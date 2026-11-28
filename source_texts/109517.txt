@@ -1,0 +1,2308 @@
+Contribute to tomchor/CoarseGrainedKHAPE development by creating an account on GitHub.
+
+3D isosurface figures: X13, a batch render job, and a subsetter by wenegrat · Pull Request #78 · tomchor/CoarseGrainedKHAPE · GitHub
+Skip to content
+You signed in with another tab or window. Reload to refresh your session.
+You signed out in another tab or window. Reload to refresh your session.
+You switched accounts on another tab or window. Reload to refresh your session.
+Dismiss alert
+Conversation
+wenegrat
+commented
+Oct 3, 2026
+•
+edited
+Loading
+Uh oh!
+There was an error while loading. Please reload this page.
+Copy link
+Copy Markdown
+Collaborator
+Points at #77. Adds the first 3D rendering in the repo: the simulation has been three-dimensional since #72, but every figure still reduces it to an x–z slice at the first y index (aux03_plotting.xz_slice).
+Four files, all new; nothing existing is modified.
+What this adds
+postprocessing/X13_3d_volume.jl — GLMakie volume render and isosurfaces of one snapshot.
+One --field lays the panels out by --mode (volume and isosurface of it); a comma-separated list lays them out by field, one panel each. --scale appends the _ℓ<ℓ> every budget term carries, so the six-term figure is one line:
+```
+julia --project postprocessing/X13_3d_volume.jl <file> \
+  --field Q,wb_rs,Π_K,Π_A,ε_Ks,ε_As --scale 1 --mode isosurface --overlay b
+```
+Q, enstrophy and speed are derived here from u, v, w. They have to be: the file's own ω is the spanwise component alone, which is enough for the 2D slice figures and useless for 3D structure. All three velocities are written at cell centres, so the gradient tensor is a centred difference on one grid with no staggered interpolation.
+--overlay b draws a reference field as contours on the two vertical bounding walls, so a Q or Π panel shows where the billow actually is.
+postprocessing/render3d.pbs + submit_render3d.sh — batch rendering, one figure per time.
+```
+bash submit_render3d.sh TIMES=100,120,140
+bash submit_render3d.sh FROM=60 TO=160 EVERY=10
+```
+postprocessing/subset_for_plots.py — cuts a run to a laptop-sized NetCDF (chosen fields and records, z cropped, float32) that X13 reads unchanged. 2.15 GiB → 0.006 GiB on the Nz=128 test run.
+The thing worth knowing: this needs no GPU and no display
+GLMakie needs an OpenGL context, not a GPU, and a Casper compute node has neither a display nor the NVIDIA driver exposed to one. /usr/bin/Xvfb plus Mesa's software rasteriser (LIBGL_ALWAYS_SOFTWARE=1) gives a context on a plain CPU node, so this is an ordinary batch job — no modules, no VirtualGL, no FastX session. The job starts its own Xvfb on a free display, smoke-tests the context before rendering, and kills the server from an EXIT trap.
+Measured on Casper at Nz=1024: about 90 s per six-panel figure, so a full 101-record set is ~2.5 h and fits in one job.
+Two traps found getting there, both recorded in the scripts:
+xvfb-run is not installed on Casper, only the Xvfb binary it wraps.
+julia +1.13 is a juliaup feature; Casper's julia reads it as a filename. The job finds 1.13 the way simulation.pbs does.
+Two things that only bite on the production runs
+Virtual merges. A multi-GPU run's merged 3D file is HDF5 virtual datasets, and NCDatasets throws a KeyError on the storage code until it is registered. X13 calls allow_virtual_storage!, as merge_rank_output.jl:290 says every Julia reader of such a file must.
+Memory. Everything is read and differentiated on the cropped z slab, with one cell of margin for the centred difference. Cropping afterwards instead would peak around 15–25 GB at Nz=1024 to render a third of it.
+Figure conventions, and why
+Settled by iterating against a real run; each one replaced something that did not work.
+One fraction set for every panel — 0.18, 0.515, 0.85 of each panel's own range — so a surface means the same thing wherever it appears. Positive fields previously took quantiles of their own distribution, which put surfaces where the data was but at magnitudes unrelated to any other panel.
+One symmetric :balance scale everywhere, including positive-definite fields, whose lower half then goes unused. That makes the colourbars the same object, and the empty half states that the quantity never changes sign — true of ε_Kˢ by construction and of nothing else here. :magma made it the loudest panel for no physical reason.
+The overlay is wall contours, not isosurfaces. Two sets of interpenetrating isosurfaces always fight, and transparency cannot separate them: GLMakie ignores alpha on a volume contour (--overlay-alpha 0.05 and 1.0 render byte-identically).
+Testing
+No automated tests — these are figure scripts, and the repo's suite covers budget closure rather than rendering. What was verified by hand:
+Every option exercised against a local Nz=128 3D run (72 × 24 × 128, Re = 258): the six-panel figure, single-field --mode both, derived and budget fields, --zlim spanning the whole domain, and the one-level edge case.
+The crop-before-differentiate change is a numerical no-op, as it must be: Q at t = 108 gives the same shape, colour range (±0.0726) and levels before and after.
+subset_for_plots.py output round-trips: the subset reconstructs Lz = 7.81, z = ±3.91 against the full file's 25.0 and ±12.5, Lx/Ly unchanged, and X13 gives identical ranges on all six fields.
+submit_render3d.sh exercised against a stubbed qsub: list, range, both given, missing EVERY, nothing given, reversed range, unknown key.
+The .pbs render loop run under bash against the local run, two times, one figure each.
+The signs on the rendered figure are a free correctness check and come out right: ε_Kˢ positive, and ε_Aˢ, τ(w,b_r), Π_K and Π_A all signed, as CLAUDE.md says to expect.
+Caveat
+Everything was tuned on an Nz=128 / Re=258 run that never goes three-dimensional — rms(v)/rms(u) ≈ 1e-4 throughout, so the isosurfaces are prismatic. That validated the mechanics, not the aesthetics. On the Nz=1024 / Re=1032 run expect a second round of tuning: fewer levels, lower alpha, and possibly more than one wall for the overlay, since a single wall is only representative while the flow is spanwise-uniform.
+🤖 Generated with Claude Code
+wenegrat
+and others
+added 16 commits
+October 3, 2026 13:18
+X12: 3D cutaway snapshot, three orthogonal cutting planes
+…
+ab38381
+```
+Exploratory first pass at rendering the 3D runs, which every figure so far
+reduces to an x-z slice at the first y index (aux03_plotting.xz_slice).
+
+mplot3d with three plot_surface planes carrying the data as facecolors. No
+new dependencies, so it runs in a batch job with no display; the planes are
+mutually orthogonal, which is the one case mplot3d's missing z-buffer does
+not spoil.
+
+The file's own omega is the spanwise component alone, so the 3D-structural
+fields are derived here from u, v, w -- all three written at cell centres,
+so the gradient tensor is a centred difference on one grid with no
+staggered interpolation: Q (Hunt et al. 1988), enstrophy and speed.
+
+Two defaults earn their place: |z| < 4, since Lz = 25h is mostly quiescent
+and ruins the box aspect, and a horizontal cut off z = 0, where a buoyancy
+plane sits on the b = 0 interface and shows nothing.
+
+Co-Authored-By: Claude Opus 5 (1M context) <noreply@anthropic.com>
+```
+X13: volume render and isosurfaces (GLMakie)
+…
+8f2dde6
+```
+The companion to X12, which cuts planes: this one looks through the volume.
+For the KH run the isosurface is the more useful of the two, since Q or
+enstrophy picks out the streamwise vortices that braid the billow -- the
+reason the simulation went 3D in the first place.
+
+GLMakie, not CairoMakie: a volume render is GPU raymarching, which Cairo
+cannot do, and Makie's 3D contour wants the same backend. Both are already
+in Project.toml. It needs OpenGL, so this is a workstation (or VirtualGL)
+script, not a batch one -- X12 stays the no-display path.
+
+Verified offscreen via GLMakie.activate!(visible=false) on a 36x12x64 run:
+both panels render and save. Content there is flat, correctly so -- t = 10
+is still the undisturbed tanh profile.
+
+Derived fields are recomputed here rather than shared with X12: the file's
+omega is spanwise only, and u, v, w are at cell centres, so the gradient
+tensor is a centred difference on one grid -- periodic in x and y, one-sided
+at the z walls, matching how the pipeline treats the bounded axis.
+
+Co-Authored-By: Claude Opus 5 (1M context) <noreply@anthropic.com>
+```
+X13: rotate toward the streamwise direction, trim the frame
+…
+6cad278
+```
+Default azimuth 1.15pi -> 1.30pi. Makie's Axis3 azimuth pi looks straight
+down +x, so the streamwise direction was heading into the page; 1.5pi gives
+x the full width but puts y edge-on and collides its labels. Compared 1.15,
+1.30 and 1.42 on the Nz=64 run: 1.30 is where x spans nearly the whole frame
+and y still reads.
+
+Figure 720x640 -> 820x560 per panel. After the z crop the domain is roughly
+14:4.7:8, so viewed near side-on a square-ish panel is mostly empty above
+and below the box.
+
+Also simplifies the signed isosurface levels, which were built by a vcat of
+a reshape and came out asymmetric in count; now a symmetric pair per level,
+logged so the choice is visible (-0.0849, -0.0299, 0.0299, 0.0849 on the
+test run).
+
+Co-Authored-By: Claude Opus 5 (1M context) <noreply@anthropic.com>
+```
+X13: read virtual merges, and crop before differentiating
+…
+3470597
+```
+Two things that only bite on the HPC runs, neither reachable from the
+single-GPU test case.
+
+A multi-GPU run's merged 3D file is HDF5 virtual datasets over the rank
+files, and netCDF-C reports a storage code NCDatasets does not map, so a
+read throws KeyError. merge_rank_output.jl:290 exists for exactly this and
+says any Julia reader of a virtual file calls it first -- X13 did not, so
+it would have failed on every Nz=1024 run. Copied rather than included:
+that file pulls in Oceananigans and HDF5_jll for what is one line.
+
+Everything is now read and differentiated on the cropped z slab instead of
+the whole column. At Nz=1024 one field is 0.91 GB and the gradient tensor
+is nine of them, so cropping afterwards peaked around 15-25 GB to render a
+third of it. One cell of margin each side keeps the centred z difference
+exact over the slab proper and collapses to the true walls when the crop
+spans the domain.
+
+Numerically a no-op, as it must be: Q at t=64 of the Nz=128 run gives the
+same shape, colour range (+/-0.0906) and levels (+/-0.077, +/-0.0272)
+before and after. Also checked --zlim 20 (margin collapses, z=128, no index
+error), enstrophy (positive path) and Pi_K_l1 (a budget field).
+
+Co-Authored-By: Claude Opus 5 (1M context) <noreply@anthropic.com>
+```
+X13: panel grid over several fields, for the six-term budget figure
+…
+f6db7f5
+```
+--field now takes a comma-separated list. One name still lays the panels
+out by mode (volume and isosurface of it); several lay them out by field,
+one panel each, in the single --mode given, wrapped at --cols (3).
+
+--scale appends the _l<l> suffix every budget term carries, so the figure
+is one readable line rather than six copies of the suffix:
+
+  --field Q,wb_rs,Pi_K,Pi_A,eps_Ks,eps_As --scale 1 --mode isosurface
+
+Each panel carries its own colorbar and its own levels. They have to: on
+the test run at t=108 the terms span Pi_K ~ 6e-4 to Q ~ 7e-2, two orders of
+magnitude, and one shared scale would flatten all but the largest.
+
+Also clamps the positive-field levels into the colour range. The top level
+is the 0.995 quantile while the range ends at --clim-percentile (99), so
+enstrophy was putting a level at 0.98 against a range ending at 0.882; it
+rendered saturated and the outermost shell was indistinguishable from the
+next one in.
+
+Signs on the rendered figure are the ones CLAUDE.md calls for: eps_Ks comes
+out positive (non-negative by construction) and eps_As, wb_rs, Pi_K and
+Pi_A all signed.
+
+Co-Authored-By: Claude Opus 5 (1M context) <noreply@anthropic.com>
+```
+subset_for_plots: cut an HPC run down to a laptop-sized file
+…
+8eb48a6
+```
+Run it on Casper, scp the result, point X12/X13 at it. Four reductions:
+only the fields asked for, only the records asked for, z cropped to the
+active layer, and float32 with zlib. On the Nz=128 test run, 2.15 GiB ->
+0.006 GiB for three records of nine fields, 336x.
+
+Named neither plot*.py nor X*.py: it writes data, not a figure, so
+plots.pbs's glob and the extra-figures family both leave it alone.
+
+Three things a plain to_netcdf of a sliced dataset gets wrong, all of them
+found by running the output back through the plotting scripts:
+
+- X12 goes through load_dataset_and_grid, which reconstructs the grid from
+  NetCDF groups that xarray does not carry across. The three groups are
+  copied, with z and size in underlying_grid_reconstruction_kwargs rewritten
+  to the crop -- otherwise Lz, z_min/z_max and dV describe the uncropped
+  domain. Verified: the subset reconstructs Lz = 7.81, z = +/-3.91 against
+  the full file's 25.0 and +/-12.5, with Lx and Ly unchanged.
+- The grid's own spacing variables are time-independent, so a field list
+  dropped them and load_dataset_and_grid died on ds.Delta_x_caa. Every
+  time-independent variable now comes along; they are 1D and free.
+- virtual_rank_files is dropped. A merged multi-GPU file carries it and
+  check_rank_files refuses the file when the rank files are absent, which
+  they are once it has been copied away.
+
+--zlim defaults to 5, wider than the plotting scripts' 4, because they
+derive Q by centred differences: cropping to exactly what gets plotted
+leaves them one-sided on the boundary. At 5 then plotted at 4, Q comes back
+bit-identical to the full file (+/-0.0726); at 4 it shifts to +/-0.0727.
+
+Co-Authored-By: Claude Opus 5 (1M context) <noreply@anthropic.com>
+```
+X13: --overlay, a reference field as contours on the bounding walls
+…
+43c1eb7
+```
+Puts b behind every panel as a shared reference, so a Q or Pi panel shows
+where the billow actually is. Three approaches, in the order they failed:
+
+- Isosurfaces of b in the box, grey. Muddy: the panels use :balance, whose
+  midpoint *is* grey, so it read as washed-out data rather than context.
+- Same, in a saturated hue off that axis. Legible as context, but it
+  occludes the thing the panel is about, and transparency cannot fix that:
+  GLMakie ignores alpha on a volume contour. Measured, not assumed --
+  --overlay-alpha 0.05 and 1.0 render byte-identically. Clipping it to a
+  curtain over part of the span helped and still looked cluttered.
+- Shaded on the bounding walls. Occludes nothing, but a filled wall is
+  still a second data layer, and a full-range colormap bottoms out at black:
+  the floor came out solid black, which reads as a rendering fault. A floor
+  is wrong anyway -- b at fixed z is nearly uniform, so it carries nothing.
+
+What works is line contours on the two vertical walls. Lines read as
+annotation rather than as a competing surface, and the deformed interface
+is legible behind every panel of the six-term figure. `transformation` is
+how Makie puts a 2D recipe on a plane of a 3D axis.
+
+--overlay-style iso keeps the isosurface version for comparison; the wall
+one is the default.
+
+Co-Authored-By: Claude Opus 5 (1M context) <noreply@anthropic.com>
+```
+X13: denser isosurfaces by default
+…
+0cb88d4
+```
+--levels 4 -> 6, and the level span widened at the weak end: signed fields
+go from 0.3-0.85 of the colour range to 0.18-0.85, positive ones from the
+0.90-0.995 quantiles to 0.80-0.995.
+
+Two pairs starting at 0.3 showed only the cores, so the panels read as a
+few isolated blobs. The nested shells are what make the structure legible
+-- the Pi_K lobes along the braid and the alternating cores of the
+conversion term only appear once there is something outside them.
+
+The cost is occlusion, which is the whole tension in this kind of figure,
+so --levels stays the knob: 2 for one strong pair per sign, 8+ when the
+field is smooth enough to take it.
+
+Co-Authored-By: Claude Opus 5 (1M context) <noreply@anthropic.com>
+```
+render3d: PBS job for the 3D isosurface figures, over one or more times
+…
+45b0117
+```
+bash submit_render3d.sh TIMES=100,120,140 [NZ= FILE= FIELDS= SCALE= LEVELS= ZLIM= OVERLAY=]
+
+One X13 invocation per time, one figure each, into extra_figures/. A time
+that fails is reported and the rest of the list continues.
+
+The job asks for no GPU, which is the part worth knowing: GLMakie needs an
+OpenGL context, not a GPU, and a Casper compute node has neither a display
+nor the NVIDIA driver exposed to one. /usr/bin/Xvfb plus Mesa's software
+rasteriser gives a context on a plain CPU node, so this is an ordinary
+batch job -- no modules, no VirtualGL, no FastX session. Verified end to
+end on crhtc73. Two traps found getting there: xvfb-run is not installed,
+only the Xvfb binary it wraps, and `julia +1.13` is a juliaup feature that
+Casper's julia reads as a filename, so the job finds 1.13 the way
+simulation.pbs does.
+
+TIMES and FIELDS travel colon-separated: `qsub -v` splits its own list on
+commas, so a comma in either value truncates the variable list.
+
+The job starts Xvfb on the first free display between 99 and 160 so two of
+these on one node cannot collide, and kills it from an EXIT trap. It
+smoke-tests the GL context before rendering, since a failure there would
+otherwise surface only after a long software render.
+
+Loop body verified locally under bash against the Nz=128 run, two times,
+one figure each. Note it must be bash: $JULIA holds "julia +1.13", two
+words that zsh does not split.
+
+README gains sections for this and for subset_for_plots.
+
+Co-Authored-By: Claude Opus 5 (1M context) <noreply@anthropic.com>
+```
+Drop the Python 3D figure; X13 is the only 3D-rendering script
+…
+aa3a62f
+```
+X12_3d_snapshot.py was written as the no-display fallback, before Xvfb and
+software Mesa turned out to give GLMakie a context on a plain Casper CPU
+node. With render3d.pbs doing that, a second 3D figure script with a
+different look and a weaker renderer (mplot3d has no z-buffer, so only
+mutually orthogonal planes survive) is maintenance for no gain.
+
+References to it are gone from X13's header, subset_for_plots and the
+README. subset_for_plots stays: it writes data, not figures, and is still
+the better loop for tuning a figure locally rather than over qsub.
+
+CLAUDE.md gains X13, subset_for_plots and the render3d job, including the
+two traps worth not rediscovering -- xvfb-run is not installed on Casper
+(only the Xvfb binary it wraps) and `julia +1.13` is a juliaup feature that
+Casper's julia reads as a filename.
+
+Co-Authored-By: Claude Opus 5 (1M context) <noreply@anthropic.com>
+```
+X13: positive fields on the positive half of :balance, not :magma
+…
+b884f9f
+```
+eps_Ks was the loudest panel of the six for no physical reason: :magma is
+a dark, fully saturated ramp while the signed panels use :balance, which
+is near-white wherever the field is small. The positive half of :balance
+(its white midpoint through to red) puts them on the same footing, and a
+positive field then reads as the red half of the signed scale, which is
+what it is.
+
+Two further changes, without which the colormap alone does not fix it:
+
+- The colour range starts at 0 rather than the 1st percentile, so white
+  means zero in every panel.
+- Positive levels are the same fractions of the colour range the signed
+  ones use (0.18-0.85) instead of the 0.80-0.995 quantiles. Quantile-chosen
+  levels put all six surfaces above the 80th percentile, so every one
+  mapped to the dark end whatever the ramp.
+
+The cost is that eps_Ks is now the busiest panel rather than the darkest:
+its distribution is skewed, so the lowest level sits well below the 80th
+percentile and wraps the active region in large sheets. --levels is the
+knob if that is the wrong trade for a given figure.
+
+Co-Authored-By: Claude Opus 5 (1M context) <noreply@anthropic.com>
+```
+X13: one symmetric colour scale for every panel, signed or not
+…
+46cf7ac
+```
+A positive-definite field now gets the same (-hi, hi) :balance scale as
+the rest, with its lower half unused, rather than the positive half of the
+ramp over (0, hi).
+
+The two render identically -- v maps to 0.5 + v/2hi either way -- so this
+is a colourbar change, not a picture change. It earns its place twice: the
+bars become the same object, so magnitudes compare across panels without
+rescaling by eye, and the empty half states that the quantity never changes
+sign, which is true of eps_Ks by construction and of nothing else in the
+six-term figure. The cost is half a bar of dead space and correspondingly
+fewer ticks over the populated half.
+
+`signed` still decides the levels -- a symmetric pair about zero, or
+one-sided -- so a positive field is not given surfaces it has no data for.
+
+Drops BALANCE_POS, dead with both cases on the full ramp.
+
+Co-Authored-By: Claude Opus 5 (1M context) <noreply@anthropic.com>
+```
+X13: one set of contour-level fractions for every panel
+…
+2b65b20
+```
+Levels are now the same fractions of each panel's own colour range --
+0.18, 0.515, 0.85 at the default --levels 6 -- whatever the field. A
+surface therefore means the same thing in every panel: this much of that
+panel's range. Checked on the six-term figure, Pi_K's +0.00011 of 0.000609
+and eps_Ks's 1.25e-05 of 6.95e-05 are both 0.18.
+
+Two asymmetries went into making this not already true. Positive fields
+took quantiles of their own distribution, which put surfaces where the data
+was but at magnitudes unrelated to any other panel. And even on fractions,
+signed fields used nlevels/2 fraction values against positive fields'
+nlevels, so the magnitudes still differed.
+
+A positive field now gets exactly the magnitudes the signed panels put
+their red surfaces at and has no blue counterparts, so `--levels n` is n
+surfaces where the field changes sign and n/2 where it does not. That is
+the honest reading of the flag once levels are placed by magnitude.
+
+It also settles the eps_Ks panel, which was either uniformly dark (all six
+levels above the 80th percentile) or cluttered (six evenly spaced levels
+wrapping the active region in sheets): three graded shells at the shared
+fractions are neither.
+
+Co-Authored-By: Claude Opus 5 (1M context) <noreply@anthropic.com>
+```
+submit_render3d: FROM/TO/EVERY for a strided range of times
+…
+eec5b0e
+```
+TIMES still takes a list; FROM=60 TO=160 EVERY=10 renders every 10th time
+over a range instead, which is what the Nz=1024 run's 101 records want.
+The two are mutually exclusive rather than one silently winning, so a typo
+in either is an error.
+
+FROM/TO/EVERY rather than a 100:10:200 range literal because colon is
+already the separator that gets TIMES past `qsub -v`'s comma splitting.
+EVERY has no default: the wrapper is pure shell and does not open the run
+to find its output interval.
+
+The range is built with awk, not seq, since the times are floats and seq's
+output format follows the locale; the endpoint comparison carries a 1e-9
+tolerance so an inclusive TO survives the accumulated float addition.
+
+Exercised against a stubbed qsub: list, range, both-given, missing EVERY,
+neither given, reversed range and an unknown key all behave, and the
+emitted -v list is well formed in each.
+
+Co-Authored-By: Claude Opus 5 (1M context) <noreply@anthropic.com>
+```
+render3d: 12 h walltime, and the real rendering cost in the docs
+…
+89930da
+```
+Measured on Casper: about 3 min per six-panel figure at Nz=1024, not the
+"minutes per panel" I guessed before anyone had run it. That is 6-7x
+faster, and it changes what the job is for -- a full 101-record set is
+roughly 5 h of sequential rendering, so it fits in one job and there is no
+case for splitting the times across several.
+
+Walltime 6 h -> 12 h to cover that with room to spare. The docs said
+software rendering was slow enough that local iteration was the only
+sensible loop; local iteration is still quicker, but because no qsub round
+trip beats a local render, not because the render is slow.
+
+Co-Authored-By: Claude Opus 5 (1M context) <noreply@anthropic.com>
+```
+render3d: 90 s per figure, measured; walltime back to 6 h
+…
+a9ee29b
+```
+Timing refined from the 3 min first reported to about 90 s per six-panel
+figure at Nz=1024. A full 101-record set is then about 2.5 h rather than
+5 h, so the 12 h walltime raised for that estimate is no longer warranted
+and goes back to 6 h, which still covers the full set twice over and
+schedules sooner.
+
+Co-Authored-By: Claude Opus 5 (1M context) <noreply@anthropic.com>
+```
+wenegrat
+commented
+Oct 3, 2026
+Copy link
+Copy Markdown
+Collaborator
+Author
+This seems to work pretty well.
+I will probably keep tweaking this, but it can be merged back to the multi-GPU branch whenever you think it is ready @tomchor.
+wenegrat
+and others
+added 11 commits
+October 3, 2026 16:35
+X13: overlay contours span the whole wall
+…
+b056007
+```
+The wall contours stopped short of the box edges, leaving a bare strip
+along each wall -- clearest as a gap at the far end of the back wall. They
+were drawn over the data's own coordinates, so they covered only the data
+footprint, while Axis3 draws the box wider than that.
+
+How much wider was worth measuring rather than guessing: Axis3 autoscales
+to the data extent plus 5% on every side (6.87 -> 7.557, x1.1 overall), and
+it pads z as well as x and y. Those limits are now written out explicitly
+so the padding is a known number instead of an implementation detail, and
+`aspect` stays on the data extents, so the panels look exactly as before.
+
+The wall slices are then edge-extended to the box in both directions --
+one repeated row and column per side -- so every contour runs flat out to
+the corners.
+
+This is only the spanning problem. The lines are still behind the
+isosurfaces wherever those cover them, which is a separate thing and not
+what was asked for. Worth recording what does *not* cause the gap, since
+each cost a render to rule out: it is not occlusion, not `transparency` on
+the isosurfaces, and not the contour plane sitting inside the volume --
+pinning the limits to the data, and moving the plane outside the volume
+with the limits extended to meet it, both leave the gap exactly as it was.
+
+Checked after the change: six-panel, single field with --mode both and no
+overlay, --zlim 20 spanning the domain, and a derived field beside a budget
+field.
+
+Co-Authored-By: Claude Opus 5 (1M context) <noreply@anthropic.com>
+```
+X13: b_r as a derived field
+…
+d1f835e
+```
+b_r = b - b✶(z), the buoyancy relative to the Winters sorted reference
+state. The simulation writes it only to the 2D writer, and that is a single
+x-z slice with no 3D structure to contour, so it is rebuilt here.
+
+On a uniform grid the sort is exact and needs no iteration: order every
+cell by buoyancy, and since each model level holds Nx·Ny cells of equal
+volume, the k-th group of Nx·Ny sorted values is the fluid that comes to
+rest at level k. The sort has to see the whole column -- a reference state
+built from a slab is a different reference state -- so this is the one
+derived field that reads beyond the z crop.
+
+Checked against the simulation's own b_r on the plane the 2D writer keeps:
+corr 0.99995, rms difference 1.0% of rms. The residual is expected, since
+the online field uses the ThreeDimensionalSort z✶ with its tie handling
+rather than an equal-volume column average, and the 2D file is Float32.
+
+Co-Authored-By: Claude Opus 5 (1M context) <noreply@anthropic.com>
+```
+X13: volume integrals in the titles, one shared colourbar, less furni…
+…
+441efdb
+```
+…ture
+
+Three changes to what the figure says and how much ink it spends saying it.
+
+Each panel's title now carries the term's volume integral, read from the
+file's own `_int` series rather than recomputed. That is the number the
+closure is stated in and the one thing a self-scaled panel cannot show:
+at t=108, l=1 it reads Pi_A +0.0877 and eps_As +0.0703 against Pi_K
+-0.00433, so the APE terms dominate by an order of magnitude and Pi_K is
+backscattering -- none of which the shapes alone convey. Note the integrals
+are over the whole domain while the panels are cropped in z, so they are
+the budget's numbers rather than sums over what is drawn. Derived fields
+have no `_int` and get no annotation.
+
+Every panel is normalised by its own 99th percentile and drawn on one
+(-1, 1) scale, so the figure carries a single colourbar instead of six of
+them repeating the same thing, and a given colour means the same fraction
+of the local range in every panel. The physical scale moves into the title
+as a +/- number, which reads better than a bar of five-digit ticks.
+
+Axis labels and tick labels stay on the upper-left panel and come off the
+rest; box and grid stay everywhere, so each panel still reads as the same
+volume. The cost is that five of six panels are no longer individually
+readable for position.
+
+Checked after: six-panel, single field with --mode both and no overlay,
+two panels mixing a derived and a budget field, and --mode volume.
+
+Co-Authored-By: Claude Opus 5 (1M context) <noreply@anthropic.com>
+```
+X13: label the per-panel scale "range = ±..."
+…
+4e3a756
+```
+The bare ± number was ambiguous next to the integral on the same line.
+
+Co-Authored-By: Claude Opus 5 (1M context) <noreply@anthropic.com>
+```
+X13: typeset panel titles
+…
+68f4c88
+```
+The terms are named with sub- and superscripts, and the titles were
+spelling them out in lookalike unicode -- "ε_Kˢ" for an epsilon with a
+subscript K and a superscript s. They are Makie rich text now, so b_r,
+τ(w, b_r), Π_K, Π_A, ε_Kˢ and ε_Aˢ typeset properly, and the table covers
+the reservoir terms too for when they are added.
+
+That forced the title out of Axis3's own `title` attribute, which takes a
+plain string or a LaTeXString but rejects rich text, and accepts no line
+break in any form -- so neither the subscripts nor the second line of
+range and integral would survive it. The title is a Label instead, hung in
+the cell's `Top()` protrusion. Not a nested GridLayout with a label row:
+that shrinks the axis into a corner of its cell, since the axis no longer
+claims the whole of it.
+
+Checked after: six-panel, single field with --mode both, two panels mixing
+a derived and a budget field, and --mode volume.
+
+Co-Authored-By: Claude Opus 5 (1M context) <noreply@anthropic.com>
+```
+X13: --colormap, defaulting to :balance as before
+…
+84bda16
+```
+Makes the diverging map a flag so alternatives can be compared without
+editing the file. Default unchanged, so every existing figure is
+unaffected.
+
+Compared :balance against :vik, :broc, :berlin, :curl and :RdBu on the
+six-panel figure. Staying with :balance. Worth recording for whoever looks
+again: the Crameri maps (:vik and friends) are perceptually uniform and
+colourblind-safe, which :balance is not, and :vik separates the innermost
+shells of eps_Ks and eps_As better because :balance compresses at its dark
+red end.
+
+Co-Authored-By: Claude Opus 5 (1M context) <noreply@anthropic.com>
+```
+X13: draw the boxes at a usable size
+…
+71a2e32
+```
+The 3D box filled about half its cell, so most of the figure was margin.
+figure_padding and the inter-panel gaps turn out to be the binding
+constraint rather than the cell size: with those at 4 and 0, `viewmode =
+:fitzoom` zooms each box into the space that frees up. On its own, at
+Makie's default padding, :fitzoom does nothing visible -- which is why it
+looked like a dead end when tested alone.
+
+Also tested and not adopted, from the 3D-rendering list:
+- perspectiveness. It does add a depth cue, but it shrinks the box further
+  and makes a structure's apparent size depend on its distance from the
+  camera, which is wrong for a figure whose purpose is comparing shapes
+  across panels.
+- SSAO. Accepted as a plot attribute and renders byte-identically, so it
+  does nothing here -- it does not apply to transparent geometry, and the
+  isosurfaces are transparent by design.
+- specular/diffuse/shininess. Not valid attributes on a volume Contour, so
+  material tuning is not available without scene-level lights, which have
+  little to act on through transparent surfaces.
+
+Co-Authored-By: Claude Opus 5 (1M context) <noreply@anthropic.com>
+```
+X13: log the physical range, not the normalised one
+…
+f3afb8d
+```
+Normalising every panel onto (-1, 1) left the log reporting "range
+[-1, 1]" for every field, which says nothing. The titles were always
+right; only the log regressed.
+
+Co-Authored-By: Claude Opus 5 (1M context) <noreply@anthropic.com>
+```
+X13: negated fields, blank cells, and a NaN guard for the tendencies
+…
+af6d35a
+```
+Three things the two-row budget layout needs:
+
+  --field "dKs_dt,wb_rs,Π_K,ε_Ks,dEas_dt,-wb_rs,Π_A,ε_As" --cols 4
+
+- A "-" prefix negates a field, for a term that enters two budgets with
+  opposite sign. The title and the volume integral both flip, so the
+  conversion reads +0.0103 in the KE row and -0.0103 in the APE row and a
+  colour means the same thing -- source for this row's reservoir -- in both.
+- A lone "." leaves a cell empty, so a row with fewer terms than the grid
+  is wide keeps its alignment rather than wrapping.
+- The quantile that sets each panel's scale now runs over finite values
+  only. The tendencies come from Oceananigans' deferred TimeDerivative,
+  whose last record of a run is NaN because its differencing window never
+  closes; without this a figure at the last time fails inside `quantile`
+  with nothing to say. An all-NaN field now errors and names the cause.
+
+Titles added for dKs_dt and dEas_dt.
+
+Co-Authored-By: Claude Opus 5 (1M context) <noreply@anthropic.com>
+```
+submit_render3d: COLS, so the batch job can lay out a budget figure
+…
+39e3082
+```
+X13 defaults to 3 columns, so the eight fields of the two-row budget
+figure wrapped 3/3/2 from the job and could only be laid out 4/4 by hand.
+
+Exercised against a stubbed qsub with the negated field in place: the -v
+list comes through as COLS=4 and FIELDS=...:-wb_rs:..., so neither the
+dash nor the colon packing trips over qsub's own parsing.
+
+README gains the two-row invocation and a note on the "-" and "." markers.
+
+Co-Authored-By: Claude Opus 5 (1M context) <noreply@anthropic.com>
+```
+README: the two-row budget invocation, and the "-" / "." field markers
+…
+6f48836
+```
+Belongs with 39e3082, whose message says the README gained these. It did
+not: the edit failed on a bad anchor and the commit went ahead regardless,
+so that message overstates what landed.
+
+Co-Authored-By: Claude Opus 5 (1M context) <noreply@anthropic.com>
+```
+tomchor
+commented
+Oct 4, 2026
+Copy link
+Copy Markdown
+Owner
+Damn, these figures are awesome! I'm not sure if you're trying to get some discussion out of these figures or to simply make eye candy, but the Q-criterion one looks the best I think. Especially more turbulent ones you plotted in #77 (comment)
+Should we be worried that the dissipation plots defaulted to a divergent colormap? (Implying there are some negative values there somewhere...)
+I will probably keep tweaking this, but it can be merged back to the multi-GPU branch whenever you think it is ready
+I'd say let's keep this separate for the moment to avoid "polluting" the other PR. Maybe wait to merge until you're at least somewhat confident those are the final versions of the figure? (Thanks for creating a separate PR for this btw 🙂 )
+One note. I generally use the naming pattern that scripts that produce figures that go in the body of the paper (including appendices) start with plot plus the number of the fig in the paper. Hence the figures that start with plot3_, plot4_ etc. Then "extra" figures (that we use for own analysis but that won't be published) start with X plus a number. And finally scripts producing figures that are included in a supporting info start with S plus a number (currently there are none of them).
+I bring this up so that we can name the new script accordingly just to help myself get organized! (Not sure where you're planning on including this new fig)
+wenegrat
+commented
+Oct 4, 2026
+Copy link
+Copy Markdown
+Collaborator
+Author
+Ah, sorry @tomchor, at some point I had made it private and forgot to add you as a collaborator. You are added now.
+Should we be worried that the dissipation plots defaulted to a divergent colormap? (Implying there are some negative values there somewhere...)
+No, they are all positive. I was just tweaking colormaps and had trouble getting dissipation to look right relative to the other subplots without putting it on the same colormap.
+I think I'll plan on putting one of these in the manuscript somewhere. TBD. I'll keep it separate for now.
+wenegrat
+and others
+added 16 commits
+October 5, 2026 20:30
+plot5: move the KE legend up under its own row
+…
+d6b30a3
+```
+It sat midway between the two rows, close enough to row 1 to read as
+belonging to either. Halving its offset from row 0's axes puts it clearly
+under the panels it describes.
+
+Co-Authored-By: Claude Opus 5 (1M context) <noreply@anthropic.com>
+```
+plot5: dissipation last in both legends
+…
+df4f0b8
+```
+The term dicts set the legend order, so they are reordered rather than the
+handles shuffled afterwards. The tendency leads, as the term the others sum
+to, and the dissipation closes, as the only sink: each row reads sources
+first, sink last.
+
+Note this also sets draw order, so the dissipation curve is now drawn on
+top of the exchange where the two coincide.
+
+Co-Authored-By: Claude Opus 5 (1M context) <noreply@anthropic.com>
+```
+plot5: bring the APE legend up under its row
+…
+553ddff
+```
+It cleared the "Time" label by more than it needed, leaving it adrift at
+the foot of the figure while the KE legend sat snug under row 0. 0.085 ->
+0.060 in figure fraction, which still clears the label.
+
+Co-Authored-By: Claude Opus 5 (1M context) <noreply@anthropic.com>
+```
+render3d: 30 min walltime
+…
+689a862
+```
+6 h was sized for rendering a whole run's worth of times. The job is
+normally asked for a handful, which at about 90 s per six-panel figure
+plus Julia's startup fits in 30 min with room, and a short request
+schedules sooner.
+
+A sweep over many times still needs a longer walltime; the comment and the
+docs say so rather than leaving the old number to be rediscovered.
+
+Co-Authored-By: Claude Opus 5 (1M context) <noreply@anthropic.com>
+```
+X13: panel letters, LaTeX titles, larger fonts; render3d back to 6 h
+…
+134e450
+```
+Panel letters (a), (b), ... prefix each title, for referring to a panel in
+text. They go in the title rather than inside the box: an annotation inside
+an Axis3 needs 3D data coordinates and would move with the camera. Blank
+cells take no letter, and a single-panel figure gets none.
+
+Titles are LaTeX now, rendered by MathTeXEngine. Makie's rich text set a
+subscript and a superscript side by side rather than stacked, so eps_K^s
+came out with the s trailing the K; LaTeX stacks them, matching how plot5
+writes the same terms in matplotlib mathtext.
+
+Getting two lines of it took some finding, and the alternatives are
+recorded at the call site so they are not re-derived: Axis3's own `title`
+rejects rich text and takes no line break; two Labels placed directly in
+the cell's top protrusion overlap rather than stack; a protrusion Label
+over the axis title overlaps too; and a LaTeX \substack spanning both lines
+does not parse in MathTeXEngine. A GridLayout *inside the protrusion*
+stacks them and still leaves the axis its whole cell -- unlike one in the
+cell itself, which shrinks the axis into a corner.
+
+Fonts: title 15 bold -> 19 regular, its second line 13 -> 15, colourbar
+label -> 20 and its tick labels -> 18.
+
+render3d.pbs walltime 30 min -> 6 h: the times render sequentially, so 200
+of them is about 5 h. The 30 min of the previous commit was sized for the
+handful this job usually draws, which left no room for a long sweep.
+
+Co-Authored-By: Claude Opus 5 (1M context) <noreply@anthropic.com>
+```
+X13: build the derived fields from the filtered velocity
+…
+5ab4ebb
+```
+Q, enstrophy and speed came from the raw u, v, w while every budget term
+beside them is at a filter scale. They now use the online filtered velocity
+at --scale by default (u_ℓ<ℓ> and friends, which the simulation writes for
+every scale in its filter_ℓs); --derived-from full restores the old
+behaviour, and a run without the filtered field falls back to the raw one
+with a warning rather than failing.
+
+At ℓ=1 on the test run this takes Q's range from ±0.0726 to ±0.0650 and
+visibly smooths the isosurfaces, the grid-scale wrinkles on the strain
+sheets going away.
+
+Worth being clear about what this does and does not fix: it makes the
+velocity consistent, not the decomposition. Q(ū) is a resolved-scale
+quantity sitting beside sub-filter terms, and Q is quadratic in gradients
+so it has no natural resolved/sub-filter split -- there is no "sub-filter
+Q" to put in that panel instead.
+
+b_r keeps the unfiltered b, being measured against the unfiltered b✶ and
+carrying no scale.
+
+Co-Authored-By: Claude Opus 5 (1M context) <noreply@anthropic.com>
+```
+X13: --fractions, to place the isosurfaces explicitly
+…
+0f5007a
+```
+--levels n spreads n/2 surfaces evenly over 0.18-0.85 of each panel's
+range, which is still the default and unchanged. --fractions places them
+by hand instead, e.g. "0.1,0.5,0.85" to reach further into the weak
+structure than an even spread starting at 0.18 does. The two are
+alternatives: setting both errors rather than letting one win silently,
+and a fraction outside (0, 1] is refused.
+
+`fractions` moves above the argument block, which now calls it -- Julia
+runs a script top to bottom, so its old position after the derived fields
+was too late.
+
+Also puts the levels back in the per-field log line. They were dropped when
+the volume integral was added there, which left no way to check where the
+surfaces had actually been placed.
+
+Co-Authored-By: Claude Opus 5 (1M context) <noreply@anthropic.com>
+```
+submit_render3d: FRACTIONS, so the batch job can place the surfaces
+…
+cebd30a
+```
+--fractions was only reachable locally. It travels colon-separated like
+TIMES and FIELDS, since qsub -v splits its own list on commas, and the
+render line passes either --fractions or --levels depending on whether it
+is set -- never both, which X13 refuses.
+
+Co-Authored-By: Claude Opus 5 (1M context) <noreply@anthropic.com>
+```
+render3d: fix the stray argument from the FRACTIONS/LEVELS switch
+…
+84f4fc4
+```
+cebd30a used ${FRACTIONS:+--fractions "$FRACTIONS"} ${FRACTIONS:---levels
+"$LEVELS"}, which is wrong: ${VAR:-default} substitutes VAR's own value
+when VAR is set, so with FRACTIONS set the render line came out as
+`--fractions "0.1,0.5,0.85" 0.1,0.5,0.85` -- the list repeated as a
+positional argument, which X13 would reject as an unexpected flag.
+
+An array built by an if/else instead. Both branches checked.
+
+Co-Authored-By: Claude Opus 5 (1M context) <noreply@anthropic.com>
+```
+submit_render3d: DERIVED, to pick the velocity for Q and friends
+…
+c4acbd7
+```
+--derived-from was only reachable locally. DERIVED=full builds Q, enstrophy
+and speed from the raw velocity rather than the filtered field at SCALE;
+'filtered' stays the default. No colon packing needed -- the value is a
+single word.
+
+Co-Authored-By: Claude Opus 5 (1M context) <noreply@anthropic.com>
+```
+render3d: refuse a fraction list given to LEVELS, and echo the real f…
+…
+87df846
+```
+…lags
+
+LEVELS=0.4,0.85 was accepted by the wrapper and then failed inside X13 on
+parse(Int, ...). That time was logged as a warning and skipped, and since
+the figure's name encodes neither the levels nor the fractions, the
+previous figure stayed on disk looking like the result -- a silent no-op.
+The wrapper now refuses a non-integer LEVELS and points at FRACTIONS, and
+refuses a FRACTIONS that is not a list of numbers.
+
+The job's own echo printed `levels=$LEVELS` whatever it was about to do, so
+a run using --fractions still reported levels=6. It now echoes the argument
+array it actually passes.
+
+Also adds --px-per-unit to X13 (default 2, unchanged). It sharpens edges;
+it was not the cause of the striping, which turned out to be many nearby
+isosurfaces in the Nz=1024 fields.
+
+Co-Authored-By: Claude Opus 5 (1M context) <noreply@anthropic.com>
+```
+render3d: fail the job when a time fails to render
+…
+cae049f
+```
+Figures are named by time alone, so a render that fails leaves the previous
+figure of that name in place. The job reported success regardless, and the
+stale figure read as a result -- which is how a broken --fractions run
+looked like it had simply ignored the argument.
+
+Each failure is still reported and the remaining times still run, but the
+job now exits 1 so PBS marks it failed, and says plainly that any figure of
+that name is from an earlier run.
+
+Co-Authored-By: Claude Opus 5 (1M context) <noreply@anthropic.com>
+```
+plot7: sub-filter mixing efficiency against time
+…
+1642e3f
+```
+η = ε_Aˢ/(ε_Aˢ + ε_Kˢ) from the volume integrals, one line per filter
+scale. Same source as plot5 -- `online_budgets` on the simulation file --
+so it runs with no post-processing, and plots.pbs picks it up through its
+plot*.py glob.
+
+The budgets carry the dissipations with the sign they enter the budget
+with, as sinks, so they are negated back to rates before the ratio is
+formed; taking them as stored would flip η.
+
+ε_Kˢ is non-negative by construction but ε_Aˢ is not, so the denominator
+can pass through zero and the ratio diverge there, and before the billow
+forms both sinks are ~0 and the ratio means nothing. --min-dissipation
+blanks the records where ε_Aˢ + ε_Kˢ is below a fraction of its own maximum
+(default 0.02) and the run reports how many were dropped, so an excursion
+is never silently drawn as a physical efficiency.
+
+Co-Authored-By: Claude Opus 5 (1M context) <noreply@anthropic.com>
+```
+plot7: blank t = 0 only
+…
+9d4c791
+```
+The threshold guard blanked any record where ε_Aˢ + ε_Kˢ fell below a
+fraction of its maximum, which hid the excursions where the denominator
+passes through zero. Those are real behaviour of a ratio whose numerator is
+not sign-definite, and worth seeing rather than papering over.
+
+Only t = 0 is dropped now, where both sinks are identically zero and the
+ratio is 0/0. The run reports the span of η instead of a blanked count, so
+a divergence shows up in the log as well as on the plot.
+
+Co-Authored-By: Claude Opus 5 (1M context) <noreply@anthropic.com>
+```
+X14: dissipation and cross-scale ratio panels; rename out of the plot…
+…
+0606cad
+```
+…* set
+
+plot7_mixing_efficiency.py -> X14_mixing_efficiency.py, writing to
+postprocessing/extra_figures/ rather than figures/. The X* family is the
+extra analysis outside the manuscript set, and plots.pbs globs plot*.py
+only, so this is no longer drawn automatically with the paper figures.
+X12 is skipped rather than reused: it was the Python 3D snapshot removed
+earlier in this branch.
+
+Two panels added above and below the efficiency:
+
+- the sinks themselves, both scales, so a feature in the ratio can be read
+  back to whichever of them moved. On the test run the l=7 dip at t~85 is
+  eps_As collapsing 0.53 -> 0.05 while eps_Ks only halves, which the ratio
+  alone does not show.
+- each sink at the first scale over the same sink at the second, in the
+  order --filter-scales gives them, so the default "7 1" reads as how much
+  more is dissipated at the coarse scale. Drawn only for exactly two
+  scales; with more it is omitted and the run says so.
+
+Colour carries the scale in the first two panels and line style the
+quantity; the third compares scales, so colour drops out and style alone
+carries the quantity. The run-parameter label moves to the efficiency
+panel, having sat on the ratio panel's y = 1 line.
+
+Co-Authored-By: Claude Opus 5 (1M context) <noreply@anthropic.com>
+```
+X14: commit the panel and output-path changes 0606cad left behind
+…
+d22c5ed
+```
+0606cad was a pure rename -- `git mv` was staged, the edits to the file
+itself were not, so a checkout of that commit has the new name with the
+old body: one panel, and still writing to figures/ rather than
+extra_figures/. This is the content that commit message described.
+
+- the two sinks plotted directly, both scales, above the efficiency
+- the cross-scale ratio of each sink below it, with a y = 1 line, drawn
+  only for exactly two scales
+- EXTRA_FIGURES as the output directory
+- the run-parameter label moved onto the efficiency panel
+
+Co-Authored-By: Claude Opus 5 (1M context) <noreply@anthropic.com>
+```
+tomchor
+commented
+Oct 9, 2026
+Copy link
+Copy Markdown
+Owner
+@wenegrat I say we should merge everything (this PR first, then #77 then #72). Then it'll be easier to explore whatever tweaks we wanna explore in parallel. (I'm assuming the figures are close to final form, right?)
+wenegrat
+and others
+added 2 commits
+October 14, 2026 09:14
+plot4: mark l = 1 and l = 7 on every panel
+…
+4039010
+```
+The two budget scales were drawn on the total alone, which meant locating
+a feature in Pi_K or Pi_A against them by carrying the position down from
+panel (a) by eye. Drawn on all three, each component can be read against
+the same scales directly.
+
+Unchanged otherwise: the lines stay unlabelled, since the secondary l axis
+on (a) identifies them, and the axhline/axvline branch already followed
+--orient.
+
+Co-Authored-By: Claude Opus 5 (1M context) <noreply@anthropic.com>
+```
+rename plotting scripts
+6e7d478
+tomchor
+added this pull request to stack #79
+October 15, 2026 22:25
+tomchor
+removed this pull request from stack #79
+October 15, 2026 22:27
+tomchor
+commented
+Oct 15, 2026
+Copy link
+Copy Markdown
+Owner
+@copilot resolve the merge conflicts in this pull request
+Copilot started work on behalf of
+tomchor
+October 15, 2026 22:28
+View session
+Merge remote-tracking branch 'origin/tc/multi-gpu' into jw/3d-plotting
+…
+c556aff
+```
+# Conflicts:
+#	README.md
+
+Co-authored-by: tomchor <13205162+tomchor@users.noreply.github.com>
+```
+Copilot finished work on behalf of
+tomchor
+October 15, 2026 22:29
+Copilot
+AI
+requested a review
+from tomchor
+October 15, 2026 22:29
+Number the 3D subset and render job; update references to renamed scr…
+…
+ea91989
+```
+…ipts
+
+subset_for_plots.py -> 03_subset_3d.py and render3d.pbs -> 04_render3d.pbs.
+submit_render3d.sh keeps its name and the render3d_Nz... job and log names.
+
+Fix the references 6e7d478 left behind: the render job still ran
+X13_3d_volume.jl, which no longer exists, and usage strings, comments,
+README.md and CLAUDE.md still used the old plot numbers.
+
+plot7_3d_volume.jl now writes to figures/ and X6_panels.py to
+extra_figures/, as the rest of the plot* and X* families do (cf. d22c5ed).
+
+Also fix older stale names on the same lines: plot2_transfer_spectrum.py
+(now X5), "the S scripts" (now X), and the X1-X11 range.
+
+Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
+```
+tomchor
+merged commit 4f9cd20
+into
+tc/multi-gpu
+Oct 15, 2026
+tomchor
+added a commit
+that referenced
+this pull request
+Oct 16, 2026
+Run on several GPUs above Nz=512 (x-slabs over MPI, rank files merged…
+…
+70d9303
+```
+… after) (#77)
+
+* Run on several GPUs above Nz=512: x-slabs over MPI, rank files merged after
+
+NZ ≤ 512 runs as before, on one GPU without MPI. Above that, the wrappers ask PBS for
+NGPUS GPUs (default 4, one Casper A100-80GB node, up to NZ=1024), simulation.pbs launches
+`--ranks NGPUS` MPI ranks, and the script builds Distributed(GPU(); partition=Partition(x=R)).
+Every rank writes its own files; merge.pbs, a CPU job chained on the run, stitches them into
+the one-GPU layout (merge_rank_output.jl) and draws the figures, so the post-processing reads
+the run as always.
+
+What a distributed grid broke, read in Oceananigans 0.113.3 and Oceanostics 0.21.2:
+- The staged Gaussian filter clamps its x-pass at each rank's slab edge. A compute! method in
+  distributed_diagnostics.jl gathers the slabs and runs the x-pass on the global Nx, bit for
+  bit the one-process filter.
+- VerticalSort errors on a Distributed grid, and its 1x1 Periodic column costs 9x its data in
+  halos. sorted_column(b) gathers and sorts the whole domain on every rank, on a Flat column,
+  in both paths.
+- Average(dims) divides by one rank's cell count: ε̄ is an area integral.
+- NetCDFWriter writes every rank to the same file; and on a distributed grid a written window
+  gets x halo-communication conditions it holds no cells for, so the first compute! of any
+  computed output failed. Rank files, and a Field constructor for x-windows that keeps their
+  windowed conditions.
+- The per-point noise repeated over every slab: it is one global array now, indexed by global
+  cell, in both paths, so any decomposition starts from the same w.
+- show_gpu_status left every rank on the last GPU; the progress message's reductions must run
+  on every rank before only rank 0 logs.
+
+MPI: Casper's OpenMPI (CUDA and UCX) through MPItrampoline and an MPIwrapper built against it
+(setup_mpi_env.sh), in an environment and depot of their own that only multi-GPU jobs load;
+pointed at the system library directly, HDF5_jll loads a second OpenMPI that cannot share the
+process.
+
+Memory, both paths, same numbers: the filter is memoized per operand, E_a and ε_A are built
+once, Υ̃ once per scale, Kˢ and S̃ are one Field each for their output, integral and tendency,
+and the tendency outputs no longer allocate buffers the writer never uses.
+
+tests/test_distributed_diagnostics.jl checks the filter, the column, its lookups and the
+windows on 2 and 4 CPU ranks against one process, bit for bit.
+
+Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
+
+* Keep the CUDA toolkit off the ranks' library path and give UCX its settings before Julia starts
+
+The openmpi module brings cuda/12.9 onto LD_LIBRARY_PATH, which the dynamic linker searches before a library's own
+RUNPATH, so CUDA.jl's 12.6 artifacts picked up libcublasLt, libcusparse and libnvJitLink from the system ("loaded from
+a system path"). OpenMPI, UCX and MPIwrapper need only the driver and find the rest through their RPATHs, so the
+toolkit comes off the path again after the module load.
+
+MPI.jl sets UCX_ERROR_SIGNALS (leave SIGSEGV to Julia, which stops threads for GC with it) and UCX_MEMTYPE_CACHE from
+its __init__, after MPItrampoline has loaded UCX, which has read its settings by then ("unused environment
+variables"). simulation.pbs now sets both before Julia starts and forwards them to the ranks.
+
+Checked on two V100s at Nz=64 against one GPU: no system-path or unused-variable warning, and the comparison with the
+one-GPU run is identical, number for number, to that of the run without either change.
+
+Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
+
+* Set UCX's signal settings in the simulation script too, before anything loads MPI
+
+Both 4-GPU A100 runs submitted before the previous commit died within a minute of starting: UCX's error handler caught
+an idle Julia thread's GC safepoint (SIGSEGV on the protected safepoint page) and aborted, "Caught signal 11
+(Segmentation fault: invalid permissions for mapped object)". MPI.jl's own UCX_ERROR_SIGNALS comes too late through
+MPItrampoline. simulation.pbs now exports it; the script sets it as well, on its first lines, so a launch by any other
+route gets it. On a login node, 8 threads allocating after MPI.Init: SIGSEGV without it, 616 GC pauses and a clean
+exit with it.
+
+Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
+
+* Record the GPU measurements, give the merge job Casper's 24 h, and note the b✶(z) slot tie
+
+Measured on 2026-10-02: Nz=1024 on four A100-80GB holds 57.1 GiB per GPU when the run starts and peaks at 67.3 GiB,
+with 125 ms per step, ~67 s per output and about an hour of setup and compilation; Nz=512 on one GPU now starts at
+23.3 GiB against 39.5. CLAUDE.md and the README give these in place of the estimates.
+
+merge.pbs asks for 24 h: on the Nz=256 rank files the merge ran ~17x slower once the files' cached pages filled the
+job's 64 GB, which at Nz=1024 would be ~14 h.
+
+CLAUDE.md also records why b_r and the pointwise exchange term differ between GPU models: every cell centre sits on a
+slot face of the sorted column, and roundoff in the GPU sum and cumsum placing the slots picks the slot.
+
+Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
+
+* Drop the merge's pages from the page cache as it goes
+
+A PBS job's memory limit counts the page cache its own reads and writes fill. On the Nz=256 rank files (60 GB, a
+64 GB job), the merge took ~5 s per 3D variable until the cache had filled the limit and 74-90 s after, waiting on
+reclaim: 13-22 min in all, which at Nz=1024 (3.8 TB) would be ~14 h. merge_rank_output.jl now writes the merged file
+back and drops the pages of every file (posix_fadvise DONTNEED) every 2 GB, and reads each slab into a reused buffer:
+the same merge takes 4 min 47 s, the cache stays under 5 GB, and both merged files are identical, variable by
+variable, to the ones the previous version wrote.
+
+Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
+
+* Ignore the multi-GPU jobs' GPU memory logs
+
+Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
+
+* Merge the 3D rank files virtually: HDF5 virtual datasets over the rank files, in seconds
+
+Copying an Nz=1024 run's 3.98 TB into one file took the merge job 7 h. netCDF-C reads an HDF5 virtual dataset as an
+ordinary variable, so merge_rank_output.jl now writes the merged 3D file as before, with every time-dependent field
+that has an x dimension defined and left empty, and replaces each of those, through HDF5_jll (the library netCDF-C is
+built on, now a direct dependency at the version already in the Manifest), with a virtual dataset that maps each rank
+file's slab onto its x-range by the file's basename. The rank files must stay beside the merged file; a missing one
+reads as fill values, so the file lists them in `virtual_rank_files` and load_dataset_and_grid refuses it when one is
+missing. The 2D file is still copied (9 GB at Nz=1024): NCDatasets 0.14 cannot read a virtual variable without being
+told what netCDF-C's storage code for it means (`allow_virtual_storage!`), and the animation reads that file in
+Julia. `--copy` (COPY=1 in merge.pbs) still writes the 3D file out, and only then may `--delete` remove the rank files.
+
+Checked against the files the copy wrote, at Nz=256 and on the Nz=1024 production run: every variable and attribute
+identical (netCDF4/xarray in py313, NCDatasets, FieldTimeSeries; 720 planes across all slabs at each size, whole
+records), the integrated budgets of 01_online_budgets.py identical, plot3/5/6 drawn, the animations byte-identical,
+whole 0.9 GB records read as fast. The Nz=1024 merge takes 3 min 7 s, the 2D copy and the read-back check included.
+
+Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
+
+* Drop the merge's copy option: the virtual merge is the only one
+
+Nothing in the pipeline used --copy (COPY=1 in merge.pbs), and a standalone 3D file, the one thing it gave, is netCDF's
+own `nccopy -k nc4` of the virtual file (checked identical to the copy merge at Nz=64). With it go --delete
+(DELETE_RANK_FILES=1), which only the copy made safe, and the page-cache release, which only a 4 TB copy needed.
+merge.pbs asks for 1 h instead of 24: the whole job takes ~10 min at Nz=1024. merge_rank_output.jl now takes exactly
+one argument, so a leftover --copy is refused rather than ignored.
+
+Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
+
+* Merge the rank files at the end of the simulation job, and drop merge.pbs
+
+On several GPUs, simulation.pbs now goes back to the one-GPU environment once the ranks have finished (modules purged
+to ncarenv, the plain depot, no MPI variables), runs merge_rank_output.jl, draws the animation from the merged 2D file,
+and then draws the three figures every simulation job draws. A failed merge fails the job; a failed figure does not.
+submit_simulation_job submits that one job, which everything downstream waits on, as on one GPU. At Nz=1024 the merge
+takes ~3 min and the whole step ~10 min, for which the four GPUs sit idle; the CPU job it replaces cost a job and its
+queue wait.
+
+Tested by running simulation.pbs, with only its launch stubbed out, on the Nz=64 two-rank files of an earlier V100 run:
+exit 0 in 2.5 min, nothing of the MPI environment left after the switch, the 2D merge byte-identical to the one the
+merge job wrote, and the animations and plot3/5/6 drawn.
+
+Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
+
+* Split the sweep transfer across jobs by record, and stop holding every record and scale at once
+
+The 3D Nz=1024 sweep transfer ran out of its 730 GiB node right after the full-field sort, and the scale loop would
+have needed ~1.3 TiB more. Its memory grows with records x cells, and the 3D Nz=512 run already took 689 GiB:
+- sorted_timeseries and local_potential_energies_timeseries write each record into a preallocated output as it is
+  done, instead of holding every record's result and concatenating them, which held each output twice (at Nz=1024 the
+  51 sorted columns of the padded domain are 320 GiB). local_potential_energies_timeseries no longer builds tpe and
+  rpe, which nothing reads (rpe was an eager copy of the whole column series).
+- calculate_energy_transfer(integrals_only=True), the sweep's mode, computes each scale's integrals before it builds
+  the next scale, so the eager Υˡ of every scale (43 GiB each at Nz=1024) is no longer held for all 30 at once.
+- sweep2 --part K/N computes the K-th contiguous share of the records into a _part<K>of<N> file (the frozen reference
+  is still the sort of the run's first record), and --merge-parts N joins the files, checking that they hold every
+  record once and in order. sweep_transfer.pbs runs either; submit_sweep_transfer in khape_defaults.sh submits
+  SWEEP_PARTS jobs at once and a small one after all of them that joins the files and runs sweep3. SWEEP_PARTS
+  defaults to 1 up to Nz=512 and 6 up to Nz=1024 (default_sweep_parts), in submit_sweep.sh and submit_all_pbs.sh.
+- submit_sweep.sh FILTER=0 reruns the transfer on the filtered file already written, and PLOTS=1 adds the plots job.
+
+No number changes, since every quantity is per record. On the 3D Nz=64 run (4 records, 30 scales) the old code, the
+new code whole and the new code in 3 parts then merged write bit-for-bit identical integrals and attributes, for the
+time-varying and the frozen reference; the two rewritten functions return Datasets identical to the old ones; and
+tests/test_sweep_reference_grid.py now pins integrals_only and a split of the records against the whole computation.
+
+Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
+
+* specify that we want 80gb A100s
+
+* 3D isosurface figures: X13, a batch render job, and a subsetter (#78)
+
+* X12: 3D cutaway snapshot, three orthogonal cutting planes
+
+Exploratory first pass at rendering the 3D runs, which every figure so far
+reduces to an x-z slice at the first y index (aux03_plotting.xz_slice).
+
+mplot3d with three plot_surface planes carrying the data as facecolors. No
+new dependencies, so it runs in a batch job with no display; the planes are
+mutually orthogonal, which is the one case mplot3d's missing z-buffer does
+not spoil.
+
+The file's own omega is the spanwise component alone, so the 3D-structural
+fields are derived here from u, v, w -- all three written at cell centres,
+so the gradient tensor is a centred difference on one grid with no
+staggered interpolation: Q (Hunt et al. 1988), enstrophy and speed.
+
+Two defaults earn their place: |z| < 4, since Lz = 25h is mostly quiescent
+and ruins the box aspect, and a horizontal cut off z = 0, where a buoyancy
+plane sits on the b = 0 interface and shows nothing.
+
+Co-Authored-By: Claude Opus 5 (1M context) <noreply@anthropic.com>
+
+* X13: volume render and isosurfaces (GLMakie)
+
+The companion to X12, which cuts planes: this one looks through the volume.
+For the KH run the isosurface is the more useful of the two, since Q or
+enstrophy picks out the streamwise vortices that braid the billow -- the
+reason the simulation went 3D in the first place.
+
+GLMakie, not CairoMakie: a volume render is GPU raymarching, which Cairo
+cannot do, and Makie's 3D contour wants the same backend. Both are already
+in Project.toml. It needs OpenGL, so this is a workstation (or VirtualGL)
+script, not a batch one -- X12 stays the no-display path.
+
+Verified offscreen via GLMakie.activate!(visible=false) on a 36x12x64 run:
+both panels render and save. Content there is flat, correctly so -- t = 10
+is still the undisturbed tanh profile.
+
+Derived fields are recomputed here rather than shared with X12: the file's
+omega is spanwise only, and u, v, w are at cell centres, so the gradient
+tensor is a centred difference on one grid -- periodic in x and y, one-sided
+at the z walls, matching how the pipeline treats the bounded axis.
+
+Co-Authored-By: Claude Opus 5 (1M context) <noreply@anthropic.com>
+
+* X13: rotate toward the streamwise direction, trim the frame
+
+Default azimuth 1.15pi -> 1.30pi. Makie's Axis3 azimuth pi looks straight
+down +x, so the streamwise direction was heading into the page; 1.5pi gives
+x the full width but puts y edge-on and collides its labels. Compared 1.15,
+1.30 and 1.42 on the Nz=64 run: 1.30 is where x spans nearly the whole frame
+and y still reads.
+
+Figure 720x640 -> 820x560 per panel. After the z crop the domain is roughly
+14:4.7:8, so viewed near side-on a square-ish panel is mostly empty above
+and below the box.
+
+Also simplifies the signed isosurface levels, which were built by a vcat of
+a reshape and came out asymmetric in count; now a symmetric pair per level,
+logged so the choice is visible (-0.0849, -0.0299, 0.0299, 0.0849 on the
+test run).
+
+Co-Authored-By: Claude Opus 5 (1M context) <noreply@anthropic.com>
+
+* X13: read virtual merges, and crop before differentiating
+
+Two things that only bite on the HPC runs, neither reachable from the
+single-GPU test case.
+
+A multi-GPU run's merged 3D file is HDF5 virtual datasets over the rank
+files, and netCDF-C reports a storage code NCDatasets does not map, so a
+read throws KeyError. merge_rank_output.jl:290 exists for exactly this and
+says any Julia reader of a virtual file calls it first -- X13 did not, so
+it would have failed on every Nz=1024 run. Copied rather than included:
+that file pulls in Oceananigans and HDF5_jll for what is one line.
+
+Everything is now read and differentiated on the cropped z slab instead of
+the whole column. At Nz=1024 one field is 0.91 GB and the gradient tensor
+is nine of them, so cropping afterwards peaked around 15-25 GB to render a
+third of it. One cell of margin each side keeps the centred z difference
+exact over the slab proper and collapses to the true walls when the crop
+spans the domain.
+
+Numerically a no-op, as it must be: Q at t=64 of the Nz=128 run gives the
+same shape, colour range (+/-0.0906) and levels (+/-0.077, +/-0.0272)
+before and after. Also checked --zlim 20 (margin collapses, z=128, no index
+error), enstrophy (positive path) and Pi_K_l1 (a budget field).
+
+Co-Authored-By: Claude Opus 5 (1M context) <noreply@anthropic.com>
+
+* X13: panel grid over several fields, for the six-term budget figure
+
+--field now takes a comma-separated list. One name still lays the panels
+out by mode (volume and isosurface of it); several lay them out by field,
+one panel each, in the single --mode given, wrapped at --cols (3).
+
+--scale appends the _l<l> suffix every budget term carries, so the figure
+is one readable line rather than six copies of the suffix:
+
+  --field Q,wb_rs,Pi_K,Pi_A,eps_Ks,eps_As --scale 1 --mode isosurface
+
+Each panel carries its own colorbar and its own levels. They have to: on
+the test run at t=108 the terms span Pi_K ~ 6e-4 to Q ~ 7e-2, two orders of
+magnitude, and one shared scale would flatten all but the largest.
+
+Also clamps the positive-field levels into the colour range. The top level
+is the 0.995 quantile while the range ends at --clim-percentile (99), so
+enstrophy was putting a level at 0.98 against a range ending at 0.882; it
+rendered saturated and the outermost shell was indistinguishable from the
+next one in.
+
+Signs on the rendered figure are the ones CLAUDE.md calls for: eps_Ks comes
+out positive (non-negative by construction) and eps_As, wb_rs, Pi_K and
+Pi_A all signed.
+
+Co-Authored-By: Claude Opus 5 (1M context) <noreply@anthropic.com>
+
+* subset_for_plots: cut an HPC run down to a laptop-sized file
+
+Run it on Casper, scp the result, point X12/X13 at it. Four reductions:
+only the fields asked for, only the records asked for, z cropped to the
+active layer, and float32 with zlib. On the Nz=128 test run, 2.15 GiB ->
+0.006 GiB for three records of nine fields, 336x.
+
+Named neither plot*.py nor X*.py: it writes data, not a figure, so
+plots.pbs's glob and the extra-figures family both leave it alone.
+
+Three things a plain to_netcdf of a sliced dataset gets wrong, all of them
+found by running the output back through the plotting scripts:
+
+- X12 goes through load_dataset_and_grid, which reconstructs the grid from
+  NetCDF groups that xarray does not carry across. The three groups are
+  copied, with z and size in underlying_grid_reconstruction_kwargs rewritten
+  to the crop -- otherwise Lz, z_min/z_max and dV describe the uncropped
+  domain. Verified: the subset reconstructs Lz = 7.81, z = +/-3.91 against
+  the full file's 25.0 and +/-12.5, with Lx and Ly unchanged.
+- The grid's own spacing variables are time-independent, so a field list
+  dropped them and load_dataset_and_grid died on ds.Delta_x_caa. Every
+  time-independent variable now comes along; they are 1D and free.
+- virtual_rank_files is dropped. A merged multi-GPU file carries it and
+  check_rank_files refuses the file when the rank files are absent, which
+  they are once it has been copied away.
+
+--zlim defaults to 5, wider than the plotting scripts' 4, because they
+derive Q by centred differences: cropping to exactly what gets plotted
+leaves them one-sided on the boundary. At 5 then plotted at 4, Q comes back
+bit-identical to the full file (+/-0.0726); at 4 it shifts to +/-0.0727.
+
+Co-Authored-By: Claude Opus 5 (1M context) <noreply@anthropic.com>
+
+* X13: --overlay, a reference field as contours on the bounding walls
+
+Puts b behind every panel as a shared reference, so a Q or Pi panel shows
+where the billow actually is. Three approaches, in the order they failed:
+
+- Isosurfaces of b in the box, grey. Muddy: the panels use :balance, whose
+  midpoint *is* grey, so it read as washed-out data rather than context.
+- Same, in a saturated hue off that axis. Legible as context, but it
+  occludes the thing the panel is about, and transparency cannot fix that:
+  GLMakie ignores alpha on a volume contour. Measured, not assumed --
+  --overlay-alpha 0.05 and 1.0 render byte-identically. Clipping it to a
+  curtain over part of the span helped and still looked cluttered.
+- Shaded on the bounding walls. Occludes nothing, but a filled wall is
+  still a second data layer, and a full-range colormap bottoms out at black:
+  the floor came out solid black, which reads as a rendering fault. A floor
+  is wrong anyway -- b at fixed z is nearly uniform, so it carries nothing.
+
+What works is line contours on the two vertical walls. Lines read as
+annotation rather than as a competing surface, and the deformed interface
+is legible behind every panel of the six-term figure. `transformation` is
+how Makie puts a 2D recipe on a plane of a 3D axis.
+
+--overlay-style iso keeps the isosurface version for comparison; the wall
+one is the default.
+
+Co-Authored-By: Claude Opus 5 (1M context) <noreply@anthropic.com>
+
+* X13: denser isosurfaces by default
+
+--levels 4 -> 6, and the level span widened at the weak end: signed fields
+go from 0.3-0.85 of the colour range to 0.18-0.85, positive ones from the
+0.90-0.995 quantiles to 0.80-0.995.
+
+Two pairs starting at 0.3 showed only the cores, so the panels read as a
+few isolated blobs. The nested shells are what make the structure legible
+-- the Pi_K lobes along the braid and the alternating cores of the
+conversion term only appear once there is something outside them.
+
+The cost is occlusion, which is the whole tension in this kind of figure,
+so --levels stays the knob: 2 for one strong pair per sign, 8+ when the
+field is smooth enough to take it.
+
+Co-Authored-By: Claude Opus 5 (1M context) <noreply@anthropic.com>
+
+* render3d: PBS job for the 3D isosurface figures, over one or more times
+
+bash submit_render3d.sh TIMES=100,120,140 [NZ= FILE= FIELDS= SCALE= LEVELS= ZLIM= OVERLAY=]
+
+One X13 invocation per time, one figure each, into extra_figures/. A time
+that fails is reported and the rest of the list continues.
+
+The job asks for no GPU, which is the part worth knowing: GLMakie needs an
+OpenGL context, not a GPU, and a Casper compute node has neither a display
+nor the NVIDIA driver exposed to one. /usr/bin/Xvfb plus Mesa's software
+rasteriser gives a context on a plain CPU node, so this is an ordinary
+batch job -- no modules, no VirtualGL, no FastX session. Verified end to
+end on crhtc73. Two traps found getting there: xvfb-run is not installed,
+only the Xvfb binary it wraps, and `julia +1.13` is a juliaup feature that
+Casper's julia reads as a filename, so the job finds 1.13 the way
+simulation.pbs does.
+
+TIMES and FIELDS travel colon-separated: `qsub -v` splits its own list on
+commas, so a comma in either value truncates the variable list.
+
+The job starts Xvfb on the first free display between 99 and 160 so two of
+these on one node cannot collide, and kills it from an EXIT trap. It
+smoke-tests the GL context before rendering, since a failure there would
+otherwise surface only after a long software render.
+
+Loop body verified locally under bash against the Nz=128 run, two times,
+one figure each. Note it must be bash: $JULIA holds "julia +1.13", two
+words that zsh does not split.
+
+README gains sections for this and for subset_for_plots.
+
+Co-Authored-By: Claude Opus 5 (1M context) <noreply@anthropic.com>
+
+* Drop the Python 3D figure; X13 is the only 3D-rendering script
+
+X12_3d_snapshot.py was written as the no-display fallback, before Xvfb and
+software Mesa turned out to give GLMakie a context on a plain Casper CPU
+node. With render3d.pbs doing that, a second 3D figure script with a
+different look and a weaker renderer (mplot3d has no z-buffer, so only
+mutually orthogonal planes survive) is maintenance for no gain.
+
+References to it are gone from X13's header, subset_for_plots and the
+README. subset_for_plots stays: it writes data, not figures, and is still
+the better loop for tuning a figure locally rather than over qsub.
+
+CLAUDE.md gains X13, subset_for_plots and the render3d job, including the
+two traps worth not rediscovering -- xvfb-run is not installed on Casper
+(only the Xvfb binary it wraps) and `julia +1.13` is a juliaup feature that
+Casper's julia reads as a filename.
+
+Co-Authored-By: Claude Opus 5 (1M context) <noreply@anthropic.com>
+
+* X13: positive fields on the positive half of :balance, not :magma
+
+eps_Ks was the loudest panel of the six for no physical reason: :magma is
+a dark, fully saturated ramp while the signed panels use :balance, which
+is near-white wherever the field is small. The positive half of :balance
+(its white midpoint through to red) puts them on the same footing, and a
+positive field then reads as the red half of the signed scale, which is
+what it is.
+
+Two further changes, without which the colormap alone does not fix it:
+
+- The colour range starts at 0 rather than the 1st percentile, so white
+  means zero in every panel.
+- Positive levels are the same fractions of the colour range the signed
+  ones use (0.18-0.85) instead of the 0.80-0.995 quantiles. Quantile-chosen
+  levels put all six surfaces above the 80th percentile, so every one
+  mapped to the dark end whatever the ramp.
+
+The cost is that eps_Ks is now the busiest panel rather than the darkest:
+its distribution is skewed, so the lowest level sits well below the 80th
+percentile and wraps the active region in large sheets. --levels is the
+knob if that is the wrong trade for a given figure.
+
+Co-Authored-By: Claude Opus 5 (1M context) <noreply@anthropic.com>
+
+* X13: one symmetric colour scale for every panel, signed or not
+
+A positive-definite field now gets the same (-hi, hi) :balance scale as
+the rest, with its lower half unused, rather than the positive half of the
+ramp over (0, hi).
+
+The two render identically -- v maps to 0.5 + v/2hi either way -- so this
+is a colourbar change, not a picture change. It earns its place twice: the
+bars become the same object, so magnitudes compare across panels without
+rescaling by eye, and the empty half states that the quantity never changes
+sign, which is true of eps_Ks by construction and of nothing else in the
+six-term figure. The cost is half a bar of dead space and correspondingly
+fewer ticks over the populated half.
+
+`signed` still decides the levels -- a symmetric pair about zero, or
+one-sided -- so a positive field is not given surfaces it has no data for.
+
+Drops BALANCE_POS, dead with both cases on the full ramp.
+
+Co-Authored-By: Claude Opus 5 (1M context) <noreply@anthropic.com>
+
+* X13: one set of contour-level fractions for every panel
+
+Levels are now the same fractions of each panel's own colour range --
+0.18, 0.515, 0.85 at the default --levels 6 -- whatever the field. A
+surface therefore means the same thing in every panel: this much of that
+panel's range. Checked on the six-term figure, Pi_K's +0.00011 of 0.000609
+and eps_Ks's 1.25e-05 of 6.95e-05 are both 0.18.
+
+Two asymmetries went into making this not already true. Positive fields
+took quantiles of their own distribution, which put surfaces where the data
+was but at magnitudes unrelated to any other panel. And even on fractions,
+signed fields used nlevels/2 fraction values against positive fields'
+nlevels, so the magnitudes still differed.
+
+A positive field now gets exactly the magnitudes the signed panels put
+their red surfaces at and has no blue counterparts, so `--levels n` is n
+surfaces where the field changes sign and n/2 where it does not. That is
+the honest reading of the flag once levels are placed by magnitude.
+
+It also settles the eps_Ks panel, which was either uniformly dark (all six
+levels above the 80th percentile) or cluttered (six evenly spaced levels
+wrapping the active region in sheets): three graded shells at the shared
+fractions are neither.
+
+Co-Authored-By: Claude Opus 5 (1M context) <noreply@anthropic.com>
+
+* submit_render3d: FROM/TO/EVERY for a strided range of times
+
+TIMES still takes a list; FROM=60 TO=160 EVERY=10 renders every 10th time
+over a range instead, which is what the Nz=1024 run's 101 records want.
+The two are mutually exclusive rather than one silently winning, so a typo
+in either is an error.
+
+FROM/TO/EVERY rather than a 100:10:200 range literal because colon is
+already the separator that gets TIMES past `qsub -v`'s comma splitting.
+EVERY has no default: the wrapper is pure shell and does not open the run
+to find its output interval.
+
+The range is built with awk, not seq, since the times are floats and seq's
+output format follows the locale; the endpoint comparison carries a 1e-9
+tolerance so an inclusive TO survives the accumulated float addition.
+
+Exercised against a stubbed qsub: list, range, both-given, missing EVERY,
+neither given, reversed range and an unknown key all behave, and the
+emitted -v list is well formed in each.
+
+Co-Authored-By: Claude Opus 5 (1M context) <noreply@anthropic.com>
+
+* render3d: 12 h walltime, and the real rendering cost in the docs
+
+Measured on Casper: about 3 min per six-panel figure at Nz=1024, not the
+"minutes per panel" I guessed before anyone had run it. That is 6-7x
+faster, and it changes what the job is for -- a full 101-record set is
+roughly 5 h of sequential rendering, so it fits in one job and there is no
+case for splitting the times across several.
+
+Walltime 6 h -> 12 h to cover that with room to spare. The docs said
+software rendering was slow enough that local iteration was the only
+sensible loop; local iteration is still quicker, but because no qsub round
+trip beats a local render, not because the render is slow.
+
+Co-Authored-By: Claude Opus 5 (1M context) <noreply@anthropic.com>
+
+* render3d: 90 s per figure, measured; walltime back to 6 h
+
+Timing refined from the 3 min first reported to about 90 s per six-panel
+figure at Nz=1024. A full 101-record set is then about 2.5 h rather than
+5 h, so the 12 h walltime raised for that estimate is no longer warranted
+and goes back to 6 h, which still covers the full set twice over and
+schedules sooner.
+
+Co-Authored-By: Claude Opus 5 (1M context) <noreply@anthropic.com>
+
+* X13: overlay contours span the whole wall
+
+The wall contours stopped short of the box edges, leaving a bare strip
+along each wall -- clearest as a gap at the far end of the back wall. They
+were drawn over the data's own coordinates, so they covered only the data
+footprint, while Axis3 draws the box wider than that.
+
+How much wider was worth measuring rather than guessing: Axis3 autoscales
+to the data extent plus 5% on every side (6.87 -> 7.557, x1.1 overall), and
+it pads z as well as x and y. Those limits are now written out explicitly
+so the padding is a known number instead of an implementation detail, and
+`aspect` stays on the data extents, so the panels look exactly as before.
+
+The wall slices are then edge-extended to the box in both directions --
+one repeated row and column per side -- so every contour runs flat out to
+the corners.
+
+This is only the spanning problem. The lines are still behind the
+isosurfaces wherever those cover them, which is a separate thing and not
+what was asked for. Worth recording what does *not* cause the gap, since
+each cost a render to rule out: it is not occlusion, not `transparency` on
+the isosurfaces, and not the contour plane sitting inside the volume --
+pinning the limits to the data, and moving the plane outside the volume
+with the limits extended to meet it, both leave the gap exactly as it was.
+
+Checked after the change: six-panel, single field with --mode both and no
+overlay, --zlim 20 spanning the domain, and a derived field beside a budget
+field.
+
+Co-Authored-By: Claude Opus 5 (1M context) <noreply@anthropic.com>
+
+* X13: b_r as a derived field
+
+b_r = b - b✶(z), the buoyancy relative to the Winters sorted reference
+state. The simulation writes it only to the 2D writer, and that is a single
+x-z slice with no 3D structure to contour, so it is rebuilt here.
+
+On a uniform grid the sort is exact and needs no iteration: order every
+cell by buoyancy, and since each model level holds Nx·Ny cells of equal
+volume, the k-th group of Nx·Ny sorted values is the fluid that comes to
+rest at level k. The sort has to see the whole column -- a reference state
+built from a slab is a different reference state -- so this is the one
+derived field that reads beyond the z crop.
+
+Checked against the simulation's own b_r on the plane the 2D writer keeps:
+corr 0.99995, rms difference 1.0% of rms. The residual is expected, since
+the online field uses the ThreeDimensionalSort z✶ with its tie handling
+rather than an equal-volume column average, and the 2D file is Float32.
+
+Co-Authored-By: Claude Opus 5 (1M context) <noreply@anthropic.com>
+
+* X13: volume integrals in the titles, one shared colourbar, less furniture
+
+Three changes to what the figure says and how much ink it spends saying it.
+
+Each panel's title now carries the term's volume integral, read from the
+file's own `_int` series rather than recomputed. That is the number the
+closure is stated in and the one thing a self-scaled panel cannot show:
+at t=108, l=1 it reads Pi_A +0.0877 and eps_As +0.0703 against Pi_K
+-0.00433, so the APE terms dominate by an order of magnitude and Pi_K is
+backscattering -- none of which the shapes alone convey. Note the integrals
+are over the whole domain while the panels are cropped in z, so they are
+the budget's numbers rather than sums over what is drawn. Derived fields
+have no `_int` and get no annotation.
+
+Every panel is normalised by its own 99th percentile and drawn on one
+(-1, 1) scale, so the figure carries a single colourbar instead of six of
+them repeating the same thing, and a given colour means the same fraction
+of the local range in every panel. The physical scale moves into the title
+as a +/- number, which reads better than a bar of five-digit ticks.
+
+Axis labels and tick labels stay on the upper-left panel and come off the
+rest; box and grid stay everywhere, so each panel still reads as the same
+volume. The cost is that five of six panels are no longer individually
+readable for position.
+
+Checked after: six-panel, single field with --mode both and no overlay,
+two panels mixing a derived and a budget field, and --mode volume.
+
+Co-Authored-By: Claude Opus 5 (1M context) <noreply@anthropic.com>
+
+* X13: label the per-panel scale "range = ±..."
+
+The bare ± number was ambiguous next to the integral on the same line.
+
+Co-Authored-By: Claude Opus 5 (1M context) <noreply@anthropic.com>
+
+* X13: typeset panel titles
+
+The terms are named with sub- and superscripts, and the titles were
+spelling them out in lookalike unicode -- "ε_Kˢ" for an epsilon with a
+subscript K and a superscript s. They are Makie rich text now, so b_r,
+τ(w, b_r), Π_K, Π_A, ε_Kˢ and ε_Aˢ typeset properly, and the table covers
+the reservoir terms too for when they are added.
+
+That forced the title out of Axis3's own `title` attribute, which takes a
+plain string or a LaTeXString but rejects rich text, and accepts no line
+break in any form -- so neither the subscripts nor the second line of
+range and integral would survive it. The title is a Label instead, hung in
+the cell's `Top()` protrusion. Not a nested GridLayout with a label row:
+that shrinks the axis into a corner of its cell, since the axis no longer
+claims the whole of it.
+
+Checked after: six-panel, single field with --mode both, two panels mixing
+a derived and a budget field, and --mode volume.
+
+Co-Authored-By: Claude Opus 5 (1M context) <noreply@anthropic.com>
+
+* X13: --colormap, defaulting to :balance as before
+
+Makes the diverging map a flag so alternatives can be compared without
+editing the file. Default unchanged, so every existing figure is
+unaffected.
+
+Compared :balance against :vik, :broc, :berlin, :curl and :RdBu on the
+six-panel figure. Staying with :balance. Worth recording for whoever looks
+again: the Crameri maps (:vik and friends) are perceptually uniform and
+colourblind-safe, which :balance is not, and :vik separates the innermost
+shells of eps_Ks and eps_As better because :balance compresses at its dark
+red end.
+
+Co-Authored-By: Claude Opus 5 (1M context) <noreply@anthropic.com>
+
+* X13: draw the boxes at a usable size
+
+The 3D box filled about half its cell, so most of the figure was margin.
+figure_padding and the inter-panel gaps turn out to be the binding
+constraint rather than the cell size: with those at 4 and 0, `viewmode =
+:fitzoom` zooms each box into the space that frees up. On its own, at
+Makie's default padding, :fitzoom does nothing visible -- which is why it
+looked like a dead end when tested alone.
+
+Also tested and not adopted, from the 3D-rendering list:
+- perspectiveness. It does add a depth cue, but it shrinks the box further
+  and makes a structure's apparent size depend on its distance from the
+  camera, which is wrong for a figure whose purpose is comparing shapes
+  across panels.
+- SSAO. Accepted as a plot attribute and renders byte-identically, so it
+  does nothing here -- it does not apply to transparent geometry, and the
+  isosurfaces are transparent by design.
+- specular/diffuse/shininess. Not valid attributes on a volume Contour, so
+  material tuning is not available without scene-level lights, which have
+  little to act on through transparent surfaces.
+
+Co-Authored-By: Claude Opus 5 (1M context) <noreply@anthropic.com>
+
+* X13: log the physical range, not the normalised one
+
+Normalising every panel onto (-1, 1) left the log reporting "range
+[-1, 1]" for every field, which says nothing. The titles were always
+right; only the log regressed.
+
+Co-Authored-By: Claude Opus 5 (1M context) <noreply@anthropic.com>
+
+* X13: negated fields, blank cells, and a NaN guard for the tendencies
+
+Three things the two-row budget layout needs:
+
+  --field "dKs_dt,wb_rs,Π_K,ε_Ks,dEas_dt,-wb_rs,Π_A,ε_As" --cols 4
+
+- A "-" prefix negates a field, for a term that enters two budgets with
+  opposite sign. The title and the volume integral both flip, so the
+  conversion reads +0.0103 in the KE row and -0.0103 in the APE row and a
+  colour means the same thing -- source for this row's reservoir -- in both.
+- A lone "." leaves a cell empty, so a row with fewer terms than the grid
+  is wide keeps its alignment rather than wrapping.
+- The quantile that sets each panel's scale now runs over finite values
+  only. The tendencies come from Oceananigans' deferred TimeDerivative,
+  whose last record of a run is NaN because its differencing window never
+  closes; without this a figure at the last time fails inside `quantile`
+  with nothing to say. An all-NaN field now errors and names the cause.
+
+Titles added for dKs_dt and dEas_dt.
+
+Co-Authored-By: Claude Opus 5 (1M context) <noreply@anthropic.com>
+
+* submit_render3d: COLS, so the batch job can lay out a budget figure
+
+X13 defaults to 3 columns, so the eight fields of the two-row budget
+figure wrapped 3/3/2 from the job and could only be laid out 4/4 by hand.
+
+Exercised against a stubbed qsub with the negated field in place: the -v
+list comes through as COLS=4 and FIELDS=...:-wb_rs:..., so neither the
+dash nor the colon packing trips over qsub's own parsing.
+
+README gains the two-row invocation and a note on the "-" and "." markers.
+
+Co-Authored-By: Claude Opus 5 (1M context) <noreply@anthropic.com>
+
+* README: the two-row budget invocation, and the "-" / "." field markers
+
+Belongs with 39e3082, whose message says the README gained these. It did
+not: the edit failed on a bad anchor and the commit went ahead regardless,
+so that message overstates what landed.
+
+Co-Authored-By: Claude Opus 5 (1M context) <noreply@anthropic.com>
+
+* plot3: spanwise vorticity on the top row, and rename to match
+
+The top row was buoyancy, which largely repeated what the isopycnal
+contours overlaid on both rows already showed. Spanwise vorticity carries
+the braid sheets and the billow core instead, and reads against b_r below:
+the vorticity core sits where b_r changes sign.
+
+--top {ω,b} keeps the old figure one flag away; ω is the default, so the
+file is renamed plot3_b_br_snapshots.py -> plot3_omega_br_snapshots.py and
+its output <stem>_b_br_snapshots_*.pdf -> <stem>_omega_br_snapshots_*.pdf.
+simulation.pbs names the script explicitly and follows; plots.pbs globs
+plot*.py and does not care.
+
+The z crop is now by dimension name rather than a hard-coded z_aac: ω sits
+on (z_aaf, x_faa) where b and b_r are on centres, so the old selector would
+have failed on it. b is still loaded whichever row is chosen -- the contour
+overlay and its levels come from it.
+
+Note this changes the figure simulation.pbs draws automatically at the end
+of every run, not only the one drawn by hand.
+
+Checked both --top ω and --top b against the local Nz=128 run.
+
+Co-Authored-By: Claude Opus 5 (1M context) <noreply@anthropic.com>
+
+* plot3: run parameters in panel (d), not (f)
+
+The Re/Ri/Pr annotation applies to the whole figure, so it belongs at the
+start of the reading order rather than tucked into the last panel, where
+it reads as a caption to that panel alone.
+
+Co-Authored-By: Claude Opus 5 (1M context) <noreply@anthropic.com>
+
+* plot5: let the time axis follow the data
+
+The right edge was hard-coded to t = 140, which silently truncated any run
+longer than that. The Nz=1024 run goes to 200, so a third of it was simply
+missing from the figure with nothing to say so.
+
+The axis now ends where the data does, and --max-time sets it explicitly
+when a fixed edge is wanted. The data itself is unchanged: it still starts
+one record in and drops the NaN records, so it ends at the last record
+whose TimeDerivative window closed -- t = 198 on a run to 200.
+
+Co-Authored-By: Claude Opus 5 (1M context) <noreply@anthropic.com>
+
+* plot5: tight time axis, legends clear of the data, tendency in the solo column
+
+Three fixes to the 2x2 budget figure.
+
+The time axis is now tight to the run -- 0 to the last output time, no
+margin either side -- where before it had matplotlib's default padding
+around a hard-coded right edge. The small gaps at the ends are the data,
+not the axis: the budget starts one record in and ends at the last closed
+TimeDerivative window, t = 198 on a run to 200.
+
+Both legends sit in the right-hand column, which now gets 33% headroom
+above the data for them to occupy. At Nz=1024 the Pi_K curve rose into the
+legend box. Expanding the column rather than one panel keeps the
+within-column y-sharing intact.
+
+The APE legend's solo first column now holds the tendency rather than R^s.
+It is the term the other four sum to, so it reads as the left-hand side of
+the budget instead of one more flux.
+
+Co-Authored-By: Claude Opus 5 (1M context) <noreply@anthropic.com>
+
+* plot5: horizontal legends under each row
+
+The legends were inside the right-hand panels, which only worked by giving
+that column 33% headroom above the data -- whitespace spent on the legend
+rather than on the curves, and conspicuous at Nz=1024 where the two columns
+then had visibly different ranges. Out of the axes, the headroom goes and
+each panel keeps its own limits.
+
+Each legend is centred between the left edge of its row's first panel and
+the right edge of its last. constrained_layout only resolves those
+positions at draw time, so the figure is drawn once and the layout frozen
+before the legends are added; otherwise the engine re-runs on save and
+moves the axes out from under them. An offset in axes coordinates was the
+first attempt and lands wrong, since it depends on the inter-column gap.
+
+hspace 0.16 and the figure 7 -> 7.6 in tall: at the default spacing the KE
+legend has nowhere to sit and overlaps the tops of row 1's panels.
+
+The APE legend is a single row now rather than two columns with a blank
+pad, so the handle shuffling is just moving the tendency to the front.
+
+Co-Authored-By: Claude Opus 5 (1M context) <noreply@anthropic.com>
+
+* plot5: move the KE legend up under its own row
+
+It sat midway between the two rows, close enough to row 1 to read as
+belonging to either. Halving its offset from row 0's axes puts it clearly
+under the panels it describes.
+
+Co-Authored-By: Claude Opus 5 (1M context) <noreply@anthropic.com>
+
+* plot5: dissipation last in both legends
+
+The term dicts set the legend order, so they are reordered rather than the
+handles shuffled afterwards. The tendency leads, as the term the others sum
+to, and the dissipation closes, as the only sink: each row reads sources
+first, sink last.
+
+Note this also sets draw order, so the dissipation curve is now drawn on
+top of the exchange where the two coincide.
+
+Co-Authored-By: Claude Opus 5 (1M context) <noreply@anthropic.com>
+
+* plot5: bring the APE legend up under its row
+
+It cleared the "Time" label by more than it needed, leaving it adrift at
+the foot of the figure while the KE legend sat snug under row 0. 0.085 ->
+0.060 in figure fraction, which still clears the label.
+
+Co-Authored-By: Claude Opus 5 (1M context) <noreply@anthropic.com>
+
+* render3d: 30 min walltime
+
+6 h was sized for rendering a whole run's worth of times. The job is
+normally asked for a handful, which at about 90 s per six-panel figure
+plus Julia's startup fits in 30 min with room, and a short request
+schedules sooner.
+
+A sweep over many times still needs a longer walltime; the comment and the
+docs say so rather than leaving the old number to be rediscovered.
+
+Co-Authored-By: Claude Opus 5 (1M context) <noreply@anthropic.com>
+
+* X13: panel letters, LaTeX titles, larger fonts; render3d back to 6 h
+
+Panel letters (a), (b), ... prefix each title, for referring to a panel in
+text. They go in the title rather than inside the box: an annotation inside
+an Axis3 needs 3D data coordinates and would move with the camera. Blank
+cells take no letter, and a single-panel figure gets none.
+
+Titles are LaTeX now, rendered by MathTeXEngine. Makie's rich text set a
+subscript and a superscript side by side rather than stacked, so eps_K^s
+came out with the s trailing the K; LaTeX stacks them, matching how plot5
+writes the same terms in matplotlib mathtext.
+
+Getting two lines of it took some finding, and the alternatives are
+recorded at the call site so they are not re-derived: Axis3's own `title`
+rejects rich text and takes no line break; two Labels placed directly in
+the cell's top protrusion overlap rather than stack; a protrusion Label
+over the axis title overlaps too; and a LaTeX \substack spanning both lines
+does not parse in MathTeXEngine. A GridLayout *inside the protrusion*
+stacks them and still leaves the axis its whole cell -- unlike one in the
+cell itself, which shrinks the axis into a corner.
+
+Fonts: title 15 bold -> 19 regular, its second line 13 -> 15, colourbar
+label -> 20 and its tick labels -> 18.
+
+render3d.pbs walltime 30 min -> 6 h: the times render sequentially, so 200
+of them is about 5 h. The 30 min of the previous commit was sized for the
+handful this job usually draws, which left no room for a long sweep.
+
+Co-Authored-By: Claude Opus 5 (1M context) <noreply@anthropic.com>
+
+* X13: build the derived fields from the filtered velocity
+
+Q, enstrophy and speed came from the raw u, v, w while every budget term
+beside them is at a filter scale. They now use the online filtered velocity
+at --scale by default (u_ℓ<ℓ> and friends, which the simulation writes for
+every scale in its filter_ℓs); --derived-from full restores the old
+behaviour, and a run without the filtered field falls back to the raw one
+with a warning rather than failing.
+
+At ℓ=1 on the test run this takes Q's range from ±0.0726 to ±0.0650 and
+visibly smooths the isosurfaces, the grid-scale wrinkles on the strain
+sheets going away.
+
+Worth being clear about what this does and does not fix: it makes the
+velocity consistent, not the decomposition. Q(ū) is a resolved-scale
+quantity sitting beside sub-filter terms, and Q is quadratic in gradients
+so it has no natural resolved/sub-filter split -- there is no "sub-filter
+Q" to put in that panel instead.
+
+b_r keeps the unfiltered b, being measured against the unfiltered b✶ and
+carrying no scale.
+
+Co-Authored-By: Claude Opus 5 (1M context) <noreply@anthropic.com>
+
+* X13: --fractions, to place the isosurfaces explicitly
+
+--levels n spreads n/2 surfaces evenly over 0.18-0.85 of each panel's
+range, which is still the default and unchanged. --fractions places them
+by hand instead, e.g. "0.1,0.5,0.85" to reach further into the weak
+structure than an even spread starting at 0.18 does. The two are
+alternatives: setting both errors rather than letting one win silently,
+and a fraction outside (0, 1] is refused.
+
+`fractions` moves above the argument block, which now calls it -- Julia
+runs a script top to bottom, so its old position after the derived fields
+was too late.
+
+Also puts the levels back in the per-field log line. They were dropped when
+the volume integral was added there, which left no way to check where the
+surfaces had actually been placed.
+
+Co-Authored-By: Claude Opus 5 (1M context) <noreply@anthropic.com>
+
+* submit_render3d: FRACTIONS, so the batch job can place the surfaces
+
+--fractions was only reachable locally. It travels colon-separated like
+TIMES and FIELDS, since qsub -v splits its own list on commas, and the
+render line passes either --fractions or --levels depending on whether it
+is set -- never both, which X13 refuses.
+
+Co-Authored-By: Claude Opus 5 (1M context) <noreply@anthropic.com>
+
+* render3d: fix the stray argument from the FRACTIONS/LEVELS switch
+
+cebd30a used ${FRACTIONS:+--fractions "$FRACTIONS"} ${FRACTIONS:---levels
+"$LEVELS"}, which is wrong: ${VAR:-default} substitutes VAR's own value
+when VAR is set, so with FRACTIONS set the render line came out as
+`--fractions "0.1,0.5,0.85" 0.1,0.5,0.85` -- the list repeated as a
+positional argument, which X13 would reject as an unexpected flag.
+
+An array built by an if/else instead. Both branches checked.
+
+Co-Authored-By: Claude Opus 5 (1M context) <noreply@anthropic.com>
+
+* submit_render3d: DERIVED, to pick the velocity for Q and friends
+
+--derived-from was only reachable locally. DERIVED=full builds Q, enstrophy
+and speed from the raw velocity rather than the filtered field at SCALE;
+'filtered' stays the default. No colon packing needed -- the value is a
+single word.
+
+Co-Authored-By: Claude Opus 5 (1M context) <noreply@anthropic.com>
+
+* render3d: refuse a fraction list given to LEVELS, and echo the real flags
+
+LEVELS=0.4,0.85 was accepted by the wrapper and then failed inside X13 on
+parse(Int, ...). That time was logged as a warning and skipped, and since
+the figure's name encodes neither the levels nor the fractions, the
+previous figure stayed on disk looking like the result -- a silent no-op.
+The wrapper now refuses a non-integer LEVELS and points at FRACTIONS, and
+refuses a FRACTIONS that is not a list of numbers.
+
+The job's own echo printed `levels=$LEVELS` whatever it was about to do, so
+a run using --fractions still reported levels=6. It now echoes the argument
+array it actually passes.
+
+Also adds --px-per-unit to X13 (default 2, unchanged). It sharpens edges;
+it was not the cause of the striping, which turned out to be many nearby
+isosurfaces in the Nz=1024 fields.
+
+Co-Authored-By: Claude Opus 5 (1M context) <noreply@anthropic.com>
+
+* render3d: fail the job when a time fails to render
+
+Figures are named by time alone, so a render that fails leaves the previous
+figure of that name in place. The job reported success regardless, and the
+stale figure read as a result -- which is how a broken --fractions run
+looked like it had simply ignored the argument.
+
+Each failure is still reported and the remaining times still run, but the
+job now exits 1 so PBS marks it failed, and says plainly that any figure of
+that name is from an earlier run.
+
+Co-Authored-By: Claude Opus 5 (1M context) <noreply@anthropic.com>
+
+* plot7: sub-filter mixing efficiency against time
+
+η = ε_Aˢ/(ε_Aˢ + ε_Kˢ) from the volume integrals, one line per filter
+scale. Same source as plot5 -- `online_budgets` on the simulation file --
+so it runs with no post-processing, and plots.pbs picks it up through its
+plot*.py glob.
+
+The budgets carry the dissipations with the sign they enter the budget
+with, as sinks, so they are negated back to rates before the ratio is
+formed; taking them as stored would flip η.
+
+ε_Kˢ is non-negative by construction but ε_Aˢ is not, so the denominator
+can pass through zero and the ratio diverge there, and before the billow
+forms both sinks are ~0 and the ratio means nothing. --min-dissipation
+blanks the records where ε_Aˢ + ε_Kˢ is below a fraction of its own maximum
+(default 0.02) and the run reports how many were dropped, so an excursion
+is never silently drawn as a physical efficiency.
+
+Co-Authored-By: Claude Opus 5 (1M context) <noreply@anthropic.com>
+
+* plot7: blank t = 0 only
+
+The threshold guard blanked any record where ε_Aˢ + ε_Kˢ fell below a
+fraction of its maximum, which hid the excursions where the denominator
+passes through zero. Those are real behaviour of a ratio whose numerator is
+not sign-definite, and worth seeing rather than papering over.
+
+Only t = 0 is dropped now, where both sinks are identically zero and the
+ratio is 0/0. The run reports the span of η instead of a blanked count, so
+a divergence shows up in the log as well as on the plot.
+
+Co-Authored-By: Claude Opus 5 (1M context) <noreply@anthropic.com>
+
+* X14: dissipation and cross-scale ratio panels; rename out of the plot* set
+
+plot7_mixing_efficiency.py -> X14_mixing_efficiency.py, writing to
+postprocessing/extra_figures/ rather than figures/. The X* family is the
+extra analysis outside the manuscript set, and plots.pbs globs plot*.py
+only, so this is no longer drawn automatically with the paper figures.
+X12 is skipped rather than reused: it was the Python 3D snapshot removed
+earlier in this branch.
+
+Two panels added above and below the efficiency:
+
+- the sinks themselves, both scales, so a feature in the ratio can be read
+  back to whichever of them moved. On the test run the l=7 dip at t~85 is
+  eps_As collapsing 0.53 -> 0.05 while eps_Ks only halves, which the ratio
+  alone does not show.
+- each sink at the first scale over the same sink at the second, in the
+  order --filter-scales gives them, so the default "7 1" reads as how much
+  more is dissipated at the coarse scale. Drawn only for exactly two
+  scales; with more it is omitted and the run says so.
+
+Colour carries the scale in the first two panels and line style the
+quantity; the third compares scales, so colour drops out and style alone
+carries the quantity. The run-parameter label moves to the efficiency
+panel, having sat on the ratio panel's y = 1 line.
+
+Co-Authored-By: Claude Opus 5 (1M context) <noreply@anthropic.com>
+
+* X14: commit the panel and output-path changes 0606cad left behind
+
+0606cad was a pure rename -- `git mv` was staged, the edits to the file
+itself were not, so a checkout of that commit has the new name with the
+old body: one panel, and still writing to figures/ rather than
+extra_figures/. This is the content that commit message described.
+
+- the two sinks plotted directly, both scales, above the efficiency
+- the cross-scale ratio of each sink below it, with a y = 1 line, drawn
+  only for exactly two scales
+- EXTRA_FIGURES as the output directory
+- the run-parameter label moved onto the efficiency panel
+
+Co-Authored-By: Claude Opus 5 (1M context) <noreply@anthropic.com>
+
+* plot4: mark l = 1 and l = 7 on every panel
+
+The two budget scales were drawn on the total alone, which meant locating
+a feature in Pi_K or Pi_A against them by carrying the position down from
+panel (a) by eye. Drawn on all three, each component can be read against
+the same scales directly.
+
+Unchanged otherwise: the lines stay unlabelled, since the secondary l axis
+on (a) identifies them, and the axhline/axvline branch already followed
+--orient.
+
+Co-Authored-By: Claude Opus 5 (1M context) <noreply@anthropic.com>
+
+* rename plotting scripts
+
+* Number the 3D subset and render job; update references to renamed scripts
+
+subset_for_plots.py -> 03_subset_3d.py and render3d.pbs -> 04_render3d.pbs.
+submit_render3d.sh keeps its name and the render3d_Nz... job and log names.
+
+Fix the references 6e7d478 left behind: the render job still ran
+X13_3d_volume.jl, which no longer exists, and usage strings, comments,
+README.md and CLAUDE.md still used the old plot numbers.
+
+plot7_3d_volume.jl now writes to figures/ and X6_panels.py to
+extra_figures/, as the rest of the plot* and X* families do (cf. d22c5ed).
+
+Also fix older stale names on the same lines: plot2_transfer_spectrum.py
+(now X5), "the S scripts" (now X), and the X1-X11 range.
+
+Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
+
+---------
+
+Co-authored-by: Claude Opus 5 (1M context) <noreply@anthropic.com>
+Co-authored-by: tomaschor <tomaschor@gmail.com>
+Co-authored-by: copilot-swe-agent[bot] <198982749+Copilot@users.noreply.github.com>
+Co-authored-by: tomchor <13205162+tomchor@users.noreply.github.com>
+
+* Check the rank files before subsetting a virtually merged run
+
+03_subset_3d.py opened the run with xr.open_dataset, which skips the check_rank_files guard that load_dataset_and_grid
+applies, so a missing rank file would have read as fill values in the subset. The subset then drops virtual_rank_files,
+which left nothing downstream able to notice. It now calls check_rank_files right after opening.
+
+Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
+
+* Keep the filtered velocities in the 3D subset
+
+plot7_3d_volume.jl derives Q, enstrophy and speed from the velocity filtered at --scale by default, and falls back to
+the raw u, v, w with a warning when the filtered one is absent. The default subset kept only the raw components, so a
+local render of it drew different derived fields from what 04_render3d.pbs draws from the run with the same options.
+Each of u, v and w the subset keeps now brings its filtered counterpart at --scale along, when the run has it, which
+keeps --derived-from full working too. The --fields help, the README and CLAUDE.md say so.
+
+Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
+
+* Let OVERLAY= reach the render job as no overlay
+
+submit_render3d.sh documents OVERLAY= as no overlay, but 04_render3d.pbs defaulted it with ${OVERLAY:-b}, which turns
+the empty value back into b, so the batch job drew the buoyancy contours anyway (and would fail on a file without b).
+The wrapper always passes OVERLAY and owns its default, so the job no longer sets one: an empty or unset OVERLAY gives
+plot7 --overlay "", which it reads as none. Dropping only the colon, ${OVERLAY-b}, would still draw b if qsub -v drops
+an empty variable rather than exporting it.
+
+Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
+
+* Drop only t = 0 from the mixing efficiency, as intended
+
+online_budgets already removes iteration 0's record (differenced_records), so the .isel(time=slice(1, None)) in X14's
+sink() also dropped the first record that does state a budget: t = 2 in a production run, or the first pair in an
+--offline_check one. That contradicted the script's own comment ("t = 0 alone is dropped") and left the
+.where(time > 0) guards with nothing to do. The slice is gone; every record online_budgets keeps is plotted.
+
+Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
+
+* Refuse more filter scales than X14 has colours
+
+X14 zipped --filter-scales with four colours, so a fifth scale and beyond were dropped from the figure without a
+word. Colour is what tells the scales apart in the first two panels, so cycling the palette would draw two scales
+alike; the script now refuses more than four scales before it reads anything.
+
+Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
+
+* Delete virtual_rank_files from a standalone copy of a merged run
+
+The documented way to make a standalone 3D file, nccopy -k nc4 of the virtual merge, keeps the global attributes,
+virtual_rank_files included (checked locally), so check_rank_files refused the copy as soon as the rank files were
+deleted or moved, which is the point of making it. The procedure now ends by deleting the attribute from the copy,
+`ncatted -h -a virtual_rank_files,global,d,, <copy>.nc`, in the README, merge_rank_output.jl's header and usage
+message, and CLAUDE.md. The guard's error names both cases: restore the rank files of a virtual merge, or delete the
+attribute from a copy.
+
+Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
+
+* run all plots* scripts at the end of simulation.pbs
+
+* Read plot7's input with NaN as the masking value, so it draws a subset
+
+03_subset_3d.py writes every variable with xarray's default _FillValue = NaN, so NCDatasets read a subset's
+coordinates and fields as Union{Missing, Float64}. Makie's contour! has no method for that, so the wall overlay
+threw before the figure was saved, and read3d's Float64.() would throw on any masked value, such as the NaN last
+record of a tendency. With maskingvalue = NaN every array reads as plain Float64. The simulation's own files
+declare no fill value, so for them nothing changes: the six-panel render of the Nz=1024 run at t = 120 is
+byte-identical before and after, and the subset of that record now draws the same figure.
+
+Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
+
+---------
+
+Co-authored-by: Claude Opus 5.5 <noreply@anthropic.com>
+Co-authored-by: Jacob Wenegrat <jwenegrat@gmail.com>
+Co-authored-by: copilot-swe-agent[bot] <198982749+Copilot@users.noreply.github.com>
+Co-authored-by: tomchor <13205162+tomchor@users.noreply.github.com>
+```
+tomchor
+deleted the
+jw/3d-plotting
+branch
+October 19, 2026 11:21
+Sign up for free
+to join this conversation on GitHub.
+Already have an account?
+Sign in to comment
+Uh oh!
+There was an error while loading. Please reload this page.
+Labels
+None yet
+3 participants
+Add this suggestion to a batch that can be applied as a single commit.This suggestion is invalid because no changes were made to the code.Suggestions cannot be applied while the pull request is closed.Suggestions cannot be applied while viewing a subset of changes.Only one suggestion per line can be applied in a batch.Add this suggestion to a batch that can be applied as a single commit.Applying suggestions on deleted lines is not supported.You must change the existing code in this line in order to create a valid suggestion.Outdated suggestions cannot be applied.This suggestion has been applied or marked resolved.Suggestions cannot be applied from pending reviews.Suggestions cannot be applied on multi-line comments.Suggestions cannot be applied while the pull request is queued to merge.Suggestion cannot be applied right now. Please check back later.
+You can’t perform that action at this time.

@@ -1,0 +1,185 @@
+--- v001.md
++++ v002.md
+@@ -19,17 +19,14 @@
+ 
+ ### Data Structures
+-*   **Point Cloud:** A collection of points. Each point stores:
+-    *   Position: 3D vector $(x, y, z)$ [S1].
+-    *   Feature Vector: Encodes color $c_m$ and other properties [S1].
+-    *   Raw Opacity: A scalar $\alpha_{raw} \in (-\infty, \infty)$ [S1].
++*   **Point Cloud:** A collection of points where each point stores a 3D position $(x, y, z)$, a feature vector encoding color $c_m$, and a raw opacity scalar $\alpha_{raw} \in (-\infty, \infty)$ [S1].
+ *   **Per-Pixel Linked Lists:** For each pixel $(u, v)$, a list of indices pointing to points projected onto that pixel [S1].
+ *   **Sorted Lists:** The per-pixel lists sorted by depth (distance from camera) [S1].
+ 
+ ### Parameters
+-*   **Sigmoid Scaling:** The opacity transformation uses a scaling factor. The formula provided is $\alpha = \text{sigmoid}((10 + f \cdot t) \cdot \alpha_{raw})$ [S1].
+-    *   $f$: A factor (value not explicitly defined in the provided text, likely a learnable or fixed scaling constant) [S1].
+-    *   $t$: A time or epoch-dependent factor (value not explicitly defined in the provided text) [S1].
+-    *   Note: The sources state alpha is stored in $(-\infty, \infty)$ and converted to $[0, 1]$ using sigmoid for differentiability [S1]. The specific coefficients $(10 + f \cdot t)$ are cited from the source [S1].
+-*   **Transparency Threshold:** Points with high transparency (low opacity) are considered outliers and removed. The exact threshold value is not specified in the sources [S1].
++*   **Sigmoid Scaling:** The opacity transformation uses a scaling factor derived from the source formula $\alpha = \text{sigmoid}((10 + f \cdot t) \cdot \alpha_{raw})$ [S1].
++    *   $f$: A scaling constant [S1].
++    *   $t$: A time or epoch-dependent factor [S1].
++    *   The sources state alpha is stored in $(-\infty, \infty)$ and converted to $[0, 1]$ using sigmoid for differentiability [S1].
++*   **Transparency Threshold:** Points with high transparency (low opacity) are considered outliers and removed [S1]. The exact threshold value is not specified in the sources [S1].
+ 
+ ### Formulas
+@@ -54,8 +51,8 @@
+ 1.  **Initialization:** Initialize the point cloud with positions, opacities (as raw values $\alpha_{raw}$), and feature vectors [S1].
+ 2.  **Projection:** Project all 3D points to 2D screen space to determine which pixels they affect [S1].
+-3.  **Collection:** Render points to per-pixel linked lists. This is implemented efficiently using a custom CUDA per-pixel counting and collection pass [S1].
++3.  **Collection:** Render points to per-pixel linked lists using a custom CUDA per-pixel counting and collection pass [S1].
+ 4.  **Sorting:** Sort the points in each per-pixel linked list by depth (front-to-back) using fast GPU bitonic sorting [S1].
+ 5.  **Opacity Parameterization:** Store opacities as raw values $\alpha_{raw} \in (-\infty, \infty)$ [S1].
+-6.  **Blending:** For each pixel, iterate through the sorted list. Compute $\alpha_m$ from $\alpha_{raw, m}$ using the sigmoid function. Compute $T_m$ and accumulate the color contribution $T_m \cdot \alpha_m \cdot c_m$ [S1].
++6.  **Blending:** For each pixel, iterate through the sorted list, compute $\alpha_m$ from $\alpha_{raw, m}$ using the sigmoid function, compute $T_m$, and accumulate the color contribution $T_m \cdot \alpha_m \cdot c_m$ [S1].
+ 7.  **Loss Computation:** Compute the loss between the rendered image and the reference image [S1].
+ 8.  **Backpropagation:** Backpropagate the loss to optimize point descriptors, positions, and raw opacities $\alpha_{raw}$ [S1].
+@@ -71,74 +68,56 @@
+     return 1.0 / (1.0 + math.exp(-x))
+ 
+-def render_points(points, cameras, resolution):
++def project_point(pos, cam_params):
++    """Standard perspective projection to screen coordinates [G]."""
++    # Simplified projection for demonstration; production uses CUDA kernel [S1]
++    u = int((pos[0] * cam_params['fx'] / pos[2]) + cam_params['cx'])
++    v = int((pos[1] * cam_params['fy'] / pos[2]) + cam_params['cy'])
++    return u, v
++
++def render_points(points, resolution, cam_params):
+     """
+     Renders points using differentiable front-to-back alpha blending.
+     
+     Args:
+-        points: List of point objects with attributes:
+-            - pos: (x, y, z)
+-            - color: (r, g, b)
+-            - alpha_raw: float in (-inf, inf)
+-        cameras: Camera parameters for projection
++        points: List of point dicts with keys: 'pos', 'color', 'alpha_raw'
+         resolution: (width, height)
+-        
++        cam_params: Camera intrinsic parameters
+     Returns:
+-        rendered_image: (height, width, 3) color image
++        image: 2D list of RGB tuples
+     """
+     width, height = resolution
+-    image = np.zeros((height, width, 3))
++    # Initialize per-pixel lists
++    pixel_lists = { (u, v): [] for u in range(width) for v in range(height) }
+     
+-    # Step 1: Project points and collect into per-pixel lists
+-    # This step involves GPU-based counting and collection [S1]
+-    # For pseudocode, we assume a helper that returns a list of lists
+-    # pixel_lists[u][v] = [point_index_1, point_index_2, ...]
+-    pixel_lists = project_and_collect(points, cameras, resolution)
++    # Step 1: Project and collect points into per-pixel lists [S1]
++    for p in points:
++        u, v = project_point(p['pos'], cam_params)
++        if 0 <= u < width and 0 <= v < height:
++            pixel_lists[(u, v)].append(p)
++            
++    # Step 2: Sort each list by depth (front-to-back) [S1]
++    sorted_lists = {}
++    for key, plist in pixel_lists.items():
++        # Sort by Z-coordinate as a proxy for depth [G]
++        sorted_lists[key] = sorted(plist, key=lambda p: p['pos'][2])
++        
++    # Step 3: Blend colors front-to-back [S1]
++    image = [[(0.0, 0.0, 0.0) for _ in range(width)] for _ in range(height)]
++    scale_factor = 10.0 # Represents (10 + f * t) from source [S1]
+     
+-    # Step 2: Sort each list by depth (front-to-back) [S1]
+-    # This step involves GPU-based bitonic sorting [S1]
+-    sorted_lists = []
+-    for u in range(width):
+-        sorted_lists.append([])
+-        for v in range(height):
+-            plist = pixel_lists[u][v]
+-            # Sort points by depth (distance from camera)
+-            sorted_points = sorted(plist, key=lambda p: depth(p.pos, cameras))
+-            sorted_lists[u][v] = sorted_points
+-            
+-    # Step 3: Blend colors front-to-back [S1]
+     for u in range(width):
+         for v in range(height):
+-            sorted_pts = sorted_lists[u][v]
+-            if not sorted_pts:
+-                continue
+-                
+-            # Transmission variable T_m
+-            # T_m = product_{i=1}^{m-1} (1 - alpha_i)
+-            # We accumulate the color contribution
+-            
+             current_transmission = 1.0
+-            pixel_color = np.array([0.0, 0.0, 0.0])
+-            
+-            for point in sorted_pts:
++            pixel_color = [0.0, 0.0, 0.0]
++            for p in sorted_lists[(u, v)]:
+                 # Convert raw opacity to [0, 1] using sigmoid [S1]
+-                # Formula: alpha = sigmoid((10 + f * t) * alpha_raw)
+-                # Note: f and t are parameters from the source [S1]
+-                # For implementation, these must be defined or learned.
+-                # Here we assume a generic scaling factor 'scale' for clarity,
+-                # but the source specifies (10 + f * t) [S1].
+-                scale = 10.0 # Placeholder for (10 + f * t) if f,t not provided
+-                alpha = sigmoid(scale * point.alpha_raw)
+-                
+-                color = point.color
+-                
++                alpha = sigmoid(scale_factor * p['alpha_raw'])
++                color = p['color']
+                 # Contribution: T_m * alpha_m * c_m
+-                contribution = current_transmission * alpha * color
+-                pixel_color += contribution
+-                
+-                # Update transmission for next point
++                contribution = [current_transmission * alpha * c for c in color]
++                pixel_color = [pixel_color[i] + contribution[i] for i in range(3)]
++                # Update transmission for next point: T_{m+1} = T_m * (1 - alpha_m)
+                 current_transmission *= (1.0 - alpha)
+-                
+-            image[v, u] = pixel_color
+-            
++            image[v][u] = tuple(pixel_color)
+     return image
+ 
+@@ -149,27 +128,22 @@
+     """
+     surviving_points = []
+-    for point in points:
+-        # Compute current opacity for pruning decision
+-        # Using the same formula as rendering
+-        scale = 10.0 # Placeholder for (10 + f * t)
+-        alpha = sigmoid(scale * point.alpha_raw)
+-        
++    scale_factor = 10.0 # Represents (10 + f * t) from source [S1]
++    for p in points:
++        alpha = sigmoid(scale_factor * p['alpha_raw'])
+         if alpha > threshold:
+-            surviving_points.append(point)
+-            
++            surviving_points.append(p)
+     return surviving_points
+ ```
+ 
+ ### Edge Cases and Pitfalls
+-*   **Precision:** The use of sigmoid on raw opacities ensures gradients flow through the $[0, 1]$ range, but extreme raw values may saturate, leading to vanishing gradients [S1].
+-*   **Sorting Stability:** The correctness of the blending depends on the correct depth sorting. Incorrect sorting leads to incorrect occlusion handling [S1].
+-*   **Outlier Removal:** The threshold for pruning is not specified in the sources. Choosing an inappropriate threshold may remove valid geometry or fail to remove outliers [S1].
+-*   **Multi-resolution:** The rendering is performed four times with progressively lower resolutions, fed into a U-Net. This requires careful handling of resolution scaling and memory [S1].
++*   **Precision:** Alpha is stored in $(-\infty, \infty)$ and converted to $[0, 1]$ using the sigmoid function for differentiability [S1].
++*   **Multi-resolution:** The rendering is performed four times with progressively lower resolutions, and these are fed into a multi-scalar U-Net with gated convolutions followed by a neural camera sensor module [S1].
++*   **Backward Pass Storage:** For the backwards pass, only the sorted per-pixel lists have to be stored [S1].
+ 
+ ## Operating characteristics
+ 
+ ### Time and Memory Complexity
+-*   **Time:** The rendering involves per-pixel sorting, which is typically $O(N \log N)$ per pixel in the worst case, but optimized with GPU bitonic sorting [S1]. The multi-resolution rendering adds overhead [S1].
+-*   **Memory:** Requires storing per-pixel linked lists and sorted lists. The backward pass requires storing the sorted per-pixel lists [S1].
++*   **Time:** The rendering involves per-pixel sorting, which is optimized with GPU bitonic sorting [S1]. The multi-resolution rendering adds overhead [S1].
++*   **Memory:** Requires storing per-pixel linked lists and sorted lists, with the backward pass requiring storage of the sorted per-pixel lists [S1].
+ 
+ ### Measured Performance

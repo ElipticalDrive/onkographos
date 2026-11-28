@@ -1,0 +1,153 @@
+--- v009.md
++++ v010.md
+@@ -8,10 +8,10 @@
+ ## How it works
+ **Inputs and Outputs:**
+-*   **Input:** A 3D scalar volume dataset $V$ with dimensions $X \times Y \times Z$. A viewing direction vector $\vec{v}$ derived from the camera's model-view matrix. A transfer function $TF$ mapping scalar values to RGBA color and opacity.
+-*   **Output:** A 2D image buffer (framebuffer) containing the composited volume.
++*   **Input:** A 3D scalar volume dataset $V$ with dimensions $X \times Y \times Z$. A viewing direction vector $\vec{v}$ derived from the camera's model-view matrix. A transfer function $TF$ mapping scalar values to RGBA color and opacity [S13, S14, unofficial].
++*   **Output:** A 2D image buffer (framebuffer) containing the composited volume [S14, unofficial].
+ 
+ **Data Structures:**
+-The method requires storing the volume data in three sets of 2D textures, one set for each axis-aligned slicing direction.
+-*   **Texture Stacks:** Three arrays of 2D texture IDs: $\text{texX}$, $\text{texY}$, $\text{texZ}$.
++The method requires storing the volume data in three sets of 2D textures, one set for each axis-aligned slicing direction [S20].
++*   **Texture Stacks:** Three arrays of 2D texture IDs: $\text{texX}$, $\text{texY}$, $\text{texZ}$ [S13, unofficial].
+     *   $\text{texX}[i]$ contains the slice at $x=i$, stored as a 2D texture of size $Y \times Z$ (or padded to power-of-two, e.g., $256 \times 256$) [S13, S24, unofficial].
+     *   $\text{texY}[j]$ contains the slice at $y=j$, stored as $X \times Z$ [S13, unofficial].
+@@ -21,5 +21,5 @@
+ 
+ **Parameters:**
+-*   **Number of Slices ($N$):** Typically matches the dimension of the volume along the slicing axis. Some implementations use a formula such as $N = 2 \cdot (10 + \text{max\_planes} \cdot q^3)$ to determine slice count based on quality factor $q$ and maximum planes [S8, unofficial].
++*   **Number of Slices ($N$):** Typically matches the dimension of the volume along the slicing axis [S18]. Some implementations use a formula such as $N = 2 \cdot (10 + \text{max\_planes} \cdot q^3)$ to determine slice count based on quality factor $q$ and maximum planes [S8, unofficial].
+ *   **Slicing Axis Selection:** The axis is chosen such that its normal is within $\pm 45^\circ$ of the viewing direction [S12, S17, S18, S19, S20].
+ *   **Opacity Correction:** An optional parameter to scale slice alpha based on the Euclidean distance between slices along the viewing ray to prevent brightness changes [S4, S8, unofficial]. Default is often OFF [S8, unofficial].
+@@ -61,7 +61,9 @@
+ ```python
+ def render_2d_texture_volume(volume_data, model_view_matrix, transfer_function):
+-    # 1. Preprocessing: Generate texture stacks (done once or on data change)
+     # volume_data: 3D array (X, Y, Z)
+-    # texX, texY, texZ: lists of 2D texture IDs
++    # transfer_function: callable mapping scalar array to RGBA array
++    # Returns: list of texture stacks [texX, texY, texZ] and rendering parameters
++    
++    # 1. Preprocessing: Generate texture stacks
+     texX = []
+     texY = []
+@@ -71,22 +73,29 @@
+         slice_data = volume_data[x, :, :]
+         rgba_slice = transfer_function(slice_data)
+-        texX.append(create_2d_texture(rgba_slice))
++        texX.append(rgba_slice) # Simulating texture upload
+         
+     for y in range(volume_data.shape[1]):
+         slice_data = volume_data[:, y, :]
+         rgba_slice = transfer_function(slice_data)
+-        texY.append(create_2d_texture(rgba_slice))
++        texY.append(rgba_slice)
+         
+     for z in range(volume_data.shape[2]):
+         slice_data = volume_data[:, :, z]
+         rgba_slice = transfer_function(slice_data)
+-        texZ.append(create_2d_texture(rgba_slice))
++        texZ.append(rgba_slice)
+ 
+     # 2. View Direction Analysis
+-    rotation_matrix = extract_rotation(model_view_matrix)
+-    view_vector = mat_vec_multiply(rotation_matrix, [0.0, 0.0, -1.0])
++    # Extract rotation from 4x4 model-view matrix (upper-left 3x3)
++    rotation_matrix = model_view_matrix[:3, :3]
++    view_vector_init = [0.0, 0.0, -1.0]
++    # Transform viewing direction
++    view_vector = [
++        rotation_matrix[0][0]*view_vector_init[0] + rotation_matrix[0][1]*view_vector_init[1] + rotation_matrix[0][2]*view_vector_init[2],
++        rotation_matrix[1][0]*view_vector_init[0] + rotation_matrix[1][1]*view_vector_init[1] + rotation_matrix[1][2]*view_vector_init[2],
++        rotation_matrix[2][0]*view_vector_init[0] + rotation_matrix[2][1]*view_vector_init[1] + rotation_matrix[2][2]*view_vector_init[2]
++    ]
+     
+     abs_view = [abs(v) for v in view_vector]
+-    max_idx = argmax(abs_view)
++    max_idx = abs_view.index(max(abs_view))
+     max_val = abs_view[max_idx]
+     
+@@ -95,7 +104,7 @@
+         stack = texX
+         if view_vector[0] > 0:
+-            order = range(len(texX)) # Positive X
++            order = range(len(texX))
+         else:
+-            order = range(len(texX) - 1, -1, -1) # Negative X
++            order = range(len(texX) - 1, -1, -1)
+     elif max_idx == 1: # Y axis
+         stack = texY
+@@ -112,26 +121,32 @@
+ 
+     # 3. Rendering Setup
+-    enable_blending()
+-    set_blend_func(GL_SRC_ALPHA, GL_ONE_MINUS_SRC_ALPHA)
+-    disable_depth_test() # Or use depth test with depth write off
++    # Enable blending, set blend function to SRC_ALPHA, ONE_MINUS_SRC_ALPHA
++    # Disable depth test
++    # Initialize framebuffer to zeros
+     
+     # 4. Render Slices Back-to-Front
+     for i in order:
+-        texture_id = stack[i]
+-        bind_texture(texture_id)
+-        
+-        # Compute slice position and vertices
+-        # dist is the distance along the viewing ray for this slice
+-        dist = compute_slice_distance(i, stack, view_vector)
+-        
+-        # Generate quad vertices for the slice plane
+-        # Vertices are in world space, transformed by model-view
+-        vertices = generate_slice_quad(i, dist, volume_bounds)
+-        
+-        # Set texture coordinates
+-        # Texcoords map the 2D texture to the quad
+-        texcoords = compute_texcoords(i, stack, volume_bounds)
+-        
+-        draw_quad(vertices, texcoords)
++        rgba_slice = stack[i]
++        # Compute slice position along viewing ray
++        dist = i * (1.0 / len(stack)) # Normalized step size
++        
++        # Generate quad vertices in world space
++        # Vertices are transformed by model-view matrix automatically in pipeline
++        vertices = [(-1.0, -1.0, dist), (1.0, -1.0, dist), (1.0, 1.0, dist), (-1.0, 1.0, dist)]
++        
++        # Set texture coordinates (0,0) to (1,1)
++        texcoords = [(0.0, 0.0), (1.0, 0.0), (1.0, 1.0), (0.0, 1.0)]
++        
++        # Rasterize quad with bilinear interpolation
++        # For each fragment, sample RGBA from slice
++        # Blend into framebuffer: C_dest = C_src * A_src + C_dest * (1 - A_src)
++        blend_into_framebuffer(rgba_slice, vertices, texcoords)
++
++def blend_into_framebuffer(rgba_slice, vertices, texcoords):
++    # Standard hardware rasterization step:
++    # 1. Interpolate vertices and texcoords across the quad.
++    # 2. Sample rgba_slice at interpolated texcoords using bilinear interpolation.
++    # 3. Apply blending equation: C_dest = C_src * A_src + C_dest * (1 - A_src)
++    pass
+ ```
+ 
+@@ -148,14 +163,14 @@
+ 
+ ### [Novel Sampling Scheme for Slice Based Volume Rendering](953-novel-sampling-scheme-for-slice-based-volume-rendering.md)
+-A variant that renders multiple clipped stacks simultaneously to eliminate stack-switching and jagged boundary artifacts. It approximates uniform ray-casting sampling more closely than spherical shell approaches while avoiding their geometry overhead.
++Renders multiple clipped stacks simultaneously to eliminate stack-switching and jagged boundary artifacts. It approximates uniform ray-casting sampling more closely than spherical shell approaches while avoiding their geometry overhead. Choose when rotation artifacts are unacceptable.
+ 
+ ### [Interpolation of Arbitrary Slices (Multi-Texture Blending)](2089-interpolation-of-arbitrary-slices-multi-texture-blending.md)
+-Renders arbitrary slicing planes by interpolating between two adjacent object-aligned texture slices using multi-texturing hardware. It reduces polygon count by half compared to single-texture approaches but is constrained by memory bandwidth.
++Renders arbitrary slicing planes by interpolating between two adjacent object-aligned texture slices using multi-texturing hardware. It reduces polygon count by half compared to single-texture approaches but is constrained by memory bandwidth. Choose when non-axis-aligned cross-sections are required.
+ 
+ ### [Multi-Texture Interpolation](2200-multi-texture-interpolation.md)
+-Enables real trilinear interpolation by computing intermediate slices on the fly using hardware combiners. It corrects bilinear artifacts by weighted blending of adjacent fixed slices, providing a constant sampling rate and supersampling capabilities.
++Enables real trilinear interpolation by computing intermediate slices on the fly using hardware combiners. It corrects bilinear artifacts by weighted blending of adjacent fixed slices, providing a constant sampling rate and supersampling capabilities. Choose when higher visual fidelity is needed without 3D texture support.
+ 
+ ### [Slice-Based Volume Rendering with HSV Transfer Function](4329-slice-based-volume-rendering-with-hsv-transfer-function.md)
+-Uses a GPU-accelerated object-order technique with an HSV transfer function. It manages a texture array (sprite sheet) to simulate 3D trilinear filtering and computes color in HSV space rather than using a pre-baked 1D RGB texture lookup.
++Uses a GPU-accelerated object-order technique with an HSV transfer function. It manages a texture array (sprite sheet) to simulate 3D trilinear filtering and computes color in HSV space rather than using a pre-baked 1D RGB texture lookup. Choose when perceptual color mapping is prioritized over standard RGB transfer functions.
+ 
+ ### SGI Octane2 Volume Rendering Pipeline

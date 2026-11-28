@@ -1,0 +1,186 @@
+# Volumetric Display Interaction System
+
+Also called: Direct Touch and Gestural Input System, SurfaceBrowser
+
+## Overview
+A system for interacting with a 3D volumetric display using direct touch and gestural input, leveraging the ability of users to walk around the display and interact from all directions [S1]. It differs from standard 3D cursors by simulating a touch-sensitive enclosure surface via motion tracking and providing specific techniques for file management (SurfaceBrowser) and 3D model transformation that respect the display's hemispheric geometry rather than imposing arbitrary global axes [S1].
+
+## How it works
+**Inputs and Outputs:**
+*   **Input:** 3D positions of passive reflective markers on the user's fingers, tracked by a motion capture system [S1].
+*   **Output:** Interaction commands (selection, rotation, translation) and visual feedback (cursors, captions, animated transitions) rendered on the volumetric display [S1].
+
+**Data Structures:**
+*   **Marker Data:** Streamed at 120Hz. Contains 3D coordinates $(x, y, z)$ for markers on the index fingers of both hands and the thumb of the dominant hand [S1].
+*   **Finger State:** Discrete state for each tracked finger tip:
+    *   `DOWN`: Touching the display enclosure surface.
+    *   `HOVERING`: Within 6 cm of the surface.
+    *   `UP`: More than 6 cm from the surface [S1].
+*   **Surface Menu:** Two menus (one per hand) mapped to physical locations on the enclosure. Buttons are simulated via pre-printed acetate overlays due to a 3-10 cm gap between the display volume and enclosure [S1].
+*   **SurfaceBrowser:** A file/object management interface consisting of four pages (2D arrays) projected around the inner surface of the display. Cells contain objects (models/scenes) and rotate slowly [S1].
+
+**Numbered Steps:**
+
+1.  **Track Markers:** Receive 3D coordinates of markers on the index fingers of both hands and the dominant thumb from the tracking system [S1].
+2.  **Determine Finger States:** For each index finger tip, calculate the distance $d$ to the display enclosure surface.
+    *   If $d = 0$ (touching), state is `DOWN`.
+    *   If $0 < d \le 6$ cm, state is `HOVERING`.
+    *   If $d > 6$ cm, state is `UP` [S1].
+3.  **Detect Postures and Gestures:** Analyze relative distances between markers on the fingers to identify static postures (e.g., index finger pointing, flat, pinch, curl) and dynamic gestures based on movement characteristics over time [S1].
+4.  **Handle Surface Menu Interaction:**
+    *   **Non-dominant Hand:** Used for kinesthetically held transient modal commands (like a 'shift' key). The finger must remain `DOWN` on a button to maintain the mode [S1].
+    *   **Dominant Hand:** Used for frequently used commands executed with a quick tap (`DOWN` then `UP`) [S1].
+    *   **Hover Feedback:** If either index finger is `HOVERING` over a surface menu button, display a caption associated with its function. The caption is dynamically oriented to always face the user, estimated by finger position and orientation [S1].
+5.  **SurfaceBrowser Navigation:**
+    *   **Rotate Pages:** Scrub the non-dominant hand's index finger along the display surface to rotate the SurfaceBrowser pages [S1].
+    *   **Select Object:** Display a flat arrow cursor below the dominant hand's index finger. If the finger is `DOWN` and the cursor is above an object, select it. If the finger lifts (`UP`), deselect it [S1].
+    *   **Move/Copy/Delete:** While an object is selected:
+        *   Drag within a page to move it to a new cell.
+        *   Drag to another page to copy it.
+        *   Drag into a trash can area at the top of the display to delete it [S1].
+    *   **Open Object:** Quick tap on an object opens it. The object animates smoothly from its 2D form on the surface to its 3D shape at the center of the display [S1].
+6.  **Model Transformation (Rotation):**
+    *   **Initiate:** Touch the display with the dominant hand's index finger (`DOWN`) [S1].
+    *   **2D Rotation (2 DoF):** Drag the finger across the surface. Map this 2D surface movement to a 2D rotation of the model, as if a stick connects the finger to the model's center [S1].
+    *   **3D Rotation (3rd DoF):** While the finger remains `DOWN`, twist the hand. Map this twist to a rotation about the vector defined from the finger to the model center [S1].
+    *   **Terminate:** Rotation stops when the finger is removed from the surface (`UP`) [S1].
+
+**Pseudocode:**
+
+> **Unverified code.** The code below did not pass a test run against a reference implementation, or no test fits it, so it may contain errors.
+
+```python
+# Constants
+HOVER_THRESHOLD_CM = 6.0
+TRACKING_RATE_HZ = 120
+
+class FingerState:
+    DOWN = 0
+    HOVERING = 1
+    UP = 2
+
+class InteractionSystem:
+    def __init__(self, display_surface, tracking_data):
+        self.display_surface = display_surface # Geometry of the enclosure
+        self.tracking_data = tracking_data     # Stream of marker positions
+        self.non_dominant_mode = None          # Current modal command
+        self.selected_object = None            # Currently selected object in SurfaceBrowser
+        self.model_rotation_matrix = Identity() # Current rotation of the active model
+
+    def update(self):
+        # 1. Get latest marker positions
+        markers = self.tracking_data.get_latest_markers()
+        
+        # 2. Determine states for index fingers
+        left_finger_state = self._get_finger_state(markers['left_index_tip'])
+        right_finger_state = self._get_finger_state(markers['right_index_tip'])
+        
+        # 3. Handle Surface Menu (Non-dominant hand for modes)
+        # Assuming right hand is dominant for this example
+        if left_finger_state == FingerState.DOWN:
+            button = self._detect_button_under_finger(left_finger_state, markers['left_index_tip'])
+            if button:
+                self.non_dominant_mode = button.get_mode()
+            else:
+                self.non_dominant_mode = None
+        elif left_finger_state == FingerState.HOVERING:
+            # Show caption facing user
+            caption = self._get_caption_for_hovered_button(markers['left_index_tip'])
+            self._render_caption(caption, markers['user_position'])
+            
+        # 4. Handle Surface Menu (Dominant hand for taps)
+        if right_finger_state == FingerState.DOWN:
+            # Check for tap (transition from UP to DOWN)
+            if self._was_up_last_frame('right_index'):
+                button = self._detect_button_under_finger(right_finger_state, markers['right_index_tip'])
+                if button:
+                    self._execute_command(button, self.non_dominant_mode)
+                    
+        # 5. Handle SurfaceBrowser
+        if self._is_surface_browser_active():
+            self._update_surface_browser(markers, right_finger_state)
+            
+        # 6. Handle Model Rotation
+        if self._is_model_active():
+            if right_finger_state == FingerState.DOWN:
+                self._rotate_model(markers['right_index_tip'], markers['right_index_orientation'])
+            else:
+                self._stop_rotation()
+
+    def _get_finger_state(self, finger_tip_pos):
+        dist = self.display_surface.distance_to_surface(finger_tip_pos)
+        if dist == 0:
+            return FingerState.DOWN
+        elif dist <= HOVER_THRESHOLD_CM:
+            return FingerState.HOVERING
+        else:
+            return FingerState.UP
+
+    def _rotate_model(self, finger_tip, finger_orientation):
+        # 2 DoF: Dragging maps to rotation around axes perpendicular to the stick vector
+        # 3 DoF: Twist maps to rotation around the stick vector
+        # Note: Exact mapping formulas are not provided in sources, 
+        # but the principle is "stick connecting finger to model center" [S1]
+        stick_vector = finger_tip - self.model_center
+        drag_movement = self._get_drag_vector_from_previous_frame(finger_tip)
+        twist_angle = self._get_twist_angle_from_previous_frame(finger_orientation)
+        
+        # Apply rotations
+        self.model_rotation_matrix = self._apply_2d_rotation(self.model_rotation_matrix, drag_movement, stick_vector)
+        self.model_rotation_matrix = self._apply_3d_rotation(self.model_rotation_matrix, twist_angle, stick_vector)
+
+    def _update_surface_browser(self, markers, dominant_state):
+        # Rotate pages if non-dominant finger scrubs
+        if self.non_dominant_state == FingerState.DOWN:
+            scrub_vector = self._get_scrub_vector(markers['non_dominant_index_tip'])
+            self.surface_browser.rotate_pages(scrub_vector)
+            
+        # Select/Deselect
+        if dominant_state == FingerState.DOWN:
+            cursor_pos = markers['dominant_index_tip'] - OFFSET_BELOW_FINGER
+            object_under_cursor = self.surface_browser.get_object_at(cursor_pos)
+            if object_under_cursor:
+                self.selected_object = object_under_cursor
+                self._render_cursor(cursor_pos, shape="arrow")
+        else:
+            self.selected_object = None
+            self._render_cursor(None)
+            
+        # Move/Copy/Delete if selected
+        if self.selected_object and dominant_state == FingerState.DOWN:
+            drag_vector = self._get_drag_vector(markers['dominant_index_tip'])
+            if self._is_in_trash_area(drag_vector):
+                self.surface_browser.delete(self.selected_object)
+            else:
+                self.surface_browser.move_or_copy(self.selected_object, drag_vector)
+```
+
+**Parameters:**
+*   Hover threshold: 6 cm [S1].
+*   Gap between display volume and enclosure: 3-10 cm [S1].
+*   Tracking rate: 120 Hz [S1].
+*   Display refresh rate: 24 Hz [S1].
+
+**Edge Cases and Pitfalls:**
+*   **Coordinate System:** The hemispheric display lacks inherent left-right or front-back axes. Rotation axes are defined by the display's hemispheric surface and the user's hands to avoid imposing an arbitrary global coordinate system [S1].
+*   **Surface Menu Gap:** The physical gap between the display volume and enclosure requires the use of pre-printed acetate overlays for buttons, as direct touch sensitivity is cost-prohibitive [S1].
+
+## Subtopics
+
+### Hemispheric Rotation
+A 3D rotation technique for volumetric displays where rotation is initiated by touching the display with the dominant hand's index finger. Dragging the finger across the surface rotates the model as if a stick connects the finger to the model's center, providing two degrees of freedom. Twisting the hand while the finger remains down rotates the model about the vector from the finger to the model, providing the third degree of freedom. The pitfall is that the display lacks inherent left-right or front-back axes, so rotation axes are defined by the display's hemispheric surface and the user's hands rather than global axes to avoid imposing an arbitrary coordinate system [S1].
+
+## Operating characteristics
+*   **Time Complexity:** Real-time interaction, dependent on tracking system latency (120Hz) and display refresh rate (24Hz) [S1].
+*   **Memory Complexity:** Not given in the sources.
+*   **Measured Performance:** The system was demonstrated on a 10" spherical volumetric display with 116 million voxels, driven by a 2 GHz Pentium4 computer [S1].
+*   **Strengths:** Allows users to walk around the display and interact from all directions; supports natural gestural input; provides context-sensitive feedback (dynamic captions) [S1].
+*   **Limitations:** Requires motion capture hardware (Vicon system with 4 cameras); limited by the 3-10 cm gap between display and enclosure for direct touch simulation; rotation axes are constrained by the hemispheric geometry [S1].
+*   **When to use:** When interacting with 3D volumetric displays where natural, multi-directional interaction is desired and motion capture infrastructure is available [S1].
+*   **When not:** When low-cost, self-contained interaction is required without external tracking systems [S1].
+
+## Background
+Originated in the paper "Multi-finger gestural interaction with 3d volumetric displays" by [S1]. The system was designed to exploit the unique properties of volumetric displays, which allow users to view and interact with 3D scenes from any direction, unlike head-tracked displays with limited fields of view [S1]. It was implemented using an Actuality Systems volumetric display and a Vicon motion tracking system [S1].
+
+## Sources
+[S1] Multi-finger gestural interaction with 3d volumetric displays, https://doi.org/10.1145/1029632.1029644, fetched 2026-10-28

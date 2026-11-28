@@ -1,0 +1,124 @@
+Voxel Cone Tracing | OGRE - Open Source 3D Graphics Engine
+Voxel Cone Tracing
+by Matias Goldberg | Aug 5, 2019 | News
+Over the last couple months we have been working on Voxel Cone Tracing (VCT), a Global Illumination solution.
+Voxel Cone Tracing could be seen as an approximated version of ray marching.
+The scene is voxelized and three voxels are generated, containing albedo, normals and emissive properties. In other words, we build a Minecraft-looking representation of the world:
+Albedo
+Normals
+We run a compute shader ('VCT/Voxelizer') to voxelize the scene. The voxelization process isn't cheap. If we were to try it every frame, it could run anywhere between 0.5-10 fps depending on scene complexity, voxel resolution and GPU performance.
+Voxelization isn't fast enough to do it at real time framerate, but it is fast enough for interactive scene editing in a level, for example.
+Once we have the scene voxelized, we need to inject light into another 3D texture. Our 'VCT/LightInjection' and 'VCT/LightVctBounceInject' compute shader take care of that, for the first and then multiple bounces respectively.
+After it's ran, the lighting 3D texture looks like this:
+Voxels after light injection. Note that sphere is an emissive object and thus can emit lighting!
+This texture will be sent directly to use for Voxel Cone Tracing during rendering. rendering commands, so that scenes can have GI on them
+Voxel Cone Tracing is similar to Ray Marching in the sense that we trace a few rays, and march across them until we hit obstacles. But instead of sending hundreds of rays, we only trace 4 to 6 'rays' (called cones) and use 3D mipmapping to detect obstacles further away
+Tracing a 'cone', as we move away from origin, we increase the cone's apperture and thus we sample from a higher mip. This way we can get away with few cone traces, instead of using hundreds or thousands of rays
+The results are amazingly good, particularly because the technique adapts very well to all sorts of situations:
+Original scene, without indirect lighting
+Final scene with GI, thanks to VCT
+It shall be noted that injecting the light is very fast. If you change your lighting setup (e.g. dynamic time of day).
+Without updating your voxelized scene, you can change light dynamically in real time. While it isn't free, you shouldn't have trouble reaching 60 fps even if you update the lighting every frame.
+But it doesn't stop there. Specular reflections are also captured by VCT:
+Specular Reflections via VCT. Roughness set to minimum to highlight the effect
+It can even make mirror-like reflections, but the blockiness of voxels become more apparent:
+Specular reflections via VCT. Roughness and Fresnel set to extreme values to highlight the effect. Note the sky colour wasn't correctly configured when this picture was taken, thus the reflected sky is black instead of light azure
+Another reason why you may think there's something wrong, is because we don't support multiple bounces on specular reflections. If you look carefully, the house reflection on the wall looks like the original house, but the house itself is also a mirror. If these reflections were accurate, the wall should reflect whatever the house is reflecting.
+Note that specular reflections at low roughness take a much higher toll on performance, because for the lowest of roughness, cone tracing becomes effectively raymarching as the cone apperture is 0.
+We only trace one cone/ray though, but at higher roughess cone tracing can skip many pixels by sampling the higher mip levels.
+VCT is also ready for HDR rendering, by using HDR multipliers to keep the RGBA8 buffers from under/overflowing.
+Most of this scene is lit from GI, as only a bit of lighting enters from the gap on the ceiling. Without it, HDR completely overblooms as the lit portions meet pitch black, and auto exposure spikes out of control depending on what you look at
+Anisotropic vs Isotropic
+VCT supports Anisotropic and Isotropic modes.
+VCT relies heavily on voxel's mips. The problem with mipmaps is that they are an average in all directions. That means higher mips lose a lot of information. If the left wall is blue and the right wall is red, eventually they get averaged into a dark pink!
+Anisotropic fixes this problem by storing directional information. That means we need to store mips for all 6 directions (+X, -X, +Y, -Y, +Z, -Z).
+This increases our memory consumption by roughly 80% and slight to moderate performance hit, but the quality differences are very noticeable.
+This is a Sibenik cathedral comparison (unfortunately I was running out of battery when I took these screenshots so FPS counter is all over the place due to throttling):
+Sibenik without GI
+Sibenik with Isotropic VCT
+Sibenik with Anisotropic VCT
+PCC problems
+Parallax Corrected Cubemaps give gorgeous reflections... when the reflected surfaces match the defined rectangle, that is.
+The following diagram illustrates the problem:
+When looking up, the table should be reflected on the ceiling. However PCC calculates the reflection to be at the red point (wrong) instead of being at the green cross (correct), because PCC can only deal with rectangular shapes.
+Likewise happens with reflections outside of a room:
+In this case, the reflection should be outside the rectangle defined by PCC, but PCC incorrectly calculates the reflection at the border, e.g. where the window is. This can cause incorrect parallax when looking at reflections.
+Sometimes these error are not noticeable. Sometimes they're visibly noticeable. It depends on what objects were included in the PCC probe, and the shape of the scene. The more rectangular and indoor it looks, the less likely the reflection errors are going to be noticed.
+Enter PCC / VCT hybrid
+VCT can also perform reflections, as already shown earlier. But VCT reflections have the problem that they look blocky / Minecraft-like. And it gets worse for large scenes and/or low resolution.
+But VCT is much more than that! VCT does not only know what colour the reflection should be. It also knows where the reflection happens.
+This means we can know whether the PCC rectangular approximation is correct!
+If the PCC error is within threshold, we use PCC reflections. If the error is large enough, we fallback to VCT.
+The hybrid simply boils to:
+```
+    w = distance( pccBoxIntersection.xyz, vctReflectionPos.xyz )
+    finalReflection = lerp( pccReflectionColour, vctReflectionColour, w );
+```
+Please note we're doing this to increase quality. It is not a performance optimization.
+This is the original PCC reflections from the LocalCubemapsManual sample:
+PCC reflections
+The room is mostly rectangular. Except tor the red wall which is layed out diagonally. Note the red wall's reflection on the blue wall.
+In contrast, these are the reflections produced by VCT:
+VCT reflections
+VCT is producing visible aliasing (staircase effect) due to the voxelization, but the red wall is correctly reflected onto the blue one.
+When we run the hybrid code and merge both, the red wall's reflection is taken from VCT, while the rest of the reflections are from PCC
+PCC / VCT hybrid
+Looking from another angle, we can see the same effect with the red wall:
+PCC reflections
+VCT reflections
+PCC / VCT hybrid
+We're still working on improving this hybrid. These pictures don't really do it justice because it does a really good job on complex scenes at fixing extremely bad looking reflections (reflections which are blatantly wrong to the naked eye).
+Right now we are fixing two problems:
+VCT precision errors due to interpolation
+Right now there are gross errors in the VCT position reconstruction. It appears to be a floating point error at first but it is too large to be just that. We strongly suspect it has to do that raymarching relies on sampling a 3D texture, and GPU only offers 8-bit of precision for interpolation. We still need to test that theory.
+Because of this issue, we only use the Hybrid for roughness <= 0.02; as the errors are quite visible, since Specular reflections are high frequency and thus very noticeable
+Storing distance to center in alpha channel
+We know the VCT position, we also know the projected PCC position in the defined rectangle. But we don't know if the object that was rendered to the PCC probe isn't actually close to the probe's bounds (such as a chair inside the probe, or a tree outside the probe)
+By storing the distance to the center of the probe in the alpha channel, we could reject additional PCC reflections that are innacurate
+The hybrid isn't perfect, but we have high hopes that it can make good quality compromises to achieve very good realtime reflections.
+Once we've tested our interpolation precision theory and store distance to probe's center in alpha channel, we may have more updates
+DDGI
+Next we will be implementing Dynamic Diffuse Global Illumination (DDGI).
+You can think of DDGI as a 3D grid array of two very low resolution cubemaps (e.g. as low as 4x4).
+The technique itself is not entirely new, the novelty is that it uses Raytracing to build the cubemaps (because rasterization is very inefficient for rendering to low resolution targets) which speeds up the process a lot, enough to be performed in real time, and that they introduced a second cubemap with depth information to fight light and shadow leaks.
+We have been extremely impressed by the presentation.
+The technique only handles diffuse GI, and strictly speaking it's very likely it is of slightly lower quality than diffuse VCT. However DDGI has O(1) complexity during rendering, which makes it ideal from a performance standpoint. DDGI also consumes far less memory (but has no specular reflections).
+We plan on rolling DDGI in two stages:
+DDGI built from VCT. Instead of using raytracing to build the DDGI probes, we use cone tracing.
+DDGI built from raytracing, whether it's using open solutions such as RadeonRays, or hw accelerated RTX
+This plan allows us to work on DDGI much sooner (i.e. without having to prepare for raytracing) and also compare the two techniques.
+Later, once raytracing is in place, we can focus on moving DDGI generation to raytracing.
+Ray Tracing
+You probably have heard RTX (aka NVIDIA's raytracing, 'DXR' in D3D12 lingo) to have been doing a lot of fuzz lately.
+It's not exactly clear whether the current generation of HW accelerated raytracing is the way to go (due to the the acceleration tree structures used by vendors is currently a black box, which could result in wild performance variations in the future depending on the scenes), but it is undeniable the industry will be moving towards raytracing hybrids in the future.
+At the very least, raytracing succeeds in performing specular reflections where current gen of techniques fail. While we can use VCT for rough specular reflections.
+This is why we will be moving towards raytracing. Starting with the integration of RadeonRays and Metal Raytracing in the near future, and later we'll integrate RTX/DXR as the Vulkan and/or D3D12 RenderSystems are implemented.
+Our current plan is to implement the following algorithm:
+When raytracing is not available:
+For every pixel on screen:
+```
+1. If roughness is above threshold, use VCT for spec reflections
+2. If roughness is below threshold, raymarch through the VCT until we find a
+   cell with alpha != 0 and test against the triangles in that cell If hit, stop
+    1. If miss, continue with the raymarch and repeat
+    2. Unless roughness is 0, as we raymarch the cone aperture will keep getting higher.
+    3. Past certain threshold, stop raytracing and only use the VCT result. 
+```
+When raytracing is available:
+For every pixel on screen:
+```
+1. If roughness is above threshold, use VCT for spec reflections
+2. If roughness is below threshold but not 0:
+    1. Raymarch through the VCT until we find a cell with alpha != 0
+       and test against the triangles in that cell.
+    2. Separately run RTX query.
+    3. Blend the result based on cone aperture (we may even discard
+       the RTX result if the aperture got too big)
+3. If roughness is 0, only run RTX
+```
+Futhermore, we are interested in futher expanding VCT solutions rather than just being locked up to DXR. Building an SDF (Signed Distance Field) could accelerate traversal of the VCT probe.
+Other interesting solutions is to store geometry information in the voxels, which would allows us to perform raytracing in current-gen HW.
+CryEngine claims to have done something of the sorts but they were not specific on the details.
+A VCT implementation that internally stores indices to sets of geometry would allow us to reduce the VCT resolution (thus reducing memory footprint), build SDF acceleration structures. There could also be the possibility of storing indices to per-mesh voxels.
+It is unclear which approaches will be a definitive win because this is mostly uncharted territory, and we don't have the resources to pursue all possibilities. We'll try to focus on what appears to be most promising.
+Further dicussion in forum post.

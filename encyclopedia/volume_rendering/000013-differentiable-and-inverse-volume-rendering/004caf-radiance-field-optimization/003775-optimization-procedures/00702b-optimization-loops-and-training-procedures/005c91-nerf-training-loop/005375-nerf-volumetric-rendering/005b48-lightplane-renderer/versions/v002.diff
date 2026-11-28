@@ -1,0 +1,123 @@
+--- v001.md
++++ v002.md
+@@ -8,24 +8,23 @@
+ ## How it works
+ **Inputs and Outputs:**
+-*   **Inputs:** A set of $M$ rays $\{r_i\}_{i=1}^M$, a hybrid 3D representation $f = g \circ h$, and $R$ sampling points per ray.
+-*   **Outputs:** Rendered pixel features $v_i$ (e.g., colors, depths) for each ray.
++*   **Inputs:** A set of $M$ rays $\{r_i\}_{i=1}^M$, a hybrid 3D representation $f = g \circ h$, and $R$ sampling points per ray [S1].
++*   **Outputs:** Rendered pixel features $v_i$ (e.g., colors, depths) for each ray [S1].
+ 
+ **Data Structures:**
+ The method relies on a hybrid representation $f$ decomposed into two components [S1]:
+-1.  **Hashing Scheme ($h$):** A function $h: \mathbb{R}^3 \to \mathbb{R}^K$ that samples features from a 3D hash structure $\theta$. The structure $\theta$ can be implemented as voxel grids, triplanes, HexPlanes, or actual hash tables [S1]. In practice, for triplane-based structures, $h(x, y, z)$ is obtained by bilinear interpolation of each plane at $(x, y)$, $(y, z)$, and $(z, x)$, followed by summing the resulting three feature vectors [S1].
++1.  **Hashing Scheme ($h$):** A function $h: \mathbb{R}^3 \to \mathbb{R}^K$ that samples features from a 3D hash structure $\theta$ [S1]. The structure $\theta$ can be implemented as voxel grids, triplanes, HexPlanes, or actual hash tables [S1]. In practice, for triplane-based structures, $h(x, y, z)$ is obtained by bilinear interpolation of each plane at $(x, y)$, $(y, z)$, and $(z, x)$, followed by summing the resulting three feature vectors [S1].
+ 2.  **Tiny MLPs ($g$):** Two small multi-layer perceptrons mapping the $K$-dimensional hash features to output dimensions [S1]:
+-    *   $g_\sigma: \mathbb{R}^K \to \mathbb{R}$: Calculates opacity $\sigma$.
++    *   $g_\sigma: \mathbb{R}^K \to \mathbb{R}$: Calculates opacity $\sigma$ [S1].
+     *   $g_v: \mathbb{R}^K \times \mathbb{R}^3 \to \mathbb{R}^C$: Calculates the feature $f_v(x_{ij})$ (e.g., color) given the sampled feature and view direction [S1].
+ 
+ **Parameters:**
+-*   $M$: Number of rays (image resolution).
++*   $M$: Number of rays (image resolution) [S1].
+ *   $R$: Number of samples per ray. Typical value: 128 [S1].
+-*   $K$: Feature dimension from the hash structure.
+-*   $L$: Number of layers in the MLPs.
++*   $K$: Feature dimension from the hash structure [S1].
++*   $L$: Number of layers in the MLPs [S1].
+ *   $\Delta$: Distance between two consecutive sampled points on a ray [S1].
+ 
+ **Algorithm Steps:**
+-The renderer processes each ray $r_i$ sequentially. For each ray, it iterates through $R$ sampled 3D points $x_{ij}$ (where $j=1 \dots R$) [S1].
+-
++The renderer processes each ray $r_i$ sequentially [S1]. For each ray, it iterates through $R$ sampled 3D points $x_{ij}$ (where $j=1 \dots R$) [S1].
+ 1.  **Sample Feature:** For point $x_{ij}$, compute the hash feature vector $z_{ij} = h(x_{ij})$ [S1].
+ 2.  **Compute Opacity:** Feed $z_{ij}$ to $g_\sigma$ to obtain opacity $\sigma_{ij} = g_\sigma(z_{ij})$ [S1].
+@@ -34,5 +33,5 @@
+     $$ T_{ij} = T_{i,j-1} \cdot \exp(-\Delta \cdot \sigma_{ij}) $$
+     where $T_{i,0} = 1$ [S1].
+-5.  **Accumulate Feature:** Update the rendered feature $v_i$ using the visibility of the current point. The visibility is defined as the difference in transmittance between the previous and current point: $(T_{i,j-1} - T_{ij})$ [S1]. The accumulated feature is:
++5.  **Accumulate Feature:** Update the rendered feature $v_i$ using the visibility of the current point [S1]. The visibility is defined as the difference in transmittance between the previous and current point: $(T_{i,j-1} - T_{ij})$ [S1]. The accumulated feature is:
+     $$ v_i = \sum_{j=1}^{R} (T_{i,j-1} - T_{ij}) f_v(x_{ij}) $$
+     This accumulation is performed on-the-fly within the kernel, avoiding storage of intermediate $T$ or $f_v$ values for all points [S1].
+@@ -43,10 +42,12 @@
+ **Pseudocode:**
+ ```python
++import math
++
+ def lightplane_renderer(rays, hash_structure, g_sigma, g_v, R, delta):
+     """
+-    rays: List of M rays, each containing R+1 3D points x_ij.
++    rays: List of M rays. Each ray is a tuple (origin, direction, points) where points has R+1 3D coordinates.
+     hash_structure: The 3D hash structure theta.
+-    g_sigma: MLP for opacity.
+-    g_v: MLP for feature/color.
++    g_sigma: MLP function for opacity.
++    g_v: MLP function for feature/color.
+     R: Number of samples per ray.
+     delta: Distance between samples.
+@@ -56,18 +57,19 @@
+ 
+     for i in range(M):
+-        ray = rays[i]
+-        # Initialize transmittance for this ray
++        origin, direction, points = rays[i]
+         T_prev = 1.0
+         accumulated_feature = 0.0
+-        
+-        # Get view direction for this ray (constant for all points on the ray)
+-        view_dir = get_view_direction(ray)
++        # Compute view direction (standard vector normalization)
++        view_dir = [d / math.sqrt(sum(d**2 for d in direction)) for d in direction]
+ 
+         for j in range(1, R + 1):
+-            x_ij = ray[j]
++            x, y, z = points[j]
+             
+-            # 1. Sample feature from hash structure
+-            # h(x_ij) performs interpolation on hash structure theta
+-            z_ij = hash_sample(hash_structure, x_ij)
++            # 1. Sample feature from hash structure (triplane interpolation)
++            # h(x,y,z) = sum of bilinear interpolations on XY, YZ, ZX planes
++            z_xy = hash_structure.interpolate_plane(x, y, plane='XY')
++            z_yz = hash_structure.interpolate_plane(y, z, plane='YZ')
++            z_zx = hash_structure.interpolate_plane(z, x, plane='ZX')
++            z_ij = [z_xy[k] + z_yz[k] + z_zx[k] for k in range(len(z_xy))]
+             
+             # 2. Compute opacity
+@@ -78,13 +80,10 @@
+             
+             # 4. Update transmittance
+-            # T_ij = T_{i,j-1} * exp(-delta * sigma_ij)
+-            T_curr = T_prev * exp(-delta * sigma_ij)
++            T_curr = T_prev * math.exp(-delta * sigma_ij)
+             
+             # 5. Accumulate feature
+-            # Visibility = T_{i,j-1} - T_{i,j}
+             visibility = T_prev - T_curr
+             accumulated_feature += visibility * f_v_ij
+             
+-            # Update T_prev for next iteration
+             T_prev = T_curr
+ 
+@@ -92,7 +91,4 @@
+ 
+     return rendered_features
+-
+-# Note: Backpropagation requires a separate pass that re-runs the forward logic
+-# above to compute gradients, as no intermediate tensors are stored.
+ ```
+ 
+@@ -102,9 +98,9 @@
+ 
+ **Time Complexity and Performance:**
+-The method integrates sampling, MLP evaluation, and accumulation into a single GPU kernel per ray [S1]. While recomputing forward activations during backpropagation increases the total number of floating-point operations, the speed remains competitive [S1]. Benchmarks show that for a 256^2 image, the forward pass takes approximately 0.1s and the backward pass 0.1s, compared to 1s and 1s for standard autograd renderers (values inferred from relative scaling in source charts where standard is baseline 100% and Lightplane is significantly faster in memory but comparable in time for small resolutions, though exact absolute times vary by hardware) [S1]. The source provides a chart showing time in seconds for various image sizes, indicating that Lightplane Renderer FW/BW times are roughly 0.1s for 256x256, scaling linearly or sub-linearly with resolution [S1].
++The method integrates sampling, MLP evaluation, and accumulation into a single GPU kernel per ray [S1]. While recomputing forward activations during backpropagation increases the total number of floating-point operations, the speed remains comparable to standard autograd renderers [S1]. The source provides performance charts indicating that forward and backward pass times scale with image resolution, maintaining competitive execution times despite the recomputation overhead [S1].
+ 
+ **Strengths and Limitations:**
+-*   **Strengths:** Drastic reduction in VRAM usage, enabling training on larger resolutions or more complex scenes. Compatible with various hash structures (voxels, triplanes, HexPlanes) [S1].
+-*   **Limitations:** The recomputation strategy increases compute cost for backpropagation compared to storing activations. It is specifically designed for the forward rendering pass; the dual component "Splatter" handles the inverse mapping [S1].
++*   **Strengths:** Drastic reduction in VRAM usage, enabling training on larger resolutions or more complex scenes [S1]. Compatible with various hash structures (voxels, triplanes, HexPlanes) [S1].
++*   **Limitations:** The recomputation strategy increases compute cost for backpropagation compared to storing activations [S1]. It is specifically designed for the forward rendering pass; the dual component "Splatter" handles the inverse mapping [S1].
+ 
+ ## Background

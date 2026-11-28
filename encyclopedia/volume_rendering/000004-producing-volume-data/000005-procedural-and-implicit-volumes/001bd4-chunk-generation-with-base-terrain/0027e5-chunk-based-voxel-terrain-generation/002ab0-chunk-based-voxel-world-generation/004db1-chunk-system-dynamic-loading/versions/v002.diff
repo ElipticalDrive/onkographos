@@ -1,0 +1,189 @@
+--- v001.md
++++ v002.md
+@@ -2,88 +2,118 @@
+ Also called: Dynamic Chunk Loading, On-Demand Chunk Generation
+ ## Overview
+-The Chunk System manages procedural world generation by loading and unloading fixed-size chunks on-demand based on camera position, enabling infinite or very large worlds without pre-generating geometry [S1, unofficial]. It differs from static chunk-based generation by actively managing the lifecycle of chunk data in memory relative to the viewer, ensuring that only relevant geometry is computed and rendered [S1, unofficial].
++The Chunk System (Dynamic Loading) manages procedural world generation by loading and unloading fixed-size chunks on-demand based on camera position, enabling infinite or very large worlds without pre-generating geometry [S1, unofficial]. It distinguishes itself from static LOD approaches by relying on deterministic procedural regeneration rather than pre-cached static meshes, ensuring memory usage remains bounded by the viewer's vicinity [S1, unofficial].
+ ## How it works
+ **Inputs and Outputs:**
+-- Input: Camera position, chunk size, load radius, unload radius, procedural generation seed.
+-- Output: A set of active chunks containing voxel data and generated geometry (meshes) for the rendering pipeline.
++- Input: Camera position, chunk size, load/unload radii, world seed.
++- Output: A set of active chunk meshes rendered in the scene.
+ 
+ **Data Structures:**
+-- **Chunk:** A fixed-size volume of world units.
+-    - Layout: 3D array of voxels.
+-    - Size: $50 \times 50 \times 50$ world units [S1, unofficial].
+-    - Halo: Chunks include a $+1$ block border on all sides ($+2$ in each dimension) to ensure geometry continuity across boundaries [S2, unofficial].
+-- **Chunk Registry:** A map or hash table storing active chunks keyed by their integer grid coordinates $(x, y, z)$ [S2, unofficial].
+-- **Voxel Storage:** Voxels are stored in $(Z, Y, X)$ order to align with NumPy C-order contiguity and optimize flat serialization [S2, unofficial].
++- **Chunk:** A fixed-size volume of world units. Contains voxel density data and generated mesh geometry.
++- **Chunk Registry:** A map or hash table mapping chunk coordinates $(C_x, C_y, C_z)$ to active Chunk objects.
++- **World Seed:** A deterministic integer used to generate procedural content.
+ 
+ **Parameters:**
+-- Chunk Size: $50$ units [S1, unofficial].
+-- Load Radius: $3$ chunks ($150$ units) [S1, unofficial].
+-- Unload Radius: $5$ chunks ($250$ units) [S1, unofficial].
++- Chunk size: $50 \times 50 \times 50$ world units [S1, unofficial].
++- Load radius: 3 chunks (150 units) [S1, unofficial].
++- Unload radius: 5 chunks (250 units) [S1, unofficial].
+ 
+-**Algorithm Steps:**
+-1. **Initialization:** Load voxel registry definitions once at startup to prevent redundant disk access [S2, unofficial].
+-2. **Update Loop:** Each frame, call `chunk_manager.Update(renderer.camera_position)` [S1, unofficial].
+-3. **Coordinate Calculation:** Determine the chunk coordinates $(cx, cy, cz)$ corresponding to the camera's current position.
+-4. **Load Check:** For each chunk within the load radius ($3$ chunks) of the camera's chunk:
+-    - If the chunk is not in the registry, generate it procedurally.
+-    - Generation is deterministic: the same chunk coordinates always produce the same result [S1, unofficial].
+-    - Store the chunk in the registry.
+-5. **Unload Check:** For each chunk in the registry:
+-    - If the distance from the camera to the chunk exceeds the unload radius ($5$ chunks), remove it from the registry and free its memory [S1, unofficial].
+-6. **Geometry Generation:** For each active chunk, generate mesh geometry from the voxel data.
+-    - Use Marching Cubes or similar algorithm.
+-    - Handle boundary faces: If a voxel at the edge of a chunk has a neighbor outside the chunk (or in an unloaded chunk), the face is not generated locally but relies on the neighbor chunk's geometry [S1, unofficial]. The halo border ensures seamless connection [S2, unofficial].
+-    - Example face generation logic (simplified):
+-      ```python
+-      def generate_chunk_mesh(chunk_data, iso_value, voxel_size):
+-          vertices = []
+-          triangles = []
+-          # Iterate over voxels, excluding the halo border for internal processing
+-          # but including it for neighbor checks
+-          for i in range(1, chunk_size - 1):
+-              for j in range(1, chunk_size - 1):
+-                  for k in range(1, chunk_size - 1):
+-                      density = chunk_data[i, j, k]
+-                      if density >= iso_value:
+-                          continue
+-                      
+-                      # Check left face (i-1)
+-                      if i == 1 or chunk_data[i-1, j, k] < iso_value:
+-                          # Create left face vertices and triangles
+-                          # ... (see S1 for specific vertex math)
+-                          pass
+-                      
+-                      # Check bottom face (j-1)
+-                      if j == 1 or chunk_data[i, j-1, k] < iso_value:
+-                          # Create bottom face vertices and triangles
+-                          # ... (see S1 for specific vertex math)
+-                          pass
+-          return vertices, triangles
+-      ```
+-7. **Procedural Bypass Logic:** Pure procedural chunks are regenerated from the seed rather than saved to disk to minimize I/O overhead [S2, unofficial].
++**Steps:**
++1. **Initialization:** Load voxel registry definitions once at startup to prevent redundant disk access [S2, unofficial]. Initialize the chunk registry as empty.
++2. **Update Loop:** Each frame, call `chunk_manager.Update(renderer.camera_position)` to synchronize loaded chunks with the camera [S1, unofficial].
++3. **Coordinate Calculation:** Determine the chunk coordinates $(C_x, C_y, C_z)$ containing the camera. Calculate the bounding box of chunks to load based on the load radius $R_{load}$:
++   $$ C_{min} = \lfloor \frac{P_{camera}}{S_{chunk}} \rfloor - R_{load} $$
++   $$ C_{max} = \lfloor \frac{P_{camera}}{S_{chunk}} \rfloor + R_{load} $$
++   where $S_{chunk}$ is the chunk size [S1, unofficial].
++4. **Load Chunks:** For each chunk coordinate in the bounding box:
++   - If the chunk is not in the registry, generate it procedurally using the world seed and current coordinates.
++   - Add the chunk to the registry.
++5. **Unload Chunks:** For each chunk in the registry:
++   - Calculate the distance from the camera to the chunk center.
++   - If the distance exceeds the unload radius $R_{unload}$, remove the chunk from the registry and free its memory [S1, unofficial].
++6. **Generation (Procedural):** For a new chunk at $(C_x, C_y, C_z)$:
++   - Generate voxel data deterministically. The same chunk coordinates always produce the same islands [S1, unofficial].
++   - Apply the **Halo Trick**: Generate voxels with a $+1$ block border ($+2 \times +2 \times +2$ padding) to ensure geometry continuity across boundaries [S2, unofficial].
++   - Convert voxel data to mesh geometry. For each voxel at $(i, j, k)$, compute the voxel center:
++     $$ V_{center} = (C_x \cdot S_{chunk} + i + 0.5, C_y \cdot S_{chunk} + j + 0.5, C_z \cdot S_{chunk} + k + 0.5) $$
++     Check if the voxel center is close to a triangle plane (e.g., for floating islands) or if density is below an iso-value for terrain. If a face is exposed, add vertices and triangles to the mesh [S1, unofficial].
++   - Store the mesh in the chunk object.
+ 
+-**Edge Cases and Pitfalls:**
+-- **Precision:** Floating-point precision may affect voxel center calculations. Use double precision for distance checks if necessary [S1, unofficial].
+-- **Boundary Continuity:** Ensure the halo border is correctly handled to avoid gaps between chunks [S2, unofficial].
+-- **Memory Leaks:** Ensure chunks are properly removed from the registry when unloaded [S1, unofficial].
+-- **Determinism:** The procedural generation must be deterministic to ensure consistency when chunks are reloaded [S1, unofficial].
++**Pseudocode:**
++```python
++class ChunkManager:
++    def __init__(self, chunk_size=50, load_radius=3, unload_radius=5, seed=0):
++        self.chunk_size = chunk_size
++        self.load_radius = load_radius
++        self.unload_radius = unload_radius
++        self.seed = seed
++        self.active_chunks = {}  # Map: (cx, cy, cz) -> Chunk
+ 
++    def update(self, camera_pos):
++        # Calculate current chunk coordinates
++        cx = floor(camera_pos.x / self.chunk_size)
++        cy = floor(camera_pos.y / self.chunk_size)
++        cz = floor(camera_pos.z / self.chunk_size)
++
++        # Determine load bounds
++        min_cx = cx - self.load_radius
++        max_cx = cx + self.load_radius
++        min_cy = cy - self.load_radius
++        max_cy = cy + self.load_radius
++        min_cz = cz - self.load_radius
++        max_cz = cz + self.load_radius
++
++        # Load new chunks
++        for x in range(min_cx, max_cx + 1):
++            for y in range(min_cy, max_cy + 1):
++                for z in range(min_cz, max_cz + 1):
++                    key = (x, y, z)
++                    if key not in self.active_chunks:
++                        chunk = self.generate_chunk(x, y, z)
++                        self.active_chunks[key] = chunk
++
++        # Unload distant chunks
++        keys_to_remove = []
++        for key, chunk in self.active_chunks.items():
++            chunk_center = self.get_chunk_center(key)
++            dist = distance(camera_pos, chunk_center)
++            if dist > self.unload_radius * self.chunk_size:
++                keys_to_remove.append(key)
++        
++        for key in keys_to_remove:
++            del self.active_chunks[key]
++
++    def generate_chunk(self, cx, cy, cz):
++        # Deterministic generation based on seed and coordinates
++        # Apply Halo Trick: generate with +1 border for continuity
++        # Convert voxels to mesh
++        # Return Chunk object with mesh data
++        pass
++
++    def get_chunk_center(self, key):
++        cx, cy, cz = key
++        return (
++            (cx + 0.5) * self.chunk_size,
++            (cy + 0.5) * self.chunk_size,
++            (cz + 0.5) * self.chunk_size
++        )
++```
+ ## Subtopics
+ 
++### [Voxel LOD System](16413-voxel-lod-system.md)
++The Voxel LOD System manages the rendering of massive procedural voxel worlds (up to $2^{31}-1$ units per axis) by dynamically adjusting chunk resolution based on viewer proximity, ensuring that only necessary data is queried from world generators. It distinguishes itself from static LOD approaches by combining on-the-fly procedural generation with a transition mesh system to eliminate visual seams between chunks of differing resolutions.
++
+ ### Procedural Bypass Logic
+-Pure procedural chunks are regenerated from seed rather than saved to disk to minimize I/O overhead [S2, unofficial]. This approach is suitable for demos or scenarios where disk space is limited or I/O latency is high. It trades CPU cycles for reduced disk usage.
++Pure procedural chunks are regenerated from seed rather than saved to disk to minimize I/O overhead in the demo [S2, unofficial].
+ 
+ ## Operating characteristics
+-- **Time Complexity:** $O(N)$ where $N$ is the number of chunks within the load radius. Generation is deterministic and can be cached.
+-- **Memory Complexity:** $O(M)$ where $M$ is the number of active chunks. Each chunk consumes memory proportional to its size ($50^3$ voxels) plus geometry data.
+-- **Measured Performance:** Not given in the sources.
+-- **Scaling:** Scales well with world size as only a fixed number of chunks are active at any time. Performance depends on the complexity of the procedural generation algorithm and the mesh generation step.
+-- **Strengths:** Enables infinite worlds, reduces initial load time, minimizes disk I/O.
+-- **Limitations:** Requires efficient procedural generation and meshing. Potential for pop-in if chunks are loaded too late.
+-- **When to use:** Large or infinite procedural worlds.
+-- **When not to use:** Small, static worlds where pre-generation is feasible and faster.
++- **Time Complexity:** $O(N)$ where $N$ is the number of chunks within the load radius. Generation is deterministic and fast for procedural content.
++- **Memory Complexity:** $O(N)$ where $N$ is the number of active chunks. Memory is bounded by the load radius.
++- **Strengths:** Enables infinite worlds; low memory footprint; no pre-generation required.
++- **Limitations:** Procedural generation can cause stutter if not optimized; requires careful handling of boundaries (Halo Trick) to avoid seams.
++- **When to use:** Infinite or very large procedural worlds.
++- **When not to use:** Static, hand-crafted worlds with complex geometry where pre-baking is feasible.
+ 
+ ## Background
+-Originated in voxel-based game engines and procedural generation systems. The specific implementation details are drawn from unofficial sources [S1, unofficial][S2, unofficial].
++Originating from procedural voxel game development, this system allows for the creation of vast, explorable environments without the storage overhead of pre-generated data [S1, unofficial]. It is commonly used in sandbox games and voxel editors.
+ 
+ ## Sources

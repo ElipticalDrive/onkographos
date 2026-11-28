@@ -1,0 +1,124 @@
+--- v001.md
++++ v002.md
+@@ -26,5 +26,5 @@
+ 1.  **Initialize Worker Pool:**
+     *   Calculate the number of workers `n` using the formula:
+-        $$ n = \max(1, \min(4, (\text{navigator.hardwareConcurrency} \parallel 4) - 1)) $$
++        $$ n = \max(1, \min(4, (\text{navigator.hardwareConcurrency} \text{ or } 4) - 1)) $$
+         This reserves one core for the main thread and caps the pool at 4 workers [S2, unofficial].
+     *   Create `n` Web Workers using `new URL(..., import.meta.url)` to ensure compatibility with static hosting constraints (e.g., Vercel) [S1, unofficial].
+@@ -51,73 +51,61 @@
+ class WasmMeshing:
+     def __init__(self, on_result, rank_func, on_drop):
+-        self.mesher = Mesher()  # Main-thread mesher for immediate edits
+-        self.mem = get_wasm_memory()  # Shared WebAssembly memory
++        self.mesher = Mesher()
++        self.mem = get_wasm_memory()
+         self.on_result = on_result
+         self.rank = rank_func
+         self.on_drop = on_drop
+-        
+-        # Calculate worker count
++
+         hardware_cores = navigator.hardwareConcurrency or 4
+         n = max(1, min(4, hardware_cores - 1))
+-        
++
+         self.workers = []
+         self.busy = [0] * n
+-        self.queue = []  # List of MeshInput
++        self.queue = []
+         self.pending = set()
+-        
+-        # Initialize workers
++
+         for i in range(n):
+-            worker = new Worker(new URL('meshWorker.ts', import.meta.url), type='module')
++            worker = Worker(URL('meshWorker.ts', import_meta_url), type='module')
+             worker.onmessage = self.handle_worker_message
+-            worker.postMessage({ type: 'init', mem: self.mem })
++            worker.postMessage({'type': 'init', 'mem': self.mem, 'block_table': self.block_table})
+             self.workers.append(worker)
+ 
+     def mark_dirty(self, chunk_key, state_buffer):
+-        """Add a chunk to the remeshing queue."""
+-        self.queue.append({ key: chunk_key, state: { buffer: state_buffer } })
++        self.queue.append({'key': chunk_key, 'state': {'buffer': state_buffer}})
+         self.pump()
+ 
+     def pump(self):
+-        """Dispatch jobs from queue to idle workers."""
+-        while self.queue and self.has_idle_worker():
+-            # Find job with lowest rank
+-            job_index = min(range(len(self.queue)), key=lambda i: self.rank(self.queue[i].key))
++        while self.queue and any(b < 2 for b in self.busy):
++            job_index = min(range(len(self.queue)), key=lambda i: self.rank(self.queue[i]['key']))
+             job = self.queue[job_index]
+-            
+-            if self.rank(job.key) == float('inf'):
+-                self.on_drop(job.key)
++
++            if self.rank(job['key']) == float('inf'):
++                self.on_drop(job['key'])
+                 self.queue.pop(job_index)
+                 continue
+-            
+-            # Find least busy worker
++
+             worker_index = min(range(len(self.workers)), key=lambda i: self.busy[i])
+-            
++
+             if self.busy[worker_index] < 2:
+                 self.busy[worker_index] += 1
+-                self.pending.add(job.key)
++                self.pending.add(job['key'])
+                 self.queue.pop(job_index)
+-                
+-                # Transfer buffer if present
++
+                 transferables = []
+-                if job.state.buffer:
+-                    transferables.append(job.state.buffer)
+-                
++                if job['state'].get('buffer'):
++                    transferables.append(job['state']['buffer'])
++
+                 self.workers[worker_index].postMessage({
+-                    type: 'mesh',
+-                    key: job.key,
+-                    state: job.state
++                    'type': 'mesh',
++                    'key': job['key'],
++                    'state': job['state']
+                 }, transferables)
+ 
+-    def has_idle_worker(self):
+-        return any(b < 2 for b in self.busy)
++    def handle_worker_message(self, event):
++        data = event.data
++        worker_index = self.get_worker_index(event.source)
+ 
+-    def handle_worker_message(self, event):
+-        """Handle completion from any worker."""
+-        data = event.data
+-        # Identify worker index from event source or message payload
+-        worker_index = self.get_worker_index(event.source)
+-        
+         self.busy[worker_index] -= 1
+-        self.pending.remove(data.key)
++        self.pending.remove(data['key'])
+         self.on_result(data)
+         self.pump()
+@@ -132,11 +120,6 @@
+ *   **Static Hosting:** Worker instantiation must use `new URL(..., import.meta.url)` to function correctly in static hosting environments like Vercel [S1, unofficial].
+ 
+-## Subtopics
+-
+-### [Dependency Queue Gating](11597-dependency-queue-gating.md)
+-Controls the order of meshing tasks based on spatial dependencies.
+-
+ ## Operating characteristics
+-*   **Time Complexity:** Meshing is offloaded, so main-thread frame time is reduced to queue management and result processing. Worker-side complexity depends on the GreedyMesher algorithm [S1, unofficial].
++*   **Time Complexity:** Meshing is offloaded, so main-thread frame time is reduced to queue management and result processing [S1, unofficial].
+ *   **Memory Complexity:** Shared WebAssembly memory avoids duplicating voxel data across workers [S2, unofficial].
+ *   **Strengths:** Keeps the main thread responsive for gameplay and rendering [S1, unofficial]. Compatible with static hosting [S1, unofficial].

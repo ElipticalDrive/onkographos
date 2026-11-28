@@ -1,0 +1,116 @@
+# Span-Buffer Ray-Casting Algorithm
+Also called: SBRC
+## Overview
+The Span-Buffer Ray-Casting (SBRC) algorithm is a hybrid volume rendering method that accelerates rendering by traversing the object space in image order, thereby supporting early ray termination and ensuring non-redundant cell processing [S1]. Unlike its parent [Boundary Cell-Based Ray Casting](11256-boundary-cell-based-ray-casting.md), which processes cells based on spatial connectivity regardless of image coverage, SBRC changes the computational traversal order from object-then-image to image-then-object, allowing it to exploit image-space coherency to skip empty regions and terminate rays early [S1].
+## How it works
+**Inputs:** A volume dataset represented as a grid of cells; a set of rays defined by their origin and direction, typically aligned with pixel coordinates.
+**Outputs:** A rendered image where each pixel contains the accumulated color and opacity along the ray path.
+
+**Data Structures:**
+The algorithm maintains three specific data structures to manage active geometry:
+1.  **Active Cells:** A list or hash map of cells currently intersected by the current scanline's rays.
+2.  **Active Edges:** Edges shared between active cells that define the boundaries for ray traversal within the scanline.
+3.  **Span Buffers:** For each active cell, a buffer storing ray-specific exit information. Each pixel in the span buffer contains:
+    *   $z$: The exit point coordinate along the ray.
+    *   $s$: The exit-face identifier, indicating which face of the cell the ray exits through.
+
+**Algorithm Steps:**
+1.  **Initialization:** Initialize the active cells, active edges, and span buffers as empty.
+2.  **Ray Traversal (Image-Order):** Iterate through pixels (rays) in image order, typically scanline by scanline.
+3.  **Cell Hit Detection:** For each ray, determine if it intersects a new cell. This is based on the observation that a ray intersects a face if and only if the pixel is covered by the projected area of that face [S1].
+4.  **Span Buffer Creation:** When a ray hits a cell for the first time (i.e., the cell is not already in the active set for the current scanline):
+    *   Add the cell to the **Active Cells** list.
+    *   Create and populate the **Span Buffer** for this cell. The buffer is initialized with the entry point of the ray into the cell.
+5.  **Sampling and Accumulation:**
+    *   Use the entry point information (from the span buffer or initial ray origin) to sample the volume data within the current cell.
+    *   Accumulate color and opacity using standard volume rendering compositing equations (e.g., front-to-back compositing).
+6.  **Exit and Neighbor Transition:**
+    *   Determine the exit point $z$ and exit-face identifier $s$ for the current ray within the current cell.
+    *   Store these values in the corresponding pixel of the cell's **Span Buffer**.
+    *   Identify the neighbor cell sharing the exit face $s$.
+    *   Use the stored exit point $z$ as the entry point for the ray in the neighbor cell.
+7.  **Early Ray Termination:** If the accumulated opacity exceeds a threshold (or reaches 1.0), terminate the ray early for that pixel [S1].
+8.  **Scanline Cleanup:** After processing all rays for a scanline, clear the active structures for the next scanline.
+
+**Pseudocode:**
+> **Unverified code.** The code below did not pass a test run against a reference implementation, or no test fits it, so it may contain errors.
+
+```python
+def span_buffer_ray_casting(volume, rays, threshold=0.99):
+    # Initialize data structures
+    active_cells = {} # Map: cell_id -> span_buffer
+    active_edges = set()
+    
+    # Process rays, typically organized by scanline
+    for scanline in scanlines:
+        for ray in scanline.rays:
+            current_cell = find_first_hit_cell(ray)
+            if current_cell is None:
+                continue
+                
+            # Initialize span buffer for new cell hit
+            if current_cell.id not in active_cells:
+                active_cells[current_cell.id] = SpanBuffer()
+                active_edges.update(current_cell.edges)
+            
+            span_buf = active_cells[current_cell.id]
+            
+            # Get entry point from previous step or ray origin
+            entry_z = ray.origin if not span_buf.has_entry else span_buf.get_entry(ray.pixel_id)
+            
+            # Sample and accumulate
+            color = 0.0
+            opacity = 0.0
+            current_z = entry_z
+            
+            while opacity < threshold:
+                # Sample volume at current_z within current_cell
+                sample = volume.sample(current_cell, current_z)
+                
+                # Front-to-back compositing
+                alpha = sample.opacity
+                color = color + sample.color * alpha * (1.0 - opacity)
+                opacity = opacity + alpha * (1.0 - opacity)
+                
+                if opacity >= threshold:
+                    break
+                
+                # Find exit point and face
+                exit_z, exit_face = current_cell.compute_exit(ray, current_z)
+                
+                # Store exit info in span buffer for potential reuse by other rays
+                span_buf.set_exit(ray.pixel_id, exit_z, exit_face)
+                
+                # Move to neighbor cell
+                current_cell = current_cell.get_neighbor(exit_face)
+                current_z = exit_z
+            
+            # Write result to image
+            image[ray.pixel_id] = color
+
+        # Clear active structures for next scanline
+        active_cells.clear()
+        active_edges.clear()
+```
+
+**Edge Cases and Pitfalls:**
+*   **Small Projection Areas:** Cells with very small projected areas may incur overhead in span buffer management that outweighs the benefit of coherency. This is addressed in variants like [Koyamada-SBRC](23260-koyamada-sbrc.md) [S1].
+*   **Cyclic Meshes:** The underlying connectivity traversal must handle cyclic meshes correctly, though the base SBRC description notes that some hybrid methods fail here [S1].
+*   **Precision:** Floating-point precision in exit point calculation can lead to gaps or overlaps between cells if not handled carefully [G].
+
+## Subtopics
+
+### [Koyamada-SBRC](23260-koyamada-sbrc.md)
+A hybrid variant that dynamically selects traversal methods per cell to reduce space complexity and handle small projection areas efficiently.
+
+## Operating characteristics
+*   **Time Complexity:** Depends on the number of active cells and the length of ray segments within them. Image-order traversal reduces redundant processing compared to object-order methods.
+*   **Memory Complexity:** Requires additional memory for active cells, active edges, and span buffers. The size of span buffers is proportional to the number of active cells and the number of rays intersecting them.
+*   **Strengths:** Supports early ray termination; ensures non-redundant cell processing; exploits image-space coherency.
+*   **Limitations:** Overhead for cells with small projection areas; requires careful management of active data structures.
+*   **When to Use:** Suitable for dense volumes where early termination is effective and image-space coherency is high.
+*   **When Not to Use:** Not ideal for sparse volumes with many small, scattered objects where the overhead of span buffer management is high.
+## Background
+The Span-Buffer Ray-Casting algorithm was proposed by H. Berk et al. in 2003 as a solution to the limitations of existing hybrid methods, which could not handle cyclic meshes or support early ray termination and non-redundant cell processing [S1]. It builds on the principles of Koyamada’s algorithm but modifies the traversal order to image-then-object [S1].
+## Sources
+[S1] Direct volume rendering of unstructured grids, https://doi.org/10.1016/s0097-8493(03)00034-7, fetched 2026-10-24

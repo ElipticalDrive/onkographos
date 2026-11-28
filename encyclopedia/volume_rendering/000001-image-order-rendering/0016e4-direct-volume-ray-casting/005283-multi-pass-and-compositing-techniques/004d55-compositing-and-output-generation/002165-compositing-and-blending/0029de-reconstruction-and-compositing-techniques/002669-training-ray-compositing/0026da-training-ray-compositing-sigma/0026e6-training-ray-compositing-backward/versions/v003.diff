@@ -1,0 +1,292 @@
+--- v002.md
++++ v003.md
+@@ -4,141 +4,183 @@
+ 
+ ## Overview
+-This method computes the gradients of the volume rendering loss with respect to the input density (`sigmas`) and color (`rgbs`) parameters during the backward pass of differentiable volume rendering [S1, unofficial]. It implements the chain rule to propagate gradients from the final rendered image and the total accumulated alpha weights back to the individual sample points along each ray [S1, unofficial]. It is the backward counterpart to [Training Ray Compositing (Sigma)](3868-training-ray-compositing-sigma.md) [S1, unofficial].
++This method computes the gradients of the volume rendering loss with respect to the input density (`sigmas`) and color (`rgbs`) parameters during the backward pass of differentiable volume rendering [S1, unofficial]. It implements the chain rule to propagate gradients from the final composite image and the total weight sum back to the individual sample points along each ray [S1, unofficial]. Unlike forward compositing which accumulates color, this kernel traverses the ray to compute partial derivatives, handling the interdependence of transmittance and absorption [S1, unofficial].
+ 
+ ## How it works
++### Inputs and Outputs
+ **Inputs:**
+-- `grad`: Gradient of the loss with respect to the final image RGB, shape `[N, 3]` where `N` is the number of rays [S1, unofficial].
+-- `grad_weights_sum`: Gradient of the loss with respect to `weights_sum` (total alpha), shape `[N]` [S1, unofficial].
+-- `weights_sum`: The computed total alpha values from the forward pass, shape `[N]` [S1, unofficial].
+-- `image`: The computed final RGB values from the forward pass, shape `[N, 3]` [S1, unofficial].
+-- `sigmas`: Density values for all sample points, shape `[M]` [S1, unofficial].
+-- `rgbs`: Color values for all sample points, shape `[M, 3]` [S1, unofficial].
+-- `deltas`: Distances between consecutive sample points along rays, shape `[M]` [S1, unofficial].
+-- `ray_start_idx`: Starting index in the sample arrays for each ray, shape `[N]` [S1, unofficial].
+-- `num_steps`: Number of valid sample steps for each ray, shape `[N]` [S1, unofficial].
++*   `grad`: Gradient of the loss with respect to the final image RGB, shape `[N, 3]` where $N$ is the number of rays [S1, unofficial].
++*   `grad_weights_sum`: Gradient of the loss with respect to `weights_sum` (total alpha), shape `[N]` [S1, unofficial].
++*   `weights_sum`: The computed total alpha values from the forward pass, shape `[N]` [S1, unofficial].
++*   `image`: The computed final RGB values from the forward pass, shape `[N, 3]` [S1, unofficial].
++*   `sigmas`: Density values for all sample points, shape `[M]` [S1, unofficial].
++*   `rgbs`: Color values for all sample points, shape `[M, 3]` [S1, unofficial].
++*   `deltas`: Step sizes for all sample points, shape `[M]` [S1, unofficial].
++*   `ray_offsets`: Start index in the sample arrays for each ray [S1, unofficial].
++*   `num_steps`: Number of valid sample points per ray [S1, unofficial].
+ 
+ **Outputs:**
+-- `grad_sigmas`: Output buffer for density gradients, shape `[M]` [S1, unofficial].
+-- `grad_rgbs`: Output buffer for color gradients, shape `[M, 3]` [S1, unofficial].
++*   `grad_sigmas`: Output buffer for density gradients, shape `[M]` [S1, unofficial].
++*   `grad_rgbs`: Output buffer for color gradients, shape `[M, 3]` [S1, unofficial].
+ 
+-**Data Structures:**
+-The method operates on flat arrays representing the ray marching data [S1, unofficial]. Each ray `i` occupies a contiguous segment in the sample arrays starting at `ray_start_idx[i]` with length `num_steps[i]` [S1, unofficial].
++### Data Structures
++The implementation assumes a CUDA kernel structure where each thread block or thread handles a subset of rays. The data is typically stored in Structure of Arrays (SoA) or Array of Structures (AoS) format flattened into contiguous memory buffers.
++*   `M`: Total number of sample points across all rays.
++*   `N`: Total number of rays.
++*   Pointers are advanced based on `num_steps` and `offset` to locate the specific segment of `sigmas`, `rgbs`, and `deltas` belonging to the current ray.
+ 
+-**Steps:**
+-1. **Initialization:** For each ray `i` from `0` to `N-1`:
+-    - Check for empty rays: If `num_steps[i] == 0` or `ray_start_idx[i] + num_steps[i] >= M`, skip this ray [S1, unofficial].
+-    - Initialize accumulators for the backward pass: `T = 1.0` (transmittance), `r = 0.0`, `g = 0.0`, `b = 0.0` (accumulated color components) [S1, unofficial].
+-    - Retrieve final forward pass values: `r_final = image[i, 0]`, `g_final = image[i, 1]`, `b_final = image[i, 2]`, `T_final = 1.0 - weights_sum[i]` [S1, unofficial].
+-    - Set the sample pointer to the start of the ray's data: `idx = ray_start_idx[i]` [S1, unofficial].
++### Algorithm Steps
++1.  **Initialization**: For each ray, locate the ray data pointers. Check for empty rays; if `num_steps == 0` or the ray extends beyond the buffer (`offset + num_steps >= M`), return immediately [S1, unofficial].
++2.  **Accumulator Setup**: Initialize transmittance accumulator $T = 1.0$ and color accumulators $r=0, g=0, b=0$ [S1, unofficial]. Retrieve the final composite values: $r_{final} = \text{image}[0]$, $g_{final} = \text{image}[1]$, $b_{final} = \text{image}[2]$ [S1, unofficial]. Compute final transmittance $T_{final} = 1 - \text{weights\_sum}[0]$ [S1, unofficial].
++3.  **Backward Loop**: Iterate backwards through the steps of the ray (from last sample to first) or forwards depending on the specific implementation variant. The provided source [S1, unofficial] implies a forward traversal logic for gradient accumulation but computes gradients based on the contribution of each step to the final result.
++    *   Compute alpha $\alpha_i$ and weight $w_i = \alpha_i T_i$ [S1, unofficial].
++    *   Update color accumulators for the forward pass context (needed for gradient calculation): $r \leftarrow r + w_i \cdot c_{i,r}$, etc. [S1, unofficial].
++    *   Update transmittance: $T \leftarrow T \cdot (1 - \alpha_i)$ [S1, unofficial].
++    *   Compute gradients for RGB and Sigma using the chain rule [S1, unofficial].
++    *   Advance pointers to the next sample point [S1, unofficial].
+ 
+-2. **Backward Loop:** Iterate `step` from `0` to `num_steps[i] - 1`:
+-    - Retrieve current sample properties: `sigma = sigmas[idx]`, `rgb = rgbs[idx]`, `delta = deltas[idx]` [S1, unofficial].
+-    - Compute alpha: $\alpha = 1 - \exp(-\sigma \cdot \delta)$ [G].
+-    - Compute weight: $w = \alpha \cdot T$ [S1, unofficial].
+-    - **Compute RGB Gradients:** The gradient of the loss with respect to the current color $c_i$ is $\frac{\partial L}{\partial c_i} = w \cdot \frac{\partial L}{\partial C}$, where $\frac{\partial L}{\partial C}$ is the gradient from the final image `grad[i]` [S1, unofficial]. Update `grad_rgbs[idx] = grad[i] * w` [S1, unofficial].
+-    - **Update Accumulators:** Update accumulated color: $r \leftarrow r + w \cdot c_r$, $g \leftarrow g + w \cdot c_g$, $b \leftarrow b + w \cdot c_b$ [S1, unofficial]. Update transmittance: $T \leftarrow T \cdot (1 - \alpha)$ [S1, unofficial].
+-    - **Compute Sigma Gradient:** The gradient with respect to density $\sigma_i$ is computed as $\frac{\partial L}{\partial \sigma_i} = \delta \left( \frac{\partial L}{\partial R}(T \cdot c_R - (C_R - r)) + \frac{\partial L}{\partial G}(T \cdot c_G - (C_G - g)) + \frac{\partial L}{\partial B}(T \cdot c_B - (C_B - b)) + \frac{\partial L}{\partial \alpha_{\text{total}}} T_{\text{final}} \right)$ [S1, unofficial]. Here, $r, g, b$ are the accumulated color components *before* the current step's contribution, and $C_R, C_G, C_B$ are the final image components [S1, unofficial].
+-    - Advance the sample pointer: `idx += 1` [S1, unofficial].
++### Formulas
++The gradient for the color logits $c_{i,j}$ (where $j \in \{r,g,b\}$) is derived from the chain rule. The contribution of a sample to the final image is weighted by its transmittance and alpha.
+ 
+-**Pseudocode:**
++The gradient with respect to the final image color $C$ (denoted as $\frac{\partial L}{\partial C}$ or `grad`) for a specific color channel $j$ at step $i$ is:
++$$ \frac{\partial L}{\partial c_{i,j}} = w_i \cdot \frac{\partial L}{\partial C_j} $$
++where $w_i = \alpha_i T_i$ is the weight of the sample [S1, unofficial]. In code: `grad_rgbs[0] = grad[0] * weight;` [S1, unofficial].
++
++The gradient with respect to density $\sigma_i$ involves the derivative of the transmittance and the accumulated color. The implementation in [S1, unofficial] computes this as:
++$$ \frac{\partial L}{\partial \sigma_i} = \delta_i \left( \sum_{j \in \{r,g,b\}} \frac{\partial L}{\partial C_j} \left( T_i c_{i,j} - (C_{j,final} - C_{j,accum\_before\_i}) \right) + \frac{\partial L}{\partial A} T_{final} \right) $$
++Where:
++*   $\delta_i$ is the step size [S1, unofficial].
++*   $T_i$ is the transmittance *before* the current step [S1, unofficial].
++*   $c_{i,j}$ is the color of the current sample [S1, unofficial].
++*   $C_{j,final}$ is the final accumulated color for channel $j$ (`r_final`, `g_final`, `b_final`) [S1, unofficial].
++*   $C_{j,accum\_before\_i}$ is the accumulated color for channel $j$ *before* adding the current step's contribution (`r`, `g`, `b` in the code trace before update) [S1, unofficial].
++*   $\frac{\partial L}{\partial A}$ is `grad_weights_sum[0]` [S1, unofficial].
++*   $T_{final}$ is `1 - weights_sum[0]` [S1, unofficial].
++
++In code, this corresponds to:
++`grad_sigmas[0] = deltas[0] * ( grad[0] * (T * rgbs[0] - (r_final - r)) + grad[1] * (T * rgbs[1] - (g_final - g)) + grad[2] * (T * rgbs[2] - (b_final - b)) + grad_weights_sum[0] * T_final )` [S1, unofficial].
++
++### Pseudocode
+ ```python
+-import math
+-
+ def training_ray_compositing_backward(
+-    grad,             # [N, 3]
+-    grad_weights_sum, # [N]
+-    weights_sum,      # [N]
+-    image,            # [N, 3]
+-    sigmas,           # [M]
+-    rgbs,             # [M, 3]
+-    deltas,           # [M]
+-    ray_start_idx,    # [N]
+-    num_steps,        # [N]
+-    M,                # Total number of samples
+-    N                 # Total number of rays
+-):
+-    grad_sigmas = [0.0] * M
+-    grad_rgbs = [[0.0, 0.0, 0.0] for _ in range(M)]
+-
++    grad: Tensor[N, 3],          # Gradient w.r.t final image RGB
++    grad_weights_sum: Tensor[N], # Gradient w.r.t total alpha
++    weights_sum: Tensor[N],      # Total alpha from forward pass
++    image: Tensor[N, 3],         # Final RGB from forward pass
++    sigmas: Tensor[M],           # Densities
++    rgbs: Tensor[M, 3],          # Colors
++    deltas: Tensor[M],           # Step sizes
++    ray_offsets: Tensor[N],      # Start index for each ray
++    num_steps: Tensor[N]         # Number of steps per ray
++) -> Tuple[Tensor[M], Tensor[M, 3]]:
++    """
++    Computes gradients for sigmas and rgbs for volume rendering.
++    """
++    grad_sigmas = zeros_like(sigmas)
++    grad_rgbs = zeros_like(rgbs)
++    
++    N = len(num_steps)
++    
+     for i in range(N):
+-        if num_steps[i] == 0 or ray_start_idx[i] + num_steps[i] >= M:
++        offset = ray_offsets[i]
++        steps = num_steps[i]
++        
++        # Edge case: empty ray
++        if steps == 0 or offset + steps > len(sigmas):
+             continue
+-
++            
++        # Initialize accumulators
+         T = 1.0
+         r_acc = 0.0
+         g_acc = 0.0
+         b_acc = 0.0
+-
+-        r_final = image[i][0]
+-        g_final = image[i][1]
+-        b_final = image[i][2]
++        
++        r_final = image[i, 0]
++        g_final = image[i, 1]
++        b_final = image[i, 2]
+         T_final = 1.0 - weights_sum[i]
+-
+-        grad_r = grad[i][0]
+-        grad_g = grad[i][1]
+-        grad_b = grad[i][2]
+-        grad_w_sum = grad_weights_sum[i]
+-
+-        for step in range(num_steps[i]):
+-            idx = ray_start_idx[i] + step
+-
++        
++        grad_r = grad[i, 0]
++        grad_g = grad[i, 1]
++        grad_b = grad[i, 2]
++        grad_w = grad_weights_sum[i]
++        
++        # Iterate through steps. 
++        # Note: The source [S1, unofficial] code trace suggests a forward pass accumulation 
++        # is used to compute the "accumulated before" term, but gradients are 
++        # computed for each step. Standard backprop usually goes backwards.
++        # However, the formula in [S1, unofficial] uses (r_final - r) where r is the 
++        # accumulator *before* the current step. This implies we can compute 
++        # gradients in a forward pass if we track the prefix sum of colors.
++        
++        for k in range(steps):
++            idx = offset + k
+             sigma = sigmas[idx]
+-            rgb0 = rgbs[idx][0]
+-            rgb1 = rgbs[idx][1]
+-            rgb2 = rgbs[idx][2]
+             delta = deltas[idx]
+-
+-            alpha = 1.0 - math.exp(-sigma * delta)
++            c_r, c_g, c_b = rgbs[idx, 0], rgbs[idx, 1], rgbs[idx, 2]
++            
++            # Compute alpha and weight
++            # alpha = 1 - exp(-sigma * delta)
++            # weight = alpha * T
++            # Note: Exact alpha formula depends on forward pass, 
++            # but gradient derivation relies on the relationship.
++            # We assume alpha is computed or available. 
++            # If not, alpha = 1 - exp(-sigma * delta).
++            alpha = 1.0 - exp(-sigma * delta)
+             weight = alpha * T
+-
+-            grad_rgbs[idx][0] = grad_r * weight
+-            grad_rgbs[idx][1] = grad_g * weight
+-            grad_rgbs[idx][2] = grad_b * weight
+-
+-            term_r = T * rgb0 - (r_final - r_acc)
+-            term_g = T * rgb1 - (g_final - g_acc)
+-            term_b = T * rgb2 - (b_final - b_acc)
+-
+-            grad_sigmas[idx] = delta * (
+-                grad_r * term_r +
+-                grad_g * term_g +
+-                grad_b * term_b +
+-                grad_w_sum * T_final
+-            )
+-
+-            r_acc += weight * rgb0
+-            g_acc += weight * rgb1
+-            b_acc += weight * rgb2
+-
++            
++            # Gradient for RGB
++            # dL/dc = weight * dL/dC
++            grad_rgbs[idx, 0] = grad_r * weight
++            grad_rgbs[idx, 1] = grad_g * weight
++            grad_rgbs[idx, 2] = grad_b * weight
++            
++            # Gradient for Sigma
++            # dL/dsigma = delta * ( sum_j ( dL/dC_j * (T * c_j - (C_j_final - C_j_acc_before)) ) + dL/dA * T_final )
++            # T_acc_before is T. C_acc_before is r_acc, g_acc, b_acc.
++            
++            term_r = grad_r * (T * c_r - (r_final - r_acc))
++            term_g = grad_g * (T * c_g - (g_final - g_acc))
++            term_b = grad_b * (T * c_b - (b_final - b_acc))
++            
++            grad_sigmas[idx] = delta * (term_r + term_g + term_b + grad_w * T_final)
++            
++            # Update accumulators for next step
++            r_acc += weight * c_r
++            g_acc += weight * c_g
++            b_acc += weight * c_b
+             T = T * (1.0 - alpha)
+-
++            
+     return grad_sigmas, grad_rgbs
+ ```
+ 
+-**Parameters:**
+-- `grad_weights_sum`: Gradient of the loss with respect to `weights_sum` (total alpha), shape `[N]` [S1, unofficial].
+-- `grad`: Gradient of the loss with respect to the final image RGB, shape `[N, 3]` [S1, unofficial].
+-- `weights_sum`: The computed total alpha values from the forward pass, shape `[N]` [S1, unofficial].
+-- `image`: The computed final RGB values from the forward pass, shape `[N, 3]` [S1, unofficial].
+-- `grad_sigmas`: Output buffer for density gradients, shape `[M]` [S1, unofficial].
+-- `grad_rgbs`: Output buffer for color gradients, shape `[M, 3]` [S1, unofficial].
++### Parameters and Edge Cases
++*   **Precision**: The implementation in [S1, unofficial] uses `float` (32-bit). Half-precision (FP16) is often used in modern variants (like [S3, unofficial]) to reduce memory bandwidth, but [S1, unofficial] explicitly uses `1.0f` [S1, unofficial].
++*   **Empty Rays**: Rays with `num_steps == 0` must be skipped to avoid out-of-bounds access [S1, unofficial].
++*   **Boundary Checks**: The condition `offset + num_steps >= M` ensures the ray does not exceed the allocated buffer [S1, unofficial].
++*   **Degenerate Input**: If `sigma` is 0, `alpha` is 0, `weight` is 0, and gradients are 0. If `delta` is 0, gradients are 0.
+ 
+-**Edge Cases and Pitfalls:**
+-- **Empty Rays:** Rays with `num_steps == 0` or exceeding the sample buffer bounds must be skipped to avoid out-of-bounds access [S1, unofficial].
+-- **Precision:** The computation involves exponentials and subtractions of similar magnitudes (e.g., `T_final` and `weights_sum`) [G]. Care should be taken with floating-point precision, especially for very small or large densities [G].
+-- **Boundary Conditions:** The transmittance `T` is updated sequentially, and the backward pass relies on forward pass values stored in `image` and `weights_sum` [G].
++## Subtopics
++
++### Patch-level Gradient Back-propagation
++This variant addresses the prohibitively huge memory consumption caused by full backward gradient propagation through all rays during stylization training [S2]. Instead of back-propagating through the entire NeRF for every ray, it renders all rays to obtain the whole image in the forward pass, calculates the stylization loss gradients in the forward process, and then back-propagates the gradients through NeRF at the patch level [S2]. This significantly reduces memory consumption while allowing high-resolution rendering for better stylization training [S2].
++
++### Alpha and Color Gradient Computation for Layered Primitives
++This variant applies to differentiable rendering with bitmap primitives (e.g., splats) rather than volumetric samples [S3, unofficial]. It calculates gradients for color logits and alpha parameters, incorporating transmittance and the interdependence of layered primitives [S3, unofficial].
++*   **Alpha Gradient**: $\frac {\partial L}{\partial \alpha _k} = \sum _{j \in {r,g,b}} \frac {\partial L}{\partial I_j} \left ( T_k \sigma (c_{k,j}) - \frac {S_j}{1-\alpha _k} \right ) + \frac {\partial L}{\partial A} T_k B$, where $S_j = \sum_{m>k} \sigma(c_{m,j})\alpha_m T_m$ and $B = \prod_{m>k} (1 - \alpha_m)$ [S3, unofficial].
++*   **Color Gradient**: $\frac {\partial L}{\partial c_{k,j}} = \frac {\partial L}{\partial I_j} \cdot T_k \alpha _k \cdot \sigma (c_{k,j})(1 - \sigma (c_{k,j}))$ [S3, unofficial].
++*   **Geometric Gradients**: Flow through bilinear sampling of the primitive mask $M_i(x,y)$, with partial derivatives $\frac{\partial M_i}{\partial u}$ and $\frac{\partial M_i}{\partial v}$ derived from bilinear interpolation [S3, unofficial].
+ 
+ ## Operating characteristics
+-- **Time Complexity:** $O(M)$, where $M$ is the total number of sample points across all rays, as each sample is processed exactly once [S1, unofficial].
+-- **Memory Complexity:** $O(M)$ for storing the output gradient buffers `grad_sigmas` and `grad_rgbs` [S1, unofficial].
+-- **Performance:** Implemented as a CUDA kernel, it is designed for high parallelism on GPUs, scaling linearly with the number of rays and samples per ray [S1, unofficial].
+-- **Strengths:** Efficiently computes gradients for differentiable volume rendering, enabling end-to-end training of neural radiance fields (NeRF) and similar models [S1, unofficial].
+-- **Limitations:** Requires the forward pass values (`image`, `weights_sum`) to be stored or recomputed, increasing peak memory usage for scenes with many rays and samples [S1, unofficial].
+-- **When to use:** When training neural volume rendering models that require gradients with respect to density and color parameters [S1, unofficial].
+-- **When not to use:** For inference-only scenarios where gradients are not needed [S1, unofficial].
++*   **Time Complexity**: Linear with respect to the total number of sample points $M$, i.e., $O(M)$, as each sample is visited once to compute its gradient contribution [S1, unofficial].
++*   **Memory Complexity**: $O(M)$ for storing the input gradients and outputs. The backward pass requires storing intermediate values (like $T$ and color accumulators) per ray, which is $O(N)$ or $O(1)$ per thread if processed sequentially [S1, unofficial].
++*   **Performance**: The CUDA kernel implementation [S1, unofficial] is optimized for parallel execution across rays. Performance is limited by memory bandwidth when reading `sigmas`, `rgbs`, and `deltas` [S1, unofficial].
++*   **Strengths**: Provides exact gradients for differentiable volume rendering, enabling end-to-end training of neural radiance fields [S1, unofficial].
++*   **Limitations**: High memory consumption for full backward propagation, especially for high-resolution images and dense sampling, which motivates variants like patch-level back-propagation [S2].
+ 
+ ## Background
+-This method is part of the differentiable volume rendering pipeline used in implementations of Instant Neural Graphics Primitives (instant-ngp) [S1, unofficial]. It enables the training of neural radiance fields by providing the necessary gradients for the volume rendering composite operation [S1, unofficial].
++The method originates from the implementation of differentiable volume rendering in neural graphics primitives, specifically as part of the PyTorch implementation of [instant-ngp](https://github.com/NVlabs/instant-ngp) [S1, unofficial]. The kernel `kernel_composite_rays_train_backward` is designed to support custom backward passes for training, computing gradients for sigmas, RGBs, and ambient light [S1, unofficial]. It is a fundamental component in the training loop of NeRF-based models, allowing the optimization of scene representation parameters via gradient descent [S1, unofficial].
+ 
+ ## Sources
+-[S1] megvii-research/cv-master-ex, https://github.com/megvii-research/cv-master-ex, fetched 2026-10-27 (unofficial)+[S1] megvii-research/cv-master-ex, https://github.com/megvii-research/cv-master-ex, fetched 2026-10-27 (unofficial)
++[S2] NeRF-Art: Text-Driven Neural Radiance Fields Stylization, https://doi.org/10.1109/tvcg.2023.3283400, fetched 2026-10-26
++[S3] DiffBMP: Differentiable Rendering with Bitmap Primitives, https://doi.org/10.48550/arXiv.2602.22625, fetched 2026-10-27 (unofficial)

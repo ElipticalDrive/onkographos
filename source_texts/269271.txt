@@ -1,0 +1,365 @@
+Reusable FFT, NUFFT, WGPU, validation, and Python bindings workspace for Apollo - perf(apollo-fft): Route the full-spectrum 3-D real entries through the pair by ryancinsight · Pull Request #476 · ryancinsight/apollo
+
+perf(apollo-fft): Route the full-spectrum 3-D real entries through the pair by ryancinsight · Pull Request #476 · ryancinsight/apollo · GitHub
+Skip to content
+You signed in with another tab or window. Reload to refresh your session.
+You signed out in another tab or window. Reload to refresh your session.
+You switched accounts on another tab or window. Reload to refresh your session.
+Dismiss alert
+Conversation
+ryancinsight
+commented
+Sep 15, 2026
+•
+edited by recurseml
+Bot
+Loading
+Uh oh!
+There was an error while loading. Please reload this page.
+Copy link
+Copy Markdown
+Owner
+Outcome
+The full-spectrum 3-D real entries (fft_3d_array, fft_3d_array_into, ifft_3d_array, ifft_3d_array_into, ifft_3d_array_into_spectrum_scratch) widened the field to complex and transformed every z lane at full length while the half pair (fft_3d_array_half_into/ifft_3d_array_half_into) and, since #474, the 2-D entries took the half route. They now route through the half volume where the split admits nz:
+the forwards compute the half volume in the 2-D staging role — free once the split applies, since the x and y passes hold the two 3-D roles and only the refused-length z lanes borrow the 2-D one — and write the (nx, ny, nz) output once in parallel lane blocks, into caller storage or fresh capacity through the slot pass feat(apollo-fft): Transform a real 2-D field through its half spectrum #474 introduced;
+the inverses pack the lower nz/2 + 1 bins of each lane (in place, into caller scratch, or into the 2-D role) and read nothing else;
+the expansion, the packs and the fresh-capacity set_len site move out of half_plane.rs into real_storage/expand.rs, generic in the lane length and the partner lane, so both ranks share one pass and one proof; its unit test covers a plane and a volume and passes under miri locally (cargo +nightly miri test -p apollo-fft --lib -- expand::tests).
+Floors, measured first (output/probe3d, minimum of 40 unpinned rounds, widened over routed):
+shape
+MiB
+forward owned
+forward into
+inverse owned
+inverse into
+4096x4x4
+1
+0.99 (widened)
+0.83
+2.36
+0.96
+4096x4x8
+2
+1.01 (widened)
+1.31
+2.01
+2.08
+1024x16x8
+2
+1.01 (widened)
+1.30
+2.74
+2.33
+256x64x8
+2
+1.00 (widened)
+1.41
+2.65
+1.99
+64x64x32
+2
+1.00 (widened)
+1.80
+3.16
+2.29
+64x64x64
+4
+1.57
+2.02
+2.93
+2.77
+128x64x64
+8
+2.69
+3.18
+4.81
+5.49
+128x128x64
+16
+3.04
+3.95
+6.61
+5.96
+So the caller-owned routes take the pair from 8-long lanes (half_volume::ROUTED_LANE_FLOOR: at nz = 4 the pair itself is within 3% of the widened pass and the expansion or pack costs its traffic), the owned forward from the 4 MiB byte floor the 2-D pair measured (expand::OWNED_ROUTE_BYTES), and the owned inverse has no floor. Below a floor a form is its widened route, unchanged.
+Tests (tests/real_half_api/volume.rs): every routed form is bit-identical to the pair over the split shapes for f64, f32 and F16 — the forwards to the half forward and its conjugate mirrors, the inverses (fed the pair's own Hermitian completion, so the check does not depend on the forward's route) to the half inverse — each form checked where it is routed, with a 4-long-lane shape under the lane floor and a 64³ cube at the byte floor; the caller-owned forms allocate nothing once warm and the owned forms exactly their returned volume; expand::tests pin the fresh spectrum and both packs.
+Census (benches/engine_census.rs gains real_half_forward_3d_f64, real_full_forward_3d_f64, real_half_inverse_3d_f64, real_full_inverse_3d_f64 on the batched shape and on the 64³ cube, the widened routes as a third arm; output/apollo-base128/engine_census_3d_routed_2026-09-15.txt, median / minimum per call):
+shape
+half forward (µs)
+full forward, routed (µs)
+full forward, widened (µs)
+half inverse (µs)
+full inverse, routed (µs)
+full inverse, widened (µs)
+4096x4x4
+166 / 158
+634 / 365
+654 / 377
+185 / 177
+215 / 205
+535 / 509
+64x64x64
+182 / 174
+1053 / 731
+2666 / 1157
+263 / 234
+1534 / 687
+2803 / 2266
+Widened over routed, by the minimum (forward / inverse): 4096x4x4 1.03x / 2.48x; 64x64x64 1.58x / 3.30x. On the batched 4096x4x4 shape (1 MiB, 4-long lanes) the owned forward is the widened route against itself; the owned inverse is routed.
+Verification (outside the stack overlay, shared target)
+cargo clippy -p apollo-fft --all-targets -- -D warnings: clean.
+cargo nextest run -p apollo-fft: 670 passed (four new).
+cargo test --doc -p apollo-fft, cargo doc --no-deps -p apollo-fft: clean.
+scripts/safety_ratchet.py check: 0 against 0; scripts/compact_board.py: idempotent.
+cargo bench -p apollo-fft --bench engine_census --profile bench-quick: inside its 60 s budget.
+Pre-push gate green on push.
+Stacked on #474 until the series lands.
+Item: APOLLO-REAL-3D-FULL-ROUTING.
+🤖 Generated with Claude Code
+High-level PR Summary
+Routes 3-D real FFT transforms through the half-spectrum pair where the real split admits nz, matching the optimization already applied to 2-D transforms in PR #474. The forwards compute the half volume (nx, ny, nz/2 + 1) in 2-D staging scratch and expand it once into full output; the inverses read only the lower nz/2 + 1 bins per lane. This eliminates redundant computation of conjugate-symmetric bins while adding expansion/pack passes. The owned forward routes from 4 MiB output (where page faults repay staging costs) and caller-owned forms from 8-long lanes. Performance measurements show speedups of 1.57x to 6.61x across tested shapes. The PR includes comprehensive test coverage verifying bit-identical agreement with the half-spectrum pair, zero allocations for warm plans, and correct handling of edge cases. As a prerequisite, the PR completes the SAFETY comment ratchet initiative by documenting all 143 remaining unsafe blocks and fixing three release-mode soundness issues in Stockham, two-by-prime, and Bluestein kernels where length assertions existed only in debug builds.
+⏱️ Estimated Review Time: 30-90 minutes
+💡 Review Order Suggestion
+Order
+File Path
+1
+backlog.md
+2
+CHANGELOG.md
+3
+docs/book/fft.md
+4
+scripts/safety_ratchet_baseline.json
+5
+crates/apollo-fft/src/application/execution/plan/fft/real_storage/expand.rs
+6
+crates/apollo-fft/src/application/execution/plan/fft/real_storage/half_plane.rs
+7
+crates/apollo-fft/src/application/execution/plan/fft/real_storage/half_volume.rs
+8
+crates/apollo-fft/src/application/execution/plan/fft/real_storage/mod.rs
+9
+crates/apollo-fft/src/application/execution/plan/fft/dimension_2d/dynamic_impl.rs
+10
+crates/apollo-fft/src/application/execution/plan/fft/dimension_3d/dynamic_impl.rs
+11
+crates/apollo-fft/src/application/execution/plan/fft/lanes.rs
+12
+crates/apollo-fft/src/api/rfft.rs
+13
+crates/apollo-fft/src/api/irfft.rs
+14
+crates/apollo-fft/src/api/mod.rs
+15
+crates/apollo-fft/benches/engine_census.rs
+16
+crates/apollo-fft/tests/real_half_api/main.rs
+17
+crates/apollo-fft/tests/real_half_api/plane.rs
+18
+crates/apollo-fft/tests/real_half_api/volume.rs
+19
+crates/apollo-fft/tests/real_half_api/inverse.rs
+20
+crates/apollo-fft/src/application/execution/kernel/mixed_radix/caches/expand.rs
+21
+crates/apollo-fft/src/application/execution/kernel/mixed_radix/caches/factors.rs
+22
+crates/apollo-fft/src/application/execution/kernel/mixed_radix/caches/pfa.rs
+23
+crates/apollo-fft/src/application/execution/kernel/mixed_radix/caches/rader.rs
+24
+crates/apollo-fft/src/application/execution/kernel/mixed_radix/caches/radices.rs
+25
+crates/apollo-fft/src/application/execution/kernel/mixed_radix/caches/tables.rs
+26
+crates/apollo-fft/src/application/execution/kernel/mixed_radix/caches/mod.rs
+27
+crates/apollo-fft/src/application/execution/kernel/components/stockham/mod.rs
+28
+crates/apollo-fft/src/application/execution/kernel/components/stockham/transform.rs
+29
+crates/apollo-fft/src/application/execution/kernel/components/stockham/precision/traits.rs
+30
+crates/apollo-fft/src/application/execution/kernel/components/stockham/precision/precise.rs
+31
+crates/apollo-fft/src/application/execution/kernel/components/stockham/precision/reduced.rs
+32
+crates/apollo-fft/src/application/execution/kernel/components/stockham/butterfly/dispatch.rs
+33
+crates/apollo-fft/src/application/execution/kernel/components/stockham/butterfly/fixed.rs
+34
+crates/apollo-fft/src/application/execution/kernel/components/stockham/avx/backend.rs
+35
+crates/apollo-fft/src/application/execution/kernel/components/stockham/avx/precise/backend_impl.rs
+36
+crates/apollo-fft/src/application/execution/kernel/components/stockham/avx/reduced/backend_impl.rs
+37
+crates/apollo-fft/src/application/execution/kernel/components/good_thomas/two_by_prime.rs
+38
+crates/apollo-fft/src/application/execution/kernel/components/rader/bluestein.rs
+39
+crates/apollo-fft/src/application/execution/kernel/mixed_radix/scalar/impls.rs
+40
+crates/apollo-fft/src/application/execution/kernel/mixed_radix/traits.rs
+41
+crates/apollo-fft/src/application/execution/kernel/twiddle_table.rs
+42
+crates/apollo-fft/src/application/execution/plan/fft/dimension_1d/executors.rs
+43
+crates/apollo-fft-macros/src/good_thomas.rs
+44
+crates/apollo-fft/src/application/execution/kernel/auto_dispatch.rs
+45
+crates/apollo-fft/src/application/execution/kernel/components/batched/mod.rs
+46
+crates/apollo-fft/src/application/execution/kernel/components/radix_composite/cache.rs
+47
+crates/apollo-fft/src/application/execution/kernel/components/resident/mod.rs
+48
+crates/apollo-fft/src/application/execution/kernel/components/resident/planar.rs
+49
+crates/apollo-fft/src/application/execution/kernel/components/stockham/tests.rs
+50
+crates/apollo-fft/src/application/execution/kernel/components/winograd/composite/power.rs
+51
+crates/apollo-fft/src/application/execution/kernel/mixed_radix/scalar/trait_def.rs
+52
+crates/apollo-fft/src/application/execution/kernel/mixed_radix/mod.rs
+53
+crates/apollo-fft/src/application/execution/kernel/precision_bridge.rs
+54
+crates/apollo-fft/src/application/execution/kernel/radix_shape.rs
+55
+crates/apollo-fft/src/application/utilities/shift.rs
+56
+crates/apollo-fwht/src/application/execution/kernel/direct.rs
+57
+crates/apollo-nufft/src/infrastructure/transport/gpu/verification/mod.rs
+ryancinsight
+mentioned this pull request
+Sep 15, 2026
+test(apollo-fft): Pin the owned 1-D forwards and census their widened arm
+#477
+Merged
+ryancinsight
+force-pushed
+the
+perf/apollo-real-3d-full-routing
+branch
+7 times, most recently
+from
+97ab92d to
+c897640
+Compare
+September 16, 2026 07:54
+ryancinsight
+marked this pull request as ready for review
+September 17, 2026 00:51
+ryancinsight
+force-pushed
+the
+perf/apollo-real-3d-full-routing
+branch
+from
+c897640 to
+1c13c20
+Compare
+September 17, 2026 00:57
+ryancinsight
+enabled auto-merge (rebase)
+September 17, 2026 00:58
+ryancinsight
+and others
+added 3 commits
+September 17, 2026 00:37
+chore(board): Claim APOLLO-REAL-3D-FULL-ROUTING
+…
+ebc31b2
+```
+Item: APOLLO-REAL-3D-FULL-ROUTING
+Refs: backlog.md#apollo-real-3d-full-routing
+
+Co-Authored-By: Claude Fable 5.1 <noreply@anthropic.com>
+```
+perf(apollo-fft): Route the full-spectrum 3-D real entries through th…
+…
+14d018d
+```
+…e pair
+
+Where the split admits `nz`, `fft_3d_array_into` computes the half volume
+in the 2-D staging role (free once the split applies: the x and y passes
+hold the two 3-D roles and only refused-length z lanes borrow the 2-D
+one) and writes its `(nx, ny, nz)` output once in parallel lane blocks;
+`fft_3d_array` writes into fresh capacity through the same pass;
+`ifft_3d_array`, `ifft_3d_array_into` and
+`ifft_3d_array_into_spectrum_scratch` pack the lower `nz/2 + 1` bins of
+each lane and read nothing else. Each owned form allocates exactly its
+returned volume and the caller-owned forms nothing.
+
+The expansion, the packs and the fresh-capacity site move from the 2-D
+pair into `real_storage/expand.rs`, generic in the lane length and the
+partner lane, so both ranks share one pass and one `set_len` proof.
+
+Floors from the census host (`output/probe3d`): the caller-owned routes
+take the pair from 8-long lanes (at 4 they ran 0.83x and 0.91-0.96x of
+the widened route, at 8 1.30-1.41x and 2.0-2.3x), the owned forward from
+the 4 MiB byte floor the 2-D pair measured, and the owned inverse has no
+floor (2.4x at 4-long lanes). Above them the routes reach 3.95x forward
+and 6.6x inverse at a 16 MiB volume.
+
+Item: APOLLO-REAL-3D-FULL-ROUTING
+Refs: backlog.md#apollo-real-3d-full-routing
+
+Co-Authored-By: Claude Fable 5.1 <noreply@anthropic.com>
+```
+docs(backlog): Record the 3-D full-spectrum routing
+…
+8433342
+```
+Item: APOLLO-REAL-3D-FULL-ROUTING
+Refs: backlog.md#apollo-real-3d-full-routing
+
+Co-Authored-By: Claude Fable 5.1 <noreply@anthropic.com>
+```
+ryancinsight
+force-pushed
+the
+perf/apollo-real-3d-full-routing
+branch
+from
+1c13c20 to
+8433342
+Compare
+September 17, 2026 04:43
+Hide details
+View details
+ryancinsight
+merged commit 80dfd9b
+into
+main
+Sep 17, 2026
+13 checks passed
+Uh oh!
+There was an error while loading. Please reload this page.
+ryancinsight
+deleted the
+perf/apollo-real-3d-full-routing
+branch
+September 17, 2026 04:54
+ryancinsight
+mentioned this pull request
+Sep 17, 2026
+chore(scripts): Order the board's done section by anchor hash
+#487
+Merged
+Sign up for free
+to join this conversation on GitHub.
+Already have an account?
+Sign in to comment
+Uh oh!
+There was an error while loading. Please reload this page.
+Labels
+None yet
+1 participant
+Add this suggestion to a batch that can be applied as a single commit.This suggestion is invalid because no changes were made to the code.Suggestions cannot be applied while the pull request is closed.Suggestions cannot be applied while viewing a subset of changes.Only one suggestion per line can be applied in a batch.Add this suggestion to a batch that can be applied as a single commit.Applying suggestions on deleted lines is not supported.You must change the existing code in this line in order to create a valid suggestion.Outdated suggestions cannot be applied.This suggestion has been applied or marked resolved.Suggestions cannot be applied from pending reviews.Suggestions cannot be applied on multi-line comments.Suggestions cannot be applied while the pull request is queued to merge.Suggestion cannot be applied right now. Please check back later.
+You can’t perform that action at this time.

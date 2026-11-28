@@ -1,0 +1,955 @@
+Unified framework for robot learning with multi-physics/renderer support - Runtime visual domain randomization with Cosmos by mingxin-zheng · Pull Request #7946 · isaac-sim/IsaacLab
+
+Runtime visual domain randomization with Cosmos by mingxin-zheng · Pull Request #7946 · isaac-sim/IsaacLab · GitHub
+Skip to content
+You signed in with another tab or window. Reload to refresh your session.
+You signed out in another tab or window. Reload to refresh your session.
+You switched accounts on another tab or window. Reload to refresh your session.
+Dismiss alert
+Conversation
+mingxin-zheng
+commented
+Sep 22, 2026
+•
+edited
+Loading
+Uh oh!
+There was an error while loading. Please reload this page.
+Copy link
+Copy Markdown
+Description
+This PR aims to provide an implementation of using Cosmos3 to perform domain randomization to the camera streams.
+```
+┌─ simulator process ────────────── GPU 0 ─┐
+│  Isaac Sim + Kit + policy                │
+│  VisualDRRuntime                         │
+│    └─ RemoteCosmosBackend  (client)      │
+│         dispatch: 1 frame → 1 free worker│
+└──────────────┬───────────────────────────┘
+               │  control: prompts, seeds, ids   (CPU queue — small, no pixels)
+               │  payload: rgb / depth / seg     (CUDA IPC — GPU→GPU, no host copy)
+    ┌──────────┼──────────┬──────────┐
+    ▼          ▼          ▼          ▼
+┌────────┐ ┌────────┐ ┌────────┐ ┌────────┐
+│worker 0│ │worker 1│ │worker 2│ │worker 3│   ← one process per GPU
+│ GPU 1  │ │ GPU 2  │ │ GPU 3  │ │ GPU 4  │
+│ Cosmos │ │ Cosmos │ │ Cosmos │ │ Cosmos │   ← CosmosBackend, unchanged
+└────────┘ └────────┘ └────────┘ └────────┘
+```
+For demonstration, we use the Franka stacking demo which provides raw semantic IDs to extract for generation. nixl is used for the runtime-backend transport layer to allow efficient communication and future model extensions.
+Fixes # (issue)
+Type of change
+New feature (non-breaking change which adds functionality)
+Release backport
+Backport this pull request to the active release branch after it merges into develop
+Screenshots
+[
+wxwW08I0.mp4
+](url)
+Checklist
+Docker and GPU tests run on demand. Push the commits you want tested, then
+comment run-ci on the pull request.
+I have read and understood the contribution guidelines
+I have run the pre-commit checks with ./isaaclab.sh --format
+I have made corresponding changes to the documentation
+My changes generate no new warnings
+I have added tests that prove my fix is effective or that my feature works
+I have added a changelog fragment under source/<pkg>/changelog.d/ for every touched package (do not edit CHANGELOG.rst or bump extension.toml — CI handles that)
+I have added my name to the CONTRIBUTORS.md or my name already exists there
+mingxin-zheng
+requested a review
+from a team
+September 22, 2026 16:00
+mingxin-zheng
+requested review from
+StafaH,
+hujc7,
+kellyguo11 and
+ooctipus
+as code owners
+September 22, 2026 16:00
+github-actions
+Bot
+added
+enhancement
+New feature or request
+isaac-lab
+Related to Isaac Lab team
+labels
+Sep 22, 2026
+isaaclab-review-bot
+Bot
+reviewed
+Sep 22, 2026
+View reviewed changes
+isaaclab-review-bot
+Bot
+left a comment
+Copy link
+Copy Markdown
+Contributor
+There was a problem hiding this comment.
+Choose a reason for hiding this comment
+The reason will be displayed to describe this comment to others. Learn more.
+Isaac Lab Review Bot
+The runtime/backend split, deterministic scheduling, mask handling, and compositing contracts are coherent, but the implementation has material integration issues: a permanent process-global Cosmos patch can suppress unrelated outputs, the contrib demo reverses package dependency layering, and the public enabled contract is not honored. CLI naming and release notes also need correction to match repository policy and the shipped behavior.
+Design and architecture: The separation between scheduling/compositing and backend residency is sound. However, visual_dr.demo imports isaaclab_tasks from isaaclab_contrib despite the declared dependency direction, and the Cosmos backend installs process-global behavior that affects unrelated Cosmos users without lifecycle restoration.
+API: DRFrame, DRRequest, and DRBackend provide explicit tensor contracts, but VisualDRCfg.enabled is documented as disabling all cost and behavior while the runtime unconditionally constructs and activates its backend. The added script flags also violate the repository requirement that CLI arguments use snake_case, and the changelog should describe only the final shipped defaults rather than contradictory intra-PR iterations.
+Implementation: The episode/chunk scheduling, deterministic hashing, caching, semantic-ID decoding, and foreground compositing paths are covered by focused tests. Before merge, the save interception must delegate for unrelated paths and be restored appropriately, disabled runtime behavior must be gated, and the task-coupled demo must be moved to a layer that can depend on isaaclab_tasks.
+Significant concerns. Posted 5 actionable findings inline.
+Automated review; human maintainers own approval decisions.
+Comment thread
+source/isaaclab_contrib/isaaclab_contrib/visual_dr/cosmos.py
+Outdated
+return original_save(sample, save_fp_wo_ext, *args, **kwargs)
+# Every other save is a control-hint dump: a debug artifact nothing
+# reads back, and one JPEG encode per frame of rollout if left on.
+return None
+isaaclab-review-bot
+Bot
+Sep 22, 2026
+Copy link
+Copy Markdown
+Contributor
+There was a problem hiding this comment.
+Choose a reason for hiding this comment
+The reason will be displayed to describe this comment to others. Learn more.
+🟡 Warning · Implementation — Global save patch drops unrelated Cosmos outputs
+_install_patches permanently replaces cosmos_framework.inference.inference.save_img_or_video and returns None for every string path absent from _WANTED, unlike the read patch which defers to the original. Any other Cosmos pipeline in the process silently stops writing outputs, and close() never restores the original. Suppress only paths this backend registered, and restore the function when the last backend closes.
+Comment thread
+source/isaaclab_tasks/isaaclab_tasks/contrib/stack/config/franka/stack_visual_dr_env_cfg.py
+from isaaclab.utils import configclass
+from isaaclab_tasks.contrib.stack import mdp
+from isaaclab_tasks.contrib.stack.config.franka.stack_ik_rel_visuomotor_cosmos_env_cfg import (
+isaaclab-review-bot
+Bot
+Sep 22, 2026
+Copy link
+Copy Markdown
+Contributor
+There was a problem hiding this comment.
+Choose a reason for hiding this comment
+The reason will be displayed to describe this comment to others. Learn more.
+🟡 Warning · Design Architecture — Contrib package imports isaaclab_tasks
+isaaclab_contrib declares only isaaclab as an interpackage dependency, while uv.lock shows isaaclab_assets depends on isaaclab_contrib and isaaclab_tasks depends on isaaclab_assets. Importing isaaclab_tasks.contrib.stack and isaaclab_tasks.utils.presets from a shipped contrib module inverts that direction and makes the module unimportable in a standalone contrib install. Move this task-coupled config into isaaclab_tasks or the scripts directory.
+Comment thread
+source/isaaclab_contrib/isaaclab_contrib/visual_dr/runtime.py
+Outdated
+self.cfg = cfg
+self.device = torch.device(device)
+self.num_envs = num_envs
+self.backend: DRBackend = cfg.backend.class_type(cfg.backend)
+isaaclab-review-bot
+Bot
+Sep 22, 2026
+Copy link
+Copy Markdown
+Contributor
+There was a problem hiding this comment.
+Choose a reason for hiding this comment
+The reason will be displayed to describe this comment to others. Learn more.
+🟡 Warning · Api — VisualDRCfg.enabled is never honored
+VisualDRCfg documents that leaving enabled false "must cost nothing -- no model load ... no change to what the policy sees", but the runtime constructs cfg.backend.class_type(cfg.backend) unconditionally and neither activate() nor read() consults cfg.enabled. A disabled config still loads the model and restyles frames, and the default config (backend MISSING) fails construction outright. Gate construction and generation on the flag, or drop it.
+Comment thread
+scripts/visual_dr/run_demo.py
+Outdated
+from isaaclab.app import AppLauncher
+parser = argparse.ArgumentParser("run_demo")
+parser.add_argument("--num-envs", type=int, default=2)
+isaaclab-review-bot
+Bot
+Sep 22, 2026
+Copy link
+Copy Markdown
+Contributor
+There was a problem hiding this comment.
+Choose a reason for hiding this comment
+The reason will be displayed to describe this comment to others. Learn more.
+🔵 Suggestion · Api — CLI arguments use kebab-case
+Repository guidelines require snake_case CLI arguments, and AppLauncher.add_app_launcher_args already contributes --enable_cameras/--num_envs-style flags. These scripts add --num-envs, --max-batch, --num-steps, --control-guidance (and similarly in run_rollout.py and bench_steps.py), forcing users to mix conventions in a single command line. Rename to underscore form.
+Comment thread
+source/isaaclab_contrib/changelog.d/runtime-visual-dr-vectorized.minor.rst
+Outdated
+storage address, and an offload/activate cycle returns to its starting residency
+exactly.
+* Lowered the default Cosmos sampler steps from four to two, roughly halving
+isaaclab-review-bot
+Bot
+Sep 22, 2026
+Copy link
+Copy Markdown
+Contributor
+There was a problem hiding this comment.
+Choose a reason for hiding this comment
+The reason will be displayed to describe this comment to others. Learn more.
+🔵 Suggestion · Api — Changelog records contradictory intra-PR iterations
+For a feature that has never shipped, the fragment states the sampler default was "Lowered ... from four to two" and later that num_steps "rises from two to sixteen" (the committed default), plus "Fixed" entries for behavior no release contained. CI folds this verbatim into CHANGELOG.rst, so the release notes will describe defaults that never existed. Collapse it into entries describing the shipped behavior.
+greptile-apps
+Bot
+commented
+Sep 22, 2026
+•
+edited
+Loading
+Uh oh!
+There was an error while loading. Please reload this page.
+Copy link
+Copy Markdown
+Contributor
+Confidence Score: 0/5
+This PR is not safe to merge because supported device and reset configurations fail, its Cosmos dependency extra is unsatisfiable in the shared environment, and the advertised remote transport is absent.
+Findings
+Unsatisfiable Cosmos dependency ▶
+Backend ignores environment device ▶
+Reset observations reuse terminal frames ▶
+Disabled runtime remains active ▶
+Remote transport is absent ▶
+Global hook drops outputs ▶
+Offload clears unrelated mappings ▶
+Wiring failures exit successfully ▶
+Summary
+This PR adds runtime camera-domain randomization, including deterministic vectorized scheduling, semantic foreground preservation, a local Cosmos transfer backend, demonstration and diagnostic scripts, and staged Franka stacking rewards.
+Integrates generated frames at the policy observation boundary and preserves configured semantic classes.
+Adds Cosmos control-map generation, prompt progression, model residency management, and optional dependency groups.
+Adds CPU contract tests for scheduling, masks, compositing, and prompt selection.
+The advertised remote NIXL worker path is not implemented; the current data path remains local and synchronous.
+Diagram
+```
+%%{init: {'theme': 'neutral'}}%%
+flowchart LR
+    Camera["Isaac camera buffers<br/>RGB / depth / segmentation"] --> Obs["image_runtime_dr"]
+    Obs --> Runtime["VisualDRRuntime<br/>schedule / prompt / composite"]
+    Runtime -->|selected frames| Local["Local CosmosBackend<br/>configured CUDA device"]
+    Local --> Cosmos["cosmos-framework pipeline"]
+    Cosmos --> Runtime
+    Runtime --> Policy["Policy observation"]
+    NIXL["NIXL agent sketch"] -. "not wired" .-> Runtime
+    Workers["Remote GPU workers"] -. "not implemented" .-> NIXL
+```
+Loading
+Reviews (1) · Last reviewed commit: "Walk a prompt progression across a run"
+greptile-apps
+Bot
+reviewed
+Sep 22, 2026
+View reviewed changes
+Comment thread
+source/isaaclab_contrib/pyproject.toml
+Outdated
+"hydra-core", "imageio-ffmpeg", "imageio", "loguru", "msgpack",
+"nvidia-cudnn-frontend; sys_platform == 'linux'", "nvidia-ml-py",
+"obstore", "omegaconf", "pydantic", "requests", "scipy", "termcolor",
+"transformers>=4.57.1,<5", "tyro", "uv", "websockets",
+greptile-apps
+Bot
+Sep 22, 2026
+Copy link
+Copy Markdown
+Contributor
+There was a problem hiding this comment.
+Choose a reason for hiding this comment
+The reason will be displayed to describe this comment to others. Learn more.
+Unsatisfiable Cosmos dependency
+The new cosmos-runtime extra requires transformers>=4.57.1,<5, but the shared development environment installs isaaclab-contrib alongside transformers==5.10.4, and uv.lock resolves that same 5.10.4 version. Selecting this extra therefore creates an unsatisfiable dependency set, so the advertised Cosmos prerequisites cannot be installed in the repository's shared environment.
+Note: If this suggestion doesn't match your team's coding style, reply to this and let me know. I'll remember it for next time!
+Comment thread
+source/isaaclab_contrib/isaaclab_contrib/visual_dr/cfg.py
+class_type: type[DRBackend] = MISSING
+"""The backend implementation this config constructs."""
+device: str = "cuda:0"
+greptile-apps
+Bot
+Sep 22, 2026
+Copy link
+Copy Markdown
+Contributor
+There was a problem hiding this comment.
+Choose a reason for hiding this comment
+The reason will be displayed to describe this comment to others. Learn more.
+Backend ignores environment device
+The backend defaults to cuda:0, while VisualDRRuntime receives the environment device but constructs the backend solely from cfg.backend. On a supported --device cuda:1 or nonzero distributed local-rank launch, camera frames are rendered on that selected device while Cosmos remains on cuda:0. CosmosBackend.generate() then rejects the mismatch, aborting under the default error policy or leaving frames unrandomized under passthrough.
+Comment thread
+source/isaaclab_contrib/isaaclab_contrib/visual_dr/runtime.py
+Comment on lines
++126
+to
++131
+step = int(env.common_step_counter)
+if self._synced_step == step:
+return
+self._synced_step = step
+self._observation_index += 1
+self._cache.clear()
+greptile-apps
+Bot
+Sep 22, 2026
+Copy link
+Copy Markdown
+Contributor
+There was a problem hiding this comment.
+Choose a reason for hiding this comment
+The reason will be displayed to describe this comment to others. Learn more.
+Reset observations reuse terminal frames
+When recorders are active or compute_final_obs=True, ManagerBasedRLEnv computes observations both before and after a reset without incrementing common_step_counter again. The pre-reset computation sets _synced_step and may cache the terminal camera image; the post-reset computation then skips synchronization and returns that cached image. The policy consequently receives terminal pixels as the new episode's first observation, and the runtime does not advance that environment's episode or style state.
+Comment thread
+source/isaaclab_contrib/isaaclab_contrib/visual_dr/runtime.py
+Outdated
+Comment on lines
++68
+to
++74
+def __init__(self, cfg: VisualDRCfg, num_envs: int, device: torch.device | str):
+self.cfg = cfg
+self.device = torch.device(device)
+self.num_envs = num_envs
+self.backend: DRBackend = cfg.backend.class_type(cfg.backend)
+bank = getattr(cfg.backend, "prompts", None)
+self.prompts = load_prompt_bank(bank)
+greptile-apps
+Bot
+Sep 22, 2026
+Copy link
+Copy Markdown
+Contributor
+There was a problem hiding this comment.
+Choose a reason for hiding this comment
+The reason will be displayed to describe this comment to others. Learn more.
+Disabled runtime remains active
+VisualDRCfg.enabled is never checked here. Constructing the public runtime with the default disabled configuration dereferences the MISSING backend and fails, while a disabled configuration that supplies a backend still instantiates it and loads the model when activate() is called. This violates the documented contract that disabled visual DR causes no model load, rendering cost, or observation change.
+Comment thread
+source/isaaclab_contrib/isaaclab_contrib/visual_dr/nixl.py
+Comment on lines
++6
+to
++17
+"""Optional NIXL entry point, not a completed transport or server.
+Communication sketch (both peers retain their CUDA allocations):
+register_memory(tensor) -> exchange agent metadata and serialized descriptors
+get_xfer_descs(local_tensor), deserialize_descs(remote_descriptors)
+initialize_xfer("WRITE", local, remote, peer) -> transfer(handle)
+check_xfer_state(handle) == "DONE" -> receiver may consume; repeat for result
+Control carries IDs, layouts, prompts and descriptors only. Before production,
+add CUDA producer/consumer synchronization, bounded buffer leases, deadlines,
+error recovery and deregistration after all readers finish. UCX can host-stage:
+qualify the actual transport/topology and message sizes before enabling it.
+greptile-apps
+Bot
+Sep 22, 2026
+Copy link
+Copy Markdown
+Contributor
+There was a problem hiding this comment.
+Choose a reason for hiding this comment
+The reason will be displayed to describe this comment to others. Learn more.
+Remote transport is absent
+This module explicitly describes itself as an incomplete sketch and only creates a bare UCX agent. It contains no memory registration, descriptor exchange, transfer lifecycle, client/server, or worker implementation, and nothing wires it into VisualDRRuntime. The demo instead selects the local synchronous CosmosBackend, so the PR's described remote multi-GPU worker and CUDA IPC path cannot run.
+Comment thread
+source/isaaclab_contrib/isaaclab_contrib/visual_dr/cosmos.py
+Outdated
+Comment on lines
++168
+to
++179
+def save_img_or_video(sample, save_fp_wo_ext, *args, **kwargs):
+if isinstance(save_fp_wo_ext, str):
+with _LOCK:
+wanted = save_fp_wo_ext in _WANTED
+if wanted:
+with _LOCK:
+_OUTPUTS[save_fp_wo_ext] = sample.detach().float().clamp(0.0, 1.0)
+# Cosmos asserts the vision file exists right after this call.
+return original_save(sample, save_fp_wo_ext, *args, **kwargs)
+# Every other save is a control-hint dump: a debug artifact nothing
+# reads back, and one JPEG encode per frame of rollout if left on.
+return None
+greptile-apps
+Bot
+Sep 22, 2026
+Copy link
+Copy Markdown
+Contributor
+There was a problem hiding this comment.
+Choose a reason for hiding this comment
+The reason will be displayed to describe this comment to others. Learn more.
+Global hook drops outputs
+This process-wide replacement discards every string-path save that is not currently in this backend's _WANTED set, although only control-hint debug artifacts are intended to be skipped. Any other Cosmos pipeline used later in the same process therefore silently loses its output files or fails when it expects them. Closing the backend does not restore the original save function.
+Comment thread
+source/isaaclab_contrib/isaaclab_contrib/visual_dr/cosmos.py
+Comment on lines
++107
+to
++120
+for obj in gc.get_objects():
+if not isinstance(obj, dict) or not obj:
+continue
+try:
+hits = [
+value
+for value in obj.values()
+if isinstance(value, torch.Tensor) and value.is_cuda and value.data_ptr() in pointers
+]
+except Exception: # noqa: BLE001 - exotic mappings must not break offload
+continue
+if hits:
+obj.clear()
+released += 1
+greptile-apps
+Bot
+Sep 22, 2026
+Copy link
+Copy Markdown
+Contributor
+There was a problem hiding this comment.
+Choose a reason for hiding this comment
+The reason will be displayed to describe this comment to others. Learn more.
+Offload clears unrelated mappings
+Offloading scans every GC-tracked dictionary in the process and clears any dictionary containing a CUDA tensor whose address matches a model parameter or buffer. A caller retaining model.state_dict() or another legitimate weight or cache mapping can therefore have that live mapping emptied. Matching only by storage address does not identify ownership or distinguish the intended Cosmos loader dictionary.
+Comment thread
+scripts/visual_dr/run_rollout.py
+Comment on lines
++239
+to
++240
+ok = backend.frames == expected_frames and style_violations == 0
+print(f"\n[rollout] WIRING {'OK' if ok else 'MISMATCH'}", flush=True)
+greptile-apps
+Bot
+Sep 22, 2026
+Copy link
+Copy Markdown
+Contributor
+There was a problem hiding this comment.
+Choose a reason for hiding this comment
+The reason will be displayed to describe this comment to others. Learn more.
+Wiring failures exit successfully
+The script reduces frame-count and style-persistence checks to ok but only prints the result. A detected mismatch still exits successfully, so CI and other automation cannot use this wiring check to catch a broken runtime without manually inspecting its final output.
+Note: If this suggestion doesn't match your team's coding style, reply to this and let me know. I'll remember it for next time!
+mingxin-zheng
+marked this pull request as draft
+September 22, 2026 16:15
+This was referenced Sep 24, 2026
+Decouple PPISP through an extensible visual-sensor post-processing pipeline - Camera specific
+#7994
+Closed
+Decouple PPISP through observation-owned post-processing
+#8012
+Closed
+mingxin-zheng
+added 12 commits
+September 29, 2026 02:11
+Add experimental runtime visual domain randomization
+896c959
+Remove runtime DR design documents and changelog fragment
+04d6347
+Implement DR scheduling and Cosmos tensor model lifecycle
+5a507e9
+Add staged rewards for cube stacking
+…
+525f915
+```
+The stacking tasks ship imitation-learning configurations and set
+rewards to None, so there is nothing for a reinforcement-learning
+configuration to start from. These terms are built on the tasks' own
+object_grasped, object_stacked and cubes_stacked predicates, so what
+earns reward and what counts as success cannot drift apart.
+
+Reach shaping uses a bounded tanh kernel rather than a raw negative
+distance, so it cannot dominate the stage rewards when the arm starts
+far from the cube. Stage rewards pay per step for a condition that
+holds rather than for entering it, so a policy cannot farm them by
+repeatedly crossing a boundary.
+
+The shipped task configurations are unchanged and still set
+rewards = None; callers opt in by assigning their own rewards group.
+```
+Vectorize runtime visual DR and add a Cosmos backend
+…
+3e1ce4f
+```
+The runtime now applies DR to every environment at once. Episode
+boundaries, action-chunk gating and partial resets are read from the
+environment rather than declared by the application, so DRObservation
+and ActionChunkSchedule are gone and the application owns only model
+residency. Style and restyle decisions derive from a hash of the seed,
+environment index and episode index, so they are stable across replicas
+and across repeated reads of one observation.
+
+Preserved regions are now named by foreground class, and an
+unrecognised semantic id is kept rather than replaced: an asset nobody
+tagged survives generation instead of dissolving into the background,
+which is the failure that stays invisible until a policy has learned
+around it.
+
+The Cosmos backend runs against a stock cosmos-framework checkout and
+the public Cosmos3-Nano checkpoint. Foreground preservation is a
+composite rather than mask-guided denoising, which is what removes the
+need for a patched checkout.
+
+Three defects found while bringing this up on hardware:
+
+- For 128-wide attention heads cuDNN answers through a runtime-compiled
+  engine, and once Omniverse Kit has started it can no longer compile a
+  shape it has not already seen. Sequence lengths follow the prompt, so
+  no fixed warm-up covers them. The backend probes cuDNN on load and
+  falls back to torch's Flash kernels, which need no runtime
+  compilation and return the same logsumexp statistics.
+
+- Cosmos' loader keeps a state dict sharing storage with the model
+  parameters, so moving them to host freed nothing and the next
+  activation allocated a second copy. Residency grew by the size of the
+  model on every offload cycle, defeating the point of offloading.
+
+- The RTX renderer reports idToLabels keys as RGBA strings even when
+  colorization is disabled and the buffer holds uncolored int32 ids.
+  Those channels are the little-endian bytes of the stored id.
+
+Sampling defaults follow Cosmos' tuned transfer values rather than its
+image2image defaults, which are for the mode that has no control hint.
+```
+Add visual DR demo, rollout and benchmark scripts
+…
+fa123b5
+```
+run_rollout drives a vectorized rollout and checks the wiring against
+expectations: that generation happens only on frames a policy consumes,
+that an episode keeps one style, that resetting one environment leaves
+the others alone, and that residency can be handed to a learner and
+taken back. It optionally records per-camera video of both the raw
+render and what the policy actually reads.
+
+scripted_policy exists so those rollouts show real motion. A static arm
+hides the problems worth seeing, such as a preserved mask lagging the
+robot. It is a phase machine over privileged state, not a learned
+policy, and is not meant to become one.
+
+bench_steps sweeps sampler steps against latency and appearance on a
+real simulated frame, loading the model once. On an H100 at the 480
+tier the cost is about 0.206 s per step plus 0.09 s fixed.
+
+smoke_cosmos_transfer checks the checkpoint end to end without Isaac
+Sim, which is how the attention and residency faults above were
+separated from the simulator.
+```
+Walk a prompt progression across a run
+…
+79e5b8f
+```
+Some background conditions should drift rather than be drawn afresh each
+frame. Time of day is the clearest case: the laboratory has windows, and
+independently sampling the lighting every frame reads as flicker rather
+than as time passing.
+
+PromptBankCfg gains a phrase sequence and the number of steps to walk it
+in. The phrase is appended to whichever variant the episode selected, so
+the room stays the same room while its light changes. The walk follows
+wall-clock steps rather than episode progress, so it does not reset each
+episode, and clamps at the final phrase rather than wrapping, so a run
+longer than the span ends at midnight instead of snapping back to dawn.
+
+The demo takes its lab from dawn to midnight over a 230-step rollout.
+Measured background brightness across that run falls 142 to 74 after
+mid-morning, rising slightly at sunset and again at midnight where
+interior lights sit against dark glass.
+```
+Run visual DR generation on dedicated GPUs, with replicas
+…
+f48fe95
+```
+A diffusion model and a simulator do not share a GPU well: one frame
+costs seconds, and the simulator waits through all of them. This moves
+generation into worker processes on their own GPUs, and runs several so
+the environments randomized in one step are generated at once -- the
+only parallelism available while Cosmos rejects batched transfer
+inference.
+
+The runtime does not change. It already chunks the environments it wants
+randomized by max_batch, so setting that to the worker count hands the
+backend exactly one frame per worker, which it fans out concurrently.
+
+Image payloads move by CUDA IPC: sending a CUDA tensor through a
+torch.multiprocessing queue shares the allocation rather than copying
+it, and the worker's device-to-device copy is a peer transfer, so pixels
+never reach host memory. Prompts, seeds and identifiers travel as
+ordinary objects on the control queue.
+
+Measured on H100s at sixteen sampler steps: 3.62 s per frame with one
+worker, 2.02 s with two, 1.18 s with four. One remote worker costs about
+what the in-process backend does, so the transport is not the expense.
+
+Workers run without Omniverse Kit, which is incidentally why the cuDNN
+attention fallback is inert in them: Kit's startup is what breaks
+runtime kernel compilation, and no Kit starts there.
+
+Device indices are indices into what this process can see, so
+CUDA_VISIBLE_DEVICES has to cover the union of the workers' GPUs and the
+simulator's. Naming a device outside that set fails at construction with
+that explanation rather than at the first generation.
+
+Same-node only; crossing machines needs a real transport behind the same
+class, which is where NIXL would go.
+```
+Suppress worker shutdown errors explicitly
+…
+0aa0bc1
+```
+SIM105: the try/except/pass around the worker close message is
+contextlib.suppress. Behaviour is unchanged -- a wedged worker is still
+terminated afterwards, and shutdown still must not mask whatever failure
+brought us here.
+```
+Move the stacking demo config out of isaaclab_contrib
+…
+a786a3e
+```
+isaaclab_contrib declares only isaaclab as a dependency, while
+isaaclab_assets depends on isaaclab_contrib and isaaclab_tasks depends
+on isaaclab_assets. A contrib module importing isaaclab_tasks therefore
+inverted that direction and would not import in a standalone contrib
+install.
+
+The configuration is task-coupled -- it names this task's cameras,
+semantic classes and scene -- so it belongs with the task rather than
+beside the runtime. Moving it to isaaclab_tasks puts the import in the
+direction the packages already declare, and leaves the runtime
+task-agnostic as intended.
+
+Repository guidelines require snake_case CLI arguments, and
+AppLauncher already contributes flags in that form, so the scripts were
+forcing two conventions onto one command line. Renamed --num-envs,
+--decision-period, --episode-length-s, --offload-at, --video-dir,
+--max-batch, --num-steps, --guidance variants, --aspect-ratio and
+--control-weight to underscore form. argparse already exposed them as
+snake_case attributes, so no access site changed.
+
+Both reported by automated review on isaac-sim#7946.
+```
+Honor VisualDRCfg.enabled
+…
+90fa01b
+```
+The flag was documented as costing nothing when false -- no model load,
+no extra render products, no change to what the policy sees -- but the
+runtime constructed and activated a backend regardless, and neither
+read() nor sync() consulted it. A disabled configuration still loaded
+the model and still restyled frames.
+
+Worse, the shipped default is disabled and names no backend, so
+constructing a runtime from the defaults dereferenced a MISSING field
+and raised. Disabled was not expressible with the configuration as
+shipped.
+
+A disabled runtime now builds no backend, so nothing can load; advances
+no scheduling state; and returns the camera buffer untouched without
+calling make_frame, so depth and segmentation are not fetched either.
+The observation term treats a disabled runtime exactly as it treats no
+runtime. Enabling is unchanged.
+
+Reported by automated review on isaac-sim#7946.
+```
+Make foreground compositing a configurable switch
+…
+3394910
+```
+Pasting the render back is one answer to preserving the foreground, not
+the only one. Somebody with a model conditioned tightly enough to keep
+the objects faithful should be able to let it render the whole frame,
+and a scene where nothing in view is task-relevant does not need the
+paste at all.
+
+CameraDRCfg.composite_foreground selects between them. Set, the
+foreground is bit-identical to the render, at the cost that the
+generator never saw it: the two share no lighting, reflections or
+contact shadows, and the mask boundary is a visible seam. Cleared, the
+generated frame stands as it is -- coherently lit, no seam -- but
+nothing constrains what the objects look like. Measured on this task's
+own scene, the cubes come back cyan and the robot black, which would be
+fatal for a policy that picks a cube out by colour.
+
+preserve_classes is now required only while compositing, so a scene with
+no semantic tags works in the cleared mode, and the mask is not built at
+all there. Naming a class that never appears still raises: silently
+regenerating everything is the expensive mistake.
+```
+mingxin-zheng
+added 15 commits
+September 29, 2026 02:11
+Allow overriding sampler steps from the rollout script
+…
+edd9bf3
+```
+Comparing step counts previously meant editing the task configuration,
+which made it awkward to check whether a quality problem came from the
+sampler or from somewhere else.
+```
+Send the preserved mask to Cosmos when the checkout supports it
+…
+440fe0c
+```
+Until now the mask never reached the model. It was used only afterwards,
+to paste the foreground back, which means the background was generated
+without any knowledge of what would cover it -- so the two could never
+agree on lighting or contact shadows, and the mask boundary stayed a
+visible seam.
+
+Stock cosmos-framework cannot accept a mask at all; guided generation
+lives in a patched checkout. Rather than choose one, the backend now
+detects the capability: mask_guidance sends the mask where the sample
+arguments accept one, and raises at load where they do not, instead of
+quietly generating unmasked. The polarity already matches -- Cosmos
+preserves where the mask is one, which is what preserve means -- so it
+goes across unchanged.
+
+Compositing remains useful alongside it. Guidance preserves
+approximately, in latent space; the paste is exact.
+
+Raised in review on isaac-sim#7946: 'Is a mask being supplied to Cosmos?'
+```
+Make the Cosmos extra installable alongside Isaac Lab
+…
+c769037
+```
+The cosmos-runtime extra pinned transformers<5 and diffusers==0.35.1
+while Isaac Lab pins transformers==5.10.4, so selecting the extra could
+not resolve at all. Both pins were stricter than reality.
+
+Cosmos needs neither a different Python nor a different torch. It
+declares requires-python >= 3.10, and the depth and segmentation
+transfer paths were verified end to end on Python 3.12, torch 2.12,
+transformers 5.10.4 and diffusers 0.39.0, with no flash-attn installed.
+What does matter is installing cosmos-framework itself with --no-deps:
+its dependency groups pin torch 2.10 or 2.13 to match the CUDA wheel
+variants it publishes, and those would fight Isaac Lab's pin.
+
+FlashAttention is the only component whose wheels are built against a
+particular torch ABI, and the transfer path does not need it.
+
+Added docs/visual_dr_setup.md with the verified configuration and the
+install recipe, since the conflict was reported from testing rather than
+found in review.
+
+Reported in testing and by automated review on isaac-sim#7946.
+```
+Document the visual DR setup gaps found in testing
+…
+15f22d7
+```
+Three things testers hit that the recipe did not mention.
+
+The stacking task needs the teleop extra: its configuration imports
+XrCfg, which is now a shim onto isaaclab_teleop, so the task will not
+import without it. The video extra is only needed for AppLauncher's own
+--video; the visual DR scripts write MP4s through imageio-ffmpeg, which
+the cosmos-runtime extra already supplies.
+
+The sharpest one: uv sync is exact, so a later plain sync uninstalls
+cosmos-framework and everything the extra brought with it -- around
+fifty packages -- silently undoing a working setup. --inexact preserves
+it.
+
+Also recorded why Cosmos cannot be locked alongside Isaac Lab yet, since
+it is closer than it appears: its base dependencies do not pin torch at
+all, and the single blocker is its base transformers<5 pin. Relaxing
+that with a uv override and a git source would let it live in the
+lockfile, but that is a packaging decision for the repository rather
+than one this feature should make.
+
+Reported in testing on isaac-sim#7946.
+```
+Support a custom cosmos-framework checkout and checkpoint
+…
+f83a1e3
+```
+Teams carry their own Cosmos fork and their own post-trained
+checkpoints, and neither should need a code change to use.
+
+install_cosmos.sh takes a local path or an https or ssh git URL,
+optionally pinned with '.git@<ref>', and always installs with --no-deps
+alongside the cosmos-runtime extra. Splitting the ref on '.git@' keeps
+the '@' in an ssh URL's 'git@host' from being read as a ref separator.
+After installing it reports which checkout landed and whether that
+checkout supports guided generation, so a checkout without it is
+obvious rather than silently falling back to composite-only.
+
+Checkpoints already worked -- the config has always accepted a local
+directory as well as a registered name or an s3:// URI -- but a mistyped
+path failed deep inside Cosmos complaining about config resolution.
+That now fails immediately, naming the path.
+
+Documented that a distilled checkpoint wants different sampling from the
+base model: roughly four steps without classifier-free guidance, rather
+than the sixteen steps at guidance 3.0 tuned for Cosmos3-Nano.
+```
+Document when a custom Cosmos checkout will not run here
+…
+ee7ca06
+```
+Installing a custom checkout and a distilled transfer checkpoint works as
+far as loading the model, which stock cannot do -- its exported config
+carries keys stock's schema does not have. Generation then fails on
+attention backend selection.
+
+The reason is worth recording. The base Cosmos3-Nano path needs no
+FlashAttention: it falls back to cuDNN, or to torch's Flash kernels once
+Kit breaks cuDNN's runtime compilation. A model using variable-length
+packed attention has no cuDNN path at all, so FlashAttention becomes
+mandatory -- and the Cosmos dependency index publishes it only for
+CPython 3.13 against torch 2.9 or 2.10, while Isaac Lab is CPython 3.12
+with torch 2.12.
+
+So the Python and torch versions reported as a conflict in testing are
+real for such a checkout, and not for the base model path this PR
+defaults to.
+```
+Unblock custom Cosmos checkouts that require FlashAttention
+…
+3dc403e
+```
+A checkout whose models use variable-length packed attention cannot fall
+back to cuDNN, which has no varlen path, so FlashAttention is mandatory
+and generation otherwise fails at backend selection. The Cosmos
+dependency index publishes it only for CPython 3.13 against torch 2.9 or
+2.10, which does not fit Isaac Lab.
+
+Dao-AILab's own releases do: a CPython 3.12 CUDA 13 build against torch
+2.10 imports and runs correctly on torch 2.12, varlen kernel included.
+With it, a fork-only distilled transfer checkpoint loads and generates,
+and the base checkpoint keeps working, so the combination is a superset
+rather than a swap.
+
+Documented as a pragmatic pin rather than a guaranteed one: nothing
+enforces the torch match, so it is worth re-checking after an upgrade.
+
+Also added checkpoint, guidance and mask_guidance overrides to the
+rollout script, which previously could only vary sampler steps.
+```
+Keep internal hosts and checkpoint names out of the docs
+…
+6119b0b
+```
+The setup guide and installer used a specific internal git URL and a
+specific checkpoint name as their examples. Neither is reachable outside
+the organisation, and neither belongs in a public repository. Replaced
+with placeholders that show the shape of each argument instead.
+```
+Describe the foreground as fixed in the stacking prompts
+…
+dfe9347
+```
+With composite_foreground cleared the model regenerates everything, and
+the prompts described only the room. Given nothing about the workbench
+or the cubes, it invented them: the three cubes fused into a pair of
+cyan shapes, the arm became a dark instrument, and laboratory clutter
+appeared on the bench.
+
+Each scene variant now carries a clause naming what must not change -- a
+bare grey metal workbench, a white arm, exactly three matte cubes in
+red, green and blue, and nothing else resting on it -- and the negative
+prompt gained entries against furnishing or recolouring the bench.
+
+Measured on one frame, the cube region goes from 1/1/98 percent
+red/green/blue to 10/7/83 against a raw 33/33/34, and the three cubes
+are individually visible again rather than fused. The bench is closer to
+grey but still not the render's colour.
+
+This is weak compared with pasting the pixels back, and does nothing at
+all when the composite is on, since those pixels never come from the
+model. It is the only lever available in the cleared mode.
+```
+Build the preserved mask even when the composite is off
+…
+46fb109
+```
+Mask construction was gated on composite_foreground, on the reasoning
+that nothing would be pasted back so nothing needed protecting. That
+was wrong: a backend may send the same mask to the model as a guidance
+signal. With the composite cleared it received an all-zero mask, so
+guided generation preserved nothing and silently did nothing at all.
+
+The mask is now built whenever preserve_classes names something, and
+composite_foreground decides only whether the runtime pastes it back.
+
+The difference is not subtle. Generating without the composite but with
+a real guidance mask reproduces the workbench colour exactly, [106,106,105]
+against the render's [106,106,105], where the empty mask gave [84,71,63];
+the cubes keep their colours rather than fusing; and the frame is still
+lit as one scene, with no mask seam.
+
+This also retracts a conclusion drawn from the earlier behaviour: mask
+guidance was never tested without the composite, only an empty mask was.
+```
+Remove the fringe around preserved objects under mask guidance
+…
+25bb5e7
+```
+Generating with a guidance mask and no composite left a bright rim
+tracing every preserved silhouette. Two causes, both introduced here.
+
+The latent mask was reduced with max, which keeps a cell whenever any of
+its pixels are foreground. That holds a rim of original background
+around each object, and against a regenerated scene the held pixels read
+as a halo. Reducing with area instead measured close to half the excess
+brightness while still keeping thin structures such as the gripper
+fingers.
+
+The stacking prompts had also been told to describe the foreground. That
+was a workaround for the mask being empty whenever the composite was
+off; with a real mask it is unnecessary, because the mask preserves the
+foreground. It was also harmful: the clause biased generation brighter
+around the objects, and measured on matched scenes it made cube colours
+worse rather than better, 19/25/56 red/green/blue against the render's
+33/33/34 where describing nothing gave 33/33/34 exactly.
+
+Over sixteen frames the workbench now differs from the render by 0.09 of
+a level on average, and no fringe is visible.
+
+boundary_px compounds the same rim -- dilation helps hide the composite's
+seam but widens what guidance holds -- so the field documents leaving it
+at zero when generating with a mask.
+```
+Clean up Cosmos runtime recipes and mask guidance compatibility
+195c2f7
+Default visual DR to generated foreground and simplify checkpoint setup
+953ef63
+fix
+…
+2d8b6ef
+```
+Signed-off-by: Mingxin Zheng <mingxinz@nvidia.com>
+```
+Remove redundant visual DR demo and exploratory scripts
+269944d
+mingxin-zheng
+force-pushed
+the
+feature/runtime-visual-dr-vectorized
+branch
+from
+195b71a to
+269944d
+Compare
+September 29, 2026 12:29
+Document tested Cosmos framework and checkpoint sources
+9cacfc9
+temiroff
+mentioned this pull request
+Sep 30, 2026
+Move PPISP into observation-owned visual post-processing
+#8222
+Closed
+7 of 8 tasks
+This branch has not been deployed
+No deployments
+Sign up for free
+to join this conversation on GitHub.
+Already have an account?
+Sign in to comment
+Uh oh!
+There was an error while loading. Please reload this page.
+Labels
+enhancement
+New feature or request
+isaac-lab
+Related to Isaac Lab team
+1 participant
+Add this suggestion to a batch that can be applied as a single commit.This suggestion is invalid because no changes were made to the code.Suggestions cannot be applied while the pull request is closed.Suggestions cannot be applied while viewing a subset of changes.Only one suggestion per line can be applied in a batch.Add this suggestion to a batch that can be applied as a single commit.Applying suggestions on deleted lines is not supported.You must change the existing code in this line in order to create a valid suggestion.Outdated suggestions cannot be applied.This suggestion has been applied or marked resolved.Suggestions cannot be applied from pending reviews.Suggestions cannot be applied on multi-line comments.Suggestions cannot be applied while the pull request is queued to merge.Suggestion cannot be applied right now. Please check back later.
+You can’t perform that action at this time.

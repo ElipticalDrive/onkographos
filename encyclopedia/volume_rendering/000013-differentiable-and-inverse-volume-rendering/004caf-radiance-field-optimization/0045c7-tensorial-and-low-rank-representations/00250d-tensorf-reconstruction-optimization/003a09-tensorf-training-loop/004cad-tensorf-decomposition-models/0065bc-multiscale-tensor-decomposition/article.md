@@ -1,0 +1,213 @@
+# Multiscale Tensor Decomposition
+## Overview
+Multiscale Tensor Decomposition (MTD) is a radiance field representation method that decomposes 3D tensors into plane and line features at multiple resolutions to reconstruct scenes from coarse to fine scales [S1]. It improves shape and appearance reconstruction accuracy and convergence speed over single-scale TensoRF while using fewer parameters [S1]. Unlike TensoRF, which performs decomposition at a single scale, MTD leverages multiscale representations to explore local smoothness at varying scales, allowing higher-resolution representations to capture richer details with fewer total parameters [S1].
+## How it works
+**Inputs and Outputs:**
+*   **Input:** A 3D point $x = (x, y, z)$ and a view direction $d$ [S1].
+*   **Output:** Density $\sigma$ and color $c$ (diffuse and specular components) for the point [S1].
+
+**Data Structures:**
+The representation consists of $L$ levels [S1]. At each level $l$, the 3D tensor is decomposed into three plane feature maps $F_{xy}^l, F_{xz}^l, F_{yz}^l$ with resolution $N_l \times N_l$ and three line feature vectors $F_{z}^l, F_{y}^l, F_{x}^l$ with length $N_l$ [S1]. The total number of parameters is determined by the number of levels, base resolution, growth factor, and feature channels per level [S1].
+
+**Parameters:**
+*   $N_{min}$: Base resolution (16) [S1].
+*   $N_{max}$: Maximum resolution (512) [S1].
+*   $L$: Total number of levels (16) [S1].
+*   $b$: Growth factor, calculated as $b = \exp\left(\frac{\ln N_{max} - \ln N_{min}}{L-1}\right)$ [S1].
+*   $C_{app}$: Feature channels for appearance field (4) [S1].
+*   $C_{den}$: Feature channels for density field (2) [S1].
+*   Spatial MLP: 3 layers, 256 hidden units, ReLU activation [S1].
+*   Directional MLP: 6 layers, 256 hidden units, ReLU activation [S1].
+*   Bottleneck feature $b$ size: 128 [S1].
+*   Specular encoding feature $a_i$ size: 2 [S1].
+*   Optimizer: Adam with learning rate $2 \times 10^{-3}$ for MTDs and $1 \times 10^{-3}$ for MLPs [S1].
+
+**Steps:**
+
+1.  **Calculate Resolution:** For each level $l \in [0, L-1]$, compute the resolution $N_l$:
+    $$ N_l = \lfloor N_{min} b^l \rfloor $$
+    [S1]
+
+2.  **Feature Extraction:** For a point $x$ at level $l$:
+    *   Decompose coordinates into 2D projections $(x, y), (x, z), (y, z)$ and 1D projections $z, y, x$ [S1].
+    *   Perform linear interpolation (bilinear for planes, linear for lines) on the feature maps/vectors:
+        $$ f_{xy}^l = \text{Interp2D}(F_{xy}^l, (x, y)) $$
+        $$ f_{z}^l = \text{Interp1D}(F_{z}^l, z) $$
+        (Similarly for $f_{xz}^l, f_{y}^l, f_{yz}^l, f_{x}^l$) [S1].
+    *   Compute the feature vector for level $l$ by element-wise multiplication (Hadamard product) of the corresponding plane and line features. For example, for the $xyz$ component:
+        $$ f_{xyz}^l = f_{xy}^l \odot f_{z}^l $$
+        [S1]
+
+3.  **Concatenation and Spatial MLP:**
+    *   Concatenate feature vectors from all levels: $f_{concat} = [f_{xyz}^0, \dots, f_{xyz}^{L-1}]$ [S1].
+    *   Feed $f_{concat}$ into the Spatial MLP to predict parameters $P = \{c_d, s, n, b, a_i, \lambda_i, \mu_i\}$ [S1].
+
+4.  **Density Prediction:**
+    *   Sum the feature vectors from all levels for the density field and apply softplus activation:
+        $$ \sigma = \text{softplus}\left(\sum_{l=0}^{L-1} f_{den}^l\right) $$
+        [S1]
+
+5.  **Color Prediction:**
+    *   Construct an encoded feature vector $g$ by concatenating encoded view direction features [S1].
+    *   Feed $g$ and the bottleneck feature $b$ (from $P$) into the Directional MLP to predict specular color $c_s$ [S1].
+    *   Predict diffuse color $c_d$ and specular weight $s$ from the Spatial MLP output $P$ [S1].
+    *   Compute final color:
+        $$ c = \text{Sigmoid}(c_d + s \odot c_s) $$
+        [S1]
+
+6.  **Volume Rendering Weights:**
+    *   For a ray sampled at points $x_i$ with depth $t_i$ and interval $\Delta_i$, compute composition weights:
+        $$ w_i = \exp\left(-\sum_{j=0}^{i-1} \sigma_j \Delta_j\right) (1 - \exp(-\sigma_i \Delta_i)) $$
+        [S1]
+    *   Only compute colors for points where $w_i$ exceeds a predefined threshold to reduce computational cost [S1].
+    *   Rendered pixel color is the weighted sum:
+        $$ \hat{c} = \sum_i w_i c_i $$
+        [S1]
+
+**Pseudocode:**
+
+> **Unverified code.** The code below did not pass a test run against a reference implementation, or no test fits it, so it may contain errors.
+
+```python
+import torch
+import torch.nn as nn
+
+def bilinear_interp(x, y, feat_map):
+    # feat_map: [H, W, C], x,y: [B, 1] in [0, 1]
+    H, W, C = feat_map.shape
+    x0 = torch.floor(x * (W - 1))
+    x1 = x0 + 1
+    y0 = torch.floor(y * (H - 1))
+    y1 = y0 + 1
+    x0 = torch.clamp(x0, 0, W - 2).long()
+    x1 = torch.clamp(x1, 1, W - 1).long()
+    y0 = torch.clamp(y0, 0, H - 2).long()
+    y1 = torch.clamp(y1, 1, H - 1).long()
+    Ia = feat_map[y0, x0, :]
+    Ib = feat_map[y1, x0, :]
+    Ic = feat_map[y0, x1, :]
+    Id = feat_map[y1, x1, :]
+    wa = (x1 - x) * (y1 - y)
+    wb = (x1 - x) * (y - y0)
+    wc = (x - x0) * (y1 - y)
+    wd = (x - x0) * (y - y0)
+    return wa[:, None] * Ia + wb[:, None] * Ib + wc[:, None] * Ic + wd[:, None] * Id
+
+def linear_interp(t, feat_vec):
+    # feat_vec: [N, C], t: [B, 1] in [0, 1]
+    N, C = feat_vec.shape
+    t0 = torch.floor(t * (N - 1))
+    t1 = t0 + 1
+    t0 = torch.clamp(t0, 0, N - 2).long()
+    t1 = torch.clamp(t1, 1, N - 1).long()
+    Ia = feat_vec[t0, :]
+    Ib = feat_vec[t1, :]
+    wa = t1 - t
+    wb = t - t0
+    return wa[:, None] * Ia + wb[:, None] * Ib
+
+class MultiscaleTensorDecomposition(nn.Module):
+    def __init__(self, N_min=16, N_max=512, L=16, C_app=4, C_den=2):
+        super().__init__()
+        self.N_min = N_min
+        self.N_max = N_max
+        self.L = L
+        self.C_app = C_app
+        self.C_den = C_den
+        self.b = torch.exp((torch.log(torch.tensor(N_max)) - torch.log(torch.tensor(N_min))) / (L - 1))
+        
+        self.app_planes = nn.ParameterList()
+        self.app_lines = nn.ParameterList()
+        self.den_planes = nn.ParameterList()
+        self.den_lines = nn.ParameterList()
+        
+        for l in range(L):
+            N_l = int(torch.floor(self.N_min * (self.b ** l)))
+            self.app_planes.append(nn.Parameter(torch.randn(3, N_l, N_l, C_app)))
+            self.app_lines.append(nn.Parameter(torch.randn(3, N_l, C_app)))
+            self.den_planes.append(nn.Parameter(torch.randn(3, N_l, N_l, C_den)))
+            self.den_lines.append(nn.Parameter(torch.randn(3, N_l, C_den)))
+            
+        input_dim = L * C_app * 3
+        self.spatial_mlp = nn.Sequential(
+            nn.Linear(input_dim, 256), nn.ReLU(),
+            nn.Linear(256, 256), nn.ReLU(),
+            nn.Linear(256, 256)
+        )
+        self.directional_mlp = nn.Sequential(
+            nn.Linear(256, 256), nn.ReLU(),
+            nn.Linear(256, 256), nn.ReLU(),
+            nn.Linear(256, 256), nn.ReLU(),
+            nn.Linear(256, 256), nn.ReLU(),
+            nn.Linear(256, 256), nn.ReLU(),
+            nn.Linear(256, 3)
+        )
+
+    def forward(self, x, d):
+        B = x.shape[0]
+        all_features = []
+        density_sum = torch.zeros(B, self.C_den, device=x.device)
+        
+        for l in range(self.L):
+            N_l = int(torch.floor(self.N_min * (self.b ** l)))
+            # Extract features for level l
+            app_p = self.app_planes[l]
+            app_l = self.app_lines[l]
+            den_p = self.den_planes[l]
+            den_l = self.den_lines[l]
+            
+            # Interpolate
+            f_xy = bilinear_interp(x[:, 0:1], x[:, 1:2], app_p[0])
+            f_z = linear_interp(x[:, 2:3], app_l[0])
+            f_xyz = f_xy * f_z
+            
+            f_xz = bilinear_interp(x[:, 0:1], x[:, 2:3], app_p[1])
+            f_y = linear_interp(x[:, 1:2], app_l[1])
+            f_xzy = f_xz * f_y
+            
+            f_yz = bilinear_interp(x[:, 1:2], x[:, 2:3], app_p[2])
+            f_x = linear_interp(x[:, 0:1], app_l[2])
+            f_yzx = f_yz * f_x
+            
+            # Concatenate for spatial MLP
+            level_feat = torch.cat([f_xyz, f_xzy, f_yzx], dim=-1)
+            all_features.append(level_feat)
+            
+            # Accumulate density features
+            d_xy = bilinear_interp(x[:, 0:1], x[:, 1:2], den_p[0])
+            d_z = linear_interp(x[:, 2:3], den_l[0])
+            d_xyz = d_xy * d_z
+            density_sum += d_xyz
+            
+        f_concat = torch.cat(all_features, dim=-1)
+        P = self.spatial_mlp(f_concat)
+        c_d = P[:, :3]
+        s = P[:, 3:4]
+        b_feat = P[:, 4:132]
+        
+        # Encode view direction (simplified placeholder for REE logic per evidence)
+        g = torch.cat([d, b_feat], dim=-1)
+        c_s = self.directional_mlp(g)
+        
+        sigma = torch.nn.functional.softplus(density_sum)
+        c = torch.sigmoid(c_d + s * c_s)
+        
+        return sigma, c
+```
+## Subtopics
+
+### Volume Rendering with MTD
+This variant integrates the MTD representation with a specific volume rendering pipeline [S1]. It models density and appearance fields separately using two MTD representations [S1]. Density $\sigma_i$ is the softplus of the sum of feature vectors at all levels [S1]. Color composition weights $w_i$ are computed based on densities and sampling intervals $\Delta_i$ [S1]. To reduce computational cost, colors are only computed for sampled points where $w_i$ exceeds a predefined threshold [S1]. The final color is a weighted sum of predicted colors [S1]. The specular color is predicted by a directional MLP fed with an encoded feature vector $g$ and a bottleneck feature $b$, while diffuse color and specular weight are predicted by the spatial MLP [S1]. The spatial MLP has 3 layers and the directional MLP has 6 layers [S1].
+
+## Operating characteristics
+*   **Complexity:** Time complexity is proportional to the number of levels $L$ and the resolution $N_l$ at each level for interpolation [S1]. Memory complexity is proportional to the total number of parameters in the plane and line features across all levels [S1].
+*   **Performance:** MTD achieves better view synthesis quality than single-scale TensoRF with fewer parameters [S1]. For example, a configuration with 16 levels, max resolution 512, and 4 feature channels uses 8.5M parameters, compared to 13M parameters for single-scale TensoRF with resolution 300 and 48 channels [S1].
+*   **Convergence:** Scene geometry appears fast in coarse-scale representations, leading to faster convergence than single-scale representations [S1].
+*   **Strengths:** Better exploration of local smoothness at varying scales; fewer parameters for high-resolution details; faster convergence [S1].
+*   **Limitations:** More complex implementation due to multiple scales; interpolation overhead at multiple resolutions [S1].
+*   **When to use:** When high-quality reconstruction of wide-ranging computer vision tasks (nature scenes) is required with limited parameters and faster training convergence [S1].
+*   **When not to use:** When computational resources for interpolation at multiple scales are constrained, or if single-scale accuracy is sufficient [S1].
+## Background
+Multiscale Tensor Decomposition was proposed in the paper "Multiscale Tensor Decomposition and Rendering Equation Encoding for View Synthesis" (CVPR 2023) [S1]. It was developed to address the limitations of single-scale tensor decomposition in TensoRF, which performs decomposition only at a single scale [S1]. The method draws inspiration from multiscale methods in computer vision and aims to represent scenes from coarse to fine scales [S1]. It differs from Multiresolution Hash Encoding (MHE), which uses multiresolution to mitigate hash collisions, by using multiresolution to explore local smoothness at varying scales [S1].
+## Sources
+[S1] Multiscale Tensor Decomposition and Rendering Equation Encoding for View Synthesis, https://doi.org/10.1109/CVPR52729.2023.00412, fetched 2026-10-27

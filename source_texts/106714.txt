@@ -1,0 +1,330 @@
+Contribute to andyfangdz/approach-viz development by creating an account on GitHub.
+
+Render the MRMS volume through a sparse page table and brick pool by andyfangdz · Pull Request #74 · andyfangdz/approach-viz · GitHub
+Skip to content
+You signed in with another tab or window. Reload to refresh your session.
+You signed out in another tab or window. Reload to refresh your session.
+You switched accounts on another tab or window. Reload to refresh your session.
+Dismiss alert
+Conversation
+andyfangdz
+commented
+Sep 7, 2026
+•
+edited
+Loading
+Uh oh!
+There was an error while loading. Please reload this page.
+Copy link
+Copy Markdown
+Owner
+Summary
+Implements the two OpenVDB/NanoVDB ideas that apply to the web raymarcher, without the library:
+Empty-space skipping. The shader fetches a page-table entry for the ray position each step. An empty page is jumped to its exit face in one loop iteration (one-level DDA) and the ray lands back on its jittered sample lattice so cadence does not change at page entries.
+Leaf bricks with a page table. build_volume_texture now emits a page table (one RG8 entry per 8³-texel page: pool slot + 1, or 0 for no echo) and a pool of resident bricks, each the 8³ core wrapped in a one-texel apron copied from neighboring logical texels (clamped at the grid edge) so trilinear filtering never leaves the brick. The dense logical grid is never materialized.
+Effects
+Full source resolution at 120 NM. The dense grid capped each axis at 256 cells, so a ~440-cell request was coarsened 2× horizontally. The sparse grid allows a 2048-cell logical axis; coarsenX/Z = 1 in the common case.
+Bounded uploads. Resident bricks are capped at MAX_VOLUME_BRICKS = 8192 (a 16.4 MB pool at 2 KB per brick). Past that the grid coarsens by the next whole footprint multiple after a count-only pass, so the pool is bounded without failing on widespread rain.
+Terrain occlusion survives skipping. buildGroundPageMax records the highest ground under each page column (one-column halo for the linearly filtered heightfield). An empty page is jumped only when it lies wholly above that value; otherwise it is stepped with the per-sample ground test and no volume fetch.
+Phase bleed on every stored copy. Empty texels bordering echo adopt the neighbor's phase in cores and aprons alike, so brick faces do not tint toward rain.
+Debug panel. New Volume Bricks row: resident bricks, filled logical texels, cell size, coarsening multiple.
+Extinction recalibration (follow-up commit)
+Andy reported light precipitation reading as nearly invisible on the preview. Root cause: the old dense grid max-pooled 0.5 NM source cells into 1 NM texels, which filled the gaps of scattered light echo (a region 50% filled at source resolution read ~94% filled) and so gave light precipitation about twice its true optical path. The cubic extinction ramp had been tuned against that. Old-vs-new headless renders of the same live payloads measured the new grid 17–28% dimmer in lit-pixel energy, concentrated in light and moderate echo:
+Scene
+Old
+Cubic at source res
+2.75 power
+KATL wide
+6.11M
+5.08M (−17%)
+6.12M (0%)
+KATL close
+4.57M
+3.65M (−20%)
+4.75M (+4%)
+KSEA stratiform
+270k
+193k (−28%)
+259k (−4%)
+Doubling extinction (+24–41%) and a 2.5 power (+20–33%) overshot because the pooling barely inflated solid heavy echo. The ramp is now pow(t, 2.75); cores, which saturate, are unchanged. Documented in the shader, docs/rendering-weather-volume.md, and the decision note.
+GPU smoke test (npm run test:smoke:volume)
+scripts/volume-smoke/ bundles the real NexradVolumeRaymarch over the shipped WASM decoder, renders it in headless Chromium on SwiftShader WebGL2 against a committed KMIA AVMR fixture (or --live <lat>,<lon>), and fails on any console error (shader compile failures land there), on budget coarsening, on a page-table/pool layout mismatch, or on a broken occlusion invariant (60,000 ft flat ground must render zero pixels; a camera under the ground must render zero pixels). The browser is driven over the DevTools Protocol with Node's built-in WebSocket, since master dropped Playwright. Not part of CI; screenshots land in .tmp/volume-smoke/.
+Not changed
+MAX_RAY_STEPS stays at 384, so this change only reduces per-pixel work.
+The native iOS/macOS renderer still consumes build_render_volume flat columns for its instanced boxes.
+Validation
+cargo test -p approach-viz-core: 119 passed; cargo check --workspace clean; wasm32 and ios feature builds clean.
+npm run typecheck, npm run lint, npm run format:check, npm test: clean on the merged tree.
+npm run build:sw && npx next build: succeeds.
+npm run test:smoke:volume: passes on the fixture and on live KATL weather (456 × 385 × 96 logical texels at 1×, 2,158 bricks, 5.0 MB pool).
+WASM rebuilt with wasm-pack 0.15 and binaryen 117.
+🤖 Generated with Claude Code
+https://claude.ai/code/session_017f8QAd1T7ks8XW5JV2RdJQ
+Render the MRMS volume through a sparse page table and brick pool
+…
+011ada7
+```
+The web raymarcher consumed a dense RG8 3D texture capped at 256 cells
+per axis, so every 120 NM request (about 440 MRMS source cells per axis)
+was coarsened 2x horizontally, the upload was up to 12.6 MB of mostly
+zeros, and rays sampled empty air at the same cadence as echo.
+
+`build_volume_texture` now emits the two-level VDB layout: a page table
+with one RG8 entry per 8^3-texel page (pool slot + 1, or 0 for no echo)
+and a pool of resident bricks, each the 8^3 core wrapped in a one-texel
+apron copied from the neighboring logical texels (clamped at the grid
+edge) so trilinear filtering never leaves the brick. The logical grid is
+never materialized. Phase bleed visits every stored copy; resident
+bricks are capped at 8192 (a 16.4 MB pool) and past that the grid
+coarsens by the next whole footprint multiple after a count-only pass.
+
+The shader fetches the page for the ray position each step: an empty
+page is jumped to its exit face in one iteration and lands back on the
+jittered sample lattice; a resident page is sampled trilinearly inside
+its brick. Terrain occlusion survives skipping through a per-page ground
+maximum (`buildGroundPageMax`, one-column halo for the linear filter):
+an empty page is jumped only when it lies wholly above the terrain and
+is otherwise stepped with the per-sample ground test and no volume fetch.
+
+The debug panel gains a `Volume Bricks` row (resident bricks, filled
+texels, cell size, coarsening multiple). The WASM artifact is rebuilt
+with binaryen 117. The native renderer is unchanged.
+
+Co-Authored-By: Claude Fable 5.1 <noreply@anthropic.com>
+Claude-Session: https://claude.ai/code/session_017f8QAd1T7ks8XW5JV2RdJQ
+```
+vercel
+Bot
+commented
+Sep 7, 2026
+•
+edited
+Loading
+Uh oh!
+There was an error while loading. Please reload this page.
+Copy link
+Copy Markdown
+The latest updates on your projects. Learn more about Vercel for GitHub.
+Project
+Deployment
+Actions
+Updated
+approach-viz
+Ready
+Preview
+Sep 7, 2026 5:13am UTC
+vercel
+Bot
+deployed
+to
+Preview
+September 7, 2026 03:48
+View deployment
+andyfangdz
+marked this pull request as ready for review
+September 7, 2026 03:58
+greptile-apps
+Bot
+commented
+Sep 7, 2026
+•
+edited
+Loading
+Uh oh!
+There was an error while loading. Please reload this page.
+Copy link
+Copy Markdown
+Greptile Summary
+This PR replaces the dense MRMS raymarch texture with a sparse page-table and apron-padded brick-pool representation.
+Builds bounded sparse volume textures in shared Rust while retaining the native renderer’s existing flat-column path.
+Adds shader-side brick lookup, empty-page skipping, and terrain-aware skip guards.
+Extends worker transport, WASM bindings, diagnostics, documentation, and tests for the new layout.
+Adds a headless Chromium smoke test covering shader compilation, texture contracts, coarsening, and terrain occlusion.
+The follow-up change cleans up Chromium and its temporary profile when startup or DevTools connection fails.
+Confidence Score: 5/5
+The PR appears safe to merge; no actionable new issue remains after the Chromium launch-cleanup follow-up.
+The only previous finding was manually resolved after the failed-launch path was updated to terminate Chromium and remove its temporary profile. No new correctness, security, or repository-rule violations were established.
+Important Files Changed
+Filename
+Overview
+crates/approach-viz-core/src/mrms_render.rs
+Builds the sparse logical grid, page table, bounded resident-brick pool, aprons, and budget-driven coarsening.
+app/scene/nexrad/NexradVolumeRaymarch.tsx
+Uploads the sparse textures and implements page traversal, brick sampling, and terrain-safe empty-space skipping.
+app/scene/nexrad/nexrad-ground.ts
+Computes conservative per-page terrain maxima used to preserve ground occlusion while skipping.
+app/scene/nexrad/nexrad.worker.ts
+Transfers the new page-table and brick-pool buffers from the worker.
+scripts/volume-smoke/run.ts
+Adds the GPU smoke-test runner and now cleans up failed Chromium launches.
+scripts/volume-smoke/harness.tsx
+Exercises the real WASM and raymarch renderer against texture-layout and terrain-occlusion invariants.
+Flowchart
+```
+%%{init: {'theme': 'neutral'}}%%
+flowchart LR
+  A[MRMS payload] --> B[Rust decode and prepare]
+  B --> C[Page table]
+  B --> D[Apron-padded brick pool]
+  C --> E[WebGL raymarch shader]
+  D --> E
+  F[Terrain heightfield] --> G[Per-page ground maximum]
+  F --> E
+  G --> E
+  E --> H[Skip empty safe pages]
+  E --> I[Sample resident bricks]
+  H --> J[Rendered weather volume]
+  I --> J
+```
+Loading
+Reviews (4): Last reviewed commit: "Clean up Chromium when the smoke-test la..." | Re-trigger Greptile
+Add a headless GPU smoke test for the raymarched volume
+…
+1cc21ab
+```
+`npm run test:smoke:volume` bundles the real `NexradVolumeRaymarch`
+component over the shipped WASM decoder, serves it locally, and renders
+it in headless Chromium on SwiftShader WebGL2 through five scenarios: a
+wide view with no terrain, a flat ground at 60,000 ft (must render
+nothing), a flat ground at 15,000 ft (must remove some echo), a close-in
+view where an 8-texel page seam would show, and a camera under the
+ground (must render nothing). Any browser console error or warning fails
+the run, which is where three.js reports shader compile and link
+failures. It also checks the page table and pool byte sizes against
+their reported layouts and that the payload rendered at full source
+resolution inside the brick budget.
+
+The default input is a captured KMIA AVMR v5 volume under
+`fixtures/mrms/` so the result is repeatable; `--live <lat>,<lon>`
+fetches current weather from the runtime. The test is not part of CI or
+`npm run test` because it needs a WebGL2 browser.
+
+Co-Authored-By: Claude Fable 5.1 <noreply@anthropic.com>
+Claude-Session: https://claude.ai/code/session_017f8QAd1T7ks8XW5JV2RdJQ
+```
+vercel
+Bot
+deployed
+to
+Preview
+September 7, 2026 04:06
+View deployment
+andyfangdz
+and others
+added 3 commits
+September 7, 2026 04:36
+Merge origin/master into claude/zarr-evaluation-otddyk
+…
+6db1759
+```
+Resolves AGENTS.md against master's rewritten index (keeping the volume
+smoke-test row and the sparse-volume ownership note) and package.json
+against master's removal of the Playwright smoke script (keeping
+test:smoke:volume).
+
+Co-Authored-By: Claude Fable 5.1 <noreply@anthropic.com>
+Claude-Session: https://claude.ai/code/session_017f8QAd1T7ks8XW5JV2RdJQ
+```
+Retune volume extinction for source-resolution rendering
+…
+313dc2a
+```
+The dense grid max-pooled 0.5 NM source cells into 1 NM texels, which
+filled the gaps of scattered light echo and gave light precipitation about
+twice its true optical path; the cubic extinction ramp had been tuned
+against that. At source resolution the same ramp rendered the same scenes
+17-28% dimmer, mostly in light and moderate echo, so light precipitation
+read as nearly invisible.
+
+Measured old-vs-new headless renders of live KATL (dense, close-in) and
+KSEA (stratiform) payloads: doubling extinction overshot by 24-41%, a 2.5
+power by 20-33%, and a 2.75 power matched the old renderer within 4% on
+all three scenes. Adopt 2.75 and document the calibration and its reason.
+
+Co-Authored-By: Claude Fable 5.1 <noreply@anthropic.com>
+Claude-Session: https://claude.ai/code/session_017f8QAd1T7ks8XW5JV2RdJQ
+```
+Drive the volume smoke test over the DevTools Protocol
+…
+8b220d2
+```
+master removed Playwright from the dev dependencies, so the smoke driver
+now launches Chromium itself and speaks CDP over Node's built-in
+WebSocket: create/attach a target, capture console errors and exceptions,
+poll the harness result, screenshot, close. Browser resolution takes
+--chromium, APPROACHVIZ_CHROMIUM_PATH, or the first Chromium/Chrome on
+PATH, and fails loudly otherwise.
+
+Co-Authored-By: Claude Fable 5.1 <noreply@anthropic.com>
+Claude-Session: https://claude.ai/code/session_017f8QAd1T7ks8XW5JV2RdJQ
+```
+vercel
+Bot
+deployed
+to
+Preview
+September 7, 2026 05:09
+View deployment
+greptile-apps
+Bot
+reviewed
+Sep 7, 2026
+View reviewed changes
+Comment thread
+scripts/volume-smoke/run.ts
+Outdated
+Show resolved
+Hide resolved
+Uh oh!
+There was an error while loading. Please reload this page.
+Clean up Chromium when the smoke-test launch fails
+…
+6e8a800
+```
+If Chromium never announces its DevTools URL or the socket fails, kill
+the child and remove its temporary profile before rethrowing, so a failed
+launch cannot leave an orphaned browser or profile behind.
+
+Co-Authored-By: Claude Fable 5.1 <noreply@anthropic.com>
+Claude-Session: https://claude.ai/code/session_017f8QAd1T7ks8XW5JV2RdJQ
+```
+vercel
+Bot
+deployed
+to
+Preview
+September 7, 2026 05:13
+View deployment
+Hide details
+View details
+andyfangdz
+merged commit 4df8d54
+into
+master
+Sep 7, 2026
+7 checks passed
+Uh oh!
+There was an error while loading. Please reload this page.
+Hide environments
+Show environments
+This branch was successfully deployed
+1 active
+deployment
+Preview
+—
+6e8a800e
+Deployed
+Sep 7, 2026 by
+vercel[bot]
+View deployment
+Sign up for free
+to join this conversation on GitHub.
+Already have an account?
+Sign in to comment
+Uh oh!
+There was an error while loading. Please reload this page.
+Labels
+None yet
+1 participant
+Add this suggestion to a batch that can be applied as a single commit.This suggestion is invalid because no changes were made to the code.Suggestions cannot be applied while the pull request is closed.Suggestions cannot be applied while viewing a subset of changes.Only one suggestion per line can be applied in a batch.Add this suggestion to a batch that can be applied as a single commit.Applying suggestions on deleted lines is not supported.You must change the existing code in this line in order to create a valid suggestion.Outdated suggestions cannot be applied.This suggestion has been applied or marked resolved.Suggestions cannot be applied from pending reviews.Suggestions cannot be applied on multi-line comments.Suggestions cannot be applied while the pull request is queued to merge.Suggestion cannot be applied right now. Please check back later.
+You can’t perform that action at this time.

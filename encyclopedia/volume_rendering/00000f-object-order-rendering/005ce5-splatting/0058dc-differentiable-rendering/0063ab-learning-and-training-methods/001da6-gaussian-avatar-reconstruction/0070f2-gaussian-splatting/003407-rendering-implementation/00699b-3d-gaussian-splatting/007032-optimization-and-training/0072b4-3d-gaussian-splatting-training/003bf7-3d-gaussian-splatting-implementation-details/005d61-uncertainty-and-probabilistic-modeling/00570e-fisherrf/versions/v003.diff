@@ -1,0 +1,226 @@
+--- v002.md
++++ v003.md
+@@ -4,86 +4,171 @@
+ 
+ ## Overview
+-FisherRF is a method for active view selection and uncertainty quantification in Radiance Fields that directly quantifies observed information on model parameters using Fisher Information, selecting candidate views by maximizing Expected Information Gain (EIG) [S2]. It sets itself apart from sibling methods like [SOGS](13171-sogs-second-order-anchor-for-advanced-3d-gaussian-splatting.md) or [Gaussian Frosting](15863-gaussian-frosting.md) by focusing on the selection of new training views rather than just optimizing existing parameters, leveraging the sparsity of the Hessian to achieve real-time evaluation speeds (70 fps) [S2].
++FisherRF is a method for estimating predictive uncertainty in 3D Gaussian Splatting (3DGS) parameters and selecting the next-best view by maximizing Expected Information Gain (EIG) [S1, S2]. It differs from sibling methods like Variational Bayes Gaussian Splatting, which modifies the model architecture to infer a posterior distribution, and PRIMU, which relies on post-hoc feature aggregation [S1, S2]. FisherRF directly quantifies observed information on model parameters using the Fisher Information Matrix (FIM), approximated via the diagonal Gauss-Newton Hessian of the rendering loss [S2]. This allows for efficient active view selection and uncertainty quantification without requiring multiple backward passes or hypothetical perturbation fields [S2].
+ 
+ ## How it works
+-**Inputs and Outputs:**
+-- **Input:** A trained or partially trained Radiance Field model (specifically 3D Gaussian Splatting or Plenoxels), a pool of candidate camera viewpoints, and the current set of training views [S1, S2].
+-- **Output:** A ranked list of candidate views based on their Expected Information Gain (EIG), or a selected subset of views for active mapping [S2].
++**Inputs:**
++*   $\theta$: The current set of trained 3D Gaussian Splatting parameters (means, covariances, opacities, colors) [S1].
++*   $D$: The set of all rays cast from training views observed so far [S1].
++*   $\mathcal{V}_{cand}$: A pool of candidate views for selection [S2].
++*   $\epsilon$: A small scalar for the prior term [S1].
++
++**Outputs:**
++*   $v^*$: The selected next-best view [S1].
++*   $U$: Predictive uncertainty maps for rendered views [S1].
+ 
+ **Data Structures:**
+-- **Hessian Matrix ($H$):** Represents the second-order derivatives of the loss function with respect to the model parameters [S2]. In 3D Gaussian Splatting, this is computed per Gaussian [S2].
+-- **Fisher Information Matrix (FIM):** Approximated by the Hessian of the negative log-likelihood [S2].
++*   **Hessian ($H$):** A diagonal matrix representing the precision (inverse covariance) of the parameter posterior [S1]. Due to the intractability of the full Hessian, only diagonal elements are stored [S1].
++*   **Rendering Jacobian ($J_r$):** For each ray $r$, a vector containing $\frac{\partial \hat{C}_r}{\partial \theta}$, the sensitivity of the rendered color $\hat{C}_r$ to the parameters $\theta$ [S1].
+ 
+-**Method Steps:**
+-1. **Compute Hessian:** For the current model state, compute the Hessian matrix of the parameters with respect to the negative log-likelihood for each 3D Gaussian [S2]. The Hessian of the objective function in volumetric rendering is independent of ground truth data or actual image measurements, depending only on the camera parameters of the views used for training [S2].
+-2. **Diagonal Approximation:** Compute $H$ as the sum over all observed rays $D$ of the outer product of the rendering Jacobian weighted by $\Lambda_r$, plus $\epsilon I$ [S1]. Keep only the diagonal elements of $H$ for tractability, allowing the inverse $H^{-1}$ to be computed as element-wise reciprocals [S1].
+-3. **Compute Candidate Hessians:** For a candidate view $v$, compute $H_v$ using only the rays of view $v$, calculated exactly like $H$ [S1].
+-4. **Approximate Information Gain:** To make computation tractable, approximate the decrease in entropy (Information Gain) by its upper bound [S2]. This bound is defined as the trace of the product of the Hessian of the candidate view ($H_{cand}$) and the Hessian with respect to all previous views ($H_{prev}$) [S2]:
+-   $$ \text{EIG} \approx \text{Tr}(H_{cand} \cdot H_{prev}) $$
+-   The exact formulation is $EIG(v) = \frac{1}{2} \log \det(I + H_v H^{-1})$ [S1].
+-5. **Leverage Sparsity:** The matrices are highly sparse due to the disentangling of scene parameters with respect to disparate rays [S2]. This sparsity allows for a cost-effective computation of the matrix trace, with complexity comparable to back-propagation [S2].
+-6. **Rank and Select:** Evaluate all candidate views using the approximation [S2]. Select the next-best view $v^* = \arg\max_v EIG(v)$ [S1].
++**Steps:**
++
++1.  **Compute Global Hessian ($H$):**
++    Calculate the Gauss-Newton Hessian of the rendering loss summed over all observed rays $r \in D$ [S1]. FisherRF assumes an unweighted squared-error loss, meaning all rays share the same isotropic confidence weight $\Lambda_r = 1$ [S1].
++    $$
++    H = \sum_{r \in D} \left( \frac{\partial \hat{C}_r}{\partial \theta} \right)^{\top} \left( \frac{\partial \hat{C}_r}{\partial \theta} \right) + \epsilon I
++    $$
++    Since $H$ is kept diagonal, the inverse $H^{-1}$ is computed as element-wise reciprocals of the diagonal entries [S1].
++
++2.  **Compute Candidate Hessian ($H_v$):**
++    For each candidate view $v \in \mathcal{V}_{cand}$, compute its specific Hessian contribution $H_v$ using only the rays associated with view $v$, calculated identically to Step 1 but restricted to $v$'s rays [S1].
++
++3.  **Calculate Expected Information Gain (EIG):**
++    Compute the EIG for each candidate view $v$. The EIG measures the reduction in uncertainty (entropy) of the parameter distribution if view $v$ were captured [S1].
++    $$
++    \mathrm{EIG}(v) = \frac{1}{2} \log \det \left( I + H_v H^{-1} \right)
++    $$
++    *Note:* [S2] mentions an alternative approximation for tractability in batch selection: using the trace of the product of the Hessians as an upper bound for the entropy decrease. However, the primary formulation for single view selection uses the log-determinant [S1, S2].
++
++4.  **Select Next-Best View:**
++    Select the view $v^*$ that maximizes the EIG:
++    $$
++    v^* = \arg \max_{v \in \mathcal{V}_{cand}} \mathrm{EIG}(v)
++    $$
++    [S1]
++
++5.  **Uncertainty Estimation (Optional/Post-Hoc):**
++    To estimate predictive uncertainty $U$ for a novel view, propagate the parameter covariance through the rendering Jacobian $J_{novel}$:
++    $$
++    U = J_{novel} H^{-1} J_{novel}^{\top}
++    $$
++    [S1]
+ 
+ **Pseudocode:**
++
+ ```python
+ import numpy as np
+ 
+-def compute_fisher_information_gain(model, candidate_views, training_views):
++def compute_fisher_hessian(rays, params, epsilon=1e-6):
+     """
+-    Computes the Expected Information Gain for a set of candidate views
+-    based on the Fisher Information (Hessian) of the current model.
++    Computes the diagonal Fisher Information Matrix (Hessian) for a set of rays.
+     
+     Args:
+-        model: A 3D Gaussian Splatting or Plenoxels model instance.
+-        candidate_views: List of camera poses to evaluate.
+-        training_views: List of camera poses already used for training.
++        rays: List of ray objects, each having a 'render_jacobian' attribute.
++              render_jacobian is a vector d(C_hat)/d(theta).
++        params: Current 3DGS parameters (not explicitly used in sum, but defines theta).
++        epsilon: Small scalar for numerical stability.
+         
+     Returns:
+-        List of tuples (view, score) sorted by score descending.
++        H_diag: 1D numpy array, the diagonal of the Hessian.
+     """
+-    # Step 1: Compute diagonal Hessian for current training views
+-    # H is independent of ground truth, relying only on camera params.
+-    # In 3DGS, this is computed per Gaussian and kept diagonal for tractability.
+-    H_prev = model.compute_diagonal_hessian(training_views)
++    # Initialize diagonal Hessian
++    num_params = len(params) # Or derived from Jacobian shape
++    H_diag = np.zeros(num_params)
+     
+-    scores = []
++    for ray in rays:
++        # Get Jacobian vector J_r = d(C_hat_r)/d(theta)
++        J_r = ray.render_jacobian
++        
++        # Outer product J_r^T * J_r contributes to H
++        # We only need the diagonal of this outer product
++        # diag(J_r^T J_r) = J_r^2 element-wise
++        H_diag += J_r ** 2
++        
++    # Add prior term epsilon * I
++    H_diag += epsilon
++    
++    return H_diag
++
++def compute_eig(H_diag_global, H_diag_candidate):
++    """
++    Computes Expected Information Gain (EIG) using the log-determinant formula.
++    
++    Args:
++        H_diag_global: Diagonal of the global Hessian H (from training data).
++        H_diag_candidate: Diagonal of the candidate view Hessian H_v.
++        
++    Returns:
++        eig: Scalar Expected Information Gain.
++    """
++    # H_inv is element-wise reciprocal
++    H_inv = 1.0 / H_diag_global
++    
++    # Compute element-wise product H_v * H^{-1}
++    # Since both are diagonal, this is element-wise multiplication of diagonals
++    product_diag = H_diag_candidate * H_inv
++    
++    # The matrix inside log det is I + H_v H^{-1}
++    # The determinant of a diagonal matrix is the product of its diagonal elements
++    # log det(I + A) = sum(log(diag(I + A)))
++    
++    # Add identity (1.0) to the product
++    diag_term = 1.0 + product_diag
++    
++    # Ensure positivity for log
++    diag_term = np.maximum(diag_term, 1e-10)
++    
++    # Sum of logs
++    eig = 0.5 * np.sum(np.log(diag_term))
++    
++    return eig
++
++def select_next_best_view(candidate_views, global_hessian_diag, epsilon):
++    """
++    Selects the next best view by maximizing EIG.
++    
++    Args:
++        candidate_views: List of candidate view objects.
++        global_hessian_diag: Diagonal Hessian from all training data.
++        epsilon: Regularization term.
++        
++    Returns:
++        best_view: The selected view object.
++    """
++    best_eig = -np.inf
++    best_view = None
+     
+     for view in candidate_views:
+-        # Step 3: Compute diagonal Hessian for the candidate view
+-        H_cand = model.compute_diagonal_hessian([view])
++        # Compute Hessian for this specific view
++        # Assumes view has a method to render and get jacobians for its rays
++        h_v_diag = compute_fisher_hessian(view.rays, None, epsilon)
+         
+-        # Step 4 & 5: Approximate EIG as Trace(H_cand * H_prev)
+-        # Due to sparsity and diagonal approximation, Tr(A*B) = sum(A_i * B_i)
+-        eig = np.sum(H_cand * H_prev)
++        # Compute EIG
++        current_eig = compute_eig(global_hessian_diag, h_v_diag)
+         
+-        scores.append((view, eig))
+-        
+-    # Step 6: Sort by EIG
+-    scores.sort(key=lambda x: x[1], reverse=True)
+-    return scores
++        if current_eig > best_eig:
++            best_eig = current_eig
++            best_view = view
++            
++    return best_view
+ ```
+ 
+ **Parameters:**
+-- **$\epsilon$:** Small scalar for the prior term $\epsilon I$ added to keep $H$ invertible [S1].
+-- **$\Lambda_r$:** Confidence weight for ray $r$ [S1]. In FisherRF, all rays share the same isotropic value, reducing the formulation to an unweighted squared-error loss [S1].
+-- **Performance Metric:** The method evaluates views at 70 fps when using 3D Gaussian Splatting [S2].
+-- **Hessian Computation Time:** 11.3 ms ± 33.3 µs for the diagonal Hessian computation [S2].
++*   $\epsilon$: Small scalar for the prior term $\epsilon I$ added to keep $H$ invertible. Value not explicitly given in sources, but standard practice implies a small positive number [S1].
++*   $\Lambda_r$: Confidence weight for ray $r$. In FisherRF, all rays share the same isotropic value, reducing the formulation to an unweighted squared-error loss [S1].
+ 
+ **Edge Cases and Pitfalls:**
+-- **Sparsity Assumption:** The efficiency relies on the high sparsity of the Hessian due to the disentangling of scene parameters [S2].
+-- **Approximation Error:** The use of the trace of the product as an upper bound for entropy decrease is an approximation [S2].
+-- **Invertibility:** The full Hessian is intractable to compute and store, handled by keeping only the diagonal elements [S1].
++*   **Intractability:** Computing the full Hessian $H$ is intractable for large models. FisherRF handles this by keeping only the diagonal elements [S1].
++*   **Sparsity:** Matrices are highly sparse due to the disentangling of scene parameters with respect to disparate rays. This sparsity allows for cost-effective computation of the matrix trace (if used) or diagonal updates [S2].
++*   **Independence from Ground Truth:** The Hessian of the objective function in volumetric rendering is independent of ground truth data or actual image measurements. This allows information gain to be computed using only camera parameters of candidate views [S2].
+ 
+ ## Operating characteristics
+-- **Time Complexity:** The computation of the trace is as cost-effective as back-propagation due to matrix sparsity [S2].
+-- **Memory Complexity:** Not given in the sources.
+-- **Measured Performance:** Evaluates views at 70 fps with 3D Gaussian Splatting [S2]. The Hessian computation takes 11.3 ms ± 33.3 µs, compared to 1.1 s ± 2.5 ms for alternative methods like Goli et al. [S2].
+-- **Strengths:** Direct quantification of uncertainty on model parameters; efficient CUDA implementation for diagonal Hessian computation; state-of-the-art results in view selection and active mapping [S2].
+-- **Limitations:** Relies on the sparsity of the Hessian; uses a trace approximation for Information Gain [S2].
+-- **When to use:** When active view selection or active mapping is required for Radiance Fields, particularly 3D Gaussian Splatting or Plenoxels [S2].
+-- **When not to use:** Not given in the sources.
++*   **Time Complexity:** The computation of the diagonal Hessian is as cost-effective as back-propagation [S2].
++*   **Performance:** When using 3D Gaussian Splatting, the method evaluates views at 70 fps [S2].
++*   **Comparison to Alternatives:** Compared to Goli et al., which relies on a hypothetical perturbation field and multiple function calls to the PyTorch backward engine, FisherRF's efficient CUDA implementation for diagonal Hessian computation takes $11.3 \text{ ms} \pm 33.3 \text{ \mu s}$ versus $1.1 \text{ s} \pm 2.5 \text{ ms}$ [S2].
++*   **Strengths:** Direct quantification of observed information on model parameters; efficient active view selection; supports batch and path selection [S2].
++*   **Limitations:** Relies on the diagonal approximation of the Hessian, which ignores parameter correlations [S1].
+ 
+ ## Background
+-FisherRF was introduced by W. Jiang et al. in the paper "FisherRF: Active View Selection and Mapping with Radiance Fields Using Fisher Information" [S2]. It addresses the problem of active "training" view selection for volumetric rendering, a problem that was extensively studied before radiance fields but lacked literature specific to them [S2]. The method builds on the framework of 3D Gaussian Splatting and Plenoxels, leveraging their differentiable nature and parameter structure [S2]. It improves upon previous methods like Goli et al. by computing the Hessian directly rather than relying on hypothetical perturbation fields and multiple backward passes [S2].
++FisherRF was introduced to address the lack of literature on active "training" view selection for volumetric rendering. It leverages Fisher Information to directly quantify observed information on the parameters of Radiance Fields, selecting candidate views by maximizing Expected Information Gain (EIG) [S2]. The method is implemented on top of point-based 3D Gaussian Splatting and Plenoxels radiance field models [S2]. It is cited as the first method to quantify uncertainty directly on model parameters for Radiance Fields using an efficient formulation [S2].
+ 
+ ## Sources

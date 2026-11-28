@@ -1,0 +1,120 @@
+--- v001.md
++++ v002.md
+@@ -16,10 +16,10 @@
+ 
+ **Steps:**
+-1.  **Dominant Axis Selection:** For each input triangle, the geometry shader calculates the projection of the triangle's normal onto the X, Y, and Z axes. It selects the axis with the largest absolute projection value as the "dominant axis" [S1, S2, unofficial].
+-2.  **Triangle Projection:** The triangle is projected onto the 2D plane perpendicular to the dominant axis [S1, S2, unofficial].
+-3.  **Edge Shifting:** The edges of the projected triangle are shifted outward to account for the voxel grid alignment, ensuring full coverage of intersected voxels [S2, unofficial].
+-4.  **Hardware Setup/Rasterization:** The rasterizer processes the shifted triangle using conservative rasterization. This generates fragments for all pixels (voxel centers) that have any overlap with the triangle, not just those whose centers are covered [S1, S2, unofficial].
+-5.  **Fragment Shader Execution:** For each generated fragment, the fragment shader computes the voxel attributes (e.g., position, color, normal) and performs an atomic write to the sparse voxel structure [S1, S2, unofficial].
+-6.  **Sparse Octree Construction (Optional/Post-process):** If using a sparse octree, a top-down construction phase may follow, involving octree subdivision and value MIP-mapping [S2, unofficial].
++1.  **Dominant Axis Selection:** For each input triangle, the geometry shader calculates the projection of the triangle's normal onto the X, Y, and Z axes and selects the axis with the largest absolute projection value as the dominant axis [S1, S2, unofficial].
++2.  **Triangle Projection:** The triangle is projected onto the 2D plane perpendicular to the dominant axis [S2, unofficial].
++3.  **Edge Shifting:** The edges of the projected triangle are shifted outward to account for voxel grid alignment, ensuring full coverage of intersected voxels [S2, unofficial].
++4.  **Hardware Setup/Rasterization:** The rasterizer processes the shifted triangle using conservative rasterization, generating fragments for all pixels that have any overlap with the triangle rather than only those whose centers are covered [S1, S2, unofficial].
++5.  **Fragment Shader Execution:** For each generated fragment, the fragment shader computes thin surface voxelization attributes and writes them to a 3D surface [S2, unofficial].
++6.  **Sparse Octree Construction:** A post-processing step organizes voxels into a hierarchical structure via top-down subdivision and value MIP-mapping [S2, unofficial].
+ 
+ **Formulas:**
+@@ -30,20 +30,15 @@
+ **Parameters:**
+ *   **Hardware Support:** Requires hardware conservative rasterization support, available on Nvidia Maxwell architecture and later [S1, unofficial]. RTX driver support is available for Turing and Pascal architectures [S1, unofficial].
+-*   **Performance:** Dynamic objects are added at runtime in ~4-5ms; static environments are pre-voxelized in ~20ms [S2, unofficial].
++*   **Performance:** Dynamic objects are added at runtime in ~4-5ms, while static environments are pre-voxelized in ~20ms [S2, unofficial].
+ 
+ **Edge Cases and Pitfalls:**
+ *   **Cracks:** Without conservative rasterization, GPUs only generate fragments if a pixel's center is covered, leading to small cracks at triangle edges [S1, unofficial].
+ *   **Over-filling:** Conservative rasterization generates too many fragments, incorrectly filling cells that should be empty [S1, unofficial]. This is mitigated by using an MSAA render target [S1, unofficial].
+-*   **Precision:** Atomic writes to sparse structures must handle potential race conditions if multiple fragments target the same voxel [S1, unofficial].
+ 
+ **Pseudocode:**
+ ```python
+-# Geometry Shader
+ def geometry_shader(triangle):
+-    # Calculate normal
+     v0, v1, v2 = triangle.vertices
+     normal = normalize(cross(v1 - v0, v2 - v0))
+-    
+-    # Select dominant axis
+     abs_normal = abs(normal)
+     if abs_normal.x >= abs_normal.y and abs_normal.x >= abs_normal.z:
+@@ -53,23 +48,38 @@
+     else:
+         dominant_axis = 'z'
+-        
+-    # Project triangle to 2D plane perpendicular to dominant axis
+-    projected_triangle = project_2d(triangle, dominant_axis)
+-    
+-    # Shift edges for conservative rasterization
+-    shifted_triangle = shift_edges(projected_triangle)
+-    
+-    # Output shifted triangle for rasterization
+-    output_triangle(shifted_triangle)
++    projected = project_2d(triangle, dominant_axis)
++    shifted = shift_edges(projected)
++    yield shifted
+ 
+-# Fragment Shader
++def project_2d(triangle, axis):
++    if axis == 'x':
++        return Triangle([(0, v[1], v[2]) for v in triangle.vertices])
++    elif axis == 'y':
++        return Triangle([(v[0], 0, v[2]) for v in triangle.vertices])
++    else:
++        return Triangle([(v[0], v[1], 0) for v in triangle.vertices])
++
++def shift_edges(triangle):
++    # Expand triangle bounds to cover adjacent grid cells
++    xs = [v[0] for v in triangle.vertices]
++    ys = [v[1] for v in triangle.vertices]
++    zs = [v[2] for v in triangle.vertices]
++    min_v = (min(xs) - 0.5, min(ys) - 0.5, min(zs) - 0.5)
++    max_v = (max(xs) + 0.5, max(ys) + 0.5, max(zs) + 0.5)
++    return Triangle([min_v, max_v, (min_v[0], max_v[1], min_v[2])])
++
++def compute_voxel_position(fragment):
++    # Map fragment screen coordinates to voxel grid indices
++    return (int(fragment.screen_x * grid_width), int(fragment.screen_y * grid_height), fragment.depth)
++
++def compute_color(fragment):
++    # Barycentric interpolation of vertex colors
++    return fragment.barycentric[0] * fragment.color0 + fragment.barycentric[1] * fragment.color1 + fragment.barycentric[2] * fragment.color2
++
+ def fragment_shader(fragment):
+-    # Compute voxel attributes (e.g., position, color)
+     voxel_pos = compute_voxel_position(fragment)
+     voxel_color = compute_color(fragment)
+-    
+-    # Atomic write to sparse voxel structure
+-    # Note: Implementation depends on specific sparse structure (e.g., hash table)
+-    atomic_write_sparse_voxel(voxel_pos, voxel_color)
++    # Conceptual atomic write to sparse structure
++    sparse_voxels[voxel_pos] = voxel_color
+ ```
+ 
+@@ -77,17 +87,15 @@
+ 
+ ### Anisotropic Voxelization
+-Improves quality by encoding directional data in voxels, useful when view-dependent changes occur. [Link](908-anisotropic-voxelization.md)
++Encodes directional data in voxels instead of isotropic data, improving quality when view-dependent changes occur. Choose when directional lighting or material properties vary significantly with viewing angle. [Link](908-anisotropic-voxelization.md) [S1, unofficial].
+ 
+ ### Sparse Octree Construction
+-Post-processing step for organizing voxels into a hierarchical structure. [Link](908-sparse-octree-construction.md)
++Post-processing step that organizes flat voxel data into a hierarchical tree structure via top-down subdivision and value MIP-mapping. Choose when hierarchical traversal or compression is required. [Link](908-sparse-octree-construction.md) [S2, unofficial].
+ 
+ ## Operating characteristics
+-*   **Time Complexity:** O(N) where N is the number of triangles, as each triangle is processed in a single pass [S1, unofficial].
+-*   **Memory Complexity:** O(V) where V is the number of occupied voxels, due to sparse allocation [S2, unofficial].
+-*   **Performance:** Dynamic updates are fast (~4-5ms), while static pre-voxelization takes ~20ms [S2, unofficial].
+-*   **Strengths:** Reduces draw calls, supports dynamic objects, avoids plain grid memory overhead [S1, S2, unofficial].
+-*   **Limitations:** Requires hardware conservative rasterization (Maxwell+), MSAA overhead, potential over-filling without MSAA [S1, unofficial].
+-*   **When to Use:** Real-time applications with dynamic scenes requiring efficient voxelization [S2, unofficial].
+-*   **When Not to Use:** Hardware without conservative rasterization support, or when exact voxel coverage is critical without MSAA [S1, unofficial].
++*   **Performance:** Dynamic objects are added at runtime in ~4-5ms, while static environments are pre-voxelized in ~20ms [S2, unofficial].
++*   **Strengths:** Reduces draw calls via geometry shaders, supports dynamic scene updates, and avoids plain grid memory overhead through sparse allocation [S1, S2, unofficial].
++*   **Limitations:** Requires hardware conservative rasterization (Nvidia Maxwell architecture and later), incurs MSAA overhead, and risks over-filling empty cells without MSAA [S1, unofficial].
++*   **When to Use:** Real-time applications with dynamic scenes requiring efficient, single-pass voxelization [S2, unofficial].
++*   **When Not to Use:** Hardware lacking conservative rasterization support, or when exact voxel coverage is critical and MSAA cannot be used, as conservative rasterization inherently over-fills empty cells [S1, unofficial].
+ 
+ ## Background

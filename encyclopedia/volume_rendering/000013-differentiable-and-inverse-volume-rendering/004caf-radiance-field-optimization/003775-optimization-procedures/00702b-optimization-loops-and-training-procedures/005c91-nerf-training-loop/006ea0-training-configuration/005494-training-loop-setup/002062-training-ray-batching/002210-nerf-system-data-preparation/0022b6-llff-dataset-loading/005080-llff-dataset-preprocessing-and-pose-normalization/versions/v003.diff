@@ -1,0 +1,94 @@
+--- v002.md
++++ v003.md
+@@ -50,4 +50,91 @@
+ 12. **Separate Render Rays:** If in test split, separate render rays from dataset rays at `n_render_poses`. Assign `self.render_rays` and `self.rays`. Update `camtoworlds` to exclude render poses [S1, unofficial].
+ 
++### Pseudocode
++```python
++def load_llff_data(config, scene_dir):
++    # 1. Load Images
++    img_dir = scene_dir if config.factor <= 0 else f"{scene_dir}_factor"
++    images = load_images(img_dir).astype(np.float32) / 255.0  # Normalized to [0, 1]
++    poses_arr = np.load(f"{scene_dir}/poses_bounds.npy")
++    if poses_arr.shape[-1] != images.shape[-1]:
++        raise RuntimeError("Mismatch between number of images and poses.")
++
++    # 2. Load Metadata
++    temperature = np.load(f"{scene_dir}/temperature.npy")
++    exposure = np.load(f"{scene_dir}/exposure.npy")
++    coc = np.load(f"{scene_dir}/coc.npy")
++    temperature = temperature.reshape(images.shape[3], -1)
++    temperature = temperature.astype(np.float32) / 10000.0
++    exposure = (exposure.astype(np.float32) + 3.0) / 6.0
++
++    # 3. Parse Poses
++    poses = poses_arr[:, :-2].reshape([-1, 3, 5]).transpose([1, 2, 0])
++    bds = poses_arr[:, -2:].transpose([1, 0])
++
++    # 4. Update Intrinsics for Downsampling
++    if config.factor > 0:
++        H, W = images.shape[1], images.shape[2]
++        poses[:2, 4, :] = np.array([H, W])
++        poses[2, 4, :] /= config.factor
++
++    # 5. Correct Rotation and Axis Convention
++    poses = np.concatenate([poses[:, 1:2, :], -poses[:, 0:1, :], poses[:, 2:, :]], axis=1)
++    poses = np.moveaxis(poses, -1, 0)
++
++    # 6. Rescale Scene Geometry
++    scale = 1.0 / (bds.min() * 0.75)
++    poses[:, :3, 3] *= scale
++    bds *= scale
++
++    # 7. Recenter Poses
++    c2w = _poses_avg(poses)
++    c2w[3, :3] = 0.0; c2w[3, 3] = 1.0
++    inv_c2w = np.linalg.inv(c2w)
++    poses = inv_c2w @ poses
++
++    # 8. Generate Camera Path (Optional)
++    if config.spherify or config.render_test:
++        poses = generate_spiral_path(poses, config)
++
++    # 9. Split Dataset
++    N = images.shape[0]
++    i_test = np.arange(N)[::config.llffhold]
++    i_train = np.setdiff1d(np.arange(N), i_test)
++    images = images[i_train]
++    poses = poses[:, :, i_train]
++    temperature = temperature[:, i_train]
++    exposure = exposure[:, i_train]
++    coc = coc[:, i_train]
++
++    # 10. Convert to NDC
++    origins, directions = generate_rays(poses, images.shape[1], images.shape[2])
++    if not config.spherify:
++        origins, directions = convert_to_ndc(origins, directions)
++    dx = np.abs(origins[1:] - origins[:-1])
++    dy = np.abs(origins[1:] - origins[:-1])
++    radii = 2.0 / np.sqrt(12.0) * np.mean([dx, dy], axis=0)
++
++    # 11. Construct Rays Object
++    rays = utils.Rays(
++        origins=origins, directions=directions, viewdirs=directions,
++        radii=radii, loss_mult=np.ones_like(radii),
++        near=bds[:, 0], far=bds[:, 1],
++        temperature=temperature, exposure=exposure, coc=coc
++    )
++
++    # 12. Separate Render Rays
++    if config.render_test:
++        n_render_poses = 30
++        self.render_rays = rays[:n_render_poses]
++        self.rays = rays[n_render_poses:]
++        camtoworlds = poses[:, :, n_render_poses:]
++    else:
++        self.render_rays = None
++        self.rays = rays
++        camtoworlds = poses
++
++    return rays, camtoworlds
++```
++
+ ### Formulas
+ **Average Pose Construction (`_poses_avg`):**

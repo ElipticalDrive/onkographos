@@ -1,0 +1,617 @@
+--- v006.md
++++ v007.md
+@@ -4,23 +4,24 @@
+ 
+ ## Overview
+-Rip-NeRF is a radiance field method that renders high-fidelity, anti-aliased images by combining cone casting with an explicit hybrid representation of anisotropic 3D Gaussians [S1]. It differs from standard NeRF by replacing point-based sampling with area-sampling, where conical frustums are characterized by Gaussians and featurized via Platonic Solid Projection and Ripmap Encoding [S1]. This approach enables efficient anisotropic area-sampling of 3D space, offering faster training and smaller model sizes compared to multi-sampling alternatives like Zip-NeRF, while maintaining competitive anti-aliasing quality [S1].
++Rip-NeRF is a radiance field method that renders high-fidelity, anti-aliased images by combining cone casting with an anisotropic 3D Gaussian characterization [S1]. It differs from sibling methods like Zip-NeRF by using Ripmap-Encoded Platonic Solids to enable efficient anisotropic area-sampling, whereas Zip-NeRF relies on a multi-sampling mechanism that is less efficient [S1]. It builds on [Model Architecture and Encoding](13550-model-architecture-and-encoding.md) by replacing standard positional encoding with a hybrid explicit-implicit representation based on Platonic Solid Projection and Ripmap Encoding.
+ 
+ ## How it works
+ **Inputs and Outputs:**
+-*   **Inputs:** A set of calibrated multi-view 2D images with known camera poses.
+-*   **Outputs:** Rendered RGB images and depth maps for arbitrary viewpoints.
++*   **Inputs:** A set of calibrated multi-view 2D images, camera poses, and intrinsics.
++*   **Outputs:** Rendered pixel colors $\mathbf{c}$ and volume density $\sigma$ for each pixel, optimized end-to-end.
+ 
+ **Data Structures:**
+-1.  **Ripmap Encoding ($R$):** A hierarchical grid of learnable features.
+-    *   **Base Level ($R_{0,0}$):** A 3D tensor of shape $H \times W \times C$. Default dimensions: $H=512, W=512, C=16$ [S1].
+-    *   **Derived Levels:** Higher levels are not stored explicitly but are derived from the base level using averaging operations to ensure consistency and compactness [S1].
+-2.  **Platonic Solid Projection:** The 3D space is projected onto the faces of a Platonic solid. Default is an icosahedron with $n=10$ unparalleled faces [S1].
+-3.  **Anisotropic 3D Gaussian:** Each conical frustum is characterized by a mean $\boldsymbol{\mu} \in \mathbb{R}^3$ and a covariance matrix $\boldsymbol{\Sigma} \in \mathbb{R}^{3 \times 3}$ [S1].
+-4.  **Tiny MLP ($F_\theta$):** A small multi-layer perceptron that takes aggregated feature vectors and view directions to predict density and color [S1].
++1.  **Ripmap Encoding ($\mathcal{R}$):** A hierarchical grid of learnable features.
++    *   **Base Level ($\mathcal{R}_{0,0}$):** A 3D tensor with shape $H \times W \times C$. Default dimensions: $H=512, W=512, C=16$ [S1].
++    *   **Derived Levels:** Higher levels are not learnable but are derived from $\mathcal{R}_{0,0}$ using averaging operations to ensure consistency and compactness [S1].
++2.  **Platonic Solid:** A geometric proxy for the 3D space. Default is an icosahedron with 10 unparalleled faces $\{P_i \mid i = 1, \dots, n\}$ [S1].
++3.  **Anisotropic 3D Gaussian:** Characterizes each conical frustum. Defined by mean $\boldsymbol{\mu} \in \mathbb{R}^3$ and covariance $\boldsymbol{\Sigma} \in \mathbb{R}^{3 \times 3}$ [S1].
++4.  **Tiny MLP ($F_\theta$):** A small neural network that takes aggregated features and outputs $\sigma$ and $\mathbf{c}$ [S1].
++5.  **Binary Occupancy Grid:** Used to skip samples in empty space, implemented via the NerfAcc library [S1].
+ 
+ **Numbered Steps:**
+ 
+ 1.  **Cone Casting and Frustum Division:**
+-    For each pixel, cast a cone into the scene and divide it into multiple conical frustums along the ray [S1]. This avoids discrete point-based sampling of continuous signals [S1].
++    For each pixel, cast a cone into the scene. Divide the cone into multiple conical frustums along the viewing ray [S1]. This avoids discrete point-based sampling of continuous signals [S1].
+ 
+ 2.  **Gaussian Characterization:**
+@@ -28,35 +29,39 @@
+ 
+ 3.  **Platonic Solid Projection:**
+-    Project the 3D Gaussian onto the $n$ faces of the Platonic solid. For each face $P_i$ (where $i = 1, \dots, n$):
+-    *   Apply a projection matrix $M_i \in \mathbb{R}^{3 \times 2}$ to map the 3D world coordinates to the 2D coordinate system of plane $P_i$ [S1].
+-    *   Compute the projected mean $\boldsymbol{\mu}_{proj}$ and covariance $\boldsymbol{\Sigma}_{proj}$ of the 2D Gaussian on plane $P_i$ [S1].
++    Project the 3D Gaussian onto the faces of the Platonic solid to form 2D Gaussians.
++    For each face $P_i$ ($i=1, \dots, n$):
++    *   Let $M_i \in \mathbb{R}^{3 \times 2}$ be the projection matrix mapping the 3D world coordinate system to the 2D coordinate system of plane $P_i$ [S1].
++    *   Compute the projected mean $\boldsymbol{\mu}_{proj} = M_i^T \boldsymbol{\mu}$ [G] (Note: Source implies mapping via $M_i$, standard projection is $\boldsymbol{\mu}_{proj} = M_i^T \boldsymbol{\mu}$ or similar linear transform; source says "mapping... into... $P_i$").
++    *   Compute the projected covariance $\boldsymbol{\Sigma}_{proj} = M_i^T \boldsymbol{\Sigma} M_i$ [G] (Standard covariance transformation under linear map).
++    *   The source states $\boldsymbol{\mu}_{proj}$ and $\boldsymbol{\Sigma}_{proj}$ are the mean and covariance of the projected 2D Gaussian on plane $P_i$ [S1].
+ 
+ 4.  **Ripmap Encoding Query:**
+-    For each projected 2D Gaussian on plane $P_i$, query a feature vector $\mathbf{f}_i$ from the Ripmap Encoding using tetra-linear interpolation [S1].
+-    *   The position $(p_x, p_y)$ for interpolation is determined by $\boldsymbol{\mu}_{proj}$ [S1].
+-    *   The level $(l_x, l_y)$ for interpolation is determined by $\boldsymbol{\Sigma}_{proj}$ [S1].
+-    *   The interpolation uses a hyper-parameter $w$ to adjust the probability mass coverage. Default $w = 2.0$ [S1].
+-    *   *Note on Ripmap Derivation:* Higher levels $R_{i,j}$ are derived from the base level $R_{0,0}$ as follows [S1]:
++    Query a feature vector $\mathbf{f}_i$ from the Ripmap Encoding of plane $P_i$ using tetra-linear interpolation [S1].
++    *   The position $(p_x, p_y)$ used in interpolation is determined by $\boldsymbol{\mu}_{proj}$ [S1].
++    *   The level $(l_x, l_y)$ used in interpolation is determined by $\boldsymbol{\Sigma}_{proj}$ [S1].
++    *   The interpolation uses a hyper-parameter $w=2.0$ to adjust how much probability mass of the Gaussian footprint is covered [S1].
++    *   The Ripmap levels are derived from the base level $\mathcal{R}_{0,0}$ using the following averaging rules for indices $i, j$ in $x, y$ directions [S1]:
+         $$
+-        R_{i,j} = \begin{cases} 
+-        \text{Avg}_{2 \times 1} R_{i, j-1} & \text{if } j \neq 0 \\
+-        \text{Avg}_{1 \times 2} R_{i-1, j} & \text{if } i \neq 0 \text{ and } j = 0 \\
+-        R_{0,0} & \text{otherwise}
++        \mathcal{R}_{i,j} = \begin{cases} 
++        \text{Avg}_{2 \times 1} \mathcal{R}_{i, j-1} & \text{if } j \neq 0 \\
++        \text{Avg}_{1 \times 2} \mathcal{R}_{i-1, j} & \text{if } i \neq 0 \text{ \& } j = 0 \\
++        \mathcal{R}_{0,0} & \text{otherwise}
+         \end{cases}
+         $$
+-        where $i$ and $j$ are indices of levels in the $x$ and $y$ directions, respectively. Only $R_{0,0}$ is learnable [S1].
++        Where $\text{Avg}_{2 \times 1}$ averages two adjacent elements in the $y$-direction (or $x$-direction depending on axis definition, source says "indices of the levels in the x and y directions") and $\text{Avg}_{1 \times 2}$ averages in the other. Specifically, Eq 1 in source: $\mathcal{R}_{i,j} = \text{Avg}_{2 \times 1} \mathcal{R}_{i, j-1}$ if $j \neq 0$, and $\text{Avg}_{1 \times 2} \mathcal{R}_{i-1, j}$ if $i \neq 0, j=0$. This implies hierarchical downsampling [S1].
+ 
+ 5.  **Feature Aggregation:**
+-    Concatenate all feature vectors $\{\mathbf{f}_i \mid i = 1, \dots, n\}$ obtained from the $n$ Platonic solid faces to form the final feature vector $\mathbf{f}$ for the 3D Gaussian [S1].
+-
+-6.  **Density and Color Prediction:**
+-    Concatenate the aggregated feature vector $\mathbf{f}$ with the encoded viewing direction $\mathbf{d}$ [S1]. Pass this combined vector through the tiny MLP $F_\theta$ to estimate the density $\sigma$ and color $\mathbf{c}$ of the conical frustum [S1].
++    Concatenate all feature vectors $\{\mathbf{f}_i \mid i = 1, \dots, n\}$ from the $n$ Platonic solid faces to form the final feature vector $\mathbf{f}$ of the 3D Gaussian [S1].
++    Concatenate $\mathbf{f}$ with the encoded view direction $\mathbf{d}$ [S1].
++
++6.  **Density and Color Estimation:**
++    Pass the aggregated feature vector (concatenation of $\mathbf{f}$ and $\mathbf{d}$) through the tiny MLP $F_\theta$ to estimate the density $\sigma$ and color $\mathbf{c}$ of the conical frustum [S1].
+ 
+ 7.  **Volume Rendering:**
+-    Render the pixel color by performing volume rendering using the estimated color $\mathbf{c}$ and density $\sigma$ values from the sampled frustums [S1].
++    Render the pixel color by performing volume rendering using the estimated $\sigma$ and $\mathbf{c}$ for all frustums along the ray [S1].
+ 
+ 8.  **Optimization:**
+     Optimize the system end-to-end using a photometric loss between rendered and observed images [S1].
+-    *   **Area Loss:** Scale the photometric loss for each pixel by the area of its footprint on the image plane, denoted as $L_{area}$ [S1]. This makes the loss area-aware [S1].
++    *   **Area Loss:** Scale the photometric loss for each pixel by incorporating the area of its footprint on the image plane, denoted as $L_{area}$ [S1]. This makes the loss area-aware [S1].
+ 
+ **Pseudocode:**
+@@ -68,231 +73,316 @@
+ 
+ class RipNeRF:
+-    def __init__(self, num_faces=10, base_h=512, base_w=512, base_c=16, w=2.0):
++    def __init__(self, h=512, w=512, c=16, num_faces=10, w_param=2.0):
+         """
+         Initialize Rip-NeRF.
+-        :param num_faces: Number of faces on the Platonic solid (default 10 for icosahedron).
+-        :param base_h, base_w, base_c: Dimensions of the base Ripmap level R_0,0.
+-        :param w: Hyper-parameter for Gaussian footprint coverage.
++        :param h: Height of base Ripmap level
++        :param w: Width of base Ripmap level
++        :param c: Channels of base Ripmap level
++        :param num_faces: Number of faces in Platonic Solid (default 10 for Icosahedron)
++        :param w_param: Hyper-parameter for Gaussian footprint coverage
+         """
+         self.num_faces = num_faces
+-        self.w = w
+-        # Base level is learnable; higher levels are derived
+-        self.base_ripmap = nn.Parameter(torch.randn(base_h, base_w, base_c))
+-        
+-        # Tiny MLP for density and color prediction
+-        # Input dim: base_c * num_faces + directional_encoding_dim
+-        # Output dim: 4 (density + 3 RGB)
++        self.w_param = w_param
++        
++        # Base level Ripmap Encoding is learnable
++        self.base_ripmap = nn.Parameter(torch.randn(h, w, c))
++        
++        # Tiny MLP for density and color
++        # Input dim: c * num_faces + direction_encoding_dim
++        # Output dim: 4 (sigma + rgb)
+         self.mlp = nn.Sequential(
+-            nn.Linear(base_c * num_faces + 27, 64), # 27 is standard SH degree 2 dim or similar
++            nn.Linear(c * num_faces + 6, 64), # 6 for directional encoding (2*3)
+             nn.ReLU(),
+-            nn.Linear(64, 32),
+-            nn.ReLU(),
+-            nn.Linear(32, 4) # sigma, r, g, b
++            nn.Linear(64, 4)
+         )
+         
+-        # Projection matrices for Platonic solid faces (precomputed)
+-        self.projection_matrices = self._get_platonic_projections(num_faces)
+-
+-    def _get_platonic_projections(self, num_faces):
+-        """
+-        Returns a list of projection matrices M_i for each face.
+-        In practice, these are fixed geometric transformations.
+-        """
+-        # Placeholder for actual geometric projection matrix generation
+-        # Each M_i is 3x2 mapping 3D world to 2D plane coordinates
+-        return [torch.eye(2, 3) for _ in range(num_faces)] # Simplified for structure
+-
+-    def derive_ripmap_level(self, i, j):
+-        """
+-        Derive Ripmap level R_{i,j} from base level using averaging.
+-        """
+-        if i == 0 and j == 0:
++        # Precompute projection matrices for Platonic Solid faces
++        # M_i maps 3D world to 2D plane i
++        self.projection_matrices = self.get_icosahedron_projection_matrices()
++
++    def get_icosahedron_projection_matrices(self):
++        """
++        Returns list of projection matrices M_i for the 10 faces of an icosahedron.
++        In a real implementation, this would compute the specific 3x2 matrices
++        mapping world coordinates to the local 2D coordinate system of each face.
++        Here we return dummy matrices for structure.
++        """
++        # Placeholder for actual geometric computation
++        return [torch.eye(3, 2) for _ in range(self.num_faces)]
++
++    def get_ripmap_level(self, level_x, level_y):
++        """
++        Retrieves the feature grid for a specific level (level_x, level_y)
++        using the hierarchical averaging rule from Eq. 1.
++        """
++        # Base case
++        if level_x == 0 and level_y == 0:
+             return self.base_ripmap
+         
+-        # Get parent levels
+-        if j != 0:
+-            parent = self.derive_ripmap_level(i, j - 1)
+-            # Avg_2x1: Average along x-axis (dim 0)
+-            # Assuming parent is H x W x C
+-            # To average 2x1, we reshape and average
+-            h, w, c = parent.shape
+-            # Reshape to (h/2, 2, w, c) -> average dim 1 -> (h/2, w, c)
+-            # Note: This requires h to be even. 
+-            # The source implies a hierarchical structure where levels are coarser.
+-            # Standard mipmapping logic:
+-            if h % 2 == 0:
+-                parent_reshaped = parent.reshape(h//2, 2, w, c)
+-                return parent_reshaped.mean(dim=1)
+-            else:
+-                # Fallback or error if dimensions don't align, 
+-                # but source implies consistent derivation.
+-                return parent # [G] Fallback for odd dimensions not specified in source
+-        
+-        if i != 0 and j == 0:
+-            parent = self.derive_ripmap_level(i - 1, j)
+-            # Avg_1x2: Average along y-axis (dim 1)
+-            h, w, c = parent.shape
+-            if w % 2 == 0:
+-                parent_reshaped = parent.reshape(h, w//2, 2, c)
+-                return parent_reshaped.mean(dim=2)
+-            else:
+-                return parent
+-
+-    def query_ripmap(self, x, y, level_x, level_y):
+-        """
+-        Query feature vector from Ripmap using tetra-linear interpolation.
+-        :param x, y: Normalized 2D coordinates on the plane.
+-        :param level_x, level_y: Integer indices for the level in x and y directions.
+-        """
+-        # Determine the grid size for the requested level
+-        # Level 0 is base_h x base_w
+-        # Level i is roughly base_h / 2^i x base_w / 2^i
+-        # However, source says levels are derived. We can just access the derived tensor.
+-        
+-        # Get the specific level tensor
+-        # Note: In implementation, one might precompute or cache derived levels
+-        # or compute on the fly. For simplicity, we assume a helper to get level tensor.
+-        # Since derive_ripmap_level is recursive, we might want to memoize or flatten.
+-        # For this pseudocode, we assume we can get the tensor for level (level_x, level_y).
+-        
+-        # Let's assume a helper `get_level_tensor(level_x, level_y)` exists
+-        # which calls derive_ripmap_level and returns the tensor.
+-        level_tensor = self.get_level_tensor(level_x, level_y)
+-        
+-        h, w, c = level_tensor.shape
+-        
+-        # Map x, y to grid coordinates
+-        # x, y are typically in [0, 1] or [-1, 1]. Source doesn't specify range.
+-        # Assuming normalized [0, 1] mapped to [0, w-1], [0, h-1]
+-        grid_x = x * (w - 1)
+-        grid_y = y * (h - 1)
+-        
+-        # Tetra-linear interpolation (bilinear in 2D grid)
+-        # Get floor and ceil coordinates
+-        x0 = torch.floor(grid_x).long()
+-        y0 = torch.floor(grid_y).long()
++        # Derived levels
++        # Note: Indices might need adjustment based on coordinate system
++        if level_y != 0:
++            # Avg_2x1: Average along y-dimension (assuming y is vertical in grid)
++            # Source: Avg_{2x1} R_{i, j-1}
++            prev = self.get_ripmap_level(level_x, level_y - 1)
++            # Average adjacent elements in the 'j' (y) direction
++            # Assuming prev is (H, W, C), we average along H (if H corresponds to y)
++            # The source says "indices of the levels in the x and y directions"
++            # Let's assume level_x corresponds to H index and level_y to W index for consistency with typical image coords
++            # However, Eq 1 says Avg_{2x1} for j!=0 (y) and Avg_{1x2} for i!=0 (x).
++            # Let's assume H is x-axis and W is y-axis for the grid storage? 
++            # Standard image: H is rows (y), W is cols (x).
++            # Let's stick to source notation: i is x-index, j is y-index.
++            # If grid is stored as [H, W, C], then H is y-index, W is x-index?
++            # Let's assume grid[i, j] where i is row (y) and j is col (x) is NOT standard.
++            # Let's assume grid[h, w, c].
++            # If i is x-level and j is y-level.
++            # If j != 0 (y-level > 0), we average in y-direction (rows).
++            if level_x >= self.base_ripmap.shape[0] or level_y >= self.base_ripmap.shape[1]:
++                return self.base_ripmap # Fallback
++            
++            # Average along the 'j' dimension (columns if j is col index, or rows if j is row index)
++            # Source: Avg_{2x1} R_{i, j-1}. This usually means averaging 2 elements in one dim, 1 in other.
++            # Let's assume standard PyTorch tensor [H, W, C].
++            # If j is W-index (x-direction in image), then Avg_{2x1} averages along H?
++            # Let's assume the source implies:
++            # i -> H index, j -> W index.
++            # If j != 0: Avg along W (dim 1).
++            # If i != 0: Avg along H (dim 0).
++            
++            # Re-reading Eq 1:
++            # i, j indices of levels in x and y directions.
++            # Avg_{2x1} R_{i, j-1} if j != 0.
++            # Avg_{1x2} R_{i-1, j} if i != 0 & j = 0.
++            
++            # Let's assume grid is [H, W, C].
++            # If j is y-level, and we average in y-direction, we average along H.
++            # If i is x-level, and we average in x-direction, we average along W.
++            
++            # Let's try:
++            # j != 0: Average along H (dim 0).
++            # i != 0: Average along W (dim 1).
++            
++            # This is ambiguous without the figure. 
++            # However, the key is that it's a deterministic average of the previous level.
++            # We will implement a generic average pool.
++            
++            # Let's assume the "level" corresponds to the resolution.
++            # Level 0 is HxW. Level 1 is H/2 x W/2.
++            # If we are at level (i, j), we derive it from (i, j-1) or (i-1, j).
++            
++            # Let's implement the average operation.
++            # Avg_{2x1} means kernel 2x1. Avg_{1x2} means kernel 1x2.
++            
++            # If j != 0 (y-level), we use Avg_{2x1}.
++            # If i != 0 (x-level), we use Avg_{1x2}.
++            
++            # Let's assume i corresponds to H (rows) and j corresponds to W (cols).
++            # Then Avg_{2x1} (2 rows, 1 col) averages along H.
++            # Avg_{1x2} (1 row, 2 cols) averages along W.
++            
++            # Check source: "i and j are the indices of the levels in the x and y directions"
++            # Usually x is horizontal (W), y is vertical (H).
++            # So i -> W, j -> H.
++            # If j != 0 (H-level > 0), Avg_{2x1} (2 in y, 1 in x) -> Average along H.
++            # If i != 0 (W-level > 0), Avg_{1x2} (1 in y, 2 in x) -> Average along W.
++            
++            # Let's assume grid is [H, W, C].
++            # i is W-index, j is H-index.
++            
++            if level_y != 0: # j != 0
++                # Avg along H (dim 0)
++                prev = self.get_ripmap_level(level_x, level_y - 1)
++                # Resize prev to current size? No, the level defines the resolution.
++                # The base level is HxW.
++                # Level (0,1) is H/2 x W? Or H x W/2?
++                # The source says "compact and consistent".
++                # Let's assume the grid size shrinks.
++                # Base: H, W.
++                # Level (0,1): H/2, W.
++                # Level (1,0): H, W/2.
++                # Level (1,1): H/2, W/2.
++                
++                # If j != 0 (y-level), we average along H.
++                # So size becomes H/2, W.
++                if level_x >= self.base_ripmap.shape[0] or level_y >= self.base_ripmap.shape[1]:
++                     return self.base_ripmap
++                
++                # Average along dim 0 (H)
++                # Kernel 2x1
++                avg_pool = nn.AvgPool2d(kernel_size=(2, 1), stride=(2, 1))
++                # Input to AvgPool2d is (N, C, H, W)
++                # prev is (H, W, C) -> (1, C, H, W)
++                prev_4d = prev.permute(2, 0, 1).unsqueeze(0)
++                pooled = avg_pool(prev_4d)
++                return pooled.squeeze(0).permute(1, 2, 0)
++            
++            else: # j == 0
++                if level_x == 0:
++                    return self.base_ripmap
++                # Avg along W (dim 1)
++                # Kernel 1x2
++                prev = self.get_ripmap_level(level_x - 1, level_y)
++                if level_x >= self.base_ripmap.shape[0] or level_y >= self.base_ripmap.shape[1]:
++                     return self.base_ripmap
++                avg_pool = nn.AvgPool2d(kernel_size=(1, 2), stride=(1, 2))
++                prev_4d = prev.permute(2, 0, 1).unsqueeze(0)
++                pooled = avg_pool(prev_4d)
++                return pooled.squeeze(0).permute(1, 2, 0)
++
++    def query_ripmap(self, pos, level, base_h, base_w):
++        """
++        Queries the Ripmap at a specific position and level using tetra-linear interpolation.
++        :param pos: (px, py) in [0, 1]
++        :param level: (lx, ly) determining the resolution
++        """
++        # Determine the resolution for this level
++        # Assuming level_x corresponds to W reduction, level_y to H reduction
++        # lx is x-level, ly is y-level
++        lx, ly = level
++        h = base_h // (2 ** ly)
++        w = base_w // (2 ** lx)
++        
++        grid = self.get_ripmap_level(lx, ly)
++        
++        # Map pos [0,1] to grid coordinates
++        px = pos[0] * (w - 1)
++        py = pos[1] * (h - 1)
++        
++        # Tetra-linear interpolation (bilinear in 2D)
++        # Get 4 corners
++        x0 = int(torch.floor(px))
++        y0 = int(torch.floor(py))
+         x1 = x0 + 1
+         y1 = y0 + 1
+         
+-        # Clamp to boundaries
++        # Clamp
+         x0 = torch.clamp(x0, 0, w - 1)
++        y0 = torch.clamp(y0, 0, h - 1)
+         x1 = torch.clamp(x1, 0, w - 1)
+-        y0 = torch.clamp(y0, 0, h - 1)
+         y1 = torch.clamp(y1, 0, h - 1)
+         
+-        # Interpolation weights
+-        wx = grid_x - x0.float()
+-        wy = grid_y - y0.float()
+-        
+-        # Get values
+-        v00 = level_tensor[y0, x0, :] # h, w, c -> y, x, c
+-        v10 = level_tensor[y0, x1, :]
+-        v01 = level_tensor[y1, x0, :]
+-        v11 = level_tensor[y1, x1, :]
+-        
+-        # Bilinear interpolation
+-        v0 = v00 * (1 - wx) + v10 * wx
+-        v1 = v01 * (1 - wx) + v11 * wx
+-        v = v0 * (1 - wy) + v1 * wy
+-        
+-        return v
+-
+-    def forward(self, rays):
++        # Interpolate
++        # This is a simplified bilinear interpolation
++        # f(x,y) = f(0,0)(1-x)(1-y) + f(1,0)x(1-y) + f(0,1)(1-x)y + f(1,1)xy
++        # We need to handle the float positions
++        
++        # Extract values
++        # grid is (H, W, C)
++        # We need to interpolate at (py, px)
++        
++        # Using F.grid_sample for bilinear interpolation
++        # Normalize to [-1, 1]
++        px_norm = 2 * (px / (w - 1)) - 1
++        py_norm = 2 * (py / (h - 1)) - 1
++        
++        # grid_sample expects (N, C, H, W) and grid (N, H_out, W_out, 2)
++        # Grid coordinates are (x, y) -> (col, row)
++        grid_coords = torch.stack([px_norm, py_norm], dim=-1).unsqueeze(0).unsqueeze(0) # (1, 1, 1, 2)
++        grid_4d = grid.permute(2, 0, 1).unsqueeze(0) # (1, C, H, W)
++        
++        sampled = F.grid_sample(grid_4d, grid_coords, mode='bilinear', padding_mode='zeros')
++        return sampled.squeeze()
++
++    def forward(self, rays_o, rays_d, frustums):
+         """
+         Forward pass for a batch of rays.
+-        :param rays: Dictionary containing ray origins, directions, and pixel indices.
+-        :return: Rendered colors and densities.
+-        """
+-        # 1. Cast cone and divide into frustums
+-        # 2. Characterize frustums as 3D Gaussians (mu, Sigma)
+-        # This part is handled by the sampling strategy (e.g., NerfAcc)
+-        # We assume `samples` contains mu and Sigma for each sample point/frustum
+-        
+-        all_features = []
+-        all_directions = []
+-        
+-        for sample in samples:
+-            mu_3d = sample.mu
+-            sigma_3d = sample.sigma
+-            
+-            features_per_face = []
+-            
+-            # 3. Platonic Solid Projection
+-            for i in range(self.num_faces):
+-                M_i = self.projection_matrices[i]
+-                
+-                # Project mean and covariance
+-                # mu_proj = M_i^T * mu_3d ? Or M_i * mu_3d?
+-                # Source: M_i in R^{3x2} maps 3D to 2D.
+-                # Usually projection is P * X. If M is 3x2, it might be a basis.
+-                # Let's assume standard projection: mu_2d = M_i^T * mu_3d (if M is 3x2 basis)
+-                # Or mu_2d = M_i * mu_3d (if M is 2x3). Source says M_i in R^{3x2}.
+-                # If M is 3x2, it likely maps 2D plane coords to 3D world.
+-                # Inverse mapping: 2D = (M^T M)^-1 M^T * 3D.
+-                # For simplicity, we assume a function `project_2d` handles this.
+-                mu_2d, sigma_2d = project_2d_gaussian(mu_3d, sigma_3d, M_i)
+-                
+-                # 4. Query Ripmap
+-                # Position determined by mu_2d
+-                px, py = mu_2d[0], mu_2d[1]
+-                # Level determined by Sigma_2d and w
+-                # Source: level (lx, ly) determined by covariance.
+-                # Typically, larger variance -> higher level (coarser).
+-                # Formula not explicitly given for lx, ly from Sigma, but w=2.0 adjusts mass.
+-                # [G] Assume a heuristic: level = floor(log2(variance * w))
+-                lx = int(torch.floor(torch.log2(torch.sqrt(sigma_2d[0,0]) * self.w)))
+-                ly = int(torch.floor(torch.log2(torch.sqrt(sigma_2d[1,1]) * self.w)))
+-                
+-                f_i = self.query_ripmap(px, py, lx, ly)
+-                features_per_face.append(f_i)
+-            
+-            # 5. Aggregate
+-            f_final = torch.cat(features_per_face, dim=-1)
+-            
+-            # 6. Predict
+-            # Encode direction d
+-            d_encoded = encode_direction(sample.direction) # e.g., SH or PE
+-            input_vec = torch.cat([f_final, d_encoded], dim=-1)
+-            
+-            output = self.mlp(input_vec)
+-            sigma = torch.relu(output[0]) # Density
+-            color = torch.sigmoid(output[1:]) # Color [0,1]
+-            
+-            all_features.append((sigma, color))
+-            
+-        # 7. Volume Rendering
+-        # Use standard volume rendering equation with alpha from sigma
+-        colors, depths = volume_render(all_features)
+-        
+-        return colors, depths
+-```
+-
+-**Parameters:**
+-*   **Ripmap Base Size:** $H=512, W=512, C=16$ [S1].
+-*   **Platonic Solid:** Icosahedron (10 faces) [S1].
+-*   **Hyper-parameter $w$:** 2.0, adjusting Gaussian footprint probability mass coverage [S1].
+-*   **Optimizer:** AdamW [S1].
+-*   **Iterations:** 120,000 for Rip-NeRF; 25,000 for Rip-NeRF25k [S1].
+-*   **Weight Decay:** $1 \times 10^{-5}$ [S1].
+-*   **Initial Learning Rate:** $2 \times 10^{-3}$, modulated by MultiStepLR [S1].
+-*   **Ripmap Learning Rate:** Scaled up by 10.0 times relative to the base learning rate [S1].
+-
+-**Edge Cases and Pitfalls:**
+-*   **Empty Space:** Use a binary occupancy grid (e.g., from NerfAcc) to skip samples in empty areas, improving efficiency [S1].
+-*   **Precision:** The derivation of higher-level Ripmap grids from the base level ensures consistency but requires careful handling of grid dimensions (even/odd) during averaging [S1].
+-*   **Boundary Conditions:** Interpolation coordinates must be clamped to the valid range of the Ripmap grid [G].
++        :param rays_o: Origin of rays (B, 3)
++        :param rays_d: Direction of rays (B, 3)
++        :param frustums: List of conical frustums for each ray, each characterized by (mu, Sigma)
++        """
++        rendered_colors = []
++        
++        for i, ray_frustums in enumerate(frustums):
++            pixel_colors = []
++            for mu, sigma in ray_frustums:
++                # Step 3: Project to Platonic Solid faces
++                features = []
++                for k in range(self.num_faces):
++                    M = self.projection_matrices[k]
++                    # Project mean and covariance
++                    # mu_proj = M^T mu
++                    mu_proj = torch.matmul(M.T, mu)
++                    # Sigma_proj = M^T Sigma M
++                    sigma_proj = torch.matmul(torch.matmul(M.T, sigma), M)
++                    
++                    # Step 4: Query Ripmap
++                    # Position determined by mu_proj
++                    # Level determined by sigma_proj
++                    # This requires mapping 2D Gaussian params to (px, py) and (lx, ly)
++                    # The source says "position ... determined by mean" and "level ... determined by covariance"
++                    # And uses w=2.0 to adjust probability mass coverage.
++                    
++                    # Simplified mapping:
++                    # px, py from mu_proj
++                    px, py = mu_proj[0], mu_proj[1]
++                    
++                    # lx, ly from sigma_proj eigenvalues or trace?
++                    # Source says "level ... determined by ... covariance"
++                    # And w=2.0 adjusts coverage.
++                    # Typically, larger variance -> higher level (coarser resolution).
++                    # Let's assume a simple mapping based on variance magnitude.
++                    # This is a gap filled by [G].
++                    var_x = sigma_proj[0, 0]
++                    var_y = sigma_proj[1, 1]
++                    
++                    # Map variance to level index
++                    # Higher variance -> higher level index
++                    # w=2.0 might be a scaling factor for the variance before mapping
++                    level_x = int(torch.log2(torch.clamp(var_x * self.w_param, min=1.0)))
++                    level_y = int(torch.log2(torch.clamp(var_y * self.w_param, min=1.0)))
++                    
++                    # Clamp levels to base level if too small
++                    level_x = max(0, min(level_x, 9)) # Assuming max 10 levels
++                    level_y = max(0, min(level_y, 9))
++                    
++                    # Query feature
++                    f_i = self.query_ripmap(torch.tensor([px, py]), (level_x, level_y), 512, 512)
++                    features.append(f_i)
++                
++                # Step 5: Aggregate
++                f_concat = torch.cat(features, dim=-1)
++                
++                # Encode view direction
++                # Standard positional encoding for direction d
++                # d is (3,)
++                # Let's assume a simple linear encoding for brevity, or standard PE
++                # Source says "encoded view direction d"
++                # We'll use a simple linear projection as a placeholder for PE
++                d_enc = torch.cat([torch.sin(2**i * torch.pi * d) for i in range(3)], dim=-1)
++                
++                # Step 6: MLP
++                input_feat = torch.cat([f_concat, d_enc], dim=-1)
++                output = self.mlp(input_feat)
++                sigma = output[0]
++                color = torch.sigmoid(output[1:])
++                
++                pixel_colors.append(color)
++            
++            # Step 7: Volume Rendering
++            # Standard alpha compositing
++            # This is a simplification. Real volume rendering integrates along the ray.
++            # Here we assume frustums are sampled points along the ray.
++            # We need to sort frustums by depth and apply volume rendering formula.
++            # For brevity, we return the last color as a placeholder.
++            # In a real implementation, this would be a loop over frustums with opacity calculation.
++            if pixel_colors:
++                rendered_colors.append(pixel_colors[-1])
++            else:
++                rendered_colors.append(torch.zeros(3))
++                
++        return torch.stack(rendered_colors)
+ 
+ ## Operating characteristics
+-*   **Training Time:** 2.6 hours on an NVIDIA A100-SXM4-80GB GPU for the standard Rip-NeRF (120k iterations) [S1]. The Rip-NeRF25k variant (25k iterations) trains in 32 minutes, which is 11.76% of Zip-NeRF's 4.5 hours [S1].
+-*   **Model Size:** 160 MB [S1]. This is significantly smaller than Zip-NeRF's 592 MB [S1].
+-*   **GPU Memory:** 20 GB during training [S1]. This is feasible for consumer GPUs like the RTX 4090, whereas Zip-NeRF requires ~80 GB [S1].
+-*   **Rendering Speed:** Approximately 3 FPS in the experimental setting [S1]. This outperforms Zip-NeRF's 0.25 FPS [S1].
+-*   **Strengths:** High-fidelity anti-aliasing, efficient anisotropic area-sampling, compact model size, and fast training/rendering compared to multi-sampling methods [S1].
+-*   **Limitations:** Requires calibrated multi-view images [S1]. SSIM is slightly lower than Zip-NeRF, though PSNR and LPIPS are better [S1].
+-*   **When to Use:** When high-quality anti-aliased rendering is needed with limited GPU memory and faster training times are preferred over maximum SSIM [S1].
+-*   **When Not to Use:** If unbounded scenes are the primary requirement (Zip-NeRF is designed for this) or if maximum SSIM is the sole metric [S1].
++*   **Time Complexity:** Training time is 2.6 hours on an NVIDIA A100-SXM4-80GB GPU for 120k iterations [S1]. The variant Rip-NeRF25k trains in 32 minutes (11.76% of Zip-NeRF's 4.5 hours) [S1].
++*   **Memory Complexity:** Model size is 160 MB [S1]. GPU memory consumption during training is 20 GB [S1]. This is significantly lower than Zip-NeRF's 80 GB, making it feasible for consumer GPUs like the RTX 4090 [S1].
++*   **Rendering Speed:** Approximately 3 FPS in the experimental setting [S1]. This outperforms Zip-NeRF (0.25 FPS) [S1].
++*   **Strengths:** High-fidelity anti-aliased rendering; efficient anisotropic area-sampling; compact model size; fast training and rendering compared to Zip-NeRF [S1].
++*   **Limitations:** Requires calibrated multi-view images [S1]. Performance on unbounded scenes may be inferior to methods like Zip-NeRF which are designed for them [S1].
++*   **When to use:** When high-fidelity anti-aliasing is required, and training time/memory are constraints. Suitable for bounded objects [S1].
++*   **When not to use:** For unbounded scenes where Zip-NeRF's generalization is preferred, or if SSIM is the primary metric and Zip-NeRF's slightly better SSIM is critical [S1].
+ 
+ ## Background
+-Rip-NeRF was introduced in the paper "Rip-NeRF: Anti-aliasing Radiance Fields with Ripmap-Encoded Platonic Solids" [S1]. It builds upon the hybrid representation approach, combining the efficiency of explicit representations (like 3D Gaussians) with the flexibility of implicit representations (like MLPs) [S1]. The method addresses the limitations of discrete point-based sampling in NeRF by using cone casting and area-sampling, inspired by Mip-NeRF and Tri-MipRF [S1]. It specifically improves upon Zip-NeRF's multi-sampling mechanism by using Ripmap-Encoded Platonic Solids for more efficient anisotropic area-sampling [S1].
++Rip-NeRF was introduced in 2024 by SRN et al. [S1]. It is part of the evolution of NeRF methods that incorporate hybrid representations (explicit and implicit) to balance efficiency and flexibility [S1]. It builds on concepts from Mip-NeRF (cone casting) and Tri-MipRF (Ripmap-like area sampling) [S1]. The method was evaluated on the multi-scale Blender dataset [S1].
+ 
+ ## Sources

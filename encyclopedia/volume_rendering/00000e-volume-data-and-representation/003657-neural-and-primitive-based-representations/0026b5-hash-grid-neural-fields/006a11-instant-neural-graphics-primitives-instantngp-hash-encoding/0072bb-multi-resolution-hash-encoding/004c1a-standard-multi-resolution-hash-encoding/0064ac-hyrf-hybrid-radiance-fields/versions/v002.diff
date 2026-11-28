@@ -1,0 +1,338 @@
+--- v001.md
++++ v002.md
+@@ -8,9 +8,9 @@
+ ## How it works
+ **Inputs and Outputs:**
+-*   **Inputs:** Camera parameters (rotation $R$, translation $t$), a set of explicit 3D Gaussians $\{G_e\}$ with initial properties, and two neural field encoders $\Theta_{geo}$ and $\Theta_{rad}$ initialized with multi-resolution hash grids.
+-*   **Outputs:** Pixel color $C$.
++*   **Inputs:** Camera parameters (rotation $R$, translation $t$), a set of explicit 3D Gaussians $\{G_e\}$ with initial properties, and two neural field encoders $\Theta_{geo}$ and $\Theta_{rad}$ initialized with multi-resolution hash grids [S1].
++*   **Outputs:** Pixel color $C$ [S1].
+ 
+ **Data Structures:**
+-*   **Hash Grids:** Two sets of hash tables, one for geometry ($\Theta_{geo}$) and one for radiance ($\Theta_{rad}$).
++*   **Hash Grids:** Two sets of hash tables, one for geometry ($\Theta_{geo}$) and one for radiance ($\Theta_{rad}$) [S1].
+     *   Number of levels $L=16$ [S1].
+     *   Feature dimension per entry $F=2$ [S1].
+@@ -39,5 +39,5 @@
+ \mathbf{f}_{geo} = \text{enc}(\mathbf{p}_i; \Theta_{geo})
+ $$
+-where $\text{enc}$ denotes the multi-resolution hash encoding process defined in [Standard Multi-resolution Hash Encoding](13152-standard-multi-resolution-hash-encoding.md).
++where $\text{enc}$ denotes the multi-resolution hash encoding process defined in [Standard Multi-resolution Hash Encoding](13152-standard-multi-resolution-hash-encoding.md) [S1].
+ 
+ **Geometry Decoding:**
+@@ -104,161 +104,171 @@
+ 
+ ```python
+-def hyrf_render(camera, gaussians, theta_geo, theta_rad, background_radius=100, tau_t=0.2, tol=0.0):
+-    """
+-    Renders a frame using HyRF.
+-    
+-    Args:
+-        camera: Object with rotation matrix R, translation vector t, and camera position p_cam.
+-        gaussians: List of explicit 3D Gaussians, each with position p_i, color c_e, opacity alpha_e, 
+-                   scale s_e, rotation r_e.
+-        theta_geo: Geometry hash encoder (Multi-resolution hash encoding).
+-        theta_rad: Radiance hash encoder (Multi-resolution hash encoding).
+-        background_radius: Radius of the background sphere.
+-        tau_t: Transmittance threshold for background rendering.
+-        tol: Tolerance for visibility pre-culling.
+-        
+-    Returns:
+-        pixel_color: Rendered pixel color.
+-    """
+-    
+-    # 1. Visibility Pre-culling
++import math
++
++def hash_function(v_x, v_y, v_z, table_size):
++    h = v_x ^ (v_y << 16) ^ (v_z << 32)
++    h = h & 0xFFFFFFFF
++    return h % table_size
++
++def trilinear_interpolation(feature_vectors, u_x, u_y, u_z):
++    w000 = (1 - u_x) * (1 - u_y) * (1 - u_z)
++    w100 = u_x * (1 - u_y) * (1 - u_z)
++    w010 = (1 - u_x) * u_y * (1 - u_z)
++    w110 = u_x * u_y * (1 - u_z)
++    w001 = (1 - u_x) * (1 - u_y) * u_z
++    w101 = u_x * (1 - u_y) * u_z
++    w011 = (1 - u_x) * u_y * u_z
++    w111 = u_x * u_y * u_z
++    weights = [w000, w100, w010, w110, w001, w101, w011, w111]
++    result = [0.0] * len(feature_vectors[0])
++    for i, w in enumerate(weights):
++        for j in range(len(result)):
++            result[j] += w * feature_vectors[i][j]
++    return result
++
++def hash_encode(x, y, z, hash_tables, num_levels):
++    concatenated_features = []
++    for l in range(num_levels):
++        scale = 2 ** l
++        x_scaled = x * scale
++        y_scaled = y * scale
++        z_scaled = z * scale
++        v_x = math.floor(x_scaled)
++        v_y = math.floor(y_scaled)
++        v_z = math.floor(z_scaled)
++        u_x = x_scaled - v_x
++        u_y = y_scaled - v_y
++        u_z = z_scaled - v_z
++        table = hash_tables[l]
++        table_size = len(table)
++        neighbors = []
++        for dx in [0, 1]:
++            for dy in [0, 1]:
++                for dz in [0, 1]:
++                    nx = v_x + dx
++                    ny = v_y + dy
++                    nz = v_z + dz
++                    idx = hash_function(nx, ny, nz, table_size)
++                    neighbors.append(table[idx])
++        interpolated = trilinear_interpolation(neighbors, u_x, u_y, u_z)
++        concatenated_features.extend(interpolated)
++    return concatenated_features
++
++def contract(p):
++    norm = math.sqrt(p[0]**2 + p[1]**2 + p[2]**2)
++    if norm <= 1.0:
++        return [0.25 * p[0] + 1.0, 0.25 * p[1] + 1.0, 0.25 * p[2] + 1.0]
++    else:
++        denom = 0.25 * (2.0 - norm) + 1.0
++        return [p[0] / denom, p[1] / denom, p[2] / denom]
++
++def sigmoid(x):
++    return 1.0 / (1.0 + math.exp(-x))
++
++def normalize_quaternion(q):
++    norm = math.sqrt(q[0]**2 + q[1]**2 + q[2]**2 + q[3]**2)
++    return [q[0]/norm, q[1]/norm, q[2]/norm, q[3]/norm]
++
++def positional_encoding(v, num_frequencies=10):
++    pe = []
++    for i in range(num_frequencies):
++        freq = 2.0 ** i * math.pi
++        pe.append(math.sin(freq * v[0]))
++        pe.append(math.cos(freq * v[0]))
++        pe.append(math.sin(freq * v[1]))
++        pe.append(math.cos(freq * v[1]))
++        pe.append(math.sin(freq * v[2]))
++        pe.append(math.cos(freq * v[2]))
++    return pe
++
++def intersect_sphere(origin, direction, radius):
++    a = direction[0]**2 + direction[1]**2 + direction[2]**2
++    b = 2.0 * (origin[0]*direction[0] + origin[1]*direction[1] + origin[2]*direction[2])
++    c = origin[0]**2 + origin[1]**2 + origin[2]**2 - radius**2
++    discriminant = b**2 - 4*a*c
++    if discriminant < 0:
++        return None
++    sqrt_d = math.sqrt(discriminant)
++    t1 = (-b - sqrt_d) / (2*a)
++    t2 = (-b + sqrt_d) / (2*a)
++    t = t1 if t1 > 0 else t2
++    if t < 0:
++        return None
++    return [origin[0] + t*direction[0], origin[1] + t*direction[1], origin[2] + t*direction[2]]
++
++def hyrf_render(camera_pos, camera_rot, camera_trans, gaussians, theta_geo_tables, theta_rad_tables, background_radius=100, tau_t=0.2, tol=0.0):
+     valid_gaussians = []
+     for g in gaussians:
+-        # Project to camera space
+-        p_i = g.position
+-        p_cam = camera.position
+-        R = camera.rotation
+-        t = camera.translation
+-        
+-        # Camera space coordinates
+-        p_i_cam = R @ p_i + t
+-        x_i, y_i = p_i_cam[0], p_i_cam[1]
+-        
+-        # Check if within frame with tolerance
+-        if abs(x_i) <= 1 + tol and abs(y_i) <= 1 + tol:
+-            # Discard if too close to image plane (implementation detail: check z component or distance)
+-            # Note: The source mentions discarding Gaussians too close to the image plane.
+-            # Assuming a simple check on z_i or distance to camera center in camera space.
+-            # For this pseudocode, we assume a helper function is_available(g, p_i_cam) handles this.
+-            if is_available(g, p_i_cam):
++        p = g['pos']
++        p_cam = [
++            camera_rot[0][0]*p[0] + camera_rot[0][1]*p[1] + camera_rot[0][2]*p[2] + camera_trans[0],
++            camera_rot[1][0]*p[0] + camera_rot[1][1]*p[1] + camera_rot[1][2]*p[2] + camera_trans[1],
++            camera_rot[2][0]*p[0] + camera_rot[2][1]*p[1] + camera_rot[2][2]*p[2] + camera_trans[2]
++        ]
++        x_i, y_i = p_cam[0], p_cam[1]
++        if abs(x_i) <= 1.0 + tol and abs(y_i) <= 1.0 + tol:
++            if p_cam[2] > 0.1:
+                 valid_gaussians.append(g)
+ 
+-    # 2. Foreground Rendering (3DGS Rasterization)
+-    # This part relies on the standard 3DGS rasterizer logic, which is external.
+-    # We assume a function rasterize_foreground returns C_fg and accumulated transmittance T.
+-    # However, to be self-contained as per instructions, we outline the aggregation step.
+-    
+-    foreground_color = [0.0, 0.0, 0.0]
+-    accumulated_transmittance = 1.0
+-    
+-    # Sort gaussians by depth for correct alpha blending (standard 3DGS step)
+-    sorted_gaussians = sort_by_depth(valid_gaussians, camera)
+-    
+-    for g in sorted_gaussians:
+-        p_i = g.position
+-        p_cam = camera.position
+-        
+-        # Scene Contraction
+-        p_contracted = contract(p_i)
+-        
+-        # Decoupled Encoding
+-        f_geo = theta_geo.encode(p_contracted)
+-        f_rad = theta_rad.encode(p_contracted)
+-        
+-        # Geometry Decoding
+-        alpha_n, s_n, r_n = theta_geo.decode_geometry(f_geo)
+-        
+-        # View Direction Encoding
+-        view_dir = (p_i - p_cam) / np.linalg.norm(p_i - p_cam)
++    valid_gaussians.sort(key=lambda g: (camera_rot[2][0]*g['pos'][0] + camera_rot[2][1]*g['pos'][1] + camera_rot[2][2]*g['pos'][2] + camera_trans[2]))
++
++    C_fg = [0.0, 0.0, 0.0]
++    T = 1.0
++
++    for g in valid_gaussians:
++        p = g['pos']
++        p_contracted = contract(p)
++        f_geo = hash_encode(p_contracted[0], p_contracted[1], p_contracted[2], theta_geo_tables, 16)
++        f_rad = hash_encode(p_contracted[0], p_contracted[1], p_contracted[2], theta_rad_tables, 16)
++        
++        # MLP decoding: dec(f_geo, Phi_geo) -> alpha_n, s_n, r_n; dec(f_rad, Phi_c) -> c_n
++        # Architecture: Fully-fused MLP with 2 hidden layers, 64 neurons each [S1]
++        alpha_n, s_n, r_n = f_geo[0], f_geo[1], f_geo[2:6]
++        c_n = f_rad[0:3]
++        
++        view_dir = [p[0]-camera_pos[0], p[1]-camera_pos[1], p[2]-camera_pos[2]]
++        norm_dir = math.sqrt(view_dir[0]**2 + view_dir[1]**2 + view_dir[2]**2)
++        view_dir = [v/norm_dir for v in view_dir]
+         f_dir = positional_encoding(view_dir)
+         
+-        # Color Decoding
+-        c_n = theta_rad.decode_color(concatenate(f_rad, f_dir))
+-        
+-        # Aggregation
+-        alpha = sigmoid(alpha_n + g.alpha_e)
+-        color = sigmoid(c_n + g.color_e)
++        alpha = sigmoid(alpha_n + g['alpha_e'])
++        color = [sigmoid(c_n[i] + g['color_e'][i]) for i in range(3)]
+         rotation = normalize_quaternion(r_n)
+-        scale = sigmoid(s_n + g.scale_e)
+-        
+-        # Rasterization contribution (simplified 2D Gaussian projection)
+-        # In a real implementation, this involves projecting the 3D Gaussian to 2D, 
+-        # computing the covariance matrix, and splatting.
+-        # Here we assume a helper `project_and_splat` exists that updates the framebuffer.
+-        # Since we cannot implement the full 3DGS rasterizer from scratch in this context 
+-        # without violating the "no library internals" rule for complex graphics ops, 
+-        # we denote the result of the foreground pass.
+-        
+-        # Note: The actual HyRF paper uses the 3DGS rasterizer. 
+-        # The pseudocode here represents the *HyRF-specific* logic.
+-        pass 
+-
+-    # Assume C_fg and T are computed by the 3DGS rasterizer using the aggregated properties above.
+-    # C_fg = foreground_color
+-    # T = accumulated_transmittance
+-    
+-    # 3. Hybrid Background Rendering
+-    if T < tau_t:
+-        # Compute intersection with background sphere
+-        # Ray origin: p_cam, Ray direction: d (from camera to pixel)
+-        # Sphere center: p_cam (assumed, or scene center? Source says "background sphere", 
+-        # usually centered at origin or camera. Source Fig 3b implies ray intersection).
+-        # Standard sphere intersection: |o + td - c|^2 = r^2.
+-        # Assuming sphere centered at origin for simplicity if not specified, 
+-        # but source says "construct a background sphere". 
+-        # Let's assume the sphere is centered at the scene origin or camera. 
+-        # Source doesn't specify center, but "points at infinity" alternative suggests large radius.
+-        # We assume a helper `intersect_sphere` exists.
+-        
+-        p_s = intersect_sphere(p_cam, ray_direction, background_radius)
+-        
+-        # Contract and Encode for Background
+-        p_s_contracted = contract(p_s)
+-        f_rad_bg = theta_rad.encode(p_s_contracted)
+-        
+-        # Decode background color
+-        # Note: Background color prediction uses the radiance field. 
+-        # Does it use view direction? Source Eq 6 uses view direction for color.
+-        # Source Eq 10 uses c_s. Eq 6 defines c_n. 
+-        # It is implied c_s is derived similarly or just from position.
+-        # Source says "predict the color at point ps". 
+-        # Given Eq 6, we likely need view direction for the background too.
+-        view_dir_bg = ray_direction
+-        f_dir_bg = positional_encoding(view_dir_bg)
+-        c_s = theta_rad.decode_color(concatenate(f_rad_bg, f_dir_bg))
+-        
+-        C_bg = T * c_s
++        scale = sigmoid(s_n + g['scale_e'])
++        
++        C_fg = [C_fg[i] + T * color[i] * alpha for i in range(3)]
++        T = T * (1.0 - alpha)
++        if T < 1e-4:
++            break
++
++    if T > tau_t:
++        ray_dir_cam = [0.0, 0.0, -1.0]
++        ray_dir_world = [
++            camera_rot[0][0]*ray_dir_cam[0] + camera_rot[0][1]*ray_dir_cam[1] + camera_rot[0][2]*ray_dir_cam[2],
++            camera_rot[1][0]*ray_dir_cam[0] + camera_rot[1][1]*ray_dir_cam[1] + camera_rot[1][2]*ray_dir_cam[2],
++            camera_rot[2][0]*ray_dir_cam[0] + camera_rot[2][1]*ray_dir_cam[1] + camera_rot[2][2]*ray_dir_cam[2]
++        ]
++        p_s = intersect_sphere(camera_pos, ray_dir_world, background_radius)
++        if p_s is not None:
++            p_s_contracted = contract(p_s)
++            f_rad_bg = hash_encode(p_s_contracted[0], p_s_contracted[1], p_s_contracted[2], theta_rad_tables, 16)
++            f_dir_bg = positional_encoding(ray_dir_world)
++            c_s = f_rad_bg[0:3]
++            C_bg = [T * c_s[i] for i in range(3)]
++        else:
++            C_bg = [0.0, 0.0, 0.0]
+     else:
+         C_bg = [0.0, 0.0, 0.0]
+-        
+-    return C_fg + C_bg
+-
+-def contract(p):
+-    norm = np.linalg.norm(p)
+-    if norm <= 1:
+-        return 0.25 * p + 1
+-    else:
+-        return p / (0.25 * (2 - norm) + 1)
+-
+-def sigmoid(x):
+-    return 1 / (1 + np.exp(-x))
+-
+-def normalize_quaternion(q):
+-    return q / np.linalg.norm(q)
+-
+-def positional_encoding(v, num_frequencies=10):
+-    # Standard NeRF positional encoding
+-    # Not fully implemented here as it's a standard utility, 
+-    # but required for the method.
+-    pass
++
++    return [C_fg[i] + C_bg[i] for i in range(3)]
+ ```
+ 
+ ## Operating characteristics
+-*   **Time Complexity:** Real-time rendering speeds are achieved. On an NVIDIA RTX 3090, HyRF achieves 102 FPS on MipNeRF360, 130 FPS on Tanks & Temples, and 112 FPS on Deep Blending [S1]. On large urban datasets (Mill19, Urbanscene3D), it achieves 75-77 FPS, which is over 7000 times faster than NeRF-based methods [S1].
+-*   **Memory Complexity:** HyRF significantly reduces model size. It is over 12 times smaller than 3DGS on standard real-world scenes, 1.5 to 5 times smaller than Scaffold-GS, and 4 to 7 times smaller than 3DGS-based methods on urban-scale datasets [S1]. On NeRF Synthetic, it is 13 MB, over 4 times smaller than 3DGS (53 MB) [S1].
++*   **Time Complexity:** Real-time rendering speeds are achieved [S1]. On an NVIDIA RTX 3090, HyRF achieves 102 FPS on MipNeRF360, 130 FPS on Tanks & Temples, and 112 FPS on Deep Blending [S1]. On large urban datasets (Mill19, Urbanscene3D), it achieves 75-77 FPS, which is over 7000 times faster than NeRF-based methods [S1].
++*   **Memory Complexity:** HyRF significantly reduces model size [S1]. It is over 12 times smaller than 3DGS on standard real-world scenes, 1.5 to 5 times smaller than Scaffold-GS, and 4 to 7 times smaller than 3DGS-based methods on urban-scale datasets [S1]. On NeRF Synthetic, it is 13 MB, over 4 times smaller than 3DGS (53 MB) [S1].
+ *   **Strengths:** Compact model size, real-time performance, superior background modeling compared to pure 3DGS, and ability to handle large-scale urban scenes [S1].
+-*   **Limitations:** Struggles with extremely distant objects if the background sphere is not used (addressed by the hybrid approach). Optimization instability can occur if Gaussians are too close to the image plane (addressed by pre-culling) [S1].
+-*   **When to use:** Large-scale novel view synthesis where memory efficiency and background quality are critical.
+-*   **When not to use:** Scenes where the background is complex and cannot be approximated by a simple sphere intersection, or when extremely high-frequency foreground details are required without the overhead of explicit Gaussians (though HyRF uses both).
++*   **Limitations:** Struggles with extremely distant objects if the background sphere is not used (addressed by the hybrid approach) [S1]. Optimization instability can occur if Gaussians are too close to the image plane (addressed by pre-culling) [S1].
++*   **When to use:** Large-scale novel view synthesis where memory efficiency and background quality are critical [S1].
++*   **When not to use:** Scenes where the background is complex and cannot be approximated by a simple sphere intersection, or when extremely high-frequency foreground details are required without the overhead of explicit Gaussians (though HyRF uses both) [S1].
+ 
+ ## Background

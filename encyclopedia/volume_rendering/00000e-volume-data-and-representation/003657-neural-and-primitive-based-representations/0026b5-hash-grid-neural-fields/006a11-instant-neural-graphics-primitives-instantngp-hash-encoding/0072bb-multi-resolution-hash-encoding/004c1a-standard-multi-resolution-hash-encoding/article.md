@@ -1,0 +1,129 @@
+# Standard Multi-resolution Hash Encoding
+
+Also called: Grid Encoder, Hash Grid Encoder, InstantNGP Hash Encoding, NGP Hash Encoding
+
+## Overview
+Standard Multi-resolution Hash Encoding accelerates neural graphics training by replacing fixed positional encoding with a trainable, multi-resolution hash grid [S2]. It maps 3D coordinates to high-dimensional feature vectors via hash table lookups and trilinear interpolation, which are then decoded by a neural network to predict density and color [S2]. It sets itself apart from standard NeRF by using a compact, trainable feature representation optimized via stochastic gradient descent [S2].
+
+## Shared principles
+The method uses $L$ resolution levels, indexed by $l \in \{0, \dots, L-1\}$ [G]. For each level, the input coordinate $\mathbf{x} = (x, y, z)$ is scaled by $2^l$: $\mathbf{x}_l = 2^l \mathbf{x}$ [G]. Integer voxel indices are computed by flooring: $v_i = \lfloor (\mathbf{x}_l)_i \rfloor$ for $i \in \{x, y, z\}$ [G]. The fractional part $\mathbf{u}_l = (u_x, u_y, u_z)$ is computed as $u_i = (\mathbf{x}_l)_i - v_i$ [G]. Voxel indices are mapped to table indices using a hash function $H_l$ with modulo $T_l$: $i_l = H_l(v_x, v_y, v_z) \pmod{T_l}$ [G]. Collision resolution is implementation-dependent [G]. Feature vectors $\mathbf{f}_{l, \mathbf{v}'}$ are retrieved from the 8 neighboring voxels $\mathbf{v}'$ and interpolated via trilinear interpolation: $\hat{\mathbf{f}}_l = \sum_{\mathbf{v}' \in \text{neighbors}(\mathbf{v}_l)} w(\mathbf{v}') \cdot \mathbf{f}_{l, \mathbf{v}'}$ [G]. The weight for neighbor $\mathbf{v}'$ is $w(\mathbf{v}') = \prod_{i \in \{x,y,z\}} (u_i \text{ if } v'_i = v_i + 1 \text{ else } 1 - u_i)$ [G]. Features from all levels are concatenated: $\mathbf{F} = [\hat{\mathbf{f}}_0; \dots; \hat{\mathbf{f}}_{L-1}]$ [G].
+
+> **Unverified code.** The code below did not pass a test run against a reference implementation, or no test fits it, so it may contain errors.
+
+```python
+import math
+
+def hash_function(v_x, v_y, v_z, table_size):
+    """
+    Simple XOR-based hash function for voxel indices.
+    Implementation detail: [G]
+    """
+    h = v_x ^ (v_y << 16) ^ (v_z << 32)
+    h = h & 0xFFFFFFFF
+    return h % table_size
+
+def trilinear_interpolation(feature_vectors, u_x, u_y, u_z):
+    """
+    Interpolate 8 feature vectors based on fractional coordinates.
+    feature_vectors: list of 8 vectors corresponding to neighbors
+    u_x, u_y, u_z: fractional parts of the scaled coordinate
+    """
+    w000 = (1 - u_x) * (1 - u_y) * (1 - u_z)
+    w100 = u_x * (1 - u_y) * (1 - u_z)
+    w010 = (1 - u_x) * u_y * (1 - u_z)
+    w110 = u_x * u_y * (1 - u_z)
+    w001 = (1 - u_x) * (1 - u_y) * u_z
+    w101 = u_x * (1 - u_y) * u_z
+    w011 = (1 - u_x) * u_y * u_z
+    w111 = u_x * u_y * u_z
+
+    result = [0.0] * len(feature_vectors[0])
+    weights = [w000, w100, w010, w110, w001, w101, w011, w111]
+    for i, w in enumerate(weights):
+        for j, val in enumerate(feature_vectors[i]):
+            result[j] += w * val
+    return result
+
+def hash_encode(x, y, z, hash_tables, num_levels):
+    """
+    Multi-resolution hash encoding.
+    x, y, z: float coordinates
+    hash_tables: list of L lists, where each list contains feature vectors
+    num_levels: number of resolution levels
+    """
+    concatenated_features = []
+    for l in range(num_levels):
+        scale = 2 ** l
+        x_scaled = x * scale
+        y_scaled = y * scale
+        z_scaled = z * scale
+        
+        v_x = math.floor(x_scaled)
+        v_y = math.floor(y_scaled)
+        v_z = math.floor(z_scaled)
+        
+        u_x = x_scaled - v_x
+        u_y = y_scaled - v_y
+        u_z = z_scaled - v_z
+        
+        table = hash_tables[l]
+        table_size = len(table)
+        
+        neighbors = []
+        for dx in [0, 1]:
+            for dy in [0, 1]:
+                for dz in [0, 1]:
+                    nx = v_x + dx
+                    ny = v_y + dy
+                    nz = v_z + dz
+                    idx = hash_function(nx, ny, nz, table_size)
+                    feature = table[idx]
+                    neighbors.append(feature)
+        
+        interpolated_feature = trilinear_interpolation(neighbors, u_x, u_y, u_z)
+        concatenated_features.extend(interpolated_feature)
+    return concatenated_features
+```
+
+## Subtopics
+
+### [HashNeRF](8678-hashnerf.md)
+HashNeRF is a neural radiance field implementation that achieves faster training and rendering by replacing traditional positional encoding with a trainable multi-resolution hash encoding [8678-hashnerf.md]. It sets itself apart from standard NeRF by using a shallow MLP decoder, making it a generic primitive for various neural graphics tasks [8678-hashnerf.md].
+
+### [Grid-NeRF](6871-grid-nerf.md)
+Grid-NeRF is a two-branch architecture designed to render large-scale urban scenes by integrating grid-based and NeRF approaches under a joint learning scheme [6871-grid-nerf.md]. It sets itself apart from its siblings by using a coarse feature grid to guide the NeRF branch's sampling and feature injection, rather than relying solely on hierarchical hash encoding or surface-relative constraints [6871-grid-nerf.md].
+
+### [Surface-Relative Hash Encoding](18178-surface-relative-hash-encoding.md)
+Surface-Relative Hash Encoding represents dynamic human bodies by mapping 3D query points to feature vectors based on their geometric relationship to a human surface mesh [18178-surface-relative-hash-encoding.md]. It sets itself apart from Standard Multi-resolution Hash Encoding by encoding relative geometric attributes rather than absolute positions, allowing the same surface point to share features across different poses while handling non-rigid deformation [18178-surface-relative-hash-encoding.md].
+
+### [HyRF (Hybrid Radiance Fields)](19187-hyrf-hybrid-radiance-fields.md)
+HyRF combines explicit 3D Gaussian Splatting for foreground geometry with a multi-resolution hash-encoded neural radiance field for background modeling [19187-hyrf-hybrid-radiance-fields.md]. It sets itself apart from sibling methods that predict all properties from a single field by using a hybrid compositing strategy where the neural field only predicts background color when foreground transmittance is low, achieving significant model size reductions [19187-hyrf-hybrid-radiance-fields.md].
+
+### [Neural Pre-integrated Emitters (NEF)](19201-neural-pre-integrated-emitters-nef.md)
+NEF learns a neural field that represents the full pre-integrated direct illumination around an emissive object, allowing runtime shading via a single network evaluation [19201-neural-pre-integrated-emitters-nef.md]. It sets itself apart from analytical methods or LTC by making runtime cost independent of emitter complexity [19201-neural-pre-integrated-emitters-nef.md].
+
+### Instant-NGP Depth Rendering
+A scene representation that bounds the scene into an axis-aligned bounding box using a multi-resolution hash table of trainable feature vectors, optimized via stochastic gradient descent [S2]. It renders depth similarly to vanilla NeRF using standard volume rendering [S2].
+
+### UrbanIR Scene Representation
+A neural scene representation using two separate multi-scale hash tables for geometry and appearance to improve convergence stability and rendering quality [S3]. It retrieves and interpolates parameters using a hash function from tiny-cuda-nn [S3]. The density field $\sigma$ is used for volume rendering, visibility estimation, and normal loss calculation, requiring it to be accurate for multiple purposes [S3].
+
+### Heterogeneous Mixture of Hash Experts (HMoHE)
+A set of $n$ hash experts with different grid resolution ranges, forming a pyramid of resolutions from coarse to fine, to capture diverse data distributions in large-scale scenes [S4]. Each expert consists of several levels of hash grids, with coarser grids capturing general distributions and finer grids capturing distinct distributions [S4]. Unlike other MoE methods that use identical experts, it uses heterogeneous experts with different resolution ranges to explicitly model scene heterogeneity [S4].
+
+### Dense Multi-Hash Encoding
+Maps each Gaussian to multiple hash functions to aggregate richer input features, mitigating hash collisions and reducing blur/ghosting artifacts in dynamic scenes [S5]. It assigns $k$ distinct hash functions per Gaussian, computes indices, retrieves features, and aggregates them to form a richer input representation [S5]. With $k=128$, PSNR improves from 31.37 dB to 33.38 dB on the cut_roasted_beef scene, with the largest gains in later frames [S5].
+
+### Parallel Position Encoders for Training
+A training architecture where the position encoder (hash encoder and MLP_Density) is divided into two parallel branches for content and style scenes, while keeping other parts unchanged [S6]. It accomplishes position embedding for content and style scenes separately, while direction embedding is accomplished by a shared direction encoder [S6].
+
+## Background
+The method was introduced by Müller et al. in "Instant Neural Graphics Primitives with a Multiresolution Hash Encoding" (Instant-NGP) in 2022 [S2]. It provides a highly efficient, trainable feature representation for neural graphics primitives [S2]. The approach has been adopted in works such as UrbanIR [S3] and HMoHE [S4] to handle large-scale scenes and heterogeneous data distributions.
+
+## Sources
+[S1] ashawkey/stable-dreamfusion, https://github.com/ashawkey/stable-dreamfusion, fetched 2026-10-26 (unofficial)
+[S2] Digging into Depth Priors for Outdoor Neural Radiance Fields, https://doi.org/10.1145/3581783.3612306, fetched 2026-10-30
+[S3] UrbanIR: Large-Scale Urban Scene Inverse Rendering from a Single Video, https://doi.org/10.1109/3dv66043.2025.00052, fetched 2026-10-30
+[S4] Learning Heterogeneous Mixture of Scene Experts for Large-Scale Neural Radiance Fields., https://doi.org/10.1109/tpami.2025.3603305, fetched 2026-10-26
+[S5] CC-4DGS: Computational Deformation and Point-Cloud Compression for Storage-Efficient Dynamic Gaussian Splatting., https://doi.org/10.1109/tvcg.2026.3721136, fetched 2026-10-27
+[S6] Instant Photorealistic Neural Radiance Fields Stylization, https://doi.org/10.1109/icassp48485.2024.10446082, fetched 2026-10-26

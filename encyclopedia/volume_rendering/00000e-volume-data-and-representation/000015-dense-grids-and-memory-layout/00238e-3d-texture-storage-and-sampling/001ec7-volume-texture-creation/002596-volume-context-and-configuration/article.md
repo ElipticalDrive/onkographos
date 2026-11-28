@@ -1,0 +1,118 @@
+# Volume Context and Configuration
+
+Also called: Context and Volume Configuration, Volume Setup
+
+## Overview
+Volume Context and Configuration establishes the rendering state and data layout metadata required by a volume rendering engine to interpret raw voxel data. It solves the problem of decoupling the raw memory layout of a 3D scalar/vector field from the rendering algorithm's expectations. Unlike [Volume Texture Creation](1857-volume-texture-creation.md), which handles GPU memory allocation and texture object generation, this method configures the logical description of the volume (dimensions, voxel structure, field offsets) so that the renderer can correctly traverse and shade the data.
+
+## How it works
+The method involves creating a context object, defining the volume's geometric dimensions, and declaring the internal structure of each voxel, including the number and layout of fields used for shading and classification.
+
+### Inputs and Outputs
+- **Input**: Raw voxel data (layout defined by the user), volume dimensions ($X, Y, Z$), and field metadata.
+- **Output**: A configured context object (e.g., `vpContext`) containing all necessary state for rendering.
+
+### Data Structures
+The primary data structure is the context pointer (`vpContext`). The voxel structure is defined by the user but must adhere to the following logical layout declared to the renderer:
+- **Voxel**: A contiguous block of memory.
+- **Fields**: Sub-components within the voxel (e.g., scalar density, normal vector).
+- **Offsets**: Byte offsets from the start of the voxel to each field.
+
+### Steps
+1. **Create Context**: Initialize a new context with default values.
+   $$ \text{vpc} = \text{vpCreateContext}() $$
+   [S1]
+2. **Set Volume Dimensions**: Define the number of voxels in each dimension.
+   $$ \text{vpSetVolumeSize}(\text{vpc}, x_{len}, y_{len}, z_{len}) $$
+   Returns `VP_OK` on success. [S1]
+3. **Set Voxel Size and Field Counts**: Declare the total byte size of a voxel and the number of fields dedicated to general storage, shading, and classification.
+   $$ \text{vpSetVoxelSize}(\text{vpc}, \text{bytes\_per\_voxel}, \text{num\_voxel\_fields}, \text{num\_shade\_fields}, \text{num\_classify\_fields}) $$
+   [S1]
+4. **Declare Field Properties**: For each field, determine its byte offset and register its size, offset, and maximum value with the context.
+   $$ \text{offset} = \text{vpFieldOffset}(\text{voxel\_ptr}, \text{field\_name}) $$
+   $$ \text{vpSetVoxelField}(\text{vpc}, \text{field\_num}, \text{field\_size}, \text{offset}, \text{field\_max}) $$
+   [S1]
+5. **Render**: Use the configured context for rendering.
+6. **Destroy Context**: Free the context resources.
+   $$ \text{vpDestroyContext}(\text{vpc}) $$
+   [S1]
+
+### Pseudocode
+> **Unverified code.** The code below did not pass a test run against a reference implementation, or no test fits it, so it may contain errors.
+
+```python
+# 1. Create context
+vpc = vpCreateContext()
+
+# 2. Set dimensions (e.g., 64x64x64)
+xlen, ylen, zlen = 64, 64, 64
+result = vpSetVolumeSize(vpc, xlen, ylen, zlen)
+if result != VP_OK:
+    raise Error("Failed to set volume size")
+
+# 3. Define voxel structure
+# Example: 1 byte scalar, 2 bytes normal (packed), 1 byte gradient
+# Total 4 bytes per voxel. 
+# 1 field for general storage (scalar), 2 for shading (normal, gradient), 2 for classification (scalar, gradient)
+bytes_per_voxel = 4
+num_voxel_fields = 1
+num_shade_fields = 2
+num_classify_fields = 2
+
+result = vpSetVoxelSize(vpc, bytes_per_voxel, num_voxel_fields, num_shade_fields, num_classify_fields)
+
+# 4. Declare fields
+# Assume a dummy voxel struct to calculate offsets
+# Field 0: Scalar (unsigned char, 1 byte, offset 0)
+field_offset_0 = vpFieldOffset(dummy_voxel, scalar_field)
+vpSetVoxelField(vpc, 0, 1, field_offset_0, 255)
+
+# Field 1: Normal (unsigned short, 2 bytes, offset 1)
+field_offset_1 = vpFieldOffset(dummy_voxel, normal_field)
+vpSetVoxelField(vpc, 1, 2, field_offset_1, 65535)
+
+# Field 2: Gradient (unsigned char, 1 byte, offset 3)
+field_offset_2 = vpFieldOffset(dummy_voxel, gradient_field)
+vpSetVoxelField(vpc, 2, 1, field_offset_2, 255)
+
+# 5. Rendering loop would use vpc here
+
+# 6. Cleanup
+vpDestroyContext(vpc)
+```
+
+### Parameters and Typical Values
+- **`bytes_per_voxel`**: Total size of the voxel in bytes. Must match the actual memory footprint of the voxel data. [S1]
+- **`num_voxel_fields`**: Total number of distinct fields in the voxel. [S1]
+- **`num_shade_fields`**: Number of fields required by the shading routine. [S1]
+- **`num_classify_fields`**: Number of fields required by the classification routine. [S1]
+- **`field_max`**: The maximum representable value for the field, used for normalization. [S1]
+
+### Edge Cases and Pitfalls
+- **Memory Alignment**: `vpFieldOffset` must correctly calculate byte offsets. If the user's voxel struct has padding, the offsets must account for it. [S1]
+- **Field Count Mismatch**: The sum of `num_shade_fields` and `num_classify_fields` does not necessarily equal `num_voxel_fields` if fields are shared or if some fields are unused by specific routines. However, `num_voxel_fields` must accurately reflect the total distinct fields. [S1]
+- **Context Lifetime**: The context must not be destroyed while rendering is in progress. [S1]
+
+## Subtopics
+
+### 3D Texture Volume Rendering Setup
+This variant configures OpenGL state specifically for 3D texture volume rendering. It differs from the generic VolPack context by directly manipulating the OpenGL pipeline.
+- **Definition**: Initializes OpenGL state for volume rendering by enabling 3D textures, disabling depth testing, setting up front-face culling, and configuring alpha blending to correctly composite semi-transparent volume data [S2, unofficial].
+- **Step**: Generate two texture objects, bind the first to `GL_TEXTURE0_ARB`, set minification and magnification filters to `GL_LINEAR`, and set S, T, R wrap modes to `GL_CLAMP` [S2, unofficial].
+- **Parameter**: `_RES` is the grid resolution dimension. `_N` is derived as `_RES - 2`. `_SIZE` is the total number of voxels, calculated as `_RES * _RES * _RES` [S2, unofficial].
+- **Layout**: `_volumeData` is a flat `float*` array of size `_SIZE` storing voxel densities, accessed via macro `_I(i,j,k)` [S2, unofficial].
+- **Pitfall**: Depth testing must be explicitly disabled before rendering volume data to prevent occlusion artifacts from interfering with alpha blending [S2, unofficial].
+
+## Operating characteristics
+- **Time Complexity**: Context creation and configuration are $O(1)$ relative to the number of voxels, as they only set metadata. Field offset calculation is $O(1)$ per field.
+- **Memory Complexity**: The context object itself is small, storing only metadata (dimensions, field counts, offsets). It does not store the voxel data itself.
+- **Strengths**: Decouples data layout from rendering logic. Allows multiple contexts for different volumes or parameters.
+- **Limitations**: Specific to the VolPack API (for the primary definition). The OpenGL variant is tightly coupled to legacy OpenGL state management.
+- **When to use**: When using a library like VolPack that requires explicit metadata declaration, or when setting up legacy OpenGL for 3D textures.
+
+## Background
+The primary definition originates from VolPack, a public domain volume rendering library developed at Stanford University [S1]. The OpenGL variant is derived from the `nevermoe/SmokeSimulation` repository, which provides an unofficial implementation of smoke simulation and rendering using OpenGL [S2, unofficial].
+
+## Sources
+[S1] VolPack User's Guide, http://www-graphics.stanford.edu/software/volpack/vp_userguide.html, fetched 2026-10-28
+[S2] nevermoe/SmokeSimulation, https://github.com/nevermoe/SmokeSimulation, fetched 2026-10-26 (unofficial)

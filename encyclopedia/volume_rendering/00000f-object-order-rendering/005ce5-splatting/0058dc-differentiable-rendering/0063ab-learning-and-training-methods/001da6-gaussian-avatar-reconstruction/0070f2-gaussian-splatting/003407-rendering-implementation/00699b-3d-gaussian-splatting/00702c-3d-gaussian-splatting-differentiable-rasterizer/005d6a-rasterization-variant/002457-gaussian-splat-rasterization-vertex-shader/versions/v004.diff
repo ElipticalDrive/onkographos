@@ -1,0 +1,527 @@
+--- v003.md
++++ v004.md
+@@ -1,288 +1,252 @@
+ # Gaussian Splat Rasterization (Vertex Shader)
+ 
+-Also called: GSplat Vert, Splat Vertex Shader
++Also called: 2D Gaussian Splatting Vertex Shader, Fast Gaussian Rasterization Vertex Shader, GSplat Vert, Splat Vertex Shader, dsplat.vert
+ 
+ ## Overview
+-This method implements the vertex shader stage of a GPU-based rasterizer for 3D Gaussian Splatting, transforming 3D Gaussian primitives into 2D screen-space ellipses for instanced rendering [S1, unofficial]. It differs from fragment-based or compute-shader approaches by performing all geometric projection, covariance transformation, and ellipse basis computation within the vertex shader, passing only the final vertex positions and attributes to the rasterizer [S1, unofficial]. It builds on [3D Gaussian Splatting Differentiable Rasterizer](2813-3d-gaussian-splatting-differentiable-rasterizer.md) by handling the specific data unpacking and frustum culling required for efficient vertex-driven splatting [S1, unofficial].
++This method implements the vertex shader stage of a GPU-accelerated 3D Gaussian Splatting rasterizer, specifically designed to compute 2D screen-space projections and basis vectors for instanced quad rendering [S1, unofficial][S2, unofficial]. It solves the problem of efficiently transforming 3D Gaussian parameters (mean, covariance, opacity) into screen-space ellipses while performing early culling to reduce geometry shader load. It differs from CUDA-based variants by executing these calculations in the vertex shader stage, relying on subsequent geometry or fragment shaders for final pixel accumulation [S1, unofficial][S2, unofficial].
+ 
+ ## How it works
+-**Inputs and Outputs:**
+-*   **Inputs:**
+-    *   `u_texture`: A `usampler2D` containing packed Gaussian data (position and covariance) [S1, unofficial].
+-    *   `projection`: A $4 \times 4$ projection matrix [S1, unofficial].
+-    *   `view`: A $4 \times 4$ view matrix [S1, unofficial].
+-    *   `focal`: A `vec2` containing the focal lengths $(f_x, f_y)$ [S1, unofficial].
+-    *   `viewport`: A `vec2` containing the viewport dimensions $(w, h)$ [S1, unofficial].
+-    *   `position`: A `vec2` instance attribute representing the local basis of the quad (typically $[-2, -2]$ to $[2, 2]$) [S1, unofficial].
+-    *   `index`: A `uint` instance attribute identifying the Gaussian splat [S1, unofficial].
+-*   **Outputs:**
+-    *   `gl_Position`: The clip-space position of the four vertices of the ellipse quad [S1, unofficial].
+-
+-**Data Structures and Layout:**
+-The input texture `u_texture` stores Gaussian data in a 2D grid layout optimized for batched access [S1, unofficial].
+-*   Each Gaussian splat $i$ occupies two texels (columns) in the texture [S1, unofficial].
+-*   The texture width is fixed at 2048 pixels (1024 Gaussians per row) [S1, unofficial].
+-*   The row index is calculated as `row = i >> 10` (integer division by 1024) [S1, unofficial].
+-*   The column index for the center data is `col = (i & 0x3ff) << 1` [S1, unofficial].
+-*   The column index for the covariance data is `col = ((i & 0x3ff) << 1) | 1` [S1, unofficial].
+-*   Each texel is a `uvec4` (four 32-bit unsigned integers) [S1, unofficial].
+-
+-**Step-by-Step Method:**
+-
+-1.  **Fetch Center Data:**
+-    Retrieve the packed center position from the texture using the instance index [S1, unofficial]:
+-    ```glsl
+-    uvec4 cen = texelFetch(u_texture, ivec2((uint(index) & 0x3ffu) << 1, uint(index) >> 10), 0);
+-    ```
+-
+-2.  **Transform to Camera Space:**
+-    Convert the packed integer center to a float vector and transform it into camera space [S1, unofficial]:
+-    ```glsl
+-    vec4 cam = view * vec4(uintBitsToFloat(cen.xyz), 1.0);
+-    ```
+-
+-3.  **Project to Clip Space:**
+-    Compute the clip-space position [S1, unofficial]:
+-    ```glsl
+-    vec4 pos2d = projection * cam;
+-    ```
+-
++### Inputs and Outputs
++**Inputs:**
++*   **Attributes:**
++    *   `aPos` (vec3): 3D position of the Gaussian center [S1, unofficial].
++    *   `aCov0_3` (vec3): First three components of the 6-component symmetric 3D covariance matrix [S1, unofficial].
++    *   `aCov3_6` (vec3): Last three components of the 6-component symmetric 3D covariance matrix [S1, unofficial].
++    *   `aColor` (vec4): RGBA color/feature vector [S1, unofficial].
++    *   `position` (vec2): Instance attribute defining the local quad basis coordinates (typically corners of a unit square or similar) [S2, unofficial].
++    *   `index` (uint): Instance attribute identifying the Gaussian splat ID [S2, unofficial].
++*   **Uniforms:**
++    *   `P` (mat4x4): Projection matrix [S1, unofficial].
++    *   `VM` (mat4x4): View-Model matrix [S1, unofficial].
++    *   `focal` (vec2): Focal lengths $(f_x, f_y)$ [S1, unofficial][S2, unofficial].
++    *   `principal` (vec2): Principal point $(c_x, c_y)$ [S1, unofficial].
++    *   `basisViewport` (vec2): Viewport dimensions $(width, height)$ [S1, unofficial].
++    *   `discardAlpha` (float): Alpha threshold for culling. Default: $0.0001$ [S1, unofficial].
++    *   `sqrt8` (float): Constant $\sqrt{8}$ for scaling eigenvalues [S1, unofficial].
++    *   `u_texture` (usampler2D): Texture storing packed Gaussian data (used in [S2, unofficial] variant) [S2, unofficial].
++    *   `projection` (mat4): Projection matrix [S2, unofficial].
++    *   `view` (mat4): View matrix [S2, unofficial].
++    *   `viewport` (vec2): Viewport dimensions [S2, unofficial].
++
++**Outputs:**
++*   `gl_Position` (vec4): Clip-space position of the quad vertices [S1, unofficial][S2, unofficial].
++*   `basisVector0` (vec2): First basis vector for the geometry shader [S1, unofficial].
++*   `basisVector1` (vec2): Second basis vector for the geometry shader [S1, unofficial].
++*   `gColor` (vec4): Output color/opacity [S1, unofficial].
++*   `gDepth` (float): Output depth [S1, unofficial].
++
++### Data Structures
++*   **Covariance Storage ([S1, unofficial]):** The 3D covariance matrix $\mathbf{V}_{rk}$ is stored as two `vec3` attributes. The symmetric matrix is reconstructed as:
++    $$
++    \mathbf{V}_{rk} = \begin{bmatrix}
++    aCov0\_3.x & aCov0\_3.y & aCov0\_3.z \\
++    aCov0\_3.y & aCov3\_6.x & aCov3\_6.y \\
++    aCov0\_3.z & aCov3\_6.y & aCov3\_6.z
++    \end{bmatrix}
++    $$
++*   **Packed Texture Storage ([S2, unofficial]):** Gaussian data is stored in a `usampler2D` texture. Each splat index $i$ occupies two texels:
++    *   Center/Covariance Texel: `texelFetch(u_texture, ivec2((uint(index) & 0x3ffu) << 1, uint(index) >> 10), 0)`
++    *   Color Texel: `texelFetch(u_texture, ivec2(((uint(index) & 0x3ffu) << 1) | 1u, uint(index) >> 10), 0)`
++    *   The low 10 bits of the index determine the column, and the high bits determine the row.
++
++### Steps
++1.  **Alpha Culling ([S1, unofficial]):** If `aColor.a < discardAlpha`, set `gColor.a = 0.0` and return immediately to prevent geometry shader emission.
++2.  **Data Fetching:**
++    *   ([S1, unofficial]) Use attributes directly.
++    *   ([S2, unofficial]) Fetch center data from `u_texture` using the instance index. Unpack half-precision covariance components from `cov.x`, `cov.y`, `cov.z` into `vec2` pairs using `unpackHalf2x16`. Reconstruct $\mathbf{V}_{rk}$:
++        $$
++        \mathbf{V}_{rk} = \begin{bmatrix}
++        u1.x & u1.y & u2.x \\
++        u1.y & u2.y & u3.x \\
++        u2.x & u3.x & u3.y
++        \end{bmatrix}
++        $$
++3.  **Position Transformation:**
++    *   ([S1, unofficial]) Compute view space center: `viewCenter = VM * vec4(aPos, 1.0)`. Compute clip space center: `clipCenter = P * vec4(aPos, 1.0)`. Perform perspective division: `clipCenter = clipCenter / clipCenter.w`.
++    *   ([S2, unofficial]) Transform center to camera space: `cam = view * vec4(uintBitsToFloat(cen.xyz), 1.0)`. Project to clip space: `pos2d = projection * cam`.
+ 4.  **Frustum Culling:**
+-    Perform early-out culling with a 1.2x margin to ensure splats near the edge are not clipped incorrectly by the rasterizer [S1, unofficial]. If the splat is outside the frustum, discard it by setting `gl_Position` to a post-depth value [S1, unofficial]:
+-    ```glsl
+-    float clip = 1.2 * pos2d.w;
+-    if (pos2d.z < -pos2d.w || pos2d.z > pos2d.w || 
+-        pos2d.x < -clip || pos2d.x > clip || 
+-        pos2d.y < -clip || pos2d.y > clip) {
+-        gl_Position = vec4(0.0, 0.0, 2.0, 1.0);
+-        return;
+-    }
+-    ```
+-
+-5.  **Fetch Covariance Data:**
+-    Retrieve the packed covariance and color data [S1, unofficial]:
+-    ```glsl
+-    uvec4 cov = texelFetch(u_texture, ivec2(((uint(index) & 0x3ffu) << 1) | 1u, uint(index) >> 10), 0);
+-    ```
+-
+-6.  **Unpack Covariance Components:**
+-    Unpack the half-precision floating-point components from `cov.x`, `cov.y`, and `cov.z` into `vec2` pairs `u1`, `u2`, and `u3` using `unpackHalf2x16` [S1, unofficial].
+-
+-7.  **Reconstruct 3D Covariance Matrix:**
+-    Reconstruct the symmetric $3 \times 3$ covariance matrix $V_{rk}$ in 3D space from the unpacked components [S1, unofficial]:
+-    ```glsl
+-    mat3 Vrk = mat3(
+-        u1.x, u1.y, u2.x,
+-        u1.y, u2.y, u3.x,
+-        u2.x, u3.x, u3.y
+-    );
+-    ```
+-
+-8.  **Compute Projection Jacobian:**
+-    Calculate the Jacobian $J$ of the perspective projection transformation [S1, unofficial]:
+-    ```glsl
+-    mat3 J = mat3(
+-        focal.x / cam.z, 0.0, -(focal.x * cam.x) / (cam.z * cam.z),
+-        0.0, focal.y / cam.z, -(focal.y * cam.y) / (cam.z * cam.z),
++    *   ([S1, unofficial]) Compute FOV limits:
++        $$
++        \begin{aligned}
++        \text{tan\_fovx} &= 0.5 \times \text{width} / f_x \\
++        \text{tan\_fovy} &= 0.5 \times \text{height} / f_y \\
++        \text{lim\_x\_pos} &= (\text{width} - c_x) / f_x + 0.3 \times \text{tan\_fov}x \\
++        \text{lim\_x\_neg} &= c_x / f_x + 0.3 \times \text{tan\_fov}x \\
++        \text{lim\_y\_pos} &= (\text{height} - c_y) / f_y + 0.3 \times \text{tan\_fov}y \\
++        \text{lim\_y\_neg} &= c_y / f_y + 0.3 \times \text{tan\_fov}y
++        \end{aligned}
++        $$
++        Compute Jacobian parameters: $r_z = 1.0/z$, $r_{z2} = r_z^2$.
++        $$
++        \begin{aligned}
++        t_x &= z \times \min(\text{lim\_x\_pos}, \max(-\text{lim\_x\_neg}, x \times r_z)) \\
++        t_y &= z \times \min(\text{lim\_y\_pos}, \max(-\text{lim\_y\_neg}, y \times r_z))
++        \end{aligned}
++        $$
++    *   ([S2, unofficial]) Perform frustum culling with a 1.2x margin. If `pos2d.z < -pos2d.w || pos2d.z > pos2d.w || pos2d.x < -clip || pos2d.x > clip || pos2d.y < -clip || pos2d.y > clip` (where `clip = 1.2 * pos2d.w`), discard the splat by setting `gl_Position = vec4(0.0, 0.0, 2.0, 1.0)`.
++5.  **Jacobian Construction:**
++    *   ([S1, unofficial]) Construct Jacobian matrix $\mathbf{J}$:
++        $$
++        \mathbf{J} = \begin{bmatrix}
++        f_x r_z & 0 & -f_x t_x r_{z2} \\
++        0 & f_y r_z & -f_y t_y r_{z2} \\
++        0 & 0 & 0
++        \end{bmatrix}
++        $$
++    *   ([S2, unofficial]) Construct Jacobian matrix $\mathbf{J}$:
++        $$
++        \mathbf{J} = \begin{bmatrix}
++        f_x / z & 0 & -f_x x / z^2 \\
++        0 & f_y / z & -f_y y / z^2 \\
++        0 & 0 & 0
++        \end{bmatrix}
++        $$
++6.  **2D Covariance Transformation:**
++    *   ([S1, unofficial]) Compute $\mathbf{W} = \text{transpose}(\text{mat3}(\mathbf{VM}))$. Compute $\mathbf{T} = \mathbf{W} \times \mathbf{J}$. Compute 2D covariance $\mathbf{cov}_{2Dm} = \text{transpose}(\mathbf{T}) \times \mathbf{V}_{rk} \times \mathbf{T}$. Add blur term: $\mathbf{cov}_{2Dm}[0][0] += 0.3$, $\mathbf{cov}_{2Dm}[1][1] += 0.3$.
++    *   ([S2, unofficial]) Compute $\mathbf{T} = \text{transpose}(\text{mat3}(\text{view})) \times \mathbf{J}$. Compute $\mathbf{cov}_{2d} = \text{transpose}(\mathbf{T}) \times \mathbf{V}_{rk} \times \mathbf{T}$. Add low-pass filter: $\mathbf{cov}_{2d}[0][0] += 0.1$, $\mathbf{cov}_{2d}[1][1] += 0.1$.
++7.  **Eigenvalue Decomposition:**
++    *   ([S1, unofficial]) Extract upper-left 2x2 components into `cov2Dv`: `cov2Dv.x = cov2Dm[0][0]`, `cov2Dv.y = cov2Dm[0][1]`, `cov2Dv.z = cov2Dm[1][1]`. Let $a=\text{cov2Dv}.x$, $d=\text{cov2Dv}.z$, $b=\text{cov2Dv}.y$.
++        $$
++        \begin{aligned}
++        D &= a \times d - b^2 \\
++        \text{trace} &= a + d \\
++        \text{traceOver2} &= 0.5 \times \text{trace} \\
++        \text{term2} &= \sqrt{\max(0.1, \text{traceOver2}^2 - D)} \\
++        \text{eigenValue0} &= \text{traceOver2} + \text{term2} \\
++        \text{eigenValue1} &= \text{traceOver2} - \text{term2}
++        \end{aligned}
++        $$
++    *   ([S2, unofficial]) Compute eigenvalues of the 2x2 upper-left submatrix of $\mathbf{cov}_{2d}$:
++        $$
++        \begin{aligned}
++        \text{mid} &= (\mathbf{cov}_{2d}[0][0] + \mathbf{cov}_{2d}[1][1]) / 2.0 \\
++        \text{radius} &= \text{length}(\text{vec2}((\mathbf{cov}_{2d}[0][0] - \mathbf{cov}_{2d}[1][1]) / 2.0, \mathbf{cov}_{2d}[0][1])) \\
++        \lambda_1 &= \text{mid} + \text{radius} \\
++        \lambda_2 &= \text{mid} - \text{radius}
++        \end{aligned}
++        $$
++8.  **Basis Vector Calculation:**
++    *   ([S1, unofficial]) Scale eigenvalues by $\sqrt{8}$ to determine the rendering basis.
++    *   ([S2, unofficial]) Compute major axis direction: `diagonalVector = normalize(vec2(cov2d[0][1], lambda1 - cov2d[0][0]))`. Compute major axis vector: `majorAxis = scale * min(sqrt(2.0 * lambda1), 1024.0) * diagonalVector` where `scale = 2.5`. Compute minor axis vector: `minorAxis = scale * min(sqrt(2.0 * lambda2), 1024.0) * vec2(diagonalVector.y, -diagonalVector.x)`.
++9.  **Final Position and Output:**
++    *   ([S1, unofficial]) Pass through color and depth.
++    *   ([S2, unofficial]) Unpack color from `cov.w`. Compute final screen position: `vCenter = vec2(pos2d) / pos2d.w`. `gl_Position = vec4(vCenter + position.x * majorAxis / viewport + position.y * minorAxis / viewport, pos2d.z / pos2d.w, 1.0)`.
++
++### Pseudocode
++```python
++def vertex_shader(aPos, aCov0_3, aCov3_6, aColor, position, index, 
++                  P, VM, focal, principal, basisViewport, discardAlpha, sqrt8):
++    # 1. Alpha Culling
++    if aColor.a < discardAlpha:
++        return (vec4(0.0, 0.0, 0.0, 0.0), vec2(0.0, 0.0), vec2(0.0, 0.0), aColor, 0.0)
++
++    # 2. Reconstruct 3D Covariance
++    Vrk = mat3(
++        aCov0_3.x, aCov0_3.y, aCov0_3.z,
++        aCov0_3.y, aCov3_6.x, aCov3_6.y,
++        aCov0_3.z, aCov3_6.y, aCov3_6.z
++    )
++
++    # 3. Position Transformation
++    viewCenter = VM * vec4(aPos, 1.0)
++    clipCenter = P * vec4(aPos, 1.0)
++    clipCenter = clipCenter / clipCenter.w
++    
++    # 4. Jacobian Parameters
++    width = 1.0 / basisViewport.x
++    height = 1.0 / basisViewport.y
++    fx = focal.x
++    fy = focal.y
++    cx = principal.x
++    cy = principal.y
++    x = viewCenter.x
++    y = viewCenter.y
++    z = viewCenter.z
++    
++    tan_fovx = 0.5 * width / fx
++    tan_fovy = 0.5 * height / fy
++    
++    lim_x_pos = (width - cx) / fx + 0.3 * tan_fovx
++    lim_x_neg = cx / fx + 0.3 * tan_fovx
++    lim_y_pos = (height - cy) / fy + 0.3 * tan_fovy
++    lim_y_neg = cy / fy + 0.3 * tan_fovy
++    
++    rz = 1.0 / z
++    rz2 = rz * rz
++    tx = z * min(lim_x_pos, max(-lim_x_neg, x * rz))
++    ty = z * min(lim_y_pos, max(-lim_y_neg, y * rz))
++    
++    # 5. Jacobian Construction
++    J = mat3(
++        fx * rz, 0.0, -fx * tx * rz2,
++        0.0, fy * rz, -fy * ty * rz2,
+         0.0, 0.0, 0.0
+-    );
+-    ```
+-
+-9.  **Transform Covariance to Camera Space:**
+-    Compute the transformation matrix $T$ and the resulting 2D covariance matrix $cov_{2d}$ [S1, unofficial]:
+-    ```glsl
+-    mat3 T = transpose(mat3(view)) * J;
+-    mat3 cov2d = transpose(T) * Vrk * T;
+-    ```
+-
+-10. **Apply Low-Pass Filter:**
+-    Add a small constant to the diagonal elements to prevent numerical instability and ensure positive definiteness [S1, unofficial]:
+-    ```glsl
+-    cov2d[0][0] += 0.1;
+-    cov2d[1][1] += 0.1;
+-    ```
+-
+-11. **Compute Eigenvalues:**
+-    Calculate the eigenvalues $\lambda_1$ and $\lambda_2$ of the upper-left $2 \times 2$ submatrix of $cov_{2d}$ [S1, unofficial]:
+-    ```glsl
+-    float mid = (cov2d[0][0] + cov2d[1][1]) / 2.0;
+-    float radius = length(vec2((cov2d[0][0] - cov2d[1][1]) / 2.0, cov2d[0][1]));
+-    float lambda1 = mid + radius;
+-    float lambda2 = mid - radius;
+-    ```
+-
+-12. **Check Validity:**
+-    If $\lambda_2 < 0.0$, the covariance is invalid (negative variance). Discard the splat [S1, unofficial]:
+-    ```glsl
+-    if (lambda2 < 0.0) {
+-        gl_Position = vec4(0.0, 0.0, 2.0, 1.0);
+-        return;
+-    }
+-    ```
+-
+-13. **Compute Axis Vectors:**
+-    Determine the major and minor axis directions and magnitudes [S1, unofficial]. The scale factor is 2.5, and the maximum axis length is capped at 1024.0:
+-    ```glsl
+-    vec2 diagonalVector = normalize(vec2(cov2d[0][1], lambda1 - cov2d[0][0]));
+-    vec2 majorAxis = 2.5 * vec2(min(sqrt(2.0 * lambda1), 1024.0)) * diagonalVector;
+-    vec2 minorAxis = 2.5 * vec2(min(sqrt(2.0 * lambda2), 1024.0)) * vec2(diagonalVector.y, -diagonalVector.x);
+-    ```
+-
+-14. **Unpack Color:**
+-    Extract the RGBA color from the `w` component of the covariance texel [S1, unofficial]:
+-    ```glsl
+-    vec4 color = vec4(
+-        float((cov.w) & 0xffu),
+-        float((cov.w >> 8) & 0xffu),
+-        float((cov.w >> 16) & 0xffu),
+-        float((cov.w >> 24) & 0xffu)
+-    ) / 255.0;
+-    ```
+-
+-15. **Compute Final Vertex Positions:**
+-    Transform the local quad positions into screen space using the computed axes and viewport dimensions [S1, unofficial]:
+-    ```glsl
+-    vec2 vCenter = vec2(pos2d) / pos2d.w;
+-    gl_Position = vec4(
+-        vCenter + (position.x * majorAxis + position.y * minorAxis) / viewport,
+-        pos2d.z / pos2d.w,
+-        1.0
+-    );
+-    ```
+-
+-**Pseudocode:**
+-```python
+-import math
+-
+-# Helper: Bitcast uint to float [S1, unofficial]
+-def uint_bits_to_float(u):
+-    import struct
+-    return struct.unpack('f', struct.pack('I', u))[0]
+-
+-# Helper: Unpack two 16-bit halves into a 2-element list [S1, unofficial]
+-def unpack_half2x16(u):
+-    lo = u & 0xFFFF
+-    hi = (u >> 16) & 0xFFFF
+-    def half_to_float(h):
+-        sign = (h >> 15) & 0x1
+-        exp = (h >> 10) & 0x1F
+-        frac = h & 0x3FF
+-        if exp == 0: return (-1)**sign * (frac / 1024.0) * 2**-14
+-        elif exp == 31: return (-1)**sign * float('inf') if frac else (-1)**sign * float('inf')
+-        else: return (-1)**sign * (1.0 + frac / 1024.0) * (2**(exp - 15))
+-    return [half_to_float(lo), half_to_float(hi)]
+-
+-# Helper: Texture fetch [S1, unofficial]
+-def texel_fetch(texture, col, row):
+-    return texture[row][col]
+-
+-def splat_vertex_shader(index, position, view, projection, focal, viewport, u_texture):
+-    # 1. Fetch Center [S1, unofficial]
+-    row = index >> 10
+-    col_center = (index & 0x3ff) << 1
+-    cen = texel_fetch(u_texture, col_center, row)
+-    
+-    # 2. Transform to Camera Space [S1, unofficial]
+-    cam_xyz = [uint_bits_to_float(cen[0]), uint_bits_to_float(cen[1]), uint_bits_to_float(cen[2])]
+-    cam = [0.0, 0.0, 0.0, 1.0]
+-    for i in range(4):
+-        for j in range(4):
+-            cam[i] += view[i][j] * (cam_xyz[j] if j < 3 else 1.0)
+-    
+-    # 3. Project to Clip Space [S1, unofficial]
+-    pos2d = [0.0, 0.0, 0.0, 0.0]
+-    for i in range(4):
+-        for j in range(4):
+-            pos2d[i] += projection[i][j] * cam[j]
+-    
+-    # 4. Frustum Culling [S1, unofficial]
+-    clip_margin = 1.2 * pos2d[3]
+-    if (pos2d[2] < -pos2d[3] or pos2d[2] > pos2d[3] or
+-        pos2d[0] < -clip_margin or pos2d[0] > clip_margin or
+-        pos2d[1] < -clip_margin or pos2d[1] > clip_margin):
+-        return [0.0, 0.0, 2.0, 1.0]
+-    
+-    # 5. Fetch Covariance [S1, unofficial]
+-    col_cov = ((index & 0x3ff) << 1) | 1
+-    cov = texel_fetch(u_texture, col_cov, row)
+-    
+-    # 6. Unpack Covariance [S1, unofficial]
+-    u1 = unpack_half2x16(cov[0])
+-    u2 = unpack_half2x16(cov[1])
+-    u3 = unpack_half2x16(cov[2])
+-    
+-    # 7. Reconstruct 3D Covariance [S1, unofficial]
+-    Vrk = [[u1[0], u1[1], u2[0]],
+-           [u1[1], u2[1], u3[0]],
+-           [u2[0], u3[0], u3[1]]]
+-    
+-    # 8. Compute Jacobian [S1, unofficial]
+-    J = [[focal[0] / cam[2], 0.0, -(focal[0] * cam[0]) / (cam[2] * cam[2])],
+-         [0.0, focal[1] / cam[2], -(focal[1] * cam[1]) / (cam[2] * cam[2])],
+-         [0.0, 0.0, 0.0]]
+-    
+-    # 9. Transform Covariance [S1, unofficial]
+-    view_3x3 = [[view[0][0], view[0][1], view[0][2]],
+-                [view[1][0], view[1][1], view[1][2]],
+-                [view[2][0], view[2][1], view[2][2]]]
+-    T = [[0.0]*3 for _ in range(3)]
+-    for i in range(3):
+-        for j in range(3):
+-            for k in range(3):
+-                T[i][j] += view_3x3[k][i] * J[k][j]
+-    cov2d = [[0.0]*3 for _ in range(3)]
+-    for i in range(3):
+-        for j in range(3):
+-            for k in range(3):
+-                for m in range(3):
+-                    cov2d[i][j] += T[k][i] * Vrk[k][m] * T[m][j]
+-    
+-    # 10. Low-Pass Filter [S1, unofficial]
+-    cov2d[0][0] += 0.1
+-    cov2d[1][1] += 0.1
+-    
+-    # 11. Eigenvalues [S1, unofficial]
+-    mid = (cov2d[0][0] + cov2d[1][1]) / 2.0
+-    radius = math.sqrt(((cov2d[0][0] - cov2d[1][1]) / 2.0)**2 + cov2d[0][1]**2)
+-    lambda1 = mid + radius
+-    lambda2 = mid - radius
+-    
+-    # 12. Validity Check [S1, unofficial]
+-    if lambda2 < 0.0:
+-        return [0.0, 0.0, 2.0, 1.0]
+-    
+-    # 13. Axis Vectors [S1, unofficial]
+-    diag_len = math.sqrt(cov2d[0][1]**2 + (lambda1 - cov2d[0][0])**2)
+-    diagonal_vector = [cov2d[0][1] / diag_len, (lambda1 - cov2d[0][0]) / diag_len]
+-    scale = 2.5
+-    major_axis = [scale * min(math.sqrt(2.0 * lambda1), 1024.0) * diagonal_vector[0],
+-                  scale * min(math.sqrt(2.0 * lambda1), 1024.0) * diagonal_vector[1]]
+-    minor_axis = [scale * min(math.sqrt(2.0 * lambda2), 1024.0) * diagonal_vector[1],
+-                  scale * min(math.sqrt(2.0 * lambda2), 1024.0) * -diagonal_vector[0]]
+-    
+-    # 14. Unpack Color [S1, unofficial]
+-    color = [
+-        float(cov[3] & 0xff) / 255.0,
+-        float((cov[3] >> 8) & 0xff) / 255.0,
+-        float((cov[3] >> 16) & 0xff) / 255.0,
+-        float((cov[3] >> 24) & 0xff) / 255.0
+-    ]
+-    
+-    # 15. Final Position [S1, unofficial]
+-    v_center = [pos2d[0] / pos2d[3], pos2d[1] / pos2d[3]]
+-    final_x = v_center[0] + (position[0] * major_axis[0] + position[1] * minor_axis[0]) / viewport[0]
+-    final_y = v_center[1] + (position[0] * major_axis[1] + position[1] * minor_axis[1]) / viewport[1]
+-    return [final_x, final_y, pos2d[2] / pos2d[3], 1.0]
++    )
++    
++    # 6. 2D Covariance Transformation
++    W = transpose(mat3(VM))
++    T = W * J
++    cov2Dm = transpose(T) * Vrk * T
++    
++    # Add blur term
++    cov2Dm[0][0] += 0.3
++    cov2Dm[1][1] += 0.3
++    
++    # 7. Eigenvalue Decomposition
++    a = cov2Dm[0][0]
++    d = cov2Dm[1][1]
++    b = cov2Dm[0][1]
++    
++    D = a * d - b * b
++    trace = a + d
++    traceOver2 = 0.5 * trace
++    term2 = sqrt(max(0.1, traceOver2 * traceOver2 - D))
++    
++    eigenValue0 = traceOver2 + term2
++    eigenValue1 = traceOver2 - term2
++    
++    # 8. Basis Vector Calculation
++    # Scale by sqrt(8) standard deviations
++    basisVector0 = vec2(eigenValue0, 0.0) * sqrt8 # Simplified representation
++    basisVector1 = vec2(0.0, eigenValue1) * sqrt8 # Simplified representation
++    
++    # Note: The actual basis vectors passed to geometry shader are derived from 
++    # eigenvalues and eigenvectors. In this simplified pseudocode, we assume 
++    # the geometry shader handles the rotation if not explicitly computed here.
++    # For explicit computation (as in [S2, unofficial]):
++    # diagonalVector = normalize(vec2(b, eigenValue0 - a))
++    # scale_factor = 2.5
++    # majorAxis = scale_factor * min(sqrt(2.0 * eigenValue0), 1024.0) * diagonalVector
++    # minorAxis = scale_factor * min(sqrt(2.0 * eigenValue1), 1024.0) * vec2(diagonalVector.y, -diagonalVector.x)
++    
++    # 9. Output
++    gColor = aColor
++    gDepth = clipCenter.z / clipCenter.w
++    
++    return (clipCenter, basisVector0, basisVector1, gColor, gDepth)
+ ```
+ 
++### Parameters
++*   `discardAlpha`: Default $0.0001$ [S1, unofficial].
++*   `maxScreenSpaceSplatSize`: $2048.0$ [S1, unofficial].
++*   `sqrt8`: $\sqrt{8}$ [S1, unofficial].
++*   `scale`: $2.5$ [S2, unofficial].
++
++### Pitfalls
++*   **Invalid Covariance:** If $D \le 0.0$, or $\text{cov2Dv}.x \le 0.0$, or $\text{cov2Dv}.z \le 0.0$, the covariance matrix is illegal. Set `gColor.a = 0.0` and return [S1, unofficial].
++*   **Negative Eigenvalue:** If $\lambda_2 < 0.0$, the covariance is invalid. Discard the splat [S2, unofficial].
++*   **Degenerate Eigenvalues:** If $\text{eigenValue0} \le 0.01$, or $\text{eigenValue1} \le 0.01$, or $\text{eigenValue0} < \text{eigenValue1}$, or ratio $\text{eigenValue0}/\text{eigenValue1} > 10000.0$, the point is degenerate [S1, unofficial].
++
+ ## Operating characteristics
+-*   **Time Complexity:** $O(1)$ per splat vertex [G].
+-*   **Memory Complexity:** $O(N)$ for storing the Gaussian data in the texture, where $N$ is the number of splats, requiring $2 \times N$ texels [S1, unofficial].
+-*   **Strengths:** Early frustum culling reduces the number of splats processed in later stages. The use of half-precision packing reduces memory bandwidth [S1, unofficial].
+-*   **Limitations:** The fixed texture width of 2048 pixels limits the number of splats per row, potentially requiring multiple rows for large scenes. The method assumes a specific data layout and may require adaptation for different hardware or API constraints [S1, unofficial].
++*   **Time Complexity:** $O(1)$ per Gaussian splat in the vertex shader. The dominant cost is the matrix multiplications and square root operations for eigenvalue decomposition.
++*   **Memory Complexity:** $O(1)$ per splat for vertex shader registers. Texture storage is $O(N)$ for $N$ splats.
++*   **Performance:** Offloads projection and culling from the CPU to the GPU vertex shader, reducing CPU-GPU transfer overhead. However, it may be less efficient than CUDA-based variants for very large scenes due to vertex shader instruction limits and lack of specialized tensor cores [S1, unofficial][S2, unofficial].
++*   **Strengths:** Simple integration into existing OpenGL/Vulkan pipelines; leverages hardware vertex processing.
++*   **Limitations:** Limited precision compared to CUDA; harder to implement complex culling or sorting logic; may require geometry shader for quad generation, adding overhead.
+ 
+ ## Background
+-This method is derived from the `gsplat-opengl` implementation by liaozhangsheng, which provides an unofficial OpenGL-based rasterizer for 3D Gaussian Splatting [S1, unofficial]. It adapts the differentiable rasterization principles of 3D Gaussian Splatting to a vertex-shader-driven pipeline, optimizing for performance by moving geometric computations to the vertex stage [S1, unofficial].
++This method is part of the 3D Gaussian Splatting rendering pipeline, specifically the vertex shader variant. It was developed to provide a GPU-accelerated alternative to CPU-based rasterization, enabling real-time rendering of Gaussian splats in graphics APIs like OpenGL and Vulkan [S1, unofficial][S2, unofficial]. The approach builds on the foundational 3D Gaussian Splatting paper by Kerbl et al. [S1, unofficial][S2, unofficial].
+ 
+ ## Sources
+-[S1] liaozhangsheng/gsplat-opengl, https://github.com/liaozhangsheng/gsplat-opengl, fetched 2026-10-28 (unofficial)+[S1] fast-gaussian-rasterization, https://github.com/dendenxu/fast-gaussian-rasterization, fetched 2026-10-26 (unofficial)
++[S2] gsplat-opengl, https://github.com/liaozhangsheng/gsplat-opengl, fetched 2026-10-28 (unofficial)

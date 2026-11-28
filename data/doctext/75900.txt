@@ -1,0 +1,3547 @@
+# SDFPerf
+🔌 A node-based editor for experimenting with signed distance fields and raymarching.
+
+<p align="center">
+  <img src="https://raw.githubusercontent.com/mwalczyk/sdfperf/master/screenshots/all_operators.PNG" width="200" height="auto"/>
+</p>
+
+
+## Description
+<p align="center">
+  <img src="https://raw.githubusercontent.com/mwalczyk/sdfperf/master/screenshots/user_interface.gif" width="500" height="auto"/>
+</p>
+
+`sdfperf` is a work-in-progress node-based editor for creating and manipulating signed-distance fields (SDFs). Currently, the system supports basic SDF primitives (spheres, cubes, planes, toruses) as well as basic domain manipulation (translations, scales, bends, twists) and CSG operations (unions, intersections, differences, smooth-minimums). 
+
+Each time a new connection is made, the underlying shader graph is re-built and a new raymarching shader string is generated. 
+
+## Tested On
+- Windows 8.1, Windows 10, Ubuntu 18.04
+- NVIDIA GeForce GTX 970M, NVIDIA GeForce GTX 980
+- Rust compiler version `1.37.0-nightly` (nightly may not be required)
+
+NOTE: this project will only run on graphics cards that support OpenGL [Direct State Access](https://www.khronos.org/opengl/wiki/Direct_State_Access) (DSA).
+
+## To Build
+1. Clone this repo.
+2. Make sure 🦀 [Rust](https://www.rust-lang.org/en-US/) installed and `cargo` is in your `PATH`.
+3. Inside the repo, run: `cargo build --release`.
+
+## To Use
+<p align="center">
+  <img src="https://raw.githubusercontent.com/mwalczyk/sdfperf/master/screenshots/graph.png" width="500" height="auto"/>
+</p>
+
+The UI displays a virtual preview of the final scene, which can be navigated with simple camera controls. Additionally, the user can switch between 5 distinct shading modes with the number keys (1-5): normals, ambient occlusion (AO), diffuse, z-depth, and ray depth. Certain nodes, such as the `translation` operator, have parameters that can be manipulated with the arrow keys.
+
+### src/bounds.rs
+```
+use cgmath::{Matrix, Matrix4, SquareMatrix, Vector2, Vector3};
+
+pub enum Edge {
+    Left,
+    Right,
+    Top,
+    Bottom,
+}
+
+#[derive(Copy, Clone, PartialEq)]
+pub struct Rect {
+    upper_left: Vector2<f32>,
+    size: Vector2<f32>,
+    model_matrix: Matrix4<f32>,
+}
+
+impl Rect {
+    pub fn new(upper_left: Vector2<f32>, size: Vector2<f32>) -> Rect {
+        let mut rect = Rect {
+            upper_left,
+            size,
+            model_matrix: Matrix4::identity(),
+        };
+
+        rect.rebuild_model_matrix();
+        rect
+    }
+
+    pub fn expanded_from(other: &Rect, amount: &Vector2<f32>) -> Rect {
+        Rect::new(other.upper_left - amount * 0.5, other.size + amount)
+    }
+
+    pub fn square(upper_left: Vector2<f32>, size: f32) -> Rect {
+        Rect::new(upper_left, Vector2::new(size, size))
+    }
+
+    /// Returns the upper-left corner of the rectangle.
+    pub fn get_upper_left(&self) -> &Vector2<f32> {
+        &self.upper_left
+    }
+
+    /// Returns the size (width and height) of the rectangle.
+    pub fn get_size(&self) -> &Vector2<f32> {
+        &self.size
+    }
+
+    /// Returns the model matrix represented by this rectangle.
+    pub fn get_model_matrix(&self) -> &Matrix4<f32> {
+        &self.model_matrix
+    }
+
+    /// Sets the upper-left corner of the rectangle.
+    pub fn set_upper_left(&mut self, to: &Vector2<f32>) {
+        self.upper_left = *to;
+        self.rebuild_model_matrix();
+    }
+
+    /// Sets the size (width and height) of the rectangle.
+    pub fn set_size(&mut self, to: &Vector2<f32>) {
+        self.size = *to;
+        self.rebuild_model_matrix();
+    }
+
+    pub fn snap_to_nearest(&mut self, increment: &Vector2<f32>) {
+        // TODO
+    }
+
+    pub fn expand_from_center(&self, delta: &Vector2<f32>) -> Rect {
+        Rect::new(self.upper_left - delta * 0.5, self.size + delta)
+    }
+
+    pub fn center_on_edge(&mut self, other: &Rect, edge: Edge) {
+        let center = other.midpoint(edge) - self.get_size() * 0.5;
+        self.set_upper_left(&center);
+    }
+
+    pub fn translate(&mut self, offset: &Vector2<f32>) {
+        self.upper_left += *offset;
+        self.rebuild_model_matrix();
+    }
+
+    pub fn inside(&self, point: &Vector2<f32>) -> bool {
+        if point.x > self.upper_left.x && point.x < (self.upper_left.x + self.size.x)
+            && point.y > self.upper_left.y && point.y < (self.upper_left.y + self.size.y)
+        {
+            return true;
+        }
+        false
+    }
+
+    pub fn inside_with_padding(&self, point: &Vector2<f32>, padding: f32) -> bool {
+        if point.x > (self.upper_left.x - padding)
+            && point.x < (self.upper_left.x + self.size.x + padding)
+            && point.y > (self.upper_left.y - padding)
+            && point.y < (self.upper_left.y + self.size.y + padding)
+        {
+            return true;
+        }
+        false
+    }
+
+    pub fn centroid(&self) -> Vector2<f32> {
+        Vector2::new(
+            self.upper_left.x + self.size.x * 0.5,
+            self.upper_left.y + self.size.y * 0.5,
+        )
+    }
+
+    pub fn midpoint(&self, edge: Edge) -> Vector2<f32> {
+        match edge {
+            Edge::Left => Vector2::new(self.upper_left.x, self.upper_left.y + self.size.y * 0.5),
+            Edge::Right => Vector2::new(
+                self.upper_left.x + self.size.x,
+                self.upper_left.y + self.size.y * 0.5,
+            ),
+            Edge::Top => Vector2::new(self.upper_left.x + self.size.x * 0.5, self.upper_left.y),
+            Edge::Bottom => Vector2::new(
+                self.upper_left.x + self.size.x * 0.5,
+                self.upper_left.y + self.size.y,
+            ),
+        }
+    }
+
+    /// Caches a 4x4 model matrix that describes this bounding
+    /// rectangle. This will be rebuilt any time the bounding
+    /// rectangle changes size or location.
+    fn rebuild_model_matrix(&mut self) {
+        let translation =
+            Matrix4::from_translation(Vector3::new(self.upper_left.x, self.upper_left.y, 0.0));
+        let scale = Matrix4::from_nonuniform_scale(self.size.x, self.size.y, 0.0);
+
+        self.model_matrix = translation * scale;
+    }
+}
+
+impl Default for Rect {
+    fn default() -> Self {
+        Rect {
+            upper_left: Vector2::new(0.0, 0.0),
+            size: Vector2::new(1.0, 1.0),
+            model_matrix: Matrix4::identity(),
+        }
+    }
+}
+```
+
+### src/color.rs
+```
+use std::ops::{Add, AddAssign, Sub, SubAssign};
+
+use cgmath::Vector4;
+
+#[derive(Copy, Clone, Debug, PartialEq)]
+pub struct Color {
+    pub r: f32,
+    pub g: f32,
+    pub b: f32,
+    pub a: f32,
+}
+
+impl Color {
+    pub fn new(r: f32, g: f32, b: f32, a: f32) -> Color {
+        Color { r, g, b, a }
+    }
+
+    pub fn mono(rgb: f32, a: f32) -> Color {
+        Color::new(rgb, rgb, rgb, a)
+    }
+
+    pub fn from_hex(code: u32, alpha: f32) -> Color {
+        let r = ((code >> 16) & 0xFF) as f32 / 255.0;
+        let g = ((code >> 8) & 0xFF) as f32 / 255.0;
+        let b = ((code) & 0xFF) as f32 / 255.0;
+        Color::new(r, g, b, alpha)
+    }
+
+    pub fn white() -> Color {
+        Color::mono(1.0, 1.0)
+    }
+
+    pub fn black() -> Color {
+        Color::mono(0.0, 1.0)
+    }
+}
+
+impl Add for Color {
+    type Output = Color;
+
+    fn add(self, other: Color) -> Color {
+        Color::new(
+            self.r + other.r,
+            self.g + other.g,
+            self.b + other.b,
+            self.a + other.a,
+        )
+    }
+}
+
+impl AddAssign for Color {
+    fn add_assign(&mut self, other: Color) {
+        *self = Color::new(
+            self.r + other.r,
+            self.g + other.g,
+            self.b + other.b,
+            self.a + other.a,
+        );
+    }
+}
+
+impl Sub for Color {
+    type Output = Color;
+
+    fn sub(self, other: Color) -> Color {
+        Color::new(
+            self.r - other.r,
+            self.g - other.g,
+            self.b - other.b,
+            self.a - other.a,
+        )
+    }
+}
+
+impl SubAssign for Color {
+    fn sub_assign(&mut self, other: Color) {
+        *self = Color::new(
+            self.r - other.r,
+            self.g - other.g,
+            self.b - other.b,
+            self.a - other.a,
+        );
+    }
+}
+
+impl From<Vector4<f32>> for Color {
+    fn from(item: Vector4<f32>) -> Self {
+        Color::new(item.x, item.y, item.z, item.w)
+    }
+}
+
+impl Into<Vector4<f32>> for Color {
+    fn into(self) -> Vector4<f32> {
+        Vector4::new(self.r, self.g, self.b, self.a)
+    }
+}
+
+#[test]
+fn test_white_hex() {
+    assert_eq!(Color::from_hex(0xFFFFFF, 1.0), Color::white());
+}
+
+#[test]
+fn test_black_hex() {
+    assert_eq!(Color::from_hex(0x000000, 1.0), Color::black());
+}
+```
+
+### src/constants.rs
+```
+use cgmath::Vector2;
+
+// Main window
+pub const WINDOW_RESOLUTION: Vector2<f32> = Vector2 { x: 1400.0, y: 700.0 };
+pub const WINDOW_MULTISAMPLES: u16 = 8;
+pub const WINDOW_TITLE: &str = "signed-distance fields";
+
+// Preview region
+pub const PREVIEW_RESOLUTION: Vector2<f32> = Vector2{ x: 300.0, y: 300.0 };
+pub const PREVIEW_ROTATION_SENSITIVITY: f32 = 0.25;
+pub const PREVIEW_TRANSLATION_SENSITIVITY: f32 = 0.01;
+
+// Interface controls
+pub const ZOOM_INCREMENT: f32 = 0.05;
+
+// Network
+pub const NETWORK_BACKGROUND_COLOR: u32 = 0x2B2B2B;
+pub const NETWORK_BACKGROUND_ALPHA: f32 = 1.0;
+
+// Operators
+pub const OPERATOR_SIZE: Vector2<f32> = Vector2 { x: 100.0, y: 50.0 };
+pub const OPERATIVE_SLOT_SIZE: Vector2<f32> = Vector2 { x: 12.0, y: 12.0 };
+pub const OPERATOR_ICON_SIZE: Vector2<f32> = Vector2 { x: 40.0, y: 40.0 };
+pub const OPERATOR_ICON_OFFSET: Vector2<f32> = Vector2 { x: 4.0, y: 4.0 };
+
+// Parameters
+pub const PARAMETER_CAPACITY: usize = 4;
+pub const PARAMETER_SSBO_CAPACITY: usize = 256;
+```
+
+### src/graph.rs
+```
+use std::cmp::max;
+
+pub trait Connected {
+    fn has_inputs(&self) -> bool;
+    fn has_outputs(&self) -> bool;
+    fn get_number_of_available_inputs(&self) -> usize;
+    fn update_active_inputs_count(&mut self, count: usize);
+    fn on_connect(&mut self);
+    fn on_disconnect(&mut self);
+}
+
+#[derive(Copy, Clone, PartialEq, Eq)]
+pub struct Node<T: Connected> {
+    pub data: T,
+}
+
+impl<T: Connected> Node<T> {
+    fn new(data: T) -> Node<T> {
+        Node { data }
+    }
+}
+
+#[derive(Clone, PartialEq, Eq)]
+pub struct Edges<T> {
+    /// The indices of any nodes that are inputs to the node backed by
+    /// this `Edges` instance
+    pub inputs: Vec<usize>,
+
+    /// The indices of any nodes that are outputs from the node backed by
+    /// this `Edges` instance
+    pub outputs: Vec<usize>,
+
+    /// The data associated with this edge
+    pub data: T,
+}
+
+impl<T> Edges<T> {
+    fn new(data: T) -> Edges<T> {
+        Edges {
+            inputs: Vec::new(),
+            outputs: Vec::new(),
+            data,
+        }
+    }
+}
+
+/// A specialized directed acyclic graph (DAG) implementation that
+/// allows individual nodes to specify whether or not they can
+/// accept incoming or outgoing connections. For example, a particular
+/// "root" node might only have outgoing edges, while disallowing
+/// any incoming edges.
+pub struct Graph<N: Connected, E> {
+    /// The nodes in the graph
+    pub nodes: Vec<Node<N>>,
+
+    /// A list of `Edges` structs, where each `Edges` corresponds
+    /// to the node with the same index in `nodes`
+    pub edges: Vec<Edges<E>>,
+}
+
+impl<N: Connected, E> Graph<N, E> {
+    pub fn new() -> Graph<N, E> {
+        Graph {
+            nodes: Vec::new(),
+            edges: Vec::new(),
+        }
+    }
+
+    /// Returns an immutable reference to the node at `index`.
+    pub fn get_node(&self, index: usize) -> Option<&Node<N>> {
+        self.nodes.get(index)
+    }
+
+    /// Returns a mutable reference to the node at `index`.
+    pub fn get_node_mut(&mut self, index: usize) -> Option<&mut Node<N>> {
+        self.nodes.get_mut(index)
+    }
+
+    /// Returns an immutable reference to the graph's list of nodes.
+    pub fn get_nodes(&self) -> &Vec<Node<N>> {
+        &self.nodes
+    }
+
+    /// Returns a mutable reference to the graph's list of nodes.
+    pub fn get_nodes_mut(&mut self) -> &mut Vec<Node<N>> {
+        &mut self.nodes
+    }
+
+    /// Returns an immutable reference to the graph's list of edges.
+    pub fn get_edges(&self) -> &Vec<Edges<E>> {
+        &self.edges
+    }
+
+    /// Returns a mutable reference to the graph's list of edges.
+    pub fn get_edges_mut(&mut self) -> &mut Vec<Edges<E>> {
+        &mut self.edges
+    }
+
+    /// Adds a new node to the graph that owns `data_n` and whose
+    /// corresponding list of edges owns `data_e`.
+    pub fn add_node(&mut self, data_n: N, data_e: E) {
+        self.nodes.push(Node::new(data_n));
+        self.edges.push(Edges::new(data_e));
+    }
+
+    /// Removes the node at `index` from the graph.
+    pub fn remove_node(&mut self, index: usize) {
+        // The (original) index of the last node, which
+        // will be swapped into the deleted node's place.
+        let swapped_index = self.nodes.len() - 1;
+
+        let removed_node = self.nodes.swap_remove(index);
+        let removed_edges = self.edges.swap_remove(index);
+
+        // Prune edges.
+        for (i, edges) in self.edges.iter_mut().enumerate() {
+            // Delete edges that started at the removed node and
+            // update the number of active inputs.
+            edges.inputs.retain(|&input| input != index);
+
+            let count = edges.inputs.len();
+            self.nodes[i].data.update_active_inputs_count(count);
+
+            // Delete edges that terminated at the removed node.
+            edges.outputs.retain(|&output| output != index);
+
+            // Update any edges that were pointing to or from the
+            // swapped node.
+            for i in edges.inputs.iter_mut() {
+                if *i == swapped_index {
+                    *i = index;
+                }
+            }
+            for i in edges.outputs.iter_mut() {
+                if *i == swapped_index {
+                    *i = index;
+                }
+            }
+        }
+    }
+
+    /// Removes the edge between nodes `a` and `b` (if it
+    /// exists).
+    pub fn remove_edge(&mut self, src: usize, dst: usize) {
+        self.edges[src].outputs.retain(|&index| index != dst);
+        self.edges[dst].inputs.retain(|&index| index != src);
+
+        // Update the number of active inputs leading to
+        // node `b`.
+        let count = self.edges[dst].inputs.len();
+        self.nodes[dst].data.update_active_inputs_count(count);
+    }
+
+    pub fn add_edge(&mut self, src: usize, dst: usize) {
+        if src != dst && self.nodes[src].data.has_outputs() && self.nodes[dst].data.has_inputs() {
+            // If node `b` has reached its input capacity, replace
+            // the edge connecting its last input with `b` with
+            // the new edge.
+            if self.nodes[dst].data.get_number_of_available_inputs() == 0 {
+                let old = self.edges[dst].inputs.pop().unwrap();
+                self.remove_edge(old, dst);
+            } else {
+
+            }
+
+            // Call the `on_connect` method for each node.
+            self.nodes[dst].data.on_connect();
+
+            // Update the edges.
+            self.edges[src].outputs.push(dst);
+            self.edges[dst].inputs.push(src);
+        } else {
+            println!("Connection failed");
+        }
+    }
+
+    /// Performs a post-order traversal of the graph, returning
+    /// the node indices in the proper order.
+    pub fn traverse(&mut self, root: usize) -> Vec<usize> {
+        let mut indices = Vec::new();
+        let mut visited = Vec::new();
+
+        // Traverse the graph, starting at the root.
+        visited.push(root);
+        self.recurse(root, &mut indices, &mut visited);
+
+        indices
+    }
+
+    /// Examine a `root` op's inputs and recurse backwards until
+    /// reaching a leaf node (i.e. an op with no other inputs).
+    fn recurse(&self, root: usize, indices: &mut Vec<usize>, visited: &mut Vec<usize>) {
+        for index in self.edges[root].inputs.iter() {
+            self.recurse(*index, indices, visited);
+        }
+
+        // Finally, push back the root index: note that
+        // here we choose to ignore duplicate entries.
+        // This occurs when a node is connected to multiple
+        // nodes at varying depths in the graph.
+        //
+        // In other scenarios, we might want to allow this
+        // insertion to happen, regardless if the index
+        // exists in `indices` already.
+        if !indices.contains(&root) {
+            indices.push(root);
+        }
+    }
+}
+```
+
+### src/interaction.rs
+```
+use cgmath::{Vector2, Zero};
+
+use bounds::Rect;
+
+pub struct MouseInfo {
+    /// The current position of the mouse
+    pub curr: Vector2<f32>,
+
+    /// The last position of the mouse
+    pub last: Vector2<f32>,
+
+    /// The last position that the user clicked
+    pub clicked: Vector2<f32>,
+
+    /// A flag denoting whether or not the left
+    /// mouse button is currently pressed
+    pub ldown: bool,
+
+    /// A flag denoting whether or not the right
+    /// mouse button is currently pressed
+    pub rdown: bool,
+
+    /// A flag denoting whether or not the middle
+    /// mouse button is currently pressed
+    pub mdown: bool,
+
+    /// The scroll status of the mouse
+    pub scroll: f32,
+}
+
+impl MouseInfo {
+    pub fn new() -> MouseInfo {
+        MouseInfo {
+            curr: Vector2::zero(),
+            last: Vector2::zero(),
+            clicked: Vector2::zero(),
+            ldown: false,
+            rdown: false,
+            mdown: false,
+            scroll: 1.0,
+        }
+    }
+
+    pub fn velocity(&self) -> Vector2<f32> {
+        self.curr - self.last
+    }
+}
+pub enum InteractionState {
+    Deselected,
+    Selected,
+    Hover,
+    ConnectSource,
+    ConnectDestination,
+    // TODO: change these to `DragFrom` and `DragTo` or `Drag` and `Drop`
+}
+
+/// A trait that represents a rectangular region of the
+/// display window that the user can interact with.
+pub trait Panel {
+    /// Returns the bounding rectangular defined by this panel.
+    fn get_bounds(&self) -> &Rect;
+
+    /// Returns the current interaction state of the panel.
+    fn get_state(&self) -> InteractionState;
+
+    /// Handles any mouse events.
+    fn handle_interaction(&mut self, info: &MouseInfo);
+}
+
+pub struct Button {
+    bounds: Rect,
+    state: InteractionState,
+}
+```
+
+### src/main.rs
+```
+#![allow(dead_code)]
+#![allow(unused_variables)]
+#![allow(unused_imports)]
+#![allow(unreachable_code)]
+#![feature(vec_remove_item)]
+extern crate cgmath;
+extern crate gl;
+extern crate glutin;
+extern crate image;
+extern crate uuid;
+
+mod bounds;
+mod color;
+mod constants;
+mod graph;
+mod interaction;
+mod network;
+mod operator;
+mod preview;
+mod program;
+mod renderer;
+mod shader_builder;
+mod texture;
+
+// TODO:
+// - Limit generators (i.e. sphere) to ONE output, since
+//   the current graph traversal code doesn't work if the
+//   same generator is connected to multiple other nodes.
+//   the other option would be to properly handle this
+//   during graph traversal so that the shader code for this
+//   generator is duplicated. This would mean that transforms
+//   should be their own family of operator as well.
+
+use color::Color;
+use interaction::{MouseInfo, Panel};
+use operator::{DomainType, Op, OpFamily, Parameters, PrimitiveType};
+use network::Network;
+use preview::Shading;
+use program::Program;
+use renderer::Renderer;
+use shader_builder::ShaderBuilder;
+
+use glutin::GlContext;
+use cgmath::{Vector2, Vector3, Vector4, Zero};
+
+fn clear() {
+    unsafe {
+        let clear = Color::from_hex(constants::NETWORK_BACKGROUND_COLOR, constants::NETWORK_BACKGROUND_ALPHA);
+        gl::ClearColor(clear.r, clear.g, clear.b, clear.a);
+        gl::Clear(gl::COLOR_BUFFER_BIT);
+    }
+}
+
+fn main() {
+    let mut events_loop = glutin::EventsLoop::new();
+    let window = glutin::WindowBuilder::new()
+        .with_dimensions(constants::WINDOW_RESOLUTION.x as u32, constants::WINDOW_RESOLUTION.y as u32)
+        .with_title(constants::WINDOW_TITLE);
+    let context = glutin::ContextBuilder::new().with_multisampling(constants::WINDOW_MULTISAMPLES);
+    let gl_window = glutin::GlWindow::new(window, context, &events_loop).unwrap();
+    unsafe { gl_window.make_current() }.unwrap();
+    gl::load_with(|symbol| gl_window.get_proc_address(symbol) as *const _);
+
+    // Keep track of the current window size and interaction state
+    let mut current_size = Vector2::new(constants::WINDOW_RESOLUTION.x, constants::WINDOW_RESOLUTION.y);
+    let mut mouse = MouseInfo::new();
+
+    // Main objects
+    let mut network = Network::new(current_size);
+    let mut builder = ShaderBuilder::new();
+
+    loop {
+        events_loop.poll_events(|event| {
+            match event {
+                glutin::Event::WindowEvent { event, .. } => match event {
+                    glutin::WindowEvent::Closed => (),
+
+                    glutin::WindowEvent::Resized(w, h) => {
+                        current_size = Vector2 { x: w as f32, y: h as f32 };
+                        gl_window.resize(w, h);
+                    }
+
+                    glutin::WindowEvent::MouseMoved { position, .. } => {
+                        mouse.last = mouse.curr;
+                        mouse.curr = Vector2::new(position.0 as f32, position.1 as f32);
+
+                        // Zero center and zoom.
+                        mouse.curr -= current_size * 0.5;
+                        //mouse.curr *= mouse.scroll;
+
+                        network.handle_interaction(&mouse);
+                    }
+
+                    glutin::WindowEvent::MouseWheel { delta, .. } => {
+                        if let glutin::MouseScrollDelta::LineDelta(_, line_y) = delta {
+                            if line_y == 1.0 {
+                                mouse.scroll -= constants::ZOOM_INCREMENT;
+                            } else {
+                                mouse.scroll += constants::ZOOM_INCREMENT;
+                            }
+                            network.handle_interaction(&mouse);
+                        }
+                    }
+
+                    glutin::WindowEvent::MouseInput { state, button, .. } => {
+                        if let glutin::ElementState::Pressed = state {
+                            // Store the current mouse position.
+                            mouse.clicked = mouse.curr;
+
+                            // Store mouse button presses.
+                            match button {
+                                glutin::MouseButton::Left => mouse.ldown = true,
+                                glutin::MouseButton::Right => mouse.rdown = true,
+                                glutin::MouseButton::Middle => mouse.mdown = true,
+                                _ => (),
+                            }
+                            network.handle_interaction(&mouse);
+                        } else {
+                            mouse.ldown = false;
+                            mouse.rdown = false;
+                            mouse.mdown = false;
+                        }
+                    }
+
+                    glutin::WindowEvent::KeyboardInput { input, .. } => {
+                        if let glutin::ElementState::Pressed = input.state {
+                            if let Some(key) = input.virtual_keycode {
+                                if input.modifiers.shift && key != glutin::VirtualKeyCode::LShift {
+                                    // If the `shift` modifier is down, add a new op.
+                                    let family = match key {
+                                        glutin::VirtualKeyCode::S => {
+                                            Some(OpFamily::Primitive(PrimitiveType::Sphere))
+                                        }
+                                        glutin::VirtualKeyCode::B => {
+                                            Some(OpFamily::Primitive(PrimitiveType::Box))
+                                        }
+                                        glutin::VirtualKeyCode::P => {
+                                            Some(OpFamily::Primitive(PrimitiveType::Plane))
+                                        }
+                                        glutin::VirtualKeyCode::T => {
+                                            Some(OpFamily::Primitive(PrimitiveType::Torus))
+                                        }
+                                        glutin::VirtualKeyCode::U => {
+                                            Some(OpFamily::Primitive(PrimitiveType::Union))
+                                        }
+                                        glutin::VirtualKeyCode::D => {
+                                            Some(OpFamily::Primitive(PrimitiveType::Subtraction))
+                                        }
+                                        glutin::VirtualKeyCode::I => {
+                                            Some(OpFamily::Primitive(PrimitiveType::Intersection))
+                                        }
+                                        glutin::VirtualKeyCode::M => {
+                                            Some(OpFamily::Primitive(PrimitiveType::SmoothMinimum))
+                                        }
+                                        glutin::VirtualKeyCode::R => {
+                                            Some(OpFamily::Primitive(PrimitiveType::Render))
+                                        }
+                                        glutin::VirtualKeyCode::Key1 => {
+                                            Some(OpFamily::Domain(DomainType::Root))
+                                        }
+                                        glutin::VirtualKeyCode::Key2 => {
+                                            Some(OpFamily::Domain(DomainType::Transform))
+                                        }
+                                        glutin::VirtualKeyCode::Key3 => {
+                                            Some(OpFamily::Domain(DomainType::Twist))
+                                        }
+                                        glutin::VirtualKeyCode::Key4 => {
+                                            Some(OpFamily::Domain(DomainType::Bend))
+                                        }
+                                        _ => None,
+                                    };
+                                    if let Some(family) = family {
+                                        network.add_op(
+                                            family,
+                                            mouse.curr - constants::OPERATOR_SIZE * 0.5,
+                                            constants::OPERATOR_SIZE,
+                                        );
+                                    }
+                                } else {
+                                    // Handle other key commands.
+                                    match key {
+                                        glutin::VirtualKeyCode::Delete => network.delete_selected(),
+                                        glutin::VirtualKeyCode::H => {
+                                            mouse.scroll = 1.0;
+                                            network.preview.home();
+                                        }
+                                        glutin::VirtualKeyCode::P => network.toggle_preview(),
+                                        glutin::VirtualKeyCode::Key1 => {
+                                            network.preview.set_shading(Shading::Depth)
+                                        }
+                                        glutin::VirtualKeyCode::Key2 => {
+                                            network.preview.set_shading(Shading::Steps)
+                                        }
+                                        glutin::VirtualKeyCode::Key3 => {
+                                            network.preview.set_shading(Shading::AmbientOcclusion)
+                                        }
+                                        glutin::VirtualKeyCode::Key4 => {
+                                            network.preview.set_shading(Shading::Normals)
+                                        }
+                                        glutin::VirtualKeyCode::Key5 => {
+                                            network.preview.set_shading(Shading::Diffuse)
+                                        }
+                                        glutin::VirtualKeyCode::Equals => {
+                                            network.increment_param(&Vector4::new(
+                                                0.0,
+                                                0.0,
+                                                0.0,
+                                                0.05,
+                                            ));
+                                        }
+                                        glutin::VirtualKeyCode::Minus => {
+                                            network.increment_param(&Vector4::new(
+                                                0.0,
+                                                0.0,
+                                                0.0,
+                                                -0.05,
+                                            ));
+                                        }
+                                        glutin::VirtualKeyCode::Left => {
+                                            network.increment_param(&Vector4::new(
+                                                0.05,
+                                                0.0,
+                                                0.0,
+                                                0.0,
+                                            ));
+                                        }
+                                        glutin::VirtualKeyCode::Right => {
+                                            network.increment_param(&Vector4::new(
+                                                -0.05,
+                                                0.0,
+                                                0.0,
+                                                0.0,
+                                            ));
+                                        }
+                                        glutin::VirtualKeyCode::Up => {
+                                            network.increment_param(&Vector4::new(
+                                                0.0,
+                                                -0.05,
+                                                0.0,
+                                                0.0,
+                                            ));
+                                        }
+                                        glutin::VirtualKeyCode::Down => {
+                                            network.increment_param(&Vector4::new(
+                                                0.0,
+                                                0.05,
+                                                0.0,
+                                                0.0,
+                                            ));
+                                        }
+                                        _ => (),
+                                    }
+                                }
+                            }
+                        }
+                    }
+                    _ => (),
+                },
+                _ => (),
+            }
+        });
+
+        clear();
+
+        // Check to see if the graph needs to be rebuilt.
+        if network.dirty() {
+            if let Some(root) = network.render_id {
+                let indices = network.graph.traverse(root);
+                let program = builder.build_sources(&network, indices);
+                network.preview.set_valid_program(program);
+                network.clean();
+            } else {
+                network.preview.set_valid_program(None);
+            }
+        }
+
+        // Draw the graph (ops, connections, preview window, etc.).
+        network.draw();
+
+        gl_window.swap_buffers().unwrap();
+    }
+}
+```
+
+### src/network.rs
+```
+use cgmath::{self, Vector2, Vector3, Vector4, Zero};
+use uuid::Uuid;
+
+use bounds::Rect;
+use color::Color;
+use graph::{Connected, Graph};
+use interaction::{InteractionState, MouseInfo, Panel};
+use operator::{ConnectionType, Connectivity, DomainType, Op, OpFamily, PrimitiveType};
+use preview::Preview;
+use renderer::{DrawParams, LineConnectivity, LineMode, Renderer};
+use texture::Texture;
+
+use std::cmp::max;
+use std::collections::HashMap;
+use std::io;
+use std::fs::{self, DirEntry};
+use std::path::Path;
+use std::ffi::OsStr;
+
+/// Palette:
+///
+/// Background:  0x2B2B2B (dark gray)
+/// Accent:      0x373737 (light gray)
+/// Generator:   0x8F719D (purple)
+/// Combiner:    0xA8B6C5 (blue)
+/// Render:      0xC77832 (orange)
+/// Selection:   0x76B264 (green)
+/// Error:       0xA0502B (dark orange)
+/// Other:       0xFEC56D (yellow)
+///
+pub struct Grid {
+    size: Vector2<f32>,
+    spacing: Vector2<usize>,
+    pub points_vertical: Vec<f32>,
+    pub points_horizontal: Vec<f32>,
+}
+
+impl Grid {
+    pub fn new(size: Vector2<f32>, spacing: Vector2<usize>) -> Grid {
+        let mut points_vertical = Vec::new();
+        let mut points_horizontal = Vec::new();
+
+        let lines_x = size.x as usize / spacing.x;
+        let lines_y = size.y as usize / spacing.y;
+        let spacing_x = size.x / lines_x as f32;
+        let spacing_y = size.y / lines_y as f32;
+
+        let offset = size * 0.5;
+
+        // Draw vertical lines.
+        for i in 0..lines_x {
+            points_vertical.extend_from_slice(&[
+                i as f32 * spacing_x - offset.x,
+                -offset.y,
+                0.0,
+                0.0,
+                i as f32 * spacing_x - offset.x,
+                offset.y,
+                1.0,
+                1.0,
+            ]);
+        }
+
+        // Draw horizontal lines.
+        for i in 0..lines_y {
+            points_horizontal.extend_from_slice(&[
+                -offset.x,
+                i as f32 * spacing_y - offset.y,
+                0.0,
+                0.0,
+                offset.x,
+                i as f32 * spacing_y - offset.y,
+                1.0,
+                1.0,
+            ]);
+        }
+
+        Grid {
+            size,
+            spacing,
+            points_vertical,
+            points_horizontal,
+        }
+    }
+}
+
+type Connection = usize;
+
+pub struct Network {
+    /// An adjacency list representation of ops
+    pub graph: Graph<Op, Connection>,
+
+    /// The sprite renderer that will be used to draw all nodes and
+    /// edges of the graph
+    pub renderer: Renderer,
+
+    /// The preview of the shader that is represented by the
+    /// current network
+    pub preview: Preview,
+
+    /// The wireframe grid that will be drawn in the background of
+    /// the network editor
+    pub grid: Grid,
+
+    /// The index of the currently selected op (if there is one)
+    pub selection_id: Option<usize>,
+
+    /// The index of the render op (if there is one)
+    pub render_id: Option<usize>,
+
+    /// A flag that controls whether or not the shader graph
+    /// needs to be rebuilt
+    dirty: bool,
+
+    /// A flag that controls whether or not the preview will
+    /// be drawn
+    show_preview: bool,
+
+    /// A flag that controls whether or not ops will be snapped
+    /// to a grid when dragged
+    snapping: bool,
+
+    /// A map of asset names to textures, used to render various
+    /// UI elements
+    assets: HashMap<String, Texture>,
+}
+
+enum Pair<T> {
+    Both(T, T),
+    One(T),
+    None,
+}
+
+/// Get mutable references at index `a` and `b`.
+fn index_twice<T>(slc: &mut [T], a: usize, b: usize) -> Pair<&mut T> {
+    if max(a, b) >= slc.len() {
+        Pair::None
+    } else if a == b {
+        Pair::One(&mut slc[max(a, b)])
+    } else {
+        unsafe {
+            let ar = &mut *(slc.get_unchecked_mut(a) as *mut _);
+            let br = &mut *(slc.get_unchecked_mut(b) as *mut _);
+            Pair::Both(ar, br)
+        }
+    }
+}
+
+impl Network {
+    /// Constructs a new, empty network.
+    pub fn new(size: Vector2<f32>) -> Network {
+        let mut network = Network {
+            graph: Graph::new(),
+            renderer: Renderer::new(size),
+            preview: Preview::new(),
+            grid: Grid::new(size, Vector2::new(20, 20)),
+            selection_id: None,
+            render_id: None,
+            dirty: false,
+            show_preview: true,
+            snapping: true,
+            assets: HashMap::new(),
+        };
+        network.load_assets();
+        network
+    }
+
+    /// Returns `true` if the shader graph needs to be rebuilt and
+    /// `false` otherwise.
+    pub fn dirty(&self) -> bool {
+        self.dirty
+    }
+
+    /// Sets the `dirty` flag to `false`.
+    pub fn clean(&mut self) {
+        self.dirty = false;
+    }
+
+    /// Toggles drawing of the preview window.
+    pub fn toggle_preview(&mut self) {
+        self.show_preview = !self.show_preview;
+    }
+
+    /// Scales the distance field represented by the currently
+    /// selected op (if one exists).
+    pub fn increment_param(&mut self, values: &Vector4<f32>) {
+        if let Some(selected) = self.selection_id {
+            let node = self.graph.nodes.get_mut(selected).unwrap();
+
+            let params = node.data.get_params_mut();
+            let data = params.get_data_mut();
+            data[0] += values.x;
+            data[1] += values.y;
+            data[2] += values.z;
+            data[3] += values.w;
+        }
+    }
+
+    /// Deletes the currently selected op (if the selection is not empty).
+    pub fn delete_selected(&mut self) {
+        if let Some(selected) = self.selection_id {
+            // Before removing this vertex from the graph,
+            // check to see if it was connected to the root
+            // (if one exists). If so, then the shader
+            // graph needs to be rebuilt.
+            if let Some(id) = self.render_id {
+                for edge in self.graph.edges[selected].outputs.iter() {
+                    if *edge == id {
+                        self.dirty = true;
+                        self.render_id = None;
+                        break;
+                    }
+                }
+            }
+
+            // The last node in the graph's list of nodes
+            // will be moved, so its parameter index needs
+            // to be reset.
+            if let Some(node) = self.graph.nodes.last_mut() {
+                node.data.params.set_index(selected);
+            }
+
+            // Finally, remove the node and reset the selection.
+            self.graph.remove_node(selected);
+            self.selection_id = None;
+        }
+    }
+
+    /// Adds a new op of type `family` to the network at coordinates
+    /// `position` and dimensions `size`.
+    pub fn add_op(&mut self, family: OpFamily, position: Vector2<f32>, size: Vector2<f32>) {
+        // Create the operator.
+        let mut op = Op::new(family, position, size);
+
+        // We need to re-assign this op's parameter index so
+        // that the resulting shader code properly indexes into
+        // the SSBO of parameter data.
+        op.params.set_index(self.graph.nodes.len());
+
+        // Add the operator to the current graph.
+        self.graph.add_node(op, 0);
+    }
+
+    /// Adds a new connection between two ops.
+    pub fn add_connection(&mut self, a: usize, b: usize) {
+        self.graph.add_edge(a, b);
+
+        if let Pair::Both(node_a, node_b) = index_twice(&mut self.graph.nodes, a, b) {
+            // If we previously connected to a render op, then we
+            // know that the graph must be rebuilt.
+            if let Some(_) = self.render_id {
+                self.dirty = true;
+                println!("Active render node in-line: re-building graph");
+            }
+
+            // If we are connecting to a render op, then the shader
+            // must be rebuilt.
+            if let OpFamily::Primitive(PrimitiveType::Render) = node_b.data.family {
+                self.render_id = Some(b);
+                self.dirty = true;
+                println!("Connected to render node: building graph");
+            }
+
+            // Deselect both ops.
+            node_a.data.state = InteractionState::Deselected;
+            node_b.data.state = InteractionState::Deselected;
+        } else {
+            println!("Attempting to connect two ops with the same index - something is wrong here")
+        }
+    }
+
+    /// Handles all mouse events.
+    pub fn handle_interaction(&mut self, mouse: &MouseInfo) {
+        let mut connecting = false;
+        let mut src: Option<usize> = None;
+        let mut dst: Option<usize> = None;
+
+        for (index, node) in self.graph.nodes.iter_mut().enumerate() {
+            if let InteractionState::ConnectSource = node.data.state {
+                if mouse.ldown {
+                    // If this operator is currently being connected to another:
+                    // 1) Set the `connecting` flag to `true`, as the user is
+                    //    performing a potential op connection
+                    // 2) Store its graph index as a potential connect source
+                    // 3) Skip the rest of this loop iteration
+                    connecting = true;
+                    src = Some(index);
+                    continue;
+                } else {
+                    // Otherwise, deselect this op
+                    node.data.state = InteractionState::Deselected;
+                }
+            }
+
+            // Is the mouse inside of this op's bounding box?
+            if node.data.bounds_body.inside(&mouse.curr) {
+                // Is there an op currently selected?
+                if let Some(selected) = self.selection_id {
+                    // Is this op the selected op?
+                    if selected == index {
+                        // Is the mouse down?
+                        if mouse.ldown {
+                            // TODO: let mut velocity = ..;
+                            if self.snapping {
+                                // TODO
+                            }
+                            node.data.translate(&mouse.velocity());
+                        }
+                        continue;
+                    }
+                }
+
+                // This op is not the selected op, but we are inside of it's
+                // bounding box. Is the mouse down?
+                if mouse.ldown {
+                    // Are we inside the bounds of this op's output slot?
+                    if node.data
+                        .bounds_output
+                        .inside_with_padding(&mouse.curr, 12.0)
+                    {
+                        // This op is now a potential connection source.
+                        node.data.state = InteractionState::ConnectSource;
+
+                        // Store the connection source index.
+                        src = Some(index);
+                    } else {
+                        // This op has been selected.
+                        node.data.state = InteractionState::Selected;
+
+                        // Store the selected UUID.
+                        self.selection_id = Some(index);
+                    }
+                } else {
+                    // Otherwise, the mouse is still inside the bounds of this op,
+                    // so we must be hovering over it.
+                    node.data.state = InteractionState::Hover;
+                }
+
+            // The mouse is not inside of this op's bounding box.
+            } else {
+                // Is there an op currently selected?
+                if let Some(selected) = self.selection_id {
+                    // Is this op the selected op?
+                    if selected == index {
+                        // Is the mouse down?
+                        if mouse.ldown {
+                            // The user has clicked somewhere else in the
+                            // network, so reset the selection.
+                            self.selection_id = None;
+                        } else {
+                            // Keep this op selected.
+                            node.data.state = InteractionState::Selected;
+                        }
+                    } else {
+                        // Deselect the op.
+                        node.data.state = InteractionState::Deselected;
+                    }
+                } else {
+                    // Deselect the op.
+                    node.data.state = InteractionState::Deselected;
+                }
+            }
+        }
+
+        // If the mouse is dragging from the output slot of one operator,
+        // check if a potential connection has happened (i.e. the mouse
+        // is now over an input slot of a different operator).
+        if connecting {
+            for (index, node) in self.graph.nodes.iter_mut().enumerate() {
+                // Is the mouse now inside of a different op's input slot region?
+                if node.data
+                    .bounds_input
+                    .inside_with_padding(&mouse.curr, 12.0)
+                {
+                    node.data.state = InteractionState::ConnectDestination;
+                    if let Some(src) = src {
+                        dst = Some(index);
+                    }
+                }
+            }
+        }
+
+        if let (Some(src), Some(dst)) = (src, dst) {
+            let src_family = self.graph.get_node(src).unwrap().data.family;
+            let dst_family = self.graph.get_node(dst).unwrap().data.family;
+
+            if dst_family.has_inputs() {
+
+                if src_family.can_connect_to(dst_family) {
+                    println!("Valid connection between ops with IDs: {}, {}", src, dst);
+                    self.add_connection(src, dst);
+                }
+            }
+        }
+
+        self.preview.handle_interaction(&mouse);
+    }
+
+    /// Draws all of the operators and edges that make
+    /// up this graph.
+    pub fn draw(&mut self) {
+        self.draw_grid();
+        self.draw_all_edges();
+        self.draw_all_nodes();
+
+        if self.show_preview {
+            self.gather_params();
+
+            self.preview.prepare(self.renderer.get_projection());
+            self.renderer.draw_rect_inner();
+        }
+    }
+
+    /// Pick a draw color based on the current interaction state of this
+    /// operator and the op type.
+    fn color_for_op(&self, op: &Op) -> Color {
+        let mut color = match op.family {
+            OpFamily::Domain(domain) => Color::from_hex(0x515151, 1.0),
+            OpFamily::Primitive(primitive) => match primitive {
+                PrimitiveType::Sphere
+                | PrimitiveType::Box
+                | PrimitiveType::Plane
+                | PrimitiveType::Torus => Color::from_hex(0x8F719D, 1.0),
+                PrimitiveType::Union
+                | PrimitiveType::Subtraction
+                | PrimitiveType::Intersection
+                | PrimitiveType::SmoothMinimum => Color::from_hex(0x8A7BA4, 1.0),
+                PrimitiveType::Render => Color::from_hex(0xC77832, 1.0),
+            },
+        };
+
+        // Add a contribution based on the op's current interaction state.
+        if let InteractionState::Hover = op.state {
+            color += Color::mono(0.05, 0.0);
+        }
+        color
+    }
+
+    /// Draws all ops in the network.
+    fn draw_all_nodes(&mut self) {
+        for node in self.graph.get_nodes().iter() {
+            let op = &node.data;
+
+            // Draw the op and other components:
+            // - If the op is selected, draw a selection box behind it
+            // - If the op is being used as a connection source or
+            //   destination, draw the appropriate connection slot
+            let slot_color = Color::from_hex(0x373737, 1.0);
+            match op.state {
+                InteractionState::Selected => {
+                    let bounds_select =
+                        Rect::expanded_from(&op.bounds_body, &Vector2::new(6.0, 6.0));
+                    self.renderer.draw(
+                        DrawParams::Rectangle(&bounds_select),
+                        &Color::from_hex(0x76B264, 1.0),
+                        None,
+                        None,
+                    );
+                }
+                InteractionState::ConnectSource => self.renderer.draw(
+                    DrawParams::Rectangle(&op.bounds_output),
+                    &slot_color,
+                    None,
+                    None,
+                ),
+                InteractionState::ConnectDestination => self.renderer.draw(
+                    DrawParams::Rectangle(&op.bounds_input),
+                    &slot_color,
+                    None,
+                    None,
+                ),
+                _ => (),
+            }
+
+            // Draw the body of the op.
+            let draw_color = self.color_for_op(op);
+            let alpha_key = match op.family.get_connectivity() {
+                Connectivity::InputOutput => "alpha_input_output".to_string(),
+                Connectivity::Input => "alpha_input".to_string(),
+                Connectivity::Output => "alpha_output".to_string(),
+            };
+            let alpha_map = self.assets.get(&alpha_key).unwrap();
+            self.renderer.draw(
+                DrawParams::Rectangle(&op.bounds_body),
+                &draw_color,
+                None,
+                Some(alpha_map),
+            );
+
+            // Draw the icon on top of the op (if one exists).
+            let color_map = self.assets.get(op.family.to_string()).unwrap();
+            self.renderer.draw(
+                DrawParams::Rectangle(&op.bounds_icon),
+                &draw_color,
+                Some(color_map),
+                None,
+            );
+        }
+    }
+
+    /// Gathers the draw data required to draw a curve between
+    /// `a` and `b`.
+    fn curve_between(
+        &self,
+        a: &Vector2<f32>,
+        b: &Vector2<f32>,
+        c: &Vector2<f32>,
+        d: &Vector2<f32>,
+    ) {
+        const LOD: usize = 20;
+        let mut points = Vec::with_capacity(LOD * 4);
+        for i in 0..LOD {
+            let t = (i as f32) / (LOD as f32);
+            let t_inv = 1.0 - t;
+
+            // Coefficients for a cubic polynomial.
+            let b0 = t * t * t;
+            let b1 = 3.0 * t * t * t_inv;
+            let b2 = 3.0 * t * t_inv * t_inv;
+            let b3 = t_inv * t_inv * t_inv;
+
+            let point = a * b0 + b * b1 + c * b2 + d * b3;
+
+            points.extend_from_slice(&[point.x, point.y, t, t]);
+        }
+
+        // Add the first point.
+        points.extend_from_slice(&[a.x, a.y, 0.0, 0.0]);
+
+        self.renderer.draw(
+            DrawParams::Line(&points, LineMode::Solid, LineConnectivity::Strip),
+            &Color::mono(0.75, 1.0),
+            None,
+            None,
+        );
+    }
+
+    /// Gathers the draw data required to draw a straight line between
+    /// `a` and `b`.
+    fn line_between(&self, a: &Vector2<f32>, b: &Vector2<f32>) {
+        let points = vec![a.x, a.y, 0.0, 0.0, b.x, b.y, 1.0, 1.0];
+
+        self.renderer.draw(
+            DrawParams::Line(&points, LineMode::Dashed, LineConnectivity::Segment),
+            &Color::mono(0.75, 0.25),
+            None,
+            None,
+        );
+    }
+
+    /// Draws all edges between ops in the network.
+    fn draw_all_edges(&self) {
+        for (src, edges) in self.graph.edges.iter().enumerate() {
+            for dst in edges.outputs.iter() {
+                let src_node = self.graph.get_node(src).unwrap();
+                let dst_node = self.graph.get_node(*dst).unwrap();
+                let src_family = src_node.data.family;
+                let dst_family = dst_node.data.family;
+                let src_centroid = src_node.data.bounds_output.centroid();
+                let dst_centroid = dst_node.data.bounds_input.centroid();
+
+                match src_family.get_connection_type(dst_family) {
+                    // Draw a bezier curve between these two operators.
+                    ConnectionType::Direct => {
+                        let a = src_centroid;
+                        let d = dst_centroid;
+                        let mid = (a + d) * 0.5;
+
+                        let b = Vector2::new(mid.x, a.y);
+                        let c = Vector2::new(mid.x, d.y);
+                        self.curve_between(&a, &b, &c, &d);
+                    }
+                    // Draw a straight, dashed line (export) between these
+                    // two operators.
+                    ConnectionType::Indirect => {
+                        self.line_between(&src_centroid, &dst_centroid);
+                    }
+                    // An invalid connection - this should never happen, in practice.
+                    _ => (),
+                }
+            }
+        }
+    }
+
+    /// Draws a grid in the network editor.
+    fn draw_grid(&mut self) {
+        let draw_color = Color::from_hex(0x373737, 0.25);
+
+        self.renderer.draw(
+            DrawParams::Line(
+                &self.grid.points_vertical,
+                LineMode::Solid,
+                LineConnectivity::Segment,
+            ),
+            &draw_color,
+            None,
+            None,
+        );
+
+        self.renderer.draw(
+            DrawParams::Line(
+                &self.grid.points_horizontal,
+                LineMode::Solid,
+                LineConnectivity::Segment,
+            ),
+            &draw_color,
+            None,
+            None,
+        );
+    }
+
+    /// Aggregates all of the operator parameters.
+    fn gather_params(&self) {
+        let mut all_params = Vec::new();
+        for node in self.graph.nodes.iter() {
+            all_params.extend_from_slice(node.data.params.get_data());
+            //all_params.push(node.data.params.data);
+        }
+
+        self.preview.update_params(all_params);
+    }
+
+    /// Loads all texture assets.
+    fn load_assets(&mut self) {
+        for entry in fs::read_dir("assets").unwrap() {
+            let path = entry.unwrap().path();
+            let file = path.file_stem().unwrap();
+            let ext = path.extension();
+
+            if ext == Some(OsStr::new("png")) {
+                self.assets
+                    .insert(file.to_str().unwrap().to_string(), Texture::new(&path));
+            }
+        }
+    }
+}
+```
+
+### src/operator.rs
+```
+use bounds::{Edge, Rect};
+use constants;
+use graph::Connected;
+use interaction::InteractionState;
+use renderer::{DrawParams, Drawable};
+
+use cgmath::{Vector2, Vector3, Vector4, Zero};
+use uuid::Uuid;
+
+use std::sync::atomic::{AtomicUsize, Ordering};
+
+static COUNTER: AtomicUsize = AtomicUsize::new(0);
+
+pub enum Connectivity {
+    InputOutput,
+    Input,
+    Output,
+}
+
+pub enum ConnectionType {
+    /// A connection between two ops that are compatible and from
+    /// the same family
+    Direct,
+
+    /// A connection between two ops that are compatible but from
+    /// different families
+    Indirect,
+
+    /// An invalid connection
+    Invalid,
+}
+
+#[derive(Copy, Clone, PartialEq)]
+pub struct Parameters {
+    /// The actual parameter data
+    data: [f32; constants::PARAMETER_CAPACITY],
+
+    /// The names of each component of this parameter
+    names: [&'static str; constants::PARAMETER_CAPACITY],
+
+    /// The index of this parameter in the SSBO that will hold
+    /// all of the op parameters at runtime
+    index: usize,
+
+    /// The minimum value of each component of this parameter -
+    /// in other words, `data[0]` should always be greater than
+    /// or equal to `min[0]`
+    min: [f32; constants::PARAMETER_CAPACITY],
+
+    /// The maximum value of each component of this parameter -
+    /// in other words, `data[0]` should always be less than
+    /// or equal to `max[0]`
+    max: [f32; constants::PARAMETER_CAPACITY],
+
+    /// The step size that will be taken when a component of
+    /// this parameter is incremented or decremented
+    step: [f32; constants::PARAMETER_CAPACITY],
+}
+
+impl Parameters {
+    pub fn new(
+        data: [f32; constants::PARAMETER_CAPACITY],
+        names: [&'static str; constants::PARAMETER_CAPACITY],
+        index: usize,
+        min: [f32; constants::PARAMETER_CAPACITY],
+        max: [f32; constants::PARAMETER_CAPACITY],
+        step: [f32; constants::PARAMETER_CAPACITY],
+    ) -> Parameters {
+        Parameters {
+            data,
+            names,
+            index,
+            min,
+            max,
+            step,
+        }
+    }
+
+    pub fn get_data(&self) -> &[f32; constants::PARAMETER_CAPACITY] {
+        &self.data
+    }
+
+    pub fn get_data_mut(&mut self) -> &mut [f32; constants::PARAMETER_CAPACITY] {
+        &mut self.data
+    }
+
+    pub fn get_names(&self) -> &[&'static str; constants::PARAMETER_CAPACITY] {
+        &self.names
+    }
+
+    pub fn get_index(&self) -> usize {
+        self.index
+    }
+
+    pub fn get_min(&self) -> &[f32; constants::PARAMETER_CAPACITY] {
+        &self.min
+    }
+
+    pub fn get_max(&self) -> &[f32; constants::PARAMETER_CAPACITY] {
+        &self.max
+    }
+
+    pub fn get_step(&self) -> &[f32; constants::PARAMETER_CAPACITY] {
+        &self.step
+    }
+
+    pub fn set_data(&mut self, values: [f32; constants::PARAMETER_CAPACITY]) {
+        for (i, v) in values.iter().enumerate() {
+            self.data[i] += v;
+        }
+    }
+
+    pub fn set_index(&mut self, index: usize) {
+        self.index = index;
+    }
+}
+
+impl Default for Parameters {
+    fn default() -> Self {
+        Parameters::new(
+            [0.0; constants::PARAMETER_CAPACITY],
+            ["param0", "param1", "param2", "param3"],
+            0,
+            [0.0; constants::PARAMETER_CAPACITY],
+            [0.0; constants::PARAMETER_CAPACITY],
+            [0.0; constants::PARAMETER_CAPACITY],
+        )
+    }
+}
+
+#[derive(Copy, Clone, PartialEq)]
+pub enum DomainType {
+    Root,
+    Transform,
+    Twist,
+    Bend,
+}
+
+#[derive(Copy, Clone, PartialEq)]
+pub enum DataType {
+    Time,
+    Math,
+    Sin,
+    Cos,
+    Noise,
+    Mouse,
+    Audio,
+}
+
+#[derive(Copy, Clone, PartialEq)]
+pub enum PrimitiveType {
+    Sphere,
+    Box,
+    Plane,
+    Torus,
+    Union,
+    Subtraction,
+    Intersection,
+    SmoothMinimum,
+    Render,
+}
+
+#[derive(Copy, Clone, PartialEq)]
+pub enum DisplacementType {
+    Noise,
+    Sin,
+    Cos,
+}
+
+/// An `OpFamily` (operator family) is a nested enum that designates
+/// the parent type of a particular operator.
+#[derive(Copy, Clone, PartialEq)]
+pub enum OpFamily {
+    // TODO: Data,
+    // TODO: Displacement,
+    Domain(DomainType),
+    Primitive(PrimitiveType),
+}
+
+impl OpFamily {
+    /// Converts the nested enum variant into a human-readable string format.
+    pub fn to_string(&self) -> &'static str {
+        match *self {
+            OpFamily::Domain(domain) => match domain {
+                DomainType::Root => "root",
+                DomainType::Transform => "transform",
+                DomainType::Twist => "twist",
+                DomainType::Bend => "bend",
+            },
+            OpFamily::Primitive(primitive) => match primitive {
+                PrimitiveType::Sphere => "sphere",
+                PrimitiveType::Box => "box",
+                PrimitiveType::Plane => "plane",
+                PrimitiveType::Torus => "torus",
+                PrimitiveType::Union => "union",
+                PrimitiveType::Subtraction => "subtraction",
+                PrimitiveType::Intersection => "intersection",
+                PrimitiveType::SmoothMinimum => "smooth_minimum",
+                PrimitiveType::Render => "render",
+            },
+        }
+    }
+
+    /// Returns an enum that describes the connectivity of this op family
+    /// (whether it accepts inputs, outputs, or both).
+    pub fn get_connectivity(&self) -> Connectivity {
+        match *self {
+            OpFamily::Domain(domain) => match domain {
+                DomainType::Root => Connectivity::Output,
+                _ => Connectivity::InputOutput,
+            },
+            OpFamily::Primitive(primitive) => match primitive {
+                PrimitiveType::Render => Connectivity::Input,
+                _ => Connectivity::InputOutput,
+            },
+        }
+    }
+
+    /// Returns the maximum number of ops that can be connected to this
+    /// op's input slot. Note that there is no equivalent `get_output_capacity`
+    /// method, since an op's output slot can be connected to a potentially
+    /// unbounded number of other ops.
+    pub fn get_input_capacity(&self) -> usize {
+        match *self {
+            OpFamily::Domain(domain) => match domain {
+                DomainType::Root => 0,
+                _ => 1,
+            },
+            OpFamily::Primitive(primitive) => match primitive {
+                PrimitiveType::Union
+                | PrimitiveType::Subtraction
+                | PrimitiveType::Intersection
+                | PrimitiveType::SmoothMinimum => 2,
+                _ => 1,
+            },
+        }
+    }
+
+    /// Returns `true` if this op's input slot can be connected to another
+    /// op's output slot and `false` otherwise.
+    pub fn has_inputs(&self) -> bool {
+        self.get_input_capacity() > 0
+    }
+
+    /// Returns `true` if this op's output slot can be connected to another
+    /// op's input slot and `false` otherwise.
+    pub fn has_outputs(&self) -> bool {
+        match *self {
+            OpFamily::Domain(domain) => true,
+            OpFamily::Primitive(primitive) => match primitive {
+                PrimitiveType::Render => false,
+                _ => true,
+            },
+        }
+    }
+
+    /// Returns a formattable string of shader code that corresponds to
+    /// this op family.
+    pub fn get_code_template(&self) -> String {
+        match *self {
+            OpFamily::Domain(domain) => match domain {
+                DomainType::Root => "
+                    vec3 p_NAME = p;
+                    float s_NAME = 1.0;"
+                    .to_string(),
+                DomainType::Transform => "
+                    float s_NAME = params[INDEX].w * s_INPUT_A;
+                    vec3 t_NAME = params[INDEX].xyz;
+                    vec3 p_NAME = p_INPUT_A / s_NAME + t_NAME;"
+                    .to_string(),
+                DomainType::Twist => "
+                    float s_NAME = s_INPUT_A;
+                    vec3 p_NAME = domain_twist(p_INPUT_A, params[INDEX].x);"
+                    .to_string(),
+                DomainType::Bend => "
+                    float s_NAME = s_INPUT_A;
+                    vec3 p_NAME = domain_bend(p_INPUT_A, params[INDEX].x);"
+                    .to_string(),
+            },
+            OpFamily::Primitive(primitive) => match primitive {
+                PrimitiveType::Sphere => {
+                    "float NAME = sdf_sphere(p_INPUT_A, vec3(0.0), 1.0) * s_INPUT_A;".to_string()
+                }
+                PrimitiveType::Box => {
+                    "float NAME = sdf_box(p_INPUT_A, vec3(1.0)) * s_INPUT_A;".to_string()
+                }
+                PrimitiveType::Plane => {
+                    "float NAME = sdf_plane(p_INPUT_A, -1.0) * s_INPUT_A;".to_string()
+                }
+                PrimitiveType::Torus => {
+                    "float NAME = sdf_torus(p_INPUT_A, vec2(1.0, 0.5)) * s_INPUT_A;".to_string()
+                }
+                PrimitiveType::Union => "float NAME = op_union(INPUT_A, INPUT_B);".to_string(),
+                PrimitiveType::Subtraction => {
+                    "float NAME = op_subtract(INPUT_A, INPUT_B);".to_string()
+                }
+                PrimitiveType::Intersection => {
+                    "float NAME = op_intersect(INPUT_A, INPUT_B);".to_string()
+                }
+                PrimitiveType::SmoothMinimum => {
+                    "float NAME = op_smooth_min(INPUT_A, INPUT_B, params[INDEX].x);".to_string()
+                }
+                PrimitiveType::Render => "float NAME = INPUT_A;".to_string(),
+            },
+        }
+    }
+
+    /// Returns `true` if this op family can connect to `other`, either
+    /// directly or indirectly.
+    pub fn can_connect_to(&self, other: OpFamily) -> bool {
+        match *self {
+            // This operator is a domain operator.
+            OpFamily::Domain(domain) => match other {
+                OpFamily::Domain(other_domain) => return true,
+                OpFamily::Primitive(other_primitive) => match other_primitive {
+                    PrimitiveType::Sphere
+                    | PrimitiveType::Box
+                    | PrimitiveType::Plane
+                    | PrimitiveType::Torus => return true,
+                    _ => return false,
+                },
+            },
+            // This operator is a primitive operator.
+            OpFamily::Primitive(primitive) => match other {
+                OpFamily::Domain(other_domain) => return false,
+                // Generators such as spheres, boxes, planes, and toruses can
+                // only be used as the source operator in primitive -> primitive
+                // interactions.
+                OpFamily::Primitive(other_primitive) => match other_primitive {
+                    PrimitiveType::Sphere
+                    | PrimitiveType::Box
+                    | PrimitiveType::Plane
+                    | PrimitiveType::Torus => return false,
+                    _ => return true,
+                },
+            },
+        }
+    }
+
+    /// Returns the connection type between this op family and `other`. A
+    /// connection can be either direct, indirect, or invalid.
+    pub fn get_connection_type(&self, other: OpFamily) -> ConnectionType {
+        match *self {
+            // This operator is a domain operator.
+            OpFamily::Domain(domain) => match other {
+                OpFamily::Domain(other_domain) => ConnectionType::Direct,
+                OpFamily::Primitive(other_primitive) => ConnectionType::Indirect,
+            },
+            // This operator is a primitive operator.
+            OpFamily::Primitive(primitive) => match other {
+                OpFamily::Domain(other_domain) => ConnectionType::Invalid,
+                OpFamily::Primitive(other_primitive) => ConnectionType::Direct,
+            },
+        }
+    }
+
+    /// Returns the default parameters for this op family.
+    pub fn get_default_params(&self) -> Parameters {
+        match *self {
+            OpFamily::Domain(domain) => match domain {
+                DomainType::Transform => Parameters::new(
+                    [0.0, 0.0, 0.0, 1.0],
+                    ["translate_x", "translate_y", "translate_z", "scale"],
+                    0,
+                    [-10.0, -10.0, -10.0, 0.1],
+                    [10.0, 10.0, 10.0, 10.0],
+                    [0.5, 0.5, 0.5, 0.1],
+                ),
+                DomainType::Twist => Parameters::new(
+                    [4.0, 4.0, 0.0, 0.0],
+                    ["twist_x", "twist_y", "", ""],
+                    0,
+                    [0.0, 0.0, 0.0, 0.0],
+                    [20.0, 20.0, 0.0, 0.0],
+                    [1.0, 1.0, 0.0, 0.0],
+                ),
+                DomainType::Bend => Parameters::new(
+                    [0.5, 0.5, 0.0, 0.0],
+                    ["bend_x", "bend_y", "", ""],
+                    0,
+                    [0.0, 0.0, 0.0, 0.0],
+                    [2.0, 2.0, 0.0, 0.0],
+                    [0.05, 0.05, 0.0, 0.0],
+                ),
+                _ => Parameters::default(),
+            },
+            OpFamily::Primitive(primitive) => match primitive {
+                PrimitiveType::SmoothMinimum => Parameters::new(
+                    [1.0, 0.0, 0.0, 0.0],
+                    ["exponent", "", "", ""],
+                    0,
+                    [0.0, 0.0, 0.0, 0.0],
+                    [1.0, 0.0, 0.0, 0.0],
+                    [0.1, 0.0, 0.0, 0.0],
+                ),
+                _ => Parameters::default(),
+            },
+        }
+    }
+}
+
+pub struct Op {
+    /// The number of ops currently connected to this op
+    pub active_inputs: usize,
+
+    /// The bounding box of the op
+    pub bounds_body: Rect,
+
+    /// The bounding box of the op's input slot
+    pub bounds_input: Rect,
+
+    /// The bounding box of the op's output slot
+    pub bounds_output: Rect,
+
+    /// The bounding box of the op's icon
+    pub bounds_icon: Rect,
+
+    /// The current interaction state of the op
+    pub state: InteractionState,
+
+    /// A unique, numeric identifier - no two ops will have the same UUID
+    pub uuid: Uuid,
+
+    /// The name of the op (i.e. "sphere_0") as it will appear in the shader
+    pub name: String,
+
+    /// The op family
+    pub family: OpFamily,
+
+    /// This op's parameters, which may or may not be used by the shader
+    pub params: Parameters,
+}
+
+impl Op {
+    pub fn new(family: OpFamily, position: Vector2<f32>, size: Vector2<f32>) -> Op {
+        // Increment counter.
+        let count = COUNTER.fetch_add(1, Ordering::SeqCst);
+
+        // Set up bounding boxes.
+        let bounds_body = Rect::new(position, size);
+
+        let mut bounds_input = Rect::new(Vector2::zero(), constants::OPERATIVE_SLOT_SIZE);
+        bounds_input.center_on_edge(&bounds_body, Edge::Left);
+
+        let mut bounds_output = Rect::new(Vector2::zero(), constants::OPERATIVE_SLOT_SIZE);
+        bounds_output.center_on_edge(&bounds_body, Edge::Right);
+
+        let mut bounds_icon = Rect::new(position, constants::OPERATOR_ICON_SIZE);
+        bounds_icon.translate(&constants::OPERATOR_ICON_OFFSET);
+
+        let name = format!("{}_{}", family.to_string(), count);
+
+        Op {
+            active_inputs: 0,
+            bounds_body,
+            bounds_input,
+            bounds_output,
+            bounds_icon,
+            state: InteractionState::Deselected,
+            uuid: Uuid::new_v4(),
+            name,
+            family,
+            params: family.get_default_params(),
+        }
+    }
+
+    /// Translates the op in the network editor by an amount
+    /// `offset`. Internally, this translates each of the
+    /// bounding rectangles that are owned by this op.
+    pub fn translate(&mut self, offset: &Vector2<f32>) {
+        self.bounds_body.translate(offset);
+        self.bounds_input.translate(offset);
+        self.bounds_output.translate(offset);
+        self.bounds_icon.translate(offset);
+    }
+
+    /// Returns the complete code snippet corresponding to
+    /// this op after it has been connected to `input_a` and
+    /// `input_b` (both of which are optional).
+    pub fn get_code(&self, input_a: Option<&str>, input_b: Option<&str>) -> String {
+        let mut code = self.family.get_code_template();
+        code = code.replace("NAME", &self.name);
+
+        code = code.replace("INDEX", &self.params.index.to_string());
+
+        if let Some(a) = input_a {
+            code = code.replace("INPUT_A", a);
+        }
+        if let Some(b) = input_b {
+            code = code.replace("INPUT_B", b);
+        }
+        code
+    }
+
+    /// Returns an immutable reference to this op's parameters.
+    pub fn get_params(&self) -> &Parameters {
+        &self.params
+    }
+
+    /// Returns a mutable reference to this op's parameters.
+    pub fn get_params_mut(&mut self) -> &mut Parameters {
+        &mut self.params
+    }
+}
+
+impl Connected for Op {
+    fn has_inputs(&self) -> bool {
+        self.family.has_inputs()
+    }
+
+    fn has_outputs(&self) -> bool {
+        self.family.has_outputs()
+    }
+
+    fn get_number_of_available_inputs(&self) -> usize {
+        self.family.get_input_capacity() - self.active_inputs
+    }
+
+    fn update_active_inputs_count(&mut self, count: usize) {
+        self.active_inputs = count;
+    }
+
+    fn on_connect(&mut self) {
+        self.active_inputs += 1;
+    }
+
+    fn on_disconnect(&mut self) {
+        self.active_inputs -= 1;
+    }
+}
+
+impl<'a> Drawable<'a> for Op {
+    fn get_draw_params(&'a self) -> DrawParams<'a> {
+        DrawParams::Rectangle(&self.bounds_body)
+    }
+}
+```
+
+### src/preview.rs
+```
+use gl::{self, types::*};
+use cgmath::{EuclideanSpace, InnerSpace, Matrix4, Point3, SquareMatrix, Vector2, Vector3, Vector4,
+             Zero};
+
+use bounds::Rect;
+use color::Color;
+use constants;
+use interaction::{MouseInfo, Panel};
+use program::Program;
+
+use std::mem;
+use std::ptr;
+use std::os::raw::c_void;
+
+#[derive(Copy, Clone)]
+pub enum Shading {
+    /// Display the z-depth of each fragment
+    Depth,
+
+    /// Display the number of steps taken along the ray
+    Steps,
+
+    /// Display the scene with ambient occlusion
+    AmbientOcclusion,
+
+    /// Display the normals of the underlying distance field
+    Normals,
+
+    /// Display the scene with diffuse lighting
+    Diffuse,
+}
+
+struct VirtualCamera {
+    /// The position of the camera
+    position: Point3<f32>,
+
+    /// The up vector of the camera
+    up: Vector3<f32>,
+
+    /// The direction that the camera is currently facing
+    front: Vector3<f32>,
+
+    /// The cross product of this camera's `up` and `front` vectors
+    right: Vector3<f32>,
+
+    /// The vertical angle of the camera
+    pitch: f32,
+
+    /// The horizontal angle of the camera
+    yaw: f32,
+}
+
+impl VirtualCamera {
+    fn new() -> VirtualCamera {
+        VirtualCamera {
+            position: Point3::new(0.0, 0.0, 5.0),
+            up: Vector3::unit_y(),
+            front: Vector3::new(0.0, 0.0, -1.0),
+            right: Vector3::unit_x(),
+            pitch: 0.0,
+            yaw: -90.0,
+        }
+    }
+
+    fn home(&mut self) {
+        self.position = Point3::new(0.0, 0.0, 5.0);
+        self.pitch = 0.0;
+        self.yaw = -90.0;
+    }
+
+    fn rebuild_basis(&mut self) {
+        self.front = Vector3::new(
+            self.yaw.to_radians().cos() * self.pitch.to_radians().cos(),
+            self.pitch.to_radians().sin(),
+            self.yaw.to_radians().sin() * self.pitch.to_radians().cos(),
+        ).normalize();
+
+        self.right = self.front.cross(self.up).normalize()
+    }
+}
+
+pub struct Preview {
+    /// The valid shader program, if one exists
+    program_valid: Option<Program>,
+
+    /// The fallback program that will be used if `program_valid`
+    /// is `None`
+    program_error: Program,
+
+    /// The bounding box of the preview window
+    bounds: Rect,
+
+    /// The virtual camera that will be used to view the scene
+    camera: VirtualCamera,
+
+    /// The current shading mode that will be applied to the scene
+    shading: Shading,
+
+    /// The OpenGL handle to the shader storage buffer object (SSBO)
+    /// that will hold all of the op parameters
+    ssbo: GLuint,
+}
+
+impl Preview {
+    pub fn new() -> Preview {
+        static FALLBACK_VS_SRC: &'static str = "
+        #version 430
+
+        layout(location = 0) in vec2 position;
+        layout(location = 1) in vec2 texcoord;
+        layout (location = 0) out vec2 vs_texcoord;
+
+        uniform mat4 u_model_matrix;
+        uniform mat4 u_projection_matrix;
+
+        void main() {
+            vs_texcoord = texcoord;
+
+            gl_Position = u_projection_matrix * u_model_matrix * vec4(position, 0.0, 1.0);
+        }";
+
+        static FALLBACK_FS_SRC: &'static str = "
+        #version 430
+
+        layout (location = 0) in vec2 vs_texcoord;
+        layout (location = 0) out vec4 o_color;
+
+        void main() {
+            const float tile = 15.0;
+            vec2 uv = vs_texcoord * tile;
+            vec2 ipos = floor(uv);
+
+            float total = dot(ipos, vec2(1.0));
+            float checkerboard = mod(total, 2.0);
+            const float alpha = 0.25;
+
+            o_color = vec4(vec3(checkerboard), alpha);
+        }";
+
+        let program_error =
+            Program::new(FALLBACK_VS_SRC.to_string(), FALLBACK_FS_SRC.to_string()).unwrap();
+
+        let mut ssbo = 0;
+        unsafe {
+            let ssbo_size = (constants::PARAMETER_SSBO_CAPACITY * mem::size_of::<Vector4<f32>>()) as GLsizeiptr;
+
+            gl::CreateBuffers(1, &mut ssbo);
+            gl::NamedBufferStorage(ssbo, ssbo_size, ptr::null(), gl::DYNAMIC_STORAGE_BIT);
+        }
+        Preview {
+            program_valid: None,
+            program_error,
+            bounds: Rect::new(Vector2::new(400.0, 50.0), constants::PREVIEW_RESOLUTION),
+            camera: VirtualCamera::new(),
+            shading: Shading::Normals,
+            ssbo,
+        }
+    }
+
+    /// Sets the shader program that will be used to render a
+    /// miniature preview window in the lower right-hand corner
+    /// of the network.
+    ///
+    /// If `program` is `None`, then the renderer will use a
+    /// fall-back shader to indicate the error state of the
+    /// current graph.
+    pub fn set_valid_program(&mut self, program: Option<Program>) {
+        self.program_valid = program;
+    }
+
+    /// Writes `data` to the OpenGL buffer that this preview
+    /// will use to populate shader parameters during rendering.
+    pub fn update_params(&self, data: Vec<f32>) {
+        unsafe {
+            let data_size = (data.len() * mem::size_of::<f32>()) as GLsizeiptr;
+            gl::NamedBufferSubData(self.ssbo, 0, data_size, data.as_ptr() as *const c_void);
+        }
+    }
+
+    /// Sets the shading mode.
+    pub fn set_shading(&mut self, shading: Shading) {
+        self.shading = shading;
+    }
+
+    /// Homes the virtual preview camera.
+    pub fn home(&mut self) {
+        self.camera.home();
+    }
+
+    /// If a preview program has be assigned, render a miniature
+    /// preview window in the lower right-hand corner of the
+    /// network.
+    pub fn prepare(&self, projection: &Matrix4<f32>) {
+        if let Some(ref program) = self.program_valid {
+            self.bind_transforms();
+            program.bind();
+            program.uniform_3f("u_camera_position", &self.camera.position.to_vec());
+            program.uniform_3f("u_camera_front", &self.camera.front);
+            program.uniform_1ui("u_shading", self.shading as u32);
+            program.uniform_matrix_4f("u_model_matrix", &self.bounds.get_model_matrix());
+            program.uniform_matrix_4f("u_projection_matrix", &projection);
+        } else {
+            self.program_error.bind();
+            self.program_error
+                .uniform_matrix_4f("u_model_matrix", &self.bounds.get_model_matrix());
+            self.program_error
+                .uniform_matrix_4f("u_projection_matrix", &projection);
+        }
+    }
+
+    pub fn handle_interaction(&mut self, mouse: &MouseInfo) {
+        if self.bounds.inside(&mouse.curr) {
+            let offset = -mouse.velocity();
+
+            // Handle camera rotation.
+            if mouse.ldown {
+                self.camera.yaw += offset.x * constants::PREVIEW_ROTATION_SENSITIVITY;
+                self.camera.pitch += offset.y * constants::PREVIEW_ROTATION_SENSITIVITY;
+                self.camera.pitch.min(89.0).max(-89.0);
+                self.camera.rebuild_basis();
+            }
+
+            // Handle camera translation.
+            if mouse.rdown {
+                self.camera.position += self.camera.right * offset.x * constants::PREVIEW_TRANSLATION_SENSITIVITY;
+                self.camera.position += self.camera.front * offset.y * constants::PREVIEW_TRANSLATION_SENSITIVITY;
+            }
+        }
+    }
+
+    fn bind_transforms(&self) {
+        unsafe {
+            gl::BindBufferBase(gl::SHADER_STORAGE_BUFFER, 0, self.ssbo);
+        }
+    }
+}
+
+impl Drop for Preview {
+    fn drop(&mut self) {
+        unsafe {
+            gl::DeleteBuffers(1, &self.ssbo);
+        }
+    }
+}
+```
+
+### src/program.rs
+```
+use gl;
+use gl::types::*;
+
+use cgmath;
+use cgmath::{Array, Matrix, Matrix4, Vector2, Vector3, Vector4};
+
+use std::ptr;
+use std::str;
+use std::ffi::CString;
+use std::collections::HashMap;
+
+pub struct Uniform {
+    location: i32,
+    size: i32,
+    // TODO this should be converted to a new type, like: https://github.com/glium/glium/blob/master/src/uniforms/value.rs
+    ty: GLenum,
+}
+
+pub struct Program {
+    pub id: GLuint,
+    vs_src: String,
+    fs_src: String,
+    uniforms: HashMap<String, Uniform>,
+}
+
+impl Program {
+    /// Compiles a shader of type `stage` from the source held in `src`.
+    fn compile_shader(src: &String, stage: GLenum) -> Result<GLuint, String> {
+        let shader;
+        unsafe {
+            shader = gl::CreateShader(stage);
+
+            // Attempt to compile the shader.
+            let c_str = CString::new(src.as_bytes()).unwrap();
+            gl::ShaderSource(shader, 1, &c_str.as_ptr(), ptr::null());
+            gl::CompileShader(shader);
+
+            // Get the compile status.
+            let mut status = gl::FALSE as GLint;
+            gl::GetShaderiv(shader, gl::COMPILE_STATUS, &mut status);
+
+            // Fail on error
+            if status != (gl::TRUE as GLint) {
+                let mut len = 0;
+                gl::GetShaderiv(shader, gl::INFO_LOG_LENGTH, &mut len);
+                let mut buffer = Vec::with_capacity(len as usize);
+
+                // Subtract 1 to skip the trailing null character.
+                buffer.set_len((len as usize) - 1);
+
+                gl::GetShaderInfoLog(
+                    shader,
+                    len,
+                    ptr::null_mut(),
+                    buffer.as_mut_ptr() as *mut GLchar,
+                );
+
+                let error = String::from_utf8(buffer)
+                    .ok()
+                    .expect("ShaderInfoLog not valid utf8");
+                return Err(error);
+            }
+        }
+
+        Ok(shader)
+    }
+
+    fn link_program(vs: GLuint, fs: GLuint) -> Result<GLuint, String> {
+        unsafe {
+            let program = gl::CreateProgram();
+            gl::AttachShader(program, vs);
+            gl::AttachShader(program, fs);
+            gl::LinkProgram(program);
+
+            // Get the link status.
+            let mut status = gl::FALSE as GLint;
+            gl::GetProgramiv(program, gl::LINK_STATUS, &mut status);
+
+            // If there was an error, return the error string.
+            if status != (gl::TRUE as GLint) {
+                let mut len: GLint = 0;
+                gl::GetProgramiv(program, gl::INFO_LOG_LENGTH, &mut len);
+                let mut buffer = Vec::with_capacity(len as usize);
+
+                // Subtract 1 to skip the trailing null character.
+                buffer.set_len((len as usize) - 1);
+
+                gl::GetProgramInfoLog(
+                    program,
+                    len,
+                    ptr::null_mut(),
+                    buffer.as_mut_ptr() as *mut GLchar,
+                );
+                gl::DeleteShader(fs);
+                gl::DeleteShader(vs);
+
+                let error = String::from_utf8(buffer)
+                    .ok()
+                    .expect("ProgramInfoLog not valid utf8");
+                return Err(error);
+            }
+
+            Ok(program)
+        }
+    }
+
+    fn perform_reflection(&mut self) {
+        unsafe {
+            use std::mem;
+
+            // Retrieve the number of active uniforms.
+            let mut active_uniforms: GLint = mem::uninitialized();
+            gl::GetProgramiv(self.id, gl::ACTIVE_UNIFORMS, &mut active_uniforms);
+
+            // Retrieve the maximum length of each uniform name.
+            let mut max_name_length: GLint = 0;
+            gl::GetProgramiv(self.id, gl::ACTIVE_UNIFORM_MAX_LENGTH, &mut max_name_length);
+
+            // Query for information about each uniform entry.
+            for i in 0..active_uniforms {
+                let mut name_bytes = Vec::with_capacity(max_name_length as usize);
+                let mut name_length = 0;
+                let mut size = 0;
+                let mut ty = gl::NONE;
+
+                gl::GetActiveUniform(
+                    self.id,
+                    i as GLuint,
+                    max_name_length,
+                    &mut name_length,
+                    &mut size,
+                    &mut ty,
+                    name_bytes.as_mut_ptr() as *mut GLchar,
+                );
+
+                // Convert the byte array to a string.
+                name_bytes.set_len(name_length as usize);
+                let name = String::from_utf8(name_bytes).unwrap();
+
+                // Finally, get the uniform's location.
+                let location =
+                    gl::GetUniformLocation(self.id, CString::new(name.clone()).unwrap().as_ptr());
+
+                println!(
+                    "Uniform Entry with name {:?}: size {}, type {}, location {}",
+                    name, size, ty, location
+                );
+                self.uniforms.insert(name, Uniform { location, size, ty });
+            }
+        }
+    }
+
+    pub fn new(vs_src: String, fs_src: String) -> Option<Program> {
+        // Make sure that compiling each of the shaders was successful.
+        let compile_vs_res = Program::compile_shader(&vs_src, gl::VERTEX_SHADER);
+        let compile_fs_res = Program::compile_shader(&fs_src, gl::FRAGMENT_SHADER);
+
+        match (compile_vs_res, compile_fs_res) {
+            (Ok(vs_id), Ok(fs_id)) => {
+                // Make sure that linking the shader program was successful.
+                if let Ok(id) = Program::link_program(vs_id, fs_id) {
+                    // If everything went ok, return the shader program.
+                    let mut valid_program = Program {
+                        id,
+                        vs_src,
+                        fs_src,
+                        uniforms: HashMap::new(),
+                    };
+                    valid_program.perform_reflection();
+
+                    return Some(valid_program);
+                } else {
+                    return None;
+                }
+            }
+            // Both shader stages resulted in an error.
+            (Err(vs_err), Err(fs_err)) => {
+                println!("{}", vs_err);
+                println!("{}", fs_err);
+                return None;
+            }
+            // The vertex shader resulted in an error.
+            (Err(vs_err), Ok(_)) => {
+                println!("{}", vs_err);
+                return None;
+            }
+            // The fragment shader resulted in an error.
+            (Ok(_), Err(fs_err)) => {
+                println!("{}", fs_err);
+                return None;
+            }
+        }
+    }
+
+    pub fn bind(&self) {
+        unsafe {
+            gl::UseProgram(self.id);
+        }
+    }
+
+    pub fn unbind(&self) {
+        unsafe {
+            gl::UseProgram(0);
+        }
+    }
+
+    pub fn uniform_1i(&self, name: &str, value: i32) {
+        unsafe {
+            let location = gl::GetUniformLocation(self.id, CString::new(name).unwrap().as_ptr());
+            gl::ProgramUniform1i(self.id, location, value as gl::types::GLint);
+        }
+    }
+
+    pub fn uniform_2i(&self, name: &str, value: &cgmath::Vector2<i32>) {
+        unsafe {
+            let location = gl::GetUniformLocation(self.id, CString::new(name).unwrap().as_ptr());
+            gl::ProgramUniform2iv(self.id, location, 1, value.as_ptr());
+        }
+    }
+
+    pub fn uniform_3i(&self, name: &str, value: &cgmath::Vector3<i32>) {
+        unsafe {
+            let location = gl::GetUniformLocation(self.id, CString::new(name).unwrap().as_ptr());
+            gl::ProgramUniform3iv(self.id, location, 1, value.as_ptr());
+        }
+    }
+
+    pub fn uniform_4i(&self, name: &str, value: &cgmath::Vector4<i32>) {
+        unsafe {
+            let location = gl::GetUniformLocation(self.id, CString::new(name).unwrap().as_ptr());
+            gl::ProgramUniform4iv(self.id, location, 1, value.as_ptr());
+        }
+    }
+
+    pub fn uniform_1ui(&self, name: &str, value: u32) {
+        unsafe {
+            let location = gl::GetUniformLocation(self.id, CString::new(name).unwrap().as_ptr());
+            gl::ProgramUniform1ui(self.id, location, value as gl::types::GLuint);
+        }
+    }
+
+    pub fn uniform_2ui(&self, name: &str, value: &cgmath::Vector2<u32>) {
+        unsafe {
+            let location = gl::GetUniformLocation(self.id, CString::new(name).unwrap().as_ptr());
+            gl::ProgramUniform2uiv(self.id, location, 1, value.as_ptr());
+        }
+    }
+
+    pub fn uniform_3ui(&self, name: &str, value: &cgmath::Vector3<u32>) {
+        unsafe {
+            let location = gl::GetUniformLocation(self.id, CString::new(name).unwrap().as_ptr());
+            gl::ProgramUniform3uiv(self.id, location, 1, value.as_ptr());
+        }
+    }
+
+    pub fn uniform_4ui(&self, name: &str, value: &cgmath::Vector4<u32>) {
+        unsafe {
+            let location = gl::GetUniformLocation(self.id, CString::new(name).unwrap().as_ptr());
+            gl::ProgramUniform4uiv(self.id, location, 1, value.as_ptr());
+        }
+    }
+
+    pub fn uniform_1f(&self, name: &str, value: f32) {
+        unsafe {
+            let location = gl::GetUniformLocation(self.id, CString::new(name).unwrap().as_ptr());
+            gl::ProgramUniform1f(self.id, location, value as gl::types::GLfloat);
+        }
+    }
+
+    pub fn uniform_2f(&self, name: &str, value: &cgmath::Vector2<f32>) {
+        unsafe {
+            let location = gl::GetUniformLocation(self.id, CString::new(name).unwrap().as_ptr());
+            gl::ProgramUniform2fv(self.id, location, 1, value.as_ptr());
+        }
+    }
+
+    pub fn uniform_3f(&self, name: &str, value: &cgmath::Vector3<f32>) {
+        unsafe {
+            let location = gl::GetUniformLocation(self.id, CString::new(name).unwrap().as_ptr());
+            gl::ProgramUniform3fv(self.id, location, 1, value.as_ptr());
+        }
+    }
+
+    pub fn uniform_4f(&self, name: &str, value: &cgmath::Vector4<f32>) {
+        unsafe {
+            let location = gl::GetUniformLocation(self.id, CString::new(name).unwrap().as_ptr());
+            gl::ProgramUniform4fv(self.id, location, 1, value.as_ptr());
+        }
+    }
+
+    pub fn uniform_matrix_3f(&self, name: &str, value: &cgmath::Matrix3<f32>) {
+        unsafe {
+            let location = gl::GetUniformLocation(self.id, CString::new(name).unwrap().as_ptr());
+            gl::ProgramUniformMatrix3fv(self.id, location, 1, gl::FALSE, value.as_ptr());
+        }
+    }
+
+    pub fn uniform_matrix_4f(&self, name: &str, value: &cgmath::Matrix4<f32>) {
+        unsafe {
+            let location = gl::GetUniformLocation(self.id, CString::new(name).unwrap().as_ptr());
+            gl::ProgramUniformMatrix4fv(self.id, location, 1, gl::FALSE, value.as_ptr());
+        }
+    }
+}
+
+impl Drop for Program {
+    fn drop(&mut self) {
+        unsafe {
+            gl::DeleteProgram(self.id);
+        }
+    }
+}
+```
+
+### src/renderer.rs
+```
+use gl::{self, types::*};
+use cgmath::{self, Matrix, Matrix4, One, PerspectiveFov, SquareMatrix, Vector2, Vector4, Zero};
+
+use bounds::Rect;
+use color::Color;
+use program::Program;
+use texture::Texture;
+
+use std::mem;
+use std::ptr;
+use std::os::raw::c_void;
+use std::ffi::CString;
+use std::time::{Duration, SystemTime};
+
+#[derive(Copy, Clone)]
+pub enum LineMode {
+    Solid,
+    Dashed,
+}
+
+#[derive(Copy, Clone)]
+pub enum LineConnectivity {
+    Segment,
+    Strip,
+}
+
+#[derive(Clone)]
+pub enum DrawParams<'a> {
+    Rectangle(&'a Rect),
+    Line(&'a Vec<f32>, LineMode, LineConnectivity),
+}
+
+pub trait Drawable<'a> {
+    fn get_draw_params(&'a self) -> DrawParams<'a>;
+}
+
+pub struct Renderer {
+    /// The shader program that will be used to draw sprites
+    program_draw: Program,
+
+    /// The projection matrix used to render the network orthographically
+    projection: Matrix4<f32>,
+
+    /// The VAO that contains vertex attribute descriptions for sprite
+    /// rendering
+    vao: u32,
+
+    /// The VBO that contains the vertex data necessary for rendering
+    /// rectangular sprites
+    vbo_rect: u32,
+
+    /// The VBO that will be dynamically updated with vertex data
+    /// for rendering lines
+    vbo_line: u32,
+
+    /// The zoom of the network editor
+    zoom: f32,
+
+    /// The resolution (in pixels) of the network editor
+    size: Vector2<f32>,
+
+    /// An application timer
+    time: SystemTime,
+}
+
+impl Renderer {
+    /// Constructs and returns a new renderer instance.
+    pub fn new(size: Vector2<f32>) -> Renderer {
+        static VERTEX_DATA: [GLfloat; 24] = [
+            // Positions followed by texture coordinates.
+
+            // First triangle
+            0.0, 0.0,   0.0, 1.0, // UL
+            1.0, 0.0,   1.0, 1.0, // UR
+            0.0, 1.0,   0.0, 0.0, // LL
+
+            // Second triangle
+            1.0, 0.0,   1.0, 1.0, // UR
+            1.0, 1.0,   1.0, 0.0, // LR
+            0.0, 1.0,   0.0, 0.0  // LL
+        ];
+
+        static DRAW_VS_SRC: &'static str = "
+        #version 430
+
+        layout(location = 0) in vec2 position;
+        layout(location = 1) in vec2 texcoord;
+
+        layout (location = 0) out vec2 vs_texcoord;
+
+        uniform mat4 u_model_matrix;
+        uniform mat4 u_projection_matrix;
+
+        void main()
+        {
+            vs_texcoord = texcoord;
+
+            gl_Position = u_projection_matrix * u_model_matrix * vec4(position, 0.0, 1.0);
+        }";
+
+        static DRAW_FS_SRC: &'static str = "
+        #version 430
+
+        uniform float u_time;
+        uniform vec4 u_draw_color = vec4(1.0);
+        uniform uint u_draw_mode = 0;
+
+        layout(binding = 0) uniform sampler2D u_color_map;
+        layout(binding = 1) uniform sampler2D u_alpha_map;
+        uniform bool u_use_color_map;
+        uniform bool u_use_alpha_map;
+
+        layout (location = 0) in vec2 vs_texcoord;
+
+        layout (location = 0) out vec4 o_color;
+
+        const uint DRAW_MODE_RECTANGLES = 0;
+        const uint DRAW_MODE_LINES_SOLID = 1;
+        const uint DRAW_MODE_LINES_DASHED = 2;
+
+        void main()
+        {
+            vec2 uv = vs_texcoord;
+
+            float alpha = u_draw_color.a;;
+            if (u_draw_mode == DRAW_MODE_LINES_DASHED)
+            {
+                const float stripes = 10.0;
+                //alpha = max(step(0.5, fract(uv.s * stripes - u_time)), 0.25);
+            }
+
+            // the alpha map overrides the default alpha
+            if (u_use_alpha_map)
+            {
+                alpha = texture(u_alpha_map, uv).r;
+            }
+
+            if (u_use_color_map)
+            {
+                uv.t = 1.0 - uv.t;
+                vec4 color = texture(u_color_map, uv);
+                color.a *= alpha;
+                o_color = color;
+            }
+            else
+            {
+                o_color = vec4(u_draw_color.rgb, alpha);
+            }
+        }";
+
+        // Compile the shader program.
+        let program_draw = Program::new(DRAW_VS_SRC.to_string(), DRAW_FS_SRC.to_string()).unwrap();
+
+        // Setup buffers.
+        let mut vao = 0;
+        let mut vbo_rect = 0;
+        let mut vbo_line = 0;
+
+        unsafe {
+            // Enable alpha blending.
+            gl::Enable(gl::BLEND);
+            gl::BlendFunc(gl::SRC_ALPHA, gl::ONE_MINUS_SRC_ALPHA);
+
+            // Create the VBO for rendering rectangles.
+            let vbo_rect_size = (VERTEX_DATA.len() * mem::size_of::<GLfloat>()) as GLsizeiptr;
+            gl::CreateBuffers(1, &mut vbo_rect);
+            gl::NamedBufferData(
+                vbo_rect,
+                vbo_rect_size,
+                mem::transmute(&VERTEX_DATA[0]),
+                gl::STATIC_DRAW,
+            );
+
+            // Create the VBO for rendering lines.
+            let vbo_line_size = (1000 * mem::size_of::<GLfloat>()) as GLsizeiptr;
+            gl::CreateBuffers(1, &mut vbo_line);
+            gl::NamedBufferStorage(
+                vbo_line,
+                vbo_line_size,
+                ptr::null(),
+                gl::DYNAMIC_STORAGE_BIT,
+            );
+
+            // This is not strictly necessary, but we do it for completeness sake.
+            let num_pos_components: i32 = 2;
+            let num_tex_components: i32 = 2;
+            let pos_attr =
+                gl::GetAttribLocation(program_draw.id, CString::new("position").unwrap().as_ptr());
+            let tex_attr =
+                gl::GetAttribLocation(program_draw.id, CString::new("texcoord").unwrap().as_ptr());
+            let tex_offset = (num_pos_components as usize * mem::size_of::<GLfloat>()) as GLuint;
+
+            // Create the VAO and setup vertex attributes.
+            gl::CreateVertexArrays(1, &mut vao);
+
+            // Position attribute.
+            gl::EnableVertexArrayAttrib(vao, pos_attr as GLuint);
+            gl::VertexArrayAttribFormat(
+                vao,
+                pos_attr as GLuint,
+                num_pos_components,
+                gl::FLOAT,
+                gl::FALSE as GLboolean,
+                0,
+            );
+            gl::VertexArrayAttribBinding(vao, pos_attr as GLuint, 0);
+
+            // Texture coordinates attribute.
+            gl::EnableVertexArrayAttrib(vao, tex_attr as GLuint);
+            gl::VertexArrayAttribFormat(
+                vao,
+                tex_attr as GLuint,
+                num_tex_components,
+                gl::FLOAT,
+                gl::FALSE as GLboolean,
+                tex_offset,
+            );
+            gl::VertexArrayAttribBinding(vao, tex_attr as GLuint, 0);
+
+            // Associate the VBO with bind point 0.
+            gl::VertexArrayVertexBuffer(
+                vao,
+                0,
+                vbo_rect,
+                0,
+                ((num_pos_components + num_tex_components) as usize * mem::size_of::<GLfloat>()) as i32,
+            );
+        }
+
+        let mut renderer = Renderer {
+            program_draw,
+            projection: Matrix4::zero(),
+            vao,
+            vbo_rect,
+            vbo_line,
+            zoom: 1.0,
+            size,
+            time: SystemTime::now(),
+        };
+        renderer.zoom(1.0);
+        renderer
+    }
+
+    /// Returns the renderer's current projection matrix.
+    pub fn get_projection(&self) -> &Matrix4<f32> {
+        &self.projection
+    }
+
+    /// Returns the internal size (width, height) of the render region.
+    pub fn get_size(&self) -> &Vector2<f32> {
+        &self.size
+    }
+
+    /// Zooms the network in or out by modifying the underlying
+    /// projection matrix. If `zoom` is `1.0`, this is
+    /// effectively the "home" position.
+    pub fn zoom(&mut self, zoom: f32) {
+        self.zoom = zoom;
+        self.rebuild_projection_matrix();
+    }
+
+    /// Resizes the network.
+    pub fn resize(&mut self, resolution: &Vector2<f32>) {
+        self.size = *resolution;
+        self.rebuild_projection_matrix();
+    }
+
+    /// Rebuild the projection matrix:
+    /// L, R, B, T, N, F
+    fn rebuild_projection_matrix(&mut self) {
+        self.projection = cgmath::ortho(
+            -(self.size.x * 0.5) * self.zoom,
+            (self.size.x * 0.5) * self.zoom,
+            (self.size.y * 0.5) * self.zoom,
+            -(self.size.y * 0.5) * self.zoom,
+            -1.0,
+            1.0,
+        );
+
+        // Set the uniform.
+        self.program_draw
+            .uniform_matrix_4f("u_projection_matrix", &self.projection);
+    }
+
+    /// Draws a primitive.
+    pub fn draw(
+        &self,
+        params: DrawParams,
+        color: &Color,
+        color_map: Option<&Texture>,
+        alpha_map: Option<&Texture>,
+    ) {
+        self.program_draw.bind();
+
+        let mut model = Matrix4::identity();
+        if let DrawParams::Rectangle(bounds) = params {
+            model = *bounds.get_model_matrix();
+        }
+
+        // Set shared uniforms.
+        self.program_draw
+            .uniform_matrix_4f("u_model_matrix", &model);
+        self.program_draw
+            .uniform_4f("u_draw_color", &(*color).into());
+        self.program_draw
+            .uniform_1f("u_time", self.get_elapsed_seconds());
+
+        // Bind the color map, if available.
+        if let Some(color_map) = color_map {
+            self.program_draw.uniform_1i("u_use_color_map", true as i32);
+            color_map.bind(0);
+        } else {
+            self.program_draw
+                .uniform_1i("u_use_color_map", false as i32);
+        }
+
+        // Bind the alpha map, if available.
+        if let Some(alpha_map) = alpha_map {
+            self.program_draw.uniform_1i("u_use_alpha_map", true as i32);
+            alpha_map.bind(1);
+        } else {
+            self.program_draw
+                .uniform_1i("u_use_alpha_map", false as i32);
+        }
+
+        // Issue draw call.
+        match params {
+            DrawParams::Rectangle(_) => {
+                self.program_draw.uniform_1ui("u_draw_mode", 0);
+                self.draw_rect_inner();
+            }
+            DrawParams::Line(data, mode, connectivity) => {
+                self.program_draw
+                    .uniform_1ui("u_draw_mode", mode as u32 + 1);
+                self.draw_line_inner(&data, connectivity);
+            }
+        }
+
+        self.program_draw.unbind();
+    }
+
+    /// Draws a rectangle.
+    pub fn draw_rect_inner(&self) {
+        unsafe {
+            gl::VertexArrayVertexBuffer(
+                self.vao,
+                0,
+                self.vbo_rect,
+                0,
+                (4 * mem::size_of::<GLfloat>()) as i32,
+            );
+
+            gl::BindVertexArray(self.vao);
+            gl::DrawArrays(gl::TRIANGLES, 0, 6);
+        }
+    }
+
+    /// Draws a line (or polyline segment).
+    pub fn draw_line_inner(&self, data: &Vec<f32>, connectivity: LineConnectivity) {
+        unsafe {
+            // Upload the vertex data.
+            let data_size = (data.len() * mem::size_of::<GLfloat>()) as GLsizeiptr;
+            gl::NamedBufferSubData(self.vbo_line, 0, data_size, data.as_ptr() as *const c_void);
+
+            gl::VertexArrayVertexBuffer(
+                self.vao,
+                0,
+                self.vbo_line,
+                0,
+                (4 * mem::size_of::<GLfloat>()) as i32,
+            );
+
+            let primitive = match connectivity {
+                LineConnectivity::Segment => gl::LINES,
+                LineConnectivity::Strip => gl::LINE_STRIP,
+            };
+
+            gl::BindVertexArray(self.vao);
+            gl::DrawArrays(primitive, 0, (data.len() / 4) as i32);
+        }
+    }
+
+    /// Returns the number of seconds that have elapsed since the program
+    /// was launched.
+    fn get_elapsed_seconds(&self) -> f32 {
+        let elapsed = self.time.elapsed().unwrap();
+        let milliseconds = elapsed.as_secs() * 1000 + elapsed.subsec_nanos() as u64 / 1_000_000;
+
+        (milliseconds as f32) / 1000.0
+    }
+}
+
+impl Drop for Renderer {
+    fn drop(&mut self) {
+        unsafe {
+            gl::DeleteBuffers(1, &self.vbo_rect);
+            gl::DeleteBuffers(1, &self.vbo_line);
+            gl::DeleteVertexArrays(1, &self.vao);
+        }
+    }
+}
+```
+
+### src/shader_builder.rs
+```
+use network::Network;
+use operator::{DomainType, Op, OpFamily, PrimitiveType};
+use program::Program;
+
+use uuid::Uuid;
+
+pub struct ShaderBuilder {
+    shader_code: String,
+}
+
+impl ShaderBuilder {
+    pub fn new() -> ShaderBuilder {
+        ShaderBuilder {
+            shader_code: String::new(),
+        }
+    }
+
+    /// Given a list of op indices in the proper post-order, builds
+    /// and returns the appropriate shader code.
+    pub fn build_sources(&mut self, network: &Network, indices: Vec<usize>) -> Option<Program> {
+        static HEADER: &str = "
+        #version 430
+
+        layout (location = 0) in vec2 vs_texcoord;
+
+        layout (location = 0) out vec4 o_color;
+
+        uniform vec3 u_camera_position;
+        uniform vec3 u_camera_front;
+        uniform uint u_shading;
+        uniform float u_time;
+
+        // The SSBO that will contain a parameter vector for each op in
+        // the graph. Note that according to the spec, there can only be
+        // one array of variable size per SSBO.
+        layout (std430, binding = 0) buffer params_block
+        {
+            vec4 params[];
+        };
+
+        const uint MAX_STEPS = 256u;
+        const float MAX_TRACE_DISTANCE = 64.0;
+        const float MIN_HIT_DISTANCE = 0.001;
+
+        struct ray
+        {
+            vec3 o;
+            vec3 d;
+        };
+
+        struct result
+        {
+            float id;
+            float total_distance;
+            int total_steps;
+        };
+
+        mat3 lookat(in vec3 t, in vec3 p)
+        {
+            vec3 k = normalize(t - p);
+            vec3 i = cross(k, vec3(0.0, 1.0, 0.0));
+            vec3 j = cross(i, k);
+            return mat3(i, j, k);
+        }
+
+        vec3 domain_twist(in vec3 p, float t)
+        {
+            float c = cos(t * p.y);
+            float s = sin(t * p.y);
+            mat2  m = mat2(c, -s, s, c);
+            vec3  q = vec3(m * p.xz, p.y);
+            return q;
+        }
+
+        vec3 domain_bend(in vec3 p, float t)
+        {
+            float c = cos(t * p.y);
+            float s = sin(t * p.y);
+            mat2 m = mat2(c, -s, s, c);
+            vec3 q = vec3(m * p.xy, p.z);
+            return q;
+        }
+
+        float op_union(float a, float b)
+        {
+            return min(a, b);
+        }
+
+        float op_subtract(float a, float b)
+        {
+            return max(-a, b);
+        }
+
+        float op_intersect(float a, float b)
+        {
+            return max(a, b);
+        }
+
+        float op_smooth_min(float a, float b, float k)
+        {
+            float h = clamp(0.5 + 0.5 * (b - a) / k, 0.0, 1.0);
+            return mix(b, a, h) - k * h * (1.0 - h);
+        }
+
+        float sdf_sphere(in vec3 p, in vec3 center, float radius)
+        {
+            return length(center - p) - radius;
+        }
+
+        float sdf_box(in vec3 p, in vec3 b)
+        {
+          vec3 d = abs(p) - b;
+          return min(max(d.x, max(d.y, d.z)), 0.0) + length(max(d, 0.0));
+        }
+
+        float sdf_plane(in vec3 p, in float h)
+        {
+            return p.y - h;
+        }
+
+        float sdf_torus(in vec3 p, in vec2 t)
+        {
+            vec2 d = vec2(length(p.xz)- t.x, p.y);
+            return length(d) - t.y;
+        }
+
+        vec2 map(in vec3 p)
+        {
+            // start of generated code
+        ";
+
+        static FOOTER: &str = "
+        }
+
+        vec3 calculate_normal(in vec3 p)
+        {
+            const vec3 e = vec3(0.001, 0.0, 0.0);
+            vec3 n = vec3(map(p + e.xyy).y - map(p - e.xyy).y,	// Gradient x
+                          map(p + e.yxy).y - map(p - e.yxy).y,	// Gradient y
+                          map(p + e.yyx).y - map(p - e.yyx).y); // Gradient z
+
+            return normalize(n);
+        }
+
+        float ambient_occlusion(in vec3 p, in vec3 n)
+        {
+            const float attenuation = 0.5;
+            float ao;
+            float accum = 0.0;
+            float scale = 1.0;
+            for(int step = 0; step < 5; step++)
+            {
+                float hr = 0.01 + 0.02 * float(step * step);
+                vec3 aopos = n * hr + p;
+
+                float dist = map(aopos).y;
+                ao = -(dist - hr);
+                accum += ao * scale;
+                scale *= attenuation;
+            }
+            ao = 1.0 - clamp(accum, 0.0, 1.0);
+
+            return ao;
+        }
+
+        result raymarch(in ray r)
+        {
+            result res = result(-1.0, 0.0, 0);
+            for (int i = 0; i < MAX_STEPS; ++i)
+            {
+                vec3 p = r.o + r.d * res.total_distance;
+                vec2 hit_info = map(p);
+                float hit_id = hit_info.x;
+                float hit_dist = hit_info.y;
+                res.total_distance += hit_dist;
+
+                if (hit_dist < MIN_HIT_DISTANCE)
+                {
+                    res.id = hit_id;
+                    break;
+                }
+
+                if(res.total_distance > MAX_TRACE_DISTANCE)
+                {
+                    res.total_distance = 0.0;
+                    break;
+                }
+
+                res.total_steps++;
+            }
+            return res;
+        }
+
+        const uint SHADING_DEPTH = 0;
+        const uint SHADING_STEPS = 1;
+        const uint SHADING_AMBIENT_OCCLUSION = 2;
+        const uint SHADING_NORMALS = 3;
+        const uint SHADING_DIFFUSE = 4;
+
+        vec3 shading(in ray r, in result res)
+        {
+            vec3 hit = r.o + r.d * res.total_distance;
+            if (u_shading == SHADING_DEPTH)
+            {
+                float depth = hit.z / MAX_TRACE_DISTANCE;
+                return vec3(pow(depth, 0.5));
+            }
+            else if (u_shading == SHADING_STEPS)
+            {
+                float pct = float(res.total_steps) / MAX_STEPS;
+                const vec3 c_a = vec3(0.0, 0.0, 1.0);
+                const vec3 c_b = vec3(0.0, 1.0, 1.0);
+                const vec3 c_c = vec3(1.0, 1.0, 0.0);
+                const vec3 c_d = vec3(1.0, 0.0, 0.0);
+
+                const float a = 0.00;
+                const float b = 0.33;
+                const float c = 0.66;
+                const float d = 1.00;
+
+                vec3 color = mix(c_a, c_b, smoothstep(a, b, pct));
+                color = mix(color, c_c, smoothstep(b, c, pct));
+                color = mix(color, c_d, smoothstep(c, d, pct));
+                return color;
+            }
+            else
+            {
+                // calculate normals
+                vec3 n = calculate_normal(hit);
+                if (u_shading == SHADING_AMBIENT_OCCLUSION)
+                {
+                    float ao = ambient_occlusion(hit, n);
+                    return vec3(pow(ao, 3.0));
+                }
+                else if (u_shading == SHADING_NORMALS)
+                {
+                    return n * 0.5 + 0.5;
+                }
+                else
+                {
+                    const vec3 l = vec3(0.0, 2.0, 3.0);
+                    vec3 to_light = normalize(l - hit);
+                    float d = max(0.0, dot(n, to_light));
+                    float ao = ambient_occlusion(hit, n);
+                    return vec3(d * pow(ao, 3.0));
+                }
+            }
+        }
+
+        ray generate_ray()
+        {
+            // uv-coordinates in the range [-1..1]
+            vec2 uv = vs_texcoord * 2.0 - 1.0;
+
+            const float pi = 3.14159265359;
+            const float fov = 50.0;
+            const float fovx = pi * fov / 360.0;
+            float fovy = fovx * 1.0; // iResolution.y/iResolution.x;
+            float ulen = tan(fovx);
+            float vlen = tan(fovy);
+
+            const vec3 camera_up = vec3(0.0, 1.0, 0.0);
+            vec2 cam_uv = uv;
+            vec3 camera_right = normalize(cross(camera_up, u_camera_front));
+            vec3 pixel = u_camera_position + u_camera_front + camera_right * cam_uv.x * ulen + camera_up * cam_uv.y * vlen;
+
+            vec3 ro = u_camera_position;
+            vec3 rd = normalize(pixel - u_camera_position);
+
+            return ray(ro, rd);
+        }
+
+        void main()
+        {
+            ray r = generate_ray();
+            result res = raymarch(r);
+
+            const vec3 background = vec3(0.0);
+            vec3 color = background;
+            switch(int(res.id))
+            {
+                case 0:
+                    color = shading(r, res);
+                    break;
+                case 1:
+                    // Placeholder
+                    break;
+                case 2:
+                    // Placeholder
+                    break;
+                    // etc...
+                default:
+                    color = background;
+                    break;
+            }
+
+            o_color = vec4(color, 1.0);
+        }";
+
+        // Clear the cached shader code (if there was any).
+        self.shader_code = String::new();
+
+        // Build the `map` function by traversing the graph of ops.
+        for index in indices {
+            if let Some(node) = network.graph.get_node(index) {
+                let mut formatted = match node.data.family {
+                    OpFamily::Domain(domain) => match domain {
+                        // Root operators have no inputs.
+                        DomainType::Root => node.data.get_code(None, None),
+
+                        // All other domain operators have a single input.
+                        _ => {
+                            if network.graph.edges[index].inputs.len() < 1 {
+                                return None;
+                            }
+                            let a = network.graph.edges[index].inputs[0];
+                            node.data
+                                .get_code(Some(&network.graph.get_node(a).unwrap().data.name), None)
+                        }
+                    },
+
+                    OpFamily::Primitive(primitive) => match primitive {
+                        // All generators have a single input, corresponding to
+                        // their (potentially transformed) root.
+                        PrimitiveType::Sphere
+                        | PrimitiveType::Box
+                        | PrimitiveType::Plane
+                        | PrimitiveType::Torus => {
+                            if network.graph.edges[index].inputs.len() < 1 {
+                                return None;
+                            }
+                            let a = network.graph.edges[index].inputs[0];
+                            node.data
+                                .get_code(Some(&network.graph.get_node(a).unwrap().data.name), None)
+                        }
+
+                        // All combinators have two inputs.
+                        PrimitiveType::Union
+                        | PrimitiveType::Subtraction
+                        | PrimitiveType::Intersection
+                        | PrimitiveType::SmoothMinimum => {
+                            // If this operator doesn't have at least 2 inputs,
+                            // then we exit early, since this isn't a valid
+                            // shader graph.
+                            if network.graph.edges[index].inputs.len() < 2 {
+                                return None;
+                            }
+
+                            let a = network.graph.edges[index].inputs[0];
+                            let b = network.graph.edges[index].inputs[1];
+                            node.data.get_code(
+                                Some(&network.graph.get_node(a).unwrap().data.name),
+                                Some(&network.graph.get_node(b).unwrap().data.name),
+                            )
+                        }
+
+                        // The render operator only has a single input.
+                        PrimitiveType::Render => {
+                            // If this operator doesn't have at least 1 input,
+                            // then we exit early, since this isn't a valid
+                            // shader graph.
+                            if network.graph.edges[index].inputs.len() < 1 {
+                                return None;
+                            }
+
+                            let a = network.graph.edges[index].inputs[0];
+                            let mut code = node.data.get_code(
+                                Some(&network.graph.get_node(a).unwrap().data.name),
+                                None,
+                            );
+
+                            // Add the final `return` in the `map(..)` function.
+                            code.push('\n');
+                            code.push('\t');
+                            code.push_str(&format!("return vec2(0.0, {});", &node.data.name));
+                            code
+                        }
+                    },
+                };
+
+                // Add a tab indent before each new line of shader code and a newline
+                // character after.
+                self.shader_code.push('\t');
+                self.shader_code.push_str(&formatted);
+                self.shader_code.push('\n');
+            }
+        }
+
+        let mut fs_src = String::new();
+        fs_src.push_str(HEADER);
+        fs_src.push_str(&self.shader_code[..]);
+        fs_src.push_str(FOOTER);
+        println!("Final shader code:");
+        println!("{}", self.shader_code);
+
+        let vs_src = "
+        #version 430
+
+        layout(location = 0) in vec2 position;
+        layout(location = 1) in vec2 texcoord;
+        layout (location = 0) out vec2 vs_texcoord;
+
+        uniform mat4 u_model_matrix;
+        uniform mat4 u_projection_matrix;
+
+        void main() {
+            vs_texcoord = texcoord;
+
+            gl_Position = u_projection_matrix * u_model_matrix * vec4(position, 0.0, 1.0);
+        }"
+            .to_string();
+
+        Program::new(vs_src, fs_src)
+    }
+}
+```
+
+### src/texture.rs
+```
+use gl;
+use gl::types::*;
+use image::{self, GenericImage};
+use cgmath::{self, Vector2};
+
+use std::fs::File;
+use std::path::Path;
+use std::os::raw::c_void;
+
+pub struct Texture {
+    pixels: Vec<u8>,
+
+    resolution: Vector2<f32>,
+
+    id: GLuint,
+}
+
+impl Texture {
+    pub fn new(path: &Path) -> Texture {
+        let image = image::open(path).unwrap().to_rgba();
+        let (w, h) = image.dimensions();
+        let pixels: Vec<u8> = image.into_raw();
+
+        let mut id = 0;
+        unsafe {
+            // Create the texture and set parameters.
+            gl::CreateTextures(gl::TEXTURE_2D, 1, &mut id);
+            gl::TextureParameteri(id, gl::TEXTURE_MIN_FILTER, gl::LINEAR_MIPMAP_LINEAR as i32);
+            gl::TextureParameteri(id, gl::TEXTURE_MAG_FILTER, gl::LINEAR as i32);
+            gl::TextureParameteri(id, gl::TEXTURE_WRAP_S, gl::CLAMP_TO_EDGE as i32);
+            gl::TextureParameteri(id, gl::TEXTURE_WRAP_T, gl::CLAMP_TO_EDGE as i32);
+
+            // Allocate storage.
+            gl::TextureStorage2D(id, 1, gl::RGBA8, w as i32, h as i32);
+            gl::TextureSubImage2D(
+                id,
+                0,
+                0,
+                0,
+                w as i32,
+                h as i32,
+                gl::RGBA,
+                gl::UNSIGNED_BYTE,
+                pixels.as_ptr() as *const c_void,
+            );
+        }
+
+        let tex = Texture {
+            pixels,
+            resolution: Vector2::new(w as f32, h as f32),
+            id,
+        };
+        tex.generate_mip_maps();
+        tex
+    }
+
+    pub fn bind(&self, unit: u32) {
+        unsafe {
+            gl::BindTextureUnit(unit, self.id);
+        }
+    }
+
+    pub fn unbind(&self, unit: u32) {
+        unsafe {
+            gl::BindTextureUnit(unit, 0);
+        }
+    }
+
+    pub fn generate_mip_maps(&self) {
+        unsafe {
+            gl::GenerateTextureMipmap(self.id);
+        }
+    }
+}
+```

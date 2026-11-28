@@ -1,0 +1,975 @@
+NeRF: A Volume Rendering Perspective Overview NeRF implicitly represents a 3D scene with a multi-layer perceptron (MLP) F:(x,d)→(c,σ) for some position x∈R3, view direction d∈[0...
+
+NeRF: A Volume Rendering Perspective | Yue Yu
+Skip to main content
+NeRF: A Volume Rendering Perspective
+August 31, 2022MLGraphicsRenderingNeRF
+NeRF: A Volume Rendering Perspective
+Overview
+NeRF implicitly represents a 3D scene with a multi-layer perceptron (MLP) F:(x,d)→(c,σ)F: (\boldsymbol{x}, \boldsymbol{d}) \rightarrow (\boldsymbol{c}, \sigma)F:(x,d)→(c,σ) for some position x∈R3\boldsymbol{x} \in \mathbb{R}^3x∈R3, view direction d∈[0,π)×[0,2π)\boldsymbol{d} \in [0, \pi) \times [0, 2\pi)d∈[0,π)×[0,2π), color c\boldsymbol{c}c, and "opacity" σ\sigmaσ. Rendered results are spectacular.
+There have been a number of articles introducing NeRF since its publication in 2020. While most posts mention general methods, few of them elaborate on why the volume rendering procedure
+C(r)=C(z;o,d)=∫znzfT(z)σ(r(z))c(r(z),d) dz, T(z)=exp⁡(−∫znzσ(r(s)) ds) \mathbf{C}(\boldsymbol{r}) = \gray{\mathbf{C}(z; \boldsymbol{o}, \boldsymbol{d}) =} \int_{z_n}^{z_f} T\gray{(z)} \sigma \left( \boldsymbol{r}\gray{(z)} \right) \boldsymbol{c} \left(\boldsymbol{r}\gray{(z)}, \boldsymbol{d} \right) \ dz, \ T(z) = \exp \left(-\int_{z_n}^z \sigma \left(\boldsymbol{r} \gray{(s)} \right) \ ds \right) C(r)=C(z;o,d)=∫zn​zf​​T(z)σ(r(z))c(r(z),d) dz, T(z)=exp(−∫zn​z​σ(r(s)) ds)
+for a ray r=o+zd\boldsymbol{r} = \boldsymbol{o} + z\boldsymbol{d}r=o+zd works and how the equation is reduced to
+C^(r)=C^(z1,z2,…,zN;o,d)=∑i=1NTi(1−e−σiδi)ci, Ti=exp⁡(−∑j=1i−1σjδj) \hat{\mathbf{C}}(\boldsymbol{r}) = \gray{\hat{\mathbf{C}}(z_1, z_2, \ldots, z_N; \boldsymbol{o}, \boldsymbol{d}) =} \sum_{i=1}^{N} T_i \left(1 - e^{-\sigma_i \delta_i} \right) \boldsymbol{c}_i, \ T_i = \exp \left(-\sum_{j=1}^{i-1} \sigma_j \delta_j \right) C^(r)=C^(z1​,z2​,…,zN​;o,d)=i=1∑N​Ti​(1−e−σi​δi​)ci​, Ti​=exp(−j=1∑i−1​σj​δj​)
+via numerical quadrature, let alone exploring its implementation via Monte Carlo method.
+This post delves into the volume rendering aspect of NeRF. The equations will be derived; its implementation will be analyzed.
+Prerequisites
+Having read the NeRF paper
+Ability to solve ordinary differential equations (ODEs)
+Introductory probability theory
+Familiarity with PyTorch and NumPy
+Background
+The rendering formula
+A ray with origin o\boldsymbol{o}o and direction d\boldsymbol{d}d casts to an arbitrary region of bounded space. Assume, for simplicity, that the cross section area AAA is uniform along the ray. Let's focus on a slice of the region with thickness Δz\Delta zΔz.
+Occluding objects are modeled as spherical particles with radius rrr. Let ρ(z;o,d)\rho(z\gray{; \boldsymbol{o}, \boldsymbol{d}})ρ(z;o,d) denote the particle density — number of particles per unit volume — in that orientation. If Δz\Delta zΔz is small enough such that ρ(z)\rho(z)ρ(z) is consistent on the slice, then there are
+A⋅Δz⏟slice volume⋅ρ(z) \underbrace{A \cdot \Delta z}_\text{slice volume} \cdot \rho(z) slice volumeA⋅Δz​​⋅ρ(z)
+particles contained in the slice. When Δz→0\Delta z \rightarrow 0Δz→0, solid particles do not overlap, then a total of
+A⋅Δz⏟slice volume⋅ρ(z)⋅πr2⏟particle area \underbrace{A \cdot \Delta z}_\text{slice volume} \cdot \rho(z) \cdot \underbrace{\pi r^2}_\text{particle area} slice volumeA⋅Δz​​⋅ρ(z)⋅particle areaπr2​​
+area is occluded, which amounts to a portion of AΔz⋅ρ(z)⋅πr2A=πr2ρ(z)Δz\frac{A \Delta z \cdot \rho(z) \cdot \pi r^2}{A} = \pi r^2 \rho(z) \Delta zAAΔz⋅ρ(z)⋅πr2​=πr2ρ(z)Δz of the cross section. Let I(z;o,d)I(z\gray{; \boldsymbol{o}, \boldsymbol{d}})I(z;o,d) denote the light intensity at depth zzz from origin o\boldsymbol{o}o along direction d\boldsymbol{d}d. If a portion of πr2ρ(z)Δz\pi r^2 \rho(z) \Delta zπr2ρ(z)Δz of all rays are occluded, then the intensity at depth z+Δzz + \Delta zz+Δz decreases to
+I(z+Δz)=(1−πr2ρ(z)Δz⏟occluded portion)I(z) I(z + \Delta z) = (1 - \underbrace{\pi r^2 \rho(z) \Delta z}_\text{occluded portion})I(z) I(z+Δz)=(1−occluded portionπr2ρ(z)Δz​​)I(z)
+The difference in intensity is
+ΔI=I(z+Δz)−I(z)=−πr2ρ(z)Δz I(z) \begin{align*} \Delta I &= I(z + \Delta z) - I(z) \\ &= -\pi r^2 \rho(z) \Delta z \ I(z) \end{align*} ΔI​=I(z+Δz)−I(z)=−πr2ρ(z)Δz I(z)​
+Take a step from discrete to continuous, we have
+dI(z)=−πr2ρ(z)⏟σ(z)I(z) dz dI(z) = - \underbrace{\pi r^2 \rho(z)}_{\sigma(z)} I(z) \ dz dI(z)=−σ(z)πr2ρ(z)​​I(z) dz
+Define volume density (or voxel "opacity") σ(z;o,d):=πr2ρ(z;o,d)\sigma(z\gray{; \boldsymbol{o}, \boldsymbol{d}}) := \pi r^2 \rho(z\gray{; \boldsymbol{o}, \boldsymbol{d}})σ(z;o,d):=πr2ρ(z;o,d). This makes sense because the amount of ray reduction depends on both the number of occluding particles and the size of them, then the solution to the ODE
+dI(z)=−σ(z)I(z) dz dI(z) = -\sigma(z) I(z) \ dz dI(z)=−σ(z)I(z) dz
+is
+I(z)=I(z0) e∫z0z−σ(s) ds⏟T(z) I(z) = I(z_0) \ \underbrace{e^{\int_{z_0}^{z} -\sigma(s) \ ds}}_{T(z)} I(z)=I(z0​) T(z)e∫z0​z​−σ(s) ds​​
+Step-by-step solution
+Exchange the terms at both sides of the ODE:
+1I(z) dI(z)=−σ(z) dz \frac{1}{I(z)} \ dI(z) = -\sigma(z) \ dz I(z)1​ dI(z)=−σ(z) dz
+which is a separable DE. Integrate both sides
+∫1I(z) dI(z)=∫−σ(z) dzln⁡I(z)=∫−σ(z) dz+CI(z)=Ce∫−σ(z) dz \begin{align*} \int \frac{1}{I(z)} \ dI(z) &= \int -\sigma(z) \ dz \\ \ln I(z) &= \int -\sigma(z) \ dz + C \\ I(z) &= C e^{\int -\sigma(z) \ dz} \end{align*} ∫I(z)1​ dI(z)lnI(z)I(z)​=∫−σ(z) dz=∫−σ(z) dz+C=Ce∫−σ(z) dz​
+Suppose III takes I(z0)I(z_0)I(z0​) at depth z0z_0z0​, then
+I(z)=I(z0) e∫z0z−σ(s) ds I(z) = I(z_0) \ e^{\int_{z_0}^{z} -\sigma(s) \ ds} I(z)=I(z0​) e∫z0​z​−σ(s) ds
+Define accumulated transmittance T(z):=e∫z0z−σ(s) dsT(z) := e^{\int_{z_0}^{z} -\sigma(s) \ ds}T(z):=e∫z0​z​−σ(s) ds, then I(z)=I(z0)T(z)I(z) = I(z_0)T(z)I(z)=I(z0​)T(z) means the remainning intensity after the rays travels from z0z_0z0​ to zzz. T(z)T(z)T(z) can also be viewed as the cumulative density function (CDF) that a ray does not hit any particles from z0z_0z0​ to zzz. But no color will be observed if a ray passes empty space; radiance is "emitted" only when there is contact between rays and particles. Define
+H(z):=1−T(z) H(z) := 1 - T(z) H(z):=1−T(z)
+as the CDF that a ray hits particles from z0z_0z0​ to zzz, then its probability density function (PDF) is
+phit(z)=−e∫z0z−σ(s) ds⏟T(z) σ(z) p_\text{hit}(z) = -\underbrace{e^{\int_{z_0}^{z} -\sigma(s) \ ds}}_{T(z)} \ \sigma(z) phit​(z)=−T(z)e∫z0​z​−σ(s) ds​​ σ(z)
+CDF to PDF
+Differentiate CDF H(z)H(z)H(z) (w.r.t. zzz) to get phit(z)p_\text{hit}(z)phit​(z)
+phit(z)=dHdz=−dTdz=−ddze∫z0z−σ(s) ds=−e∫z0z−σ(s) ds ddz∫z0z−σ(s) ds=−e∫z0z−σ(s) ds σ(z) \begin{align*} p_\text{hit}(z) &= \frac{dH}{dz} \\ &= -\frac{dT}{dz} \\ &= -\frac{d}{dz} e^{\int_{z_0}^{z} -\sigma(s) \ ds} \\ &= -e^{\int_{z_0}^{z} -\sigma(s) \ ds} \ \frac{d}{dz} \int_{z_0}^{z} -\sigma(s) \ ds \\ &= -e^{\int_{z_0}^{z} -\sigma(s) \ ds} \ \sigma(z) \end{align*} phit​(z)​=dzdH​=−dzdT​=−dzd​e∫z0​z​−σ(s) ds=−e∫z0​z​−σ(s) ds dzd​∫z0​z​−σ(s) ds=−e∫z0​z​−σ(s) ds σ(z)​
+Let a random variable a random variable R\mathbf{R}R denote the emitted radiance, then
+pR(r)= pR(z;o,d):= P[R=c(z)]= phit(z) \begin{align*} p_{\mathbf{R}}\gray{(\boldsymbol{r})} =& \ p_{\mathbf{R}}\gray{(z; \boldsymbol{o}, \boldsymbol{d})} \\ :=& \ P[\mathbf{R} = \boldsymbol{c}\gray{(z)}] \\ =& \ p_\text{hit}\gray{(z)} \end{align*} pR​(r)=:==​ pR​(z;o,d) P[R=c(z)] phit​(z)​
+Hence, the color of a pixel is the expectation of emitted radiance:
+C(r)=C(z;o,d)=E(R)=∫0∞R pR dz=∫0∞c phit dz=∫0∞T(z)σ(z)c(z) dz \begin{align*} \mathbf{C}(\boldsymbol{r}) \gray{= \mathbf{C}(z; \boldsymbol{o}, \boldsymbol{d})} &= \mathbb{E} (\mathbf{R}) \\ &= \int_0^\infty \mathbf{R} \ p_{\mathbf{R}} \ dz \\ &= \int_0^\infty \boldsymbol{c} \ p_\text{hit} \ dz \\ &= \int_0^\infty T(z) \sigma(z) \boldsymbol{c}(z) \ dz \end{align*} C(r)=C(z;o,d)​=E(R)=∫0∞​R pR​ dz=∫0∞​c phit​ dz=∫0∞​T(z)σ(z)c(z) dz​
+concluding the proof.
+Integration bounds
+In practice, c\boldsymbol{c}c, obtained from MLP query, is a function of both position zzz (or coordinate x\boldsymbol{x}x) and view direction d\boldsymbol{d}d. Also different are the integration bounds. A computer does not support an infinite range; the lower and upper bounds of integration are znear=nearz_\text{n\gray{ear}} = \verb|near|znear​=near and zfar=farz_\text{f\gray{ar}} = \verb|far|zfar​=far within the range of floating point representation:
+C(r)=∫nearfarT(z)σ(z)c(z) dz \mathbf{C}(\boldsymbol{r}) = \int_\verb|near|^\verb|far| T(z) \sigma(z) \boldsymbol{c}(z) \ dz C(r)=∫nearfar​T(z)σ(z)c(z) dz
+In NeRF, near=\verb|near| =near= 0. and far=\verb|far| =far= 1. for scaled bounded scenes and front facing scenes after conversion to normalized device coordinates (NDC).
+Numerical quadrature
+We took a step from discrete to continuous to derive the rendering integral. Nevertheless, integration on a continuous domain is not supported by computers. An alternative is numerical quadrature. Sample near<z1<z2<⋯<zN<far\verb|near| \lt z_1 \lt z_2 \lt \cdots \lt z_{N} \lt \verb|far|near<z1​<z2​<⋯<zN​<far along a ray, and define differences between adjacent samples as
+δi:=zi+1−zi ∀i∈{1,…,N−1} \delta_i := z_{i+1} - z_i \ \forall i \in \{1,\ldots,N-1\} δi​:=zi+1​−zi​ ∀i∈{1,…,N−1}
+then the transmittance is approximated by
+Ti:= T(zi)≈ e−∑j=1i−1σjδj \begin{align*} T_i :=&\ T(z_i) \\ \approx&\ e^{-\sum_{j=1}^{i\blue{-1}} \sigma_j \delta_j} \end{align*} Ti​:=≈​ T(zi​) e−∑j=1i−1​σj​δj​​
+where T1=1T_1 = 1T1​=1 and σj=σ(zj;o,d)\sigma_j = \sigma(z_j\gray{; \boldsymbol{o}, \boldsymbol{d}})σj​=σ(zj​;o,d). Meanwhile, differentiation in phit(z)p_\text{hit}(z)phit​(z) is also substituted by discrete difference. That is,
+pi:=phit(zi)=dHdz∣zi≈H(zi+1)−H(zi)=1−T(zi+1)−(1−T(zi))=T(zi)−T(zi+1)=Ti(1−e−σiδi) \begin{align*} p_i := p_\text{hit}(z_i) &= \left. \frac{dH}{dz} \right|_{z_i} \\ &\approx H(z_{i+1}) - H(z_i) \\ &\gray{= 1- T(z_{i+1}) - \left(1- T(z_i)\right)} \\ &= T(z_i) - T(z_{i+1}) \\ &= T_i \left(1 - e^{-\sigma_i \delta_i}\right) \end{align*} pi​:=phit​(zi​)​=dzdH​​zi​​≈H(zi+1​)−H(zi​)=1−T(zi+1​)−(1−T(zi​))=T(zi​)−T(zi+1​)=Ti​(1−e−σi​δi​)​
+Step-by-step solution
+T(zi)−T(zi+1)=T(zi)(1−T(zi+1)T(zi))=T(zi)(1−e−∑j=1iσjδje−∑j=1i−1σjδj)=T(zi)(1−e−∑j=1iσjδj+∑j=1i−1σjδj)=Ti(1−e−σiδi) \begin{align*} T(z_i) - T(z_{i+1}) &= T(z_i) \left(1 - \frac{T(z_{i+1})}{T(z_i)}\right) \\ &= T(z_i) \left( 1 - \frac{e^{-\sum_{j=1}^{\green{i}} \sigma_j \delta_j}}{e^{-\sum_{j=1}^{\blue{i-1}} \sigma_j \delta_j}} \right) \\ &= T(z_i) \left(1 - e^{-\sum_{j=1}^{\green{i}} \sigma_j \delta_j + \sum_{j=1}^{\blue{i-1}} \sigma_j \delta_j}\right) \\ &= T_i \left(1 - e^{-\sigma_{\green{i}} \delta_{\green{i}}}\right) \end{align*} T(zi​)−T(zi+1​)​=T(zi​)(1−T(zi​)T(zi+1​)​)=T(zi​)(1−e−∑j=1i−1​σj​δj​e−∑j=1i​σj​δj​​)=T(zi​)(1−e−∑j=1i​σj​δj​+∑j=1i−1​σj​δj​)=Ti​(1−e−σi​δi​)​
+Hence, the discretized emmitted radiance is
+C^(r)=C^(z;o,d)=E(R)=∫nearfarR pR dz≈∑i=1NciTi(1−e−σiδi) \begin{align*} \hat{\mathbf{C}}(\boldsymbol{r}) \gray{= \hat{\mathbf{C}}(z; \boldsymbol{o}, \boldsymbol{d})} &= \mathbb{E} (\mathbf{R}) \\ &= \int_\verb|near|^\verb|far| \mathbf{R} \ p_{\mathbf{R}} \ dz \\ &\approx \sum_{i=1}^N \boldsymbol{c}_i T_i \left(1 - e^{-\sigma_i \delta_i}\right) \end{align*} C^(r)=C^(z;o,d)​=E(R)=∫nearfar​R pR​ dz≈i=1∑N​ci​Ti​(1−e−σi​δi​)​
+where ci:=c(zi;o,d)\boldsymbol{c}_i := \boldsymbol{c}(z_i\gray{; \boldsymbol{o}, \boldsymbol{d}})ci​:=c(zi​;o,d) is the output RGB upon MLP query at {zi ∣ o,d}\{z_i \ | \ \boldsymbol{o}, \boldsymbol{d}\}{zi​ ∣ o,d}.
+Note that if we denote αi:=1−e−σiδi\alpha_i := 1 - e^{-\sigma_i \delta_i}αi​:=1−e−σi​δi​, then C^(r)=∑i=1NαiTici\hat{\mathbf{C}}(\boldsymbol{r}) = \sum_{i=1}^N \alpha_i T_i \boldsymbol{c}_iC^(r)=∑i=1N​αi​Ti​ci​ resembles classical alpha compositing.
+Alpha compositing
+Consider the case where a foreground object is inserted ahead of the background. Now that a pixel displays a single color, we have to blend the colors of the two. Compositing is applied when there are partially transparent regions within the foreground object, or the foreground object partially covers the background.
+In alpha compositing, a parameter α\alphaα determines the extent to which each object contributes to what is displayed in a pixel. Let α\alphaα denote the opacity (or pixel coverage) of the foreground object, then a pixel showing foreground color cf\boldsymbol{c}_fcf​ over background color cb\boldsymbol{c}_bcb​ is composited as
+c=αcf+(1−α)cb \boldsymbol{c} = \alpha \boldsymbol{c}_f + (1 - \alpha) \boldsymbol{c}_b c=αcf​+(1−α)cb​
+When blending colors of multiple objects, one can adopt a divide-and-conquer approach. Each time, cope with the unregistered object closest to the eye and treat the remaining objects as a single entity. Such a strategy is formulated by
+c=α1c1+(1−α1)(α2c2+(1−α2)(α3c3+(1−α3)(α4c4+(1−α4)(⋯ ))))=α1c1+(1−α1)α2c2 +(1−α1)(1−α2)(α3c3+(1−α3)(α4c4+(1−α4)(⋯ )))=α1c1+(1−α1)α2c2 +(1−α1)(1−α2)α3c3 +(1−α1)(1−α2)(1−α3)(α4c4+(1−α4)(⋯ ))=α1c1+(1−α1)α2c2 +(1−α1)(1−α2)α3c3 +(1−α1)(1−α2)(1−α3)α4c4 +(1−α1)(1−α2)(1−α3)(1−α4)(⋯ )=⋯ \begin{align*} \boldsymbol{c} &= \red{\alpha_1 \boldsymbol{c}_1} + (1 - \red{\alpha_1})\biggl( \blue{\alpha_2 \boldsymbol{c}_2} + \left( 1 - \blue{\alpha_2} \right)\Bigl( \green{\alpha_3 \boldsymbol{c}_3} + \left( 1 - \green{\alpha_3} \right)\bigl( \orange{\alpha_4 \boldsymbol{c}_4} + (1 - \orange{\alpha_4})\left( \cdots \right) \bigr) \Bigr) \biggr) \\ &= \red{\alpha_1 \boldsymbol{c}_1} + (1 - \red{\alpha_1})\blue{\alpha_2 \boldsymbol{c}_2} \\ & \ \ \ \ \ \ \ \ \ \ \ \ \ + (1 - \red{\alpha_1})( 1 - \blue{\alpha_2})\Bigl( \green{\alpha_3 \boldsymbol{c}_3} + \left( 1 - \green{\alpha_3} \right)\bigl( \orange{\alpha_4 \boldsymbol{c}_4} + (1 - \orange{\alpha_4})\left( \cdots \right) \bigr) \Bigr) \\ &= \red{\alpha_1 \boldsymbol{c}_1} + (1 - \red{\alpha_1})\blue{\alpha_2 \boldsymbol{c}_2} \\ & \ \ \ \ \ \ \ \ \ \ \ \ \ + (1 - \red{\alpha_1})(1 - \blue{\alpha_2})\green{\alpha_3 \boldsymbol{c}_3} \\ & \ \ \ \ \ \ \ \ \ \ \ \ \ + (1 - \red{\alpha_1})(1 - \blue{\alpha_2})(1 - \green{\alpha_3})\bigl( \orange{\alpha_4 \boldsymbol{c}_4} + (1 - \orange{\alpha_4})\left( \cdots \right) \bigr) \\ &= \red{\alpha_1 \boldsymbol{c}_1} + (1 - \red{\alpha_1})\blue{\alpha_2 \boldsymbol{c}_2} \\ & \ \ \ \ \ \ \ \ \ \ \ \ \ + (1 - \red{\alpha_1})(1 - \blue{\alpha_2}) \green{\alpha_3 \boldsymbol{c}_3} \\ & \ \ \ \ \ \ \ \ \ \ \ \ \ + (1 - \red{\alpha_1})(1 - \blue{\alpha_2})(1 - \green{\alpha_3})\orange{\alpha_4 \boldsymbol{c}_4} \\ & \ \ \ \ \ \ \ \ \ \ \ \ \ + (1 - \red{\alpha_1})(1 - \blue{\alpha_2})(1 - \green{\alpha_3})(1 - \orange{\alpha_4})\left( \cdots \right) \\ &= \cdots \end{align*} c​=α1​c1​+(1−α1​)(α2​c2​+(1−α2​)(α3​c3​+(1−α3​)(α4​c4​+(1−α4​)(⋯))))=α1​c1​+(1−α1​)α2​c2​ +(1−α1​)(1−α2​)(α3​c3​+(1−α3​)(α4​c4​+(1−α4​)(⋯)))=α1​c1​+(1−α1​)α2​c2​ +(1−α1​)(1−α2​)α3​c3​ +(1−α1​)(1−α2​)(1−α3​)(α4​c4​+(1−α4​)(⋯))=α1​c1​+(1−α1​)α2​c2​ +(1−α1​)(1−α2​)α3​c3​ +(1−α1​)(1−α2​)(1−α3​)α4​c4​ +(1−α1​)(1−α2​)(1−α3​)(1−α4​)(⋯)=⋯​
+which is essentially a tail recursion.
+Alpha compositing in NeRF
+There are NNN samples along each ray in NeRF. Consider the first N−1N - 1N−1 samples as occluding foreground objects with opacity αi\alpha_iαi​ and color ci\boldsymbol{c}_ici​, and the last sample as background, then the blended pixel value is
+C~=α1c1+(1−α1)α2c2 +(1−α1)(1−α2)α3c3 +(1−α1)(1−α2)(1−α3)α4c4 ⋯ +(1−α1)(1−α2)(1−α3)⋯(1−αN−1)cN=∑i=1N(αici∏j=1i−1(1−αj)) \begin{align*} \tilde{\mathbf{C}} &= \alpha_1 \boldsymbol{c}_1 + (1 - \alpha_1) \alpha_2 \boldsymbol{c}_2 \\ & \ \ \ \ \ \ \ \ \ \ \ \ \ + (1 - \alpha_1)(1 - \alpha_2) \alpha_3 \boldsymbol{c}_3 \\ & \ \ \ \ \ \ \ \ \ \ \ \ \ + (1 - \alpha_1)(1 - \alpha_2)(1 - \alpha_3) \alpha_4 \boldsymbol{c}_4 \\ & \ \ \ \ \ \ \ \ \ \ \ \ \ \cdots \\ & \ \ \ \ \ \ \ \ \ \ \ \ \ + (1 - \alpha_1)(1 - \alpha_2)(1 - \alpha_3) \cdots (1 - \alpha_{N-1}) \boldsymbol{c}_N \\ &= \sum_{i=1}^{N} \left(\alpha_i \boldsymbol{c}_i \prod_{j=1}^{i-1} \left(1 - \alpha_j\right)\right) \end{align*} C~​=α1​c1​+(1−α1​)α2​c2​ +(1−α1​)(1−α2​)α3​c3​ +(1−α1​)(1−α2​)(1−α3​)α4​c4​ ⋯ +(1−α1​)(1−α2​)(1−α3​)⋯(1−αN−1​)cN​=i=1∑N​(αi​ci​j=1∏i−1​(1−αj​))​
+where α0=0\alpha_0 = 0α0​=0. Recall C^=∑i=1NαiTici\hat{\mathbf{C}} = \sum_{i=1}^N \alpha_i T_i \boldsymbol{c}_iC^=∑i=1N​αi​Ti​ci​, then it remains to show that ∏j=1i−1(1−αj)=Ti\prod_{j=1}^{i-1} \left(1 - \alpha_j\right) = T_i∏j=1i−1​(1−αj​)=Ti​:
+∏j=1i−1(1−αj)=∏j=1i−1e−σjδj=exp⁡(∑j=1i−1−σjδj)=Ti \begin{align*} \prod_{j=1}^{i-1} \left(1 - \alpha_j\right) &= \prod_{j=1}^{i-1} e^{-\sigma_j \delta_j} \\ &= \exp \left( \sum_{j=1}^{i-1} -\sigma_j \delta_j \right) \\ &= T_i \end{align*} j=1∏i−1​(1−αj​)​=j=1∏i−1​e−σj​δj​=exp(j=1∑i−1​−σj​δj​)=Ti​​
+concluding the proof. This manifests the elegancy of differentiable volume rendering.
+Rewrite wi:=αiTiw_i := \alpha_i T_iwi​:=αi​Ti​, then the expectation of emmitted radiance C(r)=∑i=1Nwici\mathbf{C}(\boldsymbol{r}) = \sum_{i=1}^N w_i \boldsymbol{c}_iC(r)=∑i=1N​wi​ci​ is weighted sum of colors.
+Why (trivially) differentiable?
+Given the above renderer, a coarse training pipeline is
+ground truth C(x,d)→MLP(c,σ)→discrete renderingprediction C^}→MSEL=∥C^−C∥22 \left. \begin{array}{r} \text{ground truth} \ \mathbf{C} \\ (\boldsymbol{x}, \boldsymbol{d}) \xrightarrow{\text{MLP}} (\boldsymbol{c}, \sigma) \xrightarrow{\text{discrete rendering}} \text {prediction} \ \hat{\mathbf{C}} \end{array} \right\} \xrightarrow{\text{MSE}} \mathcal L = \| \hat{\mathbf{C}} - \mathbf{C} \|_{\gray{2}}^2 ground truth C(x,d)MLP​(c,σ)discrete rendering​prediction C^​}MSE​L=∥C^−C∥22​
+If the discrete renderer is differentiable, then we can train the end-to-end model through gradient descent. No suprise, given a (sorted) sequence of random samples t={t1,t2,…,tN}\boldsymbol{t} = \{t_1, t_2, \ldots, t_N\}t={t1​,t2​,…,tN​}, the derivatives are
+dC^dci∣t=Ti(1−e−σiδi)dC^dσi∣t=ci(dTidσi(1−e−σiδi)+Tiddσi(1−e−σiδi))=ci((1−e−σiδi)exp⁡(−∑j=1i−1σjδj)ddσi(−∑j=1i−1σjδj)⏟0+Ti(−e−σiδi)d(−σiδi)dσi)=δiTicie−σiδi \begin{align*} \left. \frac{d \hat{\mathbf{C}}}{d \boldsymbol{c}_i} \right|_{\boldsymbol{t}} &= T_i \left(1 - e^{-\sigma_i \delta_i} \right) \\ \left. \frac{d \hat{\mathbf{C}}}{d \sigma_i} \right|_{\boldsymbol{t}} &= \boldsymbol{c}_i \left( \green{\frac{d T_i}{d \sigma_i}} \blue{\left( 1 - e^{-\sigma_i \delta_i} \right)} + \green{T_i} \blue{\frac{d}{d \sigma_i} \left( 1 - e^{-\sigma_i \delta_i} \right)} \right) \\ &= \mathbf{c}_i \left( \blue{\left( 1 - e^{-\sigma_i \delta_i} \right)} \green{\exp \left(-\sum_{j=1}^{i-1} \sigma_j \delta_j \right)} \underbrace{\green{\frac{d}{d \sigma_i} \left( -\sum_{j=1}^{i-1} \sigma_j \delta_j \right)}}_{0} + \green{T_i} \blue{\left( -e^{-\sigma_i \delta_i} \right) \frac{d(-\sigma_i \delta_i)}{d \sigma_i}} \right) \\ &= \delta_i T_i \boldsymbol{c}_i e^{-\sigma_i \delta_i} \end{align*} dci​dC^​​t​dσi​dC^​​t​​=Ti​(1−e−σi​δi​)=ci​(dσi​dTi​​(1−e−σi​δi​)+Ti​dσi​d​(1−e−σi​δi​))=ci​​(1−e−σi​δi​)exp(−j=1∑i−1​σj​δj​)0dσi​d​(−j=1∑i−1​σj​δj​)​​+Ti​(−e−σi​δi​)dσi​d(−σi​δi​)​​=δi​Ti​ci​e−σi​δi​​
+Once the renderer is differentiable, weights and biases in an MLP can be updated via the chain rule.
+Coarse-to-fine approach
+NeRF jointly optimizes coarse and fine network.
+Analysis
+Whereas NeRF is originally implemented in Tensrorflow, code analysis is based on a faithful reproduction in PyTorch. The repository is organized as
+Let's experiment with the LLFF dataset, which is comprised of front-facing scenes with camera poses. Pertinent directories and files are
+ItemTypeDescription
+configsdirectorycontains per scene configuration (.txt) for the LLFF dataset
+download_example_data.shshell scriptto download datasets
+load_llff.pyPython scriptdata loader of the LLFF dataset
+run_nerf.pyPrthon scriptmain procedures
+run_nerf_helpers.pyPython scriptutility functions
+Modified identation and comments
+Codes in this post deviate slightly from the authentic version. Dataflow and function calls remain intact whereas indentation and comments are modified for the sake of readibility.
+The big picture
+```
+if __name__ == '__main__':
+    torch.set_default_tensor_type('torch.cuda.FloatTensor')
+    train()
+```
+As shown, train(…) in run_nerf.py is the execution entry to the project. The entire training process is
+```
+def train():
+
+    parser = config_parser()
+    args = parser.parse_args()
+
+    # load data
+    K = None
+    if args.dataset_type == 'llff':
+        images, poses, bds, render_poses, i_test = load_llff_data(args.datadir, args.factor,
+                                                                  recenter=True, bd_factor=.75,
+                                                                  spherify=args.spherify)
+        hwf = poses[0,:3,-1]
+        poses = poses[:,:3,:4]
+        print('Loaded llff', images.shape, render_poses.shape, hwf, args.datadir)
+        if not isinstance(i_test, list):
+            i_test = [i_test]
+
+        if args.llffhold > 0:
+            print('Auto LLFF holdout,', args.llffhold)
+            i_test = np.arange(images.shape[0])[ : :args.llffhold]
+
+        i_val = i_test
+        i_train = np.array([i for i in np.arange(int(images.shape[0]))
+                                  if (i not in i_test and i not in i_val)])
+
+        print('DEFINING BOUNDS')
+        if args.no_ndc:
+            near = np.ndarray.min(bds) * .9
+            far = np.ndarray.max(bds) * 1.
+            
+        else:
+            near = 0.
+            far = 1.
+        print('NEAR FAR', near, far)
+
+    elif args.dataset_type == 'blender':
+        images, poses, render_poses, hwf, i_split = load_blender_data(args.datadir, args.half_res, args.testskip)
+        print('Loaded blender', images.shape, render_poses.shape, hwf, args.datadir)
+        i_train, i_val, i_test = i_split
+
+        near = 2.
+        far = 6.
+
+        if args.white_bkgd:
+            images = images[...,:3]*images[...,-1:] + (1.-images[...,-1:])
+        else:
+            images = images[...,:3]
+
+    elif args.dataset_type == 'LINEMOD':
+        images, poses, render_poses, hwf, K, i_split, near, far = load_LINEMOD_data(args.datadir, args.half_res, args.testskip)
+        print(f'Loaded LINEMOD, images shape: {images.shape}, hwf: {hwf}, K: {K}')
+        print(f'[CHECK HERE] near: {near}, far: {far}.')
+        i_train, i_val, i_test = i_split
+
+        if args.white_bkgd:
+            images = images[...,:3]*images[...,-1:] + (1.-images[...,-1:])
+        else:
+            images = images[...,:3]
+
+    elif args.dataset_type == 'deepvoxels':
+
+        images, poses, render_poses, hwf, i_split = load_dv_data(scene=args.shape,
+                                                                 basedir=args.datadir,
+                                                                 testskip=args.testskip)
+
+        print('Loaded deepvoxels', images.shape, render_poses.shape, hwf, args.datadir)
+        i_train, i_val, i_test = i_split
+
+        hemi_R = np.mean(np.linalg.norm(poses[:,:3,-1], axis=-1))
+        near = hemi_R-1.
+        far = hemi_R+1.
+
+    else:
+        print('Unknown dataset type', args.dataset_type, 'exiting')
+        return
+
+    # cast intrinsics to right types
+    H, W, focal = hwf
+    H, W = int(H), int(W)
+    hwf = [H, W, focal]
+
+    if K is None:
+        K = np.array([
+            [focal, 0    , 0.5*W],
+            [0    , focal, 0.5*H],
+            [0    , 0    , 1    ]
+        ])
+
+    if args.render_test:
+        render_poses = np.array(poses[i_test])
+
+    # create log dir and copy the config file
+    basedir = args.basedir
+    expname = args.expname
+    os.makedirs(os.path.join(basedir, expname), exist_ok=True)
+    f = os.path.join(basedir, expname, 'args.txt')
+    with open(f, 'w') as file:
+        for arg in sorted(vars(args)):
+            attr = getattr(args, arg)
+            file.write('{} = {}\n'.format(arg, attr))
+    if args.config is not None:
+        f = os.path.join(basedir, expname, 'config.txt')
+        with open(f, 'w') as file:
+            file.write(open(args.config, 'r').read())
+
+    # create nerf model
+    render_kwargs_train, render_kwargs_test, start, grad_vars, optimizer = create_nerf(args)
+    global_step = start
+
+    bds_dict = {'near': near,
+                'far' : far}
+    render_kwargs_train.update(bds_dict)
+    render_kwargs_test.update(bds_dict)
+
+    # move test data to GPU
+    render_poses = torch.Tensor(render_poses).to(device)
+
+    # short circuit if rendering from trained model
+    if args.render_only:
+        print('RENDER ONLY')
+        with torch.no_grad():
+            if args.render_test:
+                images = images[i_test] # switch to test poses
+            else:
+                # default is smoother render_poses path
+                images = None
+
+            testsavedir = os.path.join(basedir, expname, 'renderonly_{}_{:06d}'.format('test' if args.render_test else 'path', start))
+            os.makedirs(testsavedir, exist_ok=True)
+            print('test poses shape', render_poses.shape)
+
+            rgbs, _ = render_path(render_poses, hwf, K, args.chunk, render_kwargs_test, gt_imgs=images, savedir=testsavedir, render_factor=args.render_factor)
+            print('Done rendering', testsavedir)
+            imageio.mimwrite(os.path.join(testsavedir, 'video.mp4'), to8b(rgbs), fps=30, quality=8)
+
+            return
+
+    # prepare raybatch tensor if batching random rays
+    N_rand = args.N_rand
+    use_batching = not args.no_batching
+    if use_batching:
+        # random ray batching
+        print('get rays')
+        rays = np.stack([get_rays_np(H, W, K, p) for p in poses[:,:3,:4]], 0) # (num_img, ro+rd, H, W, 3)
+        print('done, concats')
+        rays_rgb = np.concatenate([rays, images[:,None]], 1) # (num_img, ro+rd+rgb, H, W, 3)
+        rays_rgb = np.transpose(rays_rgb, [0,2,3,1,4]) # (num_img, H, W, ro+rd+rgb, 3)
+        rays_rgb = np.stack([rays_rgb[i] for i in i_train], 0) # training set only
+        rays_rgb = np.reshape(rays_rgb, [-1,3,3]) # ((num_img-1)*H*W, ro+rd+rgb, 3)
+        rays_rgb = rays_rgb.astype(np.float32)
+        print('shuffle rays')
+        np.random.shuffle(rays_rgb)
+
+        print('done')
+        i_batch = 0
+
+    # move training data to GPU
+    if use_batching:
+        images = torch.Tensor(images).to(device)
+    poses = torch.Tensor(poses).to(device)
+    if use_batching:
+        rays_rgb = torch.Tensor(rays_rgb).to(device)
+
+
+    N_iters = 200000 + 1
+    print('Begin')
+    print('TRAIN views are', i_train)
+    print('TEST views are', i_test)
+    print('VAL views are', i_val)
+
+    # summary writers
+    #writer = SummaryWriter(os.path.join(basedir, 'summaries', expname))
+    
+    start = start + 1
+    for i in trange(start, N_iters):
+        time0 = time.time()
+
+        # sample random ray batch
+        if use_batching:
+            # random over all images
+            batch = rays_rgb[i_batch:i_batch+N_rand] # (B, 2+1, 3*?)
+            batch = torch.transpose(batch, 0, 1)
+            batch_rays, target_s = batch[:2], batch[2]
+
+            i_batch += N_rand
+            if i_batch >= rays_rgb.shape[0]:
+                print("Shuffle data after an epoch!")
+                rand_idx = torch.randperm(rays_rgb.shape[0])
+                rays_rgb = rays_rgb[rand_idx]
+                i_batch = 0
+        else:
+            # random from one image
+            img_i = np.random.choice(i_train)
+            target = images[img_i]
+            target = torch.Tensor(target).to(device)
+            pose = poses[img_i, :3,:4]
+
+            if N_rand is not None:
+                rays_o, rays_d = get_rays(H, W, K, torch.Tensor(pose))  # (H, W, 3), (H, W, 3)
+
+                if i < args.precrop_iters:
+                    dH = int(H//2 * args.precrop_frac)
+                    dW = int(W//2 * args.precrop_frac)
+                    coords = torch.stack(
+                        torch.meshgrid(
+                            torch.linspace(H//2 - dH, H//2 + dH - 1, 2*dH), 
+                            torch.linspace(W//2 - dW, W//2 + dW - 1, 2*dW)
+                        ), -1)
+                    if i == start:
+                        print(f"[Config] Center cropping of size {2*dH} x {2*dW} is enabled until iter {args.precrop_iters}")                
+                else:
+                    coords = torch.stack(torch.meshgrid(torch.linspace(0, H-1, H), torch.linspace(0, W-1, W)), -1)  # (H, W, 2)
+
+                coords = torch.reshape(coords, [-1,2])  # (H * W, 2)
+                select_inds = np.random.choice(coords.shape[0], size=[N_rand], replace=False)  # (N_rand,)
+                select_coords = coords[select_inds].long()  # (N_rand, 2)
+                rays_o = rays_o[select_coords[:, 0], select_coords[:, 1]]  # (N_rand, 3)
+                rays_d = rays_d[select_coords[:, 0], select_coords[:, 1]]  # (N_rand, 3)
+                batch_rays = torch.stack([rays_o, rays_d], 0)
+                target_s = target[select_coords[:, 0], select_coords[:, 1]]  # (N_rand, 3)
+
+        #####  core optimization loop  #####
+        rgb, disp, acc, extras = render(H, W, K, chunk=args.chunk, rays=batch_rays,
+                                                 verbose=i < 10, retraw=True,
+                                                 **render_kwargs_train)
+        optimizer.zero_grad()
+        img_loss = img2mse(rgb, target_s)
+        trans = extras['raw'][...,-1]
+        loss = img_loss
+        psnr = mse2psnr(img_loss)
+
+        if 'rgb0' in extras:
+            img_loss0 = img2mse(extras['rgb0'], target_s)
+            loss = loss + img_loss0
+            psnr0 = mse2psnr(img_loss0)
+
+        loss.backward()
+        optimizer.step()
+
+        # NOTE: IMPORTANT!
+        ###   update learning rate   ###
+        decay_rate = 0.1
+        decay_steps = args.lrate_decay * 1000
+        new_lrate = args.lrate * (decay_rate ** (global_step / decay_steps))
+        for param_group in optimizer.param_groups:
+            param_group['lr'] = new_lrate
+        ################################
+
+        dt = time.time()-time0
+        # print(f"Step: {global_step}, Loss: {loss}, Time: {dt}")
+        #####           end            #####
+
+        # rest is logging
+        if i%args.i_weights==0:
+            path = os.path.join(basedir, expname, '{:06d}.tar'.format(i))
+            torch.save({
+                'global_step': global_step,
+                'network_fn_state_dict': render_kwargs_train['network_fn'].state_dict(),
+                'network_fine_state_dict': render_kwargs_train['network_fine'].state_dict(),
+                'optimizer_state_dict': optimizer.state_dict(),
+            }, path)
+            print('Saved checkpoints at', path)
+
+        if i%args.i_video==0 and i > 0:
+            # test mode
+            with torch.no_grad():
+                rgbs, disps = render_path(render_poses, hwf, K, args.chunk, render_kwargs_test)
+            print('Done, saving', rgbs.shape, disps.shape)
+            moviebase = os.path.join(basedir, expname, '{}_spiral_{:06d}_'.format(expname, i))
+            imageio.mimwrite(moviebase + 'rgb.mp4', to8b(rgbs), fps=30, quality=8)
+            imageio.mimwrite(moviebase + 'disp.mp4', to8b(disps / np.max(disps)), fps=30, quality=8)
+
+            #if args.use_viewdirs:
+            #    render_kwargs_test['c2w_staticcam'] = render_poses[0][:3,:4]
+            #    with torch.no_grad():
+            #        rgbs_still, _ = render_path(render_poses, hwf, args.chunk, render_kwargs_test)
+            #    render_kwargs_test['c2w_staticcam'] = None
+            #    imageio.mimwrite(moviebase + 'rgb_still.mp4', to8b(rgbs_still), fps=30, quality=8)
+
+        if i%args.i_testset==0 and i > 0:
+            testsavedir = os.path.join(basedir, expname, 'testset_{:06d}'.format(i))
+            os.makedirs(testsavedir, exist_ok=True)
+            print('test poses shape', poses[i_test].shape)
+            with torch.no_grad():
+                render_path(torch.Tensor(poses[i_test]).to(device), hwf, K, args.chunk, render_kwargs_test, gt_imgs=images[i_test], savedir=testsavedir)
+            print('Saved test set')
+
+        if i%args.i_print==0:
+            tqdm.write(f"[TRAIN] Iter: {i} Loss: {loss.item()}  PSNR: {psnr.item()}")
+        """
+            print(expname, i, psnr.numpy(), loss.numpy(), global_step.numpy())
+            print('iter time {:.05f}'.format(dt))
+
+            with tf.contrib.summary.record_summaries_every_n_global_steps(args.i_print):
+                tf.contrib.summary.scalar('loss', loss)
+                tf.contrib.summary.scalar('psnr', psnr)
+                tf.contrib.summary.histogram('tran', trans)
+                if args.N_importance > 0:
+                    tf.contrib.summary.scalar('psnr0', psnr0)
+
+            if i%args.i_img==0:
+
+                # log a rendered validation view to Tensorboard
+                img_i=np.random.choice(i_val)
+                target = images[img_i]
+                pose = poses[img_i, :3,:4]
+                with torch.no_grad():
+                    rgb, disp, acc, extras = render(H, W, focal, chunk=args.chunk, c2w=pose,
+                                                        **render_kwargs_test)
+                psnr = mse2psnr(img2mse(rgb, target))
+
+                with tf.contrib.summary.record_summaries_every_n_global_steps(args.i_img):
+
+                    tf.contrib.summary.image('rgb', to8b(rgb)[tf.newaxis])
+                    tf.contrib.summary.image('disp', disp[tf.newaxis,...,tf.newaxis])
+                    tf.contrib.summary.image('acc', acc[tf.newaxis,...,tf.newaxis])
+
+                    tf.contrib.summary.scalar('psnr_holdout', psnr)
+                    tf.contrib.summary.image('rgb_holdout', target[tf.newaxis])
+
+                if args.N_importance > 0:
+
+                    with tf.contrib.summary.record_summaries_every_n_global_steps(args.i_img):
+                        tf.contrib.summary.image('rgb0', to8b(extras['rgb0'])[tf.newaxis])
+                        tf.contrib.summary.image('disp0', extras['disp0'][tf.newaxis,...,tf.newaxis])
+                        tf.contrib.summary.image('z_std', extras['z_std'][tf.newaxis,...,tf.newaxis])
+        """
+        global_step += 1
+```
+which is lengthy and potentially obscure. Function calls are visualized below, which assists comprehension of the rendering pipeline.
+As captioned, let's concentrate on implementating volume rendering in this post. Our journey starts from rays generation (get_rays_np(…) at line 144\verb|144|144) and culminates in learning rate update (lines 242\verb|242|242 to 246\verb|246|246) in each iteration.
+Prior to rendering is the data loader (lines 7\verb|7|7 to 104\verb|104|104) and network initialization (lines 107\verb|107|107 to 116\verb|116|116). We ommit the analysis of the data loader. Though loaded images and poses will be introduced upon their first appearance, feel free to peruse this post for details. Neither will we delve into lines 119\verb|119|119 to 136\verb|136|136, which terminates the project immediately after rendering a novel view or video. Testing NeRF is not our primary concern. Despite this, network creation and initialization will be covered in appendix.
+Functions analyses are organized in horizontal tabs.
+As you see in the function flow chart, procedure call is complex in NeRF. To facilitate clearity, there will be a few horizontal tabs in a section, each responsible for a single function.
+Training set
+Data preparationRays generation
+Data preparation
+```
+    # prepare raybatch tensor if batching random rays
+    N_rand = args.N_rand
+    use_batching = not args.no_batching
+    if use_batching:
+        # random ray batching
+        print('get rays')
+        rays = np.stack([get_rays_np(H, W, K, p) for p in poses[:,:3,:4]], 0) # (num_img, ro+rd, H, W, 3)
+        print('done, concats')
+        rays_rgb = np.concatenate([rays, images[:,None]], 1) # (num_img, ro+rd+rgb, H, W, 3)
+        rays_rgb = np.transpose(rays_rgb, [0,2,3,1,4]) # (num_img, H, W, ro+rd+rgb, 3)
+        rays_rgb = np.stack([rays_rgb[i] for i in i_train], 0) # training set only
+        rays_rgb = np.reshape(rays_rgb, [-1,3,3]) # ((num_img-1)*H*W, ro+rd+rgb, 3)
+        rays_rgb = rays_rgb.astype(np.float32)
+        print('shuffle rays')
+        np.random.shuffle(rays_rgb)
+
+        print('done')
+        i_batch = 0
+```
+There are 222 command line argument variables (CL args) in the above snippet:
+VariableValueDescription
+N_rand32×32×4=409632 \times 32 \times 4 = 409632×32×4=4096 by defaultbatch size: number of random rays per optimization loop
+no_batchingFalse by defaultwhether or not adopt rays from a single image per iteration
+use_batching, therefore, is asserted by default. The conditioned block contains in lines 7\verb|7|7 to 11\verb|11|11 a few alien variables, most of which are relevant to the dataloader (lines 7\verb|7|7 to 104\verb|104|104 in train(…)):
+VariableTypeDimensionDescription
+Hintheight of image plane HHH in pixels
+Wintwidth of image plane WWW in pixles
+KNumPy array(3,3)(3, 3)(3,3)K=[fcamera0W20fcameraH2001]\mathbf{K} = \begin{bmatrix} f_{\text{camera}} & 0 & \frac{W}{2} \\ 0 & f_{\text{camera}} & \frac{H}{2} \\ 0 & 0 & 1 \end{bmatrix}K=​fcamera​00​0fcamera​0​2W​2H​1​​, where fcameraf_{\text{camera}}fcamera​ is the focal length of the camera, is a calibration matrix, also the camera intrinsics. It is defined from line 82\texttt{82}82 to 87\texttt{87}87 in train(…).
+posesNumPy array(num_img,3,5)(\texttt{num\_img}, 3, 5)(num_img,3,5)all camera poses, where num_img\texttt{num\_img}num_img is the number of images in a scene
+imagesNumPy array(num_img,H,W,3)(\texttt{num\_img}, H, W, 3)(num_img,H,W,3)all images
+i_trainNumPy array(num_img×78,)(\texttt{num\_img} \times \frac{7}{8},)(num_img×87​,)indices of training images, i_train =[0,num_img) ∖= [0, \texttt{num\_img}) \ \setminus=[0,num_img) ∖ i_test
+i_test is initially provided by the dataloader (line 9\texttt{9}9 in train(…)); it is then overridden by lines 18\texttt{18}18 to 20\texttt{20}20 since args.llffhold is 888 by default.
+Camera intrinsics
+The calibration matrix takes a general form
+K=[fcamerascx0afcameracy001] \mathbf{K} = \begin{bmatrix} f_{\text{camera}} & s & c_x \\ 0 & a f_{\text{camera}} & c_y \\ 0 & 0 & 1 \end{bmatrix} K=​fcamera​00​safcamera​0​cx​cy​1​​
+for some aspect ratio aaa, skew sss, and principle point [cxcy]T\begin{bmatrix}c_x & c_y\end{bmatrix}^\mathsf{T}[cx​​cy​​]T.
+a=1a = 1a=1 unless pixels are not square. "sss encodes possible skew between the sensor axes due to the sensor not being mounted perpendicular to the optical axis." [cxcy]T\begin{bmatrix}c_x & c_y\end{bmatrix}^\mathsf{T}[cx​​cy​​]T denotes the image center in pixel coordinates. In practice, K\mathbf{K}K is simplified to
+K=[fcamera0W20fcameraH2001] \mathbf{K} = \begin{bmatrix} f_{\text{camera}} & 0 & \frac{W}{2} \\ 0 & f_{\text{camera}} & \frac{H}{2} \\ 0 & 0 & 1 \end{bmatrix} K=​fcamera​00​0fcamera​0​2W​2H​1​​
+get_rays_np(…) is then invoked at line 7\verb|7|7 to generate rays (see right tab). Iterating all images, rays has shape (num_img,2,H,W,3)(\verb|num_img|, 2, H, W, 3)(num_img,2,H,W,3). Lines 9\verb|9|9 and 10\verb|10|10 packs rays_o, rays_d, and images together with their dimension changed to (num_img,H,W,3,3)(\verb|num_img|, H, W, 3, 3)(num_img,H,W,3,3). Lines 11\verb|11|11 to 15\verb|15|15 filter and shuffle rays in the training set, whose final result rays_rgb is of dimension (num_ray,3,3)(\verb|num_ray|, 3, 3)(num_ray,3,3).
+Misleading comment
+Training set dimension is commented to be ((num_img−1)×H×W,3,3)\left((\verb|num_img|-1) \times H \times W, 3, 3\right)((num_img−1)×H×W,3,3) at line 12\verb|12|12, which implies only 111 image in a scene is for testing. This is not true for the LLFF dataset. Behavior of the dataloader is overridden by lines 18\verb|18|18 to 20\verb|20|20 in train(…).
+Rays generation
+get_rays_np(…) is called by the line rays = np.stack([get_rays_np(H, W, K, p) for p in poses[:,:3,:4]], 0), where H and W are respectively the height and width of the image plane, and K is the camera intrinsics. p is more physically involved, detailed below.
+Suppose world frame (canonical coordinates) is characterized by an orthonormal basis {x,y,z}\{\boldsymbol{x}, \boldsymbol{y}, \boldsymbol{z}\}{x,y,z} and an origin o\boldsymbol{o}o, and that camera space is defined by an orthonormal basis {u,v,w}\{\boldsymbol{u}, \boldsymbol{v}, \boldsymbol{w}\}{u,v,w} and an origin e\boldsymbol{e}e. Denote camera space parameters w.r.t. canonical coordinates as
+[uxyzvxyzwxyzexyz]=[xuxvxwxeyuyvywyezuzvzwze] \begin{bmatrix} \boldsymbol{u}_{\gray{xyz}} & \boldsymbol{v}_{\gray{xyz}} & \boldsymbol{w}_{\gray{xyz}} & \boldsymbol{e}_{\gray{xyz}} \end{bmatrix} = \begin{bmatrix} x_u & x_v & x_w & x_e \\ y_u & y_v & y_w & y_e \\ z_u & z_v & z_w & z_e \end{bmatrix} [uxyz​​vxyz​​wxyz​​exyz​​]=​xu​yu​zu​​xv​yv​zv​​xw​yw​zw​​xe​ye​ze​​​
+then p =[uvwe]∈R3×4= \begin{bmatrix}\boldsymbol{u} & \boldsymbol{v} & \boldsymbol{w} & \boldsymbol{e}\end{bmatrix} \in \mathbb{R}^{3 \times 4}=[u​v​w​e​]∈R3×4 is the frame-to-canonical matrix that maps rays in camera space to world coordinates
+```
+def get_rays_np(H, W, K, c2w):
+    i, j = np.meshgrid(np.arange(W, dtype=np.float32), np.arange(H, dtype=np.float32), indexing='xy')
+    dirs = np.stack([ (i-K[0][2]) / K[0][0],
+                     -(j-K[1][2]) / K[1][1],
+                     -np.ones_like(i)       ], -1)
+    # rotate ray directions from camera frame to the world frame
+    rays_d = np.sum(dirs[..., np.newaxis, :] * c2w[:3,:3], -1)  # dot product, equals to: [c2w.dot(dir) for dir in dirs]
+    # translate camera frame's origin to the world frame. It is the origin of all rays.
+    rays_o = np.broadcast_to(c2w[:3,-1], np.shape(rays_d))
+    return rays_o, rays_d
+```
+np.meshgrid(…) at line 2\verb|2|2 creates a 2D grid of points [0,H)×[0,W)[0, H) \times [0, W)[0,H)×[0,W), where arrays i and j are respectively the xxx- and yyy coordinates of the grid points. However, the image plane is bounded by
+bottom: v=−H2top: v=−H2left: u=−W2right: u=W2 \begin{align*} \text{\blue{b}ottom: } v &= -\frac{H}{2} \\ \text{\blue{t}op: } v &= -\frac{H}{2} \\ \text{\blue{l}eft: } u &= -\frac{W}{2} \\ \text{\blue{r}ight: } u &= \frac{W}{2} \end{align*} bottom: vtop: vleft: uright: u​=−2H​=−2H​=−2W​=2W​​
+Applying an offset, pixel coordinates are [i−W2j−H2−fcamera]T\begin{bmatrix} i - \frac{W}{2} & j - \frac{H}{2} & -f_\text{camera} \end{bmatrix}^\mathsf{T}[i−2W​​j−2H​​−fcamera​​]T in camera frame. A ray is defined by an origin oray\boldsymbol{o}_\text{ray}oray​, which lies at the origin e\boldsymbol{e}e, and its direction d\boldsymbol{d}d that connects the origin to a pixel. For every pixel p\boldsymbol{p}p on the image plane, an ejective direction is
+d=p−oray=[i−W2j−H2−fcamera]−0 \begin{align*} \boldsymbol{d} &= \boldsymbol{p} - \boldsymbol{o}_\text{ray} \\ &= \begin{bmatrix} i - \frac{W}{2} \\ j - \frac{H}{2} \\ -f_\text{camera} \end{bmatrix} \gray{- \boldsymbol{0}} \end{align*} d​=p−oray​=​i−2W​j−2H​−fcamera​​​−0​
+which is then "normalized" to d^=dfcamera=[i−W/2fcameraj−H/2fcamera−1]T\hat{\boldsymbol{d}} = \frac{\boldsymbol{d}}{f_\text{camera}} = \begin{bmatrix} \frac{i - W/2}{f_\text{camera}} & \frac{j - H/2}{f_\text{camera}} & -1 \end{bmatrix}^\mathsf{T}d^=fcamera​d​=[fcamera​i−W/2​​fcamera​j−H/2​​−1​]T. This corresponds to lines 3\verb|3|3 to 5\verb|5|5, except that dirs for an entire image are generated concurrently. Note that jjj-axis is opposite to vvv-axis. Consequently, line 4\verb|4|4 adopts −j+H2-j + \frac{H}{2}−j+2H​ (instead of j−H2j - \frac{H}{2}j−2H​) as vvv-coordinate of d\boldsymbol{d}d.
+Rays are then mapped to world space. Apply a linear transformation c2w to directions d\boldsymbol{d}d to obtain rays_d (line 7\verb|7|7) . Ray origins rays_o are simply e\boldsymbol{e}e, the last column of c2w (line 9\verb|9|9). It is broadcast to match the dimension of rays_d.
+Coordinate transformation
+A point puvw=[upvpwp]T\boldsymbol{p}_{\gray{uvw}} = \begin{bmatrix}u_{\gray{p}} & v_{\gray{p}} & w_{\gray{p}}\end{bmatrix}^\mathsf{T}puvw​=[up​​vp​​wp​​]T in camera coordinates is characterized by
+puvw=exyz+upuxyz+vpvxyz+wpwxyz \boldsymbol{p}_{\gray{uvw}} = \gray{\boldsymbol{e}_{xyz} +} u_{\gray{p}}\boldsymbol{u}_{\gray{xyz}} + v_{\gray{p}}\boldsymbol{v}_{\gray{xyz}} + w_{\gray{p}}\boldsymbol{w}_{\gray{xyz}} puvw​=exyz​+up​uxyz​+vp​vxyz​+wp​wxyz​
+alternatively, the same point pxyz=[xpypzp]T\boldsymbol{p}_{\gray{xyz}} = \begin{bmatrix}x_{\gray{p}} & y_{\gray{p}} & z_{\gray{p}}\end{bmatrix}^\mathsf{T}pxyz​=[xp​​yp​​zp​​]T in world space is
+pxyz=o+xpx+ypy+zpz \boldsymbol{p}_{\gray{xyz}} = \gray{\boldsymbol{o} +} x_{\gray{p}}\boldsymbol{x} + y_{\gray{p}}\boldsymbol{y} + z_{\gray{p}}\boldsymbol{z} pxyz​=o+xp​x+yp​y+zp​z
+then pxyz\boldsymbol{p}_{\gray{xyz}}pxyz​ and puvw\boldsymbol{p}_{\gray{uvw}}puvw​ are bridged by
+[pxyz1]=[xpypzp1]=[I3×3xeyeze01×31]⏟translation: origins coincide[xuxvxwyuyvywzuzvzw03×101×31]⏟rotation: axes align[upvpwp1]=[xuxvxwyuyvywzuzvzwxeyeze01×31][puvw1]=[uvwe01×31]⏟frame-to-canonical matrix[puvw1] \begin{align*} \begin{bmatrix} \boldsymbol{p}_{\gray{xyz}} \\ 1 \end{bmatrix} = \begin{bmatrix} x_{\gray{p}} \\ y_{\gray{p}} \\ z_{\gray{p}} \\ 1 \end{bmatrix} &= \underbrace{\begin{bmatrix} \mathbf{I}_{3 \times 3} & \begin{matrix} x_e \\ y_e \\ z_e \end{matrix} \\ \boldsymbol{0}_{1 \times 3} & 1 \end{bmatrix}}_\text{translation: origins coincide} \underbrace{\begin{bmatrix} \begin{matrix} x_u & x_v & x_w \\ y_u & y_v & y_w \\ z_u & z_v & z_w \end{matrix} & \boldsymbol{0}_{3 \times 1} \\ \boldsymbol{0}_{1 \times 3} & 1 \end{bmatrix}}_\text{rotation: axes align} \begin{bmatrix} u_{\gray{p}} \\ v_{\gray{p}} \\ w_{\gray{p}} \\ 1 \end{bmatrix} \\ &= \begin{bmatrix} \begin{matrix} x_u & x_v & x_w \\ y_u & y_v & y_w \\ z_u & z_v & z_w \end{matrix} & \begin{matrix} x_e \\ y_e \\ z_e \end{matrix} \\ \boldsymbol{0}_{1 \times 3} & 1 \end{bmatrix} \begin{bmatrix} \boldsymbol{p}_{\gray{uvw}} \\ 1 \end{bmatrix} \\ &= \underbrace{\begin{bmatrix} \begin{matrix} \boldsymbol{u} & \boldsymbol{v} & \boldsymbol{w} \end{matrix} & \boldsymbol{e} \\ \boldsymbol{0}_{1 \times 3} & 1 \end{bmatrix}}_\text{frame-to-canonical matrix} \begin{bmatrix} \boldsymbol{p}_{\gray{uvw}} \\ 1 \end{bmatrix} \end{align*} [pxyz​1​]=​xp​yp​zp​1​​​=translation: origins coincide​I3×3​01×3​​xe​ye​ze​​1​​​​rotation: axes align​xu​yu​zu​​xv​yv​zv​​xw​yw​zw​​01×3​​03×1​1​​​​​up​vp​wp​1​​=​xu​yu​zu​​xv​yv​zv​​xw​yw​zw​​01×3​​xe​ye​ze​​1​​[puvw​1​]=frame-to-canonical matrix[u​v​w​01×3​​e1​]​​[puvw​1​]​
+Check 3B1B's videos (linear transformation, matrix multiplication, and 3D trnsformation) on linear algebra to comprehend what the above linear transformations (matrices) physically mean.
+The returned values are
+VariableTypeDimensionDescription
+rays_oNumPy array(H,W,3)(H, W, 3)(H,W,3)directions of rays in the image plane
+rays_dNumPy array(H,W,3)(H, W, 3)(H,W,3)origins of rays in the image plane
+Training preparation
+```
+def train_prepare(self, data):
+    …
+    # move training data to GPU
+    if use_batching:
+        images = torch.Tensor(images).to(device)
+    poses = torch.Tensor(poses).to(device)
+    if use_batching:
+        rays_rgb = torch.Tensor(rays_rgb).to(device)
+
+
+    N_iters = 200000 + 1
+    print('Begin')
+    print('TRAIN views are', i_train)
+    print('TEST views are', i_test)
+    print('VAL views are', i_val)
+
+    # summary writers
+    #writer = SummaryWriter(os.path.join(basedir, 'summaries', expname))
+    
+    start = start + 1
+    for i in trange(start, N_iters):
+        time0 = time.time()
+
+        # sample random ray batch
+        if use_batching:
+            # random over all images
+            batch = rays_rgb[i_batch:i_batch+N_rand] # [B, 2+1, 3*?]
+            batch = torch.transpose(batch, 0, 1)
+            batch_rays, target_s = batch[:2], batch[2]
+
+            i_batch += N_rand
+            if i_batch >= rays_rgb.shape[0]:
+                print("Shuffle data after an epoch!")
+                rand_idx = torch.randperm(rays_rgb.shape[0])
+                rays_rgb = rays_rgb[rand_idx]
+                i_batch = 0
+        else:
+            …
+```
+Lines 2\verb|2|2 to 6\verb|6|6 convert the training set (from NumPy arrays) to PyTorch tensors and "transfer" them to GPU RAM, and start = start + 1 (line 18\verb|18|18) marks the commencement of training iterations. Training data were first divided into batches. Let BBB denote the batch size (B=B =B= N_rand), then inputs batch_rays and ground truth target_s have shape (2,B,3)(2, B, 3)(2,B,3) and (B,3)(B, 3)(B,3) (line 27\verb|27|27). Lines 30\verb|30|30 to 34\verb|34|34 handles out-of-bound cases where the index i_batch exceeds num_ray\verb|num_ray|num_ray. We do not care about the else block starting from line 35\verb|35|35 since use_batching is asserted by default.
+Rendering
+```
+    …
+    for i in trange(start, N_iters):
+        …
+        #####  core optimization loop  #####
+        rgb, disp, acc, extras = render(H, W, K, chunk=args.chunk, rays=batch_rays,
+                                                 verbose=i < 10, retraw=True,
+                                                 **render_kwargs_train)
+        …
+```
+Ensuing is volume rendering. CL arg chunk defines the number of rays concurrently processed, which impacts performance rather than correctness. render_kwargs_train is a dictionary returned upon initiating a NeRF network (line 107\verb|107|107 in train) with 222 more keys injected at line 112\verb|112|112 (in train). Its internals are
+KeyElementDescription
+network_query_fna functiona subroutine that takes data and a network as input to perform query
+perturb1.whether to adopt stratified sampling, 1. for True
+N_importance128128128number of addition samples NFN_FNF​ per ray in hierarchical sampling
+network_finean objectthe fine network
+N_samples646464number of samples NCN_CNC​ per ray to coarse network
+network_fnan objectthe coarse network
+use_viewdirsTruewhether to feed viewing directions to network, indispensible for view-dependent apprearance
+white_bkgdFalsewhether to assume white background for rendering
+This applies to the synthetic dataset only, which contains images (.png) with transparent background.
+raw_noise_std1.magnitude of noise to inject into volume density
+near0.lower bound of rendering integration
+far1.upper bound of rendering integration
+Note
+See appendix for how a NeRF model is implemented.
+Basic procedureMini-batch operation
+Basic procedure
+```
+def render(H, W, K, chunk=1024*32, rays=None, c2w=None, ndc=True,
+           near=0., far=1.,
+           use_viewdirs=False, c2w_staticcam=None,
+           **kwargs):
+    if c2w is not None:
+        # special case to render full image
+        rays_o, rays_d = get_rays(H, W, K, c2w)
+    else:
+        # use provided ray batch
+        rays_o, rays_d = rays
+    # provide ray directions as input
+    if use_viewdirs:
+        viewdirs = rays_d
+        if c2w_staticcam is not None:
+            # special case to visualize effect of viewdirs
+            rays_o, rays_d = get_rays(H, W, K, c2w_staticcam)
+        viewdirs = viewdirs / torch.norm(viewdirs, dim=-1, keepdim=True)
+        viewdirs = torch.reshape(viewdirs, [-1,3]).float()
+
+    sh = rays_d.shape # shape: … × 3
+    # for forward facing scenes
+    if ndc:
+        rays_o, rays_d = ndc_rays(H, W, K[0][0], 1., rays_o, rays_d)
+    # create ray batch
+    rays_o = torch.reshape(rays_o, [-1,3]).float()
+    rays_d = torch.reshape(rays_d, [-1,3]).float()
+    near, far = near * torch.ones_like(rays_d[...,:1]), \
+                far  * torch.ones_like(rays_d[...,:1])
+    rays = torch.cat([rays_o, rays_d, near, far], -1)
+    if use_viewdirs:
+        rays = torch.cat([rays, viewdirs], -1)
+    # render and reshape
+    all_ret = batchify_rays(rays, chunk, **kwargs)
+    for k in all_ret:
+        k_sh = list(sh[:-1]) + list(all_ret[k].shape[1:])
+        all_ret[k] = torch.reshape(all_ret[k], k_sh)
+
+    k_extract = ['rgb_map', 'disp_map', 'acc_map']
+    ret_list = [all_ret[k] for k in k_extract]
+    ret_dict = {k : all_ret[k] for k in all_ret
+                                   if k not in k_extract}
+    return ret_list + [ret_dict]
+```
+Lines 5\verb|5|5 to 7\verb|7|7 and 14\verb|14|14 to 16\verb|16|16 are ignored because the conditions contradict the default setting. Rays are unpacked to origins and directions at line 10\verb|10|10. Viewing directions are aliases to ray directions (line 13\verb|13|13) except that they are normalized at line 17\verb|17|17. Rays are then projected to NDC space at line 23\verb|23|23; see my other post for details. near =OB×3= \mathbf{O}_{B \times 3}=OB×3​ and far =JB×3= \mathbf{J}_{B \times 3}=JB×3​ are initiated (lines 27\verb|27|27 and 28\verb|28|28) to match the shape of rays_d. All the above are concatenated (lines 29\verb|29|29 to 31\verb|31|31) such that input to the network rays have dimension (B,rays_o:3+rays_d:3+near:1+far:1+viewdirs:3)=(B,11)(B, \gray{\verb|rays_o|:} 3 + \gray{\verb|rays_d|:} 3 + \gray{\verb|near|:} 1 + \gray{\verb|far|:} 1 + \gray{\verb|viewdirs|:} 3) = (B, 11)(B,rays_o:3+rays_d:3+near:1+far:1+viewdirs:3)=(B,11).
+batchify_rays(…) at line 33\verb|33|33 (see right tab) decomposes the input tensor into mini-batches to feed to the NeRF network sequentially. There are 888 elements in the all_ret dictionary at line 36\verb|36|36:
+KeyDescription of element
+rgb_mapoutput color map of the fine network
+disp_mapoutput disparity map of the fine network
+acc_mapoutput accumulated transmittance of the fine network
+rawraw output of the fine network
+rgb0output color map of the coarse network
+disp0output disparity map of the coarse network
+acc0output accumulated transmittance of the coarse network
+z_stdstandard variance of disparities of samples along each ray
+The ensuing lines (line 38\verb|38|38 onward) group and reorder the output such that what are returned can be properly unpacked by train(…)
+Mini-batch operation
+```
+def batchify_rays(rays_flat, chunk=1024*32, **kwargs):
+    """ render rays in smaller minibatches to avoid OOM
+    """
+    all_ret = {}
+    for i in range(0, rays_flat.shape[0], chunk):
+        ret = render_rays(rays_flat[i:i+chunk], **kwargs)
+        for k in ret:
+            if k not in all_ret:
+                all_ret[k] = []
+            all_ret[k].append(ret[k])
+    all_ret = {k : torch.cat(all_ret[k], 0) for k in all_ret}
+
+    return all_ret
+```
+Mini-batches are sequentially passed to render_rays(…) (see below) at line 6\verb|6|6, cached from line 7\verb|7|7 to 10\verb|10|10, and eventually concatenated at line 11\verb|11|11. We may consider batchify_rays(…) as a broker connecting the high-level interface (render(…)) to actual rendering implementation.
+Keyword arguments are passed from high-level interface to "worker" procedures.
+By encapsulation with batchify_rays(…) and render(…), training options render_kwargs_train defined previously are passed to the low-level "worker" render_rays(…), which is to core of volume rendering.
+Rendering each rayShadingHierarchical sampling
+Rendering each ray
+```
+def render_rays(ray_batch,
+                network_fn,
+                network_query_fn,
+                N_samples,
+                retraw=False,
+                lindisp=False,
+                perturb=0., # 1.0, overridden by input
+                N_importance=0,
+                network_fine=None,
+                white_bkgd=False,
+                raw_noise_std=0.,
+                verbose=False,
+                pytest=False):
+    N_rays = ray_batch.shape[0]
+    rays_o, rays_d = ray_batch[:,0:3], \
+                     ray_batch[:,3:6] # (ray #, 3)
+    viewdirs = ray_batch[:,-3:] if ray_batch.shape[-1] > 8 \
+                                else None
+    bounds = torch.reshape(ray_batch[...,6:8], [-1,1,2])
+    near, far = bounds[...,0], \
+                bounds[...,1] # (ray #, 1)
+    t_vals = torch.linspace(0., 1., steps=N_samples)
+    if not lindisp:
+        z_vals = near * (1. - t_vals) + far * t_vals
+    else:
+        z_vals = 1. / (1./near * (1. - t_vals) +
+                       1./far  * (     t_vals) )
+    # copy sample distances of 1 ray to the others
+    z_vals = z_vals.expand([N_rays, N_samples])
+
+    if perturb > 0.:
+        # get intervals between samples
+        mids = .5 * (z_vals[...,1:] + z_vals[...,:-1])
+        upper = torch.cat([mids, z_vals[...,-1:]], -1)
+        lower = torch.cat([z_vals[...,:1], mids], -1)
+        # stratified samples in those intervals
+        t_rand = torch.rand(z_vals.shape)
+        # pytest: overwrite U with fixed NumPy random numbers
+        if pytest:
+            np.random.seed(0)
+            t_rand = np.random.rand(*list(z_vals.shape))
+            t_rand = torch.Tensor(t_rand)
+
+        z_vals = lower + (upper - lower) * t_rand
+
+    pts = rays_o[..., None, :] + \
+          rays_d[..., None, :] * z_vals[..., :, None] # (ray #, sample #, 3)
+    #raw = run_network(pts)
+    raw = network_query_fn(pts, viewdirs, network_fn)
+    rgb_map, disp_map, acc_map, weights, depth_map = raw2outputs(raw, z_vals, rays_d, raw_noise_std, white_bkgd, pytest=pytest)
+    # hierarchical sampling
+    if N_importance > 0:
+        # log outputs of coarse network
+        rgb_map_0, disp_map_0, acc_map_0 = rgb_map, disp_map, acc_map
+
+        z_vals_mid = .5 * (z_vals[..., 1: ] + z_vals[..., :-1])
+        z_samples = sample_pdf(z_vals_mid,
+                               weights[..., 1:-1],
+                               N_importance,
+                               det=(perturb==0.), # FALSE by default
+                               pytest=pytest)
+        z_samples = z_samples.detach()
+
+        z_vals, _ = torch.sort(torch.cat([z_vals, z_samples], -1), -1)
+        pts = rays_o[..., None, :] + \
+              rays_d[..., None, :] * z_vals[..., :, None] # (ray #, coarse & fine sample #, 3)
+
+        run_fn = network_fn if   network_fine is None \
+                            else network_fine
+        #raw = run_network(pts, fn=run_fn)
+        raw = network_query_fn(pts, viewdirs, run_fn)
+
+        rgb_map, disp_map, acc_map, weights, depth_map = raw2outputs(raw, z_vals, rays_d, raw_noise_std, white_bkgd, pytest=pytest)
+
+    ret = {'rgb_map' :  rgb_map,
+           'disp_map': disp_map,
+           'acc_map' :  acc_map}
+    if retraw:
+        ret['raw'] = raw
+    if N_importance > 0:
+        ret['rgb0' ] =  rgb_map_0
+        ret['disp0'] = disp_map_0
+        ret['acc0' ] =  acc_map_0
+        ret['z_std'] = torch.std(z_samples, dim=-1, unbiased=False)  # (ray #)
+    for k in ret:
+        if (torch.isnan(ret[k]).any() or torch.isinf(ret[k]).any()) and DEBUG:
+            print(f"! [Numerical Error] {k} contains nan or inf.")
+    return ret
+```
+Lines 14\verb|14|14 to 21\verb|21|21 unpack each mini-batch to separate physical values. Ray origins rays_o, ray directions rays_d, and viewing directions viewdirs have shape (B,3)(B, 3)(B,3). Integration boundaries near and far are both B×1B \times 1B×1 vectors.
+Lines 22\verb|22|22 to 44\verb|44|44 initialize the samples for ray marching. torch.linspace(…) at line 22\verb|22|22 create a sequence of NCN_CNC​ points evenly scattered along unit length. Recall that rays are previously projected to NDC space. False by default, lindisp dictates the voxels are sampled linearly on disparity (inverse depth). z_vals simply replicates t_vals (lines 24\verb|24|24 and 29\verb|29|29) to modulate all points on a batch of rays.
+There are NC−1N_C - 1NC​−1 intervals along each ray. To pick NCN_CNC​ random points out of those intervals ("bins"), at least 222 of them should have length less than 1NC−1\frac{1}{N_C - 1}NC​−11​. The authors cut the first and last "bin" in half so that all NCN_CNC​ "bins" fit to the interval [0,1][0, 1][0,1]. Line 33\verb|33|33 determines of midpoints of z_vals, which are afterwards combined with the start (line 35\verb|35|35) and endpoint bound (line 34\verb|34|34) of each ray.
+Subtracting the lower bound from the upper bound finalizes the length of "bins", and stratified sampling is achieved by uniformly sampling every interval. Now, sample ziz_izi​ lies in bin i ∀i∈{1,2,…,NC}i \ \forall i \in \{1, 2, \ldots, N_C\}i ∀i∈{1,2,…,NC​}.
+Let zi(b)z_i^{(b)}zi(b)​ denote the iiith sample on the bbbth ray in a batch, then z_vals at line 44\verb|44|44 is
+z_vals=[z1(1)z2(1)⋯zNC(1)z1(2)z2(2)⋯zNC(2)⋮⋮⋱⋮z1(B)z2(B)⋯zNC(B)] \verb|z_vals| = \begin{bmatrix} z_1^{(1)} & z_2^{(1)} & \cdots & z_{N_C}^{(1)} \\ z_1^{(2)} & z_2^{(2)} & \cdots & z_{N_C}^{(2)} \\ \vdots & \vdots & \ddots & \vdots \\ z_1^{(B)} & z_2^{(B)} & \cdots & z_{N_C}^{(B)} \end{bmatrix} z_vals=​z1(1)​z1(2)​⋮z1(B)​​z2(1)​z2(2)​⋮z2(B)​​⋯⋯⋱⋯​zNC​(1)​zNC​(2)​⋮zNC​(B)​​​
+Sampling: slight deviation of practice from theory
+Implementation of stratified sampling is inconsistent with what is described in the paper. Theoretically, a sample ziz_izi​ is obtained via
+ti∼U[near+i−1NC(far−near),near+iNC(far−near)] t_i \sim \mathcal{U}\left[ \verb|near| + \frac{i-1}{N_C} (\verb|far| - \verb|near|), \verb|near| + \frac{i}{N_C} (\verb|far| - \verb|near|) \right] ti​∼U[near+NC​i−1​(far−near),near+NC​i​(far−near)]
+which implies each "bin" is of equal length. The first and last bins, in practice, are half the size of the others. This does not harm the correctness of the algorithm.
+Marching depth values z_vals along directions rays_d, inputs pts to network_fn at lines 46\verb|46|46 and 47\verb|47|47 are now
+rB×NC×3=[e(1)+z1(1)d(1)e(1)+z2(1)d(1)⋯e(1)+zNC(1)d(1)e(2)+z1(2)d(2)e(2)+z2(2)d(2)⋯e(2)+zNC(2)d(2)⋮⋮⋱⋮e(B)+z1(B)d(B)e(B)+z2(B)d(B)⋯e(B)+zNC(B)d(B)] \boldsymbol{r}_{\gray{B \times N_C \times 3}} = \begin{bmatrix} \boldsymbol{e}^{(1)} + z_1^{(1)} \boldsymbol{d}^{(1)} & \boldsymbol{e}^{(1)} + z_2^{(1)} \boldsymbol{d}^{(1)} & \cdots & \boldsymbol{e}^{(1)} + z_{N_C}^{(1)} \boldsymbol{d}^{(1)} \\ \boldsymbol{e}^{(2)} + z_1^{(2)} \boldsymbol{d}^{(2)} & \boldsymbol{e}^{(2)} + z_2^{(2)} \boldsymbol{d}^{(2)} & \cdots & \boldsymbol{e}^{(2)} + z_{N_C}^{(2)} \boldsymbol{d}^{(2)} \\ \vdots & \vdots & \ddots & \vdots \\ \boldsymbol{e}^{(B)} + z_1^{(B)} \boldsymbol{d}^{(B)} & \boldsymbol{e}^{(B)} + z_2^{(B)} \boldsymbol{d}^{(B)} & \cdots & \boldsymbol{e}^{(B)} + z_{N_C}^{(B)} \boldsymbol{d}^{(B)} \end{bmatrix} rB×NC​×3​=​e(1)+z1(1)​d(1)e(2)+z1(2)​d(2)⋮e(B)+z1(B)​d(B)​e(1)+z2(1)​d(1)e(2)+z2(2)​d(2)⋮e(B)+z2(B)​d(B)​⋯⋯⋱⋯​e(1)+zNC​(1)​d(1)e(2)+zNC​(2)​d(2)⋮e(B)+zNC​(B)​d(B)​​
+The coarse network network_fn is then queried at line 49\verb|49|49 to predict raw output raw (see appendix for how NeRF is queried). raw has shape (B,rgb:3+σ:1)=(B,4)(B, \gray{\verb|rgb|:} 3 + \gray{\sigma:} 1) = (B, 4)(B,rgb:3+σ:1)=(B,4). "Shading" via raw2outputs(…) follows at line 50\verb|50|50 to acquire sample weights and radiance of each ray (see middle tab).
+To distinguish outputs of the fine network from those of the coarse one, prefixes _0 are appended to initial outputs at line 54\verb|54|54. Provided z_vals_mid, midpoints of coarse samples (line 56\verb|56|56) and their weights WB×NC\mathbf{W}_{\gray{B \times N_C}}WB×NC​​, lines 57\verb|57|57 to 61\verb|61|61 determine fine samples (see right tab). They are combined with coarse samples at line 64\verb|64|64 to form a sorted tensor of disparities z_vals
+z_vals=[z1(1)z2(1)⋯zNC+NF(1)z1(2)z2(2)⋯zNC+NF(2)⋮⋮⋱⋮z1(B)z2(B)⋯zNC+NF(B)] \verb|z_vals| = \begin{bmatrix} z_1^{(1)} & z_2^{(1)} & \cdots & z_{N_C \blue{+ N_F}}^{(1)} \\ z_1^{(2)} & z_2^{(2)} & \cdots & z_{N_C \blue{+ N_F}}^{(2)} \\ \vdots & \vdots & \ddots & \vdots \\ z_1^{(B)} & z_2^{(B)} & \cdots & z_{N_C \blue{+ N_F}}^{(B)} \end{bmatrix} z_vals=​z1(1)​z1(2)​⋮z1(B)​​z2(1)​z2(2)​⋮z2(B)​​⋯⋯⋱⋯​zNC​+NF​(1)​zNC​+NF​(2)​⋮zNC​+NF​(B)​​​
+Static compute graph
+NeRF spans a static computate graph. The key is the ….detach() call at line 62\verb|62|62.
+The coarse-to-fine passes are connected by hierarchical sampling, i.e., output of the coarse MLP is used to determine the input of the fine network. Bellow illustrates how the coarse samples are processed to for the fine ones:
+z_valscoarse→lines 46 and 47pts⋯}→line 49network_query_fnraw→line 50raw2outputs⋯ , weightsz_valscoarse→line 56z_vals_mid⋯}→lines 57 to 61sample_pdfz_samplesz_vals}→line 64concatenation →line 64sortingz_valsfine \left. \begin{array}{r} \left. \begin{array}{r} \left. \begin{array}{r} \green{\verb|z_vals|_\text{coarse}} \xrightarrow[\text{lines \texttt{46} and \texttt{47}}]{} \verb|pts| \\ \cdots \end{array} \right\} \xrightarrow[\text{line \texttt{49}}]{\red{\verb|network_query_fn|}} \verb|raw| \xrightarrow[\text{line \texttt{50}}]{\verb|raw2outputs|} \cdots,~\verb|weights| \\ \green{\verb|z_vals|_\text{coarse}} \xrightarrow[\text{line \texttt{56}}]{} \verb|z_vals_mid| \\ \cdots \end{array} \right\} \xrightarrow[\text{lines \texttt{57} to \texttt{61}}]{\verb|sample_pdf|} \verb|z_samples| \\ \verb|z_vals| \end{array} \right\} \xrightarrow[\text{line \texttt{64}}]{\text{concatenation}} ~ \xrightarrow[\text{line \texttt{64}}]{\text{sorting}} \blue{\verb|z_vals|_\text{fine}} z_valscoarse​lines 46 and 47​pts⋯​}network_query_fnline 49​rawraw2outputsline 50​⋯, weightsz_valscoarse​line 56​z_vals_mid⋯​⎭⎬⎫​sample_pdflines 57 to 61​z_samplesz_vals​⎭⎬⎫​concatenationline 64​ sortingline 64​z_valsfine​
+Hierarchically sampled inputs are again fed to the network.
+z_valsfine→lines 65 and 66pts⋯}→line 71network_query_fn⋯ \left. \begin{array}{r} \blue{\verb|z_vals|_\text{fine}} \xrightarrow[\text{lines \texttt{65} and \texttt{66}}]{} \verb|pts| \\ \cdots \end{array} \right\} \xrightarrow[\text{line \texttt{71}}]{\red{\verb|network_query_fn|}} \cdots z_valsfine​lines 65 and 66​pts⋯​}network_query_fnline 71​⋯
+Consequently, output of the MLP becomes part of its input. It is a must to cut the coarse-to-fine edge in the compute graph because it has to be a directed acyclic one. Otherwise, if the fine network shared with the coarse one an identical instance of class NeRF, there would be cyclic definition, and backpropagation would fail. This is exactly what z_samples.detach() does at line 62\verb|62|62.
+A corollary is that NeRF's compute graph is static.
+New inputs pts to the fine network network_fine at lines 65\verb|65|65 and 66\verb|66|66 are now
+rB×NC×3=[e(1)+z1(1)d(1)e(1)+z2(1)d(1)⋯e(1)+zNC+NF(1)d(1)e(2)+z1(2)d(2)e(2)+z2(2)d(2)⋯e(2)+zNC+NF(2)d(2)⋮⋮⋱⋮e(B)+z1(B)d(B)e(B)+z2(B)d(B)⋯e(B)+zNC+NF(B)d(B)] \boldsymbol{r}_{\gray{B \times N_C \times 3}} = \begin{bmatrix} \boldsymbol{e}^{(1)} + z_1^{(1)} \boldsymbol{d}^{(1)} & \boldsymbol{e}^{(1)} + z_2^{(1)} \boldsymbol{d}^{(1)} & \cdots & \boldsymbol{e}^{(1)} + z_{N_C \blue{+ N_F}}^{(1)} \boldsymbol{d}^{(1)} \\ \boldsymbol{e}^{(2)} + z_1^{(2)} \boldsymbol{d}^{(2)} & \boldsymbol{e}^{(2)} + z_2^{(2)} \boldsymbol{d}^{(2)} & \cdots & \boldsymbol{e}^{(2)} + z_{N_C \blue{+ N_F}}^{(2)} \boldsymbol{d}^{(2)} \\ \vdots & \vdots & \ddots & \vdots \\ \boldsymbol{e}^{(B)} + z_1^{(B)} \boldsymbol{d}^{(B)} & \boldsymbol{e}^{(B)} + z_2^{(B)} \boldsymbol{d}^{(B)} & \cdots & \boldsymbol{e}^{(B)} + z_{N_C \blue{+ N_F}}^{(B)} \boldsymbol{d}^{(B)} \end{bmatrix} rB×NC​×3​=​e(1)+z1(1)​d(1)e(2)+z1(2)​d(2)⋮e(B)+z1(B)​d(B)​e(1)+z2(1)​d(1)e(2)+z2(2)​d(2)⋮e(B)+z2(B)​d(B)​⋯⋯⋱⋯​e(1)+zNC​+NF​(1)​d(1)e(2)+zNC​+NF​(2)​d(2)⋮e(B)+zNC​+NF​(B)​d(B)​​
+Another mass network query is performed at line 71\verb|71|71, whose raw outputs are converted to radiance rgb_map at 71\verb|71|71.
+Shading
+```
+def raw2outputs(raw, z_vals, rays_d, raw_noise_std=0, white_bkgd=False, pytest=False):
+    raw2alpha = lambda raw, dists, act_fn=F.relu : \
+                       1. - torch.exp(-act_fn(raw) * dists) # σ column of `raw`
+
+    dists = z_vals[..., 1:] - z_vals[..., :-1]
+    dists = torch.cat([dists, # (ray #, sample #)
+                       torch.Tensor([1e10]).expand(dists[..., :1].shape)],
+                       -1)
+    dists = dists * torch.norm(rays_d[..., None, :], dim=-1)
+
+    rgb = torch.sigmoid(raw[..., :3]) # (ray #, sample #, 3)
+
+    noise = 0.
+    if raw_noise_std > 0.:
+        noise = torch.randn(raw[..., 3].shape) * raw_noise_std
+        # overwrite randomly sampled data
+        if pytest:
+            np.random.seed(0)
+            noise = np.random.rand(*list(raw[...,3].shape)) * raw_noise_std
+            noise = torch.Tensor(noise)
+
+    alpha = raw2alpha(raw[..., 3] + noise, dists) # (ray #, sample #)
+    #weights = alpha * tf.math.cumprod(1.-alpha + 1e-10, -1, exclusive=True)
+    weights = alpha * torch.cumprod(torch.cat([torch.ones((alpha.shape[0], 1)),
+                                               1. - alpha + 1e-10], -1), 
+                                    -1)[:, :-1]
+
+    rgb_map   = torch.sum(weights[..., None] * rgb, -2)  # (ray #, 3)
+    depth_map = torch.sum(weights * z_vals, -1)
+    disp_map  = 1. / torch.max(1e-10 * torch.ones_like(depth_map),
+                               depth_map / torch.sum(weights, -1))
+    acc_map   = torch.sum(weights, -1)
+    if white_bkgd:
+        rgb_map = rgb_map + (1. - acc_map[..., None])
+
+    return rgb_map, disp_map, acc_map, weights, depth_map
+```
+dists from line 5\verb|5|5 to 9\verb|9|9 calculates the difference between disparities δi:=zi+1−zi\delta_i := z_{i+1} - z_iδi​:=zi+1​−zi​.
+ΔB×NC=[δ1(1)δ2(1)⋯δNC−1(1)∞δ1(2)δ2(2)⋯δNC−1(2)∞⋮⋮⋱⋮⋮δ1(B)δ2(B)⋯δNC−1(B)∞]=[z2(1)−z1(1)z3(1)−z2(1)⋯zNC(1)−zNC−1(1)∞z2(2)−z1(2)z3(2)−z2(2)⋯zNC(2)−zNC−1(2)∞⋮⋮⋱⋮⋮z2(B)−z1(B)z3(B)−z2(B)⋯zNC(B)−zNC−1(B)∞] \begin{align*} \mathbf{\Delta}_{\gray{B \times N_C}} &= \begin{bmatrix} \delta_1^{(1)} & \delta_2^{(1)} & \cdots & \delta_{N_C \blue{- 1}}^{(1)} & \gray{\infty} \\ \delta_1^{(2)} & \delta_2^{(2)} & \cdots & \delta_{N_C \blue{- 1}}^{(2)} & \gray{\infty} \\ \vdots & \vdots & \ddots & \vdots & \gray{\vdots} \\ \delta_1^{(B)} & \delta_2^{(B)} & \cdots & \delta_{N_C \blue{- 1}}^{(B)} & \gray{\infty} \\ \end{bmatrix} \\ &= \begin{bmatrix} z_2^{(1)} - z_1^{(1)} & z_3^{(1)} - z_2^{(1)} & \cdots & z_{N_C}^{(1)} - z_{N_C - 1}^{(1)} & \gray{\infty} \\ z_2^{(2)} - z_1^{(2)} & z_3^{(2)} - z_2^{(2)} & \cdots & z_{N_C}^{(2)} - z_{N_C - 1}^{(2)} & \gray{\infty} \\ \vdots & \vdots & \ddots & \vdots & \gray{\vdots} \\ z_2^{(B)} - z_1^{(B)} & z_3^{(B)} - z_2^{(B)} & \cdots & z_{N_C}^{(B)} - z_{N_C - 1}^{(B)} & \gray{\infty} \\ \end{bmatrix} \end{align*} ΔB×NC​​​=​δ1(1)​δ1(2)​⋮δ1(B)​​δ2(1)​δ2(2)​⋮δ2(B)​​⋯⋯⋱⋯​δNC​−1(1)​δNC​−1(2)​⋮δNC​−1(B)​​∞∞⋮∞​​=​z2(1)​−z1(1)​z2(2)​−z1(2)​⋮z2(B)​−z1(B)​​z3(1)​−z2(1)​z3(2)​−z2(2)​⋮z3(B)​−z2(B)​​⋯⋯⋱⋯​zNC​(1)​−zNC​−1(1)​zNC​(2)​−zNC​−1(2)​⋮zNC​(B)​−zNC​−1(B)​​∞∞⋮∞​​​
+Purpose of appending a large vector
+1e10=1010≈∞\verb|1e10| = 10^{10} \approx \infty1e10=1010≈∞ is appended to the last column of ΔB×NC\mathbf{\Delta}_{\gray{B \times N_C}}ΔB×NC​​ to (a) maintain the shape of dists as (B,NC)(B, N_C)(B,NC​), and (b) to force the last column of "opacticy" alpha ΔB×NC\mathbf{\Delta}_{\gray{B \times N_C}}ΔB×NC​​ to be 1 such that classic alpha compositing holds.
+Line 11\verb|11|11 forces RGB values rgb to lie in the range (0,1)(0, 1)(0,1), that is,
+cB×NC×3=[c1(1)c2(1)⋯cNC(1)c1(2)c2(2)⋯cNC(2)⋮⋮⋱⋮c1(B)c2(B)⋯cNC(B)]∀ci(b)∈(0,1) \mathbf{c}_{\gray{B \times N_C \times 3}} = \begin{bmatrix} \boldsymbol{c}_1^{(1)} & \boldsymbol{c}_2^{(1)} & \cdots & \boldsymbol{c}_{N_C}^{(1)} \\ \boldsymbol{c}_1^{(2)} & \boldsymbol{c}_2^{(2)} & \cdots & \boldsymbol{c}_{N_C}^{(2)} \\ \vdots & \vdots & \ddots & \vdots \\ \boldsymbol{c}_1^{(B)} & \boldsymbol{c}_2^{(B)} & \cdots & \boldsymbol{c}_{N_C}^{(B)} \\ \end{bmatrix} \forall \boldsymbol{c}_i^{(b)} \in (0, 1) cB×NC​×3​=​c1(1)​c1(2)​⋮c1(B)​​c2(1)​c2(2)​⋮c2(B)​​⋯⋯⋱⋯​cNC​(1)​cNC​(2)​⋮cNC​(B)​​​∀ci(b)​∈(0,1)
+Random noise (line 15\verb|15|15) is injected to volume density σi(b)\sigma_i^{(b)}σi(b)​ (line 15\verb|15|15) before it is rectified and raised to αi(b)\alpha_i^{(b)}αi(b)​ (lines 2\verb|2|2, 3\verb|3|3, and 22\verb|22|22). Let σ^i(b):=ReLU(σi(b)+U[0,1])\hat{\sigma}_i^{(b)} := \verb|ReLU| \left( \sigma_i^{(b)} + \mathcal{U}[0, 1] \right)σ^i(b)​:=ReLU(σi(b)​+U[0,1]) denote the recitified "opacity" of the iiith sample along the bbbth ray, then alpha for alpha compositing are
+AB×NC=1B×NC−exp⁡(σB×NC∗ΔB×NC)=[1−e−σ1(1)δ1(1)1−e−σ2(1)δ2(1)⋯1−e−σNC−1(1)δNC−1(1)1−e−∞1−e−σ1(2)δ1(2)1−e−σ2(2)δ2(2)⋯1−e−σNC−1(2)δNC−1(2)1−e−∞⋮⋮⋱⋮⋮1−e−σ1(B)δ1(B)1−e−σ2(B)δ2(B)⋯1−e−σNC−1(B)δNC−1(B)1−e−∞]=[α1(1)α2(1)⋯αNC(1)α1(2)α2(2)⋯αNC(2)⋮⋱⋮⋮α1(B)α2(B)⋯αNC(B)] \begin{align*} \mathbf{\Alpha}_{\gray{B \times N_C}} &= \boldsymbol{1}_{\gray{B \times N_C}} - \exp \left( \boldsymbol{\sigma}_{\gray{B \times N_C}} * \mathbf{\Delta}_{\gray{B \times N_C}} \right) \\ &= \begin{bmatrix} 1 - e^{- \sigma_1^{(1)} \delta_1^{(1)}} & 1 - e^{- \sigma_2^{(1)} \delta_2^{(1)}} & \cdots & 1 - e^{- \sigma_{N_C \blue{- 1}}^{(1)} \delta_{N_C \blue{- 1}}^{(1)}} & 1 \gray{- e^{-\infty}} \\ 1 - e^{- \sigma_1^{(2)} \delta_1^{(2)}} & 1 - e^{- \sigma_2^{(2)} \delta_2^{(2)}} & \cdots & 1 - e^{- \sigma_{N_C \blue{- 1}}^{(2)} \delta_{N_C \blue{- 1}}^{(2)}} & 1 \gray{- e^{-\infty}} \\ \vdots & \vdots & \ddots & \vdots & \vdots \\ 1 - e^{- \sigma_1^{(B)} \delta_1^{(B)}} & 1 - e^{- \sigma_2^{(B)} \delta_2^{(B)}} & \cdots & 1 - e^{- \sigma_{N_C \blue{- 1}}^{(B)} \delta_{N_C \blue{- 1}}^{(B)}} & 1 \gray{- e^{-\infty}} \end{bmatrix} \\ &= \begin{bmatrix} \alpha_1^{(1)} & \alpha_2^{(1)} & \cdots & \alpha_{N_C}^{(1)} \\ \alpha_1^{(2)} & \alpha_2^{(2)} & \cdots & \alpha_{N_C}^{(2)} \\ \vdots & \ddots & \vdots & \vdots \\ \alpha_1^{(B)} & \alpha_2^{(B)} & \cdots & \alpha_{N_C}^{(B)} \end{bmatrix} \end{align*} AB×NC​​​=1B×NC​​−exp(σB×NC​​∗ΔB×NC​​)=​1−e−σ1(1)​δ1(1)​1−e−σ1(2)​δ1(2)​⋮1−e−σ1(B)​δ1(B)​​1−e−σ2(1)​δ2(1)​1−e−σ2(2)​δ2(2)​⋮1−e−σ2(B)​δ2(B)​​⋯⋯⋱⋯​1−e−σNC​−1(1)​δNC​−1(1)​1−e−σNC​−1(2)​δNC​−1(2)​⋮1−e−σNC​−1(B)​δNC​−1(B)​​1−e−∞1−e−∞⋮1−e−∞​​=​α1(1)​α1(2)​⋮α1(B)​​α2(1)​α2(2)​⋱α2(B)​​⋯⋯⋮⋯​αNC​(1)​αNC​(2)​⋮αNC​(B)​​​​
+where ∗*∗ denotes the Hadamard product. torch.cumprod(…) from line 24\verb|24|24 to 26\verb|26|26 calculates the cumulative transmittance
+TB×(NC+1)=cumprod([1B×1∣ 1B×NC−A])=cumprod([1e−σ1(1)δ1(1)e−σ2(1)δ2(1)⋯e−σNC−1(1)δNC−1(1)01e−σ1(2)δ1(2)e−σ2(2)δ2(2)⋯e−σNC−1(2)δNC−1(2)0⋮⋮⋮⋱⋮⋮1e−σ1(B)δ1(B)e−σ2(B)δ2(B)⋯e−σNC−1(B)δNC−1(B)0])=[1e−σ1(1)δ1(1)e−σ1(1)δ1(1)−σ2(1)δ2(1)⋯exp⁡(−∑j=1NC−1σj(1)δj(1))01e−σ1(2)δ1(2)e−σ1(2)δ1(2)−σ2(2)δ2(2)⋯exp⁡(−∑j=1NC−1σj(2)δj(2))0⋮⋮⋮⋱⋮⋮1e−σ1(B)δ1(B)e−σ1(B)δ1(B)−σ2(B)δ2(B)⋯exp⁡(−∑j=1NC−1σj(B)δj(B))0]=[T1(1)T2(1)⋯TNC(1)0T1(2)T2(2)⋯TNC(2)0⋮⋮⋱⋮⋮T1(B)T2(B)⋯TNC(B)0] \begin{align*} \mathbf{T}_{\gray{B \times (N_C \blue{+ 1})}} &= \verb|cumprod| \left( \begin{bmatrix} \boldsymbol{1}_{\gray{B \times 1}} \left|\ \boldsymbol{1}_{\gray{B \times N_C}} - \mathbf{\Alpha} \right. \end{bmatrix} \right) \\ &= \verb|cumprod| \left( \begin{bmatrix} 1 & e^{- \sigma_1^{(1)} \delta_1^{(1)}} & e^{- \sigma_2^{(1)} \delta_2^{(1)}} & \cdots & e^{- \sigma_{N_C \blue{- 1}}^{(1)} \delta_{N_C \blue{- 1}}^{(1)}} & 0 \\ 1 & e^{- \sigma_1^{(2)} \delta_1^{(2)}} & e^{- \sigma_2^{(2)} \delta_2^{(2)}} & \cdots & e^{- \sigma_{N_C \blue{- 1}}^{(2)} \delta_{N_C \blue{- 1}}^{(2)}} & 0 \\ \vdots & \vdots & \vdots & \ddots & \vdots & \vdots \\ 1 & e^{- \sigma_1^{(B)} \delta_1^{(B)}} & e^{- \sigma_2^{(B)} \delta_2^{(B)}} & \cdots & e^{- \sigma_{N_C \blue{- 1}}^{(B)} \delta_{N_C \blue{- 1}}^{(B)}} & 0 \end{bmatrix} \right) \\ &= \begin{bmatrix} 1 & e^{- \sigma_1^{(1)} \delta_1^{(1)}} & e^{- \sigma_1^{(1)} \delta_1^{(1)} - \sigma_2^{(1)} \delta_2^{(1)}} & \cdots & \exp \left(-\sum_{j=1}^{N_C\blue{-1}} \sigma_j^{(1)} \delta_j^{(1)} \right) & 0 \\ 1 & e^{- \sigma_1^{(2)} \delta_1^{(2)}} & e^{- \sigma_1^{(2)} \delta_1^{(2)} - \sigma_2^{(2)} \delta_2^{(2)}} & \cdots & \exp \left(-\sum_{j=1}^{N_C\blue{-1}} \sigma_j^{(2)} \delta_j^{(2)} \right) & 0 \\ \vdots & \vdots & \vdots & \ddots & \vdots & \vdots \\ 1 & e^{- \sigma_1^{(B)} \delta_1^{(B)}} & e^{- \sigma_1^{(B)} \delta_1^{(B)} - \sigma_2^{(B)} \delta_2^{(B)}} & \cdots & \exp \left(-\sum_{j=1}^{N_C\blue{-1}} \sigma_j^{(B)} \delta_j^{(B)} \right) & 0 \end{bmatrix} \\ &= \begin{bmatrix} T_1^{(1)} & T_2^{(1)} & \cdots & T_{N_C}^{(1)} & \gray{0} \\ T_1^{(2)} & T_2^{(2)} & \cdots & T_{N_C}^{(2)} & \gray{0} \\ \vdots & \vdots & \ddots & \vdots & \gray{\vdots} \\ T_1^{(B)} & T_2^{(B)} & \cdots & T_{N_C}^{(B)} & \gray{0} \\ \end{bmatrix} \end{align*} TB×(NC​+1)​​=cumprod([1B×1​∣ 1B×NC​​−A​])=cumprod​​11⋮1​e−σ1(1)​δ1(1)​e−σ1(2)​δ1(2)​⋮e−σ1(B)​δ1(B)​​e−σ2(1)​δ2(1)​e−σ2(2)​δ2(2)​⋮e−σ2(B)​δ2(B)​​⋯⋯⋱⋯​e−σNC​−1(1)​δNC​−1(1)​e−σNC​−1(2)​δNC​−1(2)​⋮e−σNC​−1(B)​δNC​−1(B)​​00⋮0​​​=​11⋮1​e−σ1(1)​δ1(1)​e−σ1(2)​δ1(2)​⋮e−σ1(B)​δ1(B)​​e−σ1(1)​δ1(1)​−σ2(1)​δ2(1)​e−σ1(2)​δ1(2)​−σ2(2)​δ2(2)​⋮e−σ1(B)​δ1(B)​−σ2(B)​δ2(B)​​⋯⋯⋱⋯​exp(−∑j=1NC​−1​σj(1)​δj(1)​)exp(−∑j=1NC​−1​σj(2)​δj(2)​)⋮exp(−∑j=1NC​−1​σj(B)​δj(B)​)​00⋮0​​=​T1(1)​T1(2)​⋮T1(B)​​T2(1)​T2(2)​⋮T2(B)​​⋯⋯⋱⋯​TNC​(1)​TNC​(2)​⋮TNC​(B)​​00⋮0​​​
+The last column of T\mathbf{T}T is discarded to match the shape of A\mathbf{\Alpha}A. Rewriting weights (for points' colors) as wi(b):=αi(b)Ti(b)w_i^{(b)} := \alpha_i^{(b)}T_i^{(b)}wi(b)​:=αi(b)​Ti(b)​, weights is
+WB×NC=A∗T=[α1(1)T1(1)α2(1)T2(1)⋯αNC(1)TNC(1)α1(2)T1(2)α2(2)T2(2)⋯αNC(2)TNC(2)⋮⋮⋱⋮α1(B)T1(B)α2(B)T2(B)⋯αNC(B)TNC(B)]=[w1(1)w2(1)⋯wNC(1)w1(2)w2(2)⋯wNC(2)⋮⋮⋱⋮w1(B)w2(B)⋯wNC(B)] \begin{align*} \mathbf{W}_{\gray{B \times N_C}} &= \mathbf{\Alpha} * \mathbf{T} \\ &= \begin{bmatrix} \alpha_1^{(1)} \gray{T_1^{(1)}} & \alpha_2^{(1)} T_2^{(1)} & \cdots & \gray{\alpha_{N_C}^{(1)}} T_{N_C}^{(1)} \\ \alpha_1^{(2)} \gray{T_1^{(2)}} & \alpha_2^{(2)} T_2^{(2)} & \cdots & \gray{\alpha_{N_C}^{(2)}} T_{N_C}^{(2)} \\ \vdots & \vdots & \ddots & \vdots \\ \alpha_1^{(B)} \gray{T_1^{(B)}} & \alpha_2^{(B)} T_2^{(B)} & \cdots & \gray{\alpha_{N_C}^{(B)}} T_{N_C}^{(B)} \\ \end{bmatrix} \\ &= \begin{bmatrix} w_1^{(1)} & w_2^{(1)} & \cdots & w_{N_C}^{(1)} \\ w_1^{(2)} & w_2^{(2)} & \cdots & w_{N_C}^{(2)} \\ \vdots & \vdots & \ddots & \vdots \\ w_1^{(B)} & w_2^{(B)} & \cdots & w_{N_C}^{(B)} \\ \end{bmatrix} \end{align*} WB×NC​​​=A∗T=​α1(1)​T1(1)​α1(2)​T1(2)​⋮α1(B)​T1(B)​​α2(1)​T2(1)​α2(2)​T2(2)​⋮α2(B)​T2(B)​​⋯⋯⋱⋯​αNC​(1)​TNC​(1)​αNC​(2)​TNC​(2)​⋮αNC​(B)​TNC​(B)​​​=​w1(1)​w1(2)​⋮w1(B)​​w2(1)​w2(2)​⋮w2(B)​​⋯⋯⋱⋯​wNC​(1)​wNC​(2)​⋮wNC​(B)​​​​
+Recall that radiance is a weighted sum of colors of samples along a ray. This corresponds to line 28\verb|28|28, and the output rgb_map is
+CB×3=sum(W∗c)=[w1(1)c1(1)+w2(1)c2(1)+⋯+wNC(1)cNC(1)w1(2)c1(2)+w2(2)c2(2)+⋯+wNC(2)cNC(2)⋮w1(B)c1(B)+w2(B)c2(B)+⋯+wNC(B)cNC(B)]=[C(1)C(2)⋮C(B)] \begin{align*} \mathbf{C}_{\gray{B \times 3}} &= \verb|sum|\left(\mathbf{W} * \mathbf{c}\right) \\ &= \begin{bmatrix} w_1^{(1)} \boldsymbol{c}_1^{(1)} + w_2^{(1)} \boldsymbol{c}_2^{(1)} + \cdots + w_{N_C}^{(1)} \boldsymbol{c}_{N_C}^{(1)} \\ w_1^{(2)} \boldsymbol{c}_1^{(2)} + w_2^{(2)} \boldsymbol{c}_2^{(2)} + \cdots + w_{N_C}^{(2)} \boldsymbol{c}_{N_C}^{(2)} \\ \vdots \\ w_1^{(B)} \boldsymbol{c}_1^{(B)} + w_2^{(B)} \boldsymbol{c}_2^{(B)} + \cdots + w_{N_C}^{(B)} \boldsymbol{c}_{N_C}^{(B)} \\ \end{bmatrix} \\ &= \begin{bmatrix} \mathbf{C}^{(1)} \\ \mathbf{C}^{(2)} \\ \vdots \\ \mathbf{C}^{(B)} \end{bmatrix} \end{align*} CB×3​​=sum(W∗c)=​w1(1)​c1(1)​+w2(1)​c2(1)​+⋯+wNC​(1)​cNC​(1)​w1(2)​c1(2)​+w2(2)​c2(2)​+⋯+wNC​(2)​cNC​(2)​⋮w1(B)​c1(B)​+w2(B)​c2(B)​+⋯+wNC​(B)​cNC​(B)​​​=​C(1)C(2)⋮C(B)​​​
+rgb_map C\mathbf{C}C and weights W\mathbf{W}W, along with other values, are returned to render_rays(…).
+What else are returned?
+Content on the way. Stay tuned!
+Hierarchical sampling
+sample_pdf(…) in run_nerf_helpers.py performs hierarchical sampling via Monte Carlo method. It is invoked by
+```
+        …
+        z_samples = sample_pdf(z_vals_mid,
+                               weights[..., 1:-1],
+                               N_importance,
+                               det=(perturb==0.), # FALSE by default
+                               pytest=pytest)
+        …
+```
+in render_rays(…), where z_vals_mid is a tensor of midpoints of coarse sample disparities. Note that the leading and trailing columns of weights are excluded from the input such that
+W[..., 1:-1]=[w2(1)w3(1)⋯wNC−1(1)w2(2)w3(2)⋯wNC−1(2)⋮⋮⋱⋮w2(B)w3(B)⋯wNC−1(B)] \mathbf{W}\verb|[..., 1:-1]| = \begin{bmatrix} w_{\blue{2}}^{(1)} & w_3^{(1)} & \cdots & w_{N_C \blue{- 1}}^{(1)} \\ w_{\blue{2}}^{(2)} & w_3^{(2)} & \cdots & w_{N_C \blue{- 1}}^{(2)} \\ \vdots & \vdots & \ddots & \vdots \\ w_{\blue{2}}^{(B)} & w_3^{(B)} & \cdots & w_{N_C \blue{- 1}}^{(B)} \\ \end{bmatrix} W[..., 1:-1]=​w2(1)​w2(2)​⋮w2(B)​​w3(1)​w3(2)​⋮w3(B)​​⋯⋯⋱⋯​wNC​−1(1)​wNC​−1(2)​⋮wNC​−1(B)​​​
+```
+def sample_pdf(bins, weights, N_samples, det=False, pytest=False):
+    # get PDF
+    weights = weights + 1e-5 # prevent NaN
+    pdf = weights / torch.sum(weights, -1, keepdim=True)
+    cdf = torch.cumsum(pdf, -1)
+    cdf = torch.cat([torch.zeros_like(cdf[..., :1]), cdf], -1)  # (ray #, bin #)
+    # Here, `N_samples` refers to `N_importance`.
+    if det:
+        u = torch.linspace(0., 1., steps=N_samples)
+        u = u.expand(list(cdf.shape[:-1]) + [N_samples])
+    else:
+        u = torch.rand(list(cdf.shape[ :-1]) + [N_samples])
+    # if pytest, overwrite u with NumPy fixed random numbers
+    if pytest:
+        np.random.seed(0)
+        new_shape = list(cdf.shape[:-1]) + [N_samples]
+        if det:
+            u = np.linspace(0., 1., N_samples)
+            u = np.broadcast_to(u, new_shape)
+        else:
+            u = np.random.rand(*new_shape)
+        u = torch.Tensor(u)
+    # invert CDF
+    u = u.contiguous()
+    inds   = torch.searchsorted(cdf, u, right=True)
+    below  = torch.max(torch.zeros_like(inds-1), inds-1)
+    above  = torch.min((cdf.shape[-1]-1) * torch.ones_like(inds), inds)
+    inds_g = torch.stack([below, above], -1)  # (ray #, sample #, 2)
+
+    #cdf_g  = tf.gather(cdf , inds_g, axis=-1, batch_dims=len(inds_g.shape)-2)
+    #bins_g = tf.gather(bins, inds_g, axis=-1, batch_dims=len(inds_g.shape)-2)
+    matched_shape = [inds_g.shape[0], inds_g.shape[1], cdf.shape[-1]]
+    cdf_g  = torch.gather( cdf.unsqueeze(1).expand(matched_shape), 2, inds_g)
+    bins_g = torch.gather(bins.unsqueeze(1).expand(matched_shape), 2, inds_g)
+
+    denom = cdf_g[..., 1] - cdf_g[..., 0]
+    denom = torch.where(denom<1e-5, torch.ones_like(denom),
+                                    denom)
+    t = (u - cdf_g[..., 0]) / denom
+    samples =  bins_g[..., 0] + \
+              (bins_g[..., 1] - bins_g[..., 0]) * t
+    return samples # (ray #, sample #), unsorted along each ray
+```
+Line 4\verb|4|4 defines the probability pip_ipi​:=wi∑j=2NC−1wj:= \frac{w_i}{\sum_{j=\blue{2}}^{\blue{N_C-1}} w_j}:=∑j=2NC​−1​wj​wi​​ that a ray is stopped by a particle at depth zi+zi+12\frac{z_i + z_{i+1}}{2}2zi​+zi+1​​. This corresponds to the area under the histogram, shown above (first ray only).
+Lines 5\verb|5|5 and 6\verb|6|6 accumulate the area for the CDF H(z)H(z)H(z).
+What follows is key to Monte Carlo sampling. Line 12\verb|12|12 generates a batch uB×NF\mathbf{u}_{\gray{B \times N_F}}uB×NF​​ of random cumulative probabilities — "seeds". The above figure visualizes operations on u[0, :], i.e., NFN_FNF​ seeds on the first ray. They fall into the "bins" at line 25\verb|25|25 through comparison against the cumulative probabilities at the boundaries. torch.searchsorted(…) returns the positions (indices) inds ∈RB×NF\in \mathbb{R}^{B \times N_F}∈RB×NF​ of those random "seeds".
+Quicker indicing
+torch.Tensor.contiguous() returns a tensor with identical data but contiguous in memory. It is called before torch.searchsorted(…) for performance concern.
+Lower bounds of the "bins" are collected as below at line 26\verb|26|26, and upper bounds are gathered as above at line 27\verb|27|27. inds_g ∈RB×NF×2\in \mathbb{R}^{B \times N_F \times 2}∈RB×NF​×2 combines below and above at line 28\verb|28|28. torch.gather(…) at lines 33\verb|33|33 and 34\verb|34|34 determine how NFN_FNF​ points along each ray are distributed according to indices inds_g, or effectively the number of "seeds" in each "bin".
+Finally, fine samples are found through similarity, whose concept is illustrated above. Indices 0 correspond to below, and indices 1 attach to above. Given cumulative probabilities u, there holds
+u−cdf[..., 0]cdf[..., 1]−cdf[..., 0]=z_samples−bins_g[..., 0]bins_g[..., 1]−bins_g[..., 0] \frac{\mathbf{u} - \verb|cdf[..., 0]|}{\verb|cdf[..., 1]| - \verb|cdf[..., 0]|} = \frac{\gray{\verb|z_|}\verb|samples| - \verb|bins_g[..., 0]|}{\verb|bins_g[..., 1]| - \verb|bins_g[..., 0]|} cdf[..., 1]−cdf[..., 0]u−cdf[..., 0]​=bins_g[..., 1]−bins_g[..., 0]z_samples−bins_g[..., 0]​
+Line 36\verb|36|36 defines denom:=cdf[..., 1]−cdf[..., 0]\verb|denom| := \verb|cdf[..., 1]| - \verb|cdf[..., 0]|denom:=cdf[..., 1]−cdf[..., 0], and line 39\verb|39|39 further denotes tB×NF:=u−cdf[..., 0]denom\mathbf{t}_{\gray{B \times N_F}} := \frac{\mathbf{u} - \verb|cdf[..., 0]|}{\verb|denom|}tB×NF​​:=denomu−cdf[..., 0]​, then
+tB×NF=z_samples−bins_g[..., 0]bins_g[..., 1]−bins_g[..., 0] \mathbf{t}_{\gray{B \times N_F}} = \frac{\gray{\verb|z_|}\verb|samples| - \verb|bins_g[..., 0]|}{\verb|bins_g[..., 1]| - \verb|bins_g[..., 0]|} tB×NF​​=bins_g[..., 1]−bins_g[..., 0]z_samples−bins_g[..., 0]​
+Hence, lines 40\verb|40|40 and 41\verb|41|41 determine the unsorted output. Fine samples are expressed in offset from (midpoints of) coarse samples bins_g[..., 0].
+z_samples=bins_g[..., 0]+t∗(bins_g[..., 1]−bins_g[..., 0]) \gray{\verb|z_|}\verb|samples| = \verb|bins_g[..., 0]| + \mathbf{t} * \left( \verb|bins_g[..., 1]| - \verb|bins_g[..., 0]| \right) z_samples=bins_g[..., 0]+t∗(bins_g[..., 1]−bins_g[..., 0])
+Optimization
+```
+    …
+    for i in trange(start, N_iters):
+        …
+        optimizer.zero_grad()
+        img_loss = img2mse(rgb, target_s)
+        trans = extras['raw'][...,-1]
+        loss = img_loss
+        psnr = mse2psnr(img_loss)
+
+        if 'rgb0' in extras:
+            img_loss0 = img2mse(extras['rgb0'], target_s)
+            loss = loss + img_loss0
+            psnr0 = mse2psnr(img_loss0)
+
+        loss.backward()
+        optimizer.step()
+
+        # NOTE: IMPORTANT!
+        ###   update learning rate   ###
+        decay_rate = 0.1
+        decay_steps = args.lrate_decay * 1000
+        new_lrate = args.lrate * (decay_rate ** (global_step / decay_steps))
+        for param_group in optimizer.param_groups:
+            param_group['lr'] = new_lrate
+        ################################
+        …
+```
+Radiance rgb ∈RB×3\in \mathbb{R}^{B \times 3}∈RB×3 is compared against the ground truth target_s to obtain the MSE loss at line 5\verb|5|5. The total loss also includes that of the coarse network (line 12\verb|12|12). The coarse and fine network are jointly optimized at lines 15\verb|15|15 and 16\verb|16|16. Eventually, learning rate decays from line 20\verb|20|20 to 24\verb|24|24.
+Summary
+This post derives the volmue rendering integral and its numrical quadrature. Also explained is its connection with classical alpha compositing. The second part elaborates on the implementation of the rendering pipeline. Illustrations are included to assist understanding procedures such as rays generation and Monte Carlo sampling. Most importantly, the article clearly specifies the physical meaning of each variable and provides the mathematical operation for each statement. To sum, the blog functions as a complete guide for in-depth comprehension of NeRF.
+References
+Chapter 2.1 in Computer Vision: Algorithms and Applications
+Foundamentals of Computer Graphics
+NeRF: Representing Scenes as Neural Radiance Fields for View Synthesis
+NeRF PyTorch implementation by Yen-Chen Lin
+Neural Radiance Field's Volume Rendering 公式分析
+Optical Models for Direct Volume Rendering
+Part 1 of the SIGGRAPH 2021 course on Advances in Neural Rendering
+深度解读yenchenlin/nerf-pytorch项目
+Please use the following BibTeX to cite this post:
+```
+@misc{yyu2022nerfrendering,
+    author = {Yu, Yue},
+    title  = {NeRF: A Volume Rendering Perspective},
+    year   = {2022},
+    howpublished = {\url{https://yconquesty.github.io/blog/ml/nerf/nerf_rendering.html}}
+}
+```
+Appendix
+Content on the way. Stay tuned!
+Errata
+TimeModification
+Aug 31 2022Initial release
+Nov 24 2022Rectify reference list
+Dec 2 2022Add BibTeX for citation
+Apr 20 2023Elaborate on static compute graph

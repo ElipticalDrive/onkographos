@@ -1,0 +1,117 @@
+# FID Evaluation
+
+Also called: Fréchet Inception Distance
+
+## Overview
+FID evaluates the quality of generated images by measuring the similarity between the distribution of real images and the distribution of generated images in a high-dimensional feature space [S1]. It sets itself apart from pixel-wise metrics like PSNR or SSIM by assessing perceptual quality and diversity rather than exact pixel reconstruction, making it suitable for evaluating the visual fidelity of radiance field renderings [S1]. It builds on [Quantitative Evaluation Metrics](9928-quantitative-evaluation-metrics.md) by providing a distributional comparison rather than a per-pixel error metric.
+
+## How it works
+**Inputs:**
+1.  A set of $N$ real images $\mathcal{R} = \{r_1, \dots, r_N\}$.
+2.  A set of $M$ generated images $\mathcal{G} = \{g_1, \dots, g_M\}$.
+3.  A pretrained Inception-v3 model [S1].
+
+**Outputs:**
+A single scalar score: the Fréchet Inception Distance. Lower scores indicate higher similarity in visual appearance and diversity [S1].
+
+**Data Structures:**
+*   **Feature Vectors:** For each image, a feature vector $z \in \mathbb{R}^k$ is extracted from the pool3 layer of the Inception-v3 network. The dimension $k$ is typically 2048 [S1].
+*   **Statistics:** Two multivariate Gaussian distributions are characterized by their mean vectors $\mu_r, \mu_g \in \mathbb{R}^k$ and covariance matrices $\Sigma_r, \Sigma_g \in \mathbb{R}^{k \times k}$.
+
+**Steps:**
+1.  **Preprocessing:** Resize all images to a fixed resolution (typically $128 \times 128$) using antialiased resampling (area interpolation) if necessary, as FID is sensitive to resizing artifacts [S2]. Ensure backgrounds are handled consistently (e.g., empty background value 0/gray) [S2].
+2.  **Feature Extraction:** Pass each image through the pretrained Inception-v3 model. Extract the feature vector $z$ from the pool3 layer for each image.
+3.  **Statistics Calculation:** Compute the sample mean and covariance for the real and generated feature sets:
+    $$ \mu_r = \frac{1}{N} \sum_{i=1}^N z_{r,i}, \quad \Sigma_r = \frac{1}{N} \sum_{i=1}^N (z_{r,i} - \mu_r)(z_{r,i} - \mu_r)^T $$
+    $$ \mu_g = \frac{1}{M} \sum_{j=1}^M z_{g,j}, \quad \Sigma_g = \frac{1}{M} \sum_{j=1}^M (z_{g,j} - \mu_g)(z_{g,j} - \mu_g)^T $$
+4.  **Distance Calculation:** Compute the Fréchet distance between the two Gaussian distributions:
+    $$ \text{FID} = \|\mu_r - \mu_g\|^2 + \text{Tr}(\Sigma_r + \Sigma_g - 2(\Sigma_r \Sigma_g)^{1/2}) $$
+    where $\text{Tr}(\cdot)$ is the trace operator and $(\Sigma_r \Sigma_g)^{1/2}$ is the matrix square root [S1].
+
+**Parameters:**
+*   **Resolution:** $128 \times 128$ is standard [S2].
+*   **Resampling:** Antialiased (area interpolation) is required if resizing is needed [S2].
+*   **Background:** For fair comparison in radiance field contexts, evaluate on empty backgrounds (value 0/gray) [S2].
+
+**Edge Cases and Pitfalls:**
+*   **Sample Size:** FID can be biased by small sample sizes. Ensure $N$ and $M$ are sufficiently large and consistent across comparisons [S1].
+*   **Resizing Sensitivity:** FID is sensitive to resizing methods. Always use antialiased resampling [S2].
+*   **Implementation Consistency:** When comparing against other methods, compute FID under identical settings by modifying their public implementations if necessary [S2].
+
+**Pseudocode:**
+> **Unverified code.** The code below did not pass a test run against a reference implementation, or no test fits it, so it may contain errors.
+
+```python
+import numpy as np
+from scipy.linalg import sqrtm
+
+def extract_features(images, inception_model):
+    """
+    Extracts pool3 features from images using a pretrained Inception-v3 model.
+    images: array of shape (N, H, W, C)
+    Returns: array of shape (N, 2048)
+    """
+    # Preprocess images: resize to 128x128 with antialiasing if needed
+    # Pass through Inception-v3 and extract pool3 layer output
+    features = []
+    for img in images:
+        # Placeholder for actual model inference
+        feat = inception_model.predict(img) 
+        features.append(feat)
+    return np.array(features)
+
+def calculate_fid(real_features, generated_features):
+    """
+    Calculates the Fréchet Inception Distance between two sets of features.
+    real_features: array of shape (N, 2048)
+    generated_features: array of shape (M, 2048)
+    Returns: float FID score
+    """
+    mu_r = np.mean(real_features, axis=0)
+    sigma_r = np.cov(real_features, rowvar=False)
+    
+    mu_g = np.mean(generated_features, axis=0)
+    sigma_g = np.cov(generated_features, rowvar=False)
+    
+    diff = mu_r - mu_g
+    
+    # Compute the trace of the sum of covariances minus 2 times the square root of the product
+    # Note: sqrtm computes the matrix square root
+    covmean = sqrtm(sigma_r.dot(sigma_g))
+    
+    # Handle numerical errors
+    if np.iscomplexobj(covmean):
+        covmean = covmean.real
+    
+    fid = diff.dot(diff) + np.trace(sigma_r + sigma_g - 2.0 * covmean)
+    return fid
+
+# Usage
+# real_imgs = load_real_images()
+# gen_imgs = load_generated_images()
+# # Resize to 128x128 with antialiasing
+# real_feats = extract_features(real_imgs, model)
+# gen_feats = extract_features(gen_imgs, model)
+# fid_score = calculate_fid(real_feats, gen_feats)
+```
+
+## Subtopics
+
+### Kernel Inception Distance (KID)
+KID is an extension of FID that measures the Maximum Mean Discrepancy between feature distributions using kernel functions [S1]. It provides an unbiased estimation of the true distance between distributions, ensuring a more accurate representation of similarity in feature space [S1]. KID is robust to the choice of sample size, minimizing variability from different sample sizes, and requires fewer samples for calculation compared to alternative metrics [S1].
+
+## Operating characteristics
+*   **Time Complexity:** Dominated by the feature extraction step using the Inception-v3 model, which is computationally expensive. The statistical calculation is $O(k^2)$ or $O(k^3)$ depending on the matrix square root implementation, where $k=2048$ [S1].
+*   **Memory Complexity:** Requires storing feature vectors for all real and generated images. For $N$ images, this is $O(N \cdot k)$ [S1].
+*   **Strengths:** Correlates well with human perception of image quality and diversity [S1]. Robust to minor pixel-level variations that PSNR/SSIM penalize heavily.
+*   **Limitations:** Sensitive to sample size and resizing methods [S1, S2]. Does not provide per-image scores, only a global distributional metric. Computationally heavy due to the deep neural network [S1].
+*   **When to Use:** When evaluating the perceptual quality and diversity of generated radiance field renderings, especially when pixel-perfect accuracy is less important than visual fidelity [S1].
+*   **When Not to Use:** When per-pixel accuracy is required (use PSNR/SSIM) or when computational resources are extremely limited [S1].
+
+## Background
+FID was introduced as a metric for evaluating generative models and image synthesis tasks [S1]. It uses the Inception-v3 model pretrained on ImageNet to extract features [S1]. It has been adopted in radiance field evaluation to assess the visual quality of generated scenes, often in conjunction with other metrics like PSNR and SSIM [S1, S3]. It is particularly useful for comparing the diversity and realism of generated images against real datasets [S1].
+
+## Sources
+[S1] Semantically-aware Neural Radiance Fields for Visual Scene Understanding: A Comprehensive Review, https://link.springer.com/article/10.1007/s11263-025-02663-5, fetched 2026-10-27
+[S2] Shape, Pose, and Appearance from a Single Image via Bootstrapped Radiance Field Inversion, https://doi.org/10.1109/cvpr52729.2023.00427, fetched 2026-10-26
+[S3] Controllable Radiance Fields for Dynamic Face Synthesis, https://doi.org/10.1109/3dv57658.2022.00075, fetched 2026-10-29

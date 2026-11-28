@@ -1,0 +1,107 @@
+# Multi-Resolution Sparse Hash Grid
+
+Also called: Hash-based Multi-Resolution Voxel Grid, MrHash Grid
+
+## Overview
+The Multi-Resolution Sparse Hash Grid (MrHash) is a GPU-accelerated sparse volumetric representation that stores active voxel blocks of varying internal resolutions within a single flat hash table [S1]. It solves the problem of memory inefficiency and access latency in large-scale 3D reconstruction by maintaining constant metric block sizes while allowing internal voxel density to vary [S1]. Unlike fixed-voxel methods [Nießner et al. 2013; Oleynikova et al. 2017] or hierarchical tree structures [Museth 2013, 2021], MrHash avoids recursive descent and pointer overhead, achieving average $O(1)$ access time for insertion, deletion, and neighborhood queries [S1].
+
+## How it works
+**Inputs:** Input depth images or TSDF volumes; a predefined set of resolution levels $n \in \{0, \dots, N_{levels}-1\}$; a hash table size $n_{\text{hash}}$; a bucket capacity $N$ for collision resolution.
+**Outputs:** A hash table $\mathbf{H}$ mapping spatial keys to voxel block pointers; a set of resolution-specific memory heaps $\mathbf{h}_n$.
+
+**Data Structures:**
+1.  **Hash Table $\mathbf{H}$**: An array of size $n_{\text{hash}}$. Each entry $j$ contains:
+    *   $\mathbf{b}_j \in \mathbb{Z}^3$: Integer coordinates of the voxel block origin (spatial key).
+    *   $o_j \in \mathbb{N}$: Auxiliary offset for collision resolution.
+    *   $t_j \in \mathbb{Z}$: Pointer to the voxel block data in GPU memory.
+    *   $n_j \in \mathbb{N}$: Index of the resolution level corresponding to heap $\mathbf{h}_n$.
+2.  **Heaps $\mathbf{h}_n$**: For each resolution level $n$, a contiguous memory block (heap) storing voxel data. Blocks are allocated from the heap corresponding to $n_j$.
+3.  **Collision Buckets**: Each hash entry maintains a fixed-size bucket for up to $N$ voxel blocks. Overflow is handled by appending blocks to a per-entry linked list [S1].
+
+**Hash Function:**
+The spatial key $(x, y, z)$ is mapped to a bucket index using:
+$$H(x, y, z) = (x \cdot p_1 \oplus y \cdot p_2 \oplus z \cdot p_3) \bmod n_{\text{hash}}$$
+where $p_1 = 73856093$, $p_2 = 19349669$, $p_3 = 83492791$ are large prime numbers [S1, Teschner et al. 2003].
+
+**Algorithm Steps:**
+1.  **Block Allocation via DDA**: For each input ray or integration step, use Digital Differential Analyzer (DDA) [Amanatides and Woo 1987] to efficiently identify all intersected voxel blocks in world space [S1].
+2.  **Key Generation**: For each intersected block, compute its integer origin coordinates $(x, y, z)$ based on the block's metric size and the current resolution level $n$.
+3.  **Hashing**: Compute the hash index $idx = H(x, y, z)$.
+4.  **Collision Resolution**:
+    *   Check the fixed-size bucket at $\mathbf{H}[idx]$.
+    *   If the block $(x, y, z)$ already exists in the bucket (verified by comparing $\mathbf{b}_j$), update the existing entry.
+    *   If the bucket is full ($N$ entries), append the new block to the per-entry linked list [S1].
+    *   If the block is new, allocate a new voxel block from the heap $\mathbf{h}_{n_j}$ corresponding to the resolution level $n$.
+5.  **Entry Update**: Store the block's origin $\mathbf{b}_j$, pointer $t_j$, resolution index $n_j$, and auxiliary offset $o_j$ in the hash table entry.
+
+**Pseudocode:**
+> **Unverified code.** The code below did not pass a test run against a reference implementation, or no test fits it, so it may contain errors.
+
+```python
+def integrate_voxel_block(hash_table, heaps, block_origin, resolution_level, bucket_capacity):
+    """
+    Integrates a voxel block into the multi-resolution hash grid.
+    
+    Args:
+        hash_table: List of hash entries, size n_hash.
+        heaps: List of memory heaps, one per resolution level.
+        block_origin: Tuple (x, y, z) of integer block coordinates.
+        resolution_level: Integer index n for the current resolution.
+        bucket_capacity: Integer N, max blocks per fixed bucket.
+        
+    Returns:
+        Pointer to the voxel block data.
+    """
+    x, y, z = block_origin
+    p1, p2, p3 = 73856093, 19349669, 83492791
+    n_hash = len(hash_table)
+    
+    # Compute hash index
+    hash_idx = (x * p1 ^ y * p2 ^ z * p3) % n_hash
+    
+    # Check existing entries in the fixed-size bucket
+    entry = hash_table[hash_idx]
+    for i in range(bucket_capacity):
+        if entry.b[i] is not None:
+            if entry.b[i] == (x, y, z):
+                # Block exists, update pointer if needed
+                return entry.t[i]
+    
+    # Block not found in fixed bucket, check linked list if implemented
+    # For simplicity, assume overflow handling is external or appended
+    # Allocate new block from the heap corresponding to resolution_level
+    new_block_ptr = allocate_from_heap(heaps[resolution_level])
+    
+    # Create new entry
+    new_entry = HashEntry(
+        b=[(x, y, z)] + [None] * (bucket_capacity - 1),
+        o=[0] * bucket_capacity,
+        t=[new_block_ptr] + [0] * (bucket_capacity - 1),
+        n=[resolution_level] * bucket_capacity
+    )
+    
+    # Insert into first available slot in bucket
+    entry.b[0] = (x, y, z)
+    entry.t[0] = new_block_ptr
+    entry.n[0] = resolution_level
+    
+    return new_block_ptr
+```
+
+**Edge Cases and Pitfalls:**
+*   **Hash Collisions**: Handled by fixed-size buckets and linked lists. Overflow can degrade performance if not managed [S1].
+*   **Precision**: Integer coordinates must be computed accurately to avoid misalignment.
+*   **Memory Coherence**: GPU memory indirection and dynamic branching can impact performance; ensure coalesced memory access where possible [S1].
+
+## Operating characteristics
+*   **Time Complexity**: Average $O(1)$ for insertion, deletion, and neighborhood queries [S1]. This avoids the $O(\log n)$ cost of octree hierarchies [S1].
+*   **Memory Complexity**: Sparse storage; only active voxel blocks are stored. Memory usage scales with the number of active blocks, not the total volume [S1].
+*   **Performance**: Efficient for large-scale scene reconstruction without predefined spatial bounds [S1]. GPU-friendly due to flat structure and reduced pointer chasing [S1].
+*   **Strengths**: Constant-time access, no hierarchical overhead, efficient parallel execution on GPUs [S1].
+*   **Limitations**: Hash collisions can cause overflow; memory locality may be suboptimal compared to dense grids [S1].
+
+## Background
+The Multi-Resolution Sparse Hash Grid was introduced in "Resolution Where It Counts: Hash-based GPU-Accelerated 3D ..." [S1]. It builds on earlier work in voxel hashing [Nießner et al. 2013; Oleynikova et al. 2017] and hash-based collision resolution [Teschner et al. 2003]. The method addresses the limitations of fixed-voxel and tree-based approaches by providing a unified, non-hierarchical structure for multi-resolution voxel data [S1].
+
+## Sources
+[S1] Resolution Where It Counts: Hash-based GPU-Accelerated 3D ..., https://arxiv.org/abs/2511.21459, fetched 2026-10-29

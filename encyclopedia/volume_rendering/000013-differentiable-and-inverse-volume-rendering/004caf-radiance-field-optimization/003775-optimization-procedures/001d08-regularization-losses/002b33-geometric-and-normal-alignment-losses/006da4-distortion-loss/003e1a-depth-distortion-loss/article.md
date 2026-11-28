@@ -1,0 +1,125 @@
+# Depth Distortion Loss
+Also called: DD Loss, L2 Depth Distortion, Nested Depth Distortion
+## Overview
+Depth Distortion Loss (DD Loss) is a regularization term used in differentiable volume rendering and Gaussian Splatting optimization to penalize the spread of accumulated weights along a view ray [S1, S2]. It encourages primitives to concentrate around a single depth plane, effectively modeling an opaque surface [S1]. It sets itself apart from standard depth supervision by operating directly on the internal weight distribution of the volume rendering equation rather than comparing rendered pixels to ground truth images [S1]. It is a specific instance of the broader Distortion Loss family [2755-distortion-loss.md].
+
+## How it works
+**Inputs and Outputs**
+*   **Inputs:**
+    *   $\mathbf{x}$: A 2D pixel coordinate.
+    *   View ray direction and origin.
+    *   For each of the $N$ Gaussians intersecting the ray:
+        *   $d_k$: Raw depth of the Gaussian center along the view ray.
+        *   $o_k$: Intrinsic opacity of Gaussian $k$.
+        *   $\mathcal{G}_k^{2D}(\mathbf{x})$: 2D Gaussian density value at pixel $\mathbf{x}$.
+        *   $T_k$: Transmittance accumulated up to (but not including) Gaussian $k$.
+*   **Output:** A scalar loss value $\mathcal{L}$ for the pixel.
+
+**Data Structures**
+Standard per-Gaussian attributes (position, covariance, opacity, color) are used [S1]. For the current ray, the algorithm maintains arrays or registers for weights $\omega_k$, NDC depths $m_k$, and three running accumulators $A$, $D$, and $D^2$ [S1].
+
+**Formula**
+The Depth Distortion loss is defined as the sum over all pairs of Gaussians of the squared distance between their NDC-transformed depths, weighted by their rendering weights [S1, S2]:
+$$
+\mathcal{L} = \sum_{i=0}^{N-1} \sum_{j=0}^{i-1} \omega_i \omega_j (m_i - m_j)^2
+$$
+where the rendering weight is $\omega_k = o_k \mathcal{G}_k^{2D}(\mathbf{x}) T_k$ [S2], and $m_k = \text{NDC}(d_k)$ is the depth transformed to normalized device coordinates [S1]. This expands to an efficient $O(N)$ nested form:
+$$
+\mathcal{L} = \sum_{i=0}^{N-1} \omega_i \left( m_i^2 A_{i-1} + D_{i-1}^2 - 2m_i D_{i-1} \right)
+$$
+where $A_{i-1} = \sum_{j=0}^{i-1} \omega_j$, $D_{i-1} = \sum_{j=0}^{i-1} \omega_j m_j$, and $D_{i-1}^2 = \sum_{j=0}^{i-1} \omega_j m_j^2$ [S1].
+
+**Steps**
+1. For pixel $\mathbf{x}$, gather all $N$ Gaussians intersecting the view ray and sort them front-to-back by raw depth $d_k$ [S1].
+2. Compute the 2D Gaussian density $\mathcal{G}_k^{2D}(\mathbf{x})$ and transmittance $T_k$ for each Gaussian [S2].
+3. Compute the rendering weight $\omega_k = o_k \mathcal{G}_k^{2D}(\mathbf{x}) T_k$ for each Gaussian [S2].
+4. Transform each raw depth $d_k$ to NDC space $m_k = \text{NDC}(d_k)$ using near plane $0.2$ and far plane $1000$ [S1].
+5. Initialize accumulators $A = 0$, $D = 0$, $D2 = 0$, and loss $\mathcal{L} = 0$ [S1].
+6. Iterate $i$ from $0$ to $N-1$: add $\omega_i (m_i^2 A + D2 - 2m_i D)$ to $\mathcal{L}$, then update $A \leftarrow A + \omega_i$, $D \leftarrow D + \omega_i m_i$, $D2 \leftarrow D2 + \omega_i m_i^2$ [S1].
+7. Back-propagate the gradient of $\mathcal{L}$ back-to-front through the intersection depths $m_i$ to update the Gaussians [S1].
+
+**Pseudocode**
+> **Unverified code.** The code below did not pass a test run against a reference implementation, or no test fits it, so it may contain errors.
+
+```python
+def depth_distortion_loss(gaussians, near_plane=0.2, far_plane=1000.0):
+    """
+    Compute Depth Distortion Loss using the nested O(N) formulation.
+    
+    Args:
+        gaussians: List of dicts/objects with keys:
+                   'depth': float, raw depth d_k
+                   'opacity': float, o_k
+                   'density_2d': float, G_k^2D(x)
+                   'transmittance': float, T_k
+        near_plane: float, NDC near plane (default 0.2)
+        far_plane: float, NDC far plane (default 1000.0)
+    Returns:
+        float: The DD loss value
+    """
+    # Sort front-to-back by raw depth
+    sorted_gs = sorted(gaussians, key=lambda g: g['depth'])
+    n = len(sorted_gs)
+    if n == 0:
+        return 0.0
+        
+    # Precompute weights and NDC depths
+    weights = []
+    ndc_depths = []
+    for g in sorted_gs:
+        w = g['opacity'] * g['density_2d'] * g['transmittance']
+        weights.append(w)
+        # Standard linear NDC mapping: [near, far] -> [-1, 1]
+        m = (2.0 * g['depth'] - (near_plane + far_plane)) / (far_plane - near_plane)
+        ndc_depths.append(m)
+        
+    loss = 0.0
+    acc_A = 0.0
+    acc_D = 0.0
+    acc_D2 = 0.0
+    
+    for i in range(n):
+        w = weights[i]
+        m = ndc_depths[i]
+        # Add nested term using accumulators from previous steps
+        loss += w * (m * m * acc_A + acc_D2 - 2.0 * m * acc_D)
+        # Update accumulators for next step
+        acc_A += w
+        acc_D += w * m
+        acc_D2 += w * m * m
+        
+    return loss
+```
+
+**Parameters**
+*   $\lambda_{dist}$: Weight for the distortion loss term in the total loss function. Typical value: $0.1$ [S4].
+*   NDC near plane: $0.2$ [S1].
+*   NDC far plane: $1000$ [S1].
+
+**Edge Cases and Pitfalls**
+*   **Opaque Surface Assumption:** The loss implicitly assumes an opaque surface, which reduces the ability to model complex light transport and transparent structures [S2].
+*   **Oversmoothing:** The loss tends to produce oversmoothed depth reconstructions [S2].
+*   **Scene Divergence:** It may cause the scene reconstruction to diverge from accurate mean depth maps in scenes that do not conform to the opaque surface assumption [S2].
+*   **Gradient Flow:** Gradients must be back-propagated back-to-front through the intersection depths to encourage Gaussians to move tightly together [S1].
+
+## Subtopics
+
+### LE3D Training Loss
+Incorporates Depth Distortion Loss ($R_{dist}$) into a broader training objective: $L = L_\psi + \lambda_T R_T + \lambda_{dist} R_{dist} + \lambda_{nf} R_{nf}$, where $L_\psi$ is a weighted L2 loss, $R_T$ is a transmittance regularization, and $R_{nf}$ is a near-far regularization [S4]. The distortion weight $\lambda_{dist}$ is set to $0.1$ [S4].
+
+## Operating characteristics
+*   **Time Complexity:** $O(N)$ per pixel using the nested formulation, where $N$ is the number of Gaussians along the ray [S1].
+*   **Memory Complexity:** $O(N)$ to store weights, NDC depths, and accumulators for the current ray [G].
+*   **Strengths:** Effectively pushes Gaussians towards a surface, improving depth accuracy for opaque scenes [S1].
+*   **Limitations:** Fails to model transparency and complex light transport; causes oversmoothing [S2].
+*   **When to Use:** When reconstructing opaque surfaces and depth accuracy is prioritized over transparency modeling [S1].
+*   **When Not to Use:** For scenes with significant transparency, subsurface scattering, or complex light transport [S2].
+
+## Background
+The Depth Distortion Loss was introduced in the context of Gaussian Splatting for RGB scene reconstruction to regularize depth estimation by pushing Gaussians towards a surface [S1]. It is based on the observation that standard approaches in multi-view settings use this loss to encourage weight concentration [S1]. The method was further analyzed in "Time of the Flight of the Gaussians," which highlighted its implicit opaque surface assumption and tendency to oversmooth [S2]. It is also used in the LE3D framework for view synthesis [S4]. The implementation is based on Sun et al. 2022b and is powered by tile-based rendering [S1].
+
+## Sources
+[S1] 2D Gaussian Splatting for Geometrically Accurate Radiance Fields, https://doi.org/10.1145/3641519.3657428, fetched 2026-10-27
+[S2] Time of the Flight of the Gaussians: Optimizing Depth Indirectly in Dynamic Radiance Fields, https://doi.org/10.1109/cvpr52734.2025.01958, fetched 2026-10-26
+[S3] SpaceCollectors/dust3r-3dgs, https://github.com/SpaceCollectors/dust3r-3dgs, fetched 2026-10-27 (unofficial)
+[S4] Lighting Every Darkness with 3DGS: Fast Training and Real-Time Rendering for HDR View Synthesis, https://doi.org/10.52202/079017-2549, fetched 2026-10-26

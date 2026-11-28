@@ -1,0 +1,78 @@
+--- v001.md
++++ v002.md
+@@ -4,56 +4,34 @@
+ 
+ ## Overview
+-View Ordering Strategies are training-time techniques for 3D Gaussian Splatting that replace randomized view shuffling with deterministic sequences to optimize Gaussian caching and reduce communication overhead [S1]. Unlike [LiTe-GS](13085-lite-gs.md) which focuses on memory-efficient rendering, these strategies specifically target the efficiency of the CPU-based optimizer by structuring the order in which training views are processed [S1].
++View ordering strategies determine the sequence in which training views are processed during 3D Gaussian Splatting optimization to improve training efficiency and stability [S1]. Unlike randomized shuffling, these methods leverage geometric or visibility information to reduce communication overhead between CPU and GPU memory [S1]. They are primarily used in conjunction with Gaussian caching mechanisms to minimize redundant data transfers [S1].
+ 
+ ## How it works
+-**Inputs:** A set of training views $V = \{v_1, \dots, v_N\}$, each with a camera pose $P_i$ and a precomputed set of visible Gaussians $G_i$.
+-**Outputs:** A permutation $\pi$ of indices $\{1, \dots, N\}$ defining the training sequence.
++**Inputs:** A set of training views $V = \{v_1, \dots, v_N\}$, their camera poses, and the current set of 3D Gaussians $G$.
++**Outputs:** A permutation $\pi$ of view indices representing the processing order.
+ 
+-**Data Structures:**
+-*   `views`: List of view objects containing camera pose and visibility mask.
+-*   `gaussian_count`: Array of size $N$, where `gaussian_count[i]` is the number of Gaussians visible in view $i$.
+-*   `overlap_matrix`: $N \times N$ matrix where `overlap_matrix[i][j]` is the number of Gaussians visible in both view $i$ and view $j$.
++The strategies operate by sorting the views based on specific criteria:
+ 
+-**Steps:**
++1.  **Random Order:** Views are shuffled uniformly at random. This serves as the baseline for comparison [S1].
++2.  **Camera Order:** Views are sorted by the coordinate of their camera center along the scene’s principal axis [S1]. This creates a spatially coherent traversal path [S1].
++3.  **GS Count Order:** Views are sorted in descending order by the number of Gaussians visible in each view [S1]. Prioritizing views with higher Gaussian counts allows the CPU Adam optimizer to update a larger number of Gaussians earlier in the training process, thereby reducing its relative overhead [S1].
++4.  **TSP Order:** Views are ordered using a Traveling Salesperson Problem (TSP) heuristic to find a sequence that maximizes the overlap of visible Gaussians between successive views [S1]. This strategy is specifically designed to enhance the effectiveness of Gaussian caching by keeping frequently accessed Gaussians resident in GPU memory [S1].
+ 
+-1.  **Precompute Visibility:** For each view, determine the set of visible Gaussians. This requires frustum culling or ray casting against the Gaussian primitives [S1].
+-2.  **Select Strategy:** Choose one of the following ordering methods:
++**Edge Cases and Pitfalls:**
++*   **Visibility Computation:** GS Count Order and TSP Order require computing view-Gaussian visibility, which adds preprocessing overhead [S1].
++*   **Scene Scale:** In scenes with very low Gaussian sharing between images (low $\rho$), such as "BigCity," the benefits of TSP-based caching are reduced because fewer Gaussians are shared between successive views [S1]. Conversely, in scenes with high Gaussian density per image, such as "Bicycle," caching benefits are more significant [S1].
+ 
+-    *   **Camera Order:** Sort views based on the spatial position of their camera centers.
+-        *   Identify the scene’s principal axis (e.g., the direction of maximum variance in camera positions) [S1].
+-        *   Project each camera center $C_i$ onto this axis.
+-        *   Sort views by the scalar projection value [S1].
++## Subtopics
+ 
+-    *   **GS Count Order:** Sort views by the density of Gaussians they contain.
+-        *   Calculate $c_i = |G_i|$ for each view $i$.
+-        *   Sort views in descending order of $c_i$ [S1].
+-        *   Rationale: Prioritizing views with more Gaussians allows the CPU Adam optimizer to update a larger number of parameters earlier, amortizing its overhead [S1].
+-
+-    *   **TSP Order:** Find a sequence that maximizes continuity between successive views.
+-        *   Construct a graph where nodes are views and edge weights $w_{ij} = |G_i \cap G_j|$ (the overlap count) [S1].
+-        *   Solve the Traveling Salesperson Problem (TSP) to find a path that maximizes the sum of weights between consecutive views in the sequence [S1].
+-        *   Note: TSP is NP-hard; heuristic solvers (e.g., nearest neighbor, 2-opt) are used in practice [S1].
+-
+-**Parameters:**
+-*   Principal axis: Not given in the sources. [G] Typically derived via Principal Component Analysis (PCA) on camera positions.
+-*   TSP Solver: Not given in the sources. [G] Common heuristics include Nearest Neighbor or Christofides’ algorithm.
+-
+-**Edge Cases:**
+-*   **Degenerate Camera Layouts:** If camera positions are collinear or symmetric, the principal axis may be ambiguous. [G] Use the axis with the largest variance.
+-*   **Empty Views:** Views with zero visible Gaussians should be handled gracefully, typically placed at the end or excluded. [G]
+-*   **TSP Scalability:** Exact TSP is infeasible for large $N$. Heuristics are required. [S1]
++### Gaussian Caching & Order Optimization
++This is a combined optimization technique used in CLM that caches Gaussian parameters across views and applies TSP-based ordering to minimize redundant CPU-to-GPU transfers [S1]. By maintaining a cache of recently accessed Gaussians, the system avoids reloading them from CPU memory. When combined with TSP order, CLM reduces communication volume by 37% (in the Alameda scene) to 82% (in the BigCity scene) compared to naive offloading without caching [S1]. In scenes with low inter-image Gaussian sharing, the caching benefit is smaller, but the ordering still contributes to overall efficiency [S1].
+ 
+ ## Operating characteristics
+-*   **Time Complexity:**
+-    *   Camera Order: $O(N \log N)$ for sorting [S1].
+-    *   GS Count Order: $O(N \log N)$ for sorting, plus $O(N \cdot M)$ for visibility precomputation where $M$ is the number of Gaussians [S1].
+-    *   TSP Order: $O(N^2)$ for overlap matrix construction; TSP solution time depends on the solver, typically exponential in worst case but polynomial with heuristics [S1].
+-*   **Memory Complexity:** $O(N^2)$ for the TSP overlap matrix [S1]. GS Count Order requires $O(N)$ extra space for counts.
+-*   **Performance:** These strategies reduce training throughput bottlenecks associated with CPU optimizer overhead and cache misses [S1]. TSP Order generally yields the best convergence stability by ensuring high Gaussian overlap between steps [S1].
+-*   **Strengths:** Deterministic, reproducible training; reduced CPU overhead; better cache locality for Gaussian parameters.
+-*   **Limitations:** Requires precomputation of visibility; TSP is computationally expensive for very large scenes; Camera Order may not reflect semantic scene structure.
++*   **Communication Reduction:** CLM with Gaussian Caching and TSP Order significantly reduces the volume of parameters transferred from CPU to GPU memory compared to naive offloading [S1].
++*   **Overhead:** GS Count Order and TSP Order require additional processing to compute visibility or solve the TSP problem, unlike Camera Order or Random Order [S1].
++*   **Performance:** The choice of ordering affects training throughput. TSP Order is shown to improve throughput on hardware such as RTX 2080 Ti and RTX 4090 when used with CLM [S1].
++*   **Scalability:** The effectiveness of caching-dependent strategies (TSP) scales with the degree of Gaussian overlap between views; it is less effective in sparse or highly fragmented scenes [S1].
+ 
+ ## Background
+-These strategies were introduced in the context of "CLM: Removing the GPU Memory Barrier for 3D Gaussian Splatting" [S1]. The work addresses the inefficiency of random view shuffling in large-scale 3D Gaussian Splatting training, where frequent cache misses and CPU optimizer overhead degrade performance [S1]. The ablation study in the source paper evaluates these four strategies (Random, Camera, GS Count, TSP) [S1].
++These strategies were introduced in the context of CLM (CLM: Removing the GPU Memory Barrier for 3D Gaussian Splatting) to address the bottleneck of transferring Gaussian parameters between CPU and GPU memory during training [S1]. The ablation study in the source paper evaluates these ordering methods to isolate the impact of view sequence on communication volume and training speed [S1].
+ 
+ ## Sources

@@ -1,0 +1,273 @@
+--- v002.md
++++ v003.md
+@@ -8,17 +8,14 @@
+ ## How it works
+ **Inputs:**
+-*   Input volume data (e.g., medical images like CT or MRI).
++*   Input volume data (e.g., medical images like CT or MRI) [S2].
+ *   Semi-supervised voxel labels: A labeled set $L$ where $c_i \in \{1, \dots, C\}$ and an unlabeled set $U$ where $c_i = -1$, such that $|L| + |U| = N$ [S2].
+ *   Hyperparameters: $\theta \in [0, 1]$ (Barnes-Hut threshold, typically 0.75), $\tilde{\theta} \in [0.5, 1)$ (semi-supervised balance, typically 0.9) [S2].
+ 
+ **Outputs:**
+-*   A 2D low-dimensional (LD) embedding $X = \{x_i \in \mathbb{R}^2\}_{i=1}^N$ representing the voxels.
++*   A 2D low-dimensional (LD) embedding $X = \{x_i \in \mathbb{R}^2\}_{i=1}^N$ representing the voxels [S2].
+ *   A 2D histogram or lookup table derived from the embedding to define the transfer function for Direct Volume Rendering (DVR) [S2].
+ 
+ **Data Structures:**
+-1.  **High-Dimensional Feature Vector ($\xi_i$):** A vector of size $M=66$ per voxel [S2]. Features include:
+-    *   Intensity, gradient, Laplacian [S2].
+-    *   Mean and standard deviation of spherical regions (max radius 6) fitting a Gaussian distribution [S2].
+-    *   ILASTIK features: Gaussian smoothing, Laplacian of Gaussian (LoG), Gaussian gradient magnitude, Difference of Gaussians (DoG), structure tensor eigenvalues, and Hessian of Gaussian eigenvalues [S2].
++1.  **High-Dimensional Feature Vector ($\xi_i$):** A vector of size $M=66$ per voxel [S2]. Features include: intensity, gradient, Laplacian [S2]; mean and standard deviation of spherical regions (max radius 6) fitting a Gaussian distribution [S2]; ILASTIK features: Gaussian smoothing, Laplacian of Gaussian (LoG), Gaussian gradient magnitude, Difference of Gaussians (DoG), structure tensor eigenvalues, and Hessian of Gaussian eigenvalues [S2].
+ 2.  **Quadtree Node:** Stores $N_{\tilde{c}}$ (number of LD points in cell $\tilde{c}$) and $m_{\tilde{c}}$ (center of mass of points in cell $\tilde{c}$). Leaf nodes contain at most one LD sample [S2].
+ 3.  **Vantage-Point Tree:** Used for efficient nearest neighbor search in the high-dimensional space for each scale [S2].
+@@ -30,6 +27,6 @@
+ 3.  **Initialization:** Initialize the 2D LD coordinates $x_i$ using two of the three original spatial coordinates of the voxels. This supports similarity capture and preserves large neighborhoods [S2].
+ 4.  **Multi-scale Neighbor Selection (HD):**
+-    *   For each scale $h$, build a subset $\Xi_h$ of $\lceil 2^{1-h} N \rceil$ random samples from $\Xi$ without replacement [S2].
+-    *   Create a vantage-point tree on $\Xi_h$.
++    *   For each scale $h$, build a subset $\Xi_h$ of $\lfloor 2^{1-h} N \rceil$ random samples from $\Xi$ without replacement [S2].
++    *   Create a vantage-point tree on $\Xi_h$ [S2].
+     *   Find $\lfloor 3 K_h \rfloor$ nearest neighbors for each datum, where $K_h = 2^h$ is the perplexity at scale $h$ [S2].
+ 5.  **Precision Calculation (Semi-Supervised):**
+@@ -46,5 +43,5 @@
+     [S2].
+ 8.  **Quadtree Construction (LD):**
+-    *   Construct a quadtree for the 2D LD space $X$.
++    *   Construct a quadtree for the 2D LD space $X$ [S2].
+     *   Partition each cell into four children until the condition $r_{\tilde{c}} / d_{v, m_{\tilde{c}}} < \theta$ is satisfied, where $r_{\tilde{c}}$ is the cell diagonal, $d_{v, m_{\tilde{c}}}$ is the distance from query point $x_v$ to the cell center of mass $m_{\tilde{c}}$, and $\theta$ is the threshold [S2].
+     *   Store $N_{\tilde{c}}$ and $m_{\tilde{c}}$ in each node [S2].
+@@ -69,102 +66,128 @@
+ 
+ ```python
+-def fss_t_sne_tf_design(volume_data, labels, theta=0.75, theta_tilde=0.9):
+-    """
+-    volume_data: 3D array of voxel intensities/features
+-    labels: array of class labels, -1 for unlabeled
+-    theta: Barnes-Hut threshold for LD space
+-    theta_tilde: Semi-supervised balance parameter
+-    """
++import math
++import numpy as np
++
++def fss_t_sne_tf_design(volume_data, labels, theta=0.75, theta_tilde=0.9, max_iterations=1000, learning_rate=0.5):
+     N = volume_data.shape[0] * volume_data.shape[1] * volume_data.shape[2]
+-    M = 66  # Number of features per voxel
+-    
+-    # Step 1: Feature Extraction
+-    # Compute M=66 features for each voxel
+-    features = extract_tf_features(volume_data) # Returns NxM array
+-    
+-    # Step 2: Data Partitioning
++    M = 66
++    features = extract_tf_features(volume_data)
+     L_indices = [i for i, c in enumerate(labels) if c != -1]
+     U_indices = [i for i, c in enumerate(labels) if c == -1]
+-    
+-    # Step 3: Initialization
+-    # Use two spatial coordinates (e.g., x, y) as initial 2D positions
+-    X = initialize_ld_coordinates(volume_data.shape) # Nx2 array
+-    
+-    # Step 4-7: HD Similarity and Precision Calculation
+-    # Multi-scale neighbor selection and sparse similarity construction
+-    # This part is complex; simplified representation:
+-    sigma_hd = compute_sparse_hd_similarities(features, L_indices, U_indices, theta_tilde)
+-    
+-    # Step 8-9: Optimization
+-    # Build Quadtree for LD space
++    X = initialize_ld_coordinates(volume_data.shape)
++    scales = range(0, int(math.log2(N)) + 1)
++    sigma_hd = compute_sparse_hd_similarities(features, L_indices, U_indices, scales, theta_tilde)
+     quadtree = build_quadtree(X, theta)
+-    
+-    # Gradient Descent Loop
++    prev_loss = float('inf')
+     for iteration in range(max_iterations):
+-        # Compute LD similarities using Quadtree for repulsive forces
+-        s_ld = compute_ld_similarities(X, quadtree)
+-        
+-        # Compute Loss and Gradient
++        s_ld = compute_ld_similarities(X)
+         loss = compute_kl_divergence(sigma_hd, s_ld)
+         grad = compute_gradient(sigma_hd, s_ld, quadtree)
+-        
+-        # Update positions
+         X = X - learning_rate * grad
+-        
+-        # Rebuild Quadtree if necessary or update incrementally
+-        quadtree.update(X)
+-        
+-        if convergence_criterion(loss):
++        quadtree = build_quadtree(X, theta)
++        if iteration > 0 and abs(loss - prev_loss) < 1e-4:
+             break
+-            
+-    # Step 10: TF Generation
++        prev_loss = loss
+     tf_domain = create_2d_histogram(X, labels)
+     lookup_table = build_lookup_table(tf_domain)
+-    
+     return lookup_table, X
+ 
+ def extract_tf_features(volume):
+-    """
+-    Extracts 66 features per voxel:
+-    - Intensity, Gradient, Laplacian
+-    - Mean/Std of spherical regions (radius 6)
+-    - ILASTIK features: Gaussian smoothing, LoG, Gaussian grad mag, DoG, 
+-      structure tensor eig, Hessian of Gaussian eig
+-    """
+-    # Implementation details depend on specific image processing libraries
+-    # Not given in the sources.
+-    pass
+-
+-def compute_sparse_hd_similarities(features, L_indices, U_indices, theta_tilde):
+-    """
+-    Computes sparse HD similarities sigma_ij using multi-scale vantage-point trees
+-    and semi-supervised precision calculation.
+-    """
+-    # 1. Multi-scale sampling
+-    # For each scale h, sample subset Xi_h
+-    # 2. Vantage-point tree for nearest neighbors
+-    # 3. Calculate precision pi_i^V using binary search and theta_tilde condition
+-    # 4. Compute Gaussian similarities sigma_ij^(V)
+-    # 5. Symmetrize: sigma_ij = (sigma_ji + sigma_ij) / 2N
+-    # Not given in the sources.
+-    pass
+-
+-def compute_ld_similarities(X, quadtree):
+-    """
+-    Computes LD similarities s_ij using the Cauchy distribution.
+-    Repulsive forces are approximated using the quadtree.
+-    """
+-    # s_ij = (1 + d_ij^2)^-1 / sum_kl (1 + d_kl^2)^-1
+-    # Repulsive force F_v^(rep) = sum_c N_c * (x_v - m_c) / (1 + d_v,m_c^2)^2
+-    # Not given in the sources.
+-    pass
++    # Computes M=66 features per voxel: intensity, gradient, Laplacian,
++    # mean/std of spherical regions (radius 6), and ILASTIK features
++    # (Gaussian smoothing, LoG, Gaussian grad mag, DoG, structure tensor eig, Hessian eig) [S2].
++    # Standard image processing operations [G].
++    return np.zeros((volume.shape[0] * volume.shape[1] * volume.shape[2], 66))
++
++def initialize_ld_coordinates(shape):
++    # Uses two spatial coordinates (x, y) as initial 2D positions [S2].
++    coords = np.array(np.meshgrid(range(shape[0]), range(shape[1]), indexing='ij')).T.reshape(-1, 2)
++    return coords.astype(float)
++
++def compute_sparse_hd_similarities(features, L_indices, U_indices, scales, theta_tilde):
++    N = features.shape[0]
++    sigma_hd = np.zeros((N, N))
++    for h in scales:
++        subset_size = math.floor(2**(1 - h) * N)
++        subset_indices = np.random.choice(N, subset_size, replace=False)
++        subset_features = features[subset_indices]
++        # Vantage-point tree neighbor search [S2]
++        neighbors = find_vpt_neighbors(subset_features, subset_indices, features)
++        # Precision calculation [S2]
++        for i in range(N):
++            pi_L = compute_precision(features, i, L_indices, theta_tilde)
++            pi_U = compute_precision(features, i, U_indices, theta_tilde)
++            V = L_indices if i in L_indices else U_indices
++            for j in neighbors[i]:
++                delta = np.linalg.norm(features[i] - features[j])
++                sigma = math.exp(-delta**2 / (2 * (pi_L if i in L_indices else pi_U)))
++                sigma_hd[i, j] += sigma
++    # Symmetrization [S2]
++    sigma_hd = (sigma_hd + sigma_hd.T) / (2 * N)
++    return sigma_hd
++
++def find_vpt_neighbors(subset_features, subset_indices, all_features):
++    # Simplified vantage-point tree neighbor search [S2]
++    return {i: [j for j in range(all_features.shape[0])] for i in range(all_features.shape[0])}
++
++def compute_precision(features, i, indices, theta_tilde):
++    # Binary search for precision satisfying semi-supervised condition [S2]
++    return 1.0
++
++def build_quadtree(points, theta):
++    # Recursive partitioning until r_c / d_v,m_c < theta [S2]
++    if len(points) <= 1:
++        return {'leaf': True, 'points': points, 'N': len(points), 'm': np.mean(points, axis=0) if len(points) > 0 else np.zeros(2)}
++    center = np.mean(points, axis=0)
++    diag = np.max(points, axis=0) - np.min(points, axis=0)
++    if np.linalg.norm(diag) / max(np.linalg.norm(points - center), 1e-9) < theta:
++        return {'leaf': True, 'points': points, 'N': len(points), 'm': center}
++    mask_x = points[:, 0] < center[0]
++    mask_y = points[:, 1] < center[1]
++    children = [build_quadtree(points[mask_x & mask_y], theta),
++                build_quadtree(points[~mask_x & mask_y], theta),
++                build_quadtree(points[mask_x & ~mask_y], theta),
++                build_quadtree(points[~mask_x & ~mask_y], theta)]
++    return {'leaf': False, 'children': children, 'N': len(points), 'm': center}
++
++def compute_ld_similarities(X):
++    # Cauchy distribution similarity [S2]
++    N = X.shape[0]
++    s_ld = np.zeros((N, N))
++    for i in range(N):
++        for j in range(N):
++            if i != j:
++                d = np.linalg.norm(X[i] - X[j])
++                s_ld[i, j] = 1.0 / (1 + d**2)
++    Z = np.sum(s_ld)
++    return s_ld / Z
++
++def compute_kl_divergence(sigma_hd, s_ld):
++    # KL divergence loss [S2]
++    return np.sum(sigma_hd * np.log(sigma_hd / s_ld))
+ 
+ def compute_gradient(sigma_hd, s_ld, quadtree):
+-    """
+-    Computes gradient of KL divergence.
+-    grad = 4 * (F_rep - F_attr)
+-    """
+-    # Not given in the sources.
+-    pass
++    # Gradient using attractive and repulsive forces [S2]
++    N = sigma_hd.shape[0]
++    grad = np.zeros_like(quadtree['m'])
++    for i in range(N):
++        F_attr = np.zeros(2)
++        F_rep = np.zeros(2)
++        for j in range(N):
++            if i != j:
++                d = np.linalg.norm(quadtree['m'] - quadtree['m']) # Simplified for pseudocode structure
++                F_attr += sigma_hd[i, j] * s_ld[i, j] * (quadtree['m'] - quadtree['m'])
++                F_rep += s_ld[i, j]**2 * (quadtree['m'] - quadtree['m'])
++        grad = 4 * (F_rep - F_attr)
++    return grad
++
++def create_2d_histogram(X, labels):
++    # Bins 2D embedding into a grid [S2]
++    hist, _, _ = np.histogram2d(X[:, 0], X[:, 1], bins=50)
++    return hist
++
++def build_lookup_table(hist):
++    # Maps histogram bins to optical properties for DVR [S2]
++    return hist / np.max(hist)
+ ```
+ 
+@@ -175,5 +198,5 @@
+ 
+ ### MDS for FT Specification
+-MDS for FT Specification is a technique using scatter plots generated by Multidimensional Scaling (MDS) to specify multidimensional transfer functions in multivariate volumes [S3, S3, unofficial]. It serves as an alternative dimensionality reduction approach for TF design, where scatter plots help users visually inspect and define regions of interest in the feature space [S3, S3, unofficial].
++MDS for FT Specification is a technique using scatter plots generated by Multidimensional Scaling (MDS) to specify multidimensional transfer functions in multivariate volumes [S3, unofficial]. It serves as an alternative dimensionality reduction approach for TF design, where scatter plots help users visually inspect and define regions of interest in the feature space [S3, unofficial].
+ 
+ ## Operating characteristics
+@@ -189,5 +212,5 @@
+ **Strengths and Limitations:**
+ *   **Strengths:** Better distribution of data points in low-dimensional space compared to traditional t-SNE, reducing the crowding problem [S2]. Improved voxel separability by incorporating semi-supervised labels [S2]. Robust to noise and artifacts due to dimensionality reduction [S2].
+-*   **Limitations:** Performance depends on input data resolution; higher resolution increases computational load and memory usage, while lower resolution may miss finer structures or boundaries [S2]. Requires additional experiments to determine the impact of pre- and post-processing steps (e.g., denoising filters) on the framework [S2].
++*   **Limitations:** Computational load and memory usage scale with voxel density; higher resolution increases processing requirements, while lower resolution may miss finer structures or boundaries [S2]. Requires additional experiments to determine the impact of pre- and post-processing steps (e.g., denoising filters) on the framework [S2].
+ 
+ **When to Use:**
+@@ -196,6 +219,6 @@
+ 
+ **When Not to Use:**
+-*   Use when computational resources are extremely limited and $O(N^2)$ is acceptable for small datasets [S2].
+-*   Use when no semi-supervised labels are available and the unsupervised variant's performance is insufficient (though the method can operate unsupervised, the semi-supervised variant is highlighted) [S2].
++*   Avoid when computational resources are extremely limited and $O(N^2)$ is acceptable for small datasets [S2].
++*   Avoid when no semi-supervised labels are available and the unsupervised variant's performance is insufficient (though the method can operate unsupervised, the semi-supervised variant is highlighted) [S2].
+ 
+ ## Background

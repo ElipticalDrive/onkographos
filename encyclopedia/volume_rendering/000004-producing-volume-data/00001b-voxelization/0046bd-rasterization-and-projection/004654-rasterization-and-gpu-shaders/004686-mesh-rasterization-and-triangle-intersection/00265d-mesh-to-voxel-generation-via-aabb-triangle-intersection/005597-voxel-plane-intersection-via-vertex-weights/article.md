@@ -1,0 +1,161 @@
+# Voxel Plane Intersection via Vertex Weights
+
+Also called: Plane Weight Sum Voxelization, Vertex Weight Voxelization
+
+## Overview
+This method determines which voxels within a triangle's Axis-Aligned Bounding Box (AABB) are intersected by the triangle's plane and its edge tangent planes. It serves as the final rasterization step in mesh-to-voxel generation, refining the candidate voxels identified by coarse AABB tests. It is distinguished from sibling methods by its reliance on a discrete vertex-weight summation algorithm rather than continuous geometric intersection tests or tessellation, offering a brute-force but highly parallelizable approach suitable for CPU implementation.
+
+## How it works
+The method operates on a voxel grid and a single triangle. It assumes the voxel grid uses a data structure with shared vertices (e.g., vertex indices) to optimize computation.
+
+### Inputs and Outputs
+- **Inputs**:
+  - Triangle vertices: $V_0, V_1, V_2$ (3D points).
+  - Voxel grid bounds and resolution (defining the AABB).
+  - Voxel grid data structure supporting shared vertex access.
+- **Outputs**:
+  - A set of voxels marked as intersected by the triangle.
+
+### Data Structures
+- **Voxel Grid**: A 3D array or hash map where each voxel is identified by integer coordinates $(i, j, k)$.
+- **Shared Vertices**: The grid stores vertex positions indexed by $(i, j, k)$. A voxel at $(i, j, k)$ has 8 vertices at indices $(i+\delta_x, j+\delta_y, k+\delta_z)$ where $\delta \in \{0, 1\}$.
+
+### Steps
+
+1.  **Calculate Triangle AABB and Tangent Planes**:
+    Compute the minimum and maximum coordinates of the triangle vertices to define the voxel sub-grid (AABB) to process. Calculate the plane equation for the triangle itself ($P_{tri}$) and the three edge tangent planes ($P_{e0}, P_{e1}, P_{e2}$). The edge tangent planes are defined by an edge vector and the triangle normal.
+
+2.  **Filter by Triangle Plane**:
+    For each voxel in the AABB sub-grid, determine if the voxel intersects the triangle plane $P_{tri}$. This is done using the vertex weight sum method on $P_{tri}$ alone. If the voxel does not intersect $P_{tri}$, skip further checks for this voxel.
+
+3.  **Check Edge Tangent Planes**:
+    For voxels intersecting $P_{tri}$, check intersection with each of the three edge tangent planes. A voxel is considered intersected by the triangle only if it intersects $P_{tri}$ AND is not entirely "in front" of any edge tangent plane.
+
+4.  **Vertex Weight Summation**:
+    To determine if a voxel intersects a specific plane (e.g., $P_{tri}$ or $P_{ei}$):
+    -   Retrieve the 8 vertices of the voxel. If using shared vertices, compute the position for each unique vertex index once per plane.
+    -   For each vertex $V_v$, calculate the signed distance to the plane: $d_v = (V_v - P_{pos}) \cdot N_{plane}$, where $P_{pos}$ is a point on the plane and $N_{plane}$ is the plane normal.
+    -   Assign a weight $w_v$ to each vertex:
+        $$
+        w_v = \begin{cases} 
+        1 & \text{if } d_v > 0 \quad (\text{in front}) \\
+        0 & \text{if } d_v = 0 \quad (\text{on plane}) \\
+        -1 & \text{if } d_v < 0 \quad (\text{behind})
+        \end{cases}
+        $$
+    -   Sum the weights: $W = \sum_{v=0}^{7} w_v$.
+
+5.  **Determine Intersection**:
+    -   **Standard Case**: If $W \neq 8$ and $W \neq -8$, the voxel intersects the plane. If $W = 8$ or $W = -8$, the voxel is entirely on one side and does not intersect.
+    -   **Strict Case (Vertex on Plane)**: If a vertex lies exactly on the plane ($d_v=0$), it is treated as intersecting by default in the standard case. To exclude voxels where the triangle merely touches a vertex, ignore vertices with $d_v=0$ in the sum. Let $N_{valid}$ be the count of vertices with $d_v \neq 0$. If $W = N_{valid}$ or $W = -N_{valid}$, the voxel does not intersect. Otherwise, it does.
+
+6.  **Optimization**:
+    -   Compute vertex positions and dot products only for unique vertices within the sub-grid.
+    -   Only perform edge tangent plane checks for voxels that already intersect the triangle plane.
+
+### Pseudocode
+
+> **Unverified code.** The code below did not pass a test run against a reference implementation, or no test fits it, so it may contain errors.
+
+```python
+def voxel_plane_intersection(triangle, voxel_grid):
+    """
+    triangle: list of 3 vertices [v0, v1, v2]
+    voxel_grid: object providing get_vertex(i,j,k) and bounds
+    """
+    # 1. Calculate AABB and planes
+    min_coord = min(triangle)
+    max_coord = max(triangle)
+    sub_grid_bounds = get_voxel_bounds(min_coord, max_coord)
+    
+    tri_plane = calculate_plane(triangle)
+    edge_planes = [calculate_edge_plane(triangle, i) for i in range(3)]
+    
+    intersected_voxels = []
+    
+    # 2. Iterate over sub-grid
+    for i, j, k in sub_grid_bounds:
+        voxel = get_voxel(i, j, k)
+        vertices = get_voxel_vertices(voxel, voxel_grid) # Returns 8 unique positions
+        
+        # 3. Check triangle plane
+        if not intersects_plane(vertices, tri_plane):
+            continue
+            
+        # 4. Check edge tangent planes
+        intersects_triangle = True
+        for ep in edge_planes:
+            # A voxel is NOT intersecting if it is entirely 'in front' of the edge plane
+            # 'In front' means all weights are +1 (sum=8) or all -1 (sum=-8) depending on normal direction
+            # Assuming consistent normal orientation: if sum == 8, all in front
+            if is_entirely_in_front(vertices, ep):
+                intersects_triangle = False
+                break
+        
+        if intersects_triangle:
+            intersected_voxels.append(voxel)
+            
+    return intersected_voxels
+
+def intersects_plane(vertices, plane):
+    """
+    Returns True if the voxel intersects the plane.
+    Uses standard case: sum != 8 and sum != -8.
+    """
+    weight_sum = 0
+    for v in vertices:
+        dist = dot_product(v - plane.point, plane.normal)
+        if dist > 0:
+            weight_sum += 1
+        elif dist < 0:
+            weight_sum -= 1
+        # dist == 0 adds 0
+    
+    if weight_sum == 8 or weight_sum == -8:
+        return False
+    return True
+
+def is_entirely_in_front(vertices, plane):
+    """
+    Returns True if all vertices are strictly on one side of the plane.
+    Assumes plane normal points 'inwards' or consistently such that 
+    'in front' corresponds to a specific sign. 
+    Here, we check if all weights are +1 or all are -1.
+    """
+    weight_sum = 0
+    has_front = False
+    has_behind = False
+    
+    for v in vertices:
+        dist = dot_product(v - plane.point, plane.normal)
+        if dist > 0:
+            weight_sum += 1
+            has_front = True
+        elif dist < 0:
+            weight_sum -= 1
+            has_behind = True
+            
+    # If it has both front and behind, it intersects (not entirely in front)
+    # If it has only front (sum=8) or only behind (sum=-8), it is entirely in front/behind
+    if has_front and has_behind:
+        return False
+    return True
+```
+
+### Parameters and Edge Cases
+-   **Precision**: Floating-point comparisons for $d_v = 0$ are sensitive. Use a small epsilon if exact equality is not desired.
+-   **Degenerate Input**: If the triangle is degenerate (area zero), the tangent planes may be undefined. The method assumes a valid triangle.
+-   **Vertex on Plane**: As noted, the standard sum treats vertices on the plane as neutral (weight 0). This means a voxel touching only a vertex will have a sum less than 8 in magnitude and be marked as intersecting. Use the strict case logic if this is undesirable.
+
+## Operating characteristics
+-   **Time Complexity**: $O(N)$ where $N$ is the number of voxels in the triangle's AABB. Each voxel requires a constant number of dot products (up to 4 planes $\times$ 8 vertices).
+-   **Memory Complexity**: $O(1)$ auxiliary space per voxel, assuming shared vertex access.
+-   **Performance**: Described as "lighting fast on modern day CPU's" due to the simplicity of operations and lack of complex branching. It is highly parallelizable as voxel checks are mutually exclusive.
+-   **Strengths**: Simple to implement, robust against precision issues compared to continuous intersection tests, easily parallelizable.
+-   **Limitations**: Brute-force nature means it processes all voxels in the AABB, even those far from the triangle surface. Less efficient than hierarchical methods for sparse grids.
+
+## Background
+This method is a practical, production-oriented approach to 3D triangle rasterization into voxels. It was popularized in community discussions on computer graphics forums as a robust alternative to more complex geometric algorithms. It relies on the geometric property that a convex polyhedron (the voxel) intersects a plane if and only if its vertices are not all strictly on one side of the plane.
+
+## Sources
+[S1] 3D triangle rasterization to voxels, https://computergraphics.stackexchange.com/questions/13420/3d-triangle-rasterization-to-voxels, fetched 2026-10-27 (unofficial)

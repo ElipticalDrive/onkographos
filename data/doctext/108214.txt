@@ -1,0 +1,1578 @@
+### point_splatting/__init__.py
+```
+"""point_splatting: 2D-to-3D Multi-View Splatting Pipeline for Large-Scale Point Clouds."""
+```
+
+### point_splatting/run_pipeline.py
+```
+"""
+Phase 4: One-Click Multi-View Splatting Pipeline.
+
+Loads pre-processed .pt point cloud files, generates adapted camera
+trajectories for elongated structures, renders per-view colour / label /
+index-map images, and saves them in an organised directory tree.
+
+Usage:
+    python point_splatting/run_pipeline.py \\
+        --data_dir DALA-CitywallV3 \\
+        --output_dir output \\
+        --overhead_views \\
+        --overhead_height 8.0 \\
+        --min_fill_rate 0.30
+
+Parameters:
+    --data_dir        Directory containing pre-processed .pt files.
+    --output_dir      Root output directory for rendered views.
+    --num_stations    Number of camera stations along the wall centreline (default: 8).
+    --distance        Distance from wall surface in metres for side views (default: 20.0).
+    --far_distance    Optional farther distance for wide-coverage side views (default: 0.0).
+    --pitch_angles    Space-separated pitch angles in degrees; 0=horizontal, positive=downward (default: -30 0 30).
+    --fov_y           Vertical field of view in degrees (default: 60.0).
+    --width           Output image width in pixels (default: 960).
+    --height          Output image height in pixels (default: 720).
+    --splat_radius    Pixel splat expansion radius for denser coverage (default: 2, gives 5×5 disk).
+    --margin          Trajectory margin factor beyond actual point cloud bounds (default: 1.05).
+    --no_both_sides   Only place cameras on one side of the wall (default: both sides).
+    --overhead_views  Enable top-down overhead camera views above the wall.
+    --overhead_height Height above z_max for overhead cameras, in metres (default: 10.0).
+    --min_fill_rate   Minimum fill rate to keep a view; views below this are auto-deleted (default: 0.30).
+                      Set to 0.0 to keep all views, including low-fill overhead views.
+    --cam_batch       Number of cameras processed simultaneously on GPU (default: 8).
+    --device          Torch device: cuda or cpu (default: cuda).
+    --scene_list      Optional subset of scene names without .pt extension (e.g., 1_1 1_2).
+"""
+
+import argparse
+import os
+import sys
+from pathlib import Path
+from typing import List, Optional
+
+import numpy as np
+import torch
+from PIL import Image
+
+# Ensure project root and CamPoint are importable
+_SCRIPT_DIR = Path(__file__).resolve().parent
+_PROJECT_DIR = _SCRIPT_DIR.parent
+_CAMPOINT_DIR = _PROJECT_DIR / "CamPoint-main"
+for _p in [str(_PROJECT_DIR), str(_CAMPOINT_DIR)]:
+    if _p not in sys.path:
+        sys.path.insert(0, _p)
+
+from point_splatting.trajectory import (
+    TrajectoryConfig,
+    CameraPose,
+    generate_trajectory,
+    poses_to_batch,
+)
+from point_splatting.splatting_renderer import SplattingRenderer
+
+
+# ---------------------------------------------------------------------------
+# I/O helpers
+# ---------------------------------------------------------------------------
+
+def _ensure_dir(path: Path):
+    path.mkdir(parents=True, exist_ok=True)
+
+
+def save_pose_txt(pose: CameraPose, path: Path):
+    """Save a 4x4 extrinsics matrix as a space-delimited text file."""
+    np.savetxt(str(path), pose.extrinsics.numpy(), fmt="%.6f")
+
+
+def save_intrinsics_txt(intrinsics: torch.Tensor, path: Path):
+    """Save intrinsics [fx, fy, cx, cy] as a space-delimited text file."""
+    np.savetxt(str(path), intrinsics.numpy().reshape(1, -1), fmt="%.6f")
+
+
+def save_color_jpg(img: np.ndarray, path: Path):
+    """Save an RGB uint8 image as JPEG."""
+    Image.fromarray(img).save(str(path))
+
+
+def save_label_png(img: np.ndarray, path: Path):
+    """Save a single-channel label map as 16-bit greyscale PNG."""
+    label_u16 = img.astype(np.uint16)
+    im = Image.fromarray(label_u16)
+    im.save(str(path))
+
+
+# Distinct colormap for semantic labels (class_id → RGB)
+_LABEL_COLORS = {
+    0: (0, 0, 0),         # background
+    1: (128, 128, 128),   # grey
+    2: (179, 41, 41),     # red
+    3: (50, 142, 50),     # green
+    4: (40, 90, 190),     # blue
+    5: (220, 160, 30),    # gold
+    6: (130, 60, 180),    # purple
+    7: (60, 180, 180),    # teal
+    8: (220, 80, 160),    # magenta
+    9: (180, 180, 40),    # olive
+}
+
+
+def _label_to_color(label_img: np.ndarray) -> np.ndarray:
+    """Map a 2D label image [H, W] to an RGB colour image [H, W, 3]."""
+    h, w = label_img.shape
+    rgb = np.zeros((h, w, 3), dtype=np.uint8)
+    for cls_id, color in _LABEL_COLORS.items():
+        mask = label_img == cls_id
+        rgb[mask] = color
+    # Assign deterministic colours to any unseen class IDs
+    unknown = ~np.isin(label_img, list(_LABEL_COLORS.keys()))
+    if unknown.any():
+        unk_ids = np.unique(label_img[unknown])
+        for uid in unk_ids:
+            hue = (int(uid) * 47 + 13) % 360
+            rgb[label_img == uid] = _hsv_to_rgb(hue, 0.7, 0.9)
+    return rgb
+
+
+def _hsv_to_rgb(h: float, s: float, v: float) -> tuple:
+    """Simple HSV→RGB for deterministic unknown-class colours."""
+    h = h / 60.0
+    c = v * s
+    x = c * (1 - abs(h % 2 - 1))
+    m = v - c
+    if h < 1:
+        r, g, b = c, x, 0
+    elif h < 2:
+        r, g, b = x, c, 0
+    elif h < 3:
+        r, g, b = 0, c, x
+    elif h < 4:
+        r, g, b = 0, x, c
+    elif h < 5:
+        r, g, b = x, 0, c
+    else:
+        r, g, b = c, 0, x
+    return int((r + m) * 255), int((g + m) * 255), int((b + m) * 255)
+
+
+def save_label_color_png(label_img: np.ndarray, path: Path):
+    """Save a colour-mapped label image as lossless PNG."""
+    rgb = _label_to_color(label_img)
+    Image.fromarray(rgb).save(str(path))
+
+
+def save_index_map(idx_map: np.ndarray, path: Path):
+    """Save the 2D→3D index map as a NumPy .npy file."""
+    np.save(str(path), idx_map.astype(np.int32))
+
+
+# ---------------------------------------------------------------------------
+# Per-scene processor
+# ---------------------------------------------------------------------------
+
+def process_one_scene(
+    pt_path: Path,
+    output_root: Path,
+    config: TrajectoryConfig,
+    cam_batch: int,
+    device: str,
+    splat_radius: int = 2,
+    min_fill_rate: float = 0.30,
+):
+    """Render all views for a single point-cloud scene.
+
+    Args:
+        pt_path:      path to the .pt file (tuple of xyz, rgb, label).
+        output_root:  root output directory.
+        config:       trajectory generation parameters.
+        cam_batch:    GPU batch size for camera processing.
+        device:       torch device (e.g., "cuda" or "cpu").
+        splat_radius: pixel expansion radius for denser coverage.
+    """
+    scene_name = pt_path.stem  # e.g., "1_1"
+
+    # ---- Load data --------------------------------------------------------
+    print(f"[{scene_name}] Loading point cloud...")
+    data = torch.load(str(pt_path), map_location="cpu", weights_only=False)
+    if isinstance(data, tuple) and len(data) == 3:
+        xyz, rgb, label = data[0], data[1], data[2]
+    else:
+        raise ValueError(
+            f"Expected tuple (xyz, rgb, label), got {type(data)} with "
+            f"len {len(data) if isinstance(data, tuple) else 'N/A'}"
+        )
+
+    print(
+        f"[{scene_name}]   xyz={list(xyz.shape)}, "
+        f"rgb={list(rgb.shape)}, label={list(label.shape)}"
+    )
+
+    # ---- Generate camera poses -------------------------------------------
+    print(f"[{scene_name}] Generating trajectory...")
+    poses = generate_trajectory(xyz, config, device=torch.device("cpu"))
+    print(f"[{scene_name}]   {len(poses)} camera poses generated.")
+    intr_batch, extr_batch = poses_to_batch(poses)
+
+    # ---- Render ----------------------------------------------------------
+    print(f"[{scene_name}] Rendering views (cam_batch={cam_batch})...")
+    renderer = SplattingRenderer(
+        cam_batch=cam_batch, splat_radius=splat_radius, device=device
+    )
+    renderer.load_pointcloud(xyz, rgb, label)
+
+    color_list, label_list, index_list = renderer.render_all(
+        intr_batch, extr_batch, config.image_width, config.image_height
+    )
+
+    # ---- Save outputs (auto-delete sparse views) -------------------------
+    scene_dir = output_root / scene_name
+    color_dir = scene_dir / "color"
+    label_dir = scene_dir / "label"
+    label_color_dir = scene_dir / "label_color"
+    pose_dir = scene_dir / "pose"
+    intrinsic_dir = scene_dir / "intrinsic"
+    index_dir = scene_dir / "index_map"
+
+    for d in [color_dir, label_dir, label_color_dir, pose_dir, intrinsic_dir, index_dir]:
+        _ensure_dir(d)
+
+    # Compute fill rates and filter sparse views
+    fill_rates = [(idxm >= 0).mean() for idxm in index_list]
+    kept_indices = [i for i, f in enumerate(fill_rates) if f >= min_fill_rate]
+    deleted = len(poses) - len(kept_indices)
+
+    if kept_indices:
+        save_intrinsics_txt(
+            poses[kept_indices[0]].intrinsics, intrinsic_dir / "intrinsic.txt"
+        )
+        for out_idx, src_idx in enumerate(kept_indices):
+            pose = poses[src_idx]
+            color = color_list[src_idx]
+            lab = label_list[src_idx]
+            idxm = index_list[src_idx]
+            save_pose_txt(pose, pose_dir / f"{out_idx}.txt")
+            save_color_jpg(color, color_dir / f"{out_idx}.jpg")
+            save_label_png(lab, label_dir / f"{out_idx}.png")
+            save_label_color_png(lab, label_color_dir / f"{out_idx}.png")
+            save_index_map(idxm, index_dir / f"{out_idx}.npy")
+    else:
+        print(
+            f"[{scene_name}] WARNING: all {len(poses)} views below "
+            f"fill threshold ({min_fill_rate:.0%}). No output saved."
+        )
+
+    # Summary
+    valid_views = sum(1 for f in fill_rates if f > 0)
+    avg_fill = (
+        np.mean([f for f in fill_rates if f > 0]) * 100 if valid_views else 0.0
+    )
+    print(
+        f"[{scene_name}] Done — {len(kept_indices)} views saved, "
+        f"{deleted} deleted (fill < {min_fill_rate:.0%}). "
+        f"{valid_views}/{len(poses)} views with any content "
+        f"(avg fill {avg_fill:.1f}%)."
+    )
+
+
+# ---------------------------------------------------------------------------
+# Main entry point
+# ---------------------------------------------------------------------------
+
+def main():
+    parser = argparse.ArgumentParser(
+        description="Multi-View Splatting Pipeline for Large-Scale Point Clouds"
+    )
+    parser.add_argument(
+        "--data_dir", type=str, default="DALA-CitywallV3",
+        help="Directory containing pre-processed .pt files."
+    )
+    parser.add_argument(
+        "--output_dir", type=str, default="output",
+        help="Root output directory."
+    )
+    parser.add_argument(
+        "--num_stations", type=int, default=8,
+        help="Number of camera stations along the principal axis."
+    )
+    parser.add_argument(
+        "--distance", type=float, default=20.0,
+        help="Distance from wall surface (metres)."
+    )
+    parser.add_argument(
+        "--far_distance", type=float, default=0.0,
+        help="Optional farther distance for wide-coverage views."
+    )
+    parser.add_argument(
+        "--pitch_angles", type=float, nargs="+", default=[-30.0, 0.0, 30.0],
+        help="Pitch angles in degrees (space-separated)."
+    )
+    parser.add_argument(
+        "--fov_y", type=float, default=60.0,
+        help="Vertical field of view in degrees."
+    )
+    parser.add_argument(
+        "--width", type=int, default=960,
+        help="Output image width (pixels)."
+    )
+    parser.add_argument(
+        "--height", type=int, default=720,
+        help="Output image height (pixels)."
+    )
+    parser.add_argument(
+        "--splat_radius", type=int, default=2,
+        help="Pixel splat radius for denser coverage (0=1px, 2=5x5 disk)."
+    )
+    parser.add_argument(
+        "--margin", type=float, default=1.05,
+        help="Trajectory margin beyond actual point cloud bounds."
+    )
+    parser.add_argument(
+        "--no_both_sides", action="store_true",
+        help="Only place cameras on one side of the structure."
+    )
+    parser.add_argument(
+        "--overhead_views", action="store_true",
+        help="Add top-down overhead camera views above the structure."
+    )
+    parser.add_argument(
+        "--overhead_height", type=float, default=10.0,
+        help="Height above z_max for overhead cameras (metres)."
+    )
+    parser.add_argument(
+        "--min_fill_rate", type=float, default=0.30,
+        help="Minimum fill rate to keep a view (0.0-1.0). Views below "
+             "this threshold are auto-deleted."
+    )
+    parser.add_argument(
+        "--cam_batch", type=int, default=8,
+        help="Number of cameras processed simultaneously on GPU."
+    )
+    parser.add_argument(
+        "--device", type=str, default="cuda",
+        help="Torch device (cuda / cpu)."
+    )
+    parser.add_argument(
+        "--scene_list", type=str, nargs="*", default=None,
+        help="Optional subset of scene names (without .pt extension)."
+    )
+    args = parser.parse_args()
+
+    # ---- Locate data files ------------------------------------------------
+    data_dir = Path(args.data_dir)
+    if not data_dir.is_dir():
+        sys.exit(f"Data directory not found: {data_dir}")
+
+    pt_files = sorted(data_dir.glob("*.pt"))
+    if args.scene_list:
+        # Filter to requested scenes
+        allowed = set(args.scene_list)
+        pt_files = [f for f in pt_files if f.stem in allowed]
+
+    if not pt_files:
+        sys.exit(f"No .pt files found in {data_dir}")
+
+    print(f"Found {len(pt_files)} scene(s) to process.")
+
+    # ---- Build config -----------------------------------------------------
+    config = TrajectoryConfig(
+        num_stations=args.num_stations,
+        distance=args.distance,
+        far_distance=args.far_distance,
+        pitch_angles_deg=tuple(args.pitch_angles),
+        fov_y_deg=args.fov_y,
+        image_width=args.width,
+        image_height=args.height,
+        view_both_sides=not args.no_both_sides,
+        margin_factor=args.margin,
+        overhead_views=args.overhead_views,
+        overhead_height=args.overhead_height,
+    )
+
+    # ---- Run pipeline -----------------------------------------------------
+    output_root = Path(args.output_dir)
+    _ensure_dir(output_root)
+
+    for pt_path in pt_files:
+        process_one_scene(
+            pt_path=pt_path,
+            output_root=output_root,
+            config=config,
+            cam_batch=args.cam_batch,
+            device=args.device,
+            splat_radius=args.splat_radius,
+            min_fill_rate=args.min_fill_rate,
+        )
+
+    print("\nAll scenes processed.")
+
+
+if __name__ == "__main__":
+    main()
+```
+
+### point_splatting/splatting_renderer.py
+```
+"""
+Phase 2: EWA Splatting Renderer (Mesh-Free).
+
+Replaces the pyrender-based Renderer with CamPoint's point-cloud
+EWA projection and Z-buffer occlusion operators. No mesh
+reconstruction required — works directly on raw point clouds.
+
+Key flow:
+  1. Batch-project all points to N camera views via ``project_points``.
+  2. Apply strict Z-buffer occlusion via ``shelter_points``.
+  3. Splat visible points onto 2D canvases (colour, label, index map).
+"""
+
+from typing import List, Optional, Tuple
+
+import torch
+import numpy as np
+from einops import rearrange
+
+# CamPoint operators (expects the CamPoint repo on sys.path)
+from utils.gaussian_splatting_batch import project_points, shelter_points
+
+
+class SplattingRenderer:
+    """Point-cloud splatting renderer using CamPoint's EWA projection.
+
+    Given a point cloud (xyz, rgb, label) and a set of camera poses,
+    produces per-view RGB images, label maps, and 2D→3D index maps.
+
+    The renderer processes cameras in configurable batch sizes to
+    manage GPU memory.
+
+    Usage::
+
+        renderer = SplattingRenderer(cam_batch=16, device="cuda")
+        renderer.load_pointcloud(xyz, rgb, label)
+        images, labels, index_maps = renderer.render_all(
+            intr_batch, extr_batch, W, H
+        )
+    """
+
+    def __init__(
+        self,
+        cam_batch: int = 8,
+        splat_radius: int = 1,
+        extent: float = 1.3,
+        device: str = "cuda",
+    ):
+        """
+        Args:
+            cam_batch:    number of cameras processed simultaneously on GPU.
+            splat_radius: pixel radius for point splatting (1 = single pixel,
+                          2 = 3×3 disk, etc.). Larger values produce denser
+                          images but soften fine details.
+            extent:       frustum culling margin passed to ``project_points``
+                          (1.3 = 30 % beyond viewport).
+            device:       torch device string.
+        """
+        self.cam_batch = cam_batch
+        self.splat_radius = splat_radius
+        self.extent = extent
+        self.device = device
+
+        # Data tensors (populated by load_pointcloud)
+        self.xyz: Optional[torch.Tensor] = None     # [N, 3]
+        self.rgb: Optional[torch.Tensor] = None     # [N, 3]
+        self.label: Optional[torch.Tensor] = None   # [N]
+
+    # ------------------------------------------------------------------
+    # Data loading
+    # ------------------------------------------------------------------
+
+    def load_pointcloud(
+        self,
+        xyz: torch.Tensor,
+        rgb: torch.Tensor,
+        label: torch.Tensor,
+    ):
+        """Load the point cloud onto the GPU.
+
+        Args:
+            xyz:   [N, 3] float32, world coordinates.
+            rgb:   [N, 3] uint8 or float (0–255 or 0–1).
+            label: [N]    integer semantic labels.
+        """
+        self.xyz = xyz.to(device=self.device, dtype=torch.float32)
+        # Normalise RGB to [0, 1] float
+        if rgb.dtype == torch.uint8:
+            rgb = rgb.float() / 255.0
+        self.rgb = rgb.to(device=self.device, dtype=torch.float32)
+        self.label = label.to(device=self.device, dtype=torch.long)
+
+    # ------------------------------------------------------------------
+    # Core projection & occlusion
+    # ------------------------------------------------------------------
+
+    def _project_batch(
+        self,
+        intr: torch.Tensor,
+        extr: torch.Tensor,
+        W: int,
+        H: int,
+    ) -> Tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
+        """Project all points onto a batch of cameras and apply occlusion.
+
+        Args:
+            intr: [M, 4] intrinsics (fx, fy, cx, cy).
+            extr: [M, 4, 4] world-to-camera extrinsics.
+            W:    viewport width (pixels).
+            H:    viewport height (pixels).
+
+        Returns:
+            uv:      [N, 2, M] pixel coordinates after occlusion (0 where invisible).
+            depths:  [N, 1, M] depth values after occlusion (0 where invisible).
+            visible: [N, 1, M] bool-like visibility mask.
+        """
+        M = intr.shape[0]
+
+        # Step 1: project all points to all cameras
+        # xyz: [N, 3] → broadcast to M cameras internally
+        uv, depths = project_points(
+            self.xyz,
+            intr,
+            extr,
+            W,
+            H,
+            nearest=0.2,
+            extent=self.extent,
+        )
+        # uv: [M, N, 2], depths: [M, N, 1] — fix shapes
+        # Actually project_points returns uv: [M, N, 2], depths: [M, N, 1]
+        # But looking at the code, if xyz is [N,3], it broadcasts to [M,N,3]
+        # and returns [M,N,2] and [M,N,1]
+
+        # But shelter_points expects [N, 2, M] and [N, 1, M]
+        # Check what project_points actually returns...
+        # From the code: uv = uv.permute(0, 2, 1) — this permutes from [M,2,N] to [M,N,2]
+
+        # Actually wait. Let me re-trace project_points:
+        # xyz_t = xyz.permute(1, 0)  if xyz is [N,3], xyz_t = [3,N]
+        # pt_cam = R @ xyz_t  [M,3,3] @ [3,N] = [M,3,N]
+        # p_proj = K @ pt_cam  [M,3,3] @ [M,3,N] = [M,3,N]
+        # depths = p_proj[:, 2] — [M,N]
+        # uv = p_proj[:, :2] / depths — [M,2,N]
+        # uv = uv.permute(0, 2, 1) — [M,N,2]
+        # depths = depths[:, 0].squeeze(-1) but wait...
+        # Actually: depths = repeat(p_proj[:, 2], 'b m -> b d m', d=2)
+        # Then depths = torch.nan_to_num(depths[:, 0]).squeeze(-1) = [M,N]
+        # Then depths_masked = depths.clone() — [M,N]
+        # Returns: uv_masked [M,N,2], depths_masked [M,N,1]
+
+        # But shelter_points expects [N,2,M] and [N,1,M]
+        # So we need to permute
+
+        uv = uv.permute(1, 2, 0).contiguous()      # [N, 2, M]
+        depths = depths.permute(1, 2, 0).contiguous()  # [N, 1, M]
+
+        # shelter_points' numba kernel requires M >= 2 (3D array indexing).
+        # When M == 1 the squeeze() inside shelter_points collapses [N,2,1]
+        # to [N,2] and the kernel fails.  Work around by duplicating.
+        M_orig = M
+        if M == 1:
+            uv = uv.repeat(1, 1, 2)          # [N, 2, 2]
+            depths = depths.repeat(1, 1, 2)  # [N, 1, 2]
+            M = 2
+
+        # Step 2: Z-buffer occlusion via bucket-based sheltering
+        mW = int(self.extent * W) + 1
+        mH = int(self.extent * H) + 1
+        bucket_size = (mH + 1) * (mW + 1)
+        bucket = torch.zeros(
+            bucket_size * M, device=self.device, dtype=torch.float32
+        )
+        offset = torch.arange(0, M, 1, device=self.device, dtype=torch.float32)
+
+        uv, depths, visible = shelter_points(
+            uv, depths, mW, mH, offset=offset, bucket=bucket
+        )
+
+        # If we duplicated for M=1, keep only the first camera
+        if M_orig == 1:
+            uv = uv[:, :, :1]
+            depths = depths[:, :, :1]
+            visible = visible[:, :, :1]
+
+        return uv, depths, visible
+
+    # ------------------------------------------------------------------
+    # Image assembly
+    # ------------------------------------------------------------------
+
+    def _assemble_view(
+        self,
+        uv: torch.Tensor,
+        depths: torch.Tensor,
+        visible: torch.Tensor,
+        W: int,
+        H: int,
+        point_ids: torch.Tensor,
+    ) -> Tuple[np.ndarray, np.ndarray, np.ndarray]:
+        """Render a single camera view via deterministic per-pixel depth test.
+
+        Handles sub-pixel rounding collisions (points whose integer pixel
+        coordinates coincide after round(uv)) by selecting the closest.
+
+        Each visible point is expanded to a disk of radius ``splat_radius``
+        pixels for denser coverage on sparse point clouds.
+
+        Args:
+            uv:        [N, 2] pixel coordinates for this camera.
+            depths:    [N, 1] depth values.
+            visible:   [N, 1] visibility mask.
+            W:         viewport width.
+            H:         viewport height.
+            point_ids: [N]    original point indices (0..N-1).
+
+        Returns:
+            color_img:  [H, W, 3] uint8 RGB image.
+            label_img:  [H, W]    uint8 label map.
+            index_map:  [H, W]    int32 index map (-1 = background).
+        """
+        vis_mask = (visible.squeeze(-1) > 0) & (depths.squeeze(-1) > 0)
+        vis_idx = vis_mask.nonzero(as_tuple=False).squeeze(-1)  # [K]
+
+        if vis_idx.numel() == 0:
+            return (
+                np.zeros((H, W, 3), dtype=np.uint8),
+                np.zeros((H, W), dtype=np.uint8),
+                np.full((H, W), -1, dtype=np.int32),
+            )
+
+        uv_vis = uv[vis_idx]              # [K, 2]
+        depths_vis = depths[vis_idx]      # [K, 1]
+        rgb_vis = self.rgb[vis_idx]       # [K, 3]
+        label_vis = self.label[vis_idx]   # [K]
+        pid_vis = point_ids[vis_idx]      # [K]
+
+        px = torch.round(uv_vis[:, 0]).long()
+        # Flip Y: camera Y points up (world +Z), but image v points down
+        py = H - 1 - torch.round(uv_vis[:, 1]).long()
+
+        valid = (px >= 0) & (px < W) & (py >= 0) & (py < H)
+        if not valid.any():
+            return (
+                np.zeros((H, W, 3), dtype=np.uint8),
+                np.zeros((H, W), dtype=np.uint8),
+                np.full((H, W), -1, dtype=np.int32),
+            )
+
+        px, py = px[valid], py[valid]
+        rgb_vis = rgb_vis[valid]
+        label_vis = label_vis[valid]
+        depths_vis = depths_vis[valid]
+        pid_vis = pid_vis[valid]
+
+        K = px.shape[0]
+        flat_idx = py * W + px  # [K], canonical pixel index
+
+        # --- Expand each point to a disk of radius r --------------------
+        r = self.splat_radius
+        offsets = []
+        for dy in range(-r, r + 1):
+            for dx in range(-r, r + 1):
+                if dx == 0 and dy == 0:
+                    continue
+                offsets.append((dx, dy))
+        offsets = torch.tensor(offsets, device=self.device, dtype=torch.long)  # [No, 2]
+
+        if r > 0 and offsets.shape[0] > 0:
+            # Expand: each of K points expands to O = 1 + |offsets| pixels
+            O = 1 + offsets.shape[0]  # centre + neighbours
+            # Centre pixel
+            flat_all = flat_idx.unsqueeze(1).expand(-1, O).clone()  # [K, O]
+            # Neighbour offsets
+            nx = px.unsqueeze(1) + offsets[None, :, 0]  # [K, No]
+            ny = py.unsqueeze(1) + offsets[None, :, 1]  # [K, No]
+            n_valid = (nx >= 0) & (nx < W) & (ny >= 0) & (ny < H)
+            n_flat = ny * W + nx  # [K, No]
+            flat_all[:, 1:] = n_flat
+            # Mark out-of-bounds neighbours as invalid by setting flat_idx=-1
+            flat_all[:, 1:][~n_valid] = -1
+
+            # Repeat data across expansion dimension
+            flat_exp = flat_all.reshape(-1)  # [K*O]
+            valid_exp = flat_exp >= 0
+            flat_exp = flat_exp[valid_exp]
+            # Map each expanded entry back to its source point index
+            src_idx = torch.arange(K, device=self.device).unsqueeze(1).expand(-1, O).reshape(-1)
+            src_idx = src_idx[valid_exp]
+        else:
+            flat_exp = flat_idx
+            src_idx = torch.arange(K, device=self.device)
+            valid_exp = torch.ones(K, device=self.device, dtype=torch.bool)
+
+        Kexp = flat_exp.shape[0]
+        if Kexp == 0:
+            return (
+                np.zeros((H, W, 3), dtype=np.uint8),
+                np.zeros((H, W), dtype=np.uint8),
+                np.full((H, W), -1, dtype=np.int32),
+            )
+
+        # --- Deterministic depth resolve --------------------------------
+        # Each pixel may receive multiple splats. Select the one with
+        # minimum depth via sort-unique: sort by (pixel_idx, depth_asc),
+        # then keep the first entry per pixel (guaranteed correct on CUDA).
+        d_src = depths_vis.squeeze(-1)[src_idx]  # [Kexp]
+        # Composite sort key: pixel_idx in high bits, depth in low bits
+        sort_key = flat_exp.float() * (d_src.max().item() + 1.0) + d_src
+        _, order = torch.sort(sort_key)
+        flat_sorted = flat_exp[order]
+        # Keep first entry of each consecutive pixel group (the min-depth one)
+        keep = torch.ones(Kexp, device=self.device, dtype=torch.bool)
+        if Kexp > 1:
+            keep[1:] = flat_sorted[1:] != flat_sorted[:-1]
+        order = order[keep]   # indices into expanded data of the winners
+        winner_src = src_idx[order]  # which original point won
+        winner_flat = flat_exp[order]  # pixel index
+
+        # --- Write canvases (no duplicate indices → deterministic) -----
+        Npix = H * W
+        color_canvas = torch.zeros(Npix, 3, device=self.device, dtype=torch.float32)
+        depth_canvas = torch.full((Npix,), float("inf"), device=self.device, dtype=torch.float32)
+        label_canvas = torch.zeros(Npix, device=self.device, dtype=torch.long)
+        index_canvas = torch.full((Npix,), -1, device=self.device, dtype=torch.int32)
+
+        color_canvas[winner_flat] = rgb_vis[winner_src]
+        depth_canvas[winner_flat] = depths_vis.squeeze(-1)[winner_src]
+        label_canvas[winner_flat] = label_vis[winner_src].long()
+        index_canvas[winner_flat] = pid_vis[winner_src].int()
+
+        written_mask = depth_canvas < float("inf")
+        written_2d = written_mask.reshape(H, W).cpu().numpy()
+
+        color_img_np = (
+            (color_canvas.reshape(H, W, 3) * 255).clamp(0, 255).byte().cpu().numpy()
+        )
+        label_img_np = label_canvas.reshape(H, W).byte().cpu().numpy()
+        index_map_np = index_canvas.reshape(H, W).cpu().numpy()
+
+        color_img_np[~written_2d] = 0
+        label_img_np[~written_2d] = 0
+        index_map_np[~written_2d] = -1
+
+        return color_img_np, label_img_np, index_map_np
+
+    # ------------------------------------------------------------------
+    # Public API
+    # ------------------------------------------------------------------
+
+    def render_view(
+        self,
+        intrinsics: torch.Tensor,
+        extrinsics: torch.Tensor,
+        W: int,
+        H: int,
+    ) -> Tuple[np.ndarray, np.ndarray, np.ndarray]:
+        """Render a single camera view.
+
+        Args:
+            intrinsics: [4]  or [1, 4]  (fx, fy, cx, cy).
+            extrinsics: [4,4] or [1,4,4] world-to-camera matrix.
+            W: viewport width.
+            H: viewport height.
+
+        Returns:
+            (color, label, index_map) as numpy arrays.
+        """
+        if intrinsics.dim() == 1:
+            intrinsics = intrinsics.unsqueeze(0)  # [1, 4]
+        if extrinsics.dim() == 2:
+            extrinsics = extrinsics.unsqueeze(0)  # [1, 4, 4]
+
+        intrinsics = intrinsics.to(self.device)
+        extrinsics = extrinsics.to(self.device)
+
+        uv, depths, visible = self._project_batch(
+            intrinsics, extrinsics, W, H
+        )
+
+        # Extract single camera: [N, 2, 1] → [N, 2]
+        point_ids = torch.arange(self.xyz.shape[0], device=self.device, dtype=torch.int32)
+
+        return self._assemble_view(
+            uv[:, :, 0],
+            depths[:, :, 0],
+            visible[:, :, 0],
+            W,
+            H,
+            point_ids,
+        )
+
+    def render_all(
+        self,
+        intr_batch: torch.Tensor,
+        extr_batch: torch.Tensor,
+        W: int,
+        H: int,
+    ) -> Tuple[List[np.ndarray], List[np.ndarray], List[np.ndarray]]:
+        """Render all camera views, processing in sub-batches to fit GPU memory.
+
+        Args:
+            intr_batch: [M, 4] intrinsics.
+            extr_batch: [M, 4, 4] extrinsics.
+            W: viewport width.
+            H: viewport height.
+
+        Returns:
+            color_list:  list of [H, W, 3] uint8 numpy arrays.
+            label_list:  list of [H, W]    uint8 numpy arrays.
+            index_list:  list of [H, W]    int32 numpy arrays.
+        """
+        M = intr_batch.shape[0]
+        color_list: List[np.ndarray] = []
+        label_list: List[np.ndarray] = []
+        index_list: List[np.ndarray] = []
+
+        point_ids = torch.arange(
+            self.xyz.shape[0], device=self.device, dtype=torch.int32
+        )
+
+        for start in range(0, M, self.cam_batch):
+            end = min(start + self.cam_batch, M)
+            sub_intr = intr_batch[start:end].to(self.device)
+            sub_extr = extr_batch[start:end].to(self.device)
+
+            uv, depths, visible = self._project_batch(
+                sub_intr, sub_extr, W, H
+            )
+
+            # uv:   [N, 2, Mb], depths: [N, 1, Mb], visible: [N, 1, Mb]
+            Mb = end - start
+            for j in range(Mb):
+                color_img, label_img, index_map = self._assemble_view(
+                    uv[:, :, j],
+                    depths[:, :, j],
+                    visible[:, :, j],
+                    W,
+                    H,
+                    point_ids,
+                )
+                color_list.append(color_img)
+                label_list.append(label_img)
+                index_list.append(index_map)
+
+        return color_list, label_list, index_list
+
+    def render_all_ewa(
+        self,
+        intr_batch: torch.Tensor,
+        extr_batch: torch.Tensor,
+        W: int,
+        H: int,
+        k: int = 16,
+    ) -> Tuple[List[np.ndarray], List[np.ndarray], List[np.ndarray]]:
+        """Render with EWA (elliptical weighted average) splatting for
+        denser coverage. Uses per-point 3D covariance estimated from
+        k-nearest neighbours.
+
+        NOTE: This path is more expensive (kNN + 2D covariance math)
+        and is intended for high-quality offline rendering.
+
+        Args:
+            intr_batch: [M, 4]
+            extr_batch: [M, 4, 4]
+            W: viewport width.
+            H: viewport height.
+            k: number of neighbours for covariance estimation.
+
+        Returns:
+            color_list, label_list, index_list (same format as render_all).
+        """
+        from pykdtree.kdtree import KDTree
+        from utils.gaussian_splatting_batch import compute_cov3d, ewa_project
+
+        # Step 1: kNN search for covariance estimation
+        xyz_np = self.xyz.cpu().numpy()
+        kdt = KDTree(xyz_np)
+        _, knn_idx = kdt.query(xyz_np, k=k)  # [N, k]
+        knn_idx = torch.from_numpy(knn_idx).long().to(self.device)
+
+        xyz_padded = self.xyz[knn_idx]  # [N, k, 3]
+        xyz_padded = xyz_padded.unsqueeze(0)  # [1, N, k, 3]
+
+        cov3d = compute_cov3d(xyz_padded)  # [1, N, 3, 3]
+        cov3d = cov3d.squeeze(0)  # [N, 3, 3]
+
+        M = intr_batch.shape[0]
+        color_list: List[np.ndarray] = []
+        label_list: List[np.ndarray] = []
+        index_list: List[np.ndarray] = []
+
+        point_ids = torch.arange(
+            self.xyz.shape[0], device=self.device, dtype=torch.int32
+        )
+
+        for start in range(0, M, self.cam_batch):
+            end = min(start + self.cam_batch, M)
+            sub_intr = intr_batch[start:end].to(self.device)
+            sub_extr = extr_batch[start:end].to(self.device)
+
+            uv, depths, visible = self._project_batch(
+                sub_intr, sub_extr, W, H
+            )
+            # uv: [N, 2, Mb]
+
+            Mb = end - start
+            for j in range(Mb):
+                # Extract single view
+                uv_j = uv[:, :, j].unsqueeze(0)  # [1, N, 2]
+                vis_j = visible[:, :, j].unsqueeze(0)  # [1, N, 1]
+
+                # EWA project to get 2D covariance + radius
+                # Expand xyz: [1, N, 3]
+                xyz_b = self.xyz.unsqueeze(0)
+                cov3d_b = cov3d.unsqueeze(0)
+                intr_b = sub_intr[j:j+1]  # [1, 4]
+                extr_b = sub_extr[j:j+1]  # [1, 4, 4]
+
+                conic, radius, tiles = ewa_project(
+                    xyz_b, cov3d_b, intr_b, extr_b, uv_j, W, H, vis_j
+                )
+                radius = radius.squeeze()  # [N]
+
+                # Render with per-point radius (splat disk)
+                color_img, label_img, index_map = self._assemble_view_ewa(
+                    uv[:, :, j],
+                    depths[:, :, j],
+                    visible[:, :, j],
+                    radius,
+                    W, H,
+                    point_ids,
+                )
+                color_list.append(color_img)
+                label_list.append(label_img)
+                index_list.append(index_map)
+
+        return color_list, label_list, index_list
+
+    def _assemble_view_ewa(
+        self,
+        uv: torch.Tensor,
+        depths: torch.Tensor,
+        visible: torch.Tensor,
+        radius: torch.Tensor,
+        W: int,
+        H: int,
+        point_ids: torch.Tensor,
+    ) -> Tuple[np.ndarray, np.ndarray, np.ndarray]:
+        """Assemble a view with per-point EWA radius for denser splatting."""
+        vis_mask = (visible.squeeze(-1) > 0) & (depths.squeeze(-1) > 0)
+        vis_idx = vis_mask.nonzero(as_tuple=False).squeeze(-1)
+
+        if vis_idx.numel() == 0:
+            return (
+                np.zeros((H, W, 3), dtype=np.uint8),
+                np.zeros((H, W), dtype=np.uint8),
+                np.full((H, W), -1, dtype=np.int32),
+            )
+
+        uv_vis = uv[vis_idx]
+        depths_vis = depths[vis_idx]
+        radius_vis = radius[vis_idx]
+        rgb_vis = self.rgb[vis_idx]
+        label_vis = self.label[vis_idx]
+        pid_vis = point_ids[vis_idx]
+
+        px = torch.round(uv_vis[:, 0]).long()
+        # Flip Y: camera Y points up (world +Z), but image v points down
+        py = H - 1 - torch.round(uv_vis[:, 1]).long()
+        r_int = radius_vis.long().clamp(0, 32)
+
+        # Flat canvases
+        depth_canvas = torch.full(
+            (H * W,), float("inf"), device=self.device, dtype=torch.float32
+        )
+        color_canvas = torch.zeros(H * W, 3, device=self.device, dtype=torch.float32)
+        label_canvas = torch.zeros(H * W, device=self.device, dtype=torch.long)
+        index_canvas = torch.full(
+            (H * W,), -1, device=self.device, dtype=torch.int32
+        )
+
+        # Sort by depth (ascending)
+        d_flat = depths_vis.squeeze(-1)
+        d_sorted, sort_idx = torch.sort(d_flat)
+
+        # Process in depth order — first valid write at each pixel wins
+        for k_idx in sort_idx:
+            r_k = int(r_int[k_idx].item())
+            cx = int(px[k_idx].item())
+            cy = int(py[k_idx].item())
+            d_k = float(d_flat[k_idx].item())
+
+            for dy in range(-r_k, r_k + 1):
+                for dx in range(-r_k, r_k + 1):
+                    tx = cx + dx
+                    ty = cy + dy
+                    if 0 <= tx < W and 0 <= ty < H:
+                        fidx = ty * W + tx
+                        if d_k < depth_canvas[fidx].item():
+                            depth_canvas[fidx] = d_k
+                            color_canvas[fidx] = rgb_vis[k_idx]
+                            label_canvas[fidx] = label_vis[k_idx].long()
+                            index_canvas[fidx] = pid_vis[k_idx].int()
+
+        written_mask = depth_canvas < float("inf")
+
+        color_img_np = (
+            (color_canvas.reshape(H, W, 3) * 255)
+            .clamp(0, 255)
+            .byte()
+            .cpu()
+            .numpy()
+        )
+        label_img_np = label_canvas.reshape(H, W).byte().cpu().numpy()
+        index_map_np = index_canvas.reshape(H, W).cpu().numpy()
+
+        written_2d = written_mask.reshape(H, W).cpu().numpy()
+        color_img_np[~written_2d] = 0
+        label_img_np[~written_2d] = 0
+        index_map_np[~written_2d] = -1
+
+        return color_img_np, label_img_np, index_map_np
+```
+
+### point_splatting/trajectory.py
+```
+"""
+Phase 1: Multi-View Camera Trajectory Generation for Elongated Structures.
+
+Generates camera poses along the principal horizontal axis of large-scale
+outdoor point clouds (e.g., ancient city walls), replacing the indoor
+room-centric hardcoded poses from Virtual-Multi-View-Fusion.
+
+Core idea:
+  1. Compute PCA on XY plane to find the principal elongation direction.
+  2. Place cameras on parallel tracks at distance D from the wall surface.
+  3. At each station, generate multiple pitch angles (e.g., 0°, ±30°)
+     to capture wall details, gateways, and top structures (battlements).
+"""
+
+import math
+from dataclasses import dataclass, field
+from typing import List, Optional, Tuple
+
+import numpy as np
+import torch
+
+
+# ---------------------------------------------------------------------------
+# Data structures
+# ---------------------------------------------------------------------------
+
+@dataclass
+class CameraPose:
+    """A single camera pose with intrinsics and extrinsics.
+
+    Attributes:
+        extrinsics: [4, 4] world-to-camera transformation matrix.
+        intrinsics: [fx, fy, cx, cy] pinhole parameters.
+        position:   (x, y, z) camera centre in world coordinates.
+        target:     (x, y, z) look-at point in world coordinates.
+        pitch_deg:  pitch angle in degrees (for bookkeeping).
+    """
+    extrinsics: torch.Tensor   # [4, 4]
+    intrinsics: torch.Tensor   # [4]
+    position: Tuple[float, float, float]
+    target: Tuple[float, float, float]
+    pitch_deg: float
+
+
+@dataclass
+class TrajectoryConfig:
+    """Configuration for the elongated-structure trajectory generator.
+
+    Attributes:
+        num_stations:      Number of camera stations along the principal axis.
+        distance:          Primary distance from the wall surface (metres).
+        far_distance:      Optional farther distance for wide-coverage views.
+                           If set, generates an additional set of views.
+        pitch_angles_deg:  List of pitch angles in degrees (0 = horizontal,
+                           positive = camera looks downward).
+        yaw_offset_deg:    Additional yaw offset added to each station
+                           (0 = perpendicular to wall axis).
+        fov_y_deg:         Vertical field of view in degrees.
+        image_width:       Output image width in pixels.
+        image_height:      Output image height in pixels.
+        view_both_sides:   Whether to place cameras on both sides of the wall.
+        margin_factor:     Extra margin beyond actual point cloud bounds
+                           (1.0 = exact bounds, 1.1 = 10% extra).
+    """
+    num_stations: int = 10
+    distance: float = 15.0
+    far_distance: float = 0.0
+    pitch_angles_deg: Tuple[float, ...] = (-30.0, 0.0, 30.0)
+    yaw_offset_deg: float = 0.0
+    fov_y_deg: float = 60.0
+    image_width: int = 640
+    image_height: int = 480
+    view_both_sides: bool = True
+    margin_factor: float = 1.1
+    overhead_views: bool = False
+    overhead_height: float = 10.0
+
+
+# ---------------------------------------------------------------------------
+# Helper: coordinate-frame utilities
+# ---------------------------------------------------------------------------
+
+def _look_at_cv(
+    campos: torch.Tensor,
+    target: torch.Tensor,
+    up: torch.Tensor = None,
+) -> torch.Tensor:
+    """Build a 3x3 camera-to-world rotation matrix (CV / COLMAP convention).
+
+    Camera +Z axis points FROM camera TOWARD the target (positive depth).
+    This matches the convention expected by CamPoint's ``project_points``
+    where ``depth > 0`` means "in front of the camera."
+
+    Handles the singularity when forward is nearly parallel to the world
+    up vector (e.g., overhead cameras looking straight down) by switching
+    to an alternative reference axis.
+
+    Args:
+        campos: [3] camera position in world space.
+        target: [3] look-at target in world space.
+        up:     [3] world up vector (default [0, 0, 1] for Z-up point clouds).
+
+    Returns:
+        R: [3, 3] rotation matrix (camera-to-world). Columns =
+           {right, up_corrected, forward} where forward points TOWARD target.
+    """
+    if up is None:
+        up = torch.tensor([0.0, 0.0, 1.0], dtype=torch.float32, device=campos.device)
+
+    # forward = camera +Z direction (toward target)
+    forward = target - campos
+    forward = forward / (forward.norm() + 1e-12)
+
+    # Handle near-degenerate case: forward ∥ up → cross product vanishes
+    cos_angle = torch.abs(torch.dot(forward, up))
+    if cos_angle > 0.999:
+        # Use world X as reference instead of world Z
+        alt_up = torch.tensor([1.0, 0.0, 0.0], dtype=torch.float32, device=campos.device)
+        right = torch.linalg.cross(alt_up, forward)
+        right = right / (right.norm() + 1e-12)
+        up_corrected = torch.linalg.cross(forward, right)
+    else:
+        right = torch.linalg.cross(up, forward)
+        right = right / (right.norm() + 1e-12)
+        up_corrected = torch.linalg.cross(forward, right)
+
+    up_corrected = up_corrected / (up_corrected.norm() + 1e-12)
+
+    # Columns: right, up, forward (camera→world rotation)
+    R = torch.stack([right, up_corrected, forward], dim=1)  # [3, 3]
+    return R
+
+
+def _make_extrinsics(campos: torch.Tensor, target: torch.Tensor) -> torch.Tensor:
+    """Build a 4x4 world-to-camera extrinsics matrix (CV / COLMAP convention).
+
+    p_cam = R_w2c @ p_world + t  where R_w2c = R_c2w^T and t = -R_w2c @ campos.
+    Points in front of the camera have positive Z (depth > 0), matching
+    the convention expected by CamPoint's ``project_points``.
+
+    Args:
+        campos: [3] camera centre in world coordinates.
+        target: [3] look-at target in world coordinates.
+
+    Returns:
+        extr: [4, 4] homogeneous world-to-camera matrix.
+    """
+    R_c2w = _look_at_cv(campos, target)  # [3, 3] columns = {right, up, forward}
+    R_w2c = R_c2w.T  # world → camera rotation
+    extr = torch.eye(4, dtype=torch.float32, device=campos.device)
+    extr[:3, :3] = R_w2c
+    extr[:3, 3] = -(R_w2c @ campos)
+    return extr
+
+
+def _make_intrinsics(
+    fov_y_deg: float,
+    width: int,
+    height: int,
+    device: torch.device = torch.device("cpu"),
+) -> torch.Tensor:
+    """Build pinhole intrinsics vector [fx, fy, cx, cy].
+
+    Args:
+        fov_y_deg: vertical field of view in degrees.
+        width:     image width (pixels).
+        height:    image height (pixels).
+
+    Returns:
+        intr: [4] tensor (fx, fy, cx, cy).
+    """
+    fov_y = math.radians(fov_y_deg)
+    focal = height / (2.0 * math.tan(fov_y / 2.0))
+    return torch.tensor(
+        [focal, focal, width / 2.0, height / 2.0],
+        dtype=torch.float32,
+        device=device,
+    )
+
+
+def compute_obb_xy(
+    xyz: torch.Tensor,
+) -> Tuple[torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor]:
+    """Compute the Oriented Bounding Box in the XY plane via PCA.
+
+    Returns both principal axes and the actual projected min/max ranges
+    along each axis (not std-based), for accurate trajectory bounds.
+
+    Args:
+        xyz: [N, 3] point cloud coordinates.
+
+    Returns:
+        centre:   [2] OBB centre in XY plane.
+        axes:     [2, 2] two principal axes (rows), sorted by eigenvalue desc.
+                  axes[0] = primary elongation direction.
+        proj_min: [2] minimum projection along each axis.
+        proj_max: [2] maximum projection along each axis.
+    """
+    xy = xyz[:, :2]  # [N, 2]
+    centre = xy.mean(dim=0)  # [2]
+
+    xy_centred = xy - centre  # [N, 2]
+    cov = (xy_centred.T @ xy_centred) / (xy.shape[0] - 1)
+
+    eigenvalues, eigenvectors = torch.linalg.eigh(cov)  # ascending
+    eigenvalues = eigenvalues.flip(0)
+    eigenvectors = eigenvectors.flip(1)  # columns are eigenvectors
+
+    axes = eigenvectors.T  # [2, 2], rows
+
+    # Actual projected ranges along each axis
+    proj = xy @ axes.T  # [N, 2]
+    proj_min = proj.min(dim=0).values  # [2]
+    proj_max = proj.max(dim=0).values  # [2]
+
+    return centre, axes, proj_min, proj_max
+
+
+def _generate_station_positions_range(
+    centre_xy: torch.Tensor,
+    axis: torch.Tensor,
+    extent_min: float,
+    extent_max: float,
+    perp_offset: torch.Tensor,
+    num_stations: int,
+    z_centre: float,
+) -> List[Tuple[float, float, float]]:
+    """Generate camera station positions along the principal axis.
+
+    Stations span from ``extent_min`` to ``extent_max`` (projected
+    coordinates along the axis), offset perpendicular by ``perp_offset``.
+
+    Args:
+        centre_xy:    [2] OBB centre in XY.
+        axis:         [2] principal elongation direction (unit vector).
+        extent_min:   minimum projected coordinate along axis.
+        extent_max:   maximum projected coordinate along axis.
+        perp_offset:  [2] perpendicular offset vector (already scaled).
+        num_stations: number of evenly-spaced stations.
+        z_centre:     mean Z coordinate (camera height).
+
+    Returns:
+        List of (x, y, z) tuples.
+    """
+    positions = []
+    for i in range(num_stations):
+        t = extent_min + (extent_max - extent_min) * i / max(num_stations - 1, 1)
+        on_wall = centre_xy + t * axis  # [2]
+        cam_xy = on_wall + perp_offset  # [2]
+        positions.append(
+            (float(cam_xy[0]), float(cam_xy[1]), float(z_centre))
+        )
+    return positions
+
+
+# ---------------------------------------------------------------------------
+# Main trajectory generator
+# ---------------------------------------------------------------------------
+
+def generate_trajectory(
+    xyz: torch.Tensor,
+    config: Optional[TrajectoryConfig] = None,
+    device: torch.device = torch.device("cpu"),
+) -> List[CameraPose]:
+    """Generate a multi-view camera trajectory adapted to elongated structures.
+
+    Strategy:
+      1. Fit the wall centreline via PCA on XY.  Use the global perp axis
+         for camera offset (proven stable).
+      2. Sample stations along the centreline, CLAMPED to the actual
+         point-cloud bounding box so no station falls outside.
+      3. Camera positions are further clamped to the bounding box expanded
+         by ``margin_distance`` so they never stare into empty space.
+      4. Both sides, multiple pitch angles.
+
+    Args:
+        xyz:    [N, 3] input point cloud (world coordinates, Z-up).
+        config: trajectory hyper-parameters.
+        device: torch device.
+
+    Returns:
+        poses: list of CameraPose objects (one per viewpoint).
+    """
+    if config is None:
+        config = TrajectoryConfig()
+
+    xyz = xyz.to(device)
+
+    # --- 1. Compute OBB axes & actual bounding-box ------------------------
+    centre_xy, axes, proj_min, proj_max = compute_obb_xy(xyz)
+    main_axis = axes[0]  # [2]
+    perp_axis = axes[1]  # [2]
+
+    x_min, x_max = float(xyz[:, 0].min()), float(xyz[:, 0].max())
+    y_min, y_max = float(xyz[:, 1].min()), float(xyz[:, 1].max())
+    z_min, z_max = float(xyz[:, 2].min()), float(xyz[:, 2].max())
+    z_centre = (z_min + z_max) / 2.0
+
+    # Consistent axis orientation
+    if perp_axis[0] < 0:
+        perp_axis = -perp_axis
+        main_axis = -main_axis
+
+    # --- 2. Intrinsics ----------------------------------------------------
+    intrinsics = _make_intrinsics(
+        config.fov_y_deg, config.image_width, config.image_height, device
+    )
+
+    # --- 3. Station centreline positions (clamped to actual range) -------
+    margin = config.margin_factor
+    extent_min = float(proj_min[0]) * margin
+    extent_max = float(proj_max[0]) * margin
+
+    stations_xy: List[Tuple[float, float]] = []
+    for i in range(config.num_stations):
+        t = extent_min + (extent_max - extent_min) * i / max(config.num_stations - 1, 1)
+        on_wall = centre_xy + t * main_axis  # [2]
+        sx = float(torch.clamp(on_wall[0], x_min, x_max))
+        sy = float(torch.clamp(on_wall[1], y_min, y_max))
+        stations_xy.append((sx, sy))
+
+    # --- 4. Camera pose generation with density validation ---------------
+    # Determine max camera offset to extend the density grid far enough.
+    all_distances = [config.distance]
+    if config.far_distance > 0 and config.far_distance != config.distance:
+        all_distances.append(config.far_distance)
+    max_dist = max(all_distances)
+
+    grid_res = 5.0  # metres per bin
+    grid_pad = max_dist + 2.0 * grid_res  # ensure cameras land inside grid
+    grid_nx = max(3, int((x_max - x_min + 2 * grid_pad) / grid_res))
+    grid_ny = max(3, int((y_max - y_min + 2 * grid_pad) / grid_res))
+    x_bins = torch.linspace(
+        x_min - grid_pad, x_min - grid_pad + grid_nx * grid_res, grid_nx + 1,
+        device=device,
+    )
+    y_bins = torch.linspace(
+        y_min - grid_pad, y_min - grid_pad + grid_ny * grid_res, grid_ny + 1,
+        device=device,
+    )
+    x_idx = torch.bucketize(xyz[:, 0].contiguous(), x_bins) - 1
+    y_idx = torch.bucketize(xyz[:, 1].contiguous(), y_bins) - 1
+    valid_xy = (x_idx >= 0) & (x_idx < grid_nx) & (y_idx >= 0) & (y_idx < grid_ny)
+    x_idx, y_idx = x_idx[valid_xy], y_idx[valid_xy]
+    density = torch.zeros(grid_nx, grid_ny, device=device)
+    density.index_put_(
+        (x_idx, y_idx),
+        torch.ones(x_idx.shape[0], device=device),
+        accumulate=True,
+    )
+
+    x_origin = x_min - grid_pad
+    y_origin = y_min - grid_pad
+
+    def _has_points_near(cx: float, cy: float, radius: float = 15.0) -> bool:
+        """Check if any point exists within ``radius`` metres of (cx, cy)."""
+        gx = int((cx - x_origin) / grid_res)
+        gy = int((cy - y_origin) / grid_res)
+        nb = max(1, int(radius / grid_res))
+        for dx in range(-nb, nb + 1):
+            for dy in range(-nb, nb + 1):
+                nx, ny = gx + dx, gy + dy
+                if 0 <= nx < grid_nx and 0 <= ny < grid_ny:
+                    if density[nx, ny] > 0:
+                        return True
+        return False
+
+    # --- 5. Camera pose generation ---------------------------------------
+    distances = all_distances
+
+    sides = [1.0, -1.0] if config.view_both_sides else [1.0]
+
+    poses: List[CameraPose] = []
+
+    for dist in distances:
+        for side_sign in sides:
+            for sx, sy in stations_xy:
+                # Camera position = station + perpendicular offset
+                cam_x = sx + float(perp_axis[0]) * dist * side_sign
+                cam_y = sy + float(perp_axis[1]) * dist * side_sign
+                cam_z = z_centre
+
+                # Skip if camera position is in an empty region
+                if not _has_points_near(cam_x, cam_y, radius=max(15.0, dist * 0.5)):
+                    continue
+
+                target_xy = torch.tensor([sx, sy], device=device)
+
+                for pitch_deg in config.pitch_angles_deg:
+                    pitch_rad = math.radians(pitch_deg)
+                    target_z = cam_z - math.tan(pitch_rad) * dist
+
+                    cam_t = torch.tensor(
+                        [cam_x, cam_y, cam_z], dtype=torch.float32, device=device
+                    )
+                    tgt_t = torch.tensor(
+                        [float(target_xy[0]), float(target_xy[1]), target_z],
+                        dtype=torch.float32, device=device,
+                    )
+
+                    extrinsics = _make_extrinsics(cam_t, tgt_t)
+
+                    poses.append(
+                        CameraPose(
+                            extrinsics=extrinsics.cpu(),
+                            intrinsics=intrinsics.cpu(),
+                            position=(cam_x, cam_y, cam_z),
+                            target=(
+                                float(target_xy[0]),
+                                float(target_xy[1]),
+                                target_z,
+                            ),
+                            pitch_deg=pitch_deg,
+                        )
+                    )
+
+    # Fallback: if density check filtered all poses, re-generate without it
+    if len(poses) == 0:
+        import warnings
+        warnings.warn(
+            "Density check filtered all poses; falling back to unfiltered "
+            "trajectory. The point cloud may be very small or narrow."
+        )
+        poses = []
+        for dist in distances:
+            for side_sign in sides:
+                for sx, sy in stations_xy:
+                    cam_x = sx + float(perp_axis[0]) * dist * side_sign
+                    cam_y = sy + float(perp_axis[1]) * dist * side_sign
+                    cam_z = z_centre
+                    target_xy = torch.tensor([sx, sy], device=device)
+                    for pitch_deg in config.pitch_angles_deg:
+                        pitch_rad = math.radians(pitch_deg)
+                        target_z = cam_z - math.tan(pitch_rad) * dist
+                        cam_t = torch.tensor(
+                            [cam_x, cam_y, cam_z], dtype=torch.float32, device=device
+                        )
+                        tgt_t = torch.tensor(
+                            [float(target_xy[0]), float(target_xy[1]), target_z],
+                            dtype=torch.float32, device=device,
+                        )
+                        extrinsics = _make_extrinsics(cam_t, tgt_t)
+                        poses.append(
+                            CameraPose(
+                                extrinsics=extrinsics.cpu(),
+                                intrinsics=intrinsics.cpu(),
+                                position=(cam_x, cam_y, cam_z),
+                                target=(
+                                    float(target_xy[0]),
+                                    float(target_xy[1]),
+                                    target_z,
+                                ),
+                                pitch_deg=pitch_deg,
+                            )
+                        )
+
+    # --- 6. Overhead / top-down views -----------------------------------
+    if config.overhead_views:
+        oh_height = config.overhead_height
+        oh_stations = max(2, config.num_stations // 2)
+        for i in range(oh_stations):
+            t = extent_min + (extent_max - extent_min) * i / max(oh_stations - 1, 1)
+            on_wall = centre_xy + t * main_axis
+            sx = float(torch.clamp(on_wall[0], x_min, x_max))
+            sy = float(torch.clamp(on_wall[1], y_min, y_max))
+            cam_x, cam_y = sx, sy
+            cam_z = float(z_max) + oh_height
+            if not _has_points_near(cam_x, cam_y, radius=oh_height * 1.5):
+                continue
+            target_z = float(z_centre)
+            cam_t = torch.tensor(
+                [cam_x, cam_y, cam_z], dtype=torch.float32, device=device
+            )
+            tgt_t = torch.tensor(
+                [sx, sy, target_z], dtype=torch.float32, device=device,
+            )
+            extrinsics = _make_extrinsics(cam_t, tgt_t)
+            poses.append(
+                CameraPose(
+                    extrinsics=extrinsics.cpu(),
+                    intrinsics=intrinsics.cpu(),
+                    position=(cam_x, cam_y, cam_z),
+                    target=(sx, sy, target_z),
+                    pitch_deg=90.0,
+                )
+            )
+
+    return poses
+
+
+# ---------------------------------------------------------------------------
+# Helpers
+# ---------------------------------------------------------------------------
+
+def poses_to_batch(poses: List[CameraPose]) -> Tuple[torch.Tensor, torch.Tensor]:
+    """Convert a list of CameraPose objects into batched tensors for
+    direct consumption by CamPoint's ``project_points``.
+
+    Args:
+        poses: list of CameraPose.
+
+    Returns:
+        intr_batch: [M, 4] stacked intrinsics.
+        extr_batch: [M, 4, 4] stacked extrinsics (world-to-camera).
+    """
+    intr_list = [p.intrinsics for p in poses]
+    extr_list = [p.extrinsics for p in poses]
+    intr_batch = torch.stack(intr_list, dim=0)  # [M, 4]
+    extr_batch = torch.stack(extr_list, dim=0)  # [M, 4, 4]
+    return intr_batch, extr_batch
+
+
+# ---------------------------------------------------------------------------
+# Demo / smoke test
+# ---------------------------------------------------------------------------
+
+if __name__ == "__main__":
+    # Quick smoke test: mock elongated wall point cloud
+    N = 5000
+    torch.manual_seed(42)
+    # Wall: 80 m long along X, 2 m wide along Y, 10 m tall along Z
+    x = torch.linspace(-40, 40, N)
+    y = torch.randn(N) * 1.0
+    z = torch.rand(N) * 10.0
+    xyz = torch.stack([x, y, z], dim=1)
+
+    config = TrajectoryConfig(
+        num_stations=5,
+        distance=10.0,
+        pitch_angles_deg=(0.0, 30.0),
+        view_both_sides=True,
+    )
+    poses = generate_trajectory(xyz, config)
+    print(f"Generated {len(poses)} camera poses")
+    for i, p in enumerate(poses):
+        print(
+            f"  [{i}] pos=({p.position[0]:.1f}, {p.position[1]:.1f}, {p.position[2]:.1f}) "
+            f"pitch={p.pitch_deg:.0f}°"
+        )
+```

@@ -1,0 +1,46 @@
+# Machine Learning and Feature Extraction
+
+
+## Overview
+This family applies machine learning algorithms and feature extraction techniques to determine the optical properties of volume data, moving beyond manual transfer function design [G]. It solves the problem of classifying complex, high-dimensional volumetric structures automatically or semi-automatically by learning decision boundaries from training data or extracting statistical features [G]. It differs from [Data Feature-Based Classification](5934-data-feature-based-classification.md) by explicitly using learned models (e.g., SVMs, Neural Networks, Boosting) or statistical clustering (e.g., K-means) rather than static, user-defined heuristic functions [G].
+
+## Shared principles
+Builds on [Data Feature-Based Classification](5934-data-feature-based-classification.md), which evaluates a classification function $C(\mathbf{x})$ for each sample point $\mathbf{x}$ to produce optical properties [G].
+
+## Subtopics
+
+### [K-means-based hybrid segmentation](7597-k-means-based-hybrid-segmentation.md)
+K-means-based hybrid segmentation is an image processing approach that enhances ray casting object distinction by assigning object membership information (ID tags) to cubical vertices in the volume. It differs from standard clustering by combining Self-Organizing Maps (SOM) for robust initialization, K-means for preliminary grouping, and Fisher discriminant analysis for statistical optimization, specifically designed to generate binary, non-overlapping transfer functions for color and opacity assignment.
+
+### [AdaBoost Look Up Table (LUT) Classification](12547-adaboost-look-up-table-lut-classification.md)
+AdaBoost Look Up Table (LUT) Classification is a machine learning method for volume rendering that accelerates multi-class segmentation by storing trained AdaBoost weak classifiers in a compact lookup structure. It solves the problem of interactive volume classification by replacing iterative model evaluation with fast table lookups, enabling real-time testing after an interactive training phase. It differs from [AdaBoost Volume Classification](12549-adaboost-volume-classification.md) by explicitly encoding the decision stumps into a 3-row LUT structure optimized for GPU parallel testing, and from [K-means-based hybrid segmentation](7597-k-means-based-hybrid-segmentation.md) by using boosting-based binary dichotomizers within an Error Correcting Output Codes (ECOC) framework rather than centroid-based clustering.
+
+### [AdaBoost Volume Classification](12549-adaboost-volume-classification.md)
+AdaBoost Volume Classification is an interactive, data-driven method for multi-class segmentation of volumetric data using a framework of Error Correcting Output Codes (ECOC) and Discrete AdaBoost classifiers. It solves the problem of classifying multiple regions of interest on demand without requiring preprocessing or complex optimization procedures. Unlike graph cuts or random walker methods, it avoids segmentation dependencies among neighboring voxels, making it suitable for real-time applications and handling thinned or complex structures.
+
+### [Two-stage k-means Streamline Clustering](14478-two-stage-k-means-streamline-clustering.md)
+Two-stage k-means streamline clustering is a method for abstracting 3D vector fields by decomposing a large set of streamlines into coherent bundles and extracting representative streamlines for visualization. It solves the problem of visual clutter and high computational complexity associated with rendering raw streamline data by reducing the dataset to a concise set of representative paths. Unlike standard k-means which operates on high-dimensional point vectors, this method uses low-dimensional feature vectors (spatial coordinates and entropy metrics) to ensure efficiency and coherence in flow structure representation.
+
+### [CNN-feature based viewpoint selection](15365-cnn-feature-based-viewpoint-selection.md)
+This method suggests the optimal viewpoint for features of interest in a given input volume and transfer function by considering the similarity between input features and features in a collected image set. It sets itself apart from image-based viewpoint selection models by separating viewpoint estimation and similarity calculation into distinct stages solved by Convolutional Neural Networks (CNNs), rather than applying a single similarity measure to mix these stages.
+
+#### Classifier Reuse
+- **Definition:** Saving a trained neural network or SVM configuration to apply it to new data sets with similar characteristics, reducing classification time [S1].
+- **Step:** Apply the saved classifier to the new data set. If misclassification occurs, the user can refine it by supplying additional training data [S1].
+- **Parameter:** Saved classifier size: under 30 kilobytes [S1].
+- **Pitfall:** Position information is specific to a given data set; using it reduces reusability because location changes between scans. It should be excluded if reusability is intended [S1]. Reused classifiers may misclassify materials if the new data set does not share similar characteristics (e.g., data value ranges or material locations) [S1].
+
+#### DINO Features for SVM/RF Classification
+- **Number:** SVM IoU on CT-ORG dataset with DINO features: 0.24 (liver), 0.36 (bones), 0.0 (other classes), mean 0.09. Fit time: 407s. Inference time: 2077s [S2].
+
+#### ICA-based Transfer Function Design
+- **Definition:** A technique using Independent Component Analysis (ICA) to represent voxel signatures via linear transformation into a space where manual classification is simpler, often achievable using separator planes perpendicular to the new coordinate axes. ICA infers the linear transformation coefficients to simplify the signature representation [S3, unofficial].
+- **Step:** 1. Apply ICA to voxel signatures. 2. Infer appropriate linear transformation coefficients. 3. Transform voxel signatures into the new space. 4. Perform manual classification using separator planes perpendicular to the new axes [S3, unofficial].
+
+## Background
+The application of machine learning to volume rendering classification emerged in the early 2000s as a response to the complexity of high-dimensional data [G]. Tzeng et al. introduced intelligent systems using Support Vector Machines (SVMs) and neural networks for higher-dimensional classification, demonstrating the reuse of classifiers across similar datasets [S1]. Concurrently, Takanashi et al. proposed using Independent Component Analysis (ICA) to simplify the classification space for multidimensional volumes [S3, unofficial]. More recently, self-supervised vision transformers (e.g., DINO) have been leveraged for segmentation-based transfer function design, although computational costs remain a challenge [S2].
+
+## Sources
+[S1] An Intelligent System Approach to Higher-Dimensional Classification of Volume Data, https://doi.org/10.1109/tvcg.2005.38, fetched 2026-10-27
+[S2] Leveraging Self-Supervised Vision Transformers for Segmentation-Based Transfer Function Design., https://doi.org/10.1109/tvcg.2024.3401755, fetched 2026-10-26
+[S3] Especificação de funções de transferência unidimensionais e multidimensionais para visualização volumétrica direta, http://hdl.handle.net/10183/12077, fetched 2026-10-30 (unofficial)

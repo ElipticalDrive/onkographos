@@ -1,0 +1,229 @@
+# MuRF (Multi-Baseline Radiance Fields)
+Also called: Multi-Baseline Radiance Fields
+
+## Overview
+MuRF is a feed-forward method for sparse view synthesis that addresses the failure of previous radiance field methods under large camera baselines by constructing a target view frustum volume aligned with the novel view rather than a reference input view [S1]. It differs from sibling methods like MVSNeRF and GeoNeRF, which use reference-view volumes, and from ray-based methods like SRF and IBRNet, by using a 3D context-aware convolutional decoder to regress density and color from a discretized volume [S1].
+
+## How it works
+**Inputs:** A set of $K$ input images $\{I_k\}_{k=1}^K$ with known camera poses, and a target camera pose for the novel view.
+**Outputs:** A rendered target image of resolution $H \times W$.
+
+**Data Structures:**
+1.  **Multi-scale Features:** Extracted from input images. The CNN produces features at $1/2$, $1/4$, and $1/8$ of the original resolution. The Transformer operates on the $1/8$ resolution features.
+2.  **Target View Frustum Volume ($z$):** A 4D tensor with dimensions $8 \times 8 \times D \times C$.
+    *   $8 \times 8$: Spatial subsampling factor applied to the target image resolution $H \times W$.
+    *   $D$: Number of equidistant points sampled along each ray within the frustum.
+    *   $C$: Channel dimension containing concatenated sampled colors, features, and cosine similarities.
+
+**Steps:**
+
+1.  **Feature Extraction:**
+    For each input image $I_k$, extract features using a weight-sharing 2D CNN followed by a joint multi-view Transformer.
+    *   The CNN consists of 6 residual blocks [S1].
+    *   A stride-2 convolutional layer is applied every 2 residual blocks, yielding feature maps at $1/2$, $1/4$, and $1/8$ resolutions [S1].
+    *   The $1/8$ resolution features from all $K$ views are processed by a joint multi-view Transformer (based on GMFlow's 2-view architecture extended to $K$ views) to produce final multi-view features $\{F_k\}$ at $1/8$ resolution [S1].
+
+2.  **Target View Frustum Volume Construction:**
+    Construct a volume aligned with the target view's camera frustum.
+    *   Cast rays from the target camera through the target image plane.
+    *   Perform $8\times$ subsampling in the spatial dimension (resulting in an $8 \times 8$ grid) [S1].
+    *   Uniformly sample $D$ equidistant points along each ray within the frustum [S1].
+    *   For each 3D point in the volume, sample color and feature information from the input images and the extracted feature maps $\{F_k\}$ [S1].
+    *   Compute cosine similarities between the sampled features from different views to provide multi-view consistency cues [S1].
+    *   Concatenate the sampled colors, sampled features, and computed cosine similarities to form the volume elements $z \in \mathbb{R}^{8 \times 8 \times D \times C}$ [S1].
+
+3.  **Radiance Field Regression:**
+    Reconstruct the radiance field from the low-resolution volume $z$ using a $(2+1)$D CNN decoder.
+    *   The $(2+1)$D CNN factorizes a standard 3D $3\times3\times3$ convolution into:
+        *   A 2D $3\times3\times1$ convolution on the spatial dimensions.
+        *   A 1D $1\times1\times3$ convolution on the depth dimension [S1].
+    *   This produces a low-resolution output of density and color [S1].
+
+4.  **Upsampling:**
+    Apply a lightweight $8\times$ upsampler to the low-resolution radiance field output to obtain the full-resolution radiance field at $H \times W$ resolution [S1].
+
+5.  **Rendering:**
+    Render the target image using standard volumetric rendering [G] on the full-resolution radiance field [S1].
+
+**Pseudocode:**
+
+> **Unverified code.** The code below did not pass a test run against a reference implementation, or no test fits it, so it may contain errors.
+
+```python
+import torch
+import torch.nn as nn
+import torch.nn.functional as F
+
+class MuRF:
+    def __init__(self, num_depth_samples=128, num_input_views=2):
+        """
+        Initialize MuRF components.
+        :param num_depth_samples: D, number of equidistant points on each ray.
+        :param num_input_views: K, number of input images.
+        """
+        # Feature Encoder
+        self.cnn_encoder = CNNFeatureEncoder() # 6 residual blocks, stride-2 convs every 2 blocks
+        self.multi_view_transformer = MultiViewTransformer(num_views=num_input_views)
+        
+        # Context-aware Decoder
+        # (2+1)D CNN: 2D spatial conv followed by 1D depth conv
+        self.decoder_2d = nn.Conv3d(in_channels=None, out_channels=None, kernel_size=(3, 3, 1)) # Placeholder for exact channel dims
+        self.decoder_1d = nn.Conv3d(in_channels=None, out_channels=None, kernel_size=(1, 1, 3)) # Placeholder for exact channel dims
+        # Note: Exact channel dimensions C are not specified in sources. 
+        # C is the aggregated channel dimension of sampled features, colors, and cosine similarities.
+        
+        # Upsampler
+        self.upsampler = LightweightUpsampler(scale_factor=8)
+
+    def extract_features(self, input_images):
+        """
+        Extract multi-view features from input images.
+        :param input_images: Tensor of shape (K, H, W, 3)
+        :return: List of feature tensors at 1/8 resolution, shape (K, H/8, W/8, C_cnn)
+        """
+        # Step 1: Per-image 2D CNN
+        cnn_features = []
+        for img in input_images:
+            # CNN produces features at 1/2, 1/4, 1/8 resolutions
+            # We only need the 1/8 resolution features for the Transformer
+            f_1_8 = self.cnn_encoder(img) 
+            cnn_features.append(f_1_8)
+        
+        # Step 2: Joint Multi-View Transformer
+        # Transformer operates on 1/8 resolution features
+        # Extends 2-view cross-attention to K views
+        multi_view_features = self.multi_view_transformer(cnn_features)
+        return multi_view_features
+
+    def construct_volume(self, target_camera, input_images, multi_view_features):
+        """
+        Construct the target view frustum volume.
+        :param target_camera: Camera parameters for the target view
+        :param input_images: Original input images (for color sampling)
+        :param multi_view_features: Features from Step 1
+        :return: Volume z of shape (8, 8, D, C)
+        """
+        H, W = input_images[0].shape[1], input_images[0].shape[2]
+        spatial_H, spatial_W = H // 8, W // 8
+        D = 128 # Default D, typically not given as a fixed constant in text, but used in volume dim
+        
+        # Cast rays from target camera
+        # Sample D equidistant points on each ray
+        # Perform 8x subsampling in spatial dimension
+        # This results in a grid of 8x8 rays
+        
+        volume_elements = []
+        
+        for i in range(8):
+            row_elements = []
+            for j in range(8):
+                # Get ray for target pixel (i*8, j*8)
+                ray = get_ray_from_target_camera(target_camera, i*8, j*8)
+                
+                # Sample D points along the ray
+                points_3d = sample_equidistant_points(ray, D)
+                
+                # For each point, sample features and colors from input views
+                sampled_colors = []
+                sampled_features = []
+                cosine_similarities = []
+                
+                for k in range(len(input_images)):
+                    # Sample color from input image I_k at the projected location of points_3d
+                    color_k = sample_color_from_image(input_images[k], points_3d, target_camera, input_images[k].camera)
+                    sampled_colors.append(color_k)
+                    
+                    # Sample feature from multi_view_features[k] at the projected location
+                    feat_k = sample_feature_from_map(multi_view_features[k], points_3d, target_camera, input_images[k].camera)
+                    sampled_features.append(feat_k)
+                    
+                    # Compute cosine similarity between features of view k and other views
+                    # Sources mention "cosine similarities between sampled features"
+                    # Assuming pairwise or reference-based similarity for consistency cues
+                    sim_k = compute_cosine_similarity(feat_k, sampled_features) 
+                    cosine_similarities.append(sim_k)
+                
+                # Concatenate sampled colors, features, and cosine similarities
+                # C is the channel dimension after aggregation
+                z_element = torch.cat([
+                    torch.stack(sampled_colors),
+                    torch.stack(sampled_features),
+                    torch.stack(cosine_similarities)
+                ], dim=-1)
+                
+                row_elements.append(z_element)
+            
+            volume_elements.append(torch.stack(row_elements))
+        
+        # Volume shape: (8, 8, D, C)
+        z = torch.stack(volume_elements)
+        return z
+
+    def decode_radiance_field(self, volume_z):
+        """
+        Reconstruct radiance field from volume using (2+1)D CNN.
+        :param volume_z: Tensor of shape (8, 8, D, C)
+        :return: Low-res density and color tensors
+        """
+        # (2+1)D CNN: 2D spatial conv (3x3x1) then 1D depth conv (1x1x3)
+        # Note: Conv3d in PyTorch expects (N, C, D, H, W) or similar. 
+        # Assuming input is (N, C, D, H, W) for conv3d, or we permute.
+        # Here we assume standard spatial (H,W) and depth (D) layout.
+        
+        # Permute to (N, C, D, H, W) if necessary
+        x = volume_z.permute(0, 3, 2, 1, 4) # (8, C, D, 8, 8) -> (N, C, D, H, W)
+        
+        # 2D Conv on spatial dimensions (H, W)
+        # Kernel (3, 3, 1)
+        x = self.decoder_2d(x)
+        
+        # 1D Conv on depth dimension (D)
+        # Kernel (1, 1, 3)
+        x = self.decoder_1d(x)
+        
+        return x
+
+    def render(self, target_camera, input_images):
+        """
+        Full forward pass.
+        """
+        # 1. Extract Features
+        multi_view_features = self.extract_features(input_images)
+        
+        # 2. Construct Volume
+        volume_z = self.construct_volume(target_camera, input_images, multi_view_features)
+        
+        # 3. Decode Radiance Field
+        low_res_radiance = self.decode_radiance_field(volume_z)
+        
+        # 4. Upsample
+        full_res_radiance = self.upsampler(low_res_radiance)
+        
+        # 5. Render
+        # Volumetric rendering on full_res_radiance
+        target_image = volumetric_render(full_res_radiance, target_camera)
+        
+        return target_image
+```
+
+**Parameters:**
+*   **Spatial Subsampling Factor:** $8\times$ [S1].
+*   **$D$:** Number of equidistant points sampled on each ray. Not given in the sources as a specific constant, but used in the volume dimension $8 \times 8 \times D \times C$.
+*   **$H \times W$:** Resolution of the target image [S1].
+*   **$K$:** Number of input views. The method supports $K \ge 2$ [S1].
+
+**Edge Cases and Pitfalls:**
+*   **Large Baselines:** Using a reference view volume (aligned with an input view) for large baselines causes failure because the overlap between the reference and target view is small, leading to missing information outside the epipolar lines of the reference view [S1]. MuRF avoids this by aligning the volume with the target view [S1].
+*   **Information Loss:** The $8\times$ spatial subsampling risks losing information if only a single point is sampled per ray. The method addresses this by sampling features and colors from multiple input views and computing cosine similarities for consistency cues [S1].
+
+## Operating characteristics
+*   **Time and Memory Complexity:** The method uses a $(2+1)$D CNN decoder, which is computationally more efficient than a full 3D CNN [S1]. The $8\times$ spatial subsampling reduces the memory footprint and computational cost of the volume representation, allowing efficient handling of high-resolution images [S1].
+*   **Measured Performance:** MuRF achieves state-of-the-art performance across multiple baseline settings on DTU, LLFF, RealEstate10K, and Mip-NeRF 360 datasets [S1]. It outperforms specialized small baseline methods (e.g., ENeRF) and large baseline methods (e.g., AttnRend) [S1].
+*   **Strengths:** General applicability to both small and large baselines; zero-shot generalization ability; explicit 3D context modeling via CNN decoder [S1].
+*   **Limitations:** Requires known camera poses for input and target views [S1]. Performance may degrade if the target view is outside the convex hull of input views (standard NeRF limitation, implied by frustum volume construction) [S1].
+
+## Background
+MuRF was proposed by Haofei Xu, Fisher Yu, et al. from ETH Zurich, University of Tübingen, Monash University, Shanghai Jiao Tong University, and Microsoft [S1]. The paper was published in CVPR 2024 [S1]. It addresses the limitations of previous feed-forward NeRF methods that were specialized for either small or large baselines, by introducing a target view frustum volume representation [S1].
+
+## Sources
+[S1] MuRF: Multi-Baseline Radiance Fields, https://doi.org/10.1109/cvpr52733.2024.01894, fetched 2026-10-27

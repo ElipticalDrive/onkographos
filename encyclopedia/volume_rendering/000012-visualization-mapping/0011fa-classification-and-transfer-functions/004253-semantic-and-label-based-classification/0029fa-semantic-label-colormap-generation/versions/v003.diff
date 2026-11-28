@@ -1,0 +1,109 @@
+--- v002.md
++++ v003.md
+@@ -4,14 +4,14 @@
+ 
+ ## Overview
+-This method maps a 2D semantic label image to an RGB color image by assigning predefined colors to known classes and generating deterministic HSV-based colors for unknown or unseen classes [S1, unofficial]. It ensures visual consistency and distinctness for arbitrary label IDs without requiring user-defined palettes for every possible class [S1, unofficial]. It differs from [Categorical Color Maps](7160-categorical-color-maps.md) by using a deterministic hash-based hue generation for unknown labels rather than a fixed or random palette, and from [Style Transfer Function (1D)](777-style-transfer-function-1d.md) by operating on discrete integer labels rather than continuous scalar values [S1, Parent, unofficial].
++This method maps a 2D semantic label image to an RGB color image by assigning predefined colors to known classes and generating deterministic HSV-based colors for unknown or unseen classes [S1, unofficial]. It ensures visual consistency and distinctness for arbitrary label IDs without requiring user-defined palettes for every possible class [S1, unofficial]. It differs from [Categorical Color Maps](7160-categorical-color-maps.md) by using a deterministic hash-based hue generation for unknown labels rather than a fixed or random palette, and from [Style Transfer Function (1D)](777-style-transfer-function-1d.md) by operating on discrete integer labels rather than continuous scalar values [S1, unofficial].
+ 
+ ## How it works
+ **Inputs:**
+-*   `label_img`: A 2D array of shape $(H, W)$ containing integer class IDs [S1, unofficial].
++*   `label_img`: A 2D array of shape $(H, W)$ containing integer class IDs $k \in \mathbb{Z}$ [S1, unofficial].
+ *   `_LABEL_COLORS`: A dictionary mapping known class IDs to RGB tuples [S1, unofficial].
+ 
+ **Outputs:**
+ *   `color_img`: A 2D array of shape $(H, W, 3)$ with dtype `uint8`, containing the mapped RGB values [S1, unofficial].
+-*   Optional binary opacity mask: fully opaque for valid labels, transparent for invalid ones [S1, unofficial].
++*   `opacity_mask`: A binary mask of shape $(H, W)$ with dtype `uint8`, fully opaque (1) for valid labels and transparent (0) for invalid/empty regions [S1, unofficial].
+ 
+ **Data Structures:**
+@@ -24,7 +24,8 @@
+ **Steps:**
+ 1.  Initialize `color_img` as an array of shape $(H, W, 3)$ with dtype `uint8`, zero-initialized [S1, unofficial].
+-2.  For each known class ID $k$ in `_LABEL_COLORS`: create a boolean mask $M_k$ where $M_k[i, j] = (\text{label\_img}[i, j] == k)$, and assign the RGB tuple $\mathbf{c}_k = \text{_LABEL_COLORS}[k]$ to all pixels where $M_k$ is true [S1, unofficial].
+-3.  Identify unknown class IDs: compute the set of unique IDs present in `label_img`, then use `np.isin` to filter out known IDs, leaving $U_{unknown}$ [S1, unofficial].
+-4.  For each unique unseen ID $uid \in U_{unknown}$: compute deterministic hue $h_{deg} = (uid \times 47 + 13) \pmod{360}$ [S1, unofficial]. Convert HSV $(h_{deg}, s, v)$ to RGB $(r, g, b)$ using: $h = h_{deg} / 60.0$, $c = v \times s$, $x = c \times (1 - |h \pmod 2 - 1|)$, $m = v - c$, then assign $(r, g, b)$ based on $h$ ranges $[0,1), [1,2), [2,3), [3,4), [4,5), [5,6)$ [S1, unofficial]. Assign $(r, g, b)$ to all pixels where $\text{label\_img}[i, j] == uid$ [S1, unofficial].
++2.  Apply exact match classification: for each known class ID $k$ in `_LABEL_COLORS`, create a boolean mask $M_k$ where $M_k[i, j] = (\text{label\_img}[i, j] == k)$, and assign the RGB tuple $\mathbf{c}_k = \text{_LABEL_COLORS}[k]$ to all pixels where $M_k$ is true [S1, unofficial].
++3.  Apply fallback handling: identify unknown class IDs by computing the set of unique IDs present in `label_img`, then filter out known IDs using `np.isin` to obtain $U_{unknown}$ [S1, unofficial].
++4.  For each unique unseen ID $uid \in U_{unknown}$: compute deterministic hue $h_{deg} = (uid \times 47 + 13) \pmod{360}$ [S1, unofficial]. Convert HSV $(h_{deg}, s, v)$ to RGB $(r, g, b)$ using $h = h_{deg} / 60.0$, $c = v \times s$, $x = c \times (1 - |h \pmod 2 - 1|)$, $m = v - c$, then assign $(r, g, b)$ based on $h$ ranges $[0,1), [1,2), [2,3), [3,4), [4,5), [5,6)$ [S1, unofficial]. Assign the computed $(r, g, b)$ to all pixels where $\text{label\_img}[i, j] == uid$ [S1, unofficial].
++5.  Generate the binary opacity mask by marking all pixels with non-zero color values as opaque (1) and all others as transparent (0) [S1, unofficial]. Interpolation is avoided during classification to prevent color bleeding between distinct semantic regions [S1, unofficial].
+ 
+ **Pseudocode:**
+@@ -32,7 +33,7 @@
+ import numpy as np
+ 
+-def semantic_label_colormap(label_img: np.ndarray, label_colors: dict, s: float = 0.7, v: float = 0.9) -> np.ndarray:
++def semantic_label_colormap(label_img: np.ndarray, label_colors: dict, s: float = 0.7, v: float = 0.9) -> tuple[np.ndarray, np.ndarray]:
+     """
+-    Maps a 2D label image to an RGB color image.
++    Maps a 2D label image to an RGB color image and binary opacity mask.
+     
+     Args:
+@@ -44,4 +45,5 @@
+     Returns:
+         color_img: 2D array of shape (H, W, 3) with dtype uint8.
++        opacity_mask: 2D array of shape (H, W) with dtype uint8.
+     """
+     H, W = label_img.shape
+@@ -53,15 +55,12 @@
+     unknown_ids = unique_ids[unknown_mask]
+     
+-    # Assign known colors
+-    for uid, rgb in label_colors.items():
+-        mask = (label_img == uid)
++    # Assign known colors via exact match
++    for class_id, rgb in label_colors.items():
++        mask = (label_img == class_id)
+         color_img[mask] = rgb
+         
+-    # Assign deterministic colors to unknown classes
++    # Assign deterministic colors to unknown classes via fallback handling
+     for uid in unknown_ids:
+-        # Deterministic hue calculation
+         h_deg = (int(uid) * 47 + 13) % 360
+-        
+-        # HSV to RGB conversion
+         h = h_deg / 60.0
+         c = v * s
+@@ -82,5 +81,4 @@
+             r_prime, g_prime, b_prime = c, 0, x
+         else:
+-            # h=6.0 is equivalent to h=0 due to modulo 360
+             r_prime, g_prime, b_prime = c, x, 0
+             
+@@ -89,5 +87,4 @@
+         b = int((b_prime + m) * 255)
+         
+-        # Clamp to 0-255 to handle floating-point rounding
+         r = max(0, min(255, r))
+         g = max(0, min(255, g))
+@@ -97,5 +94,6 @@
+         color_img[mask] = [r, g, b]
+         
+-    return color_img
++    opacity_mask = (color_img.sum(axis=2) > 0).astype(np.uint8)
++    return color_img, opacity_mask
+ ```
+ 
+@@ -106,13 +104,13 @@
+ 
+ ## Operating characteristics
+-*   **Time Complexity:** Not given in the sources.
+-*   **Memory Complexity:** Not given in the sources.
+-*   **Measured Performance:** Not given in the sources.
+-*   **Scaling:** Not given in the sources.
+-*   **Strengths and Limitations:** Not given in the sources.
+-*   **When to Use:** Not given in the sources.
++*   **Time Complexity:** Not given in the sources [S1, unofficial].
++*   **Memory Complexity:** Not given in the sources [S1, unofficial].
++*   **Measured Performance:** Not given in the sources [S1, unofficial].
++*   **Scaling:** Not given in the sources [S1, unofficial].
++*   **Strengths and Limitations:** Not given in the sources [S1, unofficial].
++*   **When to Use:** Not given in the sources [S1, unofficial].
+ 
+ ## Background
+-This method originates from implementation details in point-splatting and multi-view 2D rendering pipelines [S1, unofficial]. It addresses the need for robust visualization of semantic labels where the set of classes is not fixed or known in advance [S1, unofficial]. History and development details are not given in the sources.
++This method originates from implementation details in point-splatting and multi-view 2D rendering pipelines [S1, unofficial]. It addresses the need for robust visualization of semantic labels where the set of classes is not fixed or known in advance [S1, unofficial]. History and development details are not given in the sources [S1, unofficial].
+ 
+ ## Sources

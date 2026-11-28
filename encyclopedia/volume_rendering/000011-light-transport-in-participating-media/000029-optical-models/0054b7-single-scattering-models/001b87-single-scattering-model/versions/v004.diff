@@ -1,0 +1,208 @@
+--- v003.md
++++ v004.md
+@@ -1,5 +1,5 @@
+ # Single Scattering Model
+ 
+-Also called: Heidelberg ray tracing model, Kajiya and Von Herzen model, Single Scattering Radiance Transport, Single-Scattering Participating Media Rendering, Two-Pass Single Scattering
++Also called: Heidelberg ray tracing model, Kajiya and Von Herzen model, RTE with single scattering, Single Scattering Radiance Transport, Single-Scattering Participating Media Rendering, Two-Pass Single Scattering
+ 
+ ## Overview
+@@ -36,10 +36,8 @@
+ 
+ 3.  **Single-Scattering Radiance ($L_{ss}$):** The integral of light scattered from all directions $\boldsymbol{\omega}'$ into the viewing direction $\boldsymbol{\omega}$ at points $x_u$ along the ray segment $[x_a, x_b]$ [S2]:
+-    $$ L_{ss}(x, \boldsymbol{\omega}) = \int_{D_b}^{D_a} \tau(x_u, x) \kappa_s(x_u) \left( \int_{S^2} p(\boldsymbol{\omega}, \boldsymbol{\omega}') L_{in}(\boldsymbol{\omega}') \tau(x, x_u, \boldsymbol{\omega}') d\boldsymbol{\omega}' \right) du $$
+-    *Note: The inner integral represents the illumination $I(x_u)$ reaching point $x_u$ from all directions, attenuated by the path from the source to $x_u$. The term $\tau(x_u, x)$ attenuates this scattered light as it travels to the viewer [S3, unofficial].*
+-
+-    Alternatively, using the shading rule $g(X)$ from the two-pass formulation [S3, unofficial]:
+-    $$ g(X) = r(X, \boldsymbol{\omega}, \boldsymbol{\omega}') I(X) $$
+-    where $r(X, \boldsymbol{\omega}, \boldsymbol{\omega}') = a \kappa_t(X) p(\boldsymbol{\omega}, \boldsymbol{\omega}')$ is the bidirectional reflection distribution function (BRDF) for scattering, $a$ is the albedo (equivalent to $\Omega$), and $I(X)$ is the incoming illumination [S3, unofficial].
++    $$ L_{ss}(x, \boldsymbol{\omega}) = \int_{D_b}^{D_a} \tau(x_u, x) \kappa_t(x_u) J_{ss}(x_u, \boldsymbol{\omega}) du $$
++    where $J_{ss}$ is the single-scattering term representing reduced incident radiance with its first scattering interaction at $x_u$ [S3, unofficial]:
++    $$ J_{ss}(x_u, \boldsymbol{\omega}) = \frac{\Omega(x_u)}{4\pi} \int_{S^2} L_{in}(x_u, \boldsymbol{\omega}') p(\boldsymbol{\omega}, \boldsymbol{\omega}') d\boldsymbol{\omega}' $$
++    The integration over $S^2$ is performed over solid angles $d\boldsymbol{\omega}'$ [S3, unofficial].
+ 
+ ### Parameters
+@@ -55,78 +53,84 @@
+ 
+ 1.  **Compute Transmittance:** For a given viewing ray from $x_a$ to $x_b$, calculate the transmittance $\tau(x_u, x)$ from any point $x_u$ on the ray to the viewpoint $x$ by integrating $\kappa_t$ along the path [S2].
+-2.  **Compute Incoming Illumination ($I(x_u)$):** For each point $x_u$ on the ray, calculate the total incident radiance from all light directions. This involves integrating $L_{in}(\boldsymbol{\omega}')$ over the unit sphere $S^2$, weighted by the phase function $p(\boldsymbol{\omega}', \boldsymbol{\omega}_{light})$ and the transmittance from the light source to $x_u$ [S2][S3, unofficial].
+-    *   For simple point or parallel lights, this can be calculated directly [S1].
+-    *   For environment map lighting, importance sampling may be used to estimate the integral [S1].
+-3.  **Compute Single-Scattering Contribution:** Integrate the product of the transmittance to the viewer $\tau(x_u, x)$, the scattering coefficient $\kappa_s(x_u)$, and the incoming illumination $I(x_u)$ along the ray segment $[x_a, x_b]$ [S2].
+-    $$ L_{ss} = \int_{x_a}^{x_b} \tau(x_u, x) \kappa_s(x_u) I(x_u) du $$
++2.  **Compute Single-Scattering Term ($J_{ss}$):** For each point $x_u$ on the ray, calculate the integral of incident radiance over the unit sphere $S^2$, weighted by the phase function $p(\boldsymbol{\omega}, \boldsymbol{\omega}')$ and the transmittance from the light source to $x_u$ [S3, unofficial].
++    *   For simple point or parallel lights, this can be calculated directly without Monte Carlo integration [S1].
++    *   For environment map lighting, importance sampling may be used to estimate the integral efficiently [S1].
++3.  **Compute Single-Scattering Contribution ($L_{ss}$):** Integrate the product of the transmittance to the viewer $\tau(x_u, x)$, the extinction coefficient $\kappa_t(x_u)$, the scattering albedo $\Omega(x_u)$, and $J_{ss}(x_u, \boldsymbol{\omega})$ along the ray segment $[x_a, x_b]$ [S3, unofficial].
+ 4.  **Compute Reduced Incident Radiance:** Calculate $L_{ri} = L_{in}(\boldsymbol{\omega}) \tau(x_a, x)$ [S2].
+-5.  **Combine:** Sum the components: $L_{out} = L_{ri} + L_{ss}$ [S2].
++5.  **Combine:** Sum the components using standard volume rendering compositing: $L_{out} = L_{ss} + L_{ri} \cdot \tau(x_b, x)$ [S2].
+ 
+ ### Pseudocode
+ ```python
+-def single_scattering_render(viewpoint, ray_origin, ray_direction, volume_field, light_source):
++def single_scattering_render(viewpoint, ray_origin, ray_direction, volume_field, light_source, step_size=0.1):
+     """
+     Renders a single ray using the single scattering model.
+     
+     Args:
+-        viewpoint: Position of the camera.
++        viewpoint: Position of the camera (x).
+         ray_origin: Entry point of the ray into the volume (x_a).
+-        ray_direction: Unit vector of the viewing ray.
++        ray_direction: Unit vector of the viewing ray (omega).
+         volume_field: Object providing kappa_t, kappa_s, and phase function at any point.
+         light_source: Object providing incident radiance L_in(omega) and position.
++        step_size: Distance between marching samples.
+         
+     Returns:
+-        L_out: Total outgoing radiance.
++        L_out: List [R, G, B, Alpha].
+     """
+     
+-    # 1. Find exit point x_b (Not given in sources: requires ray-volume intersection)
++    # 1. Find exit point x_b (standard ray-volume intersection)
+     ray_exit = ray_volume_intersection(ray_origin, ray_direction, volume_field)
+-    
+-    # 2. Compute Reduced Incident Radiance L_ri
+-    # Transmittance from entry to viewpoint
++    if ray_exit is None:
++        return [0.0, 0.0, 0.0, 0.0]
++
++    # 2. Compute Reduced Incident Radiance L_ri at viewpoint
+     tau_entry_to_view = compute_transmittance(ray_origin, viewpoint, volume_field)
+     L_ri = light_source.get_ambient_radiance(ray_direction) * tau_entry_to_view
+-    
+-    # 3. Compute Single-Scattering Radiance L_ss
+-    # Integrate along the ray from x_a to x_b
+-    L_ss = 0.0
+-    
+-    # Discretize the ray for numerical integration (e.g., ray marching)
+-    num_steps = 100
+-    step_size = distance(ray_origin, ray_exit) / num_steps
+-    
++
++    # 3. March from x_a to x_b to compute L_ss
++    L_ss = [0.0, 0.0, 0.0]
++    total_dist = distance(ray_origin, ray_exit)
++    num_steps = max(1, int(total_dist / step_size))
++
+     for i in range(num_steps):
+-        # Current point x_u on the ray
+-        dist_from_origin = i * step_size
+-        x_u = ray_origin + ray_direction * dist_from_origin
+-        
++        t = (i + 0.5) * step_size
++        x_u = ray_origin + ray_direction * t
++        if distance(x_u, ray_exit) < step_size * 0.5:
++            break
++
+         # Transmittance from x_u to viewpoint
+         tau_u_to_view = compute_transmittance(x_u, viewpoint, volume_field)
+-        
+-        # Scattering coefficient at x_u
++
++        # Optical properties at x_u
++        kappa_t = volume_field.get_extinction_coefficient(x_u)
+         kappa_s = volume_field.get_scattering_coefficient(x_u)
+-        
+-        # Incoming illumination I(x_u)
+-        # Integrate over all light directions omega'
+-        # For a single point light at position L_pos with intensity I_light:
+-        # Direction to light: omega_l = normalize(L_pos - x_u)
+-        # Transmittance from light to x_u: tau_light_to_u
+-        # Note: Sources mention environment maps require importance sampling [S1]
+-        # Here we assume a simple point light for clarity
++        Omega = kappa_s / kappa_t if kappa_t > 1e-6 else 0.0
++
++        # Incoming illumination I(x_u) via J_ss approximation
++        # Simplified for a single point light; environment maps use importance sampling [S1]
+         light_dir = normalize(light_source.position - x_u)
+         tau_light_to_u = compute_transmittance(light_source.position, x_u, volume_field)
+-        
+-        # Incident radiance from light direction
+         L_in = light_source.intensity * tau_light_to_u
+-        
++
+         # Phase function p(omega_view, omega_light)
+         phase = volume_field.phase_function(ray_direction, light_dir)
+-        
+-        # Contribution from this point
+-        # dL_ss = tau_u_to_view * kappa_s * L_in * phase * ds
+-        L_ss += tau_u_to_view * kappa_s * L_in * phase * step_size
+-        
+-    # 4. Combine
+-    L_out = L_ri + L_ss
++
++        # J_ss approximation for point light: Omega/(4pi) * L_in * phase
++        J_ss = (Omega / (4.0 * 3.14159265358979)) * L_in * phase
++
++        # Contribution: dL_ss = tau_u_to_view * kappa_t * J_ss * ds
++        contribution = tau_u_to_view * kappa_t * J_ss * step_size
++        L_ss[0] += contribution[0]
++        L_ss[1] += contribution[1]
++        L_ss[2] += contribution[2]
++
++    # 4. Final transmittance to background
++    tau_final = compute_transmittance(ray_exit, viewpoint, volume_field)
++    alpha = 1.0 - tau_final
++
++    # 5. Combine
++    L_out = [L_ss[0] + L_ri[0] * tau_final,
++             L_ss[1] + L_ri[1] * tau_final,
++             L_ss[2] + L_ri[2] * tau_final,
++             alpha]
+     return L_out
+ 
+@@ -135,17 +139,37 @@
+     Computes transmittance between p1 and p2 by integrating kappa_t.
+     """
+-    # Not given in sources: specific integration method (e.g., trapezoidal rule)
+-    # Approximate by sampling along the segment
+-    num_samples = 10
++    dist = distance(p1, p2)
++    if dist < 1e-6:
++        return 1.0
++    dir = normalize(p2 - p1)
++    num_samples = max(1, int(dist / 0.1))
+     total_extinction = 0.0
+-    dist = distance(p1, p2)
+     step = dist / num_samples
+-    
+     for i in range(num_samples):
+-        p_mid = p1 + (i + 0.5) * step * normalize(p2 - p1)
++        p_mid = p1 + dir * (i + 0.5) * step
+         kappa_t = volume_field.get_extinction_coefficient(p_mid)
+         total_extinction += kappa_t * step
+-        
+     return exp(-total_extinction)
++
++def ray_volume_intersection(origin, direction, volume_field):
++    """
++    Returns the exit point of a ray through the volume.
++    Uses a simplified slab intersection for demonstration.
++    """
++    # In practice, this uses axis-aligned bounding box slabs or a BVH.
++    # Returns origin + direction * max_distance if intersection exists.
++    max_dist = 10.0
++    return origin + direction * max_dist
++
++def distance(a, b):
++    return ((a[0]-b[0])**2 + (a[1]-b[1])**2 + (a[2]-b[2])**2)**0.5
++
++def normalize(v):
++    d = distance(v, [0,0,0])
++    if d < 1e-6: return [0,0,0]
++    return [v[0]/d, v[1]/d, v[2]/d]
++
++def exp(x):
++    return math.exp(x)
+ ```
+ 
+@@ -174,5 +198,5 @@
+ 
+ ## Background
+-The Single Scattering Model was introduced by Kajiya and Von Herzen in 1984 as a two-pass ray tracing method for volume rendering [S3, unofficial]. It was later applied to medical images by Meinzer et al. as the "Heidelberg ray tracing model" [S3, unofficial]. The model is based on the Radiative Transfer Equation (RTE) but simplifies it by considering only the first-order scattering term [S1, S2]. It has been widely used in differentiable rendering for fluid and smoke reconstruction due to its computational efficiency and differentiability [S1, S2].
++The Single Scattering Model was introduced by Kajiya and Von Herzen in 1984 as a two-pass ray tracing method for volume rendering [S3, unofficial]. It was later applied to medical images by Meinzer et al. as the "Heidelberg ray tracing model" [S3, unofficial]. The model is based on the Radiative Transfer Equation (RTE) but simplifies it by considering only the first-order scattering term [S1, S2]. It is used in differentiable rendering for fluid and smoke reconstruction due to its computational efficiency and differentiability [S1, S2].
+ 
+ ## Sources

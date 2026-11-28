@@ -1,0 +1,87 @@
+# MultiVariateTransferFunction
+
+Also called: Multi-Variate Transfer Function (MVTF) Channel Mapping, Multi-dimensional Transfer Function for Multivariate Fields, Multi-dimensional transfer functions for multi-fields
+
+## Overview
+MultiVariateTransferFunction maps multiple input data fields to RGBA optical properties using separate transfer function tables and explicit channel linking [S1, unofficial][S3]. It solves the problem of combining distinct physical quantities (e.g., temperature and density) into a single coherent visualization, allowing for complex weightings and linkages that single-field methods cannot express [S2, S3]. It is distinguished from [1D Transfer Function](11719-1d-transfer-function.md) by its ability to handle multi-dimensional input domains through modular table assignment and channel routing [S1, unofficial][S3].
+
+## How it works
+**Inputs and Outputs:**
+*   **Inputs:** A set of scalar data fields (identified by `field_id`) and transfer function objects (e.g., `ColorTransferFunction` components like `.red`, `.green`, `.blue`, `.alpha`) [S1, unofficial].
+*   **Outputs:** A set of RGBA values for each sample point, determined by the linked tables [S1, unofficial].
+
+**Data Structures:**
+The method relies on a container object that holds multiple `TransferFunction` instances [S1, unofficial]. Each instance is associated with a specific input field ID and optionally a weight field ID [S1, unofficial]. The structure maintains a mapping from internal table IDs to output RGBA channels [S1, unofficial].
+
+**Steps:**
+1.  **Initialize:** Create a `MultiVariateTransferFunction` container object [S1, unofficial].
+2.  **Add Field Tables:** For each color component (Red, Green, Blue, Alpha) and each input field, call `add_field_table`. Pass the specific `TransferFunction` object (e.g., `tf_temp.red`), the `field_id` of the input data, and optional `weight_field_id` and `weight_table_id` parameters [S1, unofficial].
+3.  **Link Channels:** Call `link_channels` for each table ID to map it to specific output channels [S1, unofficial].
+4.  **Evaluate:** During ray casting, the system extracts values from the specified fields, applies the respective transfer functions, and combines the results according to the channel links [S2, S3].
+
+**Pseudocode:**
+> **Unverified code.** The code below did not pass a test run against a reference implementation, or no test fits it, so it may contain errors.
+
+```python
+class ColorTransferFunction: pass
+class MultiVariateTransferFunction:
+    def add_field_table(self, tf_obj, field_id, weight_field_id=-1, weight_table_id=-1): pass
+    def link_channels(self, table_id, channels): pass
+
+tf_temp = ColorTransferFunction()
+tf_density = ColorTransferFunction()
+mv = MultiVariateTransferFunction()
+
+# Step 1: Add field tables for each color component
+# Map temperature (field 0) to Red channel
+mv.add_field_table(tf_temp.red, field_id=0, weight_field_id=-1, weight_table_id=-1)
+# Map temperature (field 0) to Green channel
+mv.add_field_table(tf_temp.green, field_id=0, weight_field_id=-1, weight_table_id=-1)
+# Map temperature (field 0) to Blue channel
+mv.add_field_table(tf_temp.blue, field_id=0, weight_field_id=-1, weight_table_id=-1)
+# Map density (field 1) to Alpha channel
+mv.add_field_table(tf_density.alpha, field_id=1, weight_field_id=-1, weight_table_id=-1)
+
+# Step 2: Link channels to output RGBA components
+mv.link_channels(table_id=0, channels=[0])  # Red
+mv.link_channels(table_id=1, channels=[1])  # Green
+mv.link_channels(table_id=2, channels=[2])  # Blue
+mv.link_channels(table_id=3, channels=[3])  # Alpha
+
+# Step 3: Evaluate during ray casting
+# The system extracts values from the specified fields, applies the respective transfer functions,
+# and combines the results according to the channel links [S2, S3].
+```
+
+**Formulas:**
+*   Gradient definition for a multi-valued 3D field $\Phi(u_1, u_2, u_3) : \mathfrak{R}^3 \rightarrow \mathfrak{R}^m$. The difference between points $P$ and $Q$ is $\Delta\Phi = \Phi(P) - \Phi(Q)$. As distance tends to zero, the differential is $d\Phi = \sum_{i=1}^3 \frac{\delta\Phi}{\delta u_i} du_i$. The squared norm is $d\Phi^2 = \sum_{i=1}^3 \sum_{j=1}^3 \frac{\delta\Phi}{\delta u_i} \cdot \frac{\delta\Phi}{\delta u_j} du_i du_j$ [S3].
+*   Metric tensor formulation: Define $g_{ij} = \frac{\delta\Phi}{\delta u_i} \cdot \frac{\delta\Phi}{\delta u_j}$. Then $d\Phi^2 = \sum_{i=1}^3 \sum_{j=1}^3 g_{ij} du_i du_j = \begin{bmatrix} du_1 \\ du_2 \\ du_3 \end{bmatrix}^T \begin{bmatrix} g_{11} & g_{12} & g_{13} \\ g_{21} & g_{22} & g_{23} \\ g_{31} & g_{32} & g_{33} \end{bmatrix} \begin{bmatrix} du_1 \\ du_2 \\ du_3 \end{bmatrix}$ [S3].
+*   Weighting heuristic: To handle different dynamic ranges, each data channel's derivative is multiplied by a weight constant $w_k = 1 / (max_k - min_k)$ [S3]. This is expressed as a scale matrix $W$ (an $m \times m$ diagonal matrix) [S3]:
+    $d\Phi = W \left( \sum_{i=1}^3 \frac{\delta\Phi}{\delta u_i} du_i \right), \quad W := \begin{bmatrix} w_1 & 0 & 0 & \cdots \\ 0 & w_2 & 0 & \cdots \\ & & \ddots & \\ 0 & 0 & \cdots & w_m \end{bmatrix}$ [S3].
+
+**Parameters:**
+*   `field_id`: Integer identifier for the input data field [S1, unofficial].
+*   `weight_field_id`: Integer identifier for a weighting field; -1 if no weighting is used [S1, unofficial].
+*   `weight_table_id`: Integer identifier for a weighting transfer function table; -1 if not used [S1, unofficial].
+*   `table_id`: Internal identifier for the added transfer function table [S1, unofficial].
+*   `channels`: List of integers specifying the output RGBA channels to map the table to [S1, unofficial].
+*   Number of axes: Up to three axes are supported directly; additional axes are treated as separable portions of the transfer function [S3].
+
+**Edge Cases and Pitfalls:**
+*   **Channel Dominance:** Channels with very high dynamic range can dominate the derivative calculation. This is handled by the weighting heuristic, which assumes equal influence relative to other channels and no outliers [S3].
+*   **Heuristic Limitations:** The weighting heuristic may not always be desirable if domain-specific knowledge suggests different relative importance for features or phenomena [S3].
+*   **Weighting Configuration:** The source notes suggest that weight fields might need to be set explicitly for the mapping to work correctly, though the exact mechanism is under-documented [S1, unofficial].
+*   **Empty Output:** Incorrect configuration of field IDs or channel links can result in empty or incorrect images [S1, unofficial].
+*   **Documentation Gap:** The implementation details are primarily found in the source code (`utilities/lib/grid_traversal.pyx`) rather than official documentation [S2, S3].
+
+## Operating characteristics
+Not given in the sources.
+
+## Background
+The `MultiVariateTransferFunction` is part of the yt project's volume rendering toolkit, designed to apply semi-realistic color fields based on multiple physical properties like temperature and density [S2, S3]. It allows for complex weightings and linkages to approximate scattering and emission effects [S2, S3]. The implementation details are contained in the yt source code, specifically `utilities/lib/grid_traversal.pyx` [S2, S3].
+
+## Sources
+[S1] Volume rendering colormap is not directly exposed, https://github.com/yt-project/yt/issues/2804, fetched 2026-10-27 (unofficial)
+[S2] 3D Visualization and Volume Rendering, https://yt-project.org/doc/visualizing/volume_rendering.html, fetched 2026-10-28
+[S3] Volume Rendering Multivariate Data to Visualize ..., https://publications.sci.utah.edu/publications/jmk02/jmk_vissym02.pdf, fetched 2026-10-28
+[S4] https://yt-project.org/docs/dev/visualizing/volume_rendering.html#volume-rendering-components, https://yt-project.org/docs/dev/visualizing/volume_rendering.html, fetched 2026-10-29

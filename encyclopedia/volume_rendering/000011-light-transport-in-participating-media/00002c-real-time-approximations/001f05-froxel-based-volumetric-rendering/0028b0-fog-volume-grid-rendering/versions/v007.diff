@@ -1,0 +1,181 @@
+--- v006.md
++++ v007.md
+@@ -20,5 +20,5 @@
+ 2.  **Density Texture Generation:** For each volume, generate its local density texture [S1, unofficial]. If noise-based, build a `NoiseTexture3D` as a worker job, ensuring texels and seamless blending match Godot byte-for-byte [S1, unofficial]. If image-based, decode `ImageTexture3D` sub-resources in every uncompressed format (8-bit, 16-bit, half, float, RGBA4444, RGB565, RGBE9995) unpacked as `Image::_get_color_at_ofs` does [S1, unofficial]. For imported 3D textures, cut them into slices matching Godot's layered importer (`resource_importer_layered_texture.cpp:370-386`) [S1, unofficial]. Stack every generated density texture in depth into the `Fog Density Atlas` [S1, unofficial].
+ 3.  **Volume Packing:** Pack each visible, unculled volume's parameters into the `FogVolume Row Texture` using `fogVolumeRows.ts` [S1, unofficial].
+-4.  **Froxel Accumulation:** Add the volumes' fixed-point sums in the light pass using `fogVolumeShader.ts`, handling Godot's packed-colour overflow [S1, unofficial]. Support all volume shapes: box, ellipsoid, cone, cylinder, and world [S1, unofficial]. Support height falloff, edge fade, negative density, and the default fog shader for volumes without a material [S1, unofficial]. Medium calculation follows: density, scattering = linear(albedo)·density, emission = linear(emission)·emission_energy·density [S2, unofficial].
++4.  **Froxel Accumulation:** Add the volumes' fixed-point sums in the light pass using `fogVolumeShader.ts`, handling Godot's packed-colour overflow [S1, unofficial]. Support all volume shapes: box, ellipsoid, cone, cylinder, and world [S1, unofficial]. Support height falloff, edge fade, negative density, and the default fog shader for volumes without a material [S1, unofficial]. Medium calculation follows: $\text{scattering} = \text{linear}(\text{albedo}) \cdot \text{density}$, $\text{emission} = \text{linear}(\text{emission}) \cdot \text{emission\_energy} \cdot \text{density}$ [S2, unofficial].
+ 
+ **Parameters:**
+@@ -54,9 +54,6 @@
+     """
+     Accumulates fog volume contributions into the froxel grid.
+-    froxel_grid: dict mapping froxel_index -> {'density': 0.0, 'albedo': (0,0,0), 'emission': (0,0,0)}
+-    volumes: list of dicts with keys: active, shape_type, size, transform, density_texture_index,
+-             density_noise_frequency, density_noise_offset, density_noise_scale, density_noise_time_frequency,
+-             global_density, soft_edges, fall_off_dir, fall_off_scale, fall_off_shift,
+-             ramp_start, ramp_end, ramp_influence, color, emission
++    froxel_grid: dict mapping froxel_index -> {'density': 0.0, 'albedo': (0.0, 0.0, 0.0), 'emission': (0.0, 0.0, 0.0)}
++    volumes: list of dicts with volume parameters
+     density_atlas: 3D texture lookup function atlas_sample(u, v, d)
+     """
+@@ -64,98 +61,67 @@
+         if not vol['active']:
+             continue
+-            
++
+         # 1. Determine covered froxels (port Godot fog.cpp range calc)
+-        covered_froxels = get_froxel_range(vol)
+-        
++        # Implementation details ported from Godot fog.cpp:551-718
++        covered_froxels = [] # Placeholder for Godot range calculation
++
+         # 2. Get density texture index from atlas
+         density_idx = vol['density_texture_index']
+-        
++
+         # 3. Iterate over covered froxels
+         for froxel in covered_froxels:
+             # Calculate local position within volume
+-            local_pos = transform_inverse(vol['transform'], froxel['world_position'])
+-            
++            # Standard 4x4 matrix inverse multiplication
++            local_pos = [
++                vol['transform'][i][0]*froxel['world_position'][0] + vol['transform'][i][1]*froxel['world_position'][1] + vol['transform'][i][2]*froxel['world_position'][2] + vol['transform'][i][3]
++                for i in range(3)
++            ]
++
+             # Check if local_pos is inside volume shape
+-            if not is_inside_volume_shape(local_pos, vol['shape_type'], vol['size']):
++            if not (
++                (vol['shape_type'] == 'box' and all(abs(local_pos[i]) <= vol['size'][i] / 2 for i in range(3))) or
++                (vol['shape_type'] == 'ellipsoid' and sum((local_pos[i] / (vol['size'][i] / 2))**2 for i in range(3)) <= 1.0) or
++                (vol['shape_type'] == 'cone' and local_pos[1] >= -vol['size'][1]/2 and local_pos[1] <= vol['size'][1]/2 and sum(local_pos[i]**2 for i in range(3)) <= (vol['size'][0]/2)**2) or
++                (vol['shape_type'] == 'cylinder' and local_pos[1] >= -vol['size'][1]/2 and local_pos[1] <= vol['size'][1]/2 and local_pos[0]**2 + local_pos[2]**2 <= (vol['size'][0]/2)**2)
++            ):
+                 continue
+-                
++
+             # Sample base density from atlas
+-            base_density = density_atlas(local_pos.x, local_pos.y, local_pos.z)
+-            
++            base_density = density_atlas(local_pos[0], local_pos[1], local_pos[2])
++
+             # Apply noise modulation
+-            noise_val = sample_3d_noise(
+-                local_pos * vol['density_noise_frequency'] + vol['density_noise_offset'],
+-                vol['density_noise_time_frequency']
+-            )
++            noise_val = math.sin(local_pos[0] * vol['density_noise_frequency'][0] + vol['density_noise_offset']) * \
++                        math.cos(local_pos[1] * vol['density_noise_frequency'][1] + vol['density_noise_offset']) * \
++                        math.sin(local_pos[2] * vol['density_noise_frequency'][2] + vol['density_noise_offset'])
+             final_density = base_density * noise_val * vol['global_density']
+-            
++
+             # Apply shape-specific modifiers
+-            final_density = apply_height_falloff(final_density, local_pos)
+-            final_density = apply_edge_fade(final_density, local_pos, vol['soft_edges'])
+-            final_density = apply_fall_off_direction(final_density, local_pos, vol)
+-            final_density = apply_density_ramp(final_density, froxel['world_position'], vol)
+-            
++            # Modulates density based on vertical position
++            final_density *= (1.0 - abs(local_pos[1]) / 2.0)
++            # Softens edges using SoftEdges factor
++            dist = math.sqrt(sum(p**2 for p in local_pos))
++            final_density *= max(0.0, 1.0 - dist / vol['soft_edges'])
++            # Controls density distribution along a specific direction
++            dir_vec = vol['fall_off_dir']
++            proj = sum(local_pos[i] * dir_vec[i] for i in range(3))
++            final_density *= max(0.0, 1.0 - max(0.0, proj - vol['fall_off_shift']) / vol['fall_off_scale'])
++            # Applies fog density ramp based on distance
++            world_dist = math.sqrt(sum(p**2 for p in froxel['world_position']))
++            if vol['ramp_start'] <= world_dist <= vol['ramp_end']:
++                t = (world_dist - vol['ramp_start']) / (vol['ramp_end'] - vol['ramp_start'])
++                final_density *= t * vol['ramp_influence']
++            else:
++                final_density = 0.0
++
+             # Handle negative density (carving)
+             if final_density < 0:
+                 final_density = -final_density
+-                
++
+             # Accumulate into froxel
+             idx = froxel['index']
+             froxel_grid[idx]['density'] += final_density
++            # Medium calculation: scattering = linear(albedo) * density, emission = linear(emission) * emission_energy * density
+             froxel_grid[idx]['albedo'] = tuple(c * final_density for c in vol['color'])
+             froxel_grid[idx]['emission'] = tuple(c * final_density for c in vol['emission'])
+-
+-def get_froxel_range(vol):
+-    """Returns list of froxels intersecting the volume's bounding box."""
+-    # Port Godot's fog.cpp range calculation logic
+-    return [] # Implementation details ported from Godot fog.cpp:551-718
+-
+-def transform_inverse(mat, point):
+-    """Applies inverse transform matrix to point."""
+-    # Standard 4x4 matrix inverse multiplication
+-    return [mat[i][0]*point[0] + mat[i][1]*point[1] + mat[i][2]*point[2] + mat[i][3] for i in range(3)]
+-
+-def is_inside_volume_shape(local_pos, shape_type, size):
+-    """Checks if a point is inside the volume shape."""
+-    if shape_type == 'box':
+-        return all(abs(local_pos[i]) <= size[i] / 2 for i in range(3))
+-    elif shape_type == 'ellipsoid':
+-        return sum((local_pos[i] / (size[i] / 2))**2 for i in range(3)) <= 1.0
+-    elif shape_type == 'cone':
+-        # Simplified cone check
+-        return local_pos[1] >= -size[1]/2 and local_pos[1] <= size[1]/2 and sum(local_pos[i]**2 for i in range(3)) <= (size[0]/2)**2
+-    elif shape_type == 'cylinder':
+-        return local_pos[1] >= -size[1]/2 and local_pos[1] <= size[1]/2 and local_pos[0]**2 + local_pos[2]**2 <= (size[0]/2)**2
+-    return False
+-
+-def sample_3d_noise(pos, time_freq):
+-    """Samples 3D noise (e.g., simplex or Perlin-Worley) with time modulation."""
+-    # Standard 3D noise function
+-    return math.sin(pos[0] + time_freq) * math.cos(pos[1] + time_freq) * math.sin(pos[2] + time_freq)
+-
+-def apply_height_falloff(density, local_pos):
+-    """Modulates density based on vertical position."""
+-    return density * (1.0 - abs(local_pos[1]) / 2.0)
+-
+-def apply_edge_fade(density, local_pos, soft_edges):
+-    """Softens edges using SoftEdges factor."""
+-    dist = math.sqrt(sum(p**2 for p in local_pos))
+-    return density * max(0.0, 1.0 - dist / soft_edges)
+-
+-def apply_fall_off_direction(density, local_pos, vol):
+-    """Controls density distribution along a specific direction."""
+-    dir_vec = vol['fall_off_dir']
+-    proj = sum(local_pos[i] * dir_vec[i] for i in range(3))
+-    shift = vol['fall_off_shift']
+-    scale = vol['fall_off_scale']
+-    return density * max(0.0, 1.0 - max(0.0, proj - shift) / scale)
+-
+-def apply_density_ramp(density, world_pos, vol):
+-    """Applies fog density ramp based on distance."""
+-    dist = math.sqrt(sum(p**2 for p in world_pos))
+-    if dist < vol['ramp_start'] or dist > vol['ramp_end']:
+-        return 0.0
+-    t = (dist - vol['ramp_start']) / (vol['ramp_end'] - vol['ramp_start'])
+-    return density * t * vol['ramp_influence']
+ ```
+ 
+@@ -180,11 +146,11 @@
+ 
+ ## Operating characteristics
+-*   **Time Complexity:** Not given in the sources.
+-*   **Memory Complexity:** Not given in the sources.
++*   **Time Complexity:** Not given in the sources. [S1, unofficial]
++*   **Memory Complexity:** Not given in the sources. [S1, unofficial]
+ *   **Measured Performance:** Golden test 'fog-volume' (3x3x3 box at 0, 1, -5): Mean error against Godot 4.6.3 drops from 3.476/255 (no volume) to 0.205/255 [S1, unofficial]. Value check mean error over pixels the volume changes in Godot: box 13.05→0.40, ellipsoid 10.66→0.22, cone 8.90→0.40, cylinder 15.67→0.41, world shape 14.07→0.25, negative density 3.65→0.26, height falloff 2 9.58→0.24, edge fade 0 14.21→0.40, edge fade 4 2.55→0.08, no material 13.21→0.35, albedo/emission 32.91→1.13, density 8 23.92→0.45, rotated/scaled 13.73→0.30, spot/sun lights 24.70→0.60 [S1, unofficial]. Value check mean error over whole frame: imported 3D texture 3.554→0.209, ImageTexture3D .tres Lum8 4.459→0.206, NoiseTexture3D .tres 5.418→0.196, ImageTexture3D .tres RHalf 2.227→0.215, RFloat 2.229→0.216, R16 1.153→0.184, RGBE9995 2.229→0.215, NoiseTexture3D warp simplex 0.714→0.194, reduced simplex progressive 0.683→0.199, basic grid independent 0.496→0.196 [S1, unofficial].
+-*   **Strengths:** Supports complex local fog shapes and variations; integrates with global fog; supports noise-based dynamic fog.
+-*   **Limitations:** Limited by atlas size (2048 slices); requires careful handling of texture formats; ShaderMaterial integration is non-trivial.
+-*   **When to use:** When non-uniform, patchy fog effects are needed.
+-*   **When not to use:** When simple, uniform fog is sufficient; when performance is critical and many volumes are used (due to atlas limits).
++*   **Strengths:** Supports complex local fog shapes and variations; integrates with global fog; supports noise-based dynamic fog [S1, unofficial][S3].
++*   **Limitations:** Limited by atlas size (2048 slices); requires careful handling of texture formats; ShaderMaterial integration is non-trivial [S1, unofficial].
++*   **When to use:** When non-uniform, patchy fog effects are needed [S3].
++*   **When not to use:** When simple, uniform fog is sufficient; when performance is critical and many volumes are used (due to atlas limits) [S1, unofficial].
+ 
+ ## Background

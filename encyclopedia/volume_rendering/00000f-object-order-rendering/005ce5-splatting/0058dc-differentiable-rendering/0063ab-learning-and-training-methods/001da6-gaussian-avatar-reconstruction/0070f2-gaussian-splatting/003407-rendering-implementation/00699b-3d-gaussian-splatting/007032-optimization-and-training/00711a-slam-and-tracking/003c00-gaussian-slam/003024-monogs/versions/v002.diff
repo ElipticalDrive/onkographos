@@ -1,0 +1,100 @@
+--- v001.md
++++ v002.md
+@@ -1,8 +1,7 @@
+ # MonoGS
+ 
+-Also called: Monocular Gaussian Splatting SLAM
+ 
+ ## Overview
+-MonoGS is a monocular RGB-only SLAM method that performs online optimization by mapping the scene as 3D Gaussian Splatting (3DGS) primitives [S2, unofficial]. It restricts the joint estimation of camera poses and Gaussian map parameters to a selected set of keyframes, enabling real-time tracking and mapping from a single camera [S1]. Unlike RGB-D SLAM methods that rely on depth sensors, MonoGS infers geometry and pose solely from photometric consistency across keyframes [S2, unofficial].
++MonoGS is a monocular RGB-only SLAM method that performs online optimization by representing the scene as 3D Gaussian Splatting (3DGS) primitives [S2, unofficial]. It restricts the joint estimation of camera poses and Gaussian map parameters to a selected set of keyframes [S1]. Unlike RGB-D SLAM methods that use depth sensors, MonoGS estimates pose and geometry from a single camera stream [S2, unofficial].
+ 
+ ## How it works
+@@ -40,39 +39,44 @@
+ ```python
+ def monogs_online(rgb_stream):
+-    # Initialize empty Gaussian map and keyframe list
+-    gaussians = []
+-    keyframes = []
+-    W_k = [] # Local window
+-    W_r = [] # Sampled past keyframes
+-    
+-    for frame_idx, rgb in enumerate(rgb_stream):
+-        # 1. Select keyframes
+-        # Add current frame if it meets covisibility criteria
+-        if is_new_keyframe(rgb, keyframes):
++    gaussians = []  # 3DGS primitives (position, covariance, opacity, SH)
++    keyframes = []  # List of keyframe images
++    W_k = []        # Covisible local window
++    W_r = []        # Sampled past keyframes
++    lambda_pho = 1.0
++    lambda_geo = 1.0
++    lambda_iso = 1.0
++
++    for rgb in rgb_stream:
++        # 1. Keyframe selection: maintain W = W_k ∪ W_r
++        # [G] Standard covisibility check adds frame to W_k if feature overlap drops
++        if len(W_k) > 0 and not feature_overlap(rgb, W_k[-1]):
+             keyframes.append(rgb)
+-            update_windows(keyframes, W_k, W_r)
+-        
+-        # 2. Define optimization set W
++            W_k = keyframes[-10:]  # [G] Fixed-size sliding window
++            W_r = keyframes[:-10]  # [G] Sampled past keyframes
+         W = W_k + W_r
+-        
+-        # 3. Joint Optimization
+-        # Minimize loss over poses T_k and Gaussians G
+-        # Note: Exact densification and pruning steps are implementation-specific [G]
+-        T_opt, G_opt = optimize_joint_objective(
+-            W=W,
+-            gaussians=gaussians,
+-            poses=keyframes.poses,
+-            loss_fn=lambda T_k, G: sum(
+-                lambda_pho * photometric_error(k, T_k, G) +
+-                lambda_geo * geometric_error(k, T_k, G) +
+-                lambda_iso * isotropy_error(G)
+-                for k in W
+-            )
+-        )
+-        
++
++        # 2. Compute joint objective over poses T_k and Gaussians G
++        total_loss = 0.0
++        for k in W:
++            T_k = k.pose
++            # Photometric error E^k_pho
++            rendered_rgb = project_gaussians(gaussians, T_k)
++            E_pho = sum(abs(rendered_rgb - k.rgb)) / len(rendered_rgb)
++            # Geometric error E^k_geo
++            E_geo = geometric_consistency(rendered_rgb, k.rgb)
++            # Isotropy error E_iso
++            E_iso = isotropy_penalty(gaussians)
++            total_loss += lambda_pho * E_pho + lambda_geo * E_geo + lambda_iso * E_iso
++
++        # 3. Minimize objective
++        # [Comment] Sources do not specify the exact optimizer or densification schedule.
++        # Standard practice uses gradient descent to update T_k and G parameters.
++        T_opt, G_opt = gradient_descent_step(T_k, gaussians, total_loss)
++
+         # 4. Update state
+         gaussians = G_opt
+-        keyframes.poses = T_opt
+-        
++        for k in W:
++            k.pose = T_opt[k]
++
+     return gaussians, keyframes
+ ```
+@@ -84,10 +88,9 @@
+ **Edge Cases and Pitfalls:**
+ - Monocular ambiguity: Scale drift is a common issue in monocular SLAM, though the sources do not specify MonoGS's specific scale-fixing mechanism [S1].
+-- Degenerate input: Lack of texture or rapid motion may break photometric consistency [S1].
+ 
+ ## Operating characteristics
+ **Time and Memory Complexity:**
+ - The method is designed for online streaming, with the streaming time dominated by motion tracking, refinement, and structure updates rather than rendering ($t_{\text{stream}} \approx t_{\text{motion}} + t_{\text{refine}} + t_{\text{structure}} \gg t_{\text{render}}$) [S1].
+-- Measured performance on Replica office0 (12 RGB-D frames, though MonoGS is monocular, this benchmark is used for comparison): Wrapped time is 2250.57 ms/frame (0.444 frames/s), trajectory error is 0.000082 m, and model size is 2.14 MiB [S1].
++- Measured performance on Replica office0 (12 frames): Wrapped time is 2250.57 ms/frame (0.444 frames/s), trajectory error is 0.000082 m, and model size is 2.14 MiB [S1].
+ 
+ **Strengths and Limitations:**

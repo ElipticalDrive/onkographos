@@ -1,0 +1,279 @@
+Summary In line with discussion in #4025, this RFC proposes a stored format and load path for losslessly compressed KV cache blocks in LMCache's multiprocess (MP) architecture. The target path keeps each block compressed while it is read...
+
+[RFC][MP] Lossless KV Compression with GPU Decompression · Issue #4498 · LMCache/LMCache · GitHub
+Skip to content
+You signed in with another tab or window. Reload to refresh your session.
+You signed out in another tab or window. Reload to refresh your session.
+You switched accounts on another tab or window. Reload to refresh your session.
+Dismiss alert
+[RFC][MP] Lossless KV Compression with GPU Decompression #4498
+New issue
+Copy link
+New issue
+Copy link
+Open
+Open
+[RFC][MP] Lossless KV Compression with GPU Decompression#4498
+Copy link
+Description
+rob-9
+opened on Aug 12, 2026
+Issue body actions
+Summary
+In line with discussion in #4025, this RFC proposes a stored format and load path for losslessly compressed KV cache blocks in LMCache's multiprocess (MP) architecture.
+The target path keeps each block compressed while it is read from L2 storage and transferred toward the GPU, then uses the selected GPU backend (nvCOMP on NVIDIA or hipCOMP on AMD) to decompress it in GPU memory:
+```
+Store: KV block → lossless compression → L2 storage
+Load:  L2 storage → compressed GPU buffer → GPU decompression → GPU KV cache
+```
+The initial implementation targets NVIDIA and AMD GPUs in LMCache's vLLM MP path through concrete NvcompBackend and HipcompBackend implementations. Both implement the shared GpuDecompressBackend contract proposed in #4149, while vendor-specific capabilities and execution details remain inside each backend. Other GPU decompression engines are follow-up work through the same backend and abstractions.
+On the store path, asynchronous CPU compression is the initial default because it avoids GPU compute contention with inference. GPU compression will be compared using the same codec and workloads and should replace the CPU default only if it improves end-to-end performance.
+Combined with NVIDIA GPUDirect Storage (GDS), AMD Infinity Storage (AIS), or a suitable RDMA path, compression could reduce the bytes read from L2 and transferred to the GPU. Whether that improves latency is an end-to-end benchmark question.
+Motivation
+Large KV caches can take significant time to load from local NVMe or remote L2 storage. The model cannot resume inference until the required KV blocks reach its GPU cache, so this transfer can directly increase latency.
+Technologies such as GDS, AIS and RDMA can make the transfer more efficient, including by moving data directly into GPU memory. They do not, however, reduce the number of bytes that must be transferred. Lossless compression addresses that separate problem by storing each KV block in a smaller representation.
+Compression helps only if the block remains compressed for a useful part of the transfer. With CPU decompression, LMCache loads the compressed bytes into host memory, expands them there, and then copies the full-size block into GPU memory:
+```
+Storage
+    → compressed host buffer
+    → CPU decompression
+    → full-size copy to VRAM
+    → usable GPU KV block
+```
+This reduces the storage read, but the final host-to-GPU copy still carries the full uncompressed block. GPU decompression could instead keep the block compressed while it travels to GPU memory and expand it there:
+```
+Storage
+    → compressed GPU buffer
+    → GPU decompression
+    → usable GPU KV block
+```
+This is not automatically faster. GPU decompression consumes compute and memory bandwidth, requires temporary buffers and workspace, and introduces synchronization and buffer-management costs. It is beneficial only when the saved transfer time exceeds those costs and any interference with model inference. End-to-end benchmarks, rather than decompression throughput alone, must determine whether the design improves latency.
+Existing LMCache Boundary
+In LMCache's existing MP path, StorageManager may wrap an L2 storage adapter with SerdeL2AdapterWrapper. The wrapper adds serialization around the adapter while preserving the same interface for callers:
+```
+Store: KV object → serialize → L2 adapter → storage
+Load:  storage → L2 adapter → deserialize → KV object
+```
+This boundary is useful because individual storage adapters do not need to understand the stored representation. The serde wrapper can add compression without duplicating compression logic in every adapter.
+In the normal DRAM-backed MP path, serde loads byte-addressable L1 temporary buffers, while GPU onboarding later places data into the model's paged KV cache. Direct GPU decompression therefore either gives serde GPU execution state or keeps the record compressed until onboarding.
+cuFile and hipFile handle L1-to-GPU transfer during onboarding, not generic L2-to-device loads. The current L2 interface also lacks exact-size discovery and device-destination capabilities.
+Proposed Design
+The feature is selected through an L2 adapter's serde configuration. StorageManager continues to construct the adapter and wrapper. The initial CPU-compression store path uses existing logical L2 operations; a future GPU-compression path must integrate before the existing GPU-to-host KV copy. GPU onboarding may require the deferred-load contract described below.
+```
+StorageManager
+    ↓ constructs
+SerdeL2AdapterWrapper
+    ├── stored-format serde processor
+    └── underlying L2 adapter
+            ↓
+         storage
+```
+Architecture Boundary
+GPU decompression crosses two existing responsibilities: serde understands the stored representation, while GPU onboarding owns the device context and final KV cache placement. The component that invokes the selected GpuDecompressBackend must have access to both the compressed GPU input and the destination GPU KV buffer, as well as the device, stream, block mapping, and buffer lifetimes.
+Two placements are possible:
+Inside SerdeL2AdapterWrapper. This keeps compression and decompression encapsulated in serde, but the wrapper would need GPU-resident buffers and worker-owned GPU state that it does not have today.
+During GPU onboarding. Onboarding already knows the target device, stream, and paged KV cache layout. Serde would continue to define the format, codec metadata, and store-side compression; onboarding would transfer the compressed bytes, invoke the decoder, and place the output. However, LMCache has no common device-staging and placement interface across its transfer paths.
+The current ownership boundaries therefore make onboarding the more natural placement, but this changes the meaning of load completion. An L2 load can finish while the object is still compressed, so the design must distinguish record_loaded from kv_ready and keep buffers, locks, and other resources alive until GPU work completes.
+The prototype must validate this deferred-deserialization and completion contract before the design commits to onboarding. Codec and stored-format ownership remains in serde regardless of which vendor backend runs.
+PR #4474 is a Phoenix-specific prototype, not yet a generic device-load API. Its current device-resident object injection path does not compose directly with the serde wrapper's temporary-object lifecycle. This RFC must define a shared public contract independently: the caller supplies or negotiates a typed device destination, and ownership, device, stream, completion event, and error status are explicit.
+Store Path
+In the normal DRAM-backed serde path, the current serde layer receives host-resident L1 KV blocks because the model worker has already copied them from its GPU KV cache into CPU memory. The initial CPU-compression path is therefore:
+```
+GPU KV block
+    → full-size copy to host L1
+    → asynchronous CPU compression
+    → compressed temporary buffer
+    → L2 adapter
+    → storage
+```
+Background CPU workers can compress the L1 objects without blocking the storage-controller thread or using GPU compute resources needed for inference. They still consume CPU time and host-memory bandwidth. This is the initial default.
+GPU compression must be evaluated earlier, while the KV block is still on the GPU:
+```
+GPU KV block
+    → GPU compression
+    → copy compressed bytes to host staging
+    → L2 adapter
+    → storage
+```
+Because the output size is unknown before compression, serde may allocate a conservative temporary buffer. AsyncSerdeProcessor records the actual serialized size with MemoryObj.set_used_size(), ensuring that L2 stores only the valid record bytes. The new serde must preserve this behavior. If the complete compressed record, including metadata and padding, is not smaller than the equivalent raw record, it is stored raw and marked to bypass decompression during load.
+Load Path
+The target direct path is:
+```
+storage
+    → L2 adapter
+    → compressed temporary buffer in VRAM
+    → nvCOMP or hipCOMP decompression
+    → contiguous GPU KV staging
+    → usable paged GPU KV blocks
+```
+After discovering the exact stored size, the selected L2 path loads the compressed record into a temporary GPU buffer. The selected GpuDecompressBackend expands it into contiguous GPU staging, which should reuse or factor GPUCacheContext's existing staging buffer and selected CUDA or HIP stream. GPU onboarding then uses the existing device-side placement path to restore the data into vLLM's paged KV cache.
+This keeps the initial integration simple and avoids a second raw-KV-sized staging allocation. The selected onboarding path must support GPU input; direct vendor-backend output into final paged blocks remains a future optimization.
+Vendor-specific decompression is hidden behind a common backend:
+```
+GpuDecompressBackend
+    ├── NvcompBackend
+    └── HipcompBackend
+```
+The backend asynchronously submits batches of compressed chunks and their input, output, and size descriptors on a device stream. It then validates each chunk's status and actual output size before the data becomes GPU ready.
+NvcompBackend uses CUDA streams and events; HipcompBackend uses HIP equivalents. Both are included in the initial implementation and obey the same request, ownership, completion, and validation contract. Codec support and installed-library constraints remain backend-specific and are reported through backend capabilities. This abstraction should coordinate its interface and naming with the GpuDecompressBackend proposed in #4149.
+Note : using nvCOMP does not guarantee use of NVIDIA's dedicated Decompression Engine. Dedicated-engine execution requires supported Blackwell GPUs (B200, B300, GB200, or GB300), compatible codecs, APIs, and allocations; otherwise decompression may run on ordinary GPU compute resources instead.
+Additional Considerations
+Device-load contract and resource admission
+Buffer Placement and Adapter Capabilities
+Today, SerdeL2AdapterWrapper asks L1 for byte-addressable temporary buffers, which are normally CPU buffers in the DRAM-backed configuration, and the L2 adapter loads into them. The direct path instead needs an agreed contract for loading a compressed record into GPU memory:
+```
+L2 storage → compatible GPU buffer
+```
+L2AdapterInterface must expose vendor-neutral capabilities that answer:
+which memory types and GPU devices the adapter can reach, including topology constraints;
+whether LMCache or the adapter allocates and owns the destination buffer;
+the exact stored size needed for tightly sized allocation, plus any alignment or registration requirements;
+how completion is reported and how long buffers, registrations, and object locks must remain valid.
+GPU memory cannot be treated as a CPU-accessible MemoryObj.byte_array, so device loads need a descriptor containing the memory type, device, address, capacity, and logical size. The API must support batched size queries and loads.
+Before a direct load is admitted, LMCache must reserve bounded per-device capacity for compressed input, decompressed output, vendor-backend workspace, descriptor/status arrays, and in-flight operations. The design must define limits, backpressure behavior, cancellation, and failure when that capacity is unavailable.
+Optional capability methods can preserve existing adapter APIs. Exact-size discovery should reuse or extend L2AdapterInterface.get_object_sizes() from #3796, and device-buffer capabilities should coordinate with #4474. LMCache must reject unsupported direct configurations during construction.
+Adapters without device-load support may provide an explicit staged path instead:
+```
+L2 storage → compressed host buffer → compressed GPU buffer
+```
+A direct configuration must not silently fall back to staging because that changes its performance and memory behavior.
+Async completion and buffer ownership
+Async Completion and Buffer Ownership
+GPU work is asynchronous: a vendor decompression call may return after queuing decompression, while the GPU is still using its buffers. AsyncSerdeProcessor currently treats Deserializer.deserialize() returning as completion, so using that behavior unchanged could expose incomplete KV data and release live resources too early.
+If decompression runs inside the wrapper, its completion signal must wait for the selected backend's event and result validation. Until then, the input, output, workspace, descriptors, registrations, and locks remain live.
+If decompression runs during GPU onboarding, the load has two distinct completion points:
+record_loaded: the compressed record and its authoritative metadata are available, but the model cannot use the KV data yet.
+kv_ready: transfer or staging, decompression, validation, and final placement into the paged KV cache have completed.
+In this design, an L2 result reports only record_loaded. Only kv_ready may satisfy the current prefetch or read contract. Prefetch needs a deferred-load state, the wrapper needs store-only or deferred deserialization, and the model must wait for kv_ready.
+Regardless of placement, ownership must keep the source, destination, workspace, descriptors, registrations, and any required L2 lock valid until their work completes. A blocking prototype may wait for the GPU and is correct for validation, but the final design should use event-driven asynchronous completion.
+Stored Record Format and Pre-Load Size Discovery
+Stored Record Format and Pre-Load Size Discovery
+This is not a separate runtime stage. It defines the data contract between store and load after compression makes L2 objects variable-sized:
+```
+Store: compress → build record → publish record and exact size
+Load:  discover size → allocate buffer → load record → decode
+```
+LMCache already supports format-specific serde output. On store, the wrapper allocates an upper-bound host buffer and narrows it to the value returned by Serializer.serialize(). On load, it allocates that upper bound again from the original KV layout. This works for host memory, but L2AdapterInterface does not expose the exact stored size needed to allocate an efficient direct GPU buffer. Some adapters know object sizes internally, but there is no common query for callers.
+The proposed format stores a small, normally uncompressed header beside the payload:
+```
+Stored record
+    ├── header: version, compressed/raw flag, codec and parameters
+    │           original, payload, and record sizes
+    │           chunk offsets, sizes, and required layout information
+    └── compressed or raw KV payload
+```
+The header tells LMCache how to decode and validate a record after reading it. It cannot be the only source of the total record size: direct loading needs that size before allocating the input buffer. The size must therefore also be available through an L2 query, lookup metadata, or a storage-specific mechanism. That metadata and the corresponding payload must become visible atomically.
+The record stores its actual used size; any alignment padding used for direct I/O is not part of the payload. Records that do not shrink are stored raw. The format fixes the codec, framing, chunking, and parameters. All processes sharing persistent L2 storage must use a compatible format, identified by a record version or format fingerprint.
+Configuration
+Configuration applies per L2 adapter. lossless_compression is therefore mutually exclusive with FP8, TurboQuant, AES-GCM, and other serde types. A future transform pipeline may support ordered composition: quantization, then lossless compression, then encryption on store, with the reverse order on load.
+Exact field names, defaults, and the initial codec remain implementation details. The selected format must still fix or configure framing, chunk size, codec parameters, and compatibility with the chosen GPU decoder.
+Open Decisions
+Does decompression run inside SerdeL2AdapterWrapper or during GPU onboarding, and what completion contract follows from that choice?
+What device-load API provides buffer ownership, exact-size discovery, registration requirements, and completion, and which L2 adapter implements it first?
+Which CPU library, codec, framing, and chunking define the initial stored format?
+How are record metadata and payload published consistently, and what trust model does the initial implementation support?
+What benchmark criteria determine whether GPU decompression and GPU compression provide an end-to-end benefit?
+What per-device limits govern compressed input, decompressed output, workspace, descriptor storage, and maximum in-flight records, and how does LMCache apply backpressure or fail admission?
+Refs
+NVIDIA nvCOMP documentation
+nvCOMP API comparison
+nvCOMP C API
+NVIDIA Decompression Engine FAQ
+AMD hipCOMP
+Activity
+rob-9 commented on Aug 16, 2026
+rob-9
+on Aug 16, 2026
+Author
+More actions
+cc @sbates130272
+would be great if you take a look here, happy to discuss.
+👍React with 👍1Reacted by Stephen Bates
+sbates130272 commented on Aug 17, 2026
+sbates130272
+on Aug 17, 2026
+More actions
+@rob-9 I am out on PTO till Aug 25 but this looks very interesting. Please design to enable both AMD and NVIDIA support please. Happy to review and provide input when I get back to the office.
+rob-9 commented on Aug 17, 2026
+rob-9
+on Aug 17, 2026
+Author
+More actions
+@rob-9 I am out on PTO till Aug 25 but this looks very interesting. Please design to enable both AMD and NVIDIA support please. Happy to review and provide input when I get back to the office.
+sounds good. enjoy the time off!
+👍React with 👍1Reacted by Stephen Bates
+rob-9 commented on Oct 4, 2026
+rob-9
+on Oct 4, 2026
+Author
+More actions
+I’m planning to split this into focused PRs:
+Portable format and compatibility probes
+Shared device, output-lease, request, and capability contracts
+Backend and completion lifecycle
+nvCOMP backend
+hipCOMP backend
+Storage and serde integration
+Retrieve integration and e2e validation
+Will coordinate with existing PRs as needed. Glad to discuss details
+Frostbyrne commented on Oct 28, 2026
+Frostbyrne
+on Oct 28, 2026
+More actions
+A data point on what lossless compression can do for FP8 KV caches, which may affect the codec choice here.
+Generic codecs barely compress FP8 KV.
+Setup: Qwen3-1.7B, all 28 layers, per-layer calibrated E4M3, held-out C4, 64-token pages decoded independently.
+Raw FP8 is 8.00 bits/value.
+coder
+bits/value
+ratio vs FP8
+order-0 entropy
+6.79
+1.18x
+zstd, best of 3 layouts per page
+6.81
+1.17x
+static per-channel sign+exponent rANS (real archive)
+6.48
+1.23x
+E4M3 has little of the exponent redundancy that makes bf16 compressible, so I would expect nvCOMP's general-purpose codecs to land near the first two rows on FP8 caches.
+Model-aware linear prediction does much better, and stays exact.
+Method: every K and V value of a token is a projection of the same hidden state. Per-layer least-squares predictors (across heads and from K to V, with keys un-rotated out of RoPE) are fitted once per model. The residual of each prediction is then rANS-coded.
+Rates: intra-token prediction alone gives 5.04 bits/value on held-out C4 (1.59x). Adding the previous layer gives 4.25 (1.88x). Real archives decode bit-exactly, within 0.003 bits of the ideal rate.
+Prototype: I built this as an LMCache serde (fp8lin) with a Triton decoder and a built-in fitter (python -m lmcache.v1.fp8lin.fit, about 5 minutes for Qwen3-1.7B). It passes 18 unit tests.
+End-to-end test: vLLM 0.32.0 and LMCache 0.5.6 in MP mode with an fs L2 and an FP8 cache. It stores 33,353 bytes per token against 57,344 for the existing fp8 serde (1.72x). Warm restores reproduce the cold response byte for byte, 3 of 3 times.
+Speed: GPU decode runs at 110-158k tokens/s per GPU in a single pass on an RTX 6000 Ada. Through LMCache's per-batch path on an RTX 4500 Ada it decodes at about 46k tokens/s marginal, roughly 70% of the SM-scaled single-pass rate. For Qwen3 8B/14B, with GPU times measured and the link modeled at 1-10 GB/s per GPU, restoring exact KV is 1.3-1.58x faster than the best mix of raw transfer and recompute. On a local SSD with a small model it does not beat recompute, so the gain there is capacity: 1.72x more exact prefix per byte of L2.
+Costs and limits:
+A small per-model coder file has to be fitted and shipped.
+Decoding needs the GPU, which matches this RFC's load path.
+It does not apply to MLA models.
+While testing, I also found that the existing fp8 serde corrupts FP8 KV caches (filed separately as #6126).
+If useful, the codec could plug in behind the GpuDecompressBackend contract as an FP8-specific codec, or stay a serde. Happy to open a PR in whichever shape fits the plan in your 7-PR split.
+mynotwo commented on Nov 3, 2026
+mynotwo
+on Nov 3, 2026
+More actions
+Hi @rob-9 — I have a lossless BF16 byte-split + Zstd codec in KVBytePack, and I’d like to contribute GPU decode support within this RFC. Would there be room for a separate codec-specific PR that I could own?
+The path I have in mind is CPU byte-split + Zstd on store, then GPU Zstd decompression followed by a byte-merge kernel on load, reusing your shared backend/completion and storage integration work. I noticed #5479 currently defines Deflate/Gzip with no post-decode transform, so I’d want to coordinate the format/preprocessing contract first.
+Would compatibility probes, the GPU byte-merge kernel, and codec-specific correctness/performance tests be a useful scope, or does that overlap with work you already have planned? Also, what NVIDIA/AMD coverage would you expect for an initial contribution? Happy to adjust the split.
+Sign up for free to join this conversation on GitHub. Already have an account? Sign in to comment
+Metadata
+Metadata
+Assignees
+No one assigned
+Labels
+No labels
+No labels
+Type
+No type
+Projects
+No projects
+Milestone
+No milestone
+Relationships
+None yet
+Development
+No branches or pull requests
+Issue actions
+Open in GitHub Copilot app
+You can’t perform that action at this time.

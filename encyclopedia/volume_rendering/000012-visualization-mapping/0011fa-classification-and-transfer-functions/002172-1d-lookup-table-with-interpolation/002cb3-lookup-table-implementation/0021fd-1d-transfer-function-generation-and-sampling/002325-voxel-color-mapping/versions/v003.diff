@@ -1,0 +1,198 @@
+--- v002.md
++++ v003.md
+@@ -4,5 +4,5 @@
+ 
+ ## Overview
+-Voxel Color Mapping is a method for assigning discrete or continuous colors to volumetric data by mapping scalar values to integer indices for lookup in a color table [S1, unofficial]. It solves the problem of quantitative visualization by converting raw data values into RGBA representations suitable for rendering [S1, unofficial]. It differs from its parent [1D Transfer Function Generation and Sampling](2689-1d-transfer-function-generation-and-sampling.md) by focusing on the specific implementation of the index calculation and table lookup, often using deterministic rules (such as height-based assignment) rather than parametric functions [S2, unofficial]. It is distinct from [Color Specification](3969-color-specification.md) which defines color spaces, and [Parametric Function Generation](5349-parametric-function-generation.md) which generates transfer functions via mathematical functions rather than direct value-to-index mapping [S1, unofficial].
++Voxel Color Mapping is a technique that maps scalar data values to integer indices for direct lookup in a color table, translating numerical volume data into visual appearance [S1, S2, unofficial]. It serves as the final step in the classification pipeline, distinct from complex transfer functions that map multiple attributes to opacity and color; instead, it performs a direct lookup based on a normalized input, often used for maximum intensity projection or surface visualization where opacity is fixed or handled separately [S1, S2, unofficial]. Unlike [Parametric Function Generation](5349-parametric-function-generation.md) which computes colors via continuous functions, this method relies on discrete table indexing [S1, unofficial].
+ 
+ ## How it works
+@@ -13,5 +13,5 @@
+ 
+ **Outputs:**
+-- RGBA color value for the voxel.
++- RGBA color value.
+ 
+ **Data Structures:**
+@@ -19,79 +19,93 @@
+ 
+ **Steps:**
+-1. **Determine Data Bounds:** Establish $v_{min}$ and $v_{max}$. These can be specified by the user, calculated as global min/max, or determined via percentile bounds (e.g., 1st and 99th percentiles) using a histogram scan [S1, unofficial].
+-2. **Compute Color Index:** Map the scalar value $v$ to an integer index $i$ between 0 and 255 using the following formula [S1, unofficial]:
+-   $$
+-   i = \begin{cases} 
+-   0 & v < v_{min} \\
+-   1 + 253 \frac{v - v_{min}}{v_{max} - v_{min}} & v_{min} \leq v \leq v_{max} \\
+-   255 & v > v_{max}
+-   \end{cases}
+-   $$
+-   The index is typically truncated or rounded to the nearest integer for table access.
++1. **Determine Data Bounds:** Establish $v_{min}$ and $v_{max}$. These can be set by the user, calculated via percentile bounds (e.g., 1st and 99th percentiles from a histogram scan), or set to global data bounds [S1, unofficial].
++2. **Compute Color Index:** Map $v$ to an integer index $i$ between 0 and 255 using the formula below.
+ 3. **Lookup Color:** Retrieve the RGBA components from the color table at index $i$.
+-4. **Display:** Render the color using 1D texture maps or direct color commands [S1, unofficial].
++4. **Display:** Use the retrieved color, potentially via 1D texture maps for interpolation between grid points [S1, unofficial].
+ 
+-**Height-Based Variant (Deterministic Assignment):**
+-In specific applications like voxel terrain, color is determined by geometric height rather than scalar data bounds [S2, unofficial].
+-1. **Normalize Height:** Calculate normalized height $h = y / 64.0$, where $y$ is the voxel's vertical coordinate [S2, unofficial].
+-2. **Assign Material Color:**
+-   - If $h > 0.70$: Color is Grass $(0x4D, 0x9E, 0x2E)$.
+-   - If $h > 0.40$: Color is Dirt $(0x85, 0x61, 0x38)$.
+-   - Otherwise: Color is Stone $(0x85, 0x85, 0x85)$.
+-3. **Pack Color:** Combine components into a single integer: `(r << 16) | (g << 8) | b` [S2, unofficial].
++**Formula:**
++The color index $i$ is computed as [S1, unofficial]:
++
++$$
++i = \begin{cases} 
++0 & v < v_{min} \\
++1 + 253 \frac{v - v_{min}}{v_{max} - v_{min}} & v_{min} \leq v \leq v_{max} \\
++255 & v > v_{max}
++\end{cases}
++$$
++
++**Parameters:**
++- Color table size: 256 entries [S1, unofficial].
++
++**Edge Cases and Pitfalls:**
++- Values outside $[v_{min}, v_{max}]$ are clamped to indices 0 or 255 [S1, unofficial].
++- Precision issues may arise if $v_{min} = v_{max}$; division by zero must be handled [G].
++- In height-based variants, specific thresholds (e.g., $h > 0.70$ for grass, $h > 0.40$ for dirt) determine discrete material colors rather than continuous interpolation [S2, unofficial].
+ 
+ **Pseudocode:**
+ ```python
+-def voxel_color_mapping(value, v_min, v_max, color_table):
++def voxel_color_mapping(v, v_min, v_max, color_table):
+     """
+-    Maps a scalar value to a color using a 256-entry lookup table.
++    Map a scalar value v to an RGBA color using a 256-entry color table.
+     
+     Args:
+-        value (float): The scalar voxel value.
++        v (float): The scalar voxel value.
+         v_min (float): Minimum data bound.
+         v_max (float): Maximum data bound.
+-        color_table (list): List of 256 tuples, each containing (r, g, b, a) floats in [0.0, 1.0].
++        color_table (list of tuples): List of 256 (r, g, b, a) tuples, 
++                                      where each component is in [0.0, 1.0].
++    
++    Returns:
++        tuple: (r, g, b, a) color components in [0.0, 1.0].
++    """
++    # Handle degenerate case where min equals max
++    if v_min == v_max:
++        # [G] Default to middle of table if bounds are identical
++        index = 128
++    else:
++        # Compute index based on formula [S1, unofficial]
++        if v < v_min:
++            index = 0
++        elif v > v_max:
++            index = 255
++        else:
++            # Linear mapping to range [1, 254]
++            # Note: Formula uses 1 + 253 * ... resulting in range [1, 254]
++            # for v in [v_min, v_max]. 
++            # Indices 0 and 255 are reserved for out-of-bounds.
++            index = 1 + 253 * (v - v_min) / (v_max - v_min)
++            
++    # Clamp index to valid array bounds [G]
++    index = int(round(index))
++    index = max(0, min(255, index))
++    
++    # Lookup color
++    return color_table[index]
++
++def height_based_voxel_coloring(y, grid_height=64.0):
++    """
++    Deterministic voxel material assignment based on height [S2, unofficial].
++    
++    Args:
++        y (float): The y-coordinate (height) of the voxel.
++        grid_height (float): Total height of the volume grid.
+         
+     Returns:
+-        tuple: (r, g, b, a) color components.
++        int: Packed RGB color (r << 16) | (g << 8) | b.
+     """
+-    # Step 1: Compute color index
+-    if value < v_min:
+-        index = 0
+-    elif value > v_max:
+-        index = 255
+-    else:
+-        # Formula: 1 + 253 * (v - v_min) / (v_max - v_min)
+-        # Using integer arithmetic for index, clamping to 0-255
+-        index = int(1 + 253 * (value - v_min) / (v_max - v_min))
+-        # Guard against floating point errors pushing index to 256
+-        if index > 255:
+-            index = 255
+-            
+-    # Step 2: Lookup color
+-    # color_table is assumed to be pre-populated with 256 entries
+-    return color_table[index]
+-
+-def height_based_voxel_coloring(y_coordinate):
+-    """
+-    Deterministic voxel material assignment based on height.
+-    
+-    Args:
+-        y_coordinate (float): The vertical position of the voxel.
+-        
+-    Returns:
+-        int: Packed RGB color (0xRRGGBB).
+-    """
+-    # Normalize height
+-    h = y_coordinate / 64.0
++    # Normalize height [S2, unofficial]
++    h = y / grid_height
+     
+     if h > 0.70:
++        # Grass: (0x4D, 0x9E, 0x2E)
+         r, g, b = 0x4D, 0x9E, 0x2E
+     elif h > 0.40:
++        # Dirt: (0x85, 0x61, 0x38)
+         r, g, b = 0x85, 0x61, 0x38
+     else:
++        # Stone: (0x85, 0x85, 0x85)
+         r, g, b = 0x85, 0x85, 0x85
+         
+-    # Pack as (r << 16) | (g << 8) | b
++    # Pack as (r << 16) | (g << 8) | b [S2, unofficial]
+     return (r << 16) | (g << 8) | b
+ ```
+@@ -99,21 +113,23 @@
+ ## Subtopics
+ 
+-### Scalar/Component to Color Mapping
+-Maps a scalar value or a specific normal component (X, Y, Z) to a color using a colormap, clamping the input to the range [0, 1] [S3, unofficial]. It is chosen when visualizing vector field components or normalized scalar data. The input is processed based on a `visualize_target` enum: if `NORMAL_X`, `NORMAL_Y`, or `NORMAL_Z`, the component is mapped via `(component + 1.0) / 2.0` and clamped; if `VALUE`, the value is clamped directly to [0, 1] [S3, unofficial]. The specific colormap is selected via a `cm_type` parameter [S3, unofficial].
++### [Scalar/Component to Color Mapping](6697-scalar-component-to-color-mapping.md)
++Scalar/Component to Color Mapping converts a single scalar volume value or a specific component of a surface normal into an RGB color using a 1D colormap texture. It serves as the final step in the classification pipeline, translating numerical data into visual appearance. Unlike complex transfer functions that map multiple attributes to opacity and color, this method performs a direct lookup based on a normalized input, often used for maximum intensity projection or surface visualization where opacity is fixed or handled separately.
++
++### Multi-hypothesis Voxel Coloring
++Multi-hypothesis Voxel Coloring identifies a set of hypotheses (possible colorings) for each voxel and narrows them down during a hypothesis removal step, carving inconsistent voxels [S3, unofficial]. This approach, proposed by Eisert et al. [ESG99], allows for the reconstruction of semi-transparent voxels (e.g., Roxels [DebVio99]) and can be refined using volumetric optimization methods like greedy or simulated annealing [S3, unofficial]. It requires accurately calibrated camera inputs, though approximate space carving extensions can handle calibration errors [S3, unofficial].
+ 
+ ## Operating characteristics
+-- **Time Complexity:** $O(1)$ per voxel for index calculation and table lookup [S1, unofficial].
+-- **Memory Complexity:** $O(1)$ for the color table (fixed at 256 entries) [S1, unofficial].
+-- **Performance:** Fast and deterministic. The use of 1D texture maps allows hardware interpolation between grid points, providing smoother visual transitions than discrete table lookups alone [S1, unofficial].
+-- **Strengths:** Simple implementation; efficient for real-time visualization; supports user-defined bounds for dynamic data [S1, unofficial].
+-- **Limitations:** Discrete index mapping can introduce banding if not interpolated; dependent on accurate $v_{min}$ and $v_{max}$ selection [S1, unofficial].
+-- **When to use:** When quantitative visualization of scalar data is required and a fixed color mapping is sufficient.
+-- **When not to use:** When complex, non-linear transfer functions or multi-dimensional data mapping is needed.
++- **Time Complexity:** $O(1)$ per voxel for index computation and table lookup [S1, unofficial].
++- **Memory Complexity:** $O(N)$ for the color table, where $N=256$ [S1, unofficial].
++- **Strengths:** Simple implementation; efficient for real-time visualization; leverages hardware texture interpolation [S1, unofficial].
++- **Limitations:** Limited to scalar data; discrete indexing may cause banding without interpolation; opacity must be handled separately or fixed [S1, S2, unofficial].
++- **When to use:** When visualizing scalar fields with fixed opacity or when performance is critical and complex transfer functions are unnecessary [S1, S2, unofficial].
++- **When not to use:** When multi-attribute classification or complex opacity variations are required [S1, S2, unofficial].
+ 
+ ## Background
+-Voxel Color Mapping is a fundamental technique in volume visualization, prominently used in tools like Smokeview for visualizing Fire Dynamics Simulation data [S1, unofficial]. The method was formalized in the context of converting quantitative data to color for display, utilizing 1D texture maps for interpolation [S1, unofficial]. It is also applied in voxel-based games and simulations for deterministic terrain coloring based on height [S2, unofficial].
++Voxel Color Mapping originated in tools like Smokeview for visualizing Fire Dynamics Simulation data, where it was used to convert quantitative data into color using 1D texture maps [S1, unofficial]. The technique has been extended in volumetric reconstruction research, such as multi-hypothesis voxel coloring by Eisert et al. [ESG99], which introduced hypothesis-based coloring for space carving [S3, unofficial].
+ 
+ ## Sources
+ [S1] Smokeview (Version 6) A Tool for Visualizing Fire Dynamics Simulation Data Volume II : Technical Reference Guide, https://doi.org/10.6028/nist.sp.1017-2, fetched 2026-10-26 (unofficial)
+ [S2] scarlyle0/voxel-compare, https://github.com/scarlyle0/voxel-compare, fetched 2026-10-27 (unofficial)
+-[S3] GitHub - yuehaowang/volume_renderer: CUDA-based interactive volume ..., https://github.com/yuehaowang/volume_renderer, fetched 2026-10-29 (unofficial)+[S3] Accelerated volumetric reconstruction from uncalibrated camera views, http://doras.dcu.ie/157/, fetched 2026-10-26 (unofficial)

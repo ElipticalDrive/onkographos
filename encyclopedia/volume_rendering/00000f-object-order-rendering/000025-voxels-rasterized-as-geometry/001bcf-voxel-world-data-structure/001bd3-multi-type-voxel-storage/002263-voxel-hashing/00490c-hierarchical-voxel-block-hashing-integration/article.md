@@ -1,0 +1,198 @@
+# Hierarchical Voxel Block Hashing Integration
+
+Also called: Parallel Hash Table Allocation, TSDF Integration with Hierarchical Blocks
+
+## Overview
+Hierarchical Voxel Block Hashing Integration is a method for efficiently integrating depth images into a Truncated Signed Distance Field (TSDF) by using a multi-resolution spatial hash table [S1]. It solves the problem of memory inefficiency and allocation bottlenecks in real-time dense reconstruction by dynamically allocating voxel blocks only where novel depth information is detected, while maintaining a hierarchy of resolutions to skip empty or already-integrated regions [S1]. It sets itself apart from standard voxel hashing by introducing a coarse-to-fine lookup mechanism that reduces the number of hash table probes and atomic operations required for integration, and differs from its sibling [Thread-Safe Splitting and Merging](12395-thread-safe-splitting-and-merging.md) by focusing on the initial allocation and integration phase rather than post-hoc structural refinement [S1].
+
+## How it works
+**Inputs and Outputs:**
+- **Input:** A depth image $I_D$, camera pose $(\mathbf{R}, \mathbf{t})$, intrinsic matrix $\mathbf{K}$, and the current hierarchical hash table state [S1].
+- **Output:** Updated TSDF values $F(\mathbf{X})$ and observation weights $W(\mathbf{X})$ for all active voxels $\mathbf{X}$ [S1].
+
+**Data Structures:**
+The method uses a hierarchical hash table consisting of $L$ levels [S1]. Each level $l$ has a voxel size $s_l$. The hash table at each level maps a block coordinate to a linked list of voxel blocks [S1].
+- **Hash Table Entry:** A pointer to the head of a linked list of voxel blocks [S1].
+- **Voxel Block:** A contiguous array of voxels. Each voxel stores:
+  - $F(\mathbf{X})$: TSDF value (float).
+  - $W(\mathbf{X})$: Observation weight (integer) [S1].
+- **Pools:**
+  - Empty voxel block pool: For allocating new blocks [S1].
+  - Linked list entry pool: For allocating new nodes in the hash table's linked lists [S1].
+
+**Parameters:**
+- Base voxel size $s = 2$ mm [S1].
+- Number of resolution levels: 3 [S1].
+- Coarsest level voxel size: 8 mm [S1].
+- TSDF truncation band: 24 mm [S1].
+
+**Algorithm Steps:**
+
+1. **Ray Casting and Block Lookup:**
+   For each pixel, compute the corresponding 3D line segment $L$ passing through a set of blocks $B$ at the coarsest level [S1]. Compute the hash value for each element of $B$ and check if the block is associated with voxel data [S1]. If present, no action is required [S1]. If not, allocate a block from the pool and modify the hash table [S1]. If the hash table indicates information exists at a finer level, proceed to the next hierarchy level [S1].
+
+2. **Parallel Allocation (Two-Stage):**
+   For GPU parallel implementation, split allocation into two stages [S1]. Stage 1: Mark buckets in hash tables that need allocation and store coordinates of corresponding blocks [S1]. Stage 2: Modify hash tables by starting new linked lists at marked buckets or extending existing lists [S1]. Maintain pools for empty voxel blocks and linked list entries to enable parallelization using simple atomic operations [S1].
+
+3. **Integration:**
+   After allocation, iterate through the list of observed voxel blocks containing novel depth information [S1]. For each voxel $\mathbf{X}$, project it into the depth image to retrieve the observed depth: $d = I_D(\pi(\mathbf{K}(\mathbf{R}\mathbf{X} + \mathbf{t})))$, where $\pi$ normalizes homogeneous 2D coordinates to inhomogeneous ones [S1]. If the voxel projects into the depth image and has a valid depth measurement, update the weighted sum [S1]:
+   $$F(\mathbf{X}) := \frac{W(\mathbf{X})F(\mathbf{X}) + d}{W(\mathbf{X}) + 1}$$
+   $$W(\mathbf{X}) := W(\mathbf{X}) + 1$$
+   where $W(\mathbf{X})$ counts the number of observations integrated in each voxel $\mathbf{X}$ [S1].
+
+**Pseudocode:**
+
+> **Unverified code.** The code below did not pass a test run against a reference implementation, or no test fits it, so it may contain errors.
+
+```python
+import math
+
+# Constants from [S1]
+NUM_LEVELS = 3
+BASE_VOXEL_SIZE = 2.0  # mm
+COARSEST_VOXEL_SIZE = 8.0  # mm
+TRUNCATION_BAND = 24.0  # mm
+
+class VoxelBlock:
+    def __init__(self, num_voxels):
+        self.F = [0.0] * num_voxels  # TSDF values
+        self.W = [0] * num_voxels    # Observation weights
+        self.active = False
+
+class LinkedListNode:
+    def __init__(self, block):
+        self.block = block
+        self.next = None
+
+# Global pools and hash tables
+empty_block_pool = []
+list_entry_pool = []
+hash_tables = [{} for _ in range(NUM_LEVELS)]  # level -> {block_coords: LinkedListNode}
+
+def hash_block(coords, level):
+    # Standard spatial hash for integer block coordinates [G]
+    return hash(coords) % 10000
+
+def unproject_pixel(uv, K):
+    # Returns ray direction in camera frame
+    x, y = uv
+    inv_K = [[1.0/K[0][0], 0, -K[0][2]/K[0][0]],
+             [0, 1.0/K[1][1], -K[1][2]/K[1][1]],
+             [0, 0, 1.0]]
+    return [inv_K[0][0]*x + inv_K[0][1]*y + inv_K[0][2],
+            inv_K[1][0]*x + inv_K[1][1]*y + inv_K[1][2],
+            inv_K[2][0]*x + inv_K[2][1]*y + inv_K[2][2]]
+
+def voxel_to_world(voxel_idx, level):
+    voxel_size = COARSEST_VOXEL_SIZE / (2 ** level)
+    return [voxel_idx[0] * voxel_size, voxel_idx[1] * voxel_size, voxel_idx[2] * voxel_size]
+
+def sample_depth(u, v, depth_image):
+    if 0 <= u < depth_image.width and 0 <= v < depth_image.height:
+        return depth_image.data[int(v)][int(u)]
+    return None
+
+def get_intersected_blocks_at_level(ray_origin, ray_dir, level):
+    # Standard 3D DDA ray traversal over integer block grid [G]
+    voxel_size = COARSEST_VOXEL_SIZE / (2 ** level)
+    t_max = [float('inf')] * 3
+    step = [0] * 3
+    current = [0, 0, 0]
+    for i in range(3):
+        if ray_dir[i] > 0:
+            step[i] = 1
+            t_max[i] = max(0.0, ((current[i] + 1) * voxel_size - ray_origin[i]) / ray_dir[i])
+        elif ray_dir[i] < 0:
+            step[i] = -1
+            t_max[i] = max(0.0, (current[i] * voxel_size - ray_origin[i]) / ray_dir[i])
+        else:
+            t_max[i] = float('inf')
+    return current, t_max, step, voxel_size
+
+def next_block_in_ray(current, t_max, step, ray_dir):
+    # Advance DDA to next block
+    if t_max[0] < t_max[1]:
+        if t_max[0] < t_max[2]:
+            current[0] += step[0]
+            t_max[0] += step[0] / ray_dir[0]
+        else:
+            current[2] += step[2]
+            t_max[2] += step[2] / ray_dir[2]
+    else:
+        if t_max[1] < t_max[2]:
+            current[1] += step[1]
+            t_max[1] += step[1] / ray_dir[1]
+        else:
+            current[2] += step[2]
+            t_max[2] += step[2] / ray_dir[2]
+    return current
+
+def integrate_depth_image(depth_image, R, t, K):
+    allocated_blocks = []
+
+    # Stage 1: Mark buckets for allocation across hierarchy
+    for pixel in depth_image.pixels:
+        ray_dir_cam = unproject_pixel(pixel.uv, K)
+        ray_dir_world = [sum(R[i][j]*ray_dir_cam[j] for j in range(3)) for i in range(3)]
+        ray_origin = t
+
+        for level in range(NUM_LEVELS):
+            current_block, t_max, step, _ = get_intersected_blocks_at_level(ray_origin, ray_dir_world, level)
+            while True:
+                if current_block not in hash_tables[level]:
+                    allocated_blocks.append((tuple(current_block), level))
+                next_b = next_block_in_ray(current_block, t_max, step, ray_dir_world)
+                if next_b == current_block: break
+                current_block = next_b
+
+    # Stage 2: Modify hash tables
+    for block_coords, level in allocated_blocks:
+        if block_coords not in hash_tables[level]:
+            new_block = empty_block_pool.pop() if empty_block_pool else VoxelBlock(8*8*8)
+            new_entry = list_entry_pool.pop() if list_entry_pool else LinkedListNode(new_block)
+            new_block.active = True
+            new_entry.block = new_block
+            new_entry.next = hash_tables[level].get(block_coords)
+            hash_tables[level][block_coords] = new_entry
+
+    # Integration Phase: Iterate only over newly allocated blocks [S1]
+    for block_coords, level in allocated_blocks:
+        if block_coords in hash_tables[level]:
+            node = hash_tables[level][block_coords]
+            current = node
+            while current:
+                block = current.block
+                if block.active:
+                    voxel_size = COARSEST_VOXEL_SIZE / (2 ** level)
+                    for i in range(len(block.F)):
+                        idx = [i % 8, (i // 8) % 8, i // 64]
+                        voxel_world = voxel_to_world(idx, level)
+                        # Matrix-vector multiplication without numpy
+                        cam_pos = [sum(R[i][j]*voxel_world[j] for j in range(3)) + t[i] for i in range(3)]
+                        proj = [sum(K[i][j]*cam_pos[j] for j in range(3)) for i in range(3)]
+                        u, v = proj[0]/proj[2], proj[1]/proj[2]
+                        d = sample_depth(u, v, depth_image)
+                        if d is not None:
+                            block.F[i] = (block.W[i] * block.F[i] + d) / (block.W[i] + 1)
+                            block.W[i] += 1
+                current = current.next
+```
+
+## Subtopics
+
+### [Volumetric Triangle Representation with Spatial Hashing](13835-volumetric-triangle-representation-with-spatial-hashing.md)
+A compact data structure that embeds mesh vertices directly into a volumetric grid using spatial hashing, eliminating vertex redundancies by binding continuous vertex positions to discrete voxel edges. It solves the problem of memory inefficiency and topological inconsistency in real-time dense reconstruction by maintaining both TSDF values and triangle connectivity at the fine cube scale, rather than managing triangles coarsely at the block level. Unlike standard Marching Cubes implementations that may allocate duplicate vertices, this method enforces a one-to-one correspondence between voxel edges and mesh vertices, enabling $O(1)$ vertex access and preventing memory leaks during parallel execution.
+
+## Operating characteristics
+- **Time Complexity:** Not given in the sources.
+- **Memory Complexity:** Not given in the sources.
+- **Strengths:** Not given in the sources.
+- **Limitations:** Not given in the sources.
+- **When to use:** Not given in the sources.
+- **When not to use:** Not given in the sources.
+
+## Background
+The method was introduced in "Hierarchical Voxel Block Hashing for Efficient Integration of Depth Images" [S1]. It compares a standard implementation of voxel block hashing with a hierarchical representation to illustrate the benefits of the proposed structure [S1]. The default experimental settings use a base voxel size of 2 mm, three resolution levels, and a TSDF truncation band of 24 mm [S1].
+
+## Sources
+[S1] Hierarchical Voxel Block Hashing for Efficient Integration of Depth Images, https://doi.org/10.1109/lra.2015.2512958, fetched 2026-11-08

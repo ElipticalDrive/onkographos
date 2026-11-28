@@ -1,0 +1,118 @@
+# Gated Second-Order Trajectory
+
+Also called: Dynamic Modeling, Gated quadratic trajectory, Second-order motion model, Static-Dynamic Partition
+
+## Overview
+Gated Second-Order Trajectory is a method for modeling the continuous-time motion of 3D Gaussian primitives in dynamic scenes by applying a second-order kinematic model gated by a binary switch [S1, unofficial]. It solves the problem of efficiently representing temporal dynamics without per-frame neural inference, distinguishing itself from implicit deformation fields by keeping the static subset exactly time-invariant for caching [S1, unofficial].
+
+## How it works
+**Inputs and Outputs**
+*   **Input:** Canonical Gaussian parameters, normalized timestamp $t \in [0, 1]$ [S1, unofficial].
+*   **Output:** Time-dependent position $\mu_i(t)$ and effective opacity $o_i(t)$ for rendering [S1, unofficial].
+
+**Data Structures**
+Each Gaussian $i$ stores the following fields [S1, unofficial]:
+*   $\mu_i \in \mathbb{R}^3$: Canonical center position.
+*   $\Sigma_i \in \mathbb{R}^{3 \times 3}$: Covariance matrix (constant over time).
+*   $o_i \in \mathbb{R}$: Base opacity.
+*   $c_i$: Appearance coefficients (constant over time).
+*   $v_i \in \mathbb{R}^3$: Velocity vector.
+*   $a_i \in \mathbb{R}^3$: Acceleration vector.
+*   $t'_i \in [0, 1]$: Canonical time.
+*   $\rho_i \in \mathbb{R}$: Log-duration parameter.
+*   $g_i \in \{0, 1\}$: Binary static-dynamic gate.
+
+**Parameters**
+*   $t$: Normalized timestamp of the input frame, $t \in [0, 1]$ [S1, unofficial].
+*   $\sigma_{min}, \sigma_{max}$: Bounds for temporal duration clipping [S1, unofficial].
+*   $\epsilon$: Small constant to prevent division by zero [S1, unofficial].
+
+**Steps**
+1.  Compute the time delta: $\Delta t_i = t - t'_i$ [S1, unofficial].
+2.  Compute the temporal duration: $\sigma_i = \text{clip}(\exp(\rho_i), \sigma_{min}, \sigma_{max})$ [S1, unofficial].
+3.  Compute the temporal weight: $w_i(t) = \exp\left(-\frac{1}{2} \left(\frac{\Delta t_i}{\sigma_i + \epsilon}\right)^2\right)$ [S1, unofficial].
+4.  Compute the effective opacity: $o_i(t) = (1 - g_i) o_i + g_i w_i(t) o_i$ [S1, unofficial]. (Note: The source contains a typographical sign error in the original formula; this corrected form ensures static Gaussians retain their original opacity.)
+5.  Compute the position: $\mu_i(t) = \mu_i + g_i v_i \Delta t_i + \frac{1}{2} a_i \Delta t_i^2$ [S1, unofficial].
+
+**Pseudocode**
+> **Unverified code.** The code below did not pass a test run against a reference implementation, or no test fits it, so it may contain errors.
+
+```python
+import math
+
+def gated_second_order_trajectory(mu, o, v, a, t_prime, rho, g, t, sigma_min, sigma_max, epsilon):
+    """
+    Computes time-dependent position and opacity for a single Gaussian.
+    
+    Args:
+        mu: Canonical position (3,)
+        o: Base opacity (scalar)
+        v: Velocity vector (3,)
+        a: Acceleration vector (3,)
+        t_prime: Canonical time (scalar in [0,1])
+        rho: Log-duration parameter (scalar)
+        g: Binary gate (0 or 1)
+        t: Current normalized timestamp (scalar in [0,1])
+        sigma_min: Minimum temporal duration
+        sigma_max: Maximum temporal duration
+        epsilon: Small constant for numerical stability
+        
+    Returns:
+        mu_t: Position at time t (3,)
+        o_t: Effective opacity at time t (scalar)
+    """
+    # 1. Compute time delta
+    delta_t = t - t_prime
+    
+    # 2. Compute temporal duration with clipping
+    sigma_i = max(sigma_min, min(sigma_max, math.exp(rho)))
+    
+    # 3. Compute temporal weight
+    denom = sigma_i + epsilon
+    weight = math.exp(-0.5 * (delta_t / denom) ** 2)
+    
+    # 4. Compute effective opacity
+    if g == 0:
+        o_t = o
+    else:
+        o_t = weight * o
+        
+    # 5. Compute position
+    displacement = g * v * delta_t + 0.5 * a * (delta_t ** 2)
+    mu_t = mu + displacement
+    
+    return mu_t, o_t
+```
+
+**Edge Cases and Pitfalls**
+*   **Static Caching:** When $g_i=0$, the Gaussian remains at $\mu_i$ for all $t$. This subset can be cached for mobile rendering [S1, unofficial].
+*   **Explicit States:** All temporal states are explicit, avoiding per-frame neural inference required by implicit deformation-based methods [S1, unofficial].
+*   **Temporal Support:** Dynamic Gaussians do not contribute to every frame; they appear/disappear smoothly around $t'_i$ based on $\sigma_i$ [S1, unofficial].
+*   **Precision & Boundaries:** The clipping of $\sigma_i$ and addition of $\epsilon$ prevent division by zero and unbounded temporal weights [S1, unofficial].
+
+## Subtopics
+
+### [4D Neural Voxel Splatting](16404-4d-neural-voxel-splatting.md)
+Uses neural voxels for dynamic representation. Choose when high-frequency dynamic details are needed without explicit motion parameters.
+
+### [Computational Deformation Field (CDF)](19197-computational-deformation-field-cdf.md)
+Uses implicit deformation fields. Choose when continuous deformation is preferred over explicit kinematic models.
+
+### [MaGS Pipeline](20248-mags-pipeline.md)
+Focuses on multi-agent Gaussian Splatting. Choose for multi-object scenarios with distinct motion patterns.
+
+### [Dynamic Neural Motion Factorization (DynMF)](20633-dynamic-neural-motion-factorization-dynmf.md)
+Factorizes motion into neural components. Choose for complex, non-rigid deformations.
+
+## Operating characteristics
+*   **Time Complexity:** $O(1)$ per Gaussian per frame, as it involves only vector operations and exponentials. No neural network inference is required [S1, unofficial].
+*   **Memory Complexity:** Adds eight scalars per Gaussian to the static parameters [S1, unofficial].
+*   **Strengths:** Enables caching of static Gaussians; avoids per-frame neural inference; provides continuous trajectories [S1, unofficial].
+*   **Limitations:** Assumes piecewise constant velocity and acceleration [S1, unofficial].
+*   **When to use:** Real-time mobile rendering where static parts can be cached and dynamic parts are relatively simple [S1, unofficial].
+
+## Background
+Originated in Mobile-4DGS, a method for unified static-dynamic real-time mobile Gaussian Splatting [S1, unofficial]. It extends 3D Gaussian Splatting with a compact set of temporal parameters to model continuous-time motion [S1, unofficial].
+
+## Sources
+[S1] Mobile-4DGS: Unified Static-Dynamic Real-time Mobile Gaussian Splatting, https://arxiv.org/abs/2610.05289, fetched 2026-10-29 (unofficial)

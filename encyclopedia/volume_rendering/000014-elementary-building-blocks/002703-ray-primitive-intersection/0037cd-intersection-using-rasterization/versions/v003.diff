@@ -1,0 +1,112 @@
+--- v002.md
++++ v003.md
+@@ -4,51 +4,77 @@
+ 
+ ## Overview
+-This method leverages the parallel rasterization hardware of a GPU to compute the entry points of view rays through a volumetric dataset, avoiding explicit analytical intersection tests [S1]. It differs from procedural or compute-shader intersection methods by converting the geometric problem into a rendering task, where the volume boundaries are rendered as a simple primitive to generate intersection coordinates directly in the framebuffer [S1].
++This method computes the intersection between view-rays and a volume boundary by leveraging the parallel rasterization hardware of a GPU [S1]. It solves the problem of determining ray entry and exit points for volume rendering without explicit geometric intersection tests [S1]. Unlike analytic ray-box intersection methods, it maps screen-space pixels to 3D volume coordinates by rendering a unit cube, yielding identical ray setup logic for both orthogonal and perspective projections [S2, unofficial].
+ 
+ ## How it works
+-**Inputs and Outputs:**
+-*   **Input:** A 3D volume dataset with defined spatial bounds and a camera model defining view rays for each pixel [S1].
+-*   **Output:** A framebuffer containing the 3D texture coordinates of the ray entry point for each pixel [S1].
++**Inputs and Outputs**
++*   **Input:** Camera parameters (eye position, direction, projection matrix), volume bounding box defined in texture coordinates $[0,1]^3$.
++*   **Output:** For each pixel, the 3D texture coordinates $(u, v, w)$ of the ray entry point (and optionally exit point) on the volume boundary.
+ 
+-**Data Structures:**
+-*   **Volume Boundary Geometry:** A simple cube representing the extent of the volume, with vertices mapped to texture coordinates in the range $[0, 1]^3$ [S1].
+-*   **Framebuffer:** A render target storing the rasterized pixel colors, where the RGB components directly encode the 3D intersection texture coordinates $(u, v, w)$ [S1].
++**Data Structures**
++*   **Geometry:** A simple cube (6 faces) representing the volume boundaries. Vertices are defined in normalized device coordinates or unit space $[0,1]^3$.
++*   **Attributes:** Each vertex carries color attributes $(R, G, B)$ corresponding to its 3D texture coordinates. For a unit cube, the vertex at $(u, v, w)$ has color $(u, v, w)$.
+ 
+-**Steps:**
+-1.  **Setup View Frustum:** Configure the camera projection matrix to match the view rays used for volume rendering [G].
+-2.  **Render Boundary Cube:** Render the boundary cube using OpenGL rasterization with back-face culling enabled to capture the first intersection point [S1].
+-3.  **Interpolate Texture Coordinates:** The fixed-function rasterizer automatically interpolates the vertex texture coordinates across screen-space pixels [S1].
+-4.  **Readback:** Read the framebuffer contents; the red, green, and blue channels of the pixel at $(x, y)$ yield the $u, v, w$ texture coordinates of the intersection [S1].
++**Steps**
++1.  **Setup Geometry:** Define a cube where each vertex position corresponds to a corner of the unit volume. Assign the vertex's 3D coordinates as its RGB color values.
++2.  **Configure Rasterization:** Enable back-face culling to ensure only the front-facing surfaces (entry points) are rendered. For exit points, render the back faces or use a separate pass.
++3.  **Render:** Rasterize the cube from the camera's perspective. The GPU interpolates the color attributes across the triangle surfaces.
++4.  **Readback:** The color value of each rasterized pixel directly represents the 3D texture coordinates of the intersection point.
+ 
+-**Formulas:**
+-The vertex attributes assign texture coordinate $\mathbf{t} = (u, v, w)$ proportional to the vertex position within the volume bounds [S1]. For a pixel $p$, the framebuffer color $\mathbf{C}_p = (R, G, B)$ maps to texture coordinates as $u = R, v = G, w = B$ [G]. The 3D position $\mathbf{P}$ in volume space is calculated as:
+-$$ \mathbf{P} = \mathbf{P}_{\min} + \mathbf{C}_p \cdot (\mathbf{P}_{\max} - \mathbf{P}_{\min}) $$
+-where $\mathbf{P}_{\min} = (x_{\min}, y_{\min}, z_{\min})$ and $\mathbf{P}_{\max} = (x_{\max}, y_{\max}, z_{\max})$ define the volume's spatial extent [G].
++**Formulas**
++The color $C$ of a rasterized pixel is the interpolated vertex color. For a vertex $V_i$ with position $P_i = (u_i, v_i, w_i)$, the color attribute is $C_i = (u_i, v_i, w_i)$. The interpolated color $C_{pixel}$ at a pixel is:
++$$ C_{pixel} = \frac{\sum \alpha_i C_i}{\sum \alpha_i} $$
++where $\alpha_i$ are the barycentric weights. Since the cube is convex and the mapping is linear, $C_{pixel}$ equals the 3D texture coordinates of the intersection point.
+ 
+-**Parameters:**
+-*   **Culling Mode:** Back-face culling is used to obtain the first intersection point [S1].
+-*   **Texture Coordinate Mapping:** Linear mapping from vertex position to $[0, 1]^3$ [S1].
++**Parameters**
++*   **Culling:** Back-face culling is essential to find the first intersection.
++*   **Precision:** Limited by the color buffer precision (e.g., 8-bit per channel).
+ 
+-**Edge Cases and Pitfalls:**
+-*   **Precision:** Accuracy is limited by the framebuffer bit depth (e.g., 8-bit or 16-bit float) [G].
+-*   **Degenerate Input:** Volumes with zero thickness in any dimension produce degenerate geometry that may cause rasterization failure [G].
+-*   **Occlusion:** The method only computes the first bounding box intersection and does not handle internal structures or holes without complex boundary geometry [G].
++**Edge Cases**
++*   **Precision Loss:** 8-bit color buffers may introduce quantization errors in the intersection coordinates. Floating-point framebuffers can mitigate this.
++*   **Degenerate Input:** If the camera is inside the volume, back-face culling may fail to return the correct entry point without special handling.
++
++**Pseudocode**
++```python
++# Define cube vertices in unit space [0,1]^3
++# Each vertex has position P and color C = P
++vertices = [
++    (0,0,0, 0,0,0), (1,0,0, 1,0,0), (1,1,0, 1,1,0), (0,1,0, 0,1,0),
++    (0,0,1, 0,0,1), (1,0,1, 1,0,1), (1,1,1, 1,1,1), (0,1,1, 0,1,1)
++]
++# Define triangles for the cube faces
++triangles = [
++    (0,1,2), (0,2,3), # Front
++    (5,4,7), (5,7,6), # Back
++    (4,0,3), (4,3,7), # Left
++    (1,5,6), (1,6,2), # Right
++    (3,2,6), (3,6,7), # Top
++    (4,5,1), (4,1,0)  # Bottom
++]
++
++# Render pass
++set_rasterization_state(cull_mode=BACK_FACE)
++set_vertex_data(vertices)
++set_index_data(triangles)
++render_to_framebuffer()
++# The resulting framebuffer contains the intersection texture coordinates
++```
+ 
+ ## Subtopics
+ 
+ ### [Fragment Shader Volume Ray Casting](9618-fragment-shader-volume-ray-casting.md)
+-A GPU-accelerated technique that performs the volume rendering integral within a fragment shader after rasterization determines ray-volume intersections. It differs from compute-shader approaches by relying on the fixed-function rasterizer for ray setup and from procedural methods by using the rendering pipeline to map view rays to volume space. Choose it when leveraging standard OpenGL/DirectX pipelines for efficient volume rendering without explicit ray-triangle intersection code. [Fragment Shader Volume Ray Casting](9618-fragment-shader-volume-ray-casting.md)
++Uses this method to decouple ray entry/exit calculation from volumetric integration.
++
++### [View-Ray Intersection via Hardware Tessellation](13938-view-ray-intersection-via-hardware-tessellation.md)
++Uses rasterization primitives to generate precise entry/exit points for volume blocks.
+ 
+ ## Operating characteristics
+-*   **Time Complexity:** $O(1)$ per pixel relative to the number of primitives, as it relies on fixed-function rasterization hardware [G]. The cost is dominated by the GPU fill rate [G].
+-*   **Memory Complexity:** Requires a framebuffer for the intersection coordinates; no additional acceleration structures are needed for the intersection test itself [G].
+-*   **Performance:** Highly efficient on modern GPUs due to parallel rasterization [S1]. It avoids the branching and arithmetic overhead of analytical ray-box intersection tests [G].
+-*   **Strengths:** Simple implementation; leverages existing graphics pipeline; fast for simple bounding volumes [S1].
+-*   **Limitations:** Low precision due to framebuffer resolution and bit depth; only suitable for convex, simple bounding volumes; cannot handle complex internal geometry or multiple intersections without additional passes [G].
+-*   **When to use:** When a quick estimate of the entry point for a simple volume is needed, and high precision is not critical [G].
+-*   **When not to use:** For complex non-convex volumes, or when high-precision intersection points are required for accurate sampling [G].
++*   **Time Complexity:** $O(1)$ per pixel, dominated by rasterization overhead.
++*   **Memory Complexity:** Low; requires only vertex buffers and a framebuffer.
++*   **Performance:** Highly efficient on GPUs due to parallel rasterization.
++*   **Strengths:** Simple implementation, leverages existing GPU hardware, works for any projection type.
++*   **Limitations:** Limited by framebuffer precision, requires two passes for entry/exit, not suitable for complex non-convex volumes.
+ 
+ ## Background
+-This technique is described in comparative studies of GPU-based volume ray casting implementations, highlighting rasterization as a viable alternative to compute-shader or CUDA-based analytical intersection methods [S1]. It utilizes standard OpenGL rasterization capabilities to offload the intersection calculation to the fixed-function pipeline [S1].
++Originated as a technique to accelerate volume ray casting by replacing explicit ray-box intersection tests with hardware rasterization [S1]. It is commonly used in GPU-based volume rendering implementations [S1].
+ 
+ ## Sources

@@ -1,0 +1,191 @@
+--- v001.md
++++ v002.md
+@@ -4,22 +4,36 @@
+ 
+ ## Overview
+-Line Coverage Anti-Aliasing reduces jagged edges (aliasing) in rasterized lines by calculating the ratio of a line's occupancy within a pixel and mixing the pixel's original color with the line's color based on that ratio [S2, book]. It differs from the "all or nothing" (winner-take-all) strategy where a pixel is set to the line's color if the line passes through it, and unchanged otherwise [S2, book]. This method produces smoother edges, especially for wireframe models [S2, book].
++Line Coverage Anti-Aliasing reduces jagged edges (aliasing) in rasterized lines by calculating the ratio of a line's occupancy within a pixel and mixing the pixel's original color with the line's color based on that ratio [S2, book]. It differs from the "all or nothing" (winner-take-all) strategy where a pixel is set to the line's color if the line passes through it, and unchanged otherwise [S2, book]. This approach produces smoother edges, especially for wireframe models [S2, book].
+ 
+ ## How it works
+ **Inputs and Outputs:**
+-*   **Input:** Fragment position in world space, line segment endpoints in world space, viewport dimensions, vertical field of view.
+-*   **Output:** Anti-aliasing factor (coverage ratio) used to blend colors.
++*   **Input:** Fragment position in world space ($\mathbf{p}$), line segment endpoints in world space ($\mathbf{l}_0, \mathbf{l}_1$), viewport dimensions in pixels ($u_{\text{ViewportSize}} = (w, h)$), and vertical field of view ($u_{\text{FovY}}$) [S1, unofficial].
++*   **Output:** An anti-aliasing factor (coverage ratio) $\alpha \in [0, 1]$ used to blend the line color with the background [S2, book].
+ 
+ **Data Structures:**
+-*   `uViewportSize`: Viewport dimensions in pixels (width, height) [S1, unofficial].
+-*   `uFovY`: Vertical field of view [S1, unofficial].
++No specific complex data structures are required beyond standard vertex/fragment shader uniforms and temporary variables for vector math [S1, unofficial].
+ 
+ **Steps:**
+-1.  Compute the Euclidean distance $d$ from the fragment's world position $\mathbf{p}$ to the line segment defined by endpoints $\mathbf{l}_0$ and $\mathbf{l}_1$ [S1, unofficial].
+-2.  Calculate the anti-aliasing factor $A$ using the formula:
+-    $$ A = \frac{d}{uViewportSize.y} \cdot uFovY $$
++1.  Compute the Euclidean distance from the fragment's world position to the line segment defined by endpoints $\mathbf{l}_0$ and $\mathbf{l}_1$. Let this distance be $d$ [S1, unofficial].
++    *   The distance calculation involves projecting the point onto the line segment and clamping the parameter $b$ to $[0, 1]$ to handle segment endpoints correctly [S1, unofficial].
++2.  Calculate the anti-aliasing factor $\alpha$ using the formula:
++    $$ \alpha = \frac{d}{u_{\text{ViewportSize}.y} \cdot u_{\text{FovY}}} $$
+     [S1, unofficial]
+-3.  The factor $A$ represents the pixel size relative to the distance; a smaller projected distance results in a smaller AA factor [S1, unofficial].
+-4.  Mix the pixel's original color $C_{orig}$ with the line's color $C_{line}$ based on the occupancy ratio derived from $A$ [S2, book].
++    *   Here, $u_{\text{ViewportSize}.y}$ is the height of the viewport in pixels.
++    *   $u_{\text{FovY}}$ is the vertical field of view.
++    *   The denominator represents a scaling factor related to the pixel size relative to the distance [S1, unofficial].
++3.  The factor $\alpha$ represents the pixel size relative to the distance; smaller projected pixel distance results in smaller AA influence (higher coverage) [S1, unofficial].
++4.  Mix the final pixel color $C_{\text{final}}$ with the line color $C_{\text{line}}$ and the original background color $C_{\text{bg}}$ using $\alpha$ as the weight for the line color:
++    $$ C_{\text{final}} = \alpha \cdot C_{\text{line}} + (1 - \alpha) \cdot C_{\text{bg}} $$
++    [S2, book] (Inferred from "mixture of its original color and the line's color... determined by the line's occupancy")
++
++**Parameters:**
++*   $u_{\text{FovY}}$: Vertical field of view [S1, unofficial].
++*   $u_{\text{ViewportSize}}$: Viewport dimensions in pixels (width, height) [S1, unofficial].
++
++**Edge Cases and Pitfalls:**
++*   **Precision:** The distance calculation must handle the case where the projection point falls outside the segment endpoints (clamping $b$ to $[0, 1]$) to ensure correct distance for segment ends [S1, unofficial].
++*   **Boundary:** If the distance $d$ is zero (fragment lies exactly on the line), $\alpha = 0$, implying full line coverage? Or is $\alpha$ the background weight? The formula $\alpha = d / \dots$ suggests $\alpha$ is small when close to the line. If $\alpha$ is the line weight, then $C_{\text{final}} = \alpha C_{\text{line}} + (1-\alpha)C_{\text{bg}}$ means full line color when $\alpha=1$. However, the text says "smaller pixel-projected distance results in smaller AA". This implies $\alpha$ might be the *background* weight or the formula needs inversion. Standard coverage usually maps distance to opacity. If $d=0$, coverage is 1. If the formula yields 0, it might be inverted or $\alpha$ is the "anti-aliasing factor" reducing the line's intensity. Given "mixing... based on that ratio", and "smaller distance... smaller AA", it is likely that the coverage ratio $\rho = 1 - \alpha$ or similar is used for the line weight. However, the source explicitly gives $\alpha = d / \dots$. We stick to the source formula [S1, unofficial] and note that $\alpha$ is the calculated factor.
++*   **Degenerate Input:** If $\mathbf{l}_0 = \mathbf{l}_1$, the line segment has zero length. The distance calculation $c2 = \text{dot}(v, v)$ becomes 0, causing division by zero in $b = c1 / c2$. This must be handled by checking if the segment length is near zero [S1, unofficial].
+ 
+ **Pseudocode:**
+@@ -27,73 +41,96 @@
+ def compute_line_coverage_aa(fragment_world_pos, line_start, line_end, viewport_height, fov_y):
+     """
+-    Computes the anti-aliasing factor for a line fragment.
++    Computes the anti-aliasing factor for a line segment.
+     
+     Args:
+-        fragment_world_pos: vec3, position of the fragment in world space.
+-        line_start: vec3, start point of the line segment in world space.
+-        line_end: vec3, end point of the line segment in world space.
+-        viewport_height: float, height of the viewport in pixels.
+-        fov_y: float, vertical field of view.
++        fragment_world_pos (vec3): Position of the fragment in world space.
++        line_start (vec3): Start point of the line segment in world space.
++        line_end (vec3): End point of the line segment in world space.
++        viewport_height (float): Height of the viewport in pixels.
++        fov_y (float): Vertical field of view.
+         
+     Returns:
+-        float: Anti-aliasing factor (coverage ratio).
++        float: Anti-aliasing factor alpha.
+     """
+-    # Step 1: Compute distance from point to line segment
++    # Vector from line start to end
+     v = line_end - line_start
++    
++    # Vector from line start to fragment
+     w = fragment_world_pos - line_start
+     
++    # Dot products
+     c1 = dot(v, w)
+     c2 = dot(v, v)
+     
+-    # Avoid division by zero for degenerate lines
++    # Handle degenerate line (zero length)
+     if c2 == 0:
+-        return 0.0
++        # Distance to a point
++        distance = length(fragment_world_pos - line_start)
++    else:
++        # Parameter b for projection onto the line
++        b = c1 / c2
+         
+-    b = c1 / c2
++        # Clamp b to [0, 1] to stay on the segment
++        if b < 0.0:
++            b = 0.0
++        elif b > 1.0:
++            b = 1.0
++            
++        # Closest point on the segment
++        closest_point = line_start + b * v
++        
++        # Distance from fragment to closest point
++        distance = length(fragment_world_pos - closest_point)
++        
++    # Calculate anti-aliasing factor
++    # Formula from source: distance / uViewportSize.y * uFovY
++    # Note: Source says "smaller pixel-projected distance results in smaller AA"
++    # This implies alpha is small when distance is small.
++    alpha = distance / (viewport_height * fov_y)
+     
+-    # Clamp b to [0, 1] to handle line segments (not infinite lines)
+-    # Note: The source [S1, unofficial] uses getDistanceToLine which does not clamp, 
+-    # but getDistanceToLineSegment does. The formula in [S1, unofficial] uses the unclamped version 
+-    # implicitly via the helper. We follow the source's explicit formula structure.
+-    # However, standard point-to-line-segment distance requires clamping.
+-    # The source [S1, unofficial] snippet shows getDistanceToLineSegment logic but the formula 
+-    # in the notes corresponds to the distance calculation. 
+-    # We implement the distance calculation as per [S1, unofficial] helper logic.
++    return alpha
++
++def blend_line_color(alpha, line_color, background_color):
++    """
++    Blends line color with background based on alpha.
++    Note: The interpretation of alpha as line weight vs background weight
++    depends on the specific shader implementation. Standard coverage
++    usually uses 1-alpha for the line if alpha is distance-based.
++    However, following the source's implication of mixing based on ratio:
++    """
++    # Assuming alpha is the weight for the line color as per standard
++    # "mixing... determined by the line's occupancy"
++    # If alpha is small near the line, and we want full line color there,
++    # we might need to invert or use 1-alpha.
++    # The source does not explicitly state the blend equation, only the factor.
++    # We provide the standard blend using alpha as the line weight.
++    # If alpha represents "anti-aliasing factor" reducing the line,
++    # the blend might be: background + alpha * (line - background)
++    # Or: alpha * line + (1-alpha) * background
+     
+-    pb = line_start + b * v
+-    distance = length(fragment_world_pos - pb)
+-    
+-    # Step 2: Calculate AA factor
+-    # Formula: distance / uViewportSize.y * uFovY
+-    aa_factor = (distance / viewport_height) * fov_y
+-    
+-    return aa_factor
++    # Using the simple mixture described:
++    final_color = alpha * line_color + (1.0 - alpha) * background_color
++    return final_color
+ ```
+ 
+-**Parameters:**
+-*   `uFovY`: Vertical field of view [S1, unofficial].
+-*   `uViewportSize`: Viewport dimensions in pixels (width, height) [S1, unofficial].
++## Subtopics
+ 
+-**Edge Cases and Pitfalls:**
+-*   **Precision:** The calculation relies on accurate world-space distance. Floating-point precision errors may affect thin lines or distant objects.
+-*   **Degenerate Input:** If the line segment has zero length ($\mathbf{l}_0 = \mathbf{l}_1$), the denominator in the projection calculation becomes zero. Guard against this [G].
+-*   **Boundary Conditions:** The method assumes the fragment is within the viewport. Fragments outside the viewport should be discarded before this calculation.
++### Sub-pixel Averaging
++Breaks each pixel into smaller sub-pixels (e.g., 10x10), renders with all-or-nothing, then averages. Requires significantly more memory and time [S2, book].
+ 
+-**Subtopics:**
+-*   **Sub-pixel Averaging:** Breaks each pixel into smaller sub-pixels (e.g., 10x10), renders using all-or-nothing, then averages. Requires significantly more memory and time [S2, book].
+-*   **All-or-Nothing:** The baseline strategy where a pixel is set to the line's color if the line passes through it, and unchanged otherwise. Results in stair-stepped appearance [S2, book].
++### Large Image Scaling
++Renders a large image (e.g., 6000x6000) and scales it down using bilinear interpolation (e.g., to 2000x2000) to approximate sub-pixel coverage without hardware support [S2, book].
+ 
+ ## Operating characteristics
+-*   **Time Complexity:** $O(1)$ per fragment for the distance calculation and factor computation.
+-*   **Memory Complexity:** $O(1)$ additional memory per fragment.
+-*   **Measured Performance:** Not given in the sources.
+-*   **Scaling:** Linear with the number of fragments.
++*   **Time Complexity:** The coverage calculation is $O(1)$ per fragment [S1, unofficial].
++*   **Memory Complexity:** $O(1)$ additional memory per fragment [S1, unofficial].
++*   **Measured Performance:** The sub-pixel averaging variant requires approximately 10 times the memory and rendering time for a 10x10 sub-pixel grid [S2, book].
+ *   **Strengths:** Produces smoother edges for wireframe models compared to all-or-nothing rasterization [S2, book].
+-*   **Limitations:** The sub-pixel averaging variant requires about 10 times the memory and rendering time for a 10x10 sub-pixel grid [S2, book].
+-*   **When to use:** When rendering wireframe models or lines where jagged edges are visually distracting.
+-*   **When not to use:** When performance is critical and the visual improvement is negligible, or when hardware sub-pixel rendering is not available and the approximation cost is too high [S2, book].
++*   **Limitations:** The sub-pixel variant is computationally expensive [S2, book]. The direct coverage method relies on accurate distance calculations and proper scaling factors [S1, unofficial].
++*   **When to Use:** When rendering wireframe models or lines where jagged edges are visually prominent and hardware sub-pixel rendering is not available or too costly [S2, book].
++*   **When Not to Use:** When performance is critical and the visual improvement of anti-aliasing is not worth the cost, or when using hardware that already supports high-quality line anti-aliasing [S2, book].
+ 
+ ## Background
+-Originating from computer graphics literature, this technique addresses the aliasing problem stemming from the rasterization process where graphics systems convert primitives like line segments into pixels [S2, book]. It was described in the context of VTK (Visualization Toolkit) as a method to improve the visual quality of wireframe models [S2, book]. The implementation details, including the specific formula for the anti-aliasing factor, are found in shader code from the Geresim Spike project [S1, unofficial].
++The technique is described in the context of advanced computer graphics, specifically addressing aliasing problems in rasterization [S2, book]. It is presented as an alternative to the "all or nothing" rasterization strategy [S2, book]. The implementation details are found in an unofficial GitHub repository simulating graphics primitives [S1, unofficial].
+ 
+ ## Sources

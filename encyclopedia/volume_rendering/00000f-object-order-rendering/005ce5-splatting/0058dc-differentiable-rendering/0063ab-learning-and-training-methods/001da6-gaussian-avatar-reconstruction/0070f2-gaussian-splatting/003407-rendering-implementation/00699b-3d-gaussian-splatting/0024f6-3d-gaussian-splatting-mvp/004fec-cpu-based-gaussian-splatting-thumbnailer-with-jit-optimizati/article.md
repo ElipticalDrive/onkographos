@@ -1,0 +1,93 @@
+# CPU-based Gaussian Splatting Thumbnailer with JIT Optimization
+
+Also called: JIT Python Gaussian Splatting, Sphere Splatting
+
+## Overview
+This method provides a lightweight, CPU-only pipeline for generating rapid visual thumbnails from 3D Gaussian Splatting datasets, prioritizing responsiveness and portability over high-fidelity rendering [S1]. It distinguishes itself from standard GPU-accelerated splatting by omitting rotation parameters, approximating Gaussians as spheres, and leveraging Python's Numba JIT compiler to achieve near-real-time performance on constrained hardware [S1].
+
+## How it works
+**Inputs and Outputs**
+*   **Input:** A set of 3D Gaussians defined by position ($\mu$), scale ($\sigma$), and color [S1]. Rotation data is explicitly omitted to simplify the primitive representation [S1].
+*   **Output:** A 2D image file representing the projected scene [S1].
+
+**Data Structures**
+*   **Gaussian Primitive:** A structure containing `position` (3D vector), `scale` (scalar $\sigma$), and `color` [S1].
+*   **Buffers:** `color_buffer` and `depth_buffer` allocated for the target image resolution [S1].
+
+**Parameters**
+*   **Splat Size ($\sigma$):** The radius of the spherical approximation, tuned between 0.4 and 0.5 to balance detail and speed [S1].
+*   **Image Resolution:** 720p is the standard target resolution [S1].
+*   **Initial Radius:** Set to the largest Gaussian scale in the dataset [S1].
+
+**Algorithm Steps**
+1.  **Initialization:** Allocate `color_buffer` and `depth_buffer` for the target resolution [S1].
+2.  **Sphere Approximation:** Treat each Gaussian as a sphere by omitting rotation data and setting the initial radius to the largest Gaussian scale [S1].
+3.  **Projection:** Project each Gaussian's 3D center $\mu$ onto the 2D image plane to obtain screen-space coordinates [S1].
+4.  **Weight Calculation:** Compute the Gaussian weight $\rho(x)$ for pixels within the splat's radius using the formula: $\rho(x) = \alpha \cdot \exp(-0.5 \cdot (x - \mu)^\top \Sigma^{-1} (x - \mu))$ [S1].
+5.  **Blending:** Blend the projected Gaussians into the `color_buffer` based on their calculated weights using a fast approximate blending method [S1].
+6.  **Buffer Update:** Update the `color_buffer` with the blended colors and the `depth_buffer` with the corresponding depth values for each pixel [S1].
+7.  **Output:** Save the final `color_buffer` as an image file to generate the thumbnail [S1].
+
+**Pseudocode**
+> **Unverified code.** The code below did not pass a test run against a reference implementation, or no test fits it, so it may contain errors.
+
+```python
+import numpy as np
+from numba import njit
+
+@njit
+def compute_gaussian_weight(x, y, mu_x, mu_y, sigma):
+    dist_sq = (x - mu_x)**2 + (y - mu_y)**2
+    exponent = -0.5 * (dist_sq / (sigma**2))
+    return np.exp(exponent)
+
+@njit
+def render_thumbnail(gaussians, width, height, sigma_scale_factor=0.45):
+    color_buffer = np.zeros((height, width, 3), dtype=np.float32)
+    depth_buffer = np.full((height, width), np.inf, dtype=np.float32)
+    sorted_gaussians = sorted(gaussians, key=lambda g: g[2], reverse=True)
+    for g in sorted_gaussians:
+        gx, gy, gz, sigma, r, g_ch, b = g
+        # Project 3D to 2D screen coordinates [G]
+        fx, fy, cx, cy = 1.0, 1.0, width / 2.0, height / 2.0
+        sx = fx * (gx / gz) + cx
+        sy = fy * (gy / gz) + cy
+        radius = sigma * sigma_scale_factor
+        min_x = max(0, int(sx - radius))
+        max_x = min(width - 1, int(sx + radius))
+        min_y = max(0, int(sy - radius))
+        max_y = min(height - 1, int(sy + radius))
+        for y in range(min_y, max_y + 1):
+            for x in range(min_x, max_x + 1):
+                weight = compute_gaussian_weight(x, y, sx, sy, radius)
+                current_depth = depth_buffer[y, x]
+                if gz < current_depth:
+                    depth_buffer[y, x] = gz
+                    alpha = weight
+                    color_buffer[y, x, 0] = color_buffer[y, x, 0] * (1 - alpha) + r * alpha
+                    color_buffer[y, x, 1] = color_buffer[y, x, 1] * (1 - alpha) + g_ch * alpha
+                    color_buffer[y, x, 2] = color_buffer[y, x, 2] * (1 - alpha) + b * alpha
+    return color_buffer
+```
+
+**Edge Cases and Pitfalls**
+*   **Rotation Omission:** Ignoring rotation loses orientation fidelity, which may cause visual artifacts for elongated or rotated structures [S1].
+*   **Sphere Approximation:** Treating Gaussians as spheres simplifies the covariance matrix inversion but reduces accuracy for non-spherical primitives [S1].
+*   **Python Performance:** Without JIT, pure Python loops are prohibitively slow, taking 336 s compared to 2.33 s with JIT [S1].
+*   **Parallel Overhead:** Parallel processing was deliberately avoided to prevent caching and management overhead on systems with limited core counts [S1].
+
+## Operating characteristics
+*   **Performance:** JIT compilation reduces execution time by 156× compared to pure Python (from 336 s to 2.33 s) [S1]. A 720p thumbnail generation takes approximately 1.8 s with optimized parameters [S1].
+*   **Memory:** The method is designed to be lightweight, operating entirely in CPU memory without GPU dependency [S1].
+*   **Strengths:** High portability across devices, including resource-constrained environments like field operations or criminal investigations [S1]. No GPU required [S1].
+*   **Limitations:** Lower visual fidelity compared to high-fidelity Gaussian Splatting due to omitted rotation and spherical approximation [S1]. Limited by Python’s inherent performance ceiling even with JIT [S1].
+*   **When to Use:** Rapid previewing, field investigation, or batch visualization in constrained environments where GPU access is unavailable [S1].
+*   **When Not to Use:** High-fidelity rendering or applications requiring precise orientation and shape representation [S1].
+
+## Background
+*   **Origin:** The method was introduced by E. Genchev et al. in 2025 [S1].
+*   **History:** The concept of "Sphere Splatting" is inspired by "Particle Splatting" explored by Adams and Lenaert [10], which proposed using spheres to efficiently visualize particle-based simulation data [S1].
+*   **Context:** It addresses the computational demands of 3D Gaussian Splatting on CPU-based systems, aiming to make the technique viable for rapid visualization without dedicated graphics acceleration [S1].
+
+## Sources
+[S1] Utilizing JIT Python runtime and parameter optimization for CPU-based Gaussian Splatting thumbnailer, https://zenodo.org/records/19676358, fetched 2026-10-26

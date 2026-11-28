@@ -1,0 +1,191 @@
+--- v025.md
++++ v026.md
+@@ -4,42 +4,45 @@
+ 
+ ## Overview
+-Frequency Regularization (FR) is a training-time constraint for 3D Gaussian Splatting that minimizes the discrepancy between the frequency spectrum of rendered images and ground truth to alleviate over-reconstruction and improve Gaussian densification [S2]. Unlike naive pixel-wise L1 loss, which fails to provide sufficient gradient signal in over-reconstructed regions, FR explicitly disentangles frequency components (amplitude and phase) to push Gaussians toward high-frequency regions where detail is missing [S2][S3, unofficial]. It sets itself apart from geometric constraints (like depth or normal regularization) by operating in the 2D image domain, targeting spectral errors rather than 3D structural consistency [S2].
++Frequency Regularization (FR) is a training-time constraint for 3D Gaussian Splatting that minimizes the discrepancy between the frequency spectrum of rendered images and ground truth images to alleviate over-reconstruction and improve Gaussian densification [S2]. Unlike naive pixel-wise L1 loss, which fails to distinguish between well-reconstructed regions and over-reconstructed noise, FR explicitly disentangles frequency components to push Gaussians toward high-frequency regions where detail is missing [S2][S3, unofficial]. This method addresses the problem that photometric loss alone is insufficient to distinguish valid surface geometry from noise, leading to overfitting in empty space [S2][S3, unofficial].
+ 
+ ## How it works
+ **Inputs and Outputs:**
+-- **Inputs:** Rendered image $\hat{I} \in \mathbb{R}^{H \times W \times C}$, Ground truth image $I \in \mathbb{R}^{H \times W \times C}$, and the current 3D Gaussian parameters (position, scale, rotation, opacity, spherical harmonics coefficients).
+-- **Outputs:** A scalar regularization loss $\mathcal{L}_{FR}$ used to update Gaussian parameters via backpropagation.
++*   **Inputs:** Rendered image $\hat{I} \in \mathbb{R}^{H \times W \times C}$, Ground truth image $I \in \mathbb{R}^{H \times W \times C}$, where $H$ and $W$ are height and width.
++*   **Outputs:** Regularization loss terms $\mathcal{L}_{FR}$ (amplitude and phase discrepancies) added to the total loss.
+ 
+ **Data Structures:**
+-- The method operates on standard image tensors. No auxiliary 3D data structures are required beyond those used for standard 3D Gaussian Splatting rasterization.
+-- Intermediate frequency representations are stored as complex-valued tensors of size $H \times W \times C$.
++*   Complex frequency values $F(u, v)$ and $\hat{F}(u, v)$ stored as real and imaginary components.
++*   Amplitude $|F(u, v)|$ and Phase $\angle F(u, v)$ derived from the complex spectrum.
+ 
+-**Algorithm Steps:**
+-1. **Render:** Project 3D Gaussians to 2D and render the image $\hat{I}$ using standard alpha-blending [S2].
+-2. **Transform:** Compute the 2D Discrete Fourier Transform (DFT) for both the rendered image $\hat{I}$ and the ground truth $I$ to obtain frequency representations $\hat{F}$ and $F$ [S2].
+-3. **Decompose:** For each frequency component $(u, v)$ and channel $c$, decompose the complex frequency values into amplitude and phase [S2]:
+-   - Amplitude: $|\hat{F}(u, v, c)| = \sqrt{\text{Re}(\hat{F}(u, v, c))^2 + \text{Im}(\hat{F}(u, v, c))^2}$
+-   - Phase: $\angle \hat{F}(u, v, c) = \arctan\left(\frac{\text{Im}(\hat{F}(u, v, c))}{\text{Re}(\hat{F}(u, v, c))}\right)$
+-   - Repeat for ground truth $F(u, v, c)$ to get $|F(u, v, c)|$ and $\angle F(u, v, c)$.
+-4. **Compute Discrepancies:** Calculate the total amplitude discrepancy $d_a$ and total phase discrepancy $d_p$ using the Euclidean metric over all pixels and frequencies [S2]:
+-   $$ d_a = \sqrt{\frac{1}{HW} \sum_{x=0}^{H-1} \sum_{y=0}^{W-1} \left( |F(u, v)| - |\hat{F}(u, v)| \right)^2 } $$
+-   $$ d_p = \sqrt{\frac{1}{HW} \sum_{x=0}^{H-1} \sum_{y=0}^{W-1} \left( \angle F(u, v) - \angle \hat{F}(u, v) \right)^2 } $$
+-   *Note: The summation indices in the source [S2] use $(x,y)$ for spatial coordinates but the formula sums over frequency components $(u,v)$ implicitly or explicitly depending on interpretation. The standard interpretation of spectral loss sums over the frequency domain indices. The source formula (5) and (6) in [S2] explicitly sum over $x,y$ but compare $F(u,v)$ which suggests a potential notation mix-up in the source text where spatial and frequency indices are conflated, or it implies a specific frequency band selection. However, standard spectral loss sums over frequency bins. Given the source text explicitly writes $\sum_{x=0}^{H-1} \sum_{y=0}^{W-1}$ inside the square root for $d_a$ and $d_p$ while comparing $F(u,v)$, this is likely a typo in the source paper where the summation should be over frequency coordinates $(u,v)$ or the indices $x,y$ are used as dummy variables for the frequency grid. We follow the standard definition of spectral distance which aggregates over the frequency domain. If strictly following the source's visual layout, the summation is over the image dimensions, but the terms inside are frequency values. This is physically inconsistent unless $u,v$ are fixed or the sum is over frequency. We assume the standard spectral loss definition: sum over frequency bins $(u,v)$.*
+-   *Correction based on strict source adherence:* The source [S2] Eq (5) and (6) show summation over $x,y$ but the terms are $F(u,v)$. This is a known notation error in the FreGS paper where the authors likely meant to sum over frequency coordinates $(u,v)$ or use spatial coordinates for a spatial-domain loss. However, the text states "minimizing the discrepancy between the frequency spectrum". We implement the sum over frequency coordinates $(u,v)$ as this is the only mathematically valid interpretation of "frequency discrepancy".
+-5. **Combine:** The total frequency regularization loss is typically a weighted sum of amplitude and phase discrepancies:
+-   $$ \mathcal{L}_{FR} = \lambda_a d_a + \lambda_p d_p $$
+-   where $\lambda_a$ and $\lambda_p$ are weighting factors.
+-6. **Optimize:** Update Gaussian parameters using an optimizer (e.g., Adam) to minimize $\mathcal{L}_{FR}$ [S2].
++**Steps:**
++1.  **Fourier Transform:** Convert the rendered image $\hat{I}$ and ground truth image $I$ into the frequency domain using the 2D Discrete Fourier Transform (DFT) [S2].
++2.  **Compute Amplitude and Phase:** For each frequency coordinate $(u, v)$, calculate the amplitude and phase for both the rendered and ground truth spectra [S2].
++3.  **Calculate Discrepancies:** Compute the Euclidean distance between the amplitudes and the phases of the ground truth and rendered images [S2].
++4.  **Aggregate Loss:** Sum the amplitude and phase discrepancies to form the frequency regularization term [S2].
++
++**Formulas:**
++The 2D Discrete Fourier Transform is defined as [S2]:
++$$ F(u, v) = \sum_{x=0}^{H-1} \sum_{y=0}^{W-1} I(x, y) \cdot e^{-i2\pi(\frac{u}{H}x + \frac{v}{W}y)} $$
++where $(x, y)$ are image coordinates, $(u, v)$ are frequency coordinates, $I(x, y)$ is the pixel value, and $F(u, v)$ is the complex frequency value.
++
++The amplitude and phase of a frequency component $F(u, v)$ are calculated as [S2]:
++$$ |F(u, v)| = \sqrt{\text{Re}(u, v)^2 + \text{Im}(u, v)^2} $$
++$$ \angle F(u, v) = \arctan\left(\frac{\text{Im}(u, v)}{\text{Re}(u, v)}\right) $$
++where $\text{Re}(u, v)$ and $\text{Im}(u, v)$ are the real and imaginary components of $F(u, v)$, respectively.
++
++The total amplitude discrepancy $d_a$ and total phase discrepancy $d_p$ are computed as [S2]:
++$$ d_a = \sqrt{\frac{1}{HW} \sum_{x=0}^{H-1} \sum_{y=0}^{W-1} (|F(u, v)| - |\hat{F}(u, v)|)^2} $$
++$$ d_p = \sqrt{\frac{1}{HW} \sum_{x=0}^{H-1} \sum_{y=0}^{W-1} (\angle F(u, v) - \angle \hat{F}(u, v))^2} $$
++where $F$ and $\hat{F}$ denote the ground truth and rendered frequency values, respectively.
+ 
+ **Parameters:**
+-- **Optimizer:** Adam [S2].
+-- **Framework:** PyTorch [S2].
+-- **Rasterization:** Custom CUDA kernels from 3D-GS [S2].
+-- **Weighting:** Not given in the sources.
++*   **Optimizer:** Adam optimizer [S2].
++*   **Framework:** PyTorch [S2].
++*   **Rasterization:** Custom CUDA kernels from 3D-GS are retained [S2].
++*   **Typical Values:** Not given in the sources.
+ 
+ **Edge Cases and Pitfalls:**
+-- **Over-reconstruction:** L1 loss fails to differentiate over-reconstructed regions from well-reconstructed ones, leading to redundant Gaussians. FR increases pixel gradients in over-reconstructed regions, enabling adaptive densification [S2].
+-- **Frequency Annealing:** Naively applying FR can bias splatting towards undesirable artifacts. Progressive frequency regularization (annealing) is used to gradually leverage low-to-high frequencies for coarse-to-fine densification [S2]. This involves incorporating a low-pass filter $H_l$ and dynamic high-pass filter $H_h$ in Fourier space [S2].
+-- **Precision:** Complex number arithmetic in DFT requires careful handling of numerical stability, especially for high-frequency components with low amplitude.
++*   **Over-reconstruction:** Naive adoption of amplitude and phase discrepancies without distinguishing between low and high frequencies can bias the optimization towards undesirable artifacts and restrict Gaussian densification [S2].
++*   **Gradient Vanishing:** In over-reconstructed regions, pixel-wise L1 loss results in small gradients, preventing densification. FR increases these gradients, revealing over-reconstruction regions [S2].
+ 
+ **Pseudocode:**
+@@ -48,14 +51,14 @@
+ import torch.fft
+ 
+-def frequency_regularization_loss(rendered_image: torch.Tensor, ground_truth: torch.Tensor) -> torch.Tensor:
++def compute_frequency_regularization(rendered_image: torch.Tensor, ground_truth: torch.Tensor) -> torch.Tensor:
+     """
+     Computes the frequency regularization loss based on amplitude and phase discrepancies.
+     
+     Args:
+-        rendered_image: Tensor of shape (H, W, C) or (B, H, W, C).
+-        ground_truth: Tensor of shape (H, W, C) or (B, H, W, C).
++        rendered_image: Tensor of shape (H, W, C) representing the rendered image.
++        ground_truth: Tensor of shape (H, W, C) representing the ground truth image.
+         
+     Returns:
+-        Scalar loss tensor.
++        Scalar tensor representing the total frequency regularization loss.
+     """
+     # Ensure inputs are float32 for FFT stability
+@@ -63,40 +66,40 @@
+     ground_truth = ground_truth.float()
+     
+-    # Compute 2D FFT. Shift zero frequency to center is not strictly necessary for magnitude/phase diff
+-    # but standard practice. We compute FFT directly.
+-    # torch.fft.fft2 expects complex input or returns complex.
+-    # Input is real, so we use fft2.
++    # Move to CPU if necessary for FFT, or use torch.fft on GPU if supported
++    # Note: torch.fft.fft2 works on GPU tensors in PyTorch
++    H, W, C = rendered_image.shape
+     
+-    # Shape: (H, W, C) -> FFT along H, W
+-    # If batched, handle accordingly. Assuming single image for simplicity.
++    # Compute 2D FFT for each channel
++    # F(u, v) shape: (H, W, C)
++    F_gt = torch.fft.fft2(ground_truth, dim=(0, 1))
++    F_rendered = torch.fft.fft2(rendered_image, dim=(0, 1))
+     
+-    F_rendered = torch.fft.fft2(rendered_image) # Complex tensor (H, W, C)
+-    F_gt = torch.fft.fft2(ground_truth)         # Complex tensor (H, W, C)
++    # Compute Amplitude and Phase
++    # Amplitude: |F(u, v)|
++    amp_gt = torch.abs(F_gt)
++    amp_rendered = torch.abs(F_rendered)
+     
+-    # Compute Amplitude
+-    amp_rendered = torch.abs(F_rendered)
+-    amp_gt = torch.abs(F_gt)
+-    
+-    # Compute Phase
++    # Phase: angle(F(u, v))
++    phase_gt = torch.angle(F_gt)
+     phase_rendered = torch.angle(F_rendered)
+-    phase_gt = torch.angle(F_gt)
+     
+     # Compute Discrepancies
+-    # Note: Source [S2] sums over x,y but compares F(u,v). 
+-    # Standard spectral loss sums over frequency bins (u,v).
+-    # We sum over the spatial dimensions of the frequency domain (which are H, W).
++    # d_a: Root Mean Square Error of Amplitudes
++    # d_p: Root Mean Square Error of Phases
++    # Note: The source formula uses sum over x,y divided by HW, then sqrt.
++    # This is equivalent to RMSE.
+     
+-    # Mean Squared Error for Amplitude
+-    # Source Eq 5: sqrt( 1/HW sum ( |F| - |F_hat| )^2 )
+-    mse_amp = torch.mean((amp_rendered - amp_gt) ** 2)
++    # Calculate Mean Squared Error for Amplitude
++    mse_amp = torch.mean((amp_gt - amp_rendered) ** 2)
+     d_a = torch.sqrt(mse_amp)
+     
+-    # Mean Squared Error for Phase
+-    # Source Eq 6: sqrt( 1/HW sum ( angle(F) - angle(F_hat) )^2 )
+-    mse_phase = torch.mean((phase_rendered - phase_gt) ** 2)
++    # Calculate Mean Squared Error for Phase
++    mse_phase = torch.mean((phase_gt - phase_rendered) ** 2)
+     d_p = torch.sqrt(mse_phase)
+     
+-    # Combine loss
+-    # Weights are not specified in sources. Using equal weights as default.
++    # Total Loss (sum of discrepancies)
++    # The source defines d_a and d_p as the discrepancies. 
++    # The total loss is typically a weighted sum. 
++    # Here we return the sum of the two discrepancies as the core FR term.
+     loss = d_a + d_p
+     
+@@ -106,16 +109,22 @@
+ ## Subtopics
+ 
++### [Scale Regularization](9855-scale-regularization.md)
++Scale regularization is a training-time constraint used in 3D Gaussian Splatting to prevent the formation of excessively large Gaussians, which can degrade rendering quality, cause aliasing artifacts, and destabilize optimization. It specifically addresses issues arising from unconstrained Gaussian scale growth by penalizing scales that exceed a predefined maximum or geometric resolution threshold. Unlike general isotropic regularization which merely encourages equal scaling in all directions, this method ties the scale limit directly to the geometric resolution of the underlying mesh or the maximum sampling frequency of the scene.
++
+ ### DWTGS
+-DWTGS is a variant designed for sparse-view 3D Gaussian Splatting. It rethinks frequency regularization by applying a Discrete Wavelet Transform (DWT) on the rendered image instead of a Fourier Transform. It penalizes the loss in the wavelet domain to encourage sharper edges [S4, unofficial].
++DWTGS is a method that rethinks frequency regularization for sparse-view 3DGS by applying a discrete wavelet transform on the rendered image and penalizing the loss in the wavelet domain to encourage sharper edges [S4, unofficial].
+ 
+ ## Operating characteristics
+-- **Time Complexity:** The DFT operation is $O(HW \log(HW))$ per channel. This adds overhead to each training iteration compared to standard L1 loss.
+-- **Memory Complexity:** Requires storing complex frequency representations of size $H \times W \times C$, doubling the memory for image buffers during the loss computation step.
+-- **Performance:** FR significantly increases pixel gradients in over-reconstructed regions, leading to better Gaussian densification and reduced floaters compared to L1 loss alone [S2].
+-- **Strengths:** Effectively addresses over-reconstruction and improves high-frequency detail recovery.
+-- **Limitations:** Naive application can cause artifacts; requires careful annealing (progressive frequency regularization) to avoid biasing the optimization [S2].
++*   **Time Complexity:** The addition of FFT operations increases computational overhead per iteration compared to standard L1 loss. The complexity is dominated by the 2D FFT, which is $O(HW \log(HW))$ per channel.
++*   **Memory Complexity:** Requires storing the frequency domain representations of the rendered and ground truth images, adding $O(HW \cdot C)$ memory overhead per iteration.
++*   **Measured Performance:** In the "Bicycle" scene, FR significantly increased pixel gradients within over-reconstruction regions compared to the baseline method without FR [S2].
++*   **Scaling:** The method is effective for adaptive densification, allowing Gaussians to be created in regions where high-frequency details are missing [S2].
++*   **Strengths:** Effectively distinguishes over-reconstructed regions from well-reconstructed ones, enabling better Gaussian densification [S2].
++*   **Limitations:** Naive application without frequency annealing can lead to restricted densification and artifacts [S2].
++*   **When to use:** When over-reconstruction and noise are prevalent during training, or when standard densification fails to capture high-frequency details.
++*   **When not to use:** When computational resources are severely constrained, or when the scene is low-frequency and simple L1 loss suffices.
+ 
+ ## Background
+-Frequency Regularization was introduced in the context of 3D Gaussian Splatting optimization to address the limitations of spatial-domain losses. It is primarily associated with the FreGS method [S2]. The technique leverages the fact that amplitude and phase in the frequency domain capture different aspects of image structure, allowing for more robust supervision than pixel-wise differences. It is part of a broader trend of using spectral constraints to improve the geometric fidelity of neural rendering methods [S1][S3, unofficial].
++Frequency Regularization was introduced to address the limitations of pixel-wise L1 loss in 3D Gaussian Splatting optimization. The raw optimization method can lead to over-reconstruction in some regions while underrepresenting others, resulting in blur and visual inconsistencies [S1]. The method was detailed in the paper "FreGS: 3D Gaussian Splatting with Progressive Frequency Regularization" [S2]. It is part of a broader set of improvements including geometry-aware approaches and optimization procedure enhancements [S1].
+ 
+ ## Sources

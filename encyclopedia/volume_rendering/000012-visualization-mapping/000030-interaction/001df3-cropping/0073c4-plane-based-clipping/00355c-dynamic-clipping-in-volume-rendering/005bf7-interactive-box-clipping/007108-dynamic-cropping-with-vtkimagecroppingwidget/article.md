@@ -1,0 +1,185 @@
+# Dynamic Cropping with vtkImageCroppingWidget
+
+Also called: Volume Cropping with Clipping Planes, vtkImageCroppingWidget Cropping
+
+## Overview
+A technique to dynamically clip volume rendering data using a widget that defines cropping planes, which are converted to `vtkPlane` objects and added to the volume mapper [S1, S2, unofficial]. It differs from [Interactive Box Clipping](17032-interactive-box-clipping.md) by using `vtkImageCroppingWidget` to define an axis-aligned bounding box in index space, which is then explicitly converted to world-space clipping planes for the volume mapper [S2, unofficial].
+
+## How it works
+**Inputs and Outputs:**
+- Input: Volume image data (with index-to-world transformation), widget state defining an axis-aligned bounding box in index space ($i_{min}, i_{max}, j_{min}, j_{max}, k_{min}, k_{max}$).
+- Output: A volume mapper configured with six world-space clipping planes that restrict the ray casting to the defined box.
+
+**Data Structures:**
+- `vtkImageCroppingWidget`: Manages the interactive box. It exposes the current crop bounds in index space.
+- `vtkPlane`: Defined by a normal vector $\mathbf{n}$ and an origin point $\mathbf{o}$. The plane equation is $\mathbf{n} \cdot (\mathbf{x} - \mathbf{o}) = 0$.
+- `vtkVolumeMapper`: Holds a list of clipping planes.
+
+**Steps:**
+1. **Initialize Widget:** Instantiate `vtkImageCroppingWidget` and set the renderer via `vtkWidgetManager` [S1, unofficial].
+2. **Set Data Description:** Copy the image data description (specifically the index-to-world transformation matrix) to the cropping widget [S1, unofficial].
+3. **Configure Volume Properties:** Set up the volume mapper's transfer functions and lighting. Typical parameters include:
+   - `sampleDistance`: 1.1 [S2, unofficial].
+   - `scalarOpacityUnitDistance`: 3.0 [S2, unofficial].
+   - `gradientOpacityMinimumValue`: 2 [S2, unofficial].
+   - `gradientOpacityMaximumValue`: 20 [S2, unofficial].
+   - `ambient`: 0.2 [S2, unofficial].
+   - `diffuse`: 0.7 [S2, unofficial].
+   - `specular`: 0.3 [S2, unofficial].
+   - `specularPower`: 8.0 [S2, unofficial] [G: These values are typical for medical volume rendering to balance performance and visual quality].
+4. **Listen for Modifications:** Attach a listener to the widget's modification state [S1, unofficial].
+5. **Retrieve and Convert Planes:**
+   - On modification, retrieve the cropping planes from the widget state in index space [S1, S2, unofficial].
+   - Extract the rotation component from the image data's index-to-world transformation matrix [S1, unofficial].
+   - Convert the index-space bounds to world-space origins and normals:
+     - Calculate world-space origin $\mathbf{o}_{min}$ and corner $\mathbf{o}_{max}$ using the index-to-world transformation:
+       $$ \mathbf{o}_{min} = T_{index \to world}([i_{min}, j_{min}, k_{min}, 1]) $$
+       $$ \mathbf{o}_{max} = T_{index \to world}([i_{max}, j_{max}, k_{max}, 1]) $$
+     - Rotate the axis-aligned normals using the rotation component $R$ of $T_{index \to world}$:
+       $$ \mathbf{n}_{+x} = R \cdot [1, 0, 0]^T, \quad \mathbf{n}_{-x} = R \cdot [-1, 0, 0]^T $$
+       $$ \mathbf{n}_{+y} = R \cdot [0, 1, 0]^T, \quad \mathbf{n}_{-y} = R \cdot [0, -1, 0]^T $$
+       $$ \mathbf{n}_{+z} = R \cdot [0, 0, 1]^T, \quad \mathbf{n}_{-z} = R \cdot [0, 0, -1]^T $$
+     - Construct six `vtkPlane` objects:
+       - $+x$ plane: normal $\mathbf{n}_{+x}$, origin $\mathbf{o}_{min}$
+       - $-x$ plane: normal $\mathbf{n}_{-x}$, origin $\mathbf{o}_{max}$
+       - $+y$ plane: normal $\mathbf{n}_{+y}$, origin $\mathbf{o}_{min}$
+       - $-y$ plane: normal $\mathbf{n}_{-y}$, origin $\mathbf{o}_{max}$
+       - $+z$ plane: normal $\mathbf{n}_{+z}$, origin $\mathbf{o}_{min}$
+       - $-z$ plane: normal $\mathbf{n}_{-z}$, origin $\mathbf{o}_{max}$
+6. **Update Mapper:**
+   - Clear all existing clipping planes from the volume mapper [S1, S2, unofficial].
+   - Iterate through the new world-space planes and add each to the mapper [S1, unofficial].
+   - Trigger a render update [S1, unofficial].
+
+**Pseudocode:**
+> **Unverified code.** The code below did not pass a test run against a reference implementation, or no test fits it, so it may contain errors.
+
+```python
+def setup_dynamic_cropping(volume_mapper, image_data, renderer):
+    """
+    Sets up the vtkImageCroppingWidget and connects it to the volume mapper.
+    """
+    # Step 1: Instantiate widget and set renderer
+    widget = vtkImageCroppingWidget()
+    widget.SetRenderer(renderer)
+    
+    # Step 2: Copy image data description to widget
+    # This ensures the widget knows the index-to-world transformation
+    widget.SetInputData(image_data)
+    
+    # Step 3: Configure volume properties (example values from [S2, unofficial])
+    volume_properties = volume_mapper.GetVolumeProperty()
+    volume_properties.SetSampleDistance(1.1)
+    volume_properties.SetScalarOpacityUnitDistance(3.0)
+    volume_properties.SetGradientOpacityMinimumValue(2)
+    volume_properties.SetGradientOpacityMaximumValue(20)
+    volume_properties.SetAmbient(0.2)
+    volume_properties.SetDiffuse(0.7)
+    volume_properties.SetSpecular(0.3)
+    volume_properties.SetSpecularPower(8.0)
+    
+    # Step 4: Define the callback for widget modification
+    def on_widget_modified(obj, event):
+        # Step 5: Retrieve cropping planes from widget state
+        # Get the bounding box in index space: [iMin, iMax, jMin, jMax, kMin, kMax]
+        ijk_bounds = widget.GetBounds()
+        i_min, i_max, j_min, j_max, k_min, k_max = ijk_bounds
+        
+        # Get the index-to-world transformation matrix
+        index_to_world_matrix = image_data.GetIndexToWorldTransform().GetMatrix()
+        
+        # Extract rotation matrix (3x3) from the 4x4 transformation matrix
+        rotation_matrix = [
+            [index_to_world_matrix.GetElement(0, 0), index_to_world_matrix.GetElement(0, 1), index_to_world_matrix.GetElement(0, 2)],
+            [index_to_world_matrix.GetElement(1, 0), index_to_world_matrix.GetElement(1, 1), index_to_world_matrix.GetElement(1, 2)],
+            [index_to_world_matrix.GetElement(2, 0), index_to_world_matrix.GetElement(2, 1), index_to_world_matrix.GetElement(2, 2)]
+        ]
+        
+        # Helper to rotate a vector
+        def rotate_vec(vec):
+            return [
+                rotation_matrix[0][0]*vec[0] + rotation_matrix[0][1]*vec[1] + rotation_matrix[0][2]*vec[2],
+                rotation_matrix[1][0]*vec[0] + rotation_matrix[1][1]*vec[1] + rotation_matrix[1][2]*vec[2],
+                rotation_matrix[2][0]*vec[0] + rotation_matrix[2][1]*vec[1] + rotation_matrix[2][2]*vec[2]
+            ]
+        
+        # Convert index-space min and max corners to world space
+        origin = [
+            index_to_world_matrix.GetElement(0, 0)*i_min + index_to_world_matrix.GetElement(0, 1)*j_min + index_to_world_matrix.GetElement(0, 2)*k_min + index_to_world_matrix.GetElement(0, 3),
+            index_to_world_matrix.GetElement(1, 0)*i_min + index_to_world_matrix.GetElement(1, 1)*j_min + index_to_world_matrix.GetElement(1, 2)*k_min + index_to_world_matrix.GetElement(1, 3),
+            index_to_world_matrix.GetElement(2, 0)*i_min + index_to_world_matrix.GetElement(2, 1)*j_min + index_to_world_matrix.GetElement(2, 2)*k_min + index_to_world_matrix.GetElement(2, 3)
+        ]
+        corner = [
+            index_to_world_matrix.GetElement(0, 0)*i_max + index_to_world_matrix.GetElement(0, 1)*j_max + index_to_world_matrix.GetElement(0, 2)*k_max + index_to_world_matrix.GetElement(0, 3),
+            index_to_world_matrix.GetElement(1, 0)*i_max + index_to_world_matrix.GetElement(1, 1)*j_max + index_to_world_matrix.GetElement(1, 2)*k_max + index_to_world_matrix.GetElement(1, 3),
+            index_to_world_matrix.GetElement(2, 0)*i_max + index_to_world_matrix.GetElement(2, 1)*j_max + index_to_world_matrix.GetElement(2, 2)*k_max + index_to_world_matrix.GetElement(2, 3)
+        ]
+        
+        # Create world-space clipping planes
+        # Normal vectors for axes
+        n_x = rotate_vec([1, 0, 0])
+        n_neg_x = rotate_vec([-1, 0, 0])
+        n_y = rotate_vec([0, 1, 0])
+        n_neg_y = rotate_vec([0, -1, 0])
+        n_z = rotate_vec([0, 0, 1])
+        n_neg_z = rotate_vec([0, 0, -1])
+        
+        planes = [
+            vtkPlane(normal=n_x, origin=origin),
+            vtkPlane(normal=n_neg_x, origin=corner),
+            vtkPlane(normal=n_y, origin=origin),
+            vtkPlane(normal=n_neg_y, origin=corner),
+            vtkPlane(normal=n_z, origin=origin),
+            vtkPlane(normal=n_neg_z, origin=corner)
+        ]
+        
+        # Step 6: Update mapper
+        # Clear existing clipping planes
+        volume_mapper.RemoveAllClippingPlanes()
+        
+        # Add new planes
+        for plane in planes:
+            volume_mapper.AddClippingPlane(plane)
+            
+        # Trigger render
+        renderer.GetRenderWindow().Render()
+
+    # Observe widget modifications
+    widget.AddObserver("InteractionEvent", on_widget_modified)
+    widget.AddObserver("EndInteractionEvent", on_widget_modified)
+    
+    # Enable the widget
+    widget.On()
+    
+    return widget
+```
+
+**Edge Cases and Pitfalls:**
+- **Precision:** Ensure the index-to-world transformation is correctly retrieved and applied. Errors in the transformation matrix will result in incorrect clipping planes [S1, S2, unofficial].
+- **Boundaries:** The widget defines an axis-aligned box in index space. If the volume data has non-uniform spacing or rotation, the conversion to world space must account for the full transformation, not just scaling [S2, unofficial].
+- **Degenerate Input:** If the widget bounds are invalid (e.g., min > max), the clipping planes may be malformed. Guard against this by validating bounds before creating planes [G].
+
+## Subtopics
+
+### Axis-Aligned Cropping
+The widget defines an axis-aligned bounding box in index space. This is simpler to implement but may not align with the viewer's perspective for non-axis-aligned volumes. Choose when performance is critical and the volume is axis-aligned. Link: [Axis-Aligned Cropping](link-to-subtopic-if-exists).
+
+### Perspective Cropping
+Not directly supported by `vtkImageCroppingWidget` in its basic form. For perspective-aligned clipping, consider [Interactive Box Clipping](17032-interactive-box-clipping.md) which uses `vtkBoxWidget` and updates clipping planes dynamically based on camera view. Link: [Interactive Box Clipping](17032-interactive-box-clipping.md).
+
+## Operating characteristics
+- **Time Complexity:** $O(1)$ per frame for plane conversion and update, assuming a fixed number of planes (6). The cost is dominated by the volume rendering itself, which is reduced by the cropped region.
+- **Memory Complexity:** $O(1)$ additional memory for storing the clipping planes.
+- **Measured Performance:** Not given in the sources.
+- **Scaling:** Performance scales with the size of the cropped volume. Smaller crops result in faster rendering.
+- **Strengths:** Simple to implement, integrates well with VTK's widget system, provides immediate visual feedback.
+- **Limitations:** Only supports axis-aligned cropping in index space. Conversion to world space is required for non-axis-aligned volumes.
+- **When to Use:** When interactive, axis-aligned cropping is sufficient and performance is a concern.
+- **When Not to Use:** When perspective-aligned or arbitrary-shaped cropping is required.
+
+## Background
+The method originates from VTK's `vtkImageCroppingWidget`, which is part of the VTK interaction widgets library. It is commonly used in medical visualization applications to allow users to quickly inspect internal structures of volumetric data by cropping out irrelevant regions [S1, S2, unofficial]. The technique is particularly useful in DICOM viewers and medical imaging software where rapid exploration of large datasets is necessary.
+
+## Sources
+[S1] tarksalah1/Medical-Visualization-Using-VTK, https://github.com/tarksalah1/Medical-Visualization-Using-VTK, fetched 2026-10-27 (unofficial)
+[S2] abbas695/DICOM-image-viewer, https://github.com/abbas695/DICOM-image-viewer, fetched 2026-10-27 (unofficial)

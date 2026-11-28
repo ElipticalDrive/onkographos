@@ -1,0 +1,214 @@
+--- v001.md
++++ v002.md
+@@ -4,85 +4,44 @@
+ 
+ ## Overview
+-Adaptive Ray Marching with Macrocell DDA is a ray traversal technique that accelerates volume rendering by combining a 3D Digital Differential Analyzer (DDA) for coarse macrocell traversal with adaptive step sizing based on opacity upper bounds. It solves the problem of inefficient sampling in sparse or low-opacity regions by skipping empty macrocells entirely and reducing sample counts in low-opacity ones. Unlike its parent [Ray Marcher with Macrocell Empty Space Skipping](1009-ray-marcher-with-macrocell-empty-space-skipping.md), which primarily focuses on binary empty-space skipping, this method introduces granularity by adapting the step size within non-empty cells. It differs from [Triangulated Active Brick Boundary Mesh for Space Skipping](1426-triangulated-active-brick-boundary-mesh-for-space-skipping.md) by using a regular grid structure rather than a mesh, offering simpler implementation and better cache coherence on GPUs.
++Adaptive Ray Marching with Macrocell DDA is a ray marching algorithm that uses a 3D Digital Differential Analyzer (DDA) to traverse macrocells of a volume [S1, unofficial]. It adapts the sampling step size based on an opacity upper bound estimate for the current macrocell to skip empty or low-opacity regions [S1, unofficial]. It solves the problem of inefficient sampling in sparse or low-opacity regions by skipping empty macrocells entirely and reducing sample counts in low-opacity ones [S1, unofficial]. Unlike its parent [Ray Marcher with Macrocell Empty Space Skipping](1009-ray-marcher-with-macrocell-empty-space-skipping.md), which primarily focuses on binary empty-space skipping, this method introduces granularity by adapting the step size within non-empty cells [S1, unofficial]. It differs from [Triangulated Active Brick Boundary Mesh for Space Skipping](1426-triangulated-active-brick-boundary-mesh-for-space-skipping.md) by using a regular grid structure rather than a mesh [S2].
+ 
+ ## How it works
+-The method traverses a volume using a hierarchical approach: a coarse macrocell grid guides the ray, and within each active macrocell, samples are taken at adaptive intervals.
++The method traverses a volume using a hierarchical approach: a coarse macrocell grid guides the ray, and within each active macrocell, samples are taken at adaptive intervals [S1, unofficial].
+ 
+ ### Inputs and Outputs
+-*   **Input**: Ray origin $\mathbf{o}$, ray direction $\mathbf{d}$, near plane $t_{min}$, far plane $t_{max}$.
+-*   **Input**: Volume data structure containing macrocell metadata (dimensions, spacing reciprocals, opacity upper bounds).
+-*   **Output**: Accumulated color and opacity for the ray.
++*   **Input**: Ray origin $\mathbf{o}$, ray direction $\mathbf{d}$, near plane $t_{min}$, far plane $t_{max}$ [S1, unofficial].
++*   **Input**: Volume data structure containing macrocell metadata (dimensions, spacing reciprocals, opacity upper bounds) [S1, unofficial].
++*   **Output**: Accumulated color and opacity for the ray [S1, unofficial].
+ 
+ ### Data Structures
+ The core data structure is the `DeviceVolume` (or equivalent), which must contain:
+-*   `macrocell_dims`: A 3D vector (e.g., `int3`) representing the number of macrocells in x, y, and z dimensions.
+-*   `macrocell_spacings_rcp`: A 3D vector (e.g., `float3`) storing the reciprocal of the macrocell spacing in world units. This allows conversion from world space to macrocell index space via multiplication.
+-*   `opacity_upper_bounds`: A 3D array (or flattened 1D array) mapping macrocell indices to a scalar value representing the maximum possible opacity contribution of that cell. This value is used to estimate if a cell is empty or to determine step size.
++*   `macrocell_dims`: A 3D vector representing the number of macrocells in x, y, and z dimensions [S1, unofficial].
++*   `macrocell_spacings_rcp`: A 3D vector storing the reciprocal of the macrocell spacing in world units, used to transform ray origin and direction into macrocell index space via multiplication [S1, unofficial].
++*   `opacity_upper_bounds`: A 3D array (or flattened 1D array) mapping macrocell indices to a scalar value representing the maximum possible opacity contribution of that cell [S1, unofficial].
+ 
+ ### Parameters
+-*   `step`: The base sampling step size in world units.
+-*   `float_epsilon`: A small constant (e.g., $10^{-6}$) used to determine if a cell is effectively empty.
+-*   `ADAPTIVE_SAMPLING`: A boolean flag or preprocessor macro. If true, adaptive logic is used; if false, fixed-step marching is used.
++*   `step`: The base sampling step size in world units [S1, unofficial].
++*   `float_epsilon`: A small constant used to determine if a cell is effectively empty [S1, unofficial].
++*   `ADAPTIVE_SAMPLING`: A preprocessor macro that enables or disables the macrocell-based adaptive sampling logic; if defined, the adaptive path is taken, otherwise fixed-step marching is used [S1, unofficial].
+ 
+ ### Algorithm Steps
+-
+-1.  **Transform Ray to Macrocell Space**:
+-    Calculate the ray origin and direction in macrocell index space.
+-    $$ \mathbf{m}_{org} = \mathbf{o} \times \text{macrocell\_spacings\_rcp} $$
+-    $$ \mathbf{m}_{dir} = \mathbf{d} \times \text{macrocell\_spacings\_rcp} $$
+-    Note: $\mathbf{m}_{dir}$ may need normalization or handling if it contains zeros to avoid division by zero in DDA.
+-
+-2.  **Initialize DDA**:
+-    Initialize a 3D DDA iterator with $\mathbf{m}_{org}$, $\mathbf{m}_{dir}$, $t_{min}$, $t_{max}$, and `macrocell_dims`. The DDA yields tuples of `(cell_index, t_enter, t_exit)` for each macrocell intersected by the ray.
+-
+-3.  **Iterate Macrocells**:
+-    For each macrocell $(cell, t_0, t_1)$ returned by the DDA:
+-    
+-    a. **Check Opacity Upper Bound**:
+-    Retrieve the opacity upper bound $r$ for the current cell.
+-    $$ r = \text{opacityUpperBound}(cell) $$
+-    
+-    b. **Skip Empty Cells**:
+-    If $|r| \le \text{float\_epsilon}$, the cell is considered empty. Skip to the next macrocell. [S1, unofficial]
+-
+-    c. **Determine Step Size**:
+-    Calculate the adaptive step size $ss$.
+-    $$ ss = \text{sample\_size\_scaler}(\text{adaptiveSamplingRate}(step, r), t_0, t_1) $$
+-    The `adaptiveSamplingRate` function typically reduces the step size as opacity $r$ increases, or keeps it constant if $r$ is low. `sample_size_scaler` ensures $ss$ fits within the macrocell bounds $[t_0, t_1]$. [S1, unofficial]
+-
+-    d. **Sample Within Macrocell**:
+-    Initialize interval $t = (t_x, t_y) = (t_0, \min(t_1, t_0 + ss))$.
+-    While $t_y > t_x$:
+-    i. Evaluate volume density and transfer function at $t_x$.
+-    ii. Accumulate color and opacity.
+-    iii. Update $t_x = t_y$.
+-    iv. Update $t_y = \min(t_x + ss, t_1)$.
+-    
+-    e. **Early Termination**:
+-    If accumulated opacity reaches 1.0 (or a threshold), terminate the ray.
+-
+-4.  **Non-Adaptive Fallback**:
+-    If `ADAPTIVE_SAMPLING` is false, skip the opacity check and adaptive step calculation. Use a fixed step size:
+-    $$ t = (t_x, t_y) = (t_{min}, \min(t_{max}, t_{min} + step)) $$
+-    Loop while $t_y > t_x$ and body returns true, updating $t_x = t_y$ and $t_y = \min(t_x + step, t_{max})$. [S1, unofficial]
++1.  **Transform Ray to Macrocell Space**: Calculate the ray origin and direction in macrocell index space: $\mathbf{m}_{org} = \mathbf{o} \times \text{macrocell\_spacings\_rcp}$ and $\mathbf{m}_{dir} = \mathbf{d} \times \text{macrocell\_spacings\_rcp}$ [S1, unofficial].
++2.  **Initialize DDA**: Initialize a 3D DDA iterator with $\mathbf{m}_{org}$, $\mathbf{m}_{dir}$, $t_{min}$, $t_{max}$, and `macrocell_dims` [S1, unofficial].
++3.  **Iterate Macrocells**: For each macrocell $(cell, t_0, t_1)$ returned by the DDA, retrieve the opacity upper bound $r = \text{opacityUpperBound}(cell)$ [S1, unofficial].
++4.  **Skip Empty Cells**: If $|r| \le \text{float\_epsilon}$, the cell is considered empty and skipped [S1, unofficial].
++5.  **Determine Step Size**: Estimate the adaptive step size: $ss = \text{sample\_size\_scaler}(\text{adaptiveSamplingRate}(step, r), t_0, t_1)$ [S1, unofficial].
++6.  **Initialize Interval**: Set $t = (t_x, t_y) = (t_0, \min(t_1, t_0 + ss))$ [S1, unofficial].
++7.  **Sample Within Macrocell**: Loop while $t_y > t_x$: evaluate volume at $t_x$, accumulate color/opacity, update $t_x = t_y$, update $t_y = \min(t_x + ss, t_1)$ [S1, unofficial].
++8.  **Non-Adaptive Fallback**: If `ADAPTIVE_SAMPLING` is false, initialize $t = (t_{min}, \min(t_{max}, t_{min} + step))$ and loop while $(t_y > t_x) \land \text{body}(t)$, updating $t_x = t_y$ and $t_y = \min(t_x + step, t_{max})$ [S1, unofficial].
+ 
+ ### Pseudocode
+-
+ ```python
+ def adaptive_ray_march_with_macrocell_dda(ray_origin, ray_direction, t_min, t_max, volume):
+-    """
+-    ray_origin: vec3
+-    ray_direction: vec3
+-    t_min: float
+-    t_max: float
+-    volume: DeviceVolume struct containing macrocell_dims, macrocell_spacings_rcp, opacity_upper_bounds
+-    """
+-    
+     # 1. Transform to macrocell space
+     m_org = ray_origin * volume.macrocell_spacings_rcp
+     m_dir = ray_direction * volume.macrocell_spacings_rcp
+     
+-    # 2. Initialize DDA
+-    # dda3 returns an iterator that yields (cell_index, t_enter, t_exit)
++    # 2. Initialize DDA iterator
++    # Yields tuples of (cell_index, t_enter, t_exit)
+     dda = dda3(m_org, m_dir, t_min, t_max, volume.macrocell_dims)
+     
+@@ -92,5 +51,4 @@
+     # 3. Traverse macrocells
+     for cell_index, t_enter, t_exit in dda:
+-        
+         # 4. Get opacity upper bound
+         r = volume.opacity_upper_bounds[cell_index]
+@@ -101,22 +59,20 @@
+             
+         # 6. Calculate adaptive step size
+-        # adaptiveSamplingRate returns a multiplier or direct step based on r
++        # [G] Standard heuristic: increases step size for lower opacity bounds
+         base_step = adaptive_sampling_rate(volume.base_step, r)
+-        
+-        # sample_size_scaler ensures step fits in [t_enter, t_exit]
++        # [G] Clamps step to fit within [t_enter, t_exit]
+         step_size = sample_size_scaler(base_step, t_enter, t_exit)
+         
+-        # 7. Sample within macrocell
++        # 7. Initialize sampling interval
+         t_curr = t_enter
+         t_next = min(t_exit, t_curr + step_size)
+         
++        # 8. Loop while interval is valid
+         while t_next > t_curr:
+-            # Evaluate volume at t_curr
++            # Evaluate volume density and transfer function at t_curr
+             density = sample_volume(volume, ray_origin + ray_direction * t_curr)
+             color, alpha = transfer_function(density)
+             
+-            # Composite
+-            # C_out = C_in + C * alpha * (1 - A_in)
+-            # A_out = A_in + alpha * (1 - A_in)
++            # Standard front-to-back volume compositing [G]
+             accumulated_color += color * alpha * (1.0 - accumulated_opacity)
+             accumulated_opacity += alpha * (1.0 - accumulated_opacity)
+@@ -125,14 +81,38 @@
+                 return accumulated_color
+                 
++            # Update interval
+             t_curr = t_next
+             t_next = min(t_curr + step_size, t_exit)
+             
+     return accumulated_color
++
++# Helper definitions
++float_epsilon = 1e-6
++
++def dda3(org, dir, t_min, t_max, dims):
++    # Standard 3D DDA traversal yielding (cell, t_enter, t_exit)
++    pass
++
++def adaptive_sampling_rate(step, r):
++    # [G] Implementation-specific rate adjustment based on opacity bound
++    return step * (1.0 + r)
++
++def sample_size_scaler(step, t_enter, t_exit):
++    # [G] Ensures step does not exceed cell exit boundary
++    return min(step, t_exit - t_enter)
++
++def sample_volume(vol, pos):
++    # [G] Trilinear interpolation or hash lookup at pos
++    pass
++
++def transfer_function(density):
++    # [G] Maps density to (color, alpha)
++    pass
+ ```
+ 
+ ### Edge Cases and Pitfalls
+-*   **Precision**: When $t_{enter}$ and $t_{exit}$ are very close, floating-point errors may cause the loop condition $t_y > t_x$ to fail prematurely or infinitely. Use a small epsilon for comparisons.
+-*   **Zero Direction Components**: If `ray_direction` has a zero component, `m_dir` will have a zero component. The DDA implementation must handle this correctly (typically by stepping only in non-zero directions or treating the cell as fully traversed in that dimension).
+-*   **Opacity Upper Bound Accuracy**: If `opacity_upper_bounds` are inaccurate (too high), adaptive sampling may not skip enough samples. If too low, empty cells might be sampled unnecessarily. [S1, unofficial]
++*   **Precision**: When $t_{enter}$ and $t_{exit}$ are very close, floating-point errors may cause the loop condition $t_y > t_x$ to fail prematurely or infinitely; a small epsilon should be used for comparisons [S1, unofficial].
++*   **Zero Direction Components**: If `ray_direction` has a zero component, `m_dir` will have a zero component, requiring the DDA implementation to handle degenerate traversal correctly [S1, unofficial].
++*   **Opacity Upper Bound Accuracy**: If `opacity_upper_bounds` are inaccurate (too high), adaptive sampling may not skip enough samples; if too low, empty cells might be sampled unnecessarily [S1, unofficial].
+ 
+ ## Subtopics
+@@ -148,19 +128,16 @@
+ 
+ ### Space Skipping with 3DDDA
+-Space Skipping with 3DDDA is a mechanism to skip empty regions in sparse volume data using a uniform grid and 3DDDA algorithm [S2]. The fragment shader traverses the macrocell grid using 3DDDA in an outer loop. If a macrocell is nonempty, it enters the volume rendering loop with peak finding tests between samples. To begin sampling, it finds the first $t$ to sample when entering a macrocell by solving for the maximum $x$ after $T_{enter}$:
+-$$ x^2/2 + bx = T_{enter} \implies x_{tenter} = \frac{-b + \sqrt{b^2 + 2aT_{enter}}}{a} $$
+-It then computes the floor values $\lfloor b x_{tenter} \rfloor$, $T(\lfloor b x_{tenter} \rfloor)$ and $\frac{\partial T}{\partial x}(\lfloor b x_{tenter} \rfloor)$, then samples and increments as in Equation 17 of the source. To avoid duplicate samples, it stores the greatest $t$ at which it already sampled, and uses the maximum of that and $T_{enter}$ [S2]. The uniform grid stores min-max values of enclosed voxels, and coarse grids (e.g., $64^3$ cells) work best on the GPU [S2].
++Space Skipping with 3DDDA is a mechanism to skip empty regions in sparse volume data using a uniform grid and 3DDDA algorithm [S2]. The fragment shader traverses the macrocell grid using 3DDDA in an outer loop [S2]. If a macrocell is nonempty, it enters the volume rendering loop with peak finding tests between samples [S2]. To begin sampling, it finds the first $t$ to sample when entering a macrocell by solving for the maximum $x$ after $T_{enter}$: $x^2/2 + bx = T_{enter} \implies x_{tenter} = \frac{-b + \sqrt{b^2 + 2aT_{enter}}}{a}$ [S2]. It then computes the floor values $\lfloor b x_{tenter} \rfloor$, $T(\lfloor b x_{tenter} \rfloor)$ and $\frac{\partial T}{\partial x}(\lfloor b x_{tenter} \rfloor)$, then samples and increments as in Equation 17 of the source [S2]. To avoid duplicate samples, it stores the greatest $t$ at which it already sampled, and uses the maximum of that and $T_{enter}$ [S2]. The uniform grid stores min-max values of enclosed voxels, and coarse grids (e.g., $64^3$ cells) work best on the GPU [S2].
+ 
+ ## Operating characteristics
+-*   **Time Complexity**: $O(N)$ where $N$ is the number of samples taken. However, the constant factor is significantly reduced by skipping empty macrocells and reducing samples in low-opacity regions.
+-*   **Memory Complexity**: $O(M)$ where $M$ is the number of macrocells. The macrocell grid is much smaller than the full volume grid.
+-*   **Performance**: Performance gains are most significant in sparse volumes or volumes with large empty regions. In dense, uniformly opaque volumes, the overhead of DDA and opacity checks may slightly reduce performance compared to fixed-step marching. [S1, unofficial]
+-*   **Strengths**: Simple to implement, efficient for sparse data, good cache coherence on GPUs due to regular grid structure. [S1, unofficial][S2]
+-*   **Limitations**: Less effective for highly heterogeneous volumes where opacity varies rapidly within macrocells. Requires precomputed opacity upper bounds. [S1, unofficial]
+-*   **When to Use**: Sparse volumes, interactive rendering, out-of-core rendering (with resumable variant). [S1, unofficial][S2]
+-*   **When Not to Use**: Dense, uniformly opaque volumes where fixed-step marching is simpler and faster. [S1, unofficial]
++*   **Time Complexity**: $O(N)$ where $N$ is the number of samples taken, with a significantly reduced constant factor by skipping empty macrocells and reducing samples in low-opacity regions [S1, unofficial].
++*   **Memory Complexity**: $O(M)$ where $M$ is the number of macrocells, as the macrocell grid is much smaller than the full volume grid [S1, unofficial].
++*   **Performance**: Performance gains are most significant in sparse volumes or volumes with large empty regions [S1, unofficial]. Fairly coarse grids (e.g., $64^3$ cells) work best on the GPU [S2].
++*   **Strengths**: Simple uniform grid structure that works well on GPUs [S2].
++*   **Limitations**: Requires precomputed opacity upper bounds [S1, unofficial].
++*   **When to Use**: Sparse volumes, interactive rendering, and out-of-core rendering (with resumable variant) [S1, unofficial][S2].
+ 
+ ## Background
+-Adaptive Ray Marching with Macrocell DDA originates from the `instantvnr` project, an interactive volume visualization tool based on multi-resolution hash encoding based neural representation [S1, unofficial]. The method was developed by Qi Wu, Michael J. Doyle, and Kwan-Liu Ma, and published in IEEE Transactions on Visualization and Computer Graphics in 2023 [S1, unofficial]. The use of 3DDDA for space skipping in volume rendering has earlier roots, as seen in work by Knoll et al. on volume ray casting with peak finding [S2]. The integration of adaptive sampling based on opacity bounds is a key innovation in `instantvnr` to handle the sparsity of neural volume representations efficiently.
++Adaptive Ray Marching with Macrocell DDA originates from the `instantvnr` project, an interactive volume visualization tool based on multi-resolution hash encoding based neural representation [S1, unofficial]. The method was developed by Qi Wu, Michael J. Doyle, and Kwan-Liu Ma, and published in IEEE Transactions on Visualization and Computer Graphics in 2023 [S1, unofficial]. The use of 3DDDA for space skipping in volume rendering has earlier roots, as seen in work by Knoll et al. on volume ray casting with peak finding [S2]. The integration of adaptive sampling based on opacity bounds is a key innovation in `instantvnr` to handle the sparsity of neural volume representations efficiently [S1, unofficial].
+ 
+ ## Sources

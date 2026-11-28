@@ -1,0 +1,220 @@
+Extrahieren Sie 3D-Oberflaechennetze aus CT- und MRT-Daten mit GPU-beschleunigtem Marching Cubes in OrthoRay. Export in STL-, OBJ- und PLY-Formate fuer 3D-Druck und Operationsplanung. Taubin-Glaettung, Manifold-Validierung, Inselentfernung und Lochfuellung. Kostenloser DICOM-Viewer.
+
+OrthoRay
+OrthoRay
+OrthoRay-Dokumentation durchsuchen...CtrlK
+3D-Oberflaechenextraktion in OrthoRay
+Die Oberflaechenextraktion wandelt volumetrische DICOM-Daten (Stapel von 2D-CT- oder MRT-Schichten) in ein 3D-trianguliertes Netz um, das die Grenze eines bestimmten Gewebetyps darstellt. Das resultierende Netz kann in 3D visualisiert, fuer die Operationsplanung exportiert oder direkt an einen 3D-Drucker gesendet werden, um patientenspezifische anatomische Modelle zu erstellen.
+OrthoRay implementiert den Marching-Cubes-Algorithmus mit einer massgeschneiderten Rust-nativen Engine: keine externen Mesh-Bibliotheken erforderlich. Das System unterstuetzt sowohl CPU-Multithread-Extraktion (ueber Rayon) als auch eine GPU-Compute-Pipeline (ueber WebGPU/WGSL-Shader), mit automatischer Backend-Auswahl basierend auf Ihrem Hardwareprofil.
+Ob Sie eine schnelle Knochenoberflaeche fuer die Operationsplanung oder ein hochdetailliertes Weichgewebemodell fuer den 3D-Druck benoetigen, die Oberflaechenextraktions-Pipeline von OrthoRay verwaltet den gesamten Arbeitsablauf: Schwellenwertauswahl, Netzerzeugung, Glaettung, Validierung und Export.
+Wie Marching Cubes Funktioniert
+Der Marching-Cubes-Algorithmus verarbeitet das Volumen einen "Wuerfel" (einen 2×2×2-Voxel-Block) auf einmal:
+Fuer jeden Wuerfel liest der Algorithmus die 8 Eck-Voxelwerte und vergleicht sie mit einem Schwellenwert (dem Isowert)
+Jede Ecke wird als innen (ueber dem Schwellenwert) oder aussen (unter dem Schwellenwert) klassifiziert
+Diese Klassifizierung erzeugt einen Wuerfelindex (0–255), der identifiziert, welche Kanten des Wuerfels von der Isoflaeche geschnitten werden
+Eine Nachschlagetabelle ordnet jedem Wuerfelindex eine Menge von Dreiecken zu, die den Oberflaechendurchgang approximieren
+Scheitelpunktpositionen werden entlang der Wuerfelkanten fuer Sub-Voxel-Genauigkeit linear interpoliert
+Oberflaechennormalen werden aus dem Kreuzprodukt der Dreieckskanten berechnet
+Das Ergebnis ist ein wasserdichtes Dreiecksnetz, das die Grenze zwischen Gewebe oberhalb und unterhalb des ausgewaehlten Schwellenwerts nachzeichnet.
+Patientenraum-Koordinaten
+OrthoRay bildet alle extrahierten Scheitelpunkte auf Patientenraum-Koordinaten ab, unter Verwendung der DICOM-Tags fuer Pixelabstand, Schichtdicke und Bildposition. Dies bedeutet, dass exportierte Netze reale Millimeterabmessungen haben, was entscheidend fuer Operationsplanung und 3D-Druck ist.
+Isowert-Voreinstellungen
+Der Isowert (Schwellenwert) bestimmt, welche Gewebegrenze extrahiert wird. OrthoRay enthaelt klinisch optimierte Voreinstellungen:
+VoreinstellungIsowert (HE)HE-BereichZielstrukturKlinischer Einsatz
+Knochen300200–3000Kortikale KnochenoberflaecheFrakturbeurteilung, Implantatplanung, Skelettmodelle
+Weicher Knochen150100–400Trabekulaerer Knochen und KnorpelGelenkoberflaechenanalyse, Knorpeldefektplanung
+Weichgewebe40-100–200Muskeln und OrganeOrganvolumenschaetzung, Weichgewebemassen
+Hautoberflaeche-200-500–0Aeussere KoerperkonturProthesenanpassung, Patientenaufklaerung, aeussere Anatomie
+Blutgefaesse200100–400Kontrastverstaerkte GefaesseVaskulaere Anatomie, praeoperative Gefaesskartierung
+Sie koennen auch einen benutzerdefinierten Isowert manuell eingeben fuer spezialisierte Anwendungen, zum Beispiel zur Isolierung von Metallimplantaten bei 1000+ HE oder zur Extraktion von Atemwegsoberflaechen bei negativen HE-Werten.
+Den Richtigen Isowert Waehlen
+Der Isowert sollte an der Grenze zwischen dem interessierenden Gewebe und seiner Umgebung festgelegt werden:
+Zu niedrig → das Netz schliesst umliegendes Gewebe ein und erzeugt eine aufgeblaehte Oberflaeche
+Zu hoch → das Netz verfehlt duenne Strukturen und erzeugt Loecher und Luecken
+Optimal → das Netz zeichnet die anatomische Grenze genau nach
+Fuer die Knochenextraktion aus CT-Daten funktioniert ein Isowert von 200–400 HE typischerweise gut. Beginnen Sie mit der Knochen-Voreinstellung (300 HE) und passen Sie basierend auf dem visuellen Ergebnis nach oben oder unten an.
+Dualer Extraktionsmotor
+OrthoRay bietet zwei Extraktions-Backends mit automatischer Auswahl basierend auf Ihrer Hardware:
+CPU-Extraktion (Rayon Multithread)
+Der CPU-Motor verwendet parallele Z-Scheiben-Dekomposition: Das Volumen wird entlang der Tiefenachse in Scheiben aufgeteilt, und jede Scheibe wird gleichzeitig mit dem Rayon-Work-Stealing-Threadpool verarbeitet.
+VolumegroesseThreadsExtraktionszeitDreiecksanzahl
+256×256×2008100–250 ms~1M
+512×512×3008600–1.200 ms~5M
+512×512×51281.000–2.000 ms~10M
+Der CPU-Pfad ist der Standard auf allen Hardwareprofilen und ist produktionsbereit.
+GPU-Extraktion (WebGPU-Compute)
+Der GPU-Motor verwendet eine zweistufige WGSL-Compute-Shader-Pipeline:
+Stufe 1: Klassifizierung
+Jede Arbeitsgruppe verarbeitet einen 4×4×4-Zellenblock
+Liest 8 Eckvoxel pro Zelle und berechnet den Wuerfelindex
+Zaehlt Dreiecke pro Zelle mit der Nachschlagetabelle
+Inkrementiert atomar einen globalen Dreieckszaehler
+Stufe 2: Scheitelpunkt-Emission
+Reserviert atomar Ausgabepufferplatz pro Zelle
+Interpoliert Scheitelpunktpositionen entlang der Wuerfelkanten
+Schreibt Dreiecksdaten als gepackte Float-Arrays
+Normalen werden nach dem GPU-Zuruecklesen auf der CPU berechnet
+VolumegroesseGPU-Compute+ ZuruecklesenBeschleunigung vs CPU
+256×256×200~3 ms~10–15 ms10–20×
+512×512×300~7 ms~25–50 ms15–30×
+512×512×512~12 ms~40–70 ms15–30×
+Auf Apple Silicon eliminiert die vereinheitlichte Speicherarchitektur die PCIe-Zuruecklesekosten und bietet eine 50–100-fache Beschleunigung gegenueber der CPU-Extraktion.
+WYSIWYG-Integration
+Die Oberflaechenextraktion von OrthoRay ist WYSIWYG (Was Sie Sehen Ist Was Sie Bekommen): Das Netz wird immer aus dem gleichen verarbeiteten Volumen extrahiert, das im 3D-Viewport angezeigt wird. Das bedeutet:
+Auto-Clean-Masken werden automatisch angewendet: Entfernte Artefakte (CT-Tisch, Kabel, Streuung) werden aus dem Netz ausgeschlossen
+Segmentierungsmasken werden beruecksichtigt: Wenn Sie eine bestimmte Region isoliert haben, wird nur diese Region vernetzt
+Jede Volumenverarbeitung (Filterung, Neuabtastung) wird in der Netzausgabe widergespiegelt
+Sie muessen niemals Verarbeitungsschritte vor der Extraktion erneut anwenden. Das Netz entspricht dem, was Sie sehen.
+Anti-Aliased-Unterabtastung
+Fuer schnelle Vorschau grosser Volumina unterstuetzt OrthoRay 2- bis 4-fache Unterabtastung vor der Extraktion. Im Gegensatz zur naiven Naechster-Nachbar-Unterabtastung, die blockige Oberflaechen erzeugt, verwendet OrthoRay Box-Filter-Mittelung: Jedes Ausgabevoxel ist der Durchschnitt der umgebenden Nachbarschaft.
+UnterabtastungsfaktorVolumenreduktionGeschwindigkeitsverbesserungOberflaechenqualitaet
+1× (voll)KeineBasisMaximales Detail
+2×8× kleiner~5–8× schnellerGut, glatte Konturen erhalten
+3×27× kleiner~15–25× schnellerMaessig, geeignet fuer Ueberblick
+4×64× kleiner~30–50× schnellerVorschau (nur Hauptstrukturen)
+Verwenden Sie 2-fache Unterabtastung fuer die anfaengliche Erkundung, wechseln Sie dann fuer den endgueltigen Export zur vollen Aufloesung.
+Netz-Nachbearbeitung
+Nach der Extraktion bietet OrthoRay eine vollstaendige Nachbearbeitungs-Pipeline zum Bereinigen und Optimieren des Netzes.
+Glaettungsalgorithmen
+Rohe Marching-Cubes-Netze haben sichtbare Treppenartefakte von der Voxelrasterung. OrthoRay bietet drei Glaettungsalgorithmen:
+#### 1. Laplacian-Glaettung
+Bewegt jeden Scheitelpunkt in Richtung der Durchschnittsposition seiner Nachbarn. Schnell, verursacht aber Netzschrumpfung: Die Oberflaeche zieht sich mit jeder Iteration zusammen.
+Geschwindigkeit: Am schnellsten
+Qualitaet: Gut fuer 1–5 Iterationen, sichtbare Schrumpfung ueber 10 hinaus
+Anwendungsfall: Schnelle Vorschau-Glaettung
+#### 2. Taubin-Glaettung (Standard)
+Ein Zwei-Pass-Ansatz, der einen Schrumpfungsschritt (vorwaerts-Laplacian) mit einem Aufblaehungsschritt (rueckwaerts-Laplacian) abwechselt. Dies verhindert Volumenverlust bei gleichzeitiger Beseitigung von Treppenartefakten.
+Parameter: Lambda = 0,5 (vorwaerts), Mu = -0,53 (rueckwaerts)
+Geschwindigkeit: Maessig (2× Laplacian pro Iteration)
+Qualitaet: Ausgezeichnet (keine Schrumpfung, glatte Oberflaeche)
+Anwendungsfall: Klinische Netze, 3D-Druck, Operationsplanung
+#### 3. HC-Laplacian (Volumenerhaltend)
+Eine Hybridmethode, die Laplacian-Glaettung mit einem zusaetzlichen Volumenkorrekturschritt anwendet, um das urspruengliche Netzvolumen beizubehalten. Beste Qualitaet, aber am langsamsten.
+Geschwindigkeit: Am langsamsten (~3× Laplacian pro Iteration)
+Qualitaet: Beste (strikte Volumenerhaltung)
+Anwendungsfall: Quantitative Messungen, Organvolumenanalyse
+ProfilMaximale Glaettungsiterationen
+Hoch50
+Mittel30
+Niedrig15
+Ultra-Niedrig5
+Inselentfernung
+Marching Cubes erzeugt haeufig kleine, getrennte Netzfragmente ("Inseln") aus dem Rauschen in den Volumendaten. Die Inselentfernung von OrthoRay erkennt zusammenhaengende Komponenten mittels Breitensuche und entfernt Fragmente unterhalb eines konfigurierbaren Dreieckszahlschwellenwerts.
+Optionen:
+Nur die groesste behalten: behaelt nur die groesste zusammenhaengende Komponente
+Minimale Dreiecksanzahl: entfernt Komponenten kleiner als ein Schwellenwert
+Parallele Erkennung: BFS laeuft parallel auf Hoch- und Mittelprofilen
+Lochfuellung
+Oberflaechennetze koennen Loecher haben, wo die Isoflaeche die Volumengrenze schneidet oder wo Artefakte Luecken erzeugen. OrthoRay unterstuetzt zwei Methoden zur Lochfuellung:
+#### Schwerpunkt-Faecher-Triangulation (Schnell)
+Berechnet den Schwerpunkt der Lochgrenze und erstellt einen Faecher von Dreiecken vom Schwerpunkt zu jeder Grenzkante. Schnell, erzeugt aber flache Flicken.
+#### Ohrenabschneiden (Robust)
+Eine anspruchsvollere Methode, die nicht-planare und konkave Loecher behandelt:
+Berechnet eine Best-Fit-Normale mit der Newell-Methode
+Projiziert die Lochgrenze in 2D mit einer Orthonormalbasis
+Wendet den Ohrenabschneidealgorithmus an, um das Polygon zu triangulieren
+Faellt auf den Schwerpunkt-Faecher zurueck, wenn das Ohrenabschneiden fehlschlaegt
+ProfilMaximale Lochkanten
+Hoch200
+Mittel100
+Niedrig50
+Ultra-Niedrig30
+Manifold-Validierung
+Vor dem Export validiert OrthoRay das Netz auf Manifold-Korrektheit, eine Anforderung fuer 3D-Druck und viele CAD-Anwendungen:
+PruefungBeschreibungAuswirkung
+RandkantenKanten, die nur von 1 Dreieck geteilt werden (Loecher)Netz ist nicht wasserdicht
+Nicht-Manifold-KantenKanten, die von 3+ Dreiecken geteilt werdenVerursacht Slicer-Fehler
+Isolierte ScheitelpunkteScheitelpunkte, die mit keinem Dreieck verbunden sindSpeicherverschwendung
+KomponentenanzahlAnzahl getrennter NetzstueckeMoegliche Inselentfernung noetig
+3D-Druck bereitAlle Pruefungen bestandenSicher zum Drucker zu senden
+Der Validierungsbericht zeigt genau, welche Probleme bestehen, und schlaegt Korrekturen vor (Glaettung, Lochfuellung, Inselentfernung), um das Netz druckbar zu machen.
+Exportformate
+OrthoRay exportiert Netze direkt auf die Festplatte: Grosse Netze (100+ MB) werden als Binaerdateien geschrieben, ohne die IPC-Schicht zu durchlaufen, was Speicherueberlauf verhindert.
+STL (Stereolithographie)
+EigenschaftDetail
+VariantenBinaer (kompakt) und ASCII (menschenlesbar)
+StrukturPro Dreieck: 1 Normale + 3 Scheitelpunkte + Attributbyte
+Dateigroesse~50 Bytes/Dreieck (binaer), ~300 Bytes/Dreieck (ASCII)
+Anwendungsfall3D-Druck, CAD-Import, Rapid Prototyping
+KompatibilitaetUniversell: alle 3D-Drucker, Slicer und CAD-Tools
+OBJ (Wavefront)
+EigenschaftDetail
+StrukturIndexierte Scheitelpunkte + Normalen pro Flaeche
+DateigroesseKleiner als STL ASCII (geteilte Scheitelpunkte)
+Anwendungsfall3D-Modellierung (Blender, Maya, ZBrush), Rendering
+EnthaeltScheitelpunktpositionen, Scheitelpunktnormalen, Flaechendefinitionen
+PLY (Polygon-Dateiformat)
+EigenschaftDetail
+VariantenBinaer (Little-Endian oder Big-Endian) und ASCII
+StrukturHeader + Scheitelpunktliste (mit Normalen) + Flaechenliste
+DateigroesseAehnlich wie STL binaer, enthaelt Normalen pro Scheitelpunkt
+AnwendungsfallForschung, Punktwolken-Tools, MeshLab, CloudCompare
+BesonderheitScheitelpunkt-Deduplizierung (hashbasiert) reduziert die Dateigroesse
+Export-Arbeitsablauf
+Legen Sie den Isowert fest (verwenden Sie eine Voreinstellung oder geben Sie manuell ein)
+Passen Sie optional den Unterabtastungsfaktor (1–4×) und die Glaettungsiterationen (0–50) an
+Klicken Sie auf Extrahieren, um das Netz zu generieren
+Ueberpruefen Sie das 3D-Ergebnis und den Manifold-Validierungsbericht
+Klicken Sie auf Exportieren und waehlen Sie das Format (STL Binaer empfohlen fuer 3D-Druck)
+Die Datei wird direkt auf die Festplatte geschrieben: keine Groessenbeschraenkung
+Leistung nach Hardwareprofil
+EinstellungHoch (80+)Mittel (50–79)Niedrig (25–49)Ultra-Niedrig (0–24)
+Max. Glaettung50 Iterationen30 Iterationen15 Iterationen5 Iterationen
+Parallele ExtraktionJa (Auto-Threads)Ja (Auto-Threads)Ja (2 Threads)Nein (sequentiell)
+Parallele InselerkennungJaJaNeinNein
+Max. Lochkanten2001005030
+SelbstschnittspruefungJaJaNeinNein
+Dreiecks-WarnschwelleKeine5M2M500K
+Hardwareprofile werden automatisch basierend auf CPU-Kernanzahl, verfuegbarem RAM und GPU-VRAM erkannt.
+Klinische Anwendungsfaelle
+Orthopaedische Operationsplanung
+Extrahieren Sie ein 3D-Knochenmodell aus einem praeoperativen CT-Scan, um Frakturmuster zu visualisieren, Osteotomiewinkel zu planen und die Implantatplatzierung zu simulieren. Exportieren Sie als STL fuer den 3D-Druck eines patientenspezifischen anatomischen Modells, das der Chirurg vor der Operation in der Hand halten und untersuchen kann.
+Patientenspezifisches Implantatdesign
+Exportieren Sie ein hochdetailliertes Knochennetz und importieren Sie es in CAD-Software, um massgeschneiderte Implantate, Fuehrungen oder Schablonen zu entwerfen, die der genauen Anatomie des Patienten entsprechen. Die Patientenraum-Koordinatenzuordnung gewaehrleistet 1:1-Massgenauigkeit.
+3D-gedruckte Anatomische Modelle
+Erstellen Sie physische Modelle der Patientenanatomie fuer:
+Praeoperative Probe: Ueben Sie den Eingriff an einem physischen Modell
+Patientenaufklaerung: Zeigen Sie Patienten ihre Verletzung in 3D
+Chirurgische Fuehrungen: Drucken Sie Schnittfuehrungen oder Bohrschablonen
+Lehre: Erstellen Sie wiederverwendbare anatomische Lehrmodelle
+Quantitative Analyse
+Verwenden Sie manifold-validierte Netze fuer Volumenmessungen, Oberflaechenberechnungen und biomechanische Simulationseingaben. Die HC-Laplacian-Glaettung bewahrt die Volumengenauigkeit fuer quantitative Anwendungen.
+Vergleich mit Anderen DICOM-Viewern
+FunktionOrthoRayHoros3D SlicerRadiAnt
+Marching-Cubes-ExtraktionJa (massgeschneidertes Rust)Ja (VTK)Ja (VTK)Nein
+GPU-beschleunigte ExtraktionJa (WebGPU)NeinNeinNein
+CPU-MultithreadJa (Rayon)BegrenztJa (VTK)N/V
+ExportformateSTL, OBJ, PLYSTL, OBJSTL, OBJ, PLY, VTKKein Export
+Glaettungsalgorithmen3 (Laplacian, Taubin, HC)1 (Laplacian)3+ (VTK)N/V
+Manifold-ValidierungJa (integriert)NeinJa (ueber Erweiterung)N/V
+InselentfernungJaNeinJaN/V
+LochfuellungJa (2 Methoden)NeinJaN/V
+3D-Druck-BereitschaftspruefungJaNeinJa (ueber Erweiterung)N/V
+SegmentierungsintegrationJa (WYSIWYG)JaJaN/V
+Anti-Aliased-UnterabtastungJaNeinNeinN/V
+Direkter DateiexportJa (ohne IPC)JaJaN/V
+PlattformWindows, macOSNur macOSWindows, macOS, LinuxNur Windows
+KostenKostenlosKostenlosKostenlosKostenpflichtig
+Haeufig Gestellte Fragen
+Was ist der beste Isowert fuer die Knochenextraktion aus CT?
+Beginnen Sie mit der Knochen-Voreinstellung (Isowert 300 HE). Fuer duennen kortikalen Knochen oder osteoporotische Patienten senken Sie den Wert auf 200 HE. Fuer dichten Knochen mit Metallartefakten erhoehen Sie auf 400–500 HE. Der optimale Wert haengt vom CT-Aufnahmeprotokoll und der Patientenanatomie ab.
+Wie lange dauert die Netzextraktion?
+Auf einer modernen 8-Kern-CPU wird ein Standard-CT-Volumen (512×512×300 Schichten) in 600–1.200 ms extrahiert. Die Verwendung von 2-facher Unterabtastung reduziert dies auf 80–150 ms. Die GPU-Extraktion ist auf diskreten GPUs 15–30× schneller.
+Kann ich das exportierte Netz direkt 3D-drucken?
+In den meisten Faellen ja. Verwenden Sie das Manifold-Validierungstool, um auf Loecher, Nicht-Manifold-Kanten und getrennte Fragmente zu pruefen. Wenden Sie Taubin-Glaettung (10–20 Iterationen), Inselentfernung und Lochfuellung an, um das Netz vorzubereiten. Exportieren Sie als STL Binaer fuer universelle Slicer-Kompatibilitaet.
+Warum hat mein Netz Treppenartefakte?
+Die Rohausgabe von Marching Cubes spiegelt die Voxelrasteraufloesung wider. Wenden Sie Taubin-Glaettung (10–30 Iterationen) an, um Treppenartefakte ohne Volumenverlust zu beseitigen. Hoehere Glaettungsiterationen erzeugen glattere Oberflaechen, benoetigen aber mehr Verarbeitungszeit.
+Was ist der Unterschied zwischen den drei Glaettungsalgorithmen?
+Laplacian ist am schnellsten, verursacht aber eine Schrumpfung des Netzes. Taubin (Standard) verhindert die Schrumpfung durch abwechselnde Schrumpfungs- und Aufblaehungsdurchlaeufe, am besten fuer die meisten klinischen Anwendungen. HC-Laplacian bietet die beste Volumenerhaltung fuer quantitative Messungen, ist aber am langsamsten.
+Kann ich Weichgewebeoberflaechen extrahieren, nicht nur Knochen?
+Ja. Senken Sie den Isowert auf den entsprechenden HE-Bereich, zum Beispiel 40 HE fuer Muskelgewebe oder -200 HE fuer die Hautoberflaeche. Verwenden Sie die Voreinstellungen Weichgewebe oder Hautoberflaeche als Ausgangspunkt.
+Wie funktioniert die Segmentierungsintegration?
+Wenn Sie Segmentierungsmasken anwenden (Auto-Clean, Region-Growing, manuelles Sculpting), verwendet die Netzextraktion automatisch das verarbeitete Volumen: Das bedeutet, segmentierte Regionen werden einbezogen und entfernte Artefakte werden ausgeschlossen. Es gibt keinen separaten Schritt zur Anwendung der Segmentierung vor der Extraktion.
+Was ist die maximale Netzgroesse, die ich exportieren kann?
+Es gibt keine praktische Begrenzung. OrthoRay schreibt Exportdateien direkt auf die Festplatte aus Rust und umgeht die IPC-Schicht. Netze mit Millionen von Dreiecken (100+ MB Dateien) werden ohne Speicherprobleme exportiert.
+Unterstuetzt OrthoRay Netz-Dezimierung (Reduzierung der Dreiecksanzahl)?
+Netz-Dezimierung (Dreiecksreduzierung) ist fuer eine zukuenftige Version geplant. Derzeit koennen Sie die Dreiecksanzahl reduzieren, indem Sie den Unterabtastungsfaktor (2–4×) vor der Extraktion erhoehen.
+OrthoRay herunterladen
+Free, native, offline DICOM viewer for Windows and macOS
+Download
+3D-Oberflaechenextraktion: Marching Cubes Mesh-Export fuer DICOM | OrthoRay

@@ -1,0 +1,246 @@
+# Model Compression Pipeline for 3D Gaussian Splatting
+
+Also called: 3DGS Model Compression Pipeline, Edge-deployment compression, LightGaussian-derived compression, Compressed 3D Gaussian Splatting Pipeline, Compressed 3DGS, Compressed 3DGS Model, Hardware-oriented 3DGS
+
+## Overview
+This method is a compression and rendering pipeline for 3D Gaussians that reduces memory footprint and increases rendering speed while maintaining image quality [S1, S2]. It is designed for hardware-oriented 3DGS deployment, specifically targeting edge devices with low-power budgets [S2]. It sets itself apart from its parent [Mini-Splatting](7850-mini-splatting.md) by not imposing a hard limit on Gaussian count via mixed-integer optimization, but rather by iteratively pruning, reducing spherical harmonics (SH) degree, and quantizing attributes to achieve high compression ratios (up to 51.6×) suitable for streaming and mobile VR/AR [S1, S2]. It differs from [3DGS Model Compression Pipeline](10101-3dgs-model-compression-pipeline.md) primarily in the specific hardware-targeted modifications (iterative pruning, progressive SH reduction, full VQ) derived from LightGaussian to achieve higher compression [S2], and from [SUNDAE](17751-sundae.md) and [FCGS](19100-fast-compression-of-3d-gaussian-splatting-fcgs.md) by relying on iterative fine-tuning and quantization rather than neural compensation or autoencoder-based feed-forward compression [S1, S2].
+
+## How it works
+The pipeline consists of four main stages: Sensitivity Calculation, Clustering, QA Fine-tuning, and Encoding [S1]. It modifies the LightGaussian pipeline by introducing iterative pruning with intermediate fine-tuning, progressive SH-degree reduction via iterative distillation, and vector quantization (VQ) applied to all SH coefficients and colors [S2].
+
+### Inputs and Outputs
+- **Input**: Optimized 3D Gaussian Splatting model (positions, covariances, opacities, SH coefficients, colors) [S1, S2].
+- **Output**: Compressed representation consisting of Gaussian positions, codebook indices for shape/SH/colors, and encoded data [S1].
+
+### Data Structures
+The compressed representation stores:
+1.  **Positions**: 3D coordinates of Gaussian centers [S1].
+2.  **Codebook Indices**: Indices pointing to pre-defined codebooks for:
+    -   **Color**: All SH coefficients [S1].
+    -   **Shape**: Gaussian parameters (scale, rotation) [S1].
+    -   **Opacity**: (Implied by standard 3DGS, though specific codebook details for opacity are not explicitly detailed in the provided notes, it is part of the compressed attributes) [G].
+3.  **Scaling Factor**: $\eta$ [S1].
+
+Memory consumption is dominated by the coordinates of 3D Gaussian center points and the codebook indices [S1]. The amount of memory required by the color codebook varies significantly between scenes [S1].
+
+### Steps
+
+1.  **Sensitivity Calculation**: Calculate sensitivity thresholds $\beta_c$ and $\beta_g$ for SH coefficients and shape parameters to decide which attributes are considered for clustering [S1]. These thresholds offer a trade-off between quality and compression rate [S1].
+
+2.  **Iterative Pruning with Intermediate Fine-tuning**:
+    -   Instead of aggressive single-step pruning, the model is pruned progressively [S2].
+    -   Fine-tuning is inserted between pruning stages to recover visual quality [S2].
+    -   This reduces the Gaussian count to the level required by hardware constraints [S2].
+
+3.  **Progressive SH-Degree Reduction via Iterative Distillation**:
+    -   Instead of lowering SH degree in one step, the representation is distilled progressively [S2].
+    -   This reduces bytes per Gaussian point with a smoother quality-compression tradeoff [S2].
+
+4.  **Clustering and Vector Quantization (VQ)**:
+    -   SH coefficients and shape parameters are compressed into codebooks of predefined sizes [S1].
+    -   VQ is applied to **all** SH coefficients and colors, not just low-salience subsets [S2].
+    -   **Clustering Update Step**: For normalized covariance matrices $\hat{\Sigma}_i$ with $\|s_i\|_2 = 1$ and weighting factors $w_i$, the centroid $\hat{\Sigma}_c$ is calculated as:
+        $$ \hat{\Sigma}_c = \frac{\sum_{i=1}^N w_i \hat{\Sigma}_i}{\sum_{i=1}^N w_i} $$
+        The normalization is preserved as:
+        $$ \|s_c\|_2^2 = \text{Tr}(\hat{\Sigma}_c) = \frac{\sum_{i=1}^N w_i \text{Tr}(\hat{\Sigma}_i)}{\sum_{i=1}^N w_i} = \frac{\sum_{i=1}^N w_i \|s_i\|_2^2}{\sum_{i=1}^N w_i} $$
+        This proves that the centroid remains normalized if the inputs are normalized and weights are positive [S1].
+
+5.  **QA Fine-tuning**:
+    -   Quantization-aware fine-tuning is applied to regain information lost during quantization [S1].
+    -   This stage takes up 70% of the total compression pipeline time [S1].
+
+6.  **Encoding**:
+    -   Entropy and run-length encoding are applied [S1].
+    -   Morton order layout is used to save additional memory [S1].
+
+### Parameters
+-   **Codebook Sizes**: Predefined sizes for SH coefficients and Gaussian shape parameters. Larger codebooks reduce maximum error with minimal memory overhead [S1].
+-   **Sensitivity Thresholds**: $\beta_c$ and $\beta_g$ [S1].
+-   **Compression Runtime**: Approximately 5-6 minutes [S1].
+-   **Reconstruction Time Increase**: Roughly 10% [S1].
+
+### Edge Cases and Pitfalls
+-   **Position Compression**: Aggressive compression of positions introduces significant error and is currently not supported in this pipeline [S1].
+-   **Quality Drop**: Directly increasing compression ratio without iterative methods leads to noticeable PSNR degradation and visible detail loss [S2].
+-   **Color Shift**: Subtle color shifts may occur, mainly below human perception thresholds, but can be visible in side-by-side inspection [S1, S2].
+
+### Pseudocode
+
+> **Unverified code.** The code below did not pass a test run against a reference implementation, or no test fits it, so it may contain errors.
+
+```python
+def compress_3dgs(model):
+    """
+    Compress a 3D Gaussian Splatting model using the iterative pipeline.
+    model: Object containing positions, covariances, opacities, sh_coeffs, colors.
+    Returns: Compressed model with positions, codebook_indices, and encoding metadata.
+    """
+    # Step 1: Sensitivity Calculation
+    beta_c = calculate_sensitivity(model.sh_coeffs)
+    beta_g = calculate_sensitivity(model.shape_params)
+    
+    # Step 2 & 3: Iterative Pruning and Progressive SH Reduction
+    # Note: The exact iterative loop structure is not fully detailed in sources,
+    # but involves alternating pruning and fine-tuning.
+    current_model = model
+    for stage in iterative_pruning_stages:
+        # Prune Gaussians based on importance
+        current_model = prune_gaussians(current_model, stage.threshold)
+        
+        # Distill SH degree progressively
+        current_model = distill_sh_degree(current_model, stage.new_degree)
+        
+        # Intermediate Fine-tuning to recover quality
+        current_model = qa_finetune(current_model, stage.iterations)
+        
+    # Step 4: Clustering and VQ
+    # Calculate centroids for shape and color codebooks
+    shape_codebook = cluster_attributes(current_model.shape_params, beta_g)
+    color_codebook = cluster_attributes(current_model.sh_coeffs, beta_c)
+    
+    # Assign indices
+    current_model.shape_indices = find_nearest_codebook(shape_codebook, current_model.shape_params)
+    current_model.color_indices = find_nearest_codebook(color_codebook, current_model.sh_coeffs)
+    
+    # Step 5: QA Fine-tuning (Post-Quantization)
+    # This stage is critical and time-consuming (70% of total time)
+    current_model = qa_finetune(current_model, iterations=high)
+    
+    # Step 6: Encoding
+    # Apply Morton order to positions for spatial locality
+    sorted_indices = morton_order(current_model.positions)
+    sorted_positions = current_model.positions[sorted_indices]
+    sorted_shape_indices = current_model.shape_indices[sorted_indices]
+    sorted_color_indices = current_model.color_indices[sorted_indices]
+    
+    # Apply Entropy and Run-Length Encoding
+    encoded_positions = entropy_encode(run_length_encode(sorted_positions))
+    encoded_shape_indices = entropy_encode(run_length_encode(sorted_shape_indices))
+    encoded_color_indices = entropy_encode(run_length_encode(sorted_color_indices))
+    
+    return {
+        'positions': sorted_positions,
+        'shape_indices': sorted_shape_indices,
+        'color_indices': sorted_color_indices,
+        'shape_codebook': shape_codebook,
+        'color_codebook': color_codebook,
+        'encoding_metadata': {
+            'entropy_codes': {
+                'positions': encoded_positions,
+                'shape': encoded_shape_indices,
+                'color': encoded_color_indices
+            }
+        }
+    }
+
+def calculate_sensitivity(attributes):
+    """
+    Calculate sensitivity threshold for clustering.
+    Returns a threshold value beta.
+    """
+    # Implementation details for sensitivity calculation are not fully provided in sources.
+    # [G] Placeholder: Typically involves variance or gradient-based importance metrics.
+    return 0.5 # Placeholder value
+
+def prune_gaussians(model, threshold):
+    """
+    Remove Gaussians with importance below threshold.
+    """
+    # Implementation details for pruning logic are not fully provided.
+    # [G] Placeholder: Remove Gaussians based on opacity and contribution to loss.
+    return model
+
+def distill_sh_degree(model, new_degree):
+    """
+    Reduce SH degree from current to new_degree via distillation.
+    """
+    # Implementation details for distillation are not fully provided.
+    # [G] Placeholder: Train higher degree SH to predict lower degree SH.
+    return model
+
+def qa_finetune(model, iterations):
+    """
+    Fine-tune model with quantization-aware training.
+    """
+    # Implementation details for fine-tuning loop are not fully provided.
+    # [G] Placeholder: Standard optimization loop with quantization noise injection.
+    return model
+
+def cluster_attributes(attributes, beta):
+    """
+    Cluster attributes into codebooks.
+    """
+    # Implementation details for clustering algorithm (e.g., K-Means) are not fully provided.
+    # [G] Placeholder: K-Means clustering on attributes.
+    return codebook
+
+def find_nearest_codebook(codebook, attributes):
+    """
+    Find nearest index in codebook for each attribute.
+    """
+    # Implementation details for nearest neighbor search are not fully provided.
+    # [G] Placeholder: Euclidean distance search.
+    return indices
+
+def morton_order(positions):
+    """
+    Sort indices based on Morton order of positions.
+    """
+    # Implementation details for Morton code are not fully provided.
+    # [G] Placeholder: Convert 3D coordinates to Morton codes and sort.
+    return sorted_indices
+
+def entropy_encode(data):
+    """
+    Apply entropy encoding.
+    """
+    # Implementation details for entropy coding are not fully provided.
+    # [G] Placeholder: Huffman or Arithmetic coding.
+    return encoded_data
+
+def run_length_encode(data):
+    """
+    Apply run-length encoding.
+    """
+    # Implementation details for RLE are not fully provided.
+    # [G] Placeholder: Standard RLE.
+    return encoded_data
+```
+
+## Subtopics
+
+### [3DGS Model Compression Pipeline](10101-3dgs-model-compression-pipeline.md)
+A compression scheme tailored for hardware deployment that reduces model size and bandwidth by iteratively pruning Gaussians, reducing spherical harmonics (SH) degree, and quantizing attributes. It modifies LightGaussian to achieve higher compression ratios (51.6× vs 15×) by adding iterative pruning, progressive SH reduction, and full VQ on all coefficients/colors.
+
+### [SUNDAE](17751-sundae.md)
+SUNDAE is a graph-based compression method for 3D Gaussian Splatting that reduces computational load by pruning redundant Gaussians while preserving key scene details. It distinguishes itself from direct splatting by shifting to feature splatting, utilizing a neural compensation head to interpolate features and recover fine details lost during pruning.
+
+### [Fast Compression of 3D Gaussian Splatting (FCGS)](19100-fast-compression-of-3d-gaussian-splatting-fcgs.md)
+FCGS is an optimization-free, feed-forward compression pipeline for 3D Gaussian Splatting (3DGS) that compresses representations in a single pass without per-scene finetuning, aiming to reduce compression time from minutes to seconds while maintaining fidelity. It distinguishes itself from siblings like [Model Compression Pipeline for 3D Gaussian Splatting](9987-model-compression-pipeline-for-3d-gaussian-splatting.md) and [3DGS Model Compression Pipeline](10101-3dgs-model-compression-pipeline.md) by eliminating the need for iterative per-scene optimization, which typically takes 10–28 minutes, by using an autoencoder-based structure with a Multi-path Entropy Module (MEM) to balance compression size and fidelity.
+
+### F-3DGS (Factorized 3D Gaussian Splatting)
+A factorization-based compression technique that employs matrix and tensor factorization to represent high-dimensional Gaussian parameters using a limited number of basis components per axis [S3]. It factorizes attributes such as color, scale, and rotation to substantially reduce storage requirements while preserving essential visual attributes [S3].
+
+## Operating characteristics
+-   **Compression Ratio**: Up to 31× [S1] or 51.6× [S2] compared to baseline, with a PSNR drop of 0.743 dB on average across datasets [S2].
+-   **Rendering Speedup**: Up to 4× increase in rendering speed [S1]. Roughly 2× of this is attributed to reduced bandwidth requirements [S1].
+-   **Memory Footprint**: Dominated by position coordinates and codebook indices [S1].
+-   **Compression Time**: Approximately 5-6 minutes [S1]. The fine-tuning stage takes up 70% of this time [S1].
+-   **Reconstruction Time**: Increases by roughly 10% [S1].
+-   **Power Consumption**: 0.219 W at 1080p@129 FPS [S2].
+-   **Throughput**: 267.5 Mpixels/s [S2].
+-   **Hardware Suitability**: Suitable for mobile VR/AR applications and games due to network streaming capability and low-power device rendering [S1]. Effective on both low- and high-end GPUs [S1].
+-   **Performance Examples (1080p)**:
+    -   NVIDIA RTX A5000: Compressed 321 FPS (Bicycle), 184/414/502 FPS (Bonsai) [S1].
+    -   NVIDIA RTX 3070M: Compressed 211 FPS (Bicycle), 122/296/380 FPS (Bonsai) [S1].
+    -   Intel UHD Graphics 11: Compressed 23 FPS (Bicycle), 28/28/28 FPS (Bonsai) [S1].
+    -   AMD Radeon R9 380: Compressed 76 FPS (Bicycle), 76/128/128 FPS (Bonsai) [S1].
+-   **Limitations**: Cannot aggressively compress position information without significant error [S1]. Subtle color shifts may be visible under close inspection [S1, S2].
+
+## Background
+The method is derived from LightGaussian [S2], which combines Gaussian pruning and fine-tuning, SH distillation, VQ for SH coefficients and colors, and FP16 quantization [S2]. The specific pipeline described in [S1] and [S2] was developed to address the insufficiency of LightGaussian's compression ratio for edge deployment targets (full-HD rendering at 120 FPS per eye under a sub-0.5 W power budget) [S2]. It was introduced in the paper "Compressed 3D Gaussian Splatting for Accelerated Novel View Synthesis" [S1] and further optimized for hardware acceleration in "A 129 FPS Full HD Real-Time Accelerator for 3D Gaussian Splatting" [S2].
+
+## Sources
+[S1] Compressed 3D Gaussian Splatting for Accelerated Novel View Synthesis, https://doi.org/10.1109/cvpr52733.2024.00985, fetched 2026-10-26
+[S2] A 129 FPS Full HD Real-Time Accelerator for 3D Gaussian Splatting., https://doi.org/10.1109/tvcg.2026.3683714, fetched 2026-10-27
+[S3] Compression in 3D Gaussian Splatting: A Survey of Methods, Trends, and Future Directions, https://doi.org/10.1109/TCSVT.2026.3676048, fetched 2026-10-26

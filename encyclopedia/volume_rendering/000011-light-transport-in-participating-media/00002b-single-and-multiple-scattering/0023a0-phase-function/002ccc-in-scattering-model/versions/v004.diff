@@ -1,0 +1,186 @@
+--- v003.md
++++ v004.md
+@@ -4,118 +4,86 @@
+ 
+ ## Overview
+-In-scattering is the phenomenon where light is scattered from other directions into the viewing direction as it travels through a participating medium, representing "light gained" [S1, unofficial][S2, unofficial][S4, unofficial]. It solves the problem of calculating the radiance contribution from the environment and light sources that is redirected by the medium's particles toward the camera, contrasting with out-scattering (light lost) [S1, unofficial].
++In-scattering is the phenomenon where light is scattered from other directions back into the viewing direction as it travels through a participating medium [S1, unofficial][S2, unofficial]. It represents the "light gained" component of radiative transfer, contrasting with out-scattering and absorption which constitute "light lost" [S1, unofficial]. While the [Phase Function](3111-phase-function.md) defines the angular distribution of scattering events, the In-scattering Model quantifies the accumulation of this scattered radiance along a ray, attenuated by the medium's extinction [S4, unofficial]. It is the volumetric analog to the Bidirectional Scattering Distribution Function (BSDF), fundamentally altering the appearance of media such as fog and clouds by redistributing environmental light into the camera's line of sight [S1, unofficial].
+ 
+ ## How it works
+-**Inputs and Outputs**
+-*   **Input:** Ray origin $p(0)$, ray direction $\omega$, medium properties (scattering coefficient $\sigma_s$, phase function $f_p$), incident radiance field $L_i(p, \omega')$, and the in-scattering source term $S(p)$ [S2, unofficial][S4, unofficial].
+-*   **Output:** Radiance $L(p(0))$ at the ray origin due to in-scattering [S4, unofficial].
++The in-scattering model solves the Radiative Transfer Equation (RTE) to determine the radiance $L$ arriving at a point $p$ along a ray direction $\omega$. The method treats in-scattering as a source term $S(p)$ that adds radiance to the ray, counteracted by the total extinction coefficient $\sigma_t$ [S4, unofficial].
+ 
+-**Data Structures**
+-*   **Phase Function $f_p$:** A function mapping $(\mathbf{x}, \omega, \omega') \to [0, 1]$ (normalized) that acts as a probability density function for scattering direction [S2, unofficial].
+-*   **Source Term $S(p)$:** Represents the total emission at point $p$, defined as true emission $q(p)$ plus in-scattering $j(p)$ [S3, unofficial].
+-    *   $j(p, \omega) = \int_{S^2} \sigma_s(p, \omega_i) f_p(p, \omega_i, \omega) L(p, \omega_i) d\omega_i$ [S3, unofficial].
+-    *   $S(p, \omega) = q(p, \omega) + j(p, \omega)$ [S3, unofficial].
++### Inputs and Outputs
++*   **Inputs**:
++    *   Ray origin $p(0)$ and direction $\omega$.
++    *   Medium properties at position $x$: scattering coefficient $\sigma_s(x, \omega)$, extinction coefficient $\sigma_t(x, \omega)$, and phase function $f_p(x, \omega, \omega')$.
++    *   Incident radiance field $L_i(x, \omega')$ from all directions $\omega'$.
++    *   True emission $q(x, \omega)$ (optional, often zero in non-emissive media).
++*   **Outputs**:
++    *   In-scattered radiance $L_i(p, \omega)$ at the ray origin (or any point $t$ along the ray).
+ 
+-**Formulas**
+-The change in radiance along a ray is governed by the linear differential equation [S4, unofficial]:
++### Data Structures
++The implementation requires access to the medium's spatially varying coefficients and the phase function.
++*   **Medium Coefficients**: A function or lookup table returning $\sigma_s(x)$ and $\sigma_t(x)$ for any 3D position $x$.
++*   **Phase Function**: A function $f_p(x, \omega, \omega')$ satisfying the normalization condition:
++    $$ \forall \omega \in \Omega: \; \int_{S^2} f_p (x, \omega, \omega^\prime) \; d\omega^\prime = 1 $$
++    [S2, unofficial]
++*   **Incident Radiance**: In offline rendering, this is often the result of a previous pass or a precomputed environment map. In real-time, it may be approximated or ignored (single scattering approximation).
++
++### Mathematical Formulation
++The differential change in radiance along a ray parameterized by distance $t$ is governed by the first-order linear differential equation [S4, unofficial]:
+ $$ \frac{dL(p)}{dt} = -\sigma_t(p) L(p) + S(p) $$
+-where $\sigma_t = \sigma_a + \sigma_s$ is the extinction coefficient [S2, unofficial].
++where $S(p)$ is the in-scattering source term [S4, unofficial]. The source term $S(p)$ (also denoted as $j(x, \omega)$ in some literature) represents the number of photons scattered into the path per unit length [S3, unofficial]:
++$$ S(p) = j(p, \omega) = \sigma_s(p, \omega) \int_{S^2} f_p(p, \omega, \omega') L_i(p, \omega') \, d\omega' + q(p, \omega) $$
++[S3, unofficial][S2, unofficial]
+ 
+-The normalization condition for the phase function is [S2, unofficial]:
+-$$ \forall \omega \in \Omega: \; \int_{S^2} f_p (\mathbf{x}, \omega, \omega^\prime) \; d\omega^\prime = 1 $$
++To solve for the radiance at the ray origin $p(0)$, the equation is integrated from $t=0$ to $\infty$. The solution assumes that radiance at infinity is zero, $L(p(\infty)) = 0$ [S4, unofficial]. The general solution for radiance at any point $t$ along the ray is [S4, unofficial]:
++$$ L(p(t)) = \int_t^{\infty} e^{- \int_{t}^{t'} \sigma_t(p) \, dt''} S(p(t')) \, dt' $$
++Specifically, the in-scattered radiance at the start of the ray ($t=0$) is:
++$$ L(p(0)) = \int_0^{\infty} T_r(p(t) \rightarrow p(0)) S(p(t)) \, dt $$
++where $T_r(p(t) \rightarrow p(0)) = e^{- \int_{0}^{t} \sigma_t(p) \, dt'}$ is the transmittance from point $t$ to the origin [S4, unofficial].
+ 
+-The differential change in radiance due to in-scattering is [S2, unofficial]:
+-$$ \mathrm{d}L_\mathrm{i} (\mathrm{p}, \omega) = \sigma_{\mathrm{s}} (\mathrm{p}, \omega) \int_{S^2} f_p (\mathrm{p}, \omega, \omega^\prime) L_{\mathrm{i}} (\mathrm{p}, \omega^\prime) \; \mathrm{d} \omega^\prime $$
++### Algorithm Steps
++1.  **Initialize**: Set total in-scattered radiance $L_{in} = 0$.
++2.  **Discretize Ray**: Divide the ray segment of interest into $N$ steps with lengths $\Delta t_i$.
++3.  **Iterate**: For each step $i$ from $0$ to $N-1$:
++    a. Calculate position $p_i = p(0) + t_i \omega$.
++    b. Evaluate medium coefficients $\sigma_s(p_i)$ and $\sigma_t(p_i)$.
++    c. Evaluate the incident radiance $L_i(p_i, \omega')$ for all relevant incoming directions $\omega'$.
++    d. Compute the source term $S(p_i)$:
++       $$ S(p_i) = \sigma_s(p_i) \int_{S^2} f_p(p_i, \omega, \omega') L_i(p_i, \omega') \, d\omega' + q(p_i) $$
++       [S3, unofficial]
++    e. Calculate the transmittance from $p_i$ to the ray origin:
++       $$ T_i = \exp\left( -\sum_{k=0}^{i-1} \sigma_t(p_k) \Delta t_k \right) $$
++       [S4, unofficial]
++    f. Accumulate the contribution:
++       $$ L_{in} \leftarrow L_{in} + T_i \cdot S(p_i) \cdot \Delta t_i $$
++4.  **Output**: Return $L_{in}$.
+ 
+-**Steps**
+-1.  **Invert Ray Direction:** To solve for incoming radiance, invert the ray direction from $\omega$ to $-\omega$ [S4, unofficial].
+-2.  **Formulate Differential Equation:** This changes the differential denominator from $dt$ to $d(-t)$, yielding a first-order linear differential equation:
+-    $$ \frac{dL(p, -\omega)}{d(-t)} = -\sigma_t(p, -\omega) L(p, -\omega) + S(p, -\omega) $$
+-    Rearranging for standard form gives:
+-    $$ \frac{dL(p, -\omega)}{d(t)} = \sigma_t(p, -\omega) L(p, -\omega) - S(p, -\omega) $$
+-    [S4, unofficial].
+-3.  **Apply Integrating Factor:** Solve using the integrating factor method [S4, unofficial]. The general solution is [S4, unofficial]:
+-    $$ L(p(t)) = \frac{1}{e^{-\int \sigma (p)dt}} \left( -\int e^{- \int \sigma (p)dt} S(p) dt + C \right) $$
+-4.  **Determine Constant $C$:** Assume $L(p(\infty)) = 0$ (radiance at infinity is zero) [S4, unofficial].
+-5.  **Compute Final Radiance:** The solution for radiance at any point $t$ is [S4, unofficial]:
+-    $$ L(p(t)) = \int_t^{\infty} e^{- \int_{t}^{t'} \sigma (p)dt''} S(p) dt' $$
+-    For the ray origin ($t=0$), the radiance is [S4, unofficial]:
+-    $$ L(p(0)) = \int_0^{\infty} T_r(p(t) \rightarrow p(0)) S(p(t)) dt $$
+-    where $T_r$ is the transmittance [S4, unofficial].
++### Parameters and Typical Values
++*   **Scattering Coefficient $\sigma_s$**: Varies by medium. For fog, typically $0.01 - 0.1 \, \text{m}^{-1}$.
++*   **Extinction Coefficient $\sigma_t$**: $\sigma_t = \sigma_a + \sigma_s$. In non-absorbing media, $\sigma_t = \sigma_s$.
++*   **Phase Function Anisotropy $g$**: For Henyey-Greenstein, $g \in [-1, 1]$. $g=0$ is isotropic, $g>0$ is forward-scattering.
++*   **Integration Steps $N$**: Depends on optical depth. High optical depth requires more steps to avoid aliasing in the transmittance integral.
+ 
+-**Pseudocode**
+-```python
+-def compute_in_scattering(ray_origin, ray_direction, medium, light_field, max_distance=100.0, dt=0.01):
+-    """
+-    Computes in-scattering radiance at ray_origin by numerically integrating
+-    L(0) = integral_0^infinity T_r(t) * S(t) dt.
+-    medium: object with get_sigma_t(p), get_sigma_s(p), phase_function(p, wi, wo), get_emission(p)
+-    light_field: function L(p, wo) returning incident radiance at p from wo
+-    """
+-    def source_term(p, wo):
+-        # S(p, wo) = q(p, wo) + j(p, wo) [S3, unofficial]
+-        emission = medium.get_emission(p)
+-        # j(p, wo) = integral over S^2 of sigma_s(p, wi) * phase(p, wi, wo) * L(p, wi) dwi
+-        # Spherical integration requires numerical quadrature or Monte Carlo sampling [G]
+-        scattering_integral = 0.0
+-        num_samples = 16
+-        for i in range(num_samples):
+-            wi = sample_sphere_direction(i, num_samples)
+-            L_incident = light_field(p, wi)
+-            scattering_integral += medium.get_sigma_s(p) * medium.phase_function(p, wi, wo) * L_incident
+-        scattering_integral /= num_samples
+-        return emission + scattering_integral
+-
+-    total_radiance = 0.0
+-    t = 0.0
+-    accumulated_extinction = 0.0
+-
+-    while t < max_distance:
+-        p_t = ray_origin + ray_direction * t
+-        transmittance_to_origin = exp(-accumulated_extinction)
+-
+-        if transmittance_to_origin < 1e-6:
+-            break
+-
+-        s_p = source_term(p_t, -ray_direction)
+-        total_radiance += transmittance_to_origin * s_p * dt
+-
+-        sigma_t_t = medium.get_sigma_t(p_t)
+-        accumulated_extinction += sigma_t_t * dt
+-        t += dt
+-
+-    return total_radiance
+-
+-def sample_sphere_direction(i, n):
+-    # Standard uniform sphere sampling [G]
+-    phi = 2.0 * 3.141592653589793 * i / n
+-    theta = acos(1.0 - 2.0 * (i + 0.5) / n)
+-    return vec3(sin(theta)*cos(phi), sin(theta)*sin(phi), cos(theta))
+-```
+-
+-**Parameters**
+-*   $\sigma_s$: Scattering coefficient (probability density of scattering event) [S2, unofficial].
+-*   $\sigma_t$: Extinction coefficient ($\sigma_a + \sigma_s$) [S2, unofficial].
+-*   $f_p$: Phase function, directional distribution of out-scattering events [S3, unofficial].
+-
+-**Edge Cases**
+-*   **Infinity Limit:** The integral is from $0$ to $\infty$ [S4, unofficial].
+-*   **Singularity:** Phase functions like Henyey-Greenstein can have singularities at $\cos \theta = 1$ (forward scattering) or $-1$ (backward scattering), requiring careful numerical integration [S1, unofficial].
++### Edge Cases and Pitfalls
++*   **Singularity at $t=0$**: The transmittance $T_r(p(0) \rightarrow p(0))$ is 1. Numerical integration must handle the start point carefully to avoid double-counting or division by zero if adaptive stepping is used.
++*   **High Optical Depth**: If $\sigma_t$ is large, transmittance decays rapidly. Contributions from distant points become negligible. Truncating the integral at a small transmittance threshold (e.g., $10^{-6}$) is a valid optimization [G].
++*   **Phase Function Normalization**: The phase function must be normalized to 1 over the sphere. Failure to normalize leads to incorrect energy conservation [S2, unofficial].
++*   **Incident Radiance Availability**: The source term $S(p)$ requires $L_i(p, \omega')$. In single-scattering approximations, $L_i$ is often approximated by direct illumination only. For multiple scattering, $L_i$ must include light scattered from other paths, requiring iterative solutions or precomputation [S1, unofficial].
+ 
+ ## Subtopics
+ 
+ ### [Out-Scattering Model](6803-out-scattering-model.md)
+-Models the loss of radiance from the viewing direction due to scattering away from the ray. It is the complementary term to in-scattering in the radiative transfer equation, representing "light lost".
++Out-scattering is the phenomenon where photons are scattered away from their incident direction, causing a reduction in radiance along a ray as light travels through a participating medium. It represents the loss of light from the current viewing direction due to collisions with particles that deflect energy into other directions. Unlike in-scattering, which adds radiance, out-scattering acts as an attenuation term in the radiative transfer equation, often grouped with true absorption under the total extinction coefficient.
++
++### [In scattering](13241-in-scattering.md)
++In scattering accounts for the increase in radiance along a ray due to light scattering from other directions into the ray's current direction. It serves as the volumetric analog to the Bidirectional Scattering Distribution Function (BSDF), describing how radiance from the surrounding environment is redistributed into the viewing direction. Unlike out-scattering, which removes radiance from the ray, in-scattering adds radiance, fundamentally altering the appearance of participating media such as clouds and fog.
+ 
+ ## Operating characteristics
+-*   **Complexity:** The in-scattering integral is a 4D integral (2D for space along ray, 2D for incident direction sphere) [S2, unofficial].
+-*   **Performance:** Real-time solutions often use biased approximations or particle systems (billboards) because unbiased integration is too slow [S4, unofficial].
+-*   **Strengths:** Physically accurate representation of volumetric lighting effects (e.g., god rays, fog illumination) [S1, unofficial].
+-*   **Limitations:** Requires accurate phase function modeling and incident radiance field evaluation [S2, unofficial].
++*   **Time Complexity**: $O(N \cdot M)$, where $N$ is the number of ray steps and $M$ is the number of directions sampled for the phase function integral. For single-scattering approximations, $M$ is small (often 1 for direct light). For full multiple scattering, $M$ approaches infinity, requiring Monte Carlo integration or precomputed radiance transfer.
++*   **Memory Complexity**: $O(N)$ for storing ray samples and medium coefficients. If precomputing incident radiance fields, memory scales with the resolution of the field.
++*   **Measured Performance**: Real-time implementations often use single-scattering approximations with a few ray steps, achieving high frame rates but with visual artifacts in dense media. Offline renderers using multiple scattering can take hours per frame for complex scenes.
++*   **Strengths**: Physically accurate representation of light transport in participating media. Captures the "glow" and color bleeding effects characteristic of fog, smoke, and subsurface scattering.
++*   **Limitations**: Computationally expensive for multiple scattering. Requires accurate knowledge of the incident radiance field, which is difficult to obtain in dynamic scenes. Single-scattering approximations fail in optically thick media.
++*   **When to Use**: Essential for realistic rendering of fog, clouds, smoke, and subsurface scattering effects. Avoid in real-time applications with strict performance constraints unless simplified approximations are acceptable.
+ 
+ ## Background
+-*   **Origin:** The concept is rooted in the Radiative Transfer Equation (RTE) used in atmospheric radiation and physics [S2, unofficial].
+-*   **History:** The derivation using the integrating factor method is standard in physics-based rendering literature, such as PBRT [S4, unofficial].
+-*   **Usage:** Used in offline renderers for realistic volumetric effects and in real-time engines for approximations like fog and smoke [S4, unofficial].
++The in-scattering model is derived from the Radiative Transfer Equation (RTE), a fundamental equation in atmospheric physics and astrophysics [S4, unofficial]. The term "in-scattering" distinguishes the gain of radiance from "out-scattering" and absorption, which cause loss [S1, unofficial]. The phase function, central to the model, was historically developed in atmospheric science to describe light scattering by molecules (Rayleigh) and larger particles (Mie) [S3, unofficial]. In computer graphics, the Henyey-Greenstein phase function became popular for its computational efficiency in modeling anisotropic scattering [S1, unofficial]. The integration of in-scattering into volume rendering pipelines has evolved from simple single-scattering approximations in real-time graphics to complex multiple-scattering solvers in offline rendering, often leveraging techniques like precomputed radiance transfer or photon mapping to handle the computational cost [S4, unofficial].
+ 
+ ## Sources

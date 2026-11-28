@@ -1,0 +1,99 @@
+# Median Cut BVH Construction
+
+Also called: Median Cut BVH, Median Split BVH Construction
+
+## Overview
+Median Cut BVH Construction is a top-down heuristic method for building a Bounding Volume Hierarchy (BVH) by recursively partitioning a set of primitives based on their spatial centroids. It solves the problem of organizing geometry for efficient ray-primitive intersection by creating a balanced binary tree. It is distinguished from [Heuristic BVH Construction (Top-Down with Plane-Sweep)](18008-heuristic-bvh-construction-top-down-with-plane-sweep.md) by its simplicity and deterministic partitioning via sorting, rather than optimizing surface area or using plane-sweep algorithms. It builds on [Hierarchical Bounding Volumes (HBV)](13475-hierarchical-bounding-volumes-hbv.md).
+
+## How it works
+**Inputs:** A list of $N$ primitives, each with an associated bounding volume (BV) and a centroid position.
+**Outputs:** A BVH tree structure where leaf nodes contain a subset of primitives and internal nodes contain bounding volumes enclosing their children.
+
+**Data Structures:**
+*   `Primitive`: Contains a bounding box (min, max) and a centroid (center point).
+*   `BVHNode`: Contains a bounding box, two child pointers (left, right), and a list of primitives (if leaf).
+
+**Steps:**
+1.  **Compute Centroids:** For each primitive, calculate its centroid $C$. For a bounding box with min $B_{min}$ and max $B_{max}$, $C = \frac{B_{min} + B_{max}}{2}$.
+2.  **Construct Root BV:** Create a bounding volume enclosing all primitives in the current set.
+3.  **Select Axis:** Choose an axis ($x, y,$ or $z$) for partitioning.
+    *   *Variant A:* Cyclically choose the axis based on the recursion depth (e.g., depth 0: $x$, depth 1: $y$, depth 2: $z$, depth 3: $x$).
+    *   *Variant B:* Choose the axis with the longest extent of the current node's bounding volume.
+4.  **Sort:** Sort the primitives in the current set based on their centroid coordinates along the selected axis.
+5.  **Partition:** Find the median index $m = \lfloor N/2 \rfloor$. Split the sorted list into two subsets:
+    *   Left child: primitives $[0, m-1]$
+    *   Right child: primitives $[m, N-1]$
+6.  **Recurse:** Recursively apply steps 1-5 to the left and right subsets to create child nodes.
+7.  **Terminate:** Stop recursion when a node contains fewer than $n$ primitives (leaf size threshold).
+
+**Parameters:**
+*   $n$: Leaf node size threshold. Typical value: 1-4 primitives per leaf. Not given in the sources.
+
+**Edge Cases:**
+*   **Degenerate Input:** If all primitives have identical centroids, sorting order is arbitrary. The split may be unbalanced if not handled, but standard median split ensures equal count division.
+*   **Precision:** Sorting stability may affect tree balance if centroids are identical. [G] Use a stable sort or secondary key (e.g., primitive ID) to ensure deterministic behavior.
+
+**Pseudocode:**
+> **Unverified code.** The code below did not pass a test run against a reference implementation, or no test fits it, so it may contain errors.
+
+```python
+def median_cut_bvh(primitives, depth=0, leaf_threshold=2):
+    """
+    Recursively build a BVH using median cut.
+    primitives: list of objects with .centroid (vec3) and .bbox (bbox)
+    depth: current recursion depth
+    leaf_threshold: number of primitives below which we stop splitting
+    """
+    # Base case: leaf node
+    if len(primitives) <= leaf_threshold:
+        return LeafNode(primitives)
+
+    # Step 1: Compute bounding volume for current set (if not precomputed)
+    current_bbox = compute_union_bbox(primitives)
+
+    # Step 2: Select axis
+    # Variant: Cyclic axis selection
+    axis = depth % 3  # 0=x, 1=y, 2=z
+    
+    # Variant: Longest extent axis (commented out if using cyclic)
+    # extents = current_bbox.max - current_bbox.min
+    # axis = argmax(extents)
+
+    # Step 3: Sort by centroid along selected axis
+    axis_index = axis
+    sorted_primitives = sorted(primitives, key=lambda p: p.centroid[axis_index])
+
+    # Step 4: Partition at median
+    mid = len(sorted_primitives) // 2
+    left_primitives = sorted_primitives[:mid]
+    right_primitives = sorted_primitives[mid:]
+
+    # Step 5: Recurse
+    left_child = median_cut_bvh(left_primitives, depth + 1, leaf_threshold)
+    right_child = median_cut_bvh(right_primitives, depth + 1, leaf_threshold)
+
+    # Step 6: Create internal node
+    internal_bbox = compute_union_bbox([left_child.bbox, right_child.bbox])
+    return InternalNode(internal_bbox, left_child, right_child)
+```
+
+## Subtopics
+
+### BVH Construction
+This variant refers to the specific implementation context where the BVH is built from a raw triangle soup (vertex and index arrays). It involves an initial preprocessing step to convert raw indices into a primitive array with explicit vertex references and type tags before the median cut recursion begins. It is chosen when the input is unstructured geometry data rather than pre-computed bounding volumes. It is used in simple renderers like `mini.q` [S2, unofficial].
+
+## Operating characteristics
+**Time Complexity:** $O(N \log N)$ per level due to sorting, leading to $O(N \log^2 N)$ total construction time for a balanced tree.
+**Memory Complexity:** $O(N)$ for storing the tree nodes and primitive lists.
+**Performance:** Fast to implement and predictably balanced. However, it does not optimize for ray traversal efficiency (e.g., SAH), so the resulting BVH may have more overlap and lower traversal performance compared to [Heuristic BVH Construction (Top-Down with Plane-Sweep)](18008-heuristic-bvh-construction-top-down-with-plane-sweep.md).
+**Strengths:** Simplicity, deterministic output, good balance.
+**Limitations:** Suboptimal tree quality for ray tracing; sensitive to centroid distribution.
+**When to use:** When construction speed is critical and traversal performance is secondary, or for debugging/prototyping.
+**When not to use:** For high-performance ray tracing where BVH quality directly impacts frame rate.
+
+## Background
+Originated as a simple heuristic for top-down BVH construction in computer graphics. It is described in lecture materials for Advanced Computer Graphics by G. Zachmann [S1, unofficial]. It is a variant of the general Median Cut algorithm applied to spatial partitioning.
+
+## Sources
+[S1] Advanced Computer Graphics, https://cgvr.cs.uni-bremen.de/teaching/cg2_13/folien/03%20-%20Acceleration%20data%20structures.pdf, fetched 2026-10-24 (unofficial)
+[S2] bsegovia/mini.q, https://github.com/bsegovia/mini.q, fetched 2026-10-26 (unofficial)

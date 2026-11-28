@@ -1,0 +1,99 @@
+Split out of #17, items 5 and 10, now that they are the next thing worth doing rather than a line on a roadmap. The renderer today is flat shading and nothing else: raster.rs scales a face's colour by light.intensity(normal), one value f...
+
+Renderer: vertex AO, an outline pass, and preview-only shadows · Issue #48 · fpt/rs-voxeler · GitHub
+Skip to content
+You signed in with another tab or window. Reload to refresh your session.
+You signed out in another tab or window. Reload to refresh your session.
+You switched accounts on another tab or window. Reload to refresh your session.
+Dismiss alert
+Renderer: vertex AO, an outline pass, and preview-only shadows #48
+New issue
+Copy link
+New issue
+Copy link
+Closed as not planned
+Closed as not planned
+Renderer: vertex AO, an outline pass, and preview-only shadows#48
+Copy link
+Labels
+enhancementNew feature or requestNew feature or request
+Description
+fpt
+opened on Sep 9, 2026
+Issue body actions
+Split out of #17, items 5 and 10, now that they are the next thing worth doing rather than a line on a roadmap.
+The renderer today is flat shading and nothing else: raster.rs scales a face's colour by light.intensity(normal), one value for the whole quad. No ambient occlusion, no contact shadows, no outlines. That is correct and it is why a model reads as a set of tinted rectangles rather than as a solid object.
+Three separable pieces, smallest and highest-value first.
+1. Vertex ambient occlusion
+The standard voxel technique: for each of a quad's four corners, look at the three cells that meet there — two edge neighbours and the corner — and derive one of four darkness levels. Computed in mesh.rs at extraction, so it rides the existing per-chunk rebuild with no new machinery.
+The rasterizer needs one change, in a place already shaped for it. fill_triangle computes barycentrics and already interpolates depth with them:
+```
+fb.test_and_set(px, py, w0 * a.z + w1 * b.z + w2 * c.z, color);
+```
+Interpolating a per-vertex shade is the same three multiplies at the same site.
+It changes one existing invariant, and quietly
+VoxelModel::mark dirties the chunk a cell fell in, and the neighbour across a shared face:
+```
+for a in 0..3 {
+    if local[a] == 0 && c[a] > 0 { /* mark the chunk on the low side of axis a */ }
+    else if local[a] == CHUNK - 1 { /* ...the high side */ }
+}
+```
+One axis at a time — so face neighbours only. AO depends on diagonal cells too, so a change to a cell on a chunk corner has to dirty the diagonal chunks as well or the AO along that seam stays stale. This is the kind of thing that looks fine in every screenshot until someone edits exactly on a boundary, so it wants a test that edits a corner cell and checks the diagonal chunk was marked.
+It constrains greedy meshing, which is worth recording now
+CLAUDE.md calls greedy meshing "the obvious next win". After AO, greedy can only merge quads whose four AO values match, because merging quads with different corner shading would flatten the very thing AO adds. That does not block greedy — it changes what it is allowed to merge, and it is much cheaper to know before writing it than after.
+2. An outline pass
+A post-process over the depth buffer, picking out discontinuities in depth and in face normal. Cost is proportional to the screen rather than to the model, which is the opposite of everything else in the renderer and is fine — it is one pass over 1.4M pixels at worst.
+Writing a voxel id alongside would also outline neighbouring voxels of the same colour, which is what makes voxel art read as voxels rather than as a smooth blob. Behind a RenderOptions flag beside show_bounds, so the interactive view, the thumbnail and the MCP screenshot can each choose.
+3. Shadows — preview only, and that is a design decision not a compromise
+Shadows are non-local: an edit far away changes a shadow near the camera. They cannot ride the per-chunk dirty rebuild, which is the mechanism the interactive view's responsiveness is built on. Putting them in the live view would mean giving that up.
+So they belong in render_with_options only — the thumbnail and the MCP screenshot, where a frame is rendered once and nobody is dragging. RenderOptions is already the seam between "the editor's view" and "a picture of the model", and this is exactly the kind of thing it exists to separate.
+No shadow map is needed: raycast.rs already has an exact grid walk, and running it along the light direction from each face answers the question per face.
+Ortho projection and named camera presets belong in the same place and the same pass — a thumbnail wants a repeatable view, and the interactive camera does not change.
+Order, and why
+Vertex AO — the smallest change that most changes how a model reads, and every thumbnail and screenshot inherits it.
+Outline pass — small, independent, a flag.
+Shadows, ortho, presets — bigger, and confined to the preview path.
+Greedy meshing is not on this list and should come after AO, for the reason above.
+Where it sits
+Independent of #47 (the move gizmo): the shading needs no input and the gizmo needs no shading, so the two can be done in either order or at once.
+Activity
+fpt
+added
+enhancementNew feature or requestNew feature or request
+on Sep 9, 2026
+fpt commented on Sep 9, 2026
+fpt
+on Sep 9, 2026
+OwnerAuthor
+More actions
+Closing. Item 1 shipped; item 2 was tried, reverted and is not wanted; item 3 was never started.
+Vertex AO — shipped in #49. It also widened the dirty rule: mark now takes the product of each axis' affected chunk indices, because a corner's shade reads the cell diagonally across from it and a per-axis walk names only four of the eight chunks meeting at a corner. shading_across_a_chunk_seam_survives_an_incremental_rebuild covers it, and was checked to fail on the old rule.
+The greedy-meshing constraint that came with it is recorded in CLAUDE.md: greedy may only merge quads whose four AO levels match, or merging averages away what the shading adds.
+Outline pass — reverted in #53. It showed artifacts when the view was rotated. I got partway through diagnosing and did not finish, so what follows is only what was measured, not a cause:
+The depth-discontinuity half was not the source — 0 to 113 depth-only edges per frame across four camera angles.
+The bulk of outlined pixels came from the face-id test, at 11–14% of covered pixels on a stepped model. High for a line, but that model has an edge every few pixels, so it is not obviously wrong.
+Rasterizer cracks were a theory and look too small to explain it: 0 to 6 interior uncovered pixels per frame.
+So the cause is still open. Anyone picking this up should start by reproducing the rotation artifact directly rather than from these numbers, which did not find it.
+Preview-only shadows — not started. The reasoning in the description still holds if anyone wants them: shadows are non-local, so they cannot ride the per-chunk dirty rebuild, and render_with_options is the seam that keeps them out of the interactive view. raycast.rs's grid walk means no shadow map.
+Worth a fresh issue if either the outline or the shadows is wanted later, rather than reopening this one.
+fpt
+closed this as not plannedon Sep 9, 2026
+Sign up for free to join this conversation on GitHub. Already have an account? Sign in to comment
+Metadata
+Metadata
+Assignees
+No one assigned
+Labels
+enhancementNew feature or requestNew feature or request
+Projects
+No projects
+Milestone
+No milestone
+Relationships
+None yet
+Development
+No branches or pull requests
+Issue actions
+Open in GitHub Copilot app
+You can’t perform that action at this time.

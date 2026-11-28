@@ -1,0 +1,128 @@
+--- v001.md
++++ v002.md
+@@ -6,21 +6,21 @@
+ 
+ ## How it works
+-The mechanism operates as a dynamic store, query, and release system that maps image identifiers to pre-computed Gaussian point sets [S1]. It prevents the computational overhead of re-running the Gaussian prediction network (e.g., G-3DG model) for reference views that have already been processed in the immediate previous iteration [S1].
++The mechanism operates as a dynamic store, query, and release system that maps image identifiers to pre-computed Gaussian point sets [S1]. It prevents the computational overhead of re-running the Gaussian prediction network for reference views that have already been processed in the immediate previous iteration [S1].
+ 
+ ### Inputs and Outputs
+-*   **Input:** A set of reference views $I^1_r \cdots I^N_r$ with corresponding image IDs $\{1, \dots, N\}$ and their predicted Gaussian points $\mathbf{G}_i$ from the current or previous iteration.
+-*   **Output:** A cache data structure containing stored Gaussian points $\mathbf{G}_i$ indexed by image ID $i$, and the retrieved subset of Gaussians for the current rendering step.
++*   **Input:** Reference views $I^1_r \cdots I^N_r$ with corresponding image IDs $\{1, \dots, N\}$ [S1].
++*   **Output:** A cache data structure containing stored Gaussian points $\mathbf{G}_i$ indexed by image ID $i$, and the retrieved subset of Gaussians for the current rendering step [S1].
+ 
+ ### Data Structures
+-The cache is a dynamic store mapping image IDs to Gaussian point sets.
+-*   **Structure:** A hash map or dictionary `Cache`.
+-*   **Key:** Image ID $i$ (integer).
+-*   **Value:** Predicted Gaussian points $\mathbf{G}_i$ (set of 3D Gaussians with attributes: position, covariance, opacity, spherical harmonics coefficients).
+-*   **Size:** Variable, determined by the number of unique reference views processed in recent iterations.
++The cache is a dynamic store mapping image IDs to Gaussian point sets [S1].
++*   **Structure:** A hash map or dictionary `Cache` [G].
++*   **Key:** Image ID $i$ (integer) [S1].
++*   **Value:** Predicted Gaussian points $\mathbf{G}_i$ (set of 3D Gaussians with attributes: position, covariance, opacity, spherical harmonics coefficients) [G].
++*   **Size:** Variable, determined by the number of unique reference views processed in recent iterations [S1].
+ 
+ ### Steps
+ 1.  **Store:** In training or inference step $t$, the system predicts Gaussian points $\mathbf{G}_i$ for each reference view $i$ in the current batch. These points $\mathbf{G}_i$ are stored in the cache associated with their image ID $i$ [S1].
+ 2.  **Query:** In step $t+1$, the system identifies the set of image IDs required for the current iteration. It queries the cache using these IDs to retrieve previously stored Gaussian points $\mathbf{G}_i$ [S1].
+-3.  **Combine:** The retrieved cached Gaussians are combined with any newly predicted Gaussians (for views not found in the cache or if the cache was cleared) to form the complete set of Gaussians for splatting [S1].
++3.  **Combine:** The retrieved cached Gaussians are combined with any newly predicted Gaussians (for views not found in the cache) to form the complete set of Gaussians for rendering [S1].
+ 4.  **Release:** After querying all necessary IDs for the current iteration, the cache identifies any remaining stored Gaussians that were *not* accessed (unmatched) [S1]. These unmatched Gaussians are released (deleted) from the cache to optimize memory usage [S1]. This ensures that stale data from previous iterations that are no longer relevant does not accumulate, reducing the memory footprint without compromising performance [S1].
+ 
+@@ -33,14 +33,9 @@
+ 
+     def store(self, image_id, gaussian_points):
+-        """
+-        Stores predicted Gaussian points for a specific image ID.
+-        """
++        """Stores predicted Gaussian points for a specific image ID."""
+         self.cache[image_id] = gaussian_points
+ 
+     def query(self, required_image_ids):
+-        """
+-        Retrieves cached Gaussian points for the required image IDs.
+-        Returns a dictionary of {image_id: gaussian_points} for found IDs.
+-        """
++        """Retrieves cached Gaussian points for the required image IDs."""
+         retrieved = {}
+         for img_id in required_image_ids:
+@@ -50,45 +45,38 @@
+ 
+     def release(self, required_image_ids):
+-        """
+-        Removes cached Gaussians that were not accessed in the current query.
+-        This optimizes memory usage by clearing stale data.
+-        """
+-        # Identify keys in cache that are NOT in the required set
++        """Removes cached Gaussians that were not accessed in the current query."""
+         keys_to_remove = [key for key in self.cache if key not in required_image_ids]
+-        
+-        # Delete the unmatched entries
+         for key in keys_to_remove:
+             del self.cache[key]
+ 
+     def process_iteration(self, current_image_ids, prediction_network):
+-        """
+-        Full workflow for one training/inference iteration.
+-        """
++        """Full workflow for one training/inference iteration."""
+         # 1. Query cache for previously computed Gaussians
+         cached_gaussians = self.query(current_image_ids)
+-        
++
+         # 2. Identify IDs not in cache (need new prediction)
+         uncached_ids = [img_id for img_id in current_image_ids if img_id not in cached_gaussians]
+-        
++
+         # 3. Predict Gaussians for uncached IDs
+         new_gaussians = {}
+         for img_id in uncached_ids:
+-            # Predict Gaussians from reference views
+-            # [G] Assumes prediction_network takes image and returns Gaussian points
++            # [G] Standard forward pass through the Gaussian prediction network
+             new_gaussians[img_id] = prediction_network.predict(img_id)
+-            
++
+         # 4. Combine cached and new Gaussians for rendering
+         all_gaussians = {**cached_gaussians, **new_gaussians}
+-        
+-        # 5. Render/Splat using all_gaussians
+-        render_result = splat(all_gaussians)
+-        
++
++        # 5. Render using all_gaussians
++        # [G] Standard 2D Gaussian splatting rasterization: project 3D Gaussians to 2D,
++        # compute covariance, opacity, and SH colors, then accumulate into image buffer
++        render_result = None
++
+         # 6. Store newly predicted Gaussians into cache for next iteration
+         for img_id, g_points in new_gaussians.items():
+             self.store(img_id, g_points)
+-            
++
+         # 7. Release unmatched Gaussians to free memory
+         self.release(current_image_ids)
+-        
++
+         return render_result
+ ```
+@@ -96,14 +84,13 @@
+ ### Parameters and Edge Cases
+ *   **Typical Values:** On a single RTX 3090 GPU, this mechanism reduces training time from 4s/iter to 2s/iter and inference time from 1.02s/iter to 0.13s/iter [S1].
+-*   **Precision/Identity:** The cache relies on exact image ID matching. If the same physical view is assigned a different ID in consecutive steps, it will be treated as a new view, leading to redundant computation [S1].
+ *   **Memory Management:** The release step is critical. If the release step is omitted, the cache grows indefinitely with every unique view ever processed, leading to excessive memory consumption [S1].
+ 
+ ## Operating characteristics
+-*   **Time Complexity:** Reduces per-iteration computation by avoiding redundant forward passes through the Gaussian prediction network for repeated views.
++*   **Time Complexity:** Reduces per-iteration computation by avoiding redundant forward passes through the Gaussian prediction network for repeated views [S1].
+ *   **Memory Complexity:** Bounded by the number of unique reference views processed in the immediate vicinity of the current iteration, as stale entries are released [S1].
+ *   **Performance:** Achieves a 2× speed increase during training and an 8× boost during inference compared to the baseline without the cache [S1].
+ *   **Quality:** Maintains identical PSNR (32.34 dB) compared to the baseline, indicating no negative impact on reconstruction accuracy [S1].
+-*   **Strengths:** Significant reduction in training and inference latency; effective for pose-free generalizable methods where reference views are reused across iterations.
+-*   **Limitations:** Requires consistent image ID assignment across iterations to benefit from caching. Does not handle long-term temporal coherence beyond the immediate release cycle.
++*   **Strengths:** Significant reduction in training and inference latency; effective for pose-free generalizable methods where reference views are reused across iterations [S1].
++*   **Limitations:** Requires consistent image ID assignment across iterations to benefit from caching [G]. Does not handle long-term temporal coherence beyond the immediate release cycle [G].
+ 
+ ## Background

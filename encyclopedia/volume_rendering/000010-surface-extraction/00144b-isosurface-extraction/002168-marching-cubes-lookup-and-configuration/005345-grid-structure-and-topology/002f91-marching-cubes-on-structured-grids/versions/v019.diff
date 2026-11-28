@@ -1,0 +1,138 @@
+--- v018.md
++++ v019.md
+@@ -7,39 +7,43 @@
+ 
+ ## How it works
+-**Inputs:**
+-1.  **Scalar Field ($V$):** A 3D array of shape $(R_x, R_y, R_z)$ containing scalar values at grid vertices [S1, unofficial].
+-2.  **Isovalue ($I$):** The threshold scalar value defining the surface (default 50.0) [S1, unofficial].
+-3.  **Grid Bounds:** Lower bounds $c_1 = (x_{min}, y_{min}, z_{min})$ and upper bounds $c_2 = (x_{max}, y_{max}, z_{max})$ defining the physical extent of the grid (default $[-1, -1, -1]$ and $[1, 1, 1]$) [S1, unofficial].
+-4.  **Resolution ($reso$):** Grid dimensions per axis (default $[128, 128, 128]$) [S1, unofficial].
+-5.  **Lookup Tables:** `edgeTable` (256 entries, 12-bit masks) and `triangleTable` (256 entries, 16 integers) as defined in [Lookup Table and Ambiguity Handling](10327-lookup-table-and-ambiguity-handling.md) [G].
+-
+-**Outputs:**
+-1.  **Vertices:** A list of 3D coordinates $(x, y, z)$ in physical space [G].
+-2.  **Triangles:** A list of triplets of vertex indices [G].
++**Inputs and Outputs:**
++- **Inputs:** A 3D scalar field array $V$ of shape $(R_x, R_y, R_z)$, an isovalue threshold $I$, grid bounds $c_1 = (x_{min}, y_{min}, z_{min})$ and $c_2 = (x_{max}, y_{max}, z_{max})$, grid resolution $reso = (R_x, R_y, R_z)$, and precomputed lookup tables `edgeTable` (256 entries, 12-bit masks) and `triangleTable` (256 entries, 16 integers) [S1, unofficial][S2][G].
++- **Outputs:** A list of 3D vertex coordinates in physical space and a list of triangle index triplets [G].
+ 
+ **Data Structures:**
+-*   **Grid:** A 3D array $V[i, j, k]$ where $0 \le i < R_x$, $0 \le j < R_y$, $0 \le k < R_z$ [G].
+-*   **Edge Intersections:** Temporary storage for the 3D position of the isosurface intersection on a cube edge [G].
++- **Grid:** A 3D array $V[i, j, k]$ where $0 \le i < R_x$, $0 \le j < R_y$, $0 \le k < R_z$ [G].
++- **Edge Intersections:** Temporary storage for the 3D position of the isosurface intersection on a cube edge [G].
+ 
+-**Steps:**
+-1.  **Evaluate Scalar Field:** If the input is not a pre-computed grid (e.g., a neural network), generate a 3D grid of query points using `ij_indexing=True` [S1, unofficial]. Split the grid into batches of size `eval_batch_size` (default 100,000) and perform forward passes to extract sigma values [S1, unofficial]. Concatenate and reshape sigmas to grid dimensions [S1, unofficial].
+-    *   *Note:* If the network uses view-dependent shading (viewdirs), the sigma value depends on direction. Standard MC assumes a static scalar field. A common workaround is to substitute fake viewdirs pointing to the origin, though this may produce incorrect geometry [S1, unofficial].
+-2.  **Iterate Voxels:** Loop through each voxel $(i, j, k)$ where $0 \le i < R_x-1$, $0 \le j < R_y-1$, $0 \le k < R_z-1$ [G].
+-3.  **Compute Case Index:** Retrieve the 8 vertex values $v_0 \dots v_7$ for the current voxel. The vertex ordering must match the LUT convention (typically: $v_0=(0,0,0), v_1=(1,0,0), \dots, v_7=(1,1,1)$ in local IJK space) [G]. Calculate the case index $C$:
+-    $$ C = \sum_{m=0}^{7} b_m 2^m $$
+-    where $b_m = 1$ if $v_m < I$, and $0$ otherwise [S1, unofficial].
+-4.  **Check Intersection:** Look up `edgeTable[C]`. If the result is 0, the isosurface does not intersect this voxel; skip to the next voxel [G].
+-5.  **Compute Edge Intersections:** For each edge $e$ where the bit $e$ is set in `edgeTable[C]`:
+-    *   Identify the two vertices $v_a, v_b$ connected by edge $e$ [G].
+-    *   Calculate the intersection point $P$ using linear interpolation:
+-        $$ P = v_a + \frac{I - V(v_a)}{V(v_b) - V(v_a)} (v_b - v_a) $$
+-    *   Store $P$ in local IJK coordinates [G].
+-6.  **Generate Triangles:** Look up `triangleTable[C]`. Iterate through the triplets $(a, b, c)$ until the terminator `-1` is reached. For each triplet, retrieve the pre-computed intersection points $P_a, P_b, P_c$ and add the triangle $(P_a, P_b, P_c)$ to the output mesh [G].
+-7.  **Coordinate Transformation:** If intersections were computed in IJK (grid) space, transform them to XYZ (physical) space. The standard approach maps grid coordinates directly:
+-    $$ x = x_{min} + \frac{i}{R_x} (x_{max} - x_{min}) $$
+-    $$ y = y_{min} + \frac{j}{R_y} (y_{max} - y_{min}) $$
+-    $$ z = z_{min} + \frac{k}{R_z} (z_{max} - z_{min}) $$
+-    *Note:* This linear mapping is not technically correct for non-uniform grids or if the grid spacing is not uniform, but for most applications the difference is negligible [S2]. For strict correctness, one should interpolate the physical coordinates of the vertices first.
+-8.  **Handle Ambiguities:** For cases 46, 47, 98, 99, 210, 213, 214, 215, the standard LUT provides a fixed triangulation. This may cause topological errors (cracks) if adjacent voxels resolve the ambiguity inconsistently. Advanced implementations may use the Asymptotic Decider or Matveyev's algorithm to resolve these [S3].
++**Numbered Steps:**
++1. **Evaluate Scalar Field:** If the input is not a pre-computed grid (e.g., a neural network), generate a 3D grid of query points using `ij_indexing=True` [S1, unofficial]. Split the grid into batches of size `eval_batch_size` (default 100,000) and perform forward passes to extract sigma values [S1, unofficial]. Concatenate and reshape sigmas to grid dimensions [S1, unofficial].
++2. **Iterate Voxels:** Loop through each voxel $(i, j, k)$ where $0 \le i < R_x-1$, $0 \le j < R_y-1$, $0 \le k < R_z-1$ [G].
++3. **Compute Case Index:** Retrieve the 8 vertex values $v_0 \dots v_7$ for the current voxel. The vertex ordering must match the LUT convention (typically: $v_0=(0,0,0), v_1=(1,0,0), \dots, v_7=(1,1,1)$ in local IJK space) [G]. Calculate the case index $C$:
++   $$ C = \sum_{m=0}^{7} b_m 2^m $$
++   where $b_m = 1$ if $v_m < I$, and $0$ otherwise [S1, unofficial].
++4. **Check Intersection:** Look up `edgeTable[C]`. If the result is 0, the isosurface does not intersect this voxel; skip to the next voxel [G].
++5. **Compute Edge Intersections:** For each edge $e$ where the bit $e$ is set in `edgeTable[C]`:
++   - Identify the two vertices $v_a, v_b$ connected by edge $e$ [G].
++   - Calculate the intersection point $P$ using linear interpolation:
++     $$ P = v_a + \frac{I - V(v_a)}{V(v_b) - V(v_a)} (v_b - v_a) $$
++   - Store $P$ in local IJK coordinates [G].
++6. **Generate Triangles:** Look up `triangleTable[C]`. Iterate through the triplets $(a, b, c)$ until the terminator `-1` is reached. For each triplet, retrieve the pre-computed intersection points $P_a, P_b, P_c$ and add the triangle $(P_a, P_b, P_c)$ to the output mesh [G].
++7. **Coordinate Transformation:** If intersections were computed in IJK (grid) space, transform them to XYZ (physical) space. The standard approach maps grid coordinates directly:
++   $$ x = x_{min} + \frac{i}{R_x} (x_{max} - x_{min}) $$
++   $$ y = y_{min} + \frac{j}{R_y} (y_{max} - y_{min}) $$
++   $$ z = z_{min} + \frac{k}{R_z} (z_{max} - z_{min}) $$
++   This linear mapping is not technically correct for non-uniform grids or if the grid spacing is not uniform, but for most applications the difference is negligible [S2]. For strict correctness, one should interpolate the physical coordinates of the vertices first [S2].
++8. **Handle Ambiguities:** For cases 46, 47, 98, 99, 210, 213, 214, 215, the standard LUT provides a fixed triangulation. This may cause topological errors (cracks) if adjacent voxels resolve the ambiguity inconsistently. Advanced implementations may use the Asymptotic Decider or Matveyev's algorithm to resolve these [S3].
++
++**Parameters with Typical Values:**
++- `c1` (list[int]): Lower bounds of the marching cubes volume (x,y,z). Default: $[-1, -1, -1]$ [S1, unofficial].
++- `c2` (list[int]): Upper bounds of the marching cubes volume (x,y,z). Default: $[1, 1, 1]$ [S1, unofficial].
++- `reso` (list[int]): Resolution of the evaluation grid (x,y,z). Default: $[128, 128, 128]$ [S1, unofficial].
++- `isosurface` (float): Sigma threshold for marching cubes. Default: $50.0$ [S1, unofficial].
++- `eval_batch_size` (int): Number of points evaluated per forward pass to manage memory. Default: $100000$ [S1, unofficial].
++
++**Edge Cases and Pitfalls:**
++- If the network uses view-dependent shading (viewdirs), the sigma value depends on direction. Standard MC assumes a static scalar field. A common workaround is to substitute fake viewdirs pointing to the origin, though this may produce incorrect geometry [S1, unofficial].
++- Precision issues arise when $V(v_b) - V(v_a) \approx 0$ during interpolation; a small epsilon guard is required to avoid division by zero [G].
++- Boundary conditions must ensure the grid extends by one cell in each dimension to access all 8 vertices per voxel [G].
+ 
+ **Pseudocode:**
+@@ -57,16 +61,6 @@
+     vertices_ijk = []
+     triangles = []
+-
+-    # Standard MC vertex ordering for a voxel at (i,j,k)
+-    vertex_offsets = [
+-        (0, 0, 0), (1, 0, 0), (1, 1, 0), (0, 1, 0),
+-        (0, 0, 1), (1, 0, 1), (1, 1, 1), (0, 1, 1)
+-    ]
+-    # Edge definitions: (vertex_index_0, vertex_index_1)
+-    edges = [
+-        (0, 1), (1, 2), (2, 3), (3, 0),
+-        (4, 5), (5, 6), (6, 7), (7, 4),
+-        (0, 4), (1, 5), (2, 6), (3, 7)
+-    ]
++    vertex_offsets = [(0,0,0), (1,0,0), (1,1,0), (0,1,0), (0,0,1), (1,0,1), (1,1,1), (0,1,1)]
++    edges = [(0,1), (1,2), (2,3), (3,0), (4,5), (5,6), (6,7), (7,4), (0,4), (1,5), (2,6), (3,7)]
+ 
+     for i in range(Rx - 1):
+@@ -93,15 +87,16 @@
+                         edge_intersections[e_idx] = interp(v[va], v[vb], p1, p2)
+ 
+-                for idx in range(0, 15, 3):
++                for idx in range(16):
+                     e1 = tri_indices[idx]
+                     if e1 == -1: break
+-                    p1, p2, p3 = edge_intersections[tri_indices[idx]], edge_intersections[tri_indices[idx+1]], edge_intersections[tri_indices[idx+2]]
+-                    vertices_ijk.append(p1)
+-                    vertices_ijk.append(p2)
+-                    vertices_ijk.append(p3)
++                    tv1 = edge_intersections[tri_indices[idx]]
++                    tv2 = edge_intersections[tri_indices[idx+1]]
++                    tv3 = edge_intersections[tri_indices[idx+2]]
++                    vertices_ijk.append(tv1)
++                    vertices_ijk.append(tv2)
++                    vertices_ijk.append(tv3)
+                     base = len(vertices_ijk) - 3
+                     triangles.append((base, base+1, base+2))
+ 
+-    # Scale from IJK to XYZ space as per evidence
+     scale = [(c2[d] - c1[d]) / reso[d] for d in range(3)]
+     vertices_xyz = [(v[0]*scale[0] + c1[0], v[1]*scale[1] + c1[1], v[2]*scale[2] + c1[2]) for v in vertices_ijk]
+@@ -133,5 +128,5 @@
+ 
+ ### [GPU-Accelerated Metaball Isosurface Generation](12526-gpu-accelerated-metaball-isosurface-generation.md)
+-This method generates an isosurface from a combined field of metaballs using a two-stage GPU pipeline, utilizing vertex shaders for field evaluation and geometry shaders for mesh generation. It is distinguished from standard CPU-based or single-pass GPU implementations by its explicit separation of field computation and mesh topology generation, coupled with Transform-Feedback caching to avoid recomputing geometry when the camera moves but the metaball configuration remains static. It builds on [Marching Cubes on Structured Grids](6051-marching-cubes-on-structured-grids.md) by offloading the structured grid vertex evaluation and cube processing to the GPU.
++This method generates a 3D isosurface from a combined field of metaballs using a two-stage GPU pipeline, utilizing vertex shaders for field evaluation and geometry shaders for mesh generation. It is distinguished from standard CPU-based or single-pass GPU implementations by its explicit separation of field computation and mesh topology generation, coupled with Transform-Feedback caching to avoid recomputing geometry when the camera moves but the metaball configuration remains static. It builds on [Marching Cubes on Structured Grids](6051-marching-cubes-on-structured-grids.md) by offloading the structured grid vertex evaluation and cube processing to the GPU.
+ 
+ ### Matveyev's Algorithm
+@@ -142,8 +137,8 @@
+ 
+ ### TexF with Implicit Geometry (SDF)
+-TexF with Implicit Geometry (SDF) is an extension where TexF shares a canonical grid with an implicit Signed Distance Field (SDF). The surface is extracted via Marching Cubes, and TexF attributes are transferred to vertices for standard vertex-color rendering, avoiding per-pixel TexF queries [S5, unofficial]. The SDF and TexF share the same grid. After extracting a mesh with Marching Cubes, TexF attributes are transferred to its vertices using k-nearest-neighbor interpolation. The rasterizer then interpolates these vertex attributes across triangles, avoiding per-pixel TexF queries [S5, unofficial].
++TexF with Implicit Geometry (SDF) is an extension where TexF shares a canonical grid with an implicit Signed Distance Field (SDF) [S5, unofficial]. The surface is extracted via Marching Cubes, and TexF attributes are transferred to vertices for standard vertex-color rendering, avoiding per-pixel TexF queries [S5, unofficial]. The SDF and TexF share the same grid. After extracting a mesh with Marching Cubes, TexF attributes are transferred to its vertices using k-nearest-neighbor interpolation [S5, unofficial]. The rasterizer then interpolates these vertex attributes across triangles, avoiding per-pixel TexF queries [S5, unofficial].
+ 
+ ### 3-Edge Cube Sampling with Corner Extension
+-3-Edge Cube Sampling with Corner Extension is an optimization where, instead of calculating intersection points for all 12 edges of a cube, intersections are computed for only the 3 edges in the bottom-left corner of each cube [S6, unofficial]. An extra row is added in the top-right corner of the processing zone to ensure all necessary grid values are accessible for the reduced edge set. The indexing logic requires a special upgrade/mapping to correctly access grid values, making it complicated to implement correctly [S6, unofficial].
++3-Edge Cube Sampling with Corner Extension is an optimization where, instead of calculating intersection points for all 12 edges of a cube, intersections are computed for only the 3 edges in the bottom-left corner of each cube [S6, unofficial]. An extra row is added in the top-right corner of the processing zone to ensure all necessary grid values are accessible for the reduced edge set [S6, unofficial]. The indexing logic requires a special upgrade/mapping to correctly access grid values, making it complicated to implement correctly [S6, unofficial].
+ 
+ ### Octree-Based Isolevel Culling

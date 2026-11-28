@@ -1,0 +1,738 @@
+The Journal of Supercomputing
+(2025) 81:472
+https://doi.org/10.1007/s11227-025-06969-6
+VolRec: 4D real‑time volumetric reconstruction of OCT data
+Arturo Vicente‑Jaén1,2 · Juan Mompeán1,2 · Juan L. Aragón2 · Pablo Artal1
+Accepted: 19 January 2025
+© The Author(s) 2025
+Abstract
+This work presents the design, analysis and development of VolRec, a volumetric
+4D reconstruction system for OCT (optical coherence tomography) data. VolRec is
+able to obtain and process more than 25 high-resolution OCT data volumes per second. This way, VolRec allows OCT systems to perform real-time measurements that
+could help doctors and physicians in many different cases, e.g., during surgical interventions or during exams to restless patients, such as kids. Moreover, VolRec allows
+to adapt to telemedicine techniques such as telesurgery or image-guided medical
+robots. To achieve real-time performance, it is necessary to address the limitations
+of current OCT systems, which are restricted by both the acquisition and processing
+of massive amounts of data. To overcome those limitations, this work proposes an
+approach based on a 4D reconstruction. Our proposal allows to generate high-resolution volumes from acquired low-resolution ones. Hence, increasing the acquisition
+speed while reducing the acquisition resolution without sacrificing image quality.
+To this end, we use parallel programming mechanisms such as OpenMP (for CPUs)
+and CUDA to exploit the computing capabilities of modern GPUs. Our real-time
+volumetric reconstruction algorithm efficiently achieves a very high performance,
+reaching a processing rate of 18 GigaVoxels/s and about 72× speedup over a parallel CPU-based algorithm using a GPU, by efficiently exploiting the vast amount of
+data-level parallelism inherent to OCT data volumes.
+Keywords CUDA · GP-GPU · OCT · OpenMP · Parallelism
+* Arturo Vicente‑Jaén
+arturo.vicentej@um.es
+Juan Mompeán
+juan.mompean@um.es
+Juan L. Aragón
+jlaragon@um.es
+Pablo Artal
+pablo@um.es
+1
+Laboratorio de Óptica, Universidad de Murcia, 30100 Murcia, Spain
+2
+Departamento de Ingeniería y Tecnología de Computadores, Universidad de Murcia,
+30100 Murcia, Spain
+Vol.:(0123456789)
+472
+Page 2 of 22
+A. Vicente‑Jaén et al.
+1 Introduction
+Optical coherence tomography (OCT) [1, 2] is a common imaging diagnostic technique for a wide variety of ocular purposes and ophthalmic procedures. It is able
+to obtain 3D deep ocular volumes from human eyes in a fast non-invasive way and
+with high quality. Thus, OCT systems are very useful for the detection of multiple
+types of ocular pathologies, from cataracts to retinal damage [3].
+OCT systems have improved over the years in terms of both speed and quality
+since they were invented 30 years ago [4]. However, their throughput is still not
+enough to perform real-time visualization of the data, which would be preferred to
+an off-line visualization in most of the situations. A trade-off between speed and
+image quality can significantly increase the performance; however, our goal is to
+minimize the quality loss while increasing the processing speed. For this reason,
+we decided to update the OCT system developed by the authors in [5, 6], to make
+it capable of performing real-time measurements. This OCT is shown in Fig. 1,
+together with its basic operating diagram.
+In the present work, we have first performed a detailed analysis of the OCT’s
+data acquisition system and previous algorithms that can be found in the literature
+to properly identify the main bottlenecks and the critical parts that should be optimized. Typically, OCT systems are capable of processing 1 or even fewer 3D data
+volumes per second, although this number might greatly vary depending on the
+system configuration. When an OCT system is designed, some trade-offs are done
+between 3D volumes per second and resolution. Usually, throughput is sacrificed to
+maintain maximum resolution and image quality.
+The OCT system evaluated in this work is an example of that, where the resolution is originally maximized in order to capture large data volumes comprised of
+300 × 300 × 8192 voxels (using 4-byte single-precision floating point data and leading to a total size of 2.75 GB per volume), although smaller resolutions are also possible. Single-precision floating point data type is chosen because it matches the raw
+Fig. 1 OCT picture along with a 3D output of a scanned eye
+VolRec: 4D real‑time volumetric reconstruction of OCT data﻿
+Page 3 of 22
+472
+data type and is needed for the FFT calculation. Therefore, the typical 3D volume is
+composed of 700 million voxels whose acquisition takes around 2 s. Then, the processing of the 3D volume is performed and the resulting 3D image is displayed (as
+the one shown in the rightmost image in Fig. 1).
+In this paper, we present a novel method for the volumetric reconstruction of
+OCT data, called VolRec. The name VolRec is derived from the combination of
+“Volumetric" and “Reconstruction", succinctly encapsulating the core functionality
+of our method. The goal of VolRec approach is to maintain the maximum resolution but improving the acquisition time by means of reducing the resolution of the
+acquired 3D volumes. To that end, some intelligent processing is needed in order to
+improve the quality of the displayed 3D image and recover the original (maximum)
+resolution. During this processing, advanced techniques are applied to generate a
+full-resolution volume from low-resolution ones acquired in different epochs with
+high quality. Note that, to achieve what it is usually known as real-time imaging
+(i.e., 25 data volumes per second, so we can perform a live data visualization), a
+processing rate of 17 GigaVoxels/s at the very least is needed.
+Our approach consists of applying the classical OCT algorithms (dispersion compensation, linearization, FFT, etc.) on lower-resolution data sets that can be acquired
+in real time, to dynamically reconstruct a full-resolution final volume by leveraging not only 3D spatial interpolation but also temporal interpolation (hence, our 4D
+reconstruction technique) by using data from previous volumes. The use of data
+from previous volumes to approximate current data is a novel approach for OCT
+systems but well known in the fields of video compression and real-time graphics
+rendering, commonly referred to as frame-to-frame temporal coherence, meaning
+that in a video sequence two consecutive frames exhibit minor changes. This technique has been applied since many years ago [7, 8].
+By exploiting temporal coherence in low-resolution OCT data volumes, it is possible to recover and reconstruct high-resolution volumes with fine details in real
+time.
+2 Background and related work
+2.1 Background
+OCT systems, as the one in Fig. 1, are commonly based on a light source whose output is split into both the reference arm and the sampling arm. A 2-axis galvanometer
+tunable scanner is used in the sampling arm to scan the target (typically a human
+eye) and acquire its corresponding 3D data volume.
+Later, the system combines the light from both beams at the exit of their respective arms, and a high-speed photodetector is responsible of capturing the raw data.
+Finally, the photodetector sends the raw data to the computer, where the processing
+of the 3D volume is done.
+Before providing an insight about how this processing is performed, it is important to introduce some basic terminology about how the different entities of an OCT
+volume are named. Three levels can be differentiated within a volume; the smallest
+472
+Page 4 of 22
+A. Vicente‑Jaén et al.
+one is called a voxel, a zero-dimensional entity corresponding to each of the individual data points captured by the OCT system (it is the equivalent to a pixel in a 2D
+image). The next level corresponds to an A-scan, a one-dimensional entity that corresponds to a line of voxels along the Z axis (in the evaluated OCT each A-scan contains 8192 voxels). At the next level, a B-scan is a two-dimensional entity that refers
+to a horizontal cut of the volume, i.e., a 2D plane composed of a set of A-scans
+(in the evaluated OCT each B-scan corresponds to a 2D plane of 300 × 8192 voxels). Lastly, the whole volume is a three-dimensional entity usually referred to as a
+C-scan but we will call it (3D) volume for simplicity.
+As this SS-OCT is implemented using a tunable laser source over a broad spectral
+range [9], data obtained from the photodetector are sampled in the spectral domain.
+In order to compute the corresponding spatial domain volume, where each voxel
+corresponds to a real physical position, the grayscale value of the voxels is calculated by performing a fast Fourier transform (FFT) per A-scan. As a volume is comprised of many different one-dimensional A-scans, a lot of computation is involved
+but very independent, making it possible to exploit data parallelism and being GPUs
+appropriate hardware platforms to be used due to their powerful compute capabilities, as will be further detailed in Sect. 3.1.
+2.2 Related work
+The huge amount of data acquired by OCT systems are well suited for parallelism,
+as most of the processing can be done in parallel for each voxel or for each A-scan.
+Being an inherently parallel task has attracted the interest of many researchers who
+have achieved impressive results trying to improve the algorithms for computational
+OCT processing [10–12]. In addition, 3D volume reconstruction techniques have
+been developed in many other areas such as tomography imaging [13]. GPUs and
+high-performance computing techniques are usually applied to medical image processing [14, 15]. Furthermore, promising novel techniques such as artificial intelligence have recently been applied to OCT data processing [16], e.g., to reduce the
+noise of volumes. Despite this, existing research works have focused on accelerating
+the traditional OCT processing algorithm but not on speeding up the entire system
+throughput. That causes low throughput when using high-resolution volumes with
+lots of voxels, which limits the system ability to perform real-time visualization.
+Next, we review some of the aforementioned works that focus on accelerating the
+classical FFT approach and which are the basis of our research. To compare the performance obtained by the discussed studies, their reported results are summarized in
+Table 1. Each study has different configurations and small variations in the processing they perform. In an attempt to fairly compare their performance, the number of
+processed voxels per second has been selected as the comparison metric.
+Those state-of-the-art works aim to enhance performance by exploiting parallelism through the utilization of diverse hardware platforms. The work in [19] uses programmable FPGAs for OCT data processing which may compromise the achieved
+performance but it leads to very energy-efficient systems. Other works use GPUs
+[10, 17, 18, 20, 21] where it can be noted that the most recent publications (which
+VolRec: 4D real‑time volumetric reconstruction of OCT data﻿
+Table 1 Comparative analysis
+of previous related work
+Research work
+Page 5 of 22
+Processing unit
+Performance
+(MVo/s)
+Zhang et al. [17]
+GPU GeForce GTX 580
+120
+Cho et al. [18]
+GPU GeForce GTX 480
+110
+Choi et al. [19]
+20x FPGAs NI PXIe-7962R
+120
+Wieser et al. [11]
+GPU GeForce GTX 690
+1070
+Mompeán et al. [10] GPU GeForce GTX 1080Ti
+Britten et al. [12]
+472
+2519
+2x GPUs NVIDIA TITAN RTX 5000
+employ newer hardware) obtain better results than older ones. Particularly, [11]
+surpasses the 1000 MVo/s (MegaVoxels per second) barrier and [10] achieves over
+2500 MVo/s. The work in [12] reports impressive results with a processing speed
+higher than 5000 MVo/s when using two NVIDIA TITAN RTX boards. Multiple
+GPU systems can also be found in the literature. The system presented in [11] features the use of two GPUs for different purposes, one for computation and another
+for rendering and plotting the final images. Something similar is done in [17].
+All previous research shown in Table 1 execute a similar processing algorithm,
+which is basically the same than our preprocessing algorithm (see Algorithm 1),
+therefore, the obtained performance differences depend on the computing power of
+the underlying hardware device. This computing power, together with the physical
+limitations of the acquisition/scanning system, are the main limiting factors of the
+classic approach.
+In order to overcome the aforementioned limitations, our approach performs a
+volumetric reconstruction out of low-resolution volumes to obtain full-resolution
+volumes with high accuracy.
+3 Proposed solution
+In order to achieve a real-time procedure when computing high-resolution 3D
+images, we developed a system that combines the classic OCT approach with volumetric 4D reconstruction. To the best of our knowledge, no other previous work
+has developed an OCT processing algorithm based on parallel 4D volumetric
+reconstruction.
+The proposed approach is called VolRec and performs a novel and fast 4D spatiotemporal reconstruction from low-resolution volumes (typically 60 × 60 × 8192 voxels), instead of using the full-resolution ones (300 × 300 × 8192 voxels) that were
+previously preprocessed with the traditional FFT approach, aimed at reconstructing
+high-resolution data volumes in real time.
+The VolRec algorithm is split into two main stages:
+• The first stage preprocesses the raw data coming from smaller resolution vol-
+umes.
+472
+Page 6 of 22
+A. Vicente‑Jaén et al.
+• The second stage reconstructs the low-resolution preprocessed volumes into
+the final full-resolution ones. To do that, it applies both interlace and interpolation operations.
+3.1 First stage: preprocessing
+The preprocessing algorithm generates low-resolution volumes from the raw data
+sampled by the optical system in the spectral domain, and it is based on applying FFTs. Also, this preprocess is basically the same as in classical approaches.
+This operation is comprehensively detailed in [9]. However, some initial work
+is needed to prepare the data for the FFT operations. In particular, an operation to subtract the mean of each A-scan is applied to center the data. Then, an
+FFT is performed for each A-scan, with a depth size of 8192 voxels. That means
+that a full-resolution volume typically requires performing 90,000 (300 × 300)
+FFTs, whereas a low-resolution volume only performs 3600 (60 × 60) FFTs. It
+is important to note here that Z-dimension after FFTs is constrained to half-size
+because of the complex-to-float translation. Finally, other operations to enhance
+visualization are applied: a logarithm scaling, a flipping of both horizontal and
+vertical axes, to finish with a range-based pixel normalization. This preprocessing algorithm is outlined in Algorithm 1.
+Algorithm 1 Preprocessing algorithm pseudocode [10].
+3.2 Second stage: volumetric reconstruction
+VolRec reconstructs full-resolution volumes from the smaller preprocessed ones. To
+accomplish this, it first merges different preprocessed low-resolution volumes, that
+VolRec: 4D real‑time volumetric reconstruction of OCT data﻿
+Page 7 of 22
+472
+were obtained in previous epochs, into a high-resolution one with a spatio-temporal
+interlacing operation. And second, it applies a convolution kernel to the interlaced
+volume to obtain the final volume. This convolution kernel relies on both time and
+space interpolation to give more weight to newer and closer voxels. This approach
+efficiently and successfully creates a full-resolution volume by combining information from previous low-resolution ones.
+Let us explain in more detail how the 4D spatio-temporal reconstruction is
+performed.
+• Interlacing This operation creates, in each timestamp, a full-resolution vol-
+ume using lower-resolution volumes from the current epoch and previous ones.
+In this work we consider that low-resolution volumes are acquired in real time
+(< 40 ms). This interlacing operation relies in configuring the physical device to
+obtain low-resolution volumes using a constant stride through the full sampling
+space and a dynamic offset moving across the different epochs. For illustrating
+purposes, Fig. 2 presents an example of this interlacing operation for a full-resolution volume comprised of 9x9 A-scans (see the bottom volume) using nine
+low-resolution volumes of 3x3 A-scans from previous epochs. Note that each
+A-scan has a depth of N voxels; thus, the full-resolution volume contains 9x9xN
+voxels. Therefore, we can generate a full-resolution interlaced volume by placing the A-scans of each epoch in their corresponding positions, calculated using
+the epoch number as an offset and the selected stride. The function to transform
+from the low-resolution sampling space to the full-resolution space T(x, y) is
+shown below, where both ox and oy are the offset in each dimension for different
+epochs, and s is the selected stride.
+T(x, y) = (x ∗ s + ox , y ∗ s + oy )
+In the example, the A-scans from epoch N (red bars) are placed in coordinates
+[0,0], [0,3], [0,6], [3,0], [3,3], [3,6], [6,0], [6,3] and [6,6] within the full-resolution space. Similarly, the A-scans from epoch N+1 (orange bars) will be placed
+in coordinates [0,1], [0,4], [0,7], [3,1], [3,4], [3,7], [6,1], [6,4], [6,7]. This mapping behavior remains the same for all epochs during the interlacing operation.
+Thus, each low-resolution volume acquired by the physical device would look
+similar to the red 3x3xN volume showed on the top-left corner of Fig. 2. Also,
+it is important to note that each A-scan of the low-resolution volume represents
+a portion of the full sampling space with a stride. Specifically, in the example,
+A-scans within the full sampling space are represented in the different volumes
+of each epoch with different colors, while white A-scans represent empty gaps in
+the data recollection for that epoch. Finally, the interlaced full-resolution volume
+is shown at the bottom of Fig. 2, where A-scans from different epochs are represented with their color. For the evaluated setup in this paper, we configured the
+optical system to acquire OCT volumes with a stride of 5 in x and y dimensions
+(or equivalently, 25 times smaller in volume than the maximum resolution). In
+other words, the OCT system is configured to acquire low-resolution volumes
+of size 60 × 60 × 8192 with an offset depending on the timestamp instead of a
+472
+Page 8 of 22
+A. Vicente‑Jaén et al.
+Fig. 2 Example of the interlacing operation to generate a 9 × 9 × N full-resolution volume (shown at
+the bottom) comprised of 9x9 A-scans coming from 9 different epochs. In each epoch (represented with
+different colors), a low-resolution volume of 3x3xN is acquired (e.g., the red one at the left-top corner),
+totaling the 81 A-scans needed for this example. The 3x3 A-scans from each epoch are evenly spaced
+with a stride of 3 (in x and y) within the full-resolution space as depicted. Consecutive epochs are interlaced with an offset of 1
+full-resolution volume of 300 × 300 × 8192. We empirically found that a sample
+space reduction of 5 × 5 is a good trade-off between precision and speed of the
+algorithm. Note, however, that further research can be conducted in this area by
+varying the stride and testing different strides across various dimensions. Overall, this size reduction potentially allows to acquire and preprocess the smaller
+VolRec: 4D real‑time volumetric reconstruction of OCT data﻿
+Page 9 of 22
+472
+volumes 25 times faster than the full-resolution ones, however, at the expense of
+reducing data quality, in case no treatment is done to (approximately) recover the
+original full resolution.
+• Processing Lastly, we apply a custom spatio-temporal convolution kernel of size
+3x3x3 to the full-resolution interlaced volume. This kernel size was empirically
+selected because larger sizes did not manage to perform with greater precision in
+less processing time. Kernel weights have been carefully selected in such a way
+that, for a given voxel, more relevance is given to the neighbor voxels that are
+newer and closer. The pseudocode of the applied convolution kernel is shown in
+Algorithm 2. Here, comb(tempW, spatialW) is just a sum of both weights,
+as they are normalized. However, many different forms of combination can be
+applied. On the one hand, spatial weights are configured using a 3D Gaussian
+distribution, that gives much more importance to closer voxels. This is visually
+shown in Fig. 3, where the corners, colored in yellow, are less important than
+the central voxel, colored in dark red. On the other hand, temporal weights are
+assigned to every voxel of each A-scan depending on how old they are, giving
+less relevance to A-scans coming from volumes of older epochs. This calculation can be formally described as follows (here, Sx and Sy are the strides in corresponding dimensions, and x and y the positions of the A-scan to which the
+treated voxel belongs):
+Tw (x, y, epoch) = ((ysx + x) − 1 − (epoch mod (sx sy ))) mod (sx sy ))
+Note that these time-based weights are dynamic and must change in each epoch
+for each A-scan. That causes some issues that have to be solved, as we will
+explain in Sect. 5.2.
+Algorithm 2 Pseudocode for the spatio-temporal convolution kernel.
+Fig. 3 Visual diagram for the
+three-dimensional convolution
+kernel representing the application of the spatial weights,
+where the center element
+corresponds to the voxel which
+the convolution is applied to. A
+darker color means less distance
+to the center; hence, more spatial weight is given to that voxel
+472
+Page 10 of 22
+A. Vicente‑Jaén et al.
+3.3 VolRec variants
+We have evaluated two different alternatives for VolRec, in order to measure its
+accuracy in different scenarios which might happen during a real measurement of
+a patient, such as slow vs fast eye movements. The two evaluated alternatives are
+called non-cumulative processing and cumulative processing and are explained next:
+1. non-cumulative processing In each epoch, freshly acquired raw data are preprocessed in order to obtain a low-resolution volume. Then, the new data are merged
+(interlaced) with data from previous epochs to compose the full-resolution volume, using the previously explained interlacing operation, to merge the current
+epoch low-resolution raw volume with the interlaced full-resolution volume of
+the previous epoch (called mergedV in the Algorithm 3). Finally, the convolution kernel with both temporal and spatial weights is applied to the raw interlaced
+full-resolution volume to produce the final volume. Algorithm 3 shows the pseudocode of the more relevant parts of this alternative.
+2. cumulative processing In each epoch, newly acquired raw data are preprocessed in
+the same way as for the non-cumulative processing alternative. Then, the preprocessed low-resolution volume is merged with the last full-resolution volume using
+the interlacing operation. This is the main difference between the two alternatives:
+in this one, new data are interlaced with the last full-resolution convolved volume
+instead of interlacing volumes with raw data (without any convolution operation
+applied). This second alternative is achieved with a simple change in line 8 of
+Algorithm 3, which is replaced by: mergedV ← interl(exitV, preproV). Finally,
+VolRec: 4D real‑time volumetric reconstruction of OCT data﻿
+Page 11 of 22
+472
+the full-resolution volume for the current epoch is generated by applying the said
+convolution kernel to the interlaced volume.
+Algorithm 3 Pseudocode for non-cumulative processing of VolRec
+4 Experimental framework
+For testing the CUDA variants we use a NVIDIA 1080TI GPU, with 3584
+CUDA-cores and 11 GB of VRAM memory with 484.4 GB/s peak bandwidth.
+This is a high-end GPU featuring a considerable number of cores, memory and
+speed, providing ample performance for a wide range of applications. In addition
+to that, a system with 2 Intel Xeon Gold 5218 processors at 2.30 GHz and a total
+of 32 cores/64 threads has been used to evaluate an OpenMP implementation of
+the proposed algorithm. This CPU allows to obtain fast OpenMP results and can
+be a good reference point when comparing with the CUDA variants. To ensure
+that the CPU version is properly optimized, the FFTs have been calculated using
+the FFTW3 library [22].
+In order to develop the proposed approach and algorithm, C++17 has been
+used together with CUDA 11.7 and OpenMP 5.1 to take advantage of the performance and parallel capabilities of these programming languages in both GPUs
+and CPUs. In addition, we use other libraries such as FFTW3 (version 3.3.10)
+and cuFFT (version 10.7.2.50) to perform the Fourier operations efficiently.
+As experimental input set, we use a full-resolution volume which was obtained
+with the OCT device presented in Sect. 1. This volume is used to simulate eye movements, such as rotations that simulate side-to-side changes of fixation. These simulations are necessary as ground truth because it is not possible to obtain full volumes
+in real time in the current system. These simulations give the appearance of a real
+human eye in motion. Thus, they allow us to test the behavior of VolRec in a more
+realistic setting. Section 6.2 contains more information about these simulations.
+472
+Page 12 of 22
+A. Vicente‑Jaén et al.
+5 Accelerating VolRec
+CUDA is a powerful programming model to extract all the available parallelism
+in NVIDIA GPUs. However, it is not enough to simply translate from C++ code
+to a naive CUDA version. For this reason, some specific optimizations must be
+applied in order to achieve the most efficient and fast implementation possible.
+In addition, all the applied optimizations work together to obtain a significant
+reduction in the execution time. To better understand the impact of each optimization, the performance results have been recorded after applying each one of
+them. The key of this work is the meticulous implementation of the proposed
+algorithms, prioritizing the speed-quality trade-off, as highlighted in the results
+and discussion.
+Next, we explain the different optimizations applied to the proposed VolRec
+algorithm to make it capable of achieving the desired real-time processing speed.
+5.1 Accelerating the preprocessing stage
+Regarding the preprocessing stage, Fig. 4 summarizes the speedup obtained for
+each implemented version which are described next.
+• Naive CUDA version The naive CUDA version directly maps the sequential C
+code into a preliminary CUDA version. It uses CUDA fast mathematics libraries
+for floating point operations and the cuFFT library for executing FFT operations
+in a fast and parallel way on the GPU. This preliminary version achieves a pro-
+Fig. 4 Speedup of the parallelized preprocessing algorithm of VolRec (for low-resolution volumes) and
+the CUDA optimizations (over the naive CUDA version)
+VolRec: 4D real‑time volumetric reconstruction of OCT data﻿
+Page 13 of 22
+472
+cessing time of 42 ms for each low-resolution volume, represented in the fifth
+bar of the plot in Fig. 4 and a 1.64× speedup compared to the best OpenMP version.
+• Pinned memory and CUDA streams For our next optimization point, we use
+CUDA streams and pinned memory for overlapping compute with device-to-host
+copies, in order to maximize performance. On the one hand, pinned memory is
+a memory region that the CUDA driver allocates in the host main memory in a
+temporary page-locked mode. This region is used for all copies from and to the
+device, so all data moved between the host and the device are first copied to this
+region and then moved to the host main pageable memory. This way, we directly
+allocate data into pinned memory in order to avoid copies from pinned memory
+to the pageable memory region of the host. Moreover, it is important to allocate
+directly in pinned memory when using CUDA streams and asynchronous copies. Otherwise, the driver synchronizes the execution and copies silently. On the
+other hand, we use CUDA streams, a mechanism that allows to perform different CUDA operations concurrently. CUDA streams allows to overlap operations
+and reduce processing time. This way, we map each B-scan computation into
+different streams. Thus, kernel computation and copies from a B-scan can potentially overlap with work of another one, if properly configured, obtaining higher
+throughput. Through the use of the CUDA Streams mechanism, the majority
+of B-scan transfers between the host and device, both from host-to-device and
+device-to-host, effectively overlap with computation, thereby achieving parallelization. After applying these optimizations, the achieved speedup is 3.70× with
+respect to the naive version, including computing and host-to-device and deviceto-host copies. Hence, this version is capable of computing each low-resolution
+volume in just 11.2 ms, as shown in the sixth bar of the plot in Fig. 4.
+5.2 Accelerating the volumetric reconstruction
+Regarding the final processing phase that involves the full-resolution volumetric
+reconstruction, Fig. 5 summarizes the speedup obtained for each one of the implemented versions which are described next.
+• Naive CUDA version The naive version for this second stage of the VolRec algo-
+rithm simply maps the sequential C code of the convolution kernel into CUDA
+code. Thus, the interlacing operation is still performed sequentially in the CPU.
+This way, each CUDA thread must calculate one exit voxel. This calculation consists of loading every neighbor of the current voxel plus the temporal and the
+spatial weights. The value of each voxel is multiplied by its corresponding temporal and spatial weights and the output voxel value is obtained. Additionally,
+for each volume it is necessary to copy the whole high-resolution volume from
+the CPU to the GPU and vice versa. This naive version computes each volume
+in 608.35 ms, which means a rate of 1.64 volumes per second. It reaches a 4.54×
+speedup versus the fastest OpenMP version. This can be shown in the fifth bar of
+the plot in Fig. 5.
+472
+Page 14 of 22
+A. Vicente‑Jaén et al.
+Fig. 5 Speedup of the parallelized 2nd stage of VolRec (volumetric reconstruction) for the different
+CUDA optimizations (over the naive CUDA version)
+• Reducing the amount of computation We realized by using the NVIDIA Vis-
+ual Profiler, that the previous naive version was mainly limited by the compute
+power of the GPU hardware. This limitation appears because the naive version
+calculates both temporal and spatial weights for each neighbor of each result
+voxel. However, voxels of each A-scan share the same temporal weight in each
+specific timestamp. Thus, temporal weights for each A-scan can be calculated
+just once per epoch instead of 4096 times (one per voxel within an A-scan) in
+order to reduce computational complexity. As it can be noted, the naive version
+for this second stage is doing lots of repetitive and unnecessary operations that
+can be optimized. For that, we decide to precalculate the temporal weights by a
+light CUDA kernel and then reuse them for every voxel in each A-scan before
+launching the processing for each timestamp. Therefore, the current version calculates just 300 ∗ 300 instead of 300 ∗ 300 ∗ 4096 ∗ 27 temporal weights, which
+means we require much less computational power for processing a full-resolution volume. The speedup of this optimization is shown in the sixth bar of Fig. 5.
+This version generates a volume in 382.93 ms, allowing it to process 2.6 volumes
+per second, achieving a 1.59× speedup over the naive version.
+• Use of constant memory for precalculated weights The previous version, even
+though it is able to reduce the computing cost, is still limited by the memory
+access latency because many threads try to access the same global memory locations simultaneously in order to retrieve the precalculated temporal and spatial
+weights. Moreover, global memory banks in GPUs have a bad multi-cast behavior that makes impossible to load the same position by different threads of the
+same warp at exactly the same time. The solution to reduce global memory
+latency problems is to replace it by constant memory, which has much better
+multi-cast performance, to store both types of weights. Despite its excellent
+VolRec: 4D real‑time volumetric reconstruction of OCT data﻿
+Page 15 of 22
+472
+broadcast capabilities, constant memory still has some problems. First, it is an
+only-readable memory and not writable, so we need to store all weights statically (including temporal ones, which have a slightly dynamic character). Second, constant memory is small, with a size of only 64 KiB. Therefore, for storing
+both spatial and temporal weights in this small memory region we will need to
+perform some transformations. On the one hand, spatial weights can be directly
+mapped to constant memory before launching the CUDA environment because
+they are inherently constant. On the other hand, temporal weights require some
+operations before mapping them to constant memory. A first trivial mapping of
+temporal weights would be to store all precalculated weights for each A-scan in
+each epoch, but it is not possible because constant memory cannot even store the
+A-scan weights for a single epoch since they have a size of 300 ∗ 300 ∗ 4 bytes
+which is bigger than 64 KiB. However, temporal weights are repeated across all
+the volume, as shown in Fig. 2, so the same 5 × 5 block can be shared among all
+the threads. Moreover, since there are only 25 different possible positions for an
+A-scan, and the scanning positions are sequential and repeated, there are only
+25 valid distributions for the temporal weights. Therefore, a 25 × 25 structure
+can hold all the temporal weights used during the execution. This way, constant
+memory can store these data directly. This new optimization yields a 2.02 ×
+speedup versus the naive CUDA version. Thus, it can process each volume in
+just 301.44 ms which represents a processing rate of 3.32 volumes per second.
+Performance of this version is shown in the seventh bar of the plot in Fig. 5.
+• Host-to-device copies optimization In the previous versions, only the convolution kernel is executed in the device. That way, in each epoch we copy from
+host to device the whole high-resolution merged volume, which has a size of
+300 ∗ 300 ∗ 4096 ∗ 4 bytes ≈ 1.4 GB. Hence, above versions spend a large portion of their execution time copying data back and forth between the CPU and
+the GPU. A way to solve this problem is moving the interlacing operation to the
+GPU. That allows to interlace in a parallel and faster way. It also allows to copy
+just the low-resolution preprocessed volume to the device in each epoch. These
+smaller volumes have a size of 60 ∗ 60 ∗ 4096 ∗ 4 bytes ≈ 0.056 GB, which is
+25 times smaller than the full-resolution volume. Hence, host-to-device copies
+can reach a theoretical 25× speedup. Overall, this version is able to process a
+volume in just 204.83 ms, as it is shown in the eighth bar in Fig. 5. Thus, it can
+process 4.88 volumes per second, achieving a speedup of 2.97× over the naive
+CUDA version.
+• Device-to-host copies optimization In contrast with the previous optimization, the full-resolution volume must be copied from the device to the host.
+As each voxel is represented with a float data type, a whole volume occupies
+300 ∗ 300 ∗ 4096 ∗ 4 bytes ≈ 1.4 GB. In an attempt to reduce the excessive
+amount of data being copied, the data type has been changed to uint8_t before
+doing the copy. This aims to reduce 4 times the data size and the resulting copies can theoretically be done 4 times faster. Nonetheless, quality is not reduced
+when applying this optimization as the volume codification when saving the
+results is 8 bits. Therefore, this optimization is able to process each volume in
+just 75.53 ms, which corresponds to more than 13 volumes per second. This
+472
+Page 16 of 22
+A. Vicente‑Jaén et al.
+translates to a 8.16× speedup over the naive CUDA version. This speedup is represented in next-to-last bar of the plot in Fig. 5.
+• Pinned memory and CUDA streams Finally, we use pinned memory and CUDA
+streams, in a similar way as in Sect. 5.1. Streams are used to process and copy
+data in parallel from different B-scans. Thus, we overlap copies from a portion of
+the volume with compute done in a different portion of the volume to minimize
+the processing time. This final optimization is able to process each volume in
+39.17 ms, which means that potentially we can process more than 25 volumes
+per second, therefore, achieving the desired real-time processing. In addition, it
+gets a 15.53× speedup over the naive CUDA version, as shown in last bar of the
+plot in Fig. 5.
+Summarizing, all the stages (acquire, preprocessing and processing) are pipelined
+to overlap different operations (both copy and compute) from volumes in different
+epochs. Thus, filling up the pipeline from scratch has a latency of the sum of the
+three stages. These are acquisition time (< 40 ms) + preprocess time (≈ 12 ms) +
+reconstructed time (≈ 40 ms). Hence, this allows to obtain and process each volume
+in real time with no more than one tenth of second of latency (or 100 ms).
+6 Quality and accuracy of VolRec
+A key part of this novel approach to improve the processing speed of OCT systems
+is to maintain a certain level of quality. Furthermore, as we have tried two different
+alternatives for the interlacing part of the algorithm, a comparison between the two
+of them is needed. To make a fair comparison, we use two metrics: the Peak Signalto-Noise Ratio (PSNR) and the Structural Similarity Index Measure (SSIM).
+The PSNR is a classical metric which has demonstrated to be a valid quality indicator for videos and images [23] and it is widely used in image comparison and
+engineering in general. It uses a logarithmic scale and ranges from zero (for two
+completely different images) to infinite (for two completely identical images).
+The SSIM [24] is a modern metric that calculates differences between two images
+according to dissimilarities in the structural data. Hence, the SSIM gives much
+importance to differences between groups of pixels that are closely related in terms
+of luminosity, variance and reciprocity. This index ranges from zero (for two completely different images) to one (for two completely identical images).
+6.1 Quality of the preprocessing stage
+For this stage, we compare preprocessed volumes using both the CUDA and the
+CPU versions, and we measure the SSIM and PSNR metrics comparing both versions. Note that the sequential CPU version of the preprocess of a full-resolution
+volume (or in other words, the classical pipeline) is the reference point and it is considered the correct result. Nonetheless, it is the algorithm that has been used traditionally in OCT systems.
+VolRec: 4D real‑time volumetric reconstruction of OCT data﻿
+Page 17 of 22
+472
+Table 2 reports both quality metrics, SSIM and PSNR, comparing a volume generated with our parallel GPU version against the same volume generated with the sequential CPU version.
+It can be noted that both GPU and CPU versions generate an almost identical fullresolution volume, in terms of the SSIM metric (very close to 1) and achieve a very
+high PSNR. However, both results do not match exactly, due to little differences in
+the FFT operation performed by different libraries. This confirms that the developed
+CUDA algorithm for the preprocessing stage is correct and with an extremely high
+fidelity.
+6.2 Quality of the volumetric reconstruction stage
+To measure the quality of this second and more critical stage, we have created two different data sets that are used to evaluate the parallelized GPU algorithm in different
+situations. Due to physical and mechanical limitations of the scanning part of the OCT
+system, it is impossible to scan volumes at the maximum resolution in real time, which
+takes around 2 s each, being much longer than common eye movements. Therefore, we
+have emulated the rotation movement of an eye using a statically acquired volume at
+full resolution, and later making small rotations, in order to generate a sequence of fullresolution volumes representing a moving eye at two different speeds. Both data sets
+simulate a constant rotating movement of the eye in the horizontal plane, from left to
+right. However, the first data set simulates a fast eye movement, while the second data
+set simulates a slow eye movement.
+Next, we analyze the two VolRec alternatives (non-cumulative processing, cumulative processing) that were explained in Sect. 3.3 for the two data sets using both PSNR
+and SSIM metrics. We use these metrics to compare the similarity of the generated
+full-resolution volumes with the ideal volumes (that were synthetically generated by
+applying a geometrical rotation). As these metrics are designed for 2D image comparison, we compare 3D volumes by comparing each pair of planes (the B-scan of one
+volume vs the corresponding B-scan of the second volume) and averaging all the PSNR
+or SSIM values to obtain the similarity metric for the whole volume.
+But before going to the quantitative results and to provide a better insight about the
+behavior of the similarity metrics, we conducted a preliminary test that uses exactly the
+same volume with 3 rotations at angles 0.1◦ , 1◦ and 10◦. The resulting similarity metrics are reported in Table 3 and provide a reference point. It can be noticed that even
+a very small rotation of 0.1◦ results in a significant change in the SSIM metric, which
+clearly drops from almost 1 to around 0.5. The PSNR is less sensitive to such slight
+changes, going from about 93 dB (when comparing 2 exactly equal volumes) to 22
+dB for a 0.1◦ rotation of the very same volume. On the other hand, a clearly noticeable
+Table 2 Comparison of GPU versus CPU generated volumes just considering the preprocessing stage
+SSIM
+PSNR (dB)
+0.99999
+93.31294
+472
+Page 18 of 22
+A. Vicente‑Jaén et al.
+Table 3 Similarity metrics behavior by comparing a static volume with itself but rotated at 3 angles
+(0.1◦ , 1◦ and 10◦), so we can see how sensitive the used similarity metrics are to rotations
+SSIM
+Movement (Rotation) ( ◦)
+PSNR (dB)
+0.1
+0.49075
+22.76333
+1
+0.09944
+19.48928
+10
+0.08939
+18.53576
+rotation of 1◦ dramatically reduces the SSIM index, dropping it below 0.10, whereas the
+PSNR falls below 20 dB.
+6.2.1 Evaluating slow‑speed eye movements
+The first evaluated data set represents a low-speed movement which simulates an
+eye rotating movement from −0.5◦ to 0.5◦ with a step of 0.01◦. The spatio-temporal
+motion amplitude is 0.25◦/s. The full-resolution generated volume, using both cumulative processing and non-cumulative processing algorithms, is shown in Fig. 6c,
+whereas the corresponding similarity metrics are reported in Table 4. This table
+(similarly to Table 5 in the next section) presents a comparison of the similarity
+between various generated volumes (preprocessed, non-cumulative and cumulative)
+versus the ideal ground truth, evaluated using the SSIM and PSNR metrics.
+In contrast with the previous fast movement analysis, the non-cumulative processing algorithm works better for slow movements. This happens because small
+differences can be absorbed by applying just one convolution kernel, thus the grid
+effect is not appearing, which increases the volume quality. Both metrics show
+that the generated full-resolution volume is much better than the previous one,
+Fig. 6 Frontal projections of the evaluated 3D volumes for different cases: a shows an ideal full resolution volume, b shows a low resolution volume, c is using the non-cumulative algorithm variant, while d
+is using the cumulative algorithm variant
+Table 4 Similarity for a lowspeed movement comparing
+preprocessed, non-cumulative
+and cumulative versus ideal
+Algorithm
+SSIM
+PSNR (dB)
+Preprocess
+0.13314
+20.27044
+Non-cumulative
+0.40078
+23.61127
+Cumulative
+0.28251
+23.32087
+VolRec: 4D real‑time volumetric reconstruction of OCT data﻿
+Table 5 Similarity for a highspeed movement comparing
+preprocessed, non-cumulative,
+and cumulative versus ideal
+Page 19 of 22
+472
+Algorithm
+SSIM
+PSNR (dB)
+Preprocess
+0.14437
+20.37243
+Non-cumulative
+0.19775
+22.13559
+Cumulative
+0.22253
+22.53204
+and both similarity metrics are quite similar to the ideal case for the non-cumulative processing algorithm (a 0.40 SSIM, and a PSNR of 23.61 dB).
+In addition, comparing the snapshots of Fig. 6, it can be noted that the generated full-resolution volume for the low-speed movement (Fig. 6c) does not exhibit
+any noticeable artifact, because one convolution kernel is enough for reducing
+ghosting without creating any grid effect. Overall, the volume generated by VolRec is visually similar to the ideal one (Fig. 6a) and much better than the lowresolution volume (Fig. 6b), which is the best that is possible to generate using
+only raw data in real time, not only due to computational processing but also to
+the physical acquisition of the data.
+These results show that VolRec behaves surprisingly well in common situations during examinations with real patients, such as low-speed eye movements.
+6.2.2 Evaluating high‑speed eye movements
+The second evaluated data set is the one that simulates a high-speed eye movement. Specifically, it simulates an eye rotating on the horizontal plane from −5◦
+to 5◦ with a step of 0.1◦. The spatio-temporal motion amplitude is 2.5◦ ∕s . This
+movement is 10 times more aggressive than the previous one. The resulting volume using both the cumulative processing and the non-cumulative processing
+algorithms is shown in Fig. 6d, and the similarity metrics are reported in Table 5.
+For these fasts eye movements, we find that the cumulative processing alternative (explained in Sect. 3.3) performs better. This happens because more convolutions are applied, and the eye movement is better smoothed due to its cumulative nature. It can be noted that both similarity metrics show that the calculated
+volume is clearly better than just the preprocessed one despite the aggressive
+movement.
+Comparing snapshots of frontal projections of the evaluated 3D volumes,
+which are shown in Fig. 6, it can be noted that the generated full-resolution volume for this high-speed movement (Fig. 6d) exhibits a strange grid effect, which
+appears because in every epoch new raw data are getting into a very smoothed
+volume. It can also be noticed some ghosting due to old data coming from volumes of previous epochs. This is the effect of slow sampling for each position
+making data too old, which cannot be totally absorbed by the interlacing kernel,
+due to the big movement.
+However, the calculated full-resolution volume (Fig. 6d) is visually similar to
+the ideal one (Fig. 6a) and still significantly better than the low-resolution volume
+472
+Page 20 of 22
+A. Vicente‑Jaén et al.
+shown in Fig. 6b, which was the best that the OCT system was able to obtain in
+real time without the proposed VolRec, so it is considered a good result for such
+aggressive movements. This confirms that VolRec performs quite well even in
+extreme cases.
+7 Conclusions
+This work demonstrates that it is possible to process and generate high-resolution
+3D volumes for OCT systems by using the proposed VolRec in GPUs, which is able
+to generate more than 25 full-resolution volumes per second by carefully applying
+spatio-temporal interlacing and convolution to dynamically reconstruct OCT volumes from low-resolution ones. Experimental results have shown that the most optimized CUDA version obtains 71.9× speedup over a parallel OpenMP version on a
+CPU, and more than 1000× over the sequential version.
+More work is needed to properly integrate this methodology to real-world systems. For example, a multi-GPU setup will allow to combine both the preprocessing and the reconstruction algorithms in a pipelined architecture. Other future ways
+rely on changing the sampling distances (offset) for different epochs in the physical
+system in real time and building a full pipeline in order to overlap the computation, acquisition and communication. Also, further research should be conducted to
+explore different stride values for different resolution configurations. However, we
+believe that the proposed algorithm will help to improve worldwide OCT systems by
+developing more versatile systems that can be used in real time in many situations,
+such as ocular surgeries or ocular exams, even for restless patients as kids. Obtained
+results are top quality for both high- and low-speed movements, that proves that
+VolRec has a good behavior even in unfavorable situations. In fact, our system will
+assist in performing in vivo and real-time OCT ocular measurements, which will be
+highly valuable in clinical settings for continuously researching certain behaviors or
+diseases, rather than just taking snapshots or measuring patients lively during surgeries. Moreover, this idea can be potentially extended to other imaging modalities.
+This can open multiple further research across different areas.
+To conclude, the proposed VolRec algorithm is a powerful tool that reaches a
+processing rate of 18 GigaVoxels/s, which is more than 7 times faster than the baseline approach while providing a reconstruction fidelity not far from ideal full-resolution volumes and much better than the previous best approach for real time.
+Supplementary Information The online version contains supplementary material available at https://​doi.​
+org/​10.​1007/​s11227-​025-​06969-6.
+Acknowledgements This work has been supported by Grant PLEC2022-009214, PDC2021-121575-I00
+and TED2021-130233B-C33, funded by MCIN/AEI/10.13039/501100011033 and by the European
+Union NextGenerationEU/PRTR, as well as by Grant LCF/TR/CC21/52∖490004 funded by Fundación
+la Caixa (Grant No. 22317/FPI/23). Mr. Vicente-Jaén has also been supported by the fellowship 22317/
+FPI/23 from Fundación Séneca, Región de Murcia (Spain).
+VolRec: 4D real‑time volumetric reconstruction of OCT data﻿
+Page 21 of 22
+472
+Author contributions AVJ wrote the draft manuscript and carried the development. JLA and PA directed
+the project. JM designed the project. All authors reviewed the results and approved the final version of the
+manuscript.
+Funding Open Access funding provided thanks to the CRUE-CSIC agreement with Springer Nature.
+Data availability No datasets were generated or analyzed during the current study.
+Declarations
+Conflict of interest The authors declare that they have no conflict of interest.
+Open Access This article is licensed under a Creative Commons Attribution 4.0 International License,
+which permits use, sharing, adaptation, distribution and reproduction in any medium or format, as long
+as you give appropriate credit to the original author(s) and the source, provide a link to the Creative
+Commons licence, and indicate if changes were made. The images or other third party material in this
+article are included in the article’s Creative Commons licence, unless indicated otherwise in a credit line
+to the material. If material is not included in the article’s Creative Commons licence and your intended
+use is not permitted by statutory regulation or exceeds the permitted use, you will need to obtain permission directly from the copyright holder. To view a copy of this licence, visit http://creativecommons.org/
+licenses/by/4.0/.
+References
+1. Huang D, Swanson EA, Lin CP, Schuman JS, Stinson WG, Chang W et al (1991) Optical Coherence
+Tomography. Science 254(5035):1178–1181. https://​doi.​org/​10.​1126/​scien​ce.​19571​69
+2. Drexler W, Fujimoto JG et al (2015) Optical coherence tomography: technology and applications,
+vol 2. Springer
+3. Wong AL, Leung CKS, Weinreb RN, Cheng AKC, Cheung CYL, Lam PTH et al (2009) Quantitative assessment of lens opacities with anterior segment optical coherence tomography. Br J Ophthalmol 93(1):61–65. https://​doi.​org/​10.​1136/​bjo.​2008.​137653
+4. De Boer JF, Leitgeb R, Wojtkowski M (2017) Twenty-five years of optical coherence tomography:
+the paradigm shift in sensitivity and speed provided by Fourier domain OCT. Biomed Opt Express
+8(7):3248–3280
+5. de Castro A, Benito A, Manzanera S, Mompeán J, Cañizares B, Martínez D et al (2018) Threedimensional cataract crystalline lens imaging with swept-source optical coherence tomography.
+Investig Ophthalmol Vis Sci 59(2):897–903. https://​doi.​org/​10.​1167/​iovs.​17-​23596
+6. Grulkowski I, Manzanera S, Cwiklinski L, Mompeán J, de Castro A, Marin JM et al (2018) Volumetric macro- and micro-scale assessment of crystalline lens opacities in cataract patients using
+long-depth-range swept source optical coherence tomography. Biomed Opt Express 9(8):3821–
+3833. https://​doi.​org/​10.​1364/​BOE.9.​003821
+7. Hubschman H, Zucker SW (1982) Frame-to-frame coherence and the hidden surface computation:
+constraints for a convex world. ACM Trans Graph (TOG) 1(2):129–162
+8. Klein T, Strengert M, Stegmaier S, Ertl T (2005) Exploiting frame-to-frame coherence for accelerating high-quality volume raycasting on graphics hardware. In: VIS 05. IEEE visualization, 2005.
+IEEE, pp 223–230
+9. Molly Subhash H, Wang R (2013) Optical coherence tomography: technical aspects. In: Biomedical Optical Imaging Technologies, Biological and Medical Physics, Biomedical Engineering. ISBN
+978-3-642-28390-1. Springer, Berlin, p 163. https://​doi.​org/​10.​1007/​978-3-​642-​28391-8_5
+10. Mompeán J (2020) PhD Thesis: Desarrollo de sistemas de tiempo real mediante el uso de aceleradores gráficos y específicos aplicados a la óptica visual humana
+11. Wieser W, Draxinger W, Klein T, Karpf S, Pfeiffer T, Huber R (2014) High definition live
+3D-OCT in vivo: design and evaluation of a 4D OCT engine with 1 GVoxel/s. Biomed Opt Express
+5(9):2963–2977. https://​doi.​org/​10.​1364/​BOE.5.​002963
+472
+Page 22 of 22
+A. Vicente‑Jaén et al.
+12. Britten A, Matten P, Weiss J, Niederleithner M, Roodaki H, Sorg B et al (2023) Surgical microscope
+integrated MHz SS-OCT with live volumetric visualization. Biomed Opt Express 14(2):846–865.
+https://​doi.​org/​10.​1364/​BOE.​477386
+13. Khan U, Yasin A, Abid M, Shafi I, Khan S (2018) A methodological review of 3D reconstruction techniques in tomographic imaging. J Med Syst 09(42):190. https://​doi.​org/​10.​1007/​
+s10916-​018-​1042-2
+14. Gulo CA, de Arruda HF, de Araujo AF, Sementille AC, Tavares JMR (2019) Efficient parallelization on GPU of an image smoothing method based on a variational model. J Real-Time Image Process 16:1249–1261
+15. Gulo CA, Sementille AC, Tavares JMR (2019) Techniques of medical image processing and analysis accelerated by high-performance computing: a systematic literature review. J Real-Time Image
+Process 16(6):1891–1908
+16. Nienhaus J, Matten P, Britten A, Scherer J, Höck E, Freytag A et al (2023) Live 4D-OCT denoising
+with self-supervised deep learning. Sci Rep 13(1):5760
+17. Zhang K, Kang JU (2011) Real-time intraoperative 4D full-range FD-OCT based on the dual graphics processing units architecture for microsurgery guidance. Biomed Opt Express 2(4):764–770.
+https://​doi.​org/​10.​1364/​BOE.2.​000764
+18. Cho NH, Jung U, Kim S, Jung W, Oh J, Kang HW et al (2013) High speed SD-OCT system using
+GPU accelerated mode for in vivo human eye imaging. J Opt Soc Korea 17(1):68–72
+19. Choi D, Hiro-Oka H, Shimizu K, Ohbayashi K (2012) Spectral domain optical coherence tomography of multi-MHz A-scan rates at 1310 nm range and real-time 4D-display up to 41 volumes/
+second. Biomed Opt Express 3(12):3067–3086. https://​doi.​org/​10.​1364/​BOE.3.​003067
+20. Bian H, Wang J, Hong C, Liu L, Ji R, Cao S et al (2023) GPU-accelerated image registration algorithm in ophthalmic optical coherence tomography. Biomed Opt Express 14(1):194–207. https://​doi.​
+org/​10.​1364/​BOE.​479343
+21. Deng X, Liu K, Zhu T, Guo D, Yin X, Yao L et al (2022) Dynamic inverse SNR-decorrelation
+OCT angiography with GPU acceleration. Biomed Opt Express 13(6):3615–3628. https://​doi.​org/​
+10.​1364/​BOE.​459632
+22. Frigo M, Johnson SG (2005) The design and implementation of FFTW3. Proc IEEE 93(2):216–231
+(Special issue on “Program Generation, Optimization, and Platform Adaptation”)
+23. Huynh-Thu Q, Ghanbari M (2008) Scope of validity of PSNR in image/video quality assessment.
+Electron Lett 44:800–801
+24. Wang Z, Bovik AC, Sheikh HR, Simoncelli EP (2004) Image quality assessment: from error visibility to structural similarity. IEEE Trans Image Process 13(4):600–612. https://​doi.​org/​10.​1109/​TIP.​
+2003.​819861
+Publisher’s Note Springer Nature remains neutral with regard to jurisdictional claims in published maps
+and institutional affiliations.

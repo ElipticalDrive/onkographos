@@ -1,0 +1,116 @@
+--- v001.md
++++ v002.md
+@@ -1,29 +1,23 @@
+ # Sphere Rendering with Thickness
+-
+ Also called: Hollow Sphere Rendering with Thickness Clipping, Shell Sphere Voxelization, Shell sphere, Sphere Thickness Rasterization, Thick sphere clipping
+ 
+ ## Overview
+-Sphere Rendering with Thickness renders a sphere as a hollow shell by voxelizing grid points that lie between an inner and outer radius. It differs from solid sphere rendering by excluding the core volume, and from triangle-based thickness methods by using a spherical coordinate system defined by a center point and a single radius parameter. This method is a specialized case of mesh rasterization where the primitive is a sphere rather than a polygon.
++Sphere Rendering with Thickness renders a sphere with a specified thickness as a hollow shell by checking grid points against the sphere's inner and outer radii [S1, unofficial]. It filters grid points based on a thickness parameter, excluding points that fall within the inner radius [S1, unofficial].
+ 
+ ## How it works
+ **Inputs and Outputs**
+-- **Input**: Sphere center position $P_{center}$ (3D vector), sphere radius $r$, thickness parameter $\tau$ (non-negative scalar), and a grid of query points (voxel centers) $V$.
+-- **Output**: A subset of $V$ that falls within the spherical shell, typically marked for rendering or accumulation.
++- **Input**: Sphere center position `pos` (3D vector), sphere radius `r`, thickness parameter $\tau$, and a grid of query points (voxel centers) [S1, unofficial].
++- **Output**: A subset of grid points that fall within the spherical shell, added to a render list [S1, unofficial].
+ 
+ **Data Structures**
+-- **SphereGeometry**: Contains `pos` (center), `radius` ($r$), and optionally `thickness` ($\tau$).
+-- **BucketIndices**: A list of grid indices covering the bounding box of the sphere to optimize query scope.
++- **SphereGeometry**: Contains `pos` (center) and `radius` ($r$) [S1, unofficial].
++- **BucketIndices**: A list of grid indices covering the bounding box of the sphere to optimize query scope [S1, unofficial].
+ 
+ **Steps**
+-1.  **Bounding Box Calculation**: Compute the axis-aligned bounding box (AABB) of the sphere. Determine the range of grid indices (buckets) that intersect this box. This avoids checking every voxel in the scene.
+-    -   Min index: $\lfloor \frac{P_{center}.x - r}{grid\_size} \rfloor$ to $\lceil \frac{P_{center}.x + r}{grid\_size} \rceil$ (similarly for y, z).
+-2.  **Precompute Constants**:
+-    -   Calculate squared radius: $r^2 = r \times r$.
+-    -   Calculate inner shell threshold: $T_{inner} = 2r\tau - r^2$. [S1, unofficial]
+-3.  **Iterate and Filter**: For each voxel center $P_{voxel}$ in the bounding box buckets:
+-    -   Calculate squared distance to center: $d^2 = \| P_{voxel} - P_{center} \|^2$.
+-    -   **Inner Shell Check**: If $\tau > 0$ and $d^2 < T_{inner}$, the point is inside the hollow core. Skip this point. [S1, unofficial]
+-    -   **Outer Shell Check**: If $d^2 < r^2$, the point is within the outer boundary. Add to the render list. [S1, unofficial]
+-    -   *Note*: The condition $d^2 < 2r\tau - r^2$ is described as "magic math" in the source, approximating the inner radius squared for a thin shell. [S1, unofficial]
++1. Compute bounding box indices for the sphere: `auto bucketIndices = calculateIndicesFromBB(params, pos, pos, radius);` [S1, unofficial].
++2. Compute squared radius: `float radius2 = radius * radius;` [S1, unofficial].
++3. For each point `ptCoords` in the bucket, calculate squared distance to center: `float d2 = dist2(ptCoords, pos);` [S1, unofficial].
++4. If `thickness > 0` and `d2 < (2 * radius * thickness - radius2)`, skip the point as it lies inside the hollow core [S1, unofficial].
++5. If `d2 < radius2`, add the point to the render list with color, dithering, and clipping behavior [S1, unofficial].
+ 
+ **Pseudocode**
+@@ -36,6 +30,6 @@
+         center: Vec3, sphere center position.
+         radius: float, outer radius of the sphere.
+-        thickness: float, thickness of the shell. 0 means solid sphere.
+-        grid_points: List[Vec3], voxel centers to test.
++        thickness: float, thickness of the shell.
++        grid_points: List[Vec3], voxel centers within the computed bounding box bucket.
+         
+     Returns:
+@@ -43,23 +37,8 @@
+     """
+     r2 = radius * radius
+-    # Calculate inner threshold. 
+-    # Derived from (r - thickness)^2 = r^2 - 2*r*thickness + thickness^2.
+-    # The source uses 2*r*thickness - r^2 as a negative threshold for d^2 < ...
+-    # Wait, the source says: if d2 < (2 * radius * thickness - radius2) continue.
+-    # Let's verify the math. 
+-    # Inner radius r_in = r - thickness.
+-    # We want to skip if d < r_in => d^2 < (r - thickness)^2 = r^2 - 2r*thickness + thickness^2.
+-    # The source condition is: d^2 < 2*r*thickness - r^2.
+-    # This implies the source might be using a different formulation or there is a sign error/approximation in the "magic math".
+-    # However, the instruction is to implement from the source. 
+-    # Source: "if (thickness > 0 && d2 < (2 * radius * thickness - radius2)) continue;"
+-    # We must follow the source exactly.
+-    
+     inner_threshold = 2 * radius * thickness - r2
+-    
+     rendered_points = []
+     
+     for pt in grid_points:
+-        # Calculate squared distance from point to sphere center
+         dx = pt.x - center.x
+         dy = pt.y - center.y
+@@ -67,9 +46,7 @@
+         d2 = dx*dx + dy*dy + dz*dz
+         
+-        # Check inner shell exclusion
+         if thickness > 0 and d2 < inner_threshold:
+             continue
+             
+-        # Check outer shell inclusion
+         if d2 < r2:
+             rendered_points.append(pt)
+@@ -79,11 +56,9 @@
+ 
+ **Parameters**
+--   `radius`: Sphere outer radius.
+--   `thickness`: Shell thickness. If 0, the sphere is solid. [S1, unofficial]
++- `radius`: Sphere outer radius [S1, unofficial].
++- `thickness`: Shell thickness parameter [S1, unofficial].
+ 
+ **Edge Cases and Pitfalls**
+--   **Precision**: The "magic math" formula $2r\tau - r^2$ may suffer from floating-point cancellation errors if $\tau$ is very small compared to $r$. [S1, unofficial]
+--   **Negative Threshold**: If $2r\tau - r^2$ is negative (e.g., if $\tau < r/2$), the condition $d^2 < \text{negative}$ is always false for real distances, meaning no points are skipped by the inner check. This effectively renders a solid sphere if the thickness is small relative to the radius? No, if $\tau$ is small, $r_{in}$ is close to $r$. The formula seems to imply a specific approximation. If the formula is strictly followed, small thicknesses might behave unexpectedly if the threshold becomes negative. [S1, unofficial]
+--   **Boundary**: Points exactly on the boundary ($d^2 = r^2$) are included based on the strict inequality `<`.
++- The inner radius check formula `2 * radius * thickness - radius2` is described as "magic math" in the source code comment, implying it approximates the inner radius squared for a thin shell [S1, unofficial].
+ 
+ ## Subtopics
+@@ -96,13 +71,8 @@
+ 
+ ## Operating characteristics
+--   **Time Complexity**: $O(N)$ where $N$ is the number of voxels in the sphere's bounding box. The bounding box optimization reduces $N$ from the total scene voxels to approximately $\frac{4}{3}\pi r^3 / v_{size}$.
+--   **Memory Complexity**: $O(1)$ auxiliary space, excluding the output list of rendered points.
+--   **Strengths**: Simple to implement; efficient for sparse grids due to bounding box culling; supports hollow shells.
+--   **Limitations**: The inner radius approximation ("magic math") may lack precision for very thin shells or large radii. [S1, unofficial]
+--   **When to use**: When rendering spherical objects with a hollow interior (e.g., bubbles, shells) in a voxel-based renderer.
+--   **When not to use**: For solid spheres (use standard sphere voxelization) or for high-precision thin shells where the approximation error is unacceptable.
++Not given in the sources.
+ 
+ ## Background
+-This method originates from the `Volumetric-display` project by quartzzuiop, which implements a custom volumetric renderer. The specific implementation for sphere thickness is found in the source code comments and demo applications, where it is used to render moving spheres with a defined thickness. The "magic math" comment suggests it is a heuristic or optimized approximation rather than a rigorously derived geometric formula. [S1, unofficial]
++This method originates from the `Volumetric-display` project by quartzzuiop, which implements a custom volumetric renderer [S1, unofficial]. The specific implementation for sphere thickness is found in the source code comments and demo applications, where it is used to render moving spheres with a defined thickness [S1, unofficial].
+ 
+ ## Sources

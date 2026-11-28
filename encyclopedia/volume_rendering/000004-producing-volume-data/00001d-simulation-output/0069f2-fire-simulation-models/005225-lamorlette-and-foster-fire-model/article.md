@@ -1,0 +1,182 @@
+# Lamorlette and Foster Fire Model
+Also called: Macro-movement Fire Model, Parametric Curve-Based Fire, Shrek Fire Model
+
+## Overview
+The Lamorlette and Foster Fire Model is a mixed framework for simulating the macro-movement of fire in production systems, originally developed for the motion picture *Shrek* by DreamWorks [S1, unofficial]. It solves the problem of achieving a holistic visual appearance for fire, distinguishing it from the atomistic look of standard particle systems and the smoke-suited appearance of texture splats [S1, unofficial]. The method sets itself apart by modeling individual flame elements as parametric space curves that evolve over time, coupled with a reduced form of Navier-Stokes equations, rather than relying solely on discrete point particles or static volumetric fields [S1, unofficial].
+
+## How it works
+**Inputs:**
+- A set of initial points defining the spine of flame elements [S1, unofficial].
+- Wind field data (velocity and temperature fields) [S1, unofficial].
+- Procedural control parameters for placement, intensity, lifespan, shape, color, size, and behavior [S1, unofficial].
+
+**Outputs:**
+- A set of rendered particles representing the visible flame (oxidization region) [S1, unofficial].
+
+**Data Structures:**
+- **Parametric Curve:** Defined by a sequence of control points interpolating the flame spine [S1, unofficial].
+- **Particle:** A point sampled near the curve, carrying position, color, and opacity attributes [S1, unofficial].
+- **Implicit Surface:** A cylindrical profile defining the oxidization region boundary [S1, unofficial].
+
+**Steps:**
+1. **Curve Initialization:** Model individual flame elements as parametric space curves. Each curve interpolates a set of points defining the spine of the flame [S1, unofficial].
+2. **Curve Evolution:** Evolve the curves over time using a combination of physics-based, procedural, and hand-defined wind fields. Physical properties are derived from statistical measurements of natural diffusion flames. The curves are frequently re-sampled to ensure continuity and to model flames generated from moving sources [S1, unofficial]. Wind dynamics are governed by the velocity of the gas rushing into surrounding air and temperature. Drag (shearing forces) causes rotation and mixing, leading to turbulent swirling. Turbulence is exaggerated if gas flows around solid objects, transitioning from smooth flow to chaotic mixing behind the object [S1, unofficial].
+3. **Curve Breaking:** Allow curves to break, generating independently evolving flames with a limited lifespan. Engineering observations and stochastic assumptions provide heuristics for this process [S1, unofficial].
+4. **Implicit Surface & Sampling:** Build an implicit surface representing the oxidization region (the visible part of the flame) using a cylindrical profile. Sample particles close to this region using a volumetric falloff function [S1, unofficial].
+5. **Buoyancy Noise:** Apply procedural noise to the particles in the parameter space of the profile. Animate this noise to follow thermal buoyancy [S1, unofficial].
+6. **Turbulence Noise:** Transform particles into the parameter space of the flame’s structural curve. Apply a second level of noise with a Kolmogorov frequency spectrum (derived from Navier-Stokes equations for turbulence) to provide turbulent detail [S1, unofficial].
+7. **Rendering:** Render particles using either a volumetric method or a fast painterly method. The painterly method simulates a painting-like quality with visible brush strokes using height and opacity maps. Adjust particle color based on neighbor properties to allow flame elements to visually merge in a realistic way [S1, unofficial].
+8. **Procedural Control:** Apply procedural controls to govern placement, intensity, lifespan, and evolution in shape, color, size, and behavior of the flames [S1, unofficial].
+
+**Formulas:**
+The change of velocity of gas in an arbitrary wind field is expressed as:
+$$w(u) = v \nabla \cdot (\nabla u) - (u \cdot \nabla)u - \nabla p$$
+where $u = (x_p, t)$ is a four-dimensional vector of spatial dimensions and time, $v$ is kinematic viscosity, $\nabla p$ is the pressure gradient, and $(u \cdot \nabla)u$ is convection. Smaller viscosity leads to more rotation in the gas [S1, unofficial].
+
+The macro-movement of flame spines follows:
+$$\frac{dx_p}{dt} = w(x_p, t) + d(T_p) + V_p + c(T_p, t)$$
+where $w(x_p, t)$ is an arbitrary controlling wind field, $d(T_p)$ is motion due to diffusion of particles modeled as temperature-scaled Brownian motion, $V_p$ is motion due to movement of the source, and $c(T_p, t)$ is motion due to thermal buoyancy [S1, unofficial]. Thermal buoyancy is constant over the lifetime of the particle:
+$$c(T_p, t) = -\beta g (T_0 - T_p) t_p^2$$
+where $\beta$ is the thermal coefficient, $g$ is gravity, $T_0$ is ambient temperature, and $t_p$ is particle age [S1, unofficial].
+
+**Pseudocode:**
+> **Unverified code.** The code below did not pass a test run against a reference implementation, or no test fits it, so it may contain errors.
+
+```python
+def lamorlette_foster_fire_model(initial_spine_points, wind_fields, controls, use_painterly_method=False):
+    # Stage 1: Curve Initialization
+    curves = []
+    for spine_pts in initial_spine_points:
+        curves.append(ParametricCurve.interpolate(spine_pts))
+
+    # Stage 2-3: Evolution and Breaking Loop
+    for t in range(controls.simulation_time):
+        new_curves = []
+        for curve in curves:
+            curve.evolve(wind_fields)
+            curve.resample()
+            if should_break(curve, controls):
+                sub_flames = curve.break_apart(controls.lifespan)
+                new_curves.extend(sub_flames)
+            else:
+                new_curves.append(curve)
+        curves = new_curves
+
+    # Stage 4: Implicit Surface & Sampling
+    particles = []
+    for curve in curves:
+        implicit_surface = curve.build_cylindrical_profile()
+        sampled_points = implicit_surface.sample_volumetric_falloff()
+        for pt in sampled_points:
+            particles.append(Particle(position=pt))
+
+    # Stage 5: Buoyancy Noise
+    for p in particles:
+        noise = procedural_noise(p.profile_params, t)
+        p.position += noise.animate_thermal_buoyancy()
+
+    # Stage 6: Turbulence Noise
+    for p in particles:
+        curve_params = p.transform_to_curve_space()
+        turbulence = kolmogorov_noise(curve_params, t)
+        p.position += turbulence
+
+    # Stage 7: Rendering
+    rendered_image = []
+    for p in particles:
+        neighbor_colors = get_neighbor_colors(p, particles)
+        p.color = blend_color(p.color, neighbor_colors)
+        if use_painterly_method:
+            rendered_image.append(render_painterly(p, height_map, opacity_map))
+        else:
+            rendered_image.append(render_volumetric(p))
+    return rendered_image
+
+class ParametricCurve:
+    def __init__(self, points):
+        self.points = points
+        self.lifespan = 0
+    @staticmethod
+    def interpolate(points):
+        return ParametricCurve(points)
+    def evolve(self, wind_fields):
+        # Apply wind velocity, temperature, and drag to curve points
+        for pt in self.points:
+            pt.velocity += wind_fields.apply(pt.position, pt.velocity)
+            pt.position += pt.velocity
+    def resample(self):
+        # Re-distribute points for continuity
+        pass
+    def break_apart(self, lifespan):
+        # Return list of new ParametricCurve instances
+        return [ParametricCurve([self.points[0]])]
+    def build_cylindrical_profile(self):
+        return ImplicitSurface(self.points)
+
+class Particle:
+    def __init__(self, position):
+        self.position = position
+        self.color = [1.0, 0.5, 0.0]
+        self.profile_params = [0.0, 0.0]
+    def transform_to_curve_space(self):
+        return [0.0, 0.0]
+
+class ImplicitSurface:
+    def __init__(self, spine_points):
+        self.spine = spine_points
+    def sample_volumetric_falloff(self):
+        # Return points near spine with Gaussian falloff
+        return [[0.0, 0.0, 0.0]]
+
+def should_break(curve, controls):
+    return curve.lifespan > controls.lifespan
+
+def procedural_noise(params, t):
+    return Vector3(0.0, 0.0, 0.0)
+def kolmogorov_noise(params, t):
+    return Vector3(0.0, 0.0, 0.0)
+def get_neighbor_colors(particle, particles):
+    return [particle.color]
+def blend_color(base, neighbors):
+    return base
+def render_painterly(p, height_map, opacity_map):
+    return None
+def render_volumetric(p):
+    return None
+class Vector3:
+    def __init__(self, x, y, z):
+        self.x, self.y, self.z = x, y, z
+    def __add__(self, other):
+        return Vector3(self.x + other.x, self.y + other.y, self.z + other.z)
+```
+
+**Edge Cases and Pitfalls:**
+- **Precision:** The re-sampling of curves requires sufficient precision to maintain continuity, especially when modeling flames from moving sources [S1, unofficial].
+- **Degenerate Input:** If wind fields are static or zero, the characteristic turbulent swirling may not manifest correctly, as it relies on the interaction between gas velocity and surrounding air [S1, unofficial].
+- **Boundary:** The implicit surface definition must correctly bound the oxidization region to avoid sampling particles in non-visible areas [S1, unofficial].
+- **Simplification Assumptions:** Molecular diffusion is negligible. Gas is assumed incompressible locally. Shock and pressure waves are ignored [S1, unofficial].
+
+## Subtopics
+
+### Flame Spine Macro Animation
+A physics-based control system for the macro-movement of flame spines, governed by the equation $\frac{dx_p}{dt} = w(x_p, t) + d(T_p) + V_p + c(T_p, t)$ [S1, unofficial]. Here, $w(x_p, t)$ is an arbitrary controlling wind field, $d(T_p)$ is motion due to diffusion of particles modeled as temperature-scaled Brownian motion, and $V_p$ is motion due to movement of the source [S1, unofficial]. Thermal buoyancy is constant over the lifetime of the particle: $c(T_p, t) = -\beta g (T_0 - T_p) t_p^2$, where $\beta$ is the thermal coefficient, $g$ is gravity, $T_0$ is ambient temperature, and $t_p$ is particle age [S1, unofficial]. Pitfalls include simplification assumptions: molecular diffusion is negligible, gas is assumed incompressible locally, and shock and pressure waves are ignored [S1, unofficial].
+
+### B-Spline Curve Fire Model
+A procedural fire generation technique that constructs the flame from a central interpolating B-Spline curve, a surrounding cylindrical volume, and edge particles, all distorted by wind fields [S3, unofficial]. Steps: 1. Generate an interpolating B-Spline curve to serve as the flame center. 2. Apply wind and atmospheric parameters to distort and bend the curve. 3. Construct the visual flame around the curve using a cylindrical profile. 4. Populate the area around the flame's edge with particles. 5. As the flame grows, separate the top or make it flicker; separated parts burn out as they rise away from the main point [S3, unofficial]. Parameters: Wind fields control flame motion indirectly. Direct animator controls govern basic shape, scale, color, flickering, and separation behavior [S3, unofficial].
+
+## Operating characteristics
+- **Time Complexity:** Not given in the sources. The model involves multiple stages of curve evolution, particle sampling, and noise application, which can be computationally intensive depending on the number of curves and particles [S1, unofficial].
+- **Memory Complexity:** Not given in the sources. Storage is required for curve definitions, particle states, and wind field data [S1, unofficial].
+- **Measured Performance:** The fast painterly method is described as a way to render the image quickly, but specific performance metrics (e.g., frames per second, resolution) are not provided in the sources [S1, unofficial].
+- **Strengths:** Provides a holistic look for fire, superior to atomistic particle systems and better suited for fire than texture splats [S1, unofficial]. Offers artistic control through procedural parameters [S1, unofficial].
+- **Limitations:** Relies on heuristics and stochastic assumptions for curve breaking, which may require tuning for different fire types [S1, unofficial].
+- **When to use:** When a holistic, production-quality fire appearance is needed, particularly in contexts where artistic control is prioritized over strict physical simulation [S1, unofficial].
+- **When not to use:** When atomistic particle effects are desired, or when the scene primarily involves smoke or steam where texture splats are more appropriate [S1, unofficial].
+
+## Background
+The Lamorlette and Foster Fire Model was developed for the motion picture *Shrek* by DreamWorks [S1, unofficial]. It is described as a "very solid mixed framework for macro-movement of fire in a production system" [S1, unofficial]. The model draws on statistical measurements of natural diffusion flames and applies Navier-Stokes equations to turbulence (Kolmogorov frequency spectrum) [S1, unofficial]. It is cited as a key reference for realistic fire rendering in production environments [S1, unofficial].
+
+## Sources
+[S1] Realistic Real-Time Rendering of Fire in a Production System, https://clas.iusb.edu/math-compsci/_prior-proposals/YVanzine_Proposal.pdf, fetched 2026-10-28 (unofficial)
+[S2] Real-Time Volumetric Rendering of Fire in a Production System ..., https://clas.iusb.edu/math-compsci/_prior-thesis/YVanzine_thesis.pdf, fetched 2026-10-27 (unofficial)
+[S3] Efficient computation and rendering of smoke animation, http://hdl.handle.net/2346/16985, fetched 2026-10-26 (unofficial)

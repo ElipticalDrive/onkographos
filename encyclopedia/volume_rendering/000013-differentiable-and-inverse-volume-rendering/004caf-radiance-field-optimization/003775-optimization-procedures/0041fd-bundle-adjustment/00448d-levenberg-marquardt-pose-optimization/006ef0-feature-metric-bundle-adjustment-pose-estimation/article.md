@@ -1,0 +1,218 @@
+# Feature-metric Bundle Adjustment Pose Estimation
+
+Also called: Feature-metric BA
+
+## Overview
+Feature-metric Bundle Adjustment (FBA) Pose Estimation is a pose estimation method that optimizes relative pose $\{\mathbf{R}, \mathbf{t}\}$ by minimizing feature residuals between consecutive frames, using learned high-level features instead of raw RGB pixels to improve robustness against illumination and viewpoint changes [S1]. It sets itself apart from standard photometric BA by operating in a semantic feature space extracted via a Unet-like encoder-decoder network, allowing it to handle large illumination variations and poor initial pose estimates more effectively [S1]. It builds on [Levenberg-Marquardt Pose Optimization](11301-levenberg-marquardt-pose-optimization.md) by defining the error metric in terms of feature map distances rather than pixel intensity differences.
+
+## How it works
+**Inputs and Outputs:**
+*   **Inputs:** Two consecutive image frames $\mathbf{I}_a, \mathbf{I}_b$; a set of 3D points $\mathbf{P}_i$ observed in both frames; an initial pose estimate $\{\mathbf{R}, \mathbf{t}\}$; a robust cost function $\rho(\cdot)$; a damping factor $\lambda$.
+*   **Outputs:** Optimized relative pose $\{\mathbf{R}, \mathbf{t}\}$.
+
+**Data Structures:**
+*   **Feature Maps:** For each level $l \in \{L, \dots, 1\}$, a multi-channel feature map $\mathbf{F}^l \in \mathbb{R}^{W_l \times H_l \times D_l}$ is extracted. $L$ is the number of feature levels. Resolution decreases as $l$ increases (coarse to fine).
+*   **Lookup Table:** Feature maps support sub-pixel interpolation (bilinear) for arbitrary coordinate queries.
+
+**Numbered Steps:**
+1.  **Feature Extraction:** Encode consecutive frames $\mathbf{I}_a$ and $\mathbf{I}_b$ into multi-channel feature maps $\mathbf{F}_a^l$ and $\mathbf{F}_b^l$ at each level $l$ using a Unet-like encoder-decoder network [S1]. The network also estimates per-pixel confidence to select robust features [S1].
+2.  **Residual Calculation:** For each 3D point $\mathbf{P}_i$ observed in both frames, compute the projected pixel coordinate in frame $b$ using the current pose estimate: $\mathbf{p}_i^a = \Pi(\mathbf{R}\mathbf{P}_i + \mathbf{t})_b$, where $\Pi$ is the projection operator [S1].
+3.  **Feature Lookup:** Sample the feature values at the projected location in frame $b$ and the corresponding location in frame $a$ using sub-pixel interpolation: $\mathbf{F}_b[\mathbf{p}_i^a]$ and $\mathbf{F}_a[\mathbf{p}_a]$ [S1].
+4.  **Error Computation:** Calculate the feature residual $\mathbf{r}_a^i$ and the total weighted error $E(\mathbf{R}, \mathbf{t})$ [S1].
+5.  **Optimization:** Use the Levenberg-Marquardt (LM) algorithm to iteratively minimize the error from the initial estimate [S1].
+6.  **Pose Update:** Parametrize the pose update $\boldsymbol{\delta}$ on the SE(3) manifold using its Lie algebra. Update the final pose by left-multiplication on the manifold SE(3) [S1].
+
+**Formulas:**
+The feature residual for point $i$ at level $l$ is defined as [S1]:
+$$
+\mathbf{r}_a = \mathbf{F}_b [\Pi(\mathbf{R}\mathbf{P}_i + \mathbf{t})_b] - \mathbf{F}_a [\mathbf{p}_a]
+$$
+where $\mathbf{p}_i^a = \Pi(\mathbf{R}\mathbf{P}_i + \mathbf{t})_b$ is the projection of point $\mathbf{P}_i$ from frame $b$ given the current pose estimate $\{\mathbf{R}, \mathbf{t}\}$, and $[\cdot]$ denotes lookup with sub-pixel interpolation [S1].
+
+The total error over $N$ observations is [S1]:
+$$
+E(\mathbf{R}, \mathbf{t}) = \sum_{i,a} w_a^i \rho \left( \|\mathbf{r}_a^i\|_2^2 \right)
+$$
+where $\rho(\cdot)$ is a robust cost function with derivative $\rho'$, and $w_a^i$ is a per-residual weight [S1].
+
+The LM update step is [S1]:
+$$
+\boldsymbol{\delta} = -(\mathbf{H} + \lambda \text{diag}(\mathbf{H}))^{-1} \mathbf{J}^T \mathbf{W} \mathbf{r}
+$$
+where $\lambda$ is the damping factor, $\mathbf{H}$ is the Hessian matrix, $\mathbf{J}$ is the Jacobian, $\mathbf{W}$ is the weight matrix, and $\mathbf{r}$ is the residual vector [S1].
+
+**Parameters:**
+*   $\lambda$: Damping factor for LM. Typical values are not specified in the sources [S1].
+*   $\rho(\cdot)$: Robust cost function. Specific form (e.g., Huber, Cauchy) is not explicitly named for the BA loss, though Huber is used for the training loss [S1].
+*   $\gamma$: Huber cost function parameter used in the FBA *training* loss to weight supervision adaptively [S1].
+
+**Edge Cases and Pitfalls:**
+*   **Poor Initial Pose:** The method is designed to handle poor initial estimates due to the robustness of high-level features [S1].
+*   **Interpolation:** Sub-pixel interpolation is required for accurate feature lookup [S1].
+*   **Confidence:** The network estimates pixel confidence to select robust features, implying that low-confidence pixels should be down-weighted or excluded [S1].
+
+**Pseudocode:**
+> **Unverified code.** The code below did not pass a test run against a reference implementation, or no test fits it, so it may contain errors.
+
+```python
+def feature_metric_ba_pose_estimation(I_a, I_b, P_points, R_init, t_init, levels, robust_cost, damping_factor):
+    """
+    Optimizes relative pose {R, t} using feature-metric bundle adjustment.
+    
+    Args:
+        I_a, I_b: Input image frames.
+        P_points: Array of 3D points P_i.
+        R_init, t_init: Initial rotation and translation.
+        levels: List of feature levels l from L down to 1.
+        robust_cost: Function rho(r^2) and its derivative rho_prime.
+        damping_factor: Lambda for LM.
+        
+    Returns:
+        R_opt, t_opt: Optimized pose.
+    """
+    # 1. Feature Extraction
+    # Extract feature maps for all levels using Unet-like network
+    # F_a[l], F_b[l] are feature maps of shape (W_l, H_l, D_l)
+    F_a = extract_features(I_a, levels)
+    F_b = extract_features(I_b, levels)
+    
+    # Initialize pose
+    R = R_init
+    t = t_init
+    
+    # 2. Levenberg-Marquardt Optimization Loop
+    converged = False
+    while not converged:
+        residuals = []
+        jacobians = []
+        weights = []
+        
+        for l in levels:
+            F_a_l = F_a[l]
+            F_b_l = F_b[l]
+            
+            for i, P_i in enumerate(P_points):
+                # Project point P_i from frame b to frame a's coordinate system?
+                # Note: Formula says p_i^a = Pi(R P_i + t)_b. 
+                # This implies P_i is in frame b's coordinate system? 
+                # Or R,t transform from a to b? 
+                # Standard BA: P_i is in world/camera frame. 
+                # Let's follow the formula strictly:
+                # p_i^a is the projection of P_i in frame b given pose {R,t}.
+                # This suggests P_i is defined in frame a's space, and we project it to b?
+                # Or P_i is in world, and we project to b using pose of b relative to world?
+                # The text says "projection of frame b given its current pose estimate".
+                # Let's assume P_i is a 3D point. 
+                # p_i^a = Pi(R * P_i + t) -> This looks like transforming P_i by R,t then projecting.
+                # If R,t is pose of b relative to a, then P_i (in a) -> R*P_i+t (in b) -> project.
+                
+                # Project P_i to frame b
+                P_b = R @ P_i + t
+                p_i_a = project(P_b) # p_i^a
+                
+                # Lookup features with sub-pixel interpolation
+                # F_b[p_i^a] gets feature at projected location in image b
+                # F_a[p_a] gets feature at corresponding location in image a?
+                # The formula uses F_a[p_a]. p_a is likely the projection of P_i in frame a directly.
+                p_a = project(P_i) # Assuming P_i is in frame a's space for direct projection?
+                # Or p_a is the same pixel location in image a?
+                # "F_a[p_a]" where p_a is not defined in the snippet but implied to be the location in a.
+                # Usually, for consecutive frames, we match feature at p in a to feature at p' in b.
+                # Here, p_i^a is the location in b. The corresponding location in a is p_a.
+                # If P_i is the 3D point, p_a = Pi(P_i).
+                
+                feat_b = bilinear_interpolate(F_b_l, p_i_a)
+                feat_a = bilinear_interpolate(F_a_l, p_a)
+                
+                # Residual
+                r = feat_b - feat_a
+                residuals.append(r)
+                
+                # Jacobian calculation (J)
+                # J = d(r)/d(delta) where delta is Lie algebra of SE(3)
+                # This requires differentiating the feature lookup and projection
+                J_i = compute_jacobian_feature_metric(F_a_l, F_b_l, P_i, R, t, p_a, p_i_a)
+                jacobians.append(J_i)
+                
+                # Weight
+                w = compute_weight(p_i_a, p_a) # From confidence map
+                weights.append(w)
+        
+        # Stack residuals, jacobians, weights
+        R_vec = stack(residuals)
+        J_mat = stack(jacobians)
+        W_mat = diag(stack(weights))
+        
+        # Hessian approximation H = J^T W J
+        H = J_mat.T @ W_mat @ J_mat
+        
+        # LM Update
+        # delta = -(H + lambda * diag(H))^-1 * J^T W r
+        delta = solve_linear_system(H + damping_factor * diag(H), J_mat.T @ W_mat @ R_vec)
+        
+        # Update Pose on SE(3) manifold
+        R, t = update_se3_pose(R, t, delta)
+        
+        # Check convergence
+        if norm(delta) < tolerance:
+            converged = True
+            
+    return R, t
+
+def extract_features(I, levels):
+    # Unet-like encoder-decoder
+    # Returns dict of feature maps for each level
+    pass
+
+def project(P_3d):
+    # Standard pinhole projection
+    pass
+
+def bilinear_interpolate(F, uv):
+    # Sub-pixel interpolation
+    pass
+
+def compute_jacobian_feature_metric(F_a, F_b, P, R, t, p_a, p_b):
+    # Derivative of feature residual w.r.t SE(3) parameters
+    # Requires chain rule through projection and feature interpolation
+    pass
+
+def compute_weight(p_a, p_b):
+    # Use confidence map from network
+    pass
+
+def update_se3_pose(R, t, delta):
+    # Left-multiplication on SE(3) manifold
+    # delta is 6D vector (3 rot, 3 trans) in Lie algebra
+    exp_map = se3_exp(delta)
+    R_new = exp_map[:3,:3] @ R
+    t_new = exp_map[:3,3] + exp_map[:3,:3] @ t
+    return R_new, t_new
+```
+
+## Subtopics
+
+### Derivative-free Pose Estimation via Feature Matching
+Uses feature matching without gradient-based optimization. Choose when Jacobian computation is too expensive or unstable. [Link](11310-derivative-free-pose-estimation-via-feature-matching.md)
+
+### Lie Algebra (Tangent Plane) Pose Optimization
+Parametrizes pose updates in the tangent space of SE(3). This is the manifold handling used in FBA. [Link](14005-lie-algebra-tangent-plane-pose-optimization.md)
+
+### Shonan Averaging for Pose Synchronization
+Solves global pose synchronization from pairwise relative poses. Choose for global consistency across many frames. [Link](17128-shonan-averaging-for-pose-synchronization.md)
+
+## Operating characteristics
+*   **Time Complexity:** Depends on the number of 3D points $N$ and feature levels $L$. Each LM iteration involves Jacobian computation and matrix inversion ($O(N \cdot D^2)$ or similar, where $D$ is state dimension).
+*   **Memory Complexity:** Storage for feature maps at all levels $L$ and Jacobian/Hessian matrices.
+*   **Measured Performance:** Not given in the sources.
+*   **Scaling:** Coarse-to-fine strategy (levels $L$ to 1) improves robustness and accuracy [S1].
+*   **Strengths:** Robust to large illumination and viewpoint changes; handles poor initial pose estimates; accurate in indoor and outdoor environments [S1].
+*   **Limitations:** Requires training a Unet-like network for feature extraction; relies on learned features which may not generalize to unseen domains without retraining.
+*   **When to use:** When photometric consistency is unreliable due to lighting/viewpoint changes.
+*   **When not:** When computational resources for deep learning inference are unavailable.
+
+## Background
+Originated in the paper "Incremental Joint Learning of Depth, Pose, and Implicit Scene Representation on Monocular Camera in Large-Scale Scenes" (2025) [S1]. It is inspired by prior work [51] (not cited in the provided sources) and integrates feature extraction with bundle adjustment for monocular large-scale scene reconstruction.
+
+## Sources
+[S1] Incremental Joint Learning of Depth, Pose, and Implicit Scene Representation on Monocular Camera in Large-Scale Scenes, https://doi.org/10.1109/tase.2025.3617654, fetched 2026-10-29

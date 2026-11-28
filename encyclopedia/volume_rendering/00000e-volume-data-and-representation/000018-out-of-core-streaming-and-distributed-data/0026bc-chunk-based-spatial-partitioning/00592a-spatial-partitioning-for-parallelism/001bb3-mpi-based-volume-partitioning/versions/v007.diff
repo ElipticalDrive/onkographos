@@ -1,0 +1,104 @@
+--- v006.md
++++ v007.md
+@@ -30,5 +30,5 @@
+ 2.  **Data Access:** Each process $p$ reads only the slices in its assigned range $[start_p, end_p]$ from the input file [S1][S2, unofficial]. This is efficient if the file storage order matches the spatial order (e.g., Z-axis slices stored contiguously) [S2, unofficial].
+ 
+-3.  **Rendering/Processing:** Each process renders its assigned chunk independently. For isosurface extraction, this generates a partial triangle table [S1]. For ray-casting, this generates a partial image or slice buffer [S2, unofficial].
++3.  **Rendering/Processing:** Each process renders its assigned chunk independently [S1][S2, unofficial]. For isosurface extraction, this generates a partial triangle table [S1]. For ray-casting, this generates a partial image or slice buffer [S2, unofficial].
+ 
+ 4.  **Boundary Handling (Overlap):** To prevent boundary artifacts (e.g., black stripes) caused by missing opacity/color calculations at the division boundaries, a small overlap of data is included in adjacent datasets [S2, unofficial]. These extra/duplicated slices are used for boundary calculations but must be removed before final compositing to prevent image stretching [S2, unofficial].
+@@ -40,5 +40,5 @@
+ **Pseudocode:**
+ ```python
+-def mpi_volume_partitioning(total_slices, num_processors, my_rank, file_path):
++def mpi_volume_partitioning(total_slices, num_processors, my_rank, file_path, overlap_slices=0):
+     """
+     Each MPI process executes this function.
+@@ -57,21 +57,29 @@
+     end_slice = start_slice + num_slices
+     
+-    # Step 2: Read assigned slices
+-    # Assuming file format allows seeking to slice start
+-    slices = read_slices_from_file(file_path, start_slice, num_slices)
++    # Step 2: Apply overlap for boundary calculations
++    # Clamp read range to file boundaries to prevent out-of-bounds access
++    read_start = max(0, start_slice - overlap_slices)
++    read_end = min(total_slices, end_slice + overlap_slices)
++    read_count = read_end - read_start
+     
+-    # Step 3: Render/Process
+-    # For isosurface:
+-    local_vertices, local_triangles = extract_isosurface(slices)
++    # Step 3: Read assigned slices from file
++    # Standard file I/O: seek to byte offset, read contiguous block
++    slice_size = get_slice_file_size(file_path) # [G] Standard file I/O operation
++    seek_pos = read_start * slice_size
++    with open(file_path, 'rb') as f:
++        f.seek(seek_pos)
++        raw_data = f.read(read_count * slice_size)
+     
+-    # For ray-casting:
+-    # local_image = ray_cast(slices)
++    # Step 4: Process chunk
++    # Standard voxel-to-mesh conversion (e.g., Marching Cubes)
++    local_vertices, local_triangles = convert_voxels_to_mesh(raw_data) # [G] Standard geometry operation
+     
+-    # Step 4: Write output
+-    # For isosurface: write local_vertices and local_triangles to a binary file
+-    write_mesh_file(my_rank, local_vertices, local_triangles)
+-    
+-    # For ray-casting: write local_image to a binary file
+-    # write_image_file(my_rank, local_image)
++    # Step 5: Write output
++    # Write local vertices and triangles to a binary file
++    with open(f"output_rank_{my_rank}.bin", 'wb') as f:
++        f.write(pack_binary(local_vertices))
++        f.write(pack_binary(local_triangles))
++        
++    return local_vertices, local_triangles
+ ```
+ 
+@@ -88,23 +96,23 @@
+ 
+ ### Chunk-based World Streaming
+-Streams chunks from disk to memory as needed, focusing on temporal/spatial traversal rather than static MPI partitioning [2369-chunk-based-world-streaming.md].
++Streams chunks from disk to memory as needed, focusing on temporal/spatial traversal rather than static MPI partitioning [G].
+ 
+ ### Chunk-based Training
+-Applies chunking to machine learning training data for volume rendering, focusing on data augmentation and batch processing [3168-chunk-based-training.md].
++Applies chunking to machine learning training data for volume rendering, focusing on data augmentation and batch processing [G].
+ 
+ ### Chunk Trees
+-Uses a hierarchical tree structure for adaptive chunking, allowing for variable resolution and more complex spatial queries [4050-chunk-trees.md].
++Uses a hierarchical tree structure for adaptive chunking, allowing for variable resolution and more complex spatial queries [G].
+ 
+ ### Object-space decomposition with local clustering
+-Partitions space based on object density rather than uniform grid, useful for scenes with varying object distribution [4156-object-space-decomposition-with-local-clustering.md].
++Partitions space based on object density rather than uniform grid, useful for scenes with varying object distribution [G].
+ 
+ ### Uniform Block Partitioning with Acceleration
+-Uses uniform blocks but adds acceleration structures (like BVH) for ray traversal, differing from the simple slice-based approach [6098-uniform-block-partitioning-with-acceleration.md].
++Uses uniform blocks but adds acceleration structures (like BVH) for ray traversal, differing from the simple slice-based approach [G].
+ 
+ ### Moving Walls Algorithm
+-A dynamic partitioning technique for time-varying data, moving a "wall" of processed data through the volume [9715-moving-walls-algorithm.md].
++A dynamic partitioning technique for time-varying data, moving a "wall" of processed data through the volume [G].
+ 
+ ### Tide: Trajectory-Adaptive Differential Streaming
+-Adapts streaming based on camera trajectory, focusing on predictive loading rather than static MPI chunks [10150-tide-trajectory-adaptive-differential-streaming.md].
++Adapts streaming based on camera trajectory, focusing on predictive loading rather than static MPI chunks [G].
+ 
+ ## Operating characteristics
+@@ -114,9 +122,9 @@
+ *   **Strengths:** Simple implementation, efficient I/O for contiguous data, no need for complex data structures [S2, unofficial].
+ *   **Limitations:** Load imbalance for adaptive-resolution data, boundary artifacts if not handled, overhead for sewing meshes [S1][S2, unofficial].
+-*   **When to use:** Large uniform-resolution volumes on MPI clusters where I/O bandwidth is a bottleneck [S1][S2, unofficial].
+-*   **When not to use:** Adaptive-resolution data, scenes requiring complex spatial queries, or when memory per node is extremely limited and streaming is preferred [S2, unofficial].
++*   **When to use:** Large uniform-resolution volumes on MPI clusters where efficient I/O and computation distribution are required [S1][S2, unofficial].
++*   **When not to use:** Adaptive-resolution data without workload rebalancing [S2, unofficial].
+ 
+ ## Background
+-The method was developed as part of parallel volume visualization techniques for time-varying data [S2, unofficial]. It is based on the principle of spatial division of uniform resolution data, where the volume is partitioned along one axis to allow independent rendering by multiple processors [S2, unofficial]. The sewing step for isosurface extraction was introduced to handle the concatenation of partial meshes generated by parallel processes [S1].
++The method is described in the context of parallel volume visualization for time-varying datasets, specifically handling spatial division of a single time step [S2, unofficial]. It is based on the principle of spatial division of uniform resolution data, where the volume is partitioned along one axis to allow independent rendering by multiple processors [S2, unofficial]. The sewing step for isosurface extraction was introduced to handle the concatenation of partial meshes generated by parallel processes [S1].
+ 
+ ## Sources

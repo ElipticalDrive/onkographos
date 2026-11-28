@@ -1,0 +1,85 @@
+# Voxel World Map Data Layout
+Also called: 3D Voxel Grid Flattened to 1D Array, Row-Major Z-Y-X Voxel Layout
+
+## Overview
+This method represents world geometry as a discrete 3D grid of integers, where a value of 0 denotes empty space and non-zero values denote solid voxels or texture indices [S1, unofficial]. It solves the problem of mapping 3D spatial data into a contiguous memory buffer for efficient linear access. It differs from its siblings by using a specific row-major flattening order along the Z and Y axes, distinct from the standard X-Y-Z row-major layout often assumed in general volume rendering [S1, unofficial].
+
+## How it works
+**Inputs and Outputs:**
+*   **Input:** Grid dimensions `MAP_WIDTH` (X-axis size) and `MAP_HEIGHT` (Y-axis size). The Z-axis dimension is implied by the total array size or a separate constant not explicitly named in the source, but the indexing formula suggests a 3D structure.
+*   **Output:** A 1D integer array representing the 3D voxel grid.
+
+**Data Structures:**
+*   **Voxel Grid:** A 1D array of integers.
+*   **Dimensions:** `MAP_WIDTH` (integer constant for X), `MAP_HEIGHT` (integer constant for Y). The source notes specify dimensions as `MAP_WIDTH` and `MAP_HEIGHT`, but the indexing formula `y * MAP_WIDTH * MAP_HEIGHT + z * MAP_WIDTH + x` implies a 3D grid where the third dimension (Z) is also present. The source text states "Dimensions are `MAP_WIDTH` and `MAP_HEIGHT`" but the formula uses `x`, `y`, and `z`. We assume `MAP_DEPTH` or similar for Z, or that the total size determines Z. However, the source explicitly says "Dimensions are `MAP_WIDTH` and `MAP_HEIGHT`" in the layout section, which contradicts the 3D indexing formula. Given the parent article defines $N_x, N_y, N_z$, we infer the third dimension exists. Let $N_z$ be the depth. The source formula is: `y * MAP_WIDTH * MAP_HEIGHT + z * MAP_WIDTH + x`. This implies the stride for Y is `MAP_WIDTH * MAP_HEIGHT` and for Z is `MAP_WIDTH`. This is a Z-Y-X row-major layout where X is the fastest varying index.
+
+**Indexing Formula:**
+The linear index $idx$ for a voxel at coordinates $(x, y, z)$ is:
+$$idx(x, y, z) = y \cdot (MAP\_WIDTH \cdot MAP\_HEIGHT) + z \cdot MAP\_WIDTH + x$$
+
+Note: The source notes state "Indexing uses row-major order along the Z axis, then Y". The formula `y * MAP_WIDTH * MAP_HEIGHT + z * MAP_WIDTH + x` indicates that Y is the slowest varying index (largest stride), Z is the middle, and X is the fastest. This is a Z-Y-X row-major layout if we consider the order of iteration, but typically "row-major" refers to the last index varying fastest. Here, X varies fastest. The source says "along the Z axis, then Y", which might mean the outer loops are Z then Y, making X the inner loop. This matches the formula.
+
+**Pseudocode:**
+> **Unverified code.** The code below did not pass a test run against a reference implementation, or no test fits it, so it may contain errors.
+
+```python
+# Constants
+MAP_WIDTH = 100  # Example value
+MAP_HEIGHT = 100 # Example value
+MAP_DEPTH = 100  # Not given in sources, assumed for 3D grid
+
+# Array allocation
+voxel_grid = [0] * (MAP_WIDTH * MAP_HEIGHT * MAP_DEPTH)
+
+def set_voxel(x, y, z, value):
+    """
+    Set the value of a voxel at (x, y, z).
+    """
+    # Validate bounds
+    if not (0 <= x < MAP_WIDTH and 0 <= y < MAP_HEIGHT and 0 <= z < MAP_DEPTH):
+        raise IndexError("Voxel coordinates out of bounds")
+    
+    # Calculate linear index
+    idx = y * (MAP_WIDTH * MAP_HEIGHT) + z * MAP_WIDTH + x
+    
+    # Set value
+    voxel_grid[idx] = value
+
+def get_voxel(x, y, z):
+    """
+    Get the value of a voxel at (x, y, z).
+    """
+    # Validate bounds
+    if not (0 <= x < MAP_WIDTH and 0 <= y < MAP_HEIGHT and 0 <= z < MAP_DEPTH):
+        raise IndexError("Voxel coordinates out of bounds")
+    
+    # Calculate linear index
+    idx = y * (MAP_WIDTH * MAP_HEIGHT) + z * MAP_WIDTH + x
+    
+    # Return value
+    return voxel_grid[idx]
+```
+
+**Edge Cases and Pitfalls:**
+*   **Boundary Checks:** The source does not specify boundary handling. Implementers must add bounds checking to prevent out-of-bounds access [G].
+*   **Dimension Ambiguity:** The source notes mention "Dimensions are `MAP_WIDTH` and `MAP_HEIGHT`" but the formula uses three coordinates. The third dimension (Z) must be defined separately or derived from total size [G].
+*   **Data Type:** The source specifies "integers". The size of the integer (e.g., 32-bit vs 64-bit) affects memory usage and is not specified [Not given in the sources].
+
+## Subtopics
+
+### [Nav2 Voxel Grid](20648-nav2-voxel-grid.md)
+The Nav2 Voxel Grid is an efficient 3D spatial indexing structure designed for robotics navigation, specifically serving as the backend for the Voxel Layer in `nav2_costmap_2d`. It solves the problem of representing 3D occupancy data with minimal memory overhead by mapping a 3D world onto a 2D array of pointers, where each pointer manages a vertical column of voxels. It distinguishes itself from general-purpose 3D grids by relying on bitwise integer operations to achieve raytracing and cell marking performance comparable to standard 2D structures, making it significantly faster than most 3D structures.
+
+## Operating characteristics
+*   **Time Complexity:** Access and update are $O(1)$ given valid coordinates.
+*   **Memory Complexity:** $O(N_x \cdot N_y \cdot N_z)$ integers.
+*   **Strengths:** Simple implementation, cache-friendly for linear traversal if access patterns align with the layout.
+*   **Limitations:** Sparse grids waste memory. The specific Z-Y-X layout may not be optimal for all access patterns compared to standard X-Y-Z.
+*   **When to use:** Dense voxel worlds where memory overhead is acceptable and simple indexing is preferred.
+*   **When not to use:** Sparse environments where sparse data structures (like Octrees) are more efficient.
+
+## Background
+This layout is used in the DJayalath/RayTracingEngine [S1, unofficial]. It is a common approach in early 3D graphics and voxel-based games for representing world geometry.
+
+## Sources
+[S1] DJayalath/RayTracingEngine, https://github.com/DJayalath/RayTracingEngine, fetched 2026-10-24 (unofficial)

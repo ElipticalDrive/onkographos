@@ -1,0 +1,45 @@
+Out-Of-Core construction of Sparse Voxel Octrees - Jeroen Baert's Blog
+Update: I published a paper on this at HPG 2013. It contains updated info and a more detailed look into the problem and solution than this blogpost does.
+During the development of my Sparse Voxel Octree (SVO) raycaster (see last week’s progress report), I had to find a good way to build these octrees out of voxel grids, which I obtained from the usual .PLY/.OBJ suspects using Patrick Min‘s excellent binvox voxelizer.
+Every solution starts with a clear definition of the problem: I wanted to go from a given 3D voxel grid, with cells that can contain simple (is this space filled or not?) and more complex data (normals, material properties, …) to a Sparse Voxel Octree representation of this grid. In order to have a small memory footprint for the tree, I prefer keep the actual cell data and the tree nodes seperate – this is an implementation detail and does not affect the building of the SVO, only what data you store in your actual leafs.
+Table of Contents
+Toggle
+Brute force
+The first approach was – as always – the brute force one. I just built an entire octree top-down, with the amount of levels dictated by the given voxel grid, then did a depth-first search and grid lookup to prune empty branches, resulting in a Sparse Voxel Octree.
+The only advantage of this approach is that it was fairly simple, and the sparsify code could be written recursively. Disadvantages were, of course, execution speed and the fact that you needed to have the whole octree structure in memory at runtime. Also, once the pruning is done the octree nodes are spread all over, and you need an extra pass to gather them all and put them in a sequential structure (array, …) for some cache coherence.
+Using Morton codes
+For the second approach, the goals were speed and a better memory layout. In my search for that last feature, I stumbled upon the Morton order / Z-order curve, which is a way to encode multidimensional data into a one-dimensional array, which preserves data locality on multiple levels.
+For building an SVO, you only need to know whether or not a given grid cell contains data or not, so I proposed a moctree, a simple binary file format which lists all voxel cells in morton order and indicates whether or not there is data with a simple boolean. I released a tool to convert from .binvox to .moctree easily.
+In order to compute the Morton code for a given XYZ 3D grid coordinate, you have to do bit interleaving. So when using a 64-bit int to represent the morton code, you have 21 bits for X, 21 bits for Y, 21 bits for Z and one bit to spare. Come to think of it, you could probably use that very first bit to encode filled/not-filled of the grid location :) That gives you a maximum grid size of 4194303^3 voxels.
+The code to encode a 3D grid coordinate (3 integers) to a 64-bit morton code and vice versa is listed below. There are other (and probably smarter) ways to do this, but using a for loop makes the code readable, and you can easily extend it to 128 or 256-bit codes.
+UPDATE: I did a full blog post about better ways to do Morton encode/decode here.
+Keep in mind: my code is distributed under the Creative Commons Attribute-NonCommercial Sharealike 3.0 Unported license.
+```
+inline uint64_t mortonEncode(int x, int y, int z) {
+uint64_t answer = 0;
+for (uint64_t i = 0; i < (sizeof(int) * CHAR_BIT); ++i) {
+answer |= ((x & ((uint64_t)1 << i)) << 2 * i) | ((y & ((uint64_t)1 << i)) << (2 * i + 1)) | ((z & ((uint64_t)1 << i)) << (2 * i + 2));
+}
+return answer;
+}
+
+inline void mortonDecode(uint64_t morton, int& x, int& y, int& z) {
+x = 0;
+y = 0;
+z = 0;
+for (uint64_t i = 0; i < (sizeof(uint64_t) * CHAR_BIT) / 3; ++i) {
+x |= ((morton & (uint64_t(1ull) << uint64_t((3ull * i) + 0ull))) >> uint64_t(((3ull * i) + 0ull) - i));
+y |= ((morton & (uint64_t(1ull) << uint64_t((3ull * i) + 1ull))) >> uint64_t(((3ull * i) + 1ull) - i));
+z |= ((morton & (uint64_t(1ull) << uint64_t((3ull * i) + 2ull))) >> uint64_t(((3ull * i) + 2ull) - i));
+}
+}
+```
+Octree construction
+The good news is, once you have your voxel grid data in that order, building a Sparse Voxel Octree in an out-of-core way can be done with limited memory constraints: using a buffer of 8 x#octree_depth x #node_size bits.
+The basic idea is that by reading in the voxels 8 at a time, and storing the generated parent voxels at each level, you can build an SVO by flushing each buffer to disk when it is full. The final node you flush will be the root node. The array you construct this way has some nice advantages:
+There are only nodes for voxels that have data (so the tree is definitely sparse)
+At every level, child nodes will always be stored next to eachother.
+The algorithm goes as follows:
+After attending EGSR last month in Paris, I discovered that a very similar technique was presented at EGSR2011 by Eric Tabellion in the paper Coherent Out-of-core Point-Based Global Illumination. There’s a key difference which makes my method easier to use: since we’re building an octree for voxel data which spans the whole grid, and not points which were generated from geometry, there’s no need to do a top-down search to find the parent node of the 8 voxels you read in: in a Sparse Voxel Octree, they have the same parent, since the octree spans the whole grid space.
+I will focus now on writing a voxelizer which retains information about the normals from the original model, so I can venture into normal filtering when rendering a SVO.
+Comments are closed.

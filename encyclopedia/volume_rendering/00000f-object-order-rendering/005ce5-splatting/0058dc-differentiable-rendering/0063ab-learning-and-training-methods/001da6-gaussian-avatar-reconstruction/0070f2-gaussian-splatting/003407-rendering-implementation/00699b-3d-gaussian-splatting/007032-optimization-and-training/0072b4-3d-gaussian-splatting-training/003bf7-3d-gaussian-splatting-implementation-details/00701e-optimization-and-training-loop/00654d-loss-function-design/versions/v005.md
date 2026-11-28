@@ -1,0 +1,35 @@
+# Loss Function Design
+
+
+## Overview
+This article defines the composite loss function $\mathcal{L}$ minimized during the training of 3D Gaussian Splatting models, which drives the optimization of Gaussian primitives to match ground-truth observations [S1, unofficial][S2]. It establishes the standard photometric baseline and provides the structural framework for extending this baseline with geometric, semantic, or consistency constraints via sibling methods. It differs from [3D Gaussian Splatting Training Loop](15139-3d-gaussian-splatting-training-loop.md) by focusing specifically on the mathematical formulation and weighting of the loss terms rather than the iteration schedule or densification logic.
+
+## Shared principles
+The core mechanism common to all training loops in this family is the minimization of a composite loss function $\mathcal{L}$ between the rendered image $\hat{I}$ and the ground-truth image $I_{gt}$ [S1, unofficial][S2]. The standard photometric baseline is a weighted sum of L1 loss and differentiable Structural Similarity (D-SSIM) [S1, unofficial][S2]:
+$$ \mathcal{L}_{img} = (1 - \lambda) \mathcal{L}_{L1} + \lambda \mathcal{L}_{D-SSIM} $$
+where $\mathcal{L}_{L1}$ is the average absolute difference between corresponding pixel colors, and $\mathcal{L}_{D-SSIM}$ measures local structure, contrast, and texture [S2]. The weight $\lambda$ is typically 0.2 [S2][S1, unofficial].
+
+The optimization uses the Adam optimizer with $\beta_1 = 0.9$ and $\beta_2 = 0.99$ [S1, unofficial][S2]. Training typically runs for a fixed number of iterations, commonly around 30,000 for standard scenes, though specific schedules vary (e.g., [Gaussian Primitive Training Schedule](18977-gaussian-primitive-training-schedule.md) uses ~6,000) [S2]. The process does not stop at a specific loss threshold because the loss curve continues to creep down with diminishing returns; a fixed iteration budget is used instead [S2].
+
+Gaussian parameters $\mathcal{G} = \{g_i\}_{i=1}^N$ include position $\mathbf{p}_i \in \mathbb{R}^3$, covariance $\Sigma_i$ (parameterized by rotation quaternion $\mathbf{q}_i \in \mathbb{R}^4$ and scale vector $\mathbf{s}_i \in \mathbb{R}^3$), opacity $\alpha_i \in [0, 1]$, and Spherical Harmonics (SH) coefficients $\mathbf{c}_{i, l}$ for view-dependent color [S2][S1, unofficial].
+
+## Subtopics
+
+### [Multi-Attribute Consistency (MAC) Loss](19200-multi-attribute-consistency-mac-loss.md)
+Enforces geometric and photometric agreement between matched Gaussians across different views to solve sparse-view ambiguity. Unlike standard photometric losses, it operates directly on Gaussian parameters (centroids, covariances, opacities, SH) using world-space transformations and log-eigenvalue comparisons to prevent geometric degeneracy.
+
+### [Cross-Modal Alignment Optimization Strategy](19214-cross-modal-alignment-optimization-strategy.md)
+Aligns rendered 3D semantic fields with distilled 2D vision-language feature maps. It extends the loss composite with a contrastive semantic loss and spatial total variation regularization to handle noise in distilled features and enable open-world scene representation.
+
+### SuGaR Optimization
+A regularization term that encourages the 3D Gaussians to align well with the surface of the scene [S1, unofficial]. It is applied after a short vanilla 3DGS optimization phase to prepare for mesh extraction via Poisson reconstruction [S1, unofficial].
+
+### SA-ResGS Loss Formulation
+A composite loss for Gaussian updates consisting of a guided subset term ($L_{sub}$) and a full loss ($L_{full}$) [S2]. The variant without full loss tends to oversmooth low-confidence regions and cause high-frequency detail loss, while the variant with full loss reinforces these regions to prevent under-updated Gaussians from collapsing [S2].
+
+## Background
+The standard photometric loss formulation (L1 + SSIM) is the foundational training objective for 3D Gaussian Splatting [S1, unofficial][S2]. The SuGaR regularization term was introduced to address the difficulty of extracting meshes from unorganized 3D Gaussians by enforcing surface alignment [S1, unofficial]. The SA-ResGS loss was developed to improve next-best-view selection and reconstruction in sparse or ambiguous regions by combining residual supervision with uncertainty-guided view selection [S2].
+
+## Sources
+[S1] Anttwo/SuGaR, https://github.com/Anttwo/SuGaR, fetched 2026-10-26 (unofficial)
+[S2] SA-ResGS: Self-augmented Residual 3D Gaussian Splatting for Next Best View Selection, https://doi.org/10.1007/978-3-032-37013-6_17, fetched 2026-10-29

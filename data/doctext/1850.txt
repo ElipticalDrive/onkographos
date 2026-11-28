@@ -1,0 +1,1602 @@
+License: MIT
+
+Code: Roy Massaad
+
+# Python 3D DDA Raycaster 
+
+Python retro basic 3d Wolfenstein textured walls raycaster using DDA to optimize/reduce ray casting steps.
+
+![](doc/screenshot0.png)
+![](doc/screenshot1.png)
+![](doc/screenshot2.png)
+
+# Requirements
+
+* Python 3.11
+* Pygame-ce (actually faster than pygame, still lacking tho in fps in blitting)
+* CPU faster than an intel 286 and more than 528k of conventional memory sadly ;(
+
+# Install
+
+python -m venv env
+
+-Windows
+env\Scripts\activate
+
+-MacOs
+source env/bin/activate
+
+pip install -r requirements.txt
+
+# Update requirements before push
+
+pip freeze > requirements.txt
+
+# Features
+
+* Map/Top 2d view for debbuging and 3d view
+* Map wall grids editor in top view (left click to add a block, right click to remove)
+* Different log debugging levels
+* Textured and Untextured walls
+* Press and hold Shift to Run
+* Different types of walls
+* Wall collision
+* Sliding off walls support
+* Depth gradient for textured and untextured walls
+* Toggle Horizontal/Vertical/Auto DDA scans for debugging/learning 
+* Pause/Unpause
+* FPS/Raycast Steps UI counters
+* Different Inline map levels
+* Adjustable Field of View
+* Mouse movement
+* Skybox
+* Weapons HUD, animation
+* Audio fx and background music
+* Basic animated sprites with state machine and wall occlusion
+* Using custom sprite/state system (draw, update, init, animation list..)
+
+# TODO
+
+* Switch from pygame to pyglet for faster/hardware sprite blitting
+* GUI with Score board
+* Textured Floor
+* Some floors with 'reflections'
+* Different ceiling/walls heights? (i know it was a BSP feature but maybe can be done in raycasting..)
+* Pickup Sprites (health, ammo, score)
+* Weapons attack logic
+* Better enemy Sprites, animation, state Machine, navigation with different sprite angles
+* Add pickups/Enemy spawns to level editor
+* Save/Load levels to/from external files
+* Network deathmatch using Firebase realtime DB
+
+# Asset Credits
+
+Skybox from mekworks 
+https://mekworx.the-powerhouse.net/meks-box-o-skies/
+
+Wall textures from original wolfenstein 3d
+
+Weapons and enemies from Brutal Doom pk3
+
+Background music and fx original doom (mp3 versions)
+
+### classes.py
+```
+import enum
+import time
+import pygame
+from consts import *
+import shared
+
+class WeaponState(enum.Enum):
+    READY = 1
+    FIRING = 2
+    RELOADING = 3
+    
+class NPCState(enum.Enum):
+    IDLE = 1
+    WALKING = 1
+    HUNTING = 2
+    FIRING = 3
+    DEAD = 4
+    
+
+# Player class
+class Player:
+    def __init__(self, x, y, radius, speed, view_angle, rotation_speed):
+        self.x = x
+        self.y = y
+        self.radius = radius
+        self.speed = speed
+        self.view_angle = view_angle
+        self.rotation_speed = rotation_speed
+       
+class Weapon:
+    def __init__(self, damage, range, fire_rate, accuracy, ammo, state, name):
+        self.damage = damage
+        self.range = range
+        self.fire_rate = fire_rate
+        self.accuracy = accuracy
+        self.ammo = ammo
+        self.state = state
+        self.name = name
+        self.spriteset = None
+        self.current_sprite = None
+        self.timer = 0
+        self.frame = 0
+        self.lastframe = 0
+        
+    def update(self):
+        pass
+    def draw(self):
+        pass
+    def fire(self):
+        pass
+    def reload(self):
+        pass
+    def ready(self):
+        pass
+    def loadSpriteset(self):
+        pass
+        
+class Shotgun(Weapon):
+    def __init__(self, damage = 10, range = 100, fire_rate = 1, accuracy = 1, ammo = 30, state = WeaponState.READY, name = "Shotgun"):
+        super().__init__(damage, range, fire_rate, accuracy, ammo, state, name)
+        self.loadSpriteset()     
+        
+    def loadSpriteset(self):
+        self.spriteset = {
+            "idle": [pygame.image.load("assets/weapons/shotgun/idle/SHTGA0-KEY.png").convert(),
+                     pygame.image.load("assets/weapons/shotgun/idle/SHTGB0-KEY.png").convert()
+                     ], #use convert() if file is  color key, if not convert_alpha
+            "firing": [pygame.image.load("assets/weapons/shotgun/firing/SHTFA0-KEY.png").convert(),
+                        # pygame.image.load("assets/weapons/shotgun/firing/SHTFB0-KEY.png").convert()
+                        ],
+            "reloading": [pygame.image.load("assets/weapons/shotgun/reloading/SHTGB0-KEY.png").convert(),
+                          pygame.image.load("assets/weapons/shotgun/reloading/SHTGC0-KEY.png").convert(),
+                          pygame.image.load("assets/weapons/shotgun/reloading/SHTGD0-KEY.png").convert()],
+        }
+        
+        # iterate over sprite set and scale each sprite value by 2 both in width and height
+        for key, value in self.spriteset.items():
+           for index, sprite in enumerate(value):
+
+                # scale sprite, done once so doesnt affect runtime performance 
+                scale = 1.5
+                self.spriteset[key][index] = pygame.transform.scale(sprite, (sprite.get_width() * scale, sprite.get_height() * scale))
+                
+                # set transparency if not included in image alpha already. a legacy technique
+                # slightly faster than using image alpha (PNG), requires images with color key 
+                self.spriteset[key][index].set_colorkey(TRANSPARENT_COLOR_KEY)
+                      
+                # create a surface from the current sprite, surface to surface blitting 'should' be faster
+                # but it is not improving fps, on the contrary, so it is disabled for now
+                #new_surface = pygame.Surface((self.spriteset[key][index].get_width(), self.spriteset[key][index].get_height()), pygame.SRCALPHA)
+                #new_surface.blit(self.spriteset[key][index], (0, 0))
+                #self.spriteset[key][index] = new_surface
+            
+        
+    def draw(self, screen):
+                  
+        texture_rect = self.current_sprite.get_rect(center=(SCREEN_WIDTH/2, SCREEN_HEIGHT - self.current_sprite.get_height()/2))
+        # This transparent blitting operation is very slow on Pygame, the bigger the area, the slower it is
+        screen.blit(self.current_sprite, (texture_rect),area = None,special_flags=pygame.BLEND_ALPHA_SDL2)
+        
+    def fire(self):
+        self.state = WeaponState.FIRING
+        
+        self.timer = pygame.time.get_ticks() - FRAME_DELAY # this skips the delay in the update function
+        self.frame = 0
+        
+        # Play shotgun sound
+        shared.weapon_channel.play(shared.shotgun_firing)
+        
+        # Not used, Schedule the reload timer event to trigger after some time 
+        #pygame.time.set_timer(WEAPON_RELOAD_EVENT, 400 , 1)
+        
+    
+    def reload(self):
+        self.state = WeaponState.RELOADING
+       
+        # reset timer and frame for the animation for the update function 
+        self.timer = pygame.time.get_ticks()
+        self.frame = 0
+        
+    def ready(self):
+        self.state = WeaponState.READY
+        self.frame = 0
+        
+    def update(self):
+        
+        current_time = pygame.time.get_ticks()
+        
+        # run the animation only if the timer is ready (prevent running continuously)
+        nextframe_ready = current_time - self.timer >= FRAME_DELAY
+                
+        if nextframe_ready == True:
+                
+            if self.state == WeaponState.READY:
+                
+                total_frames = self.spriteset["idle"].__len__() #might be slow
+                if self.frame >= total_frames: #loop the animation
+                    self.frame = 0
+
+                self.current_sprite = self.spriteset["idle"][self.frame]
+                self.frame += 1 #increment current frame for the set
+                
+            elif self.state == WeaponState.FIRING:
+                
+                total_frames = self.spriteset["firing"].__len__()
+                if self.frame >= total_frames:
+                    self.frame = 0
+                    # switch to reloading state, exit/skip animation set loop
+                    self.reload()
+
+                self.current_sprite = self.spriteset["firing"][self.frame]
+                self.frame += 1
+                
+            elif self.state == WeaponState.RELOADING:
+                
+                total_frames = self.spriteset["reloading"].__len__()
+                if self.frame >= total_frames:
+                    self.frame = 0
+                    self.ready()
+
+                self.current_sprite = self.spriteset["reloading"][self.frame]
+                self.frame += 1
+        
+            # reset timer (after manual even was triggered)
+            self.timer = pygame.time.get_ticks()
+              
+class NPC:
+    def __init__(self, x, y, radius, speed, view_angle, rotation_speed, health, damage, name, fire_rate, state, accuracy, width, height, normalized_height, vertical_offset):
+        self.x = x
+        self.y = y
+        self.radius = radius
+        self.speed = speed
+        self.view_angle = view_angle
+        self.rotation_speed = rotation_speed
+        self.health = health
+        self.damage = damage
+        self.name = name
+        self.fire_rate = fire_rate
+        self.state = state
+        self.accuracy = accuracy
+        self.spriteset = None
+        self.current_sprite = None
+        self.timer = 0
+        self.frame = 0
+        self.lastframe = 0
+        self.width = width
+        self.height = height
+        self.normalized_height = normalized_height
+        self.vertical_offset = vertical_offset
+
+        
+    def update(self):
+        pass
+    def draw(self):
+        pass
+    def fire(self):
+        pass
+    def die(self):
+        pass
+    def loadSpriteset(self):
+        pass
+        
+class ShotgunGuy(NPC):
+    def __init__(self, x = 500, y = 500, radius = 5, speed = 30, view_angle = 0, rotation_speed = 1, 
+                 health = 20, damage = 10, name = "Shotgun Guy", fire_rate = 1, state = NPCState.IDLE, 
+                 accuracy = 1 , width = 35, height = 55, normalized_height = 60, vertical_offset = 0.2):
+        super().__init__(x, y, radius, speed, view_angle, rotation_speed, health, damage, name, fire_rate, state, accuracy, width, height, normalized_height, vertical_offset)   
+        self.loadSpriteset()
+        
+    def loadSpriteset(self):
+        
+        self.spriteset = {
+            "idle_front": [
+                            pygame.image.load("assets/npc/shotgunguy/idle/front/SHIDA1-KEY.png").convert(),
+                            pygame.image.load("assets/npc/shotgunguy/idle/front/SHIDB1-KEY.png").convert()
+                     ], 
+            "firing_front": [
+                            pygame.image.load("assets/npc/shotgunguy/firing/front/SPOSE1-KEY.png").convert(),
+                            pygame.image.load("assets/npc/shotgunguy/firing/front/SPOSF1-KEY.png").convert()
+                        ],
+            "walking_front": [
+                            pygame.image.load("assets/npc/shotgunguy/walking/front/SPOSA1-KEY.png").convert(),
+                            pygame.image.load("assets/npc/shotgunguy/walking/front/SPOSB1-KEY.png").convert(),
+                            pygame.image.load("assets/npc/shotgunguy/walking/front/SPOSC1-KEY.png").convert(),
+                            pygame.image.load("assets/npc/shotgunguy/walking/front/SPOSD1-KEY.png").convert()
+                          ],
+        }
+        
+
+        # iterate over sprite set and set color key
+        for key, value in self.spriteset.items():
+           for index, sprite in enumerate(value):
+
+                self.spriteset[key][index].set_colorkey(TRANSPARENT_COLOR_KEY)
+        
+        
+    def draw(self, screen, player):
+
+        # Get distance between sprite and player
+        distance = math.sqrt((player.x - self.x)**2 + (player.y - self.y)**2)
+        
+        # Dynamically inversly scale sprite size based on distance
+        scale = 100 / distance 
+
+        # Calculate npc screen projected x position, based on player vs npc positions, no matrix math
+        # based on, which used degrees instead of radians to calculate small steps
+        # https://wynnliam.github.io/raycaster/news/tutorial/2019/04/03/raycaster-part-02.html
+        # TODO seems inaccurate in alignement with FOV as is, to investigate why or replace algo/fix FOV
+        
+        # Get relative vector difference between player and npc
+        h_x = self.x - player.x
+        h_y = self.y - player.y
+        
+        # Get angle difference
+        p = math.degrees(math.atan2(h_y, h_x))
+        
+        if (p > 360):
+            p -= 360
+        if (p < 0):
+            p += 360
+            
+        # To speed up calculate, i wont use the FOV as variable but instead precalculate it
+        # FOV as defined in consts.py is 80, but 120 seems to 'align' better the NPC and walls
+        # TODO investigate why 120 is better than 80? is FOV misconfigured or something?
+        # HALF FOV = 60, this is required in the formula
+        #q = ((math.degrees(player.view_angle) + FOV/2) - p)
+        q = ((math.degrees(player.view_angle) + 60) - p)
+        
+        # projected x position
+        # prebake screen width / FOV, assuming width of 800, then it is 6.66
+        #screen_x =  q * (SCREEN_WIDTH / 120)
+        screen_x =  q * (6.66)
+        
+        # invert screen_x on the vertical axis
+        # TODO this is a workaround, it is best calculate x correctly instead above (tan?)
+        screen_x = int(SCREEN_WIDTH - screen_x)
+
+        # Draw only when projected x is within FOV/Screen
+        if screen_x >= 0 and screen_x < (SCREEN_WIDTH-1):
+            
+            self.current_sprite = pygame.transform.scale(self.current_sprite, (self.width * scale, self.height * scale))
+     
+            texture_rect = self.current_sprite.get_rect(center=(screen_x, SCREEN_HEIGHT/2 + self.current_sprite.get_height() * self.vertical_offset )) 
+        
+            # if sprite doesnt have a wall in the way, draw it
+            # TODO BUG here or in storing the depth buffer:
+            # on some view angles the sprites draw infront of closer walls, maybe quadrant related
+            # TODO enhancement, this should occlude per column of a sprite and not the entire sprite
+            if distance < shared.depth_buffer_1d[screen_x] :
+                screen.blit(self.current_sprite, (texture_rect),area = None,special_flags=pygame.BLEND_ALPHA_SDL2)
+            
+        
+    
+    def update(self):
+        
+        current_time = pygame.time.get_ticks()
+        
+        # run the animation only if the timer is ready (prevent running continuously)
+        nextframe_ready = current_time - self.timer >= FRAME_DELAY_SHORT
+                
+        if nextframe_ready == True:
+                
+            if self.state == NPCState.IDLE:
+                
+                total_frames = self.spriteset["idle_front"].__len__() #might be slow
+                if self.frame >= total_frames: #loop the animation
+                    self.frame = 0
+
+                self.current_sprite = self.spriteset["idle_front"][self.frame]
+                self.frame += 1 #increment current frame for the set
+                
+            elif self.state == NPCState.FIRING:
+                
+                total_frames = self.spriteset["firing_front"].__len__()
+                if self.frame >= total_frames:
+                    self.frame = 0
+                    # switch to reloading state, exit/skip animation set loop
+                    self.reload()
+
+                self.current_sprite = self.spriteset["firing_front"][self.frame]
+                self.frame += 1
+                
+            elif self.state == NPCState.WALKING:
+                
+                total_frames = self.spriteset["walking_front"].__len__()
+                if self.frame >= total_frames:
+                    self.frame = 0
+                    self.ready()
+
+                self.current_sprite = self.spriteset["walking_front"][self.frame]
+                self.frame += 1
+        
+            # reset timer (after manual even was triggered)
+            self.timer = pygame.time.get_ticks()
+    
+    def fire(self):
+        pass
+    def die(self):
+        pass
+```
+
+### consts.py
+```
+import math
+
+# Game frame settings
+FPS = 60
+
+# Set the width and height of the screen [width, height]
+SCREEN_WIDTH = 800
+SCREEN_HEIGHT = 550
+
+# Define the man size in x and y, set to 32 blocks by default
+MAP_SIZE_X = 32
+MAP_SIZE_Y = 32
+
+# Define the block size for the uniform cells in map, same on X width and Y height for raycast tilemaps
+BLOCK_SIZE = 32
+
+MAX_WALL_HEIGHT = BLOCK_SIZE
+FOCAL_LENGTH = SCREEN_HEIGHT / 2
+FOV = 80 #doesnt seem to do much
+
+# Starting position of the player
+
+PLAYER_INITIAL_X = 100
+PLAYER_INITIAL_Y = 150
+PLAYER_RADIUS = 15
+PLAYER_SPEED = 70
+PLAYER_VIEW_ANGLE = math.pi /2 - 0.6
+PLAYER_ROTATION_SPEED = 2
+PLAYER_RUNNING_SPEED = 140
+PLAYER_HEALTH = 100
+
+PLAYER_INITIAL_X = 373
+PLAYER_INITIAL_Y = 229
+PLAYER_VIEW_ANGLE = 0.472
+
+MOUSE_SENSITIVITY = 1.7
+
+# Define a small epsilon value to help avoid division by zero if needed
+EPSILON = 1e-10
+
+# Wall textures should be uniform in size, 64x64 pixels for example
+TEXTURE_SIZE = 64
+
+# Define colors, can be used anywhere
+BLACK = (0, 0, 0)
+WHITE = (255, 255, 255)
+RED = (255, 0, 0) 
+BLUE = (0, 0, 255)
+GREY = (128, 128, 128)
+GREEN = (0, 255, 0)
+LIGHT_GREY = (190, 190, 190)
+LIGHT_GREY_EXTRA = (230, 230, 230)
+DARK_GREY = (50, 50, 50)
+
+SKY_BLUE = (135, 206, 235)
+GROUND_BROWN = (139, 69, 19)
+GROUND_GREY = (128, 128, 128)
+
+# WALL COLORS and TEXTURES index values used in map grid array # TODO json file loading to be implemented by will use the same values
+
+WHITE_EMPTY_SPACE = 0
+BLUE_SOLID_WALL = 1
+GREY_SOLID_WALL = 2
+GREEN_SOLID_WALL = 3
+RED_SOLID_WALL = 4
+BLUE_TEXTURE_WALL = 5
+GREY_TEXTURE_STONEWALL = 6
+
+MINIMAP_SCALE_FACTOR = 0.5
+MINIMAP_OFFSET_X = 144
+MINIMAP_OFFSET_Y = 44
+
+# CYAN, used instead of loading PNGs with alpha, this color is the default that is used with doom
+# Double important when using Pygame which is very slow blitting with alpha (pngs/surfaces)
+TRANSPARENT_COLOR_KEY = (0, 255, 255)
+
+# Animation frame delay in ms
+FRAME_DELAY = 150
+# Shorter constant for when you want to update/draw faster
+FRAME_DELAY_SHORT = 100
+
+# EVENTS (ASYNC)
+DEFAULT_EVENT = -100
+CANCEL_EVENT = -1
+WEAPON_FIRE_EVENT = 0
+WEAPON_RELOAD_EVENT = 1
+WEAPON_READY_EVENT = 2
+```
+
+### data.py
+```
+# level 6 testing data grid array
+level1 = [
+    [6, 6, 6, 6, 6, 6, 6, 6, 6, 6, 6, 6, 6, 6, 6, 6, 6, 6, 6, 6, 6, 6, 6, 6, 6, 6, 6, 6, 6, 6, 6, 6],
+    [6, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 6],
+    [6, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 6],
+    [6, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 6],
+    [6, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 3, 0, 0, 0, 0, 0, 6],
+    [6, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 3, 0, 0, 0, 0, 0, 6],
+    [6, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 3, 0, 0, 0, 0, 0, 6],
+    [6, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 3, 0, 0, 0, 0, 0, 6],
+    [6, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 5, 5, 5, 5, 5, 5, 0, 0, 0, 0, 0, 0, 3, 0, 0, 0, 0, 0, 6],
+    [6, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 5, 5, 5, 5, 5, 5, 0, 0, 0, 0, 0, 0, 3, 0, 0, 0, 0, 0, 6],
+    [6, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 5, 5, 0, 0, 5, 5, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 6],
+    [6, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 5, 0, 5, 5, 0, 0, 5, 5, 0, 5, 5, 0, 0, 0, 0, 0, 0, 0, 0, 0, 6],
+    [6, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 6],
+    [6, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 6],
+    [6, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 6],
+    [6, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 6],
+    [6, 2, 2, 2, 2, 2, 2, 2, 2, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 6, 0, 0, 0, 0, 0, 0, 0, 0, 0, 6],
+    [6, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 6, 0, 0, 0, 0, 0, 0, 0, 0, 0, 6],
+    [6, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 6, 0, 0, 0, 0, 0, 0, 0, 0, 0, 6],
+    [6, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 6, 0, 0, 0, 0, 0, 0, 0, 0, 0, 6],
+    [6, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 2, 2, 2, 2, 2, 2, 2, 2, 2, 0, 0, 0, 0, 0, 0, 6],
+    [6, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 6],
+    [6, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 6],
+    [6, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 6],
+    [6, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 6],
+    [6, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 6],
+    [6, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 6],
+    [6, 0, 0, 0, 3, 3, 3, 3, 3, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 6],    
+    [6, 0, 0, 0, 0, 0, 0, 0, 3, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 6],
+    [6, 0, 0, 0, 0, 0, 0, 0, 3, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 6],
+    [6, 0, 0, 0, 0, 0, 0, 0, 3, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 6],
+    [6, 6, 6, 6, 6, 6, 6, 6, 6, 6, 6, 6, 6, 6, 6, 6, 6, 6, 6, 6, 6, 6, 6, 6, 6, 6, 6, 6, 6, 6, 6, 6]
+]
+
+
+# level 6 testing data grid array
+level2 = [
+    [6, 6, 6, 6, 6, 6, 6, 6, 6, 6, 6, 6, 6, 6, 6, 6, 6, 6, 6, 6, 6, 6, 6, 6, 6, 6, 6, 6, 6, 6, 6, 6],
+    [6, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 6],
+    [6, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 6],
+    [6, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 6],
+    [6, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 3, 3, 0, 0, 0, 0, 6],
+    [6, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 3, 3, 0, 0, 0, 0, 6],
+    [6, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 3, 3, 0, 0, 0, 0, 6],
+    [6, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 3, 3, 0, 0, 0, 0, 6],
+    [6, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 5, 5, 5, 5, 5, 5, 0, 0, 0, 0, 0, 0, 3, 3, 0, 0, 0, 0, 6],
+    [6, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 5, 5, 5, 5, 5, 5, 0, 0, 0, 0, 0, 0, 3, 3, 0, 0, 0, 0, 6],
+    [6, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 5, 5, 5, 5, 5, 5, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 6],
+    [6, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 5, 5, 5, 5, 5, 5, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 6],
+    [6, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 6],
+    [6, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 6],
+    [6, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 6],
+    [6, 2, 2, 2, 2, 2, 2, 2, 2, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 6],
+    [6, 2, 2, 2, 2, 2, 2, 2, 2, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 6, 6, 0, 0, 0, 0, 0, 0, 0, 0, 6],
+    [6, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 6, 6, 0, 0, 0, 0, 0, 0, 0, 0, 6],
+    [6, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 6, 6, 0, 0, 0, 0, 0, 0, 0, 0, 6],
+    [6, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 2, 2, 2, 2, 2, 6, 6, 2, 2, 0, 0, 0, 0, 0, 0, 6],
+    [6, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 2, 2, 2, 2, 2, 6, 6, 2, 2, 0, 0, 0, 0, 0, 0, 6],
+    [6, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 6],
+    [6, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 6],
+    [6, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 6],
+    [6, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 6],
+    [6, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 6],
+    [6, 0, 0, 0, 3, 3, 3, 3, 3, 3, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 6],
+    [6, 0, 0, 0, 3, 3, 3, 3, 3, 3, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 6],    
+    [6, 0, 0, 0, 0, 0, 0, 0, 3, 3, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 6],
+    [6, 0, 0, 0, 0, 0, 0, 0, 3, 3, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 6],
+    [6, 0, 0, 0, 0, 0, 0, 0, 3, 3, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 6],
+    [6, 6, 6, 6, 6, 6, 6, 6, 6, 6, 6, 6, 6, 6, 6, 6, 6, 6, 6, 6, 6, 6, 6, 6, 6, 6, 6, 6, 6, 6, 6, 6]
+]
+```
+
+### graphics.py
+```
+import math
+from consts import *
+from termcolor import colored
+import shared
+
+# Cast a ray from the player's position at a given angle and return the distance, coordinates and meta data(color) to the nearest HIT wall
+# POV_xRange is the range of columns to scan for the ray, it is used per scan limit of the screen width/POV by the caller of this function
+# ignore_debug is used to debug only top view direct rays, ignoring 2d fov and 3d horizonal raycasts
+def cast_ray(player, ray_angle, level, POV_xRange, ignore_debug = False):
+    
+    # Wrap the angle to 0-2pi for consistency
+    ray_angle = ray_angle % (2 * math.pi)
+    
+    if (shared.DEBUG_LEVEL >= 1 and not ignore_debug): print(colored("\n\n==SENDING RAY using DDA sub Steps==", "green"))  
+    if (shared.DEBUG_LEVEL >= 1 and not ignore_debug): print("Player X: {}   Player Y: {}  Player Angle: {:.3f} Ray Angle: {:.3f}".format(int(player.x), int(player.y), player.view_angle, ray_angle))
+    if (shared.DEBUG_LEVEL >= 2 and not ignore_debug): print("View column scan from X : " + str(POV_xRange))
+    
+    # Pre calculate the ray direction values in cos and sin (useful for right triangle calculations)
+    cos_angle = math.cos(ray_angle)  
+    sin_angle = math.sin(ray_angle)  
+    tan_angle = math.tan(ray_angle)
+    atan_angle = math.atan(ray_angle)
+
+    # Calculate the internal delta x and y of the player position inside the current block
+    offset_px = player.x % BLOCK_SIZE
+    offset_py = player.y % BLOCK_SIZE
+    # Normalize to use normalized formulas
+    normalized_offset_px = offset_px / BLOCK_SIZE
+    normalized_offset_py = offset_py / BLOCK_SIZE
+    
+    # Calculate the origin block x and y of the ray position for debugging
+    initial_grid_x = int(player.x / BLOCK_SIZE)
+    initial_grid_y = int(player.y / BLOCK_SIZE)
+    
+    if (shared.DEBUG_LEVEL >= 1 and not ignore_debug): print("Initial Grid X: " + str(initial_grid_x) + "   Grid Y: " + str(initial_grid_y))
+    if (shared.DEBUG_LEVEL >= 1 and not ignore_debug): print("Cos Angle: {:.3f}   Sin Angle: {:.3f}  Tan Angle: {:.3f}   aTan Angle: {:.3f}".format(cos_angle, sin_angle, tan_angle, atan_angle))
+    if (shared.DEBUG_LEVEL >= 2 and not ignore_debug): print(f"Offset X: {offset_px:.3f}, Offset Y: {offset_py:.3f}")
+    
+    """
+    This section is the DDA algorithm for raycasting
+    It is a more efficient way to step through the grid
+    Based on the ray direction and the current position of the ray,
+    it calculates the next potential hit location on the grid line in a fast way
+    """
+    
+    # ./doc folder pix credit to the excellent DDA explainer youtube video by fahlrile https://www.youtube.com/watch?v=IDmWuSrEkow
+    # Kindly note the Y axis direction is different between the video/picture and the code in python
+    # You can use the 'Image Preview' VS Code plugin from the marketplace to see image previews in comment lines below
+        
+    # Shared variables
+    
+    # Steps trackers for the vertical and horizontal hits, i prefer variables to be descriptive and declared explicitly in python
+    steps = 0 
+    steps_v = 0
+    steps_h = 0
+    
+    # Distance variables for the vertical and horizontal hits
+    distance_v = 0
+    distance_h = 0
+
+    # We need the sign of the cos and sin to know if we are going to add or subtract the offset per axis
+    x_sign = int(math.copysign(1, cos_angle))
+    y_sign = int(math.copysign(1, sin_angle))
+    
+    if (shared.DEBUG_LEVEL >= 2 and not ignore_debug): print("X Sign: " + str(x_sign) + "   Y Sign: " + str(y_sign))
+    
+    # Final results variables
+    next_rayhit_x_h = 0
+    next_rayhit_y_h = 0
+    next_rayhit_x_v = 0
+    next_rayhit_y_v = 0
+    
+    # TLDR: DDA Algorithm
+    # We are going to do 2 main calculations, one with X locked on grid lines and Y as incremental (vertical intersections)
+    # Then we are going to do one with Y locked on grid lines and X as incremental (horizontal intersections)
+    # And then select the one that yields the shortest distance to optimial traversal (frontface vs backface of the wall)
+    # Reference: ./doc/dda-overview.png
+    # Referecece: ./doc/overlapped-shortest.png
+    # Note the code accounts for both +/i axis scanning unlike the reference image that only accounts for positive axis scanning
+
+    #############################################################
+    # Calculate the next potential hit on the Vertical grid lines
+    #############################################################
+    # X locked to Grid, Y incremental, Vertical Intersections
+    # Check if the ray is facing right/left based on cos of angle so we now if we are going to add or subtract the offset also 
+    # (Also check python cos/sin range/quadrants and axis direction)
+    
+    if (shared.DEBUG_LEVEL >= 2 and not ignore_debug): print (colored("\n==VERTICAL RAY SCANNING==","blue"))
+    
+    # Initialize the deltas to 0
+    delta_xi = 0
+    delta_yi = 0
+    delta_xe = 0
+    delta_ye = 0
+    
+    # texture "x" indexing needed for fake 3d walls rending in caller function (normalized)
+    texture_x_h = 0
+    texture_x_v = 0
+    texture_x = 0
+    
+    # Ray is facing right
+    if cos_angle > 0:
+        delta_xi = (1 - normalized_offset_px) # use normalized values
+    # Ray is facing left
+    elif cos_angle < 0:
+        delta_xi = normalized_offset_px
+    # This is parallel, and will not hit anything, so we set the distance to a high value to avoid being selected as the shortest distance
+    else:
+        delta_xi = 0
+        distance_v = 1000000 # Set to a high value to avoid being selected as the shortest distance
+
+    if delta_xi != 0:
+        # Calculate the Y value based on angle as defined by the right triangle rules
+        # Reference, check ./doc/vertical-intersections-step1.png   
+                
+        # Calculate the internal delta y side length value as defined by the right triangle rules
+        # (We denormalize by multiplying by BLOCK_SIZE)
+        
+        delta_xi = BLOCK_SIZE - offset_px if x_sign == 1 else -offset_px
+        delta_yi = delta_xi * tan_angle 
+        
+        # Required to correctly select grid_x index backwards(ray pointing backward to x axis) by offsetting the x value slightly negatively
+        # ex, if x = 16 then x = 15.99 -> grid_x = 0 since grid_0 is (0 to 15). This is not required for positive vertical scanning 
+        if x_sign == -1:
+            delta_xi += -EPSILON 
+
+        # External delta y
+        # Reference, check ./doc/vertical-intersections-step2.png
+        delta_ye = abs(tan_angle * BLOCK_SIZE) * y_sign
+        delta_xe = BLOCK_SIZE * x_sign
+
+        # Starting position (player position + nearest inline grid intersection)
+        ray_x = player.x + delta_xi
+        ray_y = player.y + delta_yi
+        
+        if (shared.DEBUG_LEVEL >= 2 and not ignore_debug): print ( "delta_xi: " + str(int(delta_xi)) + "   delta_yi: " + str(int(delta_yi)))
+        if (shared.DEBUG_LEVEL >= 2 and not ignore_debug): print ( "delta_xe: " + str(int(delta_xe)) + "   delta_ye: " + str(int(delta_ye)))
+        if (shared.DEBUG_LEVEL >= 2 and not ignore_debug): print ( "start X: " + str(int(ray_x)) + "   start Y: " + str(int(ray_y)))  
+
+        # Step through the level grid until a wall is hit (Level designed to be closed, or limit max steps to avoid infinite loop on open levels or bugs) 
+
+        # Loop until finding a wall or timing out
+        while True: # TODO remove
+            
+            # Increment the steps for counting
+            steps_v += 1
+
+            # If the ray has taken too many steps, quit or else we get stuck in an infinite loop
+            # It is imposible for the steps to be higher than 2 times the map size (accurate 'enough' but fast)
+            if steps_v > MAP_SIZE_X * 2:
+                print(colored("Error: Raycast took too many steps", 'red'))
+                quit()  
+            
+            # Clamp to level boundraies in case of ray increment slightly overshooting the edges of level boundaries
+            if ray_x < 0 : 
+                ray_x = 0
+            if ray_x >= MAP_SIZE_X * BLOCK_SIZE : 
+                ray_x = MAP_SIZE_X * BLOCK_SIZE - 1
+            if ray_y < 0 : 
+                ray_y = 0
+            if ray_y >= MAP_SIZE_Y * BLOCK_SIZE : 
+                ray_y = MAP_SIZE_Y * BLOCK_SIZE - 1
+            
+            # Calculate the grid cell the ray is in
+            grid_x = int(ray_x / BLOCK_SIZE)
+            grid_y = int(ray_y / BLOCK_SIZE)
+            
+            if (shared.DEBUG_LEVEL >= 3 and not ignore_debug): print ( colored("\n-Step : " + str(steps_v),"yellow"))
+            if (shared.DEBUG_LEVEL >= 3 and not ignore_debug): print ( "grid_x: " + str(grid_x) + "   grid_y: " + str(grid_y))
+            if (shared.DEBUG_LEVEL >= 3 and not ignore_debug): print ( "ray_x: " + str(int(ray_x)) + "   ray_y: " + str(int(ray_y)))
+            
+            # Check for out of bounds errors
+            if grid_x < 0 or grid_x >= MAP_SIZE_X or grid_y < 0 or grid_y >= MAP_SIZE_Y:
+                print(colored("Error: Raycast referenced out of bounds Grid X Y", 'red'))
+                quit()
+            
+            # If we hit a wall, break the loop
+            if level[grid_y][grid_x] > 0:
+                
+                # Assign the final vertical values  
+                next_rayhit_x_v = ray_x
+                next_rayhit_y_v = ray_y
+                
+                # Save this value for wall texture mapping from delta_yi/tan on vertical scans        
+                texture_x_v = (next_rayhit_y_v % BLOCK_SIZE) / BLOCK_SIZE
+                
+                # Calculate the distance of these 2 points using math.hypot  
+                distance_v = math.hypot(player.x - next_rayhit_x_v, player.y - next_rayhit_y_v)
+                
+                if (shared.DEBUG_LEVEL >= 2 and not ignore_debug): print (colored("\n==VERTICAL HIT==",'red'))
+                if (shared.DEBUG_LEVEL >= 2 and not ignore_debug): print ( "Distance : " + str(int(distance_v)))        
+                break
+            
+            # Move in external delta increments
+            ray_x += delta_xe
+            ray_y += delta_ye
+            
+  
+    ####################################################################
+    # Next, calculate the next potential hit on the horizontal grid line
+    ####################################################################
+    
+    # Y locked to Grid, X incremental, Horizontal Intersections
+    # Check if the ray is facing down/up based on sin of angle so we now if we are going to add or subtract the offset
+    # Reference, check ./doc/horizontal-intersections-step1.png   
+    
+    if (shared.DEBUG_LEVEL >= 2 and not ignore_debug): print (colored("\n==HORIZONTAL RAY SCANNING==", "blue"))
+        
+    # Reset the deltas
+    delta_xi = 0
+    delta_yi = 0
+    delta_xe = 0
+    delta_ye = 0
+    
+    # Ray is facing down
+    if sin_angle > 0:
+        delta_yi = (1 - normalized_offset_py)
+    # Ray is facing up
+    elif sin_angle < 0:
+        delta_yi = normalized_offset_py
+    # This is parallel, and will not hit anything, so we set the distance to a high value to avoid being selected as the shortest distance
+    else:
+        delta_yi = 0
+        distance_h = 1000000 # Set to a high value to avoid being selected as the shortest distance
+    
+    if delta_yi != 0:
+        
+        # Calculate internal X delta_xi side length value as defined by the right triangle rules
+        # Reference: ./doc/horizontal-intersections-step1.png    
+        delta_yi = BLOCK_SIZE - offset_py if y_sign == 1 else -offset_py
+        delta_xi = delta_yi * (1/tan_angle) 
+ 
+        # Required to correctly select grid_y index backwards(ray pointing backward to y axis) by offsetting the y value slightly negatively
+        if y_sign == -1:
+           delta_yi += -EPSILON 
+        
+        # External delta x 
+        # Reference: check ./doc/horizontal-intersections-step2.png
+
+        delta_ye = BLOCK_SIZE * y_sign
+        delta_xe = abs(1/tan_angle * BLOCK_SIZE) * x_sign
+        
+        # For below, same comments as the vertical loop above, omitting for brevity
+        
+        ray_x = player.x + delta_xi
+        ray_y = player.y + delta_yi 
+  
+        if (shared.DEBUG_LEVEL >= 2 and not ignore_debug): print ( "delta_xi: " + str(int(delta_xi)) + "   delta_yi: " + str(int(delta_yi)))
+        if (shared.DEBUG_LEVEL >= 2 and not ignore_debug): print ( "delta_xe: " + str(int(delta_xe)) + "   delta_ye: " + str(int(delta_ye)))
+        if (shared.DEBUG_LEVEL >= 2 and not ignore_debug): print ( "start X: " + str(int(ray_x)) + "   start Y: " + str(int(ray_y))) 
+
+        while True:
+            
+            steps_h += 1
+            
+            if steps_h > MAP_SIZE_X * 2:
+                print(colored("Error: Raycast took too many steps", 'red'))
+                quit()
+            
+            if ray_x < 0 : 
+                ray_x = 0
+            if ray_x >= MAP_SIZE_X * BLOCK_SIZE : 
+                ray_x = MAP_SIZE_X * BLOCK_SIZE - 1
+            if ray_y < 0 : 
+                ray_y = 0
+            if ray_y >= MAP_SIZE_Y * BLOCK_SIZE : 
+                ray_y = MAP_SIZE_Y * BLOCK_SIZE - 1
+            
+            grid_x = int(ray_x / BLOCK_SIZE)
+            grid_y = int(ray_y / BLOCK_SIZE)      
+            
+            if (shared.DEBUG_LEVEL >= 3 and not ignore_debug): print ( colored("\n-Step : " + str(steps_h),"yellow"))
+            if (shared.DEBUG_LEVEL >= 3 and not ignore_debug): print ( "grid_x: " + str(grid_x) + "   grid_y: " + str(grid_y))
+            if (shared.DEBUG_LEVEL >= 3 and not ignore_debug): print ( "ray_x: " + str(int(ray_x)) + "   ray_y: " + str(int(ray_y)))
+            
+            if grid_x < 0 or grid_x >= MAP_SIZE_X or grid_y < 0 or grid_y >= MAP_SIZE_Y:
+                print(colored("Error: Raycast referenced out of bounds Grid X Y", 'red'))
+                quit()
+            
+            # TODO, Investigate Above here, remove
+            if level[grid_y][grid_x] > 0:
+                    
+                next_rayhit_x_h = ray_x
+                next_rayhit_y_h = ray_y
+                
+                # Save this value for wall texture mapping from delta_yi/tan on vertical scans        
+                texture_x_h = (next_rayhit_x_h % BLOCK_SIZE) / BLOCK_SIZE
+                
+                distance_h = math.hypot(player.x - next_rayhit_x_h, player.y - next_rayhit_y_h)
+                
+                if (shared.DEBUG_LEVEL >= 2 and not ignore_debug): print (colored("\n==HORIZONTAL HIT==","red"))
+                if (shared.DEBUG_LEVEL >= 2 and not ignore_debug): print ( "Distance : " + str(int(distance_h)))           
+                break
+            
+            ray_x += delta_xe 
+            ray_y += delta_ye    
+                
+        
+    
+    # Init final distance and ray hit values
+    distance_direct = 0
+
+    # Init ray hit values
+    ray_x = 0
+    ray_y = 0
+
+    # Choose the steps of the shorter distance between vertical and horizontal hit
+    
+    if shared.scanmode == "vertical": # For debugging, space bar key
+        if (shared.DEBUG_LEVEL >= 1 and not ignore_debug): print(colored("\n==SCAN MODE: VERTICAL OVERRIDE==","green"))
+        ray_x = next_rayhit_x_v
+        ray_y = next_rayhit_y_v    
+        distance_direct = distance_v
+        steps = steps_v
+        texture_x = texture_x_v
+    elif shared.scanmode == "horizontal":
+        if (shared.DEBUG_LEVEL >= 1 and not ignore_debug): print(colored("\n==SCAN MODE: HORIZONTAL OVERRIDE==","green"))
+        ray_x = next_rayhit_x_h
+        ray_y = next_rayhit_y_h    
+        distance_direct = distance_h
+        steps = steps_h
+        texture_x = texture_x_h
+    else:
+        if (shared.DEBUG_LEVEL >= 1 and not ignore_debug): print(colored("\n==SCAN MODE: SHORTEST AUTO==","green"))
+        if distance_h < distance_v:
+            ray_x = next_rayhit_x_h
+            ray_y = next_rayhit_y_h
+            distance_direct = distance_h
+            steps = steps_h
+            texture_x = texture_x_h
+            if (shared.DEBUG_LEVEL >= 1 and not ignore_debug): print("HORIZONTAL HIT IS SHORTER")
+        # If the vertical hit is shorter or equal, we select it
+        else:
+            ray_x = next_rayhit_x_v
+            ray_y = next_rayhit_y_v    
+            distance_direct = distance_v
+            steps = steps_v
+            texture_x = texture_x_v
+            if (shared.DEBUG_LEVEL >= 1 and not ignore_debug): print("VERTICAL HIT IS SHORTER")
+    
+    # Return the optimize distance and meta data to the nearest wall
+    
+    # Fish eye correction, uses perpendicular distance, required, so this is what we return instead
+    distance_perdendicular = distance_direct * math.cos(player.view_angle - ray_angle) 
+    
+    # Calculate the grid cell the ray is in
+    grid_x = int(ray_x / BLOCK_SIZE)
+    grid_y = int(ray_y / BLOCK_SIZE)
+    
+    # Assuming level stores color information, read color from map value >0
+    wall_color = level[grid_y][grid_x]  
+
+    if (shared.DEBUG_LEVEL >= 1 and not ignore_debug): print(colored("\n==FINAL HIT DATA==","red"))   
+    if (shared.DEBUG_LEVEL >= 2 and not ignore_debug): print("Hit_x : {:.3f}   Hit_y: {:.3f}".format(ray_x, ray_y))
+    if (shared.DEBUG_LEVEL >= 1 and not ignore_debug): print("Grid X: " + str(grid_x) + "   Grid Y: " + str(grid_y))
+    if (shared.DEBUG_LEVEL >= 1 and not ignore_debug): print("Steps " + str(steps))
+    if (shared.DEBUG_LEVEL >= 2 and not ignore_debug): print("Distance Perdendicular: " + str(int(distance_perdendicular)))
+    if (shared.DEBUG_LEVEL >= 2 and not ignore_debug): print("Distance: " + str(int(distance_direct)))
+    if (shared.DEBUG_LEVEL >= 2 and not ignore_debug): print("Wall Color: " + str(wall_color) + "\n\n")
+    
+    #quit() #enable for 1 frame log debugging
+    return distance_perdendicular, wall_color, ray_x, ray_y, steps, initial_grid_x, initial_grid_y, grid_x, grid_y, texture_x
+```
+
+### main.py
+```
+import math
+import time
+import pygame
+import cProfile
+import pstats
+import os
+from pygame import mixer 
+#import pygame.surfarray as surfarray
+#import numpy as np
+
+# Game custom modules
+from physics import *
+from classes import *
+from data import *
+from graphics import *
+from consts import *
+import shared 
+
+def main():
+    
+    # Clear the terminal screen
+    os.system('cls' if os.name == 'nt' else 'clear')
+
+    # Initialize Pygame
+    pygame.init()
+    
+    size = (SCREEN_WIDTH, SCREEN_HEIGHT)
+    # Surface optimizations, don't seem to be improving performance, keeping for verbosity
+    flags = pygame.HWSURFACE | pygame.DOUBLEBUF # | pygame.FULLSCREEN
+    
+    screen = pygame.display.set_mode(size , flags=flags, vsync=True)
+
+    # Set the title of the window
+    pygame.display.set_caption("Wolfy Style DDA Raycasting 3D Demo")
+
+    # Loop until the user clicks the close button
+    running = True
+
+    # Used to manage how fast the screen updates
+    clock = pygame.time.Clock()
+    
+    # Define the view mode
+    # top, 3d
+    view_mode = '3d'
+    
+    
+    # 32x32 grid representing the level
+    # different values represent different wall types/colors
+    level = level1
+
+    player = Player(PLAYER_INITIAL_X, PLAYER_INITIAL_Y, PLAYER_RADIUS, PLAYER_SPEED, PLAYER_VIEW_ANGLE, PLAYER_ROTATION_SPEED)
+
+    # Load the stone texture and convert it to a PixelArray array for better performance
+    wall_texture_grey = pygame.image.load('assets/textures/wall-stone.png').convert() #rgb colors might be flipped otherwise
+    #Load the texture into a PixelArray
+    wall_texture_grey_array = pygame.PixelArray(wall_texture_grey)
+    # Update the loaded texture array into the shared module for dynamic referencing
+    shared.wall_colors_textures_list[GREY_TEXTURE_STONEWALL] = wall_texture_grey_array
+    
+    # Load the blue wall texture
+    wall_texture_blue = pygame.image.load('assets/textures/wall-blue.png').convert()
+    wall_textire_blue_array = pygame.PixelArray(wall_texture_blue)
+    shared.wall_colors_textures_list[BLUE_TEXTURE_WALL] = wall_textire_blue_array
+    
+    # Load a skybox texture
+    #skybox_texture = pygame.image.load('assets/skyboxes/SNOSKY03.png').convert()
+    skybox_texture = pygame.image.load('assets/skyboxes/HELLSKY9.png').convert()
+    
+    #resize the skybox texture
+    skybox_texture = pygame.transform.scale(skybox_texture, (skybox_texture.get_width(), SCREEN_HEIGHT/2))
+    #skybox_array = pygame.PixelArray(skybox_texture)
+    skybox_rect = skybox_texture.get_rect(center=(SCREEN_WIDTH/2, SCREEN_HEIGHT/4))
+
+
+    # Create a Font object
+    font_30 = pygame.font.Font(None, 30)
+    font_22 = pygame.font.Font(None, 18)
+    
+    # GUI counter
+    ray_steps = 0
+    
+    # Delta time
+    delta_time = 0
+    current_time = 0
+    previous_time = time.time()
+    
+    # Load the background music 
+    pygame.mixer.music.load("assets/audio/music/E1M1.mp3") 
+    
+    # Set the volume 
+    pygame.mixer.music.set_volume(0.1) 
+    
+    # Play the background music 
+    pygame.mixer.music.play() 
+
+    # Create new Shotgun weapon
+    weapon = Shotgun()
+    
+    
+    # Create a shotgun npc
+    shotgun_guy1 = ShotgunGuy() 
+    
+    # add shotgun_guy1 to npcs, use default params
+    shared.npcs.append(shotgun_guy1)
+    
+    # Create a shotgun npc
+    shotgun_guy2 = ShotgunGuy(x=400, y=400, name="Shotgun Guy 2") 
+    
+    # add shotgun_guy1 to npcs
+    shared.npcs.append(shotgun_guy2)
+    
+    # Create a shotgun npc
+    #shotgun_guy3 = ShotgunGuy(x=700, y=750, name="Shotgun Guy 3") 
+    
+    # add shotgun_guy1 to npcs
+    #shared.npcs.append(shotgun_guy3)
+
+    
+    #  Game Loop
+    while running:
+        
+        current_time = time.time()
+        delta_time = current_time - previous_time
+        
+        # Initialize the proposed player movement with the current player position for this frame (to be valided by the collision detection)
+        proposed_x = player.x
+        proposed_y = player.y
+        
+        # Check for user input events (and custom game events)
+        # Game control keys (quit, view mode, etc.)
+        for event in pygame.event.get():
+            
+            # UI Events
+            if event.type == pygame.QUIT:
+                running = False
+            
+            if event.type == pygame.MOUSEBUTTONDOWN and event.button == 1 and view_mode == 'top':  # Left mouse button clicked
+                    mouse_pos = pygame.mouse.get_pos()
+                    clicked_grid_x = int((mouse_pos[0] - MINIMAP_OFFSET_X) // (BLOCK_SIZE * MINIMAP_SCALE_FACTOR))
+                    clicked_grid_y = int((mouse_pos[1] - MINIMAP_OFFSET_Y)  // (BLOCK_SIZE * MINIMAP_SCALE_FACTOR))
+                    
+                    if clicked_grid_x > 0 and clicked_grid_x < MAP_SIZE_X-1 and clicked_grid_y > 0 and clicked_grid_y < MAP_SIZE_Y-1:
+                        level[clicked_grid_y][clicked_grid_x] = 5
+            
+            if event.type == pygame.MOUSEBUTTONDOWN and event.button == 3 and view_mode == 'top':  # Left mouse button clicked
+                    mouse_pos = pygame.mouse.get_pos()
+                    clicked_grid_x = int((mouse_pos[0] - MINIMAP_OFFSET_X) // (BLOCK_SIZE * MINIMAP_SCALE_FACTOR))
+                    clicked_grid_y = int((mouse_pos[1] - MINIMAP_OFFSET_Y)  // (BLOCK_SIZE * MINIMAP_SCALE_FACTOR))
+                    if clicked_grid_x > 0 and clicked_grid_x < MAP_SIZE_X-1 and clicked_grid_y > 0 and clicked_grid_y < MAP_SIZE_Y-1:
+                        level[clicked_grid_y][clicked_grid_x] = 0
+            
+            # weapon fired in 3d mode
+            if event.type == pygame.MOUSEBUTTONDOWN and event.button == 1 and view_mode == '3d':
+                weapon.fire()
+                
+            
+            if event.type == pygame.KEYDOWN:
+                
+                if event.key == pygame.K_q:
+                    running = False
+                    quit()
+                    
+                if event.key == pygame.K_TAB:
+                    view_mode = '3d' if view_mode == 'top' else 'top'
+                    # Console log the change
+                    if (shared.DEBUG_LEVEL >= 1): print('View mode: ', view_mode)
+                if event.key == pygame.K_SPACE:
+                    if shared.scanmode == "shortest":
+                        shared.scanmode = "horizontal"
+                    elif shared.scanmode == "horizontal":
+                        shared.scanmode = "vertical"
+                    else:
+                        shared.scanmode = "shortest"
+                if event.key == pygame.K_ESCAPE:
+                    shared.paused = not shared.paused
+                    if shared.paused:
+                        mixer.music.pause() 
+                    else:
+                        mixer.music.unpause()
+                        
+                    if (shared.DEBUG_LEVEL >= 1): print ('Paused: ' + str(shared.paused))
+                if event.key == pygame.K_0:
+                    shared.DEBUG_LEVEL = 0
+                if event.key == pygame.K_1:
+                    shared.DEBUG_LEVEL = 1
+                if event.key == pygame.K_2:
+                    shared.DEBUG_LEVEL = 2
+                if event.key == pygame.K_3:
+                    shared.DEBUG_LEVEL = 3
+            
+            if event.type == pygame.MOUSEMOTION and view_mode == '3d' and not shared.paused:
+                # Get the relative movement of the mouse
+                rel_x, rel_y = event.rel
+                
+                # Check if the mouse is moving left or right
+                if rel_x < 0:
+                    # Mouse is moving left
+                    player.view_angle -= player.rotation_speed * delta_time * MOUSE_SENSITIVITY
+                elif rel_x > 0:
+                    # Mouse is moving right
+                    player.view_angle += player.rotation_speed * delta_time * MOUSE_SENSITIVITY
+               
+            # Custom game events     
+            if event.type == DEFAULT_EVENT:
+                pass
+            
+            # if event.type == WEAPON_RELOAD_EVENT:
+            #     weapon.reload()
+            
+            # if event.type == WEAPON_READY_EVENT:
+            #     weapon.ready()
+                
+        
+        # Movement keys support multiple keys at once and diagonal movement with pressing and holding
+        if not shared.paused:
+            keys = pygame.key.get_pressed()
+            if keys[pygame.K_UP] or keys[pygame.K_w]: 
+                proposed_x += player.speed * math.cos(player.view_angle) * delta_time
+                proposed_y += player.speed * math.sin(player.view_angle) * delta_time
+               
+                player = check_level_collision(player, proposed_x, player.y, level)
+                player = check_level_collision(player, player.x, proposed_y, level)
+                 
+            if keys[pygame.K_DOWN] or keys[pygame.K_s]: 
+                proposed_x -= player.speed * math.cos(player.view_angle) * delta_time
+                proposed_y -= player.speed * math.sin(player.view_angle) * delta_time
+                
+                player = check_level_collision(player, proposed_x, player.y, level)
+                player = check_level_collision(player, player.x, proposed_y, level)
+
+                
+            if keys[pygame.K_LEFT] or keys[pygame.K_a]:
+                player.view_angle -= player.rotation_speed * delta_time
+            
+            if keys[pygame.K_RIGHT] or keys[pygame.K_d]:
+                player.view_angle += player.rotation_speed * delta_time
+                
+            if keys[pygame.K_LSHIFT]:
+                player.speed = PLAYER_RUNNING_SPEED
+            else:
+                player.speed = PLAYER_SPEED
+
+        if player.view_angle < 0:
+            player.view_angle = 2 * math.pi
+        if player.view_angle > 2 * math.pi:
+            player.view_angle = 0
+                
+        # Gameplay logic, check if paused or not
+        if not shared.paused:
+            
+            # Raycasting Mode Drawing
+            
+            if view_mode == '3d':
+                
+                # Grab the mouse cursor
+                pygame.mouse.set_visible(False)
+                pygame.event.set_grab(True)
+                
+                # Screen clear
+                screen.fill(BLACK)
+                
+                # Draw the sky and floor first
+                #pygame.draw.rect(screen, SKY_BLUE, pygame.Rect(0, 0, SCREEN_WIDTH, SCREEN_HEIGHT / 2))
+                pygame.draw.rect(screen, DARK_GREY, pygame.Rect(0, SCREEN_HEIGHT / 2, SCREEN_WIDTH, SCREEN_HEIGHT / 2))
+
+                # Draw the skybox
+                # Scroll/clip it based on the player view angle
+                skybox_rect.left = 0 - (skybox_texture.get_width() * player.view_angle ) /  (math.pi*2 )
+                screen.blit(skybox_texture, skybox_rect)
+                
+                # Add the buffer looping image
+                # PS: the 2 skyboxes are reset to initial positions by the player's wrapping angle
+                skybox_rect.left = skybox_rect.left + skybox_texture.get_width()
+                screen.blit(skybox_texture, skybox_rect)
+                
+                
+                # For each vertical slice of the screen
+                # NOTE rendering half the screen width resolution with step of 2
+                # interleaved => performance boost at neglightable visual loss
+                # This also affects the depth buffer calculation below
+                for x in range(0,SCREEN_WIDTH, 2):
+                    # Calculate the ray angle per vertical slice of the POV
+                    ray_angle = player.view_angle + math.atan((x - SCREEN_WIDTH / 2) / FOCAL_LENGTH)
+
+                    # Enable debug only for player angle(ignore debug for POV angles)
+                    ray_debug = not (ray_angle == player.view_angle)
+                        
+                    # Cast the ray and find the distance to the nearest wall
+                    ray_distance, wall_color, hit_x, hit_y, steps, intial_grid_x, initial_grid_y, grid_x, grid_y, texture_x \
+                    = cast_ray(player, ray_angle, level, x, ray_debug)
+                    
+                    # disable GUI steps
+                    ray_steps = 0
+
+                    # Calculate the height of the wall slice
+                    slice_height = int(MAX_WALL_HEIGHT * FOCAL_LENGTH / ray_distance )
+
+                    if (wall_color == GREY_TEXTURE_STONEWALL or wall_color == BLUE_TEXTURE_WALL):
+                
+                        # Calculate the final texture x-coordinate, so denormallize to texture size
+                        texture_x = int(texture_x * TEXTURE_SIZE)
+                        
+                        # Create a surface for the wall slice (1 pixel wide, TEXTURE pixels tall)
+                        wall_slice_surface = pygame.Surface((1, TEXTURE_SIZE))
+
+                        # Draw the wall slice with texture mapping from top to bottom on Y axis
+                        # In the range of the Texture not to slice_height (then hardwarescaling it later to the slice_height)
+                        # If you use slice_height, the y loop will take alot longer when the player moves close to the wall and will tank fps
+                        
+                        color_brightness = 255 - min(ray_distance/2, 255)
+                        color_brightness = max(color_brightness, 30)  # Adjust the minimum brightness of distant walls
+                        color_brightness_normalized = (color_brightness / 255)
+                        
+                        for y in range(TEXTURE_SIZE):
+                            
+                            # Load the correct texture from the lookup table
+                            if wall_color == GREY_TEXTURE_STONEWALL:
+                                # Disabled, fully bright texture version
+                                #texture_color = shared.wall_colors_textures_list[GREY_TEXTURE_STONEWALL][texture_x, y]
+                                
+                                #PixelArray store colors are int not rgb, so to darken texture based on distance
+                                # we convert into to rgb, darken rgb, then convert back to int
+                                texture_color = wall_texture_grey.unmap_rgb(shared.wall_colors_textures_list[GREY_TEXTURE_STONEWALL][texture_x, y])                           
+                                texture_color = (texture_color[0] * color_brightness_normalized, texture_color[1] * color_brightness_normalized, texture_color[2] * color_brightness_normalized)
+                                texture_color = wall_texture_blue.map_rgb(texture_color)
+                            
+                            if wall_color == BLUE_TEXTURE_WALL:
+                                
+                                texture_color = wall_texture_blue.unmap_rgb(shared.wall_colors_textures_list[BLUE_TEXTURE_WALL][texture_x, y])                           
+                                texture_color = (texture_color[0] * color_brightness_normalized, texture_color[1] * color_brightness_normalized, texture_color[2] * color_brightness_normalized)
+                                texture_color = wall_texture_blue.map_rgb(texture_color)
+                                                                          
+                            
+                            # Paint the texture pixel on the thin slice surface
+                            wall_slice_surface.set_at((0, y), texture_color)
+                                                
+                        # Scale the wall slice surface to the size of final the wall slice height
+                        # '2' is used as slice width here because the loop has a step of 2 (see above)
+                        # TODO BUG, in some situations we get error:
+                        # pygame.error: Size too large for scaling
+                        # maybe when walking backwards? i dont know how to recreate it, but it happens when u are close to a wall
+                        wall_slice_surface = pygame.transform.scale(wall_slice_surface, (2, slice_height))
+
+                        # Get the texture y slice location on the screen (centered)
+                        tex_location_y = int(SCREEN_HEIGHT / 2 - slice_height / 2)
+
+                        # Blit the wall slice surface onto the screen
+                        screen.blit(wall_slice_surface, (x, tex_location_y))
+                        
+                        # update 1d depth buffer to be used later by sprites in their rendering pass
+                        shared.depth_buffer_1d[x] = ray_distance
+                        # NOTE, ONLY used when raycast rendering with half width resolution
+                        shared.depth_buffer_1d[x+1] = ray_distance
+                        
+                            
+                    else:
+                        # Calculate the color of the wall slice based on the distance and the wall color
+                        
+                        color_brightness = 255 - min(ray_distance/2, 255)
+                        color_brightness = max(color_brightness, 30)  # Adjust the minimum brightness of distant walls
+                        color_brightness_normalized = (color_brightness / 255)
+                        
+                        # texture or colored wall mode
+                        if wall_color == GREY_TEXTURE_STONEWALL or wall_color == BLUE_TEXTURE_WALL: 
+                            wall_color = LIGHT_GREY # placeholder color for minimap for textured walls
+                        else:   
+                            wall_color = shared.wall_colors_textures_list[wall_color]
+                        
+                        wall_color = (wall_color[0] * color_brightness_normalized, wall_color[1] * color_brightness_normalized, wall_color[2] * color_brightness_normalized)
+
+                        # Draw the wall slice
+                        pygame.draw.rect(screen, wall_color, pygame.Rect(x, SCREEN_HEIGHT / 2 - slice_height / 2, 2, slice_height))
+                    
+                    
+                    # Render the sprites (items, enemies)
+                    render_sprites(screen, player)
+                    
+                    # Draw aiming reticle
+                    pygame.draw.circle(screen, RED, (SCREEN_WIDTH / 2, SCREEN_HEIGHT / 2), 3)
+                    
+                    # Draw selected weapon HUD
+                    weapon.update()
+                    weapon.draw(screen)
+
+            # Top view map mode Drawing
+            if view_mode == 'top':
+                
+                # Release the mouse cursor
+                pygame.mouse.set_visible(True)
+                pygame.event.set_grab(False)
+    
+                # Screen clear
+                screen.fill(BLACK)
+                
+                # draw the level
+                # i is the row number (y) and j is the column number (x)
+                # wall color depends on the wall grid value
+                for i in range(MAP_SIZE_Y):
+                    for j in range(MAP_SIZE_X):
+
+                        if level[i][j] in shared.wall_colors_textures_list:
+                            if level[i][j] == GREY_TEXTURE_STONEWALL:
+                                # Draw the wall texture
+                                selected_color = LIGHT_GREY
+                            elif level[i][j] == BLUE_TEXTURE_WALL:
+                                selected_color = BLUE
+                            else:
+                                selected_color = shared.wall_colors_textures_list[level[i][j]]
+                            
+                            pygame.draw.rect(screen, selected_color, pygame.Rect(j * BLOCK_SIZE * MINIMAP_SCALE_FACTOR + MINIMAP_OFFSET_X, i * BLOCK_SIZE * MINIMAP_SCALE_FACTOR + MINIMAP_OFFSET_Y, BLOCK_SIZE * MINIMAP_SCALE_FACTOR, BLOCK_SIZE * MINIMAP_SCALE_FACTOR))                           
+
+                # Draw the map grid based on the block size and map size          
+                for i in range(MAP_SIZE_Y):
+                    pygame.draw.line(screen, LIGHT_GREY_EXTRA, (0 + MINIMAP_OFFSET_X, i * BLOCK_SIZE * MINIMAP_SCALE_FACTOR + MINIMAP_OFFSET_Y), (BLOCK_SIZE * MAP_SIZE_X * MINIMAP_SCALE_FACTOR + MINIMAP_OFFSET_X, i * BLOCK_SIZE * MINIMAP_SCALE_FACTOR + MINIMAP_OFFSET_Y), 1)
+                for j in range(MAP_SIZE_X):
+                    pygame.draw.line(screen, LIGHT_GREY_EXTRA, (j * BLOCK_SIZE * MINIMAP_SCALE_FACTOR + MINIMAP_OFFSET_X, 0 + MINIMAP_OFFSET_Y), (j * BLOCK_SIZE * MINIMAP_SCALE_FACTOR + MINIMAP_OFFSET_X, BLOCK_SIZE * MAP_SIZE_Y * MINIMAP_SCALE_FACTOR + MINIMAP_OFFSET_Y), 1)
+                
+                # Draw the raytraced scanners
+                ray_distance, wall_color, hit_x, hit_y, steps, intial_grid_x, initial_grid_y, grid_x, grid_y, texture_x \
+                = cast_ray(player, player.view_angle, level, 0)
+                
+                # texture or color wall mode
+                if wall_color == GREY_TEXTURE_STONEWALL or wall_color == BLUE_TEXTURE_WALL:
+                    wall_color = LIGHT_GREY 
+                else:   
+                    wall_color = shared.wall_colors_textures_list[wall_color]
+                
+                # draw a gray transparent rectangle on initial grid position
+                pygame.draw.rect(screen, LIGHT_GREY_EXTRA, pygame.Rect(intial_grid_x * BLOCK_SIZE * MINIMAP_SCALE_FACTOR + MINIMAP_OFFSET_X, initial_grid_y * BLOCK_SIZE * MINIMAP_SCALE_FACTOR + MINIMAP_OFFSET_Y, BLOCK_SIZE * MINIMAP_SCALE_FACTOR, BLOCK_SIZE * MINIMAP_SCALE_FACTOR))
+                
+                pygame.draw.rect(screen, RED, pygame.Rect(grid_x * BLOCK_SIZE * MINIMAP_SCALE_FACTOR + MINIMAP_OFFSET_X, grid_y * BLOCK_SIZE * MINIMAP_SCALE_FACTOR + MINIMAP_OFFSET_Y, BLOCK_SIZE * MINIMAP_SCALE_FACTOR, BLOCK_SIZE * MINIMAP_SCALE_FACTOR))
+            
+                pygame.draw.line(screen, wall_color, (player.x * MINIMAP_SCALE_FACTOR + MINIMAP_OFFSET_X, player.y * MINIMAP_SCALE_FACTOR + MINIMAP_OFFSET_Y), (hit_x * MINIMAP_SCALE_FACTOR + MINIMAP_OFFSET_X, hit_y * MINIMAP_SCALE_FACTOR + MINIMAP_OFFSET_Y), 2)
+                ray_steps = steps
+                
+                # Draw the player pin
+                pygame.draw.circle(screen, RED, (player.x * MINIMAP_SCALE_FACTOR + MINIMAP_OFFSET_X, player.y * MINIMAP_SCALE_FACTOR + MINIMAP_OFFSET_Y), player.radius * MINIMAP_SCALE_FACTOR, 1)
+                # Draw the player view angle
+                end_x = (player.x + player.radius * 1 * math.cos(player.view_angle))
+                end_y = (player.y + player.radius * 1 * math.sin(player.view_angle))
+                pygame.draw.line(screen, BLACK, (player.x * MINIMAP_SCALE_FACTOR + MINIMAP_OFFSET_X, player.y * MINIMAP_SCALE_FACTOR + MINIMAP_OFFSET_Y), (end_x * MINIMAP_SCALE_FACTOR + MINIMAP_OFFSET_X, end_y * MINIMAP_SCALE_FACTOR + MINIMAP_OFFSET_Y), 3) 
+                
+                        
+                # # with POV
+                ray_angle = player.view_angle + math.atan(-(SCREEN_WIDTH / 2) / FOCAL_LENGTH)
+                ray_distance, wall_color, hit_x, hit_y, steps, intial_grid_x, initial_grid_y, grid_x, grid_y, texture_x \
+                = cast_ray(player, ray_angle, level, 0, True)
+                pygame.draw.line(screen, LIGHT_GREY, (player.x * MINIMAP_SCALE_FACTOR + MINIMAP_OFFSET_X, player.y * MINIMAP_SCALE_FACTOR + MINIMAP_OFFSET_Y), (hit_x * MINIMAP_SCALE_FACTOR + MINIMAP_OFFSET_X, hit_y * MINIMAP_SCALE_FACTOR + MINIMAP_OFFSET_Y), 1)
+                
+                ray_angle = player.view_angle + math.atan((SCREEN_WIDTH / 2) / FOCAL_LENGTH)
+                ray_distance, wall_color, hit_x, hit_y, steps, intial_grid_x, initial_grid_y, grid_x, grid_y, texture_x \
+                = cast_ray(player, ray_angle, level, 0, True)
+                pygame.draw.line(screen, LIGHT_GREY, (player.x * MINIMAP_SCALE_FACTOR + MINIMAP_OFFSET_X, player.y * MINIMAP_SCALE_FACTOR + MINIMAP_OFFSET_Y), (hit_x * MINIMAP_SCALE_FACTOR + MINIMAP_OFFSET_X, hit_y * MINIMAP_SCALE_FACTOR + MINIMAP_OFFSET_Y), 1)
+
+            
+            # Update the HUD display
+            
+            
+            # Calculate the FPS
+            fps = clock.get_fps()
+
+            # Render the FPS onto a Surface
+            fps_text = font_30.render("FPS: {:.0f}".format(fps), True, WHITE)
+
+            # Blit the FPS Surface onto the screen
+            screen.blit(fps_text, (12, 20))
+            
+            steps_text = font_30.render("STEPS: {:.0f}".format(ray_steps), True, WHITE)
+            screen.blit(steps_text, (12, 50))
+            
+            instructions_text = font_22.render("TAB: View Mode", True, WHITE)
+            screen.blit(instructions_text, (660, 20))
+            
+            instructions_text = font_22.render("SHIFT: Hold to Run", True, WHITE)
+            screen.blit(instructions_text, (660, 50))
+            
+            instructions_text = font_22.render("SPC: Toogle V/H Scan", True, WHITE)
+            screen.blit(instructions_text, (660, 80))
+            
+            instructions_text = font_22.render("Mouse, A/D : Rotate", True, WHITE)
+            screen.blit(instructions_text, (660, 110))
+            
+            instructions_text = font_22.render("W/S: Move", True, WHITE)
+            screen.blit(instructions_text, (660, 140))
+            
+            instructions_text = font_22.render("0/1/2/3: Debug Logs", True, WHITE)
+            screen.blit(instructions_text, (660, 170))
+            
+            instructions_text = font_22.render("Esc: Pause/Resume", True, WHITE)
+            screen.blit(instructions_text, (660, 200))
+            
+            instructions_text = font_22.render("Click map LR: Add/Rem", True, WHITE)
+            screen.blit(instructions_text, (660, 230))
+            
+            instructions_text = font_22.render("Q: Quit", True, WHITE)
+            screen.blit(instructions_text, (660, 260))
+                        
+            # Flip frame buffer to draw screen 
+            pygame.display.flip()
+
+            # Limit to 30 frames per second
+            clock.tick(FPS)
+            
+            # Update the previous time
+            previous_time = current_time
+
+    # Close the window and quit.
+    pygame.quit()
+
+def render_sprites(screen , player):
+    
+    #loop through npcs array and call the draw function
+    for npc in shared.npcs:
+        npc.update()
+        npc.draw(screen, player)
+        
+    for item in shared.items:
+        item.update()
+        item.draw(screen, player)
+    
+    
+
+# profiler = cProfile.Profile()
+# profiler.enable()
+
+main()
+
+# profiler.disable()
+# stats = pstats.Stats(profiler).sort_stats('cumulative')
+# stats.print_stats()
+```
+
+### physics.py
+```
+from consts import *
+
+# Check collision with level walls, use proposed_player to check for collision and update player position if it is valid
+# disallow_clipping is a flag to avoid clipping through the wall, it does so by checking if the player is at least 1 block away from surrounding walls
+def check_level_collision(player, proposed_x, proposed_y, level, player_body_buffer = 5):
+
+    # Add the player body size buffer (radius) to the proposed position
+    # this way the play body does not clip through the walls
+    
+    proposed_x_buffer = player.x
+    proposed_y_buffer = player.y
+    
+    if (proposed_x > player.x):
+        proposed_x_buffer = player.x + player_body_buffer
+        
+    if (proposed_x < player.x):
+        proposed_x_buffer = player.x - player_body_buffer
+        
+    if (proposed_y > player.y):
+        proposed_y_buffer = player.y + player_body_buffer
+    
+    if (proposed_y < player.y):
+        proposed_y_buffer = player.y - player_body_buffer
+        
+
+    # Proposed new grid location
+    grid_x = int(proposed_x_buffer / BLOCK_SIZE)
+    grid_y = int(proposed_y_buffer / BLOCK_SIZE)
+     
+    # # Wall clipping agrressivecheck, disabled by default (keep 1 grid distance from walls)
+    # if disallow_clipping:
+    #     # Calculate the grid coordinates of the cells around the player and use min/max to avoid out of bounds errors
+    #     grid_x_left = max(0, grid_x - 1)
+    #     grid_x_right = min(MAP_SIZE_X - 1, grid_x + 1)
+    #     grid_y_up = max(0, grid_y - 1)
+    #     grid_y_down = min(MAP_SIZE_Y - 1, grid_y + 1)
+
+    #     # Check if any of the cells around the player contain a wall
+    #     for x in range(grid_x_left, grid_x_right + 1):
+    #         for y in range(grid_y_up, grid_y_down + 1):
+    #             if level[y][x] > 0:
+    #                 # There's a wall nearby, don't move the player, return without changing x,y
+    #                 return player
+    
+    
+    if level[grid_y][grid_x] > 0:
+        # There's a wall nearby, don't move the player, return without changing x,y
+        return player
+    
+    # If map grid is empty accept the move
+    if level[grid_y][grid_x] == 0:
+        player.x =  proposed_x
+        player.y =  proposed_y
+    
+    # If move is not valid, return the original player with original x,y only
+    # If valid, return with new x,y 
+    return player
+```
+
+### shared.py
+```
+#shares between modules
+
+import pygame
+
+from consts import *
+
+clock = pygame.time.Clock()
+
+# Scan modes for raycasting # useful for debugging
+# shortest, horizontal, vertical
+scanmode = "shortest"
+
+# True, False
+paused = False
+
+# 0 none, 1 minimal, 2 moderate, 3 maximum
+DEBUG_LEVEL = 0
+
+# Lookup table for wall colors and textures used for rendering map grid walls
+wall_colors_textures_list = {
+    GREY_TEXTURE_STONEWALL: '',  # reference to loaded array of pixels for texture, linked on init, null by default
+    BLUE_TEXTURE_WALL: '',  
+    GREEN_SOLID_WALL: GREEN,  
+    GREY_SOLID_WALL: GREY,  
+    BLUE_SOLID_WALL: BLUE,  
+    RED_SOLID_WALL: RED,  
+    WHITE_EMPTY_SPACE: WHITE,
+}
+
+
+# Create an array for items andnpcs
+
+items = []
+npcs = []
+
+# Initialize the audio mixer 
+pygame.mixer.init() 
+    
+# Create channels for multiple sounds(weapon, player, npc, level)
+weapon_channel = pygame.mixer.Channel(0)
+
+# Load shotgun sound
+shotgun_firing = pygame.mixer.Sound('assets/audio/fx/shotgun_firing.mp3')
+
+# 1d depth buffer
+depth_buffer_1d = [0] * SCREEN_WIDTH
+```

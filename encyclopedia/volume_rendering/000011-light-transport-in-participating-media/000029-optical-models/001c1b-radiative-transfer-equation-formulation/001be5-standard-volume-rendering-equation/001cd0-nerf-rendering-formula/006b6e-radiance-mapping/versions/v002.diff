@@ -1,0 +1,260 @@
+--- v001.md
++++ v002.md
+@@ -10,5 +10,5 @@
+ 
+ **Inputs and Outputs:**
+-*   **Input:** A 3D point cloud $P$ (with coordinates and potentially initial attributes), camera parameters (position $o$, direction $d$), and a radius threshold $\tau$.
++*   **Input:** A 3D point cloud $P$ (with coordinates and potentially initial attributes), camera parameters (position $o$, direction $d$), and a radius threshold $\tau$ [S1].
+ *   **Output:** A rendered image of shape $H \times W \times 3$ [S1].
+ 
+@@ -17,10 +17,10 @@
+ *   **Fragments:** Points within radius $\tau$ of a camera ray. For occupied pixels, only the closest point (fragment) is kept [S1].
+ *   **Feature Map:** An $H \times W \times C$ tensor where $C$ is the feature dimension. Unoccupied pixels are assigned zero features [S1].
+-*   **Radiance Mapping MLP ($F_\Theta$):** A 5-layer Multi-Layer Perceptron.
++*   **Radiance Mapping MLP ($F_\Theta$):** A 5-layer Multi-Layer Perceptron [S1].
+     *   Layer dimensions: 256, 256, 256, 128, 8 [S1].
+     *   Total parameters: 0.75 million [S1].
+     *   Input: Concatenated positional encoding of rectified coordinate $x_{query}$ and view direction $d$.
+-    *   Output: Latent feature vector $L$ of dimension $C$ (typically 8 or higher depending on implementation, though the final layer outputs 8 in the cited architecture, the feature map dimension $C$ is used for the U-Net input) [S1]. Note: The source states output feature dimensions are 256, 256, 256, 128, and 8. The final output $L$ has dimension 8 in the specific architecture described, but is treated as a latent feature map [S1].
+-*   **Refinement U-Net:** A 2D convolutional network.
++    *   Output: Latent feature vector $L$ of dimension $C$ (typically 8 in the cited architecture) [S1].
++*   **Refinement U-Net:** A 2D convolutional network [S1].
+     *   Architecture: Down-samples four times.
+     *   Layer dimensions: 16, 32, 64, 128, 256 [S1].
+@@ -65,11 +65,5 @@
+ import torch.nn.functional as F
+ 
+-# Standard Positional Encoding as used in NeRF
+ def positional_encoding(x, min_deg, max_deg):
+-    """
+-    Applies positional encoding to input x.
+-    x shape: (..., D)
+-    Returns shape: (..., D * (2 * (max_deg - min_deg) + 1))
+-    """
+     scales = torch.tensor([2**i for i in range(min_deg, max_deg + 1)], dtype=x.dtype, device=x.device)
+     xb = torch.reshape((x[..., None, :] * scales[:, None]), list(x.shape[:-1]) + [(max_deg - min_deg + 1) * x.shape[-1]])
+@@ -88,5 +82,4 @@
+         layers.append(nn.Linear(prev_dim, output_dim))
+         self.net = nn.Sequential(*layers)
+-
+     def forward(self, x):
+         return self.net(x)
+@@ -95,11 +88,6 @@
+     def __init__(self, in_channels, out_channels=3):
+         super().__init__()
+-        # Simplified U-Net structure matching the description:
+         # Down-samples 4 times. Dimensions: 16, 32, 64, 128, 256.
+         # Uses gated blocks (gated conv, ReLU, Instance Norm).
+-        # Note: A full implementation of gated conv is complex; 
+-        # here we represent the structure conceptually with standard convs 
+-        # for clarity, as the source specifies the architecture components.
+-        
+         self.enc1 = nn.Sequential(nn.Conv2d(in_channels, 16, 3, padding=1), nn.InstanceNorm2d(16), nn.ReLU())
+         self.enc2 = nn.Sequential(nn.Conv2d(16, 32, 3, padding=1), nn.InstanceNorm2d(32), nn.ReLU())
+@@ -107,14 +95,10 @@
+         self.enc4 = nn.Sequential(nn.Conv2d(64, 128, 3, padding=1), nn.InstanceNorm2d(128), nn.ReLU())
+         self.enc5 = nn.Sequential(nn.Conv2d(128, 256, 3, padding=1), nn.InstanceNorm2d(256), nn.ReLU())
+-        
+         self.dec4 = nn.Sequential(nn.Conv2d(256, 128, 3, padding=1), nn.InstanceNorm2d(128), nn.ReLU())
+         self.dec3 = nn.Sequential(nn.Conv2d(128, 64, 3, padding=1), nn.InstanceNorm2d(64), nn.ReLU())
+         self.dec2 = nn.Sequential(nn.Conv2d(64, 32, 3, padding=1), nn.InstanceNorm2d(32), nn.ReLU())
+         self.dec1 = nn.Sequential(nn.Conv2d(32, 16, 3, padding=1), nn.InstanceNorm2d(16), nn.ReLU())
+-        
+         self.out_conv = nn.Conv2d(16, out_channels, 1)
+-
+     def forward(self, x):
+-        # Down-sampling path
+         e1 = self.enc1(x)
+         e2 = self.enc2(F.avg_pool2d(e1, 2))
+@@ -122,8 +106,4 @@
+         e4 = self.enc4(F.avg_pool2d(e3, 2))
+         e5 = self.enc5(F.avg_pool2d(e4, 2))
+-        
+-        # Up-sampling path (simplified, skipping skip connections for brevity 
+-        # as source doesn't specify exact skip connection channels, 
+-        # but U-Nets typically use them. We assume standard U-Net flow)
+         d4 = F.interpolate(e5, scale_factor=2)
+         d4 = self.dec4(d4)
+@@ -134,117 +114,78 @@
+         d1 = F.interpolate(d2, scale_factor=2)
+         d1 = self.dec1(d1)
+-        
+         return torch.sigmoid(self.out_conv(d1))
+ 
+-def render_radiance_mapping(points, camera_o, camera_d, height, width, tau, 
++def rasterize_points(points_cam, ray_dirs, height, width, tau):
++    """
++    Simulates hardware-accelerated rasterization.
++    points_cam: (N, 3) in camera space.
++    ray_dirs: (H, W, 3) normalized ray directions.
++    Returns:
++      fragments: (N_occ, 3) 3D coordinates of closest points per occupied pixel.
++      pixel_map: (N_occ, 2) integer (x, y) coordinates of occupied pixels.
++      z_pcd: (N_occ,) depth values of closest points.
++    """
++    fragments = []
++    pixel_map = []
++    z_pcd = []
++    for y in range(height):
++        for x in range(width):
++            d = ray_dirs[y, x]
++            min_dist = float('inf')
++            closest_idx = -1
++            for i, p in enumerate(points_cam):
++                op = p
++                t = torch.dot(op, d)
++                proj = t * d
++                dist = torch.norm(op - proj)
++                if dist < tau and dist < min_dist:
++                    min_dist = dist
++                    closest_idx = i
++            if closest_idx != -1:
++                fragments.append(points_cam[closest_idx])
++                pixel_map.append([x, y])
++                z_pcd.append(points_cam[closest_idx, 2])
++    if not fragments:
++        return torch.empty(0, 3), torch.empty(0, 2), torch.empty(0)
++    return torch.stack(fragments), torch.tensor(pixel_map), torch.tensor(z_pcd)
++
++def render_radiance_mapping(points_world, camera_o, camera_d, height, width, tau, 
+                             min_deg_pe=0, max_deg_pe=10, 
+                             mlp_params=None, unet_params=None):
+-    """
+-    Simulates the Radiance Mapping pipeline.
+-    points: Tensor of shape (N, 3) in world space.
+-    camera_o: Camera origin (3,)
+-    camera_d: Ray directions for all pixels (H, W, 3)
+-    height, width: Image dimensions
+-    tau: Radius threshold for rasterization
+-    """
+-    # 1. Rasterization
+-    # Transform points to camera space (simplified: assume points are already in camera space 
+-    # or transformation is handled externally. Here we assume points are in camera space 
+-    # relative to camera_o for the ray intersection logic).
+-    # In practice, points are transformed to camera space first.
+-    
+-    # For each pixel, find points within tau of the ray
+-    # Ray: r(t) = o + t * d
+-    # Distance from point p to ray: || (p - o) - ((p - o) . d) d ||
+-    # We need to find the closest point for each pixel.
+-    
+-    # This step is typically done via OpenGL rasterization in the source.
+-    # Here we simulate the logic:
+-    # N_occ points will be selected.
+-    
+-    # Placeholder for hardware-accelerated rasterization result
+-    # occupied_indices: list of indices into points for occupied pixels
+-    # z_pcd: z-buffer values (depth) for these points
+-    # occupied_pixel_coords: (x, y) for each occupied pixel
+-    
+-    # Since we cannot run OpenGL here, we assume we have the fragments:
+-    # fragments: Tensor of shape (N_occ, 3) containing the 3D coordinates of the closest points
+-    # pixel_map: Tensor of shape (N_occ, 2) containing the (u, v) pixel coordinates
+-    
+-    # Let's assume we have computed `fragments` and `pixel_map` from rasterization
+-    # fragments: (N_occ, 3)
+-    # pixel_map: (N_occ, 2)
+-    
+-    # 2. Coordinate Rectification
+-    # x_query = o + (z_pcd / cos(theta)) * d
+-    # theta is angle between ray d and z-axis pointing to scene center.
+-    # Assuming scene center is origin (0,0,0) or similar. 
+-    # If camera is at o, and looking at center, d is normalized.
+-    # z-axis pointing to scene center: Let's assume the camera's local Z axis 
+-    # or the vector from camera to center. The source says "z axis pointing to the center of the scene".
+-    # If the camera is at o, and the scene center is C, the vector is C - o.
+-    # However, in camera space, the camera looks down Z. 
+-    # The source formula uses theta between ray and z-axis.
+-    # In camera space, d = (dx, dy, dz). The z-axis is (0,0,1).
+-    # cos(theta) = d . (0,0,1) = dz.
+-    
+-    # Extract d for each occupied pixel
+-    d_occupied = camera_d[pixel_map[:, 1].long(), pixel_map[:, 0].long()] # (N_occ, 3)
+-    
+-    # cos_theta = dot(d, (0,0,1))
++    # 1. Transform to camera space (simplified: assume points_world are already in camera space relative to camera_o)
++    points_cam = points_world - camera_o
++
++    # 2. Rasterization
++    fragments, pixel_map, z_pcd = rasterize_points(points_cam, camera_d, height, width, tau)
++
++    # 3. Coordinate Rectification
++    d_occupied = camera_d[pixel_map[:, 1].long(), pixel_map[:, 0].long()]
+     cos_theta = d_occupied[:, 2]
+-    
+-    # Avoid division by zero
+     cos_theta = torch.clamp(cos_theta, min=1e-6)
+-    
+-    # z_pcd is the depth of the fragment
+-    # In camera space, z is the depth.
+-    z_pcd = fragments[:, 2] # (N_occ,)
+-    
+-    # x_query = o + (z_pcd / cos_theta) * d
+-    # Note: o in camera space is (0,0,0) if points are in camera space.
+-    # If points are in world space, o is world space camera position.
+-    # The formula implies x_query is in the same coordinate system as o and d.
+-    # If we are in camera space, o=(0,0,0).
+-    
+     scale = z_pcd / cos_theta
+-    x_query = scale[:, None] * d_occupied # (N_occ, 3)
+-    
+-    # 3. Radiance Mapping
+-    # Positional Encoding
+-    # Input: x_query and d
++    x_query = scale[:, None] * d_occupied
++
++    # 4. Radiance Mapping
+     pe_x = positional_encoding(x_query, min_deg_pe, max_deg_pe)
+     pe_d = positional_encoding(d_occupied, min_deg_pe, max_deg_pe)
+-    
+-    # Concatenate
+     input_features = torch.cat([pe_x, pe_d], dim=-1)
+-    
+-    # MLP Forward
+     mlp = RadianceMappingMLP(input_features.shape[1])
+     if mlp_params is not None:
+         mlp.load_state_dict(mlp_params)
+-    L = mlp(input_features) # (N_occ, 8)
+-    
+-    # 4. Feature Map Assembly
++    L = mlp(input_features)
++
++    # 5. Feature Map Assembly
+     feature_map = torch.zeros((height, width, L.shape[1]))
+-    # Assign L to pixel_map locations
+-    # pixel_map is (N_occ, 2) with integer coordinates
+     y_idx = pixel_map[:, 1].long()
+     x_idx = pixel_map[:, 0].long()
+-    
+-    # Handle potential duplicates if any (though rasterization keeps closest)
+     feature_map[y_idx, x_idx, :] = L
+-    
+-    # 5. Refinement
+-    # Convert to (N, C, H, W) for Conv2d
+-    feature_map_tensor = feature_map.permute(2, 0, 1).unsqueeze(0) # (1, C, H, W)
+-    
++
++    # 6. Refinement
++    feature_map_tensor = feature_map.permute(2, 0, 1).unsqueeze(0)
+     unet = RefinementUNet(in_channels=L.shape[1])
+     if unet_params is not None:
+         unet.load_state_dict(unet_params)
+-        
+-    rendered_image = unet(feature_map_tensor) # (1, 3, H, W)
+-    
+-    return rendered_image.squeeze(0).permute(1, 2, 0) # (H, W, 3)
++    rendered_image = unet(feature_map_tensor)
++    return rendered_image.squeeze(0).permute(1, 2, 0)
+ ```
+ 
+@@ -262,7 +203,7 @@
+ *   **Spatial Frequency Collapse:** When point clouds are sparse, a single neural descriptor is rasterized to multiple pixels and optimized to fit the average of multiple pixels, harming rendering quality [S1]. This is analogous to Nyquist Rate dissatisfaction [S1].
+ *   **Neighbor Point Disturbance:** When point clouds are dense, points lying close have a larger impact on the feature optimization of each other [S1].
+-*   **Sparsity/Noise:** Raw point clouds have noise $\epsilon$ such that $x_{pcd} = x_{obj} + \epsilon$. Feeding raw coordinates leads to spatial frequency collapse and blurred results because sparse points rasterize to multiple pixels, querying the same latent feature [S1]. Coordinate rectification solves this by providing uniformly distributed query points [S1].
+-*   **Unoccupied Pixels:** Pixels with no points within radius $\tau$ cause artifacts (bleeding). These are handled by the refinement U-Net stage [S1].
+-*   **Threshold Selection:** If $\tau$ is too large, rasterized points are inaccurate. If $\tau$ is too small, more pixels become unoccupied, causing bleeding [S1].
++*   **Sparsity/Noise:** Raw point clouds have noise $\epsilon$ such that $x_{pcd} = x_{obj} + \epsilon$ [S1]. Feeding raw coordinates leads to spatial frequency collapse and blurred results because sparse points rasterize to multiple pixels, querying the same latent feature [S1]. Coordinate rectification solves this by providing uniformly distributed query points [S1].
++*   **Unoccupied Pixels:** Pixels with no points within radius $\tau$ cause artifacts (bleeding) [S1]. These are handled by the refinement U-Net stage [S1].
++*   **Threshold Selection:** If $\tau$ is too large, rasterized points are inaccurate [S1]. If $\tau$ is too small, more pixels become unoccupied, causing bleeding [S1].
+ 
+ ## Operating characteristics

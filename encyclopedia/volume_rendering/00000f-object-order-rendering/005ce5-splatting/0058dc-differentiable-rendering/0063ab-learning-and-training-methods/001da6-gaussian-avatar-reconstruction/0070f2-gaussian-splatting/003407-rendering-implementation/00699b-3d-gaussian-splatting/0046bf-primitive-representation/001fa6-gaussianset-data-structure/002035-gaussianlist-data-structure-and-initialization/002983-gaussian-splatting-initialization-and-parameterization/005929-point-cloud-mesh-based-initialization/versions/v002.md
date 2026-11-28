@@ -1,0 +1,57 @@
+# Point Cloud/Mesh-based Initialization
+Also called: Geometry-based Gaussian Seeding
+
+## Overview
+This family of methods initializes 3D Gaussian Splatting (3DGS) primitives using pre-existing 3D geometry (point clouds or meshes) rather than relying solely on sparse Structure-from-Motion (SfM) outputs [G]. It solves the problem of initializing high-quality radiance fields when multi-view images are unavailable or when the user possesses dense, surface-aligned volumetric data (e.g., MPEG plenoptic point clouds or meshes) [16108-3dgs-custom-initialization-from-point-cloud-mesh.md]. It differs from [Random Large-Variance Initialization](6129-random-large-variance-initialization.md) by anchoring Gaussians to observed geometry, and from [Gaussian Model Initialization](2349-gaussian-model-initialization.md) by supporting dense mesh inputs and optional fixed-position constraints [16108-3dgs-custom-initialization-from-point-cloud-mesh.md].
+
+## Shared principles
+All methods in this family map input geometric primitives (vertices or points) to Gaussian centers [G]. The core shared mechanism is the derivation of initial covariance parameters (scale and rotation) and color features from the input geometry or associated rendering data [G].
+1. **Position Mapping:** Input vertices or points $\{p_i\}$ are assigned directly to the `_xyz` tensor of the Gaussian model [2349-gaussian-model-initialization.md].
+2. **Rotation Initialization:** The rotation quaternion is initialized to the identity $(1, 0, 0, 0)$ for all Gaussians, implying an initial isotropic orientation unless local normals are available [2349-gaussian-model-initialization.md].
+3. **Color Initialization:** The zeroth-order spherical harmonic coefficient (`_features_dc`) is set to the RGB color of the corresponding point or rendered pixel. Higher-order coefficients (`_features_rest`) are zero-initialized [2349-gaussian-model-initialization.md].
+4. **Scale Estimation:** Scales are derived from local density or depth. Common heuristics include using the median distance to $k$-nearest neighbors or computing an isometric radius based on focal length and depth [14060-3d-gaussian-initialization.md].
+5. **Opacity Initialization:** Opacity is initialized to a low value (e.g., raw parameter $\approx -2.197$ corresponding to 0.1) to prevent early overconfidence and allow gradient propagation [2349-gaussian-model-initialization.md].
+
+## Subtopics
+
+### [Gaussian Model Initialization](2349-gaussian-model-initialization.md)
+Standard procedure for seeding 3DGS from a sparse SfM point cloud (e.g., COLMAP). It maps each 3D point to a Gaussian, initializing position, SH coefficients, scale, rotation, and opacity. It differs from [Random Large-Variance Initialization](6129-random-large-variance-initialization.md) by anchoring to observed geometry, and from [Gaussian Geometry Parameters Prediction](8442-gaussian-geometry-parameters-prediction.md) by using heuristic density estimation rather than neural networks.
+*   **When to choose:** When starting with standard SfM sparse points and no dense mesh is available.
+*   **Key Details:**
+    *   **Scale:** Estimated via $k$-nearest neighbor distances (e.g., $k=20$). A common heuristic sets the scale to a fraction (e.g., 0.1) of the median nearest-neighbor distance.
+    *   **Rotation:** Identity quaternion.
+    *   **Opacity:** Raw parameter $\approx -2.197$ (target opacity 0.1).
+    *   **Learning Rates:** Position $\alpha_{xyz} = 0.00016$, Color $\alpha_{color} = 0.0025$.
+    *   **Pitfall:** Covariance must be symmetric; ensure quaternion normalization.
+
+### [3DGS Custom Initialization from Point Cloud/Mesh](16108-3dgs-custom-initialization-from-point-cloud-mesh.md)
+Initializes 3DGS from dense 3D point clouds or meshes, replacing the standard SfM initialization. It solves the problem of creating models from existing volumetric data when original multi-view images are unavailable. Unlike standard 3DGS, it uses dense, surface-aligned points, resulting in cleaner models and faster convergence.
+*   **When to choose:** When starting with a known dense mesh or plenoptic point cloud, and the original camera poses/images are missing or insufficient.
+*   **Key Details:**
+    *   **Input:** 3D point cloud or mesh. View-dependent colors are preferred.
+    *   **Process:** Renders multi-view images from the geometry to provide training data and camera parameters.
+    *   **Adaptive Density Control:** Deactivated if input is dense/clean to preserve geometry; activated if noisy/sparse.
+    *   **Position Learning Rate:** Set to $0$ to fix splats on the original surface.
+    *   **Other Learning Rates:** $> 0$ for opacity, scale, rotation, color.
+
+### [3D Gaussian Initialization](14060-3d-gaussian-initialization.md)
+A variant focusing on isometric spherical initialization based on depth.
+*   **Rotation:** Identity matrix [G].
+*   **Scale:** Isometric spheres. Radius $r$ is computed as:
+    $$ r = \frac{f \cdot D^{\text{init}}}{H} $$
+    where $f$ is the vertical focal length, $D^{\text{init}}$ is the initial depth, and $H$ is the image height [14060-3d-gaussian-initialization.md].
+*   **Color:** SH DC set to pixel color; other coefficients zero [14060-3d-gaussian-initialization.md].
+*   **Opacity:** Depends on view count $N$: $N=2 \rightarrow 0.6$, $N=3 \rightarrow 0.5$, $N=4 \rightarrow 0.35$. Opacity decreases with view count to ensure gradient propagation [14060-3d-gaussian-initialization.md].
+
+### Inverse Mapping Initialization and Refinement
+[1] Initialize the inverse mapping network $F_{uv}^{-1}$ using a point cloud with a Chamfer loss to help the network converge quickly to a reasonable stage.
+[1] After initialization, remove supervision from the initial point cloud.
+[1] Continue training with the cycle loss to improve the noisy initialization and let $F_{uv}^{-1}$ discover a smooth surface.
+**Pitfall:** Initial point clouds from MVS reconstruction contain noise, leading to a noisy surface in $F_{uv}^{-1}$ if trained with Chamfer loss.
+**Pitfall:** Removing $F_{uv}^{-1}$ and training with only the rendering loss causes degenerate texture mapping where large regions of 3D points map to the same UV coordinates.
+
+## Background
+The standard 3DGS initialization relies on sparse SfM points [G]. Methods using dense point clouds or meshes were developed to leverage existing high-quality geometric representations (e.g., from MPEG or monocular depth estimators) when multi-view data is limited or unavailable [16108-3dgs-custom-initialization-from-point-cloud-mesh.md]. CoherentGS introduced the isometric scale calculation based on depth to handle sparse novel view synthesis [14060-3d-gaussian-initialization.md].
+
+## Sources
+[S1] NeuTex: Neural Texture Mapping for Volumetric Neural Rendering, https://doi.org/10.1109/cvpr46437.2021.00704, fetched 2026-10-26

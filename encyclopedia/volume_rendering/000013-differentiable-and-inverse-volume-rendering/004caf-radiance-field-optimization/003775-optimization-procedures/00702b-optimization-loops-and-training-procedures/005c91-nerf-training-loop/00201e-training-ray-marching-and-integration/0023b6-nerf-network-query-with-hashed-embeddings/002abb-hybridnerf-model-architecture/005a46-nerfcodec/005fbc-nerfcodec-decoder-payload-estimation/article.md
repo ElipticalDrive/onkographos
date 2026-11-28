@@ -1,0 +1,151 @@
+# NeRFCodec Decoder Payload Estimation
+
+
+## Overview
+This method estimates the compressed bitrate budget for the decoder-side parameters of the NeRFCodec framework, which must be transmitted alongside encoded Neural Radiance Fields [S1]. It differs from raw parameter counting by applying per-tensor quantization and entropy estimation to approximate the actual payload size in a streaming application [S1]. It serves as a proxy for memory footprint when NeRFCodec is used as a 3D representation for content delivery [S1].
+
+## How it works
+The procedure estimates the bit cost for each tensor in the decoder-side model (density and appearance codecs) by simulating quantization and calculating the theoretical entropy bound plus header overhead [S1].
+
+### Inputs and Outputs
+- **Input**: A tensor $x$ of floating-point values representing decoder-side parameters [S1].
+- **Output**: The estimated total bit cost for the tensor [S1].
+
+### Data Structures
+- **Tensor $x$**: A multi-dimensional array of values [S1].
+- **Histogram**: An array of size $L = 2^{qbits}$ storing counts of each quantized level [S1].
+- **PMF**: An array of size $L$ storing empirical probabilities $p_i$ [S1].
+
+### Steps
+1. **Per-tensor Quantization**:
+   - Compute the minimum and maximum values of the tensor:
+     $$x_{\min} = \min(x), \quad x_{\max} = \max(x)$$
+   - Determine the number of quantization bits $qbits$ (typically 8) [S1].
+   - Calculate the number of levels $L$:
+     $$L = 2^{qbits}$$
+   - Compute the scale factor:
+     $$\mathrm{scale} = \frac{x_{\max} - x_{\min}}{L - 1}$$
+   - Map each element $x_j$ to an integer level $q_j$:
+     $$q_j = \mathrm{round}\left(\frac{x_j - x_{\min}}{\mathrm{scale}}\right)$$
+   - Clamp $q_j$ to the range $[0, L - 1]$ [S1].
+
+2. **Entropy Estimate**:
+   - Compute a histogram of the quantized levels $q_j$ [S1].
+   - Derive the empirical probability mass function (PMF) $p_i$ for each level $i \in \{0, \dots, L-1\}$:
+     $$p_i = \frac{\text{count}(i)}{N}$$
+     where $N$ is the total number of elements in the tensor [S1].
+   - Calculate the Shannon entropy bound (idealized bit cost) $H_{\text{bits}}$ by summing over non-zero probabilities:
+     $$H_{\text{bits}} = N \sum_{i: p_i > 0} -p_i \log_2 p_i$$
+     [S1].
+
+3. **Per-tensor Header**:
+   - Calculate the overhead bits required to transmit side information ($x_{\min}, x_{\max}, qbits$, and tensor shape) [S1].
+   - The header size depends on the number of dimensions $d$ of the tensor:
+     $$\mathrm{header\_bits} = 2 \cdot 32 + 8 + 32 \cdot d$$
+     This assumes 32-bit floats for $x_{\min}$ and $x_{\max}$, 8 bits for $qbits$, and 32 bits per dimension for the shape [S1].
+
+4. **Total Bits**:
+   - Sum the entropy cost and header overhead:
+     $$\mathrm{bits} = H_{\text{bits}} + \mathrm{header\_bits}$$
+     [S1].
+
+### Pseudocode
+> **Unverified code.** The code below did not pass a test run against a reference implementation, or no test fits it, so it may contain errors.
+
+```python
+import math
+
+def estimate_tensor_bits(x, qbits=8, d=1):
+    """
+    Estimate the bit cost for a single tensor x.
+    
+    Args:
+        x: flat list of floating point values.
+        qbits: Number of bits for quantization (default 8).
+        d: Number of dimensions of the original tensor.
+        
+    Returns:
+        Total estimated bits for the tensor.
+    """
+    # 1. Per-tensor Quantization
+    x_min = min(x)
+    x_max = max(x)
+    L = 2 ** qbits
+    
+    # Guard against zero range [G]
+    if x_max == x_min:
+        scale = 1.0
+    else:
+        scale = (x_max - x_min) / (L - 1)
+    
+    # Map to integer levels and clamp
+    quantized_levels = []
+    for val in x:
+        q = round((val - x_min) / scale)
+        q = max(0, min(L - 1, q))
+        quantized_levels.append(q)
+    
+    N = len(quantized_levels)
+    
+    # Guard for empty tensor [G]
+    if N == 0:
+        return 2 * 32 + 8 + 32 * d
+    
+    # 2. Entropy Estimate
+    # Compute histogram
+    histogram = [0] * L
+    for q in quantized_levels:
+        histogram[q] += 1
+        
+    # Calculate Shannon entropy
+    H_bits = 0.0
+    for count in histogram:
+        if count > 0:
+            p_i = count / N
+            H_bits -= p_i * math.log2(p_i)
+    H_bits *= N
+    
+    # 3. Per-tensor Header
+    header_bits = 2 * 32 + 8 + 32 * d
+    
+    # 4. Total Bits
+    total_bits = H_bits + header_bits
+    
+    return total_bits
+
+def estimate_nerfcodec_payload(tensors_with_dims):
+    """
+    Estimate total payload for NeRFCodec decoder parameters.
+    
+    Args:
+        tensors_with_dims: List of tuples (tensor_flat_list, num_dimensions).
+        
+    Returns:
+        Total estimated bits.
+    """
+    total_bits = 0
+    for tensor, d in tensors_with_dims:
+        total_bits += estimate_tensor_bits(tensor, d=d)
+    return total_bits
+```
+
+### Parameters
+- **qbits**: Number of bits for quantization. Typically set to 8 in experiments [S1].
+
+### Edge Cases and Pitfalls
+- **Zero Range**: If $x_{\max} = x_{\min}$, the scale becomes zero. The pseudocode handles this by setting scale to 1.0, resulting in all values mapping to level 0 [G].
+- **Empty Tensor**: If $N=0$, the entropy calculation should return 0. The pseudocode returns only the header bits in this case [G].
+- **Dimensionality**: The header cost scales linearly with the number of dimensions $d$. High-dimensional tensors incur higher overhead [S1].
+
+## Operating characteristics
+- **Time Complexity**: Linear in the number of elements $N$ for quantization and histogram computation. Entropy calculation is constant time with respect to $N$ (depends on $L=2^{qbits}$) [G].
+- **Memory Complexity**: Linear in $N$ for storing the tensor and histogram [G].
+- **Measured Performance**: The raw decoder payload for NeRFCodec is roughly 24 MB (11.9 MB for density codec, 12.8 MB for appearance codec). After compression, this reduces to about 1.6 MB [S1].
+- **Strengths**: Provides a more realistic estimate of streaming payload than raw parameter size. Simple to implement [G].
+- **Limitations**: Uses Shannon entropy bound, which assumes ideal entropy coding. Actual bitrates may vary depending on the specific entropy coder used [G]. Does not account for encoder-side parameters, which are excluded from the budget [S1].
+
+## Background
+This estimation procedure is described in the context of evaluating NeRFCodec's efficiency for volumetric content delivery [S1]. The NeRFCodec framework integrates non-linear transform, quantization, and entropy coding for memory-efficient scene representation of plane-based hybrid NeRF [S1]. The estimation method is applied to decoder-side parameters to determine the bitrate budget required for transmission [S1]. The authors of NeRFCodec do not release their bitrate budget estimation code, so this procedure is used as a proxy [S1].
+
+## Sources
+[S1] CATRF: Codec-Adaptive TriPlane Radiance Fields for Volumetric Content Delivery, https://doi.org/10.1109/cvprf71909.2026.00048, fetched 2026-10-30

@@ -1,0 +1,147 @@
+# Latent Diffusion Models (LDM)
+
+Also called: Stable Diffusion
+
+## Overview
+Latent Diffusion Models (LDMs) perform the diffusion process in a compressed latent space rather than the high-dimensional pixel space, significantly improving computational efficiency and output quality [S1]. In the context of 3D volume rendering, hierarchical LDMs define a generative model over latent variables representing scene geometry, camera trajectories, and fine details, enabling the synthesis of voxel-based neural fields [S2]. This approach sets it apart from standard Denoising Diffusion Probabilistic Models (DDPMs) by decoupling the diffusion process from the expensive decoding step, allowing for stable and efficient generation of complex 3D scenes conditioned on hierarchical inputs [S1, S2].
+
+## How it works
+**Inputs and Outputs:**
+The model generates a voxel-based scene representation $V$ (representing a neural field) conditioned on hierarchical latent variables: a coarse geometry latent $g$, a camera trajectory latent $c$, and a fine-detail latent $f$ [S2]. The training inputs are samples from the data distribution of these latents [S2]. The output is a denoised estimate of the clean latent variables, which are subsequently decoded into $V$ [S2].
+
+**Data Structures:**
+The generative model is defined by the joint distribution:
+$$ p(V, g, c, f) = p(V |g, c, f)p(f |g, c)p(c|g)p(g) $$
+where $p(V |g, c, f)$ is the likelihood of the voxel representation given the latents, and the remaining terms represent the hierarchical prior [S2].
+
+**Denoising Networks:**
+Three distinct denoising networks, denoted as $\psi_g$, $\psi_c$, and $\psi_f$, are used to predict the noise or clean signal for $g$, $c$, and $f$ respectively [S2].
+*   $\psi_g$: Implemented with linear layers and skip connections [S2].
+*   $\psi_c$ and $\psi_f$: Adopt the U-Net architecture [S2].
+*   Conditioning: For conditional generation, each $\psi$ takes the conditioning variable as input using cross-attention layers [S2].
+*   Specific Connections:
+    *   $g$ is fed into $\psi_c$ and $\psi_f$ via conditional group normalization layers [S2].
+    *   $c$ is interpolated and concatenated to the input of $\psi_f$ [S2].
+    *   Camera trajectory information is concatenated to $g$ (the vector is still referred to as $g$ for brevity) to inform the model where to focus during generation [S2].
+
+**Training Procedure:**
+The model is trained using a hierarchical loss function based on the Denoising Diffusion Model (DDM) framework [S2]. The general DDM loss for a variable $x$ is:
+$$ \mathbb{E}_{t,\epsilon,x_0} \left[ w(\lambda_t) ||x_0 - \hat{x}_\theta(x_t, t)||^2_2 \right] $$
+where $t$ is sampled uniformly from the timesteps, $\epsilon$ is sampled from a standard normal distribution to noise the data $x_0$, $w(\lambda_t)$ is a timestep-dependent weighting constant, and $\hat{x}_\theta$ is the learned denoising model [S2].
+
+The specific hierarchical losses are:
+1.  **Geometry ($g$):**
+    $$ \mathbb{E}_{t,\epsilon,g_0} \left[ w(\lambda_t) ||g_0 - \psi_g(g_t, t)||^2_2 \right] $$
+2.  **Camera Trajectory ($c$):**
+    $$ \mathbb{E}_{t,\epsilon,g_0,c_0} \left[ w(\lambda_t) ||c_0 - \psi_c(c_t, g_0, t)||^2_2 \right] $$
+3.  **Fine Detail ($f$):**
+    $$ \mathbb{E}_{t,\epsilon,g_0,c_0,f_0} \left[ w(\lambda_t) ||f_0 - \psi_f(f_t, g_0, c_0, t)||^2_2 \right] $$
+
+**Parameters:**
+*   **Parameterization:** The model uses v-prediction parameterization [64], which has been shown to provide better convergence and training stability [S2].
+*   **Training Parallelism:** Each $\psi$ can be trained in parallel [S2].
+
+**Sampling Procedure:**
+1.  Sample $g$ from its prior $p(g)$ [S2].
+2.  Sample $c$ conditioned on $g$ [S2].
+3.  Sample $f$ conditioned on $g$ and $c$ [S2].
+4.  Once $g, c, f$ are sampled, use the latent decoder to construct the voxel representation $V$ [S2].
+5.  Visualize the sampled scene from desired viewpoints using volume rendering [S2].
+
+**Pseudocode:**
+> **Unverified code.** The code below did not pass a test run against a reference implementation, or no test fits it, so it may contain errors.
+
+```python
+import torch
+import torch.nn as nn
+import torch.nn.functional as F
+
+def add_noise(x0, t, eps):
+    """Standard DDPM forward process: x_t = sqrt(alpha_t)*x_0 + sqrt(1-alpha_t)*eps [G]."""
+    sqrt_alpha_prod = torch.sqrt(torch.cumprod(torch.tensor([1.0] + [0.999**i for i in range(1000)]))[t])
+    sqrt_one_minus_alpha_prod = torch.sqrt(1.0 - sqrt_alpha_prod**2)
+    return sqrt_alpha_prod * x0 + sqrt_one_minus_alpha_prod * eps
+
+def reverse_diffusion_step(xt, t, denoiser, cond=None):
+    """Standard DDPM reverse step to predict x0 [G]."""
+    return denoiser(xt, t, cond)
+
+def get_timestep_weight(t):
+    """Returns timestep-dependent weighting constant w(λt) [G]."""
+    return 1.0
+
+class LinearSkipConnection(nn.Module):
+    """Implementation of psi_g: linear layers with skip connections [S2]."""
+    def __init__(self, dim):
+        super().__init__()
+        self.linear = nn.Linear(dim, dim)
+    def forward(self, x, t):
+        out = self.linear(x)
+        return out + x
+
+class UNet(nn.Module):
+    """Implementation of psi_c and psi_f: U-Net architecture with cross-attention [S2]."""
+    def __init__(self, dim, cond_dim=None):
+        super().__init__()
+        self.dim = dim
+        self.cross_attn = nn.MultiheadAttention(cond_dim, num_heads=8) if cond_dim else None
+    def forward(self, x, t, cond=None):
+        if cond is not None and self.cross_attn is not None:
+            x = self.cross_attn(x, cond, cond)[0]
+        return x
+
+class HierarchicalLDM:
+    def __init__(self, dim_g, dim_c, dim_f):
+        self.psi_g = LinearSkipConnection(dim_g)
+        self.psi_c = UNet(dim_c, cond_dim=dim_g)
+        self.psi_f = UNet(dim_f, cond_dim=dim_g)
+        self.latent_decoder = nn.Linear(dim_g + dim_c + dim_f, 1024)
+
+    def compute_loss(self, g0, c0, f0, t, eps_g, eps_c, eps_f):
+        """Computes the hierarchical LDM losses [S2]."""
+        gt = add_noise(g0, t, eps_g)
+        ct = add_noise(c0, t, eps_c)
+        ft = add_noise(f0, t, eps_f)
+
+        pred_g = self.psi_g(gt, t)
+        pred_c = self.psi_c(ct, t, cond=g0)
+
+        c_interp = F.interpolate(c0.unsqueeze(1), scale_factor=1).squeeze(1)
+        f_input = torch.cat([ft, c_interp], dim=-1)
+        pred_f = self.psi_f(f_input, t, cond=g0)
+
+        w = get_timestep_weight(t)
+        loss_g = w * torch.mean((g0 - pred_g) ** 2)
+        loss_c = w * torch.mean((c0 - pred_c) ** 2)
+        loss_f = w * torch.mean((f0 - pred_f) ** 2)
+        return loss_g + loss_c + loss_f
+
+    def sample(self, num_samples):
+        """Samples g, c, f hierarchically and decodes to V [S2]."""
+        g = reverse_diffusion_step(torch.randn(num_samples, self.psi_g.linear.out_features), 0, self.psi_g)
+        c = reverse_diffusion_step(torch.randn(num_samples, self.psi_c.dim), 0, self.psi_c, cond=g)
+        c_interp = F.interpolate(c.unsqueeze(1), scale_factor=1).squeeze(1)
+        f_input = torch.cat([torch.randn(num_samples, self.psi_f.dim), c_interp], dim=-1)
+        f = reverse_diffusion_step(f_input, 0, self.psi_f, cond=g)
+        V = self.latent_decoder(torch.cat([g, c, f], dim=-1))
+        return V
+```
+
+## Subtopics
+
+### [Scene Editing](17595-scene-editing.md)
+Scene editing modifies specific spatial regions of a generated 3D scene by treating the 3D coarse latent representation as an image and applying diffusion-based inpainting. Unlike global latent resampling which regenerates the entire scene, this method allows localized modifications by inpainting only a selected region of the coarse latent. It enables control over color, opacity, lighting magnitude, and light direction in inverse volume rendering contexts.
+
+## Operating characteristics
+*   **Computational Efficiency:** By performing diffusion in a latent space, LDMs significantly improve computational efficiency compared to pixel-space diffusion [S1].
+*   **Training Stability:** The use of v-prediction parameterization enhances convergence and training stability [S2].
+*   **Parallel Training:** The hierarchical components ($\psi_g, \psi_c, \psi_f$) can be trained in parallel, reducing training time [S2].
+*   **Quality:** LDMs produce outputs with reasonable texture and geometry, though post-optimization (e.g., Score Distillation Sampling) may be required for high-fidelity results on real-world data [S2].
+*   **Limitations:** The quality of the generated voxels depends heavily on the pre-trained latent auto-encoder and the conditioning mechanisms [S2].
+
+## Background
+Latent Diffusion Models were introduced to address the high computational cost of standard diffusion models in pixel space [S1]. Stable Diffusion, a prominent implementation of LDMs, leverages pre-trained conditional models for stable and efficient image synthesis based on text prompts or other conditional inputs [S1]. In the context of 3D volume rendering, hierarchical LDMs extend this concept to generate voxel-based neural fields by modeling the joint distribution of geometry, camera trajectories, and fine details [S2]. The method builds on Denoising Diffusion Probabilistic Models (DDPMs) [S2].
+
+## Sources
+[S1] A survey on 3D editing based on NeRF and 3DGS, https://link.springer.com/article/10.1007/s11704-025-41176-9, fetched 2026-10-28
+[S2] NeuralField-LDM: Scene Generation with Hierarchical Latent Diffusion Models, https://doi.org/10.1109/cvpr52729.2023.00821, fetched 2026-10-29

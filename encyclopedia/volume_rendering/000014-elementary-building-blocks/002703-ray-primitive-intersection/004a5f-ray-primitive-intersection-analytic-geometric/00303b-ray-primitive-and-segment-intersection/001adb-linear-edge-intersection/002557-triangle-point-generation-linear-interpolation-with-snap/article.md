@@ -1,0 +1,57 @@
+# Triangle Point Generation (Linear Interpolation with Snap)
+Also called: Linear Interpolation with Snap, Snap Interpolation
+## Overview
+This method computes the intersection point on a triangle edge where a scalar field equals a threshold, using linear interpolation between two grid vertices [S1, unofficial]. It applies a deterministic snapping heuristic to vertices near the threshold to stabilize the interpolation result [S1, unofficial].
+## How it works
+**Inputs:**
+- $p_1, p_2$: 3D coordinates of the two vertices defining the edge.
+- $v_1, v_2$: Scalar field values at $p_1$ and $p_2$ respectively.
+- $snap$: Threshold parameter for snapping vertices when close to a grid edge point. Default value is $0.01$ [S1, unofficial].
+
+**Outputs:**
+- $point$: The 3D coordinate of the intersection point on the edge.
+
+**Data Structures:**
+Not given in the sources.
+
+**Steps:**
+1. Check if $|v_1| < snap$. If true, return $p_1$ [S1, unofficial].
+2. Check if $|v_2| < snap$. If true, return $p_2$ [S1, unofficial].
+3. Check if $|v_2 - v_1| < snap$. If true, return $p_1$ [S1, unofficial].
+4. Calculate the interpolation factor $\mu$:
+   $$ \mu = \frac{v_2}{v_2 - v_1} $$
+5. Calculate the intersection point:
+   $$ point = \mu \cdot p_1 + (1 - \mu) \cdot p_2 $$
+
+**Pseudocode:**
+> **Unverified code.** The code below did not pass a test run against a reference implementation, or no test fits it, so it may contain errors.
+
+```python
+def triangle_point_generation(p1, v1, p2, v2, snap=0.01):
+    if abs(v1) < snap:
+        return p1
+    if abs(v2) < snap:
+        return p2
+    if abs(v2 - v1) < snap:
+        return p1
+    mu = v2 / (v2 - v1)
+    point = mu * p1 + (1 - mu) * p2
+    return point
+```
+
+**Edge Cases and Pitfalls:**
+The snapping checks handle cases where scalar values are near zero or near each other, preventing degenerate interpolation when the denominator approaches zero [S1, unofficial].
+
+## Subtopics
+
+### [Triangle Point Sampling](17806-triangle-point-sampling.md)
+Triangle Point Sampling is a method to uniformly sample points over a mesh surface by selecting triangles proportional to their area and then sampling a point uniformly within the selected triangle using barycentric coordinates. It builds on this method by applying a square-root transformation to uniform random variables, which corrects the non-linear area distortion inherent in naive linear interpolation.
+
+## Operating characteristics
+Not given in the sources.
+
+## Background
+Not given in the sources.
+
+## Sources
+[S1] mwrazam/marchingtets-reconstruction, https://github.com/mwrazam/marchingtets-reconstruction, fetched 2026-10-27 (unofficial)

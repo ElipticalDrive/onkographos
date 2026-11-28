@@ -1,0 +1,142 @@
+Holographic materials is a term I made up for the technique of ray casting inside the fragment shader. This allows for rendering smooth curvatures with very few triangles. The reason I call it holographic is because, like a hologram, it ...
+
+[Rendering] Holographic materials with quadrics (spheres etc.) · Issue #326 · leetvr/hotham · GitHub
+Skip to content
+You signed in with another tab or window. Reload to refresh your session.
+You signed out in another tab or window. Reload to refresh your session.
+You switched accounts on another tab or window. Reload to refresh your session.
+Dismiss alert
+[Rendering] Holographic materials with quadrics (spheres etc.) #326
+New issue
+Copy link
+New issue
+Copy link
+Closed
+Closed
+[Rendering] Holographic materials with quadrics (spheres etc.)#326
+Copy link
+Assignees
+Labels
+renderingAn issue with the rendering systemAn issue with the rendering system
+Description
+rasmusgo
+opened on Aug 12, 2022
+Issue body actions
+Holographic materials is a term I made up for the technique of ray casting inside the fragment shader. This allows for rendering smooth curvatures with very few triangles. The reason I call it holographic is because, like a hologram, it makes flat surfaces look like 3D images.
+This is not about the type of ray tracing that has started to get special hardware acceleration and makes reflections look better. This is about the simple variant of ray tracing called ray casting where only primary rays are casted.
+Ray casting is typically slower than rasterization even without secondary rays. A big reason why it is slower is that each ray is casted against the whole scene while only one object at a time is considered during rasterization. Each ray is also treated independently while rasterization can more easily reuse computations for drawing multiple pixels.
+Ray casting can also be slow if ray marching is being done. Ray marching traverses a volume by testing many points inside it, eg. traversing a voxel grid or sphere casting a signed distance field. This is not necessary for simpler shapes as long as there are closed form solutions available.
+Spheres, cylinders and cones are examples of quadric surfaces. Ray intersections against quadric surfaces has a simple closed form solution. These shapes are also abundant in human made things. This makes them especially interesting for holographic materials.
+Holographic materials is a hybrid technique that traces multiple rays against a single object (shape) at a time. gl_FragDepth is set to the hit point if the ray hits the object. discard is invoked if the ray misses. The color can be computed with PBR similar to how it is done for regular triangles. Only the pixels covered by the projection of the hull of the object will cast rays against the object. This avoids the need for for hierarchical acceleration structures and allows for reusing computations between rays.
+The z-buffer is used for resolving occlusions between objects. It can also be used for avoiding to cast rays toward occluded parts of objects as long as layout (depth_less) out float gl_FragDepth; is declared in the fragment shader and utilized by the driver. Although some tricks used by graphics cards to avoid fragment shader invocations may be disabled because of the use of gl_FragDepth and discard.
+UV mapping cannot be done normally because the rays are cast from the hull and can hit the object at different points depending on the view. This means that if UV-coordinates of the hull were used, the texture would glide around on the object. The UV coordinates must be computed from the hit point to remain fixed on the object. The best projection depends on the specific object so there probably needs to be some flexibility here.
+There is an additional problem that arises for all quadrics except the ellipsoids. They are unbounded. The surface goes off towards infinity. This is not as bad as it sounds because the hologram is bounded by the projection of the hull. Other geometry can also occlude the unbounded regions. However, we will most likely want to add bounds to the shapes inside the holograms so that we can have capped cylinders and similar things. This can be done with additional quadrics or clipping planes.
+Implementation details
+Holographic materials can be rendered after regular materials and use a new pair of shaders. This allows for simpler shaders and a cleaner separation. It should be possible to share most of the PBR shading code by putting it in a separate file.
+The hulls do not need to match the shapes closely. This makes it easy to reuse hull geometry. We could even let all of them be boxes for example. A single box can be instanced with unique transformations for all hulls in the scene.
+A quadric surface is fully described by a 4x4 matrix, often denoted Q, which can be made symmetric or triangular without changing the shape of the surface. The surface is found where $x^TQx = 0$. The point $x$ is expressed as a homogenous column vector.
+The normal of the surface is given by the gradient; $n \propto \nabla(x^TQx) \propto Qx$
+The ray is parameterized by a ray origin and a direction; $x = r_o + r_dt$. The intersection can be computed by inserting into the quadric equation and solving for $t$
+$$ x^TQx = 0 $$
+$$ (r_o + r_dt)^TQ(r_o + r_dt) = 0 $$
+$$ r_o^TQr_o + r_d^TQr_ot + r_o^TQr_dt + r_d^TQr_dt^2 = 0 $$
+$$ r_o^TQr_o + (r_d^TQr_o + r_o^TQr_d)t + r_d^TQr_dt^2 = 0 $$
+We can now use the quadratic formula to get the two solutions.
+Note that the four vectors $r_o, r_d, Qr_o, Qr_d$ can be computed in the vertex shader and will behave nicely when interpolated. This is the trick that avoids the matrix multiplications in the fragment shader. They can even be used for computing the normal, thereby completely avoiding the need for $Q$ in the fragment shader.
+The surface is most conveniently expressed in local space but the transformation between local and global space can be baked into the matrix Q before the vertex shader is run.
+The UV mapping can be done by a perspective transform that can be stored per instance alongside the material properties to start with. Other mappings should be relatively easy to add as we need them.
+Bounds can be enforced by testing the hit point against clipping planes or other quadrics. A single clipping plane can be represented by putting the plane equation in the last column (or row) of a quadric matrix $Q$. Two clipping planes can actually fit into a single quadric, eg $y^2 \le 1$.
+We only need two vectors per additional quadric because we can use the same $r_o, r_d$ and only add additional vectors for $Q_ir_o, Q_ir_d$. Alternatively, the quadric matrices can be stored per instance and not passed via the vertex shader at all.
+Activity
+rasmusgo
+added
+renderingAn issue with the rendering systemAn issue with the rendering system
+on Aug 12, 2022
+rasmusgo
+self-assigned this
+on Aug 12, 2022
+rasmusgo commented on Aug 14, 2022
+rasmusgo
+on Aug 14, 2022
+Last edited by rasmusgo
+ContributorAuthor
+More actions
+Compared to https://iquilezles.org/articles/distfunctions/, quadrics can do many but not all of the primitives.
+Sphere - yes ✅
+Box - yes (but use triangles instead) ✅
+A box can be represented as the three quadrics (double planes) with with two quadric bounds each but it would probably be better to just use triangles.
+Round Box - yes ✅
+Several quadrics are necessary but the they will get the job done. 4 spheres for the corners, 6 cylinders for the edges and probably best to use triangles for the flat surfaces.
+Box Frame - yes (but use triangles instead) ✅
+Lots of flat quadrics but better to use triangles.
+Torus - no ❌
+A torus is a fourth order surface, confusingly called a quartic. I would like to support this but it would need a different solver for the ray intersection.
+Capped Torus - no ❌
+Same as the torus. The capped ends could be done with spheres though.
+Link - no ❌
+This is two cylinders and two cut torus's.
+Infinite Cylinder - yes ✅
+Cone - yes ✅
+Infinite Cone - yes ✅
+Plane - yes ✅
+Hexagonal Prism - yes (but use triangles instead) ✅
+Could be done with quadrics with multiple bounds but better to use triangles.
+Triangular Prism - yes (but use triangles instead) ✅
+Capsule - yes ✅
+A capsule is two spheres and a cylinder.
+Capped Cylinder - yes ✅
+This is a sphere and a cylinder.
+Rounded Cylinder - no ❌
+This is a cylinder and a torus with a lid. Something similar can be done with a cylinder and a flat ellipsoid though.
+Capped Cone - yes ✅
+Solid Angle - yes ✅
+This is a cone and a cut sphere.
+Cut Sphere - yes ✅
+Cut Hollow Sphere - yes ✅
+This is two spheres and a plane with two quadric bounds.
+Death Star - yes ✅
+This is two spheres with bounds.
+Round cone - yes ✅
+This is a bounded cone and two spheres.
+Ellipsoid - yes ✅
+Rhombus - yes (but use triangles instead) ✅
+Octahedron -yes (but use triangles instead) ✅
+Pyramid - yes (but use triangles instead) ✅
+Triangle - yes (but use a triangle instead) ✅
+Quad - yes (but use triangles instead) ✅
+rasmusgo commented on Aug 15, 2022
+rasmusgo
+on Aug 15, 2022
+ContributorAuthor
+More actions
+There is a tasty list of analytical solutions of raytraced shapes over here https://iquilezles.org/articles/intersectors/ that could be useful!
+kanerogers commented on Sep 23, 2022
+kanerogers
+on Sep 23, 2022
+Collaborator
+More actions
+@rasmusgo As discussed in dearest Stockholm, 🇸🇪 , I think that the best way to approach this is as a "non core feature". I think that there's definitely some interesting research to be done in finding alternatives to rasterised triangle rendering, but I do think it's out of scope for the Hotham project.
+However, I think this would be a really good case for proving whether Hotham can easily support external render passes. We've done a proof of concept of this with The Station, thanks to @Ralith 's help, but it'd be good to see how much further we can push this.
+If you're happy to, I think the best approach would be for you to create your own crate (open source or no!) and use Hotham as an external dependency. I think that would (a) give you the freedom to experiment with this nifty rendering idea without having to go through the bureaucracy of PRs, etc and (b) would be a really good test to see how flexible Hotham actually is.
+kanerogers
+closed this as completedon Sep 23, 2022
+Sign up for free to join this conversation on GitHub. Already have an account? Sign in to comment
+Metadata
+Metadata
+Assignees
+rasmusgo
+Labels
+renderingAn issue with the rendering systemAn issue with the rendering system
+Type
+No type
+Projects
+No projects
+Milestone
+No milestone
+Relationships
+None yet
+Development
+No branches or pull requests
+Issue actions
+Open in GitHub Copilot app
+You can’t perform that action at this time.

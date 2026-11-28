@@ -1,0 +1,114 @@
+--- v001.md
++++ v002.md
+@@ -16,5 +16,5 @@
+ 
+ **Steps:**
+-1.  **Initialize:** Initialize gain $g$ to 1.0 and bias $b$ to 0.0 for all cameras and channels [G]. Initialize background image $I_{\text{rgb}}^{(\text{bg})}$ to black or zero if used [G].
++1.  **Initialize:** Initialize gain $g$ to 1.0 and bias $b$ to 0.0 for all cameras and channels [G].
+ 2.  **Raymarch:** For each camera view, raymarch through the volume to compute the accumulated volume color $I_{\text{rgb}}(\mathbf{p})$ and opacity $I_\alpha(\mathbf{p})$ for each pixel $\mathbf{p}$ [S2].
+ 3.  **Apply Radiometric Transform:** Apply the per-camera, per-channel gain and bias to the volume color:
+@@ -24,7 +24,6 @@
+     $$ \widehat{I}_{\text{rgb}}(\mathbf{p}) = (1 - I_\alpha(\mathbf{p})) I_{\text{rgb}}^{(\text{bg})}(\mathbf{p}) + I'_{\text{rgb}}(\mathbf{p}) $$
+     [S2]
+-    If background estimation is disabled, $\widehat{I}_{\text{rgb}}(\mathbf{p}) = I'_{\text{rgb}}(\mathbf{p})$ [S2].
+-5.  **Compute Loss:** Calculate the photometric loss (e.g., L1 or L2) between the rendered image $\widehat{I}_{\text{rgb}}(\mathbf{p})$ and the ground truth image $I_{\text{gt}}(\mathbf{p})$ [S2].
+-6.  **Optimize:** Update the gain $g$, bias $b$, and optionally the background image $I_{\text{rgb}}^{(\text{bg})}$ using gradient descent (e.g., Adam) [S2].
++5.  **Compute Loss:** Calculate the photometric loss (e.g., L2) between the rendered image $\widehat{I}_{\text{rgb}}(\mathbf{p})$ and the ground truth image $I_{\text{gt}}(\mathbf{p})$ [S2].
++6.  **Optimize:** Update the gain $g$, bias $b$, and optionally the background image $I_{\text{rgb}}^{(\text{bg})}$ using gradient descent [S2].
+ 
+ **Parameters:**
+@@ -38,16 +37,17 @@
+                                  use_background=False, 
+                                  lr_gain_bias=1e-3, 
+-                                 lr_background=1e-1):
++                                 lr_background=1e-1,
++                                 num_iterations=500000):
+     # Initialize learnable parameters
+     # g: (num_cameras, num_channels), b: (num_cameras, num_channels)
+-    g = torch.ones_like(g)
+-    b = torch.zeros_like(b)
++    g = [1.0] * len(cameras)
++    b = [0.0] * len(cameras)
+     
+     if use_background:
+         # bg_images: (num_cameras, H, W, num_channels)
+-        bg_images = torch.zeros_like(bg_images)
+-        optimizer_bg = torch.optim.Adam([bg_images], lr=lr_background)
++        bg_images = [[0.0] * (H * W * 3) for _ in range(len(cameras))]
++        optimizer_bg = AdamOptimizer(bg_images, lr=lr_background)
+     
+-    optimizer_gb = torch.optim.Adam([g, b], lr=lr_gain_bias)
++    optimizer_gb = AdamOptimizer([g, b], lr=lr_gain_bias)
+     
+     for iteration in range(num_iterations):
+@@ -60,30 +60,53 @@
+         for camera, gt_image in zip(cameras, gt_images):
+             # 1. Raymarch to get volume color and opacity
+-            # volume_color: (H, W, C), opacity: (H, W, 1)
+             volume_color, opacity = volume_model.raymarch(camera)
+             
+             # 2. Apply gain and bias
+-            # Apply per-camera gain/bias
+             cam_idx = camera.id
+-            transformed_color = g[cam_idx] * volume_color + b[cam_idx]
++            transformed_color = [g[cam_idx][c] * volume_color[c] + b[cam_idx][c] for c in range(len(volume_color))]
+             
+             # 3. Merge with background if enabled
+             if use_background:
+                 bg = bg_images[cam_idx]
+-                # alpha is assumed to be in [0, 1]
+-                rendered = (1.0 - opacity) * bg + transformed_color
++                rendered = [(1.0 - opacity[c]) * bg[c] + transformed_color[c] for c in range(len(volume_color))]
+             else:
+                 rendered = transformed_color
+                 
+-            # 4. Compute loss
+-            loss = F.l1_loss(rendered, gt_image)
++            # 4. Compute loss (L2)
++            loss = sum((rendered[c] - gt_image[c])**2 for c in range(len(rendered))) / len(rendered)
+             total_loss += loss
+             
+-        total_loss.backward()
+-        optimizer_gb.step()
++        # 5. Backpropagation and parameter update
++        gradients = compute_gradients(total_loss)
++        optimizer_gb.step(gradients)
+         if use_background:
+-            optimizer_bg.step()
++            optimizer_bg.step(gradients)
+             
+     return g, b, bg_images if use_background else None
++
++class AdamOptimizer:
++    def __init__(self, params, lr):
++        self.params = params
++        self.lr = lr
++        self.t = 0
++        self.m = {id(p): 0.0 for p in params}
++        self.v = {id(p): 0.0 for p in params}
++    def zero_grad(self):
++        for p in self.params:
++            if hasattr(p, 'grad'): p.grad = 0
++    def step(self, grads):
++        self.t += 1
++        beta1, beta2, eps = 0.9, 0.999, 1e-8
++        for i, p in enumerate(self.params):
++            g = grads[i] if isinstance(grads, list) else grads
++            self.m[id(p)] = beta1 * self.m[id(p)] + (1 - beta1) * g
++            self.v[id(p)] = beta2 * self.v[id(p)] + (1 - beta2) * g**2
++            m_hat = self.m[id(p)] / (1 - beta1**self.t)
++            v_hat = self.v[id(p)] / (1 - beta2**self.t)
++            p = p - self.lr * m_hat / (v_hat**0.5 + eps)
++
++def compute_gradients(loss):
++    # Standard automatic differentiation step [G]
++    return [p.grad for p in loss.params]
+ ```
+ 
+@@ -105,5 +128,5 @@
+ 
+ ## Background
+-Radiometric Self-Calibration originates from work on neural volume rendering and adaptive tomography. It was introduced in "Neural Volumes: Learning Dynamic Renderable Volumes from Images" (2019) [S2] and "Neural Adaptive Tomography" (2022) [S1]. It is used in differentiable volume rendering pipelines to improve photometric consistency [S1, S2].
++Originates from work on neural volume rendering and adaptive tomography [S1, S2]. It is used in differentiable volume rendering pipelines to improve photometric consistency [S1, S2].
+ 
+ ## Sources

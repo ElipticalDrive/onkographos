@@ -1,0 +1,179 @@
+# Interactive Large Iso-Surface Ray Tracing (DeMarle et al.)
+Also called: DeMarle's approach, Out-of-core iso-surface ray tracing
+
+## Overview
+An out-of-core iso-surface ray tracing engine designed to render volume datasets exceeding single-machine main memory limits by leveraging a PC cluster [S1]. It employs a hierarchical grid acceleration structure with a three-level bricking approach to minimize memory overhead, enabling interactive frame rates for large-scale data [S1]. It differs from its parent [Ray-marching reference (min-max octree accelerated)](1554-ray-marching-reference-min-max-octree-accelerated.md) by using a rectilinear hierarchical grid instead of an octree, and from [Object-Order Iso-Surface Rendering with Macro-Cells](1757-object-order-iso-surface-rendering-with-macro-cells.md) by relying on image-order ray traversal and distributed out-of-core data loading rather than object-order macro-cell processing [S1].
+
+## How it works
+**Inputs:**
+- Volume dataset $V$ with dimensions $D_x \times D_y \times D_z$ and voxel values [S1].
+- Iso-surface threshold value $T$ [S1].
+- Camera parameters (origin $\mathbf{o}$, direction $\mathbf{d}$) [G].
+- Cluster configuration (number of nodes, network topology) [G].
+
+**Outputs:**
+- Rendered image tiles distributed across cluster nodes [S1].
+
+**Data Structures:**
+1.  **Hierarchical Grid Acceleration Structure:**
+    -   Three-level hierarchy [S1].
+    -   Leaf level: Macro-cells of size approximately $8^3$ voxels [S1].
+    -   Internal nodes: Store min/max scalar values of their children [S1].
+    -   Memory overhead: Minimal; for a $2048 \times 2048 \times 1920$ dataset (7.5 GB per time step), the structure requires only 8.5 MB per time step [S1].
+2.  **Brick Cache (DataServer):**
+    -   Local memory cache on each cluster node [S1].
+    -   Stores loaded voxel bricks (sub-volumes) requested by rays [S1].
+    -   Managed via shared memory and semaphores between processors on the same node [S1].
+
+**Algorithm Steps:**
+
+1.  **Initialization:**
+    -   Master node divides the image into rectangular tiles [S1].
+    -   Tiles are distributed to render nodes [S1]. If a node has multiple processors, tiles are further divided into scan-lines [S1].
+
+2.  **Hierarchical Ray Traversal:**
+    -   Start at the top level of the hierarchical grid [S1].
+    -   Perform incremental grid walking to find the first macro-cell intersected by the ray [S1].
+    -   **Empty Space Skipping:** Check the min/max values stored in the current node. If the iso-surface threshold $T$ is not within $[min, max]$, skip the entire subtree (empty space) [S1].
+    -   **Recursion:** If the ray intersects a macro-cell containing the isosurface, descend to the next lower hierarchy level. Restart traversal from the top of that sub-grid [S1].
+    -   Repeat until reaching the leaf level (macro-cells of $8^3$ voxels) or the ray exits the volume [S1].
+
+3.  **Iso-Surface Intersection:**
+    -   At the leaf level, the ray intersects a brick of $8^3$ voxels [S1].
+    -   Perform analytic iso-surface intersection tests within the voxel grid [S1].
+    -   Solve for intersections using Cardano's formula for cubic polynomials [S1].
+    -   [G] Standard trilinear interpolation within a voxel yields a cubic equation for the ray parameter $t$. Cardano's formula provides the exact roots.
+
+4.  **Data Loading (Out-of-Core):**
+    -   When a ray enters a brick not present in the local DataServer cache:
+        -   Request the brick from the DataServer [S1].
+        -   DataServer loads the brick from the network storage if not in memory [S1].
+        -   Cache the brick in local shared memory for subsequent rays [S1].
+
+5.  **Rendering:**
+    -   Compute shading and color at intersection points [G].
+    -   Accumulate results into the image tile buffer [G].
+
+**Pseudocode:**
+
+> **Unverified code.** The code below did not pass a test run against a reference implementation, or no test fits it, so it may contain errors.
+
+```python
+def render_tile(tile, camera, iso_threshold, hierarchy, data_server):
+    """
+    Renders a single image tile using hierarchical ray traversal.
+    """
+    image = Image(tile.width, tile.height)
+    
+    for y in range(tile.y_start, tile.y_end):
+        for x in range(tile.x_start, tile.x_end):
+            # 1. Generate ray for pixel (x, y)
+            ray = camera.generate_ray(x, y)
+            
+            # 2. Hierarchical Traversal
+            current_node = hierarchy.root
+            
+            while current_node is not None:
+                # Check if ray intersects current node's bounding box
+                if not ray_intersects_bbox(ray, current_node.bbox):
+                    current_node = None
+                    break
+                
+                # Empty space check using min/max values
+                if not (current_node.min_val <= iso_threshold <= current_node.max_val):
+                    current_node = None
+                    break
+                
+                # If leaf node, perform intersection test
+                if current_node.is_leaf:
+                    # Load brick if not in cache
+                    brick = data_server.get_brick(current_node.brick_id)
+                    
+                    # Analytic intersection using Cardano's formula [S1]
+                    # Standard trilinear interpolation yields a cubic equation for t [G]
+                    intersections = solve_cardano_intersections(ray, brick, iso_threshold)
+                    
+                    if intersections:
+                        t = min(intersections)
+                        point = ray.origin + t * ray.direction
+                        color = compute_shading(point, ray, brick)
+                        image.set_pixel(x, y, color)
+                    
+                    current_node = None
+                    break
+                
+                # Descend to children
+                children = current_node.children
+                next_node = None
+                min_t = float('inf')
+                
+                for child in children:
+                    if ray_intersects_bbox(ray, child.bbox):
+                        t = ray_t_intersect(ray, child.bbox)
+                        if t < min_t:
+                            min_t = t
+                            next_node = child
+                
+                current_node = next_node
+
+    return image
+
+def ray_intersects_bbox(ray, bbox):
+    """Returns True if ray intersects axis-aligned bounding box [G]."""
+    tmin = (bbox.min - ray.origin) / ray.direction
+    tmax = (bbox.max - ray.origin) / ray.direction
+    tmin = max(tmin)
+    tmax = min(tmax)
+    return tmax >= tmin and tmax >= 0
+
+def ray_t_intersect(ray, bbox):
+    """Returns entry t for ray and bounding box [G]."""
+    tmin = (bbox.min - ray.origin) / ray.direction
+    tmax = (bbox.max - ray.origin) / ray.direction
+    return max(tmin)
+
+def solve_cardano_intersections(ray, brick, iso_threshold):
+    """Solves cubic equation for trilinear interpolation roots [G]."""
+    # Analytic approach solving Cardano's formula [S1]
+    # Returns list of valid t values
+    return []
+
+def compute_shading(point, ray, brick):
+    """Computes color at intersection point [G]."""
+    return (0.0, 0.0, 0.0)
+```
+
+**Parameters:**
+-   Macro-cell size: Approximately $8^3$ voxels at leaf level [S1].
+-   Hierarchy depth: 3 levels [S1].
+-   Iso-surface threshold: User-defined scalar value [S1].
+
+**Edge Cases and Pitfalls:**
+-   Ray exit from the volume must be explicitly checked to avoid infinite traversal [S1].
+-   [G] Floating-point precision near degenerate cases (e.g., ray tangent to surface) requires standard numerical safeguards.
+-   [G] Network latency during out-of-core loading is mitigated by the DataServer caching strategy [S1].
+
+## Operating characteristics
+-   **Time Complexity:** Depends on the number of macro-cells traversed. Empty space skipping reduces average case complexity. Intersection test is $O(1)$ per leaf cell due to analytic solution [S1].
+-   **Memory Complexity:** Very low for acceleration structure (8.5 MB for 7.5 GB dataset) [S1]. DataServer cache size depends on working set of bricks.
+-   **Measured Performance:**
+    -   Visible Female (428 MB, 512x512 resolution): ~1 fps on 1 node, up to 22 fps on 32 nodes (linear scaling) [S1].
+    -   LLNL (7.5 GB, 512x512 resolution): 2.2 to 6.7 fps on 32 nodes, depending on iso-surface complexity [S1].
+-   **Strengths:**
+    -   Handles datasets too large for single-machine memory [S1].
+    -   Low memory overhead for acceleration structure [S1].
+    -   Linear scalability with cluster size [S1].
+-   **Limitations:**
+    -   Slower than kd-tree based approaches (e.g., Wald's) for comparable hardware (5x slower than Wald's 8.1 fps on single PC for Visible Female) [S1].
+    -   Performance sensitive to iso-surface complexity [S1].
+-   **When to use:** Large-scale scientific visualization where data exceeds single-node memory and cluster resources are available [S1].
+-   **When not to use:** Single-machine environments with sufficient memory, or when higher frame rates are required compared to kd-tree methods (since the method is slower) [S1].
+
+## Background
+-   **Origin:** Presented by DeMarle et al. in 2003 [S1].
+-   **Development:** Built upon the *-Ray ray tracing engine by Parker et al., originally designed for parallel shared memory SGI Onyx 2000 systems [S1]. Extended to out-of-core rendering on PC clusters [S1].
+-   **Usage:** Used for interactive visualization of large-scale scientific simulations, such as the LLNL Richtmyer-Meshkov instability simulation [S1].
+-   **Comparison Context:** Compared against Wald's kd-tree approach and Neubauer's hierarchical grid method [S1].
+
+## Sources
+[S1] Interactive Volume Rendering with Ray Tracing, https://doi.org/10.2312/egst.20061055, fetched 2026-10-24

@@ -1,0 +1,426 @@
+--- v027.md
++++ v028.md
+@@ -4,236 +4,247 @@
+ 
+ ## Overview
+-This method defines the optimization objective and densification strategy for **MeshGS** (Adaptive Mesh-Aligned Gaussian Splatting), which reconstructs high-quality 3D scenes by aligning Gaussian primitives with an explicit mesh surface [S1]. It solves the problem of standard 3D Gaussian Splatting (3DGS) ignoring existing 3D geometry, which can lead to artifacts and inefficient primitive placement [S1]. It sets itself apart from its siblings by explicitly distinguishing between **tightly-bound** splats (constrained to the mesh) and **loosely-bound** splats (free-floating), applying distinct loss functions and densification rules to each group [S1]. Unlike [Hybrid Coarse-to-Fine Strategy](7173-hybrid-coarse-to-fine-strategy.md) which manages resolution, or [Budget-Centered Training](9682-budget-centered-training.md) which manages count, this method manages the *spatial relationship* between Gaussians and the mesh [S1].
++This method defines the optimization objective and densification strategy for **MeshGS** (Adaptive Mesh-Aligned Gaussian Splatting), which integrates explicit mesh geometry into the 3D Gaussian Splatting pipeline [S1]. It solves the problem of Gaussian primitives drifting away from the underlying surface or expanding excessively, which degrades rendering quality on complex geometry [S1]. It sets itself apart from standard 3DGS by decoupling primitives into **tightly-bound** ($G^t$) and **loosely-bound** ($G^l$) sets, applying mesh-aligned constraints and specialized densification only to the former, while retaining standard 3DGS behavior for the latter [S1].
+ 
+ ## How it works
+-The method operates on a set of 3D Gaussian primitives $\mathcal{G} = \{g_1, \dots, g_N\}$, partitioned into two subsets: tightly-bound splats $G^t$ and loosely-bound splats $G^l$ [S1]. The partitioning is determined by the distance of each Gaussian center $P_i$ to the mesh surface $M$; if the distance is below a threshold $d_{th}$, the Gaussian is classified as tightly-bound [S1].
+ 
+ ### Inputs and Outputs
+-*   **Inputs:**
+-    *   A set of 3D Gaussians $\mathcal{G}$, each defined by mean $\mu_i$, covariance $\Sigma_i$ (scale $s_i$, rotation $q_i$), opacity $\alpha_i$, and spherical harmonic coefficients $\mathbf{c}_i$.
+-    *   An explicit mesh $M$ consisting of faces $F$ and vertices $V$.
+-    *   Ground truth images $I_i$ and rendered images $\hat{I}_i$.
+-    *   Camera poses and intrinsics.
+-*   **Outputs:**
+-    *   Optimized Gaussian parameters $\mathcal{G}$ and rendered images.
++**Inputs:**
++*   A set of 3D Gaussians $\mathcal{G} = \{g_1, \dots, g_N\}$, where each Gaussian $g_i$ has position $P_i$, rotation $R_i$, scale $S_i = (s_1, s_2, s_3)$, opacity $\alpha_i$, and spherical harmonic coefficients [S1].
++*   A reference mesh $M$ defined by a set of faces $F$, where each face $f_j$ has vertices $v_i$ and a face normal $n_f$ [S1].
++*   A distance threshold $d_{th} = 0.01$ to distinguish tightly-bound from loosely-bound splats [S1].
++*   A threshold $\rho = 0.1$ for scale regularization [S1].
++*   Loss weights: $\lambda_{img} = 0.001$, $\lambda_{nc} = 0.1$, $\lambda_{min} = 0.1$, $\lambda_{max} = 10$, $\lambda_{proj} = 50$ [S1].
++*   Training duration: 30,000 iterations [S1].
++
++**Outputs:**
++*   Optimized Gaussian parameters $\mathcal{G}$ and the rendered image $\hat{I}_i$ for a given camera view [S1].
+ 
+ ### Data Structures
+-*   **Gaussian Attributes:** Each Gaussian $g_i$ stores:
+-    *   $\mu_i \in \mathbb{R}^3$: Position.
+-    *   $s_i \in \mathbb{R}^3$: Scale parameters (log-space or raw, as per 3DGS).
+-    *   $q_i \in \mathbb{R}^4$: Rotation quaternion.
+-    *   $\alpha_i \in [0,1]$: Opacity.
+-    *   $\mathbf{c}_i$: Spherical harmonic coefficients.
+-    *   $type \in \{t, l\}$: Classification as tightly-bound or loosely-bound.
+-*   **Mesh Data:**
+-    *   $F$: List of triangular faces.
+-    *   $V$: List of vertices.
+-    *   $n_f$: Normal vector for face $f \in F$.
+-
+-### Numbered Steps
++The Gaussian set is logically partitioned into two subsets based on the distance to the mesh surface:
++1.  **Tightly-bound splats ($G^t$):** Gaussians within distance $d_{th}$ of the mesh. These are subject to mesh-aligned losses and specialized densification [S1].
++2.  **Loosely-bound splats ($G^l$):** Gaussians outside distance $d_{th}$. These follow the original 3DGS densification strategy [S1].
++
++### Steps
+ 
+ 1.  **Initialization and Classification:**
+-    *   Initialize Gaussians.
+-    *   For each Gaussian $i$, calculate the distance to the mesh surface.
+-    *   If distance $< d_{th}$, assign $g_i \in G^t$. Otherwise, assign $g_i \in G^l$ [S1].
+-    *   Default threshold $d_{th} = 0.01$ [S1].
++    Initialize Gaussians (e.g., from a point cloud or mesh vertices). For each Gaussian $g_i$ with center $P_i$, compute the distance to the mesh surface. If the distance is $\le d_{th}$, classify $g_i \in G^t$; otherwise, $g_i \in G^l$ [S1].
+ 
+ 2.  **Rendering:**
+-    *   Render the scene using standard differentiable splatting to produce $\hat{I}_i$ [S1].
+-
+-3.  **Loss Calculation:**
++    Render the image $\hat{I}_i$ from the current Gaussian set using standard differentiable volume rendering [S1].
++
++3.  **Loss Computation:**
+     Compute the total loss $L$ as the sum of image loss, normal consistency loss, scale regularization loss, and projection loss [S1]:
+     $$ L = L_{img} + \lambda_{nc} L_{nc} + L_{scale} + \lambda_{proj} L_{proj} $$
+ 
+     *   **Image Loss ($L_{img}$):**
+-        Combines L1 loss and D-SSIM [S1]:
++        Combines L1 loss and D-SSIM between the rendered image $\hat{I}_i$ and ground truth $I_i$ [S1]:
+         $$ L_{img} = (1 - \lambda_{img}) L_1(\hat{I}_i, I_i) + \lambda_{img} SSIM(\hat{I}_i, I_i) $$
+-        Where $\lambda_{img}$ is the weight for SSIM [S1].
+ 
+     *   **Normal Consistency Loss ($L_{nc}$):**
+-        Aligns tightly-bound splat normals with mesh face normals [S1].
+-        First, estimate the normal $n_i$ for each tightly-bound Gaussian $g_i \in G^t$:
+-        1.  Identify the minimum scale axis index $k$ such that $s_k = \min(s_1, s_2, s_3)$.
+-        2.  Construct the rotation matrix $R_i$ from quaternion $q_i$.
+-        3.  Transform the local axis vector $e_k = [0,0,0]^T + e_k$ (unit vector along the minimum scale axis) to world coordinates: $n_i = R_i e_k$.
+-        4.  Compute cosine similarity with the corresponding mesh face normal $n_f$ [S1]:
+-        $$ L_{nc} = \sum_{i \in G^t, f \in F} (1 - n_i \cdot n_f) $$
+-        *Note: The summation implies matching each tightly-bound Gaussian to its closest mesh face $f$ [S1].*
++        Encourages tightly-bound splats to align their normals with the mesh face normals [S1].
++        1.  Estimate the normal $n_i$ for each tightly-bound Gaussian $g_i \in G^t$. Identify the minimum scale axis among $S_i = (s_1, s_2, s_3)$. Apply the rotation matrix $R_i$ to this axis to transform it into world coordinates [S1].
++        2.  Compute the cosine similarity between $n_i$ and the normal $n_f$ of the closest mesh face $f \in F$ [S1]:
++            $$ L_{nc} = \sum_{i \in G^t, f \in F} (1 - n_i \cdot n_f) $$
+ 
+     *   **Scale Regularization Loss ($L_{scale}$):**
+-        Constrains the scale of tightly-bound splats to align with the mesh surface thickness [S1]:
+-        $$ L_{scale} = \sum_{i \in G^t} \left( \lambda_{min} |\min(s_1, s_2, s_3)| + \lambda_{max} |\max(s_1, s_2, s_3) - \rho| \right) $$
+-        Where $\rho$ is the threshold for the maximum scale [S1].
++        Prevents tightly-bound splats from expanding excessively or becoming too small [S1].
++        1.  Let $S_i = (s_1, s_2, s_3)$ be the scale parameters of $g_i \in G^t$ [S1].
++        2.  Compute the minimum and maximum scale values: $\min(s_1, s_2, s_3)$ and $\max(s_1, s_2, s_3)$ [S1].
++        3.  Apply the regularization:
++            $$ L_{scale} = \sum_{i \in G^t} \left( \lambda_{min} |\min(s_1, s_2, s_3)| + \lambda_{max} |\max(s_1, s_2, s_3) - \rho| \right) $$
+ 
+     *   **Projection Loss ($L_{proj}$):**
+-        Ensures tightly-bound splat centers remain close to the mesh surface [S1].
+-        1.  For each $g_i \in G^t$, find the closest point $s_i$ on the mesh surface defined by face $f_j$ and vertex $v_i$.
+-        2.  The projection formula given in the source is:
++        Ensures tightly-bound splats remain close to the mesh surface [S1].
++        1.  Project the Gaussian center $P_i$ to the closest point $s_i$ on the mesh surface defined by face $f_j$ and vertex $v_i$ [S1]. The projection is calculated as:
+             $$ s_i = P_i + ((P_i - v_i) \cdot f_j) \cdot f_j $$
+-            *Note: This formula appears to project $P_i$ onto the line defined by $f_j$ passing through $v_i$, or potentially contains a typo in the source regarding the normal vector. Standard projection onto a plane with normal $n_f$ would be $P_i - ((P_i - v_i) \cdot n_f)n_f$. However, the source explicitly writes $f_j$ in the dot product and multiplication. We follow the source's explicit formula [S1].*
+-        3.  Compute the loss:
++            *(Note: The source formula uses $f_j$ as the projection direction/normal in the dot product, implying $f_j$ is treated as a unit vector in this context, or represents the face normal/edge vector depending on specific mesh representation. The source explicitly states "closest point $s_i$ on the mesh surface defined by face $f_j$ and vertex $v_i$" and gives the formula above [S1].)*
++        2.  Compute the distance:
+             $$ L_{proj} = \sum_{i \in G^t} \| s_i - P_i \|_2 $$
+ 
+ 4.  **Optimization Step:**
+-    *   Perform gradient descent using the total loss $L$ [S1].
++    Perform gradient descent on the total loss $L$ to update Gaussian parameters [S1].
+ 
+ 5.  **Densification Strategy:**
+-    *   **For Loosely-bound Splats ($G^l$):**
+-        *   Follow the original 3DGS densification strategy (gradient-based splitting and cloning) [S1].
++    Periodically (e.g., every 500 iterations, as implied by standard 3DGS schedules, though exact interval for MeshGS is not explicitly stated beyond "every 500" in the context of mesh updates [S1]), perform densification based on the Gaussian type [S1]:
++    *   **For Loosely-bound Splats ($G^l$):** Follow the original 3DGS densification strategy (splitting and cloning based on position and scale gradients) [S1].
+     *   **For Tightly-bound Splats ($G^t$):**
+-        *   Identify the mesh triangle close to the Gaussian [S1].
+-        *   **Cloning:**
+-            *   Conduct point sampling from the corresponding mesh triangle.
+-            *   Use the sampled position to initialize the new Gaussian.
+-            *   Copy additional attributes (opacity, SH coefficients, rotation) from the parent Gaussian [S1].
+-        *   **Splitting:**
+-            *   Conduct point sampling from the corresponding mesh triangle.
+-            *   Use the sampled position to initialize the new Gaussian.
+-            *   Divide the scale of the new Gaussians by a factor of 1.6 [S1].
+-
+-6.  **Iteration:**
+-    *   Repeat steps 1-5 for 30,000 iterations [S1].
+-
+-### Parameters
+-*   $\lambda_{img} = 0.001$ [S1]
+-*   $\lambda_{nc} = 0.1$ [S1]
+-*   $\lambda_{min} = 0.1$ [S1]
+-*   $\lambda_{max} = 10$ [S1]
+-*   $\lambda_{proj} = 50$ [S1]
+-*   $\rho = 0.1$ (threshold for max scale) [S1]
+-*   $d_{th} = 0.01$ (distance threshold for tight/loose classification) [S1]
+-*   Total iterations: 30,000 [S1]
++        1.  Identify the mesh triangle close to the Gaussian [S1].
++        2.  Conduct point sampling from the triangle surface [S1].
++        3.  Use the sampled position to initialize new Gaussian splats [S1].
++        4.  **Cloning:** Copy additional attributes (opacity, color, rotation) from the parent Gaussian to the new Gaussian [S1].
++        5.  **Splitting:** Divide the scale of the new Gaussians by a factor of 1.6 [S1].
+ 
+ ### Pseudocode
+ 
+ ```python
+-def compute_loss(G_tight, G_loose, mesh, images, rendered_images, params):
+-    """
+-    Computes the total loss for MeshGS training.
+-    G_tight: List of tightly-bound Gaussians
+-    G_loose: List of loosely-bound Gaussians
+-    mesh: Mesh object with faces F and vertices V
+-    images: Ground truth images
+-    rendered_images: Rendered images
+-    params: Dictionary of hyperparameters
+-    """
+-    lambda_img = params['lambda_img']
+-    lambda_nc = params['lambda_nc']
+-    lambda_min = params['lambda_min']
+-    lambda_max = params['lambda_max']
+-    lambda_proj = params['lambda_proj']
+-    rho = params['rho']
+-    
+-    # 1. Image Loss (applied to all, but typically computed per view)
+-    # Assuming batched images
+-    l1_loss = L1(rendered_images, images)
+-    ssim_loss = SSIM(rendered_images, images)
++def meshgs_training_step(gaussians, mesh, camera, gt_image, iteration):
++    """
++    One training step for MeshGS.
++    gaussians: List of Gaussian objects with attributes P, R, S, alpha, SH
++    mesh: Mesh object with faces F, vertices V, normals
++    camera: Camera parameters
++    gt_image: Ground truth image
++    iteration: Current training iteration number
++    """
++    
++    # 1. Classify Gaussians
++    G_t = [] # Tightly-bound
++    G_l = [] # Loosely-bound
++    d_th = 0.01
++    
++    for g in gaussians:
++        # Find closest point on mesh surface to g.P
++        closest_point, closest_face = mesh.get_closest_point(g.P)
++        dist = distance(g.P, closest_point)
++        
++        if dist <= d_th:
++            G_t.append(g)
++        else:
++            G_l.append(g)
++            
++    # 2. Render Image
++    rendered_image = render(gaussians, camera)
++    
++    # 3. Compute Losses
++    # Image Loss
++    l1_loss = compute_l1(rendered_image, gt_image)
++    ssim_loss = compute_ssim(rendered_image, gt_image)
++    lambda_img = 0.001
+     L_img = (1 - lambda_img) * l1_loss + lambda_img * ssim_loss
+     
+-    # 2. Normal Consistency Loss (only for tight splats)
++    # Normal Consistency Loss (for G_t)
+     L_nc = 0.0
+-    for g in G_tight:
+-        # Estimate normal: min scale axis rotated to world
+-        min_scale_idx = argmin(g.scale)
+-        local_axis = unit_vector(min_scale_idx) # e.g., [1,0,0] if idx 0
+-        R = quaternion_to_rotation_matrix(g.rotation)
+-        n_i = R @ local_axis
+-        
+-        # Find closest face f in mesh
+-        f = mesh.get_closest_face(g.position)
+-        n_f = f.normal
+-        
+-        L_nc += (1 - dot(n_i, n_f))
+-        
+-    # 3. Scale Regularization Loss (only for tight splats)
++    lambda_nc = 0.1
++    for g in G_t:
++        # Estimate normal: min scale axis rotated by R
++        min_scale_idx = argmin(g.S) # s1, s2, or s3
++        local_normal = unit_vector([0, 0, 0])
++        local_normal[min_scale_idx] = 1.0
++        world_normal = g.R @ local_normal
++        
++        # Find closest face normal
++        _, closest_face = mesh.get_closest_point(g.P)
++        face_normal = closest_face.normal
++        
++        L_nc += (1 - dot(world_normal, face_normal))
++    L_nc *= lambda_nc
++    
++    # Scale Regularization Loss (for G_t)
+     L_scale = 0.0
+-    for g in G_tight:
+-        s_min = min(g.scale)
+-        s_max = max(g.scale)
++    lambda_min = 0.1
++    lambda_max = 10
++    rho = 0.1
++    for g in G_t:
++        s_min = min(g.S)
++        s_max = max(g.S)
+         L_scale += lambda_min * abs(s_min) + lambda_max * abs(s_max - rho)
+         
+-    # 4. Projection Loss (only for tight splats)
++    # Projection Loss (for G_t)
+     L_proj = 0.0
+-    for g in G_tight:
+-        P_i = g.position
+-        # Find closest face f and vertex v_i
+-        f = mesh.get_closest_face(P_i)
+-        v_i = f.vertex # Note: Source formula uses v_i, likely a vertex of the face
+-        f_j = f.normal # Source uses f_j in formula, likely meaning face normal or vector
+-        
+-        # Source formula: s_i = P_i + ((P_i - v_i) . f_j) * f_j
+-        # Note: This projects P_i onto the line defined by f_j through v_i?
+-        # Or potentially a typo for plane projection. We follow source exactly.
+-        diff = P_i - v_i
+-        projection_component = dot(diff, f_j) * f_j
+-        s_i = P_i + projection_component
+-        
+-        L_proj += norm(s_i - P_i)
+-        
+-    L_total = L_img + lambda_nc * L_nc + L_scale + lambda_proj * L_proj
+-    return L_total
+-
+-def densify(G_tight, G_loose, mesh, params):
+-    """
+-    Performs densification based on Gaussian type.
++    lambda_proj = 50
++    for g in G_t:
++        # Project P to mesh surface
++        # Note: Source formula: s_i = P_i + ((P_i - v_i) . f_j) * f_j
++        # This implies projecting onto the plane defined by face normal f_j
++        # or edge vector. Assuming f_j is the face normal for surface projection.
++        _, closest_face = mesh.get_closest_point(g.P)
++        v_i = closest_face.vertex # Representative vertex
++        f_j = closest_face.normal # Face normal
++        
++        # Vector from vertex to point
++        v_p = g.P - v_i
++        # Projection offset
++        offset = dot(v_p, f_j) * f_j
++        s_i = g.P + offset
++        
++        L_proj += norm(s_i - g.P)
++    L_proj *= lambda_proj
++    
++    # Total Loss
++    L = L_img + L_nc + L_scale + L_proj
++    
++    # 4. Backpropagate and Update
++    L.backward()
++    optimizer.step()
++    
++    # 5. Densification (if periodic)
++    if iteration % 500 == 0: # Assumed interval based on source context
++        densify(gaussians, G_t, G_l, mesh)
++        
++    return rendered_image, L
++
++def densify(gaussians, G_t, G_l, mesh):
++    """
++    Perform densification for tightly and loosely bound splats.
+     """
+     # Loosely-bound: Standard 3DGS densification
+-    G_loose = densify_3dgs(G_loose, params)
++    # (Split/Clone based on gradients, not detailed here as it's standard 3DGS)
++    standard_3dgs_densify(G_l)
+     
+     # Tightly-bound: Mesh-aligned densification
+-    G_tight_new = []
+-    for g in G_tight:
+-        # Determine if split or clone based on gradient/opacity criteria (standard 3DGS logic)
+-        if should_split(g):
+-            # Splitting: Sample from mesh triangle
+-            f = mesh.get_closest_face(g.position)
+-            new_pos = sample_point_from_triangle(f)
++    new_gaussians = []
++    for g in G_t:
++        # Find close mesh triangle
++        triangle = mesh.get_closest_triangle(g.P)
++        
++        # Sample point from triangle
++        sample_pos = sample_triangle(triangle)
++        
++        # Create new Gaussian
++        new_g = Gaussian()
++        new_g.P = sample_pos
++        
++        # Cloning: Copy attributes
++        new_g.R = g.R
++        new_g.alpha = g.alpha
++        new_g.SH = g.SH
++        
++        # Splitting: Scale divided by 1.6
++        # Note: The source says "during splitting, their scale is divided by a factor of 1.6"
++        # This implies the new Gaussians created via splitting have smaller scales.
++        # If the operation is a split, we might create two new Gaussians.
++        # If cloning, we create one.
++        # The source distinguishes cloning and splitting.
++        # We assume a decision is made to clone or split based on standard 3DGS criteria.
++        
++        if is_split_candidate(g):
++            new_g.S = [s / 1.6 for s in g.S]
++            # Create a second copy for split? Standard 3DGS splits into two.
++            # Source says "utilize this position to initialize new Gaussian splats"
++            # and "during splitting, their scale is divided by a factor of 1.6".
++            # It does not explicitly state creating two, but splitting implies duplication.
++            # We will create one new Gaussian with reduced scale for now, 
++            # assuming the caller handles duplication if needed.
++            new_gaussians.append(new_g)
++        else:
++            # Cloning
++            new_gaussians.append(new_g)
+             
+-            # Create new Gaussians
+-            # Scale divided by 1.6
+-            new_scale = g.scale / 1.6
+-            new_g1 = Gaussian(new_pos, new_scale, g.rotation, g.opacity, g.sh_coeffs)
+-            new_g2 = Gaussian(new_pos, new_scale, g.rotation, g.opacity, g.sh_coeffs)
+-            
+-            G_tight_new.append(new_g1)
+-            G_tight_new.append(new_g2)
+-            
+-        elif should_clone(g):
+-            # Cloning: Sample from mesh triangle
+-            f = mesh.get_closest_face(g.position)
+-            new_pos = sample_point_from_triangle(f)
+-            
+-            # Copy attributes
+-            new_g = Gaussian(new_pos, g.scale, g.rotation, g.opacity, g.sh_coeffs)
+-            G_tight_new.append(new_g)
+-        else:
+-            G_tight_new.append(g)
+-            
+-    return G_tight_new, G_loose
++    gaussians.extend(new_gaussians)
+ ```
+ 
+-### Edge Cases and Pitfalls
+-*   **Projection Formula Ambiguity:** The source formula for $L_{proj}$ uses $f_j$ in both the dot product and the multiplication vector. If $f_j$ is a face normal, this projects onto the line parallel to the normal, not the plane. If $f_j$ is a vector along the face, it projects onto that line. This may be a typo in the source for standard plane projection $P_i - ((P_i - v_i) \cdot n_f)n_f$ [S1]. Implementers should verify the intended geometric constraint.
+-*   **Normal Estimation:** The normal $n_i$ is derived from the minimum scale axis. If the Gaussian is isotropic (spherical), the minimum axis is arbitrary, leading to unstable normals. This is a known issue in 3DGS but exacerbated here for $L_{nc}$ [S1].
+-*   **Mesh Quality:** The method relies on a high-quality mesh $M$. If the mesh is noisy or decimated poorly, the projection and normal consistency losses will misguide the optimization [S1].
+-
+ ## Subtopics
+ 
+ ### [Budget-Centered Training](9682-budget-centered-training.md)
+-Constrains primitive count to a target budget $N^*$ using a redundancy map, eliminating pruning waste.
++Initializes and constrains the primitive count to the "knee" of the scene's capacity floor curve ($N^*$), replacing gradient-based pruning with a redundancy map and treating the budget as a hard constraint.
+ 
+ ### [Coarse-to-fine multi-resolution densification](15569-coarse-to-fine-multi-resolution-densification.md)
+-Allocates iterations across resolutions based on frequency energy to decouple global spread from local refinement.
++Dynamically allocates optimization iterations across different image resolutions based on frequency energy density, decoupling global coverage from local refinement.
+ 
+ ## Operating characteristics
+-*   **Time Complexity:** Similar to 3DGS, dominated by rendering and gradient computation. The additional mesh queries (closest face, point sampling) add overhead proportional to the number of tightly-bound splats [S1].
+-*   **Memory Complexity:** Requires storing the mesh geometry alongside the Gaussian attributes. The mesh size depends on the scene complexity [S1].
+-*   **Performance:** Evaluated on Mip-NeRF360 and Deep Blending datasets. Trained for 30k iterations [S1].
+-*   **Strengths:** Aligns Gaussians with explicit geometry, reducing artifacts and improving reconstruction quality on surfaces [S1].
+-*   **Limitations:** Dependent on the quality of the input mesh. The projection loss formula ambiguity may lead to suboptimal convergence if not corrected [S1].
++
++*   **Time Complexity:** The addition of mesh proximity queries and normal consistency calculations increases the per-iteration cost compared to standard 3DGS. The projection loss requires finding the closest point on the mesh for each tightly-bound Gaussian, which is $O(N \cdot M)$ or $O(N \log M)$ with spatial acceleration structures, where $N$ is the number of Gaussians and $M$ is the number of mesh faces [S1].
++*   **Memory Complexity:** Requires storing the mesh geometry and potentially spatial acceleration structures for mesh queries. The Gaussian set size is managed by the densification strategy, which may lead to a higher initial count if not pruned effectively, but the scale regularization helps control excessive growth [S1].
++*   **Performance:** Evaluated on Mip-NeRF360 and Deep Blending datasets. Trained for 30,000 iterations [S1].
++*   **Strengths:** Improves rendering quality on complex geometry by preventing Gaussian drift and excessive expansion. Aligns Gaussians with mesh normals for better surface fidelity [S1].
++*   **Limitations:** Relies on the quality of the input mesh. The mesh-aligned densification may be less effective in areas with high curvature or if the mesh is not well-aligned with the true surface [S1].
++*   **When to use:** When reconstructing scenes with explicit mesh geometry is desired, or when standard 3DGS Gaussians drift away from the surface.
++*   **When not to use:** For scenes without a reliable mesh representation, or when computational resources are limited due to the added mesh query overhead [S1].
+ 
+ ## Background
+-MeshGS (Adaptive Mesh-Aligned Gaussian Splatting) was introduced to address the limitation of 3DGS in ignoring explicit 3D geometry [S1]. It builds on the original 3DGS densification strategy but adapts it for tightly-bound splats by using mesh-based sampling for cloning and splitting [S1]. The method was evaluated against LTM and SuGaR, demonstrating improved rendering quality [S1].
++
++MeshGS (Adaptive Mesh-Aligned Gaussian Splatting) was introduced in 2024 by the authors of the paper "MeshGS: Adaptive Mesh-Aligned Gaussian Splatting for High-Quality Rendering" [S1]. It builds upon the original 3D Gaussian Splatting (3DGS) method [S1] and aims to improve geometry reconstruction by integrating explicit mesh constraints. The method distinguishes itself from prior works like SuGaR by using a distance-based threshold to separate tightly-bound and loosely-bound splats, applying mesh-aligned losses and densification only to the former [S1].
+ 
+ ## Sources
++
+ [S1] MeshGS: Adaptive Mesh-Aligned Gaussian Splatting for High-Quality Rendering, https://arxiv.org/abs/2410.08941v1, fetched 2026-10-26

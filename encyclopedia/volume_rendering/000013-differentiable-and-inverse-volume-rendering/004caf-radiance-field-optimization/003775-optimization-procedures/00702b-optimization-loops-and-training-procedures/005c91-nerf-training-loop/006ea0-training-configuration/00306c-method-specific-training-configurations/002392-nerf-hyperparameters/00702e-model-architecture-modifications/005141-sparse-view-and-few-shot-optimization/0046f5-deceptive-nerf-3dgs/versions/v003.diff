@@ -1,0 +1,168 @@
+--- v002.md
++++ v003.md
+@@ -8,6 +8,6 @@
+ ## How it works
+ **Inputs:**
+-*   A set of $W$ sparse input images $I = \{I_1, I_2, \dots, I_W\}$ with known calibrated camera poses.
+-*   A pre-trained 2D diffusion model (e.g., Stable Diffusion) [S1].
++*   A set of $W$ sparse input images $I = \{I_1, I_2, \dots, I_W\}$ with known calibrated camera poses [S1].
++*   A pre-trained 2D diffusion model [S1].
+ *   A base radiance field representation: either an MLP-based NeRF (using Nerfacto backbone) or 3D Gaussian Splatting (using Splatfacto backbone) [S1].
+ 
+@@ -24,5 +24,5 @@
+         where $\hat{T}(t_k) = \exp\left(-\sum_{k'=1}^{k-1} \sigma(t_{k'})\delta_{k'}\right)$, $\alpha(x) = 1 - \exp(-x)$, and $\delta_k = t_{k+1} - t_k$ [S1].
+ 2.  **3DGS Representation:**
+-    *   Represents the scene as a collection of 3D Gaussians.
++    *   Represents the scene as a collection of 3D Gaussians [S1].
+     *   Pixel color $\hat{\mathbf{C}}$ is computed as:
+         $$
+@@ -42,113 +42,57 @@
+ 
+ ```python
+-def deceptive_nerf_3dgs_training(input_images, camera_poses, diffusion_model, 
+-                                 radiance_field_type='nerf', num_iterations=5):
+-    """
+-    Trains a NeRF or 3DGS representation using diffusion-generated pseudo-observations.
+-    
+-    Args:
+-        input_images: List of W sparse input images.
+-        camera_poses: Corresponding camera poses for input_images.
+-        diffusion_model: Pre-trained 2D diffusion model.
+-        radiance_field_type: 'nerf' or '3dgs'.
+-        num_iterations: Number of alternation steps (default 5).
+-        
+-    Returns:
+-        Trained radiance field model.
+-    """
+-    
+-    # 1. Initialize Radiance Field
++def train_deceptive_nerf_3dgs(input_images, camera_poses, diffusion_model, 
++                              radiance_field_type='nerf', num_iterations=5):
++    # Initialize radiance field based on type [S1]
+     if radiance_field_type == 'nerf':
+-        # Use Nerfacto backbone from NerfStudio
+-        model = NerfactoBackbone()
+-    elif radiance_field_type == '3dgs':
+-        # Randomly initialize Gaussians; do NOT use COLMAP point clouds
+-        model = SplatfactoBackbone(random_init=True)
++        # Nerfacto: MLP with positional encoding, default proposal sampling, scene contraction, appearance embeddings [S1]
++        model = initialize_mlp_nerf()
+     else:
+-        raise ValueError("Unsupported radiance field type")
++        # Splatfacto: 3D Gaussians randomly initialized without COLMAP point clouds [S1]
++        model = initialize_3d_gaussians(random_init=True)
+ 
+-    # Define bounding box from outermost input cameras
++    # Define bounding box using outermost input cameras [S1]
+     bounding_box = compute_bounding_box(camera_poses)
+-    
+-    # Current set of training views (initially just real inputs)
++
++    # Start with real input views [S1]
+     training_views = list(zip(input_images, camera_poses))
+-    
++
+     for iteration in range(num_iterations):
+-        # Step 1: Coarse Rendering
+-        # Render coarse RGB and Depth maps for a set of novel viewpoints
+-        # within the bounding box
+-        novel_view_cameras = sample_novel_views(bounding_box, count=len(training_views))
+-        coarse_rgb_images, coarse_depth_maps = render_coarse(model, novel_view_cameras)
+-        
+-        # Step 2: Uncertainty Estimation
+-        # Compute an uncertainty measure for the coarse renderings.
+-        # High uncertainty corresponds to artifacts or inconsistent regions.
+-        # [G] The specific formula for uncertainty is not provided in the source,
+-        # but it is used to guide the diffusion model. Typically, this involves
+-        # analyzing variance or consistency in the coarse depth/RGB.
+-        uncertainty_maps = compute_uncertainty(coarse_rgb_images, coarse_depth_maps)
+-        
+-        # Step 3: Generate Pseudo-Observations
+-        # Feed coarse images into the deceptive diffusion model, guided by uncertainty.
+-        # The diffusion model enhances the RGB-D images to generate high-quality
+-        # pseudo-observations.
++        # 1. Coarse Rendering: render novel views from current model [S1]
++        num_novel = len(training_views)
++        novel_cameras = sample_cameras_in_box(bounding_box, count=num_novel)
++        coarse_rgbs, coarse_depths = render_volumetric(model, novel_cameras)
++
++        # 2. Uncertainty Estimation: compute uncertainty from coarse renderings [S1]
++        uncertainty_maps = compute_uncertainty_map(coarse_rgbs, coarse_depths)
++
++        # 3. Generate Pseudo-Observations: diffusion model guided by uncertainty [S1]
+         pseudo_observations = []
+-        for i, (coarse_rgb, coarse_depth, unc_map) in enumerate(zip(
+-                coarse_rgb_images, coarse_depth_maps, uncertainty_maps)):
+-            # The diffusion model uses the coarse image as a condition and the
+-            # uncertainty map to focus generation on high-uncertainty areas.
+-            pseudo_rgb, pseudo_depth = generate_pseudo_observation(
+-                diffusion_model, coarse_rgb, coarse_depth, unc_map)
+-            pseudo_observations.append((pseudo_rgb, pseudo_depth, novel_view_cameras[i]))
+-        
+-        # Step 4: Joint Optimization
+-        # Combine real input views and newly generated pseudo-observations.
+-        # Optimize the model by minimizing photometric loss on both sets.
+-        all_training_views = training_views + pseudo_observations
+-        
+-        # Minimize Mean Squared Error (Photometric Loss)
+-        # L = MSE(Real Rendered, Real Input) + MSE(Pseudo Rendered, Pseudo Input)
+-        loss = compute_photometric_loss(model, all_training_views)
+-        optimize_model(model, loss)
+-        
+-        # Update training views for next iteration (optional, but implied by "progressively incorporate")
+-        # The source states it "densifies" the inputs, implying the pseudo-observations
+-        # are added to the pool of views used for training in subsequent steps or
+-        # simply that the training set size grows.
+-        training_views = all_training_views
++        for i in range(num_novel):
++            pseudo_rgb, pseudo_depth = diffusion_model.generate(
++                coarse_rgbs[i], coarse_depths[i], uncertainty_maps[i])
++            pseudo_observations.append((pseudo_rgb, pseudo_depth, novel_cameras[i]))
++
++        # 4. Joint Optimization: minimize photometric loss on real + pseudo views [S1]
++        all_views = training_views + pseudo_observations
++        loss = compute_mse_loss(model, all_views)
++        update_parameters(model, loss)
++
++        # Progressively incorporate pseudo-observations [S1]
++        training_views = all_views
+ 
+     return model
+-
+-def compute_uncertainty(coarse_rgb, coarse_depth):
+-    """
+-    Computes an uncertainty map guiding the diffusion model.
+-    High uncertainty indicates artifacts or missing details.
+-    [G] Specific implementation details are not provided in the source.
+-    """
+-    # Placeholder for uncertainty calculation logic
+-    # Typically involves depth variance, gradient magnitude, or consistency checks
+-    return uncertainty_map
+-
+-def generate_pseudo_observation(diffusion_model, coarse_rgb, coarse_depth, uncertainty_map):
+-    """
+-    Generates high-quality pseudo-observations using the diffusion model.
+-    """
+-    # The diffusion model is conditioned on the coarse RGB and guided by uncertainty.
+-    # [G] Specific conditioning mechanism (e.g., ControlNet, attention injection) 
+-    # is not detailed in the source text, but the output is high-quality RGB-D.
+-    pseudo_rgb, pseudo_depth = diffusion_model.generate(coarse_rgb, coarse_depth, uncertainty_map)
+-    return pseudo_rgb, pseudo_depth
+ ```
+ 
+ **Edge Cases and Pitfalls:**
+-*   **Sparse Inputs:** Standard NeRF/3DGS pipelines suffer from severe artifacts and overfitting with sparse inputs. The method mitigates this by densifying observations rather than relying solely on regularization [S1].
+-*   **Uncertainty Guidance:** Without uncertainty guidance, the diffusion model cannot effectively remove artifacts in coarse renderings, leading to inconsistencies between pseudo-observations and real input views. This results in lower PSNR (18.61 vs 20.44), SSIM (0.703 vs 0.748), and higher LPIPS (0.28 vs 0.173) [S1].
++*   **Sparse Inputs:** Standard NeRF/3DGS pipelines suffer from severe artifacts and overfitting with sparse inputs [S1].
++*   **Uncertainty Guidance:** Without uncertainty guidance, the diffusion model cannot effectively remove artifacts in coarse renderings, leading to inconsistencies between pseudo-observations and real input views [S1].
+ *   **Initialization:** For 3DGS, random initialization is used instead of COLMAP point clouds, which is a specific deviation from standard 3DGS pipelines [S1].
+ 
+ ## Operating characteristics
+ *   **Time Complexity:** Nearly tenfold faster than methods using diffusion models as per-step regularizers (e.g., SDS) because the diffusion model is inferred only during the pseudo-observation generation phase, not at every training step [S1].
+-*   **Memory Complexity:** Not explicitly given, but comparable to standard NeRF/3DGS plus the memory overhead of storing pseudo-observations [S1].
++*   **Memory Complexity:** Not given in the sources.
+ *   **Measured Performance:**
+-    *   **Hypersim (10 views):** Deceptive-NeRF achieved PSNR 20.44, SSIM 0.748, LPIPS 0.173, Training Time 17min, Rendering FPS 5.3. Compared to "Regularizer" approach: PSNR 19.31, SSIM 0.710, LPIPS 0.253, Training Time 2h40min, Rendering FPS 1.1 [S1].
++    *   **Hypersim (10 views):** Deceptive-NeRF achieved PSNR 20.44, SSIM 0.748, LPIPS 0.173, Training Time 17min, Rendering FPS 5.3 [S1].
+     *   **DTU (Scan 65, 9 views):** Deceptive-NeRF achieved Chamfer Distance 1.86, compared to NeRF 3.75, FreeNeRF 3.63, and DiffusioNeRF 1.93 [S1].
+ *   **Scaling:** Works effectively with as few as 3 input images [S1].

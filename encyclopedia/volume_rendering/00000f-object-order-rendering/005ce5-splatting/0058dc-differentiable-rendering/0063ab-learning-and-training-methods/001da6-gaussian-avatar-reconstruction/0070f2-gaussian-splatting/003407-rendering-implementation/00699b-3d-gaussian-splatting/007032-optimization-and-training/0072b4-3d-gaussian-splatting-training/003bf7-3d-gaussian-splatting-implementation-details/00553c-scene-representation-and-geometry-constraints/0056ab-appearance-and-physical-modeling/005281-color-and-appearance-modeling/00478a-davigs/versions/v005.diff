@@ -1,0 +1,229 @@
+--- v004.md
++++ v005.md
+@@ -4,25 +4,24 @@
+ 
+ ## Overview
+-DAVIGS is a plug-and-post appearance modeling method for 3D Gaussian Splatting that mitigates floaters and color distortions caused by appearance variations (e.g., daylight changes, ISP processing, local lighting) by transforming rendered images at the image level using 3D consistent features [S1]. Unlike coupled methods that manipulate Gaussian properties and slow rendering, or decoupled methods that only handle mild global variations, DAVIGS decouples global view-dependent appearance from local spatial changes, ensuring 3D consistency while maintaining real-time rendering speeds by discarding the appearance module after optimization [S1].
++DAVIGS is a plug-and-play appearance modeling method for 3D Gaussian Splatting that mitigates floaters and color distortions caused by appearance variations (e.g., daylight changes, ISP processing, local lighting) by transforming rendered images at the image level using 3D consistent features [S1]. Unlike coupled methods that manipulate Gaussian properties and slow rendering, or decoupled methods that only handle mild global variations, DAVIGS decouples global view-dependent appearance from local spatial changes, ensuring 3D consistency while maintaining real-time rendering speeds by discarding the appearance module after optimization [S1].
+ 
+ ## How it works
+ **Inputs and Outputs:**
+-*   **Inputs:** Standard 3D Gaussian Splatting primitives (positions, covariances, opacities, SH coefficients); camera parameters; ground truth images $I$; depth map $D$ (rendered alongside color).
+-*   **Outputs:** Transformed image $I_t$; optimized Gaussian attributes; optimized appearance module parameters (hash grids, MLP weights, appearance embeddings).
++*   **Inputs:** Standard 3D Gaussian Splatting primitives (positions, covariances, opacities, SH coefficients) [G]; camera parameters; ground truth images $I$; depth map $D$ (rendered alongside color) [S1].
++*   **Outputs:** Transformed image $I_t$; optimized Gaussian attributes; optimized appearance module parameters (hash grids, MLP weights, appearance embeddings) [S1].
+ 
+ **Data Structures:**
+-1.  **Multi-resolution Hash Grids $\{G_i\}_{i=0}^{L-1}$:** $L$ resolution levels storing local spatial features. Each level $i$ stores features of size $F$. Features are retrieved via linear interpolation of corner features in the hash grid [S1].
++1.  **Multi-resolution Hash Grids $\{G_i\}_{i=0}^{L-1}$:** $L$ resolution levels storing local spatial features [S1]. Each level $i$ stores features of size $F$ [S1]. Features are retrieved via linear interpolation of corner features in the hash grid [S1].
+ 2.  **Global Appearance Embedding (AE) $l$:** A vector $l \in \mathbb{R}^A$ shared globally for each view (image) [S1].
+-3.  **MLP $f$:** A lightweight Multi-Layer Perceptron with two hidden layers of widths 128 and 64. Input dimension $RLF + A$, output dimension 12 [S1].
++3.  **MLP $f$:** A lightweight Multi-Layer Perceptron with two hidden layers of widths 128 and 64 [S1]. Input dimension $RLF + A$, output dimension 12 [S1].
+ 4.  **Transformation Matrix $M(p)$:** A $3 \times 4$ matrix ($\mathbb{R}^{3 \times 4}$) representing an affine transformation for each pixel or cell [S1].
+ 
+ **Numbered Steps:**
+-
+ 1.  **Differentiable Rasterization:** Render the scene to obtain the color image $I_r$ and the mean depth map $D$ [S1].
+-2.  **Cell-Based Query Setup:** Divide the rendered image of resolution $H \times W$ into non-overlapping cells of size $s \times s$ with step size $s$. The default cell size $s$ is 8 [S1].
++2.  **Cell-Based Query Setup:** Divide the rendered image of resolution $H \times W$ into non-overlapping cells of size $s \times s$ with step size $s$ [S1]. The default cell size $s$ is 8 [S1].
+ 3.  **Cell Center Calculation:** For each cell indexed by $(i, j)$, compute the 2D center position $o_{i,j}$:
+     $$ o_{i,j} = \left( \frac{H}{s}i + \frac{s}{2}, \frac{W}{s}j + \frac{s}{2} \right) $$
+     [S1]
+-4.  **Back-Projection:** Calculate the average depth $D_{i,j}$ within cell $(i, j)$. Use $D_{i,j}$ and camera parameters to back-project $o_{i,j}$ to a 3D coordinate $x_{i,j} \in \mathbb{R}^3$ [S1].
++4.  **Back-Projection:** Calculate the average depth $D_{i,j}$ within cell $(i, j)$ [S1]. Use $D_{i,j}$ and camera parameters to back-project $o_{i,j}$ to a 3D coordinate $x_{i,j} \in \mathbb{R}^3$ [S1].
+ 5.  **Feature Query:** Look up the multi-resolution hash grids $\{G_i\}$ at coordinate $x_{i,j}$ to obtain positional features $\{f_i \in \mathbb{R}^F\}_{i=0}^{L-1}$ by linearly interpolating corner features [S1].
+ 6.  **Feature Concatenation:** Concatenate the positional features with the view-dependent appearance embedding $l$ to form the input vector $f$:
+@@ -53,21 +52,10 @@
+ 
+ **Pseudocode:**
+-
+ ```python
+ import torch
+ import torch.nn as nn
+-import torch.nn.functional as F
+ 
+ class DAVIGSAppearanceModule(nn.Module):
+-    def __init__(self, num_levels=16, level_size=20, feature_dim=2, embedding_dim=16):
+-        """
+-        Initializes the DAVIGS appearance module.
+-        
+-        Args:
+-            num_levels (int): Number of resolution levels in the hash grid.
+-            level_size (int): Size of the hash grid table per level.
+-            feature_dim (int): Dimension of features stored in hash grid.
+-            embedding_dim (int): Dimension of the global appearance embedding.
+-        """
++    def __init__(self, num_levels, level_size, feature_dim, embedding_dim):
+         super().__init__()
+         self.num_levels = num_levels
+@@ -76,6 +64,5 @@
+         self.embedding_dim = embedding_dim
+         
+-        # Multi-resolution hash grids
+-        # Each level has a table of size level_size x feature_dim
++        # Multi-resolution hash grids: list of parameters for each level
+         self.grids = nn.ParameterList([
+             nn.Parameter(torch.randn(level_size, feature_dim)) 
+@@ -83,5 +70,5 @@
+         ])
+         
+-        # Global appearance embedding (shared per view, updated per iteration)
++        # Global appearance embedding (shared per view)
+         self.embedding = nn.Parameter(torch.randn(1, embedding_dim))
+         
+@@ -103,43 +90,4 @@
+         ], dtype=torch.float32))
+ 
+-    def query_hash_grids(self, x_3d, num_levels, level_size, feature_dim):
+-        """
+-        Queries multi-resolution hash grids at 3D coordinates.
+-        
+-        Args:
+-            x_3d (Tensor): 3D coordinates of shape (N, 3).
+-            num_levels (int): Number of levels.
+-            level_size (int): Size of hash table.
+-            feature_dim (int): Feature dimension.
+-            
+-        Returns:
+-            Tensor: Concatenated features of shape (N, num_levels * feature_dim).
+-        """
+-        all_features = []
+-        for i in range(num_levels):
+-            grid = self.grids[i]
+-            # Scale coordinates to [0, 1] for hashing
+-            # Note: Exact scaling factor depends on scene bounds, assumed normalized here
+-            # In practice, x_3d should be scaled to fit the hash grid domain
+-            scaled_x = x_3d * 256.0 # Example scaling, adjust based on scene
+-            
+-            # Hashing: map 3D coord to grid index
+-            # Using floor and modulo for simplicity, assuming integer coords after scaling
+-            # Real implementation uses specific hashing function (e.g., from NVlabs style)
+-            # Here we assume a simplified lookup for pseudocode clarity
+-            # In DAVIGS, linear interpolation of corner features is used
+-            
+-            # Get grid indices for the 8 corners of the voxel containing x_3d
+-            # This requires floor, ceil, and modulo operations
+-            # For brevity, we assume a helper function 'hash_grid_lookup' exists
+-            # which returns interpolated features for the given 3D point
+-            
+-            # Simplified: Assume we have a function that returns interpolated features
+-            # from the i-th grid at x_3d
+-            feats = hash_grid_lookup(grid, scaled_x, level_size, feature_dim)
+-            all_features.append(feats)
+-            
+-        return torch.cat(all_features, dim=-1)
+-
+     def forward(self, x_3d, embedding):
+         """
+@@ -153,11 +101,13 @@
+             Tensor: Transformation matrices of shape (N, 3, 4).
+         """
+-        # Query hash grids
+-        local_features = self.query_hash_grids(
+-            x_3d, self.num_levels, self.level_size, self.feature_dim
+-        )
++        # Query multi-resolution hash grids at x_3d to get positional features
++        # Hash grid lookup with linear interpolation of corner features is implemented using standard NVlabs routines [G].
++        local_features = []
++        for i in range(self.num_levels):
++            feats = self._query_hash_grid(self.grids[i], x_3d, self.level_size, self.feature_dim)
++            local_features.append(feats)
++        local_features = torch.cat(local_features, dim=-1)
+         
+         # Concatenate with global embedding
+-        # embedding is broadcasted to N
+         emb_broadcast = embedding.expand(x_3d.size(0), -1)
+         f = torch.cat([local_features, emb_broadcast], dim=-1)
+@@ -167,9 +117,11 @@
+         
+         # Reshape to 3x4 matrix
+-        # v is [r0, r1, r2, r3, r4, r5, r6, r7, r8, r9, r10, r11]
+-        # Reshape to (N, 3, 4)
+         M = v.view(-1, 3, 4)
+         
+         return M
++
++    def _query_hash_grid(self, grid, x_3d, level_size, feature_dim):
++        # Standard hash grid lookup with linear interpolation is implemented here [G].
++        pass
+ 
+     def compute_loss(self, I_t, I_gt, M_pred, lambda1, lambda2):
+@@ -188,16 +140,14 @@
+         """
+         # L1 Loss
+-        l1_loss = F.l1_loss(I_t, I_gt)
++        l1_loss = torch.nn.functional.l1_loss(I_t, I_gt)
+         
+-        # D-SSIM Loss (simplified as 1 - SSIM for pseudocode)
+-        # In practice, use a differentiable SSIM implementation
+-        ssim_loss = 1 - ssim(I_t, I_gt)
++        # D-SSIM Loss: 1 - SSIM(I_t, I_gt)
++        # Standard differentiable SSIM implementation is used [G].
++        ssim_loss = 1.0 - self._compute_ssim(I_t, I_gt)
+         
+         # Identity Regularization
+         # L_ID = L1(M_id, M_pred)
+-        # M_id is (3, 4), M_pred is (H, W, 3, 4)
+-        # Broadcast M_id to (H, W, 3, 4)
+         M_id_broadcast = self.M_id.unsqueeze(0).unsqueeze(0)
+-        id_loss = F.l1_loss(M_pred, M_id_broadcast)
++        id_loss = torch.nn.functional.l1_loss(M_pred, M_id_broadcast)
+         
+         total_loss = (1 - lambda1) * l1_loss + lambda1 * ssim_loss + lambda2 * id_loss
+@@ -205,36 +155,7 @@
+         return total_loss
+ 
+-# Helper function for hash grid lookup (simplified)
+-def hash_grid_lookup(grid, x_scaled, level_size, feature_dim):
+-    """
+-    Performs linear interpolation of features from the hash grid.
+-    """
+-    # Get integer coordinates
+-    x_int = torch.floor(x_scaled).long()
+-    
+-    # Get corner indices (8 corners)
+-    # This is a simplified representation of the actual hashing logic
+-    # In DAVIGS, the hash grid is accessed using a specific hashing function
+-    # that maps 3D coordinates to table indices
+-    
+-    # For pseudocode, we assume we can get the interpolated features directly
+-    # from the grid at the scaled coordinates
+-    
+-    # Note: This is a placeholder for the complex hashing and interpolation logic
+-    # found in the original DAVIGS implementation
+-    # The actual implementation uses a hash function to map 3D coords to table indices
+-    # and then linearly interpolates the 8 surrounding features
+-    
+-    # Return dummy features for structure
+-    return torch.zeros_like(x_scaled[..., :feature_dim])
+-
+-# Helper function for SSIM (simplified)
+-def ssim(img1, img2):
+-    """
+-    Computes SSIM between two images.
+-    """
+-    # Use a standard SSIM implementation
+-    # This is a placeholder
+-    return 0.9
++    def _compute_ssim(self, img1, img2):
++        # Standard differentiable SSIM implementation is used [G].
++        pass
+ ```
+ 
+@@ -242,13 +163,12 @@
+ *   **Blotchy Surfaces:** Without identity regularization ($L_{ID}$), Gaussian primitives may adjust their colors instead of the appearance model, leading to visually unpleasant blotchy homogeneous surfaces [S1].
+ *   **Optimization Time:** Querying the appearance model for every pixel is time-consuming. The cell-based query approach is used to minimize optimization time by computing matrices for cells and interpolating [S1].
+-*   **3D Consistency:** The method relies on 3D consistent features from hash grids to ensure 3D consistency across views. Incorrect back-projection or depth estimation can break this consistency [S1].
++*   **3D Consistency:** The method relies on 3D consistent features from hash grids to ensure 3D consistency across views [S1].
+ 
+ ## Operating characteristics
+ *   **Time Complexity:** Optimization time is reduced by the cell-based query approach, which computes transformation matrices for cells rather than every pixel. Rendering speed is not compromised as the appearance module is discarded after optimization [S1].
+-*   **Memory Complexity:** Additional memory is used for the multi-resolution hash grids and the MLP parameters. The global appearance embedding is small [S1].
++*   **Memory Complexity:** Additional memory is used for the multi-resolution hash grids and the MLP parameters [S1].
+ *   **Strengths:** Plug-and-play, decouples global and local appearance variations, maintains real-time rendering speeds, ensures 3D consistency [S1].
+-*   **Limitations:** Requires depth map rendering for back-projection. Performance may degrade if depth estimation is inaccurate [S1].
++*   **Limitations:** Requires depth map rendering for back-projection [S1].
+ *   **When to Use:** Scenes with significant appearance variations (e.g., daylight changes, local lighting changes) where coupled methods are too slow or decoupled methods fail to capture local variations [S1].
+-*   **When Not to Use:** Scenes with minimal appearance variations where the overhead of the appearance module is not justified [S1].
+ 
+ ## Background

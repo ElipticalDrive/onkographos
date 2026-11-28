@@ -1,0 +1,4019 @@
+> ## GSCache: Real-Time Radiance Caching for Volume Path Tracing using 3D Gaussian Splatting
+> [David Bauer](https://davidbauer.me), [Qi Wu](https://wilsoncernwq.github.io/), [Hamid Gadirov](https://hamidgadirov.github.io), [Kwan-Liu Ma](https://www.cs.ucdavis.edu/~ma/index.html)  
+>_IEEE VIS 2025_  
+>__[Project Page](https://dbauer15.github.io/papers/gscache/)&nbsp;/ [Paper](https://www.arxiv.org/abs/2507.19718)__
+
+Official implementation of the 2025 IEEE VIS paper "GSCache: Real-Time Radiance Caching for Volume Path Tracing using 3D Gaussian Splatting"
+
+### Build Instructions
+
+The build was tested on Ubuntu 22.04 with CUDA 12.8. Windows and Mac might work but are not tested.
+
+#### Dependencies
+
+These are the dependencies the project was tested with. Earlier versions might work.
+
+- CMake 3.20+
+- C++17 Compiler
+- CUDA 12.5+
+- LibTorch 2.7+
+
+#### Building
+
+First edit the file `setup_env.sh` to correctly point to your CUDA, LibTorch installation and GPU architecture.
+Use the build script to build the project:
+
+On Linux:
+```bash
+    source setup_env.sh
+    sh build.sh
+```
+
+### Updates
+- ✅ [2025/12] Open source release
+- ✅ [2025/11] Conference presentation in Vienna
+- ✅ [2025/07] Paper accepted to IEEE VIS 2025
+
+### BibTex
+```
+@misc{bauer2025gscache,
+      title={GSCache: Real-Time Radiance Caching for Volume Path Tracing using 3D Gaussian Splatting}, 
+      author={David Bauer and Qi Wu and Hamid Gadirov and Kwan-Liu Ma},
+      year={2025},
+      eprint={2507.19718},
+      archivePrefix={arXiv},
+      primaryClass={cs.GR},
+      url={https://arxiv.org/abs/2507.19718}, 
+}
+```
+
+### License
+The source code for this project is open under the Apache 2.0 license. 3D Gaussian splatting code and third party libraries are subject to their own licenses as noted in file headers and license files.
+
+### gscache/gscache.cpp
+```
+#include "gscache.h"
+#include "gscache_device.h"
+#include <glm/glm.hpp>
+#include <glm/ext.hpp>
+#include "model/gaussian_model.h"
+#include "model/diff_rasterizer.h"
+#include "model/util.h"
+#include <cassert>
+#include <string>
+#include <vector>
+#include <iostream>
+#include <memory.h>
+#include <cuda.h>
+#include <cuda_runtime.h>
+#include <torch/types.h>
+
+using namespace gscache;
+
+#if __cplusplus
+extern "C" {
+#endif
+
+struct gscache_config {
+    int sh_degree;
+    int n_levels;
+    bool subsample_levels;
+    float scene_extent;
+
+    int size_threshold;
+    float gradient_threshold;
+    float opacity_threshold;
+
+    int densification_interval;
+    int max_densification_iteration;
+    int opacity_reset_interval;
+    int max_opacity_reset_iteration;
+    glm::vec3 background;
+
+    gscache_loss_function_t loss_fn;
+};
+
+struct gscache_context {
+    int version;
+
+    gscache_config_t            config;
+
+    std::vector<size_t>                          iterations;
+    std::vector<GaussianModel*>                  models;
+    std::vector<DiffRasterizerForwardResult*>    forward_results;
+    std::vector<DiffRasterizerBackwardResult*>   backward_results;
+
+    Camera*                  camera { nullptr };
+    DiffRasterizer*          rasterizer { nullptr };
+
+    float   sample_factor_c;
+
+    gscache_device_context_t device_context { nullptr };
+    std::vector<torch::Tensor> device_radiance_samples;
+    std::shared_ptr<torch::Tensor> device_betas;
+};
+
+
+/** 
+ * Initialization
+ */
+gscache_config_t 
+gscache_config_create() {
+    gscache_config_t config = (gscache_config_t)calloc(1, sizeof(struct gscache_config));
+
+    config->sh_degree = 0;
+    config->n_levels = 3;
+    config->subsample_levels = true;
+    config->scene_extent = 1.f;
+
+    config->size_threshold = 0;
+    config->gradient_threshold = 0.0002;
+    config->opacity_threshold = 0.005;
+
+    config->densification_interval = 100;
+    config->max_densification_iteration = 1000;
+    config->opacity_reset_interval = 250;
+    config->max_opacity_reset_iteration = 1<<20;
+    config->background = glm::vec3(0.f);
+
+    config->loss_fn = GSCACHE_LOSS_FUNCTION_HDR;
+    return config;
+}
+
+void 
+gscache_config_setopt(gscache_config_t config, gscache_config_option_t option, void* value) {
+    if (option == GSCACHE_CONFIG_SH_DEGREE) {
+        int sh_degree = *(int*)value;
+        assert(sh_degree >= 0);
+        assert(sh_degree < 4);
+        config->sh_degree = sh_degree;
+    }
+    if (option == GSCACHE_CONFIG_LEVELS) {
+        int n_levels = *(int*)value;
+        assert(n_levels >= 1);
+        assert(n_levels <= MAX_NUM_CACHE_LEVELS);
+        config->n_levels = n_levels;
+    }
+    if (option == GSCACHE_CONFIG_SUBSAMPLE_LEVELS) {
+        bool subsample_levels = *(bool*)value;
+        config->subsample_levels = subsample_levels;
+    }
+    if (option == GSCACHE_CONFIG_BACKGROUND) {
+        float* rgb = (float*)value;
+        config->background = glm::clamp(glm::vec3(rgb[0], rgb[1], rgb[2]), glm::vec3(0.f), glm::vec3(1.f));
+    }
+    if (option == GSCACHE_CONFIG_SCENE_EXTENT) {
+        float* extent = (float*)value;
+        config->scene_extent = *extent;
+    }
+    if (option == GSCACHE_CONFIG_LOSS_FUNCTION) {
+        gscache_loss_function_t* loss_fn = (gscache_loss_function_t*)value;
+        config->loss_fn = *loss_fn;
+    }
+}
+
+gscache_context_t 
+gscache_context_create(gscache_config_t config) {
+    gscache_context_t context = (gscache_context_t)calloc(1, sizeof(struct gscache_context));
+    context->version = 0;
+    context->config = config;
+    for (int i = 0; i < config->n_levels; ++i) {
+        context->iterations.push_back(0);
+        context->models.push_back(new GaussianModel(config->sh_degree));
+        context->forward_results.push_back(new DiffRasterizerForwardResult());
+        context->backward_results.push_back(new DiffRasterizerBackwardResult());
+        context->device_radiance_samples.push_back(torch::empty({0}));
+    }
+    context->device_betas = std::make_shared<torch::Tensor>();
+    context->rasterizer = new DiffRasterizer(config->background);
+    context->camera = new Camera();
+
+    return context;
+}
+
+static void
+_gscache_device_context_update(gscache_context_t context) {
+    if (context->device_context != nullptr) {
+        cudaFree(context->device_context);
+    }
+    struct gscache_device_context device_context;
+
+    for (int i = 0; i < context->config->n_levels; ++i) {
+        device_context.radiance_samples[i] = (gscache_vec3f*)context->device_radiance_samples[i].data_ptr<float>();
+        device_context.cache_levels[i] = (gscache_vec3f*)context->forward_results[i]->framebuffer.getRGBPtr();
+        device_context.width = context->forward_results[i]->framebuffer.getWidth();
+        device_context.height = context->forward_results[i]->framebuffer.getHeight();
+    }
+    device_context.betas = context->device_betas->data_ptr<float>();
+    device_context.n_levels = context->config->n_levels;
+    device_context.sample_factor_c = context->sample_factor_c;
+
+    gscache_device_context_t device_context_ptr;
+    cudaMalloc(&device_context_ptr, sizeof(struct gscache_device_context));
+    cudaMemcpy(device_context_ptr, &device_context, sizeof(struct gscache_device_context), cudaMemcpyHostToDevice);
+
+    context->device_context = device_context_ptr;
+}
+
+gscache_device_context_t
+gscache_get_device_context(gscache_context_t context) {
+    if (context->device_context == nullptr) {
+        _gscache_device_context_update(context);
+    }
+    return context->device_context;
+}
+
+void
+gscache_init(gscache_context_t context, gscache_vec3f* points, gscache_vec3f* colors, long points_count) {
+    for (int i = 0; i < context->config->n_levels; ++i) {
+        //FIXME: Subsampling expects PCD to be spatially randomized
+        // We can either pass a flag to model->init to randomize it or do the randomization here
+        if (context->config->subsample_levels) {
+            context->models[i]->init((float*)points, (float*)colors, points_count / powf(2, i));
+        }
+        else {
+            context->models[i]->init((float*)points, (float*)colors, points_count);
+        }
+    }
+}
+
+void
+gscache_setopt(gscache_context_t context, gscache_option_t option, void* value) {
+    switch(option) {
+        case GSCACHE_CAMERA_POSITION:
+            context->camera->setPosition(glm::make_vec3((float*)value));
+            break;
+        case GSCACHE_CAMERA_CENTER:
+            context->camera->setCenter(glm::make_vec3((float*)value));
+            break;
+        case GSCACHE_CAMERA_UP:
+            context->camera->setUp(glm::make_vec3((float*)value));
+            break;
+        case GSCACHE_CAMERA_ASPECT_RATIO:
+            context->camera->setAspectRatio(*(float*)value);
+            break;
+        case GSCACHE_CAMERA_FOVY_DEGREES:
+            context->camera->setFovyDegrees(*(float*)value);
+            break;
+        case GSCACHE_FRAME_WIDTH:
+            for (int i = 0; i < context->config->n_levels; ++i) {
+                context->forward_results[i]->framebuffer.resize({ *(int*)value, context->forward_results[i]->framebuffer.getHeight() });
+
+                context->device_radiance_samples[i] = torch::zeros({ context->forward_results[i]->framebuffer.getHeight(), *(int*)value, 3 }, torch::kCUDA);
+            }
+            *(context->device_betas) = torch::ones({ context->forward_results[0]->framebuffer.getHeight(), *(int*)value }, torch::kCUDA);
+            _gscache_device_context_update(context);
+            break;
+        case GSCACHE_FRAME_HEIGHT:
+            for (int i = 0; i < context->config->n_levels; ++i) {
+                context->forward_results[i]->framebuffer.resize({ context->forward_results[i]->framebuffer.getWidth(), *(int*)value });
+
+                context->device_radiance_samples[i] = torch::zeros({ *(int*)value, context->forward_results[i]->framebuffer.getWidth(), 3 }, torch::kCUDA);
+            }
+            *(context->device_betas) = torch::ones({ *(int*)value, context->forward_results[0]->framebuffer.getWidth() }, torch::kCUDA);
+            _gscache_device_context_update(context);
+            break;
+        case GSCACHE_SAMPLE_FACTOR_C:
+            context->sample_factor_c = *((float*)value);
+            _gscache_device_context_update(context);
+            break;
+    }
+}
+
+void
+gscache_get_cuda_context(void* cuda_context) {
+    // Create cuda context
+    torch::Tensor dummy = torch::zeros({1}, torch::kCUDA);
+
+    // Retrieve context
+    CUcontext* pytorch_ctx = (CUcontext*)cuda_context;
+    CUresult result = cuCtxGetCurrent(pytorch_ctx);
+    if (result != CUDA_SUCCESS) {
+        throw std::runtime_error("Unable to obtain pytorch cuda context");
+    }
+}
+
+/**
+ * Rasterization and Optimization
+ */
+void
+gscache_rasterize_level(gscache_context_t context, int level) {
+    if (level >= context->config->n_levels) return;
+
+    context->rasterizer->forward(*context->models[level], *context->camera, *context->forward_results[level]);
+    context->device_betas->fill_(1);
+}
+
+void
+gscache_map_pixels_level(gscache_context_t context, int level, bool to_cpu, gscache_vec3f** pixels, int* width, int* height) {
+    if (to_cpu) {
+        *pixels = (gscache_vec3f*)context->forward_results[level]->framebuffer.getRGBPtr_RW_CPU();
+    } else {
+        *pixels = (gscache_vec3f*)context->forward_results[level]->framebuffer.getRGBPtr_RW_GPU();
+    }
+    *width = context->forward_results[level]->framebuffer.getWidth();
+    *height = context->forward_results[level]->framebuffer.getHeight();
+}
+
+void
+gscache_update_level(gscache_context_t context, int level) {
+    if (level >= context->config->n_levels) return;
+
+    torch::Tensor expected;
+    expected = context->device_radiance_samples[level];
+
+    torch::Tensor gradient;
+    if (context->config->loss_fn == GSCACHE_LOSS_FUNCTION_MSE) {
+        gradient = util::mseLossGradient(context->forward_results[level]->framebuffer.getRGB(), expected);
+    }
+    if (context->config->loss_fn == GSCACHE_LOSS_FUNCTION_HDR) {
+        gradient = util::hdrLossGradient(context->forward_results[level]->framebuffer.getRGB(), expected);
+    }
+
+    context->rasterizer->backward(*context->models[level], *context->camera, *context->forward_results[level], gradient, *context->backward_results[level]);
+
+    context->device_radiance_samples[level].fill_(0);
+}
+
+void
+gscache_optimize_level(gscache_context_t context, int level, int frameid) {
+    if (level >= context->config->n_levels) return;
+
+    context->iterations[level] += 1;
+    {
+        torch::NoGradGuard no_grad;
+        float factor = 1.f / (1.f + std::log(frameid + 1));
+        context->models[level]->updateLearningRate(factor);
+        context->models[level]->updateGradients(*context->backward_results[level]);
+        context->models[level]->updateDensificationStats(*context->backward_results[level]);
+
+        if (context->iterations[level] < context->config->max_densification_iteration && context->iterations[level] % context->config->densification_interval == 0) {
+            context->models[level]->densifyAndPrune(context->config->gradient_threshold, 
+                                            context->config->opacity_threshold, 
+                                            context->config->scene_extent, 
+                                            context->config->size_threshold);
+        }
+        if (context->iterations[level] < context->config->max_opacity_reset_iteration && context->iterations[level] % context->config->opacity_reset_interval == 0) {
+            context->models[level]->resetOpacity();
+        }
+        if (context->iterations[level] == 1) {
+            context->models[level]->resetOpacity();
+        }
+
+        context->models[level]->optimize();
+    }
+}
+
+/**
+ * Utility
+ */
+void
+gscache_dump_ply(gscache_context_t context, int level, const char* filename) {
+    if (level >= context->config->n_levels) return;
+
+    std::string strfilename(filename);
+    context->models[level]->savePLY(strfilename);
+}
+
+void
+gscache_destroy_context(gscache_context_t context) {
+    delete context->rasterizer;
+    delete context->camera;
+    for (int i = 0; i < context->config->n_levels; ++i) {
+        delete context->models[i];
+        delete context->forward_results[i];
+        delete context->backward_results[i];
+    }
+    free(context);
+}
+
+void
+gscache_destroy_device_context(gscache_device_context_t context) {
+    cudaFree(context);
+}
+
+void
+gscache_destroy(void* gscache_object) {
+    if (gscache_object == nullptr) return;
+    free(gscache_object);
+}
+
+#if __cplusplus
+}
+#endif
+```
+
+### gscache/gscache.h
+```
+#ifndef __GSCACHE_H__
+#define __GSCACHE_H__
+
+#include <stdlib.h>
+
+#ifdef __CUDACC__
+#define __gscache_both__       __host__ __device__
+#define __gscache_device__     __device__ __forceinline__
+#define __gscache_host__       __host__ 
+#else
+#define __gscache_both__
+#define __gscache_device__
+#define __gscache_host__
+#endif
+
+#define GSCACHE_OPAQUE_TYPE(X) \
+    struct X; \
+    typedef struct X* X ## _t;
+
+#if __cplusplus
+extern "C" {
+#endif
+
+/**
+ * Type Definitions
+ */
+GSCACHE_OPAQUE_TYPE(gscache_config);
+GSCACHE_OPAQUE_TYPE(gscache_context);
+GSCACHE_OPAQUE_TYPE(gscache_device_context);
+
+typedef struct _gscache_vec3f {
+    union {
+        struct { float x, y, z; };
+        float v[3];
+    };
+} gscache_vec3f;
+
+typedef enum {
+    GSCACHE_LOSS_FUNCTION_MSE = 0,
+    GSCACHE_LOSS_FUNCTION_HDR
+} gscache_loss_function_t;
+
+typedef enum {
+    GSCACHE_CONFIG_SH_DEGREE = 0,
+    GSCACHE_CONFIG_LEVELS,
+    GSCACHE_CONFIG_SUBSAMPLE_LEVELS,
+    GSCACHE_CONFIG_LOSS_FUNCTION,
+    GSCACHE_CONFIG_BACKGROUND,
+    GSCACHE_CONFIG_SCENE_EXTENT
+} gscache_config_option_t;
+
+typedef enum {
+    GSCACHE_CAMERA_POSITION = 0,
+    GSCACHE_CAMERA_CENTER,
+    GSCACHE_CAMERA_UP,
+    GSCACHE_CAMERA_ASPECT_RATIO,
+    GSCACHE_CAMERA_FOVY_DEGREES,
+    GSCACHE_FRAME_WIDTH,
+    GSCACHE_FRAME_HEIGHT,
+    GSCACHE_SAMPLE_FACTOR_C
+} gscache_option_t;
+
+
+/** 
+ * Initialization
+ */
+void                gscache_get_cuda_context(void* cuda_context);
+gscache_config_t    gscache_config_create();
+void                gscache_config_setopt(gscache_config_t config, gscache_config_option_t option, void* value);
+gscache_context_t   gscache_context_create(gscache_config_t config);
+void                gscache_init(gscache_context_t context, gscache_vec3f* points, gscache_vec3f* colors, long points_count);
+void                gscache_setopt(gscache_context_t context, gscache_option_t option, void* value);
+gscache_device_context_t gscache_get_device_context(gscache_context_t context);
+
+/**
+ * Rasterization and Optimization
+ */
+void    gscache_rasterize_level(gscache_context_t context, int level);
+void    gscache_map_pixels_level(gscache_context_t context, int level, bool to_cpu, gscache_vec3f** pixels, int* width, int* height);
+void    gscache_update_level(gscache_context_t context, int level);
+void    gscache_optimize_level(gscache_context_t context, int level, int frameid);
+
+/**
+ * Utility
+ */
+void    gscache_dump_ply(gscache_context_t context, int level, const char* filename);
+void    gscache_destroy_context(gscache_context_t context);
+void    gscache_destroy_device_context(gscache_device_context_t context);
+void    gscache_destroy(void* context);
+
+#if __cplusplus
+}
+#endif
+#endif
+```
+
+### gscache/gscache_device.h
+```
+#ifndef __GSCACHE_DEVICE_H__
+#define __GSCACHE_DEVICE_H__
+
+#include "gscache.h"
+#include <assert.h>
+
+#define MAX_NUM_CACHE_LEVELS 16
+
+typedef struct _gscache_sample {
+    int             u, v;
+    int             scatter_index;
+    gscache_vec3f   L;
+} gscache_sample;
+
+typedef struct _gscache_query {
+    int     u, v;
+    int     scatter_index;
+    float   rand01;
+    gscache_vec3f   L;
+    gscache_vec3f   throughput;
+} gscache_query;
+
+typedef struct _gscache_query_result {
+    bool            cache_hit;
+    gscache_vec3f   throughput;
+    gscache_vec3f   L;
+} gscache_query_result;
+
+struct gscache_device_context {
+    int                n_levels;
+    size_t             height, width;
+    float              sample_factor_c;
+
+    gscache_vec3f*     cache_levels[MAX_NUM_CACHE_LEVELS];
+    gscache_vec3f*     radiance_samples[MAX_NUM_CACHE_LEVELS];
+    float*             betas;
+};
+
+__gscache_device__ float 
+gscache_clamp(const float v, const float min, const float max) {
+    return (v < min) ? min : ((v > max) ? max : v);
+}
+
+__gscache_device__ float
+gscache_luminance(const gscache_vec3f L) {
+    return 0.212671f * L.x + 0.715160f * L.y + 0.072169f * L.z;
+}
+
+__gscache_device__ void
+gscache_sample_record_ground_truth(gscache_device_context_t context, gscache_sample sample) {
+    assert(sample.scatter_index >= 0);
+    assert(sample.scatter_index < MAX_NUM_CACHE_LEVELS);
+    assert(sample.scatter_index < context->n_levels);
+    assert(sample.u < context->width);
+    assert(sample.v < context->height);
+
+    context->radiance_samples[sample.scatter_index][sample.v*context->width + sample.u] = sample.L;
+}
+
+__gscache_device__ gscache_query_result
+gscache_sample_cache(gscache_device_context_t context, gscache_query query) {
+    assert(query.scatter_index >= 0);
+    assert(query.scatter_index < MAX_NUM_CACHE_LEVELS);
+    assert(query.scatter_index < context->n_levels);
+    assert(query.u < context->width);
+    assert(query.v < context->height);
+
+    gscache_vec3f L = query.L;
+    gscache_vec3f cached_L = context->cache_levels[query.scatter_index][query.v*context->width + query.u];
+
+    float q = gscache_clamp(context->sample_factor_c * gscache_luminance(query.throughput), 0.f, 1.f);
+    float p = 1.f - q;
+
+    gscache_query_result result;
+    result.cache_hit = false;
+    result.L = L;
+    result.throughput = query.throughput;
+    if (q < 0.9f) {
+        float beta = context->betas[query.v*context->width + query.u];
+        if (query.rand01 < p) {
+            result.L.x = cached_L.x / beta;
+            result.L.y = cached_L.y / beta;
+            result.L.z = cached_L.z / beta;
+            result.throughput = query.throughput;
+            result.cache_hit = true;
+            return result;
+        }
+        
+        context->betas[query.v*context->width + query.u] = beta * q;
+        result.throughput.x = query.throughput.x / q;
+        result.throughput.y = query.throughput.y / q;
+        result.throughput.z = query.throughput.z / q;
+    }
+    
+    return result;
+}
+
+#endif
+```
+
+### gscache/model/diff_rasterizer.cpp
+```
+#include "diff_rasterizer.h"
+#include <cuda_rasterizer/rasterizer.h>
+#include <glm/gtc/matrix_transform.hpp>
+
+namespace gscache {
+
+/*
+ * Used for forward call, borrowed from 3DGS implementation
+ */
+std::function<char*(size_t N)> resizeFunctional(torch::Tensor& t) {
+    auto lambda = [&t](size_t N) {
+        t.resize_({(long long)N});
+        t.index_put_({"..."}, 0);
+		return reinterpret_cast<char*>(t.contiguous().data_ptr());
+    };
+    return lambda;
+}
+
+/*
+ * Camera
+ *
+ */
+
+Camera::Camera() {
+    m_position = glm::vec3(0.f, 0.f, 1.f);
+    m_center = glm::vec3(0.f);
+    m_up = glm::vec3(0.f, 1.f, 0.f);
+
+    m_fovy = glm::radians(45.f);
+    m_fovx = glm::radians(45.f);
+    m_aspect_ratio = 1.f;
+    updateTensorData();
+}
+
+Camera::Camera(glm::vec3 position,
+           glm::vec3 center,
+           glm::vec3 up,
+           float aspect_ratio,
+           float fovy_degrees) {
+    m_position = position;
+    m_center = center;
+    m_up = up;
+
+    m_aspect_ratio = aspect_ratio;
+    m_fovy = glm::radians(fovy_degrees);
+    m_fovx = 2.f * glm::atan(glm::tan(m_fovy * 0.5f) * m_aspect_ratio);
+
+    updateTensorData();
+}
+
+void
+Camera::setPosition(glm::vec3 position) {
+    m_position = position;
+    updateTensorData();
+}
+
+void
+Camera::setCenter(glm::vec3 center) {
+    m_center = center;
+    updateTensorData();
+}
+
+void
+Camera::setUp(glm::vec3 up) {
+    m_up = up;
+    updateTensorData();
+}
+
+void
+Camera::setAspectRatio(float aspect_ratio) {
+    m_aspect_ratio = aspect_ratio;
+    m_fovx = 2.f * glm::atan(glm::tan(m_fovy * 0.5f) * m_aspect_ratio);
+    updateTensorData();
+}
+
+void
+Camera::setFovyDegrees(float fovy_degrees) {
+    m_fovy = glm::radians(fovy_degrees);
+    m_fovx = 2.f * glm::atan(glm::tan(m_fovy * 0.5f) * m_aspect_ratio);
+    updateTensorData();
+}
+
+torch::Tensor
+Camera::getViewMatrix() {
+    return m_view_matrix;
+}
+
+torch::Tensor
+Camera::getProjectionMatrix() {
+    return m_projection_matrix;
+}
+
+torch::Tensor
+Camera::getPosition() {
+    return m_position_tensor;
+}
+
+void
+Camera::updateTensorData() {
+    glm::mat4 lookat = glm::lookAt(m_position, m_center, m_up);
+    m_view_matrix = torch::from_blob(&lookat[0][0], {4, 4}).clone().to(torch::kCUDA);
+
+    glm::mat4 projection = glm::perspective(m_fovy, m_aspect_ratio, 0.001f, 10000.f);
+    m_projection_matrix = torch::from_blob(&projection[0][0], {4, 4}).clone().to(torch::kCUDA);
+
+    m_position_tensor = torch::from_blob(&m_position[0], {3}).clone().to(torch::kCUDA);
+}
+
+/*
+ * FrameBuffer 
+ *
+ */
+FrameBuffer::FrameBuffer() {
+    resize({0, 0});
+}
+
+void
+FrameBuffer::resize(glm::ivec2 size) {
+    m_size = size;
+    m_rgb = torch::zeros({size.y, size.x, 3}).clone().to(torch::kCUDA);
+    m_dirty_cpu = true;
+    m_dirty_gpu = true;
+}
+
+
+void
+FrameBuffer::updateTensorData(bool cpu) {
+    if (cpu && m_dirty_cpu) {
+        m_rgb_rw_cpu = getRGB().contiguous().cpu();
+        m_dirty_cpu = false;
+    }
+
+    if (!cpu && m_dirty_gpu) {
+        m_rgb_rw_gpu = getRGB().contiguous().clone();
+        m_dirty_gpu = false;
+    }
+}
+
+float*
+FrameBuffer::getRGBPtr_RW_CPU() {
+    updateTensorData(true);
+    return m_rgb_rw_cpu.data_ptr<float>();
+}
+
+float*
+FrameBuffer::getRGBPtr_RW_GPU() {
+    updateTensorData(false);
+    return m_rgb_rw_gpu.data_ptr<float>();
+}
+
+
+/*
+ * DiffRasterizer 
+ *
+ */
+
+DiffRasterizer::DiffRasterizer(glm::vec3 background) {
+    m_background = torch::from_blob(&background[0], {3}, torch::TensorOptions().dtype(torch::kFloat32)).clone().to(torch::kCUDA);
+}
+
+void
+DiffRasterizer::markVisible(GaussianModel& model, Camera& camera) {
+    const int n_points = model.getXYZ().size(0);
+    torch::Tensor visible = torch::full({n_points}, 0, model.getXYZ().options().dtype(torch::kInt32));
+    torch::Tensor num_visible = torch::zeros({1}, model.getXYZ().options().dtype(torch::kInt32));
+
+    auto xyz = model.getXYZ();
+    CudaRasterizer::Rasterizer::markVisible(n_points, 
+                                            xyz.data_ptr<float>(),
+                                            camera.getViewMatrix().data_ptr<float>(),
+                                            camera.getProjectionMatrix().data_ptr<float>(),
+                                            visible.data_ptr<int32_t>(),
+                                            num_visible.data_ptr<int32_t>());
+
+    visible = visible.index({ torch::indexing::Slice(0, num_visible.item<int32_t>()) });
+    model.setVisible(visible);
+}
+
+void
+DiffRasterizer::forward(GaussianModel& model, Camera& camera, DiffRasterizerForwardResult& result) {
+    const int n_points = model.getXYZ().size(0);
+    const int n_sh = model.getActiveSHDegree();
+    const int n_sh_feature_size = model.getFeatures().size(1);
+
+    torch::Device device(torch::kCUDA);
+    torch::TensorOptions buffer_options(torch::kByte);
+    torch::TensorOptions radii_options(torch::kInt32);
+
+    result.geometry_buffer = torch::empty({0}, buffer_options.device(device));
+    result.binning_buffer = torch::empty({0}, buffer_options.device(device));
+    result.image_buffer = torch::empty({0}, buffer_options.device(device));
+    result.radii = torch::zeros({n_points}, radii_options.device(device));
+
+    std::function<char*(size_t)> geomFunc = resizeFunctional(result.geometry_buffer);
+    std::function<char*(size_t)> binningFunc = resizeFunctional(result.binning_buffer);
+    std::function<char*(size_t)> imgFunc = resizeFunctional(result.image_buffer);
+
+    int W = result.framebuffer.getWidth();
+    int H = result.framebuffer.getHeight();
+    float tan_fovx = glm::tan(camera.getFovX() * 0.5f);
+    float tan_fovy = glm::tan(camera.getFovY() * 0.5f); 
+
+    auto xyz = model.getXYZ();
+    auto features = model.getFeatures();
+    auto opacity = model.getOpacity();
+    auto scaling = model.getScaling();
+    auto rotation = model.getRotation();
+    result.n_rendered = CudaRasterizer::Rasterizer::forward(geomFunc,
+                                        binningFunc,
+                                        imgFunc,
+                                        n_points,
+                                        n_sh,
+                                        n_sh_feature_size,
+                                        m_background.data_ptr<float>(),
+                                        W, H,
+                                        xyz.data_ptr<float>(),
+                                        features.data_ptr<float>(),
+                                        nullptr, // colorsprecomp
+                                        opacity.data_ptr<float>(),
+                                        scaling.data_ptr<float>(),
+                                        1.f, // scale modifier
+                                        rotation.data_ptr<float>(),
+                                        nullptr, // cov3Dprecomp
+                                        camera.getViewMatrixPtr(),
+                                        camera.getProjectionMatrixPtr(),
+                                        camera.getPositionPtr(),
+                                        tan_fovx, tan_fovy, 
+                                        false, // prefiltered
+                                        result.framebuffer.getRGBPtr(), 
+                                        result.radii.data_ptr<int>(), 
+                                        false // debug flag
+                                        );
+    
+    // Mark framebuffer dirty 
+    result.framebuffer.setDirty();
+}
+
+void
+DiffRasterizer::backward(GaussianModel& model, Camera& camera, DiffRasterizerForwardResult& forward_result, torch::Tensor loss_gradient, DiffRasterizerBackwardResult& result) {
+    const int n_points = model.getXYZ().size(0);
+    const int n_sh = model.getActiveSHDegree();
+    const int n_sh_feature_size = model.getFeatures().size(1);
+
+    torch::TensorOptions options = model.getXYZ().options();
+
+    result.radii        = forward_result.radii;
+    result.d_xyz        = torch::zeros({n_points, 3}, options);
+    result.d_mean2D     = torch::zeros({n_points, 3}, options);
+    result.d_conic      = torch::zeros({n_points, 2, 2,}, options);
+    result.d_color      = torch::zeros({n_points, 3}, options);
+    result.d_opacity    = torch::zeros({n_points, 1}, options);
+    result.d_cov3D      = torch::zeros({n_points, 6}, options);
+    result.d_sh         = torch::zeros({n_points, n_sh_feature_size, 3}, options);
+    result.d_scale      = torch::zeros({n_points, 3}, options);
+    result.d_rotation   = torch::zeros({n_points, 4}, options);
+
+    int W = forward_result.framebuffer.getWidth();
+    int H = forward_result.framebuffer.getHeight();
+    float tan_fovx = glm::tan(camera.getFovX() * 0.5f);
+    float tan_fovy = glm::tan(camera.getFovY() * 0.5f); 
+
+    auto xyz = model.getXYZ();
+    auto features = model.getFeatures();
+    auto opacity = model.getOpacity();
+    auto scaling = model.getScaling();
+    auto rotation = model.getRotation();
+    CudaRasterizer::Rasterizer::backward(n_points, 
+                                         n_sh,
+                                         n_sh_feature_size,
+                                         forward_result.n_rendered,
+                                         m_background.data_ptr<float>(),
+                                         W, H,
+                                         xyz.data_ptr<float>(),
+                                         features.data_ptr<float>(),
+                                         nullptr, // colorsprecomp 
+                                         scaling.data_ptr<float>(),
+                                         1.f, // scale modifier
+                                         rotation.data_ptr<float>(),
+                                         nullptr, // cov3Dprecomp
+                                         camera.getViewMatrixPtr(),
+                                         camera.getProjectionMatrixPtr(),
+                                         camera.getPositionPtr(),
+                                         tan_fovx, tan_fovy,
+                                         forward_result.radii.data_ptr<int>(),
+                                         reinterpret_cast<char*>(forward_result.geometry_buffer.data_ptr()),
+                                         reinterpret_cast<char*>(forward_result.binning_buffer.data_ptr()),
+                                         reinterpret_cast<char*>(forward_result.image_buffer.data_ptr()),
+                                         loss_gradient.data_ptr<float>(),
+                                         result.d_mean2D.data_ptr<float>(),
+                                         result.d_conic.data_ptr<float>(),
+                                         result.d_opacity.data_ptr<float>(),
+                                         result.d_color.data_ptr<float>(),
+                                         result.d_xyz.data_ptr<float>(),
+                                         result.d_cov3D.data_ptr<float>(),
+                                         result.d_sh.data_ptr<float>(),
+                                         result.d_scale.data_ptr<float>(),
+                                         result.d_rotation.data_ptr<float>(),
+                                         false // debug flag
+                                         );
+}
+
+}
+```
+
+### gscache/model/diff_rasterizer.h
+```
+#pragma once
+
+#include <torch/types.h>
+#include <glm/glm.hpp>
+#include "gaussian_model.h"
+
+namespace gscache {
+
+struct Camera {
+    Camera();
+    Camera(glm::vec3 position,
+           glm::vec3 center,
+           glm::vec3 up,
+           float aspect_ratio,
+           float fovy_degrees);
+
+    void setPosition(glm::vec3 position);
+    void setCenter(glm::vec3 center);
+    void setUp(glm::vec3 up);
+    void setAspectRatio(float aspect_ratio);
+    void setFovyDegrees(float fovy_degrees);
+    
+    torch::Tensor getViewMatrix();
+    torch::Tensor getProjectionMatrix();
+    torch::Tensor getPosition();
+
+    float* getViewMatrixPtr()       { return getViewMatrix().data_ptr<float>(); }
+    float* getProjectionMatrixPtr() { return getProjectionMatrix().data_ptr<float>(); }
+    float* getPositionPtr()         { return getPosition().data_ptr<float>(); }
+
+    float  getFovX()        { return m_fovx; }
+    float  getFovY()        { return m_fovy; }
+    float  getAspectRatio() { return m_aspect_ratio; }
+
+
+private:
+    void updateTensorData();
+
+    float          m_fovy;
+    float          m_fovx;
+    float          m_aspect_ratio;
+
+    glm::vec3      m_position;
+    glm::vec3      m_center;
+    glm::vec3      m_up;
+
+    torch::Tensor  m_view_matrix;
+    torch::Tensor  m_projection_matrix;
+    torch::Tensor  m_position_tensor;
+};
+
+struct FrameBuffer {
+    FrameBuffer();
+
+    void resize(glm::ivec2 size);
+
+    torch::Tensor getRGB()    { return m_rgb; }
+    float*        getRGBPtr() { return m_rgb.data_ptr<float>(); }
+    float*        getRGBPtr_RW_GPU();
+    float*        getRGBPtr_RW_CPU();
+
+    int           getWidth()  { return m_rgb.size(1); }
+    int           getHeight() { return m_rgb.size(0); }
+
+    void          setDirty()  { m_dirty_cpu = true; m_dirty_gpu = true; }
+
+private:
+    void updateTensorData(bool cpu);
+
+    bool          m_dirty_cpu;
+    bool          m_dirty_gpu;
+    glm::ivec2    m_size;
+    torch::Tensor m_rgb;
+
+    torch::Tensor m_rgb_rw_cpu;
+    torch::Tensor m_rgb_rw_gpu;
+};
+
+
+struct DiffRasterizerForwardResult {
+    int             n_rendered;
+    FrameBuffer     framebuffer;
+    torch::Tensor   radii;
+    torch::Tensor   geometry_buffer;
+    torch::Tensor   binning_buffer;
+    torch::Tensor   image_buffer;
+};
+
+struct DiffRasterizerBackwardResult {
+    torch::Tensor   radii;
+    torch::Tensor   d_xyz;
+    torch::Tensor   d_conic;
+    torch::Tensor   d_opacity;
+    torch::Tensor   d_color;
+    torch::Tensor   d_mean2D;
+    torch::Tensor   d_cov3D;
+    torch::Tensor   d_sh;
+    torch::Tensor   d_scale;
+    torch::Tensor   d_rotation;
+};
+
+struct DiffRasterizer {
+
+    DiffRasterizer(glm::vec3 background);
+
+    void markVisible(GaussianModel& model, Camera& camera);
+    void forward(GaussianModel& model, Camera& camera, DiffRasterizerForwardResult& result);
+    void backward(GaussianModel& model, Camera& camera, DiffRasterizerForwardResult& forward_result, torch::Tensor loss_gradient, DiffRasterizerBackwardResult& result);
+
+private:
+    torch::Tensor       m_background;
+};
+
+}
+```
+
+### gscache/model/gaussian_model.cu
+```
+#include "gaussian_model.h"
+#include "util.h"
+#include <array>
+#include <unordered_map>
+#include <happly.h>
+#include <simple_knn/simple_knn.h>
+#include <torch/nn/functional/normalization.h>
+#include <ATen/ops/normal.h>
+
+#include "diff_rasterizer.h"
+
+namespace gscache {
+
+torch::Tensor& 
+GaussianModel::getXYZ()         { return m_xyz; }
+
+torch::Tensor& 
+GaussianModel::getFeatures()    { return m_features; }
+
+torch::Tensor  
+GaussianModel::getScaling()     { return torch::exp(m_scaling); }
+
+torch::Tensor  
+GaussianModel::getRotation()    { return torch::nn::functional::normalize(m_rotation); }
+
+torch::Tensor  
+GaussianModel::getOpacity()     { return torch::sigmoid(m_opacity); }
+
+torch::Tensor& 
+GaussianModel::getVisible()     { return m_visible; }
+
+void
+GaussianModel::init(float* points, float* colors, size_t num_points) {
+    long points_count = (long)num_points;
+    long feature_size = (m_max_sh_degree+1);
+    feature_size = feature_size * feature_size;
+    bool pseudo_empty = points_count == 0;
+    
+    if (pseudo_empty) {
+        points_count = 1;
+    }
+
+    // Create default data
+    torch::Tensor xyz;
+    if (points != nullptr) {
+        xyz        = torch::from_blob(points, {points_count, 3}).to(torch::kCUDA);
+    } else if (pseudo_empty) {
+        // Not pretty, but avoids headache of dealing with empty model edge case
+        xyz        = -1e30f * torch::ones({points_count, 3}).to(torch::kCUDA);
+    } else {
+        xyz        = torch::rand({points_count, 3}).to(torch::kCUDA);
+    }
+    auto features   = torch::zeros({points_count, 3, feature_size}).to(torch::kCUDA);
+    auto scaling    = torch::ones({points_count, 3}).to(torch::kCUDA);
+    auto rotation   = torch::zeros({points_count, 4}).to(torch::kCUDA);
+    auto opacity    = torch::ones({points_count, 1}).to(torch::kCUDA);
+    auto visible    = torch::full({points_count}, 0, torch::TensorOptions().dtype(torch::kInt32)).to(torch::kCUDA);
+
+    auto max_radii_2d           = torch::zeros({points_count}, torch::TensorOptions().dtype(torch::kInt32)).to(torch::kCUDA);
+    auto xyz_gradients_accum    = torch::zeros({points_count, 1}).to(torch::kCUDA);
+    auto denom                  = torch::zeros({points_count, 1}).to(torch::kCUDA);
+
+    // Calculate scaling factors
+    auto mean_distances         = torch::full({points_count}, 0.0, torch::TensorOptions().dtype(torch::kFloat32)).to(torch::kCUDA);
+    SimpleKNN::knn(points_count, (float3*)xyz.contiguous().data_ptr<float>(), mean_distances.contiguous().data_ptr<float>());
+    if (num_points > 0) {
+        auto mean_distances_med = torch::median(mean_distances);
+        auto mean_distances_std = torch::std(mean_distances);
+
+        mean_distances = torch::min(mean_distances_med + 2*mean_distances_std, mean_distances);
+        mean_distances *= 0.75f;
+    }
+
+    // Adapt default data for activation functions
+    scaling = torch::log(torch::sqrt(mean_distances)).unsqueeze(1).repeat({1, 3});
+    rotation.index_put_({"...", 0}, 1);
+    opacity = torch::log((0.1f*opacity) / (1.f-(0.1f*opacity)));
+
+    if (pseudo_empty) {
+        opacity = 1e-16f * torch::ones({points_count, 1}).to(torch::kCUDA);
+        scaling = 1e-16f * torch::ones({points_count, 3}).to(torch::kCUDA);
+    }
+
+    // Set features
+    torch::Tensor color_features;
+    if (colors != nullptr) {
+        color_features = torch::from_blob(colors, {points_count, 3}).to(torch::kCUDA);
+    } else {
+        color_features = torch::rand({points_count, 3}).to(torch::kCUDA);
+    }
+    color_features     = util::rgb2sh(color_features);
+    features.index_put_({"...", torch::indexing::Slice({0, 3}), 0}, color_features);
+    features.index_put_({"...", torch::indexing::Slice({3, torch::indexing::None}), 0}, 0.f);
+    features        = features.transpose(1, 2).contiguous();
+    
+    m_xyz        = xyz.detach().clone();
+    m_features   = features.detach().clone();
+    m_scaling    = scaling;
+    m_rotation   = rotation;
+    m_opacity    = opacity;
+    m_visible    = visible;
+    m_xyz.requires_grad_();
+    m_features.requires_grad_();
+    m_scaling.requires_grad_();
+    m_rotation.requires_grad_();
+    m_opacity.requires_grad_();
+
+    m_max_radii_2d = max_radii_2d;
+    m_xyz_gradient_accum = xyz_gradients_accum;
+    m_denom = denom;
+
+    // Create optimizer
+    // TODO: Experiment with different weight decay options for AdamW
+    OptimizerOptions options;
+    std::vector<torch::optim::OptimizerParamGroup> params {
+        torch::optim::OptimizerParamGroup { std::vector<torch::Tensor> { m_xyz }, std::make_unique<OptimizerOptions>(m_options.lr_xyz) },
+        torch::optim::OptimizerParamGroup { std::vector<torch::Tensor> { m_features }, std::make_unique<OptimizerOptions>(m_options.lr_features) },
+        torch::optim::OptimizerParamGroup { std::vector<torch::Tensor> { m_opacity }, std::make_unique<OptimizerOptions>(m_options.lr_opacity) },
+        torch::optim::OptimizerParamGroup { std::vector<torch::Tensor> { m_scaling }, std::make_unique<OptimizerOptions>(m_options.lr_scaling) },
+        torch::optim::OptimizerParamGroup { std::vector<torch::Tensor> { m_rotation }, std::make_unique<OptimizerOptions>(m_options.lr_rotation) }
+    };
+    m_optimizer = std::make_shared<Optimizer>(params, options);
+}
+
+void
+GaussianModel::oneupSHDegree() {
+    m_active_sh_degree = std::min(m_active_sh_degree + 1, m_max_sh_degree);
+}
+
+void
+GaussianModel::updateLearningRate(float factor) {
+    const float lrs [5] { 
+        m_options.lr_xyz,
+        m_options.lr_features,
+        m_options.lr_opacity,
+        m_options.lr_scaling,
+        m_options.lr_rotation
+    };
+            
+    for (int i = 0; i < m_optimizer->param_groups().size(); ++i) {
+        auto& paramgroup = m_optimizer->param_groups()[i];
+        paramgroup.options().set_lr(lrs[i]);
+    }
+}
+
+void 
+GaussianModel::updateGradients(DiffRasterizerBackwardResult& result) {
+    // Update gradients
+    m_xyz.mutable_grad()        = result.d_xyz;
+    m_features.mutable_grad()   = result.d_sh;
+    m_rotation.mutable_grad()   = result.d_rotation;
+
+    /* chain rule to get pre-activation gradients */
+    auto a_opacity = getOpacity();
+    m_opacity.mutable_grad()    = result.d_opacity * a_opacity * (1.f - a_opacity);
+    m_scaling.mutable_grad()    = result.d_scale * getScaling(); 
+}
+
+void
+GaussianModel::optimize() {
+    // Update parameters via gradient descent
+    {
+        torch::NoGradGuard no_grad;
+        m_optimizer->step();
+    }
+
+    // Zero out all gradients
+    m_optimizer->zero_grad();
+}
+
+void 
+GaussianModel::updateDensificationStats(DiffRasterizerBackwardResult& result) {
+    //Update densification stats
+    {
+        // FIXME: First usage of m_visible to index into any tensor causes massive cudaMemcpy overhead
+        // FIXME: See for fix: https://stackoverflow.com/questions/57783029/is-indexing-with-a-bool-array-or-index-array-faster-in-numpy-pytorch
+        torch::NoGradGuard no_grad;
+        m_max_radii_2d.index_put_({ m_visible }, torch::max(m_max_radii_2d, result.radii).index({ m_visible }));
+        m_xyz_gradient_accum.index_put_({ m_visible }, 
+                m_xyz_gradient_accum.index({ m_visible }) + 
+                torch::norm(result.d_mean2D.index({ m_visible, "..."}), 2, -1, true));
+        m_denom.index_put_({ m_visible }, m_denom.index({ m_visible }) + 1);
+    }
+}
+
+void 
+GaussianModel::densifyPostfix(torch::Tensor& new_xyz, torch::Tensor& new_features, torch::Tensor& new_opacities, torch::Tensor& new_scaling, torch::Tensor& new_rotation) {
+    std::vector<torch::Tensor> parameters = {
+        new_xyz, new_features, new_opacities, new_scaling, new_rotation
+    };
+    auto optimizable_tensors = catTensorToOptimizer(parameters);
+    m_xyz       = optimizable_tensors[0];
+    m_features  = optimizable_tensors[1];
+    m_opacity   = optimizable_tensors[2];
+    m_scaling   = optimizable_tensors[3];
+    m_rotation  = optimizable_tensors[4];
+
+    m_max_radii_2d          = torch::zeros({ getXYZ().size(0) }, torch::TensorOptions().dtype(torch::kInt32)).to(torch::kCUDA);
+    m_xyz_gradient_accum    = torch::zeros({ getXYZ().size(0), 1 }).to(torch::kCUDA);
+    m_denom                 = torch::zeros({ getXYZ().size(0), 1 }).to(torch::kCUDA);
+}
+
+void 
+GaussianModel::densifyAndClone(torch::Tensor& gradients, float gradient_threshold, float extent) {
+    auto selected_pts_mask = torch::where(torch::norm(gradients, 2, -1, false) >= gradient_threshold, true, false);
+    selected_pts_mask = torch::logical_and(selected_pts_mask, std::get<0>(torch::max(getScaling(), 1)) <= m_options.percent_dense*extent);
+
+    auto new_xyz = m_xyz.index({ selected_pts_mask });
+    auto new_features = m_features.index({ selected_pts_mask });
+    auto new_opacities = m_opacity.index({ selected_pts_mask });
+    auto new_scaling = m_scaling.index({ selected_pts_mask });
+    auto new_rotation = m_rotation.index({ selected_pts_mask });
+    densifyPostfix(new_xyz, new_features, new_opacities, new_scaling, new_rotation);
+}
+
+void 
+GaussianModel::densifyAndSplit(torch::Tensor& gradients, float gradient_threshold, float extent) {
+    int n_init_points = getXYZ().size(0);
+    auto padded_gradients = torch::zeros({ n_init_points }).to(torch::kCUDA);
+    padded_gradients.index_put_({ torch::indexing::Slice({ torch::indexing::None, gradients.size(0)}) }, 
+            gradients.squeeze());
+
+    auto selected_pts_mask = torch::where(padded_gradients >= gradient_threshold, true, false);
+    selected_pts_mask = torch::logical_and(selected_pts_mask,
+            std::get<0>(torch::max(getScaling(), 1)) > m_options.percent_dense * extent);
+
+
+    // N denotes the number of components the gaussians are split into
+    long N = 2;
+    auto stds = getScaling().index({ selected_pts_mask }).repeat({ N, 1 });
+    auto means = torch::zeros({stds.size(0), 3}).to(torch::kCUDA);
+    auto samples = at::normal(stds, means);
+    auto rots = util::buildRotation(m_rotation.index({ selected_pts_mask })).repeat({ N, 1, 1 });
+
+    auto new_xyz = torch::bmm(rots, samples.unsqueeze(-1)).squeeze(-1) + getXYZ().index({ selected_pts_mask }).repeat({ N, 1 });
+    // torch::log is the scaling inverse activations
+    auto new_scaling = torch::log(getScaling().index({ selected_pts_mask }).repeat({ N, 1}) / (0.8 * N));
+    auto new_rotation = m_rotation.index({ selected_pts_mask }).repeat({ N, 1 });
+    auto new_features = m_features.index({ selected_pts_mask }).repeat({ N, 1, 1 });
+    auto new_opacity = m_opacity.index({ selected_pts_mask }).repeat({ N, 1 });
+
+    densifyPostfix(new_xyz, new_features, new_opacity, new_scaling, new_rotation);
+    auto prune_mask = torch::cat({ selected_pts_mask, torch::zeros({ N * selected_pts_mask.sum().item<int>() }, torch::TensorOptions().dtype(torch::kBool)).to(torch::kCUDA) });
+    prunePoints(prune_mask);
+}
+
+void 
+GaussianModel::prunePoints(torch::Tensor& prune_mask) {
+    auto valid_points_mask = ~prune_mask;
+    auto optimizable_tensors = pruneOptimizer(valid_points_mask);
+
+    m_xyz       = optimizable_tensors[0];
+    m_features  = optimizable_tensors[1];
+    m_opacity   = optimizable_tensors[2];
+    m_scaling   = optimizable_tensors[3];
+    m_rotation  = optimizable_tensors[4];
+
+    m_xyz_gradient_accum    = m_xyz_gradient_accum.index({ valid_points_mask });
+    m_denom                 = m_denom.index({ valid_points_mask });
+    m_max_radii_2d          = m_max_radii_2d.index({ valid_points_mask });
+}
+
+void 
+GaussianModel::densifyAndPrune(float gradient_threshold, float opacity_threshold, float extent, int size_threshold) {
+    auto gradients = m_xyz_gradient_accum / m_denom;
+    gradients = torch::nan_to_num(gradients, 0.f);
+
+    densifyAndClone(gradients, gradient_threshold, extent);
+    densifyAndSplit(gradients, gradient_threshold, extent);
+
+    auto prune_mask = getOpacity() < opacity_threshold;
+    prune_mask = prune_mask.squeeze(-1);
+    if (size_threshold > 0) {
+        auto size_mask_viewspace = m_max_radii_2d > size_threshold;
+        auto size_mask_worldspace = std::get<0>(getScaling().max(1)) > 0.1 * extent;
+        prune_mask = torch::logical_or(torch::logical_or(prune_mask, size_mask_viewspace), size_mask_worldspace);
+    }
+    prunePoints(prune_mask);
+}
+
+void 
+GaussianModel::resetOpacity() {
+    auto new_opacity = torch::min(getOpacity(), torch::ones_like(getOpacity()) * 0.01);
+    new_opacity = torch::log((new_opacity) / (1.f-new_opacity));
+    auto optimizable_tensor = replaceTensorToOptimizer(new_opacity, 2);
+    m_opacity = optimizable_tensor;
+}
+
+void
+GaussianModel::savePLY(std::string filename) {
+    happly::PLYData outfile;
+
+    auto xyz = m_xyz.detach().cpu().transpose(0,1);
+    std::vector<float> x (m_xyz.sizes()[0]);
+    std::vector<float> y (m_xyz.sizes()[0]);
+    std::vector<float> z (m_xyz.sizes()[0]);
+    std::memcpy(x.data(), xyz.index({0}).contiguous().data_ptr<float>(), sizeof(float) * x.size());
+    std::memcpy(y.data(), xyz.index({1}).contiguous().data_ptr<float>(), sizeof(float) * y.size());
+    std::memcpy(z.data(), xyz.index({2}).contiguous().data_ptr<float>(), sizeof(float) * z.size());
+    outfile.addElement("vertex", m_xyz.sizes()[0]);
+    outfile.getElement("vertex").addProperty<float>("x", x);
+    outfile.getElement("vertex").addProperty<float>("y", y);
+    outfile.getElement("vertex").addProperty<float>("z", z);
+
+    auto sh = m_features.index({"...", 0, torch::indexing::Slice({0, 3})}).detach().cpu().transpose(0,1).contiguous();
+    std::vector<float> f_dc_0 (m_features.sizes()[0]);
+    std::vector<float> f_dc_1 (m_features.sizes()[0]);
+    std::vector<float> f_dc_2 (m_features.sizes()[0]);
+    std::memcpy(f_dc_0.data(), sh.index({0}).data_ptr<float>(), sizeof(float) * f_dc_0.size());
+    std::memcpy(f_dc_1.data(), sh.index({1}).data_ptr<float>(), sizeof(float) * f_dc_1.size());
+    std::memcpy(f_dc_2.data(), sh.index({2}).data_ptr<float>(), sizeof(float) * f_dc_2.size());
+    outfile.getElement("vertex").addProperty<float>("f_dc_0", f_dc_0);
+    outfile.getElement("vertex").addProperty<float>("f_dc_1", f_dc_1);
+    outfile.getElement("vertex").addProperty<float>("f_dc_2", f_dc_2);
+
+    auto scale = m_scaling.detach().cpu().transpose(0,1).contiguous();
+    std::vector<float> scale_0 (m_scaling.sizes()[0]);
+    std::vector<float> scale_1 (m_scaling.sizes()[0]);
+    std::vector<float> scale_2 (m_scaling.sizes()[0]);
+    std::memcpy(scale_0.data(), scale.index({0}).data_ptr<float>(), sizeof(float) * scale_0.size());
+    std::memcpy(scale_1.data(), scale.index({1}).data_ptr<float>(), sizeof(float) * scale_1.size());
+    std::memcpy(scale_2.data(), scale.index({2}).data_ptr<float>(), sizeof(float) * scale_2.size());
+    outfile.getElement("vertex").addProperty<float>("scale_0", scale_0);
+    outfile.getElement("vertex").addProperty<float>("scale_1", scale_1);
+    outfile.getElement("vertex").addProperty<float>("scale_2", scale_2);
+
+    auto rot = m_rotation.detach().cpu().transpose(0,1).contiguous();
+    std::vector<float> rot_0 (m_rotation.sizes()[0]);
+    std::vector<float> rot_1 (m_rotation.sizes()[0]);
+    std::vector<float> rot_2 (m_rotation.sizes()[0]);
+    std::vector<float> rot_3 (m_rotation.sizes()[0]);
+    std::memcpy(rot_0.data(), rot.index({0}).data_ptr<float>(), sizeof(float) * rot_0.size());
+    std::memcpy(rot_1.data(), rot.index({1}).data_ptr<float>(), sizeof(float) * rot_1.size());
+    std::memcpy(rot_2.data(), rot.index({2}).data_ptr<float>(), sizeof(float) * rot_2.size());
+    std::memcpy(rot_3.data(), rot.index({3}).data_ptr<float>(), sizeof(float) * rot_3.size());
+    outfile.getElement("vertex").addProperty<float>("rot_0", rot_0);
+    outfile.getElement("vertex").addProperty<float>("rot_1", rot_1);
+    outfile.getElement("vertex").addProperty<float>("rot_2", rot_2);
+    outfile.getElement("vertex").addProperty<float>("rot_3", rot_3);
+
+    auto opacity = m_opacity.detach().cpu().contiguous();
+    std::vector<float> opacity_0 (m_opacity.sizes()[0]);
+    std::memcpy(opacity_0.data(), opacity.data_ptr<float>(), sizeof(float) * opacity_0.size());
+    outfile.getElement("vertex").addProperty<float>("opacity", opacity_0);
+
+    outfile.write(filename, happly::DataFormat::Binary);
+}
+
+torch::Tensor 
+GaussianModel::replaceTensorToOptimizer(torch::Tensor parameter, int parameter_id) {
+    assert(parameter_id < m_optimizer->param_groups().size());
+
+    torch::Tensor optimizable_tensor;
+    auto& param_group = m_optimizer->param_groups()[parameter_id];
+    auto& param = param_group.params()[0];
+
+    if (m_optimizer->state().find( param.unsafeGetTensorImpl() ) != m_optimizer->state().end()) {
+        auto stored_state_ptr = std::move(m_optimizer->state().at( param.unsafeGetTensorImpl() ));
+        //torch::optim::AdamParamState* stored_state = (torch::optim::AdamParamState*)stored_state_ptr.get();
+        OptimizerParamState* stored_state = (OptimizerParamState*)stored_state_ptr.get();
+
+        stored_state->exp_avg(torch::zeros_like(parameter));
+        stored_state->exp_avg_sq(torch::zeros_like(parameter));
+
+        m_optimizer->state().erase(param.unsafeGetTensorImpl());
+        param_group.params()[0] = parameter.requires_grad_();
+        m_optimizer->state().insert_or_assign(param_group.params()[0].unsafeGetTensorImpl(), std::move(stored_state_ptr));
+        optimizable_tensor = param_group.params()[0];
+    } else {
+        param_group.params()[0] = parameter.requires_grad_();
+        optimizable_tensor = param_group.params()[0];
+    }
+
+    return optimizable_tensor;
+}
+
+std::vector<torch::Tensor> 
+GaussianModel::catTensorToOptimizer(std::vector<torch::Tensor> parameters) {
+    std::vector<torch::Tensor> optimizable_tensors (parameters.size());
+    assert(parameters.size() == m_optimizer->param_groups().size());
+
+    for (int i = 0; i < m_optimizer->param_groups().size(); ++i) {
+        auto& param_group = m_optimizer->param_groups()[i];
+        assert(param_group.params().size() == 1);
+        auto& param = param_group.params()[0];
+
+        auto& extension_tensor = parameters[i];
+
+        if (m_optimizer->state().find( param.unsafeGetTensorImpl() ) != m_optimizer->state().end()) {
+            auto stored_state_ptr = std::move(m_optimizer->state().at(param.unsafeGetTensorImpl()));
+            //torch::optim::AdamParamState* stored_state = (torch::optim::AdamParamState*)stored_state_ptr.get();
+            OptimizerParamState* stored_state = (OptimizerParamState*)stored_state_ptr.get();
+
+            stored_state->exp_avg() = torch::cat({ stored_state->exp_avg(), torch::zeros_like(extension_tensor) }, 0);
+            stored_state->exp_avg_sq() = torch::cat({ stored_state->exp_avg_sq(), torch::zeros_like(extension_tensor) }, 0);
+
+            m_optimizer->state().erase(param.unsafeGetTensorImpl());
+            param_group.params()[0] = torch::cat({ param, extension_tensor }, 0).requires_grad_();
+            m_optimizer->state().insert_or_assign(param_group.params()[0].unsafeGetTensorImpl(), std::move(stored_state_ptr));
+            optimizable_tensors[i] = param_group.params()[0];
+        } else {
+            param_group.params()[0] = torch::cat({ param, extension_tensor }, 0).requires_grad_();
+            optimizable_tensors[i] = param_group.params()[0];
+        }
+    }
+
+    return optimizable_tensors;
+}
+
+std::vector<torch::Tensor> 
+GaussianModel::pruneOptimizer(torch::Tensor prune_mask) {
+    std::vector<torch::Tensor> optimizable_tensors (m_optimizer->param_groups().size());
+
+    for (int i = 0; i < m_optimizer->param_groups().size(); ++i) {
+        auto& param_group = m_optimizer->param_groups()[i];
+        assert(param_group.params().size() == 1);
+        auto param = param_group.params()[0];
+
+        if (m_optimizer->state().find( param.unsafeGetTensorImpl() ) != m_optimizer->state().end()) {
+            auto stored_state_ptr = std::move(m_optimizer->state().at( param.unsafeGetTensorImpl() ));
+            //torch::optim::AdamParamState* stored_state = (torch::optim::AdamParamState*)stored_state_ptr.get();
+            OptimizerParamState* stored_state = (OptimizerParamState*)stored_state_ptr.get();
+
+            stored_state->exp_avg(stored_state->exp_avg().index({ prune_mask }));
+            stored_state->exp_avg_sq(stored_state->exp_avg_sq().index({ prune_mask }));
+
+            m_optimizer->state().erase(param.unsafeGetTensorImpl());
+            param_group.params()[0] = param.index({ prune_mask });
+            m_optimizer->state().insert_or_assign(param_group.params()[0].unsafeGetTensorImpl(), std::move(stored_state_ptr));
+            optimizable_tensors[i] = param_group.params()[0];
+
+        } else {
+            param_group.params()[0] = param.index({ prune_mask });
+            optimizable_tensors[i] = param_group.params()[0];
+        }
+    }
+
+    return optimizable_tensors;
+}
+
+}
+```
+
+### gscache/model/gaussian_model.h
+```
+#pragma once
+#include <cstdlib>
+#include <string>
+#include <memory.h>
+#include <torch/types.h>
+#include <torch/optim/adam.h>
+#include <torch/optim/adamw.h>
+
+typedef torch::optim::AdamW             Optimizer;
+typedef torch::optim::AdamWOptions      OptimizerOptions;
+typedef torch::optim::AdamWParamState   OptimizerParamState;
+
+namespace gscache {
+
+struct DiffRasterizerBackwardResult;
+
+struct GaussianModelOptions {
+    float lr_xyz      = 0.00016;
+    float lr_features = 0.0025;
+    float lr_scaling  = 0.001;
+    float lr_rotation = 0.001;
+    float lr_opacity  = 0.025;
+    float percent_dense = 0.6f;
+};
+
+struct GaussianModel {
+
+    GaussianModel(int sh_degree, GaussianModelOptions options = {}) : 
+        m_max_sh_degree(sh_degree), m_active_sh_degree(0), m_options(options) {}
+    void init(float* points, float* colors, size_t num_points);
+
+    void oneupSHDegree();
+    void updateLearningRate(float factor);
+    void updateGradients(DiffRasterizerBackwardResult& result);
+    void updateDensificationStats(DiffRasterizerBackwardResult& result);
+    void densifyAndPrune(float gradient_threshold, float opacity_threshold, float extent, int size_threshold);
+    void optimize();
+    void resetOpacity();
+
+    void setVisible(torch::Tensor& visible) { m_visible = visible; }
+
+    torch::Tensor& getXYZ();
+    torch::Tensor& getFeatures();
+    torch::Tensor  getScaling();
+    torch::Tensor  getRotation();
+    torch::Tensor  getOpacity();
+    torch::Tensor& getVisible();
+
+    const torch::Tensor& getMaxRadii2D()        { return m_max_radii_2d; }
+    const torch::Tensor& getXYZGradientAccum()  { return m_xyz_gradient_accum; }
+    const torch::Tensor& getDenom()             { return m_denom; }
+
+    int getMaxSHDegree()     { return m_max_sh_degree; }
+    int getActiveSHDegree()  { return m_active_sh_degree; }
+
+    void savePLY(std::string filename);
+    void loadPLY(std::string filename);
+    
+    private:
+    int                m_max_sh_degree;
+    int                m_active_sh_degree;
+
+    torch::Tensor      m_xyz;
+    torch::Tensor      m_features;
+    torch::Tensor      m_scaling;
+    torch::Tensor      m_rotation;
+    torch::Tensor      m_opacity;
+    torch::Tensor      m_visible;
+
+    torch::Tensor      m_max_radii_2d;
+    torch::Tensor      m_xyz_gradient_accum;
+    torch::Tensor      m_denom;
+
+    std::shared_ptr<Optimizer>  m_optimizer;
+    GaussianModelOptions m_options;
+
+    // Helper functions for densification, splitting and pruning
+    void densifyAndClone(torch::Tensor& gradients, float gradient_threshold, float extent);
+    void densifyAndSplit(torch::Tensor& gradients, float gradient_threshold, float extent);
+    void densifyPostfix(torch::Tensor& new_xyz, torch::Tensor& new_features, torch::Tensor& new_opacities, torch::Tensor& new_scaling, torch::Tensor& new_rotation);
+    void prunePoints(torch::Tensor& prune_mask);
+
+    torch::Tensor replaceTensorToOptimizer(torch::Tensor parameter, int parameter_id);
+    std::vector<torch::Tensor> catTensorToOptimizer(std::vector<torch::Tensor> parameters);
+    std::vector<torch::Tensor> pruneOptimizer(torch::Tensor prune_mask);
+};
+
+}
+```
+
+### gscache/model/util.h
+```
+#pragma once
+#include <iostream>
+#include <torch/types.h>
+
+#define GSCACHELOG(X) std::cout << X << std::endl;
+
+
+namespace gscache {
+namespace util {
+
+/*
+ * SH Utils
+ *
+ */
+const float C0 = 0.28209479177387814;
+const float C1 = 0.4886025119029199;
+
+const torch::Tensor 
+C2 = torch::tensor({
+    1.0925484305920792,
+    -1.0925484305920792,
+    0.31539156525252005,
+    -1.0925484305920792,
+    0.5462742152960396
+    }, torch::TensorOptions().device(torch::kCUDA));
+
+const torch::Tensor
+C3 = torch::tensor({
+    -0.5900435899266435,
+    2.890611442640554,
+    -0.4570457994644658,
+    0.3731763325901154,
+    -0.4570457994644658,
+    1.445305721320277,
+    -0.5900435899266435
+    }, torch::TensorOptions().device(torch::kCUDA));
+
+const torch::Tensor
+C4 = torch::tensor({
+    2.5033429417967046,
+    -1.7701307697799304,
+    0.9461746957575601,
+    -0.6690465435572892,
+    0.10578554691520431,
+    -0.6690465435572892,
+    0.47308734787878004,
+    -1.7701307697799304,
+    0.6258357354491761,
+    }, torch::TensorOptions().device(torch::kCUDA));
+
+inline torch::Tensor rgb2sh(torch::Tensor rgb) {
+    return (rgb - 0.5f) / C0;
+}
+
+inline torch::Tensor sh2rgb(torch::Tensor sh) {
+    return sh * C0 + 0.5f;
+}
+
+/*
+ * Geometric Utils
+ *
+ */
+inline torch::Tensor buildRotation(torch::Tensor rotation) {
+    auto R = torch::zeros({rotation.size(0), 3, 3}).to(torch::kCUDA);
+
+    auto r = rotation.index({"...", 0});
+    auto x = rotation.index({"...", 1});
+    auto y = rotation.index({"...", 2});
+    auto z = rotation.index({"...", 3});
+
+    R.index_put_({"...", 0, 0}, 1.f - 2.f * (y*y + z*z));
+    R.index_put_({"...", 0, 1}, 2.f * (x*y - r*z));
+    R.index_put_({"...", 0, 2}, 2.f * (x*z + r*y));
+
+    R.index_put_({"...", 1, 0}, 2.f * (x*y + r*z));
+    R.index_put_({"...", 1, 1}, 1.f - 2.f * (x*x + z*z));
+    R.index_put_({"...", 1, 2}, 2.f * (y*z - r*x));
+
+    R.index_put_({"...", 2, 0}, 2.f * (x*z - r*y));
+    R.index_put_({"...", 2, 1}, 2.f * (y*z + r*x));
+    R.index_put_({"...", 2, 2}, 1.f - 2.f * (x*x + y*y));
+
+    return R;
+}
+
+/*
+ * Loss Utils
+ *
+ */
+inline torch::Tensor mseLossGradient(torch::Tensor actual, torch::Tensor expected) {
+    // Gradient of 1/k * sum( (actual - expected) ^ 2)
+    // is (2 * (actual - expected)) / k
+    return (2 * (actual - expected)) / actual.numel();
+}
+
+inline torch::Tensor hdrLossGradient(torch::Tensor actual, torch::Tensor expected) {
+    // From: Noise2Noise Paper "https://arxiv.org/abs/1803.04189"
+
+    // Gradient of 1/k * ( (actual - expected) ^ 2 / (actual + 0.01) ^ 2 )
+    // is 2 * (actual - expected) / (k * (actual + 0.01) ^ 2)
+    // assuming that the denominator is constant and does not contribute to the gradient
+    
+    return (2 * (actual - expected)) / (actual.numel() * torch::pow(actual + 0.01, 2));
+}
+
+
+}
+}
+```
+
+### gscache/3dgs/cuda_rasterizer/auxiliary.h
+```
+/*
+ * Copyright (C) 2023, Inria
+ * GRAPHDECO research group, https://team.inria.fr/graphdeco
+ * All rights reserved.
+ *
+ * This software is free for non-commercial, research and evaluation use 
+ * under the terms of the LICENSE.md file.
+ *
+ * For inquiries contact  george.drettakis@inria.fr
+ */
+
+#ifndef CUDA_RASTERIZER_AUXILIARY_H_INCLUDED
+#define CUDA_RASTERIZER_AUXILIARY_H_INCLUDED
+
+#include "config.h"
+#include "stdio.h"
+
+#define BLOCK_SIZE (BLOCK_X * BLOCK_Y)
+#define NUM_WARPS (BLOCK_SIZE/32)
+
+// Spherical harmonics coefficients
+__device__ const float SH_C0 = 0.28209479177387814f;
+__device__ const float SH_C1 = 0.4886025119029199f;
+__device__ const float SH_C2[] = {
+	1.0925484305920792f,
+	-1.0925484305920792f,
+	0.31539156525252005f,
+	-1.0925484305920792f,
+	0.5462742152960396f
+};
+__device__ const float SH_C3[] = {
+	-0.5900435899266435f,
+	2.890611442640554f,
+	-0.4570457994644658f,
+	0.3731763325901154f,
+	-0.4570457994644658f,
+	1.445305721320277f,
+	-0.5900435899266435f
+};
+
+__forceinline__ __device__ float ndc2Pix(float v, int S)
+{
+	return ((v + 1.0) * S - 1.0) * 0.5;
+}
+
+__forceinline__ __device__ void getRect(const float2 p, int max_radius, uint2& rect_min, uint2& rect_max, dim3 grid)
+{
+	rect_min = {
+		min(grid.x, max((int)0, (int)((p.x - max_radius) / BLOCK_X))),
+		min(grid.y, max((int)0, (int)((p.y - max_radius) / BLOCK_Y)))
+	};
+	rect_max = {
+		min(grid.x, max((int)0, (int)((p.x + max_radius + BLOCK_X - 1) / BLOCK_X))),
+		min(grid.y, max((int)0, (int)((p.y + max_radius + BLOCK_Y - 1) / BLOCK_Y)))
+	};
+}
+
+__forceinline__ __device__ float3 transformPoint4x3(const float3& p, const float* matrix)
+{
+	float3 transformed = {
+		matrix[0] * p.x + matrix[4] * p.y + matrix[8] * p.z + matrix[12],
+		matrix[1] * p.x + matrix[5] * p.y + matrix[9] * p.z + matrix[13],
+		matrix[2] * p.x + matrix[6] * p.y + matrix[10] * p.z + matrix[14],
+	};
+	return transformed;
+}
+
+__forceinline__ __device__ float4 transformPoint4x4(const float3& p, const float* matrix)
+{
+	float4 transformed = {
+		matrix[0] * p.x + matrix[4] * p.y + matrix[8] * p.z + matrix[12],
+		matrix[1] * p.x + matrix[5] * p.y + matrix[9] * p.z + matrix[13],
+		matrix[2] * p.x + matrix[6] * p.y + matrix[10] * p.z + matrix[14],
+		matrix[3] * p.x + matrix[7] * p.y + matrix[11] * p.z + matrix[15]
+	};
+	return transformed;
+}
+
+__forceinline__ __device__ float3 transformVec4x3(const float3& p, const float* matrix)
+{
+	float3 transformed = {
+		matrix[0] * p.x + matrix[4] * p.y + matrix[8] * p.z,
+		matrix[1] * p.x + matrix[5] * p.y + matrix[9] * p.z,
+		matrix[2] * p.x + matrix[6] * p.y + matrix[10] * p.z,
+	};
+	return transformed;
+}
+
+__forceinline__ __device__ float3 transformVec4x3Transpose(const float3& p, const float* matrix)
+{
+	float3 transformed = {
+		matrix[0] * p.x + matrix[1] * p.y + matrix[2] * p.z,
+		matrix[4] * p.x + matrix[5] * p.y + matrix[6] * p.z,
+		matrix[8] * p.x + matrix[9] * p.y + matrix[10] * p.z,
+	};
+	return transformed;
+}
+
+__forceinline__ __device__ float dnormvdz(float3 v, float3 dv)
+{
+	float sum2 = v.x * v.x + v.y * v.y + v.z * v.z;
+	float invsum32 = 1.0f / sqrt(sum2 * sum2 * sum2);
+	float dnormvdz = (-v.x * v.z * dv.x - v.y * v.z * dv.y + (sum2 - v.z * v.z) * dv.z) * invsum32;
+	return dnormvdz;
+}
+
+__forceinline__ __device__ float3 dnormvdv(float3 v, float3 dv)
+{
+	float sum2 = v.x * v.x + v.y * v.y + v.z * v.z;
+	float invsum32 = 1.0f / sqrt(sum2 * sum2 * sum2);
+
+	float3 dnormvdv;
+	dnormvdv.x = ((+sum2 - v.x * v.x) * dv.x - v.y * v.x * dv.y - v.z * v.x * dv.z) * invsum32;
+	dnormvdv.y = (-v.x * v.y * dv.x + (sum2 - v.y * v.y) * dv.y - v.z * v.y * dv.z) * invsum32;
+	dnormvdv.z = (-v.x * v.z * dv.x - v.y * v.z * dv.y + (sum2 - v.z * v.z) * dv.z) * invsum32;
+	return dnormvdv;
+}
+
+__forceinline__ __device__ float4 dnormvdv(float4 v, float4 dv)
+{
+	float sum2 = v.x * v.x + v.y * v.y + v.z * v.z + v.w * v.w;
+	float invsum32 = 1.0f / sqrt(sum2 * sum2 * sum2);
+
+	float4 vdv = { v.x * dv.x, v.y * dv.y, v.z * dv.z, v.w * dv.w };
+	float vdv_sum = vdv.x + vdv.y + vdv.z + vdv.w;
+	float4 dnormvdv;
+	dnormvdv.x = ((sum2 - v.x * v.x) * dv.x - v.x * (vdv_sum - vdv.x)) * invsum32;
+	dnormvdv.y = ((sum2 - v.y * v.y) * dv.y - v.y * (vdv_sum - vdv.y)) * invsum32;
+	dnormvdv.z = ((sum2 - v.z * v.z) * dv.z - v.z * (vdv_sum - vdv.z)) * invsum32;
+	dnormvdv.w = ((sum2 - v.w * v.w) * dv.w - v.w * (vdv_sum - vdv.w)) * invsum32;
+	return dnormvdv;
+}
+
+__forceinline__ __device__ float sigmoid(float x)
+{
+	return 1.0f / (1.0f + expf(-x));
+}
+
+__forceinline__ __device__ bool in_frustum(int idx,
+	const float* orig_points,
+	const float* viewmatrix,
+	const float* projmatrix,
+	bool prefiltered,
+	float3& p_view)
+{
+	float3 p_orig = { orig_points[3 * idx], orig_points[3 * idx + 1], orig_points[3 * idx + 2] };
+
+	// Bring points to screen space
+	p_view = transformPoint4x3(p_orig, viewmatrix);
+	float4 p_hom = transformPoint4x4(p_view, projmatrix);
+    float p_w = abs(p_hom.w);
+    //float p_w = 1.0f / (p_hom.w + 0.0000001f);
+    //float3 p_proj = { p_hom.x * p_w, p_hom.y * p_w, p_hom.z * p_w };
+    //printf("%f, %f, %f, %f\n", p_hom.x, p_hom.y, p_hom.z, p_hom.w);
+
+
+	//if (p_view.z <= 0.2f)// || ((p_proj.x < -1.3 || p_proj.x > 1.3 || p_proj.y < -1.3 || p_proj.y > 1.3)))
+	//if ((p_proj.z < -1 || p_proj.z > 1 || p_proj.x < -1.3 || p_proj.x > 1.3 || p_proj.y < -1.3 || p_proj.y > 1.3))
+	if (abs(p_hom.z) > p_w || abs(p_hom.y) > p_w || abs(p_hom.x) > p_w)
+	{
+		if (prefiltered)
+		{
+			printf("Point is filtered although prefiltered is set. This shouldn't happen!");
+			__trap();
+		}
+		return false;
+	}
+	return true;
+}
+
+#define CHECK_CUDA(A, debug) \
+A; if(debug) { \
+auto ret = cudaDeviceSynchronize(); \
+if (ret != cudaSuccess) { \
+std::cerr << "\n[CUDA ERROR] in " << __FILE__ << "\nLine " << __LINE__ << ": " << cudaGetErrorString(ret); \
+throw std::runtime_error(cudaGetErrorString(ret)); \
+} \
+}
+
+#endif
+```
+
+### gscache/3dgs/cuda_rasterizer/backward.cu
+```
+/*
+ * Copyright (C) 2023, Inria
+ * GRAPHDECO research group, https://team.inria.fr/graphdeco
+ * All rights reserved.
+ *
+ * This software is free for non-commercial, research and evaluation use 
+ * under the terms of the LICENSE.md file.
+ *
+ * For inquiries contact  george.drettakis@inria.fr
+ */
+
+#include "backward.h"
+#include "auxiliary.h"
+#include <cooperative_groups.h>
+#include <cooperative_groups/reduce.h>
+namespace cg = cooperative_groups;
+
+// Backward pass for conversion of spherical harmonics to RGB for
+// each Gaussian.
+__device__ void computeColorFromSH(int idx, int deg, int max_coeffs, const glm::vec3* means, glm::vec3 campos, const float* shs, const bool* clamped, const glm::vec3* dL_dcolor, glm::vec3* dL_dmeans, glm::vec3* dL_dshs)
+{
+	// Compute intermediate values, as it is done during forward
+	glm::vec3 pos = means[idx];
+	glm::vec3 dir_orig = pos - campos;
+	glm::vec3 dir = dir_orig / glm::length(dir_orig);
+
+	glm::vec3* sh = ((glm::vec3*)shs) + idx * max_coeffs;
+
+	// Use PyTorch rule for clamping: if clamping was applied,
+	// gradient becomes 0.
+	glm::vec3 dL_dRGB = dL_dcolor[idx];
+	dL_dRGB.x *= clamped[3 * idx + 0] ? 0 : 1;
+	dL_dRGB.y *= clamped[3 * idx + 1] ? 0 : 1;
+	dL_dRGB.z *= clamped[3 * idx + 2] ? 0 : 1;
+
+	glm::vec3 dRGBdx(0, 0, 0);
+	glm::vec3 dRGBdy(0, 0, 0);
+	glm::vec3 dRGBdz(0, 0, 0);
+	float x = dir.x;
+	float y = dir.y;
+	float z = dir.z;
+
+	// Target location for this Gaussian to write SH gradients to
+	glm::vec3* dL_dsh = dL_dshs + idx * max_coeffs;
+
+	// No tricks here, just high school-level calculus.
+	float dRGBdsh0 = SH_C0;
+	dL_dsh[0] = dRGBdsh0 * dL_dRGB;
+	if (deg > 0)
+	{
+		float dRGBdsh1 = -SH_C1 * y;
+		float dRGBdsh2 = SH_C1 * z;
+		float dRGBdsh3 = -SH_C1 * x;
+		dL_dsh[1] = dRGBdsh1 * dL_dRGB;
+		dL_dsh[2] = dRGBdsh2 * dL_dRGB;
+		dL_dsh[3] = dRGBdsh3 * dL_dRGB;
+
+		dRGBdx = -SH_C1 * sh[3];
+		dRGBdy = -SH_C1 * sh[1];
+		dRGBdz = SH_C1 * sh[2];
+
+		if (deg > 1)
+		{
+			float xx = x * x, yy = y * y, zz = z * z;
+			float xy = x * y, yz = y * z, xz = x * z;
+
+			float dRGBdsh4 = SH_C2[0] * xy;
+			float dRGBdsh5 = SH_C2[1] * yz;
+			float dRGBdsh6 = SH_C2[2] * (2.f * zz - xx - yy);
+			float dRGBdsh7 = SH_C2[3] * xz;
+			float dRGBdsh8 = SH_C2[4] * (xx - yy);
+			dL_dsh[4] = dRGBdsh4 * dL_dRGB;
+			dL_dsh[5] = dRGBdsh5 * dL_dRGB;
+			dL_dsh[6] = dRGBdsh6 * dL_dRGB;
+			dL_dsh[7] = dRGBdsh7 * dL_dRGB;
+			dL_dsh[8] = dRGBdsh8 * dL_dRGB;
+
+			dRGBdx += SH_C2[0] * y * sh[4] + SH_C2[2] * 2.f * -x * sh[6] + SH_C2[3] * z * sh[7] + SH_C2[4] * 2.f * x * sh[8];
+			dRGBdy += SH_C2[0] * x * sh[4] + SH_C2[1] * z * sh[5] + SH_C2[2] * 2.f * -y * sh[6] + SH_C2[4] * 2.f * -y * sh[8];
+			dRGBdz += SH_C2[1] * y * sh[5] + SH_C2[2] * 2.f * 2.f * z * sh[6] + SH_C2[3] * x * sh[7];
+
+			if (deg > 2)
+			{
+				float dRGBdsh9 = SH_C3[0] * y * (3.f * xx - yy);
+				float dRGBdsh10 = SH_C3[1] * xy * z;
+				float dRGBdsh11 = SH_C3[2] * y * (4.f * zz - xx - yy);
+				float dRGBdsh12 = SH_C3[3] * z * (2.f * zz - 3.f * xx - 3.f * yy);
+				float dRGBdsh13 = SH_C3[4] * x * (4.f * zz - xx - yy);
+				float dRGBdsh14 = SH_C3[5] * z * (xx - yy);
+				float dRGBdsh15 = SH_C3[6] * x * (xx - 3.f * yy);
+				dL_dsh[9] = dRGBdsh9 * dL_dRGB;
+				dL_dsh[10] = dRGBdsh10 * dL_dRGB;
+				dL_dsh[11] = dRGBdsh11 * dL_dRGB;
+				dL_dsh[12] = dRGBdsh12 * dL_dRGB;
+				dL_dsh[13] = dRGBdsh13 * dL_dRGB;
+				dL_dsh[14] = dRGBdsh14 * dL_dRGB;
+				dL_dsh[15] = dRGBdsh15 * dL_dRGB;
+
+				dRGBdx += (
+					SH_C3[0] * sh[9] * 3.f * 2.f * xy +
+					SH_C3[1] * sh[10] * yz +
+					SH_C3[2] * sh[11] * -2.f * xy +
+					SH_C3[3] * sh[12] * -3.f * 2.f * xz +
+					SH_C3[4] * sh[13] * (-3.f * xx + 4.f * zz - yy) +
+					SH_C3[5] * sh[14] * 2.f * xz +
+					SH_C3[6] * sh[15] * 3.f * (xx - yy));
+
+				dRGBdy += (
+					SH_C3[0] * sh[9] * 3.f * (xx - yy) +
+					SH_C3[1] * sh[10] * xz +
+					SH_C3[2] * sh[11] * (-3.f * yy + 4.f * zz - xx) +
+					SH_C3[3] * sh[12] * -3.f * 2.f * yz +
+					SH_C3[4] * sh[13] * -2.f * xy +
+					SH_C3[5] * sh[14] * -2.f * yz +
+					SH_C3[6] * sh[15] * -3.f * 2.f * xy);
+
+				dRGBdz += (
+					SH_C3[1] * sh[10] * xy +
+					SH_C3[2] * sh[11] * 4.f * 2.f * yz +
+					SH_C3[3] * sh[12] * 3.f * (2.f * zz - xx - yy) +
+					SH_C3[4] * sh[13] * 4.f * 2.f * xz +
+					SH_C3[5] * sh[14] * (xx - yy));
+			}
+		}
+	}
+
+	// The view direction is an input to the computation. View direction
+	// is influenced by the Gaussian's mean, so SHs gradients
+	// must propagate back into 3D position.
+	glm::vec3 dL_ddir(glm::dot(dRGBdx, dL_dRGB), glm::dot(dRGBdy, dL_dRGB), glm::dot(dRGBdz, dL_dRGB));
+
+	// Account for normalization of direction
+	float3 dL_dmean = dnormvdv(float3{ dir_orig.x, dir_orig.y, dir_orig.z }, float3{ dL_ddir.x, dL_ddir.y, dL_ddir.z });
+
+	// Gradients of loss w.r.t. Gaussian means, but only the portion 
+	// that is caused because the mean affects the view-dependent color.
+	// Additional mean gradient is accumulated in below methods.
+	dL_dmeans[idx] += glm::vec3(dL_dmean.x, dL_dmean.y, dL_dmean.z);
+}
+
+// Backward version of INVERSE 2D covariance matrix computation
+// (due to length launched as separate kernel before other 
+// backward steps contained in preprocess)
+__global__ void computeCov2DCUDA(int P,
+	const float3* means,
+	const int* radii,
+	const float* cov3Ds,
+	const float h_x, float h_y,
+	const float tan_fovx, float tan_fovy,
+	const float* view_matrix,
+	const float* dL_dconics,
+	float3* dL_dmeans,
+	float* dL_dcov)
+{
+	auto idx = cg::this_grid().thread_rank();
+	if (idx >= P || !(radii[idx] > 0))
+		return;
+
+	// Reading location of 3D covariance for this Gaussian
+	const float* cov3D = cov3Ds + 6 * idx;
+
+	// Fetch gradients, recompute 2D covariance and relevant 
+	// intermediate forward results needed in the backward.
+	float3 mean = means[idx];
+	float3 dL_dconic = { dL_dconics[4 * idx], dL_dconics[4 * idx + 1], dL_dconics[4 * idx + 3] };
+	float3 t = transformPoint4x3(mean, view_matrix);
+	
+	const float limx = 1.3f * tan_fovx;
+	const float limy = 1.3f * tan_fovy;
+	const float txtz = t.x / t.z;
+	const float tytz = t.y / t.z;
+	t.x = min(limx, max(-limx, txtz)) * t.z;
+	t.y = min(limy, max(-limy, tytz)) * t.z;
+	
+	const float x_grad_mul = txtz < -limx || txtz > limx ? 0 : 1;
+	const float y_grad_mul = tytz < -limy || tytz > limy ? 0 : 1;
+
+	glm::mat3 J = glm::mat3(h_x / t.z, 0.0f, -(h_x * t.x) / (t.z * t.z),
+		0.0f, h_y / t.z, -(h_y * t.y) / (t.z * t.z),
+		0, 0, 0);
+
+	glm::mat3 W = glm::mat3(
+		view_matrix[0], view_matrix[4], view_matrix[8],
+		view_matrix[1], view_matrix[5], view_matrix[9],
+		view_matrix[2], view_matrix[6], view_matrix[10]);
+
+	glm::mat3 Vrk = glm::mat3(
+		cov3D[0], cov3D[1], cov3D[2],
+		cov3D[1], cov3D[3], cov3D[4],
+		cov3D[2], cov3D[4], cov3D[5]);
+
+	glm::mat3 T = W * J;
+
+	glm::mat3 cov2D = glm::transpose(T) * glm::transpose(Vrk) * T;
+
+	// Use helper variables for 2D covariance entries. More compact.
+	float a = cov2D[0][0] += 0.3f;
+	float b = cov2D[0][1];
+	float c = cov2D[1][1] += 0.3f;
+
+	float denom = a * c - b * b;
+	float dL_da = 0, dL_db = 0, dL_dc = 0;
+	float denom2inv = 1.0f / ((denom * denom) + 0.0000001f);
+
+	if (denom2inv != 0)
+	{
+		// Gradients of loss w.r.t. entries of 2D covariance matrix,
+		// given gradients of loss w.r.t. conic matrix (inverse covariance matrix).
+		// e.g., dL / da = dL / d_conic_a * d_conic_a / d_a
+		dL_da = denom2inv * (-c * c * dL_dconic.x + 2 * b * c * dL_dconic.y + (denom - a * c) * dL_dconic.z);
+		dL_dc = denom2inv * (-a * a * dL_dconic.z + 2 * a * b * dL_dconic.y + (denom - a * c) * dL_dconic.x);
+		dL_db = denom2inv * 2 * (b * c * dL_dconic.x - (denom + 2 * b * b) * dL_dconic.y + a * b * dL_dconic.z);
+
+		// Gradients of loss L w.r.t. each 3D covariance matrix (Vrk) entry, 
+		// given gradients w.r.t. 2D covariance matrix (diagonal).
+		// cov2D = transpose(T) * transpose(Vrk) * T;
+		dL_dcov[6 * idx + 0] = (T[0][0] * T[0][0] * dL_da + T[0][0] * T[1][0] * dL_db + T[1][0] * T[1][0] * dL_dc);
+		dL_dcov[6 * idx + 3] = (T[0][1] * T[0][1] * dL_da + T[0][1] * T[1][1] * dL_db + T[1][1] * T[1][1] * dL_dc);
+		dL_dcov[6 * idx + 5] = (T[0][2] * T[0][2] * dL_da + T[0][2] * T[1][2] * dL_db + T[1][2] * T[1][2] * dL_dc);
+
+		// Gradients of loss L w.r.t. each 3D covariance matrix (Vrk) entry, 
+		// given gradients w.r.t. 2D covariance matrix (off-diagonal).
+		// Off-diagonal elements appear twice --> double the gradient.
+		// cov2D = transpose(T) * transpose(Vrk) * T;
+		dL_dcov[6 * idx + 1] = 2 * T[0][0] * T[0][1] * dL_da + (T[0][0] * T[1][1] + T[0][1] * T[1][0]) * dL_db + 2 * T[1][0] * T[1][1] * dL_dc;
+		dL_dcov[6 * idx + 2] = 2 * T[0][0] * T[0][2] * dL_da + (T[0][0] * T[1][2] + T[0][2] * T[1][0]) * dL_db + 2 * T[1][0] * T[1][2] * dL_dc;
+		dL_dcov[6 * idx + 4] = 2 * T[0][2] * T[0][1] * dL_da + (T[0][1] * T[1][2] + T[0][2] * T[1][1]) * dL_db + 2 * T[1][1] * T[1][2] * dL_dc;
+	}
+	else
+	{
+		for (int i = 0; i < 6; i++)
+			dL_dcov[6 * idx + i] = 0;
+	}
+
+	// Gradients of loss w.r.t. upper 2x3 portion of intermediate matrix T
+	// cov2D = transpose(T) * transpose(Vrk) * T;
+	float dL_dT00 = 2 * (T[0][0] * Vrk[0][0] + T[0][1] * Vrk[0][1] + T[0][2] * Vrk[0][2]) * dL_da +
+		(T[1][0] * Vrk[0][0] + T[1][1] * Vrk[0][1] + T[1][2] * Vrk[0][2]) * dL_db;
+	float dL_dT01 = 2 * (T[0][0] * Vrk[1][0] + T[0][1] * Vrk[1][1] + T[0][2] * Vrk[1][2]) * dL_da +
+		(T[1][0] * Vrk[1][0] + T[1][1] * Vrk[1][1] + T[1][2] * Vrk[1][2]) * dL_db;
+	float dL_dT02 = 2 * (T[0][0] * Vrk[2][0] + T[0][1] * Vrk[2][1] + T[0][2] * Vrk[2][2]) * dL_da +
+		(T[1][0] * Vrk[2][0] + T[1][1] * Vrk[2][1] + T[1][2] * Vrk[2][2]) * dL_db;
+	float dL_dT10 = 2 * (T[1][0] * Vrk[0][0] + T[1][1] * Vrk[0][1] + T[1][2] * Vrk[0][2]) * dL_dc +
+		(T[0][0] * Vrk[0][0] + T[0][1] * Vrk[0][1] + T[0][2] * Vrk[0][2]) * dL_db;
+	float dL_dT11 = 2 * (T[1][0] * Vrk[1][0] + T[1][1] * Vrk[1][1] + T[1][2] * Vrk[1][2]) * dL_dc +
+		(T[0][0] * Vrk[1][0] + T[0][1] * Vrk[1][1] + T[0][2] * Vrk[1][2]) * dL_db;
+	float dL_dT12 = 2 * (T[1][0] * Vrk[2][0] + T[1][1] * Vrk[2][1] + T[1][2] * Vrk[2][2]) * dL_dc +
+		(T[0][0] * Vrk[2][0] + T[0][1] * Vrk[2][1] + T[0][2] * Vrk[2][2]) * dL_db;
+
+	// Gradients of loss w.r.t. upper 3x2 non-zero entries of Jacobian matrix
+	// T = W * J
+	float dL_dJ00 = W[0][0] * dL_dT00 + W[0][1] * dL_dT01 + W[0][2] * dL_dT02;
+	float dL_dJ02 = W[2][0] * dL_dT00 + W[2][1] * dL_dT01 + W[2][2] * dL_dT02;
+	float dL_dJ11 = W[1][0] * dL_dT10 + W[1][1] * dL_dT11 + W[1][2] * dL_dT12;
+	float dL_dJ12 = W[2][0] * dL_dT10 + W[2][1] * dL_dT11 + W[2][2] * dL_dT12;
+
+	float tz = 1.f / t.z;
+	float tz2 = tz * tz;
+	float tz3 = tz2 * tz;
+
+	// Gradients of loss w.r.t. transformed Gaussian mean t
+	float dL_dtx = x_grad_mul * -h_x * tz2 * dL_dJ02;
+	float dL_dty = y_grad_mul * -h_y * tz2 * dL_dJ12;
+	float dL_dtz = -h_x * tz2 * dL_dJ00 - h_y * tz2 * dL_dJ11 + (2 * h_x * t.x) * tz3 * dL_dJ02 + (2 * h_y * t.y) * tz3 * dL_dJ12;
+
+	// Account for transformation of mean to t
+	// t = transformPoint4x3(mean, view_matrix);
+	float3 dL_dmean = transformVec4x3Transpose({ dL_dtx, dL_dty, dL_dtz }, view_matrix);
+
+	// Gradients of loss w.r.t. Gaussian means, but only the portion 
+	// that is caused because the mean affects the covariance matrix.
+	// Additional mean gradient is accumulated in BACKWARD::preprocess.
+	dL_dmeans[idx] = dL_dmean;
+}
+
+// Backward pass for the conversion of scale and rotation to a 
+// 3D covariance matrix for each Gaussian. 
+__device__ void computeCov3D(int idx, const glm::vec3 scale, float mod, const glm::vec4 rot, const float* dL_dcov3Ds, glm::vec3* dL_dscales, glm::vec4* dL_drots)
+{
+	// Recompute (intermediate) results for the 3D covariance computation.
+	glm::vec4 q = rot;// / glm::length(rot);
+	float r = q.x;
+	float x = q.y;
+	float y = q.z;
+	float z = q.w;
+
+	glm::mat3 R = glm::mat3(
+		1.f - 2.f * (y * y + z * z), 2.f * (x * y - r * z), 2.f * (x * z + r * y),
+		2.f * (x * y + r * z), 1.f - 2.f * (x * x + z * z), 2.f * (y * z - r * x),
+		2.f * (x * z - r * y), 2.f * (y * z + r * x), 1.f - 2.f * (x * x + y * y)
+	);
+
+	glm::mat3 S = glm::mat3(1.0f);
+
+	glm::vec3 s = mod * scale;
+	S[0][0] = s.x;
+	S[1][1] = s.y;
+	S[2][2] = s.z;
+
+	glm::mat3 M = S * R;
+
+	const float* dL_dcov3D = dL_dcov3Ds + 6 * idx;
+
+	glm::vec3 dunc(dL_dcov3D[0], dL_dcov3D[3], dL_dcov3D[5]);
+	glm::vec3 ounc = 0.5f * glm::vec3(dL_dcov3D[1], dL_dcov3D[2], dL_dcov3D[4]);
+
+	// Convert per-element covariance loss gradients to matrix form
+	glm::mat3 dL_dSigma = glm::mat3(
+		dL_dcov3D[0], 0.5f * dL_dcov3D[1], 0.5f * dL_dcov3D[2],
+		0.5f * dL_dcov3D[1], dL_dcov3D[3], 0.5f * dL_dcov3D[4],
+		0.5f * dL_dcov3D[2], 0.5f * dL_dcov3D[4], dL_dcov3D[5]
+	);
+
+	// Compute loss gradient w.r.t. matrix M
+	// dSigma_dM = 2 * M
+	glm::mat3 dL_dM = 2.0f * M * dL_dSigma;
+
+	glm::mat3 Rt = glm::transpose(R);
+	glm::mat3 dL_dMt = glm::transpose(dL_dM);
+
+	// Gradients of loss w.r.t. scale
+	glm::vec3* dL_dscale = dL_dscales + idx;
+	dL_dscale->x = glm::dot(Rt[0], dL_dMt[0]);
+	dL_dscale->y = glm::dot(Rt[1], dL_dMt[1]);
+	dL_dscale->z = glm::dot(Rt[2], dL_dMt[2]);
+
+	dL_dMt[0] *= s.x;
+	dL_dMt[1] *= s.y;
+	dL_dMt[2] *= s.z;
+
+	// Gradients of loss w.r.t. normalized quaternion
+	glm::vec4 dL_dq;
+	dL_dq.x = 2 * z * (dL_dMt[0][1] - dL_dMt[1][0]) + 2 * y * (dL_dMt[2][0] - dL_dMt[0][2]) + 2 * x * (dL_dMt[1][2] - dL_dMt[2][1]);
+	dL_dq.y = 2 * y * (dL_dMt[1][0] + dL_dMt[0][1]) + 2 * z * (dL_dMt[2][0] + dL_dMt[0][2]) + 2 * r * (dL_dMt[1][2] - dL_dMt[2][1]) - 4 * x * (dL_dMt[2][2] + dL_dMt[1][1]);
+	dL_dq.z = 2 * x * (dL_dMt[1][0] + dL_dMt[0][1]) + 2 * r * (dL_dMt[2][0] - dL_dMt[0][2]) + 2 * z * (dL_dMt[1][2] + dL_dMt[2][1]) - 4 * y * (dL_dMt[2][2] + dL_dMt[0][0]);
+	dL_dq.w = 2 * r * (dL_dMt[0][1] - dL_dMt[1][0]) + 2 * x * (dL_dMt[2][0] + dL_dMt[0][2]) + 2 * y * (dL_dMt[1][2] + dL_dMt[2][1]) - 4 * z * (dL_dMt[1][1] + dL_dMt[0][0]);
+
+	// Gradients of loss w.r.t. unnormalized quaternion
+	float4* dL_drot = (float4*)(dL_drots + idx);
+	*dL_drot = float4{ dL_dq.x, dL_dq.y, dL_dq.z, dL_dq.w };//dnormvdv(float4{ rot.x, rot.y, rot.z, rot.w }, float4{ dL_dq.x, dL_dq.y, dL_dq.z, dL_dq.w });
+}
+
+// Backward pass of the preprocessing steps, except
+// for the covariance computation and inversion
+// (those are handled by a previous kernel call)
+template<int C>
+__global__ void preprocessCUDA(
+	int P, int D, int M,
+	const float3* means,
+	const int* radii,
+	const float* shs,
+	const bool* clamped,
+	const glm::vec3* scales,
+	const glm::vec4* rotations,
+	const float scale_modifier,
+	const float* proj,
+	const glm::vec3* campos,
+	const float3* dL_dmean2D,
+	glm::vec3* dL_dmeans,
+	float* dL_dcolor,
+	float* dL_dcov3D,
+	float* dL_dsh,
+	glm::vec3* dL_dscale,
+	glm::vec4* dL_drot)
+{
+	auto idx = cg::this_grid().thread_rank();
+	if (idx >= P || !(radii[idx] > 0))
+		return;
+
+	float3 m = means[idx];
+
+	// Taking care of gradients from the screenspace points
+	float4 m_hom = transformPoint4x4(m, proj);
+	float m_w = 1.0f / (m_hom.w + 0.0000001f);
+
+	// Compute loss gradient w.r.t. 3D means due to gradients of 2D means
+	// from rendering procedure
+	glm::vec3 dL_dmean;
+	float mul1 = (proj[0] * m.x + proj[4] * m.y + proj[8] * m.z + proj[12]) * m_w * m_w;
+	float mul2 = (proj[1] * m.x + proj[5] * m.y + proj[9] * m.z + proj[13]) * m_w * m_w;
+	dL_dmean.x = (proj[0] * m_w - proj[3] * mul1) * dL_dmean2D[idx].x + (proj[1] * m_w - proj[3] * mul2) * dL_dmean2D[idx].y;
+	dL_dmean.y = (proj[4] * m_w - proj[7] * mul1) * dL_dmean2D[idx].x + (proj[5] * m_w - proj[7] * mul2) * dL_dmean2D[idx].y;
+	dL_dmean.z = (proj[8] * m_w - proj[11] * mul1) * dL_dmean2D[idx].x + (proj[9] * m_w - proj[11] * mul2) * dL_dmean2D[idx].y;
+
+	// That's the second part of the mean gradient. Previous computation
+	// of cov2D and following SH conversion also affects it.
+	dL_dmeans[idx] += dL_dmean;
+
+	// Compute gradient updates due to computing colors from SHs
+	if (shs)
+		computeColorFromSH(idx, D, M, (glm::vec3*)means, *campos, shs, clamped, (glm::vec3*)dL_dcolor, (glm::vec3*)dL_dmeans, (glm::vec3*)dL_dsh);
+
+	// Compute gradient updates due to computing covariance from scale/rotation
+	if (scales)
+		computeCov3D(idx, scales[idx], scale_modifier, rotations[idx], dL_dcov3D, dL_dscale, dL_drot);
+}
+
+// Backward version of the rendering procedure.
+template <uint32_t C>
+__global__ void __launch_bounds__(BLOCK_X * BLOCK_Y)
+renderCUDA(
+	const uint2* __restrict__ ranges,
+	const uint32_t* __restrict__ point_list,
+	int W, int H,
+	const float* __restrict__ bg_color,
+	const float2* __restrict__ points_xy_image,
+	const float4* __restrict__ conic_opacity,
+	const float* __restrict__ colors,
+	const float* __restrict__ final_Ts,
+	const uint32_t* __restrict__ n_contrib,
+	const float* __restrict__ dL_dpixels,
+	float3* __restrict__ dL_dmean2D,
+	float4* __restrict__ dL_dconic2D,
+	float* __restrict__ dL_dopacity,
+	float* __restrict__ dL_dcolors)
+{
+	// We rasterize again. Compute necessary block info.
+	auto block = cg::this_thread_block();
+	const uint32_t horizontal_blocks = (W + BLOCK_X - 1) / BLOCK_X;
+	const uint2 pix_min = { block.group_index().x * BLOCK_X, block.group_index().y * BLOCK_Y };
+	const uint2 pix_max = { min(pix_min.x + BLOCK_X, W), min(pix_min.y + BLOCK_Y , H) };
+	const uint2 pix = { pix_min.x + block.thread_index().x, pix_min.y + block.thread_index().y };
+	const uint32_t pix_id = W * pix.y + pix.x;
+	const float2 pixf = { (float)pix.x, (float)pix.y };
+
+	const bool inside = pix.x < W&& pix.y < H;
+	const uint2 range = ranges[block.group_index().y * horizontal_blocks + block.group_index().x];
+
+	const int rounds = ((range.y - range.x + BLOCK_SIZE - 1) / BLOCK_SIZE);
+
+	bool done = !inside;
+	int toDo = range.y - range.x;
+
+	__shared__ int collected_id[BLOCK_SIZE];
+	__shared__ float2 collected_xy[BLOCK_SIZE];
+	__shared__ float4 collected_conic_opacity[BLOCK_SIZE];
+	__shared__ float collected_colors[C * BLOCK_SIZE];
+
+	// In the forward, we stored the final value for T, the
+	// product of all (1 - alpha) factors. 
+	const float T_final = inside ? final_Ts[pix_id] : 0;
+	float T = T_final;
+
+	// We start from the back. The ID of the last contributing
+	// Gaussian is known from each pixel from the forward.
+	uint32_t contributor = toDo;
+	const int last_contributor = inside ? n_contrib[pix_id] : 0;
+
+	float accum_rec[C] = { 0 };
+	float dL_dpixel[C];
+	if (inside)
+		for (int i = 0; i < C; i++)
+			dL_dpixel[i] = dL_dpixels[pix_id * C + i];
+
+	float last_alpha = 0;
+	float last_color[C] = { 0 };
+
+	// Gradient of pixel coordinate w.r.t. normalized 
+	// screen-space viewport corrdinates (-1 to 1)
+	const float ddelx_dx = 0.5 * W;
+	const float ddely_dy = 0.5 * H;
+
+	// Traverse all Gaussians
+	for (int i = 0; i < rounds; i++, toDo -= BLOCK_SIZE)
+	{
+		// Load auxiliary data into shared memory, start in the BACK
+		// and load them in revers order.
+		block.sync();
+		const int progress = i * BLOCK_SIZE + block.thread_rank();
+		if (range.x + progress < range.y)
+		{
+			const int coll_id = point_list[range.y - progress - 1];
+			collected_id[block.thread_rank()] = coll_id;
+			collected_xy[block.thread_rank()] = points_xy_image[coll_id];
+			collected_conic_opacity[block.thread_rank()] = conic_opacity[coll_id];
+			for (int i = 0; i < C; i++)
+				collected_colors[i * BLOCK_SIZE + block.thread_rank()] = colors[coll_id * C + i];
+		}
+		block.sync();
+
+		// Iterate over Gaussians
+		for (int j = 0; !done && j < min(BLOCK_SIZE, toDo); j++)
+		{
+			// Keep track of current Gaussian ID. Skip, if this one
+			// is behind the last contributor for this pixel.
+			contributor--;
+			if (contributor >= last_contributor)
+				continue;
+
+			// Compute blending values, as before.
+			const float2 xy = collected_xy[j];
+			const float2 d = { xy.x - pixf.x, xy.y - pixf.y };
+			const float4 con_o = collected_conic_opacity[j];
+			const float power = -0.5f * (con_o.x * d.x * d.x + con_o.z * d.y * d.y) - con_o.y * d.x * d.y;
+			if (power > 0.0f)
+				continue;
+
+			const float G = exp(power);
+			const float alpha = min(0.99f, con_o.w * G);
+			if (alpha < 1.0f / 255.0f)
+				continue;
+
+			T = T / (1.f - alpha);
+			const float dchannel_dcolor = alpha * T;
+
+			// Propagate gradients to per-Gaussian colors and keep
+			// gradients w.r.t. alpha (blending factor for a Gaussian/pixel
+			// pair).
+			float dL_dalpha = 0.0f;
+			const int global_id = collected_id[j];
+			for (int ch = 0; ch < C; ch++)
+			{
+				const float c = collected_colors[ch * BLOCK_SIZE + j];
+				// Update last color (to be used in the next iteration)
+				accum_rec[ch] = last_alpha * last_color[ch] + (1.f - last_alpha) * accum_rec[ch];
+				last_color[ch] = c;
+
+				const float dL_dchannel = dL_dpixel[ch];
+				dL_dalpha += (c - accum_rec[ch]) * dL_dchannel;
+				// Update the gradients w.r.t. color of the Gaussian. 
+				// Atomic, since this pixel is just one of potentially
+				// many that were affected by this Gaussian.
+				atomicAdd(&(dL_dcolors[global_id * C + ch]), dchannel_dcolor * dL_dchannel);
+			}
+			dL_dalpha *= T;
+			// Update last alpha (to be used in the next iteration)
+			last_alpha = alpha;
+
+			// Account for fact that alpha also influences how much of
+			// the background color is added if nothing left to blend
+			float bg_dot_dpixel = 0;
+			for (int i = 0; i < C; i++)
+				bg_dot_dpixel += bg_color[i] * dL_dpixel[i];
+			dL_dalpha += (-T_final / (1.f - alpha)) * bg_dot_dpixel;
+
+
+			// Helpful reusable temporary variables
+			const float dL_dG = con_o.w * dL_dalpha;
+			const float gdx = G * d.x;
+			const float gdy = G * d.y;
+			const float dG_ddelx = -gdx * con_o.x - gdy * con_o.y;
+			const float dG_ddely = -gdy * con_o.z - gdx * con_o.y;
+
+			// Update gradients w.r.t. 2D mean position of the Gaussian
+			atomicAdd(&dL_dmean2D[global_id].x, dL_dG * dG_ddelx * ddelx_dx);
+			atomicAdd(&dL_dmean2D[global_id].y, dL_dG * dG_ddely * ddely_dy);
+
+			// Update gradients w.r.t. 2D covariance (2x2 matrix, symmetric)
+			atomicAdd(&dL_dconic2D[global_id].x, -0.5f * gdx * d.x * dL_dG);
+			atomicAdd(&dL_dconic2D[global_id].y, -0.5f * gdx * d.y * dL_dG);
+			atomicAdd(&dL_dconic2D[global_id].w, -0.5f * gdy * d.y * dL_dG);
+
+			// Update gradients w.r.t. opacity of the Gaussian
+			atomicAdd(&(dL_dopacity[global_id]), G * dL_dalpha);
+		}
+	}
+}
+
+void BACKWARD::preprocess(
+	int P, int D, int M,
+	const float3* means3D,
+	const int* radii,
+	const float* shs,
+	const bool* clamped,
+	const glm::vec3* scales,
+	const glm::vec4* rotations,
+	const float scale_modifier,
+	const float* cov3Ds,
+	const float* viewmatrix,
+	const float* projmatrix,
+	const float focal_x, float focal_y,
+	const float tan_fovx, float tan_fovy,
+	const glm::vec3* campos,
+	const float3* dL_dmean2D,
+	const float* dL_dconic,
+	glm::vec3* dL_dmean3D,
+	float* dL_dcolor,
+	float* dL_dcov3D,
+	float* dL_dsh,
+	glm::vec3* dL_dscale,
+	glm::vec4* dL_drot)
+{
+	// Propagate gradients for the path of 2D conic matrix computation. 
+	// Somewhat long, thus it is its own kernel rather than being part of 
+	// "preprocess". When done, loss gradient w.r.t. 3D means has been
+	// modified and gradient w.r.t. 3D covariance matrix has been computed.	
+	computeCov2DCUDA << <(P + 255) / 256, 256 >> > (
+		P,
+		means3D,
+		radii,
+		cov3Ds,
+		focal_x,
+		focal_y,
+		tan_fovx,
+		tan_fovy,
+		viewmatrix,
+		dL_dconic,
+		(float3*)dL_dmean3D,
+		dL_dcov3D);
+
+	// Propagate gradients for remaining steps: finish 3D mean gradients,
+	// propagate color gradients to SH (if desireD), propagate 3D covariance
+	// matrix gradients to scale and rotation.
+	preprocessCUDA<NUM_CHANNELS> << < (P + 255) / 256, 256 >> > (
+		P, D, M,
+		(float3*)means3D,
+		radii,
+		shs,
+		clamped,
+		(glm::vec3*)scales,
+		(glm::vec4*)rotations,
+		scale_modifier,
+		projmatrix,
+		campos,
+		(float3*)dL_dmean2D,
+		(glm::vec3*)dL_dmean3D,
+		dL_dcolor,
+		dL_dcov3D,
+		dL_dsh,
+		dL_dscale,
+		dL_drot);
+}
+
+void BACKWARD::render(
+	const dim3 grid, const dim3 block,
+	const uint2* ranges,
+	const uint32_t* point_list,
+	int W, int H,
+	const float* bg_color,
+	const float2* means2D,
+	const float4* conic_opacity,
+	const float* colors,
+	const float* final_Ts,
+	const uint32_t* n_contrib,
+	const float* dL_dpixels,
+	float3* dL_dmean2D,
+	float4* dL_dconic2D,
+	float* dL_dopacity,
+	float* dL_dcolors)
+{
+	renderCUDA<NUM_CHANNELS> << <grid, block >> >(
+		ranges,
+		point_list,
+		W, H,
+		bg_color,
+		means2D,
+		conic_opacity,
+		colors,
+		final_Ts,
+		n_contrib,
+		dL_dpixels,
+		dL_dmean2D,
+		dL_dconic2D,
+		dL_dopacity,
+		dL_dcolors
+		);
+}
+```
+
+### gscache/3dgs/cuda_rasterizer/backward.h
+```
+/*
+ * Copyright (C) 2023, Inria
+ * GRAPHDECO research group, https://team.inria.fr/graphdeco
+ * All rights reserved.
+ *
+ * This software is free for non-commercial, research and evaluation use 
+ * under the terms of the LICENSE.md file.
+ *
+ * For inquiries contact  george.drettakis@inria.fr
+ */
+
+#ifndef CUDA_RASTERIZER_BACKWARD_H_INCLUDED
+#define CUDA_RASTERIZER_BACKWARD_H_INCLUDED
+
+#include <cuda.h>
+#include "cuda_runtime.h"
+#include "device_launch_parameters.h"
+#define GLM_FORCE_CUDA
+#include <glm/glm.hpp>
+
+namespace BACKWARD
+{
+	void render(
+		const dim3 grid, dim3 block,
+		const uint2* ranges,
+		const uint32_t* point_list,
+		int W, int H,
+		const float* bg_color,
+		const float2* means2D,
+		const float4* conic_opacity,
+		const float* colors,
+		const float* final_Ts,
+		const uint32_t* n_contrib,
+		const float* dL_dpixels,
+		float3* dL_dmean2D,
+		float4* dL_dconic2D,
+		float* dL_dopacity,
+		float* dL_dcolors);
+
+	void preprocess(
+		int P, int D, int M,
+		const float3* means,
+		const int* radii,
+		const float* shs,
+		const bool* clamped,
+		const glm::vec3* scales,
+		const glm::vec4* rotations,
+		const float scale_modifier,
+		const float* cov3Ds,
+		const float* view,
+		const float* proj,
+		const float focal_x, float focal_y,
+		const float tan_fovx, float tan_fovy,
+		const glm::vec3* campos,
+		const float3* dL_dmean2D,
+		const float* dL_dconics,
+		glm::vec3* dL_dmeans,
+		float* dL_dcolor,
+		float* dL_dcov3D,
+		float* dL_dsh,
+		glm::vec3* dL_dscale,
+		glm::vec4* dL_drot);
+}
+
+#endif
+```
+
+### gscache/3dgs/cuda_rasterizer/config.h
+```
+/*
+ * Copyright (C) 2023, Inria
+ * GRAPHDECO research group, https://team.inria.fr/graphdeco
+ * All rights reserved.
+ *
+ * This software is free for non-commercial, research and evaluation use 
+ * under the terms of the LICENSE.md file.
+ *
+ * For inquiries contact  george.drettakis@inria.fr
+ */
+
+#ifndef CUDA_RASTERIZER_CONFIG_H_INCLUDED
+#define CUDA_RASTERIZER_CONFIG_H_INCLUDED
+
+#define NUM_CHANNELS 3 // Default 3, RGB
+#define BLOCK_X 16
+#define BLOCK_Y 16
+
+#endif
+```
+
+### gscache/3dgs/cuda_rasterizer/forward.cu
+```
+/*
+ * Copyright (C) 2023, Inria
+ * GRAPHDECO research group, https://team.inria.fr/graphdeco
+ * All rights reserved.
+ *
+ * This software is free for non-commercial, research and evaluation use 
+ * under the terms of the LICENSE.md file.
+ *
+ * For inquiries contact  george.drettakis@inria.fr
+ */
+
+#include "forward.h"
+#include "auxiliary.h"
+#include <cooperative_groups.h>
+#include <cooperative_groups/reduce.h>
+namespace cg = cooperative_groups;
+
+// Forward method for converting the input spherical harmonics
+// coefficients of each Gaussian to a simple RGB color.
+__device__ glm::vec3 computeColorFromSH(int idx, int deg, int max_coeffs, const glm::vec3* means, glm::vec3 campos, const float* shs, bool* clamped)
+{
+	// The implementation is loosely based on code for 
+	// "Differentiable Point-Based Radiance Fields for 
+	// Efficient View Synthesis" by Zhang et al. (2022)
+	glm::vec3 pos = means[idx];
+	glm::vec3 dir = pos - campos;
+	dir = dir / glm::length(dir);
+
+	glm::vec3* sh = ((glm::vec3*)shs) + idx * max_coeffs;
+	glm::vec3 result = SH_C0 * sh[0];
+
+	if (deg > 0)
+	{
+		float x = dir.x;
+		float y = dir.y;
+		float z = dir.z;
+		result = result - SH_C1 * y * sh[1] + SH_C1 * z * sh[2] - SH_C1 * x * sh[3];
+
+		if (deg > 1)
+		{
+			float xx = x * x, yy = y * y, zz = z * z;
+			float xy = x * y, yz = y * z, xz = x * z;
+			result = result +
+				SH_C2[0] * xy * sh[4] +
+				SH_C2[1] * yz * sh[5] +
+				SH_C2[2] * (2.0f * zz - xx - yy) * sh[6] +
+				SH_C2[3] * xz * sh[7] +
+				SH_C2[4] * (xx - yy) * sh[8];
+
+			if (deg > 2)
+			{
+				result = result +
+					SH_C3[0] * y * (3.0f * xx - yy) * sh[9] +
+					SH_C3[1] * xy * z * sh[10] +
+					SH_C3[2] * y * (4.0f * zz - xx - yy) * sh[11] +
+					SH_C3[3] * z * (2.0f * zz - 3.0f * xx - 3.0f * yy) * sh[12] +
+					SH_C3[4] * x * (4.0f * zz - xx - yy) * sh[13] +
+					SH_C3[5] * z * (xx - yy) * sh[14] +
+					SH_C3[6] * x * (xx - 3.0f * yy) * sh[15];
+			}
+		}
+	}
+	result += 0.5f;
+
+	// RGB colors are clamped to positive values. If values are
+	// clamped, we need to keep track of this for the backward pass.
+	clamped[3 * idx + 0] = (result.x < 0);
+	clamped[3 * idx + 1] = (result.y < 0);
+	clamped[3 * idx + 2] = (result.z < 0);
+    result.x = result.x > 0.f ? result.x : 0.f;
+    result.y = result.y > 0.f ? result.y : 0.f;
+    result.z = result.z > 0.f ? result.z : 0.f;
+	return result;
+}
+
+// Forward version of 2D covariance matrix computation
+__device__ float3 computeCov2D(const float3& mean, float focal_x, float focal_y, float tan_fovx, float tan_fovy, const float* cov3D, const float* viewmatrix)
+{
+	// The following models the steps outlined by equations 29
+	// and 31 in "EWA Splatting" (Zwicker et al., 2002). 
+	// Additionally considers aspect / scaling of viewport.
+	// Transposes used to account for row-/column-major conventions.
+	float3 t = transformPoint4x3(mean, viewmatrix);
+
+	const float limx = 1.3f * tan_fovx;
+	const float limy = 1.3f * tan_fovy;
+	const float txtz = t.x / t.z;
+	const float tytz = t.y / t.z;
+	t.x = min(limx, max(-limx, txtz)) * t.z;
+	t.y = min(limy, max(-limy, tytz)) * t.z;
+
+	glm::mat3 J = glm::mat3(
+		focal_x / t.z, 0.0f, -(focal_x * t.x) / (t.z * t.z),
+		0.0f, focal_y / t.z, -(focal_y * t.y) / (t.z * t.z),
+		0, 0, 0);
+
+	glm::mat3 W = glm::mat3(
+		viewmatrix[0], viewmatrix[4], viewmatrix[8],
+		viewmatrix[1], viewmatrix[5], viewmatrix[9],
+		viewmatrix[2], viewmatrix[6], viewmatrix[10]);
+
+	glm::mat3 T = W * J;
+
+	glm::mat3 Vrk = glm::mat3(
+		cov3D[0], cov3D[1], cov3D[2],
+		cov3D[1], cov3D[3], cov3D[4],
+		cov3D[2], cov3D[4], cov3D[5]);
+
+	glm::mat3 cov = glm::transpose(T) * glm::transpose(Vrk) * T;
+
+	// Apply low-pass filter: every Gaussian should be at least
+	// one pixel wide/high. Discard 3rd row and column.
+	cov[0][0] += 0.3f;
+	cov[1][1] += 0.3f;
+	return { float(cov[0][0]), float(cov[0][1]), float(cov[1][1]) };
+}
+
+// Forward method for converting scale and rotation properties of each
+// Gaussian to a 3D covariance matrix in world space. Also takes care
+// of quaternion normalization.
+__device__ void computeCov3D(const glm::vec3 scale, float mod, const glm::vec4 rot, float* cov3D)
+{
+	// Create scaling matrix
+	glm::mat3 S = glm::mat3(1.0f);
+	S[0][0] = mod * scale.x;
+	S[1][1] = mod * scale.y;
+	S[2][2] = mod * scale.z;
+
+	// Normalize quaternion to get valid rotation
+	glm::vec4 q = rot;// / glm::length(rot);
+	float r = q.x;
+	float x = q.y;
+	float y = q.z;
+	float z = q.w;
+
+	// Compute rotation matrix from quaternion
+	glm::mat3 R = glm::mat3(
+		1.f - 2.f * (y * y + z * z), 2.f * (x * y - r * z), 2.f * (x * z + r * y),
+		2.f * (x * y + r * z), 1.f - 2.f * (x * x + z * z), 2.f * (y * z - r * x),
+		2.f * (x * z - r * y), 2.f * (y * z + r * x), 1.f - 2.f * (x * x + y * y)
+	);
+
+	glm::mat3 M = S * R;
+
+	// Compute 3D world covariance matrix Sigma
+	glm::mat3 Sigma = glm::transpose(M) * M;
+
+	// Covariance is symmetric, only store upper right
+	cov3D[0] = Sigma[0][0];
+	cov3D[1] = Sigma[0][1];
+	cov3D[2] = Sigma[0][2];
+	cov3D[3] = Sigma[1][1];
+	cov3D[4] = Sigma[1][2];
+	cov3D[5] = Sigma[2][2];
+}
+
+// Perform initial steps for each Gaussian prior to rasterization.
+template<int C>
+__global__ void preprocessCUDA(int P, int D, int M,
+	const float* orig_points,
+	const glm::vec3* scales,
+	const float scale_modifier,
+	const glm::vec4* rotations,
+	const float* opacities,
+	const float* shs,
+	bool* clamped,
+	const float* cov3D_precomp,
+	const float* colors_precomp,
+	const float* viewmatrix,
+	const float* projmatrix,
+	const glm::vec3* cam_pos,
+	const int W, int H,
+	const float tan_fovx, float tan_fovy,
+	const float focal_x, float focal_y,
+	int* radii,
+	float2* points_xy_image,
+	float* depths,
+	float* cov3Ds,
+	float* rgb,
+	float4* conic_opacity,
+	const dim3 grid,
+	uint32_t* tiles_touched,
+	bool prefiltered)
+{
+	auto idx = cg::this_grid().thread_rank();
+	if (idx >= P)
+		return;
+
+	// Initialize radius and touched tiles to 0. If this isn't changed,
+	// this Gaussian will not be processed further.
+	radii[idx] = 0;
+	tiles_touched[idx] = 0;
+
+	// Perform near culling, quit if outside.
+	float3 p_view;
+	if (!in_frustum(idx, orig_points, viewmatrix, projmatrix, prefiltered, p_view))
+		return;
+
+	// Transform point by projecting
+	float3 p_orig = { orig_points[3 * idx], orig_points[3 * idx + 1], orig_points[3 * idx + 2] };
+	float4 p_hom = transformPoint4x4(p_view, projmatrix);
+	float p_w = 1.0f / (p_hom.w + 0.0000001f);
+	float3 p_proj = { p_hom.x * p_w, p_hom.y * p_w, p_hom.z * p_w };
+
+	// If 3D covariance matrix is precomputed, use it, otherwise compute
+	// from scaling and rotation parameters. 
+	const float* cov3D;
+	if (cov3D_precomp != nullptr)
+	{
+		cov3D = cov3D_precomp + idx * 6;
+	}
+	else
+	{
+		computeCov3D(scales[idx], scale_modifier, rotations[idx], cov3Ds + idx * 6);
+		cov3D = cov3Ds + idx * 6;
+	}
+
+	// Compute 2D screen-space covariance matrix
+	float3 cov = computeCov2D(p_orig, focal_x, focal_y, tan_fovx, tan_fovy, cov3D, viewmatrix);
+
+	// Invert covariance (EWA algorithm)
+	float det = (cov.x * cov.z - cov.y * cov.y);
+	if (det == 0.0f)
+		return;
+	float det_inv = 1.f / det;
+	float3 conic = { cov.z * det_inv, -cov.y * det_inv, cov.x * det_inv };
+
+	// Compute extent in screen space (by finding eigenvalues of
+	// 2D covariance matrix). Use extent to compute a bounding rectangle
+	// of screen-space tiles that this Gaussian overlaps with. Quit if
+	// rectangle covers 0 tiles. 
+	float mid = 0.5f * (cov.x + cov.z);
+	float lambda1 = mid + sqrt(max(0.1f, mid * mid - det));
+	float lambda2 = mid - sqrt(max(0.1f, mid * mid - det));
+	float my_radius = ceil(3.f * sqrt(max(lambda1, lambda2)));
+	float2 point_image = { ndc2Pix(p_proj.x, W), ndc2Pix(p_proj.y, H) };
+	uint2 rect_min, rect_max;
+	getRect(point_image, my_radius, rect_min, rect_max, grid);
+	if ((rect_max.x - rect_min.x) * (rect_max.y - rect_min.y) == 0)
+		return;
+
+	// If colors have been precomputed, use them, otherwise convert
+	// spherical harmonics coefficients to RGB color.
+	if (colors_precomp == nullptr)
+	{
+		glm::vec3 result = computeColorFromSH(idx, D, M, (glm::vec3*)orig_points, *cam_pos, shs, clamped);
+		rgb[idx * C + 0] = result.x;
+		rgb[idx * C + 1] = result.y;
+		rgb[idx * C + 2] = result.z;
+	}
+
+	// Store some useful helper data for the next steps.
+	depths[idx] = p_proj.z;
+	radii[idx] = my_radius;
+	points_xy_image[idx] = point_image;
+	// Inverse 2D covariance and opacity neatly pack into one float4
+	conic_opacity[idx] = { conic.x, conic.y, conic.z, opacities[idx] };
+	tiles_touched[idx] = (rect_max.y - rect_min.y) * (rect_max.x - rect_min.x);
+}
+
+// Main rasterization method. Collaboratively works on one tile per
+// block, each thread treats one pixel. Alternates between fetching 
+// and rasterizing data.
+template <uint32_t CHANNELS>
+__global__ void __launch_bounds__(BLOCK_X * BLOCK_Y)
+renderCUDA(
+	const uint2* __restrict__ ranges,
+	const uint32_t* __restrict__ point_list,
+	int W, int H,
+	const float2* __restrict__ points_xy_image,
+	const float* __restrict__ features,
+	const float4* __restrict__ conic_opacity,
+	float* __restrict__ final_T,
+	uint32_t* __restrict__ n_contrib,
+	const float* __restrict__ bg_color,
+	float* __restrict__ out_color)
+{
+	// Identify current tile and associated min/max pixel range.
+	auto block = cg::this_thread_block();
+	uint32_t horizontal_blocks = (W + BLOCK_X - 1) / BLOCK_X;
+	uint2 pix_min = { block.group_index().x * BLOCK_X, block.group_index().y * BLOCK_Y };
+	uint2 pix_max = { min(pix_min.x + BLOCK_X, W), min(pix_min.y + BLOCK_Y , H) };
+	uint2 pix = { pix_min.x + block.thread_index().x, pix_min.y + block.thread_index().y };
+	uint32_t pix_id = W * pix.y + pix.x;
+	float2 pixf = { (float)pix.x, (float)pix.y };
+
+	// Check if this thread is associated with a valid pixel or outside.
+	bool inside = pix.x < W&& pix.y < H;
+	// Done threads can help with fetching, but don't rasterize
+	bool done = !inside;
+
+	// Load start/end range of IDs to process in bit sorted list.
+	uint2 range = ranges[block.group_index().y * horizontal_blocks + block.group_index().x];
+	const int rounds = ((range.y - range.x + BLOCK_SIZE - 1) / BLOCK_SIZE);
+	int toDo = range.y - range.x;
+
+	// Allocate storage for batches of collectively fetched data.
+	__shared__ int collected_id[BLOCK_SIZE];
+	__shared__ float2 collected_xy[BLOCK_SIZE];
+	__shared__ float4 collected_conic_opacity[BLOCK_SIZE];
+
+	// Initialize helper variables
+	float T = 1.0f;
+	uint32_t contributor = 0;
+	uint32_t last_contributor = 0;
+	float C[CHANNELS] = { 0 };
+
+	// Iterate over batches until all done or range is complete
+	for (int i = 0; i < rounds; i++, toDo -= BLOCK_SIZE)
+	{
+		// End if entire block votes that it is done rasterizing
+		int num_done = __syncthreads_count(done);
+		if (num_done == BLOCK_SIZE)
+			break;
+
+		// Collectively fetch per-Gaussian data from global to shared
+		int progress = i * BLOCK_SIZE + block.thread_rank();
+		if (range.x + progress < range.y)
+		{
+			int coll_id = point_list[range.x + progress];
+			collected_id[block.thread_rank()] = coll_id;
+			collected_xy[block.thread_rank()] = points_xy_image[coll_id];
+			collected_conic_opacity[block.thread_rank()] = conic_opacity[coll_id];
+		}
+		block.sync();
+
+		// Iterate over current batch
+		for (int j = 0; !done && j < min(BLOCK_SIZE, toDo); j++)
+		{
+			// Keep track of current position in range
+			contributor++;
+
+			// Resample using conic matrix (cf. "Surface 
+			// Splatting" by Zwicker et al., 2001)
+			float2 xy = collected_xy[j];
+			float2 d = { xy.x - pixf.x, xy.y - pixf.y };
+			float4 con_o = collected_conic_opacity[j];
+			float power = -0.5f * (con_o.x * d.x * d.x + con_o.z * d.y * d.y) - con_o.y * d.x * d.y;
+			if (power > 0.0f)
+				continue;
+
+			// Eq. (2) from 3D Gaussian splatting paper.
+			// Obtain alpha by multiplying with Gaussian opacity
+			// and its exponential falloff from mean.
+			// Avoid numerical instabilities (see paper appendix). 
+			float alpha = min(0.99f, con_o.w * exp(power));
+			if (alpha < 1.0f / 255.0f)
+				continue;
+			float test_T = T * (1 - alpha);
+			if (test_T < 0.0001f)
+			{
+				done = true;
+				continue;
+			}
+
+			// Eq. (3) from 3D Gaussian splatting paper.
+			for (int ch = 0; ch < CHANNELS; ch++)
+				C[ch] += features[collected_id[j] * CHANNELS + ch] * alpha * T;
+
+			T = test_T;
+
+			// Keep track of last range entry to update this
+			// pixel.
+			last_contributor = contributor;
+		}
+	}
+
+	// All threads that treat valid pixel write out their final
+	// rendering data to the frame and auxiliary buffers.
+	if (inside)
+	{
+		final_T[pix_id] = T;
+		n_contrib[pix_id] = last_contributor;
+		for (int ch = 0; ch < CHANNELS; ch++)
+			out_color[pix_id * CHANNELS + ch] = C[ch] + T * bg_color[ch];
+	}
+}
+
+void FORWARD::render(
+	const dim3 grid, dim3 block,
+	const uint2* ranges,
+	const uint32_t* point_list,
+	int W, int H,
+	const float2* means2D,
+	const float* colors,
+	const float4* conic_opacity,
+	float* final_T,
+	uint32_t* n_contrib,
+	const float* bg_color,
+	float* out_color)
+{
+	renderCUDA<NUM_CHANNELS> << <grid, block >> > (
+		ranges,
+		point_list,
+		W, H,
+		means2D,
+		colors,
+		conic_opacity,
+		final_T,
+		n_contrib,
+		bg_color,
+		out_color);
+}
+
+void FORWARD::preprocess(int P, int D, int M,
+	const float* means3D,
+	const glm::vec3* scales,
+	const float scale_modifier,
+	const glm::vec4* rotations,
+	const float* opacities,
+	const float* shs,
+	bool* clamped,
+	const float* cov3D_precomp,
+	const float* colors_precomp,
+	const float* viewmatrix,
+	const float* projmatrix,
+	const glm::vec3* cam_pos,
+	const int W, int H,
+	const float focal_x, float focal_y,
+	const float tan_fovx, float tan_fovy,
+	int* radii,
+	float2* means2D,
+	float* depths,
+	float* cov3Ds,
+	float* rgb,
+	float4* conic_opacity,
+	const dim3 grid,
+	uint32_t* tiles_touched,
+	bool prefiltered)
+{
+	preprocessCUDA<NUM_CHANNELS> << <(P + 255) / 256, 256 >> > (
+		P, D, M,
+		means3D,
+		scales,
+		scale_modifier,
+		rotations,
+		opacities,
+		shs,
+		clamped,
+		cov3D_precomp,
+		colors_precomp,
+		viewmatrix, 
+		projmatrix,
+		cam_pos,
+		W, H,
+		tan_fovx, tan_fovy,
+		focal_x, focal_y,
+		radii,
+		means2D,
+		depths,
+		cov3Ds,
+		rgb,
+		conic_opacity,
+		grid,
+		tiles_touched,
+		prefiltered
+		);
+}
+```
+
+### gscache/3dgs/cuda_rasterizer/forward.h
+```
+/*
+ * Copyright (C) 2023, Inria
+ * GRAPHDECO research group, https://team.inria.fr/graphdeco
+ * All rights reserved.
+ *
+ * This software is free for non-commercial, research and evaluation use 
+ * under the terms of the LICENSE.md file.
+ *
+ * For inquiries contact  george.drettakis@inria.fr
+ */
+
+#ifndef CUDA_RASTERIZER_FORWARD_H_INCLUDED
+#define CUDA_RASTERIZER_FORWARD_H_INCLUDED
+
+#include <cuda.h>
+#include "cuda_runtime.h"
+#include "device_launch_parameters.h"
+#define GLM_FORCE_CUDA
+#include <glm/glm.hpp>
+
+namespace FORWARD
+{
+	// Perform initial steps for each Gaussian prior to rasterization.
+	void preprocess(int P, int D, int M,
+		const float* orig_points,
+		const glm::vec3* scales,
+		const float scale_modifier,
+		const glm::vec4* rotations,
+		const float* opacities,
+		const float* shs,
+		bool* clamped,
+		const float* cov3D_precomp,
+		const float* colors_precomp,
+		const float* viewmatrix,
+		const float* projmatrix,
+		const glm::vec3* cam_pos,
+		const int W, int H,
+		const float focal_x, float focal_y,
+		const float tan_fovx, float tan_fovy,
+		int* radii,
+		float2* points_xy_image,
+		float* depths,
+		float* cov3Ds,
+		float* colors,
+		float4* conic_opacity,
+		const dim3 grid,
+		uint32_t* tiles_touched,
+		bool prefiltered);
+
+	// Main rasterization method.
+	void render(
+		const dim3 grid, dim3 block,
+		const uint2* ranges,
+		const uint32_t* point_list,
+		int W, int H,
+		const float2* points_xy_image,
+		const float* features,
+		const float4* conic_opacity,
+		float* final_T,
+		uint32_t* n_contrib,
+		const float* bg_color,
+		float* out_color);
+}
+
+
+#endif
+```
+
+### gscache/3dgs/cuda_rasterizer/rasterizer.h
+```
+/*
+ * Copyright (C) 2023, Inria
+ * GRAPHDECO research group, https://team.inria.fr/graphdeco
+ * All rights reserved.
+ *
+ * This software is free for non-commercial, research and evaluation use 
+ * under the terms of the LICENSE.md file.
+ *
+ * For inquiries contact  george.drettakis@inria.fr
+ */
+
+#ifndef CUDA_RASTERIZER_H_INCLUDED
+#define CUDA_RASTERIZER_H_INCLUDED
+
+#include <vector>
+#include <functional>
+
+namespace CudaRasterizer
+{
+	class Rasterizer
+	{
+	public:
+
+		static void markVisible(
+			int P,
+			float* means3D,
+			float* viewmatrix,
+			float* projmatrix,
+			int32_t* present,
+            int32_t* num_present);
+
+		static int forward(
+			std::function<char* (size_t)> geometryBuffer,
+			std::function<char* (size_t)> binningBuffer,
+			std::function<char* (size_t)> imageBuffer,
+			const int P, int D, int M,
+			const float* background,
+			const int width, int height,
+			const float* means3D,
+			const float* shs,
+			const float* colors_precomp,
+			const float* opacities,
+			const float* scales,
+			const float scale_modifier,
+			const float* rotations,
+			const float* cov3D_precomp,
+			const float* viewmatrix,
+			const float* projmatrix,
+			const float* cam_pos,
+			const float tan_fovx, float tan_fovy,
+			const bool prefiltered,
+			float* out_color,
+			int* radii = nullptr,
+			bool debug = false);
+
+		static void backward(
+			const int P, int D, int M, int R,
+			const float* background,
+			const int width, int height,
+			const float* means3D,
+			const float* shs,
+			const float* colors_precomp,
+			const float* scales,
+			const float scale_modifier,
+			const float* rotations,
+			const float* cov3D_precomp,
+			const float* viewmatrix,
+			const float* projmatrix,
+			const float* campos,
+			const float tan_fovx, float tan_fovy,
+			const int* radii,
+			char* geom_buffer,
+			char* binning_buffer,
+			char* image_buffer,
+			const float* dL_dpix,
+			float* dL_dmean2D,
+			float* dL_dconic,
+			float* dL_dopacity,
+			float* dL_dcolor,
+			float* dL_dmean3D,
+			float* dL_dcov3D,
+			float* dL_dsh,
+			float* dL_dscale,
+			float* dL_drot,
+			bool debug);
+	};
+};
+
+#endif
+```
+
+### gscache/3dgs/cuda_rasterizer/rasterizer_impl.cu
+```
+/*
+ * Copyright (C) 2023, Inria
+ * GRAPHDECO research group, https://team.inria.fr/graphdeco
+ * All rights reserved.
+ *
+ * This software is free for non-commercial, research and evaluation use 
+ * under the terms of the LICENSE.md file.
+ *
+ * For inquiries contact  george.drettakis@inria.fr
+ */
+
+#include "rasterizer_impl.h"
+#include <iostream>
+#include <fstream>
+#include <algorithm>
+#include <numeric>
+#include <cuda.h>
+#include "cuda_runtime.h"
+#include "device_launch_parameters.h"
+#include <cub/cub.cuh>
+#include <cub/device/device_radix_sort.cuh>
+#define GLM_FORCE_CUDA
+#include <glm/glm.hpp>
+
+#include <cooperative_groups.h>
+#include <cooperative_groups/reduce.h>
+namespace cg = cooperative_groups;
+
+#include "auxiliary.h"
+#include "forward.h"
+#include "backward.h"
+
+// Helper function to find the next-highest bit of the MSB
+// on the CPU.
+uint32_t getHigherMsb(uint32_t n)
+{
+	uint32_t msb = sizeof(n) * 4;
+	uint32_t step = msb;
+	while (step > 1)
+	{
+		step /= 2;
+		if (n >> msb)
+			msb += step;
+		else
+			msb -= step;
+	}
+	if (n >> msb)
+		msb++;
+	return msb;
+}
+
+// Wrapper method to call auxiliary coarse frustum containment test.
+// Mark all Gaussians that pass it.
+__global__ void checkFrustum(int P,
+	const float* orig_points,
+	const float* viewmatrix,
+	const float* projmatrix,
+	int32_t* present,
+    int32_t* num_present)
+{
+	auto idx = cg::this_grid().thread_rank();
+	if (idx >= P)
+		return;
+
+	float3 p_view;
+
+    bool valid = in_frustum(idx, orig_points, viewmatrix, projmatrix, false, p_view);
+    int32_t nextid = -1;
+    if (valid) {
+        nextid = atomicAdd(num_present, 1);
+    }
+
+    if (valid) {
+        present[nextid] = (int32_t)(idx);
+    }
+}
+
+// Generates one key/value pair for all Gaussian / tile overlaps. 
+// Run once per Gaussian (1:N mapping).
+__global__ void duplicateWithKeys(
+	int P,
+	const float2* points_xy,
+	const float* depths,
+	const uint32_t* offsets,
+	uint64_t* gaussian_keys_unsorted,
+	uint32_t* gaussian_values_unsorted,
+	int* radii,
+	dim3 grid)
+{
+	auto idx = cg::this_grid().thread_rank();
+	if (idx >= P)
+		return;
+
+	// Generate no key/value pair for invisible Gaussians
+	if (radii[idx] > 0)
+	{
+		// Find this Gaussian's offset in buffer for writing keys/values.
+		uint32_t off = (idx == 0) ? 0 : offsets[idx - 1];
+		uint2 rect_min, rect_max;
+
+		getRect(points_xy[idx], radii[idx], rect_min, rect_max, grid);
+
+		// For each tile that the bounding rect overlaps, emit a 
+		// key/value pair. The key is |  tile ID  |      depth      |,
+		// and the value is the ID of the Gaussian. Sorting the values 
+		// with this key yields Gaussian IDs in a list, such that they
+		// are first sorted by tile and then by depth. 
+		for (int y = rect_min.y; y < rect_max.y; y++)
+		{
+			for (int x = rect_min.x; x < rect_max.x; x++)
+			{
+				uint64_t key = y * grid.x + x;
+				key <<= 32;
+				key |= *((uint32_t*)&depths[idx]);
+				gaussian_keys_unsorted[off] = key;
+				gaussian_values_unsorted[off] = idx;
+				off++;
+			}
+		}
+	}
+}
+
+// Check keys to see if it is at the start/end of one tile's range in 
+// the full sorted list. If yes, write start/end of this tile. 
+// Run once per instanced (duplicated) Gaussian ID.
+__global__ void identifyTileRanges(int L, uint64_t* point_list_keys, uint2* ranges)
+{
+	auto idx = cg::this_grid().thread_rank();
+	if (idx >= L)
+		return;
+
+	// Read tile ID from key. Update start/end of tile range if at limit.
+	uint64_t key = point_list_keys[idx];
+	uint32_t currtile = key >> 32;
+	if (idx == 0)
+		ranges[currtile].x = 0;
+	else
+	{
+		uint32_t prevtile = point_list_keys[idx - 1] >> 32;
+		if (currtile != prevtile)
+		{
+			ranges[prevtile].y = idx;
+			ranges[currtile].x = idx;
+		}
+	}
+	if (idx == L - 1)
+		ranges[currtile].y = L;
+}
+
+// Mark Gaussians as visible/invisible, based on view frustum testing
+void CudaRasterizer::Rasterizer::markVisible(
+	int P,
+	float* means3D,
+	float* viewmatrix,
+	float* projmatrix,
+	int32_t* present,
+    int32_t* num_present)
+{
+	checkFrustum << <(P + 255) / 256, 256 >> > (
+		P,
+		means3D,
+		viewmatrix, projmatrix,
+		present,
+        num_present);
+}
+
+CudaRasterizer::GeometryState CudaRasterizer::GeometryState::fromChunk(char*& chunk, size_t P)
+{
+	GeometryState geom;
+	obtain(chunk, geom.depths, P, 128);
+	obtain(chunk, geom.clamped, P * 3, 128);
+	obtain(chunk, geom.internal_radii, P, 128);
+	obtain(chunk, geom.means2D, P, 128);
+	obtain(chunk, geom.cov3D, P * 6, 128);
+	obtain(chunk, geom.conic_opacity, P, 128);
+	obtain(chunk, geom.rgb, P * 3, 128);
+	obtain(chunk, geom.tiles_touched, P, 128);
+	cub::DeviceScan::InclusiveSum(nullptr, geom.scan_size, geom.tiles_touched, geom.tiles_touched, P);
+	obtain(chunk, geom.scanning_space, geom.scan_size, 128);
+	obtain(chunk, geom.point_offsets, P, 128);
+	return geom;
+}
+
+CudaRasterizer::ImageState CudaRasterizer::ImageState::fromChunk(char*& chunk, size_t N)
+{
+	ImageState img;
+	obtain(chunk, img.accum_alpha, N, 128);
+	obtain(chunk, img.n_contrib, N, 128);
+	obtain(chunk, img.ranges, N, 128);
+	return img;
+}
+
+CudaRasterizer::BinningState CudaRasterizer::BinningState::fromChunk(char*& chunk, size_t P)
+{
+	BinningState binning;
+	obtain(chunk, binning.point_list, P, 128);
+	obtain(chunk, binning.point_list_unsorted, P, 128);
+	obtain(chunk, binning.point_list_keys, P, 128);
+	obtain(chunk, binning.point_list_keys_unsorted, P, 128);
+	cub::DeviceRadixSort::SortPairs(
+		nullptr, binning.sorting_size,
+		binning.point_list_keys_unsorted, binning.point_list_keys,
+		binning.point_list_unsorted, binning.point_list, P);
+	obtain(chunk, binning.list_sorting_space, binning.sorting_size, 128);
+	return binning;
+}
+
+// Forward rendering procedure for differentiable rasterization
+// of Gaussians.
+int CudaRasterizer::Rasterizer::forward(
+	std::function<char* (size_t)> geometryBuffer,
+	std::function<char* (size_t)> binningBuffer,
+	std::function<char* (size_t)> imageBuffer,
+	const int P, int D, int M,
+	const float* background,
+	const int width, int height,
+	const float* means3D,
+	const float* shs,
+	const float* colors_precomp,
+	const float* opacities,
+	const float* scales,
+	const float scale_modifier,
+	const float* rotations,
+	const float* cov3D_precomp,
+	const float* viewmatrix,
+	const float* projmatrix,
+	const float* cam_pos,
+	const float tan_fovx, float tan_fovy,
+	const bool prefiltered,
+	float* out_color,
+	int* radii,
+	bool debug)
+{
+	const float focal_y = height / (2.0f * tan_fovy);
+	const float focal_x = width / (2.0f * tan_fovx);
+
+	size_t chunk_size = required<GeometryState>(P);
+	char* chunkptr = geometryBuffer(chunk_size);
+	GeometryState geomState = GeometryState::fromChunk(chunkptr, P);
+
+	if (radii == nullptr)
+	{
+		radii = geomState.internal_radii;
+	}
+
+	dim3 tile_grid((width + BLOCK_X - 1) / BLOCK_X, (height + BLOCK_Y - 1) / BLOCK_Y, 1);
+	dim3 block(BLOCK_X, BLOCK_Y, 1);
+
+	// Dynamically resize image-based auxiliary buffers during training
+	size_t img_chunk_size = required<ImageState>(width * height);
+	char* img_chunkptr = imageBuffer(img_chunk_size);
+	ImageState imgState = ImageState::fromChunk(img_chunkptr, width * height);
+
+	if (NUM_CHANNELS != 3 && colors_precomp == nullptr)
+	{
+		throw std::runtime_error("For non-RGB, provide precomputed Gaussian colors!");
+	}
+
+	// Run preprocessing per-Gaussian (transformation, bounding, conversion of SHs to RGB)
+	CHECK_CUDA(FORWARD::preprocess(
+		P, D, M,
+		means3D,
+		(glm::vec3*)scales,
+		scale_modifier,
+		(glm::vec4*)rotations,
+		opacities,
+		shs,
+		geomState.clamped,
+		cov3D_precomp,
+		colors_precomp,
+		viewmatrix, projmatrix,
+		(glm::vec3*)cam_pos,
+		width, height,
+		focal_x, focal_y,
+		tan_fovx, tan_fovy,
+		radii,
+		geomState.means2D,
+		geomState.depths,
+		geomState.cov3D,
+		geomState.rgb,
+		geomState.conic_opacity,
+		tile_grid,
+		geomState.tiles_touched,
+		prefiltered
+	), debug)
+
+	// Compute prefix sum over full list of touched tile counts by Gaussians
+	// E.g., [2, 3, 0, 2, 1] -> [2, 5, 5, 7, 8]
+	CHECK_CUDA(cub::DeviceScan::InclusiveSum(geomState.scanning_space, geomState.scan_size, geomState.tiles_touched, geomState.point_offsets, P), debug)
+
+	// Retrieve total number of Gaussian instances to launch and resize aux buffers
+	int num_rendered;
+	CHECK_CUDA(cudaMemcpy(&num_rendered, geomState.point_offsets + P - 1, sizeof(int), cudaMemcpyDeviceToHost), debug);
+
+	size_t binning_chunk_size = required<BinningState>(num_rendered);
+	char* binning_chunkptr = binningBuffer(binning_chunk_size);
+	BinningState binningState = BinningState::fromChunk(binning_chunkptr, num_rendered);
+
+	// For each instance to be rendered, produce adequate [ tile | depth ] key 
+	// and corresponding dublicated Gaussian indices to be sorted
+	duplicateWithKeys << <(P + 255) / 256, 256 >> > (
+		P,
+		geomState.means2D,
+		geomState.depths,
+		geomState.point_offsets,
+		binningState.point_list_keys_unsorted,
+		binningState.point_list_unsorted,
+		radii,
+		tile_grid)
+	CHECK_CUDA(, debug)
+
+	int bit = getHigherMsb(tile_grid.x * tile_grid.y);
+
+	// Sort complete list of (duplicated) Gaussian indices by keys
+    CHECK_CUDA(cub::DeviceRadixSort::SortPairs(
+        binningState.list_sorting_space,
+        binningState.sorting_size,
+        binningState.point_list_keys_unsorted, binningState.point_list_keys,
+        binningState.point_list_unsorted, binningState.point_list,
+        num_rendered, 0, 32 + bit), debug);
+
+    CHECK_CUDA(cudaMemset(imgState.ranges, 0, tile_grid.x * tile_grid.y * sizeof(uint2)), debug);
+
+
+	// Identify start and end of per-tile workloads in sorted list
+	if (num_rendered > 0)
+		identifyTileRanges << <(num_rendered + 255) / 256, 256 >> > (
+			num_rendered,
+			binningState.point_list_keys,
+			imgState.ranges);
+	CHECK_CUDA(, debug)
+
+	// Let each tile blend its range of Gaussians independently in parallel
+	const float* feature_ptr = colors_precomp != nullptr ? colors_precomp : geomState.rgb;
+	CHECK_CUDA(FORWARD::render(
+		tile_grid, block,
+		imgState.ranges,
+		binningState.point_list,
+		width, height,
+		geomState.means2D,
+		feature_ptr,
+		geomState.conic_opacity,
+		imgState.accum_alpha,
+		imgState.n_contrib,
+		background,
+		out_color), debug)
+
+	return num_rendered;
+}
+
+// Produce necessary gradients for optimization, corresponding
+// to forward render pass
+void CudaRasterizer::Rasterizer::backward(
+	const int P, int D, int M, int R,
+	const float* background,
+	const int width, int height,
+	const float* means3D,
+	const float* shs,
+	const float* colors_precomp,
+	const float* scales,
+	const float scale_modifier,
+	const float* rotations,
+	const float* cov3D_precomp,
+	const float* viewmatrix,
+	const float* projmatrix,
+	const float* campos,
+	const float tan_fovx, float tan_fovy,
+	const int* radii,
+	char* geom_buffer,
+	char* binning_buffer,
+	char* img_buffer,
+	const float* dL_dpix,
+	float* dL_dmean2D,
+	float* dL_dconic,
+	float* dL_dopacity,
+	float* dL_dcolor,
+	float* dL_dmean3D,
+	float* dL_dcov3D,
+	float* dL_dsh,
+	float* dL_dscale,
+	float* dL_drot,
+	bool debug)
+{
+	GeometryState geomState = GeometryState::fromChunk(geom_buffer, P);
+	BinningState binningState = BinningState::fromChunk(binning_buffer, R);
+	ImageState imgState = ImageState::fromChunk(img_buffer, width * height);
+
+	if (radii == nullptr)
+	{
+		radii = geomState.internal_radii;
+	}
+
+	const float focal_y = height / (2.0f * tan_fovy);
+	const float focal_x = width / (2.0f * tan_fovx);
+
+	const dim3 tile_grid((width + BLOCK_X - 1) / BLOCK_X, (height + BLOCK_Y - 1) / BLOCK_Y, 1);
+	const dim3 block(BLOCK_X, BLOCK_Y, 1);
+
+	// Compute loss gradients w.r.t. 2D mean position, conic matrix,
+	// opacity and RGB of Gaussians from per-pixel loss gradients.
+	// If we were given precomputed colors and not SHs, use them.
+	const float* color_ptr = (colors_precomp != nullptr) ? colors_precomp : geomState.rgb;
+	CHECK_CUDA(BACKWARD::render(
+		tile_grid,
+		block,
+		imgState.ranges,
+		binningState.point_list,
+		width, height,
+		background,
+		geomState.means2D,
+		geomState.conic_opacity,
+		color_ptr,
+		imgState.accum_alpha,
+		imgState.n_contrib,
+		dL_dpix,
+		(float3*)dL_dmean2D,
+		(float4*)dL_dconic,
+		dL_dopacity,
+		dL_dcolor), debug)
+
+	// Take care of the rest of preprocessing. Was the precomputed covariance
+	// given to us or a scales/rot pair? If precomputed, pass that. If not,
+	// use the one we computed ourselves.
+	const float* cov3D_ptr = (cov3D_precomp != nullptr) ? cov3D_precomp : geomState.cov3D;
+	CHECK_CUDA(BACKWARD::preprocess(P, D, M,
+		(float3*)means3D,
+		radii,
+		shs,
+		geomState.clamped,
+		(glm::vec3*)scales,
+		(glm::vec4*)rotations,
+		scale_modifier,
+		cov3D_ptr,
+		viewmatrix,
+		projmatrix,
+		focal_x, focal_y,
+		tan_fovx, tan_fovy,
+		(glm::vec3*)campos,
+		(float3*)dL_dmean2D,
+		dL_dconic,
+		(glm::vec3*)dL_dmean3D,
+		dL_dcolor,
+		dL_dcov3D,
+		dL_dsh,
+		(glm::vec3*)dL_dscale,
+		(glm::vec4*)dL_drot), debug)
+}
+```
+
+### gscache/3dgs/cuda_rasterizer/rasterizer_impl.h
+```
+/*
+ * Copyright (C) 2023, Inria
+ * GRAPHDECO research group, https://team.inria.fr/graphdeco
+ * All rights reserved.
+ *
+ * This software is free for non-commercial, research and evaluation use 
+ * under the terms of the LICENSE.md file.
+ *
+ * For inquiries contact  george.drettakis@inria.fr
+ */
+
+#pragma once
+
+#include <iostream>
+#include <vector>
+#include "rasterizer.h"
+#include <cuda_runtime_api.h>
+
+namespace CudaRasterizer
+{
+	template <typename T>
+	static void obtain(char*& chunk, T*& ptr, std::size_t count, std::size_t alignment)
+	{
+		std::size_t offset = (reinterpret_cast<std::uintptr_t>(chunk) + alignment - 1) & ~(alignment - 1);
+		ptr = reinterpret_cast<T*>(offset);
+		chunk = reinterpret_cast<char*>(ptr + count);
+	}
+
+	struct GeometryState
+	{
+		size_t scan_size;
+		float* depths;
+		char* scanning_space;
+		bool* clamped;
+		int* internal_radii;
+		float2* means2D;
+		float* cov3D;
+		float4* conic_opacity;
+		float* rgb;
+		uint32_t* point_offsets;
+		uint32_t* tiles_touched;
+
+		static GeometryState fromChunk(char*& chunk, size_t P);
+	};
+
+	struct ImageState
+	{
+		uint2* ranges;
+		uint32_t* n_contrib;
+		float* accum_alpha;
+
+		static ImageState fromChunk(char*& chunk, size_t N);
+	};
+
+	struct BinningState
+	{
+		size_t sorting_size;
+		uint64_t* point_list_keys_unsorted;
+		uint64_t* point_list_keys;
+		uint32_t* point_list_unsorted;
+		uint32_t* point_list;
+		char* list_sorting_space;
+
+		static BinningState fromChunk(char*& chunk, size_t P);
+	};
+
+	template<typename T> 
+	size_t required(size_t P)
+	{
+		char* size = nullptr;
+		T::fromChunk(size, P);
+		return ((size_t)size) + 128;
+	}
+};
+```
+
+### gscache/3dgs/simple_knn/simple_knn.cu
+```
+/*
+ * Copyright (C) 2023, Inria
+ * GRAPHDECO research group, https://team.inria.fr/graphdeco
+ * All rights reserved.
+ *
+ * This software is free for non-commercial, research and evaluation use 
+ * under the terms of the LICENSE.md file.
+ *
+ * For inquiries contact  george.drettakis@inria.fr
+ */
+
+#define BOX_SIZE 1024
+
+#include "cuda_runtime.h"
+#include "device_launch_parameters.h"
+#include "simple_knn.h"
+#include "float.h"
+#include <cub/cub.cuh>
+#include <cub/device/device_radix_sort.cuh>
+#include <vector>
+#include <cuda_runtime_api.h>
+#include <thrust/device_vector.h>
+#include <thrust/sequence.h>
+#define __CUDACC__
+#include <cooperative_groups.h>
+#include <cooperative_groups/reduce.h>
+
+namespace cg = cooperative_groups;
+
+struct CustomMin
+{
+	__device__ __forceinline__
+		float3 operator()(const float3& a, const float3& b) const {
+		return { min(a.x, b.x), min(a.y, b.y), min(a.z, b.z) };
+	}
+};
+
+struct CustomMax
+{
+	__device__ __forceinline__
+		float3 operator()(const float3& a, const float3& b) const {
+		return { max(a.x, b.x), max(a.y, b.y), max(a.z, b.z) };
+	}
+};
+
+__host__ __device__ uint32_t prepMorton(uint32_t x)
+{
+	x = (x | (x << 16)) & 0x030000FF;
+	x = (x | (x << 8)) & 0x0300F00F;
+	x = (x | (x << 4)) & 0x030C30C3;
+	x = (x | (x << 2)) & 0x09249249;
+	return x;
+}
+
+__host__ __device__ uint32_t coord2Morton(float3 coord, float3 minn, float3 maxx)
+{
+	uint32_t x = prepMorton(((coord.x - minn.x) / (maxx.x - minn.x)) * ((1 << 10) - 1));
+	uint32_t y = prepMorton(((coord.y - minn.y) / (maxx.y - minn.y)) * ((1 << 10) - 1));
+	uint32_t z = prepMorton(((coord.z - minn.z) / (maxx.z - minn.z)) * ((1 << 10) - 1));
+
+	return x | (y << 1) | (z << 2);
+}
+
+__global__ void coord2Morton(int P, const float3* points, float3 minn, float3 maxx, uint32_t* codes)
+{
+	auto idx = cg::this_grid().thread_rank();
+	if (idx >= P)
+		return;
+
+	codes[idx] = coord2Morton(points[idx], minn, maxx);
+}
+
+struct MinMax
+{
+	float3 minn;
+	float3 maxx;
+};
+
+__global__ void boxMinMax(uint32_t P, float3* points, uint32_t* indices, MinMax* boxes)
+{
+	auto idx = cg::this_grid().thread_rank();
+
+	MinMax me;
+	if (idx < P)
+	{
+		me.minn = points[indices[idx]];
+		me.maxx = points[indices[idx]];
+	}
+	else
+	{
+		me.minn = { FLT_MAX, FLT_MAX, FLT_MAX };
+		me.maxx = { -FLT_MAX,-FLT_MAX,-FLT_MAX };
+	}
+
+	__shared__ MinMax redResult[BOX_SIZE];
+
+	for (int off = BOX_SIZE / 2; off >= 1; off /= 2)
+	{
+		if (threadIdx.x < 2 * off)
+			redResult[threadIdx.x] = me;
+		__syncthreads();
+
+		if (threadIdx.x < off)
+		{
+			MinMax other = redResult[threadIdx.x + off];
+			me.minn.x = min(me.minn.x, other.minn.x);
+			me.minn.y = min(me.minn.y, other.minn.y);
+			me.minn.z = min(me.minn.z, other.minn.z);
+			me.maxx.x = max(me.maxx.x, other.maxx.x);
+			me.maxx.y = max(me.maxx.y, other.maxx.y);
+			me.maxx.z = max(me.maxx.z, other.maxx.z);
+		}
+		__syncthreads();
+	}
+
+	if (threadIdx.x == 0)
+		boxes[blockIdx.x] = me;
+}
+
+__device__ __host__ float distBoxPoint(const MinMax& box, const float3& p)
+{
+	float3 diff = { 0, 0, 0 };
+	if (p.x < box.minn.x || p.x > box.maxx.x)
+		diff.x = min(abs(p.x - box.minn.x), abs(p.x - box.maxx.x));
+	if (p.y < box.minn.y || p.y > box.maxx.y)
+		diff.y = min(abs(p.y - box.minn.y), abs(p.y - box.maxx.y));
+	if (p.z < box.minn.z || p.z > box.maxx.z)
+		diff.z = min(abs(p.z - box.minn.z), abs(p.z - box.maxx.z));
+	return diff.x * diff.x + diff.y * diff.y + diff.z * diff.z;
+}
+
+template<int K>
+__device__ void updateKBest(const float3& ref, const float3& point, float* knn)
+{
+	float3 d = { point.x - ref.x, point.y - ref.y, point.z - ref.z };
+	float dist = d.x * d.x + d.y * d.y + d.z * d.z;
+	for (int j = 0; j < K; j++)
+	{
+		if (knn[j] > dist)
+		{
+			float t = knn[j];
+			knn[j] = dist;
+			dist = t;
+		}
+	}
+}
+
+__global__ void boxMeanDist(uint32_t P, float3* points, uint32_t* indices, MinMax* boxes, float* dists)
+{
+	int idx = cg::this_grid().thread_rank();
+	if (idx >= P)
+		return;
+
+	float3 point = points[indices[idx]];
+	float best[3] = { FLT_MAX, FLT_MAX, FLT_MAX };
+
+	for (int i = max(0, idx - 3); i <= min(P - 1, idx + 3); i++)
+	{
+		if (i == idx)
+			continue;
+		updateKBest<3>(point, points[indices[i]], best);
+	}
+
+	float reject = best[2];
+	best[0] = FLT_MAX;
+	best[1] = FLT_MAX;
+	best[2] = FLT_MAX;
+
+	for (int b = 0; b < (P + BOX_SIZE - 1) / BOX_SIZE; b++)
+	{
+		MinMax box = boxes[b];
+		float dist = distBoxPoint(box, point);
+		if (dist > reject || dist > best[2])
+			continue;
+
+		for (int i = b * BOX_SIZE; i < min(P, (b + 1) * BOX_SIZE); i++)
+		{
+			if (i == idx)
+				continue;
+			updateKBest<3>(point, points[indices[i]], best);
+		}
+	}
+	dists[indices[idx]] = (best[0] + best[1] + best[2]) / 3.0f;
+}
+
+void SimpleKNN::knn(int P, float3* points, float* meanDists)
+{
+	float3* result;
+	cudaMalloc(&result, sizeof(float3));
+	size_t temp_storage_bytes;
+
+	float3 init = { 0, 0, 0 }, minn, maxx;
+
+	cub::DeviceReduce::Reduce(nullptr, temp_storage_bytes, points, result, P, CustomMin(), init);
+	thrust::device_vector<char> temp_storage(temp_storage_bytes);
+
+	cub::DeviceReduce::Reduce(temp_storage.data().get(), temp_storage_bytes, points, result, P, CustomMin(), init);
+	cudaMemcpy(&minn, result, sizeof(float3), cudaMemcpyDeviceToHost);
+
+	cub::DeviceReduce::Reduce(temp_storage.data().get(), temp_storage_bytes, points, result, P, CustomMax(), init);
+	cudaMemcpy(&maxx, result, sizeof(float3), cudaMemcpyDeviceToHost);
+
+	thrust::device_vector<uint32_t> morton(P);
+	thrust::device_vector<uint32_t> morton_sorted(P);
+	coord2Morton << <(P + 255) / 256, 256 >> > (P, points, minn, maxx, morton.data().get());
+
+	thrust::device_vector<uint32_t> indices(P);
+	thrust::sequence(indices.begin(), indices.end());
+	thrust::device_vector<uint32_t> indices_sorted(P);
+
+	cub::DeviceRadixSort::SortPairs(nullptr, temp_storage_bytes, morton.data().get(), morton_sorted.data().get(), indices.data().get(), indices_sorted.data().get(), P);
+	temp_storage.resize(temp_storage_bytes);
+
+	cub::DeviceRadixSort::SortPairs(temp_storage.data().get(), temp_storage_bytes, morton.data().get(), morton_sorted.data().get(), indices.data().get(), indices_sorted.data().get(), P);
+
+	uint32_t num_boxes = (P + BOX_SIZE - 1) / BOX_SIZE;
+	thrust::device_vector<MinMax> boxes(num_boxes);
+	boxMinMax << <num_boxes, BOX_SIZE >> > (P, points, indices_sorted.data().get(), boxes.data().get());
+	boxMeanDist << <num_boxes, BOX_SIZE >> > (P, points, indices_sorted.data().get(), boxes.data().get(), meanDists);
+
+	cudaFree(result);
+}
+```
+
+### gscache/3dgs/simple_knn/simple_knn.h
+```
+/*
+ * Copyright (C) 2023, Inria
+ * GRAPHDECO research group, https://team.inria.fr/graphdeco
+ * All rights reserved.
+ *
+ * This software is free for non-commercial, research and evaluation use 
+ * under the terms of the LICENSE.md file.
+ *
+ * For inquiries contact  george.drettakis@inria.fr
+ */
+
+#ifndef SIMPLEKNN_H_INCLUDED
+#define SIMPLEKNN_H_INCLUDED
+
+class SimpleKNN
+{
+public:
+	static void knn(int P, float3* points, float* meanDists);
+};
+
+#endif
+```

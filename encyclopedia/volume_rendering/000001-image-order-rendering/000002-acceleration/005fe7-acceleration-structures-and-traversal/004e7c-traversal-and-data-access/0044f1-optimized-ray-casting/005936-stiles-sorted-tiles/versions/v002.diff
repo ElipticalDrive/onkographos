@@ -1,0 +1,263 @@
+--- v001.md
++++ v002.md
+@@ -4,177 +4,126 @@
+ 
+ ## Overview
+-STiles is a progressive rendering technique for volume visualization that decomposes the image space into square tiles, sorts them by estimated rendering cost, and renders them in batches over subsequent frames until a time budget is reached [S1, unofficial]. It addresses the challenge of interactive volume rendering on mobile and low-performance devices by providing immediate low-resolution feedback during interaction and progressively refining the image to full resolution without stalling [S1, unofficial]. Unlike sibling method [Light Ray Extinction Optimization](15221-light-ray-extinction-optimization.md) which optimizes ray traversal, or [Parallel Volume Rendering for Computational Flow Imaging](16105-parallel-volume-rendering-for-computational-flow-imaging.md) which focuses on data parallelism for flow fields, STiles optimizes the *order* of rendering work to fit within frame time constraints [S1, unofficial]. It differs from [Front-to-back Slabs (FBSlabs)](11373-optimized-ray-casting.md) by sorting individual tiles rather than rendering fixed slabs across the entire image [S1, unofficial].
++STiles is a progressive rendering technique for volume visualization that decomposes the image space into square tiles, sorts them by estimated rendering cost, and renders them in batches over subsequent frames until a time budget is reached [S1, unofficial]. It addresses the challenge of maintaining interactive frame rates on mobile and low-performance devices while rendering high-resolution medical data (typically $>512^3$) [S1, unofficial]. Unlike [Light Ray Extinction Optimization](15221-light-ray-extinction-optimization.md) which optimizes ray traversal, or [Parallel Volume Rendering for Computational Flow Imaging](16105-parallel-volume-rendering-for-computational-flow-imaging.md) which focuses on data parallelism, STiles optimizes frame delivery by grouping tiles of similar cost [S1, unofficial]. It differs from [Front-to-back Slabs (FBSlabs)](11373-optimized-ray-casting.md) by sorting individual tiles rather than rendering fixed slabs across the entire image [S1, unofficial].
+ 
+ ## How it works
+-The method operates in two phases: an interactive low-resolution phase and a progressive high-resolution refinement phase.
++**Inputs:** High-resolution volume dataset; viewport dimensions; time budget per frame for high-resolution rendering.
++**Outputs:** Progressive high-resolution image.
+ 
+-### Inputs and Outputs
+-*   **Input:** High-resolution volume dataset, viewport dimensions, user interaction state (active/inactive), and a fixed time budget per frame for high-resolution rendering.
+-*   **Output:** A composited image that transitions from low-resolution interactive view to full-resolution static view.
++**Data Structures:**
++1.  **$T_{low}$**: A 2D texture storing the low-resolution result.
++    *   RGB channels: Low-resolution color.
++    *   Alpha channel: Ray cost (number of ray samples) used as a cost estimation [S1, unofficial].
++2.  **$T_{high}$**: A 2D texture storing the high-resolution result for rendered tiles.
++3.  **Correlation Maps**: Two maps generated during sorting to convert between unsorted and sorted tile coordinates [S1, unofficial].
++4.  **Tile List**: An array of tile identifiers sorted by cost [S1, unofficial].
+ 
+-### Data Structures
+-1.  **$T_{low}$**: A 2D texture storing the low-resolution rendering result.
+-    *   **RGB channels**: Store the low-resolution color.
+-    *   **Alpha channel**: Stores the ray cost, defined as the number of ray samples taken during the low-resolution pass. This serves as an estimation of rendering cost for sorting [S1, unofficial].
+-2.  **$T_{high}$**: A 2D texture storing the high-resolution rendering result. Initially empty or invalid.
+-3.  **Correlation Maps**: Two maps generated during the sorting step to allow conversion between unsorted tile coordinates (screen space) and sorted tile coordinates (rendering order) [S1, unofficial].
+-4.  **Tile List**: A list of tile identifiers sorted by cost.
++**Parameters:**
++*   **Tile Size**: Not given in the sources.
++*   **Time Budget**: Fixed duration per frame for high-resolution rendering [S1, unofficial].
++*   **Resolution**: Low-resolution is used during interaction; high-resolution is used for final output [S1, unofficial].
+ 
+-### Numbered Steps
++**Steps:**
+ 
+-1.  **Low Resolution Ray Casting (Interactive Phase)**
+-    *   During user interaction, perform standard low-resolution ray casting in a fragment shader.
+-    *   For each pixel, compute the color and store it in the RGB channels of $T_{low}$.
+-    *   Count the number of ray samples taken for that pixel and store this count in the Alpha channel of $T_{low}$ [S1, unofficial]. This value approximates the rendering cost for that pixel.
++1.  **Low Resolution Ray Casting (Interactive Phase):**
++    During user interaction, perform standard low-resolution ray casting in a fragment shader. For each pixel, store the resulting color in the RGB channels of $T_{low}$ and the number of ray samples taken in the Alpha channel of $T_{low}$ [S1, unofficial]. This alpha value serves as the cost estimation [S1, unofficial].
+ 
+-2.  **Tile Sorting (Post-Interaction)**
+-    *   Once user interaction stops, divide the viewport into square tiles.
+-    *   Use compute shaders to sort these tiles based on the cost hint provided by the Alpha channel of $T_{low}$ [S1, unofficial].
+-    *   The sorting pipeline typically involves a GPU radix sort algorithm implemented via compute shaders. It proceeds in steps such as group count, prefix sum, and scattering to reorder tiles [S1, unofficial].
+-    *   Generate two correlation maps during this process to map between the original screen-space tile positions and their new sorted positions [S1, unofficial].
++2.  **Tile Sorting (Post-Interaction):**
++    Once user interaction stops, split the viewport into square tiles. Use compute shaders to sort these tiles based on the cost stored in $T_{low}$'s alpha channel. The sorting pipeline typically involves a GPU radix sort algorithm implemented via compute shaders, including a group count step [S1, unofficial]. Generate two correlation maps to allow coordinate conversion between unsorted and sorted tile spaces [S1, unofficial].
+ 
+-3.  **Progressive High Resolution Ray Casting - Render Tiles**
+-    *   Render tiles in the sorted order (highest cost first, or as determined by the sort).
+-    *   For each tile, perform high-resolution ray casting.
+-    *   Store the resulting high-resolution color in the corresponding region of $T_{high}$.
+-    *   Continue rendering tiles until a fixed time budget is reached [S1, unofficial].
++3.  **Progressive High Resolution Ray Casting (Rendering Phase):**
++    Render tiles from the sorted list in order. Render a batch of high-resolution tiles until the fixed time budget for the frame is reached. Store the results in $T_{high}$ [S1, unofficial].
+ 
+-4.  **Progressive High Resolution Ray Casting - Composite**
+-    *   Composite the final image for display.
+-    *   For each pixel, check if its corresponding tile has been rendered in $T_{high}$.
+-    *   If the tile is rendered in $T_{high}$, use the high-resolution color from $T_{high}$.
+-    *   Otherwise, use the low-resolution color from $T_{low}$ [S1, unofficial].
++4.  **Progressive High Resolution Ray Casting (Compositing Phase):**
++    Composite the current display image. For each pixel, select the high-resolution value from $T_{high}$ if the corresponding tile has been rendered; otherwise, select the low-resolution value from $T_{low}$ [S1, unofficial].
+ 
+-5.  **Iteration**
+-    *   In the next frame, resume rendering tiles from step 3, continuing from where the previous frame left off in the sorted list.
+-    *   Repeat steps 3 and 4 until all tiles are rendered in $T_{high}$ [S1, unofficial].
++5.  **Iteration:**
++    In the next frame, resume rendering tiles from step 3 (starting from the next unrendered tile in the sorted list) until all tiles are rendered [S1, unofficial].
+ 
+-### Pseudocode
++**Pseudocode:**
+ 
+ ```python
+ # Global State
+-T_low = create_2d_texture(width, height, format=RGBA)
+-T_high = create_2d_texture(width, height, format=RGBA)
+-tiles = [] # List of tile objects with id, x, y, width, height
+-sorted_tiles = [] # List of tile objects sorted by cost
+-correlation_map_unsorted_to_sorted = {} # Map: (x,y) -> sorted_index
+-correlation_map_sorted_to_unsorted = {} # Map: sorted_index -> (x,y)
+-time_budget_ms = 100 # Example budget
+-rendered_tile_indices = set() # Track which sorted indices are done
++T_low: Texture2D # RGB: low-res color, A: ray cost (sample count)
++T_high: Texture2D # RGB: high-res color, initialized to 0 or transparent
++sorted_tiles: List[Tile] # List of tile coordinates sorted by cost
++current_tile_index: int = 0
++time_budget: float # Seconds allowed for high-res rendering per frame
+ 
+ def on_interaction_start():
+-    global T_low
+-    # Reset T_high if necessary
+-    clear_texture(T_high)
+-    rendered_tile_indices.clear()
+-
+-def on_interaction_active():
+     # Step 1: Low Resolution Ray Casting
+     render_low_res_fragment_shader(T_low)
+ 
+ def on_interaction_stop():
+-    global tiles, sorted_tiles
+     # Step 2: Tile Sorting
+-    tiles = generate_tiles(viewport_width, viewport_height, tile_size)
++    tiles = get_viewport_tiles()
++    costs = [get_cost_from_tile(t, T_low) for t in tiles]
++    # Sort tiles by cost using GPU radix sort in compute shaders
++    sorted_tiles = sort_tiles_by_cost(tiles, costs)
++    # Generate correlation maps for coordinate conversion
++    generate_correlation_maps(sorted_tiles)
++
++def render_frame():
++    # Check if all tiles are rendered
++    if current_tile_index >= len(sorted_tiles):
++        return T_high # Final image is ready
++
++    # Step 3: Progressive High Resolution Ray Casting
++    start_time = get_current_time()
+     
+-    # Extract costs from T_low alpha channel for each tile
+-    tile_costs = []
+-    for tile in tiles:
+-        # Average alpha value in the tile region as cost estimate
+-        cost = compute_average_alpha(T_low, tile.x, tile.y, tile.width, tile.height)
+-        tile_costs.append((tile, cost))
+-    
+-    # Sort tiles by cost (descending or ascending depending on strategy)
+-    # Assuming descending cost for prioritization
+-    tile_costs.sort(key=lambda x: x[1], reverse=True)
+-    sorted_tiles = [item[0] for item in tile_costs]
+-    
+-    # Generate correlation maps
+-    for sorted_idx, tile in enumerate(sorted_tiles):
+-        correlation_map_unsorted_to_sorted[(tile.x, tile.y)] = sorted_idx
+-        correlation_map_sorted_to_unsorted[sorted_idx] = (tile.x, tile.y)
+-
+-def on_frame_render():
+-    if not sorted_tiles:
+-        return
+-
+-    # Step 3: Progressive High Resolution Ray Casting - Render Tiles
+-    start_time = get_current_time_ms()
+-    
+-    # Determine how many tiles can be rendered within the time budget
+-    # This is an approximation; in practice, you might render one by one and check time
+-    tiles_to_render_this_frame = []
+-    for sorted_idx in range(len(sorted_tiles)):
+-        if sorted_idx in rendered_tile_indices:
+-            continue
+-        
+-        tile = sorted_tiles[sorted_idx]
+-        
+-        # Estimate time for this tile or render it and measure
+-        # For pseudocode, assume we render one tile per iteration check
+-        render_high_res_tile(T_high, tile)
+-        rendered_tile_indices.add(sorted_idx)
+-        
+-        if get_current_time_ms() - start_time > time_budget_ms:
++    while current_tile_index < len(sorted_tiles):
++        if (get_current_time() - start_time) > time_budget:
+             break
+             
++        tile = sorted_tiles[current_tile_index]
++        render_high_res_tile(tile, T_high)
++        current_tile_index += 1
++
+     # Step 4: Progressive High Resolution Ray Casting - Composite
+     composite_image(T_low, T_high)
+ 
++def get_cost_from_tile(tile, T_low):
++    # Retrieve the alpha value (ray cost) from T_low for the tile's region
++    # Average or representative value of the alpha channel within the tile bounds
++    return get_average_alpha(tile, T_low)
++
+ def render_low_res_fragment_shader(T_low):
+     # Standard low-res ray casting
+-    for y in range(T_low.height):
+-        for x in range(T_low.width):
+-            color, sample_count = low_res_ray_cast(x, y)
+-            T_low[x, y].rgb = color
+-            T_low[x, y].a = sample_count
++    # For each pixel (x, y):
++    #   color = ray_cast_low_res(x, y)
++    #   samples = count_samples(x, y)
++    #   T_low[x, y].rgb = color
++    #   T_low[x, y].a = samples
+ 
+-def render_high_res_tile(T_high, tile):
++def render_high_res_tile(tile, T_high):
+     # High-res ray casting for the specific tile region
+-    for y in range(tile.y, tile.y + tile.height):
+-        for x in range(tile.x, tile.x + tile.width):
+-            color = high_res_ray_cast(x, y)
+-            T_high[x, y].rgb = color
+-            # Alpha can be ignored or set to 1 if fully opaque
++    # For each pixel (x, y) in tile bounds:
++    #   color = ray_cast_high_res(x, y)
++    #   T_high[x, y].rgb = color
+ 
+ def composite_image(T_low, T_high):
+-    # Create final image buffer
+-    final_image = create_2d_texture(viewport_width, viewport_height, format=RGBA)
+-    
+-    for y in range(viewport_width):
+-        for x in range(viewport_height):
+-            # Check if this pixel's tile has been rendered in T_high
+-            # We need to know which tile (x,y) belongs to
+-            tile_id = get_tile_id_for_pixel(x, y)
+-            sorted_idx = correlation_map_unsorted_to_sorted.get(tile_id)
+-            
+-            if sorted_idx is not None and sorted_idx in rendered_tile_indices:
+-                final_image[x, y] = T_high[x, y]
+-            else:
+-                final_image[x, y] = T_low[x, y]
+-    
+-    display(final_image)
++    # For each pixel (x, y):
++    #   if T_high[x, y] is valid (tile rendered):
++    #       return T_high[x, y].rgb
++    #   else:
++    #       return T_low[x, y].rgb
++    pass
+ ```
+ 
+-### Parameters
+-*   **Tile Size**: Not given in the sources.
+-*   **Time Budget**: Not given in the sources.
+-*   **Sorting Algorithm**: GPU radix sort via compute shaders [S1, unofficial].
+-
+-### Edge Cases and Pitfalls
+-*   **Cost Estimation Accuracy**: The Alpha channel stores the number of ray samples. If the low-resolution sampling rate is significantly different from the high-resolution rate, the cost estimation may be inaccurate, leading to suboptimal sorting [S1, unofficial].
+-*   **Interaction Resumption**: If interaction resumes before all tiles are rendered, the system must handle the transition back to low-resolution mode. The sources imply that interaction stops trigger the sorting, but do not detail the reset mechanism if interaction restarts [S1, unofficial].
++**Edge Cases and Pitfalls:**
++*   **Cost Estimation Accuracy:** The alpha channel stores the number of ray samples. If the low-resolution sampling is too coarse, the cost estimation may be inaccurate, leading to suboptimal tile sorting [S1, unofficial].
++*   **Time Budget Management:** The time budget must be carefully tuned to ensure smooth progressive refinement without stalling the application [S1, unofficial].
++*   **Memory Usage:** Storing both $T_{low}$ and $T_{high}$ requires additional memory bandwidth and storage [S1, unofficial].
+ 
+ ## Operating characteristics
+-*   **Time Complexity**: Sorting is $O(N \log N)$ or $O(N)$ depending on the radix sort implementation, where $N$ is the number of tiles. Rendering is proportional to the number of tiles rendered per frame.
+-*   **Memory Complexity**: Requires storage for $T_{low}$, $T_{high}$, and correlation maps. $T_{low}$ and $T_{high}$ are full-resolution textures.
+-*   **Measured Performance**: Designed for mobile and low-performance devices to achieve interactive frame rates with large models (resolutions larger than $512^3$) [S1, unofficial].
+-*   **Strengths**: Provides immediate visual feedback during interaction. Progressively refines the image without stalling. Efficiently uses time budgets by rendering expensive tiles first.
+-*   **Limitations**: Requires two passes (low-res and high-res). Sorting overhead exists. Accuracy of cost estimation depends on low-res sampling.
+-*   **When to use**: When interactive performance is critical on hardware with limited rendering power, and full resolution is needed eventually.
+-*   **When not to use**: When immediate full resolution is required, or when the cost estimation is highly unreliable.
++*   **Time Complexity:** Sorting is $O(N \log N)$ or $O(N)$ depending on the radix sort implementation, where $N$ is the number of tiles. Rendering is proportional to the time budget [S1, unofficial].
++*   **Memory Complexity:** Requires storage for $T_{low}$, $T_{high}$, and correlation maps [S1, unofficial].
++*   **Performance:** Designed for mobile and low-performance devices, achieving interactive frame rates with large datasets ($>512^3$) [S1, unofficial].
++*   **Strengths:** Provides immediate visual feedback during interaction; progressively refines the image; efficient use of time budget by rendering expensive tiles first [S1, unofficial].
++*   **Limitations:** Requires a post-interaction sorting step; quality depends on the accuracy of the cost estimation [S1, unofficial].
++*   **When to use:** Interactive volume rendering on resource-constrained devices where full resolution cannot be rendered in real-time [S1, unofficial].
++*   **When not to use:** When real-time full-resolution rendering is possible; when interaction continues indefinitely without a clear "stop" point for sorting [S1, unofficial].
+ 
+ ## Background
+-STiles was introduced in the context of progressive ray casting for volumetric models on mobile devices. The technique was developed to address the limitations of traditional ray casting on mobile hardware, which often struggles with large datasets and interactive frame rates. The paper "Progressive Ray Casting for Volumetric Models on Mobile Devices" by [S1, unofficial] presents STiles as a solution to provide a smooth user experience by balancing interactivity and image quality.
++STiles was developed to address the problem of volume rendering medical data on mobile and low-performance devices [S1, unofficial]. It was introduced in the paper "Progressive Ray Casting for Volumetric Models on Mobile Devices" [S1, unofficial]. The technique was proposed as an alternative to Front-to-back Slabs (FBSlabs) for progressive rendering [S1, unofficial].
+ 
+ ## Sources

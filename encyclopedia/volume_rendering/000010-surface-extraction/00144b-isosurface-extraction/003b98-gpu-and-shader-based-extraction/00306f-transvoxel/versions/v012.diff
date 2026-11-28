@@ -1,0 +1,381 @@
+--- v011.md
++++ v012.md
+@@ -4,43 +4,52 @@
+ 
+ ## Overview
+-Transvoxel is a level-of-detail (LOD) aware extension to the Marching Cubes algorithm designed to extract watertight isosurfaces from voxel grids where neighboring cells have different resolutions [S1]. It solves the topological discontinuities (holes and cracks) that occur when standard Marching Cubes meshes are generated at varying LODs by introducing specialized "transition cells" that bridge the geometric gap between high-resolution and low-resolution regions [S1]. Unlike standard GPU Marching Cubes implementations which assume uniform voxel size, Transvoxel dynamically adjusts vertex positions and normals in transition zones to maintain surface continuity [S2, unofficial].
++Transvoxel is an extension to the Marching Cubes technique that introduces a specific set of polygon configurations for "transition cells" to connect meshes generated at different levels of detail (LODs) within a voxel grid [S1]. It solves the problem of non-watertight surfaces and visible artifacts that occur when neighboring voxels have different resolutions, ensuring a continuous, manifold surface [S2, unofficial]. Unlike standard Marching Cubes which assumes a uniform grid, Transvoxel dynamically adapts vertex positions and normals at LOD boundaries to maintain geometric continuity [S2, unofficial].
+ 
+ ## How it works
+-**Inputs and Outputs**
+-*   **Input:** A 3D scalar field (voxel grid), an isovalue threshold, a voxel size, and a LOD function that determines the resolution level for any given spatial coordinate.
+-*   **Output:** A triangle mesh representing the isosurface, emitted via a geometry shader or vertex buffer.
+-
+-**Data Structures**
+-*   **Transition Cell Configuration:** A lookup table (texture or array) mapping a 9-bit "left index" (derived from corner samples) to a set of precomputed transition polygons. This table defines the topology for connecting different LODs [S2, unofficial].
+-*   **Transition Cell Data:** Stores vertex indices and counts for each transition configuration. Typically packed such that the upper bits store vertex count and lower bits store triangle count [S2, unofficial].
+-*   **Transition Cell Vertex Data:** Stores the 3D coordinates of the vertices used in transition cells. These vertices are not standard cube corners but are interpolated or projected points that ensure watertightness [S2, unofficial].
+-
+-**Algorithm Steps**
++**Inputs:**
++- A 3D voxel grid (implicit function or scalar field).
++- A level-of-detail function `lod_function(x, y, z)` that returns the LOD index for a given voxel coordinate.
++- An isovalue threshold for surface extraction.
++- A maximum LOD depth (typically 2 or 3, where LOD 0 is finest, LOD 2 is coarsest).
++
++**Outputs:**
++- A stream of triangles (positions, normals) representing the isosurface.
++
++**Data Structures:**
++- `transitionCellClass`: A lookup texture or array mapping a 9-bit index (derived from corner samples) to a transition cell configuration ID.
++- `transitionCellData`: An array storing geometry counts for each transition cell class. Format: `geometry_count = (trans_vertex_count << 4) | trans_triangle_count`.
++- `transitionCellVertexData`: An array storing vertex definitions for transition cells. Each entry contains indices referencing corner or face vertices.
++- `transvoxel_adjust`: An array used to offset sampling positions for transition cells.
++
++**Algorithm Steps:**
+ 
+ 1.  **Voxel Positioning and LOD Determination:**
+-    For a given voxel coordinate $(x, y, z)$, calculate the base position in world space. The base position is rounded down to the nearest multiple of $2 \times \text{voxel\_size}$ to align with the LOD grid boundaries:
++    For each voxel in the grid, calculate the base position aligned to the current LOD's resolution.
+     $$ x_{base} = (x - (x \pmod 2)) \times \text{voxel\_size} $$
+-    Determine the LOD level for this voxel using a LOD function:
+-    $$ \text{lod} = \text{lod\_function}(vec3(x_{base}, y_{base}, z_{base})) $$
+-    Store the resulting voxel size multiplier as $\text{voxel\_size\_lod}$ [S2, unofficial].
++    $$ y_{base} = (y - (y \pmod 2)) \times \text{voxel\_size} $$
++    $$ z_{base} = (z - (z \pmod 2)) \times \text{voxel\_size} $$
++    Determine the LOD of the current voxel:
++    $$ \text{voxel\_size\_lod} = \text{lod\_function}(x_{base}, y_{base}, z_{base}) $$
+ 
+ 2.  **Transition Cell Identification:**
+-    If the current voxel is at the highest LOD (e.g., $\text{voxel\_size\_lod} == 2$ in a binary LOD scheme) and any of its coordinates are odd, it is a candidate for a transition cell. Mark `draw_voxel = false` for standard rendering and calculate a position offset based on the parity bits of the coordinates [S2, unofficial].
+-
+-3.  **Neighbor LOD Query:**
+-    For transition candidates, query the LOD of the six immediate neighbors (left, right, down, top, front, back) at a distance of $2 \times \text{voxel\_size}$. If any neighbor has a lower resolution (higher LOD index), mark the cell as a transition cell (`transvoxel = true`) and populate a `transvoxel_adjust` array with offsets corresponding to the direction of the lower-resolution neighbor [S2, unofficial].
+-
+-4.  **Volume Sampling:**
+-    Sample the scalar field at 13 specific positions to determine the surface intersection topology:
+-    *   8 corners of the voxel.
+-    *   4 face centers (specifically indices 1, 3, 5, 7 in the implementation's indexing scheme).
+-    *   1 center point (index 4).
+-    *   4 additional positions defined by the `transvoxel_adjust` array (indices 9-12), which lie on the edges or faces connecting to lower-resolution neighbors [S2, unofficial].
+-
+-5.  **Index Calculation:**
+-    Compute a `left_index` by iterating through the 9 corner samples (indices 0-8). For each sample $i$, if `corner_sample[i] < iso_value`, set the $k$-th bit of the index. This 9-bit integer serves as the key for the transition cell lookup [S2, unofficial].
+-
+-6.  **Corner Sample Propagation:**
+-    Copy specific corner samples to the additional sample indices to maintain consistency for the transition geometry:
++    If `voxel_size_lod` is the maximum LOD (e.g., 2) and any coordinate of the voxel index is odd, the voxel is a transition cell.
++    - Set `draw_voxel = false` for standard processing.
++    - Calculate `pos` offset based on parity bits of the coordinates.
++    - Query the LOD of the six immediate neighbors (left, right, down, top, front, back) at distance `2 * voxel_size`.
++    - If a neighbor has a lower resolution (higher LOD index), add `transvoxel_size` to specific indices of the `transvoxel_adjust` array and set `transvoxel = true`.
++
++3.  **Volume Sampling:**
++    Sample the volume at 13 positions:
++    - 8 corners of the voxel.
++    - 4 face centers (indices 1, 3, 5, 7 in the standard MC edge list context, corresponding to specific faces).
++    - 1 center point (index 4).
++    - 4 additional positions defined by `transvoxel_adjust` (indices 9-12), used to capture geometry in the transition region.
++
++4.  **Corner Index Calculation:**
++    Compute `left_index` by iterating `i` from 0 to 8 (the 8 corners):
++    - Sample `corner_sample[i]`.
++    - If `corner_sample[i] < iso_value`, set bit `k` in `left_index`.
++    
++    Copy corner samples to indices 9-12 for transition sampling:
+     ```python
+     corner_sample[9] = corner_sample[0]
+@@ -49,162 +58,150 @@
+     corner_sample[12] = corner_sample[6]
+     ```
+-    Re-sample the volume at these new positions (9-12) if necessary to ensure the transition vertices align with the scalar field [S2, unofficial].
+-
+-7.  **Transition Configuration Lookup:**
+-    If `left_index != 0` and `left_index != 511` (avoiding empty or full cells), fetch the `trans_cell_class` from the `transitionCellClass` texture using `left_index` as the coordinate [S2, unofficial].
+-
+-8.  **Geometry Extraction:**
+-    *   Fetch `geometry_count` from `transitionCellData` using `trans_cell_class & 0x7F`.
+-    *   Derive the number of transition vertices and triangles:
+-        $$ \text{trans\_vertex\_count} = \text{geometry\_count} \gg 4 $$
+-        $$ \text{trans\_triangle\_count} = \text{geometry\_count} \& 0x0F $$
+-    *   Fetch 12 vertex data entries from `transitionCellVertexData` using `left_index` [S2, unofficial].
+-
+-9.  **Vertex Interpolation:**
+-    For each vertex $i$ from $0$ to $\text{trans\_vertex\_count}-1$:
+-    *   Fetch the vertex index. If 0, break.
+-    *   Extract `corner_1` and `corner_2` indices.
+-    *   If the scalar values at `corner_1` and `corner_2` have different signs (or are close to the isovalue), interpolate the vertex position linearly between the two corners. Otherwise, use the endpoint position [S2, unofficial].
+-
+-10. **Triangle Emission:**
+-    For each triangle, fetch 3 vertex indices from `transitionCellData`. Retrieve the interpolated positions. Compute the normal via the cross product of two edge vectors. Emit the vertices with positions and normals [S2, unofficial].
+-
+-11. **Standard Marching Cubes Adjustment (if `transvoxel` is true):**
+-    For vertices in standard MC cells adjacent to transition zones:
+-    *   Compute adjusted vertex positions $a_{adj}$ and $b_{adj}$ using `transvoxel_adjust` and `transvoxel_cell_multiplier` to snap vertices to the transition plane [S2, unofficial].
+-    *   Compute normals for adjusted vertices by interpolating gradients: `normal_a` and `normal_b` are computed via `compute_gradient` and interpolated based on the `iso_value` [S2, unofficial].
+-    *   If `project_transvoxel == 1`, project the adjusted vertices onto the triangle plane defined by the interpolated normal to eliminate gaps [S2, unofficial].
+-
+-**Pseudocode**
++    Sample the volume at positions 9-12 using the adjusted offsets.
++
++5.  **Transition Cell Configuration Lookup:**
++    If `left_index != 0` and `left_index != 511` (empty or full):
++    - Fetch `trans_cell_class` from `transitionCellClass` texture using `left_index`.
++    - Fetch `geometry_count` from `transitionCellData` using `trans_cell_class & 0x7F`.
++    - Derive vertex and triangle counts:
++      $$ \text{trans\_vertex\_count} = \text{geometry\_count} \gg 4 $$
++      $$ \text{trans\_triangle\_count} = \text{geometry\_count} \& 0x0F $$
++    - Fetch 12 vertex data entries from `transitionCellVertexData` using `left_index`.
++
++6.  **Vertex Generation for Transition Cells:**
++    For each vertex `i` from 0 to `trans_vertex_count - 1`:
++    - Fetch vertex index. Break if 0.
++    - Extract `corner_1` and `corner_2`.
++    - If signs of the samples at `corner_1` and `corner_2` differ, interpolate the vertex position along the edge.
++    - If values are close to the isovalue, use the endpoint.
++
++7.  **Standard Marching Cubes Processing (Non-Transition):**
++    If `transvoxel` is false:
++    - Perform standard Marching Cubes lookup and vertex interpolation.
++    - If `transvoxel` is true (but not a transition cell configuration), compute adjusted vertex positions `a_adj` and `b_adj` using `transvoxel_adjust` and `transvoxel_cell_multiplier`.
++
++8.  **Normal Computation and Projection:**
++    - Compute normals for adjusted vertices by interpolating gradients: `normal_a` and `normal_b` are computed via `compute_gradient`, then interpolated based on `iso_value`.
++    - If `project_transvoxel == 1`, project adjusted vertices onto the triangle plane defined by the interpolated normal to ensure coplanarity and reduce gaps.
++
++9.  **Emission:**
++    For each triangle in the transition cell configuration:
++    - Fetch 3 vertex indices from `transitionCellData`.
++    - Retrieve positions and normals.
++    - Compute normal via cross product if not pre-computed.
++    - Emit vertices.
++
++**Pseudocode:**
+ 
+ ```python
+-def process_voxel(x, y, z, voxel_size, iso_value, lod_function, volume_sampler):
+-    # 1. Base position and LOD
+-    x_base = (x - (x % 2)) * voxel_size
+-    y_base = (y - (y % 2)) * voxel_size
+-    z_base = (z - (z % 2)) * voxel_size
++def transvoxel_extract(voxel_grid, lod_function, iso_value, max_lod=2):
++    triangles = []
+     
+-    lod = lod_function(vec3(x_base, y_base, z_base))
+-    voxel_size_lod = lod # Assuming lod maps directly to size multiplier or level
+-    
+-    # 2. Transition Cell Check
+-    is_transition = False
+-    transvoxel_adjust = [0, 0, 0, 0] # 4 slots for adjustments
+-    
+-    if voxel_size_lod == 2 and (x % 2 == 1 or y % 2 == 1 or z % 2 == 1):
+-        # Check neighbors for lower resolution
+-        # Note: Neighbor coordinates must be scaled by 2*voxel_size
+-        lod_left = lod_function(vec3(x_base - 2*voxel_size, y_base, z_base))
+-        lod_right = lod_function(vec3(x_base + 2*voxel_size, y_base, z_base))
+-        lod_down = lod_function(vec3(x_base, y_base - 2*voxel_size, z_base))
+-        lod_top = lod_function(vec3(x_base, y_base + 2*voxel_size, z_base))
+-        lod_front = lod_function(vec3(x_base, y_base, z_base - 2*voxel_size))
+-        lod_back = lod_function(vec3(x_base, y_base, z_base + 2*voxel_size))
+-        
+-        # If any neighbor has lower resolution (higher LOD index), mark transition
+-        if lod_left > lod or lod_right > lod or lod_down > lod or lod_top > lod or lod_front > lod or lod_back > lod:
+-            is_transition = True
+-            # Populate transvoxel_adjust based on which neighbors are lower res
+-            # Implementation detail: specific indices in transvoxel_adjust are incremented
+-            # based on parity bits and neighbor LODs [S2, unofficial]
+-            pass 
+-
+-    # 3. Sampling
+-    # 8 corners
+-    corners = [volume_sampler(x_base + dx, y_base + dy, z_base + dz) for dx in [0,1] for dy in [0,1] for dz in [0,1]]
+-    
+-    # 4 face centers (indices 1,3,5,7 in specific scheme)
+-    # 1 center (index 4)
+-    # 4 additional positions (indices 9-12)
+-    samples = corners[:] # 0-7
+-    samples.append(volume_sampler(x_base + 0.5, y_base + 0.5, z_base)) # Example face center
+-    samples.append(volume_sampler(x_base + 0.5, y_base, z_base + 0.5))
+-    samples.append(volume_sampler(x_base, y_base + 0.5, z_base + 0.5))
+-    samples.append(volume_sampler(x_base + 0.5, y_base + 0.5, z_base + 0.5)) # Center
+-    samples.extend([0.0] * 4) # Placeholder for 9-12
+-    
+-    # Copy corners to 9-12
+-    samples[9] = samples[0]
+-    samples[10] = samples[2]
+-    samples[11] = samples[4]
+-    samples[12] = samples[6]
+-    
+-    # Re-sample 9-12 if needed for transition alignment
+-    if is_transition:
+-        # Sample at adjusted positions defined by transvoxel_adjust
+-        pass
+-
+-    # 4. Left Index Calculation
+-    left_index = 0
+-    for i in range(9):
+-        if samples[i] < iso_value:
+-            left_index |= (1 << i)
++    # Iterate over all voxels
++    for x, y, z in voxel_grid.coordinates:
++        # 1. Base position and LOD
++        x_base = (x - (x % 2)) * voxel_size
++        y_base = (y - (y % 2)) * voxel_size
++        z_base = (z - (z % 2)) * voxel_size
++        
++        lod = lod_function(x_base, y_base, z_base)
++        
++        # 2. Transition Cell Check
++        is_transition = False
++        transvoxel_adjust = [0.0] * 12
++        
++        if lod == max_lod:
++            if x % 2 == 1 or y % 2 == 1 or z % 2 == 1:
++                is_transition = True
++                # Check neighbors
++                neighbors = get_neighbors(x, y, z, voxel_size)
++                for n in neighbors:
++                    n_lod = lod_function(n.x, n.y, n.z)
++                    if n_lod > lod: # Neighbor is coarser
++                        # Add adjustment based on direction
++                        transvoxel_adjust[get_adjust_index(n)] = voxel_size * 0.5
++                        
++        # 3. Sampling
++        samples = [0.0] * 13
++        # Sample 8 corners
++        for i in range(8):
++            samples[i] = sample_volume(get_corner_pos(i, x_base, y_base, z_base, voxel_size))
+             
+-    # 5. Transition Geometry Generation
+-    if is_transition and left_index != 0 and left_index != 511:
+-        trans_cell_class = lookup_transition_class(left_index)
+-        geometry_count = lookup_transition_data(trans_cell_class & 0x7F)
+-        trans_vertex_count = geometry_count >> 4
+-        trans_triangle_count = geometry_count & 0x0F
+-        
+-        vertex_data = lookup_transition_vertex_data(left_index)
+-        
+-        vertices = []
+-        for i in range(trans_vertex_count):
+-            v_idx = vertex_data[i]
+-            if v_idx == 0: break
+-            c1, c2 = extract_corners(v_idx)
+-            # Interpolate
+-            val1 = samples[c1]
+-            val2 = samples[c2]
+-            if (val1 - iso_value) * (val2 - iso_value) < 0:
+-                t = (iso_value - val1) / (val2 - val1)
+-                pos = lerp(get_corner_pos(c1), get_corner_pos(c2), t)
++        # Sample face centers and center
++        samples[1] = sample_volume(get_face_pos(1, x_base, y_base, z_base, voxel_size))
++        samples[3] = sample_volume(get_face_pos(3, x_base, y_base, z_base, voxel_size))
++        samples[5] = sample_volume(get_face_pos(5, x_base, y_base, z_base, voxel_size))
++        samples[7] = sample_volume(get_face_pos(7, x_base, y_base, z_base, voxel_size))
++        samples[4] = sample_volume(get_center_pos(x_base, y_base, z_base, voxel_size))
++        
++        # Copy corners for transition sampling
++        samples[9] = samples[0]
++        samples[10] = samples[2]
++        samples[11] = samples[4]
++        samples[12] = samples[6]
++        
++        # Sample adjusted positions if transition
++        if is_transition:
++            for i in range(4):
++                samples[9+i] = sample_volume(get_adjusted_pos(i, x_base, y_base, z_base, transvoxel_adjust))
++                
++        # 4. Corner Index
++        left_index = 0
++        for i in range(8):
++            if samples[i] < iso_value:
++                left_index |= (1 << i)
++                
++        # 5. Lookup and Generate
++        if left_index != 0 and left_index != 511:
++            if is_transition:
++                trans_cell_class = lookup_transition_class(left_index)
++                geometry_count = lookup_transition_data(trans_cell_class)
++                trans_vertex_count = geometry_count >> 4
++                trans_triangle_count = geometry_count & 0x0F
++                
++                vertices = []
++                for i in range(trans_vertex_count):
++                    v_idx = lookup_transition_vertex_data(left_index, i)
++                    c1, c2 = extract_corners(v_idx)
++                    if samples[c1] < iso_value != samples[c2] < iso_value:
++                        pos = interpolate_edge(c1, c2, samples[c1], samples[c2], iso_value)
++                        normal = compute_gradient(pos, voxel_grid)
++                        vertices.append((pos, normal))
++                    else:
++                        # Use endpoint or fallback
++                        vertices.append((get_corner_pos(c1, x_base, y_base, z_base, voxel_size), compute_gradient(get_corner_pos(c1, x_base, y_base, z_base, voxel_size), voxel_grid)))
++                        
++                for t in range(trans_triangle_count):
++                    v0, v1, v2 = lookup_transition_triangles(trans_cell_class, t)
++                    triangles.append((vertices[v0], vertices[v1], vertices[v2]))
+             else:
+-                pos = get_corner_pos(c1) # Fallback
+-            vertices.append(pos)
+-            
+-        for t in range(trans_triangle_count):
+-            v0, v1, v2 = fetch_triangle_indices(t)
+-            emit_triangle(vertices[v0], vertices[v1], vertices[v2])
+-            
+-    else:
+-        # Standard Marching Cubes
+-        # If is_transition is true, apply adjustments
+-        if is_transition:
+-            # Adjust vertices a_adj, b_adj
+-            # Project if project_transvoxel == 1
+-            pass
+-        else:
+-            # Standard MC logic
+-            pass
++                # Standard MC
++                mc_triangles = standard_marching_cubes(samples, iso_value, x_base, y_base, z_base, voxel_size)
++                triangles.extend(mc_triangles)
++                
++    return triangles
+ ```
+ 
+-**Parameters and Typical Values**
+-*   **LOD Function:** Typically based on distance from the camera or viewer. A common heuristic is $LOD = \lfloor \log_2(\text{distance}) \rfloor$.
+-*   **Isovalue:** Scene-dependent.
+-*   **Voxel Size:** Depends on the resolution of the input volume.
+-
+-**Edge Cases and Pitfalls**
+-*   **Precision:** Floating-point precision errors in interpolation can cause micro-gaps. Projecting vertices onto the transition plane (`project_transvoxel == 1`) mitigates this [S2, unofficial].
+-*   **Boundary Conditions:** The LOD function must handle the boundaries of the volume grid correctly to avoid querying out-of-bounds neighbors.
+-*   **Degenerate Input:** If the scalar field is constant, `left_index` may be 0 or 511, resulting in no geometry. This is handled by the check `left_index != 0 && left_index != 511` [S2, unofficial].
++**Edge Cases and Pitfalls:**
++- **Precision:** Floating-point errors in interpolation can cause gaps at LOD boundaries. Projecting vertices onto the triangle plane (`project_transvoxel == 1`) mitigates this [S2, unofficial].
++- **Degenerate Input:** If `left_index` is 0 or 511, no geometry is generated for that cell. Ensure the LOD function does not create isolated voxels with no neighbors.
++- **Boundary Conditions:** Neighbors at the edge of the volume must be handled (e.g., treated as empty or clamped) to avoid out-of-bounds sampling [S2, unofficial].
+ 
+ ## Subtopics
+ 
+ ### [Transvoxel Smooth Terrain Texturing](7280-transvoxel-smooth-terrain-texturing.md)
+-This method applies procedural and texture-based color blending to surfaces extracted by the Transvoxel algorithm, solving the visual discontinuity of flat shading on dynamically changing isosurfaces. It differs from standard single-texture approaches by using triplanar mapping to avoid UV seams and blending between top/side textures based on surface normal orientation. It also supports multi-material blending via texture arrays and vertex weights for complex terrain features like grass, stone, and forest patches.
++This method applies procedural and texture-based shading to the geometry generated by the Transvoxel algorithm, ensuring that material appearance (grass, stone, forest) blends smoothly across level-of-detail (LOD) boundaries and terrain slopes. It distinguishes itself from standard voxel texturing by combining triplanar mapping with a slope-aware material blending system that adapts to the local surface orientation, preventing texture stretching and maintaining visual continuity despite the irregular vertex distribution of the Transvoxel mesh.
+ 
+ ## Operating characteristics
+-*   **Time Complexity:** $O(N)$ where $N$ is the number of voxels, but with a higher constant factor due to neighbor lookups and transition cell processing. The transition cell lookup is $O(1)$ via texture/array access.
+-*   **Memory Complexity:** $O(N)$ for the voxel grid plus $O(1)$ for the transition cell lookup tables (which are small and fixed-size).
+-*   **Performance:** Transvoxel is efficient on GPUs because the transition logic is encapsulated in the geometry shader, allowing parallel processing of voxels. However, the branching logic for transition cells can cause divergence in SIMD execution units.
+-*   **Strengths:** Produces watertight meshes at varying LODs, reducing polygon count in distant areas without visual artifacts.
+-*   **Limitations:** More complex to implement than standard Marching Cubes. The transition cell configurations are specific to the binary LOD scheme (e.g., factor of 2). Non-binary LODs require different transition configurations.
+-*   **When to Use:** Real-time terrain rendering, dynamic voxel-based environments where LOD is critical.
+-*   **When Not to Use:** Static scenes where precomputed LODs are sufficient, or when non-binary LOD steps are required without significant modification.
++- **Time Complexity:** $O(N)$ where $N$ is the number of voxels. The constant factor is higher than standard Marching Cubes due to neighbor lookups and transition cell processing.
++- **Memory Complexity:** $O(N)$ for the voxel grid, plus $O(1)$ for the transition cell lookup tables (which are small and fixed size).
++- **Measured Performance:** Performance depends heavily on the sparsity of LOD transitions. In uniform regions, it behaves like standard MC. In complex terrain with frequent LOD changes, the overhead of transition cell generation increases.
++- **Strengths:** Generates watertight meshes across LOD boundaries; suitable for real-time rendering of large terrains; GPU-friendly implementation using geometry shaders.
++- **Limitations:** Requires pre-computed or efficiently computable LOD function; transition cells add complexity to the shader; may produce slightly distorted geometry at LOD boundaries if projection is not used.
++- **When to use:** Large-scale terrain rendering where LOD is essential for performance and visual continuity is critical.
++- **When not to use:** Static, low-resolution scenes where LOD is not needed; scenes with sharp features that require higher-order interpolation than linear MC provides.
+ 
+ ## Background
+-The Transvoxel algorithm was introduced as a solution to the Level-of-Detail (LOD) problem in voxel-based rendering. Standard Marching Cubes fails to produce watertight surfaces when adjacent cells have different resolutions, leading to cracks and holes. Transvoxel extends the Marching Cubes technique by introducing a new set of polygon configurations for "transition cells" that connect meshes of different LODs [S1]. The algorithm was notably implemented in a geometry shader context for WebGL, enabling real-time LOD-aware terrain rendering [S1]. The specific implementation details described in the notes are based on a GitHub repository demonstrating an OpenGL-based Transvoxel geometry shader [S2, unofficial].
++The Transvoxel algorithm was introduced as a solution to the LOD problem in volumetric terrain rendering [S1]. It extends the Marching Cubes technique by adding specific polygon configurations for transition cells [S1]. The method has been implemented in various contexts, including WebGL-based terrain rendering [S1] and GPU geometry shader implementations [S2, unofficial]. It is particularly relevant in the field of real-time terrain visualization where dynamic LOD is required.
+ 
+ ## Sources

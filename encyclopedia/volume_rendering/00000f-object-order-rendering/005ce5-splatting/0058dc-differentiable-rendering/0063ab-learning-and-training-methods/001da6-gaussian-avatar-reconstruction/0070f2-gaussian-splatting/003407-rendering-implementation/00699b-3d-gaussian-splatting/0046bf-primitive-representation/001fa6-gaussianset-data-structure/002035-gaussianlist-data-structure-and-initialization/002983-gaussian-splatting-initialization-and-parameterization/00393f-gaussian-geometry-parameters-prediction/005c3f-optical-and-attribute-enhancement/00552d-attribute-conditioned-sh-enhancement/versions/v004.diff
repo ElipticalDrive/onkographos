@@ -1,0 +1,192 @@
+--- v003.md
++++ v004.md
+@@ -4,101 +4,115 @@
+ 
+ ## Overview
+-The Attribute-Conditioned SH Enhancement module recovers high-frequency visual details lost during the compression of Spherical Harmonic (SH) coefficients to low orders (typically first-order) by predicting view-independent residual offsets [S1][S2, unofficial]. Unlike neural view-dependent enhancement strategies that incur runtime overhead, this method statically bakes the predicted offsets into the Gaussian parameters prior to inference, introducing zero additional computational cost during rendering [S1][S2, unofficial].
++The Attribute-Conditioned SH Enhancement module recovers high-frequency visual details lost when compressing radiance into low-order Spherical Harmonics (SH), specifically first-order SH [S1][S2, unofficial]. Unlike methods that introduce view-dependent neural networks at render time (e.g., Mobile-GS), this method predicts view-independent offsets based on intrinsic Gaussian attributes and statically bakes them into the Gaussian parameters before inference [S1]. This approach eliminates additional computational overhead during rendering while maintaining high reconstruction fidelity [S1][S2, unofficial].
+ 
+ ## How it works
+-The module uses a lightweight Multi-Layer Perceptron (MLP) $\Phi$ to model contextual offsets based on intrinsic Gaussian properties, refining the base low-order SH representation to capture complex specular details and high-frequency structural variations [S1][S2, unofficial].
++**Inputs and Outputs**
++*   **Input:** The set of $N$ 3D Gaussians, each defined by position $\mu$, scale $s$, rotation $r$, opacity $\alpha$, and base first-order SH coefficients $c'$.
++*   **Output:** Enhanced SH coefficients $c_{out}$ for each Gaussian, where the high-frequency residuals are encoded into the static parameters.
+ 
+-**Inputs and Outputs:**
+-*   **Input:** Intrinsic Gaussian attributes for each Gaussian primitive $i$:
+-    *   Spatial position $\mu_i$
+-    *   Rotation quaternion $r_i$
+-    *   Scale $\hat{s}_i$ (normalized)
+-    *   Opacity $o_i$
+-    *   Base first-order SH coefficients $\tilde{c}'_i$ (normalized)
+-*   **Output:** Enhanced SH coefficients $c^{out}_i$ and the residual offset $\Delta c_i$.
++**Data Structures**
++The module $\Phi$ is a Multi-Layer Perceptron (MLP).
++*   **Architecture:** 4 hidden layers with ReLU activation.
++*   **Hidden Neurons:** The layer sizes are $(128, 64, 32, 12)$ respectively [S1].
++*   **Input Vector:** For each Gaussian $i$, the input to $\Phi$ is the concatenation of:
++    1.  Normalized first-order SH coefficients $\tilde{c}'_i$ [S2, unofficial].
++    2.  Opacity $\alpha_i$ (denoted as $o_i$ in the formula) [S2, unofficial].
++    3.  Normalized scales $\hat{s}_i$ [S2, unofficial].
++    4.  Spatial position $\mu_i$ [S2, unofficial].
++    5.  Rotation quaternion $r_i$ [S2, unofficial].
++*   **Output Vector:** The residual offset $\Delta c_i$ for the SH coefficients [S2, unofficial].
+ 
+-**Data Structures:**
+-The MLP $\Phi$ is parameterized by 4 layers with ReLU activation. The hidden neuron counts for these layers are $(128, 64, 32, 12)$ respectively [S1]. The input to $\Phi$ is the concatenation of the normalized attributes: $[\mu_i, \hat{s}_i, r_i, o_i, \tilde{c}'_i]$ [S2, unofficial].
++**Steps**
++1.  **Training Phase (Offset Prediction):**
++    1.  Initialize the final linear layer of $\Phi$ with strict zero initialization [S2, unofficial]. This ensures the model starts as standard 3D Gaussian Splatting (3DGS) and learns residuals gradually [S2, unofficial].
++    2.  During optimization, compute the residual offset $\Delta c_i$ for each Gaussian $i$ using the MLP $\Phi$:
++        $$ \Delta c_i = \Phi([\mu_i, \hat{s}_i, r_i, o_i, \tilde{c}'_i]) $$
++        where $[\cdot]$ denotes concatenation [S2, unofficial].
++    3.  The enhanced coefficients are calculated as:
++        $$ c_{out, i} = c'_i + \Delta c_i $$
++        [S2, unofficial].
++    4.  *Note on Training Curriculum:* In some implementations (e.g., Flux-GS), training begins with full third-order SH for the first 3k iterations to establish high-frequency representation, followed by aggregation to first-order SH via a Monte Carlo Specular Energy Aggregator, after which the enhancement module is active [S2, unofficial].
+ 
+-**Steps:**
+-1.  **Initialization:** The final linear layer of $\Phi$ is strictly zero-initialized to ensure optimization stability, allowing the model to fall back to the standard 3DGS representation at the beginning of training [S2, unofficial].
+-2.  **Offset Prediction:** For each Gaussian $i$, compute the residual offset $\Delta c_i$ using the MLP:
+-    $$ \Delta c_i = \Phi([\mu_i, \hat{s}_i, r_i, o_i, \tilde{c}'_i]) $$
+-    [S2, unofficial]
+-3.  **Coefficient Refinement:** Add the offset to the base coefficients:
+-    $$ c^{out}_i = c'_i + \Delta c_i $$
+-    [S2, unofficial]
+-4.  **Baking:** Pre-compute $\Delta c_i$ and statically bake it into the explicit Gaussian parameters before inference. Since $\Phi$ relies strictly on intrinsic attributes independent of the camera viewing direction, this computation is performed once [S1][S2, unofficial].
++2.  **Inference Phase (Static Baking):**
++    1.  Because $\Phi$ depends only on intrinsic Gaussian attributes and not on the camera viewing direction, the offset $\Delta c_i$ is view-independent [S2, unofficial].
++    2.  Pre-compute $\Delta c_i$ for all Gaussians once before rendering [S2, unofficial].
++    3.  Add $\Delta c_i$ to the base coefficients $c'_i$ and store the result $c_{out, i}$ directly into the Gaussian's SH attribute storage [S1][S2, unofficial].
++    4.  Render using the standard 3DGS rasterization pipeline with the baked coefficients, incurring zero additional computational overhead [S1][S2, unofficial].
+ 
+-**Pseudocode:**
++**Pseudocode**
+ ```python
+-def attribute_conditioned_sh_enhancement(gaussian_attributes, mlp_phi):
++def attribute_conditioned_sh_enhancement(gaussians, mlp_phi):
+     """
+-    Predicts SH offsets and bakes them into Gaussian parameters.
++    Predicts and bakes SH offsets for a set of Gaussians.
+     
+     Args:
+-        gaussian_attributes: Dict or list of objects containing:
+-            - mu: Position vector (3,)
+-            - s_hat: Normalized scale vector (3,)
+-            - r: Rotation quaternion (4,)
+-            - o: Opacity (scalar)
+-            - c_prime: Base first-order SH coefficients (vector, normalized)
+-        mlp_phi: The MLP model with 4 layers, hidden sizes (128, 64, 32, 12),
+-                 ReLU activations, and zero-initialized final layer.
+-                 
++        gaussians: List of Gaussian objects. Each has attributes:
++                   .mu (position), .s (scale), .r (rotation quaternion),
++                   .alpha (opacity), .c_prime (first-order SH coefficients).
++        mlp_phi: The trained MLP model with layers [128, 64, 32, 12] and ReLU.
++                 The final layer is zero-initialized.
++    
+     Returns:
+-        enhanced_gaussians: List of Gaussian objects with baked SH coefficients.
++        Updated Gaussians with baked SH coefficients.
+     """
+-    enhanced_gaussians = []
+-    
+-    for attr in gaussian_attributes:
+-        # Concatenate intrinsic attributes
+-        # Note: Normalization of inputs is assumed to be handled prior to this step
+-        input_vector = concatenate([
+-            attr.mu,
+-            attr.s_hat,
+-            attr.r,
+-            attr.o,
+-            attr.c_prime
+-        ])
++    for g in gaussians:
++        # 1. Normalize inputs as required by the training setup
++        # Note: Exact normalization formulas for s and c' are not specified in sources.
++        # [G] Assuming standard normalization to [0,1] or similar based on context.
++        norm_scale = normalize_scale(g.s)
++        norm_sh = normalize_sh(g.c_prime)
+         
+-        # Predict residual offset
+-        delta_c = mlp_phi(input_vector)
++        # 2. Construct input vector for MLP
++        # Concatenation order: [mu, s_hat, r, o, c_tilde_prime]
++        input_vector = concatenate(
++            g.mu, 
++            norm_scale, 
++            g.r, 
++            g.alpha, 
++            norm_sh
++        )
+         
+-        # Compute enhanced coefficients
+-        c_out = attr.c_prime + delta_c
++        # 3. Predict residual offset
++        delta_c = mlp_phi.forward(input_vector)
+         
+-        # Create enhanced Gaussian with baked coefficients
+-        enhanced_gaussian = Gaussian(
+-            position=attr.mu,
+-            rotation=attr.r,
+-            scale=attr.s_hat,
+-            opacity=attr.o,
+-            sh_coefficients=c_out, # Baked offset
+-            is_view_dependent=False # Since offset is static
+-        )
+-        enhanced_gaussians.append(enhanced_gaussian)
++        # 4. Compute enhanced coefficients
++        c_out = add(g.c_prime, delta_c)
+         
+-    return enhanced_gaussians
++        # 5. Bake into Gaussian parameters (replace c_prime with c_out)
++        g.c_prime = c_out
++        
++    return gaussians
+ ```
+ 
+-**Parameters:**
+-*   **MLP Architecture:** 4 layers, hidden neurons $(128, 64, 32, 12)$, ReLU activation [S1].
+-*   **Zero Initialization:** The final linear layer of $\Phi$ is zero-initialized [S2, unofficial].
++**Parameters**
++*   **MLP Layers:** 4 layers [S1].
++*   **Hidden Neurons:** 128, 64, 32, 12 [S1].
++*   **Activation:** ReLU [S1].
++*   **Initialization:** Final linear layer strictly zero-initialized [S2, unofficial].
+ 
+-**Edge Cases and Pitfalls:**
+-*   **Optimization Stability:** Failure to zero-initialize the final layer may cause instability at the start of training [S2, unofficial].
+-*   **Inference Overhead:** Adding view-dependent modeling during inference increases computational overhead; this method avoids that by baking offsets into static parameters [S1][S2, unofficial].
+-*   **Degenerate Input:** The method assumes intrinsic attributes are normalized as specified [S2, unofficial].
++**Edge Cases and Pitfalls**
++*   **Optimization Stability:** If the final layer of $\Phi$ is not zero-initialized, the model may diverge at the start of training because it attempts to predict large residuals before the base representation is stable [S2, unofficial].
++*   **Inference Overhead:** Failing to bake the offsets statically and instead computing them per-view during rendering will reintroduce the computational overhead that this method aims to eliminate [S1][S2, unofficial].
++*   **Degenerate Input:** The method relies on intrinsic attributes. If Gaussian attributes (e.g., scale) are extreme or undefined, normalization steps must be robust to prevent NaNs in the MLP [G].
++
++## Subtopics
++
++### Monte Carlo Specular Energy Aggregator
++Compresses high-order radiance residuals into first-order SH before enhancement. It handles the initial compression that necessitates the SH Enhancement module. [Link](17107-optical-and-attribute-enhancement.md#monte-carlo-specular-energy-aggregator)
++
++### Multi-view Alpha-based Densification and Pruning
++Addresses the inefficiency of single-view densification by using multi-view consistency to prune redundant Gaussians, ensuring the compact representation required for mobile efficiency. [Link](17107-optical-and-attribute-enhancement.md#multi-view-alpha-based-densification-and-pruning)
+ 
+ ## Operating characteristics
+-*   **Time Complexity:** The enhancement module is evaluated once per Gaussian during the baking phase. It introduces zero computational overhead during the rendering pipeline [S1][S2, unofficial].
+-*   **Memory Complexity:** The MLP parameters are small (hidden sizes 128, 64, 32, 12) [S1]. The baked offsets are stored within the Gaussian SH coefficients, so no additional memory is required for the MLP at runtime [S1][S2, unofficial].
+-*   **Performance:** On mobile hardware (e.g., RTX 4090 for training, mobile devices for inference), this method achieves competitive PSNR while requiring lower storage costs and delivering faster FPS compared to baselines using third-order SH or neural view-dependent enhancement [S1].
+-*   **Strengths:** Recovers high-frequency details lost in SH compression without runtime cost; complements other compression techniques like MC-SEA [S1].
+-*   **Limitations:** The offsets are view-independent, so they cannot capture dynamic view-dependent effects that change with camera position, only those correlated with intrinsic geometry [S1][S2, unofficial].
++*   **Time Complexity:** Zero additional time complexity during rendering compared to standard 3DGS with first-order SH. The MLP is executed only once during the baking phase [S1][S2, unofficial].
++*   **Memory Complexity:** Adds no memory overhead during rendering, as offsets are baked into existing SH coefficient storage. The MLP model itself is small (4 layers, ~12k parameters) and not stored per-Gaussian [S1].
++*   **Performance:** On mobile hardware (e.g., RTX 4090 for training, mobile inference), Flux-GS achieves competitive PSNR (e.g., 23.27 on Mip-NeRF 360 subset) with significantly lower storage (3.5 MB) and higher FPS (139) compared to baselines like Mobile-GS or third-order SH 3DGS [S1].
++*   **Strengths:** Recovers high-frequency details (specular highlights, fine textures) lost in SH compression without sacrificing rendering speed. Maintains compatibility with standard rasterization pipelines.
++*   **Limitations:** The enhancement is view-independent. It cannot capture dynamic view-dependent effects that change with camera position (e.g., complex anisotropic reflections that vary significantly with angle) as effectively as a real-time view-dependent MLP, though it captures the average high-frequency structure well [S1].
++*   **When to use:** Resource-constrained environments (mobile, edge devices) where high-order SH is too expensive, but visual fidelity is critical.
++*   **When not to use:** Scenes requiring precise, dynamic view-dependent specularities that vary strongly with viewing angle, where a real-time neural renderer is acceptable.
+ 
+ ## Background
+-The method was introduced in the context of efficient 3D Gaussian Splatting for resource-constrained devices, specifically in the Flux-GS and Mobile-4DGS frameworks [S1][S2, unofficial]. It addresses the trade-off between reconstruction fidelity and memory/compute efficiency, where traditional high-order SH representations are too expensive for mobile rendering [S1]. The approach is motivated by the observation that discarded high-order SH residual energy is highly correlated with intrinsic Gaussian attributes such as spatial position and anisotropic scale [S2, unofficial].
++The method was introduced in **Flux-GS** (Du et al., 2024) and **Mobile-4DGS** (2026) to address the trade-off between rendering efficiency and visual fidelity in 3D Gaussian Splatting on mobile devices [S1][S2, unofficial]. Traditional 3DGS uses third-order SH (81 coefficients per Gaussian), which is memory-intensive. Mobile-GS used first-order SH (3 coefficients) but added a neural view-dependent network at render time, which hindered FPS [S1]. Flux-GS proposed the Attribute-Conditioned SH Enhancement module to recover the lost detail from compression by baking view-independent residuals into the Gaussians, achieving "zero-cost" enhancement [S1]. The approach was later extended to dynamic scenes in Mobile-4DGS [S2, unofficial].
+ 
+ ## Sources

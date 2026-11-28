@@ -1,0 +1,183 @@
+# Height-field Gaussian Primitive
+
+Also called: H-2DGS primitive
+
+## Overview
+The Height-field Gaussian Primitive is a curved local chart that combines the thin support of a 2D surfel with bending capability via a Gaussian-basis height field [S1, unofficial]. It stores spatially varying appearance (color and opacity) on the same local domain, allowing a small number of patches to represent both smooth geometry and detailed texture [S1, unofficial]. It sets itself apart from vanilla Gaussian Splatting by providing an explicit surface intersection and camera-linear depth, rather than volumetric accumulation through an ellipsoid [S1, unofficial].
+
+## How it works
+**Inputs:** World-space ray $r(t) = o + td$, where $o$ is the origin and $d$ is the direction.
+**Outputs:** Intersection parameter $t$, color $C$, and opacity $O$ at the intersection point.
+
+**Data Structures:**
+Each primitive $i$ stores:
+- Center $\mathbf{c}_i \in \mathbb{R}^3$.
+- Tangent frame $R_i = [\mathbf{t}_{u,i}, \mathbf{t}_{v,i}, \mathbf{n}_i] \in \mathbb{R}^{3 \times 3}$, where columns are orthonormal vectors.
+- Tangent scales $s_{x,i}, s_{y,i} \in \mathbb{R}$.
+- Height basis coefficients $b_{i,k}^h \in \mathbb{R}$ for $k=1 \dots K_h$.
+- Height basis centers $\boldsymbol{\mu}_{i,k}^h \in \mathbb{R}^2$.
+- Height basis bandwidths $\sigma_{i,k}^h \in \mathbb{R}$.
+- Color basis coefficients and centers (analogous to height).
+- Opacity basis coefficients and centers (analogous to height).
+- Constant terms for color and opacity.
+
+**Parameters:**
+- $K_h = 5$ height bases [S1, unofficial].
+- 20 opacity bases [S1, unofficial].
+- 50 color bases [S1, unofficial].
+
+**Steps:**
+1. Transform the world-space ray into the primitive's local frame:
+   $$ \mathbf{y}_i(t) = R_i^T (r(t) - \mathbf{c}_i) $$
+   Let $\mathbf{y}_i(t) = [y_{x,i}(t), y_{y,i}(t), y_{z,i}(t)]^T$.
+
+2. Compute normalized local coordinates $(u_i(t), v_i(t))$:
+   $$ u_i(t) = \frac{y_{x,i}(t)}{s_{x,i}}, \quad v_i(t) = \frac{y_{y,i}(t)}{s_{y,i}} $$
+
+3. Evaluate the height field $h_i(u, v)$ at the current $(u_i(t), v_i(t))$:
+   $$ h_i(u, v) = \sum_{k=1}^{K_h} b_{i,k}^h \phi_{i,k}^h(u, v) $$
+   where the Gaussian basis function is:
+   $$ \phi_{i,k}^h(u, v) = \exp\left(-\frac{\|(u, v) - \boldsymbol{\mu}_{i,k}^h\|^2}{2(\sigma_{i,k}^h)^2}\right) $$
+
+4. Define the residual function for intersection:
+   $$ f_i(t) = y_{z,i}(t) - h_i(u_i(t), v_i(t)) $$
+
+5. Solve $f_i(t) = 0$ for $t$ using a small fixed number of Newton iterations [S1, unofficial].
+   - Initial guess: $t_0$ (e.g., from previous frame or bounding box).
+   - Update: $t_{new} = t_{old} - \frac{f_i(t_{old})}{f_i'(t_{old})}$.
+   - Compute derivative $f_i'(t)$ analytically or via finite difference. Note that $u_i(t)$ and $v_i(t)$ depend on $t$, so the chain rule applies to the height term.
+
+6. Evaluate color $C_i(u, v)$ and opacity $O_i(u, v)$ at the accepted intersection $(u_i(t), v_i(t))$ using their respective Gaussian bases and constant terms [S1, unofficial].
+
+7. Composite the result in depth order [S1, unofficial].
+
+**Pseudocode:**
+> **Unverified code.** The code below did not pass a test run against a reference implementation, or no test fits it, so it may contain errors.
+
+```python
+def render_height_field_primitive(ray_origin, ray_direction, primitive):
+    # 1. Transform ray to local frame
+    # R_i is 3x3 matrix, c_i is 3-vector
+    R_T = transpose(primitive.R)
+    c = primitive.c
+    
+    # y_i(t) = R^T * (r(t) - c)
+    # r(t) = o + t*d
+    # Let's define a function for y_i(t) components
+    def get_y(t):
+        r_t = ray_origin + t * ray_direction
+        diff = r_t - c
+        y = mat_vec_mul(R_T, diff)
+        return y # [y_x, y_y, y_z]
+
+    # 2. Define height field evaluation
+    def eval_height(u, v):
+        h = 0.0
+        for k in range(primitive.K_h):
+            mu = primitive.mu_h[k]
+            sigma = primitive.sigma_h[k]
+            b = primitive.b_h[k]
+            dist_sq = (u - mu[0])**2 + (v - mu[1])**2
+            phi = exp(-dist_sq / (2 * sigma**2))
+            h += b * phi
+        return h
+
+    # 3. Define residual function f(t)
+    def f(t):
+        y = get_y(t)
+        y_x, y_y, y_z = y[0], y[1], y[2]
+        
+        # Normalized coordinates
+        u = y_x / primitive.s_x
+        v = y_y / primitive.s_y
+        
+        h = eval_height(u, v)
+        return y_z - h
+
+    # 4. Newton's method to find root
+    t = initial_guess # [G] Typically from previous frame or bounding box intersection
+    for _ in range(max_iterations): # [G] Small fixed number, e.g., 5-10
+        f_val = f(t)
+        if abs(f_val) < tolerance:
+            break
+        
+        # Compute derivative f'(t)
+        # f(t) = y_z(t) - h(u(t), v(t))
+        # y_z(t) = (R^T * (o + t*d - c))_z
+        # Let R^T columns be r0, r1, r2.
+        # y_z = r2 . (o - c) + t * (r2 . d)
+        # dy_z/dt = r2 . d
+        r2 = R_T[2] # Third row of R^T, which is third column of R (normal)
+        dy_z_dt = dot(r2, ray_direction)
+        
+        # dh/dt = dh/du * du/dt + dh/dv * dv/dt
+        # u = y_x / s_x, v = y_y / s_y
+        # y_x = r0 . (o - c) + t * (r0 . d)
+        # y_y = r1 . (o - c) + t * (r1 . d)
+        # du/dt = (r0 . d) / s_x
+        # dv/dt = (r1 . d) / s_y
+        
+        r0 = R_T[0]
+        r1 = R_T[1]
+        dy_x_dt = dot(r0, ray_direction)
+        dy_y_dt = dot(r1, ray_direction)
+        
+        u = (dot(r0, ray_origin - c) + t * dy_x_dt) / primitive.s_x
+        v = (dot(r1, ray_origin - c) + t * dy_y_dt) / primitive.s_y
+        
+        # Compute partial derivatives of h w.r.t u and v
+        dh_du = 0.0
+        dh_dv = 0.0
+        for k in range(primitive.K_h):
+            mu = primitive.mu_h[k]
+            sigma = primitive.sigma_h[k]
+            b = primitive.b_h[k]
+            dx = u - mu[0]
+            dy = v - mu[1]
+            dist_sq = dx**2 + dy**2
+            phi = exp(-dist_sq / (2 * sigma**2))
+            
+            # d(phi)/du = phi * (-2*dx / (2*sigma^2)) = -phi * dx / sigma^2
+            dphi_du = -phi * dx / (sigma**2)
+            dphi_dv = -phi * dy / (sigma**2)
+            
+            dh_du += b * dphi_du
+            dh_dv += b * dphi_dv
+            
+        dh_dt = dh_du * (dy_x_dt / primitive.s_x) + dh_dv * (dy_y_dt / primitive.s_y)
+        
+        f_prime = dy_z_dt - dh_dt
+        
+        # Guard against division by zero
+        if abs(f_prime) < 1e-8:
+            break
+            
+        t = t - f_val / f_prime
+
+    # 5. Evaluate color and opacity at final t
+    y_final = get_y(t)
+    u_final = y_final[0] / primitive.s_x
+    v_final = y_final[1] / primitive.s_y
+    
+    color = eval_color(u_final, v_final, primitive) # [G] Analogous to eval_height
+    opacity = eval_opacity(u_final, v_final, primitive) # [G] Analogous to eval_height
+    
+    return t, color, opacity
+```
+
+**Edge Cases and Pitfalls:**
+- Newton iterations may fail to converge if the initial guess is poor or the surface is highly curved [S1, unofficial].
+- Precision issues may arise if $s_{x,i}$ or $s_{y,i}$ are very small.
+- The height field approximation may introduce artifacts if $K_h$ is insufficient for the curvature [S1, unofficial].
+
+## Operating characteristics
+- **Time Complexity:** Dominated by the Newton iterations and the evaluation of the Gaussian bases. Each iteration requires $O(K_h)$ operations for the height field. $K_h$ is small (5), so this is efficient [S1, unofficial].
+- **Memory Complexity:** Each primitive stores $K_h$ height bases, 20 opacity bases, and 50 color bases. This is more memory-intensive than a simple 2D surfel but less than a full volumetric representation [S1, unofficial].
+- **Strengths:** Provides explicit surface intersection and camera-linear depth, which is beneficial for postoperative alignment and sharp reconstruction [S1, unofficial]. Allows spatially varying appearance within a single primitive [S1, unofficial].
+- **Limitations:** Requires solving a non-linear equation for each ray, which is more complex than simple plane intersection [S1, unofficial].
+
+## Background
+The Height-field Gaussian Primitive was introduced in "H-2DGS: Height-Field Gaussian Splatting for Sharp and Deformable Neurosurgical Surface Reconstruction" [S1, unofficial]. It addresses the limitation of planar surfels, which can only approximate cortical curvature by using many small elements [S1, unofficial]. The method was developed to represent both smooth geometry and detailed cortical texture with a relatively small number of patches [S1, unofficial].
+
+## Sources
+[S1] H-2DGS: Height-Field Gaussian Splatting for Sharp and Deformable Neurosurgical Surface Reconstruction, https://arxiv.org/abs/2610.30910, fetched 2026-10-26 (unofficial)

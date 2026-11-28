@@ -1,0 +1,137 @@
+--- v001.md
++++ v002.md
+@@ -1,42 +1,111 @@
+ # gscache_optimize_level
+ 
+-Also called: gscache optimization step, gscache level update
+ 
+ ## Overview
+-`gscache_optimize_level` performs the parameter update, structural maintenance (densification/pruning), and state reset for a specific optimization level within the gscache radiance field training loop. It serves as the core iterative engine that advances the Gaussian Splatting model for a given resolution level, handling learning rate decay, gradient application, and adaptive scene complexity management. It differs from standard NeRF optimization by explicitly managing multi-level Gaussian hierarchies and integrating densification/pruning logic directly into the per-level update cycle rather than as a separate global phase.
++`gscache_optimize_level` executes the per-iteration update for a specific resolution level in the gscache radiance field training loop [S1, unofficial]. It advances the Gaussian Splatting model by applying learning rate decay, integrating gradients, managing Gaussian population density through densification and pruning, and resetting opacity states [S1, unofficial]. It differs from standard NeRF optimization by embedding densification and pruning logic directly into the per-level update cycle rather than executing them as separate global phases [S1, unofficial].
+ 
+ ## How it works
+-The method processes a single optimization level identified by an integer index. It updates the model's parameters, manages the population of 3D Gaussians, and adjusts the learning rate schedule based on the current iteration count.
++The method processes a single optimization level identified by an integer index [S1, unofficial]. It updates the model's parameters, manages the population of 3D Gaussians, and adjusts the learning rate schedule based on the current iteration count [S1, unofficial].
+ 
+ ### Inputs and Outputs
+ **Inputs:**
+-- `level`: Integer index of the optimization level being processed.
+-- `frameid`: Current frame or iteration identifier, used for learning rate decay calculation.
++- `level`: Integer index of the optimization level being processed [S1, unofficial].
++- `frameid`: Current frame or iteration identifier, used for learning rate decay calculation [S1, unofficial].
+ - `context`: Object containing:
+-  - `iterations[level]`: Current iteration count for this level.
+-  - `models[level]`: The Gaussian model instance for this level.
+-  - `backward_results[level]`: Gradients and statistics computed from the backward pass.
+-  - `config`: Configuration object containing thresholds and intervals.
++  - `iterations[level]`: Current iteration count for this level [S1, unofficial].
++  - `models[level]`: The Gaussian model instance for this level [S1, unofficial].
++  - `backward_results[level]`: Gradients and statistics computed from the backward pass [S1, unofficial].
++  - `config`: Configuration object containing thresholds and intervals [S1, unofficial].
+ - `config`:
+-  - `max_densification_iteration`: Upper bound for densification/pruning.
+-  - `densification_interval`: Frequency of densification checks.
+-  - `gradient_threshold`: Minimum gradient magnitude for densification.
+-  - `opacity_threshold`: Opacity value below which Gaussians are pruned.
+-  - `scene_extent`: Spatial boundary for densification.
+-  - `size_threshold`: Size limit for pruning.
+-  - `max_opacity_reset_iteration`: Upper bound for opacity resets.
+-  - `opacity_reset_interval`: Frequency of opacity resets.
++  - `max_densification_iteration`: Upper bound for densification/pruning [S1, unofficial].
++  - `densification_interval`: Frequency of densification checks [S1, unofficial].
++  - `gradient_threshold`: Minimum gradient magnitude for densification [S1, unofficial].
++  - `opacity_threshold`: Opacity value below which Gaussians are pruned [S1, unofficial].
++  - `scene_extent`: Spatial boundary for densification [S1, unofficial].
++  - `size_threshold`: Size limit for pruning [S1, unofficial].
++  - `max_opacity_reset_iteration`: Upper bound for opacity resets [S1, unofficial].
++  - `opacity_reset_interval`: Frequency of opacity resets [S1, unofficial].
+ 
+ **Outputs:**
+-- Updated model parameters (positions, colors, opacities, scales, rotations).
+-- Updated densification statistics.
+-- Modified Gaussian population (via densification/pruning).
+-- Updated learning rate.
++- Updated model parameters (positions, colors, opacities, scales, rotations) [S1, unofficial].
++- Updated densification statistics [S1, unofficial].
++- Modified Gaussian population (via densification/pruning) [S1, unofficial].
++- Updated learning rate [S1, unofficial].
+ 
+ ### Data Structures
+ The method relies on the `GaussianModel` and `DiffRasterizerBackwardResult` structures defined in the gscache repository [S1, unofficial].
+-- `GaussianModel`: Stores XYZ positions, colors, opacities, scaling factors, rotation quaternions, and SH features.
+-- `DiffRasterizerBackwardResult`: Contains gradients for XYZ (`d_xyz`), mean 2D (`d_mean2D`), conic matrix (`d_conic`), color (`d_color`), opacity (`d_opacity`), and covariance (`d_cov3D`) for each Gaussian point.
++- `GaussianModel`: Stores XYZ positions, colors, opacities, scaling factors, rotation quaternions, and SH features [S1, unofficial].
++- `DiffRasterizerBackwardResult`: Contains gradients for XYZ (`d_xyz`), mean 2D (`d_mean2D`), conic matrix (`d_conic`), color (`d_color`), opacity (`d_opacity`), and covariance (`d_cov3D`) for each Gaussian point [S1, unofficial].
+ 
+ ### Steps
+-1. **Increment Iter+1. Increment the iteration counter for the current level: `context->iterations[level] += 1;` [S1, unofficial].
++2. Compute a decaying learning rate factor based on the frame ID: `float factor = 1.f / (1.f + std::log(frameid + 1));` [S1, unofficial].
++3. Update the model's learning rate, gradients, and densification statistics using the computed factor and backward results: `context->models[level]->updateLearningRate(factor); context->models[level]->updateGradients(*context->backward_results[level]); context->models[level]->updateDensificationStats(*context->backward_results[level]);` [S1, unofficial].
++4. If `iterations[level] < max_densification_iteration` and `iterations[level] % densification_interval == 0`, trigger densification and pruning with gradient, opacity, scene extent, and size thresholds: `context->models[level]->densifyAndPrune(context->config->gradient_threshold, context->config->opacity_threshold, context->config->scene_extent, context->config->size_threshold);` [S1, unofficial].
++5. If `iterations[level] < max_opacity_reset_iteration` and `iterations[level] % opacity_reset_interval == 0`, reset model opacity: `context->models[level]->resetOpacity();` [S1, unofficial].
++6. Unconditionally reset opacity on the first iteration: `if (context->iterations[level] == 1) { context->models[level]->resetOpacity(); }` [S1, unofficial].
++7. Execute the model's optimizer step: `context->models[level]->optimize();` [S1, unofficial].
++
++### Pseudocode
++```python
++import math
++
++def gscache_optimize_level(level, frameid, context):
++    # 1. Increment iteration counter
++    context.iterations[level] += 1
++
++    # 2. Compute decaying learning rate factor
++    factor = 1.0 / (1.0 + math.log(frameid + 1))
++
++    # 3. Update learning rate, gradients, and densification statistics
++    context.models[level].update_learning_rate(factor)
++    context.models[level].update_gradients(context.backward_results[level])
++    context.models[level].update_densification_stats(context.backward_results[level])
++
++    # 4. Densify and prune if within bounds and at interval
++    if (context.iterations[level] < context.config.max_densification_iteration and
++        context.iterations[level] % context.config.densification_interval == 0):
++        context.models[level].densify_and_prune(
++            context.config.gradient_threshold,
++            context.config.opacity_threshold,
++            context.config.scene_extent,
++            context.config.size_threshold
++        )
++
++    # 5. Reset opacity if within bounds and at interval
++    if (context.iterations[level] < context.config.max_opacity_reset_iteration and
++        context.iterations[level] % context.config.opacity_reset_interval == 0):
++        context.models[level].reset_opacity()
++
++    # 6. Unconditionally reset opacity on the first iteration
++    if context.iterations[level] == 1:
++        context.models[level].reset_opacity()
++
++    # 7. Execute the model's optimizer step
++    context.models[level].optimize()
++```
++
++### Parameters
++- `level`: Integer index of the optimization level being processed [S1, unofficial].
++- `frameid`: Current frame/iteration identifier, used in the learning rate decay formula [S1, unofficial].
++- `max_densification_iteration`: Upper bound on iterations before densification/pruning is disabled [S1, unofficial].
++- `densification_interval`: Frequency (in iterations) at which densification and pruning are evaluated [S1, unofficial].
++- `gradient_threshold`: Minimum gradient magnitude required to trigger densification [S1, unofficial].
++- `opacity_threshold`: Opacity value below which Gaussians are pruned [S1, unofficial].
++- `scene_extent`: Spatial boundary used during densification [S1, unofficial].
++- `size_threshold`: Size limit used during pruning [S1, unofficial].
++- `max_opacity_reset_iteration`: Upper bound on iterations before opacity resets are disabled [S1, unofficial].
++- `opacity_reset_interval`: Frequency (in iterations) at which opacity is reset [S1, unofficial].
++
++### Edge Cases and Pitfalls
++- The learning rate decay formula uses `std::log(frameid + 1)`, which requires `frameid` to be non-negative to avoid undefined behavior [S1, unofficial].
++- Opacity is reset twice on the first iteration: once by the conditional interval check and once unconditionally, as specified by the source logic [S1, unofficial].
++- Not given in the sources.
++
++## Operating characteristics
++
++## Background
++The method originates from the gscache repository and is used within differentiable inverse volume rendering and radiance-field optimization training loops [S1, unofficial].
++
++## Sources
++[S1] DBauer15/gscache, https://github.com/DBauer15/gscache, fetched 2026-10-26 (unofficial)

@@ -1,0 +1,176 @@
+# Inverse Rendering Pipeline
+
+
+## Overview
+This method performs inverse rendering by optimizing a neural Signed Distance Function (SDF) and shading network to match a target image, using a reparameterization technique that handles boundary gradients exactly [S1]. It differs from approximate differentiable volume rendering methods [4143-single-scattering-differentiable-volume-rendering.md] by computing unbiased gradients for surface boundaries via Monte-Carlo pixel integration, and from differential ratio tracing [4231-differential-ratio-tracing.md] by relying on nested automatic differentiation passes rather than analytical ratio derivations [S1]. It solves the problem of recovering geometry and appearance from images when the underlying representation is a neural implicit surface [S1].
+
+## How it works
+The pipeline optimizes neural network parameters $\theta$ (SDF weights, shading weights, positional encoding biases) to minimize a loss $L$ between the rendered image and a target image [S1]. The rendering is defined by a transformation $T$ from pixel coordinates $u$ to 3D space, modulated by a warp $\mathcal{V}$, and evaluated via the SDF $f$ [S1].
+
+**Inputs:**
+- Target image $I_{\text{target}}$ [S1].
+- Camera parameters (intrinsics, extrinsics) [G].
+- Initial neural network weights [S1].
+
+**Outputs:**
+- Optimized SDF network $f$ and shading network [S1].
+
+**Data Structures:**
+- **SDF Network:** Multi-layer perceptron (MLP) [S1]. Input: 3D position $x$. Output: scalar distance $f(x)$ and geometric feature vector. Width: 256 channels per layer [S1].
+- **Shading Network:** MLP [S1]. Inputs: position $x$, viewing direction $v$, geometric feature vector. Output: radiance. Evaluated only at surface points [S1].
+- **Positional Encoding:** 6-levels of sinusoidal positional encoding applied to input position $x$ [S1].
+- **Pixel Sampling:** Monte-Carlo samples within each pixel to integrate the spatially-varying warp $\mathcal{V}$ [S1].
+
+**Numbered Steps:**
+
+1. **Initialization:**
+   - Initialize the geometric network to produce an approximate spherical SDF using the method of Atzmon and Lipman [S1].
+   - Initialize positional encoding layer weights to 0 [S1].
+   - Pad SDF weights with a small $\epsilon$ to avoid infinities during gradient computation [S1].
+
+2. **Pixel Sampling:**
+   - For each optimization iteration, select a subset of pixels [S1].
+   - For each selected pixel, generate Monte-Carlo samples within the pixel area to integrate the warp $\mathcal{V}$, rather than using a single center ray [S1].
+
+3. **Forward Pass (Rendering):**
+   - For each sample, compute the 3D position $x$ via the transformation $T(u, \theta)$ [S1].
+   - Evaluate the SDF $f(x)$ to determine surface intersection [S1].
+   - Compute normals $\partial_x f$ using forward-mode automatic differentiation [S1].
+   - Evaluate the shading network at the surface point to get radiance [S1].
+   - Compute the rendered pixel value by integrating radiance over the pixel samples [S1].
+
+4. **Gradient Computation (3 Nested Derivative Passes):**
+   The total gradient $\partial_\theta [L(T(u, \theta)) |\det(\partial_u T(u, \theta))|]$ is computed using JAX with nested forward+backward differentiation [S1]:
+   - **(i) Normals:** Compute $\partial_x f$ using forward-mode AD [S1].
+   - **(ii) Jacobian:** Compute $\partial_u T$ (Jacobian of the transformation) using forward-mode AD [S1].
+   - **(iii) Full Pipeline:** Compute derivatives of the full pipeline loss with respect to $\theta$ using reverse-mode AD (backpropagation) [S1].
+
+5. **Regularization:**
+   - Apply Eikonal regularization loss to enforce $|\nabla f(x)| = 1$ [S1].
+   - Use a multi-scale pyramid of the target image to stabilize gradients, particularly for silhouette pixels [S1].
+
+6. **Optimization Step:**
+   - Update $\theta$ using gradient descent [S1].
+
+**Formulas:**
+- Loss: $L(T(u, \theta)) |\det(\partial_u T(u, \theta))|$ [S1].
+- Eikonal Loss: $\mathcal{L}_{\text{eikonal}} = \mathbb{E}_{x \sim \text{samples}} [ (|\nabla f(x)| - 1)^2 ]$ [S1].
+
+**Parameters:**
+- SDF Network Width: 256 channels [S1].
+- Positional Encoding Levels: 6 [S1].
+- Epsilon Padding: Small $\epsilon$ (value not specified) [S1].
+
+**Edge Cases and Pitfalls:**
+- **Silhouette Gradients:** Unbiased derivatives are non-zero only for pixels partially covered by a surface [S1]. Using a subset of pixels makes sampling these pixels rare [S1]. Mitigated by multi-scale pyramid [S1].
+- **Infinities:** SDF approximation may lead to infinities. Mitigated by padding weights with $\epsilon$ [S1].
+- **Memory:** The method is memory-intensive. Mitigated by reducing SDF network width to 256 channels [S1].
+
+**Pseudocode:**
+> **Unverified code.** The code below did not pass a test run against a reference implementation, or no test fits it, so it may contain errors.
+
+```python
+import jax
+import jax.numpy as jnp
+
+def positional_encoding(x, num_levels=6):
+    """6-levels of sinusoidal positional encoding [S1]."""
+    scales = 2.0 ** jnp.arange(num_levels)
+    x_enc = jnp.sin(x * scales)
+    return x_enc
+
+def sdf_network(x, weights, epsilon=1e-6):
+    """MLP with 256 channels per layer [S1]. Returns distance and feature vector."""
+    x_enc = positional_encoding(x)
+    h = x_enc
+    for w in weights[:-1]:
+        h = jnp.tanh(jnp.dot(h, w))
+    dist = jnp.dot(h, weights[-1][0])
+    features = jnp.dot(h, weights[-1][1])
+    return dist + epsilon, features
+
+def shading_network(x, v, features, weights):
+    """MLP predicting radiance from position, view direction, and features [S1]."""
+    h = jnp.concatenate([x, v, features])
+    for w in weights[:-1]:
+        h = jnp.tanh(jnp.dot(h, w))
+    return jnp.dot(h, weights[-1])
+
+def compute_normals(x, sdf_weights, epsilon=1e-6):
+    """Compute normals using forward-mode AD [S1]."""
+    return jax.jacfwd(lambda x: sdf_network(x, sdf_weights, epsilon)[0])(x)
+
+def compute_jacobian(u, theta):
+    """Compute Jacobian of transformation using forward-mode AD [S1]."""
+    return jax.jacfwd(lambda u: transform(u, theta))(u)
+
+def transform(u, theta):
+    """Compute 3D position x from pixel coordinates u [G]."""
+    return jnp.array([u[0], u[1], 1.0])
+
+def sample_pixel(u, num_samples=4):
+    """Monte-Carlo sampling within each pixel [S1]."""
+    return u + jnp.random.uniform(-0.5, 0.5, (num_samples, 2))
+
+def render_pixel(u, theta, epsilon=1e-6):
+    """Render a single pixel with Monte-Carlo sampling."""
+    samples = sample_pixel(u)
+    radiance_sum = jnp.zeros(3)
+    for s in samples:
+        x = transform(s, theta)
+        dist, features = sdf_network(x, theta['sdf_weights'], epsilon)
+        normals = compute_normals(x, theta['sdf_weights'], epsilon)
+        v = jnp.array([0.0, 0.0, 1.0])
+        radiance = shading_network(x, v, features, theta['shading_weights'])
+        radiance_sum += radiance
+    return radiance_sum / len(samples)
+
+def compute_full_pipeline_gradients(theta, target_image, pixel_coords, epsilon=1e-6):
+    """Compute derivatives of the full pipeline using reverse-mode AD [S1]."""
+    rendered_image = jax.vmap(render_pixel, in_axes=(0, None, None))(pixel_coords, theta, epsilon)
+    L = jnp.mean((rendered_image - target_image) ** 2)
+    eikonal_samples = jnp.random.uniform(-1, 1, (100, 3))
+    eikonal_loss = 0.0
+    for x in eikonal_samples:
+        grad_f = jax.grad(lambda x: sdf_network(x, theta['sdf_weights'], epsilon)[0])(x)
+        eikonal_loss += jnp.sum((jnp.linalg.norm(grad_f) - 1) ** 2)
+    eikonal_loss /= len(eikonal_samples)
+    return L + eikonal_loss
+
+def optimize(target_image, initial_theta, num_iterations, pixel_coords, epsilon=1e-6):
+    """Multi-level optimization with pyramid [S1]."""
+    theta = initial_theta
+    pyramid_levels = [target_image, jnp.array(target_image)[::2, ::2]]
+    for level in pyramid_levels:
+        for i in range(num_iterations):
+            grads = jax.grad(compute_full_pipeline_gradients)(theta, level, pixel_coords, epsilon)
+            theta = theta - 0.01 * grads
+    return theta
+```
+
+## Subtopics
+
+### [Single-Scattering Differentiable Volume Rendering](4143-single-scattering-differentiable-volume-rendering.md)
+Approximate differentiable volume rendering using single-scattering assumption. Choose when computational resources are limited and single-scattering is a valid approximation.
+
+### [Differential Ratio Tracing](4231-differential-ratio-tracing.md)
+Uses analytical ratio derivations for differentiable rendering. Choose when analytical gradients are available and preferred over automatic differentiation.
+
+### [RAN Training Procedure](14632-ran-training-procedure.md)
+Training procedure for Neural Radiance Fields. Choose when using explicit neural radiance fields rather than implicit SDFs.
+
+## Operating characteristics
+- **Time Complexity:** High due to nested automatic differentiation passes and Monte-Carlo sampling. Each iteration requires 3 derivative passes [S1].
+- **Memory Complexity:** High. The method is memory-intensive, mitigated by reducing SDF network width to 256 channels [S1].
+- **Measured Performance:** Not given in the sources.
+- **Scaling:** Uses multi-scale pyramid to handle large images and stabilize gradients [S1].
+- **Strengths:** Unbiased gradients for surface boundaries, handles complex geometry via neural SDF, robust initialization [S1].
+- **Limitations:** Memory-intensive, slow due to nested AD and Monte-Carlo sampling, requires careful initialization [S1].
+- **When to use:** When recovering high-quality geometry and appearance from images using neural implicit representations is required [S1].
+- **When not to use:** Not given in the sources.
+
+## Background
+Originated from the paper "Differentiable Rendering of Neural SDFs through Reparameterization" [S1]. The method builds on neural SDF representations [Yariv et al. 2020] and geometric network initialization [Atzmon and Lipman 2020] [S1]. It addresses the limitations of approximate differentiable rendering methods by providing unbiased gradients for surface boundaries [S1].
+
+## Sources
+[S1] Differentiable Rendering of Neural SDFs through Reparameterization, https://doi.org/10.1145/3550469.3555397, fetched 2026-10-26

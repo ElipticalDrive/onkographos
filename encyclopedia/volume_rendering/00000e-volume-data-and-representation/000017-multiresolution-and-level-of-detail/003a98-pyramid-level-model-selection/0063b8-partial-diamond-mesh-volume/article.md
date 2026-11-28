@@ -1,0 +1,121 @@
+# Partial Diamond Mesh Volume
+
+Also called: Partial DMV, ∆ p
+
+## Overview
+Partial Diamond Mesh Volume (Partial DMV) is a sparse representation of a scalar field that encodes only relevant diamonds from a hierarchical diamond mesh, subject to a transitive closure constraint. It solves the problem of efficient storage and transmission of volumetric data where only a subset of the full hierarchy is needed for rendering or analysis. It sets itself apart from sibling methods by explicitly clustering diamonds into "supercubes" to exploit spatial and hierarchical coherence, reducing overhead compared to explicit diamond-based or vertex-based representations.
+
+## How it works
+**Inputs and Outputs:**
+- Input: A full Diamond Mesh Volume (DMV) hierarchy $\Delta_f$ and a selection criterion for relevant diamonds (e.g., error threshold $\epsilon$).
+- Output: A partial DMV $\Delta_p$ represented as a set of supercubes.
+
+**Data Structures:**
+The representation consists of a list of supercubes. Each supercube encodes:
+1.  **Origin:** 6 bytes. The coordinates of the central vertex of the supercube.
+2.  **Bookkeeping:** 21 bytes. A bitflag array indicating which diamonds within the supercube are active. Since a supercube can contain up to 336 tetrahedra, and diamonds are formed by pairs of tetrahedra, there are $336/2 = 168$ possible diamonds. However, the source specifies tracking tetrahedra due to a single supercube in the active front using $(336/2)$ bits = 21 bytes. This implies a 168-bit mask (21 bytes) where each bit corresponds to a potential diamond or tetrahedron pair within the supercube's domain.
+
+**Parameters:**
+- $b_\delta$: Bytes per diamond data. Value: 4 bytes [S1].
+- $b_v$: Bytes per central vertex coordinate. Value: 6 bytes [S1].
+- $b_\sigma$: Bytes per supercube overhead (origin + bookkeeping). Value: 27 bytes (6 + 21) [S1].
+
+**Steps:**
+1.  **Generate Full Hierarchy:** Construct the full DMV $\Delta_f$ from the scalar field $F$.
+2.  **Select Diamonds:** Identify the subset of diamonds $\Delta_p \subset \Delta_f$ that satisfy the application's relevance criteria (e.g., error $> \epsilon$).
+3.  **Apply Transitive Closure:** Ensure that if a diamond $\delta \in \Delta_p$, all ancestors of $\delta$ in the hierarchy are also included in $\Delta_p$.
+4.  **Cluster into Supercubes:** Group the diamonds in $\Delta_p$ into supercubes. A supercube is a spatial cluster of diamonds.
+5.  **Encode Supercubes:** For each supercube:
+    - Store the 6-byte origin.
+    - Initialize a 21-byte bitflag array to zero.
+    - For each active diamond in the supercube, set the corresponding bit in the array.
+    - Store the supercube if it contains at least one active diamond.
+
+**Formulas:**
+- **Density ($D$):** $D = n_p / n_f$, where $n_p$ is the number of diamonds in $\Delta_p$ and $n_f$ is the number of diamonds in $\Delta_f$ [S1].
+- **Concentration ($C$):** $C = n_p / n_s$, where $n_s$ is the number of supercubes. Range: $C \in [1, 56]$ [S1].
+- **Compactness Condition for Supercube-based ($\Delta_s$) vs Full ($\Delta_f$):** $\Delta_s$ is more compact than $\Delta_f$ when:
+  $$ D < \frac{b_\delta}{b_\delta + (b_\sigma / C)} $$
+- **Compactness Condition for Vertex-based ($\Delta_d$) vs Full ($\Delta_f$):** $\Delta_d$ is more compact than $\Delta_f$ when:
+  $$ D < \frac{b_\delta}{b_\delta + b_v} $$
+
+**Pseudocode:**
+> **Unverified code.** The code below did not pass a test run against a reference implementation, or no test fits it, so it may contain errors.
+
+```python
+def encode_partial_dmv(full_dmv, error_threshold):
+    """
+    Encodes a partial DMV using supercubes.
+    
+    Args:
+        full_dmv: The full DMV hierarchy.
+        error_threshold: The error threshold for diamond selection.
+        
+    Returns:
+        A list of supercubes, each represented as (origin, bitflags).
+    """
+    # Step 1: Select diamonds based on error
+    selected_diamonds = []
+    for diamond in full_dmv.all_diamonds():
+        if diamond.error > error_threshold:
+            selected_diamonds.append(diamond)
+            
+    # Step 2: Apply transitive closure
+    # If a diamond is selected, all its ancestors must be included.
+    # This is typically handled by traversing up the hierarchy from each selected diamond.
+    transitive_closure_diamonds = set()
+    for diamond in selected_diamonds:
+        current = diamond
+        while current is not None:
+            transitive_closure_diamonds.add(current)
+            current = current.parent
+            
+    # Step 3: Cluster into supercubes
+    # The source does not specify the exact clustering algorithm, 
+    # but implies spatial clustering. We assume a function that groups diamonds.
+    supercubes = cluster_diamonds_into_supercubes(transitive_closure_diamonds)
+    
+    # Step 4: Encode each supercube
+    encoded_supercubes = []
+    for supercube in supercubes:
+        if not supercube.has_active_diamonds():
+            continue
+            
+        origin = supercube.origin_coordinates() # 6 bytes
+        bitflags = bytearray(21) # 21 bytes
+        
+        # Set bits for active diamonds
+        for diamond in supercube.active_diamonds():
+            bit_index = get_diamond_bit_index(diamond, supercube)
+            bitflags[bit_index // 8] |= (1 << (bit_index % 8))
+            
+        encoded_supercubes.append((origin, bitflags))
+        
+    return encoded_supercubes
+```
+
+**Edge Cases and Pitfalls:**
+- **Empty Supercubes:** Supercubes with no active diamonds should not be encoded [S1].
+- **Precision:** The 6-byte origin and 21-byte bitflags are fixed sizes. Ensure coordinate precision matches the application's needs [S1].
+- **Transitive Closure:** Failure to include ancestors will break the hierarchical dependency and rendering correctness [S1].
+
+## Subtopics
+
+### [Composite Voxel Manager with Multi-resolution Selection](18732-composite-voxel-manager-with-multi-resolution-selection.md)
+A sibling method that uses composite voxels and multi-resolution selection. It differs in its primitive structure (voxels vs. diamonds) and selection mechanism. Choose when voxel-based rendering is preferred.
+
+## Operating characteristics
+- **Time Complexity:** Not given in the sources.
+- **Memory Complexity:** The storage requirement for $\Delta_s$ is $n_p \cdot b_\delta + n_s \cdot b_\sigma$. For $\Delta_d$, it is $n_p \cdot b_\delta + n_p \cdot b_v$. For $\Delta_f$, it is $n_f \cdot b_\delta$.
+- **Measured Performance:** On a 2 GHz Intel Core 2 Duo laptop with 4 GB RAM, $\Delta_s$ achieved around 3 times savings compared to $\Delta_f$ for most datasets [S1]. The overhead of $\Delta_s$ averages around 12% across datasets, while $\Delta_d$ has a 150% overhead relative to $\Delta_p$ [S1].
+- **Scaling:** The compactness of $\Delta_s$ relative to $\Delta_f$ improves with higher concentration $C$ and lower density $D$ [S1].
+- **Strengths:** Significant storage savings for sparse data; low overhead compared to vertex-based methods.
+- **Limitations:** Requires clustering into supercubes; effectiveness depends on the density and concentration of the selected diamonds.
+- **When to Use:** When the scalar field is sparse with respect to the full hierarchy and storage/transmission efficiency is critical.
+- **When Not to Use:** When the data is dense (high $D$) or when the overhead of supercube management outweighs the savings.
+
+## Background
+Partial Diamond Mesh Volume was introduced in the paper "Supercubes: A High-Level Primitive for Diamond Hierarchies" [S1]. It builds on the Diamond Mesh Volume (DMV) framework, which uses a hierarchy of diamonds to represent scalar fields. The partial DMV model was developed to address the inefficiency of encoding full hierarchies when only a subset of diamonds is relevant. The supercube-based representation was proposed to exploit the spatial and hierarchical coherence of partial DMVs.
+
+## Sources
+[S1] Supercubes: A High-Level Primitive for Diamond Hierarchies, https://doi.org/10.1109/tvcg.2009.186, fetched 2026-10-28

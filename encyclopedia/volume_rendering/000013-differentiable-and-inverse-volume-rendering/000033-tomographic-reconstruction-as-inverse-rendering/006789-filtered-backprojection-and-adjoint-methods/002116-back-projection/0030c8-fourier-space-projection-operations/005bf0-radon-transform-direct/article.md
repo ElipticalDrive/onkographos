@@ -1,0 +1,175 @@
+# Radon Transform (Direct)
+
+Also called: Discrete Radon Transform, Kingston and Svalbe Discrete Radon Transform, skradon
+
+## Overview
+Computes the Radon transform (sinogram) of a batch of multi-channel images by rotating the image and summing along one axis for each angle [S2, unofficial]. It differs from [TorchRadon](7278-torchradon.md) by operating directly in the spatial domain via explicit rotation and summation, rather than relying on Fourier-space approximations [S2, unofficial].
+
+## How it works
+**Inputs:**
+- `image`: A 4-D `torch.Tensor` of shape `(B, C, H, W)` representing a batch of multi-channel images [S2, unofficial].
+- `theta`: A 1-D `torch.Tensor` of angles in degrees. If `None`, defaults to `torch.arange(180, dtype=torch.float32)` [S2, unofficial].
+- `circle`: A boolean flag. If `True`, assumes the image is zero outside the inscribed circle and crops to a square; if `False`, pads the image to the diagonal size [S2, unofficial].
+- `preserve_range`: A boolean flag. If `True`, preserves the original value range by converting to double precision if necessary; if `False`, scales integer types to `[0.0, 1.0]` or `[-1.0, 1.0]` [S2, unofficial].
+
+**Outputs:**
+- `radon_image`: A `torch.Tensor` of shape `(B, C, N, M)`, where `B` is batch size, `C` is channels, `N` is the projection width (padded image size), and `M` is the number of angles [S2, unofficial].
+
+**Formulas:**
+For the discrete formulation by Kingston and Svalbe, the transform on a discrete image $f(i, j)$ is defined as [S1, unofficial]:
+$$
+R(k, \theta) = \sum_{i=0}^{p-1} \sum_{j=0}^{p-1} f(i, j) \delta(k - ijm + jim),
+$$
+where $\delta(i) = 0$ if $i \neq 0$ and $1$ if $i = 0$ [S1, unofficial]. The number of bins $N_m$ on a projection is not constant: $N_m = p(|i| + j)$, with $0 \le i \le p$ and $0 \le j \le p$ [S1, unofficial].
+
+**Steps:**
+1. **Type Conversion:** Convert `image` to float using `convert_to_float(image, preserve_range)`. If `preserve_range` is true, convert non-float types to `double`. If false, scale unsigned integers to `[0.0, 1.0]` and signed integers to `[-1.0, 1.0]` [S2, unofficial].
+2. **Validation:** Validate input is 4-D. If `theta` is `None`, set `theta = torch.arange(180, dtype=torch.float32)`. Clone `theta` and move it to the same device as `image` [S2, unofficial].
+3. **Preprocessing (Circle Mode):** If `circle` is `True`: calculate `shape_min = min(image.size()[2:])` and `radius = shape_min // 2`. Create a meshgrid `x, y` for the image coordinates. Calculate distance from center `dist = ((coords - center.view(-1, 1, 1)) ** 2).sum(0)`. Identify `outside_reconstruction_circle = dist > radius**2`. Warn if any non-zero values exist outside the circle. Calculate `excess = img_shape - shape_min`. Create slices to crop the image to a square: `padded_image = image[:, :, slices[0], slices[1]]` [S2, unofficial].
+4. **Preprocessing (Padding Mode):** If `circle` is `False`: calculate `diagonal = torch.sqrt(torch.tensor(2)) * max(image.size()[2:])`. Calculate padding `pad = [int(torch.ceil(diagonal - s)) for s in image.size()[2:]]`. Calculate new/old centers and pad widths. Apply `torch.nn.functional.pad` with mode `'constant'` and value `0` to get `padded_image` [S2, unofficial].
+5. **Square Assertion:** Assert `padded_image` is square. If `padded_image.size()[2] != padded_image.size()[3]`, raise `ValueError` [S2, unofficial].
+6. **Center Calculation:** If `padded_image.size()[2]` is even, `center = 0.5`; else `center = 0.0` [S2, unofficial].
+7. **Initialization:** Initialize `radon_image` tensor of shape `(batch, channels, padded_size, len(theta))` with zeros [S2, unofficial].
+8. **Rotation and Summation:** Loop `for i, angle in enumerate(torch.deg2rad(theta))`: calculate `cos_a, sin_a = torch.cos(angle), torch.sin(angle)`. Construct 3x3 rotation matrix `R` with translation terms `-center * (cos_a + sin_a - 1) / (padded_image.size()[2] / 2)` and `-center * (cos_a - sin_a - 1) / (padded_image.size()[3] / 2)`. Warp image using `rotated = warp(padded_image, R)`. Sum along axis 2: `radon_image[:, :, :, i] = rotated.sum(2)` [S2, unofficial].
+
+**Pseudocode:**
+> **Unverified code.** The code below did not pass a test run against a reference implementation, or no test fits it, so it may contain errors.
+
+```python
+import torch
+import torch.nn.functional as F
+
+def radon_transform(image, theta=None, circle=True, preserve_range=True):
+    # Step 1: Type Conversion
+    if image.dtype == torch.float16:
+        image = image.float()
+    if preserve_range:
+        if image.dtype not in [torch.float32, torch.float64]:
+            image = image.double()
+    else:
+        if not image.dtype.is_floating_point:
+            if image.dtype == torch.bool:
+                image = image.double()
+            elif image.dtype == torch.uint8:
+                imax_in = torch.iinfo(image.dtype).max
+                image = image / imax_in
+                image = image.double()
+            elif image.dtype in [torch.int8, torch.int16, torch.int32, torch.int64]:
+                imax_in = torch.iinfo(image.dtype).max
+                image = image / imax_in
+                image = image.double()
+
+    # Step 2: Validation
+    assert image.dim() == 4, "Input must be 4-D"
+    if theta is None:
+        theta = torch.arange(180, dtype=torch.float32, device=image.device)
+    else:
+        theta = theta.clone().to(image.device)
+
+    # Step 3 & 4: Preprocessing
+    if circle:
+        shape_min = min(image.size()[2:])
+        radius = shape_min // 2
+        y, x = torch.meshgrid(torch.arange(image.size(2), device=image.device),
+                              torch.arange(image.size(3), device=image.device),
+                              indexing='ij')
+        center_coord = shape_min / 2.0
+        dist = ((x - center_coord) ** 2 + (y - center_coord) ** 2)
+        outside_reconstruction_circle = dist > radius ** 2
+        if torch.any((image != 0) & outside_reconstruction_circle):
+            import warnings
+            warnings.warn("Non-zero values exist outside the reconstruction circle")
+        excess = [image.size(2) - shape_min, image.size(3) - shape_min]
+        slices = []
+        for e in excess:
+            if e.item() > 0:
+                slices.append((int(torch.ceil(e / 2).item()), int(torch.ceil(e / 2).item() + shape_min)))
+            else:
+                slices.append(slice(None))
+        padded_image = image[:, :, slices[0][0]:slices[0][1], slices[1][0]:slices[1][1]]
+    else:
+        diagonal = torch.sqrt(torch.tensor(2.0, device=image.device)) * max(image.size()[2:])
+        pad = [int(torch.ceil(diagonal - s)) for s in image.size()[2:]]
+        new_center = [(s + p) // 2 for s, p in zip(image.size()[2:], pad)]
+        old_center = [s // 2 for s in image.size()[2:]]
+        pad_before = [nc - oc for oc, nc in zip(old_center, new_center)]
+        pad_width = [(pb, p - pb) for pb, p in zip(pad_before, pad)]
+        padded_image = F.pad(image, (pad_width[1][0], pad_width[1][1], pad_width[0][0], pad_width[0][1]), mode="constant", value=0)
+
+    # Step 5: Square Assertion
+    if padded_image.size()[2] != padded_image.size()[3]:
+        raise ValueError("padded_image must be a square")
+
+    # Step 6: Center Calculation
+    if padded_image.size()[2] % 2 == 0:
+        center = 0.5
+    else:
+        center = 0.0
+
+    # Step 7: Initialization
+    radon_image = torch.zeros(
+        (padded_image.size(0), padded_image.size(1), padded_image.size(2), len(theta)),
+        dtype=padded_image.dtype,
+        device=padded_image.device,
+    )
+
+    # Step 8: Rotation and Summation
+    for i, angle in enumerate(torch.deg2rad(theta)):
+        cos_a, sin_a = torch.cos(angle), torch.sin(angle)
+        R = torch.tensor([
+            [cos_a, sin_a, -center * (cos_a + sin_a - 1) / (padded_image.size(2) / 2)],
+            [-sin_a, cos_a, -center * (cos_a - sin_a - 1) / (padded_image.size(3) / 2)],
+            [0, 0, 1]
+        ], dtype=padded_image.dtype, device=padded_image.device)
+        # Standard affine warp using grid_sample [G]
+        B, C, H, W = padded_image.shape
+        grid = F.affine_grid(R[:2, :].unsqueeze(0), [B, C, H, W], align_corners=False)
+        rotated = F.grid_sample(padded_image, grid, mode='bilinear', padding_mode='zeros', align_corners=False)
+        radon_image[:, :, :, i] = rotated.sum(2)
+
+    return radon_image
+```
+
+**Parameters:**
+- `circle`: `bool`, optional. If `True`, assumes image is zero outside inscribed circle and crops to square. If `False`, pads to diagonal size [S2, unofficial].
+- `preserve_range`: `bool`, optional. Whether to keep original value range or convert via `img_as_float` conventions [S2, unofficial].
+
+**Edge Cases and Pitfalls:**
+- If `circle=True` and image has non-zero values outside the reconstruction circle, a `UserWarning` is raised [S2, unofficial].
+- If `circle=False`, the padded image must be square. If not, `ValueError` is raised [S2, unofficial].
+
+## Subtopics
+
+### [Mojette Transform](20223-mojette-transform.md)
+The Mojette transform is an exact discrete version of the Radon transform that allows the projection of discrete data onto a discrete hyperplane. Unlike the continuous Radon transform, which requires interpolation for arbitrary angles, the Mojette transform restricts projection directions to discrete angles defined by integer vectors, ensuring that line integrals pass exactly through pixel centers. This induces regular sampling on the projections and eliminates interpolation errors for a finite number of angles. It builds on [Radon Transform (Direct)](17030-radon-transform-direct.md) by replacing the continuous integral with a discrete sum constrained by integer geometry.
+
+### Discrete Scanner Acquisition Model
+Models a real-world scanner acquisition as a finite, discrete subset of the ideal continuous sinogram [S3, unofficial]. It uses a finite number of projections $N_\theta$, uniformly distributed between $0$ and $\pi$, and a finite, constant number of samples per projection $N_\rho$ [S3, unofficial]. The angular step is $d\theta = \pi / N_\theta$, and the sampling step on a projection is $d\rho = \max(W,H) / N_\rho$, where $W$ and $H$ are image width and height in pixels [S3, unofficial]. The discrete sinogram $S^*$ is a 2D image of size $N_\rho \times N_\theta$, where pixel $(i_\theta, i_\rho)$ with $0 \le i_\theta < N_\theta$ and $0 \le i_\rho < N_\rho$ stores the value $R_\theta(\rho)$ [S3, unofficial].
+
+## Operating characteristics
+**Time and Memory Complexity:**
+- Not given in the sources.
+
+**Measured Performance:**
+- Not given in the sources.
+
+**Scaling:**
+- Not given in the sources.
+
+**Strengths and Limitations:**
+- Strengths: Explicit control over rotation and summation; supports multi-channel images [S2, unofficial].
+- Limitations: Requires square images after preprocessing [S2, unofficial].
+
+**When to Use:**
+- Not given in the sources.
+
+**When Not to Use:**
+- Not given in the sources.
+
+## Background
+The Radon transform is a fundamental tool in tomography, mapping a function to its line integrals [S1, unofficial]. The discrete formulation was described by Kingston and Svalbe [S1, unofficial]. The direct implementation described here follows the principles outlined in "Principles of Computerized Tomographic Imaging" by Kak and Slaney [S2, unofficial].
+
+## Sources
+[S1] Reconstruction Tomographique Mojette, https://theses.hal.science/tel-00426920v1, fetched 2026-10-26 (unofficial)
+[S2] tomluetjen/torchskradon, https://github.com/tomluetjen/torchskradon, fetched 2026-10-27 (unofficial)
+[S3] Précision et qualité en reconstruction tomographique : algorithmes et applications, https://doi.org/10.70675/d2bc4875z6a5az46afz9289z2fe16b3a43f3, fetched 2026-10-30 (unofficial)

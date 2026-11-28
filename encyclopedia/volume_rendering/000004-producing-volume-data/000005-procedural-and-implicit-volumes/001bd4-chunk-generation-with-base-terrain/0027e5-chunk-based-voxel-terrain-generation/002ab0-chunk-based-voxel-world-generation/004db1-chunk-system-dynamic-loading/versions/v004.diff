@@ -1,0 +1,123 @@
+--- v003.md
++++ v004.md
+@@ -2,5 +2,5 @@
+ Also called: Chunk Management System, Dynamic Chunk Loading, On-Demand Chunk Generation, World Chunk Loader
+ ## Overview
+-The Chunk System (Dynamic Loading) manages procedural world generation by loading and unloading fixed-size chunks on-demand based on camera position, enabling infinite or very large worlds without pre-generating geometry [S1, unofficial]. It distinguishes itself from static LOD approaches by relying on deterministic procedural regeneration rather than pre-cached static meshes, ensuring memory usage remains bounded by the viewer's vicinity [S1, unofficial].
++The Chunk System (Dynamic Loading) manages procedural world generation by loading and unloading fixed-size chunks on-demand based on camera position, enabling infinite or very large worlds without pre-generating geometry [S1, unofficial]. It distinguishes itself from static world generation by dynamically synchronizing chunk loading with the viewer's vicinity, keeping memory usage bounded to the active region [S1, unofficial].
+ ## How it works
+ **Inputs and Outputs:**
+@@ -9,7 +9,7 @@
+ 
+ **Data Structures:**
+-- **Active Chunks:** A map/dictionary mapping chunk coordinates $(C_x, C_y, C_z)$ to chunk objects containing voxel density data and generated mesh geometry [S2, unofficial].
++- **Active Chunks:** A map/dictionary mapping chunk coordinates $(C_x, C_z)$ to chunk objects containing voxel density data and generated mesh geometry [S2, unofficial].
+ - **Generating Chunks:** A set tracking chunk coordinates currently being asynchronously generated to prevent duplicate requests [S2, unofficial].
+-- **Last Chunk Position Reference:** A vector storing the camera position at the last chunk boundary crossing, used to validate late-arriving asynchronous generation results [S2, unofficial].
++- **Last Chunk Position Reference:** A vector storing the chunk coordinates at the last chunk boundary crossing, used to validate late-arriving asynchronous generation results [S2, unofficial].
+ 
+ **Parameters:**
+@@ -19,9 +19,9 @@
+ 
+ **Steps:**
+-1. **Initialization:** Load voxel registry definitions once at startup to prevent redundant disk access [S2, unofficial]. Initialize `active_chunks` as empty, `generating_chunks` as empty, and `last_chunk_pos_ref` to the initial camera position.
++1. **Initialization:** Load voxel registry definitions once at startup to prevent redundant disk access [S2, unofficial]. Initialize `active_chunks` as empty, `generating_chunks` as empty, and `last_chunk_pos_ref` to the initial camera position [G].
+ 2. **Update Loop:** Each frame, call `chunk_manager.Update(camera_position)` to synchronize loaded chunks with the camera [S1, unofficial].
+-3. **Coordinate Calculation:** Determine the current chunk coordinates containing the camera: $C_x = \lfloor P_{camera.x} / S_{chunk} \rfloor$, $C_z = \lfloor P_{camera.z} / S_{chunk} \rfloor$ (and similarly for $C_y$) [S2, unofficial]. If $(C_x, C_y, C_z)$ matches `last_chunk_pos_ref`, return early to avoid recalculation [S2, unofficial].
+-4. **Desired Chunks & Unloading:** Generate a set of desired chunk keys in the range $[C_x - R_{load}, C_x + R_{load}]$ and $[C_z - R_{load}, C_z + R_{load}]$ (and $C_y$) [S2, unofficial]. Iterate `active_chunks`; if a chunk key is not in `desired_chunks`, dispose its geometry, remove it from the scene, delete it from the map, and update statistics [S2, unofficial].
+-5. **Loading & Asynchronous Generation:** Identify chunks to generate by filtering `desired_chunks` for keys not in `active_chunks` or `generating_chunks` [S2, unofficial]. Calculate the Manhattan distance $dist = |C_x - c_x| + |C_z - c_z| + |C_y - c_y|$ for each candidate [S2, unofficial]. Sort candidates by distance ascending [S2, unofficial]. For each chunk, add its key to `generating_chunks` and call `generate_chunk_async(key)` [S2, unofficial]. Update `last_chunk_pos_ref` to the current camera position [S2, unofficial].
++3. **Coordinate Calculation:** Determine the current chunk coordinates containing the camera: $C_x = \lfloor P_{camera.x} / S_{chunk} \rfloor$, $C_z = \lfloor P_{camera.z} / S_{chunk} \rfloor$ [S2, unofficial]. If $(C_x, C_z)$ matches `last_chunk_pos_ref`, return early to avoid recalculation [S2, unofficial].
++4. **Desired Chunks & Unloading:** Generate a set of desired chunk keys in the range $[C_x - R_{load}, C_x + R_{load}]$ and $[C_z - R_{load}, C_z + R_{load}]$ [S2, unofficial]. Iterate `active_chunks`; if a chunk key is not in `desired_chunks`, dispose its geometry, remove it from the scene, delete it from the map, and update statistics [S2, unofficial].
++5. **Loading & Asynchronous Generation:** Identify chunks to generate by filtering `desired_chunks` for keys not in `active_chunks` or `generating_chunks` [S2, unofficial]. Calculate the Manhattan distance $dist = |C_x - c_x| + |C_z - c_z|$ for each candidate [S2, unofficial]. Sort candidates by distance ascending [S2, unofficial]. For each chunk, add its key to `generating_chunks` and call `generate_chunk_async(key)` [S2, unofficial]. Update `last_chunk_pos_ref` to the current chunk coordinates $(C_x, C_z)$ [S2, unofficial].
+ 6. **Async Callback:** When `generate_chunk_async` completes, check if the chunk is still within the render radius relative to `last_chunk_pos_ref` [S2, unofficial]. If yes, add it to `active_chunks` and update statistics; if no, dispose its geometry and remove it from the scene [S2, unofficial]. Remove the chunk key from `generating_chunks` [S2, unofficial].
+ 7. **Procedural Generation:** Generation is deterministic: the same chunk coordinates always produce the same islands [S1, unofficial]. Apply the **Halo Trick**: generate voxels with a $+1$ block border ($+2 \times +2 \times +2$ padding) to ensure geometry continuity across boundaries [S3, unofficial]. For each voxel at local indices $(i, j, k)$, compute the voxel center: $V_{center} = \text{box.lo} + (i + 0.5) \cdot S_{voxel}$ [S1, unofficial]. Check if the voxel center is close to a triangle plane (e.g., for floating islands) or if density is below an iso-value for terrain [S1, unofficial]. If a face is exposed, add vertices and triangles to the mesh [S1, unofficial]. Store the mesh in the chunk object.
+@@ -37,15 +37,14 @@
+         self.unload_radius = unload_radius
+         self.seed = seed
+-        self.active_chunks = {}  # Map: (cx, cy, cz) -> Chunk
+-        self.generating_chunks = set()  # Set: (cx, cy, cz)
+-        self.last_chunk_pos_ref = (0.0, 0.0, 0.0)
++        self.active_chunks = {}  # Map: (cx, cz) -> Chunk
++        self.generating_chunks = set()  # Set: (cx, cz)
++        self.last_chunk_pos_ref = (0.0, 0.0)
+ 
+     def update(self, camera_pos):
+         # 3. Coordinate Calculation
+         cx = math.floor(camera_pos[0] / self.chunk_size)
+-        cy = math.floor(camera_pos[1] / self.chunk_size)
+         cz = math.floor(camera_pos[2] / self.chunk_size)
+         
+-        if (cx, cy, cz) == self.last_chunk_pos_ref:
++        if (cx, cz) == self.last_chunk_pos_ref:
+             return  # Return early to avoid recalculation [S2, unofficial]
+ 
+@@ -53,7 +52,6 @@
+         desired_chunks = set()
+         for x in range(cx - self.load_radius, cx + self.load_radius + 1):
+-            for y in range(cy - self.load_radius, cy + self.load_radius + 1):
+-                for z in range(cz - self.load_radius, cz + self.load_radius + 1):
+-                    desired_chunks.add((x, y, z))
++            for z in range(cz - self.load_radius, cz + self.load_radius + 1):
++                desired_chunks.add((x, z))
+ 
+         keys_to_remove = []
+@@ -69,5 +67,5 @@
+         for key in desired_chunks:
+             if key not in self.active_chunks and key not in self.generating_chunks:
+-                dist = abs(key[0] - cx) + abs(key[1] - cy) + abs(key[2] - cz)
++                dist = abs(key[0] - cx) + abs(key[1] - cz)
+                 chunks_to_generate.append((dist, key))
+         
+@@ -78,5 +76,5 @@
+             self.generate_chunk_async(key)
+             
+-        self.last_chunk_pos_ref = (cx, cy, cz)  # Update reference [S2, unofficial]
++        self.last_chunk_pos_ref = (cx, cz)  # Update reference [S2, unofficial]
+ 
+     def generate_chunk_async(self, key):
+@@ -87,7 +85,7 @@
+     def _on_chunk_ready(self, key, chunk_data):
+         # 6. Async Callback
+-        cx, cy, cz = key
+-        last_cx, last_cy, last_cz = self.last_chunk_pos_ref
+-        dist = abs(cx - last_cx) + abs(cy - last_cy) + abs(cz - last_cz)
++        cx, cz = key
++        last_cx, last_cz = self.last_chunk_pos_ref
++        dist = abs(cx - last_cx) + abs(cz - last_cz)
+         
+         if dist <= self.load_radius:
+@@ -100,5 +98,5 @@
+     def _procedural_generate(self, key):
+         # 7. Procedural Generation
+-        cx, cy, cz = key
++        cx, cz = key
+         # Deterministic generation based on seed and coordinates [S1, unofficial]
+         # Apply Halo Trick: generate with +1 border for continuity [S3, unofficial]
+@@ -108,6 +106,11 @@
+ 
+     def dispose_chunk(self, key):
+-        # Remove from scene and free memory [S2, unofficial]
+-        pass
++        # Dispose geometry, remove from scene, delete from map, update stats [S2, unofficial]
++        if key in self.active_chunks:
++            chunk = self.active_chunks.pop(key)
++            # scene.remove(chunk.mesh)
++            # chunk.mesh.geometry.dispose()
++            # chunk.mesh.material.dispose()
++            # update_stats()
+ ```
+ 
+@@ -124,10 +127,10 @@
+ 
+ ## Operating characteristics
+-- **Time Complexity:** Not given in the sources.
+-- **Memory Complexity:** Not given in the sources.
++- **Time Complexity:** Not given in the sources. [G]
++- **Memory Complexity:** Not given in the sources. [G]
+ - **Strengths:** Enables infinite worlds; deterministic generation ensures reproducibility; asynchronous loading prevents main-thread blocking during chunk creation [S2, unofficial].
+ - **Limitations:** Procedural generation can cause stutter if not optimized; requires careful handling of boundaries (Halo Trick) to avoid seams [S3, unofficial].
+ - **When to use:** Infinite or very large procedural worlds [S1, unofficial].
+-- **When not to use:** Not given in the sources.
++- **When not to use:** Not given in the sources. [G]
+ 
+ ## Background

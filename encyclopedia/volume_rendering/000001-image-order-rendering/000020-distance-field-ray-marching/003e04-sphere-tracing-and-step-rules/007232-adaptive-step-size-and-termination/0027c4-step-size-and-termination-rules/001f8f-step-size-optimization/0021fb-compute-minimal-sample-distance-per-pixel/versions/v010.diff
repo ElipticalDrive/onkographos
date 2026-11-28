@@ -1,0 +1,207 @@
+--- v009.md
++++ v010.md
+@@ -1,86 +1,149 @@
+ # Compute Minimal Sample Distance Per Pixel
+ 
++Also called: L1 Voxel Thickness Step, Oblique Slice Step Size
+ 
+ ## Overview
+-This method computes the minimal sample distance required per pixel for volume rendering by projecting the dataset's cell axes onto the viewport. It accounts for camera and volume transformations to determine the appropriate sampling density [S1, unofficial]. It differs from standard distance-field ray marching step rules by explicitly evaluating the angular span of a voxel's extent from the camera center, rather than relying solely on Euclidean distance or fixed grid spacing [S1, unofficial].
++Computes the minimal sample distance per pixel by projecting each dataset cell axis onto the viewport, accounting for camera and volume transforms [S1, S2, unofficial]. It determines the distance between consecutive oblique slices in a volume viewport to ensure no voxel overlap and no gaps [S2, unofficial]. It differs from standard distance-field ray marching step rules by explicitly evaluating the angular span of a voxel's extent from the camera center to determine sampling density, rather than relying solely on Euclidean distance or fixed grid spacing [S1, unofficial]. The method uses the L1 norm (Manhattan distance) of the projected voxel spacing vector along the view plane normal, rather than the L2 norm (Euclidean distance) [S2, unofficial].
+ 
+ ## How it works
+-**Inputs:**
+-*   `renderer`: A pointer to the rendering context providing camera position, orientation, and viewport dimensions [S1, unofficial].
+-*   `volume`: A pointer to the volume object providing the dataset geometry (cell dimensions) and transformation matrix [S1, unofficial].
+-
+-**Outputs:**
+-*   `min_sample_distance`: The computed minimal sample distance per pixel [S1, unofficial].
+-*   `IgnoreSampleDistancePerPixel`: A boolean flag indicating whether the computed distance is invalid due to degenerate geometry [S1, unofficial].
++**Inputs and Outputs:**
++*   **Inputs:**
++    *   `imageVolume`: The volume dataset providing geometry and transformation [S2, unofficial].
++    *   `viewPlaneNormal`: The normalized vector $\mathbf{n}$ representing the view plane normal (direction of ray propagation) [S2, unofficial].
++    *   `renderer`: A pointer providing camera and viewport state [S1, unofficial].
++    *   `volume`: A pointer providing dataset geometry and transformation [S1, unofficial].
++*   **Outputs:**
++    *   `stepDistance`: The minimal sample distance $\Delta t$ (scalar) [S2, unofficial].
++    *   `ignoreFlag`: A boolean indicating if the step distance is degenerate [S1, unofficial].
+ 
+ **Data Structures:**
+-The method operates on the volume's cell dimensions (axis-aligned bounding box extents or voxel sizes) and the camera's projection matrix. No complex intermediate structures are defined in the source; the calculation is performed directly from these parameters [S1, unofficial].
++*   **Voxel Grid Basis:** The voxel grid is defined by basis vectors $\mathbf{a}_i$ (typically unit vectors aligned with axes) and spacing values $s_i$ (voxel dimensions) along each axis $i$ [S2, unofficial].
++*   **View Plane Normal:** A 3D vector $\mathbf{n}$, normalized such that $|\mathbf{n}| = 1$ [S2, unofficial].
+ 
+ **Steps:**
+-1.  **Retrieve Geometry:** Extract the dimensions of the dataset cells (voxel sizes) along the X, Y, and Z axes from the `volume` object [S1, unofficial].
+-2.  **Retrieve Camera State:** Obtain the camera's view direction, up vector, and projection parameters (field of view, aspect ratio) from the `renderer` [S1, unofficial].
+-3.  **Project Axes:** For each of the three dataset cell axes, project the axis vector onto the viewport plane. This involves transforming the axis vector by the camera's view and projection matrices to determine its angular span relative to the pixel size [S1, unofficial].
+-4.  **Compute Minimal Distance:** Determine the minimal sample distance based on the projected sizes. The distance is derived such that the voxel's projected size on the screen does not undersample the pixel. The exact formula is not provided in the source, but it relies on the relationship between the voxel's physical size, the camera distance, and the projection geometry [S1, unofficial].
+-5.  **Check for Degeneracy:** If any dataset axis is degenerate (e.g., aligned with the view direction, resulting in zero projected width or infinite aspect ratio), set `IgnoreSampleDistancePerPixel` to `true` and return a default or invalid distance [S1, unofficial].
+-6.  **Return Result:** Return the computed `min_sample_distance` and the `IgnoreSampleDistancePerPixel` flag [S1, unofficial].
++1.  **Check for Degeneracy:** Determine if the voxel axes are degenerate (aligned with the view direction). If an axis is parallel to the view plane normal, the projection is zero. In this case, set `IgnoreSampleDistancePerPixel` to true and return [S1, unofficial].
++2.  **Calculate L1 Thickness:** Compute the L1 voxel thickness $T_v$ along the normal $\mathbf{n}$. This is the sum of the absolute projections of each voxel axis scaled by its spacing [S2, unofficial]:
++    $$ T_v = \sum_{i} | \mathbf{n} \cdot \mathbf{a}_i | \cdot s_i $$
++    Where:
++    *   $i$ iterates over the spatial dimensions (e.g., $x, y, z$).
++    *   $\mathbf{n}$ is the view plane normal.
++    *   $\mathbf{a}_i$ is the $i$-th basis vector of the voxel grid.
++    *   $s_i$ is the voxel spacing (size) along the $i$-th axis.
++3.  **Calculate L2 Spacing (Historical/Incorrect):** Compute the L2 spacing $S_n$ for comparison or legacy support [S2, unofficial]:
++    $$ S_n = \sqrt{ \sum_{i} ( \mathbf{n} \cdot \mathbf{a}_i \cdot s_i )^2 } $$
++4.  **Select Step Size:**
++    *   If the configuration flag `rendering.sliceStepMeasure` is set to `'l1'` (or if correcting the defect), use $T_v$ as the step distance [S2, unofficial].
++    *   If set to `'l2'` (default historic behavior), use $S_n$ [S2, unofficial].
++    *   The step distance is clamped to a minimum value to prevent division by zero or infinite loops:
++        ```python
++        step_distance = max(T_v, min_step_threshold)
++        ```
++        [S2, unofficial]
++5.  **Return Result:** Return the calculated `step_distance` and the `ignoreFlag` [S1, S2, unofficial].
+ 
+ **Pseudocode:**
+ ```python
+-def compute_minimal_sample_distance_per_pixel(renderer, volume):
+-    # 1. Retrieve cell dimensions (voxel sizes)
+-    # Assume volume provides get_cell_dimensions() returning (dx, dy, dz)
+-    dx, dy, dz = volume.get_cell_dimensions()
++def compute_minimal_sample_distance_per_pixel(image_volume, view_plane_normal, config):
++    """
++    Computes the minimal sample distance per pixel using L1 or L2 norm.
+     
+-    # 2. Retrieve camera parameters
+-    # Assume renderer provides get_camera() returning a camera object
+-    camera = renderer.get_camera()
+-    view_direction = camera.get_view_direction()
+-    projection_matrix = camera.get_projection_matrix()
+-    viewport_width = camera.get_viewport_width()
+-    viewport_height = camera.get_viewport_height()
++    Args:
++        image_volume: Object containing voxel spacing (s_x, s_y, s_z) and basis vectors.
++        view_plane_normal: Normalized 3D vector (n_x, n_y, n_z).
++        config: Dictionary with key 'sliceStepMeasure' ('l1' or 'l2').
++        
++    Returns:
++        step_distance: Float, the minimal sample distance.
++        ignore_flag: Boolean, true if degenerate.
++    """
++    # Extract voxel spacings
++    s = [image_volume.spacing_x, image_volume.spacing_y, image_volume.spacing_z]
+     
+-    # 3. Project axes and compute minimal distance
+-    # This step involves projecting the cell axes onto the viewport
+-    # and calculating the distance at which the cell spans at least one pixel.
+-    # The exact mathematical formulation is not provided in the source.
+-    # We assume a helper function exists that performs this projection logic.
++    # Basis vectors are typically unit vectors [1,0,0], [0,1,0], [0,0,1]
++    # Dot product n . a_i is simply the component n_i
++    n = view_plane_normal
+     
+-    min_distance = calculate_projected_min_distance(
+-        dx, dy, dz, 
+-        view_direction, 
+-        projection_matrix, 
+-        viewport_width, 
+-        viewport_height
+-    )
++    # Check for degeneracy: if any axis is aligned with view direction,
++    # the projection might be zero or the step calculation invalid.
++    # Note: The source [S1, unofficial] mentions "aligned with view direction" triggers ignore.
++    # In standard ray marching, if the ray is parallel to a grid axis, 
++    # specific handling is needed. Here we assume standard oblique case.
++    # If strict degeneracy check is required based on [S1, unofficial]:
++    if is_degenerate(n, s):
++        return 0.0, True
++
++    # Calculate L1 thickness T_v
++    # T_v = sum(|n . a_i| * s_i)
++    # Since a_i are unit vectors, n . a_i is just n_i
++    t_v = 0.0
++    for i in range(3):
++        t_v += abs(n[i]) * s[i]
++        
++    # Calculate L2 spacing S_n
++    # S_n = sqrt(sum((n . a_i * s_i)^2))
++    s_n_sq = 0.0
++    for i in range(3):
++        s_n_sq += (n[i] * s[i]) ** 2
++    s_n = sqrt(s_n_sq)
+     
+-    # 4. Check for degenerate axes
+-    # If an axis is aligned with the view direction, the projection may be degenerate
+-    is_degenerate = check_axis_degeneracy(dx, dy, dz, view_direction)
++    # Select measure based on config
++    # Default is 'l2' (historic), 'l1' is correct for no overlap
++    if config.get('sliceStepMeasure') == 'l1':
++        step_distance = t_v
++    else:
++        step_distance = s_n
++        
++    # Clamp to minimum to avoid zero/negative steps
++    min_step = 1e-6 # [G] Small epsilon to prevent division by zero
++    step_distance = max(step_distance, min_step)
+     
+-    if is_degenerate:
+-        return min_distance, True  # IgnoreSampleDistancePerPixel = true
+-    
+-    return min_distance, False
++    return step_distance, False
++
++def is_degenerate(n, s):
++    """
++    Check if axes are degenerate (aligned with view direction).
++    Simplified check: if the normal is parallel to one of the axes,
++    the projection onto that axis is 1 and others 0.
++    This doesn't necessarily mean "ignore" in all contexts, 
++    but [S1, unofficial] suggests setting IgnoreSampleDistancePerPixel to true.
++    """
++    # If the view direction is exactly aligned with a grid axis,
++    # the "oblique" assumption fails.
++    # We check if two components of n are effectively zero.
++    eps = 1e-9
++    if (abs(n[0]) > 1 - eps and abs(n[1]) < eps and abs(n[2]) < eps) or \
++       (abs(n[1]) > 1 - eps and abs(n[0]) < eps and abs(n[2]) < eps) or \
++       (abs(n[2]) > 1 - eps and abs(n[0]) < eps and abs(n[1]) < eps):
++        return True
++    return False
+ ```
+ 
+ **Parameters:**
+-*   `renderer`: VTK renderer pointer [S1, unofficial].
+-*   `volume`: VTK volume pointer [S1, unofficial].
++*   `rendering.sliceStepMeasure`: Configuration flag. Defaults to `'l2'` (historic behavior) but can be set to `'l1'` to enable the correct L1-based slice stepping [S2, unofficial].
++*   `epsilon`: A small value used in strict depth tests (e.g., $|d| < h - \epsilon$) to determine voxel inclusion in slabs [S2, unofficial].
+ 
+-**Edge Cases:**
+-*   **Degenerate Axes:** If a dataset axis is aligned with the view direction, the projected size may be zero or undefined. In this case, the method sets `IgnoreSampleDistancePerPixel` to `true` [S1, unofficial].
+-*   **Missing Scalars:** The source code checks for the presence of scalars, but this is related to the rendering pipeline rather than the distance calculation itself. If scalars are missing, the rendering fails, but the distance calculation method's behavior in this specific error case is not explicitly defined beyond the general pipeline failure [S1, unofficial].
++**Edge Cases and Pitfalls:**
++*   **L2 Overlap:** Using the L2 measure ($S_n$) for the slice step causes consecutive oblique slices to share voxels (overlap) because $S_n < T_v$ for oblique normals. This results in the same voxels appearing on multiple adjacent slices, with overlap ranging from 22% to 40% for oblique normals [S2, unofficial].
++*   **45-Degree Hole:** At specific angles like 45 degrees with isotropic voxels, using the L1 step with a symmetric strict depth test ($|d| < h - \epsilon$) causes every second plane of the voxel lattice to be hidden (0% coverage for those planes) because voxel centers fall exactly on slab boundaries [S2, unofficial]. This is due to the interval definition in the slab test, not the step size itself [S2, unofficial].
++*   **Axis-Aligned Views:** The axis-aligned case gives the same result for both L1 and L2 steps, which is why the defect is not visible in an acquisition-orientation view [S2, unofficial].
+ 
+ ## Subtopics
+ 
++### [Projected Voxel Size / LOD Calculation](4189-projected-voxel-size-lod-calculation.md)
++Computes a scalar metric representing the projected size of a voxel relative to the camera, primarily used for Level-of-Detail (LOD) decisions and step size adaptation in volume rendering. It differs from standard distance-field ray marching step rules by explicitly evaluating the angular span of a voxel's extent from the camera center to determine sampling density, rather than relying solely on Euclidean distance or fixed grid spacing.
++
+ ## Operating characteristics
+-*   **Complexity:** The method performs a constant number of vector and matrix operations per pixel (or per volume, depending on implementation granularity). It is $O(1)$ with respect to the number of voxels, as it only considers the dataset's global cell dimensions and camera state.
+-*   **Performance:** Very fast, as it avoids per-voxel or per-ray calculations. It is typically computed once per frame or when camera/volume transforms change.
+-*   **Strengths:** Provides a geometrically accurate sampling distance based on the actual projected size of voxels, preventing aliasing and ensuring consistent visual quality across different camera positions and orientations.
+-*   **Limitations:** Relies on the accuracy of the camera and volume transformation matrices. If the volume is non-axis-aligned or has complex transformations, the projection logic must be robust. The source does not specify how non-axis-aligned volumes are handled beyond the general projection step.
++*   **Time Complexity:** $O(1)$ relative to the number of voxels, as it depends only on the number of dimensions (typically 3) and the number of axes [S2, unofficial].
++*   **Memory Complexity:** $O(1)$, requiring only a few scalar variables for the calculation [S2, unofficial].
++*   **Measured Performance:** The L1 step ($T_v$) ensures zero overlap and 100% coverage for a single plane fill, whereas the L2 step ($S_n$) causes 22-40% overlap for oblique normals [S2, unofficial].
++*   **Strengths:** The L1 measure correctly prevents voxel overlap in oblique views, ensuring that each voxel is sampled exactly once per slice pass [S2, unofficial].
++*   **Limitations:** The L1 step is larger than the L2 step, which may require more slices to cover the same volume depth, potentially increasing rendering time if not optimized [S2, unofficial]. The 45-degree hole issue requires careful handling of slab boundaries [S2, unofficial].
++*   **When to Use:** Use when rendering oblique slices in volume visualization to avoid double-counting voxels. Use L1 measure for correctness in overlap testing [S2, unofficial].
++*   **When Not to Use:** Avoid L2 measure for oblique slices due to overlap artifacts. Be cautious with L1 measure at 45-degree angles if strict slab boundaries are used without adjustment [S2, unofficial].
+ 
+ ## Background
+-This method is part of the VTK (Visualization Toolkit) multi-volume ray casting implementation, specifically within the `vtkMultiVolumeRayCastMapper` or related classes. It was introduced to improve the quality of volume rendering by ensuring that the sampling rate is appropriate for the projected size of the data cells. The source is an unofficial GitHub repository (`bozorgi/VTKMultiVolumeRayCaster`) [S1, unofficial].
++The method originated from issues in volume rendering implementations where oblique slices were stepped using the L2 norm, leading to visible artifacts [S2, unofficial]. The issue was highlighted in a GitHub issue for cornerstone3D, where it was noted that the L1 norm is the correct measure for slice stepping to ensure no voxel overlap [S2, unofficial]. The correction involves changing the step calculation from L2 to L1 and adjusting the configuration flag `rendering.sliceStepMeasure` [S2, unofficial]. The concept is also referenced in VTK-based volume renderers, where it is used to compute minimal sample distances per pixel [S1, unofficial].
+ 
+ ## Sources
+-[S1] bozorgi/VTKMultiVolumeRayCaster, https://github.com/bozorgi/VTKMultiVolumeRayCaster, fetched 2026-10-26 (unofficial)+[S1] bozorgi/VTKMultiVolumeRayCaster, https://github.com/bozorgi/VTKMultiVolumeRayCaster, fetched 2026-10-26 (unofficial)
++[S2] A volume viewport steps an oblique slice by the L2 spacing, and shows the same voxels on two slices, https://github.com/cornerstonejs/cornerstone3D/issues/2912, fetched 2026-10-27 (unofficial)

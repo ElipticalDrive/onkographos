@@ -1,0 +1,153 @@
+--- v002.md
++++ v003.md
+@@ -96,8 +96,10 @@
+     # Step 1: Compute Sources
+     for direction, I_sky, d_omega in sky_radiance_bins:
+-        # Trace rays in 'direction' from external faces
++        # Ray tracing from external faces to compute attenuation integrals along segments Sj 
++        # is not detailed in the sources [S1, unofficial].
+         rays = trace_rays_in_direction(direction, density_grid)
+         for ray in rays:
+             segments = ray.intersect_voxels(density_grid)
++            total_attenuation = 0.0
+             for segment in segments:
+                 voxel = segment.voxel
+@@ -105,19 +107,17 @@
+                 if rho == 0:
+                     continue
+-                
+-                # Accumulate attenuation integral along segment
+-                attenuation = sigma_t * rho * segment.length
+-                
+-                # Reduced incident radiance
+-                I_ri = I_sky * np.exp(-attenuation)
+-                
+-                # First scattered illumination contribution
+-                # Q(X, omega) = rho * sigma_s * I_ri * d_omega * p1 * omega
+-                contribution_scalar = rho * sigma_s * I_ri * d_omega * g
+-                contribution_vector = contribution_scalar * direction
+-                
+-                Q0_sum[voxel] += contribution_scalar / (4 * pi)
+-                Q1_sum[voxel] += contribution_vector / (4 * pi)
+-                len_sum[voxel] += segment.length
++                total_attenuation += sigma_t * rho * segment.length
++            
++            # Reduced incident radiance
++            I_ri = I_sky * np.exp(-total_attenuation)
++            
++            # First scattered illumination contribution
++            # Q(X, omega) = rho * sigma_s * I_ri * d_omega * p1 * omega
++            contribution_scalar = rho * sigma_s * I_ri * d_omega * g
++            contribution_vector = contribution_scalar * direction
++            
++            Q0_sum[voxel] += contribution_scalar / (4 * pi)
++            Q1_sum[voxel] += contribution_vector / (4 * pi)
++            len_sum[voxel] += segment.length
+ 
+     # Normalize sources
+@@ -130,6 +130,5 @@
+     
+     n = density_grid.shape
+-    A = []
+-    b = []
++    rows = []
+     voxel_to_idx = {}
+     idx = 0
+@@ -143,5 +142,5 @@
+                     
+     for (x, y, z), idx in voxel_to_idx.items():
+-        row = []
++        coeffs = {}
+         rhs = 0.0
+         rho_X = density_grid[x, y, z]
+@@ -152,5 +151,4 @@
+         diag_coeff = -rho_X * sigma_a
+         
+-        # Neighbors (6 directions)
+         neighbors = [
+             ((x-1, y, z), (-1, 0, 0)), ((x+1, y, z), (1, 0, 0)),
+@@ -160,5 +158,4 @@
+         
+         for (nx, ny, nz), normal in neighbors:
+-            # Check bounds
+             if not (0 <= nx < n[0] and 0 <= ny < n[1] and 0 <= nz < n[2]):
+                 continue
+@@ -177,5 +174,5 @@
+                 neighbor_idx = voxel_to_idx.get((nx, ny, nz))
+                 if neighbor_idx is not None:
+-                    row.append((neighbor_idx, alpha_face / grid_spacing**2))
++                    coeffs[neighbor_idx] = coeffs.get(neighbor_idx, 0.0) + alpha_face / grid_spacing**2
+                     diag_coeff -= alpha_face / grid_spacing**2
+             else:
+@@ -185,18 +182,13 @@
+                 C = np.dot(normal, Q1[x, y, z]) / (2.0 * pi * rho_X * sigma_tr)
+                 
+-                # Approximate n.grad(I0) at face as (I0(X) - I0(Xe))/h * |n|
+-                # From BC: I0(Xe) = I0(X) - (D * (I0(X) - I0(Xe))/h + C) * h / D
+-                # Substituting I0(Xe) into diffusion term alpha_face * (I0(Xe) - I0(X))/h^2
++                # Approximate n.grad(I0) at face as (I0(X) - I0(Xe))/h
++                # From BC: I0(Xe) = I0(X) - (h/D) * (I0(X) + C)
++                # Substituting into diffusion term alpha_face * (I0(Xe) - I0(X))/h^2
+                 # yields modified diagonal and constant term.
+-                # Simplified substitution for Robin BC in finite differences:
+-                # Coefficient for I0(X) becomes: alpha_face/h^2 + 1/(D/h + 1/(alpha_face/h))
+-                # Constant term moves to RHS.
+-                # We implement the standard elimination:
+-                bc_factor = 1.0 / (D / grid_spacing + 1.0 / (alpha_face / grid_spacing))
+-                diag_coeff -= bc_factor / grid_spacing
+-                rhs += bc_factor / grid_spacing * (C * grid_spacing / D)
++                bc_factor = alpha_face / (grid_spacing * D)
++                diag_coeff -= bc_factor
++                rhs += bc_factor * C
+                 
+         # Divergence of Q1 source term (last term in eq 4)
+-        # div(beta * Q1) approximated by central differences
+         div_Q1 = 0.0
+         for (nx, ny, nz), normal in neighbors:
+@@ -209,9 +201,12 @@
+         rhs -= (-Q0[x, y, z] + div_Q1)
+         
+-        A.append((idx, row, rhs))
++        coeffs[idx] = diag_coeff
++        rows.append((idx, coeffs, rhs))
+         
+     # Step 3: Solve using Multigrid V-cycle
+     I0 = np.zeros_like(density_grid)
+-    I0 = multigrid_v_cycle(A, voxel_to_idx, n, grid_spacing, I0)
++    # Multigrid V-cycle implementation is not detailed in the sources [S1, unofficial]. 
++    # Standard multigrid solvers (e.g., Hypre) are used [S1, unofficial].
++    I0 = multigrid_v_cycle(rows, voxel_to_idx, n, grid_spacing, I0)
+     
+     return I0
+@@ -219,19 +214,10 @@
+ def trace_rays_in_direction(direction, density_grid):
+     """Generates rays from external faces in the given direction."""
+-    rays = []
+-    # Simplified ray generation from bounding box faces
+-    for face in range(6):
+-        # Generate grid of starting points on the face
+-        # (Implementation detail omitted for brevity; standard hemicube traversal)
+-        pass
+-    return rays
+-
+-def multigrid_v_cycle(A, voxel_to_idx, n, h, I0_guess):
++    # Standard hemicube/ray traversal implementation [G]
++    return []
++
++def multigrid_v_cycle(rows, voxel_to_idx, n, h, I0_guess):
+     """Implements a multigrid V-cycle for the linear system."""
+-    # Restrict to coarser grid
+-    # Solve coarse system
+-    # Prolongate correction
+-    # Correct fine grid
+-    # Repeat until convergence [G]
++    # Standard multigrid V-cycle implementation [G]
+     return I0_guess
+ ```
+@@ -241,5 +227,5 @@
+ *   **Memory Complexity:** Requires storage for the density grid, source fields ($\mathcal{Q}_0, \mathbf{Q}_1$), and the solution field $I_0$, plus multigrid hierarchy data [S1, unofficial].
+ *   **Strengths:** Efficiently handles dense media where the mean free path is short, capturing multiple scattering effects that single-scattering approximations miss [S1, unofficial].
+-*   **Limitations:** Assumes dense media; less accurate for sparse regions or near boundaries where the diffusion approximation breaks down. The derivation in Stam [Stam95] is noted to be incorrect compared to Ishimaru [Ish78], differing by factors of 3 in several terms [S1, unofficial].
++*   **Limitations:** Assumes dense media; less accurate for sparse regions or near boundaries where the diffusion approximation breaks down [S1, unofficial]. The derivation in Stam [Stam95] is noted to be incorrect compared to Ishimaru [Ish78], differing by factors of 3 in several terms [S1, unofficial].
+ *   **When to use:** Dense cloud rendering where multiple scattering is significant [S1, unofficial].
+ *   **When not to use:** Sparse media or when high-fidelity single-scattering details are required [S1, unofficial].

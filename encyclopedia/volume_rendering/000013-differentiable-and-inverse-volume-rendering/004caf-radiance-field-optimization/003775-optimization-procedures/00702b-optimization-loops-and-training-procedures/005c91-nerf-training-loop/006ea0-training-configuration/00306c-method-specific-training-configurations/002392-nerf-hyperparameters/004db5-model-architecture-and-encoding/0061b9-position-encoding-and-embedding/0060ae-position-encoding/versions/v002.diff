@@ -1,0 +1,113 @@
+--- v001.md
++++ v002.md
+@@ -4,40 +4,33 @@
+ 
+ ## Overview
+-Position Encoding (PE) is a feature mapping technique that transforms low-frequency coordinate representations into high-frequency information using sine and cosine functions, thereby increasing dimensionality to help deep networks approximate high-frequency functions and prevent the loss of high-frequency spatial information [S2]. It sets itself apart from its siblings by serving as the foundational explicit encoding scheme for NeRF, whereas alternatives like Frequency-Modulated Position Encoding or Random Offset Annealed Fourier Encoding introduce stochasticity, modulation, or local affine transformations to address specific limitations such as spectral bias or domain shift [S1, S2].
++Position Encoding (PE) is a feature mapping technique that transforms low-frequency coordinate representations into high-frequency information using sine and cosine functions, thereby increasing dimensionality to help deep networks approximate high-frequency functions and prevent the loss of high-frequency spatial information [S1]. It sets itself apart from its siblings by serving as the foundational explicit encoding scheme for NeRF, whereas alternatives like Frequency-Modulated Position Encoding or Random Offset Annealed Fourier Encoding introduce stochasticity, modulation, or local affine transformations to address specific limitations such as spectral bias or domain shift [S1].
+ 
+ ## How it works
+ **Inputs and Outputs:**
+-*   **Input:** A query point coordinate vector $x \in \mathbb{R}^3$ and a camera viewing direction vector $d \in \mathbb{R}^3$.
+-*   **Output:** A high-dimensional encoded vector resulting from the application of the encoding function $\gamma(\cdot)$ to $x$ and $d$, which is then concatenated and passed to the MLP.
++The method takes a query point coordinate vector $\mathbf{x} \in \mathbb{R}^3$ (position) and a camera viewing direction vector $\mathbf{d} \in \mathbb{R}^3$ as input [S1]. It outputs a high-dimensional encoded vector resulting from the application of the encoding function $\gamma(\cdot)$ to $\mathbf{x}$ and $\mathbf{d}$, which is then concatenated and passed to a fully-connected MLP [S1].
+ 
+ **Data Structures:**
+-The encoding relies on a frequency matrix $F$ and an encoding level parameter $L$.
+-*   **Frequency Matrix ($F$):** In hardware implementations (e.g., ICARUS), $F$ is stored in local memory. For $R=3$ (3-dimensional data), one memory block of size $3 \times 128$ stores the matrix [S1]. For $R=6$ (6-dimensional data, combining $x$ and $d$), two separate $3 \times 128$ memory blocks are used: the first stores the first half of the matrix, and the second stores the second half [S1].
+-*   **Encoding Levels ($L$):** The number of frequency bands. In the standard NeRF configuration, $L=10$ for position $x$ and $L=4$ for direction $d$ [S2].
++The encoding relies on an encoding level parameter $L$, representing the number of frequency bands [S1]. In the standard NeRF configuration, $L=10$ for position $\mathbf{x}$ and $L=4$ for direction $\mathbf{d}$ [S1].
+ 
+ **Formulas:**
+-The encoding function $\gamma: \mathbb{R} \to \mathbb{R}^{2L}$ is defined as [S2]:
++The encoding function $\gamma: \mathbb{R} \to \mathbb{R}^{2L}$ is defined as [S1]:
+ $$
+-\gamma(p) = (\sin(2^0\pi p), \cos(2^0\pi p), \dots, \sin(2^{L-1}\pi p), \cos(2^{L-1}\pi p))
++\gamma(p) = (\sin(2^0 \pi p), \cos(2^0 \pi p), \dots, \sin(2^{L-1} \pi p), \cos(2^{L-1} \pi p))
+ $$
+-The final encoded feature vector is computed by applying $\gamma$ separately to each component of $x$ and $d$, and then feeding the result into a regular MLP $F_{\Theta'}$ [S2]:
++The final encoded feature vector is computed by applying $\gamma$ separately to each of the three components of $\mathbf{x}$ and $\mathbf{d}$, and then feeding the result into a regular MLP $F_{\Theta'}$ [S1]:
+ $$
+ F_\Theta = F_{\Theta'} \circ \gamma
+ $$
+-where $\circ$ denotes the composition of the mapping $\gamma$ with the MLP $F_{\Theta'}$ [S2].
++where $\circ$ denotes the composition of the mapping $\gamma$ with the MLP $F_{\Theta'}$ [S1]. The MLP architecture typically consists of two branches: a density branch that processes the encoded position features to predict volume density $\sigma$, and a color branch that processes the encoded direction features concatenated with intermediate features from the density branch to predict RGB color $\mathbf{c}$ [S1].
+ 
+ **Parameters:**
+-*   $L_x = 10$: Encoding levels for position [S2].
+-*   $L_d = 4$: Encoding levels for direction [S2].
+-*   $R$: Dimensionality of the input data. Supports $R=3$ (position only) and $R=6$ (position + direction) [S1].
++*   $L_x = 10$: Encoding levels for position [S1].
++*   $L_d = 4$: Encoding levels for direction [S1].
+ 
+ **Numbered Steps:**
+-1.  **Initialize Frequency Matrix:** Store the frequency matrix $F$ in local memory. The matrix is constant for all sample points in a particular rendering task [S1].
+-2.  **Stream Inputs:** Stream the position $x$ and direction $d$ into the matrix multiplication unit [S1].
+-3.  **Matrix Multiplication:** Multiply the streamed positions/directions with the frequency matrix $F$ in a pipelined manner to generate an intermediate vector $z$ [S1].
+-    *   For $R=3$: Access one memory block. Process through the first 3 stages of the cascaded MAC unit (3 multiplications and 2 additions in serial) [S1].
+-    *   For $R=6$: Access two memory blocks simultaneously. Process through all 6 stages of the cascaded MAC unit [S1].
+-4.  **Trigonometric Transformation:** Feed the intermediate vector $z$ to a Coordinate Rotation Digital Computer (CORDIC) array to generate the final transformed features $\sin(z)$ and $\cos(z)$ [S1].
+-5.  **MLP Forward Pass:** Pass the concatenated sine and cosine features into the neural network $F_{\Theta'}$ to predict density and color [S2].
++1.  Compute the frequency scaling factors $2^l \pi$ for $l = 0, \dots, L-1$.
++2.  For each coordinate component $p \in \{x_1, x_2, x_3, d_1, d_2, d_3\}$, evaluate $\sin(2^l \pi p)$ and $\cos(2^l \pi p)$ for all $l$.
++3.  Concatenate the resulting $2L$ values for each component to form the encoded vectors for position and direction.
++4.  Concatenate the position and direction encoded vectors and pass them to the MLP branches (density for position, color for direction) [S1].
+ 
+ **Pseudocode:**
+@@ -57,5 +50,4 @@
+     """
+     encoded = []
+-    # Handle both scalar and vector inputs
+     if isinstance(p, (int, float)):
+         p = [p]
+@@ -87,38 +79,24 @@
+ 
+ **Edge Cases and Pitfalls:**
+-*   **Precision:** The use of high-frequency sine/cosine functions can lead to numerical instability if the input coordinates are not normalized or if the frequency bands $2^l$ become excessively large, potentially causing overflow or loss of precision in floating-point representations [S2].
+-*   **Boundary Conditions:** The encoding is periodic. If the scene coordinates are not bounded or normalized to a specific range (e.g., $[-1, 1]$ or $[0, 1]$), the high-frequency components may alias or fail to represent the spatial structure correctly [S2].
+-*   **Spectral Bias:** While PE addresses spectral bias by introducing high frequencies, the MLP still tends to learn low-frequency functions first. The choice of $L$ must balance the ability to represent high-frequency details against the network's capacity to learn them [S2].
++*   **Spectral Bias:** Deep networks tend to focus on learning low-frequency functions while losing high-frequency information; PE explicitly injects high frequencies to mitigate this [S1].
++*   **Precision:** High-frequency components $2^{L-1}$ can cause numerical instability or overflow if input coordinates are not normalized, requiring careful scaling or clamping [G].
++*   **Degenerate Input:** Zero or near-zero direction vectors should be normalized before encoding to avoid undefined behavior in downstream ray sampling [G].
+ 
+ ## Subtopics
+ 
+-### Frequency-Modulated Position Encoding
+-Modulates the frequency of the encoding based on the input position, allowing for adaptive frequency resolution. Choose when the scene has varying levels of detail across different regions. [Frequency-Modulated Position Encoding](15897-frequency-modulated-position-encoding.md)
+-
+-### Neural Light Fields with Ray-Space Embedding
+-Embeds ray-space coordinates directly, often used for light field rendering. Choose when dealing with light field data structures rather than volumetric radiance fields. [Neural Light Fields with Ray-Space Embedding](17616-neural-light-fields-with-ray-space-embedding.md)
+-
+-### Ray-Space Embedding Network with Local Affine Transformation
+-Uses local affine transformations to adapt the encoding to local geometric structures. Choose when global periodic encodings fail to capture local geometric variations. [Ray-Space Embedding Network with Local Affine Transformation](18128-ray-space-embedding-network-with-local-affine-transformation.md)
+-
+-### Skeleton-Relative Encoding
+-Encodes positions relative to a skeleton structure, useful for articulated objects. Choose when rendering characters or articulated models. [Skeleton-Relative Encoding](18148-skeleton-relative-encoding.md)
+-
+-### Random Offset Annealed Fourier Encoding
+-Uses random Fourier features with annealing to improve optimization dynamics. Choose when standard sine/cosine encoding leads to optimization difficulties or local minima. [Random Offset Annealed Fourier Encoding](18686-random-offset-annealed-fourier-encoding.md)
++### [Positional Encoding Unit (PEU)](21626-positional-encoding-unit-peu.md)
++A specialized hardware accelerator designed to compute feature mapping functions for neural radiance fields by performing inner product operations with vector sizes $R=3$ and $R=6$. It differs from software-based implementations by offloading the matrix multiplication and trigonometric evaluation to dedicated logic, supporting isotropic and anisotropic random Fourier features. Choose when hardware acceleration is required for NeRF training and rendering. [Positional Encoding Unit (PEU)](21626-positional-encoding-unit-peu.md)
+ 
+ ## Operating characteristics
+-*   **Time Complexity:** The encoding step is $O(L \cdot D)$, where $L$ is the number of frequency bands and $D$ is the dimensionality of the input (3 for position, 3 for direction). This is negligible compared to the MLP evaluation, which is typically $O(N_{layers} \cdot W^2)$ where $W$ is the hidden width [S2].
+-*   **Memory Complexity:** The memory footprint for the encoding parameters is minimal, as the frequencies are fixed constants. However, the intermediate vector size is $2 \cdot L \cdot D$, which for standard NeRF ($L_x=10, L_d=4, D=3$) results in a vector of size $72$ [S2].
+-*   **Measured Performance:** In standard NeRF, this encoding allows the network to approximate high-frequency functions effectively, leading to high-quality renderings of complex scenes [S2]. Hardware implementations like ICARUS show that using a cascaded MAC unit and CORDIC array can efficiently compute these operations, with $R=6$ mode utilizing two memory blocks and 6 MAC stages [S1].
+-*   **Strengths:** Simple to implement, differentiable, and effective at mitigating spectral bias in MLPs [S2].
+-*   **Limitations:** Fixed frequency bands may not be optimal for all scenes; high frequencies can be difficult to learn without careful initialization or optimization strategies [S2].
+-*   **When to Use:** Standard NeRF training and rendering where high-frequency details are present and the scene is bounded [S2].
+-*   **When Not to Use:** Scenes with unbounded coordinates or where adaptive frequency resolution is required (consider Frequency-Modulated Position Encoding) [S1, S2].
++*   **Time Complexity:** The encoding step is $O(L \cdot D)$, where $L$ is the number of frequency bands and $D$ is the dimensionality of the input (3 for position, 3 for direction) [G]. This is negligible compared to the MLP evaluation.
++*   **Memory Complexity:** The memory footprint for the encoding parameters is minimal, as the frequencies are fixed constants. The output vector size is $2 \cdot L \cdot D$, which for standard NeRF ($L_x=10, L_d=4, D=3$) results in a vector of size 72 [G].
++*   **Strengths:** Simple to implement, fully differentiable, and effective at mitigating spectral bias in MLPs by expanding the frequency spectrum [S1].
++*   **Limitations:** Fixed frequency bands may not be optimal for all scenes; high frequencies can be difficult to optimize without careful initialization or optimization strategies [S1].
++*   **When to Use:** Standard NeRF training and rendering where high-frequency spatial details must be preserved [S1].
++*   **When Not to Use:** Not given in the sources.
+ 
+ ## Background
+-Position Encoding was introduced in the seminal NeRF paper by Mildenhall et al. (2020) to address the spectral bias of MLPs, which tend to learn low-frequency functions and lose high-frequency spatial information [S2]. The technique maps low-frequency coordinates to a higher-dimensional space using sine and cosine functions with exponentially increasing frequencies [S2]. It has since become a standard component in many neural radiance field architectures, with various extensions proposed to improve performance and efficiency [S1, S2].
++NeRF employs PE as a specialized mapping technique to transform low-frequency coordinate representations into high-frequency information, addressing the tendency of deep networks to learn low-frequency functions and lose high-frequency spatial information [S1]. The technique maps coordinates to a higher-dimensional space using multi-period sine and cosine functions with exponentially increasing frequencies [S1].
+ 
+ ## Sources
+-[S1] ICARUS: A Specialized Architecture for Neural Radiance Fields Rendering, https://doi.org/10.48550/arxiv.2203.01414, fetched 2026-10-26
+-[S2] Neural Radiance Fields-Based 3D Reconstruction of Power Transmission Lines Using Progressive Motion Sequence Images., https://doi.org/10.3390/s23239537, fetched 2026-10-26+[S1] Neural Radiance Fields-Based 3D Reconstruction of Power Transmission Lines Using Progressive Motion Sequence Images., https://doi.org/10.3390/s23239537, fetched 2026-10-26

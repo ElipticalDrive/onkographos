@@ -1,0 +1,82 @@
+# Depth and Gaussian Decoding
+
+Also called: Depth-guided Gaussian Decoding, Inverse-depth Gaussian Decoding
+
+## Overview
+Depth and Gaussian decoding is a method for reconstructing explicit 3D Gaussian primitives from encoded feature streams by predicting depth from the features and mapping pixel-aligned predictions to 3D space [S1, unofficial]. It solves the problem of generating 3D geometry without relying on encoder-side depth maps or original context images, instead inferring geometry directly from the latent feature representation [S1, unofficial]. It differs from standard Gaussian Splatting by decoupling the Gaussian center prediction from fixed ray intersections, using a learned depth head to establish the third dimension [S1, unofficial].
+
+## How it works
+**Inputs and Outputs:**
+*   **Inputs:** Reconstructed feature maps $\hat{F}_{c,i}$ for each context view $i \in \{1, \dots, N\}$; camera intrinsics $K_i$ and extrinsics $T_i$; near and far depth bounds $n_i$ and $f_i$ for each view.
+*   **Outputs:** A set of 3D Gaussian primitives $\hat{G}$.
+
+**Data Structures:**
+*   **Feature Map:** $\hat{F}_{c,i} \in \mathbb{R}^{C \times H \times W}$ (or similar layout depending on implementation).
+*   **Depth Map:** $S_i \in [0, 1]^{H \times W}$, representing normalized inverse depth.
+*   **Gaussian Attributes:** $\hat{\Theta}_i \in \mathbb{R}^{A \times H \times W}$, where $A$ is the number of attributes (e.g., opacity, scale, rotation, color).
+
+**Parameters:**
+*   $n_i, f_i$: Near and far depth bounds for context view $i$. These are stored in the bitstream and define the valid scene range [S1, unofficial].
+*   $\sigma$: Sigmoid activation function.
+
+**Steps:**
+1.  **Predict Normalized Inverse-Depth Map:**
+    Apply a depth head network to the reconstructed feature map $\hat{F}_{c,i}$ and pass the output through a sigmoid function to constrain values to $[0, 1]$:
+    $$ S_i = \sigma(\text{DepthHead}(\hat{F}_{c,i})) $$
+    where $S_i \in [0, 1]^{H \times W}$ [S1, unofficial].
+
+2.  **Convert to Metric Depth:**
+    Convert the normalized inverse-depth value $S_i(p)$ at pixel $p$ to metric depth $\hat{D}_i(p)$ using the near and far bounds:
+    $$ \hat{D}_i(p) = \left( f_i^{-1} + S_i(p) (n_i^{-1} - f_i^{-1}) \right)^{-1} $$
+    This parameterization ensures that $S_i(p)=0$ corresponds to the far bound $f_i$ and $S_i(p)=1$ corresponds to the near bound $n_i$, constraining decoded depth to the valid scene range [S1, unofficial].
+
+3.  **Predict Pixel-Aligned Gaussian Attributes:**
+    Apply a Gaussian head network to the post-codec refined features $F_{dec,i}$ and the decoded metric depth $\hat{D}_i$ to predict attributes:
+    $$ \hat{\Theta}_i = \text{GSHead}(F_{dec,i}, \hat{D}_i) $$
+    [S1, unofficial].
+
+4.  **Map to 3D Primitives:**
+    Use the decoded depth $\hat{D}_i$, predicted attributes $\hat{\Theta}_i$, and camera parameters $K_i, T_i$ to instantiate 3D Gaussians:
+    $$ \hat{G} = \text{Map2D}\to3D(\{\hat{D}_i, \hat{\Theta}_i, K_i, T_i\}_{i=1}^N) $$
+    The $\text{Map2D}\to3D$ function uses the depth and camera parameters to determine Gaussian centers and assigns the pixel-aligned attributes to the corresponding primitives [S1, unofficial].
+
+**Pitfalls:**
+*   **Inverse-Depth Parameterization:** The mapping $S_i(p)=0 \to f_i$ and $S_i(p)=1 \to n_i$ is critical. If the sigmoid output is not properly bounded or if the inverse calculation encounters division by zero (e.g., if $n_i$ or $f_i$ is zero), the depth will be invalid [S1, unofficial].
+*   **Precision:** The conversion involves inverse operations ($^{-1}$). Care must be taken with floating-point precision near the bounds, especially if $n_i \approx f_i$ [S1, unofficial].
+
+## Subtopics
+
+### Delta Decoder
+A decoder that transforms geometry-guided features into per-Gaussian updates using an image-space dual-branch mixer followed by per-attribute heads [S2, unofficial]. It differs from the standard depth-and-Gaussian decoding by operating iteratively to refine existing Gaussians rather than generating them from scratch [S2, unofficial]. Choose this variant when pose-free refinement or iterative optimization is required [S2, unofficial].
+
+**Steps:**
+1.  **Dual-Branch Mixer:**
+    *   **Coarse Branch:** Rearrange input from $H \times W \times C$ to $H/2 \times W/2 \times 4C$ via pixel-unshuffle (lossless space-to-depth reshaping), then apply dilated convolutions at half resolution [S2, unofficial].
+    *   **Detail Branch:** Stay at full $H \times W$ resolution and apply lightweight convolutions to preserve high-frequency residual signal [S2, unofficial].
+    *   **Fuse:** Add the outputs of the two branches into a single feature map [S2, unofficial].
+2.  **Per-Attribute Head:**
+    *   Each Gaussian samples the fused feature map at its projected mean in each context view [S2, unofficial].
+    *   Aggregate per-view samples by averaging weighted by the Gaussian's rasterizer blending weights [S2, unofficial].
+    *   Concatenate the aggregated feature with the Gaussian's current parameters and decode into the update using three parallel MLPs (one per attribute: position, opacity, color) [S2, unofficial].
+
+**Parameters:**
+*   All output layers are zero-initialized so that refinement starts exactly at $\Delta = 0$ [S2, unofficial].
+
+**Pitfalls:**
+*   **Numerical Scale:** Position, opacity, and color updates differ substantially in numerical scale. Using a single shared MLP lets the largest signal dominate others; hence, three parallel MLPs are required [S2, unofficial].
+
+## Operating characteristics
+*   **Time Complexity:** Not given in the sources.
+*   **Memory Complexity:** Not given in the sources.
+*   **Performance:** Not given in the sources.
+*   **Strengths:** Constrains decoded depth to a valid scene range using inverse-depth parameterization; does not require encoder-side depth or original context images [S1, unofficial].
+*   **Limitations:** Requires accurate camera parameters ($K_i, T_i$) and depth bounds ($n_i, f_i$) [S1, unofficial].
+*   **When to use:** When reconstructing 3D Gaussians from latent features without access to ground-truth depth maps [S1, unofficial].
+*   **When not to use:** When iterative refinement of existing Gaussians is preferred over initial generation [S2, unofficial].
+
+## Background
+Originated in CodecSplat, which introduces ultra-compact latent coding for feed-forward 3D Gaussian Splatting [S1, unofficial]. The method separates optimization into two stages: a codec-free stage for stable Gaussian generation and a codec-aware stage for rate-distortion performance [S1, unofficial]. The Delta Decoder variant was introduced in DeltaSplat for pose-free feed-forward 3D Gaussian Splatting, focusing on iterative refinement [S2, unofficial].
+
+## Sources
+[S1] CodecSplat: Ultra-Compact Latent Coding for Feed-Forward 3D Gaussian Splatting, https://doi.org/10.48550/arXiv.2605.25563, fetched 2026-10-29 (unofficial)
+[S2] DeltaSplat: Iterative Gaussian Refinement for Pose-Free Feed-Forward 3D Gaussian Splatting, https://arxiv.org/abs/2610.09853, fetched 2026-10-29 (unofficial)

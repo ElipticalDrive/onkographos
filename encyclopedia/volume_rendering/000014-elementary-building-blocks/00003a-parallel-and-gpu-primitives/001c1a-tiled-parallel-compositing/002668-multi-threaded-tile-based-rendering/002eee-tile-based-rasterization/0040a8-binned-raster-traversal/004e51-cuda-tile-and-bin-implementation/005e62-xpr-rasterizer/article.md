@@ -1,0 +1,203 @@
+# XPR Rasterizer
+
+Also called: XPR's rasterizer, static-shape rasterization
+
+## Overview
+The XPR rasterizer converts variable-length per-tile primitive lists into a fixed-size matrix $Q$ of dimensions $T \times P_{\max}$, enabling execution on accelerators that require static tensor shapes and prohibit dynamic control flow [S1, unofficial]. Unlike traditional rasterizers that rely on dynamic lists or linked structures, this method uses a sequence of static-shape modules (Replicate, Assign, Cull, Sort, Gather) to produce a dense, depth-sorted array of primitive indices for each tile, padding unused entries with a sentinel value [S1, unofficial].
+
+## How it works
+**Inputs and Outputs:**
+*   **Input:** $M$ visible primitives $p_0, \dots, p_{M-1}$ from the filter stage. Each primitive $p_i$ provides its depth $z_i$, tile-space bounding box $[x_i^{\min}, x_i^{\max}) \times [y_i^{\min}, y_i^{\max})$, and tile count $tc_i$ (the number of tiles its bounding box intersects) [S1, unofficial].
+*   **Output:** A fixed-size matrix $Q$ of size $T \times P_{\max}$, where row $t$ contains up to $P_{\max}$ depth-sorted primitive indices for tile $t$. Entries beyond the valid count $c_t$ are padded with $-1$ [S1, unofficial].
+
+**Data Structures:**
+*   **Flat Intersection Array:** A temporary array of size $I$, where $I = \sum_{i=0}^{M-1} tc_i$ is the total intersection count [S1, unofficial]. Each element corresponds to a specific tile-primitive intersection.
+*   **Matrix $Q$:** Dimensions $T \times P_{\max}$. $T$ is the number of tiles. $P_{\max}$ is the maximum number of primitives per tile [S1, unofficial].
+*   **Bounds Array:** Stores start index $b_j$ and count $c_j$ for each valid tile $j$ [S1, unofficial].
+
+**Parameters:**
+*   $P_{\max}$: Maximum primitives per tile. Typical values are 4096 or 8192 [S1, unofficial].
+*   $T$: Total number of tiles [S1, unofficial].
+*   $W'$: Tile-grid width [S1, unofficial].
+*   $T_{sentinel}$: Sentinel tile ID (denoted as $T$ in sources) indicating rejection [S1, unofficial].
+
+**Steps:**
+
+1.  **Replicate:** Compute prefix sums of the tile counts $tc_i$ to determine the start offset $s_i$ for each primitive in the flat intersection array of size $I$. For each primitive $p_i$, generate $tc_i$ entries in the flat array starting at $s_i$ [S1, unofficial].
+2.  **Assign Tile ID:** For each replicated entry with local offset $r$ within primitive $p_i$'s bounding box, compute the tile coordinates:
+    $$ w_i = x_i^{\max} - x_i^{\min} $$
+    $$ x = x_i^{\min} + (r \bmod w_i) $$
+    $$ y = y_i^{\min} + \lfloor r / w_i \rfloor $$
+    $$ t = y W' + x $$
+    Assign tile ID $t$ to the entry [S1, unofficial].
+3.  **Cull:** Apply an optional `tile_cull` function to each candidate primitive-tile pair using tile-cull data returned by the projection stage. If a candidate fails `tile_cull` or a contribution threshold, reassign its tile ID to $T_{sentinel}$. If no `tile_cull` is provided, keep all candidates [S1, unofficial].
+4.  **Sort and Identify Bounds:** Lexicographically sort the flat array by $(tile\ ID, depth)$. Rejected candidates (ID $T_{sentinel}$) move to the end. For each valid tile $t_j$, the surviving candidates form a contiguous segment. Record each segment's start $b_j$ and count $c_j$ [S1, unofficial].
+5.  **Gather:** Using $b_j$ and $c_j$, write to matrix $Q$:
+    $$ Q[j, k] = P_{sort}[b_j + k] \quad \text{for } 0 \le k < \min(c_j, P_{\max}) $$
+    where $P_{sort}$ is the sorted primitive-index array. Pad remaining entries of $Q[j, :]$ with $-1$ [S1, unofficial].
+
+**Pseudocode:**
+
+> **Unverified code.** The code below did not pass a test run against a reference implementation, or no test fits it, so it may contain errors.
+
+```python
+def xpr_rasterizer(primitives, tile_grid_width, p_max, tile_cull_func=None):
+    """
+    primitives: list of M primitives. Each primitive has:
+        - depth: float
+        - bbox: (x_min, x_max, y_min, y_max)
+        - tc: int (tile count)
+    tile_grid_width: int W'
+    p_max: int P_max
+    tile_cull_func: optional function(tile_id, primitive_data) -> bool
+    """
+    m = len(primitives)
+    
+    # Step 1: Replicate
+    # Calculate start offsets using prefix sum of tile counts
+    tile_counts = [p.tc for p in primitives]
+    start_offsets = [0] * m
+    current_offset = 0
+    for i in range(m):
+        start_offsets[i] = current_offset
+        current_offset += tile_counts[i]
+    
+    total_intersections = current_offset # I
+    flat_array = [] # Will store tuples: (tile_id, depth, primitive_index)
+    
+    for i in range(m):
+        p = primitives[i]
+        x_min, x_max, y_min, y_max = p.bbox
+        w_i = x_max - x_min
+        h_i = y_max - y_min # Not explicitly used in formula but implied by tc
+        
+        # Generate entries for each tile intersection
+        # Note: The source describes iterating local offset r. 
+        # We assume the order of r corresponds to the order of tiles 
+        # generated by the bounding box traversal.
+        for r in range(tile_counts[i]):
+            x = x_min + (r % w_i)
+            y = y_min + (r // w_i)
+            tile_id = y * tile_grid_width + x
+            flat_array.append((tile_id, p.depth, i))
+
+    # Step 3: Cull (Applied before sort to allow rejection)
+    # The source says Cull happens after Assign Tile ID.
+    # We filter out invalid ones by marking them with sentinel tile ID.
+    sentinel_tile_id = -1 # Assuming -1 or a specific large value not in valid range
+    # Note: Source uses T as sentinel. We use a distinct value.
+    
+    culled_flat_array = []
+    for tile_id, depth, p_idx in flat_array:
+        # Check cull condition
+        # We need primitive data to check cull. 
+        # In a real implementation, we'd look up primitive data by p_idx.
+        # Here we assume tile_cull_func can access necessary data or is passed context.
+        # For this pseudocode, we simulate the check.
+        is_valid = True
+        if tile_cull_func is not None:
+            # Placeholder for actual cull logic which depends on primitive data
+            # is_valid = tile_cull_func(tile_id, primitives[p_idx])
+            pass 
+        
+        if is_valid:
+            culled_flat_array.append((tile_id, depth, p_idx))
+        else:
+            # Reassign tile ID to sentinel
+            culled_flat_array.append((sentinel_tile_id, depth, p_idx))
+
+    # Step 4: Sort and Identify Bounds
+    # Sort by (tile_id, depth). Sentinels (negative) will sort to the end if 
+    # we treat them as smaller, but source says "rejected candidates move to the end".
+    # We need to ensure sentinels are at the end.
+    # Let's use a custom sort key: (0 if tile_id != sentinel else 1, tile_id, depth)
+    # But source says lexicographically by (tile_id, depth). 
+    # If sentinel is a specific value T, and valid IDs are 0..T-1, 
+    # we must ensure T is larger than any valid ID or handled separately.
+    # Source: "rejected candidates (ID T) move to the end".
+    
+    # Let's assume sentinel_tile_id is a value that sorts after all valid IDs.
+    # If valid IDs are 0..N-1, sentinel could be N or -1 with special handling.
+    # The source implies T is a specific ID. Let's use a large number for sentinel.
+    MAX_TILES = 1000000 # Example
+    if sentinel_tile_id < 0:
+        sentinel_tile_id = MAX_TILES
+
+    # Sort
+    culled_flat_array.sort(key=lambda x: (x[0], x[1]))
+    
+    # Identify bounds for valid tiles
+    # Valid tiles are those with tile_id != sentinel_tile_id
+    # They form contiguous segments.
+    
+    bounds = {} # tile_id -> (start_index, count)
+    
+    if not culled_flat_array:
+        return [[-1] * p_max for _ in range(MAX_TILES)] # Or appropriate T
+
+    # Find segments
+    current_tile = culled_flat_array[0][0]
+    segment_start = 0
+    
+    # We need to know the total number of tiles T to initialize Q?
+    # Source says Q is T x P_max. T is usually known from image/tile grid.
+    # Let's assume T is derived from max valid tile ID + 1 or passed.
+    # For this pseudocode, we collect valid tiles first.
+    
+    valid_tiles = set()
+    for tile_id, _, _ in culled_flat_array:
+        if tile_id != sentinel_tile_id:
+            valid_tiles.add(tile_id)
+            
+    if not valid_tiles:
+        return [[-1] * p_max for _ in range(len(valid_tiles) + 1)]
+
+    max_tile_id = max(valid_tiles)
+    T = max_tile_id + 1
+    
+    Q = [[-1] * p_max for _ in range(T)]
+    
+    # Iterate through sorted array to fill Q
+    # We need to group by tile_id
+    
+    i = 0
+    n = len(culled_flat_array)
+    
+    while i < n:
+        tile_id = culled_flat_array[i][0]
+        
+        if tile_id == sentinel_tile_id:
+            break # Rest are rejected
+            
+        # Find end of this tile's segment
+        j = i
+        while j < n and culled_flat_array[j][0] == tile_id:
+            j += 1
+            
+        # Segment is from i to j-1
+        count = j - i
+        start_idx = i
+        
+        # Gather into Q
+        for k in range(min(count, p_max)):
+            p_idx = culled_flat_array[start_idx + k][2]
+            Q[tile_id][k] = p_idx
+            
+        i = j
+        
+    return Q
+```
+
+## Operating characteristics
+*   **Time Complexity:** Dominated by the sorting step in "Sort and Identify Bounds", which is $O(I \log I)$ where $I$ is the total intersection count [S1, unofficial].
+*   **Memory Complexity:** Requires $O(I)$ for the flat intersection array and $O(T \times P_{\max})$ for the output matrix $Q$ [S1, unofficial].
+*   **Strengths:** Eliminates dynamic memory allocation and dynamic control flow, making it suitable for accelerators like TPUs that compile to static tensor shapes [S1, unofficial].
+*   **Limitations:** Requires setting $P_{\max}$ statically. If a tile has more than $P_{\max}$ primitives, excess primitives are discarded (padded with -1) [S1, unofficial]. Performance depends on the choice of $P_{\max}$; larger values increase memory usage but reduce the risk of clipping [S1, unofficial].
+*   **When to use:** When rendering on hardware with limited dynamic control flow support or when a static-shape pipeline is required [S1, unofficial].
+*   **When not to use:** When memory is extremely constrained and $P_{\max}$ must be small, leading to significant primitive clipping, or when the scene has highly variable and unpredictable primitive densities that cannot be bounded by a reasonable $P_{\max}$ [S1, unofficial].
+
+## Background
+The XPR rasterizer was introduced in the XPR renderer, an extensible cross-platform point-based differentiable renderer [S1, unofficial]. It was designed to address the limitations of dynamic data structures on modern accelerators, specifically targeting compatibility with TPUs and other static-shape hardware [S1, unofficial]. The method is part of a broader pipeline that includes filtering, projection, and shader stages, all expressed as static-shape operations [S1, unofficial].
+
+## Sources
+[S1] XPR: An Extensible Cross-Platform Point-Based Differentiable Renderer, https://doi.org/10.48550/arxiv.2606.11529, fetched 2026-10-26 (unofficial)

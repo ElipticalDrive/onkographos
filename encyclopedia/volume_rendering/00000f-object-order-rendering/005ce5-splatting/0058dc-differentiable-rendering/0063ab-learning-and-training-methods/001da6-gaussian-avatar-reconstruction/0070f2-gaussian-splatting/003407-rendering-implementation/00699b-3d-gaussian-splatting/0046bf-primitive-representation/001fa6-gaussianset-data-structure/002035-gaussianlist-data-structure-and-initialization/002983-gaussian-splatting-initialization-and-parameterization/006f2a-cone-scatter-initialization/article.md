@@ -1,0 +1,196 @@
+# Cone Scatter Initialization
+
+
+## Overview
+Cone Scatter Initialization (CSI) is a technique for 3D Gaussian Splatting that enriches sparse point clouds (typically from COLMAP) by scattering new points within a predefined viewing frustum, specifically to address depth coverage issues in low-light or nighttime scenes where COLMAP fails to produce high-quality distant points [S1]. Unlike standard initialization which relies solely on existing sparse matches, CSI ensures Gaussians form at correct, deeper depths, preventing the generation of structures at incorrect depths and lack of fine details [S1].
+
+## How it works
+**Inputs:**
+- A set of training camera poses $C = \{c_i\}$, where each $c_i$ has an origin $p^c_i$ and orientation $\vec{n}^c_i$ (viewing direction).
+- An initial sparse point cloud $S$ obtained from COLMAP (xyz, rgb).
+- A scaling factor $\lambda_F$ for the far plane.
+
+**Outputs:**
+- An enriched point cloud $S'$ used to initialize the 3D Gaussians.
+
+**Data Structures:**
+- Camera parameters: $p^c_i \in \mathbb{R}^3$, $\vec{n}^c_i \in \mathbb{R}^3$ (normalized).
+- Point cloud: $S = \{s_j\}$, where $s_j \in \mathbb{R}^3$.
+- Frustum definition: $F = \{p, \vec{n}, \Theta, z_n, z_f\}$.
+- Scattered points: $S_F = \{s'_k\}$.
+
+**Steps:**
+
+1.  **Estimate Global Viewing Direction and Field of View:**
+    Calculate the average viewing direction $\vec{n}$ and the maximum field of view $\Theta$ from all training cameras [S1]:
+    $$ \vec{n} = \text{avg}\{\vec{n}^c_i\} $$
+    $$ \Theta = \max\{\theta^c_i\} $$
+    where $\theta^c_i$ is the field of view angle of camera $c_i$.
+
+2.  **Calculate Frustum Center and Radius:**
+    Determine the center $p^c$ of the camera cluster and the radius $r$ required to encompass all camera origins in a plane perpendicular to $\vec{n}$ [S1]:
+    $$ p^c = \text{avg}\{p^c_i\} $$
+    $$ r = \max\{\|p^c_i - p^c\|_2\} $$
+
+3.  **Define Frustum Origin:**
+    Calculate the origin $p$ of the viewing frustum by moving from the center $p^c$ along the negative viewing direction by a distance determined by the radius and field of view [S1]:
+    $$ p = p^c - r \tan(\Theta/2) \cdot \frac{\vec{n}}{\|\vec{n}\|_2} $$
+
+4.  **Determine Near and Far Planes:**
+    Calculate the near plane distance $z_n$ and far plane distance $z_f$ based on the distances from the frustum origin $p$ to the points in the initial COLMAP cloud $S$ [S1]:
+    $$ z_n = \min\{\|s_i - p\|_2\} $$
+    $$ z_f = \lambda_F \cdot \max\{\|s_i - p\|_2\} $$
+    The parameter $\lambda_F$ is a scaling factor for the far plane.
+
+5.  **Scatter Points:**
+    Randomly scatter points within the viewing frustum $F = \{p, \vec{n}, \Theta, z_n, z_f\}$ to create a set of new points $S_F$. The exact distribution method (e.g., uniform within the cone volume) is not explicitly detailed in the source beyond "randomly scatter" [S1].
+
+6.  **Initialize Gaussians:**
+    Combine the original COLMAP points and the scattered points to form the enriched set $S'$ [S1]:
+    $$ S' = S \cup S_F $$
+    Use $S'$ to initialize the positions of the 3D Gaussians.
+
+**Parameters:**
+- $\lambda_F$: Scaling factor for the far plane distance. Typical value: 10 [S1].
+
+**Edge Cases and Pitfalls:**
+- If COLMAP produces no points ($S$ is empty), the calculation of $z_n$ and $z_f$ fails. The method assumes $S$ is non-empty but potentially sparse [S1].
+- Without CSI, methods tend to generate Gaussians at incorrect depths and lack fine details, particularly in low-light/nighttime scenes [S1].
+
+**Pseudocode:**
+
+> **Unverified code.** The code below did not pass a test run against a reference implementation, or no test fits it, so it may contain errors.
+
+```python
+import numpy as np
+
+def cone_scatter_initialization(cameras, colmap_points, lambda_F=10.0, num_scattered_points=10000):
+    """
+    Performs Cone Scatter Initialization.
+    
+    Args:
+        cameras: List of dicts with keys 'origin' (3,) and 'view_dir' (3,).
+        colmap_points: Array of shape (N, 3) representing initial COLMAP points.
+        lambda_F: Scaling factor for far plane.
+        num_scattered_points: Number of points to scatter.
+        
+    Returns:
+        enriched_points: Array of shape (N + M, 3).
+    """
+    # Step 1: Estimate viewing direction and FOV
+    # Note: Source uses avg of view directions. Assuming view_dir is normalized.
+    view_dirs = np.array([c['view_dir'] for c in cameras])
+    n_vec = np.mean(view_dirs, axis=0)
+    n_vec = n_vec / np.linalg.norm(n_vec) # Ensure normalized
+    
+    # FOV extraction depends on camera intrinsics. 
+    # Source says max(theta^c_i). Assuming cameras provide 'fov' attribute.
+    fovs = np.array([c['fov'] for c in cameras])
+    theta_max = np.max(fovs)
+    
+    # Step 2: Calculate center and radius
+    origins = np.array([c['origin'] for c in cameras])
+    p_c = np.mean(origins, axis=0)
+    r = np.max(np.linalg.norm(origins - p_c, axis=1))
+    
+    # Step 3: Define frustum origin
+    # p = p_c - r * tan(theta/2) * (n / ||n||)
+    p_frustum = p_c - r * np.tan(theta_max / 2.0) * n_vec
+    
+    # Step 4: Determine near and far planes
+    # Distances from frustum origin to COLMAP points
+    dists = np.linalg.norm(colmap_points - p_frustum, axis=1)
+    
+    z_n = np.min(dists)
+    z_f = lambda_F * np.max(dists)
+    
+    # Step 5: Scatter points within frustum
+    # Frustum defined by origin p_frustum, direction n_vec, angle theta_max, 
+    # and depth range [z_n, z_f].
+    # Uniform scattering in a cone is complex. A common approximation is:
+    # 1. Sample depth z uniformly in [z_n, z_f].
+    # 2. Sample radius rho uniformly in [0, z * tan(theta_max/2)].
+    # 3. Sample angle phi uniformly in [0, 2*pi].
+    # 4. Convert to Cartesian relative to cone axis, then rotate to align with n_vec.
+    
+    scattered_points = []
+    for _ in range(num_scattered_points):
+        z = np.random.uniform(z_n, z_f)
+        max_radius_at_z = z * np.tan(theta_max / 2.0)
+        rho = np.random.uniform(0, max_radius_at_z)
+        phi = np.random.uniform(0, 2 * np.pi)
+        
+        # Local coordinates (z-axis along cone axis)
+        x_local = rho * np.cos(phi)
+        y_local = rho * np.sin(phi)
+        z_local = z
+        
+        local_point = np.array([x_local, y_local, z_local])
+        
+        # Rotate local point to world coordinates
+        # We need a rotation matrix that maps (0,0,1) to n_vec.
+        # This is a standard basis alignment.
+        rot_matrix = _rotation_matrix_align(np.array([0, 0, 1]), n_vec)
+        world_point = rot_matrix @ local_point + p_frustum
+        scattered_points.append(world_point)
+        
+    scattered_points = np.array(scattered_points)
+    
+    # Step 6: Combine
+    enriched_points = np.vstack([colmap_points, scattered_points])
+    
+    return enriched_points
+
+def _rotation_matrix_align(v1, v2):
+    """
+    Returns a rotation matrix that rotates vector v1 to align with v2.
+    """
+    v1 = v1 / np.linalg.norm(v1)
+    v2 = v2 / np.linalg.norm(v2)
+    
+    # Cross product gives axis of rotation
+    axis = np.cross(v1, v2)
+    axis_norm = np.linalg.norm(axis)
+    
+    if axis_norm < 1e-8:
+        # Vectors are parallel
+        if np.dot(v1, v2) > 0:
+            return np.eye(3)
+        else:
+            # Vectors are opposite, rotate 180 degrees around any perpendicular axis
+            # Find a perpendicular vector
+            if abs(v1[0]) < 0.9:
+                perp = np.array([1, 0, 0])
+            else:
+                perp = np.array([0, 1, 0])
+            axis = np.cross(v1, perp)
+            axis = axis / np.linalg.norm(axis)
+            angle = np.pi
+    else:
+        axis = axis / axis_norm
+        angle = np.arccos(np.clip(np.dot(v1, v2), -1.0, 1.0))
+        
+    # Rodrigues' rotation formula
+    K = np.array([
+        [0, -axis[2], axis[1]],
+        [axis[2], 0, -axis[0]],
+        [-axis[1], axis[0], 0]
+    ])
+    R = np.eye(3) + np.sin(angle) * K + (1 - np.cos(angle)) * (K @ K)
+    
+    return R
+```
+
+## Operating characteristics
+- **Time Complexity:** The calculation of frustum parameters is $O(N_c + N_p)$ where $N_c$ is the number of cameras and $N_p$ is the number of COLMAP points. Scattering points is $O(N_s)$ where $N_s$ is the number of scattered points.
+- **Memory Complexity:** $O(N_p + N_s)$ to store the enriched point cloud.
+- **Strengths:** Specifically addresses the issue of missing distant points in nighttime/low-light scenes where COLMAP fails [S1]. Extends depth coverage, enabling more accurate geometric reconstruction and fine detail representation [S1].
+- **Limitations:** Relies on the assumption that a viewing frustum can be reasonably estimated from available cameras. If COLMAP points are extremely sparse or biased, the frustum definition might be suboptimal.
+- **When to use:** When initializing 3D Gaussian Splatting for nighttime or low-light scenes where COLMAP sparse reconstruction is insufficient for distant areas [S1].
+- **When not to use:** For well-lit scenes with high-quality COLMAP reconstructions where standard initialization suffices.
+
+## Background
+Cone Scatter Initialization was proposed in the context of the LE3D pipeline for HDR view synthesis in low-light environments [S1]. It was introduced to overcome the inadequacy of COLMAP in capturing distant scenes during nighttime, which leads to incomplete structure recovery in 3D Gaussian Splatting [S1]. The method is part of a broader set of improvements including a Color MLP and regularization terms [S1].
+
+## Sources
+[S1] Lighting Every Darkness with 3DGS: Fast Training and Real-Time Rendering for HDR View Synthesis, https://doi.org/10.52202/079017-2549, fetched 2026-10-26

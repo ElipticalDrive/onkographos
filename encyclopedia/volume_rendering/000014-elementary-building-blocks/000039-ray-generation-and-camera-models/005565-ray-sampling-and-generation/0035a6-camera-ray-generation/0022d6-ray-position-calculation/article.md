@@ -1,0 +1,95 @@
+# Ray Position Calculation
+
+Also called: Depth to 3D Points Conversion (Ray-based), Query Point Sampling, Ray-based Point Reconstruction, Rendered Point Cloud Reconstruction
+
+## Overview
+Ray Position Calculation computes the 3D spatial coordinates of sampling points (query points) along camera rays within specified near and far depth bounds [S1, unofficial]. It solves the problem of discretizing a continuous ray into a finite set of 3D locations for volume rendering or neural radiance field evaluation [S2, unofficial][S4, unofficial]. It differs from [Camera Matrix Ray Generation](7456-camera-ray-generation.md) by taking generated rays and sampling specific positions along them rather than producing the ray vectors themselves [S1, unofficial]. It differs from [World Space Position Reconstruction](10694-world-space-position-reconstruction.md) by generating positions along a parametric ray direction rather than reconstructing a single point from depth buffers [S2, unofficial].
+
+## How it works
+**Inputs:**
+- `ray_origins`: `torch.Tensor` of shape $(W, H, 3)$, containing the 3D origin for each pixel's ray [S1, unofficial].
+- `ray_directions`: `torch.Tensor` of shape $(W, H, 3)$, containing the normalized direction vector for each pixel's ray [S1, unofficial].
+- `near_thresh`: `float`, the nearest depth coordinate of interest [S1, unofficial].
+- `far_thresh`: `float`, the farthest depth coordinate of interest [S1, unofficial].
+- `num_samples`: `int`, the number of samples drawn along each ray [S1, unofficial].
+- `randomize`: `bool`, default `True`. If `True`, adds random noise to depth values [S1, unofficial].
+
+**Outputs:**
+- `query_points`: `torch.Tensor` of shape $(W, H, num\_samples, 3)$, containing the 3D coordinates of the sampling points [S1, unofficial].
+
+**Data Structures:**
+- `depth_values`: 1D tensor of shape $(num\_samples)$ containing the sampled distances along the ray [S1, unofficial].
+
+**Steps:**
+1. Generate a linearly spaced array of distances between `near_thresh` and `far_thresh` with `num_samples` elements, denoted as $d$ [S1, unofficial].
+2. If `randomize` is `True`, add uniform noise to each $d_i$ to jitter the samples [S1, unofficial]. [G] The noise is typically sampled from $U(0, \frac{far\_thresh - near\_thresh}{num\_samples})$.
+3. Compute the query points using the ray equation:
+   $$ Q_{w,h,s} = O_{w,h} + d_s \cdot D_{w,h} $$
+   Where:
+   - $Q_{w,h,s}$ is the query point at pixel $(w,h)$ and sample index $s$ [S1, unofficial][S4, unofficial].
+   - $O_{w,h}$ is the ray origin at pixel $(w,h)$ [S1, unofficial].
+   - $D_{w,h}$ is the ray direction at pixel $(w,h)$ [S1, unofficial].
+   - $d_s$ is the distance value for sample $s$ [S1, unofficial].
+
+**Pseudocode:**
+> **Unverified code.** The code below did not pass a test run against a reference implementation, or no test fits it, so it may contain errors.
+
+```python
+import torch
+
+def ray_position_calculation(ray_origins: torch.Tensor, ray_directions: torch.Tensor, near_thresh: float, far_thresh: float, num_samples: int, randomize: bool = True) -> torch.Tensor:
+    """
+    Computes 3D query points along rays within near and far bounds.
+    """
+    # Step 1: Create linearly spaced depth values
+    depth_values = torch.linspace(near_thresh, far_thresh, num_samples, device=ray_origins.device)
+
+    # Step 2: Optional jittering
+    if randomize:
+        # Add uniform noise to depth values [S1, unofficial]
+        step_size = (far_thresh - near_thresh) / num_samples
+        noise = torch.rand_like(depth_values) * step_size
+        depth_values = depth_values + noise
+
+    # Step 3: Expand dimensions for broadcasting
+    # ray_origins: (W, H, 1, 3)
+    # ray_directions: (W, H, 1, 3)
+    # depth_values: (1, 1, num_samples, 1)
+    ray_origins_exp = ray_origins.unsqueeze(2)
+    ray_directions_exp = ray_directions.unsqueeze(2)
+    depth_values_exp = depth_values.unsqueeze(0).unsqueeze(0).unsqueeze(3)
+
+    # Step 4: Compute query points: Q = O + d * D
+    query_points = ray_origins_exp + ray_directions_exp * depth_values_exp
+
+    return query_points
+```
+
+**Edge Cases and Pitfalls:**
+- **Precision:** When `num_samples` is very large, `depth_values` may suffer from floating-point precision issues if `near_thresh` and `far_thresh` are large [G]. Ensure `near_thresh` and `far_thresh` are consistent with the coordinate system scale.
+- **Zero Direction:** If `ray_directions` contains zero vectors, the result will be invalid [G]. Ray directions should be normalized before this step.
+- **Near/Far Order:** If `near_thresh > far_thresh`, `torch.linspace` will produce decreasing values, which is mathematically valid but semantically incorrect for ray marching [G]. Validate `near_thresh < far_thresh`.
+
+## Subtopics
+
+### [World Space Position Reconstruction](10694-world-space-position-reconstruction.md)
+Reconstructs 3D world-space positions from 2D screen-space UV coordinates and depth values. It differs from direct ray generation by first establishing the precise 3D location of the current fragment in the world, which serves as the origin for subsequent raymarching steps. Choose this when working with post-processing raymarching or deferred rendering pipelines where depth buffers are available, rather than parametric camera rays.
+
+## Operating characteristics
+- **Time Complexity:** Not given in the sources. [G] The operation scales linearly with $W \cdot H \cdot N$.
+- **Memory Complexity:** Not given in the sources. [G] The output tensor requires $O(W \cdot H \cdot N \cdot 3)$ memory.
+- **Measured Performance:** Not given in the sources.
+- **Scaling:** Not given in the sources.
+- **Strengths:** Simple, differentiable, and easily vectorized. Supports jittering for anti-aliasing [S1, unofficial].
+- **Limitations:** Does not handle ray-object intersections or adaptive sampling. It assumes a uniform or linear spacing along the ray unless modified.
+- **When to use:** Standard volume rendering and NeRF training requiring fixed-step ray marching [S1, unofficial].
+- **When not to use:** When adaptive sampling based on scene complexity is required, or when ray-object intersection is needed before sampling.
+
+## Background
+This method is a fundamental building block in neural radiance fields (NeRF) and volume rendering [S1, unofficial]. The specific implementation details, including the use of `torch.linspace` and jittering, are commonly found in PyTorch-based NeRF implementations [S1, unofficial]. The concept of sampling along rays is central to classical volume rendering, but the explicit tensor-based calculation for differentiable rendering is a hallmark of modern neural rendering pipelines [G].
+
+## Sources
+[S1] rigved-sanku/NeRF-Implementation-for-Efficient-3D-Scene-Reconstruction, https://github.com/rigved-sanku/NeRF-Implementation-for-Efficient-3D-Scene-Reconstruction, fetched 2026-10-27 (unofficial)
+[S2] hopexn/VolumeRenderingParallel, https://github.com/hopexn/VolumeRenderingParallel, fetched 2026-10-27 (unofficial)
+[S3] bennyguo/instant-nsr-pl, https://github.com/bennyguo/instant-nsr-pl, fetched 2026-10-27 (unofficial)
+[S4] GitHub - moonseokha/StreamOcc: StreamOcc: Streaming Dense Voxel ..., https://github.com/moonseokha/streamOcc, fetched 2026-10-30 (unofficial)

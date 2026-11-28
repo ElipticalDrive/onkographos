@@ -1,0 +1,423 @@
+--- v005.md
++++ v006.md
+@@ -1,150 +1,301 @@
+ # Fast tri-cubic interpolation
+ 
+-Also called: Tri-cubic interpolation
++Also called: Tri-cubic interpolation, GPU-accelerated tri-cubic B-spline interpolation, Sigg-Hadwiger acceleration
+ 
+ ## Overview
+-Fast tri-cubic interpolation is a GPU-accelerated technique for reconstructing volume data using a cubic B-spline filter, designed to reduce the number of texture fetches required for the convolution sum [S1]. It solves the problem of high computational cost associated with evaluating the 64-term tri-cubic convolution sum by leveraging GPU linear filtering capabilities and the separability of tensor-product B-splines [S1]. It sets itself apart from standard tri-cubic interpolation by reducing the fetch count from 64 to 8 via pre-computed weight/offset lookups and multi-channel texture storage [S1][S2, S3, unofficial].
++Fast tri-cubic interpolation is a GPU-optimized reconstruction scheme that evaluates a tri-cubic B-spline filter using significantly fewer texture fetches than the theoretical 64 nearest-neighbor lookups required by the full kernel support [S1, S5]. It solves the problem of high computational cost in higher-order volume rendering by leveraging GPU linear texture filtering and separable kernel decomposition to reduce the operation to eight tri-linear texture fetches per sample [S1, S5]. It sets itself apart from standard tri-cubic interpolation by avoiding on-the-fly kernel tile multiplication and from [Trilinear Interpolation](1531-trilinear-interpolation.md) by providing $C^2$ continuous, higher-order accuracy with reduced aliasing, albeit at the cost of increased oversmoothing compared to non-interpolating methods like [Prefiltered Reconstruction](11114-prefiltered-reconstruction.md).
+ 
+ ## How it works
+-**Inputs and Outputs:**
+-- Input: A 3D volume texture (source data), a query position $\mathbf{x} = (x, y, z)$ in voxel space.
+-- Output: The interpolated scalar value $V(\mathbf{x})$.
++**Inputs:**
++- Input volume data $V$ stored in a 3D texture.
++- Query position $\mathbf{x} = (x, y, z)$ in voxel space.
++- Pre-computed weight functions $g_i(t)$ and offset functions $h_i(t)$ stored in a 1D lookup texture [S1].
++- Discretized reconstruction kernel tiles stored in a 1D floating-point RGBA texture (for frequency-domain variants) [S2, S3, unofficial].
++
++**Outputs:**
++- Reconstructed scalar value $f(\mathbf{x})$ at the query position.
+ 
+ **Data Structures:**
+-1. **Lookup Texture:** A single 1D floating-point RGBA texture [S2, S3, unofficial].
+-   - Layout: Each channel (R, G, B, A) stores one "tile" of the discretized reconstruction kernel [S2, S3, unofficial].
+-   - For a kernel of width 4, there are 4 tiles [S2, S3, unofficial]. A single texture fetch at position $t$ returns 4 weight values $(w_0, w_1, w_2, w_3)$ corresponding to the four neighboring texels [S2, S3, unofficial].
+-   - Format: Floating-point to support precise blending calculations [S2, S3, unofficial].
+-2. **Weight/Offset Lookup:** Pre-computed functions $g_i(x)$ and $h_i(x)$ stored in a lookup texture to further optimize the 1D pass [S1].
+-
+-**Method Steps:**
+-The method exploits the separability of tensor-product B-splines [S1]. A 3D tri-cubic filter with 64 summands is evaluated using only 8 tri-linear texture fetches [S1].
+-
+-1. **1D Reconstruction (Separable Pass):**
+-   For a single dimension with coordinate $x$:
+-   a. Compute the integer part $[x]$ and fractional part [S1].
+-   b. Retrieve pre-computed weight functions $g_0(x), g_1(x)$ and offset functions $h_0(x), h_1(x)$ from the lookup texture [S1].
+-      $$ g_0(x) = w_0(x) + w_1(x) $$
+-      $$ h_0(x) = 1 - \frac{w_1(x)}{w_0(x) + w_1(x)} $$
+-      $$ g_1(x) = w_2(x) + w_3(x) $$
+-      $$ h_1(x) = 1 + \frac{w_3(x)}{w_2(x) + w_3(x)} $$
+-      where $w_k(x)$ are the cubic B-spline weights [S1].
+-   c. Perform two linear texture fetches using hardware linear filtering:
+-      $$ f_{\text{left}} = \text{texel}([x] - h_0(x)) $$
+-      $$ f_{\text{right}} = \text{texel}([x] + h_1(x)) $$
+-   d. Compute the 1D result:
+-      $$ f(x) = g_0(x) f_{\text{left}} + g_1(x) f_{\text{right}} $$
+-   *Note: This step reduces 4 fetches to 2 fetches + 1 weighted sum [S1].*
+-
+-2. **3D Extension:**
+-   Apply the 1D reconstruction separably along X, Y, and Z axes [S1]. Due to separability, the total 64-term sum is computed using $2 \times 2 \times 2 = 8$ tri-linear texture fetches [S1].
+-
+-3. **Hardware Implementation (Multi-Pass Strategy):**
+-   Because current hardware does not support blending with full floating-point precision in a single pass for the full kernel width, the filtering is divided into four passes [S2, S3, unofficial].
+-   a. **Pass 1-4:** Each pass computes the contribution of 16 neighboring samples (4 neighbors $\times$ 4 channels/tiles) [S3, unofficial]. This is achieved by storing the kernel tiles in a single 1D RGBA texture, where one fetch returns 4 weights [S2, S3, unofficial].
+-   b. **Blending Pass:** A separate pass sums the four intermediate sub-results together [S3, unofficial]. Direct blending is avoided due to precision limitations [S2, S3, unofficial].
+-   c. **Storage:** The filtered slice is stored in a texture for subsequent processing (e.g., inverse FFT in frequency domain rendering) [S2, S3, unofficial].
++1.  **Lookup Texture (1D, RGBA, Float):** Stores pre-computed functions $g_0, g_1, h_0, h_1$ for the cardinal B-spline weights.
++    -   Channel R: $g_0(t)$
++    -   Channel G: $h_0(t)$
++    -   Channel B: $g_1(t)$
++    -   Channel A: $h_1(t)$
++    -   Resolution: Sufficient to cover the fractional part range $[0, 1)$ with high precision [S1].
++2.  **Kernel Texture (1D, RGBA, Float):** Stores discretized kernel tiles. For a kernel width of 4, there are 4 tiles.
++    -   Channel R: Tile 0 (interval $[0, 1)$)
++    -   Channel G: Tile 1 (interval $[1, 2)$)
++    -   Channel B: Tile 2 (interval $[-1, 0)$)
++    -   Channel A: Tile 3 (interval $[-2, -1)$)
++    -   Resolution: Number of samples per tile [S2, S3, unofficial].
++
++**Cubic B-Spline Weights:**
++The standard cubic B-spline weights $w_k(t)$ for $t \in [0, 1)$ are derived from the basis function $\beta^3(t)$ [S5]:
++$$
++\beta^3(t) = \begin{cases} 
++\frac{1}{2}t^3 - t^2 + \frac{2}{3} & 0 \le t < 1 \\
++-\frac{1}{6}t^3 + t^2 - 2t + \frac{4}{3} & 1 \le t < 2 \\
++0 & \text{otherwise}
++\end{cases}
++$$
++The weights for the four neighboring samples $f_{i-1}, f_i, f_{i+1}, f_{i+2}$ at coordinate $x$ are:
++$$
++\begin{aligned}
++w_0(x) &= \beta^3(1 - \{x\}) \\
++w_1(x) &= \beta^3(\{x\}) \\
++w_2(x) &= \beta^3(1 + \{x\}) \\
++w_3(x) &= \beta^3(2 - \{x\})
++\end{aligned}
++$$
++where $\{x\} = x - \lfloor x \rfloor$ is the fractional part [S1, S5].
++
++**Algorithm Steps:**
++
++1.  **Decompose Coordinate:**
++    For each dimension $d \in \{x, y, z\}$, compute the integer part $I_d = \lfloor d \rfloor$ and fractional part $F_d = d - I_d$.
++
++2.  **Compute Weight and Offset Functions (1D Pass):**
++    Using the fractional part $F_d$, sample the lookup texture to retrieve $g_0, h_0, g_1, h_1$.
++    $$
++    \begin{aligned}
++    g_0(F_d) &= w_0(F_d) + w_1(F_d) \\
++    h_0(F_d) &= 1 - \frac{w_1(F_d)}{w_0(F_d) + w_1(F_d)} \\
++    g_1(F_d) &= w_2(F_d) + w_3(F_d) \\
++    h_1(F_d) &= 1 + \frac{w_3(F_d)}{w_2(F_d) + w_3(F_d)}
++    \end{aligned}
++    $$
++    [S1]
++
++3.  **Optimized 1D Filtering (GPU Linear Filtering):**
++    Instead of fetching 4 texels and computing a weighted sum, fetch 2 texels using hardware linear interpolation.
++    The first fetch combines $f_{i-1}$ and $f_i$:
++    $$
++    T_0 = \text{texelFetch}(I_d - 1 + h_0(F_d)) \approx (1 - h_0(F_d)) f_{i-1} + h_0(F_d) f_i
++    $$
++    The second fetch combines $f_{i+1}$ and $f_{i+2}$:
++    $$
++    T_1 = \text{texelFetch}(I_d + 1 + h_1(F_d)) \approx (1 - h_1(F_d)) f_{i+1} + h_1(F_d) f_{i+2}
++    $$
++    The result for this dimension is:
++    $$
++    R_d = g_0(F_d) T_0 + g_1(F_d) T_1
++    $$
++    This reduces 4 fetches + 3 multiplies + 3 adds to 2 fetches + 2 multiplies + 1 add [S1].
++
++4.  **3D Extension (Separability):**
++    Apply the 1D optimized filter sequentially along X, Y, and Z axes.
++    -   Pass 1 (X): Compute intermediate values using X-dimension weights.
++    -   Pass 2 (Y): Compute intermediate values using Y-dimension weights on the result of Pass 1.
++    -   Pass 3 (Z): Compute final values using Z-dimension weights on the result of Pass 2.
++    Total: 8 tri-linear texture fetches per output sample [S1, S5].
++
++5.  **Frequency Domain Variant (Multi-Pass Blending):**
++    If used in frequency-domain rendering (e.g., [Frequency Domain Volume Rendering with Sinc Resampling](826-frequency-domain-volume-rendering-with-sinc-resampling.md)):
++    -   Store kernel tiles in a 1D RGBA texture [S2, S3, unofficial].
++    -   Divide filtering into 4 passes. Each pass computes the contribution of 16 neighboring samples (4 neighbors $\times$ 4 channels/tiles) [S2, S3, unofficial].
++    -   Due to hardware limitations preventing floating-point blending precision in intermediate passes, sum the 4 sub-results in a separate blending pass [S2, S3, unofficial].
++    -   Store the filtered slice in a texture for inverse FFT [S2, S3, unofficial].
+ 
+ **Pseudocode:**
++
+ ```python
+-import math
+-
+-def fetch_1d(texture, coord):
+-    """Returns a 4-component vector from a 1D texture at coord."""
+-    pass
+-
+-def fetch_3d(texture, coord):
+-    """Returns a scalar from a 3D texture at coord using tri-linear interpolation."""
+-    pass
+-
+-def fast_tricubic_1d(x, lookup_tex, volume_tex):
++def cubic_b_spline_weight(t):
+     """
+-    Performs 1D fast tri-cubic interpolation using pre-computed g/h lookups.
++    Computes the cubic B-spline weight for fractional distance t.
++    t is in [0, 1).
+     """
+-    # 1. Retrieve pre-computed weight and offset functions
+-    g0, g1, h0, h1 = fetch_1d(lookup_tex, x)
+-    
+-    # 2. Compute effective sample coordinates
+-    int_x = math.floor(x)
+-    coord_left = int_x - h0
+-    coord_right = int_x + h1
+-    
+-    # 3. Fetch values using hardware linear interpolation
+-    val_left = fetch_3d(volume_tex, (coord_left, 0.0, 0.0))
+-    val_right = fetch_3d(volume_tex, (coord_right, 0.0, 0.0))
+-    
+-    # 4. Compute weighted sum
+-    return g0 * val_left + g1 * val_right
+-
+-def fast_tricubic_3d(x, y, z, lookup_tex, volume_tex):
++    t2 = t * t
++    t3 = t2 * t
++    # beta^3(t) for 0 <= t < 1
++    return 0.5 * t3 - t2 + 2.0/3.0
++
++def fast_tricubic_interpolation(volume_texture, lookup_texture, x, y, z):
+     """
+-    3D tri-cubic interpolation using separability.
+-    Requires 8 tri-linear fetches.
++    Performs fast tri-cubic interpolation using GPU linear filtering acceleration.
++    volume_texture: 3D texture containing input data.
++    lookup_texture: 1D RGBA texture containing pre-computed g and h functions.
++    x, y, z: Query coordinates in voxel space.
+     """
+-    # Compute effective coordinates for each axis
+-    int_x, int_y, int_z = math.floor(x), math.floor(y), math.floor(z)
+-    
+-    g0x, g1x, h0x, h1x = fetch_1d(lookup_tex, x)
+-    g0y, g1y, h0y, h1y = fetch_1d(lookup_tex, y)
+-    g0z, g1z, h0z, h1z = fetch_1d(lookup_tex, z)
+-    
+-    x_l, x_r = int_x - h0x, int_x + h1x
+-    y_l, y_r = int_y - h0y, int_y + h1y
+-    z_l, z_r = int_z - h0z, int_z + h1z
+-    
+-    # Fetch 8 tri-linear samples at the effective coordinates
+-    v000 = fetch_3d(volume_tex, (x_l, y_l, z_l))
+-    v001 = fetch_3d(volume_tex, (x_l, y_l, z_r))
+-    v010 = fetch_3d(volume_tex, (x_l, y_r, z_l))
+-    v011 = fetch_3d(volume_tex, (x_l, y_r, z_r))
+-    v100 = fetch_3d(volume_tex, (x_r, y_l, z_l))
+-    v101 = fetch_3d(volume_tex, (x_r, y_l, z_r))
+-    v110 = fetch_3d(volume_tex, (x_r, y_r, z_l))
+-    v111 = fetch_3d(volume_tex, (x_r, y_r, z_r))
+-    
+-    # Combine along X
+-    v00 = g0x * v000 + g1x * v100
+-    v01 = g0x * v001 + g1x * v101
+-    v10 = g0x * v010 + g1x * v110
+-    v11 = g0x * v011 + g1x * v111
+-    
+-    # Combine along Y
+-    v0 = g0y * v00 + g1y * v01
+-    v1 = g0y * v10 + g1y * v11
+-    
+-    # Combine along Z
+-    return g0z * v0 + g1z * v1
++    # 1. Decompose coordinates
++    ix = floor(x)
++    fx = x - ix
++    iy = floor(y)
++    fy = y - iy
++    iz = floor(z)
++    fz = z - iz
++
++    # 2. Pre-compute weights for each dimension
++    # Note: In a real GPU shader, this is done per-fragment.
++    # We compute the helper functions g and h for each dimension.
++    
++    # Dimension X
++    w0_x = cubic_b_spline_weight(1.0 - fx)
++    w1_x = cubic_b_spline_weight(fx)
++    w2_x = cubic_b_spline_weight(1.0 + fx)
++    w3_x = cubic_b_spline_weight(2.0 - fx)
++    
++    sum_w01_x = w0_x + w1_x
++    sum_w23_x = w2_x + w3_x
++    
++    # Avoid division by zero if weights are zero (rare in B-spline)
++    if sum_w01_x > 1e-9:
++        h0_x = 1.0 - w1_x / sum_w01_x
++    else:
++        h0_x = 0.5 # Fallback
++        
++    if sum_w23_x > 1e-9:
++        h1_x = 1.0 + w3_x / sum_w23_x
++    else:
++        h1_x = 1.5 # Fallback
++        
++    g0_x = sum_w01_x
++    g1_x = sum_w23_x
++
++    # Dimension Y
++    w0_y = cubic_b_spline_weight(1.0 - fy)
++    w1_y = cubic_b_spline_weight(fy)
++    w2_y = cubic_b_spline_weight(1.0 + fy)
++    w3_y = cubic_b_spline_weight(2.0 - fy)
++    
++    sum_w01_y = w0_y + w1_y
++    sum_w23_y = w2_y + w3_y
++    
++    if sum_w01_y > 1e-9:
++        h0_y = 1.0 - w1_y / sum_w01_y
++    else:
++        h0_y = 0.5
++        
++    if sum_w23_y > 1e-9:
++        h1_y = 1.0 + w3_y / sum_w23_y
++    else:
++        h1_y = 1.5
++        
++    g0_y = sum_w01_y
++    g1_y = sum_w23_y
++
++    # Dimension Z
++    w0_z = cubic_b_spline_weight(1.0 - fz)
++    w1_z = cubic_b_spline_weight(fz)
++    w2_z = cubic_b_spline_weight(1.0 + fz)
++    w3_z = cubic_b_spline_weight(2.0 - fz)
++    
++    sum_w01_z = w0_z + w1_z
++    sum_w23_z = w2_z + w3_z
++    
++    if sum_w01_z > 1e-9:
++        h0_z = 1.0 - w1_z / sum_w01_z
++    else:
++        h0_z = 0.5
++        
++    if sum_w23_z > 1e-9:
++        h1_z = 1.0 + w3_z / sum_w23_z
++    else:
++        h1_z = 1.5
++        
++    g0_z = sum_w01_z
++    g1_z = sum_w23_z
++
++    # 3. Perform 3D filtering using 8 tri-linear fetches
++    # Pass 1: X-dimension
++    # Fetch two samples along X for each Y, Z neighbor pair
++    # Coordinates for X-fetches:
++    # T0_x: combines f(ix-1, ...) and f(ix, ...)
++    # T1_x: combines f(ix+1, ...) and f(ix+2, ...)
++    
++    # We need to iterate over the 8 neighbors in Y and Z space
++    # Neighbors in Y: iy-1, iy, iy+1, iy+2
++    # Neighbors in Z: iz-1, iz, iz+1, iz+2
++    
++    result = 0.0
++    
++    # Loop over Y neighbors (4) and Z neighbors (4)
++    # However, the optimization groups them.
++    # The formula is: f(x) = g0(x)*f([x]-h0(x)) + g1(x)*f([x]+h1(x))
++    # This is applied separably.
++    
++    # Let's implement the separable approach explicitly:
++    # Step A: Filter along X for all 16 (Y,Z) neighbor combinations? 
++    # No, the 8 fetches come from:
++    # 2 X-fetches * 2 Y-fetches * 2 Z-fetches = 8 fetches.
++    
++    # Y-fetches:
++    # Y0_coord = iy - 1 + h0_y
++    # Y1_coord = iy + 1 + h1_y
++    # Z-fetches:
++    # Z0_coord = iz - 1 + h0_z
++    # Z1_coord = iz + 1 + h1_z
++    
++    # X-fetches:
++    # X0_coord = ix - 1 + h0_x
++    # X1_coord = ix + 1 + h1_x
++    
++    # Fetch 8 points
++    val_000 = volume_texture.trilinear(ix - 1 + h0_x, iy - 1 + h0_y, iz - 1 + h0_z)
++    val_100 = volume_texture.trilinear(ix + 1 + h1_x, iy - 1 + h0_y, iz - 1 + h0_z)
++    val_010 = volume_texture.trilinear(ix - 1 + h0_x, iy + 1 + h1_y, iz - 1 + h0_z)
++    val_110 = volume_texture.trilinear(ix + 1 + h1_x, iy + 1 + h1_y, iz - 1 + h0_z)
++    val_001 = volume_texture.trilinear(ix - 1 + h0_x, iy - 1 + h0_y, iz + 1 + h1_z)
++    val_101 = volume_texture.trilinear(ix + 1 + h1_x, iy - 1 + h0_y, iz + 1 + h1_z)
++    val_011 = volume_texture.trilinear(ix - 1 + h0_x, iy + 1 + h1_y, iz + 1 + h1_z)
++    val_111 = volume_texture.trilinear(ix + 1 + h1_x, iy + 1 + h1_y, iz + 1 + h1_z)
++    
++    # Combine with weights
++    # The weights g0/g1 are applied to the fetched values which are already linearly interpolated.
++    # The structure is:
++    # Result = g0_x * ( g0_y * ( g0_z * val_000 + g1_z * val_001 ) + g1_y * ( g0_z * val_010 + g1_z * val_011 ) ) 
++    #        + g1_x * ( g0_y * ( g0_z * val_100 + g1_z * val_101 ) + g1_y * ( g0_z * val_110 + g1_z * val_111 ) )
++    
++    # Z-combination
++    rz_00 = g0_z * val_000 + g1_z * val_001
++    rz_01 = g0_z * val_010 + g1_z * val_011
++    rz_10 = g0_z * val_100 + g1_z * val_101
++    rz_11 = g0_z * val_110 + g1_z * val_111
++    
++    # Y-combination
++    ry_0 = g0_y * rz_00 + g1_y * rz_01
++    ry_1 = g0_y * rz_10 + g1_y * rz_11
++    
++    # X-combination
++    result = g0_x * ry_0 + g1_x * ry_1
++    
++    return result
+ ```
+ 
+-**Parameters:**
+-- Kernel Width: 4 samples [S3, unofficial].
+-- Texture Format: 1D floating-point RGBA [S3, unofficial].
+-
+ **Edge Cases and Pitfalls:**
+-- **Hardware Precision:** Hardware does not support blending with floating-point precision in intermediate passes. A separate blending pass is required to sum the 4 sub-results [S2, S3, unofficial].
+-- **Fragment Program Length:** ATI GPUs have fragment program length limits, requiring the 4-pass approach. NVIDIA GPUs support longer programs, allowing the passes to be folded into a single pass [S2, S3, unofficial].
+-- **Periodicity:** The weights are periodic in the sample positions of the input texture [S1].
++-   **Boundary Conditions:** The method assumes periodic boundary conditions for the weights $w_k(x)$ as noted in [S1]. For non-periodic volumes, boundary handling must be implemented explicitly (e.g., clamping or mirroring) before or during the texture fetches.
++-   **Hardware Precision:** Current hardware (at the time of source publication) does not support blending with floating-point precision in intermediate passes. A separate blending pass is required to sum intermediate results [S2, S3, unofficial].
++-   **Fragment Program Length:** ATI GPUs have fragment program length limits requiring a multi-pass approach (4 passes) for the kernel-tile variant. NVIDIA hardware supports longer programs, allowing folding into a single pass [S2, S3, unofficial].
++-   **Oversmoothing:** Standard tri-cubic B-spline interpolation is a 2-EF (Error Function of order 2) reconstruction and is quasi-interpolating. It exhibits strong oversmoothing, making it less suitable for high-fidelity detail reconstruction compared to prefiltered methods [S5].
+ 
+ ## Subtopics
+ 
+ ### [Adaptive Filter Size for Rendering Time Reduction](861-adaptive-filter-size-for-rendering-time-reduction.md)
+-A technique to reduce rendering time by adaptively selecting smaller interpolation filters for low-energy frequency components. It builds on Fast tri-cubic interpolation by optimizing the convolution cost during slice extraction in frequency-domain rendering.
++Adaptive Filter Size for Rendering Time Reduction is a technique to reduce rendering time by adaptively selecting smaller interpolation filters for low-energy frequency components, maintaining image quality within a user-defined tolerance. It sets itself apart from standard interpolation schemes by dynamically switching between a high-quality large filter and a low-cost small filter based on the spectral energy of the input data, rather than using a fixed kernel for all samples. This method is specifically designed for frequency-domain volume rendering, building on [Fast tri-cubic interpolation](848-fast-tri-cubic-interpolation.md) by optimizing the convolution cost during slice extraction.
+ 
+ ### [Cubic Interpolation (Mitchell-Netravali)](2073-cubic-interpolation-mitchell-netravali.md)
+-A parameterized family of reconstruction filters. It sets itself apart by defining the specific mathematical kernel and parameter space ($B, C$) rather than the hardware-accelerated fetch reduction technique used in Fast tri-cubic interpolation.
++Mitchell-Netravali cubic interpolation is a parameterized family of reconstruction filters used in volume rendering to approximate scalar values at arbitrary positions within a 3D grid. It solves the problem of high-frequency leakage artifacts (ringing, aliasing) caused by discontinuities in lower-order methods, while offering a tunable trade-off between blurring and ringing.
++
++### [Prefiltered Reconstruction](11114-prefiltered-reconstruction.md)
++Prefiltered Reconstruction is a volume rendering technique that improves the approximation order of non-interpolating filters, such as the cubic B-spline, by convolving input samples with a discrete prefilter before applying the continuous reconstruction kernel. It solves the problem of severe oversmoothing inherent in standard approximating filters, which can disconnect fine anatomical structures like blood vessels in CT scans. Unlike standard cubic B-spline interpolation, which acts as a low-pass filter that blurs high-frequency details, this method allows the cubic B-spline to act as an interpolator with $C^2$ continuity and 4th-order approximation accuracy (4-EF). It sets itself apart from its parent [Fast tri-cubic interpolation](848-fast-tri-cubic-interpolation.md) by explicitly handling the coefficient generation step to correct for the non-interpolating nature of the basis function, and from its sibling [Cubic Interpolation (Mitchell-Netravali)](2073-cubic-interpolation-mitchell-netravali.md) by targeting the specific frequency response characteristics of B-splines rather than general cubic kernels.
++
++### Unprefiltered Cubic B-Spline Reconstruction
++Unprefiltered Cubic B-Spline Reconstruction uses the standard cubic B-spline filter without prefiltering. It is classified as a 2-EF (Error Function of order 2) reconstruction, meaning it is quasi-interpolating of order 2 [S5]. The cubic B-spline filter is defined piecewise: for $|t| \le 1$, $\frac{1}{2}|t|^3 - |t|^2 + \frac{2}{3}$ [S5]. Due to its relatively strong oversmoothing effect, this filter is mainly used for reconstructing data corrupted by noise, rather than for high-fidelity detail reconstruction [S5].
+ 
+ ## Operating characteristics
+-- **Time Complexity:** Reduces the number of texture fetches from 64 (naive tri-cubic) to 8 (separable + g/h optimization) [S1]. This increases resampling performance [S2, S3, unofficial].
+-- **Memory Complexity:** Requires additional memory for the 1D lookup texture storing $g_i$ and $h_i$ functions, and the 1D RGBA texture storing kernel tiles [S1][S2, S3, unofficial].
+-- **Performance:** Measured on ATI and NVIDIA GPUs. ATI requires multi-pass due to fragment program limits, while NVIDIA can fold passes into one [S2, S3, unofficial]. The method is specifically effective in frequency-domain volume rendering pipelines where resampling is a bottleneck [S2, S3, unofficial].
+-- **Strengths:** High-quality reconstruction (cubic B-spline), reduced fetch count, hardware-friendly.
+-- **Limitations:** Requires floating-point texture support (historically limited), multi-pass overhead on some hardware, precision loss in intermediate blending if not handled separately [S2, S3, unofficial].
++-   **Time Complexity:** $O(1)$ per sample, with a constant factor significantly lower than naive tri-cubic interpolation. Naive tri-cubic requires 64 nearest-neighbor fetches and 63 multiplications/additions. Fast tri-cubic requires 8 tri-linear fetches and roughly 26 multiplications/additions [S1, S5].
++-   **Memory Complexity:** Requires storage for the input volume texture and a small 1D lookup texture for $g_i, h_i$ functions [S1]. For frequency-domain variants, an additional 1D RGBA texture for kernel tiles is needed [S2, S3, unofficial].
++-   **Measured Performance:** The method leverages GPU hardware linear filtering, which is highly optimized. It enables real-time ray-casting and advanced shading of discrete isosurfaces by reducing the interpolation bottleneck [S1].
++-   **Strengths:** High accuracy ($C^2$ continuity), reduced aliasing compared to trilinear interpolation, significant performance improvement over naive higher-order interpolation.
++-   **Limitations:** Oversmoothing compared to interpolating filters (like Mitchell-Netravali or prefiltered B-splines). Hardware-dependent implementation details (multi-pass vs. single-pass) due to fragment program length limits and floating-point blending precision [S2, S3, unofficial][S5].
++-   **When to use:** When higher-order smoothness is required and performance is critical, and the oversmoothing is acceptable (e.g., noisy data, or when followed by post-processing).
++-   **When not to use:** When preserving high-frequency details is paramount and oversmoothing is unacceptable; consider [Prefiltered Reconstruction](11114-prefiltered-reconstruction.md) or [Cubic Interpolation (Mitchell-Netravali)](2073-cubic-interpolation-mitchell-netravali.md) instead.
+ 
+ ## Background
+-Fast tri-cubic interpolation was introduced in the context of real-time ray-casting and advanced shading of discrete isosurfaces, and later applied to frequency-domain volume rendering [S1][S2, S3, unofficial]. The core technique of reducing texture fetches using linear filtering and pre-computed weights was detailed by Weiler et al. in 2000 [S1]. It was further adapted for GPU-based frequency domain rendering by Viola et al. in 2004, who implemented the multi-pass strategy and kernel tile storage [S2, S3, unofficial].
++Fast tri-cubic interpolation was introduced by Sigg and Hadwiger in 2005 as an acceleration technique for GPU-based volume rendering [S1, S5]. It builds upon the separability of tensor-product B-splines and the linear filtering capabilities of GPU texture units. The method was initially proposed for real-time ray-casting and isosurface rendering [S1]. It has since been integrated into frequency-domain volume rendering pipelines to optimize the resampling step [S2, S3, unofficial]. The technique addresses the computational bottleneck of evaluating 64-term convolution sums for tri-cubic B-splines by reducing the number of texture fetches to 8 [S1, S5].
+ 
+ ## Sources
+-[S1] Real-Time Ray-Casting and Advanced Shading of Discrete Isosurfaces, https://cgl.ethz.ch/people/archive/siggc/publications/eg05.pdf, fetched 2026-10-26
+-[S2] GPU-based Frequency Domain Volume Rendering - TU Wien, https://www.cg.tuwien.ac.at/research/publications/2004/Viola-2004-GPU/Viola-2004-GPU-Paper.pdf, fetched 2026-10-27 (unofficial)
+-[S3] Hardware-Accelerated Frequency Domain Volume Rendering, https://www.cg.tuwien.ac.at/research/publications/2004/viola-2004-har2/viola-2004-har2-Paper.pdf, fetched 2026-10-27 (unofficial)
+-[S4] SRaimondi/VolumeRender, https://github.com/SRaimondi/VolumeRender, fetched 2026-10-27 (unofficial)+[S1] PDF Real-Time Ray-Casting and Advanced Shading of Discrete Isosurfaces, https://cgl.ethz.ch/people/archive/siggc/publications/eg05.pdf, fetched 2026-10-26
++[S2] PDF GPU-based Frequency Domain Volume Rendering - TU Wien, https://www.cg.tuwien.ac.at/research/publications/2004/Viola-2004-GPU/Viola-2004-GPU-Paper.pdf, fetched 2026-10-27 (unofficial)
++[S3] PDF Hardware-Accelerated Frequency Domain Volume Rendering, https://www.cg.tuwien.ac.at/research/publications/2004/viola-2004-har2/viola-2004-har2-Paper.pdf, fetched 2026-10-27 (unofficial)
++[S4] SRaimondi/VolumeRender, https://github.com/SRaimondi/VolumeRender, fetched 2026-10-27 (unofficial)
++[S5] Interactively controlling the smoothing and postaliasing effects in volume visualization, https://doi.org/10.1145/1980462.1980488, fetched 2026-11-03

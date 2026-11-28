@@ -1,0 +1,97 @@
+# TAA with Depth and Color Rejection
+
+Also called: Depth-based TAA Rejection, TAA Ghosting Removal
+
+## Overview
+A Temporal Anti-Aliasing (TAA) variant that eliminates ghosting artifacts by discarding the previous frame's contribution when motion or depth consistency fails [S1, unofficial]. It sets the mixing weight to 1.0 (rejecting history) if the reprojected pixel is out of bounds or if the depth difference exceeds a threshold, effectively combining implicit color rejection via TAA mixing with explicit depth consistency checks [S1, unofficial].
+
+## How it works
+**Inputs and Outputs:**
+*   **Inputs:** Current fragment position (clip space), current fragment depth, previous frame's clip space projection matrix (`projectionPrev`), previous frame's depth texture (linearized), current frame's linearized depth.
+*   **Outputs:** Mixing amount `mixAmt` (float in [0, 1]), where 1.0 means full rejection of history.
+
+**Data Structures:**
+*   **Depth Texture:** 32-bit float (`r32f`) storage for previous fragment depth to ensure precision [S1, unofficial].
+*   **Current Depth:** Linearized depth value for the current fragment.
+
+**Steps:**
+1.  **Reprojection:** Transform the current fragment's clip-space position to the previous frame's clip space using `projectionPrev`. Convert to normalized device coordinates (NDC) and then to screen space coordinates $(u, v)$ in $[0, 1]$.
+2.  **Depth Sampling:** Sample 9 neighboring pixels in the previous frame's depth texture centered at $(u, v)$. Linearize their depths if they are not already linear.
+3.  **Depth Comparison:** Compute the absolute difference between the current linearized depth and each of the 9 sampled previous depths. Track the minimum difference $\Delta d_{min}$.
+4.  **Rejection Check:**
+    *   If $(u, v)$ is outside the $[0, 1]$ range, set `mixAmt = 1.0`.
+    *   If $\Delta d_{min} > 0.05 \times \text{linearize\_depth}(d_{current})$, set `mixAmt = 1.0`.
+    *   Otherwise, `mixAmt` remains 0.0 (or is determined by other TAA factors not detailed in this specific rejection logic).
+
+**Pseudocode:**
+> **Unverified code.** The code below did not pass a test run against a reference implementation, or no test fits it, so it may contain errors.
+
+```python
+def compute_taa_rejection(current_clip_pos, projection_prev, current_depth, prev_depth_texture):
+    # Step 1: Reprojection
+    # Transform current clip pos to previous frame's clip space
+    prev_clip_pos = projection_prev * current_clip_pos
+    
+    # Convert to NDC
+    prev_ndc = prev_clip_pos / prev_clip_pos.w
+    
+    # Convert to screen space [0, 1]
+    u = (prev_ndc.x + 1.0) * 0.5
+    v = (prev_ndc.y + 1.0) * 0.5
+    
+    # Check bounds
+    if u < 0.0 or u > 1.0 or v < 0.0 or v > 1.0:
+        return 1.0  # Reject: out of bounds
+    
+    # Step 2 & 3: Depth Sampling and Comparison
+    # Sample 9 neighbors (3x3 grid) around (u, v)
+    # Assuming texel size is 1.0 / resolution
+    min_diff = infinity
+    current_linear_depth = linearize_depth(current_depth)
+    
+    for dy in [-1, 0, 1]:
+        for dx in [-1, 0, 1]:
+            sample_u = u + dx * texel_size
+            sample_v = v + dy * texel_size
+            
+            # Sample previous depth and linearize
+            prev_depth_sample = prev_depth_texture.sample(sample_u, sample_v)
+            prev_linear_depth = linearize_depth(prev_depth_sample)
+            
+            diff = abs(current_linear_depth - prev_linear_depth)
+            if diff < min_diff:
+                min_diff = diff
+                
+    # Step 4: Rejection Check
+    # Threshold multiplier is 0.05
+    threshold = 0.05 * current_linear_depth
+    
+    if min_diff > threshold:
+        return 1.0  # Reject: depth inconsistency
+        
+    return 0.0  # Accept: consistent
+```
+
+**Parameters:**
+*   `0.05`: Depth difference threshold multiplier for rejection [S1, unofficial].
+
+**Edge Cases and Pitfalls:**
+*   **Precision:** Requires 32-bit float storage for previous fragment depth to ensure precision in depth-based rejection [S1, unofficial].
+*   **Boundaries:** Pixels reprojected outside the screen bounds must be rejected to prevent sampling invalid memory or wrapping artifacts.
+
+## Subtopics
+
+### Temporal Anti-Aliasing with Multisampling
+A rendering pipeline configuration that combines Temporal Anti-Aliasing (TA) with 4x Multisample Anti-Aliasing (MSAA) to average out Z-fighting flicker across frames and samples [S2, unofficial]. In testing on Ubuntu 23.10 with Godot 4.1.1-4.1.3, TA + MSAA x4 reduced visible flickering to near invisibility, though minor artifacts remain upon close inspection [S2, unofficial].
+
+## Operating characteristics
+*   **Performance:** TAA is expensive, taking approximately 1.1ms on a GTX 980 at 4K resolution when running at full res with `r11g11b10f` and `r32f` textures [S1, unofficial].
+*   **Strengths:** Effectively removes most ghosting artifacts when combined with color rejection [S1, unofficial].
+*   **Limitations:** Requires additional memory bandwidth for 32-bit depth textures and neighbor sampling.
+
+## Background
+This method is described in the context of a voxel terrain generation project (`3dTerrainGeneration`) that relies heavily on TAA for antialiasing and denoising [S1, unofficial]. It was integrated into the RTGI shader (`/shaders/rtgi.frag`) and likely the main TAA pass [S1, unofficial]. The author notes that while the concept may not have been used before in this specific combination, it effectively addresses ghosting [S1, unofficial].
+
+## Sources
+[S1] Maxsimuss/3dTerrainGeneration, https://github.com/Maxsimuss/3dTerrainGeneration, fetched 2026-10-27 (unofficial)
+[S2] Z fighting with voxel rendering, https://github.com/godotengine/godot/issues/79081, fetched 2026-10-26 (unofficial)

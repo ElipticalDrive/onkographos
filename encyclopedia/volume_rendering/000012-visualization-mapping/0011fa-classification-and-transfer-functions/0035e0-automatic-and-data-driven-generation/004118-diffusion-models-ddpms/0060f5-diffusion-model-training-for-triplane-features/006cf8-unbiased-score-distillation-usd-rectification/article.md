@@ -1,0 +1,123 @@
+# Unbiased Score Distillation (USD) Rectification
+
+Also called: CF Rectification, CRF Rectification, Zero-1-to-3 Rectification
+
+## Overview
+Unbiased Score Distillation (USD) Rectification is a method to correct unconditional noise bias in diffusion models used for novel view synthesis. It addresses the issue where fine-tuned models retain the unconditional noise prediction characteristics of their base models, leading to inconsistent or biased outputs. By combining unconditional noise prediction from a base model with conditional noise prediction from a fine-tuned model, it generates novel views that are more consistent with the input view while preserving original style and geometric details. This sets it apart from standard classifier-free guidance (CFG) which typically uses the same model for both conditional and unconditional predictions.
+
+## How it works
+**Inputs:**
+*   $\mathbf{z}_t$: Latent representation at timestep $t$.
+*   $c_I$: Image condition (e.g., input view).
+*   $cP$: Prompt condition (text prompt).
+*   $c$: Combined condition (image and/or prompt).
+*   $\mathcal{O}$: Object/unconditional state (empty conditions).
+*   $\epsilon_{\phi}$: Noise predictor of the fine-tuned model.
+*   $\epsilon_{\psi}$: Noise predictor of the base model.
+*   $\omega$: Weight parameter for balancing predictions.
+
+**Outputs:**
+*   $\epsilon^{\text{CF}}$: Rectified noise prediction using Classifier-Free Guidance (CF) style.
+*   $\epsilon^{\text{CRF}}$: Rectified noise prediction using Classifier-Free Rectification (CRF) style.
+
+**Data Structures:**
+*   Latent $\mathbf{z}_t$: Tensor of shape determined by the diffusion model's latent space (e.g., $4 \times H/8 \times W/8$ for SD).
+*   Conditions $c_I, cP$: Encoded embeddings (e.g., CLIP text embeddings, image embeddings).
+*   Noise predictions $\epsilon$: Tensors of the same shape as $\mathbf{z}_t$.
+
+**Parameters:**
+*   $\omega$: Weight parameter. Typical value not explicitly stated in sources, but used to balance the difference term. [S1]
+
+**Steps:**
+1.  **Obtain Conditional Prediction:** Compute the noise prediction from the fine-tuned model using the provided conditions.
+    *   For CF: $\epsilon_{\text{cond}} = \epsilon_{\phi}(\mathbf{z}_t, c_I, cP)$
+    *   For CRF: $\epsilon_{\text{cond}} = \epsilon_{\phi}(\mathbf{z}_t, c)$
+2.  **Obtain Unconditional Prediction:** Compute the noise prediction from the appropriate model using empty/unconditional conditions.
+    *   For CF: $\epsilon_{\text{uncond}} = \epsilon_{\phi}(\mathbf{z}_t, \emptyset, \emptyset)$
+    *   For CRF: $\epsilon_{\text{uncond}} = \epsilon_{\psi}(\mathbf{z}_t, \mathcal{O})$
+3.  **Compute Difference:** Calculate the difference between the conditional and unconditional predictions.
+    *   $\Delta \epsilon = \epsilon_{\text{cond}} - \epsilon_{\text{uncond}}$
+4.  **Apply Weight:** Multiply the difference by the weight parameter $\omega$.
+    *   $\omega \Delta \epsilon$
+5.  **Add Unconditional Prediction:** Add the weighted difference back to the unconditional prediction to get the final rectified noise.
+    *   For CF: $\epsilon^{\text{CF}} = \omega [\epsilon_{\phi}(\mathbf{z}_t, c_I, cP) - \epsilon_{\phi}(\mathbf{z}_t, \emptyset, \emptyset)] + \epsilon_{\phi}(\mathbf{z}_t, \emptyset, \emptyset)$
+    *   For CRF: $\epsilon^{\text{CRF}} = \omega [\epsilon_{\phi}(\mathbf{z}_t, c) - \epsilon_{\psi}(\mathbf{z}_t, \mathcal{O})] + \epsilon_{\psi}(\mathbf{z}_t, \mathcal{O})$
+
+**Formulas:**
+*   **CF Rectification:**
+    $$ \epsilon_{\phi}^{\text{CF}}(\mathbf{z}_{\mathbf{t}}, c_I, cP) = \omega[\epsilon_{\phi}(\mathbf{z}_{\mathbf{t}}, c_I, cP) - \epsilon_{\phi}(\mathbf{z}_{\mathbf{t}}, \emptyset, \emptyset)] + \epsilon_{\phi}(\mathbf{z}_{\mathbf{t}}, \emptyset, \emptyset) $$
+    [S1]
+*   **CRF Rectification:**
+    $$ \epsilon_{\phi, \psi}^{\text{CRF}}(\mathbf{z}_t, c) = \omega \left[ \epsilon_{\phi}(\mathbf{z}_t, c) - \epsilon_{\psi}(\mathbf{z}_t, \mathcal{O}) \right] + \epsilon_{\psi}(\mathbf{z}_t, \mathcal{O}) $$
+    [S1]
+
+**Pseudocode:**
+> **Unverified code.** The code below did not pass a test run against a reference implementation, or no test fits it, so it may contain errors.
+
+```python
+def cf_rectification(z_t, c_I, cP, epsilon_phi, omega):
+    """
+    Computes CF Rectified noise prediction.
+    
+    Args:
+        z_t: Latent at timestep t.
+        c_I: Image condition.
+        cP: Prompt condition.
+        epsilon_phi: Function representing the fine-tuned model's noise predictor.
+        omega: Weight parameter.
+        
+    Returns:
+        Rectified noise prediction.
+    """
+    # Step 1: Conditional prediction from fine-tuned model
+    epsilon_cond = epsilon_phi(z_t, c_I, cP)
+    
+    # Step 2: Unconditional prediction from fine-tuned model
+    epsilon_uncond = epsilon_phi(z_t, empty_condition, empty_condition)
+    
+    # Step 3 & 4 & 5: Apply formula
+    rectified_noise = omega * (epsilon_cond - epsilon_uncond) + epsilon_uncond
+    
+    return rectified_noise
+
+def crf_rectification(z_t, c, epsilon_phi, epsilon_psi, omega):
+    """
+    Computes CRF Rectified noise prediction.
+    
+    Args:
+        z_t: Latent at timestep t.
+        c: Combined condition.
+        epsilon_phi: Function representing the fine-tuned model's noise predictor.
+        epsilon_psi: Function representing the base model's noise predictor.
+        omega: Weight parameter.
+        
+    Returns:
+        Rectified noise prediction.
+    """
+    # Step 1: Conditional prediction from fine-tuned model
+    epsilon_cond = epsilon_phi(z_t, c)
+    
+    # Step 2: Unconditional prediction from base model
+    epsilon_uncond = epsilon_psi(z_t, object_state)
+    
+    # Step 3 & 4 & 5: Apply formula
+    rectified_noise = omega * (epsilon_cond - epsilon_uncond) + epsilon_uncond
+    
+    return rectified_noise
+```
+[G] `empty_condition` and `object_state` represent the specific empty/unconditional inputs required by the respective models, typically involving null text embeddings and potentially masked or empty image inputs.
+
+## Operating characteristics
+*   **Time Complexity:** Requires two noise predictions per step (one conditional, one unconditional) for CF, or one from each model for CRF. This doubles the computational cost per step compared to standard CFG if the base model is different, or adds overhead if the same model is used for both.
+*   **Memory Complexity:** Requires storing or accessing both the fine-tuned model ($\epsilon_{\phi}$) and potentially the base model ($\epsilon_{\psi}$) for CRF.
+*   **Performance:** Achieves significantly better novel views from in-the-wild inputs compared to Zero-1-to-3. Generates views more consistent with the input view while keeping original style and object geometric details. [S1]
+*   **Strengths:** Improves consistency and geometric detail preservation in novel view synthesis.
+*   **Limitations:** Increased computational cost due to multiple model evaluations. Requires access to both fine-tuned and base models for CRF.
+*   **When to use:** When high-quality novel view synthesis from in-the-wild images is required, especially when consistency with the input view and preservation of style/geometric details are critical.
+*   **When not to use:** When computational resources are limited and standard CFG provides sufficient quality.
+
+## Background
+Originated in the context of novel view synthesis using diffusion models, specifically to address biases in models like Zero-1-to-3. The method was proposed in "Optimized View and Geometry Distillation from Multi-view Diffuser" [S1]. It was compared against other methods like One-2-3-45++, Wonder3D, and SyncDreamer. [S1]
+
+## Sources
+[S1] Optimized View and Geometry Distillation from Multi-view Diffuser, https://arxiv.org/abs/2312.06198v4, fetched 2026-10-27

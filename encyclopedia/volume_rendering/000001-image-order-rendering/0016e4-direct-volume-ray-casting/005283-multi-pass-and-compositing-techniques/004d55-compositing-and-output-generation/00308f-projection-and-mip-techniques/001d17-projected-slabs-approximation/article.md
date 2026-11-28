@@ -1,0 +1,76 @@
+# Projected Slabs Approximation
+
+Also called: Parallel projected slabs, Perspective Baseplane Blending, Projected Slabs Approximation for Perspective Volume Rendering, Slab approximation
+
+## Overview
+Projected Slabs Approximation is a technique that approximates perspective volume rendering by rendering slabs using parallel volume rendering hardware and blending the slab images perspectively on the graphics card [S2, unofficial]. It enables acceleration on hardware designed for parallel projection by introducing an analytical error bound [S1, unofficial].
+
+## How it works
+The method approximates the perspective viewing frustum as a sequence of parallel slabs. The core inputs are the volume dataset, the camera position, and the view direction. The output is a rendered image.
+
+1. **Slab Decomposition**: The volume is divided into slabs perpendicular to the view direction. For perspective projection, these slabs are not equidistant in depth but are chosen to bound the approximation error [S1, unofficial]. For best quality, all slabs must be parallel to the image plane [S2, unofficial]. Slab thicknesses are selected to trade off between quality (with a large number of thin slabs) and speed (with a small number of thick slabs) [S2, unofficial].
+2. **Parallel Projection Approximation**: Each slab is rendered using parallel projection techniques [S1, unofficial].
+3. **Error Analysis**: An analytical study of the maximum and average error is performed to determine the optimal slab thickness and distribution [S1, unofficial].
+4. **Compositing**: The results from the parallel projected slabs are composited together. The standard front-to-back compositing equation from the parent [Projection and MIP Techniques](6305-projection-and-mip-techniques.md) is applied to the samples derived from these slabs [G].
+
+The approximation error is bounded by adjusting the slab boundaries based on the analytical error model. The improvement increases frame rate while keeping the global maximum error bounded [S1, unofficial].
+
+Pseudocode for the error-bounded slab selection and rendering:
+> **Unverified code.** The code below did not pass a test run against a reference implementation, or no test fits it, so it may contain errors.
+
+```python
+def projected_slabs_approximation(volume_data, camera_pos, view_dir, image_plane, max_error_threshold):
+    # 1. Cut volume into slabs parallel to the image plane [S2, unofficial]
+    slabs = []
+    current_depth = 0.0
+    slab_thickness = 32.0  # Cube-4/VolumePro requires borders to be multiples of 32 voxels [S2, unofficial]
+    
+    while current_depth < volume_depth:
+        # Analytical study of maximum and average error bounds global maximum error [S1, unofficial]
+        # The specific analytical formula is not given in the sources [S1, unofficial]
+        error = estimate_perspective_approximation_error(current_depth, slab_thickness, camera_pos, view_dir)
+        if error > max_error_threshold:
+            slab_thickness *= 0.5  # Reduce thickness to bound error [G]
+        slabs.append({'depth': current_depth, 'thickness': slab_thickness})
+        current_depth += slab_thickness
+        
+    # 2. Render each slab using parallel projection techniques [S1, unofficial]
+    slab_results = []
+    for slab in slabs:
+        # Standard front-to-back compositing for the slab subvolume [G]
+        samples = []
+        for ray in generate_rays_through_slab(slab, image_plane):
+            c_acc = vec3(0.0)
+            alpha_acc = 0.0
+            for sample in volume_data.trace_ray(ray, slab):
+                transmittance = 1.0 - alpha_acc
+                c_acc = c_acc + transmittance * sample.alpha * sample.color
+                alpha_acc = alpha_acc + transmittance * sample.alpha
+                if alpha_acc >= 1.0:
+                    break
+            samples.append(c_acc)
+        # 3. Blend the slab images perspectively on the graphics card [S2, unofficial]
+        slab_results.append(perspective_blend_samples(samples, camera_pos, view_dir))
+        
+    # 4. Interlace and blend the slab images together to form the final image [S2, unofficial]
+    return interlace_and_blend(slab_results)
+```
+
+## Subtopics
+
+### [Perspective Slab Rendering via Texture Mapping](21438-perspective-slab-rendering-via-texture-mapping.md)
+A method for performing perspective volume rendering on hardware originally designed for parallel projection, such as the Cube-4/VolumePro architecture. It sets itself apart from Projected Slabs Approximation by relying on hardware texture mapping for perspective correction rather than analytical error bounds for parallel projection approximation. It is chosen when hardware supports efficient texture-based perspective scaling. [Perspective Slab Rendering via Texture Mapping](21438-perspective-slab-rendering-via-texture-mapping.md)
+
+### Slab-projection slice
+A tool for out-of-core data processing where a consecutive series of data is gathered into an orthographic projection [S3, unofficial]. It is used in conjunction with a slab-projected kd-tree partitioning to find partitions using nonempty voxel information represented by a series of slab-projection slices [S3, unofficial]. It is chosen when memory constraints require processing large volumes that exceed free memory on rendering hardware or CPU main memory [S3, unofficial].
+
+## Operating characteristics
+The method enables acceleration on hardware designed for parallel projection [S1, unofficial]. It increases frame rate while keeping the global maximum error bounded [S1, unofficial]. Slab thicknesses are selected to trade off between quality (with a large number of thin slabs) and speed (with a small number of thick slabs) [S2, unofficial]. The exact time and memory complexity are not given in the sources.
+
+## Background
+The method was introduced in 2001 for virtual endoscopy, a medical application where perspective projection is mandatory [S1, unofficial]. It was applied to the VolumePro 500 hardware [S1, unofficial]. The work focused on investigating the introduced error and improving the basic algorithm based on error analysis [S1, unofficial].
+
+## Sources
+[S1] FAST VOLUME RENDERING USING A SHEAR-WARP FACTORIZATION ..., https://www.academia.edu/6981092/FAST_VOLUME_RENDERING_USING_A_SHEAR_WARP_FACTORIZATION_OF_THE_VIEWING_TRANSFORMATION, fetched 2026-10-27 (unofficial)
+[S2] Real-Time Volume Rendering, https://cfcs.pku.edu.cn/baoquan/docs/20180622110335231616.pdf, fetched 2026-10-30 (unofficial)
+[S3] Massive Data Management for Distributed Volume Visualization, http://hdl.handle.net/1951/47671, fetched 2026-10-26 (unofficial)

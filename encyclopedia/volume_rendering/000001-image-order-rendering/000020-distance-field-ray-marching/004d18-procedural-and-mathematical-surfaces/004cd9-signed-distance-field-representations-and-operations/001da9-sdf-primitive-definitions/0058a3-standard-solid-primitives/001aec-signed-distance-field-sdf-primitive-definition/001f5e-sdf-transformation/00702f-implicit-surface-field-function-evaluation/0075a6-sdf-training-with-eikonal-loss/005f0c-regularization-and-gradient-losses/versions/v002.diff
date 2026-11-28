@@ -1,0 +1,93 @@
+--- v001.md
++++ v002.md
+@@ -1,53 +1,57 @@
+ # Regularization and Gradient Losses
+ 
+-Also called: SDF Regularization, Geometric Consistency Losses
++Also called: SDF Regularization, Gradient Constraints, Surface Consistency Losses
+ 
+ ## Overview
+-This family defines auxiliary loss terms used during the training of Signed Distance Field (SDF) and Directional Distance Field (DDF) networks to enforce geometric priors beyond the primary photometric or depth supervision. While the parent [SDF Training with Eikonal Loss](2553-sdf-training-with-eikonal-loss.md) enforces the unit gradient magnitude constraint ($\|\nabla f(x)\| = 1$), this family addresses other geometric inconsistencies: inter-model agreement between SDF and DDF representations, surface smoothness, and the suppression of "free surfaces" (uncontrollable geometry) in regions behind visible surfaces where supervision is sparse.
++This family defines auxiliary loss terms used during the training of neural Signed Distance Field (SDF) networks to enforce geometric priors, improve surface smoothness, and prevent artifacts in regions lacking direct supervision. Unlike the primary Eikonal loss which enforces unit gradient magnitude everywhere, these terms target specific geometric properties such as surface alignment between different field representations, local smoothness of the distance function, and the suppression of "free surfaces" in unobserved volumes. They are typically combined with photometric or depth supervision to stabilize the optimization of implicit surfaces.
+ 
+ ## Shared principles
+-All losses in this family operate on the output of the neural network $f(x)$ (the SDF value) or its derivatives. They do not modify the network architecture but constrain the optimization landscape. Common characteristics include:
+-1.  **Evaluation Domain:** Losses are computed on sampled points $\mathcal{X}$, which may include points on the surface, points along rays, or sparse point clouds.
+-2.  **Differentiability:** All terms are differentiable with respect to the network parameters to allow gradient-based optimization.
+-3.  **Weighting:** Each loss term $\mathcal{L}_i$ is typically scaled by a hyperparameter $\lambda_i$ in the total loss function: $\mathcal{L}_{total} = \mathcal{L}_{primary} + \sum \lambda_i \mathcal{L}_i$.
++All methods in this family operate on the output of a neural network $f(\mathbf{x})$ that predicts the SDF value $s$ at a query point $\mathbf{x} \in \mathbb{R}^3$. The core mechanism involves computing a scalar loss $\mathcal{L}$ based on the predicted SDF values $s(\mathbf{x})$ or their spatial gradients $\nabla s(\mathbf{x})$, and backpropagating this loss to update the network weights.
++
++Common characteristics include:
++1.  **Query Points**: Losses are computed over a set of sampled points $\mathcal{Q}$, which may include points on the surface (where $s \approx 0$), points in free space ($s > 0$), or points inside the object ($s < 0$).
++2.  **Gradient Dependence**: Many terms rely on the gradient of the SDF, $\nabla s(\mathbf{x})$, either explicitly (e.g., smoothness between adjacent gradients) or implicitly (e.g., enforcing magnitude via Eikonal, though Eikonal is covered in the parent article).
++3.  **Regularization Goal**: The objective is not to fit observed data directly but to constrain the solution space to be geometrically plausible (smooth, compact, consistent).
++4.  **Weighting**: Each loss term is typically multiplied by a hyperparameter $\lambda$ to balance its influence against other losses (e.g., photometric loss, Eikonal loss).
+ 
+ ## Subtopics
+ 
+ ### [Surface SDF Loss](14235-surface-sdf-loss.md)
+-Also called: Track-SDF Regularizer
+-**What it is:** A consistency loss for Directional Distance Field (DDF) networks that enforces agreement with a co-trained SDF network [14235-surface-sdf-loss].
+-**Distinction:** Unlike the Eikonal loss which enforces local gradient magnitude, this loss explicitly links two different geometric representations (DDF and SDF) by ensuring that points reconstructed via the DDF lie on the zero-level set of the SDF.
+-**When to choose:** Use when training a DDF network alongside an SDF network to resolve depth ambiguities or ensure geometric consistency between the two representations.
+-**Link:** [Surface SDF Loss](14235-surface-sdf-loss.md)
++Enforces geometric consistency between a primary SDF network and a secondary Directional Distance Field (DDF) network. It ensures that points predicted by the DDF to lie on the surface actually correspond to the zero-level set of the SDF. This is particularly useful when training multi-representation models to resolve depth ambiguities. It differs from standard SDF supervision by comparing two learned representations rather than a network against ground truth. See [Surface SDF Loss](14235-surface-sdf-loss.md) for implementation details.
++
++### SDF Smoothness Loss
++Regularizes the reconstructed surface by penalizing the difference between gradients of the SDF at adjacent sampled points. This encourages geometric smoothness and reduces high-frequency noise in the predicted distance field. It is computed by comparing the gradient $\nabla d_\Omega(\mathbf{p})$ at a point $\mathbf{p}$ with the gradient at a perturbed point $\mathbf{p} + \varepsilon$. The loss is defined as [S2]:
++$$
++\mathcal{L}_s = \frac{1}{N_{sm}} \sum_{\mathbf{p} \in \mathcal{X}} \| \nabla d_\Omega(\mathbf{p}) - \nabla d_\Omega(\mathbf{p} + \varepsilon) \|_2
++$$
++where $\mathcal{X}$ is the set of sampled points, $N_{sm}$ is the number of points used for computing the loss, $d_\Omega$ is the SDF output, and $\varepsilon$ is a small perturbation vector. This term is applied to the geometry MLP parameters.
+ 
+ ### Sparse Points SDF Loss
+-**What it is:** A regularization term applied to sparse point cloud data to encourage the SDF to be zero at known surface points.
+-**Distinction:** It operates on a specific subset of sparse points filtered by a geometric constraint (e.g., inside a unit sphere) and incorporates point weights.
+-**When to choose:** Use when sparse point cloud data is available and needs to be integrated into the SDF training process.
+-**Link:** [Geometric Loss Terms](17877-geometric-loss-terms.md) (Note: Specific implementation details are in the minor variant description below).
+-
+-### SDF Smoothness Loss
+-**What it is:** A regularization term that penalizes the gradient of the SDF between adjacent sampled points, encouraging geometric smoothness [S2].
+-**Distinction:** It focuses on the spatial consistency of the SDF gradient field rather than the magnitude of the gradient itself.
+-**When to choose:** Use to reduce noise or jaggedness in the reconstructed surface, particularly in regions with sparse supervision.
+-**Link:** [Geometric Loss Terms](17877-geometric-loss-terms.md)
++A variant used in sparse-view reconstruction pipelines (e.g., SDFStudio) that applies SDF supervision only to a subset of points extracted from sparse input data. The process involves:
++1.  Extracting sparse points and weights from the input batch.
++2.  Filtering points to keep only those inside the unit sphere (norm < 1.0).
++3.  Evaluating the SDF network at these filtered points.
++4.  Computing the loss as the mean of the absolute SDF values weighted by the input weights.
++In the specific implementation cited, the loss is multiplied by a factor of 0.0, effectively disabling it or serving as a placeholder for future tuning [S1, unofficial]. This suggests that in some configurations, sparse point supervision is optional or handled differently.
+ 
+ ### SparseNeuS Sparseness Regularization
+-**What it is:** A term that penalizes uncontrollable free surfaces behind visible surfaces to generate compact geometry [S3].
+-**Distinction:** It uses an exponential penalty based on the absolute SDF value to push non-surface points away from the zero-level set, specifically targeting regions behind visible surfaces.
+-**When to choose:** Use in sparse-view neural surface reconstruction (e.g., SparseNeuS) to prevent the formation of arbitrary geometry in unobserved regions.
+-**Link:** [Geometric Loss Terms](17877-geometric-loss-terms.md)
++Designed to prevent the generation of "uncontrollable free surfaces" behind visible surfaces in sparse-view neural surface reconstruction. It penalizes points that are close to the zero-level set in unobserved regions, encouraging the SDF values to be large (far from zero) in free space behind the visible geometry. The loss is defined as [S3]:
++$$
++\mathcal{L}_{sparse} = \frac{1}{\|\mathbb{Q}\|} \sum_{q \in \mathbb{Q}} \exp(-\tau |s(q)|)
++$$
++where $\mathbb{Q}$ is the set of sampled points, $s(q)$ is the predicted SDF value, and $\tau$ is a temperature parameter controlling the penalty strength. By minimizing this term, the network is encouraged to make $|s(q)|$ large for points $q$ behind visible surfaces, thus pushing the zero-level set away from these ambiguous regions.
+ 
+ ### SDF Rescaling Term for Points Behind Visible Surfaces
+-**What it is:** A regularization term that encourages SDF values of points behind visible surfaces to be far from zero [S3].
+-**Distinction:** It uses a linear rescaling of the absolute SDF value to suppress free surfaces, contrasting with the exponential penalty of the Sparseness Regularization.
+-**When to choose:** Use as an alternative to the Sparseness Regularization when a linear penalty is preferred for controlling free surfaces.
+-**Link:** [Geometric Loss Terms](17877-geometric-loss-terms.md)
++A complementary regularization term used in SparseNeuS to further suppress free surfaces. It directly penalizes points located behind visible surfaces by encouraging their absolute SDF values to be large. The term is defined as [S3]:
++$$
++\mathcal{L}_{rescale} = |s(q)| \cdot \tau
++$$
++where $|s(q)|$ is the absolute SDF value of a sampled point $q$ behind the visible surface, and $\tau$ is a hyperparameter. This linear penalty works in conjunction with the exponential sparseness term to ensure compact geometry.
+ 
+ ## Background
+-The need for regularization in SDF training arises from the ill-posed nature of reconstructing surfaces from limited observations (images or sparse points). Without constraints, neural networks can fit noise or generate arbitrary geometry in unobserved regions. The Eikonal loss [12] (covered in the parent article) is the most common gradient-based regularizer. This family extends that by addressing specific failure modes:
+-1.  **Inter-representation consistency:** When using multiple geometric representations (SDF and DDF), they must agree [14235-surface-sdf-loss].
+-2.  **Smoothness:** SDFs should vary smoothly in space [S2].
+-3.  **Compactness:** In sparse-view settings, "free surfaces" (artifacts behind visible geometry) are a major issue [S3].
++Regularization of neural SDFs has become critical as implicit representations are applied to sparse-view and unstructured data where photometric supervision is insufficient. The Eikonal loss [12] (covered in the parent article) established the baseline for enforcing unit gradients. Subsequent works introduced specialized terms to handle specific failure modes:
++*   **Smoothness**: Early neural surface reconstruction methods noted that raw SDF predictions can be noisy, leading to jagged meshes. Gradient-based smoothness losses were introduced to enforce local continuity [S2].
++*   **Multi-Representation Consistency**: As models like MonoSDF and others began using directional distances to resolve depth ambiguities, losses enforcing consistency between different field representations (SDF vs. DDF) became necessary [S2].
++*   **Sparse View Artifacts**: In sparse-view settings (e.g., SparseNeuS), the lack of supervision behind visible surfaces leads to "flying artifacts" or free surfaces. Sparseness regularization and rescaling terms were proposed to penalize zero-crossings in these unobserved regions, ensuring the reconstructed geometry is compact and well-defined [S3].
+ 
+ ## Sources

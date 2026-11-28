@@ -1,0 +1,109 @@
+# Sphere Assisted Raymarching
+
+Also called: Shape Assisted Raymarching, Shape Marching, Sphere Assisted
+
+## Overview
+Sphere Assisted Raymarching is a distance-field ray marching technique that stores the radius of the largest empty sphere centered at each voxel in a separate shape texture [S1, unofficial][S2, unofficial]. This allows rays to take large steps through empty space by using the stored radius as a lower bound for the step size, significantly reducing the number of voxel lookups compared to standard plane-based marching [S1, unofficial][S2, unofficial]. It sets itself apart from its parent [Chamfer-L1 Distance Computation](2752-chamfer-l1-distance-computation.md) by utilizing the exact Euclidean distance to the nearest solid voxel (sphere) rather than the L1 distance, providing optimal step sizes in empty regions at the cost of higher preprocessing complexity [S1, unofficial].
+
+## How it works
+**Inputs and Outputs:**
+*   **Input:** Ray origin $p_0$, ray direction $d$ (normalized), maximum check distance $maxDistToCheck$, voxel grid size $voxelGridSize$.
+*   **Textures:**
+    *   `voxels`: A 3D texture storing normalized float color values. The alpha channel indicates solidity [S1, unofficial].
+    *   `shape`: A 3D texture storing integer values. The red channel stores the distance to the nearest solid voxel as a non-negative integer [S1, unofficial][S2, unofficial].
+*   **Output:** A `vec4` color value if a solid voxel is hit, or `vec4(0)` if the ray exits the volume or exceeds $maxDistToCheck$ [S1, unofficial].
+
+**Data Structures:**
+The `shape` texture uses an integer format (e.g., `uint`) to store the sphere radius. The value 255 is reserved to represent a solid voxel [S1, unofficial][S2, unofficial]. Empty voxels store the radius of the largest empty sphere centered at that voxel [S1, unofficial].
+
+**Parameters:**
+*   `255`: Constant representing a solid voxel in the shape texture [S1, unofficial][S2, unofficial].
+*   `epsilon`: A small positive constant added to the step size to guarantee progress and avoid infinite loops due to precision errors [S1, unofficial].
+
+**Algorithm Steps:**
+1.  Initialize ray parameter $t = 0$.
+2.  Loop while $t \le maxDistToCheck$:
+    a.  Calculate current position $p = p_0 + d \cdot t$.
+    b.  Sample the `shape` texture at $p / voxelGridSize$ to get `shapeValue` (integer) [S1, unofficial].
+    c.  If `shapeValue` == 255:
+        i.  Sample the `voxels` texture at $p / voxelGridSize$.
+        ii. Return the sampled color.
+    d.  Calculate `deltas` to the next plane boundaries along the ray direction:
+        $$deltas = \frac{step(0, d) - fract(p)}{d}$$
+        Where $step(0, d)$ is a vector where each component is 0 if $d_i < 0$ else 1, and $fract(p)$ is the fractional part of $p$ [S1, unofficial].
+    e.  Calculate the minimum distance to the next voxel boundary:
+        $$minDelta = \min(deltas)$$
+    f.  Update $t$:
+        $$t \leftarrow t + \max(minDelta + shapeValue, epsilon)$$
+3.  Return `vec4(0)` [S1, unofficial].
+
+**Pseudocode:**
+> **Unverified code.** The code below did not pass a test run against a reference implementation, or no test fits it, so it may contain errors.
+
+```python
+def sphere_assisted_raymarching(p0, d, maxDistToCheck, voxelGridSize, shape_texture, voxels_texture):
+    t = 0.0
+    epsilon = 1e-6  # [G] Small constant to prevent zero-step loops
+    
+    while t <= maxDistToCheck:
+        p = p0 + d * t
+        
+        # Sample shape texture
+        # Note: In GLSL, textureLod returns vec4. We access the red channel.
+        shape_value = shape_texture.sample_level(p / voxelGridSize, 0).r
+        
+        # Check for solid voxel
+        if shape_value == 255:
+            return voxels_texture.sample_level(p / voxelGridSize, 0)
+        
+        # Calculate deltas to next plane boundaries
+        # step(0, d) returns 0 if d < 0 else 1
+        step_vector = vec3(1.0 if d.x >= 0 else 0.0,
+                           1.0 if d.y >= 0 else 0.0,
+                           1.0 if d.z >= 0 else 0.0)
+        
+        # fract(p) returns p - floor(p)
+        fract_p = p - floor(p)
+        
+        # Avoid division by zero if d is exactly 0 (though d is normalized)
+        # [G] Guard against zero direction components if necessary, 
+        # though normalized rays have non-zero components unless degenerate.
+        deltas = (step_vector - fract_p) / d
+        
+        # Find minimum delta
+        min_delta = min(deltas.x, min(deltas.y, deltas.z))
+        
+        # Update t
+        t += max(min_delta + shape_value, epsilon)
+        
+    return vec4(0.0)
+```
+
+**Edge Cases and Pitfalls:**
+*   **Preprocessing Cost:** Generating the shape data (distance field) has a significant upfront computational cost. A simple implementation runs in $O(n^2)$ time, where $n$ is the number of voxels [S1, unofficial].
+*   **Precision:** Using integer textures for shape data avoids precision issues with normalized floats for color, but limits the maximum representable distance to the texture's bit depth (e.g., 255 for 8-bit) [S1, unofficial][S2, unofficial].
+*   **Boundary Conditions:** The `epsilon` is crucial to prevent the ray from getting stuck if `minDelta + shapeValue` evaluates to 0 due to floating-point inaccuracies [S1, unofficial].
+
+## Subtopics
+
+### [Cube Assisted Raymarching](4940-cube-assisted-raymarching.md)
+Cube Assisted Raymarching is a distance-field ray marching technique that stores the size of the largest empty cube centered at each voxel instead of the largest empty sphere. It solves the problem of slow shape data generation in Sphere Assisted Raymarching by trading some step optimality for significantly faster preprocessing. While Sphere Assisted Raymarching provides optimal step sizes, Cube Assisted Raymarching is an order of magnitude faster to compute the shape data, making it suitable for larger voxel grids where preprocessing time is a bottleneck.
+
+### [Sphere-based Empty Space Leaping](13590-sphere-based-empty-space-leaping.md)
+A technique that places a sphere at every empty voxel position, where the sphere radius indicates the distance to the closest non-empty voxel, used for navigation inside hollow volumetric objects. It reduces a ray's space traversal to just a few hops until a boundary wall is reached. Unlike standard sphere tracing which uses the global maximum empty sphere radius, this method is view-sensitive and specifically optimized for hollow structures like those in virtual colonoscopy.
+
+## Operating characteristics
+*   **Time Complexity:** The ray marching loop itself is efficient in empty space, taking large steps. However, the preprocessing cost to generate the shape texture is $O(n^2)$ for a simple implementation, where $n$ is the number of voxels [S1, unofficial]. This can be reduced to $O(n \log n)$ using summed area tables and binary search [S1, unofficial].
+*   **Memory Complexity:** Requires two 3D textures: one for color (`voxels`) and one for shape (`shape`) [S1, unofficial]. This doubles the memory usage compared to storing only color data [S1, unofficial].
+*   **Performance:** Reduces the number of voxel lookups in empty space compared to plane marching [S1, unofficial]. However, it is not always a performance win due to the high preprocessing cost and memory bandwidth usage [S1, unofficial].
+*   **Strengths:** Optimal step sizes in empty space, reducing traversal steps significantly for large empty volumes.
+*   **Limitations:** High preprocessing time for shape data generation. Higher memory footprint.
+*   **When to Use:** When empty space traversal is a bottleneck and preprocessing time is acceptable. Suitable for static scenes where the shape data can be precomputed.
+*   **When Not to Use:** When memory is constrained or dynamic geometry requires frequent updates to the shape data. In such cases, [Cube Assisted Raymarching](4940-cube-assisted-raymarching.md) may be preferred due to faster preprocessing [S1, unofficial].
+
+## Background
+Sphere Assisted Raymarching was introduced by Caleb Leak in his blog post "Raymarching Voxel Rendering" [S1, unofficial][S2, unofficial]. The technique is part of a series of optimizations for voxel rendering, following plane-based marching and preceding cube-assisted variants. It addresses the inefficiency of small steps in empty space by leveraging distance field information [S1, unofficial][S2, unofficial].
+
+## Sources
+[S1] Raymarching Voxel Rendering | Caleb Leak, https://calebleak.com/posts/raymarching-voxel-rendering/, fetched 2026-10-24 (unofficial)
+[S2] Raymarching Voxel Rendering, https://medium.com/@calebleak/raymarching-voxel-rendering-58018201d9d6, fetched 2026-10-25 (unofficial)

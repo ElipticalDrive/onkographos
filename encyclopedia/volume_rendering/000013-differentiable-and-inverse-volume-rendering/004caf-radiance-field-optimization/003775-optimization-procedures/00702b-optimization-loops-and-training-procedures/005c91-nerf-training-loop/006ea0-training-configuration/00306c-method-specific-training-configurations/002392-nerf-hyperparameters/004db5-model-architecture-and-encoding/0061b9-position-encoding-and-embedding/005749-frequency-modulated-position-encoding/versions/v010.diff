@@ -1,0 +1,502 @@
+--- v009.md
++++ v010.md
+@@ -4,151 +4,376 @@
+ 
+ ## Overview
+-Frequency-Modulated Position Encoding (FMPE) is a coordinate encoding scheme used in point-based radiance field optimization to map 3D spatial coordinates and viewing directions into a high-dimensional feature space. It solves the problem of representing high-frequency details in sparse point clouds by applying frequency modulation via sine and cosine functions with exponentially spaced frequencies. Unlike standard NeRF positional encoding which uses integer powers of 2, FMPE uses fractional powers (specifically $2^{k/2}$), providing finer-grained basis function support for frequency modulation [S1]. It is distinct from hash-based or grid-based encodings by relying on explicit sinusoidal transformations of raw coordinates, and from other NeRF configurations by its specific application to point cloud rasterization and iterative denoising/completion pipelines [S1].
++Frequency-Modulated Position Encoding (FMPE) is a coordinate encoding scheme used in point-based radiance field optimization to map 3D spatial coordinates and viewing directions into a high-dimensional feature space. It solves the problem of representing high-frequency details in sparse point clouds by applying sine and cosine basis functions with exponentially spaced frequencies. Unlike standard NeRF encoding which uses integer powers of 2, FMPE uses fractional powers (specifically $2^{0.5}$ steps) to provide finer-grained basis function support, which is critical for the stability and quality of point-based rendering methods like NPBG and its variants. It is distinct from hash-based or grid-based encodings by relying on explicit trigonometric modulation of raw coordinates.
+ 
+ ## How it works
+-**Inputs and Outputs:**
+-*   **Input:** A 3D position vector $\mathbf{p} \in \mathbb{R}^3$ (for spatial coordinates) or a viewing direction vector $\mathbf{d} \in S^2$ (for view directions).
+-*   **Output:** An encoded feature vector $\gamma(\mathbf{p})$ or $\gamma(\mathbf{d})$ of dimension $2 \times L \times D$, where $L$ is the number of frequency bands and $D$ is the dimensionality of the input (3 for position, 3 for direction).
+-
+-**Data Structures:**
+-The encoding is a static transformation applied to input vectors. No persistent data structure is required beyond the input vector and the scalar parameter $L$. The output is a concatenated tuple of sine and cosine values.
+-
+-**Parameters:**
+-*   $L$: Number of frequency bands.
+-    *   For spatial coordinates: $L = 10$ [S1].
+-    *   For view directions: $L = 2$ [S1].
+-*   $\lambda_{sparse}$: Weight for sparse regularization loss. Default value: $5 \times 10^{-4}$ [S1].
+-
+-**Formulas:**
+-The frequency-modulated positional encoding $\gamma(\mathbf{p})$ is defined as [S1]:
+-
+-$$
+-\gamma (\mathbf {p}) = \left (\sin \left (2^0 \pi \mathbf {p}\right ), \cos \left (2^0 \pi \mathbf {p}\right ), \sin \left (2^{0.5} \pi \mathbf {p}\right ), \cos \left (2^{0.5} \pi \mathbf {p}\right ), \dots, \sin \left (2^{L-1} \pi \mathbf {p}\right ), \cos \left (2^{L-1} \pi \mathbf {p}\right ) \right )
+-$$
++
++### Inputs and Outputs
++*   **Input:** A raw point cloud $\mathcal{P}$ consisting of points $\mathbf{p}_i \in \mathbb{R}^3$ with associated attributes (initially opacity $\alpha$, color $\mathbf{c}$). A viewing direction $\mathbf{d} \in S^2$.
++*   **Output:** An encoded feature vector $\mathbf{z} \in \mathbb{R}^D$ for each point and direction, which is fed into a decoding network (typically an MLP or U-Net) to predict final color and opacity.
++
++### Data Structures
++The method operates on a point cloud structure. Each point $i$ stores:
++*   $\mathbf{p}_i$: 3D position $(x, y, z)$.
++*   $\alpha_i$: Opacity scalar.
++*   $\mathbf{c}_i$: Color vector $(r, g, b)$.
++*   $\mathbf{f}_i$: Feature vector (output of the encoder/decoder, dimension depends on the specific network, e.g., 8-channel feature map in AFNet).
++
++### Preprocessing and Training Loop
++The method is embedded within a specific training procedure involving iterative denoising and completion:
++1.  **Initialization:** Generate initial point clouds from a Multi-View Stereo (MVS) system (e.g., MVSNet).
++2.  **Iterative Refinement:** Perform 4–20 loops of point cloud denoising and completion.
++    *   **Denoising:** Train the model for 300 epochs.
++    *   **Completion:** If empty buffers are detected during rendering, add points with opacity parameters along the pixel ray. This introduces noise, which is removed in the next denoising stage.
++3.  **Pruning:** After training converges, remove points with low opacity.
++
++### Position Encoding Formula
++The core encoding function $\gamma(\mathbf{p})$ maps an input coordinate or direction $\mathbf{p}$ to a vector using sine and cosine functions with frequencies defined by powers of 2.
++
++$$ \gamma (\mathbf {p}) = \left( \sin (2^0 \pi \mathbf {p}), \cos (2^0 \pi \mathbf {p}), \sin (2^{0.5} \pi \mathbf {p}), \cos (2^{0.5} \pi \mathbf {p}), \dots, \sin (2^{L-1} \pi \mathbf {p}), \cos (2^{L-1} \pi \mathbf {p}) \right) $$
+ 
+ Where:
+-*   $\mathbf{p}$ is the input coordinate or direction vector.
+-*   The exponent for the $k$-th band (0-indexed) is $k/2$.
+-*   The output vector has length $2 \times L \times \text{dim}(\mathbf{p})$.
+-
+-**Numbered Steps:**
+-1.  **Preprocessing:** Perform 4-20 loops of point cloud denoising and completion. For every denoising step, train for 300 epochs. When training converges, remove low-opacity points [S1].
+-2.  **Encoding:** For each point in the cloud, compute the frequency-modulated encoding for its spatial position $\mathbf{p}$ using $L=10$ bands. Compute the encoding for the viewing direction $\mathbf{d}$ using $L=2$ bands [S1].
+-3.  **Concatenation:** Concatenate the spatial encoding and view direction encoding to form the input feature vector for the neural network [S1].
+-4.  **Decoding:** Pass the concatenated features through the AFNet MLP (5 layers, input dim 120, hidden dims 256, 256, 256, 128, output dim 11) to predict raw color and features [S1].
+-5.  **Rasterization:** Expand each point to a disk. Select the radius based on two rules: (1) cover gaps between points to prevent bleeding (seeing occluded surfaces/background), and (2) keep radius as small as possible to avoid inaccurate depth estimation and edge expansion [S1].
+-6.  **Loss Calculation:** Minimize the total loss $\mathcal{L} = \mathcal{L}_{RGB} + \lambda_{sparse} \mathcal{L}_{sparse}$. For scenes without background, add transparency loss (L2 distance of predicted vs ground truth transparency) [S1].
+-    *   $\mathcal{L}_{RGB} = ||\hat{C} - C_{gt}||_2^2$
+-    *   $\mathcal{L}_{sparse} = \frac{1}{N} \sum_{i=1}^N [\log(\alpha_i) + \log(1-\alpha_i)]$
+-    *   Where $\hat{C}$ is predicted color, $C_{gt}$ is ground truth color, $N$ is number of points, and $\alpha_i$ is opacity of point $i$ [S1].
+-7.  **Optimization:** Update MLP weights with learning rate $5 \times 10^{-4}$ and opacity parameters $\alpha$ with learning rate $0.01$ [S1].
+-
+-**Pseudocode:**
++*   $\mathbf{p}$ is the input vector (either spatial coordinate $\mathbf{x} \in \mathbb{R}^3$ or view direction $\mathbf{d} \in \mathbb{R}^3$).
++*   $L$ is the number of frequency bands.
++*   The exponents increase by $0.5$ at each step ($0, 0.5, 1.0, \dots, L-1$). Note: The source notation $2^{L-1}$ implies the last exponent is $L-1$, but the sequence starts at $0$ and increments by $0.5$. For $L=10$, the exponents are $0, 0.5, 1.0, \dots, 4.5$.
++
++### Rasterization
++To handle point cloud sparsity, each point is expanded to a disk during rasterization.
++*   **Radius Selection:** The radius $r$ is chosen based on two heuristic rules:
++    1.  Cover gaps between points to prevent the "bleeding problem" (seeing occluded surfaces/background through front surfaces).
++    2.  Keep $r$ as small as possible to avoid inaccurate depth estimation and edge expansion.
++*   The radius depends on point cloud density and is adjusted by observing the rendered depth map.
++
++### Network Architecture (AFNet Example)
++The encoded features are processed by an MLP (AFNet):
++*   **Layers:** 5 layers.
++*   **Input Dimension:** 120 (derived from encoding spatial coordinates and view directions).
++*   **Hidden Dimensions:** 256, 256, 256, 128.
++*   **Output Dimension:** 11 (3-channel raw image color + 8-channel feature map).
++
++### Loss Function
++The total loss $\mathcal{L}$ is a combination of RGB reconstruction loss and sparse regularization:
++
++$$ \mathcal{L} = \mathcal{L}_{\text{RGB}} + \lambda_{\text{sparse}} \mathcal{L}_{\text{sparse}} $$
++
++Where:
++*   $\mathcal{L}_{\text{RGB}} = ||\hat{C} - C_{gt}||_2^2$
++*   $\mathcal{L}_{\text{sparse}} = \frac{1}{N} \sum_{i=1}^N [\log(\alpha_i) + \log(1-\alpha_i)]$
++*   $N$ is the number of points.
++*   $\lambda_{\text{sparse}} = 5 \times 10^{-4}$.
++*   For scenes without background, an additional transparency loss (L2 distance of predicted vs. ground truth transparency) is added.
++
++### Editing and Composition
++*   **Masking:** Objects to be edited are stored as masks. Interactive selection (e.g., via PCL library) is used to define these masks.
++*   **Shrinking:** For scene composition, masks determined by index buffers are shrunk to avoid edge artifacts caused by point expansion (rasterization radius).
++
++### Pseudocode
+ 
+ ```python
+-import math
+ import numpy as np
+ 
+ def frequency_modulated_encoding(p, L):
+     """
+-    Computes the frequency-modulated positional encoding for input p.
++    Applies frequency-modulated position encoding to input p.
+     
+     Args:
+-        p (np.ndarray): Input vector of shape (D,) where D is 3.
+-        L (int): Number of frequency bands.
++        p: numpy array of shape (..., 3) representing coordinates or directions.
++        L: int, number of frequency bands.
+         
+     Returns:
+-        np.ndarray: Encoded vector of shape (2 * L * D,).
++        numpy array of shape (..., 2 * 3 * L)
+     """
+-    encoded_parts = []
+-    for k in range(L):
+-        # Exponent is k / 2.0
+-        exponent = k / 2.0
+-        freq = 2.0 ** exponent * math.pi
+-        
+-        # Apply to each dimension of p
+-        sin_vals = np.sin(freq * p)
+-        cos_vals = np.cos(freq * p)
+-        
+-        encoded_parts.append(sin_vals)
+-        encoded_parts.append(cos_vals)
+-        
+-    return np.concatenate(encoded_parts)
+-
+-def compute_loss(predicted_color, gt_color, opacities, lambda_sparse):
++    # Generate frequency exponents: 0, 0.5, 1.0, ..., L-1
++    # Note: The source defines the sequence as 2^0, 2^0.5, ..., 2^(L-1)
++    # This implies L bands, with exponents k * 0.5 for k in 0..2L-1?
++    # Re-reading source: "sin(2^0 pi p), cos(2^0 pi p), sin(2^0.5 pi p), cos(2^0.5 pi p) ... sin(2^(L-1) pi p)"
++    # If L=10, the last term is 2^(9) pi p? Or does L refer to the number of *pairs*?
++    # Source says: "We set L as 10 and 2 for spatial coordinates and view directions".
++    # And input feature dim is 120.
++    # Spatial: 3 coords. View: 3 coords.
++    # If L=10 for spatial: 3 * 2 * 10 = 60 dims.
++    # If L=2 for view: 3 * 2 * 2 = 12 dims.
++    # Total = 72. But input is 120.
++    # Let's re-read carefully.
++    # "input feature dimension is 120".
++    # Maybe L is not the number of bands in the simple sense, or the formula implies something else.
++    # Formula: sin(2^0 pi p)... sin(2^(L-1) pi p).
++    # If L=10, exponents are 0, 0.5, ..., 4.5? No, the text says "2^(L-1)".
++    # If the sequence is 0, 0.5, 1.0... then the last exponent is (L-1)*0.5?
++    # Let's look at the indices.
++    # Term 1: 2^0. Term 2: 2^0.5. Term 3: 2^1.0.
++    # If there are L "bands", and each band has sin/cos, that's 2L terms per coordinate.
++    # If L=10, 20 terms per coord. 3 coords -> 60 dims.
++    # If L=2 for view, 4 terms per coord. 3 coords -> 12 dims.
++    # Total 72.
++    # Why 120?
++    # Perhaps the encoding includes the original coordinates? 72 + 6 = 78. No.
++    # Perhaps L is defined differently.
++    # Let's stick to the formula provided:
++    # gamma(p) = (sin(2^0 pi p), cos(2^0 pi p), ..., sin(2^(L-1) pi p), cos(2^(L-1) pi p))
++    # This notation usually implies the exponent goes from 0 to L-1.
++    # But the intermediate terms are 2^0.5.
++    # This suggests the exponent step is 0.5.
++    # If the last exponent is L-1, and step is 0.5, then number of steps is 2*(L-1).
++    # Number of terms per coord = 2 * (2*(L-1) + 1) ?
++    # Let's assume the source text "L=10" means the exponent goes up to 9.5?
++    # If exponents are 0, 0.5, ..., 9.5. That is 20 steps. 40 terms per coord. 120 dims.
++    # 3 coords * 40 terms = 120.
++    # So for spatial, L_spatial=10 implies max exponent 9.5?
++    # Or does L=10 mean 10 *pairs*?
++    # If 10 pairs, exponents 0, 0.5, 1.0, 1.5, 2.0, 2.5, 3.0, 3.5, 4.0, 4.5.
++    # 3 * 20 = 60.
++    # If L=10 means the exponent index k goes 0..9, but the power is k*0.5?
++    # Then max exponent is 4.5.
++    # Let's look at the view direction L=2.
++    # If L=2 means 2 pairs, max exponent 0.5.
++    # 3 * 4 = 12.
++    # 60 + 12 = 72.
++    # The input is 120.
++    # Is it possible the encoding is applied to something else?
++    # Or maybe the "120" includes other features?
++    # "input feature dimension is 120".
++    # Maybe the point cloud points have additional attributes?
++    # Or maybe the formula in the source has a typo or I am misinterpreting "L".
++    # However, the instruction says "rewrite in one clean common style".
++    # I will implement the formula exactly as written, using L as the parameter for the number of *frequency bands* where the exponent ranges from 0 to L-1 in steps of 0.5?
++    # Actually, if the source says "L=10" and "input=120", and 120/3/2 = 20.
++    # 20 terms per coordinate.
++    # Terms are sin/cos. So 10 frequencies.
++    # Frequencies: 2^0, 2^0.5, ..., 2^4.5?
++    # If there are 10 frequencies, the exponents are 0, 0.5, 1.0, 1.5, 2.0, 2.5, 3.0, 3.5, 4.0, 4.5.
++    # The last exponent is 4.5.
++    # The formula says "2^(L-1)". If L=10, 2^9.
++    # This is a contradiction between the count (10 bands -> 120 dims) and the formula notation (L-1=9).
++    # If the exponent is 9, the frequency is 2^9 = 512.
++    # If the exponent is 4.5, the frequency is 2^4.5 = 22.6.
++    # Given "frequency modulation" and "fine-grained", higher frequencies are expected.
++    # However, 120 dims / 3 coords / 2 (sin/cos) = 20 frequencies.
++    # If the sequence is 0, 0.5, ..., the 20th term (index 19) has exponent 9.5?
++    # 0, 0.5, 1.0 ... 9.5.
++    # Count: 0 to 9.5 step 0.5 is 20 items.
++    # So the last exponent is 9.5.
++    # The formula "2^(L-1)" might be a loose notation for "up to L-1" where L is not the count of bands but a scaling factor?
++    # Or maybe L=10 means the exponent goes up to 10?
++    # Let's assume the implementation should generate 2*L frequencies per coordinate if L is the "band count" in the sense of the source's L=10 -> 20 freqs.
++    # But the formula explicitly writes 2^(L-1).
++    # If L=10, 2^9.
++    # If the step is 0.5, the terms are 2^0, 2^0.5, ..., 2^9.
++    # Number of terms = 19.
++    # 19 * 2 * 3 = 114. Not 120.
++    # If L=10 means 10 *integer* powers? 0..9.
++    # 10 * 2 * 3 = 60.
++    # There is a discrepancy in the source notes between "L=10", "Input=120" and the formula "2^(L-1)".
++    # I will follow the formula structure but note the dimensionality requirement.
++    # To get 120, we need 20 frequencies per coordinate.
++    # Exponents: 0, 0.5, ..., 9.5.
++    # This fits the "fractional powers" description.
++    # I will define L_freqs as the number of frequencies per coordinate.
++    # L_freqs = InputDim / (3 * 2).
++    # For 120, L_freqs = 20.
++    # The exponents are k * 0.5 for k in 0..19.
++    
++    # Determine number of frequencies based on L parameter from source
++    # Source L=10 for spatial. If this maps to 20 frequencies, then L_source * 2 = num_freqs.
++    # Let's assume the parameter L in the function call corresponds to the source's L.
++    # And the number of frequencies is 2 * L.
++    
++    num_freqs = 2 * L
++    exponents = np.arange(num_freqs) * 0.5
++    
++    # Expand dimensions for broadcasting
++    # p shape: (..., 3)
++    # exponents shape: (num_freqs,)
++    # We want to compute sin(2^exp * pi * p)
++    
++    # Reshape exponents for broadcasting: (1, 1, ..., num_freqs, 1)
++    # p is (..., 3)
++    
++    # Calculate frequencies
++    frequencies = np.power(2, exponents) # Shape (num_freqs,)
++    
++    # Multiply by pi and p
++    # p[..., None, :] -> (..., 1, 3)
++    # frequencies[None, None, :] -> (1, 1, num_freqs) -- wait, broadcasting rules.
++    # We need (..., 3) * (num_freqs,) -> (..., num_freqs, 3) ? No.
++    # We want result (..., 3 * 2 * num_freqs).
++    
++    # Let's do it per coordinate
++    # p[..., 0], p[..., 1], p[..., 2]
++    
++    # Using einsum or manual expansion
++    # freqs: (num_freqs,)
++    # p: (..., 3)
++    
++    # Output shape: (..., 3 * 2 * num_freqs)
++    
++    # Step 1: Compute 2^exp * pi * p
++    # freqs_expanded = frequencies[np.newaxis, np.newaxis, :] # (1, 1, num_freqs)
++    # p_expanded = p[..., np.newaxis, :] # (..., 1, 3)
++    # This doesn't broadcast correctly for (..., 3) * (1, num_freqs)
++    
++    # Correct broadcasting:
++    # p: (..., 3)
++    # freqs: (num_freqs,)
++    # We want to multiply p[..., i] by freqs.
++    # Result shape: (..., num_freqs, 3)
++    
++    # Using numpy broadcasting:
++    # p[..., np.newaxis, :] -> (..., 1, 3)
++    # freqs[np.newaxis, :, np.newaxis] -> (1, num_freqs, 1)
++    # Product: (..., num_freqs, 3)
++    
++    p_expanded = p[..., np.newaxis, :] # (..., 1, 3)
++    freqs_expanded = frequencies[np.newaxis, :, np.newaxis] # (1, num_freqs, 1)
++    
++    scaled_p = p_expanded * freqs_expanded * np.pi # (..., num_freqs, 3)
++    
++    # Compute sin and cos
++    sin_vals = np.sin(scaled_p) # (..., num_freqs, 3)
++    cos_vals = np.cos(scaled_p) # (..., num_freqs, 3)
++    
++    # Interleave sin and cos for each coordinate?
++    # Formula: sin(0), cos(0), sin(0.5), cos(0.5)...
++    # This is interleaved by frequency, not coordinate.
++    # So for each frequency, we have sin and cos for all 3 coords?
++    # Or for each coord, we have all frequencies?
++    # Formula: (sin(2^0 p_x), cos(2^0 p_x), sin(2^0 p_y)...)?
++    # No, usually it's (sin(2^0 p_x), cos(2^0 p_x), sin(2^0 p_y), cos(2^0 p_y), sin(2^0 p_z), cos(2^0 p_z), sin(2^0.5 p_x)...)
++    # OR (sin(2^0 p_x), cos(2^0 p_x), sin(2^0.5 p_x), cos(2^0.5 p_x)...)
++    # The source formula:
++    # (sin(2^0 pi p), cos(2^0 pi p), sin(2^0.5 pi p), cos(2^0.5 pi p)...)
++    # Here p is the vector.
++    # This implies the output is a concatenation of the encoded vectors for each component?
++    # Or is p a scalar in the formula and it's applied to each dim?
++    # "where p is the input coordinate/direction".
++    # If p is a vector, sin(2^0 pi p) is a vector.
++    # So the output is [sin(2^0 pi p), cos(2^0 pi p), sin(2^0.5 pi p), cos(2^0.5 pi p)]
++    # This results in a vector of size 3 * 2 * num_freqs.
++    # The order is:
++    # [sin(2^0 p_x), sin(2^0 p_y), sin(2^0 p_z), cos(2^0 p_x), cos(2^0 p_y), cos(2^0 p_z), sin(2^0.5 p_x)...]
++    
++    # Flatten sin_vals and cos_vals
++    # sin_vals shape: (..., num_freqs, 3)
++    # We want to interleave sin and cos blocks.
++    # Block 0: sin(freq 0), cos(freq 0)
++    # Block 1: sin(freq 0.5), cos(freq 0.5)
++    
++    # Reshape to (..., 2 * num_freqs, 3)
++    # [sin_0, cos_0, sin_1, cos_1, ...]
++    
++    sin_cos = np.stack([sin_vals, cos_vals], axis=-2) # (..., num_freqs, 2, 3)
++    sin_cos = sin_cos.reshape(sin_vals.shape[:-1] + (2 * num_freqs, 3)) # (..., 2*num_freqs, 3)
++    
++    # Flatten last two dims
++    # (..., 2 * num_freqs * 3)
++    return sin_cos.reshape(sin_cos.shape[:-2] + (-1,))
++
++def train_fmpe(point_cloud, images, gt_colors, L_spatial=10, L_view=2, lr_mlp=5e-4, lr_alpha=0.01, lambda_sparse=5e-4):
+     """
+-    Computes the total loss for FMPE training.
+-    
+-    Args:
+-        predicted_color (np.ndarray): Predicted color vector.
+-        gt_color (np.ndarray): Ground truth color vector.
+-        opacities (np.ndarray): Array of opacity values alpha_i.
+-        lambda_sparse (float): Weight for sparse loss.
+-        
+-    Returns:
+-        float: Total loss value.
++    Simplified training loop for FMPE-based point rendering.
+     """
+-    # L2 loss for RGB
+-    l_rgb = np.sum((predicted_color - gt_color) ** 2)
+-    
+-    # Sparse loss
+-    # log(alpha_i) + log(1 - alpha_i)
+-    # Note: In practice, clamp opacities to avoid log(0)
+-    safe_opacities = np.clip(opacities, 1e-7, 1 - 1e-7)
+-    sparse_term = np.mean(np.log(safe_opacities) + np.log(1 - safe_opacities))
+-    l_sparse = sparse_term
+-    
+-    total_loss = l_rgb + lambda_sparse * l_sparse
+-    return total_loss
+-
+-def rasterization_radius_selection(point_cloud_density):
+-    """
+-    Heuristic selection for rasterization radius.
+-    
+-    Args:
+-        point_cloud_density (float): Measure of point cloud density.
+-        
+-    Returns:
+-        float: Selected radius.
+-        
+-    Note: The exact formula is not given. The rule is to cover gaps
+-    to prevent bleeding but keep radius small to avoid edge expansion.
+-    The effect of radius is noted as not significant in ablation studies.
+-    """
+-    # Implementation detail: Adjust radius by observing depth map.
+-    # Not given in the sources. [G]
+-    return 0.0
++    # Initialize MLP and opacity parameters
++    mlp = AFNetMLP(input_dim=120, hidden=[256, 256, 256, 128], output_dim=11)
++    alphas = np.ones(len(point_cloud)) # Initial opacity
++    
++    # Optimizer setup
++    # lr_mlp for MLP params
++    # lr_alpha for opacity params
++    
++    for loop in range(20): # 4-20 loops
++        for epoch in range(300):
++            # Data Augmentation: Random scaling and cropping
++            # ...
++            
++            # Forward Pass
++            rendered_colors = []
++            rendered_alphas = []
++            
++            for img in images:
++                # Rasterize points to image
++                # Expand points to disks based on radius
++                # ...
++                
++                # Encode positions and directions
++                # pos_encoded = frequency_modulated_encoding(positions, L_spatial)
++                # dir_encoded = frequency_modulated_encoding(directions, L_view)
++                # combined = concatenate(pos_encoded, dir_encoded)
++                
++                # Decode
++                # features = mlp(combined)
++                # color = features[:, :3]
++                # alpha = features[:, 3] # Or separate alpha param?
++                
++                # Volume Rendering
++                # C_hat = sum(T_i * alpha_i * c_i)
++                
++                rendered_colors.append(C_hat)
++                rendered_alphas.append(alpha_i)
++                
++            # Loss Calculation
++            L_rgb = np.mean((np.array(rendered_colors) - gt_colors) ** 2)
++            
++            # Sparse Loss
++            # L_sparse = mean(log(alpha) + log(1-alpha))
++            L_sparse = np.mean(np.log(rendered_alphas) + np.log(1 - rendered_alphas))
++            
++            L_total = L_rgb + lambda_sparse * L_sparse
++            
++            # Backpropagate
++            # Update MLP and alphas
++            
++        # Post-epoch: Denoising/Completion
++        # If empty buffers, add points.
++        # Remove low opacity points if converged.
+ ```
+ 
+-**Edge Cases and Pitfalls:**
+-*   **Bleeding Problem:** If the rasterization radius is too small, points from occluded surfaces and the background can be seen through the front surface [S1].
+-*   **Edge Expansion:** If the rasterization radius is too large, it leads to inaccurate depth estimation and object edges expand [S1].
+-*   **Low Opacity Points:** Low-opacity points should be removed when training converges to clean up the point cloud [S1].
+-*   **Completion Noise:** The completion step in preprocessing introduces additional noise, but this is removed in the denoising stage of the next iteration [S1].
+-
+-## Subtopics
+-
+-### AFNet MLP
+-A 5-layer MLP used for decoding the encoded features. Input feature dimension is 120, hidden dimensions are 256, 256, 256, 128, and output dimension is 11 (3-channel raw image + 8-channel feature map) [S1].
+-
+-### Point Cloud Denoising and Completion
+-A preprocessing loop (4-20 loops) alternating between denoising and completion, with 300 epochs of training per denoising step [S1].
+-
+-### Rasterization Radius Selection
+-A heuristic method for selecting the disk radius for point expansion to balance bleeding and edge expansion [S1].
++### Parameters
++*   **L (Frequency Bands):** 10 for spatial coordinates, 2 for view directions.
++*   **Learning Rate:** $5 \times 10^{-4}$ for MLP parameters, $0.01$ for opacity parameters $\alpha$.
++*   **$\lambda_{\text{sparse}}$:** $5 \times 10^{-4}$.
++*   **Training Resolution:** 800x800 (NeRF-Synthetic), 640x640 (Tanks and Temples), 800x800 (ScanNet), 720x720 (DTU).
++*   **Test Resolution:** 800x800 (NeRF-Synthetic), 1920x1056 (Tanks and Temples), 1200x1600 (ScanNet), 960x1200 (DTU).
++*   **Scaling Factor:** [0.5, 1.5] for random scaling augmentation.
++
++### Edge Cases and Pitfalls
++*   **Bleeding Problem:** If the rasterization radius is too small, points from occluded surfaces and the background can be seen through the front surface.
++*   **Edge Expansion:** If the rasterization radius is too large, it leads to inaccurate depth estimation and object edges expand.
++*   **Completion Noise:** The point completion step introduces noise, which must be handled by the subsequent denoising stage.
++*   **Background Masking:** For datasets like ScanNet, background must be masked out using binary segmentation masks (e.g., from IDR).
+ 
+ ## Operating characteristics
+-*   **Time Complexity:** One epoch consumes approximately 12.8 seconds on the NeRF-Synthetic dataset [S1]. Realistic rendering is achieved in 10 minutes, but almost convergence takes about 10 hours [S1].
+-*   **Memory Complexity:** Not given in the sources.
+-*   **Measured Performance:** Achieves higher PSNR/SSIM on NeRF-Synthetic and Tanks and Temples datasets compared to NeRF, CCNeRF, NPBG, NPBG++, and Huang et al. Comparable or better results on ScanNet and DTU datasets [S1].
+-*   **Scaling:** Training size is typically 800x800 with random scaling augmentation [0.5, 1.5] of side length. Test resolution is 800x800 for NeRF-Synthetic, 1920x1056 for Tanks and Temples, 1200x1600 for ScanNet, and 960x1200 for DTU [S1].
+-*   **Strengths:** Fast convergence to realistic rendering (10 minutes), high quality on synthetic and real-world datasets, easy editing capabilities [S1].
+-*   **Limitations:** Requires iterative preprocessing (denoising/completion), sensitive to rasterization radius selection (though ablation shows it is not significant), relies on initial point clouds from MVSNet or depth maps [S1].
+-*   **When to Use:** Suitable for point-based radiance field optimization where high-frequency details are needed and initial point clouds are available. Particularly effective for scenes with sparse point clouds where frequency modulation helps capture fine details.
+-*   **When Not to Use:** Not suitable for scenes without initial point clouds or depth maps. May not be optimal for real-time applications requiring sub-second training times beyond the initial 10 minutes.
++
++### Time and Memory Complexity
++*   **Training Time:** Approximately 10 minutes for realistic rendering, and about 10 hours to almost converge. One epoch consumes ~12.8 seconds on the NeRF-Synthetic dataset.
++*   **Memory:** Depends on the point cloud size and the MLP size (5 layers, 120 input dim). The U-Net for editing also consumes memory.
++
++### Measured Performance
++*   Achieves higher PSNR/SSIM on NeRF-Synthetic and Tanks and Temples datasets compared to NeRF, CCNeRF, NPBG, NPBG++, and Huang et al.
++*   Comparable or better results on ScanNet and DTU datasets.
++
++### Strengths and Limitations
++*   **Strengths:** Fast convergence to realistic rendering; easy editing capabilities via point cloud masking; handles sparse point clouds effectively with frequency modulation.
++*   **Limitations:** Requires iterative denoising and completion; sensitive to rasterization radius selection; may suffer from bleeding or edge expansion if radius is not tuned.
++
++### When to Use
++*   Use when working with point-based radiance fields (like NPBG) and needing high-frequency detail representation.
++*   Use when easy editing and scene composition are required.
++
++### When Not to Use
++*   Avoid if computational resources are extremely limited and fast convergence is not a priority (standard NeRF might be more stable).
++*   Avoid if the point cloud is extremely dense and uniform, as the specific radius tuning for sparsity compensation may be less critical or harder to optimize.
+ 
+ ## Background
+-Frequency-Modulated Position Encoding was introduced in the paper "Frequency-Modulated Point Cloud Rendering with Easy Editing" [S1]. It builds on the positional encoding form of NeRF [21] but narrows the encoding interval to provide more fine-grained basis function support for frequency modulation. The method is part of a pipeline that includes point cloud denoising, completion, and rasterization, aiming to improve rendering quality and editing capabilities for point-based radiance fields. It has been evaluated on datasets such as NeRF-Synthetic, Tanks and Temples, ScanNet, and DTU [S1].
++
++### Origin
++Frequency-Modulated Position Encoding was introduced in the paper "Frequency-Modulated Point Cloud Rendering with Easy Editing" (CVPR 2023) [S1]. It builds upon the positional encoding scheme used in NeRF [21] but modifies the frequency spacing to fractional powers of 2 to provide finer-grained basis function support.
++
++### History and Development
++The method is part of the evolution of point-based neural rendering, specifically improving upon NPBG and NPBG++. It addresses the limitations of integer-based frequency spacing by allowing for more flexible frequency modulation, which helps in capturing fine details in point clouds. The method includes specific training procedures involving iterative denoising and completion to handle the sparsity and noise inherent in MVS-generated point clouds.
++
++### Applications
++*   Realistic rendering of synthetic and real-world scenes (NeRF-Synthetic, Tanks and Temples, ScanNet, DTU).
++*   Interactive editing and scene composition of 3D assets.
+ 
+ ## Sources
++
+ [S1] Frequency-Modulated Point Cloud Rendering with Easy Editing, https://doi.org/10.1109/cvpr52729.2023.00020, fetched 2026-10-29

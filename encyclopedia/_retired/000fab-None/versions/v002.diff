@@ -1,0 +1,315 @@
+--- v001.md
++++ v002.md
+@@ -3,216 +3,92 @@
+ 
+ ## Overview
+-Backward Projection is a rendering technique that maps volumetric data attributes (such as intensity, scale, or opacity) from the 3D voxel grid onto a 2D image plane by accumulating contributions along rays. It solves the problem of visualizing volumetric features by aggregating weighted voxel values into image pixels, effectively performing a weighted sum of the volume data along the viewing direction. Unlike forward projection methods that project image pixels into the volume, backward projection traverses the volume for each pixel, allowing for flexible compositing and transfer function application. It is distinct from its siblings in [Ray-grid traversal](17-ray-grid-traversal.md) by focusing on the accumulation of scalar or vector attributes into a buffer rather than just geometric intersection, and differs from [Hierarchical Trilinear Ray Casting](851-hierarchical-trilinear-ray-casting.md) by typically using a uniform accumulation strategy without hierarchical acceleration structures in its basic form.
++Backward Projection is a volume rendering technique that maps volumetric data (such as scale-space features or intensity values) from the 3D grid onto the 2D image plane by projecting contributions along rays defined by the camera geometry [S2]. Unlike forward projection methods that sample the image plane, backward projection iterates over voxels or detected features and accumulates their influence into image pixels [S1, unofficial]. It is distinct from standard ray casting because it often operates on derived data (like scale-space blobs) rather than raw scalar fields, and it decouples the expensive feature detection from the rendering pass [S2].
+ 
+ ## How it works
+ **Inputs and Outputs:**
+-- Input: A 3D volumetric dataset $V$ of dimensions $W \times H \times D$, a set of rays defined by camera parameters (origin $\mathbf{o}$ and direction $\mathbf{d}$ for each pixel $(i, j)$), and a transfer function or weighting scheme.
+-- Output: A 2D image buffer $I$ of dimensions $W_{img} \times H_{img}$.
++- Input: A 3D volume grid (scalar or feature field), camera parameters (origin $\mathbf{o}$, direction $\mathbf{d}$, image dimensions $W \times H$), and optionally a set of detected features (e.g., LoG extrema) [S2].
++- Output: A 2D image buffer (color and/or opacity) [S1, unofficial].
+ 
+ **Data Structures:**
+-- The volume $V$ is stored as a 3D array. In implementation, it is often flattened to 1D for memory efficiency.
+-- The output buffer $I$ is a 2D array (or 3D if multi-channel) initialized to zero.
+-- Ray parameters are computed per pixel: step size $\Delta t$ and current position $\mathbf{p}$.
++- **Image Buffer:** A 2D array of size $W \times H$, potentially with multiple channels (e.g., RGB + Alpha). In batch processing, this may be flattened to a 1D array of size $Batch \times Channels \times Height \times Width$ [S1, unofficial].
++- **Voxel Grid:** A 3D array representing the volume data. For uniform grids, voxel size $v$ and dimensions $N_x, N_y, N_z$ define the geometry [S2].
++- **Feature List:** A list of 3D coordinates $(x, y, z)$ and associated attributes (scale, intensity) for detected features [S2].
+ 
+-**Steps:**
+-1. **Initialization**: For each pixel $(i, j)$ in the output image, initialize the accumulator $C_{i,j} = 0$. Compute the ray origin $\mathbf{o}_{i,j}$ and direction $\mathbf{d}_{i,j}$. Determine the entry and exit points of the ray with the volume bounding box.
+-2. **Ray Traversal**: For each step $k$ along the ray:
+-   - Compute the current 3D coordinate $\mathbf{p}_k = \mathbf{o}_{i,j} + k \cdot \Delta t \cdot \mathbf{d}_{i,j}$.
+-   - Check if $\mathbf{p}_k$ is within the volume bounds. If not, terminate the ray for this pixel.
+-   - Sample the volume value $v$ at $\mathbf{p}_k$. This may involve trilinear interpolation if $\mathbf{p}_k$ is not aligned with voxel centers.
+-   - Compute the weight $w$ for this sample based on the transfer function or visibility criteria.
+-   - Accumulate the contribution: $C_{i,j} \leftarrow C_{i,j} + w \cdot v$.
+-3. **Finalization**: After traversing the entire ray, store $C_{i,j}$ in the output image buffer $I_{i,j}$.
++**Algorithm Steps:**
++1.  **Initialization:** Initialize the image buffer to zero [S1, unofficial].
++2.  **Feature Iteration:** For each detected feature (or voxel, depending on the variant) at position $\mathbf{p}_{voxel}$ with value $val$ and weight $w$:
++    a.  Compute the ray direction $\mathbf{d}$ from the camera origin $\mathbf{o}$ to $\mathbf{p}_{voxel}$ [S2].
++    b.  Determine the pixel coordinates $(u, v)$ on the image plane corresponding to $\mathbf{p}_{voxel}$ [S2].
++    c.  **Visibility Check (Optional):** If using visibility thresholding, check if the ray from the feature to the camera intersects any occluding geometry or intensity below a threshold $\tau$ [S2]. If occluded, skip this feature.
++    d.  **Projection:** Add the weighted contribution of the feature to the image buffer at $(u, v)$. The contribution is typically $w \cdot val$ [S1, unofficial].
++3.  **Normalization:** If necessary, normalize the accumulated values in the image buffer to produce the final pixel intensities [S2].
+ 
+ **Formulas:**
+-The accumulation for a pixel $(i, j)$ is given by:
+-$$ I_{i,j} = \sum_{k=0}^{N-1} w_k \cdot V(\mathbf{p}_k) $$
+-where:
+-- $N$ is the number of steps along the ray.
+-- $w_k$ is the weight at step $k$, derived from opacity or visibility thresholds.
+-- $V(\mathbf{p}_k)$ is the interpolated volume value at position $\mathbf{p}_k$.
++- **Ray Direction:** $\mathbf{d} = \mathbf{p}_{voxel} - \mathbf{o}$ [S2].
++- **Pixel Coordinates:** Derived from the projection matrix $P$: $\begin{bmatrix} u \\ v \\ 1 \end{bmatrix} \propto P \cdot \begin{bmatrix} \mathbf{p}_{voxel} \\ 1 \end{bmatrix}$ [S2].
++- **Visibility Threshold:** A voxel is not visible if $\min_{t \in [0, 1]} I(\mathbf{o} + t(\mathbf{p}_{voxel} - \mathbf{o})) < \tau$, where $I$ is the intensity field and $\tau$ is the threshold [S2].
+ 
+ **Parameters:**
+-- $\Delta t$: Step size, typically set to the voxel size or a fraction thereof for accuracy.
+-- $\tau$: Visibility threshold, used in advanced variants to filter contributions.
++- $\tau$ (tau): Visibility threshold, based on scalar value or gradient magnitude [S2].
++- $w$: Weight of the feature, often related to scale or confidence [S2].
+ 
+ **Edge Cases and Pitfalls:**
+-- **Precision**: Floating-point precision errors can accumulate in the accumulator. Use double precision for accumulation if necessary.
+-- **Boundaries**: Rays may miss the volume entirely or only graze it. Proper bounding box checks are required.
+-- **Degenerate Input**: Empty volumes or volumes with no significant values should be handled to avoid unnecessary computation.
++- **Floating Point Precision:** When computing pixel coordinates, ensure proper rounding and clamping to avoid out-of-bounds access [S1, unofficial].
++- **Occlusion:** The visibility check is a fast approximation; for higher accuracy, a region growing post-process may be needed [S2].
++- **Multiple Features per Pixel:** If multiple features project to the same pixel, their contributions must be accumulated correctly (e.g., additive blending) [S1, unofficial].
+ 
+ **Pseudocode:**
+ ```python
+-def backward_projection(volume, camera_params, image_width, image_height):
+-    """
+-    Perform backward projection to render a volume to an image.
++def backward_projection(volume, features, camera, image_width, image_height):
++    # Initialize image buffer
++    image = np.zeros((image_height, image_width, 4))  # RGBA
+     
+-    Args:
+-        volume: 3D numpy array of shape (D, H, W) representing the volumetric data.
+-        camera_params: Object containing ray origins and directions for each pixel.
+-        image_width: Width of the output image.
+-        image_height: Height of the output image.
++    for feature in features:
++        # feature: (x, y, z, value, weight)
++        voxel_pos = np.array([feature.x, feature.y, feature.z])
++        value = feature.value
++        weight = feature.weight
+         
+-    Returns:
+-        image: 2D numpy array of shape (image_height, image_width) representing the rendered image.
+-    """
+-    # Initialize output image buffer
+-    image = np.zeros((image_height, image_width), dtype=np.float32)
+-    
+-    # Get volume dimensions
+-    D, H, W = volume.shape
+-    
+-    # Iterate over each pixel in the output image
+-    for j in range(image_height):
+-        for i in range(image_width):
+-            # Get ray parameters for this pixel
+-            ray_origin = camera_params.origins[j, i]
+-            ray_direction = camera_params.directions[j, i]
++        # Compute ray direction
++        ray_dir = voxel_pos - camera.origin
++        ray_dir = ray_dir / np.linalg.norm(ray_dir)
++        
++        # Project voxel to image plane
++        # Assuming a simple pinhole camera model for illustration
++        # In practice, use the full projection matrix
++        projected = camera.project(voxel_pos)
++        u, v = projected.x, projected.y
++        
++        # Check bounds
++        if not (0 <= u < image_width and 0 <= v < image_height):
++            continue
++        
++        # Visibility check (optional)
++        if visibility_thresholding(camera.origin, voxel_pos, volume, threshold=0.5):
++            continue
+             
+-            # Compute ray entry and exit points with volume bounding box
+-            # Assuming volume is centered at origin with size 1x1x1 for simplicity
+-            # In practice, this involves solving for t_min and t_max
+-            t_min, t_max = compute_ray_box_intersection(ray_origin, ray_direction, (0,0,0), (1,1,1))
+-            
+-            # If ray does not intersect the volume, skip
+-            if t_min > t_max:
+-                continue
+-            
+-            # Determine step size (e.g., voxel size)
+-            step_size = 1.0 / max(D, H, W)
+-            num_steps = int((t_max - t_min) / step_size)
+-            
+-            # Accumulate contributions along the ray
+-            accumulator = 0.0
+-            for k in range(num_steps):
+-                t = t_min + k * step_size
+-                # Compute current 3D position
+-                pos = ray_origin + t * ray_direction
+-                
+-                # Check if position is within volume bounds
+-                if not is_inside_volume(pos, (0,0,0), (1,1,1)):
+-                    break
+-                
+-                # Sample volume value at current position
+-                # Using trilinear interpolation for smoothness
+-                v = trilinear_sample(volume, pos)
+-                
+-                # Compute weight (e.g., based on opacity or visibility)
+-                # For basic backward projection, weight might be 1 or based on transfer function
+-                w = compute_weight(v)
+-                
+-                # Accumulate contribution
+-                accumulator += w * v
+-            
+-            # Store result in image buffer
+-            image[j, i] = accumulator
+-            
++        # Accumulate contribution
++        # Assuming RGBA image
++        image[v, u, 0] += weight * value  # R
++        image[v, u, 1] += weight * value  # G
++        image[v, u, 2] += weight * value  # B
++        image[v, u, 3] += weight          # A
++        
++    # Normalize if necessary
++    # image = image / np.max(image)
+     return image
+ 
+-def compute_ray_box_intersection(origin, direction, box_min, box_max):
+-    """
+-    Compute the intersection of a ray with an axis-aligned bounding box.
+-    
+-    Args:
+-        origin: Ray origin (x, y, z).
+-        direction: Ray direction (x, y, z).
+-        box_min: Minimum corner of the box (x, y, z).
+-        box_max: Maximum corner of the box (x, y, z).
+-        
+-    Returns:
+-        t_min, t_max: Entry and exit distances along the ray.
+-    """
+-    t_min = -np.inf
+-    t_max = np.inf
+-    
+-    for i in range(3):
+-        if direction[i] == 0:
+-            if origin[i] < box_min[i] or origin[i] > box_max[i]:
+-                return np.inf, -np.inf  # Ray is parallel and outside box
+-        else:
+-            t1 = (box_min[i] - origin[i]) / direction[i]
+-            t2 = (box_max[i] - origin[i]) / direction[i]
+-            t_min = max(t_min, min(t1, t2))
+-            t_max = min(t_max, max(t1, t2))
+-            
+-    return t_min, t_max
+-
+-def is_inside_volume(pos, box_min, box_max):
+-    """
+-    Check if a point is inside the volume bounding box.
+-    
+-    Args:
+-        pos: Point coordinates (x, y, z).
+-        box_min: Minimum corner of the box (x, y, z).
+-        box_max: Maximum corner of the box (x, y, z).
+-        
+-    Returns:
+-        True if inside, False otherwise.
+-    """
+-    return (box_min[0] <= pos[0] <= box_max[0] and
+-            box_min[1] <= pos[1] <= box_max[1] and
+-            box_min[2] <= pos[2] <= box_max[2])
+-
+-def trilinear_sample(volume, pos):
+-    """
+-    Perform trilinear interpolation on the volume at the given position.
+-    
+-    Args:
+-        volume: 3D numpy array of shape (D, H, W).
+-        pos: Position (x, y, z) in normalized coordinates [0, 1].
+-        
+-    Returns:
+-        Interpolated value.
+-    """
+-    # Convert normalized position to voxel indices
+-    D, H, W = volume.shape
+-    x = pos[0] * (W - 1)
+-    y = pos[1] * (H - 1)
+-    z = pos[2] * (D - 1)
+-    
+-    # Get integer and fractional parts
+-    x0, y0, z0 = int(x), int(y), int(z)
+-    dx, dy, dz = x - x0, y - y0, z - z0
+-    
+-    # Handle boundary conditions
+-    x0 = max(0, min(x0, W - 2))
+-    y0 = max(0, min(y0, H - 2))
+-    z0 = max(0, min(z0, D - 2))
+-    
+-    # Get 8 neighboring values
+-    v000 = volume[z0, y0, x0]
+-    v100 = volume[z0, y0, x0 + 1]
+-    v010 = volume[z0, y0 + 1, x0]
+-    v110 = volume[z0, y0 + 1, x0 + 1]
+-    v001 = volume[z0 + 1, y0, x0]
+-    v101 = volume[z0 + 1, y0, x0 + 1]
+-    v011 = volume[z0 + 1, y0 + 1, x0]
+-    v111 = volume[z0 + 1, y0 + 1, x0 + 1]
+-    
+-    # Interpolate along x
+-    v00 = v000 * (1 - dx) + v100 * dx
+-    v01 = v010 * (1 - dx) + v110 * dx
+-    v10 = v001 * (1 - dx) + v101 * dx
+-    v11 = v011 * (1 - dx) + v111 * dx
+-    
+-    # Interpolate along y
+-    v0 = v00 * (1 - dy) + v01 * dy
+-    v1 = v10 * (1 - dy) + v11 * dy
+-    
+-    # Interpolate along z
+-    return v0 * (1 - dz) + v1 * dz
+-
+-def compute_weight(v):
+-    """
+-    Compute weight for a volume value.
+-    
+-    Args:
+-        v: Volume value.
+-        
+-    Returns:
+-        Weight.
+-    """
+-    # Basic weight function (e.g., identity or transfer function)
+-    return v
++def visibility_thresholding(origin, target, volume, threshold):
++    # Simple line sampling for visibility check
++    # This is a fast approximation
++    num_samples = 10
++    for i in range(1, num_samples):
++        t = i / num_samples
++        point = origin + t * (target - origin)
++        # Sample volume at point
++        val = volume.sample(point)
++        if val < threshold:
++            return False
++    return True
+ ```
+ 
+@@ -223,18 +99,17 @@
+ 
+ ### Visibility Thresholding for Scale Backprojection
+-Visibility Thresholding for Scale Backprojection is a method to prevent scale information from being backprojected to voxels that do not correspond to the target feature (e.g., vessels), improving classification accuracy by using a visibility parameter [S2]. A voxel is determined to be not visible from the Laplacian of Gaussian (LoG) extrema if, at some point along the ray connecting the two positions, the intensity is below the threshold $\tau$ [S2]. Alternatively, thresholding can be based on gradient magnitude [S2]. The parameter $\tau$ (tau) is a visibility parameter used to control the sensitivity of the visibility test, and can be based on scalar value or gradient magnitude [S2]. This is a fast approximation; more accurate results can be obtained with a region growing approach added as a post-process based on the initial size-based classification [S2].
++Visibility Thresholding for Scale Backprojection is a method to prevent scale information from being backprojected to voxels that do not correspond to the target feature (e.g., vessels), improving classification accuracy by using a visibility parameter [S2]. A voxel is determined to be not visible from the Laplacian of Gaussian (LoG) extrema if, at some point along the ray connecting the two positions, the intensity is below the threshold $\tau$. Alternatively, thresholding can be based on gradient magnitude [S2]. The parameter $\tau$ (tau) is a visibility parameter used to control the sensitivity of the visibility test, based on scalar value or gradient magnitude [S2]. This is a fast approximation; more accurate results can be obtained with a region growing approach added as a post-process based on the initial size-based classification [S2].
+ 
+ ## Operating characteristics
+-- **Time Complexity**: $O(N \cdot M)$, where $N$ is the number of pixels in the output image and $M$ is the average number of steps per ray.
+-- **Memory Complexity**: $O(V + I)$, where $V$ is the size of the volume data and $I$ is the size of the output image.
+-- **Measured Performance**: Performance depends heavily on the volume resolution and image size. High-resolution volumes and images require more computation.
+-- **Scaling**: Scales linearly with the number of pixels and steps. Parallelization on GPUs can significantly improve performance.
+-- **Strengths**: Simple to implement, flexible with transfer functions, suitable for real-time visualization with optimizations.
+-- **Limitations**: Computationally expensive for high-resolution volumes, sensitive to noise without preprocessing.
+-- **When to Use**: Suitable for interactive visualization of volumetric data, especially when combined with scale-space analysis.
+-- **When Not to Use**: Not ideal for very large volumes where hierarchical methods might be more efficient.
++- **Time Complexity:** $O(F \cdot S)$, where $F$ is the number of features and $S$ is the number of samples for visibility checks [S2]. If no visibility check is used, it is $O(F)$ [S1, unofficial].
++- **Memory Complexity:** $O(W \cdot H \cdot C)$ for the image buffer, where $C$ is the number of channels [S1, unofficial].
++- **Performance:** Fast for sparse features; performance degrades if the number of features is large or if visibility checks are expensive [S2].
++- **Strengths:** Decouples feature detection from rendering; allows for interactive parameter adjustment [S2].
++- **Limitations:** Visibility check is an approximation; may miss complex occlusions [S2].
++- **When to Use:** When rendering derived features (like scale-space blobs) rather than raw volume data; when interactive adjustment of visibility is required [S2].
++- **When Not to Use:** When high-accuracy occlusion handling is required; when the volume is dense and features are not sparse [S2].
+ 
+ ## Background
+-Backward Projection is a fundamental technique in volume rendering, originating from the need to visualize 3D volumetric data on 2D displays. It has been widely used in medical imaging, scientific visualization, and computer graphics. The method is closely related to ray casting and ray marching techniques. The specific variant involving scale-space analysis and visibility thresholding was introduced in the context of size-based transfer functions for volume exploration [S2].
++Backward Projection in the context of scale-based volume rendering was introduced by Correa et al. in 2008 as part of a technique for exploring volumetric data using scale-space representations [S2]. The method leverages the properties of diffusion-based scale-space, which is robust to noise, to detect features like vessels and brain tissue [S2]. The approach allows for the visualization of specific structures by highlighting them while hiding others, comparable to rendering a segmented dataset [S2].
+ 
+ ## Sources

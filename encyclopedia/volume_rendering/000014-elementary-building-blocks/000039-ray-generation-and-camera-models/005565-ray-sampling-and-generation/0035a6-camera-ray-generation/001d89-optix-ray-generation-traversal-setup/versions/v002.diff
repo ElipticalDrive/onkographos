@@ -1,0 +1,177 @@
+--- v001.md
++++ v002.md
+@@ -1,8 +1,8 @@
+ # OptiX Ray Generation & Traversal Setup
+ 
+-Also called: Camera Ray Generation, OptiX 7 Ray Generation, OptiX Ray Generation, Ray Generation Program
++Also called: OptiX 7 Ray Generation, OptiX Ray Generation, Ray Generation Program
+ 
+ ## Overview
+-This method implements the ray generation and initial traversal setup for volume rendering within the NVIDIA OptiX 7 API. It computes pixel rays, initializes the random number generator (RNG) for anti-aliasing, and dispatches volume tracing via `optixTrace` [S2, unofficial]. It differs from generic ray generation methods by integrating specific OptiX 7 launch parameters, SBT (Shader Binding Table) indexing, and visibility masks to restrict traversal to volume geometry [S2, unofficial].
++This method implements the ray generation and initial traversal setup for volume rendering within the NVIDIA OptiX 7 API [S2, unofficial]. It computes pixel rays, initializes the random number generator (RNG) for anti-aliasing, and dispatches volume tracing via `optixTrace` [S2, unofficial]. It differs from generic ray generation methods by integrating specific OptiX 7 launch parameters, SBT indexing, and visibility masks to restrict traversal to volume geometry [S2, unofficial].
+ 
+ ## How it works
+@@ -14,94 +14,73 @@
+ 
+ **Outputs:**
+-- Ray origin $\mathbf{o}$ and direction $\mathbf{d}$ for each pixel.
++- Ray origin $\mathbf{o}$ and direction $\mathbf{d}$ for each pixel [S1][S2, unofficial].
+ - Payload for `optixTrace` [S2, unofficial].
+ 
+ **Data Structures:**
+ - `RandomTEA`: RNG state initialized with `frame_index` and `fbIndex` [S2, unofficial].
+-- `vec2f`: 2D floating-point vector for screen coordinates [S2, unofficial].
+-- `vec3f`: 3D floating-point vector for ray origin/direction [S2, unofficial].
++- `vec2f`/`vec3f`: 2D and 3D floating-point vectors for screen coordinates and ray data [S2, unofficial].
+ - `uint32_t` payload: Packed pointer data for ray payload [S2, unofficial].
+ 
+ **Steps:**
+-1. **Thread Launch:** Launch a CUDA kernel with $w \times h$ threads. Threads are grouped into $8 \times 8$ tiled blocks, consisting of two 32-thread wraps computed as SIMD vectors [S1].
+-2. **Pixel Indexing:** Compute the framebuffer index:
+-   $$ \text{fbIndex} = i_x + i_y \times w $$
+-   where $i_x, i_y$ are the pixel coordinates [S2, unofficial].
+-3. **RNG Initialization:** Initialize the RNG state:
+-   $$ \text{rng\_state} = \text{RandomTEA}(\text{frame\_index}, \text{fbIndex}) $$
+-   [S2, unofficial].
+-4. **Screen Coordinates:** Determine 2D screen space coordinates. Compute normalized screen position:
+-   $$ \text{screen} = \left( \frac{i_x + 0.5}{w}, \frac{i_y + 0.5}{h} \right) $$
+-   [S2, unofficial].
+-   Convert to UV coordinates where top-left is $[-1, 1]$ and bottom-right is $[1, -1]$ [S1].
++1. **Thread Launch:** Launch a CUDA kernel with $w \times h$ threads [S1]. Threads are grouped into $8 \times 8$ tiled blocks, consisting of two 32-thread wraps computed as SIMD vectors [S1].
++2. **Pixel Indexing:** Compute the framebuffer index: `fbIndex = ix + iy * frame.size.x` [S2, unofficial].
++3. **RNG Initialization:** Initialize the RNG state: `rng_state = RandomTEA(frame_index, fbIndex)` [S2, unofficial].
++4. **Screen Coordinates:** Determine 2D screen space coordinates [S1]. Compute normalized screen position: `screen = vec2f((float)ix + 0.5, (float)iy + 0.5) / vec2f(frame.size)` [S2, unofficial]. Convert to UV coordinates where top-left is $[-1, 1]$ and bottom-right is $[1, -1]$ [S1].
+ 5. **Ray Direction Calculation:**
+-   - Compute initial ray direction $rd_0$:
+-     $$ rd_0 = \frac{[u, v, f]^T}{\sqrt{u^2 + v^2 + f^2}} $$
+-     where $u, v$ are the UV coordinates and $f$ is the focal length [S1].
+-   - Apply rotation matrices to orient the ray:
+-     $$ rd = R_y(\theta) R_z(\phi) rd_0 $$
+-     where:
+-     $$ R_y(\theta) = \begin{bmatrix} \cos\theta & 0 & \sin\theta \\ 0 & 1 & 0 \\ -\sin\theta & 0 & \cos\theta \end{bmatrix} $$
+-     $$ R_z(\phi) = \begin{bmatrix} 1 & 0 & 0 \\ 0 & \cos\phi & -\sin\phi \\ 0 & \sin\phi & \cos\phi \end{bmatrix} $$
+-     [S1].
+-   - Alternatively, using camera basis vectors:
+-     $$ \mathbf{d} = \text{normalize}(\mathbf{camera.direction} + (\text{screen}.x - 0.5) \mathbf{camera.horizontal} + (\text{screen}.y - 0.5) \mathbf{camera.vertical}) $$
+-     [S2, unofficial].
+-6. **Ray Origin:** Set $\mathbf{o} = \mathbf{camera.position}$ [S2, unofficial].
+-7. **Payload Packing:** Pack the payload for OptiX trace:
+-   $$ \text{packPointer}(\&\text{payload}, u_0, u_1) $$
+-   [S2, unofficial].
+-8. **Trace Dispatch:** Call `optixTrace` with:
+-   - Visibility mask: `OptixVisibilityMask(VISIBILITY_MASK_VOLUME)` [S2, unofficial].
+-   - Flags: `OPTIX_RAY_FLAG_DISABLE_ANYHIT` [S2, unofficial].
+-   - SBT offset: `MethodOptiX::RADIANCE_RAY_TYPE` [S2, unofficial].
+-   - Stride: `MethodOptiX::RAY_TYPE_COUNT` [S2, unofficial].
+-   - Miss index: `MethodOptiX::RADIANCE_RAY_TYPE` [S2, unofficial].
++   - Compute initial ray direction $rd_0$: $rd_0 = [u, v, f]^T / \sqrt{u^2 + v^2 + f^2}$, where $u, v$ are the UV coordinates and $f$ is the focal length [S1].
++   - Apply rotation matrices to orient the ray: $rd = R_y(\theta) R_z(\phi) rd_0$ [S1].
++   - Rotation matrices are $R_y(\theta) = \begin{bmatrix} \cos\theta & 0 & \sin\theta \\ 0 & 1 & 0 \\ -\sin\theta & 0 & \cos\theta \end{bmatrix}$ and $R_z(\phi) = \begin{bmatrix} 1 & 0 & 0 \\ 0 & \cos\phi & -\sin\phi \\ 0 & \sin\phi & \cos\phi \end{bmatrix}$ [S1].
++   - Alternatively, using camera basis vectors: $\mathbf{d} = \text{normalize}(\text{camera.direction} + (\text{screen}.x - 0.5) \text{camera.horizontal} + (\text{screen}.y - 0.5) \text{camera.vertical})$ [S2, unofficial].
++6. **Ray Origin:** Set $\mathbf{o} = \text{camera.position}$ [S1][S2, unofficial]. Any position $p$ along the ray is computed as $p = \mathbf{o} + \mathbf{d} \cdot t$ [S1].
++7. **Payload Packing:** Pack the payload for OptiX trace: `packPointer(&payload, u0, u1)` [S2, unofficial].
++8. **Trace Dispatch:** Call `optixTrace` with visibility mask `OptixVisibilityMask(VISIBILITY_MASK_VOLUME)`, flags `OPTIX_RAY_FLAG_DISABLE_ANYHIT`, SBT offset `MethodOptiX::RADIANCE_RAY_TYPE`, stride `MethodOptiX::RAY_TYPE_COUNT`, and miss index `MethodOptiX::RADIANCE_RAY_TYPE` [S2, unofficial].
+ 
+ **Pseudocode:**
+ ```python
+-# CUDA Kernel
+-__global__ void ray_generation_kernel(uint32_t* output, LaunchParams params) {
+-    uint32_t ix = blockIdx.x * blockDim.x + threadIdx.x;
+-    uint32_t iy = blockIdx.y * blockDim.y + threadIdx.y;
+-    
+-    if (ix >= params.frame.size.x || iy >= params.frame.size.y) return;
+-    
+-    // Step 2: Pixel Indexing
+-    uint32_t fbIndex = ix + iy * params.frame.size.x;
+-    
+-    // Step 3: RNG Initialization
+-    RandomTEA rng_state(params.frame_index, fbIndex);
+-    
+-    // Step 4: Screen Coordinates
+-    vec2f screen((float)ix + 0.5f, (float)iy + 0.5f);
+-    screen = screen / vec2f(params.frame.size);
+-    
+-    // Step 5: Ray Direction (Alternative method from S2)
+-    vec3f rayDir = params.camera.direction;
+-    rayDir = rayDir + (screen.x - 0.5f) * params.camera.horizontal;
+-    rayDir = rayDir + (screen.y - 0.5f) * params.camera.vertical;
+-    rayDir = normalize(rayDir);
+-    
+-    // Step 6: Ray Origin
+-    vec3f rayOrg = params.camera.position;
+-    
+-    // Step 7: Payload Packing
+-    uint32_t payload[2];
+-    packPointer(&payload[0], payload[1]); // Implementation detail [S2, unofficial]
+-    
+-    // Step 8: Trace Dispatch
+-    // Note: Actual optixTrace call is done in host/device interface
+-    // This kernel prepares the ray data for the trace call
+-    output[fbIndex * 2] = rayOrg.x;
+-    output[fbIndex * 2 + 1] = rayOrg.y;
+-    // ... store rayDir and payload
+-}
++def normalize(v):
++    return (v[0], v[1], v[2]) / (v[0]**2 + v[1]**2 + v[2]**2)**0.5
++
++class RandomTEA:
++    def __init__(self, frame_index, fbIndex):
++        pass
++
++def packPointer(payload, u0, u1):
++    pass
++
++def ray_generation_kernel(ix, iy, frame_size, frame_index, camera, output):
++    if ix >= frame_size[0] or iy >= frame_size[1]:
++        return
++
++    # Step 2: Pixel Indexing
++    fbIndex = ix + iy * frame_size[0]
++
++    # Step 3: RNG Initialization
++    rng_state = RandomTEA(frame_index, fbIndex)
++
++    # Step 4: Screen Coordinates
++    screen_x = (ix + 0.5) / frame_size[0]
++    screen_y = (iy + 0.5) / frame_size[1]
++
++    # Step 5: Ray Direction (Camera basis method)
++    ray_dir = camera.direction + (screen_x - 0.5) * camera.horizontal + (screen_y - 0.5) * camera.vertical
++    ray_dir = normalize(ray_dir)
++
++    # Step 6: Ray Origin
++    ray_org = camera.position
++
++    # Step 7: Payload Packing
++    payload = [0, 0]
++    packPointer(payload, payload[0], payload[1])
++
++    # Step 8: Trace Dispatch
++    # optixTrace(ray_org, ray_dir, payload, VISIBILITY_MASK_VOLUME,
++    #            OPTIX_RAY_FLAG_DISABLE_ANYHIT, MethodOptiX::RADIANCE_RAY_TYPE,
++    #            MethodOptiX::RAY_TYPE_COUNT, MethodOptiX::RADIANCE_RAY_TYPE) [S2, unofficial]
++    output[fbIndex] = (ray_org, ray_dir, payload)
+ ```
+ 
+ **Edge Cases and Pitfalls:**
+-- Precision: Floating-point UV conversion must handle pixel centers correctly to avoid aliasing artifacts [S1].
+ - Boundaries: Threads outside the frame buffer dimensions must be guarded [S1].
+-- Degenerate Input: Camera direction must be normalized before basis construction to avoid skewed rays [S2, unofficial].
++- Degenerate Input: Not given in the sources.
+ 
+ ## Subtopics
+@@ -157,10 +136,10 @@
+ - **Performance:** Depends on GPU architecture and OptiX acceleration structure traversal efficiency [S2, unofficial].
+ - **Strengths:** Efficient GPU parallelism, hardware-accelerated ray traversal via OptiX [S2, unofficial].
+-- **Limitations:** Requires NVIDIA hardware and OptiX SDK [S2, unofficial].
+-- **When to Use:** High-performance volume rendering on NVIDIA GPUs [S2, unofficial].
+-- **When Not to Use:** Cross-platform requirements or non-NVIDIA hardware [S2, unofficial].
++- **Limitations:** Not given in the sources.
++- **When to Use:** Not given in the sources.
++- **When Not to Use:** Not given in the sources.
+ 
+ ## Background
+-Originated in NVIDIA OptiX 7 API documentation and examples [S2, unofficial]. Developed by NVIDIA for high-performance ray tracing applications [S2, unofficial]. Used in scientific visualization and medical imaging [S2, unofficial].
++Originated in the open-volume-renderer project by VIDILabs, which implements an OptiX-7 renderer [S2, unofficial]. Used for volume rendering tasks within the open-volume-renderer framework [S2, unofficial].
+ 
+ ## Sources

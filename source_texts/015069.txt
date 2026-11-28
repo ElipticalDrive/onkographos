@@ -1,0 +1,1519 @@
+DOI: 10.1111/cgf.70216
+COMPUTER GRAPHICS forum
+High-Performance Graphics 2025
+A. Knoll and C. Peters
+(Guest Editors)
+UBVH: Unified Bounding Volume and Scene Geometry
+Representation for Ray Tracing
+M. Káčerik
+and J. Bittner
+Czech Technical University in Prague, Faculty of Electrical Engineering, Czechia
+Mammoth [8.8M△]
+AABB BVH [293 Mrays/s] SOBB BVH [336 Mrays/s]
+UBVH [447 Mrays/s]
+Figure 1: Path traced image of the Mammoth scene with 8.8M triangles (left). Visualization of the leaf bounding volumes (top row) and
+scene triangles (bottom row) on the left tusk. Triangles stored in the same leaf node share the color with the corresponding bounding volume.
+Traditionally, the bounding volumes and triangles have to be tested for intersection separately, while for UBVH the test is practically
+identical, yielding an efficient traversal algorithm. The numbers in brackets show the ray tracing speed for incoherent secondary rays
+.
+Abstract
+Bounding volume hierarchies (BVHs) are currently the most common data structure used to accelerate ray tracing. The existing
+BVH methods distinguish between the bounding volume representation associated with the interior BVH nodes and the scene
+geometry representation associated with leaf nodes. We propose a new method that unifies the representation of bounding
+volumes and triangular scene geometry. Our unified representation builds on skewed oriented bounding boxes (SOBB) that
+yield tight bounds for interior nodes and precise representation for triangles in the leaf nodes. This innovation allows to
+streamline the conventional massively parallel BVH traversal, as there is no need to switch between testing for ray intersection
+in interior nodes and leaf nodes. The results show that the proposed method accelerates ray tracing of incoherent rays between
+1.2x–11.8x over the AABB BVH, 1.4x-4.2x over the 14-DOP BVH, 1.1x-2.0x over the OBB BVH, and by 1.1x–1.7x over the
+SOBB BVH.
+CCS Concepts
+• Computing methodologies → Ray tracing; Massively parallel algorithms;
+1. Introduction
+Traditionally, we think of a Bounding Volume Hierarchy (BVH) as
+a tree consisting of interior nodes representing the bounding volumes and leaf nodes pointing to the geometric primitives (as illustrated in Fig. 2, left). The separation of bounding volumes and the
+actual scene geometry naturally leads to the two-stage tree traversal. To determine the ray-geometry intersection, in the first stage the
+© 2025 The Author(s). Computer Graphics Forum published by Eurographics - The European Association for Computer Graphics and John Wiley & Sons Ltd.
+This is an open access article under the terms of the Creative Commons Attribution License, which
+permits use, distribution and reproduction in any medium, provided the original work is properly
+cited.
+ray is repeatedly tested for the intersection with the bounding volumes of interior nodes. Upon reaching the leaf node, in the second
+stage, the ray is tested using a different routine to find the geometry
+intersection. This complicates the traversal algorithm, especially in
+the massively parallel context, where abrupt switches of the context
+lead to thread execution divergence and hardware under-utilization.
+Unifying the representation of bounding volumes and geometry
+CGF | e70216
+M. Káčerik & J. Bittner / Unified Bounding Volume Hierarchy
+(as depicted in Fig. 2, right) opens the possibility of merging the
+two previously distinct traversal stages while utilizing an identical
+intersection test for the bounding volumes of the hierarchy and the
+triangular scene geometry. This increases the overall efficiency of
+the traversal in terms of hardware utilization as well as the total
+number of evaluated intersection tests.
+sentation of the bounding volume in the form of a discrete orientation polytope (k-DOP) [KZ97; KHM*98; SVCM23]. Recently,
+Káčerik and Bittner [KB24] presented a fast method to construct
+a SAH-optimized 14-DOP hierarchy and later proposed using the
+intermediate k-DOP representation for a fast construction of a hierarchy of skewed oriented bounding boxes (SOBB) [KB25]. In
+different context, Calderon and Boubekeur proposed mesh-based
+bounding proxies [CB17] which provide a tight fit to the underlying geometry, but their potential usage for ray tracing is yet unclear.
+Instead of replacing the AABBs to achieve tighter bounding, the
+geometry of the scene could be split into smaller parts, which can
+be bounded by their own small AABBs [KA13], or utilized for a
+top-down BVH construction with spatial splits [FLPE16].
+Figure 2: Traditional BVH stores bounding volumes in interior
+nodes of the hierarchy and triangles are referenced in the leaf nodes
+(left). The UBVH stores the triangles directly inside the hierarchy
+in the same way as the bounding volumes (right).
+Our main contributions are:
+• Unified BVH (UBVH), a data structure that unifies the representation of bounding volumes and triangular geometry.
+• Efficient traversal algorithm for the UBVH, using identical intersection tests for both the interior nodes and leaf nodes.
+• Efficient way of encoding triangle pairs in the UBVH and an
+algorithm to find such pairs.
+• Verification of the proposed methods and their comparison with
+AABB, 14-DOP, OBB, and SOBB BVHs on representative
+scenes.
+2. Related Work
+A long history of research on the bounding volume hierarchies
+in the context of ray tracing was recently surveyed by Meister et al. [MOB*21]. BVH construction process is often guided
+by a heuristic that estimates its performance. Most state-ofthe-art builders attempt to minimize the surface area heuristic
+(SAH) [GS87; AKL13]. For our line of research, the most relevant are bottom-up builders, that by design construct trees with
+leaves of one primitive. They were brought to GPUs by Meister and
+Bittner with parallel locally-ordered clustering (PLOC) [MB18]
+and later refined by Benthin et al. as PLOC++ [BDTD22] and HPLOC [BMB*24].
+Dominating bounding volume for ray tracing BVHs is an axisaligned bounding box (AABB), mainly due to its simplicity. However, it is well-known that it provides a loose fit to many geometric
+configurations, leading to substantial overlaps of the volumes in the
+hierarchy. Furthermore, in such cases, it also generates many unnecessary intersection tests compared to tighter bounding volumes
+with smaller surface areas. A method to find an optimal oriented
+bounding box (OBB) was presented by O’Rourke [ORo85], but it
+is too slow for a practical workload. Multiple approximate OBB
+methods were proposed [Got00; CGM11]. The di-tetrahedron OBB
+algorithm (DiTO) by Larsson and Källberg [LK11] was recently
+parallelized by Vitsas et al. [VEPG23] for fast OBB hierarchy construction. For OBB estimation, DiTO uses an intermediate repre-
+Yet another approach is to optimize the memory layout and
+memory access patterns to efficiently map the problem to modern
+hardware. Wald et al. [WBB08] presented the way to convert a binary BVH to a wide BVH. Later, Ylitie et al. showed how to do the
+conversion in a SAH-optimal fashion and presented a compressed
+wide layout [YKL17]. Efficient traversal of the compressed wide
+BVHs was addressed by Vaidyanathan et al. [VWB19]. Meister and
+Bittner conducted a thorough comparison of several state-of-the-art
+GPU-oriented BVH methods [MB22].
+To reduce the memory consumption of the geometry referenced
+by the BVH, ray-strips by Lauterbach et al. [LYM07] exploit
+the connectivity of the triangles followed by SAH-aware variant [LYTM08]. Segovia and Ernst [SE10] presented hierarchical
+mesh quantization, where they were able to fit the geometry directly to a BVH node by compressing the triangle vertices as local
+offsets to the bounding planes. No-Memory BVH by Eisemann et
+al. [EBM12] inverted the approach by implicitly storing the bounding volume as reordered scene triangles. For parametric models
+such as Bézier patches or curves tight bounding volumes can be
+constructed directly from the parametric representation and used as
+a geometry proxy for intersection test [PK87; BK18].
+As far as we know, there was no previous work aiming to unify
+the representation of bounding volumes and scene geometry for
+BVHs or directly use compressed representation of triangle pairs
+for ray intersection evaluation.
+3. Unified Representation
+Our work builds on the recently introduced skewed oriented bounding boxes (SOBBs) [KB25]. SOBBs were originally proposed as a
+general bounding volume for BVHs to accelerate ray tracing. We
+extend this idea further by observing that SOBBs have great potential to precisely represent triangular geometry.
+In this section, we briefly review the most important properties
+of SOBBs and then present the way of storing triangles as SOBBs
+together with a cheap verification test to determine a ray-triangle
+intersection for a positive ray-SOBB intersection.
+3.1. Skewed Oriented Bounding Box
+SOBB generalizes a well-known oriented bounding box by relaxing the orthogonality constraint of its basis. Therefore, SOBB is a
+© 2025 The Author(s).
+Computer Graphics Forum published by Eurographics and John Wiley & Sons Ltd.
+14678659, 0, Downloaded from https://onlinelibrary.wiley.com/doi/10.1111/cgf.70216, Wiley Online Library on [26/10/2026]. See the Terms and Conditions (https://onlinelibrary.wiley.com/terms-and-conditions) on Wiley Online Library for rules of use; OA articles are governed by the applicable Creative Commons License
+2 of 10
+parallelepiped whose faces are three pairs of congruent parallelograms. For the purpose of an efficient ray-SOBB intersection test,
+the authors proposed representing the SOBB as an intersection of
+three slabs, where each slab s consists of a normal n defining the
+slab plane together with minimal (dmin ) and maximal (dmax ) projections along this normal, defining the slab boundaries. Each slab
+is then encoded as a four dimensional vector:
+
+T
+
+T
+nx ny nz dmin
+(1)
+s = sx sy sz sd =
+.
+max(dmax − dmin , ϵ)
+The ϵ is used as a minimal width of the slab to prevent division
+by zero when encoding the SOBB (we used ϵ = 10−7 ).
+The SOBBs are able to provide tight bounds of the contained
+geometry (possibly even tighter than the OBBs). At the same time,
+the k-DOP based algorithm for tight SOBB computation [KB25] is
+significantly faster than the the ditetrahedron-based state-of-the-art
+algorithm for OBBs [VEPG23].
+plane. The slab s contains all the points p that satisfy the inequality:
+
+T
+u = p · sx sy sz − sd
+(2)
+p ∈ s ⇐⇒ 0 ≤ u ≤ 1.
+(3)
+The value u obtained by adjusting the scalar projection by sd represents a relative distance from the lower limit of the slab, and we
+will refer to it as a slab relative coordinate. The slab triplet then defines a space with slab relative coordinates u, v, and w, in which all
+points lying on the SOBB surface have at least one of these coordinates equal to 0 or 1, while the other two coordinates, assuming that
+they hold the inequality above, describe a relative position within
+the corresponding parallelogram.
+We can verify that the ray-triangle intersection happened simply by projecting the ray-SOBB intersection point p to the SOBB
+unit space and evaluating, whether the position corresponds to the
+known position of the triangle T within the parallelogram. We construct the SOBB so that the triangle is always aligned with w = 0
+plane and therefore:
+p ∈ T ⇐⇒ u + v ≤ 1.
+(4)
+3.2. Triangle as SOBB
+Any triangle can be expanded to a parallelogram such that its diagonal divides the parallelogram into two congruent triangles. This
+parallelogram can then serve as a face of a parallelepiped, forming
+an SOBB. If the SOBB is constructed with the width of ϵ, a necessity of the slab-based representation, it is also the tightest possible
+non-degenerate bounding SOBB for the given triangle (see Fig. 3,
+left). We call the resulting BVH where all nodes are encoded as
+SOBBs and leaf SOBBs encode individual scene triangles unified
+BVH (UBVH).
+See Fig. 3, right, for an illustration of this equation. Note that
+the relative slab coordinates are closely related to the barycentric
+coordinates of the enclosed triangle. With respect to layout shown
+in Fig. 3, barycentric coordinates λ0 , λ1 , and λ2 corresponding to
+vertices v0 , v1 , v2 can be computed trivially:
+During ray tracing, we can use a standard slab-based intersection
+test to find a ray-SOBB intersection in the exact same way as we do
+for any other SOBB in the hierarchy. However, once we determine
+an intersection with the SOBB representing the triangle, we have to
+perform an additional check to determine whether the actual raytriangle intersection occurred.
+Working with pairs of triangles sharing a common edge instead of
+singular triangles is known to provide multiple benefits: reduced
+memory footprint, faster bottom-up BVH construction due to the
+reduced number of clusters, and a potentially more efficient intersection test [WWB*14; BMB*24]. We adopt this idea for our
+UBVH representation and encode suitable triangle pairs as a single
+SOBB. We call the resulting data structure extended UBVH.
+λ1 = 1 − u,
+λ2 = 1 − v,
+λ0 = 1 − λ1 − λ2 .
+(5)
+3.3. Triangle pair as SOBB
+We distinguish three configurations of triangle pairs with a common edge: (1) coplanar triangles with central symmetry over the
+midpoint of the shared edge, forming a parallelogram, (2) arbitrary
+coplanar triangles, and (3) butterfly formation of two noncoplanar
+triangles, resembling the shape of wings.
+3.3.1. Coplanar symmetric pair
+Figure 3: Left: a triangle placed on the surface of a tight bounding
+SOBB with the width of ϵ. Right: slab relative coordinates over the
+surface of the triangle. These coordinates grow from 0 to 1 in the
+span of the slab.
+We utilize a property of the SOBB representation that directly
+provides the relative coordinates of the intersection point within the
+slab. This follows from the fact that the transformation described in
+Eq. 1 scales the world space so that the width of the slab becomes
+a unit length, with ϵ ensuring that the slab does not collapse into a
+© 2025 The Author(s).
+Computer Graphics Forum published by Eurographics and John Wiley & Sons Ltd.
+The case of central symmetry over the midpoint of the shared edge
+is a straightforward extension of the single triangle approach, as
+depicted in Fig. 4, left. If inequality u + v ≤ 1 is true, the point p
+belongs to the first triangle (orange); otherwise, it belongs to the
+second triangle (cyan).
+3.3.2. Coplanar asymmetric pair
+Although arbitrary pair of coplanar triangles can always be
+bounded by a parallelogram (see Fig. 4, right), there is no obvious way to determine the ray-triangle intersection using only the
+slab relative coordinates (i.e., without additional information). For
+14678659, 0, Downloaded from https://onlinelibrary.wiley.com/doi/10.1111/cgf.70216, Wiley Online Library on [26/10/2026]. See the Terms and Conditions (https://onlinelibrary.wiley.com/terms-and-conditions) on Wiley Online Library for rules of use; OA articles are governed by the applicable Creative Commons License
+3 of 10
+M. Káčerik & J. Bittner / Unified Bounding Volume Hierarchy
+M. Káčerik & J. Bittner / Unified Bounding Volume Hierarchy
+this reason, we treat this pair configuration as two separate triangles
+with separate SOBB representation.
+first triangle T0 occupies the face with the relative slab coordinate
+w = 0 and the other triangle T1 occupies the face with u = 0. Similarly to a single triangle test, valid ray-SOBB intersection point p
+intersects one of the triangles if following conditions are met:
+p ∈ T0 ⇐⇒ w = 0 ∧ u + v ≤ 1
+p ∈ T1 ⇐⇒ u = 0 ∧ v + w ≤ 1.
+(6)
+3.3.4. Barycentric coordinates for triangle pairs
+Figure 4: Left: a coplanar triangle pair with central symmetry
+over the edge midpoint, placed on the surface of a tight bounding
+SOBB with the width of ϵ. Right: a coplanar triangle pair with no
+symmetry bounded by a parallelogram.
+As we do not impose constraints on the common edge of a pair of
+triangles, the barycentric coordinates can no longer be computed
+as trivially as for the single triangle with consistent relative position of triangle vertices and SOBB slabs. Although the mapping
+between the slab coordinates and the vertices of triangles could be
+maintained, we decided to simply recompute the barycentric coordinates in the shading phase of the ray tracing pipeline.
+3.3.3. Butterfly pair
+Any noncoplanar pair of triangles can be encoded on the surface
+of an SOBB as shown in Fig. 5. Also, with a careful approach,
+the ray-triangle intersection can be determined directly from the
+relative slab coordinates, similarly to the case of a single triangle.
+Depending on the butterfly shape, resulting SOBB might provide
+a poor fit for the pair, including a lot of empty space. However, due
+to the implicit clipping of hierarchies of oriented bounding volumes [KB25] this problem is mitigated. This enlarged bounding
+volume is only used to encode the triangle pair and is not used
+to compute the parent bounding volumes (these are fitted independently as we discuss in Section 4.1.1). The empty space is thus
+effectively clipped by the parent bounding volumes. This observation is supported by measurements that show a very low number of
+ray-triangle intersection tests for the proposed representation.
+3.4. Precision
+Encoding triangles on the SOBB surface comes with potential precision issues when encoding single triangles and near-planar butterfly pairs.
+Single triangles. Unlike in Eq. 6 for butterflies, in Eq. 4 for
+triangles we do not explicitly consider the coordinate w. For a single triangle, the w corresponds to the ϵ wide slab, where the values
+0 and 1 correspond to the front and back sides of the SOBB (see
+Fig. 3, left, for reference). As the triangle is placed on the SOBB
+front side (w = 0), disregarding w slightly distorts the resulting intersection for rays coming from the back due to the ϵ difference,
+but in turn simplifies the intersection test. We used this faster intersection test as it did not yield visible artifacts in our test scenes.
+For an accurate handling of backface hits, it is possible to explicitly
+ignore the hits on the back side of the SOBB.
+Near-planar butterflies. With finite precision, butterflies with
+almost identical normals can introduce numerical issues in the uvw
+space due to extremely thin and nearly parallel SOBB slabs. Therefore, we used a fixed threshold angle of 5 · 10−4 rad, below which
+the pair is dismissed and the triangles are considered separately.
+Figure 5: Left: a nonplanar, convex triangle pair, placed on the
+surface of a tight bounding SOBB. Right: possible placements of a
+concave pair, either with flipped order or on the SOBB backside.
+Convex and concave triangle pair configuration. Assuming
+outward pointing normal vectors, the relative position of the triangles as shown in Fig. 5, left, is what we consider a convex configuration. Were the normals pointing inwards, in a so called concave configuration, placing the triangles in the same relative position within the SOBB would lead to an inconsistency between the
+configurations. We identified two ways of addressing this issue: either the concave pair is encoded on the other side of the SOBB,
+or the triangles are flipped, maintaining the same relative SOBB
+placement with different triangle order, as shown in Fig. 5, right.
+We implemented the second option, as it allows to share the same
+intersection test for both convex and concave configurations.
+Intersection test. We construct the SOBB in such a way that the
+4. BVH Construction and Traversal
+Our UBVH structure is constructed by transforming the bounding
+volumes of an existing AABB hierarchy, similar to the way a SOBB
+BVH is built [KB25]. The main differences are the assembly of the
+leaf nodes and the approach to BVH traversal.
+4.1. BVH construction
+First, we construct the AABB BVH with a single primitive per
+leaf and proceed with the bottom-up BVH transformation to obtain
+SOBB for each BVH node.
+4.1.1. Transformation to UBVH
+For each leaf, we retrieve the associated triangle (or pair of triangles) and encode it on the surface of a SOBB, as described in
+Sec. 3. Then we continue the bottom-up pass, merging child nodes
+© 2025 The Author(s).
+Computer Graphics Forum published by Eurographics and John Wiley & Sons Ltd.
+14678659, 0, Downloaded from https://onlinelibrary.wiley.com/doi/10.1111/cgf.70216, Wiley Online Library on [26/10/2026]. See the Terms and Conditions (https://onlinelibrary.wiley.com/terms-and-conditions) on Wiley Online Library for rules of use; OA articles are governed by the applicable Creative Commons License
+4 of 10
+at each step, using an intermediate k-DOP representation to estimate the merged SOBB in the same fashion as the SOBB BVH is
+constructed [KB25].
+Leaf nodes are explicitly positioned before the interior nodes in
+the currently processed node’s child list. Due to sequential evaluation of ray-child intersection tests (explained in detail in Sec. 4.2),
+early evaluation of the ray-triangle intersection that yields an intersection has the potential to cull the more distant subtrees rooted in
+the following interior nodes. This potential is even greater for wide
+BVHs with more child nodes.
+4.1.2. Triangle pairs discovery
+Standard UBVH requires one primitive per leaf node, while extended UBVH can also handle specific triangle pairs with a shared
+edge, as described in Sec. 3.3. As scenes typically consist of a large
+number of neighboring triangles, this approach can provide up to
+50% reduction of primitives and thus the associated memory usage.
+However, this process can be costly, and its efficiency is related to
+the structure of a given scene.
+Finding suitable triangle pairs can be approached in many ways
+with varying trade-offs. We propose two pair discovery algorithms:
+(1) a simple greedy parallel algorithm that attempts to merge a triangle with its direct neighbors in the input triangle array and (2)
+more involved pairing based on parallel locally-ordered clustering
+(PLOC) [MB18].
+Simple greedy pairs. In parallel, each triangle attempts to
+merge with its successor, accepting valid pairs in a greedy manner using atomic instructions. This approach is strongly tied to the
+memory layout of the input scene representation and could require
+topological layout optimization to be successful.
+PLOC-based pairing. This approach incorporates the spatial
+proximity of the triangles and also enables SAH-driven pairing,
+beneficial for construction of efficient hierarchy. It resembles a
+standard PLOC iteration [MB18], where the set radius of candidates ordered by the Morton space-filling curve are considered for
+merging, with two major differences: (1) the distance() function returns the value ∞ for candidates without a shared edge, effectively
+disallowing their merge, and (2) successfully merged pairs are excluded from the subsequent iterations, maintaining only clusters of
+up to two primitives. The resulting set of leaves is then passed to a
+standard bottom-up construction algorithm.
+4.2. BVH Traversal
+Most contemporary massively parallel traversal algorithms are
+based on the so-called while-while design with persistent threads
+by Aila and Laine [AL09]. One loop evaluates bounding volume intersections, while the other evaluates scene geometry intersections
+in the BVH leaf nodes. Each of these loops fetches its own data
+according to the bounding volume and scene geometry representation. The while-while design strives to optimize the switches between these two contexts to minimize thread divergence and maximize hardware utilization.
+The fundamental difference of our algorithm lies in the fact that
+we require only a single loop, as due to our UBVH data structure
+© 2025 The Author(s).
+Computer Graphics Forum published by Eurographics and John Wiley & Sons Ltd.
+5 of 10
+ALGORITHM 1: Pseudocode of the traversal of a single ray using
+the N-wide UBVH.
+ray ← FetchRay()
+node ← FetchNode(root_id)
+stack ← ∅
+result ← INVALID
+repeat
+t_mins ← [BIG_FLOAT, ...]
+c_ids ← [INVALID_VALUE, ...]
+node_id ← INVALID_VALUE
+// intersect N-wide node
+for i ← 0 to N do
+result ← Intersect(node.child_sobb[i])
+if intersection found then
+if child is leaf then
+CheckTriangleHit()
+else
+t_mins[i] ← t
+c_ids[i] ← node.child_id[i]
+if child is closest by intersection distance then
+node_id ← node.child_id[i]
+if node_id is INVALID_VALUE then
+node_id ← StackPop(stack)
+// traversal will continue
+if node_id is valid id then
+node ← FetchNode(node_id)
+Sort(t_mins, c_ids)
+StackPushBackwards(stack, c_ids[i])
+until stack ̸= ∅
+StoreIntersection(result)
+we are able to evaluate both intersections equivalently. Hence, we
+do not need to consider the context switches inherent to traditional
+BVHs. Our additional ray-triangle intersection check is very fast,
+does not require additional data to be fetched from memory, and it
+is executed very rarely, as will be shown in the results. The pseudocode of the single ray traversal is provided in Alg. 1.
+The stack-based top-down traversal starts with the BVH root
+node and continuously evaluates intersections with all child nodes.
+If the child is a leaf, the additional fast triangle intersection verification test is performed (according to Eq. 4 or Eq. 6) and the
+valid intersection is stored locally. Additionally, we keep track of
+the closest non-leaf child as a candidate for the next iteration. If
+none is found, we try to get the next node from the stack. If the
+traversal should continue, we immediately retrieve the next node
+from the main memory, followed by a distance-based sort using a
+sorting network [Bat68; Gut14], hiding the computation in the latency of the memory access. Finally, the sorted nodes are pushed to
+stack in far→near order.
+Triangle intersection verification. If a leaf node is found, the
+ray-triangle intersection test is evaluated immediately. Here, it is
+important to realize that our test is performed on top of a ray-SOBB
+intersection that necessarily produces two hit points for a successful hit of a non-degenerate SOBB. For the cases of a single triangle and a parallelogram, we neglect the far intersection point due
+to the thickness of the SOBB being ϵ (see the discussion in Section 3.4). However, doing this also for butterflies might produce
+14678659, 0, Downloaded from https://onlinelibrary.wiley.com/doi/10.1111/cgf.70216, Wiley Online Library on [26/10/2026]. See the Terms and Conditions (https://onlinelibrary.wiley.com/terms-and-conditions) on Wiley Online Library for rules of use; OA articles are governed by the applicable Creative Commons License
+M. Káčerik & J. Bittner / Unified Bounding Volume Hierarchy
+M. Káčerik & J. Bittner / Unified Bounding Volume Hierarchy
+potentially incorrect results due to unexpected back-face culling or
+self-shadowing. Hence, if we care about the triangle backside and
+the triangle hit could not be found with the near point, the far point
+must also be considered. To avoid numerical issues with leaf SOBB
+boundaries in the uvw space, the coordinate corresponding to intersected face of SOBB is explicitly set to 0 or 1 when an intersection
+with the SOBB is found. This is done using knowledge of the slab
+planes that yield the nearest and farthest intersection.
+Dynamic ray fetch. The behavior of our algorithm is consistent
+with the findings of Ylitie et al. [YKL17] where dynamic ray fetch
+provides practically no real benefit for a binary BVH, but wide layouts benefit significantly.
+5. Results
+The presented method has been prototyped and evaluated in
+a Vulkan-based framework and its implementation is available
+online: https://dcgi.fel.cvut.cz/projects/ubvh/.
+All utilized BVHs are constructed on the GPU in the following series of steps:
+Baseline BVH. 2-wide AABB BVH is constructed using a single kernel launch variant of the PLOC++ algorithm [BDTD22] and
+also serves as a starting point for all transformed BVHs. Initial
+AABB clusters are formed using either scene triangles or triangle
+pairs for the extended UBVH and the search radius is 16.
+Collapsing. When appropriate, BVH is optimized with parallel
+SAH-based subtree collapsing [MB18], using SAH cost constants
+ci = 2, ct = 3 for the AABB BVH and ci = 2, ct = 4.5 for the other
+bounding volumes. The maximum leaf size is set to 8.
+Transformation. The corresponding bounding volume transformation algorithm is used to obtain 14-DOP BVH [KB24], OBB
+BVH [VEPG23], SOBB BVH [KB25], and UBVH. For SOBB and
+UBVH cases, we use a 64-DOP for the intermediate representation
+during the process.
+Layout optimization. Lastly, the hierarchy is packed to a final,
+traversal layout. We utilize 4-wide layouts, as they consistently
+outperform their binary counterpart in all our tested scenarios. For
+conversion, we used parallel conversion introduced by Benthin et
+al. [BMB*24]. Specialized compression is not applied for any of
+the methods.
+As a reference, we constructed 4-wide AABB BVH, 4-wide 14DOP BVH, 4-wide OBB BVH, 4-wide SOBB BVH, and also 4wide SOBB BVH without subtree collapsing (denoted SOBB*).
+Our proposed method is evaluated in the form of the 4-wide UBVH
+and the 4-wide extended UBVH. The topology of SOBB* matches
+the UBVH; these two data structures differ only in the content of
+the leaf nodes, i.e. the SOBB shape.
+For performance evaluation, we used eight scenes of geometric
+complexity varying between 1 and 13 million triangles. For each
+scene, we rendered about eight representative views (including far
+and close ones) at a resolution of 1920x1080 pixels. We used naive
+path tracing (i.e., no next event estimation, no Russian roulette)
+with eight samples per pixel, and we treated all surfaces as Lambertian. We used up to eight bounces per path which created sufficiently incoherent workload for interior-like scenes. The test was
+performed on a PC with an Intel i9-10900X, 128GB RAM, and an
+NVIDIA RTX 3080Ti with 12GB of VRAM.
+5.1. Measurements
+To evaluate the methods tested, we report the average number of
+primitives per leaf node, the total build time in milliseconds, and
+total memory requirements for storing the BVH and triangles in an
+optimized layout. To assess the traversal performance, we report
+the following statistics: average ray-bounding volume intersection
+tests per ray, average ray-triangle intersection tests per ray (both
+consider all rays traced regardless of their type), trace speed of primary rays, trace speed of secondary rays (both in millions of rays
+per second), and finally the total average time for frame for a given
+rendering scenario. The results are summarized in Tab. 1 and we
+discuss them below.
+5.1.1. Build times
+The construction of our UBVH structures is on average 3.5x slower
+than construction of 4-wide AABB BVH and 2.1x slower than the
+one of 4-wide SOBB BVH. The main bottleneck is the transformation of AABBs to SOBBs. Although the algorithm is exactly
+the same for our UBVH as for the SOBB BVH, unlike the collapsed SOBB BVH we have to process significantly more nodes
+to maintain full hierarchy with leaves of size one (or two). This is
+even more pronounced for the uncollapsed SOBB BVH, which has
+expensive leaf transformation and is on average 1.2x slower than
+UBVH.
+The extended UBVH shows that the overhead of the pair discovery algorithm can be completely recovered already when only
+a handful of pairs is found (such as for the Crown scene), and with
+higher number of pairs the total build time can be significantly reduced (such as for the Powerplant or Sheep scenes) compared to
+the baseline UBVH.
+5.1.2. Memory consumption
+For conventional BVHs, memory consumption can be divided into
+two parts. One is consumed by the hierarchy itself, and the other
+is consumed by the triangles, typically transformed into a representation favorable for the fast and precise intersection test. Our
+unified representation has a larger memory footprint for bounding
+volumes than AABB (12 floats for SOBB vs 6 floats for AABB)
+and is equivalent with OBBs and SOBBs.
+For triangles referenced from the traditional BVHs, we use a layout of 12 floats per triangle required for Woop’s triangle intersection test [Woo04; AL09]. Triangles in UBVH also use 12 floats
+per triangle as they are encoded as SOBBs. In extended UBVH
+a triangle pair is also represented with 12 floats (SOBB) and two
+bits identifying the particular triangle pair configuration which are
+stored inside the primitive ID field.
+The standard UBVH consumes on average 1.5x more memory
+than a 4-wide AABB BVH and 1.4x more memory than a 4-wide
+SOBB BVH. Consumption of an extended UBVH representation is
+directly tied to the number of triangle pairs in the hierarchy, consuming 0.5x the UBVH memory in an ideal case up to exactly
+© 2025 The Author(s).
+Computer Graphics Forum published by Eurographics and John Wiley & Sons Ltd.
+14678659, 0, Downloaded from https://onlinelibrary.wiley.com/doi/10.1111/cgf.70216, Wiley Online Library on [26/10/2026]. See the Terms and Conditions (https://onlinelibrary.wiley.com/terms-and-conditions) on Wiley Online Library for rules of use; OA articles are governed by the applicable Creative Commons License
+6 of 10
+Table 1: Performance comparison of UBVH and extended UBVH methods to the reference methods: 4-wide BVHs of AABBs, 14-DOPs,
+OBBs, and SOBBs. The star symbol denotes a BVH construction with no subtree collapsing. The italic font for the average triangle intersections for UBVH methods signifies that, unlike the references, most of the price of these tests is already covered in the bounding volume
+intersection.
+Scene
+Bounding
+#triangles volume
+Leaf Build time Memory req. Avg. tested
+Avg. tested
+Primary
+Secondary
+Avg. frame
+size
+(ms) ↓
+(MB) ↓ BVs per ray ↓ △ per ray ↓
+(MRps) ↑
+(MRps) ↑
+time (ms) ↓
+San Miguel [10.0M] AABB
+14-DOP
+OBB
+SOBB
+SOBB*
+UBVH
+UBVH ext.
+2.7 37 (1.00) 677 (1.00) 141.7
+3.6 53 (1.42) 794 (1.17) 113.3
+3.7 83 (2.24) 740 (1.09) 133.4
+3.7 63 (1.69) 740 (1.09) 131.2
+1.0 185 (4.97) 1494 (2.21) 142.7
+1.0 172 (4.62) 1015 (1.50) 142.4
+1.5 132 (3.56) 666 (0.98) 132.1
+(1.00)
+(0.80)
+(0.94)
+(0.93)
+(1.01)
+(1.00)
+(0.93)
+13.3
+10.2
+10.6
+11.6
+3.7
+2.3
+2.0
+(1.00)
+(0.76)
+(0.80)
+(0.87)
+(0.28)
+(0.17)
+(0.15)
+618
+513
+392
+408
+366
+506
+605
+(1.00)
+(0.83)
+(0.63)
+(0.66)
+(0.59)
+(0.82)
+(0.98)
+207
+161
+145
+195
+191
+210
+242
+(1.00)
+(0.78)
+(0.70)
+(0.94)
+(0.92)
+(1.02)
+(1.17)
+2188
+2810
+3141
+2374
+2436
+2179
+1893
+(1.00)
+(1.28)
+(1.44)
+(1.09)
+(1.11)
+(1.00)
+(0.87)
+Crown [3.5M]
+AABB
+14-DOP
+OBB
+SOBB
+SOBB*
+UBVH
+UBVH ext.
+2.5
+3.4
+3.6
+3.6
+1.0
+1.0
+1.1
+16
+21
+32
+24
+60
+53
+52
+(1.00)
+(1.32)
+(2.03)
+(1.54)
+(3.85)
+(3.41)
+(3.35)
+247
+289
+269
+269
+532
+362
+312
+(1.00)
+(1.17)
+(1.09)
+(1.09)
+(2.15)
+(1.47)
+(1.26)
+111.5
+88.1
+100.7
+101.8
+111.8
+111.8
+108.0
+(1.00)
+(0.79)
+(0.90)
+(0.91)
+(1.00)
+(1.00)
+(0.97)
+16.7
+12.4
+6.4
+10.0
+3.5
+1.5
+1.6
+(1.00) 1214
+(0.74) 902
+(0.39) 810
+(0.60) 812
+(0.21) 708
+(0.09) 863
+(0.10) 988
+(1.00)
+(0.74)
+(0.67)
+(0.67)
+(0.58)
+(0.71)
+(0.81)
+235
+207
+235
+283
+252
+296
+326
+(1.00)
+(0.88)
+(1.00)
+(1.20)
+(1.07)
+(1.26)
+(1.39)
+1220
+1400
+1254
+1060
+1194
+1011
+915
+(1.00)
+(1.15)
+(1.03)
+(0.87)
+(0.98)
+(0.83)
+(0.75)
+Bistro ext. [2.8M]
+AABB
+14-DOP
+OBB
+SOBB
+SOBB*
+UBVH
+UBVH ext.
+2.6
+3.4
+3.6
+3.6
+1.0
+1.0
+1.4
+17
+23
+32
+27
+61
+59
+50
+(1.00)
+(1.34)
+(1.84)
+(1.55)
+(3.56)
+(3.40)
+(2.87)
+193
+227
+212
+212
+421
+285
+202
+(1.00)
+(1.18)
+(1.10)
+(1.10)
+(2.19)
+(1.48)
+(1.05)
+158.6
+121.4
+134.8
+137.1
+153.2
+152.9
+153.9
+(1.00)
+(0.76)
+(0.85)
+(0.86)
+(0.97)
+(0.96)
+(0.97)
+37.5
+22.0
+12.6
+17.0
+6.0
+2.1
+2.3
+(1.00)
+(0.59)
+(0.34)
+(0.46)
+(0.16)
+(0.06)
+(0.06)
+634
+576
+496
+488
+416
+552
+578
+(1.00)
+(0.91)
+(0.78)
+(0.77)
+(0.66)
+(0.87)
+(0.91)
+132
+122
+143
+174
+162
+193
+196
+(1.00)
+(0.93)
+(1.08)
+(1.32)
+(1.23)
+(1.46)
+(1.49)
+2839
+3069
+2665
+2220
+2387
+1993
+1965
+(1.00)
+(1.08)
+(0.94)
+(0.78)
+(0.84)
+(0.70)
+(0.69)
+Mammoth [8.8M]
+AABB
+14-DOP
+OBB
+SOBB
+SOBB*
+UBVH
+UBVH ext.
+2.3 35 (1.00) 624 (1.00)
+3.2 51 (1.46) 745 (1.19)
+3.3 81 (2.35) 692 (1.11)
+3.3 58 (1.68) 692 (1.11)
+1.0 137 (3.96) 1310 (2.10)
+1.0 127 (3.66) 888 (1.42)
+1.7 92 (2.65) 536 (0.86)
+67.4
+50.9
+56.9
+56.2
+58.8
+58.8
+58.5
+(1.00)
+(0.75)
+(0.84)
+(0.83)
+(0.87)
+(0.87)
+(0.87)
+2.8
+2.4
+4.0
+2.5
+0.9
+0.6
+0.7
+(1.00)
+(0.85)
+(1.41)
+(0.89)
+(0.31)
+(0.22)
+(0.26)
+1360
+1146
+920
+1203
+1186
+1446
+1508
+(1.00)
+(0.84)
+(0.68)
+(0.88)
+(0.87)
+(1.06)
+(1.11)
+293
+273
+234
+336
+342
+416
+447
+(1.00)
+(0.93)
+(0.80)
+(1.15)
+(1.17)
+(1.42)
+(1.52)
+264
+291
+345
+247
+246
+202
+190
+(1.00)
+(1.10)
+(1.31)
+(0.94)
+(0.93)
+(0.77)
+(0.72)
+Powerplant [12.8M] AABB
+14-DOP
+OBB
+SOBB
+SOBB*
+UBVH
+UBVH ext.
+2.6 40 (1.00) 880 (1.00) 144.3 (1.00)
+3.7 58 (1.45) 1016 (1.16) 127.4 (0.88)
+3.9 87 (2.15) 944 (1.07) 157.4 (1.09)
+3.9 75 (1.87) 944 (1.07) 137.5 (0.95)
+1.0 223 (5.53) 1928 (2.19) 150.4 (1.04)
+1.0 208 (5.17) 1315 (1.50) 150.0 (1.04)
+1.6 161 (4.00) 840 (0.95) 151.2 (1.05)
+26.7
+12.7
+16.5
+14.6
+5.2
+2.5
+2.3
+(1.00)
+(0.48)
+(0.62)
+(0.55)
+(0.19)
+(0.10)
+(0.09)
+784
+546
+441
+568
+445
+582
+558
+(1.00)
+(0.70)
+(0.56)
+(0.72)
+(0.57)
+(0.74)
+(0.71)
+178
+150
+140
+203
+176
+244
+276
+(1.00)
+(0.84)
+(0.79)
+(1.14)
+(0.99)
+(1.37)
+(1.55)
+1736
+2086
+2243
+1542
+1814
+1318
+1185
+(1.00)
+(1.20)
+(1.29)
+(0.89)
+(1.04)
+(0.76)
+(0.68)
+Hairball [2.9M]
+AABB
+14-DOP
+OBB
+SOBB
+SOBB*
+UBVH
+UBVH ext.
+4.4
+5.1
+5.2
+5.2
+1.0
+1.0
+1.7
+11
+15
+22
+18
+46
+43
+29
+(1.00)
+(1.38)
+(1.99)
+(1.64)
+(4.15)
+(3.91)
+(2.63)
+172
+203
+194
+194
+427
+288
+180
+(1.00)
+(1.18)
+(1.13)
+(1.13)
+(2.48)
+(1.68)
+(1.05)
+165.4
+130.6
+147.6
+147.9
+165.8
+165.7
+159.7
+(1.00)
+(0.79)
+(0.89)
+(0.89)
+(1.00)
+(1.00)
+(0.97)
+45.8
+26.7
+12.7
+19.8
+4.3
+2.1
+2.0
+(1.00)
+(0.58)
+(0.28)
+(0.43)
+(0.09)
+(0.05)
+(0.04)
+523
+439
+411
+432
+326
+535
+548
+(1.00)
+(0.84)
+(0.79)
+(0.83)
+(0.62)
+(1.02)
+(1.05)
+89
+107
+128
+147
+136
+160
+177
+(1.00)
+(1.20)
+(1.43)
+(1.65)
+(1.52)
+(1.79)
+(1.98)
+3494
+2975
+2530
+2214
+2452
+2016
+1845
+(1.00)
+(0.85)
+(0.72)
+(0.63)
+(0.70)
+(0.58)
+(0.53)
+Bistro int. [1.0M]
+AABB
+14-DOP
+OBB
+SOBB
+SOBB*
+UBVH
+UBVH ext.
+2.5
+3.5
+3.6
+3.6
+1.0
+1.0
+1.5
+5.2
+7.2
+9.8
+8.8
+21
+20
+16
+(1.00)
+(1.39)
+(1.91)
+(1.71)
+(4.17)
+(3.92)
+(3.18)
+72
+84
+78
+78
+156
+106
+70
+(1.00)
+(1.16)
+(1.09)
+(1.09)
+(2.17)
+(1.47)
+(0.97)
+123.8
+96.8
+100.2
+102.6
+116.9
+116.4
+108.6
+(1.00)
+(0.78)
+(0.81)
+(0.83)
+(0.94)
+(0.94)
+(0.88)
+63.5
+34.6
+8.7
+14.9
+7.6
+2.0
+2.1
+(1.00)
+(0.55)
+(0.14)
+(0.23)
+(0.12)
+(0.03)
+(0.03)
+859
+554
+570
+636
+520
+623
+722
+(1.00)
+(0.64)
+(0.66)
+(0.74)
+(0.60)
+(0.73)
+(0.84)
+163
+144
+227
+256
+224
+378
+432
+(1.00)
+(0.88)
+(1.39)
+(1.56)
+(1.37)
+(2.31)
+(2.64)
+2963
+3400
+2197
+1955
+2243
+1362
+1192
+(1.00)
+(1.15)
+(0.74)
+(0.66)
+(0.76)
+(0.46)
+(0.40)
+Sheep [10.7M]
+AABB
+14-DOP
+OBB
+SOBB
+SOBB*
+UBVH
+UBVH ext.
+4.3
+5.0
+4.8
+4.8
+1.0
+1.0
+1.5
+52
+68
+106
+80
+187
+172
+124
+(1.00) 644 (1.00) 245.1
+(1.29) 760 (1.18) 331.8
+(2.02) 731 (1.14) 249.4
+(1.52) 738 (1.15) 249.1
+(3.57) 1602 (2.49) 380.0
+(3.29) 1086 (1.69) 379.8
+(2.38) 720 (1.12) 334.3
+(1.00)
+(1.35)
+(1.02)
+(1.02)
+(1.55)
+(1.55)
+(1.36)
+290.9
+258.0
+135.1
+121.3
+85.0
+3.4
+3.3
+(1.00)
+(0.89)
+(0.46)
+(0.42)
+(0.29)
+(0.01)
+(0.01)
+13 (1.00) 3.8 (1.00) 61363 (1.00)
+32 (2.46) 11 (2.84) 21863 (0.36)
+78 (5.97) 32 (8.44) 7522 (0.12)
+100 (7.65) 37 (9.72) 6455 (0.11)
+48 (3.67) 24 (6.20) 10454 (0.17)
+128 (9.70) 34 (8.94) 6817 (0.11)
+168 (12.76) 45 (11.82) 5171 (0.08)
+© 2025 The Author(s).
+Computer Graphics Forum published by Eurographics and John Wiley & Sons Ltd.
+14678659, 0, Downloaded from https://onlinelibrary.wiley.com/doi/10.1111/cgf.70216, Wiley Online Library on [26/10/2026]. See the Terms and Conditions (https://onlinelibrary.wiley.com/terms-and-conditions) on Wiley Online Library for rules of use; OA articles are governed by the applicable Creative Commons License
+7 of 10
+M. Káčerik & J. Bittner / Unified Bounding Volume Hierarchy
+M. Káčerik & J. Bittner / Unified Bounding Volume Hierarchy
+5.1.3. Average number of intersection tests
+Due to the tight fit of SOBBs, our UBVH on average requires approximately the same number of the bounding volume intersections
+compared to the baseline AABB, despite the fact that the baseline BVH with collapsed subtrees is shallower. An exception is the
+Sheep scene, where the subtree collapsing significantly reduces the
+number of nodes in the tree. However, this metric should be considered together with the average ray-triangle intersections.
+In UBVH, most of the work necessary for the ray-triangle intersection is already covered by the ray-SOBB intersection. The
+ray-triangle intersection verification itself is cheap and much more
+efficient than the ray-triangle intersection used in other methods.
+The practical cost of the UBVH ray-triangle tests is reduced even
+more as they require no additional data to be fetched. Thus, the
+numbers in the related column in Tab. 1 are in italics to indicate that
+although they represent the same idea, they are not directly comparable to the rest of the values. In addition, the deeper hierarchy of
+UBVH with leaf bounding volumes directly fit to triangles leads to
+a very low number of ray-triangle intersection verifications.
+5.1.4. Ray tracing speed
+We first discuss results for all scenes excluding the Sheep scene,
+which has a dedicated section below. Our results are consistent
+with findings for SOBB BVHs [KB25], that tight bounding volumes with more data and more expensive intersection test tend to
+degrade the performance of highly coherent primary rays, unless
+the structure of the scene is complex enough (e.g., the Hairball and
+Mammoth scenes). Still, UBVH is, on average, 1.1x faster and extended UBVH is about 1.2x faster than the 4-wide SOBB BVH for
+primary rays.
+On the other hand, incoherent secondary rays benefit significantly from reduced overlaps of tight bounding volumes, with
+UBVH being on average about 1.5x and extended UBVH about
+1.7x faster than the baseline AABB BVH. UBVH also outperforms
+SOBB BVH with 1.2x and 1.3x faster trace speeds of secondary
+rays, respectively.
+It is known that for path tracing, majority of time is spent on the
+traversal of secondary rays (over 90% in most of our test scenarios).
+Thus, the overall rendering performance is strongly correlated with
+secondary rays performance. The UBVH resulted in the best frame
+times for all scenes tested.
+Sheep scene. Scenes such as Sheep are a common outlier used
+specifically in the research of tight bounding volumes [WMZ*20;
+VEPG23; KB24; KB25]. Here, tubular shapes tesselated from
+curves simulating fur form a dense, massively overlapping structure of long, thin, and arbitrarily oriented primitives. In addition to
+the utilization of tightly fitting SOBBs, the great success of our extended UBVH is due to a huge number of triangle pairs in the form
+of parallelograms and butterflies (depending on the algorithm) that
+can be exploited by our method.
+5.1.5. Triangle pairs
+The extended UBVH results presented in Tab. 1 were obtained with
+triangle pairs discovered by 4 iterations of the PLOC-based pairing
+algorithm with a radius of 8, empirically proven to be reasonable
+default values, although the parameters could be tuned adaptively
+per scene for best results. The success rate and pair distribution of
+the settings chosen is expressed as the reduction in the total number
+of BVH nodes in Fig. 6.
+Rel. node count
+the same amount in the worst case. Our extended UBVH pairing
+achieved about 1.5x reduction in memory consumption compared
+to standard UBVH and is roughly equivalent to AABB BVH, despite the larger memory footprint of the bounding volume representation. Furthermore, with the exception of an underwhelming
+pairing in the Crown scene, the extended UBVH consumes roughly
+equivalent amount of memory as the AABB BVH and less than
+other reference BVHs (using 12 float triangle representaion for fast
+intersection test [AL09]).
+Butterflies
+Parallelograms
+Triangles
+1.0
+0.5
+0.0
+San
+uel
+Mig
+l
+.
+.
+t
+wn
+ext moth rplan airbal ro int Sheep
+Cro istro
+t
+m owe
+s
+H
+a
+i
+B
+M
+B
+P
+Figure 6: Relative reduction of primitives using our PLOC-based
+algorithm for discovery of triangle pairs with a common edge.
+We also tested the greedy pairing algorithm as described in 4.1.2
+and report the results in Tab 2. In the top part, we provide relative
+average values over the scenes except the Sheep, which is handled
+separately. Despite the fact that the algorithm is simpler and faster
+on its own, it also typically discovers fewer pairs, and consequently,
+the total build time is overwhelmed by the transformation cost of
+more nodes, leading also to increased memory requirements and
+slower trace times.
+The exception is the Sheep scene, where due to the shape and algorithmically produced topological layout allows the greedy algorithm to discover more parallelogram pairs faster, leading to smaller
+memory footprint and increased traversal performance.
+Table 2: Relative comparison of the PLOC-based and greedy triangle pairing algorithms introduced in Sec. 4.1.2. Greedy algorithm
+performs on average worse, however with favorable scene topology
+it can outperform the PLOC, as proven by the Sheep scene.
+Pairing method Leaf size Build time Memory Secondary RT
+avg. w/o Sheep
+PLOC pairs
+Greedy pairs
+1.50
+1.21
+1.00
+1.21
+1.00
+1.23
+1.00
+0.95
+Sheep
+PLOC pairs
+Greedy pairs
+1.50
+1.70
+1.00
+0.87
+1.00
+0.92
+1.00
+1.09
+© 2025 The Author(s).
+Computer Graphics Forum published by Eurographics and John Wiley & Sons Ltd.
+14678659, 0, Downloaded from https://onlinelibrary.wiley.com/doi/10.1111/cgf.70216, Wiley Online Library on [26/10/2026]. See the Terms and Conditions (https://onlinelibrary.wiley.com/terms-and-conditions) on Wiley Online Library for rules of use; OA articles are governed by the applicable Creative Commons License
+8 of 10
+5.2. Discussion and Limitations
+Traversal. Our UBVH traversal pipeline is limited by global
+memory access latency. This is partially hidden by the full sorting
+of children nodes, but another meaningful task, such as stack sanitation, could be investigated. We currently fetch the entire uncompressed wide BVH node at once, creating pressure on the register
+allocation. Our experiments with 8-wide nodes in this fashion were
+strongly hindered. Other approaches could attempt to efficiently
+interleave partial node fetches and intersection computations with
+precomputed child node ordering, for example, as proposed by Ylitie et al. [YKL17]. Additionally, a shared memory could be utilized
+to partially cover the traversal stack for faster memory access.
+Numerical stability. Ray tracing, as any other computation in
+finite precision, is prone to floating point errors. We use worldspace ϵ-thresholds for computing SOBB bounds and uvw parametric space ϵ-thresholds for the triangle intersection verification.
+Although we do not observe precision related artifacts in tested
+scenes, to provably achieve watertightness of the SOBB-based triangle intersection, our method would need to be extended as done
+by Woop et al. for triangles [WBW13].
+Compression. State-of-the-art GPU-oriented ray tracing implementations, such as the work of Ylitie et al. [YKL17], utilize axisaligned bounding boxes with reduced precision organized in a wide
+compressed BVH node layout. Due to unified representation of
+bounding volumes and scene geometry, traditional lossy compression methods such as bounding volume quantization are not trivially applicable to UBVH, as they will also be applied to the geometry itself. As we do not use compressed layout for any of the
+evaluated methods, a comparison with such an approach is missing. We acknowledge that in specific cases it might outperform our
+implementation.
+6. Conclusion and Future Work
+We proposed a unified representation of bounding volumes and triangular geometry for BVHs based on skewed oriented bounding
+boxes. This unified representation allows for a simplified design of
+the BVH traversal algorithm for ray tracing, leading to a considerable acceleration of traversal of incoherent rays. We also presented
+a method for efficient representation of triangle pairs, leading to
+reduced memory consumption and further accelerating ray tracing.
+For tracing incoherent rays, the UBVH methods outperformed traditional AABB BVHs as well as SOBB, 14-DOP, and OBB BVHs
+in all tested scenes.
+There are numerous possible extensions of our work. Designing
+a compressed SOBB representation and improving the algorithm
+for determining triangle pairs would yield an even lower memory
+footprint and faster trace times. Optimizing BVH topology directly
+for the SOBBs would likely further improve the traversal performance. We also believe that our method could serve as a basis for
+designing a novel hardware architecture for ray tracing polygonal
+scenes.
+Acknowledgments
+This work was supported by the Research Center for Informatics (CZ.02.1.01/0.0/0.0/16_019/0000765) and by the
+© 2025 The Author(s).
+Computer Graphics Forum published by Eurographics and John Wiley & Sons Ltd.
+9 of 10
+Grant Agency of the Czech Technical University in Prague
+(SGS25/150/OHK3/3T/13). The Crown scene is courtesy of
+Martin Lubich, the Sheep scene is part of the Blender Foundation’s
+demo scene repository, and the Mammoth scene is part of the
+Smithsonian Institution digitized 3D collection. The rest of
+the scenes come from Morgan McGuire’s Computer Graphics
+Archive [McG17]. Open access publishing facilitated by Ceske
+vysoke uceni technicke v Praze, as part of the Wiley - CzechELib
+agreement.
+References
+[AKL13] A ILA, T IMO, K ARRAS, T ERO, and L AINE, S AMULI. “On quality metrics of bounding volume hierarchies”. Proceedings of the 5th
+High-Performance Graphics Conference. HPG ’13. Anaheim, California: Association for Computing Machinery, 2013, 101–107 2.
+[AL09] A ILA, T IMO and L AINE, S AMULI. “Understanding the Efficiency
+of Ray Traversal on GPUs”. Proceedings of the Conference on High Performance Graphics 2009. HPG ’09. New Orleans, Louisiana: Association for Computing Machinery, 2009, 145–149 5, 6, 8.
+[Bat68] BATCHER, K ENNETH E. “Sorting networks and their applications”. Proceedings of the April 30–May 2, 1968, spring joint computer
+conference. 1968, 307–314 5.
+[BDTD22] B ENTHIN, C ARSTEN, D RABINSKI, R ADOSLAW, T ESSARI,
+L ORENZO, and D ITTEBRANDT, A DDIS. “PLOC++: Parallel LocallyOrdered Clustering for Bounding Volume Hierarchy Construction Revisited”. Proc. ACM Comput. Graph. Interact. Tech. 5.3 (July 2022) 2,
+6.
+[BK18] B INDER, N IKOLAUS and K ELLER, A LEXANDER. “Fast, high precision ray/fiber intersection using tight, disjoint bounding volumes”.
+ACM SIGGRAPH 2018 Talks. SIGGRAPH ’18. Vancouver, British
+Columbia, Canada: Association for Computing Machinery, 2018 2.
+[BMB*24] B ENTHIN, C ARSTEN, M EISTER, DANIEL, BARCZAK,
+J OSHUA, et al. “H-PLOC: Hierarchical Parallel Locally-Ordered
+Clustering for Bounding Volume Hierarchy Construction”. Proc. ACM
+Comput. Graph. Interact. Tech. 7.3 (Aug. 2024) 2, 3, 6.
+[CB17] C ALDERON, S TÉPHANE and B OUBEKEUR, TAMY. “Bounding
+proxies for shape approximation”. ACM Trans. Graph. 36.4 (2017), 57–
+1 2.
+[CGM11] C HANG, C HIA -T CHE, G ORISSEN, BASTIEN, and M ELCHIOR,
+S AMUEL. “Fast oriented bounding box optimization on the rotation group SO(3, R)”. ACM Transactions on Graphics (TOG) 30.5
+(2011), 1–16 2.
+[EBM12] E ISEMANN, M ARTIN, BAUSZAT, PABLO, and M AGNOR, M AR CUS. Implicit Object Space Partitioning: The No-Memory BVH. Tech.
+rep. 16. Computer Graphics Lab, TU Braunschweig, Jan. 2012 2.
+[FLPE16] F UETTERLING, V., L OJEWSKI, C., P FREUNDT, F.-J., and
+E BERT, A. “Parallel spatial splits in bounding volume hierarchies”. Proceedings of the 16th Eurographics Symposium on Parallel Graphics and
+Visualization. EGPGV ’16. Groningen, The Netherlands: Eurographics
+Association, 2016, 21–30 2.
+[Got00] G OTTSCHALK, S TEFAN A RIC. Collision queries using oriented
+bounding boxes. The University of North Carolina at Chapel Hill,
+2000 2.
+[GS87] G OLDSMITH, J EFFREY and S ALMON, J OHN. “Automatic Creation
+of Object Hierarchies for Ray Tracing”. IEEE Computer Graphics and
+Applications 7.5 (May 1987), 14–20 2.
+[Gut14] G UTHE, M ICHAEL. “Latency Considerations of Depth-first GPU
+Ray Tracing”. Eurographics 2014 - Short Papers. Ed. by G ALIN, E RIC
+and WAND, M ICHAEL. The Eurographics Association, 2014 5.
+[KA13] K ARRAS, T ERO and A ILA, T IMO. “Fast parallel construction of
+high-quality bounding volume hierarchies”. HPG ’13. Anaheim, California: Association for Computing Machinery, 2013, 89–99 2.
+14678659, 0, Downloaded from https://onlinelibrary.wiley.com/doi/10.1111/cgf.70216, Wiley Online Library on [26/10/2026]. See the Terms and Conditions (https://onlinelibrary.wiley.com/terms-and-conditions) on Wiley Online Library for rules of use; OA articles are governed by the applicable Creative Commons License
+M. Káčerik & J. Bittner / Unified Bounding Volume Hierarchy
+M. Káčerik & J. Bittner / Unified Bounding Volume Hierarchy
+[KB24] K ÁČERIK, M ARTIN and B ITTNER, J I ŘÍ. “SAH-Optimized k-DOP
+Hierarchies for Ray Tracing”. Proceedings of the ACM on Computer
+Graphics and Interactive Techniques 7.3 (2024), 1–16 2, 6, 8.
+[WBW13] W OOP, S VEN, B ENTHIN, C ARSTEN, and WALD, I NGO. “Watertight ray/triangle intersection”. Journal of Computer Graphics Techniques (JCGT) 2.1 (2013), 65–82 9.
+[KB25] K ÁČERIK, M. and B ITTNER, J. “SOBB: Skewed Oriented Bounding Boxes for Ray Tracing”. Computer Graphics Forum 44.2 (2025) 2–
+6, 8.
+[WMZ*20] WALD, I NGO, M ORRICAL, NATE, Z ELLMANN, S TEFAN, et
+al. “Using Hardware Ray Transforms to Accelerate Ray/Primitive Intersections for Long, Thin Primitive Types”. Proc. ACM Comput. Graph.
+Interact. Tech. 3.2 (Aug. 2020) 8.
+[KHM*98] K LOSOWSKI, JAMES T, H ELD, M ARTIN, M ITCHELL,
+J OSEPH SB, et al. “Efficient collision detection using bounding volume
+hierarchies of k-DOPs”. IEEE transactions on Visualization and Computer Graphics 4.1 (1998), 21–36 2.
+[KZ97] KONE ČNÝ, P ETR and Z IKAN, K AREL. “Lower bound of distance
+in 3d”. Proceedings Winter School of Computer Graphics(WCSG ’97) 3
+(1997), 640–649 2.
+[LK11] L ARSSON, T HOMAS and K ÄLLBERG, L INUS. “Fast computation of tight-fitting oriented bounding boxes”. Game Engine Gems 2
+(2011), 1 2.
+[Woo04] W OOP, S VEN. “A Programmable Hardware Architecture for
+Real-time Ray Tracing of Coherent Dynamic Scenes”. (Apr. 2004) 6.
+[WWB*14] WALD, I NGO, W OOP, S VEN, B ENTHIN, C ARSTEN, et al.
+“Embree: a kernel framework for efficient CPU ray tracing”. ACM Trans.
+Graph. 33.4 (July 2014) 3.
+[YKL17] Y LITIE, H ENRI, K ARRAS, T ERO, and L AINE, S AMULI. “Efficient incoherent ray traversal on GPUs through compressed wide
+BVHs”. Proceedings of High Performance Graphics. HPG ’17. Los Angeles, California: Association for Computing Machinery, 2017 2, 6, 9.
+[LYM07] L AUTERBACH, C HRISTIAN, YOON, S UNG -E UI, and
+M ANOCHA, D INESH. “Ray-Strips: A Compact Mesh Representation for Interactive Ray Tracing”. 2007 IEEE Symposium on Interactive
+Ray Tracing. 2007, 19–26 2.
+[LYTM08] L AUTERBACH, C HRISTIAN, YOON, S UNG - EUI, TANG,
+M ING, and M ANOCHA, D INESH. “ReduceM: Interactive and Memory
+Efficient Ray Tracing of Large Models”. Computer Graphics Forum 27.4
+(2008), 1313–1321 2.
+[MB18] M EISTER, DANIEL and B ITTNER, J I ŘÍ. “Parallel locally-ordered
+clustering for bounding volume hierarchy construction”. IEEE transactions on visualization and computer graphics 24.3 (2018), 1345–1353 2,
+5, 6.
+[MB22] M EISTER, DANIEL and B ITTNER, J I ŘÍ. “Performance Comparison of Bounding Volume Hierarchies for GPU Ray Tracing”. Journal of
+Computer Graphics Techniques (JCGT) 11.4 (Oct. 2022), 1–19 2.
+[McG17] M C G UIRE, M ORGAN. Computer Graphics Archive. July 2017 9.
+[MOB*21] M EISTER, DANIEL, O GAKI, S HINJI, B ENTHIN, C ARSTEN, et
+al. “A survey on bounding volume hierarchies for ray tracing”. Computer
+Graphics Forum. Vol. 40. 2. Wiley Online Library. 2021, 683–712 2.
+[ORo85] O’ROURKE, J OSEPH. “Finding minimal enclosing boxes”. International journal of computer & information sciences 14 (1985), 183–
+199 2.
+[PK87] P ULLEYBLANK, RON and K APENGA, J OHN. “The Feasibility of a
+VLSI Chip for Ray Tracing Bicublic Patches”. IEEE Computer Graphics
+and Applications 7.3 (1987), 33–44 2.
+[SE10] S EGOVIA, B ENJAMIN and E RNST, M ANFRED. “Memory efficient
+ray tracing with hierarchical mesh quantization”. Proceedings of Graphics Interface 2010. GI ’10. Ottawa, Ontario, Canada: Canadian Information Processing Society, 2010, 153–160 2.
+[SVCM23] S ABINO,
+RODOLFO,
+V IDAL,
+C RETO
+AUGUSTO,
+C AVALCANTE -N ETO, J OAQUIM B ENTO, and M AIA, J OSÉ G ILVAN
+RODRIGUES. “Building Oriented Bounding Boxes by the intermediate
+use of ODOPs”. Computers & Graphics 116 (2023), 251–261 2.
+[VEPG23] V ITSAS, N ICK, E VANGELOU, I ORDANIS, PAPAIOANNOU,
+G EORGIOS, and G KARAVELIS, A NASTASIOS. “Parallel Transformation
+of Bounding Volume Hierarchies into Oriented Bounding Box Trees”.
+Computer Graphics Forum 42.2 (2023). Ed. by M YSZKOWSKI KarolNiessner, M ATTHIAS, 245–25410 pages 2, 3, 6, 8.
+[VWB19] VAIDYANATHAN, K., W OOP, S., and B ENTHIN, C. “Wide
+BVH traversal with a short stack”. Proceedings of the Conference on
+High-Performance Graphics. HPG ’19. Strasbourg, France: Eurographics Association, 2019, 15–19 2.
+[WBB08] WALD, I NGO, B ENTHIN, C ARSTEN, and B OULOS, S OLOMON.
+“Getting rid of packets - Efficient SIMD single-ray traversal using multibranching BVHs -”. 2008 IEEE Symposium on Interactive Ray Tracing.
+2008, 49–57 2.
+© 2025 The Author(s).
+Computer Graphics Forum published by Eurographics and John Wiley & Sons Ltd.
+14678659, 0, Downloaded from https://onlinelibrary.wiley.com/doi/10.1111/cgf.70216, Wiley Online Library on [26/10/2026]. See the Terms and Conditions (https://onlinelibrary.wiley.com/terms-and-conditions) on Wiley Online Library for rules of use; OA articles are governed by the applicable Creative Commons License
+10 of 10

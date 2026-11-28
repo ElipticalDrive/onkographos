@@ -1,0 +1,227 @@
+--- v003.md
++++ v004.md
+@@ -4,120 +4,143 @@
+ 
+ ## Overview
+-Early Stop (ES) is an optimization for sphere tracing procedural volumes that limits the evaluation of noise frequencies ($f_i$) by breaking the summation loop as soon as the current position is determined to be outside the bounding volume of the current octave [S1]. It solves the problem of unnecessary computational cost when higher-frequency noise terms cannot possibly influence the isosurface intersection because their bounding volumes do not contain the isovalue [S1]. Unlike [Empty-space skipping](1002-empty-space-skipping.md) which skips entire ray segments, ES reduces the per-step cost by skipping function evaluations within a single step, trading a potential increase in total step count for fewer evaluations per step [S1].
++Early Stop (ES) is an optimization for sphere tracing procedural volumes that limits the computation of noise frequencies ($f_i$) during ray marching to reduce computational cost [S1]. It solves the problem of excessive function evaluations by breaking the summation loop early based on the position's relation to Bounding Volume Hierarchy (BVH) bounding volumes [S1]. Unlike standard sphere tracing which computes all octaves, ES trades a small increase in per-step function evaluations (in variants like ES+1) for a significant reduction in the total number of BVH traversal steps, avoiding the slow convergence and "grazing ray" penalties associated with ES+0 [S1].
+ 
+ ## How it works
+ **Inputs:**
+-- Ray origin $\mathbf{o}$ and direction $\mathbf{d}$ [G].
+-- Isosurface value $v$ [S1].
+-- Procedural noise function defined by octaves $f_i$, where $i$ ranges from $0$ to $n$ [S1].
+-- Bounding volume hierarchy (BVH) where each level $i$ has an upper bound function $\text{BVH}_{i+}(\mathbf{p})$ and optionally a lower bound $\text{BVH}_{i-}(\mathbf{p})$ [S1].
+-- Parameter $k$: the number of additional octaves to compute beyond the minimum required index $i_{\min}$ [S1].
++*   Ray origin $\mathbf{o}$ and direction $\mathbf{d}$.
++*   Isosurface value $v$.
++*   BVH structure where each level $i$ has an upper bound inclusion function $BVH_{i+}(\mathbf{p})$ and lower bound $BVH_{i-}(\mathbf{p})$ [S1].
++*   Noise frequency functions $f_i(\mathbf{p})$ for $i = 0, \dots, n$ [S1].
++*   Parameter $k$: The number of additional functions to compute beyond the minimum index $i_{min}$ before breaking the loop [S1].
+ 
+ **Outputs:**
+-- Intersection point $\mathbf{p}$ and distance $t$ along the ray [G].
++*   Intersection distance $t$ or null if no intersection is found within the ray length [S1].
+ 
+ **Data Structures:**
+-- **BVH Bounds:** For each octave $i$, the bounding volume is represented by inclusion functions [S1]. The upper bound $\text{BVH}_{i+}(\mathbf{p})$ provides a value such that $f_i(\mathbf{p}) \le \text{BVH}_{i+}(\mathbf{p})$ [S1]. The lower bound $\text{BVH}_{i-}(\mathbf{p})$ satisfies $f_i(\mathbf{p}) \ge \text{BVH}_{i-}(\mathbf{p})$ [S1]. These bounds are typically computed using interval arithmetic or Taylor inclusion functions [S1].
++*   **BVH:** A hierarchy of bounding volumes. For each level $i$, the structure provides an upper bound function $BVH_{i+}(\mathbf{p})$ which returns the maximum possible value of the noise function $f_i(\mathbf{p})$ within that volume [S1].
+ 
+ **Algorithm Steps:**
+-1. **Initialize:** Set current ray position $\mathbf{p} = \mathbf{o}$, accumulated distance $t = 0$, and maximum step limit [G].
+-2. **Ray Marching Loop:** While $\mathbf{p}$ has not converged to the isosurface within a tolerance $\epsilon$:
+-    a. **Find Minimum Index:** Determine $i_{\min}$, the first octave index where the position lies outside the bounding volume: $i_{\min} = \min\{i \mid \text{BVH}_{i+}(\mathbf{p}) < v\}$ [S1]. If all bounds remain above $v$, set $i_{\min} = n$ [G].
+-    b. **Summation with Early Stop:** Compute the accumulated sum $S$ starting from $i_{\min}$ up to $i_{\min} + k$. Break the octave loop immediately after computing $f_{i_{\min}+k}$ [S1].
+-    c. **Step Size Calculation:** Calculate the safe step size $\Delta t$ using the accumulated sum and the derivative bounds of the computed octaves [G]. Using fewer octaves (smaller $k$) typically yields smaller step sizes because the bounding volume of the truncated sum is tighter or the derivative estimate is less accurate [S1].
+-    d. **Advance Ray:** Update $\mathbf{p} \leftarrow \mathbf{p} + \Delta t \cdot \mathbf{d}$ and $t \leftarrow t + \Delta t$ [G].
+-3. **Convergence Check:** If $\Delta t < \epsilon$, return $\mathbf{p}$ and $t$ [G].
+-
+-**Formulas:**
+-- **Minimum Index Condition:**
+-  $$ i_{\min} = \min\{i \mid \text{BVH}_{i+}(\mathbf{p}) < v\} $$
+-  [S1]
+-- **Alternative Condition (Inside Volume):**
+-  When inside the volume and searching for the isosurface, $i_{\min}$ can equivalently be defined using the lower bound:
+-  $$ \text{BVH}_{i-}(\mathbf{p}) > v $$
+-  [S1]
+-- **Summation Limit:**
+-  The octave loop breaks after computing:
+-  $$ f_{i_{\min}+k} $$
+-  [S1]
+-
+-**Parameters:**
+-- $v$: The isovalue for the isosurface [S1].
+-- $k$: The number of additional functions to compute beyond $i_{\min}$. Typical value is $1$ (Early stop+1) [S1].
+-
+-**Edge Cases and Pitfalls:**
+-- **Early Stop+0 ($k=0$):** Computing only $f_{i_{\min}}$ causes slow convergence [S1]. The ray steps safely to the outer bounding volume and repeats, massively increasing the total number of steps, especially for grazing rays (rays passing close to but not entering a bounding volume) [S1].
+-- **Step Size Reduction:** Stopping early reduces the number of $f_i$ computed but may result in smaller step sizes, potentially increasing the total number of steps required to converge [S1]. This could raise the final cost if the overhead of extra steps outweighs the savings in function evaluations [S1].
+-- **Grazing Rays:** ES+0 is particularly bad for grazing rays [S1]. ES+1 drastically diminishes this performance loss by considering one extra level of the BVH, making slow convergence rare [S1].
+-- **Precision:** The bounds $\text{BVH}_{i+}$ and $\text{BVH}_{i-}$ must be tight enough to be useful [S1]. Loose bounds may cause premature termination or failure to detect intersections [G].
++1.  **Initialize:** Start sphere tracing from the ray origin. Let current position be $\mathbf{p}$ and step size $s$ [S1].
++2.  **Find Minimum Index:** For the current position $\mathbf{p}$, determine the minimum index $i_{min}$ such that the position is outside the bounding volume at level $i_{min}$ [S1]. This is defined as:
++    $$ i_{min} = \min\{i \mid BVH_{i+}(\mathbf{p}) < v\} $$
++    If the position is inside the volume and searching for the isosurface, $i_{min}$ can equivalently be defined using the lower bound: $BVH_{i-}(\mathbf{p}) > v$ [S1].
++3.  **Compute Sum:** Evaluate the noise sum $F(\mathbf{p})$ starting from $i_{min}$. The loop computes $f_i(\mathbf{p})$ for $i$ from $i_{min}$ up to $i_{min} + k$ [S1].
++    *   During this computation, check $BVH_{i+}(\mathbf{p})$ for each $i$. If $BVH_{i+}(\mathbf{p}) < v$, the position is outside the bounding volume for that frequency, and further higher-frequency terms are unnecessary for determining the step size at this specific precision level [S1].
++4.  **Step:** Calculate the step size $s$ based on the computed sum $F(\mathbf{p})$ and the isovalue $v$ [S1].
++5.  **Advance:** Move the ray forward by $s$ [S1].
++6.  **Repeat:** Return to Step 2 until the isosurface is hit or the ray exits the scene [S1].
+ 
+ **Pseudocode:**
+ ```python
+-def early_stop_sphere_trace(ray_origin, ray_direction, isovalue, bvhs, noise_func, k=1, tolerance=1e-4, max_steps=1000):
++def sphere_trace_early_stop(ray_origin, ray_dir, isovalue, bvh, k):
+     """
+-    Perform sphere tracing with Early Stop optimization.
++    Sphere tracing with Early Stop optimization.
+     
+     Args:
+-        ray_origin: Initial ray position.
+-        ray_direction: Normalized ray direction.
+-        isovalue: The target isovalue v.
+-        bvhs: List of BVH bound objects. bvhs[i].upper_bound(p) returns BVH_i+(p).
+-        noise_func: Callable noise_func(i, p) returning f_i(p).
+-        k: Number of additional octaves to compute beyond i_min.
+-        tolerance: Convergence threshold.
+-        max_steps: Safety limit for ray marching iterations.
++        ray_origin: 3D vector, ray origin.
++        ray_dir: 3D vector, ray direction (normalized).
++        isovalue: float, the threshold value for the isosurface.
++        bvh: Object providing method get_upper_bound(level, point) returning BVH_i+(p).
++        k: int, number of additional octaves to compute beyond i_min.
+         
+     Returns:
+-        Intersection point and distance, or None if no intersection.
++        float: Distance to intersection, or infinity if not found.
+     """
+-    p = ray_origin
+     t = 0.0
++    max_steps = 1000  # Implementation detail [G]
+     
+-    for _ in range(max_steps):
+-        # 1. Find i_min: first octave where upper bound drops below isovalue
+-        i_min = len(bvhs)
+-        for i in range(len(bvhs)):
+-            if bvhs[i].upper_bound(p) < isovalue:
+-                i_min = i
++    for step in range(max_steps):
++        p = ray_origin + ray_dir * t
++        
++        # Step 2: Find i_min
++        # Find the first level i where the upper bound is below the isovalue
++        i_min = 0
++        while True:
++            # Assume bvh.get_upper_bound returns float
++            upper_bound = bvh.get_upper_bound(i_min, p)
++            if upper_bound < isovalue:
+                 break
+-                
+-        # 2. Compute sum from i_min to i_min + k
+-        accumulated_sum = 0.0
+-        step_candidates = []
+-        for i in range(i_min, min(i_min + k + 1, len(bvhs))):
+-            accumulated_sum += noise_func(i, p)
+-            step_candidates.append(bvhs[i].upper_bound(p) - accumulated_sum)
++            i_min += 1
++            # Safety break if i_min exceeds max BVH depth [G]
++            if i_min >= bvh.max_depth():
++                break
++        
++        # Step 3: Compute sum from i_min to i_min + k
++        noise_value = 0.0
++        # Determine the upper limit for the loop
++        limit = i_min + k + 1
++        
++        # If i_min reached max depth, we might need to handle remaining terms differently
++        # but typically ES stops evaluating higher frequencies entirely if they are outside bounds.
++        # Here we compute the specific range defined by ES+k.
++        for i in range(i_min, limit):
++            # Compute frequency function f_i(p)
++            # Note: In FBM, f_i is often scaled. The source implies computing f_i directly.
++            freq_val = compute_frequency(i, p) 
++            noise_value += freq_val
+             
+-        # 3. Calculate step size using standard sphere tracing logic [G]
+-        step_size = max(min(step_candidates), 1e-6)
++            # Optimization: If during the loop we encounter a level where 
++            # BVH upper bound < isovalue, we could technically stop earlier,
++            # but ES+k specifically computes up to i_min + k regardless of 
++            # intermediate bounds to ensure step size stability [S1].
++            # The primary break condition is the loop limit.
++            
++        # Step 4: Calculate step size
++        # Standard sphere tracing step size calculation
++        # s = |noise_value - isovalue| / max_derivative [G]
++        # The source notes that step size tends to get smaller as i gets higher [S1].
++        # We assume a standard sphere tracing step function here.
++        step_size = calculate_step_size(noise_value, isovalue)
+         
+-        # 4. Advance ray
+-        p_new = p + step_size * ray_direction
++        # Guard against zero or negative step sizes
++        if step_size <= 0:
++            step_size = 1e-6
++            
++        # Step 5: Advance
+         t += step_size
+         
+-        # 5. Convergence check
+-        if step_size < tolerance:
+-            return p_new, t
++        # Check for intersection
++        # If noise_value is close to isovalue, we hit the surface
++        if abs(noise_value - isovalue) < 1e-4:
++            return t
+             
+-        p = p_new
+-        
+-    return None, None
++        # Check for exit condition (e.g., max distance)
++        if t > 1000.0: # Arbitrary max distance [G]
++            break
++            
++    return float('inf')
++
++def compute_frequency(i, p):
++    """
++    Placeholder for the specific noise frequency function f_i(p).
++    In FBM, this typically involves scaling and shifting the base noise.
++    """
++    # Implementation depends on the specific noise generator [S1]
++    pass
+ ```
++
++**Parameters:**
++*   $k$: The number of additional functions to compute beyond $i_{min}$ [S1]. Typical value is $k=1$ [S1].
++*   $v$: The isovalue used for comparison against BVH bounds [S1].
++
++**Edge Cases and Pitfalls:**
++*   **Grazing Rays with ES+0:** Using $k=0$ (Early stop+0) causes slow convergence at every level of the BVH traversal because it steps safely to the current outer bounding volume and repeats [S1]. This massively increases total steps and is particularly bad for grazing rays (rays passing close to but not entering a bounding volume) [S1].
++*   **Step Size Reduction:** Stopping early reduces the number of $f_i$ computed but may result in smaller step sizes, potentially increasing the total number of steps required to converge, which could raise final cost [S1].
++*   **Diminishing Returns for $k>1$:** Using $k > 1$ provides diminishing returns. It slightly increases step size but makes convergence issues even less likely. However, the added cost of computing more $f_i$ is usually not worth the small gains compared to $k=1$ [S1].
+ 
+ ## Subtopics
+ 
+ ### [Early Stop + k](1938-early-stop-k.md)
+-Early Stop + k (ES+k) is an optimization for sphere tracing procedural volumes that prevents unnecessary intermediate convergence checks during BVH traversal by computing $k$ additional octaves per traversal step. It builds on [Early Stop](1790-early-stop.md) by trading a small increase in per-step function evaluations for a significant reduction in the total number of BVH traversal steps. Unlike standard Early Stop (ES+0), which may converge too slowly and incur high step counts, ES+k maintains a balance between step reduction and computational overhead, with ES+1 generally offering the best performance across diverse scenes.
++An optimization that computes $k$ additional octaves per traversal step. ES+1 is generally recommended as it balances step reduction and computational overhead, avoiding the slow convergence of ES+0 without the diminishing returns of higher $k$.
+ 
+ ## Operating characteristics
+-- **Time Complexity:** The cost per step is reduced by skipping $f_i$ evaluations for $i > i_{\min} + k$ [S1]. However, the total number of steps may increase due to smaller step sizes when $k$ is small [S1]. The total computation cost depends on the number of $f_i$ computed rather than just the number of steps [S1].
+-- **Measured Performance:** ES+1 provides results very similar to full computation (computing all $f_i$) but with significantly lower cost [S1]. ES+0 causes massive performance loss due to slow convergence [S1]. ES+k with $k>1$ provides diminishing returns compared to $k=1$ [S1].
+-- **Strengths:** Reduces per-step computational cost by avoiding unnecessary noise function evaluations [S1]. Effective for procedural volumes with hierarchical bounding structures [S1].
+-- **Limitations:** May increase the total number of steps if step sizes become too small [S1]. Not suitable for $k=0$ due to grazing ray issues [S1].
+-- **When to Use:** When rendering procedural volumetric noise with sphere tracing, especially in large and detailed scenes where noise evaluation is expensive [S1].
+-- **When Not to Use:** When the overhead of BVH bound computation outweighs the savings from skipping noise evaluations, or when the noise function does not have well-defined bounding volumes [G].
++*   **Time Complexity:** Depends on the number of $f_i$ computed per step and the total number of steps [S1]. ES reduces the number of steps by allowing larger steps when far from the isosurface (by ignoring high-frequency noise that doesn't affect the coarse step size) [S1].
++*   **Memory Complexity:** Requires storage for the BVH structure [S1].
++*   **Strengths:** Drastically reduces performance loss from grazing rays compared to ES+0 at negligible cost (computing one extra $f_i$) [S1]. Avoids unnecessary function evaluations for high-frequency noise when the position is outside the corresponding BVH level [S1].
++*   **Limitations:** May result in smaller step sizes if too few frequencies are computed, potentially increasing the total number of steps [S1]. ES+0 is inefficient due to slow convergence [S1].
++*   **When to Use:** Use ES+1 ($k=1$) for most procedural volume sphere tracing scenarios to balance performance and accuracy [S1]. Avoid ES+0 due to grazing ray penalties [S1]. Avoid $k>1$ unless specific accuracy requirements justify the marginal step size increase [S1].
+ 
+ ## Background
+-Early Stop was introduced in the context of fast sphere tracing of procedural volumetric noise for very large and detailed scenes [S1]. It leverages the hierarchical nature of bounding volume hierarchies (BVH) used in sphere tracing to prune the computation of noise octaves [S1]. The method addresses the inefficiency of computing all noise frequencies even when higher frequencies cannot affect the isosurface intersection due to their bounding volumes [S1].
++Early Stop was introduced in the context of fast sphere tracing of procedural volumetric noise for very large and detailed scenes [S1]. It leverages the hierarchical nature of Bounding Volume Hierarchies (BVH) applied to noise functions (such as Fractional Brownian Motion) to prune unnecessary computations [S1]. The method addresses the inefficiency of standard sphere tracing which evaluates all noise octaves at every step, regardless of whether the high-frequency details are relevant to the current step size or intersection detection [S1].
+ 
+ ## Sources

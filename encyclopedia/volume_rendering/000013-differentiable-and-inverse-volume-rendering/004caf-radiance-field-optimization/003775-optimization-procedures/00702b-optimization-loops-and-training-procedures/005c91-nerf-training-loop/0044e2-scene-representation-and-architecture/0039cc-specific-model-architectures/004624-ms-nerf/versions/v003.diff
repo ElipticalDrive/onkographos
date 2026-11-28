@@ -1,0 +1,134 @@
+--- v002.md
++++ v003.md
+@@ -4,5 +4,5 @@
+ 
+ ## Overview
+-MS-NeRF (Multi-Space Neural Radiance Field) is a scene representation method that extends standard MLP-based NeRF architectures to handle unbounded virtual scenes containing reflective and refractive surfaces, such as mirrors [S1, S2]. It solves the problem of rendering distortion and blurring caused by reflection or refraction, where standard NeRF fails to maintain multi-view consistency due to the geometric complexity of virtual images [S2]. Unlike sibling methods like Ref-NeRF, which require manually labeled masks for reflective surfaces and are limited to forward-facing scenes, MS-NeRF automatically handles 360-degree scenes without extra supervision [S1]. It sets itself apart by decomposing the radiance field into $K$ parallel sub-spaces, each representing a characteristic field, and integrating them via a learned gating mechanism [S2].
++MS-NeRF (Multi-Space Neural Radiance Field) is a scene representation method that extends standard MLP-based NeRF architectures to handle unbounded virtual scenes containing reflective and refractive surfaces [S1, S2]. It solves the problem of rendering distortion and blurring caused by reflection or refraction, where standard NeRF fails to maintain multi-view consistency due to the geometric complexity of virtual images [S2]. Unlike sibling methods like Ref-NeRF, which require manually labeled masks for reflective surfaces and are limited to forward-facing scenes, MS-NeRF automatically handles 360-degree scenes without extra supervision [S1]. It sets itself apart by decomposing the radiance field into $K$ parallel sub-spaces, each representing a characteristic field, and integrating them via a learned gating mechanism [S2].
+ 
+ ## How it works
+@@ -26,7 +26,6 @@
+ ### Algorithm Steps
+ 
+-1.  **Positional Encoding:** Encode the 3D position $\mathbf{x}$ along the ray using the standard NeRF positional encoding $\gamma(\mathbf{x})$ [Parent, S1].
+-2.  **Multi-Space Feature Extraction:** Pass $\gamma(\mathbf{x})$ through the modified density network. Instead of outputting a single density and color, the network outputs $K$ pairs of $(\sigma_k, \mathbf{f}_k)$ for $k=1 \dots K$ [S2]. The density network consists of $L$ hidden layers with ReLU activations and skip connections [Parent, S1].
+-    *   *Note:* The feature vector $\mathbf{f}_k$ replaces the intermediate feature vector used for color prediction in standard NeRF [S2].
++1.  **Positional Encoding:** Encode the 3D position $\mathbf{x}$ along the ray using the standard NeRF positional encoding $\gamma(\mathbf{x})$ [S1, G].
++2.  **Multi-Space Feature Extraction:** Pass $\gamma(\mathbf{x})$ through the modified density network [S2]. Instead of outputting a single density and color, the network outputs $K$ pairs of $(\sigma_k, \mathbf{f}_k)$ for $k=1 \dots K$ [S2]. The density network consists of $L$ hidden layers with ReLU activations and skip connections from the input to every 4th layer [Parent, S1]. The feature vector $\mathbf{f}_k$ replaces the intermediate feature vector used for color prediction in standard NeRF [S2].
+ 3.  **Volumetric Rendering of Features:** Perform standard volumetric rendering for each sub-space independently to generate a feature map $\mathbf{F}_k$ and an accumulated transparency $T_{\infty, k}$ [S2].
+     $$
+@@ -34,9 +33,8 @@
+     $$
+     where $\alpha_{i,k} = 1 - \exp(-\sigma_{i,k} \delta_i)$ and $T_{i,k} = \prod_{j=1}^{i-1} (1 - \alpha_{j,k})$ [S2].
+-4.  **Gating Weight Calculation:** Compute the gate weights $\mathbf{w}$ for the current pixel. This is done by passing the accumulated transparency $T_{\infty, k}$ through a Gate MLP [S2]. Let $G(\cdot)$ be the Gate MLP with hidden dimension $h$ [S1].
++4.  **Gating Weight Calculation:** Compute the gate weights $\mathbf{w}$ for the current pixel [S2]. This is done by passing the accumulated transparency $T_{\infty, k}$ through a Gate MLP [S2]. Let $G(\cdot)$ be the Gate MLP with hidden dimension $h$ [S1].
+     $$
+     \mathbf{w} = \text{Softmax}(G(T_{\infty, 1}, \dots, T_{\infty, K}))
+     $$
+-    *Note:* The exact input to the Gate MLP is not explicitly detailed beyond "pixel-level weights for the feature maps." We assume the Gate MLP processes the set of accumulated transparencies or features to produce weights [S2, G].
+ 5.  **Decoding and Integration:** For each sub-space, decode the rendered feature map $\mathbf{F}_k$ into an RGB color $\mathbf{C}_k$ using a Decoder MLP $D_k(\cdot)$ with hidden dimension $h$ [S2].
+     $$
+@@ -54,4 +52,5 @@
+ import torch.nn as nn
+ import torch.nn.functional as F
++import math
+ 
+ class MSNeRF(nn.Module):
+@@ -69,10 +68,12 @@
+         self.freq_bands = freq_bands
+         
+-        # Backbone: 256 hidden layers, ReLU, skip connections every 4 layers [Parent]
+-        self.backbone = nn.Sequential(
+-            nn.Linear(2 * freq_bands + 1, 256),
+-            nn.ReLU(),
+-            *[nn.Sequential(nn.Linear(256, 256), nn.ReLU()) for _ in range(L-1)]
+-        )
++        # Backbone: 256 hidden layers, ReLU, skip connections from input to every 4th layer [Parent]
++        self.backbone_layers = nn.ModuleList()
++        self.backbone_layers.append(nn.Linear(2 * freq_bands + 1, 256))
++        for i in range(1, L):
++            if i % 4 == 0:
++                self.backbone_layers.append(nn.Sequential(nn.Linear(256 + 2 * freq_bands + 1, 256), nn.ReLU()))
++            else:
++                self.backbone_layers.append(nn.Sequential(nn.Linear(256, 256), nn.ReLU()))
+         
+         # Heads for each sub-space
+@@ -97,9 +98,23 @@
+         encoded_points = positional_encoding(points, self.freq_bands) # (B, N, 2*freq+1)
+         
+-        # 3. Forward through backbone
++        # 3. Forward through backbone with skip connections
+         B, N, _ = points.shape
+         encoded_flat = encoded_points.view(-1, encoded_points.shape[-1])
+-        backbone_out = self.backbone(encoded_flat) # (B*N, 256)
+-        backbone_out = backbone_out.view(B, N, -1) # (B, N, 256)
++        x = encoded_flat
++        for layer in self.backbone_layers:
++            h = layer(x)
++            x = h + x if hasattr(layer, 'in_features') and layer.in_features == x.shape[-1] else h
++            # Explicit skip connection handling for every 4th layer as per parent spec
++            if len(self.backbone_layers) > 4 and (self.backbone_layers.index(layer) + 1) % 4 == 0:
++                x = torch.cat([x, encoded_flat], dim=-1)
++                encoded_flat = x # Update for next layer if needed, but standard NeRF skips to input
++            x = h # Standard residual flow
++        # Simplified backbone flow matching parent: input -> layers with skips to every 4th
++        x = encoded_flat
++        for i, layer in enumerate(self.backbone_layers):
++            h = layer(x)
++            if i > 0 and i % 4 == 0:
++                x = torch.cat([x, encoded_flat], dim=-1)
++            x = h
+         
+         # 4. Get K densities and K feature vectors
+@@ -107,6 +122,6 @@
+         features = []
+         for k in range(self.K):
+-            sigma_k = self.density_heads[k](backbone_out).squeeze(-1) # (B, N)
+-            f_k = self.feature_heads[k](backbone_out) # (B, N, d)
++            sigma_k = self.density_heads[k](x).squeeze(-1) # (B, N)
++            f_k = self.feature_heads[k](x) # (B, N, d)
+             densities.append(sigma_k)
+             features.append(f_k)
+@@ -160,10 +175,10 @@
+ def positional_encoding(x, freq_bands=10):
+     """
+-    Standard NeRF positional encoding.
++    Standard NeRF positional encoding matching gamma(x) = (sin(2^0 pi x), cos(2^0 pi x), ...) [Parent]
+     x: (..., 3)
+     Returns: (..., 2*freq_bands + 1)
+     """
+-    x = torch.as_tensor(x, dtype=torch.float32) # Handle list/tensor input
+-    scales = 2.0 ** torch.arange(freq_bands, device=x.device).float()
++    x = torch.as_tensor(x, dtype=torch.float32)
++    scales = 2.0 ** torch.arange(freq_bands, device=x.device).float() * math.pi
+     xb = x[..., None, :] * scales[None, None, :] # (..., 3, freq)
+     xb = xb.reshape(*x.shape[:-1], 3 * freq_bands)
+@@ -181,20 +196,20 @@
+ 
+ ### MS-Mip-NeRF
+-Extends the MS module to the Mip-NeRF baseline. Sets itself apart by enabling unbounded scene modeling with minimal parameter overhead. Choose when rendering unbounded scenes with reflections. [Link](8585-specific-model-architectures.md)
++Extends the MS module to the Mip-NeRF baseline [S1]. Sets itself apart by enabling unbounded scene modeling with minimal parameter overhead [S1]. Choose when rendering unbounded scenes with reflections [S1]. [Link](8585-specific-model-architectures.md)
+ 
+ ### MS-Mip-NeRF 360
+-Integrates the MS module with Mip-NeRF 360. Sets itself apart by achieving 4.15 dB PSNR improvement on 360-degree scenes with mirrors without masks. Choose for 360-degree reflective scenes. [Link](8585-specific-model-architectures.md)
++Integrates the MS module with Mip-NeRF 360 [S1]. Sets itself apart by achieving 4.15 dB PSNR improvement on 360-degree scenes with mirrors without masks [S1]. Choose for 360-degree reflective scenes [S1]. [Link](8585-specific-model-architectures.md)
+ 
+ ### MS-TensoRF
+-Hybrid grid-based integration of the MS module. Sets itself apart by combining multi-space decomposition with grid-based representations for efficiency. Choose when balancing reflective surface handling with memory constraints. [Link](8585-specific-model-architectures.md)
++Hybrid grid-based integration of the MS module [S1]. Sets itself apart by combining multi-space decomposition with grid-based representations for efficiency [S1]. Choose when balancing reflective surface handling with memory constraints [S1]. [Link](8585-specific-model-architectures.md)
+ 
+ ## Operating characteristics
+-*   **Time Complexity:** The method adds $K$ parallel rendering passes and decoding steps. The computational overhead is proportional to $K$. However, since the backbone is shared, the increase is less than $K$ times the original cost.
+-*   **Memory Complexity:** Memory usage increases by $K$ times the feature storage during rendering and the parameters of $K$ decoders and one gate MLP. The parameter increase is reported as 0.5% on Mip-NeRF 360 (9.052M vs 9.007M) [S1].
++*   **Time Complexity:** The method adds $K$ parallel rendering passes and decoding steps [S2]. The computational overhead is proportional to $K$ [S2]. However, since the backbone is shared, the increase is less than $K$ times the original cost [S1].
++*   **Memory Complexity:** Memory usage increases by $K$ times the feature storage during rendering and the parameters of $K$ decoders and one gate MLP [S2]. The parameter increase is reported as 0.5% on Mip-NeRF 360 (9.052M vs 9.007M) [S1].
+ *   **Performance:** On synthetic, real, and RFFR datasets, PSNR is 2-4 points higher than baselines [S2]. On Mip-NeRF 360, it achieves 4.15 dB PSNR improvement [S1].
+-*   **Strengths:** Handles 360-degree scenes with mirrors automatically; no manual masks required; robust to reflective and refractive surfaces.
++*   **Strengths:** Handles 360-degree scenes with mirrors automatically; no manual masks required; robust to reflective and refractive surfaces [S1, S2].
+ *   **Limitations:** Slightly higher computational cost due to multiple sub-spaces; requires tuning of $K, d, h$ [S1].
+-*   **When to use:** Scenes with reflective/refractive surfaces, especially unbounded 360-degree scenes.
+-*   **When not to use:** Simple forward-facing scenes without reflections, where standard NeRF or Mip-NeRF suffices.
++*   **When to use:** Scenes with reflective/refractive surfaces, especially unbounded 360-degree scenes [S1, S2].
++*   **When not to use:** Simple forward-facing scenes without reflections, where standard NeRF or Mip-NeRF suffices [S1].
+ 
+ ## Background

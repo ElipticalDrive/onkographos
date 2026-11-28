@@ -1,0 +1,202 @@
+--- v007.md
++++ v008.md
+@@ -4,112 +4,128 @@
+ 
+ ## Overview
+-BlitzGS is a distributed 3D Gaussian Splatting (3DGS) framework designed to accelerate city-scale reconstruction by reducing the active Gaussian workload at system, model, and view levels [S1, unofficial]. Unlike spatial block partitioning which suffers from cross-block visibility waste and imbalance, BlitzGS shards Gaussians by index parity and applies importance-based pruning and distance-based LOD filtering to maintain high quality while training nearly an order of magnitude faster [S1, unofficial].
++BlitzGS is a distributed 3D Gaussian Splatting (3DGS) framework designed to accelerate city-scale reconstruction by reducing the active Gaussian workload at three coupled levels: system, model, and view [S1, unofficial]. Unlike spatial block partitioning which incurs cross-block visibility waste and imbalanced shards, BlitzGS shards Gaussians across GPUs by index parity and employs importance-based pruning and distance-based LOD filtering to minimize redundant computation [S1, unofficial]. It achieves nearly an order-of-magnitude faster training times compared to baselines like Momen.GS and CityGS-X while maintaining high reconstruction quality [S1, unofficial].
+ 
+ ## How it works
+ **Inputs and Outputs:**
+-*   **Input:** A set of calibrated images, initial 3D Gaussian primitives (mean $\mu$, covariance $\Sigma$, opacity $\alpha$, color/radiance), and $M$ GPUs.
+-*   **Output:** Optimized 3D Gaussian scene representation and rendered novel views.
++*   **Input:** A set of calibrated images, initial 3D Gaussian primitives $\mathcal{G}$, and $M$ GPUs.
++*   **Output:** Optimized 3D Gaussian parameters (position, covariance, opacity, spherical harmonics) and rendered novel views.
+ 
+ **Data Structures:**
+-*   **Global Gaussian Set $\mathcal{G}$:** Partitioned into $M$ shards $\mathcal{G}^{(m)}$ for $m \in \{0, \dots, M-1\}$.
+-*   **Tile Ownership:** The image plane is divided into tiles. Each tile is assigned to a specific GPU owner.
+-*   **Importance Score:** A scalar value per Gaussian per camera view, derived from the importance-scoring pass.
++*   **Global Gaussian Set:** $\mathcal{G}$, partitioned into shards $\mathcal{G}^{(m)}$ for each GPU $m \in \{0, \dots, M-1\}$.
++*   **Shard Layout:** Gaussians are assigned to shard $\mathcal{G}^{(m)}$ based on their global index parity. If the global index $i$ is even, it belongs to shard 0; if odd, to shard 1 (assuming $M=2$ for parity logic, extended to $M$ GPUs via modulo or similar parity-based distribution as implied by "index parity" [S1, unofficial]).
++*   **Optimizer State:** Each GPU $m$ stores the optimizer states (e.g., Adam moments) corresponding to its local shard $\mathcal{G}^{(m)}$ [S1, unofficial].
++*   **Tile Assignment:** The image plane is divided into tiles (e.g., $16 \times 16$ pixels), with each tile assigned to a specific GPU owner [S1, unofficial].
+ 
+ **Numbered Steps:**
+ 
+ 1.  **System-Level Sharding:**
+-    *   Partition the global Gaussian index set into $M$ shards based on index parity (even/odd indices) or a similar deterministic hash to ensure balanced distribution [S1, unofficial].
+-    *   Each GPU $m$ stores its shard $\mathcal{G}^{(m)}$ and corresponding optimizer states [S1, unofficial].
+-    *   Assign tile ownership such that each tile is owned by exactly one GPU [S1, unofficial].
++    *   Partition the global set of Gaussians $\mathcal{G}$ into $M$ shards $\mathcal{G}^{(m)}$ based on index parity rather than spatial coordinates [S1, unofficial].
++    *   Each GPU $m$ stores its local shard $\mathcal{G}^{(m)}$ and corresponding optimizer states [S1, unofficial].
++    *   This avoids cross-block redundancy and imbalanced shards inherent in spatial partitioning [S1, unofficial].
+ 
+ 2.  **Model-Level Population Control:**
+-    *   **Importance Scoring:** Perform a lightweight pass to compute an importance score for each Gaussian relative to each camera view [S1, unofficial].
+-    *   **Pruning:** Use the importance scores to prune redundant Gaussians that contribute negligibly to the loss [S1, unofficial].
+-    *   **Spawn Gating:** Before spawning new Gaussians during densification, predict their survival probability. Withhold candidates predicted not to survive to limit peak population [S1, unofficial].
++    *   **Importance Scoring:** Perform an importance-scoring pass to evaluate each Gaussian. This pass prunes redundant Gaussians and emits per-(Gaussian, camera) importance signals [S1, unofficial].
++    *   **Spawn Gating:** Use a lightweight spawn gate to withhold Gaussian candidates predicted not to survive densification before they are spawned, limiting peak population [S1, unofficial].
+     *   **Gradient Reweighting:** Use the importance signal to reweight density control gradients during optimization [S1, unofficial].
+ 
+ 3.  **View-Level Filtering:**
+-    *   **Distance-Based LOD:** For each camera, apply a Level-of-Detail (LOD) gate to drop Gaussians that are too fine (small scale) for the current camera distance [S1, unofficial].
+-    *   **Importance Mask:** Apply an importance-based mask to skip Gaussians with negligible cross-view contribution, further trimming the active set for each camera [S1, unofficial].
++    *   **Distance-Based LOD Gate:** Apply a distance-based Level-of-Detail (LOD) gate to drop Gaussians that are too fine for the current camera distance [S1, unofficial].
++    *   **Importance-Based Mask:** Apply an importance-based mask to skip Gaussians with negligible cross-view contribution, trimming the active set for each camera [S1, unofficial].
+ 
+ 4.  **Distributed Rendering:**
+     *   Each GPU $m$ projects its local shard $\mathcal{G}^{(m)}$ to screen space [S1, unofficial].
+-    *   Perform a single cross-GPU all-to-all exchange to route projected Gaussians to the GPUs owning the tiles they cover [S1, unofficial].
+-    *   Each GPU composites the pixels for its owned tiles using the received Gaussians [S1, unofficial].
++    *   Perform a single cross-GPU all-to-all communication exchange to route projected Gaussians to the GPUs owning the tiles they cover [S1, unofficial].
++    *   Each GPU composites only the pixels for its owned tiles using the received Gaussians [S1, unofficial].
++
++5.  **Gradient Synchronization:**
++    *   Compute gradients locally for the assigned pixels [S1, unofficial].
++    *   Synchronize gradients using fused all-reduce operations to aggregate gradients for global parameters, or sparse all-to-all communication to aggregate gradients for specific Gaussians [S1, unofficial].
+ 
+ **Pseudocode:**
+ 
+ ```python
+-def blitzgs_train(cameras, initial_gaussians, num_gpus, num_iterations):
+-    # 1. System-Level Sharding
+-    # Shard Gaussians by index parity
++def blitzgs_training(gaussians, images, num_gpus, tile_size):
++    # 1. System-Level Sharding by Index Parity
++    # Assign Gaussians to shards based on index parity
+     shards = {}
+     for m in range(num_gpus):
+-        shards[m] = [g for i, g in enumerate(initial_gaussians) if i % num_gpus == m]
++        shards[m] = [g for i, g in enumerate(gaussians) if i % num_gpus == m]
+     
+-    # Assign tile owners (simplified assumption: round-robin or fixed mapping)
+-    tile_owners = assign_tile_owners(num_gpus)
+-
+-    for iteration in range(num_iterations):
+-        # 2. Model-Level Population Control
+-        # Compute importance scores for all Gaussians across all cameras
+-        importance_scores = compute_importance_scores(shards, cameras)
++    # Initialize optimizer states for each shard
++    optimizer_states = {m: init_optimizer(shards[m]) for m in range(num_gpus)}
++    
++    # 2. Model-Level Population Control
++    # Importance scoring pass
++    importance_scores = compute_importance(gaussians, images)
++    
++    # Spawn gating: withhold candidates predicted not to survive
++    surviving_candidates = spawn_gate(gaussians, importance_scores)
++    
++    # Prune redundant Gaussians
++    active_gaussians = prune_gaussians(gaussians, importance_scores)
++    
++    # 3. View-Level Filtering
++    # Distance-based LOD gate
++    lod_mask = apply_lod_gate(active_gaussians, images)
++    
++    # Importance-based mask
++    view_mask = apply_importance_mask(active_gaussians, images, importance_scores)
++    
++    # Combine masks to get final active set per view
++    active_set = lod_mask & view_mask
++    
++    # 4. Distributed Rendering
++    # Each GPU projects its shard
++    projected_gaussians = {}
++    for m in range(num_gpus):
++        projected_gaussians[m] = project(shards[m], images)
+         
+-        # Prune redundant Gaussians based on importance
+-        active_shards = {}
+-        for m in range(num_gpus):
+-            active_shards[m] = [g for g in shards[m] if importance_scores[m][g] > threshold]
++    # All-to-all communication to route Gaussians to tile owners
++    # Assume tile_owner(tile_id) returns the GPU index owning the tile
++    received_gaussians = {}
++    for m in range(num_gpus):
++        received_gaussians[m] = all_to_all(projected_gaussians, tile_owner)
+         
+-        # Spawn gating: predict survival before spawning new Gaussians
+-        # (Implementation detail: integrate with densification step)
+-        new_candidates = predict_and_filter_candidates(active_shards, cameras)
++    # Composite pixels for owned tiles
++    rendered_images = {}
++    for m in range(num_gpus):
++        rendered_images[m] = composite(received_gaussians[m], images)
+         
+-        # Gradient reweighting
+-        gradients = compute_gradients(active_shards, cameras, importance_scores)
+-        gradients = reweight_gradients(gradients, importance_scores)
+-        
+-        # Update Gaussians
+-        for m in range(num_gpus):
+-            update_gaussians(active_shards[m], gradients[m])
+-        
+-        # 3. View-Level Filtering & 4. Distributed Rendering
+-        # Prepare for rendering
+-        projected_gaussians = {}
+-        for m in range(num_gpus):
+-            # Project local Gaussians
+-            projected_gaussians[m] = project_gaussians(active_shards[m], cameras)
+-            
+-            # Apply Distance-Based LOD
+-            projected_gaussians[m] = apply_lod_filter(projected_gaussians[m], cameras)
+-            
+-            # Apply Importance Mask
+-            projected_gaussians[m] = apply_importance_mask(projected_gaussians[m], importance_scores)
+-
+-        # Cross-GPU Exchange: Route to tile owners
+-        # Each GPU sends its projected Gaussians to the GPUs owning the tiles they cover
+-        received_gaussians = all_to_all_exchange(projected_gaussians, tile_owners)
+-        
+-        # Composite pixels
+-        for m in range(num_gpus):
+-            render_tiles(received_gaussians[m], tile_owners[m])
++    # 5. Gradient Synchronization
++    # Compute local gradients
++    local_gradients = compute_gradients(rendered_images, images)
++    
++    # Synchronize gradients
++    global_gradients = all_reduce(local_gradients)
++    
++    # Update parameters with reweighted gradients
++    update_parameters(gaussians, global_gradients, importance_scores)
++    
++    return gaussians
+ ```
+ 
+ **Parameters:**
+ *   **Hardware:** 4x NVIDIA A6000 GPUs [S1, unofficial].
+-*   **Thresholds:** Importance and LOD thresholds are not explicitly defined in the sources [S1, unofficial].
++*   **Tile Size:** Not given in the sources.
++*   **LOD Threshold:** Not given in the sources.
++*   **Importance Score Threshold:** Not given in the sources.
+ 
+ **Edge Cases and Pitfalls:**
+-*   **Imbalanced Shards:** Index parity sharding is chosen specifically to avoid the imbalanced shards common in spatial block partitioning [S1, unofficial].
+-*   **Cross-Block Visibility:** By sharding by index rather than space, cross-block visibility waste is avoided [S1, unofficial].
++*   **Precision:** Not given in the sources.
++*   **Boundaries:** Index parity sharding avoids cross-block visibility waste, but requires careful handling of Gaussian visibility across tile boundaries during the all-to-all exchange [S1, unofficial].
++*   **Degenerate Input:** Not given in the sources.
+ 
+ ## Operating characteristics
+-*   **Time Complexity:** Training time is significantly reduced compared to baselines. On the Residence scene, BlitzGS trains in 38 minutes, compared to 5 hours 3 minutes for Momen.GS and 4 hours 45 minutes for CityGS-X [S1, unofficial].
+-*   **Memory Complexity:** By pruning redundant Gaussians and gating spawns, the peak population and memory footprint are reduced [S1, unofficial].
+-*   **Performance:** Achieves scene-average PSNR of 24.66 dB on Residence and 33.79 dB on Rubble [S1, unofficial].
+-*   **Strengths:** Near order-of-magnitude speedup over baselines while maintaining high quality [S1, unofficial].
+-*   **Limitations:** Requires distributed infrastructure (multiple GPUs) and careful tuning of importance thresholds [S1, unofficial].
++*   **Time Complexity:** Training time is significantly reduced compared to baselines. For the Residence scene, training takes 38 minutes; for the Rubble scene, 39 minutes [S1, unofficial]. This is nearly an order of magnitude faster than Momen.GS (5h 03min) and CityGS-X (4h 45min) [S1, unofficial].
++*   **Memory Complexity:** Memory usage is reduced by sharding Gaussians by index parity and pruning redundant Gaussians via importance scoring [S1, unofficial].
++*   **Measured Performance:** On 4x NVIDIA A6000 GPUs, BlitzGS achieves a scene-average PSNR of 24.66 dB for the Residence scene and 33.79 dB for the Rubble scene [S1, unofficial].
++*   **Scaling:** Storage and per-step compute scale with the GPU count due to index parity sharding [S1, unofficial].
++*   **Strengths:** Fast training times, high reconstruction quality, efficient use of multiple GPUs, avoidance of cross-block redundancy.
++*   **Limitations:** Requires careful implementation of importance scoring and spawn gating. Performance may vary depending on the scene complexity and camera distribution.
++*   **When to Use:** City-scale 3D reconstruction where training time is a critical factor.
++*   **When Not to Use:** Small-scale scenes where the overhead of distributed rendering and importance scoring may not be justified.
+ 
+ ## Background
+-BlitzGS was introduced by Zhongtao Wang, Huishan Au, Yisong Chen, Meng Gai, Yilong Li, Fei Zhu, Mai Su, Haojie Jin, and Guoping Wang in the paper "BlitzGS: City-Scale Gaussian Splatting at Lightning Speed" [S1, unofficial]. It addresses the high computational cost of city-scale 3DGS training by unifying sharding, importance-based simplification, and LOD filtering [S1, unofficial].
++BlitzGS was introduced by Zhongtao Wang, Huishan Au, Yisong Chen, Meng Gai, Yilong Li, Fei Zhu, Mai Su, Haojie Jin, and Guoping Wang in the paper "BlitzGS: City-Scale Gaussian Splatting at Lightning Speed" [S1, unofficial]. The paper addresses the high computational cost of city-scale 3DGS training, which involves preprocessing, communication, and rasterization of an overly dense set of primitives [S1, unofficial]. BlitzGS reduces this cost by focusing on which Gaussians to store, render, and keep, rather than targeting individual costs [S1, unofficial].
+ 
+ ## Sources

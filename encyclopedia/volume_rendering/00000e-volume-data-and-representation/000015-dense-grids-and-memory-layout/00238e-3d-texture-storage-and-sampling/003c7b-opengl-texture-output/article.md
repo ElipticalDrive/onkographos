@@ -1,0 +1,92 @@
+# OpenGL Texture Output
+
+
+## Overview
+A method to output rendering results using OpenGL texture objects for efficiency, mapping calculated volumetric data directly to screen display planes via texture-based data structures [S1, unofficial]. It sets itself apart from general volume rendering pipelines by treating the final image or intermediate buffers as OpenGL textures initialized with specific formats (e.g., GL_RGB) and sampled via standard texture mapping primitives (GL_QUAD), rather than writing to a generic framebuffer or file format immediately [S1, unofficial].
+
+## How it works
+**Inputs and Outputs:**
+- Input: Calculated texture data structure containing volumetric results (typically RGB color components).
+- Output: A rendered image displayed on the screen, stored initially in an OpenGL texture object.
+
+**Data Structures:**
+- **Texture Object:** Initialized in the `DrawModel` class.
+- **Format:** `GL_RGB` [S1, unofficial].
+- **Texel Format:** `GL_UNSIGNED_BYTE` [S1, unofficial].
+- **Size:** Matches the dimensions of the calculated texture data structure [S1, unofficial].
+- **Display Polygon:** A `GL_QUAD` defined in the `DrawModel` class, representing the entire screen display plane, used to map the texture [S1, unofficial].
+
+**Steps:**
+1. Initialize the OpenGL texture object within the rendering class (e.g., `DrawModel`) using the specified format (`GL_RGB`) and texel format (`GL_UNSIGNED_BYTE`) [S1, unofficial].
+2. Ensure the texture size and data content match the calculated texture data structure [S1, unofficial].
+3. Define a `GL_QUAD` polygon in the `DrawModel` class to represent the screen display plane [S1, unofficial].
+4. Map the initialized texture onto the `GL_QUAD` polygon for display [S1, unofficial].
+5. Configure automatic Trilinear Sampling Distance to guarantee efficient sampling during size changes [S1, unofficial].
+    - The sampling distance measures the distance between two succeeding sample points along a ray in world coordinates [S1, unofficial].
+    - Higher sampling distance results in fewer sample points per ray, increasing approximation error for optical values [S1, unofficial].
+
+**Parameters:**
+- **Sampling Distance:** Adjustable parameter. Higher values reduce sample count but increase approximation error [S1, unofficial].
+- **Texture Format:** `GL_RGB` [S1, unofficial].
+- **Texel Format:** `GL_UNSIGNED_BYTE` [S1, unofficial].
+
+**Edge Cases and Pitfalls:**
+- **Sampling Error:** Increasing sampling distance reduces computational load but increases approximation error for image plane pixels [S1, unofficial].
+- **Size Changes:** Automatic Trilinear Sampling Distance is required to maintain efficiency when texture dimensions change [S1, unofficial].
+
+**Pseudocode:**
+> **Unverified code.** The code below did not pass a test run against a reference implementation, or no test fits it, so it may contain errors.
+
+```python
+class DrawModel:
+    def __init__(self, texture_data):
+        # Initialize texture object with GL_RGB format and GL_UNSIGNED_BYTE texels
+        # Size matches texture_data dimensions
+        self.texture_id = glGenTextures(1)
+        glBindTexture(GL_TEXTURE_3D, self.texture_id) # Or GL_TEXTURE_2D depending on implementation context
+        glTexImage3D(GL_TEXTURE_3D, 0, GL_RGB, 
+                     texture_data.width, texture_data.height, texture_data.depth, 
+                     0, GL_RGB, GL_UNSIGNED_BYTE, texture_data.data)
+        
+        # Configure sampling for efficiency during size changes
+        glTexParameteri(GL_TEXTURE_3D, GL_TEXTURE_MIN_FILTER, GL_LINEAR_MIPMAP_LINEAR)
+        glTexParameteri(GL_TEXTURE_3D, GL_TEXTURE_MAG_FILTER, GL_LINEAR)
+        
+        # Define the screen display plane polygon
+        self.quad_vertices = [
+            -1.0, -1.0, 0.0,
+             1.0, -1.0, 0.0,
+             1.0,  1.0, 0.0,
+            -1.0,  1.0, 0.0
+        ]
+        self.quad_indices = [0, 1, 2, 2, 3, 0]
+
+    def render(self):
+        # Bind texture
+        glBindTexture(GL_TEXTURE_3D, self.texture_id)
+        
+        # Map texture to quad
+        glDrawElements(GL_TRIANGLES, 6, GL_UNSIGNED_INT, self.quad_indices)
+```
+
+## Subtopics
+
+### OpenGL Render-to-Texture with Single Buffer
+A variant using a single large floating-point buffer render target with the OpenGL `RENDER_TO_TEXTURE` extension, divided into an 'eye half' and a 'light half', selected via viewport transformation [S2]. It allows reading from and rendering to the same pixel buffer simultaneously in its own context, avoiding buffer copying or context switching [S2]. It uses four fragment programs: 1) Sky (eye to halfway), 2) Volume to eye buffer, 3) Volume to light buffer, 4) Sky (halfway to outer atmosphere with sunlight) [S2]. It composites in front-to-back fashion for acute angles between eye and light directions, and back-to-front for obtuse angles [S2]. A key pitfall is that rendering to and reading from the same buffer produces undefined behavior if small overlapping polygons are rendered and blended; the system uses large sampling polygons to avoid texture cache flushes and erroneous results [S2]. Performance: 768x768 resolution with 64-512 sampling planes in <4 seconds on 2.66 GHz Intel Xeon, 2GB RAM, 256MB nVidia GeForce FX 6800 (350 MHz core, 1 GHz memory) [S2]. Interactive rate achieved at 512x512 resolution with 256 sampling planes [S2].
+
+## Operating characteristics
+- **Time Complexity:** Not explicitly defined in sources. Performance measured at 768x768 resolution with 64-512 sampling planes in <4 seconds [S2]. Interactive rates at 512x512 with 256 sampling planes [S2].
+- **Memory Complexity:** Uses a single large floating-point buffer for the render target in the variant [S2]. Standard implementation uses `GL_UNSIGNED_BYTE` textures [S1, unofficial].
+- **Measured Performance:** 768x768 resolution, 64-512 sampling planes, <4 seconds on 2.66 GHz Intel Xeon, 2GB RAM, 256MB nVidia GeForce FX 6800 (350 MHz core, 1 GHz memory) [S2].
+- **Scaling:** Higher sampling distance reduces sample points per ray, increasing approximation error [S1, unofficial].
+- **Strengths:** Efficient output process using OpenGL texture objects; avoids buffer copying and context switching in the single-buffer variant [S1, unofficial][S2].
+- **Limitations:** Rendering to and reading from the same buffer in the variant produces undefined behavior with small overlapping polygons [S2]. Approximation error increases with higher sampling distances [S1, unofficial].
+- **When to Use:** When efficient texture-based output is required, or when avoiding buffer copies is critical (variant) [S1, unofficial][S2].
+- **When Not to Use:** When small overlapping polygons are rendered in the variant, or when high precision is required with high sampling distances [S1, unofficial][S2].
+
+## Background
+Originated in implementations of importance-driven volume rendering and atmospheric phenomenon rendering [S1, unofficial][S2]. Used in systems for rendering atmospheric optical phenomena, including clouds, glory, and aerial perspective [S2].
+
+## Sources
+[S1] Implementation of Importance-Driven Volume Rendering, https://www.cg.tuwien.ac.at/research/publications/2005/Thurner-2005-IVR/Thurner-2005-IVR-paper.pdf, fetched 2026-10-29 (unofficial)
+[S2] Efficient Rendering of Atmospheric Phenomena, https://doi.org/10.2312/egwr/egsr04/375-386, fetched 2026-10-26

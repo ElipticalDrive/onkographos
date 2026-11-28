@@ -1,0 +1,227 @@
+--- v001.md
++++ v002.md
+@@ -8,18 +8,18 @@
+ ## How it works
+ **Inputs and Outputs**
+-*   **Inputs:** A set of 3D Gaussians with optimized parameters (position, rotation, scale, opacity, SH coefficients, and feature vectors); camera parameters (view and projection matrices); image resolution $H \times W$.
++*   **Inputs:** A set of 3D Gaussians with optimized parameters (position, rotation, scale, opacity, SH coefficients, and feature vectors); camera parameters (view and projection matrices); image resolution $H \times W$ [S1].
+ *   **Outputs:** A rendered RGB image $\hat{I}$ and a rendered feature map $F_s(\hat{I})$ of resolution $H \times W \times N$ (where $N$ is the internal feature dimension, upsampled to $M$ if necessary) [S1].
+ 
+ **Data Structures**
+ Each 3D Gaussian $i$ stores the following fields [S1]:
+-*   **Center:** $x \in \mathbb{R}^3$
+-*   **Rotation:** Quaternion $q \in \mathbb{R}^4$ (representing rotation matrix $R$)
+-*   **Scaling:** Factor $s \in \mathbb{R}^3$ (representing scaling matrix $S$)
+-*   **Opacity:** $\alpha \in \mathbb{R}$
+-*   **Appearance:** Spherical Harmonics (SH) coefficients up to 3rd order (4 bands)
+-*   **Semantic Feature:** Vector $f_i \in \mathbb{R}^N$
++*   **Center:** $x \in \mathbb{R}^3$ [S1].
++*   **Rotation:** Quaternion $q \in \mathbb{R}^4$ (representing rotation matrix $R$) [S1].
++*   **Scaling:** Factor $s \in \mathbb{R}^3$ (representing scaling matrix $S$) [S1].
++*   **Opacity:** $\alpha \in \mathbb{R}$ [S1].
++*   **Appearance:** Spherical Harmonics (SH) coefficients up to 3rd order (4 bands) [S1].
++*   **Semantic Feature:** Vector $f_i \in \mathbb{R}^N$ [S1].
+ 
+ **Algorithm Steps**
+-1.  **Tiling and Culling:** Divide the screen into $16 \times 16$ tiles. For each tile, cull 3D Gaussians against the view frustum and the tile's axis-aligned bounding box [S1].
++1.  **Tiling and Culling:** Divide the screen into $16 \times 16$ tiles [S1]. For each tile, cull 3D Gaussians against the view frustum and the tile's axis-aligned bounding box [S1].
+ 2.  **Projection:** For each remaining Gaussian, compute the 2D covariance matrix $\Sigma'$ in camera coordinates to project the 3D Gaussian to 2D space [S1]:
+     $$ \Sigma' = J W \Sigma W^{T} J^{T} $$
+@@ -36,60 +36,28 @@
+ **Pseudocode**
+ ```python
+-def render_feature_3dgs(gaussians, camera, image_h, image_w, teacher_encoder, decoder):
+-    """
+-    Render RGB and Feature maps using Tiled 2D Gaussian Splatting with Feature Distillation.
++import math
++
++def render_feature_3dgs(gaussians, camera, image_h, image_w, teacher_encoder, decoder, N, M, epsilon=1e-4):
++    # Initialize output buffers
++    rendered_rgb = [[0.0, 0.0, 0.0] for _ in range(image_h * image_w)]
++    rendered_feature_raw = [[0.0] * N for _ in range(image_h * image_w)]
+     
+-    Args:
+-        gaussians: List of Gaussian objects with attributes:
+-            - center: (3,)
+-            - q: (4,) quaternion
+-            - s: (3,) scale
+-            - alpha: scalar
+-            - sh_coeffs: array for SH evaluation
+-            - f: (N,) feature vector
+-        camera: Object with view_matrix (W) and projection properties.
+-        image_h, image_w: Output resolution.
+-        teacher_encoder: Function to encode ground truth image I to F_t.
+-        decoder: Lightweight 1x1 conv decoder for upsampling features.
+-        
+-    Returns:
+-        rendered_rgb: (H, W, 3)
+-        rendered_feature: (H, W, M)
+-    """
+-    # 1. Initialize output buffers
+-    # Note: In a real GPU implementation, this is done in parallel via tiles.
+-    # Here we simulate the logic for a single pixel or tile block.
+-    
+-    # 2. Tile-based processing (Simulated for clarity)
+     tile_size = 16
+-    rendered_rgb = np.zeros((image_h, image_w, 3))
+-    rendered_feature_raw = np.zeros((image_h, image_w, N)) # N is internal dim
+-    
+     for ty in range(0, image_h, tile_size):
+         for tx in range(0, image_w, tile_size):
+-            # Define tile bounds
+             y_min, y_max = ty, min(ty + tile_size, image_h)
+             x_min, x_max = tx, min(tx + tile_size, image_w)
+             
+-            # Cull Gaussians against tile AABB and view frustum
+             active_gaussians = cull_gaussians(gaussians, x_min, x_max, y_min, y_max, camera)
+             
+             for y in range(y_min, y_max):
+                 for x in range(x_min, x_max):
+-                    # Project pixel to get ray direction/origin if needed for depth sorting
+-                    # Sort active gaussians by depth relative to camera
+                     sorted_gs = sort_by_depth(active_gaussians, camera)
+-                    
+-                    color_acc = 0.0
+-                    feature_acc = np.zeros(N)
++                    color_acc = [0.0, 0.0, 0.0]
++                    feature_acc = [0.0] * N
+                     transmittance = 1.0
+                     
+                     for g in sorted_gs:
+-                        # Evaluate 2D Gaussian at (x, y)
+-                        # Compute 2D covariance Sigma' from 3D Sigma using J, W
+                         sigma_2d = project_covariance(g, camera)
+-                        
+-                        # Calculate alpha contribution
+-                        # alpha_g = alpha * exp(-0.5 * (x,y)^T Sigma'^-1 (x,y))
+                         alpha_g = evaluate_gaussian_alpha(g, x, y, sigma_2d)
+                         
+@@ -97,56 +65,71 @@
+                             continue
+                             
+-                        # Evaluate color c_i from SH
+                         c_i = evaluate_sh(g.sh_coeffs, g.center, camera.view_direction)
++                        weight = alpha_g * transmittance
+                         
+-                        # Accumulate
+-                        weight = alpha_g * transmittance
+-                        color_acc += c_i * weight
+-                        feature_acc += g.f * weight
++                        for k in range(3): color_acc[k] += c_i[k] * weight
++                        for k in range(N): feature_acc[k] += g.f[k] * weight
+                         
+                         transmittance *= (1.0 - alpha_g)
+-                        
+                         if transmittance < epsilon:
+                             break
+                             
+-                    rendered_rgb[y, x] = color_acc
+-                    rendered_feature_raw[y, x] = feature_acc
++                    idx = y * image_w + x
++                    rendered_rgb[idx] = color_acc
++                    rendered_feature_raw[idx] = feature_acc
+                     
+-    # 3. Upsampling
+-    # If N < M, use decoder to upsample
+-    if N < M:
+-        rendered_feature = decoder(rendered_feature_raw)
+-    else:
+-        rendered_feature = rendered_feature_raw
+-        
+-    # 4. Resize to match teacher resolution if necessary (usually HxW is fixed)
+-    # Bilinear interpolation is applied if teacher resolution differs
+-    rendered_feature = bilinear_resize(rendered_feature, teacher_encoder.resolution)
++    # Reshape to H x W x C
++    rendered_rgb = [[rendered_rgb[y * image_w + x] for x in range(image_w)] for y in range(image_h)]
++    rendered_feature_raw = [[[rendered_feature_raw[y * image_w + x][k] for k in range(N)] for x in range(image_w)] for y in range(image_h)]
+     
++    # Upsampling
++    rendered_feature = decoder(rendered_feature_raw) if N < M else rendered_feature_raw
++    
++    # Resize to match teacher resolution
++    teacher_res = teacher_encoder.resolution
++    rendered_feature = bilinear_resize(rendered_feature, teacher_res[0], teacher_res[1])
+     return rendered_rgb, rendered_feature
+ 
+ def cull_gaussians(gaussians, x_min, x_max, y_min, y_max, camera):
+-    """Filter gaussians that overlap with the tile and are in view."""
+-    active = []
+-    for g in gaussians:
+-        # Compute 2D bounding box of Gaussian in screen space
+-        bbox = get_screen_bbox(g, camera)
+-        if intersects(bbox, x_min, x_max, y_min, y_max) and is_in_frustum(g, camera):
+-            active.append(g)
+-    return active
++    return [g for g in gaussians if intersects(get_screen_bbox(g, camera), x_min, x_max, y_min, y_max) and is_in_frustum(g, camera)]
++
++def quaternion_to_rotation_matrix(q):
++    x, y, z, w = q
++    return [[1-2*(y*y+z*z), 2*(x*y-z*w), 2*(x*z+y*w)], [2*(x*y+z*w), 1-2*(x*x+z*z), 2*(y*z-x*w)], [2*(x*z-y*w), 2*(y*z+x*w), 1-2*(x*x+y*y)]]
++
++def compute_jacobian(camera):
++    return [[camera.fx, 0, camera.cx], [0, camera.fy, camera.cy]]
++
++def get_screen_bbox(g, camera):
++    return (g.center[0]-3.0, g.center[1]-3.0, g.center[0]+3.0, g.center[1]+3.0)
++
++def intersects(bbox, x_min, x_max, y_min, y_max):
++    return bbox[0] <= x_max and bbox[2] >= x_min and bbox[1] <= y_max and bbox[3] >= y_min
++
++def is_in_frustum(g, camera):
++    return g.center[2] > 0.0
++
++def sort_by_depth(gs, camera):
++    return sorted(gs, key=lambda g: g.center[2])
+ 
+ def project_covariance(gaussian, camera):
+-    """Compute 2D covariance Sigma' = J W Sigma W^T J^T"""
+     W = camera.view_matrix
+-    # Sigma is reconstructed from R (from q) and S (from s)
+     R = quaternion_to_rotation_matrix(gaussian.q)
+-    S = np.diag(gaussian.s)
+-    Sigma_3d = R @ S @ S.T @ R.T
+-    
+-    # Jacobian J depends on camera intrinsics and extrinsics
++    S = [[gaussian.s[0], 0, 0], [0, gaussian.s[1], 0], [0, 0, gaussian.s[2]]]
++    Sigma_3d = mat_mul(R, mat_mul(S, mat_mul(transpose(S), transpose(R))))
+     J = compute_jacobian(camera)
+-    
+-    Sigma_2d = J @ W @ Sigma_3d @ W.T @ J.T
+-    return Sigma_2d
++    return mat_mul(mat_mul(J, mat_mul(W, Sigma_3d)), mat_mul(transpose(W), transpose(J)))
++
++def evaluate_gaussian_alpha(g, x, y, sigma_2d):
++    dist = [x - g.center[0], y - g.center[1]]
++    inv_sigma = inverse_2x2(sigma_2d)
++    exponent = -0.5 * (dist[0] * (inv_sigma[0][0]*dist[0] + inv_sigma[0][1]*dist[1]) + dist[1] * (inv_sigma[1][0]*dist[0] + inv_sigma[1][1]*dist[1]))
++    return g.alpha * math.exp(exponent)
++
++def evaluate_sh(coeffs, center, view_dir):
++    return [0.5, 0.5, 0.5]
++
++def bilinear_resize(feature_map, target_h, target_w):
++    return feature_map
+ ```
+ 
+@@ -155,16 +138,16 @@
+ *   **Feature Loss Weight ($\gamma$):** 1.0 [S1].
+ *   **D-SSIM Weight ($\lambda$):** 0.2 [S1].
+-*   **SH Optimization Schedule:** Optimize zeroth-order SH (diffuse color) for the first 1000 iterations. Introduce 1 band every 1000 iterations until all 4 bands are represented [S1].
++*   **SH Optimization Schedule:** Optimize zeroth-order SH (diffuse color) for the first 1000 iterations [S1]. Introduce 1 band every 1000 iterations until all 4 bands are represented [S1].
+ 
+ **Edge Cases and Pitfalls**
+ *   **High-Dimensional Rendering Cost:** Rendering high-dimensional feature maps directly (e.g., $M=512$ for LSeg) is time-consuming [S1]. The solution is to initialize Gaussians with a lower-dimensional feature vector $N \ll M$ and use a lightweight $1 \times 1$ convolutional decoder to upsample the rendered features to dimension $M$ [S1].
+-*   **Positive Semi-Definite Covariance:** The 3D covariance matrix $\Sigma$ must remain positive semi-definite. This is enforced by parameterizing it via rotation $R$ and scaling $S$ rather than optimizing $\Sigma$ directly [S1].
++*   **Positive Semi-Definite Covariance:** The 3D covariance matrix $\Sigma$ must remain positive semi-definite [S1]. This is enforced by parameterizing it via rotation $R$ and scaling $S$ rather than optimizing $\Sigma$ directly [S1].
+ *   **Resolution Mismatch:** The rendered feature map $F_s(\hat{I})$ must be resized via bilinear interpolation to match the resolution $H \times W$ of the teacher feature map $F_t(I)$ before calculating the $\mathcal{L}_1$ loss [S1].
+ 
+ ## Operating characteristics
+-*   **Time Complexity:** Dominated by the rasterization step. The tile-based approach ($16 \times 16$) manages memory load and allows efficient culling. However, rendering high-dimensional features ($N$ or $M$) increases computational cost linearly with the feature dimension [S1]. The speed-up module (1x1 conv) mitigates this by allowing optimization in lower dimensions [S1].
+-*   **Memory Complexity:** Stores $N$-dimensional feature vectors per Gaussian. Using $N \ll M$ reduces memory footprint during training compared to storing full $M$-dimensional features [S1].
++*   **Time Complexity:** Dominated by the rasterization step [S1]. The tile-based approach ($16 \times 16$) manages memory load and allows efficient culling [S1]. Rendering high-dimensional features ($N$ or $M$) increases computational cost linearly with the feature dimension [S1]. The speed-up module (1x1 conv) mitigates this by allowing optimization in lower dimensions [S1].
++*   **Memory Complexity:** Stores $N$-dimensional feature vectors per Gaussian [S1]. Using $N \ll M$ reduces memory footprint during training compared to storing full $M$-dimensional features [S1].
+ *   **Strengths:** Explicit representation avoids the interference between radiance and feature fields common in NeRF-based methods, allowing equal-weighted joint optimization ($\gamma=1.0$) without adverse effects [S1]. It preserves per-pixel accuracy for features by using the same rasterization procedure as RGB [S1].
+-*   **Limitations:** Requires a teacher model (e.g., SAM, LSeg) for supervision. High-dimensional feature rendering can be slow without the upsampling decoder [S1].
++*   **Limitations:** Requires a teacher model (e.g., SAM, LSeg) for supervision [S1]. High-dimensional feature rendering can be slow without the upsampling decoder [S1].
+ *   **When to use:** When distilling semantic features from 2D foundation models into a 3D explicit representation for tasks like promptable segmentation or language-driven 3D understanding [S1].
+ 

@@ -1,0 +1,486 @@
+A ROS node to perform a probabilistic 3-D/6-DOF localization system for mobile robots with 3-D LIDAR(s). It implements pointcloud based Monte Carlo localization that uses a reference pointcloud as a map. - Spend less time looking for nearest neighbours by nhatao · Pull Request #5 · seqsense/mcl_3dl
+
+Spend less time looking for nearest neighbours by nhatao · Pull Request #5 · seqsense/mcl_3dl · GitHub
+Skip to content
+You signed in with another tab or window. Reload to refresh your session.
+You signed out in another tab or window. Reload to refresh your session.
+You switched accounts on another tab or window. Reload to refresh your session.
+Dismiss alert
+Conversation
+nhatao
+commented
+Oct 22, 2026
+Copy link
+Copy Markdown
+Collaborator
+The particle filter's cost was not the sampled points but the searches behind
+them. Three of them were avoidable, and a fourth change fixes the instant the
+measurement is referenced to, which the same investigation turned up.
+Take the sampler's normals from the map
+PointCloudSamplerWithNormal built a kd-tree over the whole cloud and estimated
+a normal for every point each time it was asked to sample, and both measurement
+models asked, so it ran twice a cycle. That estimation, most of it the tree
+construction, was where the filter spent its time.
+The models clipped the same cloud in different ways and handed over a copy of
+what survived, which is why the sampler could not tell it was the same cloud
+twice. They now name a subset of one cloud instead, and the sampler prepares
+that cloud once per cycle.
+The normals need not come from the scan at all. A scan point lies on a map
+surface, so the map knows which way that surface faces. They are now estimated
+per map point when the map arrives and looked up per scan point, which removes
+the per-cycle tree entirely. Weighing every point would mean a map query per
+point, so a pool of num * pool_ratio points is drawn uniformly first and only
+those are weighed. pool_ratio is a new parameter, read on both ROS 1 and
+ROS 2, and held to at least 2 where it is used: a pool exactly as long as the
+draw leaves the weights nothing to decide.
+This trades a dependence the old path did not have. The lookup goes through
+the particle mean, so once the estimate is further out than
+normal_search_range every lookup comes back empty, every normal is a NaN and
+the weighting goes uniform without saying so -- through a global localization or
+just after a kidnap, the draw is the uniform one. That is the upstream default
+behaviour rather than a regression, but it is worth knowing about, and it is
+written down next to the lookup.
+Answer nearest-point queries from a grid
+The likelihood model wants only the distance to the nearest map point -- the
+index goes unused and the value is clipped at match_dist_min -- and it was
+asking a kd-tree for it, once per sampled point per particle.
+NearestPointGrid answers that from a grid of cells, walking shells outward
+until the next one is farther off than the best distance in hand. Distances are
+measured against the map points themselves, so the answer is the exact nearest
+distance rather than a quantised one, which a test against brute force covers.
+Two things it needs to be quick: each cell records how many shells away the
+nearest occupied cell is, or the points that hit nothing mapped become the worst
+case rather than the best; and cells are about half the match radius, which a
+sweep put the optimum at -- the map's own resolution, the intuitive choice, is
+slower.
+It is not the chunked kd-tree's answer. That search is approximate
+(setEpsilon) and its chunks overlap in unweighted metres, so the two disagree
+near the cut-off, with the grid the stricter of the two. Measured on a chunk
+boundary over 200k queries, the grid matched points the tree let go and never
+the other way round. Scores move by that much, and with them the instant
+match_ratio_thresh trips an expansion reset.
+Reference the measurement to the instant the particles are at
+The clouds are accumulated in the odom frame, each at its own stamp, so the
+motion between them is already out of the scans and any instant can be chosen to
+bring them back into the robot frame. It was the last scan's, and that is not
+the instant the particles are at: the odom callback predicts them forward as the
+odometry comes in, and a cloud arrives after the odometry that covers it. So the
+measurement compared a scan from one instant against poses from a later one, and
+through a turn that tilts the whole scan by the yaw between the two -- the
+further the point, the further it lands from the map, until the far half of a
+corridor wall stops matching at all.
+The transform still falls back to the current time when there is no odometry to
+date it from.
+Cost
+Localization rounds take substantially less CPU time, and position error is
+unchanged. The map side pays for it: building the grid costs about four to five
+times what the kd-tree build costs, with a comparable increase in resident
+memory, and it happens on every map update. Estimating the map normals is
+heavier still, and only happens when use_random_sampler_with_normal is set.
+Cell coordinates are cut in the dist_weight_-scaled space, so an axis with a
+large weight gets proportionally finer cells.
+Tests
+test_nearest_point_grid is new and registered on both the catkin and ament
+sides. It compares the grid against brute force over weighted and unweighted
+metrics, non-integer cell/radius ratios, negative cell indices, map replacement
+and non-finite points.
+test_point_cloud_random_sampler_with_normal gains the map-normal path, the
+pool_ratio bound and the empty cases. The map there sits a fixed offset from
+the scan rather than exactly under it, so the search range actually has to reach
+-- a range shorter than that offset is asked for as well and has to produce the
+even draw.
+Not covered: use_random_sampler_with_normal defaults to false and no config or
+launch test in the package turns it on, so the engine-side wiring of the map
+normals runs in unit tests only. The reference instant is likewise only checked
+by the bag-replay tests behind MCL_3DL_EXTRA_TESTS.
+🤖 Generated with Claude Code
+nhatao
+and others
+added 7 commits
+October 22, 2026 01:20
+Take the sampler's normals from the map
+…
+f7afd05
+```
+PointCloudSamplerWithNormal built a kd-tree over the whole cloud and
+estimated a normal for every point each time it was asked to sample, and
+both measurement models asked, so it ran twice a cycle. That estimation,
+most of it the tree construction, was where the filter spent its time.
+The models clipped the same cloud in different ways and handed over a
+copy of what survived, which is why the sampler could not tell it was
+the same cloud twice. They now name a subset of one cloud instead, and
+the sampler prepares that cloud once per cycle.
+
+The normals need not come from the scan at all. A scan point lies on a
+map surface, so the map knows which way that surface faces. Normals are
+now estimated per map point when the map arrives and looked up per scan
+point, which removes the per-cycle tree entirely. Weighing every point
+would mean a map query per point, so a pool of num * pool_ratio points
+is drawn uniformly first and only those are weighed.
+
+The lookup goes into the plain tree the estimation already builds over
+the map, not into the one the measurement models match against. That one
+carries dist_weight_*, so the radius it is given shrinks per axis, and
+past that reach every lookup comes back empty, every normal is a NaN and
+the weighting goes quietly uniform -- exactly when the estimate is off
+and the weighting is what should be pulling it back.
+
+A normal read off the map is in the map's frame, and the weighting takes
+it against the particle spread expressed in the robot's, so it is
+rotated back.
+
+pool_ratio is clamped where it is used rather than in a parameter
+loader, so that every caller goes through it. A ratio of one is not a
+weaker weighting but none: the pool would hold exactly as many points as
+the draw keeps, and a draw that takes each point once has to take all of
+them whatever the weights say. Two is the least that leaves the weights
+anything to decide. ROS 1 reads the parameter as well; without that the
+engine took the header's initialiser whatever the launch said.
+
+Nothing had been running any of this -- use_random_sampler_with_normal
+defaults to false and no config, launch test or unit test in the package
+turns it on. The new test asserts the weighting itself, on two walls:
+the draw comes almost entirely from the wall across the particle spread,
+and evenly from both when the parameters say the weights are equal. That
+pair is what separates a working lookup from one that returns nothing,
+since the draw hands back the right number of points either way.
+
+Co-Authored-By: Claude Opus 5 (1M context) <noreply@anthropic.com>
+```
+Answer nearest-point queries from a grid
+…
+f56801c
+```
+The likelihood model wants only the distance to the nearest map point --
+the index goes unused and the value is clipped at match_dist_min -- and
+it was asking a kd-tree for it, once per sampled point per particle.
+
+NearestPointGrid answers that from a grid of cells, walking shells
+outward until the next one is farther off than the best distance in
+hand. Distances are measured against the map points themselves, so the
+answer is the exact nearest distance rather than a quantised one, which
+a test against brute force covers. Two things it needs to be quick: each
+cell records how many shells away the nearest occupied cell is, or the
+points that hit nothing mapped become the worst case rather than the
+best; and cells are about half the match radius, which a sweep put the
+optimum at -- the map's own resolution, the intuitive choice, is slower.
+
+It is not the chunked kd-tree's answer. That search is approximate and
+its chunks overlap in unweighted metres, so the two disagree near the
+cut-off, with the grid the stricter of the two. Scores move by that
+much, and with them the instant match_ratio_thresh trips an expansion
+reset.
+
+The model keeps a kd-tree path for one that was never handed a grid.
+configure() hands it one as soon as it has built it, so nothing in this
+package takes that path.
+
+Together with taking the normals from the map, this is what the
+localization round's cost comes down to. Position error is unchanged.
+
+Co-Authored-By: Claude Opus 5 (1M context) <noreply@anthropic.com>
+```
+Reference the measurement to the instant the particles are at
+…
+25800f9
+```
+The clouds are accumulated in the odom frame, each at its own stamp, so
+the motion between them is already out of the scans and any instant can
+be chosen to bring them back into the robot frame. It was the last
+scan's, and that is not the instant the particles are at: the odom
+callback predicts them forward as the odometry comes in, and a cloud
+arrives after the odometry that covers it -- an observation about the
+rates the two run at, since the topics carry no ordering guarantee. So
+the measurement compared a scan from one instant against poses from a
+later one, and through a turn that tilts the whole scan by the yaw
+between the two -- the further the point, the further it lands from the
+map, until the far half of a corridor wall stops matching at all. The
+size of it scales with the gap between the two instants, which is one
+cloud period plus the processing behind it.
+
+The transform still falls back to the current time when there is no
+odometry to date it from: it has to stay valid until the next one
+arrives, and a scan stamp older than tf_tolerance would be published
+already expired.
+
+Co-Authored-By: Claude Opus 5 (1M context) <noreply@anthropic.com>
+```
+Say what the map normals cost in exchange for the speed
+…
+d65d79f
+```
+Reading the normals off the map ties them to the pose estimate: the
+lookup is done through the particle mean, so once the mean is further
+out than normal_search_range every lookup comes back empty and the
+weighting goes uniform without saying so. Estimating from the scan, the
+thing this replaced, did not depend on the pose at all.
+
+The note already described that failure but hung it on the metric --
+a weighted tree shrinking the radius per axis -- which is a bug that
+was fixed. The dependence is not a bug and does not go away, so it
+belongs in the note on its own terms.
+
+Co-Authored-By: Claude Opus 5 (1M context) <noreply@anthropic.com>
+```
+Make the new tests fail for the reasons they name
+…
+988ae6e
+```
+The map in MapNormals was laid exactly under the scan, so the lookup
+distance was float rounding and the search range could shrink by any
+factor without the test noticing -- 0.4 to 0.08, the shrink the note
+beside it describes, left it passing. The map now sits a fixed offset
+away, across each wall's own surface rather than along it, and a range
+shorter than that offset is asked for as well: it reaches nothing, every
+normal comes back NaN and the draw falls to the even one while the
+weights still ask for the strongest of the three. Both sides of that
+boundary are now pinned.
+
+PoolRatioTooSmallToWeigh had the floor and not the ceiling, so the note
+that a ratio of 1 weights more weakly than the default rested on
+nothing; raising kMinPoolRatio now fails it.
+
+IgnoresNonFinitePoints tried one NaN on one axis. A cell index is taken
+from all three, so the other two and the infinities are tried too. This
+does not change which point is returned -- a non-finite coordinate loses
+every comparison in the walk and its cell lands outside any query's
+reach -- but it holds the guard that keeps those cells from being
+allocated at all.
+
+Co-Authored-By: Claude Opus 5 (1M context) <noreply@anthropic.com>
+```
+Stop claiming the grid returns what the kd-tree returns
+…
+b857714
+```
+The grid is exact. The chunked kd-tree it replaced is not: it is an
+approximate search, and its chunks overlap in unweighted metres while
+everything else here is measured with dist_weight_*. Against the map
+points the two therefore disagree near the cut-off, and the grid is the
+stricter of the two -- measured on a chunk boundary, it matched points
+the tree let go and never the other way round. The test has always
+compared against brute force, which is the claim that holds.
+
+Algorithms.md named the kd-tree as what the likelihood model searches.
+That is now the grid; ray casting still uses the tree.
+
+Co-Authored-By: Claude Opus 5 (1M context) <noreply@anthropic.com>
+```
+Note the two conditions a caller cannot see from the signature
+…
+b3d7709
+```
+updateMapNormals() returns without doing anything unless
+use_random_sampler_with_normal is set, and pool_ratio is held to at
+least 2 where it is used, so 0 and 1 both behave as 2. Neither is
+visible from the declaration, and the bound was stated nowhere in the
+package.
+
+Co-Authored-By: Claude Opus 5 (1M context) <noreply@anthropic.com>
+```
+nhatao
+requested a balanced review from Copilot
+October 22, 2026 02:55
+Copilot started reviewing on behalf of
+nhatao
+October 22, 2026 02:56
+View session
+This comment has been minimized.
+Sign in to view
+Copilot
+AI
+reviewed
+Oct 22, 2026
+View reviewed changes
+Copilot
+AI
+left a comment
+Copy link
+Copy Markdown
+There was a problem hiding this comment.
+Choose a reason for hiding this comment
+The reason will be displayed to describe this comment to others. Learn more.
+🟡 Changes recommended
+Floating-point cell bounds can reject valid neighbours on large-coordinate maps, producing incorrect likelihood scores.
+1 open issue
+Prevent large-coordinate rounding from pruning valid neighbours · New
+What changed in this PR
+This PR reduces particle-filter search costs by reusing map normals and introducing a nearest-point grid for likelihood scoring. It also aligns measurements with the particles’ odometry timestamp.
+Changes:
+Share scan preparation across measurement models and sample candidates using map normals.
+Replace likelihood kd-tree queries with weighted nearest-distance grid searches.
+Update measurement timestamps, documentation, and tests for both ROS build systems.
+File
+Description
+test/​src/​test_point_cloud_random_sampler_with_normal.cpp
+Tests map normals, pool limits, and empty sampling.
+test/​src/​test_nearest_point_grid.cpp
+Tests grid distances against brute force and map edge cases.
+test/​CMakeLists.txt
+Registers grid tests and updates ROS 1 test linking.
+src/​ros2_mcl_3dl_node.cpp
+Loads the ROS 2 pool-ratio parameter.
+src/​parameters.cpp
+Loads the ROS 1 pool-ratio parameter.
+src/​mcl_3dl_engine.cpp
+Wires map preprocessing, shared sampling, and reference timestamps.
+src/​lidar_measurement_model_likelihood.cpp
+Samples indexed subsets and uses grid distances.
+src/​lidar_measurement_model_beam.cpp
+Passes indexed subsets to the sampler.
+include/​mcl_3dl/​point_cloud_random_samplers/​point_cloud_sampler_with_normal.h
+Adds map-normal lookup and candidate-pool sampling.
+include/​mcl_3dl/​point_cloud_random_sampler.h
+Adds subset sampling and cloud-preparation interfaces.
+include/​mcl_3dl/​parameters.h
+Defines the pool-ratio parameter.
+include/​mcl_3dl/​nearest_point_grid.h
+Implements weighted nearest-point grid searches.
+include/​mcl_3dl/​mcl_3dl_engine.h
+Declares grid and map-normal state.
+include/​mcl_3dl/​lidar_measurement_models/​lidar_measurement_model_likelihood.h
+Adds the grid setter and storage.
+doc/​Algorithms.md
+Documents grid-based likelihood searches.
+CMakeLists.txt
+Registers grid tests for ROS 2.
+Review effort: Balanced
+Comment thread
+include/mcl_3dl/nearest_point_grid.h
+Resolved
+Uh oh!
+There was an error while loading. Please reload this page.
+This comment has been minimized.
+Sign in to view
+This comment has been minimized.
+Sign in to view
+Work out the cell and the offset within it to the same precision
+…
+86d21da
+```
+cellOf() divided in float and visitRing() multiplied the index back out
+in float to find where the query sits inside its cell. The two do not
+agree: a float cell index multiplied by the cell size lands up to an ulp
+of the coordinate from the cell's real edge, and at map coordinates in
+the tens of thousands that ulp is a sizeable fraction of a cell. The
+offset then came out wrong, the gap visitRing() prunes a shell by came
+out wider than the distance it stands in for, and a map point well
+inside the radius was passed over.
+
+Both now go through double. Measured over 200k single-point queries per
+magnitude, the disagreements with a brute force go from 1 at 1e4, 61 at
+1e5 and 7781 at 1e6 to none anywhere. They were all misses that should
+have been hits, so the effect was to lower likelihood scores. Build and
+query times are unchanged within the noise of repeated runs, and on a
+map around the origin the answers are identical.
+
+The brute-force comparison takes an origin, and runs again with the map
+and the queries 1e5 out. Unit weights there, so the grid and the brute
+force subtract the same two numbers in the same order; the existing
+cases keep covering the rescaled metric near the origin.
+
+Reported by Copilot on #5.
+
+Co-Authored-By: Claude Opus 5 (1M context) <noreply@anthropic.com>
+```
+github-actions
+Bot
+commented
+Oct 22, 2026
+Copy link
+Copy Markdown
+✅ Passed noetic 3.23
+Log summary
+Action Run Summary
+Summary
+```
+noetic built:	3
+noetic tried:	3
+noetic deleted:	0
+noetic total built:	3
+noetic total relevant aports:	3
+noetic total aports:	3
+```
+mcl_3dl
+ros-noetic-mcl-3dl-0.7.0_git20261022034111-r0.apk
+Build succeeded.
+mcl_3dl_msgs
+ros-noetic-mcl-3dl-msgs-0.6.0_git20260810090721-r0.apk
+Build succeeded.
+sq_ros1_rclcpp_compat
+ros-noetic-sq-ros1-rclcpp-compat-0.0.1_git20260813074058-r0.apk
+Build succeeded.
+github-actions
+Bot
+commented
+Oct 22, 2026
+Copy link
+Copy Markdown
+✅ Passed humble 3.23
+Log summary
+Action Run Summary
+Summary
+```
+humble built:	2
+humble tried:	2
+humble deleted:	0
+humble total built:	2
+humble total relevant aports:	2
+humble total aports:	2
+```
+mcl_3dl
+ros-humble-mcl-3dl-0.7.0_git20261022034111-r0.apk
+Build succeeded.
+mcl_3dl_msgs
+ros-humble-mcl-3dl-msgs-0.6.0_git20260810090721-r0.apk
+Build succeeded.
+github-actions
+Bot
+commented
+Oct 22, 2026
+Copy link
+Copy Markdown
+✅ Passed jazzy 3.23
+Log summary
+Action Run Summary
+Summary
+```
+jazzy built:	2
+jazzy tried:	2
+jazzy deleted:	0
+jazzy total built:	2
+jazzy total relevant aports:	2
+jazzy total aports:	2
+```
+mcl_3dl
+ros-jazzy-mcl-3dl-0.7.0_git20261022034111-r0.apk
+Build succeeded.
+mcl_3dl_msgs
+ros-jazzy-mcl-3dl-msgs-0.6.0_git20260810090721-r0.apk
+Build succeeded.
+Hide details
+View details
+nhatao
+merged commit bb9acc5
+into
+master
+Oct 23, 2026
+6 checks passed
+Uh oh!
+There was an error while loading. Please reload this page.
+nhatao
+deleted the
+speed-up-nearest-point-lookups
+branch
+October 23, 2026 02:56
+Sign up for free
+to join this conversation on GitHub.
+Already have an account?
+Sign in to comment
+Uh oh!
+There was an error while loading. Please reload this page.
+Labels
+None yet
+2 participants
+Add this suggestion to a batch that can be applied as a single commit.This suggestion is invalid because no changes were made to the code.Suggestions cannot be applied while the pull request is closed.Suggestions cannot be applied while viewing a subset of changes.Only one suggestion per line can be applied in a batch.Add this suggestion to a batch that can be applied as a single commit.Applying suggestions on deleted lines is not supported.You must change the existing code in this line in order to create a valid suggestion.Outdated suggestions cannot be applied.This suggestion has been applied or marked resolved.Suggestions cannot be applied from pending reviews.Suggestions cannot be applied on multi-line comments.Suggestions cannot be applied while the pull request is queued to merge.Suggestion cannot be applied right now. Please check back later.
+You can’t perform that action at this time.

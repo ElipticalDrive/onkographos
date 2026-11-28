@@ -1,0 +1,119 @@
+# Texture Coordinate Conversion
+
+Also called: World to Texture Coordinate Mapping, local2tex
+
+## Overview
+Texture Coordinate Conversion maps spatial positions (typically in world, model, or object space) into normalized texture coordinates in the $[0, 1]^3$ range required for 3D texture sampling [S1, S2, unofficial]. It solves the alignment problem between continuous geometric vertices or ray origins and the discrete texel grid of a volume texture [S1, S5, unofficial]. It differs from [Voxel Texture Atlas UV Mapping](4162-voxel-texture-atlas-uv-mapping.md) by operating on continuous 3D volumes rather than 2D atlas faces [S1, S2, unofficial].
+
+## How it works
+**Inputs:**
+- Position vector $\mathbf{P}$ (world, model, or object space) [S1, S2, unofficial].
+- Volume dimensions $\mathbf{D} = (D_x, D_y, D_z)$ or half-extents $\mathbf{B} = (B_x, B_y, B_z)$ [S1, S2, unofficial].
+- Optional coordinate system flip parameters (e.g., Y-axis inversion) [S2, unofficial].
+
+**Outputs:**
+- Normalized texture coordinate vector $\mathbf{uv} = (u, v, w) \in [0, 1]^3$ [S1, S2, unofficial].
+
+**Data Structures:**
+- 3D vectors for position and output coordinates [G].
+- 3D vector for inverse volume size or half-extents [S2, unofficial].
+
+**Steps:**
+1. **Normalization:** Scale the input position by the inverse dimensions of the volume to map the spatial extent to $[0, 1]$ [S2, unofficial].
+2. **Offset:** Add a bias of $0.5$ to shift the range to the standard texture coordinate range $[0, 1]$ [S1, S2, unofficial].
+3. **Axis Flipping:** Invert specific axes (commonly Y) to align with the texture coordinate system's orientation [S2, unofficial].
+
+**Formulas:**
+Two primary formulations exist depending on the input space definition:
+
+1. **AABB/Model Space (Centered at Origin):**
+   If the volume is defined by an Axis-Aligned Bounding Box (AABB) with half-extents $\mathbf{B}$ centered at the origin:
+   $$ \mathbf{uv} = \frac{\mathbf{P}}{2 \mathbf{B}} + 0.5 $$
+   Where $\mathbf{P}$ is the position in model or world space [S1, unofficial].
+
+2. **Grid Index/World Space (Corner at Origin):**
+   If the volume is defined by integer grid dimensions $\mathbf{D}$:
+   $$ \mathbf{uv} = \mathbf{P} \cdot \frac{1}{\mathbf{D}} + 0.5 $$
+   Where $\mathbf{P}$ is the position in world or object space, and $\frac{1}{\mathbf{D}}$ is the precomputed inverse volume size [S2, unofficial].
+
+**Parameters:**
+- `g_cf3InvVolSize`: Precomputed vector $(1/D_x, 1/D_y, 1/D_z)$ [S2, unofficial].
+
+**Edge Cases and Pitfalls:**
+- **Y-Axis Inversion:** Texture coordinates often assume Y increases upwards or downwards differently than world space; failing to flip Y results in inverted volume rendering [S2, unofficial].
+- **Precision:** Using integer division for inverse dimensions causes precision loss; always use floating-point reciprocals [S2, unofficial].
+- **Boundary Conditions:** Coordinates exactly at $0$ or $1$ may sample edge texels; depending on filtering (clamp vs. repeat), this may cause artifacts at volume boundaries [G].
+
+**Pseudocode:**
+> **Unverified code.** The code below did not pass a test run against a reference implementation, or no test fits it, so it may contain errors.
+
+```python
+class Vector3:
+    def __init__(self, x, y, z):
+        self.x = x
+        self.y = y
+        self.z = z
+    def __mul__(self, scalar):
+        return Vector3(self.x * scalar, self.y * scalar, self.z * scalar)
+    def __add__(self, other):
+        return Vector3(self.x + other.x, self.y + other.y, self.z + other.z)
+
+def texture_coordinate_conversion(position: Vector3, volume_dimensions: Vector3, flip_y: bool = True) -> Vector3:
+    """
+    Convert a 3D position to normalized texture coordinates [0,1]^3.
+    
+    Args:
+        position: Input position in world/model space.
+        volume_dimensions: Dimensions (width, height, depth) of the volume grid.
+        flip_y: Whether to invert the Y coordinate to match texture space.
+        
+    Returns:
+        Normalized texture coordinates.
+    """
+    # Step 1: Normalize by inverse volume size
+    inv_dims = Vector3(1.0 / volume_dimensions.x, 
+                       1.0 / volume_dimensions.y, 
+                       1.0 / volume_dimensions.z)
+    
+    uv = position * inv_dims
+    
+    # Step 2: Add 0.5 offset to center the sampling in the texel
+    uv = uv + Vector3(0.5, 0.5, 0.5)
+    
+    # Step 3: Flip Y axis if required by the texture coordinate system
+    if flip_y:
+        uv.y = 1.0 - uv.y
+        
+    return uv
+```
+
+## Subtopics
+
+### Voxel Center Alignment Offset
+Offsets the camera position in texture space by half a unit to align ray origins with voxel centers, assuming texture coordinates range from 0 to 1 [S3, unofficial]. It computes the camera position in object space using the inverse model-view matrix and adds $(0.5, 0.5, 0.5)$ to get the texture space position [S3, unofficial]. Formula: $\mathbf{p}_{\text{tex}} = \mathbf{p}_{\text{obj}} + (0.5, 0.5, 0.5)$ [S3, unofficial].
+
+### IsoSurface Vertex Shader
+Assumes the unit cube is centered at the origin with min $(-0.5, -0.5, -0.5)$ and max $(0.5, 0.5, 0.5)$ [S4, unofficial]. It computes clip-space position via MVP matrix multiplication and generates 3D texture coordinates by adding $(0.5, 0.5, 0.5)$ to the object space vertex position to map the unit cube to texture space $[0, 1]$ [S4, unofficial].
+
+### Coordinate System Normalization for Volume Rendering
+Normalizes volume data coordinates between 0 and 1 to align with texture function requirements, while clip space remains between -1 and 1 [S5, unofficial]. It translates and scales the volume data into the center of the clip space to ensure correct rotation around the center [S5, unofficial].
+
+### Screen Space to Local Space Conversion
+A shader function to convert screen UV coordinates to local 3D positions, likely for ray casting or screen-space effects [S6, unofficial]. It maps UV coordinates to clip space via $pos.xy = uv * 2.0 - 1.0$ [S6, unofficial].
+
+## Operating characteristics
+- **Time Complexity:** $O(1)$ per sample, as the operation consists of a few multiplications and additions [G].
+- **Memory Complexity:** $O(1)$ auxiliary memory, requiring only the storage of the inverse volume dimensions or half-extents [G].
+- **Strengths:** Simple, hardware-friendly arithmetic; works for both ray casting and meshed geometry [S1, S4, unofficial].
+- **Limitations:** Assumes linear mapping; does not handle non-uniform scaling or non-axis-aligned volumes without additional transformation matrices [S5, unofficial].
+
+## Background
+Originating from standard 3D graphics pipeline practices, this method is used in volume ray casting and isosurface rendering to sample 3D textures [S1, S4, unofficial]. It is implemented in various open-source volume rendering engines and educational WebGL tutorials [S1, S2, S5, unofficial].
+
+## Sources
+[S1] xwghua/clearvolume-plus, https://github.com/xwghua/clearvolume-plus, fetched 2026-10-26 (unofficial)
+[S2] pengliu916/DynamicVolumeRayCasting, https://github.com/pengliu916/DynamicVolumeRayCasting, fetched 2026-10-26 (unofficial)
+[S3] wpop/qt-viewer-pro, https://github.com/wpop/qt-viewer-pro, fetched 2026-10-27 (unofficial)
+[S4] Volumetric Render Engine - GitHub, https://github.com/mikejernil/volumetric-render-engine, fetched 2026-10-27 (unofficial)
+[S5] WebGL for Numerical PDEs (Session 11): Volume Ray Casting, https://www.youtube.com/watch?v=X095f9QzSBo, fetched 2026-10-27 (unofficial)
+[S6] StarsX/FluidX12, https://github.com/StarsX/FluidX12, fetched 2026-10-26 (unofficial)

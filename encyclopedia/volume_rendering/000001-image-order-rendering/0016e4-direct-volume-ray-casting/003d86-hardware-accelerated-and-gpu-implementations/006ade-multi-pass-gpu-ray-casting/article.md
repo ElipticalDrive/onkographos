@@ -1,0 +1,145 @@
+# Multi-pass GPU Ray-casting
+
+Also called: Ray Casting Volume Rendering Pipeline, RayCasting101
+
+## Overview
+Multi-pass GPU ray-casting decomposes the volume rendering pipeline into distinct rendering passes to decouple ray entry/exit point calculation from the final compositing step [S2, unofficial]. Unlike single-pass approaches that compute all ray parameters within a single fragment shader invocation, this method uses intermediate textures to store geometric ray data (entry and exit positions) before performing the final ray-marching compositing [S2, unofficial]. This separation allows for more flexible handling of complex ray generation logic and can simplify shader complexity, though it incurs additional memory bandwidth costs for the intermediate buffers [S1].
+
+## How it works
+The method executes a sequence of three rendering passes. It assumes a standard hardware-accelerated sampling setup where volume data resides in 3D texture memory [G].
+
+**Inputs and Outputs:**
+*   **Inputs:** Volume texture (3D), World-View-Projection matrix ($WVP$), Scale factor, Step size, Volume dimensions ($W, H, D$), and maximum iteration count.
+*   **Outputs:** Final composited image in `SampleRenderView`.
+*   **Intermediate Data:** `FrontTexture` (stores ray entry points), `RearTexture` (stores ray exit points).
+
+**Data Structures:**
+*   `FrontTexture`: 2D texture, format matching the screen resolution, storing 3D position vectors (entry points).
+*   `RearTexture`: 2D texture, format matching the screen resolution, storing 3D position vectors (exit points).
+*   `VolumeTexture`: 3D texture containing the scalar field data.
+
+**Numbered Steps:**
+
+1.  **Calculate Ray Parameters:** Compute the World-View-Projection matrix $WVP = \text{World} \times \text{View} \times \text{Proj}$ [S2, unofficial].
+2.  **Render Rear Positions (Exit Points):**
+    *   Set blend state to disable blending (overwrite).
+    *   Bind `RearTexture` as the render target view.
+    *   Set rasterizer state to **Back Culling** (cull front-facing triangles of the volume bounding box).
+    *   Set shader constants: $WVP$, Scale Factor.
+    *   Execute technique `RayCasting101FX_RenderPosition`. This pass renders the back faces of the volume bounding box, outputting the world-space exit positions of rays intersecting the volume.
+    *   Flush the context.
+3.  **Render Front Positions (Entry Points):**
+    *   Set blend state to disable blending.
+    *   Bind `FrontTexture` as the render target view.
+    *   Set rasterizer state to **Front Culling** (cull back-facing triangles of the volume bounding box).
+    *   Set shader constants: $WVP$, Scale Factor.
+    *   Execute technique `RayCasting101FX_RenderPosition`. This pass renders the front faces of the volume bounding box, outputting the world-space entry positions of rays intersecting the volume.
+    *   Flush the context.
+4.  **Final Ray Casting and Compositing:**
+    *   Bind `SampleRenderView` as the render target.
+    *   Set viewport to the full window dimensions.
+    *   Clear the render target (e.g., to red $(1.0, 0.0, 0.0, 0.0)$ as a debug or default value) [S2, unofficial].
+    *   Set shader resources:
+        *   $WVP$ matrix.
+        *   Scale Factor.
+        *   `FrontTexture` Shader Resource View (SRV).
+        *   `RearTexture` SRV.
+        *   `VolumeTexture` SRV.
+        *   Step Size vector.
+        *   Maximum Iterations integer.
+        *   Volume Width, Height, Depth integers.
+    *   Execute technique `RayCasting101FX_RayCastSimple`. This pass reads the entry/exit points from the intermediate textures, marches through the volume using the step size, samples the volume texture, and performs front-to-back compositing [S2, unofficial].
+
+**Pseudocode:**
+
+> **Unverified code.** The code below did not pass a test run against a reference implementation, or no test fits it, so it may contain errors.
+
+```python
+def multi_pass_gpu_ray_casting(device, context, renderer, volume_data, camera):
+    # 1. Calculate World-View-Projection Matrix
+    wvp = camera.world * camera.view * camera.proj
+    
+    # 2. Render Rear Positions (Exit Points)
+    # Setup blend state to disable blending
+    setup_blend(enable_blending=False)
+    
+    # Prepare rear render target view
+    prepare_rtv(rear_texture_view)
+    
+    # Set rasterizer state to back culling
+    set_rasterizer_state(cull_mode=CULL_BACK)
+    
+    # Set shader constants
+    renderer.set_matrix("RayCasting101FX_WVP", wvp)
+    renderer.set_float("RayCasting101FX_ScaleFactor", scale_factor)
+    
+    # Execute technique to render back faces of bounding box
+    execute_technique(renderer.techniques["RayCasting101FX_RenderPosition"])
+    
+    # Flush context to ensure completion
+    context.flush()
+    
+    # 3. Render Front Positions (Entry Points)
+    # Setup blend state to disable blending
+    setup_blend(enable_blending=False)
+    
+    # Prepare front render target view
+    prepare_rtv(front_texture_view)
+    
+    # Set rasterizer state to front culling
+    set_rasterizer_state(cull_mode=CULL_FRONT)
+    
+    # Set shader constants
+    renderer.set_matrix("RayCasting101FX_WVP", wvp)
+    renderer.set_float("RayCasting101FX_ScaleFactor", scale_factor)
+    
+    # Execute technique to render front faces of bounding box
+    execute_technique(renderer.techniques["RayCasting101FX_RenderPosition"])
+    
+    # Flush context to ensure completion
+    context.flush()
+    
+    # 4. Final Ray Casting and Compositing
+    # Set render target to final output
+    context.output_merger.set_targets(sample_render_view)
+    
+    # Set viewport
+    context.rasterizer.set_viewports([Viewport(0, 0, width, height, 0.0, 1.0)])
+    
+    # Clear render target
+    context.clear_render_target_view(sample_render_view, color=(1.0, 0.0, 0.0, 0.0))
+    
+    # Set shader resources
+    renderer.set_matrix("RayCasting101FX_WVP", wvp)
+    renderer.set_float("RayCasting101FX_ScaleFactor", scale_factor)
+    renderer.set_resource("RayCasting101FX_Back", rear_texture_srv)
+    renderer.set_resource("RayCasting101FX_Front", front_texture_srv)
+    renderer.set_resource("RayCasting101FX_Volume", volume_texture_srv)
+    renderer.set_vector("RayCasting101FX_StepSize", step_size)
+    renderer.set_int("RayCasting101FX_Iterations", max_iterations)
+    renderer.set_int("RayCasting101FX_Width", volume_width)
+    renderer.set_int("RayCasting101FX_Height", volume_height)
+    renderer.set_int("RayCasting101FX_Depth", volume_depth)
+    
+    # Execute final ray casting technique
+    execute_technique(renderer.techniques["RayCasting101FX_RayCastSimple"])
+```
+
+**Edge Cases and Pitfalls:**
+*   **Precision:** The accuracy of entry/exit points depends on the rasterization precision of the bounding box geometry. Floating-point errors in the intermediate textures can lead to slight gaps or overlaps in the final ray march [G].
+*   **Empty Volumes:** If the volume is empty or the camera is outside the volume, the front/rear passes may produce no output, requiring a clear or default color in the final pass [S2, unofficial].
+*   **Memory Bandwidth:** Writing to two intermediate textures (`FrontTexture`, `RearTexture`) doubles the memory bandwidth requirement compared to a single-pass approach that computes points on the fly [S1].
+
+## Operating characteristics
+*   **Time Complexity:** $O(N \cdot M)$, where $N$ is the number of pixels and $M$ is the average number of steps per ray. The constant factor is higher than single-pass due to the overhead of two additional render passes and memory writes.
+*   **Memory Complexity:** $O(W \cdot H)$ for the two intermediate position textures, plus $O(V)$ for the volume data, where $W, H$ are screen dimensions and $V$ is volume size.
+*   **Strengths:** Simplifies the final compositing shader by pre-computing ray bounds; allows for easier integration of complex ray generation logic (e.g., non-linear rays) in the first two passes [S2, unofficial].
+*   **Limitations:** Increased memory bandwidth usage; potential precision loss from storing positions in textures; requires careful synchronization between passes [S1].
+*   **When to use:** When ray generation is complex or when the rendering pipeline needs to separate geometric intersection from optical compositing. Not ideal for memory-constrained environments due to intermediate buffers [S1].
+
+## Background
+Multi-pass GPU ray-casting is a traditional approach to hardware-accelerated volume rendering, often cited in early GPU-based volume visualization literature [S1]. The specific implementation details described here, including the `RayCasting101` technique names and the use of front/rear culling for position extraction, originate from DirectX 11 tutorial code and community discussions [S2, unofficial]. It represents a step towards more modern, optimized single-pass or tiled approaches by modularizing the rendering pipeline [S1].
+
+## Sources
+[S1] State-of-the-Art in GPU-Based Large-Scale Volume Visualization, https://vcg.seas.harvard.edu/publications/20150513-stateof-the-art-in-gpu-based-large-scale-volume-visualization/paper, fetched 2026-10-24
+[S2] 3D Texture Only interpolates on Y-Axis, https://gamedev.stackexchange.com/questions/166205, fetched 2026-10-29 (unofficial)

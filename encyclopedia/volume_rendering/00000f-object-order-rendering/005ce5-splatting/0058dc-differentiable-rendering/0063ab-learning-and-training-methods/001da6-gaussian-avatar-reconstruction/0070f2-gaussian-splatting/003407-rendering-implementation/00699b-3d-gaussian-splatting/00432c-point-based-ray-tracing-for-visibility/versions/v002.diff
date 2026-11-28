@@ -1,0 +1,128 @@
+--- v001.md
++++ v002.md
+@@ -8,13 +8,13 @@
+ ## How it works
+ **Inputs and Outputs**
+-*   **Input:** A set of 3D Gaussians (position, covariance, opacity $\alpha$, color); a ray $r(t) = o + td$; an early-out threshold $T_{stop}$; a minimum response threshold $\epsilon$.
+-*   **Output:** The accumulated transmittance $T$ along the ray.
++*   **Input:** A set of 3D Gaussians (position, covariance, opacity $\alpha$, color); a ray $r(t) = o + td$; an early-out threshold $T_{stop}$; a minimum response threshold $\epsilon$ [S1].
++*   **Output:** The accumulated transmittance $T$ along the ray [S1].
+ 
+ **Data Structures**
+-*   **Gaussian Proxy:** For each Gaussian, a proxy mesh (e.g., a subdivided regular icosahedron) is constructed. The triangles of this proxy are inserted into a BVH for fast ray-triangle traversal [S1].
+-*   **Proxy Scale:** The proxy is scaled to tightly bound the region where the particle’s response exceeds $\epsilon$. The scale explicitly incorporates the particle’s opacity $\alpha$ to apply "adaptive clamping," ensuring nearly transparent splats receive proportionally tighter bounds to reduce false-positive hits during traversal [S1].
++*   **Gaussian Proxy:** For each Gaussian, a proxy mesh (e.g., a subdivided regular icosahedron) is constructed, and its triangles are inserted into a BVH for fast ray-triangle traversal [S1].
++*   **Proxy Scale:** The proxy is scaled to tightly bound the region where the particle’s response exceeds $\epsilon$ [S1]. The scale explicitly incorporates the particle’s opacity $\alpha$ to apply "adaptive clamping," ensuring nearly transparent splats receive proportionally tighter bounds to reduce false-positive hits during traversal [S1].
+ 
+ **Algorithm Steps**
+-1.  **Ray Query:** For a given ray $r(t) = o + td$, query the BVH to gather the batch of intersected Gaussian proxies.
++1.  **Ray Query:** For a given ray $r(t) = o + td$, query the BVH to gather the batch of intersected Gaussian proxies [S1].
+ 2.  **Virtual Camera Setup:** To reuse the unmodified rasterizer for consistent blending, instantiate a one-pixel virtual camera at the ray origin $o$ with the optical axis aligned to the ray direction $d$ [S1].
+ 3.  **Splatting Evaluation:** Splat exactly the Gaussians reported by the BVH for that ray into the center pixel of this virtual camera using the standard EWA-splatting formulation [S1]. This computes the per-hit attenuation $\Delta a_i$ from the Gaussian’s line integral along the ray segment covered by the proxy [S1].
+@@ -29,4 +29,8 @@
+ *   **$\epsilon$:** A small minimum response threshold used to define the tight bounding region for the proxy [S1].
+ 
++**Pitfalls**
++*   **False Positives:** Without adaptive clamping, transparent Gaussians may generate oversized proxies, increasing traversal cost and false-positive hits [S1].
++*   **Threshold Mismatch:** Setting $T_{stop}$ differently from the rasterizer's early-out threshold will cause inconsistency between ray-traced visibility and screen-space rendering [S1].
++
+ **Pseudocode**
+ ```python
+@@ -34,81 +38,38 @@
+     """
+     Evaluates transmittance along a ray using Gaussian proxies.
+-    
+-    Args:
+-        ray_origin (vec3): Origin of the ray o.
+-        ray_direction (vec3): Direction of the ray d.
+-        gaussians (list): List of Gaussian objects with properties:
+-            - position (vec3)
+-            - covariance (mat3)
+-            - opacity (float)
+-            - proxy_mesh (mesh): Triangles bounding the Gaussian response > epsilon.
+-        bvh (BVH): Bounding Volume Hierarchy containing all proxy_meshes.
+-        t_stop (float): Early-out threshold for transmittance.
+-        epsilon (float): Minimum response threshold for proxy scaling.
+-        
+-    Returns:
+-        float: Accumulated transmittance T.
+     """
+     T = 1.0
+-    
+-    # 1. Query BVH for intersected proxies
+-    # The BVH contains proxies scaled by opacity (adaptive clamping)
++    # 1. Query BVH for intersected proxies. Proxies are scaled with opacity (adaptive clamping) [S1].
+     intersected_proxies = bvh.query(ray_origin, ray_direction)
+     
+-    # 2. Setup virtual camera frame
+-    # Local camera frame aligned with ray direction
+-    # This allows reusing the standard EWA-splatting logic
+-    cam_frame = create_local_camera_frame(ray_origin, ray_direction)
++    # 2. Setup virtual camera frame at ray origin with optical axis aligned to ray direction [S1].
++    # This local frame allows reusing the standard EWA-splatting formulation [S1].
+     
+-    # 3. Process intersections
+-    # No depth sorting required for transmittance accumulation
++    # 3. Process intersections. Depth sorting is not required for transmittance accumulation [S1].
+     for proxy in intersected_proxies:
+-        # Find the corresponding Gaussian
+         gaussian = proxy.parent_gaussian
+         
+-        # 4. Evaluate attenuation using EWA-splatting via virtual camera
+-        # Splat the Gaussian into the center pixel of the 1-pixel virtual camera
+-        # This computes the line integral along the ray segment covered by the proxy
+-        delta_a = splat_gaussian_to_pixel(gaussian, cam_frame)
++        # 4. Splat the Gaussian into the center pixel of the 1-pixel virtual camera using EWA-splatting [S1].
++        # This computes the per-hit attenuation delta_a from the Gaussian's line integral along the ray segment [S1].
++        # Note: The exact EWA-splatting projection is implemented in the parent rasterizer article [G].
++        delta_a = standard_ewa_splatting(gaussian, ray_origin, ray_direction)  # Standard EWA-splatting step [G]
+         
+-        # 5. Update transmittance
++        # 5. Update transmittance: T <- T * (1 - delta_a) [S1].
+         T = T * (1.0 - delta_a)
+         
+-        # 6. Early termination
++        # 6. Early termination when transmittance drops below threshold [S1].
+         if T <= t_stop:
+             break
+             
+     return T
+-
+-def create_local_camera_frame(origin, direction):
+-    """
+-    Creates a camera frame where the optical axis is the ray direction.
+-    Returns a structure containing view matrix or projection parameters
+-    compatible with the standard rasterizer's splatting function.
+-    """
+-    # Implementation detail: Construct a rotation matrix that aligns
+-    # the camera's Z-axis with 'direction'.
+-    # The resulting frame is passed to the rasterizer's splatting kernel.
+-    pass
+-
+-def splat_gaussian_to_pixel(gaussian, cam_frame):
+-    """
+-    Reuses the unmodified rasterizer's EWA-splatting formulation.
+-    Evaluates the Gaussian's contribution to the center pixel of the
+-    virtual camera defined by cam_frame.
+-    """
+-    # This function encapsulates the standard 3DGS rasterization step
+-    # for a single Gaussian projected onto a 1x1 pixel buffer.
+-    # It returns the opacity/attenuation delta_a.
+-    pass
+ ```
+ 
+ ## Operating characteristics
+-*   **Time Complexity:** Depends on BVH traversal depth and the number of intersected proxies per ray. Early termination reduces average cost when transmittance drops below $T_{stop}$.
+-*   **Memory Complexity:** Requires storing the BVH of Gaussian proxies. The proxy scale incorporates opacity, which may increase memory slightly compared to minimal bounding spheres but reduces false positives.
+-*   **Strengths:** Decouples visibility from camera projection; allows reuse of pretrained 3DGS point clouds and the existing rasterizer without training mismatch; consistent blending with the screen-space renderer.
+-*   **Limitations:** Not a full renderer; serves only as a visibility oracle. Requires careful tuning of $T_{stop}$ to match the rasterizer's early-out behavior.
+-*   **When to use:** When evaluating transmittance along arbitrary light directions for relighting or shadowing in 3DGS scenes.
+-*   **When not to use:** For primary view synthesis where the tile-based rasterizer is more efficient.
++*   **Time Complexity:** Depends on BVH traversal depth and the number of intersected proxies per ray [S1]. Early termination reduces average cost when transmittance drops below $T_{stop}$ [S1].
++*   **Memory Complexity:** Requires storing the BVH of Gaussian proxies [S1]. The proxy scale incorporates opacity, which may increase memory slightly compared to minimal bounding spheres but reduces false positives [S1].
++*   **Strengths:** Decouples visibility from camera projection [S1]. Allows reuse of pretrained 3DGS point clouds and the existing rasterizer without training mismatch [S1]. Provides consistent blending with the screen-space renderer [S1].
++*   **Limitations:** Not a full renderer; serves only as a visibility oracle [S1]. Requires careful tuning of $T_{stop}$ to match the rasterizer's early-out behavior [S1].
++*   **When to use:** When evaluating transmittance along arbitrary light directions for relighting or shadowing in 3DGS scenes [S1].
++*   **When not to use:** For primary view synthesis where the tile-based rasterizer is more efficient [S1].
+ 
+ ## Background

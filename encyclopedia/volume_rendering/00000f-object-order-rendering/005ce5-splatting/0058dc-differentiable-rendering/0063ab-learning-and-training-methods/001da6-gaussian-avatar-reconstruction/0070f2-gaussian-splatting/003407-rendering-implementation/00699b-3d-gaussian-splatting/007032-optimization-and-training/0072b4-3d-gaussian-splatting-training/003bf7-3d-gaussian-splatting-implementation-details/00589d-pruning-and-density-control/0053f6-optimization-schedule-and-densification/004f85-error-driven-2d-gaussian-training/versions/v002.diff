@@ -1,0 +1,261 @@
+--- v001.md
++++ v002.md
+@@ -4,14 +4,14 @@
+ 
+ ## Overview
+-Error-Driven 2D Gaussian Training is a densification strategy that samples and optimizes 2D Gaussian kernels in image space using a differentiable rasterizer, then back-projects them to 3D to initialize new 3D Gaussians [S1, unofficial]. It solves the problem of initializing view-dependent Gaussian kernels for complex specular radiance reconstruction, where standard 3D initialization may be insufficient [S1, unofficial]. It sets itself apart from standard 3DGS densification by performing optimization in 2D image space with pre-rendered images as fixed backgrounds, rather than directly manipulating 3D primitives [S1, unofficial].
++Error-Driven 2D Gaussian Training is a densification strategy that samples and optimizes 2D Gaussian kernels in image space using a differentiable rasterizer, then back-projects them to 3D to initialize new 3D primitives [S1, unofficial]. It solves the problem of reconstructing complex specular radiance and high-frequency details where standard 3D Gaussian Splatting (3DGS) initialization may fail [S1, unofficial]. Unlike standard densification which operates directly in 3D, this method optimizes in 2D image space using pre-rendered images as fixed backgrounds, allowing for more precise error-driven placement before projection [S1, unofficial].
+ 
+ ## How it works
+ **Inputs and Outputs:**
+-*   **Inputs:** Rendered images $I = \{I_i\}_{i=1}^M$ and depth maps $D = \{D_i\}_{i=1}^M$ from standard 3DGS training for all $M$ training views [S1, unofficial].
+-*   **Outputs:** Optimized 2D Gaussian parameters $\{x, \alpha, c, d, r, s\}_{2D}$ which are back-projected to initialize new 3D Gaussians [S1, unofficial].
++*   **Inputs:** Rendered images $I = \{I_i\}_{i=1}^M$ and depth maps $D = \{D_i\}_{i=1}^M$ from standard 3DGS training for $M$ views; total number of supplementary Gaussians to add; loss weights $\lambda_{SSIM}$ (matching original 3DGS paper).
++*   **Outputs:** Optimized 2D Gaussian parameters $\{x, \alpha, c, d, r, s\}_{2D}$ per view, which are back-projected to initialize new 3D Gaussians.
+ 
+ **Data Structures:**
+ Each 2D Gaussian primitive is defined by the following parameters [S1, unofficial]:
+-*   $x$: Image-space coordinates (2D vector).
++*   $x$: Image-space coordinates $(u, v)$.
+ *   $s$: Scale along the two principal axes.
+ *   $r$: Rotation angle between the primary axis and the image y-axis.
+@@ -20,144 +20,122 @@
+ *   $d$: Depth value used for rendering-order sorting.
+ 
+-**Algorithm Steps:**
+-1.  **Pre-allocation:** Predefine the total number of supplementary Gaussians for the scene. Allocate these across views proportional to their respective rendering loss values, assigning more kernels to higher-loss views [S1, unofficial].
+-2.  **Initialization:** For each view, initialize new Gaussian kernels with minimal opacity. Sample color $c$ from the current rendered image $I_i$ at the mean position $x$. Determine the spatial distribution of new kernels via multinomial sampling across pixel coordinates $(u, v)$ with probability [S1, unofficial]:
++**Numbered Steps:**
++
++1.  **Pre-rendering:** Obtain rendered images $I_i$ and depth maps $D_i$ for all training views using the current 3DGS model.
++2.  **Allocation:** Predefine the total number of supplementary Gaussians. Allocate them across views proportional to their respective rendering loss values; higher-loss views receive more kernels [S1, unofficial].
++3.  **Initialization:** For each view, initialize new Gaussian kernels with minimal opacity. Sample color $c$ from the current rendered image $I_i$ at the mean position $x$. Determine spatial distribution via multinomial sampling across pixel coordinates $(u, v)$ with probability [S1, unofficial]:
+     $$p(u, v) \propto [(1 - \lambda_{SSIM}) L_1(u, v) + \lambda_{SSIM} L_{SSIM}(u, v)]^2$$
+-    where $L_1$ and $L_{SSIM}$ are the $L_1$ and structural similarity loss metrics, and $\lambda_{SSIM}$ is the weight matching the original 3DGS paper [S1, unofficial].
+-3.  **Depth Map Rendering:** Render depth maps for each training image to ensure correct rendering order for 2D Gaussian primitives. Compute depth values at points where transmittance first drops below 0.5 during rasterization. This represents positions where 3D Gaussians attain maximal response along camera rays [S1, unofficial].
+-4.  **Optimization:** Overlay supplementary 2D Gaussians on the image. Optimize their parameters using a differentiable rasterizer that emulates 3DGS’s differentiable rendering. Use the pre-rendered image $I_i$ as a fixed background (rather than a uniform one) and apply the same loss function as 3DGS [S1, unofficial].
+-5.  **Depth Update:** During optimization, update each primitive’s depth $d$ via nearest-neighbor sampling on the rendered depth map $D_i$ using the primitive's current image-space coordinates $x$ [S1, unofficial].
+-6.  **Augmentation and Pruning:** Periodically augment the kernel set by introducing 20% new primitives at fixed intervals. Prune primitives that exhibit excessive transparency or occupy insufficient pixels [S1, unofficial].
+-7.  **Back-projection:** After optimization, back-project the 2D primitives into world space to serve as high-quality initializations for new 3D Gaussians. This involves foreground-background separation through point cloud clustering, determination of 3D Gaussian rotations and scales via Weighted Principal Component Analysis (WPCA), and final calibration of the scales [S1, unofficial].
++    where $L_1$ and $L_{SSIM}$ are the $L_1$ and structural similarity loss metrics at pixel $(u, v)$ [S1, unofficial].
++4.  **Optimization Loop:**
++    a. Overlay supplementary 2D Gaussians on the image.
++    b. Optimize parameters $\{x, \alpha, c, d, r, s\}_{2D}$ using a differentiable rasterizer that emulates 3DGS rendering.
++    c. Use the pre-rendered image $I_i$ as a fixed background during optimization [S1, unofficial].
++    d. Update primitive depth $d$ via nearest-neighbor sampling on $D_i$ using the current coordinates $x$ [S1, unofficial].
++    e. Render depth maps to ensure correct rendering order. Compute depth values at points where transmittance first drops below 0.5 during rasterization. This represents positions where 3D Gaussians attain maximal response along camera rays [S1, unofficial].
++5.  **Augmentation and Pruning:** Periodically (at fixed intervals) augment the kernel set by introducing 20% new primitives. Prune primitives that exhibit excessive transparency or occupy insufficient pixels [S1, unofficial].
++6.  **Back-projection:** After optimization, back-project the 2D primitives into world space to serve as high-quality initializations for new 3D Gaussians. This involves foreground-background separation through point cloud clustering, determination of 3D Gaussian rotations and scales via Weighted Principal Component Analysis (WPCA), and final calibration of scales [S1, unofficial].
+ 
+ **Pseudocode:**
++
+ ```python
+-def error_driven_2d_training(rendered_images, depth_maps, total_supplementary_gaussians, lambda_ssim):
++def error_driven_2d_training(rendered_images, depth_maps, total_supplementary_gaussians, lambda_ssim, interval):
+     """
+-    Optimizes 2D Gaussians in image space to initialize new 3D Gaussians.
++    Optimizes 2D Gaussians in image space and prepares for back-projection.
++    """
++    # Step 2: Allocation proportional to loss
++    view_losses = compute_rendering_loss(rendered_images)
++    allocations = allocate_gaussians_proportional(view_losses, total_supplementary_gaussians)
+     
+-    Args:
+-        rendered_images: List of M rendered images I_i.
+-        depth_maps: List of M depth maps D_i.
+-        total_supplementary_gaussians: Total number of supplementary Gaussians to create.
+-        lambda_ssim: Weight for SSIM loss.
++    optimized_2d_primitives = {}
++    
++    for view_idx, (I_i, D_i) in enumerate(zip(rendered_images, depth_maps)):
++        num_prims = allocations[view_idx]
+         
+-    Returns:
+-        optimized_2d_gaussians: List of optimized 2D Gaussian parameters.
+-    """
+-    # 1. Allocate Gaussians across views proportional to loss
+-    losses = compute_rendering_loss(rendered_images)
+-    allocation = proportional_allocation(losses, total_supplementary_gaussians)
+-    
+-    all_2d_gaussians = []
+-    
+-    for i in range(len(rendered_images)):
+-        I_i = rendered_images[i]
+-        D_i = depth_maps[i]
+-        num_gaussians = allocation[i]
+-        
+-        # 2. Initialize 2D Gaussians
+-        # Sample positions based on error-driven probability
+-        positions = sample_positions_multinomial(I_i, lambda_ssim)
++        # Step 3: Initialization
++        # Multinomial sampling based on error
++        loss_map = compute_composite_loss(I_i, lambda_ssim)
++        probabilities = normalize(loss_map ** 2)
++        initial_positions = multinomial_sample(probabilities, num_prims)
+         
+         # Initialize parameters
+-        gaussians = []
+-        for pos in positions:
+-            g = {
+-                'x': pos,          # Image-space coordinates
+-                'alpha': 0.0,      # Minimal initial opacity [G]
+-                'c': I_i[pos],     # Color sampled from rendered image
+-                'd': 0.0,          # Depth for sorting
+-                'r': 0.0,          # Rotation angle
+-                's': [1.0, 1.0]    # Scale (initial guess)
++        primitives = []
++        for pos in initial_positions:
++            prim = {
++                'x': pos,
++                'alpha': MIN_OPACITY, # Conservative strategy
++                'c': sample_color_from_image(I_i, pos),
++                'd': get_depth_from_map(D_i, pos),
++                'r': 0.0,
++                's': INITIAL_SCALE
+             }
+-            gaussians.append(g)
++            primitives.append(prim)
+             
+-        # 3. Render depth maps for sorting
+-        # Compute depth where transmittance < 0.5
+-        depth_map_rendered = render_depth_with_transmittance_threshold(gaussians, threshold=0.5)
++        # Step 5: Periodic Augmentation and Pruning
++        for iteration in range(TOTAL_ITERATIONS):
++            # Optimization Step 4
++            primitives = optimize_2d_primitives(primitives, I_i, D_i, lambda_ssim)
++            
++            if iteration % interval == 0:
++                # Augment
++                new_count = int(len(primitives) * 0.2)
++                new_prims = initialize_new_primitives(I_i, D_i, new_count, lambda_ssim)
++                primitives.extend(new_prims)
++                
++                # Prune
++                primitives = prune_primitives(primitives, threshold_transparency=EXCESSIVE_TRANSPARENCY, threshold_coverage=INSUFFICIENT_PIXELS)
++                
++        optimized_2d_primitives[view_idx] = primitives
+         
+-        # 4. Optimize 2D Gaussians
+-        # Use differentiable rasterizer with I_i as fixed background
+-        for step in range(num_optimization_steps):
+-            # Render current 2D Gaussians
+-            rendered_output = differentiable_rasterize(gaussians, background=I_i)
+-            
+-            # Compute loss against ground truth (or pre-rendered image if used as target)
+-            # Note: The method uses pre-rendered image as fixed background, 
+-            # but optimization likely minimizes difference from ground truth or uses the 
+-            # pre-rendered image as a static backdrop for the new kernels to fill gaps.
+-            # Based on [S1, unofficial], it optimizes parameters using the rasterizer with I_i as fixed background.
+-            # The loss function is the same as 3DGS.
+-            loss = compute_3dgs_loss(rendered_output, ground_truth_images[i])
+-            
+-            # Update parameters via gradient descent
+-            gradients = compute_gradients(loss, gaussians)
+-            update_gaussians(gaussians, gradients, learning_rate)
+-            
+-            # Update depth via nearest-neighbor sampling on D_i
+-            for g in gaussians:
+-                g['d'] = nearest_neighbor_sample(D_i, g['x'])
+-                
+-        # 5. Periodic Augmentation and Pruning
+-        # (Simplified for single view optimization context)
+-        # In practice, this happens during the optimization loop at fixed intervals
+-        if step % augmentation_interval == 0:
+-            # Add 20% new primitives
+-            new_positions = sample_positions_multinomial(I_i, lambda_ssim, count=0.2 * len(gaussians))
+-            for pos in new_positions:
+-                g_new = {
+-                    'x': pos,
+-                    'alpha': 0.0,
+-                    'c': I_i[pos],
+-                    'd': 0.0,
+-                    'r': 0.0,
+-                    's': [1.0, 1.0]
+-                }
+-                gaussians.append(g_new)
+-                
+-        # Prune excessive transparency or insufficient coverage
+-        gaussians = prune_gaussians(gaussians, threshold_transparency=0.01, threshold_coverage=5)
++    return optimized_2d_primitives
++
++def optimize_2d_primitives(primitives, I_i, D_i, lambda_ssim):
++    """
++    Optimizes 2D Gaussian parameters using differentiable rasterization.
++    """
++    # Step 4a: Render current primitives
++    rendered_img, transmittance, depth_map = differentiable_rasterize(primitives)
++    
++    # Step 4d: Update depth via nearest-neighbor sampling on pre-rendered depth map
++    for prim in primitives:
++        prim['d'] = nearest_neighbor_sample(D_i, prim['x'])
+         
+-        all_2d_gaussians.extend(gaussians)
+-        
+-    # 6. Back-projection to 3D
+-    # This step is described in the source as a separate phase after 2D optimization
+-    # It involves WPCA and clustering, which is outside the core 2D optimization loop
+-    # but is part of the "Error-Driven 2D Gaussian Training" method's output preparation.
+-    optimized_3d_initializations = back_project_to_3d(all_2d_gaussians, depth_maps)
++    # Compute loss against fixed background I_i
++    loss = compute_loss(rendered_img, I_i, lambda_ssim)
+     
+-    return optimized_3d_initializations
++    # Gradient descent update
++    gradients = compute_gradients(loss, primitives)
++    primitives = apply_gradients(primitives, gradients)
++    
++    return primitives
++
++def get_depth_from_transmittance(transmittance):
++    """
++    Computes depth at points where transmittance first drops below 0.5.
++    """
++    # Find first drop below 0.5 along rays
++    depth_values = compute_depth_at_transmittance_threshold(transmittance, threshold=0.5)
++    return depth_values
+ ```
+ 
+ **Parameters:**
+-*   $\lambda_{SSIM}$: Weight for SSIM loss, matching the original 3DGS paper [S1, unofficial].
+-*   Augmentation rate: 20% new primitives introduced at fixed intervals [S1, unofficial].
+-*   Transmittance threshold: 0.5 for depth computation [S1, unofficial].
++*   $\lambda_{SSIM}$: Weight for SSIM loss, matching original 3DGS paper values [S1, unofficial].
++*   Augmentation rate: 20% new primitives per interval [S1, unofficial].
++*   Depth threshold: Transmittance < 0.5 [S1, unofficial].
+ 
+ **Edge Cases and Pitfalls:**
+-*   **Precision:** Depth computation relies on transmittance dropping below 0.5, which may be sensitive to noise in the transmittance curve [S1, unofficial].
+-*   **Boundaries:** Pruning based on "insufficient pixels" requires a threshold for pixel coverage, which is not explicitly defined in the sources [S1, unofficial].
+-*   **Degenerate Input:** If the rendered image $I_i$ is uniform or lacks detail, the error-driven sampling may not effectively target areas needing refinement [G].
+-
+-## Subtopics
+-
+-### Inverse Gaussian Plattting
+-The process of back-projecting optimized 2D primitives into world space using WPCA and clustering to initialize 3D Gaussians [S1, unofficial].
+-
+-### Depth Map Rendering
+-A specific technique for computing depth values at points where transmittance first drops below 0.5, avoiding planar surface approximations [S1, unofficial].
++*   **Depth Ambiguity:** Using median depth is preferred over expected depth for robustness to outliers [S1, unofficial].
++*   **Flattening Regularization:** The method avoids imposing flattening regularizations on 3D Gaussians, unlike some geometric reconstruction methods [S1, unofficial].
++*   **Perturbation:** New Gaussians are initialized with minimal opacity to mitigate perturbation introduced by newly added kernels [S1, unofficial].
+ 
+ ## Operating characteristics
+-*   **Time Complexity:** Not given in the sources.
+-*   **Memory Complexity:** Not given in the sources.
+-*   **Measured Performance:** Not given in the sources.
+-*   **Strengths:** Enables effective reconstruction of complex specular radiance through proper initialization of view-dependent kernels [S1, unofficial]. Avoids imposing flattening regularizations on 3D Gaussians [S1, unofficial].
+-*   **Limitations:** Requires standard 3DGS training to be completed first to obtain initial rendered images and depth maps [S1, unofficial].
+-*   **When to use:** When standard 3DGS initialization fails to capture complex specular details.
+-*   **When not to use:** When computational resources are limited, as this adds an extra optimization phase [G].
++*   **Time Complexity:** Adds an additional optimization phase in 2D image space after standard 3DGS training. Complexity depends on the number of supplementary Gaussians and the number of optimization iterations.
++*   **Memory Complexity:** Requires storing additional 2D Gaussian parameters and intermediate rendered images/depth maps.
++*   **Strengths:** Enables effective reconstruction of complex specular radiance; error-driven placement targets high-loss regions; avoids flattening regularizations.
++*   **Limitations:** Requires pre-rendered images and depth maps; adds computational overhead due to 2D optimization and back-projection steps.
++*   **When to use:** When standard 3DGS initialization fails to capture high-frequency details or specular highlights.
++*   **When not to use:** When computational resources are limited or when the scene does not require high-frequency detail reconstruction.
+ 
+ ## Background
+-Originated in the paper "Augmented Radiance Field: A General Framework for Enhanced Gaussian Splatting" (ICLR 2026) [S1, unofficial]. It is part of the broader effort to improve the initialization and densification strategies in 3D Gaussian Splatting.
++Originated in the paper "Augmented Radiance Field: A General Framework for Enhanced Gaussian Splatting" [S1, unofficial]. The method addresses limitations in standard 3DGS initialization by leveraging image-space optimization to better handle view-dependent effects. It builds on the principles of differentiable rendering and error-driven densification.
+ 
+ ## Sources

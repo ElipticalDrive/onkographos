@@ -1,0 +1,173 @@
+--- v006.md
++++ v007.md
+@@ -4,74 +4,86 @@
+ 
+ ## Overview
+-Dynamic Growth Parameters define the configuration for the iterative expansion of a neural radiance field's network architecture during training. This method solves the problem of representing complex scenes with a single static network by dynamically allocating capacity where reconstruction uncertainty is high. It sets apart from static NeRF variants by using k-means clustering of uncertain query points to spawn new network branches, and from other growth methods by strictly limiting the total number of growth iterations and the branching factor $k$ per step [S1].
++Dynamic Growth Parameters configure the iterative expansion of a neural radiance field's network architecture during training [S1]. It sets apart from static NeRF variants by using k-means clustering of uncertain query points to spawn new network branches, and from other growth methods by strictly limiting the total number of growth iterations and the branching factor $k$ per step [S1].
+ 
+ ## How it works
+ **Inputs and Outputs:**
+-*   **Inputs:** Current network parameters $\Phi$, training dataset, current iteration count $I$, total allowed growth steps $N_{grow}$, and branching factor $k$.
+-*   **Outputs:** Updated network architecture with new child branches, updated parameters.
++*   **Inputs:** Current network branch, training dataset, current iteration count, total allowed growth steps $N_{grow}$, branching factor $k$, iterations per stage $I_1$, and an uncertainty threshold [S1].
++*   **Outputs:** Updated network architecture with new child branches and optimized parameters [S1].
+ 
+ **Data Structures:**
+-*   **Network Branch:** A multi-layer perceptron (MLP) taking parent output $y_{p_i}$ and viewing direction $d$ as input, predicting color $c_i$, density $\sigma_i$, uncertainty $\delta_i$, and latent vector $y_i$ [S1].
+-*   **Cluster Centers:** $k$ vectors representing the mean latent/position space of high-uncertainty points.
++*   **Network Branch:** A multi-layer perceptron defined as $F_{\Phi_i} : (y_{p_i}, d) \rightarrow (c_i, \sigma_i, \delta_i, y_i)$, taking parent output $y_{p_i}$ and viewing direction $d$ as input, and predicting color $c_i$, density $\sigma_i$, uncertainty $\delta_i$, and latent vector $y_i$ [S1].
++*   **Cluster Centers:** $k$ vectors representing the mean position/latent space of high-uncertainty points [S1].
+ 
+ **Numbered Steps:**
+ 1.  **Training Phase:** Train the current network branch for a fixed number of iterations $I_1$ [S1].
+ 2.  **Uncertainty Estimation:** Compute the uncertainty metric $\delta_i$ for all sampled query points in the scene [S1].
+-3.  **Clustering:** Identify points where $\delta_i$ exceeds a predefined threshold. Apply k-means clustering with parameter $k$ to these high-uncertainty points to determine $k$ cluster centers [S1].
+-4.  **Branch Initialization:** Initialize $k$ new child network branches. Each branch is initialized based on the corresponding cluster center from the previous step [S1].
+-5.  **Growth Check:** If the total number of growth steps performed is less than $N_{grow}$, repeat from Step 1 with the expanded network. Otherwise, stop growth [S1].
++3.  **Clustering:** Identify points where $\delta_i$ exceeds a predefined threshold and cluster them using k-means with parameter $k \in [2, 4]$ [S1].
++4.  **Branch Initialization:** Grow $k$ new child network branches initialized at the corresponding cluster centers [S1].
++5.  **Growth Check:** If the total number of growth steps performed is less than $N_{grow}$, repeat from Step 1 with the expanded network [S1].
+ 
+ **Parameters:**
+ *   $N_{grow}$: Total number of growth iterations. Default value is 3 [S1].
+-*   $k$: Number of branches spawned per growth step. Default value is 2 [S1]. Range is $[2, 4]$ [S1].
++*   $k$: Number of branches spawned per growth step. Default value is 2, with a range of $[2, 4]$ [S1].
+ *   $I_1$: Iterations per growth stage. Not given in the sources.
+ *   Threshold: Uncertainty threshold for clustering. Not given in the sources.
+ 
+ **Edge Cases and Pitfalls:**
+-*   **Precision:** Clustering relies on the stability of the uncertainty metric $\delta_i$. If $\delta_i$ is noisy, clustering may produce unstable branch centers [S1].
+-*   **Boundaries:** The method assumes the scene can be effectively segmented by k-means in the latent/position space. Degenerate cases where uncertainty is uniformly low may result in no growth, while uniformly high uncertainty may lead to excessive branching if $k$ is not capped [S1].
++*   **Early Termination:** The method uses early termination to finalize predictions when uncertainty is low enough, avoiding unnecessary calculations and speeding up rendering [S1].
+ 
+ **Pseudocode:**
+ ```python
+-def dynamic_growth_parameters(network, dataset, N_grow=3, k=2, I_1=1000):
+-    """
+-    Implements the dynamic growth parameter logic for Recursive NeRF.
+-    """
++import math
++import random
++
++def dynamic_growth_parameters(network, dataset, N_grow=3, k=2, I_1=1000, threshold=0.0):
+     current_network = network
+     growth_step = 0
+-    
+     while growth_step < N_grow:
+         # Step 1: Train current network for I_1 iterations
+-        current_network = train_network(current_network, dataset, iterations=I_1)
++        current_network = train_step(current_network, dataset, I_1)
+         
+-        # Step 2: Compute uncertainty for all query points
+-        # Assume get_uncertainties returns a list of (point, delta) tuples
+-        points_and_uncertainties = get_uncertainties(current_network, dataset)
++        # Step 2: Compute uncertainty for sampled query points
++        points = sample_points(dataset)
++        uncertainties = compute_uncertainties(current_network, points)
+         
+         # Step 3: Cluster high uncertainty points
+-        # Filter points above threshold (threshold not specified in sources, assume fixed or adaptive)
+-        high_uncertainty_points = [p for p, delta in points_and_uncertainties if delta > THRESHOLD]
++        high_unc_points = [p for p, u in zip(points, uncertainties) if u > threshold]
++        if not high_unc_points:
++            break
++        centers = k_means(high_unc_points, k)
+         
+-        if len(high_uncertainty_points) == 0:
+-            break
++        # Step 4: Initialize and attach k new child branches
++        for center in centers:
++            child = init_child_branch(center)
++            current_network.add_child(child)
+             
+-        # Perform k-means clustering on the points
+-        # Returns k cluster centers
+-        cluster_centers = k_means(high_uncertainty_points, k=k)
+-        
+-        # Step 4: Initialize k new child branches
+-        new_branches = []
+-        for center in cluster_centers:
+-            # Initialize new branch based on cluster center
+-            # The exact initialization logic (e.g., copying weights or zero-init) is not specified
+-            new_branch = initialize_branch(center)
+-            new_branches.append(new_branch)
+-            
+-        # Attach new branches to the current network structure
+-        current_network.add_children(new_branches)
+-        
+         growth_step += 1
+-        
+     return current_network
++
++def train_step(net, data, iters):
++    for _ in range(iters):
++        batch = sample_batch(data)
++        net.update_gradients(batch)
++    return net
++
++def sample_points(data):
++    return data.points
++
++def compute_uncertainties(net, points):
++    return [net.predict(p).uncertainty for p in points]
++
++def k_means(points, k):
++    centers = random.sample(points, k)
++    for _ in range(10):
++        assignments = [min(range(k), key=lambda c: math.dist(p, centers[c])) for p in points]
++        new_centers = [sum(points[i] for i, a in enumerate(assignments) if a == idx) / max(1, sum(1 for a in assignments if a == idx)) for idx in range(k)]
++        if new_centers == centers: break
++        centers = new_centers
++    return centers
++
++def init_child_branch(center):
++    # Initialize new branch network parameters based on cluster center
++    # The exact initialization logic is not specified in the sources [G]
++    return NetworkBranch(initial_state=center)
+ ```
+ 
+@@ -79,10 +91,10 @@
+ 
+ ### Dynamic Growth
+-An adaptive strategy that clusters uncertain queries at the current stage and grows deeper networks according to the clustering result. After $I_1$ iterations, points with uncertainty higher than a threshold are clustered using k-means with $k \in [2, 4]$. The network grows $k$ branches according to the cluster centers [S1].
++An adaptive strategy that clusters uncertain queries at the current stage and grows deeper networks according to the clustering result [S1]. After $I_1$ iterations, points with uncertainty higher than a threshold are clustered using k-means with $k \in [2, 4]$ [S1]. The network grows $k$ branches according to the cluster centers [S1].
+ 
+ ## Operating characteristics
+ **Time and Memory Complexity:**
+-*   **Memory:** Increases linearly with the number of growth steps and $k$. Each growth step adds $k$ new network branches [S1].
+-*   **Time:** Training time increases due to the iterative clustering and re-training phases. The total number of growth steps is limited to 3 by default, bounding the complexity [S1].
++*   **Memory:** Increases linearly with the number of growth steps and $k$, as each step adds $k$ new network branches [S1].
++*   **Time:** Training time increases due to iterative clustering and re-training phases, but is bounded by the default limit of 3 growth steps [S1].
+ 
+ **Measured Performance:**
+@@ -90,22 +102,22 @@
+ 
+ **Scaling:**
+-*   The method scales with scene complexity by allocating more network capacity to high-uncertainty regions. The fixed limit of 3 growth steps prevents unbounded growth [S1].
++*   The method scales with scene complexity by allocating capacity to high-uncertainty regions, while early termination speeds up rendering for low-uncertainty points [S1].
+ 
+ **Strengths and Limitations:**
+-*   **Strengths:** Efficiently represents complex scenes by focusing capacity where needed. Early termination allows speeding up rendering for low-uncertainty points [S1].
+-*   **Limitations:** Requires careful tuning of $k$ and the uncertainty threshold. The recursive nature may complicate implementation compared to single-branch NeRFs [S1].
++*   **Strengths:** Efficiently represents complex scenes by focusing capacity where needed and accelerates rendering via early termination [S1].
++*   **Limitations:** Introduces overhead from iterative clustering and re-training phases [S1].
+ 
+ **When to use it and when not:**
+-*   Use when representing scenes with varying levels of detail and when computational resources allow for iterative training. Not suitable for real-time applications requiring a fixed, pre-trained model without growth overhead [S1].
++*   Use when representing scenes with varying levels of detail and when iterative training is feasible [S1].
+ 
+ ## Background
+ **Origin:**
+-*   Recursive NeRF was introduced in the paper "Recursive-NeRF: An Efficient and Dynamically Growing NeRF" [S1].
++*   Recursive NeRF was introduced in "Recursive-NeRF: An Efficient and Dynamically Growing NeRF" [S1].
+ 
+ **History and Development:**
+-*   The method was developed to address the limitations of single-branch NeRFs in representing complex scenes. It introduces a recursive structure where the network grows dynamically based on uncertainty metrics [S1].
++*   The method was developed to address the limitations of single-branch NeRFs by introducing a recursive structure that grows dynamically based on uncertainty metrics [S1].
+ 
+ **Where it is used:**
+-*   Used in neural radiance field optimization for view synthesis and 3D reconstruction [S1].
++*   It is used in neural radiance field optimization for view synthesis and 3D reconstruction [S1].
+ 
+ ## Sources

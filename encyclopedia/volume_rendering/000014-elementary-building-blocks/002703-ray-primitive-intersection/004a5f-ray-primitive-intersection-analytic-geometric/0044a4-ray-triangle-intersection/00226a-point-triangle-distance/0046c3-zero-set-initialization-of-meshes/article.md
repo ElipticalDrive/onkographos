@@ -1,0 +1,124 @@
+# Zero Set Initialization of Meshes
+
+
+## Overview
+Zero Set Initialization of Meshes initializes the closest points for triangle meshes by operating on individual triangles without using edge or vertex adjacency information [S1]. It establishes an initial signed distance field from a polygonal mesh by identifying samples near the surface and assigning them signs [S1]. It differs from [Unsigned Triangle Distance](3587-unsigned-triangle-distance.md) by computing signed distances and from [Mesh SDF Sampling](7159-mesh-sdf-sampling.md) by focusing on the initialization phase for distance transforms [S1, S2]. It builds on [Point-Triangle Distance](2776-point-triangle-distance.md) to determine geometric proximity [G].
+
+## How it works
+**Inputs:** A triangular mesh (list of triangles), a 3D grid of samples, and `cell-width` (the distance between adjacent samples in x, y, and z directions) [S1].
+**Outputs:** A queue of zero set samples, each with an associated sign, a duplication flag, and a distance value [S1].
+
+**Data Structures:**
+*   `Sample`: Represents a grid point. Fields: `position` (3D vector), `distance` (scalar, initialized to infinity), `sign` (scalar, +1 or -1), `queued` (boolean, default false), `ambiguous` (boolean, default false).
+*   `Triangle`: Defined by three vertices $v_0, v_1, v_2$ and normal $n$ [S1].
+
+**Steps:**
+1.  **Bounding Box Adjustment:** For every triangle $T$ in the mesh:
+    *   Compute the axis-aligned bounding box (AABB) of $T$: $(x_{min}, y_{min}, z_{min})$ to $(x_{max}, y_{max}, z_{max})$ [S1].
+    *   Expand the box by `cell-width`:
+        $$ x'_{min} = x_{min} - \text{cell-width}, \quad x'_{max} = x_{max} + \text{cell-width} $$
+        (Similarly for $y$ and $z$) [S1].
+2.  **Sample Evaluation:** For each sample $s$ within the adjusted bounding box:
+    *   Compute the closest point $cp(s)$ on triangle $T$ to $s$ [S1].
+    *   Determine the type of closest point: `face`, `edge`, or `vertex` [S1].
+    *   Calculate the distance $\delta = \|s - cp(s)\|$ [S1].
+    *   If $\delta \le \sqrt{3} \cdot \text{cell-width}$ and $\delta < s.distance$:
+        *   Place $s$ on the zero set queue [S1].
+        *   Set $s.queued = \text{true}$ to prohibit duplication [S1].
+        *   Update $s.distance = \delta$ [S1].
+        *   Compute $s.sign$ based on the closest point type (see Sign Computation below) [S1].
+        *   If the closest point is a `vertex` and signs are ambiguous, set $s.ambiguous = \text{true}$ and $s.sign = 0$ [S1].
+
+**Sign Computation:**
+The sign determines whether the sample is inside or outside the mesh [S1].
+*   **Face Case:** If $cp(s)$ lies on the face of $T$, the sign is determined by the dot product of the triangle normal $n'$ and the vector $v = s - cp(s)$:
+    $$ \text{sign} = \text{sign}(n' \cdot v) $$
+    where $\text{sign}(x)$ is $+1$ if $x \ge 0$ and $-1$ if $x < 0$ [S1].
+*   **Edge Case:** If $cp(s)$ lies on an edge shared by two triangles $T_1$ and $T_2$, compute dot products $d_1 = n_1 \cdot v$ and $d_2 = n_2 \cdot v$ [S1]. The sign is taken from the triangle with the larger absolute dot product:
+    $$ \text{sign} = \text{sign}(d_i) \quad \text{where } |d_i| = \max(|d_1|, |d_2|) $$
+    [S1].
+*   **Vertex Case:** If $cp(s)$ coincides with a vertex shared by multiple triangles, compute dot products for all adjacent triangles [S1]. If the dot products have mixed signs (some positive, some negative), the sample is marked as **ambiguous** [S1]. No sign is propagated initially ($s.sign = 0$) [S1].
+
+**Post-Processing for Ambiguity:**
+After the initial pass and any subsequent distance transform steps, ambiguous samples are revisited [S1]. The signs of the 26-neighbors of the ambiguous sample are examined [S1]. The sign of the majority of the neighbors is assigned to the ambiguous sample [S1].
+
+**Pseudocode:**
+> **Unverified code.** The code below did not pass a test run against a reference implementation, or no test fits it, so it may contain errors.
+
+```python
+import math
+
+def zero_set_initialization(mesh, grid, cell_width):
+    def closest_point_on_triangle(tri, p):
+        # Barycentric projection to find closest point on triangle
+        v0, v1, v2 = tri.vertices
+        e1, e2 = v1 - v0, v2 - v0
+        d1, d2 = (p - v0) @ e1, (p - v0) @ e2
+        a, b, c = e1 @ e1, e1 @ e2, e2 @ e2
+        det = a * c - b * b
+        s = (c * d1 - b * d2) / max(det, 1e-12)
+        t = (a * d2 - b * d1) / max(det, 1e-12)
+        if s + t <= 1:
+            if s >= 0 and t >= 0:
+                return v0 + s * e1 + t * e2, 'face'
+            elif s < 0:
+                return v0 + max(0, min(1, t)) * e2, 'edge'
+            elif t < 0:
+                return v0 + max(0, min(1, s)) * e1, 'edge'
+        # Fallback to edges/vertices if projection outside
+        return v0, 'vertex' # Simplified for self-containment; [G]
+
+    for tri in mesh:
+        bbox_min, bbox_max = tri.bounding_box()
+        expanded_min = bbox_min - cell_width
+        expanded_max = bbox_max + cell_width
+        
+        for s in grid.samples_in_box(expanded_min, expanded_max):
+            if s.queued:
+                continue
+                
+            cp, cp_type = closest_point_on_triangle(tri, s.position)
+            delta = math.dist(cp, s.position)
+            
+            if delta <= math.sqrt(3) * cell_width and delta < s.distance:
+                s.queued = True
+                s.distance = delta
+                
+                v = s.position - cp
+                if cp_type == 'face':
+                    s.sign = 1 if tri.normal @ v >= 0 else -1
+                elif cp_type == 'edge':
+                    # Source specifies computing dot products for adjacent triangles sharing the edge
+                    # Adjacency lookup omitted per source constraint; [G]
+                    d1 = tri.normal @ v
+                    s.sign = 1 if d1 >= 0 else -1
+                elif cp_type == 'vertex':
+                    # Source specifies checking adjacent triangles for mixed signs
+                    # Adjacency lookup omitted per source constraint; [G]
+                    d = tri.normal @ v
+                    if d >= 0:
+                        s.sign = 1
+                    else:
+                        s.sign = -1
+                    # Ambiguity resolution deferred to post-processing [S1]
+```
+
+## Subtopics
+
+### Closest Point Baseline
+A naive baseline method that builds correspondence between an extracted triangular mesh and continuous volume space by finding the closest point on the mesh surface for each sampled point and using its displacement directly as the sampled point's displacement [S2]. Unlike Zero Set Initialization, it does not explicitly manage a queue or sign propagation for distance transforms, serving as a simpler geometric proxy [S2].
+
+## Operating characteristics
+*   **Time Complexity:** $O(N \cdot M)$, where $N$ is the number of triangles and $M$ is the number of samples within the expanded bounding boxes of all triangles [S1]. In practice, spatial indexing (e.g., voxelization) is often used to limit $M$ [G].
+*   **Memory Complexity:** $O(G)$, where $G$ is the number of grid samples, to store distance, sign, and queue flags [G].
+*   **Strengths:** Efficiently identifies the zero set without requiring complex topological data structures or adjacency information for the entire mesh [S1]. It is robust for local curvature regions [S1].
+*   **Limitations:** Vertex ambiguity requires post-processing [S1]. The $\sqrt{3} \cdot \text{cell-width}$ threshold is heuristic; tighter bounds may miss samples, while looser bounds increase computational cost [S1]. It does not guarantee a globally consistent sign field without the neighbor-heuristic resolution [S1].
+*   **When to use:** When initializing SDFs for distance transforms on triangle meshes where topological information is unavailable or expensive to compute [S1].
+*   **When not to use:** When high precision is required without post-processing ambiguity resolution, or when the mesh has complex non-manifold geometry where vertex ambiguity is frequent [S1].
+
+## Background
+The method originates from research on distance field generation for triangle meshes [S1]. It is designed to operate on individual triangles without using edge or vertex adjacency information, making it suitable for compressed or simplified mesh representations [S1]. The technique is noted as being very similar to the method proposed by Huang et al. [S1]. It is primarily used in computer graphics for generating signed distance fields from polygonal meshes for rendering and simulation [S1].
+
+## Sources
+[S1] Multiresolution Distance Volumes for Progressive Surface Compression, https://digital.library.unt.edu/ark:/67531/metadc1409942/?q=volume data compression rendering, fetched 2026-10-28
+[S2] NeRF-Editing: Geometry Editing of Neural Radiance Fields, https://doi.org/10.1109/cvpr52688.2022.01781, fetched 2026-10-26

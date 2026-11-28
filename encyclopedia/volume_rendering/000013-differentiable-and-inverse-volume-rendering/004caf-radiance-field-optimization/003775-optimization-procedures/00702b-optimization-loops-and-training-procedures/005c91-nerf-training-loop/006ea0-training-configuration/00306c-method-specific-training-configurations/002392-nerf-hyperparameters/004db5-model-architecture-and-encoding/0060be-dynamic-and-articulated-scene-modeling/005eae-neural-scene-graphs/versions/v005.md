@@ -1,0 +1,178 @@
+# Neural Scene Graphs
+
+Also called: NSG
+
+## Overview
+Neural Scene Graphs (NSG) is a method for decomposing dynamic, multi-object scenes into a learned hierarchical scene graph with decoupled object transformations and scene representations [S2]. It solves the problem of novel view synthesis and rendering of unseen arrangements in dynamic scenes by lifting the assumption of static scene consistency required by existing neural rendering methods [S2]. Unlike methods that encode the entire scene into a single, static network, NSG uses a hierarchical scene-graph model with object-level implicit representations, allowing for the learning of object representations directly from video frames and tracking data [S2].
+
+## How it works
+**Inputs and Outputs**
+*   **Inputs:** A set of video frames and corresponding tracking data (labels for object instances, classes, and poses) [S2]. Camera intrinsics and extrinsics are required for ray generation [S2].
+*   **Outputs:** A rendered image for a given camera pose and a scene graph $S$ containing learned object representations, transformations, and background models [S2].
+
+**Data Structures**
+The scene is defined as a directed acyclic graph $S$ [S2]:
+$$ S = \langle W, C, F, L, E \rangle $$
+*   $W$: The root node representing the global world space [S2].
+*   $C$: The camera node [S2].
+*   $F$: A set of representation nodes. This includes a static background node $F_{\theta_{bckg}}$ and dynamic object nodes $F_{\theta_o}$ [S2].
+*   $L$: Latent descriptors $l_o$ associated with object nodes to encode instance-specific appearance [S2].
+*   $E$: A set of edges representing affine transformations or property assignments [S2].
+
+**Edges and Transformations**
+Edges $E$ represent affine transformations from node $u$ to node $v$ or property assignments [S2]:
+$$ E = \{ e_{u,v} \in \{ [\cdot], M_{uv} \} \} $$
+where $M_{uv}$ is a $4 \times 4$ affine transformation matrix:
+$$ M_{uv} = \begin{bmatrix} R & t \\ 0 & 1 \end{bmatrix}, \quad R \in \mathbb{R}^{3 \times 3}, t \in \mathbb{R}^3 $$
+[S2]
+
+For all edges originating from the root node $W$, transformations $T^W_v$ are assigned between the global world space and the local object or camera space [S2]. The background node has no assigned transformation as it is already aligned with $W$ [S2].
+
+To represent different scales of the same object type, a non-uniform scaling matrix $S_o$ is computed and assigned at the edge $e_{o,f}$ between an object node and its shared representation model $F$ [S2].
+
+**Representation Models**
+Representation models are shared and defined in a shared, unit-scaled frame [S2].
+1.  **Background Node ($F_{\theta_{bckg}}$):** Approximates all static parts of the scene [S2]. It maps a point $x$ and viewing direction $d$ to volumetric density $\sigma$ and color $c$ [S2]. Unlike standard volumetric NeRF, this representation lives on sparse planes instead of a volume [S2]. It uses Fourier encodings to aid learning high-frequency functions in the MLP model [S2].
+2.  **Object Nodes ($F_{\theta_o}$):** Scene objects are represented as augmented implicit neural radiance fields following Mildenhall et al. [22] [S2]. To generalize across a class of objects, a latent vector $z$ (or $l_o$) is added to the input 3D query point, allowing similar objects to be modeled using the same network [S2].
+
+**Rendering Algorithm**
+1.  **Graph Traversal:** To retrieve an object’s local transformation and position $p_o = [x, z, y]_o$, traverse from the root node $W$, applying transformations until the desired object node $F_{\theta_o}$ is reached, ending in the frame of reference defined by the accumulated transformations [S2].
+2.  **Ray Sampling:** Generate rays $r(\lambda) = o_{world} + \lambda d_{world}$ based on camera intrinsics and extrinsics [S2].
+3.  **Evaluation:**
+    *   For background points, query $F_{\theta_{bckg}}(x, d)$ [S2].
+    *   For object points, transform the query point $x$ from world space to the object's local unit-scaled space using the accumulated transformation from the graph traversal [S2]. Query the shared representation model $F$ with the transformed point and the latent descriptor $l_o$ [S2].
+4.  **Compositing:** Perform standard volume rendering integration along the ray using the sampled densities and colors [S2].
+
+**Pseudocode**
+
+```python
+import math
+
+def render_neural_scene_graph(camera_pose, scene_graph, ray_origin, ray_direction, near, far, num_samples):
+    """
+    Renders a single ray through a Neural Scene Graph.
+    
+    Args:
+        camera_pose: Tuple (R, t) of camera extrinsics.
+        scene_graph: Dict containing 'background_node', 'dynamic_nodes' (list of dicts with 'model', 'latent', 'edges_from_root').
+        ray_origin: World space origin of the ray.
+        ray_direction: World space direction of the ray.
+        near, far: Ray marching bounds.
+        num_samples: Number of samples per ray.
+        
+    Returns:
+        color: Rendered RGB color.
+        depth: Rendered depth.
+    """
+    accumulated_color = [0.0, 0.0, 0.0]
+    accumulated_weight = 0.0
+    accumulated_depth = 0.0
+    transmittance = 1.0
+    
+    # [G] Standard ray marching generates sample points along the ray within near/far bounds.
+    sample_distances = [near + (far - near) * i / num_samples for i in range(1, num_samples + 1)]
+    
+    for dist in sample_distances:
+        world_point = [ray_origin[i] + dist * ray_direction[i] for i in range(3)]
+        is_background = True
+        object_node = None
+        latent_code = None
+        local_point = world_point
+        
+        # Traverse graph to find relevant object node
+        for obj_node in scene_graph['dynamic_nodes']:
+            # [G] Accumulate transformation matrices along edges from root W to obj_node
+            transform_to_obj = obj_node['edges_from_root']
+            
+            # Homogeneous coordinate transformation
+            local_point = [
+                transform_to_obj[0][0]*world_point[0] + transform_to_obj[0][1]*world_point[1] + transform_to_obj[0][2]*world_point[2] + transform_to_obj[0][3],
+                transform_to_obj[1][0]*world_point[0] + transform_to_obj[1][1]*world_point[1] + transform_to_obj[1][2]*world_point[2] + transform_to_obj[1][3],
+                transform_to_obj[2][0]*world_point[0] + transform_to_obj[2][1]*world_point[1] + transform_to_obj[2][2]*world_point[2] + transform_to_obj[2][3]
+            ]
+            
+            # Apply non-uniform scaling if defined on edge e_o,f
+            if 'scale_matrix' in obj_node:
+                scale_matrix = obj_node['scale_matrix']
+                local_point = [
+                    scale_matrix[0][0]*local_point[0],
+                    scale_matrix[1][1]*local_point[1],
+                    scale_matrix[2][2]*local_point[2]
+                ]
+            
+            # Check if local_point is within the unit-scaled bounding box domain
+            if all(-1.0 <= p <= 1.0 for p in local_point):
+                is_background = False
+                object_node = obj_node
+                latent_code = obj_node['latent']
+                break
+        
+        if is_background:
+            density, color = scene_graph['background_node'].evaluate(world_point, ray_direction)
+        else:
+            input_point = [local_point[i] + latent_code[i] for i in range(3)]
+            density, color = object_node['model'].evaluate(input_point, ray_direction)
+            
+        alpha = 1.0 - math.exp(-density * (far - near) / num_samples)
+        weight = transmittance * alpha
+        accumulated_color = [accumulated_color[i] + weight * color[i] for i in range(3)]
+        accumulated_depth += weight * dist
+        accumulated_weight += weight
+        transmittance *= (1.0 - alpha)
+        
+        if transmittance < 1e-4:
+            break
+            
+    final_color = [accumulated_color[i] for i in range(3)]
+    return final_color, accumulated_weight
+```
+
+**Parameters**
+*   **Latent Vector Dimension:** Not given in the sources. [G]
+*   **Number of Frequency Bands for Fourier Encoding:** Not given in the sources. [G]
+*   **MLP Architecture:** Follows Mildenhall et al. [22] (standard NeRF MLP) for object nodes; specific architecture for background sparse planes not detailed beyond "Fourier encodings" and "MLP model" [S2].
+
+**Edge Cases and Pitfalls**
+*   **Scale Normalization:** Objects are represented in a shared, unit-scaled frame. Non-uniform scaling $S_o$ must be correctly computed and applied to handle objects of different physical sizes within the same class [S2].
+*   **Tracking Data Dependency:** The method relies on labeled and generated tracking data to learn object representations and transformations [S2].
+*   **Background Representation:** The background uses sparse planes instead of a volume [S2].
+
+## Subtopics
+
+### MoCo-NeRF
+Predicts radiance residuals in canonical space conditioned on pose. Choose when residual-based deformation is preferred over explicit graph structures. [MoCo-NeRF](16197-moco-nerf.md)
+
+### A-NeRF
+Uses inverse Linear Blend Skinning (LBS) for skeleton-based canonical transformation. Choose when articulated human or object motion is the primary focus. [A-NeRF](18108-a-nerf.md)
+
+### Pixel-aligned Volumetric Avatars (PVA)
+Encodes instance-specific representations directly from video frames and tracking data. Choose when per-instance avatar reconstruction is required. [Pixel-aligned Volumetric Avatars (PVA)](18139-pixel-aligned-volumetric-avatars-pva.md)
+
+### SelfNeRF
+Uses signed distances to nearest neighbors in a reconstructed surface mesh for canonical mapping. Choose when surface-based deformation is more stable than volumetric priors. [SelfNeRF](18160-selfnerf.md)
+
+### CLA-NeRF
+Decouples appearance, shape, and class using hierarchical bounding layers. Choose when explicit spatial partitioning is needed for dynamic objects. [CLA-NeRF](20285-cla-nerf.md)
+
+### Object-Centric Voxelization for Dynamic Scenes
+Voxelizes dynamic objects into separate layers for independent manipulation. Choose when discrete voxel representations are preferred over implicit fields. [Object-Centric Voxelization for Dynamic Scenes](20318-object-centric-voxelization-for-dynamic-scenes.md)
+
+### MI-NeRF
+Models multi-instance scenes with shared radiance fields and instance-specific codes. Choose when scene decomposition into independent instances is required without explicit graph traversal. [MI-NeRF](21740-mi-nerf.md)
+
+## Operating characteristics
+*   **Time Complexity:** Not given in the sources. [G]
+*   **Memory Complexity:** Not given in the sources. [G]
+*   **Measured Performance:** Validated on simulated and experimental data, with labeled and generated tracking data by rendering novel unseen views and unseen dynamic scene arrangements [S2].
+*   **Strengths:** Allows for novel view synthesis and rendering of unseen arrangements in dynamic scenes; facilitates 3D object detection using inverse rendering; decouples object transformations and scene representations [S2].
+*   **Limitations:** Relies on tracking data; less interpretable than explicit methods due to the use of MLPs [S2].
+*   **When to use:** When dealing with dynamic, multi-object scenes where novel views and unseen arrangements are required, and tracking data is available [S2].
+*   **When not to use:** When the scene is static and a simpler NeRF variant is sufficient; when tracking data is unavailable or unreliable [S2].
+
+## Background
+Neural Scene Graphs was introduced by Park et al. in 2021 [S2]. The method builds on the success of implicit neural representations for static scenes, specifically NeRF by Mildenhall et al. [22], and extends it to dynamic scenes by introducing a hierarchical scene-graph model [S2]. It addresses the limitation of existing methods that rely on static scenes with consistent mappings from a 3D point to a 2D observation [S2].
+
+## Sources
+[S1] Advances in Neural Rendering, https://doi.org/10.48550/arxiv.2111.05849, fetched 2026-10-26 (unofficial)
+[S2] Neural Scene Graphs for Dynamic Scenes, https://doi.org/10.1109/cvpr46437.2021.00288, fetched 2026-10-26
+[S3] Semantically-aware Neural Radiance Fields for Visual Scene Understanding: A Comprehensive Review, https://link.springer.com/article/10.1007/s11263-025-02663-5, fetched 2026-10-27

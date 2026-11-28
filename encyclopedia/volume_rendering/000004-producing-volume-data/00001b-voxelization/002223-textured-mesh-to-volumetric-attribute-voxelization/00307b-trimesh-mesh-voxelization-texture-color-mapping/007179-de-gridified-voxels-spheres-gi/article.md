@@ -1,0 +1,194 @@
+# De-Gridified Voxels / Spheres GI
+
+Also called: De-Gridified Voxels, Voxel-based GI using Spheres
+
+## Overview
+A Global Illumination method that represents triangle meshes as collections of free-floating spheres rather than grid-bound voxels, allowing rotation and translation without re-voxelization [S1, unofficial]. Unlike grid-bound voxels, spheres allow mesh rotation and translation without re-voxelization because spheres are part of the mesh, not splatted into a grid [S1, unofficial]. Unlike SDFGI, this method avoids cascade leakage issues at higher distances and does not require expensive re-voxelization for dynamic objects upon movement [S1, unofficial].
+
+## How it works
+**Inputs:** Triangle mesh geometry (static or skeletal animated), mesh vertex texture colors (from parent method), normal buffer data.
+**Outputs:** Sphere representation of the mesh, Global Illumination contribution per pixel.
+
+**Data Structures:**
+*   **Sphere:** A structure containing a 3D position vector ($P$) and a scalar radius ($R$).
+*   **Mesh Sphere Set:** A collection of Spheres belonging to a single mesh. All spheres in a set share the same radius $R$.
+*   **Triangle Association:** Each sphere stores a list of triangle indices that lie within its volume.
+
+**Steps:**
+
+1.  **Initial Voxelization:** On import, run a standard voxelization pass on the mesh to generate a set of voxels [S1, unofficial].
+2.  **Sphere Conversion:** Convert each voxel into a sphere. The sphere's position is the center of the voxel, and its radius is half the voxel width (or a shared radius for the mesh) [S1, unofficial].
+3.  **Triangle Assignment:** For each sphere, identify all triangles from the original mesh that are inside the sphere's volume [S1, unofficial].
+4.  **Optimization (Cell Removal):** During voxelization, if a cell contains triangles that are only "barely" inside it, remove the cell. A cell is considered barely inside if the maximum distance between any two triangles in the cell is small, and the distance from the cell center to the closest triangle is large [S1, unofficial].
+5.  **Dynamic Object Handling:**
+    *   Treat each bone of a dynamic mesh as a separate static mesh for voxelization purposes [S1, unofficial].
+    *   Re-voxelize dynamic objects at runtime only if their bones are scaled or translated. Rotations do not require re-voxelization [S1, unofficial].
+    *   For bone translation updates, re-voxelize only the translated bone and bones directly attached to it [S1, unofficial].
+6.  **Sphere Render Pass:** Perform a render pass to determine which spheres are visible and affect which pixels [S1, unofficial].
+7.  **Ray Shooting:** For each visible sphere, shoot rays in the direction of the average normals of the pixels it covers. The normals are retrieved from the Normal Buffer [S1, unofficial].
+8.  **Broad Phase Culling:** Check Axis-Aligned Bounding Boxes (AABBs) for ray intersection with other objects in the scene [S1, unofficial].
+9.  **Narrow Phase Intersection:** Perform Ray-Sphere intersections between the shot rays and the spheres of the intersected objects [S1, unofficial].
+10. **Bouncing:** Bounce rays a given number of times ($N_{bounce}$) before casting at a light source [S1, unofficial].
+11. **Caching:** Cache ray results (both caster/bouncer data and hit data) for bodies and lights that did not move between frames [S1, unofficial].
+
+**Pseudocode:**
+
+> **Unverified code.** The code below did not pass a test run against a reference implementation, or no test fits it, so it may contain errors.
+
+```python
+def voxelize_mesh_to_spheres(mesh):
+    """
+    Converts a mesh into a set of spheres.
+    Returns: List of Sphere objects, each with position, radius, and list of triangle indices.
+    """
+    spheres = []
+    # Step 1: Run voxelization pass
+    voxels = run_voxelization_pass(mesh)
+    
+    # Step 2 & 3: Convert voxels to spheres and assign triangles
+    for voxel in voxels:
+        # Check optimization condition (Step 4)
+        if is_cell_barely_inside(voxel, mesh.triangles):
+            continue
+            
+        sphere = Sphere()
+        sphere.position = voxel.center
+        sphere.radius = voxel.half_width # Or shared radius for mesh
+        sphere.triangles = []
+        
+        # Assign triangles inside sphere volume
+        for tri in mesh.triangles:
+            if is_triangle_inside_sphere(tri, sphere):
+                sphere.triangles.append(tri.index)
+                
+        spheres.append(sphere)
+        
+    return spheres
+
+def is_cell_barely_inside(voxel, triangles):
+    """
+    Step 4: Remove cells if all triangles are barely inside.
+    Condition: max distance between triangles is small AND distance from center to closest triangle is large.
+    """
+    if not triangles:
+        return True
+        
+    # Calculate distances between all pairs of triangles in the cell
+    max_tri_distance = 0
+    for i in range(len(triangles)):
+        for j in range(i + 1, len(triangles)):
+            dist = distance_between_triangles(triangles[i], triangles[j])
+            if dist > max_tri_distance:
+                max_tri_distance = dist
+                
+    # Calculate distance from voxel center to closest triangle
+    min_center_distance = infinity
+    for tri in triangles:
+        dist = distance_from_center_to_triangle(voxel.center, tri)
+        if dist < min_center_distance:
+            min_center_distance = dist
+            
+    # Thresholds are implementation-specific; conceptually:
+    # if max_tri_distance < SMALL_THRESHOLD and min_center_distance > LARGE_THRESHOLD:
+    #     return True
+    # For the purpose of this article, we assume the logic is implemented as described.
+    # Since exact thresholds are not given, we return False to keep the cell by default [G].
+    return False
+
+def compute_gi(spheres, scene_objects, normal_buffer, max_bounces):
+    """
+    Step 6-11: Compute GI using sphere-ray intersections.
+    """
+    # Step 6: Sphere Render Pass to find visible spheres and affected pixels
+    visible_spheres = perform_sphere_render_pass(spheres, normal_buffer)
+    
+    for sphere in visible_spheres:
+        # Step 7: Shoot rays in direction of average normals of covered pixels
+        avg_normal = compute_average_normal(sphere, normal_buffer)
+        ray_origin = sphere.position
+        ray_direction = avg_normal
+        
+        # Step 8: Broad phase culling with AABBs
+        intersected_objects = check_aabb_intersection(ray_origin, ray_direction, scene_objects)
+        
+        # Step 9: Narrow phase Ray-Sphere intersection
+        for obj in intersected_objects:
+            # obj.spheres is the list of spheres belonging to the object
+            for obj_sphere in obj.spheres:
+                hit = ray_sphere_intersection(ray_origin, ray_direction, obj_sphere)
+                if hit:
+                    # Step 10: Bounce
+                    if hit.bounces < max_bounces:
+                        new_ray = compute_bounced_ray(hit)
+                        # Recursive or iterative bounce logic would follow here
+                        pass
+                    
+                    # Step 11: Cache results if object/light didn't move
+                    if not obj.moved_last_frame:
+                        cache_ray_result(obj, hit)
+
+def ray_sphere_intersection(origin, direction, sphere):
+    """
+    Standard Ray-Sphere intersection.
+    Returns hit point, normal, and distance if intersected, else None.
+    """
+    oc = origin - sphere.position
+    a = dot(direction, direction)
+    b = 2.0 * dot(oc, direction)
+    c = dot(oc, oc) - sphere.radius * sphere.radius
+    discriminant = b * b - 4 * a * c
+    
+    if discriminant < 0:
+        return None
+        
+    sqrt_disc = sqrt(discriminant)
+    t1 = (-b - sqrt_disc) / (2 * a)
+    t2 = (-b + sqrt_disc) / (2 * a)
+    
+    t = t1 if t1 > 0 else t2
+    if t < 0:
+        return None
+        
+    hit_point = origin + direction * t
+    hit_normal = normalize(hit_point - sphere.position)
+    
+    return {
+        "point": hit_point,
+        "normal": hit_normal,
+        "distance": t,
+        "bounces": 0 # Placeholder for bounce count tracking
+    }
+```
+
+**Parameters:**
+*   **Radius:** A shared radius value for all spheres belonging to the same mesh [S1, unofficial].
+*   **Max Bounces:** The number of times rays should bounce before casting at a light [S1, unofficial].
+*   **Implementation Platform:** GPU compute is preferred, but CPU is viable for millions of rays [S1, unofficial].
+
+**Edge Cases and Pitfalls:**
+*   **Precision:** Ray-sphere intersection calculations must handle floating-point precision, especially for grazing angles [S1, unofficial].
+*   **Dynamic Updates:** Rotations do not require re-voxelization, but scaling or translation does. Translation requires re-voxelization of the translated bone and directly attached bones [S1, unofficial].
+*   **Performance:** Ray-sphere intersections are computationally expensive. Optimization is critical [S1, unofficial].
+
+## Operating characteristics
+*   **Time Complexity:** Dominated by the number of ray-sphere intersections. Performance scales with the number of visible spheres and the number of bounces.
+*   **Memory Complexity:** Proportional to the number of spheres generated from the mesh. Each sphere stores position, radius, and a list of associated triangles.
+*   **Measured Performance:** 100k Ray-Sphere intersections completed in about one frame on a single thread on an i3-10105f at 3.7 GHz using Godot 3.4 GDScript [S1, unofficial].
+*   **Strengths:**
+    *   Allows mesh rotation and translation without re-voxelization [S1, unofficial].
+    *   Avoids cascade leakage issues associated with SDFGI [S1, unofficial].
+    *   Dynamic objects can contribute to GI without expensive re-voxelization [S1, unofficial].
+*   **Limitations:**
+    *   Requires initial voxelization on import [S1, unofficial].
+    *   Dynamic objects still require re-voxelization if scaled or translated [S1, unofficial].
+    *   Ray-sphere intersections are more expensive than simple grid lookups [S1, unofficial].
+*   **When to Use:** Scenes with many rotating dynamic objects where SDFGI cascade leakage is problematic and VoxelGI baking is too restrictive.
+*   **When Not to Use:** Static scenes where baked GI is sufficient, or scenes with extreme scale changes in dynamic objects.
+
+## Background
+*   **Origin:** Proposed by mrjustaguy in a Godot Engine proposal [S1, unofficial].
+*   **History:** The proposal was created to address limitations in existing GI methods (VoxelGI, SDFGI, BakedGI) within the Godot engine [S1, unofficial]. It was inspired by SDFGI but aims to overcome its drawbacks regarding dynamic objects and cascade leakage [S1, unofficial].
+*   **Usage:** Primarily discussed in the context of the Godot Engine's rendering pipeline [S1, unofficial].
+
+## Sources
+[S1] Implement GI Based on De-Gridified Voxels / Spheres, https://github.com/godotengine/godot-proposals/issues/3677, fetched 2026-10-26 (unofficial)

@@ -1,0 +1,363 @@
+--- v005.md
++++ v006.md
+@@ -4,210 +4,110 @@
+ 
+ ## Overview
+-Brick Caching with LRU Replacement manages a fixed-size pool of volume data blocks in memory, mapping logical brick coordinates to physical pool indices and evicting the least-recently-used blocks when the pool is full [S2, unofficial]. It solves the problem of limited GPU memory capacity and transfer bandwidth by ensuring that expensive data transfers from slower host memory are minimized, allowing rendering of volumes larger than physical memory [S1][S2, unofficial]. It sets itself apart from sibling methods by explicitly maintaining a sorted list of blocks along the ray depth to facilitate immediate lookup [S2, 2260-block-based-ray-cache, unofficial] and by decoupling volume size from GPU resolution limits using a low-resolution reference texture to map volume coordinates to cache coordinates [S1]. Unlike [N³-tree with Brick Pool and Node Pool](3407-n-tree-with-brick-pool-and-node-pool.md) which uses hierarchical octrees for residency, this method relies on a flat pool with LRU eviction, often coordinated by CPU-side logic or specific GPU-steered mechanisms [S2, 3654-gpu-steered-lru-cache-management.md, unofficial].
++Brick Caching with LRU Replacement manages a fixed-size pool of volume data blocks, mapping logical brick coordinates to physical memory slots and evicting the least-recently-used blocks when the pool is full [S2, unofficial]. It solves the problem of limited GPU memory capacity and transfer bandwidth by allowing rendering of volumes larger than physical memory, reducing rendering times from days to minutes for high-resolution datasets [S1][S3, unofficial]. It sets itself apart from sibling methods by explicitly maintaining a sorted list of blocks along the ray depth to facilitate immediate lookup, rather than relying solely on generic LRU eviction without spatial locality awareness [S1]. Unlike [Multi-Level Cache and Prefetching](4631-multi-level-cache-and-prefetching.md) which uses hierarchical prefetching, this method focuses on a single flat pool with strict LRU eviction [S2, unofficial].
+ 
+ ## How it works
+ **Inputs:**
+ - Volume dimensions $D_x, D_y, D_z$ [S2, unofficial].
+-- Brick dimensions $B_x, B_y, B_z$ (typically cubic, $B$) [S1][S2, unofficial].
+-- Cache capacity ratio $\rho$ (e.g., 0.5) defining the fraction of total bricks to keep in memory [S2, unofficial].
+-- Transfer function $TF$ (optional, for empty brick detection) [S2, unofficial].
+-- File handle or network socket for brick data retrieval [S2, unofficial].
++- Brick dimensions $B_x, B_y, B_z$ (typically $32^3$ voxels) [S1][S2, unofficial].
++- Cache capacity ratio $\alpha$ (e.g., 0.5 for 50% of total bricks) [S2, unofficial].
++- Transfer function $TF$ (optional, for active brick determination) [S1].
++- Count buffer $cnt\_buf$ precomputed from disk, size $N_x \cdot N_y \cdot N_z \cdot 256$ [S2, unofficial].
+ 
+ **Outputs:**
+-- A pointer to the voxel data of a requested brick $(i, j, k)$, or `nullptr` if the brick is empty or not resident [S2, unofficial].
++- A pointer to the voxel data of the requested brick $(i, j, k)$, or `nullptr` if the brick is not resident or empty [S2, unofficial].
+ 
+ **Data Structures:**
+-The cache (often called the MMU) maintains the following state [S2, unofficial]:
++The cache is implemented as a Block Memory Management Unit (MMU) containing the following fields [S2, unofficial]:
+ 
+-1.  **Grid Dimensions:**
+-    -   `dims`: Total volume dimensions $(D_x, D_y, D_z)$.
+-    -   `brick_dims`: Number of bricks in each dimension, calculated as $N_x = \lceil D_x / B_x \rceil$, $N_y = \lceil D_y / B_y \rceil$, $N_z = \lceil D_z / B_z \rceil$.
+-    -   `brick_size`: The logical brick size $(B_x, B_y, B_z)$.
+-
+-2.  **Entry Map (`entries`):**
+-    -   An array of size $N_x \cdot N_y \cdot N_z$.
+-    -   Each element is an `Entry` struct:
+-        -   `valid`: Boolean, true if the brick is currently in the pool.
+-        -   `blk_idx`: Integer index into the `blocks` array.
+-
+-3.  **Block Pool (`blocks`):**
+-    -   An array of size $K = \lfloor N_x \cdot N_y \cdot N_z \cdot \rho \rfloor$.
+-    -   Represents the physical memory slots available for bricks.
+-
+-4.  **Data Buffer (`data`):**
+-    -   A contiguous byte array of size $K \cdot (B_x+1)(B_y+1)(B_z+1)$.
+-    -   Stores the actual voxel data. Each brick is stored with a padding layer of 1 voxel on each side to support trilinear interpolation at boundaries without accessing adjacent bricks [S1][S2, unofficial].
+-
+-5.  **Count Buffer (`cnt_buf`):**
+-    -   An integer array of size $N_x \cdot N_y \cdot N_z \cdot 256$.
+-    -   Stores the histogram of voxel intensities for each brick. Used to skip loading bricks that do not contribute to the image based on the transfer function [S2, unofficial].
+-
+-6.  **LRU State:**
+-    -   `clock_pos`: Integer index tracking the current position in the LRU scan (clock algorithm) [S2, unofficial].
+-    -   `blk_used`: Integer count of currently used slots in the pool [S2, unofficial].
+-    -   `mutex`: Synchronization primitive (e.g., `pthread_mutex_t`) to protect concurrent access [S2, unofficial].
++1.  **dims**: Vector3i, original volume dimensions.
++2.  **brick_dims**: Vector3i, number of bricks per dimension:
++    $$ N_x = \lceil D_x / B_x \rceil, \quad N_y = \lceil D_y / B_y \rceil, \quad N_z = \lceil D_z / B_z \rceil $$
++3.  **brick_size**: Vector3i, dimensions of each brick in voxels $(B_x, B_y, B_z)$ [S2, unofficial].
++4.  **entries**: Array of `Entry` structures, size $N_x \cdot N_y \cdot N_z$. Each `Entry` contains:
++    -   `valid`: bool, indicates if the mapping is active.
++    -   `blk_idx`: int, index into the `blocks` array.
++5.  **blocks**: Array of `Block` structures, size $blk\_nums$. Each `Block` contains:
++    -   `brick_coords`: Vector3i, logical coordinates $(i, j, k)$.
++    -   `last_access`: int, timestamp or counter for LRU ordering.
++    -   `data_ptr`: pointer to the voxel data in the `data` pool.
++6.  **blk_nums**: int, total number of blocks in the pool, calculated as:
++    $$ blk\_nums = N_x \cdot N_y \cdot N_z \cdot \alpha $$
++7.  **clock_pos**: int, current position in the LRU clock for eviction search [S2, unofficial].
++8.  **blk_used**: int, number of currently used blocks in the pool.
++9.  **data**: uchar*, linear memory pool of size $blk\_nums \times (B_x+1)(B_y+1)(B_z+1)$ [S2, unofficial].
++10. **cnt_buf**: int*, buffer of size $N_x \cdot N_y \cdot N_z \cdot 256$ storing voxel counts for each isovalue level (0-255) for every brick [S2, unofficial].
++11. **mutex**: pthread_mutex_t, for thread-safe access [S2, unofficial].
++12. **fin**: ifstream, file handle for loading bricks from disk [S2, unofficial].
+ 
+ **Algorithm Steps:**
+ 
+ 1.  **Initialization:**
+-    -   Calculate `brick_dims` from `dims` and `brick_size` [S2, unofficial].
+-    -   Calculate total bricks $N_{total} = N_x \cdot N_y \cdot N_z$ [S2, unofficial].
+-    -   Calculate pool size $K = \lfloor N_{total} \cdot \rho \rfloor$ [S2, unofficial].
+-    -   Allocate `entries` array of size $N_{total}$, initializing all `valid` to false [S2, unofficial].
+-    -   Allocate `blocks` array of size $K$ [S2, unofficial].
+-    -   Allocate `data` buffer of size $K \cdot (B_x+1)(B_y+1)(B_z+1)$ [S2, unofficial].
+-    -   Load or initialize `cnt_buf` of size $N_{total} \cdot 256$ from disk or precomputed data [S2, unofficial].
+-    -   Initialize `clock_pos` to 0 and `blk_used` to 0 [S2, unofficial].
++    -   Calculate $N_x, N_y, N_z$ from volume and brick dimensions.
++    -   Allocate `entries` array of size $N_x \cdot N_y \cdot N_z$, initializing all `valid` to false.
++    -   Calculate $blk\_nums$ using ratio $\alpha$.
++    -   Allocate `blocks` array of size $blk\_nums$.
++    -   Allocate `data` buffer of size $blk\_nums \times (B_x+1)(B_y+1)(B_z+1)$.
++    -   Load `cnt_buf` from disk.
++    -   Initialize `clock_pos` to 0, `blk_used` to 0 [S2, unofficial].
+ 
+-2.  **Empty Brick Detection (Pre-fetch Check):**
+-    -   Given brick coordinates $(i, j, k)$ and an optional transfer function $TF$ [S2, unofficial].
+-    -   If $TF$ is provided:
+-        -   Compute base index in `cnt_buf`: $idx_{base} = (i + j \cdot N_x + k \cdot N_x \cdot N_y) \cdot 256$ [S2, unofficial].
+-        -   Iterate $v$ from 0 to 255:
+-            -   If `cnt_buf[idx_base + v]` is non-zero AND $TF$.sampleSimple($v$).w is non-zero:
+-                -   Break loop (brick is potentially non-empty) [S2, unofficial].
+-        -   If loop completes without break (all counts zero or all TF samples zero):
+-            -   Return `nullptr` (brick is empty) [S2, unofficial].
++2.  **Get Block Request `getBlock(x, y, z)`:**
++    -   **Boundary Check:** If $x \ge N_x$ or $y \ge N_y$ or $z \ge N_z$, return `nullptr` [S2, unofficial].
++    -   **Empty Brick Check (Optimization):**
++        -   If a transfer function $TF$ is provided, iterate index $idx$ from 0 to 255.
++        -   Check if $cnt\_buf[base + idx] \neq 0$ AND $TF.sampleSimple(idx).w \neq 0$.
++        -   If no such $idx$ is found (loop completes with $idx=256$), return `nullptr` (brick is effectively empty for this transfer function) [S2, unofficial].
++    -   **Cache Hit Check:**
++        -   Calculate linear index $L = x + y \cdot N_x + z \cdot N_x \cdot N_y$.
++        -   If `entries[L].valid` is true:
++            -   Retrieve `blk_idx = entries[L].blk_idx`.
++            -   Update `blocks[blk_idx].last_access` to current timestamp.
++            -   Return `blocks[blk_idx].data_ptr` [S2, unofficial].
++    -   **Cache Miss / Eviction:**
++        -   Lock `mutex` [S2, unofficial].
++        -   If `blk_used < blk_nums`:
++            -   Find the first free slot in `blocks` (where `brick_coords` is invalid/unused).
++            -   Let this slot be `new_blk_idx`.
++        -   Else (pool full):
++            -   Perform LRU eviction search starting from `clock_pos`.
++            -   Iterate through `blocks` circularly. If `blocks[i].last_access` is older than a threshold or simply the minimum found so far, mark it for eviction.
++            -   *Note: The source describes a "clock" mechanism where `clock_pos` finds the first unused block or evicts the least recently used.*
++            -   Let `old_blk_idx` be the evicted block.
++            -   Invalidate `entries` mapping for `blocks[old_blk_idx].brick_coords`.
++            -   Set `new_blk_idx = old_blk_idx` [S2, unofficial].
++        -   **Load Brick:**
++            -   Read brick data from file `fin` at logical coordinates $(x, y, z)$.
++            -   Store data into `data` pool at offset `new_blk_idx * brick_volume`.
++            -   Update `blocks[new_blk_idx]`:
++                -   `brick_coords = (x, y, z)`
++                -   `last_access = current_timestamp`
++                -   `data_ptr = &data[new_blk_idx * brick_volume]`
++            -   Update `entries[L]`:
++                -   `valid = true`
++                -   `blk_idx = new_blk_idx`
++            -   Increment `blk_used` if a new slot was allocated.
++            -   Update `clock_pos` to `(new_blk_idx + 1) % blk_nums` [S2, unofficial].
++        -   Unlock `mutex` [S2, unofficial].
++        -   Return `blocks[new_blk_idx].data_ptr` [S2, unofficial].
+ 
+-3.  **Cache Lookup (`getBlock(i, j, k)`):**
+-    -   Check bounds: If $i \ge N_x$ or $j \ge N_y$ or $k \ge N_z$, return `nullptr` [S2, unofficial].
+-    -   Compute linear index: $idx = i + j \cdot N_x + k \cdot N_x \cdot N_y$ [S2, unofficial].
+-    -   Check `entries[idx]`:
+-        -   If `valid` is true:
+-            -   Mark block as used (update LRU status) [S2, unofficial].
+-            -   Return pointer to data at `data + entries[idx].blk_idx * brick_volume` [S2, unofficial].
+-    -   If `valid` is false (Cache Miss):
+-        -   Lock `mutex` [S2, unofficial].
+-        -   If `blk_used < K`:
+-            -   Find first free slot in `blocks` (or maintain a free list) [S2, unofficial].
+-            -   Let $slot$ be the free slot index [S2, unofficial].
+-        -   Else (Pool Full):
+-            -   Perform LRU eviction search using `clock_pos` [S2, unofficial].
+-            -   Scan `blocks` starting from `clock_pos` to find a block that is not currently "referenced" (or simply the next available slot in a circular buffer implementation of LRU) [S2, unofficial].
+-            -   Let $evict\_slot$ be the found slot [S2, unofficial].
+-            -   Identify the brick currently in $evict\_slot$ and invalidate its corresponding `entries` entry (set `valid` to false) [S2, unofficial].
+-            -   Update `clock_pos` to $(evict\_slot + 1) \mod K$ [S2, unofficial].
+-            -   $slot = evict\_slot$ [S2, unofficial].
+-        -   Load brick data from file/network into `data + slot * brick_volume` [S2, unofficial].
+-        -   Update `entries[idx]`: set `valid` to true, set `blk_idx` to $slot$ [S2, unofficial].
+-        -   Increment `blk_used` if a new slot was allocated (not reused) [S2, unofficial].
+-        -   Unlock `mutex` [S2, unofficial].
+-        -   Return pointer to the loaded data [S2, unofficial].
++3.  **Isovalue Change Handling:**
++    -   When the isovalue changes, perform a range query on `cnt_buf` for all bricks to determine active status [S1].
++    -   Download active bricks into the cache.
++    -   Remove inactive bricks using the LRU strategy when space is needed [S1].
+ 
+-4.  **Reference Texture Mapping (GPU Implementation):**
+-    -   Maintain a low-resolution floating-point reference texture of size $N_x \times N_y \times N_z$ (or compressed) [S1].
+-    -   Each texel stores the texture coordinate offset to the corresponding brick in the single large brick cache texture [S1].
+-    -   White/null references indicate bricks not in cache [S1].
+-    -   During raycasting, sample the reference texture to transform volume coordinates into brick cache texture coordinates [S1].
++**Parameters:**
++-   **brick_size**: Typically $32^3$ voxels [S1][S2, unofficial].
++-   **_brick_num_ratio ($\alpha$)**: Fraction of total bricks to keep in memory, e.g., 0.5 [S2, unofficial].
++-   **GPU Resolution Limit**: Example $512^3$ on NVIDIA GeForce 6 [S1].
++-   **Memory Limit**: Example 256MB [S1].
+ 
+-**Pseudocode:**
+-
+-```python
+-class BrickCache:
+-    def __init__(self, dims, brick_size, rho):
+-        self.dims = dims
+-        self.brick_size = brick_size
+-        self.Nx = (dims.x + brick_size.x - 1) // brick_size.x
+-        self.Ny = (dims.y + brick_size.y - 1) // brick_size.y
+-        self.Nz = (dims.z + brick_size.z - 1) // brick_size.z
+-        self.total_bricks = self.Nx * self.Ny * self.Nz
+-        
+-        # Pool size
+-        self.K = int(self.total_bricks * rho)
+-        
+-        # Data structures
+-        self.entries = [Entry() for _ in range(self.total_bricks)]
+-        self.blocks = [None] * self.K
+-        self.brick_vol = (brick_size.x + 1) * (brick_size.y + 1) * (brick_size.z + 1)
+-        self.data = bytearray(self.K * self.brick_vol)
+-        
+-        # LRU state
+-        self.clock_pos = 0
+-        self.blk_used = 0
+-        self.mutex = Lock()
+-        
+-        # Count buffer (simplified)
+-        self.cnt_buf = [0] * (self.total_bricks * 256)
+-
+-    def get_block(self, i, j, k, tf=None):
+-        # Bounds check
+-        if not (0 <= i < self.Nx and 0 <= j < self.Ny and 0 <= k < self.Nz):
+-            return None
+-            
+-        idx = i + j * self.Nx + k * self.Nx * self.Ny
+-        
+-        # Empty brick check
+-        if tf is not None:
+-            base = idx * 256
+-            is_empty = True
+-            for v in range(256):
+-                if self.cnt_buf[base + v] != 0 and tf.sample(v).w != 0:
+-                    is_empty = False
+-                    break
+-            if is_empty:
+-                return None
+-                
+-        # Cache hit
+-        if self.entries[idx].valid:
+-            self.update_lru(self.entries[idx].blk_idx)
+-            return self.data[self.entries[idx].blk_idx * self.brick_vol : (self.entries[idx].blk_idx + 1) * self.brick_vol]
+-            
+-        # Cache miss - load
+-        self.mutex.lock()
+-        try:
+-            if self.blk_used < self.K:
+-                # Find free slot
+-                slot = self.find_free_slot()
+-                self.blk_used += 1
+-            else:
+-                # Evict
+-                slot = self.evict_lru()
+-            
+-            # Load data (pseudo-load)
+-            self.load_brick_data_into(slot, i, j, k)
+-            
+-            # Update entry
+-            self.entries[idx].valid = True
+-            self.entries[idx].blk_idx = slot
+-            
+-        finally:
+-            self.mutex.unlock()
+-            
+-        return self.data[slot * self.brick_vol : (slot + 1) * self.brick_vol]
+-
+-    def find_free_slot(self):
+-        # Simple linear scan for free slot
+-        for s in range(self.K):
+-            if self.blocks[s] is None:
+-                return s
+-        return 0 # Should not happen if blk_used < K
+-
+-    def evict_lru(self):
+-        # Clock algorithm
+-        while True:
+-            slot = self.clock_pos
+-            self.clock_pos = (self.clock_pos + 1) % self.K
+-            # In a full LRU, we'd check a 'referenced' bit. 
+-            # Here we assume a simple circular buffer eviction for demonstration 
+-            # or that blocks are marked dirty/referenced.
+-            # For strict LRU, we need a doubly linked list or bit vector.
+-            # Based on S2, it uses clock_pos to find first unused block.
+-            # Assuming 'unused' means not currently accessed in this frame or similar.
+-            # Simplified: just take the next slot in clock order.
+-            return slot
+-
+-    def update_lru(self, slot):
+-        # Update LRU status for the accessed slot
+-        pass
+-
+-    def load_brick_data_into(self, slot, i, j, k):
+-        # Load from file/network
+-        pass
+-```
++**Edge Cases and Pitfalls:**
++-   **Precision:** The count buffer uses 256 levels (uchar/int mapping). If the volume data has higher precision, binning or sampling is required to populate `cnt_buf` [S2, unofficial].
++-   **Boundaries:** Bricks are stored with 1-voxel padding $(B_x+1)(B_y+1)(B_z+1)$ to support trilinear interpolation at boundaries without accessing adjacent bricks [S1][S2, unofficial].
++-   **Concurrency:** The use of `pthread_mutex_t` indicates this implementation is designed for multi-threaded CPU access. On GPU, atomic operations or a different synchronization primitive would be required [S2, G, unofficial].
+ 
+ ## Subtopics
+ 
+ ### [Block-based Ray Cache](2260-block-based-ray-cache.md)
+-The Block-based Ray Cache is a memory optimization technique for volume rendering that reduces reconstruction overhead by retaining reconstructed voxel blocks in memory for reuse by adjacent rays. It solves the problem of redundant computation in high-resolution volume rendering where data exceeds physical memory, allowing rendering times to drop from days to minutes. It sets itself apart from sibling methods by explicitly maintaining a sorted list of blocks along the ray depth to facilitate immediate lookup, rather than relying solely on generic LRU eviction without spatial locality awareness.
++The Block-based Ray Cache is a memory optimization technique that reduces reconstruction overhead by retaining reconstructed voxel blocks in memory for reuse by adjacent rays. It solves the problem of redundant computation in high-resolution volume rendering where data exceeds physical memory, allowing rendering times to drop from days to minutes. It sets itself apart from sibling methods by explicitly maintaining a sorted list of blocks along the ray depth to facilitate immediate lookup, rather than relying solely on generic LRU eviction without spatial locality awareness.
+ 
+ ### [LRU Cache Eviction with Residency Update](3115-lru-cache-eviction-with-residency-update.md)
+@@ -215,5 +115,5 @@
+ 
+ ### [Brick Cache Implementation](3222-brick-cache-implementation.md)
+-The Brick Cache is a single-channel 3D texture cache that stores bricks from a multi-resolution multi-volume hierarchy. It is agnostic to the number of data channels. It differs from general-purpose CPU caches by being implemented as a GPU-resident texture managed via LRU replacement using WebGPU compute passes.
++The Brick Cache is a single-channel 3D texture cache that stores bricks from a multi-resolution multi-volume hierarchy. It is agnostic to the number of data channels in the underlying dataset. It differs from general-purpose CPU caches by being implemented as a GPU-resident texture managed via LRU replacement using WebGPU compute passes.
+ 
+ ### [GPU-Steered LRU Cache Management](3654-gpu-steered-lru-cache-management.md)
+@@ -224,40 +124,25 @@
+ 
+ ### Brick Cache Updates
+-#### Brick Cache Updates
+-A user-defined number of brick data received from the file server is uploaded to the GPU each frame. For each of the received bricks, the brick data comprises the brick’s global brick ID, and either the special EMPTY value if it contains only zero values or the pre-processed brick [S3, unofficial]. As a first step, the brick’s global brick ID is translated to a local brick ID [S3, unofficial]. If the brick’s channel is currently not represented by the multi-channel page-table hierarchy, the brick is discarded [S3, unofficial]. If the brick is EMPTY, only the brick’s corresponding page in the multi-channel page-table hierarchy is marked as EMPTY [S3, unofficial]. Otherwise, the brick’s corresponding page is marked as MAPPED, and the brick’s data is added to the brick cache [S3, unofficial]. To do so, the LRU buffer is used to find either free cache entries or ones that have not been accessed recently [S3, unofficial]. Whenever a brick is removed from the brick cache, its corresponding page is marked as UNMAPPED [S3, unofficial]. When the brick cache update is completed, two lists of local brick IDs are passed to the residency octree for further processing: a list containing the local brick IDs of all bricks for which the corresponding page has been marked EMPTY or MAPPED, and a list containing the local brick IDs of all bricks for which the corresponding page has been marked UNMAPPED in the current update [S3, unofficial].
++A variant involving dynamic updates from a file server [S3, unofficial].
++-   **Upload:** A user-defined number of brick data is uploaded to the GPU each frame. Each brick comprises its global brick ID and either the EMPTY value (if all zeros) or the pre-processed brick [S3, unofficial].
++-   **Translate ID:** The brick's global brick ID is translated to a local brick ID [S3, unofficial].
++-   **Discard:** If the brick's channel is not represented by the multi-channel page-table hierarchy, the brick is discarded [S3, unofficial].
++-   **Handle EMPTY:** If the brick is EMPTY, the corresponding page in the multi-channel page-table hierarchy is marked as EMPTY [S3, unofficial].
++-   **Handle MAPPED:** Otherwise, the corresponding page is marked as MAPPED, and the brick's data is added to the brick cache [S3, unofficial].
++-   **Find Entry:** The LRU buffer is used to find free cache entries or entries not accessed recently [S3, unofficial].
++-   **Handle Removal:** When a brick is removed from the cache, its corresponding page is marked as UNMAPPED [S3, unofficial].
++-   **Pass Lists:** Two lists of local brick IDs are passed to the residency octree: 1) IDs of bricks marked EMPTY or MAPPED, 2) IDs of bricks marked UNMAPPED [S3, unofficial].
+ 
+ ## Operating characteristics
+-**Time Complexity:**
+--   Cache Hit: $O(1)$ average [S2, unofficial].
+--   Eviction Search: $O(1)$ amortized (using clock algorithm) [S2, unofficial].
+--   Empty Brick Check: $O(256)$ worst-case (iterating histogram) [S2, unofficial].
+-
+-**Memory Complexity:**
+--   $O(K \cdot V_{brick} + N_{total} \cdot 256 \cdot \text{sizeof(int)})$, where $K$ is the number of bricks in the pool, $V_{brick}$ is the volume of a brick including padding, and $N_{total}$ is the total number of bricks [S2, unofficial].
+-
+-**Measured Performance:**
+--   Example configuration: 512^3 volume on NVIDIA GeForce 6 with 256MB memory limit [S1].
+--   Reference texture size: 16^3 for 512^3 volume with 32^3 bricks [S1].
+-
+-**Strengths:**
+--   Decouples volume size from GPU memory constraints [S1].
+--   Efficient empty space skipping via count buffers [S2, unofficial].
+--   Simple implementation using flat arrays and LRU [S2, unofficial].
+-
+-**Limitations:**
+--   Padding overhead is inversely proportional to brick size [S1].
+--   LRU eviction may not account for spatial locality as well as ray-specific caches [2260-block-based-ray-cache].
+--   Mutex contention on CPU side if not steered by GPU [S2, 3654-gpu-steered-lru-cache-management.md, unofficial].
+-
+-**When to Use:**
+--   When rendering large volumes that exceed GPU memory.
+--   When isovalue changes are frequent, requiring dynamic active brick determination [S1].
+-
+-**When Not to Use:**
+--   When fine-grained spatial locality is critical and a ray-specific cache is available [2260-block-based-ray-cache].
+--   When hierarchical residency information is required for culling beyond simple brick emptiness [3407-n-tree-with-brick-pool-and-node-pool.md].
++-   **Time Complexity:** $O(1)$ average for cache hit. $O(1)$ for eviction search (amortized using clock algorithm). $O(256)$ worst-case for empty brick check (iterating the count buffer) [S2, unofficial].
++-   **Memory Complexity:** $O(blk\_nums \times brick\_volume + brick\_count \times 256 \times sizeof(int))$ [S2, unofficial]. The overhead is inversely proportional to brick size due to padding [S1].
++-   **Measured Performance:** Example resolution $512^3$ on NVIDIA GeForce 6 with 256MB memory limit [S1]. Rendering times can drop from days to minutes for high-resolution volumes [S1][S3, unofficial].
++-   **Strengths:** Decouples volume size from GPU memory restrictions; efficient space skipping via count buffer; simple implementation [S1][S2, unofficial].
++-   **Limitations:** Single-level cache may suffer from thrashing if working set exceeds pool size; mutex contention on CPU; 256-level count buffer may not capture all transfer function nuances [S1][S2, unofficial].
++-   **When to use:** When volume size exceeds available VRAM/CPU cache and a single-level cache is sufficient.
++-   **When not to use:** When hierarchical LOD is required or when GPU-steered updates are needed for better performance [S1][S3, unofficial].
+ 
+ ## Background
+-The method originates from real-time ray-casting of discrete isosurfaces, specifically addressing the limitations of GPU memory resolution and capacity [S1]. It builds on the concept of adaptive texture maps [KE02] by maintaining a low-resolution reference texture to map volume coordinates to a single large brick cache texture [S1]. The approach allows for dynamic maintenance of the cache without pre-processing [S1]. The use of count buffers for empty brick detection and LRU replacement for pool management is detailed in implementations such as the Block Memory Management Unit (MMU) [S2, unofficial].
++Originating from real-time ray-casting research for discrete isosurfaces, this method was described in work by Sigg and Hadwiger (2005) [S1]. It builds on the idea of adaptive texture maps [KE02] to manage memory for large volumes. The technique is used in web-based volume rendering of large biomedicine datasets [S3, unofficial] and in parallel volume rendering implementations [S2, unofficial].
+ 
+ ## Sources

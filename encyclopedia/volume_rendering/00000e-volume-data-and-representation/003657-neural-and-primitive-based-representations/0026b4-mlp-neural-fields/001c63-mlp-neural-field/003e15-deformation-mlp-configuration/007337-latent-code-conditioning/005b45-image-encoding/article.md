@@ -1,0 +1,91 @@
+# Image Encoding
+
+Also called: Image Encoder
+
+## Overview
+Image Encoding extracts a global latent code from an input appearance source image to condition a neural field decoder [S1, S2]. It builds on [Latent Code Conditioning](16345-latent-code-conditioning.md) by using a dedicated encoder network to map 2D appearance into a fixed-dimensional vector that is concatenated with spatial coordinates before decoding [S1, S2].
+
+## How it works
+**Inputs:**
+1.  Appearance source image $A$ (typically RGB) [S1, S2].
+2.  Spatial coordinates $x$ of the voxel grid or query points [S1, S2].
+3.  Pre-trained neural field decoder $f_\theta$ [S1, S2].
+
+**Outputs:**
+1.  Latent code vector $z \in \mathbb{R}^D$ [S2].
+2.  Rendered volume properties (e.g., color, density) conditioned on $z$ [S1, S2].
+
+**Data Structures:**
+*   **Latent Code $z$**: A dense vector of dimension $D$ [S1, S2].
+*   **Decoder Input**: The spatial coordinates $x$ are concatenated with $z$ to form the input to the first layer of the decoder [S1, S2].
+
+**Parameters:**
+*   **Latent dimension $D$**: Hyperparameter chosen based on inter-instance variation complexity [S1, S2]. Typical values are $D=512$ for volumetric applications and $D=256$ for shape space learning [S1, S2].
+
+**Steps:**
+1.  **Encode**: Pass the input image $A$ through an encoder network $E$ to produce the latent code $z$ [S2].
+    $$ z = E(A) $$
+2.  **Condition**: Concatenate $z$ with the query spatial coordinates $x$ [S1, S2].
+    $$ x' = [x; z] $$
+3.  **Decode**: Query the neural field decoder $f_\theta$ with $x'$ to obtain the output $y$ (e.g., color, density) [S1, S2].
+    $$ y = f_\theta(x') $$
+
+**Edge Cases and Pitfalls:**
+*   **Spatial Ambiguity**: The method captures overall color but fails to assign it correctly to individual 3D parts [S1].
+*   **No 3D Information**: The method does not inherently use 3D structural information from the input image; it relies entirely on the decoder's learned priors to interpret the latent code [S1].
+*   **Precision**: Concatenating high-dimensional latent codes with low-dimensional coordinates can cause gradient imbalance during training if not normalized [G].
+
+**Pseudocode:**
+> **Unverified code.** The code below did not pass a test run against a reference implementation, or no test fits it, so it may contain errors.
+
+```python
+import numpy as np
+
+def image_encoding_render(image_A, encoder, decoder, query_points):
+    # Step 1: Encode image to latent code
+    latent_code = encoder(image_A)
+    
+    # Step 2: Condition decoder input
+    # Concatenate spatial coordinates with latent code
+    conditioned_input = []
+    for point in query_points:
+        conditioned_input.append(np.concatenate((point, latent_code)))
+        
+    # Step 3: Decode
+    output = []
+    for x_prime in conditioned_input:
+        output.append(decoder(x_prime))
+        
+    return output
+```
+
+## Subtopics
+
+### SegFormer B5 Encoder
+An encoder architecture using the SegFormer B5 backbone to predict a latent code, canonical map, and segmentation mask from a single input RGB image [S3]. It is chosen when bootstrapping latent codes and pose estimation from sparse image ensembles is required [S3].
+
+**Layout:**
+1.  **Input**: 128x128, 3-channel RGB Image [S3].
+2.  **Backbone**: SegFormer B5 transformer-based backbone [S3].
+3.  **Feature Map**: Intermediate feature map of size 32x32, 512 channels [S3].
+4.  **Upsampling**: Bilinear upsampling by 4x [S3].
+5.  **Convolutional Blocks**: Conv2D 3x3, 512 channels, ReLU activation, followed by another Conv2D 3x3, 512 channels, ReLU activation [S3].
+6.  **Heads**: Latent Code Regressor uses a Linear layer, 512 channels, Leaky ReLU (a=0.2) activation [S3]. Canonical Map uses Conv2D 3x3, 3 channels output [S3]. Segmentation Mask uses Conv2D 3x3, 1 channel output with Sigmoid activation [S3].
+
+**Pitfalls:**
+*   The latent code regressor includes a Leaky ReLU activation in the final layer to mimic the behavior of a GAN mapping network [S3].
+
+## Operating characteristics
+*   **Time Complexity**: Dominated by the encoder pass (typically a transformer or CNN) and the decoder queries [G]. The encoder runs once per image, while the decoder runs per voxel or query point [G].
+*   **Memory Complexity**: Requires storing the latent code $z$ ($D$ floats) and the decoder weights [G]. The encoder memory is transient [G].
+*   **Performance**: In comparisons, Image Encoding yields better MSE (24.3) and DSSIM (0.030) than Single-to-multiview (34.8, 0.040) but is inferior to NVR+ (22.8, 0.028) [S1]. It captures overall color but lacks fine detail and spatial assignment [S1].
+*   **Strengths**: Simple to implement; leverages powerful 2D encoders [S1, S2].
+*   **Limitations**: Global latent code cannot represent spatially varying appearance accurately; no explicit 3D structure in the conditioning [S1].
+
+## Background
+It was introduced in the context of Neural Voxel Renderers for learning controllable rendering tools [S1]. It was evaluated against comparative methods including Single-to-multiview, Image translation, and Deep shading [S1].
+
+## Sources
+[S1] Neural Voxel Renderer: Learning an Accurate and Controllable Rendering Tool, https://doi.org/10.1109/cvpr42600.2020.00546, fetched 2026-10-26
+[S2] Texture Fields: Learning Texture Representations in Function Space, https://doi.org/10.1109/iccv.2019.00463, fetched 2026-10-26
+[S3] Shape, Pose, and Appearance from a Single Image via Bootstrapped Radiance Field Inversion, https://doi.org/10.1109/cvpr52729.2023.00427, fetched 2026-10-26

@@ -1,0 +1,111 @@
+# Function Composition Gradient Rule for Discontinuous Functions
+
+Also called: Heaviside composition rule, Two-branch composition gradient
+
+## Overview
+This method provides a gradient approximation for composite functions $f = h(g)$ where $h$ is continuous but $g$ is discontinuous, specifically addressing the failure of standard automatic differentiation (AD) at discontinuity boundaries. It sets itself apart from the parent [Heaviside Step Derivative Approximation](20427-heaviside-step-derivative-approximation.md) by generalizing the two-sided sampling principle to arbitrary continuous outer functions $h$, rather than limiting the approximation to the Heaviside step function itself. It differs from the [Surrogate Gradient Method](21618-surrogate-gradient-method.md) by deriving the gradient from a finite difference quotient of the composite function's branches rather than replacing the derivative with a heuristic surrogate.
+
+## How it works
+**Inputs and Outputs:**
+- Input: A composite function $f(\mathbf{x}, \boldsymbol{\theta}) = h(g(\mathbf{x}, \boldsymbol{\theta}))$, where $g$ is discontinuous with respect to parameters $\boldsymbol{\theta}$ and $h$ is continuous.
+- Output: The approximate gradient $\frac{\partial \hat{f}}{\partial \theta_i}$ for each parameter $\theta_i$.
+
+**Data Structures:**
+No specific data structures are required beyond standard scalar or vector storage for the function values and their derivatives. The method relies on evaluating the function at two specific spatial offsets.
+
+**Parameters:**
+- $\alpha, \beta$: Kernel boundary weights. Typical values are $\alpha = 0.5, \beta = 0.5$ for a symmetric box kernel, though the sources define them generally as positive constants summing to the kernel width scaling.
+- $\varepsilon$: The filtering kernel width or sampling step size.
+
+**Steps:**
+1.  **Identify Composition:** Decompose the target function into $f = h(g)$, ensuring $h$ is continuous and $g$ contains the discontinuity.
+2.  **Sample Boundaries:** Compute the intermediate value $g$ at the left and right boundaries of the filtering kernel centered at the current evaluation point $x$:
+    $$ g^+ = g(x + \beta\varepsilon) $$
+    $$ g^- = g(x - \alpha\varepsilon) $$
+3.  **Evaluate Outer Function:** Compute the composite function values at these sampled points:
+    $$ f^+ = h(g^+) $$
+    $$ f^- = h(g^-) $$
+4.  **Compute Inner Gradient:** Calculate the standard pre-filtered gradient of the inner discontinuous function $g$ with respect to $\theta_i$, denoted as $\frac{\partial \hat{g}}{\partial \theta_i}$. This is typically derived using the Heaviside step derivative approximation from the parent method.
+5.  **Approximate Composite Gradient:** Compute the gradient using the two-branch composition rule:
+    $$ \frac{\partial \hat{f}}{\partial \theta_i} \approx \frac{f^+ - f^-}{g^+ - g^-} \cdot \frac{\partial \hat{g}}{\partial \theta_i} $$
+    This formula effectively applies the chain rule using a finite difference quotient for the outer function $h$ across the discontinuity.
+
+**Pseudocode:**
+> **Unverified code.** The code below did not pass a test run against a reference implementation, or no test fits it, so it may contain errors.
+
+```python
+def function_composition_gradient_rule(g_func, h_func, theta, epsilon, alpha=0.5, beta=0.5):
+    """
+    Computes the gradient of f = h(g) where g is discontinuous.
+    
+    Args:
+        g_func: Function computing g(x, theta).
+        h_func: Continuous function computing h(g).
+        theta: Parameter vector theta.
+        epsilon: Kernel width.
+        alpha: Left kernel weight.
+        beta: Right kernel weight.
+        
+    Returns:
+        grad_f: Approximate gradient df/dtheta.
+    """
+    # Step 2: Sample boundaries
+    # Note: x is implicit in the function calls; in a full renderer, 
+    # x would be the ray parameter or spatial coordinate.
+    g_plus = g_func(x=theta + beta * epsilon, theta=theta)
+    g_minus = g_func(x=theta - alpha * epsilon, theta=theta)
+    
+    # Step 3: Evaluate outer function
+    f_plus = h_func(g_plus)
+    f_minus = h_func(g_minus)
+    
+    # Step 4: Compute inner gradient d(g_hat)/d(theta)
+    # This requires the parent method's logic for Heaviside step derivative approximation.
+    # Assuming a helper function exists that returns the pre-filtered gradient of g.
+    grad_g = compute_heaviside_gradient(g_func, theta, epsilon, alpha, beta)
+    
+    # Step 5: Approximate composite gradient
+    # Guard against division by zero if g+ == g- (no discontinuity crossed or degenerate case)
+    if abs(g_plus - g_minus) < 1e-9:
+        # Fallback to standard AD if no discontinuity is detected in the kernel
+        # [G] Standard AD gradient of h(g) is h'(g) * g'
+        # Since h is continuous, we can use standard chain rule at the center point
+        g_center = g_func(x=theta, theta=theta)
+        # Approximate h'(g) using finite difference if derivative not available
+        h_prime = (h_func(g_center + 1e-5) - h_func(g_center - 1e-5)) / 2e-5
+        grad_f = h_prime * grad_g
+    else:
+        grad_f = (f_plus - f_minus) / (g_plus - g_minus) * grad_g
+        
+    return grad_f
+```
+
+**Edge Cases and Pitfalls:**
+- **Naive AD Bias:** Naively applying the standard AD chain rule to $f = H(x + \theta)^2$ yields $\frac{\partial f}{\partial \theta} = 2H(x + \theta)\frac{\partial H}{\partial \theta}$, which is biased to one branch and incorrect at the discontinuity. The composition rule avoids this by sampling both branches [S1].
+- **Denominator Zero:** If $g^+ = g^-$, the denominator vanishes. This occurs if the discontinuity is not within the kernel or if the function is locally constant. In this case, standard AD should be used [S1].
+- **Higher-Order Roots:** Discontinuities with roots of order $n \ge 2$ are excluded from the domain of correctness for this first-order approximation [S1].
+
+## Subtopics
+
+### [Adelta (Autodiff for Discontinuous Programs)](20434-adelta-autodiff-for-discontinuous-programs.md)
+Adelta is a compiler-based approach that extends reverse-mode automatic differentiation to arbitrary programs involving discontinuities by approximating the prefiltered gradient over a 1D box kernel oriented along a sampling axis. Unlike traditional AD which ignores gradients at discontinuities, or finite difference which scales linearly with parameter count, Adelta handles discontinuities with $O(1)$ complexity relative to the number of parameters. It differs from this method by providing a concrete implementation via a domain-specific language (DSL) and specific gradient rules for Dirac parameters, and from [Smoothing Function for Discontinuity Handling](20528-smoothing-function-for-discontinuity-handling.md) by using a 1D box kernel convolution rather than general smoothing functions.
+
+### [Smoothing Function for Discontinuity Handling](20528-smoothing-function-for-discontinuity-handling.md)
+This method replaces discontinuous Boolean checks, such as occlusion tests and convergence criteria in ray tracing, with continuous, differentiable approximations to enable gradient-based optimization. It differs from [Adelta (Autodiff for Discontinuous Programs)](20434-adelta-autodiff-for-discontinuous-programs.md) by modifying the forward function itself via parameterized smoothing rather than using a specialized backward pass or delta-rule approximation for the gradient.
+
+### Ternary Select Operator Gradient Rule
+A gradient approximation rule for the ternary select operator $F = \text{select}(B, l, r)$ where $B$ is a Boolean condition. It handles branching in shaders by sampling Boolean values at kernel boundaries and identifying the active discontinuity clause [S1]. The number of inequality clauses $n$ decomposing $B$ determines the complexity, with no fixed limit imposed [S1]. If the Boolean condition is statically determined to be $C^0$ continuous (no runtime branching), the gradient rule falls back to standard automatic differentiation through the branching [S1].
+
+## Operating characteristics
+- **Time Complexity:** $O(1)$ with respect to the number of parameters, as it requires only two additional function evaluations ($g^+, g^-$) and one gradient evaluation for the inner function, regardless of the parameter count [S1].
+- **Memory Complexity:** $O(1)$ additional memory for storing the sampled values $g^+, g^-, f^+, f^-$.
+- **Strengths:** Robust at discontinuities; avoids the bias of standard AD which favors one branch; generalizable to any continuous outer function $h$.
+- **Limitations:** Requires the ability to evaluate the function at offset points; fails for higher-order discontinuities ($n \ge 2$); requires the inner function $g$ to have a computable gradient (via the parent method).
+- **When to use:** When differentiating composite functions involving discontinuous inner functions (e.g., ray marching with step functions, branching shaders) where standard AD fails.
+- **When not to use:** When the function is entirely continuous (use standard AD); when the discontinuity is of higher order than first.
+
+## Background
+The method originates from the "A $\delta$" paper, which introduces a framework for automatic differentiation of discontinuous programs [S1]. It was developed to address the limitations of standard reverse-mode AD in graphics and ray tracing, where discontinuities are common due to visibility tests, surface intersections, and branching logic. The specific composition rule is derived from the induction results for unary operators involving Heaviside steps and continuous atomic functions, ensuring first-order correctness at discontinuity points [S1].
+
+## Sources
+[S1] A $\delta$, https://doi.org/10.1145/3528223.3530125, fetched 2026-10-30

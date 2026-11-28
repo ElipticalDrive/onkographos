@@ -1,0 +1,137 @@
+--- v003.md
++++ v004.md
+@@ -20,10 +20,10 @@
+ 
+ ### Data Structures
+-*   **Slab Cache:** A three-dimensional array stored in GPU shared memory.
+-    *   Dimensions: $[N_{rays}, N_{slices}, N_{samples\_per\_slice}]$.
+-    *   $N_{rays}$: Number of rays in the slab (threads in the block).
+-    *   $N_{slices}$: Determined by slab depth $s_d$ and ray length.
+-    *   $N_{samples\_per\_slice}$: Determined by ray length and step size.
+-    *   Layout: Rays with the same distance to the camera lie on the same slice [S1, unofficial].
++*   **Slab Cache:** A three-dimensional array stored in GPU shared memory [S1, unofficial].
++    *   Dimensions: $[N_{slices}, N_{rays}, N_{samples\_per\_slice}]$ [S1, unofficial].
++    *   $N_{rays}$: Number of rays in the slab (threads in the block) [S1, unofficial].
++    *   $N_{slices}$: Determined by slab depth $s_d$ and ray length [S1, unofficial].
++    *   $N_{samples\_per\_slice}$: Determined by ray length and step size [S1, unofficial].
++    *   Layout: Rays with the same distance to the camera lie on the same slice in the slab [S1, unofficial].
+ *   **Slab Definition:** A slab of thickness $2d$ is defined by three successive samples $(s_f, s_m, s_b)$ [S2]. The next slab is indexed by $(s_f, s_m, s_b)$ with the correlation $s_f = s_b$ (front sample of the next slab equals the back sample of the current slab) [S2].
+ 
+@@ -31,10 +31,10 @@
+ *   $d$: Step length between samples [S2].
+ *   $s_d$: Slab depth, controlling the number of samples written into the cache per ray simultaneously [S1, unofficial].
+-*   Typical values: Not given in the sources.
++*   Typical values: Not given in the sources [S1, unofficial].
+ 
+ ### Algorithm Steps
+ 
+ 1.  **Screen Subdivision and Slab Creation:**
+-    The screen is subdivided into rectangular regions. For each region, a slab is created. For orthogonal projection, the slab is a cuboid; for perspective projection, it is a frustum [S1, unofficial].
++    The screen is subdivided into rectangular regions [S1, unofficial]. For each region, a slab is created [S1, unofficial]. For orthogonal projection, the slab is a cuboid; for perspective projection, it is a frustum [S1, unofficial].
+ 
+ 2.  **Start Point Preprocessing:**
+@@ -42,5 +42,5 @@
+     *   Use shared memory and thread synchronization to find the minimum camera distance among all rays in the block [S1, unofficial].
+     *   Move each ray's start point to this minimum distance [S1, unofficial].
+-    *   **Pitfall:** If the view plane is not parallel to one side of the proxy geometry cube, ray start positions have different distances, causing adjacent voxels to lie on different slices in the cache, resulting in incorrect gradients [S1, unofficial]. Modifying start points resolves this. Texture coordinates will lie outside $[0,1]^3$; checks must be performed before each 3D texture fetch [S1, unofficial].
++    *   **Pitfall:** If the view plane is not parallel to one side of the proxy geometry cube, ray start positions have different distances, causing adjacent voxels to lie on different slices in the cache, resulting in incorrect gradients [S1, unofficial]. Modifying start points resolves this [S1, unofficial]. Texture coordinates will lie outside $[0,1]^3$; checks must be performed before each 3D texture fetch [S1, unofficial].
+ 
+ 3.  **Main Loop Part 1 (Cache Filling):**
+@@ -49,5 +49,5 @@
+     *   Write the sample result into the shared memory slab cache [S1, unofficial].
+     *   The slab depth $s_d$ controls how many samples are written per ray at a time [S1, unofficial].
+-    *   **Border Handling:** For rays adjacent to the slab boundary, execute only Part 1 to write samples into the cache. This ensures inner rays have access to neighbor voxels for gradient calculation, avoiding discontinuities (grid patterns) [S1, unofficial].
++    *   **Border Handling:** For rays adjacent to the slab boundary, execute only Part 1 to write samples into the cache [S1, unofficial]. This ensures inner rays have access to neighbor voxels for gradient calculation, avoiding discontinuities (grid patterns) [S1, unofficial].
+ 
+ 4.  **Thread Synchronization:**
+@@ -58,5 +58,5 @@
+     *   Read samples directly from the shared memory cache instead of the texture [S1, unofficial].
+     *   **Gradient Calculation:** Calculate gradients in eye space using adjacent samples on the same slice from top, left, bottom, and right rays (as seen from the viewpoint), and the next/previous samples on the current ray [S1, unofficial]. Transform gradients to object space for lighting [S1, unofficial].
+-    *   **Compositing:** Apply lighting and front-to-back compositing. For pre-integration methods, fetch color/opacity from a 3D pre-integration table using the retrieved scalar values [S2].
++    *   **Compositing:** Apply lighting and front-to-back compositing [S1, unofficial]. For pre-integration methods, fetch color/opacity from a 3D pre-integration table using the retrieved scalar values [S2].
+ 
+ 6.  **Early Ray Termination (ERT):**
+@@ -138,6 +138,10 @@
+         color = [0.0, 0.0, 0.0]
+         opacity = 0.0
++        ray_alive = True
+ 
+         for sample_idx in range(sd):
++            if not ray_alive:
++                break
++
+             dist = length(current_pos)
+             slice_idx = int(dist / d) % 2
+@@ -146,7 +150,17 @@
+             if not is_border:
+                 # Gradient Calculation in eye space [S1, unofficial]
+-                # Approximate using adjacent samples on same slice from top, left, bottom, right rays
+-                # and next/previous on current ray [S1, unofficial]
+-                grad_eye = [0.0, 0.0, 0.0] # Exact neighbor indexing depends on block layout [G]
++                # Adjacent samples on same slice from top, left, bottom, right rays
++                # and next/previous samples on current ray [S1, unofficial]
++                # Exact neighbor indexing depends on block layout [G]
++                grad_eye = [0.0, 0.0, 0.0]
++                # Left/Right rays (same slice, different ray_idx) [G]
++                if ray_idx > 0: grad_eye[0] += cache[slice_idx][ray_idx-1][sample_idx] - val
++                if ray_idx < num_rays-1: grad_eye[0] += cache[slice_idx][ray_idx+1][sample_idx] - val
++                # Top/Bottom rays (different slice_idx, same ray_idx) [G]
++                if slice_idx > 0: grad_eye[1] += cache[slice_idx-1][ray_idx][sample_idx] - val
++                if slice_idx < 1: grad_eye[1] += cache[slice_idx+1][ray_idx][sample_idx] - val
++                # Next/Previous samples on current ray [G]
++                if sample_idx > 0: grad_eye[2] += cache[slice_idx][ray_idx][sample_idx-1] - val
++                if sample_idx < sd-1: grad_eye[2] += cache[slice_idx][ray_idx][sample_idx+1] - val
+ 
+                 # Transform gradient to object space for lighting [S1, unofficial]
+@@ -159,5 +173,11 @@
+                 # Apply lighting and front-to-back compositing [S1, unofficial]
+                 # Standard volume rendering step using transfer_func and grad_obj [G]
+-                color, opacity = color, opacity
++                alpha = transfer_func(val, grad_obj)
++                color = [color[j] + (1.0 - opacity) * alpha * color[j] for j in range(3)]
++                opacity = opacity + (1.0 - opacity) * alpha
++
++                # Early Ray Termination check [S1, unofficial]
++                if opacity >= 0.99:
++                    ray_alive = False
+ 
+             current_pos = [current_pos[j] + step_vec[j] for j in range(3)]
+@@ -172,14 +192,14 @@
+ 
+ ### Edge Cases and Pitfalls
+-*   **Incorrect Gradients:** If the view plane is not parallel to one side of the proxy geometry cube, ray start positions have different distances to the camera. This causes voxels adjacent in the volume to lie on different slices in the slab cache, leading to incorrect gradients [S1, unofficial]. **Solution:** Modify all ray start points in a slab to have the same distance to the camera as the closest one [S1, unofficial].
+-*   **Discontinuities (Grid Pattern):** Ignoring voxels not accessible through the cache for gradient calculation leads to discontinuities, visible as a grid pattern [S1, unofficial]. **Solution:** Include surrounding voxels by adding all rays adjacent to the slab to the cache. For these border rays, only Part 1 of the main loop is executed [S1, unofficial].
+-*   **Texture Coordinates:** Moving start points may result in texture coordinates outside $[0,1]^3$. Checks must be performed before each 3D texture fetch [S1, unofficial].
+-*   **Perspective Projection:** Rays are not parallel, so the distance between sample points differs, making the relation between adjacent samples in the cache irregular. An approximation of the neighborhood is often sufficient [S1, unofficial].
++*   **Incorrect Gradients:** If the view plane is not parallel to one side of the proxy geometry cube, ray start positions have different distances to the camera [S1, unofficial]. This causes voxels adjacent in the volume to lie on different slices in the slab cache, leading to incorrect gradients [S1, unofficial]. **Solution:** Modify all ray start points in a slab to have the same distance to the camera as the closest one [S1, unofficial].
++*   **Discontinuities (Grid Pattern):** Ignoring voxels not accessible through the cache for gradient calculation leads to discontinuities, visible as a grid pattern [S1, unofficial]. **Solution:** Include surrounding voxels by adding all rays adjacent to the slab to the cache [S1, unofficial]. For these border rays, only Part 1 of the main loop is executed [S1, unofficial].
++*   **Texture Coordinates:** Moving start points may result in texture coordinates outside $[0,1]^3$ [S1, unofficial]. Checks must be performed before each 3D texture fetch [S1, unofficial].
++*   **Perspective Projection:** Rays are not parallel, so the distance between sample points differs, making the relation between adjacent samples in the cache irregular [S1, unofficial]. An approximation of the neighborhood is often sufficient [S1, unofficial].
+ 
+ ## Operating characteristics
+ 
+ ### Time and Memory Complexity
+-*   **Memory:** Uses shared memory for the slab cache. The size depends on the number of rays in a block, slab depth $s_d$, and samples per slice. It avoids large global memory allocations for bricking lists [S1, unofficial].
+-*   **Time:** Two passes per slab (fill cache, then read/composite). This doubles the traversal cost for the cached portion but saves memory bandwidth for gradient calculations [S1, unofficial].
++*   **Memory:** Uses shared memory for the slab cache [S1, unofficial]. The size depends on the number of rays in a block, slab depth $s_d$, and samples per slice [S1, unofficial]. It avoids large global memory allocations for bricking lists [S1, unofficial].
++*   **Time:** Two passes per slab (fill cache, then read/composite) [S1, unofficial]. This doubles the traversal cost for the cached portion but saves memory bandwidth for gradient calculations [S1, unofficial].
+ 
+ ### Measured Performance
+@@ -188,5 +208,5 @@
+ 
+ ### Scaling
+-*   Performance advantage is realized when lighting techniques (ambient occlusion, gradient calculation) access the same sample position multiple times. Caching provides no advantage if samples are accessed only once [S1, unofficial].
++*   Performance advantage is realized when lighting techniques (ambient occlusion, gradient calculation) access the same sample position multiple times [S1, unofficial]. Caching provides no advantage if samples are accessed only once [S1, unofficial].
+ 
+ ### Strengths and Limitations
+@@ -195,7 +215,7 @@
+ 
+ ### When to Use
+-*   Use when gradient-based lighting or ambient occlusion is required and memory bandwidth is a bottleneck.
+-*   Use when targeting GPU architectures with efficient shared memory access.
+-*   Do not use if samples are accessed only once (no caching benefit) or if per-ray early termination is critical without slab-wide synchronization overhead.
++*   Use when gradient-based lighting or ambient occlusion is required and memory bandwidth is a bottleneck [S1, unofficial].
++*   Use when targeting GPU architectures with efficient shared memory access [S1, unofficial].
++*   Do not use if samples are accessed only once (no caching benefit) or if per-ray early termination is critical without slab-wide synchronization overhead [S1, unofficial].
+ 
+ ## Background

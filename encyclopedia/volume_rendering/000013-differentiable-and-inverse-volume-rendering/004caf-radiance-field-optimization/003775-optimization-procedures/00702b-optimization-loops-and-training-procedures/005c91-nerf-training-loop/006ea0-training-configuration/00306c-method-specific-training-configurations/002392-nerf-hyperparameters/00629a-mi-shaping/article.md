@@ -1,0 +1,193 @@
+# MI-shaping
+Also called: JacobiNeRF shaping, contrastive loss on gradients
+
+## Overview
+MI-shaping is a training technique that improves the suitability of a NeRF for semantic label propagation by applying a contrastive loss on the gradients of pixel gray values with respect to the network weights [S1]. It specifically targets the RGB linear layer to increase the mutual information between perturbed responses of semantically similar rays [S1]. Unlike standard NeRF training which only minimizes photometric error, MI-shaping explicitly aligns the gradient space of the network to reflect semantic similarity, as measured by DINO features [S1].
+
+## How it works
+**Inputs and Outputs:**
+*   **Input:** A pre-trained NeRF model (trained for color reconstruction only), a set of training images, and corresponding DINO feature embeddings for each pixel/region.
+*   **Output:** A shaped NeRF model with modified weights in the RGB linear layer.
+
+**Data Structures:**
+*   **NeRF Weights:** The method targets the parameters of the RGB linear layer. In the reference implementation, this is a $3 \times 128$-dimensional weight matrix [S1].
+*   **Ray Batch:** A batch of 64 rays sampled across all training views [S1].
+*   **DINO Features:** Semantic feature vectors associated with each ray/pixel, used to compute similarity [S1].
+
+**Algorithm Steps:**
+1.  **Pre-training:** Train the NeRF using standard photometric loss (color reconstruction) for 24 hours [S1].
+2.  **Ray Sampling:** For each epoch, randomly sample a batch of 64 rays across all training views [S1].
+3.  **Gradient Computation:** For each ray in the batch, compute the gradient of the pixel gray value with respect to the NeRF's RGB linear layer weights [S1]. The pixel gray value is defined as the mean of the 3 RGB channels [S1].
+4.  **Sample Selection:** For each sampled ray $i$, identify positive and negative samples from the other rays in the batch based on DINO feature similarity [S1]:
+    *   **Positive Sample:** A ray $j$ is a positive sample if its DINO feature similarity with ray $i$ is higher than a dynamic threshold $\tau$ [S1].
+    *   **Negative Sample:** A ray $j$ is a negative sample if its DINO feature similarity with ray $i$ is lower than $\tau$ [S1].
+    *   The total number of samples considered for the contrastive loss for a specific ray is 64 [S1].
+5.  **Threshold Adaptation:** Adjust the similarity threshold $\tau$ dynamically during training [S1]:
+    *   Initialize $\tau$ within the interval $[0.5, 0.8]$ [S1].
+    *   Calculate the ratio of positive samples in the current batch [S1].
+    *   If the ratio of positive samples is lower than 5%, subtract 0.001 from $\tau$ [S1].
+    *   If the ratio of positive samples is larger than 15%, add 0.001 to $\tau$ [S1].
+    *   Clamp $\tau$ to remain within $[0.5, 0.8]$ [S1].
+6.  **Loss Calculation:** Compute the MI-shaping loss. The loss is derived from the mutual information between pixel gradients under perturbation [S1]. The implementation uses a contrastive formulation where the loss encourages high similarity between gradients of rays with high DINO similarity and low similarity otherwise [S1]. The loss parameters are $\lambda = 0.01$ and $\gamma = 0.01$ [S1].
+7.  **Optimization:** Update the NeRF weights using the Adam optimizer with an initial learning rate of $5 \times 10^{-4}$ for 10,000 epochs [S1]. This phase takes approximately 8 hours [S1].
+
+**Pseudocode:**
+
+> **Unverified code.** The code below did not pass a test run against a reference implementation, or no test fits it, so it may contain errors.
+
+```python
+import torch
+import torch.nn as nn
+import torch.optim as optim
+
+def compute_gray_value(rgb_output):
+    """Compute gray value as mean of RGB channels."""
+    return torch.mean(rgb_output, dim=-1)
+
+def compute_dino_similarity(feature_a, feature_b):
+    """Compute cosine similarity between DINO features."""
+    # Normalize features
+    norm_a = torch.nn.functional.normalize(feature_a, p=2, dim=-1)
+    norm_b = torch.nn.functional.normalize(feature_b, p=2, dim=-1)
+    return torch.sum(norm_a * norm_b, dim=-1)
+
+def adaptive_threshold_update(threshold, pos_ratio):
+    """Update threshold based on positive sample ratio."""
+    if pos_ratio < 0.05:
+        threshold -= 0.001
+    elif pos_ratio > 0.15:
+        threshold += 0.001
+    # Clamp to [0.5, 0.8]
+    threshold = torch.clamp(threshold, min=0.5, max=0.8)
+    return threshold
+
+def mi_shaping_step(nerf_model, batch_rays, dino_features, threshold, optimizer):
+    """
+    Perform one step of MI-shaping.
+    
+    Args:
+        nerf_model: The NeRF model.
+        batch_rays: Tensor of shape (64, ...) representing 64 sampled rays.
+        dino_features: Tensor of shape (64, D) containing DINO features for each ray.
+        threshold: Current similarity threshold.
+        optimizer: Adam optimizer for the RGB linear layer weights.
+        
+    Returns:
+        new_threshold: Updated threshold.
+    """
+    optimizer.zero_grad()
+    
+    # 1. Forward pass to get RGB outputs
+    # Note: Implementation details for ray marching are assumed from parent articles
+    rgb_outputs = nerf_model(batch_rays) # Shape: (64, 3)
+    
+    # 2. Compute gray values
+    gray_values = compute_gray_value(rgb_outputs) # Shape: (64,)
+    
+    # 3. Compute gradients of gray values w.r.t. RGB linear layer weights
+    # The RGB linear layer weights are shape (3, 128)
+    rgb_linear_weights = nerf_model.rgb_linear.weight # Shape: (3, 128)
+    
+    # Compute gradient of gray value for each ray w.r.t. the weights
+    # grad_i = d(gray_value_i) / d(weights)
+    # This requires computing gradients for each ray separately or using vector-Jacobian products
+    # For clarity, we assume a function that returns gradients for the batch
+    gradients = compute_gradients(gray_values, rgb_linear_weights) # Shape: (64, 3, 128)
+    
+    # 4. Compute DINO similarities between all pairs in the batch
+    # Similarity matrix S of shape (64, 64)
+    similarities = torch.zeros(64, 64, device=gray_values.device)
+    for i in range(64):
+        for j in range(64):
+            if i != j:
+                similarities[i, j] = compute_dino_similarity(dino_features[i], dino_features[j])
+    
+    # 5. Identify positive and negative samples for each ray
+    # Positive: similarity > threshold
+    # Negative: similarity < threshold
+    # The loss is a contrastive loss over these pairs
+    
+    pos_mask = similarities > threshold
+    neg_mask = similarities < threshold
+    
+    # 6. Compute Contrastive Loss
+    # The MI-shaping loss encourages gradients of positive pairs to be similar
+    # and gradients of negative pairs to be dissimilar.
+    # Based on Eq. 8 and 20 in [S1], the loss relates to the cosine similarity of gradients.
+    
+    loss = 0.0
+    count = 0
+    
+    for i in range(64):
+        # Get gradients for ray i
+        grad_i = gradients[i] # Shape: (3, 128)
+        
+        # Flatten gradient for similarity computation
+        grad_i_flat = grad_i.flatten()
+        
+        # Iterate over other rays
+        for j in range(64):
+            if i == j:
+                continue
+                
+            grad_j = gradients[j]
+            grad_j_flat = grad_j.flatten()
+            
+            sim = compute_dino_similarity(grad_i_flat, grad_j_flat)
+            
+            if pos_mask[i, j]:
+                # Positive pair: minimize distance (maximize similarity)
+                # Loss term: -sim or similar
+                loss -= sim
+                count += 1
+            elif neg_mask[i, j]:
+                # Negative pair: maximize distance (minimize similarity)
+                # Loss term: +sim or similar
+                loss += sim
+                count += 1
+                
+    if count > 0:
+        loss = loss / count
+        
+    # Apply loss parameters lambda and gamma if defined in specific formulation
+    # [S1] mentions lambda=0.01, gamma=0.01. Assuming these scale the loss or are part of a combined loss.
+    # For this implementation, we assume the computed loss is the MI-shaping loss.
+    
+    loss.backward()
+    optimizer.step()
+    
+    # 7. Update threshold
+    # Calculate ratio of positive samples in the batch
+    total_pairs = 64 * 63
+    num_pos = torch.sum(pos_mask).item()
+    pos_ratio = num_pos / total_pairs
+    
+    new_threshold = adaptive_threshold_update(threshold, pos_ratio)
+    
+    return new_threshold
+
+# Training Loop Example
+# 1. Pre-train NeRF for 24 hours with photometric loss
+# 2. Initialize threshold = 0.65 (midpoint of [0.5, 0.8])
+# 3. For epoch in range(10000):
+#       batch_rays, dino_features = sample_batch()
+#       threshold = mi_shaping_step(nerf_model, batch_rays, dino_features, threshold, optimizer)
+```
+
+**Edge Cases and Pitfalls:**
+*   **Threshold Clamping:** The threshold must be strictly clamped to $[0.5, 0.8]$ to prevent divergence [S1].
+*   **Gradient Precision:** Computing gradients of pixel gray values with respect to the RGB linear layer weights requires careful handling of the backpropagation through the volume rendering process [S1].
+*   **Memory Usage:** The MI-shaping phase consumes approximately 1350 MB of memory [S1].
+
+## Operating characteristics
+*   **Time Complexity:** The MI-shaping phase takes approximately 8 hours to complete [S1]. This is significantly faster than Semantic-NeRF and DINO-NeRF, which take 28 hours [S1].
+*   **Memory Complexity:** The method requires approximately 1350 MB of memory during the shaping phase [S1].
+*   **Performance:** On the Replica dataset, the PSNR for novel view synthesis is 18.79 for J-NeRF (with MI-shaping) compared to 18.88 for standard NeRF [S1]. The shaping does not degrade view synthesis quality [S1].
+*   **Strengths:** Improves semantic label propagation performance significantly compared to plain NeRF [S1]. Faster training than comparable semantic NeRF methods [S1].
+*   **Limitations:** Requires pre-training the NeRF for color reconstruction first [S1]. Relies on DINO features for similarity, which may not be available for all scenes without pre-computation [S1].
+
+## Background
+MI-shaping was introduced in the JacobiNeRF paper [S1]. It is based on the observation that the mutual information between pixel gradients under perturbation is positively correlated with the cosine similarity of their gradients with respect to perturbed network weights [S1]. The method was developed to enhance the NeRF's suitability for semantic segmentation label propagation [S1].
+
+## Sources
+[S1] JacobiNeRF: NeRF Shaping with Mutual Information Gradients, https://doi.org/10.1109/cvpr52729.2023.01583, fetched 2026-10-29

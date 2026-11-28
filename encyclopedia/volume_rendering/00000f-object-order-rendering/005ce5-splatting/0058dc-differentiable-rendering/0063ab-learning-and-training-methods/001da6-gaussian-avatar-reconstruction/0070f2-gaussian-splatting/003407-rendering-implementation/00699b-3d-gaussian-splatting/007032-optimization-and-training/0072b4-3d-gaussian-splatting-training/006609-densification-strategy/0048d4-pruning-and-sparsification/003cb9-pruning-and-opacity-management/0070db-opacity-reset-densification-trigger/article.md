@@ -1,0 +1,250 @@
+# Opacity Reset & Densification Trigger
+
+Also called: Opacity Reset, 3DGS Densification, Gaussian Densification
+
+## Overview
+Opacity Reset & Densification Trigger is the adaptive control mechanism in 3D Gaussian Splatting that manages the population of Gaussian primitives $\mathcal{G}$ during training [S4, unofficial]. It solves the problem of static initialization by transitioning from a sparse set of Structure-from-Motion (SfM) points to a denser, scene-adaptive representation [S2]. It distinguishes itself from sibling methods by combining periodic opacity resetting with gradient-based densification (cloning/splitting) and pruning, rather than relying solely on static thresholds or post-processing [S2][S4, unofficial].
+
+## How it works
+The method operates on the set of Gaussians $\mathcal{G} = \{g_1, \dots, g_N\}$, where each Gaussian $g_i$ has position $\mathbf{x}_i$, covariance $\Sigma_i$ (or scale $\mathbf{s}_i$ and rotation $\mathbf{q}_i$), opacity $\alpha_i$, and spherical harmonic coefficients $\mathbf{c}_i$ [G].
+
+### Inputs and Outputs
+- **Input:** Current Gaussian set $\mathcal{G}$, accumulated image-plane gradients $\nabla_{\mathbf{x}}$, accumulated visibility counts or contribution weights, current training iteration $t$, and hyperparameters [S4, unofficial].
+- **Output:** Updated Gaussian set $\mathcal{G}'$ with modified counts, positions, opacities, and scales.
+
+### Data Structures
+- **grad2d:** A tensor of shape $(N, 2)$ storing the running accumulation of image-plane gradient norms for each Gaussian [S4, unofficial].
+- **count:** A tensor of shape $(N, 1)$ storing the running accumulation of visibility counts (how many times a Gaussian contributed to a pixel) [S4, unofficial].
+- **state:** Flags indicating if refinement is paused (e.g., after reset) [S4, unofficial].
+
+### Parameters
+- **densify_from_iter:** Iteration after which densification begins. Default: 500 [S4, unofficial].
+- **densify_until_iter:** Iteration after which densification stops. Default: 15,000 [S4, unofficial].
+- **densify_every:** Iteration interval for densification checks. Default: 100 [S2][S4, unofficial].
+- **opacity_reset_interval:** Iteration interval for opacity resets. Default: 3000 [S4, unofficial][S5, unofficial].
+- **pause_refine_after_reset:** Steps to pause refinement after reset. Default: 0 [S4, unofficial].
+- **pos_thresh:** Position gradient threshold for densification. Default: 0.0002 [S2].
+- **prune_opa:** Opacity threshold for pruning. Default: 0.005 [S4, unofficial].
+- **grow_grad2d:** Image plane gradient threshold for splitting/duplicating. Default: 0.0002 [S4, unofficial].
+- **grow_scale3d:** 3D scale threshold (normalized by scene scale) below which Gaussians are duplicated. Default: 0.01 [S4, unofficial].
+- **grow_scale2d:** 2D scale threshold (normalized by image resolution) above which Gaussians are split. Default: 0.05 [S4, unofficial].
+- **prune_scale3d:** 3D scale threshold (normalized by scene scale) above which Gaussians are pruned. Default: 0.1 [S4, unofficial].
+- **prune_scale2d:** 2D scale threshold (normalized by image resolution) above which Gaussians are pruned. Default: 0.15 [S4, unofficial].
+- **refine_scale2d_stop_iter:** Iteration after which 2D scale-based refinement stops. Default: 0 (disabled) [S4, unofficial].
+- **absgrad:** Boolean flag to use absolute gradients instead of average gradients. Default: False [S4, unofficial].
+- **revised_opacity:** Boolean flag to use revised opacity heuristic. Default: False [S4, unofficial].
+- **key_for_gradient:** Variable name for gradient ('means2d' for 3DGS, 'gradient_2dgs' for 2DGS). Default: 'means2d' [S4, unofficial].
+- **split_scale_factor:** Factor by which scale is divided during split. Default: 1.6 [S2].
+- **floor:** Constant added to accumulated contribution in denominator for occlusion-aware criteria. Default: 1 [S3, unofficial].
+
+### Steps
+1. **Initialization:** At $t=0$, initialize `grad2d` and `count` to zeros for all Gaussians [S4, unofficial].
+2. **Pre-Backward Accumulation:** During each training step, accumulate gradients and visibility information into `grad2d` and `count` based on the current iteration and rendering info [S4, unofficial].
+3. **Opacity Reset Check:** If $t$ is a multiple of `opacity_reset_interval`, or if the dataset uses a white background and $t ==$ `densify_from_iter`, call `reset_opacity()` [S5, unofficial].
+   - `reset_opacity()`: Sets all $\alpha_i$ to a small initial value (e.g., 0.01) or resets non-diffuse SH coefficients to 0.001 [S1][S4, unofficial].
+   - If `pause_refine_after_reset` > 0, set refinement paused flag for the next `pause_refine_after_reset` steps [S4, unofficial].
+4. **Refinement Check:** If $t \ge$ `densify_from_iter` and $t <$ `densify_until_iter` and $t \%$ `densify_every` == 0 and refinement is not paused:
+   - **Gradient Normalization:** Compute average gradient magnitude per Gaussian. If `absgrad` is False, divide `grad2d` by `count` (or accumulated contribution if using occlusion-aware criteria) [S4, unofficial][S3, unofficial].
+   - **Densification Trigger:** Identify Gaussians with average view-space position gradient magnitude $> $ `pos_thresh` [S2].
+   - **Cloning (Under-reconstruction):** For small Gaussians (3D scale $< $ `grow_scale3d`) with high gradients:
+     - Clone the Gaussian.
+     - Move the clone in the direction of the positional gradient [S2].
+   - **Splitting (Over-reconstruction):** For large Gaussians (2D scale $> $ `grow_scale2d` or 3D scale $> $ `prune_scale3d`) with high gradients:
+     - Replace the Gaussian with two new Gaussians [S2].
+     - Divide their scale by `split_scale_factor` (1.6) [S2].
+     - Initialize positions by sampling from the original Gaussian's PDF [S2].
+   - **Pruning:** Remove Gaussians that meet any of the following criteria [S4, unofficial][S2]:
+     - Opacity $\alpha_i <$ `prune_opa`.
+     - 3D scale $> $ `prune_scale3d`.
+     - 2D scale $> $ `prune_scale2d` (if $t <$ `refine_scale2d_stop_iter` or `refine_scale2d_stop_iter` == 0) [S4, unofficial].
+   - **Buffer Compaction:** Remove pruned Gaussians from the data structures and compact memory for contiguous access [Parent].
+5. **Post-Backward:** Update normals if the number of Gaussians changed [S10, unofficial].
+
+### Pseudocode
+> **Unverified code.** The code below did not pass a test run against a reference implementation, or no test fits it, so it may contain errors.
+
+```python
+import torch
+
+def densification_step(gaussians, grad2d, count, t, params):
+    N = gaussians.opacities.shape[0]
+    if N == 0:
+        return
+
+    # 1. Opacity Reset
+    reset_interval = params.get('opacity_reset_interval', 3000)
+    densify_from_iter = params.get('densify_from_iter', 500)
+    pause_refine = params.get('pause_refine_after_reset', 0)
+    
+    should_reset = (t % reset_interval == 0)
+    if params.get('white_background', False) and t == densify_from_iter:
+        should_reset = True
+        
+    if should_reset:
+        reset_opacity(gaussians)
+        gaussians.refine_paused = pause_refine
+        if pause_refine > 0:
+            gaussians.refine_paused -= 1
+
+    # 2. Check if refinement is active
+    densify_until_iter = params.get('densify_until_iter', 15000)
+    densify_every = params.get('densify_every', 100)
+    
+    if (t < densify_from_iter or t >= densify_until_iter or 
+        t % densify_every != 0 or gaussians.refine_paused > 0):
+        return
+
+    # 3. Compute average gradients
+    absgrad = params.get('absgrad', False)
+    if not absgrad:
+        safe_count = torch.clamp(count, min=1)
+        avg_grad = grad2d / safe_count
+    else:
+        avg_grad = grad2d
+
+    pos_thresh = params.get('pos_thresh', 0.0002)
+    grad_magnitude = torch.norm(avg_grad, dim=1)
+    high_grad_mask = grad_magnitude > pos_thresh
+    
+    # 4. Pruning
+    prune_opa = params.get('prune_opa', 0.005)
+    prune_scale3d = params.get('prune_scale3d', 0.1)
+    prune_scale2d = params.get('prune_scale2d', 0.15)
+    refine_stop_iter = params.get('refine_scale2d_stop_iter', 0)
+    
+    prune_mask = (gaussians.opacities < prune_opa) | \
+                 (gaussians.scale_3d > prune_scale3d)
+    if refine_stop_iter == 0 or t < refine_stop_iter:
+        prune_mask |= (gaussians.scale_2d > prune_scale2d)
+        
+    keep_mask = ~prune_mask
+    # Buffer compaction: filter tensors to maintain contiguous memory
+    gaussians.opacities = gaussians.opacities[keep_mask]
+    gaussians.scale_3d = gaussians.scale_3d[keep_mask]
+    gaussians.scale_2d = gaussians.scale_2d[keep_mask]
+    gaussians.position = gaussians.position[keep_mask]
+    gaussians.rotation = gaussians.rotation[keep_mask]
+    gaussians.sh_coeffs = gaussians.sh_coeffs[keep_mask]
+    
+    grad2d = grad2d[keep_mask]
+    count = count[keep_mask]
+    high_grad_mask = high_grad_mask[keep_mask]
+    
+    # 5. Densification (Clone/Split)
+    grow_scale3d = params.get('grow_scale3d', 0.01)
+    grow_scale2d = params.get('grow_scale2d', 0.05)
+    split_scale_factor = params.get('split_scale_factor', 1.6)
+    
+    new_gaussians = []
+    for i in range(len(gaussians)):
+        if not high_grad_mask[i]:
+            continue
+            
+        g = gaussians[i]
+        is_small = g.scale_3d < grow_scale3d
+        is_large_2d = g.scale_2d > grow_scale2d
+        
+        if is_small:
+            clone = Gaussian(
+                g.position.clone(), g.scale_3d.clone(), g.rotation.clone(), 
+                g.opacity.clone(), g.sh_coeffs.clone()
+            )
+            grad_dir = avg_grad[i] / (torch.norm(avg_grad[i]) + 1e-8)
+            clone.position += grad_dir * 0.01
+            new_gaussians.append(clone)
+        elif is_large_2d:
+            new_scale = g.scale_3d / split_scale_factor
+            pos1, pos2 = sample_from_gaussian_pdf(g.position, g.covariance, 2)
+            g1 = Gaussian(pos1, new_scale, g.rotation.clone(), g.opacity.clone(), g.sh_coeffs.clone())
+            g2 = Gaussian(pos2, new_scale, g.rotation.clone(), g.opacity.clone(), g.sh_coeffs.clone())
+            new_gaussians.append(g1)
+            new_gaussians.append(g2)
+            
+    # Extend Gaussians after loop to avoid modifying while iterating
+    gaussians.opacities = torch.cat([gaussians.opacities, torch.tensor([g.opacity for g in new_gaussians])])
+    gaussians.scale_3d = torch.cat([gaussians.scale_3d, torch.tensor([g.scale_3d for g in new_gaussians])])
+    gaussians.scale_2d = torch.cat([gaussians.scale_2d, torch.tensor([g.scale_2d for g in new_gaussians])])
+    gaussians.position = torch.cat([gaussians.position, torch.stack([g.position for g in new_gaussians])])
+    gaussians.rotation = torch.cat([gaussians.rotation, torch.stack([g.rotation for g in new_gaussians])])
+    gaussians.sh_coeffs = torch.cat([gaussians.sh_coeffs, torch.stack([g.sh_coeffs for g in new_gaussians])])
+    
+    # 6. Post-processing
+    update_normals(gaussians)
+
+def reset_opacity(gaussians):
+    gaussians.opacities.fill_(0.01)
+
+def sample_from_gaussian_pdf(mean, covariance, num_samples):
+    samples = torch.distributions.MultivariateNormal(mean, covariance).rsample((num_samples,))
+    return samples[0], samples[1]
+
+class Gaussian:
+    def __init__(self, position, scale_3d, rotation, opacity, sh_coeffs):
+        self.position = position
+        self.scale_3d = scale_3d
+        self.scale_2d = scale_3d * 2.0  # Placeholder for 2D projection scale
+        self.rotation = rotation
+        self.opacity = opacity
+        self.sh_coeffs = sh_coeffs
+        self.covariance = rotation @ torch.diag(scale_3d**2) @ rotation.T
+
+def update_normals(gaussians):
+    for i in range(len(gaussians)):
+        cov = gaussians.rotation[i] @ torch.diag(gaussians.scale_3d[i]**2) @ gaussians.rotation[i].T
+        eigenvalues, eigenvectors = torch.linalg.eigh(cov)
+        gaussians.normal = torch.cat([gaussians.normal if hasattr(gaussians, 'normal') else torch.zeros_like(gaussians.position), eigenvectors[:, 0].unsqueeze(0)])
+```
+
+### Edge Cases and Pitfalls
+- **Divergence without Floor:** If using occlusion-aware densification, omitting the denominator floor (`floor=0`) causes training divergence on Zip-NeRF scenes within ~1,800 iterations, exceeding the 16.8M trainable limit [S3, unofficial].
+- **Over-densification:** Using a threshold too low (e.g., 0.001 vs 0.002) on Mip-NeRF360 yields 4.90M Gaussians and lowers PSNR [S3, unofficial].
+- **Under-densification:** Using a threshold too high (e.g., 0.004) yields 0.66M Gaussians and raises LPIPS [S3, unofficial].
+
+## Subtopics
+
+### [Smooth Opacity Decay](15326-smooth-opacity-decay.md)
+A regularization technique that gradually reduces opacity instead of hard resets, stabilizing gradient flow and preventing incorrect densification decisions caused by abrupt changes.
+
+### Joint Deletion Cost Approximation
+A method using a first-order Taylor approximation $f_b(1-u) - f_b(1) \approx -J_b u$ to estimate the cost of deleting Gaussians, where $J_b$ is the Jacobian of the rendered image with respect to opacity multipliers. The approximation may become less accurate when many Gaussians are deleted together [S6, unofficial].
+
+### Opacity Lobe Modulation
+Applies generalized Phong shading to opacity modulation, allowing the opacity lobe to decouple each Gaussian's contribution to exitant radiance. This provides stability against depth sorting permutations compared to methods using spherical beta functions for color [S7, unofficial].
+
+### 3D Gaussian Editing Operations
+Procedures to modify Gaussians based on selected regions: Extraction (keep opacity for selected, 0 for others), Deletion (0 for selected, keep for others), and Appearance Modification (update color $c_i$) [S8].
+
+### Denominator Floor for Occlusion-Aware Densification
+Adds a constant floor (default 1) to the accumulated contribution in the denominator of the densification criterion to prevent score inflation when accumulated contribution is between 0 and 1 [S3, unofficial].
+
+### Transition to Opaque Point Rendering
+Smoothly transitions from alpha blending to opaque depth testing during optimization using a steepness parameter $f$ and current step $t$, allowing high-performance real-time rendering of point clouds [S9].
+
+### Post-Backward Strategy
+Handles splat count changes and normal updates after densification/pruning, including re-querying normals from an anchor tree if lengths mismatch [S10, unofficial].
+
+### Structure Adaptive Control
+Identifies under-reconstruction regions via positional gradients and overdense regions via opacity, replicating neighbors for structural completion and eliminating low-opacity Gaussians [S11].
+
+## Operating characteristics
+- **Time Complexity:** Densification is performed every 100 iterations. The cost depends on the number of Gaussians $N$ and the number of candidates for cloning/splitting. Buffer compaction is $O(N)$ [S2][S4, unofficial].
+- **Memory Complexity:** Memory usage scales with the number of Gaussians. Pruning reduces memory, while densification increases it. The method keeps the total count manageable (e.g., ~1.79M on Mip-NeRF360 subsets) [S3, unofficial].
+- **Performance:** On Mip-NeRF360 calibration subset (bicycle, bonsai, counter, garden), a threshold of 0.002 yields 1.79M Gaussians with best PSNR, SSIM, and GMSD [S3, unofficial].
+- **Strengths:** Adapts to scene complexity, handles both under- and over-reconstruction, and prevents floaters via pruning [S2].
+- **Limitations:** Requires careful tuning of thresholds; improper thresholds lead to divergence or poor quality [S3, unofficial].
+
+## Background
+The method was introduced in the original 3D Gaussian Splatting paper by Kerbl et al. (2023) [S2]. It builds on the idea of adaptive control of Gaussian primitives, allowing the model to start from sparse SfM points and densify as needed [S2]. Subsequent works have refined the thresholds and added variations like occlusion-aware criteria [S3, unofficial] and opacity lobe modulation [S7, unofficial].
+
+## Sources
+[S1] SpotLessSplats: Ignoring Distractors in 3D Gaussian Splatting, https://doi.org/10.1145/3727143, fetched 2026-10-27
+[S2] 3D Gaussian Splatting for Real-Time Radiance Field Rendering, https://arxiv.org/abs/2308.04079, fetched 2026-10-26
+[S3] Counting Contributions, Not Views: Occlusion-Aware Densification for 3D Gaussian Splatting, https://arxiv.org/abs/2610.27108, fetched 2026-10-26 (unofficial)
+[S4] carlinds/splatad, https://github.com/carlinds/splatad, fetched 2026-10-27 (unofficial)
+[S5] Yang-SyZng/AVM-GS, https://github.com/Yang-SyZng/AVM-GS, fetched 2026-10-27 (unofficial)
+[S6] SplatQ: Interaction-Aware Pruning of 3D Gaussian Splatting via Quadratic Selection, https://arxiv.org/abs/2610.13503, fetched 2026-10-09 (unofficial)
+[S7] Augmented Radiance Field: A General Framework for Enhanced Gaussian Splatting, https://doi.org/10.48550/arXiv.2602.19916, fetched 2026-10-30 (unofficial)
+[S8] Feature 3DGS: Supercharging 3D Gaussian Splatting to Enable Distilled Feature Fields, https://doi.org/10.1109/cvpr52733.2024.02048, fetched 2026-10-26
+[S9] VET: Visual Error Tomography for Point Cloud Completion and High-Quality Neural Rendering, https://doi.org/10.1145/3610548.3618212, fetched 2026-10-26
+[S10] SpaceCollectors/dust3r-3dgs, https://github.com/SpaceCollectors/dust3r-3dgs, fetched 2026-10-27 (unofficial)
+[S11] LIV-GaussMap: LiDAR-Inertial-Visual Fusion for Real-Time 3D Radiance Field Map Rendering, https://doi.org/10.1109/lra.2024.3400149, fetched 2026-10-26

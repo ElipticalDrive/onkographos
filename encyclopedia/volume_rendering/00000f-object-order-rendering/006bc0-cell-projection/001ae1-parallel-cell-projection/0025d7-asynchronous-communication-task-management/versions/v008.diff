@@ -1,0 +1,120 @@
+--- v007.md
++++ v008.md
+@@ -34,7 +34,8 @@
+             *   For each ray segment destined for processor $j$:
+                 *   Identify the current active buffer $B_{j,k}$ (initially $k=0$) [S1].
+-                *   If $B_{j,k}$ is `empty`, add segment to $B_{j,k}$ [S1].
+-                *   If $B_{j,k}$ is `pending`, check if it is full. If full, switch to the companion buffer $B_{j, (k+1) \pmod{\text{num\_buffers}}}$ [S1].
+-                *   If the selected buffer $B_{j,k}$ becomes full (reaches `buffer_depth`), post an asynchronous send operation for $B_{j,k}$ to processor $j$ and mark it as `pending` [S1].
++                *   If $B_{j,k}$ is `pending`, switch to the companion buffer $B_{j, (k+1) \pmod{\text{num\_buffers}}}$ [S1].
++                *   If the companion buffer is also `pending`, switch to the ray merging task to process incoming segments while waiting for outbound congestion to clear [S1].
++                *   If the selected buffer $B_{j,k}$ is `empty` or `full` (not pending), add the segment to $B_{j,k}$ [S1].
++                *   If $B_{j,k}$ becomes full (reaches `buffer_depth`), post an asynchronous send operation for $B_{j,k}$ to processor $j$ and mark it as `pending` [S1].
+         
+         *   **Polling (Image-Space):**
+@@ -61,4 +62,5 @@
+     # Initialize buffers: buffers[dest][k] tracks state and segments
+     buffers = [[{'state': 'empty', 'segments': []} for _ in range(num_buffers)] for _ in range(num_processors)]
++    active_buf = [0] * num_processors  # Track current active buffer index per destination
+     local_done = False
+     designated_node = 0
+@@ -76,18 +78,24 @@
+             for seg in segments:
+                 dest = seg.destination
+-                # Find first empty buffer
+-                buf_id = -1
+-                for k in range(num_buffers):
+-                    if buffers[dest][k]['state'] == 'empty':
+-                        buf_id = k
+-                        break
+-                if buf_id != -1:
+-                    buffers[dest][buf_id]['segments'].append(seg)
+-                    if len(buffers[dest][buf_id]['segments']) >= buffer_depth:
+-                        post_nonblocking_send(dest, buf_id)
+-                        buffers[dest][buf_id]['state'] = 'pending'
+-                else:
+-                    # All buffers for dest are pending -> Deadlock prevention
+-                    break # Switch to ray merging task
++                k = active_buf[dest]
++                
++                # Companion buffer logic: if current is pending, switch to next
++                if buffers[dest][k]['state'] == 'pending':
++                    k = (k + 1) % num_buffers
++                    active_buf[dest] = k
++                
++                # Deadlock prevention: if companion is also pending, switch to merging
++                if buffers[dest][k]['state'] == 'pending':
++                    break  # Exit scan conversion loop to prioritize ray merging
++                
++                # Add segment to buffer
++                buffers[dest][k]['segments'].append(seg)
++                
++                # Post send if buffer reaches depth
++                if len(buffers[dest][k]['segments']) >= buffer_depth:
++                    # [G] Standard non-blocking send call (e.g., MPI_Isend)
++                    buffers[dest][k]['state'] = 'pending'
++                    active_buf[dest] = k  # Keep tracking this buffer until it completes
++                
+             cells_processed += 1
+ 
+@@ -98,5 +106,5 @@
+                 compositing_merge(seg)
+ 
+-        # If scan conversion stalled, prioritize merging to clear congestion
++        # If scan conversion stalled due to congestion, prioritize merging
+         if cells_processed < polling_interval:
+             while check_nonblocking_receives():
+@@ -117,5 +125,5 @@
+                 send_done_message(designated_node)
+             while not global_termination_signal:
+-                pass
++                pass  # [G] Wait for global termination signal
+ 
+ # Standard operations defined for self-containment:
+@@ -126,8 +134,4 @@
+ def generate_ray_segments(cell):
+     # Returns list of ray segments for the cell
+-    pass
+-
+-def post_nonblocking_send(dest, buf_id):
+-    # Initiates asynchronous send of buffers[dest][buf_id]['segments']
+     pass
+ 
+@@ -154,27 +158,27 @@
+ 
+ **Edge Cases and Pitfalls:**
+-*   **Polling Frequency:** If polling is too frequent, excessive overhead is introduced. If too infrequent, outbound buffers clog due to pending send operations [S1].
+-*   **Buffer Size:** Small buffers cause excessive send/receive overhead. Large buffers introduce delays for processors waiting for ray segments and reduce effectiveness in spreading communication load [S1].
+-*   **Deadlock:** If both buffers for a destination fill up before the first send completes, the processor must switch to ray merging. Failure to do so results in deadlock [S1].
+-*   **Termination:** Incorrect termination handling can lead to lost ray segments or infinite waiting. A designated node with global synchronization is required [S1].
++*   **Polling Frequency:** If polling is too frequent, excessive overhead is introduced [S1]. If too infrequent, outbound buffers clog due to pending send operations [S1].
++*   **Buffer Size:** Small buffers cause excessive send/receive overhead [S1]. Large buffers introduce delays for processors waiting for ray segments and reduce effectiveness in spreading communication load [S1].
++*   **Deadlock:** If both buffers for a destination fill up before the first send completes, the processor must switch to ray merging [S1]. Failure to do so results in deadlock [S1].
++*   **Termination:** Incorrect termination handling can lead to lost ray segments or infinite waiting [S1]. A designated node with global synchronization is required [S1].
+ 
+ ## Subtopics
+ 
+ ### [Asynchronous Communication with Double-Buffering](4280-asynchronous-communication-with-double-buffering.md)
+-Uses double-buffering to overlap communication of ray segments with rendering calculations. Sets itself apart by multiplexing object-space cell computations with image-space ray merging and overlapping computation with communication using end buffering.
++A communication strategy that uses double-buffering in conjunction with asynchronous send and receive operations to reduce overheads and overlap the communication of ray segments with rendering calculations. It sets itself apart by multiplexing the scan conversion of data cells with the merging of ray segments, allowing processors to proceed independently rather than waiting for global synchronization. Choose this variant when minimizing synchronization overhead and maximizing compute-communication overlap is critical.
+ 
+ ### [Host-Slave Implementation with Interrupt-Driven Communication](14569-host-slave-implementation-with-interrupt-driven-communicatio.md)
+-A host-slave scheme using interrupt-driven communication to overlap computation with data transfer. Sets itself apart by employing an interrupt handler on the host for background subcube transmission and strategies like exponential subcube reduction.
++A parallel processing scheme for volume rendering where a host node handles I/O and data preparation, while slave nodes handle the computationally intensive fitting and polygon generation. It solves the idle time and communication overhead problems of standard host-slave partitions by using asynchronous, interrupt-driven communication to overlap computation with data transfer. It sets itself apart from its sibling by specifically employing an interrupt handler on the host to manage background subcube transmission and by implementing specific strategies like exponential subcube reduction and early communication requests to minimize latency. Choose this variant when a host-slave partitioning model is preferred and the hardware supports interrupt-driven I/O.
+ 
+ ## Operating characteristics
+-*   **Time Complexity:** Not given in the sources.
+-*   **Memory Complexity:** Not given in the sources.
++*   **Time Complexity:** Not given in the sources [S1].
++*   **Memory Complexity:** Not given in the sources [S1].
+ *   **Measured Performance:** Tested on a dataset containing about 0.5 million tetrahedral cells (flow over an aircraft wing with an attached missile) rendered into a 400x400 pixel image [S1].
+ *   **Scaling:** The strategy is designed to be scalable by spreading communication load over time and reducing data copying overheads in message-passing systems [S1].
+ *   **Strengths:** Overlaps computation and communication, reduces data copying overheads, decouples sending and receiving tasks, prevents idle time [S1].
+-*   **Limitations:** Requires careful tuning of `polling_interval` and `buffer_depth`. Performance depends on the number of processors, number of ray segments, and target architecture characteristics [S1].
++*   **Limitations:** Requires careful tuning of `polling_interval` and `buffer_depth` [S1]. Performance depends on the number of processors, number of ray segments, and target architecture characteristics [S1].
+ 
+ ## Background
+-The asynchronous communication strategy was originally developed for a parallel polygon renderer [5] and later improved for use in the PGL rendering system [3,4] [S1]. It was adapted for parallel cell-projection volume rendering to manage communication costs and memory consumption [S1].
++The asynchronous communication strategy was originally developed for a parallel polygon renderer and later improved for use in the PGL rendering system [S1]. It was adapted for parallel cell-projection volume rendering to manage communication costs and memory consumption [S1].
+ 
+ ## Sources

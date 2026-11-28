@@ -1,0 +1,223 @@
+# Rapid Decimation for Direct Volume Rendering
+
+Also called: Bucket-based Decimation, Vertex Decimation
+
+## Overview
+Rapid Decimation for Direct Volume Rendering is a mesh simplification technique that reduces polygon count by removing vertices deemed unimportant for visual fidelity, converting a grid of simple hexahedral or tetrahedral cells into a hybrid grid with many-sided cells and non-cell polygons [S1, unofficial]. It solves the problem of rendering large volumetric datasets efficiently by preserving critical feature boundaries defined by data value ranges, rather than geometric proximity alone [S1, unofficial]. Unlike its parent method, [GPU-based Mesh Decimation via Edge Collapse](3505-gpu-based-mesh-decimation-via-edge-collapse.md), which minimizes geometric error via edge collapses on triangular meshes, this method operates on hexahedral or tetrahedral grids and uses a data-value-based "bucket" heuristic to determine vertex importance, allowing for significant decimation rates (45-62%) [S1, unofficial].
+
+## How it works
+
+### Inputs and Outputs
+**Inputs:** Volume grid (hexahedral or tetrahedral), scalar data values per vertex, bucket placement strategy, optional transfer function control points, and target number of buckets $N$ [S1, unofficial].
+**Outputs:** Decimated volume representation consisting of a subset of original vertices and connected polygons, forming a hybrid grid where some cells have more than four or six faces and some polygons do not belong to any complete cell [S1, unofficial].
+
+### Data Structures
+Implementation uses a boolean array indicating which polygons remain in the volume [S1, unofficial]. Optimization: polygon list sorted so decimated vertices are listed first, with an offset indicating where active vertices begin [S1, unofficial]. Neighbor definition: 26 neighbors for regular/curvilinear grids, found by incrementing $(z, j, k)$ by $d=1$ in each direction; explicit neighbor list for tetrahedral grids [S1, unofficial].
+
+### Bucket Placement Strategies
+The method divides the data range into sub-ranges called buckets and maps vertices to buckets based on scalar values [S1, unofficial]. All histogram-based strategies use a histogram smoothed by a Gaussian filter with standard deviation $\sigma = 2.82$ [S1, unofficial].
+1. **Uniform by Range:** Places $N$ buckets at equal intervals over the data range [S1, unofficial].
+2. **Uniform by Histogram:** Places buckets uniformly based on the frequency of data from the smoothed histogram, rather than the data range [S1, unofficial].
+3. **Histogram Curvature:** Places boundaries where the magnitude of the second derivative of the smoothed histogram is largest: $| -2h_i + h_{i-1} + h_{i+1} |$, where $h_i$ is the histogram value at bin $i$ [S1, unofficial].
+4. **Histogram Feature:** Scans histogram for highest curvature magnitude (feature center). Scans left and right for next peak in curvature of opposite sign. Places boundaries at these values. Repeats, excluding found features or entries with boundaries [S1, unofficial].
+5. **Transfer Function:** Places a boundary at each control point of a piecewise linear transfer function [S1, unofficial].
+
+### Decimation Algorithm
+1. Break up the data range into buckets using the chosen strategy. Map each vertex into one bucket based on its data value [S1, unofficial].
+2. Traverse the volume examining each vertex and its neighbors. For regular/curvilinear datasets, neighbors are found by incrementing $(z, j, k)$ by $d=1$ in each direction (26 neighbors). For tetrahedral grids, use an explicit neighbor list [S1, unofficial].
+3. If a vertex maps to the same bucket as all of its neighbors, decimate the vertex and all polygons including it. If the vertex is adjacent to any vertex in a different bucket, retain it [S1, unofficial].
+4. Ensure all vertices on the exterior boundary of the grid are retained to identify the region of space inside the volume [S1, unofficial].
+
+### Pseudocode
+> **Unverified code.** The code below did not pass a test run against a reference implementation, or no test fits it, so it may contain errors.
+
+```python
+import math
+
+def compute_histogram(values, num_bins=256):
+    hist = [0] * num_bins
+    min_v, max_v = min(values), max(values)
+    for v in values:
+        idx = int((v - min_v) / (max_v - min_v) * (num_bins - 1))
+        hist[min(idx, num_bins - 1)] += 1
+    return hist
+
+def gaussian_smooth(hist, sigma=2.82):
+    k = int(6 * sigma) + 1
+    center = k // 2
+    kernel = [math.exp(-0.5 * ((i - center) / sigma) ** 2) for i in range(k)]
+    norm = sum(kernel)
+    kernel = [x / norm for x in kernel]
+    smoothed = [0.0] * len(hist)
+    for i in range(len(hist)):
+        for j in range(k):
+            idx = i - center + j
+            if 0 <= idx < len(hist):
+                smoothed[i] += hist[idx] * kernel[j]
+    return smoothed
+
+def get_neighbors_regular(grid_dims, v_idx):
+    z, rem = divmod(v_idx, grid_dims[1] * grid_dims[2])
+    j, k = divmod(rem, grid_dims[2])
+    neighbors = []
+    for dz in (-1, 0, 1):
+        for dj in (-1, 0, 1):
+            for dk in (-1, 0, 1):
+                if dz == 0 and dj == 0 and dk == 0:
+                    continue
+                nz, nj, nk = z + dz, j + dj, k + dk
+                if 0 <= nz < grid_dims[0] and 0 <= nj < grid_dims[1] and 0 <= nk < grid_dims[2]:
+                    neighbors.append(nz * grid_dims[1] * grid_dims[2] + nj * grid_dims[2] + nk)
+    return neighbors
+
+def get_exterior_boundary_vertices(grid_dims):
+    exterior = set()
+    for z in range(grid_dims[0]):
+        for j in range(grid_dims[1]):
+            for k in range(grid_dims[2]):
+                if z == 0 or z == grid_dims[0]-1 or j == 0 or j == grid_dims[1]-1 or k == 0 or k == grid_dims[2]-1:
+                    exterior.add(z * grid_dims[1] * grid_dims[2] + j * grid_dims[2] + k)
+    return list(exterior)
+
+def rapid_decimation(data_values, grid_dims, num_buckets, strategy, transfer_function=None):
+    # Step 1: Determine Bucket Boundaries
+    boundaries = []
+    if strategy == 'uniform_range':
+        min_val, max_val = min(data_values), max(data_values)
+        boundaries = [min_val + i * (max_val - min_val) / num_buckets for i in range(1, num_buckets)]
+    elif strategy in ['uniform_histogram', 'histogram_curvature', 'histogram_features']:
+        hist = compute_histogram(data_values)
+        smoothed_hist = gaussian_smooth(hist)
+        if strategy == 'uniform_histogram':
+            total = sum(smoothed_hist)
+            boundaries = []
+            target_cum = [i * total / num_buckets for i in range(1, num_buckets)]
+            curr_cum, bin_idx = 0, 0
+            for target in target_cum:
+                while curr_cum < target and bin_idx < len(smoothed_hist):
+                    curr_cum += smoothed_hist[bin_idx]
+                    bin_idx += 1
+                boundaries.append(bin_idx)
+        elif strategy == 'histogram_curvature':
+            curvatures = []
+            for i in range(1, len(smoothed_hist) - 1):
+                c = abs(-2 * smoothed_hist[i] + smoothed_hist[i-1] + smoothed_hist[i+1])
+                curvatures.append((c, i))
+            curvatures.sort(reverse=True)
+            boundaries = [idx for _, idx in curvatures[:num_buckets-1]]
+        elif strategy == 'histogram_features':
+            curvatures = []
+            for i in range(1, len(smoothed_hist) - 1):
+                c = abs(-2 * smoothed_hist[i] + smoothed_hist[i-1] + smoothed_hist[i+1])
+                curvatures.append((c, i))
+            boundaries = []
+            used = set()
+            while len(boundaries) < num_buckets - 1:
+                if not curvatures:
+                    break
+                max_c, max_idx = curvatures.pop(0)
+                if max_idx in used:
+                    continue
+                used.add(max_idx)
+                # Scan left and right for next peak in curvature of opposite sign
+                second_deriv = [smoothed_hist[i+1] - 2*smoothed_hist[i] + smoothed_hist[i-1] for i in range(1, len(smoothed_hist)-1)]
+                sign = 1 if second_deriv[max_idx-1] >= 0 else -1
+                left, right = max_idx, max_idx
+                while left > 0 and second_deriv[left-1] * sign < 0:
+                    left -= 1
+                while right < len(second_deriv) - 1 and second_deriv[right] * sign < 0:
+                    right += 1
+                boundaries.extend([left, right])
+                used.update([left, right])
+    elif strategy == 'transfer_function':
+        boundaries = [tf[0] for tf in transfer_function]
+    
+    # Step 2: Map Vertices to Buckets
+    vertex_buckets = []
+    for val in data_values:
+        bucket_id = 0
+        for i, bound in enumerate(boundaries):
+            if val < bound:
+                break
+            bucket_id += 1
+        vertex_buckets.append(bucket_id)
+
+    # Step 3: Determine Neighbors and Decimate
+    active_vertices = [True] * len(data_values)
+    exterior = get_exterior_boundary_vertices(grid_dims)
+    for v in exterior:
+        active_vertices[v] = True
+
+    for v in range(len(data_values)):
+        if not active_vertices[v]:
+            continue
+        neighbors = get_neighbors_regular(grid_dims, v)
+        bucket_v = vertex_buckets[v]
+        decimate = True
+        for u in neighbors:
+            if vertex_buckets[u] != bucket_v:
+                decimate = False
+                break
+        if decimate:
+            active_vertices[v] = False
+
+    # Step 4: Update Polygons
+    active_polygons = []
+    for poly in volume_grid.polygons:
+        if all(active_vertices[v] for v in poly.vertices):
+            active_polygons.append(poly)
+    return active_vertices, active_polygons
+```
+
+### Parameters
+* **Number of Buckets ($N$):** User-specified. More buckets lead to less decimation but potentially higher fidelity [S1, unofficial].
+* **Histogram Smoothing Sigma:** Fixed at $\sigma = 2.82$ for all histogram-based strategies [S1, unofficial].
+* **Neighbor Definition:** 26 neighbors for regular/curvilinear grids [S1, unofficial].
+
+### Edge Cases and Pitfalls
+* **Holes in Images:** Strictly local decimation based on linearity can cause holes if a long string of vertices along a view direction are all decimated, as the heuristic does not account for global visibility [S1, unofficial].
+* **Color Bleeding:** Strong non-linearities in the transfer function (e.g., around free-stream in CFD volumes) can cause color bleeding artifacts where decimated regions allow colors to bleed into otherwise clear portions of the volume [S1, unofficial].
+* **Boundary Preservation:** Exterior boundary vertices must be explicitly retained to define the volume's interior space [S1, unofficial].
+* **Bucket Sensitivity:** The "Uniform by Range" strategy is sensitive to small changes in $N$, as moving bucket boundaries can drastically change which vertices are decimated [S1, unofficial].
+
+## Operating characteristics
+
+### Time and Memory Complexity
+Decimation pass is $O(V)$ where $V$ is vertex count, as each vertex is examined once with a constant number of neighbors [S1, unofficial]. Bucket placement is $O(H)$ where $H$ is histogram size (typically 256) [S1, unofficial]. Memory is $O(V + P)$ for grid and polygon lists [S1, unofficial]. Sorting complexity is not given in the sources.
+
+### Measured Performance
+Performance was evaluated on three CFD datasets using an image-based error metric (root mean square error of 32 x-ray images, 500x500 pixels, generated with linear gray-scale transfer function and zero opacity) [S1, unofficial]. All datasets were decimated approximately 45-62% [S1, unofficial].
+
+| Strategy | Blunt Fin Error | Lockheed Fighter Error | Space Shuttle Error |
+| :--- | :--- | :--- | :--- |
+| Uniform by Range | 0.089 | 0.056 | 0.061 |
+| Uniform by Histogram | 0.117 | 0.042 | 0.040 |
+| Histogram Curvature | 0.062 | 0.048 | 0.004 |
+| Histogram Features | 0.058 | 0.065 | 0.031 |
+| Transfer Function | 0.074 | 0.071 | 0.022 |
+
+*Note: Lower error is better. The Space Shuttle dataset shows significant variation in strategy performance, with Histogram Curvature performing best (0.004) and Transfer Function performing worst (0.022) among the listed strategies, though Transfer Function was noted to produce images "practically identical" to the non-decimated volume in some contexts [S1, unofficial].*
+
+### Strengths and Limitations
+* **Strengths:** High decimation rates (45-62%) with minimal visual loss for appropriate strategies. Preserves feature boundaries defined by data values. Simple implementation; no complex geometric reconstruction required. Transfer Function strategy can produce near-identical visual results to the original volume [S1, unofficial].
+* **Limitations:** Produces a hybrid grid, which may not be suitable for applications requiring strict hexahedral/tetrahedral topology. Prone to artifacts (holes, color bleeding) if the transfer function has strong non-linearities or if long linear strings of vertices exist along view directions. Does not account for view-dependent importance during the decimation pass (though the error metric is view-dependent, the decimation is static) [S1, unofficial].
+
+### When to Use
+* Use when rendering large volumetric datasets (CFD, medical) where performance is critical and the data has distinct features separable by scalar value ranges [S1, unofficial].
+* Use when the transfer function is known and can be used to guide bucket placement [S1, unofficial].
+* Avoid when strict geometric topology preservation is required or when the data has smooth, continuous gradients without distinct features [S1, unofficial].
+
+## Background
+
+### Origin
+The method was developed to address the computational cost of direct volume rendering for large datasets, particularly in computational fluid dynamics (CFD) [S1, unofficial].
+
+### History and Development
+The authors explored five automatic strategies for bucket placement to improve upon earlier local decimation methods that suffered from visual artifacts [S1, unofficial]. The key innovation was the use of data-value-based buckets to preserve feature boundaries [S1, unofficial]. The method was tested on CFD datasets (Blunt Fin, Lockheed Fighter, Space Shuttle) and compared against non-decimated volumes using an image-based error metric derived from x-ray projections [S1, unofficial].
+
+### Usage
+The method is primarily used in scientific visualization for accelerating the rendering of large volumetric datasets [S1, unofficial]. It is particularly relevant in CFD visualization where data ranges can be large and features (like shock waves or free-stream boundaries) are critical [S1, unofficial].
+
+## Sources
+
+[S1] NASA Technical Reports Server (NTRS) 19990088074: Rapid Decimation for Direct Volume Rendering, https://archive.org/details/NASA_NTRS_Archive_19990088074, fetched 2026-10-26 (unofficial)

@@ -1,0 +1,90 @@
+# Multi-resolution Surface Feature Encoding
+
+Also called: Per-face LOD feature encoding
+
+## Overview
+Multi-resolution Surface Feature Encoding is a strategy to increase feature density in regions requiring high-frequency detail by creating virtual vertices within mesh faces, controlled by a per-face Level of Detail (LOD) factor $k_i$, without modifying the actual mesh topology [S1, unofficial]. It addresses the limitation of sparse vertex distributions in neural global illumination, where insufficient geometric resolution hinders the representation of high-frequency illumination details [S1, unofficial]. Unlike standard barycentric interpolation which uses only the three mesh vertices, this method subdivides each face into a regular triangular grid of virtual vertices, allowing for adaptive refinement based on training loss [S1, unofficial].
+
+## How it works
+**Inputs and Outputs**
+The method takes a mesh geometry defined by triangles $F$, where each triangle $i$ has vertices $v_i, v_j, v_k$ with associated trainable neural features $g_i, g_j, g_k$, a spatial query point $x$ with barycentric coordinates $(u, v)$ relative to triangle $i$, and per-face LOD factors $k_i$ [S1, unofficial]. It outputs the interpolated neural feature $f_x$ at point $x$ [S1, unofficial].
+
+**Data Structures**
+Per-face LOD factors $k_i$ are scalars for each triangle $i$, initially set to 1 [S1, unofficial]. For a given $k_i$, the face is subdivided into a regular triangular grid of virtual vertices, with the total number of vertices $N(i)$ computed as $N(i) = (k_i + 1)^2 (k_i + 2)$ [S1, unofficial]. Each virtual vertex is assigned a trainable neural feature [S1, unofficial].
+
+**Steps**
+1. **Initialization:** All per-face LOD factors are set to $k_i = 1$, meaning no virtual vertices are added initially and standard barycentric interpolation is used [S1, unofficial].
+2. **Adaptive Refinement:** During training, factors are adaptively increased in response to training loss to allocate higher spatial resolution to challenging regions [S1, unofficial]. When a face is refined, new virtual vertices are generated on the regular triangular grid defined by $k_i$, their features are initialized via interpolation from the existing representation, and these features replace the originals [S1, unofficial].
+3. **Query Processing:** For a query point $x$ in triangle $i$ with barycentric coordinates $(u, v)$, compute integer grid coordinates and remainders: $\bar{u} = \lfloor k_i u \rfloor$, $\tilde{u} = k_i u - \bar{u}$, $\bar{v} = \lfloor k_i v \rfloor$, $\tilde{v} = k_i v - \bar{v}$ [S1, unofficial]. Determine the local barycentric coordinates $(u', v')$ within the virtual sub-triangle containing $x$ based on the sum of remainders: $(u', v') = (\tilde{u}, \tilde{v})$ if $\tilde{u} + \tilde{v} \le 1$, otherwise $(1 - \tilde{u}, 1 - \tilde{v})$ [S1, unofficial]. Identify the virtual sub-triangle using integer grid coordinates $(\bar{u}, \bar{v})$ [S1, unofficial]. Perform barycentric interpolation using the features of the three corresponding virtual vertices to get the final feature $f_x$ [S1, unofficial].
+
+**Pseudocode**
+> **Unverified code.** The code below did not pass a test run against a reference implementation, or no test fits it, so it may contain errors.
+
+```python
+import math
+
+def multi_resolution_feature_encoding(u, v, k, virtual_features):
+    # Compute integer grid coordinates and remainders
+    u_bar = math.floor(k * u)
+    u_tilde = k * u - u_bar
+    v_bar = math.floor(k * v)
+    v_tilde = k * v - v_bar
+
+    # Determine local barycentric coordinates (u', v')
+    if u_tilde + v_tilde <= 1.0:
+        u_prime = u_tilde
+        v_prime = v_tilde
+    else:
+        u_prime = 1.0 - u_tilde
+        v_prime = 1.0 - v_tilde
+
+    # Identify the virtual sub-triangle using integer grid coordinates (u_bar, v_bar)
+    # The source does not specify the exact indexing scheme for the virtual_features grid [S1, unofficial].
+    # Standard triangular grid vertex indexing [G]:
+    def vertex_index(i, j):
+        return i * (i + 1) // 2 + j
+
+    if u_tilde + v_tilde <= 1.0:
+        g1 = virtual_features[vertex_index(u_bar, v_bar)]
+        g2 = virtual_features[vertex_index(u_bar + 1, v_bar)]
+        g3 = virtual_features[vertex_index(u_bar, v_bar + 1)]
+    else:
+        g1 = virtual_features[vertex_index(u_bar + 1, v_bar + 1)]
+        g2 = virtual_features[vertex_index(u_bar + 1, v_bar)]
+        g3 = virtual_features[vertex_index(u_bar, v_bar + 1)]
+
+    # Perform barycentric interpolation using the features of the three corresponding virtual vertices
+    w_prime = 1.0 - u_prime - v_prime
+    f_x = w_prime * g1 + u_prime * g2 + v_prime * g3
+    return f_x
+```
+
+**Parameters**
+* $k_i$: Per-face LOD factor for triangle $i$, specifying the number of segments each edge is divided into. Initial value is 1 [S1, unofficial].
+* $\alpha$: A factor controlling the weighted combination of area-based and vertex-based sampling probabilities during training [S1, unofficial].
+
+**Edge Cases and Pitfalls**
+* **Precision:** Floating point errors in calculating $\lfloor k_i u \rfloor$ near boundaries ($u=1$ or $v=1$) can lead to incorrect sub-triangle identification. Guard against $u, v$ slightly outside $[0,1]$ due to numerical noise [G].
+* **Memory Scaling:** The number of virtual vertices grows as $(k_i + 1)^2 (k_i + 2)$ per triangle, which can cause significant memory overhead for high LOD factors [S1, unofficial].
+
+## Subtopics
+
+### [Adaptive Multi-resolution LOD for Vertex Features](12898-adaptive-multi-resolution-lod-for-vertex-features.md)
+This method dynamically refines mesh-based surface features during training by allocating virtual vertices in regions with high reconstruction loss, enabling the capture of high-frequency illumination details in initially sparse mesh areas. It sets itself apart from manual subdivision by achieving superior detail preservation using the original sparse mesh as input while requiring less memory, and differs from static multi-resolution grids by concentrating computation only on actual scene geometry rather than unnecessary space.
+
+## Operating characteristics
+* **Time Complexity:** Query time is $O(1)$ per point, involving basic arithmetic and interpolation [S1, unofficial].
+* **Memory Complexity:** The number of features scales with the sum of $N(i)$ over all triangles, where $N(i) = (k_i + 1)^2 (k_i + 2)$ [S1, unofficial].
+* **Measured Performance:** Not given in the sources.
+* **Strengths:** Allows high-frequency detail recovery without modifying mesh topology, and adaptive refinement focuses computational resources on challenging regions [S1, unofficial].
+* **Limitations:** Increased memory usage for high LOD factors [S1, unofficial].
+* **When to use:** When neural global illumination requires high-frequency detail representation on sparse meshes [S1, unofficial].
+* **When not to use:** When memory is constrained and high LOD factors are necessary [S1, unofficial].
+
+## Background
+* **Origin:** Proposed in "Vertex Features for Neural Global Illumination" by Rui Su et al. [S1, unofficial].
+* **History:** The method addresses the issue of sparse vertex distributions hindering high-frequency illumination details in neural radiosity and global illumination contexts [S1, unofficial].
+* **Usage:** Used in neural global illumination systems to encode spatial information directly at vertices, supporting downstream applications like neural radiosity [S1, unofficial].
+
+## Sources
+[S1] [2508.07852] Vertex Features for Neural Global Illumination, https://arxiv.org/abs/2508.07852, fetched 2026-10-27 (unofficial)

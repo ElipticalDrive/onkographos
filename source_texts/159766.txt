@@ -1,0 +1,940 @@
+1
+OR-NeRF: Object Removing from 3D Scenes
+Guided by Multiview Segmentation with Neural
+Radiance Fields
+arXiv:2305.10503v3 [cs.CV] 29 Sep 2023
+Youtan Yin∗ , Zhoujie Fu∗ , Fan Yang, Guosheng Lin
+Abstract—The emergence of Neural Radiance Fields (NeRF)
+for novel view synthesis has increased interest in 3D scene
+editing. An essential task in editing is removing objects from
+a scene while ensuring visual reasonability and multiview consistency. However, current methods face challenges such as timeconsuming object labeling, limited capability to remove specific
+targets, and compromised rendering quality after removal. This
+paper proposes a novel object-removing pipeline, named ORNeRF, that can remove objects from 3D scenes with user-given
+points or text prompts on a single view, achieving better performance in less time than previous works. Our method spreads
+user annotations to all views through 3D geometry and sparse
+correspondence, ensuring 3D consistency with less processing
+burden. Then recent 2D segmentation model Segment-Anything
+(SAM) is applied to predict masks, and a 2D inpainting model is
+used to generate color supervision. Finally, our algorithm applies
+depth supervision and perceptual loss to maintain consistency in
+geometry and appearance after object removal. Experimental
+results demonstrate that our method achieves better editing
+quality with less time than previous works, considering both
+quality and quantity.
+Index Terms—3D editing, multiview segmentation, neural radiance fields
+I. I NTRODUCTION
+N
+EURAL Radiance Fields (NeRF) [1] has demonstrated
+excellent results in reconstructing 3D scenes, and recent
+works [2], [3], [4], [5], [6] have aimed to extend its capabilities
+to editing 3D scenes. One of the essential editing operations
+is removing objects from a 3D scene, which has garnered
+significant interest from the research community [7], [8], [9],
+[10], [11]. However, the practical application of this task faces
+several challenges. One of the most significant obstacles is
+the accurate localization of unwanted objects. Although it
+is natural for humans to identify unwanted objects, asking
+users to label every view is impractical. Additionally, ensuring
+multiview consistency and plausible content after deletion
+without any ground truth is not trivial.
+Several works have tried to address the above problems but
+remain unsatisfactory. Object-NeRF [7] and ObjectSDF [8]
+decompose the NeRF training into background and objects
+branches, allowing them to render specified objects controlled
+by object ID. However, because of the lack of supervision
+Corresponding author: Guosheng Lin.
+∗ denotes equal contribution.
+Youtan Yin, Zhoujie Fu, Fan Yang, and Guosheng Lin are with the
+School of Computer Science and Engineering, Nanyang Technological University (NTU), Singapore 639798 (email: youtan001@e.ntu.edu.sg, zhoujie001@e.ntu.edu.sg, fan007@e.ntu.edu.sg, gslin@ntu.edu.sg)
+for the removed part, neither of these works can guarantee
+a plausible completion at the removal area. NeRF-ObjectRemoval [9] and SPIn-NeRF [10] use the 2D inpainting
+method LaMa [12] to generate color and depth priors after
+deletion and reconstruct NeRF from these priors directly.
+Although editing quality has improved, NeRF-Object-Removal
+requires all views’ masks to realize, while SPIn-NeRF uses
+a series of segmentation preliminaries [13], [14], [15], [16]
+which even involves network training to generate masks for
+each scene with intensive time. DFFs [17] applies pre-trained
+language models [18], [14] to enable text-prompt editing by
+training NeRF to align feature vectors extracted from language
+models, eliminating the need for masks. However, it has
+difficulty locating regions to remove if the pre-trained object
+detector does not work appropriately.
+In this paper, we propose a novel pipeline called OR-NeRF
+that enables free object removal from 3D scenes using either
+points or text prompts on a single image, requiring less time
+for multiview segmentation and achieving better performance
+than previous methods. To spread the points prompt on a single
+view to other views, we introduce a point projection strategy
+that utilizes the COLMAP [19] sparse reconstruction to find
+correspondences from 2D points to 3D sparse point cloud
+and further projects 3D points to all 2D images with camera
+parameters. This results in precise sparse points annotations
+for all scene views, which can be directly input to a recent 2D
+segmentation model Segment-Anything (SAM) [20] to predict
+masks. Generated at approximately two frames per second on
+an RTX 3090 GPU, our algorithm outperforms previous works
+like SPIn-NeRF, requiring minutes. Following the approach
+of NeRF-Object-Removal and SPIn-NeRF, we use the 2D
+inpainting model LaMa to get color priors for the removal
+area. We develop our scene object removal algorithm using
+TensoRF [21] as the backbone with depth supervision and
+perceptual loss. TensoRF is a SOTA model for improving
+rendering quality considering time and performance tradeoffs. This approach enables us to reconstruct the 3D scene
+after object removal with superior editing quality compared to
+existing methods. Fig 1 shows an overview of our OR-NeRF
+framework.
+We evaluate our method on various datasets and analyze
+its performance in multiview segmentation and scene object
+removal through quality and quantity analyses. In summary,
+our contributions are (1) A novel pipeline for efficient object
+removal from 3D scenes, allowing for both points and text
+prompts on a single image, and (2) Experimental results
+2
+Input: sparse views and points prompt
+Generate points
+annotations for
+all views from
+initial prompt
+Grounded-SAM
+SAM
+Sample points
+from mask
+LaMa Inpainting
+Neural Radiance Fields
+supervised with colour,
+depth and perceptual
+Output: Novel Views
+Or input text prompt: Statue
+Fig. 1. An overview of our OR-NeRF’s framework. We start with sparse images and either points or text prompts. If a text prompt is used, we convert it
+into a points prompt by sampling points from the initial mask estimated using Grounded-SAM (Sec IV-A2). Next, we propagate the points annotations to all
+views by projecting them from 2D to 3D point cloud and back to 2D (Sec IV-A1). We utilize SAM to predict masks using these point annotations. LaMa is
+used to obtain color and depth priors. Finally, the scene after removal is reconstructed using Neural Radiance Fields supervised by color (Eq (3)), depth (Eq
+(5)), and perceptual (Eq (6)) cues simultaneously (Sec IV-B).
+demonstrate that our method achieves better editing quality
+and requires less time for multiview segmentation than previous methods, as evidenced by both quality and quantity
+analyses.
+II. R ELATED W ORK
+A. Multiview Segmentation
+Though segmentation in 2D [22], [23] is well studied,
+multiview segmentation for 3D scenes [24], [25] has received
+less attention despite its non-negligible importance for downstream applications like 3D editing. Several self-supervised
+methods [26], [27] have been proposed, but they often produce
+inaccurate masks and have difficulty handling complex scenes.
+To mitigate these challenges, semi-supervised strategies [28],
+[29], [16], [10] have emerged that require partial annotations, or reasonable prompts from users. Semantic NeRF [16]
+propagates partial labels to dense semantic segmentation by
+leveraging a few in-place annotations via predicting semantic
+labels with volume rendering. Like NeRF [1], SPIn-NeRF [10]
+further constructs a thorough pipeline to generate masks for
+all views with points prompt on a single image. They use oneshot segmentation [13] to estimate an initial mask, followed
+by a video segmentation [14], [12] to generate masks for all
+views by treating the image sequence as a video. Finally,
+they refine the masks using Semantic NeRF. However, the
+above approaches require network training, which consumes
+considerable resources and does not guarantee an accurate
+mask, as errors can accumulate with complicated frameworks.
+B. Scene Object Removal
+NeRF has greatly facilitated the area of 3D scene editing and
+research [30], [31], [32], [33] focuses on various editing types
+emerging in large numbers. Works exist for texture editing
+[34], [5], geometry editing [2], [3], [4], and object-centred
+editing [35], [36], [11], [8], [7], such as removal [37], [9],
+[10], and even enabling multiple manipulations [38], [17],
+[39], [40], [41], [42], [43], [44]. Object-NeRF [8] and ObjSDF
+[7] decompose NeRF training into background and object
+branches, allowing for rendering specified objects controlled
+by assigned object IDs. However, they generate ’black holes’
+at the removal region as there is no supervision or priors for
+the deletion part during training. NeRF-In [37], NeRF-ObjectRemoval [9], and SPIn-NeRF utilize the 2D inpainting method
+LaMa [12] to obtain priors for the removal part and directly
+reconstruct the scene after deletion from these priors. Though
+achieving better rendering quality, these methods demand high
+preconditions, such as annotating or generating masks for
+all views, which rely on expensive time costs and hardware
+resources. Additionally, [17], [43], [11] combine pre-trained
+language models [14], [18], [45], [46] to enable text editing,
+thus bypassing the requirement for masks. Still, the rendering
+quality in the removal region is poor, as no algorithms are
+designed for learning pixel values after deletion.
+III. BACKGROUND
+A. Neural Radiance Fields
+Given 3D location x = (x, y, z) and 2D viewing direction
+d = (θ, ϕ), NeRF models the 3D scene implicitly with an MLP
+network which gives a mapping function FΘ : (x, d) → (c, σ).
+The output c stands for the radiance and σ for volume density,
+respectively. To optimize weights Θ, the volume rendering
+3
+Input Sparse Views
+SPIn-NeRF
+One-Shot Seg
+Initial Object Mask
+Video Seg
+Coarse Masks
+Object Mask for all Views
+Mask Refined with
+Semantic-NeRF Training
+Semantic NeRF refine
+Ours Multiview Segmentation Method
+In One Step Only
+Fig. 2. Comparison of mask generation between SPIn-NeRF [10] (first row) and ours (second row). Our method generates masks rapidly and precisely for all
+views in a single step, supporting points, and text input. In contrast, SPIn-NeRF exhibits slower speed, lower accuracy, and limited support for points prompt
+only, requiring three steps, including network training.
+approach is introduced as:
+Z tf
+C(r) =
+T (t)σ(r(t))c(r(t), d)dt,
+tn
+
+ Z t
+σ(r(s))ds .
+where T (t) = exp −
+(1)
+tn
+In Eq (1), C(r) represents the pixel value and is calculated
+by integrating the radiance value c along the ray r(t) = o + td
+starting from the camera position o with direction d pointing to
+the pixel, within near and far bounds tn and tf . The function
+T (t) denotes the accumulated transmittance along the ray from
+tn to t. NeRF trains the network with the above definitions
+by minimizing the total squared error between rendered pixels
+and ground truth.
+B. SPIn-NeRF
+SPIn-NeRF proposes a comprehensive pipeline for removing objects from 3D scenes. In addition to a set of sparse view
+images with their corresponding camera parameters, SPInNeRF takes a few points on one view annotated by users,
+indicating the unwanted objects as a prompt. With these inputs,
+SPIn-NeRF first combines a series of segmentation methods
+[13], [14], [15], [16] to obtain masks for all views. Then, a 2D
+image inpainting model LaMa [12] is used to generate color
+and depth priors in the mask area. The scene after deletion can
+be reconstructed with a modified version of vanilla NeRF from
+these priors directly, which adds depth supervision [47] and
+perceptual loss [48] to constrain the geometry and appearance
+consistency across different views.
+In the mask generation stage, an initial mask from the
+single-view annotation is obtained using the one-shot segmentation [13] method. The video segmentation approach [15],
+[14] that follows provides coarse masks for all views by
+wrapping images into a video sequence. Finally, the coarse
+masks are fine-tuned to generate proper masks for all views by
+fitting the Semantic NeRF [16]. This procedure even requires
+training the Semantic NeRF from scratch to refine coarse
+masks obtained from [15], [14], resulting in significant costs
+in terms of time and hardware. Fig 2 shows the difference in
+mask generation between our pipeline and SPIn-NeRF.
+IV. M ETHOD
+Considering a set of sparse-view images with their corresponding camera poses waiting to be edited, our method requires users to provide either points or text prompts indicating
+the unwanted objects for only one image. Possible prompts can
+be a few points marked on the object or words describing the
+target. To begin with, we find the masks of unwanted objects in
+all images. We spread the initial points prompts to all images
+for points input according to 3D geometry match relationships
+(Sec IV-A1). While for text input, we first acquire GroundedSAM [49] to make an initial mask for the annotated single
+view followed by sampling points in this initial mask to switch
+text prompts to the points-prompt pattern (Sec IV-A2).
+To continue, we utilize the SAM model [20] to predict
+masks with points prompt and use masks to guide a 2D
+inpainting model LaMa [12] to generate color and depth priors.
+Finally, we describe our object-removing strategy, guaranteeing geometry and appearance consistency across all the views
+(Sec IV-B). Fig 1 shows an overview of our framework for
+removing objects from 3D scenes with points or text prompts.
+A. Multiview Segmentation
+1) Points Prompt: Suppose we have a group of n images
+I = {Ii }ni=1 and their corresponding camera parameters
+C = {Ci }ni=1 gathered from a 3D scene. We aim to predict
+masks for all views I from only one-shot annotation. An
+intuitive approach to this question is to generate annotations
+for other images. We carefully investigate the 3D geometry
+matching relation in 3D scenes and find that a 2D point
+on a certain perspective can be spread to other views by
+projecting it back to 3D space and then to 2D planes under
+a certain camera pose. For 2D to 3D pass, we can refer to
+the sparse point cloud reconstructed by COLMAP [19] and
+its projected discrete points group D = {Di }ni=1 on all 2D
+images. This information is represented by a certain data
+structure in COLMAP’s sparse reconstruction as a unique
+one-to-one mapping, which allows us to locate points in 3D
+space by simply querying with 2D coordinates. However,
+this introduces a new problem: finding a mapping for the
+user’s arbitrary input is not guaranteed as the reconstruction
+is sparse. We can solve this question by making a query with
+the existing nearest points in the discrete points set D. Finally,
+for the 3D to 2D reverse pass, we reproject 3D points back to
+the 2D plane under a certain view through its corresponding
+camera matrices. Now, we can spread the initial annotation
+provided by users to all other views safely and quickly as this
+algorithm utilizes 3D information, which is self-consistent and
+does not involve any neural network training. Only matrices
+4
+computation is needed, and the algorithm can achieve a speed
+of about two frames per second for generating masks.
+Specifically, we leverage the 3D geometry correspondence
+m
+from the
+to calculate all views’ annotation P2d = {Pij }ni=1 j=1
+only prompt P1 provided by users and here Pij = (xij , yij ),
+while m stands for the number of points marked in an image.
+With P2d , we can obtain masks M = {Mi }ni=1 for all
+views easily from SAM model FS by making inferences as
+M = FS (I, P2d ). To realise this, we first initialise M1 with
+FS (I1 , P1 ). Then we acquire points P3d = {(xk , yk , zk )}lk=1
+in 3D space by querying 2D coordinates D1∗ = (M1 ∩ D1 ).
+Note l equals the number of points in D1∗ and we only
+refer to the points belonging to the mask M1 as we need
+to constrain the points annotation for all views precisely
+match the unwanted objects. In practice, the nearest points are
+calculated after 3D points have been projected to 2D planes
+to ensure the amount and quality of prompts.
+Considering the 3D to 2D situation, we begin with camera parameters. For each view Ii , the associated camera
+parameters Ci = {Ki , Pi } is composed of the intrinsics K
+and extrinsics P = [R|t]. Here, the extrinsic matrix P is
+represented by a 3 × 3 rotation matrix R (camera orientation) and a 3 × 1 translation vector t (camera position) that
+together transform the 3D point from the world coordinate
+system Pw = [Xw , Yw , Zw ]T to the camera coordinate system
+Pc = [Xc , Yc , Zc ]T = RPw + t. By substituting P3d to Pw ,
+we can switch 3D points P3d from the world coordinate
+system to camera coordinate system for all views simply
+∗
+l
+∗
+= {(xik , yik , zik )}ni=1 k=1
+= Ri P3d + ti . Here P3d
+as P3d
+denotes the camera coordinate system form. And with one
+little step forward:
+∗
+l
+P2d
+= {Pik }ni=1 k=1
+xik yik n l
+,
+}
+,
+={
+zik zik i=1 k=1
+∗
+where (x, y, z) ∈ P3d
+,
+(2)
+∗
+we project 3D points P3d
+back to all 2D views to get
+∗
+corresponding pixel coordinates P2d
+in images. Now, we need
+to filter the number of points in each image from k to m. To
+handle this issue, we spread the initial annotation P1 to all
+views by performing the above 2D-3D-2D projection to D1∗
+′
+m
+similarly to get a P2d = {Pij }ni=1 j=1
+and find the m nearest
+′
+∗
+points to P2d in P2d to construct P2d . We keep the number
+of points the same as the user input in each view to ensure
+mask quality. By far, we get all the annotations required for
+the prediction of SAM, and we can gain masks for all views
+by calling M = FS (I, P2d ).
+2) Text Prompt: We leverage SAM’s variety GroundedSAM for the text prompt, which combines an object detector
+Grounding DINO [50] who can handle text input. A natural
+way to deal with text is by asking Grounded-SAM to predict
+all the views’ masks with the same text input. However, we observe a considerable speed drop in inference when comparing
+Grounding DINO to SAM. Meanwhile, Grounded-SAM can
+fail to handle some ’difficult’ views due to Grounding DINO’s
+limited detection ability. Therefore, we consider a two-stage
+strategy where we first use Grounded-SAM to obtain an initial
+mask for the single view and then sample points from this
+mask. Finally, we use the points prompt method in Sec IV-A1
+to generate masks for the remaining views. This design ensures
+high-quality masks while minimizing computational costs.
+Regarding m words T = {Tj }m
+j=1 input from the user
+that describe the unwanted objects. For input words sequence
+T and images I pairs, Grounding DINO model FG takes
+the prompt T as labels and tries to find these labels’ corm
+responding bounding boxes B = {Bij }ni=1 j=1
+in images I as
+B = FG (I, T ). As SAM is capable of two kinds of inputs,
+points or boxes, we can obtain the mask M1 of unwanted
+objects in the user’s annotated image I1 simply by forwarding
+SAM with M1 = FS (I1 , B1 ). With the one-shot mask M1 ,
+we sample a set of k points P̂ = {Pk = (xk , yk )}qk=1 from
+this mask to make the problem solvable by the points prompt
+method (Sec IV-A1). To implement this, we traverse the points
+in the mask from left to right and up to down and choose the
+top left, bottom right point, and center point of the mask to
+construct the points prompt P̂. Then, text prompt input has
+been converted into points prompt, and we let the algorithm
+used for points prompt in Sec IV-A1 generate masks for all
+views.
+B. Scene Object Removal
+Once we get object masks for all views, we can reconstruct
+a 3D scene without unwanted objects through Neural Radiance
+Fields by treating 2D inpainting priors as ground truth. Recall
+Sec III-A, the network can be optimized by minimizing the
+color loss:
+Lc = Σr∈R ||Ĉ(r) − C(r)||22 ,
+(3)
+where R is the set of rays in each training batch, Ĉ(r) are
+the ground truth and C(r) are the rendered pixels by network
+outputs calculated through Eq (1), respectively.
+However, relying solely on color loss is inadequate, as LaMa
+does not consider the 3D context, leading to inconsistency
+across different views. To address this issue, we introduce
+depth constraints [47] into the training of Neural Radiance
+Fields. Depth values D(r) can be obtained through volume
+rendering easily as:
+Z tf
+D(r) =
+T (t)σ(r(t))zdt,
+tn
+(4)
+ Z t
+
+where T (t) = exp −
+σ(r(s))ds .
+tn
+where z is the distance from the current 3D location to the
+camera position. Like RGB images, we render depth images
+for the original scene without deletion and use LaMa to get
+depth priors. Then, we add depth supervision to training as:
+Ld = Σr∈R ||D̂(r) − D(r)||22 ,
+(5)
+where D̂(r) are the depth ground truth. We further discuss
+the difference between using the whole-depth image as supervision and only querying the depth in the mask area in Sec
+V-E.
+In addition, we recognize that depth supervision alone
+only enforces geometric consistency across views, while the
+appearance may still exhibit inconsistency. To address this,
+5
+TABLE I
+COMPARISON OF MASK GENERATION BETWEEN OUR METHOD AND SPIN - NERF. THE FIRST ROW INDICATES THE SCENE NAME IN THE SPIN - NERF
+DATASET, WHILE ’ POINTS ’ AND ’ TEXT ’ DENOTE THE PROMPTS MODE USED , RESPECTIVELY.
+points
+text
+acc↑
+IoU↑
+acc↑
+IoU↑
+1
+99.80
+96.77
+99.81
+96.81
+2
+99.82
+96.47
+99.82
+96.51
+3
+99.73
+97.48
+99.73
+97.47
+4
+99.79
+98.50
+99.80
+98.51
+7
+99.81
+97.43
+99.81
+97.43
+we incorporate perceptual loss [48] to guide the network
+in learning a plausible color distribution within the masked
+region, matching the style of the inpainted color priors. We
+focus the perceptual loss specifically on the masked area. This
+is because color loss alone is sufficient for the non-masked
+area, as pixel values do not change after the deletion in this
+area. It is important to note that the perceptual loss is designed
+at the image level. In our implementation, we refer to the
+patch-level implementation from SPIn-NeRF, represented by
+the following equation:
+1
+ˆ
+Σi∈B LPIPS(I(r),
+I(r)) ,
+B
+where I(r) = Σr∈P C(r) ,
+Lp =
+10
+99.87
+95.47
+99.86
+95.41
+12
+99.30
+91.73
+99.25
+91.19
+trash
+99.51
+88.68
+99.51
+88.64
+Mean
+99.71↑
+95.42↑
+99.71↑
+95.38↑
+SPIn-NeRF
+98.91
+91.66
+98.91
+91.66
+intersection over union (IoU), to assess the performance of
+our multiview segmentation algorithm. We report peak signalto-noise ratio (PSNR), a widely used 3D reconstruction metric
+for the scene object removal component. Additionally, we
+include two metrics used by SPIn-NeRF [10]: the learned
+perceptual image patch similarity (LPIPS) [53] and the Fréchet
+inception distance (FID) [54]. These metrics compare the
+similarity between the ground-truth data and the rendering
+outputs produced by our method.
+C. Experiments Settings
+(6)
+and adjust the patch sampling strategy to fit a variety of data
+used in our Experiments (Sec V-A). In Equation (6), we first
+sample a patch P from the mask and calculate the mean square
+error between the rendered pixels I(r) and the ground truth
+ˆ
+I(r) for the pixels within the patch P. Batch training with a
+size of B can be employed. Finally, the training objective is
+to minimize the total loss L defined as:
+L = a ∗ L c + b ∗ Ld + c ∗ L p ,
+9
+99.78
+96.29
+99.78
+96.41
+(7)
+where a, b, and c are tunable loss weights for the color, depth,
+and perceptual loss, respectively.
+V. E XPERIMENTS
+A. Datasets
+We select 12 scenes from various commonly used 3D
+reconstruction datasets, including NeRF LLFF data, IBRNet
+data [51], and LLFF real-world data [52]. Our scene selection
+aims to cover a wide range of scene variations and different
+types of removal operations, such as slogans, providing a
+high degree of flexibility. Since the reconstruction datasets do
+not provide ground truth for evaluation, we incorporate the
+SPIn-NeRF dataset, which includes human-annotated object
+masks and scene capture after object removal. We use all 10
+scenes from the SPIn-NeRF dataset to evaluate the quality of
+multiview segmentation. To evaluate scene object removal’s
+performance, we select 8 scenes, excluding two duplicate
+scenes, to ensure a diverse layout of the objects. To conclude,
+we conducted experiments on 20 scenes, comprehensively
+evaluating our OR-NeRF pipeline.
+B. Metrics
+We adopt the evaluation metrics commonly used in segmentation tasks, including pixel-wise accuracy (Acc) and
+1) Multiview Segmentation: We conduct experiments using
+points and text prompts on our selected scenes and evaluate the results using metrics stated in Sec V-B. Since the
+implementation details of multiview segmentation were not
+explicitly provided in the SPIn-NeRF paper, we directly utilize
+the metrics mentioned in their paper. However, it should be
+noted that the paper does not specify which scenes were
+used for calculating these metrics. Therefore, we compare the
+performance of SPIn-NeRF with our scene-average results.
+Subsequently, we utilize the masks generated from the points
+prompt for all subsequent experiments.
+2) Scene Object Removal: We conducted experiments on
+all 20 scenes with ours and the SPIn-NeRF methods. Both
+vanilla NeRF and TensoRF architectures are tested with our
+method’s implementation. We follow the implementation of
+the SPIn-NeRF to reproduce their results. For NeRF and
+TensoRF, we train the original scenes to render depth maps
+instead of disparity maps used in SPIn-NeRF. This decision is
+made to avoid errors from dividing by zero when calculating
+disparities.
+D. Multiview Segmentation
+TABLE II
+C OMPARISON OF TIME CONSUMPTION BETWEEN OUR METHOD AND
+SPI N -N E RF [10]. S TATICS FOR SPI N -N E RF ARE BORROWED FROM THEIR
+PAPER DIRECTLY.
+SPIn-NeRF
+Ours
+One-shot Seg
+<1 sec
+Video Seg
+<1 min
+<1 min
+3D Fit
+3-6 min
+Table I compares mask generation between our method and
+SPIn-NeRF. Our approach outperforms SPIn-NeRF regarding
+accuracy and IoU. SPIn-NeRF’s mask generation process
+involves a complex pipeline that introduces errors at each
+step and requires significant time and hardware resources.
+In contrast, our method leverages the simplicity of SAM
+6
+Fig. 3. Editing results of our OR-NeRF method demonstrating various examples. Please zoom in to observe better.
+Imaegs
+Ground Truth
+Points Prompt
+Text Prompt
+Fig. 4. Mask generation results of our OR-NeRF. The figure shows the masks generated for two scenes: ’book’ (up) and ’12’ (below) from the SPIn-NeRF
+dataset. From left to right are the original image, ground truth mask, masks generated with points, and text prompt.
+and involves minimal matrix calculations. Consequently, our
+multiview segmentation algorithm delivers superior-quality
+results in less time. Table II shows our estimated time for
+mask generation compared to SPIn-NeRF.
+Note that we have excluded the ’book’ scene from the
+average calculation. This decision was made because we
+have identified inaccuracies in the ground truth labels for
+this particular scene, as evident from Fig 4. Furthermore, as
+depicted in Fig 4, our segmentation results exhibit precise
+coverage of the target objects with intricate details, such as
+the crossing chair legs in the ’12’ scene. However, it should
+be noted that there is a minor flaw in the ’trash’ scene where
+our masks fail to cover all areas of the trash cans, explaining
+the low metrics in Table I. This does not significantly affect
+the subsequent experiments if refined with our strategy.
+E. Scene Object Removal
+1) Quantity: Table III presents our results for scene object
+removal. Regarding overall rendering quality, Ours-NeRF exhibits a superior FID compared to SPIn-NeRF but performs
+worse regarding PSNR and LPIPS. On the other hand, OursTensoRF outperforms SPIn-NeRF in terms of FID and LPIPS
+scores but has a weakness in PSNR. Analyzing the impact
+of the loss models, it appears that the additional components
+for training Neural Radiance Fields do not have a significantly
+positive effect. Ours-NeRF and ours-TensoRF exhibit a similar
+pattern where depth supervision and perceptual loss increase
+PSNR but show no positive influence on FID and LPIPS.
+Interestingly, SPIn-NeRF behaves somewhat differently: removing perceptual loss and depth supervision from the SPInNeRF pipeline results in a subtle increase in PSNR compared
+to the original version. However, the FID and LPIPS scores
+7
+TABLE III
+E XPERIMENT RESULTS ON SCENE OBJECT REMOVAL . T HE FIRST ROW INDICATES THE METHOD NAME , WHILE ABBREVIATIONS IN THE SECOND ROW
+INDICATE LOSS MODULES . ’ DIR ’ DENOTES TRAINING N EURAL R ADIANCE F IELDS WITH L A M A PRIORS DIRECTLY, ’ DP ’ DENOTES PARTIAL DEPTH , ’ DA’
+DENOTES ALL DEPTH , AND ’ LPIPS ’ DENOTES THE USE OF PERCEPTUAL LOSS . N OTABLY, PERCEPTUAL LOSS IS ALWAYS APPLIED WITH ALL - DEPTH
+SUPERVISION ENABLED .
+PSNR↑
+FID↓
+LPIPS↓
+dir
+14.04
+61.11
+0.6834
+Ours-NeRF+dir
+Ours-NeRF
+dp
+da
+14.04
+14.16
+65.21
+64.71
+0.6893
+0.7022
+lpips
+14.16
+58.15
+0.6763
+Ours-TensoRF
+dir
+da
+lpips
+13.93
+14.04
+14.03
+53.28
+64.29
+59.74
+0.6370 0.6494
+0.6273
+Ours-NeRF+dp
+dir
+14.85
+70.02
+0.6810
+SPIn-NeRF
+da
+lpips
+14.82
+14.83
+70.07
+67.26
+0.6752 0.6506
+Ours-NeRF+da
+Fig. 5. The effect of depth supervision. We can see from the figure that either without depth supervision (left) or training with partial depth (middle) leads
+to geometry inconsistency. While supervised by all-depth images (right) convergent to a consistent result.
+Ours-TensoRF+dir
+SPIn-NeRF
+Ours-TensoRF+lpips
+Ours-TensoRF
+Fig. 7. The effect of perceptual loss. The top is Ours-TensoRF trained directly,
+and the bottom is Ours-TensoRF with perceptual loss. We can see from the
+figure that this loss has some influence but is still unsatisfactory.
+Fig. 6. Comparison of overall rendering quality between SPIn-NeRF (top)
+and Ours-TensoRF (bottom). We can see blurry from SPIn-NeRF compared
+with our clear details.
+demonstrate that the add-ons improve SPIn-NeRF performance. While the results involve complex numbers, we adopt
+Ours-TensoRF with perceptual loss as it performs best overall.
+Although Table III does not provide strong evidence for the
+efficacy of depth supervision and perceptual loss, we will
+discuss the real significance of these add-ons in the following
+section.
+2) Quality: We first compare the three methods’ overall
+rendering quality in this part. Ours-NeRF and Ours-TensoRF
+produce clear outputs, while SPIn-NeRF suffers from blurry
+due to the noisy disparity maps, which provide inaccurate
+geometry supervision. This can be observed by Fig 6.
+Next, we discuss the impact of depth supervision. Although
+widely used in training, there is a lack of exploration of the
+difference between using the entire depth image as supervision
+and only applying depth loss in the masked area. Fig 5 indicates that full-depth supervision is necessary and irreplaceable,
+as both partial depth and direct training settings in all three
+architectures produce inconsistent depth results, resulting in
+different extents of restoring removed objects. However, it
+is worth noting that the depth loss does not show a visible
+8
+difference in the rendered views, which aligns with the metrics
+presented in Table III.
+Moving on to the perceptual loss aspect, we conclude from
+Fig 7 that this loss has a positive effect but falls short of
+guaranteeing a plausible completion for the masked area. This
+also explains the relatively ineffective metrics in Table III,
+as our results exhibit a significant gap with the ground truth.
+Finally, part of our editing results are displayed in Fig 3.
+VI. C ONCLUSIONS AND D ISCUSSIONS
+This paper presents a novel pipeline OR-NeRF for object
+removal from 3D scenes, requiring only points or text prompts
+on a single view. We emphasize the advantages of our method
+in terms of rendering quality and time efficiency. Potential
+limitations exist due to the inpainting model’s capability and
+more robust 2D image inpainting techniques, such as diffusion
+[55], [56], [57], [58], [59], [60], [61] based methods can be
+applied to achieve more plausible completions after object
+removal.
+R EFERENCES
+[1] B. Mildenhall, P. P. Srinivasan, M. Tancik, J. T. Barron, R. Ramamoorthi,
+and R. Ng, “NeRF: Representing Scenes as Neural Radiance
+Fields for View Synthesis,” in Computer Vision – ECCV 2020:
+16th European Conference, Glasgow, UK, August 23–28, 2020,
+Proceedings, Part I, 2020, pp. 405–421. [Online]. Available: https:
+//doi.org/10.1007/978-3-030-58452-8 24
+[2] Y. Peng, Y. Yan, S. Liu, Y. Cheng, S. Guan, B. Pan, G. Zhai,
+and X. Yang, “CageNeRF: Cage-based Neural Radiance Field for
+Generalized 3D Deformation and Animation,” in Advances in Neural
+Information Processing Systems, S. Koyejo, S. Mohamed, A. Agarwal,
+D. Belgrave, K. Cho, and A. Oh, Eds., vol. 35, 2022, pp. 31 402–31 415.
+[Online]. Available: https://proceedings.neurips.cc/paper files/paper/
+2022/file/cb78e6b5246b03e0b82b4acc8b11cc21-Paper-Conference.pdf
+[3] T. Xu and T. Harada, “Deforming Radiance Fields with Cages,” in
+Computer Vision – ECCV 2022: 17th European Conference, Tel Aviv,
+Israel, October 23–27, 2022, Proceedings, Part XXXIII, 2022, pp. 159–
+175. [Online]. Available: https://doi.org/10.1007/978-3-031-19827-4 10
+[4] Y.-J. Yuan, Y.-T. Sun, Y.-K. Lai, Y. Ma, R. Jia, and L. Gao,
+“NeRF-Editing: Geometry Editing of Neural Radiance Fields,” in 2022
+IEEE/CVF Conference on Computer Vision and Pattern Recognition
+(CVPR), 2022, pp. 18 332–18 343.
+[5] F. Xiang, Z. Xu, M. Hašan, Y. Hold-Geoffroy, K. Sunkavalli, and H. Su,
+“NeuTex: Neural Texture Mapping for Volumetric Neural Rendering,”
+in 2021 IEEE/CVF Conference on Computer Vision and Pattern Recognition (CVPR), 2021, pp. 7115–7124.
+[6] B. Yang, C. Bao, J. Zeng, H. Bao, Y. Zhang, Z. Cui, and G. Zhang,
+“NeuMesh: Learning Disentangled Neural Mesh-Based Implicit Field
+for Geometry and Texture Editing,” in Computer Vision – ECCV
+2022: 17th European Conference, Tel Aviv, Israel, October 23–27,
+2022, Proceedings, Part XVI, 2022, pp. 597–614. [Online]. Available:
+https://doi.org/10.1007/978-3-031-19787-1 34
+[7] B. Yang, Y. Zhang, Y. Xu, Y. Li, H. Zhou, H. Bao, G. Zhang, and
+Z. Cui, “Learning Object-Compositional Neural Radiance Field for
+Editable Scene Rendering,” in 2021 IEEE/CVF International Conference
+on Computer Vision (ICCV), 2021, pp. 13 759–13 768.
+[8] Q. Wu, X. Liu, Y. Chen, K. Li, C. Zheng, J. Cai, and J. Zheng,
+“Object-Compositional Neural Implicit Surfaces,” in Computer Vision
+– ECCV 2022: 17th European Conference, Tel Aviv, Israel, October
+23–27, 2022, Proceedings, Part XXVII, 2022, pp. 197–213. [Online].
+Available: https://doi.org/10.1007/978-3-031-19812-0 12
+[9] S. Weder, G. Garcia-Hernando, A. Monszpart, M. Pollefeys, G. Brostow,
+M. Firman, and S. Vicente, “Removing Objects From Neural Radiance
+Fields,” 2022. [Online]. Available: http://arxiv.org/abs/2212.11966
+[10] A. Mirzaei, T. Aumentado-Armstrong, K. G. Derpanis, J. Kelly, M. A.
+Brubaker, I. Gilitschenski, and A. Levinshtein, “SPIn-NeRF: Multiview
+Segmentation and Perceptual Inpainting with Neural Radiance Fields,”
+2023. [Online]. Available: http://arxiv.org/abs/2211.12254
+[11] R. Goel, D. Sirikonda, S. Saini, and P. J. Narayanan, “Interactive
+Segmentation of Radiance Fields,” 2023. [Online]. Available: http:
+//arxiv.org/abs/2212.13545
+[12] R. Suvorov, E. Logacheva, A. Mashikhin, A. Remizova, A. Ashukha,
+A. Silvestrov, N. Kong, H. Goka, K. Park, and V. Lempitsky,
+“Resolution-robust Large Mask Inpainting with Fourier Convolutions,”
+in 2022 IEEE/CVF Winter Conference on Applications of Computer
+Vision (WACV), 2022, pp. 3172–3182.
+[13] Y. Hao, Y. Liu, Z. Wu, L. Han, Y. Chen, G. Chen, L. Chu, S. Tang, Z. Yu,
+Z. Chen, and B. Lai, “EdgeFlow: Achieving Practical Interactive Segmentation with Edge-Guided Flow,” in 2021 IEEE/CVF International
+Conference on Computer Vision Workshops (ICCVW), 2021, pp. 1551–
+1560.
+[14] M. Caron, H. Touvron, I. Misra, H. Jegou, J. Mairal, P. Bojanowski, and
+A. Joulin, “Emerging Properties in Self-Supervised Vision Transformers,” in 2021 IEEE/CVF International Conference on Computer Vision
+(ICCV), 2021, pp. 9630–9640.
+[15] T. Zhou, F. Porikli, D. J. Crandall, L. Van Gool, and W. Wang, “A survey
+on deep learning technique for video segmentation,” IEEE Transactions
+on Pattern Analysis and Machine Intelligence, vol. 45, no. 6, pp. 7099–
+7122, 2023.
+[16] S. Zhi, T. Laidlow, S. Leutenegger, and A. J. Davison, “In-Place Scene
+Labelling and Understanding with Implicit Scene Representation,” in
+2021 IEEE/CVF International Conference on Computer Vision (ICCV),
+2021, pp. 15 818–15 827.
+[17] S. Kobayashi, E. Matsumoto, and V. Sitzmann, “Decomposing NeRF
+for Editing via Feature Field Distillation,” in Advances in Neural
+Information Processing Systems, S. Koyejo, S. Mohamed, A. Agarwal,
+D. Belgrave, K. Cho, and A. Oh, Eds., vol. 35, 2022, pp. 23 311–23 330.
+[Online]. Available: https://proceedings.neurips.cc/paper files/paper/
+2022/file/93f250215e4889119807b6fac3a57aec-Paper-Conference.pdf
+[18] A. Radford, J. W. Kim, C. Hallacy, A. Ramesh, G. Goh, S. Agarwal,
+G. Sastry, A. Askell, P. Mishkin, J. Clark, G. Krueger, and
+I. Sutskever, “Learning Transferable Visual Models From Natural
+Language Supervision,” in Proceedings of the 38th International
+Conference on Machine Learning, 2021, pp. 8748–8763. [Online].
+Available: https://proceedings.mlr.press/v139/radford21a.html
+[19] J. L. Schönberger, T. Price, T. Sattler, J.-M. Frahm, and M. Pollefeys, “A
+vote-and-verify strategy for fast spatial verification in image retrieval,”
+in Asian Conference on Computer Vision (ACCV), 2016.
+[20] A. Kirillov, E. Mintun, N. Ravi, H. Mao, C. Rolland, L. Gustafson,
+T. Xiao, S. Whitehead, A. C. Berg, W.-Y. Lo, P. Dollár, and
+R. Girshick, “Segment Anything,” 2023. [Online]. Available: http:
+//arxiv.org/abs/2304.02643
+[21] A. Chen, Z. Xu, A. Geiger, J. Yu, and H. Su, “TensoRF:
+Tensorial Radiance Fields,” in Computer Vision – ECCV 2022:
+17th European Conference, Tel Aviv, Israel, October 23–27, 2022,
+Proceedings, Part XXXII, 2022, pp. 333–350. [Online]. Available:
+https://doi.org/10.1007/978-3-031-19824-3 20
+[22] Z. Qiu, T. Yao, and T. Mei, “Learning deep spatio-temporal dependence
+for semantic video segmentation,” IEEE Transactions on Multimedia,
+vol. 20, no. 4, pp. 939–949, 2018.
+[23] L. Wang and C. Jung, “Example-based video stereolization with foreground segmentation and depth propagation,” IEEE Transactions on
+Multimedia, vol. 16, no. 7, pp. 1905–1914, 2014.
+[24] L. Zhao, H. Zhou, X. Zhu, X. Song, H. Li, and W. Tao, “Lif-seg: Lidar
+and camera image fusion for 3d lidar semantic segmentation,” IEEE
+Transactions on Multimedia, pp. 1–11, 2023.
+[25] A. H. Abdulnabi, B. Shuai, Z. Zuo, L.-P. Chau, and G. Wang, “Multimodal recurrent neural networks with information transfer layers for
+indoor scene labeling,” IEEE Transactions on Multimedia, vol. 20, no. 7,
+pp. 1656–1671, 2018.
+[26] Z. Fan, P. Wang, Y. Jiang, X. Gong, D. Xu, and Z. Wang, “NeRF-SOS:
+Any-View Self-supervised Object Segmentation on Complex Scenes,”
+2022. [Online]. Available: http://arxiv.org/abs/2209.08776
+[27] X. Liu, J. Chen, H. Yu, Y.-W. Tai, and C.-K. Tang,
+“Unsupervised Multi-View Object Segmentation Using Radiance
+Field Propagation,” in Advances in Neural Information Processing
+Systems, S. Koyejo, S. Mohamed, A. Agarwal, D. Belgrave,
+K. Cho, and A. Oh, Eds., vol. 35, 2022, pp. 17 730–17 743.
+[Online]. Available: https://proceedings.neurips.cc/paper files/paper/
+2022/file/70de9e3948645a1be2de657f14d85c6d-Paper-Conference.pdf
+[28] M. Wallingford, A. Kusupati, A. Fang, V. Ramanujan, A. Kembhavi,
+R. Mottaghi, and A. Farhadi, “Neural Radiance Field Codebooks,”
+in ICLR, 2023. [Online]. Available: https://openreview.net/forum?id=
+mX56bKDybu5
+9
+[29] X. Fu, S. Zhang, T. Chen, Y. Lu, L. Zhu, X. Zhou, A. Geiger,
+and Y. Liao, “Panoptic NeRF: 3D-to-2D Label Transfer for
+Panoptic Urban Scene Segmentation,” 2022. [Online]. Available:
+http://arxiv.org/abs/2203.15224
+[30] C. Bao, Y. Zhang, B. Yang, T. Fan, Z. Yang, H. Bao, G. Zhang,
+and Z. Cui, “SINE: Semantic-driven Image-based NeRF Editing
+with Prior-guided Editing Field,” 2023. [Online]. Available: http:
+//arxiv.org/abs/2303.13277
+[31] S. Benaim, F. Warburg, P. E. Christensen, and S. Belongie, “Volumetric
+Disentanglement for 3D Scene Manipulation,” 2022. [Online]. Available:
+http://arxiv.org/abs/2206.02776
+[32] A. Mikaeili, O. Perel, D. Cohen-Or, and A. Mahdavi-Amiri, “SKED:
+Sketch-guided Text-based 3D Editing,” 2023. [Online]. Available:
+http://arxiv.org/abs/2303.10735
+[33] E. Sella, G. Fiebelman, P. Hedman, and H. Averbuch-Elor, “Vox-E:
+Text-guided Voxel Editing of 3D Objects,” 2023. [Online]. Available:
+http://arxiv.org/abs/2303.12048
+[34] Z. Chen, K. Yin, and S. Fidler, “AUV-Net: Learning Aligned UV Maps
+for Texture Transfer and Synthesis,” in 2022 IEEE/CVF Conference on
+Computer Vision and Pattern Recognition (CVPR), 2022, pp. 1455–
+1464.
+[35] K. Rematas, R. Martin-Brualla, and V. Ferrari, “Sharf: Shapeconditioned Radiance Fields from a Single View,” in Proceedings
+of the 38th International Conference on Machine Learning, 2021,
+pp. 8948–8958. [Online]. Available: https://proceedings.mlr.press/v139/
+rematas21a.html
+[36] H.-X. Yu, L. Guibas, and J. Wu, “Unsupervised Discovery of
+Object Radiance Fields,” in ICLR, 2022. [Online]. Available:
+https://openreview.net/forum?id=rwE8SshAlxw
+[37] H.-K. Liu, I.-C. Shen, and B.-Y. Chen, “NeRF-In: Free-Form
+NeRF Inpainting with RGB-D Priors,” 2022. [Online]. Available:
+http://arxiv.org/abs/2206.04901
+[38] V. Lazova, V. Guzov, K. Olszewski, S. Tulyakov, and G. Pons-Moll,
+“Control-NeRF: Editable Feature Volumes for Scene Rendering and
+Manipulation,” 2022. [Online]. Available: http://arxiv.org/abs/2204.
+10850
+[39] B. Wang, L. Chen, and B. Yang, “DM-NeRF: 3D Scene Geometry
+Decomposition and Manipulation from 2D Images,” in ICLR, 2023.
+[Online]. Available: https://openreview.net/forum?id=C PRLz8bEJx
+[40] S. Liu, X. Zhang, Z. Zhang, R. Zhang, J.-Y. Zhu, and B. Russell,
+“Editing Conditional Radiance Fields,” in 2021 IEEE/CVF International
+Conference on Computer Vision (ICCV), 2021, pp. 5753–5763.
+[41] J. Zhu, Y. Huo, Q. Ye, F. Luan, J. Li, D. Xi, L. Wang, R. Tang,
+W. Hua, H. Bao, and R. Wang, “I$2̂$-SDF: Intrinsic Indoor Scene
+Reconstruction and Editing via Raytracing in Neural SDFs,” 2023.
+[Online]. Available: http://arxiv.org/abs/2303.07634
+[42] W. Ye, S. Chen, C. Bao, H. Bao, M. Pollefeys, Z. Cui, and
+G. Zhang, “IntrinsicNeRF: Learning Intrinsic Neural Radiance Fields
+for Editable Novel View Synthesis,” 2023. [Online]. Available:
+http://arxiv.org/abs/2210.00647
+[43] A. Mirzaei, Y. Kant, J. Kelly, and I. Gilitschenski, “LaTeRF: Label
+and Text Driven Object Radiance Fields,” in Computer Vision – ECCV
+2022: 17th European Conference, Tel Aviv, Israel, October 23–27,
+2022, Proceedings, Part III, 2022, pp. 20–36. [Online]. Available:
+https://doi.org/10.1007/978-3-031-20062-5 2
+[44] Z. Kuang, F. Luan, S. Bi, Z. Shu, G. Wetzstein, and K. Sunkavalli,
+“PaletteNeRF: Palette-based Appearance Editing of Neural Radiance
+Fields,” 2023. [Online]. Available: http://arxiv.org/abs/2212.10699
+[45] B. Li, K. Q. Weinberger, S. Belongie, V. Koltun, and R. Ranftl,
+“Language-driven Semantic Segmentation,” in ICLR, 2022. [Online].
+Available: https://openreview.net/forum?id=RriDjddCLN
+[46] V. Tschernezki, I. Laina, D. Larlus, and A. Vedaldi, “Neural Feature
+Fusion Fields: 3D Distillation of Self-Supervised 2D Image Representations,” in 2022 International Conference on 3D Vision (3DV), 2022,
+pp. 443–453.
+[47] K. Deng, A. Liu, J.-Y. Zhu, and D. Ramanan, “Depth-supervised
+NeRF: Fewer Views and Faster Training for Free,” in 2022 IEEE/CVF
+Conference on Computer Vision and Pattern Recognition (CVPR), 2022,
+pp. 12 872–12 881.
+[48] J. Johnson, A. Alahi, and L. Fei-Fei, “Perceptual losses for real-time
+style transfer and super-resolution,” in Computer Vision – ECCV 2016,
+B. Leibe, J. Matas, N. Sebe, and M. Welling, Eds., 2016, pp. 694–711.
+[49] IDEA-Research, “Grounded-sam,” https://github.com/IDEA-Research/
+Grounded-Segment-Anything, 2023.
+[50] S. Liu, Z. Zeng, T. Ren, F. Li, H. Zhang, J. Yang, C. Li, J. Yang,
+H. Su, J. Zhu et al., “Grounding dino: Marrying dino with grounded pre-
+training for open-set object detection,” arXiv preprint arXiv:2303.05499,
+2023.
+[51] Q. Wang, Z. Wang, K. Genova, P. Srinivasan, H. Zhou, J. T. Barron,
+R. Martin-Brualla, N. Snavely, and T. Funkhouser, “Ibrnet: Learning
+multi-view image-based rendering,” in CVPR, 2021.
+[52] B. Mildenhall, P. P. Srinivasan, R. Ortiz-Cayon, N. K. Kalantari, R. Ramamoorthi, R. Ng, and A. Kar, “Local light field fusion: Practical view
+synthesis with prescriptive sampling guidelines,” ACM Transactions on
+Graphics (TOG), 2019.
+[53] R. Zhang, P. Isola, A. A. Efros, E. Shechtman, and O. Wang, “The
+Unreasonable Effectiveness of Deep Features as a Perceptual Metric,”
+in 2018 IEEE/CVF Conference on Computer Vision and Pattern Recognition, 2018, pp. 586–595.
+[54] M. Heusel, H. Ramsauer, T. Unterthiner, B. Nessler, and S. Hochreiter,
+“GANs trained by a two time-scale update rule converge to a local nash
+equilibrium,” in Proceedings of the 31st International Conference on
+Neural Information Processing Systems, ser. NIPS’17, 2017, pp. 6629–
+6640.
+[55] L. Zhang and M. Agrawala, “Adding Conditional Control to
+Text-to-Image Diffusion Models,” 2023. [Online]. Available: http:
+//arxiv.org/abs/2302.05543
+[56] A. Haque, M. Tancik, A. A. Efros, A. Holynski, and A. Kanazawa,
+“Instruct-NeRF2NeRF: Editing 3D Scenes with Instructions,” 2023.
+[Online]. Available: http://arxiv.org/abs/2303.12789
+[57] A. Raj, S. Kaza, B. Poole, M. Niemeyer, N. Ruiz, B. Mildenhall,
+S. Zada, K. Aberman, M. Rubinstein, J. Barron, Y. Li, and
+V. Jampani, “DreamBooth3D: Subject-Driven Text-to-3D Generation,”
+2023. [Online]. Available: http://arxiv.org/abs/2303.13508
+[58] B. Poole, A. Jain, J. T. Barron, and B. Mildenhall, “DreamFusion:
+Text-to-3D using 2D Diffusion,” in ICLR, 2023. [Online]. Available:
+https://openreview.net/forum?id=FjNys5c7VyY
+[59] Z. Zhou and S. Tulsiani, “SparseFusion: Distilling View-conditioned
+Diffusion for 3D Reconstruction,” 2023. [Online]. Available: http:
+//arxiv.org/abs/2212.00792
+[60] U. Singer, S. Sheynin, A. Polyak, O. Ashual, I. Makarov, F. Kokkinos,
+N. Goyal, A. Vedaldi, D. Parikh, J. Johnson, and Y. Taigman,
+“Text-To-4D Dynamic Scene Generation,” 2023. [Online]. Available:
+http://arxiv.org/abs/2301.11280
+[61] S. Cao, W. Chai, S. Hao, Y. Zhang, H. Chen, and G. Wang, “Difffashion: Reference-based fashion design with structure-aware transfer by
+diffusion models,” IEEE Transactions on Multimedia, pp. 1–13, 2023.

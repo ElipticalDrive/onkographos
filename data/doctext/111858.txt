@@ -1,0 +1,1147 @@
+MDLIB: Molecule Dynamics Library. Contribute to scanberg/mdlib development by creating an account on GitHub.
+
+md_gto_iso_gpu: optimized GPU isosurface extraction (non-blocking jobs, flood, one measured path) by scanberg · Pull Request #15 · scanberg/mdlib · GitHub
+Skip to content
+You signed in with another tab or window. Reload to refresh your session.
+You signed out in another tab or window. Reload to refresh your session.
+You switched accounts on another tab or window. Reload to refresh your session.
+Dismiss alert
+Conversation
+scanberg
+commented
+Oct 21, 2026
+•
+edited
+Loading
+Uh oh!
+There was an error while loading. Please reload this page.
+Copy link
+Copy Markdown
+Owner
+The GPU path of the gridless isosurface extraction (md_gto_iso_gpu), optimized over rounds r1–r34.
+Each round was measured with viamd's Profiler on an RTX 3080 (Vulkan) and an M4 Pro (Metal). In r32 the
+variants that lost were removed, so the branch now carries a single path. The full history and numbers
+are in the commit messages.
+The pipeline
+Octree: tested from level 2.
+Kernels: iso_octree; iso_octree_small for up to 4 functions; iso_octree_dform for densities as
+phi^T D phi.
+Kept nodes are emitted in Morton order through a prefix sum.
+Brick slots and the brick hash are built on the device.
+Corners: from a point list, with shared high-face corners. The kernel depends on the set:
+iso_corners_list_f1v4: one function.
+Tiled GEMM iso_gcorners_f16/32/64.
+Wide GEMM w128/w192/y256: canonical sets of more than 64 functions.
+iso_dcorners: the D form.
+Flood (approximate): only for densities whose maxima are at the atoms
+(md_gto_iso_field_set_maxima_at_atoms), with all weights ≥ 0. Seeds are the bricks whose corners
+straddle the iso value, plus the bricks holding an atom. It matched the exact mesh in every measured case.
+Mesh and projection:
+Surface Nets cells and quads.
+Relaxation on the lattice surface, then a Newton projection.
+One orbital runs the whole projection in one launch (iso_project_list_f1).
+A step whose remaining error is predicted far below the tolerance ends the vertex.
+Output is regrouped per field and sheet.
+Non-blocking job API: md_gto_iso_gpu_job_begin/poll/progress/end.
+Three host waits per extraction, plus one per flood round.
+Long jobs launch the corners and the vertices in chunks, each followed by a progress marker.
+md_gto_iso_gpu_extract is the blocking form.
+Switches left: AO cutoff (GTO_ISO_EVAL_EPS, default 1e-6), D form (GTO_ISO_DFORM, default off),
+flood (GTO_ISO_FLOOD, default 1). Also md_gto_iso_gpu_switches_set.
+Profiling: md_gto_iso_gpu_profile_set/print gives per-step times, counts and kernel statistics.
+md_gpu: md_gpu_kernel_info_t.stats reports the driver's statistics for a compiled kernel: Vulkan
+pipeline executable statistics, Metal threadgroup memory.
+Measured (r32–r34 defaults, median extraction, h = 0.2 bohr)
+RTX 3080
+M4 Pro
+Dense evaluation of the same box
+mm density (156 functions)
+8.4–8.6 ms
+19.3–19.7 ms
+3080: 14.4–16.1 ms; M4: 33–35 ms
+tq density (221 functions)
+14.1 ms
+—
+15.9–16.5 ms
+mm HOMO
+2.25–2.3 ms
+2.42–2.49 ms
+3080: 0.48 ms; M4: 1.07–1.16 ms
+Densities beat the dense evaluation. The dense column is the evaluation only, without a mesh.
+Orbitals at h = 0.2 stay slower than dense. The octree's bounds are loose for them because the AO terms
+cancel: of 6,592 bricks kept for the mm HOMO, 704 have surface. Flooding is not safe for orbitals.
+Flooding every field loses small lobes; that is measured in the Profiler series and in the
+flood_sweep test.
+Tests (lavapipe)
+gto_iso_gpu_lib passes: matches_cpu_reference, fields_batch_like_alone, job_matches_extract,
+repeated_field_shares_functions and flood_sweep.
+It also passes with GTO_ISO_DFORM=1, GTO_ISO_CHUNKS=5 and GTO_ISO_FLOOD=0.
+flood_sweep: the default differs from the exact mesh in 0 cases.
+Metal was checked by the M4 Pro Profiler series. The meshes there match the 3080's vertex and triangle
+counts.
+For review
+Kernels after shutdown: md_gto_iso_gpu_shutdown must be called before the device is destroyed. A
+later md_gto_iso_gpu_initialize with a new device otherwise reuses the old kernels. One test tripped on
+this. A guard in initialize (drop the kernels when the device changes) would be small.
+Pipeline statistics: Vulkan now captures pipeline statistics for every kernel when the driver
+supports it. This is useful for profiling, but you may prefer it behind a device-creation flag.
+Experiment tests: the tests gated behind environment variables (taylor_brick_*, flood_experiment,
+benchmark) are analysis tools from the experiments. They are kept but skipped by default.
+Merge: master is merged into the branch (b5949ae), without conflicts. The build and the
+gto_iso_gpu_lib tests pass on the merged tree. Merging this PR with a merge commit (not a squash)
+keeps b5949ae on master, which is the commit viamd#174's ext/mdlib points at.
+The viamd side is scanberg/viamd#174: the non-blocking extraction in iso_meshes, with a progress bar.
+https://claude.ai/code/session_013DspSN5YmtffCGxMJt9S5L
+Generated by Claude Code
+Robin Skånberg
+and others
+added 30 commits
+October 20, 2026 07:32
+md_gto_iso_gpu: step by step profile of the extraction (temporary)
+…
+0612dd5
+```
+BENCHMARK (temporary, branch gto-iso-gpu-opt). md_gto_iso_gpu_profile_set
+makes md_gto_iso_gpu_extract wait after every step and record its wall
+clock and what it worked on: octree nodes per level, bricks, slots,
+vertices, and the vertices still moving before every evaluation pass.
+md_gto_iso_gpu_profile_print sums the steps by name.
+
+The gto_iso_gpu_lib.benchmark test prints the profile under each row
+(GTO_ISO_BENCH_PROFILE=0 turns it off), takes GTO_ISO_BENCH_ONLY to run a
+subset, and adds tq (MO, SCF, 16 MOs). iso_dens_src_load_ex loads files
+without NTOs. Also takes popcnt32 from md_intrinsics for the slot count.
+
+Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
+Claude-Session: https://claude.ai/code/session_013DspSN5YmtffCGxMJt9S5L
+```
+Merge branch 'master' into gto-iso-gpu-opt
+0a5b274
+md_gto_iso_gpu: relax before projecting; corner values in registers
+…
+8afa025
+```
+Vertices: relaxed on the lattice's own surface first, tangential to the
+trilinear interpolant's normal that iso_cells now writes, then projected
+once. The same quality (p1 and mean min angle, dev rms within noise on
+amide/mol, h 0.2 and 0.12) for 2.0-2.6 evaluations per vertex instead of
+5.1-6.4, and a third of the evaluation groups.
+
+Corners: iso_corners_f{1,8,16,32,64}, one thread per lattice point with the
+function columns accumulated in registers; the brick's shells listed once
+per block of 128 and packed into chunks of at most 32 AOs whose rows of C
+are staged in groupshared memory and read by every thread at once. Orbital
+sets no longer pad their functions to even indices.
+
+Shell lists compacted in parallel (iso_group_prefix) instead of by thread 0;
+the octree takes the AO offsets of a block from the shells' first AOs. Loads
+from groupshared indices are clamped (llvmpipe loads for inactive lanes) and
+all 16 field records are uploaded.
+
+EXPERIMENT (temporary): GTO_ISO_RELAX_FIRST=0 and GTO_ISO_CORNERS_V2=0 in
+the environment bring back the old forms. The profile counts the AOs that
+reach the bricks, and reports multiply-adds per second for the corners and
+the octree.
+
+Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
+Claude-Session: https://claude.ai/code/session_013DspSN5YmtffCGxMJt9S5L
+```
+md_gto_iso_gpu: octree ranges once per node, culled; corners with mon…
+…
+bf3f7bb
+```
+…omials
+
+Octree: the shells' ranges over a node are made once per pass for up to 4
+tiles of 64 functions (each lane owns a function of every tile) instead of
+once per tile, and only for the shells that reach the node. A dropped shell
+has every AO below 1e-10 over the node; fn_tail (2e-10 times the column's
+sum of |C|) is added to every function's bound for them.
+
+Corners: the Cartesian monomials of a shell made at once per l in md_gto's
+order, the AO normalization folded into the staged rows of C, those read as
+float4; a single function accumulates the shell's polynomial and multiplies
+by the radial part once. The groupshared rows are sized per F, so a narrow
+kernel keeps its occupancy.
+
+iso_eval: the radial part and its derivative once per (shell, vertex), not
+once per AO. iso_surface_box: the padding found by doubling and bisection
+over the monotone tails instead of 0.05 bohr steps (on the CPU and GPU
+paths alike).
+
+Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
+Claude-Session: https://claude.ai/code/session_013DspSN5YmtffCGxMJt9S5L
+```
+md_gto_iso_gpu: vertex values in registers; Newton ends on a predicte…
+…
+47c7fe0
+```
+…d error
+
+iso_eval_f{8,16,32,64}: value and gradient at 64 vertices per group of 256
+threads, a warp per channel (value, d/dx, d/dy, d/dz) accumulating F
+function columns in registers, the shells listed and the rows of C staged
+as for the corners; one thread per vertex applies its field's terms from
+the channels staged 16 vertices at a time. Used for sets with densities.
+
+iso_newton mode 2: a step whose next error, about |f'| / (2 |f|) s^2 for
+these exponentially decaying fields, is predicted below a tenth of the
+tolerance ends the vertex without an evaluation to confirm it (its normal
+then that of the evaluation before the step). On amide/mol at h 0.2 and
+0.12: 1.3-2.0 evaluations per vertex instead of 2.0-2.6, the largest
+vertex residual 1.4e-4 h (tolerance 1e-4 h), metrics otherwise unchanged.
+
+EXPERIMENT (temporary): GTO_ISO_EVAL_V2=0 and GTO_ISO_NEWTON_PREDICT=0
+bring back iso_eval and the checked convergence. The schedule experiment
+test also reports the vertices' residuals in the double field.
+
+Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
+Claude-Session: https://claude.ai/code/session_013DspSN5YmtffCGxMJt9S5L
+```
+md_gto_iso_gpu: fix the converged-group test; corners shared across f…
+…
+cd42af4
+```
+…aces
+
+Fix: the evaluators skipped a group of 64 vertices when the AND of their
+vdone flags was set, which a mix of 1 (converged) and 2 (predicted) clears:
+every pass after convergence ran in full with GTO_ISO_NEWTON_PREDICT=1.
+Now any nonzero flag counts.
+
+Shared corners (GTO_ISO_SHARED_CORNERS, default 1, register form only): a
+lattice point on a brick's high face belongs to the neighbour across it;
+when that neighbour is present with all of the brick's fields, the point is
+not evaluated but copied from it by iso_corners_fill. The points a brick
+does evaluate are compacted to the first threads, so the rest of the warps
+are free: 70-88 points per brick instead of 125 on mol at h 0.2. The
+profile counts them.
+
+EXPERIMENT: GTO_ISO_SKIP_BRICK_TEST=1 keeps every child of the octree's
+last tested level as a brick (default 0): when the bound keeps most
+candidates anyway, the corners deciding is cheaper. A superset of the
+bricks, so nothing is missed.
+
+Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
+Claude-Session: https://claude.ai/code/session_013DspSN5YmtffCGxMJt9S5L
+```
+md_gto_iso_gpu: switches settable at run time; AO cutoff 1e-6 (r5)
+…
+cdfa755
+```
+The experimental forms are a struct now (md_gto_iso_gpu_switches,
+md_gto_iso_gpu_switches_set), still read from GTO_ISO_* at initialization.
+New: eval_eps_exp, the AO cutoff 1e-N of the evaluations and of the octree's
+culling, default 1e-6 as the volume path uses; the bound adds 2 eps sum|C|
+per function for what is dropped, so no cell is missed. The set keeps what
+re-derives the shells' radii and the tails, and does so on the extraction
+after a change. On amide the corner values differ from the CPU reference by
+1.5e-7 instead of 1.2e-7 at most, the same bricks; on mol 25-28% fewer AOs
+reach a brick.
+
+The profile reports carry a revision (ISOG_REVISION, r5) with the switches.
+
+Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
+Claude-Session: https://claude.ai/code/session_013DspSN5YmtffCGxMJt9S5L
+```
+Merge branch 'master' into gto-iso-gpu-opt
+442f759
+md_gto_iso_gpu: corners from a list of points, 256 per group (r6)
+…
+9c37bf0
+```
+iso_points lists, brick by brick, the lattice points each brick evaluates
+(all 125, or with shared corners those it owns), and
+iso_corners_list_f{1,8,16,32,64} take 256 consecutive ones per group: 2-4
+neighbouring bricks, every thread busy, the setup of a shell shared by 256
+points instead of one brick's 70-125. The shells are listed for the box of
+the group's points, and a point skips a shell out of its reach (a whole
+wave when none of its points is in reach), so the larger box costs little.
+
+So that consecutive bricks are neighbours, the octree's brick level keeps
+the slots of rejected siblings in this mode (mask 0, no corner slots); the
+hash skips them and num_bricks counts only the kept ones.
+
+On lavapipe, mol at h 0.2, the corner kernel: 34 ms instead of 38 (HOMO),
+144 instead of 168 (difference density), 121 instead of 197 (transition
+density), 246 instead of 315 (16 MOs); the same points evaluated.
+
+EXPERIMENT (temporary): GTO_ISO_CORNERS_LIST=0, or the switch corners_list,
+brings back a group per brick.
+
+Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
+Claude-Session: https://claude.ai/code/session_013DspSN5YmtffCGxMJt9S5L
+```
+md_gto_iso_gpu: shells staged per chunk, terms as per-column weights …
+…
+b1e927e
+```
+…(r7)
+
+The register-form kernels (corners per brick, corners from the point list,
+vertex values) read every shell of a chunk from groupshared memory: its
+centre, cutoff, l, AO count and primitives are staged with its rows of C
+(k_load_chunk, chunks packed to at most 256 primitives), so the inner loop
+no longer waits on dependent global loads per shell. Each point skips the
+shells out of its reach in all three.
+
+Canonical terms (GTO_ISO_CANON_TERMS, default 1): when every term of every
+field is w a, w a^2 or w a b with a even and b = a + 1 (orbitals, density
+matrices, products of pairs), the set keeps them as three weights per field
+and column. The epilogues then stage a tile's weights and every thread
+applies them to its own accumulators: no rounds of 64 points over the
+term list. The vertex kernel puts a vertex's four channels on neighbouring
+lanes and shuffles the value channel to the gradient channels. The corner
+values accumulate in memory over the tiles instead of in registers.
+
+md_gpu: md_gpu_kernel_info reports the driver's statistics of a kernel
+(Vulkan: VK_KHR_pipeline_executable_properties, captured where the driver
+offers it; Metal: thread limit and threadgroup memory). The extraction
+profile lists them for the octree, corner and vertex kernels it ran.
+
+The set refuses shells of more than 64 primitives.
+
+Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
+Claude-Session: https://claude.ai/code/session_013DspSN5YmtffCGxMJt9S5L
+```
+md_gto_iso_gpu: corners and vertices as a tiled GEMM; octree per shel…
+…
+54a39dc
+```
+…l for orbitals (r8)
+
+iso_gcorners_f{16,32,64} and iso_geval_f{16,32,64} (GTO_ISO_GEMM, default 1):
+128 rows per group (corner points of the list; or 32 vertices x value and
+gradient channels). Per chunk of at most 16 AOs every thread puts its row's
+AO values in groupshared memory; thread (pg, cg) then multiplies rows
+4 pg .. 4 pg + 3 by F / 4 columns of the chunk's C: one float4 of AO values
+and F / 16 float4 of C per 4 F / 4 multiply-adds, instead of F / 4 float4 of
+C per F. The epilogues reduce the four column groups per row through
+groupshared memory (canonical terms), or stage the rows (other terms).
+On GTX 1060 the register form held 139-168 registers at 256 threads: one
+group per SM.
+
+iso_octree_small (GTO_ISO_OCTREE_SMALL, default 1): sets of at most four
+functions bound each node with a thread per shell, its AOs' sums straight
+in registers and reduced over the group at the end: no per-AO arrays in
+groupshared memory (iso_octree: 28.9 KB, three groups per SM) and no
+barriers per block of shells. Both octree kernels take the AOs' monomial
+ranges directly instead of from an array indexed by the exponents, which
+the driver spilled to local memory. The same nodes are kept.
+
+Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
+Claude-Session: https://claude.ai/code/session_013DspSN5YmtffCGxMJt9S5L
+```
+md_gto_iso_gpu: densities as phi^T D phi for corners and vertices (r9)
+…
+cc3f755
+```
+iso_dcorners and iso_deval (GTO_ISO_DFORM, default 1, sets of densities
+only): rho = phi^T D phi over the AOs that reach each group's box, whatever
+the factorization's rank. A group (128 rows: corner points of the list, or
+32 vertices x value and gradient channels) lists the shells reaching its
+box, then over tiles J of 64 local AOs accumulates T_J = sum over chunks
+I <= J of 16 AOs of Phi_I D'_IJ (D' = 2 D before the diagonal block: the
+upper block triangle) as the GEMM of r8 does, and adds Phi_J . T_J with the
+tile's AO values made again per column group; the gradient is
+dPhi_J . T_J + Phi_J . dT_J. About A^2 / 2 multiply-adds per row for A local
+AOs, against A x r in the factored form.
+
+D is built at set creation from the fields' terms (with the AO
+normalization folded in), one per distinct field, when every field is a
+density of products and the basis has at most 1024 shells (the local list
+in groupshared memory). The octree still bounds the factored form, so the
+set's limit of 1024 functions remains.
+
+Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
+Claude-Session: https://claude.ai/code/session_013DspSN5YmtffCGxMJt9S5L
+```
+md_gto_iso_gpu: the octree bounds phi^T D phi; no limit on the rank (…
+…
+55fb142
+```
+…r10)
+
+iso_octree_dform (GTO_ISO_DFORM_OCTREE, default 1, with the D form): over
+the AOs a node's box reaches, with pc their values at the centre and dev
+bounds of their deviation from them over the box,
+rho = pc^T D pc + 2 g . delta + delta^T D delta (g = D pc, |delta| <= dev),
+so rho lies within rho_c +- (2 sum |g| dev + sum dev |D| dev), intersected
+with |rho| <= m^T |D| m (m: the AOs' magnitude bounds; rho >= -slack for a
+positive semidefinite D), plus what the dropped AOs (each below eps over the
+box) can add: 2 (2 eps) sum m_mu sum_nu |D_mu nu| / |nrm_nu| and
+(2 eps)^2 sum |D|. Rounding is covered as in the factored bound. Per node
+four matrix-vector products over the local list, in blocks of 256 AOs. A
+local list of more than 2048 shells keeps the node.
+
+On amide (h 0.25) against the factored bound: 638 bricks instead of 660
+(SCF density), 450 instead of 436 (transition), 603 instead of 479
+(difference density: indefinite, where the factored form's per-function
+intersection is tighter). Every crossing cell is still in a brick.
+
+Sets of densities with more than 1024 functions no longer fail: they are
+made without functions (factorless) and run the D form only. A field made
+from a density matrix keeps the matrix (float), and the D form uses it
+instead of rebuilding it from the factors. The local lists hold 2048 shells
+(16-bit indices); a group of points whose list overflows fails the
+extraction with a message.
+
+TEST: GTO_ISO_FN_CAP lowers the 1024 (factorless sets on small systems).
+The CPU comparison skips the rejected siblings the point list keeps.
+
+Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
+Claude-Session: https://claude.ai/code/session_013DspSN5YmtffCGxMJt9S5L
+```
+md_gto_iso_gpu: coefficient screening for orbitals; the D-form octree…
+…
+897f0ec
+```
+… on its own (r11)
+
+Coefficient screening (GTO_ISO_COEF_SCREEN, default 1, sets of orbitals): a
+shell is dropped where its largest coefficient (over the set's functions)
+times its AOs is below eps, as the volume path screens, rather than where
+its AOs alone are; a shell without coefficients is never listed. The bound's
+tail per function becomes 2 eps n_AO. mol HOMO at h 0.2: 89 AOs reach a
+brick instead of 112, 897 bricks instead of 887; on amide the corners stay
+within 3.4e-6 of the CPU reference.
+
+The D-form octree no longer needs the D-form evaluation: it bounds the
+matrix's density, which the slack in the bound relates to the factored
+one. On C60 (GTX 1060) the D-form octree took 12.7 ms against 50 ms and kept
+fewer bricks, while the D-form evaluation was 3.6 times slower than the
+factored GEMM, so its default is now off (sets beyond 1024 functions use it
+regardless). Its shells read their primitives from groupshared memory only:
+a select between that and the global copy issued the global load as well.
+
+Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
+Claude-Session: https://claude.ai/code/session_013DspSN5YmtffCGxMJt9S5L
+```
+md_gto_iso_gpu: four corner points per thread for orbitals; vertex va…
+…
+791a66b
+```
+…lues from lists (r12)
+
+iso_corners_list_f1v4 (GTO_ISO_CORNERS_V4, default 1, one function): 64
+threads take 256 consecutive points of the list, four consecutive points
+per thread, so a shell's staged data, primitives and coefficients are read
+once for four points (the volume path's kernel shares them over the voxels
+of a thread the same way). On lavapipe, mol HOMO: 18.7 ms instead of 32.0,
+the same mesh.
+
+iso_eval_list_f1 (GTO_ISO_EVAL_LIST, default 1, one orbital): value and
+gradient at 128 consecutive vertices per group from the shells listed for
+their box and staged with their coefficients, instead of every shell per
+vertex from global memory; groups whose vertices have all converged are
+skipped. The same mesh.
+
+k_list lists at most 128 shells per pass (the groups of 256 threads take two
+passes): 3.5 KB less groupshared memory for the 128-thread GEMM kernels
+(iso_gcorners_f64 22.5 KB instead of 26.1), so four groups fit on a GTX 1060
+SM where the registers allow.
+
+EXPERIMENT (the driver's register allocation, 163 registers for
+iso_gcorners_f64 on the GTX 1060): GTO_ISO_GEMM_T32 runs sets of more than
+32 functions in tiles of 32; GTO_ISO_GEMM_PIPE picks the F = 64 kernels'
+loop over a chunk's rows: 0 left to the compiler, 1 not unrolled ([loop]),
+2 unrolled over 16 rows padded with zeros.
+
+Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
+Claude-Session: https://claude.ai/code/session_013DspSN5YmtffCGxMJt9S5L
+```
+md_gto_iso_gpu: the Newton tolerance as a switch (r13)
+…
+5433766
+```
+GTO_ISO_NEWTON_TOL=N (default 4): a vertex has converged within 1e-N h of
+the surface, N in 1..6 (it was fixed at 1e-4 h). On lavapipe (the schedule
+experiment) the vertices take 2.9 / 2.5 / 2.0 evaluations each for 1e-4 /
+1e-3 / 1e-2 h, with the mesh's quality metrics unchanged: the facets' own
+deviation from the surface is about 3e-2 h rms, so a tighter tolerance buys
+nothing visible. The default stays 1e-4 h until it is measured on the GTX
+1060.
+
+Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
+Claude-Session: https://claude.ai/code/session_013DspSN5YmtffCGxMJt9S5L
+```
+md_gto_iso_gpu: the D form triangular by chunks, its AO values made o…
+…
+6aaf725
+```
+…nce per tile (r14)
+
+New D-form kernels (GTO_ISO_DFORM_KERNEL: 1 iso_dcorners2/iso_deval2, the
+default; 2 iso_dcorners3/iso_deval3; 0 those of r9), for sets of densities
+with GTO_ISO_DFORM and for every factorless set:
+
+- D' is upper triangular by chunks of 16 AOs (2 D before a column's chunk,
+  D on its diagonal block, 0 after), so the T of a column chunk is complete
+  at its own row chunk and Phi . T is taken then from the AO values already
+  in g_phi: a tile's AO values are no longer made a second time.
+- The column chunks are waves (cg = tid / 32): a wave skips the row chunks
+  after its own and a column chunk past the list's end (about half the
+  multiply-adds where the list spans two tiles or less).
+- Each chunk's first shell comes from a table made once per group, and the
+  next chunk is staged while the current one is evaluated (two buffers):
+  two barriers per chunk instead of five, no searches per chunk.
+- The tile's D' is loaded into registers before the AO values are made;
+  Phi . T is summed over the tiles in registers and reduced once.
+- Phi . T reads the AO values again after a groupshared fence: without it
+  the compiler kept the MAC loop's 16 float4 loads alive for it (ACO: 154
+  VGPRs before scheduling, 112 with the fence).
+
+Kernel 2 takes tiles of 128 columns in groups of 256 threads, two threads
+per row making its AO values (the chunk's shells split by parity): half the
+chunk steps per row for long lists, but 34 KB of groupshared memory (two
+groups per GTX 1060 SM, one if the driver gives it more than 128
+registers) against 30 KB (three).
+
+On lavapipe, mol SCF density with the D form (min of 3 runs): corners 458
+-> 406 (kernel 1) / 390 (kernel 2) ms at h 0.25, and 477 -> 290 / 277 ms
+with the AO cutoff at 1e-10 (126 AOs per brick); vertex values 460 -> 302 /
+293 and 495 -> 285 / 270 ms. The same meshes; on amide the corners stay
+within 3.1e-5 of the CPU reference (max |f| 46), factorless sets too.
+
+The chunk table holds 1024 chunks: more than 16384 AOs reaching a group
+fail the extraction, as more than 2048 shells do.
+
+Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
+Claude-Session: https://claude.ai/code/session_013DspSN5YmtffCGxMJt9S5L
+```
+md_gto_iso_gpu: bricks, corner points and vertices in Morton order; n…
+…
+f13bbc2
+```
+…ew defaults (r15)
+
+Ordered lists (GTO_ISO_ORDERED, default 1): the host sorts the brick list it
+reads back by Morton code (siblings stay together) and uploads it again.
+iso_points and iso_cells first write each brick's count, iso_scan (one
+group) turns the counts into offsets, and the points and vertices are
+written at their brick's offset. Before, one atomic per brick put them in
+the order the groups got there, so a group of 128 consecutive points (or 32
+vertices) could span bricks far apart and list far more shells. On
+lavapipe, mol SCF density at h 0.2: the AOs reaching a corner group drop
+from 170 to 98 (a brick: 90), a vertex group from 136 to 86; corners take
+323 ms instead of 585, the projection 130 instead of 269. The same meshes,
+in another order.
+
+The profile reports the AOs reaching the corner kernel's groups and the
+vertex groups (computed on the host from the read-back lists, not timed).
+
+DIAGNOSTIC (GTO_ISO_DIAG=1|2): the corner GEMM kernels (iso_gcorners_*,
+iso_dcorners2/3) run without making the AO values, or without the
+multiply-adds. The corners are then zeroed (no surface): only the corner
+kernel's time means anything, and it shows how that time divides on the
+GTX 1060.
+
+New defaults from the GTX 1060 (C60, r14):
+- GTO_ISO_DFORM_KERNEL=2: corners in 365 ms, against 533 with the r9
+  kernels and 820 with kernel 1.
+- GTO_ISO_NEWTON_TOL=2: density 250 -> 194 ms, one evaluation per vertex.
+  On amide the facets' deviation from the surface changes by at most 1.3%.
+
+The D form's kernels take their D' buffer as a type parameter: the driver
+allocated groupshared memory for both buffers (38 KB for iso_dcorners2, so
+only two groups per SM).
+
+llvmpipe loads through a pointer in a branch not taken, so scan is
+allocated even when the lists are not ordered.
+
+Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
+Claude-Session: https://claude.ai/code/session_013DspSN5YmtffCGxMJt9S5L
+```
+md_gto_iso_gpu: the wide GEMM, one pass over up to 256 functions (r16)
+…
+1a8b2b3
+```
+iso_gcorners_w{128,192,256} and iso_geval_w{128,192,256} (GTO_ISO_GEMM_WIDE,
+default 1) take canonical sets of more than 64 functions: 64 rows per group
+of 256 threads (corners: 64 consecutive points of the list; vertices: 16
+vertices x 4 channels), 128, 192 or 256 function columns per pass. The
+shells are listed and staged, and the AO values made, once per pass instead
+of once per tile of 64. The four threads of a row each make the AO values
+of every fourth shell of a chunk; thread (pg, cg) multiplies rows
+4 pg .. 4 pg + 3 by F / 16 columns. The epilogue reduces the 16 column
+groups per row. Columns past the row of weights (a pass of 256 over a
+stride of 320) are neither read nor counted.
+
+Why: on the GTX 1060 (C60 density, r15 diagnostics), the factored corners
+took 61 ms: about 11 ms making AO values, 23 ms of multiply-adds (420 G/s,
+the dense GEMM kernel's rate) and 27 ms of listing, staging, barriers and
+the epilogue. With 180 functions as three tiles of 64, the AO values and
+most of the rest were repeated three times.
+
+On lavapipe (mol SCF with 139 virtual orbitals added, 180 functions):
+corners 745 ms against 698 for the tiles of 64, vertex values 278 against
+364; the same meshes. TEST: GTO_ISO_GEMM_WIDE=2 takes the wide kernels from
+17 functions: corners within 2.5e-5 of the CPU reference (max |f| 51) on
+mol.
+
+TEST hooks: GTO_ISO_REF_FILE picks the system matches_cpu_reference
+compares (amide.h5 by default); GTO_ISO_SCF_EXTRA=N adds N virtual orbitals
+at weight 0.01 to the SCF densities (larger sets on small systems).
+
+Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
+Claude-Session: https://claude.ai/code/session_013DspSN5YmtffCGxMJt9S5L
+```
+md_gto_iso_gpu: diagnostics for the corner kernels' overhead (r17)
+…
+0cd8108
+```
+On the GTX 1060 (C60 density, r16) the wide kernel's corners took 48.5
+ms: about 3.7 ms making AO values, 12.4 ms of multiply-adds (about 1.9 T/s,
+near the card's peak) and about 32 ms of everything else. GTO_ISO_DIAG
+gains three modes for the corner GEMM kernels (iso_gcorners_*) to split
+that rest:
+- 3: the shell lists only, no chunks.
+- 4: no rows of C loaded (zeros staged).
+- 5: no shells or primitives staged and no AO values made.
+As before, the corners are zeroed (no surface): only the corner kernel's
+time means anything.
+
+Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
+Claude-Session: https://claude.ai/code/session_013DspSN5YmtffCGxMJt9S5L
+```
+md_gto_iso_gpu: every kernel within 32 KB of groupshared memory; a ke…
+…
+5ae35e8
+```
+…rnel the device cannot make fails only where chosen (r18)
+
+Apple GPUs allow 32 KB of threadgroup memory per group. iso_dcorners3 and
+iso_deval3 used about 34 KB, and iso_gcorners_w256/iso_geval_w256 32.3 KB;
+one kernel failing to build failed every extraction. Now:
+- The D form's staged primitives are 8 per shell (DQ_PMAX; a shell with
+  more reads them from global memory).
+- Its chunk table holds 512 chunks: more than 8192 AOs reaching a group
+  fail the extraction, as more than 2048 shells do.
+- The wide kernels reduce their epilogue sums through the C buffer instead
+  of a separate array (4 KB less).
+The largest are now iso_eval (32.2 KB, unchanged since round 1),
+iso_corners (31.1 KB), and iso_dcorners3/iso_deval3 (31.0 KB).
+
+Kernels are still all made at once, but one the device cannot make
+fails the extraction only where it is chosen, with a message naming it.
+The D form falls back to its older kernels, the wide GEMM to tiles of
+64, and the four-point corner kernel to one point per thread. Only the
+kernels every extraction needs (grid, hash, points, scan, cells, quads,
+Newton, relax, buckets, fill) still fail all of them.
+
+Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
+Claude-Session: https://claude.ai/code/session_013DspSN5YmtffCGxMJt9S5L
+```
+md_gto_iso_gpu: Metal: groupshared floats a thread at a time, not flo…
+…
+82f4bd2
+```
+…at4 components (r19)
+
+On the M4 Pro (Metal) the new kernels made wrong corners: mm HOMO gave
+1580 vertices against 10056 with the round-1 kernels, the density 292K
+against 60K, and the vertices never converged. Threads wrote single
+floats into groupshared float4 arrays: the chunk rows of C (K_BUF st), the
+AO values (g_phi[...][cg], w_phi[...][ce]) and the epilogue staging.
+Slang emits these as arr[i >> 2][i & 3] = v. Metal may compile such a
+write as a read-modify-write of the whole vector, so two threads writing
+different components of the same float4 lose one of the writes. Every
+kernel staging through these buffers was affected: the list corners
+(f1, f1 x4), the eval list, the GEMM, the wide GEMM and the D form. The
+round-1 orbital kernels were not.
+
+These buffers now have two layouts, chosen per target with
+__target_switch. SPIR-V keeps the float4 arrays (one 16-byte load per
+float4, unchanged on Vulkan). Metal gets plain float arrays, written a
+float at a time and read as four floats. Each kernel references only its
+target's array: the SPIR-V is the same size as before. No dynamic
+component write into a threadgroup vector is left in the generated MSL.
+Not run on Metal here (no device); lavapipe tests pass.
+
+Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
+Claude-Session: https://claude.ai/code/session_013DspSN5YmtffCGxMJt9S5L
+```
+md_gto_iso_gpu: Metal: the D-form kernels' fence no longer a threadgr…
+…
+10f70d4
+```
+…oup barrier; profile: corner bricks by what their corners show, ms per octree level (r20)
+
+gemm_dform2 (iso_dcorners2/3, iso_deval2/3) fenced its AO-value reloads with GroupMemoryBarrier()
+in a branch one wave takes at a time. Slang emits that as threadgroup_barrier on Metal, an execution
+barrier for the whole threadgroup, so the waves fell out of step and the D-form corners were wrong on
+Apple GPUs (dform eval on: 123164 vertices for 60448). iso_wave_fence() is simdgroup_barrier there and
+GroupMemoryBarrier() elsewhere (the SPIR-V is unchanged).
+
+The profile now classifies the bricks given corners: with surface cells, or without and every corner
+inside a sheet or outside, and prints each octree level's time.
+
+Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
+Claude-Session: https://claude.ai/code/session_013DspSN5YmtffCGxMJt9S5L
+```
+md_gto_iso_gpu: the D-form octree 8 children per group; the wide GEMM…
+…
+7875217
+```
+…'s shells listed once (r21)
+
+iso_octree_dform8 (levels below the root, GTO_ISO_OCTREE8, default on): a node's 8 children in one
+group, the shells reaching the parent listed once and each element of D loaded once for all 8
+instead of once per child (the per node kernel is bound by those loads). A child counts an AO only
+where its shell reaches the child's own box, so the sums are the child's own; the same nodes are kept.
+
+gemm_wide2 (GTO_ISO_WIDE_KERNEL, default 1): the group's shells listed once, all of them in rounds
+of 256 (gemm_wide lists 128 of the set per pass), and staged as they are listed: centres, primitives
+and each AO's global index, so a chunk stages only its rows of C (gemm_wide stages each chunk's shells
+after a barrier, the loads' latency exposed per chunk). Chunks are 16 consecutive AOs of the list, a
+shell across a chunk's edge made in both, so every chunk is full but the last. Same sums in the same
+order. 2: the next chunk's rows of C loaded into registers during this chunk (F / 16 more registers).
+
+Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
+Claude-Session: https://claude.ai/code/session_013DspSN5YmtffCGxMJt9S5L
+```
+md_gto_iso_gpu: the octree tests from level 2; the D-form octree's lo…
+…
+435a808
+```
+…ads four rows ahead; octree8 off (r22)
+
+M4 Pro, mm density, r21: the D form's levels 0 and 1 (one node and eight, each reaching every AO, a
+group each) took 2.9 ms of the octree's 11.4 and dropped no node, as in every series so far: the root
+box holds the surfaces. The octree now starts at level 2 (GTO_ISO_OCTREE_START, 0..3), its nodes
+every node of the levels above with the root's sheet bits.
+
+iso_octree_dform issues four rows' loads of D before using any: one load per four multiply-adds, the
+loop waited on memory. Summed in the same order (same bounds), no more registers.
+
+iso_octree_dform8 off by default: on the M4 Pro it ran the levels of few nodes a group where there
+were 8 (octree 15.1 ms against 11.4), and the bricks' level only 6% faster.
+
+Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
+Claude-Session: https://claude.ai/code/session_013DspSN5YmtffCGxMJt9S5L
+```
+md_gto_iso_gpu: iso_dcorners4, the D form's corners in one tile sprea…
+…
+a829bfe
+```
+…d over the waves; D-form corners alone (r23)
+
+iso_dcorners3 gives each of its 8 waves a chunk of 16 columns in tiles of 128: for A = 158 the second
+tile holds 2 chunks, so 2 waves of 8 work through all 10 row chunks while 6 wait, and each tile makes
+the AO values of every row chunk again (18 chunks made for 10). On the M4 Pro (mm density, r22) its
+corners took 29.9 ms against the canonical 23.0 for half the multiply-adds.
+
+iso_dcorners4 (GTO_ISO_DFORM_KERNEL=3): 64 points per group of 256 threads, one tile of up to 192
+columns spread evenly over the 8 waves (a multiple of 4 columns each), so a list of up to 192 AOs is
+one tile, each chunk's AO values made once, every wave with columns. Thread (lane, wave): rows
+2 lane, 2 lane + 1; per row chunk, thread t loads tile column t's rows of D' (none before the column's
+chunk) before the chunk's AO values are made. Vertices keep iso_deval3.
+
+GTO_ISO_DFORM_CORNERS=1: sets of densities take the D form for the corners only, the vertices as
+without it (the canonical wide GEMM where there are canonical terms).
+
+Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
+Claude-Session: https://claude.ai/code/session_013DspSN5YmtffCGxMJt9S5L
+```
+md_gto_iso_gpu: iso_dcorners4 taken out (r24)
+…
+0882e9d
+```
+On the M4 Pro (mm density, r23) its corners took 53.2 ms against 29.8 for iso_dcorners3 and 23.0
+for the canonical wide GEMM; without the multiply-adds 33.9 against 15.1. Half as many points per
+group doubled the fixed cost per point (the shell list over the whole set, the chunk table, the steps'
+loads of D', staging and barriers), and a step of 64 points has too little AO work to hide its loads.
+GTO_ISO_DFORM_CORNERS stays.
+
+Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
+Claude-Session: https://claude.ai/code/session_013DspSN5YmtffCGxMJt9S5L
+```
+md_gto_iso_gpu: APPROXIMATE corners from seeds and a flood, as a swit…
+…
+b605728
+```
+…ch (r25)
+
+GTO_ISO_FLOOD (default 0): the bricks the octree keeps are evaluated at their 8 corners first (each
+corner once, from the brick that holds it at its low end); a brick whose corners straddle an iso value
+is a seed (round 1); each round's bricks are evaluated in full (sharing points with bricks evaluated by
+then), and a brick across a face holding a sign change on a face edge joins the next round
+(iso_flood_seed, iso_flood_face); the bricks no round reached lose their sheet bits (iso_flood_finish).
+Every evaluated brick has surface cells; a surface piece no seed reaches is missed. 1: densities with
+every weight >= 0 (total, alpha, beta); 2: every field (to see what it misses).
+
+Simulated first on the GPU's own candidates and corners (unittest gto_iso_gpu_lib.flood_experiment,
+GTO_ISO_FLOOD=1): six molecules, h 0.2 and 0.12, total densities at 0.0025, 0.02, 0.1: no surface
+brick missed in 30 sheets, 56% of today's lattice points; HOMO, LUMO, difference and transition
+densities: small pieces missed in 20-70% of the sheets. Also kept: gto_iso_gpu_lib.taylor_brick_experiment
+(GTO_ISO_TM=1), a TOPO_ANALYTIC-style Taylor model per brick, which drops 0-6% of the inside bricks.
+
+Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
+Claude-Session: https://claude.ai/code/session_013DspSN5YmtffCGxMJt9S5L
+```
+md_gto_iso_gpu: the flood on by default for SCF densities, seeded at …
+…
+7af32f7
+```
+…the atoms; wide kernel by width (r26)
+
+The flood (r25) evaluates a density's lattice only around its surface: the brick corners first, then
+the bricks whose corners straddle the iso value, then round by round across faces with a sign change.
+On the RTX 3080 it cut the corners of the mm and tq total densities from 9.7 and 13.3 ms to 4.2 and
+6.7 ms, the same meshes to the vertex.
+
+r25's flood missed pieces once the iso value was high enough for them to fall between the brick
+corners: total densities at 0.3 and above lost up to 60% of their vertices (amide, mol). The bricks
+holding an atom are now seeds too (iso_flood_atoms, a thread per shell): a total density's maxima are
+at the nuclei, so every piece of its surface holds one. Over h2o, amide and mol, total, attachment and
+detachment densities at iso 0.0025 to 3 (unittest gto_iso_gpu_lib.flood_sweep):
+  - total densities with the atom seeds: every mesh as the exact one;
+  - without them: 12 meshes with pieces missing;
+  - attachment and detachment densities, even with the atom seeds: 3 still missing pieces, since
+    their maxima lie between the atoms.
+So the default (GTO_ISO_FLOOD=1) floods only fields marked md_gto_iso_field_set_maxima_at_atoms
+(new; for an SCF density, total or of one spin) whose weights are all >= 0. Every other field is
+extracted exactly, as before. Orbitals were never flooded by default: on the 3080, the mm, C60 and tq
+HOMOs lost 288, 1296 and 228 vertices.
+
+With the flood, the octree's last level (the brick test) is skipped by default, since the brick
+corners reject the empty bricks for less than the bound costs (mm density 12.5 -> 10.1 ms;
+GTO_ISO_FLOOD_BRICK_TEST=1 keeps it).
+
+The flood claims bricks with InterlockedMin, an unreached brick being FLOOD_NONE, instead of a
+compare-exchange: Slang's Metal output for that is atomic_compare_exchange_weak_explicit, which may
+fail spuriously. The brick hash's insert, the one other compare-exchange, now retries when the
+exchange fails with the slot still empty.
+
+Wide kernel (GTO_ISO_WIDE_KERNEL) default 3, auto: r16's kernels up to 192 columns, the C-ahead ones
+at 256. On the 3080 occupancy decides:
+  - 192 columns: w192 fits in 127 registers, two groups of 256 per SM, against x192's 139 and y192's
+    144, one group each. mm density corners: w 6.8 ms, y 7.2, x 9.7.
+  - 256 columns: all three fit one group, and y's rows of C held ahead hide the latency. tq density:
+    y 10.3 ms, x 13.3, w 15.8.
+On the M4 Pro, w192 was 3% ahead of x192; y is not measured there yet.
+
+The flood's final readback of the bricks is skipped unless profiling or testing (one wait fewer).
+
+Also kept: gto_iso_gpu_lib.taylor_brick_mo_experiment (GTO_ISO_TM_MO=1), the Taylor-model brick test
+for orbitals. Over the bricks the octree keeps, K = 3 drops 38-61% of the empty ones and K = 4 drops
+49-72% (amide and mol, HOMO and LUMO), with no surface brick dropped.
+
+Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
+Claude-Session: https://claude.ai/code/session_013DspSN5YmtffCGxMJt9S5L
+```
+md_gto_iso_gpu: the flood off under the DIAGNOSTIC modes (r26b)
+…
+f328994
+```
+They make no real corners, so a flood under them evaluated every brick (the 3080's tq density
+series: diag no AO values 23.5 ms with the corners of every candidate) or none.
+
+Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
+Claude-Session: https://claude.ai/code/session_013DspSN5YmtffCGxMJt9S5L
+```
+Robin Skånberg
+and others
+added 8 commits
+October 21, 2026 08:44
+md_gto_iso_gpu: the octree's last level skipped by default (r27)
+…
+7693430
+```
+GTO_ISO_SKIP_BRICK_TEST defaults to 1. The octree's last level, the brick test, is its most expensive,
+and the corners reject what it would for less.
+  - RTX 3080, orbitals: 0.2-1 ms faster (mm HOMO 2.98 -> 2.77; tq 3.1 -> 2.6-3.0; C60 about 6.0 ->
+    4.7-5.4, about 15% more bricks given corners).
+  - RTX 3080, flooded densities: 2.4-2.5 ms faster (mm 12.5 -> 10.1, tq 17.5 -> 15.0).
+  - RTX 3080, other densities: even.
+  - M4 Pro (r22, r23): orbitals 0.2-0.3 ms faster on two of three runs; densities even.
+The flood's own brick-test switch (r26, flood_brick_test) goes, since skip_brick_test now covers both.
+
+Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
+Claude-Session: https://claude.ai/code/session_013DspSN5YmtffCGxMJt9S5L
+```
+md_gto_iso_gpu: the extraction as a job that never blocks the caller …
+…
+9f7ffe4
+```
+…(r28)
+
+md_gto_iso_gpu_job_begin / _poll / _progress / _end. Where the host needs a count from the device (the
+brick count, the bricks, each flood round's new bricks, the vertex count, the final counts, the
+buckets), the job copies it to host-readable memory, records a sync (md_gpu_stream_record) and returns.
+md_gto_iso_gpu_job_poll(job, budget_ms) takes each count once its sync has passed and issues the work
+after it, waiting for the GPU budget_ms in all at most (0: not at all, < 0: until done). A job polled
+once a frame runs alongside the rendering; the GPU work is as before.
+
+  - The device memory is the job's own (md_gpu_malloc, freed at its end, recorded on the stream), not a
+    temp scope, so the stream may serve other work between polls, temp scopes included.
+  - desc.read_back copies the mesh to the host within the job (mesh.host_position, host_normal,
+    host_index, freed by md_gto_iso_gpu_mesh_free), so a caller needs no blocking readback either.
+  - Ending a job early drops what it made and never waits: the work in flight completes unseen.
+  - md_gto_iso_gpu_extract is a job polled until done, so its results and the profile are unchanged.
+  - The extraction's body is the old function, cut at its waits into the job's stages (ISOG_J_*).
+
+Test gto_iso_gpu_lib.job_matches_extract, on amide's HOMO, SCF density (flooded) and difference density:
+  - A job polled with budget 0, with a temp scope and fills on the stream between polls, gives the same
+    triangles as md_gto_iso_gpu_extract (compared by their corners' positions, since the order within a
+    range comes from atomics and differs between any two extractions).
+  - Its host copy is the device's mesh, and its progress never goes back.
+  - Jobs ended at each of their first waits leave the device's allocations as they were.
+
+Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
+Claude-Session: https://claude.ai/code/session_013DspSN5YmtffCGxMJt9S5L
+```
+md_gto_iso_gpu: three waits instead of five, the bricks ordered and s…
+…
+fce4215
+```
+…lotted on the device (r29)
+
+An extraction now waits for the device at three points (plus one per flood round), down from five:
+the brick and slot counts, the vertex count, and the final counts with the mesh.
+
+The bricks' readback goes:
+  - The octree emits in order. Each node leaves its sheet bits and the count of what it emits (8
+    children, or itself at the brick level) in scan. Their prefix sum (iso_scan, now able to take its
+    count from the device and give its sum to count_out) places the emission (iso_octree_emit, new).
+    The first level comes in Morton order and a node's children too, so every level comes out in Morton
+    order, the bricks included, with no host sort.
+  - The bricks' corner slots are their prefix sum on the device (iso_brick_slots, new, then iso_scan).
+    The slot total (counters[4]) and the bricks kept (counters[8]) come back with the brick count, in
+    the one wait that sizes the corners' buffers.
+  - The bricks are read to the host only for the profile and the tests.
+
+The final counts' own wait goes:
+  - The output is sized from the vertex count (indices for up to cap_q = 3 nv + 1 quads).
+  - The bucket kernels take the quad count from counters[1].
+  - The counts and buckets are read once, at the end. With read_back the mesh comes in the same copy,
+    its triangles up to 2 nv + 64 quads (a closed surface has about as many quads as vertices); more are
+    read after, in a second copy (tested with GTO_ISO_READBACK_SHORT=1).
+
+Also:
+  - A kernel's count_in now always points at valid memory: llvmpipe loads both sides of a select, and
+    iso_scan's new count switch read it through a null pointer.
+  - The new kernels clamp their indices for llvmpipe's inactive lanes.
+
+The gto_iso_gpu_lib tests pass on lavapipe, including job_matches_extract with the second copy forced.
+
+Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
+Claude-Session: https://claude.ai/code/session_013DspSN5YmtffCGxMJt9S5L
+```
+md_gto_iso_gpu: one orbital's Newton projection in one launch; relaxa…
+…
+2c12c68
+```
+…tion without copies (r30)
+
+  - Fused projection (iso_project_list_f1, GTO_ISO_FUSED_PROJECT, default 1). One orbital's projection
+    was an evaluation (iso_eval_list_f1) and a step (iso_newton) launched per iteration over every
+    vertex: 9 + 9 launches, each followed by a full barrier. Most of them have nothing to do: on the
+    3080's tq HOMO, 10130 vertices move in the first pass, 1686 in the second, 19 in the third, then
+    none. A group of 128 vertices now runs every iteration in one launch, each one an evaluation (its
+    shells listed and staged for its box, as iso_eval_list_f1) and a step for the vertices still moving
+    (as iso_newton). It ends when the group has converged, then writes the normals.
+  - Relaxation alternates vpos and vpos_out instead of copying back after each pass: 3 copies fewer.
+  - One orbital's vertex stage goes from 24 operations to 4.
+
+Test gto_iso_gpu_lib.fused_projection_matches, on amide's and mol's HOMO and LUMO: the fused and the
+pass-by-pass projection give identical meshes on lavapipe, every triangle to the bit. Other devices may
+differ by rounding where the compiler fuses differently; the test allows 1e-3 bohr.
+
+Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
+Claude-Session: https://claude.ai/code/session_013DspSN5YmtffCGxMJt9S5L
+```
+md_gto_iso_gpu: a long job's corner and vertex launches in chunks, it…
+…
+ed7e16a
+```
+…s progress from them; MO corner diagnostics (r31)
+
+Progress. A job's progress moved only at its waits for counts: the corners and the vertex evaluation,
+most of a long extraction, went by as one step each. A long job now launches them in chunks, each
+followed by a marker (md_gpu_stream_record), and md_gto_iso_gpu_job_progress reports the markers passed.
+  - When: the octree's time decides. A job whose octree took 4 ms or more gets a chunk for every 2 ms of
+    it, up to 32: the octree is a tenth to a quarter of an extraction, so a chunk is about 10-20 ms of
+    work. A quicker job is not split (the markers would cost more than they tell), nor is
+    md_gto_iso_gpu_extract's or a profiled one. GTO_ISO_CHUNKS=n forces n (tests).
+  - How: IsoArgs.group_base, which node_index adds, offsets a chunk's groups.
+      - Direct launches (the vertex evaluation's first pass, the fused projection) split their groups.
+      - Indirect ones (the corners, whose point count only the device knows) split the groups expected
+        (about 70 points a brick evaluated in full): iso_grid takes group_base and grid_max, and the last
+        chunk takes whatever is left. A chunk is at most 65535 groups, so a grid's y adds none past it.
+  - The progress: the octree to 0.15; the corners to 0.6 (with the flood: the brick corners to 0.2, the
+    seeds' pass to 0.55, each later round half of what is left); the vertices 0.65 to 0.92; the output
+    to 1. It never goes back.
+  - Also a point where other work (the rendering) can get the GPU between chunks.
+
+Test job_matches_extract, in 6 chunks: the same triangles; the progress in 15-17 steps (amide HOMO:
+0.05 0.20 0.27 0.33 0.40 0.47 0.53 0.60 0.65 0.69 0.74 0.78 0.83 0.88 0.92), against 4-6 unchunked. All
+the gto_iso_gpu_lib tests pass with GTO_ISO_CHUNKS=5 as well.
+
+MO corners: the DIAGNOSTIC switches now act on iso_corners_list_f1v4, one orbital's corner kernel (they
+acted on the GEMM kernels only, so the Profiler's diag rows showed nothing for orbitals):
+  - 1: no AO values (no exponentials, no monomials)
+  - 2: the radial part only (no monomials, no coefficients)
+  - 3: the lists only
+  - 4: no rows of C
+  - 5: no shells staged
+
+Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
+Claude-Session: https://claude.ai/code/session_013DspSN5YmtffCGxMJt9S5L
+```
+md_gto_iso_gpu: the measured winners as the only path; the experiment…
+…
+9a79b7a
+```
+…s, their switches and the kernels that lost removed (r32)
+
+Every choice below was settled by the Profiler series on the RTX 3080 and the M4 Pro (r31 again: each
+default confirmed). What is left is the pipeline as it runs by default, so it can be
+read and reviewed as one path.
+
+  - Kernels: 78 entry points to 39, so the first extraction also makes half as many pipelines.
+  - Switches: 29 to 3 (eval_eps_exp, dform, flood).
+  - gto_iso_gpu.slang: 4431 lines to 3053. md_gto_iso_gpu.inl: 2333 to 1955.
+
+Fixed as the only path (each was a switch):
+  - relax on the lattice surface first, then project; the octree's last level not bounded (the corners
+    decide); the octree tested from level 2
+  - corners from the point list, in Morton order (counts, prefix sum, offsets), shared high-face corners
+  - one function: four corner points per thread (iso_corners_list_f1v4) and the Newton projection in one
+    launch (iso_project_list_f1); orbitals screened by their largest coefficient
+  - more functions: the tiled GEMM with the canonical epilogue (iso_gcorners_f*, iso_geval_f*), and for
+    canonical sets of more than 64 functions the wide kernels (w128, w192, y256 at 256 columns)
+  - densities: the octree as phi^T D phi (iso_octree_dform)
+  - Newton: converged within 1e-2 h, a step predicted far below that ending the vertex
+
+Removed:
+  - the per-brick evaluators (iso_corners, iso_eval, iso_corners_orbital); the register forms
+    (iso_corners_f*, iso_eval_f*); the list form (iso_corners_list_f1..f64); iso_eval_list_f1 (folded
+    into the fused projection)
+  - the GEMM loop variants (iso_*_f64_p1/p2) and the wide variants that lost (w256, x*, y128, y192)
+  - the D form of r9 and its tiles-of-64 version (iso_dcorners/deval, iso_dcorners2/deval2) and
+    iso_octree_dform8. The remaining D form is renamed iso_dcorners and iso_deval ("corners (dform)" in the
+    profile). The D form for corners only, with the vertices factored, is gone: GTO_ISO_DFORM=1 now
+    switches both.
+  - the DIAGNOSTIC modes (IsoArgs.diag is padding now) and the octree's mode that kept rejected bricks'
+    slots
+
+Simpler kernel interfaces:
+  - iso_cells: mode 0 counts, 1 emits, at the offsets in scan
+  - iso_newton: mode 0 a step (the prediction always on), 1 the normals
+  - iso_points: the ordered list only
+
+Tests:
+  - Removed fused_projection_matches and schedule_experiment, whose switches are gone.
+  - flood_experiment is now gated by GTO_ISO_FLOOD_SURVEY.
+  - Every gto_iso_gpu_lib test passes on lavapipe, unchanged: the defaults, GTO_ISO_DFORM=1,
+    GTO_ISO_CHUNKS=5 and GTO_ISO_FLOOD=0.
+  - With GTO_ISO_FLOOD=2 (every field flooded, approximate), fields_batch_like_alone differs in one
+    orbital's negative sheet: the batch finds a piece the field alone misses. That is expected for that mode.
+  - flood_sweep: the default differs from the exact mesh in 0 cases.
+  - All 39 kernels generate SPIR-V and MSL.
+
+Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
+Claude-Session: https://claude.ai/code/session_013DspSN5YmtffCGxMJt9S5L
+```
+md_gto_iso_gpu: EXPERIMENT the vertices' radial parts once per vertex…
+…
+d658b29
+```
+… and shell (r33)
+
+The vertex evaluation was 42% of the M4 Pro's mm density extraction (8.3 of 19.7 ms) and wasted work.
+The GEMM kernels give each vertex four threads, one per channel (value, d/dx, d/dy, d/dz). Each of
+those threads made every shell's radial part (its exponentials) and monomials for its own channel,
+so three of every four exponentials were redundant. The corners have no such redundancy: each of
+their threads is a point of its own.
+
+VERT 2 (iso_geval_*_sr): one thread makes a vertex's four channels of a shell, so the radial part is
+made once per vertex and shell. The monomials are made once, and each axis's derivatives in turn
+(the registers held stay those of the per-channel form).
+  - iso_geval_f*_sr: the vertex's four threads take every fourth shell of a chunk (all of them before).
+  - iso_geval_w*_sr, iso_geval_y256_sr: the vertex's 16 threads take every 16th shell (before: every
+    fourth, per channel).
+The products and the epilogues are unchanged. Each value is the same expression as before, made by
+another thread.
+
+GTO_ISO_VSHARE=0|1 (md_gto_iso_gpu_switches_t.vshare, default 1) switches back to the per-channel
+kernels, for the Profiler's comparison. The D form's vertices (iso_deval) are not changed.
+
+Test vshare_matches: the per-channel and shared forms give the same triangles, to the bit, through
+f32 (amide density), f64 (mol), w128 (amide + virtuals, 100 functions), w192 (170) and y256 (220).
+Every gto_iso_gpu_lib test passes with either setting.
+
+On lavapipe (a CPU, so only a hint) amide + virtuals (w128) vertex evaluation: 115.7 -> 94.6 ms.
+
+Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
+Claude-Session: https://claude.ai/code/session_013DspSN5YmtffCGxMJt9S5L
+```
+md_gto_iso_gpu: the r33 experiment removed (the vertices' radial part…
+…
+a976520
+```
+…s once per vertex): ~1%
+
+Measured with the Profiler series (mm, M4 Pro), defaults (the shared form) against the per-channel kernels:
+
+| | Shared form | Per channel |
+|---|---|---|
+| density, extraction | 19.32 / 19.39 ms (first row / drift check) | 19.55 ms |
+| density, vertex evaluation (profiled) | 7.96 / 7.98 ms | 8.26 ms |
+| HOMO (fused projection, not affected) | 2.42 / 2.45 ms | 2.49 ms |
+
+On the RTX 3080 (tq density, y256, one profiled extraction), vertex evaluation took 5.10 ms with the shared
+form against 4.76 ms per channel. Its kernel takes 186 registers against 171, at one group of 256 threads
+per SM either way.
+
+The exponentials were not what bounds the vertex GEMM: about 1% of the M4's extraction, nothing or a loss
+on the 3080. That does not pay for six more kernels and a switch. This reverts d658b29 (the kernels
+iso_geval_*_sr, GTO_ISO_VSHARE, md_gto_iso_gpu_switches_t.vshare, test vshare_matches). The library is
+r32's again, revision "r34".
+
+Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
+Claude-Session: https://claude.ai/code/session_013DspSN5YmtffCGxMJt9S5L
+```
+scanberg
+mentioned this pull request
+Oct 21, 2026
+Isosurface meshes: non-blocking GPU extraction with progress (mdlib gto-iso-gpu-opt)
+scanberg/viamd#174
+Merged
+Merge master into gto-iso-gpu-opt
+…
+b5949ae
+```
+Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
+Claude-Session: https://claude.ai/code/session_013DspSN5YmtffCGxMJt9S5L
+```
+scanberg
+marked this pull request as ready for review
+October 21, 2026 11:39
+Hide details
+View details
+scanberg
+merged commit b5949ae
+into
+master
+Oct 21, 2026
+5 checks passed
+Uh oh!
+There was an error while loading. Please reload this page.
+scanberg
+deleted the
+gto-iso-gpu-opt
+branch
+October 22, 2026 20:09
+Sign up for free
+to join this conversation on GitHub.
+Already have an account?
+Sign in to comment
+Uh oh!
+There was an error while loading. Please reload this page.
+Labels
+None yet
+1 participant
+Add this suggestion to a batch that can be applied as a single commit.This suggestion is invalid because no changes were made to the code.Suggestions cannot be applied while the pull request is closed.Suggestions cannot be applied while viewing a subset of changes.Only one suggestion per line can be applied in a batch.Add this suggestion to a batch that can be applied as a single commit.Applying suggestions on deleted lines is not supported.You must change the existing code in this line in order to create a valid suggestion.Outdated suggestions cannot be applied.This suggestion has been applied or marked resolved.Suggestions cannot be applied from pending reviews.Suggestions cannot be applied on multi-line comments.Suggestions cannot be applied while the pull request is queued to merge.Suggestion cannot be applied right now. Please check back later.
+You can’t perform that action at this time.

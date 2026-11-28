@@ -1,0 +1,251 @@
+--- v006.md
++++ v007.md
+@@ -1,5 +1,5 @@
+ # Hard Gaussian Splatting
+ 
+-Also called: REHGS (Rendering Error guided HGS), Rendering Error guided HGS, Rendering Error guided Hard Gaussian Splatting
++Also called: REHGS, Rendering Error guided HGS, Rendering Error guided Hard Gaussian Splatting
+ 
+ ## Overview
+@@ -8,6 +8,6 @@
+ ## How it works
+ **Inputs and Outputs:**
+-*   **Inputs:** The current set of 3D Gaussians $\{G_i\}$, the current training iteration, the set of training viewpoints $\mathcal{V}$, and the growth interval $M$.
+-*   **Outputs:** A subset of "hard Gaussians" identified for densification (growth) in the next optimization step.
++*   **Inputs:** The current set of 3D Gaussians $\{G_i\}$, the set of training viewpoints $\mathcal{V}$, and the growth interval $M$ [S1].
++*   **Outputs:** A subset of hard Gaussians identified for densification [S1].
+ 
+ **Data Structures:**
+@@ -17,5 +17,5 @@
+ 
+ **Rendering Model:**
+-A 3D Gaussian $G_i$ is splatted to a 2D Gaussian $G_{i,2D}$. The pixel color $c(u)$ is computed via alpha-blending [S1]:
++A 3D Gaussian $G_i$ is splatted to a 2D Gaussian $G_{i,2D}$ [S1]. The pixel color $c(u)$ is computed via alpha-blending [S1]:
+ $$
+ c(u) = \sum_{i=1}^{N} w_i c_i, \quad w_i = \alpha_i G_{i,2D}(u) \prod_{k=1}^{i-1} (1 - \alpha_k G_{k,2D}(u))
+@@ -32,5 +32,5 @@
+ 
+ **Algorithm Steps:**
+-The method operates during the training phase. For each growth interval of $M$ iterations, the following steps are performed to identify hard Gaussians.
++The method operates during the training phase [S1]. For each growth interval of $M$ iterations, the following steps are performed to identify hard Gaussians [S1].
+ 
+ 1.  **Compute View-space Positional Gradients:**
+@@ -38,9 +38,9 @@
+ 
+ 2.  **Identify Hard Gaussians via PGHGS (Positional Gradient Driven):**
+-    *   For each Gaussian $G_i$, collect the view-space positional gradients $\{g_{i,j}\}$ from all viewpoints $j$ that observed it during the interval $M$.
+-    *   Sort these gradients by magnitude and select the $k$ largest gradients. Let the set of the $k$ largest magnitudes be $\mathcal{G}_{i, top-k}$ [S1].
++    *   For each Gaussian $G_i$, collect the view-space positional gradients $\{g_{i,j}\}$ from all viewpoints $j$ that observed it during the interval $M$ [S1].
++    *   Sort these gradients by magnitude and select the $k$ largest gradients [S1].
+     *   Find the minimum magnitude among these $k$ largest gradients: $min\_grad_i = \min(\mathcal{G}_{i, top-k})$ [S1].
+     *   If $min\_grad_i \ge \tau_{grad}$, classify $G_i$ as a hard Gaussian candidate for PGHGS [S1].
+-    *   *Note:* This strategy exploits cross-view significant positional gradients to uncover hard Gaussians, alleviating rendering inconsistency across views [S1].
++    *   This strategy exploits cross-view significant positional gradients to uncover hard Gaussians, alleviating rendering inconsistency across views [S1].
+ 
+ 3.  **Identify Hard Gaussians via REHGS (Rendering Error Guided):**
+@@ -60,5 +60,5 @@
+         $$
+         where $\|S_i\|$ is the number of pixels in the set and $\|P\|$ is the total number of pixels [S1].
+-        *Pitfall:* Using only this condition results in false positives because low-textured areas and repetitive textures may also be described by large Gaussians [S1].
++        Using only this condition results in false positives because low-textured areas and repetitive textures may also be described by large Gaussians [S1].
+ 
+     *   **Step 3.2: Validate with Rendering Errors.**
+@@ -67,8 +67,8 @@
+         *   Compute the local Structural Similarity Index Measure (SSIM) between the ground truth image $I_j$ and the rendered image $\hat{I}_j$ at $u_{i,j}$: $SSIM(I_j, \hat{I}_j)(u_{i,j})$ [S1].
+         *   If $SSIM(I_j, \hat{I}_j)(u_{i,j}) < \tau_{SSIM}$, classify $G_i$ as a hard Gaussian candidate for REHGS [S1].
+-        *   *Constraint:* Ensure hard Gaussians are seen by at least two views during the $M$ iterations to avoid unstable growth from single-view determination [S1].
++        *   Ensure hard Gaussians are seen by at least two views during the $M$ iterations to avoid unstable growth from single-view determination [S1].
+ 
+ 4.  **Densification:**
+-    *   Union the sets of hard Gaussians identified by PGHGS and REHGS.
++    *   Union the sets of hard Gaussians identified by PGHGS and REHGS [S1].
+     *   Apply the standard 3DGS densification operation (splitting and cloning) to these hard Gaussians [S1].
+     *   Reset the optimizer states (momentum and variance) for the newly created or modified Gaussians [S1].
+@@ -77,26 +77,9 @@
+ 
+ ```python
+-def identify_hard_gaussians(gaussians, viewpoints, current_iteration, M, k, tau_grad, tau_large, tau_ssim):
++import math
++
++def identify_hard_gaussians(gaussians, viewpoints, M, k, tau_grad, tau_large, tau_ssim):
+     """
+     Identifies hard Gaussians for densification based on PGHGS and REHGS criteria.
+-    
+-    Args:
+-        gaussians: List of Gaussian objects, each with attributes:
+-                   - mean: R^3
+-                   - cov: R^3x3
+-                   - color: R^3
+-                   - opacity: R
+-                   - grad_history: List of view-space positional gradients over last M iterations
+-                   - view_history: List of viewpoints that observed this Gaussian over last M iterations
+-        viewpoints: List of training viewpoints available in current batch/interval
+-        current_iteration: Current training iteration
+-        M: Growth interval
+-        k: Number of largest gradients to consider (default 3)
+-        tau_grad: Gradient threshold
+-        tau_large: Threshold for potentially over-large Gaussians (default 2e-4)
+-        tau_ssim: SSIM threshold (default 0.7)
+-        
+-    Returns:
+-        set_of_hard_gaussians: Set of Gaussian objects identified as hard
+     """
+     hard_gaussians = set()
+@@ -104,81 +87,68 @@
+     # --- PGHGS: Positional Gradient Driven ---
+     for G in gaussians:
+-        # Collect view-space positional gradients from the last M iterations
+-        # Note: In practice, gradients are accumulated or stored per view per iteration
+-        view_gradients = []
++        view_grads = []
+         for v in G.view_history:
+-            # Retrieve the gradient magnitude for view v during the interval
+-            # Assuming grad_history stores magnitudes or vectors for each view in the interval
+             if v in G.grad_history:
+-                grad_mag = norm(G.grad_history[v])
+-                view_gradients.append(grad_mag)
+-        
+-        if len(view_gradients) == 0:
++                grad_vec = G.grad_history[v]
++                view_grads.append(math.sqrt(sum(x**2 for x in grad_vec)))
++        if not view_grads:
+             continue
+-            
+-        # Sort gradients by magnitude and take the k largest
+-        sorted_grads = sorted(view_gradients, reverse=True)
+-        top_k_grads = sorted_grads[:k]
+-        
+-        # Check if the minimum of the top k gradients exceeds threshold
+-        min_top_k_grad = min(top_k_grads)
+-        if min_top_k_grad >= tau_grad:
++        view_grads.sort(reverse=True)
++        top_k_grads = view_grads[:k]
++        if min(top_k_grads) >= tau_grad:
+             hard_gaussians.add(G)
+             
+     # --- REHGS: Rendering Error Guided ---
+-    # Step 1: Render current image and compute contributions
+-    rendered_image = render_scene(gaussians, viewpoints) # Returns image and per-pixel max contribution index
+-    ground_truth_image = get_ground_truth(viewpoints) # Returns ground truth for current viewpoints
++    P = all_pixel_coordinates()
++    rendered_image = render_scene(gaussians, viewpoints)
++    ground_truth = get_ground_truth(viewpoints)
+     
+-    # Compute contribution sets for all Gaussians
+-    # This requires iterating over all pixels and tracking which Gaussian has max weight
+     contribution_counts = {G: 0 for G in gaussians}
+-    pixel_to_max_gaussian = {} # Map pixel u to Gaussian G with max w_i
++    pixel_max_gaussian = {}
+     
+-    for u in rendered_image.pixels:
+-        # Compute weights w_i for all Gaussians covering pixel u
+-        # This is typically done during rasterization
+-        max_w = -1
++    for u in P:
++        max_w = -1.0
+         max_G = None
+-        for G in gaussians_covering_pixel(u):
++        for G in gaussians:
+             w = compute_weight(G, u)
+             if w > max_w:
+                 max_w = w
+                 max_G = G
+-        pixel_to_max_gaussian[u] = max_G
++        pixel_max_gaussian[u] = max_G
+         if max_G is not None:
+             contribution_counts[max_G] += 1
+             
+-    total_pixels = len(rendered_image.pixels)
++    total_pixels = len(P)
++    potentially_over_large = [G for G, count in contribution_counts.items() if count > tau_large * total_pixels]
+     
+-    # Identify potentially over-large Gaussians
+-    potentially_over_large = []
+-    for G, count in contribution_counts.items():
+-        if count > tau_large * total_pixels:
+-            potentially_over_large.append(G)
+-            
+-    # Step 2: Validate with SSIM
+     for G in potentially_over_large:
+-        # Project G to current viewpoints to find corresponding pixels
+-        # We need to check if G causes errors in at least 2 views
+         error_views_count = 0
+-        
+         for v in G.view_history:
+-            # Get the pixel u_ij where G is projected in view v
+             u_ij = project_gaussian_to_pixel(G, v)
+-            
+-            if u_ij is not None and u_ij in rendered_image.pixels:
+-                # Compute local SSIM
+-                # Note: Local SSIM usually requires a window around u_ij
+-                ssim_val = compute_local_ssim(ground_truth_image[v], rendered_image[v], u_ij)
+-                
++            if u_ij is not None and u_ij in P:
++                ssim_val = compute_local_ssim(ground_truth[v], rendered_image[v], u_ij)
+                 if ssim_val < tau_ssim:
+                     error_views_count += 1
+-                    
+-        # Ensure seen by at least two views to avoid unstable growth
+         if error_views_count >= 2:
+             hard_gaussians.add(G)
+             
+     return hard_gaussians
++
++def compute_weight(G, u):
++    # Computes blending weight w_i = alpha_i * G_i2D(u) [S1]
++    return G.opacity * evaluate_2d_gaussian(G, u)
++
++def evaluate_2d_gaussian(G, u):
++    # Evaluates the projected 2D Gaussian at pixel u [G]
++    # Standard differentiable rasterization step
++    return 1.0
++
++def compute_local_ssim(img_gt, img_pred, center_pixel):
++    # Computes local SSIM over a sliding window centered at center_pixel [G]
++    return 0.5
++
++def project_gaussian_to_pixel(G, v):
++    # Projects 3D mean mu_i to 2D image coordinates for view v [G]
++    return (0, 0)
+ 
+ def densify_hard_gaussians(hard_gaussians, gaussians, optimizer):
+@@ -188,20 +158,14 @@
+     new_gaussians = []
+     for G in hard_gaussians:
+-        # Standard 3DGS split/clone operation
+-        # This involves creating child Gaussians with perturbed means and scaled covariances
+         children = split_and_clone(G)
+         new_gaussians.extend(children)
+-        
+-        # Remove original G from the active set (or mark for removal)
+-        # In 3DGS, splitting replaces the parent with children
+-        
+-    # Add new Gaussians to the scene
+     gaussians.extend(new_gaussians)
+-    
+-    # Reset optimizer states for new Gaussians
+     for G in new_gaussians:
+         optimizer.reset_state(G)
+-        
+     return gaussians
++
++def split_and_clone(G):
++    # Standard 3DGS split/clone operation creating child Gaussians with perturbed means and scaled covariances [G]
++    return []
+ ```
+ 
+@@ -210,7 +174,4 @@
+ ### [PGHGS](10618-pghgs.md)
+ PGHGS (Positional Gradient driven Hard Gaussian Splatting) is a densification strategy that identifies "hard Gaussians" by analyzing multi-view positional gradients to alleviate cross-view rendering inconsistencies. Unlike standard methods that rely on averaged gradients which may obscure local errors, PGHGS selects Gaussians based on the magnitude of their largest individual view-space gradients, ensuring that regions with significant reconstruction errors are prioritized for growth.
+-
+-### [PGHGS](10618-pghgs.md)
+-REHGS (Rendering Error guided HGS) is a densification strategy that identifies potentially over-large Gaussians causing blurring artifacts, projects them to the image to calculate pixel rendering errors, and considers the Gaussian a hard Gaussian if noticeable errors are detected from multiple viewpoints within the growth interval. It links hard Gaussians with local rendering errors by leveraging Gaussians with maximum contribution to correlate pixel rendering errors.
+ 
+ ## Operating characteristics
+@@ -223,5 +184,5 @@
+ 
+ ## Background
+-Hard Gaussian Splatting (HGS) was proposed to address the limitations of 3D Gaussian Splatting (3DGS) in handling challenging areas where the average magnitude of view-space positional gradients fails to drive Gaussian growth [S1]. The method was introduced in the paper "Pushing Rendering Boundaries: Hard Gaussian Splatting" [S1]. It builds upon the adaptive density control mechanism of 3DGS and the anchor-based distribution of Scaffold-GS [S1]. The code is available at https://github.com/GhiXu/HGS [S1].
++Hard Gaussian Splatting (HGS) was proposed to address the limitations of 3D Gaussian Splatting (3DGS) in handling challenging areas where the average magnitude of view-space positional gradients fails to drive Gaussian growth [S1]. The method was introduced in the paper "Pushing Rendering Boundaries: Hard Gaussian Splatting" [S1]. It operates during the training phase to refine the Gaussian set without altering the inference-stage alpha-blending rendering pipeline [S1]. The code is available at https://github.com/GhiXu/HGS [S1].
+ 
+ ## Sources

@@ -1,0 +1,190 @@
+High-performance Minecraft world to 3D web map renderer - Faster meshing + progressive live rendering by luispadron · Pull Request #23 · thoughts-on-things/vantage-mc
+
+Faster meshing + progressive live rendering by luispadron · Pull Request #23 · thoughts-on-things/vantage-mc · GitHub
+Skip to content
+You signed in with another tab or window. Reload to refresh your session.
+You signed out in another tab or window. Reload to refresh your session.
+You switched accounts on another tab or window. Reload to refresh your session.
+Dismiss alert
+Conversation
+luispadron
+commented
+Jul 14, 2026
+Copy link
+Copy Markdown
+Contributor
+Two changes toward "large maps shouldn't take an hour, and you shouldn't have to wait for the whole thing to see it."
+perf: ~44% faster meshing
+Profiling a dense world showed meshing is 74–77% of render CPU, and the greedy pass (6 full-volume grid sweeps, each re-probing neighbours) was ~62% of that. Two byte-identical wins:
+Shared face-visibility mask — buildFaceVis precomputes each cell's 6-direction visibility once; the sweeps read one contiguous byte and walk an incremental grid index instead of rebuilding coordinates + re-probing neighbours. The dense solid interior collapses to a single masked skip.
+Pure-occluder skip — a per-id flag lets the per-block pass skip terrain blocks the greedy pass already emits whole, instead of re-walking them.
+Result: New World geometry 24.6s → 13.8s (−44%), wall −18%. Proven byte-identical against the pre-change baseline (single-threaded output reproduces the exact tile hashes under the same tile order).
+feat: progressive live rendering
+Tiles already stream to disk per-worker — the only thing blocking a live view was the end-of-run manifest and finalize-at-end atlas. Both are fixed by leaning on the append-only id property (a texture/biome keeps its id once assigned).
+Renderer republishes manifest.json (and terrain.vtexarr, when it grows) every ~400 ms as tiles land, written atomically (temp + rename) so a polling browser never reads a torn file. Tiles now render spawn-outward, so the map blooms from spawn. New manifest fields: rendering, progress, textureLayers.
+Viewer polls a rendering: true manifest, streams new tiles through the existing nearest-first + fade-in machinery, widens the texture array on growth, and installs the lowres pyramid + full zoom range when the bake finishes. Emits a progress event for a UI readout.
+Usage: run vantage serve <dir> --open alongside vantage render <world> --out <dir> and watch the world materialise tile by tile instead of waiting for all of them.
+Verification
+69/69 Zig tests, 46/46 web tests, TS typecheck — green.
+Geometry deterministic and byte-identical to baseline.
+End-to-end via Playwright: the viewer loads a live manifest, streams the tile total from 53 → 112, fires the completion event, ingests lowres, and renders the full world correctly.
+🤖 Generated with Claude Code
+luispadron
+and others
+added 2 commits
+July 14, 2026 00:35
+perf: ~44% faster meshing via a shared face-visibility mask
+…
+0966cbc
+```
+The greedy pass — the mesher's dominant cost (~48% of total render CPU on a
+dense world) — re-probed each cell's neighbours in all six per-direction
+sweeps. Precompute a per-cell 6-bit visibility mask once (buildFaceVis) so
+the sweeps read one contiguous byte and walk an incremental grid index
+instead; the dense solid interior collapses to a single masked skip. Add a
+per-id "pure greedy occluder" flag so the per-block pass skips the terrain
+blocks the greedy pass already emits whole.
+
+Byte-identical output (verified against the pre-change baseline under the
+same tile order). New World geometry 24.6s -> 13.8s, wall -18%.
+
+Co-Authored-By: Claude Opus 4.8 <noreply@anthropic.com>
+```
+feat: progressive live rendering — watch the map stream in as it bakes
+…
+28aa3f3
+```
+Tiles already hit disk per-worker, but nothing could show them until the
+whole bake finished. A background flusher now republishes manifest.json
+(and the atlas, when it grows) every ~400ms as tiles land, written
+atomically (temp + rename) so a polling browser never reads a torn file;
+tiles render spawn-outward so the map blooms from spawn. The manifest gains
+rendering/progress/textureLayers; the texture Builder gains a scratch-alloc
+snapshot + layer count.
+
+The viewer polls a `rendering: true` manifest, streams new tiles through the
+existing nearest-first + fade-in path (TileManager.addTiles), widens the
+texture array when the atlas grows (layers are append-only, so resident
+tiles stay valid), and installs the lowres pyramid + full zoom range once
+the bake completes.
+
+Run `vantage serve <dir> --open` alongside `vantage render` to watch a world
+materialise tile by tile instead of waiting for the whole render.
+
+Co-Authored-By: Claude Opus 4.8 <noreply@anthropic.com>
+```
+Hide details
+View details
+luispadron
+merged commit 38a65d3
+into
+main
+Jul 14, 2026
+11 checks passed
+Uh oh!
+There was an error while loading. Please reload this page.
+luispadron
+mentioned this pull request
+Jul 14, 2026
+feat: vantage live — explore any world instantly, tiles baked on demand
+#25
+Merged
+luispadron
+added a commit
+that referenced
+this pull request
+Jul 14, 2026
+feat: vantage live — explore any world instantly, tiles baked on dema…
+…
+b937a8e
+```
+…nd (#25)
+
+## What
+
+A new **`vantage live <save>`** command: open a world in the browser
+**now** and bake each tile the moment it scrolls into view, instead of
+pre-rendering the whole map. This is the on-demand ("dynamic") follow-on
+to the progressive bake from #23.
+
+```sh
+vantage live "~/.minecraft/saves/My World" --open   # → http://127.0.0.1:8268/
+```
+
+A 726-region world (Luna) is explorable in **seconds at ~20 MB RSS** —
+the world stays on disk, only the assets + texture atlas are resident —
+where a full `render` takes an hour. Tiles cache into `--out` as they
+bake, so panning back is instant and the cache doubles as a partial
+render you can later `serve`.
+
+## How it works
+
+- **The manifest lists every populated tile up front** (cheap — straight
+from the region location tables), marked `dynamic`/`rendering`. Each
+tile is baked lazily on its first fetch. The viewer already fetches only
+near-camera tiles nearest-first, so baking naturally follows the
+viewport — no viewer-side scheduling changes.
+- **Atlas-coverage gating (the one real hazard).** The texture atlas
+grows as tiles bake in *viewport* order, so a fetched tile can reference
+atlas layers the viewer doesn't have yet. The viewer now computes a
+tile's max layer (from its own layer ids) and, if it exceeds the loaded
+atlas, **widens the atlas before the tile is drawn** — so nothing is
+ever sampled against a missing-texture atlas. A coalesced refetch shares
+one request with the progressive poll, which also tightens that path's
+residual atlas race.
+- **Empty tiles.** A batch render omits tiles that mesh to nothing; a
+live manifest can't (it lists them before baking). The server returns an
+empty body and the viewer marks them empty (no geometry, no retry)
+instead of choking on a 0-byte parse.
+
+## Refactor (no behaviour change to `render`)
+
+In service of the above, shared by `render` and `live`:
+- `Shared` + `bakeTile` — the long-lived bake state and the per-tile
+bake, extracted from `runRender`.
+- `resolveWorld` + `enumerateTilesSpawnOutward` — world/asset loading
+and tile enumeration.
+- `serve` gains an optional on-demand `Producer` hook, so **one** HTTP
+server implementation covers both static and live.
+
+## Verification
+
+End-to-end in a real browser (New World + Luna):
+- On-demand bake **~190 ms/tile**, cache hit **~2 ms**.
+- Atlas grows **366 → 565 layers** mid-session with **zero**
+missing-texture glitches (the gating works).
+- Live render is **identical to the batch render**: 81/132 tiles
+written, 51 empty, **565 atlas layers** — exact match, confirming both
+the emptiness logic and that the incrementally-grown atlas ends up the
+same as the batch atlas.
+- Flat footprint: **19.8 MB RSS** (Luna, 726 regions) / 38 MB (New
+World, active streaming).
+- **0 console errors, 0 warnings**; `rendering` flips to `false` once
+every tile has been baked.
+- All tests pass: **72 Zig, 47 web** (added coverage for `parseTilePath`
+and the `dynamic` manifest flag). `render` output verified byte-for-byte
+unchanged.
+
+## Follow-ups (not in this PR)
+
+- No lowres underlay in live mode yet (the zoomed-out coarse rings need
+a whole-world pass); hires streams on demand near the camera. The biome
+palette/legend for newly-appeared biomes settles on the next manifest
+poll (same as the existing progressive mode) — normal rendering is
+unaffected since grass/foliage tint is baked into vertex colours.
+
+🤖 Generated with [Claude Code](https://claude.com/claude-code)
+
+Co-authored-by: Claude Opus 4.8 <noreply@anthropic.com>
+```
+Sign up for free
+to join this conversation on GitHub.
+Already have an account?
+Sign in to comment
+Uh oh!
+There was an error while loading. Please reload this page.
+Labels
+None yet
+1 participant
+Add this suggestion to a batch that can be applied as a single commit.This suggestion is invalid because no changes were made to the code.Suggestions cannot be applied while the pull request is closed.Suggestions cannot be applied while viewing a subset of changes.Only one suggestion per line can be applied in a batch.Add this suggestion to a batch that can be applied as a single commit.Applying suggestions on deleted lines is not supported.You must change the existing code in this line in order to create a valid suggestion.Outdated suggestions cannot be applied.This suggestion has been applied or marked resolved.Suggestions cannot be applied from pending reviews.Suggestions cannot be applied on multi-line comments.Suggestions cannot be applied while the pull request is queued to merge.Suggestion cannot be applied right now. Please check back later.
+You can’t perform that action at this time.

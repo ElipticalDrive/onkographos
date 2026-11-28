@@ -1,0 +1,84 @@
+Summary A review of the volumetric path tracer (integrator/VPT.cpp, volume/Homogeneous.cpp, visual/Medium.cpp, and the medium branch of Integrator::DirectIllumination) found one real bias in equi-angular sampling, a no-op Russian roulett...
+
+VPT: fix equi-angular sampling bias and clean up the volumetric path tracer · Issue #191 · xiaoyxue/Gyunity · GitHub
+Skip to content
+You signed in with another tab or window. Reload to refresh your session.
+You signed out in another tab or window. Reload to refresh your session.
+You switched accounts on another tab or window. Reload to refresh your session.
+Dismiss alert
+VPT: fix equi-angular sampling bias and clean up the volumetric path tracer #191
+New issue
+Copy link
+New issue
+Copy link
+Open
+Open
+VPT: fix equi-angular sampling bias and clean up the volumetric path tracer#191
+Copy link
+Description
+xiaoyxue
+opened on Oct 28, 2026
+Issue body actions
+Summary
+A review of the volumetric path tracer (integrator/VPT.cpp, volume/Homogeneous.cpp, visual/Medium.cpp, and the medium branch of Integrator::DirectIllumination) found one real bias in equi-angular sampling, a no-op Russian roulette, two numerical edge cases, and dead code. The distance-sampling path (the default, equalAngular = false) looks correct.
+What is correct
+Distance sampling (HomogeneousMedium::Sample): channel-averaged pdf, Tr * sigma_s / pdf for a scattering event and Tr / pdf for a pass-through, as in pbrt. Tr uses t * |d| consistently.
+Henyey–Greenstein (HenyeyGreenstein::SampleP / Evaluate): the inversion samples the cosine about the propagation direction -wo, and returns PhaseHG(-cosTheta) = PhaseHG(dot(wo, wi)), which matches Evaluate. The main path keeps the throughput unchanged after phase sampling, which is correct because f / pdf = 1.
+Emission and NEE bookkeeping: emission is added only at i == 0 or after a delta bounce. After a surface or medium event, DirectIllumination handles both light sampling and BSDF/phase sampling with MIS, including transmittance via VisibilityTester::Tr / Scene::IntersectTr. Nothing is counted twice or missed. Mixed BSDFs are handled correctly, because NEE uses NonDeltaFlags and a sampled delta lobe sets specularBounce.
+Medium boundaries: null-material surfaces are skipped with i--, and Primitive::Intersect inherits the ray medium for non-transition surfaces (the pbrt rule), so the fog scene's interior is filled once the ray enters through the front quad.
+Equi-angular estimator form (Kulla–Fajardo): pdf = D / ((thetaB - thetaA)(D^2 + tau^2)), plus a pass-through branch with probability 1 - P(t < tMax). This is unbiased as long as the sampling interval covers the whole medium segment. See bug 1.
+Bugs
+#
+Where
+Problem
+Fix
+1
+Homogeneous.cpp:46 (real tMax = 3;)
+Bias. The equi-angular interval is hard-coded to [0, 3]. If the medium segment is longer than 3 (ray.mTmax > 3), every sample scatters inside [0, 3], so scattering beyond 3 and the surface behind it are never reached. If the camera or a path is in an unbounded medium (mTmax = INF), the path can never escape. In the fog Cornell box most segments are shorter than 3, so the effect is small there, but the estimator is wrong in general.
+Use tMax = ray.mTmax (in distance units) when it is finite. For an unbounded segment, either fall back to distance sampling or use a finite, documented cap with an explicit pass-through tail.
+2
+VPT.cpp:136-143
+Russian roulette is a no-op. survivalProb = min(1, throughput.Y() / throughput.Y()) is always 1 (or NaN when Y = 0), so roulette never runs. The result is unbiased because mMaxDepth bounds the loop, but the code does not do what it says.
+Use the throughput's maximum component (as pbrt does) or remove the block.
+3
+Homogeneous.cpp:51-54, 60
+D = 0 (the light point lies on the ray line, for example a point light on the camera axis) gives atan2(..., 0) and then divides by D, producing NaN.
+Handle D below a small threshold explicitly, for example by falling back to distance sampling for that segment.
+4
+Homogeneous.cpp:59
+The scattering branch uses Exp(-sigma_t * t), assuming a unit-length direction, while Tr and Sample multiply by `
+d
+Quality
+VPT.cpp:33-39: useEquiAngular and the light-type typeid scan run on every camera sample. Compute them once in RenderChecked and validate there (boundary-only validation, following Simplify VCM: validate once at the boundary and remove redundant internal state checks #185).
+VPT.cpp, ConnectToLight: weight1, pdfPhase and geomTerm are computed but unused, and the phase-sampling half (L2) is commented out. Equi-angular medium vertices therefore use light sampling only. That is unbiased but has no MIS. Either implement MIS with phase sampling (and drop the separate weight helpers), or delete the dead code.
+Commented-out code: VPT.cpp:81-85, 89 and the two large blocks in ConnectToLight (VPT.cpp:155-167, 189-212), Homogeneous.cpp:43-47.
+Equi-angular samples a light point even when the ray has no medium. This is harmless, but it wastes random numbers.
+Examples.cpp:162 writes MediaTestFogEquiAngular.bmp, but the example disables equi-angular sampling.
+Acceptance criteria
+New test: a homogeneous slab or sphere with a point light, where equi-angular and distance sampling converge to the same mean, including a medium segment longer than 3 units (this catches bug 1). Where possible, compare against an analytic single-scattering value.
+Test: D = 0 gives a finite result.
+Test: Russian roulette actually terminates some paths, or the block is removed.
+The distance-sampling path stays byte-identical, and the full test suite passes.
+Workflow
+PRs target feature/vcm. After the PR is merged there, feature/vcm is merged into main. Integrator changes do not need the scene render regression; Debug/Release builds and the full test suite are required.
+🤖 Generated with Claude Code
+Activity
+Sign up for free to join this conversation on GitHub. Already have an account? Sign in to comment
+Metadata
+Metadata
+Assignees
+No one assigned
+Labels
+No labels
+No labels
+Projects
+No projects
+Milestone
+No milestone
+Relationships
+None yet
+Development
+No branches or pull requests
+Issue actions
+Open in GitHub Copilot app
+You can’t perform that action at this time.

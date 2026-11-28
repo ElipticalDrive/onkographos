@@ -1,0 +1,178 @@
+--- v002.md
++++ v003.md
+@@ -8,86 +8,77 @@
+ ## How it works
+ **Inputs and Outputs:**
+-- **Input:** Raw KITTI-360 images (resolution $1408 \times 376$), LiDAR point clouds, text prompts, and reference images.
+-- **Output:** Preprocessed image tensors ($512 \times 512$), depth masks, and training batches configured for classifier-free guidance.
++- **Input:** Raw KITTI-360 images (resolution $1408 \times 376$), LiDAR point clouds, text prompts, and reference images [S1].
++- **Output:** Preprocessed image tensors ($512 \times 512$), depth masks, and training batches configured for classifier-free guidance [S1].
+ 
+ **Data Structures:**
+-- **Image Tensor:** Shape $(B, 3, 512, 512)$, normalized to $[-1, 1]$ or $[0, 1]$ as required by the Stable Diffusion VAE [S1].
++- **Image Tensor:** Images are resized to $512 \times 512$ pixels for the diffusion model [S1].
+ - **Depth Mask:** A binary mask of shape $(512, 512)$ where the top 80 rows are set to 1 (masked) and the rest are 0 [S1].
+ 
+ **Steps:**
+-1. **Pre-cropping:** Crop the original KITTI-360 image from $1408 \times 376$ to $600 \times 376$. This step is critical to prevent over-distortion during the subsequent resizing to square dimensions [S1].
++1. **Pre-cropping:** Crop the original KITTI-360 image from $1408 \times 376$ to $600 \times 376$ [S1].
+ 2. **Resizing:** Resize the cropped image to $512 \times 512$ [S1].
+-3. **Depth Masking:** Apply a mask to the top 80 rows of the $512 \times 512$ image. This accounts for LiDAR point cloud height limitations where the sky or upper structures are not captured [S1]. The diffusion model's inpainting capability is relied upon to complete this masked region [S1].
+-4. **Training Image Cropping:** Apply a center-crop to the training images to ensure consistent framing [S1].
+-5. **Reference Image Cropping:** Apply a random-crop to reference images during training. This ensures a perspective gap between the reference and training images, enhancing model robustness [S1].
++3. **Depth Masking:** Apply a mask to the top 80 rows of the $512 \times 512$ image due to LiDAR point cloud height limitations [S1]. The diffusion model's inpainting capability completes this portion of content [S1].
++4. **Training Image Cropping:** Apply a center-crop to the training images [S1].
++5. **Reference Image Cropping:** Apply a random-crop to reference images during training to ensure a perspective gap between the reference and training images [S1].
+ 6. **Reference Selection:**
+-   - **During Training:** Reference images are selected from the dataset as needed.
++   - **During Training:** Reference images are selected from the dataset as needed [S1].
+    - **During Inference (Standard):** Center-crop reference images. Select one frame from the five frames preceding the training image and one from the five frames succeeding it [S1].
+    - **During Inference (Novel View):** Identify the closest training viewpoint. Use the adjacent frames of this closest viewpoint as reference images [S1].
+-7. **Classifier-Free Guidance Setup:** During training, with a probability of 10%, set both the text prompt and the reference images to empty (null) conditions. This enables the model to learn unconditional generation capabilities [S1].
++7. **Classifier-Free Guidance Setup:** During training, with a probability of 10%, set both the text prompt and the reference images to empty conditions [S1].
+ 
+ **Pseudocode:**
+ ```python
++import random
++
++def center_crop(image, target_h, target_w):
++    h, w, _ = image.shape
++    start_h = (h - target_h) // 2
++    start_w = (w - target_w) // 2
++    return image[start_h:start_h+target_h, start_w:start_w+target_w, :]
++
++def random_crop(image, target_h, target_w):
++    h, w, _ = image.shape
++    start_h = random.randint(0, h - target_h)
++    start_w = random.randint(0, w - target_w)
++    return image[start_h:start_h+target_h, start_w:start_w+target_w, :]
++
++def resize_bilinear(image, target_h, target_w):
++    h, w, _ = image.shape
++    resized = [[None]*target_w for _ in range(target_h)]
++    for y in range(target_h):
++        for x in range(target_w):
++            src_y = y * h / target_h
++            src_x = x * w / target_w
++            # Standard bilinear interpolation [G]
++            resized[y][x] = image[int(src_y)][int(src_x)]
++    return resized
++
+ def preprocess_kitti_image(image_raw, height=512, width=512, top_mask_rows=80):
+-    """
+-    Preprocess a single KITTI-360 image for Stable Diffusion training.
+-    image_raw: numpy array of shape (376, 1408, 3)
+-    Returns: numpy array of shape (512, 512, 3) and a binary mask
+-    """
+-    # Step 1: Pre-crop to avoid over-distortion
+-    # Original: 1408x376. Crop to 600x376.
+-    # Assuming center crop in width:
+     h, w, _ = image_raw.shape
++    # Step 1: Pre-crop to 600x376
+     start_w = (w - 600) // 2
+     image_cropped = image_raw[:, start_w:start_w+600, :]
+-    
+     # Step 2: Resize to 512x512
+-    image_resized = resize(image_cropped, (height, width))
+-    
++    image_resized = resize_bilinear(image_cropped, height, width)
+     # Step 3: Create depth mask
+-    mask = np.ones((height, width), dtype=np.float32)
+-    mask[:top_mask_rows, :] = 0.0 # Top 80 rows are masked
+-    
++    mask = [[1.0]*width for _ in range(height)]
++    for r in range(top_mask_rows):
++        for c in range(width):
++            mask[r][c] = 0.0
+     return image_resized, mask
+ 
+-def select_reference_images(training_idx, dataset, num_prev=5, num_next=5):
+-    """
+-    Select reference images for a given training image index.
+-    """
+-    # Randomly choose one from preceding frames
+-    prev_indices = range(max(0, training_idx - num_prev), training_idx)
+-    ref_prev_idx = random.choice(list(prev_indices))
+-    
+-    # Randomly choose one from succeeding frames
+-    next_indices = range(training_idx + 1, min(len(dataset), training_idx + 1 + num_next))
+-    ref_next_idx = random.choice(list(next_indices))
+-    
++def select_reference_images(training_idx, dataset_len, num_prev=5, num_next=5):
++    prev_indices = list(range(max(0, training_idx - num_prev), training_idx))
++    ref_prev_idx = random.choice(prev_indices) if prev_indices else training_idx
++    next_indices = list(range(training_idx + 1, min(dataset_len, training_idx + 1 + num_next)))
++    ref_next_idx = random.choice(next_indices) if next_indices else training_idx
+     return ref_prev_idx, ref_next_idx
+ 
+-def apply_cropping_strategy(image, strategy='center'):
+-    """
+-    Apply cropping based on strategy.
+-    strategy: 'center' for training images and inference references,
+-              'random' for training references.
+-    """
+-    if strategy == 'center':
+-        return center_crop(image)
+-    elif strategy == 'random':
+-        return random_crop(image)
+-    return image
+-
+ def prepare_training_batch(training_image, reference_image, text_prompt, cfg_prob=0.1):
+-    """
+-    Prepare a batch for training with classifier-free guidance.
+-    """
+-    # Apply cropping
+-    train_img = apply_cropping_strategy(training_image, 'center')
+-    ref_img = apply_cropping_strategy(reference_image, 'random')
+-    
+-    # Classifier-free guidance: randomly nullify conditions
++    train_img = center_crop(training_image, 512, 512)
++    ref_img = random_crop(reference_image, 512, 512)
+     if random.random() < cfg_prob:
+         text_prompt = ""
+-        ref_img = None # Or empty tensor depending on implementation
+-        
++        ref_img = None
+     return train_img, ref_img, text_prompt
+ ```
+@@ -102,5 +93,5 @@
+ **Edge Cases and Pitfalls:**
+ - **Over-distortion:** Failing to pre-crop to $600 \times 376$ before resizing to $512 \times 512$ causes significant aspect ratio distortion [S1].
+-- **LiDAR Gaps:** The top 80 rows contain no LiDAR data. The model must be trained to inpaint this region, relying on semantic priors rather than geometric constraints [S1].
++- **LiDAR Gaps:** The top 80 rows contain no LiDAR data. The diffusion model's inpainting capability completes this portion of content [S1].
+ - **Perspective Gap:** Using center-crop for both training and reference images during training reduces the perspective diversity, potentially harming robustness. Random cropping for references is essential [S1].
+ 
+@@ -108,18 +99,25 @@
+ 
+ ### [Image-Conditioned Diffusion Fine-Tuning](15523-image-conditioned-diffusion-fine-tuning.md)
+-This is the first stage of a two-step training strategy for the diffusion prior. It enables the model to learn high-level semantic content and object existence from adjacent reference images without relying on camera pose information. It isolates semantic understanding to handle complex driving scenes with mutual occlusions, where pose alone is insufficient.
++Image-Conditioned Diffusion Fine-Tuning is the first stage of a two-step training strategy for a diffusion model prior used in street view synthesis. It enables the model to learn high-level semantic content and object existence from adjacent reference images without relying on camera pose information. Unlike methods that simultaneously encode images and poses, this approach isolates semantic understanding to handle complex driving scenes with mutual occlusions, where pose alone is insufficient for the diffusion model to fully comprehend the 3D scene structure.
++
++### [StableMaterial Training Configuration](19403-stablematerial-training-configuration.md)
++StableMaterial Training Configuration defines the hyperparameters and data pipeline for finetuning a 2D diffusion model prior to estimate physically plausible material properties (albedo and ORM) from input images. It adapts a pretrained Stable Diffusion UNet by freezing the backbone and training only a custom adapter and the UNet weights, reducing computational requirements compared to full model training. This configuration serves as the foundation for the StableMaterial model, which provides strong material priors for inverse rendering pipelines like MaterialFusion.
++
++### DeepFloyd IF 2D Guidance
++DeepFloyd IF 2D Guidance is a text-to-image guidance approach using DeepFloyd IF, which features an Imagen-like architecture and a T-5 text encoder for stronger text understanding [S2]. The input image is downsampled to 64×64 pixels before passing it to DeepFloyd IF due to its modular cascaded design [S2]. It produces better text-3D alignment than StableDiffusion due to the T-5 encoder, but yields blurrier assets because of the mandatory 64×64 downsampling [S2].
+ 
+ ## Operating characteristics
+-- **Time Complexity:** Not given in the sources.
+-- **Memory Complexity:** Not given in the sources.
++- **Time Complexity:** Not given in the sources. [S1]
++- **Memory Complexity:** Not given in the sources. [S1]
+ - **Performance:** The method is evaluated on the KITTI-360 dataset. The model is fine-tuned on approximately 12,000 images [S1].
+-- **Strengths:** Effectively handles the wide aspect ratio of street view data. The perspective gap strategy enhances robustness. The depth mask leverages the diffusion model's inpainting capabilities to fill LiDAR gaps.
+-- **Limitations:** Relies on the assumption that the diffusion model can accurately inpaint the masked top region. Performance is dependent on the quality of the LiDAR point clouds for the lower region.
+-- **When to use:** When synthesizing street views using Gaussian Splatting and a diffusion prior, specifically with wide-angle datasets like KITTI-360.
+-- **When not to use:** For datasets with standard aspect ratios or where LiDAR data covers the full vertical extent.
++- **Strengths:** Effectively handles the wide aspect ratio of street view data. The perspective gap strategy enhances robustness. The depth mask leverages the diffusion model's inpainting capabilities to fill LiDAR gaps [S1].
++- **Limitations:** Relies on the assumption that the diffusion model can accurately inpaint the masked top region. Performance is dependent on the quality of the LiDAR point clouds for the lower region [S1].
++- **When to use:** When synthesizing street views using Gaussian Splatting and a diffusion prior, specifically with wide-angle datasets like KITTI-360 [S1].
++- **When not to use:** For datasets with standard aspect ratios or where LiDAR data covers the full vertical extent [S1].
+ 
+ ## Background
+-The method originates from the SGD (Street View Synthesis with Gaussian Splatting and Diffusion Prior) paper [S1]. It adapts Stable Diffusion 1.5  for 3D scene synthesis. The preprocessing steps are designed to bridge the gap between the wide, low-height aspect ratio of KITTI-360 images and the square, high-resolution inputs expected by Stable Diffusion. The classifier-free guidance setup follows standard practices in conditional diffusion models but is specifically tuned for the image-conditioned setting [S1].
++The method originates from the SGD (Street View Synthesis with Gaussian Splatting and Diffusion Prior) paper [S1]. It adapts Stable Diffusion 1.5 for 3D scene synthesis [S1]. The preprocessing steps are designed to bridge the gap between the wide, low-height aspect ratio of KITTI-360 images and the square, high-resolution inputs expected by Stable Diffusion [S1]. The classifier-free guidance setup follows standard practices in conditional diffusion models but is specifically tuned for the image-conditioned setting [S1].
+ 
+ ## Sources
+-[S1] SGD: Street View Synthesis with Gaussian Splatting and Diffusion Prior, https://doi.org/10.1109/wacv61041.2025.00375, fetched 2026-10-27+[S1] SGD: Street View Synthesis with Gaussian Splatting and Diffusion Prior, https://doi.org/10.1109/wacv61041.2025.00375, fetched 2026-10-27
++[S2] Text-to-3D using Gaussian Splatting, https://doi.org/10.1109/cvpr52733.2024.02022, fetched 2026-10-26

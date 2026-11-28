@@ -1,0 +1,152 @@
+# Neural Textures Architecture
+
+Also called: Neural Texture Rendering
+
+## Overview
+Neural Textures Architecture extends traditional 2D RGB texture maps into high-dimensional Neural Feature Maps associated with an explicit 3D mesh model to achieve view synthesis [S1]. Unlike implicit neural fields that optimize volumetric properties directly in 3D space, this method maps features to a simple 3D proxy surface, sampling them via the standard graphics pipeline to produce features that are decoded into an image [S1]. This approach produces standard physically based textures compatible with traditional renderers, distinguishing it from purely implicit neural field representations [S1].
+
+## How it works
+**Inputs and Outputs:**
+*   **Inputs:** A triangular mesh model with UV parameterization; camera parameters (viewing direction $d$, ray origin); surface normal $n$ at intersection; illumination information $l$ (optional); and a neural feature map [S1].
+*   **Outputs:** Final RGB color $c$ for each pixel [S1].
+
+**Data Structures:**
+*   **Neural Feature Map:** A 2D texture where each pixel stores a $k$-dimensional feature vector $f \in \mathbb{R}^K$. $K$ is typically 16, 32, or similar small integers [S1].
+*   **Coloring Network (MLP):** A lightweight Multi-Layer Perceptron that decodes features into color [S1].
+    *   **Structure:** Two hidden layers, each with 64 features [S2].
+    *   **Activations:** Hidden layers use ReLU; final layer uses linear activation [S2].
+    *   **Output:** Per-channel spherical harmonics (SH) coefficients of degree 3 [S2].
+
+**Steps:**
+1.  **Feature Map Creation:** Given a triangular mesh and its UV parameterization, initialize a neural feature map where each pixel stores a $K$-dimensional feature vector instead of RGB values [S1].
+2.  **Rasterization and Feature Query:** For each camera ray, determine the intersection with the mesh using differentiable rasterization [S1]. Retrieve the UV coordinates $(u, v)$ of the intersection point [S2]. Perform bilinear interpolation on the neural feature map at $(u, v)$ to obtain the feature vector $f \in \mathbb{R}^K$ [S1].
+3.  **Color Decoding:** Feed the queried feature vector $f$, the surface normal $n$, the viewing direction $d$, and illumination $l$ into the coloring network [S1].
+4.  **Output Generation:** The coloring network outputs the final RGB color $c$ [S1]. The entire "feature query-coloring" process is differentiable, allowing gradient-based optimization of the feature map and network weights [S1].
+
+**Alternative Implementation (Volumetric Surfaces):**
+In specific implementations involving fuzzy geometries, the architecture varies slightly [S2].
+1.  **Encoding:** Encode 2D UV coordinates using trainable positional encoding [S2].
+2.  **MLP Processing:** Pass encoded coordinates through an MLP with two layers of 64 features each [S2].
+3.  **SH Output:** The final layer outputs per-channel spherical harmonics (SH) coefficients of degree 3 [S2].
+4.  **Decoding:** Decode the SH coefficients using the view direction $v$ to determine color and transparency [S2].
+
+**Pseudocode:**
+> **Unverified code.** The code below did not pass a test run against a reference implementation, or no test fits it, so it may contain errors.
+
+```python
+def neural_texture_render(mesh, uv_map, feature_map, camera_ray, coloring_network):
+    """
+    Renders a single ray using the Neural Textures architecture.
+    
+    Args:
+        mesh: Triangular mesh object with intersection methods.
+        uv_map: UV parameterization map for the mesh.
+        feature_map: 2D tensor of shape (H, W, K) storing neural features.
+        camera_ray: Ray object with origin and direction.
+        coloring_network: MLP function taking (f, n, d, l) and returning color.
+        
+    Returns:
+        color: RGB color value.
+    """
+    # Step 1: Determine intersection with the mesh
+    intersection = mesh.ray_intersection(camera_ray)
+    if intersection is None:
+        return [0.0, 0.0, 0.0]  # Default background color
+
+    # Step 2: Retrieve UV coordinates and surface properties
+    u, v = intersection.uv_coordinates
+    n = intersection.normal
+    d = camera_ray.direction
+
+    # Step 3: Query feature vector via bilinear interpolation
+    f = bilinear_interpolate(feature_map, u, v)
+
+    # Step 4: Decode color using the coloring network
+    # Illumination computation not specified in sources [G]
+    l = compute_illumination(intersection.position, n)
+    color = coloring_network(f, n, d, l)
+
+    return color
+
+def bilinear_interpolate(texture, u, v):
+    """
+    Performs bilinear interpolation on a 2D texture given normalized coordinates.
+    """
+    h, w, k = texture.shape
+    u_idx = u * (w - 1)
+    v_idx = v * (h - 1)
+
+    u0 = int(u_idx)
+    v0 = int(v_idx)
+    u1 = min(u0 + 1, w - 1)
+    v1 = min(v0 + 1, h - 1)
+
+    u_frac = u_idx - u0
+    v_frac = v_idx - v0
+
+    q11 = texture[v0, u0]
+    q12 = texture[v0, u1]
+    q21 = texture[v1, u0]
+    q22 = texture[v1, u1]
+
+    top = lerp(q11, q12, u_frac)
+    bottom = lerp(q21, q22, u_frac)
+
+    return lerp(top, bottom, v_frac)
+
+def lerp(a, b, t):
+    return a + t * (b - a)
+
+def compute_illumination(position, normal):
+    # Standard diffuse illumination approximation [G]
+    return [1.0, 1.0, 1.0]
+```
+
+## Subtopics
+
+### [Neural Textures](16067-neural-textures.md)
+Neural Textures is a deferred neural rendering technique that optimizes a high-dimensional neural texture jointly with a neural renderer to achieve novel view synthesis, scene editing, animation synthesis, or free viewpoint relighting. Unlike volumetric implicit fields, it maps the texture to a simple 3D proxy surface, samples it via the standard graphics pipeline to produce features, and decodes them into an image. This yields standard physically based textures compatible with traditional renderers.
+
+### [Neural Texture Field](19490-neural-texture-field.md)
+A Neural Texture Field is a continuous texture representation that maps any 3D point to a color value using a neural network parameterized by $\theta$, independent of shape discretization or UV mapping. It solves the problem of high-frequency texture reconstruction and generation for 3D objects by avoiding the resolution limits of voxel grids and the topology constraints of UV-mapped meshes. Unlike the main Neural Textures Architecture, which separates models for RGB and transparency per mesh, the Neural Texture Field learns a single continuous function conditioned on a shape embedding and a latent code to predict RGB color directly in 3D space.
+
+### SIREN Optimization for Neural Lumigraph
+Training procedure for the SDF $S$ and emissivity $E$ using SIREN architectures, incorporating a smoothness term to restrict angular behavior for favorable interpolation [S3].
+*   **Implementation:** Implement MLPs for $S$ and $E$ as SIRENs with 5 layers using 256 hidden units each [S3]. Use Fourier features $\{\sin(2k\pi r_d), \cos(2k\pi r_d) \mid k \in 1 \dots 4\}$ in $E$ to support angular resolution [S3].
+*   **Initialization:** Initialize $S$ to a unit sphere of radius 0.5 by pretraining to a procedural shape [S3].
+*   **Optimization:** Optimize loss in mini-batches of 50,000 individual rays sampled uniformly across the entire training dataset [S3]. Use Adam solver with initial learning rate $10^{-4}$, decreased by a factor of 2 every 40,000 batches for 150,000 batches total [S3].
+*   **Loss Function:** The total loss is optimized as:
+    $$ \arg \min_{\theta, \phi} L_R + w_E L_E + w_M L_M + w_S L_S $$
+    The angular smoothness loss $L_S$ is defined as:
+    $$ L_S = \frac{1}{|U|} \sum ||\nabla^2_{r_d} E(x, r_d, n; \theta, \phi)||^2_2 $$
+*   **Parameters:** $w_E$ (Weight for emissivity loss) is 0.1 [S3].
+*   **Pitfalls:** Local overfitting of SIREN, especially for high-frequency function $E$, is prevented by using large batch sizes and uniform ray distribution [S3]. Large values of $w_S$ cause high-frequency artifacts in $S$ [S3].
+
+### Neural Texture for Virtual Digital Humans
+A technique for real-time animation and actuation of virtual digital humans, combining a parametric face model with neural textures [S1].
+*   **Method:** Combine a parametric face model (such as 3DMM) with neural textures [S1]. Render high fidelity facial animation in real time by driving a limited number of expression parameters [S1].
+*   **History:** Referenced in [15] [S1].
+
+## Operating characteristics
+**Time and Memory Complexity:**
+*   The architecture achieves a three-order-of-magnitude acceleration in training throughput compared to vanilla NeRF due to efficient hash-table lookups and interpolation operations [S1].
+*   Memory consumption is lower than Plenoxels, which discretizes the scene into a sparse voxel grid and optimizes spherical harmonic coefficients directly, albeit at the cost of increased memory [S1].
+
+**Strengths and Limitations:**
+*   **Strengths:** Produces standard physically based textures compatible with traditional renderers; enables real-time animation for virtual humans; supports deferred rendering workflows [S1].
+*   **Limitations:** Relies on the quality of the explicit 3D mesh proxy; may suffer from artifacts if the mesh is inaccurate or poorly UV-unwrapped [S1].
+
+**When to Use:**
+Not given in the sources.
+
+**When Not to Use:**
+Not given in the sources.
+
+## Background
+Neural Textures Architecture extends the concept of traditional 2D texture mapping into the neural rendering domain [S1]. It was introduced as part of the broader exploration of explicit representations in neural rendering, offering a hybrid approach between explicit mesh-based rendering and implicit neural fields [S1]. The method leverages differentiable rasterization to bridge the gap between standard graphics pipelines and neural optimization [S1].
+
+## Sources
+[S1] Review of Key Technologies and Application Scenarios of Neural Rendering, https://doi.org/10.54254/2755-2721/2026.36116, fetched 2026-10-26
+[S2] Volumetric Surfaces: Representing Fuzzy Geometries with Layered Meshes, https://doi.org/10.1109/cvpr52734.2025.01991, fetched 2026-10-26
+[S3] Neural Lumigraph Rendering, https://doi.org/10.1109/cvpr46437.2021.00427, fetched 2026-10-26
+[S4] Intrinsic Neural Fields: Learning Functions on Manifolds, https://doi.org/10.1007/978-3-031-20086-1_36, fetched 2026-10-26

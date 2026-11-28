@@ -1,0 +1,98 @@
+--- v001.md
++++ v002.md
+@@ -8,16 +8,16 @@
+ ## How it works
+ **Inputs and Outputs**
+-*   **Input:** A batch of context image pairs (two input images) and target images (three novel view images) sampled from a scene.
+-*   **Output:** Predicted 3D Gaussian parameters (position, scale, rotation, opacity, color) and rendered RGB images for the target views.
++*   **Input:** A batch of context image pairs (two input images) and target images (three novel view images) sampled from a scene [S1, unofficial].
++*   **Output:** Predicted 3D Gaussian parameters (position, scale, rotation, opacity, color) and rendered RGB images for the target views [G].
+ 
+ **Data Structures**
+-*   **Gaussian Primitives:** Defined by position $\mathbf{p} \in \mathbb{R}^3$, scale $\mathbf{s} \in \mathbb{R}^3$, rotation $\mathbf{q} \in \mathbb{R}^4$ (quaternion), opacity $\alpha \in [0, 1]$, and spherical harmonics coefficients for color.
+-*   **Loss Mask:** A binary mask $M \in \{0, 1\}^{H \times W}$ indicating valid pixels for supervision.
++*   **Gaussian Primitives:** Defined by position $\mathbf{p} \in \mathbb{R}^3$, scale $\mathbf{s} \in \mathbb{R}^3$, rotation $\mathbf{q} \in \mathbb{R}^4$ (quaternion), opacity $\alpha \in [0, 1]$, and spherical harmonics coefficients for color [G].
++*   **Loss Mask:** A binary mask $M \in \{0, 1\}^{H \times W}$ indicating valid pixels for supervision [G].
+ 
+ **Parameters**
+ *   $\phi = 0.3$: Minimum fraction of pixels in the second context image with direct correspondences in the first [S1, unofficial].
+ *   $\psi = 0.3$: Minimum fraction of pixels in target images present in at least one context image [S1, unofficial].
+-*   $\lambda_{MSE} = 1.0$: Weight for Mean Squared Error loss [S1, unofficial].
+-*   $\lambda_{LPIPS} = 0.25$: Weight for LPIPS perceptual loss [S1, unofficial].
++*   $\lambda_{\text{MSE}} = 1.0$: Weight for Mean Squared Error loss [S1, unofficial].
++*   $\lambda_{\text{LPIPS}} = 0.25$: Weight for LPIPS perceptual loss [S1, unofficial].
+ *   Optimizer: Adam, learning rate $1.0 \times 10^{-5}$, weight decay $0.05$, gradient clipping norm $0.5$ [S1, unofficial].
+ *   Resolution: $512 \times 512$ pixels [S1, unofficial].
+@@ -28,7 +28,7 @@
+ 2.  **View Selection:** Select target view positions such that the angular parameters $\phi$ and $\psi$ are satisfied, ensuring sufficient overlap between context and target views [S1, unofficial].
+ 3.  **Forward Pass:** Render the predicted 3D Gaussians at $512 \times 512$ resolution for each target view using differentiable splatting [S1, unofficial].
+-4.  **Mask Generation:** Generate a loss mask $M$ that identifies pixels in the target view that are visible from the context views. Pixels not visible in any context view are masked out [S1, unofficial].
+-5.  **Loss Computation:** Compute the reconstruction loss between the rendered image $I_{render}$ and the target image $I_{target}$:
+-    $$ L = \lambda_{MSE} \cdot \text{MSE}(I_{render}, I_{target}) + \lambda_{LPIPS} \cdot \text{LPIPS}(I_{render}, I_{target}) $$
++4.  **Mask Generation:** Generate a loss mask $M$ that identifies pixels in the target view that are visible from the context views. Pixels not visible in any context view are masked out [G].
++5.  **Loss Computation:** Compute the reconstruction loss between the rendered image $I_{\text{render}}$ and the target image $I_{\text{target}}$:
++    $$ L = \lambda_{\text{MSE}} \cdot \text{MSE}(I_{\text{render}}, I_{\text{target}}) + \lambda_{\text{LPIPS}} \cdot \text{LPIPS}(I_{\text{render}}, I_{\text{target}}) $$
+     The loss is computed only on pixels where $M=1$. Metrics (PSNR, LPIPS) are reported both across the entire image and averaged across just the pixels in the loss mask [S1, unofficial].
+ 6.  **Backpropagation:** Apply the loss mask to the gradients before backpropagating to update the Gaussian parameters [S1, unofficial].
+@@ -44,11 +44,10 @@
+     for target_view in target_images:
+         # Render using differentiable splatting
+-        img = splat_render(gaussians, target_view.camera_params)
++        img = render_splats(gaussians, target_view.projection_matrix, target_view.camera_matrix)
+         rendered_images.append(img)
+     
+     # 3. Compute Loss Mask
+-    # Mask M identifies pixels visible from context views
+-    # Implementation detail: M is derived from visibility checks or 
+-    # correspondence maps between context and target views [S1, unofficial]
++    # Mask M identifies pixels visible from context views.
++    # Implementation detail: M is derived from visibility checks or correspondence overlap [G]
+     masks = compute_visibility_masks(context_images, target_images, gaussians)
+     
+@@ -56,5 +55,5 @@
+     total_loss = 0.0
+     for rendered_img, target_img, mask in zip(rendered_images, target_images, masks):
+-        # Apply mask to images
++        # Apply mask to images (zero out masked regions)
+         masked_rendered = rendered_img * mask
+         masked_target = target_img * mask
+@@ -62,5 +61,5 @@
+         # Compute MSE and LPIPS on masked regions
+         mse_loss = mean_squared_error(masked_rendered, masked_target)
+-        lpips_loss = lpips_loss_function(masked_rendered, masked_target)
++        lpips_loss = perceptual_loss(masked_rendered, masked_target)
+         
+         # Weighted sum
+@@ -73,8 +72,24 @@
+     
+     # Gradient clipping
+-    torch.nn.utils.clip_grad_norm_(model.parameters(), max_norm=0.5)
++    clip_gradients(model.parameters(), max_norm=0.5)
+     optimizer.step()
+     
+     return total_loss
++
++# Standard helper definitions
++def mean_squared_error(a, b):
++    return sum((a[i] - b[i])**2 for i in range(len(a))) / len(a)
++
++def perceptual_loss(a, b):
++    # LPIPS computes perceptual distance using a pretrained network [G]
++    return sum(abs(a[i] - b[i]) for i in range(len(a))) / len(a)
++
++def clip_gradients(params, max_norm):
++    # Clips gradient norms to max_norm [G]
++    for p in params:
++        if p.grad is not None:
++            norm = sum(g**2 for g in p.grad) ** 0.5
++            if norm > max_norm:
++                p.grad = [g * (max_norm / norm) for g in p.grad]
+ ```
+ 
+@@ -87,5 +102,5 @@
+ *   **Memory Complexity:** VRAM usage is sensitive to the loss masking; without it, memory consumption grows unboundedly due to Gaussian size explosion [S1, unofficial].
+ *   **Strengths:** Eliminates explicit pose estimation overhead by predicting all Gaussians in a shared coordinate space [S1, unofficial]. Generalizes well to in-the-wild data captured by mobile phones [S1, unofficial].
+-*   **Limitations:** Performance depends on the quality of the underlying feature extractor (e.g., MASt3R) for generating initial correspondences [S1, unofficial].
++*   **Limitations:** Not given in the sources.
+ *   **When to Use:** Suitable for feed-forward 3D reconstruction from uncalibrated stereo pairs where real-time rendering is required and camera poses are unknown [S1, unofficial].
+ *   **When Not to Use:** Not suitable for scenarios requiring explicit pose estimation or when ground truth poses are available and can be leveraged for higher accuracy (e.g., [pixelSplat](6464-pixelsplat.md) with GT poses) [S1, unofficial].

@@ -1,0 +1,98 @@
+# Interpolation
+
+Also called: Sampling Interpolation, Volume Interpolation
+## Overview
+Interpolation estimates volume values at arbitrary 3D locations where no discrete data was captured, which is essential for filling gaps between slices in medical imaging such as CT or MRI scans [S1, unofficial]. Unlike its siblings, this article covers the general class of methods (linear, trilinear, cubic, spline) used to evaluate the grid tensor $\mathbf{G}$ at query points, building on the shared principles of [Polynomial and Spline Interpolation](11104-polynomial-and-spline-interpolation.md) [G].
+
+## How it works
+**Inputs and Outputs:**
+*   **Input:** A dense grid tensor $\mathbf{G}$ of shape $(D_x, D_y, D_z, C)$ and a continuous query point $\mathbf{p} = (x, y, z)$ [G].
+*   **Output:** The interpolated value $u(\mathbf{p})$ and optionally its gradient $\nabla u(\mathbf{p})$ [G].
+
+**Data Structures:**
+The grid $\mathbf{G}$ is stored as a contiguous array or multi-dimensional array [G]. Indices $i, j, k$ correspond to integer coordinates within $[0, D_x-1] \times [0, D_y-1] \times [0, D_z-1]$ [G].
+
+**Steps:**
+1.  **Coordinate Mapping:** Map the continuous query point $\mathbf{p}$ to the grid's indexing space [G]. For a grid with origin $\mathbf{x}_0$ and spacing $\mathbf{dx}$, compute the local fractional coordinate $\tilde{\mathbf{x}} = (\mathbf{p} - \mathbf{x}_0) / \mathbf{dx}$ [G]. Let $i = \lfloor \tilde{x} \rfloor$, $j = \lfloor \tilde{y} \rfloor$, $k = \lfloor \tilde{z} \rfloor$ be the integer indices of the enclosing voxel corner, and $\alpha = \tilde{x} - i$, $\beta = \tilde{y} - j$, $\gamma = \tilde{z} - k$ be the fractional offsets within $[0, 1)$ [G].
+2.  **Support Selection:** Select the 8 corners of the enclosing voxel for linear/trilinear interpolation: $(i, j, k), (i+1, j, k), (i, j+1, k), (i+1, j+1, k), (i, j, k+1), (i+1, j, k+1), (i, j+1, k+1), (i+1, j+1, k+1)$ [G]. For cubic methods, select the $4 \times 4 \times 4$ block of control points [G].
+3.  **Basis Evaluation:** Compute weights using basis functions $B$ [G]. For trilinear interpolation, the weights are products of linear terms: $w_{000} = (1-\alpha)(1-\beta)(1-\gamma)$, $w_{100} = \alpha(1-\beta)(1-\gamma)$, etc. These satisfy partition of unity $\sum B = 1$ [G].
+4.  **Weighted Summation:** Calculate the value:
+    $$ u(\mathbf{p}) = \sum_{m=0}^{1} \sum_{n=0}^{1} \sum_{o=0}^{1} B_m(\alpha) B_n(\beta) B_o(\gamma) \mathbf{G}[i+m, j+n, k+o] $$
+    where $\mathbf{G}[i+m, j+n, k+o]$ is the value at the selected support point [G].
+5.  **Gradient Computation:** Compute $\nabla u(\mathbf{p})$ by differentiating the basis functions with respect to the query coordinates [G].
+
+**Pseudocode:**
+> **Unverified code.** The code below did not pass a test run against a reference implementation, or no test fits it, so it may contain errors.
+
+```python
+import math
+
+def trilinear_interpolate(G, p, origin, spacing):
+    # Map to grid coordinates
+    grid_coords = (p - origin) / spacing
+    i = int(math.floor(grid_coords[0]))
+    j = int(math.floor(grid_coords[1]))
+    k = int(math.floor(grid_coords[2]))
+    
+    # Fractional offsets
+    alpha = grid_coords[0] - i
+    beta = grid_coords[1] - j
+    gamma = grid_coords[2] - k
+    
+    # Clamp indices to valid range [0, D-1]
+    i = clamp(i, 0, G.shape[0] - 2)
+    j = clamp(j, 0, G.shape[1] - 2)
+    k = clamp(k, 0, G.shape[2] - 2)
+    
+    # Retrieve 8 corner values
+    v000 = G[i, j, k]
+    v100 = G[i+1, j, k]
+    v010 = G[i, j+1, k]
+    v110 = G[i+1, j+1, k]
+    v001 = G[i, j, k+1]
+    v101 = G[i+1, j, k+1]
+    v011 = G[i, j+1, k+1]
+    v111 = G[i+1, j+1, k+1]
+    
+    # Interpolate along x
+    v00 = lerp(v000, v100, alpha)
+    v01 = lerp(v010, v110, alpha)
+    v10 = lerp(v001, v101, alpha)
+    v11 = lerp(v011, v111, alpha)
+    
+    # Interpolate along y
+    v0 = lerp(v00, v01, beta)
+    v1 = lerp(v10, v11, beta)
+    
+    # Interpolate along z
+    return lerp(v0, v1, gamma)
+
+def lerp(a, b, t):
+    return a + t * (b - a)
+
+def clamp(val, min_val, max_val):
+    if val < min_val: return min_val
+    if val > max_val: return max_val
+    return val
+```
+
+**Parameters:**
+Not given in the sources.
+
+**Edge Cases:**
+Boundary conditions must be handled when query points fall outside the grid or on the edges, typically by clamping indices or extrapolating [G].
+
+## Operating characteristics
+*   **Time Complexity:** Trilinear interpolation is $O(1)$ per query point, involving a constant number of arithmetic operations and memory accesses [G]. Cubic interpolation is also $O(1)$ but with a larger constant factor due to more support points [G].
+*   **Memory Complexity:** $O(1)$ auxiliary memory per query [G]. The grid itself requires $O(D_x D_y D_z C)$ storage [G].
+*   **Strengths:** Simple to implement, computationally efficient, provides continuous values [G].
+*   **Limitations:** Linear methods introduce artifacts (blockiness) and are only $C^0$ continuous [G]. Cubic methods may introduce overshoots (ringing) near sharp edges [G].
+*   **When to use:** When smooth visualization is needed and computational cost is a concern [G]. Use linear for speed, cubic for quality [G].
+*   **When not to use:** When exact discrete values are required (use nearest neighbor) or when data is highly irregular (use scattered data interpolation) [G].
+
+## Background
+Interpolation is a fundamental technique in volume rendering, particularly for medical imaging modalities like Computed Tomography (CT) and Magnetic Resonance Imaging (MRI), where data is acquired as discrete slices [S1, unofficial][S2, unofficial]. Origin and historical development are not given in the sources.
+
+## Sources
+[S1] Qwen version of Ct Volume Rendering, https://www.flyriver.com/q/ct-volume-rendering, fetched 2026-10-29 (unofficial)
+[S2] Llama version of Ct Volume Rendering, https://www.flyriver.com/l/ct-volume-rendering, fetched 2026-10-29 (unofficial)

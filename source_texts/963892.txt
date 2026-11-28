@@ -1,0 +1,593 @@
+JAX-native differentiable geometry and STEP/B-Rep evaluation. - fix(brep): scope TrimmedCSGStump to raw analytical SDF by lv416e · Pull Request #79 · lv416e/brepax
+
+fix(brep): scope TrimmedCSGStump to raw analytical SDF by lv416e · Pull Request #79 · lv416e/brepax · GitHub
+Skip to content
+You signed in with another tab or window. Reload to refresh your session.
+You signed out in another tab or window. Reload to refresh your session.
+You switched accounts on another tab or window. Reload to refresh your session.
+Dismiss alert
+Conversation
+lv416e
+commented
+May 6, 2026
+•
+edited by coderabbitai
+Bot
+Loading
+Uh oh!
+There was an error while loading. Please reload this page.
+Copy link
+Copy Markdown
+Owner
+Summary
+Forward-fix the analytical-primitive routing inside TrimmedCSGStump. Per ADR-0019 every analytical primitive (plane, cylinder, sphere, cone, torus) contributes its raw untrimmed half-space SDF to the CSG-Stump DNF, recovering bit-equivalence with DifferentiableCSGStump on analytical-only models.
+ADR-0018's Marschner signed blend is preserved for two distinct use cases: standalone trimmed-face distance queries (the *_face_sdf wrappers in brep/trim_frame.py, unaffected) and the future BSpline-patch path inside the composition.
+New regression benchmark tests/benchmarks/test_trim_baseline.py extended with a sdf_trim column to lock the bit-equivalence invariant on four analytical fixtures.
+Why
+The previous wiring (PR #76) substituted the Marschner blend for every curved analytical primitive inside the DNF. Measurement on the new baseline benchmark showed:
+Model
+V_direct error
+V_trim_aware error (before)
+sample_box (planes only)
+-0.25%
+-0.25%
+sample_cylinder (1 cyl + 2 caps)
++0.89%
+-0.81%
+box_with_holes (6 planes + 2 holes)
++0.10%
+-3.30%
+l_bracket (planes only)
+-0.44%
+-0.44%
+Plane-only fixtures were bit-identical between the two paths but box_with_holes collapsed from +0.10% direct error to -3.30% under trim-aware. Isolation experiments narrowed the cause to a category error: the CSG-Stump DNF treats each primitive's SDF as a half-space ingredient, but the Marschner formula returns the signed distance to a finite trimmed face patch which collapses to a non-negative boundary distance outside the trim parameter range. Substituted into the DNF this collapses entire half-spaces to thin shells. The asymmetry that the prior wiring documented for plane primitives generalises to every analytical surface type.
+ADR-0019 records the scope correction; ADR-0018 stands as the formula's mathematical specification and is not superseded.
+After this PR, the same benchmark reports:
+Model
+V_direct error
+V_trim_aware error (after)
+sample_box
+-0.25%
+-0.25%
+sample_cylinder
++0.89%
++0.89%
+box_with_holes
++0.10%
++0.10%
+l_bracket
+-0.44%
+-0.44%
+Changes
+src/brepax/brep/trimmed_csg_stump.py: TrimmedCSGStump now stores both primitives and frames; sdf composes via primitive.sdf(query) for every slot. enrich_with_trim_frames no longer flips intersection-matrix columns. Module docstring rewritten to explain the analytical-vs-BSpline asymmetry.
+tests/unit/brep/test_trimmed_csg_stump.py: tests pin the bit-equivalence invariant on sample_box and box_with_holes; the gradient regression flows through primitive parameters.
+tests/benchmarks/test_trim_baseline.py: extended with sdf_trim column on the four analytical fixtures.
+docs/architecture/adr/0019-marschner-composition-scope.md: new ADR scoping ADR-0018's blend to standalone-face queries and the future BSpline path.
+Verification
+uv run ruff format src/ tests/ clean
+uv run ruff check src/ tests/ clean
+uv run mypy src/ 0 errors
+uv run pytest -m "not slow" 724 passed, 1 skipped (matplotlib unavailable locally), 54 deselected
+uv run pytest tests/benchmarks/test_trim_baseline.py -m slow -s confirms V_direct == V_trim on all four fixtures
+uv run pytest tests/unit/brep/test_trimmed_csg_stump.py -v all 9 tests pass under the new bit-equivalence invariant
+Related
+ADR-0018 (the Marschner blend formula, unchanged)
+ADR-0019 (new, scope correction)
+ADR-0016 (BSpline half-space limitation; motivation for the future BSpline path)
+PR feat(brep): TrimmedCSGStump wires per-primitive Marschner trim-aware SDF #76 (introduced TrimmedCSGStump; this PR forward-fixes its analytical routing)
+Summary by CodeRabbit
+Documentation
+Added an ADR detailing trim-aware composition, formulas, invariants, and intended use cases for trimmed geometry.
+New Features
+Added trim-aware CSG composition with per-face trim metadata and a tunable sharpness parameter for enrichment; preserves existing composition behavior.
+Tests
+Benchmarks now report trim-aware volumes, errors, and timings vs ground truth.
+Unit tests tightened to ensure trimmed vs untrimmed consistency, primitive alignment, gradients, and volume agreement.
+fix(brep): scope TrimmedCSGStump to raw analytical SDF
+…
+74b1a12
+```
+Per ADR-0019, every analytical primitive (plane, cylinder, sphere,
+cone, torus) contributes its raw untrimmed half-space SDF to the
+DNF composition.  The Marschner trim-aware blend from ADR-0018 is
+preserved for two distinct use cases: standalone trimmed-face
+distance queries (the *_face_sdf wrappers, unaffected) and the
+future BSpline-patch path inside the composition.
+
+Substituting the Marschner blend for analytical primitives inside
+the DNF was a category error.  CSG-Stump's DNF treats each
+primitive's signed distance as a half-space ingredient; a closed
+solid is exactly the intersection of half-spaces.  The Marschner
+formula returns the signed distance to a finite trimmed face
+patch, which collapses to a non-negative boundary distance outside
+the trim parameter range.  Substituted into the DNF this collapses
+entire half-spaces to thin shells.  Measured on box_with_holes the
+trim-aware composite drifted from +0.10% (untrimmed) to -3.30% at
+res=64; the asymmetry that the prior wiring documented for plane
+primitives generalises to every analytical surface type.
+
+Changes:
+- TrimmedCSGStump now stores both primitives and frames; sdf
+  composes via primitive.sdf for every slot, identical to the
+  untrimmed composite.
+- enrich_with_trim_frames no longer flips intersection-matrix
+  columns based on face orientation; the original matrix is used.
+- Module docstring rewritten to explain the analytical-vs-BSpline
+  asymmetry and its connection to ADR-0019.
+- Unit tests updated to pin the bit-equivalence invariant on
+  sample_box and box_with_holes; the gradient regression flows
+  through primitive parameters.
+- test_trim_baseline.py extended with a sdf_trim column to lock
+  the same invariant on four analytical fixtures
+  (sample_box, sample_cylinder, box_with_holes, l_bracket).
+
+Co-Authored-By: Claude Opus 4.7 (1M context) <noreply@anthropic.com>
+```
+coderabbitai
+Bot
+commented
+May 6, 2026
+•
+edited
+Loading
+Uh oh!
+There was an error while loading. Please reload this page.
+Copy link
+Copy Markdown
+📝 Walkthrough
+Walkthrough
+Adds ADR-0019 documentation and implements a trim-aware composition path: introduces a new TrimmedCSGStump storing per-face primitives and TrimFrame metadata, changes SDF composition to use primitives (removing per-frame SDF dispatch), extends enrich_with_trim_frames with a sharpness parameter, and updates benchmarks and unit tests.
+Changes
+Trim-Aware Composition Refactor
+Layer / File(s)
+Summary
+Architecture Decision
+docs/architecture/adr/0019-marschner-composition-scope.md
+New ADR describing Marschner trim-aware composition scope, formula for d_T(p), two use cases (standalone trimmed-face queries and BSpline-patch composition), and consequences for primitives, frames, and tests.
+Data Shape & Public API
+src/brepax/brep/trimmed_csg_stump.py
+Adds TrimmedCSGStump(eqx.Module) with fields primitives: tuple[Primitive, ...], frames: tuple[TrimFrame, ...], intersection_matrix, union_mask, optional bbox_lo/bbox_hi, and sharpness; enrich_with_trim_frames gains sharpness: float and returns TrimmedCSGStump.
+Core Implementation
+src/brepax/brep/trimmed_csg_stump.py
+sdf() now computes SDFs directly from self.primitives and composes via DNF; removed per-frame SDF dispatch and reversed_slots/matrix-negation logic; _extract_frame_for_face now returns `TrimFrame
+Imports & Wiring
+src/brepax/brep/trimmed_csg_stump.py
+Replaced per-frame SDF helper imports with extract_*_trim_frame helpers; adjusted OCCT import surface (removed TopAbs_FORWARD, added TopAbs_FACE).
+Frame Preparation / Enrichment
+src/brepax/brep/trimmed_csg_stump.py
+enrich_with_trim_frames rewritten to build per-face frames, populate primitives from the input stump, accept sharpness, and return a wired TrimmedCSGStump for future Marschner/BSpline paths.
+Benchmark Integration
+tests/benchmarks/test_trim_baseline.py
+VolumeRow extended to include sdf_trim, err_direct_pct, err_trim_pct, t_direct_sec, t_trim_sec; benchmark computes direct and trim-aware volumes/timings via enrich_with_trim_frames, validates finiteness and OCCT GT positivity, and prints per-path metrics.
+Unit Tests
+tests/unit/brep/test_trimmed_csg_stump.py
+Tests updated to assert primitive alignment between trimmed and untrimmed stumps, switch gradient checks from frames to primitives, compare SDF signs, add volume-equality checks for sample_box and box_with_holes, and add an above-box outside-query test; docstrings updated to reflect ADR-0019 invariants.
+Estimated code review effort
+🎯 4 (Complex) | ⏱️ ~45 minutes
+Poem
+🐰
+Prims aligned, I hopped with glee,
+Frames in tow, sharpness set free.
+ADR guides the Marschner art,
+Trimmed and raw now play their part.
+🚥 Pre-merge checks | ✅ 4 | ❌ 1
+❌ Failed checks (1 warning)
+Check name
+Status
+Explanation
+Resolution
+Docstring Coverage
+⚠️ Warning
+Docstring coverage is 26.32% which is insufficient. The required threshold is 80.00%.
+Write docstrings for the functions missing them to satisfy the coverage threshold.
+✅ Passed checks (4 passed)
+Check name
+Status
+Explanation
+Description Check
+✅ Passed
+Check skipped - CodeRabbit’s high-level summary is enabled.
+Title check
+✅ Passed
+The title 'fix(brep): scope TrimmedCSGStump to raw analytical SDF' directly and specifically describes the main change: scoping the TrimmedCSGStump class to use raw, untrimmed analytical SDFs instead of trimmed ones, which is the core fix documented in the PR objectives.
+Linked Issues check
+✅ Passed
+Check skipped because no linked issues were found for this pull request.
+Out of Scope Changes check
+✅ Passed
+Check skipped because no linked issues were found for this pull request.
+✏️ Tip: You can configure your own custom pre-merge checks in the settings.
+✨ Finishing Touches
+📝 Generate docstrings
+Create stacked PR
+Commit on current branch
+🧪 Generate unit tests (beta)
+Create PR with unit tests
+Commit unit tests in branch feat/trimmed-csg-stump-analytical-raw
+Tip
+💬 Introducing Slack Agent: The best way for teams to turn conversations into code.
+Slack Agent is built on CodeRabbit's deep understanding of your code, so your team can collaborate across the entire SDLC without losing context.
+Generate code and open pull requests
+Plan features and break down work
+Investigate incidents and troubleshoot customer tickets together
+Automate recurring tasks and respond to alerts with triggers
+Summarize progress and report instantly
+Built for teams:
+Shared memory across your entire org—no repeating context
+Per-thread sandboxes to safely plan and execute work
+Governance built-in—scoped access, auditability, and budget controls
+One agent for your entire SDLC. Right inside Slack.
+👉 Get started
+Thanks for using CodeRabbit! It's free for OSS, and your support helps us grow. If you like it, consider giving us a shout-out.
+❤️ Share
+X
+Mastodon
+Reddit
+LinkedIn
+Comment @coderabbitai help to get the list of available commands and usage tips.
+gemini-code-assist
+Bot
+reviewed
+May 6, 2026
+View reviewed changes
+gemini-code-assist
+Bot
+left a comment
+Copy link
+Copy Markdown
+There was a problem hiding this comment.
+Choose a reason for hiding this comment
+The reason will be displayed to describe this comment to others. Learn more.
+Code Review
+This pull request implements ADR-0019, which restricts the Marschner trim-aware composition to standalone distance queries and future BSpline patches. Analytical primitives now use their raw untrimmed signed distance functions within TrimmedCSGStump, making the trimmed path bit-equivalent to the untrimmed path for these types. The changes include removing the previous dispatch logic and the intersection matrix column flipping in enrich_with_trim_frames. Feedback suggests improving maintainability and type safety by using specific type hints for the primitives and frames tuples instead of Any.
+Comment thread
+src/brepax/brep/trimmed_csg_stump.py
+Resolved
+Uh oh!
+There was an error while loading. Please reload this page.
+Comment thread
+src/brepax/brep/trimmed_csg_stump.py
+Resolved
+Uh oh!
+There was an error while loading. Please reload this page.
+refactor(brep): tighten TrimmedCSGStump type hints
+…
+2dd6365
+```
+Replace ``Any`` with the concrete element types per Gemini review:
+- ``primitives: tuple[Primitive, ...]`` (the eqx.Module base shared
+  by Plane / Cylinder / Sphere / Cone / Torus)
+- ``frames: tuple[TrimFrame, ...]`` (the existing module-level union
+  of the five NamedTuple frame types)
+- ``_extract_frame_for_face`` returns ``TrimFrame | None`` instead
+  of ``Any``
+
+The runtime behaviour is unchanged; this is a static-analysis and
+documentation improvement.
+
+Co-Authored-By: Claude Opus 4.7 (1M context) <noreply@anthropic.com>
+```
+lv416e
+commented
+May 6, 2026
+Copy link
+Copy Markdown
+Owner
+Author
+Gemini review (MEDIUM x 2) addressed in 2dd6365:
+Imported Primitive from brepax.primitives._base and used it as the element type for TrimmedCSGStump.primitives.
+Replaced the local frames: tuple[Any, ...] field with tuple[TrimFrame, ...] reusing the module-level union alias already defined for the five NamedTuple frame types.
+Tightened _extract_frame_for_face to return TrimFrame | None instead of Any.
+Behaviour-equivalent change; pre-push gates green (ruff format / ruff check / mypy / pytest -m "not slow" 724 passed, 1 matplotlib skip).
+coderabbitai
+Bot
+reviewed
+May 6, 2026
+View reviewed changes
+coderabbitai
+Bot
+left a comment
+Copy link
+Copy Markdown
+There was a problem hiding this comment.
+Choose a reason for hiding this comment
+The reason will be displayed to describe this comment to others. Learn more.
+🧹 Nitpick comments (1)
+src/brepax/brep/trimmed_csg_stump.py (1)
+106-106: ⚡ Quick win
+Hardcoded 200.0 sharpness default in two places.
+The same magic literal 200.0 is duplicated as the field default here and as the enrich_with_trim_frames parameter default at line 187. Per coding guidelines, magic-number defaults should be centralized.
+♻️ Define a module-level constant and reference it from both sites
+```
++# Default sigmoid sharpness for the Marschner trim indicator;
++# consumed by future BSpline-patch dispatches (see ADR-0018/ADR-0019).
++_DEFAULT_TRIM_SHARPNESS: float = 200.0
++
++
+ class TrimmedCSGStump(eqx.Module):
+     ...
+-    sharpness: float = eqx.field(static=True, default=200.0)
++    sharpness: float = eqx.field(static=True, default=_DEFAULT_TRIM_SHARPNESS)
+```
+```
+ def enrich_with_trim_frames(
+     stump: CSGStump,
+     shape: TopoDS_Shape,
+     *,
+     max_vertices: int = 64,
+-    sharpness: float = 200.0,
++    sharpness: float = _DEFAULT_TRIM_SHARPNESS,
+ ) -> TrimmedCSGStump:
+```
+As per coding guidelines, "Do not hardcode magic numbers and defaults -- define them in constants or configuration".
+🤖 Prompt for AI Agents
+```
+Verify each finding against current code. Fix only still-valid issues, skip the
+rest with a brief reason, keep changes minimal, and validate.
+
+In `@src/brepax/brep/trimmed_csg_stump.py` at line 106, Define a module-level
+constant (e.g., DEFAULT_SHARPNESS = 200.0) at top of trimmed_csg_stump.py and
+replace the hardcoded literal in the sharpness field declaration (sharpness:
+float = eqx.field(static=True, default=200.0)) and the enrich_with_trim_frames
+function/method parameter default (enrich_with_trim_frames=200.0 at line ~187)
+to reference that constant instead; update any imports or references within the
+module to use DEFAULT_SHARPNESS so the default is centralized and the magic
+number is removed.
+```
+🤖 Prompt for all review comments with AI agents
+```
+Verify each finding against current code. Fix only still-valid issues, skip the
+rest with a brief reason, keep changes minimal, and validate.
+
+Nitpick comments:
+In `@src/brepax/brep/trimmed_csg_stump.py`:
+- Line 106: Define a module-level constant (e.g., DEFAULT_SHARPNESS = 200.0) at
+top of trimmed_csg_stump.py and replace the hardcoded literal in the sharpness
+field declaration (sharpness: float = eqx.field(static=True, default=200.0)) and
+the enrich_with_trim_frames function/method parameter default
+(enrich_with_trim_frames=200.0 at line ~187) to reference that constant instead;
+update any imports or references within the module to use DEFAULT_SHARPNESS so
+the default is centralized and the magic number is removed.
+```
+ℹ️ Review info
+⚙️ Run configuration
+Configuration used: defaults
+Review profile: CHILL
+Plan: Pro
+Run ID: c69a4345-429f-4989-b3ca-7e1d6b03a536
+📥 Commits
+Reviewing files that changed from the base of the PR and between 74b1a12 and 2dd6365.
+📒 Files selected for processing (1)
+src/brepax/brep/trimmed_csg_stump.py
+refactor(brep): centralize TrimmedCSGStump sharpness default
+…
+42f1545
+```
+Hoist the duplicated 200.0 sigmoid sharpness literal out of
+TrimmedCSGStump.sharpness and enrich_with_trim_frames into a
+module-level DEFAULT_TRIM_SHARPNESS constant so the Marschner
+indicator default has a single source of truth.
+
+Co-Authored-By: Claude <noreply@anthropic.com>
+```
+coderabbitai
+Bot
+reviewed
+May 6, 2026
+View reviewed changes
+coderabbitai
+Bot
+left a comment
+Copy link
+Copy Markdown
+There was a problem hiding this comment.
+Choose a reason for hiding this comment
+The reason will be displayed to describe this comment to others. Learn more.
+Actionable comments posted: 1
+🤖 Prompt for all review comments with AI agents
+```
+Verify each finding against current code. Fix only still-valid issues, skip the
+rest with a brief reason, keep changes minimal, and validate.
+
+Inline comments:
+In `@src/brepax/brep/trimmed_csg_stump.py`:
+- Around line 88-103: The public docstrings for TrimmedCSGStump (class) and
+enrich_with_trim_frames (function) lack the required Examples section; update
+each docstring to include an "Examples" section showing minimal, copy-pastable
+usage (constructing a TrimmedCSGStump or calling enrich_with_trim_frames and
+invoking key methods like sdf/volume), include expected types for inputs/outputs
+and any import lines needed, and follow the project's docstring style so the
+examples render in docs and satisfy the repo's "New public APIs must have
+docstrings with Examples section" guideline.
+```
+🪄 Autofix (Beta)
+Fix all unresolved CodeRabbit comments on this PR:
+Push a commit to this branch (recommended)
+Create a new PR with the fixes
+ℹ️ Review info
+⚙️ Run configuration
+Configuration used: defaults
+Review profile: CHILL
+Plan: Pro
+Run ID: b18b70e0-6430-49a6-9b43-c6b139caa2eb
+📥 Commits
+Reviewing files that changed from the base of the PR and between 2dd6365 and 42f1545.
+📒 Files selected for processing (1)
+src/brepax/brep/trimmed_csg_stump.py
+Comment thread
+src/brepax/brep/trimmed_csg_stump.py
+Resolved
+Uh oh!
+There was an error while loading. Please reload this page.
+docs(brep): add Examples sections to TrimmedCSGStump public API
+…
+eae0216
+```
+Per CodeRabbit review and the project PR checklist ("New public API
+has docstrings with Examples section"), add minimal usage examples
+to the ``TrimmedCSGStump`` class docstring and the
+``enrich_with_trim_frames`` function docstring.  Examples follow the
+commented-illustration pattern already used by ``trim_frame.py``'s
+``extract_*_trim_frame`` family because the runnable form would
+require an OCCT shape, which is not constructible inline.
+
+No behaviour change.
+
+Co-Authored-By: Claude Opus 4.7 (1M context) <noreply@anthropic.com>
+```
+lv416e
+commented
+May 6, 2026
+Copy link
+Copy Markdown
+Owner
+Author
+CodeRabbit nitpick (Major) addressed in eae0216:
+Added Examples sections to TrimmedCSGStump class and enrich_with_trim_frames function docstrings.
+Examples follow the commented-illustration pattern already used by the extract_*_trim_frame family in brep/trim_frame.py, since the runnable form requires an OCCT shape that is not constructible inline.
+Pre-push gates all green (ruff format / ruff check / mypy / pytest tests/unit/brep/test_trimmed_csg_stump.py 9 passed).
+coderabbitai
+Bot
+reviewed
+May 6, 2026
+View reviewed changes
+coderabbitai
+Bot
+left a comment
+Copy link
+Copy Markdown
+There was a problem hiding this comment.
+Choose a reason for hiding this comment
+The reason will be displayed to describe this comment to others. Learn more.
+🧹 Nitpick comments (1)
+src/brepax/brep/trimmed_csg_stump.py (1)
+249-255: ⚡ Quick win
+Improve surface type error message readability by removing enum prefix.
+BRepAdaptor_Surface(face).GetType() returns a readable enum name like GeomAbs_BSplineSurface. While functional in error messages, removing the GeomAbs_ prefix produces cleaner output (BSplineSurface) that's more immediately actionable for callers debugging unsupported surface types.
+♻️ Suggested diff
+```
++from brepax._occt.backend import (
++    BRepAdaptor_Surface,
++    GeomAbs_BSplineSurface,
++    GeomAbs_BezierSurface,
++    GeomAbs_Cone,
++    GeomAbs_Cylinder,
++    GeomAbs_OffsetSurface,
++    GeomAbs_Plane,
++    GeomAbs_Sphere,
++    GeomAbs_SurfaceOfExtrusion,
++    GeomAbs_SurfaceOfRevolution,
++    GeomAbs_Torus,
++    TopAbs_FACE,
++    TopExp_Explorer,
++    TopoDS,
++)
+@@
++_SURFACE_TYPE_NAMES: dict[int, str] = {
++    GeomAbs_Plane: "Plane",
++    GeomAbs_Cylinder: "Cylinder",
++    GeomAbs_Sphere: "Sphere",
++    GeomAbs_Cone: "Cone",
++    GeomAbs_Torus: "Torus",
++    GeomAbs_BezierSurface: "BezierSurface",
++    GeomAbs_BSplineSurface: "BSplineSurface",
++    GeomAbs_SurfaceOfRevolution: "SurfaceOfRevolution",
++    GeomAbs_SurfaceOfExtrusion: "SurfaceOfExtrusion",
++    GeomAbs_OffsetSurface: "OffsetSurface",
++}
+@@
+-        if frame is None:
+-            type_name = BRepAdaptor_Surface(face).GetType()
+-            raise ValueError(
+-                f"primitive {prim_idx} has no trim-aware SDF for surface "
+-                f"type {type_name}"
+-            )
++        if frame is None:
++            surf_type = BRepAdaptor_Surface(face).GetType()
++            type_name = _SURFACE_TYPE_NAMES.get(surf_type, f"<{surf_type}>")
++            raise ValueError(
++                f"primitive {prim_idx} has no trim-aware SDF for surface "
++                f"type {type_name}"
++            )
+```
+🤖 Prompt for AI Agents
+```
+Verify each finding against current code. Fix only still-valid issues, skip the
+rest with a brief reason, keep changes minimal, and validate.
+
+In `@src/brepax/brep/trimmed_csg_stump.py` around lines 249 - 255, The error
+message currently logs the raw enum from BRepAdaptor_Surface(face).GetType()
+which includes the "GeomAbs_" prefix; update the block around
+_extract_frame_for_face(face, max_vertices) so that after computing type_name =
+BRepAdaptor_Surface(face).GetType() you normalize it by removing the "GeomAbs_"
+prefix (e.g., strip or replace that substring) before including it in the
+ValueError for prim_idx, so the message shows "BSplineSurface" instead of
+"GeomAbs_BSplineSurface". Ensure this transformation only affects the printed
+name and preserves the original enum elsewhere.
+```
+🤖 Prompt for all review comments with AI agents
+```
+Verify each finding against current code. Fix only still-valid issues, skip the
+rest with a brief reason, keep changes minimal, and validate.
+
+Nitpick comments:
+In `@src/brepax/brep/trimmed_csg_stump.py`:
+- Around line 249-255: The error message currently logs the raw enum from
+BRepAdaptor_Surface(face).GetType() which includes the "GeomAbs_" prefix; update
+the block around _extract_frame_for_face(face, max_vertices) so that after
+computing type_name = BRepAdaptor_Surface(face).GetType() you normalize it by
+removing the "GeomAbs_" prefix (e.g., strip or replace that substring) before
+including it in the ValueError for prim_idx, so the message shows
+"BSplineSurface" instead of "GeomAbs_BSplineSurface". Ensure this transformation
+only affects the printed name and preserves the original enum elsewhere.
+```
+ℹ️ Review info
+⚙️ Run configuration
+Configuration used: defaults
+Review profile: CHILL
+Plan: Pro
+Run ID: 0dcd468b-d3e3-4338-ae37-67622877dcbc
+📥 Commits
+Reviewing files that changed from the base of the PR and between 42f1545 and eae0216.
+📒 Files selected for processing (1)
+src/brepax/brep/trimmed_csg_stump.py
+Hide details
+View details
+lv416e
+merged commit 7dc81ad
+into
+main
+May 8, 2026
+12 checks passed
+Uh oh!
+There was an error while loading. Please reload this page.
+lv416e
+deleted the
+feat/trimmed-csg-stump-analytical-raw
+branch
+May 8, 2026 03:15
+github-actions
+Bot
+mentioned this pull request
+May 6, 2026
+chore(main): release 0.6.0
+#60
+Merged
+This was referenced May 8, 2026
+fix(brep): close BSpline Marschner-as-DNF-ingredient as negative result (ADR-0020)
+#80
+Merged
+docs(reference): surface integration benchmark report under Reference
+#87
+Merged
+Sign up for free
+to join this conversation on GitHub.
+Already have an account?
+Sign in to comment
+Uh oh!
+There was an error while loading. Please reload this page.
+Labels
+None yet
+1 participant
+Add this suggestion to a batch that can be applied as a single commit.This suggestion is invalid because no changes were made to the code.Suggestions cannot be applied while the pull request is closed.Suggestions cannot be applied while viewing a subset of changes.Only one suggestion per line can be applied in a batch.Add this suggestion to a batch that can be applied as a single commit.Applying suggestions on deleted lines is not supported.You must change the existing code in this line in order to create a valid suggestion.Outdated suggestions cannot be applied.This suggestion has been applied or marked resolved.Suggestions cannot be applied from pending reviews.Suggestions cannot be applied on multi-line comments.Suggestions cannot be applied while the pull request is queued to merge.Suggestion cannot be applied right now. Please check back later.
+You can’t perform that action at this time.

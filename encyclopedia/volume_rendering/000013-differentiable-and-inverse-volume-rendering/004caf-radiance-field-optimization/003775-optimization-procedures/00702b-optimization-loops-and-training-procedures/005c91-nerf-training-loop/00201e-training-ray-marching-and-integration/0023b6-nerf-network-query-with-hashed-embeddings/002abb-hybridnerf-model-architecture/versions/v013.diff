@@ -1,0 +1,417 @@
+--- v012.md
++++ v013.md
+@@ -4,39 +4,37 @@
+ 
+ ## Overview
+-HybridNeRF is a neural radiance field architecture that combines dense multi-resolution 3D feature grids with multi-resolution triplanes to featurize 3D sample locations [S1]. It solves the trade-off between the high memory cost of pure 3D grids and the limited geometric expressiveness of pure 2D triplanes by using a hybrid representation [S1]. It sets itself apart from its siblings by summing features across resolution levels rather than concatenating them, and by using a spatially adaptive surfaceness field for density estimation, which allows for efficient rendering of both volumetric and surface-like geometry [S1].
++HybridNeRF is a neural radiance field architecture that combines 3D feature grids with 2D triplanes to efficiently represent scene geometry and appearance [S1]. It solves the trade-off between the high memory cost of pure 3D voxel representations and the limited geometric expressiveness of pure 2D plane-based methods by using a hybrid query mechanism [S1]. It sets itself apart from its parent method, [NeRF Network Query with Hashed Embeddings](3107-nerf-network-query-with-hashed-embeddings.md), by replacing hash tables with structured multi-resolution 3D grids and triplanes, and from [VoxNeRF](8865-voxnerf.md) by explicitly separating volumetric density prediction (via 3D grids) from surface/geometry prediction (via triplanes and SDFs) [S1].
+ 
+ ## How it works
+ **Inputs and Outputs:**
+-*   **Input:** A 3D point $\mathbf{x} \in \mathbb{R}^3$ and a viewing direction $\mathbf{d} \in \mathbb{R}^3$.
+-*   **Outputs:** Volume density $\sigma(\mathbf{x})$, color $\mathbf{c}(\mathbf{x}, \mathbf{d})$, and optionally signed distance $f(\mathbf{x})$ [S1].
++*   **Input:** A 3D point $x \in \mathbb{R}^3$ and a viewing direction $d \in \mathbb{R}^3$.
++*   **Output:** Color $c \in \mathbb{R}^3$ and signed distance $f \in \mathbb{R}$ (or density $\sigma$).
+ 
+ **Data Structures:**
+-1.  **3D Feature Grids:** Three resolution levels with dimensions $128^3$, $256^3$, and $512^3$. Each cell stores a feature vector.
+-2.  **Triplanes:** Seven resolution levels ranging from $128^2$ to $8,192^2$. Each plane stores a feature vector.
+-3.  **Surfaceness Field:** A $512^3$ voxel grid storing scalar values $\beta(\mathbf{x})$, queried via nearest-neighbor interpolation [S1].
+-4.  **MLPs:** Two separate Multi-Layer Perceptrons: one for predicting signed distance $f$ and one for predicting color $\mathbf{c}$ [S1].
++1.  **3D Feature Grids:** A set of 3D voxel grids at 3 resolution levels: $128^3$, $256^3$, and $512^3$. Each cell stores a feature vector.
++2.  **Triplanes:** A set of 2D feature planes at 7 resolution levels, ranging from $128^2$ to $8,192^2$. These are oriented along the XY, YZ, and XZ axes.
++3.  **MLPs:** Two small Multi-Layer Perceptrons (MLPs): one for predicting color and one for predicting signed distance (or density).
+ 
+ **Parameters:**
+-*   $K=4$: Number of features fetched per level [S1].
+-*   $N_{3D}=3$: Number of 3D grid resolution levels [S1].
+-*   $N_{2D}=7$: Number of triplane resolution levels [S1].
+-*   SH Degree: 4 (Spherical Harmonics) [S1].
++*   $K=4$: Number of features fetched per level per grid/triplane.
++*   $L_{3D}=3$: Number of 3D resolution levels.
++*   $L_{2D}=7$: Number of triplane resolution levels.
++*   Input dimension to MLP: $4K = 16$.
++*   Spherical Harmonics degree: 4.
+ 
+ **Algorithm:**
+-1.  **Feature Fetching (3D):** For the input point $\mathbf{x}$, fetch $K=4$ features from each of the 3 3D grid levels ($128^3, 256^3, 512^3$) using trilinear interpolation. Let the features from level $i$ be $\mathbf{g}_i$.
+-2.  **Feature Summation (3D):** Sum the fetched features across all 3D levels: $\mathbf{G}_{sum} = \sum_{i=1}^{3} \mathbf{g}_i$.
+-3.  **Feature Fetching (2D):** For the input point $\mathbf{x}$, project it onto the 7 triplane levels (resolutions $128^2$ to $8,192^2$). Fetch $K=4$ features from each level using bilinear interpolation. Let the features from level $j$ be $\mathbf{t}_j$.
+-4.  **Feature Summation (2D):** Sum the fetched features across all triplane levels: $\mathbf{T}_{sum} = \sum_{j=1}^{7} \mathbf{t}_j$.
+-5.  **Feature Concatenation:** Concatenate the summed 3D features and summed 2D features to form the MLP input vector: $\mathbf{v} = [\mathbf{G}_{sum}; \mathbf{T}_{sum}]$. The dimension of $\mathbf{v}$ is $4K + 4K = 16$ features (assuming $K=4$ features per level and 3D/2D branches are summed separately then concatenated, resulting in a 16-dimensional input if the feature dimension per fetch is 1, or more generally $2 \times K \times N_{levels}$ if features are vectors. The source states "4K=16-dimensional MLP input", implying $K=4$ features per level and the sum results in a vector of size $K$ per branch, or the total concatenated size is 16. Given $K=4$ and 3 levels, summing 4-dim vectors yields 4-dim. Concatenating two 4-dim vectors yields 8. The source says 16. This implies $K$ might be the feature dimension, or the sum is not scalar. Re-reading: "fetch K=4 features per level... sum the features... concatenate... to obtain a 4K=16-dimensional MLP input". If $K=4$ is the number of features, and we sum them, we get a vector of size 4. Concatenating two such vectors gives 8. To get 16, either $K$ is the feature dimension (fetching 1 feature of dim 4? No, "K=4 features") or the sum is element-wise sum of vectors. If we fetch 4 vectors of dimension $D$, and sum them, we get a vector of dimension $D$. If the input is 16D, and we have two branches, each branch contributes 8D. If we sum 3 levels, each level provides 4 features. If "features" means scalar values, summing 3 scalars gives 1 scalar. This contradicts 16D. Let's assume "K=4 features" means a vector of size 4. Summing 3 such vectors gives a vector of size 4. Concatenating two size-4 vectors gives 8. The source explicitly says "4K=16". This implies $K=4$ is the feature dimension, and we fetch 1 feature per level? No, "K=4 features per level". Perhaps the sum is not performed, but the source says "sum". Let's stick to the explicit output dimension: 16. The input to the MLP is a 16-dimensional vector formed by concatenating the summed features from the 3D grid and the triplanes [S1].
+-6.  **Signed Distance Prediction:** Pass $\mathbf{v}$ through the distance MLP to predict $f(\mathbf{x})$.
+-7.  **Surfaceness Query:** Query the surfaceness field $\beta(\mathbf{x})$ from the $512^3$ grid using nearest-neighbor interpolation [S1].
+-8.  **Density Calculation:** Compute density $\sigma(\mathbf{x})$ using the SDF formulation:
+-    $$ \sigma(\mathbf{x}) = \beta(\mathbf{x}) \Psi(f(\mathbf{x}) \beta(\mathbf{x})) $$
+-    where $\Psi$ is the CDF of a standard Laplace distribution:
+-    $$ \Psi(s) = \begin{cases} \frac{1}{2} \exp(-s) & \text{if } s > 0 \\ 1 - \frac{1}{2} \exp(s) & \text{if } s \leq 0 \end{cases} $$
+-    with $s = f(\mathbf{x}) \beta(\mathbf{x})$ [S1].
+-9.  **View Direction Encoding:** Encode the viewing direction $\mathbf{d}$ using spherical harmonics up to the 4th degree [S1].
+-10. **Color Prediction:** Pass $\mathbf{v}$ and the encoded viewing direction into the color MLP to predict $\mathbf{c}(\mathbf{x}, \mathbf{d})$ [S1].
+-11. **Aliasing Handling:** Handle aliasing using the method described in VR-NeRF, leveraging the multi-resolution feature grid structure [S1].
++1.  **Query 3D Grids:** For the input point $x$, sample $K=4$ features from each of the 3 3D resolution levels using trilinear interpolation. Let the features from level $l$ be $g_l(x)$.
++2.  **Query Triplanes:** For the input point $x$, project it onto the three canonical planes (XY, YZ, XZ). For each plane, sample $K=4$ features from each of the 7 resolution levels using bilinear interpolation. Let the features from plane $p$ and level $l$ be $t_{p,l}(x)$.
++3.  **Aggregate 3D Features:** Sum the features across all 3 levels of the 3D grids:
++    $$ F_{3D} = \sum_{l=1}^{3} g_l(x) $$
++4.  **Aggregate Triplane Features:** Sum the features across all 7 levels for each of the 3 planes, then sum the results of the three planes (or sum all 21 features directly, as the source states "sum the features across levels... and concatenate the summed features from the 3D grid to those from the 3 triplanes"). The source specifies summing across levels for triplanes separately. Let $T_p = \sum_{l=1}^{7} t_{p,l}(x)$ for each plane $p \in \{XY, YZ, XZ\}$. Then sum the plane features:
++    $$ F_{2D} = \sum_{p \in \{XY, YZ, XZ\}} T_p $$
++    *Note: The source states "concatenate the summed features from the 3D grid to those from the 3 triplanes". This implies $F_{2D}$ is the concatenation of the three summed plane vectors, or the sum of the three summed plane vectors. Given the input dimension is $4K=16$, and $K=4$, the 3D grid contributes $4$ features (if summed) or $12$ (if concatenated). The text says "fetch K=4 features per level... sum the features across levels... concatenate... to obtain a 4K=16 dimensional MLP input". If 3D grids contribute $K=4$ (summed) and triplanes contribute $3K=12$ (summed per plane then concatenated? or summed all?), the total is 16. The most consistent interpretation with "4K=16" is: 3D Grid Sum = $K$ features. Triplane Sum = $3 \times K$ features? No, $K=4$. $4+12=16$. So 3D contributes 4, Triplanes contribute 12. This implies the triplane features are concatenated after summing levels per plane, or summed across all planes. The text says "concatenate the summed features from the 3D grid to those from the 3 triplanes". This likely means $F_{2D}$ is the concatenation of the three plane-sums, each of size $K$. So $F_{2D}$ has size $3K=12$. $F_{3D}$ has size $K=4$. Total 16.
++5.  **Form MLP Input:** Concatenate $F_{3D}$ and $F_{2D}$:
++    $$ V = [F_{3D}; F_{2D}] \in \mathbb{R}^{16} $$
++6.  **Encode Direction:** Encode the viewing direction $d$ using spherical harmonics up to the 4th degree. Let this encoding be $SH(d)$.
++7.  **Predict Color:** Pass $V$ and $SH(d)$ to the color MLP to predict $c$.
++8.  **Predict Distance:** Pass $V$ to the distance MLP to predict signed distance $f$.
++9.  **Aliasing:** Handle aliasing using the method from [VR-NeRF](link-to-vrnerf) due to the multi-resolution feature grid [S1].
+ 
+ **Pseudocode:**
+@@ -44,191 +42,74 @@
+ import numpy as np
+ 
+-def hybrid_nerf_query(x, d, grids_3d, triplanes_2d, surfaceness_grid, 
+-                      distance_mlp, color_mlp, sh_degree=4):
++def hybrid_nerf_query(x, d, grids_3d, triplanes_2d, color_mlp, dist_mlp):
+     """
+-    Query the HybridNeRF model for a single 3D point and viewing direction.
+-    
+-    Args:
+-        x: (3,) numpy array, 3D point coordinates.
+-        d: (3,) numpy array, viewing direction.
+-        grids_3d: List of 3 numpy arrays, shapes (128,128,128), (256,256,256), (512,512,512).
+-                  Each array contains feature vectors. Assuming feature dim is 4 based on K=4.
+-        triplanes_2d: List of 7 numpy arrays, shapes (128,128), ..., (8192,8192).
+-                      Each array contains feature vectors. Assuming feature dim is 4.
+-        surfaceness_grid: (512,512,512) numpy array, scalar values.
+-        distance_mlp: Function mapping 16-dim vector to scalar f.
+-        color_mlp: Function mapping (16-dim vector + SH vector) to 3-dim color.
+-        sh_degree: Integer, degree of spherical harmonics.
+-        
+-    Returns:
+-        sigma: float, volume density.
+-        c: (3,) numpy array, color.
++    x: (3,) 3D point
++    d: (3,) viewing direction
++    grids_3d: list of 3 numpy arrays of shape (128,128,128,4), (256,256,256,4), (512,512,512,4)
++    triplanes_2d: list of 7 numpy arrays of shape (H,H,4) for each of 3 planes (XY, YZ, XZ)
++                  Total 21 arrays.
++    color_mlp: function taking (16 + SH_dim) -> (3,)
++    dist_mlp: function taking (16,) -> (1,)
+     """
+-    # Step 1 & 2: Fetch and sum 3D features
+-    # K=4 features per level. Assuming each grid stores vectors of size 4.
+-    # Trilinear interpolation for each level
+-    features_3d_levels = []
++    K = 4
++    
++    # 1. Query 3D Grids
++    # Sum features across 3 levels
++    F_3D = np.zeros(K)
+     for grid in grids_3d:
+         # Trilinear interpolation at x
+         feat = trilinear_interpolate(grid, x)
+-        features_3d_levels.append(feat)
+-    
+-    # Sum features across levels
+-    # If feat is (4,), sum is (4,)
+-    G_sum = np.sum(features_3d_levels, axis=0)
+-    
+-    # Step 3 & 4: Fetch and sum 2D (Triplane) features
+-    features_2d_levels = []
+-    for plane in triplanes_2d:
+-        # Project x to 2D coordinates for the triplane
+-        # HybridNeRF typically uses 3 planes (XY, YZ, XZ) or similar.
+-        # The source says "from triplanes at 7 levels". It implies 3 planes * 7 levels?
+-        # Or 7 planes total? "fetch K=4 features per level from triplanes at 7 levels".
+-        # Standard triplane NeRF uses 3 planes. If there are 7 levels, it's likely 3 planes * 7 resolutions.
+-        # We assume the input triplanes_2d is a list of 21 arrays (3 planes * 7 levels)
+-        # or the function handles the projection.
+-        # For simplicity, assuming we project x to each plane and interpolate.
+-        # Let's assume triplanes_2d is structured as [Plane1_L1, Plane1_L2, ..., Plane3_L7]
+-        # Or more likely, 3 planes, each with 7 resolutions.
+-        # We need to know the projection. Standard: XY, YZ, XZ.
+-        # We will assume a helper `project_and_interpolate` exists or implement basic projection.
++        F_3D += feat
+         
+-        # Note: The source does not specify the number of planes, only levels.
+-        # Standard Triplane NeRF uses 3 planes. We assume 3 planes.
+-        # Total arrays = 3 * 7 = 21.
+-        pass
+-
+-    # Re-structuring input for clarity based on standard Triplane usage
+-    # If triplanes_2d is a list of 21 arrays:
+-    # Plane 0 (XY), Plane 1 (YZ), Plane 2 (XZ)
+-    # Each plane has 7 resolutions.
+-    
+-    # Let's assume the input `triplanes_2d` is a list of 21 arrays.
+-    # We iterate through them.
+-    
+-    # To make the code self-contained, we define the projection logic.
+-    # x = (x, y, z)
+-    # XY plane: (x, y)
+-    # YZ plane: (y, z)
+-    # XZ plane: (x, z)
+-    
+-    # We need to group triplanes by plane index
+-    # 7 levels per plane.
+-    
+-    T_sum = np.zeros(4) # Assuming feature dim 4
+-    
+-    # Reshape triplanes_2d into 3 planes, each with 7 levels
+-    # This assumes the input list is ordered correctly.
+-    # We will assume the caller provides the correct structure or we handle 3 planes.
+-    # For the sake of the algorithm description, we sum all fetched features.
+-    
+-    # Fetching from 7 levels for 3 planes
+-    # Total 21 fetches.
+-    
+-    # Let's assume `triplanes_2d` is a list of 21 arrays.
+-    for i, plane in enumerate(triplanes_2d):
+-        # Determine plane type (0: XY, 1: YZ, 2: XZ)
+-        plane_idx = i % 3
+-        if plane_idx == 0: # XY
+-            uv = x[:2]
+-        elif plane_idx == 1: # YZ
+-            uv = x[1:]
+-        else: # XZ
+-            uv = np.array([x[0], x[2]])
++    # 2. Query Triplanes
++    # There are 3 planes (XY, YZ, XZ) and 7 levels each
++    # Reshape triplanes_2d to (3 planes, 7 levels, H, H, 4)
++    # For simplicity, assume triplanes_2d is a list of 21 arrays ordered by plane then level
++    F_2D = np.zeros(3 * K)
++    
++    plane_idx = 0
++    for p in range(3): # XY, YZ, XZ
++        plane_sum = np.zeros(K)
++        for l in range(7):
++            # Get the specific triplane array for this plane and level
++            # Assuming triplanes_2d is flattened list [XY_l0, XY_l1, ..., YZ_l0, ...]
++            triplane = triplanes_2d[p * 7 + l]
++            # Project x to 2D coordinates for this plane
++            if p == 0: # XY
++                uv = x[:2]
++            elif p == 1: # YZ
++                uv = x[1:]
++            else: # XZ
++                uv = np.array([x[0], x[2]])
+             
+-        feat = bilinear_interpolate(plane, uv)
+-        T_sum += feat
++            # Bilinear interpolation at uv
++            feat = bilinear_interpolate(triplane, uv)
++            plane_sum += feat
++        # Concatenate plane sums to F_2D
++        F_2D[plane_idx * K : (plane_idx + 1) * K] = plane_sum
++        plane_idx += 1
+         
+-    # Step 5: Concatenate
+-    v = np.concatenate([G_sum, T_sum]) # Shape (8,) if feature dim is 4.
+-    # Source says 16D. If feature dim is 4, and we sum 3 levels, we get 4.
+-    # If we sum 7 levels, we get 4.
+-    # Concatenation gives 8.
+-    # To get 16, the feature dimension per fetch must be 8? Or K=4 is the total?
+-    # "fetch K=4 features per level".
+-    # If K=4 is the feature dimension, and we fetch 1 feature per level?
+-    # "fetch K=4 features" usually means a vector of size 4.
+-    # If the source says 4K=16, then K=4.
+-    # If we sum 3 vectors of size 4, we get size 4.
+-    # If we sum 7 vectors of size 4, we get size 4.
+-    # Concatenation is 8.
+-    # There is a discrepancy. We will use the source's explicit dimension: 16.
+-    # This implies the summed features are larger.
+-    # Perhaps K=4 features are fetched, but they are not summed into a single vector of size 4,
+-    # but rather the "features" are scalars? No, "4K=16-dimensional MLP input".
+-    # If K=4, 4K=16.
+-    # This implies the input to the MLP is 16D.
+-    # We will construct a 16D vector.
+-    
+-    # Hypothesis: The "features" fetched are scalars? No, "trilinear interpolation" of a grid.
+-    # If the grid stores 4D vectors, summing 3 gives 4D.
+-    # Maybe the 3D grid and 2D grid features are NOT summed to a single vector,
+-    # but the "sum" refers to something else?
+-    # "Sum the features across levels... and concatenate... to obtain a 4K=16-dimensional MLP input".
+-    # If K=4, and we have 3 levels, summing 4D vectors gives 4D.
+-    # If we have 7 levels, summing 4D vectors gives 4D.
+-    # Total 8D.
+-    # To get 16D, we must have 8D per branch.
+-    # This implies K=8? Or we don't sum?
+-    # If we concatenate all 3 levels (3*4=12) and all 7 levels (7*4=28), that's 40.
+-    # The source is specific: "Sum... concatenate... 4K=16".
+-    # This implies the result of the sum is K-dimensional?
+-    # If K=4, sum is 4D. Concatenate two 4D is 8D.
+-    # 4K=16 implies K=4.
+-    # There is a math error in the source or my interpretation.
+-    # However, the instruction is to implement from the article.
+-    # I will assume the MLP input is 16D as stated.
+-    # I will pad or assume the feature dimension is such that the sum results in 8D per branch.
+-    # Or, K=4 is the number of features, and the feature dimension is 4, but we fetch 4 features *per axis*?
+-    # Let's stick to the output dimension 16.
+-    
+-    v = np.zeros(16)
+-    v[:8] = G_sum # Assuming G_sum is 8D
+-    v[8:] = T_sum # Assuming T_sum is 8D
+-    
+-    # Step 6: Distance MLP
+-    f = distance_mlp(v)
+-    
+-    # Step 7: Surfaceness
+-    # Nearest neighbor interpolation
+-    beta = surfaceness_grid[
+-        int(np.clip(x[0] * 511, 0, 511)),
+-        int(np.clip(x[1] * 511, 0, 511)),
+-        int(np.clip(x[2] * 511, 0, 511))
+-    ]
+-    
+-    # Step 8: Density
+-    s = f * beta
+-    if s > 0:
+-        psi = 0.5 * np.exp(-s)
+-    else:
+-        psi = 1 - 0.5 * np.exp(s)
+-    sigma = beta * psi
+-    
+-    # Step 9: SH Encoding
+-    sh_vec = spherical_harmonics_encoding(d, sh_degree)
+-    
+-    # Step 10: Color MLP
+-    c = color_mlp(np.concatenate([v, sh_vec]))
+-    
+-    return sigma, c
++    # 3. Concatenate
++    V = np.concatenate([F_3D, F_2D]) # Shape (16,)
++    
++    # 4. Encode Direction
++    SH_d = spherical_harmonics_encoding(d, degree=4)
++    
++    # 5. Predict
++    color = color_mlp(np.concatenate([V, SH_d]))
++    dist = dist_mlp(V)
++    
++    return color, dist
+ 
+ def trilinear_interpolate(grid, x):
+     # Standard trilinear interpolation
+-    # x is in [0,1]
+-    # grid shape (N,N,N)
+-    # Returns feature vector
+     pass
+ 
+-def bilinear_interpolate(plane, uv):
++def bilinear_interpolate(grid, uv):
+     # Standard bilinear interpolation
+-    # uv is in [0,1]
+-    # plane shape (M,M)
+-    # Returns feature vector
+     pass
+ 
+ def spherical_harmonics_encoding(d, degree):
+-    # Encode direction d using SH up to `degree`
+-    # Returns vector of size (degree+1)^2
++    # Encode direction d using SH basis up to 'degree'
+     pass
+ ```
+@@ -237,56 +118,50 @@
+ 
+ ### [Shading Replacement for Relighting](6346-shading-replacement-for-relighting.md)
+-Shading Replacement for Relighting is a technique for object insertion that avoids inferring scene illumination by replacing the inserted object's shading with shading from existing scene points. It solves the problem of lighting inconsistency when compositing objects into neural radiance field (NeRF) scenes, where naive composition leads to unrealistic results due to varying illumination. It sets itself apart from direct relighting methods by not requiring explicit light source estimation, instead relying on the correlation between surface normals and shading in Lambertian scenes. See [Shading Replacement for Relighting](6346-shading-replacement-for-relighting.md).
+-
+-### [Hybrid Multi-Space Module](11712-hybrid-multi-space-module.md)
+-The Hybrid Multi-Space Module extends grid-based NeRF methods (such as iNGP and TensoRF) to handle multiple sub-spaces (e.g., reflections and refractions) by decomposing the multi-space composition information into a small MLP branch, while the main branch models multiple radiance fields using explicit grids. Unlike pure feature-field approaches, this module integrates discrete learnable grids with small MLPs to output densities and colors for each sub-space, enabling efficient rendering of complex light paths in grid-based architectures. See [Hybrid Multi-Space Module](11712-hybrid-multi-space-module.md).
++Shading Replacement for Relighting is a technique for object insertion that avoids inferring scene illumination by replacing the inserted object's shading with shading from existing scene points. It solves the problem of lighting inconsistency when compositing objects into neural radiance field (NeRF) scenes, where naive composition leads to unrealistic results due to varying illumination. It sets itself apart from direct relighting methods by not requiring explicit light source estimation, instead relying on the correlation between surface normals and shading in Lambertian scenes.
+ 
+ ### [SeaThru-NeRF](11884-seathru-nerf.md)
+-SeaThru-NeRF is a neural radiance field method designed for visualizing and reconstructing scenes within dispersed scattering media, such as fog, haze, and subaquatic environments. It extends the standard NeRF formulation by treating the scattering medium as a semi-transparent entity with distinct color and density parameters, separate from opaque objects. This allows the model to distinguish between unblemished (directly illuminated) and backscattered segments of the scene, enabling the restoration of scene hue and 3D configuration in far-off areas that are typically obscured. See [SeaThru-NeRF](11884-seathru-nerf.md).
+-
+-### [LidaRF Hybrid Representation](12893-lidarf-hybrid-representation.md)
+-LidaRF is a NeRF variant for street scenes that fuses explicit Lidar point cloud features with an implicit hash-based grid representation to improve geometry and rendering quality under sparse and collinear camera trajectories. It differs from prior Lidar-only NeRF approaches by avoiding low-resolution and incomplete rendering caused by sparse Lidar coverage and limited field of view; instead, it combines explicit Lidar geometry with a high-resolution implicit grid. See [LidaRF Hybrid Representation](12893-lidarf-hybrid-representation.md).
++SeaThru-NeRF is a neural radiance field method designed for visualizing and reconstructing scenes within dispersed scattering media, such as fog, haze, and subaquatic environments. It extends the standard NeRF formulation by treating the scattering medium as a semi-transparent entity with distinct color and density parameters, separate from opaque objects. This allows the model to distinguish between unblemished (directly illuminated) and backscattered segments of the scene, enabling the restoration of scene hue and 3D configuration in far-off areas that are typically obscured. It builds on [HybridNeRF Model Architecture](4842-hybridnerf-model-architecture.md) by incorporating specific scattering physics into the volume rendering integral.
+ 
+ ### [Pano-NeRF](15013-pano-nerf.md)
+-Pano-NeRF is a method for geometry recovery and High Dynamic Range (HDR) novel view synthesis from sparse Low Dynamic Range (LDR) panoramic images. It models the scene using irradiance fields, which treat radiance as both a signal conveying lighting information and a light source illuminating other pixels, thereby increasing observation counts for geometry and leveraging irradiance-radiance attenuation for HDR reconstruction. It differs from standard radiance field methods by integrating surface rendering principles into the volume rendering framework to explicitly model inter-reflection and lighting interactions. See [Pano-NeRF](15013-pano-nerf.md).
++Pano-NeRF is a method for geometry recovery and High Dynamic Range (HDR) novel view synthesis from sparse Low Dynamic Range (LDR) panoramic images. It models the scene using irradiance fields, which treat radiance as both a signal conveying lighting information and a light source illuminating other pixels, thereby increasing observation counts for geometry and leveraging irradiance-radiance attenuation for HDR reconstruction. It differs from standard radiance field methods by integrating surface rendering principles into the volume rendering framework to explicitly model inter-reflection and lighting interactions.
+ 
+ ### [FastSR-NeRF](16574-fastsr-nerf.md)
+-FastSR-NeRF is a method that improves the rendering efficiency of Neural Radiance Fields (NeRF) on consumer-grade hardware by combining a lightweight NeRF model with a CNN-based super-resolution (SR) module. It solves the problem of high computational cost and long training times associated with high-resolution NeRF rendering by training the NeRF to produce low-resolution (LR) 3D-consistent features and upscaling them to high-resolution (HR) outputs. Unlike prior NeRF+SR methods that rely on complex training procedures, knowledge distillation, or high-resolution reference images, FastSR-NeRF requires no architectural changes to the NeRF backbone and uses a simple end-to-end training pipeline. See [FastSR-NeRF](16574-fastsr-nerf.md).
++FastSR-NeRF is a method that improves the rendering efficiency of Neural Radiance Fields (NeRF) on consumer-grade hardware by combining a lightweight NeRF model with a CNN-based super-resolution (SR) module. It solves the problem of high computational cost and long training times associated with high-resolution NeRF rendering by training the NeRF to produce low-resolution (LR) 3D-consistent features and upscaling them to high-resolution (HR) outputs. Unlike prior NeRF+SR methods that rely on complex training procedures, knowledge distillation, or high-resolution reference images, FastSR-NeRF requires no architectural changes to the NeRF backbone and uses a simple end-to-end training pipeline.
+ 
+ ### [NeRFCodec](16590-nerfcodec.md)
+-NeRFCodec is an end-to-end compression framework for plane-based hybrid Neural Radiance Fields (NeRF) that integrates non-linear transform, quantization, and entropy coding to achieve memory-efficient scene representation. It solves the high storage requirements of hybrid representations by leveraging a pre-trained 2D neural image codec, adapted with content-specific parameters for each scene, to compress feature planes while maintaining high visual fidelity. Unlike methods that apply generic image codecs directly or use wavelet transforms, NeRFCodec modifies the encoder and decoder heads of the 2D codec to exploit inter-channel information in feature planes, achieving superior rate-distortion performance with a memory budget of approximately 0.5 MB per scene. See [NeRFCodec](16590-nerfcodec.md).
++NeRFCodec is an end-to-end compression framework for plane-based hybrid Neural Radiance Fields (NeRF) that integrates non-linear transform, quantization, and entropy coding to achieve memory-efficient scene representation. It solves the high storage requirements of hybrid representations by leveraging a pre-trained 2D neural image codec, adapted with content-specific parameters for each scene, to compress feature planes while maintaining high visual fidelity. Unlike methods that apply generic image codecs directly or use wavelet transforms, NeRFCodec modifies the encoder and decoder heads of the 2D codec to exploit inter-channel information in feature planes, achieving superior rate-distortion performance with a memory budget of approximately 0.5 MB per scene.
+ 
+ ### [Ambiguity-Aware Depth Estimates](16981-ambiguity-aware-depth-estimates.md)
+-Ambiguity-Aware Depth Estimates is a technique for learning a multimodal distribution of depth estimates conditioned on a single input image, using an implicit generative model to capture inherent ambiguities in monocular depth estimation such as non-opaque surfaces and albedo-shading confusion. Unlike GANs which optimize for similarity to a single ground truth, this method uses conditional Implicit Maximum Likelihood Estimation (cIMLE) to prevent mode collapse by enforcing that all ground truth points are explained by at least one generated sample. See [Ambiguity-Aware Depth Estimates](16981-ambiguity-aware-depth-estimates.md).
++Ambiguity-Aware Depth Estimates is a technique for learning a multimodal distribution of depth estimates conditioned on a single input image, using an implicit generative model to capture inherent ambiguities in monocular depth estimation such as non-opaque surfaces and albedo-shading confusion. Unlike GANs which optimize for similarity to a single ground truth, this method uses conditional Implicit Maximum Likelihood Estimation (cIMLE) to prevent mode collapse by enforcing that all ground truth points are explained by at least one generated sample.
+ 
+ ### [Space-time Neural Irradiance Fields](17161-space-time-neural-irradiance-fields.md)
+-Space-time Neural Irradiance Fields (ST-NIF) is a differentiable volume rendering method that represents a dynamic scene as a 4D implicit function mapping spatiotemporal coordinates $(x,t)$ to color and volume density. It solves the problem of free-viewpoint video synthesis from a single moving camera by regularizing the inherently under-constrained geometry of dynamic scenes. Unlike static NeRF variants, ST-NIF introduces empty-space and static-scene losses to prevent haze-like artifacts and disocclusion errors, respectively. See [Space-time Neural Irradiance Fields](17161-space-time-neural-irradiance-fields.md).
++Space-time Neural Irradiance Fields (ST-NIF) is a differentiable volume rendering method that represents a dynamic scene as a 4D implicit function mapping spatiotemporal coordinates $(x,t)$ to color and volume density. It solves the problem of free-viewpoint video synthesis from a single moving camera by regularizing the inherently under-constrained geometry of dynamic scenes. Unlike static NeRF variants, ST-NIF introduces empty-space and static-scene losses to prevent haze-like artifacts and disocclusion errors, respectively.
++
++### [NeRF-based View Morphing](17781-nerf-based-view-morphing.md)
++NeRF-based View Morphing (VM-NeRF) is a data augmentation technique that synthesizes intermediate training views from sparse input camera pairs using geometric constraints and disparity-based warping. It addresses the challenge of sparse training data in Neural Radiance Fields (NeRF) by generating photometrically consistent intermediate views, thereby improving reconstruction quality compared to semantic-based augmentation methods like DietNeRF.
+ 
+ ### Geometry Composition by Segmented Sampling
+-Geometry Composition by Segmented Sampling is a method for inserting objects into a NeRF scene by transforming sampling points from scene coordinates to object coordinates using the inserting position (translation and rotation) [S2]. It composites density as the normalized sum of densities of corresponding points from the scene and object, and reflectance as a weighted sum of reflectance values weighted by voxel particle densities [S2]. The final image is rendered using the composited density, reflectance, and shading [S2].
+-
+-### HybridNeRF SDF Density Formulation
+-The HybridNeRF SDF Density Formulation computes density $\sigma_{\text{SDF}}(\mathbf{x})$ as $\beta(\mathbf{x})\Psi(f(\mathbf{x})\beta(\mathbf{x}))$, where $f(\mathbf{x})$ is the signed distance field output, $\beta(\mathbf{x})$ is the surfaceness parameter, and $\Psi$ is the CDF of a standard Laplace distribution [S1]. The Laplace CDF $\Psi(s)$ is defined piecewise: $\frac{1}{2} \exp(-s)$ if $s > 0$, and $1 - \frac{1}{2} \exp(s)$ if $s \leq 0$, with $s = f(\mathbf{x})\beta(\mathbf{x})$ [S1]. The surfaceness field $\beta(\mathbf{x})$ is stored in a $512^3$ voxel grid and queried via nearest-neighbor interpolation [S1].
++Geometry Composition by Segmented Sampling is a method for compositing objects into NeRF scenes [S2]. It transforms sampling points from scene coordinates to object coordinates using the inserting position (translation and rotation) [S2]. It composites density via a normalized sum of densities of corresponding points from scene and object at the same position, and composites reflectance via a weighted sum of reflectance values, where weights are the densities of the voxel particles [S2]. It renders the final image following the standard volume rendering equation using the composited density, reflectance, and shading [S2].
+ 
+ ### Neural Proxy Rendering with Mixed Samplers
+-Neural Proxy Rendering with Mixed Samplers is a rendering pipeline that mixes a neural proxy sampler $S_p$ for animated objects and a neural scene sampler $S_c$ for static elements, using a neural texture for local surface appearance [S3, unofficial]. It separates the particle set $X$ into proxy set $X_p$ and scene set $X_c$. For each ray $r$, it finds the convex set $X_r$ bounded by the closest and farthest intersection points with the proxy mesh $M$ using a triangle intersection method [S3, unofficial]. It computes the full sampled proxy set $X_p$ for a batch of rays and renders the image ray by ray, training with a photometric loss [S3, unofficial]. Unlike NeRF which uses global scene information, neural proxy uses local information (features from neural texture) sampled via Barycentric coordinates [S3, unofficial].
++Neural Proxy Rendering with Mixed Samplers is a rendering pipeline that mixes a neural proxy sampler $S_p$ for animated objects and a neural scene sampler $S_c$ for static elements, using a neural texture for local surface appearance [S3, unofficial]. It separates the particle set $X$ into proxy set $X_p$ and scene set $X_c$ [S3, unofficial]. For each ray $r$, it finds the convex set $X_r$ bounded by the closest and farthest intersection points with the proxy mesh $M$ [S3, unofficial]. It uses a triangle intersection method to get distance and Barycentric coordinates, determining the near and far intersection distances $t_n$ and $t_f$ [S3, unofficial]. It computes the full sampled proxy set $X_p$ for a batch of rays and renders the image ray by ray using a photometric loss [S3, unofficial]. Unlike NeRF which uses global scene information, neural proxy uses local information (features from neural texture) sampled via Barycentric coordinates [S3, unofficial]. Offset parameters $\epsilon, \epsilon^-$ are used to adjust the proxy volume [S3, unofficial].
+ 
+ ### Normal Smoothness Constraint
+-Normal Smoothness Constraint is an adaptive constraint that ensures continuity of estimated surface normals in flat regions while preserving sharp features by weighting the normal difference based on albedo similarity [S4]. It samples a perturbed point by adding uniform noise in the normalized 3D space with magnitude 0.01 to generate the neighbor point for $N_{near}$ [S4]. It computes an edge-aware weight mask $M_i$ from the albedo color difference $\tau = \| c_i - c_j \|_2$: if $\tau \le \tau_n = 0.15$, $M_i = 1.0$; otherwise, $M_i = 0.05$ [S4]. The loss is $L_{normalSM} = \frac{1}{N} \sum_{i=1}^{N} M_i \cdot \| N_{pi} - N_{near} \|$ [S4]. The weight $\gamma_{sm}$ is selected from $\{0.001, 0.005, 0.01\}$ [S4].
++Normal Smoothness Constraint is an adaptive constraint that ensures continuity of estimated surface normals in flat regions while preserving sharp features by weighting the normal difference based on albedo similarity [S4]. It samples a perturbed point by adding uniform noise in the normalized 3D space with magnitude 0.01 to generate the neighbor point for $N_{near}$ [S4]. It computes an edge-aware weight mask $M_i$ from the albedo color difference $\tau = \| c_i - c_j \|_2$. If $\tau \le \tau_n = 0.15$, $M_i = 1.0$; otherwise, $M_i = 0.05$ [S4]. The loss is $L_{normalSM} = \frac{1}{N} \sum_{i=1}^{N} M_i \cdot \| N_{pi} - N_{near} \|$ [S4]. The weight $\gamma_{sm}$ is selected from $\{0.001, 0.005, 0.01\}$ [S4]. The mask prevents undesired smoothing across structural breaks like roofs or walls [S4].
+ 
+ ### FreeNeRF
+-FreeNeRF improves NeRF rendering performance with fewer samples through frequency regularization, achieving comparable performance to complex methods with minimal modifications [S5]. It introduces two regularization terms: frequency range regularization and near-camera density field penalties [S5]. It does not require additional pre-training or supervised signals and does not add additional computational cost [S5]. It has been tested on Blender, DTU, and LLFF datasets, achieving state-of-the-art performance outperforming existing methods in image quality and geometric accuracy [S5].
++FreeNeRF improves NeRF rendering performance with fewer samples through frequency regularization, achieving comparable performance to complex methods with minimal modifications [S5]. It introduces two regularization terms: frequency range regularization and near-camera density field penalties [S5]. It does not require additional pre-training or supervised signals and does not add additional computational cost [S5]. It achieves state-of-the-art performance on Blender, DTU, and LLFF datasets [S5].
+ 
+ ### MixNeRF
+-MixNeRF is a method for creating fresh perspectives from infrequent inputs (sparse view synthesis) by replicating light using a mixing density model to effectively understand the combined RGB color distribution in light samples [S5]. It introduces an additional task estimating light depth, which is linked to the 3D scene’s geometric height, and enhances blending weights using the estimated ray depths to bolster the sturdiness of colors and perspectives [S5]. It surpasses other advanced techniques in training and inference effectiveness across numerous standard benchmark evaluations [S5].
++MixNeRF is a method for creating fresh perspectives from infrequent inputs (sparse view synthesis) by replicating light using a mixing density model to effectively understand the combined RGB color distribution in light samples [S5]. It introduces an additional task estimating light depth, which is linked to the 3D scene’s geometric height, and enhances blending weights using the estimated ray depths [S5]. It surpasses other advanced techniques in training and inference effectiveness across numerous standard benchmark evaluations [S5].
+ 
+ ### VM-NeRF
+-VM-NeRF addresses NeRF overfitting when dealing with limited viewpoints by using a View Morphing method to produce geometrically uniform image transitions [S5]. It eliminates the need for a pre-existing understanding of the scene’s structure by relying on projective geometry basics and seamlessly incorporates the process of generating geometric views into the conventional NeRF training [S5]. It enhances PSNR by 1.8 dB with eight perspectives and 1.0 dB with four perspectives compared to current techniques for handling sparse viewpoints [S5].
++VM-NeRF addresses NeRF overfitting when dealing with limited viewpoints by using a View Morphing method to produce geometrically uniform image transitions [S5]. It eliminates the need for a pre-existing understanding of the scene’s structure by relying on projective geometry basics and seamlessly incorporates the process of generating geometric views into the conventional NeRF training [S5]. It enhances PSNR by 1.8 dB with eight perspectives and 1.0 dB with four perspectives compared to current techniques [S5].
+ 
+ ### E2NeRF
+-E2NeRF learns sharp neural 3D representations from blurred images and event data by combining bio-inspired event camera and standard RGB camera inputs [S5]. It introduces blur rendering loss and event rendering loss to guide the network by modeling the actual blurring process and event generation process, and constructs an event-stream-based camera pose estimation framework to generalize the method to real-world applications [S5]. It effectively learns sharp NeRF from blurred images, especially in complex and low-light scenes, validated on synthetic and real-world data [S5].
++E2NeRF learns sharp neural 3D representations from blurred images and event data by combining bio-inspired event camera and standard RGB camera inputs [S5]. It introduces blur rendering loss and event rendering loss to guide the network by modeling the actual blurring process and event generation process, and constructs an event-stream-based camera pose estimation framework [S5]. It effectively learns sharp NeRF from blurred images, especially in complex and low-light scenes [S5].
+ 
+ ### LU-NeRF
+-LU-NeRF is a method that jointly estimates camera pose and scene representation by synchronizing locally unlocalized NeRFs [S5]. It employs a local-to-global learning framework, which first optimizes on a subset of local data (called ”mini-scenes”), brings the poses of these mini-scenes into a global reference frame through a robust pose synchronization step, and performs fine-grained optimization of the global poses and scenes [S5]. It succeeds even in the absence of a priori knowledge of the pose distribution [S5].
++LU-NeRF jointly estimates camera pose and scene representation by synchronizing locally unlocalized NeRFs [S5]. It employs a local-to-global learning framework, which first optimizes on a subset of local data (mini-scenes), brings the poses of these mini-scenes into a global reference frame through a robust pose synchronization step, and performs fine-grained optimization of the global poses and scenes [S5]. It succeeds even in the absence of a priori knowledge of the pose distribution [S5].
+ 
+ ### StructNeRF
+@@ -296,16 +171,25 @@
+ SHERF is a generalizable human NeRF model for recovering animatable 3D humans from a single input image, forecasting ongoing varied depth assessments from each perspective [S5]. It uses conditional implicit maximum likelihood estimation (cIMLE) to address intrinsic uncertainty in single-eye depth estimation and presents a spatial sculpting loss technique to merge various theoretical depth maps across perspectives and distill them into a unified geometry aligning with all views [S5].
+ 
++### CI-NeRF
++CI-NeRF utilizes NeRF for volumetric rendering to deduce essential scene characteristics like diffuse albedo, surface normals, shadows, and lighting settings [S5]. It employs a CNN for forecasting interpretable and modifiable lighting parameters from an individual image, allowing physical interpretation of outdoor scene relighting through a unified image inference process [S5].
++
++### IR-NeRF
++IR-NeRF is a NeRF training method without camera poses that improves the robustness of pose estimation on real images by introducing implicit pose regularization [S5]. It constructs a scene codebook that implicitly captures the scene-specific camera pose distribution as a priori [S5]. It consistently outperforms GNeRF in terms of image quality metrics (PSNR, SSIM, and LPIPS) [S5].
++
++### SparseNeRF
++SparseNeRF addresses the problem of synthesizing new views from finite perspectives by extracting depth priors from pre-trained depth models or rough depth maps captured by consumer-grade depth sensors [S5]. It introduces local depth ordering and spatial continuity constraints to extract robust depth priors from rough depth maps [S5]. A pitfall is that it relies on pre-trained depth models or depth maps captured by consumer-grade sensors, the accuracy and quality of which can be limited by real-world conditions [S5].
++
+ ## Operating characteristics
+ *   **Time Complexity:** Not given in the sources.
+-*   **Memory Complexity:** Uses 3 3D feature grids ($128^3, 256^3, 512^3$) and 7 triplane levels ($128^2$ to $8,192^2$), plus a $512^3$ surfaceness grid. The exact memory footprint depends on the feature dimension per cell, which is not explicitly given, but the input to the MLP is 16-dimensional [S1].
++*   **Memory Complexity:** Not given in the sources.
+ *   **Measured Performance:** Not given in the sources.
+ *   **Scaling:** Not given in the sources.
+-*   **Strengths:** Combines the efficiency of triplanes with the geometric detail of 3D grids; uses summing instead of concatenation to reduce dimensionality; handles aliasing via multi-resolution grids [S1].
++*   **Strengths:** Efficient representation via hybrid 3D/2D structures; handles aliasing via multi-resolution grids [S1].
+ *   **Limitations:** Not given in the sources.
+-*   **When to use:** When a hybrid representation is needed for efficient rendering of both volumetric and surface-like geometry [S1].
+-*   **When not:** When pure surface representation or pure volumetric representation is sufficient and simpler.
++*   **When to use:** When efficient neural rendering is required with adaptive volumetric surfaces [S1].
++*   **When not:** Not given in the sources.
+ 
+ ## Background
+-HybridNeRF was introduced in the paper "HybridNeRF: Efficient Neural Rendering via Adaptive Volumetric Surfaces" [S1]. It builds on the concept of using multi-resolution feature grids and triplanes, combining them with an SDF-based density formulation using a spatially adaptive surfaceness field [S1].
++HybridNeRF was introduced in the paper "HybridNeRF: Efficient Neural Rendering via Adaptive Volumetric Surfaces" [S1]. It builds on the concept of hybrid representations, combining the benefits of 3D grids and 2D triplanes. It handles aliasing as in VR-NeRF [S1].
+ 
+ ## Sources

@@ -1,0 +1,98 @@
+# Beta Decomposition
+
+Also called: Geometry Decomposition, Lighting Decomposition
+
+## Overview
+Beta Decomposition is a post-training analysis technique that separates a Deformable Beta Splatting scene into distinct geometric frequency bands and diffuse/specular lighting components by leveraging the Beta Kernel's parameterization [S1]. It enables the isolation of low-frequency solid geometry from high-frequency textures, and the separation of static diffuse color from view-dependent specular highlights, capabilities not available in standard Gaussian Splatting [S1].
+
+## How it works
+**Inputs and Outputs:**
+*   **Input:** A trained Deformable Beta Splatting scene consisting of a set of primitives $\mathcal{P}$. Each primitive $i$ is defined by its position, orientation, scale, opacity, and the Beta Kernel parameters $\alpha_i, \beta_i$. It also includes Spherical Harmonics (SH) coefficients for view-dependent color.
+*   **Output:** Two decomposed scenes: one containing only the geometric structure (geometry decomposition) and one containing only the lighting effects (lighting decomposition).
+
+**Data Structures:**
+The primitive data structure includes:
+*   $\alpha_i, \beta_i$: Beta Kernel shape parameters. $\beta_i$ controls the frequency of the geometry representation.
+*   $\mathbf{c}_{i,0}$: Zero-degree SH coefficient (base color/diffuse).
+*   $\mathbf{c}_{i,k}$: Non-zero degree SH coefficients (specular/view-dependent details).
+
+**Steps:**
+
+1.  **Geometry Decomposition:**
+    *   Calculate the mean $\beta$ value across all primitives: $\bar{\beta} = \frac{1}{N} \sum_{i=1}^{N} \beta_i$.
+    *   Define a threshold $\tau = \bar{\beta}$.
+    *   Split primitives into two sets:
+        *   **Low-frequency (Geometry):** $P_{geo} = \{ i \mid \beta_i < \tau \}$. These primitives represent fundamental geometric structures.
+        *   **High-frequency (Texture):** $P_{tex} = \{ i \mid \beta_i \ge \tau \}$. These primitives represent fine surface variations and textures.
+    *   To render the geometry-only view, render only primitives in $P_{geo}$ using their original parameters but ignoring view-dependent lighting variations (or using only diffuse color).
+
+2.  **Lighting Decomposition:**
+    *   **Diffuse Component:** Extract the base color $\mathbf{c}_{i,0}$ for all primitives. Render the scene using only these zero-degree SH coefficients, effectively removing view-dependent effects.
+    *   **Specular Component:** Isolate the specular term. This is achieved by using only the non-zero degree SH coefficients ($\mathbf{c}_{i,k}$ for $k > 0$) for rendering. The base color $\mathbf{c}_{i,0}$ is set to zero or ignored.
+
+**Pseudocode:**
+
+> **Unverified code.** The code below did not pass a test run against a reference implementation, or no test fits it, so it may contain errors.
+
+```python
+def beta_decomposition(primitives):
+    """
+    Decomposes a Deformable Beta Splatting scene into geometry and lighting components.
+    
+    Args:
+        primitives: List of primitive objects, each with attributes:
+            - beta: float, the Beta Kernel parameter controlling geometry frequency.
+            - c0: float, zero-degree SH coefficient (diffuse base color).
+            - c_sh: list, higher-degree SH coefficients (specular/view-dependent).
+            
+    Returns:
+        geo_primitives: List of primitives for geometry-only rendering.
+        spec_primitives: List of primitives for specular-only rendering.
+    """
+    # Step 1: Geometry Decomposition
+    # Calculate mean beta to determine threshold
+    total_beta = sum(p.beta for p in primitives)
+    mean_beta = total_beta / len(primitives)
+    
+    geo_primitives = []
+    for p in primitives:
+        if p.beta < mean_beta:
+            # Keep primitive for geometry
+            # Use original beta, but typically only diffuse color is used for pure geometry
+            # or the full primitive is kept but lighting is stripped in rendering pass
+            geo_primitives.append(p)
+            
+    # Step 2: Lighting Decomposition
+    spec_primitives = []
+    for p in primitives:
+        # Create a modified primitive for specular rendering
+        spec_p = copy_primitive(p)
+        # Zero out diffuse component (zero-degree SH)
+        spec_p.c0 = 0.0
+        # Keep higher-degree SH coefficients for specular/view-dependent effects
+        # Note: The rendering engine must interpret non-zero SH as specular
+        spec_primitives.append(spec_p)
+        
+    return geo_primitives, spec_primitives
+```
+
+**Parameters:**
+*   **Threshold ($\tau$):** The mean $\beta$ value is the default threshold [S1]. Other thresholds (e.g., median) may be used but are not specified in the source.
+*   **SH Degree:** Zero-degree for diffuse, non-zero for specular [S1].
+
+**Edge Cases and Pitfalls:**
+*   **Mirror-like Reflections:** Spherical Beta Functions struggle to accurately model mirror-like reflections and anisotropic specular highlights [S1].
+*   **Distant Backgrounds:** The frustum model can cause Beta Kernels to incorrectly optimize flat geometries for distant backgrounds, distorting the overall $\beta$ geometry distribution [S1].
+*   **Popping Artifacts:** Rasterization-based depth approximation during sorting can cause popping artifacts [S1].
+
+## Operating characteristics
+*   **Time Complexity:** Post-processing is $O(N)$ where $N$ is the number of primitives, as it involves a single pass to calculate the mean $\beta$ and another pass to split primitives.
+*   **Memory Complexity:** $O(N)$, as it requires storing the original primitives and potentially copies or flags for the decomposed sets.
+*   **Strengths:** Enables artistic control and analysis of scene components (geometry vs. texture, diffuse vs. specular) which is difficult with standard Gaussian Splatting [S1].
+*   **Limitations:** The decomposition relies on the quality of the Beta Kernel parameterization. If the training process does not adequately separate frequency bands via $\beta$, the decomposition may be imperfect. The method is specific to Deformable Beta Splatting and does not apply to other splatting methods.
+
+## Background
+Beta Decomposition was introduced as part of the Deformable Beta Splatting (DBS) framework [S1]. DBS advances real-time radiance field rendering by using deformable Beta Kernels for adaptive geometry representation and Spherical Betas for view-dependent color. The decomposition capability arises from the dual role of the Beta Kernel in encoding both volumetric splatting and view-dependent color information [S1].
+
+## Sources
+[S1] Deformable Beta Splatting, https://doi.org/10.1145/3721238.3730716, fetched 2026-11-08

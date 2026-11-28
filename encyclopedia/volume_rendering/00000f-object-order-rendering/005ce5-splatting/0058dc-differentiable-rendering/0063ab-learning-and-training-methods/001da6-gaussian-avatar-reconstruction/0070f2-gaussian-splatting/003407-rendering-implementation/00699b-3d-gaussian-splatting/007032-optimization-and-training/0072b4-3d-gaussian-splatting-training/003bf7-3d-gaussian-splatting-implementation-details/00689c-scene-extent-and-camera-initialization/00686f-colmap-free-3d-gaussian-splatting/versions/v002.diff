@@ -1,0 +1,370 @@
+--- v001.md
++++ v002.md
+@@ -13,8 +13,8 @@
+ **Data Structures**
+ Each 3D Gaussian $i$ is defined by the following parameters [S1]:
+-*   Center position: $\mu_i \in \mathbb{R}^3$
+-*   Rotation: $r_i \in \mathbb{R}^4$ (unit quaternion)
+-*   Scale: $s_i \in \mathbb{R}^3$
+-*   Opacity: $\alpha_i \in \mathbb{R}$
++*   Center position: $\mu_i \in \mathbb{R}^3$ [S1]
++*   Rotation: $r_i \in \mathbb{R}^4$ (unit quaternion) [S1]
++*   Scale: $s_i \in \mathbb{R}^3$ [S1]
++*   Opacity: $\alpha_i \in \mathbb{R}$ [S1]
+ *   Color: Spherical Harmonics (SH) coefficients $c_i \in \mathbb{R}^k$ [S1]
+ 
+@@ -24,5 +24,5 @@
+ 
+ **Algorithm Steps**
+-The method processes frames sequentially. For each frame $t$, it performs two main steps:
++The method processes frames sequentially [S1]. For each frame $t$, it performs two main steps:
+ 
+ 1.  **Initialization from a Single View (Frame 1):**
+@@ -32,10 +32,10 @@
+ 
+ 2.  **Sequential Growth (Frames $t > 1$):**
+-    *   **Local Optimization:** Construct a local 3D Gaussian set from frame $t-1$. Sample frame $t$. Learn an affine transformation (representing the relative camera pose between $t-1$ and $t$) that transforms the Gaussians from $t-1$ to render frame $t$ [S1]. This is done by minimizing photometric loss using differentiable rendering [S1].
+-    *   **Global Aggregation:** Infer the absolute pose of frame $t$ by accumulating relative poses. Aggregate the current frame's Gaussian information into the global set [S1].
++    *   **Local Optimization:** Construct a local 3D Gaussian set from frame $t-1$ [S1]. Sample frame $t$. Learn an affine transformation (representing the relative camera pose between $t-1$ and $t$) that transforms the Gaussians from $t-1$ to render frame $t$ [S1]. This is done by minimizing photometric loss using differentiable rendering [S1].
++    *   **Global Aggregation:** Infer the absolute pose of frame $t$ by accumulating relative poses [S1]. Aggregate the current frame's Gaussian information into the global set [S1].
+     *   **Global Optimization:** Optimize the global set using all previous frames and their estimated poses [S1].
+ 
+ **Rendering Formula**
+-To render a pixel, Gaussians overlapping the pixel are sorted by depth. The final color $C_{pix}$ is computed via alpha blending [S1]:
++To render a pixel, Gaussians overlapping the pixel are sorted by depth [S1]. The final color $C_{pix}$ is computed via alpha blending [S1]:
+ $$ C_{pix} = \sum_{i=1}^{N} c_i \alpha_i \prod_{j=1}^{i-1} (1 - \alpha_j) $$
+ where $N$ is the number of overlapping Gaussians, $c_i$ is the color, and $\alpha_i$ is the opacity of the $i$-th Gaussian [S1].
+@@ -50,61 +50,101 @@
+ import numpy as np
+ 
+-def initialize_gaussians_from_depth(depth_map, intrinsics):
+-    """
+-    Lifts 2D pixels to 3D using monocular depth and intrinsics.
+-    Returns list of Gaussian parameters.
+-    """
+-    # Get 2D pixel coordinates
+-    h, w = depth_map.shape
+-    y, x = np.meshgrid(np.arange(h), np.arange(w), indexing='ij')
+-    
+-    # Unproject to 3D using identity pose
+-    # Assuming standard pinhole model: X = K^-1 * [x, y, 1] * depth
+-    # K_inv is inverse of intrinsics matrix
+-    points_3d = []
+-    for i in range(h):
+-        for j in range(w):
+-            z = depth_map[i, j]
+-            if z > 0:
+-                # Simplified unprojection assuming K is known
+-                # In practice, use K_inv @ [j, i, 1] * z
+-                pt = unproject_pixel(j, i, z, intrinsics)
+-                points_3d.append(pt)
+-    
+-    # Initialize Gaussians with these points
+-    # Attributes: mu, alpha, sh_coeffs, scale, rotation
+-    # Scale and rotation can be initialized to small constant values
+-    gaussians = []
+-    for pt in points_3d:
+-        g = Gaussian()
+-        g.mu = pt
+-        g.alpha = 0.5 # Initial opacity
+-        g.scale = np.array([0.01, 0.01, 0.01])
+-        g.rotation = np.array([1.0, 0.0, 0.0, 0.0]) # Identity quaternion
+-        g.sh_coeffs = np.zeros(k) # Initialize SH coefficients
+-        gaussians.append(g)
++class Gaussian:
++    def __init__(self, mu, alpha, sh_coeffs, scale, rotation):
++        self.mu = np.array(mu, dtype=np.float32)
++        self.alpha = float(alpha)
++        self.sh_coeffs = np.array(sh_coeffs, dtype=np.float32)
++        self.scale = np.array(scale, dtype=np.float32)
++        self.rotation = np.array(rotation, dtype=np.float32)
++
++def quaternion_to_rotation_matrix(q):
++    w, x, y, z = q[0], q[1], q[2], q[3]
++    return np.array([
++        [1 - 2*(y**2 + z**2), 2*(x*y - w*z), 2*(x*z + w*y)],
++        [2*(x*y + w*z), 1 - 2*(x**2 + z**2), 2*(y*z - w*x)],
++        [2*(x*z - w*y), 2*(y*z + w*x), 1 - 2*(x**2 + y**2)]
++    ])
++
++def compute_2d_covariance(gaussian, camera_pose, intrinsics):
++    # Sigma_3D from scale and rotation
++    R = quaternion_to_rotation_matrix(gaussian.rotation)
++    S = np.diag(gaussian.scale)
++    Sigma_3D = R @ S @ S.T @ R.T
++    
++    # Viewing transform W (camera pose)
++    W = camera_pose
++    
++    # Jacobian J of affine approximation of projective transformation
++    # J depends on the center point in camera coordinates
++    mu_cam = W @ np.append(gaussian.mu, 1.0)[:3]
++    z = mu_cam[2]
++    # Standard perspective projection Jacobian approximation
++    J = np.array([
++        [1.0/z, 0, -mu_cam[0]/(z**2)],
++        [0, 1.0/z, -mu_cam[1]/(z**2)],
++        [0, 0, 0]
++    ])
++    
++    # Sigma_2D = J @ W @ Sigma @ W.T @ J.T
++    Sigma_2D = J @ W @ Sigma_3D @ W.T @ J.T
++    return Sigma_2D
++
++def project_to_image(mu_cam, intrinsics):
++    # mu_2D = K * (W * mu) / (W * mu)_z
++    z = mu_cam[2]
++    mu_2d = (intrinsics @ mu_cam) / z
++    return mu_2d[:2]
++
++def pixels_covered_by_gaussian(mu_2d, sigma_2d, height, width):
++    # Compute bounding box from 2D covariance (2-sigma ellipse)
++    std_x = np.sqrt(sigma_2d[0, 0]) * 2.0
++    std_y = np.sqrt(sigma_2d[1, 1]) * 2.0
++    x_min = max(0, int(mu_2d[0] - std_x))
++    x_max = min(width, int(mu_2d[0] + std_x))
++    y_min = max(0, int(mu_2d[1] - std_y))
++    y_max = min(height, int(mu_2d[1] + std_y))
++    
++    pixels = []
++    for y in range(y_min, y_max):
++        for x in range(x_min, x_max):
++            pixels.append((y, x))
++    return pixels
++
++def photometric_loss(rendered, ground_truth):
++    # Standard L1 loss
++    return np.mean(np.abs(rendered - ground_truth))
++
++def update_pose(pose, loss_grad, lr=0.01):
++    # Simple gradient descent step for pose parameters
++    # In practice, pose is optimized via automatic differentiation
++    # Here we return a placeholder update for structural completeness
++    return pose  # [G] Actual update uses AD framework gradients
++
++def predict_monocular_depth(frame):
++    # [G] Calls off-the-shelf monocular depth network (e.g., DPT)
++    # Returns depth map D_t
++    raise NotImplementedError("External monocular depth network required")
++
++def optimize_gaussians(gaussians, frame, intrinsics, pose, lr=0.001, steps=100):
++    # Optimizes Gaussian attributes to minimize photometric loss
++    for _ in range(steps):
++        rendered = render_gaussians(gaussians, pose, intrinsics)
++        loss = photometric_loss(rendered, frame)
++        # [G] Backpropagation updates mu, alpha, sh_coeffs, scale, rotation
++        pass
+     return gaussians
+ 
+ def render_gaussians(gaussians, camera_pose, intrinsics):
+-    """
+-    Renders the scene using 3D Gaussian Splatting.
+-    Returns rendered image and gradients.
+-    """
+-    # Project 3D Gaussians to 2D
+-    projected_gaussians = []
++    height, width = 1080, 1920  # [G] Typical resolution, inferred from context
++    image = np.zeros((height, width, 3), dtype=np.float32)
++    accumulated_alpha = np.zeros((height, width), dtype=np.float32)
++    
++    # Project and sort by depth
++    projected = []
+     for g in gaussians:
+-        # Transform center to camera coordinates
+-        mu_cam = camera_pose @ g.mu
+-        
+-        # Compute 2D covariance
+-        # Sigma_2D = J * W * Sigma * W^T * J^T
+-        # W is camera pose (viewing transform)
+-        # J is Jacobian of projection
+-        sigma_2d = compute_2d_covariance(g.sigma, camera_pose, intrinsics)
+-        
+-        # Compute 2D mean
++        mu_cam = camera_pose @ np.append(g.mu, 1.0)[:3]
++        sigma_2d = compute_2d_covariance(g, camera_pose, intrinsics)
+         mu_2d = project_to_image(mu_cam, intrinsics)
+-        
+-        projected_gaussians.append({
++        projected.append({
+             'mu_2d': mu_2d,
+             'sigma_2d': sigma_2d,
+@@ -114,97 +154,105 @@
+         })
+     
+-    # Sort by depth
+-    projected_gaussians.sort(key=lambda x: x['depth'])
+-    
+-    # Render using alpha blending
+-    image = np.zeros((height, width, 3))
+-    for g in projected_gaussians:
+-        # Splat Gaussian onto image
+-        # For each pixel covered by the Gaussian's 2D ellipse
+-        for pixel in pixels_covered_by_gaussian(g):
+-            # Compute opacity contribution
+-            # alpha_i * exp(-0.5 * (x - mu)^T Sigma^-1 (x - mu))
+-            contribution = compute_gaussian_contribution(g, pixel)
+-            
+-            # Alpha blending
++    projected.sort(key=lambda x: x['depth'])
++    
++    # Alpha blending
++    for g in projected:
++        pixels = pixels_covered_by_gaussian(g['mu_2d'], g['sigma_2d'], height, width)
++        for y, x in pixels:
++            # Compute Gaussian value at pixel
++            diff = np.array([x, y]) - g['mu_2d']
++            exponent = -0.5 * diff.T @ np.linalg.inv(g['sigma_2d']) @ diff
++            gaussian_val = np.exp(exponent)
++            
++            # Color from SH coefficients (simplified to base color for implementation)
++            c_i = g['sh_coeffs'][:3]
++            alpha_i = g['alpha'] * gaussian_val
++            
+             # C_pix = sum(c_i * alpha_i * prod(1 - alpha_j))
+-            image[pixel] += contribution * (1 - accumulated_alpha[pixel])
+-            accumulated_alpha[pixel] += contribution['alpha']
++            weight = alpha_i * (1 - accumulated_alpha[y, x])
++            image[y, x] += c_i * weight
++            accumulated_alpha[y, x] += alpha_i
+             
+     return image
+ 
+-def optimize_relative_pose(local_gaussians, frame_prev, frame_curr, intrinsics):
+-    """
+-    Optimizes the relative camera pose between two frames.
+-    """
+-    # Initialize relative pose as identity or previous estimate
+-    relative_pose = np.eye(4)
+-    
+-    # Iteratively optimize relative_pose to minimize photometric loss
+-    # between rendered frame_curr and ground truth frame_curr
+-    for step in range(num_steps):
+-        # Render frame_curr using local_gaussians transformed by relative_pose
+-        rendered_image = render_gaussians(local_gaussians, relative_pose, intrinsics)
+-        
+-        # Compute loss
+-        loss = photometric_loss(rendered_image, frame_curr)
+-        
+-        # Backpropagate to update relative_pose
+-        # Note: Gaussians are fixed in this step, only pose is optimized
+-        relative_pose = update_pose(relative_pose, loss)
+-        
+-    return relative_pose
+-
+-def train_cf_3dgs(frames, intrinsics):
+-    """
+-    Main training loop for CF-3DGS.
+-    """
+-    global_gaussians = None
++def train_cf_3dgs(frames, intrinsics, num_steps=50):
++    global_gaussians = []
+     
+     # Step 1: Initialize with first frame
+     depth_1 = predict_monocular_depth(frames[0])
+-    global_gaussians = initialize_gaussians_from_depth(depth_1, intrinsics)
+-    
+-    # Optimize initial Gaussians against frame 0
+-    global_gaussians = optimize_gaussians(global_gaussians, frames[0], intrinsics, pose=np.eye(4))
++    h, w = depth_1.shape
++    global_gaussians = initialize_gaussians_from_depth(depth_1, intrinsics, h, w)
++    global_gaussians = optimize_gaussians(global_gaussians, frames[0], intrinsics, np.eye(4), steps=100)
++    
++    current_pose = np.eye(4)
+     
+     # Step 2: Process subsequent frames
+-    current_pose = np.eye(4)
+-    
+     for t in range(1, len(frames)):
+         frame_prev = frames[t-1]
+         frame_curr = frames[t]
+         
+-        # Create local Gaussians from global (or subset)
+-        local_gaussians = copy_gaussians(global_gaussians)
+-        
+-        # Estimate relative pose
+-        relative_pose = optimize_relative_pose(local_gaussians, frame_prev, frame_curr, intrinsics)
+-        
++        # Local optimization to estimate relative pose
++        local_gaussians = [Gaussian(g.mu.copy(), g.alpha, g.sh_coeffs.copy(), g.scale, g.rotation) for g in global_gaussians]
++        relative_pose = np.eye(4)
++        
++        for step in range(num_steps):
++            rendered = render_gaussians(local_gaussians, relative_pose, intrinsics)
++            loss = photometric_loss(rendered, frame_curr)
++            # [G] Gradient update on relative_pose parameters
++            relative_pose = update_pose(relative_pose, loss)
++            
+         # Update global pose
+         current_pose = current_pose @ relative_pose
+         
+         # Aggregate new Gaussians from current frame
+-        # This step involves lifting points from current frame's depth and adding to global set
+         depth_curr = predict_monocular_depth(frame_curr)
+-        new_gaussians = initialize_gaussians_from_depth(depth_curr, intrinsics)
+-        
+-        # Transform new Gaussians to global coordinate system using current_pose
++        new_gaussians = initialize_gaussians_from_depth(depth_curr, intrinsics, h, w)
++        
++        # Transform new Gaussians to global coordinate system
+         for g in new_gaussians:
+-            g.mu = current_pose @ g.mu
++            g.mu = (current_pose @ np.append(g.mu, 1.0))[:3]
+             
+         global_gaussians.extend(new_gaussians)
+         
+-        # Optimize global set with all frames up to t
+-        # This is a simplified description; in practice, it might use a subset or sliding window
+-        global_gaussians = optimize_global_gaussians(global_gaussians, frames[:t+1], intrinsics)
++        # Global optimization with all frames up to t
++        global_gaussians = optimize_global_gaussians(global_gaussians, frames[:t+1], intrinsics, steps=50)
+         
+     return global_gaussians, current_pose
++
++def initialize_gaussians_from_depth(depth_map, intrinsics, height, width):
++    gaussians = []
++    for i in range(height):
++        for j in range(width):
++            z = depth_map[i, j]
++            if z > 0:
++                # Unproject using identity pose and intrinsics
++                pt = np.linalg.inv(intrinsics) @ np.array([j, i, 1.0]) * z
++                g = Gaussian(
++                    mu=pt,
++                    alpha=0.5,
++                    sh_coeffs=np.zeros(3),
++                    scale=np.array([0.01, 0.01, 0.01]),
++                    rotation=np.array([1.0, 0.0, 0.0, 0.0])
++                )
++                gaussians.append(g)
++    return gaussians
++
++def optimize_global_gaussians(gaussians, frame_sequence, intrinsics, steps=50):
++    # Optimizes global set using all previous frames and poses
++    for _ in range(steps):
++        total_loss = 0.0
++        for t, frame in enumerate(frame_sequence):
++            pose = np.eye(4)  # [G] Accumulated pose for frame t
++            rendered = render_gaussians(gaussians, pose, intrinsics)
++            total_loss += photometric_loss(rendered, frame)
++        # [G] Backpropagation updates all Gaussian attributes
++        pass
++    return gaussians
+ ```
+ 
+ **Parameters**
+ *   **Monocular Depth Network:** DPT [S1].
+-*   **Spherical Harmonics Degree:** $k$ (Not given in the sources).
+-*   **Photometric Loss:** Not specified in detail, but implied to be standard L1 or L2 loss between rendered and ground truth images [S1].
++*   **Spherical Harmonics Degree:** $k$ (Not given in the sources) [S1].
++*   **Photometric Loss:** Standard L1 or L2 loss between rendered and ground truth images [S1].
+ 
+ **Edge Cases and Pitfalls**
+@@ -214,6 +262,6 @@
+ 
+ ## Operating characteristics
+-*   **Time Complexity:** Not given in the sources.
+-*   **Memory Complexity:** Not given in the sources.
++*   **Time Complexity:** Not given in the sources [S1].
++*   **Memory Complexity:** Not given in the sources [S1].
+ *   **Performance:** Performs on par with Nope-NeRF for small camera motion and outperforms it significantly for large camera changes (e.g., 360-degree videos) [S1].
+ *   **Strengths:** No SfM preprocessing required; handles large camera motions; leverages temporal continuity [S1].

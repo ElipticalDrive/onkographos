@@ -1,0 +1,79 @@
+--- v004.md
++++ v005.md
+@@ -8,25 +8,16 @@
+ ## How it works
+ **Inputs and Outputs:**
+-- **Inputs:** Real image patches $x_{\text{real}}$, fake image patches $x_{\text{fake}}$, discriminator network $D$, gradient penalty multiplier $\lambda$ (parameter `gp_loss_mult`) [S1, unofficial].
++- **Inputs:** Real image patches $x_{\text{real}}$, fake image patches $x_{\text{fake}}$, discriminator network $D$, gradient penalty multiplier `gp_loss_mult` [S1, unofficial].
+ - **Outputs:** Scalar discriminator loss value [S1, unofficial].
+ 
+ **Data Structures:**
+-- Tensors are assumed to be 4D: $[N, C, H, W]$ representing batch size, channels, height, and width [G].
++- Tensors are 4D: $[N, C, H, W]$ representing batch size, channels, height, and width [G].
+ - Gradients are computed with respect to the input tensor $x_{\text{real}}$ [S1, unofficial].
+ 
+ **Steps:**
+-1. **Real Prediction:** Pass real patches through the discriminator to obtain predictions $pred_{\text{real}} = D(x_{\text{real}})$ [S1, unofficial].
++1. **Real Prediction:** Set $x_{\text{real}}$ to require gradients, then pass real patches through the discriminator to obtain predictions $pred_{\text{real}} = D(x_{\text{real}})$ [S1, unofficial].
+ 2. **Fake Prediction:** Pass detached fake patches through the discriminator to obtain predictions $pred_{\text{fake}} = D(x_{\text{fake}})$ [S1, unofficial]. Detachment prevents gradient flow from the fake path into the discriminator during the penalty calculation [G].
+-3. **Gradient Penalty Calculation:**
+-   - Set the input tensor $x_{\text{real}}$ to require gradients [S1, unofficial].
+-   - Compute the sum of predictions (typically just $pred_{\text{real}}$ for R1 penalty) with respect to $x_{\text{real}}$ [S1, unofficial].
+-   - Compute the gradients $g = \frac{\partial \sum pred_{\text{real}}}{\partial x_{\text{real}}}$ [S1, unofficial].
+-   - Calculate the squared gradient norm per sample: $r1_{\text{penalty}} = \sum_{c,h,w} g_{c,h,w}^2$ [S1, unofficial].
+-   - Average over the batch: $r1_{\text{mean}} = \text{mean}(r1_{\text{penalty}})$ [S1, unofficial].
+-   - Normalize by 2: $\text{gradient\_penalty} = r1_{\text{mean}} / 2$ [S1, unofficial].
+-4. **Loss Computation:**
+-   - Compute real loss using softplus: $loss_{d\_real} = \text{mean}(\text{softplus}(-pred_{\text{real}}))$ [S1, unofficial].
+-   - Compute fake loss using softplus: $loss_{d\_fake} = \text{mean}(\text{softplus}(pred_{\text{fake}}))$ [S1, unofficial].
+-   - Combine losses: $total\_loss = loss_{d\_real} + loss_{d\_fake} + \lambda \cdot \text{gradient\_penalty}$ [S1, unofficial].
++3. **Gradient Penalty Calculation:** Compute the gradients of the sum of predictions with respect to the input: $g = \nabla_{x_{\text{real}}} pred_{\text{real}}$ [S1, unofficial]. Calculate the R1 penalty as the mean of the squared gradient norms across spatial dimensions: $r1_{\text{penalty}} = \text{mean}(\sum g^2, \text{dim}=[1,2,3])$ [S1, unofficial]. Normalize by 2: $\text{gradient\_penalty} = r1_{\text{penalty}} / 2$ [S1, unofficial].
++4. **Loss Computation:** Compute real loss using softplus: $loss_{d\_real} = \text{mean}(\text{softplus}(-pred_{\text{real}}))$ [S1, unofficial]. Compute fake loss using softplus: $loss_{d\_fake} = \text{mean}(\text{softplus}(pred_{\text{fake}}))$ [S1, unofficial]. Sum the real and fake losses to get the total discriminator loss: $total\_loss = loss_{d\_real} + loss_{d\_fake} + \text{gp\_loss\_mult} \cdot \text{gradient\_penalty}$ [S1, unofficial].
+ 
+ **Formulas:**
+@@ -34,12 +25,14 @@
+ $$pred_{\text{fake}} = D(x_{\text{fake}})$$
+ $$g = \nabla_{x_{\text{real}}} pred_{\text{real}}$$
+-$$r1_{\text{penalty}} = \sum_{i=1}^{N} \sum_{j=1}^{C} \sum_{k=1}^{H} \sum_{l=1}^{W} g_{i,j,k,l}^2$$
+-$$\text{gradient\_penalty} = \frac{1}{N} \sum_{i=1}^{N} r1_{\text{penalty}, i} / 2$$
+-$$loss_{d\_real} = \frac{1}{N} \sum_{i=1}^{N} \log(1 + e^{-pred_{\text{real}, i}})$$
+-$$loss_{d\_fake} = \frac{1}{N} \sum_{i=1}^{N} \log(1 + e^{pred_{\text{fake}, i}})$$
+-$$total\_loss = loss_{d\_real} + loss_{d\_fake} + \lambda \cdot \text{gradient\_penalty}$$
++$$r1_{\text{penalty}} = \text{mean}\left(\sum_{c,h,w} g_{c,h,w}^2\right)$$
++$$\text{gradient\_penalty} = r1_{\text{penalty}} / 2$$
++$$loss_{d\_real} = \text{mean}(\text{softplus}(-pred_{\text{real}}))$$
++$$loss_{d\_fake} = \text{mean}(\text{softplus}(pred_{\text{fake}}))$$
++$$total\_loss = loss_{d\_real} + loss_{d\_fake} + \text{gp\_loss\_mult} \cdot \text{gradient\_penalty}$$
++where $x_{\text{real}}$ and $x_{\text{fake}}$ are image patches, $D$ is the discriminator network, $g$ is the gradient tensor, and $\text{softplus}(x) = \log(1 + e^x)$ [G].
+ 
+ **Parameters:**
+-- `gp_loss_mult` ($\lambda$): Multiplier for the gradient penalty term. Value not given in the sources [S1, unofficial].
++- `gp_loss_mult`: The multiplier for the gradient penalty term in the discriminator loss [S1, unofficial].
++- Label $l$: Set to $1$ when training the discriminator, and $-1$ when using it as a loss to optimize the density via $\frac{\tilde{L}_D(\rho, -1)}{\rho}$ [S2].
+ 
+ **Edge Cases and Pitfalls:**
+@@ -90,10 +83,8 @@
+     
+     # Compute r1_penalty: mean(sum(gradients^2, dim=[1,2,3]))
+-    # Sum over channels, height, and width for each sample in the batch
+-    r1_penalty = torch.sum(gradients ** 2, dim=[1, 2, 3])
+-    r1_mean = torch.mean(r1_penalty)
++    r1_penalty = torch.sum(gradients ** 2, dim=[1, 2, 3]).mean()
+     
+     # gradient_penalty = r1_penalty / 2
+-    gradient_penalty = r1_mean / 2.0
++    gradient_penalty = r1_penalty / 2.0
+     
+     # 4. Compute losses
+@@ -116,10 +107,6 @@
+ 
+ ## Operating characteristics
+-- **Time Complexity:** Not given in the sources.
+-- **Memory Complexity:** Not given in the sources.
+ - **Strengths:** Stabilizes GAN training by enforcing Lipschitz continuity without weight clipping [S1, unofficial].
+-- **Limitations:** Not given in the sources.
+-- **When to use:** Not given in the sources.
+-- **When not to use:** Not given in the sources.
++- **Limitations:** Extending the discriminator to the temporal domain via a triplet of inputs yields no benefits because transport priors already constrain physicality [S2].
+ 
+ ## Background

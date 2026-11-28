@@ -1,0 +1,108 @@
+--- v002.md
++++ v003.md
+@@ -23,18 +23,19 @@
+ **Pseudocode:**
+ ```python
++import math
++import random
++
+ def estimate_anisotropy(volume, r, epsilon, n, filter_flag):
+-    # Step 1: Estimate normals
++    # Step 1: Estimate normals using Sobel operator [G]
+     normals = {}
+     for x in volume.voxels:
+-        # Standard 3x3 Sobel kernel approximation for gradient
+-        grad = [
+-            (volume.sample(x + [1,0,0]) - volume.sample(x - [1,0,0])) / 2.0,
+-            (volume.sample(x + [0,1,0]) - volume.sample(x - [0,1,0])) / 2.0,
+-            (volume.sample(x + [0,0,1]) - volume.sample(x - [0,0,1])) / 2.0
+-        ]
+-        length = (grad[0]**2 + grad[1]**2 + grad[2]**2)**0.5
+-        normals[x] = [v / length for v in grad] if length > 0 else [0, 0, 1]
++        grad = [0.0, 0.0, 0.0]
++        for d in range(3):
++            grad[d] = (volume.sample(x + [1 if d==i else 0 for i in range(3)]) - 
++                       volume.sample(x - [1 if d==i else 0 for i in range(3)])) / 2.0
++        length = math.sqrt(sum(g**2 for g in grad))
++        normals[x] = [g / length for g in grad] if length > 1e-8 else [0.0, 0.0, 1.0]
+ 
+-    # Step 2-4: Estimate covariance matrices
++    # Steps 2-4: Estimate covariance matrices
+     covariances = {}
+     for x in volume.voxels:
+@@ -43,13 +44,11 @@
+         C = [0.0, 0.0, 0.0]
+         
+-        for i in range(n):
++        for _ in range(n):
+             # Draw uniform sample on sphere of radius r around x
+             theta = random.uniform(0, 2 * math.pi)
+             phi = math.acos(random.uniform(-1, 1))
+-            xi = [
+-                x[0] + r * math.sin(phi) * math.cos(theta),
+-                x[1] + r * math.sin(phi) * math.sin(theta),
+-                x[2] + r * math.cos(phi)
+-            ]
++            xi = [x[0] + r * math.sin(phi) * math.cos(theta),
++                  x[1] + r * math.sin(phi) * math.sin(theta),
++                  x[2] + r * math.cos(phi)]
+             si = volume.sample(xi)
+             
+@@ -62,12 +61,11 @@
+                 xp = [xi[j] - N[j] * dot_val for j in range(3)]
+                 
+-                # Transform 3D point to 2D coordinates in tangent basis
+-                # Construct orthonormal basis {u, v} for tangent plane
++                # Transform 3D point to 2D coordinates in tangent basis [G]
+                 u = [1, 0, 0] if abs(N[0]) < 0.9 else [0, 1, 0]
+                 u = [u[j] - N[j] * sum(u[k]*N[k] for k in range(3)) for j in range(3)]
+-                u_len = (u[0]**2 + u[1]**2 + u[2]**2)**0.5
++                u_len = math.sqrt(sum(v**2 for v in u))
+                 u = [v / u_len for v in u]
+                 v = [u[1]*N[2] - u[2]*N[1], u[2]*N[0] - u[0]*N[2], u[0]*N[1] - u[1]*N[0]]
+-                v_len = (v[0]**2 + v[1]**2 + v[2]**2)**0.5
++                v_len = math.sqrt(sum(val**2 for val in v))
+                 v = [val / v_len for val in v]
+                 
+@@ -85,20 +83,21 @@
+         for x in volume.voxels:
+             C = covariances[x]
+-            # Standard 3x3 Gaussian convolution applied to each of the 3 components [G]
+-            C = apply_gaussian_filter_3x3(C)
++            # Apply 3x3 Gaussian convolution to each of the 3 components across the voxel grid [G]
++            C = apply_gaussian_filter_3x3(C, volume)
+             covariances[x] = C
+             
+     return covariances
+ 
+-def apply_gaussian_filter_3x3(matrix_3d):
+-    # Standard 3x3 Gaussian kernel weights
++def apply_gaussian_filter_3x3(component, volume):
++    # Standard 3x3 Gaussian kernel weights [G]
+     kernel = [[1, 2, 1], [2, 4, 2], [1, 2, 1]]
+-    # Convolve each of the 3 components (C00, C01, C11) across the voxel grid [G]
+-    return matrix_3d
++    # Convolve component across the voxel grid
++    # (Implementation details omitted for brevity; standard 3D convolution applied to each voxel)
++    return component
+ ```
+ 
+ **Parameters:**
+-*   $r$: Radius of the ambient sphere. Controls feature size in the spatial domain. Small $r$ provides local curvature info but requires filtering to avoid discrete artifacts. Large $r$ accounts for large-scale structures but may make estimation overly isotropic and requires more samples $n$ to maintain constant sample density [S1].
+-*   $\varepsilon$: Interval size in the data domain. Controls feature size in the scalar field. Small $\varepsilon$ samples locally for sharp isosurfaces but causes noise artifacts. Large $\varepsilon$ samples wide intervals, beneficial for volumetric structures, but large $\varepsilon$ includes many different features, which results in a loss of anisotropic details [S1].
++*   $r$: Radius of the ambient sphere. Controls feature size in the spatial domain [S1]. Small $r$ provides local curvature info but requires filtering to avoid discrete artifacts [S1]. Large $r$ accounts for large-scale structures but may make estimation overly isotropic and requires more samples $n$ to maintain constant sample density [S1].
++*   $\varepsilon$: Interval size in the data domain. Controls feature size in the data domain [S1]. Small $\varepsilon$ samples locally for sharp isosurfaces but causes noise artifacts [S1]. Large $\varepsilon$ samples wide intervals, beneficial for volumetric structures, but large $\varepsilon$ includes many different features, which results in a loss of anisotropic details [S1].
+ *   $n$: Number of samples. Must be increased if $r$ is large to maintain constant sample density [S1].
+ 
+@@ -107,8 +106,8 @@
+ 
+ ## Operating characteristics
+-*   **Memory:** Requires 3 values per voxel for the gradient (normal) and 3 values per voxel for the symmetric 2x2 covariance matrix. This is more efficient than storing a symmetric 3x3 Hessian matrix (6 values) [S1].
++*   **Memory:** Requires 3 values per voxel for the gradient (normal) and 3 values per voxel for the symmetric 2x2 covariance matrix [S1]. This is more efficient than storing a symmetric 3x3 Hessian matrix (6 values) [S1].
+ *   **Performance:** The method involves $n$ samples per voxel. Performance scales linearly with $n$ and the number of voxels [G].
+-*   **Strengths:** Estimates anisotropy for structures with finite extent in both spatial and data domains. It can classify local isotropic areas as partially anisotropic if they are part of a larger anisotropic feature, making shading less susceptible to artifacts from strong variations or low signal-to-noise ratio [S1].
+-*   **Limitations:** Requires careful tuning of $r$ and $\varepsilon$. Small parameters require extensive filtering or high $n$ to avoid noise. Large $\varepsilon$ includes many different features, which results in a loss of anisotropic details [S1].
++*   **Strengths:** Estimates anisotropy for structures with finite extent in both spatial and data domains [S1]. It can classify local isotropic areas as partially anisotropic if they are part of a larger anisotropic feature, making shading less susceptible to artifacts from strong variations or low signal-to-noise ratio [S1].
++*   **Limitations:** Requires careful tuning of $r$ and $\varepsilon$ [S1]. Small parameters require extensive filtering or high $n$ to avoid noise [S1]. Large $\varepsilon$ includes many different features, which results in a loss of anisotropic details [S1].
+ 
+ ## Background

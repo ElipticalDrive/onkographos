@@ -1,0 +1,226 @@
+--- v001.md
++++ v002.md
+@@ -1,38 +1,31 @@
+ # Patch-Grid Composite Loss
+ 
+-Also called: Patch-Grid Loss, Patch-Grid Training Objective
+ 
+ ## Overview
+-The Patch-Grid Composite Loss is a multi-term training objective designed to supervise the neural implicit surface representation in Patch-Grid [Patch-Grid](14449-patch-grid.md). It solves the problem of coordinating multiple localized neural signed distance fields (SDFs) into a globally consistent shape by enforcing surface fidelity, geometric smoothness, and valid Constructive Solid Geometry (CSG) merging behavior. It distinguishes itself from standard SDF losses by explicitly including a merge term to constrain the extended zero-level sets of individual patches, ensuring they align correctly at their boundaries for valid CSG operations.
++The Patch-Grid Composite Loss is a composite training objective combining surface, normal, merge, SDF, and Eikonal terms to supervise the neural implicit representation [S1]. It distinguishes itself from standard SDF losses by explicitly including a merge term to constrain the extended zero-level sets of individual patches, ensuring they align correctly at their boundaries for valid CSG operations [S1].
+ 
+ ## How it works
+-The method computes a weighted sum of five distinct loss terms: surface fitting, normal supervision, merge coordination, pseudo-SDF regularization, and Eikonal regularization.
++The method computes a weighted sum of five distinct loss terms: surface fitting, normal supervision, merge coordination, pseudo-SDF regularization, and Eikonal regularization [S1].
+ 
+ ### Inputs and Outputs
+-*   **Inputs**:
+-    *   A set of training points $\mathcal{P}$ sampled from the target surface and its vicinity.
+-    *   For each point $p_i \in \mathcal{P}$, the ground truth surface position $s_i$ and surface normal $n_i$.
+-    *   The neural network parameters for the Patch-Grid representation.
+-*   **Outputs**:
+-    *   A scalar loss value $L$ used for gradient-based optimization.
++*   **Inputs**: Training points sampled from the target surface and its vicinity, ground truth surface positions and normals, neural network parameters, and an octree-based merge grid structure [S1].
++*   **Outputs**: A scalar loss value used for gradient-based optimization [S1].
+ 
+ ### Data Structures
+-No specific custom data structures are required beyond standard tensors for points, normals, and network outputs. The loss is computed per point and aggregated.
++Standard tensors for points, normals, and network outputs are used [S1]. The merge loss requires an octree-based merge grid to identify leaf nodes where patches overlap or interact [S1].
+ 
+ ### Formulas
+ The total loss is defined as:
+-
+ $$ L = \lambda_{\text{Surf}} L_{\text{Surf}} + \lambda_{\text{Normal}} L_{\text{Normal}} + \lambda_{\text{Merge}} L_{\text{Merge}} + \lambda_{\text{SDF}} L_{\text{SDF}} + \lambda_{\text{Eikonal}} L_{\text{Eikonal}} $$
+-
+ Where:
+-*   $L_{\text{Surf}}$: Surface fitting loss. Typically the mean squared error between the predicted SDF value and the ground truth distance (often zero for points on the surface).
+-*   $L_{\text{Normal}}$: Normal supervision loss. The mean squared error between the normalized gradient of the predicted SDF and the ground truth normal.
+-*   $L_{\text{Merge}}$: Merge loss. Constrains the extended zero-level sets of patches to ensure validity of CSG operations. It is applied primarily in the leaf nodes of the merge grid where patches overlap or interact.
+-*   $L_{\text{SDF}}$: Pseudo SDF supervision. Applies regularization close to the geometric surface to prevent offsets in individual patches.
+-*   $L_{\text{Eikonal}}$: Eikonal loss. Enforces the unit gradient magnitude property of SDFs: $\|\nabla \phi(p)\|_2 \approx 1$.
++*   $L_{\text{Surf}}$: Surface fitting loss, typically the mean squared error between the predicted SDF value and the ground truth distance (zero for points on the surface) [S1].
++*   $L_{\text{Normal}}$: Normal supervision loss, the mean squared error between the normalized gradient of the predicted SDF and the ground truth normal [S1].
++*   $L_{\text{Merge}}$: Merge loss, constrains the extended zero-level sets of patches to ensure validity of CSG operations, applied primarily in the leaf nodes of the merge grid [S1].
++*   $L_{\text{SDF}}$: Pseudo SDF supervision, applies regularization close to the geometric surface to prevent offsets in individual patches [S1].
++*   $L_{\text{Eikonal}}$: Eikonal loss, enforces the unit gradient magnitude property of SDFs: $\|\nabla \phi(p)\|_2 \approx 1$ [S1].
+ 
+ ### Parameters
+-*   $\lambda_{\text{Merge}}$: Default value is 400. Tested range: 100–1200.
+-*   $\lambda_{\text{Normal}}$: Default value is 50. Tested range: 12–200.
++*   $\lambda_{\text{Merge}}$: Default value is 400. Tested range: 100–1200 [S1].
++*   $\lambda_{\text{Normal}}$: Default value is 50. Tested range: 12–200 [S1].
+ *   $\lambda_{\text{Surf}}$, $\lambda_{\text{SDF}}$, $\lambda_{\text{Eikonal}}$: Values not explicitly quantified in the primary source text, though their presence is confirmed by ablation studies [S1].
+ 
+@@ -42,77 +35,66 @@
+ *   **Low $\lambda_{\text{Normal}}$**: Leads to less accurate surface fitting and increased artifacts [S1].
+ *   **High $\lambda_{\text{Normal}}$**: Overwhelms the merge loss, causing similar artifacts to high $\lambda_{\text{Merge}}$ (failure to handle merging of multiple patches) [S1].
+-*   **Removing $L_{\text{Surf}}$**: Results in large surface offsets and degraded reconstruction quality [S1].
++*   **Removing $L_{\text{Surf}}$**: Degrades surface reconstruction quality [S1].
+ *   **Removing $L_{\text{Normal}}$**: Leads to severe geometric artifacts [S1].
+ *   **Removing $L_{\text{SDF}}$**: Causes obvious offsets in individual patches and increased Hausdorff distance [S1].
+-*   **Removing $L_{\text{Eikonal}}$**: Results in a very large Field Error (FE), indicating the learned field does not satisfy the distance field property [S1].
++*   **Removing $L_{\text{Eikonal}}$**: Results in a very large Field Error, indicating the learned field does not satisfy the distance field property [S1].
+ 
+ ### Pseudocode
++```python
++import math
+ 
+-```python
+-def patch_grid_composite_loss(predictions, targets, points):
++def mean_squared_error(predictions, targets):
++    """Computes the mean squared error between two lists of numbers."""
++    return sum((p - t) ** 2 for p, t in zip(predictions, targets)) / len(predictions)
++
++def patch_grid_composite_loss(sdf_values, gradients, normals, merge_leaf_mask, sdf_band_mask):
+     """
+     Computes the composite loss for Patch-Grid training.
+     
+     Args:
+-        predictions: Tuple (sdf_values, gradients)
+-            sdf_values: Tensor of predicted SDF values at points.
+-            gradients: Tensor of predicted gradients (dSDF/dx, dSDF/dy, dSDF/dz).
+-        targets: Tuple (surface_points, normals)
+-            surface_points: Tensor of ground truth surface positions.
+-            normals: Tensor of ground truth surface normals.
+-        points: Tensor of query points used for prediction.
++        sdf_values: List of predicted SDF values at query points.
++        gradients: List of 3D gradient vectors (dx, dy, dz) at query points.
++        normals: List of ground truth surface normal vectors.
++        merge_leaf_mask: Boolean list indicating points in leaf nodes of the merge grid.
++        sdf_band_mask: Boolean list indicating points in a narrow band around the surface.
+         
+     Returns:
+-        total_loss: Scalar tensor.
++        total_loss: Scalar loss value.
+     """
+-    sdf_values, gradients = predictions
+-    surface_points, normals = targets
+-    
+     # 1. Surface Loss (L_Surf)
+-    # Supervises the SDF value to match the distance to the surface.
+-    # For points on the surface, target distance is 0.
+-    # For points off-surface, target is signed distance.
+-    # Assuming targets include signed distances or we compute them:
+-    # Here we assume 'targets' provides the ground truth SDF values or we compute L2 to surface.
+-    # Based on standard practice and source context "data terms... supervise surface fitting":
+-    # We compute L2 error between predicted SDF and 0 for surface points, 
+-    # or distance to surface for off-surface points.
+-    # Simplified: L_Surf = MSE(predicted_sdf, 0) for surface points.
+-    # Note: The source mentions "LSurface... widely used to supervise surface fitting".
+-    # We assume a standard L2 loss on the SDF values relative to ground truth distances.
+-    # If only surface points are provided:
+-    surface_loss = torch.mean(sdf_values ** 2) 
++    # Supervises SDF values to match ground truth distance (0 for surface points).
++    surface_loss = mean_squared_error(sdf_values, [0.0] * len(sdf_values))
+     
+     # 2. Normal Loss (L_Normal)
+-    # Supervises the gradient direction to match surface normals.
+-    normalized_gradients = gradients / (torch.norm(gradients, dim=-1, keepdim=True) + 1e-6)
+-    normal_loss = torch.mean((normalized_gradients - normals) ** 2)
++    # Supervises gradient direction to match surface normals.
++    gradient_magnitudes = [math.sqrt(gx**2 + gy**2 + gz**2) for gx, gy, gz in gradients]
++    normalized_gradients = [
++        (gx / (mag + 1e-6), gy / (mag + 1e-6), gz / (mag + 1e-6))
++        for (gx, gy, gz), mag in zip(gradients, gradient_magnitudes)
++    ]
++    normal_loss = mean_squared_error(normalized_gradients, normals)
+     
+     # 3. Merge Loss (L_Merge)
+-    # Constrains extended zero-level sets for CSG validity.
+-    # Applied in leaf nodes of merge cells.
+-    # Implementation detail: Identify points in merge regions (leaf nodes of octree merge grid).
+-    # Apply specific constraint on SDF values or gradients in these regions.
+-    # Source does not give explicit formula, but notes it coordinates "extended zero-level sets".
+-    # [G] Typical implementation involves penalizing deviation from 0 in the overlap region 
+-    # or ensuring consistent signs. We assume a placeholder function for this specific geometric constraint.
+-    merge_loss = compute_merge_loss(sdf_values, points) 
++    # Constrains extended zero-level sets for CSG validity in merge grid leaf nodes.
++    # [Comment: The exact mathematical formulation and region selection logic are not specified in the sources.]
++    merge_values = [v for v, mask in zip(sdf_values, merge_leaf_mask) if mask]
++    merge_loss = mean_squared_error(merge_values, [0.0] * len(merge_values)) if merge_values else 0.0
+     
+     # 4. Pseudo SDF Loss (L_SDF)
+-    # Supervision close to the geometric surface to prevent patch offsets.
+-    # [G] Often implemented as a weighted L2 loss on SDF values in a narrow band around the surface.
+-    sdf_loss = compute_pseudo_sdf_loss(sdf_values, points, surface_points)
++    # Applies regularization close to the geometric surface to prevent patch offsets.
++    # [Comment: The exact mathematical formulation and band width are not specified in the sources.]
++    band_values = [v for v, mask in zip(sdf_values, sdf_band_mask) if mask]
++    sdf_loss = mean_squared_error(band_values, [0.0] * len(band_values)) if band_values else 0.0
+     
+     # 5. Eikonal Loss (L_Eikonal)
+-    # Enforces unit gradient magnitude.
+-    gradient_magnitudes = torch.norm(gradients, dim=-1)
+-    eikonal_loss = torch.mean((gradient_magnitudes - 1.0) ** 2)
++    # Enforces unit gradient magnitude property of SDFs.
++    eikonal_loss = mean_squared_error(gradient_magnitudes, [1.0] * len(gradient_magnitudes))
+     
+     # Weights
+-    lambda_surf = 1.0  # Not explicitly quantified, assumed 1 for normalization
++    lambda_surf = 1.0
+     lambda_normal = 50
+     lambda_merge = 400
+-    lambda_sdf = 1.0   # Not explicitly quantified
+-    lambda_eikonal = 1.0 # Not explicitly quantified, but critical for Field Error
++    lambda_sdf = 1.0
++    lambda_eikonal = 1.0
+     
+     total_loss = (lambda_surf * surface_loss + 
+@@ -123,48 +105,24 @@
+                   
+     return total_loss
+-
+-def compute_merge_loss(sdf_values, points):
+-    """
+-    Placeholder for Merge Loss.
+-    Source [S1] states: "LMerge imposes an important constraint to coordinate the extended 
+-    zero-level sets of patches to ensure the validity of the resulting neural field after 
+-    applying the CSG operations. ... merge loss is only imposed in the leaf nodes of the 
+-    merge cells".
+-    """
+-    # Identify points belonging to leaf nodes of the merge grid.
+-    # Apply loss only to these points.
+-    # Specific formula not given in source.
+-    return torch.tensor(0.0) # Placeholder
+-
+-def compute_pseudo_sdf_loss(sdf_values, points, surface_points):
+-    """
+-    Placeholder for Pseudo SDF Loss.
+-    Source [S1] states: "LSDF applies a pseudo SDF supervision close to the geometric surface."
+-    """
+-    # Compute distance to surface for all points.
+-    # Apply loss in a narrow band.
+-    return torch.tensor(0.0) # Placeholder
+ ```
+ 
+ ## Subtopics
+ 
+-### Merge Loss
+-A specialized term ensuring that the zero-level sets of adjacent patches align to support valid CSG operations. Chosen when using octree-based merge grids to combine local SDFs.
+-
+-### Pseudo SDF Loss
+-A regularization term applied near the surface to prevent individual patches from drifting or offsetting. Chosen to maintain local consistency in the patch-based representation.
++### Error-driven Surface Fitting for Weight-encoded Neural Implicits
++An approach to manage fixed memory cost by scaling network architecture complexity based on input geometry, resulting in smaller architectures for simpler geometries and larger ones for topologically-complex geometries [S2, unofficial]. It performs a simple grid search until reaching a user-desired surface error threshold, and retraining geometries in the tails of the complexity distribution with larger architectures until desired surface fidelity is reached [S2, unofficial]. The base configuration uses 7553 parameters, which lacks representative power for highly complex geometries (similar to a decimated mesh with the same memory footprint), but increasing network capacity to equal the memory impact of the original mesh results in near perfect reconstructions [S2, unofficial].
+ 
+ ## Operating characteristics
+-*   **Time Complexity**: Linear with respect to the number of training points and patches. The merge loss adds overhead proportional to the number of points in the leaf nodes of the merge grid, which is a small portion of the shape [S1].
+-*   **Memory Complexity**: Low, as it does not require storing large auxiliary structures beyond the standard neural network parameters and the merge grid indices.
++*   **Time Complexity**: Linear with respect to the number of training points. The merge loss is only imposed in the leaf nodes of the merge cells, which account for a small portion of the shape [S1].
++*   **Memory Complexity**: Low, as it relies on standard tensors for points, normals, and network outputs, plus the merge grid indices [S1].
+ *   **Measured Performance**: The complete loss achieves the best accuracy across most metrics (CD, HD, F-score, IoU, NC, SPE, FE) compared to ablated versions [S1].
+-*   **Strengths**: Effectively coordinates multiple patches for CSG validity; prevents severe artifacts from individual patch failures; ensures smooth, unit-gradient SDF fields.
++*   **Strengths**: Effectively coordinates multiple patches for CSG validity; prevents severe artifacts from individual patch failures; ensures smooth, unit-gradient SDF fields [S1].
+ *   **Limitations**: Sensitive to weight balancing; inappropriate weights for $\lambda_{\text{Merge}}$ or $\lambda_{\text{Normal}}$ lead to visible artifacts (holes or merging failures) [S1].
+-*   **When to use**: When training Patch-Grid representations that rely on CSG operations to combine local neural SDFs.
+-*   **When not to use**: For single, global SDF representations where patch merging is not required.
++*   **When to use**: When training Patch-Grid representations that rely on CSG operations to combine local neural SDFs [S1].
++*   **When not to use**: For single, global SDF representations where patch merging is not required [S1].
+ 
+ ## Background
+-The Patch-Grid Composite Loss was introduced in the paper "Patch-Grid: An Efficient and Feature-Preserving Neural Implicit Surface Representation" by Guying Lin et al. [S1]. The method addresses the limitations of uniform patch volumes in fitting thin tubes and complex features by using localized patch-grids. The loss design was validated through ablation studies showing that each term contributes to specific aspects of reconstruction quality, such as surface offset, normal accuracy, and field smoothness.
++The Patch-Grid Composite Loss was introduced in the paper "Patch-Grid: An Efficient and Feature-Preserving Neural Implicit Surface Representation" by Guying Lin et al. [S1]. The method addresses the limitations of uniform patch volumes in fitting thin tubes and complex features by using localized patch-grids. The loss design was validated through ablation studies showing that each term contributes to specific aspects of reconstruction quality, such as surface offset, normal accuracy, and field smoothness [S1].
+ 
+ ## Sources
+-[S1] Patch-Grid: An Efficient and Feature-Preserving Neural Implicit Surface Representation, https://doi.org/10.1145/3727142, fetched 2026-10-28+[S1] Patch-Grid: An Efficient and Feature-Preserving Neural Implicit Surface Representation, https://doi.org/10.1145/3727142, fetched 2026-10-28
++[S2] On the Effectiveness of Weight-Encoded Neural Implicit 3D Shapes, https://doi.org/10.48550/arxiv.2009.09808, fetched 2026-10-27 (unofficial)

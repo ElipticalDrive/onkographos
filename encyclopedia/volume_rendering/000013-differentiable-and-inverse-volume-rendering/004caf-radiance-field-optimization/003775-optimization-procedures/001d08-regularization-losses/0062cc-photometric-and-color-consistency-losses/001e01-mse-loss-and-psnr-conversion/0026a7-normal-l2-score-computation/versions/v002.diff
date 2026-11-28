@@ -1,0 +1,148 @@
+--- v001.md
++++ v002.md
+@@ -2,31 +2,34 @@
+ Also called: Masked Normal L2, Normal Error Metric
+ ## Overview
+-The Normal-L2 score quantifies the geometric fidelity of a predicted surface by measuring the L2 distance between predicted surface normals and reference normals. It serves as a shape-aware alternative to RGB-based metrics like MSE, focusing on shading cues rather than color accuracy [S1]. It is distinct from PSNR and SSIM, which evaluate pixel intensity and structural similarity respectively, by operating on vector fields derived from surface geometry [S1, 2742-psnr-metric-calculation.md, 3650-ssim-metric-calculation.md].
++The Normal-L2 score evaluates surface geometry by computing the mean squared L2 distance between predicted surface normals and reference normals from a ground-truth mesh [S1]. It is computed only on the intersection of predicted and ground-truth masks, distinguishing it from silhouette metrics like iIoU which evaluate mask alignment separately [S1].
+ ## How it works
+ **Inputs:**
+-- Predicted surface normals $N_{pred}$: A tensor of shape $(H, W, 3)$ containing normalized normal vectors for each pixel.
+-- Reference surface normals $N_{ref}$: A tensor of shape $(H, W, 3)$ containing interpolated normal vectors from a ground-truth mesh.
+-- Predicted mask $M_{pred}$: A binary tensor of shape $(H, W)$ indicating pixels belonging to the predicted surface.
+-- Ground-truth mask $M_{gt}$: A binary tensor of shape $(H, W)$ indicating pixels belonging to the ground-truth surface.
++- Predicted surface normals $N_{pred}$: A tensor of shape $(H, W, 3)$ containing normalized normal vectors for each pixel [G].
++- Reference surface normals $N_{ref}$: A tensor of shape $(H, W, 3)$ containing interpolated normal vectors from a ground-truth mesh [S1, G].
++- Predicted mask $M_{pred}$: A binary tensor of shape $(H, W)$ indicating pixels belonging to the predicted surface [G].
++- Ground-truth mask $M_{gt}$: A binary tensor of shape $(H, W)$ indicating pixels belonging to the ground-truth surface [G].
+ 
+ **Outputs:**
+-- Normal-L2 score: A scalar value representing the mean squared error of the normal vectors over the valid region.
++- Normal-L2 score: A scalar value representing the mean squared error of the normal vectors over the valid region [S1, G].
+ 
+ **Data Structures:**
+-- Masks are typically boolean or float tensors where 1 indicates surface presence and 0 indicates background.
+-- Normals are 3D unit vectors.
++- Masks are boolean or float tensors where 1 indicates surface presence and 0 indicates background [G].
++- Normals are 3D unit vectors [G].
+ 
+ **Steps:**
+ 1. **Compute Intersection Mask:** Calculate the intersection of the predicted and ground-truth masks to ensure normals are only compared where both surfaces exist.
+    $$ M_{valid} = M_{pred} \land M_{gt} $$
+-   [G] In implementation, this is often done via logical AND or element-wise multiplication followed by a threshold check.
++   [S1, G] In implementation, this is performed via logical AND or element-wise multiplication followed by a threshold check.
+ 2. **Extract Valid Normals:** Select normal vectors from $N_{pred}$ and $N_{ref}$ where $M_{valid}$ is true.
+    $$ N_{pred}^{valid} = \{ n \in N_{pred} \mid M_{valid}(u,v) = 1 \} $$
+    $$ N_{ref}^{valid} = \{ n \in N_{ref} \mid M_{valid}(u,v) = 1 \} $$
++   [G] This is typically done via boolean indexing or coordinate filtering.
+ 3. **Compute Squared Differences:** Calculate the squared Euclidean distance between corresponding valid normal vectors.
+    $$ D_{uv} = \| N_{pred}^{valid}(u,v) - N_{ref}^{valid}(u,v) \|^2 $$
+    $$ D_{uv} = (n_{pred,x} - n_{ref,x})^2 + (n_{pred,y} - n_{ref,y})^2 + (n_{pred,z} - n_{ref,z})^2 $$
++   [G] Normals must be normalized before this step to ensure unit length.
+ 4. **Average:** Compute the mean of $D_{uv}$ over all valid pixels.
+    $$ \text{Normal-L2} = \frac{1}{|M_{valid}|} \sum_{(u,v) \in M_{valid}} D_{uv} $$
++   [S1, G] If $|M_{valid}| = 0$, the metric returns 0 or raises an error depending on convention.
+ 
+ **Parameters:**
+@@ -38,7 +41,6 @@
+ **Edge Cases and Pitfalls:**
+ - **Mask Misalignment:** If masks do not overlap, the denominator becomes zero. The metric is only evaluated on the intersection [S1].
+-- **Normal Orientation:** Normals must be consistently oriented (e.g., outward-facing) to avoid large errors due to sign flips.
+-- **Interpolation:** Reference normals are interpolated from the reference mesh, which may introduce artifacts at low resolutions or sharp edges [S1].
+-- **Numerical Stability:** Normals should be normalized before comparison to ensure unit length.
++- **Normal Orientation:** Normals must be consistently oriented (e.g., outward-facing) to avoid large errors due to sign flips [G].
++- **Numerical Stability:** Normals should be normalized before comparison to ensure unit length [G].
+ 
+ **Pseudocode:**
+@@ -49,62 +51,50 @@
+     
+     Args:
+-        n_pred: Tensor of shape (H, W, 3), predicted normals.
+-        n_ref: Tensor of shape (H, W, 3), reference normals.
+-        mask_pred: Tensor of shape (H, W), predicted mask (1.0 for surface, 0.0 otherwise).
+-        mask_gt: Tensor of shape (H, W), ground-truth mask (1.0 for surface, 0.0 otherwise).
++        n_pred: List of lists of shape (H, W, 3), predicted normals.
++        n_ref: List of lists of shape (H, W, 3), reference normals.
++        mask_pred: List of lists of shape (H, W), predicted mask (1.0 for surface, 0.0 otherwise).
++        mask_gt: List of lists of shape (H, W), ground-truth mask (1.0 for surface, 0.0 otherwise).
+         
+     Returns:
+         float: Normal-L2 score.
+     """
+-    # Step 1: Compute intersection mask
+-    # Ensure masks are boolean or float 0/1
+-    valid_mask = (mask_pred > 0.5) & (mask_gt > 0.5)
++    h = len(mask_pred)
++    w = len(mask_pred[0])
+     
+-    # Step 2: Extract valid normals
+-    # Use boolean indexing to get valid normals
+-    valid_n_pred = n_pred[valid_mask]
+-    valid_n_ref = n_ref[valid_mask]
++    valid_count = 0
++    sum_sq_diff = 0.0
+     
+-    # Check if any valid pixels exist
+-    if valid_n_pred.numel() == 0:
+-        return 0.0 # Or raise an error, depending on convention
+-        
+-    # Step 3: Compute squared differences
+-    # Difference vector
+-    diff = valid_n_pred - valid_n_ref
+-    # Squared L2 norm per pixel
+-    squared_diff = torch.sum(diff ** 2, dim=-1)
+-    
+-    # Step 4: Average
+-    normal_l2 = torch.mean(squared_diff)
+-    
+-    return normal_l2.item()
++    for y in range(h):
++        for x in range(w):
++            if mask_pred[y][x] > 0.5 and mask_gt[y][x] > 0.5:
++                dx = n_pred[y][x][0] - n_ref[y][x][0]
++                dy = n_pred[y][x][1] - n_ref[y][x][1]
++                dz = n_pred[y][x][2] - n_ref[y][x][2]
++                sum_sq_diff += dx*dx + dy*dy + dz*dz
++                valid_count += 1
++                
++    if valid_count == 0:
++        return 0.0
++    return sum_sq_diff / valid_count
+ ```
+ ## Subtopics
+ 
+ ### KL Normal Loss
+-Computes the Kullback-Leibler divergence between a standard normal distribution and a diagonal Gaussian parameterized by the mean and variance of an output embedding tensor. It is used to regularize the latent space of implicit surface models.
++Computes the Kullback-Leibler divergence between a standard normal distribution and a diagonal Gaussian parameterized by the mean and variance of an output embedding tensor. It is used to regularize the latent space of implicit surface models rather than evaluating surface geometry.
+ - **Definition:** Measures the divergence of the distribution of latent embeddings from a standard normal prior.
+-- **Steps:**
+-  1. Compute mean $\mu_d$ and standard deviation $\sigma_d$ along dimension 0 for each dimension $d$ of the output embedding tensor.
+-  2. Compute variance $\sigma_d^2 = \sigma_d^2$.
+-  3. Compute KL per dimension: $kl_d = 0.5 (\mu_d^2 + \sigma_d^2 - \ln(\sigma_d^2 + \epsilon) - 1)$.
+-  4. Sum over all dimensions: $KL = \sum_d kl_d$.
+-- **Formula:**
+-  $$ KL = \sum_{d} 0.5 \left( \mu_d^2 + \sigma_d^2 - \ln(\sigma_d^2 + \epsilon) - 1 \right) $$
+-  where $\mu_d$ is the mean along dimension 0 for dimension $d$, $\sigma_d^2$ is the variance, and $\epsilon = 1e-8$ for numerical stability.
+-- **When to choose:** Use when regularizing latent embeddings in generative models (e.g., VAEs) rather than evaluating surface geometry.
+-- **Link:** [KL Normal Loss](2742-kl-normal-loss.md) (Note: No separate article exists, so this is a subtopic entry).
++- **Steps:** 1. Compute mean $\mu_d$ and standard deviation $\sigma_d$ along dimension 0 for each dimension $d$ of the output embedding tensor. 2. Compute variance $\sigma_d^2 = \sigma_d^2$. 3. Compute KL per dimension: $kl_d = 0.5 (\mu_d^2 + \sigma_d^2 - \ln(\sigma_d^2 + \epsilon) - 1)$. 4. Sum over all dimensions: $KL = \sum_d kl_d$.
++- **Formula:** $$ KL = \sum_{d} 0.5 \left( \mu_d^2 + \sigma_d^2 - \ln(\sigma_d^2 + \epsilon) - 1 \right) $$ where $\mu_d$ is the mean along dimension 0 for dimension $d$, $\sigma_d^2$ is the variance, and $\epsilon = 1e-8$ for numerical stability.
++- **When to choose:** Use when regularizing latent embeddings in generative models rather than evaluating surface geometry.
++- **Link:** [KL Normal Loss](2742-kl-normal-loss.md)
+ 
+ ## Operating characteristics
+-- **Time Complexity:** $O(H \times W)$ for mask intersection and normal comparison, where $H$ and $W$ are image dimensions. Rendering normals takes additional time depending on the renderer (e.g., Mitsuba 2) [S1].
+-- **Memory Complexity:** $O(H \times W)$ to store normal tensors and masks [S1].
++- **Time Complexity:** Not given in the sources.
++- **Memory Complexity:** Not given in the sources.
+ - **Measured Performance:** Evaluated at 512x512 resolution with 4 samples per pixel [S1].
+-- **Strengths:** Sensitive to surface orientation errors, which are perceptually important for shading [S1]. Complements RGB metrics by focusing on geometry [S1].
++- **Strengths:** Sensitive to surface orientation errors, which are perceptually important for shading [S1].
+ - **Limitations:** Requires ground-truth mesh normals for comparison, which may not always be available. Sensitive to mask alignment errors [S1].
+ - **When to use:** When evaluating geometric accuracy of implicit surface reconstructions, especially when shading quality is important [S1].
+-- **When not to use:** When only RGB fidelity is of interest, or when ground-truth normals are unavailable.
+ ## Background
+-The Normal-L2 score was introduced in the context of Neural Geometric Level of Detail (NGLOD) for real-time rendering with implicit 3D shapes [S1]. It was used alongside intersection over union (iIoU) to evaluate shape silhouettes and surface normals, as these drive shading and are perceptually important [S1]. The metric is implemented using Mitsuba 2 for mesh rendering [S1].
++The metric was used alongside intersection over union (iIoU) to evaluate shape silhouettes and surface normals, as these drive shading and are perceptually important [S1]. It is implemented using Mitsuba 2 for mesh rendering [S1].
+ ## Sources
+ [S1] Neural Geometric Level of Detail: Real-time Rendering with Implicit 3D Shapes, https://doi.org/10.1109/cvpr46437.2021.01120, fetched 2026-10-26

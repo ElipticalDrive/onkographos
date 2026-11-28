@@ -1,0 +1,168 @@
+--- v008.md
++++ v009.md
+@@ -1,80 +1,111 @@
+ # Mesh Plugin Architecture
+ Also called: IMeshingJob
++
+ ## Overview
+-The Mesh Plugin Architecture provides an interface for pluggable meshing algorithms, allowing for extensibility in the meshing pipeline [S1, unofficial]. It decouples the mesh generation logic from the chunk management system, enabling the selection of different algorithms (e.g., greedy meshing for blocky voxels vs. marching cubes for smooth terrain) based on voxel type [S1, unofficial]. It sets itself apart from sibling [Chunk Mesh Assembly](4100-chunk-mesh-assembly.md) by defining the algorithmic contract rather than the buffer population and submission process.
++The Mesh Plugin Architecture provides an interface for pluggable meshing algorithms, allowing for extensibility within the meshing pipeline [S1, unofficial]. It decouples the meshing process from the assembly process, enabling different algorithms (e.g., greedy meshing vs. marching cubes) to produce standardized mesh data structures [4921-mesh-plugin-architecture.md, unofficial]. This builds on [Mesh Assembly and Data Structure](6268-mesh-assembly-and-data-structure.md) by defining the contract for geometry generation before it enters the buffer organization phase.
+ 
+ ## How it works
+-### Inputs and Outputs
+-- **Input**: Voxel data (blocky or smooth density) and chunk coordinates.
+-- **Output**: Mesh data structures (vertices, indices, attributes) ready for assembly.
++The architecture relies on a polymorphic interface (`IMeshingJob`) that abstracts the specific meshing algorithm. The system manages the lifecycle of mesh generation through a status tracking mechanism and a manager that handles scheduling.
+ 
+-### Data Structures
+-The architecture relies on an interface `IMeshingJob` [S1, unofficial]. The system manages mesh status and information via:
+-- **MeshStatus**: An enum with variants `Meshing`, `Meshed(Arc<MeshInfo>)`, and `Empty` [S2, unofficial].
+-- **MeshInfo**: Contains an optional opaque mesh and a vector of translucent meshes [S2, unofficial].
+-- **Resource Store**: A hash map of `(ChunkPosition, ZoomLevel)` to `MeshStatus` [S2, unofficial].
++**Inputs and Outputs:**
++*   **Input:** Voxel data (blocky or smooth density fields) and chunk coordinates.
++*   **Output:** `MeshInfo` structures containing opaque and translucent mesh data, stored in contiguous arrays as per the parent's principles.
+ 
+-### Steps
+-1. **Job Selection**: The `ChunkManager` performs smart mesher selection based on voxel type (blocky vs. smooth) [S1, unofficial].
+-2. **Execution**: The selected job (e.g., `GreedyMeshingJob` or `MarchingCubesJob`) executes. These jobs are burst-compiled and designed for zero garbage collection [S1, unofficial].
+-3. **Status Update**: The `MeshStatus` is updated to `Meshing` during execution and `Meshed` upon completion [S2, unofficial].
+-4. **Assembly**: The resulting mesh data is passed to the assembly phase [S1, unofficial].
++**Data Structures:**
++The system tracks the state of mesh generation for each chunk using a hash map.
++*   **Mesh Resource Store:** A hash map mapping `(ChunkPosition, ZoomLevel)` to `MeshStatus`.
++*   **MeshStatus:** An enum with three variants:
++    *   `Meshing`: The mesh is currently being generated.
++    *   `Meshed(Arc<MeshInfo>)`: The mesh is complete and ready for use.
++    *   `Empty`: The chunk contains no relevant data.
++*   **MeshInfo:** Contains an optional opaque mesh and a vector of translucent meshes.
+ 
+-### Pseudocode
++**Numbered Steps:**
++1.  **Registration:** The `ChunkManager` registers chunks and assigns them an initial `MeshStatus` of `Empty` or `Meshing` based on voxel presence.
++2.  **Selection:** The `ChunkManager` performs smart mesher selection, choosing between blocky (Greedy) or smooth (Marching Cubes) algorithms based on the voxel type [S1, unofficial].
++3.  **Execution:** The selected job (implementing `IMeshingJob`) executes. Jobs are typically burst-compiled for performance and designed for zero garbage collection [S1, unofficial].
++4.  **Completion:** Upon completion, the `MeshStatus` for the `(ChunkPosition, ZoomLevel)` key is updated to `Meshed(Arc<MeshInfo>)`.
++5.  **Assembly:** The assembly phase consumes the `MeshInfo` from the store, applying material mapping and layer separation as defined in the parent article.
++
++**Pseudocode:**
+ ```python
++# Interface definition
+ class IMeshingJob:
+-    """Interface for pluggable meshing algorithms."""
+-    def execute(self, chunk_data: VoxelChunk) -> MeshData:
+-        """
+-        Executes the meshing algorithm on the provided chunk data.
+-        Returns mesh data ready for assembly.
+-        """
+-        raise NotImplementedError
+-
+-class GreedyMeshingJob(IMeshingJob):
+-    """Face culling for blocky voxels. Burst-compiled, zero GC."""
+-    def execute(self, chunk_data: VoxelChunk) -> MeshData:
+-        # Implementation details for greedy meshing
++    def execute(self, chunk_data: VoxelChunk) -> MeshInfo:
++        """Generates mesh data from voxel chunk."""
+         pass
+ 
+-class MarchingCubesJob(IMeshingJob):
+-    """Simplified MC prototype for smooth terrain. Burst-compiled, zero GC."""
+-    def execute(self, chunk_data: VoxelChunk) -> MeshData:
+-        # Implementation details for marching cubes
+-        pass
++# Status Enum
++class MeshStatus:
++    MESHING = 0
++    MESHED = 1
++    EMPTY = 2
+ 
++# Manager Logic
+ class ChunkManager:
+     def __init__(self):
+-        self.mesh_status_store = {} # Hash map of (ChunkPosition, ZoomLevel) to MeshStatus
++        self.mesh_store = HashMap<(ChunkPosition, ZoomLevel), MeshStatus>()
++        self.jobs = {
++            "blocky": GreedyMeshingJob(),
++            "smooth": MarchingCubesJob()
++        }
+ 
+-    def select_mesher(self, voxel_type: str) -> IMeshingJob:
+-        if voxel_type == "blocky":
+-            return GreedyMeshingJob()
+-        elif voxel_type == "smooth":
+-            return MarchingCubesJob()
++    def set_voxel(self, pos: int3, data: VoxelData):
++        """Updates voxel data and triggers meshing if necessary."""
++        # Update underlying voxel storage
++        self.voxel_storage.set(pos, data)
++        
++        # Determine chunk and zoom level
++        chunk_pos = self.get_chunk_position(pos)
++        zoom_level = self.get_zoom_level(data)
++        
++        # Update status to Meshing if not already
++        key = (chunk_pos, zoom_level)
++        if self.mesh_store.get(key) != MeshStatus.MESHING:
++            self.mesh_store[key] = MeshStatus.MESHING
++            self.schedule_job(key, data)
++
++    def schedule_job(self, key: (ChunkPosition, ZoomLevel), data: VoxelData):
++        """Selects and runs the appropriate meshing job."""
++        # Smart mesher selection based on data type
++        if data.is_smooth():
++            job = self.jobs["smooth"]
+         else:
+-            raise ValueError("Unknown voxel type")
++            job = self.jobs["blocky"]
++            
++        # Execute job (conceptually asynchronous in real implementation)
++        mesh_info = job.execute(self.voxel_storage.get_chunk(key[0]))
++        
++        # Update status to Meshed
++        self.mesh_store[key] = MeshStatus.MESHED(mesh_info)
+ 
+-    def process_chunk(self, chunk_pos: int3, voxel_data: VoxelData):
+-        mesher = self.select_mesher(voxel_data.type)
+-        self.mesh_status_store[(chunk_pos, 0)] = MeshStatus.Meshing
+-        mesh_data = mesher.execute(voxel_data.chunk)
+-        self.mesh_status_store[(chunk_pos, 0)] = MeshStatus.Meshed(Arc[MeshInfo](mesh_data))
++# Example Jobs
++class GreedyMeshingJob(IMeshingJob):
++    def execute(self, chunk: VoxelChunk) -> MeshInfo:
++        # Face culling for blocky voxels
++        # Burst-compiled, zero GC
++        return generate_greedy_mesh(chunk)
++
++class MarchingCubesJob(IMeshingJob):
++    def execute(self, chunk: VoxelChunk) -> MeshInfo:
++        # Simplified MC prototype for smooth terrain
++        # Full lookup tables noted for future implementation
++        return generate_marching_cubes_mesh(chunk)
+ ```
+ 
+-### Parameters and Edge Cases
+-- **Precision**: Half precision density saves 50% memory (68KB vs 128KB per 32³ chunk) [S1, unofficial].
+-- **Performance**: Jobs are burst-compiled for performance [S1, unofficial].
+-- **Edge Cases**: Not given in the sources.
++**Parameters and Edge Cases:**
++*   **Precision:** Half-precision density fields can save 50% memory (e.g., 68KB vs 128KB per 32³ chunk) [S1, unofficial].
++*   **Degenerate Input:** If a chunk is empty, the status remains `Empty`, and no job is scheduled.
++*   **Missing Materials:** If a specific material is missing, a fallback material is used to prevent null dereferences [4100-chunk-mesh-assembly.md, unofficial].
+ 
+ ## Operating characteristics
+-- **Time Complexity**: Not given in the sources.
+-- **Memory Complexity**: Half precision density reduces memory usage by 50% [S1, unofficial].
+-- **Strengths**: Extensibility, performance via burst compilation, zero GC overhead [S1, unofficial].
+-- **Limitations**: Not given in the sources.
+-- **When to use**: When different meshing algorithms are needed for different voxel types (blocky vs. smooth) [S1, unofficial].
++*   **Time Complexity:** Depends on the specific algorithm (Greedy Meshing is generally faster for blocky voxels; Marching Cubes is more expensive for smooth terrain).
++*   **Memory Complexity:** Reduced by using half-precision density where applicable [S1, unofficial].
++*   **Performance:** Jobs are designed to be burst-compiled and zero-GC to minimize overhead [S1, unofficial].
++*   **Strengths:** Extensibility allows easy addition of new meshing algorithms; decoupling simplifies testing and maintenance.
++*   **Limitations:** Requires careful management of the `MeshStatus` state to avoid race conditions in multi-threaded environments.
+ 
+ ## Background
+-The Mesh Plugin Architecture was introduced in the StraightFour voxel engine project [S1, unofficial]. It is part of a broader ecosystem that includes chunk management and mesh assembly [S1, unofficial]. The concept of mesh status and info structures is also present in the Infinigen project [S2, unofficial].
++The Mesh Plugin Architecture was introduced as part of the foundational voxel engine development in the StraightFour project [S1, unofficial]. It aims to provide a generic, extensible framework for both terrain and smooth voxel support. The concept of pluggable meshing is also reflected in the Infinigen project, which uses a plugin system for world generation and block definitions [S2, unofficial].
+ 
+ ## Sources

@@ -1,0 +1,376 @@
+--- v009.md
++++ v010.md
+@@ -3,100 +3,86 @@
+ 
+ ## Overview
+-Viewing Direction Gaussian Splatting (VDGS) is a hybrid neural rendering method that combines the explicit geometric representation of 3D Gaussian Splatting (GS) with the view-dependent appearance modeling of Neural Radiance Fields (NeRF) [S1]. It solves the limitation of classical GS, where color and opacity are static per primitive, by using a neural network to modulate opacity (and optionally color) based on the viewing direction, thereby accurately rendering specular reflections, transparency, and shadows without significantly increasing training time [S1]. Unlike classical GS, VDGS achieves NeRF-quality view-dependent effects while retaining the fast differentiable rasterization pipeline of Gaussian primitives [S1].
++Viewing Direction Gaussian Splatting (VDGS) is a hybrid neural rendering method that combines the explicit geometric representation of 3D Gaussian Splatting (GS) with the view-dependent appearance modeling of Neural Radiance Fields (NeRF) [S1]. It solves the limitation of classical GS, where color and opacity are static per primitive, by using a neural network to modulate opacity (and optionally color) based on the viewing direction, thereby accurately rendering specular reflections, transparency, and glass without increasing training time significantly [S1]. Unlike classical GS, VDGS achieves NeRF-quality view-dependent effects while maintaining the fast training and inference speeds of Gaussian rasterization [S1].
+ 
+ ## How it works
+-**Inputs:** A set of camera poses and corresponding 2D images; initial 3D points from Structure from Motion (SfM) or random initialization.
+-**Outputs:** A scene representation consisting of a set of 3D Gaussians $\mathcal{G}$ and a neural network $F_{VDGS}$; rendered images for arbitrary viewpoints.
++**Inputs and Outputs:**
++*   **Inputs:** A set of camera poses and corresponding 2D images from a dataset; initial 3D points (from Structure from Motion or random initialization).
++*   **Outputs:** A differentiable rendering of the scene for arbitrary camera viewpoints, represented by a set of 3D Gaussians and a neural network.
+ 
+ **Data Structures:**
+-1.  **Gaussian Primitives ($\mathcal{G}$):** A set of $N$ 3D Gaussians. Each Gaussian $i$ is defined by:
+-    *   Mean position $\mathbf{m}_i \in \mathbb{R}^3$.
+-    *   Covariance matrix $\mathbf{\Sigma}_i \in \mathbb{R}^{3 \times 3}$ (symmetric positive definite).
+-    *   Base opacity $\sigma_i \in \mathbb{R}$ (scalar, non-view-dependent).
+-    *   Color $\mathbf{c}_i \in \mathbb{R}^3$ (RGB).
++1.  **Gaussian Primitives ($G$):** A collection of $n$ 3D Gaussian distributions. Each Gaussian $i$ is defined by:
++    *   Mean position $\mathbf{m}_i \in \mathbb{R}^3$ (trainable).
++    *   Covariance matrix $\mathbf{\Sigma}_i \in \mathbb{R}^{3 \times 3}$ (trainable, positive definite).
++    *   Base color $\mathbf{c}_i \in \mathbb{R}^3$ (RGB, trainable).
++    *   Base opacity $\sigma_i \in \mathbb{R}$ (trainable, scalar).
+ 2.  **Neural Network ($F_{VDGS}$):** A Multi-Layer Perceptron (MLP) with parameters $\Theta$.
+-    *   Input: Hash-encoded Gaussian mean $\mathbf{m}_i$ and viewing direction $\mathbf{d}$.
+-    *   Output: Density update $\Delta \sigma_i(\mathbf{d}) \in \mathbb{R}$.
+-    *   Implementation: 2-layer MLP with LeakyReLU activation [S1].
+-    *   Encoding: 3D structured hash grid with 12 levels of 3D embedding (resolutions 16 to 512), hash table size $2^{14}$ (16384), feature dimension 2 [S1].
++    *   **Input:** Hash-encoded Gaussian mean $\mathbf{m}_i$ and viewing direction $\mathbf{d} \in \mathbb{R}^2$ (spherical coordinates $\theta, \psi$).
++    *   **Output:** Opacity update factor $\Delta \sigma(\mathbf{d}) \in \mathbb{R}$.
++    *   **Hash Grid:** 12 levels of 3D embedding (resolutions 16 to 512), hash table size $2^{14}$ (16384), feature dimension 2, LeakyReLU activation [S1].
++    *   **MLP Architecture:** 2-layer MLP [S1].
++
++**Formulas:**
++The vanilla NeRF model is defined as $F_{NeRF}(\mathbf{x}, \mathbf{d}; \Theta) = (\mathbf{c}, \sigma)$ [S1]. VDGS modifies this by separating shape and view-dependent appearance.
++
++The VDGS function is defined as:
++$$ F_{VDGS}(\mathbf{m}, \mathbf{d}; \Theta) = \Delta \sigma(\mathbf{d}) $$
++where $\mathbf{m}$ is the Gaussian mean and $\mathbf{d}$ is the viewing direction [S1].
++
++The final representation is a set of tuples:
++$$ (G, F_{VDGS}) = \{ (\mathcal{N}(\mathbf{m}_i, \mathbf{\Sigma}_i), \sigma_i \cdot \Delta \sigma_i(\mathbf{d}), \mathbf{c}_i) \}_{i=1}^n $$
++where $\Delta \sigma_i(\mathbf{d}) = F_{VDGS}(\mathbf{m}_i, \mathbf{d}; \Theta)$ [S1].
++
++Rendering computes the pixel color $C(\mathbf{p})$ by blending $N$ ordered overlapping Gaussian samples along the ray passing through pixel $\mathbf{p}$:
++$$ C = \sum_{i \in \mathcal{N}} \mathbf{c}_i \alpha_i \prod_{j=1}^{i-1} (1 - \alpha_j) $$
++where $\alpha_i$ is the effective opacity of sample $i$:
++$$ \alpha_i = 1 - \exp\left( \sigma_i \cdot F_{VDGS}(\mathbf{m}_i, \mathbf{d}; \Theta) \cdot \delta_i \right) $$
++Here, $\delta_i$ is the distance between adjacent samples along the ray, and $\sigma_i$ is the base opacity of the Gaussian [S1].
++
++**Parameters:**
++*   Hash Grid Levels: 12 [S1].
++*   Hash Table Size: $2^{14}$ (16384) [S1].
++*   Feature Dimension: 2 [S1].
++*   Activation Function: LeakyReLU [S1].
++*   MLP Layers: 2 [S1].
+ 
+ **Numbered Steps:**
+-
+-1.  **Initialization:** Initialize the Gaussian set $\mathcal{G}$ using SfM points (e.g., from COLMAP) or random points. Set initial means $\mathbf{m}_i$, covariances $\mathbf{\Sigma}_i$, base opacities $\sigma_i$, and colors $\mathbf{c}_i$ [S1].
+-2.  **Hash Encoding:** For each Gaussian $i$, encode its mean position $\mathbf{m}_i$ using the 3D hash grid to produce a feature vector $\mathbf{h}_i$ [S1].
+-3.  **Density Update Calculation:** For a given viewing direction $\mathbf{d}$, compute the density update $\Delta \sigma_i(\mathbf{d})$ by passing the hash-encoded mean $\mathbf{h}_i$ and direction $\mathbf{d}$ through the MLP $F_{VDGS}$:
+-    $$ \Delta \sigma_i(\mathbf{d}) = F_{VDGS}(\mathbf{m}_i, \mathbf{d}; \Theta) $$
+-    [S1]
+-4.  **Effective Opacity Calculation:** For each sample $i$ along a ray, calculate the effective opacity $\alpha_i$ using the base opacity $\sigma_i$, the distance between adjacent samples $\delta_i$, and the density update $\Delta \sigma_i(\mathbf{d})$:
+-    $$ \alpha_i = 1 - \exp\left( \sigma_i \cdot \Delta \sigma_i(\mathbf{d}) \cdot \delta_i \right) $$
+-    [S1]
+-    *Note: The source defines $\Delta \sigma_i(\mathbf{d})$ as the output of the network. The term $\sigma_i \cdot \Delta \sigma_i(\mathbf{d})$ acts as the effective volume density for the sample.*
+-5.  **Rendering (Alpha Compositing):** Compute the pixel color $C(\mathbf{p})$ by blending $N$ ordered overlapping Gaussian samples along the ray:
+-    $$ C(\mathbf{p}) = \sum_{i \in \mathcal{N}} \mathbf{c}_i \alpha_i \prod_{j=1}^{i-1} (1 - \alpha_j) $$
+-    where $\mathcal{N}$ is the set of indices of Gaussians intersecting the pixel, ordered by depth [S1].
+-6.  **Optimization:** Jointly optimize all parameters: Gaussian means $\mathbf{m}_i$, covariances $\mathbf{\Sigma}_i$, base opacities $\sigma_i$, colors $\mathbf{c}_i$, and MLP weights $\Theta$ using gradient descent via differentiable Gaussian rasterization [S1].
+-7.  **Pruning and Densification:**
+-    *   **Pruning:** Every 100 iterations, eliminate Gaussians with opacity below a specific threshold [S1].
+-    *   **Densification:** Generate new Gaussians in unoccupied areas of 3D space to fill vacant regions [S1].
++1.  **Initialization:** Initialize the model with Structure from Motion (SfM) points (from COLMAP or randomly generated) to establish initial 3D Gaussian positions and covariances [S1].
++2.  **Hash Encoding:** Encode the mean position $\mathbf{m}_i$ of each Gaussian using a 3D structured hash grid [S1].
++3.  **View-Dependent Update:** Feed the hashed Gaussian mean $\mathbf{m}_i$ and the viewing direction $\mathbf{d}$ into the MLP $F_{VDGS}$ to compute the opacity update $\Delta \sigma_i(\mathbf{d})$ [S1].
++4.  **Effective Opacity Calculation:** Calculate the effective opacity $\alpha_i$ for each Gaussian sample using the base opacity $\sigma_i$, the NeRF-based density update $\Delta \sigma_i(\mathbf{d})$, and the sample distance $\delta_i$ [S1].
++5.  **Rasterization:** Render the pixel color $C(\mathbf{p})$ by blending $N$ ordered overlapping Gaussian samples using alpha compositing [S1].
++6.  **Optimization:** Jointly optimize all parameters (Gaussian mean, covariance, color, base opacity, and MLP weights $\Theta$) using differential Gaussian rasterization [S1].
++7.  **Pruning and Densification:** During optimization, eliminate Gaussians with opacity below a specific limit every hundred iterations. Generate new Gaussians in unoccupied areas of 3D space to fill vacant areas [S1].
+ 
+ **Pseudocode:**
+-
+ ```python
+ import torch
+ import torch.nn as nn
+ 
+-class HashGridEncoder:
++class HashGrid:
+     """
+-    3D Structured Hash Grid Encoder.
+-    Levels: 12, Resolutions: 16 to 512, Table Size: 2^14, Feature Dim: 2.
++    Simplified hash grid encoder.
++    In practice, this uses a CUDA kernel for efficient lookup.
+     """
+-    def __init__(self, num_levels=12, num_features=2, hash_size=2**14):
+-        super().__init__()
++    def __init__(self, num_levels=12, resolution_range=(16, 512), hash_size=2**14, feature_dim=2):
+         self.num_levels = num_levels
+-        self.num_features = num_features
+         self.hash_size = hash_size
+-        # Initialize hash table with random embeddings
+-        self.embeddings = nn.Parameter(torch.randn(num_levels, hash_size, num_features))
+-        # Resolutions for each level (log2 scale from 16 to 512)
+-        self.resolutions = torch.tensor([2**i for i in range(4, 16)]) # 16, 32, ..., 512
++        self.feature_dim = feature_dim
++        # Initialize hash table with random features
++        self.table = torch.randn(hash_size, num_levels, feature_dim)
+ 
+     def forward(self, x):
+-        """
+-        x: (N, 3) tensor of 3D coordinates.
+-        Returns: (N, num_levels * num_features) encoded features.
+-        """
+-        N = x.shape[0]
+-        all_features = []
+-        for l in range(self.num_levels):
+-            # Map coordinates to grid indices
+-            # Assuming x is in range [-1, 1] or similar, adjust scaling as needed
+-            # Standard hash grid implementation details are abstracted here
+-            # as per source description of "3D structured hash grid"
+-            # This is a placeholder for the actual CUDA kernel logic
+-            # which maps continuous coordinates to discrete hash indices
+-            # and interpolates between adjacent grid cells.
+-            indices = self._get_grid_indices(x, self.resolutions[l])
+-            features = self.embeddings[l, indices] # Gather embeddings
+-            # Interpolation would occur here in a full implementation
+-            all_features.append(features)
+-        return torch.cat(all_features, dim=1)
+-
+-    def _get_grid_indices(self, x, resolution):
+-        # Placeholder for grid index calculation
+-        # In practice, this involves flooring scaled coordinates and modulo hash size
++        # x: (N, 3) coordinates
++        # Returns: (N, num_levels * feature_dim)
++        # Note: Actual implementation requires CUDA for hashing logic.
++        # This is a placeholder for the mathematical operation.
++        # For implementation, one would use a library like tiny-cuda-nn.
+         pass
+ 
+-class VDGSMLP(nn.Module):
+-    """
+-    2-layer MLP with LeakyReLU for density update.
+-    Input: Hash-encoded Gaussian mean + Viewing Direction
+-    Output: Density update delta_sigma
+-    """
+-    def __init__(self, input_dim, hidden_dim=256, output_dim=1):
++class VDGS_MLP(nn.Module):
++    def __init__(self, input_dim, hidden_dim=64, output_dim=1):
+         super().__init__()
+         self.net = nn.Sequential(
+             nn.Linear(input_dim, hidden_dim),
+-            nn.LeakyReLU(),
+-            nn.Linear(hidden_dim, hidden_dim),
+             nn.LeakyReLU(),
+             nn.Linear(hidden_dim, output_dim)
+@@ -107,153 +93,98 @@
+ 
+ class VDGS:
+-    def __init__(self, num_gaussians, hash_encoder, mlp):
++    def __init__(self, num_gaussians, hash_grid, mlp):
+         self.num_gaussians = num_gaussians
+-        self.hash_encoder = hash_encoder
++        self.hash_grid = hash_grid
+         self.mlp = mlp
+         # Gaussian parameters
+         self.means = nn.Parameter(torch.randn(num_gaussians, 3))
+         self.covariances = nn.Parameter(torch.eye(3).unsqueeze(0).repeat(num_gaussians, 1, 1))
+-        self.base_opacities = nn.Parameter(torch.ones(num_gaussians) * 0.5)
+-        self.colors = nn.Parameter(torch.rand(num_gaussians, 3))
++        self.colors = nn.Parameter(torch.randn(num_gaussians, 3))
++        self.base_opacities = nn.Parameter(torch.ones(num_gaussians))
+ 
+-    def get_density_update(self, means, directions):
++    def get_view_dependent_opacity(self, means, view_directions):
+         """
+-        Compute density update for a batch of Gaussians and viewing directions.
++        Compute the opacity update factor Delta_sigma based on viewing direction.
+         means: (N, 3)
+-        directions: (N, 3)
++        view_directions: (N, 2) spherical coords (theta, psi)
+         """
+-        # Encode means
+-        hashed_means = self.hash_encoder(means)
+-        # Concatenate with directions
+-        input_tensor = torch.cat([hashed_means, directions], dim=-1)
+-        # Predict density update
+-        delta_sigma = self.mlp(input_tensor).squeeze(-1)
++        # Hash encode means
++        hashed_means = self.hash_grid(means) # (N, 12 * 2)
++        
++        # Concatenate with view direction
++        # Note: The paper says "camera position and Gaussian center... fed into MLP".
++        # However, the formula F_VDGS(m, d) suggests mean and direction.
++        # We assume the MLP takes hashed mean and view direction.
++        # The input dimension to MLP is hash_dim + view_dim
++        input_tensor = torch.cat([hashed_means, view_directions], dim=-1)
++        
++        # MLP outputs Delta_sigma
++        delta_sigma = self.mlp(input_tensor) # (N, 1)
+         return delta_sigma
+ 
+-    def render(self, rays, gaussians):
++    def render(self, ray_origins, ray_directions, image_width, image_height):
+         """
+-        Render a batch of rays.
+-        rays: (B, 3) origin, (B, 3) direction
+-        gaussians: list of Gaussian objects or tensors
++        Render a single image.
++        This is a simplified conceptual implementation.
++        Real implementation uses differential Gaussian rasterization.
+         """
+-        # 1. Project Gaussians to 2D and sort by depth along rays
+-        # This step uses the differential Gaussian rasterization pipeline
+-        # Details of projection and sorting are handled by the rasterizer
+-        # See: https://github.com/gmum/ViewingDirectionGaussianSplatting
+-        projected_gaussians = project_and_sort(gaussians, rays)
++        # 1. Project Gaussians to 2D and sort by depth
++        # 2. For each pixel, gather overlapping Gaussians
++        # 3. Compute alpha and color
++        
++        # Placeholder for rasterization logic
++        # In practice, this calls a CUDA kernel
++        pass
+ 
+-        # 2. For each ray, iterate through overlapping Gaussians
+-        pixel_colors = []
+-        for ray in rays:
+-            alpha_composite = 0.0
+-            accumulated_color = torch.zeros(3)
+-            T = 1.0 # Transmittance
+-
+-            for g in projected_gaussians:
+-                if not g.intersects_ray(ray):
+-                    continue
+-
+-                # Calculate effective opacity
+-                # alpha_i = 1 - exp(sigma_i * delta_sigma(d) * delta_i)
+-                # delta_i is distance between samples (handled in rasterizer)
+-                # For simplicity, assume delta_i is provided by rasterizer context
+-                delta_sigma = self.get_density_update(g.mean.unsqueeze(0), ray.direction.unsqueeze(0))
+-                sigma_i = g.base_opacity
+-                delta_i = g.depth_step # From rasterizer
+-
+-                alpha = 1.0 - torch.exp(sigma_i * delta_sigma * delta_i)
+-                
+-                # Clamp alpha to avoid numerical issues
+-                alpha = torch.clamp(alpha, 0.0, 0.99)
+-
+-                # Alpha compositing
+-                weight = T * alpha
+-                accumulated_color += weight * g.color
+-                T *= (1.0 - alpha)
+-
+-                if T < 1e-4:
+-                    break
+-
+-            accumulated_color += T * background_color # Assuming black background
+-            pixel_colors.append(accumulated_color)
+-
+-        return torch.stack(pixel_colors)
+-
+-    def optimize_step(self, rays, target_images):
+-        # Forward pass
+-        rendered_images = self.render(rays, self)
++    def step(self, batch):
++        """
++        One optimization step.
++        """
++        # 1. Get camera parameters and image
++        # 2. Render predicted image
++        pred_image = self.render(...)
+         
+-        # Loss calculation (e.g., L1 or L2 loss)
+-        loss = torch.mean((rendered_images - target_images) ** 2)
++        # 3. Compute loss against ground truth
++        loss = (pred_image - batch.gt_image).mean()
+         
+-        # Backward pass
++        # 4. Backpropagate
+         loss.backward()
+         
+-        # Update parameters
+-        with torch.no_grad():
+-            self.means -= self.means.grad * lr
+-            self.covariances -= self.covariances.grad * lr
+-            self.base_opacities -= self.base_opacities.grad * lr
+-            self.colors -= self.colors.grad * lr
+-            self.means.grad.zero_()
+-            self.covariances.grad.zero_()
+-            self.base_opacities.grad.zero_()
+-            self.colors.grad.zero_()
+-            
+-        # Pruning and Densification logic would go here
+-        # Every 100 iterations:
+-        # if iteration % 100 == 0:
+-        #     prune_low_opacity_gaussians()
+-        #     densify_unoccupied_areas()
++        # 5. Prune and densify Gaussians every 100 iterations
++        # (Implementation details omitted as they are heuristic-based)
++        pass
+ ```
+ 
+-**Parameters:**
+-*   **Hash Grid Levels:** 12 [S1].
+-*   **Hash Table Size:** $2^{14}$ (16384) [S1].
+-*   **Feature Dimension:** 2 [S1].
+-*   **MLP Layers:** 2 [S1].
+-*   **Activation:** LeakyReLU [S1].
+-*   **Training Hardware:** NVIDIA RTX 3090 GPU [S1].
+-*   **Implementation Frameworks:** PyTorch and TinyCUDA [S1].
+-
+ **Edge Cases and Pitfalls:**
+-*   **Joint Color and Opacity Update:** Updating both color and opacity via the neural network simultaneously yields slightly worse results than updating only one. This is attributed to the dependency of opacity on color, making joint training ineffective [S1].
+-*   **Opacity vs. Color Update:** Changing only opacity (Opacity Multiply) provides the most consistently high-quality results on real-world scenes. Changing only color (Color Multiply) performs best on the NeRF Synthetic dataset [S1].
+-*   **Precision:** The use of hash encoding provides fast queries and superior results compared to frequency encoding for Gaussian means [S1].
++*   **Joint Color and Opacity Update:** The authors found that updating both color and opacity via the MLP yields slightly worse results than updating only opacity. This is attributed to the dependency of opacity on color, making joint training ineffective [S1].
++*   **Opacity vs. Color Multiply:** "VDGS Opacity Multiply" (updating only opacity) yields the best scores on real scenes, while "VDGS Color Multiply" yields the best scores on the NeRF Synthetic dataset [S1]. The final model uses Opacity Multiply [S1].
++*   **Precision:** The hash grid provides extremely fast queries, but precision depends on the hash table size and resolution levels [S1].
+ 
+ ## Subtopics
+ 
+ ### Differentiable Primitive Assembly
+-Uses differentiable set operations on primitive distances for occupancy. VDGS differs by using rasterization-based alpha compositing of Gaussians rather than set operations [13657-differentiable-primitive-assembly.md].
++Uses set-theoretic operations for rendering. Chooses this when explicit geometry is not required or when dealing with non-Gaussian primitives. [Differentiable Primitive Assembly](13657-differentiable-primitive-assembly.md)
+ 
+ ### Point-NeRF Representation
+-Uses point clouds with neural features. VDGS differs by using 3D Gaussians (with covariance) for shape and a NeRF-based MLP for view-dependent updates, whereas Point-NeRF typically uses points with local MLPs [15538-point-nerf-representation.md].
++Uses point clouds with MLPs for local queries. Chooses this when memory efficiency for sparse scenes is prioritized over the dense rasterization speed of Gaussians. [Point-NeRF Representation](15538-point-nerf-representation.md)
+ 
+ ### Frequency-Modulated Point Cloud Rendering
+-Uses frequency modulation on point clouds. VDGS differs by using Gaussian splatting with hash-encoded NeRF updates for view-dependent appearance [15903-frequency-modulated-point-cloud-rendering.md].
++Uses frequency modulation on point clouds. Chooses this for high-frequency detail reconstruction in point-based methods. [Frequency-Modulated Point Cloud Rendering](15903-frequency-modulated-point-cloud-rendering.md)
+ 
+ ## Operating characteristics
+-**Time and Memory Complexity:**
+-*   Training time is comparable to classical Gaussian Splatting (GS), significantly faster than NeRF. For VDGS-30K on RTX 3090: Mip-NeRF360 46m11s, Tanks&Temples 29m45s, Deep Blending 41m29s [S1].
+-*   Inference FPS is high: Mip-NeRF360 41.35, Tanks&Temples 38.53, Deep Blending 44.72 on RTX 3090 [S1].
+-*   Memory usage is dominated by the Gaussian primitives and the hash grid. The hash grid size is fixed at $2^{14}$ entries with 2 features per level [S1].
+-
+-**Measured Performance:**
+-*   **Mip-NeRF360:** SSIM 0.813, PSNR 27.64, LPIPS 0.220 [S1].
+-*   **Tanks and Temples:** SSIM 0.851, PSNR 24.02, LPIPS 0.176 [S1].
+-*   **Deep Blending:** SSIM 0.906, PSNR 29.54, LPIPS 0.243 [S1].
+-*   **Shiny Blender:** Avg PSNR 30.62 [S1].
+-
+-**Strengths and Limitations:**
+-*   **Strengths:** Accurately models light reflection, transparency, and shadows; removes view-dependent artifacts; fast training and inference comparable to GS; better background regulation [S1].
+-*   **Limitations:** Requires careful tuning of opacity vs. color updates; joint updates are ineffective; performance on synthetic datasets may favor color-only updates [S1].
+-
+-**When to Use:**
+-*   Use VDGS when view-dependent effects (specularities, transparency) are critical and classical GS fails to capture them, but NeRF is too slow.
+-*   Use Opacity Multiply for real-world scenes.
+-*   Use Color Multiply for synthetic NeRF datasets.
++*   **Time Complexity:** Training time is comparable to classical Gaussian Splatting, significantly faster than NeRF. Inference is also fast, comparable to GS [S1].
++*   **Memory Complexity:** Depends on the number of Gaussians and the hash grid size. The hash grid is fixed size ($2^{14}$ entries), while Gaussians grow during densification [S1].
++*   **Measured Performance (RTX 3090, VDGS-30K*):**
++    *   **Mip-NeRF360:** SSIM 0.813, PSNR 27.64, LPIPS 0.220. Training: 46m 11s. Inference: 41.35 FPS [S1].
++    *   **Tanks and Temples:** SSIM 0.851, PSNR 24.02, LPIPS 0.176. Training: 29m 45s. Inference: 38.53 FPS [S1].
++    *   **Deep Blending:** SSIM 0.906, PSNR 29.54, LPIPS 0.243. Training: 41m 29s. Inference: 44.72 FPS [S1].
++    *   **Shiny Blender:** Avg PSNR 30.62 [S1].
++*   **Strengths:** Accurately models light reflections, transparency, and glass; eliminates view-dependent artifacts; fast training and inference compared to NeRF [S1].
++*   **Limitations:** Requires careful tuning of pruning/densification; joint color/opacity update is less effective than opacity-only update [S1].
++*   **When to use:** When view-dependent effects (shiny surfaces, transparency) are critical, but NeRF training times are prohibitive.
++*   **When not to use:** When the scene is purely diffuse and static, classical GS may be sufficient and simpler.
+ 
+ ## Background
+-VDGS was proposed by researchers from the Faculty of Mathematics and Computer Science, Jagiellonian University, and the Department of Engineering, University of Cambridge [S1]. The method was presented in the paper "Gaussian Splatting with NeRF-based Color and Opacity" (arXiv:2312.13729) in 2023 [S1]. It addresses the limitations of both NeRF (slow, hard to locate geometry) and GS (hard to condition, static appearance) by creating a hybrid model [S1]. The implementation is available on GitHub: https://github.com/gmum/ViewingDirectionGaussianSplatting [S1].
++VDGS was proposed by researchers from the Faculty of Mathematics and Computer Science, Jagiellonian University, and the Department of Engineering, University of Cambridge [S1]. It was published in December 2023 (arXiv:2312.13729) [S1]. The method addresses the limitations of both NeRF (slow, hard to locate geometry) and GS (hard to condition, static appearance) by hybridizing them [S1]. It builds on the differential Gaussian rasterization pipeline introduced in classical GS [S1].
+ 
+ ## Sources

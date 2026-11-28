@@ -1,0 +1,144 @@
+NrrdImageIO does not implement streamed reads, so extracting a small region of a NRRD file costs a full decode of the volume. For uncompressed NRRD (encoding: raw) the pixel data is a flat block, exactly like MetaImage, so the region cou...
+
+NrrdImageIO does not stream: a small region costs a whole volume decode · Issue #6805 · InsightSoftwareConsortium/ITK · GitHub
+Skip to content
+You signed in with another tab or window. Reload to refresh your session.
+You signed out in another tab or window. Reload to refresh your session.
+You switched accounts on another tab or window. Reload to refresh your session.
+Dismiss alert
+NrrdImageIO does not stream: a small region costs a whole volume decode #6805
+New issue
+Copy link
+New issue
+Copy link
+Open
+Open
+NrrdImageIO does not stream: a small region costs a whole volume decode#6805
+Copy link
+Milestone
+Backlog -- Will be considered for future releases
+Description
+vboussot
+opened on Aug 26, 2026
+Issue body actions
+NrrdImageIO does not implement streamed reads, so extracting a small region of a NRRD file costs a full
+decode of the volume. For uncompressed NRRD (encoding: raw) the pixel data is a flat block, exactly like
+MetaImage, so the region could be served by seeking.
+256^3 uint16 volume (32 MiB), region extracted with SetExtractIndex / SetExtractSize, minimum of 15
+runs, SimpleITK 2.5.5, Linux, local NVMe, page cache warm:
+format
+16^3
+64^3
+128^3
+whole 256^3
+.nii
+0.75 ms
+1.81 ms
+6.10 ms
+41.34 ms
+.mha
+0.52 ms
+2.28 ms
+8.46 ms
+21.87 ms
+.nrrd
+24.71 ms
+25.17 ms
+32.91 ms
+26.69 ms
+NIfTI and MetaImage scale with the size of the region. NRRD does not: it stays around 25 to 33 ms whatever
+is asked of it. A 16^3 region is 0.02% of the volume and costs 93% of what reading the whole volume costs,
+and 33x what NIfTI charges for the same region.
+The file is genuinely uncompressed. The header says encoding: raw and it is 33554740 bytes for 33554432
+bytes of pixel data.
+The mechanism is in Read(). NiftiImageIO::Read() takes this->GetIORegion() and reads that region.
+MetaImageIO::Read() compares m_IORegion against the largest region and reads the sub-block.
+NrrdImageIO::Read() refers to GetIORegion or m_IORegion nowhere at all, 0 occurrences against 1 in
+itkNiftiImageIO.cxx and 13 in itkMetaImageIO.cxx, and calls nrrdLoad(nrrd, this->GetFileName(), nullptr) on the whole file. Consistently with that, itkNrrdImageIO.h overrides neither
+CanStreamRead() nor GenerateStreamableReadRegionFromRequestedRegion(), where NIfTI overrides the
+second and MetaImage both.
+```
+import numpy as np, SimpleITK as sitk, time, tempfile, pathlib
+
+tmp = pathlib.Path(tempfile.mkdtemp()); N = 256
+arr = np.random.randint(0, 4000, (N, N, N), dtype=np.uint16)
+for ext in ("nii", "mha", "nrrd"):
+    p = str(tmp / f"v.{ext}")
+    w = sitk.ImageFileWriter(); w.SetFileName(p); w.SetUseCompression(False)
+    w.Execute(sitk.GetImageFromArray(arr))
+    for R in (16, 64, 128, 256):
+        def read():
+            r = sitk.ImageFileReader(); r.SetFileName(p)
+            r.SetExtractIndex([0, 0, 0]); r.SetExtractSize([R, R, R])
+            return sitk.GetArrayViewFromImage(r.Execute())
+        read()
+        ts = []
+        for _ in range(15):
+            t = time.perf_counter()
+            read()
+            ts.append(time.perf_counter() - t)
+        print(f"{ext:5} {R:>4}^3 {min(ts) * 1e3:8.2f} ms")
+```
+Where this matters: patch based deep learning reads a volume as many small overlapping windows, one per
+training sample or per inference patch. NRRD is 3D Slicer's native format, so a dataset exported from
+Slicer takes the whole volume path on every patch. In KonfAI we detect the format and read the volume
+whole rather than pay this per patch, which is a workaround for something that looks fixable.
+Happy to work on streamed reads for the raw encoding if that would be welcome, and glad to hear if there
+is a reason it was left out that I am not seeing.
+Activity
+dzenanz commented on Aug 26, 2026
+dzenanz
+on Aug 26, 2026
+Member
+More actions
+@kindlmann Where is the best place for this work to occur?
+dzenanz commented on Aug 26, 2026
+dzenanz
+on Aug 26, 2026
+Member
+More actions
+@hjmjohnson might also have advice.
+blowekamp commented on Aug 26, 2026
+blowekamp
+on Aug 26, 2026
+Member
+More actions
+One possibility perhaps not ideal (hacky?) is to leverage the functionality in itkStreamingImageIO base to read regions for raw images. The NrrdImageIO could be derived from StreamingImageIOBase and when there is a raw binary data detected it could use the region streaming reading already implemented in StreamingImageIOBase.
+vboussot commented on Aug 26, 2026
+vboussot
+on Aug 26, 2026
+ContributorAuthor
+More actions
+That fits, and most of the pieces are already in place. ReadImageInformation calls
+nrrdIoStateSet(nio, nrrdIoStateSkipData, 1), so the header is parsed on its own, and it already sets the
+byte order from nio->endian and the file type from nio->encoding. VTKImageIO looks like the closest
+precedent: header then raw block, deriving from StreamingImageIOBase.
+Two boundaries so it does not overreach. The data offset has to come from the header, and NRRD allows a
+detached data file plus line skip and byte skip, so encoding: raw on its own is not the condition. And
+the SYMMETRICSECONDRANKTENSOR path sets nrrdAllocated = true precisely because ITK's buffer is not
+sized for the data, so that one cannot stream into the caller's buffer.
+Unrelated, from the same function: on a whole volume read the header is parsed twice, once in
+ReadImageInformation and once by the nrrdLoad in Read. The comment there says as much.
+hjmjohnson
+added this to the Backlog -- Will be considered for future releases milestone on Sep 23, 2026
+Sign up for free to join this conversation on GitHub. Already have an account? Sign in to comment
+Metadata
+Metadata
+Assignees
+No one assigned
+Labels
+No labels
+No labels
+Type
+No type
+Projects
+No projects
+Milestone
+Backlog -- Will be considered for future releasesNo due date
+Relationships
+None yet
+Development
+No branches or pull requests
+Issue actions
+Open in GitHub Copilot app
+You can’t perform that action at this time.

@@ -1,0 +1,241 @@
+--- v004.md
++++ v005.md
+@@ -1,104 +1,137 @@
+ # Mipmap Generation
+ Also called: 3D Texture Mipmap Generation, Compute Shader Mipmap Generation, Volume Mipmapping
+-
+ ## Overview
+-Mipmap generation creates a hierarchy of downscaled volume data representations to enable multi-resolution rendering and faster traversal [S2, unofficial]. It solves the problem of aliasing and performance degradation when viewing high-resolution volumes from a distance by allowing the renderer to sample from lower-resolution levels [S4, unofficial]. Unlike [VoxelGrid Down Sample](1014-voxelgrid-down-sample.md) which focuses on structural grid reduction, or [Streaming MIP Implementation (Basic)](1803-streaming-mip-implementation-basic.md) which handles memory bandwidth, this method specifically constructs the filtered texture pyramid itself, often using compute shaders for parallel generation [S1, unofficial].
+-
++Mipmap generation creates a hierarchy of downscaled volume data representations to enable multi-resolution rendering and faster traversal [S2, unofficial]. It solves the problem of aliasing and performance degradation when viewing high-resolution volumes from a distance or at varying scales [S4, unofficial]. It sets itself apart from siblings like [VoxelGrid Down Sample](1014-voxelgrid-down-sample.md) by explicitly managing the creation of a full mip-chain via compute shaders or specific filtering modes (Average, Halton) rather than simple grid reduction, and differs from [Streaming MIP Implementation (Basic)](1803-streaming-mip-implementation-basic.md) by focusing on the static generation of the hierarchy rather than the streaming of levels [G].
+ ## How it works
+ **Inputs and Outputs:**
+-- Input: A base volume texture (Level 0) at resolution $N \times N \times N$.
+-- Output: A mip-chain of textures where Level $L$ has resolution $\lfloor N / 2^L \rfloor \times \lfloor N / 2^L \rfloor \times \lfloor N / 2^L \rfloor$ [S2, unofficial].
++- Input: A base 3D texture (Level 0) containing the original volume data.
++- Output: A mip-chain of 3D textures where each subsequent level $n$ has reduced spatial dimensions.
+ 
+ **Data Structures:**
+-The mipmap level is managed via a structure containing:
++The mipmap levels are managed via a `MipmapLevel` structure [S2, unofficial]:
+ - `sizeX_`, `sizeY_`, `sizeZ_`: Integer dimensions of the current level.
+ - `dataCpu_`: Pointer to CPU-side memory.
+-- `dataGpu_`: CUDA array or GPU buffer handle.
+-- `dataTex_`: CUDA texture object or OpenGL/Vulkan texture handle.
++- `dataGpu_`: Pointer to CUDA/GPU array memory.
++- `dataTex_`: CUDA texture object handle.
+ - `cpuDataCounter_`, `gpuDataCounter_`: Usage counters for synchronization.
+-- `parent_`: Reference to the parent Volume object [S2, unofficial].
++- `parent_`: Reference to the parent Volume object.
+ 
+ **Parameters:**
+ - `MipmapFilterMode::AVERAGE`: Applies average filtering (box filter) when generating the mipmap level [S2, unofficial].
+-- `MipmapFilterMode::HALTON`: Uses Halton sampling to select voxels for downsampling, reducing bias compared to simple averaging [S2, unofficial].
+-- Typical downsampling factor: 2x per level (Level $n$ is $(n+1)$x downsampling relative to base? No, standard is $2^n$. The source [S2, unofficial] states "level 1 is 2x downsampling, level 2 is 3x downsampling, and level n is (n+1)x downsampling". This contradicts standard power-of-two mipmaps. However, standard practice and [S4, unofficial] imply sequential lower resolutions. We will assume standard power-of-two halving for the algorithm steps, noting the source's specific "n+1" claim as a potential variant or error, but implementing the standard halving loop described in [S1, unofficial] which says "halve the current dimension"). *Correction*: [S1, unofficial] explicitly states "halve the current dimension". [S2, unofficial] says "level 2 is 3x downsampling". This is a contradiction. Standard mipmap generation halves dimensions. We follow the explicit step "halve the current dimension" [S1, unofficial] as it is the operational instruction.
++- `MipmapFilterMode::HALTON`: Uses Halton sequence sampling to select voxels for downsampling, reducing bias compared to simple averaging [S2, unofficial].
++- Level scaling: Level 0 is the original data. Level 1 is 2x downsampling, Level 2 is 3x downsampling, and Level $n$ is $(n+1)$x downsampling [S2, unofficial]. *Note: This linear scaling $(n+1)$ differs from the standard geometric halving ($1/2^n$) found in many graphics APIs; implementation must verify if this specific scaling is a library-specific convention or a general rule.*
+ 
+ **Algorithm Steps:**
+-1. **Initialization**: Set `current_dim` to the base resolution $N$. Set `mip_level` to 0.
+-2. **Loop Condition**: While `current_dim` $\ge 1$:
+-    a. **Check Existence**: Call `mipmapCheckOrCreate` to ensure the target level exists. If not, allocate memory for the new level [S2, unofficial].
+-    b. **Setup Dispatch**: Calculate work group size as $\lceil \text{current\_dim} / 8 \rceil$ in all three dimensions [S1, unofficial].
+-    c. **Bind Target**: Bind the 3D texture face (or the specific 3D texture) as a write-only image at `mip_level + 1` using RGBA8 format [S1, unofficial].
+-    d. **Dispatch Compute**: Execute the compute shader dispatch.
+-    e. **Barrier**: Insert memory barriers for texture fetch and shader image access to ensure coherence [S1, unofficial].
+-    f. **Increment**: Increment `mip_level` by 1.
+-    g. **Downsample**: Set `current_dim` = `current_dim` / 2 (integer division) [S1, unofficial].
++1. Initialize `current_dimension` to the resolution of the base volume (Level 0) and `mip_level` to 0.
++2. Check if the next mipmap level already exists using `mipmapCheckOrCreate`. If it exists, skip generation for that level [S2, unofficial].
++3. Bind the current volume data as a read-only texture and the target mipmap level as a write-only image texture (e.g., RGBA8 format) [S1, unofficial].
++4. Dispatch a compute shader kernel. The work group size is typically $8 \times 8 \times 8$. The number of work groups is calculated as $\lceil \text{current\_dimension} / 8 \rceil$ in each dimension [S1, unofficial].
++5. Inside the compute shader:
++   - Calculate the global thread ID.
++   - Determine the source coordinates in the parent level based on the filter mode:
++     - For `AVERAGE`: Sample a neighborhood (e.g., $2 \times 2 \times 2$ or larger box) and compute the mean.
++     - For `HALTON`: Use the Halton sequence to jitter or select specific sample points within the neighborhood to estimate the value, reducing aliasing artifacts [S2, unofficial].
++   - Write the computed value to the target image at the current mip level.
++6. Insert memory barriers to ensure texture fetches and shader image writes are synchronized [S1, unofficial].
++7. Increment `mip_level` and update `current_dimension` (typically halving it, though the source notes a specific $(n+1)$ scaling for level indexing, the spatial reduction is usually geometric halving for mipchains [G]).
++8. Repeat steps 2-7 until `current_dimension` is less than 1.
+ 
+ **Pseudocode:**
+ ```python
+-def generate_mip_chain(base_texture, filter_mode):
+-    current_dim = base_texture.resolution
++def generate_mip_chain(volume_texture, filter_mode=MipmapFilterMode.AVERAGE):
++    """
++    Generates a mipmap chain for a 3D volume texture.
++    :param volume_texture: The base 3D texture (Level 0).
++    :param filter_mode: The downsampling filter to use.
++    """
++    current_dim = volume_texture.size  # Assuming cubic for simplicity, or max dimension
+     mip_level = 0
+     
+-    # Level 0 is always the original data
+-    levels = [base_texture]
+-    
+     while current_dim >= 1:
+-        # Check if level exists, create if not
+-        next_level = mipmap_check_or_create(mip_level + 1, current_dim // 2)
+-        
+-        # Bind next level as write-only target
+-        bind_write_only_image(next_level.texture_handle, mip_level + 1)
++        # Check if next level exists
++        next_level = mipmap_check_or_create(mip_level + 1)
++        if next_level is None:
++            break
++            
++        # Bind textures
++        bind_read_only(volume_texture, mip_level)
++        bind_write_only(next_level, mip_level + 1)
+         
+         # Calculate work groups
+-        work_group_size = 8
+-        num_groups_x = ceil(current_dim / work_group_size)
+-        num_groups_y = ceil(current_dim / work_group_size)
+-        num_groups_z = ceil(current_dim / work_group_size)
++        # Assuming 8x8x8 work group size
++        num_groups_x = ceil(current_dim / 8)
++        num_groups_y = ceil(current_dim / 8)
++        num_groups_z = ceil(current_dim / 8)
+         
+         # Dispatch compute shader
+-        # The shader reads from mip_level and writes to mip_level + 1
+-        dispatch_compute(num_groups_x, num_groups_y, num_groups_z, 
+-                         base_texture.texture_handle, 
+-                         next_level.texture_handle, 
+-                         filter_mode)
++        dispatch_compute(num_groups_x, num_groups_y, num_groups_z, 8, 8, 8)
+         
+-        # Memory barrier to ensure write completion before next read
+-        insert_memory_barrier()
++        # Memory barrier to ensure writes are visible
++        memory_barrier_texture()
+         
+-        levels.append(next_level)
++        # Prepare for next level
+         mip_level += 1
++        # Standard mipmapping halves the dimension. 
++        # Note: Source [S2, unofficial] mentions level n is (n+1)x downsampling, 
++        # but standard practice and other sources imply geometric halving.
++        # We use halving for spatial resolution.
+         current_dim = current_dim // 2
+ 
+-    return levels
++def compute_shader_downsample(global_id, parent_level, child_level, filter_mode):
++    """
++    Compute shader kernel for downsampling.
++    """
++    # Get coordinates in the child level
++    x, y, z = global_id
++    
++    # Determine the region in the parent level to sample from
++    # For 2x downsampling, each child voxel covers a 2x2x2 block in parent
++    parent_x = x * 2
++    parent_y = y * 2
++    parent_z = z * 2
++    
++    if filter_mode == MipmapFilterMode.AVERAGE:
++        sum_val = 0.0
++        count = 0
++        for dx in range(2):
++            for dy in range(2):
++                for dz in range(2):
++                    val = sample_texture(parent_level, parent_x + dx, parent_y + dy, parent_z + dz)
++                    sum_val += val
++                    count += 1
++        result = sum_val / count
++        
++    elif filter_mode == MipmapFilterMode.HALTON:
++        # Use Halton sequence to select a representative sample
++        # Halton sequence index based on global_id
++        h = halton_sequence(global_id.x, global_id.y, global_id.z)
++        # Map h to a sample within the 2x2x2 block
++        sample_offset = map_halton_to_block(h)
++        result = sample_texture(parent_level, parent_x + sample_offset.x, 
++                                parent_y + sample_offset.y, 
++                                parent_z + sample_offset.z)
++                                
++    write_image(child_level, x, y, z, result)
+ ```
+ 
+-**Compute Shader Logic (Internal):**
+-The compute shader for each thread (representing a voxel in the *new* lower-resolution level) must determine which voxels from the *previous* higher-resolution level contribute to it.
+-- If `filter_mode` is `AVERAGE`:
+-    - Identify the $2 \times 2 \times 2$ block of voxels in the parent level corresponding to the current thread's coordinates.
+-    - Sum the values of these 8 voxels.
+-    - Divide by 8.0.
+-- If `filter_mode` is `HALTON`:
+-    - Use Halton sequence indices to select a subset of voxels from the parent block to reduce computational cost or bias [S2, unofficial]. *Note: Specific Halton implementation details are not provided in sources, so this step is marked as requiring implementation based on the mode flag.*
+-
+ **Edge Cases and Pitfalls:**
+-- **Boundary Conditions**: When `current_dim` is odd, the last block may not be a full $2 \times 2 \times 2$. The shader must handle partial blocks by averaging only the existing voxels or padding with zeros.
+-- **Precision**: Using `RGBA8` may lose precision for floating-point volume data. If high dynamic range is required, use `RGBA16F` or `RGBA32F` [S1, unofficial].
+-- **Degenerate Input**: If the base resolution is 1, the loop terminates immediately after Level 0.
++- **Precision:** When using `AVERAGE` filtering, accumulation of floating-point values in large neighborhoods can lead to precision loss. Use higher precision accumulators if necessary [G].
++- **Boundaries:** Ensure that sampling neighborhoods do not exceed the bounds of the parent texture. Clamp coordinates or handle edge cases explicitly [G].
++- **Degenerate Input:** If the base volume has dimensions that are not powers of two, standard halving may result in non-integer dimensions. The implementation must handle the final levels carefully, possibly using nearest-neighbor or adaptive box sizes [G].
++- **Scaling Discrepancy:** The source [S2, unofficial] describes level $n$ as $(n+1)$x downsampling, which is non-standard. Implementers should verify if this is a specific library convention (e.g., for acceleration structures) or a misinterpretation, as standard mipmaps use geometric progression ($1/2^n$) [S2, unofficial].
+ 
+ ## Subtopics
+ 
+ ### [Atlas Mipmapping](2639-atlas-mipmapping.md)
+-Atlas Mipmapping addresses undersampling artifacts that occur when a distant surfel covers few pixels but retains its full-resolution texture tile, causing a single pixel to span multiple texels during a bilinear fetch. It focuses on storage layout optimization within an atlas rather than the generation algorithm itself.
++Atlas Mipmapping addresses the undersampling artifacts that occur when a distant surfel covers few pixels but retains its full-resolution texture tile, causing a single pixel to span multiple texels during a bilinear fetch. It focuses on storage layout optimization for atlases rather than the general generation algorithm.
+ 
+ ### [Voxel Pre-integration](2956-voxel-pre-integration.md)
+-Voxel Pre-integration generates mipmaps for a voxelized 3D texture using bilinear filtering to create a volumetric sampling function that yields average color and occlusion for cone tracing. It differs from standard mipmap generation by specifically targeting the creation of a "volumetric sampling function" for indirect lighting approximation via cone tracing, rather than general texture compression. Trade-offs include potential inaccuracies in appearance when input voxels are very opaque due to the loss of masking and shadowing effects.
++Voxel Pre-integration is a method to generate mipmaps for a voxelized 3D texture using bilinear filtering to create a volumetric sampling function that yields average color and occlusion for cone tracing. It solves the problem of approximating light from areas of various sizes by sampling a 4D texture (3D space + mip levels) using linear interpolation. It differs from sibling methods like Atlas Mipmapping and GPU 3D Mip Chain Generation by specifically targeting the creation of a "volumetric sampling function" for indirect lighting approximation via cone tracing, rather than general texture compression or shadow volume optimization. Trade-offs include potential inaccuracies in appearance when input voxels are very opaque due to the loss of masking and shadowing effects.
+ 
+ ### [Mipmap Filtering](4541-mipmap-filtering.md)
+-Mipmap Filtering is a pre-filtering technique that avoids aliasing artifacts when a projected texture's resolution exceeds the sample resolution, and mitigates block-like discontinuities when the projected resolution is lower than the target resolution. It sets itself apart by explicitly managing the transition between different levels of detail (LOD) during the sampling phase, whereas other methods focus on storage or creation [G].
++Mipmap Filtering is a pre-filtering technique that avoids aliasing artifacts when a projected texture's resolution exceeds the sample resolution, and mitigates block-like discontinuities when the projected resolution is lower than the target resolution. It sets itself apart from its siblings by explicitly managing the transition between different levels of detail in the mip-chain during the sampling phase, whereas [Atlas Mipmapping](2639-atlas-mipmapping.md) focuses on storage layout, [Voxel Pre-integration](2956-voxel-pre-integration.md) on radiative transfer approximation, and [GPU 3D Mip Chain Generation](5067-gpu-3d-mip-chain-generation.md) on the creation process itself [G].
+ 
+ ### [GPU 3D Mip Chain Generation](5067-gpu-3d-mip-chain-generation.md)
+-`generateMipChain3d` is a GPU primitive that fills a 3D texture's mip chain by executing per-(level, z-slice) render passes, targeting specific Z-slices via `GPURenderPassColorAttachment.depthSlice`. Unlike standard mipmaps which store averaged values, this method supports building a per-field max pyramid in deviation space to enable transfer-function-adaptive skipping during volume ray marching, allowing dynamic region skipping based on live contrast settings without rebuilding the structure.
++`generateMipChain3d` is a GPU primitive that fills a 3D texture's mip chain by executing per-(level, z-slice) render passes, targeting specific Z-slices via `GPURenderPassColorAttachment.depthSlice`. It mirrors the 2D `generateMipChain` approach but extends it to 3D volumes, enabling efficient downsampling for both display (box filter) and acceleration (max-value pyramid) purposes. Unlike standard mipmaps which store averaged or filtered values for display, this method supports building a per-field max pyramid in deviation space to enable transfer-function-adaptive skipping during volume ray marching, allowing dynamic region skipping based on live contrast settings without rebuilding the structure.
+ 
+ ### [Shadow Volume Mipmap Generation](5724-shadow-volume-mipmap-generation.md)
+@@ -106,29 +139,26 @@
+ 
+ ### [Voxel Mipmap Generation](12422-voxel-mipmap-generation.md)
+-Not given in the sources.
++Voxel Mipmap Generation creates a hierarchy of downsampled voxel representations from a primary volume buffer to enable rendering at varying scales or distances. It differs from [Atlas Mipmapping](2639-atlas-mipmapping.md) by operating on a contiguous 3D voxel grid rather than 2D texture atlases, and from [GPU 3D Mip Chain Generation](5067-gpu-3d-mip-chain-generation.md) by often employing specific compute shader passes or CPU-side accumulation loops for the downsampling step.
+ 
+ ### [Clipmap Voxel Storage with Mipmap Generation](13504-clipmap-voxel-storage-with-mipmap-generation.md)
+-A voxel storage structure using clipmaps that generates mipmaps for inner clipmaps and the largest clipmap via compute shaders, copying regions between textures to handle axis-aligned downsampling.
++This method implements a voxel storage structure using clipmaps that generates mipmaps for inner clipmaps and the largest clipmap via compute shaders, copying regions between textures to handle axis-aligned downsampling. It differs from standard 3D mipmap chains by organizing data into a clipmap layout (concentric rings or layers) and using explicit region copies for downsampling rather than recursive texture sampling, which optimizes memory locality for view-dependent rendering.
+ 
+ ### Multi-Frequency Texture Sampling with LOD
+-A technique to simulate high-frequency noise details using a small 3D texture by sampling it at different frequencies (Fractal Brownian Motion levels), reducing the number of texture lookups for distant objects [S3, unofficial].
+-- **Steps**: Limit the number of frequency levels (LODs) sampled for far-away primary samples to minimize texture lookups, which are a bottleneck. Blend between different LODs to ensure smooth transitions in visual quality [S3, unofficial].
+-- **Parameters**: Texture resolution: 128x128x128. This size is small enough for fast web loading but large enough for 2-3 FBM levels [S3, unofficial].
++A technique to simulate high-frequency noise details using a small 3D texture by sampling it at different frequencies (Fractal Brownian Motion levels), reducing the number of texture lookups for distant objects [S3, unofficial]. It limits the number of frequency levels (LODs) sampled for far-away primary samples to minimize texture lookups, which are a bottleneck, and blends between different LODs to ensure smooth transitions in visual quality [S3, unofficial]. A typical texture resolution is $128 \times 128 \times 128$, which is small enough for fast web loading but large enough for 2-3 FBM levels [S3, unofficial].
+ 
+ ### Volume Rendering with Mipmapping
+-Applies mipmapping to the retained texture to improve rendering performance [S4, unofficial].
+-- **Steps**: Upload the final 3D texture atlas and lookup tables to the GPU. Render the volume slice-by-slice by drawing a proxy polygon for each slice. Use a fragment shader to sample the correct texels from the packed texture using the lookup tables [S4, unofficial].
++Applies mipmapping to the retained texture to improve rendering performance in a hybrid CPU-GPU pipeline [S4, unofficial]. The process involves uploading the final 3D texture atlas and lookup tables to the GPU, then rendering the volume slice-by-slice by drawing a proxy polygon for each slice. A fragment shader samples the correct texels from the packed texture using the lookup tables, selecting the appropriate mipmap level based on distance to reduce aliasing and improve speed [S4, unofficial].
+ 
+ ## Operating characteristics
+-- **Time Complexity**: $O(N^3)$ for the entire chain generation, as the total number of voxels in a power-of-two mip chain is $N^3 (1 + 1/8 + 1/64 + \dots) \approx 1.14 N^3$. Each level is processed in parallel via compute shaders [S1, unofficial].
+-- **Memory Complexity**: $O(N^3)$ total storage for the full mip chain. For 3D textures, this can be significant. Using `RGBA8` reduces memory footprint compared to `RGBA32F` [S1, unofficial].
+-- **Measured Performance**: Not given in the sources.
+-- **Strengths**: Reduces aliasing artifacts and improves rendering speed by sampling appropriate resolution levels [S4, unofficial]. Enables efficient traversal and skipping in volume ray marching when combined with max-value pyramids [S1, unofficial].
+-- **Limitations**: Increases memory usage due to storing multiple levels. Halton sampling may introduce bias if not implemented correctly [S2, unofficial].
+-- **When to use**: When rendering high-resolution volumes at varying distances or when using techniques like cone tracing that benefit from pre-filtered volumetric data [S4, unofficial].
+-- **When not to use**: When memory bandwidth is extremely constrained and the volume is viewed at a single fixed resolution, or when the volume is too small to benefit from multi-resolution sampling.
++- **Time Complexity:** Generation is $O(N)$ relative to the total number of voxels in the mip-chain, where $N$ is the volume of the base level. Each level is processed in parallel via compute shaders.
++- **Memory Complexity:** The total memory required is approximately $1.33 \times$ the base volume size for a standard geometric halving chain ($1 + 1/8 + 1/64 + \dots$). For the specific $(n+1)$ scaling mentioned in [S2, unofficial], the memory footprint would be significantly larger and non-standard [S2, unofficial].
++- **Performance:** Compute shader-based generation is highly efficient on modern GPUs, leveraging parallelism for each voxel in each level [S1, unofficial].
++- **Strengths:** Reduces aliasing artifacts, improves rendering performance for distant views, and enables efficient traversal in acceleration structures [S4, unofficial].
++- **Limitations:** Requires additional memory for the mip-chain. The choice of filter (Average vs. Halton) affects visual quality and computational cost. Halton sampling may be more expensive per voxel than simple averaging [S2, unofficial].
++- **When to Use:** When rendering large volumes at varying distances or scales, or when using acceleration structures that benefit from multi-resolution data [S2, S4, unofficial].
++- **When Not to Use:** When memory is extremely constrained and the volume is only viewed at a single resolution, or when the volume is very small and the overhead of managing the mip-chain outweighs the benefits [G].
+ 
+ ## Background
+-Mipmap generation for volume rendering originated from the need to handle texture aliasing in 3D graphics. The concept of mipmaps was introduced for 2D textures by Lance Williams [LaM99] (cited in [S4, unofficial]). In volume rendering, it was adapted to handle the dense sampling requirements of ray marching and cone tracing. The specific compute shader dispatch method described in [S1, unofficial] and the adaptive sampling integration in [S2, unofficial] represent modern GPU-accelerated implementations. The use of mipmaps in hybrid CPU-GPU pipelines for medical imaging was detailed in [S4, unofficial], highlighting their role in memory-efficient rendering.
++Mipmap generation for volumes extends the 2D texture mipmapping technique introduced by Lance Williams in 1983 [S4, unofficial]. In volume rendering, it was adapted to handle 3D data, enabling efficient rendering of large medical and scientific datasets [S4, unofficial]. The use of compute shaders for generation allows for flexible filtering modes and integration with GPU-based acceleration structures [S1, unofficial]. The specific implementation details, such as the use of Halton sampling and the $(n+1)$ scaling, appear in specialized libraries and research projects [S2, unofficial].
+ 
+ ## Sources

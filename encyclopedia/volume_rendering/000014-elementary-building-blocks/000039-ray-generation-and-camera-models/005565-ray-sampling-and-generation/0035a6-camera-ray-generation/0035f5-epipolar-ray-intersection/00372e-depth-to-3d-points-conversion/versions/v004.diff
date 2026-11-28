@@ -1,0 +1,367 @@
+--- v003.md
++++ v004.md
+@@ -4,143 +4,264 @@
+ 
+ ## Overview
+-This method converts 2D depth maps and camera parameters into a 3D point cloud, serving as the geometric foundation for initializing point clouds in neural rendering pipelines [S1, unofficial][S2]. It differs from its sibling [Point Cloud Generation and Refinement](8042-point-cloud-generation-and-refinement.md) by relying on explicit geometric backprojection rather than implicit field refinement, and from [Fixed-size initialization from RGB-D backprojection](10155-fixed-size-initialization-from-rgb-d-backprojection.md) by focusing on the core coordinate transformation without necessarily incorporating color or specific downsampling strategies in the base definition [S1, unofficial][S2, S3]. It solves the problem of lifting 2D image data into 3D space for subsequent volume rendering or Gaussian splatting operations.
++This method converts 2D depth measurements from one or more images into a 3D point cloud in absolute world coordinates by backprojecting pixels using camera intrinsic and extrinsic parameters [S1, unofficial][S3]. It solves the geometric reprojection problem of mapping per-pixel depth values from image space into a global 3D reference frame [S2]. It differs from sibling methods like [Point Cloud Generation and Refinement](8042-point-cloud-generation-and-refinement.md) by focusing strictly on the geometric reprojection step, whereas the sibling also includes feature estimation and semantic fusion . It differs from [Fixed-size initialization from RGB-D backprojection](10155-fixed-size-initialization-from-rgb-d-backprojection.md) by typically operating on variable-resolution depth maps without enforcing a fixed grid size during the initial unprojection [S3].
+ 
+ ## How it works
+ **Inputs:**
+-- Depth map $D$ of shape $(B, H, W)$ or $(B, H, W, n)$ [S1, unofficial].
+-- Pseudo-focal lengths $f$ of shape $[B, H, W]$, $[B, 2, H, W]$, or $[B, 1, H, W]$ [S1, unofficial].
+-- Principal point $pp$ (optional, defaults to image center if None) [S1, unofficial].
+-- Camera intrinsics $K$ and extrinsics $T$ (for global scene construction) [S3].
++- Depth map(s) $D$.
++- Camera intrinsic parameters (focal lengths, principal point).
++- Camera extrinsic parameters (rotation $R$, translation $t$) [S3].
++- Optional: Image dimensions $(H, W)$ [S1, unofficial].
+ 
+ **Outputs:**
+-- 3D point cloud $P$ in absolute coordinates [S1, unofficial][S3].
++- A set of 3D points $P \in \mathbb{R}^{N \times 3}$ representing the scene geometry in world coordinates [S1, unofficial][S3].
+ 
+ **Data Structures:**
+-- Grid coordinates $grid\_x, grid\_y$: 2D arrays of shape $(H, W)$ representing pixel indices relative to the principal point.
+-- Point cloud $P$: Array of shape $(N, 3)$ containing $(x, y, z)$ coordinates.
++- **Depth Map:** A tensor or array of shape $(B, H, W)$ or $(B, H, W, n)$, where $B$ is batch size, $H$ is height, $W$ is width, and $n$ is optional channels [S1, unofficial].
++- **Pseudo Focal Lengths:** A tensor of shape $[B, H, W]$, $[B, 2, H, W]$, or $[B, 1, H, W]$ containing focal lengths for each pixel or channel [S1, unofficial].
++- **Grid Coordinates:** 2D arrays representing pixel indices $(x, y)$ for each pixel in the image [S1, unofficial].
+ 
+ **Steps:**
+-1. **Generate Grid Coordinates:** Create a grid of pixel coordinates $(u, v)$ for the image dimensions $H \times W$.
+-2. **Adjust for Principal Point:** Subtract the principal point $(c_x, c_y)$ from the grid coordinates. If $pp$ is not provided, use the image center:
+-   $$ c_x = \frac{W-1}{2}, \quad c_y = \frac{H-1}{2} $$
+-   Let $grid\_x = u - c_x$ and $grid\_y = v - c_y$ [S1, unofficial].
+-3. **Extract Focal Lengths:** Parse $pseudo\_focal$ to obtain $pseudo\_focalx$ and $pseudo\_focaly$. If the input is a single channel, assume isotropic focal length [S1, unofficial].
+-4. **Backproject to 3D:** For each pixel $(u, v)$ with depth $d = D[u, v]$, compute the 3D coordinates in the camera frame:
+-   $$ x = d \cdot \frac{grid\_x}{pseudo\_focalx} $$
+-   $$ y = d \cdot \frac{grid\_y}{pseudo\_focaly} $$
+-   $$ z = d $$
+-   [S1, unofficial].
+-5. **Transform to World Coordinates (Global Construction):** For multi-view global construction, apply the inverse projection $\pi^{-1}$ using intrinsic $K_n$ and extrinsic $T_n = [R_n | t_n]$ for each view $n$:
+-   $$ P_n = T_n \cdot K_n^{-1} \cdot \begin{bmatrix} x \\ y \\ 1 \end{bmatrix} \cdot d $$
+-   Accumulate points from all $N$ views:
+-   $$ \mathcal{P} = \bigcup_{n=1}^{N} \mathbf{\pi}^{-1}(I_n, D_n, \mathbf{T}_n, \mathbf{K}_n) $$
+-   [S3].
+-6. **Filtering (Optional for Global):** Apply a uniform filter to remove duplicate primitives and a statistical filter to remove floaters (noise) [S3].
++
++1.  **Generate Grid Coordinates:** Create 2D coordinate grids $grid\_x$ and $grid\_y$ corresponding to the pixel indices of the depth map dimensions $H$ and $W$ [S1, unofficial].
++2.  **Adjust for Principal Point:** Calculate the adjusted coordinates by subtracting the principal point $(c_x, c_y)$ from the grid coordinates. If the principal point $pp$ is not provided, use the image center: $c_x = (W-1)/2$ and $c_y = (H-1)/2$ [S1, unofficial].
++    $$
++    x' = grid\_x - c_x
++    $$
++    $$
++    y' = grid\_y - c_y
++    $$
++3.  **Compute Camera Space Coordinates:** For each pixel, compute the 3D coordinates in the camera frame using the depth value $z = depth$, the adjusted coordinates $x', y'$, and the pseudo-focal lengths $f_x, f_y$ [S1, unofficial].
++    $$
++    x = \frac{depth \cdot x'}{f_x}
++    $$
++    $$
++    y = \frac{depth \cdot y'}{f_y}
++    $$
++    $$
++    z = depth
++    $$
++    Here, $f_x$ and $f_y$ are extracted from the `pseudo_focal` tensor based on its shape (e.g., if shape is $[B, 2, H, W]$, extract the first and second channels) [S1, unofficial].
++4.  **Transform to World Coordinates (Multi-View):** If processing multiple views, apply the extrinsic transformation $T_n = [R_n | t_n]$ to each point $P_{cam}$ to obtain world coordinates $P_{world}$ [S3].
++    $$
++    P_{world} = R_n \cdot P_{cam} + t_n
++    $$
++5.  **Aggregate and Filter:** Combine points from all views into a global point cloud $\mathcal{P}$ [S3]. Apply a uniform filter in 3D space to remove duplicate primitives and a statistical filter to remove noise (floaters) [S3].
+ 
+ **Pseudocode:**
++
+ ```python
+ import numpy as np
+ 
+-def depth_to_3d_points(depth, pseudo_focal, pp=None):
+-    """
+-    Convert depth map to 3D points in camera coordinates.
++def depth_to_3d_points(depth_map, pseudo_focal, principal_point=None, extrinsic_matrix=None):
++    """
++    Converts a depth map to 3D points in world coordinates.
+     
+     Args:
+-        depth: np.ndarray of shape (H, W) or (B, H, W).
+-        pseudo_focal: np.ndarray of shape (2,) or (B, 2) or (B, H, W).
+-        pp: tuple (cx, cy) or None.
++        depth_map: np.ndarray of shape (H, W) or (B, H, W).
++        pseudo_focal: np.ndarray of shape (H, W), (2, H, W), or (B, 2, H, W).
++        principal_point: tuple (cx, cy). If None, uses image center.
++        extrinsic_matrix: np.ndarray of shape (4, 4) for world transform.
+         
+     Returns:
+-        points: np.ndarray of shape (N, 3) or (B, N, 3).
+-    """
+-    # Handle batch dimension
+-    if depth.ndim == 2:
+-        depth = depth[np.newaxis, :, :]
+-        pseudo_focal = pseudo_focal[np.newaxis, :] if pseudo_focal.ndim == 1 else pseudo_focal
+-    
+-    B, H, W = depth.shape
+-    
+-    # Generate grid coordinates
+-    u, v = np.meshgrid(np.arange(W), np.arange(H))
+-    
+-    # Principal point
+-    if pp is None:
+-        cx, cy = (W - 1) / 2, (H - 1) / 2
++        points: np.ndarray of shape (N, 3) in world coordinates.
++    """
++    # Handle batch dimension if present
++    if depth_map.ndim == 3:
++        # Assume single batch for simplicity in this basic conversion
++        depth_map = depth_map[0]
++        if pseudo_focal.ndim == 4:
++            pseudo_focal = pseudo_focal[0]
++            
++    H, W = depth_map.shape
++    
++    # Step 1: Generate grid coordinates
++    y_coords, x_coords = np.meshgrid(np.arange(H), np.arange(W), indexing='ij')
++    
++    # Step 2: Adjust for principal point
++    if principal_point is None:
++        cx = (W - 1) / 2.0
++        cy = (H - 1) / 2.0
+     else:
+-        cx, cy = pp
+-        
+-    # Adjust grid
+-    grid_x = u - cx
+-    grid_y = v - cy
+-    
+-    # Expand grid for broadcasting
+-    grid_x = grid_x[np.newaxis, :, :]  # (1, H, W)
+-    grid_y = grid_y[np.newaxis, :, :]  # (1, H, W)
+-    
+-    # Handle pseudo_focal shape
+-    if pseudo_focal.ndim == 1:
+-        fx, fy = pseudo_focal[0], pseudo_focal[1]
+-        fx = np.full((B, H, W), fx)
+-        fy = np.full((B, H, W), fy)
+-    elif pseudo_focal.ndim == 2:
+-        fx = pseudo_focal[:, 0, np.newaxis, np.newaxis]
+-        fy = pseudo_focal[:, 1, np.newaxis, np.newaxis]
++        cx, cy = principal_point
++        
++    x_prime = x_coords - cx
++    y_prime = y_coords - cy
++    
++    # Step 3: Extract focal lengths
++    # Handle different shapes of pseudo_focal
++    if pseudo_focal.ndim == 2:
++        fx = pseudo_focal
++        fy = pseudo_focal
++    elif pseudo_focal.ndim == 3:
++        # Shape (2, H, W)
++        fx = pseudo_focal[0]
++        fy = pseudo_focal[1]
+     else:
+-        fx = pseudo_focal[:, 0, :, :]
+-        fy = pseudo_focal[:, 1, :, :]
+-        
+-    # Compute 3D coordinates
+-    # x = depth * grid_x / fx
+-    # y = depth * grid_y / fy
+-    # z = depth
+-    
+-    x = depth * grid_x / fx
+-    y = depth * grid_y / fy
+-    z = depth
+-    
+-    # Stack and reshape
+-    points = np.stack([x, y, z], axis=-1)  # (B, H, W, 3)
+-    points = points.reshape(B, -1, 3)      # (B, N, 3)
+-    
+-    return points
++        raise ValueError("Unsupported pseudo_focal shape")
++        
++    # Step 4: Compute camera space coordinates
++    # Avoid division by zero
++    fx_safe = np.where(fx == 0, 1e-8, fx)
++    fy_safe = np.where(fy == 0, 1e-8, fy)
++    
++    x_cam = (depth_map * x_prime) / fx_safe
++    y_cam = (depth_map * y_prime) / fy_safe
++    z_cam = depth_map
++    
++    # Stack into (H, W, 3)
++    points_cam = np.stack([x_cam, y_cam, z_cam], axis=-1)
++    
++    # Step 5: Flatten to (N, 3)
++    points_cam_flat = points_cam.reshape(-1, 3)
++    
++    # Step 6: Transform to world coordinates if extrinsic is provided
++    if extrinsic_matrix is not None:
++        # Homogeneous coordinates
++        ones = np.ones((points_cam_flat.shape[0], 1))
++        points_hom = np.hstack([points_cam_flat, ones])
++        
++        # Apply transformation: P_world = R * P_cam + t
++        # extrinsic_matrix is 4x4
++        points_world_hom = (extrinsic_matrix @ points_hom.T).T
++        points_world = points_world_hom[:, :3]
++        
++        return points_world
++    else:
++        return points_cam_flat
++
++def global_point_cloud_construction(depth_maps, intrinsics, extrinsics, images=None):
++    """
++    Constructs a global scene point cloud from multiple calibrated images.
++    
++    Args:
++        depth_maps: List of depth maps D_n.
++        intrinsics: List of intrinsic matrices K_n.
++        extrinsics: List of extrinsic matrices T_n.
++        images: List of RGB images I_n (optional, for color).
++        
++    Returns:
++        global_points: np.ndarray of shape (N_p, 3).
++    """
++    all_points = []
++    all_colors = []
++    
++    for n in range(len(depth_maps)):
++        D_n = depth_maps[n]
++        K_n = intrinsics[n]
++        T_n = extrinsics[n]
++        
++        # Unproject pixel (pi^-1)
++        # Note: This is a conceptual step; implementation depends on K_n structure
++        # Typically involves inverse intrinsic multiplication
++        points_cam = unproject_pixel(D_n, K_n)
++        
++        # Transform to world
++        # P_world = R_n * P_cam + t_n
++        points_world = transform_to_world(points_cam, T_n)
++        
++        all_points.append(points_world)
++        
++        if images is not None:
++            colors = get_colors_from_image(images[n], points_cam)
++            all_colors.append(colors)
++            
++    # Concatenate all points
++    global_points = np.vstack(all_points)
++    
++    # Apply uniform filter to delete duplicates
++    global_points = uniform_filter_3d(global_points)
++    
++    # Apply statistical filter to remove floaters
++    global_points = statistical_filter(global_points)
++    
++    return global_points
++
++def unproject_pixel(depth_map, K):
++    """
++    Unprojects depth map to camera coordinates using intrinsic matrix K.
++    """
++    H, W = depth_map.shape
++    y_coords, x_coords = np.meshgrid(np.arange(H), np.arange(W), indexing='ij')
++    
++    # Extract K elements
++    fx = K[0, 0]
++    fy = K[1, 1]
++    cx = K[0, 2]
++    cy = K[1, 2]
++    
++    x_prime = x_coords - cx
++    y_prime = y_coords - cy
++    
++    x_cam = (depth_map * x_prime) / fx
++    y_cam = (depth_map * y_prime) / fy
++    z_cam = depth_map
++    
++    points_cam = np.stack([x_cam, y_cam, z_cam], axis=-1)
++    return points_cam.reshape(-1, 3)
++
++def transform_to_world(points_cam, T):
++    """
++    Transforms camera points to world coordinates using extrinsic matrix T.
++    """
++    ones = np.ones((points_cam.shape[0], 1))
++    points_hom = np.hstack([points_cam, ones])
++    points_world_hom = (T @ points_hom.T).T
++    return points_world_hom[:, :3]
++
++def uniform_filter_3d(points):
++    """
++    Placeholder for uniform filter to remove duplicates.
++    In practice, this involves voxelization and merging.
++    """
++    # Implementation detail: [G]
++    # Convert points to voxel grid, keep one point per voxel
++    return points # Simplified for article
++
++def statistical_filter(points):
++    """
++    Placeholder for statistical filter to remove floaters.
++    In practice, this involves neighborhood analysis.
++    """
++    # Implementation detail: [G]
++    return points # Simplified for article
+ ```
+ 
+ **Parameters:**
+-- `depth`: Depth map values. Typical values depend on the scene scale.
+-- `pseudo_focal`: Focal length in pixels. For standard cameras, this is often derived from the sensor size and optical focal length.
+-- `pp`: Principal point. Default is image center.
++- `depth`: Depth map of shape $(B, H, W)$ or $(B, H, W, n)$ [S1, unofficial].
++- `pseudo_focal`: Pseudo focal lengths of shape $[B, H, W]$, $[B, 2, H, W]$, or $[B, 1, H, W]$ [S1, unofficial].
++- `principal_point`: Optional tuple $(c_x, c_y)$. If None, defaults to $(W-1)/2, (H-1)/2$ [S1, unofficial].
+ 
+ **Edge Cases and Pitfalls:**
+-- **Zero Depth:** Pixels with $d=0$ result in $(0,0,0)$. These should be masked out or handled as invalid [G].
+-- **Invalid Focal Length:** Division by zero if $fx$ or $fy$ is 0. Ensure positive focal lengths [G].
+-- **Coordinate System:** The method produces points in the camera coordinate system (Z-forward or Z-backward depending on convention). Transformation to world coordinates requires extrinsic matrices [S3].
++- **Division by Zero:** Ensure focal lengths are not zero; use a small epsilon if necessary [S1, unofficial].
++- **Principal Point:** Incorrect principal point estimation leads to systematic geometric errors [S1, unofficial].
++- **Extrinsic Accuracy:** Errors in extrinsic matrices propagate directly to world coordinate errors [S3].
++- **Noise:** Raw unprojected points contain noise; filtering is essential for clean point clouds [S3].
+ 
+ ## Subtopics
+ 
+ ### [Depth Map to Absolute Camera Coordinates](7984-depth-map-to-absolute-camera-coordinates.md)
+-This method converts a 2D depth map and camera parameters into a 3D point cloud in absolute world coordinates. It differs from sibling methods by explicitly handling the transformation from normalized pixel space to world space via an inverse projection matrix, often incorporating depth scaling for specific camera models. It serves as the geometric foundation for initializing point clouds in neural rendering pipelines.
++This method converts a 2D depth map, camera intrinsic parameters, and an optional camera pose (extrinsic parameters) into a 3D point cloud in absolute world coordinates. It solves the problem of backprojecting per-pixel depth measurements from image space into a global 3D reference frame. It differs from sibling methods like [Point Cloud Generation and Refinement](8042-point-cloud-generation-and-refinement.md) by focusing strictly on the geometric reprojection step, whereas the sibling also includes feature estimation and semantic fusion. It differs from [Fixed-size initialization from RGB-D backprojection](10155-fixed-size-initialization-from-rgb-d-backprojection.md) by typically operating on variable-resolution depth maps without enforcing a fixed grid size during the initial unprojection.
+ 
+ ### [Point Cloud Generation and Refinement](8042-point-cloud-generation-and-refinement.md)
+-An offline process to generate and refine a 3D point cloud from a subset of training images to improve depth estimation accuracy for novel views in Neural Radiance Fields (NeRF). It differs from standard Multi-View Stereo (MVS) by iteratively validating points against ground-truth depth from adjacent views, resulting in higher point density and better PSNR for similar computational time.
++An offline process that generates and refines a 3D point cloud from a subset of training images to improve depth estimation accuracy for novel views in neural rendering. It differs from standard Multi-View Stereo (MVS) by iteratively validating points against ground-truth depth from adjacent views, allowing it to generate a denser, more accurate point cloud for similar computational time, which leads to higher rendering quality (PSNR).
+ 
+ ### [Fixed-size initialization from RGB-D backprojection](10155-fixed-size-initialization-from-rgb-d-backprojection.md)
+-This method generates a fixed-size, colored 3D point cloud initialization for volume rendering primitives (specifically 3D Gaussians) by backprojecting RGB-D data. It solves the problem of determining the initial spatial distribution and density of primitives in a scene. It differs from its parent [Depth to 3D Points Conversion](7929-depth-to-3d-points-conversion.md) by explicitly incorporating color information and applying specific downsampling strategies to control point count, and from its sibling [Point Cloud Generation and Refinement](8042-point-cloud-generation-and-refinement.md) by relying on explicit geometric backprojection rather than implicit field refinement for initialization.
++This method generates a fixed-size, colored 3D point cloud initialization for volume rendering primitives by backprojecting RGB-D data. It differs from its parent [Depth to 3D Points Conversion](7929-depth-to-3d-points-conversion.md) by applying explicit downsampling factors and stride ratios to control point density, and from its sibling [Point Cloud Generation and Refinement](8042-point-cloud-generation-and-refinement.md) by relying on direct geometric backprojection rather than implicit field refinement.
+ 
+ ### Global Scene Point Cloud Construction
+-Constructs a global scene point cloud $P \in \mathbb{R}^{N_p \times 3}$ in world coordinates by unprojecting pixels from $N$ calibrated images using intrinsic matrices $\{K_n\}_{n=1}^N$ and extrinsic matrices $\{T_n = R_n | t_n\}_{n=1}^N$ [S3]. The process involves:
+-1. Unprojecting pixels from each view: $\mathcal {P}=\bigcup ^N \mathbf {\pi }^{-1}\left (I_n, D_n, \mathbf {T}_n, \mathbf {K}_n\right )$ [S3].
+-2. Applying a uniform filter in 3D space to delete duplicate primitives while keeping the scene structure [S3].
+-3. Applying a statistical filter to remove floaters (noise) from the processed primitives [S3].
++Constructs a global scene point cloud $P \in \mathbb{R}^{N_p \times 3}$ in world coordinates by unprojecting pixels from $N$ calibrated images using intrinsic matrices $\{K_n\}_{n=1}^N$ and extrinsic matrices $\{T_n = R_n | t_n\}_{n=1}^N$ [S3]. The global point cloud is formed by the union of unprojected points: $\mathcal {P}=\bigcup ^N \mathbf {\pi }^{-1}\left (I_n, D_n, \mathbf {T}_n, \mathbf {K}_n\right )$ where $\pi^{-1}$ denotes pixel unprojection, $I_n$ is the image, $D_n$ is the depth, $T_n$ is the extrinsic matrix, and $K_n$ is the intrinsic matrix [S3]. A uniform filter is applied in 3D space to delete duplicate primitives while keeping the scene structure, followed by a statistical filter to remove floaters (noise) [S3].
+ 
+ ## Operating characteristics
+-- **Time Complexity:** $O(N)$ where $N$ is the number of pixels, for the basic backprojection. Global construction is $O(N \cdot V)$ where $V$ is the number of views. Filtering adds overhead proportional to the number of points.
+-- **Memory Complexity:** $O(N)$ to store the point cloud.
+-- **Strengths:** Simple, efficient, and provides a dense geometric initialization.
+-- **Limitations:** Sensitive to depth errors and noise. Does not handle occlusions or missing depth data inherently. Requires accurate camera calibration.
+-- **When to use:** When initializing point clouds for NeRF or Gaussian Splatting from known depth maps.
+-- **When not to use:** When depth maps are unreliable or unavailable, or when high-precision geometric refinement is required without iterative processes.
++- **Time Complexity:** $O(N \cdot H \cdot W)$ for single-view unprojection, where $N$ is the number of pixels. Multi-view construction adds a factor of $V$ (number of views). Filtering steps add complexity based on neighborhood search, typically $O(N \log N)$ or $O(N)$ with spatial hashing.
++- **Memory Complexity:** $O(N \cdot 3)$ for storing the point cloud coordinates. Multi-view accumulation may require temporary storage for all points before filtering.
++- **Measured Performance:** Not given in the sources.
++- **Scaling:** Scales linearly with image resolution and number of views. Filtering steps may become bottleneck for very large point clouds.
++- **Strengths:** Direct geometric interpretation; produces metrically accurate points if calibration is correct; simple to implement.
++- **Limitations:** Sensitive to depth noise and calibration errors; produces sparse points in textureless regions; requires post-processing (filtering) to remove artifacts.
++- **When to Use:** When metric 3D geometry is required from depth maps; for initializing point-based representations (e.g., 3DGS, NeRF).
++- **When Not to Use:** When high-density, smooth surfaces are needed without post-processing; when depth maps are unreliable or uncalibrated.
+ 
+ ## Background
+-The method originates from the need to initialize 3D representations for neural rendering. It is used in InstantSplat [S1, unofficial], which uses pseudo-focal lengths to generate point clouds from depth maps. It is also referenced in surface-based sampling for NeRF [S2] and in EVolSplat for global point cloud construction [S3]. The technique is fundamental to many modern 3D Gaussian Splatting pipelines that rely on explicit geometric initialization.
++The method originates from the need to convert 2D depth representations into 3D for neural rendering and computer vision tasks. It is widely used in offline stages of neural rendering pipelines to generate initial point clouds for surface-based sampling [S2]. The specific implementation using pseudo-focal lengths and grid coordinates is detailed in NVlabs' InstantSplat repository [S1, unofficial]. The global construction approach with filtering is described in EVolSplat for urban view synthesis [S3].
+ 
+ ## Sources

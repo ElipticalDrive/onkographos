@@ -1,0 +1,155 @@
+--- v002.md
++++ v003.md
+@@ -4,65 +4,81 @@
+ 
+ ## Overview
+-Chunk-based Training is a distributed optimization strategy for training large-scale neural volume representations, where the input volume is partitioned into spatial chunks to enable parallel processing across multiple GPUs [S1, unofficial]. It differs from single-GPU training by scaling the coordinate space and training units according to the number of chunks, allowing datasets like Hemibrain to be trained on 4–5 GPUs instead of a single device [S1, unofficial].
++Chunk-based Training is a strategy for optimizing large-scale volumetric datasets by partitioning the global volume into discrete chunks, enabling parallel optimization across multiple GPUs [S1, unofficial]. It differs from single-GPU training by scaling the coordinate space and training units according to the number of chunks, allowing efficient handling of massive datasets like Hemibrain [S1, unofficial].
+ 
+ ## How it works
+-**Inputs:** Large-scale 3D volume dataset; number of chunks $n_{chunk}$.
+-**Outputs:** Trained neural volume model parameters.
++**Inputs and Outputs:**
++- Input: Large-scale volumetric dataset (e.g., BigBrain, Woodbranch, Hemibrain).
++- Output: Optimized neural volume representation (e.g., ellipsoid primitives).
+ 
+ **Data Structures:**
+-The volume is represented in a normalized coordinate space. For large volumes, the global coordinate space $[-1, 1]^3$ is subdivided into $n_{chunk}$ sub-spaces. Each chunk $i$ occupies a specific region within this scaled space.
++- **Chunk Grid:** A logical grid of $n_{chunk}$ chunks. The global volume is mapped to a normalized coordinate space.
++- **Subvolumes:** Each training unit (full volume or individual chunk) is further partitioned into voxelized cubic subvolumes for optimization [S1, unofficial].
+ 
+ **Steps:**
+-1.  **Coordinate Space Scaling:** Determine the bounding box for each chunk. If the full volume is optimized in $[-1, 1]^3$, the space for $n_{chunk}$ chunks is scaled such that each chunk covers a sub-region. For example:
+-    *   $n_{chunk} = 8$: Each chunk covers a region of size $1.0$ in each dimension (e.g., $[-0.5, 0.5]^3$ for the central chunk, or partitioned octants).
+-    *   $n_{chunk} = 64$: Each chunk covers a region of size $0.5$ in each dimension (e.g., $[-0.25, 0.25]^3$).
+-    *   $n_{chunk} = 125$: Each chunk covers a region of size $0.4$ in each dimension (e.g., $[-0.2, 0.2]^3$) [S1, unofficial].
+-2.  **Chunk Assignment:** Assign each chunk to a distinct GPU. The number of GPUs used matches $n_{chunk}$ or is a divisor thereof if multiple chunks are processed per GPU [S1, unofficial].
+-3.  **Subvolume Partitioning:** Within each training unit (chunk or full volume), partition the data into voxelized cubic subvolumes for optimization [S1, unofficial].
+-4.  **Parallel Optimization:** Each GPU optimizes its assigned chunk(s) independently using the subvolume partitioning. The subvolume side length is set to approximately half the longest axis of the training unit. For flat volumes (e.g., Neuron), the smallest axis is used instead [S1, unofficial].
++1. **Coordinate Space Normalization:**
++   - For small datasets, the full volume is optimized in a normalized $[-1, 1]^3$ coordinate space [S1, unofficial].
++   - For large datasets, the training space is scaled according to the number of chunks $n_{chunk}$. The range becomes $[-\frac{1}{2\sqrt[3]{n_{chunk}}}, \frac{1}{2\sqrt[3]{n_{chunk}}}]^3$.
++     - Example: For $n_{chunk}=8$, range is $[-0.5, 0.5]^3$.
++     - Example: For $n_{chunk}=64$, range is $[-0.25, 0.25]^3$.
++     - Example: For $n_{chunk}=125$, range is $[-0.2, 0.2]^3$ [S1, unofficial].
++
++2. **Chunk Assignment:**
++   - The global volume is decomposed into $n_{chunk}$ chunks. Each chunk is assigned to a specific GPU [S1, unofficial].
++
++3. **Subvolume Partitioning:**
++   - During optimization, the training unit (full volume or individual chunk) is partitioned into voxelized cubic subvolumes [S1, unofficial].
++   - **Subvolume Side Length:** Set to approximately half the longest axis of the training unit. For flat volumes (e.g., Neuron), the smallest axis is used instead [S1, unofficial].
++
++4. **Parallel Optimization:**
++   - Each GPU optimizes its assigned chunk(s) using the subvolumes. The optimization process involves structure-aware primitive learning and per-primitive ray sampling [S1, unofficial].
+ 
+ **Parameters:**
+-*   $n_{chunk}$: Number of chunks. Typical values: 8 (BigBrain, Woodbranch), 64 (Hemibrain vDeltaA), 125 (Hemibrain lLN2P) [S1, unofficial].
+-*   Subvolume side length: $\approx \frac{1}{2} \times \max(\text{axis lengths})$ of the training unit. For flat volumes, $\approx \frac{1}{2} \times \min(\text{axis lengths})$ [S1, unofficial].
++- $n_{chunk}$: Number of chunks.
++  - BigBrain: 8 chunks [S1, unofficial].
++  - Woodbranch: 8 chunks [S1, unofficial].
++  - Hemibrain (vDeltaA): 64 chunks [S1, unofficial].
++  - Hemibrain (lLN2P): 125 chunks [S1, unofficial].
++- Subvolume side length: ~0.5 * max(axis lengths) of training unit [S1, unofficial].
++
++**Edge Cases and Pitfalls:**
++- **Flat Volumes:** For non-cubic volumes (e.g., Neuron), the subvolume side length is determined by the smallest axis to maintain cubic subvolumes [S1, unofficial].
++- **Precision:** The scaling of the coordinate space must be precise to avoid boundary artifacts between chunks [S1, unofficial].
+ 
+ **Pseudocode:**
+ ```python
+-def chunk_based_training(volume_data, n_chunk, gpu_ids):
+-    # Step 1: Scale coordinate space
+-    # The global space is [-1, 1]^3.
+-    # Each chunk i gets a sub-region.
+-    # Example for 8 chunks (octants):
+-    # Chunk 0: [-1, 0] x [-1, 0] x [-1, 0]
+-    # ...
+-    # For 64 chunks, the step size is 0.5.
+-    # For 125 chunks, the step size is 0.4.
+-    chunk_size = 2.0 / n_chunk ** (1/3) # Approximate linear scaling factor
++def chunk_based_training(dataset, n_chunk, num_gpus):
++    # Step 1: Determine coordinate space scaling
++    if n_chunk == 1:
++        coord_range = [-1.0, 1.0]
++    else:
++        scale = 1.0 / (2.0 * (n_chunk ** (1.0/3.0)))
++        coord_range = [-scale, scale]
+     
+-    # Step 2: Assign chunks to GPUs
+-    # Each GPU handles one or more chunks
+-    gpu_assignments = assign_chunks_to_gpus(n_chunk, gpu_ids)
++    # Step 2: Partition volume into chunks
++    chunks = partition_volume(dataset, n_chunk)
+     
+-    # Step 3: Parallel optimization
++    # Step 3: Assign chunks to GPUs
++    gpu_assignments = assign_to_gpus(chunks, num_gpus)
++    
++    # Step 4: Parallel optimization
+     results = []
+-    for gpu_id, chunks in gpu_assignments.items():
+-        # For each chunk in this GPU's assignment
+-        for chunk in chunks:
+-            # Determine subvolume size based on chunk dimensions
+-            chunk_dims = get_chunk_dimensions(chunk)
+-            if is_flat_volume(chunk_dims):
+-                subvolume_side = 0.5 * min(chunk_dims)
+-            else:
+-                subvolume_side = 0.5 * max(chunk_dims)
++    for gpu_id, gpu_chunks in gpu_assignments.items():
++        # Determine subvolume size for this chunk
++        training_unit = gpu_chunks
++        max_axis = max(training_unit.dimensions)
++        subvolume_side = max_axis / 2.0
++        
++        # For flat volumes, use smallest axis
++        min_axis = min(training_unit.dimensions)
++        if is_flat_volume(training_unit):
++            subvolume_side = min_axis / 2.0
+             
+-            # Optimize chunk using subvolumes
+-            model_params = optimize_chunk(
+-                volume_data, 
+-                chunk, 
+-                subvolume_side, 
+-                gpu_id
+-            )
+-            results.append(model_params)
+-            
+-    return merge_model_params(results)
++        subvolumes = partition_into_subvolumes(training_unit, subvolume_side)
++        
++        # Optimize chunk using subvolumes
++        optimized_chunk = optimize_chunk(subvolumes, coord_range)
++        results.append(optimized_chunk)
++        
++    return merge_results(results)
+ ```
+ 
+@@ -70,14 +86,18 @@
+ 
+ ### Subvolume Configuration
+-A variant where the training unit (full volume or individual chunk) is further partitioned into voxelized cubic subvolumes during optimization. The subvolume side length is set to approximately half the longest axis of the training unit. For flat volumes (e.g., Neuron), the smallest axis is used instead [S1, unofficial]. This reduces memory pressure and improves cache locality during gradient computation.
++A variant where the training unit (full volume or individual chunk) is partitioned into voxelized cubic subvolumes during optimization. The subvolume side length is set to approximately half the longest axis of the training unit. For flat volumes, the smallest axis is used instead [S1, unofficial]. This configuration helps manage memory and computational load during the optimization process.
+ 
+ ## Operating characteristics
+-*   **Hardware:** Tested on NVIDIA RTX A6000 GPUs [S1, unofficial].
+-*   **Scaling:** BigBrain and Woodbranch trained sequentially on a single A6000 ($n_{chunk}=8$ or $4$). Hemibrain (vDeltaA) uses 4 GPUs ($n_{chunk}=64$). Hemibrain (lLN2P) uses 5 GPUs ($n_{chunk}=125$) [S1, unofficial].
+-*   **Memory:** Subvolume partitioning reduces per-GPU memory requirements by processing smaller voxelized blocks [S1, unofficial].
+-*   **Performance:** Enables training of datasets that exceed single-GPU memory capacity (e.g., Hemibrain) [S1, unofficial].
++- **Time Complexity:** Scales with the number of chunks and GPUs. Parallel optimization reduces total training time compared to single-GPU training [S1, unofficial].
++- **Memory Complexity:** Each GPU only needs to store the data for its assigned chunks and subvolumes, reducing peak memory usage per GPU [S1, unofficial].
++- **Performance:**
++  - BigBrain and Woodbranch: Trained sequentially on a single NVIDIA RTX A6000 GPU [S1, unofficial].
++  - Hemibrain (vDeltaA): Trained on 4 NVIDIA RTX A6000 GPUs [S1, unofficial].
++  - Hemibrain (lLN2P): Trained on 5 NVIDIA RTX A6000 GPUs [S1, unofficial].
++- **Strengths:** Enables training of massive datasets that do not fit into a single GPU's memory. Parallel processing accelerates optimization [S1, unofficial].
++- **Limitations:** Requires careful coordination of chunk boundaries and coordinate space scaling. Performance may be limited by inter-GPU communication if chunks are not independent [S1, unofficial].
+ 
+ ## Background
+-Chunk-based Training was introduced in the context of 3D Ellipsoid-based Sparse Volume Rendering (ESVR) to handle large-scale volumetric datasets like BigBrain and Hemibrain [S1, unofficial]. It builds on the principles of chunk-based spatial partitioning, extending them to the training phase rather than just rendering [S1, unofficial].
++Chunk-based Training was introduced in the ESVR (3D Ellipsoid-based Sparse Volume Rendering) paper, which proposed structure-aware primitive learning and per-primitive ray sampling for large-scale volumetric data [S1, unofficial]. The method was developed to handle datasets like BigBrain, Woodbranch, and Hemibrain, which are too large for traditional single-GPU training approaches [S1, unofficial].
+ 
+ ## Sources

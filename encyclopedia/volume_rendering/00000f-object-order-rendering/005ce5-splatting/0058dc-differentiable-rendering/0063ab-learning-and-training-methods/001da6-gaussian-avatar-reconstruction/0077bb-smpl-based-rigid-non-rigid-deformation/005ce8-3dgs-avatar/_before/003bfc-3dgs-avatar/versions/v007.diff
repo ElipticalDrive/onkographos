@@ -1,0 +1,97 @@
+--- v006.md
++++ v007.md
+@@ -3,45 +3,44 @@
+ 
+ ## Overview
+-3DGS-Avatar reconstructs full-body digital humans by combining 3D Gaussians with rigid and non-rigid transformations derived from an underlying SMPL model [S3, unofficial]. It distinguishes itself from sibling methods by introducing a shallow Multi-Layer Perceptron (MLP) to model Gaussian color, replacing spherical harmonics, and by regularizing the deformation with geometry priors to handle pose-dependent cloth deformation effectively [S1].
++3DGS-Avatar reconstructs photorealistic, animatable full-body human avatars by anchoring 3D Gaussians to an underlying SMPL model [S3, unofficial]. It distinguishes itself from sibling methods by replacing spherical harmonics with a shallow Multi-Layer Perceptron (MLP) to model per-Gaussian color, enabling the capture of pose-dependent cloth deformation and novel pose generalization [S1].
+ 
+ ## How it works
+-**Inputs and Outputs:**
+-*   **Inputs:** Monocular or multi-view video sequences of a human subject; SMPL-X model parameters (pose $\theta$, shape $\beta$, global translation $T$) [S2, S3, unofficial].
+-*   **Outputs:** A set of 3D Gaussians defined in canonical space, each with position, covariance, opacity, and color parameters, capable of rendering novel poses.
++**Inputs:** Monocular or multi-view video sequences of a human subject; SMPL mesh parameters (pose $\theta$, shape $\beta$) fitted to the input frames.
++**Outputs:** A set of 3D Gaussians $\{g_i\}$, each defined in a canonical space, with parameters: position $\mathbf{p}_i$, covariance $\Sigma_i$, opacity $\alpha_i$, color $c_i$ (predicted by MLP), and SMPL skinning weights $w_{i,j}$.
+ 
+ **Data Structures:**
+-*   **Gaussian Attributes:** Each Gaussian $i$ stores:
+-    *   Position $\mathbf{p}_i$ in canonical space.
+-    *   Rotation $\mathbf{q}_i$ and Scale $\mathbf{s}_i$ (defining covariance $\Sigma_i$).
+-    *   Opacity $\alpha_i$.
+-    *   Color representation: Instead of spherical harmonic coefficients, a shallow MLP $\mathcal{M}_{color}$ takes direction $\mathbf{d}$ and pose features as input to predict RGB color [S1].
+-*   **Deformation Network:** A pose-conditioned MLP $\mathcal{M}_{def}$ that predicts residual offsets $\Delta \mathbf{p}$ based on pose parameters [S1][S3, unofficial].
++*   **Gaussian Attributes:** Stored in flat arrays or structures of arrays (SoA) for GPU access.
++    *   $\mathbf{p}_i \in \mathbb{R}^3$: Canonical position.
++    *   $\Sigma_i \in \mathbb{R}^{3 \times 3}$: Covariance matrix.
++    *   $\alpha_i \in \mathbb{R}$: Opacity.
++    *   $w_{i,j} \in \mathbb{R}$: Skinning weight for bone $j$ (sums to 1).
++    *   MLP Weights $W_{color}$: Parameters for the shallow color network.
++*   **SMPL Model:** Pre-loaded mesh topology and joint hierarchy.
+ 
+ **Steps:**
+-1.  **Initialization:** Initialize Gaussians on the surface of the SMPL mesh in the canonical rest pose [S1][S3, unofficial].
+-2.  **Rigid Deformation:** Apply Linear Blend Skinning (LBS) using SMPL joint rotations to transform canonical positions $\mathbf{p}$ to $\mathbf{p}_{rigid}$ [S1].
+-3.  **Non-Rigid Deformation:** Predict residual offsets $\Delta \mathbf{p}$ using the deformation network conditioned on pose $\theta$: $\Delta \mathbf{p} = \mathcal{M}_{def}(\theta)$. Compute final position $\mathbf{p}' = \mathbf{p}_{rigid} + \Delta \mathbf{p}$ [S1][S3, unofficial].
+-4.  **Color Prediction:** For each Gaussian, compute view direction $\mathbf{d}$ in camera space. Pass $\mathbf{d}$ and pose features through the shallow color MLP $\mathcal{M}_{color}$ to obtain RGB color [S1].
+-5.  **Differentiable Rendering:** Render the deformed Gaussians using standard 2D splatting. Compute photometric loss against input images [S1].
+-6.  **Regularization:** Apply geometry priors to the deformation field to prevent artifacts, particularly in dynamic cloth regions [S1].
+-
+-**Formulas:**
+-*   Rigid Transform: $\mathbf{p}_{rigid} = \text{LBS}(\mathbf{p}, \theta)$
+-*   Non-Rigid Offset: $\Delta \mathbf{p} = \mathcal{M}_{def}(\theta)$
+-*   Final Position: $\mathbf{p}' = \mathbf{p}_{rigid} + \Delta \mathbf{p}$
+-*   Color: $\mathbf{c} = \mathcal{M}_{color}(\mathbf{d}, \theta)$
++1.  **Initialization:** Initialize Gaussians on the surface of the SMPL mesh in the canonical rest pose [S1][S3, unofficial]. Assign initial skinning weights based on the SMPL vertex weights.
++2.  **Deformation:** For a target pose $\theta$:
++    a. Compute rigid transformation $\mathbf{p}_{rigid}$ using Linear Blend Skinning (LBS) [S1][S3, unofficial]:
++       $$ \mathbf{p}_{rigid} = \sum_{j=1}^{N_{bones}} w_{i,j} \mathbf{T}_j(\theta) \mathbf{p}_i $$
++    b. Compute non-rigid residual $\Delta \mathbf{p}$ using a deformation network (MLP) conditioned on pose and canonical position [S3, unofficial].
++    c. Final position: $\mathbf{p}'_i = \mathbf{p}_{rigid} + \Delta \mathbf{p}$.
++3.  **Covariance Update:** Transform covariance using the Jacobian $J$ of the deformation map [G]:
++    $$ \Sigma'_i = J \Sigma_i J^T + \sigma^2 I $$
++4.  **Color Prediction:** Instead of spherical harmonics, pass the deformed position, view direction, and pose features through a shallow MLP to predict color $c_i$ [S1].
++5.  **Rendering:** Differentiable splatting of deformed Gaussians onto the 2D image plane [S1].
++6.  **Optimization:** Minimize loss $\mathcal{L} = \mathcal{L}_{L1} + \lambda_{SSIM}\mathcal{L}_{MS-SSIM} + \lambda_{reg}\mathcal{L}_{reg}$, where $\mathcal{L}_{reg}$ includes geometry priors to regularize deformation [S1].
+ 
+ **Parameters:**
+-*   Shallow MLP depth: Not given in the sources.
+-*   Regularization weight for geometry priors: Not given in the sources.
++*   MLP depth/width: "Shallow" (specifics not given in sources) [S1].
++*   Regularization weights: Not given in sources [S1].
+ 
+ **Edge Cases:**
+-*   **Monocular Ambiguity:** Without multi-view data, depth ambiguity may cause artifacts in dynamic cloth; addressed by physical-based priors in related methods like GaussianBody, but 3DGS-Avatar relies on geometry priors [S1].
+-*   **Pose Generalization:** The method is designed to generalize to novel poses, but extreme poses may challenge the deformation network if not sufficiently regularized [S1].
++*   **Degenerate Poses:** Extreme poses may cause skinning weights to become unstable; regularization helps [S1].
++*   **Monocular Ambiguity:** Depth ambiguity in monocular video requires strong geometric priors to avoid artifacts [S1].
+ 
+ ## Subtopics
+ 
+ ### Gaussian Avatar
+-Uses SMPL model with pose features to predict Gaussian parameters via a feed-forward network [S3, unofficial].
++Uses SMPL with pose features to predict Gaussian parameters via a feed-forward network [S3, unofficial].
+ 
+ ### Animatable Gaussians
+@@ -49,16 +48,14 @@
+ 
+ ### UV-based motion parameterization
+-Maps Gaussians to 2D texture space for appearance capture [S1].
++Maps Gaussians to 2D UV space for appearance modeling [S1].
+ 
+ ## Operating characteristics
+-*   **Time Complexity:** Training time is not explicitly given, but the use of a shallow MLP for color and deformation adds computational overhead compared to static 3DGS [S1].
+-*   **Memory Complexity:** Higher than static 3DGS due to the storage of MLP weights for color and deformation [S1].
+-*   **Strengths:** Photorealistic rendering with pose-dependent cloth deformation; effective generalization to novel poses [S1].
+-*   **Limitations:** Requires SMPL-X rig; potential artifacts in dynamic cloth if geometry priors are insufficient [S1].
+-*   **When to use:** When high-fidelity, animatable full-body avatars with detailed cloth dynamics are needed from video data [S1][S3, unofficial].
+-*   **When not to use:** For static scenes or when computational resources for MLP inference are limited [S1].
++*   **Time Complexity:** Rendering is $O(N)$ where $N$ is the number of Gaussians. Training is slower due to MLP inference per Gaussian.
++*   **Memory Complexity:** Higher than standard 3DGS due to MLP weights and deformation network storage [S1].
++*   **Strengths:** Photorealistic rendering of cloth deformation; generalizes to novel poses [S1].
++*   **Limitations:** Requires SMPL fitting; MLP inference adds computational overhead compared to SH [S1].
+ 
+ ## Background
+-3DGS-Avatar was introduced to address the limitations of static 3D Gaussian Splatting in dynamic human modeling. It builds on the SMPL-based rigid/non-rigid deformation framework [S3, unofficial]. The method was developed to provide photorealistic rendering with pose-dependent cloth deformation, leveraging a shallow MLP for color and geometry priors for regularization [S1]. It is part of the broader family of Gaussian Avatar Reconstruction methods [S2, S3, unofficial].
++3DGS-Avatar was introduced to address the limitations of spherical harmonics in capturing complex, pose-dependent appearance changes like cloth wrinkles [S1]. It builds on the SMPL-based rigid/non-rigid deformation framework [S3, unofficial].
+ 
+ ## Sources

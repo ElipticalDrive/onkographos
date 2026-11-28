@@ -1,0 +1,103 @@
+# Deterministic Integer Allocation
+
+Also called: Fixed-Phase Rounding, Systematic Rounding
+
+## Overview
+Deterministic Integer Allocation converts continuous expected Gaussian counts $B p_n$ into integer allocations $k_n^\bullet$ for $N$ anchors, ensuring the total count sums exactly to a budget $B$ without sorting or handling ties [S1, unofficial]. It sets itself apart from stochastic multinomial sampling by providing a deterministic, tie-free result with $O(N)$ complexity, relying on a fixed phase to eliminate variance while maintaining the expected value property [S1, unofficial].
+
+## How it works
+**Inputs:**
+- $N$: Number of anchors.
+- $B$: Total integer budget (sum of allocations).
+- $p_n$: Allocation probability for anchor $n$, where $\sum_{n=1}^N p_n = 1$.
+
+**Outputs:**
+- $k_n^\bullet$: Integer allocation count for anchor $n$, where $\sum_{n=1}^N k_n^\bullet = B$.
+
+**Data Structures:**
+- Array `P` of size $N+1$ storing cumulative probabilities. `P[0] = 0`. `P[n] = P[n-1] + p[n-1]` for $n=1..N$.
+- Array `k` of size $N$ storing integer counts.
+
+**Parameters:**
+- $\phi = 1/2$: Fixed phase offset [S1, unofficial].
+- Budget floor: The ratio $B/N$ is floored at $1/64$ to ensure the log-ratio $u = \log_2(B/N)$ remains finite for very small budgets [S1, unofficial].
+
+**Steps:**
+1. **Compute Cumulative Probabilities:** Calculate $P_n = \sum_{m=1}^n p_m$ for all anchors $n=1..N$, with $P_0=0$. If $\sum p_n \neq 1$ due to floating-point error, renormalize $P_N$ to one [S1, unofficial].
+2. **Calculate Integer Counts:** For each anchor $n=1..N$, compute:
+   $$k_n^\bullet = \lfloor B P_n - \phi \rfloor - \lfloor B P_{n-1} - \phi \rfloor$$
+   This calculation must be performed in double precision arithmetic to maintain accuracy [S1, unofficial].
+3. **Verify Sum:** The counts inherently sum to $B$ due to the telescoping nature of the floor differences: $\sum_{n=1}^N k_n^\bullet = \lfloor B P_N - \phi \rfloor - \lfloor B P_0 - \phi \rfloor = \lfloor B - 0.5 \rfloor - \lfloor -0.5 \rfloor = (B-1) - (-1) = B$ [S1, unofficial].
+
+**Pseudocode:**
+> **Unverified code.** The code below did not pass a test run against a reference implementation, or no test fits it, so it may contain errors.
+
+```python
+def deterministic_integer_allocation(p, B):
+    """
+    Convert probabilities p into integer allocations k summing to B.
+    p: list of floats, length N, summing to 1.0
+    B: int, total budget
+    Returns: list of ints, length N, summing to B
+    """
+    N = len(p)
+    k = [0] * N
+    
+    # Step 1: Compute cumulative probabilities
+    # P[0] = 0.0
+    P = [0.0] * (N + 1)
+    current_sum = 0.0
+    for n in range(1, N + 1):
+        current_sum += p[n - 1]
+        P[n] = current_sum
+        
+    # Renormalize if necessary to handle floating point drift
+    if abs(P[N] - 1.0) > 1e-9:
+        scale = 1.0 / P[N]
+        for n in range(1, N + 1):
+            P[n] *= scale
+            
+    # Fixed phase
+    phi = 0.5
+    
+    # Step 2: Calculate integer counts using double precision
+    # Note: In Python, float is double precision.
+    # We compute floor(B * P[n] - phi) - floor(B * P[n-1] - phi)
+    
+    prev_floor = -1 # Corresponds to floor(B * P[0] - phi) = floor(-0.5) = -1
+    
+    for n in range(1, N + 1):
+        curr_val = B * P[n] - phi
+        prev_val = B * P[n - 1] - phi
+        
+        # Manual floor for negative numbers if needed, though math.floor handles it
+        curr_f = math.floor(curr_val)
+        prev_f = math.floor(prev_val)
+        
+        k[n - 1] = curr_f - prev_f
+        
+    return k
+```
+
+**Edge Cases and Pitfalls:**
+- **Zero-probability anchors:** An anchor with $p_n = 0$ receives exactly 0 Gaussians, as the interval length is zero [S1, unofficial].
+- **Precision:** The method requires double precision arithmetic to avoid accumulation errors in the floor operations [S1, unofficial].
+- **Small Budgets:** If $B/N$ is very small, the ratio is floored at $1/64$ to prevent numerical instability in related log-ratio calculations [S1, unofficial].
+
+## Subtopics
+
+### Priority-Based Content Allocation
+A variant used in chunk-based world streaming contexts where children have minimum content targets. It filters children with `count > 0`, calculates a `minTotal` from minimum targets, and sets `total` to `max(minTotal, min(node.count, floor(totalTarget)))`. It initializes allocations to minimums, distributes remaining budget proportionally based on `exact = (remaining * entry.child.count) / denominator`, and assigns `extra = min(entry.capacity, floor(exact))`. Finally, it sorts active allocations by remainder descending, child count descending, and child slot ascending to assign final overrides [S2, unofficial].
+
+## Operating characteristics
+- **Time Complexity:** $O(N)$ due to a single cumulative sum pass. No sorting is required [S1, unofficial].
+- **Memory Complexity:** $O(N)$ to store cumulative probabilities and output counts.
+- **Strengths:** Deterministic, tie-free, and computationally efficient. It guarantees the sum constraint exactly [S1, unofficial].
+- **Limitations:** It is a heuristic approximation of multinomial sampling. While it satisfies $E[k_n] = B p_n$ (mean of multinomial rollouts) when the phase is random, fixing the phase removes the stochastic variance [S1, unofficial].
+
+## Background
+The method originates from the GSPO (Gaussian Splatting Policy Optimization) framework, specifically within the RLSplat paper which introduces resource-linear budget control for feed-forward 3D Gaussian Splatting [S1, unofficial]. It is used during inference and for reconstruction loss during policy training to convert expected counts into integer allocations for Gaussian splats [S1, unofficial].
+
+## Sources
+[S1] RLSplat: Resource-Linear Budget Control for Feed-forward 3D Gaussian Splatting, https://arxiv.org/abs/2610.27712, fetched 2026-10-26 (unofficial)
+[S2] lzy-0618/3DGS-PLY-3DTiles-Converter, https://github.com/lzy-0618/3DGS-PLY-3DTiles-Converter, fetched 2026-10-27 (unofficial)

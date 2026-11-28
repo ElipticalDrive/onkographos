@@ -1,0 +1,127 @@
+# Newton–Raphson Voxel Intersection
+
+Also called: Cubic Ray-Voxel Intersection Solver, NR Voxel Intersection, Ray-cubic intersection, Voxel intersection root finder
+
+## Overview
+The Newton–Raphson Voxel Intersection method solves for the intersection of a ray with a voxel by finding the roots of the cubic equation defining the voxel's boundary surface [S1, unofficial]. It builds on the polynomial split from Marmitt et al. [2004] but replaces the repeated linear interpolation used in the Marmitt method with Newton–Raphson iteration [S1, unofficial]. This approach offers a balance between the speed of analytic solvers and the flexibility of iterative refinement, specifically designed to handle the precision requirements of ray-traced signed distance function (SDF) grids [S1, unofficial][S2, unofficial].
+
+## How it works
+**Inputs and Outputs:**
+- **Input:** Ray origin $\mathbf{o}$, ray direction $\mathbf{d}$, voxel bounds (min/max coordinates), and the cubic polynomial coefficients derived from the SDF field within the voxel [S1, unofficial].
+- **Output:** The smallest positive intersection parameter $t$ if an intersection exists, or a failure indicator [S1, unofficial].
+
+**Data Structures:**
+The method relies on the cubic polynomial $P(t) = at^3 + bt^2 + ct + d = 0$ representing the distance function along the ray [S1, unofficial].
+
+**Parameters:**
+- **Maximum Iterations:** 50 [S1, unofficial].
+- **Convergence Epsilon ($\epsilon_{conv}$):** $4.0 \cdot 10^{-3}$ [S1, unofficial]. The iteration stops if the absolute difference between two subsequent $t$ values is less than this value [S1, unofficial].
+- **Validation Epsilon ($\epsilon_{val}$):** $1.0 \cdot 10^{-15}$ [S2, unofficial]. Used to verify if the final root estimate produces a near-zero result in the cubic equation [S2, unofficial]. Values of $1.0 \cdot 10^{-30}$ cause precision artifacts, while $1.0 \cdot 10^{-8}$ causes imprecision [S2, unofficial]. The optimal value is resolution-dependent [S2, unofficial].
+
+**Steps:**
+1. **Polynomial Split:** Decompose the cubic polynomial using the method from Marmitt et al. [2004] [S1, unofficial].
+2. **Initialization:** Set initial guess $t_0$ based on the voxel entry point or previous iteration [G].
+3. **Iteration Loop:**
+   - For $i = 0$ to `max_iterations` - 1:
+     - Evaluate $P(t_i)$ and $P'(t_i)$ (the derivative) [G].
+     - Compute next estimate: $t_{i+1} = t_i - \frac{P(t_i)}{P'(t_i)}$ [G].
+     - Check convergence: If $|t_{i+1} - t_i| < \epsilon_{conv}$, break loop [S1, unofficial].
+     - Ensure loop conditions use absolute value comparisons to prevent infinite loops or premature termination [S2, unofficial].
+4. **Validation:**
+   - Plug the final root estimate $t_{final}$ back into the cubic equation $P(t_{final})$ [S2, unofficial].
+   - If $|P(t_{final})| > \epsilon_{val}$, discard the root as a false positive [S2, unofficial].
+   - If valid, check if $t_{final}$ lies within the voxel bounds [G].
+5. **Quadratic Case Handling:** If the cubic degenerates to a quadratic, remove unnecessary `IsZero()` tests that incorrectly filter valid roots [S2, unofficial].
+
+**Pseudocode:**
+> **Unverified code.** The code below did not pass a test run against a reference implementation, or no test fits it, so it may contain errors.
+
+```python
+def newton_raphson_voxel_intersection(ray_origin, ray_direction, voxel_bounds, cubic_coeffs):
+    """
+    ray_origin: (x, y, z)
+    ray_direction: (x, y, z)
+    voxel_bounds: (min_x, min_y, min_z, max_x, max_y, max_z)
+    cubic_coeffs: (a, b, c, d)
+    Returns: t (float) or None
+    """
+    MAX_ITER = 50
+    EPS_CONV = 4.0e-3
+    EPS_VAL = 1.0e-15
+    
+    t_min = float('-inf')
+    t_max = float('inf')
+    
+    for axis in range(3):
+        if abs(ray_direction[axis]) > 1e-10:
+            t1 = (voxel_bounds[axis] - ray_origin[axis]) / ray_direction[axis]
+            t2 = (voxel_bounds[axis + 3] - ray_origin[axis]) / ray_direction[axis]
+            t_min = max(t_min, min(t1, t2))
+            t_max = min(t_max, max(t1, t2))
+        else:
+            if ray_origin[axis] < voxel_bounds[axis] or ray_origin[axis] > voxel_bounds[axis + 3]:
+                return None
+                
+    if t_max < 0:
+        return None
+        
+    t_current = max(0.0, t_min)
+    t_prev = t_current
+    
+    for i in range(MAX_ITER):
+        t = t_current
+        a, b, c, d = cubic_coeffs
+        
+        P_t = ((a * t + b) * t + c) * t + d
+        P_prime_t = (3 * a * t + 2 * b) * t + c
+        
+        if abs(P_prime_t) < 1e-12:
+            break
+            
+        t_next = t - P_t / P_prime_t
+        
+        if abs(t_next - t_prev) < EPS_CONV:
+            t_current = t_next
+            break
+            
+        t_prev = t
+        t_current = t_next
+        
+        if t_current < 0:
+            t_current = 0.0
+            
+    t_final = t_current
+    P_final = ((a * t_final + b) * t_final + c) * t_final + d
+    
+    if abs(P_final) > EPS_VAL:
+        return None
+        
+    if t_final < 0:
+        return None
+        
+    intersection_point = (
+        ray_origin[0] + t_final * ray_direction[0],
+        ray_origin[1] + t_final * ray_direction[1],
+        ray_origin[2] + t_final * ray_direction[2]
+    )
+    
+    for i in range(3):
+        if intersection_point[i] < voxel_bounds[i] or intersection_point[i] > voxel_bounds[i + 3]:
+            return None
+            
+    return t_final
+```
+
+## Operating characteristics
+- **Time Complexity:** $O(1)$ per voxel intersection, dominated by a fixed number of Newton–Raphson iterations [S1, unofficial].
+- **Memory Complexity:** $O(1)$, requiring only storage for the cubic coefficients and a few scalar variables [G].
+- **Performance:** In path tracing experiments, NR provided competitive performance compared to analytic solvers and Marmitt's method, with visual quality indistinguishable from analytic methods [S1, unofficial].
+- **Strengths:** Robust against precision issues when tuned correctly; handles degenerate cases (quadratic) with specific fixes [S2, unofficial].
+- **Limitations:** Sensitive to the choice of epsilon values; requires careful implementation to avoid false positives from convergence to incorrect roots within voxel bounds [S2, unofficial]. Not suitable for extremely high-precision requirements without resolution-dependent tuning [S2, unofficial].
+
+## Background
+The method was developed as part of a broader effort to improve ray-traced volume rendering of signed distance function grids [S1, unofficial]. It builds on the polynomial split from Marmitt et al. [2004] but replaces the repeated linear interpolation used in the Marmitt method with Newton–Raphson iteration [S1, unofficial]. The Newton–Raphson variant was implemented and tested by Kevin Beason in 2005, with specific fixes for precision artifacts and false positives documented in his development logs [S2, unofficial]. The method is part of a family of voxel intersection techniques including grid sphere tracing, sphere tracing, and analytic solvers [S1, unofficial].
+
+## Sources
+[S1] Ray tracing of signed distance function grids, https://www.jcgt.org/published/0011/03/06/paper-lowres.pdf, fetched 2026-10-25 (unofficial)
+[S2] Log, https://kevinbeason.com/scs/log/2005/index01.html, fetched 2026-10-29 (unofficial)

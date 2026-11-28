@@ -1,0 +1,155 @@
+--- v002.md
++++ v003.md
+@@ -4,22 +4,21 @@
+ 
+ ## Overview
+-This method extracts and cleans video frames from laparoscopic surgical recordings to create a high-quality input dataset for 3D scene reconstruction. It solves the problem of degraded input quality caused by camera motion artifacts, lighting inconsistencies, and redundant video borders. It is distinguished from general volume preprocessing by its specific focus on surgical video characteristics, such as discarding frames based on camera pose discontinuities and handling specific black-bar cropping ratios.
++This method extracts and preprocesses equidistant frames from laparoscopic surgical video to create a clean input dataset for 3D scene reconstruction [S1]. It discards frames with severe exposure issues or motion blur detected via adjacent camera pose differences, and crops redundant black borders [S1, S2].
+ 
+ ## How it works
+ **Inputs and Outputs**
+-- Input: Raw laparoscopic video file (e.g., MP4).
+-- Output: A set of $n_{frame}$ preprocessed image frames and associated metadata (camera poses, UV coordinates if applicable).
++- Input: Raw laparoscopic video file.
++- Output: A set of $n_{frame}$ preprocessed image frames and associated camera pose metadata [S1, S2].
+ 
+ **Data Structures**
+ - Frame List: A sequence of $n_{frame}$ images.
+-- Metadata: Camera pose matrices and UV coordinates for texture mapping.
++- Metadata: Camera pose matrices and optional UV coordinates for texture mapping [S2].
+ 
+ **Steps**
+-1. **Extraction**: Extract $n_{frame}$ equidistant frames from the source video [S1].
+-2. **Quality Filtering**: Discard frames with severe under-exposure, over-exposure, or motion blur. Detection is performed by analyzing the difference in camera pose between adjacent frames [S2].
+-3. **Cropping**: Remove redundant black areas from the frame borders. Crop 6.6% from the left and 9.1% from the right [S1].
+-4. **Color Correction**: Linearize the image gamma and apply white balancing [S2].
+-5. **Distortion Removal**: Remove lens distortion from the images [S2].
+-6. **Geometry Representation**: Represent the scene geometry using a standard triangle mesh with UV texture parameterization. If UV coordinates are missing (e.g., in synthetic datasets like Replica), generate them automatically using Blender’s “Smart UV Project” operator [S2].
++1. Extract $n_{frame}$ equidistant frames from the source video [S1].
++2. Discard frames with severe under- and over-exposure and motion blur, detected from the difference in camera pose between adjacent frames [S2].
++3. Crop the video frames to remove redundant black areas: 6.6% from the left and 9.1% from the right [S1].
++4. Linearize the image gamma, apply white balancing, and remove lens distortion [S2].
++5. Represent scene geometry with a standard triangle mesh with UV texture parameterization. If UV coordinates are missing, generate them automatically using Blender’s standard “Smart UV Project” operator [S2].
+ 
+ **Parameters**
+@@ -33,89 +32,76 @@
+ **Pseudocode**
+ ```python
+-def preprocess_video(video_path, n_frame):
++def preprocess_video(video_path, n_frame, video_duration=93.0, fps=29.935):
+     # Step 1: Extract equidistant frames
+-    # Calculate step size based on total frames and n_frame
+-    total_frames = get_total_frames(video_path)
++    total_frames = int(video_duration * fps)
+     step = total_frames // n_frame
+     frames = []
+     for i in range(n_frame):
+         idx = i * step
+-        frame = extract_frame(video_path, idx)
+-        frames.append(frame)
++        frames.append(read_frame_from_video(video_path, idx))
+ 
+     # Step 2: Filter bad frames using camera pose differences
+-    # Note: Camera pose estimation is required here.
+-    # Discard frames where pose difference to adjacent frame exceeds threshold
+-    poses = estimate_camera_poses(frames)
++    poses = compute_sfm_poses(frames)
+     valid_frames = []
+     valid_poses = []
++    pose_threshold = 1.0
+     for i in range(len(frames)):
+         if i == 0 or i == len(frames) - 1:
+-            # Keep first and last, or apply specific boundary logic
+             valid_frames.append(frames[i])
+             valid_poses.append(poses[i])
+         else:
+-            diff = pose_difference(poses[i], poses[i-1])
+-            diff_next = pose_difference(poses[i], poses[i+1])
+-            if diff < threshold and diff_next < threshold:
++            if pose_distance(poses[i], poses[i-1]) < pose_threshold and \
++               pose_distance(poses[i], poses[i+1]) < pose_threshold:
+                 valid_frames.append(frames[i])
+                 valid_poses.append(poses[i])
+-            # Else: discard due to motion blur/exposure issues detected via pose jump
+-    
++
+     # Step 3: Crop frames
+-    # Remove 6.6% from left, 9.1% from right
+     h, w = valid_frames[0].shape[:2]
+     crop_left = int(w * 0.066)
+     crop_right = int(w * 0.091)
+-    cropped_frames = []
+-    for frame in valid_frames:
+-        cropped = frame[:, crop_left:w-crop_right, :]
+-        cropped_frames.append(cropped)
++    cropped_frames = [f[:, crop_left:w-crop_right, :] for f in valid_frames]
+ 
+     # Step 4: Linearize and White-Balance
+     corrected_frames = []
+     for frame in cropped_frames:
+-        linear = linearize_gamma(frame)
+-        white_balanced = apply_white_balance(linear)
+-        corrected_frames.append(white_balanced)
++        linear = frame ** (1.0 / 2.2)
++        corrected_frames.append(apply_white_balance(linear))
+ 
+     # Step 5: Remove Lens Distortion
+     undistorted_frames = []
+     for frame in corrected_frames:
+-        undistorted = remove_lens_distortion(frame, camera_intrinsics)
+-        undistorted_frames.append(undistorted)
++        undistorted_frames.append(undistort_lens(frame, intrinsics, distortion_coeffs))
+ 
+-    # Step 6: Generate UVs if needed (Mesh context)
+-    # This step is typically performed on the reconstructed mesh, not individual frames,
+-    # but is part of the preprocessing pipeline for the final representation.
+     return undistorted_frames, valid_poses
++
++def read_frame_from_video(path, idx): ... # Standard video frame extraction at index idx
++def compute_sfm_poses(frames): ... # Structure-from-Motion solver to recover camera poses [G]
++def pose_distance(p1, p2): ... # Euclidean distance of translation + angular distance of rotation [G]
++def apply_white_balance(img): ... # Gray-world or similar standard white balancing algorithm [G]
++def undistort_lens(img, K, D): ... # Standard radial/tangential distortion removal using intrinsics K and coefficients D [G]
+ ```
+ 
+ ## Subtopics
+ 
+-### [VolumeSegmenter Pipeline](11584-volumesegmenter-pipeline.md)
+-Segments volumes after preprocessing.
++### Video Preprocessing for 3DGS
++Extracts frames at evenly spaced intervals (default 305, adjustable via `--num-frames-target`) from an input video, runs COLMAP feature extraction and matching, executes bundle adjustment to recover camera poses and sparse 3D structure, and refines camera intrinsics [S3, unofficial]. Parameters include `--data` for the input video path and `--output-dir` for COLMAP output [S3, unofficial]. A 609-frame input video yields 305 extracted images prefixed with 'frame_' [S3, unofficial].
+ 
+-### [Volume Partitioning Pipeline](11585-volume-partitioning-pipeline.md)
+-Partitions volumes for efficient rendering.
+-
+-### [3D Seismic Data Compression Pipeline](11727-3d-seismic-data-compression-pipeline.md)
+-Compresses seismic volumes.
+-
+-### [Wild Scene Preprocessing & Test Set Selection](13103-wild-scene-preprocessing-test-set-selection.md)
+-Preprocesses wild scenes for testing.
++### Data Cleanup for Wild Capture
++Captures time-lapse video on a multi-camera rig, runs a sharpness detector based on the variance of Laplacians, and discards images more than 1.5 standard deviations below the mean sharpness [S4]. Uses Mask R-CNN to identify and mask out people and animals, and detects motion for vehicles by checking if SfM points with error lower than 1.5 pixels exist under vehicle masks [S4]. Uses EgoBlur to remove vehicle license plates, constraining license plate masks to be included in segmented vehicle masks via Mask R-CNN [S4].
+ 
+ ## Operating characteristics
+-- **Time Complexity**: Depends on $n_{frame}$ and the cost of camera pose estimation. For $n_{frame}=2784$, COLMAP takes ~4.5 hours, HLOC ~22 hours, and LocalRF ~75 hours on an RTX A6000 GPU [S1].
+-- **Memory Complexity**: Scales linearly with the number of frames and resolution. High-resolution frames ($3840 \times 2160$) require significant RAM/VRAM for processing [S1].
+-- **Strengths**: Handles surgical video specific artifacts (motion blur, exposure) effectively. Standardizes input for NeRF and mesh-based reconstruction.
+-- **Limitations**: Camera pose estimation can be slow for large $n_{frame}$. Discarding frames reduces data density.
+-- **When to Use**: Laparoscopic surgical video reconstruction.
+-- **When Not to Use**: Non-surgical videos without significant motion blur/exposure issues, or real-time applications where pose estimation latency is prohibitive.
++- Time Complexity: Depends on $n_{frame}$ and the cost of camera pose estimation. For $n_{frame}=2784$, COLMAP takes 04:32:53 [S1]. The text states HLOC and LocalRF were not used for this sparsity, though Table 1 lists LocalRF running time as 75:10:54 on an RTX A6000 GPU [S1].
++- Memory Complexity: Not given in the sources.
++- Strengths: Filters frames based on camera pose discontinuities to remove motion blur and exposure issues [S2].
++- Limitations: Pose estimation latency increases with $n_{frame}$ [S1].
++- When to Use: Laparoscopic surgical video reconstruction [S1].
++- When Not to Use: Not given in the sources.
+ 
+ ## Background
+-Originated in the context of abdominal 3-D scene rendering from laparoscopic surgical videos using NeRFs [S1]. The method addresses the need for high-quality, sparse view inputs for neural rendering in medical settings. It also incorporates techniques from texture-space differentiable rendering for complex indoor scenes, such as UV generation for synthetic data [S2].
++Originated in the context of abdominal 3-D scene rendering from laparoscopic surgical videos using NeRFs [S1]. The method addresses the need for high-quality, sparse view inputs for neural rendering in medical settings [S1]. It also incorporates techniques from texture-space differentiable rendering for complex indoor scenes, such as UV generation for synthetic data [S2].
+ 
+ ## Sources
+ [S1] Towards Abdominal 3-D Scene Rendering from Laparoscopy Surgical Videos Using NeRFs, https://doi.org/10.1007/978-3-031-45673-2_9, fetched 2026-10-26
+-[S2] Material and Lighting Reconstruction for Complex Indoor Scenes with Texture-space Differentiable Rendering, https://doi.org/10.2312/sr.20211292, fetched 2026-10-29+[S2] Material and Lighting Reconstruction for Complex Indoor Scenes with Texture-space Differentiable Rendering, https://doi.org/10.2312/sr.20211292, fetched 2026-10-29
++[S3] 動画から3D Gaussian Splattingを作成してNVIDIA Omniverseに取り込む手順, https://qiita.com/devgamesan/items/b5be3dc9727f0a2c1a13, fetched 2026-10-28 (unofficial)
++[S4] A Hierarchical 3D Gaussian Representation for Real-Time Rendering of Very Large Datasets, https://inria.hal.science/hal-04568786v1, fetched 2026-10-27

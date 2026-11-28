@@ -1,0 +1,187 @@
+# NeRFshop
+
+Also called: Interactive Editing of Neural Radiance Fields
+
+## Overview
+NeRFshop is an end-to-end method for the interactive editing of full Neural Radiance Field (NeRF) scenes, enabling users to select and deform objects via cage-based transformations [S1]. It distinguishes itself from other editing methods by operating directly on the trainable sparse occupancy grid of Instant-NGP using GPU-friendly two-level interpolation, allowing for real-time feedback without the need for retraining or offline optimization loops [S1]. Unlike methods that rely on diffusion priors or semantic segmentation masks for inpainting, NeRFshop focuses on geometric manipulation and deformation of existing scene content [S1].
+
+## How it works
+**Inputs and Outputs:**
+*   **Input:** A pre-trained Instant-NGP NeRF representation (hashgrid), a user-defined cage mesh surrounding the target object, and user interactions (cage vertex displacements) [S1].
+*   **Output:** A modified NeRF representation where the selected object is deformed according to the cage, with artifacts reduced by volumetric membrane interpolation [S1].
+
+**Data Structures:**
+The method builds on Instant-NGP, which uses a trainable sparse occupancy grid queried directly from CUDA kernels performing SIMT operations [S1]. The cage is represented as a mesh with vertices $v_i \in \mathbb{R}^3$ [S1].
+
+**Steps:**
+
+1.  **Object Selection and Cage Building:**
+    The user selects an object using a scribble-based interface [S1]. The system semi-automatically builds a bounding cage mesh around the selected region, inspired by Bounding Proxies [S1].
+
+2.  **Ray Marching with Remapping:**
+    During rendering, Instant-NGP alternates between traversal, inference, and ray compaction [S1]. To incorporate editing, intermediate kernel routines are introduced that remap samples according to user-defined edits before inference [S1]. This maintains memory coherency and minimal throughput across ray compactions [S1].
+
+3.  **Cage-Based Deformation:**
+    For each sample point $x$ along a ray, the method computes its position relative to the cage [S1].
+    *   Compute generalized barycentric coordinates $\{\lambda_1, \dots, \lambda_n\}$ with respect to the canonical (original) cage vertex positions $\{v_1, \dots, v_n\}$ such that:
+        $$
+        x = \sum_{i=1}^{n} \lambda_i v_i
+        $$
+        where $\sum_{i=1}^{n} \lambda_i = 1$ and $\lambda_i \ge 0$ [S1].
+    *   The method uses Mean Value Coordinates (MVC) for this computation due to their efficiency and simplicity [S1].
+    *   Let $\hat{v}_i$ be the displaced positions of the cage vertices (modified by the user) [S1]. The new position $\hat{x}$ is computed as:
+        $$
+        \hat{x} = \sum_{i=1}^{n} \lambda_i \hat{v}_i
+        $$
+        [S1].
+    *   The sample at $\hat{x}$ is then queried from the NeRF hashgrid to obtain density $\sigma$ and color $c$ [S1].
+
+4.  **Rendering:**
+    The rendered color $\hat{C}(r)$ along a ray $r$ is computed using standard volume rendering:
+    $$
+    \hat{C}(r) = \sum_{i=1}^{N} T_i (1 - \exp(-\sigma_i \delta_i)) c_i
+    $$
+    where $T_i = \exp \left( -\sum_{j=1}^{i-1} \sigma_j \delta_j \right)$, $\sigma_i$ is density, $c_i$ is color, and $\delta_i$ is the interval between samples [S1].
+
+5.  **Volumetric Membrane Interpolation (Artifact Reduction):**
+    To reduce color and density artifacts resulting from user edits, a preliminary membrane-based correction method is applied, inspired by Poisson Image Editing [S1].
+
+6.  **Distillation:**
+    After interactive editing, a "distillation" step collapses all edits and saves the hashgrid NeRF representation for loading in established pipelines [S1].
+
+**Pseudocode:**
+
+> **Unverified code.** The code below did not pass a test run against a reference implementation, or no test fits it, so it may contain errors.
+
+```python
+import math
+
+def render_ray_with_edit(ray_origin, ray_direction, cage_vertices_original, cage_vertices_displaced, hashgrid_query):
+    """
+    Renders a single ray with cage-based deformation applied to samples.
+    hashgrid_query: function returning (sigma, color) for a 3D point.
+    """
+    # Normalize direction to ensure consistent step size
+    d = ray_direction / math.sqrt(sum(c**2 for c in ray_direction))
+    t = 0.0
+    T = 1.0
+    color = [0.0, 0.0, 0.0]
+    samples = []
+    step_size = 0.5
+
+    for i in range(100):
+        # Current sample position in world space
+        x = [ray_origin[j] + d[j] * t for j in range(3)]
+
+        # Compute barycentric coordinates (MVC) for x relative to original cage
+        lambdas = compute_mvc(x, cage_vertices_original)
+
+        # Remap position using displaced cage vertices
+        x_hat = [sum(lambdas[k] * cage_vertices_displaced[k][dim] for k in range(len(cage_vertices_original))) for dim in range(3)]
+
+        # Query hashgrid at deformed position
+        sigma, c = hashgrid_query(x_hat)
+
+        # Volume rendering accumulation
+        alpha = 1.0 - math.exp(-sigma * step_size)
+        color[0] += T * alpha * c[0]
+        color[1] += T * alpha * c[1]
+        color[2] += T * alpha * c[2]
+        T *= (1.0 - alpha)
+
+        samples.append((x, x_hat, sigma, c))
+
+        if T < 1e-4:
+            break
+        t += step_size
+
+    return color, samples
+
+def compute_mvc(point, cage_vertices):
+    """
+    Computes Mean Value Coordinates for a point relative to a convex polygon/polyhedron.
+    Returns weights lambda_i.
+    """
+    n = len(cage_vertices)
+    lambdas = [0.0] * n
+    numerator_sum = 0.0
+
+    # First pass: compute weights and sum
+    for i in range(n):
+        v_i = cage_vertices[i]
+        v_next = cage_vertices[(i + 1) % n]
+        v_prev = cage_vertices[(i - 1) % n]
+
+        # Vectors
+        d_i = [point[j] - v_i[j] for j in range(3)]
+        d_next = [v_next[j] - v_i[j] for j in range(3)]
+        d_prev = [v_prev[j] - v_i[j] for j in range(3)]
+
+        # Distances
+        dist_i = math.sqrt(sum(c**2 for c in d_i))
+        dist_next = math.sqrt(sum(c**2 for c in d_next))
+        dist_prev = math.sqrt(sum(c**2 for c in d_prev))
+
+        # Angles at point p: alpha_i between (v_i-p) and (v_{i+1}-p), beta_i between (v_i-p) and (v_{i-1}-p)
+        # Using cross/dot product for 3D or 2D
+        # For 2D/3D convex polygon, we compute angles using atan2/cross products
+        # Simplified robust MVC weight calculation
+        alpha_i = angle_between([v_next[j] - point[j] for j in range(3)], [v_i[j] - point[j] for j in range(3)])
+        beta_i = angle_between([v_prev[j] - point[j] for j in range(3)], [v_i[j] - point[j] for j in range(3)])
+
+        w_i = (math.tan(alpha_i / 2.0) + math.tan(beta_i / 2.0)) / (dist_i * dist_i + 1e-8)
+        numerator_sum += w_i
+
+    # Second pass: normalize
+    for i in range(n):
+        v_i = cage_vertices[i]
+        v_next = cage_vertices[(i + 1) % n]
+        v_prev = cage_vertices[(i - 1) % n]
+        d_i = [point[j] - v_i[j] for j in range(3)]
+        dist_i = math.sqrt(sum(c**2 for c in d_i))
+        alpha_i = angle_between([v_next[j] - point[j] for j in range(3)], [v_i[j] - point[j] for j in range(3)])
+        beta_i = angle_between([v_prev[j] - point[j] for j in range(3)], [v_i[j] - point[j] for j in range(3)])
+        w_i = (math.tan(alpha_i / 2.0) + math.tan(beta_i / 2.0)) / (dist_i * dist_i + 1e-8)
+        lambdas[i] = w_i / numerator_sum
+
+    return lambdas
+
+def angle_between(v1, v2):
+    dot = sum(a * b for a, b in zip(v1, v2))
+    norm1 = math.sqrt(sum(c**2 for c in v1))
+    norm2 = math.sqrt(sum(c**2 for c in v2))
+    return math.acos(max(-1.0, min(1.0, dot / (norm1 * norm2 + 1e-8))))
+```
+
+**Parameters:**
+*   **MVC:** Used for barycentric coordinate computation [S1].
+*   **Distillation:** Applied after editing to save the final state [S1].
+
+**Edge Cases and Pitfalls:**
+*   **Cage Construction:** Automatic cage-building can result in complex meshes; the method uses adaptive cage mesh simplification [S1].
+*   **Artifacts:** Deformations can cause color and density artifacts; mitigated by volumetric membrane interpolation [S1].
+*   **GPU Coherency:** The method must maintain memory coherency across ray compactions in Instant-NGP [S1].
+
+## Subtopics
+
+### Cage-Based Deformation
+A technique where a bounding mesh (cage) is manipulated to deform the enclosed volume [S1]. It is chosen for its intuitive control and suitability for volumetric data [S1]. [Link to Cage-Based Deformation](#)
+
+### Instant-NGP Integration
+The use of a trainable sparse occupancy grid queried via CUDA kernels [S1]. It is chosen for its speed and interactive performance [S1]. [Link to Instant-NGP](#)
+
+### Volumetric Membrane Interpolation
+A post-processing step inspired by Poisson Image Editing to reduce artifacts [S1]. It is chosen when geometric edits introduce discontinuities [S1]. [Link to Membrane Interpolation](#)
+
+## Operating characteristics
+*   **Time Complexity:** Interactive, as it builds on Instant-NGP which is fully GPU-accelerated [S1].
+*   **Memory Complexity:** Depends on the sparse occupancy grid of Instant-NGP [S1].
+*   **Strengths:** Interactive free-form editing (deformation, translation/scale/rotation, duplication); GPU-friendly; no retraining required [S1].
+*   **When to use:** When interactive, real-time editing of existing NeRF geometry is required [S1].
+*   **When not to use:** When inpainting missing regions or generating new content is required [S1].
+
+## Background
+NeRFshop was introduced by Clément Jambon, Bernhard Kerbl, Georgios Kopanas, Stavros Diolatzis, Thomas Leimkühler, and George Drettakis in 2023 [S1]. It is the first complete method allowing interactive free-form editing of full NeRF scenes [S1]. The method builds on Instant-NGP [Müller et al. 2022] and uses Mean Value Coordinates [Hormann and Floater 2006] for deformation [S1].
+
+## Sources
+[S1] NeRFshop: Interactive Editing of Neural Radiance Fields, https://doi.org/10.1145/3585499, fetched 2026-10-26

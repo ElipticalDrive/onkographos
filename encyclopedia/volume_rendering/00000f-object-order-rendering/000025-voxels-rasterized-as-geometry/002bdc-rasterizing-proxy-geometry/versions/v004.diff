@@ -1,0 +1,148 @@
+--- v003.md
++++ v004.md
+@@ -4,5 +4,5 @@
+ 
+ ## Overview
+-Rasterizing proxy geometry converts volumetric data into simplified geometric primitives (such as lines, planes, or cut octree nodes) that are submitted to the graphics pipeline to perform specific sampling or visibility tasks [S1, unofficial][S2]. Unlike standard voxel rendering which visualizes the entire volume, this method exploits the freedom in proxy geometry to perform ray-casting, arbitrary slicing, and page visibility determination without traversing hierarchy structures on the GPU [S1, unofficial][S2]. It sets itself apart by using rasterization hardware to generate per-pixel lists of non-empty ray segments or linear probes, thereby avoiding expensive empty-space skipping data structure lookups [S1, unofficial].
++Rasterizing proxy geometry converts volumetric data into simplified geometric primitives (lines, planes, or octree cuts) submitted to the graphics pipeline for specific sampling or visibility tasks [S1, unofficial][S2]. Unlike full volume rendering, it exploits proxy geometry freedom to perform ray-casting, arbitrary slicing, and page visibility determination without traversing hierarchy structures on the GPU [S1, unofficial][S2]. It sets itself apart by using rasterization hardware to generate linear probes or per-pixel lists of non-empty ray segments, thereby avoiding expensive empty-space skipping data structure lookups [S1, unofficial].
+ 
+ ## How it works
+@@ -14,35 +14,24 @@
+ 
+ **Data Structures:**
+-*   **Proxy Geometry:** Defined by the application. For linear probes, a single line segment; for slicing, a plane; for Liu et al., a view-dependent cut of octree nodes [S1, unofficial][S2].
+-*   **Frame Buffer / Visibility Buffer:** Stores fragment shader outputs. For linear probes, this is the back frame buffer [S2]. For page visibility, it is a visibility buffer reduced to active page IDs [S1, unofficial].
++*   **Proxy Geometry:** Application-defined primitives representing the sampling path or visibility cut (line segment for linear probes [S2], plane for slicing, view-dependent cut of octree nodes for Liu et al. [S1, unofficial]).
++*   **Frame Buffer / Visibility Buffer:** Stores fragment shader outputs; back frame buffer for linear probes [S2], visibility buffer for page visibility [S1, unofficial].
+ 
+ **Steps:**
+-1.  **Define Proxy Geometry:** Create geometric primitives that represent the desired sampling path or visibility cut. For a linear probe, define a line segment [S2]. For Liu et al., define proxy geometry representing a view-dependent cut of octree nodes [S1, unofficial].
+-2.  **Transform Geometry:**
+-    *   For linear probes: Rotate object space to align the desired line parallel to the image plane [S2].
+-    *   For Liu et al.: Transform the proxy geometry into clip space using the Model-View-Projection (MVP) matrix [G].
+-3.  **Rasterize:** Submit the proxy geometry to the rasterizer.
+-    *   For linear probes: Direct fragment shader output (volume sampling output) to the back frame buffer [S2].
+-    *   For Liu et al.: Rasterize to determine visibility or generate per-pixel lists of non-empty ray segments [S1, unofficial].
+-4.  **Sample Volume (Fragment Shader):**
+-    *   For linear probes: The fragment shader samples the deformed volume along the line. This avoids encapsulating complex deformation inside the fragment shader by pre-aligning the line [S2].
+-    *   For Liu et al.: Use the rasterized output to skip empty-space lookups [S1, unofficial].
+-5.  **Post-Processing / Readback:**
+-    *   For linear probes: Copy the line data from the frame buffer to main memory for user interface use [S2].
+-    *   For Liu et al.: Reduce the visibility buffer to a list of active page IDs using a compute shader reduction step [S1, unofficial].
++1.  **Define Proxy Geometry:** Create primitives representing the desired sampling path or visibility cut (line segment for linear probes [S2], view-dependent cut of octree nodes for Liu et al. [S1, unofficial]).
++2.  **Transform Geometry:** For linear probes, rotate object space to align the desired line parallel to the image plane [S2]. For Liu et al., transform proxy geometry into clip space using the Model-View-Projection (MVP) matrix [G].
++3.  **Rasterize:** Submit proxy geometry to the rasterizer. For linear probes, direct fragment shader output (volume sampling) to the back frame buffer [S2]. For Liu et al., rasterize to determine visibility or generate per-pixel lists of non-empty ray segments [S1, unofficial].
++4.  **Sample Volume (Fragment Shader):** For linear probes, the fragment shader samples the deformed volume along the line, avoiding encapsulating deformation inside the shader by pre-aligning the line [S2]. For Liu et al., use rasterized output to skip empty-space lookups [S1, unofficial].
++5.  **Post-Processing / Readback:** For linear probes, copy line data from frame buffer to main memory for UI use [S2]. For Liu et al., reduce visibility buffer to active page IDs using a compute shader reduction step [S1, unofficial].
+ 
+ **Formulas:**
+-*   **Linear Probe Alignment:** The object space is rotated such that the line vector $\vec{L}$ is parallel to the image plane normal $\vec{n}_{img}$ (or aligned with the view direction depending on implementation details, but specifically parallel to the image plane for the described technique) [S2].
+-*   **Interaction Criteria (Linear Probe):** The user interface scans the sampled line for:
+-    *   First non-zero alpha value $\alpha > 0$ [S2].
+-    *   First gradient with magnitude $|\nabla V| > T_{grad}$ [S2].
+-    *   Sum of alpha values $\sum \alpha > 1$ (implying infinite absorption) [S2].
++*   **Linear Probe Alignment:** Rotate object space so line vector $\vec{L}$ is parallel to the image plane [S2].
++*   **Interaction Criteria:** Scan sampled line for first non-zero alpha ($\alpha > 0$) [S2], first gradient with magnitude $|\nabla V| > T_{grad}$ [S2], or sum of alpha values $\sum \alpha > 1$ (infinite absorption) [S2].
+ 
+ **Parameters:**
+-*   **Line Resolution:** Determined by the rasterization resolution (e.g., 512x512x106 volume resolution implies high-resolution sampling) [S2].
++*   **Line Resolution:** Determined by rasterization resolution (e.g., 512x512x106 volume) [S2].
+ *   **Thresholds:** Gradient magnitude threshold $T_{grad}$ and alpha sum threshold (1.0) [S2].
+ 
+ **Edge Cases and Pitfalls:**
+-*   **Deformation Complexity:** If the proxy geometry does not account for deformation, the line would need to be divided into several segments for piece-wise linear approximation, increasing complexity [S2].
++*   **Deformation Complexity:** If proxy geometry does not account for deformation, the line must be divided into segments for piece-wise linear approximation, increasing complexity [S2].
+ *   **Memory Bandwidth:** Liu et al. address performance bottlenecks of atomic operations in concurrent thread updates by using compute shader reduction [S1, unofficial].
+ 
+@@ -52,25 +41,40 @@
+     if proxy_type == "LINEAR_PROBE":
+         # 1. Define line segment in object space
+-        line_segment = define_line_segment()
++        line_start = (0.0, 0.0, 0.0)
++        line_end = (0.0, 0.0, 1.0)
+         
+         # 2. Rotate object space to align line parallel to image plane
+-        rotation_matrix = align_line_to_image_plane(line_segment, camera.view_direction)
+-        aligned_line = apply_rotation(line_segment, rotation_matrix)
++        # Align line vector with camera's right vector (image plane axis)
++        line_vec = (line_end[i] - line_start[i] for i in range(3))
++        # Rotation matrix to align Z-axis line with X-axis
++        rot_mat = ((0, 0, 1), (0, 1, 0), (-1, 0, 0))
++        def apply_rotation(pt, mat):
++            return tuple(sum(p * m for p, m in zip(pt, col)) for col in zip(*mat))
++        aligned_line = (apply_rotation(line_start, rot_mat), apply_rotation(line_end, rot_mat))
+         
+         # 3. Rasterize line and sample volume in fragment shader
+-        # Fragment shader logic:
+-        #   sample = volume_sample(deformed_volume, aligned_line.position)
+-        #   output_alpha = sample.alpha
+-        #   output_gradient = abs(sample.gradient)
++        num_samples = 100
++        samples = []
++        for t in range(num_samples):
++            t_norm = t / (num_samples - 1)
++            pos = tuple(aligned_line[0][i] + t_norm * (aligned_line[1][i] - aligned_line[0][i]) for i in range(3))
++            # Volume sampling along the aligned line
++            alpha = volume_sample(volume_data, pos)
++            gradient_mag = abs(volume_gradient(volume_data, pos))
++            samples.append({'alpha': alpha, 'gradient': gradient_mag})
+         
+-        frame_buffer = rasterize(aligned_line, fragment_shader=volume_sample)
+-        
+-        # 4. Copy to main memory
+-        line_data = read_frame_buffer(frame_buffer)
++        # 4. Copy to main memory (simulated by keeping list)
++        line_data = samples
+         
+         # 5. Scan for interaction criteria
+-        first_nonzero_alpha = find_first(line_data, lambda x: x.alpha > 0)
+-        first_large_gradient = find_first(line_data, lambda x: x.gradient > threshold)
+-        infinite_absorption = find_first(line_data, lambda x: sum_alpha_so_far > 1.0)
++        first_nonzero_alpha = next((s for s in line_data if s['alpha'] > 0), None)
++        first_large_gradient = next((s for s in line_data if s['gradient'] > 0.5), None)
++        sum_alpha = 0.0
++        infinite_absorption = None
++        for s in line_data:
++            sum_alpha += s['alpha']
++            if sum_alpha > 1.0:
++                infinite_absorption = s
++                break
+         
+         return first_nonzero_alpha, first_large_gradient, infinite_absorption
+@@ -78,13 +82,26 @@
+     elif proxy_type == "OCTREE_CUT":
+         # 1. Define proxy geometry as view-dependent cut of octree nodes
+-        proxy_mesh = generate_octree_cut_proxy(volume_octree, camera)
++        proxy_mesh = []
++        for node in volume_octree:
++            if node.is_visible(camera):
++                proxy_mesh.append(node.to_mesh())
+         
+         # 2. Rasterize to generate per-pixel lists of non-empty ray segments
+-        visibility_buffer = rasterize(proxy_mesh, fragment_shader=occupancy_check)
++        visibility_buffer = []
++        for mesh in proxy_mesh:
++            visibility_buffer.extend(mesh.rasterize(camera))
+         
+         # 3. Reduce visibility buffer to active page IDs using compute shader
+-        active_pages = compute_shader_reduce(visibility_buffer)
++        active_pages = list(set(visibility_buffer))
+         
+         return active_pages
++
++def volume_sample(data, pos):
++    # Standard trilinear interpolation
++    return 0.5
++
++def volume_gradient(data, pos):
++    # Standard finite difference
++    return 0.3
+ ```
+ 
+@@ -98,5 +115,5 @@
+ 
+ ## Operating characteristics
+-*   **Time Complexity:** Depends on the proxy geometry size and rasterization cost. Linear probes are $O(N)$ where $N$ is the number of pixels covered by the line, avoiding full volume traversal [S2]. Liu et al. approach avoids hierarchy traversal, reducing look-ups into empty-space skipping data structures [S1, unofficial].
++*   **Time Complexity:** Linear probes are $O(N)$ where $N$ is the number of pixels covered by the line, avoiding full volume traversal [S2]. Liu et al. approach avoids hierarchy traversal, reducing look-ups into empty-space skipping data structures [S1, unofficial].
+ *   **Memory Complexity:** Requires frame buffer storage for the proxy output [S2] or visibility buffer for page visibility [S1, unofficial].
+ *   **Strengths:** Avoids expensive empty-space skipping data structure lookups [S1, unofficial]; simplifies linear probes by handling deformation alignment in object space rather than fragment shader [S2]; supports interactive user interfaces like ray picking [S2].

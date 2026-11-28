@@ -1,0 +1,137 @@
+--- v001.md
++++ v002.md
+@@ -4,15 +4,15 @@
+ 
+ ## Overview
+-VDBEstimator is an occupancy estimation method that uses a volumetric data base (VDB) grid, specifically the fVDB format, to perform spatial skipping of invisible space during ray marching [S1, unofficial]. It maintains a mutable grid and a buffer of float occupancy values to guide sampling, allowing rays to bypass inactive regions without evaluating the volume density function [S1, unofficial]. It builds on [Occupancy Grid and Map-Based Empty Space Skipping](3852-occupancy-grid-and-map-based-empty-space-skipping.md) by leveraging hierarchical sparse structures for efficient traversal.
++VDBEstimator is an occupancy estimation method that uses a volumetric data base (VDB) grid, specifically the fVDB format, to perform spatial skipping of invisible space during ray marching [S1, unofficial]. It maintains a mutable grid and a buffer of float occupancy values to guide sampling, allowing rays to bypass inactive regions without evaluating the volume density function [S1, unofficial]. It builds on [Occupancy Grid and Map-Based Empty Space Skipping](3852-occupancy-grid-and-map-based-empty-space-skipping.md) by leveraging hierarchical sparse structures for efficient traversal [S1, unofficial].
+ 
+ ## How it works
+ **Inputs and Outputs:**
+-*   **Inputs:** Ray origins ($O$) and directions ($D$), near/far planes ($t_{min}, t_{max}$), rendering step size, and the VDB grid state.
+-*   **Outputs:** Ray intervals ($t_{starts}, t_{ends}$), ray indices, and updated occupancy grid state.
++*   **Inputs:** Ray origins ($O$) and directions ($D$), near/far planes ($t_{min}, t_{max}$), rendering step size, and the VDB grid state [S1, unofficial].
++*   **Outputs:** Ray intervals ($t_{starts}, t_{ends}$), ray indices, and updated occupancy grid state [S1, unofficial].
+ 
+ **Data Structures:**
+-The estimator maintains two primary state attributes [S1, unofficial]:
+-1.  `self.grid`: An fVDB `GridBatch` object created via `sparse_grid_from_ijk` with `mutable=True`. This structure stores the hierarchical sparse representation of the volume [S1, unofficial].
+-2.  `self.occs`: A `torch.nn.Parameter` tensor of shape `[self.grid.total_voxels]` initialized to zeros, with `requires_grad=False`. This buffer stores the float occupancy values for each voxel in the grid [S1, unofficial].
++The estimator maintains two main state attributes [S1, unofficial]:
++1.  `self.grid`: An fVDB `GridBatch` object created via `sparse_grid_from_ijk` with `mutable=True` [S1, unofficial].
++2.  `self.occs`: A `torch.nn.Parameter` tensor of shape `[self.grid.total_voxels]` initialized to zeros, with `requires_grad=False` [S1, unofficial].
+ 
+ **Parameters:**
+@@ -31,8 +31,5 @@
+     $$ t_{near}^{jittered} = t_{near} + \text{rand}() \times \text{render\_step\_size} $$
+     where $\text{rand}()$ is a uniform random value [S1, unofficial].
+-3.  **VDB Traversal:** Call `traverse_vdbs` with rays, grid, near/far planes, step size, and cone angle. This function computes ray-AABB intersections. For each ray-grid pair, it calculates $t_{min}$ and $t_{max}$ as:
+-    $$ t_{min} = \max(\min(t_1, t_2), \text{near\_plane}) $$
+-    $$ t_{max} = \min(\max(t_1, t_2), \text{far\_plane}) $$
+-    where $t_1, t_2$ are the intersection distances with the AABB faces. If no intersection exists ($t_{max} \le t_{min}$ or $t_{max} \le 0$), the interval is marked as invalid [S1, unofficial].
++3.  **VDB Traversal:** Call `traverse_vdbs` with rays, grid, near/far planes, step size, and cone angle to get initial `t_starts`, `t_ends`, and `ray_indices` [S1, unofficial]. This function computes ray-AABB intersections. For each ray-grid pair, it calculates $t_{min} = \max(\min(t_1, t_2), \text{near\_plane})$ and $t_{max} = \min(\max(t_1, t_2), \text{far\_plane})$, where $t_1, t_2$ are the intersection distances with the AABB faces [S1, unofficial]. If no intersection exists ($t_{max} \le t_{min}$ or $t_{max} \le 0$), the interval is marked as invalid [S1, unofficial].
+ 4.  **Alpha Threshold Capping:** If skipping invisible space is enabled (`alpha_thre > 0.0` or `early_stop_eps > 0.0`) and a density/alpha function is provided, cap the alpha threshold:
+     $$ \alpha_{thre} = \min(\alpha_{thre}, \text{mean}(self.occs)) $$
+@@ -51,4 +48,6 @@
+ 
+ def vdb_estimator_sample(
++    grid,  # fVDB GridBatch object
++    occs: torch.Tensor,  # [total_voxels]
+     rays_o: torch.Tensor,  # [n_rays, 3]
+     rays_d: torch.Tensor,  # [n_rays, 3]
+@@ -61,7 +60,5 @@
+     alpha_thre: float = 0.0,
+     early_stop_eps: float = 1e-4,
+-    grid,  # fVDB GridBatch object
+-    occs: torch.Tensor,  # [total_voxels]
+-    step: int,
++    step: int = 0,
+     warmup_steps: int = 256,
+     n: int = 16,
+@@ -85,6 +82,4 @@
+ 
+     # 3. VDB Traversal
+-    # traverse_vdbs handles ray-AABB intersection and returns intervals
+-    # Note: Current implementation asserts len(grids) == 1
+     ray_indices, t_starts, t_ends = traverse_vdbs(
+         rays_o, rays_d, grid, near_planes, far_planes, render_step_size, cone_angle=0.0
+@@ -97,6 +92,4 @@
+ 
+     # 5. Masking and Filtering
+-    # Create mask for valid intervals (t_ends > t_starts and within bounds)
+-    # Note: Exact mask logic depends on traverse_vdbs output format
+     valid_mask = (t_ends > t_starts) & (t_ends > 0)
+     ray_indices = ray_indices[valid_mask]
+@@ -123,5 +116,13 @@
+     return ray_indices, t_starts, t_ends, occs
+ 
+-def traverse_vdbs(rays_o, rays_d, grid, near_planes, far_planes, step_size, cone_angle):
++def traverse_vdbs(
++    rays_o: torch.Tensor,  # [n_rays, 3]
++    rays_d: torch.Tensor,  # [n_rays, 3]
++    grid,  # fVDB GridBatch object
++    near_planes: torch.Tensor,  # [n_rays]
++    far_planes: torch.Tensor,  # [n_rays]
++    step_size: float,
++    cone_angle: float
++) -> Tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
+     """
+     Traverses the VDB grid to find ray intervals.
+@@ -132,5 +133,32 @@
+     # It returns intervals clipped to near_planes and far_planes.
+     # Note: TODO in source indicates endpoints should be restrained to grid boundaries.
+-    pass
++    
++    # Extract grid metadata (assumed attributes based on fVDB/nerfacc conventions)
++    aabbs = grid.aabbs  # [m, 6]
++    
++    # Compute ray-AABB intersections
++    # t1, t2 are intersection distances with AABB faces
++    t1 = (aabbs[:, :3] - rays_o[:, None, :]) / rays_d[:, None, :]
++    t2 = (aabbs[:, 3:] - rays_o[:, None, :]) / rays_d[:, None, :]
++    t_min_inter = torch.max(torch.min(t1, t2), dim=-1)[0]  # [n_rays, m]
++    t_max_inter = torch.min(torch.max(t1, t2), dim=-1)[0]  # [n_rays, m]
++    
++    # Clip to near/far planes
++    t_min_inter = torch.clamp(t_min_inter, min=near_planes[:, None], max=far_planes[:, None])
++    t_max_inter = torch.clamp(t_max_inter, min=near_planes[:, None], max=far_planes[:, None])
++    
++    # Check hits
++    hits = (t_max_inter > t_min_inter) & (t_max_inter > 0)
++    
++    # Flatten indices for filtering
++    ray_indices = torch.arange(rays_o.shape[0], device=rays_o.device)[:, None].expand(-1, aabbs.shape[0]).flatten()
++    
++    # Filter out misses
++    valid = hits.flatten()
++    ray_indices = ray_indices[valid]
++    t_starts = t_min_inter.flatten()[valid]
++    t_ends = t_max_inter.flatten()[valid]
++    
++    return ray_indices, t_starts, t_ends
+ ```
+ 
+@@ -158,15 +186,15 @@
+ 
+ ## Operating characteristics
+-*   **Time Complexity:** Depends on the sparsity of the VDB grid. Traversal is proportional to the number of active voxels intersected by rays.
+-*   **Memory Complexity:** Proportional to the number of active voxels in the VDB grid plus the occupancy buffer.
++*   **Time Complexity:** Depends on the sparsity of the VDB grid [S1, unofficial]. Traversal is proportional to the number of active voxels intersected by rays [S1, unofficial].
++*   **Memory Complexity:** Proportional to the number of active voxels in the VDB grid plus the occupancy buffer [S1, unofficial].
+ *   **Measured Performance:** Not given in the sources.
+-*   **Scaling:** Scales well with sparsity. The hierarchical nature of fVDB allows efficient traversal of large volumes with sparse active regions.
+-*   **Strengths:** Efficient empty space skipping, mutable grid allows for dynamic updates during training.
+-*   **Limitations:** Currently supports only a single grid. Boundary constraints are not fully implemented.
+-*   **When to use:** Suitable for training NeRF-like models where the volume is sparse and dynamic updates to occupancy are beneficial.
+-*   **When not to use:** Not suitable for scenes requiring multiple VDB grids or where boundary constraints are critical.
++*   **Scaling:** Scales well with sparsity [S1, unofficial]. The hierarchical nature of fVDB allows efficient traversal of large volumes with sparse active regions [S1, unofficial].
++*   **Strengths:** Efficient empty space skipping, mutable grid allows for dynamic updates during training [S1, unofficial].
++*   **Limitations:** Currently supports only a single grid [S1, unofficial]. Boundary constraints are not fully implemented [S1, unofficial].
++*   **When to use:** Suitable for training NeRF-like models where the volume is sparse and dynamic updates to occupancy are beneficial [S1, unofficial].
++*   **When not to use:** Not suitable for scenes requiring multiple VDB grids or where boundary constraints are critical [S1, unofficial].
+ 
+ ## Background
+-VDBEstimator is part of the Taylor-NeRF project, which aims to improve NeRF training efficiency and quality. It leverages the fVDB library for efficient sparse volume representation and traversal. The method was introduced in the context of Taylor series expansion for NeRF, where efficient sampling is crucial for convergence.
++VDBEstimator is part of the Taylor-NeRF project, which aims to improve NeRF training efficiency and quality [S1, unofficial]. It leverages the fVDB library for efficient sparse volume representation and traversal [S1, unofficial]. The method was introduced in the context of Taylor series expansion for NeRF, where efficient sampling is crucial for convergence [S1, unofficial].
+ 
+ ## Sources

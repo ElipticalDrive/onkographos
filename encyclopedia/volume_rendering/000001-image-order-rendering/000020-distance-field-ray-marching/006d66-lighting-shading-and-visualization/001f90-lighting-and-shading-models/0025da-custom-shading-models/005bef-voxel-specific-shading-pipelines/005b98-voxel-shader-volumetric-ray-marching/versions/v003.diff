@@ -1,0 +1,398 @@
+--- v002.md
++++ v003.md
+@@ -4,172 +4,214 @@
+ 
+ ## Overview
+-Voxel Shader Volumetric Ray Marching is a shading method for Fire/Smoke simulations and meshes that reads voxel grid data from a Phoenix Simulator or V-Ray Volume Grid [S1]. It handles volumetric shading via specific rollouts (Fire, Smoke Color, Smoke Opacity) because standard Maya materials cannot shade volumetrics [S1]. It sets itself apart from its siblings by providing a dedicated UI-driven pipeline for Phoenix FD and V-Ray Volume Grids, offering specific controls for motion blur, displacement, and emission that are not available in generic voxel shading pipelines [S1].
++Voxel Shader Volumetric Ray Marching is a shading method for Fire/Smoke simulations and meshes that reads voxel grid data from a Phoenix Simulator or V-Ray Volume Grid to handle volumetric shading, as standard Maya materials cannot shade volumetrics directly [S1]. It distinguishes itself from its siblings by providing specific rollouts for Fire, Smoke Color, and Smoke Opacity, and by supporting both pure volumetric ray marching and "Render as Geometry" procedural geometry modes [S1]. Unlike [Voxel Shading Pipeline](3898-voxel-shading-pipeline.md) which may rely on discrete neighbor dependence for lighting, this method explicitly traces camera and shadow rays through the grid with configurable step sizes and sampling filters [S1].
+ 
+ ## How it works
+ **Inputs and Outputs:**
+-*   **Inputs:** Voxel grid data (Temperature, Smoke, Speed, Fuel, Velocity, etc.), camera position/direction, light positions/directions, and shader parameters (Step %, Surface Channel, etc.) [S1].
+-*   **Outputs:** Color, Alpha, and optionally Render Elements (Normals, Velocity, Z-Depth, Material ID) [S1].
++*   **Inputs:** Voxel grid data (Temperature, Smoke, Speed, Fuel, Velocity, etc.), camera position/direction, light sources, and shader parameters (Step %, Sampler Type, Surface Channel, etc.) [S1].
++*   **Outputs:** Colored pixel values, optionally with Render Elements (Normals, Velocity, Z-Depth, Material ID) if "Render as Geometry" is enabled [S1].
+ 
+ **Data Structures:**
+-*   **Voxel Grid:** A 3D array of cells. Each cell contains values for various channels (e.g., Temperature, Smoke) [S1].
+-*   **Velocity Texture:** A custom 3D texture where colors represent velocity direction per cell. Y/Z components are flipped (Blue/Green channels) [S1].
+-
+-**Parameters:**
+-*   `rendstep` (Step %): Ray marching step as a percentage of cell size. Recommended >=90%. Must be >0. If >100, cells are skipped [S1].
+-*   `rendshadstep` (Shadow Step %): Ray marching step for shadow/lighting rays. Typically higher than `rendstep` [S1].
+-*   `borderFade`: Distance in Scene Units from grid boundaries where content becomes transparent [S1].
+-*   `mbmult` (Motion Blur Multiplier): Multiplier for motion blur strength. Can be negative [S1].
+-*   `sarg` (Surface Channel): Defines fluid surface for solid rendering/displacement. Options: Texture, Liquid/Temperature, Smoke, Speed, Fuel, Viscosity [S1].
+-*   `rendSurfLevel_x/t/s/v/f` (Isosurface Level): Threshold value for geometry surface generation. Default 0.5 [S1].
+-*   `rendInvertNorm` (Invert Volume): Swaps inside/outside definition. Default: values above surface level are internal [S1].
+-*   `rendUseGizmo` (Render Cutter): Restricts rendering to inside a selected geometric object's volume [S1].
+-*   `rendInvGizmo` (Invert Cutter): Restricts rendering to outside the cutter [S1].
+-*   `geommode` (Render as Geometry): V-Ray only. Produces result using procedural geometry (multiple transparent layers) [S1].
+-*   `rendHeatHaze` (Heat Haze): Traces ray changing direction according to Surface channel gradient. Value 1 approx normal heat haze [S1].
+-*   `emSource` (Fire Emission): Source channel for emissive fire color/light. Options: Disabled, Temperature, Smoke, Speed, Fuel, Texture [S1].
+-*   `emModulate` (Modulate): Multiplies Based on channel by Texture map [S1].
+-*   `difSource` (Smoke Color Based on): Source channel for smoke color. Options: Disabled, Temperature, Smoke, Speed, Texture, Constant Color, RGB, Fuel [S1].
+-*   `difModulate` (Smoke Color Modulate): Multiplies color by texture in Texture slot if Based on is not Texture [S1].
+-*   `difScattering` (Scattering): Controls light scattering. Options: Ray-traced (GI only), Disabled, Approximate [S1].
+-*   `rendDispl` (Displacement Amount): Displacement strength multiplier [S1].
+-*   `rendDisplFine` (Displacement Texture): Specifies the displacement map [S1].
+-*   `rendDispltSurf` (Displacement Type): Gradient driven, Surface driven, Vector, Advection [S1].
+-*   `emIgnoreAlpha` (Fire Opacity Mode): Use Smoke Opacity, Fully Visible, Use Own Opacity [S1].
+-*   `emLightsPersist` (Lights Persist): Forces simulator to emit light even if rendering is disabled [S1].
+-*   `rendVelTexture` (Velocity Texture): Custom 3D texture for motion blur. Overrides Velocity grid channel [S1].
+-*   `rendHeatHaze` (Heat Haze): Traces ray changing direction according to Surface channel gradient [S1].
+-*   `materialID` (Volumetric Material ID): Material ID color for the MaterialID Render Element [S1].
+-*   `volZDepth` (Volumetric ZDepth): Used to generate a Z-depth Render Element [S1].
+-*   `volMoblurMethod` (Volumetric Motion Blur): Ray-traced (default) vs Grid-based [S1].
+-*   `sampler` (Sampler Type): Box, Linear, Spherical [S1].
++The method operates on a 3D voxel grid indexed by integer coordinates $(x, y, z)$. Each cell contains scalar or vector fields (e.g., Temperature, Smoke density, Velocity vector) [S1]. The grid is accessed via ray marching, where continuous ray positions are mapped to grid cells [S1].
+ 
+ **Numbered Steps:**
+-1.  **Initialize Ray:** For each pixel, cast a ray from the camera through the voxel grid [S1].
+-2.  **Check Render Cutter:** If `rendUseGizmo` is enabled, check if the ray intersects the cutter volume. If `rendInvGizmo` is enabled, shade if the ray does *not* intersect the cutter [S1].
+-3.  **Determine Step Size:** Calculate the step size for the camera ray based on `rendstep` and the cell size. Calculate the step size for shadow rays based on `rendshadstep` [S1].
+-4.  **Ray Marching Loop:**
+-    a.  Advance the ray by the step size.
+-    b.  Sample the voxel grid at the current position.
+-    c.  If `sampler` is Box, use the value of the current cell. If Linear, blend with neighbors. If Spherical, use weight-based sampling [S1].
+-    d.  Apply `borderFade` if near grid boundaries [S1].
+-    e.  Accumulate color, opacity, and other properties based on the sampled values and shader parameters (Fire Emission, Smoke Color, etc.) [S1].
+-    f.  If `rendHeatHaze` is enabled, adjust the ray direction based on the gradient of the Surface channel [S1].
+-    g.  If `volMoblurMethod` is Grid-based, use pre-pass data for motion blur. If Ray-traced, use the velocity vector from the grid or `rendVelTexture` to stretch the contents [S1].
+-    h.  Check for termination conditions (e.g., full opacity, end of grid) [S1].
+-5.  **Shadow Ray Marching:** For each light, cast shadow rays using `rendshadstep` to determine occlusion [S1].
+-6.  **Displacement (if Render as Geometry):** If `geommode` is enabled, generate procedural geometry from the voxel grid using the `sarg` and `rendSurfLevel` parameters. Apply displacement using `rendDispl`, `rendDisplFine`, and `rendDispltSurf` [S1].
+-7.  **Output:** Return the accumulated color, alpha, and any requested Render Elements (Normals, Velocity, Z-Depth, Material ID) [S1].
++1.  **Ray Initialization:** For each pixel, cast a primary camera ray into the scene [S1].
++2.  **Cutter Check (Optional):** If `rendUseGizmo` is enabled, check if the ray intersects the render cutter geometry. If `rendInvGizmo` is enabled, shade rays that do *not* intersect the cutter. If the ray is outside the allowed volume, return background color [S1].
++3.  **Ray Marching Loop:**
++    a.  Determine step size: $step = \text{cell\_size} \times (\text{Step \%} / 100)$ [S1].
++    b.  If `Step %` > 100, cells are skipped, causing artifacts [S1].
++    c.  Advance ray by $step$ along its direction.
++    d.  Sample the voxel grid at the current ray position. The sampling method depends on `Sampler Type`:
++        *   **Box:** No blending; return value of the single cell containing the ray [S1].
++        *   **Linear:** Linear blending between adjacent voxels [S1].
++        *   **Spherical:** Weight-based sampling for smoothest look [S1].
++    e.  Accumulate optical depth and color based on the sampled values (Smoke, Temperature, etc.) and the current lighting state [S1].
++    f.  Repeat until the ray exits the grid or reaches a maximum distance.
++4.  **Shadow Ray Marching (Lighting):**
++    a.  For each light source, cast a shadow ray from the current shading point to the light [S1].
++    b.  Determine shadow step size: $shadow\_step = \text{cell\_size} \times (\text{Shadow Step \%} / 100)$ [S1].
++    c.  March along the shadow ray, accumulating opacity. Higher `Shadow Step %` speeds up rendering, especially for dome/area lights [S1].
++5.  **Surface Shading (If applicable):**
++    a.  If "Render as Geometry" (`geommode`) is enabled, the volume is converted to procedural geometry (transparent layers) [S1].
++    b.  Otherwise, if a `Surface Channel` (`sarg`) is defined, compute the isosurface using `rendSurfLevel_x/t/s/v/f` [S1].
++    c.  Apply displacement based on `rendDispltSurf` type (Gradient driven, Surface driven, Vector, or Advection) [S1].
++    d.  Compute normals and lighting for the surface [S1].
++6.  **Heat Haze (Optional):** If `rendHeatHaze` > 0, perturb the ray direction based on the gradient of the `Surface Channel` [S1].
++7.  **Motion Blur (Optional):**
++    a.  If `volMoblurMethod` is "Ray-traced", sample the velocity at multiple time steps along the ray [S1].
++    b.  If "Grid-based", use a pre-pass to generate streaks [S1].
++    c.  If `rendVelTexture` is set, use the texture's RGB values (Y/Z flipped to Blue/Green) as velocity vectors to stretch the simulation content [S1].
++    d.  Apply `mbmult` multiplier to blur strength [S1].
++8.  **Border Fade:** If the ray is within `borderFade` distance of the grid boundary, fade the opacity to transparent to prevent sharp edges [S1].
++9.  **Compositing:** Combine fire and smoke colors/opacities. Fire opacity mode (`emIgnoreAlpha`) determines if fire uses smoke opacity, is fully visible (additive blending), or uses own opacity [S1].
+ 
+ **Formulas:**
+-*   **Step Size:** $step = rendstep \times cell\_size / 100$ [S1].
+-*   **Velocity Vector from Texture:** $v = (R, -B, -G)$ where R, G, B are the red, green, blue components of the `rendVelTexture` [S1].
+-*   **Heat Haze Direction:** The ray direction is adjusted based on the gradient of the Surface channel, scaled by `rendHeatHaze` [S1].
++*   **Step Size:** $s = C \cdot \frac{P}{100}$, where $C$ is cell size, $P$ is Step % [S1].
++*   **Velocity Texture Mapping:** $v_y = -T_b$, $v_z = -T_g$, where $T_b, T_g$ are Blue and Green texture components [S1].
++*   **Heat Haze Perturbation:** $\vec{d}_{new} = \vec{d}_{old} + k \cdot \nabla S$, where $k$ is `rendHeatHaze` value, $S$ is Surface channel [S1].
++
++**Parameters with Typical Values:**
++*   `Step %` (`rendstep`): Recommended $\ge 90\%$ [S1].
++*   `Shadow Step %` (`rendshadstep`): Typically higher than Step % [S1].
++*   `Isosurface Level` (`rendSurfLevel_*`): Default 0.5 [S1].
++*   `Heat Haze` (`rendHeatHaze`): 1 approximates normal heat haze [S1].
++*   `Sampler Type`: Box (fastest), Linear (20-30% faster than Spherical), Spherical (smoothest) [S1].
++
++**Edge Cases and Pitfalls:**
++*   **Step % > 100:** Causes cell skipping and artifacts [S1].
++*   **Step % < 90%:** Required for render curves or texture maps to capture details smaller than a voxel, but increases render time [S1].
++*   **Render as Geometry:** Slows down rendering significantly [S1].
++*   **Grid-based Motion Blur:** Requires pre-pass, uses more memory, and only affects Volumetric/Volumetric Geometry/Volumetric Heat Haze modes [S1].
++*   **Velocity Texture:** Y/Z components are flipped (Blue/Green channels) [S1].
++*   **Fire Opacity:** "Fully Visible" mode uses additive blending and is not suitable for fire+smoke mix [S1].
+ 
+ **Pseudocode:**
+ ```python
+-def voxel_shader_volumetric_ray_marching(camera_ray, voxel_grid, params):
+-    # Initialize accumulation variables
+-    accumulated_color = (0, 0, 0)
+-    accumulated_alpha = 0
+-    
+-    # Determine step sizes
+-    camera_step = params['rendstep'] * voxel_grid.cell_size / 100
+-    shadow_step = params['rendshadstep'] * voxel_grid.cell_size / 100
+-    
+-    # Check Render Cutter
+-    if params['rendUseGizmo']:
+-        if not ray_intersects_gizmo(camera_ray, params['gizmo']):
+-            return (0, 0, 0, 0) # Outside cutter
+-    if params['rendInvGizmo']:
+-        if ray_intersects_gizmo(camera_ray, params['gizmo']):
+-            return (0, 0, 0, 0) # Inside cutter (if inverted)
+-            
+-    # Ray Marching Loop
+-    t = 0
+-    while t < params['max_distance']:
+-        # Advance ray
+-        current_pos = camera_ray.origin + camera_ray.direction * t
+-        
+-        # Check boundary fade
+-        if is_near_boundary(current_pos, voxel_grid, params['borderFade']):
+-            fade_factor = get_boundary_fade(current_pos, voxel_grid, params['borderFade'])
++def voxel_shader_volumetric_ray_marching(ray_origin, ray_direction, grid, params):
++    """
++    ray_origin: vec3
++    ray_direction: vec3
++    grid: VoxelGrid (access methods: get_scalar(x,y,z), get_vector(x,y,z))
++    params: dict containing all shader parameters
++    """
++    cell_size = grid.cell_size
++    step_pct = params['rendstep']
++    shadow_step_pct = params['rendshadstep']
++    border_fade_dist = params['borderFade']
++    sampler_type = params['sampler']
++    surface_channel = params['sarg']
++    isosurface_level = params['rendSurfLevel_x'] # Simplified for one channel
++    heat_haze_strength = params['rendHeatHaze']
++    velocity_texture = params['rendVelTexture']
++    motion_blur_method = params['volMoblurMethod']
++    mb_mult = params['mbmult']
++    use_cutter = params['rendUseGizmo']
++    invert_cutter = params['rendInvGizmo']
++    cutter_gizmo = params['cutter_gizmo'] # Geometric object
++    render_as_geometry = params['geommode']
++    fire_opacity_mode = params['emIgnoreAlpha']
++    smoke_color_source = params['difSource']
++    fire_emission_source = params['emSource']
++    
++    # Initialize accumulators
++    accumulated_color = vec3(0.0)
++    accumulated_opacity = 0.0
++    current_pos = ray_origin
++    current_dir = ray_direction
++    
++    # Check cutter
++    if use_cutter:
++        if invert_cutter:
++            if ray_intersects_gizmo(ray_origin, ray_direction, cutter_gizmo):
++                return vec3(0.0) # Ray intersects cutter, so it's outside (inverted)
+         else:
+-            fade_factor = 1.0
+-            
+-        # Sample voxel grid
+-        voxel_value = sample_voxel_grid(current_pos, voxel_grid, params['sampler'])
+-        
+-        # Apply border fade
+-        voxel_value *= fade_factor
+-        
+-        # Calculate emission and scattering
+-        emission = calculate_emission(voxel_value, params['emSource'], params['emTexture'], params['emModulate'])
+-        scattering = calculate_scattering(voxel_value, params['difSource'], params['difTexture'], params['difModulate'], params['difScattering'])
+-        
+-        # Accumulate
+-        alpha_contribution = voxel_value['opacity'] * fade_factor
+-        color_contribution = emission + scattering
+-        
+-        accumulated_color += color_contribution * (1 - accumulated_alpha)
+-        accumulated_alpha += alpha_contribution * (1 - accumulated_alpha)
+-        
+-        if accumulated_alpha >= 1.0:
+-            break
+-            
++            if not ray_intersects_gizmo(ray_origin, ray_direction, cutter_gizmo):
++                return vec3(0.0) # Ray does not intersect cutter, so it's outside
++    
++    # Determine step size
++    step_size = cell_size * (step_pct / 100.0)
++    if step_pct > 100:
++        # Artifacts may appear, but we proceed as per source
++        pass
++    
++    # Main ray march
++    while current_pos is inside grid:
++        # Check border fade
++        dist_to_boundary = distance_to_grid_boundary(current_pos, grid)
++        if dist_to_boundary < border_fade_dist:
++            fade_factor = dist_to_boundary / border_fade_dist
++            # Apply fade to accumulated color/opacity? Source says content becomes transparent.
++            # We'll apply it to the final contribution.
++            pass
++        
++        # Sample grid
++        if sampler_type == 'Box':
++            voxel_value = grid.get_scalar_at_position(current_pos)
++        elif sampler_type == 'Linear':
++            voxel_value = grid.get_linear_interpolated_scalar(current_pos)
++        elif sampler_type == 'Spherical':
++            voxel_value = grid.get_spherical_weighted_scalar(current_pos)
++        
+         # Heat Haze
+-        if params['rendHeatHaze'] > 0:
+-            gradient = calculate_surface_gradient(current_pos, voxel_grid, params['sarg'])
+-            camera_ray.direction += gradient * params['rendHeatHaze']
+-            camera_ray.direction = normalize(camera_ray.direction)
+-            
+-        # Motion Blur (Grid-based)
+-        if params['volMoblurMethod'] == 'Grid-based':
+-            # Use pre-pass data
+-            pass
+-        elif params['volMoblurMethod'] == 'Ray-traced':
+-            # Use velocity vector
+-            if params['rendVelTexture']:
+-                vel_color = sample_texture_3d(params['rendVelTexture'], current_pos)
+-                velocity = (vel_color.r, -vel_color.g, -vel_color.b) # Y/Z flipped
+-            else:
+-                velocity = voxel_grid.velocity[current_pos]
+-            # Stretch contents along velocity vector [G]
+-            
+-        t += camera_step
+-        
+-    return accumulated_color, accumulated_alpha
+-
+-def calculate_emission(voxel_value, em_source, em_texture, em_modulate):
+-    if em_source == 'Disabled':
+-        return (0, 0, 0)
+-    elif em_source == 'Texture':
+-        color = sample_texture_2d(em_texture, voxel_value.uv)
+-        if em_modulate:
+-            color *= em_texture_modulation
+-        return color
++        if heat_haze_strength > 0:
++            surface_gradient = grid.get_gradient_of_surface_channel(current_pos, surface_channel)
++            current_dir = normalize(current_dir + heat_haze_strength * surface_gradient)
++        
++        # Accumulate color and opacity
++        # Simplified accumulation logic
++        smoke_density = grid.get_scalar('Smoke', current_pos)
++        temperature = grid.get_scalar('Temperature', current_pos)
++        
++        # Smoke Color
++        smoke_color = compute_smoke_color(smoke_density, temperature, smoke_color_source, params)
++        
++        # Fire Emission
++        fire_color = compute_fire_emission(temperature, fire_emission_source, params)
++        
++        # Shadow Ray Marching
++        shadow_opacity = 0.0
++        shadow_step_size = cell_size * (shadow_step_pct / 100.0)
++        shadow_pos = current_pos
++        shadow_dir = normalize(light_position - current_pos)
++        while shadow_pos is inside grid and shadow_opacity < 1.0:
++            shadow_pos += shadow_step_size * shadow_dir
++            shadow_opacity += grid.get_scalar('Smoke', shadow_pos) * shadow_step_size
++        
++        # Combine
++        contribution = (smoke_color * (1.0 - shadow_opacity) + fire_color) * smoke_density * step_size
++        accumulated_color += contribution * (1.0 - accumulated_opacity)
++        accumulated_opacity += smoke_density * step_size
++        
++        # Advance
++        current_pos += step_size * current_dir
++    
++    # Apply border fade to final result if needed
++    # ...
++    
++    # Fire Opacity Mode
++    if fire_opacity_mode == 'Fully Visible':
++        # Additive blending, no alpha
++        return accumulated_color
++    elif fire_opacity_mode == 'Use Smoke Opacity':
++        return accumulated_color, accumulated_opacity
+     else:
+-        # Based on cache channel (Temperature, Smoke, etc.)
+-        channel_value = voxel_value[em_source]
+-        return remap_channel_to_color(channel_value, em_source)
+-
+-def calculate_scattering(voxel_value, dif_source, dif_texture, dif_modulate, dif_scattering):
+-    if dif_scattering == 'Disabled':
+-        return (0, 0, 0)
+-    elif dif_scattering == 'Ray-traced':
+-        # Physically accurate scattering (requires GI) [G]
+-        return ray_traced_scattering(voxel_value, dif_source, dif_texture, dif_modulate)
+-    elif dif_scattering == 'Approximate':
+-        # Approximate scattering [G]
+-        return approximate_scattering(voxel_value, dif_source, dif_texture, dif_modulate)
++        # Use Own Opacity
++        return accumulated_color, accumulated_opacity
++
++def compute_smoke_color(smoke_density, temperature, source, params):
++    if source == 'Constant Color':
++        return params['difSimpleColor']
++    elif source == 'Temperature':
++        return remap_temperature_to_color(temperature, params['difScattering'])
++    elif source == 'Smoke':
++        return remap_smoke_to_color(smoke_density, params['difScattering'])
++    elif source == 'Texture':
++        return params['difTexture'].sample(params['tex_coords'])
++    elif source == 'RGB':
++        return grid.get_vector('RGB', params['tex_coords'])
++    elif source == 'Fuel':
++        return remap_fuel_to_color(grid.get_scalar('Fuel', params['tex_coords']), params['difScattering'])
+     else:
+-        return (0, 0, 0)
+-
+-def sample_voxel_grid(pos, voxel_grid, sampler_type):
+-    if sampler_type == 'Box':
+-        return voxel_grid.get_cell_value(pos)
+-    elif sampler_type == 'Linear':
+-        return linear_interpolation(pos, voxel_grid)
+-    elif sampler_type == 'Spherical':
+-        return spherical_weighted_sampling(pos, voxel_grid)
++        return vec3(0.0)
++
++def compute_fire_emission(temperature, source, params):
++    if source == 'Temperature':
++        return remap_temperature_to_fire_color(temperature)
++    elif source == 'Smoke':
++        return remap_smoke_to_fire_color(grid.get_scalar('Smoke', params['tex_coords']))
++    elif source == 'Speed':
++        return remap_speed_to_fire_color(grid.get_scalar('Speed', params['tex_coords']))
++    elif source == 'Fuel':
++        return remap_fuel_to_fire_color(grid.get_scalar('Fuel', params['tex_coords']))
++    elif source == 'Texture':
++        return params['emTexture'].sample(params['tex_coords'])
++    elif source == 'RGB':
++        return grid.get_vector('RGB', params['tex_coords'])
++    else:
++        return vec3(0.0)
++
++def ray_intersects_gizmo(origin, direction, gizmo):
++    # Placeholder for geometric intersection test
++    # [G] Standard ray-triangle or ray-bounding box intersection
++    return False
+ ```
+ 
+@@ -177,18 +219,18 @@
+ 
+ ### Smoke Color Mapping
+-Smoke Color Mapping determines the diffuse color of the smoke. It requires external light to become visible if GI is enabled. The `difSource` parameter specifies the source channel (Temperature, Smoke, Speed, Texture, Constant Color, RGB, Fuel). If `difSource` is not Texture, the color is multiplied by the texture in the `difTexture` slot if `difModulate` is enabled. The `difScattering` parameter controls light scattering (Ray-traced, Disabled, Approximate) [S1].
++Smoke Color Mapping determines the diffuse color of the smoke volume. It requires external light to become visible if GI is enabled [S1]. The `Based on` (`difSource`) parameter specifies the source channel: Constant Color (default), Temperature, Smoke, Speed, Texture, RGB, or Fuel [S1]. If `Based on` is not Texture, the color can be modulated by a texture map (`difModulate`) [S1]. The `Scattering` (`difScattering`) parameter controls light ray scattering, with options for Ray-traced (GI only, slowest, most realistic), Disabled (uses Diffuse Multiplier for brightness), and Approximate [S1].
+ 
+ ## Operating characteristics
+-*   **Time Complexity:** Depends on the number of steps per ray, which is determined by `rendstep` and the grid resolution. Shadow rays add additional complexity. Grid-based motion blur requires a pre-pass, increasing time [S1].
+-*   **Memory Complexity:** Depends on the voxel grid size and the number of channels stored. Grid-based motion blur requires additional memory for pre-pass data [S1].
+-*   **Measured Performance:** Box sampler is the fastest. Linear is 20-30% faster than Spherical. Spherical is the smoothest but slowest [S1].
+-*   **Scaling:** Performance scales with grid resolution and the number of lights. Increasing `rendstep` or `rendshadstep` improves performance but reduces quality [S1].
+-*   **Strengths:** Provides detailed control over volumetric shading for Phoenix FD and V-Ray Volume Grids. Supports various displacement types and motion blur methods [S1].
+-*   **Limitations:** `Render as Geometry` slows down rendering. Grid-based motion blur requires more memory. Standard Maya materials cannot be used [S1].
+-*   **When to Use:** When rendering Fire/Smoke simulations from Phoenix FD or V-Ray Volume Grids in Maya.
+-*   **When Not to Use:** When using standard Maya materials or when performance is critical and high quality is not required (use Box sampler) [S1].
++*   **Time Complexity:** Depends on the number of ray steps, which is inversely proportional to `Step %` and `Shadow Step %`. Shadow rays add additional cost, especially with many lights [S1].
++*   **Memory Complexity:** Proportional to the size of the voxel grid and any additional textures (Velocity, Displacement) [S1]. Grid-based motion blur requires a pre-pass and more memory [S1].
++*   **Measured Performance:** Box sampler is fastest. Linear is 20-30% faster than Spherical. Spherical is smoothest but slowest [S1]. "Render as Geometry" slows down rendering significantly [S1]. Grid-based motion blur is slower than Ray-traced due to pre-pass [S1].
++*   **Scaling:** Performance degrades with higher resolution grids and lower step percentages [S1].
++*   **Strengths:** Supports complex volumetric shading, motion blur, displacement, and render elements (via Render as Geometry) [S1].
++*   **Limitations:** "Render as Geometry" is slow. Grid-based motion blur requires more memory. Step % < 90% increases render time [S1].
++*   **When to Use:** For Fire/Smoke simulations where volumetric shading is required and standard materials cannot be used [S1].
++*   **When Not to Use:** When performance is critical and visual quality of sampling is less important (use Box sampler). When deep images or render elements are not needed (avoid Render as Geometry) [S1].
+ 
+ ## Background
+-The Voxel Shader is part of the Phoenix FD plugin for Maya, developed by Chaos Group. It is designed to work with Phoenix Simulator and V-Ray Volume Grid data [S1].
++The Voxel Shader is part of the Phoenix FD plugin for Maya, developed by Chaos Group [S1]. It was created to address the limitation that Maya materials cannot shade volumetrics directly, providing specific rollouts for Fire, Smoke Color, and Smoke Opacity [S1]. It supports rendering from Phoenix Simulator data and V-Ray Volume Grids [S1].
+ 
+ ## Sources

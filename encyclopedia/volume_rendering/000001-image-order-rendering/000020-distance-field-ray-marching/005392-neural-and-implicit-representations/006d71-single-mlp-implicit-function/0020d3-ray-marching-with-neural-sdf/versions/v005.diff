@@ -1,0 +1,313 @@
+--- v004.md
++++ v005.md
+@@ -4,155 +4,203 @@
+ 
+ ## Overview
+-Ray Marching with Neural SDF is a rendering technique that approximates the Space Distance Field (SDF) using a deep neural network and renders images by marching rays along the estimated distance field [S1, unofficial]. It substitutes the analytical distance query $f(\mathbf{p})$ with a neural network inference $N(\mathbf{z}, \mathbf{p})$, where $\mathbf{z}$ is a latent code representing the shape and $\mathbf{p}$ is the 3D query point [S1, unofficial]. The method builds on [Distance-field ray marching](21-distance-field-ray-marching.md) by replacing explicit geometric primitives with a learned implicit representation [S1, unofficial].
++Ray Marching with Neural SDF is a rendering technique that approximates the Space Distance Field (SDF) using a deep neural network and renders images by marching rays along the estimated distance field [S1, unofficial]. It differs from traditional SDF ray marching by replacing the analytical distance function with a learned implicit representation, allowing for the rendering of complex, non-analytic shapes defined by latent codes [S1, unofficial].
+ 
+ ## How it works
+ **Inputs and Outputs:**
+-*   **Inputs:** Camera parameters (origin, direction vectors), a trained neural SDF model (weights and latent code), lighting configuration, and rendering parameters (`max_steps`, `epsilon`, `max_dist`) [S1, unofficial].
+-*   **Outputs:** A 2D image tensor of shape `(height, width, 3)` representing the rendered scene [S1, unofficial].
++*   **Inputs:** A trained neural network model (DeepSDF), a latent code representing the shape, camera parameters (position, width, height, FOV), and rendering parameters (`max_steps`, `epsilon`, `max_dist`) [S1, unofficial].
++*   **Outputs:** A rendered image (uint8 array of shape `[height, width]`) [S1, unofficial].
+ 
+ **Data Structures:**
+-*   **Camera:** Defined by `width` (int), `height` (int), `fov` (float, default $\pi/3$), `position` (3D vector), and `aspect_ratio` (float, `width/height`) [S1, unofficial].
+-*   **Ray Directions:** A tensor of shape `(width * height, 3)` containing normalized direction vectors for each pixel, generated via coordinate grid sampling over $[-1, 1]$ [S1, unofficial].
+-*   **Distances Tensor:** Initialized to zeros with shape `(width * height, 1)` on the GPU device [S1, unofficial].
+-*   **Neural SDF Model:** A neural network taking concatenated latent code and 3D coordinates as input, outputting a scalar distance value [S1, unofficial].
++*   **Camera:**
++    *   `width` (int): Image width in pixels.
++    *   `height` (int): Image height in pixels.
++    *   `fov` (float): Field of view, default $\pi/3$ [S1, unofficial].
++    *   `position` (torch.Tensor): Camera origin in 3D space [S1, unofficial].
++    *   `aspect_ratio` (float): `width / height` [S1, unofficial].
++    *   `directions` (torch.Tensor): Normalized ray directions for all pixels, shape `[width * height, 3]` [S1, unofficial].
++*   **DeepSDF Model:**
++    *   Architecture: `nn.Sequential` with `nn.Linear(latent_dim + 3, 256)`, `nn.ReLU()`, `nn.Linear(256, 1)` [S1, unofficial].
++    *   Input: Concatenation of `latent_code` (shape `[batch, latent_dim]`) and `coords` (shape `[batch, 3]`) [S1, unofficial].
++    *   Output: Scalar SDF value [S1, unofficial].
+ 
+ **Parameters:**
+-*   `max_steps`: Maximum number of ray marching iterations. Default value is 30 [S1, unofficial].
+-*   `epsilon`: Convergence threshold. Default value is $10^{-3}$ [S1, unofficial].
+-*   `max_dist`: Maximum ray travel distance. Default value is 10.0 [S1, unofficial].
++*   `max_steps`: Maximum ray marching iterations. Default 30 [S1, unofficial].
++*   `epsilon`: Convergence threshold. Default $10^{-3}$ [S1, unofficial].
++*   `max_dist`: Maximum ray travel distance. Default 10.0 [S1, unofficial].
+ 
+ **Algorithm Steps:**
+-1.  **Initialization:** Create a distances tensor $D$ of shape $(N, 1)$ filled with zeros, where $N = \text{width} \times \text{height}$ [S1, unofficial]. Compute ray origins $\mathbf{o}$ (camera position) and directions $\mathbf{d}$ (one per pixel) [S1, unofficial].
+-2.  **Position Calculation:** Calculate initial ray positions $\mathbf{p}_0 = \mathbf{o} + D \cdot \mathbf{d}$ [S1, unofficial].
+-3.  **Marching Loop:** Iterate up to `max_steps` times:
+-    *   Query the neural SDF for distances at current positions $\mathbf{p}$: $d = N(\mathbf{z}, \mathbf{p})$ [S1, unofficial].
+-    *   **Termination Check:** If all values in $d$ are less than `epsilon`, break the loop (convergence) [S1, unofficial].
+-    *   **Step Update:** Update distances $D \leftarrow D + d$ [S1, unofficial].
+-    *   **Recalculate Positions:** Update positions $\mathbf{p} \leftarrow \mathbf{o} + D \cdot \mathbf{d}$ [S1, unofficial].
+-    *   **Escape Check:** If all rays have exceeded `max_dist` (check if $D > \text{max\_dist}$), break the loop [S1, unofficial].
+-4.  **Normal Estimation:** At the final converged positions, estimate normals using central finite differences with step size $e = 10^{-3}$ [S1, unofficial].
+-    *   Compute offsets: $\mathbf{dx} = (e, 0, 0)$, $\mathbf{dy} = (0, e, 0)$, $\mathbf{dz} = (0, 0, e)$ [S1, unofficial].
+-    *   Calculate gradient components:
+-        $$ n_x = \frac{N(\mathbf{z}, \mathbf{p} + \mathbf{dx}) - N(\mathbf{z}, \mathbf{p} - \mathbf{dx})}{2e} $$
+-        $$ n_y = \frac{N(\mathbf{z}, \mathbf{p} + \mathbf{dy}) - N(\mathbf{z}, \mathbf{p} - \mathbf{dy})}{2e} $$
+-        $$ n_z = \frac{N(\mathbf{z}, \mathbf{p} + \mathbf{dz}) - N(\mathbf{z}, \mathbf{p} - \mathbf{dz})}{2e} $$ [G]
+-    *   Normalize: $\mathbf{n} = \frac{(n_x, n_y, n_z)}{\|(n_x, n_y, n_z)\|}$ [S1, unofficial].
+-5.  **Shading:** Calculate brightness using a single directional light $\mathbf{l}$:
+-    *   Compute dot product: $b = \max(0, \mathbf{n} \cdot \mathbf{l})$ [S1, unofficial].
+-    *   Set brightness to 0 for pixels where the final accumulated distance exceeds `max_dist` [S1, unofficial].
+-6.  **Post-processing:** Reshape brightness to `(height, width)`, convert to numpy, scale by 255, and cast to `uint8` for the final image [S1, unofficial].
++1.  **Initialize Rays:**
++    *   Create a grid of pixel coordinates. For a camera with `width` and `height`, generate normalized coordinates $x, y \in [-1, 1]$ using `torch.meshgrid`.
++    *   Construct direction vectors $d = [x, y, 1.0]$ and normalize them: $d_{norm} = \frac{d}{\|d\|}$ [S1, unofficial].
++    *   Reshape directions to `[width * height, 3]` [S1, unofficial].
++    *   Get ray origins from camera position [S1, unofficial].
++
++2.  **Initialize Distances:**
++    *   Create a tensor `distances` of shape `[width * height, 1]` initialized to zeros on the GPU device [S1, unofficial].
++
++3.  **Ray Marching Loop:**
++    *   Loop `step` from 0 to `max_steps - 1`:
++        *   Calculate current positions: $pos = origin + distances \times directions$ [S1, unofficial].
++        *   Query the neural SDF: $sdf\_val = \text{Model}(latent\_code, pos)$ [S1, unofficial].
++        *   **Convergence Check:** If all values in `distances` are less than `epsilon`, break the loop [S1, unofficial].
++        *   **Max Distance Check:** If all rays have either converged (`distances < epsilon`) or exceeded `max_dist`, break the loop [S1, unofficial].
++        *   **Update:** Update distances by adding the sampled SDF value: $distances \leftarrow distances + sdf\_val$ [S1, unofficial].
++        *   Recalculate positions based on updated distances [S1, unofficial].
++
++4.  **Normal Estimation:**
++    *   Estimate normals at the final positions using central finite differences with step size $e = 10^{-3}$ [S1, unofficial].
++    *   For each position $p$, compute:
++        $$
++        n_x = \text{SDF}(p + [e, 0, 0]) - \text{SDF}(p - [e, 0, 0])
++        $$
++        $$
++        n_y = \text{SDF}(p + [0, e, 0]) - \text{SDF}(p - [0, e, 0])
++        $$
++        $$
++        n_z = \text{SDF}(p + [0, 0, e]) - \text{SDF}(p - [0, 0, e])
++        $$
++        $$
++        normal = \text{normalize}([n_x, n_y, n_z])
++        $$
++    *   *Note:* The reference implementation hardcodes the use of the first object (`objects[0]`) for normal estimation, which is a known pitfall for multi-object scenes [S1, unofficial].
++
++5.  **Shading:**
++    *   Calculate brightness using a single directional light:
++        $$
++        brightness = \max(0, \text{dot}(normal, light\_direction))
++        $$
++    *   Set brightness to 0 for pixels where the final distance exceeds `max_dist` [S1, unofficial].
++
++6.  **Output:**
++    *   Reshape brightness to `[height, width]` [S1, unofficial].
++    *   Convert to numpy, scale by 255, and cast to `uint8` [S1, unofficial].
+ 
+ **Pseudocode:**
++
+ ```python
++import torch
++import torch.nn as nn
+ import numpy as np
+ 
+-def render_neural_sdf(camera, sdf_model, latent_code, light_dir, max_steps=30, epsilon=1e-3, max_dist=10.0):
++def render_neural_sdf(model, latent_code, camera, max_steps=30, epsilon=1e-3, max_dist=10.0, light_direction=None):
+     """
+     Renders an image using ray marching with a neural SDF.
+     
+     Args:
+-        camera: Object with width, height, position (3,), and directions (N, 3).
+-        sdf_model: Callable N(latent_code, coords) -> distances (N, 1).
+-        latent_code: Tensor/array representing the shape.
+-        light_dir: Normalized 3D vector for the light source.
+-        max_steps: Max iterations.
++        model: Trained DeepSDF neural network.
++        latent_code: Tensor of shape [batch, latent_dim] representing the shape.
++        camera: Camera object with width, height, position, and directions.
++        max_steps: Max ray marching iterations.
+         epsilon: Convergence threshold.
+         max_dist: Max ray distance.
++        light_direction: Normalized light direction vector.
+         
+     Returns:
+-        numpy array: Rendered image (uint8, shape HxWx3).
++        np.ndarray: Rendered image of shape (height, width, 3) or (height, width) depending on shading.
+     """
+     device = camera.position.device
+     dtype = camera.position.dtype
++    
++    # 1. Initialize distances
+     num_rays = camera.width * camera.height
+-    
+-    # 1. Initialize distances tensor
+-    distances = np.zeros((num_rays, 1), dtype=dtype)
+-    
+-    # 2. Calculate initial positions
+-    # directions shape: (num_rays, 3)
+-    positions = camera.position + distances * camera.directions
+-    
+-    # 3. Marching Loop
++    distances = torch.zeros((num_rays, 1), device=device, dtype=dtype)
++    
++    # 2. Ray Marching Loop
+     for step in range(max_steps):
+-        # Query neural SDF
+-        sdf_values = sdf_model(latent_code, positions)
+-        
+-        # Termination Check: Convergence
+-        if np.all(sdf_values < epsilon):
++        # Calculate current positions
++        # directions shape: (num_rays, 3)
++        # distances shape: (num_rays, 1)
++        positions = camera.position + distances * camera.directions
++        
++        # Query SDF
++        # Expand latent_code to match number of rays if necessary, or assume batch processing
++        # In the reference, latent_code is expanded to match points_torch shape
++        sdf_values = model(latent_code.expand(positions.shape[0], -1), positions)
++        
++        # Check convergence
++        if torch.all(distances < epsilon):
+             break
+             
+-        # Step Update
+-        distances = distances + sdf_values
+-        
+-        # Recalculate positions
+-        positions = camera.position + distances * camera.directions
+-        
+-        # Escape Check
+-        if np.all(distances > max_dist):
++        # Check max distance
++        # Note: The reference checks if ALL rays have converged OR exceeded max_dist
++        # This logic might be flawed for partial convergence, but we follow the source
++        if torch.all((distances < epsilon) | (distances > max_dist)):
+             break
+             
++        # Update distances
++        distances = distances + sdf_values
++        
++    # 3. Final Positions
++    final_positions = camera.position + distances * camera.directions
++    
+     # 4. Normal Estimation
+     e = 1e-3
+-    dx = np.array([e, 0, 0], dtype=dtype)
+-    dy = np.array([0, e, 0], dtype=dtype)
+-    dz = np.array([0, 0, e], dtype=dtype)
+-    
+-    # Calculate finite differences
+-    sdf_plus_dx = sdf_model(latent_code, positions + dx)
+-    sdf_minus_dx = sdf_model(latent_code, positions - dx)
+-    sdf_plus_dy = sdf_model(latent_code, positions + dy)
+-    sdf_minus_dy = sdf_model(latent_code, positions - dy)
+-    sdf_plus_dz = sdf_model(latent_code, positions + dz)
+-    sdf_minus_dz = sdf_model(latent_code, positions - dz)
+-    
+-    nx = (sdf_plus_dx - sdf_minus_dx) / (2 * e)
+-    ny = (sdf_plus_dy - sdf_minus_dy) / (2 * e)
+-    nz = (sdf_plus_dz - sdf_minus_dz) / (2 * e)
+-    
+-    # Normalize normals
+-    norms = np.sqrt(nx**2 + ny**2 + nz**2)
+-    norms = np.clip(norms, 1e-8, None)
+-    normals = np.stack([nx, ny, nz], axis=-1) / norms.reshape(-1, 1)
++    dx = torch.tensor([e, 0, 0], device=device, dtype=dtype)
++    dy = torch.tensor([0, e, 0], device=device, dtype=dtype)
++    dz = torch.tensor([0, 0, e], device=device, dtype=dtype)
++    
++    # Compute finite differences
++    # Note: Reference hardcodes object index 0. We assume single object for this implementation.
++    sdf_pos_dx = model(latent_code.expand(final_positions.shape[0], -1), final_positions + dx)
++    sdf_neg_dx = model(latent_code.expand(final_positions.shape[0], -1), final_positions - dx)
++    sdf_pos_dy = model(latent_code.expand(final_positions.shape[0], -1), final_positions + dy)
++    sdf_neg_dy = model(latent_code.expand(final_positions.shape[0], -1), final_positions - dy)
++    sdf_pos_dz = model(latent_code.expand(final_positions.shape[0], -1), final_positions + dz)
++    sdf_neg_dz = model(latent_code.expand(final_positions.shape[0], -1), final_positions - dz)
++    
++    nx = sdf_pos_dx - sdf_neg_dx
++    ny = sdf_pos_dy - sdf_neg_dy
++    nz = sdf_pos_dz - sdf_neg_dz
++    
++    normals = torch.stack([nx, ny, nz], dim=-1)
++    normals = torch.nn.functional.normalize(normals, dim=-1)
+     
+     # 5. Shading
+-    # Dot product with light direction
+-    dot_product = np.sum(normals * light_dir, axis=-1)
+-    brightness = np.clip(dot_product, 0.0, 1.0)
+-    
+-    # Set brightness to 0 for rays that exceeded max_dist
+-    escaped = distances.squeeze(-1) > max_dist
+-    brightness[escaped] = 0.0
+-    
+-    # 6. Post-processing
+-    # Reshape to (height, width)
++    if light_direction is not None:
++        # Ensure light_direction is broadcastable
++        light_dir = light_direction.to(device).to(dtype)
++        # Dot product: normals (num_rays, 3) . light_dir (3,) -> (num_rays,)
++        dot_product = torch.sum(normals * light_dir, dim=-1)
++        brightness = torch.clamp(dot_product, 0.0, 1.0)
++    else:
++        brightness = torch.ones_like(nx)
++        
++    # 6. Handle rays that exceeded max_dist
++    # The reference sets brightness to 0 if final distance > max_dist
++    # Note: distances shape is (num_rays, 1)
++    exceeded_max_dist = distances.squeeze(-1) > max_dist
++    brightness[exceeded_max_dist] = 0.0
++    
++    # 7. Output
++    # Reshape to height x width
+     brightness_image = brightness.reshape(camera.height, camera.width)
+     
+     # Convert to numpy, scale, cast to uint8
+-    img_np = brightness_image * 255
+-    img_uint8 = img_np.astype(np.uint8)
+-    
+-    # Convert to RGB (single channel brightness -> grayscale RGB)
+-    img_rgb = np.stack([img_uint8] * 3, axis=-1)
+-    
+-    return img_rgb
++    # Assuming grayscale for simplicity as per reference brightness calculation
++    # If color is needed, shading would need to be per-channel or use albedo
++    image_np = (brightness_image.cpu().numpy() * 255).astype(np.uint8)
++    
++    return image_np
+ ```
+ 
+-**Edge Cases and Pitfalls:**
+-*   **Normal Estimation Bug:** The reference implementation contains a hardcoded index for the SDF object (`objects[0]`), which fails if multiple objects are passed [S1, unofficial].
+-*   **Screen Initialization:** The PyGame screen initialization is hardcoded to 1280x720, which may not match the requested render dimensions [S1, unofficial].
+-*   **Precision:** The choice of `epsilon` affects convergence; too large a value leads to jagged surfaces, while too small increases computation time [S1, unofficial].
++## Subtopics
++
++### Ray-marching on 3D Gaussians
++Renders scenes using 3D Gaussian splats instead of implicit distance fields. Chosen when explicit geometric primitives are preferred over implicit surfaces. [Link](1036-ray-marching-on-3d-gaussians.md)
++
++### RBF Particle Volume Path Tracing
++Uses Radial Basis Function particles for volume rendering. Chosen for volumetric data rather than surface rendering. [Link](9641-rbf-particle-volume-path-tracing.md)
+ 
+ ## Operating characteristics
+-*   **Time Complexity:** $O(N \cdot S \cdot C)$, where $N$ is the number of pixels, $S$ is the number of steps (`max_steps`), and $C$ is the cost of a neural network forward pass [S1, unofficial].
+-*   **Memory Complexity:** $O(N)$ for storing ray states and distances [S1, unofficial].
+-*   **Performance:** Performance depends heavily on the neural network architecture and hardware [S1, unofficial].
+-*   **Strengths:** Compact representation of complex geometry via latent codes; no need for explicit mesh or voxel data [S1, unofficial].
+-*   **Limitations:** Slow rendering speed compared to analytical methods; requires training data and training time; normal estimation via finite differences is noisy and computationally expensive [S1, unofficial].
+-*   **When to Use:** When geometry is complex and defined implicitly by a neural network, or when storage of explicit geometry is prohibitive [S1, unofficial].
+-*   **When Not to Use:** Not given in the sources.
++*   **Time Complexity**: Dominated by the neural network inference per ray step. Total time is $O(N_{rays} \times N_{steps} \times T_{inference})$, where $N_{rays}$ is the number of pixels, $N_{steps}$ is `max_steps`, and $T_{inference}$ is the time for one forward pass through the DeepSDF network [S1, unofficial].
++*   **Memory Complexity**: $O(N_{rays} \times N_{steps})$ for storing distances and positions during marching, plus the memory for the neural network weights [S1, unofficial].
++*   **Performance**: The reference implementation uses a simple MLP (256 hidden units) and runs on GPU. Performance scales with network depth/width and ray count [S1, unofficial].
++*   **Strengths**: Can represent complex, organic shapes that are difficult to define analytically. Latent codes allow for shape interpolation and variation [S1, unofficial].
++*   **Limitations**: Requires training data and training time. Normal estimation via finite differences is noisy and computationally expensive. The reference implementation has bugs (hardcoded object index, hardcoded screen resolution) [S1, unofficial].
++*   **When to use**: When rendering shapes defined by implicit neural representations.
++*   **When not to use**: For high-performance real-time rendering of simple analytic shapes, or when high-fidelity normals are critical without post-processing.
+ 
+ ## Background
+-The technique originates from the application of deep learning to implicit surface representations, specifically building on the DeepSDF framework [S1, unofficial]. The provided source is an unofficial project exploring the approximation of SDFs using deep machine learning for ray marching rendering [S1, unofficial]. It demonstrates the feasibility of using a neural network to replace the analytical distance function in the sphere tracing algorithm [S1, unofficial].
++The technique is based on the DeepSDF (Deep Signed Distance Function) approach, which uses a deep neural network to represent the SDF of a shape [S1, unofficial]. The specific implementation described in the sources is an unofficial project by Kulakov-Nikita, exploring the approximation of SDFs using deep learning for ray marching [S1, unofficial].
+ 
+ ## Sources

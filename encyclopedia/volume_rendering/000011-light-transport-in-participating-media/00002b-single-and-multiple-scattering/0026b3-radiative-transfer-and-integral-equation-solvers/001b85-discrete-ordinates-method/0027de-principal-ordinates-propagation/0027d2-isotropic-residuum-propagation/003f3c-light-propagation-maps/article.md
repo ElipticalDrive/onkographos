@@ -1,0 +1,203 @@
+# Light Propagation Maps
+
+Also called: Fattal's LPM, Fattal's Original LPM Algorithm, Fattal's method, Original LPM iteration
+
+## Overview
+Light Propagation Maps (LPM) is a Discrete Ordinate Method (DOM) technique for computing multiple scattering in participating media [S1]. It approximates the radiative transfer equation by decoupling spatial and directional sampling: it uses high-resolution 2D ray maps for iterative light propagation to reduce artifacts like false scattering and ray effects, while using a coarse 3D grid for storing accumulated radiance to minimize memory usage [S1]. It sets itself apart from standard DOM by using these 2D propagation maps instead of a full 3D directional grid for the transport step, and from [Isotropic Residuum Propagation](4122-isotropic-residuum-propagation.md) by handling the full anisotropic propagation before potentially switching to isotropic residuum methods.
+
+## How it works
+**Inputs and Outputs:**
+*   **Input:** A 3D voxel grid representing the medium with absorption coefficient $K_a$, scattering coefficient $K_s$, and phase function $p(\omega, \omega')$. Boundary conditions (incoming radiance) and self-emission radiance.
+*   **Output:** Average scattered radiance $I_{xyz}^d$ for each voxel $xyz$ and storage direction $d$.
+
+**Data Structures:**
+1.  **3D Grid:** Stores medium properties ($K_a, K_s$) and radiance buffers.
+    *   $I_{xyz}^d$: Average radiance in voxel $xyz$ along direction $d$.
+    *   $U_{xyz}^{i,p}$: Unscattered radiance for propagation direction $i$ at iteration $p$.
+    *   *Note:* In practice, only two $U$ buffers are kept (for $p-1$ and $p$) using a swap mechanism [S1].
+2.  **Light Propagation Maps (LPMs):** A set of 2D arrays. Each LPM corresponds to a face of the coarse 3D grid.
+    *   Each element $(r,s)$ in an LPM stores a set of rays originating at $(r,s)$ with directions sampled from the unit sphere $S^2$.
+    *   High spatial resolution compared to the storage grid.
+
+**Parameters:**
+*   $\varepsilon$: Termination threshold. Iteration stops when $\max_{xyz} |U_{d,pprev,xyz}| < \varepsilon$ [S1].
+*   $p$: Iteration number (scattering order).
+*   $m$: Number of propagation directions sampled per LPM element ($m \ll n$, where $n$ is the total number of directions) [S1].
+
+**Formulas:**
+1.  **Average Radiance Definition:**
+    $$I_{xyz}^d \approx (V_{xyz}^d)^{-1} \int_{C_{xyz}} \int_{\Omega^d} \frac{K_{S_{xyz}}}{4\pi} \int_{\omega' \in S^2} L(p, \omega') p(\omega, \omega') d\omega' d\omega dp \quad (2)$$
+    Where $V_{xyz}^d = \Delta V |\Omega^d|$ is the product of voxel volume and solid angle [S1].
+
+2.  **Ray Radiance Update (Transport):**
+    $$L_{r,s}^i = L_{r,s}^{i,t-1} e^{-\Delta l_q(K_a + K_s)/\omega_z^i} + U_{xyz}^{i,p} \times \frac{1 - e^{-\Delta l_q(K_a + K_s)/\omega_z^i}}{K_a + K_s} \quad (3)$$
+    Where:
+    *   $L_{r,s}^i$: Radiance leaving the $t$-th voxel for ray $i$ at element $(r,s)$.
+    *   $\Delta l_q$: Distance traversed in the voxel.
+    *   $\omega_z^i$: Z-component of direction $i$ (used for perspective correction/grid marching) [S1].
+    *   $U_{xyz}^{i,p}$: Stored unscattered radiance for direction $d$ (closest to $i$) at iteration $p$ [S1].
+
+3.  **Scattering Contribution (Storage):**
+    $$R = (V_{xyz}^d)^{-1} A_{r,s} F^{i,d} L_{r,s}^{i,t} \frac{1 - e^{-\Delta l_q K_s}}{\omega_s^i} \quad (4)$$
+    Where:
+    *   $A_{r,s}$: Area of the LPM sample $(r,s)$.
+    *   $F^{i,d}$: Precomputed phase function integral for propagation direction $i$ and storage direction $d$.
+    *   $\omega_s^i$: Component of direction $i$ relevant to the storage geometry [S1].
+
+4.  **Phase Function Integral:**
+    $$F^{i,d} = \frac{1}{4\pi} \int_{\Omega^i} \int_{\Omega^d} p(\omega, \omega') d\omega d\omega' \quad (5)$$
+    Where $d$ is the storage direction closest to propagation direction $i$ [S1].
+
+**Algorithm Steps:**
+1.  **Initialization:**
+    *   Initialize $p_{prev} = 0$.
+    *   Initialize $U_{d,pprev,xyz}$ and $I_{d,xyz}$ with medium self-emission radiance (if any) [S1].
+    *   Create LPMs for each face of the 3D grid.
+
+2.  **Iteration Loop:**
+    *   While $\max_{xyz} |U_{d,pprev,xyz}| \ge \varepsilon$ and $p > 0$:
+        a.  Set $p_{cur} = (p_{prev} + 1) \% 2$.
+        b.  Initialize $U_{d,pcur,xyz}$ to 0.
+        c.  For each LPM:
+            i.  For each propagation direction $i$:
+                1.  For each element $(r,s)$ of the current map:
+                    *   If $p == 0$: Initialize $L_{r,s}^{i,0}$ with boundary conditions (incoming radiance).
+                    *   Else: Set $L_{r,s}^{i,0}$ to 0.
+                2.  March rays through the volume:
+                    *   For each intersected voxel $t$:
+                        *   Update ray radiance $L_{r,s}^{i,t}$ using Eq. (3) and $U_{d,pprev,xyz}$.
+                        *   Calculate scattering contribution $R$ using Eq. (4).
+                        *   Update $U_{d,pcur,xyz}$ and $I_{d,xyz}$ with $R$ [S1].
+                        *   *Boundary Handling:* When a ray leaves the medium at point A, generate a new ray of the same direction with zero radiance from the opposite point B to maintain constant ray count [S1].
+        d.  Set $p_{prev} = p_{cur}$.
+
+**Pseudocode:**
+> **Unverified code.** The code below did not pass a test run against a reference implementation, or no test fits it, so it may contain errors.
+
+```python
+def light_propagation_maps(volume, boundary_conditions, epsilon):
+    """
+    volume: 3D grid with fields Ka, Ks, phase_function
+    boundary_conditions: function returning radiance at boundary
+    epsilon: termination threshold
+    """
+    # Initialize buffers
+    # Ud stores unscattered radiance, I stores average radiance
+    # Only two Ud buffers are kept (pprev and pcur)
+    Ud_prev = zeros_like(volume)
+    Ud_cur = zeros_like(volume)
+    I = zeros_like(volume)
+    
+    # Initialize with self-emission
+    for voxel in volume:
+        Ud_prev[voxel] = volume[voxel].self_emission
+        I[voxel] = volume[voxel].self_emission
+        
+    p_prev = 0
+    p = 1
+    
+    # Precompute F^{i,d} for all direction pairs
+    F = precompute_phase_integrals(volume.phase_function)
+    
+    # Create LPMs for each face of the grid
+    lpm_faces = create_lpm_faces(volume)
+    
+    while max(abs(Ud_prev)) >= epsilon and p > 0:
+        p_cur = (p_prev + 1) % 2
+        
+        # Swap buffers
+        Ud_prev, Ud_cur = Ud_cur, Ud_prev
+        Ud_cur = zeros_like(volume) # Reset current buffer
+        
+        for lpm in lpm_faces:
+            for direction_i in lpm.propagation_directions:
+                for r, s in lpm.elements:
+                    # Initialize ray radiance
+                    if p == 0:
+                        L_ray = boundary_conditions(lpm, r, s, direction_i)
+                    else:
+                        L_ray = 0.0
+                    
+                    # March ray through volume
+                    ray = Ray(origin=lpm.position(r, s), direction=direction_i)
+                    while ray.inside_volume():
+                        voxel = volume.get_voxel_at(ray.position)
+                        delta_l = ray.distance_to_next_voxel_face()
+                        
+                        # Update ray radiance (Eq. 3)
+                        # Note: omega_z is the component of direction_i along the ray's primary axis
+                        # For grid marching, this is typically the component along the traversal axis
+                        omega_z = abs(dot(direction_i, ray.traversal_axis))
+                        if omega_z == 0:
+                            omega_z = 1e-6 # Guard against division by zero [G]
+                            
+                        exp_term = exp(-delta_l * (voxel.Ka + voxel.Ks) / omega_z)
+                        
+                        # Get unscattered radiance from previous iteration
+                        # d is the storage direction closest to i
+                        direction_d = get_closest_direction(direction_i, volume.directions)
+                        U_prev = Ud_prev[voxel][direction_d]
+                        
+                        L_ray = L_ray * exp_term + U_prev * (1 - exp_term) / (voxel.Ka + voxel.Ks)
+                        
+                        # Calculate scattering contribution (Eq. 4)
+                        # omega_s is the component relevant to storage geometry
+                        omega_s = abs(dot(direction_i, storage_axis))
+                        if omega_s == 0:
+                            omega_s = 1e-6 # Guard against division by zero [G]
+                            
+                        A_rs = lpm.element_area
+                        V_d = voxel.volume * solid_angle(direction_d)
+                        F_id = F[direction_i][direction_d]
+                        
+                        R = (1 / V_d) * A_rs * F_id * L_ray * (1 - exp(-delta_l * voxel.Ks)) / omega_s
+                        
+                        # Update buffers
+                        Ud_cur[voxel][direction_d] += R
+                        I[voxel][direction_d] += R
+                        
+                        ray.advance(delta_l)
+                        
+                        # Boundary handling: if ray leaves, spawn new ray from opposite side
+                        if not ray.inside_volume():
+                            # Spawn new ray with zero radiance from opposite point
+                            opposite_point = get_opposite_boundary_point(ray.exit_point, direction_i)
+                            L_ray = 0.0
+                            ray = Ray(origin=opposite_point, direction=direction_i)
+                            
+        p_prev = p_cur
+        p += 1
+        
+    return I
+```
+
+**Edge Cases and Pitfalls:**
+*   **Ray Effects and False Scattering:** Standard DOM suffers from these; LPM mitigates them via fine spatial sampling in LPMs [S1].
+*   **Boundary Conditions:** Rays leaving the volume must be handled by spawning new rays from the opposite boundary to maintain ray density [S1].
+*   **Precision:** Division by $\omega_z^i$ and $\omega_s^i$ requires guards against zero values [G].
+*   **Memory:** Storing all LPMs and radiance buffers for high-resolution volumes can exceed GPU memory, addressed by variants like Streaming LPM [S1].
+
+## Subtopics
+
+### [Parallel and Scalable LPM](9951-parallel-and-scalable-lpm.md)
+A GPU implementation that avoids synchronization bottlenecks by dividing propagation into propagation and collecting steps, ensuring each voxel is traversed by only one ray per direction block.
+
+### [Streaming LPM](9952-streaming-lpm.md)
+A memory-management technique that processes the volume in small, streamed sub-volumes, decoupling memory footprint from total volume size to allow high-resolution rendering on limited VRAM.
+
+### [Light Map (L Map)](16885-light-map-l-map.md)
+A perceptual culling map that identifies regions around light sources where scattering is visually salient, addressing false undersampling artifacts caused by the Extinction-Saliency (XS) map.
+
+## Operating characteristics
+*   **Time Complexity:** Proportional to the number of iterations (scattering order) times the number of LPM elements times the number of propagation directions times the number of voxels traversed per ray [S1].
+*   **Memory Complexity:** Proportional to the size of the 3D grid (for $I$ and $U$ buffers) plus the size of all LPMs. Since LPMs are high-resolution 2D arrays, memory usage can be significant [S1].
+*   **Strengths:** Reduces false scattering and ray effects compared to standard DOM; efficient storage via coarse grid for radiance [S1].
+*   **Limitations:** High memory usage for large volumes; iterative nature can be slow for highly scattering media; requires careful handling of boundary conditions [S1].
+*   **When to Use:** When high-quality multiple scattering is needed and artifacts from standard DOM are unacceptable, and memory allows for high-resolution LPMs [S1].
+*   **When Not to Use:** When memory is severely constrained (use Streaming LPM) or when real-time performance is critical and lower quality is acceptable [S1].
+
+## Background
+Light Propagation Maps were introduced by Ronen Fattal [S1]. The method is based on the Discrete Ordinate Method (DOM) for solving the radiative transfer equation [S1]. It was developed to address the shortcomings of DOM, specifically false scattering and ray effects, by using fine sampling for propagation and coarse sampling for storage [S1].
+
+## Sources
+[S1] Light Propagation Maps on Parallel Graphics Architectures, https://doi.org/10.2312/egpgv/egpgv12/081-088, fetched 2026-10-26

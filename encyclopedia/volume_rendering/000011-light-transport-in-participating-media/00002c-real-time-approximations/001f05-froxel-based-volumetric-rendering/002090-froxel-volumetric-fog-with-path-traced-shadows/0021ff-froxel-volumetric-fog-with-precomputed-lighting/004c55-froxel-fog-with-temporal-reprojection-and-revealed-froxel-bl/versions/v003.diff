@@ -1,0 +1,244 @@
+--- v002.md
++++ v003.md
+@@ -27,5 +27,5 @@
+     -   Slice Spacing: Exponential. The view depth $z$ of the near face of slice $s$ is:
+         $$ z(s) = 2^{(s + 8)/8} - 2 $$
+-        Slice 0 starts at the camera. Slice 8 is at depth 2. Slice 32 is at depth 30. The far face of slice 63 is at depth 510. Each slice is $2^{1/8}$ times as thick as the one in front [S2, unofficial].
++        Slice 0 starts at the camera. Slice 8 is at depth 2. Slice 32 is at depth 30. The far face of slice 63 is at depth 510 [S2, unofficial]. Each slice is $2^{1/8}$ times as thick as the one in front [S2, unofficial].
+ 2.  **`froxelLastIndex`:**
+     -   Texture type: `R8Uint` [S2, unofficial].
+@@ -50,5 +50,5 @@
+         -   The froxel is past the opaque surface [S2, unofficial].
+         -   The old tiled depth indicates the point was hidden [S2, unofficial].
+-    -   If history is discarded, `currentFrameAmount = 1.0`. Otherwise, `currentFrameAmount = 0.05` (blend weight) [S2, unofficial].
++    -   If history is discarded, `currentFrameAmount = 1.0` [S2, unofficial]. Otherwise, `currentFrameAmount = 0.05` (blend weight) [S2, unofficial].
+ 
+ 2.  **Shadow Sampling:**
+@@ -71,5 +71,5 @@
+ 
+ #### 2. Revealed Froxel Blur
+-This pass is only executed if the atomic counter is non-zero. The CPU reads the counter via `froxel_dispatch_args` and writes the dispatch size for 64-thread groups. The blur and copy back run via `dispatch_indirect` [S2, unofficial].
++This pass is only executed if the atomic counter is non-zero [S2, unofficial]. The CPU reads the counter via `froxel_dispatch_args` and writes the dispatch size for 64-thread groups [S2, unofficial]. The blur and copy back run via `dispatch_indirect` [S2, unofficial].
+ 
+ 1.  **Blur Kernel:**
+@@ -93,45 +93,50 @@
+ 
+ ```python
++import math
++
+ # Global buffers (defined by engine)
+ GRID_W, GRID_H, GRID_D = 8, 8, 64
+-froxel_shadow_volume = R8Unorm[GRID_W, GRID_H, GRID_D]
+-froxel_last_index = R8Uint[GRID_W, GRID_H]
+-froxel_ids_to_blur = StorageBuffer<uint3> # Worst-case size: GRID_W*GRID_H*GRID_D entries + 4 bytes
+-froxel_atomic_counter = StorageBuffer<uint32> # Initialized to 0 every frame
+-blur_output_buffer = StorageBuffer<float> # Same size as froxel_ids_to_blur
+-tiled_depth_buffer = Texture2D # Current frame opaque depth
+-prev_tiled_depth_buffer = Texture2D # Previous frame opaque depth
+-prev_proj_view_matrix = Mat4x4
+-current_proj_view_matrix = Mat4x4
+-
+-def froxel_inject_density_and_shadows(column_idx, row_idx, slice_idx):
+-    # 1. Determine slice depth
+-    s = slice_idx
+-    z_near = 2**((s + 8) / 8) - 2
+-
+-    # 2. Check opaque surface
+-    opaque_depth = tiled_depth_buffer[column_idx, row_idx]
+-    if z_near > opaque_depth:
++froxel_shadow_volume = [None] * (GRID_W * GRID_H * GRID_D)
++froxel_last_index = [[0] * GRID_H for _ in range(GRID_W)]
++froxel_ids_to_blur = []  # List of (col, row, slice)
++froxel_atomic_counter = 0  # Conceptual atomic counter, initialized to 0 every frame
++blur_output_buffer = []
++tiled_depth_buffer = [[0.0] * GRID_H for _ in range(GRID_W)]
++prev_tiled_depth_buffer = [[0.0] * GRID_H for _ in range(GRID_W)]
++prev_proj_view_matrix = [[0.0]*4 for _ in range(4)]
++current_proj_view_matrix = [[0.0]*4 for _ in range(4)]
++
++def z_near(s):
++    return 2**((s + 8) / 8) - 2
++
++def slice_thickness(s):
++    return z_near(s + 1) - z_near(s)
++
++def froxel_inject_density_and_shadows(col, row, s):
++    z = z_near(s)
++    thickness = slice_thickness(s)
++    opaque_depth = tiled_depth_buffer[col][row]
++    
++    if z > opaque_depth:
+         return
+ 
+-    # 3. Reprojection Check
+-    # Compute froxel center in world space (standard view-to-world transform) [G]
+-    froxel_center_world = view_to_world(column_idx, row_idx, z_near + slice_thickness(s))
+-    # Project to previous frame [G]
+-    prev_froxel_screen = prev_proj_view_matrix * froxel_center_world
+-    # Normalize to screen space [0, grid_dims] [G]
+-    prev_froxel_screen_uv = prev_froxel_screen.xy / prev_froxel_screen.w
+-
+-    is_revealed = False
+-    if not (0 <= prev_froxel_screen_uv.x < GRID_W and 0 <= prev_froxel_screen_uv.y < GRID_H):
++    # Reprojection Check [G]
++    center_world = [0.0, 0.0, z + thickness/2, 1.0]
++    prev_screen = [0.0, 0.0, 0.0, 0.0]
++    for i in range(4):
++        for j in range(4):
++            prev_screen[i] += prev_proj_view_matrix[i][j] * center_world[j]
++    if prev_screen[3] == 0.0:
+         is_revealed = True
+-    elif z_near > opaque_depth:
+-        is_revealed = True
+-    elif prev_tiled_depth_buffer[prev_froxel_screen_uv] < z_near:
+-        is_revealed = True
++    else:
++        uv_x = prev_screen[0] / prev_screen[3]
++        uv_y = prev_screen[1] / prev_screen[3]
++        is_revealed = (uv_x < 0 or uv_x >= GRID_W or uv_y < 0 or uv_y >= GRID_H)
++        is_revealed = is_revealed or (z > opaque_depth)
++        is_revealed = is_revealed or (prev_tiled_depth_buffer[int(uv_y)][int(uv_x)] < z)
+ 
+     current_frame_amount = 1.0 if is_revealed else 0.05
+ 
+-    # 4. Shadow Sampling
++    # Shadow Sampling
+     sampled_shadow = 0.0
+     if is_revealed:
+@@ -141,9 +146,8 @@
+         batch1_sum = 0.0
+         for i in range(8):
+-            # Spread across two froxels' depth, centered on current [G]
+-            depth_offset = (i - 3.5) * slice_thickness(s)
+-            ray_origin = view_to_world(column_idx, row_idx, z_near)
+-            ray_dir = normalize(view_direction)
+-            shadow_val = sample_shadow_map(ray_origin + ray_dir * depth_offset, ray_dir)
++            depth_offset = (i - 3.5) * thickness
++            ray_origin = [0.0, 0.0, z, 1.0]
++            ray_dir = [0.0, 0.0, 1.0, 0.0]
++            shadow_val = sample_shadow_map(ray_origin, ray_dir)
+             batch1_sum += shadow_val * weights[i]
+         batch1_avg = batch1_sum / sum_w1
+@@ -153,14 +157,11 @@
+         for i in range(4):
+             jitter = get_blue_noise_jitter(i)
+-            # Ray from previous camera at same screen position/depth [G]
+-            ray = get_ray_from_prev_camera(prev_froxel_screen_uv, z_near, jitter)
++            ray = get_ray_from_prev_camera(uv_x, uv_y, z, jitter)
+             shadow_val = sample_shadow_map(ray.origin, ray.direction)
+             batch2_sum += shadow_val
+         batch2_avg = batch2_sum / 4.0
+ 
+-        # Average batches half-and-half
+         sampled_shadow = (batch1_avg + batch2_avg) / 2.0
+     else:
+-        # Converged: 4 samples jittered by blue noise
+         sum_w2 = 0.0
+         for i in range(4):
+@@ -171,26 +172,22 @@
+         sampled_shadow = sum_w2 / 4.0
+ 
+-    # 5. Blend
+-    reprojected_history = reproject_shadow_from_prev_frame(prev_froxel_screen_uv, s)
++    # Blend
++    reprojected_history = reproject_shadow_from_prev_frame(uv_x, uv_y, s)
+     new_shadow = current_frame_amount * sampled_shadow + (1.0 - current_frame_amount) * reprojected_history
+ 
+-    # 6. Store and Append if revealed
+-    froxel_shadow_volume[column_idx, row_idx, s] = new_shadow
++    # Store and Append if revealed
++    froxel_shadow_volume[col * GRID_H * GRID_D + row * GRID_D + s] = new_shadow
+ 
+     if is_revealed:
+-        entry_idx = froxel_atomic_counter[0] + 1
+-        froxel_atomic_counter[0] = entry_idx
+-        froxel_ids_to_blur[entry_idx] = uint3(column_idx, row_idx, s)
+-        froxel_last_index[column_idx, row_idx] = s - 1
++        froxel_atomic_counter += 1
++        froxel_ids_to_blur.append((col, row, s))
++        froxel_last_index[col][row] = s - 1
+ 
+ def blur_revealed_froxels(list_idx):
+-    froxel_id = froxel_ids_to_blur[list_idx]
+-    col, row, slice = froxel_id
+-
+-    last_valid_slice = froxel_last_index[col, row]
++    col, row, s = froxel_ids_to_blur[list_idx]
++    last_valid_slice = froxel_last_index[col][row]
+     weighted_sum = 0.0
+     weighted_shadow_sum = 0.0
+ 
+-    # Visit 26 neighbors and self
+     for dx in [-1, 0, 1]:
+         for dy in [-1, 0, 1]:
+@@ -198,45 +195,32 @@
+                 n_col = col + dx
+                 n_row = row + dy
+-                n_slice = slice + dz
+-
+-                # Bounds check BEFORE load (Vulkan robust buffer access fix)
++                n_slice = s + dz
++
+                 if n_col < 0 or n_col >= GRID_W or n_row < 0 or n_row >= GRID_H or n_slice < 0 or n_slice >= GRID_D:
+                     continue
+ 
+-                # Check if neighbor is behind opaque surface
+-                n_last_slice = froxel_last_index[n_col, n_row]
++                n_last_slice = froxel_last_index[n_col][n_row]
+                 if n_slice > n_last_slice:
+                     continue
+ 
+-                # Calculate weight
+                 dist_sq = dx*dx + dy*dy + dz*dz
+                 sigma = 2.0
+-                weight = exp(-dist_sq / (2.0 * sigma * sigma))
+-
+-                # Load shadow value
+-                shadow_val = froxel_shadow_volume[n_col, n_row, n_slice]
++                weight = math.exp(-dist_sq / (2.0 * sigma * sigma))
++
++                shadow_val = froxel_shadow_volume[n_col * GRID_H * GRID_D + n_row * GRID_D + n_slice]
+ 
+                 weighted_sum += weight
+                 weighted_shadow_sum += weight * shadow_val
+ 
+-    # Include self explicitly (dx=dy=dz=0)
+-    self_weight = 1.0
+-    self_shadow = froxel_shadow_volume[col, row, slice]
+-    weighted_sum += self_weight
+-    weighted_shadow_sum += self_weight * self_shadow
+-
+-    # Store blurred result in compact buffer
+     if weighted_sum > 0.0:
+         blurred_shadow = weighted_shadow_sum / weighted_sum
+     else:
+-        blurred_shadow = self_shadow # Fallback to unblurred if no neighbors
+-
+-    blur_output_buffer[list_idx] = blurred_shadow
++        blurred_shadow = froxel_shadow_volume[col * GRID_H * GRID_D + row * GRID_D + s]
++
++    blur_output_buffer.append(blurred_shadow)
+ 
+ def composite_revealed_froxels(list_idx):
+-    froxel_id = froxel_ids_to_blur[list_idx]
+-    col, row, slice = froxel_id
+-    blurred_shadow = blur_output_buffer[list_idx]
+-    froxel_shadow_volume[col, row, slice] = blurred_shadow
++    col, row, s = froxel_ids_to_blur[list_idx]
++    froxel_shadow_volume[col * GRID_H * GRID_D + row * GRID_D + s] = blur_output_buffer[list_idx]
+ ```
+ 
+@@ -256,9 +240,9 @@
+ 
+ ## Operating characteristics
+--   **Time Complexity:** The inject pass is $O(N)$ where $N$ is the number of froxels (one thread per column). The blur pass is $O(K)$ where $K$ is the number of revealed froxels. In the worst case (camera cut), $K$ equals the total number of froxels. In typical frames, $K$ is small [S2, unofficial].
++-   **Time Complexity:** The inject pass is $O(N)$ where $N$ is the number of froxels (one thread per column) [S2, unofficial]. The blur pass is $O(K)$ where $K$ is the number of revealed froxels [S2, unofficial]. In the worst case (camera cut), $K$ equals the total number of froxels [S2, unofficial]. In typical frames, $K$ is small [S2, unofficial].
+ -   **Memory Complexity:** $O(N)$ for the froxel volumes and the revealed froxel list buffer [S2, unofficial].
+--   **Measured Performance:** A frame where nothing was revealed costs a single-thread pass and two empty indirect dispatches. A camera cut costs a blur over most of the grid [S2, unofficial].
+--   **Strengths:** Reduces noise in revealed froxels without blurring converged history. Cost is proportional to the number of revealed froxels.
+--   **Limitations:** Does not fix the root cause of revealed froxel noise (lack of shadow history). Relies on static shadow maps (no moving sun/occluder). Anisotropic blur due to exponential slice spacing.
++-   **Measured Performance:** A frame where nothing was revealed costs a single-thread pass and two empty indirect dispatches [S2, unofficial]. A camera cut costs a blur over most of the grid [S2, unofficial].
++-   **Strengths:** Reduces noise in revealed froxels without blurring converged history. Cost is proportional to the number of revealed froxels [S2, unofficial].
++-   **Limitations:** Does not fix the root cause of revealed froxel noise (lack of shadow history). Relies on static shadow maps (no moving sun/occluder) [S2, unofficial]. Anisotropic blur due to exponential slice spacing.
+ -   **When to Use:** When temporal reprojection fails frequently (e.g., fast camera movements, occluder edges) and shadow map history buffers are not available.
+ -   **When Not to Use:** When shadow map history buffers are available (preferred solution). When the sun or occluders are moving rapidly.

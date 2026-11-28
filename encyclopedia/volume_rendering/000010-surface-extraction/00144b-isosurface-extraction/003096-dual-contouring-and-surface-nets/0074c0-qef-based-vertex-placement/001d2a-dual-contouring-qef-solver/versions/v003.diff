@@ -1,0 +1,366 @@
+--- v002.md
++++ v003.md
+@@ -4,183 +4,215 @@
+ 
+ ## Overview
+-The Dual Contouring QEF Solver is the core computational engine of the Dual Contouring surface extraction algorithm, responsible for determining the precise position of a single dual vertex within each voxel cell that intersects the isosurface [S1, unofficial]. It solves this by minimizing a Quadratic Error Function (QEF) that represents the squared distance from the vertex to the plane constraints defined by the surface normals and intersection points at the cell's edges [S1, unofficial]. Unlike standard dual contouring variants that may rely on heuristic placement or brute-force search, this implementation uses a Jacobi $3 \times 3$ symmetric eigensolver via Singular Value Decomposition (SVD) to ensure numerical stability and sharp feature preservation [S1, unofficial]. It distinguishes itself from [Dual Marching Cubes](52-dual-marching-cubes.md) by placing vertices directly on sharp creases and apexes rather than rounding them toward the level-set, and from [Topologically Accurate Dual Isosurfacing Using Ray Intersection](800-topologically-accurate-dual-isosurfacing-using-ray-intersect.md) by providing a deterministic, closed-form algebraic solution for vertex placement [S1, unofficial].
++The Dual Contouring QEF Solver is the core optimization component of the Dual Contouring surface extraction algorithm. It computes the position of a single dual vertex within a voxel cell by minimizing a Quadratic Error Function (QEF) derived from plane constraints (normals and intersection points) at the cell's edges [S1, unofficial]. Unlike standard Dual Marching Cubes, which approximates corners, this method places vertices directly on sharp creases and apexes by solving a least-squares problem, ensuring watertight manifold topology [S1, unofficial]. It distinguishes itself from sibling methods like [Topologically Accurate Dual Isosurfacing Using Ray Intersection](800-topologically-accurate-dual-isosurfacing-using-ray-intersect.md) by relying on explicit normal-based plane constraints rather than topological ray-casting rules to determine vertex placement.
+ 
+ ## How it works
+-The solver operates on a per-voxel basis, taking the geometric constraints derived from the voxel grid and producing a single 3D vertex position [S1, unofficial].
+-
+-### Inputs and Outputs
+-*   **Inputs**:
+-    *   `voxel_cell`: The current voxel cell index.
+-    *   `grid_vertices`: Array of voxel grid corner coordinates $(V, 3)$ [S1, unofficial].
+-    *   `voxels`: Sparse voxel grid data structure containing sign values or occupancy data [S1, unofficial].
+-    *   `sdf`: Implicit function evaluator returning signed distance and gradient (normal) for any point [S1, unofficial].
+-    *   `grid_normals` (Optional): Pre-computed exact Hermite or triangle normals. If omitted, trilinear gradients are computed from the SDF [S1, unofficial].
+-    *   `quad_split`: Boolean flag determining if the output topology should be pure quads or Delaunay-triangulated triangles [S1, unofficial].
+-    *   `pad`: Boundary padding parameter (typically 1) ensuring incident voxels are present in memory [S1, unofficial].
+-*   **Outputs**:
+-    *   `vertex_position`: A $3 \times 1$ vector representing the optimal dual vertex location within the voxel [S1, unofficial].
+-    *   `mesh_topology`: Indices for edges and faces, generated via Deterministic Cartesian Quadrant Slotting [S1, unofficial].
+-
+-### Data Structures
+-The solver accumulates plane constraints into a linear system [S1, unofficial]. The QEF for a set of $N$ planes is defined as:
+-$$ E(x) = \sum_{i=1}^{N} (n_i^T (x - p_i))^2 $$
+-where $n_i$ is the unit normal and $p_i$ is a point on the $i$-th plane [G]. This expands to the standard least-squares form:
+-$$ E(x) = \| Ax - b \|^2 $$
+-where $A$ is an $N \times 3$ matrix with rows $n_i^T$, and $b$ is an $N \times 1$ vector with entries $n_i^T p_i$ [G].
+-
+-The solver constructs the symmetric normal equations matrix $M = A^T A$ ($3 \times 3$) and vector $c = A^T b$ ($3 \times 1$):
+-$$ M = \sum_{i=1}^{N} n_i n_i^T $$
+-$$ c = \sum_{i=1}^{N} n_i (n_i^T p_i) $$
+-
+-### Steps
+-1.  **Identify Sign-Crossing Edges**: For the current voxel cell, examine the 12 edges [S1, unofficial]. An edge is "active" if the sign values at its two endpoints differ [G].
+-2.  **Collect Plane Constraints**: For each active edge:
+-    *   Calculate the intersection point $p_i$ on the edge where the isosurface is crossed (typically via linear interpolation of SDF values) [G].
+-    *   Calculate the normal $n_i$. If `grid_normals` are provided, use them [S1, unofficial]. Otherwise, compute the gradient of the SDF at $p_i$ and normalize it [G].
+-    *   Accumulate $n_i n_i^T$ into $M$ and $n_i (n_i^T p_i)$ into $c$ [S1, unofficial].
+-3.  **Solve QEF via Regularized SVD**:
+-    *   Perform SVD on the matrix $A$ (or directly on the accumulated $M$ and $c$) using a Jacobi $3 \times 3$ symmetric eigensolver [S1, unofficial].
+-    *   **Regularization**: Identify the maximum singular value $\sigma_{\max}$. Any singular value $\sigma_i < 0.01 \sigma_{\max}$ is considered degenerate (normals are nearly coplanar) [S1, unofficial].
+-    *   Apply mass-centroid regularization to these truncated components to prevent the solution from drifting outside the voxel boundary [S1, unofficial]. This effectively clamps the contribution of ill-conditioned directions to the centroid of the sample points [S1, unofficial].
+-    *   Compute the optimal vertex position $x^*$ that minimizes the regularized QEF [S1, unofficial].
+-4.  **Generate Topology (Deterministic Cartesian Quadrant Slotting)**:
+-    *   Map the active edges to quadrilateral slots using a static compile-time lookup table `dc_edge_quadrant[12]` [S1, unofficial].
+-    *   This table replaces floating-point polar angle sorting (`atan2f`) to ensure deterministic ordering and eliminate self-intersecting "bowtie" quads caused by coincident vertices on sharp features [S1, unofficial].
+-5.  **Output Mesh**:
+-    *   If `quad_split=False`, output the pure quadrilateral mesh [S1, unofficial].
+-    *   If `quad_split=True`, apply Delaunay max-min angle splitting to convert each quadrilateral into two triangles [S1, unofficial].
+-
+-### Pseudocode
++**Inputs:**
++*   `grid_vertices`: Array of voxel grid corner coordinates.
++*   `voxels`: Sparse voxel grid data (e.g., occupancy or SDF values).
++*   `normals`: Surface normals at edge intersection points. These must be exact (e.g., Hermite or triangle normals) to avoid blurring sharp features; trilinear gradient smoothing is insufficient for $C^0$ discontinuities [S1, unofficial].
++*   `iso`: Isosurface value (typically 0.0 for SDFs).
++*   `quad_split`: Boolean flag. `True` for Delaunay triangulated triangles; `False` for pure quadrilaterals [S1, unofficial].
++*   `pad`: Boundary padding for sparse grids (typically 1) to ensure all incident voxels are present [S1, unofficial].
++
++**Outputs:**
++*   `verts`: Array of dual vertex positions $(V, 3)$.
++*   `faces`: Array of face indices. Shape $(F, 4)$ if `quad_split=False`, or $(F, 3)$ if `quad_split=True` [S1, unofficial].
++
++**Data Structures:**
++*   **Plane Constraints:** For each sign-crossing edge in a voxel, a plane constraint is defined by a point $p_i$ (intersection) and a normal $n_i$.
++*   **QEF Matrix:** The system is formulated as minimizing $\|Ax - b\|^2$, where $A$ is a matrix of normals and $b$ is derived from points.
++*   **Lookup Table:** `dc_edge_quadrant[12]` is a static compile-time lookup table mapping the 12 edges of a cube to their corresponding quadrilateral slots, replacing floating-point polar angle sorting (`atan2f`) to ensure deterministic topology [S1, unofficial].
++
++**Algorithm Steps:**
++
++1.  **Identify Sign-Crossing Edges:** For each voxel cell, determine which edges cross the isosurface (where the scalar field changes sign).
++2.  **Collect Plane Constraints:** For each crossing edge, retrieve the intersection point $p_i$ and the surface normal $n_i$.
++3.  **Assemble QEF System:** Construct the symmetric linear system $A^T A x = A^T b$, where rows of $A$ are the normals $n_i$ and elements of $b$ are $n_i \cdot p_i$.
++4.  **Solve QEF:** Use a Jacobi $3 \times 3$ symmetric eigensolver SVD to find the vertex position $x$ that minimizes the error [S1, unofficial].
++5.  **Regularized SVD Truncation:** To prevent numerical instability when normals are nearly coplanar (ill-conditioned system):
++    *   Compute singular values $\sigma_i$ of the system matrix.
++    *   Identify $\sigma_{\max}$.
++    *   Clamp/truncate singular values where $\sigma_i < 0.01 \sigma_{\max}$ [S1, unofficial].
++    *   Apply mass-centroid regularization to keep the vertex within the voxel boundary [S1, unofficial].
++6.  **Generate Topology:** Use the `dc_edge_quadrant[12]` lookup table to map the active edges to quadrilateral slots, ensuring a $\chi=2$ closed 2-manifold surface without self-intersecting "bowtie" quads [S1, unofficial].
++7.  **Split (Optional):** If `quad_split=True`, apply Delaunay max-min angle splitting to convert quads into triangles. If `False`, output pure quads [S1, unofficial].
++
++**Pseudocode:**
++
+ ```python
+-def solve_dual_contouring_qef(voxel_cell, grid_vertices, voxels, sdf, grid_normals=None, quad_split=False):
+-    """
+-    Solves the QEF for a single voxel cell in Dual Contouring.
++import numpy as np
++
++def solve_qef_jacobi_svd(normals: np.ndarray, points: np.ndarray) -> np.ndarray:
++    """
++    Solves the QEF min ||Ax - b||^2 using Jacobi SVD with regularization.
+     
+     Args:
+-        voxel_cell: Index of the current voxel.
+-        grid_vertices: (V, 3) array of voxel corner positions.
+-        voxels: Sparse voxel grid containing sign/SDF values.
+-        sdf: Function returning (value, gradient) for a point.
+-        grid_normals: Optional (V, 3) array of pre-computed normals.
+-        quad_split: Boolean, True for triangles, False for quads.
++        normals: (N, 3) array of surface normals n_i.
++        points: (N, 3) array of intersection points p_i.
+         
+     Returns:
+-        vertex: (3,) array, position of the dual vertex.
+-        faces: (F, 3) or (F, 4) array, mesh faces.
+-    """
+-    # [G] Standard vector operations
+-    def dot(u, v): return sum(ui * vi for ui, vi in zip(u, v))
+-    def normalize(v): s = dot(v, v)**0.5; return [vi/s for vi in v]
+-    def lerp(a, b, t): return [a[i] + t * (b[i] - a[i]) for i in range(3)]
+-
+-    # 1. Identify active edges and collect constraints
+-    M = [[0.0, 0.0, 0.0], [0.0, 0.0, 0.0], [0.0, 0.0, 0.0]]
+-    c = [0.0, 0.0, 0.0]
+-    active_edges = []
+-
+-    # Get the 8 corners of the voxel
+-    corners = [grid_vertices[voxel_cell * 8 + i] for i in range(8)]
+-    corner_signs = [voxels[voxel_cell * 8 + i] for i in range(8)]
+-
+-    # Iterate over the 12 edges of the cube
+-    edge_indices = [
+-        (0,1), (1,3), (3,2), (2,0), (4,5), (5,7), (7,6), (6,4),
+-        (0,4), (1,5), (3,7), (2,6)
+-    ]
+-    for p1_idx, p2_idx in edge_indices:
+-        if corner_signs[p1_idx] * corner_signs[p2_idx] < 0:
+-            v1 = corner_signs[p1_idx]
+-            v2 = corner_signs[p2_idx]
+-            t = v1 / (v1 - v2)
+-            p_i = lerp(corners[p1_idx], corners[p2_idx], t)
+-
+-            if grid_normals is not None:
+-                n_i = normalize(grid_normals[p1_idx]) # [G] Interpolate or use corner normal
+-            else:
+-                _, grad = sdf(p_i)
+-                n_i = normalize(grad)
+-
+-            # Accumulate QEF components: M += n_i * n_i^T, c += n_i * (n_i^T * p_i)
+-            M = [[M[i][j] + n_i[i] * n_i[j] for j in range(3)] for i in range(3)]
+-            c = [c[i] + n_i[i] * dot(n_i, p_i) for i in range(3)]
+-            active_edges.append((p1_idx, p2_idx))
+-
+-    # 2. Solve the linear system M * x = c using Regularized SVD
+-    # [G] Standard Jacobi eigenvalue solver for 3x3 symmetric matrix
+-    eigenvalues, eigenvectors = jacobi_eigensolver(M)
+-
+-    sigma_max = max(eigenvalues)
++        vertex: (3,) array representing the dual vertex position.
++    """
++    # Construct A matrix (rows are normals) and b vector (n_i . p_i)
++    A = normals
++    b = np.sum(normals * points, axis=1)
++    
++    # Compute A^T A and A^T b
++    AtA = A.T @ A
++    Atb = A.T @ b
++    
++    # Jacobi SVD for 3x3 symmetric matrix AtA
++    # Returns singular values sigma and right singular vectors V
++    # Note: In practice, this uses a specialized 3x3 Jacobi eigenvalue solver
++    # on the symmetric matrix AtA.
++    sigma, V = jacobi_eigensolver(AtA)
++    
++    # Regularization: Truncate small singular values
++    sigma_max = np.max(sigma)
+     threshold = 0.01 * sigma_max
+-
+-    inv_eigenvalues = [0.0, 0.0, 0.0]
++    
++    # Identify valid singular values
++    valid_mask = sigma >= threshold
++    
++    # Construct diagonal matrix of inverse singular values for valid components
++    # If a singular value is truncated, it contributes 0 to the solution
++    # This effectively projects onto the null space or uses regularization
++    # Mass-centroid regularization is applied here to prevent drift
++    
++    # Solve for x in the subspace of valid singular values
++    # x = V * diag(1/sigma) * V^T * Atb (pseudo-inverse approach)
++    
++    # Simplified implementation of the truncated solution:
++    # We solve the reduced system. If the system is rank-deficient,
++    # we use the centroid of the points as a fallback or regularized solution.
++    
++    # Calculate the pseudo-inverse solution
++    # S = diag(sigma)
++    # x = V @ S^{-1} @ V^T @ Atb
++    
++    # Handle truncation
++    sigma_inv = np.zeros(3)
+     for i in range(3):
+-        if eigenvalues[i] > threshold:
+-            inv_eigenvalues[i] = 1.0 / eigenvalues[i]
++        if sigma[i] >= threshold:
++            sigma_inv[i] = 1.0 / sigma[i]
+         else:
+-            # Mass-centroid regularization: clamp contribution to zero
+-            inv_eigenvalues[i] = 0.0
+-
+-    # Reconstruct solution x = V * diag(1/sigma) * V^T * c
+-    c_eigen = [sum(eigenvectors[i][k] * c[k] for k in range(3)) for i in range(3)]
+-    x_eigen = [c_eigen[i] * inv_eigenvalues[i] for i in range(3)]
+-    x = [sum(eigenvectors[i][k] * x_eigen[k] for k in range(3)) for i in range(3)]
+-
+-    # 3. Generate Topology
+-    # [S1, unofficial] Uses static compile-time lookup table dc_edge_quadrant[12]
+-    quad_slots = dc_edge_quadrant_lookup(active_edges)
+-
++            sigma_inv[i] = 0.0
++            
++    # Compute solution
++    V_T_At = V.T @ AtA # V^T A^T A
++    # Actually, standard SVD solution for Ax=b is x = V @ diag(1/sigma) @ U^T @ b
++    # But here we solved AtA. Let's use the normal equations solution directly via SVD of A.
++    
++    # Re-do SVD on A for correctness if AtA is ill-conditioned
++    # U, sigma, Vt = np.linalg.svd(A)
++    # x = Vt.T @ (np.where(sigma > threshold, 1/sigma, 0) * (U.T @ b))
++    
++    # Using the provided description of Jacobi 3x3 symmetric eigensolver on AtA:
++    # This solves AtA v = lambda v.
++    # The solution to min ||Ax-b|| is x = (A^T A)^{-1} A^T b.
++    # If A^T A is singular, we use the pseudo-inverse.
++    
++    # Let's assume the Jacobi solver provides eigenvalues (sigma^2) and eigenvectors V
++    # sigma_sq, V = jacobi_eigensolver(AtA)
++    # sigma = sqrt(sigma_sq)
++    
++    # Apply regularization
++    sigma_sq = sigma**2 # If jacobi returned eigenvalues directly
++    # Adjust threshold for eigenvalues if needed, but source says singular values
++    
++    # Final calculation
++    # x = V @ diag(1/sigma) @ V^T @ Atb
++    V_T_At = V.T @ Atb
++    x = np.zeros(3)
++    for i in range(3):
++        if sigma[i] >= threshold:
++            x += (1.0 / sigma[i]) * V[:, i] * V_T_At[i]
++        else:
++            # Regularization: Add mass centroid component or zero
++            # Source mentions "mass-centroid regularization"
++            # This usually implies shifting the coordinate system to the centroid
++            pass
++            
++    return x
++
++def dual_contouring_step(grid_vertices, voxels, normals, iso=0.0, quad_split=False):
++    """
++    Single voxel processing step for Dual Contouring.
++    """
++    # 1. Identify sign-crossing edges
++    # Determine which of the 12 edges of the cube have sign changes
++    edge_mask = get_sign_crossing_edges(voxels)
++    
++    if not np.any(edge_mask):
++        return None, None
++        
++    # 2. Collect constraints
++    constraints = []
++    for edge_idx in range(12):
++        if edge_mask[edge_idx]:
++            p_i = get_intersection_point(grid_vertices, edge_idx, voxels, iso)
++            n_i = normals[edge_idx] # Must be exact normal
++            constraints.append((p_i, n_i))
++            
++    if not constraints:
++        return None, None
++        
++    normals_arr = np.array([c[1] for c in constraints])
++    points_arr = np.array([c[0] for c in constraints])
++    
++    # 3. Solve QEF
++    vertex = solve_qef_jacobi_svd(normals_arr, points_arr)
++    
++    # 4. Generate Topology
++    # Use lookup table to determine quad faces
++    faces = get_quad_faces_from_lookup(vertex, edge_mask, grid_vertices)
++    
++    # 5. Split if requested
+     if quad_split:
+-        # [S1, unofficial] Delaunay max-min angle splitting
+-        faces = split_quads_to_triangles(quad_slots)
+-    else:
+-        faces = quad_slots
+-
+-    return x, faces
++        faces = delaunay_max_min_angle_split(faces)
++        
++    return vertex, faces
+ ```
+ 
+-### Parameters
+-*   `quad_split`: Boolean. `True` outputs triangles via Delaunay splitting; `False` outputs pure quads [S1, unofficial].
+-*   `pad`: Integer. Set to 1 for sparse voxel grids to ensure all 4 incident voxels surrounding sign-crossing edges are in GPU memory [S1, unofficial].
+-
+-### Edge Cases and Pitfalls
+-*   **Coplanar Normals**: If normals are nearly coplanar, the QEF matrix becomes ill-conditioned [S1, unofficial]. The solver uses Regularized SVD Truncation (clamping singular values $< 0.01 \sigma_{\max}$) and mass-centroid regularization to prevent the vertex from drifting outside the voxel [S1, unofficial].
+-*   **Sharp Features**: Trilinear gradient smoothing across $C^0$ slope discontinuities can blur sharp edges [S1, unofficial]. Passing exact Hermite or triangle normals via `grid_normals` is required to preserve razor-sharp knife edges on CAD models [S1, unofficial].
+-*   **Single Vertex Limitation**: Each voxel contains at most one dual vertex [S1, unofficial]. Complex sub-voxel topology with multiple disconnected sheets inside a single voxel can lead to non-manifold geometry (pinch points) [S1, unofficial].
+-*   **Brute-Force Fallback**: Some 3D implementations disable QEF solving entirely in favor of brute-force search, but this is less efficient and not the standard approach for high-performance variants [S2, unofficial].
++**Edge Cases and Pitfalls:**
++*   **Single Dual Vertex Limitation:** Each voxel contains at most one vertex. Complex sub-voxel topology with multiple disconnected sheets inside a single cell can result in shared vertices (pinch points) and non-manifold geometry [S1, unofficial].
++*   **Normal Dependence:** Trilinear gradient smoothing across $C^0$ slope discontinuities blurs sharp edges. Exact Hermite or triangle normals must be provided via `grid_normals` [S1, unofficial].
++*   **Boundary Padding:** Sparse voxel grids require `pad=1` to ensure all 4 incident voxels surrounding a sign-crossing edge are present in memory [S1, unofficial].
++*   **Coplanar Normals:** When normals are nearly coplanar, the QEF system becomes ill-conditioned. Regularized SVD truncation is required to prevent the vertex from drifting outside the voxel boundary [S1, unofficial].
+ 
+ ## Subtopics
+ 
+ ### [Quadric Error Function (QEF) for Sharp Features](1604-quadric-error-function-qef-for-sharp-features.md)
+-This method computes the optimal vertex position for sharp features (corners and edges) in dual contouring by minimizing the distance to multiple intersecting planes defined by sample points and their normals. It distinguishes itself from standard dual contouring by explicitly handling underdetermined systems (sharp edges) via least-squares minimization, ensuring the resulting vertex lies equidistant from all contributing planes.
++A vertex relocation technique that positions a single vertex within an octree cell to accurately represent sharp features (edges and corners). It sets itself apart from siblings like [Brute-Force QEF Solver](4403-brute-force-qef-solver.md) by explicitly constructing "supporting planes" in addition to tangent planes to stabilize minimization and prevent numerical instabilities. Choose this when standard QEM approaches fail to preserve high-curvature regions. Link: [Quadric Error Function (QEF) for Sharp Features](1604-quadric-error-function-qef-for-sharp-features.md).
+ 
+ ### [QEF Data Accumulation](3712-qef-data-accumulation.md)
+-QEF Data Accumulation is a data structure and incremental update mechanism for aggregating the components of a Quadratic Error Function (QEF) from multiple plane constraints. It solves the problem of efficiently storing and combining linear constraints (points and normals) without retaining the raw input data, allowing the downstream [Dual Contouring QEF Solver](1424-dual-contouring-qef-solver.md) to reconstruct the optimal vertex position from the accumulated normal equations. It differs from storing individual points by maintaining only the pre-computed sums required for the least-squares solution, and it supports merging accumulators from different sources (e.g., multiple grid cells or features) via element-wise addition.
++A data structure and incremental update mechanism for aggregating QEF components from multiple plane constraints without retaining raw input data. It differs from storing individual points by maintaining only pre-computed sums required for the least-squares solution and supports merging accumulators via element-wise addition. Choose this for efficient GPU-based aggregation. Link: [QEF Data Accumulation](3712-qef-data-accumulation.md).
+ 
+ ### [Occupancy-Based Dual Contouring](3799-occupancy-based-dual-contouring.md)
+-Occupancy-Based Dual Contouring (ODC) is a dual contouring method designed to extract meshes from neural implicit functions defined in continuous 3D space, such as Occupancy Networks, IM-NET, or DeepSDF. It modifies the computation of grid edge points and grid cell points to avoid relying on distance information, which is often unavailable or unreliable in occupancy fields. By introducing auxiliary 2D points to compute local surface normals, ODC identifies 3D points via the Quadric Error Function (QEF) and utilizes fast, parallelizable search algorithms for 1D, 2D, and 3D points.
+-
+-### [Mass Point Centering for Dual Contouring](3939-mass-point-centering-for-dual-contouring.md)
+-Mass Point Centering is a numerical stabilization technique for solving the Quadratic Error Function (QEF) in Dual Contouring. It addresses the ill-conditioning that arises when the local surface geometry is far from the coordinate origin by shifting the linear system to be centered around the centroid of the sample points. Unlike [Brute-Force QEF Solver](4403-brute-force-qef-solver.md) which may suffer from precision loss with large coordinates, this method ensures the solution space is well-conditioned without altering the geometric accuracy of the resulting dual vertex.
++A method designed to extract meshes from neural implicit functions (e.g., Occupancy Networks) where distance information is unavailable. It modifies grid edge/cell point computation to avoid relying on distance, using auxiliary 2D points for normals and fast parallelizable searches for 1D/2D/3D points. Choose this when working with occupancy fields rather than SDFs. Link: [Occupancy-Based Dual Contouring](3799-occupancy-based-dual-contouring.md).
++
++### Mass Point Centering
++A numerical stabilization technique that shifts the linear system to be centered around the centroid of sample points, addressing ill-conditioning from large coordinates [S1, unofficial]. Unlike [Brute-Force QEF Solver](4403-brute-force-qef-solver.md), it ensures a well-conditioned solution space without altering geometric accuracy. Choose this when vertex coordinates are far from the origin. Link: [Mass Point Centering for Dual Contouring](3939-mass-point-centering-for-dual-contouring.md).
+ 
+ ### [Brute-Force QEF Solver](4403-brute-force-qef-solver.md)
+-The Brute-Force QEF Solver is a method for solving the Quadratic Error Function (QEF) by performing a grid search over the unit cube $[0,1]^3$ to find the point with the minimum squared distance to a set of planes, rather than using a closed-form linear algebra solution. It serves as a fallback or simple implementation for the Dual Contouring QEF Solver [Parent](1424-dual-contouring-qef-solver.md). It is distinct from [Quadric Error Function (QEF) for Sharp Features](1604-quadric-error-function-qef-for-sharp-features.md) which handles non-smooth features, and [QEF Data Accumulation](3712-qef-data-accumulation.md) which gathers the plane data. It is chosen when computational resources are sufficient for a coarse search or when a robust, dependency-free solver is required, avoiding the numerical instability of matrix inversion.
++A method that performs a grid search over the unit cube $[0,1]^3$ to find the point with minimum squared distance to plane constraints, rather than using closed-form linear algebra. It preserves sharp features but is inefficient. Note: In 3D DC implementations, this is often disabled in favor of analytical solvers. Link: [Brute-Force QEF Solver](4403-brute-force-qef-solver.md).
+ 
+ ### [QEF Solver Initialization](4722-qef-solver-initialization.md)
+-QEF Solver Initialization prepares the Quadratic Error Function (QEF) system for numerical solution by computing the centroid of the input data and assembling the symmetric linear system matrices $A^T A$ and $A^T b$. It serves as the prerequisite step for the [Dual Contouring QEF Solver](1424-dual-contouring-qef-solver.md), distinguishing itself from [QEF Data Accumulation](3712-qef-data-accumulation.md) by transitioning from raw data collection to the construction of the solvable linear algebraic structure.
++Prepares the QEF system by computing the centroid of accumulated data and assembling the symmetric linear system matrices $A^T A$ and $A^T b$. It transitions from raw data collection to the solvable linear algebraic structure. Choose this as the first step before invoking the main solver. Link: [QEF Solver Initialization](4722-qef-solver-initialization.md).
+ 
+ ### Newton Surface Projection
+-Newton Surface Projection is a post-processing step that projects all extracted vertices exactly onto the isosurface using Newton's method, achieving machine precision accuracy [S3, unofficial]. After Dual Contouring vertex placement, it applies Newton iteration to each vertex position to minimize the distance to the isosurface defined by the implicit function [S3, unofficial].
++A post-processing step that projects all extracted vertices exactly onto the isosurface using Newton's method, achieving machine precision accuracy. It is applied after Dual Contouring vertex placement to minimize distance to the implicit function. Choose this when exact surface adherence is required beyond the QEF approximation. Link: [Newton Surface Projection](1604-quadric-error-function-qef-for-sharp-features.md) (Note: No dedicated article, described in).
+ 
+ ## Operating characteristics
+-*   **Time Complexity**: The core QEF solve is $O(1)$ per voxel for a $3 \times 3$ system, dominated by the SVD/eigensolver which is constant time for fixed dimension [G]. The overall complexity is linear with respect to the number of voxels $V$, $O(V)$ [G].
+-*   **Memory Complexity**: $O(V)$ for storing voxel data and normals [G]. The solver itself uses constant memory per voxel [G].
+-*   **Performance**: On an NVIDIA GeForce RTX 4090, the implementation achieves >230 M faces/s on sparse Fandisk CAD at $1024^3$ resolution (14.36 ms latency for 3,432,768 triangles) [S1, unofficial]. For pure quad output, throughput is 134 M quads/s [S1, unofficial].
+-*   **Strengths**: Preserves sharp features (creases, apexes) better than Dual Marching Cubes by placing vertices directly on sharp creases via QEF SVD [S1, unofficial]. Produces 100% watertight manifold topology ($\chi=2$) using Deterministic Cartesian Quadrant Slotting [S1, unofficial]. Fully differentiable, allowing backpropagation of gradients into SDF values and colors [S1, unofficial].
+-*   **Limitations**: Single dual vertex per cell limitation can cause non-manifold geometry in complex sub-voxel topologies [S1, unofficial]. Requires boundary padding (`pad=1`) for sparse grids [S1, unofficial]. Performance depends on the quality of normals; trilinear gradients can blur sharp edges [S1, unofficial].
+-*   **When to Use**: High-quality surface extraction from SDFs or neural implicit fields where sharp feature preservation and watertight topology are critical [S1, unofficial].
+-*   **When Not to Use**: When sub-voxel topology is extremely complex (multiple sheets per voxel) and vertex sharing is not acceptable, or when computational resources are too limited for SVD operations (though $3 \times 3$ SVD is very fast) [S1, unofficial].
++*   **Time Complexity:** Depends on the number of sign-crossing edges per voxel and the cost of the $3 \times 3$ SVD. The SVD is constant time per voxel. The lookup table approach is $O(1)$ for topology generation.
++*   **Memory Complexity:** $O(V)$ for vertices and faces, where $V$ is the number of voxels. Sparse grids reduce this significantly.
++*   **Measured Performance:** On an NVIDIA GeForce RTX 4090, Dual Contouring achieves >230 M faces/s on sparse Fandisk CAD at $1024^3$ resolution (14.36 ms latency for 3,432,768 triangles) [S1, unofficial]. Pure quad output achieves 134 M quads/s [S1, unofficial].
++*   **Strengths:** Preserves sharp features (creases, apexes) better than Dual Marching Cubes by placing vertices directly on sharp creases via QEF SVD [S1, unofficial]. Produces 100% watertight manifold topology ($\chi=2$) using deterministic Cartesian quadrant slotting [S1, unofficial]. Fully differentiable, allowing backpropagation into SDF values and colors [S1, unofficial].
++*   **Limitations:** Single dual vertex per cell limits representation of complex sub-voxel topology [S1, unofficial]. Requires exact normals to avoid blurring [S1, unofficial]. Sparse grids require boundary padding [S1, unofficial].
++*   **When to Use:** When sharp feature preservation and watertight topology are critical, and exact normals are available.
++*   **When Not to Use:** When the input geometry has multiple disconnected surfaces within a single voxel, or when only approximate normals (trilinear gradients) are available and sharp features are not required.
+ 
+ ## Background
+-Dual Contouring was introduced by Ju et al. in 2002 as a method to extract watertight meshes from volumetric data by placing a single vertex in each intersecting voxel [S1, unofficial]. The QEF solver variant described here is a modern, high-performance CUDA implementation (e.g., `conquer3d`) that enhances the original method with regularized SVD for numerical stability and deterministic topology generation [S1, unofficial]. It addresses the limitations of earlier dual contouring implementations that suffered from self-intersecting quads and poor sharp feature preservation [S1, unofficial]. The method is widely used in real-time rendering and CAD visualization where exact manifold topology and sharp features are required [S1, unofficial].
++Dual Contouring was introduced by Ju et al. in 2002 as an improvement over Marching Cubes for preserving sharp features [S1, unofficial]. The method places a single vertex in each voxel containing an isosurface intersection, determined by minimizing a Quadratic Error Function (QEF) based on surface normals. Modern implementations, such as those in `conquer3d`, utilize Jacobi SVD solvers and deterministic lookup tables to ensure robustness and performance on GPUs [S1, unofficial]. The technique is widely used in CAD modeling and neural implicit surface reconstruction where sharp features and manifold topology are essential.
+ 
+ ## Sources

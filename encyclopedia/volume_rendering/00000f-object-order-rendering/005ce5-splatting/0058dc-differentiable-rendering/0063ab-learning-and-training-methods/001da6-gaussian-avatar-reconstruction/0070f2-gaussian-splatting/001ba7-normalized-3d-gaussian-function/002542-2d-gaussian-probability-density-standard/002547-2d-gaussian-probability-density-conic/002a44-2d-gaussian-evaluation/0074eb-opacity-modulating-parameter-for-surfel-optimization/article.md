@@ -1,0 +1,250 @@
+# Opacity Modulating Parameter for Surfel Optimization
+
+Also called: translucent-to-opaque surfel evolution
+
+## Overview
+This method solves the non-differentiability of optimizing opaque surfel geometry directly from image color loss by introducing a gradual opacity modulation parameter $w_i$ that evolves translucent surfels into opaque ones [S1]. It differs from standard 2D Gaussian Evaluation by using $w_i$ to control the transition from a soft Gaussian profile to a hard-edged circular disc, enabling gradient flow through semi-transparent regions during early training [S1].
+
+## How it works
+**Inputs:**
+- Surfel geometry parameters (position, rotation, scale) initialized from SfM points [S1].
+- Initial opacity modulating parameter $w_i = 0.1$ for all surfels [S1].
+- Training views and corresponding ground truth images [S1].
+
+**Outputs:**
+- Optimized surfel geometry parameters [S1].
+- Final opacity modulating parameters $w_i$ (set to 255 at termination) [S1].
+
+**Data Structures:**
+- **Surfel $S_i$**: Contains position $\mathbf{p}_i$, rotation matrix $\mathbf{R}_i$, scale $\mathbf{s}_i$, color $\mathbf{c}_i$, and opacity modulating parameter $w_i$ [S1].
+- **Local Coordinates**: For a surfel, points $(x, y)$ are defined on the XY-plane in its local coordinate system [S1].
+
+**Formulas:**
+The opacity $\alpha_i(x, y)$ for a point $(x, y)$ on a surfel is defined as [S1]:
+$$
+\alpha_i(x, y) = \min(1, w_i G(x, y))
+$$
+where the Gaussian term is [S1]:
+$$
+G(x, y) = \exp\left(-\frac{x^2 + y^2}{2}\right)
+$$
+The opacity is clamped to 0 when [S1]:
+$$
+\min(\alpha_i(x, y), G(x, y)) < 1/255
+$$
+The loss function used for optimization is [S1]:
+$$
+\mathcal{L}_{rgb} = (1 - \lambda)\mathcal{L}_1 + \lambda\mathcal{L}_{D-SSIM}
+$$
+where $\lambda = 0.2$ [S1]. $\mathcal{L}_1$ is the L1 loss and $\mathcal{L}_{D-SSIM}$ is the D-SSIM loss [S1].
+
+**Parameters:**
+- $w_i$: Opacity modulating parameter, range $[0, 255]$ [S1].
+- $w_i < 1$: Surfel behaves as a 2D Gaussian [S1].
+- $w_i = 255$: Surfel becomes a uniform circular disc with radius $r = \sqrt{2 \log(255)} \approx 3.3$ where opacity is 1, and 0 outside [S1].
+- Supersampling factor: $4\times$ used when $w_i > 30$ for all surfels [S1].
+- Pruning thresholds: $S_{thresh} = 16$ for real scenes, $S_{thresh} = 4$ for synthetic scenes [S1].
+
+**Numbered Steps:**
+
+1. **Initialization**: Initialize surfel positions and colors from SfM points. Set scaling to the distance to the nearest neighbor. Generate random rotations. Set initial $w_i = 0.1$ for all surfels [S1].
+
+2. **Early Optimization ($w_i < 30$)**:
+   - Perform tile-based sorting of surfels based on center depth, similar to 3DGS [S1].
+   - Render surfels using $\alpha$-blending with the current $w_i$ [S1].
+   - Compute loss $\mathcal{L}_{rgb}$ and backpropagate gradients to update geometry and $w_i$ [S1].
+   - Apply densification and pruning strategies from [Yu et al. 2024a] for the first 10K iterations [S1].
+
+3. **Transition Phase ($w_i \ge 30$)**:
+   - Once all surfels have $w_i > 30$, enable $4\times$ supersampling to obtain more gradients in semi-transparent regions and achieve anti-aliasing [S1].
+   - Perform tile-based sorting as before [S1].
+   - For each pixel, compute accurate pixel-level depths for all surfels covering it [S1].
+   - Select the surfel with the minimum depth (frontmost) for the first blending computation [S1].
+   - Do not adjust the blending order of the remaining surfels; use the tile-based order for subsequent blending [S1].
+   - This approximates accurate $\alpha$-blending while reducing time and memory overhead [S1].
+
+4. **Surfel Optimization Schedule**:
+   - **Iteration 10K**: Discard surfels with $w_i < 0.8$. Record their positions for subsequent 3D Gaussian initialization. Increase $w_i$ of remaining surfels to no smaller than 30. Keep $w_i$ from optimization. Disable densification and pruning [S1].
+   - **Iteration 15K**: Disable densification. Perform pruning based on covering score (see Step 5).
+   - **Iteration 18K**: Increase $w_i$ of each surfel to no smaller than 60 [S1].
+   - **Iteration 19K**: Increase $w_i$ of each surfel to no smaller than 90 [S1].
+   - **Iteration 20K**: Set $w_i = 255$ for all surfels. Terminate surfel geometry optimization [S1].
+
+5. **Surfel Pruning (after 15K iterations)**:
+   - For each surfel $S_i$ and each training view $j$, compute $N_{i,j}$, the number of pixels where $S_i$ is the frontmost surfel covering them [S1].
+   - Compute the covering score $S_i = \max_{j} N_{i,j}$, where $J$ is the number of training views [S1].
+   - Prune all surfels with $S_i < S_{thresh}$ [S1].
+
+**Pseudocode:**
+
+> **Unverified code.** The code below did not pass a test run against a reference implementation, or no test fits it, so it may contain errors.
+
+```python
+def opacity_modulating_parameter_for_surfel_optimization(surfels, training_views, num_iterations=20000):
+    """
+    Optimizes surfel geometry using opacity modulating parameter w_i.
+    
+    Args:
+        surfels: List of Surfel objects with attributes:
+            - position: (x, y, z)
+            - rotation: 3x3 matrix
+            - scale: (sx, sy, sz)
+            - color: (r, g, b)
+            - w_i: float, initial value 0.1
+        training_views: List of view parameters and ground truth images
+        num_iterations: Total number of optimization steps
+        
+    Returns:
+        Optimized surfels
+    """
+    # Step 1: Initialization
+    for surfel in surfels:
+        surfel.w_i = 0.1
+        # Initialize position, color from SfM
+        # Initialize scale from nearest neighbor distance
+        # Initialize rotation randomly
+        
+    lambda_loss = 0.2
+    
+    for iteration in range(1, num_iterations + 1):
+        # Step 4: Schedule adjustments
+        if iteration == 10000:
+            # Discard surfels with w_i < 0.8
+            valid_surfels = []
+            for surfel in surfels:
+                if surfel.w_i < 0.8:
+                    # Record position for 3D Gaussian initialization
+                    pass
+                else:
+                    surfel.w_i = max(surfel.w_i, 30)
+                    valid_surfels.append(surfel)
+            surfels = valid_surfels
+            # Disable densification and pruning
+            
+        elif iteration == 18000:
+            for surfel in surfels:
+                surfel.w_i = max(surfel.w_i, 60)
+                
+        elif iteration == 19000:
+            for surfel in surfels:
+                surfel.w_i = max(surfel.w_i, 90)
+                
+        elif iteration == 20000:
+            for surfel in surfels:
+                surfel.w_i = 255
+            break # Terminate optimization
+            
+        # Step 5: Pruning after 15K iterations
+        if iteration > 15000:
+            # Disable densification
+            # Compute covering scores and prune
+            for surfel in surfels:
+                max_pixels = 0
+                for view in training_views:
+                    # Compute N_i,j: number of pixels where surfel is frontmost
+                    n_ij = compute_frontmost_pixel_count(surfel, view)
+                    if n_ij > max_pixels:
+                        max_pixels = n_ij
+                surfel.covering_score = max_pixels
+                
+            # Determine threshold based on scene type
+            if scene_type == "real":
+                thresh = 16
+            else:
+                thresh = 4
+                
+            # Prune
+            surfels = [s for s in surfels if s.covering_score >= thresh]
+            
+        # Rendering and Optimization
+        rendered_images = []
+        for view in training_views:
+            # Determine sorting method based on w_i
+            all_w_i_above_30 = all(s.w_i > 30 for s in surfels)
+            
+            if all_w_i_above_30:
+                # Step 3: Transition Phase
+                # Tile-based sorting
+                sorted_surfels = tile_sort(surfels, view)
+                
+                # Render with accurate depth for frontmost
+                image = render_with_accurate_frontmost_depth(sorted_surfels, view, lambda_loss)
+            else:
+                # Step 2: Early Optimization
+                # Tile-based sorting
+                sorted_surfels = tile_sort(surfels, view)
+                
+                # Standard alpha blending
+                image = render_alpha_blending(sorted_surfels, view, lambda_loss)
+                
+            rendered_images.append(image)
+            
+        # Compute loss and update
+        loss = compute_loss(rendered_images, training_views, lambda_loss)
+        update_gradients(surfels, loss)
+        
+    return surfels
+
+def compute_frontmost_pixel_count(surfel, view):
+    """
+    Computes the number of pixels where the surfel is the frontmost.
+    """
+    # Project surfel to view
+    # For each pixel covered by surfel, check if it is the closest
+    count = 0
+    # Implementation details for depth comparison
+    return count
+
+def render_with_accurate_frontmost_depth(sorted_surfels, view, lambda_loss):
+    """
+    Renders using accurate depth for the frontmost surfel, then tile-based order for others.
+    """
+    # For each pixel, find all covering surfels
+    # Compute accurate depth for each
+    # Select frontmost (min depth)
+    # Blend frontmost first
+    # Blend rest in tile-based order
+    pass
+
+def render_alpha_blending(sorted_surfels, view, lambda_loss):
+    """
+    Standard alpha blending with tile-based sorting.
+    """
+    # Standard 3DGS-like alpha blending
+    pass
+
+def tile_sort(surfels, view):
+    """
+    Sorts surfels by center depth within tiles.
+    """
+    # Implement tile-based sorting
+    pass
+
+def compute_loss(rendered_images, training_views, lambda_loss):
+    """
+    Computes L1 and D-SSIM loss.
+    """
+    l1_loss = 0
+    d_ssim_loss = 0
+    for rendered, gt in zip(rendered_images, training_views):
+        l1_loss += l1_loss_function(rendered, gt)
+        d_ssim_loss += d_ssim_loss_function(rendered, gt)
+        
+    total_loss = (1 - lambda_loss) * l1_loss + lambda_loss * d_ssim_loss
+    return total_loss
+```
+
+## Operating characteristics
+- **Time Complexity**: Tile-based sorting is $O(N)$ where $N$ is the number of surfels, similar to 3DGS [S1]. Accurate pixel-level depth computation for the frontmost surfel adds overhead but is limited to pixels covered by multiple surfels [S1].
+- **Memory Complexity**: Similar to 3DGS, storing surfel parameters and intermediate rendering buffers [S1].
+- **Performance**: The approximation strategy for $w_i > 30$ reduces time and memory overhead compared to full accurate sorting while maintaining rendering quality consistent with z-buffer-based opaque rendering [S1].
+- **Strengths**: Enables gradient flow through semi-transparent regions for geometry optimization; efficient approximation for opaque surfels; avoids interleaving artifacts [S1].
+- **Limitations**: Requires careful scheduling of $w_i$; non-differentiable direct optimization of opaque surfels is avoided but at the cost of a multi-stage optimization process [S1].
+- **When to use**: When optimizing surfel-based radiance fields where opaque surfels are desired for final rendering, but translucent initialization is needed for stable optimization [S1].
+- **When not to use**: When real-time rendering with fully opaque surfels is required from the start without optimization [S1].
+
+## Background
+The method was introduced in "When Gaussian Meets Surfel: Ultra-fast High-fidelity Radiance Field Rendering" [S1]. It addresses the challenge that directly optimizing opaque surfels from image color loss is difficult because the forward process is non-differentiable, yielding either no color change or sudden changes [S1]. The technique builds on 2D Gaussian Splatting [Huang et al. 2024] and 3DGS [Kerbl et al. 2023] concepts, extending them to surfel-based representations [S1].
+
+## Sources
+[S1] When Gaussian Meets Surfel: Ultra-fast High-fidelity Radiance Field Rendering, https://doi.org/10.1145/3730925, fetched 2026-10-26

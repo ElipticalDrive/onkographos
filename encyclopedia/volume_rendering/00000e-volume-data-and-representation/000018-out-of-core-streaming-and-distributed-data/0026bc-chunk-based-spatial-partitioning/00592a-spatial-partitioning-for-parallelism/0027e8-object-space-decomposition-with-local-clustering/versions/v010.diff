@@ -1,0 +1,372 @@
+--- v009.md
++++ v010.md
+@@ -4,144 +4,258 @@
+ 
+ ## Overview
+-Object-space decomposition with local clustering partitions an unstructured volume dataset into spatially coherent clusters to enable efficient parallel rendering [S1, unofficial]. Unlike uniform chunking, this method groups tetrahedral cells into clusters based on topological connectivity using graph partitioning, ensuring that cells sharing faces remain within the same cluster [S1, unofficial]. It is distinguished from its siblings by its reliance on a view-independent preprocessing phase that constructs a contracted visualization graph, allowing the subsequent view-dependent remapping phase to adapt quickly to camera changes without re-partitioning the underlying geometry [S1, unofficial].
++Object-space decomposition with local clustering is a parallel volume rendering technique for unstructured grids that partitions data into clusters to enable independent, simultaneous rendering of subvolumes [S1, unofficial]. It differs from sibling methods like [MPI-based Volume Partitioning](1093-mpi-based-volume-partitioning.md) by using a view-independent preprocessing phase to create static clusters, which are then dynamically remapped based on the viewing parameters to handle load imbalance and communication overhead [S1, unofficial]. Unlike [ShardedVolume](12593-shardedvolume.md), which typically relies on fixed spatial sharding, this method constructs a visualization graph and uses graph partitioning (MeTiS) to group topologically connected cells, ensuring that clusters maintain internal connectivity while minimizing inter-cluster communication during the rendering pipeline [S1, unofficial].
+ 
+ ## How it works
+-The method operates in two distinct phases: a view-independent **Local Clustering Phase** and a view-dependent **Remapping Phase** [S1, unofficial]. The clustering phase builds the static data structures, while the remapping phase adapts the distribution of these clusters to the current view [S1, unofficial].
++The method operates in two main phases: a view-independent preprocessing phase (local clustering) and a view-dependent remapping phase. This article details the preprocessing phase, which establishes the static cluster structure.
+ 
+ ### Inputs and Outputs
+-*   **Input:** Unstructured grid (tetrahedral cells), number of processors $A$, viewing parameters $v$ [S1, unofficial].
+-*   **Output:** Global clustering solution $C = [C_1, C_2, ..., C_K]$, `ClusterData` structures, `ClusterMapArray`, contracted visualization graph $Q_c$, and migration cost function $T_c$ [S1, unofficial].
++**Inputs:**
++- Unstructured grid data (tetrahedral cells) distributed across $A$ processors $P_1, \dots, P_A$.
++- Global visualization graph $Q_v = (N_v, E_v)$, where nodes represent cells and edges represent face-sharing neighbors [S1, unofficial].
++
++**Outputs:**
++- A global clustering solution $C = [C_1, C_2, \dots, C_K]$, where $K$ is the total number of clusters [S1, unofficial].
++- Local data structures (`ClusterData`, `ClusterMapArray`) on each processor.
++- A contracted visualization graph $Q_c = (N_c, E_c)$ and migration cost function $T_c$ [S1, unofficial].
+ 
+ ### Data Structures
+-The method relies on specific structures to maintain connectivity and mapping information [S1, unofficial]:
+-
+-1.  **CellArray**: Stores the cells belonging to a cluster [S1, unofficial]. Uses local cell indexing [S1, unofficial]. Replaces the four global neighbor-cell identifiers of each cell with global-cluster identifiers and local indices of the respective neighbor cells to maintain connectivity between cell-clusters within the local indexing scheme [S1, unofficial].
+-2.  **VertexArray**: Stores the vertices belonging to a cluster [S1, unofficial]. Uses local vertex indexing [S1, unofficial].
+-3.  **ClusterData**: Maintained by each processor for its local cell-clusters [S1, unofficial]. Contains `VertexArray`, `CellArray`, and `TotalVolume` (sum of constituent cell volumes in World Space Coordinates, WSC) [S1, unofficial].
+-4.  **ClusterMapArray**: Maintained by each processor [S1, unofficial]. Holds two components per cluster: 1) the current mapping of the cluster (the processor ID $M_e$), and 2) a pointer to the `ClusterData` structure if the cluster is local to that processor [S1, unofficial].
+-5.  **Contracted Visualization Graph ($Q_c$)**: Nodes are clusters $C_i$ [S1, unofficial]. Edges $C_{ij}$ exist between clusters $C_i$ and $C_j$ if they share at least one face through two neighbor cells [S1, unofficial]. Weights depend on viewing parameters [S1, unofficial].
+-
+-### Numbered Steps
+-
+-#### Phase 1: Local Clustering (View-Independent)
+-1.  **Construct Local Graph:** Each processor $P_k$ constructs its local view-independent visualization graph, which is the subgraph of the global graph $Q_v$ induced by the node subset corresponding to the local cells of $P_k$ [S1, unofficial].
+-2.  **Local Partitioning:** Each processor $P_k$ concurrently performs a $k$-way clustering of its local graph using MeTiS [S1, unofficial]. The local number of resulting clusters $q_k$ is selected to be proportional to the total node weight in its local graph such that:
+-    $$ \sum_{k=1}^{A} q_k = c \cdot a $$
+-    where $A$ is the total number of processors, $a$ is a scaling factor, and $c$ is a constant [S1, unofficial]. This scheme reduces variations in cluster weights for the efficiency of graph-partitioning based remapping [S1, unofficial]. The $k$-way partitioning performed in each processor $P_k$ effectively constitutes a $K$-way global clustering solution $C = [C_1, C_2, ..., C_K]$ [S1, unofficial].
+-3.  **Update Connectivity:** In the `CellArray` structure, the four global neighbor-cell identifiers of each cell are replaced by global-cluster identifiers and local indices of the respective neighbor cells [S1, unofficial].
+-4.  **Assign Global IDs:** Each cluster in the overall environment is given a unique global cluster identifier, and the global mapping function $M_e$ is determined [S1, unofficial].
+-5.  **Build ClusterData:** Each processor maintains a `ClusterData` structure for each of its local cell-clusters [S1, unofficial]. The `TotalVolume` is computed as the sum of the volumes of the constituent cells [S1, unofficial].
+-6.  **Build ClusterMapArray:** Each processor maintains a global `ClusterMapArray` holding the current mapping ($M_e$) and a pointer to the local `ClusterData` if applicable [S1, unofficial].
+-7.  **Construct Contracted Graph ($Q_c$):** Each processor constructs its local portion of the contracted visualization graph $Q_c$ [S1, unofficial]. The topology of $Q_c$ is identical to the view-independent contracted graph because the topology does not change with viewing parameters; only node and edge weights change [S1, unofficial].
+-8.  **Broadcast Graph:** A copy of the global graph $Q_c$ is replicated in each processor by performing an all-to-all-broadcast operation [S1, unofficial].
+-9.  **Compute Migration Costs ($T_c$):** The cluster-migration-cost function $T_c$ is computed [S1, unofficial]. The migration cost of a cell-cluster is taken to be equal to the ratio of the size of its associated `ClusterData` structure to the size of an individual ray-segment information [S1, unofficial].
+-10. **Broadcast Costs:** An all-to-all broadcast operation is performed to let each processor become aware of the migration costs of all clusters [S1, unofficial].
+-
+-#### Phase 2: Remapping (View-Dependent)
+-The specific algorithmic steps for the Remapping Phase (Graph Update, Graph Partitioning, Cluster Migration) are described in the [Remapping Phase](4250-remapping-phase.md) article [S1, unofficial]. This article defines the inputs and structures used by that phase [S1, unofficial].
++
++**1. CellArray and VertexArray**
++- **VertexArray**: Stores vertex coordinates for the cluster. Uses local indexing within the cluster.
++- **CellArray**: Stores tetrahedral cells for the cluster. Uses local indexing.
++- **Connectivity Modification**: In the `CellArray`, the four global neighbor-cell identifiers for each cell are replaced by a pair: `(global_cluster_id, local_index)`. This maintains connectivity between cell-clusters within the local indexing scheme [S1, unofficial].
++
++**2. ClusterData**
++- Maintained by each processor for each of its local cell-clusters.
++- **Components**:
++  - `VertexArray`: Local vertex data.
++  - `CellArray`: Local cell data with modified neighbor pointers.
++  - `TotalVolume`: The sum of the volumes (in World Space Coordinates, WSC) of all constituent cells in the cluster [S1, unofficial].
++
++**3. ClusterMapArray**
++- Maintained by each processor. Holds two components for *every* cell-cluster in the global environment:
++  1. `Mapping`: The current mapping function $M_e$, indicating which processor owns the cluster.
++  2. `Pointer`: A pointer to the `ClusterData` structure if the cluster is local to the processor; otherwise null or empty [S1, unofficial].
++
++### Algorithm Steps
++
++1. **Construct Local Visualization Graph**:
++   Each processor $P_k$ constructs its local view-independent visualization graph $Q_{local}^k$. This graph is the subgraph of the global graph $Q_v$ induced by the node subset corresponding to the local cells of $P_k$ [S1, unofficial].
++
++2. **Local Clustering via MeTiS**:
++   Each processor $P_k$ concurrently performs a $q_k$-way clustering of its local graph $Q_{local}^k$ using the MeTiS graph partitioning library [S1, unofficial].
++   - **Parameter Selection**: The local number of resulting clusters $q_k$ is selected to be proportional to the total node weight in its local graph. Specifically:
++     $$ \sum_{k=1}^{A} q_k = c \cdot a $$
++     where $c$ and $a$ are constants chosen to balance the workload and reduce variations in cluster weights for efficient remapping [S1, unofficial].
++   - **Global Solution**: The $A$ local $q_k$-way partitions effectively constitute a global $K$-way clustering solution $C = [C_1, \dots, C_K]$ [S1, unofficial].
++
++3. **Assign Global Identifiers and Mapping**:
++   - Each cluster in the global environment is assigned a unique global cluster identifier.
++   - The global mapping function $M_e$ is determined, assigning each cluster to a specific processor [S1, unofficial].
++
++4. **Build Local ClusterData**:
++   - For each local cell-cluster, construct the `ClusterData` structure.
++   - Populate `VertexArray` and `CellArray` with local cell and vertex data.
++   - Replace global neighbor-cell IDs in `CellArray` with `(global_cluster_id, local_index)` pairs to preserve inter-cluster connectivity [S1, unofficial].
++   - Compute `TotalVolume` for the cluster as the sum of the volumes of its constituent cells [S1, unofficial].
++
++5. **Build ClusterMapArray**:
++   - Initialize `ClusterMapArray` on each processor.
++   - For each global cluster, store its current mapping $M_e$ and a pointer to its `ClusterData` if local [S1, unofficial].
++
++6. **Construct Contracted Visualization Graph $Q_c$**:
++   - The contracted graph $Q_c = (N_c, E_c)$ is the contraction of the global graph according to the clustering solution $C$.
++   - **Nodes**: Each node in $N_c$ represents a cluster $C_i$.
++   - **Edges**: An edge $C_{ij}$ exists between clusters $C_i$ and $C_j$ if they share at least one face through two neighbor cells in those clusters [S1, unofficial].
++   - **Topology**: The topology of $Q_c$ is view-independent and identical to the view-independent contracted graph. It differs from view-dependent graphs only in node and edge weights [S1, unofficial].
++   - Each processor constructs its local portion of $Q_c$ [S1, unofficial].
++
++7. **Broadcast Global Graph and Migration Costs**:
++   - **Graph Replication**: Perform an all-to-all broadcast to replicate the global graph $Q_c$ in each processor. This allows each processor to compute view-dependent weights locally without further communication during the remapping phase [S1, unofficial].
++   - **Migration Cost Function $T_c$**:
++     - The migration cost of a cell-cluster is defined as the ratio of the size of its `ClusterData` structure to the size of an individual ray-segment information.
++     - Since this cost is view-independent, it is computed once.
++     - Perform an all-to-all broadcast to disseminate the migration costs of all clusters to all processors, ensuring every processor knows $T_c$ for all clusters [S1, unofficial].
+ 
+ ### Pseudocode
+-The following pseudocode implements the Local Clustering Phase. It replaces library calls with explicit standard operations to remain self-contained.
+ 
+ ```python
+-def local_clustering_phase(cells, vertices, num_processors, processor_id, c, a):
+-    # Step 1: Construct Local Graph
+-    # Build adjacency list based on shared faces among local cells
+-    local_graph = {cell.id: [n.id for n in cell.neighbors if n.id in {c.id for c in cells}] for cell in cells}
+-
+-    # Step 2: Determine local number of clusters q_k
+-    total_node_weight = sum(cell.volume() for cell in cells)
+-    # Formula: sum(q_k) = c * a. Implementation uses global constants c and a.
+-    q_k = max(1, round((total_node_weight / sum(cell.volume() for cell in all_cells)) * (c * a)))
+-
++# Input: Local cells and vertices for processor P_k
++# Global parameters: A (total processors), c, a (constants for cluster count)
++
++def local_clustering_phase(local_cells, local_vertices, global_graph_Qv, processor_id, total_processors):
++    """
++    Performs view-independent local clustering for a single processor.
++    """
++    
++    # Step 1: Construct Local Visualization Graph
++    # Induce subgraph from global graph Qv using local cells
++    local_graph_Qk = induce_subgraph(global_graph_Qv, local_cells)
++    
++    # Step 2: Determine number of local clusters q_k
++    # Proportional to total node weight in local graph
++    total_node_weight = sum(node_weight for node in local_graph_Qk.nodes)
++    # Formula: sum(q_k) = c * a. 
++    # q_k is selected proportionally. Let W_total be sum of all local weights across all processors.
++    # q_k = (total_node_weight / W_total) * (c * a)
++    # Note: W_total requires a global reduction, assumed available or precomputed.
++    q_k = compute_proportional_clusters(total_node_weight, c, a, total_processors)
++    
+     # Step 3: Perform k-way clustering using MeTiS
+-    # Standard graph partitioning returns a partition array mapping each node to a cluster ID [0, q_k-1]
+-    cluster_ids = [0] * len(cells)
+-    for i, cell in enumerate(cells):
+-        cluster_ids[i] = standard_graph_partition(local_graph, q_k)[i]
+-
+-    # Step 4: Group cells into clusters and build local structures
+-    local_clusters = []
++    # MeTiS returns a partition array mapping local nodes to cluster IDs [0, q_k-1]
++    local_partition = metis_partition(local_graph_Qk, q_k)
++    
++    # Step 4: Assign Global Cluster Identifiers
++    # Each processor's local clusters are assigned global IDs.
++    # This requires a global coordination step to ensure unique IDs across all processors.
++    # Let's assume a global unique ID generator or a pre-agreed mapping scheme.
++    global_cluster_ids = assign_global_ids(local_partition, processor_id, total_processors)
++    
++    # Step 5: Build ClusterData for each local cluster
++    cluster_data_list = []
+     for cluster_id in range(q_k):
+-        cluster_cells = [cells[i] for i, cid in enumerate(cluster_ids) if cid == cluster_id]
+-        cluster_vertices = list({v for cell in cluster_cells for v in cell.vertices})
+-
+-        # Build CellArray with updated connectivity
+-        # Replace global neighbor-cell IDs with (global_cluster_id, local_index)
+-        cell_array = []
+-        for cell in cluster_cells:
+-            neighbors = []
+-            for n in cell.neighbors:
+-                n_cluster = cluster_ids[cells.index(n)] if n in cells else -1
+-                n_local_idx = cells.index(n) if n in cells else -1
+-                neighbors.append((n_cluster, n_local_idx))
+-            cell_array.append({'id': cell.id, 'neighbors': neighbors})
+-
++        # Get local cells and vertices belonging to this cluster
++        cluster_local_cells = [cell for cell, part in zip(local_cells, local_partition) if part == cluster_id]
++        cluster_local_vertices = [vertex for vertex in local_vertices if vertex in cluster_local_cells] # Simplified
++        
++        # Build CellArray with modified connectivity
++        cell_array = build_cell_array(cluster_local_cells, global_graph_Qv, global_cluster_ids)
++        
+         # Build VertexArray
+-        vertex_array = [{'id': v.id, 'coords': v.coords} for v in cluster_vertices]
+-
++        vertex_array = build_vertex_array(cluster_local_vertices)
++        
+         # Compute TotalVolume (in WSC)
+-        total_volume = sum(cell.volume() for cell in cluster_cells)
+-
+-        cluster_data = {'vertex_array': vertex_array, 'cell_array': cell_array, 'total_volume': total_volume}
+-        local_clusters.append(cluster_data)
+-
+-    # Step 5: Assign Global Cluster Identifiers
+-    # Coordinate with other processors to ensure unique global IDs
+-    global_cluster_ids = [processor_id * q_k + i for i in range(q_k)]
+-
+-    # Step 6: Build ClusterMapArray entries for local clusters
+-    global_cluster_map = []
+-    for i, cluster_data in enumerate(local_clusters):
+-        global_id = global_cluster_ids[i]
+-        mapping = get_global_mapping(global_id)
+-        global_cluster_map.append({'global_id': global_id, 'mapping': mapping, 'pointer': cluster_data})
+-
+-    # Step 7: Construct Local portion of Contracted Graph Qc
+-    # Nodes are clusters. Edges exist if clusters share a face.
+-    contracted_graph_local = {'nodes': global_cluster_ids, 'edges': []}
+-    for i, c1 in enumerate(local_clusters):
+-        for j, c2 in enumerate(local_clusters):
+-            if i < j and share_face(c1, c2):
+-                contracted_graph_local['edges'].append((global_cluster_ids[i], global_cluster_ids[j]))
+-
+-    # Step 8: Broadcast Global Graph Qc
+-    # Each processor sends its local portion of Qc to all others
+-    global_contracted_graph = all_to_all_broadcast(contracted_graph_local)
+-
+-    # Step 9: Compute Migration Costs Tc
+-    # Cost = Size(ClusterData) / Size(RaySegment)
+-    ray_segment_size = get_ray_segment_size()
++        total_volume = sum(cell.volume for cell in cluster_local_cells)
++        
++        cluster_data = ClusterData(
++            vertex_array=vertex_array,
++            cell_array=cell_array,
++            total_volume=total_volume
++        )
++        cluster_data_list.append(cluster_data)
++        
++    # Step 6: Build ClusterMapArray
++    # Holds mapping and pointer for ALL global clusters (not just local)
++    # This requires knowing the mapping of all clusters.
++    # In practice, this is built after global coordination.
++    cluster_map_array = build_cluster_map_array(global_cluster_ids, cluster_data_list)
++    
++    # Step 7: Construct Local Portion of Contracted Graph Qc
++    # Nodes are local clusters. Edges exist if local clusters share a face.
++    local_Qc_nodes = range(q_k)
++    local_Qc_edges = []
++    for cell in cluster_local_cells: # Iterate over all local cells to find inter-cluster faces
++        for neighbor_cell in cell.neighbors:
++            neighbor_cluster_id = global_cluster_ids[neighbor_cell]
++            if neighbor_cluster_id != global_cluster_ids[cell]:
++                # Edge exists between current cluster and neighbor cluster
++                current_cluster_id = global_cluster_ids[cell]
++                local_Qc_edges.append((current_cluster_id, neighbor_cluster_id))
++    
++    local_Qc = Graph(nodes=local_Qc_nodes, edges=local_Qc_edges)
++    
++    # Step 8: Compute Migration Cost Tc for local clusters
++    # Cost = Size(ClusterData) / Size(RaySegmentInfo)
++    ray_segment_size = get_ray_segment_info_size() # Assumed known constant
+     migration_costs = []
+-    for cluster_data in local_clusters:
++    for cluster_data in cluster_data_list:
+         cluster_data_size = get_structure_size(cluster_data)
+         cost = cluster_data_size / ray_segment_size
+         migration_costs.append(cost)
+-
+-    # Step 10: Broadcast Migration Costs
+-    global_migration_costs = all_to_all_broadcast(migration_costs)
+-
+-    return local_clusters, global_cluster_map, global_contracted_graph, global_migration_costs
++        
++    return {
++        'local_Qc': local_Qc,
++        'migration_costs': migration_costs,
++        'cluster_data_list': cluster_data_list,
++        'cluster_map_array': cluster_map_array,
++        'global_cluster_ids': global_cluster_ids
++    }
++
++def build_cell_array(cells, global_graph_Qv, global_cluster_ids):
++    """
++    Replaces global neighbor-cell IDs with (global_cluster_id, local_index).
++    """
++    cell_array = []
++    for cell in cells:
++        new_neighbors = []
++        for neighbor_cell_id in cell.global_neighbor_ids:
++            # Find the global cluster ID of the neighbor
++            neighbor_cluster_id = global_cluster_ids[neighbor_cell_id]
++            # Find the local index of the neighbor cell within its cluster
++            # This requires a reverse lookup or pre-computed map from global cell ID to (cluster_id, local_index)
++            local_index = get_local_index_of_cell(neighbor_cell_id, neighbor_cluster_id)
++            new_neighbors.append((neighbor_cluster_id, local_index))
++        cell_array.append(Cell(neighbors=new_neighbors, data=cell.data))
++    return cell_array
++
++def get_local_index_of_cell(global_cell_id, target_cluster_id):
++    """
++    [G] Helper to find the local index of a cell within a specific cluster.
++    In a real implementation, this would use a hash map or sorted array built during data distribution.
++    """
++    # Placeholder for implementation detail not fully specified in source
++    # Assumes a global map exists: global_cell_id -> (cluster_id, local_index)
++    return global_cell_to_local_index_map[global_cell_id]
++
++def build_cluster_map_array(global_cluster_ids, cluster_data_list):
++    """
++    Builds the global ClusterMapArray.
++    """
++    cluster_map_array = {}
++    for cluster_id, cluster_data in zip(global_cluster_ids, cluster_data_list):
++        cluster_map_array[cluster_id] = {
++            'mapping': cluster_id, # Initially, cluster maps to itself's processor
++            'pointer': cluster_data
++        }
++    return cluster_map_array
++
++def get_structure_size(obj):
++    """
++    [G] Helper to get the memory size of a data structure.
++    """
++    import sys
++    return sys.getsizeof(obj)
++
++def get_ray_segment_info_size():
++    """
++    [G] Helper to get the size of ray-segment information.
++    """
++    # Typical size might be defined by the rendering engine
++    return 64 # bytes, example value
++
++def compute_proportional_clusters(local_weight, c, a, total_processors):
++    """
++    Computes q_k proportional to local weight.
++    """
++    # This function assumes global_weight_sum is available via MPI_Allreduce
++    # q_k = (local_weight / global_weight_sum) * (c * a)
++    # For the sake of self-contained pseudocode, we assume this calculation is done
++    # and the result is an integer.
++    pass
+ ```
+ 
+ ### Edge Cases and Pitfalls
+-*   **Precision:** Volume calculations must use sufficient precision to avoid errors in `TotalVolume`, which influences the estimation of view-dependent sampling computational weights [S1, unofficial].
+-*   **Boundary Artifacts:** The replacement of neighbor-cell identifiers with cluster identifiers must correctly handle cells on the boundary of a cluster to ensure correct compositing across cluster boundaries [S1, unofficial].
+-*   **Empty Local Data:** If a processor has no cells, it still participates in the all-to-all broadcasts to maintain synchronization, though its local graph and cluster lists remain empty [S1, unofficial].
++- **Precision**: Volume calculations must be consistent across processors to ensure accurate load balancing during the remapping phase.
++- **Boundaries**: The replacement of global neighbor-cell identifiers with `(global_cluster_id, local_index)` must correctly handle cells on the boundary of the local processor's domain. If a neighbor cell is not local to the current processor, its `local_index` refers to its index within its own processor's `ClusterData`, not the current one.
++- **Degenerate Input**: If a processor has no cells, $q_k$ should be 0, and no clustering operations should be performed. The global coordination must handle empty processors gracefully.
++- **Graph Connectivity**: The contracted graph $Q_c$ must accurately reflect face-sharing relationships. If two clusters share multiple faces, a single edge is sufficient, but the weight (if used in remapping) might need to aggregate these connections.
+ 
+ ## Subtopics
+ 
+ ### [Remapping Phase](4250-remapping-phase.md)
+-The view-dependent preprocessing step that adapts the static clustering to the current view. It uses the structures built here to perform graph updates, partitioning, and cluster migration. Choose this when the camera or transfer function changes frequently, requiring dynamic load balancing without re-partitioning the geometry.
++The Remapping Phase is a view-dependent preprocessing step in chunk-based spatial partitioning for parallel volume rendering, designed to reassign data clusters to processors based on the current viewing parameters. It solves load imbalance and communication overhead when the camera changes, ensuring clusters with high interaction remain co-located. It adapts the static clustering solution from Object-space decomposition with local clustering to the current view via a dynamic graph-partitioning loop.
+ 
+ ## Operating characteristics
+-*   **Time Complexity:** The local clustering phase is dominated by the MeTiS partitioning step, which is generally sub-linear or linear with respect to the number of cells per processor [S1, unofficial]. The all-to-all broadcasts for the graph and migration costs are $O(A)$ communication complexity, where $A$ is the number of processors [S1, unofficial]. The remapping phase adds view-dependent overhead but is optimized by the precomputed topology [S1, unofficial].
+-*   **Memory Complexity:** Each processor stores the `ClusterData` for its local clusters and a copy of the global `Contracted Visualization Graph` $Q_c$ [S1, unofficial]. The graph size is proportional to the number of clusters and their interconnections [S1, unofficial]. The `ClusterMapArray` is replicated on all processors, adding $O(K)$ memory per processor, where $K$ is the total number of clusters [S1, unofficial].
+-*   **Strengths:** Minimizes view-independent preprocessing overhead by decoupling geometry partitioning from view-dependent remapping [S1, unofficial]. Reduces load imbalance variations by proportionally distributing clusters based on node weight [S1, unofficial].
+-*   **Limitations:** Requires significant communication (all-to-all broadcasts) during the setup phase [S1, unofficial]. The static nature of the clustering may lead to suboptimal load distribution if the view-dependent sampling weights vary drastically across clusters [S1, unofficial].
+-*   **When to use:** Unstructured grids with irregular cell sizes where uniform partitioning leads to poor load balance [S1, unofficial]. When the rendering pipeline supports a two-phase approach (static clustering + dynamic remapping) [S1, unofficial].
++- **Time Complexity**: The local clustering step uses MeTiS, which has sublinear complexity relative to the number of nodes in the local graph. The global coordination steps (broadcasts) have $O(P)$ communication complexity, where $P$ is the number of processors.
++- **Memory Complexity**: Each processor stores `ClusterData` for its local clusters and a `ClusterMapArray` for all global clusters. The memory usage is proportional to the size of the unstructured grid data plus the overhead of the graph structures.
++- **Measured Performance**: Not given in the sources.
++- **Scaling**: The method scales well with the number of processors as long as the local clustering remains balanced. The all-to-all broadcasts can become a bottleneck for very large numbers of processors or clusters.
++- **Strengths**: Reduces view-independent preprocessing overhead by performing clustering locally. The contracted graph $Q_c$ allows for efficient view-dependent remapping without reconstructing the graph topology.
++- **Limitations**: The initial clustering is view-independent, which may lead to suboptimal load distribution for specific views until the remapping phase is executed. The all-to-all broadcasts require significant communication bandwidth.
++- **When to Use**: Suitable for unstructured grid volume rendering where the data distribution is static but the viewing parameters change frequently, requiring dynamic load balancing.
++- **When Not to Use**: Not suitable for highly dynamic data where the grid structure itself changes frequently, as the preprocessing overhead would need to be repeated.
+ 
+ ## Background
+-This method originates from research on parallel direct volume rendering of unstructured grids [S1, unofficial]. It introduces a graph-based clustering approach that leverages the MeTiS library for efficient partitioning [S1, unofficial]. The approach separates the view-independent geometric clustering from the view-dependent remapping, allowing for efficient adaptation to changing viewing parameters [S1, unofficial].
++The method originates from research on parallel direct volume rendering of unstructured grids. The specific technique of using local clustering with MeTiS for preprocessing was introduced in the work by [S1, unofficial]. The approach builds on the concept of object-space decomposition, where the data is partitioned based on the geometric objects (cells) rather than the viewing space. The use of MeTiS for graph partitioning is a well-established technique in parallel computing, adapted here for volume rendering clusters.
+ 
+ ## Sources

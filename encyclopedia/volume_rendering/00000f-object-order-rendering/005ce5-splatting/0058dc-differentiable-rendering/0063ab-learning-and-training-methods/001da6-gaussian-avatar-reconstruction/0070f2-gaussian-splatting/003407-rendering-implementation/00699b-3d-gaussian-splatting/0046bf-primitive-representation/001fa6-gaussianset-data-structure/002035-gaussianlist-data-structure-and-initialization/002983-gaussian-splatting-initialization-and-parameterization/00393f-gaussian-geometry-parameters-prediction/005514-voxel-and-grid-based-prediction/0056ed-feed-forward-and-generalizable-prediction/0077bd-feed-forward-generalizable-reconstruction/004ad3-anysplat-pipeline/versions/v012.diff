@@ -1,0 +1,168 @@
+--- v011.md
++++ v012.md
+@@ -4,88 +4,58 @@
+ 
+ ## Overview
+-The AnySplat Pipeline is a feed-forward method for novel-view synthesis that predicts 3D Gaussian Splatting parameters directly from uncalibrated input images using a transformer-based architecture [S1, unofficial]. It solves the problem of requiring calibrated camera poses and sparse-view inputs by jointly predicting Gaussian geometry, depth, and camera poses in a single forward pass [S1, unofficial]. Unlike sibling methods that often rely on fixed grids or specific view constraints, AnySplat uses a differentiable voxelization module to convert pixel-wise Gaussians into a renderable set, supervised by pseudo-geometry priors from a pretrained VGGT model [S1, unofficial].
++The AnySplat Pipeline is a feed-forward method that predicts a dense set of 3D Gaussians directly from uncalibrated input images, bypassing iterative per-scene optimization [S1, unofficial]. It differs from sibling methods by explicitly predicting camera poses and depth alongside Gaussian parameters, using a differentiable voxelization step to regularize the output before rendering [S1, unofficial].
+ 
+ ## How it works
+-**Inputs and Outputs:**
+-The method takes a batch of uncalibrated images as input. The input tensor shape is $[1, K, 3, 448, 448]$, representing batch size 1, $K$ views, 3 color channels, and height/width of 448 pixels [S1, unofficial]. The output consists of a set of 3D Gaussians (defined by mean $\mu$, covariance $\sigma$, rotation $r$, scale $s$, and color $c$) and predicted camera poses (extrinsic and intrinsic matrices) [S1, unofficial].
++The pipeline maps input images to a voxelized Gaussian field using a transformer-based encoder and three decoder heads.
+ 
+-**Data Structures:**
+-The core data structure is the set of 3D Gaussians. Each Gaussian is defined by:
+-- $\mu \in \mathbb{R}^3$: Mean position.
+-- $\sigma \in \mathbb{R}^3$: Standard deviation (related to covariance).
+-- $r \in \mathbb{R}^4$: Rotation quaternion.
+-- $s \in \mathbb{R}^3$: Scale factors.
+-- $c \in \mathbb{R}^3$: Color (RGB).
+-These parameters are predicted by three decoder heads: $F_G$ (geometry), $F_D$ (depth), and $F_C$ (camera poses) [S1, unofficial].
++**Inputs and Outputs**
++*   **Input:** A tensor of $K$ uncalibrated images with shape $[1, K, 3, 448, 448]$ (batch, views, channels, height, width) [S1, unofficial].
++*   **Outputs:** A set of voxelized 3D Gaussians and predicted camera poses (extrinsic and intrinsic matrices) [S1, unofficial].
+ 
+-**Steps:**
+-1. **Encoding:** Input images are normalized to $[-1, 1]$ and passed through a transformer-based geometry encoder [S1, unofficial].
+-2. **Decoding:** Three decoder heads predict:
+-   - Gaussian parameters $(\mu, \sigma, r, s, c)$ via $F_G$.
+-   - Depth map $D$ via $F_D$.
+-   - Camera poses $p$ (extrinsic and intrinsic) via $F_C$ [S1, unofficial].
+-3. **Gaussian Construction:** Pixel-wise 3D Gaussians are constructed using the predicted parameters and the camera projection geometry [S1, unofficial].
+-4. **Differentiable Voxelization:** The pixel-wise Gaussians are voxelized into "pre-voxel" 3D Gaussians using a Differentiable Voxelization module. This step aggregates overlapping Gaussians and handles spatial discretization [S1, unofficial].
+-5. **Rendering:** Multi-view images and depth maps are rendered from the voxelized Gaussians using standard differentiable rasterization [S1, unofficial].
+-6. **Loss Computation:**
+-   - **RGB Loss:** Rendered images are compared against ground truth images using an RGB loss (typically L1 or L2) [S1, unofficial].
+-   - **Geometry Loss:** Rendered depth maps, decoded depth $D$, and predicted poses $p$ are used to compute geometry losses [S1, unofficial].
+-   - **Pseudo-Geometry Supervision:** Geometries are supervised by pseudo-geometry priors obtained from a pretrained VGGT model [S1, unofficial].
+-7. **Optimization:** The model parameters are updated via backpropagation to minimize the combined loss [S1, unofficial].
++**Data Structures**
++The Gaussian parameters are predicted per-pixel, resulting in a parameter map. The specific fields for each Gaussian are mean position $\mu$, scale $\sigma$, rotation $r$, scale factor $s$, and color $c$ [S1, unofficial]. These are voxelized into "pre-voxel 3D Gaussians" [S1, unofficial].
+ 
+-**Pseudocode:**
++**Steps**
++1.  **Encoding:** Input images are normalized to $[-1, 1]$ and passed through a transformer-based geometry encoder [S1, unofficial].
++2.  **Decoding:** Three decoder heads ($F_G, F_D, F_C$) predict:
++    *   $F_G$: Gaussian parameters ($\mu, \sigma, r, s, c$) [S1, unofficial].
++    *   $F_D$: A depth map $D$ [S1, unofficial].
++    *   $F_C$: Camera poses $p$ [S1, unofficial].
++3.  **Construction:** Pixel-wise 3D Gaussians are constructed from the predicted parameters [S1, unofficial].
++4.  **Voxelization:** The constructed Gaussians are processed by a Differentiable Voxelization module to create pre-voxel 3D Gaussians [S1, unofficial].
++5.  **Rendering:** Multi-view images and depth maps are rendered from the voxelized Gaussians using differentiable rasterization [S1, unofficial].
++6.  **Loss Computation:**
++    *   **RGB Loss:** Rendered images are compared against ground truth images [S1, unofficial].
++    *   **Geometry Loss:** Rendered depth maps, decoded depth $D$, and predicted poses $p$ are used to compute geometry losses [S1, unofficial].
++7.  **Supervision:** Geometries are supervised by pseudo-geometry priors obtained from a pretrained VGGT model [S1, unofficial].
++
++**Pseudocode**
+ ```python
+-# Inference
+-def inference(model, image_paths):
+-    # Load and preprocess images
+-    images = []
+-    for path in image_paths:
+-        img = load_image(path)
+-        img = process_image(img) # Normalize to [-1, 1]
+-        images.append(img)
+-    
+-    # Stack images: [1, K, 3, 448, 448]
+-    images_tensor = torch.stack(images, dim=0).unsqueeze(0).to(device)
+-    
+-    # Run model inference
+-    # model.inference expects images in [0, 1] range, so normalize from [-1, 1]
+-    gaussians, pred_context_pose = model.inference((images_tensor + 1) * 0.5)
+-    
+-    # Extract poses
+-    pred_all_extrinsic = pred_context_pose['extrinsic']
+-    pred_all_intrinsic = pred_context_pose['intrinsic']
+-    
+-    return gaussians, pred_all_extrinsic, pred_all_intrinsic
++# Input: images tensor of shape [1, K, 3, 448, 448]
++# Normalize images to [-1, 1] range if they are in [0, 1]
++normalized_images = (images + 1) * 0.5
+ 
+-# Training (conceptual)
+-def train_step(model, images, gt_images, gt_depths):
+-    # Forward pass
+-    gaussians, pred_context_pose = model.inference((images + 1) * 0.5)
+-    
+-    # Render
+-    rendered_images, rendered_depths = render(gaussians, pred_context_pose)
+-    
+-    # Compute losses
+-    rgb_loss = compute_rgb_loss(rendered_images, gt_images)
+-    geometry_loss = compute_geometry_loss(rendered_depths, pred_context_pose, gt_depths)
+-    pseudo_geometry_loss = compute_pseudo_geometry_loss(gaussians, pred_context_pose)
+-    
+-    total_loss = rgb_loss + geometry_loss + pseudo_geometry_loss
+-    
+-    # Backward pass
+-    total_loss.backward()
+-    optimizer.step()
+-    optimizer.zero_grad()
++# Run inference
++# Returns: gaussians (voxelized 3D Gaussians), pred_context_pose (dict with extrinsic and intrinsic)
++gaussians, pred_context_pose = model.inference(normalized_images)
++
++# Extract poses
++pred_all_extrinsic = pred_context_pose['extrinsic']
++pred_all_intrinsic = pred_context_pose['intrinsic']
++
++# Render and compute losses (internal to training loop)
++# rendered_images, rendered_depth = render(gaussians, pred_all_extrinsic, pred_all_intrinsic)
++# loss_rgb = rgb_loss(rendered_images, ground_truth_images)
++# loss_geo = geometry_loss(rendered_depth, pred_context_pose['depth'], pred_context_pose['poses'], vggt_priors)
+ ```
+ 
+-**Parameters:**
+-- Input resolution: 448x448 pixels [S1, unofficial].
+-- Number of views $K$: Not specified in sources, but typically small (e.g., 3-5) for feed-forward methods [G].
+-- Device: CUDA 12.1 compatible GPU [S1, unofficial].
++**Parameters**
++*   Image resolution: 448x448 [S1, unofficial].
++*   Batch size: 1 [S1, unofficial].
++*   Number of views ($K$): Variable, determined by input [S1, unofficial].
+ 
+-**Edge Cases and Pitfalls:**
+-- **Uncalibrated Inputs:** The method handles uncalibrated images, but accuracy depends on the quality of the pseudo-geometry priors from VGGT [S1, unofficial].
+-- **Voxelization Artifacts:** The differentiable voxelization step may introduce artifacts if the voxel grid resolution is not chosen appropriately [G].
+-- **Pose Ambiguity:** Predicting camera poses from uncalibrated images can be ambiguous; the VGGT priors help constrain this [S1, unofficial].
++**Edge Cases and Pitfalls**
++*   **Uncalibrated Input:** The method handles uncalibrated images, but accuracy depends on the quality of the pseudo-geometry priors from VGGT [S1, unofficial].
++*   **Voxelization:** The differentiable voxelization step is critical for regularizing the Gaussian distribution; skipping it may lead to artifacts [S1, unofficial].
+ 
+ ## Subtopics
+@@ -98,26 +68,12 @@
+ 
+ ## Operating characteristics
+-**Time and Memory Complexity:**
+-- **Time:** The method is feed-forward, so inference time is dominated by the transformer encoder and decoder heads. The exact complexity is not given in the sources [S1, unofficial].
+-- **Memory:** Memory usage depends on the number of Gaussians and the voxel grid resolution. The sources do not specify exact memory requirements [S1, unofficial].
+-
+-**Measured Performance:**
+-- Performance metrics (e.g., PSNR, SSIM) are not provided in the sources [S1, unofficial].
+-
+-**Scaling:**
+-- The method scales with the number of input views $K$ and the resolution of the input images [S1, unofficial].
+-
+-**Strengths and Limitations:**
+-- **Strengths:** Handles uncalibrated inputs; feed-forward inference; uses pseudo-geometry priors for robust supervision [S1, unofficial].
+-- **Limitations:** Relies on the quality of the pretrained VGGT model; voxelization may introduce artifacts [S1, unofficial].
+-
+-**When to Use:**
+-- Use when input images are uncalibrated and a fast, feed-forward solution is needed [S1, unofficial].
+-
+-**When Not to Use:**
+-- Avoid when high-precision calibrated poses are available and iterative optimization is feasible [G].
++*   **Time Complexity:** Not given in the sources.
++*   **Memory Complexity:** Not given in the sources.
++*   **Performance:** The method relies on a pretrained VGGT model for pseudo-geometry priors, which impacts inference time [S1, unofficial].
++*   **Strengths:** Handles uncalibrated inputs; avoids iterative optimization [S1, unofficial].
++*   **Limitations:** Dependent on the accuracy of VGGT priors; voxelization may introduce quantization artifacts [S1, unofficial].
+ 
+ ## Background
+-The AnySplat Pipeline was introduced by InternRobotics as a feed-forward approach to 3D Gaussian Splatting [S1, unofficial]. It builds on the principles of 3D Gaussian Splatting and extends them to handle uncalibrated inputs by leveraging transformer-based architectures and pseudo-geometry priors [S1, unofficial]. The method is part of a broader trend towards generalizable and feed-forward 3D scene representations [S1, unofficial].
++AnySplat is developed by InternRobotics [S1, unofficial]. It builds on the principles of feed-forward 3D Gaussian Splatting, extending them to handle unconstrained views and uncalibrated inputs by integrating camera pose and depth prediction [S1, unofficial].
+ 
+ ## Sources

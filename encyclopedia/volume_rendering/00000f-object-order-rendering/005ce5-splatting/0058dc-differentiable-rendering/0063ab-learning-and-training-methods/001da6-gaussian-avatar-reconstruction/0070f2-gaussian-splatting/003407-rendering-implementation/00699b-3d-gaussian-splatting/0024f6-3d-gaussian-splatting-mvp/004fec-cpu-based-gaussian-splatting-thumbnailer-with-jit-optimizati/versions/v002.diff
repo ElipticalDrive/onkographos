@@ -1,0 +1,149 @@
+--- v001.md
++++ v002.md
+@@ -8,31 +8,24 @@
+ ## How it works
+ **Inputs and Outputs**
+-*   **Input:** A set of 3D Gaussians defined by position ($\mu$), scale ($\sigma$), and color ($\alpha$). Rotation data is explicitly omitted [S1].
+-*   **Output:** A 2D image file (thumbnail) representing the projected scene [S1].
++*   **Input:** A set of 3D Gaussians defined by position ($\mu$), scale ($\sigma$), and color [S1]. Rotation data is explicitly omitted to simplify the primitive representation [S1].
++*   **Output:** A 2D image file representing the projected scene [S1].
+ 
+ **Data Structures**
+-*   **Gaussian Primitive:** A structure containing:
+-    *   `position`: 3D vector $(x, y, z)$ [S1].
+-    *   `scale`: Scalar value $\sigma$ representing the radius [S1].
+-    *   `color`: Color value (e.g., RGB) [S1].
+-*   **Buffers:**
+-    *   `color_buffer`: 2D array of shape $(H, W, 3)$ initialized to zero [S1].
+-    *   `depth_buffer`: 2D array of shape $(H, W)$ initialized to infinity [S1].
++*   **Gaussian Primitive:** A structure containing `position` (3D vector), `scale` (scalar $\sigma$), and `color` [S1].
++*   **Buffers:** `color_buffer` and `depth_buffer` allocated for the target image resolution [S1].
+ 
+ **Parameters**
+-*   **Splat Size ($\sigma$):** The radius of the spherical approximation. Values between 0.4 and 0.5 balance detail and speed [S1].
+-*   **Image Resolution:** 720p (1280x720) is the standard target resolution [S1].
++*   **Splat Size ($\sigma$):** The radius of the spherical approximation, tuned between 0.4 and 0.5 to balance detail and speed [S1].
++*   **Image Resolution:** 720p is the standard target resolution [S1].
+ *   **Initial Radius:** Set to the largest Gaussian scale in the dataset [S1].
+ 
+ **Algorithm Steps**
+-1.  **Initialization:** Initialize `color_buffer` and `depth_buffer` for the target resolution [S1].
+-2.  **Sphere Approximation:** Treat each Gaussian as a sphere. The rotation component is ignored, and the Gaussian is defined solely by its center $\mu$ and radius $\sigma$ [S1].
+-3.  **Projection:** Project each Gaussian's 3D center $\mu$ onto the 2D image plane to obtain screen-space coordinates $(x, y)$ [S1].
+-4.  **Weight Calculation:** Compute the Gaussian weight $\rho(x)$ for pixels within the splat's radius using the formula:
+-    $$ \rho(x) = \alpha \cdot \exp\left(-0.5 \cdot (x - \mu)^T \Sigma^{-1} (x - \mu)\right) $$
+-    In the spherical approximation, $\Sigma$ is treated as a diagonal matrix derived from the scalar scale $\sigma$ [S1].
+-5.  **Blending:** Blend the projected Gaussians into the `color_buffer` based on their calculated weights $\rho(x)$ using a fast approximate blending method [S1].
++1.  **Initialization:** Allocate `color_buffer` and `depth_buffer` for the target resolution [S1].
++2.  **Sphere Approximation:** Treat each Gaussian as a sphere by omitting rotation data and setting the initial radius to the largest Gaussian scale [S1].
++3.  **Projection:** Project each Gaussian's 3D center $\mu$ onto the 2D image plane to obtain screen-space coordinates [S1].
++4.  **Weight Calculation:** Compute the Gaussian weight $\rho(x)$ for pixels within the splat's radius using the formula: $\rho(x) = \alpha \cdot \exp(-0.5 \cdot (x - \mu)^\top \Sigma^{-1} (x - \mu))$ [S1].
++5.  **Blending:** Blend the projected Gaussians into the `color_buffer` based on their calculated weights using a fast approximate blending method [S1].
+ 6.  **Buffer Update:** Update the `color_buffer` with the blended colors and the `depth_buffer` with the corresponding depth values for each pixel [S1].
+-7.  **Output:** Save the final `color_buffer` as an image file [S1].
++7.  **Output:** Save the final `color_buffer` as an image file to generate the thumbnail [S1].
+ 
+ **Pseudocode**
+@@ -43,89 +36,41 @@
+ @njit
+ def compute_gaussian_weight(x, y, mu_x, mu_y, sigma):
+-    """
+-    Compute the weight of a spherical Gaussian at pixel (x, y).
+-    mu_x, mu_y: Center of the Gaussian in screen space.
+-    sigma: Radius of the sphere.
+-    alpha: Opacity/Color intensity (scalar for simplicity).
+-    """
+-    # Distance squared from center
+     dist_sq = (x - mu_x)**2 + (y - mu_y)**2
+-    
+-    # Exponential term: exp(-0.5 * (dist^2 / sigma^2))
+-    # Note: For a sphere, the covariance matrix inverse is (1/sigma^2) * I
+     exponent = -0.5 * (dist_sq / (sigma**2))
+-    
+-    # Clamp exponent to avoid underflow issues if necessary, though exp handles it
+     return np.exp(exponent)
+ 
+ @njit
+ def render_thumbnail(gaussians, width, height, sigma_scale_factor=0.45):
+-    """
+-    Render a thumbnail using CPU-based sphere splatting.
+-    
+-    gaussians: List of tuples (x, y, z, sigma, r, g, b)
+-    width: Image width
+-    height: Image height
+-    sigma_scale_factor: Multiplier for the Gaussian radius (0.4-0.5 recommended)
+-    """
+-    # Initialize buffers
+     color_buffer = np.zeros((height, width, 3), dtype=np.float32)
+     depth_buffer = np.full((height, width), np.inf, dtype=np.float32)
+-    
+-    # Sort Gaussians by depth (far to near) for correct alpha blending
+-    # [G] Standard alpha blending requires back-to-front sorting.
+     sorted_gaussians = sorted(gaussians, key=lambda g: g[2], reverse=True)
+-    
+     for g in sorted_gaussians:
+-        gx, gy, gz, sigma, r, g_val, b = g
+-        
+-        # Project to screen space (simplified orthographic/perspective projection)
+-        # [G] Assuming a standard pinhole camera model where x_screen = fx * X/Z + cx
+-        # This is a placeholder for the specific projection matrix used in the source.
+-        # The source implies projection happens but does not give the matrix.
+-        # We assume gx, gy are already in normalized device coordinates or screen pixels.
+-        # For implementation, one must apply the camera projection matrix here.
+-        
+-        # Determine bounding box for the splat
++        gx, gy, gz, sigma, r, g_ch, b = g
++        # Project 3D to 2D screen coordinates [G]
++        fx, fy, cx, cy = 1.0, 1.0, width / 2.0, height / 2.0
++        sx = fx * (gx / gz) + cx
++        sy = fy * (gy / gz) + cy
+         radius = sigma * sigma_scale_factor
+-        min_x = max(0, int(gx - radius))
+-        max_x = min(width - 1, int(gx + radius))
+-        min_y = max(0, int(gy - radius))
+-        max_y = min(height - 1, int(gy + radius))
+-        
+-        # Precompute inverse depth for blending
+-        inv_depth = 1.0 / gz if gz > 0 else 0.0
+-        
++        min_x = max(0, int(sx - radius))
++        max_x = min(width - 1, int(sx + radius))
++        min_y = max(0, int(sy - radius))
++        max_y = min(height - 1, int(sy + radius))
+         for y in range(min_y, max_y + 1):
+             for x in range(min_x, max_x + 1):
+-                # Calculate weight
+-                weight = compute_gaussian_weight(x, y, gx, gy, radius)
+-                
+-                # Fast approximate blending
+-                # [G] Standard alpha blending: C_out = C_in * (1 - alpha) + C_new * alpha
+-                # The source mentions "fast approximate blending" [S1].
+-                # We use standard alpha blending here as the approximation.
+-                
++                weight = compute_gaussian_weight(x, y, sx, sy, radius)
+                 current_depth = depth_buffer[y, x]
+-                
+-                # Only update if this Gaussian is closer than the current pixel depth
+                 if gz < current_depth:
+-                    # Update depth
+                     depth_buffer[y, x] = gz
+-                    
+-                    # Update color
+-                    # [G] Assuming weight acts as alpha for the splat contribution
+                     alpha = weight
+                     color_buffer[y, x, 0] = color_buffer[y, x, 0] * (1 - alpha) + r * alpha
+-                    color_buffer[y, x, 1] = color_buffer[y, x, 1] * (1 - alpha) + g_val * alpha
++                    color_buffer[y, x, 1] = color_buffer[y, x, 1] * (1 - alpha) + g_ch * alpha
+                     color_buffer[y, x, 2] = color_buffer[y, x, 2] * (1 - alpha) + b * alpha
+-
+     return color_buffer
+ ```
+ 
+ **Edge Cases and Pitfalls**
+-*   **Rotation Omission:** By ignoring rotation, the method loses orientation fidelity, which may cause visual artifacts for elongated or rotated structures [S1].
++*   **Rotation Omission:** Ignoring rotation loses orientation fidelity, which may cause visual artifacts for elongated or rotated structures [S1].
+ *   **Sphere Approximation:** Treating Gaussians as spheres simplifies the covariance matrix inversion but reduces accuracy for non-spherical primitives [S1].
+-*   **Python Performance:** Without JIT, pure Python loops are prohibitively slow (336 s vs 2.33 s with JIT) [S1].
++*   **Python Performance:** Without JIT, pure Python loops are prohibitively slow, taking 336 s compared to 2.33 s with JIT [S1].
+ *   **Parallel Overhead:** Parallel processing was deliberately avoided to prevent caching and management overhead on systems with limited core counts [S1].
+ 

@@ -1,0 +1,236 @@
+--- v001.md
++++ v002.md
+@@ -1,42 +1,44 @@
+ # PCA Pose Alignment
+-
+ Also called: principal component pose transform
+ 
+ ## Overview
+-PCA Pose Alignment recenters a set of camera poses by aligning the principal components of the camera positions with the coordinate axes, ensuring the average pose becomes the identity transformation. It differs from [Sim(3) Alignment via Procrustes Analysis](8526-sim-3-alignment-via-procrustes-analysis.md) by relying solely on the spatial distribution of camera centers rather than optimizing for rigid body alignment of the full pose matrices, making it computationally lighter but potentially less accurate for scenes with significant rotational variance relative to position [S1, unofficial].
++PCA Pose Alignment recenters and rotates a set of camera poses so that the principal components of the camera position distribution align with the global XYZ axes [S1, unofficial]. It solves the problem of arbitrary coordinate system orientation in multi-view datasets by enforcing a canonical frame derived from the data geometry. Unlike [Sim(3) Alignment via Procrustes Analysis](8526-sim-3-alignment-via-procrustes-analysis.md), which minimizes rigid-body transformation errors to match a target configuration, PCA Pose Alignment relies solely on the statistical variance of camera centers, ignoring orientation constraints during the rotation estimation [S1, unofficial].
+ 
+ ## How it works
+-**Inputs:** A set of $N$ camera poses, represented as $4 \times 4$ matrices $P_i$ in world-to-camera (c2w) or camera-to-world (c2w) format. The method assumes the input poses are consistent in format.
+-**Outputs:** A transformed set of poses $P'_i$ and the transformation matrix $T$ applied to them.
++**Inputs:** A set of $N$ camera poses, represented as $4 \times 4$ matrices $P_i$ (camera-to-world, c2w).
++**Outputs:** A $4 \times 4$ transformation matrix $T$ and the transformed poses $P'_i = T P_i$.
+ 
+ **Data Structures:**
+-- `poses`: Array of shape $(N, 4, 4)$ containing the input transformation matrices.
+-- `positions`: Array of shape $(N, 3)$ containing the translation vectors extracted from the poses.
+-- `mean_pos`: Array of shape $(3,)$ representing the centroid of the camera positions.
+-- `cov_matrix`: $3 \times 3$ covariance matrix of the centered positions.
+-- `eigvecs`: $3 \times 3$ matrix where columns are the eigenvectors of the covariance matrix, sorted by eigenvalue magnitude.
+-- `rot`: $3 \times 3$ rotation matrix derived from `eigvecs`.
+-- `transform`: $4 \times 4$ matrix combining rotation and translation.
++- $P$: Array of shape $(N, 4, 4)$ containing the input poses.
++- $t$: Array of shape $(N, 3)$ containing the translation vectors (camera positions).
++- $T_{3 \times 4}$: Intermediate $3 \times 4$ matrix.
++- $T_{4 \times 4}$: Final $4 \times 4$ transformation matrix.
+ 
+ **Steps:**
+-1. **Extract Positions:** Retrieve the translation components from the poses. If poses are $4 \times 4$ matrices $P$, extract $t_i = P_i[:3, 3]$.
+-2. **Compute Mean:** Calculate the centroid of the camera positions:
+-   $$ t_{mean} = \frac{1}{N} \sum_{i=1}^{N} t_i $$
+-3. **Center Positions:** Subtract the mean from each position:
+-   $$ t'_i = t_i - t_{mean} $$
+-4. **Covariance Matrix:** Compute the covariance matrix of the centered positions:
+-   $$ C = \frac{1}{N} (t')^T t' $$
+-   *Note: Some implementations use $(t')^T t'$ without normalization, as scaling does not affect eigenvectors [S1, unofficial].*
+-5. **Eigendecomposition:** Perform eigendecomposition on $C$ to obtain eigenvalues $\lambda$ and eigenvectors $v$.
+-6. **Sort Eigenvectors:** Sort the eigenvectors in descending order of their corresponding eigenvalues. Let the sorted eigenvectors form the columns of matrix $R_{raw}$.
+-7. **Ensure Proper Rotation:** Check the determinant of $R_{raw}$. If $\det(R_{raw}) < 0$, flip the sign of the third column (the eigenvector corresponding to the smallest eigenvalue) to ensure a right-handed coordinate system:
+-   $$ R_{raw}[:, 2] = -R_{raw}[:, 2] $$
+-   Set $rot = R_{raw}$.
+-8. **Construct Transform:** Create the $3 \times 4$ linear transform matrix $M_{3 \times 4}$:
+-   $$ M_{3 \times 4} = [rot \mid rot \cdot (-t_{mean})] $$
+-   This represents the rotation and translation required to map the original world coordinates to the new PCA-aligned space.
+-9. **Apply Transform:** For each pose $P_i$, apply the transform. If $P_i$ is a $4 \times 4$ matrix, the transformation is applied to the upper $3 \times 4$ part. The new pose $P'_i$ is constructed by multiplying the original pose by the inverse of the alignment transform, or by directly transforming the camera centers and orientations. Specifically, the new camera center $c'_i$ is $rot \cdot (c_i - t_{mean})$. The new orientation is rotated by $rot$.
+-10. **Homogeneous Row:** Append the row $[0, 0, 0, 1]$ to the transform matrix to make it $4 \times 4$.
+-11. **Axis Flip Check:** Calculate the mean z-component of the y-axis of the recentered poses. If this mean is negative, flip the y and z axes in both the poses and the transform matrix to ensure consistent orientation (e.g., "up" direction) [S1, unofficial].
++1. **Extract Positions:** Extract the translation components from the poses. For each pose $P_i$, let $t_i$ be the first three elements of the fourth column:
++   $$ t_i = P_i[:3, 3] $$
++   Stack these into a matrix $t \in \mathbb{R}^{N \times 3}$.
++
++2. **Recenter:** Compute the mean position $\bar{t}$:
++   $$ \bar{t} = \frac{1}{N} \sum_{i=1}^{N} t_i $$
++   Subtract the mean from all positions:
++   $$ t_{centered} = t - \bar{t} $$
++
++3. **Covariance and Eigendecomposition:** Compute the covariance matrix $C$ of the centered positions:
++   $$ C = t_{centered}^T t_{centered} $$
++   Perform eigendecomposition on $C$ to obtain eigenvalues $\lambda$ and eigenvectors $v$.
++
++4. **Construct Rotation:** Sort the eigenvectors in descending order of their corresponding eigenvalues. Let the sorted eigenvectors be $v_1, v_2, v_3$. Construct the rotation matrix $R \in \mathbb{R}^{3 \times 3}$ by stacking these vectors as columns:
++   $$ R = [v_1 | v_2 | v_3] $$
++   **Determinant Check:** If $\det(R) < 0$, the transformation includes a reflection. Flip the third column (associated with the smallest eigenvalue) to ensure a proper rotation:
++   $$ R[:, 2] = -R[:, 2] $$
++
++5. **Construct Transform Matrix:** Form the $3 \times 4$ matrix $M$ by concatenating $R$ and the rotated translation offset:
++   $$ M = [R \quad | \quad R(-\bar{t})] $$
++   Append a homogeneous row $[0, 0, 0, 1]$ to $M$ to create the $4 \times 4$ transformation matrix $T$.
++
++6. **Apply Transform:** Transform the poses by multiplying $T$ with each $P_i$. Note that since $P_i$ are $4 \times 4$ and $T$ is $4 \times 4$, the operation is standard matrix multiplication. The result is the set of aligned poses.
++
++7. **Axis Flipping (Y/Z Check):** After alignment, inspect the y-axis vectors (second row of the rotation part) of the recentered poses. Calculate the mean z-component of these y-axes. If this mean is negative, flip the y and z axes in both the poses and the transformation matrix $T$ to ensure consistent orientation [S1, unofficial].
+ 
+ **Pseudocode:**
+@@ -48,105 +50,82 @@
+     Aligns camera poses using PCA on camera positions.
+     Args:
+-        poses: np.ndarray of shape (N, 4, 4)
++        poses: np.array of shape (N, 4, 4), camera-to-world matrices.
+     Returns:
+-        aligned_poses: np.ndarray of shape (N, 4, 4)
+-        transform: np.ndarray of shape (4, 4)
++        T: np.array of shape (4, 4), the transformation matrix.
++        aligned_poses: np.array of shape (N, 4, 4), transformed poses.
+     """
+     # 1. Extract positions
+-    positions = poses[:, :3, 3]  # Shape (N, 3)
++    t = poses[:, :3, 3]  # Shape (N, 3)
+     
+-    # 2. Compute mean
+-    mean_pos = np.mean(positions, axis=0)  # Shape (3,)
++    # 2. Center positions
++    t_mean = np.mean(t, axis=0)
++    t_centered = t - t_mean
+     
+-    # 3. Center positions
+-    centered_pos = positions - mean_pos  # Shape (N, 3)
++    # 3. Covariance and Eigendecomposition
++    # Covariance matrix C = t_centered.T @ t_centered
++    C = t_centered.T @ t_centered
++    eigenvalues, eigenvectors = np.linalg.eigh(C)
+     
+-    # 4. Covariance matrix
+-    # Using (N, 3) @ (3, N) -> (N, 3) @ (3, N) is not right.
+-    # Covariance is (1/N) * centered_pos.T @ centered_pos
+-    cov_matrix = centered_pos.T @ centered_pos  # Shape (3, 3)
+-    
+-    # 5. Eigendecomposition
+-    eigenvalues, eigenvectors = np.linalg.eigh(cov_matrix)
+-    
+-    # 6. Sort eigenvectors by descending eigenvalues
++    # 4. Sort eigenvectors by descending eigenvalues
+     # eigh returns sorted ascending, so reverse
+     idx = np.argsort(eigenvalues)[::-1]
+-    rot = eigenvectors[:, idx]  # Shape (3, 3)
++    R = eigenvectors[:, idx]  # Shape (3, 3)
+     
+-    # 7. Ensure proper rotation (det = 1)
+-    if np.linalg.det(rot) < 0:
+-        rot[:, 2] = -rot[:, 2]
++    # Ensure proper rotation (det = 1)
++    if np.linalg.det(R) < 0:
++        R[:, 2] = -R[:, 2]
+         
+-    # 8. Construct 3x4 transform matrix [R | -R*t_mean]
+-    translation_part = rot @ (-mean_pos)
+-    transform_3x4 = np.hstack([rot, translation_part.reshape(3, 1)])  # Shape (3, 4)
++    # 5. Construct 3x4 transform matrix
++    # Translation part: R @ (-t_mean)
++    t_offset = R @ (-t_mean)
++    M_3x4 = np.hstack([R, t_offset.reshape(3, 1)])
+     
+-    # 9. Apply transform to poses
+-    # The new pose P' is such that its camera center is transformed by transform_3x4
+-    # And its orientation is rotated by rot.
+-    # P' = [R * P[:3,:3] | R * (P[:3,3] - t_mean) + R * t_mean - R * t_mean ?]
+-    # Actually, the transform T maps World -> PCA_Space.
+-    # So P'_i = T @ P_i ? No, P_i is World->Camera.
+-    # If we want to align the *poses* (the camera extrinsics), we are changing the coordinate system.
+-    # The new camera center in the new system is: c'_i = R * (c_i - t_mean)
+-    # The new orientation is: R_cam' = R @ R_cam
++    # 6. Construct 4x4 transform matrix T
++    T = np.eye(4)
++    T[:3, :] = M_3x4
+     
+-    aligned_poses = np.zeros_like(poses)
+-    for i in range(len(poses)):
+-        R_cam = poses[i, :3, :3]
+-        c_cam = poses[i, :3, 3]
++    # 7. Apply transform to poses
++    # P' = T @ P
++    aligned_poses = T @ poses
++    
++    # 8. Check Y/Z axis flip
++    # Get y-axis of recentered poses (second row of rotation part)
++    # The rotation part of aligned_poses is aligned_poses[:, :3, :3]
++    y_axes = aligned_poses[:, :3, 1]
++    mean_z_y = np.mean(y_axes[:, 2])
++    
++    if mean_z_y < 0:
++        # Flip Y and Z axes in poses and T
++        # Flip Y and Z in poses
++        aligned_poses[:, :3, 1] *= -1
++        aligned_poses[:, :3, 2] *= -1
+         
+-        # New orientation
+-        R_new = rot @ R_cam
++        # Flip Y and Z in T
++        T[:3, 1] *= -1
++        T[:3, 2] *= -1
+         
+-        # New center
+-        c_new = rot @ (c_cam - mean_pos)
+-        
+-        aligned_poses[i, :3, :3] = R_new
+-        aligned_poses[i, :3, 3] = c_new
+-        aligned_poses[i, 3, :] = poses[i, 3, :] # Keep homogeneous row
+-        
+-    # 10. Construct full 4x4 transform matrix
+-    transform = np.eye(4)
+-    transform[:3, :4] = transform_3x4
+-    
+-    # 11. Axis flip check
+-    # Mean z-component of the y-axis of the recentered poses
+-    # The y-axis of the camera is the second column of the rotation matrix R_cam
+-    # In the new system, the y-axis is the second column of R_new
+-    y_axes = aligned_poses[:, :3, 1]
+-    mean_y_z = np.mean(y_axes[:, 2])
+-    
+-    if mean_y_z < 0:
+-        # Flip y and z axes in poses and transform
+-        flip_matrix = np.diag([1, -1, -1, 1])
+-        aligned_poses = flip_matrix @ aligned_poses
+-        transform = flip_matrix @ transform
+-        
+-    return aligned_poses, transform
++    return T, aligned_poses
+ ```
+ 
+-**Parameters:**
+-- None explicitly, though the number of poses $N$ affects stability.
+-
+ **Edge Cases and Pitfalls:**
+-- **Degenerate Input:** If all camera positions are identical, the covariance matrix is zero, and eigendecomposition fails. [G] Handle by returning identity or raising an error.
+-- **Determinant Sign:** If the eigenvectors form a left-handed system, the rotation is improper. The flip step (7) corrects this.
+-- **Orientation Ambiguity:** PCA aligns axes but not necessarily the "up" direction. Step 11 attempts to resolve this by flipping y/z if the mean up vector points down, but this heuristic may fail in complex scenes.
++- **Degenerate Data:** If all camera positions are collinear or coincident, the covariance matrix will be singular or near-singular, leading to undefined eigenvectors. [G] Implementers should check the condition number of $C$ and fallback to a default identity transform or raise an error.
++- **Determinant Sign:** Failure to check $\det(R)$ results in a reflection, which reverses depth ordering and breaks rendering.
++- **Homogeneous Coordinates:** Ensure poses are strictly $4 \times 4$ with the last row $[0,0,0,1]$.
+ 
+ ## Subtopics
+ 
+ ### [Camera Space Normalization via Similarity Transform](11417-camera-space-normalization-via-similarity-transform.md)
+-Computes a 4x4 similarity transform matrix T and a scalar scale to normalize camera poses (c2w) and optionally point clouds, aligning the world up axis to the camera's negative Y axis and centering the scene.
++Computes a 4x4 similarity transform matrix $T$ and a scalar scale to normalize camera poses (c2w) and optionally point clouds, aligning the world up axis to the camera's negative Y axis and centering the scene. It sets the coordinate system such that the average camera orientation defines the vertical axis, distinct from [PCA Pose Alignment](7626-pca-pose-alignment.md) which aligns principal components of the data distribution.
+ 
+ ## Operating characteristics
+-- **Time Complexity:** $O(N)$ to extract positions and compute mean, $O(1)$ for covariance (fixed $3 \times 3$), $O(1)$ for eigendecomposition (fixed size), $O(N)$ to apply transform. Total $O(N)$.
+-- **Memory Complexity:** $O(N)$ to store positions and transformed poses.
+-- **Strengths:** Fast, simple, robust to outliers in rotation if positions are well-distributed.
+-- **Limitations:** Ignores camera orientation during alignment, which can lead to misalignment if rotational variance is high. The axis flip heuristic is not guaranteed to work for all scenes.
++- **Time Complexity:** $O(N)$ to extract positions and compute the mean. $O(N)$ to compute the covariance matrix (assuming fixed dimension 3). Eigendecomposition of a $3 \times 3$ matrix is $O(1)$. Total time is dominated by $O(N)$ for data extraction and transformation application.
++- **Memory Complexity:** $O(N)$ to store the positions and centered positions.
++- **Strengths:** Fast, deterministic, and requires no iterative optimization. It effectively handles large datasets by reducing them to a simple covariance calculation.
++- **Limitations:** It only considers camera positions, ignoring camera orientations. If the camera orientations are highly correlated with positions in a non-principal way, the resulting alignment might not be optimal for rendering tasks that depend on view consistency. It does not scale the scene, unlike similarity transforms.
++- **When to Use:** When a quick, position-based canonicalization is needed and orientation constraints are secondary or handled separately.
++- **When Not to Use:** When the scene has a known global up vector that must be preserved, or when camera orientations are critical for the alignment metric.
+ 
+ ## Background
+-PCA Pose Alignment is a technique used in 3D computer vision and graphics to standardize the coordinate system of a set of camera poses. It is commonly used in NeRF and 3D reconstruction pipelines to ensure consistent orientation and centering. The method is implemented in libraries such as VolSplat [S1, unofficial].
++PCA Pose Alignment is a heuristic method commonly used in neural radiance field (NeRF) and multi-view stereo pipelines to standardize input data. It originates from the need to handle datasets with arbitrary coordinate systems. The specific implementation details, including the Y/Z axis flipping heuristic, are documented in the VolSplat repository [S1, unofficial]. It is a simpler alternative to Procrustes analysis, which requires a target configuration or iterative alignment.
+ 
+ ## Sources

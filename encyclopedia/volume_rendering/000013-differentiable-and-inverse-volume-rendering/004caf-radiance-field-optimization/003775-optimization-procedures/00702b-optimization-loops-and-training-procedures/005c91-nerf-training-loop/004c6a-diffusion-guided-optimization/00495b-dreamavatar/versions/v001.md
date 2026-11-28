@@ -1,0 +1,77 @@
+# DreamAvatar
+
+Also called: DreamHuman, AvatarVerse
+
+## Overview
+DreamAvatar is a text-guided 3D avatar generation method that combines a parametric body model (SMPL) as a shape prior with a NeRF-based radiance field optimization pipeline [S1]. It solves the problem of generating high-fidelity, animatable 3D human avatars from text prompts by leveraging 2D diffusion models for training supervision [S1]. Unlike generic text-to-3D methods like DreamFusion which optimize a free-form NeRF, DreamAvatar constrains the geometry to the SMPL topology, ensuring anatomical correctness and enabling animation [S1]. It builds on [DreamFusion](10253-dreamfusion.md) but replaces the unconstrained MLP radiance field with a shape-constrained representation [S1].
+
+## How it works
+DreamAvatar generates 3D avatars by optimizing a neural radiance field conditioned on an SMPL mesh, using gradients from a 2D text-to-image diffusion model [S1].
+
+**Inputs:**
+*   Text prompt $P$ describing the avatar.
+*   SMPL model parameters (shape $\beta$, pose $\theta$) defining the initial geometry [S1].
+*   A pretrained 2D text-to-image diffusion model (e.g., Stable Diffusion) [S1].
+*   Camera poses for novel view synthesis [S1].
+
+**Outputs:**
+*   Optimized SMPL parameters ($\beta, \theta$) and NeRF radiance field parameters [S1].
+*   Rendered 3D avatar mesh and textures [S1].
+
+**Data Structures:**
+*   **SMPL Model:** Stores vertex positions and face connectivity. Used to define the surface geometry and sampling locations [S1].
+*   **NeRF Radiance Field:** An MLP that maps 3D coordinates and viewing directions to color and density. In DreamAvatar, the 3D coordinates are constrained to lie on or near the SMPL surface [S1].
+*   **Diffusion Model:** A U-Net based architecture conditioned on text embeddings [S1].
+
+**Steps:**
+1.  **Initialization:** Initialize the SMPL parameters $\beta$ and $\theta$ and the NeRF MLP weights [S1].
+2.  **View Sampling:** For each training iteration, sample a camera pose and a set of 3D points along rays originating from the camera and intersecting the SMPL surface [S1].
+3.  **Rendering:** Render the image using the NeRF radiance field. The density and color at each point are determined by the MLP, conditioned on the SMPL geometry [S1].
+4.  **Diffusion Supervision:**
+    *   Encode the rendered image into the latent space of the diffusion model [S1].
+    *   Add noise to the latent representation [S1].
+    *   Predict the noise using the diffusion model conditioned on the text prompt $P$ [S1].
+    *   Compute the loss between the predicted noise and the added noise [S1].
+5.  **Backpropagation:** Compute gradients of the diffusion loss with respect to the NeRF parameters and SMPL parameters [S1].
+6.  **Optimization:** Update the NeRF parameters and SMPL parameters using an optimizer (e.g., Adam) [S1].
+7.  **Iteration:** Repeat steps 2-6 for a fixed number of iterations or until convergence [S1].
+
+**Formulas:**
+*   The rendering equation for NeRF is standard, but the spatial coordinates $\mathbf{x}$ are derived from the SMPL mesh: $\mathbf{x} = \text{SMPL}(\beta, \theta, u, v)$, where $(u, v)$ are texture coordinates [S1].
+*   The diffusion loss $\mathcal{L}_{diff}$ is the mean squared error between the predicted noise $\epsilon_\theta$ and the actual noise $\epsilon$ [S1].
+
+**Parameters:**
+*   Learning rate: Not given in the sources.
+*   Number of iterations: Not given in the sources.
+*   Diffusion model steps: Not given in the sources.
+
+**Edge Cases and Pitfalls:**
+*   **SMPL Limitations:** The SMPL model may not capture all fine details of the avatar, leading to artifacts if the text prompt describes features outside the SMPL topology [S1].
+*   **Optimization Stability:** The joint optimization of SMPL and NeRF parameters can be unstable [S1].
+*   **Resolution:** The resolution of the rendered images affects the quality of the diffusion supervision [S1].
+
+## Subtopics
+
+### DreamFusion
+DreamFusion is the foundational text-to-3D method that DreamAvatar builds upon [S1]. It uses a pretrained text-to-image diffusion model (Imagen) to generate training images for a mipNeRF 360 NeRF model trained from scratch [S1]. A key modification is that surface color is parameterized by an MLP instead of radiance [S1]. It allows view control via text keywords (e.g., "front view") [S1]. However, it lacks fine details because Imagen images were generated at 64x64 resolution [S1].
+
+### Latent-NeRF
+Latent-NeRF trains a NeRF model to output 64x64x4 latent features that Stable Diffusion operates over, resulting in 512x512x3 RGB images after a decoder step [S1]. It allows for text guidance and shape guidance for shape refinement and strict shape constraints [S1].
+
+### Magic3D
+Magic3D targets the low-resolution issues of DreamFusion using a two-stage coarse-fine approach [S1].
+
+## Operating characteristics
+*   **Time Complexity:** Not given in the sources.
+*   **Memory Complexity:** Not given in the sources.
+*   **Performance:** DreamAvatar produces high-fidelity, animatable avatars [S1].
+*   **Strengths:** Anatomical correctness due to SMPL prior; text-guided generation [S1].
+*   **Limitations:** Limited by SMPL topology; resolution constraints of the diffusion model [S1].
+*   **When to use:** When generating animatable human avatars from text prompts.
+*   **When not to use:** When generating non-human objects or scenes without a parametric model prior.
+
+## Background
+DreamAvatar was proposed in April 2023 [S1]. It is part of an emerging research area in 2022-2023 for diffusion-based 3D avatar model generation with text guidance powered by neural fields and NeRF [S1]. Other conceptually similar methods include DreamHuman (June 2023) and AvatarVerse (August 2023) [S1]. These methods use an SMPL model as a shape prior and text-guided 2D image generation via diffusion to create training data in a DreamFusion-like pipeline [S1].
+
+## Sources
+[S1] Neural Radiance Fields in 3D Vision: A Comprehensive Review, https://doi.org/10.26599/cvm.2026.9450535, fetched 2026-10-28

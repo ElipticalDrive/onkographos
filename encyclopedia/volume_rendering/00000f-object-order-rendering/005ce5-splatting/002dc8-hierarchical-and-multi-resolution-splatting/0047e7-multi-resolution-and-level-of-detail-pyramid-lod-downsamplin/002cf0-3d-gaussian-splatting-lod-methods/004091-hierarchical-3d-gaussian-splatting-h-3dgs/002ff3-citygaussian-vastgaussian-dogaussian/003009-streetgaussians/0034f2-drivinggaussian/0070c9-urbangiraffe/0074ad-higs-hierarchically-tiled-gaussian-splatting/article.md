@@ -1,0 +1,186 @@
+# HiGS (Hierarchically Tiled Gaussian Splatting)
+
+Also called: Hierarchical Rendering Architecture for Real-Time 3D Gaussian Splatting
+
+## Overview
+HiGS is a rendering architecture for 3D Gaussian Splatting that decouples spatial partitioning from rasterization granularity using a two-scale hierarchy [S1, unofficial]. It solves the tile-size trade-off inherent in standard 3DGS, where large tiles reduce binning overhead but increase rasterization waste, and small tiles do the opposite [S1, unofficial]. Unlike its siblings in the [Pyramid, LOD, Downsampling](52-pyramid-lod-downsampling.md) family which often rely on model compression or hardware-specific optimizations, HiGS retains the standard exact-alpha compositing model on commodity GPUs by grouping render tiles into macro-tiles for sorting and splitting those macro-tiles into fixed-size Gaussian batches for load-balanced rasterization [S1, unofficial].
+
+## How it works
+HiGS operates by restructuring the pipeline into coarse partitioning/sorting and fine rasterization stages, utilizing a density-proportional work decomposition to eliminate the "rasterizer tail effect" [S1, unofficial].
+
+### Inputs and Outputs
+*   **Input:** A set of 3D Gaussians defined by position, covariance (or conic parameters), opacity, and spherical harmonics coefficients.
+*   **Output:** A 2D image frame.
+
+### Data Structures
+The implementation relies on preallocated buffers to avoid dynamic allocation stalls [S1, unofficial].
+
+1.  **Gaussian Attributes:** Standard 3DGS attributes.
+2.  **Macro-tile List:** A contiguous array of depth keys and Gaussian IDs, segmented by macro-tile.
+3.  **Work Queue:** A shared atomic queue for render tiles within a macro-tile.
+4.  **Scheduling Buffer:** Per-worker buffer to absorb variability in visible Gaussian counts.
+5.  **Partial Blending Buffer:** Per-batch buffer storing intermediate alpha/composite results.
+
+### Parameters
+*   **Render Tile Size:** $8 \times 8$ pixels [S1, unofficial].
+*   **Macro-tile Size:** $8 \times 4$ render tiles ($64 \times 32$ pixels) [S1, unofficial].
+*   **Gaussian Batch Size:** $B = 1,024$ Gaussians per processing unit [S1, unofficial].
+*   **Partitioning Batch Size:** $P = 8,192$ Gaussians per binning work group [S1, unofficial].
+
+### Algorithm Steps
+
+1.  **Binning (Coarse Partitioning):**
+    Gaussians are processed in partitioning batches of $P$ Gaussians. A work group handles one batch. For each Gaussian, a conservative per-row ellipse-contour scan determines overlap with macro-tiles. Overlapping Gaussians are assigned to the corresponding macro-tile's range in the output list. The output is a segmented structure containing per-macro-tile lists of 32-bit depth keys and Gaussian IDs [S1, unofficial].
+
+2.  **Segmented Depth Sort:**
+    A fully asynchronous on-device segmented sort is performed on the macro-tile lists. This runs as a cascade of tier-classified per-segment block sorts. Oversized segments are handled by a device-built merge tree consumed by a persistent kernel, scaling across orders of magnitude of segment sizes without host involvement [S1, unofficial]. The result is a depth-sorted list of Gaussians for each macro-tile.
+
+3.  **Work Decomposition:**
+    Each macro-tile's sorted Gaussian list is split into fixed-size batches of $B=1,024$ Gaussians. Each pair $(\text{Macro-tile}, \text{Batch})$ becomes an independent processing unit. A macro-tile with $N$ Gaussians spawns $\lceil N/B \rceil$ processing units [S1, unofficial].
+
+4.  **Rasterization Dispatch:**
+    Within each processing unit, worker groups dynamically claim active render tiles from a shared tile work queue. This ensures that dense macro-tiles spawn proportionally more work units, balancing load based on Gaussian density rather than screen area [S1, unofficial].
+
+5.  **Visibility and Data Loading:**
+    For each claimed render tile, the worker group determines per-tile visibility masks inline. Gaussians are loaded from global memory into local storage (shared memory) once per macro-tile and reused across all member render tiles within that macro-tile [S1, unofficial].
+
+6.  **Rasterization (Fine Granularity):**
+    Each worker group rasterizes its assigned $8 \times 8$ pixel tile via front-to-back alpha blending. A per-worker scheduling buffer absorbs the per-tile variability in visible Gaussian count, allowing the blending pipeline to run at a fixed rate [S1, unofficial]. All data is read from local storage [S1, unofficial].
+
+### Pseudocode
+
+> **Unverified code.** The code below did not pass a test run against a reference implementation, or no test fits it, so it may contain errors.
+
+```python
+# Constants
+RENDER_TILE_W = 8
+RENDER_TILE_H = 8
+MACRO_TILE_W_RT = 8  # Render tiles wide
+MACRO_TILE_H_RT = 4  # Render tiles high
+BATCH_SIZE = 1024
+PARTITION_BATCH_SIZE = 8192
+
+def higgs_render(gaussians, camera):
+    # 1. Binning
+    # Output: macro_tile_lists, a dictionary mapping macro_tile_id -> list of (depth, gaussian_id)
+    macro_tile_lists = bin_gaussians_to_macro_tiles(gaussians, camera)
+    
+    # 2. Segmented Depth Sort
+    # Sorts each list in macro_tile_lists by depth
+    for mt_id, g_list in macro_tile_lists.items():
+        macro_tile_lists[mt_id] = segmented_sort(g_list)
+        
+    # 3. Prepare Processing Units
+    # Create a list of (macro_tile_id, batch_of_gaussians)
+    processing_units = []
+    for mt_id, sorted_gaussians in macro_tile_lists.items():
+        # Split into fixed-size batches
+        for i in range(0, len(sorted_gaussians), BATCH_SIZE):
+            batch = sorted_gaussians[i : i + BATCH_SIZE]
+            processing_units.append((mt_id, batch))
+            
+    # 4. Rasterization
+    # Initialize frame buffer
+    frame = zeros((height, width, 3))
+    
+    # Shared work queue for tiles within a macro-tile
+    # Note: In practice, this is managed per macro-tile or globally with coordination
+    # Here we simulate the parallel execution of processing units
+    
+    for mt_id, batch in processing_units:
+        # Load macro-tile Gaussians into local storage (simulated)
+        local_gaussians = load_to_local_storage(batch)
+        
+        # Determine which render tiles are active in this macro-tile
+        # and which Gaussians overlap them
+        active_tiles = get_active_render_tiles(mt_id, local_gaussians)
+        
+        # Shared queue for this macro-tile's tiles
+        tile_queue = Queue(active_tiles)
+        
+        # Worker groups claim tiles dynamically
+        while not tile_queue.empty():
+            tile_id = tile_queue.pop()
+            if tile_id is None: break
+            
+            # Get tile coordinates
+            tx, ty = get_tile_coords(tile_id)
+            
+            # Determine visibility mask for this tile against local_gaussians
+            # This is done inline during load/processing
+            visible_gaussians = []
+            for g in local_gaussians:
+                if overlaps_tile(g, tx, ty):
+                    visible_gaussians.append(g)
+            
+            # Sort visible gaussians by depth (already sorted globally, but need local order)
+            # Since global sort is per macro-tile, local order is preserved
+            visible_gaussians.sort(key=lambda g: g.depth)
+            
+            # Rasterize tile
+            # Use scheduling buffer to absorb variability
+            result = rasterize_tile_front_to_back(visible_gaussians, tx, ty, camera)
+            
+            # Write to frame
+            write_to_frame(frame, result, tx, ty)
+
+    return frame
+
+def bin_gaussians_to_macro_tiles(gaussians, camera):
+    macro_tile_lists = {}
+    # Process in partitioning batches
+    for i in range(0, len(gaussians), PARTITION_BATCH_SIZE):
+        batch = gaussians[i : i + PARTITION_BATCH_SIZE]
+        # Cooperative work group handles this batch
+        # Writes (depth, gaussian_id) to macro_tile_lists
+        for g in batch:
+            # Conservative per-row ellipse-contour scan
+            overlapping_macro_tiles = get_overlapping_macro_tiles(g, camera)
+            for mt_id in overlapping_macro_tiles:
+                if mt_id not in macro_tile_lists:
+                    macro_tile_lists[mt_id] = []
+                macro_tile_lists[mt_id].append((g.depth, g.id))
+    return macro_tile_lists
+
+def segmented_sort(list_of_pairs):
+    # Cascade of tier-classified per-segment block sorts
+    # Handles oversized segments via device-built merge tree
+    # Returns sorted list of pairs by depth
+    return sorted(list_of_pairs, key=lambda x: x[0])
+
+def rasterize_tile_front_to_back(gaussians, tx, ty, camera):
+    # Front-to-back alpha blending
+    # Reads from local storage
+    # Uses scheduling buffer for fixed-rate blending
+    color = zeros(3)
+    alpha = 0.0
+    for g in gaussians:
+        # Evaluate Gaussian at tile pixels
+        # Stabilized half-precision using Cholesky factors of conics
+        # Mahalanobis quadratic turned into sum of squares
+        contribution = evaluate_gaussian(g, tx, ty, camera)
+        color += contribution.color * contribution.alpha * (1.0 - alpha)
+        alpha += contribution.alpha * (1.0 - alpha)
+        if alpha > 0.99: break # Early termination if supported, though HiGS aims for exact
+    return color
+```
+
+### Edge Cases and Pitfalls
+*   **Precision:** The data path uses half-precision (fp16) stabilized by Cholesky factors of conics. This converts the Mahalanobis quadratic into a sum of squares, preventing fp16 cancellation errors [S1, unofficial].
+*   **Oversized Segments:** During sorting, segments may vary greatly in size. The system uses a device-built merge tree consumed by a persistent kernel to handle this without host involvement [S1, unofficial].
+*   **Memory Preallocation:** To avoid producer-consumer stalls, per-macro-tile Gaussian lists, per-batch partition histograms, and per-batch partial blending buffers are preallocated up front [S1, unofficial].
+
+## Operating characteristics
+*   **Performance:** HiGS renders a 5.8M Gaussian scene at 1,124 FPS at 1080p resolution [S1, unofficial]. It renders up to ~15.8x faster than the original 3DGS across tested scenes [S1, unofficial].
+*   **Pair Count Reduction:** At 1080p, mean tile-Gaussian pair counts drop from 10.1M (gsplat) to 1.51M (HiGS), an 85% reduction. At 4K, they drop from 29.3M to 2.21M, a 92% reduction [S1, unofficial].
+*   **Load Balancing:** In dense scenes, the peak per-work-unit load drops from 2,485 (gsplat) to ~340 (HiGS) [S1, unofficial].
+*   **Complexity:** Time complexity is dominated by the segmented sort and rasterization. The work decomposition scales with Gaussian density rather than screen area, eliminating the tail effect [S1, unofficial].
+*   **Memory:** Memory footprint scales with the number of macro-tile Gaussian batches in the frame, roughly linearly with scene density at fixed resolution [S1, unofficial].
+*   **Strengths:** Eliminates the rasterizer tail effect, retains exact alpha compositing, works on commodity GPUs, and significantly reduces pair counts.
+*   **Limitations:** Requires preallocation of buffers which may increase peak memory usage compared to dynamic allocation approaches. The complexity of the segmented sort and hierarchical dispatch is higher than standard 3DGS.
+
+## Background
+HiGS was introduced by Dawid Pająk, Martin Bisson, and Rodolfo Lima from NVIDIA [S1, unofficial]. It addresses the limitations of standard 3DGS tile-based rendering, where partitioning and rasterization costs are tied to a single tile size [S1, unofficial]. Prior acceleration work like FlashGS, Splatshop, and TC-GS either fused stages, swapped compositing models, or moved to alternative hardware [S1, unofficial]. HiGS differs from pair reduction methods like StopThePop and Speedy-Splat by reducing pair counts through coarser-than-render-tile partitioning rather than refining per-tile assignment [S1, unofficial]. It builds on the AccuTile family's ellipse-contour intersection tests but applies them at a macro-tile level [S1, unofficial].
+
+## Sources
+[S1] HiGS: A Hierarchical Rendering Architecture for Real-Time 3D Gaussian Splatting, https://doi.org/10.48550/arXiv.2606.00352, fetched 2026-10-29 (unofficial)

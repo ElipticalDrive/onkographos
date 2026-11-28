@@ -1,0 +1,137 @@
+# Material Parameter Setting
+
+Also called: Material Format, Material object fields, Standard Volume Material, vpSetMaterial
+
+## Overview
+Material Parameter Setting defines the optical and geometric properties of volumetric media by mapping raw data grids to physical attributes such as density, color, and emission [S3]. It solves the problem of converting abstract simulation data into renderable radiance contributions within the volume rendering integral [S3]. It differs from sibling methods by focusing on the definition of these properties via explicit channel bindings and parameter sliders (Standard Volume Material) or low-level API calls (VolPack), rather than the traversal or shading algorithms themselves [S2, S3]. It builds on [Specific Material and Geometry Rendering](4395-specific-material-and-geometry-rendering.md).
+
+## How it works
+### Inputs and Outputs
+*   **Inputs:** Raw scalar grids (e.g., density, temperature), user-defined parameters (density multipliers, anisotropy), and optional texture descriptors [S1, S3].
+*   **Outputs:** A material state object or context configuration that defines how sample points along a ray are shaded [S1, S2, S3].
+
+### Data Structures
+
+#### 1. Standard Volume Material (High-Level)
+This configuration binds named VDB grids to specific physical properties through explicit channel fields [S3]:
+*   `Volume Channel`: String (case-sensitive name of the VDB grid, typically 'density') [S3].
+*   `Density`: Float multiplier for the volume channel [S3].
+*   `Scatter Color`: RGB vector [S3].
+*   `Scatter Scale`: Float multiplier for scatter intensity [S3].
+*   `Anisotropy Mode`: Enum (Henyey-Greenstein or Jendersie-d’Eon) [S3].
+*   `Transparency Color`: RGB vector (per-wavelength attenuation) [S3].
+*   `Transparency Depth`: Float (cm, per-wavelength travel distance) [S3].
+*   `Emission Channel`: String (name of temperature grid) [S3].
+*   `Emission Mode`: Enum (Blackbody or Color) [S3].
+
+#### 2. Material Object Fields (Low-Level/Procedural)
+Defined in [S1], this structure holds shading parameters for surfaces and procedural volumes:
+> **Unverified code.** The code below did not pass a test run against a reference implementation, or no test fits it, so it may contain errors.
+
+```python
+class Material:
+    albedo: list[float]       # Linear float RGB
+    metalness: float          # Float [0..1]
+    roughness: float          # Float [0..1]
+    F0: list[float]           # Linear float RGB, base reflectivity
+    triplar: bool             # True for XZ planar, False for triplanar
+    normalStrength: float     # Linear float
+    albedoTex: int            # Texture descriptor (-1 if unused)
+    normalTex: int            # Texture descriptor (-1 if unused)
+    roughnessTex: int         # Texture descriptor (-1 if unused)
+    metalnessTex: int         # Texture descriptor (-1 if unused)
+    heightmapTex: int         # Texture descriptor (-1 if unused)
+    ambietTex: int            # Texture descriptor (-1 if unused)
+```
+
+#### 3. VolPack Material State (API)
+Defined in [S2], this is not a persistent struct but a state set via `vpSetMaterial` using the following constants:
+*   `material_num`: `VP_MATERIAL0` through `VP_MATERIAL5` [S2].
+*   `property`: `VP_AMBIENT`, `VP_DIFFUSE`, `VP_SPECULAR`, `VP_SHINYNESS` [S2].
+*   `surface_side`: `VP_EXTERIOR`, `VP_INTERIOR`, `VP_BOTH_SIDES` [S2].
+
+### Numbered Steps
+
+#### Standard Volume Material Setup
+1.  **Bind Volume Channel:** Assign the name of the density grid to the `Volume Channel` field [S3].
+2.  **Set Density:** Multiply the grid values by the `Density` parameter to control overall thickness [S3].
+3.  **Configure Scatter:** Set `Scatter Color` and `Scatter Scale` to define reflection properties [S3].
+4.  **Select Phase Function:** Choose `Anisotropy Mode` [S3]. Use Henyey-Greenstein (slider -1 to +1) for isotropic smoke or Jendersie-d’Eon for cloud droplets [S3].
+5.  **Configure Transparency:** Set `Transparency Color` (darker means thicker) and `Transparency Depth` (in cm) to model wavelength-dependent attenuation [S3].
+6.  **Configure Emission (Optional):** If rendering fire, bind the temperature grid to `Emission Channel` [S3]. Set `Emission Mode` to Blackbody for physical accuracy (3,000 K to >9,000 K) or Color for artistic control [S3].
+
+#### VolPack API Setup
+1.  **Initialize Context:** Create a `vpContext` object [S2].
+2.  **Set Material Properties:** Call `vpSetMaterial(vpc, material_num, property, surface_side, r, g, b)` [S2].
+3.  **Define Surface Side:** Use `VP_EXTERIOR` (gradient towards viewer), `VP_INTERIOR` (gradient away), or `VP_BOTH_SIDES` [S2].
+4.  **Reverse Sides (Optional):** Call `vpEnable(vpc, VP_REVERSE_SURFACE_SIDES)` to invert exterior/interior definitions [S2].
+
+#### Material Object Construction (Procedural)
+> **Unverified code.** The code below did not pass a test run against a reference implementation, or no test fits it, so it may contain errors.
+
+```python
+def Material(albedo: list[float], metalness: float, roughness: float, F0: list[float]) -> Material:
+    """Constructor 1: Full initialization."""
+    mat = Material()
+    mat.albedo = albedo
+    mat.metalness = metalness
+    mat.roughness = roughness
+    mat.F0 = F0
+    mat.triplar = False  # Planar projection
+    mat.normalStrength = 1.0
+    mat.albedoTex = -1
+    mat.normalTex = -1
+    mat.roughnessTex = -1
+    mat.metalnessTex = -1
+    mat.heightmapTex = -1
+    mat.ambietTex = -1
+    return mat
+
+def Material_DefaultF0(albedo: list[float], metalness: float, roughness: float) -> Material:
+    """Constructor 2: Default F0 for non-metal dielectrics."""
+    default_F0 = [0.04, 0.04, 0.04]
+    return Material(albedo, metalness, roughness, default_F0)
+```
+
+### Formulas
+
+**Volume Rendering Integral (Context):**
+$$
+C(r) = \int_{t_n}^{t_f} T(t) \sigma_t(t) c(t) dt
+$$
+Where $\sigma_t$ is derived from the `Volume Channel` multiplied by `Density` and modified by `Transparency Color/Depth` [Parent].
+
+**Blackbody Emission (Standard Volume):**
+Temperature $T$ (Kelvin) maps to color $C$ [S3].
+*   $T \approx 3,000$ K maps to deep red [S3].
+*   $T > 9,000$ K maps to white/blue-white [S3].
+
+**Base Reflectivity (Material Format):**
+For non-metal dielectrics, $F_0 = [0.04, 0.04, 0.04]$ [S1].
+
+### Parameters and Typical Values
+*   **F0:** `[0.04, 0.04, 0.04]` for dielectrics [S1].
+*   **Anisotropy (Henyey-Greenstein):** Slider range $[-1, 1]$ [S3].
+*   **Transparency Depth:** Measured in centimeters; should match real-world volume size [S3].
+*   **Material IDs:** `VP_MATERIAL0` through `VP_MATERIAL5` [S2].
+
+### Edge Cases and Pitfalls
+*   **Case Sensitivity:** Volume channel names are case-sensitive [S3].
+*   **Surface Side Ambiguity:** `VP_EXTERIOR` and `VP_INTERIOR` depend on gradient direction [S2]. Use `VP_REVERSE_SURFACE_SIDES` if the gradient is inverted relative to the viewer [S2].
+*   **Textureless Default:** Material objects default to textureless (descriptors = -1) unless explicitly bound [S1].
+
+## Subtopics
+
+### [Volume Material Setup](6933-volume-material-setup.md)
+Initializes the rendering state for direct volume ray casting by creating and caching a shader program configured for transparent volumetric rendering [G]. It binds necessary textures (noise, fire profiles, transfer functions, labels, weights) and uniform parameters (affine transforms, intensity ranges) to the GPU [G]. It differs from sibling methods by focusing on the binding and configuration of material resources rather than the traversal logic or the transfer function definition itself [G].
+
+## Operating characteristics
+Not given in the sources.
+
+## Background
+Standard Volume Material is described in Maxon's documentation as a volume shader with optimized fast paths for clouds, smoke, and flames, and a fully programmable node-based path [S3]. Material Format is defined in CUDA raymarching implementations to hold shading parameters for surfaces and procedural volumes, including PBR-like properties and texture descriptors [S1]. VolPack is a C library for volume rendering that uses `vpSetMaterial` to configure material properties per voxel side [S2].
+
+## Sources
+[S1] Raymarching Distance Fields with CUDA, https://doi.org/10.3390/electronics10222730, fetched 2026-10-26
+[S2] VolPack User's Guide, http://www-graphics.stanford.edu/software/volpack/vp_userguide.html, fetched 2026-10-28
+[S3] Introduction to Volumetric Rendering, https://help.maxon.net/c4d/2027/en-us/Content/html/What_is_Volumetric_Rendering.html, fetched 2026-10-29

@@ -1,0 +1,458 @@
+# Mandelbulb — SDF Raymarching in Unity
+
+A study project rendering signed-distance-field (SDF) scenes in Unity URP via raymarching, culminating in a real-time Mandelbulb fractal. Three scenes of increasing complexity, each with hand-written HLSL.
+
+Built against Unity 6 LTS / URP 17.
+
+---
+
+## What this project is, in plain language
+
+Most 3D games render scenes by drawing lots of tiny triangles. The graphics card receives a list of triangles, transforms them into screen positions, and colors the resulting pixels. This is fast and well-understood and it's what almost every game ships with.
+
+This project does it differently. There are no triangles. The scenes are described by mathematical functions, and each pixel on screen figures out what it should look like by walking a ray of light from the camera into the scene and checking what it hits. The result is the same kind of 3D image you'd get from triangles — surfaces, shading, depth — but produced by math instead of geometry.
+
+The technique is called **raymarching**, and the math that describes the scenes is called **signed distance fields**. The end goal is to render a **Mandelbulb** — a 3D fractal that's famously hard to draw any other way, because it isn't actually made of triangles at all. It's pure math, and raymarching is one of the few ways to render it.
+
+### What is a signed distance field (SDF)?
+
+Imagine you're standing somewhere in 3D space and you want to know "how far is the nearest surface?" An SDF is a function that answers exactly that question. You give it a 3D position, and it returns a number: the distance to the nearest surface, with a sign convention — negative if you're inside something, positive if you're outside.
+
+For example, the SDF for a sphere centered at the origin with radius 1 is `length(p) - 1`, where `p` is your 3D position. If you're 0.5 units from the origin, the function returns `-0.5` (you're 0.5 units inside the sphere). If you're 2 units from the origin, it returns `1.0` (you're 1 unit outside the sphere). If you're exactly 1 unit out, it returns `0` (you're on the surface).
+
+That's it. An SDF is a math function that returns distance-to-nearest-surface from any point. Simple primitives like spheres, boxes, and tori each have their own one-line SDF. More complex shapes are built by combining primitive SDFs with operators (union, subtract, blend) — also one-line math.
+
+The whole 3D world becomes a single function: give it a position, get a distance.
+
+### What is raymarching?
+
+If you have an SDF describing your scene, you need a way to actually draw it. Raymarching is the algorithm.
+
+For each pixel on screen, the algorithm:
+
+1. **Constructs a ray** from the camera's position pointing through that pixel into the world.
+2. **Walks the ray forward in steps**, where each step is exactly as long as the SDF says it can safely be. This is the clever part — the SDF tells you the distance to the nearest surface, so you know it's safe to step that far without hitting anything. Take the step, ask again, take another step.
+3. **Stops when** either the SDF says you're touching a surface (distance is approximately zero), or you've walked too far without hitting anything (the ray missed the scene).
+4. **Shades the pixel** based on what was hit — surface normal, lighting, color — or paints background if nothing was hit.
+
+This is repeated for every pixel on screen, every frame. Modern GPUs do millions of these in parallel, so the result runs in real time.
+
+The trick that makes raymarching work for SDFs specifically is step (2). With a proper SDF, you always know how far you can safely advance — so you take maximum-length steps and converge on surfaces fast. Without that guarantee, you'd have to take tiny constant-size steps and the technique would be too slow to use.
+
+### Why use raymarching at all?
+
+Triangles are great for things you can model — characters, props, level geometry. They're not great for:
+
+- **Fractals.** Mathematical objects with infinite detail at every scale can't be triangulated.
+- **Implicit surfaces.** Smooth blends between shapes (like `smin(sphere, box)`) that change continuously without obvious "edges."
+- **Procedural worlds.** Caves, terrain, organic blob shapes generated entirely from math.
+
+Raymarching opens these up. It's also the technique used in much of the demoscene, in shadertoy.com, and in the work of graphics-engineers like Inigo Quilez who push real-time rendering forward.
+
+---
+
+## What the three scenes are
+
+The project ships three scenes of increasing complexity. Each is a single shader. Each lives in its own Unity scene file with its own material.
+
+### Scene 1 — Sphere
+
+The simplest possible raymarched scene. One SDF (a sphere), one raymarch loop, one normal estimate, one Lambert light. ~50 lines of HLSL total.
+
+The point isn't visual ambition; it's getting the raymarching foundations right. If the sphere shades correctly under a moving light, the math is sound. Everything else builds on this.
+
+### Scene 2 — Composition
+
+Multiple SDF primitives combined with operators. A box subtracted from a sphere; a smooth-min blending two shapes into one organic surface; a ground plane. Soft shadows traced with a second raymarch from the surface toward the light.
+
+The point is to demonstrate that SDFs compose. Once the operators work, you can build any shape that can be described as a combination of primitives — which turns out to be a lot of shapes.
+
+### Scene 3 — Mandelbulb
+
+A 3D fractal. Real-time. The marquee scene of the project.
+
+The Mandelbulb is the visually iconic generalization of the 2D Mandelbrot set into three dimensions. It looks like an alien organic structure with infinite detail at every scale. You can't model it; you can only describe it as a recursive math function and let the raymarcher draw what the math implies.
+
+This is the scene the project is named for. See "Why the Mandelbulb is harder than other fractals" below for the technical challenges.
+
+---
+
+## How the Mandelbulb raymarching works (high-level)
+
+The Mandelbrot set in 2D is defined by iterating `z → z² + c` and asking "does this stay bounded forever, or fly off to infinity?" Points where it stays bounded are "in the set"; points where it escapes are "out." The classic Mandelbrot fractal image colors points by how many iterations they take to escape.
+
+The Mandelbulb generalizes this to 3D by using a 3D analog of squaring — a "spherical power" operation that takes a 3D point, raises its distance from origin to the 8th power, and rotates its direction by 8x. Then it iterates the same way: `point → spherical-power-8(point) + c`. Points that stay bounded form the 3D fractal surface.
+
+For raymarching, you don't just need to know "is this point inside or outside?" You need a **distance estimate** — how far is this point from the nearest surface? For the Mandelbulb, this is computed from the iteration: how fast is the iteration escaping, and how many iterations did it take? A standard formula (the "Hubbard-Douady distance estimator") converts the iteration's escape velocity into a conservative distance estimate.
+
+That conservative distance becomes the raymarch step size. Each pixel:
+
+1. Walks a ray into the scene.
+2. At each step, runs ~10 iterations of the Mandelbulb formula on the current position.
+3. Reads off the distance estimate from the iteration's escape behavior.
+4. Steps forward that distance.
+5. Repeats until the distance estimate becomes small enough to call "hit," or until the ray is far enough out to call "missed."
+
+When the ray hits, surface normals are estimated by sampling the distance function at four nearby points — the gradient of the function gives the surface direction. Lighting is then standard: dot product with the light direction, ambient, soft shadows.
+
+The whole pipeline produces a real-time image of an infinitely-detailed mathematical object. No mesh, no textures, no triangles — just the iteration formula and the raymarch loop, evaluated millions of times per frame.
+
+---
+
+## Why the Mandelbulb is harder than other fractals
+
+Three reasons make the Mandelbulb a serious technical challenge compared to easier 3D fractals like the Menger sponge or recursive cubes:
+
+### 1. The distance estimator is approximate, not exact
+
+For most SDF primitives (sphere, box, plane), the SDF is mathematically exact — you know exactly how far the nearest surface is. Raymarching with exact SDFs converges fast and never miscounts.
+
+For the Mandelbulb, there's no exact distance function. The Hubbard-Douady distance estimator is *approximate* — it's a lower bound on the true distance, but it can be loose. Loose estimates mean smaller raymarch steps mean more iterations per pixel mean more GPU work. Worse, near the fractal's boundary the estimator gets less accurate, which is exactly where you need it most. Performance tuning is a constant fight against this.
+
+### 2. Recursive iteration inside the SDF
+
+A sphere SDF is one math operation. The Mandelbulb SDF is a loop of ~10 iterations of the spherical-power formula, where each iteration involves computing a 3D power (which itself uses trig functions or a custom approximation). Plus a derivative tracker for the distance estimate.
+
+That's roughly 100x the work per SDF call. And the SDF is called dozens of times per pixel during raymarching. So the GPU is doing thousands of math operations per pixel per frame just to estimate distance, before any shading even happens.
+
+### 3. Normal estimation amplifies noise
+
+Surface normals come from the gradient of the SDF — the direction the SDF increases fastest. This is computed by sampling the SDF at four nearby points and taking differences.
+
+When the SDF is itself approximate (as the Mandelbulb's is), the differences between samples are *noisy approximations of approximations*. Small numerical errors in the distance estimate become large errors in the normal estimate, and large normal errors produce visible artifacts in the shading — bumpy noise on what should be smooth surfaces.
+
+Mitigations include using a larger sample offset (less noisy but blurs detail), supersampling the screen, or denoising the normal field. None are free.
+
+### 4. Self-similar detail at every scale
+
+The fractal is, by definition, infinitely detailed. As the camera zooms in, more iterations become necessary to represent the surface accurately, the distance estimator gets less accurate, and the normal estimation gets noisier — all at the same time. There's no "level of detail" trick to fall back on; the only knob is how many iterations the shader runs, and that knob is a direct multiplier on GPU cost.
+
+By contrast, a Menger sponge is recursive but with finite depth at any reasonable zoom level. A Mandelbulb is genuinely infinite, and rendering it well at close range pushes the GPU hard.
+
+---
+
+## Project layout
+
+```
+Mandelbulb/
+├── README.md                     this file
+├── LICENSE                       MIT
+├── .gitignore                    Unity standard
+└── Unity Mandelbulb/             Unity project root
+    ├── Assets/
+    │   ├── Shaders/
+    │   │   ├── SDF/              shared HLSL: primitives, operators, raymarcher, lighting
+    │   │   └── Scenes/           per-scene shader files (Scene01_Sphere.shader, etc.)
+    │   ├── Materials/            material assets binding shaders to scenes
+    │   ├── Scenes/                Unity scene files (01_Sphere.unity, 02_Composition.unity, 03_Mandelbulb.unity)
+    │   ├── ProfilingCaptures/     per-week Frame Debugger / RenderDoc screenshots
+    │   └── Settings/              URP renderer assets, volume profiles
+    ├── Packages/                  Unity package manifest
+    └── ProjectSettings/           Unity project configuration
+```
+
+---
+
+## How to run locally
+
+1. Install Unity 6 LTS (or later LTS) via Unity Hub.
+2. Clone this repo: `git clone https://github.com/AJKKinney/Mandelbulb.git`
+3. In Unity Hub, click "Add" → select the `Unity Mandelbulb/` subfolder.
+4. Open the project. First load can take a few minutes while Unity imports assets and builds the Library cache.
+5. Open one of the scene files in `Assets/Scenes/`.
+6. Click Play, or just look at the Scene view — the SDF runs in the editor without entering Play mode.
+
+---
+
+## Status
+
+| # | Scene | Status |
+|---|---|---|
+| 01 | Sphere | in progress |
+| 02 | Composition | planned |
+| 03 | Mandelbulb | planned |
+
+Profiling captures, technical writeups, and per-scene documentation land alongside each scene as it ships.
+
+---
+
+## Sources I'm learning from
+
+- **Inigo Quilez — Distance functions**: https://iquilezles.org/articles/distfunctions/
+- **Inigo Quilez — Raymarching primer**: https://iquilezles.org/articles/raymarchingdf/
+- **Inigo Quilez — Normals from SDF**: https://iquilezles.org/articles/normalsSDF/
+- **Skytopia — Mandelbulb derivation**: https://www.skytopia.com/project/fractal/2mandelbulb.html
+- **The Book of Shaders**: https://thebookofshaders.com/
+- **Unity URP Shader docs**: https://docs.unity3d.com/Packages/com.unity.render-pipelines.universal@17.0/manual/
+
+---
+
+## License
+
+MIT — see [LICENSE](./LICENSE).
+
+### Unity Mandelbulb/Assets/TutorialInfo/Scripts/Readme.cs
+```
+﻿using System;
+using UnityEngine;
+
+public class Readme : ScriptableObject
+{
+    public Texture2D icon;
+    public string title;
+    public Section[] sections;
+    public bool loadedLayout;
+
+    [Serializable]
+    public class Section
+    {
+        public string heading, text, linkText, url;
+    }
+}
+```
+
+### Unity Mandelbulb/Assets/TutorialInfo/Scripts/Editor/ReadmeEditor.cs
+```
+﻿using System.Collections;
+using System.Collections.Generic;
+using UnityEngine;
+using UnityEditor;
+using System;
+using System.IO;
+using System.Reflection;
+
+[CustomEditor(typeof(Readme))]
+[InitializeOnLoad]
+public class ReadmeEditor : Editor
+{
+    static string s_ShowedReadmeSessionStateName = "ReadmeEditor.showedReadme";
+    
+    static string s_ReadmeSourceDirectory = "Assets/TutorialInfo";
+
+    const float k_Space = 16f;
+
+    static ReadmeEditor()
+    {
+        EditorApplication.delayCall += SelectReadmeAutomatically;
+    }
+
+    static void RemoveTutorial()
+    {
+        if (EditorUtility.DisplayDialog("Remove Readme Assets",
+            
+            $"All contents under {s_ReadmeSourceDirectory} will be removed, are you sure you want to proceed?",
+            "Proceed",
+            "Cancel"))
+        {
+            if (Directory.Exists(s_ReadmeSourceDirectory))
+            {
+                FileUtil.DeleteFileOrDirectory(s_ReadmeSourceDirectory);
+                FileUtil.DeleteFileOrDirectory(s_ReadmeSourceDirectory + ".meta");
+            }
+            else
+            {
+                Debug.Log($"Could not find the Readme folder at {s_ReadmeSourceDirectory}");
+            }
+
+            var readmeAsset = SelectReadme();
+            if (readmeAsset != null)
+            {
+                var path = AssetDatabase.GetAssetPath(readmeAsset);
+                FileUtil.DeleteFileOrDirectory(path + ".meta");
+                FileUtil.DeleteFileOrDirectory(path);
+            }
+
+            AssetDatabase.Refresh();
+        }
+    }
+
+    static void SelectReadmeAutomatically()
+    {
+        if (!SessionState.GetBool(s_ShowedReadmeSessionStateName, false))
+        {
+            var readme = SelectReadme();
+            SessionState.SetBool(s_ShowedReadmeSessionStateName, true);
+
+            if (readme && !readme.loadedLayout)
+            {
+                LoadLayout();
+                readme.loadedLayout = true;
+            }
+        }
+    }
+
+    static void LoadLayout()
+    {
+        var assembly = typeof(EditorApplication).Assembly;
+        var windowLayoutType = assembly.GetType("UnityEditor.WindowLayout", true);
+        var method = windowLayoutType.GetMethod("LoadWindowLayout", BindingFlags.Public | BindingFlags.Static);
+        method.Invoke(null, new object[] { Path.Combine(Application.dataPath, "TutorialInfo/Layout.wlt"), false });
+    }
+
+    static Readme SelectReadme()
+    {
+        var ids = AssetDatabase.FindAssets("Readme t:Readme");
+        if (ids.Length == 1)
+        {
+            var readmeObject = AssetDatabase.LoadMainAssetAtPath(AssetDatabase.GUIDToAssetPath(ids[0]));
+
+            Selection.objects = new UnityEngine.Object[] { readmeObject };
+
+            return (Readme)readmeObject;
+        }
+        else
+        {
+            Debug.Log("Couldn't find a readme");
+            return null;
+        }
+    }
+
+    protected override void OnHeaderGUI()
+    {
+        var readme = (Readme)target;
+        Init();
+
+        var iconWidth = Mathf.Min(EditorGUIUtility.currentViewWidth / 3f - 20f, 128f);
+
+        GUILayout.BeginHorizontal("In BigTitle");
+        {
+            if (readme.icon != null)
+            {
+                GUILayout.Space(k_Space);
+                GUILayout.Label(readme.icon, GUILayout.Width(iconWidth), GUILayout.Height(iconWidth));
+            }
+            GUILayout.Space(k_Space);
+            GUILayout.BeginVertical();
+            {
+
+                GUILayout.FlexibleSpace();
+                GUILayout.Label(readme.title, TitleStyle);
+                GUILayout.FlexibleSpace();
+            }
+            GUILayout.EndVertical();
+            GUILayout.FlexibleSpace();
+        }
+        GUILayout.EndHorizontal();
+    }
+
+    public override void OnInspectorGUI()
+    {
+        var readme = (Readme)target;
+        Init();
+
+        foreach (var section in readme.sections)
+        {
+            if (!string.IsNullOrEmpty(section.heading))
+            {
+                GUILayout.Label(section.heading, HeadingStyle);
+            }
+
+            if (!string.IsNullOrEmpty(section.text))
+            {
+                GUILayout.Label(section.text, BodyStyle);
+            }
+
+            if (!string.IsNullOrEmpty(section.linkText))
+            {
+                if (LinkLabel(new GUIContent(section.linkText)))
+                {
+                    Application.OpenURL(section.url);
+                }
+            }
+
+            GUILayout.Space(k_Space);
+        }
+
+        if (GUILayout.Button("Remove Readme Assets", ButtonStyle))
+        {
+            RemoveTutorial();
+        }
+    }
+
+    bool m_Initialized;
+
+    GUIStyle LinkStyle
+    {
+        get { return m_LinkStyle; }
+    }
+
+    [SerializeField]
+    GUIStyle m_LinkStyle;
+
+    GUIStyle TitleStyle
+    {
+        get { return m_TitleStyle; }
+    }
+
+    [SerializeField]
+    GUIStyle m_TitleStyle;
+
+    GUIStyle HeadingStyle
+    {
+        get { return m_HeadingStyle; }
+    }
+
+    [SerializeField]
+    GUIStyle m_HeadingStyle;
+
+    GUIStyle BodyStyle
+    {
+        get { return m_BodyStyle; }
+    }
+
+    [SerializeField]
+    GUIStyle m_BodyStyle;
+
+    GUIStyle ButtonStyle
+    {
+        get { return m_ButtonStyle; }
+    }
+
+    [SerializeField]
+    GUIStyle m_ButtonStyle;
+
+    void Init()
+    {
+        if (m_Initialized)
+            return;
+        m_BodyStyle = new GUIStyle(EditorStyles.label);
+        m_BodyStyle.wordWrap = true;
+        m_BodyStyle.fontSize = 14;
+        m_BodyStyle.richText = true;
+
+        m_TitleStyle = new GUIStyle(m_BodyStyle);
+        m_TitleStyle.fontSize = 26;
+
+        m_HeadingStyle = new GUIStyle(m_BodyStyle);
+        m_HeadingStyle.fontStyle = FontStyle.Bold;
+        m_HeadingStyle.fontSize = 18;
+
+        m_LinkStyle = new GUIStyle(m_BodyStyle);
+        m_LinkStyle.wordWrap = false;
+
+        // Match selection color which works nicely for both light and dark skins
+        m_LinkStyle.normal.textColor = new Color(0x00 / 255f, 0x78 / 255f, 0xDA / 255f, 1f);
+        m_LinkStyle.stretchWidth = false;
+
+        m_ButtonStyle = new GUIStyle(EditorStyles.miniButton);
+        m_ButtonStyle.fontStyle = FontStyle.Bold;
+
+        m_Initialized = true;
+    }
+
+    bool LinkLabel(GUIContent label, params GUILayoutOption[] options)
+    {
+        var position = GUILayoutUtility.GetRect(label, LinkStyle, options);
+
+        Handles.BeginGUI();
+        Handles.color = LinkStyle.normal.textColor;
+        Handles.DrawLine(new Vector3(position.xMin, position.yMax), new Vector3(position.xMax, position.yMax));
+        Handles.color = Color.white;
+        Handles.EndGUI();
+
+        EditorGUIUtility.AddCursorRect(position, MouseCursor.Link);
+
+        return GUI.Button(position, label, LinkStyle);
+    }
+}
+```

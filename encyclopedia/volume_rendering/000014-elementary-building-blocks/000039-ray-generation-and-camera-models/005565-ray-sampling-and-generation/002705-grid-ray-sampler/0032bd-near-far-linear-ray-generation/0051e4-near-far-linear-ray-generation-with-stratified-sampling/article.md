@@ -1,0 +1,126 @@
+# Near-Far Linear Ray Generation with Stratified Sampling
+
+
+## Overview
+This method generates ray samples along a near-far segment by dividing the depth range into intervals and drawing one uniform random sample from each interval [S1, unofficial]. It differs from uniform jittered sampling by guaranteeing that every sub-interval contributes exactly one sample [S2, unofficial].
+
+## How it works
+**Inputs:**
+- `t_min`: Near plane distance (scalar or tensor) [S1, unofficial].
+- `t_max`: Far plane distance (scalar or tensor) [S1, unofficial].
+- `num_samples`: Integer count of samples per ray (e.g., 384) [S2, unofficial].
+- `depth_mode`: String specifying interpolation space: `'linear'`, `'geometric'`, or `'harmonic'` [S1, unofficial].
+- `epsilon`: Small constant to prevent division by zero or log(0) in non-linear modes. Default: $10^{-3}$ [S1, unofficial].
+- `ray_origin`: 3D camera origin position [G].
+- `ray_direction`: Normalized ray direction vector [G].
+
+**Outputs:**
+- `samples`: Tensor of shape `[..., num_samples, 3]` containing the final 3D positions along the ray [G].
+
+**Data Structures:**
+- `ts`: Intermediate tensor of shape `[..., num_samples]` storing interpolated depth values [S1, unofficial].
+- `t_rand`: Tensor of shape `[..., num_samples]` storing uniform random noise in $[0, 1]$ [S1, unofficial].
+
+**Steps:**
+1. **Base Timestamps:** Generate base timestamps using linear spacing from 0 to 1, reshaped to broadcast with batch dimensions: `ts = linspace(0, 1, num_samples)` reshaped to `[..., num_samples]` [S1, unofficial].
+2. **Interpolation:** Compute interpolated timestamps `ts` based on `depth_mode`:
+   - **Linear:** `ts = t_min * (1.0 - ts) + t_max * ts` [S1, unofficial].
+   - **Geometric:** Interpolate in log-space: `ts = (clamp(t_min, epsilon).log() * (1.0 - ts) + clamp(t_max, epsilon).log() * ts).exp()` [S1, unofficial]. This samples closer points more densely [S1, unofficial].
+   - **Harmonic:** Interpolate in inverse-space: `ts = 1.0 / (1.0 / clamp(t_min, epsilon) * (1.0 - ts) + 1.0 / clamp(t_max, epsilon) * ts)` [S1, unofficial]. Recommended for spherical scenes [S1, unofficial].
+3. **Interval Bounds:** Define the boundaries of each stratified interval [S1, unofficial].
+   - Compute midpoints: `mids = 0.5 * (ts[..., 1:] + ts[..., :-1])` [S1, unofficial].
+   - Lower bounds: `lower = cat([t_min, mids], dim=-1)` [S1, unofficial].
+   - Upper bounds: `upper = cat([mids, t_max], dim=-1)` [S1, unofficial].
+4. **Stratified Sampling:** Draw uniform random noise `t_rand` in $[0, 1]$ with the same shape as `ts` [S1, unofficial]. Compute final depth values: `ts = lower + (upper - lower) * t_rand` [S1, unofficial].
+5. **Position Calculation:** Compute sample position: `position = ray_origin + ray_direction * ts[..., None]` [G]. (Note: [S2, unofficial] describes an alternative loop-based approach where `t = t_min + dt * (i + random())` and `position = ray_origin + ray_direction * t`, but the vectorized formulation above is standard for batched execution [S1, unofficial]).
+6. **Output:** Return positions unsqueezed at the last dimension: `samples = ts.unsqueeze(-1)` [S1, unofficial].
+
+**Pseudocode:**
+> **Unverified code.** The code below did not pass a test run against a reference implementation, or no test fits it, so it may contain errors.
+
+```python
+import torch
+
+def stratified_sample_ray(t_min, t_max, num_samples, depth_mode='linear', epsilon=1e-3, ray_origin=None, ray_direction=None):
+    # 1. Base timestamps
+    ts = torch.linspace(0, 1, num_samples, device=t_min.device)
+    # Reshape to broadcast: [..., num_samples]
+    ts = ts.view([1] * t_min.dim() + [num_samples])
+
+    # 2. Interpolate based on depth_mode
+    if depth_mode == 'linear':
+        ts = t_min * (1.0 - ts) + t_max * ts
+    elif depth_mode == 'geometric':
+        t_min_c = torch.clamp(t_min, min=epsilon)
+        t_max_c = torch.clamp(t_max, min=epsilon)
+        ts = torch.exp(torch.log(t_min_c) * (1.0 - ts) + torch.log(t_max_c) * ts)
+    elif depth_mode == 'harmonic':
+        t_min_c = torch.clamp(t_min, min=epsilon)
+        t_max_c = torch.clamp(t_max, min=epsilon)
+        inv_t_min = 1.0 / t_min_c
+        inv_t_max = 1.0 / t_max_c
+        ts = 1.0 / (inv_t_min * (1.0 - ts) + inv_t_max * ts)
+    else:
+        raise ValueError(f"Unknown depth_mode: {depth_mode}")
+
+    # 3. Interval bounds
+    mids = 0.5 * (ts[..., 1:] + ts[..., :-1])
+    lower = torch.cat([t_min.unsqueeze(-1), mids], dim=-1)
+    upper = torch.cat([mids, t_max.unsqueeze(-1)], dim=-1)
+
+    # 4. Stratified sampling
+    t_rand = torch.rand_like(ts)
+    ts = lower + (upper - lower) * t_rand
+
+    # 5. Position calculation
+    if ray_origin is not None and ray_direction is not None:
+        samples = ray_origin + ray_direction * ts.unsqueeze(-1)
+    else:
+        samples = ts.unsqueeze(-1)
+
+    return samples
+```
+
+**Edge Cases and Pitfalls:**
+- **Harmonic Interpolation:** Edge cases occur when the observer crosses from the inner to outer volume, potentially causing discontinuities [S1, unofficial].
+- **Zero Distance:** If $t_{min} = 0$, geometric and harmonic modes require clamping to $\epsilon$ to avoid $\log(0)$ or $1/0$ [S1, unofficial].
+- **Ordering:** The method assumes $t_{min} < t_{max}$. If not, results are undefined [G].
+
+## Subtopics
+
+### [Near-Far Clipping](7709-near-far-clipping.md)
+Filters samples outside the viewing frustum. Use when rays must be discarded before marching [G].
+
+### [Inverse CDF Ray Sampling](11412-inverse-cdf-ray-sampling.md)
+Samples based on a learned or analytical distribution. Use when importance sampling is required [G].
+
+### [Near-Far Linear/Disparity Ray Generation with Stratification](11841-near-far-linear-disparity-generation-with-stratification.md)
+Extends stratification to disparity space. Use for stereo or multi-view consistency [G].
+
+### [Depth-Guided Supersampling](12190-depth-guided-supersampling.md)
+Adaptive sampling based on depth variance. Use for high-detail regions [G].
+
+### [Dataset-Specific Near/Far Bound Calculation](12599-dataset-specific-near-far-bound-calculation.md)
+Computes $t_{min}, t_{max}$ from scene data. Use when bounds are not known a priori [G].
+
+### [Uniform Ray Marching with Occupancy Filtering](13089-uniform-ray-marching-with-occupancy-filtering.md)
+Skips empty space. Use with stratified sampling to improve efficiency in sparse volumes [G].
+
+### [SpacedSampler](18462-spacedsampler.md)
+Samples rays with specific spacing constraints. Use when regular grid alignment is required [G].
+
+## Operating characteristics
+- **Time Complexity:** Not given in the sources.
+- **Memory Complexity:** Not given in the sources.
+- **Performance:** Typical `num_samples` is 384 [S2, unofficial].
+- **Strengths:** Simple to implement; supports multiple interpolation modes [S1, unofficial].
+- **Limitations:** Does not adapt to scene content; harmonic mode can be unstable near zero [S1, unofficial].
+- **When to Use:** General-purpose volume rendering where uniform coverage is desired; spherical scenes (use harmonic mode) [S1, unofficial].
+- **When Not to Use:** Not given in the sources.
+
+## Background
+This method is implemented in modern neural rendering frameworks. [S1, unofficial] (gsgen3d/gsgen) uses it for 3D generation, supporting linear, geometric, and harmonic modes. [S2, unofficial] (OctaNeRF) uses a loop-based variant for distillation.
+
+## Sources
+[S1] gsgen3d/gsgen, https://github.com/gsgen3d/gsgen, fetched 2026-10-27 (unofficial)
+[S2] mdmubarak/OctaNeRF, https://github.com/mdmubarak/OctaNeRF, fetched 2026-10-27 (unofficial)

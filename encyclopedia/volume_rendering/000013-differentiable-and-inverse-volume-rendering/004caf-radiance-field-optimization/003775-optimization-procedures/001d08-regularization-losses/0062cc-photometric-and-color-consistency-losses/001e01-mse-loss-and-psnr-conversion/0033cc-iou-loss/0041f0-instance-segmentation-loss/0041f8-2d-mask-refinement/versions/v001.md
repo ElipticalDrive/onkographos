@@ -1,0 +1,62 @@
+# 2D Mask Refinement
+
+Also called: Instance-NeRF Mask Refinement
+
+## Overview
+2D Mask Refinement addresses the issue of missing or erroneous mask predictions in different views, which causes conflicting supervision for the instance field and results in fragmented segmentation [S1]. It refines preliminary instance segmentation results using a pre-trained 2D mask refinement model, specifically CascadePSP [S1]. Unlike methods that feed raw 2D detector outputs (e.g., Mask2Former) directly into the refinement network, this method uses Instance-NeRF rendering results as input, leveraging multi-view information fusion to fill incomplete or missing mask areas [S1].
+
+## How it works
+**Inputs:**
+1. Preliminary instance segmentation masks rendered from the Instance-NeRF model [S1].
+2. A pre-trained 2D mask refinement network (CascadePSP) [S1].
+
+**Outputs:**
+Refined 2D instance masks used to supervise the final instance field training [S1].
+
+**Data Structures:**
+Not given in the sources.
+
+**Steps:**
+1. **Render Preliminary Masks:** Render instance segmentation maps from the current state of the Instance-NeRF model [S1]. These masks benefit from multi-view information fusion, which helps fill areas of incomplete or missing prediction in certain views compared to single-view detectors [S1].
+2. **Split Instances:** Split the instances within each preliminary Instance-NeRF mask into individual instance components [S1].
+3. **Refine Independently:** Pass each split instance through the pre-trained 2D mask refinement network (CascadePSP) to refine its mask geometry [S1].
+4. **Superimpose:** Combine (superimpose) the independently refined results back into a single mask set [S1].
+5. **Supervise:** Use the superimposed refined masks to supervise the training of the final instance field [S1].
+
+**Parameters:**
+- Training iterations for the instance field to obtain intermediate results for refinement: 25k steps [S1].
+- Subsequent training iterations using refined masks: 20k steps [S1].
+- Hardware: Single NVIDIA 1080 Ti [S1].
+
+**Edge Cases and Pitfalls:**
+- Direct training on unrefined 2D masks suffers from conflicting masks across different views [S1].
+- Single-view detectors (like Mask2Former) may produce incomplete or missing masks due to occlusion, which the refinement step aims to alleviate [S1].
+
+## Subtopics
+
+### Instance-NeRF Mask Refinement
+This variant involves matching 3D object masks projected from a proposal-based NeRF-RCNN into image space with inconsistent segmentation maps to refine initial instance segmentation results [S2]. It is chosen when leveraging proposal-based 3D object detection to guide the refinement of 2D segmentation maps in a semantically-aware NeRF framework [S2].
+
+## Operating characteristics
+**Time and Memory Complexity:**
+Not given in the sources.
+
+**Measured Performance:**
+On the 3D-FRONT dataset, the method achieves a mean Intersection over Union (mIoU) of 43.0 and a Panoptic Quality (PQ) of 32.4 [S1]. Ablation studies show that adding 2D mask refinement improves mIoU from 39.8 to 43.0 and PQ from 27.6 to 32.4 compared to using instance regularization loss alone [S1].
+
+**Strengths and Limitations:**
+- **Strengths:** Alleviates missing or erroneous mask predictions caused by partial occlusion [S1]. Enhances single-view results by fusing multi-view information [S1].
+- **Limitations:** Requires additional training steps (25k for intermediate, 20k for final) [S1]. Relies on a pre-trained 2D refinement model (CascadePSP) [S1].
+
+**When to Use:**
+Use when the instance field suffers from fragmented segmentation due to conflicting 2D masks across views [S1].
+
+**When Not to Use:**
+Not specified.
+
+## Background
+The method was introduced in the Instance Neural Radiance Field paper [S1]. It builds on the observation that training an instance field directly on 2D masks leads to conflicts when masks from different views are inconsistent [S1]. The approach utilizes CascadePSP, a pre-trained 2D mask refinement model [S1].
+
+## Sources
+[S1] Instance Neural Radiance Field, https://doi.org/10.1109/ICCV51070.2023.00079, fetched 2026-10-29
+[S2] Semantically-aware Neural Radiance Fields for Visual Scene Understanding: A Comprehensive Review, https://link.springer.com/article/10.1007/s11263-025-02663-5, fetched 2026-10-27

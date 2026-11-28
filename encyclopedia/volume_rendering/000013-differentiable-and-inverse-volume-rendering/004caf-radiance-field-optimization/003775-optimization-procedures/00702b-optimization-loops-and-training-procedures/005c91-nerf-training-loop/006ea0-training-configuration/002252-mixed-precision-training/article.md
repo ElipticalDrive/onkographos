@@ -1,0 +1,141 @@
+# Mixed Precision Training
+
+Also called: AMP Training, FP16 Training, Mixed Precision Training with Fallback
+
+## Overview
+Mixed Precision Training (MPT) accelerates the optimization of radiance fields by utilizing lower-precision data types (typically FP16) for forward and backward passes while maintaining a master copy of weights in higher precision (FP32) to preserve numerical stability [S1, unofficial][S2, unofficial]. Unlike standard FP32 training, MPT reduces memory bandwidth requirements and increases throughput, though it requires careful handling of gradient scaling to prevent underflow in low-precision arithmetic [S1, unofficial][S2, unofficial].
+
+## How it works
+**Inputs and Outputs:**
+- **Input:** A differentiable volume rendering model, a dataset of target images and camera poses, an optimizer, and a loss function (typically MSE) [S2, unofficial].
+- **Output:** Optimized model parameters (stored in FP32) and training metrics [S2, unofficial].
+
+**Data Structures:**
+- **Master Weights:** FP32 tensor storing the authoritative model parameters [G].
+- **Working Weights:** FP16 tensor copy used for computation [G].
+- **Gradient Scaler:** State object tracking the loss scale factor and overflow history [S1, unofficial].
+- **Optimizer State:** Buffers for momentum/variance [G].
+
+**Numbered Steps:**
+1. **Initialization:** Create the model and optimizer. Initialize a `GradScaler` instance [S1, unofficial]. Set model to training mode [S2, unofficial].
+2. **Autocast Context:** Wrap the forward pass in `torch.amp.autocast('cuda')` (or `torch.cuda.amp.autocast()` for older PyTorch versions) to automatically cast operations to FP16 where supported [S1, unofficial][S2, unofficial].
+3. **Data Loading:** Randomly select a batch of target images and camera transforms. Move data to the GPU device [S2, unofficial].
+4. **Forward Pass:** Render predicted RGB images using the model within the autocast context [S2, unofficial].
+5. **Loss Computation:** Compute the Mean Squared Error (MSE) between predicted and target images [S2, unofficial].
+6. **Loss Scaling:** Multiply the loss by a scale factor $S$ maintained by the scaler [S1, unofficial].
+7. **Backward Pass:** Call `loss.backward()` to compute gradients [S1, unofficial].
+8. **Optimizer Step:** The optimizer updates the **Master Weights** (FP32) using the unscaled gradients [S1, unofficial].
+9. **Scaler Update:** The scaler updates its internal state [S1, unofficial].
+10. **Zero Gradients:** Zero out gradients for the next iteration [S2, unofficial].
+11. **Checkpointing:** Periodically save the master weights, optimizer state, scaler state, and iteration count [S2, unofficial].
+
+**Pseudocode:**
+> **Unverified code.** The code below did not pass a test run against a reference implementation, or no test fits it, so it may contain errors.
+
+```python
+import torch
+import torch.nn as nn
+import numpy as np
+
+def run_one_iter_of_tinynerf(model, target_tform_cam2world, height, width, focal_length, near_thresh, far_thresh, depth_samples_per_ray):
+    """
+    Renders predicted RGB images for a batch of camera poses.
+    """
+    # Generate rays from camera poses
+    ray_origins, ray_directions = generate_rays_from_cameras(target_tform_cam2world, height, width, focal_length)
+    # Sample depths
+    depth_values = sample_depths(ray_origins, near_thresh, far_thresh, depth_samples_per_ray)
+    # Forward pass through model
+    rgb_predicted = model(ray_origins, ray_directions, depth_values)
+    return rgb_predicted
+
+def train_step(model, optimizer, scaler, batch_data, device):
+    """
+    Performs one training step using mixed precision.
+    """
+    target_img, target_tform_cam2world = batch_data
+    target_img = target_img.to(device)
+    target_tform_cam2world = target_tform_cam2world.to(device)
+    
+    model.train()
+    optimizer.zero_grad(set_to_none=True)
+    
+    with torch.amp.autocast('cuda'):
+        rgb_predicted = run_one_iter_of_tinynerf(
+            model, target_tform_cam2world, 
+            height=256, width=256, focal_length=500.0,
+            near_thresh=0.01, far_thresh=100.0, depth_samples_per_ray=128
+        )
+        if rgb_predicted.dim() > 3:
+            rgb_predicted = rgb_predicted.squeeze(0)
+        loss = torch.mean((rgb_predicted - target_img) ** 2)
+        
+    scaled_loss = scaler.scale(loss)
+    scaled_loss.backward()
+    optimizer.step()
+    scaler.update()
+    
+    return loss.item()
+
+def train_loop(model, optimizer, scaler, dataset, num_iters, save_every, checkpoint_dir):
+    """
+    Main training loop with mixed precision.
+    """
+    loss_history = []
+    epoch_history = []
+    
+    for i in range(num_iters):
+        indices = np.random.choice(dataset.images.shape[0], 4)
+        batch_images = dataset.images[indices]
+        batch_cam2world = dataset.cam2world[indices]
+        
+        loss = train_step(model, optimizer, scaler, (batch_images, batch_cam2world), 'cuda')
+        
+        if i % save_every == 0:
+            loss_history.append(loss)
+            epoch_history.append(i + 1)
+            checkpoint = {
+                'model_state_dict': model.state_dict(),
+                'optimizer_state_dict': optimizer.state_dict(),
+                'loss': loss,
+                'iteration': i,
+                'scaler_state_dict': scaler.state_dict(),
+            }
+            torch.save(checkpoint, f"{checkpoint_dir}/checkpoint_{i}.pt")
+```
+
+**Parameters:**
+- `use_mixed_precision`: Boolean flag to enable/disable AMP [S1, unofficial].
+- `scaler`: Gradient scaler instance [S1, unofficial].
+- `save_every`: Interval for checkpointing [S2, unofficial].
+
+**Edge Cases and Pitfalls:**
+- **NaN/Inf Gradients:** FP16 has a smaller dynamic range than FP32. Gradients can underflow to zero or overflow to NaN. The scaler handles this by detecting NaNs and reducing the scale factor [S1, unofficial].
+- **Compatibility:** Older PyTorch versions use `torch.cuda.amp` instead of `torch.amp` [S1, unofficial].
+
+## Subtopics
+
+### [Mixed Precision & Gradient Scaling/Clipping](8686-mixed-precision-gradient-scaling-clipping.md)
+Integrates Automatic Mixed Precision (AMP) with gradient scaling and clipping to stabilize optimization in differentiable volume rendering. It addresses numerical instability from low-precision arithmetic and high-variance gradients from path-traced Monte Carlo estimates. By scaling the loss before backpropagation and clipping gradients based on their L2 norm, it prevents silent failures from NaN/Inf values and mitigates contamination of optimized textures by improbable light path outliers.
+
+### [Mixed Precision GAN Generator Training](21647-mixed-precision-gan-generator-training.md)
+Trains the generator using PyTorch Automatic Mixed Precision (AMP) to reduce memory usage and potentially speed up computation, while handling discriminator updates separately.
+
+### Post-training Precision Reduction
+Stores all Gaussian parameters with 16-bit precision using half-tensors after training, as the accuracy drop is insignificant [S3].
+
+## Operating characteristics
+- **Time Complexity:** Training time is reduced compared to FP32 on GPUs with Tensor Cores [S1, unofficial][S2, unofficial].
+- **Memory Complexity:** Memory usage is reduced for activations and gradients, allowing for larger batch sizes or higher resolution scenes [S1, unofficial][S2, unofficial].
+- **Measured Performance:** On standard NeRF datasets (Blender, LLFF), MPT achieves similar PSNR/SSIM to FP32 but with significantly faster convergence per epoch [S1, unofficial][S2, unofficial].
+- **Strengths:** Faster training, lower memory footprint, compatibility with modern GPU hardware.
+- **Limitations:** Potential for numerical instability if not properly scaled [S1, unofficial].
+- **When to Use:** Standard for training large NeRF models on modern GPUs [S1, unofficial].
+
+## Background
+Mixed Precision Training was popularized in deep learning for training large neural networks on GPUs [S1, unofficial]. In the context of NeRF and volume rendering, it has become a standard optimization procedure due to the high computational cost of differentiable rendering [S1, unofficial][S2, unofficial]. It is widely used in modern NeRF implementations (e.g., Instant-NGP, 3DGS) to accelerate training [S1, unofficial][S2, unofficial].
+
+## Sources
+[S1] InanXR/FLASH, https://github.com/InanXR/FLASH, fetched 2026-10-27 (unofficial)
+[S2] rigved-sanku/NeRF-Implementation-for-Efficient-3D-Scene-Reconstruction, https://github.com/rigved-sanku/NeRF-Implementation-for-Efficient-3D-Scene-Reconstruction, fetched 2026-10-27 (unofficial)
+[S3] Trick-GS: A Balanced Bag of Tricks for Efficient Gaussian Splatting, https://doi.org/10.1109/icassp49660.2025.10889395, fetched 2026-10-30

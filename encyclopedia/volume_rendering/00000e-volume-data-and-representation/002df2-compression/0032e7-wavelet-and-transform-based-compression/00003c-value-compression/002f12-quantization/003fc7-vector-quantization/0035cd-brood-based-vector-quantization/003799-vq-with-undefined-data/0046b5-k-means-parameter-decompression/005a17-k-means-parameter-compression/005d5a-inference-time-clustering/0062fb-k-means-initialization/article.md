@@ -1,0 +1,128 @@
+# K-Means++ Initialization
+
+Also called: Spread Initialization
+
+## Overview
+K-Means++ Initialization is a strategy for selecting initial cluster centers in k-means clustering that ensures the centers are relatively spread out across the data space [S1]. It addresses the problem that standard random initialization can lead to exponential runtime and locally optimal solutions far from the global optimum [S1]. By selecting subsequent centers with probability proportional to their squared distance from existing centers, it improves theoretical guarantees for both efficiency and clustering quality [S1].
+
+## How it works
+**Inputs:**
+- $X = \{x_1, \dots, x_m\}$: A set of $m$ data points in a metric space.
+- $k$: The number of cluster centers to initialize.
+
+**Outputs:**
+- $C = \{c_1, \dots, c_k\}$: A set of $k$ initial cluster centers.
+
+**Data Structures:**
+- $D^2$: An array of size $m$, where $D^2[j]$ stores the squared distance from data point $x_j$ to its nearest currently selected center.
+
+**Steps:**
+1. Select the first center $c_1$ uniformly at random from $X$ [S1].
+2. For each subsequent center $c_i$ from $i = 2$ to $k$:
+   a. Compute the squared distance from each data point $x_j$ to the nearest existing center in $C = \{c_1, \dots, c_{i-1}\}$. Let this be $D^2[j] = \min_{c \in C} \|x_j - c\|^2$ [S1].
+   b. Compute the selection probability for each point $x_j$ as $P(x_j) = \frac{D^2[j]}{\sum_{l=1}^m D^2[l]}$ [S1].
+   c. Select the next center $c_i$ from $X$ according to the probability distribution $P$ [S1].
+3. Return $C$.
+
+**Pseudocode:**
+> **Unverified code.** The code below did not pass a test run against a reference implementation, or no test fits it, so it may contain errors.
+
+```python
+import random
+import math
+
+def kmeans_plus_plus_init(data_points, k):
+    """
+    data_points: list of vectors (e.g., list of lists or numpy arrays)
+    k: int, number of centers
+    returns: list of k vectors
+    """
+    n = len(data_points)
+    if k > n:
+        raise ValueError("k cannot be greater than the number of data points")
+    
+    centers = []
+    
+    # Step 1: Select first center uniformly at random
+    first_idx = random.randint(0, n - 1)
+    centers.append(data_points[first_idx])
+    
+    # Array to store squared distances to nearest center
+    # Initialize with infinity
+    sq_dists = [float('inf')] * n
+    
+    for _ in range(1, k):
+        # Step 2a: Compute squared distances to nearest existing center
+        for j, point in enumerate(data_points):
+            min_sq_dist = float('inf')
+            for center in centers:
+                # Compute squared Euclidean distance
+                dist_sq = sum((p - c) ** 2 for p, c in zip(point, center))
+                if dist_sq < min_sq_dist:
+                    min_sq_dist = dist_sq
+            sq_dists[j] = min_sq_dist
+        
+        # Step 2b: Compute total sum for normalization
+        total_dist = sum(sq_dists)
+        
+        # Handle edge case where all points are already centers (total_dist == 0)
+        if total_dist == 0:
+            # If all points are at distance 0 from centers, pick any remaining point
+            # or break if all points are already centers. 
+            # In practice, if total_dist is 0, all points are covered.
+            # We can just pick a random point or stop if k > n (handled above).
+            # To be robust, pick a random index if total_dist is 0 but we still need centers.
+            next_idx = random.randint(0, n - 1)
+            centers.append(data_points[next_idx])
+            continue
+            
+        # Step 2c: Select next center based on probability proportional to squared distance
+        # Generate a random number between 0 and total_dist
+        r = random.uniform(0, total_dist)
+        cumulative_sum = 0.0
+        next_idx = -1
+        
+        for j, dist in enumerate(sq_dists):
+            cumulative_sum += dist
+            if cumulative_sum >= r:
+                next_idx = j
+                break
+        
+        # Fallback if floating point errors cause sum to slightly undershoot
+        if next_idx == -1:
+            next_idx = n - 1
+            
+        centers.append(data_points[next_idx])
+        
+    return centers
+```
+
+**Parameters:**
+- $k$: The number of cluster centers to initialize [S1].
+
+**Edge Cases and Pitfalls:**
+- If $k > m$ (number of data points), the algorithm cannot select distinct centers. The implementation should handle this, typically by raising an error or allowing duplicates [G].
+- If all data points are identical or already selected as centers, the squared distances become zero, leading to division by zero in probability calculation. The pseudocode handles this by checking `total_dist == 0` [G].
+- Standard k-means runtime can be exponential, and locally optimal solutions can be far from the global optimum if initialization is poor [S1].
+
+## Subtopics
+
+### Weighted K-Means Initialization
+Weighted K-Means Initialization extends the standard method by assigning weights $w_j$ to data points, biasing the distribution of cluster centers towards points with higher importance [S2]. It is used to initialize Radial Basis Function (RBF) position and shape parameters in neural fields [S2]. The position optimization minimizes $\min_{c_1,...,c_n} \sum_{i=1}^n \sum_{j=1}^m a_{ij} w_j \|x_j - c_i\|^2$, where $a_{ij}$ is an indicator variable, solved via an EM-style algorithm [S2]. Shape initialization sets the covariance matrix $\Sigma_i = \frac{\sum_j a_{ij} w_j (x_j - c_i)(x_j - c_i)^T}{\sum_j a_{ij} w_j}$ [S2]. Weighting schemes vary by data type: for 2D images, $w_j = \|\nabla I(x_j)\|$; for 3D SDF, $w_j = 1 / (|SDF(x_j)| + 1e-9)$ to avoid division by zero; for NeRF, weights are derived via distillation from a grid-based neural field as $w_j = (1 - \exp(-\sigma(x_j)\delta)) \|\nabla f_c(x_j)\|$ [S2].
+
+## Operating characteristics
+**Time and Memory Complexity:**
+The initialization step requires $O(k \cdot m \cdot d)$ time, where $d$ is the dimensionality of the data, as it computes distances from all $m$ points to $k$ centers in each of the $k$ iterations [S1]. Memory complexity is $O(m)$ to store the squared distances [G].
+
+**Strengths and Limitations:**
+The primary strength is improved theoretical guarantees for efficiency and clustering quality compared to random initialization [S1]. It ensures centers are spread out, reducing the risk of poor local optima [S1]. A limitation is that it is only an initialization step; the subsequent k-means iterations still determine the final clustering quality and runtime [S1].
+
+**When to Use:**
+Use when reducing large volumetric datasets into a manageable set of cluster centers for transfer function design or other parameter space operations [S1]. It is suitable when standard random initialization leads to poor clustering results or excessive runtime [S1].
+
+## Background
+K-Means++ was introduced by Arthur and Vassilvitskii [S1, S2]. It was developed to address the scalability and quality issues of standard k-means clustering, which can have exponential runtime and converge to poor local optima with random initialization [S1]. The method has been applied in various fields, including multivariate volume visualization for transfer function design [S1] and initializing adaptive Radial Basis Functions in neural radiance fields [S2].
+
+## Sources
+[S1] Multivariate volume visualization through dynamic projections, https://doi.org/10.1109/ldav.2014.7013202, fetched 2026-10-26
+[S2] NeuRBF: A Neural Fields Representation with Adaptive Radial Basis Functions, https://doi.org/10.1109/iccv51070.2023.00386, fetched 2026-10-29

@@ -1,0 +1,167 @@
+PyTorch3D is FAIR's library of reusable components for deep learning with 3D data - Fix CUDA box IoU triangle buffer capacity by fusheng-ji · Pull Request #2059 · facebookresearch/pytorch3d
+
+Fix CUDA box IoU triangle buffer capacity by fusheng-ji · Pull Request #2059 · facebookresearch/pytorch3d · GitHub
+Skip to content
+You signed in with another tab or window. Reload to refresh your session.
+You signed out in another tab or window. Reload to refresh your session.
+You switched accounts on another tab or window. Reload to refresh your session.
+Dismiss alert
+Conversation
+fusheng-ji
+commented
+Oct 7, 2026
+•
+edited
+Loading
+Uh oh!
+There was an error while loading. Please reload this page.
+Copy link
+Copy Markdown
+Fixes #1777. Fixes #1805.
+Summary
+Problem: The CUDA kernel keeps the clipped triangles of each box in fixed MAX_TRIS = 100 per-thread arrays. BoxIntersections writes tri_verts_updated[offset] before the count is clamped, and the merge step appends Box2 triangles to box1_intersect[box1_count++] without a bound. Inputs whose clipped surface needs more than 100 triangles therefore write out of bounds or silently drop faces, giving wrong volumes and IoU (or the illegal memory access reported in box3d_overlap may cause “RuntimeError: CUDA error: an illegal memory access was encountered” in some cases #1805).
+Bound: ClipTriByPlane emits at most two triangles, so 12 box triangles clipped by six planes produce at most 12 * 2^6 = 768 triangles per side. MAX_TRIS is now derived from this control-flow bound, and a CUDA_KERNEL_ASSERT checks every append.
+Storage: The per-side lists and the clipping scratch live in one bounded global workspace (at most 2400 workers, 253 MiB) instead of per-thread arrays; threads reuse their slot with a grid-stride loop. The two side lists are read through a concatenated view, so the summation order of PolyhedronCenter / BoxVolume is unchanged.
+Follow-up commit: Clipping alternates between the output and scratch buffers instead of copying back after every plane, and the coplanar filter compacts Box2 in place, removing the Keep buffer. Results are bitwise identical to the first commit.
+CPU path: Unchanged; it already uses growable vectors.
+#1805 input
+The #1805 boxes clip to 31 triangles on one side and 109 on the other (140 total), on both the native CPU helpers and the CUDA helpers.
+Implementation
+Intersection volume
+IoU
+CPU
+0.0310588
+0.166918
+CUDA before, (a, b)
+0.0285713
+0.151524
+CUDA before, (b, a)
+0.0661335
+0.437978
+CUDA after, (a, b)
+0.0310589
+0.166918
+CUDA after, (b, a)
+0.0310589
+0.166918
+Resources and performance
+NVIDIA B200, one fresh process per case, median of 31 CUDA-event samples after 5 warmups. The "before" kernel is only timed on inputs it handles within its capacity.
+Case
+Before ms
+After ms
+After / before
+1x1
+0.178
+0.192
+1.08x
+16x16
+1.114
+1.266
+1.14x
+30x100
+1.293
+2.443
+1.89x
+100x100
+1.315
+5.533
+4.21x
+100x100, high overlap
+1.804
+7.989
+4.43x
+#1805 input, 100x100
+unsafe
+44.220
+n/a
+Memory: Device memory taken by the first call drops from 4252 MiB (local-memory reservation for the 15408-byte stack) to 94–348 MiB; the stack is now 992 bytes with 255 registers.
+Throughput trade-off: Large batches are slower because the 253 MiB budget caps the kernel at 75 blocks of 32 threads. As a diagnostic only (not in this PR), a 1 GiB budget brings 100x100 to 2.233 ms. A per-face polygon clipper would remove the triangle fragmentation and the global workspace entirely; I'd suggest that as a separate change since the CPU path should move with it.
+Validation
+Environment: Linux, Python 3.12.13, PyTorch 2.11.0+cu130, CUDA 13.0, NVIDIA B200 (sm_100).
+Regression tests: New tests cover the box3d_overlap may cause “RuntimeError: CUDA error: an illegal memory access was encountered” in some cases #1805 boxes in both orders and in mixed batches, pair counts around the block size and the worker cap (31/32/33, 2399/2400/2401), worker reuse on a 49x49 batch, repeated calls, a non-default stream, a non-current device, and empty inputs, on CPU and CUDA.
+Module suite: All 18 tests in tests/test_iou_box3d.py pass (Python seed 0).
+Memory checking: The new regression tests pass under compute-sanitizer --tool memcheck with 0 errors. A diagnostic build with the old capacity of 100 stops at the new assert before writing out of bounds.
+Agreement: On 12x15 independently rotated high-overlap boxes, CPU/CUDA differences are at most 3.6e-7 (volume) and 3.0e-7 (IoU). On 30704 rotated pairs, the two commits produce bitwise identical outputs.
+Formatting: clang-format, flake8, usort and git diff --check pass on the changed files.
+Evidence and reproduction
+#1805 results and clipping trace: CPU/CUDA volume and IoU in both argument orders, and the triangle count after each clipping plane.
+Benchmark results: latency and first-call memory for all 13 cases at the baseline, first commit and final revision; raw per-sample data is in the benchmark-*.json files.
+Module suite and memcheck run on the final revision; small-capacity diagnostic showing the assert fires before an out-of-bounds write.
+Reproduction instructions: revisions, scripts, fixture, and validation limits.
+Storage: Evidence is maintained on the fork's pr_assets branch; figure and data links pin commit b51df1c.
+Verification limits
+One GPU model and one software stack; the full repository test suite was not rerun for this change.
+The throughput regression above is measured and accepted in exchange for correctness and bounded memory; the budget is a fixed constant rather than tuned per device.
+Fix CUDA box IoU triangle buffer capacity
+203555b
+meta-cla
+Bot
+added
+the
+CLA Signed
+This label is managed by the Facebook bot. Authors need to sign the CLA before a PR can be reviewed.
+label
+Oct 7, 2026
+Drop IoU CUDA clip copy-back and coplanar keep buffer
+…
+0d0f69e
+```
+BoxIntersections now alternates between the output and scratch buffers
+instead of copying the clipped triangles back after every plane. With an
+even number of planes the result ends in the output buffer.
+
+The coplanar filter scans Box2 triangles in the outer loop, stops at the
+first coplanar Box1 triangle and compacts in place, so the global Keep
+workspace is no longer needed. Results are bitwise identical.
+```
+fusheng-ji
+force-pushed
+the
+fix/iou-cuda-capacity
+branch
+from
+6335ca7 to
+0d0f69e
+Compare
+October 7, 2026 23:57
+fusheng-ji
+added a commit
+to fusheng-ji/pytorch3d
+that referenced
+this pull request
+Oct 8, 2026
+Add CUDA IoU capacity evidence for PR facebookresearch#2059
+b51df1c
+This was referenced Oct 8, 2026
+Possibly insufficient preallocation in IoU3D algorithm implementation
+#1777
+Open
+box3d_overlap may cause “RuntimeError: CUDA error: an illegal memory access was encountered” in some cases
+#1805
+Open
+Clip box triangles as polygons in box3d_overlap
+#2060
+Open
+fusheng-ji
+commented
+Oct 8, 2026
+Copy link
+Copy Markdown
+Author
+Follow-up: #2060 builds on this PR and replaces the triangle splitting with per-triangle polygon clipping on both CPU and CUDA.
+While validating this fix against exact float64 intersections, I found that the existing algorithm (on main, and unchanged here) also has an accuracy problem: faces are matched as coplanar up to ~2.5 degrees apart, and coincident faces are only deduplicated above an absolute 1e-4 area. Rotated boxes can be off by up to 0.25 in IoU, and boxes smaller than ~0.01 with shared planes can give IoU above 1 or inf. #2060 fixes that as well, removes the workspace added here, and is faster than main on both CPU and CUDA (100x100 on a B200: 1.32 ms on main, 5.53 ms here, 0.68 ms in #2060).
+The two can be reviewed in order, this PR first as the minimal capacity fix. If you would rather land a single change, #2060 contains both commits from this PR, so reviewing only #2060 is enough.
+This branch has not been deployed
+No deployments
+Sign up for free
+to join this conversation on GitHub.
+Already have an account?
+Sign in to comment
+Uh oh!
+There was an error while loading. Please reload this page.
+Labels
+CLA Signed
+This label is managed by the Facebook bot. Authors need to sign the CLA before a PR can be reviewed.
+1 participant
+Add this suggestion to a batch that can be applied as a single commit.This suggestion is invalid because no changes were made to the code.Suggestions cannot be applied while the pull request is closed.Suggestions cannot be applied while viewing a subset of changes.Only one suggestion per line can be applied in a batch.Add this suggestion to a batch that can be applied as a single commit.Applying suggestions on deleted lines is not supported.You must change the existing code in this line in order to create a valid suggestion.Outdated suggestions cannot be applied.This suggestion has been applied or marked resolved.Suggestions cannot be applied from pending reviews.Suggestions cannot be applied on multi-line comments.Suggestions cannot be applied while the pull request is queued to merge.Suggestion cannot be applied right now. Please check back later.
+You can’t perform that action at this time.

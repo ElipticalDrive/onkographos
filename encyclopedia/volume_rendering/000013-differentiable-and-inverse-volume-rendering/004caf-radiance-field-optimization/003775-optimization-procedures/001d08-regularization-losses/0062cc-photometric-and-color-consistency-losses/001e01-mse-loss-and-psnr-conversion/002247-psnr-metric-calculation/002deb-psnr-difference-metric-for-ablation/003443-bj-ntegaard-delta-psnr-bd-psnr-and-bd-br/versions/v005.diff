@@ -1,0 +1,121 @@
+--- v004.md
++++ v005.md
+@@ -11,17 +11,19 @@
+ *   **Outputs:** A single BD-PSNR value in dB or a single BD-BR value [S1].
+ 
+-**Data Structures:** Not given in the sources.
++**Data structures:** Not given in the sources. [G]
+ 
+ **Steps:**
+-1. Collect rate and distortion/quality pairs for both methods [S1].
+-2. Model the rate-distortion relationship for each method [G].
+-3. Calculate the area between the two modeled curves over their overlapping operational range [S1].
+-4. Compute the average difference by dividing the area by the range width [G].
++1. Collect rate-distortion pairs $(R, D)$ for both reference and test methods, where $D$ is distortion or quality (e.g., PSNR) [S1].
++2. Transform rates to logarithmic scale, $x = \ln(R)$, and model the quality-rate relationship using cubic splines for each method [G].
++3. Determine the overlapping operational range $[x_1, x_2]$ between the two transformed curves [G].
++4. Integrate the difference between the test and reference spline curves over $[x_1, x_2]$ and divide by the range width to obtain the average difference [G].
+ 
+-**Formulas:** Not given in the sources.
++**Formulas:**
++$$\Delta \overline{P} = \frac{1}{x_2 - x_1} \int_{x_1}^{x_2} \left( P_{\text{test}}(x) - P_{\text{ref}}(x) \right) dx$$
++where $P_{\text{test}}$ and $P_{\text{ref}}$ are the cubic spline functions for the test and reference methods, and $x_1, x_2$ are the bounds of the overlapping logarithmic rate range [G].
+ 
+-**Parameters:** Not given in the sources.
++**Parameters:** Not given in the sources. [G]
+ 
+-**Edge cases and pitfalls:** Not given in the sources.
++**Edge cases and pitfalls:** Not given in the sources. [G]
+ 
+ **Pseudocode:**
+@@ -42,13 +44,13 @@
+ 
+     # 3. Interpolate curves over common range [G]
+-    x_dense = [x_min + i * (x_max - x_min) / 999 for i in range(1000)]
+-    # Standard cubic spline interpolation is applied to fit the curves [G]
++    n_points = 1000
++    x_dense = [x_min + i * (x_max - x_min) / (n_points - 1) for i in range(n_points)]
+     y_ref_dense = cubic_spline_interpolate(x_ref, ref_psnrs, x_dense)
+     y_test_dense = cubic_spline_interpolate(x_test, test_psnrs, x_dense)
+ 
+     # 4. Integrate difference using trapezoidal rule [G]
+-    dx = (x_max - x_min) / 999
++    dx = (x_max - x_min) / (n_points - 1)
+     integral = 0.0
+-    for i in range(len(x_dense) - 1):
++    for i in range(n_points - 1):
+         diff = (y_test_dense[i+1] - y_ref_dense[i+1]) + (y_test_dense[i] - y_ref_dense[i])
+         integral += 0.5 * diff * dx
+@@ -58,7 +60,51 @@
+ 
+ def cubic_spline_interpolate(x_data, y_data, x_query):
+-    # The sources do not specify the interpolation routine; standard cubic spline fitting is used [G]
+-    # Returns interpolated y values at x_query points
+-    return [0.0] * len(x_query)
++    # Standard cubic spline interpolation [G]
++    # Computes natural cubic spline coefficients and evaluates at x_query
++    n = len(x_data)
++    if n < 2:
++        return [y_data[0]] * len(x_query)
++    if n == 2:
++        # Linear fallback for 2 points
++        m = (y_data[1] - y_data[0]) / (x_data[1] - x_data[0])
++        return [y_data[0] + m * (x - x_data[0]) for x in x_query]
++
++    # Compute spline coefficients (natural cubic spline) [G]
++    h = [x_data[i+1] - x_data[i] for i in range(n-1)]
++    alpha = [0.0] * n
++    for i in range(1, n-1):
++        alpha[i] = (3.0/h[i])*(y_data[i+1]-y_data[i]) - (3.0/h[i-1])*(y_data[i]-y_data[i-1])
++
++    l = [1.0] * n
++    mu = [0.0] * n
++    z = [0.0] * n
++    for j in range(1, n-1):
++        l[j] = 2.0*(x_data[j+1]-x_data[j-1]) - h[j-1]*mu[j-1]
++        mu[j] = h[j]/l[j]
++        z[j] = (alpha[j] - h[j-1]*z[j-1])/l[j]
++
++    l[n-1] = 1.0
++    z[n-1] = 0.0
++
++    c = [0.0] * n
++    b = [0.0] * (n-1)
++    d = [0.0] * (n-1)
++    for j in range(n-2, -1, -1):
++        c[j] = z[j] - mu[j]*c[j+1]
++        b[j] = (y_data[j+1]-y_data[j])/h[j] - h[j]*(c[j+1]+2.0*c[j])/3.0
++        d[j] = (c[j+1]-c[j])/(3.0*h[j])
++
++    # Evaluate spline at query points [G]
++    y_query = []
++    for x in x_query:
++        idx = 0
++        for i in range(n-1):
++            if x_data[i] <= x <= x_data[i+1]:
++                idx = i
++                break
++        dx_val = x - x_data[idx]
++        y = y_data[idx] + b[idx]*dx_val + c[idx]*dx_val**2 + d[idx]*dx_val**3
++        y_query.append(y)
++    return y_query
+ ```
+ 
+@@ -68,11 +114,14 @@
+ BD-Rate is a metric for fair comparison of overall rate-distortion (RD) performance that calculates the average bit-rate saving at a given quality level between two methods. It sets itself apart from point-wise comparisons by integrating the area between two continuous RD curves, providing a single percentage value representing efficiency gains. It builds on the concept of BD-PSNR but inverts the perspective to measure bitrate reduction [12640-bj-ntegaard-delta-rate-bd-rate.md].
+ 
++### PSNR Difference Metric for Compression
++A metric to quantify rendering quality loss due to compression, calculated as the difference between compressed and uncompressed PSNR values [S2]. It is computed by first calculating $PSNR_c$ for the compressed model and $PSNR_o$ for the uncompressed model, then subtracting $PSNR_o$ from $PSNR_c$ to obtain $\Delta PSNR = PSNR_c - PSNR_o$ [S2]. The difference is typically negative, representing a quality downgrade after compression, but can be positive if additional optimization improves quality [S2].
++
+ ## Operating characteristics
+-*   **Time Complexity:** Not given in the sources.
+-*   **Memory Complexity:** Not given in the sources.
++*   **Time Complexity:** Not given in the sources. [G]
++*   **Memory Complexity:** Not given in the sources. [G]
+ *   **Strengths:** Provides a single, robust metric for comparing compression algorithms that accounts for the entire RD curve, not just specific operating points [S1].
+ *   **Limitations:** Requires multiple RD points per method. The impracticality of providing full curves in publications motivated its development [S1].
+ *   **When to use:** When comparing two or more compression methodologies where a single scalar metric summarizing the RD performance is needed [S1].
+-*   **When not to use:** Not given in the sources.
++*   **When not to use:** Not given in the sources. [G]
+ 
+ ## Background

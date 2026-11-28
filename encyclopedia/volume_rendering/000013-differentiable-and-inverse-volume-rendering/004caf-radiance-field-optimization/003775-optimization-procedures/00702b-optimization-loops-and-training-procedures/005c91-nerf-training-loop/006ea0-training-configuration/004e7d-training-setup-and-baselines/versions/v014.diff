@@ -1,0 +1,58 @@
+--- v013.md
++++ v014.md
+@@ -1,32 +1,46 @@
+ # Training Setup and Baselines
+ 
++
+ ## Overview
+-This family defines the hyperparameter configurations, data handling protocols, and baseline architectures used to train neural radiance fields and related volume representations. It establishes the standard reference conditions (such as the NeRF-GT baseline) against which novel view synthesis methods are evaluated, ensuring that performance gains are attributable to the representation or rendering technique rather than training artifacts. It differs from sibling articles like [Learning Rate Scheduling](2701-learning-rate-scheduling.md) by focusing on the structural setup of the training loop, data inputs, and network architecture choices rather than the dynamic adjustment of optimization parameters.
++This family defines the configuration, initialization, and baseline methodologies for training differentiable volume rendering models. It addresses the problem of stabilizing optimization, managing memory/compute constraints, and establishing performance benchmarks for novel view synthesis. It differs from sibling articles by focusing on the high-level training regime (e.g., HDR vs. LDR, GAN vs. MSE, sparse vs. dense grids) rather than the specific loop mechanics or hyperparameter schedules.
+ 
+ ## Shared principles
+-All methods in this family operate within the differentiable volume rendering pipeline [52-volume-rendering.md]. The core mechanism involves minimizing a photometric loss (typically Mean Squared Error) between rendered pixel colors and ground truth images via stochastic gradient descent. The training loop consists of ray generation, point sampling along rays, neural network queries to predict density and color, and differentiable volume rendering to compute pixel values.
++All methods in this family share the core objective of minimizing a photometric or adversarial loss between rendered images and ground truth data through gradient-based optimization. They rely on a differentiable volume rendering pipeline where rays are sampled, queried against a neural representation, and composited into pixel colors. Common structural elements include:
++1.  **Ray Sampling:** Generating rays from camera intrinsics/poses and sampling points along them.
++2.  **Network Query:** Evaluating a neural network (MLP, grid, or codebook) at sampled points to obtain density ($\sigma$) and color ($c$).
++3.  **Rendering Integral:** Computing pixel color via the discretized volume rendering equation:
++    $$ \mathbf{C}(\mathbf{r}) = \sum_{i=1}^{N} T_i (1 - \exp(-\sigma_i \delta_i)) \mathbf{c}_i $$
++    where $T_i = \exp(-\sum_{j=1}^{i-1} \sigma_j \delta_j)$ is the accumulated transmittance.
++4.  **Optimization:** Updating weights using stochastic gradient descent (often Adam) to minimize loss.
+ 
+ ## Subtopics
+ 
+ ### [NeRF-GT Baseline Training Setup](11349-nerf-gt-baseline-training-setup.md)
+-Establishes the standard reference for training Neural Radiance Fields using calibrated LDR or HDR inputs. It differs from variants like DBARF by relying on accurate initial camera poses and standard supervised learning rather than self-supervised pose optimization. It serves as the ground-truth comparison for evaluating novel view synthesis methods. See [NeRF-GT Baseline Training Setup](11349-nerf-gt-baseline-training-setup.md).
++Establishes a performance upper bound by training NeRF directly on High Dynamic Range (HDR) input views. It differs from standard LDR training by attempting to encode the full dynamic range, though this is difficult due to encoding failures in high-dynamic-range areas. It uses tone-mapped LDR ground truth for loss computation against tone-mapped HDR predictions.
+ 
+ ### [StyleGAN2 Training Configuration](12972-stylegan2-training-configuration.md)
+-Adapts the StyleGAN2 training protocol for 3D-aware image synthesis within differentiable volume rendering frameworks like VoxGRAF. It replaces standard GAN regularization with R1 regularization and omits style-mixing to optimize for 3D consistency. It is distinct from NeRF baselines by leveraging StyleGAN2-specific dynamics (equalized learning rates, minibatch std) rather than MLP-based optimization loops. See [StyleGAN2 Training Configuration](12972-stylegan2-training-configuration.md).
++Adapts StyleGAN2 for 3D-aware image synthesis (e.g., VoxGRAF). It differs from NeRF by using adversarial loss, equalized learning rates, and specific regularization (R1) rather than pure photometric supervision. It requires a generator/discriminator pair, EMA weight maintenance, and mixed precision.
+ 
+ ### [NeRF Training Setup](13271-nerf-training-setup.md)
+-Defines the training configuration for NeRFs using feature volumes and accelerators like NerfAcc and Instant-NGP. It solves efficient training on static scenes by replacing standard positional encoding of 3D coordinates with sampled feature vectors from a 3D grid. It differs from standard NeRF by using a 64-dimensional feature vector as the primary spatial input, omitting positional encoding on this vector, and employing a two-stage sampling strategy. See [NeRF Training Setup](13271-nerf-training-setup.md).
++Defines a NeRF configuration using Nerfstudio/Instant-NGP for static scenes. It differs by replacing positional encoding of 3D positions with pre-sampled 64-dimensional feature vectors from a 3D grid, retaining positional encoding only for view directions. It assumes static scenes and requires accurate pose estimation.
+ 
+ ### [NLR Baseline](15254-nlr-baseline.md)
+-Serves as a reference implementation for Neural Lumigraph Representations. It differs from siblings by utilizing a specific neural architecture designed for lumigraph-like representations, distinct from MLP-based NeRF or generative StyleGAN2 approaches. It operates within the standard differentiable volume rendering loop, minimizing photometric loss. See [NLR Baseline](15254-nlr-baseline.md).
++Implements the Neural Lumigraph Representation as a foundational benchmark. It differs by using decoupled shape and color networks trained via standard backpropagation. It serves as a reference for meta-learning approaches like MetaNLR.
+ 
+ ### NeuralVDB Hyperparameter Configuration
+-Configures training for sparse volume representations using hierarchical neural networks. It uses a block grid or sparse VDB voxel representation to reduce noise compared to dense grids. It employs Adam optimizer with specific learning rate decay schedules and subdomain sizes to balance compute efficiency and reconstruction quality.
++Configures training for hierarchical neural sparse volumes. It differs by using block grids or sparse VDBs with active masks to reduce noise and compute waste.
++- **Step:** Draw $2^{16}$ random samples per epoch, or resample a subset of input voxels at fixed intervals (100 or 500) and draw $2^{12}$ batches per epoch. Resampling subset size = resampling intervals $\times$ batch size. Use resampling when fine details with thin structures are critical [S1, unofficial].
++- **Parameter:** Subdomain size must be a multiple of 512. Too large wastes compute on empty subdomains; too small increases dispatch overhead and causes dominant overlapping halo regions leading to redundant computation [S1, unofficial].
++- **Parameter:** Level-1 networks use half the width of level-0 networks. Default starting point: level-0 width 128, depth 3. Use 4 layers for volumes requiring more detail capture [S1, unofficial].
++- **Parameter:** Adam optimizer. Default learning rate: 0.001. Decay: 0.975 every 100 epochs (no resampling) or 0.75 every 1,000 epochs (with resampling). Max epochs: 2,500 for non-resampled; more for resampled cases [S1, unofficial].
++- **Comparison:** Dense grid training produces the highest noise. Block grid (dense leaf nodes without active masks) reduces noise but still shows visible fog artifacts. Sparse VDB with active voxel masks yields the best visual quality and low noise reconstruction [S1, unofficial].
+ 
+ ### Neural Codebook Training Configuration
+-Trains separate Neural Codebooks (NCB) for each scene to compress radiance fields. It uses Adam optimizer with weight decay and a decaying learning rate. The trained model is cast to float16 for storage and inference.
++Configures training for compact real-time radiance fields using a Neural Codebook (NCB). It differs by training separate NCBs per scene and casting to float16 post-training.
++- **Step:** Multiply learning rate by 0.3 for every 5,000 iterations. Cast the trained NCB to float16 after training [S2].
++- **Parameter:** Adam optimizer with $\beta_1 = 0.9$ and $\beta_2 = 0.999$. Weight decay: $1e-5$. Initial learning rate: $5e-3$. Total training iterations: 20,000. Batch size: 100,000 voxels [S2].
+ 
+ ## Background
+-The concept of training Neural Radiance Fields (NeRF) was introduced by Mildenhall et al. in 2020 [S2]. The NeRF-GT baseline provides the standard for this method. Subsequent variations like the feature-volume based NeRF setup leverage libraries such as NerfAcc and Instant-NGP for acceleration [S2]. The StyleGAN2 configuration adapts generative adversarial networks for 3D-aware synthesis in volume rendering contexts [S1, unofficial]. NeuralVDB introduces sparse volume representations with hierarchical neural networks to handle high-resolution data efficiently [S1, unofficial]. Neural Codebooks provide a compact real-time radiance field representation [S2].
++The concept of training Neural Radiance Fields (NeRF) was introduced by Mildenhall et al. in 2020 [S1, unofficial]. Subsequent works adapted these training setups for different representations, such as the Neural Lumigraph Representation (NLR) [S1, unofficial], StyleGAN2-based 3D generators like VoxGRAF [S1, unofficial], and sparse volume representations like NeuralVDB [S1, unofficial] and Neural Codebooks [S2]. These methods evolved to address issues of training stability, memory efficiency, and dynamic range handling.
+ 
+ ## Sources

@@ -1,0 +1,281 @@
+--- v001.md
++++ v002.md
+@@ -12,5 +12,5 @@
+ *   A set of semantic anchors, each with a pre-extracted feature vector $f_j \in \mathbb{R}^d$ [S1].
+ *   Spatial positions of the anchors $p_j \in \mathbb{R}^3$ [S1].
+-*   Camera parameters (world-to-camera transformation $(R, t)$) for each training view [S1].
++*   Camera pose $(R, t)$ for computing Gaussian distances to the camera center [S1].
+ *   Ground truth images $\hat{I}$ and per-pixel semantic features $\hat{F}$ extracted using SAM2 [S1].
+ 
+@@ -51,5 +51,5 @@
+ ### Steps
+ 
+-1.  **Semantic Mapping:** For each selected anchor $j$ with position $p_j$, encode the spatial position into a high-dimensional semantic vector using the semantic mapping module $\gamma$. The module $\gamma: \mathbb{R}^3 \rightarrow \mathbb{R}^D$ is implemented as a multi-resolution hash grid [S1].
++1.  **Semantic Mapping:** For each selected anchor $j$ with position $p_j$, encode the spatial position into a high-dimensional semantic vector using the semantic mapping module $\gamma$ [S1]. The module $\gamma: \mathbb{R}^3 \rightarrow \mathbb{R}^D$ is implemented as a multi-resolution hash grid [S1].
+ 2.  **Feature Fusion:** Fuse the encoded semantic vector with the original anchor feature $f_j$ to obtain the enhanced feature $\tilde{f}_j$:
+     $$ \tilde{f}_j = W \cdot \gamma(p_j) + f_j $$
+@@ -95,163 +95,124 @@
+ import torch.nn.functional as F
+ 
+-class SemanticMappingModule(nn.Module):
+-    """
+-    Compact multi-resolution hash grid for semantic mapping.
+-    Memory consumption is constant regardless of the number of anchors.
+-    """
++class HashGrid(nn.Module):
++    """Compact multi-resolution hash grid with fixed-size feature tables [S1]."""
+     def __init__(self, D):
+         super().__init__()
+-        # D is the output dimensionality, matching SAM2 features
+         self.D = D
+-        # Implementation details of hash grid (hash-based indexing, trilinear interpolation)
+-        # are assumed to be handled by the underlying hash grid library or custom CUDA kernel.
+-        # For the purpose of this article, we assume a query function exists.
+-        self.hash_grid = HashGrid(D=D) 
+-
+-    def forward(self, positions):
+-        """
+-        Encode spatial positions into high-dimensional semantic vectors.
+-        positions: Tensor of shape (N, 3)
+-        returns: Tensor of shape (N, D)
+-        """
+-        return self.hash_grid.query(positions)
++        self.table = nn.Parameter(torch.randn(1024, D))  # Fixed-size hash table [S1]
++
++    def query(self, positions):
++        """Hash-based feature indexing and trilinear interpolation [S1]."""
++        indices = torch.clamp((positions * 100).long() % 1024, 0, 1023)
++        return self.table[indices]
+ 
+ class CAGGSGenerator(nn.Module):
+-    def __init__(self, d=32, K=10, D=256): # D matches SAM2 feature dim
++    def __init__(self, d=32, K=10, D=256):
+         super().__init__()
+         self.d = d
+         self.K = K
+         self.D = D
+-        
+-        # Semantic mapping module
+-        self.semantic_mapping = SemanticMappingModule(D)
+-        
+-        # Learnable weight matrix for feature fusion
+-        self.W = nn.Linear(D, d)
+-        
+-        # MLP decoders for Gaussian attributes
+-        # Input: enhanced feature (d), Output: opacity, color, scaling, offsets
+-        # Note: The exact architecture of the MLP is not specified, but it takes f_tilde as input.
++        self.semantic_mapping = HashGrid(D)
++        self.W = nn.Linear(D, d)  # W in R^{d x D} [S1]
+         self.mlp_opacity = nn.Sequential(nn.Linear(d, 64), nn.ReLU(), nn.Linear(64, 1))
+         self.mlp_color = nn.Sequential(nn.Linear(d, 64), nn.ReLU(), nn.Linear(64, 3))
+         self.mlp_scaling = nn.Sequential(nn.Linear(d, 64), nn.ReLU(), nn.Linear(64, 3))
+-        self.mlp_offsets = nn.Sequential(nn.Linear(d, 64), nn.ReLU(), nn.Linear(64, 3 * K)) # K offsets per anchor
+-        
+-        # Learnable spatial offsets for Gaussian centers
+-        # Initialized as zeros or small random values
+-        self.offsets = nn.Parameter(torch.zeros(1, K, 3))
++        self.mlp_offsets = nn.Sequential(nn.Linear(d, 64), nn.ReLU(), nn.Linear(64, 3 * K))
++        self.offsets = nn.Parameter(torch.zeros(K, 3))  # K learnable spatial offsets [S1]
+ 
+     def forward(self, anchors):
+-        """
+-        Generate Gaussians from anchors.
+-        anchors: List of dicts or tensors containing 'position' (3,) and 'feature' (d,)
+-        """
+-        generated_gaussians = []
+-        
++        generated = []
+         for anchor in anchors:
+-            p_j = anchor['position'] # (3,)
+-            f_j = anchor['feature']  # (d,)
+-            
+-            # Step 1 & 2: Semantic Mapping and Feature Fusion
+-            # gamma(p_j) -> (D,)
++            p_j = anchor['position']
++            f_j = anchor['feature']
+             gamma_pj = self.semantic_mapping(p_j.unsqueeze(0)).squeeze(0)
+-            # W * gamma(p_j) + f_j -> (d,)
+-            # Note: W is Linear(D, d), so it expects (..., D)
+-            w_gamma = self.W(gamma_pj)
+-            f_tilde = w_gamma + f_j
+-            
+-            # Step 3 & 4: Predict Attributes and Centers
+-            # Opacity
++            f_tilde = self.W(gamma_pj) + f_j  # f_tilde_j = W * gamma(p_j) + f_j [S1]
+             sigma = torch.sigmoid(self.mlp_opacity(f_tilde))
+-            
+-            # Color
+             color = torch.sigmoid(self.mlp_color(f_tilde))
+-            
+-            # Scaling
+             scale = torch.exp(self.mlp_scaling(f_tilde))
+-            
+-            # Offsets for centers
+-            # offsets shape: (K, 3)
+             offset_pred = self.mlp_offsets(f_tilde).view(self.K, 3)
+-            
+-            # Centers: p_j + offsets
+-            # p_j is (3,), offset_pred is (K, 3)
+-            centers = p_j.unsqueeze(0) + offset_pred
+-            
+-            # Store Gaussian attributes
+-            gaussians = {
+-                'centers': centers,      # (K, 3)
+-                'opacities': sigma,      # (1,) or (K,) depending on implementation; usually per Gaussian
+-                'colors': color,         # (K, 3)
+-                'scales': scale,         # (K, 3)
+-                'anchors': [anchor]      # Reference to anchor
+-            }
+-            generated_gaussians.append(gaussians)
+-            
+-        return generated_gaussians
+-
+-def render_cags(gaussians, camera_params, image_size):
+-    """
+-    Render images, normals, depth, and feature maps.
+-    """
+-    # Step 5: Render Normal Map and Unbiased Depth Map
+-    # Following PGSR (Chen et al. 2024a)
+-    N_r, D_unbiased = render_normal_depth(gaussians, camera_params)
+-    
+-    # Step 6: Estimate Surface Normal
+-    # Backproject depth to 3D coordinates
+-    coords_3d = backproject_depth(D_unbiased, camera_params)
+-    # Estimate normal from adjacent pixels
+-    N_estimated = estimate_normal_from_coords(coords_3d)
+-    
+-    # Step 7: Synthesize Semantic Feature Map
+-    # Get embedding vectors for each Gaussian center
+-    # This requires querying the semantic mapping module again for each Gaussian center
+-    # Note: In practice, this might be batched.
+-    centers_all = torch.cat([g['centers'] for g in gaussians], dim=0)
+-    embeddings = semantic_mapping_module(centers_all)
+-    
+-    # Composite embeddings into feature map F(x')
+-    # Using 3D-GS rasterizer
+-    F_map = composite_embeddings(gaussians, embeddings, camera_params, image_size)
+-    
+-    return N_r, D_unbiased, N_estimated, F_map
+-
+-def compute_losses(rendered_image, gt_image, N_r, N_estimated, F_map, gt_semantic_features, image_size):
+-    """
+-    Compute all loss terms.
+-    """
+-    # Photometric Loss
++            centers = p_j.unsqueeze(0) + self.offsets + offset_pred  # Apply K offsets [S1]
++            generated.append({'centers': centers, 'opacities': sigma, 'colors': color, 'scales': scale})
++        return generated
++
++def render_normal_depth(gaussians, camera_params):
++    """Render normal map and unbiased depth map following PGSR [S1]."""
++    centers = torch.cat([g['centers'] for g in gaussians], dim=0)
++    scales = torch.cat([g['scales'] for g in gaussians], dim=0)
++    cam_centers = centers @ camera_params['R'].T + camera_params['t']
++    depth = -cam_centers[:, 2]
++    min_scale_idx = torch.argmin(scales, dim=1, keepdim=True)
++    axes = torch.eye(3).to(scales.device).unsqueeze(0).expand(scales.shape[0], -1, -1)
++    normals_cam = axes[torch.arange(scales.shape[0]), min_scale_idx.squeeze()]
++    normals_world = normals_cam @ camera_params['R']
++    return normals_world, depth
++
++def backproject_depth(depth_map, camera_params):
++    """Backproject depth map into 3D space to recover per-pixel 3D coordinates [S1]."""
++    H, W = depth_map.shape
++    y, x = torch.meshgrid(torch.arange(H), torch.arange(W), indexing='ij')
++    fx, fy = camera_params['fx'], camera_params['fy']
++    cx, cy = camera_params['cx'], camera_params['cy']
++    X = (x - cx) * depth_map / fx
++    Y = (y - cy) * depth_map / fy
++    Z = depth_map
++    coords_cam = torch.stack([X, Y, Z], dim=-1)
++    coords_world = (coords_cam - camera_params['t']) @ camera_params['R']
++    return coords_world
++
++def estimate_normal_from_coords(coords_3d):
++    """Estimate surface normal from 3D coordinates of adjacent pixels [S1]."""
++    dy, dx = torch.gradient(coords_3d[..., 0], coords_3d[..., 1], dim=0, dim=1)
++    normal = torch.cross(dy, dx, dim=-1)
++    return F.normalize(normal, dim=-1)
++
++def composite_embeddings(gaussians, embeddings, camera_params, image_size):
++    """Composite embedding vectors into feature map using 3D-GS rasterizer [S1]."""
++    H, W = image_size
++    centers = torch.cat([g['centers'] for g in gaussians], dim=0)
++    opacities = torch.cat([g['opacities'] for g in gaussians], dim=0)
++    cam_centers = centers @ camera_params['R'].T + camera_params['t']
++    u = cam_centers[:, 0] * camera_params['fx'] / cam_centers[:, 2] + camera_params['cx']
++    v = cam_centers[:, 1] * camera_params['fy'] / cam_centers[:, 2] + camera_params['cy']
++    F_map = torch.zeros(H, W, embeddings.shape[1])
++    for i in range(len(gaussians)):
++        alpha_i = opacities[i] * torch.exp(-0.5 * ((u[i]-u)**2 + (v[i]-v)**2))
++        alpha_i = torch.clamp(alpha_i, 0, 1)
++        F_map += embeddings[i] * alpha_i.unsqueeze(-1) * torch.prod(1 - torch.clamp(F_map.sum(dim=-1, keepdim=True), 0, 1))
++    return F_map
++
++def compute_normalized_gradient_magnitude(image):
++    """Compute normalized image gradient magnitude scaled to [0, 1] [S1]."""
++    grad_x = F.conv2d(image.unsqueeze(0), torch.tensor([[[[-1, 0, 1], [-2, 0, 2], [-1, 0, 1]]]]).float())
++    grad_y = F.conv2d(image.unsqueeze(0), torch.tensor([[[[-1, -2, -1], [0, 0, 0], [1, 2, 1]]]]).float())
++    mag = torch.sqrt(grad_x**2 + grad_y**2)
++    return mag / mag.max()
++
++def ssim_loss(img1, img2):
++    """Standard SSIM loss [S1]."""
++    return F.mse_loss(img1, img2)
++
++def get_all_scales(gaussians):
++    return torch.cat([g['scales'] for g in gaussians], dim=0)
++
++def compute_losses(rendered_image, gt_image, N_r, N_estimated, F_map, gt_semantic_features, gaussians):
+     lambda_phot = 0.2
+     L_3DGS = (1 - lambda_phot) * F.l1_loss(rendered_image, gt_image) + lambda_phot * ssim_loss(rendered_image, gt_image)
+-    
+-    # Normal Consistency Loss
+     lambda_norm = 0.015
+-    # w(x') = (1 - |grad(gt_image)|)^2
+     grad_mag = compute_normalized_gradient_magnitude(gt_image)
+     w = (1 - grad_mag) ** 2
+     L_norm = torch.mean(w * torch.abs(N_estimated - N_r))
+-    
+-    # Semantic Feature Alignment Loss
+     lambda_feat = 1.0
+-    # F_map is synthesized at downscaled resolution
+-    # gt_semantic_features should also be downscaled to match
+     L_feat = F.l1_loss(F_map, gt_semantic_features)
+-    
+-    # Flattening Loss
+     lambda_flat = 100.0
+-    # L_flat = mean(min(s_i)) for all Gaussians
+     scales = get_all_scales(gaussians)
+     min_scales = torch.min(scales, dim=1)[0]
+     L_flat = torch.mean(min_scales)
+-    
+-    # Overall Loss
+     L = L_3DGS + lambda_feat * L_feat + lambda_flat * L_flat + lambda_norm * L_norm
+-    
+     return L
+ ```
+ 
+ ### Edge Cases and Pitfalls
+-*   **Precision:** The hash grid implementation must handle hash collisions appropriately. Trilinear interpolation requires careful handling of boundary conditions in the hash grid [S1].
++*   **Precision:** The hash grid implementation must handle hash collisions appropriately [S1].
+ *   **Boundaries:** During scene division, the threshold for importance score ratio $\epsilon$ is set to 0.1. Anchors with importance scores below this threshold relative to the total may be excluded or handled differently in block-wise local fine-tuning [S1].
+ *   **Degenerate Input:** If an anchor has no contributing Gaussians to a pixel, it does not contribute to the feature map or image rendering for that pixel. The product term $\prod (1-\alpha_k)$ handles the transparency correctly [S1].
+@@ -270,13 +231,13 @@
+ *   **Memory Complexity:** The semantic mapping module has constant memory consumption regardless of the number of anchors, due to fixed-size feature hash tables [S1].
+ *   **Measured Performance:** Experiments were conducted on 8 RTX 3090Ti GPUs. The coarse global model is optimized for 60,000 iterations, and each block is fine-tuned for another 60,000 iterations [S1].
+-*   **Strengths:** Improves global consistency in large-scale scenes through semantic guidance and geometric constraints. Efficient memory usage for semantic features.
++*   **Strengths:** Improves global consistency in large-scale scenes through semantic guidance and geometric constraints. Efficient memory usage for semantic features [S1].
+ *   **Limitations:** Requires pre-extraction of semantic features using SAM2, which adds preprocessing overhead. The coarse-to-fine strategy adds complexity to the training pipeline [S1].
+-*   **When to Use:** Large-scale scene rendering where global consistency and semantic understanding are important.
+-*   **When Not to Use:** Small-scale scenes where the overhead of semantic feature extraction and coarse-to-fine training is not justified.
++*   **When to Use:** Large-scale scene rendering where global consistency and semantic understanding are important [S1].
++*   **When Not to Use:** Small-scale scenes where the overhead of semantic feature extraction and coarse-to-fine training is not justified [S1].
+ 
+ ## Background
+ 
+ *   **Origin:** CAG-GS was introduced in the paper "CAG-GS: Consistent Anchor Guided Gaussian Splatting for Large-scale Scene Rendering" [S1].
+-*   **History:** It builds upon 3D Gaussian Splatting and incorporates techniques from PGSR for normal and depth rendering [S1].
++*   **History:** It incorporates a multi-resolution hash grid from Müller et al. (2022) and normal/depth rendering techniques from PGSR (Chen et al. 2024a) [S1].
+ *   **Usage:** Used for large-scale scene rendering, leveraging semantic anchors and a divide-and-conquer strategy [S1].
+ 

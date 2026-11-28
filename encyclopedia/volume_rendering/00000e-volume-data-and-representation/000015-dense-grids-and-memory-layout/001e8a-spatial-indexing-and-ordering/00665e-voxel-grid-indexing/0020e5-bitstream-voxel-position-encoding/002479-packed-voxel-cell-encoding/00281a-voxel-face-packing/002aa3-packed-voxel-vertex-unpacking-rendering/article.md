@@ -1,0 +1,124 @@
+# Packed Voxel Vertex Unpacking & Rendering
+## Overview
+This method renders voxel geometry by unpacking a single 32-bit integer per vertex into spatial coordinates, material ID, face ID, ambient occlusion ID, and flip ID to render voxel geometry efficiently [S1, unofficial]. It encodes spatial coordinates, material identity, face orientation, and shading parameters into a compact format to reduce vertex buffer overhead [S1, unofficial].
+
+## How it works
+**Inputs and Outputs:**
+*   **Input:** A packed 32-bit unsigned integer (`packed_data`) per vertex, containing x, y, z coordinates, voxel ID, face ID, ambient occlusion ID, and flip ID [S1, unofficial].
+*   **Output:** Clipped screen-space positions (`gl_Position`), UV coordinates, and color values for the fragment shader [S1, unofficial].
+
+**Data Structures:**
+The `packed_data` is a 32-bit unsigned integer with the following bit layout (MSB to LSB) [S1, unofficial]:
+*   Bits 31-28: `x` (4 bits)
+*   Bits 27-22: `y` (6 bits)
+*   Bits 21-14: `z` (8 bits)
+*   Bits 13-6: `voxel_id` (8 bits)
+*   Bits 5-3: `face_id` (3 bits)
+*   Bits 2-1: `ao_id` (2 bits)
+*   Bit 0: `flip_id` (1 bit)
+
+**Parameters:**
+*   `gamma = vec3(2.2)`: Standard sRGB gamma correction factor [S1, unofficial].
+*   `water_line`: Uniform float threshold for underwater tinting [S1, unofficial].
+*   `bg_color`: Uniform vec3 for fog background color [S1, unofficial].
+*   `ao_values[4] = float[4](0.1, 0.25, 0.5, 1.0)`: Ambient occlusion intensity multipliers [S1, unofficial].
+*   `face_shading[6] = float[6](1.0, 0.5, 0.5, 0.8, 0.5, 0.8)`: Base shading multipliers for top, bottom, right, left, front, back faces [S1, unofficial].
+
+**Steps:**
+
+1.  **Unpack Data:** Extract fields from `packed_data` using bitwise operations [S1, unofficial].
+    *   `x = int(packed_data >> 28)`
+    *   `y = int((packed_data >> 22) & 63)`
+    *   `z = int((packed_data >> 14) & 255)`
+    *   `voxel_id = int((packed_data >> 6) & 255)`
+    *   `face_id = int((packed_data >> 3) & 7)`
+    *   `ao_id = int((packed_data >> 2) & 3)`
+    *   `flip_id = int(packed_data & 1)`
+
+2.  **Compute UV Index:** Determine the UV coordinate index based on vertex ID and face properties [S1, unofficial].
+    *   `uv_index = gl_VertexID % 6 + ((face_id & 1) + flip_id * 2) * 6`
+    *   Set UV from `uv_coords[uv_indices[uv_index]]` [S1, unofficial].
+
+3.  **Compute Shading:** Calculate the shading multiplier [S1, unofficial].
+    *   `shading = face_shading[face_id] * ao_values[ao_id]`
+
+4.  **Transform Position:** Compute world position and clip space position [S1, unofficial].
+    *   `frag_world_pos = (m_model * vec4(x, y, z, 1.0)).xyz`
+    *   `gl_Position = m_proj * m_view * vec4(frag_world_pos, 1.0)`
+
+5.  **Fragment Shader Adjustments:**
+    *   Adjust UV for texture array sampling: `face_uv.x = uv.x / 3.0 - min(face_id, 2) / 3.0` [S1, unofficial].
+    *   Sample texture array: `tex_col = texture(u_texture_array_0, vec3(face_uv, voxel_id)).rgb` [S1, unofficial].
+    *   Apply gamma correction: `tex_col = pow(tex_col, vec3(2.2))` [S1, unofficial].
+    *   Apply shading: `tex_col *= shading` [S1, unofficial].
+    *   Apply underwater tint if `frag_world_pos.y < water_line`: `tex_col *= vec3(0.0, 0.3, 1.0)` [S1, unofficial].
+    *   Apply fog: `fog_dist = gl_FragCoord.z / gl_FragCoord.w`; `tex_col = mix(tex_col, bg_color, (1.0 - exp2(-0.00001 * fog_dist * fog_dist)))` [S1, unofficial].
+    *   Apply inverse gamma: `tex_col = pow(tex_col, 1.0 / vec3(2.2))` [S1, unofficial].
+
+**Pseudocode:**
+
+> **Unverified code.** The code below did not pass a test run against a reference implementation, or no test fits it, so it may contain errors.
+
+```python
+def unpack_and_render(packed_data, gl_VertexID, uv_coords, uv_indices, face_shading, ao_values, m_model, m_proj, m_view, u_texture_array_0, water_line, bg_color, depth_clip):
+    # Step 1: Unpack Data
+    x = (packed_data >> 28) & 0xF
+    y = (packed_data >> 22) & 0x3F
+    z = (packed_data >> 14) & 0xFF
+    voxel_id = (packed_data >> 6) & 0xFF
+    face_id = (packed_data >> 3) & 0x7
+    ao_id = (packed_data >> 2) & 0x3
+    flip_id = packed_data & 0x1
+
+    # Step 2: Compute UV Index
+    uv_index = (gl_VertexID % 6) + ((face_id & 1) + flip_id * 2) * 6
+    uv = uv_coords[uv_indices[uv_index]]
+
+    # Step 3: Compute Shading
+    shading = face_shading[face_id] * ao_values[ao_id]
+
+    # Step 4: Transform Position
+    frag_world_pos = (m_model @ vec4(x, y, z, 1.0)).xyz
+    gl_Position = m_proj @ m_view @ vec4(frag_world_pos, 1.0)
+
+    # Step 5: Fragment Shader Adjustments
+    face_uv_x = uv.x / 3.0 - min(face_id, 2) / 3.0
+    face_uv = vec2(face_uv_x, uv.y)
+    tex_col = texture(u_texture_array_0, vec3(face_uv, voxel_id)).rgb
+    tex_col = pow(tex_col, vec3(2.2))
+    tex_col *= shading
+    if frag_world_pos.y < water_line:
+        tex_col *= vec3(0.0, 0.3, 1.0)
+    # depth_clip replaces gl_FragCoord.z / gl_FragCoord.w
+    fog_dist = depth_clip
+    fog_factor = 1.0 - 2.0 ** (-0.00001 * fog_dist * fog_dist)
+    tex_col = tex_col * (1.0 - fog_factor) + bg_color * fog_factor
+    tex_col = pow(tex_col, 1.0 / vec3(2.2))
+    return tex_col
+```
+
+**Edge Cases and Pitfalls:**
+*   **Precision:** The 4-bit x-coordinate limits the world width to 16 units. This is sufficient for small chunks but requires chunking for larger worlds [G].
+*   **Boundaries:** The method assumes valid `face_id` (0-7) and `ao_id` (0-3) values. Invalid values may lead to out-of-bounds array access [G].
+*   **Degenerate Input:** Empty voxels should not generate vertices to avoid unnecessary processing [G].
+
+## Subtopics
+
+### [Bit-packed Voxel Rendering via Vertex Texture Fetch](15416-bit-packed-voxel-rendering-via-vertex-texture-fetch.md)
+Bit-packed Voxel Rendering via Vertex Texture Fetch is a technique to render a $128 \times 128 \times 128$ voxel grid by packing voxel existence data into 4 separate $128 \times 128$ RGBA images, where each pixel's 32 bits represent 32 voxels along the Z-axis. The vertex shader samples these textures to determine voxel presence and projects vertices accordingly, using vertex texture fetch.
+
+## Operating characteristics
+*   **Time Complexity:** O(1) per vertex for unpacking and transformation [S1, unofficial].
+*   **Memory Complexity:** O(V) for vertex data, where V is the number of visible faces. The packed format reduces memory footprint significantly compared to storing separate fields [S1, unofficial].
+*   **Measured Performance:** Efficient for large voxel grids due to reduced vertex buffer size and improved cache locality [S1, unofficial].
+*   **Scaling:** Scales well with chunking strategies. The 4-bit x-coordinate limit requires careful chunk management [S1, unofficial].
+*   **Strengths:** Compact data representation, efficient vertex processing, easy integration with texture arrays [S1, unofficial].
+*   **Limitations:** Limited coordinate range per chunk, requires careful handling of face culling and AO calculation [S1, unofficial].
+*   **When to Use:** Ideal for voxel-based games and simulations where memory bandwidth and vertex processing overhead are critical [S1, unofficial].
+*   **When Not to Use:** Not suitable for scenes requiring high-precision coordinates without chunking, or for non-voxel-based rendering [S1, unofficial].
+
+## Background
+The method originates from implementations of Minecraft-like voxel engines, specifically documented in the [StanislavPetrovV/Minecraft](https://github.com/StanislavPetrovV/Minecraft) repository [S1, unofficial]. It leverages the efficiency of packing multiple attributes into a single integer to optimize vertex processing in GPU shaders [S1, unofficial].
+
+## Sources
+[S1] StanislavPetrovV/Minecraft, https://github.com/StanislavPetrovV/Minecraft, fetched 2026-10-26 (unofficial)

@@ -1,0 +1,170 @@
+# Domain Colouring
+
+
+## Overview
+Domain Colouring maps complex numbers to colors using a cyclic colormap scaled by a degree parameter and brightness, allowing the phase (angle) and magnitude (brightness) of a complex field to be read orthogonally in a single image [S1, S2, unofficial]. It is distinct from standard scalar transfer functions by exploiting the two-dimensional nature of the complex plane, mapping the angular component to hue and the radial component to intensity [S2, unofficial].
+
+## How it works
+**Inputs:**
+- `real_part`: Real component of the complex number $z$.
+- `imag_part`: Imaginary component of the complex number $z$.
+- `cyclic_colourmap`: A 2D array of shape $(N, 3)$ or $(N, 4)$ representing $N$ colors in the cyclic colormap [S1, unofficial].
+- `degree`: An integer scaling factor for the angular resolution [S1, unofficial].
+
+**Outputs:**
+- `output`: A color tensor with the same spatial dimensions as the input, where each pixel is a color vector [S1, unofficial].
+
+**Data Structures:**
+- The complex number is represented as $z = \text{real\_part} + i \cdot \text{imag\_part}$ [S1, unofficial].
+- The colormap is an array of $N$ entries, where $N$ is the length of `cyclic_colourmap` [S1, unofficial].
+
+**Steps:**
+1. Calculate the argument (phase) of $z$ using the two-argument arctangent: $\theta = \arg(z) = \operatorname{atan2}(\text{imag\_part}, \text{real\_part})$. The result is in the range $(-\pi, \pi]$ [S1, unofficial].
+2. Normalize the angle to the range $[0, 1)$ by adding $0.5$ to the normalized angle $\frac{\theta}{2\pi}$:
+   $$ u = \frac{\theta}{2\pi} + 0.5 $$
+3. Scale the normalized angle by the `degree` parameter and the colormap length $N$ to determine the color index:
+   $$ \text{index} = \lfloor u \cdot \text{degree} \cdot N \rfloor \bmod N $$
+   This maps the cyclic phase to an integer index in the colormap [S1, unofficial].
+4. Retrieve the base color $c$ from the colormap:
+   $$ c = \text{cyclic\_colourmap}[\text{index}] $$
+5. Calculate the brightness $b$ as the magnitude of $z$:
+   $$ b = |z| = \sqrt{\text{real\_part}^2 + \text{imag\_part}^2} $$
+6. Compute the final output color by scaling the base color by the brightness:
+   $$ \text{output} = b \cdot c $$
+
+**Pseudocode:**
+> **Unverified code.** The code below did not pass a test run against a reference implementation, or no test fits it, so it may contain errors.
+
+```python
+import math
+import torch
+
+def domain_colouring(real_part, imag_part, cyclic_colourmap, degree):
+    """
+    Maps complex numbers to colors using domain colouring.
+    
+    Args:
+        real_part: Tensor of real components.
+        imag_part: Tensor of imaginary components.
+        cyclic_colourmap: Tensor of shape (N, 3) or (N, 4) representing the colormap.
+        degree: Integer scaling factor for angular resolution.
+        
+    Returns:
+        Tensor of output colors.
+    """
+    # Step 1: Calculate argument
+    theta = torch.atan2(imag_part, real_part)
+    
+    # Step 2: Normalize angle to [0, 1)
+    # math.tau is 2*pi
+    u = theta.div(math.tau).add(0.5)
+    
+    # Step 3: Calculate index
+    # Scale by degree and colormap length, floor, and modulo
+    cmap_len = cyclic_colourmap.shape[0]
+    index = u.mul(degree).multiply(cmap_len).floor().long().remainder(cmap_len)
+    
+    # Step 4: Retrieve base color
+    colours = cyclic_colourmap[index, :]
+    
+    # Step 5: Calculate brightness (magnitude)
+    # Stack real and imag parts, compute squared sum, then square root
+    z_stack = torch.stack([real_part, imag_part], dim=-1)
+    magnitude_sq = z_stack.pow(2).sum(dim=-1, keepdim=True)
+    brightness = magnitude_sq.pow(1 / 2)
+    
+    # Step 6: Scale color by brightness
+    output = brightness.mul(colours)
+    
+    return output
+```
+
+**Parameters:**
+- `degree`: Controls the number of color cycles across the $2\pi$ range. Higher values increase angular resolution [S1, unofficial]. Typical values are not specified in the sources.
+- `cyclic_colourmap`: Must be seamless at $\pm \pi$ (i.e., the first and last colors should match or blend smoothly) to avoid discontinuities in the phase mapping [S2, unofficial]. Common colormaps include `twilight`, `HSV`, `infinity`, and `grayscale` [S2, unofficial].
+
+**Edge Cases and Pitfalls:**
+- **Zero Magnitude:** If $z=0$, the argument is undefined. `atan2(0, 0)` typically returns 0. The brightness will be 0, resulting in a black pixel regardless of the colormap index [S1, unofficial].
+- **Discontinuities:** If the colormap is not cyclic (i.e., the first and last colors do not match), a visible seam will appear at the negative real axis ($\theta = \pm \pi$) [S2, unofficial].
+- **Precision:** Floating-point precision in `atan2` and subsequent floating-point arithmetic may cause slight variations in index selection near boundaries. Using `floor` and `long` conversion ensures integer indexing [S1, unofficial].
+
+## Subtopics
+
+### Tangent Shading
+Projects surface normals onto the plane perpendicular to the ray direction, rotates them to camera space, and applies domain colouring to the resulting 2D tangent vectors to visualize spin orientation [S1, unofficial].
+- **Definition:** Surface normals $\mathbf{n}$ are projected onto the tangent plane defined by the ray direction $\mathbf{r}$, then rotated to camera space [S1, unofficial].
+- **Formula:** The tangent vector is calculated as $\mathbf{t} = \mathbf{n} - (\mathbf{n} \cdot \mathbf{r})\mathbf{r}$, which removes the component of the normal parallel to the ray [S1, unofficial]. This vector is then rotated by the camera orientation conjugate [S1, unofficial]. Domain colouring is applied to the $x$ and $y$ components of the resulting tangent vector $\mathbf{t}$ [S1, unofficial].
+- **Pseudocode:**
+> **Unverified code.** The code below did not pass a test run against a reference implementation, or no test fits it, so it may contain errors.
+
+```python
+def tangent_shading(surface_normals, ray_directions, camera_orientation_conj, cyclic_colourmap, degree):
+    """
+    Applies domain colouring to tangent vectors derived from surface normals.
+    
+    Args:
+        surface_normals: Tensor of surface normals.
+        ray_directions: Tensor of ray directions.
+        camera_orientation_conj: Quaternion or rotation matrix representing camera orientation conjugate.
+        cyclic_colourmap: Colormap tensor.
+        degree: Degree parameter for domain colouring.
+        
+    Returns:
+        Tensor of colors.
+    """
+    # Project normals onto the plane perpendicular to ray direction
+    # t = n - (n . r) * r
+    dot_product = surface_normals.multiply(ray_directions).sum(dim=-1, keepdim=True)
+    projected_normals = surface_normals.add(dot_product.multiply(ray_directions).mul(-1.0))
+    
+    # Rotate to camera space
+    # Note: Actual rotation implementation depends on the representation of camera_orientation_conj
+    # Assuming a helper function 'rotate' exists for the specific rotation format
+    rotated_normals = rotate(projected_normals, camera_orientation_conj)
+    
+    # Apply domain colouring to the x and y components
+    tangent_image = domain_colouring(
+        rotated_normals[..., 0], 
+        rotated_normals[..., 1], 
+        cyclic_colourmap, 
+        degree
+    )
+    
+    return tangent_image
+```
+- **When to choose:** Use when visualizing spin orientation or vector field tangents on surfaces relative to the camera [S1, unofficial].
+
+### Complex-field Direct Volume Rendering
+Volumetric 3-D plotting of complex scalar fields $f(x, y, z) \in \mathbb{C}$ sampled on a grid, where magnitude drives opacity and phase drives color [S2, unofficial].
+- **Definition:** Implements direct volume ray-marching for complex fields, typically as a Vulkan compute pipeline [S2, unofficial]. The magnitude $|f|$ drives opacity, and the phase $\arg(f)$ drives color through a cyclic colormap [S2, unofficial].
+- **Inputs:** Complex field data `std::complex<float|double>` on a grid with x-fastest memory layout [S2, unofficial].
+- **Parameters:**
+  - **Magnitude Mapping:** Opacity is driven by $|f|$ using linear or logarithmic transfer functions, with a decade window for high-dynamic-range data [S2, unofficial].
+  - **Phase Mapping:** Color is driven by $\arg(f)$ using a cyclic colormap (e.g., `twilight`, `HSV`, `infinity`, `grayscale`) [S2, unofficial].
+- **Output:** R8G8B8A8_UNORM image [S2, unofficial].
+- **Features:** Includes world-space bounding box, ticked/labeled axes, and a phase $\times$ magnitude legend with thickness-corrected opacity ramp [S2, unofficial]. Supports inline LaTeX-subset math for labels [S2, unofficial].
+- **When to choose:** Use for rendering quantum-mechanical wavefunctions or other complex-valued volumetric data where both amplitude and phase information are critical [S2, unofficial].
+
+## Operating characteristics
+**Time and Memory Complexity:**
+- Not given in the sources.
+
+**Measured Performance:**
+- For Complex-field Direct Volume Rendering, performance is approximately 15 ms/frame (~65 FPS) for a 500³ complex field on the tested hardware [S2, unofficial].
+
+**Scaling:**
+- Not given in the sources.
+
+**Strengths and Limitations:**
+- **Strengths:** Allows orthogonal reading of amplitude and phase in a single image [S2, unofficial]. Cyclic colormaps provide seamless phase visualization [S2, unofficial]. Tangent shading enables visualization of spin orientation [S1, unofficial].
+- **Limitations:** Requires complex-valued data [S2, unofficial]. Performance may degrade with higher resolutions or more complex transfer functions [S2, unofficial]. Discontinuities in non-cyclic colormaps can cause visual artifacts [S2, unofficial].
+
+**When to use it and when not:**
+- Use when visualizing complex-valued fields where phase and magnitude are both important [S2, unofficial]. Use Tangent Shading for visualizing vector field orientations on surfaces [S1, unofficial]. Do not use for purely real-valued scalar fields where standard transfer functions are more appropriate.
+
+## Background
+Domain Colouring originates from the visualization of complex functions, mapping the complex plane to the color plane [S1, unofficial]. It has been adapted for volume rendering to visualize complex scalar fields, such as quantum-mechanical wavefunctions [S2, unofficial]. The technique is implemented in libraries such as `ray_marching` for shader-based rendering [S1, unofficial] and `imaginaryVolumes` for Vulkan-based direct volume rendering [S2, unofficial].
+
+## Sources
+[S1] kyle-rosa/ray_marching, https://github.com/kyle-rosa/ray_marching, fetched 2026-10-26 (unofficial)
+[S2] steubengineer/imaginaryVolumes, https://github.com/steubengineer/imaginaryVolumes, fetched 2026-10-26 (unofficial)

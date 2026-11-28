@@ -1,0 +1,204 @@
+# VDB Sparse Voxel Tree Data Structure (5-4-3 Variant)
+
+Also called: VDB 5-4-3 Tree, VDB 5-4-3 Tree Data Structure, VDB 5-4-3 Tree Structure, VDB 5-4-3 Variant, VDB sparse volume tree
+
+## Overview
+The VDB 5-4-3 variant is a hierarchical sparse voxel tree structure used to store volumetric data efficiently by omitting inactive regions [S1, unofficial]. It differs from dense grids by using a multi-level tree where only nodes containing active data are allocated, and from other sparse structures by its fixed 5-4-3 node dimension hierarchy which enables compact bitmask-based topology tracking [S1, unofficial]. It serves as the primary data structure for the OpenVDB library, balancing fast random access for modification with low memory overhead for sparse scenes [S1, unofficial].
+
+## How it works
+**Inputs and Outputs:**
+*   **Input:** A 3D position `p` (integer coordinates) and a voxel value `v` (typically 16-bit float).
+*   **Output:** The internal tree state updated to include the voxel at `p` with value `v`.
+
+**Data Structures:**
+The structure is rooted in a `VDB` struct containing a single top-level node.
+
+1.  **VDB Struct:**
+    *   `node_5`: A pointer or reference to a `Node_5`.
+
+2.  **Node_5 (Top-Level Node):**
+    *   `mask`: An array of 512 `u64` values (64-bit integers). Each bit corresponds to a potential `Node_4` child. Total bits = $512 \times 64 = 32,768$.
+    *   `nodes_4`: A map from `u32` (bit index) to `Node_4` pointers. Only contains entries for children whose mask bits are set.
+
+3.  **Node_4 (Intermediate Node):**
+    *   `mask`: An array of 64 `u64` values. Each bit corresponds to a potential `Node_3` child. Total bits = $64 \times 64 = 4,096$.
+    *   `nodes_3`: A map from `u32` (bit index) to `Node_3` pointers. Only contains entries for children whose mask bits are set.
+
+4.  **Node_3 (Leaf Node):**
+    *   `mask`: An array of 8 `u64` values. Each bit corresponds to a potential voxel (0-node) child. Total bits = $8 \times 64 = 512$.
+    *   `data`: An array of 512 `f16` values (16-bit floats). Stores the actual voxel values.
+
+**Node Dimensions and Coverage:**
+*   **5-node:** Spans $32 \times 32 \times 32 = 32,768$ voxels. `log2dim` = 5.
+*   **4-node:** Spans $16 \times 16 \times 16 = 4,096$ voxels. `log2dim` = 4.
+*   **3-node:** Spans $8 \times 8 \times 8 = 512$ voxels. `log2dim` = 3.
+*   **Voxel (0-node):** Spans $1 \times 1 \times 1$ voxel.
+
+**Bit Index Formulas:**
+To locate a child node or voxel within a parent, a 3D coordinate relative to the parent's origin is converted into a linear bit index. The relative coordinates are derived by masking the global position `p` and shifting.
+
+1.  **4-node child of a 5-node:**
+    *   Relative position: `p_rel = p & (4096 - 1)`
+    *   3D index: `idx_3d.x = p_rel.x >> 7`, `idx_3d.y = p_rel.y >> 7`, `idx_3d.z = p_rel.z >> 7`
+    *   Bit Index: `idx = idx_3d.z | (idx_3d.y << 5) | (idx_3d.x << 10)`
+
+2.  **3-node child of a 4-node:**
+    *   Relative position: `p_rel = p & (128 - 1)`
+    *   3D index: `idx_3d.x = p_rel.x >> 3`, `idx_3d.y = p_rel.y >> 3`, `idx_3d.z = p_rel.z >> 3`
+    *   Bit Index: `idx = idx_3d.z | (idx_3d.y << 4) | (idx_3d.x << 8)`
+
+3.  **Voxel (0-node) child of a 3-node:**
+    *   Relative position: `p_rel = p & (8 - 1)`
+    *   3D index: `idx_3d.x = p_rel.x >> 0`, `idx_3d.y = p_rel.y >> 0`, `idx_3d.z = p_rel.z >> 0`
+    *   Bit Index: `idx = idx_3d.z | (idx_3d.y << 3) | (idx_3d.x << 6)`
+
+**Algorithm: Set Voxel**
+To set a voxel at position `p` with value `v`:
+
+> **Unverified code.** The code below did not pass a test run against a reference implementation, or no test fits it, so it may contain errors.
+
+```python
+def set_voxel(vdb, p, v):
+    # 1. Compute bit indices for each level
+    bit_index_4 = get_bit_index_4(p)
+    bit_index_3 = get_bit_index_3(p)
+    bit_index_0 = get_bit_index_0(p)
+
+    # 2. Access or create Node_4
+    node_5 = vdb.node_5
+    if bit_index_4 not in node_5.nodes_4:
+        node_5.nodes_4[bit_index_4] = Node_4()
+    node_4 = node_5.nodes_4[bit_index_4]
+
+    # 3. Access or create Node_3
+    if bit_index_3 not in node_4.nodes_3:
+        node_4.nodes_3[bit_index_3] = Node_3()
+    node_3 = node_4.nodes_3[bit_index_3]
+
+    # 4. Update masks
+    # Mask index is bit_index // 64, bit offset is bit_index % 64
+    node_5.mask[bit_index_4 >> 6] |= (1 << (bit_index_4 & 63))
+    node_4.mask[bit_index_3 >> 6] |= (1 << (bit_index_3 & 63))
+    node_3.mask[bit_index_0 >> 6] |= (1 << (bit_index_0 & 63))
+
+    # 5. Set voxel data
+    node_3.data[bit_index_0] = v
+
+def get_bit_index_4(p):
+    p_rel = p & 4095
+    x = p_rel.x >> 7
+    y = p_rel.y >> 7
+    z = p_rel.z >> 7
+    return z | (y << 5) | (x << 10)
+
+def get_bit_index_3(p):
+    p_rel = p & 127
+    x = p_rel.x >> 3
+    y = p_rel.y >> 3
+    z = p_rel.z >> 3
+    return z | (y << 4) | (x << 8)
+
+def get_bit_index_0(p):
+    p_rel = p & 7
+    x = p_rel.x
+    y = p_rel.y
+    z = p_rel.z
+    return z | (y << 3) | (x << 6)
+```
+
+**Algorithm: Iterate Tree**
+To traverse the tree depth-first, iterate through the mask words of each node. For each set bit, retrieve the child from the map and recurse.
+
+> **Unverified code.** The code below did not pass a test run against a reference implementation, or no test fits it, so it may contain errors.
+
+```python
+def iterate_node_5(node_5):
+    for word_index, word in enumerate(node_5.mask):
+        # Process each set bit in the word
+        temp_word = word
+        while temp_word != 0:
+            # Count trailing zeros to find the least significant set bit
+            bit_offset = count_trailing_zeros(temp_word)
+            
+            # Calculate global bit index for this child
+            bit_index = (word_index * 64) + bit_offset
+            
+            # Retrieve child node
+            node_4 = node_5.nodes_4[bit_index]
+            
+            # Recurse into Node_4
+            iterate_node_4(node_4)
+            
+            # Clear the least significant bit to move to the next set bit
+            temp_word &= (temp_word - 1)
+
+def iterate_node_4(node_4):
+    for word_index, word in enumerate(node_4.mask):
+        temp_word = word
+        while temp_word != 0:
+            bit_offset = count_trailing_zeros(temp_word)
+            bit_index = (word_index * 64) + bit_offset
+            
+            node_3 = node_4.nodes_3[bit_index]
+            
+            # Process leaf node data
+            process_node_3(node_3)
+            
+            temp_word &= (temp_word - 1)
+
+def process_node_3(node_3):
+    # Iterate through the mask to find active voxels
+    for word_index, word in enumerate(node_3.mask):
+        temp_word = word
+        while temp_word != 0:
+            bit_offset = count_trailing_zeros(temp_word)
+            bit_index = (word_index * 64) + bit_offset
+            
+            # Access voxel data
+            value = node_3.data[bit_index]
+            # Process value...
+            
+            temp_word &= (temp_word - 1)
+```
+
+**Parameters:**
+*   **Variant:** 5-4-3. Defines the hierarchy levels [S1, unofficial].
+*   **Voxel Data Type:** Typically 16-bit floating point (`f16`), but supports arbitrary types [S1, unofficial].
+
+**Edge Cases and Pitfalls:**
+*   **Node Overlap:** Top-level 5-nodes must be non-overlapping. Overlapping behavior is undefined and undesirable [S1, unofficial].
+*   **Mask-Map Consistency:** The mask bits must strictly correspond to the keys present in the child map. If a mask bit is set, the corresponding child node must exist in the map. Iteration code should assert this consistency [S1, unofficial].
+*   **Precision:** Bit shifting operations assume integer coordinates. Floating point positions must be converted to integer grid coordinates before indexing [G].
+
+## Subtopics
+
+### [VDB Child Mask Encoding](21042-vdb-child-mask-encoding.md)
+A bit-vector mechanism used within the OpenVDB sparse voxel tree to indicate the existence of child nodes. It solves the problem of sparse storage by allowing a parent node to omit children that contain no data, storing only a bitmask to define the tree topology and the sorted order of the remaining children. It is distinct from the Value Mask, which encodes data uniformity (tiles) rather than structural presence.
+
+## Operating characteristics
+*   **Time Complexity:**
+    *   **Set/Get Voxel:** $O(1)$ average case, assuming $O(1)$ map lookups. The depth is fixed at 3 levels (5-node -> 4-node -> 3-node).
+    *   **Iteration:** $O(N)$ where $N$ is the number of active nodes/voxels. Iteration skips inactive regions via the mask.
+*   **Memory Complexity:**
+    *   Proportional to the number of active nodes. Inactive regions consume no memory beyond the root structure.
+    *   Overhead per node:
+        *   5-node: $512 \times 8$ bytes (mask) + map overhead.
+        *   4-node: $64 \times 8$ bytes (mask) + map overhead.
+        *   3-node: $8 \times 8$ bytes (mask) + $512 \times 2$ bytes (data) = 64 + 1024 = 1088 bytes.
+*   **Performance:**
+    *   Highly efficient for sparse volumes where active data occupies a small fraction of the total space.
+    *   Dense volumes may incur overhead from the tree structure and map lookups compared to flat arrays.
+*   **Strengths:**
+    *   Fast random access for modifications.
+    *   Compact storage for sparse data.
+    *   Fixed depth simplifies traversal logic.
+*   **Limitations:**
+    *   Map overhead for nodes with few children.
+    *   Not suitable for dense volumes without significant overhead.
+    *   Fixed hierarchy limits flexibility in node sizes.
+
+## Background
+The VDB format was developed by DreamWorks Animation for use in visual effects and animation pipelines [S1, unofficial]. The 5-4-3 variant is the most commonly used configuration in practice, despite the underlying C++ template system allowing for customization [S1, unofficial]. The structure is designed to handle large-scale volumetric data efficiently, enabling operations like fluid simulation and surface reconstruction on sparse datasets [S1, unofficial].
+
+## Sources
+[S1] JangaFX - Insight: VDB, a deep dive, https://jangafx.com/insights/vdb-a-deep-dive, fetched 2026-10-27 (unofficial)

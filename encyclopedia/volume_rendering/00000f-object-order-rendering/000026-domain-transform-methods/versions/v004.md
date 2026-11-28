@@ -1,0 +1,54 @@
+# Domain-transform methods
+
+Also called: Fourier-space techniques, frequency-domain rendering, spectral volume rendering
+
+## Overview
+Domain-transform methods solve the computational bottleneck of spatial-domain volume rendering by transforming volumetric data into an alternative domain (typically frequency, compression, or wavelet) where projections can be generated more efficiently [S1, unofficial][S2]. Unlike object-order methods that rasterize primitives, these techniques decouple rendering performance from dataset resolution by leveraging global transforms, reducing per-view complexity from $O(N^3)$ to $O(N^2)$ or better [S1, S3, S13, unofficial]. They are distinct from [Ray Casting](52-ray-casting.md) and [Digital Compositing](53-digital-compositing.md) because they produce order-independent linear projections (attenuation-only images) without supporting transparency control or interactive parameter modification beyond viewing direction [S1, S3, S9, unofficial].
+
+## Shared principles
+All domain-transform methods follow a three-stage pipeline: Global Transformation, Slice Extraction, and Inverse Transformation [S1, 824-fourier-projection-slice-volume-rendering.md, 895-hartley-transform-for-memory-reduction.md, 5396-dct-based-volume-rendering.md, unofficial].
+
+1.  **Global Transformation:** The input 3D scalar volume $f(x, y, z)$ is transformed into the target domain (e.g., frequency, DCT coefficients) using a global transform (DFT, DHT, DCT) [S1, unofficial][S2]. This step is performed once during preprocessing.
+2.  **Slice Extraction:** A 2D slice is extracted from the transformed 3D data. For frequency-domain methods, this corresponds to extracting a plane through the origin perpendicular to the viewing direction $V$, exploiting the Projection-Slice Theorem [S3, S13, unofficial]. The slice is resampled from the discrete 3D lattice to a 2D grid, requiring interpolation [S3, S2, unofficial].
+3.  **Inverse Transformation:** The extracted 2D slice is transformed back to the spatial domain using the inverse of the global transform (e.g., 2D IFFT, 2D IDHT, 2D IDCT) to generate the final 2D projection image [S1, unofficial][S2].
+
+**Common Pitfalls:**
+*   **Boundary Artifacts:** Transforms like DFT and DHT assume periodic boundary conditions. Discontinuities at volume boundaries cause high-frequency artifacts. Mitigation includes zero-padding or vignetting correction (pre-multiplying by the reciprocal of the interpolation filter response) [S3, S10, S11, S13, 841-gpu-based-2d-fft.md, 952-frequency-domain-volume-rendering.md, 6324-hartley-transform.md, unofficial].
+*   **Aliasing:** The output image resolution must meet the Nyquist criterion to avoid aliasing artifacts during slice extraction [S2, S3, 952-frequency-domain-volume-rendering.md, 5396-dct-based-volume-rendering.md, 6324-hartley-transform.md, unofficial].
+*   **Limited Interactivity:** These methods generally do not allow interactive modification of display parameters (e.g., opacity, lighting) other than the viewing direction [S1, unofficial].
+
+## Subtopics
+
+### [Fourier Projection-Slice Volume Rendering](824-fourier-projection-slice-volume-rendering.md)
+Uses the Discrete Fourier Transform (DFT) and the Projection-Slice Theorem to generate X-ray-like projections. It solves the $O(N^3)$ complexity of ray casting by reducing per-view cost to $O(N^2 \log N)$ via 2D resampling and inverse transforms. It produces order-independent linear projections without transparency.
+
+### [GPU-based 2D FFT](841-gpu-based-2d-fft.md)
+A hardware-accelerated implementation of the 2D FFT using ping-pong buffers and lookup textures for bit-reversal and butterfly operations. It exploits the separability of the Fourier transform to map the algorithm to fragment shaders, solving the computational bottleneck of frequency-domain rendering on GPUs.
+
+### [Hartley Transform for Memory Reduction](895-hartley-transform-for-memory-reduction.md)
+Replaces the complex DFT with the real-valued Discrete Hartley Transform (DHT). This eliminates complex arithmetic, reducing memory requirements by half compared to storing a full complex spectrum, and avoids the complexity of handling Hermitian symmetry.
+
+### [Frequency Domain Volume Rendering](952-frequency-domain-volume-rendering.md)
+A general pipeline that transforms scalar data to the frequency domain, slices the spectrum, and inverse-transforms. It decouples rendering performance from dataset resolution, making it suitable for interactive visualization on hardware supporting floating-point textures.
+
+### [Domain Repetition](1218-domain-repetition.md)
+A technique for creating infinite, periodic repetitions of an object in space by wrapping query coordinates using modulo arithmetic. It allows rendering an infinite grid of primitives "for free" by modifying position before querying the base SDF, tiling space with a rectangular cell structure.
+
+### [Fourier Transform](2288-fourier-transform.md)
+The foundational transform converting a 3D scalar volume into the frequency domain. It enables efficient convolution and filtering via the Projection-Slice Theorem but lacks spatial localization of features.
+
+### [Translation-invariant Fluorescence Rendering via Fourier Convolution](5085-translation-invariant-fluorescence-rendering-via-fourier-con.md)
+Renders 3D fluorescence microscopy images by convolving fluorophore density with a Point Spread Function (PSF) in the Fourier domain. It enables differentiable 3D image synthesis for optimizing biological geometry and optical parameters.
+
+### [DCT-based Volume Rendering](5396-dct-based-volume-rendering.md)
+Represents volume using Discrete Cosine Transform (DCT) coefficients. Unlike DFT/DHT, it requires on-demand decompression of data blocks during rendering, making it suitable for rendering directly from compressed data formats.
+
+### [Hartley Transform](6324-hartley-transform.md)
+A real-valued integral transform using the kernel $\text{cas}(\theta) = \cos(\theta) + \sin(\theta)$. It serves as an alternative to DFT for real-valued data, preserving the projection-slice theorem while avoiding complex arithmetic.
+
+## Background
+Domain-transform methods, also known as Fourier-space techniques, were introduced to address the high computational cost of spatial-domain volume rendering [S1, unofficial][S2]. The basic idea is to compute the 3D Fourier transformation of the entire volume in a pre-processing step, extract a slice image in the frequency domain, and transform it back into the spatial domain using the 2D inverse Fourier transformation [S1, unofficial]. The main advantage is the computational complexity of $O(N^2)$ for the projection, disregarding the one-time $O(N^3 \log N)$ 3D Fourier transformation [S1, unofficial]. A major drawback is the lack of interactivity for display parameters other than viewing direction [S1, unofficial]. The category includes methods using compression (e.g., Yeo and Liu [1995]), wavelets (e.g., Muraki [1993]), or frequency domains (e.g., Malzbender [1993]) [S2].
+
+## Sources
+[S1] Volume rendering techniques for general purpose graphics hardware, https://opus4.kobv.de/opus4-fau/files/9/Dissertation.pdf, fetched 2026-10-26 (unofficial)
+[S2] Volume visualization, https://dl.acm.org/doi/pdf/10.1145/234313.234383, fetched 2026-11-01

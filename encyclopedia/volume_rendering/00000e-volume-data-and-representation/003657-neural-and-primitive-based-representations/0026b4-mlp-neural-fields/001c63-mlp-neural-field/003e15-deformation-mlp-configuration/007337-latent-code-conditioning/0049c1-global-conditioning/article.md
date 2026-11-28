@@ -1,0 +1,81 @@
+# Global Conditioning
+
+Also called: Mapping Network
+
+## Overview
+Global conditioning encodes the entirety of a data sample's properties into a single latent vector $z$ [S2, unofficial]. This vector is mapped to an intermediate non-linear latent space to influence the neural field decoder, serving as a global summary of the instance [S1][S2, unofficial]. It is distinguished from local conditioning, which distributes information across multiple latent codes assigned to specific spatio-temporal coordinates [S2, unofficial].
+
+## How it works
+**Inputs and Outputs:**
+- Input: A global latent code $z \in \mathbb{R}^D$ [S1][S2, unofficial].
+- Output: A mapped latent vector $z'$ in an intermediate non-linear space with dimension 128 [S1].
+
+**Data Structures:**
+- The mapping network is a fixed architecture consisting of normalization and linear layers [S1].
+
+**Steps:**
+1. **Normalization:** Normalize the input latent code $z$ [S1].
+2. **Linear Transformation 1:** Pass the normalized $z$ through a linear layer [S1].
+3. **Activation 1:** Apply LeakyReLU with negative slope 0.2 [S1].
+4. **Linear Transformation 2:** Pass the result through a second linear layer [S1].
+5. **Activation 2:** Apply LeakyReLU(0.2) [S1].
+6. **Linear Transformation 3:** Pass the result through a third linear layer [S1].
+7. **Activation 3:** Apply LeakyReLU(0.2) [S1].
+8. **Output:** The final output shape is 128 [S1].
+
+**Parameters:**
+- Hidden Dimension: The intermediate latent space dimension is 128 for all layers in the mapping network [S1].
+- Activation: LeakyReLU with $\alpha = 0.2$ [S1].
+
+**Pseudocode:**
+> **Unverified code.** The code below did not pass a test run against a reference implementation, or no test fits it, so it may contain errors.
+
+```python
+import torch
+import torch.nn as nn
+
+class MappingNetwork(nn.Module):
+    def __init__(self, input_dim: int):
+        super().__init__()
+        self.norm = nn.LayerNorm(input_dim) # [G] Specific normalization type not detailed in sources [S1]
+        self.linear1 = nn.Linear(input_dim, 128)
+        self.linear2 = nn.Linear(128, 128)
+        self.linear3 = nn.Linear(128, 128)
+        self.activation = nn.LeakyReLU(negative_slope=0.2)
+
+    def forward(self, z: torch.Tensor) -> torch.Tensor:
+        z_norm = self.norm(z)
+        x = self.activation(self.linear1(z_norm))
+        x = self.activation(self.linear2(x))
+        x = self.activation(self.linear3(x))
+        return x
+```
+
+## Subtopics
+
+### Global Generator
+A variant that maps a single global latent code $z$ to a 2D grid of local latent codes $W$, representing the spatial layout of the scene [S1]. It is chosen when spatial variation of latent properties is required, unlike standard global conditioning which provides a single code for the entire volume [S1].
+- **Definition:** Maps $z$ to a grid $W$ of local codes [S1].
+- **Steps:**
+    1. Initialize with a constant input tensor [S1].
+    2. Apply a 3×3 modulated convolutional layer conditioned on $z$ [S1].
+    3. Apply LeakyReLU(0.2) [S1].
+    4. For subsequent layers, apply pairs of modulated convolutions [S1]. Each pair upsamples resolution by 2× using a transposed convolution (stride 2) followed by bilinear filtering [S1].
+    5. Apply LeakyReLU(0.2) after each convolution in the Global Generator [S1].
+- **Parameters:**
+    - Output resolution of $W$: 32×32 [S1]. This controls the spatial region size represented by each local code [S1].
+
+## Operating characteristics
+**Time and Memory Complexity:**
+- The mapping network is lightweight, consisting of only three linear layers with a fixed output dimension of 128 [S1].
+- The Global Generator variant involves convolutional operations, with computational cost increasing with the output resolution (e.g., 32×32 grid) [S1].
+
+**Strengths and Limitations:**
+- **Strengths:** Encodes the whole information about a data sample in one latent code, simplifying the representation of global properties [S2, unofficial].
+
+## Background
+Global conditioning and the Mapping Network architecture were introduced in the context of unconstrained scene generation with locally conditioned radiance fields [S1]. The mapping network design follows conventions from StyleGAN, utilizing normalization and LeakyReLU activations [S1][S2, unofficial]. The concept of global vs. local conditioning is discussed in broader introductions to neural fields [S2, unofficial].
+
+## Sources
+[S1] Unconstrained Scene Generation with Locally Conditioned Radiance Fields, https://doi.org/10.1109/iccv48922.2021.01404, fetched 2026-10-26
+[S2] Introduction to Neural Fields - inovex GmbH, https://www.inovex.de/de/blog/introduction-to-neural-fields/, fetched 2026-10-29 (unofficial)

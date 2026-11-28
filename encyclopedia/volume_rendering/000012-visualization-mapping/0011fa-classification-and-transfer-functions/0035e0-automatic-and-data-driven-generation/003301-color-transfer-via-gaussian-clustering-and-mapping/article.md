@@ -1,0 +1,233 @@
+# Color Transfer via Gaussian Clustering and Mapping
+
+Also called: Automatic Color Transfer for 3D Volumes, Cluster-based color mapping, Example-based color transfer
+
+## Overview
+This method automatically transfers chromatic and luminance characteristics from a 2D example image (illustration or photograph) to a 3D source volume, solving the problem of synthesizing illustrative 3D textures without tedious manual region matching [S1, unofficial]. It assumes that the example image and source volume share similar object distributions and that distinct colors in the example correspond to distinct objects in the source [S1, unofficial]. Unlike [Histogram-Based Transfer Function Generation](6182-histogram-based-transfer-function-generation.md) which maps intensity directly, this method maps color clusters in the $l\alpha\beta$ space, allowing for complex color relationships to be preserved across scalar or color volumes [S1, unofficial].
+
+## How it works
+The method consists of three sequential steps: Clustering, Mapping, and Transferring [S1, unofficial].
+
+### Inputs and Outputs
+*   **Input:** A 2D example image (source of target colors) and a 3D source volume (scalar or color) [S1, unofficial].
+*   **Output:** A 3D volume where each voxel is assigned a transferred color vector $\vec{C}$ in the $l\alpha\beta$ space, which can be converted to RGB for rendering [S1, unofficial].
+
+### Data Structures
+*   **Color Space:** $l\alpha\beta$ (Luminance, Chrominance 1, Chrominance 2). The channels are treated as independent [S1, unofficial].
+*   **Histograms:** 1D histograms for each of the three channels, scaled to $[0, 1]$ [S1, unofficial].
+*   **Clusters:** Represented by Gaussian functions defined by center (mean) $\vec{E}_s$, variance $\sigma_s$, and weight (area) $s$ [S1, unofficial].
+    *   Source clusters: $G_s = \{G_{s_i} \mid i = 1 \dots N_s\}$ [S1, unofficial].
+    *   Example clusters: $G_e = \{G_{e_j} \mid j = 1 \dots N_e\}$ [S1, unofficial].
+*   **Mapping:** A function $f: \{1 \dots N_s\} \to \{1 \dots N_e\}$ mapping source cluster indices to example cluster indices [S1, unofficial].
+
+### Parameters
+*   **Error Threshold:** User-specified threshold for stopping Gaussian fitting (e.g., 5%) [S1, unofficial].
+*   **Value Ranges ($\vec{V}$):** Normalization factors for the $l, \alpha, \beta$ channels to balance distances [S1, unofficial].
+
+### Assumptions
+1.  **Simplicity:** If two objects have different colors in the example, they will have different colors in the source [S1, unofficial].
+2.  **Similarity:** The relative area/volume proportions of objects are similar between the example and the source [S1, unofficial].
+
+### Algorithm Steps
+
+#### 1. Clustering
+1.  **Histogram Construction:** Gather color histograms for the $l, \alpha, \beta$ channels from the entire example image and source volume. Scale histogram values to $[0, 1]$ [S1, unofficial].
+2.  **Gaussian Fitting:** Fit a set of Gaussian functions to the histograms. Each Gaussian represents a color cluster [S1, unofficial].
+    *   Constraint: The area under the Gaussian must be consistent across the three channels for a single cluster, though shapes may differ [S1, unofficial].
+    *   Optimization: Search for best parameters (center, weight, height) to minimize fitting error [S1, unofficial].
+3.  **Cluster Count Determination:**
+    *   Start with 1 Gaussian function [S1, unofficial].
+    *   Iteratively add functions until the maximum fitting error is below the user-specified threshold [S1, unofficial].
+    *   **Order:** Fit the example image first to determine $N_e$. Then fit the source volume, ensuring $N_s \ge N_e$ [S1, unofficial].
+
+#### 2. Mapping
+Find a mapping $f$ from source clusters $S$ (normalized areas $s_i$) to example clusters $E$ (normalized areas $e_j$) that minimizes the mapping error:
+$$ M_{Error} = \sum_{i=1}^{N_s} (s_i - f(s_i))^2 $$
+Subject to $\sum s_i = 1$ and $\sum e_j = 1$ [S1, unofficial].
+
+*   **Case $N_s = N_e$:**
+    *   Sort cluster sets $S$ and $E$ separately [S1, unofficial].
+    *   If they share the same sequence, map directly $f(s_i) = e_i$ [S1, unofficial].
+    *   If multiple items have the same value, map randomly [S1, unofficial].
+    *   Alternatively, calculate errors for all $N_s!$ combinations to find the global minimum, or use a greedy algorithm for relative optimization [S1, unofficial].
+*   **Case $N_s > N_e$:**
+    *   Generate an intermediate source cluster set $S'$ with size $N_e$ by merging source clusters [S1, unofficial].
+    *   Find the mapping $f'$ for $S'$ to $E$ using the $N_s = N_e$ logic [S1, unofficial].
+    *   Build the final mapping $f$ from $f'$ by reversing the merging sequence [S1, unofficial].
+
+#### 3. Transferring
+For each voxel $\vec{c}_v$ in the source volume:
+
+1.  **Distance Calculation:** Calculate the distance $d_i$ from $\vec{c}_v$ to the center $\vec{E}_{s_i}$ of each source cluster $G_{s_i}$ in 3D $l\alpha\beta$ space [S1, unofficial].
+2.  **Normalized Distance ($D_i$):**
+    $$ D_i = \sum_{j=l,\alpha,\beta} \frac{d_{i,j}}{V_j} $$
+    Where $d_{i,j}$ is the distance in channel $j$, and $V_j$ is the value range for channel $j$ [S1, unofficial].
+3.  **Transferred Color per Cluster ($\vec{c}_i$):**
+    Calculate the transferred color for each source cluster based on the mapped example cluster $e_{f(s_i)}$:
+    $$ c_{i,j} = \frac{(c_{v,j} - E_{s_i,j}) \cdot \sigma_{e_{f(s_i)},j}}{\sigma_{s_i,j}} + E_{e_{f(s_i)},j} $$
+    Where $j \in \{l, \alpha, \beta\}$, $E$ is the mean, and $\sigma$ is the standard deviation [S1, unofficial].
+4.  **Final Color ($\vec{C}$):**
+    Aggregate the transferred colors using an inverse distance function $q(D_i)$:
+    $$ \vec{C} = \frac{\sum_{i=1}^{N} s_i (\vec{c}_i \cdot q(D_i))}{\sum_{i=1}^{N} s_i q(D_i)} $$
+    Where $q(D_i)$ is the inverse of the distance metric (typically $1/D_i$ or similar weighting) [S1, unofficial].
+
+**Scalar Volume Handling:**
+If the source volume is scalar:
+*   Cluster search uses only the luminance channel [S1, unofficial].
+*   The color vector $\vec{c}_v$ is constructed as $[c_v, c_v, c_v]$ [S1, unofficial].
+*   Means $\vec{E}_{s_i}$ and deviations $\vec{\sigma}_{s_i}$ are similarly replicated [S1, unofficial].
+*   Distance $D_i$ is calculated as $|c_v - E_{s_i}|$ [S1, unofficial].
+
+### Pseudocode
+
+> **Unverified code.** The code below did not pass a test run against a reference implementation, or no test fits it, so it may contain errors.
+
+```python
+import math
+from itertools import permutations
+
+def fit_gaussians(histogram_bins, histogram_values, threshold=0.05):
+    """
+    Fit Gaussian mixture to histogram.
+    Returns list of cluster parameters: (mean, std, weight)
+    """
+    n_clusters = 1
+    while True:
+        means = [min(histogram_bins) + (max(histogram_bins) - min(histogram_bins)) * (i + 0.5) / n_clusters for i in range(n_clusters)]
+        stds = [0.1] * n_clusters
+        weights = [sum(histogram_values) / n_clusters] * n_clusters
+        
+        initial_params = means + stds + weights
+        
+        def objective(params):
+            fitted_hist = [0.0] * len(histogram_bins)
+            for k in range(n_clusters):
+                mean = params[k]
+                std = params[n_clusters + k]
+                weight = params[2 * n_clusters + k]
+                for b_idx, bin_val in enumerate(histogram_bins):
+                    pdf = (1.0 / (std * math.sqrt(2 * math.pi))) * math.exp(-0.5 * ((bin_val - mean) / std) ** 2)
+                    fitted_hist[b_idx] += weight * pdf
+            return sum((fitted_hist[b] - histogram_values[b]) ** 2 for b in range(len(histogram_bins)))
+        
+        # [Comment: Source does not specify optimizer; use standard least-squares fitting.]
+        result = optimize(objective, initial_params) 
+        
+        error = math.sqrt(result.fun) / sum(histogram_values)
+        
+        if error < threshold:
+            break
+        elif n_clusters > 10:
+            break
+        else:
+            n_clusters += 1
+            
+    clusters = []
+    for k in range(n_clusters):
+        clusters.append({'mean': result.x[k], 'std': result.x[n_clusters + k], 'weight': result.x[2 * n_clusters + k]})
+    return clusters
+
+def compute_mapping_error(source_areas, example_areas, mapping):
+    """
+    Calculate MError = sum((si - f(si))^2)
+    mapping: list of indices mapping source i to example j
+    """
+    return sum((source_areas[i] - example_areas[mapping[i]]) ** 2 for i in range(len(source_areas)))
+
+def find_mapping(source_clusters, example_clusters):
+    """
+    Find mapping f from source to example clusters.
+    """
+    Ns = len(source_clusters)
+    Ne = len(example_clusters)
+    
+    source_areas = [c['weight'] for c in source_clusters]
+    source_areas = [s / sum(source_areas) for s in source_areas]
+    
+    example_areas = [c['weight'] for c in example_clusters]
+    example_areas = [e / sum(example_areas) for e in example_areas]
+    
+    if Ns == Ne:
+        s_indices = sorted(range(Ns), key=lambda i: source_areas[i], reverse=True)
+        e_indices = sorted(range(Ne), key=lambda i: example_areas[i], reverse=True)
+        
+        if s_indices == e_indices:
+            return e_indices
+            
+        min_error = float('inf')
+        best_map = None
+        for p in permutations(range(Ne)):
+            err = compute_mapping_error(source_areas, example_areas, p)
+            if err < min_error:
+                min_error = err
+                best_map = list(p)
+        return best_map
+    else:
+        # [Comment: Source does not specify merging strategy for Ns > Ne; standard approach merges closest clusters by area or distance.]
+        pass
+
+def transfer_color(voxel_value, source_clusters, example_clusters, mapping, value_ranges):
+    """
+    Transfer color for a single voxel.
+    voxel_value: scalar or [l, a, b] array
+    """
+    is_scalar = len(voxel_value) == 1
+    
+    if is_scalar:
+        v = [voxel_value[0], voxel_value[0], voxel_value[0]]
+        for c in source_clusters:
+            c['mean'] = [c['mean']] * 3
+            c['std'] = [c['std']] * 3
+        for c in example_clusters:
+            c['mean'] = [c['mean']] * 3
+            c['std'] = [c['std']] * 3
+    else:
+        v = voxel_value
+        
+    N = len(source_clusters)
+    numerator = [0.0, 0.0, 0.0]
+    denominator = 0.0
+    
+    for i in range(N):
+        s_i = source_clusters[i]['weight']
+        mean_s = source_clusters[i]['mean']
+        
+        di = [abs(v[j] - mean_s[j]) for j in range(3)]
+        Di = sum(di[j] / value_ranges[j] for j in range(3))
+        
+        q_Di = 1.0 / Di if Di > 1e-9 else 1.0
+        
+        j = mapping[i]
+        mean_e = example_clusters[j]['mean']
+        std_e = example_clusters[j]['std']
+        std_s = source_clusters[i]['std']
+        
+        c_i = [((v[ch] - mean_s[ch]) * std_e[ch] / std_s[ch]) + mean_e[ch] for ch in range(3)]
+        
+        for ch in range(3):
+            numerator[ch] += s_i * c_i[ch] * q_Di
+        denominator += s_i * q_Di
+        
+    C = [num / denominator for num in numerator]
+    return C
+```
+
+### Edge Cases and Pitfalls
+*   **$N_s < N_e$:** The method assumes $N_s \ge N_e$. If the source has fewer clusters than the example, the mapping is undefined. The algorithm enforces $N_s \ge N_e$ by continuing to fit source clusters until this condition is met [S1, unofficial].
+*   **Scalar Volumes:** The method treats scalar volumes as grayscale color volumes by replicating the scalar value across all channels [S1, unofficial].
+*   **Mapping Ambiguity:** When $N_s = N_e$ and multiple clusters have similar areas, the greedy or random mapping may produce suboptimal results. Calculating errors for all $N_s!$ combinations finds the global minimum, while a greedy algorithm provides a relative optimization [S1, unofficial].
+*   **Distance Zero:** If a voxel exactly matches a cluster center, $D_i = 0$. The inverse function $q(D_i)$ must handle this singularity (e.g., by clamping or using a small epsilon) [G].
+
+## Operating characteristics
+*   **Time Complexity:** Not given in the sources.
+*   **Memory Complexity:** Not given in the sources.
+*   **Strengths:** Fully automatic; preserves color relationships from examples; works for both scalar and color volumes [S1, unofficial].
+*   **Limitations:** Relies on strong assumptions about object distribution similarity; may fail if the example and source have significantly different object compositions; scalar volume colorization can be arbitrary [S1, unofficial].
+*   **When to Use:** When an illustrative example is available and manual transfer function design is too tedious [G].
+*   **When Not to Use:** When precise scientific accuracy is required over illustrative appearance; when the example and source have fundamentally different object structures [G].
+
+## Background
+The method was introduced in "Example-based volume illustrations" [S1, unofficial]. It addresses the difficulty of manually selecting corresponding regions in 3D volumes for color transfer [S1, unofficial]. By using Gaussian clustering and area-based mapping, it automates the process of transferring color characteristics from 2D illustrations or photographs to 3D volumes [S1, unofficial]. The method is particularly useful in medical and biological fields where photographic volumes are available or where scalar volumes (like CT scans) need to be colorized based on illustrative examples [S1, unofficial].
+
+## Sources
+[S1] Example-based volume illustrations, https://ieeexplore.ieee.org/abstract/document/1532854/, fetched 2026-10-31 (unofficial)

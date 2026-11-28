@@ -1,0 +1,105 @@
+When using openvdb::tools::meshToVolume(), there is this great feature that allows you to pass a MeshDataAdapter that acts as pro proxy for reading mesh data. This allows the user to plug a custom mesh structure into the rasterization pr...
+
+MeshDataAdapter in volumeToMesh · Issue #900 · AcademySoftwareFoundation/openvdb · GitHub
+Skip to content
+You signed in with another tab or window. Reload to refresh your session.
+You signed out in another tab or window. Reload to refresh your session.
+You switched accounts on another tab or window. Reload to refresh your session.
+Dismiss alert
+MeshDataAdapter in volumeToMesh #900
+New issue
+Copy link
+New issue
+Copy link
+Open
+Open
+MeshDataAdapter in volumeToMesh#900
+Copy link
+Description
+UlysseV
+opened on Dec 14, 2020
+Issue body actions
+When using openvdb::tools::meshToVolume(), there is this great feature that allows you to pass a MeshDataAdapter that acts as pro proxy for reading mesh data.
+This allows the user to plug a custom mesh structure into the rasterization process without the overhead of copying all the data into openvdb structures (openvdb::Vec3d and such).
+Such a feature would be extremely valuable at the other end of the pipeline : when usingopenvdb::tools::volumeToMesh().
+As far as I know, there is now proxy mechanics for writing mesh data, making it cumbersome to write a custom mesh structure using openVDB dual contouring (instead, data is written in openVDB datatypes and then has to be copied/casted into the custom type).
+The Interface would be something along those lines :
+```
+struct WriteOnlyMeshDataAdapter {
+  size_t createVertex(const openvdb::Vec3d& pos);
+  size_t createQuad(size_t v0, size_t v1, size_t v2, size_t v3);
+};
+```
+Such a WriteOnlyMeshDataAdapter would be passed as a parameter to the volumeToMesh() function.
+Would it be concievable to add such a feature ?
+Reactions are currently unavailable
+Activity
+jmlait commented on Dec 19, 2020
+jmlait
+on Dec 19, 2020
+Contributor
+More actions
+It is an interesting idea. However, the main problem with a proxy for creating meshes is efficiency. (Which might sound odd, as I suspect the pull for an Adapter is that the creation of intermediary arrays is seen as inefficient)
+If we create into our own arrays of arrays, we can potentially pre-allocate, multithread, etc. If we have a createVertex/createQuad style interface we are immediately tied to a very serial interface. It is also hard to properly parallelize the marshalling on the other side of the interface, as you have no idea how many vertices or quads will be created so need to do everything just-in-time.
+If efficiency is not a concern, then writing the array -> mesh converter is probably just as much work as writing the MeshDataAdapter, so we aren't really any farther ahead. Moving the copy/casting into WriteOnlyMeshDataAdapter doesn't change the fact copy/casting is being done.
+If you look at SOP_OpenVDB_Convert's copyMesh you can see an example of why creating a single pool is advantagous - it allows us to use the buildBlock() functions that can allocate all the tris and quads en-masse, along with all the topology attributes they require to cross link the mesh properly. This can be multithreaded and optimized, but if they were fed to us a quad and tri at a time, we'd probably just have to re-invent the mesh-cache on our side.
+UlysseV commented on Dec 21, 2020
+UlysseV
+on Dec 21, 2020
+Author
+More actions
+I understand that memory management and parallelization make such an interface difficult and/or inefficient.
+Dumping the idea of an adapter, I think it should still be possible to generate custom mesh types with little extra cost, for instance using template types.
+Assuming that vertex position and face indices are stored in std::vector in the target structure, one could still use openvdb::tools::doVolumeToMesh() while passing custom types for points and faces.
+The prototype of the function would hence look like that:
+```
+struct DefaultMeshType {
+     using Point=Vec3s;
+     using Triangle=Vec3I;
+     using Quad=Vec4I;
+};
+
+template<typename GridType, typename MeshType = DefaultMeshType>
+doVolumeToMesh(
+    const GridType& grid,
+    std::vector<typename MeshType::Point>& points,
+    std::vector<typename MeshType::Triangle>& triangles,
+    std::vector<typename MeshType::Quad>& quads,
+    double isovalue,
+    double adaptivity,
+    bool relaxDisorientedTriangles);
+```
+Of course, the template parameter MeshType would have to be used by all classes of VolumeToMesh.h, but it would allow a great versatility at no runtime cost.
+End goal
+In my case, efficiency is a concern, but rather in space than time.
+Those exported meshes are huge, and having them twice in memory at some point (one in openvdb structures, and one in my working structures) creates a peak of RAM usage that is detrimental to my end.
+jmlait commented on Jan 14, 2021
+jmlait
+on Jan 14, 2021
+Contributor
+More actions
+Ah, I see... If your native structure is also happily a std::vector of points/tris/quads, just with different element types, this sort of templating would avoid a marshal stage.
+Naturally your native Point/Triangle/Quad would have to be duck-typed to act like Vec3s/Vec3I/Vec4I (possible even with assignment operators...), but this would allow the doVolumeToMesh to bulk-allocate your type directly.
+The main use I can think of is if your point position or index precision are different sizes than used by VDB, such as if you have double or half points rather than float points. The other use is if you have array-of-structure for your points, for example, co-locating position and velocity values in a single structure. (Though in this cases, usually, I'd recommend SoA if you care about memory... and I'm not a big fan of std::vector for large structures either... But I can certainly see the use-cases)
+All those concerns are pretty moot because at a glance this seems a very low-cost approach to get what you need. So unless something unforeseen crops up in the implementation, a PR to add this template would seem quite useful. But I'd not want to do it myself, as I'd be doing it blindly guessing on your use case - I'd much rather review a PR from you where you've verified the templating actually works in your use case.
+Sign up for free to join this conversation on GitHub. Already have an account? Sign in to comment
+Metadata
+Metadata
+Assignees
+No one assigned
+Labels
+No labels
+No labels
+Type
+No type
+Projects
+No projects
+Milestone
+No milestone
+Relationships
+None yet
+Development
+No branches or pull requests
+Issue actions
+Open in GitHub Copilot app
+You can’t perform that action at this time.

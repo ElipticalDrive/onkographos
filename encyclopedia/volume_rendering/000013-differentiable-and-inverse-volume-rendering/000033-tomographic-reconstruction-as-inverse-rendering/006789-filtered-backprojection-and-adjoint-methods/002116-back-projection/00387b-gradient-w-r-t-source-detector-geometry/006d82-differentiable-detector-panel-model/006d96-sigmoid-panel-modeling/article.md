@@ -1,0 +1,116 @@
+# Sigmoid Panel Modeling
+
+Also called: Double-sigmoid hit recording model
+
+## Overview
+Sigmoid Panel Modeling is a differentiable detector hit-recording method used in muon tomography optimization (specifically within the TomOpt framework) to make detector performance metrics—spatial resolution and hit efficiency—continuous functions of the muon's position relative to the panel [S1]. It solves the problem of non-differentiability in standard binary detector models (where hits are either recorded or not, and resolution is constant or zero) by replacing step functions with smooth sigmoid transitions [S1]. This allows gradients to flow with respect to all panel parameters (position, size, and z-depth) during inverse rendering or optimization, unlike its nearest alternative, the binary rectangle model, which is only suitable for validation [S1].
+
+## How it works
+**Inputs:**
+*   Muon trajectory parameters (position and direction).
+*   Detector panel parameters: maximum spatial resolution $\sigma_{max}$, maximum hit efficiency $\epsilon_{max}$, panel dimensions (width $W$, height $H$), and panel position $(x_p, y_p, z_p)$.
+*   Sigmoid smoothness parameter (controls the transition width at panel edges) [S1].
+
+**Outputs:**
+*   Reconstructed hit position $(x_{rec}, y_{rec}, z_j)$.
+*   Effective hit efficiency $\epsilon_{eff}$.
+*   Effective spatial resolutions $\sigma_{x,eff}, \sigma_{y,eff}$.
+
+**Data Structures:**
+*   The panel model evaluates a weight function $w(u)$ for a coordinate $u$ (where $u$ is either $x$ or $y$ relative to the panel center).
+*   The weight function $w(u)$ is a double-sigmoid function that maps the normalized distance from the panel center to a value in $[0, 1]$. It reaches 1 at the center and smoothly decays to 0 at the edges and beyond [S1].
+*   The specific mathematical form of the double-sigmoid is not explicitly defined in the provided notes, but it is described as a pair of functions in $x$ and $y$ [S1].
+
+**Steps:**
+1.  **Propagation:** For each muon and each detector panel $j$ at depth $z_j$, propagate the muon to determine the true intersection point $(x_{true}, y_{true})$ on the panel plane [S1].
+2.  **Weight Evaluation:** Compute the panel model weights $w(x_{true})$ and $w(y_{true})$ based on the true hit position relative to the panel center [S1].
+3.  **Resolution Calculation:** Compute the effective spatial resolutions for the x and y axes using the maximum resolution $\sigma_{max}$ and the respective weights:
+    $$ \sigma_{x,eff} = \frac{\sigma_{max}}{w(x_{true})} $$
+    $$ \sigma_{y,eff} = \frac{\sigma_{max}}{w(y_{true})} $$
+    Note: As $w \to 0$ (far from center), $\sigma_{eff} \to \infty$, effectively discarding the hit's positional accuracy [S1].
+4.  **Hit Sampling:** Generate the reconstructed hit position by sampling from a Gaussian distribution centered at the true position with the effective resolutions:
+    $$ x_{rec} = x_{true} + \delta_x $$
+    $$ y_{rec} = y_{true} + \delta_y $$
+    where $\delta_x, \delta_y \sim \mathcal{N}(0, \sigma_{x,y,eff})$ [S1].
+5.  **Efficiency Calculation:** Compute the effective hit efficiency as the product of the maximum efficiency $\epsilon_{max}$ and the weights for both axes:
+    $$ \epsilon_{eff} = \epsilon_{max} \cdot w(x_{true}) \cdot w(y_{true}) $$
+    This value represents the probabilistic likelihood of the hit being recorded [S1].
+
+**Pseudocode:**
+> **Unverified code.** The code below did not pass a test run against a reference implementation, or no test fits it, so it may contain errors.
+
+```python
+def sigmoid_panel_model(muon, panel, rng):
+    """
+    muon: object with method propagate_to_z(z) returning (x_true, y_true)
+    panel: object with attributes sigma_max, epsilon_max, center_x, center_y, width, height
+    rng: random number generator
+    """
+    # Step 1: Propagate muon to panel z-position
+    z_j = panel.z_position
+    x_true, y_true = muon.propagate_to_z(z_j)
+    
+    # Step 2: Compute weights using double-sigmoid function
+    # Note: The exact formula for w(u) is not provided in sources, 
+    # but it depends on normalized distance from panel center.
+    # w_x = double_sigmoid(x_true, panel.center_x, panel.width)
+    # w_y = double_sigmoid(y_true, panel.center_y, panel.height)
+    # [G] Implementation detail: w(u) typically involves sigmoid functions 
+    # of the form 0.5 * (sigmoid(k*(u - edge1)) - sigmoid(k*(u - edge2))) 
+    # to create a plateau in the center and decay at edges.
+    w_x = evaluate_panel_weight(x_true, panel.center_x, panel.width)
+    w_y = evaluate_panel_weight(y_true, panel.center_y, panel.height)
+    
+    # Step 3: Compute effective resolutions
+    # Avoid division by zero if w is extremely small; 
+    # in practice, very small w implies infinite resolution error (no hit).
+    sigma_x_eff = panel.sigma_max / w_x
+    sigma_y_eff = panel.sigma_max / w_y
+    
+    # Step 4: Sample reconstructed hit
+    delta_x = rng.gauss(0, sigma_x_eff)
+    delta_y = rng.gauss(0, sigma_y_eff)
+    
+    x_rec = x_true + delta_x
+    y_rec = y_true + delta_y
+    
+    # Step 5: Compute hit efficiency
+    epsilon_eff = panel.epsilon_max * w_x * w_y
+    
+    return {
+        'x_rec': x_rec,
+        'y_rec': y_rec,
+        'z_rec': z_j,
+        'epsilon_eff': epsilon_eff,
+        'sigma_x_eff': sigma_x_eff,
+        'sigma_y_eff': sigma_y_eff
+    }
+```
+
+**Parameters:**
+*   $\sigma_{max}$: Maximum spatial resolution of the panel (e.g., in mm). Not given in the sources.
+*   $\epsilon_{max}$: Maximum hit efficiency of the panel (e.g., 1.0 for 100%). Not given in the sources.
+*   Sigmoid smoothness: Controls the steepness of the transition at the panel edges. Higher smoothness leads to broader transitions [S1].
+
+**Edge Cases and Pitfalls:**
+*   **Division by Zero:** If $w(x_{true})$ or $w(y_{true})$ is exactly zero, $\sigma_{eff}$ becomes infinite. In practice, this means the hit has no positional information. The sources do not specify a numerical epsilon guard, but standard implementation requires handling near-zero weights [S1].
+*   **Inference Sensitivity:** The smoothness of the sigmoid affects optimization stability. Smoother panels make inference sensitive to muons far from the panel (affecting xy position/span optimization). Sharper transitions make inference sensitive to z-position, as muons far from the panel receive diminished weights (efficiency/resolution drop to near zero) [S1].
+
+## Subtopics
+
+### Probabilistic Hit Recording with Efficiency
+This variant interprets the binary nature of hit recording probabilistically. Instead of a hard "hit/no-hit" decision, every muon passing through a panel records a hit with an associated efficiency factor $\epsilon_{hit}$ [S1]. The total muon efficiency $\epsilon_\mu$ is computed as the probability of recording at least two hits (one before and one after the passive volume), which is required to reconstruct a trajectory [S1]. More hits better constrain the uncertainty on trajectory parameters, but at least two are strictly necessary [S1]. This approach allows the optimization process to account for partial detection probabilities rather than binary outcomes [S1].
+
+## Operating characteristics
+*   **Time Complexity:** Linear with respect to the number of muons and detector panels. For each muon-panel pair, the computation involves a few arithmetic operations and a Gaussian sampling [S1].
+*   **Memory Complexity:** Low. Requires storing panel parameters and temporary variables for each hit. No large lookup tables are needed if the sigmoid function is computed analytically [S1].
+*   **Strengths:** Fully differentiable with respect to all panel parameters (x, y, z, width, height), enabling gradient-based optimization of detector geometry [S1]. Provides a smooth transition between detected and undetected regions, avoiding discontinuities that hinder optimization [S1].
+*   **Limitations:** Computationally more expensive than binary models due to the evaluation of sigmoid functions and Gaussian sampling. The choice of smoothness parameter requires tuning; too smooth leads to noise from distant muons, too sharp leads to vanishing gradients for xy parameters [S1].
+*   **When to use:** During the optimization phase of detector design or alignment where gradients are required [S1].
+*   **When not to use:** During validation or inference where physical realism is prioritized over differentiability; in these cases, a binary rectangle model is used [S1].
+
+## Background
+Sigmoid Panel Modeling was introduced in the TomOpt framework for differential optimization of particle detectors in muon tomography [S1]. It was developed to address the non-differentiability of standard detector models, allowing for task- and constraint-aware design of detectors [S1]. The method uses a pair of double-sigmoid functions to model spatial resolution and efficiency as continuous functions of position, enabling the use of gradient-based optimization techniques for detector geometry [S1]. The approach is part of a broader effort to integrate differentiable rendering and inverse methods into particle physics detector design [S1].
+
+## Sources
+[S1] TomOpt: Differential optimisation for task- and constraint-aware design of particle detectors in the context of muon tomography, https://doi.org/10.1088/2632-2153/ad52e7, fetched 2026-10-26

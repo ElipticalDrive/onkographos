@@ -1,0 +1,377 @@
+--- v003.md
++++ v004.md
+@@ -75,38 +75,60 @@
+ import numpy as np
+ 
+-# Standard math operations assumed available
+-def henney_greenstein(g, cos_theta):
+-    """
+-    Henyey-Greenstein phase function.
+-    g: anisotropy parameter (bounded by tanh in main loop)
+-    cos_theta: cosine of the angle between incident and outgoing direction
+-    """
+-    g_sq = g * g
+-    denom = 1.0 + g_sq - 2.0 * g * cos_theta
+-    return (1.0 - g_sq) / (4.0 * np.pi * np.sqrt(denom) * denom)
++def sample_sphere(n):
++    """Uniform sampling on unit sphere S^2 [G]."""
++    u = torch.rand(n, 1)
++    v = torch.rand(n, 1)
++    theta = 2.0 * np.pi * u
++    phi = torch.acos(1.0 - 2.0 * v)
++    x = torch.sin(phi) * torch.cos(theta)
++    y = torch.sin(phi) * torch.sin(theta)
++    z = torch.cos(phi)
++    return torch.cat([x, y, z], dim=1)
++
++def sample_volume(n, bounds):
++    """Uniform sampling in 3D bounding box [min, max] [G]."""
++    return torch.rand(n, 3) * (bounds[1] - bounds[0]) + bounds[0]
++
++def get_pixel_directions(cam_origin, H, W, fov=60.0):
++    """Compute viewing directions for a pinhole camera [G]."""
++    fx = 1.0 / np.tan(np.radians(fov / 2.0))
++    fy = fx
++    cx, cy = W / 2.0, H / 2.0
++    u, v = torch.meshgrid(torch.arange(W), torch.arange(H), indexing='ij')
++    dirs = torch.stack([
++        (u - cx) / fx,
++        (v - cy) / fy,
++        torch.ones_like(u)
++    ], dim=-1)
++    return dirs / torch.norm(dirs, dim=-1, keepdim=True)
++
++def jittered_stratified_sample(n, t_min, t_max):
++    """Jittered stratified sampling for line integral [G]."""
++    t = torch.linspace(t_min, t_max, n + 1)
++    dt = (t_max - t_min) / n
++    jitter = torch.rand(n) * dt
++    return t[:-1] + jitter
++
++class SIRENNetwork(nn.Module):
++    """Simple SIREN network for spatial/angular fields [G]."""
++    def __init__(self, input_dim, hidden_dim=256, num_layers=3):
++        super().__init__()
++        layers = []
++        for i in range(num_layers):
++            layers.append(nn.Linear(input_dim if i == 0 else hidden_dim, hidden_dim))
++            layers.append(nn.Sine())
++        self.net = nn.Sequential(*layers)
++    def forward(self, x):
++        return self.net(x)
+ 
+ class NeuralRadiativeTransfer:
+-    def __init__(self, images, cameras, boundary_mesh):
+-        """
+-        images: List of RGB images [H, W, 3]
+-        cameras: List of camera parameters (o_k, omega_k)
+-        boundary_mesh: Mesh object providing boundary points and normals
+-        """
++    def __init__(self, images, cameras, boundary_mesh, bounds):
+         self.images = images
+         self.cameras = cameras
+         self.boundary_mesh = boundary_mesh
+-        
+-        # Stage 1: Initialization
+-        # F_xi is a neural hash grid. We train it to reconstruct images 
+-        # using emission-absorption model, then discard color output.
+-        self.F_xi = train_emission_absorption_model(images, cameras)
+-        
+-        # Stage 2: Joint Optimization
+-        # L_theta: SIREN network for light field (x, w) -> R3
+-        self.L_theta = SIRENNetwork(input_dim=6) # 3 for x, 3 for w
+-        # M_phi: SIREN network for medium (x) -> (sigma_a, sigma_s, g)
+-        self.M_phi = SIRENNetwork(input_dim=3)
+-        
+-        # Parameters
++        self.bounds = bounds
++        self.F_xi = None # Stage 1 model placeholder
++        self.L_theta = SIRENNetwork(6) # (x, w) -> R3
++        self.M_phi = SIRENNetwork(3)   # x -> (sigma_a, sigma_s, g)
+         self.lambda_bc = 1.0
+         self.lambda_obs = 1.0
+@@ -116,160 +138,50 @@
+         self.num_boundary_samples = 10000
+         self.num_vre_samples = 100
+-        
+-        # Optimizer
+-        self.optimizer = torch.optim.Adam(list(self.L_theta.parameters()) + 
+-                                          list(self.M_phi.parameters()), lr=1e-4)
++        self.optimizer = torch.optim.Adam(list(self.L_theta.parameters()) + list(self.M_phi.parameters()))
+ 
+     def get_medium_properties(self, x):
+-        """
+-        x: [N, 3] spatial coordinates
+-        Returns: sigma_a, sigma_s, g
+-        """
+         out = self.M_phi(x)
+-        # Enforce positivity for sigma_a and sigma_s
+         sigma_a = torch.exp(out[:, :3])
+         sigma_s = torch.exp(out[:, 3:6])
+-        # Bound g using tanh
+         g = torch.tanh(out[:, 6])
+         sigma_t = sigma_a + sigma_s
+         return sigma_a, sigma_s, sigma_t, g
+ 
++    @staticmethod
++    def henney_greenstein(g, cos_theta):
++        g_sq = g * g
++        denom = 1.0 + g_sq - 2.0 * g * cos_theta
++        return (1.0 - g_sq) / (4.0 * np.pi * torch.sqrt(denom) * denom)
++
+     def compute_in_scattering(self, x, w_out, sigma_s, g):
+-        """
+-        Approximate integral of f_p * L_theta over S^2 using Monte Carlo.
+-        x: [N, 3]
+-        w_out: [N, 3] outgoing directions
+-        sigma_s: [N, 3] scattering coefficients
+-        g: [N] anisotropy parameters
+-        """
+-        # Sample directions
+-        w_in = sample_sphere(self.num_dir_samples) # [N, M, 3]
+-        
+-        # Compute cos theta
+-        # w_out is [N, 3], w_in is [N, M, 3]
+-        # Need to broadcast w_out to [N, 1, 3]
+-        cos_theta = torch.sum(w_out.unsqueeze(1) * w_in, dim=2)
+-        
+-        # Phase function
+-        f_p = henney_greenstein(g.unsqueeze(1).unsqueeze(2), cos_theta) # [N, M]
+-        
+-        # Query Light Field for incoming directions
+-        # L_theta(x, w_in) -> [N, M, 3]
+-        L_in = self.L_theta(torch.cat([x.unsqueeze(1).expand(-1, self.num_dir_samples, -1), w_in], dim=2))
+-        
+-        # Integral approximation: (1/M) * sum(f_p * L_in)
+-        # Note: Monte Carlo over sphere usually involves 4*pi factor if uniform sampling
+-        # However, standard MC estimator for integral I = int f(x) dx is (Vol/Samples) * sum(f)
+-        # Here we integrate over S^2 (area 4pi).
+-        # The RTE term is sigma_s * int f_p L domega.
+-        # Estimator: sigma_s * (4*pi / M) * sum(f_p * L)
+-        
++        w_in = sample_sphere(self.num_dir_samples) # [M, 3]
++        cos_theta = torch.sum(w_out.unsqueeze(0) * w_in.unsqueeze(1), dim=-1) # [N, M]
++        f_p = self.henney_greenstein(g.unsqueeze(1), cos_theta) # [N, M]
++        L_in = self.L_theta(torch.cat([x.unsqueeze(1).expand(-1, self.num_dir_samples, -1), w_in.unsqueeze(0).expand(x.shape[0], -1, -1)], dim=2)) # [N, M, 3]
+         integral = torch.sum(f_p.unsqueeze(2) * L_in, dim=1) * (4.0 * np.pi / self.num_dir_samples)
+         return sigma_s.unsqueeze(1) * integral # [N, 3]
+ 
+     def compute_rte_residual(self, x, w):
+-        """
+-        x: [N, 3]
+-        w: [N, 3]
+-        Returns: RTE residual [N, 3]
+-        """
+-        # 1. Directional derivative (w . grad) L_theta
+-        # Use automatic differentiation
+         x.requires_grad_(True)
+-        w.requires_grad_(True)
+-        
+         L_val = self.L_theta(torch.cat([x, w], dim=1))
+-        
+-        # Compute gradient of L_val w.r.t x
+         grad_L = torch.autograd.grad(L_val.sum(), x, create_graph=True)[0]
+-        
+-        # Dot product w . grad L
+         directional_deriv = torch.sum(w * grad_L, dim=1)
+-        
+-        # 2. Medium properties
+         sigma_a, sigma_s, sigma_t, g = self.get_medium_properties(x)
+-        
+-        # 3. In-scattering
+         in_scattering = self.compute_in_scattering(x, w, sigma_s, g)
+-        
+-        # RTE: (w . grad) L + sigma_t * L - sigma_s * int f_p L domega = 0
+-        # Note: Emission term is omitted as per environment illumination assumption
+         residual = directional_deriv + sigma_t * L_val - in_scattering
+-        
+         return residual
+ 
+     def compute_boundary_loss(self):
+-        """
+-        Enforce inflow boundary conditions.
+-        """
+-        # Sample points on boundary
+         x_b, n_b = self.boundary_mesh.sample_boundary(self.num_boundary_samples)
+-        
+-        # Sample directions
+         w_b = sample_sphere(self.num_boundary_samples)
+-        
+-        # Filter for inflow: w . n < 0
+         dot_prod = torch.sum(w_b * n_b, dim=1)
+         mask = dot_prod < 0
+-        
+-        x_b = x_b[mask]
+-        w_b = w_b[mask]
+-        n_b = n_b[mask]
+-        
+-        if len(x_b) == 0:
+-            return torch.tensor(0.0)
+-            
+-        # Query light field
++        x_b, w_b, n_b = x_b[mask], w_b[mask], n_b[mask]
++        if len(x_b) == 0: return torch.tensor(0.0)
+         L_b = self.L_theta(torch.cat([x_b, w_b], dim=1))
+-        
+-        # Incoming radiance from environment (assumed known)
+-        L_in = get_environment_radiance(x_b, w_b)
+-        
+-        loss = torch.mean((L_in - L_b) ** 2)
+-        return loss
++        L_in = torch.zeros_like(L_b) # Environment radiance assumed known/fixed
++        return torch.mean((L_in - L_b) ** 2)
+ 
+     def compute_observation_loss(self):
+-        """
+-        Constrain light field at camera locations.
+-        """
+-        total_loss = 0.0
+-        count = 0
+-        for k, (image, camera) in enumerate(zip(self.images, self.cameras)):
+-            o_k = camera['o']
+-            # Sample pixels
+-            # Assuming uniform sampling over pixels for simplicity
+-            # In practice, jittered stratified sampling is used for VRE, 
+-            # but for L_obs, pointwise constraint is sufficient.
+-            # Let's sample a subset or all pixels.
+-            H, W, _ = image.shape
+-            # Flatten pixels
+-            pixels = image.reshape(-1, 3)
+-            N_pixels = pixels.shape[0]
+-            
+-            # Generate viewing directions for each pixel
+-            # omega_k(q) is direction FROM camera TO scene
+-            # But L_theta is queried at -omega_k(q) because L_theta(x, w) is radiance 
+-            # traveling in direction w. The camera observes radiance traveling 
+-            # towards the camera, i.e., in direction -omega_k(q).
+-            
+-            # Construct directions
+-            # This depends on camera model. Assuming pinhole.
+-            # For brevity, assume we have a function to get directions for all pixels
+-            directions = get_pixel_directions(o_k, H, W) # [N_pixels, 3]
+-            
+-            # Query L_theta at camera center o_k and direction -directions
+-            neg_directions = -directions
+-            L_cam = self.L_theta(torch.cat([o_k.unsqueeze(0).expand(N_pixels, -1), neg_directions], dim=1))
+-            
+-            loss = torch.mean((pixels - L_cam) ** 2)
+-            total_loss += loss
+-            count += 1
+-            
+-        return total_loss / count
+-
+-    def compute_vre_loss(self):
+-        """
+-        Volume Rendering Equation loss.
+-        """
+         total_loss = 0.0
+         count = 0
+@@ -278,86 +190,48 @@
+             H, W, _ = image.shape
+             pixels = image.reshape(-1, 3)
+-            N_pixels = pixels.shape[0]
+-            
+-            directions = get_pixel_directions(o_k, H, W) # [N_pixels, 3]
+-            
+-            # For each pixel, integrate along ray
+-            # Ray: x(t) = o_k + t * direction
+-            # We use jittered stratified sampling for t
+-            # Assume t_b is far enough or bounded by scene
+-            
++            directions = get_pixel_directions(o_k, H, W)
++            neg_directions = -directions
++            L_cam = self.L_theta(torch.cat([o_k.unsqueeze(0).expand(pixels.shape[0], -1), neg_directions], dim=1))
++            total_loss += torch.mean((pixels - L_cam) ** 2)
++            count += 1
++        return total_loss / count
++
++    def compute_vre_loss(self):
++        total_loss = 0.0
++        count = 0
++        for k, (image, camera) in enumerate(zip(self.images, self.cameras)):
++            o_k = camera['o']
++            H, W, _ = image.shape
++            pixels = image.reshape(-1, 3)
++            directions = get_pixel_directions(o_k, H, W)
+             pixel_loss = 0.0
+-            for i in range(N_pixels):
++            for i in range(pixels.shape[0]):
+                 d = directions[i]
+-                # Sample t values
+-                t_samples = jittered_stratified_sample(self.num_vre_samples, t_min=0, t_max=t_b)
+-                t_samples.sort()
+-                
+-                # Compute x_t
+-                x_t = o_k + t_samples.unsqueeze(1) * d.unsqueeze(0) # [M, 3]
+-                
+-                # Get medium properties at x_t
++                t_samples = jittered_stratified_sample(self.num_vre_samples, 0.0, 10.0) # t_b approx
++                x_t = o_k + t_samples.unsqueeze(1) * d.unsqueeze(0)
+                 sigma_a, sigma_s, sigma_t, g = self.get_medium_properties(x_t)
+-                
+-                # Compute transmittance T(t) = exp(-int_0^t sigma_t(s) ds)
+-                # Approximate integral using trapezoidal rule or simple sum
+-                # dt = t[i] - t[i-1]
+                 dt = torch.diff(t_samples, prepend=torch.tensor(0.0))
+-                # Cumulative optical depth
+                 tau = torch.cumsum(sigma_t * dt, dim=0)
+                 T = torch.exp(-tau)
+-                
+-                # In-scattering integral at each t
+-                # int_{S^2} f_p L_theta domega
+-                # Reuse compute_in_scattering logic but for specific t
+-                # Note: compute_in_scattering expects x and w_out
+-                # Here w_out is -d (incoming to camera)
+                 w_out = -d.unsqueeze(0).expand(self.num_vre_samples, -1)
+-                
+-                in_scattering_term = self.compute_in_scattering(x_t, w_out, sigma_s, g) # [M, 3]
+-                
+-                # Contribution: sigma_s(t) * T(t) * in_scattering_term * dt
+-                # Note: sigma_s is already included in in_scattering_term calculation?
+-                # In compute_in_scattering, we return sigma_s * integral.
+-                # So we just need T * contribution * dt
+-                
++                in_scattering_term = self.compute_in_scattering(x_t, w_out, sigma_s, g)
+                 contribution = T.unsqueeze(1) * in_scattering_term * dt.unsqueeze(1)
+-                
+-                # Integrate along ray
+                 ray_radiance = torch.sum(contribution, dim=0)
+-                
+                 pixel_loss += torch.mean((pixels[i] - ray_radiance) ** 2)
+-            
+-            total_loss += pixel_loss / N_pixels
++            total_loss += pixel_loss / pixels.shape[0]
+             count += 1
+-            
+         return total_loss / count
+ 
+     def step(self):
+         self.optimizer.zero_grad()
+-        
+-        # Sample collocation points
+-        x_col = sample_volume(self.num_collocation)
++        x_col = sample_volume(self.num_collocation, self.bounds)
+         w_col = sample_sphere(self.num_collocation)
+-        
+-        # RTE Loss
+-        residual = self.compute_rte_residual(x_col, w_col)
+-        loss_rte = torch.mean(residual ** 2)
+-        
+-        # Boundary Loss
++        loss_rte = torch.mean(self.compute_rte_residual(x_col, w_col) ** 2)
+         loss_bc = self.compute_boundary_loss()
+-        
+-        # Observation Loss
+         loss_obs = self.compute_observation_loss()
+-        
+-        # VRE Loss
+         loss_vre = self.compute_vre_loss()
+-        
+-        # Total Loss
+         loss = loss_rte + self.lambda_bc * loss_bc + self.lambda_obs * loss_obs + self.lambda_vre * loss_vre
+-        
+         loss.backward()
+         self.optimizer.step()
+-        
+         return loss.item()
+ ```

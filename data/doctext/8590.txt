@@ -1,0 +1,161 @@
+This document covers the ray model and voxelization system that converts sparse LiDAR point clouds into dense 3D occupancy grids. This is a critical component of the OCF (Occupancy Completion and Fore
+
+Ray Model and Voxelization | ai4ce/Occ4cast | DeepWiki
+Index your code with Devin
+DeepWiki
+DeepWiki
+ai4ce/Occ4cast
+Index your code with
+Devin
+Edit WikiShare
+Last indexed: 3 September 2025 (f37d8f)
+Overview
+Getting Started
+Data Processing Pipeline
+Dataset Conversion
+Lyft Dataset Processing
+NuScenes Dataset Processing
+Argoverse Dataset Processing
+ApolloScape Dataset Processing
+Ray Model and Voxelization
+SLURM Infrastructure
+Model Training and Evaluation
+Baseline Model Architectures
+Training Process
+Evaluation and Metrics
+OCFBench Dataset
+Dataset Structure and Formats
+Class Mappings and Labels
+Visualization and Analysis
+Development Environment
+Menu
+Ray Model and Voxelization
+Relevant source files
+data_processing/raymodel/ray_model.py
+data_processing/raymodel/run_ray_model.sh
+data_processing/raymodel/utils/ray_traversal.py
+This document covers the ray model and voxelization system that converts sparse LiDAR point clouds into dense 3D occupancy grids. This is a critical component of the OCF (Occupancy Completion and Forecasting) pipeline that transforms raw point cloud data into structured voxel representations suitable for neural network training and inference.
+For information about dataset conversion and preprocessing steps that occur before ray model processing, see Dataset Conversion. For details on the final OCFBench dataset structure and formats, see Dataset Structure and Formats.
+Overview
+The ray model system implements a sophisticated voxelization pipeline that uses ray traversal to determine the occupancy state of 3D voxels. The core algorithm traces rays from LiDAR sensor origins to detected points, classifying voxels along each ray as either free space (traversed by rays but containing no points), occupied space (containing LiDAR points), or unobserved space (never traversed by any ray).
+```
+Output Voxel GridRay Model ProcessingInput DataPoint Clouds(N frames)Sensor Poses(N frames)Point Labels(N frames)Coordinate Transformpose_origin_inv @ pointMulti-frame Aggregation±70 frames defaultRay Traversal Algorithmray_traversal()Voxel ClassificationFREE/OCCUPIED/NOT_OBSERVEDVoxel State[512,256,32]Voxel Labels[512,256,32]Invalid Mask[512,256,32]
+```
+Sources: data_processing/raymodel/ray_model.py60-202
+Core Components
+Ray Model Main Function
+The main_func in ray_model.py orchestrates the entire voxelization process. It processes input and ground truth sequences separately, applying coordinate transformations and temporal aggregation before invoking the ray traversal algorithm.
+ParameterDefaultDescription
+voxel_size[0.2, 0.2, 0.2]Size of each voxel in meters (x,y,z)
+point_cloud_range[-51.2, -25.6, -2, 51.2, 25.6, 4.4]3D bounding box in meters
+spatial_shape[512, 256, 32]Voxel grid dimensions
+a_pre/a_post70/70Frames to aggregate before/after current frame
+p_pre/p_post10/10Input/prediction sequence lengths
+Sources: data_processing/raymodel/ray_model.py61-66
+Coordinate System Transformations
+The system handles different coordinate systems across datasets by applying rotation matrices:
+```
+Transformation PipelineDataset Coordinate SystemsLyft Level 5rotation: π around ZNuScenesrotation: -π/2 around ZArgoverserotation: 0ApolloScaperotation: 0World Posepose @ pointOrigin Normalizationpose_origin_inv @ pointCoordinate Rotationpoints @ rotation_matrix.T
+```
+Sources: data_processing/raymodel/ray_model.py74-84 data_processing/raymodel/ray_model.py96-113
+Ray Traversal Algorithm
+Algorithm Overview
+The ray traversal implementation uses a 3D Digital Differential Analyzer (DDA) algorithm to efficiently traverse voxels along rays from sensor origins to detected points. This is implemented as a CUDA kernel using NVRTC for high performance.
+```
+Voxel Classification3D DDA AlgorithmRay Traversal Inputspoints_origin[N, 3]points[N, 3+]points_label[N]point_cloud_range[6]voxel_size[3]spatial_shape[3]Initialize Ray Parametersstep[], tDelta[], tMax[]Mark Target VoxelatomicAdd(voxel_occ_count)Traverse Ray Pathwhile loop with bounds checkMark Traversed VoxelsatomicAdd(voxel_free_count)Count Thresholdsfree_n_threshold: 0occupied_n_threshold: 1State Assignment-1: NOT_OBSERVED0: FREE1: OCCUPIED
+```
+Sources: data_processing/raymodel/utils/ray_traversal.py39-271
+CUDA Kernel Implementation
+The core ray traversal is implemented as an inline CUDA kernel that processes rays in parallel:
+VariablePurpose
+ray[3]Ray direction vector
+step[3]Step direction per axis (+1 or -1)
+tDelta[3]t increment to move one voxel
+tMax[3]Next voxel boundary in t units
+current_voxel[3]Current traversal position
+target_voxel[3]End point voxel (LiDAR hit)
+The algorithm implements several optimizations:
+Ray stopping distance of 1 voxel to prevent over-traversal
+Distance threshold of 1.0m to ignore voxels too close to sensor/target
+Atomic operations for thread-safe voxel count updates
+Sources: data_processing/raymodel/utils/ray_traversal.py100-245
+Voxel State Classification
+State Definitions
+The system uses three primary voxel states encoded as integers:
+StateValueConditionMeaning
+NOT_OBSERVED-1DefaultNever traversed by any ray
+FREE0voxel_free_count > 0Traversed but contains no points
+OCCUPIED1voxel_occ_count > 1Contains LiDAR points
+```
+State ClassificationRay ProcessingYesNoYesNoInitialize Voxelstate = NOT_OBSERVEDRay hits pointvoxel_occ_count++Ray traverses voxelvoxel_free_count++voxel_occ_count > 1?voxel_free_count > 0?state = OCCUPIEDstate = FREEstate = NOT_OBSERVED
+```
+Sources: data_processing/raymodel/utils/ray_traversal.py248-262
+Label Assignment
+Voxel semantic labels are assigned based on the points contained within each voxel:
+```
+Label AssignmentVoxel IndexingPoint Processingpoints_inrange[M, 3+]points_labels_inrange[M]pcds_voxel = floor((points - range_min) / voxel_size)inds = _indice_to_scalar(pcds_voxel, shape)voxel_label = FREE_LABEL(default: 0)voxel_label_squeeze[inds]= points_labels_inrange
+```
+Sources: data_processing/raymodel/utils/ray_traversal.py250-258
+Multi-Frame Temporal Processing
+Input Sequence Processing
+The system processes sparse input sequences for model training, using fewer frames to simulate partial observability:
+```
+Ground Truth ProcessingGT Sequenceindex to index+p_post(default: 11 frames)Multi-frame Aggregation±a_pre/a_post frames(default: ±70 frames)Ray Traversal→ voxel_state, voxel_labelInvalid Maskunobserved & no_label voxelsInput ProcessingInput Sequenceindex-p_pre to index(default: 11 frames)Pseudo Labelszeros(points.shape[0])Ray Traversal→ input_voxel_stateBinary Occupancy(input_voxel_state == 1)
+```
+Sources: data_processing/raymodel/ray_model.py86-126 data_processing/raymodel/ray_model.py128-176
+Frame Aggregation Strategy
+Ground truth generation uses extensive temporal aggregation to create dense occupancy labels:
+PhaseFrame RangePurpose
+Input[index-p_pre, index]Sparse observations for model input
+Ground Truth[index, index+p_post]Dense labels for each future frame
+Aggregation Window[i-a_pre, i+a_post]Multi-frame accumulation per GT frame
+This creates temporally dense ground truth while maintaining sparse inputs to simulate real-world partial observability.
+Sources: data_processing/raymodel/ray_model.py132-154
+Data Storage and Compression
+Bit Packing Optimization
+The system uses bit packing to compress binary occupancy data for efficient storage:
+```
+Label StorageLabel Arraysfinal_label (uint8)Direct Save*_label.npyData CompressionBoolean Arraysfinal_input, final_invalidnp.packbits()8:1 compression ratioSave .npy Files*_input.npy*_invalid.npy
+```
+The pack function implements custom bit packing for visualization outputs:
+```
+Boolean Arrayshape: [H, W, D]Reshape to 1Darray.reshape(-1)Bit Compression8 bools → 1 uint8Compressed Arraydtype: uint8
+```
+Sources: data_processing/raymodel/ray_model.py48-57 data_processing/raymodel/ray_model.py182-201
+Execution and Performance
+Batch Processing Configuration
+The system is designed for parallel execution across multiple compute nodes:
+```
+File OrganizationProcessing WindowExecution ParametersBatch Indexargs.batchStart Indexargs.startScene Indexstart + batchFrame Rangestart_frame to end_frameBoundary Constraints±p_pre/p_post marginsScene Directory{:04d}.format(scene_idx)Output Files{:06d}_*.npy
+```
+Sources: data_processing/raymodel/ray_model.py215-235 data_processing/raymodel/run_ray_model.sh1-8
+CUDA Memory Management
+The implementation uses GPU acceleration with careful memory management:
+Tensor operations on CUDA device for performance
+Atomic operations in CUDA kernel for thread safety
+TF32 disabled to prevent numerical precision issues
+Synchronization points to ensure kernel completion
+Sources: data_processing/raymodel/ray_model.py30-32 data_processing/raymodel/ray_model.py62 data_processing/raymodel/utils/ray_traversal.py246
+Dismiss
+Refresh this wiki
+Enter email to refresh
+On this page
+Ray Model and Voxelization
+Overview
+Core Components
+Ray Model Main Function
+Coordinate System Transformations
+Ray Traversal Algorithm
+Algorithm Overview
+CUDA Kernel Implementation
+Voxel State Classification
+State Definitions
+Label Assignment
+Multi-Frame Temporal Processing
+Input Sequence Processing
+Frame Aggregation Strategy
+Data Storage and Compression
+Bit Packing Optimization
+Execution and Performance
+Batch Processing Configuration
+CUDA Memory Management

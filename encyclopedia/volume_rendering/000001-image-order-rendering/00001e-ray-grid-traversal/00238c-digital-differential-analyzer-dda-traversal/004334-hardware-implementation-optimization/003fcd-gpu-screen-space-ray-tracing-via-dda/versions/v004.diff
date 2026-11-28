@@ -1,0 +1,227 @@
+--- v003.md
++++ v004.md
+@@ -4,39 +4,36 @@
+ 
+ ## Overview
+-This method provides an efficient GPU solution for screen-space 3D ray tracing against a depth buffer by adapting the perspective-correct Digital Differential Analyzer (DDA) line rasterization algorithm [S1, unofficial]. It solves the inefficiency and missing intersections inherent in linear 3D marching by ensuring that sampled pixels form a contiguous set with no oversampling [S1, unofficial]. Unlike [Parallel 3D-DDA](6247-parallel-3d-dda.md), which projects 3D points to screen space and may skip pixels or oversample the same pixel multiple times, this method places each sampled pixel adjacent (in x, y, or diagonally) to the previous one and samples each pixel at most once [S1, unofficial].
++This method provides an efficient GPU solution for screen-space 3D ray tracing against a depth buffer by adapting the perspective-correct Digital Differential Analyzer (DDA) line rasterization algorithm [S1, unofficial]. It solves the inefficiency and missing intersections inherent in linear 3D marching by ensuring that sampled pixels form a contiguous set with no oversampling [S1, unofficial]. Unlike linear 3D ray marching, which projects 3D points to screen space and can skip pixels or oversample the same pixel multiple times, this method places each sampled pixel adjacent (in x, y, or diagonally) to the previous one and samples each pixel at most once [S1, unofficial].
+ 
+ ## How it works
+ ### Inputs and Outputs
+ **Inputs:**
+-*   `csOrig`: Camera-space ray origin (vec3) [S1, unofficial].
+-*   `csDir`: Camera-space ray direction (vec3) [S1, unofficial].
+-*   `proj`: Projection matrix (mat4) [S1, unofficial].
+-*   `nearPlaneZ`: Negative near plane Z value (float) [S1, unofficial].
+-*   `csZBuffer`: Depth buffer texture (sampler2D) [S1, unofficial].
+-*   `csZBufferSize`: Depth buffer dimensions (vec2) [S1, unofficial].
++*   `csOrig`: Camera-space ray origin [S1, unofficial].
++*   `csDir`: Camera-space ray direction [S1, unofficial].
++*   `proj`: Projection matrix [S1, unofficial].
++*   `nearPlaneZ`: Negative near plane Z value [S1, unofficial].
++*   `csZBuffer`: Depth buffer texture [S1, unofficial].
++*   `csZBufferSize`: Dimensions of the depth buffer [S1, unofficial].
+ *   `csZBufferIsHyperbolic`: Boolean flag indicating if the depth buffer stores hyperbolic (perspective-correct) depth values [S1, unofficial].
+-*   `csZThickness`: Camera-space z-thickness ascribed to each point in the depth buffer (float) [S1, unofficial].
+-*   `maxDistance`: Maximum trace distance in camera-space (float) [S1, unofficial].
+-*   `maxSteps`: Maximum number of steps allowed during the trace (int) [S1, unofficial].
++*   `csZThickness`: Camera-space z-thickness ascribed to each point in the depth buffer [S1, unofficial].
++*   `maxDistance`: Maximum trace distance in camera-space [S1, unofficial].
++*   `maxSteps`: Maximum number of steps allowed during the trace [S1, unofficial].
+ *   `stride`: Controls spacing between samples. `stride = 1.0` produces thin-line rasterization [S1, unofficial].
+-*   `jitter`: Value in range `[0, 1]` used to bump the ray in pixels to conceal banding artifacts [S1, unofficial].
++*   `jitter`: A value in the range $[0, 1]$ used to bump the ray in pixels to conceal banding artifacts introduced by spaced samples [S1, unofficial].
+ 
+ **Outputs:**
+-*   `hitPixel`: Coordinates of the hit pixel (vec2) [S1, unofficial].
+-*   `hitLayer`: Index of the hit layer in the depth buffer (int) [S1, unofficial].
+-*   `csHitPoint`: Camera-space hit point (vec3) [S1, unofficial].
+-*   Return value: Boolean indicating if a surface was hit [S1, unofficial].
++*   Boolean indicating if a surface was hit.
++*   `hitPixel`: Coordinates of the hit pixel [S1, unofficial].
++*   `hitLayer`: Index of the hit layer in the depth buffer (if multiple layers are supported) [S1, unofficial].
++*   `csHitPoint`: Camera-space position of the hit [S1, unofficial].
+ 
+ ### Data Structures
+-The method operates on standard GPU primitives. The depth buffer is accessed via `texelFetch`, which returns a zero value for out-of-bounds samples to facilitate implicit clipping [S1, unofficial].
++The method operates on a depth buffer (`csZBuffer`) accessed via `texelFetch`. The depth buffer stores depth values which may be hyperbolic (perspective-correct) or linear, determined by `csZBufferIsHyperbolic` [S1, unofficial]. The algorithm assumes a right-handed camera space where $+z$ is out of the screen [S1, unofficial].
+ 
+ ### Steps
+-1.  **Unify DDA Cases:** The classic DDA suffers from divergent execution due to eight cases (4 quadrants × 2 iteration directions). These are unified by permuting axes and taking derivatives relative to the sign of `delta.x`, ensuring iteration is always performed along the x-axis [S1, unofficial]. A matrix permutation compensates for this in the vertical case, allowing all subsequent code to assume iteration in x [S1, unofficial].
++1.  **Unify DDA Cases:** The classic DDA has eight cases (4 quadrants $\times$ 2 iteration directions). These are unified by permuting axes and taking derivatives relative to the sign of $\Delta x$, ensuring iteration is always performed along the x-axis [S1, unofficial]. A matrix permutation compensates for this in the vertical case, allowing all subsequent code to assume iteration in x [S1, unofficial]. This eliminates divergent execution on GPUs [S1, unofficial].
+ 2.  **Clip Far End:** Clip only the far end of the ray against the near plane. The caller ensures the ray origin lies within the view frustum, eliminating the need for complex frustum clipping logic [S1, unofficial].
+ 3.  **Implicit Viewport Clipping:** Structure the test so that a zero value returned by `texelFetch` for an out-of-bounds depth-buffer sample terminates iteration [S1, unofficial].
+-4.  **Calculate Screen Endpoints:** Compute the screen-space pixel endpoints $P_0$ and $P_1$ of the line segment corresponding to the ray [S1, unofficial].
+-5.  **Iterate:** Perform the DDA loop. For each step, calculate the 3D point $Q'$ corresponding to the current 2D screen point $(x, y)$ using perspective-correct interpolation [S1, unofficial].
+-6.  **Check Intersection:** Sample the depth buffer at the current screen coordinates. If the sampled depth indicates an intersection (considering `csZThickness`), record the hit and break the loop [S1, unofficial].
+-7.  **Termination:** The loop terminates if a hit is found, `maxSteps` is reached, or the ray goes out of bounds (detected by the zero-depth sentinel) [S1, unofficial].
++4.  **Iterate and Sample:** Perform the DDA iteration. At each step, calculate the 3D point corresponding to the current 2D screen point and test for intersection with the depth buffer.
+ 
+ ### Formulas
+@@ -47,94 +44,98 @@
+ $$
+ 
+-Where:
+-*   $k = 1/(H \otimes (0,0,0,1))$ is the reciprocal of the homogeneous w component [S1, unofficial].
+-*   $H$ is the homogeneous coordinate transformation [S1, unofficial].
+-*   $Q \otimes k$ interpolates linearly in 2D [S1, unofficial].
+-
+-### Parameters
+-*   `stride`: Default `1.0`. Larger values space samples for efficiency at the cost of quality [S1, unofficial].
+-*   `jitter`: Range `[0, 1]`. Used to conceal banding artifacts introduced by `stride > 1.0` [S1, unofficial].
+-*   `csZBufferIsHyperbolic`: Boolean. Determines depth buffer interpretation [S1, unofficial].
+-*   `csZThickness`: Float. Used for robustness in intersection testing [S1, unofficial].
+-*   `maxDistance`: Float. Maximum trace distance [S1, unofficial].
+-*   `maxSteps`: Int. Maximum iteration count [S1, unofficial].
+-
+-### Edge Cases and Pitfalls
+-*   **Branch Divergence:** Classic DDA implementations suffer from divergent execution on GPUs due to branching for different quadrants and iteration directions. This method avoids this by unifying cases via axis permutation [S1, unofficial].
+-*   **Banding Artifacts:** Using `stride > 1.0` for efficiency introduces banding artifacts. This is handled by applying a `jitter` value in `[0, 1]` to the ray [S1, unofficial].
+-*   **Out-of-Bounds Access:** The method relies on `texelFetch` returning zero for out-of-bounds samples to terminate iteration. Implementations must ensure this behavior is consistent with the hardware/driver [S1, unofficial].
++where $k = 1/(H \otimes (0,0,0,1))$ is the reciprocal of the homogeneous w component, and $Q \otimes k$ interpolates linearly in 2D [S1, unofficial].
+ 
+ ### Pseudocode
++The following pseudocode implements the core DDA loop. It assumes the axis permutation has already been applied so that iteration proceeds along the x-axis. It uses conditional assignment instead of branches to maintain SIMD efficiency [S1, unofficial].
++
+ ```python
+ def traceRay(csOrig, csDir, proj, nearPlaneZ, csZBuffer, csZBufferSize, 
+              csZBufferIsHyperbolic, csZThickness, maxDistance, maxSteps, 
+              stride, jitter):
+-    # 1. Clip far end against near plane
+-    # Caller ensures csOrig is within view frustum
+-    # Calculate far point in camera space
+-    # P_far_cam = csOrig + csDir * maxDistance
+-    # Clip P_far_cam against nearPlaneZ if necessary
++    # 1. Calculate screen-space endpoints P0 and P1
++    # P0 is the screen position of csOrig (already in frustum)
++    # P1 is the screen position of csOrig + csDir * maxDistance
++    # Note: Division by w is handled via perspective-correct interpolation
+     
+-    # 2. Project endpoints to screen space
+-    # P0_screen, P1_screen = project_to_screen(csOrig, P_far_cam, proj)
++    # 2. Determine delta and slope for DDA
++    # dx = P1.x - P0.x
++    # dy = P1.y - P0.y
++    # The algorithm unifies cases by ensuring iteration is along x
++    # If |dx| < |dy|, axes are permuted so that the major axis is x
+     
+-    # 3. Unify DDA cases
+-    # Permute axes so iteration is always along x-axis
+-    # Calculate delta_x, delta_y, slope
+-    # Apply matrix permutation if vertical case
++    # 3. Initialize DDA state
++    # t = 0.0
++    # current_x = P0.x
++    # current_y = P0.y
++    # step_x = sign(dx) * stride
++    # step_y = (dy/dx) * step_x  # Precomputed slope
+     
+-    # 4. Initialize DDA state
+-    x = P0_screen.x
+-    y = P0_screen.y
+-    dx = P1_screen.x - P0_screen.x
+-    dy = P1_screen.y - P0_screen.y
++    # Add jitter to initial position to conceal banding
++    current_x += jitter * step_x
++    current_y += jitter * step_y
+     
+-    # 5. Iterate
++    # 4. Iterate
+     for step in range(maxSteps):
+-        # Apply jitter if stride > 1.0
+-        if stride > 1.0:
+-            x += jitter * stride
+-            y += jitter * stride
++        # Check bounds implicitly: if out of bounds, texelFetch returns 0
++        # which terminates the loop in the intersection test
++        
++        # Calculate 3D point from screen coordinates
++        # Use perspective-correct interpolation for depth
++        if csZBufferIsHyperbolic:
++            # Depth is stored as 1/w or similar hyperbolic value
++            # Interpolate 1/w linearly, then invert
++            inv_w = interpolate_inv_w(current_x, current_y)
++            depth = 1.0 / inv_w
++        else:
++            depth = texelFetch(csZBuffer, int(current_x), int(current_y)).z
+             
+-        # Check bounds implicitly via depth buffer fetch
+-        # If out of bounds, texelFetch returns 0, terminating iteration
++        # Intersection test
++        # Compare ray depth at current screen position with depth buffer
++        # Ray depth is derived from csOrig and csDir
++        ray_depth = calculate_ray_depth(csOrig, csDir, current_x, current_y)
+         
+-        # Sample depth buffer
+-        depth_sample = texelFetch(csZBuffer, (int(x), int(y)), 0).z
++        # Check if ray hits surface
++        # Account for zThickness for robustness
++        if ray_depth <= depth + csZThickness:
++            # Hit found
++            csHitPoint = reconstruct_3d_point(current_x, current_y, ray_depth)
++            return True, (current_x, current_y), 0, csHitPoint
++            
++        # Advance DDA
++        t += 1.0
++        current_x += step_x
++        current_y += step_y
+         
+-        # If depth_sample is 0, we are out of bounds, break
+-        if depth_sample == 0:
++        # Check if we have exceeded max distance or steps
++        if t > maxDistance or step >= maxSteps:
+             break
+             
+-        # Calculate 3D point Q' from screen coordinates (x, y)
+-        # Using perspective-correct interpolation
+-        # k = 1.0 / proj[3][3] # Simplified for homogeneous w
+-        # Q_prime = interpolate_3d(x, y, proj, csZBufferIsHyperbolic)
+-        
+-        # Check intersection
+-        # Compare Q_prime.z with depth_sample considering csZThickness
+-        if is_intersection(Q_prime, depth_sample, csZThickness):
+-            hitPixel = (x, y)
+-            csHitPoint = Q_prime
+-            return True, hitPixel, 0, csHitPoint
+-            
+-        # Advance DDA
+-        x += dx / maxSteps * stride
+-        y += dy / maxSteps * stride
+-        
+     return False, (0, 0), 0, (0, 0, 0)
+ ```
+ 
++### Parameters
++*   `stride`: Controls spacing between samples. `stride = 1.0` produces thin-line rasterization. Larger values space samples for efficiency at the cost of quality [S1, unofficial].
++*   `jitter`: A value in the range $[0, 1]$ used to bump the ray in pixels to conceal banding artifacts introduced by spaced samples (stride > 1.0) [S1, unofficial].
++*   `csZBufferIsHyperbolic`: Boolean encoding flag for the depth buffer. Determines if the depth buffer stores hyperbolic (perspective-correct) depth values [S1, unofficial].
++*   `csZThickness`: Camera-space z-thickness ascribed to each point in the depth buffer, used for robustness in intersection testing [S1, unofficial].
++*   `maxDistance`: Maximum trace distance in camera-space [S1, unofficial].
++*   `maxSteps`: Maximum number of steps allowed during the trace [S1, unofficial].
++
++### Edge Cases and Pitfalls
++*   **Branch Divergence:** Classic DDA implementations suffer from divergent execution on GPUs due to branching for different quadrants and iteration directions. This method avoids this by unifying cases via axis permutation [S1, unofficial].
++*   **Banding Artifacts:** Banding artifacts appear when using `stride > 1.0` for efficiency. This is handled by applying a `jitter` value in $[0, 1]$ to the ray [S1, unofficial].
++*   **Out-of-Bounds Access:** The method relies on implicit clipping to the viewport. If the depth buffer does not return zero for out-of-bounds accesses, the iteration may not terminate correctly [S1, unofficial].
++
+ ## Operating characteristics
+-*   **Time Complexity:** Linear with respect to the number of steps (`maxSteps`) and the number of pixels traced. The inner loop is optimized for instruction caching and minimal register usage [S1, unofficial].
+-*   **Memory Complexity:** Constant space per thread, plus access to the depth buffer [S1, unofficial].
+-*   **Measured Performance:** Achieved 2 ms at 1080p on a GeForce 650M for reflections in ripply water [S1, unofficial].
+-*   **Strengths:** No oversampling, contiguous pixel sampling, efficient GPU implementation due to branch unification and simple arithmetic operations (FMUL) [S1, unofficial].
+-*   **Limitations:** Quality loss with `stride > 1.0` (mitigated by jitter), relies on depth buffer availability and correctness [S1, unofficial].
+-*   **When to Use:** Reflections, refractions, and other screen-space effects where performance is critical and the depth buffer is available [S1, unofficial].
+-*   **When Not to Use:** When high-quality, artifact-free sampling is required without jitter, or when the depth buffer is not available or unreliable [S1, unofficial].
++*   **Time Complexity:** The method performs a fixed number of steps up to `maxSteps` or `maxDistance`. Each step involves simple arithmetic operations (FMUL) and a texture lookup [S1, unofficial].
++*   **Memory Complexity:** Minimal additional memory is required beyond the depth buffer. The algorithm is designed to minimize register count and instruction cache pressure [S1, unofficial].
++*   **Measured Performance:** Used in production for reflections in ripply water, achieving 2 ms at 1080p on GeForce 650M [S1, unofficial].
++*   **Strengths:** Ensures sampling at a contiguous set of pixels with no oversampling, addressing the inefficiency and missing intersections of linear 3D marching [S1, unofficial]. Efficient on GPUs due to branch unification and simple arithmetic [S1, unofficial].
++*   **Limitations:** Quality decreases with larger `stride` values, requiring jitter to mitigate banding [S1, unofficial]. Relies on the caller to ensure the ray origin is within the view frustum [S1, unofficial].
++*   **When to Use:** Suitable for screen-space effects like reflections in ripply water where performance is critical and the depth buffer is available [S1, unofficial].
++*   **When Not to Use:** Not suitable for scenes requiring global illumination or complex ray-object intersections beyond the depth buffer [S1, unofficial].
+ 
+ ## Background
+-The underlying method of 2D iteration is about 20 years old, evolving from Bresenham's algorithm through DDA [S1, unofficial]. Recent games brought details for reflection tracing and GPU optimizations [S1, unofficial]. Wronski [2014a, 80][2014b] and Valient [2014b, 90][2014a] sketched algorithms in presentations [S1, unofficial]. The full implementation details were provided by McGuire and Mara [S1, unofficial]. It is used in production for reflections in ripply water [S1, unofficial].
++The underlying method of 2D iteration is about 20 years old, evolving from Bresenham's algorithm through DDA [S1, unofficial]. Recent games brought details for reflection tracing and GPU optimizations [S1, unofficial]. Wronski [2014a, 80][2014b] and Valient [2014b, 90][2014a] sketched algorithms in presentations [S1, unofficial]. The method has been proven in production of recent major game titles [S1, unofficial].
+ 
+ ## Sources

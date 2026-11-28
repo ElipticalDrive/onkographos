@@ -1,0 +1,96 @@
+--- v003.md
++++ v004.md
+@@ -25,8 +25,8 @@
+ **Algorithm Steps:**
+ 1. **Preprocessing (Floating Point):** If keys are floating-point numbers, map them to integers using the method by Terdiman to preserve order for negative and positive numbers [S1, unofficial].
+-2. **Initialization:** Set `blockSize = 256`. Allocate and initialize `blockSumArray` on GPU memory to zero [S1, unofficial].
++2. **Initialization:** Set `blockSize = 256` and allocate and initialize `blockSumArray` on GPU memory to zero [S1, unofficial].
+ 3. **Main Loop:** Iterate `bit` from 0 to 30 (inclusive), incrementing by 2 [S1, unofficial].
+     1. **Order Check:** Perform a parallel reduction to check if the current input array is already sorted. If sorted, terminate the loop immediately [S1, unofficial].
+-    2. **Block Division:** Divide the input data into equal blocks of size `blockSize` [S1, unofficial].
++    2. **Block Division:** Divide the input data into equal blocks [S1, unofficial].
+     3. **Parallel Block Processing (for all blocks in parallel):**
+         1. **Load Data:** Load `blockSize` elements into shared memory (`s_data`) [S1, unofficial].
+@@ -47,6 +47,5 @@
+           - $m$ is the local prefix sum value for the element (from `localPrefixSumArray`) [S1, unofficial].
+         - Permute the elements from the shared memory shuffle buffer to their calculated global positions in the output array. This mapping is cluster-wise, ensuring coalesced global memory writes [S1, unofficial].
+-    6. **Swap Buffers:** If not the last pass, swap input and output arrays [S1, unofficial].
+-    7. Increment `bit` by 2 [S1, unofficial].
++    6. Increment `bit` by 2 [S1, unofficial].
+ 
+ **Pseudocode:**
+@@ -57,5 +56,4 @@
+     numBlocks = (n + blockSize - 1) // blockSize
+ 
+-    # Allocate memory
+     blockSumArray = [0] * (numBlocks * 4)
+     localPrefixSumArray = [0] * n
+@@ -69,9 +67,8 @@
+ 
+     for bit in range(0, 31, 2):
+-        # 1. Order Check
++        # Order check (GPU uses optimized reduction [G])
+         if is_sorted(currKeys, n):
+             break
+ 
+-        # 2. Parallel Block Processing
+         for block in range(numBlocks):
+             startIdx = block * blockSize
+@@ -79,8 +76,6 @@
+             localSize = endIdx - startIdx
+ 
+-            # Shared memory simulation
+             s_data = [0] * blockSize
+             cnt = [[0] * threadsPerBlock for _ in range(4)]
+-            localPos = [0] * threadsPerBlock
+ 
+             # Load data
+@@ -97,5 +92,5 @@
+                         cnt[b][tid] = 1 if b == radix else 0
+ 
+-            # Local Prefix Sum (scan) on counters
++            # Local Prefix Sum (scan) on counters (GPU uses shared-memory scan [G])
+             for b in range(4):
+                 scan_in_place(cnt[b])
+@@ -105,6 +100,5 @@
+                 if tid < localSize:
+                     radix = (s_data[tid] >> bit) & 3
+-                    localPos[tid] = cnt[radix][tid]
+-                    localPrefixSumArray[startIdx + tid] = localPos[tid]
++                    localPrefixSumArray[startIdx + tid] = cnt[radix][tid]
+ 
+             # In-block shuffle: scatter elements to positions based on local rank
+@@ -116,7 +110,4 @@
+                     shuffled_data[pos] = s_data[tid]
+ 
+-            for tid in range(localSize):
+-                s_data[tid] = shuffled_data[tid]
+-
+             # Store block sums
+             for b in range(4):
+@@ -125,12 +116,12 @@
+             # Write shuffled data to temporary buffer
+             for tid in range(localSize):
+-                nextKeys[startIdx + tid] = s_data[tid]
++                nextKeys[startIdx + tid] = shuffled_data[tid]
+ 
+-        # 3. Global Prefix Sum on blockSumArray
++        # Global Prefix Sum on blockSumArray
+         scan_in_place(blockSumArray)
+ 
+-        # 4. Final Mapping
++        # Final Mapping
+         for i in range(n):
+-            val = currKeys[i]
++            val = nextKeys[i]  # Read from shuffled buffer
+             radix = (val >> bit) & 3
+             block = i // blockSize
+@@ -138,6 +129,6 @@
+             base = blockSumArray[block * 4 + radix]
+             finalPos = base + m
+-            nextKeys[finalPos] = val
+-            nextValues[finalPos] = currValues[i]
++            outputKeys[finalPos] = val
++            outputValues[finalPos] = currValues[i]
+ 
+         # Swap buffers

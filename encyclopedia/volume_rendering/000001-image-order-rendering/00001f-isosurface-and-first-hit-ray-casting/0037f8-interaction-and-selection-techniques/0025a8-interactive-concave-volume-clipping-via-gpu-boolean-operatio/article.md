@@ -1,0 +1,114 @@
+# Interactive Concave Volume Clipping via GPU Boolean Operations
+
+Also called: Concave Volume Clipping, GPU Ray Casting with Boolean Clipping
+
+## Overview
+This method displays inner structures of volumetric datasets by performing interactive concave volume clipping using Boolean operations (intersection, subtraction, union) implemented on the GPU, thereby avoiding the need for complex transfer function specification [S1, unofficial]. It sets itself apart from sibling techniques like [Surface Peeling](7679-surface-peeling.md) by operating directly on the volume data via ray casting rather than peeling layers, and differs from [Direct Haptic Rendering of Isosurface by Intermediate Representation](8620-direct-haptic-rendering-of-isosurface-by-intermediate-repres.md) by focusing on visual clipping rather than haptic feedback generation [G]. The core mechanism builds on [Isosurface and first-hit ray casting](20-isosurface-and-first-hit-ray-casting.md), utilizing the computed intersection positions and normals for shading and selection [G].
+
+## How it works
+The method implements rendering and Boolean operations entirely on the GPU [S1, unofficial]. It converts 3D Boolean operations into 1D Boolean operations to efficiently implement intersection, subtraction, and union [S1, unofficial].
+
+**Inputs and Outputs:**
+*   **Input:** Volumetric dataset; clipping geometry parameters (defining common analytical convex objects such as polyhedrons and spheres) [S1, unofficial].
+*   **Output:** Rendered image with clipped volume and enhanced visual effects [S1, unofficial].
+
+**Data Structures:**
+*   **Clipping Geometry:** Defined by parameters for convex objects. The method leverages the fact that these objects consume very little video memory [S1, unofficial].
+*   **Color Scheme:** A selection of pre-defined schemes or user-specified colors [S1, unofficial].
+
+**Steps:**
+1.  **Ray Casting:** Perform ray casting on the GPU to traverse the volume [S1, unofficial].
+2.  **Boolean Conversion:** Convert the 3D Boolean operation (intersection, subtraction, union) into a 1D Boolean operation [S1, unofficial].
+3.  **Clipping Execution:** Apply the 1D Boolean operation to determine visibility based on intersection, subtraction, or union [S1, unofficial].
+4.  **Rendering Model:** Apply a pseudo color based rendering model to enhance visual effects [S1, unofficial].
+5.  **Shading:** Enable the Phong illumination model on the clipped surfaces [S1, unofficial].
+
+**Pseudocode:**
+> **Unverified code.** The code below did not pass a test run against a reference implementation, or no test fits it, so it may contain errors.
+
+```python
+def render_clipped_volume(volume_data, clipping_params, color_scheme, operation):
+    output_buffer = create_empty_image_buffer()
+    geometry = parse_clipping_geometry(clipping_params)
+    
+    for y in range(image_height):
+        for x in range(image_width):
+            ray = generate_pixel_ray(x, y)
+            hit_point, normal, value = ray_march(volume_data, ray)
+            
+            if hit_point is not None:
+                is_inside = evaluate_1d_boolean(hit_point, geometry, operation)
+                
+                if is_inside:
+                    color = map_value_to_color(value, color_scheme)
+                    shaded_color = phong_shading(hit_point, normal, color)
+                    output_buffer[x, y] = shaded_color
+                    
+    return output_buffer
+
+def parse_clipping_geometry(params):
+    # Returns structured geometry data (e.g., center, radius for sphere; plane equations for polyhedron)
+    return params
+
+def ray_march(volume_data, ray):
+    # Standard ray casting: sample volume along ray, return first significant hit
+    return sample_volume_along_ray(volume_data, ray)
+
+def evaluate_1d_boolean(point, geometry, operation):
+    # Converts 3D spatial check to 1D scalar boolean
+    if operation == "intersection":
+        return is_inside_geometry(point, geometry)
+    elif operation == "subtraction":
+        return not is_inside_geometry(point, geometry)
+    elif operation == "union":
+        return is_inside_geometry(point, geometry)
+    return False
+
+def is_inside_geometry(point, geometry):
+    # Standard analytical check (e.g., distance to center < radius)
+    return point.distance(geometry.center) < geometry.radius
+
+def map_value_to_color(value, scheme):
+    # Maps scalar volume value to RGB based on selected color scheme
+    return scheme.lookup(value)
+
+def phong_shading(point, normal, color):
+    light_dir = normalize(vec3(0.5, 1.0, 0.3))
+    view_dir = normalize(-ray.direction)
+    ambient = 0.2
+    diffuse = max(dot(normal, light_dir), 0.0) * 0.8
+    specular = pow(max(dot(reflect(-light_dir, normal), view_dir), 0.0), 16.0) * 0.5
+    return color * (ambient + diffuse + specular)
+```
+
+**Parameters:**
+*   **Color Scheme:** Users can select from several pre-defined schemes or specify their own [S1, unofficial].
+*   **Clipping Geometry:** Defined by parameters for convex objects [S1, unofficial].
+
+**Edge Cases and Pitfalls:**
+*   **Precision:** Not given in the sources.
+*   **Boundaries:** Not given in the sources.
+*   **Degenerate Input:** Not given in the sources.
+
+## Subtopics
+
+### [Automatic Cut-Away and Ghosted Views (Volumetric)](8179-automatic-cut-away-and-ghosted-views-volumetric.md)
+A method for automatically generating cut-away and ghosted views of volumetric datasets by employing an importance-based scheme to select which features remain visible or suppressed. It generalizes traditional cut-away views by allowing inspection of the internals of opaque objects based on feature significance rather than fixed geometric planes. This approach is distinct from sibling methods like [GPU-based Volume Sculpting System](13711-gpu-based-volume-sculpting-system.md) by focusing on semantic importance rather than manual or geometric sculpting, and builds on [Interactive Concave Volume Clipping via GPU Boolean Operations](3592-interactive-concave-volume-clipping-via-gpu-boolean-operatio.md) by mapping clipping operations to commodity graphics hardware for interactive performance.
+
+### [GPU-based Volume Sculpting System](13711-gpu-based-volume-sculpting-system.md)
+A texture-based volume rendering system that enables real-time interactive sculpting of volumetric datasets by voxelizing sculpting tools on the GPU via fragment shaders to create a 3D mask. It solves the problem of interactive volume modification by allowing users to clip, erase, or dig into volumes without complex transfer functions, building on the [Interactive Concave Volume Clipping via GPU Boolean Operations](3592-interactive-concave-volume-clipping-via-gpu-boolean-operatio.md) by providing the mechanism for generating the 3D mask used in subsequent rendering stages.
+
+## Operating characteristics
+*   **Time and Memory Complexity:** The method consumes very little video memory because common analytical convex objects (polyhedrons, spheres) are determined by parameters [S1, unofficial].
+*   **Measured Performance:** Tested on a standard PC with a GeForce FX8600 graphics card, achieving interactive frame rates [S1, unofficial].
+*   **Scaling:** Not given in the sources.
+*   **Strengths:** Avoids difficulties in specifying an appropriate transfer function; allows free clipping and visualization at interactive frame rates [S1, unofficial].
+*   **Limitations:** Relies on analytical convex objects for clipping geometry [S1, unofficial].
+*   **When to use:** When displaying inner structures of volumetric datasets is required without complex transfer function tuning [S1, unofficial].
+*   **When not:** When complex, non-convex clipping geometries are required that cannot be represented by the supported analytical objects [S1, unofficial].
+
+## Background
+The method was presented by Feiniu Yuan in January 2012 [S1, unofficial]. It addresses the challenge of visualizing inner structures in volumetric data by leveraging GPU-accelerated Boolean operations, building on the principles of GPU ray casting [S1, unofficial].
+
+## Sources
+[S1] Volume and Isosurface Rendering with GPU‐Accelerated Cell Projection, https://www.researchgate.net/publication/227523087_Volume_and_Isosurface_Rendering_with_GPU-Accelerated_Cell_Projection, fetched 2026-10-27 (unofficial)

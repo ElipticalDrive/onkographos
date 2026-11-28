@@ -1,0 +1,166 @@
+# Sparse AABB Sweep Test
+
+Also called: SweepAabb
+
+## Overview
+The Sparse AABB Sweep Test is a voxel occupancy test that determines whether an axis-aligned bounding box (AABB) moving along a displacement vector intersects any occupied voxels in a sparse voxel grid [S1, unofficial]. It solves the problem of detecting collisions during continuous motion by sampling the path at discrete intervals, serving as a bridge between static point queries and full continuous collision detection [G]. It differs from its sibling [Support Below Search](5414-support-below-search.md) by testing the entire swept volume path rather than only checking for support below a specific point, and from its parent [Sparse AABB Collision Test](3047-sparse-aabb-collision-test.md) by adding temporal interpolation to the static spatial query [G].
+
+## How it works
+The method discretizes the linear trajectory of an AABB into a fixed number of steps, testing for occupancy at each intermediate position [S1, unofficial]. It returns the fraction of the path traveled before the first collision (`hitFraction`) and the last known safe fraction (`safeFraction`) [S1, unofficial].
+
+**Inputs and Outputs**
+*   **Inputs**:
+    *   `aabb`: The initial axis-aligned bounding box, defined by minimum and maximum coordinates $(x_{min}, y_{min}, z_{min})$ and $(x_{max}, y_{max}, z_{max})$ [S1, unofficial].
+    *   `delta`: The displacement vector $(\Delta x, \Delta y, \Delta z)$ representing the motion over the step [S1, unofficial].
+    *   `steps`: The number of intermediate probes to perform along the path [S1, unofficial].
+    *   `liquidsBlock`: A boolean flag indicating whether liquid voxels should be treated as solid obstacles [S1, unofficial].
+*   **Outputs**:
+    *   `blocked`: Boolean indicating if a collision occurred [S1, unofficial].
+    *   `safeFraction`: The fraction of the path where the AABB was last confirmed clear ($0.0$ to $1.0$) [S1, unofficial].
+    *   `hitFraction`: The fraction of the path where the first collision was detected ($0.0$ to $1.0$) [S1, unofficial].
+    *   `hitVolume`: The result of the specific voxel test at the collision point [S1, unofficial].
+
+**Data Structures**
+The `SparseCollisionAabb` structure contains the bounding box coordinates $(x_{min}, y_{min}, z_{min}, x_{max}, y_{max}, z_{max})$ [S1, unofficial]. The `SparseCollisionVolumeResult` structure contains the `blocked` flag and potentially voxel coordinates or metadata [S1, unofficial]. The implementation relies on a helper function `TestAabb` which queries the sparse voxel grid; the exact layout of the voxel grid is defined by the parent method [Sparse AABB Collision Test](3047-sparse-aabb-collision-test.md) [S1, unofficial].
+
+**Parameters**
+*   `kMaxCollisionSweepSteps`: The maximum allowed number of steps. The source specifies this constant as $1024$ [S1, unofficial].
+*   `epsilon`: The threshold for near-zero displacement is $0.0001$ [S1, unofficial].
+
+**Algorithm Steps**
+1.  **Validation**: Check if the components of `aabb` or `delta` are non-finite (NaN or Infinity). If any are non-finite, return immediately with `blocked=true`, `safeFraction=0.0`, and `hitFraction=0.0` [S1, unofficial].
+2.  **Degenerate Motion Check**: Calculate the absolute values of the displacement components $|\Delta x|, |\Delta y|, |\Delta z|$. If all are less than $0.0001$, the motion is negligible. In this case, bypass the sweep and call the static `TestAabb` on the original `aabb` [S1, unofficial].
+3.  **Step Clamping**: Clamp the requested `steps` parameter to the range $[1, kMaxCollisionSweepSteps]$ (i.e., $[1, 1024]$) [S1, unofficial].
+4.  **Initialization**: Set `lastSafeFraction = 0.0f` [S1, unofficial].
+5.  **Sweep Loop**: Iterate `step` from $1$ to `steps` (inclusive):
+    a.  Calculate the interpolation fraction: $f = \frac{\text{step}}{\text{steps}}$ [S1, unofficial].
+    b.  Translate the AABB by the scaled displacement:
+        $$
+        \begin{aligned}
+        x_{min}' &= x_{min} + \Delta x \cdot f \\
+        x_{max}' &= x_{max} + \Delta x \cdot f \\
+        y_{min}' &= y_{min} + \Delta y \cdot f \\
+        y_{max}' &= y_{max} + \Delta y \cdot f \\
+        z_{min}' &= z_{min} + \Delta z \cdot f \\
+        z_{max}' &= z_{max} + \Delta z \cdot f
+        \end{aligned}
+        $$
+        Let the translated box be `probe` [S1, unofficial].
+    c.  Query the voxel grid: Call `TestAabb(probe, liquidsBlock)` to get `volume` [S1, unofficial].
+    d.  **Collision Check**: If `volume.blocked` is true:
+        i.  Set `result.blocked = true` [S1, unofficial].
+        ii. Set `result.safeFraction = lastSafeFraction` [S1, unofficial].
+        iii. Set `result.hitFraction = f` [S1, unofficial].
+        iv. Set `result.hitVolume = volume` [S1, unofficial].
+        v.  Return `result` immediately [S1, unofficial].
+    e.  **Update Safe Fraction**: Set `lastSafeFraction = f` [S1, unofficial].
+6.  **Completion**: If the loop finishes without collision, set `result.blocked = false`, `result.safeFraction = 1.0f`, and `result.hitFraction = 1.0f` [S1, unofficial].
+
+**Pseudocode**
+> **Unverified code.** The code below did not pass a test run against a reference implementation, or no test fits it, so it may contain errors.
+
+```python
+def SparseAABBSweepTest(aabb, delta, steps, liquids_block):
+    # 1. Validate finiteness
+    def is_finite(v):
+        return v == v and v != float('inf') and v != float('-inf')
+
+    if not all(is_finite(v) for v in [aabb.min_x, aabb.max_x, aabb.min_y, aabb.max_y, aabb.min_z, aabb.max_z, delta.x, delta.y, delta.z]):
+        return {
+            'blocked': True,
+            'safeFraction': 0.0,
+            'hitFraction': 0.0,
+            'hitVolume': None
+        }
+
+    # 2. Near-zero displacement fallback
+    if abs(delta.x) < 0.0001 and abs(delta.y) < 0.0001 and abs(delta.z) < 0.0001:
+        volume = TestAabb(aabb, liquids_block)
+        return {
+            'blocked': volume.blocked,
+            'safeFraction': 1.0 if not volume.blocked else 0.0,
+            'hitFraction': 1.0 if not volume.blocked else 0.0,
+            'hitVolume': volume
+        }
+
+    # 3. Clamp steps
+    kMaxCollisionSweepSteps = 1024
+    steps = max(1, min(steps, kMaxCollisionSweepSteps))
+
+    last_safe_fraction = 0.0
+
+    # 5. Loop
+    for step in range(1, steps + 1):
+        fraction = step / steps
+        
+        # Translate AABB
+        probe = SparseCollisionAabb(
+            min_x=aabb.min_x + delta.x * fraction,
+            max_x=aabb.max_x + delta.x * fraction,
+            min_y=aabb.min_y + delta.y * fraction,
+            max_y=aabb.max_y + delta.y * fraction,
+            min_z=aabb.min_z + delta.z * fraction,
+            max_z=aabb.max_z + delta.z * fraction
+        )
+        
+        # Test occupancy
+        volume = TestAabb(probe, liquids_block)
+        
+        if volume.blocked:
+            return {
+                'blocked': True,
+                'safeFraction': last_safe_fraction,
+                'hitFraction': fraction,
+                'hitVolume': volume
+            }
+        
+        last_safe_fraction = fraction
+
+    # 6. No collision
+    return {
+        'blocked': False,
+        'safeFraction': 1.0,
+        'hitFraction': 1.0,
+        'hitVolume': None
+    }
+
+class SparseCollisionAabb:
+    def __init__(self, min_x, max_x, min_y, max_y, min_z, max_z):
+        self.min_x = min_x
+        self.max_x = max_x
+        self.min_y = min_y
+        self.max_y = max_y
+        self.min_z = min_z
+        self.max_z = max_z
+
+class SparseCollisionVolumeResult:
+    def __init__(self, blocked, hit_volume=None):
+        self.blocked = blocked
+        self.hit_volume = hit_volume
+
+def TestAabb(aabb, liquids_block):
+    # Queries the sparse voxel grid defined by the parent method [Sparse AABB Collision Test](3047-sparse-aabb-collision-test.md).
+    # Returns a SparseCollisionVolumeResult indicating if the AABB intersects any occupied voxels.
+    # Implementation details are not provided in the sources.
+    return SparseCollisionVolumeResult(blocked=False)
+```
+
+## Subtopics
+
+### [Broad-phase Collision Detection (Sweep and Prune)](15066-broad-phase-collision-detection-sweep-and-prune.md)
+A broad-phase collision detection algorithm that sorts projected extents of objects' bounding boxes on cartesian axes to determine overlaps. It differs from narrow-phase methods by identifying potential collisions without precise geometric intersection tests, serving as a filter to reduce the complexity of the subsequent narrow-phase stage.
+
+## Operating characteristics
+*   **Time Complexity**: $O(k)$, where $k$ is the number of steps [G]. Each step involves a constant-time AABB translation and a voxel grid lookup via `TestAabb` [G]. The lookup cost depends on the sparse voxel structure (e.g., hash map or tree traversal) but is independent of the sweep logic itself [G].
+*   **Memory Complexity**: $O(1)$ auxiliary space, excluding the storage required by the voxel grid itself [G].
+*   **Performance**: The method is bounded by `kMaxCollisionSweepSteps` (1024) [S1, unofficial]. In practice, it often returns early upon collision, making average-case performance faster than the worst case [G].
+*   **Strengths**: Simple to implement; provides a safe fraction for continuous collision response; handles non-zero velocity cases robustly [G].
+*   **Limitations**: Discrete sampling may miss thin obstacles if the step size is too large relative to the obstacle thickness (tunneling) [G]. The fallback to static testing for near-zero motion avoids division by zero or infinite loops but may miss micro-movements [G].
+*   **When to use**: When continuous collision detection is required for moving voxels or objects in a voxel environment, and the motion is not extremely high-speed relative to the voxel size [G].
+*   **When not to use**: For static objects (use [Sparse AABB Collision Test](3047-sparse-aabb-collision-test.md) directly) or when exact continuous collision detection is required without sampling artifacts (requires more complex analytical methods) [G].
+
+## Background
+The Sparse AABB Sweep Test is part of the voxel physics engine implementation in the `voxelrender` project by asajid2-cell [S1, unofficial]. It is designed to handle collision detection for moving entities within a sparse voxel world, likely for sand or particle simulations where objects move through a grid of voxels [S1, unofficial]. The method integrates with a broader system that includes DX12 rendering and window management, indicating its use in a real-time simulation context [S1, unofficial].
+
+## Sources
+[S1] asajid2-cell/voxelrender, https://github.com/asajid2-cell/voxelrender, fetched 2026-10-27 (unofficial)

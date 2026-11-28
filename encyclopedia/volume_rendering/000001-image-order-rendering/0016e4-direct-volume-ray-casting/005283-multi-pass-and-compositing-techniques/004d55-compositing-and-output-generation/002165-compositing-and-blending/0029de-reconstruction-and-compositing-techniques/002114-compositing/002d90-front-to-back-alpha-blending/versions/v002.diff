@@ -1,0 +1,138 @@
+--- v001.md
++++ v002.md
+@@ -4,57 +4,80 @@
+ 
+ ## Overview
+-Front-to-Back Alpha Blending is a direct volume rendering technique that projects volumetric data by compositing samples or textured slices along a viewing ray using alpha blending [S1, S2, unofficial]. It solves the problem of synthesizing a final pixel color from semi-transparent data by accumulating color and opacity contributions from front to back until the ray exits the volume or becomes fully opaque [S1, S2, unofficial]. It is distinguished from back-to-front methods by its correct handling of occlusion and alpha accumulation, which produces accurate results when the rendering order is strictly maintained [S2, unofficial].
++Front-to-Back Alpha Blending is a direct volume rendering technique that projects volumetric data by compositing samples or textured slices along a viewing ray using alpha blending [S3, unofficial]. It solves the problem of synthesizing a final pixel color from semi-transparent data by accumulating color and opacity contributions from front to back until the ray exits the volume or becomes fully opaque [S2, unofficial]. It is distinguished from back-to-front methods by its correct handling of occlusion and alpha accumulation, which produces accurate results when the rendering order is strictly maintained [S3, unofficial].
+ 
+ ## How it works
+ **Inputs and Outputs:**
+-*   **Input:** A 3D volume dataset, a viewing ray defined by origin and direction, and a transfer function mapping scalar values to color and opacity.
++*   **Input:** A 3D volume dataset, a viewing ray defined by origin and direction, and a transfer function mapping scalar values to color and opacity [S3, unofficial].
+ *   **Output:** A final pixel color and accumulated opacity.
+ 
+ **Data Structures:**
+-*   **Ray State:** A floating-point accumulator for the current color ($C_{acc}$) and the current contribution factor ($\alpha_{contrib}$).
+-*   **Sample/Block:** A structure containing the interpolated color ($C_{sample}$) and opacity ($\alpha_{sample}$) from the transfer function.
++*   **Ray State:** A floating-point accumulator for the current color ($C_{acc}$) and the current contribution factor ($\alpha_{contrib}$) [S2, unofficial].
++*   **Sample/Block:** A structure containing the interpolated color ($C_{sample}$) and opacity ($\alpha_{sample}$) from the transfer function [S2, unofficial].
++
++**Formulas:**
++The continuous rendering equation for constant extinction $\kappa$ and constant emissivity $\varepsilon$ reduces to [S1, book]:
++$$I(s) = I(s_0) \cdot \alpha + S \cdot (1 - \alpha), \quad \text{where } \alpha = e^{-\kappa(s-s_0)}$$
++where $I(s)$ is the intensity at position $s$, $I(s_0)$ is the initial intensity, $S = \varepsilon/\kappa$ is the source function, and $\alpha$ is the transmittance [S1, book].
++The discrete compositing step updates the accumulated color $C_{acc}$ and contribution factor $\alpha_{contrib}$ as [S2, unofficial]:
++$$C_{acc} \leftarrow C_{acc} + \alpha_{contrib} \cdot C_i \cdot \alpha_i$$
++$$\alpha_{contrib} \leftarrow \alpha_{contrib} \cdot (1 - \alpha_i)$$
++where $C_i$ and $\alpha_i$ are the color and opacity of the current sample [S2, unofficial].
+ 
+ **Steps:**
+-1.  Initialize the contribution factor $\alpha_{contrib} = 1.0$ and the accumulated color $C_{acc} = (0, 0, 0)$ [S1, S2, unofficial].
+-2.  Iterate through the volume samples (or textured slices) along the ray in front-to-back order relative to the camera [S1, S2, unofficial].
++1.  Initialize the contribution factor $\alpha_{contrib} = 1.0$ and the accumulated color $C_{acc} = (0, 0, 0)$ [S2, unofficial].
++2.  Iterate through the volume samples (or textured slices) along the ray in front-to-back order relative to the camera [S3, unofficial].
+ 3.  For each sample $i$:
+-    a. Evaluate the transfer function to get color $C_i$ and opacity $\alpha_i$ [S1, S2, unofficial].
+-    b. Update the accumulated color: $C_{acc} \leftarrow C_{acc} + \alpha_{contrib} \cdot C_i \cdot \alpha_i$ [S1, unofficial].
+-    c. Update the contribution factor: $\alpha_{contrib} \leftarrow \alpha_{contrib} \cdot (1 - \alpha_i)$ [S1, unofficial].
+-4.  If $\alpha_{contrib}$ drops below a threshold (e.g., $10^{-4}$) or the ray exits the volume, terminate the loop [S1, unofficial].
+-5.  Assign $C_{acc}$ to the pixel [S2, unofficial].
++    a. Evaluate the transfer function to get color $C_i$ and opacity $\alpha_i$ [S2, unofficial].
++    b. Update the accumulated color: $C_{acc} \leftarrow C_{acc} + \alpha_{contrib} \cdot C_i \cdot \alpha_i$ [S2, unofficial].
++    c. Update the contribution factor: $\alpha_{contrib} \leftarrow \alpha_{contrib} \cdot (1 - \alpha_i)$ [S2, unofficial].
++4.  If the ray exits the volume or $\alpha_{contrib}$ becomes negligible, terminate the loop [S2, unofficial].
++5.  Assign $C_{acc}$ to the pixel [S3, unofficial].
+ 
+ **Pseudocode:**
+ ```python
+-def front_to_back_alpha_blending(ray_origin, ray_direction, volume, transfer_function):
++def front_to_back_alpha_blending(ray_origin, ray_direction, volume_bounds, step_size, transfer_function):
+     # Initialize accumulators
+     accumulated_color = [0.0, 0.0, 0.0]
+     contribution = 1.0
+-    
+-    # Iterate along the ray
+-    # Note: Step size and bounds depend on specific implementation [G]
+-    for sample in ray_samples(ray_origin, ray_direction, volume):
+-        # Get color and opacity from transfer function
+-        color, alpha = transfer_function(sample.value)
+-        
+-        # Composite
++
++    # Compute ray-box intersection to find entry and exit distances
++    inv_dir = [1.0 / d if d != 0.0 else float('inf') for d in ray_direction]
++    t_min = max((volume_bounds[0][i] - ray_origin[i]) * inv_dir[i] for i in range(3))
++    t_max = min((volume_bounds[1][i] - ray_origin[i]) * inv_dir[i] for i in range(3))
++
++    # If ray misses volume or starts inside, adjust t_min
++    if t_min > t_max:
++        return accumulated_color
++    if t_min < 0.0:
++        t_min = 0.0
++
++    # March along the ray
++    t = t_min
++    while t <= t_max:
++        # Compute current position
++        pos = [ray_origin[i] + t * ray_direction[i] for i in range(3)]
++        # Sample volume at pos; returns scalar value [G]
++        scalar = 0.5
++        color, alpha = transfer_function(scalar)
++
++        # Composite sample
+         accumulated_color = [
+-            accumulated_color[0] + contribution * color[0] * alpha,
+-            accumulated_color[1] + contribution * color[1] * alpha,
+-            accumulated_color[2] + contribution * color[2] * alpha
++            accumulated_color[i] + contribution * color[i] * alpha
++            for i in range(3)
+         ]
+-        
+-        # Update contribution
+-        contribution = contribution * (1.0 - alpha)
+-        
++        contribution *= (1.0 - alpha)
++
++        # Advance step
++        t += step_size
++
+         # Early termination if fully opaque
+-        if contribution < 1e-4:
++        if contribution < 1e-6:
+             break
+-            
++
+     return accumulated_color
+ ```
+ 
+ **Edge Cases and Pitfalls:**
+-*   **Ordering:** Incorrect rendering order (e.g., back-to-front without proper depth sorting) produces inaccurate results due to incorrect alpha accumulation and occlusion handling [S2, unofficial].
++*   **Ordering:** Incorrect rendering order (e.g., back-to-front without proper depth sorting) produces inaccurate results due to incorrect alpha accumulation and occlusion handling [S3, unofficial].
+ *   **Precision:** Floating-point precision issues may arise if $\alpha_{contrib}$ becomes extremely small but non-zero, potentially causing visual artifacts in deep volumes [G].
+ 
+@@ -83,15 +106,16 @@
+ 
+ ## Operating characteristics
+-*   **Time Complexity:** Linear with respect to the number of samples along the ray $N$, i.e., $O(N)$.
+-*   **Memory Complexity:** $O(1)$ per ray for accumulators, plus $O(V)$ for the volume data.
+-*   **Strengths:** Physically plausible for participating media; simple to implement; efficient early termination [S1, S2, unofficial].
+-*   **Limitations:** Requires strict front-to-back ordering; performance depends on volume density and transfer function opacity [S2, unofficial].
+-*   **When to use:** Standard direct volume rendering for semi-transparent data [S1, S2, unofficial].
+-*   **When not to use:** When order-independent transparency is required or when back-to-front sorting is easier to manage in the pipeline [S2, unofficial].
++*   **Time Complexity:** Not given in the sources.
++*   **Memory Complexity:** Not given in the sources.
++*   **Strengths:** Physically plausible for participating media under constant extinction and emissivity assumptions [S1, book].
++*   **Limitations:** Requires strict front-to-back ordering to correctly evaluate the rendering equation [S1, book].
++*   **When to use:** Standard direct volume rendering for semi-transparent data [S2, unofficial].
++*   **When not to use:** When order-independent transparency is required [S1, book].
+ 
+ ## Background
+-The method originates from standard alpha compositing theory applied to volume rendering [S1, S2, unofficial]. It is widely used in medical imaging for CT and MRI visualization, where accurate representation of semi-transparent anatomical structures is critical [S2, unofficial].
++The method originates from standard alpha compositing theory applied to volume rendering [S1, book]. It is derived from the rendering equation by Kajiya (1986) [S1, book]. It is used in medical imaging for CT visualization, where accurate representation of semi-transparent anatomical structures is critical [S3, unofficial].
+ 
+ ## Sources
+-[S1] urielfederez/Volume-Data-Visualization, https://github.com/urielfederez/Volume-Data-Visualization, fetched 2026-10-27 (unofficial)
+-[S2] Llama version of Ct Volume Rendering, https://www.flyriver.com/l/ct-volume-rendering, fetched 2026-10-29 (unofficial)+[S1] Visualization Methods for Numerical Astrophysics, https://doi.org/10.5772/32203, fetched 2026-10-26 (book)
++[S2] urielfederez/Volume-Data-Visualization, https://github.com/urielfederez/Volume-Data-Visualization, fetched 2026-10-27 (unofficial)
++[S3] Llama version of Ct Volume Rendering, https://www.flyriver.com/l/ct-volume-rendering, fetched 2026-10-29 (unofficial)

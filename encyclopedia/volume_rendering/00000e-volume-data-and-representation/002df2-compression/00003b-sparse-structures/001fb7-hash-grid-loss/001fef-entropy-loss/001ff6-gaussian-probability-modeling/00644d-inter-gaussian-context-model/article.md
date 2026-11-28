@@ -1,0 +1,127 @@
+# Inter-Gaussian Context Model
+
+## Overview
+The Inter-Gaussian Context Model predicts the attributes of a current Gaussian by leveraging context from previously processed Gaussians, thereby reducing the entropy of the quantized anchor attributes [S1, unofficial]. It sets itself apart from the parent [Gaussian Probability Modeling](2122-gaussian-probability-modeling.md) by explicitly structuring the Gaussian set into sequential batches to progressively enrich the available context, distinguishing it from methods that treat Gaussians as independent or use only local spatial neighbors [S1, unofficial].
+
+## How it works
+**Inputs and Outputs:**
+- Input: A set of 3D Gaussians to be compressed, split into sequential batches $B_1, \dots, B_k$ [S1, unofficial].
+- Output: Predicted mean $\mu_g$ and variance for the attributes of the current batch, used to compute the probability distribution for entropy coding [G].
+
+**Data Structures:**
+The Gaussian set is partitioned into $k$ batches according to specified proportions $p_1, \dots, p_k$ such that $\sum p_i = 1$ [S1, unofficial]. The attributes typically include color ($f_{col}$) and geometric ($f_{geo}$) components [S1, unofficial].
+
+**Steps:**
+1. **Partitioning:** Split the total set of Gaussians into $k$ batches $B_1, \dots, B_k$ according to the specified proportions [S1, unofficial].
+2. **Context Initialization (Batch $B_1$):** For the first batch $B_1$, there is no prior Gaussian context [S1, unofficial]. The mean $\mu_g$ is manually set to $0$ as a placeholder [S1, unofficial]. However, the positional encoding $emb(\mu_g)$ is still computed and provided to the context model to serve as a fallback context signal [S1, unofficial].
+3. **Context Aggregation (Batches $B_2 \dots B_k$):** For subsequent batches, the context is derived from the attributes of all previously processed Gaussians in $B_1, \dots, B_{i-1}$ [S1, unofficial].
+4. **Prediction:** The context model takes the aggregated context and the positional encoding of the current Gaussian to predict the mean $\mu_g$ and variance [G].
+5. **Entropy Coding:** The predicted distribution is used to encode the quantized attributes [G].
+
+**Parameters:**
+- **Number of splits ($k$):** Default is 4 [S1, unofficial]. Tested extremes include 2 splits (proportions $95\%, 5\%$) [S1, unofficial].
+- **Split Proportions:** Default is $[17\%, 17\%, 33\%, 33\%]$ [S1, unofficial]. The strategy allocates fewer Gaussians to early batches to account for their lack of context, leading to diminishing returns in size reduction beyond 4 splits [S1, unofficial].
+
+**Edge Cases and Pitfalls:**
+- **Precision:** The placeholder $\mu_g=0$ in $B_1$ is a necessary approximation; removing the inter-Gaussian context model entirely results in significantly larger file sizes, proving that even this weak context is valuable [S1, unofficial].
+- **Convergence:** Increasing the number of splits beyond 4 yields negligible size reduction, suggesting diminishing returns in context enrichment [S1, unofficial].
+
+**Pseudocode:**
+> **Unverified code.** The code below did not pass a test run against a reference implementation, or no test fits it, so it may contain errors.
+
+```python
+import math
+
+def positional_encoding(pos, num_freqs=10):
+    """Standard sinusoidal positional encoding."""
+    scales = [2.0 ** (i / num_freqs) for i in range(num_freqs)]
+    encoded = []
+    for scale in scales:
+        encoded.extend([math.sin(pos * scale), math.cos(pos * scale)])
+    return encoded
+
+def aggregate_context(prev_gaussians):
+    """Compute context statistics from previously processed Gaussians."""
+    if not prev_gaussians:
+        return []
+    n = len(prev_gaussians)
+    mean_pos = sum(g.pos for g in prev_gaussians) / n
+    var_pos = sum((g.pos - mean_pos) ** 2 for g in prev_gaussians) / n
+    return [mean_pos, var_pos]
+
+def predict_mean(context, pos_enc):
+    """Simple linear prediction from context and positional encoding."""
+    return sum(c * p for c, p in zip(context, pos_enc))
+
+def context_model(pos_enc, context):
+    """Predict distribution parameters (mean and log-variance) for entropy coding."""
+    combined = pos_enc + context if context else pos_enc
+    mean = predict_mean(context, pos_enc)
+    log_var = sum(x ** 2 for x in combined) / len(combined)
+    return mean, math.exp(log_var)
+
+def quantize(value, mean, variance):
+    """Round value to nearest integer grid point based on predicted distribution."""
+    return round(value)
+
+def encode(value, mean, variance):
+    """Compute bits using probability mass function of the predicted Gaussian."""
+    prob = math.exp(-0.5 * ((value - mean) ** 2) / variance) / math.sqrt(2 * math.pi * variance)
+    return -math.log2(max(prob, 1e-10))
+
+def inter_gaussian_context_model(gaussians, num_splits=4, proportions=None):
+    if proportions is None:
+        if num_splits == 4:
+            proportions = [0.17, 0.17, 0.33, 0.33]
+        elif num_splits == 2:
+            proportions = [0.95, 0.05]
+        else:
+            proportions = [1.0 / num_splits] * num_splits
+
+    batches = []
+    start_idx = 0
+    for prop in proportions:
+        end_idx = start_idx + int(len(gaussians) * prop)
+        batches.append(gaussians[start_idx:end_idx])
+        start_idx = end_idx
+
+    context_buffer = []
+    bitstream = []
+
+    for i, batch in enumerate(batches):
+        batch_bits = []
+        for gaussian in batch:
+            if i == 0:
+                mu_g = 0.0
+                pos_enc = positional_encoding(gaussian.pos)
+                context = []
+            else:
+                context = aggregate_context(context_buffer)
+                pos_enc = positional_encoding(gaussian.pos)
+
+            mean, variance = context_model(pos_enc, context)
+            quantized_attr = quantize(gaussian.attr, mean, variance)
+            bits = encode(quantized_attr, mean, variance)
+            batch_bits.append(bits)
+            context_buffer.append(gaussian)
+        bitstream.extend(batch_bits)
+    return bitstream
+```
+
+## Subtopics
+
+### Intra-Gaussian Context Model
+Predicts attributes within a single Gaussian by splitting them into sequential chunks ($C_1 \to C_4$) rather than across Gaussians [S1, unofficial]. Context is derived from a learnable MLP operating in latent space [S1, unofficial]. Unlike the inter-Gaussian model, where batches have equal average information, intra-Gaussian chunks have unequal information distribution due to the learnable MLP latent space [S1, unofficial]. $C_1$ lacks intra-Gaussian context and receives minimal information allocation to save bits, while $C_2$ receives the most information as it plays a pivotal role in predicting subsequent chunks ($C_3, C_4$) [S1, unofficial]. The default number of chunks is 4 [S1, unofficial].
+
+## Operating characteristics
+- **Time and Memory Complexity:** Not explicitly given in the sources. The method involves splitting data and aggregating context, which adds overhead compared to independent coding [G].
+- **Measured Performance:** On the DL3DV-GS dataset ($\lambda=1e-4$), 4 splits yield 27.440 MB with a PSNR of 29.264 dB [S1, unofficial].
+- **Scaling:** Increasing splits from 3 to 4 reduces size by 0.227 MB. Beyond 4 splits, size reduction is negligible (e.g., 5 splits yield 27.379 MB) [S1, unofficial].
+- **Strengths:** Significantly reduces file size compared to removing the inter-Gaussian context model entirely. The positional encoding $emb(\mu_g)$ provides effective fallback context even when $\mu_g$ is a placeholder [S1, unofficial].
+- **Limitations:** The first batch ($B_1$) lacks inter-Gaussian context, leading to less accurate probability estimates and higher bits per parameter for $B_1$ compared to subsequent batches [S1, unofficial]. Extreme split strategies (e.g., 95%, 5%) perform poorly [S1, unofficial].
+
+## Background
+The Inter-Gaussian Context Model is part of the Fast Feedforward 3D Gaussian Splatting Compression (FCGS) method, published as a conference paper at ICLR 2025 [S1, unofficial]. It builds on the concept of Gaussian Probability Modeling by introducing structured context dependencies between Gaussians to improve compression efficiency [S1, unofficial].
+
+## Sources
+[S1] Fast Feedforward 3D Gaussian Splatting Compression, https://doi.org/10.48550/arxiv.2410.08017, fetched 2026-10-26 (unofficial)

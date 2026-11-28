@@ -1,0 +1,82 @@
+--- v007.md
++++ v008.md
+@@ -20,11 +20,11 @@
+ 
+ **Steps:**
+-1. **Light Camera Setup:** Construct a virtual perspective camera to simulate a directional sun light source. Place it at a large distance with a narrow field of view (FOV) to minimize parallax error to below 2% and avoid modifying the EWA Jacobian [S1, unofficial].
+-2. **Rasterization Pass:** Perform a CUDA rasterization pass from the sun camera's perspective. Traverse Gaussians in depth order relative to the sun camera [S1, unofficial].
+-3. **Transmittance Accumulation:** For each Gaussian, calculate its contribution to the front occlusion. Record the accumulated front transmittance $\tau$ weighted by $\tau \times \text{weight}$ into the `record_front_tau` channel. This represents an energy-weighted mean over the entire sun-facing footprint, not just a center point sample [S1, unofficial].
+-4. **Gradient Handling:** Enable full continuous gradients by default. This includes gradients for $\tau$, weights, normalization, weak density backup transmittance, and projection position/scale/rotation. However, treat sun camera framing, sorting, coverage, and threshold branches as constants to prevent incorrect gradient propagation [S1, unofficial].
+-5. **Covariance Handling:** Do not expand the projection covariance by $0.3I$ during this light pass, and do not apply amplitude compensation. Keep the sampling expansion from the main camera pass as is [S1, unofficial].
++1. **Light Camera Setup:** Construct a virtual perspective camera to simulate a directional sun light source [S1, unofficial]. Place it at a large distance with a narrow field of view (FOV) to minimize parallax error to below 2% and avoid modifying the EWA Jacobian [S1, unofficial].
++2. **Rasterization Pass:** Perform a CUDA rasterization pass from the sun camera's perspective [S1, unofficial]. Traverse Gaussians in depth order relative to the sun camera [S1, unofficial].
++3. **Transmittance Accumulation:** For each Gaussian, calculate its contribution to the front occlusion [S1, unofficial]. Record the accumulated front transmittance $\tau$ weighted by $\tau \times \text{weight}$ into the `record_front_tau` channel [S1, unofficial]. This represents an energy-weighted mean over the entire sun-facing footprint, not just a center point sample [S1, unofficial].
++4. **Gradient Handling:** Enable full continuous gradients by default [S1, unofficial]. This includes gradients for $\tau$, weights, normalization, weak density backup transmittance, and projection position/scale/rotation [S1, unofficial]. Treat sun camera framing, sorting, coverage, and threshold branches as constants to prevent incorrect gradient propagation [S1, unofficial].
++5. **Covariance Handling:** Do not expand the projection covariance by $0.3I$ during this light pass, and do not apply amplitude compensation [S1, unofficial]. Keep the sampling expansion from the main camera pass as is [S1, unofficial].
+ 6. **Deeply Buried Gaussians:** Handle deeply buried Gaussians (where early termination causes $wsum=0$) by explicitly mapping them to full shadow to prevent inversion artifacts [S1, unofficial].
+-7. **Fallback Mode:** If the `--tlight_voxel` flag is passed, use the old $128^3$ voxel cache path. This is compatible with models trained before rasterization support was added [S1, unofficial].
++7. **Fallback Mode:** If the `--tlight_voxel` flag is passed, use the old $128^3$ voxel cache path [S1, unofficial]. This is compatible with models trained before rasterization support was added [S1, unofficial].
+ 
+ **Pseudocode:**
+@@ -40,5 +40,5 @@
+         
+     Returns:
+-        t_light: Array of transmittance values for each Gaussian.
++        record_front_tau: Array of transmittance values for each Gaussian.
+     """
+     if use_voxel_fallback:
+@@ -46,8 +46,14 @@
+         return [0.0] * len(gaussians)
+     
+-    light_camera = PerspectiveCamera(sun_direction, distance=1e6, fov=1.0)
+-    sorted_gaussians = sort_by_depth(gaussians, light_camera)
++    # Construct virtual perspective camera for directional sun light [S1, unofficial]
++    camera_pos = sun_direction * 1e6
++    fov = 1.0
+     
+-    t_light = [0.0] * len(gaussians)
++    # Sort Gaussians by depth relative to sun camera [S1, unofficial]
++    depths = [gaussian.position.dot(camera_pos) for gaussian in gaussians]
++    sorted_indices = sorted(range(len(depths)), key=lambda k: depths[k])
++    sorted_gaussians = [gaussians[i] for i in sorted_indices]
++    
++    record_front_tau = [0.0] * len(gaussians)
+     tau = 1.0
+     
+@@ -56,22 +62,12 @@
+         tau *= (1.0 - weight)
+         
+-        # Handle deeply buried Gaussians where early termination causes wsum=0
++        # Handle deeply buried Gaussians where early termination causes wsum=0 [S1, unofficial]
+         if tau < 1e-6:
+-            t_light[gaussian.id] = 0.0
++            record_front_tau[gaussian.id] = 0.0
+         else:
+-            # Record accumulated front transmittance weighted by tau * weight
+-            t_light[gaussian.id] = tau * weight
++            # Record accumulated front transmittance weighted by tau * weight [S1, unofficial]
++            record_front_tau[gaussian.id] = tau * weight
+             
+-    return t_light
+-
+-def PerspectiveCamera(direction, distance, fov):
+-    """Standard perspective camera setup [G]."""
+-    return {"position": direction * distance, "fov": fov}
+-
+-def sort_by_depth(gaussians, camera):
+-    """Sort Gaussians by depth relative to camera [G]."""
+-    depths = [gaussian.position.dot(camera["position"]) for gaussian in gaussians]
+-    indices = sorted(range(len(depths)), key=lambda k: depths[k])
+-    return [gaussians[i] for i in indices]
++    return record_front_tau
+ ```
+ 
+@@ -86,6 +82,6 @@
+ 
+ ## Operating characteristics
+-- **Time Complexity:** Depends on the number of Gaussians and the rasterization pass. The light-space rasterization adds an additional pass over the Gaussians [S1, unofficial].
+-- **Memory Complexity:** Requires additional buffer for `record_front_tau` aligned with the Gaussian buffer [S1, unofficial].
++- **Time Complexity:** Not given in the sources. The light-space rasterization adds an additional pass over the Gaussians [S1, unofficial].
++- **Memory Complexity:** Not given in the sources. Requires additional buffer for `record_front_tau` aligned with the Gaussian buffer [S1, unofficial].
+ - **Strengths:** Provides accurate self-shadowing effects in volume rendering. Compatible with existing training pipelines [S1, unofficial].
+ - **Limitations:** Requires additional computation for the light pass. Fallback mode may be less efficient or accurate than rasterization [S1, unofficial].

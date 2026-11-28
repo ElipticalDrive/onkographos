@@ -1,0 +1,195 @@
+# Ray-Space Embedding Network with Local Affine Transformation
+
+Also called: Local affine transformation-based embedding, Ours (no subdivision)
+
+## Overview
+This method is a neural light field representation that uses a ray-space embedding network to predict local affine transformations for color computation, enabling view-dependent effects and multi-view consistency without explicit geometry [S1, unofficial]. It differs from standard NeRF by parameterizing the radiance field locally within a voxel grid (for sparse inputs) or globally (for dense inputs), using an embedding network to infer affine parameters that linearize color level sets, thereby improving interpolation quality [S1, unofficial].
+
+## How it works
+**Inputs and Outputs**
+*   **Input:** Camera ray $r$, defined by origin and direction. For subdivided models, the ray intersects a regular voxel grid covering NDC space.
+*   **Output:** Final color $c$ for the ray.
+
+**Data Structures**
+1.  **Voxel Grid:**
+    *   For sparse light fields (e.g., Real Forward-Facing, Shiny): A regular grid covering NDC space. Default resolution is $32^3$. For specific Shiny sequences (CD, Lab), a coarser $4^3$ grid is used [S1, unofficial].
+    *   For dense/small-baseline light fields (e.g., Stanford): No subdivision; a single global model is used [S1, unofficial].
+    *   Each voxel $i$ has a center point $p_i$.
+2.  **Networks:**
+    *   **Embedding Network ($E_\phi$):** An 8-layer MLP with 256 hidden units and one skip connection [S1, unofficial].
+    *   **Color Network ($F_\theta$):** An 8-layer MLP with 256 hidden units and one skip connection [S1, unofficial].
+    *   A single network is shared for all local light fields for both $E_\phi$ and $F_\theta$ in the subdivided representation, indexed by voxel center points $p_i$ [S1, unofficial].
+3.  **Parameters:**
+    *   Embedding space dimension $N = 32$ [S1, unofficial].
+    *   Local affine transformation parameters: $32 \times 4$ matrices $A$ and $32$-dimensional bias vectors $b$ [S1, unofficial].
+
+**Positional Encoding**
+The input coordinates $\mathbf{x}$ (position) and $\mathbf{d}$ (view direction) are mapped to higher dimensions using hierarchical positional encoding $\gamma(\cdot)$ [S1, unofficial]. For a scalar input $p$:
+$$ \gamma(p) = (\sin(2^0 \pi p), \cos(2^0 \pi p), \dots, \sin(2^{L-1} \pi p), \cos(2^{L-1} \pi p)) $$
+where $L$ is the number of frequency bands. $L=8$ for the subdivided model and $L=10$ for the one-evaluation model [S1, unofficial].
+
+**Algorithm Steps**
+1.  **Ray Voxel Intersection:** For each ray $r$, intersect it with the voxel grid. Identify the sequence of voxels $V(r)$ intersected by the ray. For each voxel $i \in V(r)$, compute the local ray coordinates $r_i$ within that voxel [S1, unofficial].
+2.  **Embedding Network Forward Pass:** For each voxel $i$, compute the local affine transformation parameters $(A_i, b_i)$ using the embedding network:
+    $$ (A_i, b_i) = E_\phi(r_i, \gamma(i)) $$
+    where $i$ represents the voxel index or center point [S1, unofficial].
+3.  **Normalization:**
+    *   **Feature Normalization:** If using feature-based embedding (ablation), normalize the embedded feature $f$ with L2 normalization and multiply by $\sqrt{32}$ so the average square value is close to one [S1, unofficial].
+    *   **Matrix Normalization:** Normalize the matrix $A_i$ with its Frobenius norm and multiply by $\sqrt{32} \cdot 4$ [S1, unofficial].
+    *   **Bias Activation:** Apply $\tanh$ activation to the predicted bias vectors $b_i$ [S1, unofficial].
+4.  **Color and Alpha Prediction:** For each sample point $r_i$ in voxel $i$, compute color $c_i$ and alpha $\alpha_i$ using the color network:
+    $$ (c_i, \alpha_i) = F_\theta(\gamma(A_i r_i + b_i), \gamma(i)) $$
+    Here, the input to the color network is the affine-transformed local ray coordinate $A_i r_i + b_i$, encoded via $\gamma$, concatenated with the global positional encoding $\gamma(i)$ [S1, unofficial].
+5.  **Volume Rendering:** Sort the samples by distance from the ray origin. Compute the final color $c$ by over-compositing:
+    $$ c = \sum_{i \in V(r)} \alpha_i c_i \prod_{j \in V(r), j < i} (1 - \alpha_j) $$
+    [S1, unofficial].
+
+**Pseudocode**
+
+> **Unverified code.** The code below did not pass a test run against a reference implementation, or no test fits it, so it may contain errors.
+
+```python
+import math
+import numpy as np
+
+def positional_encoding(p, L):
+    """
+    Hierarchical positional encoding.
+    p: scalar input.
+    L: number of frequency bands.
+    Returns: array of size 2*L.
+    """
+    out = []
+    for l in range(L):
+        freq = 2**l * math.pi
+        out.append(math.sin(freq * p))
+        out.append(math.cos(freq * p))
+    return np.array(out)
+
+def ray_space_embedding_network(x_local, voxel_index, L_enc):
+    """
+    Placeholder for the 8-layer MLP E_phi.
+    In implementation, this network takes the local ray coordinates
+    and the voxel index (encoded) to output A and b.
+    """
+    # Note: The actual MLP weights are learned during training.
+    # This function represents the forward pass of E_phi.
+    # Input: x_local (4D vector in voxel space), voxel_index (scalar or encoded)
+    # Output: A (32x4 matrix), b (32D vector)
+    pass
+
+def color_network(encoded_transformed_ray, encoded_voxel):
+    """
+    Placeholder for the 8-layer MLP F_theta.
+    Input: Concatenation of encoded affine-transformed ray and encoded voxel.
+    Output: color (3D), alpha (scalar)
+    """
+    pass
+
+def normalize_matrix(A):
+    """
+    Normalize matrix A with Frobenius norm and scale by sqrt(32)*4.
+    """
+    frob_norm = np.linalg.norm(A, 'fro')
+    if frob_norm == 0:
+        return A
+    return A * (math.sqrt(32) * 4) / frob_norm
+
+def normalize_feature(f):
+    """
+    L2 normalize feature f and multiply by sqrt(32).
+    """
+    norm = np.linalg.norm(f)
+    if norm == 0:
+        return f
+    return f * math.sqrt(32) / norm
+
+def render_ray(ray_origin, ray_direction, voxel_grid, L_enc):
+    """
+    Renders a single ray using the ray-space embedding method.
+    """
+    # 1. Intersect ray with voxel grid to get list of intersected voxels V(r)
+    # and local coordinates r_i for each voxel.
+    intersected_voxels = voxel_grid.intersect(ray_origin, ray_direction)
+    
+    samples = []
+    
+    for voxel in intersected_voxels:
+        # 2. Get local ray coordinates r_i
+        r_i = voxel.get_local_ray_coords(ray_origin, ray_direction)
+        
+        # 3. Compute affine parameters (A_i, b_i)
+        # Note: In the paper, E_phi takes r_i and gamma(i).
+        # We assume r_i is a 4D vector (x,y,z,w) or similar local coord system.
+        A_i, b_i = ray_space_embedding_network(r_i, voxel.index, L_enc)
+        
+        # 4. Normalize A_i
+        A_i = normalize_matrix(A_i)
+        
+        # 5. Apply tanh to b_i
+        b_i = np.tanh(b_i)
+        
+        # 6. Transform local ray coordinate
+        # r_i is typically 4D (x,y,z,1) or similar. A_i is 32x4.
+        transformed_ray = np.dot(A_i, r_i) + b_i
+        
+        # 7. Encode transformed ray and voxel index
+        # gamma is applied to each component of the transformed ray and voxel index
+        encoded_transformed_ray = []
+        for val in transformed_ray:
+            encoded_transformed_ray.extend(positional_encoding(val, L_enc))
+            
+        encoded_voxel = positional_encoding(voxel.index, L_enc) # Simplified indexing
+        
+        # 8. Predict color and alpha
+        c_i, alpha_i = color_network(encoded_transformed_ray, encoded_voxel)
+        
+        # 9. Store sample with depth
+        depth = voxel.get_depth(ray_origin, ray_direction)
+        samples.append({'c': c_i, 'alpha': alpha_i, 'depth': depth})
+    
+    # 10. Sort samples by depth
+    samples.sort(key=lambda s: s['depth'])
+    
+    # 11. Over-compositing
+    accumulated_alpha = 0.0
+    final_color = np.zeros(3)
+    
+    for sample in samples:
+        alpha = sample['alpha']
+        c = sample['c']
+        weight = (1.0 - accumulated_alpha) * alpha
+        final_color += weight * c
+        accumulated_alpha += weight
+        
+        if accumulated_alpha >= 1.0:
+            break
+            
+    return final_color
+```
+
+**Parameters**
+*   **Embedding Dimension:** $N=32$ [S1, unofficial].
+*   **Frequency Bands ($L$):** 8 for subdivided model, 10 for one-evaluation model [S1, unofficial].
+*   **Batch Size:** 4,096 for subdivided model, 8,192 for one-evaluation model [S1, unofficial].
+*   **Training Iterations:** 50,000 with subdivision, 80,000 without [S1, unofficial].
+
+**Edge Cases and Pitfalls**
+*   **Plücker Coordinates:** Color level sets for Plücker coordinates are no longer affine, limiting the method's effectiveness for 360-degree scenes parameterized this way [S1, unofficial].
+*   **Subdivision Cost:** Subdivision increases render time and training time linearly with grid resolution $N$ [S1, unofficial].
+*   **Small-Baseline:** For small-baseline light fields (Stanford), subdivision is not used; a single-evaluation per ray model is employed [S1, unofficial].
+
+## Operating characteristics
+*   **Time Complexity:** Rendering speed is competitive. On Stanford dataset (512x512), it takes ~0.11 seconds per frame (9.14 FPS) [S1, unofficial]. On Real Forward-Facing, it is >4.5x faster than NeRF [S1, unofficial].
+*   **Memory Complexity:** Memory footprint is 5.4 MB, compared to 4.6 MB for NeRF and 38.4 MB for NeX [S1, unofficial].
+*   **Training Time:** ~20 hours for Real Forward-Facing and Shiny datasets at $32^3$ resolution; ~10 hours for Stanford [S1, unofficial].
+*   **Strengths:** Better reconstruction of view dependence than baselines; outperforms AutoInt in quality (~2 dB) and speed (~30%) on Real Forward-Facing; competitive with NeRF on PSNR/SSIM; outperforms NeX on PSNR for Shiny dataset [S1, unofficial].
+*   **Limitations:** Requires subdivision for sparse light fields, increasing training and render time; less effective for 360-degree scenes using Plücker coordinates [S1, unofficial].
+
+## Background
+*   **Origin:** The method was introduced in "Learning Neural Light Fields with Ray-Space Embedding Networks" [S1, unofficial].
+*   **History:** It was developed to address the limitations of existing neural light field methods in handling sparse input views and complex view-dependent effects. It builds on the idea of local affine transformations to implicitly encourage color level sets to be locally linear, facilitating multi-view consistency [S1, unofficial].
+*   **Usage:** Evaluated on Real Forward-Facing, Shiny, and Stanford Light Field datasets [S1, unofficial].
+
+## Sources
+[S1] Learning Neural Light Fields with Ray-Space Embedding Networks, https://doi.org/10.48550/arxiv.2112.01523, fetched 2026-10-26 (unofficial)

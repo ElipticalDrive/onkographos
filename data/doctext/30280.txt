@@ -1,0 +1,998 @@
+ReorgGS: Equivalent Distribution Reorganization for
+3D Gaussian Splatting
+arXiv:2605.08739v1 [cs.CV] 9 May 2026
+Luchao Wang
+Kaimin Liao Qian Ren
+Zhi Chen Yaohua Tang
+tangyaohua28@gmail.com
+Hua Wang
+Abstract
+A converged 3D Gaussian Splatting (3DGS) model may approximate the target
+scene while remaining poorly parameterized for further optimization. We identify
+this failure mode as parameterization degeneration: high-opacity floaters attenuate
+gradients to true surfaces through alpha compositing, and redundant overlapping
+clusters create strongly coupled parameter blocks with nearly collinear Jacobian responses. These effects explain why continued optimization can plateau even when
+the model still contains removable artifacts. We propose ReorgGS, an equivalent
+distribution reorganization method for converged 3DGS models. ReorgGS treats
+the existing Gaussian set as an empirical probability field, resamples centers from
+it, estimates local anisotropic covariances with kNN, initializes low opacity, and
+continues optimization with the original 3DGS renderer and loss. Unlike opacity
+reset, which only rescales opacity on the old overlap graph, ReorgGS rebuilds
+centers, covariances, and visibility structure, thereby changing the graph itself.
+Our analysis shows that distributional equivalence is not optimization equivalence.
+The reorganized model preserves scene support while improving gradient accessibility under alpha compositing and reducing opacity-weighted overlap, thereby
+weakening local parameter coupling during subsequent optimization. Under the
+same additional optimization budget, ReorgGS improves fitting quality at a fixed
+Gaussian count, suppresses persistent floaters, and reduces rendering overhead
+from redundant overlap.
+1
+Introduction
+3D Gaussian Splatting (3DGS) [Kerbl et al., 2023] represents scenes with anisotropic 3D Gaussians
+and renders them via differentiable alpha compositing, achieving strong reconstruction quality, fast
+training, and efficient rendering. The standard 3DGS pipeline builds this representation through local,
+history-dependent heuristic operations—such as gradient-based densification, cloning, splitting, and
+pruning, alongside periodic opacity resets. While these operations rapidly expand scene coverage,
+they also inevitably rigidify the occlusion order, overlap relations, and parameter-coupling structure
+of the Gaussian set.
+This trajectory dependence induces a late-stage optimization bottleneck—one rooted not in representation capacity, but in parameter topology. In many converged models, training views are rendered
+reasonably well, yet high-opacity floaters persist in free space, redundant Gaussians repeatedly
+explain the same local residuals, and directly continuing optimization yields negligible gains. The
+root cause lies in the non-uniqueness of the 3DGS representation: different Gaussian sets can project
+to nearly identical images, yet possess drastically different visibility structures and optimization
+landscapes. Through alpha compositing, a high-opacity floater can act as an opaque barrier, attenuating gradients to true surfaces behind it. Likewise, a redundant overlapping cluster forces multiple
+parameter blocks to respond to the same pixel residual, causing severe collinearity. We term this state
+degenerate parameterization: the model is distributionally adequate, but optimization-degenerate.
+Preprint.
+Figure 1: Reorganization unlocks the full potential of post-training. Given a suboptimal baseline (e.g.,
+LiteGS, top-left), directly applying post-training methods (top row) fails to resolve the underlying
+thick and messy geometric topology. This overlapped configuration causes gradient deadlock during
+optimization, leaving fine details persistently blurred in the final rendering (top-right). In contrast, our
+ReorgGS (bottom row) first resamples the baseline’s chaotic probability field into discrete, unoccluded
+primitives. This fundamental topological reset smooths the optimization landscape, allowing the
+same post-training process to explicitly align the points to the local manifold and easily recover
+high-fidelity details (bottom-right) that closely match the Ground Truth (bottom-left).
+This perspective elegantly unifies three traditionally disparate symptoms: floaters correspond to
+ray-level gradient truncation, redundant overlap induces strong local coupling, and optimization
+plateauing is the inevitable consequence of these structural barriers. This leads to the central question
+of our work:
+If a converged 3DGS model already approximately represents a scene, can we
+replace it—without increasing the Gaussian budget—with a distributionally equivalent but strictly easier-to-optimize parameterization?
+We propose ReorgGS to answer this question. Given a converged Gaussian set G p , ReorgGS interprets
+it as an empirical Gaussian-mixture probability field. We resample centers from this field, estimate
+local anisotropic covariances using k-nearest neighbors, and initialize a new, low-opacity Gaussian
+set G q . This approach fundamentally distinguishes ReorgGS from standard opacity resets. A standard
+reset merely applies αi ← α0 while preserving the original centers, covariances, and old overlap
+graph; it mitigates weights on a flawed topology, but cannot escape the topology itself. ReorgGS,
+instead, applies low opacity to newly sampled centers with geometrically re-estimated shapes, thereby
+explicitly dismantling and rebuilding the visibility structure that dictates occlusion and parameter
+coupling. Our contributions are summarized as follows:
+1. We identify parameterization degeneration as a critical late-stage bottleneck in 3DGS.
+We demonstrate that persistent floaters, redundant overlap, and optimization plateaus are
+symptoms of an unfavorable optimization coordinate system, rather than simply a lack of
+capacity or training time.
+2. We introduce ReorgGS, an equivalent distribution reorganization method. ReorgGS
+preserves the learned scene support while resampling centers, re-estimating anisotropic
+covariances, and resetting opacity. This fundamentally improves visibility structure and
+reduces local coupling without altering the renderer, loss function, or Gaussian budget.
+3. We analyze and validate the optimization dynamics of reorganization. We mathematically and empirically show that distributional equivalence does not imply optimization
+equivalence. ReorgGS improves gradient accessibility and reduces parameter coupling,
+delivering up to 0.5 dB higher training PSNR and 0.14 dB higher test PSNR over direct
+continuation, along with a 12.8% rendering speedup in representative settings.
+2
+Figure 2: Method pipeline and optimization dynamics of ReorgGS. (a) Vanilla 3DGS often degenerates into a pathological distribution p(x) with severe spatial overlap. (b) Our α-driven equivalent
+resampling discards the spatial volume term, naturally filtering out large-scale floating artifacts. (c,
+d) Via kNN local manifold alignment, we reconstruct the covariance to form a healthy continuous
+field q(x) with bounded overlap. (e) Schematic illustration of Hessian Spectrum Analysis: In the
+vanilla distribution p, severe physical overlap causes heavy occlusion, forcing a massive amount of
+eigenvalues to collapse from the bulk into the tail (null space), leading to a catastrophic condition
+number (κp ≫ 1) and sharp deadlocks. Conversely, ReorgGS bounded overlap effectively eliminates
+the null space, keeping the tail eigenvalues stable (κq ≈ O(1)). This preconditions the loss landscape,
+smoothly transforming sharp deadlocks into optimizable flat minima.
+2
+Related Work
+Representational Variants of 3DGS. 3DGS parameterizes scenes with depth-sorted anisotropic
+primitives [Kerbl et al., 2023]. To improve geometric fidelity, numerous variants alter the fundamental
+representation via neural anchors [Lu et al., 2024], planar constraints [Huang et al., 2024], geometry
+extraction [Yu et al., 2024b], or anti-aliasing filters [Yu et al., 2024a]. While these architectural
+shifts confirm the importance of primitive organization, they achieve it by modifying the underlying
+mathematical formulation. ReorgGS takes an orthogonal path: we demonstrate the standard 3DGS
+primitive is strictly sufficient. Instead of altering the representation, we reorganize a degenerate
+Gaussian set into a well-conditioned parameterization to unlock superior optimization without
+changing the renderer.
+Heuristic Density Control. Standard 3DGS relies on heuristic densification and opacity resets
+to shape the Gaussian distribution [Kerbl et al., 2023]. Subsequent works refine these micro-level
+operations via advanced gradient signals, steepest-descent, localized point management, or dedicated
+floater-free frameworks [Cheng et al., 2024, Zhang et al., 2024, Ye et al., 2024, Yang et al., 2024,
+Wang et al., 2025b, Chen et al., 2025, Wang et al., 2025a]. However, these methods primarily govern
+incremental growth and remain greedy. They struggle to undo structural damage (e.g., redundant
+overlap, deadlocks) accumulated over long training trajectories. Rather than patching local growth
+heuristics, ReorgGS executes a global topological reset to dismantle unfavorable occlusion orders
+and parameter collinearity in the post-plateau regime.
+Compact 3DGS and Probabilistic Sampling. Extensive research reduces 3DGS overhead via
+pruning, quantization, distillation, or entropy coding [Niedermayr et al., 2024, Fan et al., 2024, Girish
+et al., 2024, Lee et al., 2024, Fang and Wang, 2024, Mallick et al., 2024, Wang et al., 2024, Dai et al.,
+2025, Lee et al., 2025]. These methods universally treat a converged Gaussian set as a static object to
+be compressed. In contrast, ReorgGS treats it as a flawed optimization coordinate system, actively
+improving gradient accessibility to break fitting ceilings under restricted point budgets. Closest to
+our probabilistic perspective is 3DGS-MCMC [Kheradmand et al., 2024], which injects stochastic
+exploration into the training loop. While MCMC performs continuous micro-exploration during
+optimization, ReorgGS intervenes at the macro level: we halt optimization, resample the degenerate
+probability field into a clean, unoccluded state, and provide a drastically flattened loss landscape for
+the optimizer to resume.
+3
+3
+Method
+3.1
+From 3DGS Parameters to a Reorganized Distribution
+A 3DGS model represents a scene by a set of Gaussians G = {gi }N
+i=1 . Each primitive has a
+center µi , covariance Σi , opacity
+α
+,
+and
+color
+parameters
+C
+,
+with
+spatial response Gi (x) =
+i
+i
+
+exp − 12 (x − µi )T Σ−1
+i (x − µi ) . ReorgGS starts from a model that has converged or reached a
+plateau. Rather than treating its primitives as fixed optimization variables, we interpret their spatial
+PN
+support as an unnormalized empirical Gaussian-mixture field: P (x) ≈ i=1 αi N (x | µi , Σi ).
+This field is not introduced to change the rendering model. It is a compact way to separate what
+the current model has learned from how it is parameterized. Many Gaussian sets can induce
+nearly the same spatial support while having very different opacity patterns, overlap relations,
+and visibility orders. Standard densification, pruning, and opacity reset gradually construct one
+such parameterization, but the final arrangement need not be a good coordinate system for further
+optimization. The importance of this distinction comes from alpha compositing. For a ray or pixel
+PN
+Q
+r, 3DGS renders C(r) = i=1 Ti (r)ai (r)Ci (r), Ti (r) = j<i (1 − aj (r)), where ai (r) is the
+effective projected opacity and Ti (r) is the accumulated transmittance before the i-th Gaussian. A
+high-opacity floater or a redundant foreground cluster can make Ti (r) small, starving the true surface
+behind it of gradient. Thus, continued optimization may fail not because the scene support is absent,
+but because the existing support is organized with an unfavorable visibility and overlap structure.
+Direct continuation keeps this structure and updates the old variables in place, Gi ← Gi − η∇Gi L.
+′
+′
+′
+′ M
+ReorgGS instead constructs a new Gaussian set G ′ = {gj′ }M
+j=1 , with parameters {µj , Σj , αj , Cj }j=1 ,
+PM ′
+whose induced field q(x) = j=1 αj N (x | µ′j , Σ′j ) approximately preserves the support of P (x)
+while changing the centers, covariances, opacity initialization, and overlap graph. The goal is
+therefore not only distributional similarity, q ≈ P , but optimization improvement: the reorganized
+set should expose gradients more evenly and reduce local parameter coupling during the subsequent
+3DGS optimization.
+3.2
+Algorithm
+Given a 3DGS model {µi , Σi , αi , Ci }N
+i=1 that has reached the middle-to-late stage of training,
+converged, or entered a plateau, ReorgGS constructs a new Gaussian set as follows.
+Step 1. GMM modeling. We view the current Gaussian set as an empirical Gaussian-mixture
+R
+field and define its normalized form as p̂(x) = P Z(x) , where Z = P (x)dx. In implementation, the
+continuous integral Z does not need to be computed explicitly. Sampling only requires the discrete
+mixture weights of the components.
+Step 2. Categorical sampling. We first sample a latent variable zj ∈ {1, . . . , N } from a categorical
+distribution P (zj = k) = PNαk α . Thus, Gaussian components with higher opacity are more likely
+l=1 l
+to be selected. We use only αk as the categorical weight and do not multiply it by the Gaussian
+volume. The reason is that, in degenerate 3DGS optimization, abnormally large Gaussians often
+correspond to blurred regions or artifacts. Volume-weighted sampling could further amplify such
+large-scale abnormal structures. We therefore ignore volume in the categorical probability to reduce
+this sampling bias.
+Step 3. Gaussian coordinate sampling. After choosing category zj = k, we sample a new center
+from the corresponding 3D Gaussian xj ∼ N (µk , Σk ). In practice, we use the reparameterized form
+xj = µk + Lk ϵ, where ϵ ∼ N (0, I) and Lk is the Cholesky factor of Σk . Since 3DGS parameterizes
+Σk = Rk Sk SkT RkT , one can also directly use Rk Sk as the sampling transform. Through this
+procedure, ReorgGS regenerates centers from the continuous spatial distribution induced by the old
+model, rather than simply copying old Gaussian positions.
+Step 4. Anisotropic initialization. Sampled centers alone are not sufficient for an effective
+3DGS initialization. To make the new Gaussians quickly adapt to local geometry, we perform a
+kNN query for each sampled point xj within the new point set {xj }M
+j=1 , obtaining its k nearest
+4
+neighbors {xj1 , . . . , xjk }. We then estimate the new covariance using the local second moment:
+Pk
+Σ′j = k1 l=1 (xjl −xj )(xjl −xj )T . The kNN covariance provides a natural anisotropic initialization.
+Step 5. Constructing the reorganized distribution q(x). Using sampled point xj as the center and
+local covariance Σ′j as the shape, we construct the new Gaussian set. We set µ′j = xj , αj′ = α0 , where
+α0 is a small opacity value (default 0.01). The spatial scale of each reorganized Gaussian is naturally
+determined by Σ′j , without additional volume normalization. Subsequent optimization continues to
+adjust scale, rotation, and opacity to fit the image reconstruction objective. The appearance parameter
+Cj′ is inherited from the nearest old Gaussian: NN(xj ) = arg mini ∥xj − µi ∥2 , Cj′ = CNN(xj ) .
+Step 6. Recovering scale and rotation. To write Σ′j back into the standard 3DGS parameterization,
+p
+we perform eigendecomposition Σ′j = Uj Λj UjT , set Rj′ = Uj and Sj′ = Λj , so that Σ′j =
+Rj′ Sj′ (Sj′ )T (Rj′ )T . After obtaining (µ′j , Sj′ , Rj′ , αj′ , Cj′ ), we continue training with the original
+3DGS renderer, loss function, and optimization strategy. Since the Gaussian set has been rebuilt, the
+optimizer state is reinitialized for the new parameters.
+3.3
+Optimization Properties of the Reorganized Distribution
+ReorgGS is not only a distribution approximation. Preserving the scene support, i.e., making q(x)
+close to P (x), does not imply that the two Gaussian sets have the same visibility, gradients, or local
+curvature. The benefit of ReorgGS comes from reorganizing four coupled structures: opacity-density
+allocation, local overlap, alpha-compositing transmittance, and covariance alignment. Appendix A
+provides the detailed analysis.
+1. From opacity values to spatial density. Let p(x) be the normalized spatial distribution of the
+original model, and let q(x) be the mixture induced by resampled centers and kNN covariances. Under
+standard kNN density-estimation assumptions, Appendix A.1 gives E[q(x)] → p(x), Var[q(x)] =
+O(1/k). With constant low opacity α0 (set to 0.01, see Sec. 3.2), the reorganized occupancy field
+satisfies E[F̂ (x)] ≈ M α0 p(x). Thus, ReorgGS transfers scene occupancy from large per-primitive
+opacity to spatial sample density: dense regions receive more primitives, sparse regions fewer, while
+each primitive starts with low opacity. This preserves support while reducing absolute ray occlusion.
+2. Spatial demixing and bounded overlap. Standard continued optimization keeps the old overlap
+graph created by densification. ReorgGS instead sets covariance scales from kNN neighborhoods.
+If the local point density is ρ(x) = M p(x), the effective number of local overlaps satisfies (Apk
+= O(k). Hence local coverage is controlled by the neighborhood
+pendix A.2): Kq (x) ≈ ρ(x) · ρ(x)
+size rather than by the number of redundant clones in the original cluster.
+3. Gradient accessibility. Under
+Qalpha compositing, a primitive behind foreground components
+receives gradients scaled by Ti = j<i (1−αj ). High-opacity floaters or many redundant foreground
+primitives can drive Tip → 0, starving true surfaces of gradient. ReorgGS initializes low opacity
+and bounds foreground overlap; if mq = O(k), then Tiq ≥ (1 − α0 )mq ≈ 1 − mq α0 > 0. The
+improvement therefore comes from a new visibility structure, not from merely lowering opacity on
+the old one (Appendix A.3).
+4. Local manifold alignment and improved conditioning. Redundant Gaussians with inconsistent
+scales and orientations can explain the same residual with nearly collinear Jacobian responses,
+increasing off-diagonal coupling in the Gauss–Newton Hessian or Fisher Information Matrix. kNN
+covariance initialization aligns
+primitives with the local tangent-normal structure. If Σi ≈
+P nearby
+−1
+Σmanifold , then Hlocal ∝
+≈ K U Λ−1 U T , where U is the local eigenbasis. ReorgGS
+i Σi
+effectively eliminates the null space and transforms sharp deadlocks into optimizable flat minima
+(Appendix A.4).
+4
+Experiments
+4.1
+Experimental Setup
+Our experiments examine whether ReorgGS can convert a converged 3DGS model into an equivalent
+parameterization that is easier to optimize, without increasing the number of Gaussians. Each
+5
+Figure 3: Plug-and-play capability and qualitative comparisons across diverse 3DGS baselines. We
+evaluate the universality of our Reorg mechanism on various initializations (rows), including standard
+3DGS, GoF, Taming-3DGS, and LiteGS variants. Columns from left to right: Original baseline,
+standard Post-Training, our Reorg (single pass), Reorg applied iteratively (Reorg ×3), and Ground
+Truth (GT). As highlighted in the red insets (wood grain textures), standard post-training struggles
+to resolve the blurry artifacts caused by suboptimal topology. In contrast, our Reorg consistently
+unlocks sharp, high-fidelity fine details across all tested baselines. Furthermore, applying Reorg
+iteratively further refines the geometry, achieving visual quality highly consistent with the GT.
+backbone is first trained to convergence with its original training procedure. We then compare three
+settings under the same additional optimization budget:
+• Baseline: the converged original model, with no further modification.
+• Direct continuation: continued optimization of the original Gaussian set.
+• ReorgGS: equivalent distribution reorganization followed by continued optimization.
+Unless otherwise stated, ReorgGS keeps exactly the same number of Gaussians as the model before
+reorganization. The experiments therefore compare parameterization structure, rather than model
+capacity or training budget.
+Backbones. We evaluate ReorgGS on vanilla 3DGS [Kerbl et al., 2023], GOF [Yu et al., 2024b],
+Taming-3DGS [Mallick et al., 2024], 3DGS-MCMC [Kheradmand et al., 2024], and LiteGS [Liao
+et al., 2025]. These methods use different training mechanisms and Gaussian organizations, allowing
+us to test whether ReorgGS improves continued optimization across backbones.
+Datasets. We use standard novel-view synthesis datasets, including Mip-NeRF 360 [Barron et al.,
+2022], Blender [Mildenhall et al., 2021], and Tanks&Temples [Knapitsch et al., 2017], evaluating
+with PSNR, SSIM, and LPIPS [Zhang et al., 2018].
+Gaussian-budget control. To control model capacity, we first train standard 3DGS to convergence
+and record the target point count. Other backbones reuse this scene-wise budget unless specified
+6
+Figure 4: Ablation studies of ReorgGS. Top (Effectiveness of Reorg): We demonstrate the necessity
+of topological reorganization. We continue training the GoF baseline for 30k iterations without
+densification or opacity reset. Under this fixed topology, naive finetuning (middle) fails to recover
+sharp details (e.g., bookshelf) because the Gaussians are trapped in a deadlocked, suboptimal
+distribution. In contrast, applying our Reorg prior to the same finetuning (right) resolves the geometric
+occlusion, enabling pure gradient descent to successfully restore high-frequency structures. Middle
+& Bottom (Reorg Strategies): Ablation on Reorg specific designs across different stages (1 epoch
+vs. 30k iters). Discarding the covariance prior via Isotropic Initialization ("Iso-init") struggles to
+capture complex geometry early on (glass, middle row) and leaves splotchy noise on flat surfaces
+(wall, bottom row). Altering the splitting scale to k = 3 leads to slower structural recovery. Our
+default Reorg strategy maintains optimal convergence and artifact-free rendering.
+otherwise in point-budget ablations. We additionally consider LiteGS-half (×0.5 budget) and LiteGSdouble (×2 budget) to test robustness. Further analyses on experimental setups, statistical variance,
+and computational costs are deferred to Appendix B.
+4.2
+Main Results: Equal-budget Comparison across Backbones
+Table 1 compares the baseline, direct continuation, and ReorgGS under the same additional optimization budget. ReorgGS improves training PSNR for every backbone and improves test PSNR in most
+settings, with gains over direct continuation of 0.5 dB on training views and 0.14 dB on test views.
+This result shows that the plateau of a converged model is not caused only by insufficient iterations:
+under the same capacity and the same additional budget, reorganizing the parameterization reaches
+optimization regions that direct continuation cannot reliably access.
+The training-view gains are consistently larger than the test-view gains, which is meaningful for
+scene-specific 3DGS because the training views are the observations used to reconstruct each scene.
+Under a fixed Gaussian count and the same additional optimization budget, better training-view fitting
+indicates that ReorgGS uses capacity previously wasted by occlusion and coupling, while test-view
+metrics verify that the improvement does not collapse into view-specific artifacts.
+Fig. 3 qualitatively supports the same trend: ReorgGS reduces topology-induced blur across backbones, and iterative reorganization further refines fine details. For more comprehensive qualitative
+and quantitative results across different datasets, please refer to Appendix C.
+7
+Table 1: Equal-budget comparison across backbones. Each cell reports train / test. ReorgGS keeps
+the same Gaussian count as the corresponding converged model.
+PSNR
+Backbone
+3DGS
+GOF
+Taming-3DGS
+3DGS-MCMC
+LiteGS
+LiteGS-half
+LiteGS-double
+SSIM
+LPIPS
+Baseline
+Direct
+ReorgGS
+Baseline
+Direct
+ReorgGS
+Baseline
+Direct
+ReorgGS
+31.37 / 28.26
+30.65 / 27.99
+31.04 / 28.44
+31.69 / 28.71
+32.91 / 29.09
+32.12 / 28.87
+33.63 / 29.07
+32.61 / 28.72
+32.76 / 28.80
+32.72 / 28.84
+33.09 / 28.99
+33.15 / 28.95
+32.32 / 28.86
+33.91 / 28.95
+33.16 / 28.89
+33.21 / 28.93
+33.38 / 29.08
+33.63 / 29.06
+33.67 / 29.03
+32.77 / 28.96
+34.47 / 28.97
+0.918 / 0.872
+0.916 / 0.873
+0.911 / 0.874
+0.928 / 0.886
+0.938 / 0.888
+0.925 / 0.884
+0.948 / 0.888
+0.936 / 0.880
+0.940 / 0.882
+0.937 / 0.881
+0.944 / 0.883
+0.945 / 0.884
+0.932 / 0.882
+0.954 / 0.882
+0.940 / 0.883
+0.941 / 0.884
+0.942 / 0.886
+0.946 / 0.885
+0.947 / 0.885
+0.934 / 0.883
+0.956 / 0.883
+0.169 / 0.198
+0.167 / 0.194
+0.178 / 0.194
+0.151 / 0.177
+0.135 / 0.167
+0.156 / 0.180
+0.117 / 0.160
+0.137 / 0.174
+0.131 / 0.170
+0.135 / 0.171
+0.125 / 0.168
+0.123 / 0.165
+0.144 / 0.174
+0.105 / 0.160
+0.130 / 0.169
+0.130 / 0.169
+0.129 / 0.166
+0.123 / 0.166
+0.121 / 0.165
+0.144 / 0.176
+0.103 / 0.159
+The reorganized spatial structure also reduces redundant alpha compositing; in representative settings,
+ReorgGS provides up to 12.8% rendering speedup.
+4.3
+Robustness under Different Gaussian Budgets
+The LiteGS-half, LiteGS, and LiteGS-double rows in Table 1 further vary the Gaussian budget
+while keeping the baseline, direct continuation, and ReorgGS at the same point count within each
+row. ReorgGS remains beneficial under both reduced and increased budgets. The improvement
+is larger under the half budget, where each Gaussian carries more representational pressure and a
+degenerate overlap pattern wastes a larger fraction of the available capacity. In this half-budget setting,
+Direct continuation slightly outperforms ReorgGS on LPIPS, likely due to the perceptual penalty
+of low-opacity initialization under severe capacity constraints, though ReorgGS still dominates in
+PSNR and SSIM. Under the double budget, the model has more redundancy and the test-view gain
+becomes smaller, but ReorgGS still improves training PSNR. This suggests that parameterization
+degeneration is not unique to compact models; it also appears when the Gaussian budget is larger,
+although its effect on novel-view metrics may be partly absorbed by the extra capacity.
+4.4
+Cascaded Reorganization
+We further evaluate repeated Reorg operations. As shown in Table 2, Reorg x2, x3, and x4 continue
+to improve training PSNR, but the marginal gain decreases. This trend agrees with the degenerateparameterization view: the first Reorg usually removes the strongest occlusion barriers and redundant
+coupling, while later reorganizations face fewer remaining structural obstacles.
+To rule out the effect of total training budget, we compare two equal-budget trajectories. Direct
+continuation optimizes the original parameterization for the same total number of iterations, while
+Reorg ×N allocates the same additional optimization budget after each reorganization. Table 2 reports
+PSNR only and lists each backbone and point budget separately. Reorg remains better overall under
+the same total budget, showing that the cascaded gain comes from repeatedly replacing degenerate
+parameterizations rather than simply using more optimization steps. Training PSNR gains saturate as
+the number of reorganizations increases, while test-view improvements remain small but generally
+positive. This is consistent with our analysis: ReorgGS first improves optimization accessibility
+and local parameter decoupling, which is most directly reflected in training-view fitting. Test-view
+improvement then depends on whether the better fitting becomes a more consistent geometric and
+appearance representation.
+Table 2: Cascaded reorganization under equal total optimization budget. Each cell reports train / test
+PSNR. For ReorgGS columns, darker color indicates a larger number of reorganization stages.
+2×iters
+Backbone
+3DGS
+GOF
+Taming-3DGS
+3DGS-MCMC
+LiteGS
+LiteGS-half
+LiteGS-double
+3×iters
+4×iters
+Direct
+ReorgGS
+Direct
+ReorgGS
+Direct
+ReorgGS
+33.07 / 28.77
+33.10 / 28.89
+33.25 / 28.89
+33.33 / 29.01
+33.35 / 28.91
+32.52 / 28.89
+34.17 / 28.93
+33.46 / 28.90
+33.54 / 28.93
+33.71 / 29.04
+33.74 / 29.06
+33.76 / 29.04
+32.82 / 28.94
+34.63 / 28.93
+33.26 / 28.80
+33.29 / 28.92
+33.53 / 28.89
+33.50 / 29.02
+33.52 / 28.89
+32.68 / 28.92
+34.37 / 28.86
+33.57 / 28.93
+33.59 / 28.97
+33.79 / 29.04
+33.76 / 29.06
+33.80 / 28.97
+32.81 / 28.97
+34.69 / 28.90
+33.42 / 28.79
+33.41 / 28.93
+33.60 / 28.88
+33.61 / 28.97
+33.66 / 28.89
+32.76 / 28.90
+34.50 / 28.83
+33.62 / 28.93
+33.66 / 28.97
+33.78 / 29.04
+33.76 / 29.05
+33.78 / 29.00
+32.80 / 29.00
+34.68 / 28.89
+8
+4.5
+Necessity of Reorganization (w/o Densification & Reset)
+To demonstrate that persistent floaters and blurry details are symptoms of topological deadlocks
+rather than mere lack of training, we evaluate finetuning under a strict constraint: disabling both
+heuristic densification and opacity reset.
+As shown in the top row of Fig. 4, directly finetuning the baseline under this fixed topology (Baseline
++ Finetune) fails to resolve the blurry artifacts on the bookshelf. The existing high-opacity floaters
+maintain their occlusion advantage, blocking gradients to the true surfaces and trapping the optimization in a local minimum. In contrast, applying ReorgGS before finetuning explicitly breaks these
+old visibility structures. By resampling the geometry with low opacity, ReorgGS smoothly eliminates gradient deadlocks, enabling pure gradient descent to successfully restore sharp, high-fidelity
+structures without relying on heuristic cleanup.
+4.6
+Ablation on Reorg Configurations
+We further ablate the internal design choices of Reorg across different training stages, as visualized
+in the bottom two rows of Fig. 4. All variants use the same sampling distribution, differing only in
+the initialized state.
+Isotropic vs. Anisotropic Initialization. We compare our default kNN-based anisotropic initialization against an isotropic variant (which serves as a minimalist implementation of Reorg without
+geometric priors). As observed in the early stage (1 epoch, left vs. middle), the isotropic variant
+struggles to capture structures like the glass bottle and the wall corner. While it eventually converges
+to a comparable visual quality at 30k iterations without statistically significant degradation, our
+default anisotropic initialization effectively aligns primitives to local manifolds much earlier, leading
+to fundamentally faster and more stable structural recovery.
+kNN Neighborhood Size (k). We set k = 20 as our default configuration to provide robust local
+geometric estimation. Shrinking the neighborhood size aggressively (e.g., "w/ kNN k = 3") makes
+the covariance estimation highly susceptible to local noise. As shown in the right column of Fig. 4,
+this introduces severe needle-like noise artifacts during the early optimization stage. Although most
+of these spikes are eliminated upon convergence, noticeable artifacts still persist in poorly observed
+regions (e.g., the upper wall edge at 30k iterations). The default k = 20 smoothly avoids these
+instabilities.
+5
+Limitations and Broader Impact
+ReorgGS is a reorganization method rather than a geometry completion method. It assumes that
+the converged input model already contains reasonable scene support, and therefore cannot recover
+structures that are completely missing or never observed in the original Gaussian set. Its effectiveness
+may also decrease when the input distribution is dominated by severe reconstruction errors, since
+resampling from such a distribution can preserve part of the wrong support. In addition, ReorgGS
+requires additional optimization after reorganization. ReorgGS can reduce persistent floaters and
+redundant overlap, which may improve the reliability and efficiency of scene-specific 3D reconstruction systems. At the same time, higher-quality reconstruction can increase privacy risks when applied
+to people, private spaces, or restricted environments. As with other high-fidelity 3D reconstruction
+methods, ReorgGS should be used only with appropriate consent, data-use permission, and care when
+releasing reconstructed scenes or trained Gaussian models.
+6
+Conclusion
+We identify parameterization degeneration as a late-stage bottleneck in 3DGS: a converged model
+may represent the scene reasonably well while retaining floaters, redundant overlap, and poor gradient
+accessibility. ReorgGS addresses this by rebuilding the converged Gaussian set as an equivalent
+low-opacity, locally aligned parameterization, without changing the renderer or increasing capacity.
+Across backbones and Gaussian budgets, this reorganization improves fixed-budget optimization,
+suppresses persistent floaters, and reduces rendering redundancy, suggesting that the organization of
+Gaussian density, opacity, covariance, and visibility is a central factor in late-stage 3DGS performance.
+9
+References
+Jonathan T Barron, Ben Mildenhall, Dor Verbin, Pratul P Srinivasan, and Peter Hedman. Mip-nerf
+360: Unbounded anti-aliased neural radiance fields. In Proceedings of the IEEE/CVF conference
+on computer vision and pattern recognition, pages 5470–5479, 2022.
+Youyu Chen, Junjun Jiang, Kui Jiang, Xiao Tang, Zhihao Li, Xianming Liu, and Yinyu Nie. Dashgaussian: Optimizing 3d gaussian splatting in 200 seconds. In Proceedings of the Computer Vision
+and Pattern Recognition Conference, pages 11146–11155, 2025.
+Kai Cheng, Xiaoxiao Long, Kaizhi Yang, Yao Yao, Wei Yin, Yuexin Ma, Wenping Wang, and Xuejin
+Chen. Gaussianpro: 3d gaussian splatting with progressive propagation. In Forty-first International
+Conference on Machine Learning, 2024.
+Zhenqi Dai, Ting Liu, and Yanning Zhang. Efficient decoupled feature 3d gaussian splatting
+via hierarchical compression. In Proceedings of the Computer Vision and Pattern Recognition
+Conference, pages 11156–11166, 2025.
+Zhiwen Fan, Kevin Wang, Kairun Wen, Zehao Zhu, Dejia Xu, and Zhangyang Wang. Lightgaussian:
+Unbounded 3d gaussian compression with 15x reduction and 200+ fps. Advances in neural
+information processing systems, 37:140138–140158, 2024.
+Guangchi Fang and Bing Wang. Mini-splatting: Representing scenes with a constrained number of
+gaussians. In European conference on computer vision, pages 165–181. Springer, 2024.
+Sharath Girish, Kamal Gupta, and Abhinav Shrivastava. Eagles: Efficient accelerated 3d gaussians
+with lightweight encodings. In European Conference on Computer Vision, pages 54–71. Springer,
+2024.
+Binbin Huang, Zehao Yu, Anpei Chen, Andreas Geiger, and Shenghua Gao. 2d gaussian splatting for
+geometrically accurate radiance fields. In ACM SIGGRAPH 2024 conference papers, pages 1–11,
+2024.
+Bernhard Kerbl, Georgios Kopanas, Thomas Leimkühler, and George Drettakis. 3d gaussian splatting
+for real-time radiance field rendering. ACM Trans. Graph., 42(4):139–1, 2023.
+Shakiba Kheradmand, Daniel Rebain, Gopal Sharma, Weiwei Sun, Yang-Che Tseng, Hossam Isack,
+Abhishek Kar, Andrea Tagliasacchi, and Kwang Moo Yi. 3d gaussian splatting as markov chain
+monte carlo. Advances in Neural Information Processing Systems, 37:80965–80986, 2024.
+Arno Knapitsch, Jaesik Park, Qian-Yi Zhou, and Vladlen Koltun. Tanks and temples: Benchmarking
+large-scale scene reconstruction. ACM Transactions on Graphics (ToG), 36(4):1–13, 2017.
+Joo Chan Lee, Daniel Rho, Xiangyu Sun, Jong Hwan Ko, and Eunbyung Park. Compact 3d gaussian
+representation for radiance field. In Proceedings of the IEEE/CVF Conference on Computer Vision
+and Pattern Recognition, pages 21719–21728, 2024.
+Soonbin Lee, Fangwen Shu, Yago Sanchez, Thomas Schierl, and Cornelius Hellge. Compression of
+3d gaussian splatting with optimized feature planes and standard video codecs. In Proceedings of
+the IEEE/CVF International Conference on Computer Vision, pages 25496–25505, 2025.
+Kaimin Liao, Hua Wang, Zhi Chen, Luchao Wang, and Yaohua Tang. Litegs: A high-performance
+framework to train 3dgs in subminutes via system and algorithm codesign. arXiv preprint
+arXiv:2503.01199, 2025.
+Tao Lu, Mulin Yu, Linning Xu, Yuanbo Xiangli, Limin Wang, Dahua Lin, and Bo Dai. Scaffold-gs:
+Structured 3d gaussians for view-adaptive rendering. In Proceedings of the IEEE/CVF Conference
+on Computer Vision and Pattern Recognition, pages 20654–20664, 2024.
+Saswat Subhajyoti Mallick, Rahul Goel, Bernhard Kerbl, Markus Steinberger, Francisco Vicente
+Carrasco, and Fernando De La Torre. Taming 3dgs: High-quality radiance fields with limited
+resources. In SIGGRAPH Asia 2024 Conference Papers, pages 1–11, 2024.
+10
+Ben Mildenhall, Pratul P Srinivasan, Matthew Tancik, Jonathan T Barron, Ravi Ramamoorthi, and
+Ren Ng. Nerf: Representing scenes as neural radiance fields for view synthesis. Communications
+of the ACM, 65(1):99–106, 2021.
+Simon Niedermayr, Josef Stumpfegger, and Rüdiger Westermann. Compressed 3d gaussian splatting
+for accelerated novel view synthesis. In Proceedings of the IEEE/CVF Conference on Computer
+Vision and Pattern Recognition, pages 10349–10358, 2024.
+Luchao Wang, Qian Ren, Kaimin Liao, Hua Wang, Zhi Chen, and Yaohua Tang. Stablegs: A
+floater-free framework for 3d gaussian splatting. arXiv preprint arXiv:2503.18458, 2025a.
+Peihao Wang, Yuehao Wang, Dilin Wang, Sreyas Mohan, Zhiwen Fan, Lemeng Wu, Ruisi Cai,
+Yu-Ying Yeh, Zhangyang Wang, Qiang Liu, et al. Steepest descent density control for compact 3d
+gaussian splatting. In Proceedings of the Computer Vision and Pattern Recognition Conference,
+pages 26663–26672, 2025b.
+Yufei Wang, Zhihao Li, Lanqing Guo, Wenhan Yang, Alex C Kot, and Bihan Wen. Contextgs:
+Compact 3d gaussian splatting with anchor level context model. Advances in neural information
+processing systems, 37:51532–51551, 2024.
+Haosen Yang, Chenhao Zhang, Wenqing Wang, Marco Volino, Adrian Hilton, Li Zhang, and Xiatian
+Zhu. Gaussian splatting with localized points management. arXiv preprint arXiv:2406.04251,
+2024.
+Zongxin Ye, Wenyu Li, Sidun Liu, Peng Qiao, and Yong Dou. Absgs: Recovering fine details in
+3d gaussian splatting. In Proceedings of the 32nd ACM International Conference on Multimedia,
+pages 1053–1061, 2024.
+Zehao Yu, Anpei Chen, Binbin Huang, Torsten Sattler, and Andreas Geiger. Mip-splatting: Alias-free
+3d gaussian splatting. In Proceedings of the IEEE/CVF conference on computer vision and pattern
+recognition, pages 19447–19456, 2024a.
+Zehao Yu, Torsten Sattler, and Andreas Geiger. Gaussian opacity fields: Efficient adaptive surface
+reconstruction in unbounded scenes. ACM Transactions on Graphics (TOG), 43(6):1–13, 2024b.
+Richard Zhang, Phillip Isola, Alexei A Efros, Eli Shechtman, and Oliver Wang. The unreasonable
+effectiveness of deep features as a perceptual metric. In IEEE Conference on Computer Vision and
+Pattern Recognition (CVPR), 2018.
+Zheng Zhang, Wenbo Hu, Yixing Lao, Tong He, and Hengshuang Zhao. Pixel-gs: Density control
+with pixel-aware gradient for 3d gaussian splatting. In European Conference on Computer Vision,
+pages 326–342. Springer, 2024.
+11
+A
+Theoretical proofs
+A.1
+Distributional Equivalence and Constant-opacity Occupancy
+Let the converged 3DGS model induce the normalized scene occupancy distribution
+N
+p(x) =
+1 X
+αi N (x | µi , Σi ),
+Z i=1
+Z=
+Z X
+N
+αi N (x | µi , Σi )dx.
+i=1
+ReorgGS samples new centers from this distribution. Equivalently, it first selects an original Gaussian
+according to
+αk
+P (zj = k) = PN
+l=1 αl
+,
+and then draws a coordinate from
+xj ∼ N (µk , Σk ).
+Given the resampled centers, ReorgGS estimates a local covariance Σqj from the kNN neighborhood
+and constructs
+M
+qM (x) =
+1 X
+N (x | xj , Σqj ).
+M j=1
+Proposition (distributional consistency). Assume that p(x) is twice continuously differentiable
+in a local neighborhood, and that the kNN bandwidth satisfies k → ∞ and k/M → 0. Then, as
+M → ∞,
+E[qM (x)] → p(x),
+Proof.
+Var[qM (x)] = O(1/k).
+For samples drawn from p, the local 3D volume that contains k nearest neighbors satisfies
+Vk (x) ≈
+k
+.
+M p(x)
+The corresponding local covariance scale is therefore
+
+
+∥Σq (x)∥ = O (k/M )2/3 .
+Treating the kNN local estimator as a kernel density estimator with bandwidth Σq (x), applying local
+Gaussian smoothing to p, and using a second-order Taylor expansion gives
+1
+E[qM (x)] = p(x) + Tr(Σq (x)∇2 p(x)) + o(∥Σq (x)∥).
+2
+Since k/M → 0, the bandwidth vanishes and the bias term goes to zero. Hence E[qM (x)] → p(x).
+For the variance of the local kernel estimator,
+Z
+1
+Var[qM (x)] ≈
+N (x | z, Σq (z))2 p(z)dz.
+M
+Using the squared Gaussian integral, the leading scale is
+Var[qM (x)] ∝
+p(x)
+.
+M |Σq (x)|1/2
+12
+For a 3D kNN bandwidth, |Σq (x)|1/2 ∝ k/M . Thus,
+Var[qM (x)] ∝
+1
+.
+k
+The variance therefore vanishes as k → ∞. This completes the proof.
+This result shows that resampling and kNN covariance estimation preserve the original scene support
+in an asymptotic sense. ReorgGS further converts the original opacity weights into spatial sampling
+density and initializes the new primitives with a constant low opacity. Let the constant-opacity
+occupancy field after reorganization be
+F̂ (x) =
+M
+X
+α0 K(x − xj ),
+j=1
+where K is a local kernel. Since xj ∼ p(x),
+Z
+K(x − z)p(z)dz.
+E[F̂ (x)] = M α0
+When the local kernel bandwidth is small,
+E[F̂ (x)] ≈ M α0 p(x).
+Thus, the occupancy strength originally represented by αi is represented after reorganization mainly
+by the sample density M p(x), while each primitive starts from the same low opacity α0 . This
+separation is essential for the subsequent optimization analysis: ReorgGS preserves the distributional
+support while changing the parameterization among opacity, spatial density, and local covariance.
+A.2
+Bounded Overlap under kNN Reorganization
+Distributional equivalence does not imply optimization equivalence. The original converged model
+may stack many high-opacity Gaussians in the same local region. These primitives make similar
+rendering contributions, but they also create strong overlap and strong parameter coupling. The kNN
+covariance in ReorgGS ties the support scale of each new Gaussian to the local sampling density,
+which controls the number of effective overlaps under standard local regularity assumptions.
+Let the local density of reorganized centers be
+ρ(x) = M p(x).
+Near x, the volume that contains k nearest neighbors satisfies
+Vk (x) ≈
+k
+.
+ρ(x)
+The kNN covariance makes the effective support volume of each new Gaussian proportional to Vk (x).
+Let Kq (x) denote the number of reorganized Gaussians that have a significant density or rendering
+response near x. If the local density is smooth, the samples are sufficiently dense, and the kernel
+support is controlled by the kNN scale, then
+Kq (x) ≈ ρ(x) · Vk (x) ≈ ρ(x) ·
+k
+= O(k).
+ρ(x)
+This statement does not mean that the reorganized Gaussians do not overlap. Rather, it states
+that the number of effective local overlaps no longer grows without bound with the number of
+redundant Gaussians in a degenerate original cluster. Dense regions produce more centers but
+13
+smaller covariances; sparse regions produce fewer centers but larger covariances. These two effects
+compensate each other, keeping the effective local coverage at a scale controlled by k.
+In contrast, standard densification clones or splits existing Gaussians near their current locations,
+and can preserve or amplify an existing local pile-up. If a degenerate cluster contains s strongly
+overlapping Gaussians, its local effective overlap can grow with s. ReorgGS resamples centers from
+the global empirical distribution and re-estimates covariances, rewriting such local redundancy into
+a density-controlled representation with adaptive support. This geometric property underlies the
+reduction of alpha-compositing occlusion and Hessian / FIM coupling.
+A.3
+Gradient Accessibility under Alpha Compositing
+For a single ray r, the reconstruction loss is
+Lr = ∥C(r) − C ∗ (r)∥22 .
+For a responding primitive g, ignoring higher-order occlusion interaction terms, the leading gradient
+term is scaled by its foreground transmittance:
+∥∇Lr (g)∥ ∝ Tg (r)a(g, r)∥Jg (r)∥,
+where a(g, r) is the effective opacity of this primitive on the ray and Jg (r) is its local rendering
+Jacobian. When the effective foreground opacities are small,
+log Tg (r) =
+X
+log(1 − ah (r)) ≈ −
+h<g
+X
+ah (r).
+h<g
+Defining
+Ag (r) =
+X
+ah (r),
+h<g
+we obtain
+Tg (r) ≈ exp(−Ag (r)).
+This gives the opacity barrier induced by alpha compositing: the larger the accumulated effective
+opacity in front of a target surface, the smaller the gradient received by parameters near that surface.
+For high-opacity floaters in a degenerate distribution p, the true behavior is more severe than the
+small-opacity approximation. If a foreground Gaussian satisfies
+apj (r) → 1,
+then
+log(1 − apj (r)) → −∞,
+Tgp (r) =
+Y
+(1 − aph (r)) → 0.
+h<g
+Thus, a high-opacity floater can approximately cut off the optimization path to the true surface behind
+it.
+Since ReorgGS changes the Gaussian set, there is no strict index-wise correspondence between the
+primitives before and after reorganization. We therefore consider the same target physical surface
+near depth d along ray r, and compare the responding primitives gp and gq under the original and
+reorganized parameterizations. Let Apd (r) be the accumulated effective opacity in front of the target
+surface in the original distribution. In the reorganized distribution, if there are at most mq (r, d)
+effective responding primitives in front of the surface and each satisfies aqj (r) ≤ α0 , then
+14
+Aqd (r) =
+X q
+aj (r) ≤ mq (r, d)α0 ,
+j<d
+and
+Tdq (r) =
+Y
+(1 − aqj (r)) ≥ (1 − α0 )mq (r,d) ≈ exp(−mq (r, d)α0 ).
+j<d
+Proposition (gradient accessibility). If Aqd (r) ≤ mq α0 and the original degenerate distribution
+satisfies Apd (r) > mq α0 , then
+Tdq (r) > Tdp (r).
+Furthermore, for the responding primitives gq and gp near the same target physical surface,
+∥∇Lr (gq )∥
+a(gq , r)
+≈ exp(Apd (r) − Aqd (r)) ·
+.
+∥∇Lr (gp )∥
+a(gp , r)
+Proof.
+By alpha compositing,
+Tdp (r) ≈ exp(−Apd (r)),
+Tdq (r) ≈ exp(−Aqd (r)).
+Together with Aqd (r) ≤ mq α0 < Apd (r), this gives
+Tdq (r) ≥ exp(−mq α0 ) > exp(−Apd (r)) ≈ Tdp (r).
+For any responding primitive g, the leading gradient term satisfies
+∥∇Lr (g)∥ ∝ Td (r)a(g, r)∥Jg (r)∥.
+Since gp and gq respond to the same local physical surface, their Jacobian norms are of the same
+order. Hence,
+T q (r)a(gq , r)
+∥∇Lr (gq )∥
+a(gq , r)
+≈ dp
+≈ exp(Apd (r) − Aqd (r)) ·
+.
+∥∇Lr (gp )∥
+Td (r)a(gp , r)
+a(gp , r)
+This completes the proof.
+The expression also explains the trade-off introduced by low-opacity initialization. Because α0
+is small, the local factor a(gq , r)/a(gp , r) may be below one. However, Apd (r) is a macroscopic
+occlusion quantity accumulated over all foreground floaters and redundant Gaussians along the ray,
+and it affects transmittance exponentially. When the original parameterization contains a strong
+opacity barrier, removing that barrier can yield an exponential recovery of gradients that dominates
+the local linear reduction caused by low opacity.
+A.4
+Hessian / FIM Coupling and Local Manifold Alignment
+Gradient accessibility explains how ReorgGS reopens optimization paths to occluded surfaces. A
+second degeneracy comes from parameter coupling. If multiple Gaussians strongly overlap and
+explain the same pixel residuals, their Jacobian columns become highly correlated, making it difficult
+for the optimizer to determine which parameter block should be updated.
+Define the opacity-weighted overlap energy as
+O(G) =
+X
+Z
+αi αj
+i̸=j
+15
+Gi (x)Gj (x)dx.
+Assuming normalized Gaussians,
+Z
+N (x | µi , Σi )N (x | µj , Σj )dx = N (µi | µj , Σi + Σj ).
+Thus, O(G) measures the opacity-weighted strength of spatial overlap. It can also be viewed as
+a geometric proxy for local optimization coupling. Let all parameters be Θ = {θi }. Under the
+Gauss–Newton approximation,
+H ≈ J T J,
+where J = ∂C/∂Θ. The off-diagonal block for parameter blocks i, j is
+
+Hij ≈
+∂C
+∂θi
+T 
+∂C
+∂θj
+
+.
+The off-diagonal blocks of the Fisher Information Matrix are similarly determined by inner products
+between the effects of different parameters on the observation distribution. If two Gaussians strongly
+overlap in space, they R
+affect many of the same pixels and rays, making their Jacobian columns highly
+correlated. Therefore, Gi Gj is not only a measure of geometric redundancy, but also a proxy for
+off-diagonal coupling in the Hessian / FIM.
+Proposition (overlap energy reduction). In a degenerate distribution p, if a local cluster contains
+s strongly overlapping Gaussians with average opacity ᾱ, the overlap energy grows approximately
+quadratically:
+Op = Ω(s2 ᾱ2 ).
+This quadratic growth corresponds to severe parameter multicollinearity. If only a standard opacity
+reset is applied, then
+Oreset = α02
+XZ
+Gpi (x)Gpj (x)dx.
+i̸=j
+It reduces the opacity weights, but preserves the geometric overlap term of the old parameterization.
+After ReorgGS, we instead have
+OReorg = α02
+XZ
+Gqi (x)Gqj (x)dx.
+i̸=j
+By the bounded-overlap analysis in Section A.2, if the effective local overlap after reorganization is
+controlled by mq , then
+Oq = O(M mq α02 ),
+whereas the original overlap in a degenerate cluster can reach Ω(s2 ᾱ2 ). ReorgGS therefore reduces
+not only the opacity weights, but also the geometric overlap induced by the parameterization. This
+weakens off-diagonal Hessian / FIM coupling and makes the local curvature closer to a block-diagonal
+structure.
+Finally, the kNN covariance provides a local manifold-alignment effect. If the scene is locally
+approximated by a low-dimensional manifold, let U denote the principal directions of the local
+neighborhood and Λ its variance spectrum. The kNN covariance estimate gives
+Σqj ≈ U ΛU T .
+16
+Since the local curvature of Gaussian position and scale parameters is related to (Σqj )−1 , the aggregate
+local curvature of several reorganized Gaussians can be approximated as
+Hlocal ∝
+X
+(Σqj )−1 ≈ K U Λ−1 U T .
+j
+where K denotes the number of reorganized Gaussians in the local neighborhood. This does not
+mean that ReorgGS exactly aligns with the global eigenvectors of the Hessian, nor that it constructs
+an optimal preconditioner. It means that kNN covariance estimation makes the principal directions of
+local Gaussians consistent with the sampled geometric neighborhood, reducing conflicting directional
+updates. Together with low-opacity initialization and bounded overlap, ReorgGS converts a degenerate parameterization caused by high opacity, redundant stacking, and inconsistent orientations into a
+distributionally similar but more gradient-accessible and less coupled one.
+B
+Additional Experimental Details and Discussions
+In this section, we provide further context on our experimental design, addressing potential questions
+regarding the opacity reset baseline, statistical variance in our sampling process, and a detailed
+breakdown of computational costs. Our implementation will be released as open-source code. All
+experiments are run on NVIDIA A100 GPUs.
+B.1
+Computational Cost: Training Overhead and Rendering Speedup
+While ReorgGS explicitly improves the rendering speed, we also transparently detail its computational
+overhead during the post-training phase.
+Training & Module Overhead. As a post-training method, ReorgGS inherently increases the total
+training time due to the additional gradient descent steps required. For instance, each post-training
+stage adds approximately 5 minutes for the LiteGS architecture on an NVIDIA A100 GPU. However,
+the ReorgGS algorithmic module itself is extremely lightweight. Leveraging efficient GPU kNN
+implementations, the complete topological reorganization (resampling and covariance re-estimation)
+of millions of Gaussians takes only a few seconds. Since this module is invoked very infrequently
+(e.g., 1 to 3 times per scene), its core algorithmic overhead is completely negligible compared to the
+rendering backward pass.
+Rendering Speedup. Crucially, although the Gaussian budget is strictly matched to the baseline
+count (M = N ), the reorganized topology inherently reduces rendering redundancy. By explicitly
+bounding local geometric overlap via K-NN initialization, fewer effective Gaussians participate in the
+depth-sorting and alpha-compositing operations per pixel tile. Validated on the LiteGS architecture,
+ReorgGS successfully reduces the total inference time from 10.75 seconds down to 9.37 seconds,
+yielding a concrete 12.8% acceleration without compromising geometric fidelity.
+B.2
+On the Insufficiency of Pure Opacity Reset
+A natural question is why we do not isolate “pure opacity reset” as a separate comparative baseline to
+prove the effectiveness of ReorgGS. Importantly, in our experimental setup, the Direct Continuation
+baseline already incorporates standard periodic opacity resets (as per the default 3DGS training
+schedule). The fact that direct continuation still plateaus with blurry artifacts proves that merely
+resetting opacity on a degenerate topology is fundamentally insufficient.
+The operations are simply not on the same level. Opacity reset only scales down the edge weights of
+the existing overlap graph (αi ← α0 ). The overlapping primitives maintain the exact same centers µ
+and covariance matrices Σ, meaning their Jacobians remain highly collinear. To rapidly minimize the
+photometric loss, the optimizer quickly scales the opacities of these exact same redundant Gaussians
+back up, returning the model to its original topological deadlocks. In contrast, ReorgGS operates on
+a fundamentally deeper structural level. By probabilistically resampling centers and re-estimating
+kNN covariances, it physically rebuilds the overlap graph and fundamentally breaks the parameter
+coupling.
+17
+B.3
+Robustness to Random Seeds (Statistical Stability)
+Because ReorgGS involves categorical sampling and Gaussian coordinate sampling, one might ask
+whether the choice of random seed introduces high variance into the final reconstruction, and whether
+averaging results across multiple seeds per scene is necessary.
+In practice, this statistical variance is entirely marginalized out by two macro-level factors. First, at the
+intra-scene level, a typical 3DGS model contains millions of primitives (M ≈ 105 ∼ 106 ). Drawing
+such a massive number of independent samples ensures that the macroscopic occupancy distribution
+tightly converges to the empirical field p(x) (as formalized in Proposition A.1, Var[qM (x)] ∝ 1/k →
+0). Second, at the inter-scene level, our quantitative tables report metrics averaged across dozens of
+diverse scenes from multiple datasets. This combination of massive large-scale sampling within each
+scene and macro-averaging across multiple datasets completely flattens any microscopic statistical
+fluctuations caused by individual random seeds, making the reported performance highly stable and
+reproducible.
+C
+Qualitative Comparisons
+As visualized in our qualitative results, ReorgGS consistently recovers finer geometric and textural
+details that are otherwise lost in baseline methods due to optimization deadlocks. We highlight
+specific challenging regions across different scenarios:
+KITCHEN (High-Frequency Textures): For indoor scenes rich in fine-grained patterns, as shown
+in Fig. 5, such as the floor tiles in the KITCHEN dataset, direct finetuning often yields over-smoothed
+results because redundant Gaussians blur the structural boundaries. ReorgGS redistributes the
+primitives to align with local manifolds, faithfully restoring the sharp, intricate textural details of the
+floor.
+PLAYROOM (Ghosting Artifacts): As shown in Fig. 6, baseline methods typically struggle
+with severe topological entanglement, which manifests as noticeable ghosting artifacts (double
+images) around the wall switches. By explicitly breaking these fixed occlusion structures, ReorgGS
+successfully converges to a single, crisp geometry for the switch.
+BICYCLE (Complex Background Geometry): In outdoor environments like the BIKE scene, as
+shown in Fig. 7, recovering complex, depth-varying background structures is highly challenging.
+While baselines tend to merge the background leaves and branches into cloudy, semi-transparent
+artifacts, ReorgGS excels at resolving the crisp silhouettes and natural gaps of the intricate foliage,
+demonstrating its superior capability in modeling high-frequency geometric boundaries.
+18
+Figure 5: Qualitative comparisons on the Kitchen scene. We evaluate Reorg across six baselines
+(rows). Columns show the original baseline, standard post-training, Reorg (1 pass), Reorg (3 passes),
+and Ground Truth. As highlighted in the red insets, standard post-training struggles with the dark
+bottle boundaries and countertop reflections, whereas Reorg effectively breaks the optimization
+deadlocks to restore sharp, high-fidelity details.
+19
+Figure 6: Qualitative comparisons on the Playroom scene. This scene challenges the parameterization of thin geometric structures (wooden railings) against a plain background. While standard
+post-training often leaves floating artifacts or broken geometry, Reorg successfully restores continuous and clean foreground structures without polluting the background.
+20
+Figure 7: Qualitative comparisons on the Bicycle scene. This scene presents extreme depth
+occlusions between thin metallic cables and a high-frequency foliage background. Reorg accurately
+disentangles the foreground objects from the complex background, significantly alleviating the
+blurring artifacts seen in standard gradient-based finetuning.
+21

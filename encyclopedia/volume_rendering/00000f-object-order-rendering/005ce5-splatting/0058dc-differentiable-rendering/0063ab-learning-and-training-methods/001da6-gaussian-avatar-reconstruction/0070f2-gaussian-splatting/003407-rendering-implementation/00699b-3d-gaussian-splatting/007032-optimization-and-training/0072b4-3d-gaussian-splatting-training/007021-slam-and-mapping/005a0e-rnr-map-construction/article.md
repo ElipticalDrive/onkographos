@@ -1,0 +1,154 @@
+# RNR-Map Construction
+
+Also called: Feature Registration
+
+## Overview
+RNR-Map Construction embeds visual information from an RGB-D image into a 2D grid map (RNR-Map) using a pretrained encoder and inverse camera projection [S1]. It differs from sibling methods like [iMAP](11979-imap.md) by operating directly on latent codes to bypass the computationally expensive differentiable rendering step required for alignment, enabling high-frequency mapping [S1].
+
+## How it works
+**Inputs and Outputs:**
+*   **Input:** An RGB-D image $I_t \in \mathbb{R}^{H \times W \times 4}$, where the first three channels are RGB and the fourth is depth [S1]. A relative pose $\Delta p_t = (\Delta x_t, \Delta y_t, \Delta a_t)$ representing the change in $x, y$ position and heading angle $\alpha$ from the previous pose [S1].
+*   **Output:** A local RNR-Map $m_t^l \in \mathbb{R}^{U \times V \times D}$ and a local mask $n_t^l \in \mathbb{Z}^{U \times V}$ [S1].
+
+**Data Structures:**
+*   **RNR-Map ($m$):** A 2D grid of size $U \times V$ [S1]. Each cell $m(u,v)$ stores a latent code vector of dimension $D$ ($m(u,v) \in \mathbb{R}^D$) [S1].
+*   **Mask ($n$):** A 2D grid of size $U \times V$ [S1]. Each cell $n(u,v)$ stores an integer count of the number of latent codes averaged into the corresponding map cell [S1].
+
+**Parameters:**
+*   $D$: The channel size (dimensionality) of the latent code feature vector [S1].
+*   $K$: Camera intrinsic matrix [S1].
+*   $\theta_{enc}$: Parameters of the pretrained encoder [S1].
+*   $s$: Grid resolution (size of each cell in world units) [S1].
+
+**Steps:**
+1.  **Pose Accumulation:** Compute the absolute pose $p_t$ by cumulating relative pose differences from the start pose $p_0 = (0, 0, 0)$ [S1].
+2.  **Encoding:** Encode the input image $I_t$ using the pretrained encoder $\theta_{enc}$ to produce a feature map $C_t \in \mathbb{R}^{H \times W \times D}$ [S1].
+3.  **Inverse Projection:** For each pixel $(h, w)$ in $C_t$, calculate its 3D world position $[q_x, q_y, q_z]^T$ using the camera intrinsic $K$, the extrinsic matrix derived from $p_t$, and the depth value $d_{h,w}$ from $I_t$ [S1].
+4.  **Grid Mapping:** Map the 3D world position to 2D grid coordinates $(u, v)$ using the grid resolution $s$ [S1]:
+    $$ u = \left\lfloor \frac{q_x(h,w)}{s} \right\rfloor, \quad v = \left\lfloor \frac{q_y(h,w)}{s} \right\rfloor $$
+5.  **Feature Registration:** Update the map cell $m(u,v)$ and mask cell $n(u,v)$ by averaging the incoming feature $c_{h,w}$ with existing features in that cell [S1]:
+    $$ m(u,v) = \frac{1}{n(u,v)} \sum_{c_i \in X_{(u,v)}} c_i, \quad n(u,v) = |X_{(u,v)}| $$
+    where $X_{(u,v)}$ is the set of features mapped to cell $(u,v)$ [S1].
+
+**Pseudocode:**
+> **Unverified code.** The code below did not pass a test run against a reference implementation, or no test fits it, so it may contain errors.
+
+```python
+def rnr_map_construction(I_t, delta_p_t, p_prev, K, theta_enc, s):
+    """
+    Construct/update RNR-Map from a single RGB-D frame.
+    
+    Args:
+        I_t: RGB-D image tensor of shape (H, W, 4).
+        delta_p_t: Relative pose (dx, dy, da) from previous step.
+        p_prev: Previous absolute pose (x, y, alpha).
+        K: Camera intrinsic matrix (3x3).
+        theta_enc: Pretrained encoder network.
+        s: Grid cell size in world units.
+        
+    Returns:
+        m_local: Local RNR-Map tensor of shape (U, V, D).
+        n_local: Local mask tensor of shape (U, V).
+    """
+    H, W, _ = I_t.shape
+    D = theta_enc.output_channels
+    
+    # 1. Pose accumulation
+    # Source states p_t is obtained by cumulating pose differences from p_0 = (0,0,0) [S1]
+    # Exact SE(2) composition is not detailed in sources [G]
+    p_t = accumulate_pose(p_prev, delta_p_t)
+
+    # 2. Encoding
+    C_t = theta_enc(I_t) # Shape: (H, W, D)
+
+    # 3. Compute grid bounds from projected points
+    points_3d = []
+    for h in range(H):
+        for w in range(W):
+            d = I_t[h, w, 3]
+            if d <= 0: continue
+            p_cam = invert_3x3(K) @ [w, h, 1]
+            p_cam = [p_cam[0]*d, p_cam[1]*d, p_cam[2]*d]
+            q = transform_to_world(p_cam, p_t)
+            points_3d.append(q)
+
+    if not points_3d:
+        return [], []
+
+    xs = [q[0] for q in points_3d]
+    ys = [q[1] for q in points_3d]
+    min_x, max_x = min(xs), max(xs)
+    min_y, max_y = min(ys), max(ys)
+    U = int((max_x - min_x) / s) + 1
+    V = int((max_y - min_y) / s) + 1
+    offset_x, offset_y = min_x, min_y
+
+    # Initialize local map and mask
+    m_local = [[[0.0]*D for _ in range(V)] for _ in range(U)]
+    n_local = [[0]*V for _ in range(U)]
+
+    # 4. Inverse projection and registration
+    for h in range(H):
+        for w in range(W):
+            d = I_t[h, w, 3]
+            if d <= 0: continue
+
+            c = C_t[h, w]
+
+            p_cam = invert_3x3(K) @ [w, h, 1]
+            p_cam = [p_cam[0]*d, p_cam[1]*d, p_cam[2]*d]
+            q = transform_to_world(p_cam, p_t)
+
+            u = int((q[0] - offset_x) / s)
+            v = int((q[1] - offset_y) / s)
+
+            if 0 <= u < U and 0 <= v < V:
+                n_local[u][v] += 1
+                n_curr = n_local[u][v]
+                # Incremental average: m_new = (m_old * (n-1) + c) / n
+                m_local[u][v] = [(m_local[u][v][i] * (n_curr - 1) + c[i]) / n_curr for i in range(D)]
+
+    return m_local, n_local
+
+def invert_3x3(M):
+    # Standard 3x3 matrix inverse [G]
+    inv_det = 1.0 / (M[0][0]*(M[1][1]*M[2][2]-M[1][2]*M[2][1]) - M[0][1]*(M[1][0]*M[2][2]-M[1][2]*M[2][0]) + M[0][2]*(M[1][0]*M[2][1]-M[1][1]*M[2][0]))
+    return [[(M[1][1]*M[2][2]-M[1][2]*M[2][1])*inv_det, (M[0][2]*M[2][1]-M[0][1]*M[2][2])*inv_det, (M[0][1]*M[1][2]-M[0][2]*M[1][1])*inv_det],
+            [(M[1][2]*M[2][0]-M[1][0]*M[2][2])*inv_det, (M[0][0]*M[2][2]-M[0][2]*M[2][0])*inv_det, (M[0][2]*M[1][0]-M[0][0]*M[1][2])*inv_det],
+            [(M[1][0]*M[2][1]-M[1][1]*M[2][0])*inv_det, (M[0][1]*M[2][0]-M[0][0]*M[2][1])*inv_det, (M[0][0]*M[1][1]-M[0][1]*M[1][0])*inv_det]]
+
+def transform_to_world(p_cam, p_t):
+    # SE(2) rotation and translation [G]
+    x, y, alpha = p_t
+    R = [[cos(alpha), -sin(alpha), 0], [sin(alpha), cos(alpha), 0], [0, 0, 1]]
+    t = [x, y, 0]
+    return [R[0][0]*p_cam[0] + R[0][1]*p_cam[1] + t[0],
+            R[1][0]*p_cam[0] + R[1][1]*p_cam[1] + t[1],
+            R[2][0]*p_cam[0] + R[2][1]*p_cam[1] + t[2]]
+
+def accumulate_pose(p_prev, delta_p_t):
+    # SE(2) accumulation [G]
+    x, y, alpha = p_prev
+    dx, dy, da = delta_p_t
+    new_alpha = alpha + da
+    return [x + dx*cos(alpha) - dy*sin(alpha),
+            y + dx*sin(alpha) + dy*cos(alpha),
+            new_alpha]
+```
+
+## Subtopics
+
+### [Image-Based Localization (Floc)](16555-image-based-localization-floc.md)
+Determines an agent's position within an RNR-Map using a single query image by operating directly on latent codes, bypassing rendering. It outputs a spatial heatmap and a predicted orientation to identify the most probable location and viewing angle.
+
+## Operating characteristics
+*   **Time Complexity:** The mapping process operates at 91.9 Hz [S1].
+*   **Memory Complexity:** Not given in the sources [S1].
+*   **Strengths:** Eliminates the rendering step in mapping, allowing for high-frequency updates suitable for navigation systems [S1].
+*   **Limitations:** Requires a pretrained encoder and decoder pair; relies on accurate pose estimation for correct spatial alignment [S1].
+
+## Background
+The RNR-Map was introduced by Songhwai Oh et al. in 2023 [S1]. It is designed as a navigation map that supports camera tracking, image-based localization, and image-goal navigation [S1]. The method uses an autoencoder-like framework where the encoder embeds pixel features into the 2D grid map [S1].
+
+## Sources
+[S1] Renderable Neural Radiance Map for Visual Navigation, https://doi.org/10.1109/cvpr52729.2023.00878, fetched 2026-10-26

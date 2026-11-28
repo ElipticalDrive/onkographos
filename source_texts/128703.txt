@@ -1,0 +1,218 @@
+AMReX: Software Framework for Block Structured AMR - Optimize STL ray-box intersection by ankithadas · Pull Request #5609 · AMReX-Codes/amrex
+
+Optimize STL ray-box intersection by ankithadas · Pull Request #5609 · AMReX-Codes/amrex · GitHub
+Skip to content
+You signed in with another tab or window. Reload to refresh your session.
+You signed out in another tab or window. Reload to refresh your session.
+You switched accounts on another tab or window. Reload to refresh your session.
+Dismiss alert
+Conversation
+ankithadas
+commented
+Aug 12, 2026
+Copy link
+Copy Markdown
+Contributor
+Summary
+Replace the face-by-face line-box intersection test with a slab-based test.
+Compute inverse ray directions once and reuse them.
+Handle ray directions parallel to a box axis explicitly.
+Additional background
+BVH ray traversal tests the same ray against many bounding boxes. Reusing its inverse direction avoids repeated division, while the slab test reduces the work required for each box.
+This is a performance optimization.
+Checklist
+The proposed changes:
+fix a bug or incorrect behavior in AMReX
+add new capabilities to AMReX
+changes answers in the test suite to more than roundoff level
+are likely to significantly affect the results of downstream AMReX users
+include documentation in the code and/or rst files, if appropriate
+Optimize STL ray-box intersection
+e58515d
+WeiqunZhang
+commented
+Aug 17, 2026
+Copy link
+Copy Markdown
+Member
+Review by claude
+Review
+Nice optimization — the slab test plus hoisted reciprocals is measurably faster (1.8x on the ray-cast path, numbers below) and it is answer-identical to development on a real STL in both double and single precision. One robustness regression should be fixed before merge; it costs one multiply-add.
+What I verified
+Compiles clean in 2D and 3D with -Wall -Wextra -Wpedantic, rc=0 (and the removed b parameter leaves no unused-argument warnings).
+line_box_intersects has no callers outside bvh_line_tri_intersects; both call sites are updated.
+Random equivalence: 40M random segment/box pairs (biased toward axis-aligned and degenerate segments, since the getIntercept path at AMReX_EB_STL_utils.cpp:1214, :1258, :1307 builds exactly axis-aligned rays) compared old vs new vs a long-double division-based reference: 0 disagreements.
+End-to-end: BVH-off is an exact oracle here, because it never calls the changed function. On a 34,988-triangle STL at n_cell=128, comparing setBVHOptimization(true) against (false):
+build
+level-set cells
+mismatches
+getBoxType boxes
+mismatches
+development, double
+2,515,456
+0
+512
+0
+PR Optimize STL ray-box intersection #5609, double
+2,515,456
+0
+512
+0
+development, FLOAT
+2,515,456
+0
+512
+1
+PR Optimize STL ray-box intersection #5609, FLOAT
+2,515,456
+0
+512
+1
+The single getBoxType difference in the FLOAT build is present in development too, so it is pre-existing and not from this PR.
+Performance (STLtools::fill, BVH on, best of 3, repeated 3x):
+development
+PR Optimize STL ray-box intersection #5609
+double
+0.2345 / 0.2358 / 0.2385 s
+0.1301 / 0.1259 / 0.1321 s
+FLOAT
+0.2353 s
+0.1302 s
+So ~1.8x on this path. Worth putting these in the PR description, since there is no in-repo test covering it.
+The one thing to fix: reciprocal multiplication can now cull a real hit
+x/x is exactly 1; x*(1/x) is not. The old code computed w = (xface-a[idim])/(b[idim]-a[idim]), so a segment endpoint lying exactly on a bounding-box face plane produced exactly the boundary value. With (box.lo(idim)-a[idim]) * inv_direction[idim] it lands a few ulps off, and tmin can end up marginally above tmax for a segment that genuinely touches the box. The old code also had an unconditional exact guard for this — if (box.contains(a) || box.contains(b)) { return true; } — which the rewrite drops.
+Measured on 20M adversarial cases (segment endpoints snapped exactly onto box face planes), scored against a long-double reference, where a false negative means a genuinely intersecting node gets culled:
+variant
+real hits culled
+false positives
+old (development)
+0
+0
+PR #5609 as written
+46,311
+0
+PR + division instead of reciprocal
+0
+0
+PR + contains() early-out restored
+0
+0
+PR + gamma-inflated far bound
+0
+0
+Whether that reaches the geometry depends on the deliberate bbox padding at AMReX_EB_STL_utils.cpp:757-769 (sml = eps*max(length), eps = 1e-10 double / 1e-5 float). The rounding is ~eps_machine relative to the segment length; the padding is eps_pad relative to the leaf length. So real hits survive while L_seg/L_leaf < eps_pad/eps_machine, i.e. about 4.5e5 in double but only about 83 in float. Measured with ptref-style segments of length 1 against padded leaf boxes, counting culled genuine hits out of ~1.85M:
+precision
+leaf extent
+culled by PR
+culled by old
+double
+1e-1 / 1e-3 / 1e-6
+0 / 0 / 0
+0 / 0 / 0
+float
+1e-1
+0
+0
+float
+1e-2
+0
+0
+float
+1e-3
+8
+0
+float
+1e-4
+112
+40
+With m_bvh_max_size = 4, leaf boxes are small: the 35k-triangle model above gives leaf extent ~0.02 against segments of length ~2-4, i.e. a ratio of ~100-200 — right at the float threshold, which is why the end-to-end FLOAT run above shows 0 level-set mismatches. A ~1e6-triangle model in a FLOAT build would sit past it. In double there is a wide margin and no action would be needed; it is the FLOAT case that argues for fixing it, and the fix is nearly free.
+Suggested fix (PBRT §3.9.2 "Robust bounding-box intersections"): nudge the far bound out by a few ulps. Verified 0 false negatives in every test above, including beating the old code at float/leaf=1e-4 (0 vs 40):
+```
+// Multiplying by the reciprocal loses the exactness of (face-a)/(b-a) that
+// division gives when the segment ends exactly on a face plane, so open the
+// far bound by a few ulps rather than culling a node we might really hit.
+constexpr Real ulps = Real(4)*std::numeric_limits<Real>::epsilon();
+...
+    tmin = amrex::max(tmin,tlo);
+    tmax = amrex::min(tmax,thi);
+    if (tmin > tmax*(Real(1)+ulps) + ulps) {
+        return false;
+    }
+```
+The alternative — restoring if (box.contains(a) || box.contains(b)) { return true; } ahead of the slab loop — also measured 0 false negatives and needs no epsilon tuning, but costs up to 12 comparisons per visited node and puts b back in the signature. The far-bound nudge keeps the PR's speedup intact.
+Minor / optional
+parallel_direction_mask is redundant. inv_direction[idim] is already set to exactly 0 for parallel directions, and 1/dir can never be 0 for any finite dir, so if (inv_direction[idim] == Real(0.0)) carries the same information and drops a parameter.
+The swap can be branchless, which reads better and avoids divergence on GPU:
+```
+Real t1 = (box.lo(idim)-a[idim]) * inv_direction[idim];
+Real t2 = (box.hi(idim)-a[idim]) * inv_direction[idim];
+tmin = amrex::max(tmin, amrex::min(t1,t2));
+tmax = amrex::min(tmax, amrex::max(t1,t2));
+```
+For completeness, not a request: a denormal direction component makes 1/dir overflow to inf, and (box.lo-a)*inf is NaN when the numerator is exactly zero. NaN then fails every comparison and the function returns true, which is the conservative direction, and it needs coordinates that differ by less than the smallest normal double, so it is unreachable in practice.
+Checkbox note
+Leaving "changes answers in the test suite to more than roundoff level" unchecked is correct for double — verified bit-identical on a real STL. If the far-bound nudge is not added, it would be worth a sentence noting the single-precision caveat for downstream users building with AMREX_USE_FLOAT and finely tessellated geometry.
+Harden STL ray-box slab test against false negatives
+fe0a47d
+ankithadas
+commented
+Aug 17, 2026
+Copy link
+Copy Markdown
+Contributor
+Author
+STLtools::fill results
+8,624-triangle STL, $$192^3$$ nodal level set, BVH on, best of 7
+variant
+best
+median
+vs pre-PR
+pre-PR base
+0.3448 s
+0.3475 s
+1.00x
+reciprocal + nudge
+0.2023 s
+0.2039 s
+1.70x
+division
+0.2355 s
+0.2384 s
+1.46x
+WeiqunZhang
+commented
+Aug 19, 2026
+Copy link
+Copy Markdown
+Member
+LGTM. A minor issue is inv_direction[AMREX_SPACEDIM] is passed to a function taking inv_direction[3]. It's not a bug, but can be confusing.
+Minor variable name change
+1d490c4
+WeiqunZhang
+approved these changes
+Aug 19, 2026
+View reviewed changes
+WeiqunZhang
+enabled auto-merge (squash)
+August 19, 2026 18:21
+Hide details
+View details
+WeiqunZhang
+merged commit 13221b4
+into
+AMReX-Codes:development
+Aug 19, 2026
+75 checks passed
+Uh oh!
+There was an error while loading. Please reload this page.
+Sign up for free
+to join this conversation on GitHub.
+Already have an account?
+Sign in to comment
+Uh oh!
+There was an error while loading. Please reload this page.
+Labels
+None yet
+2 participants
+Add this suggestion to a batch that can be applied as a single commit.This suggestion is invalid because no changes were made to the code.Suggestions cannot be applied while the pull request is closed.Suggestions cannot be applied while viewing a subset of changes.Only one suggestion per line can be applied in a batch.Add this suggestion to a batch that can be applied as a single commit.Applying suggestions on deleted lines is not supported.You must change the existing code in this line in order to create a valid suggestion.Outdated suggestions cannot be applied.This suggestion has been applied or marked resolved.Suggestions cannot be applied from pending reviews.Suggestions cannot be applied on multi-line comments.Suggestions cannot be applied while the pull request is queued to merge.Suggestion cannot be applied right now. Please check back later.
+You can’t perform that action at this time.

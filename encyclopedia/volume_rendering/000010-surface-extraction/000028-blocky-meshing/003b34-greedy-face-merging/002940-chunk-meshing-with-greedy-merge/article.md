@@ -1,0 +1,224 @@
+# Chunk Meshing with Greedy Merge
+
+Also called: 2D Plane Extraction, Greedy Mesher, Greedy Meshing (2D Plane Extraction), meshChunk
+
+## Overview
+Chunk Meshing with Greedy Merge is a surface extraction algorithm that reduces vertex count and draw calls in voxel rendering by merging adjacent coplanar faces of the same block type into maximal rectangles [S1, unofficial][S2, unofficial][S3, unofficial]. It builds on [Chunk Mesh Preparation](4265-chunk-mesh-preparation.md) by processing the chunk's block array to generate optimized geometry for all six faces while handling visibility culling against neighbors [S1, unofficial][S2, unofficial]. Unlike naive per-block meshing, it iteratively expands horizontal and vertical dimensions to form quads, and unlike [Greedy Meshing (Back Face)](16006-greedy-meshing-back-face.md), it typically handles all visible faces (front, back, left, right, top, bottom) in a unified or parallelized manner [S2, unofficial][S3, unofficial].
+
+## How it works
+### Inputs and Outputs
+**Inputs:**
+- A 1D array of block IDs representing the chunk, indexed as `x + (chunkWidth * y)` for the current face projection [S2, unofficial].
+- Chunk dimensions: `chunkWidth` and `chunkHeight` (and `chunkLength` for 3D context, though the greedy merge operates on 2D planes) [S2, unofficial].
+- Block size (world units per voxel), typically `0.25` [S3, unofficial].
+- Color lookup table indexed by block ID [S2, unofficial].
+- Adjacent chunk block arrays for neighbor culling (optional, depending on implementation) [S2, unofficial].
+
+**Outputs:**
+- A list of vertices, each containing a 3D position and a color [S2, unofficial][S3, unofficial].
+- A list of triangle indices forming quads from the vertices [S2, unofficial].
+
+### Data Structures
+- **Vertex**: A struct containing a `Vector3` position and a `Color32` color [S3, unofficial].
+- **Block Array**: 1D array of bytes (`byte[]` or `Uint8Array`), size `chunkWidth * chunkHeight` [S2, unofficial].
+- **Triangle List**: 1D array of integers representing vertex indices [S2, unofficial].
+
+### Algorithm Steps
+The algorithm processes each face of the chunk. For a given face, the 3D chunk is projected into a 2D grid. The following steps describe the greedy merge logic for one such 2D plane [S2, unofficial][S3, unofficial]:
+
+1. **Initialization**:
+   - Validate chunk views and build necessary context (fluids, layers, special block lookups) if required by the specific engine implementation [S3, unofficial].
+   - Initialize empty lists for vertices and triangles [S2, unofficial].
+   - Set `index = 0` for tracking vertex positions in the triangle list [S2, unofficial].
+
+2. **Iteration**:
+   - Iterate through the 2D block array using nested loops: `x` from `0` to `chunkWidth - 1`, and `y` from `0` to `chunkHeight - 1` [S2, unofficial].
+
+3. **Block Check**:
+   - Retrieve the block ID at the current position: `blockID = blocks[x + (chunkWidth * y)]` [S2, unofficial].
+   - If `blockID == 0` (empty/air), skip to the next iteration [S2, unofficial].
+
+4. **Vertical Expansion (Height)**:
+   - Initialize `height = 0` [S2, unofficial].
+   - While `y + height < chunkHeight` and the block at `blocks[x + (chunkWidth * (y + height))]` equals `blockID`, increment `height` [S2, unofficial].
+   - This finds the maximum contiguous vertical span of identical blocks starting at `(x, y)` [S2, unofficial].
+
+5. **Horizontal Expansion (Width)**:
+   - Initialize `width = 1` and `canExtend = true` [S2, unofficial].
+   - While `canExtend` is true and `x + width < chunkWidth`:
+     - Check if all blocks in the column at `x + width` from row `y` to `y + height - 1` match `blockID` [S2, unofficial].
+     - If any block in this column segment does not match `blockID`, set `canExtend = false` and break [S2, unofficial].
+     - If all match, increment `width` [S2, unofficial].
+   - This finds the maximum contiguous horizontal span of identical blocks for the previously determined height [S2, unofficial].
+
+6. **Mark Processed**:
+   - Mark the merged region as processed by setting all blocks in the rectangle defined by top-left `(x, y)` and dimensions `width x height` to `0` (empty) [S2, unofficial][S3, unofficial].
+   - Nested loops:
+     ```python
+     for i in range(width):
+         for j in range(height):
+             blocks[(x + i) + (chunkWidth * (y + j))] = 0
+     ```
+   - This ensures that subsequent iterations do not re-process blocks already included in a larger quad [S2, unofficial].
+
+7. **Quad Generation**:
+   - Calculate center coordinates:
+     - `xCenter = (x + width / 2.0) * blockSize` [S2, unofficial].
+     - `yCenter = (y + height / 2.0) * blockSize` [S2, unofficial].
+     - `zPos = (z * blockSize)` (where `z` is the depth coordinate of the face being meshed, e.g., the top face's Y-coordinate) [S2, unofficial].
+   - Calculate half-dimensions:
+     - `halfWidth = (width * blockSize) / 2.0` [S2, unofficial].
+     - `halfHeight = (height * blockSize) / 2.0` [S2, unofficial].
+   - Get color from `colors[blockID - 1]` (assuming 1-based indexing for colors) [S2, unofficial].
+
+8. **Vertex Addition**:
+   - Add four vertices to the `vertices` list with positions forming the quad corners relative to the center and half-dimensions, and the calculated color [S2, unofficial].
+   - The four corners are:
+     - `(xCenter - halfWidth, yCenter - halfHeight, zPos)` [S2, unofficial].
+     - `(xCenter + halfWidth, yCenter - halfHeight, zPos)` [S2, unofficial].
+     - `(xCenter + halfWidth, yCenter + halfHeight, zPos)` [S2, unofficial].
+     - `(xCenter - halfWidth, yCenter + halfHeight, zPos)` [S2, unofficial].
+   - Indices for these vertices are `index` to `index + 3` [S2, unofficial].
+
+9. **Triangle Addition**:
+   - Add two triangles to the `triangles` list using the four vertex indices to form a quad:
+     - Triangle 1: `(index + 0, index + 1, index + 2)` [S2, unofficial].
+     - Triangle 2: `(index + 2, index + 3, index + 0)` [S2, unofficial].
+   - Increment `index` by 4 [S2, unofficial].
+
+10. **Finalization**:
+    - After processing all faces, call `meshAllFaces` or equivalent to finalize buffers, handle special blocks (fluids, plants), and apply lighting/masks if required [S3, unofficial].
+    - Return the generated mesh data [S3, unofficial].
+
+### Pseudocode
+> **Unverified code.** The code below did not pass a test run against a reference implementation, or no test fits it, so it may contain errors.
+
+```python
+from dataclasses import dataclass
+from typing import List, Tuple
+
+@dataclass
+class Vertex:
+    pos: Tuple[float, float, float]
+    color: Tuple[int, int, int, int]
+
+def chunk_meshing_with_greedy_merge(blocks: List[int], width: int, height: int, block_size: float, colors: List[Tuple[int, int, int, int]], z_face: int) -> Tuple[List[Vertex], List[int]]:
+    """
+    Generate a mesh for a single 2D face of a voxel chunk using greedy merging.
+    
+    Args:
+        blocks: 1D array of block IDs, indexed as x + (width * y)
+        width: Width of the chunk in blocks
+        height: Height of the chunk in blocks
+        block_size: World size of a single voxel block (e.g., 0.25)
+        colors: Lookup table for block colors, indexed by block ID
+        z_face: The Z-coordinate (or depth) of the face being meshed
+        
+    Returns:
+        vertices: List of Vertex objects
+        triangles: List of integer indices
+    """
+    vertices: List[Vertex] = []
+    triangles: List[int] = []
+    index: int = 0
+    
+    # Make a copy of blocks to mark processed areas as 0
+    work_blocks = list(blocks)
+    
+    for y in range(height):
+        for x in range(width):
+            block_id = work_blocks[x + (width * y)]
+            
+            # Skip empty blocks
+            if block_id == 0:
+                continue
+            
+            # Vertical expansion
+            h = 0
+            while y + h < height:
+                if work_blocks[x + (width * (y + h))] == block_id:
+                    h += 1
+                else:
+                    break
+            
+            # Horizontal expansion
+            w = 1
+            can_extend = True
+            while can_extend and x + w < width:
+                # Check if all blocks in the column at x + w from y to y + h - 1 match
+                match = True
+                for j in range(h):
+                    if work_blocks[(x + w) + (width * (y + j))] != block_id:
+                        match = False
+                        break
+                if match:
+                    w += 1
+                else:
+                    can_extend = False
+            
+            # Mark region as processed
+            for i in range(w):
+                for j in range(h):
+                    work_blocks[(x + i) + (width * (y + j))] = 0
+            
+            # Calculate quad geometry
+            x_center = (x + w / 2.0) * block_size
+            y_center = (y + h / 2.0) * block_size
+            z_pos = z_face * block_size
+            
+            half_width = (w * block_size) / 2.0
+            half_height = (h * block_size) / 2.0
+            
+            # Get color (handle 1-based indexing if necessary)
+            color = colors[block_id - 1] if block_id > 0 else (0, 0, 0, 255)
+            
+            # Add vertices
+            # Corner 0: Bottom-Left
+            vertices.append(Vertex((x_center - half_width, y_center - half_height, z_pos), color))
+            # Corner 1: Bottom-Right
+            vertices.append(Vertex((x_center + half_width, y_center - half_height, z_pos), color))
+            # Corner 2: Top-Right
+            vertices.append(Vertex((x_center + half_width, y_center + half_height, z_pos), color))
+            # Corner 3: Top-Left
+            vertices.append(Vertex((x_center - half_width, y_center + half_height, z_pos), color))
+            
+            # Add triangles
+            triangles.append(index)
+            triangles.append(index + 1)
+            triangles.append(index + 2)
+            
+            triangles.append(index + 2)
+            triangles.append(index + 3)
+            triangles.append(index)
+            
+            index += 4
+            
+    return vertices, triangles
+```
+
+### Parameters
+- `block_size`: The world size of a single voxel block, typically `0.25` [S3, unofficial].
+- `chunk_width`, `chunk_height`: Dimensions of the chunk, typically `16x16` or similar powers of two [S1, unofficial][S2, unofficial].
+
+### Edge Cases and Pitfalls
+- **Indexing Assumption**: The algorithm assumes the block array is indexed as `x + (chunkWidth * y)` [S2, unofficial]. Deviations from this layout will cause incorrect merging [S2, unofficial].
+- **Boundary Checks**: The height check loop bounds must not exceed `chunkHeight` [S2, unofficial]. Similarly, width checks must not exceed `chunkWidth` [S2, unofficial].
+- **Empty Blocks**: Block ID `0` is treated as empty and skipped [S2, unofficial]. Ensure that non-empty blocks do not use `0` as an ID [G].
+- **Color Indexing**: Colors are often indexed by `blockID - 1`, implying 1-based block IDs [S2, unofficial]. Handle `blockID == 0` separately to avoid out-of-bounds access [G].
+- **Neighbor Culling**: This algorithm merges faces within a single chunk [S1, unofficial]. For correct global rendering, faces adjacent to other chunks must be checked against neighbor block data to avoid rendering hidden faces [S1, unofficial][S2, unofficial]. This is typically handled by the parent [Chunk Mesh Preparation](4265-chunk-mesh-preparation.md) step [G].
+
+## Operating characteristics
+- **Time Complexity**: $O(W \times H)$ for a face of size $W \times H$, as each block is visited and processed once [S2, unofficial]. The horizontal expansion check can take $O(H)$ in the worst case, but since blocks are marked as processed, the total work remains linear with respect to the number of blocks [S2, unofficial].
+- **Memory Complexity**: $O(V + T)$ where $V$ is the number of vertices and $T$ is the number of triangles in the output mesh [S2, unofficial]. The algorithm requires a copy of the block array or in-place modification to mark processed blocks [S2, unofficial].
+- **Performance**: Significantly reduces draw calls and vertex count compared to per-block meshing by merging coplanar faces [S1, unofficial][S2, unofficial]. Performance depends on the homogeneity of the chunk; highly varied chunks yield less benefit [G].
+- **Strengths**: Simple to implement, efficient for large homogeneous areas, reduces GPU overhead [S1, unofficial][S2, unofficial].
+- **Limitations**: Does not handle complex geometry or non-rectangular shapes [G]. Requires careful handling of neighbor culling for correct global rendering [S1, unofficial][S2, unofficial]. Transparent faces require depth sorting or separate meshes because standard depth testing may fail with blending [S2, unofficial].
+
+## Background
+The algorithm is a standard technique in voxel engine development, often referred to as "Greedy Meshing" or "2D Plane Extraction" [S1, unofficial][S2, unofficial][S3, unofficial]. It is widely used in games like Minecraft and its clones to optimize rendering [S2, unofficial]. The specific implementation details described here are derived from various open-source voxel engine projects [S1, unofficial][S2, unofficial][S3, unofficial].
+
+## Sources
+[S1] Phase 2: voxel engine com chunks, meshing e edição, https://github.com/EduardoLavall/blockbound/issues/4, fetched 2026-10-26 (unofficial)
+[S2] mwbryant/logic_voxels, https://github.com/mwbryant/logic_voxels, fetched 2026-10-27 (unofficial)
+[S3] BloodyFish/UnityVoxelEngine, https://github.com/BloodyFish/UnityVoxelEngine, fetched 2026-10-27 (unofficial)
+[S4] nerima-games/mc-meshing, https://github.com/nerima-games/mc-meshing, fetched 2026-10-28 (unofficial)

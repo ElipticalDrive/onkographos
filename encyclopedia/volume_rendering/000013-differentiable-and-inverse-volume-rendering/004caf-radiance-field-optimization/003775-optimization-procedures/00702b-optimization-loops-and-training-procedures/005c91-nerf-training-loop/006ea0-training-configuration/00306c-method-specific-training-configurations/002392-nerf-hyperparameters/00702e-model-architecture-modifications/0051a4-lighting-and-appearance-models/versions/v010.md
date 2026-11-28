@@ -1,0 +1,26 @@
+# Lighting and Appearance Models
+
+
+## Overview
+Lighting and Appearance Models extend the standard NeRF architecture [11313-model-architecture-modifications.md] to explicitly model illumination, material properties, or stylistic variations, rather than predicting view-dependent color directly from position and direction. These methods solve the problem of disentangling geometry from appearance, enabling capabilities such as explicit relighting, physically-based rendering, or controllable style synthesis. They differ from siblings like [DoF-NeRF](9432-dof-nerf.md) by introducing specific parameterizations for light transport or style, rather than focusing on depth-of-field or sparse-view constraints.
+
+## Shared principles
+The standard NeRF architecture [11313-model-architecture-modifications.md] learns a continuous volumetric scene representation $F_\Theta: (\mathbf{x}, \mathbf{d}) \rightarrow (\sigma, \mathbf{c})$. Lighting and Appearance Models modify this mapping to output intermediate physical or stylistic quantities (e.g., albedo, normal, pre-integrated light, or style vectors) which are then combined with explicit lighting or style conditions during the rendering step. The rendering process still integrates these outputs along rays using standard volume rendering equations, but the final color $\mathbf{C}$ is derived from a more complex composition of these intermediate fields and external parameters.
+
+## Subtopics
+
+### [Neural Pre-Integrated Lighting (Neural-PIL)](13783-neural-pre-integrated-lighting-neural-pil.md)
+Neural-PIL replaces costly numerical integration of incoming light with a neural network query, predicting pre-integrated light $\tilde{L}_i(\omega_r, b_r)$ directly from an illumination embedding, view direction, and material roughness [13783-neural-pre-integrated-lighting-neural-pil.md]. It sets itself apart from [Spherical Harmonics NeRF](14480-spherical-harmonics-nerf.md) by using an MLP to represent finer illumination details efficiently, avoiding the lack of fine details or high memory costs associated with SH bases [13783-neural-pre-integrated-lighting-neural-pil.md]. Choose this method when physically-based relighting with roughness-dependent specular highlights is required.
+
+### [Spherical Harmonics NeRF](14480-spherical-harmonics-nerf.md)
+Spherical Harmonics NeRF replaces the standard view-dependent color prediction head with an explicit 2nd-order Spherical Harmonics (SH) illumination model, allowing for explicit relighting by varying learnable SH coefficients [14480-spherical-harmonics-nerf.md]. It differs from siblings like Neural-PIL by decoupling geometry (density) and appearance (albedo) into separate accumulations, then applying a global, per-image SH lighting model to the accumulated screen-space albedo and normals, rather than predicting color directly per sample [14480-spherical-harmonics-nerf.md]. Choose this method when global, consistent relighting of a scene is the primary goal.
+
+### StylizedNeRF
+StylizedNeRF (also known as StyleNeRF) integrates a style-based generator into the NeRF architecture for high-resolution 3D-aware image synthesis [14882-stylizednerf.md]. It solves the problem of generating high-fidelity, view-consistent 3D objects with controllable appearance styles, addressing the limitations of standard NeRF which lacks explicit style conditioning [14882-stylizednerf.md]. It sets itself apart from siblings like Neural-PIL by using a GAN-based mutual learning strategy with a 2D stylization network, rather than optimizing for physical lighting parameters [14882-stylizednerf.md]. Choose this method for artistic style transfer or synthesis of specific subject appearances.
+
+## Background
+The baseline NeRF architecture  employs two MLPs: a Position MLP $\Phi_{pos}$ and a Shading MLP $\Phi_{shade}$. Lighting and Appearance Models emerged to address the limitations of this monolithic color prediction, enabling explicit control over lighting and style. Neural-PIL  and Spherical Harmonics NeRF  focus on physical illumination, while StylizedNeRF  focuses on generative style synthesis.
+
+## Sources
+[S1] Neural Pre-Integrated Lighting for Neural Radiance Fields, https://arxiv.org/abs/2112.00721, 2021-12-01
+[S2] StyleNeRF: Stylizing Neural Radiance Fields, https://arxiv.org/abs/2104.14634, 2021-04-28

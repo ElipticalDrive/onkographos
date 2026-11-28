@@ -1,0 +1,28 @@
+# SDF-based Neural Fields
+Also called: SDF NeRF, Signed Distance Function Neural Fields
+
+## Overview
+SDF-based Neural Fields replace the implicit density field of standard NeRFs with a Signed Distance Function (SDF) to provide a more explicit and smooth formulation of surfaces [S1, unofficial]. This approach addresses the geometric inaccuracy and surface holes typical of density-based NeRFs by leveraging the zero-level set of the SDF to define geometry [S1, unofficial]. Builds on [Signed Distance Function (SDF) Representations](12495-signed-distance-function-sdf-representations.md).
+
+## Shared principles
+The core mechanism involves predicting a continuous scalar field $s: \mathbb{R}^3 \rightarrow \mathbb{R}$ instead of a density $\sigma(\mathbf{x})$ [S1, unofficial]. For any 3D point $\mathbf{x} \in \mathbb{R}^3$, the function value $s(\mathbf{x})$ represents the distance to the closest surface, with the sign conventionally negative inside the object and positive outside [S1, unofficial]. The surface is defined as the zero-level set $\{\mathbf{x} \mid s(\mathbf{x}) = 0\}$ [S1, unofficial]. To enable volumetric rendering, the predicted SDF value $s(\mathbf{x})$ is converted into a density $\sigma(\mathbf{x})$ [S1, unofficial]. The specific conversion function is not detailed in the provided sources [G].
+
+## Subtopics
+
+### [ProbeSDF](11363-probesdf.md)
+A specific implementation of SDF-based neural fields. Not given in the sources.
+
+### [Generalizable Implicit Reconstruction with SRDF](14760-generalizable-implicit-reconstruction-with-srdf.md)
+Focuses on generalizable implicit reconstruction using SDFs. Not given in the sources.
+
+### [SDF-based Neural Volume Rendering with PBR](15009-sdf-based-neural-volume-rendering-with-pbr.md)
+Integrates physically based rendering with SDF representations. Not given in the sources.
+
+### [RS-Recon](15321-rs-recon.md)
+A reconstruction method utilizing SDF-based neural fields. Not given in the sources.
+
+## Background
+SDF-based neural fields emerged as a prominent research direction to improve surface quality in neural radiance fields [S1, unofficial]. Proposed strategies range from regularization terms to depth-guided supervision [S1, unofficial]. The approach combines NeRF with SDFs to provide a more explicit and smooth formulation of surfaces, addressing the limitations of traditional density-based representations [S1, unofficial].
+
+## Sources
+[S1] From reconstruction to reasoning : neural radiance fields for comprehensive 3D scene understanding, https://theses.hal.science/tel-05693528v1, fetched 2026-10-26 (unofficial)

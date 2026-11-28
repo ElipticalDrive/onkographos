@@ -1,0 +1,205 @@
+--- v001.md
++++ v002.md
+@@ -9,12 +9,12 @@
+ ### Inputs and Outputs
+ **Inputs:**
+-- A video sequence of the scene.
+-- Camera poses (computed via SfM).
+-- Predicted albedo maps (from a video diffusion model).
+-- Predicted depth maps (from a monocular depth estimator).
++- A video sequence of the scene [S1].
++- Camera poses (computed via Structure-from-Motion) [S1].
++- Predicted albedo maps (from a video diffusion model) [S1].
++- Predicted depth maps (from a monocular depth estimator) [S1].
+ 
+ **Outputs:**
+-- Three sets of 3D Gaussians: $G_A$ (albedo), $G_S$ (shading), and $G_R$ (residual).
+-- A rendered scene $I$ composed from these fields.
++- Three sets of 3D Gaussians: $G_A$ (albedo), $G_S$ (shading), and $G_R$ (residual) [S1].
++- A rendered scene $I$ composed from these fields [S1].
+ 
+ ### Data Structures
+@@ -60,7 +60,7 @@
+   - $L_{scale} = \bar{s}$ (average scale of primitives, encouraging flattening) [S1].
+   - $L_{D-SSIM}$ is the D-SSIM loss [S1].
+-- Regularization parameters $\lambda, \lambda_d, \lambda_s$ are used as in standard implementations [S1].
+-
+-**Step 2: Shading Optimization (Phase 1)**
++  - $\lambda, \lambda_d, \lambda_s$ are hyperparameters controlling the loss weights [S1].
++
++**Step 2: Shading Optimization (Phase 1) [S1]**
+ Ignore the residual term. Optimize $G_S$ using the diffuse model $I = A \times S$ [S1].
+ - Use inverse domain photometric loss to handle high dynamic range and bound values in $[0, 1]$ [S1]:
+@@ -72,10 +72,10 @@
+ 
+ **Step 3: Residual Spawning**
+-- Iterate through training views.
++- Iterate through training views [S1].
+ - Compute the difference between the input image $I$ and the composited diffuse render $A \times S$ [S1].
+ - Randomly select a subset of pixels with high difference [S1].
+ - Use the predicted depth of these pixels as positions to spawn new residual Gaussians in $G_R$ [S1].
+ 
+-**Step 4: Residual Optimization (Phase 2)**
++**Step 4: Residual Optimization (Phase 2) [S1]**
+ Freeze $G_S$. Optimize $G_R$ to capture residual non-diffuse effects [S1].
+ - Use the full image formation model [S1]:
+@@ -97,5 +97,7 @@
+ 
+ ```python
+-def intrinsic_decomposition(video_frames, video_diffusion_model, depth_estimator, sfm_solver):
++import numpy as np
++
++def intrinsic_decomposition(video_frames, video_diffusion_model, depth_estimator, sfm_solver, num_iterations=30000):
+     """
+     Main pipeline for intrinsic decomposition of 3D Gaussian Splatting.
+@@ -104,12 +106,11 @@
+     linear_frames = apply_inverse_gamma(video_frames)
+     
+-    # Subsample video
+-    sampled_frames = linear_frames[::5] # Sample every 5th frame
+-    
+-    # Compute camera poses
++    # Subsample video: every 5th frame
++    sampled_frames = linear_frames[::5]
++    
++    # Compute camera poses via SfM
+     cameras = sfm_solver(sampled_frames)
+     
+-    # Estimate Albedo using Video Diffusion Model
+-    # Handle long videos with chunking
++    # Estimate Albedo using Video Diffusion Model with chunking
+     albedo_maps = []
+     chunk_size = 64
+@@ -134,20 +135,19 @@
+     
+     # 3. Optimize Albedo Field
+-    optimize_albedo(G_A, albedo_maps, depth_maps, cameras)
++    optimize_albedo(G_A, albedo_maps, depth_maps, cameras, num_iterations)
+     
+     # 4. Optimize Shading Field G_S
+     G_S = initialize_gaussians(initial_points)
+-    optimize_shading(G_A, G_S, sampled_frames, depth_maps, cameras)
++    optimize_shading(G_A, G_S, sampled_frames, depth_maps, cameras, num_iterations)
+     
+     # 5. Spawn and Optimize Residual Field G_R
+-    G_R = []
+     G_R = spawn_residual_gaussians(G_A, G_S, sampled_frames, depth_maps, cameras)
+-    optimize_residual(G_A, G_S, G_R, sampled_frames, depth_maps, cameras)
++    optimize_residual(G_A, G_S, G_R, sampled_frames, depth_maps, cameras, num_iterations)
+     
+     return G_A, G_S, G_R
+ 
+-def optimize_albedo(G_A, albedo_maps, depth_maps, cameras):
+-    """
+-    Optimizes G_A to match predicted albedo maps.
++def optimize_albedo(G_A, albedo_maps, depth_maps, cameras, num_iterations):
++    """
++    Optimizes G_A to match predicted albedo maps using Eq. 5.
+     """
+     for iteration in range(num_iterations):
+@@ -160,11 +160,12 @@
+             rendered_albedo, rendered_depth = render_gaussians(G_A, camera)
+             
+-            # Loss
++            # Loss components
+             L_recon = l1_loss(rendered_albedo, target_albedo)
++            L_dssim = d_ssim_loss(rendered_albedo, target_albedo)
+             L_depth = l1_loss(rendered_depth, target_depth)
+             L_scale = mean_scale(G_A)
+             
+-            # Combine losses
+-            loss = (1 - lambda_param) * L_recon + lambda_param * d_ssim_loss(rendered_albedo, target_albedo) + \
++            # Combine losses (Eq. 5)
++            loss = (1 - lambda_param) * L_recon + lambda_param * L_dssim + \
+                    lambda_d * L_depth + lambda_s * L_scale
+             
+@@ -175,7 +176,7 @@
+             densify_gaussians(G_A, cameras, frame_idx)
+ 
+-def optimize_shading(G_A, G_S, frames, depth_maps, cameras):
+-    """
+-    Optimizes G_S assuming I = A * S.
++def optimize_shading(G_A, G_S, frames, depth_maps, cameras, num_iterations):
++    """
++    Optimizes G_S assuming I = A * S (Phase 1).
+     """
+     for iteration in range(num_iterations):
+@@ -235,9 +236,9 @@
+             new_G_R.append(create_gaussian(pos, color_sh=True, opacity=0.5))
+             
+-    return G_R
+-
+-def optimize_residual(G_A, G_S, G_R, frames, depth_maps, cameras):
+-    """
+-    Optimizes G_R using full model I = A * S + R.
++    return new_G_R
++
++def optimize_residual(G_A, G_S, G_R, frames, depth_maps, cameras, num_iterations):
++    """
++    Optimizes G_R using full model I = A * S + R (Phase 2).
+     """
+     for iteration in range(num_iterations):
+@@ -267,9 +268,61 @@
+             update_gaussians(G_R, loss)
+             densify_gaussians(G_R, cameras, frame_idx)
++
++# Helper functions (defined for self-containment)
++def apply_inverse_gamma(img, gamma=2.2):
++    return np.power(img, gamma)
++
++def apply_undistortion(img, cameras):
++    # [G] Standard camera undistortion applied to match SfM preprocessing
++    return [cam.undistort(i) for i, cam in zip(img, cameras)]
++
++def initialize_gaussians(points, color_activation='linear'):
++    # [G] Standard 3DGS initialization from point cloud
++    return Gaussians(points, color_activation=color_activation)
++
++def render_gaussians(G, camera):
++    # [G] Standard 3DGS rasterization returning color and depth buffers
++    return camera.rasterize(G)
++
++def render_albedo(G_A, camera):
++    return render_gaussians(G_A, camera)[0]
++
++def render_shading(G_S, camera):
++    return render_gaussians(G_S, camera)[0]
++
++def select_high_difference_pixels(residual, threshold=0.1):
++    return np.argwhere(np.abs(residual) > threshold)
++
++def l1_loss(a, b):
++    return np.mean(np.abs(a - b))
++
++def d_ssim_loss(a, b):
++    # [G] Standard D-SSIM implementation
++    return 1.0 - ssim(a, b)
++
++def mean_scale(G):
++    return np.mean(G.scales)
++
++def max_color_range(G):
++    return np.max(G.colors, axis=1) - np.min(G.colors, axis=1)
++
++def update_gaussians(G, loss):
++    # [G] Standard optimizer step (e.g., Adam)
++    G.optimizer.step()
++
++def densify_gaussians(G, cameras, frame_idx):
++    # [G] Standard 3DGS densification based on gradient magnitudes
++    G.densify(cameras[frame_idx])
++
++def unproject_pixel(camera, pixel, depth):
++    return camera.unproject(pixel.x, pixel.y, depth)
++
++def create_gaussian(pos, color_sh=True, opacity=0.5):
++    return Gaussian(position=pos, use_sh=color_sh, opacity=opacity)
+ ```
+ 
+ ## Operating characteristics
+-- **Time Complexity:** Training is significantly slower than vanilla 3DGS. For example, on the "Basement 1" scene, the full method took 28 minutes 30 seconds compared to 6 minutes 56 seconds for vanilla 3DGS [S1]. This is due to the additional render calls required for each layer (2 for diffuse, 3 for full) [S1].
+-- **Memory Complexity:** Requires storing three sets of Gaussians. The total number of primitives is higher than vanilla 3DGS (e.g., 2.185M vs 1.558M for Basement 1) [S1].
++- **Time Complexity:** Training is significantly slower than vanilla 3DGS [S1]. For example, on the "Basement 1" scene, the full method took 28 minutes 30 seconds compared to 6 minutes 56 seconds for vanilla 3DGS [S1]. This is due to the additional render calls required for each layer (2 for diffuse, 3 for full) [S1].
++- **Memory Complexity:** Requires storing three sets of Gaussians [S1]. The total number of primitives is higher than vanilla 3DGS (e.g., 2.185M vs 1.558M for Basement 1) [S1].
+ - **Rendering:** Requires 2 render calls for the diffuse scene (Albedo + Shading) and 3 for the full scene (Albedo + Shading + Residual) [S1].
+ - **Strengths:** Allows multi-view consistent editing of albedo without altering lighting; better captures misaligned sharp details of intrinsic components [S1].

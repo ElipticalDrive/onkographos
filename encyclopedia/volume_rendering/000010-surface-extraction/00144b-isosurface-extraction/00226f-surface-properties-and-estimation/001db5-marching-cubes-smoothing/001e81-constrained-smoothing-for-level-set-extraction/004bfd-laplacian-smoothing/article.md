@@ -1,0 +1,100 @@
+# Laplacian Smoothing
+
+Also called: Isotropic spatial filter, Laplacian Relaxation, Laplacian Smooth
+
+## Overview
+Laplacian Smoothing is a mesh smoothing technique that reduces geometric noise and jaggedness (such as the stairstepping artifact in isosurfaces) by moving each vertex toward the average position of its immediate neighbors [S4, unofficial]. In gradient-based methods, it acts as an isotropic spatial filter applied to gradients [S2]. Unlike edge-aware filters, it does not explicitly preserve sharp features and may oversmooth edges if applied excessively [S2].
+
+## How it works
+**Inputs:** A mesh defined by a list of vertices $V$ and a list of triangles $T$ [G].
+**Outputs:** A smoothed mesh with updated vertex positions $V'$ [G].
+
+**Data Structures:**
+- `vertices`: Array of 3D vectors $[x, y, z]$.
+- `triangles`: Array of triplets of vertex indices $[i, j, k]$.
+- `neighbors`: Adjacency list where `neighbors[i]` contains the unique indices of vertices connected to vertex $i$ by an edge [S4, unofficial].
+
+**Parameters:**
+- `smoothIter` (or `postSmooth`): Number of smoothing iterations. Default is 0 (no smoothing) [S1, S3, unofficial].
+- `alpha` and `beta`: Smoothing parameters. Fixed at 0.1 and 0.5 respectively in some implementations [S1, S3, unofficial].
+- `weight` (blend factor): The fraction of the neighbor average to apply. In the conservative variant, this is 0.4 for the average and 0.6 for the original position [S4, unofficial].
+- `boundary_flag`: Boolean flag controlling boundary handling or normalization during smoothing [S1, S3, unofficial].
+
+**Steps:**
+1. **Build Adjacency List:** Iterate through all triangles. For each triangle with vertex indices $a, b, c$, add bidirectional edges between $(a,b)$, $(b,c)$, and $(c,a)$ to the adjacency list. Ensure no duplicate neighbors are added for each vertex [S4, unofficial].
+2. **Iterative Smoothing:** For `smoothIter` iterations:
+   a. Store current vertex positions in `old_pos` [S4, unofficial].
+   b. For each vertex $i$:
+      i. If `neighbors[i]` is empty, skip vertex $i$ to prevent division by zero [S4, unofficial].
+      ii. Compute the average position of neighbors:
+          $$ \text{avg}_i = \frac{1}{|N_i|} \sum_{j \in N_i} \text{old\_pos}_j $$
+          where $N_i$ is the set of neighbors of vertex $i$, and $|N_i|$ is the count of neighbors [S4, unofficial].
+      iii. Update the vertex position using a weighted blend:
+          $$ \text{new\_pos}_i = (1 - w) \cdot \text{old\_pos}_i + w \cdot \text{avg}_i $$
+          where $w$ is the smoothing weight (e.g., 0.4) [S4, unofficial].
+
+**Pseudocode:**
+> **Unverified code.** The code below did not pass a test run against a reference implementation, or no test fits it, so it may contain errors.
+
+```python
+def laplacian_smooth(vertices, triangles, smooth_iter=1, weight=0.4, boundary_flag=True):
+    # 1. Build adjacency list
+    neighbors = [[] for _ in range(len(vertices))]
+    for tri in triangles:
+        a, b, c = tri
+        for u, v in [(a, b), (b, a), (b, c), (c, b), (c, a), (a, c)]:
+            if v not in neighbors[u]:
+                neighbors[u].append(v)
+    
+    # 2. Iterative smoothing
+    for _ in range(smooth_iter):
+        old_pos = [[v[0], v[1], v[2]] for v in vertices]
+        
+        for i in range(len(vertices)):
+            if not neighbors[i]:
+                continue # Skip isolated vertices
+                
+            # Calculate average of neighbors
+            avg = [0.0, 0.0, 0.0]
+            count = len(neighbors[i])
+            for j in neighbors[i]:
+                for k in range(3):
+                    avg[k] += old_pos[j][k]
+            
+            for k in range(3):
+                avg[k] /= count
+            
+            # Update position with weighted blend
+            for k in range(3):
+                vertices[i][k] = (1.0 - weight) * old_pos[i][k] + weight * avg[k]
+                
+    return vertices
+```
+
+## Subtopics
+
+### Conservative Mesh Smoothing
+A variant that uses a weighted blend (e.g., 60% original, 40% neighbor average) instead of fully replacing the vertex position with the average [S4, unofficial]. This reduces the convergence rate and prevents excessive shrinkage or drift, making it suitable for preserving overall volume while reducing noise [S4, unofficial].
+
+### [Volume-Adaptive Active Interface Model](13766-volume-adaptive-active-interface-model.md)
+A technique that balances internal Laplacian smoothing forces with external volume-adaptive forces to reconstruct piecewise linear material interfaces from volume fraction data. Unlike standard Laplacian Smoothing, which only reduces noise, this method adaptively pushes the interface to match known material volumes, preventing the shrinkage artifact inherent in pure Laplacian smoothing. It is chosen for multi-material junctions in VOF simulations where traditional methods fail due to manifold constraints.
+
+### [Constrained Laplacian Fairing](14502-constrained-laplacian-fairing.md)
+A mesh smoothing technique that strictly bounds positional error by constraining vertex movement to the dual-grid cell of origin. It differs from standard Laplacian smoothing by preventing the mesh from drifting arbitrarily far from the extracted topology. It serves as the primary smoothing step for the SurfaceNet extraction method, addressing jaggedness in non-manifold mesh extraction from multi-material volumes.
+
+## Operating characteristics
+- **Time Complexity:** Not given in the sources. [S1, unofficial][S2][S3, S4, unofficial]
+- **Memory Complexity:** Not given in the sources. [S1, unofficial][S2][S3, S4, unofficial]
+- **Strengths:** Simple to implement; effective at removing high-frequency noise and jaggedness from isosurfaces; isotropic smoothing promotes smooth gradients [S1, unofficial][S2][S4, unofficial].
+- **Limitations:** Oversmooths sharp edges and features; converges slowly near edges for piecewise smooth targets; does not preserve volume or topology strictly without constraints [S1, unofficial][S2].
+- **When to use:** When the primary goal is noise reduction on smooth surfaces and edge preservation is not critical [S2].
+- **When not to use:** When sharp features must be preserved (use edge-aware filters) [S2].
+
+## Background
+Laplacian smoothing has been applied to gradients in inverse rendering as a preconditioner of the form $(I + \lambda L)^{-1}$, where $L$ is the Laplacian matrix [S2]. It is well-known that this operation acts as an isotropic spatial filter, related to the solution of the screened Poisson equation [S2]. In mesh processing, it is a standard technique for reducing jaggedness in extracted surfaces [S4, unofficial]. Variants like the cotangent Laplacian have been explored for micro-mesh construction but offer limited benefits in standard inverse rendering [S2].
+
+## Sources
+[S1] neurolabusc/nii2mesh, https://github.com/neurolabusc/nii2mesh, fetched 2026-10-26 (unofficial)
+[S2] Spatiotemporal Bilateral Gradient Filtering for Inverse Rendering, https://doi.org/10.1145/3680528.3687606, fetched 2026-10-29
+[S3] TRTUZ8/TRTUZ8.github.io, https://github.com/TRTUZ8/TRTUZ8.github.io, fetched 2026-10-28 (unofficial)
+[S4] elyssov/prometheus-engine, https://github.com/elyssov/prometheus-engine, fetched 2026-10-28 (unofficial)

@@ -1,0 +1,369 @@
+# 3D Gaussian Splatting Implementation Details
+
+Also called: 3DGS CUDA kernel implementation, GS Implementation Parameters, GSGEN Implementation Details, Gaussian Splatting Training Configuration, gsplat implementation details, half-precision rasterization implementation
+
+## Overview
+This article details the specific implementation parameters, optimization schedules, and kernel-level configurations required to train and render 3D Gaussian Splatting (3DGS) scenes effectively. It addresses the problem of translating the theoretical differentiable rendering pipeline into a stable, high-performance GPU-accelerated training loop. It sets itself apart from sibling methods by focusing on the concrete hyperparameters (learning rates, thresholds, iteration intervals) and data structure layouts (half-precision fetches, compactness metrics) rather than high-level architectural changes or novel loss functions. It builds on [3D Gaussian Splatting Training](3761-3d-gaussian-splatting-training.md) by providing the granular settings that govern the densification and optimization steps described there.
+
+## How it works
+The implementation relies on a custom CUDA kernel implementation (e.g., `gsplat`) to handle the forward and backward passes of the differentiable rasterizer, often utilizing `tiny-cuda-nn` for MLP-based components [S2]. The core training loop manages camera sampling, downscaling schedules, and metric evaluation, exposing these via Python bindings [Parent].
+
+### Inputs and Outputs
+*   **Inputs:** A set of $N$ input images with known camera poses (intrinsics $K$, extrinsics $R, t$), typically from Structure-from-Motion (SfM) pipelines like COLMAP or OpenSfM.
+*   **Outputs:** A set of $M$ 3D Gaussian primitives, each parameterized by position $\mu$, covariance $\Sigma$ (or scale $s$ and rotation $q$), opacity $\alpha$, and spherical harmonic (SH) coefficients $c_{lm}$.
+
+### Data Structures
+*   **Gaussian Primitives:** Stored in a flat array or structure-of-arrays (SoA) layout for efficient GPU access. Each primitive contains:
+    *   Position: $\mathbb{R}^3$ (float32 or float16).
+    *   Rotation: Quaternion $\mathbb{R}^4$ (normalized).
+    *   Scale: $\mathbb{R}^3$ (log-space or direct).
+    *   Opacity: $\mathbb{R}^1$ (sigmoid output).
+    *   SH Coefficients: $\mathbb{R}^{3 \times (L+1)^2}$ for degree $L$. Standard implementations use Degree 1 (7 coefficients per color channel) [S3].
+*   **Rasterization State:** Tile-based partitioning of the image plane. Gaussians are sorted by depth within tiles.
+*   **Half-Precision Fetches:** To reduce register pressure and memory bandwidth, feature vectors (SH coefficients) are fetched in half-precision (FP16) during both forward and backward rasterization kernels [S2].
+
+### Training Schedule and Optimization Steps
+The training process is iterative, typically running for a fixed number of iterations (e.g., 30,000). The following steps are executed periodically:
+
+1.  **Camera Sampling:** Randomly select a single image from the training set for supervision in each iteration [S3].
+2.  **Forward Pass:** Project 3D Gaussians to 2D, rasterize using alpha blending, and compute the rendered image.
+3.  **Loss Computation:** Calculate photometric loss (L1 + SSIM) between rendered and ground-truth images. An automatic scaling factor is applied to loss values to improve half-precision training stability [S2].
+4.  **Backward Pass:** Compute gradients via automatic differentiation.
+5.  **Optimizer Step:** Update Gaussian parameters using the Adam optimizer with a learning rate of $1 \times 10^{-3}$ [S3].
+
+### Densification and Pruning
+To manage the number of Gaussians and adapt to scene complexity, densification and pruning occur at fixed intervals:
+
+1.  **Gradient-Based Splitting:** Every 500 iterations, Gaussians are split based on their view-space position gradient.
+    *   **Condition:** If the gradient magnitude exceeds threshold $T_{pos} = 0.02$, the Gaussian is split into two [S1].
+    *   **Action:** The original Gaussian is replaced by two children with adjusted scales and positions.
+2.  **Compactness-Based Densification:** Every 1000 iterations, a compactness metric is evaluated to clone or split Gaussians that are too small or too large relative to their neighbors, ensuring uniform coverage [S1].
+3.  **Pruning:** Every 200 iterations, Gaussians are removed if:
+    *   Opacity $\alpha < \alpha_{min} = 0.05$ [S1].
+    *   The world-space or view-space radius exceeds a predefined maximum limit [S1].
+
+### Edge Cases and Pitfalls
+*   **Half-Precision Stability:** Training in FP16 can lead to gradient underflow or overflow. An automatic loss scaling factor is required [S2].
+*   **Degenerate Gaussians:** Gaussians with extremely small scales or near-zero opacity can cause numerical instability. Pruning thresholds must be tuned to remove these without over-aggressively deleting valid geometry.
+*   **Boundary Artifacts:** At the edges of the image or near occlusion boundaries, gradient-based splitting may produce artifacts if the threshold $T_{pos}$ is not calibrated to the scene's depth distribution.
+
+### Pseudocode
+> **Unverified code.** The code below did not pass a test run against a reference implementation, or no test fits it, so it may contain errors.
+
+```python
+# Configuration
+LR = 1e-3
+ALPHA_MIN = 0.05
+T_POS = 0.02
+ITER_SPLIT = 500
+ITER_DENSIFY = 1000
+ITER_PRUNE = 200
+SH_DEGREE = 1
+
+# Initialization
+gaussians = initialize_from_sfm(points, poses)
+optimizer = Adam(gaussians.parameters(), lr=LR)
+
+for iteration in range(MAX_ITERATIONS):
+    # 1. Sample Camera
+    image_idx = random.choice(training_images)
+    gt_image = training_images[image_idx]
+    camera = poses[image_idx]
+    
+    # 2. Forward Pass (Rasterization)
+    # Uses half-precision fetches for SH coefficients [S2]
+    rendered_image = rasterize(gaussians, camera)
+    
+    # 3. Loss Computation
+    # Automatic scaling for FP16 stability [S2]
+    loss = compute_loss(rendered_image, gt_image)
+    loss = scale_loss_for_fp16(loss)
+    
+    # 4. Backward Pass
+    optimizer.zero_grad()
+    loss.backward()
+    
+    # 5. Optimizer Step
+    optimizer.step()
+    
+    # 6. Densification and Pruning
+    if iteration % ITER_SPLIT == 0:
+        # Split based on view-space position gradient [S1]
+        split_gaussians(gaussians, threshold=T_POS)
+        
+    if iteration % ITER_DENSIFY == 0:
+        # Compactness-based densification [S1]
+        densify_gaussians(gaussians)
+        
+    if iteration % ITER_PRUNE == 0:
+        # Remove low-opacity and oversized Gaussians [S1]
+        prune_gaussians(gaussians, alpha_min=ALPHA_MIN)
+```
+
+## Subtopics
+
+### [DeSplat](12925-desplat.md)
+Decomposes scene into static and per-view distractor Gaussians to handle transient occluders.
+
+### [360 Gaussian Splatting](12929-360-gaussian-splatting.md)
+Adapts rasterization for equirectangular images from 360-degree cameras.
+
+### [Scene Representation and Geometry Constraints](15421-scene-representation-and-geometry-constraints.md)
+Defines core geometric primitives and optimization dynamics.
+
+### [Perceptual Wrapper](15438-perceptual-wrapper.md)
+Post-processing module for high-frequency texture synthesis.
+
+### [Inverse and Internal Rendering](15764-inverse-and-internal-rendering.md)
+Handles internal volumetric structures and global illumination.
+
+### [Gaussian Frosting](15863-gaussian-frosting.md)
+Augments mesh with adaptive Gaussian layer for fine details.
+
+### [Semantic and Language Integration](15930-semantic-and-language-integration.md)
+Associates semantic embeddings with Gaussians for open-vocabulary querying.
+
+### [3D Difference-of-Gaussians (3D-DoG)](16198-3d-difference-of-gaussians-3d-dog.md)
+Uses positive/negative primitives to sharpen boundaries.
+
+### [Pruning and Density Control](16215-pruning-and-density-control.md)
+Manages dynamic population of primitives for memory and quality balance.
+
+### [QuantumGS](16253-quantumgs.md)
+Integrates Variational Quantum Circuits for view-dependent effects.
+
+### [Dynamic and Spacetime Modeling](16342-dynamic-and-spacetime-modeling.md)
+Extends 3DGS to handle temporal evolution.
+
+### [Closed-Form Triangle Splatting (CF-Splat)](16773-closed-form-triangle-splatting-cf-splat.md)
+Solves appearance via linear least-squares on mesh vertices.
+
+### [Softmax-GS](16854-softmax-gs.md)
+Enforces softmax competition among overlapping Gaussians to reduce popping.
+
+### [Student’s t-Primitive Representation](17072-student-s-t-primitive-representation.md)
+Uses heavy-tailed distributions for robustness.
+
+### [Hierarchical, Graph-Based, and Adaptive Structures](17106-hierarchical-graph-based-and-adaptive-structures.md)
+Introduces structural organization for scalability.
+
+### [Variable Basis Mapping (VBM)](17312-variable-basis-mapping-vbm.md)
+Transforms volumetric fields via wavelet analysis.
+
+### [Human Gaussian Splatting](17349-human-gaussian-splatting.md)
+Represents animatable human avatars.
+
+### [Uncertainty and Probabilistic Modeling](17380-uncertainty-and-probabilistic-modeling.md)
+Estimates confidence metrics for predictions.
+
+### [SCION](17424-scion.md)
+Hierarchical compositional representation with reusable primitives.
+
+### [On-the-Fly GS](17509-on-the-fly-gs.md)
+Progressive online training during image acquisition.
+
+### [View-Dependent and Appearance Modeling](17617-view-dependent-and-appearance-modeling.md)
+Models complex lighting effects like specular highlights.
+
+### [Optimization and Training Loop](17791-optimization-and-training-loop.md)
+Iterative procedures for adjusting Gaussian parameters.
+
+### [BAD-Gaussians](18036-bad-gaussians.md)
+Recovers sharp scenes from motion-blurred images.
+
+### [LiteTex-GS](18111-litetex-gs.md)
+Fast texturing with local RGB maps.
+
+### [Virtual Camera Optimization for Mirror Reflections](18121-virtual-camera-optimization-for-mirror-reflections.md)
+Renders mirror reflections using virtual cameras.
+
+### [ParetoGS Continuous-Budget Decoding](18388-paretogs-continuous-budget-decoding.md)
+Interpolates between nested anchors for continuous budget control.
+
+### [TruncGradGS](18675-truncgradgs.md)
+Replaces near-zero derivative tails with linear surrogates.
+
+### [EfficientGS](18681-efficientgs.md)
+Optimized for large-scale, high-resolution scenes.
+
+### [Variational 3D Gaussians](18706-variational-3d-gaussians.md)
+Models uncertainty via distributions over SH coefficients.
+
+### [EnvMap-GS](18915-envmap-gs.md)
+Separates foreground and background for outdoor captures.
+
+### [Thermal-Physics-Informed 3D Gaussian Splatting](18935-thermal-physics-informed-3d-gaussian-splatting.md)
+Embeds infrared radiative transfer modeling.
+
+### [Environment Map Generation from Gaussian Background](18942-environment-map-generation-from-gaussian-background.md)
+Converts distant background to equirectangular map.
+
+### [MAC-Splat](19210-mac-splat.md)
+Enforces 3D consistency for sparse-view training.
+
+### [Heat Kernel Textures (HKTex)](19427-heat-kernel-textures-hktex.md)
+UV-free texture representation on manifolds.
+
+### [Gaussian Splatting in Style](19431-gaussian-splatting-in-style.md)
+Stylizes 3D scenes via learned color mapping.
+
+### [EOGS (Earth-observation Gaussian Splatting)](19449-eogs-earth-observation-gaussian-splatting.md)
+Specialized for satellite photogrammetry.
+
+### [HDR Gaussian Splatting](19777-hdr-gaussian-splatting.md)
+Handles High Dynamic Range imaging.
+
+### [BoundedGS](20068-boundedgs.md)
+Bounds GPU memory usage during high-res training.
+
+### [Connectivity-based Visibility for 3D Gaussian Splatting](20071-connectivity-based-visibility-for-3d-gaussian-splatting.md)
+Filters unseen points for memory efficiency.
+
+### [Sketch and Patch](20108-sketch-and-patch.md)
+Categorizes Gaussians into sketch and patch roles.
+
+### [Scene Extent and Camera Initialization](20164-scene-extent-and-camera-initialization.md)
+
+### [Laplacian Frequency Hierarchies](20304-laplacian-frequency-hierarchies.md)
+Decomposes supervision into frequency components.
+
+### [Gradient-Aware Super Sampling (GASS)](20492-gradient-aware-super-sampling-gass.md)
+Post-rendering refinement using image gradients.
+
+### [3D Gaussian Splatting for CT](20630-3d-gaussian-splatting-for-ct.md)
+Sparse-view CT reconstruction.
+
+### [AquaMass-GS](20667-aquamass-gs.md)
+Per-scene underwater rendering.
+
+### [GS-Scale Host Offloading](20685-gs-scale-host-offloading.md)
+Stores parameters in host memory.
+
+### [DeltaSplat](20851-deltasplat.md)
+Iterative refinement for pose-free feed-forward GS.
+
+### [Rendering Implementation and Acceleration](21069-rendering-implementation-and-acceleration.md)
+Computational pipeline for projection and blending.
+
+### [ClunoGS Unified Optimization](21178-clunogs-unified-optimization.md)
+Jointly optimizes parameters, sparsity, and quantization.
+
+### [Splat and Replace](21189-splat-and-replace.md)
+Fuses repetitive instances into shared templates.
+
+### [Shared Representation for Repetitive Elements](21241-shared-representation-for-repetitive-elements.md)
+Shares geometry across instances.
+
+### [Parameter-level Geometry-Appearance Decoupling](21297-parameter-level-geometry-appearance-decoupling.md)
+Isolates supervision attribution.
+
+### [Radiance Field-Informed Gaussian Splatting](21331-radiance-field-informed-gaussian-splatting.md)
+Uses NeRF for initialization and supervision.
+
+### [Hybrid Gaussian Splatting](21999-hybrid-gaussian-splatting.md)
+Decouples static and transient components.
+
+### [Laplacian-Based Deformation for Gaussian Splatting](22006-laplacian-based-deformation-for-gaussian-splatting.md)
+Proxy-free deformation via splat graphs.
+
+### [GS2Mesh](22457-gs2mesh.md)
+Extracts mesh from GS using stereo matching.
+
+### [Anchor-based and Coupled Primitives](22458-anchor-based-and-coupled-primitives.md)
+Uses compact anchors to predict primitives.
+
+### [Hybrid Radiance Fields (HyRF)](22697-hybrid-radiance-fields-hyrf.md)
+Combines Gaussians and neural fields.
+
+### [Distractor Removal and Robust Masking](23014-distractor-removal-and-robust-masking.md)
+
+### [Stochastic Solid Gaussian Rendering](23238-stochastic-solid-gaussian-rendering.md)
+Treats Gaussians as stochastic solids for depth extraction.
+
+### [UniqueSplat](23256-uniquesplat.md)
+Feed-forward method with view-conditioned Gaussians.
+
+### [Adaptive Spherical Harmonics Band Adjustment](23286-adaptive-spherical-harmonics-band-adjustment.md)
+Variable SH bands per primitive.
+
+### [Camera and Projection Models](23322-camera-and-projection-models.md)
+Defines geometric transformations.
+
+### [RaDe-GS Rasterized Depth and Normal Computation](23402-rade-gs-rasterized-depth-and-normal-computation.md)
+Derives depth/normal maps from splats.
+
+### [Multi-Level Gaussian Caching Pipeline](23421-multi-level-gaussian-caching-pipeline.md)
+Hierarchical optimization with cached radiance.
+
+### [Compression and Quantization](23646-compression-and-quantization.md)
+Reduces memory footprint via quantization.
+
+### Selective Defocus Blurring
+Predicts a per-Gaussian scale offset $\delta s_j$ using a compact MLP to selectively enlarge covariances, creating pixel-wise variable blur kernels that match spatially varying scene blurriness [S4]. The offset is added to the base scale, the transformed covariance is projected to 2D, and used as the blur kernel during rasterization [S4]. If $\delta s_j$ is constant for all Gaussians, it degrades to a uniform Gaussian blur [S4]. This method is distinct from naive Gaussian blur (which blurs the whole image) and learnable Gaussian kernels (which optimize a single mean/variance) by enabling spatially varying blur shapes [S4].
+
+### Denoise-GS
+A self-supervised denoising method for sparse-view 3DGS that combines Noise2Void (N2V) with differentiable 3DGS [S5]. Round 1: Train a UNet using N2V, process denoised images through InstantSplat to initialize/train/render 3DGS, and filter results by viewpoint [S5]. Round 2: Fine-tune the UNet with a composite loss balancing low-frequency and perceptual detail consistency, then render again [S5]. Unlike supervised methods, it requires no paired clean data, and unlike N2N, it works with single images per viewpoint [S5].
+
+### Multi-Scale Constraint
+Applies different scales to Gaussians based on viewer distance to improve distant object rendering [S6]. A position-aware factor $\gamma(\mu)$ is computed: $\gamma(\mu) = 1$ if $\|\mu - c\|^2 < 2r$, else $\|\mu - c\|^2 / r - 1$, where $r$ is scene radius and $c$ is camera center [S6]. If $\max(s) < g \cdot \gamma(\mu)$, clone the Gaussian; if $\max(s) \ge g \cdot \gamma(\mu)$, split it; if $\max(s) > b \cdot \gamma(\mu)$, eliminate it, where $g$ and $b$ are scale thresholds [S6].
+
+### LS-Gaussian Viewpoint Transformation
+Leverages inter-frame continuity by transforming the viewpoint between consecutive frames rather than rendering each separately [S7]. This enables sparse rendering (e.g., one full render every 6 frames) on edge devices like Jetson AGX Orin [S7]. Rendering quality degrades as the number of consecutively transformed frames increases due to interpolation error accumulation [S7]. Unlike naive pixel warping, it operates at the tile/Gaussian level to reduce preprocessing costs [S7].
+
+### Opacity Offset Table for DSA
+Constructs an opacity offset table to model changes in digital subtraction angiography [S8].
+
+### GAINS (Gaussian-based Inverse Rendering from Sparse multi-view captures)
+A two-stage inverse rendering framework using foundation model priors [S9]. Stage I: Optimize geometry using monocular depth, normal, and diffusion priors. Stage II: Jointly optimize material and lighting using segmentation, intrinsic image decomposition, and diffusion priors [S9]. Uses 2DGS instead of 3DGS for more accurate geometry, which is essential for material estimation [S9]. Typically uses $N=4-32$ input views [S9].
+
+### SAGS (Adaptive Gaussian Splatting)
+Utilizes an adaptive 2D low-pass filter at inference time based on rendering resolution and camera distance to handle aliasing [S10, unofficial].
+
+### GraphiGS
+A variant of GraphiXS where the component distribution $\delta_\theta$ is modeled as a 3D Gaussian primitive $\delta_{GS}(x; \mu, \Sigma) = \exp(-\frac{1}{2} (x - \mu)^T \Sigma^{-1} (x - \mu))$ [S11]. This provides compact spatial support but may be limited in capturing broader uncertainty regions compared to heavy-tailed distributions [S11].
+
+### Local 3DGS for Relative Pose Estimation
+Estimates relative camera pose by optimizing a rigid SE-3 transformation $T_t$ applied to a pre-trained set of 3D Gaussians $G_t^*$ [S12]. The objective is $T_t^* = \arg \min_{T_t} \mathcal{L}_{rgb}(\mathcal{R}(T_t \odot G_t), I_{t+1})$ [S12]. All Gaussian attributes are frozen during this optimization to separate camera movement from deformation [S12]. The transformation $T$ is represented by quaternion $q \in so(3)$ and translation $t \in \mathbb{R}^3$ [S12]. Typically takes 5-10 seconds [S12].
+
+### AM-GS Implementation Configuration
+Holds inherited object Gaussians, optimizer, loss, and direction-conditioned asymptotic-color head fixed, optimizing only spatial water representation [S13, unofficial]. Uses $N=8$ fixed lattice size, coverage normalization, and geometric camera-ray distance for query [S13, unofficial]. Uses 2,048 water Gaussians and 12,288 RGB transport parameters [S13, unofficial]. 18 analytic-renderer unit tests agree with float64 integration within $2.90 \times 10^{-6}$ [S13, unofficial].
+
+### 3DGS Self-Initialization
+Generates additional Gaussian centers by training a lightweight 3DGS model and reusing its primitive centers as a point cloud to compensate for regions with insufficient image features [S14]. Trains a first-pass lightweight 3DGS $G^{(0)}$ on downsampled images with SH degree 0 (DC color only) [S14]. Stops when densification plateaus or a small step budget is reached [S14]. Forms a colored point set $P_1$ by taking primitive centers $X_n = \mu_n$ and DC color $C_n = c_n$ [S14].
+
+### Mesh-adsorbed Gaussian Representation (MaGS)
+A hybrid representation of a triangular mesh and 3D Gaussians constrained near the mesh surface [S15, unofficial]. Uses RGD-Net to model relative displacement between mesh and Gaussians to enhance rendering fidelity under mesh constraints [S15, unofficial]. Unlike rigidly bound methods, it allows relative displacement, bypassing the trade-off between rendering accuracy and deformation rationality [S15, unofficial].
+
+### Intersection Depth
+The depth of the intersection between the Gaussian and the ray, calculated by flattening the Gaussian ellipsoid into a planar shape [S16]. Scale regularization loss $L_s$ is applied to squeeze ellipsoids into flat shapes by constraining the minimum scaling factor component towards zero [S16]. The depth is given by $d(n, p) = r_z \cdot (n \cdot p) / (n \cdot r)$, where $r_z$ is the z-value of the ray direction $r$, $n$ is the normal, and $p$ is the position [S16].
+
+## Operating characteristics
+*   **Time Complexity:** The forward pass is $O(N)$ where $N$ is the number of Gaussians, but dominated by the sorting and blending steps which are $O(T \cdot K)$ where $T$ is the number of tiles and $K$ is the average number of Gaussians per tile. The backward pass is similarly linear in the number of active Gaussians.
+*   **Memory Complexity:** $O(N \cdot C)$ where $C$ is the size of the attribute vector (position, rotation, scale, opacity, SH coefficients). For Degree 1 SH, this is significant. Half-precision fetches reduce memory bandwidth pressure [S2].
+*   **Measured Performance:** Standard 3DGS achieves real-time rendering (30-100+ FPS) on modern GPUs (e.g., RTX 3090/4090) for scenes with millions of Gaussians at 1080p resolution [Parent].
+*   **Scaling:** Performance scales well with GPU memory and compute. Large-scale scenes require techniques like [Pruning and Density Control](16215-pruning-and-density-control.md) or [BoundedGS](20068-boundedgs.md) to manage memory.
+*   **Strengths:** Real-time rendering, high visual fidelity, explicit representation allows for easy editing and compression.
+*   **Limitations:** High memory usage for large scenes, potential for "floaters" in unobserved regions, sensitivity to initialization.
+*   **When to Use:** Real-time novel view synthesis, interactive applications, scenes with complex geometry and appearance.
+*   **When Not to Use:** Scenes with extreme transparency or subsurface scattering (unless augmented), very sparse view settings without careful initialization.
+
+## Background
+3D Gaussian Splatting was introduced by Kerbl et al. in 2023 [S1]. It builds on the concept of splatting, a technique used in computer graphics for rendering point-based representations. The method was developed to address the slow rendering speeds of NeRFs while maintaining high visual quality. It has since become a standard baseline for novel view synthesis and has inspired numerous variants and optimizations [S1, S2, S3].
+
+## Sources
+[S1] Text-to-3D using Gaussian Splatting, https://doi.org/10.1109/cvpr52733.2024.02022, fetched 2026-10-26
+[S2] Neural Harmonic Textures for High-Quality Primitive Based Neural Reconstruction, https://doi.org/10.1007/978-3-032-37032-7_18, fetched 2026-10-26
+[S3] EVolSplat: Efficient Volume-based Gaussian Splatting for Urban View Synthesis, https://doi.org/10.1109/CVPR52734.2025.01054, fetched 2026-11-03
+[S4] Deblurring 3D Gaussian Splatting, https://doi.org/10.1007/978-3-031-73636-0_8, fetched 2026-10-26
+[S5] Denoise-GS: Self-Supervised Denoising for Sparse-View 3D Gaussian Splatting., https://doi.org/10.3390/s26020651, fetched 2026-10-26
+[S6] TraGraph-GS: Trajectory Graph-based Gaussian Splatting for Arbitrary Large-Scale Scene Rendering., https://doi.org/10.1109/tpami.2026.3709368, fetched 2026-10-26
+[S7] No Redundancy, No Stall: Lightweight Streaming 3D Gaussian Splatting for Real-time Rendering, https://doi.org/10.1109/iccad66269.2025.11240950, fetched 2026-10-30
+[S8] Recent advances in 3D Gaussian splatting, https://doi.org/10.1007/s41095-024-0436-y, fetched 2026-10-26
+[S9] GAINS: Gaussian-Based Inverse Rendering from Sparse Multi-view Captures, https://doi.org/10.1007/978-3-032-37602-2_18, fetched 2026-10-29
+[S10] PDF Recent advances in 3D Gaussian splatting - Springer, https://link.springer.com/content/pdf/10.1007/s41095-024-0436-y.pdf, fetched 2026-10-29 (unofficial)
+[S11] Graphical X Splatting (GraphiXS): A Graphical Model for 4D Gaussian Splatting under Uncertainty, https://doi.org/10.1145/3799902.3811085, fetched 2026-11-05
+[S12] COLMAP-Free 3D Gaussian Splatting, https://doi.org/10.1109/cvpr52733.2024.01965, fetched 2026-10-26
+[S13] Optical-Mass Water Gaussians for Per-Scene Underwater Rendering, https://doi.org/10.21203/rs.3.rs-10938586/v1, fetched 2026-10-26 (unofficial)
+[S14] Initialize to Generalize: A Stronger Initialization Pipeline for Sparse-View 3DGS., https://doi.org/10.1109/tvcg.2026.3736471, fetched 2026-10-26
+[S15] Reconstructing and Simulating Dynamic 3D Objects with Mesh-adsorbed Gaussian Splatting, https://doi.org/10.48550/arXiv.2406.01593, fetched 2026-10-30 (unofficial)
+[S16] VCR-GauS: View Consistent Depth-Normal Regularizer for Gaussian Surface Reconstruction, https://doi.org/10.52202/079017-4434, fetched 2026-10-29

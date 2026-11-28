@@ -1,0 +1,159 @@
+# Emission Reconstruction
+## Overview
+Emission reconstruction is an inverse volume rendering technique that solves for the spatial distribution of emitted radiance ($L_{emit}$) within a volume such that the rendered output matches target images [S1]. It linearizes the volume rendering equation under a single-scattering assumption, isolating the emission term from background and scattering contributions to form a linear system [S1]. Unlike [Albedo Reconstruction](14422-albedo-reconstruction.md), which optimizes scattering color properties, this method treats emission coefficients as the primary unknowns [S1].
+
+## How it works
+**Inputs:**
+- Target pixel values $L^k_i(x_k, \omega_k)$ for $k$ pixels [S1].
+- Camera ray origins $x_k$ and directions $\omega_k$ [S1].
+- Background radiance $L_o(x^k_s, \omega_k)$ at the scene boundary $x^k_s$ [S1].
+- Extinction coefficient field $\sigma_t(x)$ [S1].
+- Scattering phase function $\rho(x)$ and scattered light field $L_{scat}(x, \omega)$ (assumed fixed) [S1].
+- Basis functions $\upsilon_i(x)$ for representing emission [S1].
+
+**Outputs:**
+- Emission coefficients vector $\vec{L}_{emit}$, where $L_{emit}(x) = \sum_i L^i_{emit} \upsilon_i(x)$ [S1].
+
+**Data Structures:**
+- **Observation Vector $\mathbf{o}$**: A column vector of size $K$ (number of pixels), where each element $o_k$ represents the residual radiance attributable to emission [S1].
+- **Transport Matrix $\mathbf{W}$**: A matrix of size $K \times N$ (where $N$ is the number of basis functions) [S1]. Element $W_{ki}$ represents the contribution of the $i$-th basis function to the $k$-th pixel [S1].
+
+**Steps:**
+1. **Linearization**: Start with the volume rendering equation and assume single scattering [S1]. Split the integral into emitted and scattered light components [S1].
+2. **Isolation**: Define the observation vector $o_k$ by subtracting background and single-scattering contributions from the target pixel value:
+   $$o_k := L^k_i(x_k, \omega_k) - T_r(x_k, x^k_s) L_o(x^k_s, \omega_k) - \int_c T_r(x_k, x_t) \sigma_t(x_t) \rho(x) L_{scat}(x_t, \omega_k) dt$$
+   This simplifies to the emission-only integral:
+   $$o_k = \int_c T_r(x_k, x_t) \sigma_t(x_t) L_{emit}(x_t) dt$$
+   where $T_r(x_k, x_t)$ is the transmittance from $x_k$ to $x_t$, and $c$ is the ray path [S1].
+3. **Basis Expansion**: Represent the unknown emission field $L_{emit}(x_t)$ as a linear combination of basis functions $\upsilon_i(x_t)$ with coefficients $L^i_{emit}$:
+   $$L_{emit}(x_t) = \sum_i L^i_{emit} \upsilon_i(x_t)$$
+4. **Matrix Assembly**: Substitute the basis expansion into the integral [S1]. By linearity, the integral becomes a sum:
+   $$o_k = \sum_i L^i_{emit} \left( \int_c T_r(x_k, x_t) \sigma_t(x_t) \upsilon_i(x_t) dt \right)$$
+   Define the matrix entries $w_{ki}$ as:
+   $$w_{ki} = \int_c T_r(x_k, x_t) \sigma_t(x_t) \upsilon_i(x_t) dt$$
+   The system is now $\mathbf{o} = \mathbf{W} \vec{L}_{emit}$ [S1].
+5. **Solving**: Solve the linear system for $\vec{L}_{emit}$ [S1].
+
+**Pseudocode:**
+> **Unverified code.** The code below did not pass a test run against a reference implementation, or no test fits it, so it may contain errors.
+
+```python
+import math
+
+def emission_reconstruction(target_radiance, camera_rays, sigma_t,
+                            background_radiance, scattering_field,
+                            basis_functions, num_basis):
+    """
+    Reconstruct emission coefficients from target images.
+    """
+    K = len(camera_rays)
+    o = [0.0] * K
+    W = [[0.0] * num_basis for _ in range(K)]
+
+    for k in range(K):
+        ray = camera_rays[k]
+        x_k = ray.origin
+        omega_k = ray.direction
+        c = ray.path
+
+        # 1. Calculate background and scattering contributions
+        x_s = ray.boundary_point
+        L_o_val = background_radiance(x_s, omega_k)
+
+        # Transmittance to boundary
+        T_r_boundary = compute_transmittance(x_k, x_s, sigma_t)
+
+        # Single scattering integral
+        scattering_integral = integrate_along_ray(
+            path=c,
+            integrand=lambda x_t: compute_transmittance(x_k, x_t, sigma_t) *
+                                  sigma_t(x_t) * scattering_field(x_t, omega_k)
+        )
+
+        # 2. Isolate emission term o_k
+        o[k] = target_radiance[k] - T_r_boundary * L_o_val - scattering_integral
+
+        # 3. Assemble matrix row W[k, :]
+        for i in range(num_basis):
+            upsilon_i = basis_functions[i]
+            # w_ki = integral of T_r(x_k, x_t) * sigma_t(x_t) * upsilon_i(x_t) dt
+            W[k][i] = integrate_along_ray(
+                path=c,
+                integrand=lambda x_t: compute_transmittance(x_k, x_t, sigma_t) *
+                                      sigma_t(x_t) * upsilon_i(x_t)
+            )
+
+    # 4. Solve linear system o = W * L_emit using standard least squares [G]
+    # L_emit_coeffs = solve_linear_system(W, o)
+    return L_emit_coeffs
+
+def compute_transmittance(x_start, x_end, sigma_t):
+    """Compute transmittance T_r(x_start, x_end) along the segment."""
+    optical_depth = integrate_along_segment(x_start, x_end, sigma_t)
+    return math.exp(-optical_depth)
+
+def integrate_along_segment(x_start, x_end, func):
+    """Numerical integration of func(x) along the line segment."""
+    num_samples = 100
+    dx = x_end[0] - x_start[0]
+    dy = x_end[1] - x_start[1]
+    dz = x_end[2] - x_start[2]
+    length = math.sqrt(dx*dx + dy*dy + dz*dz)
+    h = length / (num_samples - 1)
+    
+    integral = 0.0
+    for j in range(num_samples):
+        t = j / (num_samples - 1)
+        px = x_start[0] + t * dx
+        py = x_start[1] + t * dy
+        pz = x_start[2] + t * dz
+        val = func((px, py, pz))
+        if j == 0 or j == num_samples - 1:
+            integral += val
+        else:
+            integral += 2.0 * val
+    return integral * h * 0.5
+
+def integrate_along_ray(path, integrand):
+    """Integrate integrand(x) along the ray path using trapezoidal rule [G]."""
+    if not path or len(path) < 2:
+        return 0.0
+    integral = 0.0
+    for j in range(len(path) - 1):
+        p1 = path[j]
+        p2 = path[j+1]
+        dx = p2[0] - p1[0]
+        dy = p2[1] - p1[1]
+        dz = p2[2] - p1[2]
+        seg_len = math.sqrt(dx*dx + dy*dy + dz*dz)
+        if seg_len < 1e-9:
+            continue
+        integral += (integrand(p1) + integrand(p2)) * seg_len * 0.5
+    return integral
+```
+
+**Parameters:**
+- **Basis Functions**: The choice of $\upsilon_i(x)$ is not specified in the sources [S1].
+- **Single Scattering Assumption**: The method assumes single scattering to linearize the problem [S1].
+
+**Edge Cases and Pitfalls:**
+- **Boundary Conditions**: Accurate estimation of background radiance $L_o$ and boundary points $x^k_s$ is critical [S1].
+- **Single Scattering Limitation**: The method is restricted to weakly scattering media; multiple scattering requires iterative refinement or non-linear solvers, which are not covered in the base method [S1].
+
+## Subtopics
+
+### [Light Reconstruction via Linear Transport Operator](14452-light-reconstruction-via-linear-transport-operator.md)
+This method optimizes environmental illumination (outgoing radiance from the environment) to match a desired volume appearance, assuming the volume's intrinsic properties (emission, albedo, extinction) are spatially varying but fixed during the optimization process. It differs from sibling methods like [Emission Reconstruction](14424-emission-reconstruction.md) by treating the light source coefficients as the unknown variables rather than the volume properties, solving for the lighting that best explains the observed pixel values through a linear transport operator.
+
+## Operating characteristics
+- **Time Complexity**: Not given in the sources [S1].
+- **Memory Complexity**: Not given in the sources [S1].
+- **Strengths**: Provides a direct, non-iterative solution for emission under single scattering [S1].
+- **Limitations**: Restricted to single scattering. Requires known geometry and scattering properties [S1].
+- **When to Use**: Suitable for stylization and inverse rendering of volumes where emission is the dominant light source and scattering is weak or known [S1].
+
+## Background
+The method originates from the work on property and lighting manipulations for static volume stylization [S1]. It was developed to allow artists to manipulate emission properties of volumes to achieve desired visual effects while maintaining physical plausibility under simplified scattering assumptions [S1].
+
+## Sources
+[S1] Property and Lighting Manipulations for Static Volume Stylization Using a Painting Metaphor, https://doi.org/10.1109/TVCG.2014.13, fetched 2026-10-26

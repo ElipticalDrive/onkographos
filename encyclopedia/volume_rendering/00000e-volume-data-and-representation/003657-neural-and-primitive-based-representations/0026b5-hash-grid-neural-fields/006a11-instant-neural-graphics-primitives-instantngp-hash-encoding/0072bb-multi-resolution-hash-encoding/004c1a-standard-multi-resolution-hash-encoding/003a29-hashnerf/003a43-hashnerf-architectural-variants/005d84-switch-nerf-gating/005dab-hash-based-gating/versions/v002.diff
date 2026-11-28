@@ -1,0 +1,134 @@
+--- v001.md
++++ v002.md
+@@ -1,92 +1,62 @@
+ # Hash-based Gating
+ 
+-Also called: Hash expert selection, Hash dispatching
++Also called: Hash-based dispatching, Hash expert selection
+ 
+ ## Overview
+-Hash-based Gating is a mechanism for selecting one of $N$ hash experts for a given 3D point $x$ by integrating point dispatching directly into the hash operation [S1]. It solves the efficiency bottleneck of traditional Mixture of Experts (MoE) routing in large-scale neural radiance fields by avoiding extra memory for reorganizing inputs and eliminating the need for a capacity factor [S1]. It sets itself apart from MLP-based gating (used in Switch-NeRF) by providing sufficient network capacity for accurate selection while reducing training time and memory usage [S1].
++Hash-based gating is a mechanism for selecting one of $N$ hash experts for a given 3D point $x$ by integrating the dispatching logic directly into the hash table lookup operation [S1]. It solves the efficiency bottleneck of traditional Mixture-of-Experts (MoE) routing by eliminating explicit input feature reorganization and the associated matrix multiplications [S1]. Unlike MLP-based gating used in Switch-NeRF, it reduces training time and memory overhead while maintaining or improving rendering quality [S1].
+ 
+ ## How it works
+ **Inputs and Outputs:**
+-*   Input: A 3D point coordinate $x \in \mathbb{R}^3$.
+-*   Output: An index $k \in \{0, \dots, N-1\}$ identifying the selected hash expert.
++- Input: A 3D point coordinate $x \in \mathbb{R}^3$.
++- Output: The index of the selected hash expert $e \in \{0, \dots, N-1\}$ and the corresponding feature representation from that expert.
+ 
+ **Data Structures:**
+-*   **Gating Network:** An MLP with LayerNorm (as opposed to a simple linear layer) that processes the positional encoding $PE(x)$ [S1].
+-*   **Hash Experts:** $N$ distinct hash grids. The sources specify $N=8$ experts with logarithmically spaced base and desired resolutions, enabling specialization in different scene scales [S1].
+-*   **Balance Loss Weight:** $\lambda = 5 \times 10^{-4}$ [S1].
++- $N$ hash experts, where each expert consists of a hash grid with logarithmically spaced base and desired resolutions [S1].
++- A gating network that maps $x$ to an expert index. The sources specify the use of an MLP+Norm design for the gating network, contrasting it with a linear gating baseline [S1].
++- Hash tables for each expert, following Instant-NGP settings [S1].
+ 
+-**Steps:**
+-1.  **Positional Encoding:** Compute $PE(x)$ for the input point $x$.
+-2.  **Gating Network Forward Pass:** Pass $PE(x)$ through the gating network (MLP + LayerNorm) to produce a probability distribution or score vector over the $N$ experts [S1].
+-3.  **Expert Selection:** Select the expert index $k$ corresponding to the highest score (argmax) or via sampling, depending on the training phase [S1].
+-4.  **Hash Integration:** The selected expert's hash grid is accessed directly. The dispatching is integrated into the hash operation itself, meaning the hash lookup uses the parameters of the selected expert without moving or reorganizing the point data in memory [S1].
+-5.  **Prediction:** The selected expert processes the point to predict density and color, which are then passed to prediction heads [S1].
+-6.  **Balance Loss:** Compute a gating balance loss $L_b$ to ensure uniform utilization of experts. The total loss includes this term weighted by $\lambda$ [S1].
++**Method:**
++1. **Positional Encoding:** Compute the positional encoding $PE(x)$ of the input point $x$ [S1].
++2. **Gating Network Forward Pass:** Process $PE(x)$ through a trainable MLP with Layer Normalization (Norm) to produce a routing decision [S1]. The sources note that removing LayerNorm or using a simple linear layer (Linear gating) underperforms due to insufficient capacity [S1].
++3. **Hash-Based Dispatching:** Integrate the expert selection into the hash operation. Instead of computing a separate routing vector and gathering features from multiple experts, the gating network's output directly determines which hash table (expert) is queried for the feature representation of $x$ [S1]. This avoids the "gather-scatter" overhead of standard MoE dispatching [S1].
++4. **Feature Retrieval:** Retrieve the feature vector from the selected expert's hash grid using the standard hash lookup procedure [S1].
++5. **Prediction:** Pass the retrieved feature through prediction heads to estimate density and color [S1].
++6. **Loss Computation:** Compute the L2 loss on rendered pixel colors and a gating balance loss $L_b$ to ensure uniform expert utilization [S1]. The weight $\lambda$ for $L_b$ is set to $5 \times 10^{-4}$ [S1].
+ 
+-**Pseudocode:**
+-```python
+-def hash_based_gating(x, gating_network, hash_experts, lambda_balance):
+-    """
+-    Selects an expert for point x and integrates dispatching into hash lookup.
+-    
+-    Args:
+-        x: 3D point coordinates (float32, shape [3])
+-        gating_network: MLP with LayerNorm processing PE(x)
+-        hash_experts: List of N hash grid structures
+-        lambda_balance: Weight for balance loss (5e-4)
+-        
+-    Returns:
+-        rendered_color: Predicted color for the point
+-        balance_loss: Scalar value for balancing expert usage
+-    """
+-    # 1. Positional Encoding
+-    pe_x = positional_encoding(x)
+-    
+-    # 2. Gating Network Forward Pass
+-    # The gating network uses MLP + LayerNorm, not just a linear layer
+-    scores = gating_network(pe_x)
+-    
+-    # 3. Expert Selection
+-    # Select the expert with the highest score
+-    expert_index = argmax(scores)
+-    
+-    # 4. Hash Integration (Dispatching)
+-    # The dispatching is integrated into the hash operation.
+-    # This avoids reorganizing inputs. We directly access the hash grid
+-    # of the selected expert.
+-    expert = hash_experts[expert_index]
+-    
+-    # 5. Prediction
+-    # The expert processes the point to predict density and color
+-    density, color = expert.forward(x)
+-    
+-    # 6. Balance Loss Calculation
+-    # Compute loss to balance usage across all N experts
+-    balance_loss = compute_balance_loss(hash_experts, lambda_balance)
+-    
+-    return color, balance_loss
+-```
++**Parameters:**
++- $N = 8$: Number of hash experts [S1].
++- $\lambda = 5 \times 10^{-4}$: Weight for the balance loss $L_b$ [S1].
++- Resolutions: Logarithmically spaced base and desired resolutions for the hash grids [S1].
+ 
+ **Edge Cases and Pitfalls:**
+-*   **Insufficient Capacity:** Using a simple linear layer (Linear gating) instead of MLP+Norm leads to underperformance due to insufficient network capacity [S1].
+-*   **Precision:** Half-precision training and testing are used, similar to Mega-NeRF, which may require careful handling of numerical stability [S1].
+-*   **Degenerate Input:** Not specified in the sources.
++- **Precision:** Half-precision training and testing are used, similar to Mega-NeRF [S1].
++- **Capacity:** Linear gating fails due to insufficient network capacity; the MLP+Norm design is required [S1].
++- **Balance:** Without the balance loss $L_b$, expert utilization may become skewed [S1].
+ 
+ ## Subtopics
+ 
+ ### [Hash-Based Dispatching](17538-hash-based-dispatching.md)
+-A dispatching method that integrates dispatching into the hash operation, avoiding extra memory for reorganizing inputs and eliminating the need for a capacity factor.
++A specific implementation detail where the expert selection is integrated into the hash lookup, avoiding explicit feature reorganization and matrix multiplications, thereby reducing memory and latency compared to MLP-based dispatching.
+ 
+ ## Operating characteristics
+-*   **Time Complexity:** Rendering time is approximately half that of MoE dispatching (6.65s vs 13.5s in tests) [S1]. Training time is reduced by 5 hours compared to MoE dispatching (10.7h vs 15.2h) [S1].
+-*   **Memory Complexity:** GPU memory usage is lower than MoE dispatching (2857M vs 2981M for test, 8707M vs 10386M for train) [S1].
+-*   **Performance:** Outperforms Mega-NeRF, Switch-NeRF, and Instant-NGP (INGP) in accuracy (PSNR) on the Mega-NeRF dataset while maintaining comparable or better efficiency [S1]. On the UrbanBIS dataset, it demonstrates scalability and accuracy with heterogeneous hash experts [S1].
+-*   **Strengths:** High efficiency, low memory footprint, scalability to large scenes, better accuracy than MLP-based gating.
+-*   **Limitations:** Requires careful tuning of the balance loss weight $\lambda$ [S1]. Performance depends on the logarithmic spacing of expert resolutions [S1].
+-*   **When to use:** Large-scale neural radiance fields where efficiency and memory are critical constraints.
+-*   **When not to use:** Small-scale scenes where the overhead of multiple experts is not justified, or when simpler methods like standard Instant-NGP suffice.
++**Time and Memory Complexity:**
++- The method reduces training time and memory usage compared to MLP-based gating and standard MoE dispatching [S1].
++- On the Mega-NeRF dataset, Hash-based dispatching (Switch-NeRF++) uses 2857M test memory vs 2981M for MoE dispatching, and 8707M train memory vs 10386M for MoE [S1].
++- Training time is 10.7 hours vs 15.2 hours for MoE dispatching [S1].
++- Rendering time is 6.65s vs 13.5s for MoE dispatching [S1].
++
++**Scaling:**
++- The method scales well to large-scale scenes (e.g., UrbanBIS) [S1].
++- It outperforms Instant-NGP (INGP) with less training time, demonstrating great scalability [S1].
++
++**Strengths and Limitations:**
++- **Strengths:** Higher quality images with cleaner and sharper details; superior efficiency compared to Mega-NeRF, Switch-NeRF, and INGP [S1].
++- **Limitations:** Requires careful tuning of the balance loss weight $\lambda$ [S1].
++
++**When to use:**
++- Use for large-scale neural radiance fields where training efficiency and memory usage are critical, and high-quality rendering is required [S1].
+ 
+ ## Background
+-Hash-based Gating was introduced in the Switch-NeRF++ framework, presented in the paper "Learning Heterogeneous Mixture of Scene Experts for Large-Scale Neural Radiance Fields" [S1]. It builds upon the Switch-NeRF architecture but replaces the MLP-based gating with a hash-based approach to improve efficiency and accuracy. The method was designed to address the limitations of existing large-scale NeRF methods like Mega-NeRF and Instant-NGP, which struggle with scalability and memory usage. The use of $N=8$ experts with logarithmically spaced resolutions allows the model to handle diverse scene scales effectively [S1].
++Originated in Switch-NeRF++ [S1]. The method builds on Instant-NGP hash encoding settings and addresses the scalability issues of large-scale NeRF methods like Mega-NeRF [S1]. It was developed to provide a more efficient alternative to MLP-based gating and standard MoE dispatching in the context of heterogeneous mixture of scene experts [S1].
+ 
+ ## Sources

@@ -1,0 +1,348 @@
+--- v004.md
++++ v005.md
+@@ -4,23 +4,29 @@
+ 
+ ## Overview
+-The Monte Carlo Specular Energy Aggregator (MC-SEA) is a compression technique for 3D Gaussian Splatting that maps high-order (third-order) Spherical Harmonics (SH) radiance energy into a compact low-order (first-order) subspace to reduce memory overhead and inference cost for mobile rendering [S1]. It preserves high-frequency specular features by extracting directional moments of the specular residual via Monte Carlo projection, replacing the teacher-student distillation process used in methods like Mobile-GS [S1, 12167]. Unlike distillation, MC-SEA requires no pre-training or offline distillation, allowing for direct compression during the training curriculum [S1].
++The Monte Carlo Specular Energy Aggregator (MC-SEA) is a compression technique that maps high-order (third-order) Spherical Harmonics (SH) radiance energy into a compact lower-order (first-order) subspace without pre-training or distillation [S1]. It solves the problem of high memory overhead and inference cost associated with high-order SH in mobile 3D Gaussian Splatting by extracting directional moments of the specular residual via Monte Carlo projection [S1]. Unlike Mobile-GS, which relies on costly teacher-student distillation to compress SH, MC-SEA preserves high-frequency specular features by aggregating photometric residuals into latent energy and direction vectors, which are then mapped to first-order coefficients via a neural network [S1].
+ 
+ ## How it works
+-**Inputs and Outputs:**
+-*   **Input:** Third-order SH coefficients $c_i \in \mathbb{R}^{(L_o+1)^2 \times 3}$ for each Gaussian primitive $i$ (where $L_o=3$), and Gaussian attributes (position $\mu_i$, scale $\hat{s}_i$, rotation $r_i$, opacity $o_i$).
+-*   **Output:** First-order SH coefficients $c'_i \in \mathbb{R}^{(L_t+1)^2 \times 3}$ (where $L_t=1$) and aggregated latent variables $E_{mag}, E_{dir}$ used for neural mapping [S1].
+-
+-**Data Structures:**
+-*   **Spherical Samples:** A set of $K$ unit direction vectors $D = \{d_k\}_{k=1}^K \in \mathbb{R}^{K \times 3}$.
+-*   **Aggregated Latents:**
+-    *   $E_{mag} \in \mathbb{R}$: Scalar specular energy magnitude.
+-    *   $E_{dir} \in \mathbb{R}^3$: Vector representing the dominant direction of specular energy.
+-*   **Neural Mappings:**
+-    *   $\Psi$: MLP mapping latents to first-order SH.
+-    *   $\Phi$: MLP for Attribute-Conditioned SH Enhancement (residual prediction).
+-
+-**Numbered Steps:**
+-
+-1.  **High-Order Training:** Optimize the 3D Gaussian scene using full third-order SH coefficients for the initial 3,000 iterations [S1].
++
++### Inputs and Outputs
++*   **Inputs:**
++    *   Third-order SH coefficients $c_i \in \mathbb{R}^{10 \times 3}$ for each Gaussian primitive $i$ (after initial optimization).
++    *   Gaussian attributes: position $\mu_i$, scale $\hat{s}_i$, rotation quaternion $r_i$, opacity $o_i$, and normalized first-order SH $\hat{c}'_i$.
++    *   Number of Monte Carlo samples $K$ (default 2048) [S1].
++*   **Outputs:**
++    *   Compressed first-order SH coefficients $c'_i \in \mathbb{R}^{4 \times 3}$.
++    *   Refined coefficients $c^{out}_i$ after enhancement.
++
++### Data Structures
++*   **Directional Samples:** A set of $K$ unit vectors $D = \{d_k\}_{k=1}^K \in \mathbb{R}^{K \times 3}$.
++*   **Latents:**
++    *   Scalar specular energy $E_{mag} \in \mathbb{R}$.
++    *   Directional moment vector $E_{dir} \in \mathbb{R}^3$.
++*   **Neural Networks:**
++    *   Mapping MLP $\Psi$: Maps latents and position to first-order SH. Architecture: 1 hidden layer, 64 neurons [S1].
++    *   Enhancement MLP $\Phi$: Predicts residual offset. Architecture: 4 layers with ReLU, hidden neurons $(128, 64, 32, 12)$ [S1].
++
++### Steps
++
++1.  **High-Order Training:** Optimize 3D Gaussians using full third-order SH coefficients for the first 3,000 iterations to establish a high-frequency representation [S1].
+ 2.  **Spherical Sampling:** Generate $K$ directional vectors $D$ by sampling uniformly on the unit sphere $\mathbb{S}^2$. For each sample $k$:
+     *   Draw $\phi_k \sim \mathcal{U}(0, 2\pi)$ and $\xi_k \sim \mathcal{U}(0, 1)$.
+@@ -28,23 +34,25 @@
+     *   Convert to Cartesian coordinates:
+         $$ d_k = [\sin \theta_k \cos \phi_k, \sin \theta_k \sin \phi_k, \cos \theta_k]^T $$
+-    *   Default value for $K$ is 2048 [S1].
+-3.  **Residual Evaluation:** For each Gaussian $i$ and each direction $d_k$, compute the photometric residual between the third-order SH radiance $c_i(d_k)$ and the second-order SH radiance $c^2_i(d_k)$:
++    *   Ensure $\|d_k\|_2 = 1$ [S1].
++3.  **Photometric Residual Evaluation:** For each direction $d_k$, evaluate the third-order SH radiance $c_i(d_k)$ and the second-order SH radiance $c^2_i(d_k)$. Compute the residual:
+     $$ c_{res}(d_k) = c_i(d_k) - c^2_i(d_k) $$
+-    Note: The residual is computed against second-order SH, not zero, to isolate the high-frequency components added by the third-order band [S1].
+-4.  **Energy Aggregation:** Compute the scalar magnitude $E_{mag}$ and directional vector $E_{dir}$ using Monte Carlo integration over the $K$ samples. Only positive residuals contribute to specular energy:
++    *Note: The residual is computed per channel (RGB) or as a scalar magnitude depending on implementation; the source defines $c_{res}$ generally as the difference in radiance [S1].*
++4.  **Monte Carlo Aggregation:** Compute the scalar energy magnitude $E_{mag}$ and directional moment $E_{dir}$ using the positive part of the residual:
+     $$ E_{mag} = \frac{1}{K} \sum_{k=1}^{K} \max(0, c_{res}(d_k)) $$
+     $$ E_{dir} = \frac{1}{K} \sum_{k=1}^{K} d_k \otimes \max(0, c_{res}(d_k)) $$
+-    where $\otimes$ denotes the outer product (resulting in a vector if $c_{res}$ is scalar, or tensor if vector; in the context of the formula provided in [S1], $c_{res}$ is treated as a scalar magnitude per channel or the formula implies a vector outer product for the direction moment. The source text specifies $E_{dir} \in \mathbb{R}^3$ and uses $d_k \otimes \dots$, implying $c_{res}$ is scalar or the operation is component-wise. Given $c_i$ is RGB, $c_{res}$ is likely a vector. However, the formula $E_{mag} = \frac{1}{K} \sum \max(0, c_{res})$ suggests a scalar sum. The source text says "photometric residual... $c_{res}(d_k)$" and then sums it. In standard SH, $c$ is a vector. The formula in [S1] Eq 4 shows $E_{mag}$ as a scalar and $E_{dir}$ as a vector. This implies $c_{res}$ is projected to a scalar (e.g., luminance or max channel) or the formula is simplified. We follow the source notation exactly: $c_{res}$ is evaluated, $\max(0, \cdot)$ is applied, and summed. If $c_{res}$ is RGB, $\max(0, c_{res})$ is ambiguous. The source text says "photometric residual... $c_{res}(d_k) = c_i(d_k) - c^2_i(d_k)$". Then $E_{mag} = \frac{1}{K} \sum \max(0, c_{res})$. This implies $c_{res}$ is treated as a scalar quantity (likely the magnitude or a specific channel, or the formula assumes a scalar radiance model for the derivation). Given the ambiguity, we implement the formula as written, assuming $c_{res}$ yields a scalar value for the energy calculation, or that the operation is applied per-channel and aggregated. However, $E_{dir}$ is a vector. The most consistent interpretation with "directional moments" is that $c_{res}$ is a scalar energy value. We will assume $c_{res}$ is the scalar radiance value (e.g., luminance) or the formula applies to each channel independently to produce channel-specific latents. The source does not specify channel handling. We will write the pseudocode to handle the vector nature of SH coefficients by aggregating per-channel or treating the residual as a scalar magnitude. The source text "photometric residual" usually implies intensity. We will assume $c_{res}$ is the scalar intensity residual for the aggregation steps as per the scalar nature of $E_{mag}$ [S1].
+-5.  **Neural Mapping to First-Order SH:** Map the aggregated latents to first-order SH coefficients $c'$ using an MLP $\Psi$. The input to $\Psi$ includes $E_{mag}$, $E_{dir}$, and the normalized Gaussian position $\hat{\mu}$:
++    where $\otimes$ denotes the outer product if $E_{dir}$ is a tensor, or element-wise multiplication if $E_{dir}$ is a vector representing the first-order moment. The source formula shows $d_k \otimes \dots$ resulting in a vector (first-order moment) [S1]. Specifically, $E_{dir}$ captures the dominant direction of the specular energy.
++5.  **Neural Mapping to First-Order SH:** Map the aggregated latents to first-order SH coefficients $c'$ using MLP $\Psi$. The input to $\Psi$ is the concatenation of $E_{mag}$, $E_{dir}$, and the normalized position $f(\hat{\mu})$:
+     $$ c' = \Psi(E_{mag}, E_{dir}, f(\hat{\mu})) $$
+     The position normalization function $f(\hat{\mu})$ is:
+     $$ f(\hat{\mu}) = \begin{cases} \hat{\mu} & \text{if } \|\hat{\mu}\|_2 \leq 1 \\ \left( 2 - \frac{1}{\|\hat{\mu}\|_2} \right) \frac{\hat{\mu}}{\|\hat{\mu}\|_2} & \text{if } \|\hat{\mu}\|_2 > 1 \end{cases} $$
+-    The MLP $\Psi$ is initialized with one hidden layer containing 64 neurons [S1].
+-6.  **Attribute-Conditioned SH Enhancement (Optional/Refinement):** To recover high-frequency details lost during compression, predict a residual offset $\Delta c_i$ using an MLP $\Phi$ conditioned on intrinsic Gaussian attributes:
++    where $\hat{\mu}$ is the normalized Gaussian position [S1].
++6.  **Attribute-Conditioned SH Enhancement (Optional/Refinement):** Predict a residual offset $\Delta c_i$ using MLP $\Phi$ conditioned on intrinsic Gaussian attributes:
+     $$ \Delta c_i = \Phi([\mu_i, \hat{s}_i, r_i, o_i, \hat{c}'_i]) $$
+-    The final coefficients are $c^{out}_i = c'_i + \Delta c_i$. The MLP $\Phi$ has 4 layers with hidden neurons (128, 64, 32, 12) and ReLU activation. The final linear layer of $\Phi$ is strictly zero-initialized to ensure optimization stability [S1].
+-7.  **Low-Order Training:** For iterations greater than 3,000, optimize the scene using the first-order SH coefficients $c'$ (and optionally the baked-in $\Delta c$). The compression from third-order to first-order is executed only once [S1].
+-
+-**Pseudocode:**
++    The final coefficients are:
++    $$ c^{out}_i = c'_i + \Delta c_i $$
++    The final linear layer of $\Phi$ is strictly zero-initialized to ensure optimization stability [S1].
++7.  **Low-Order Training:** Transition to first-order SH optimization using the aggregated energy representation for iterations greater than 3,000. The compression step (1-5) is executed only once; subsequent updates maintain lightweight first-order parameters [S1].
++
++### Pseudocode
+ 
+ ```python
+@@ -69,66 +77,69 @@
+     return D
+ 
+-def evaluate_sh_radiance(sh_coeffs, direction):
++def evaluate_sh_radiance(coeffs, direction):
+     """
+     Evaluate SH radiance for a given direction.
+-    sh_coeffs: shape (N_coeffs, 3) for RGB.
+-    direction: shape (3,)
+-    Returns: radiance, shape (3,)
+-    """
+-    # Standard SH evaluation implementation required.
+-    # For the purpose of this article, we assume a standard SH evaluation function.
+-    # The source uses c_i(d_k) to denote this evaluation.
+-    pass
+-
+-def aggregate_specular_energy(sh_coeffs_3rd, sh_coeffs_2nd, D):
+-    """
+-    Compute E_mag and E_dir from the residual between 3rd and 2nd order SH.
+-    sh_coeffs_3rd: shape (N_coeffs_3rd, 3)
+-    sh_coeffs_2nd: shape (N_coeffs_2nd, 3)
+-    D: shape (K, 3)
+-    Returns: E_mag (scalar), E_dir (vector shape (3,))
+-    """
+-    K = D.shape[0]
+-    
+-    # Evaluate radiance for all directions
+-    # Note: sh_coeffs_2nd must be padded or projected to 3rd order basis for subtraction
+-    # or evaluated at the same basis. The source implies direct subtraction of radiance values.
+-    # We assume a function that evaluates SH coefficients at direction d.
+-    
+-    res_3rd = np.zeros((K, 3))
+-    res_2nd = np.zeros((K, 3))
+-    
++    coeffs: SH coefficients (e.g., 10 for 3rd order, 4 for 1st order)
++    direction: unit vector (3,)
++    Returns: Radiance value (scalar or vector per channel)
++    """
++    # Implementation depends on SH library. 
++    # Assuming a standard SH evaluation function exists.
++    return sh_eval(coeffs, direction)
++
++def aggregate_specular_energy(K, coeffs_3rd, coeffs_2nd):
++    """
++    Step 1: Sample directions.
++    Step 2: Evaluate residuals.
++    Step 3: Aggregate energy and direction.
++    """
++    D = uniform_sphere_sampling(K)
++    
++    # Evaluate 3rd order and 2nd order radiance for all samples
++    # coeffs_3rd: (10, 3) for RGB
++    # coeffs_2nd: (4, 3) for RGB
++    # We need to evaluate per channel or treat as vector. 
++    # The source defines c_res as scalar difference in radiance.
++    # Assuming we compute magnitude of residual or per-channel.
++    # Let's assume scalar energy aggregation per primitive for simplicity 
++    # as per E_mag formula.
++    
++    # Evaluate 3rd order
++    r_3rd = np.zeros(K)
+     for k in range(K):
+-        d = D[k]
+-        res_3rd[k] = evaluate_sh_radiance(sh_coeffs_3rd, d)
+-        res_2nd[k] = evaluate_sh_radiance(sh_coeffs_2nd, d)
++        r_3rd[k] = np.sum(evaluate_sh_radiance(coeffs_3rd, D[k])) # Sum over RGB? Or separate?
++        # Source says c_res(d_k) = c_i(d_k) - c^2_i(d_k). 
++        # Usually SH is per channel. Let's assume we aggregate magnitude of residual vector.
+         
+-    # Photometric residual
+-    # The source formula uses max(0, c_res). 
+-    # If c_res is RGB, max(0, c_res) is ambiguous. 
+-    # Assuming scalar energy (e.g., luminance or max channel) or per-channel aggregation.
+-    # The source defines E_mag as scalar and E_dir as vector.
+-    # This implies c_res is treated as a scalar. 
+-    # We will compute the residual magnitude or assume a scalar radiance model for the aggregation step.
+-    # Given "photometric residual", we calculate the Euclidean norm or use a specific channel.
+-    # However, the source text does not specify. We will use the L2 norm of the residual vector as the scalar energy.
+-    
+-    c_res = res_3rd - res_2nd # Shape (K, 3)
+-    
+-    # Compute scalar energy per sample. 
+-    # Using L2 norm of the RGB residual as the scalar "photometric" energy.
+-    c_res_scalar = np.linalg.norm(c_res, axis=1) # Shape (K,)
+-    
+-    # Apply ReLU to scalar energy
+-    positive_energy = np.maximum(0, c_res_scalar)
+-    
+-    # E_mag: Mean of positive energy
+-    E_mag = np.mean(positive_energy)
+-    
+-    # E_dir: Weighted sum of directions by positive energy
+-    # Outer product d_k * scalar_energy
+-    # E_dir = (1/K) * sum( d_k * max(0, c_res_scalar[k]) )
+-    weights = positive_energy / K # Shape (K,)
+-    E_dir = np.sum(D * weights[:, np.newaxis], axis=0) # Shape (3,)
++    # Re-evaluating based on source: c_res is likely the vector difference or scalar magnitude.
++    # Formula: max(0, c_res). If c_res is vector, max(0, v) is ambiguous.
++    # Likely c_res is the scalar intensity or we take norm.
++    # However, source says "photometric residual". 
++    # Let's assume we compute the residual vector and take its L2 norm or sum.
++    # But E_mag is scalar. E_dir is vector.
++    # Let's assume c_res(d_k) is the scalar intensity difference (sum of channels) or 
++    # we process each channel separately and aggregate?
++    # Source: "c_res(d_k) = c_i(d_k) - c^2_i(d_k)". 
++    # If c_i is vector, c_res is vector. 
++    # "max(0, c_res)" implies element-wise max or scalar.
++    # Given E_dir = sum d_k * max(0, c_res), if c_res is vector, E_dir would be tensor.
++    # But E_dir is described as "directional moment", likely vector.
++    # Most likely: c_res is the scalar intensity (e.g. luminance or sum of RGB).
++    
++    # Let's implement for scalar intensity (sum of RGB)
++    r_3rd_intensity = np.zeros(K)
++    r_2nd_intensity = np.zeros(K)
++    for k in range(K):
++        rad_3rd = evaluate_sh_radiance(coeffs_3rd, D[k]) # Shape (3,)
++        rad_2nd = evaluate_sh_radiance(coeffs_2nd, D[k]) # Shape (3,)
++        r_3rd_intensity[k] = np.sum(rad_3rd)
++        r_2nd_intensity[k] = np.sum(rad_2nd)
++        
++    c_res = r_3rd_intensity - r_2nd_intensity
++    
++    # Aggregate
++    positive_res = np.maximum(0, c_res)
++    E_mag = np.mean(positive_res)
++    E_dir = np.mean(D * positive_res[:, np.newaxis], axis=0)
+     
+     return E_mag, E_dir
+@@ -136,7 +147,5 @@
+ def normalize_position(mu):
+     """
+-    Normalize Gaussian position mu.
+-    mu: shape (3,)
+-    Returns: normalized_mu, shape (3,)
++    Normalize position mu.
+     """
+     norm = np.linalg.norm(mu)
+@@ -144,62 +153,72 @@
+         return mu
+     else:
+-        return (2 - 1.0 / norm) * (mu / norm)
+-
+-def mlp_psi(E_mag, E_dir, mu):
+-    """
+-    MLP mapping latents to first-order SH coefficients.
+-    E_mag: scalar
+-    E_dir: shape (3,)
+-    mu: shape (3,) normalized
+-    Returns: c_prime, shape (4, 3) for 1st order SH (L=1 -> 4 coeffs per channel)
+-    """
+-    # Input to MLP: [E_mag, E_dir, f(mu)]
+-    # E_mag is scalar, E_dir is 3, f(mu) is 3. Total 7 inputs.
+-    input_vec = np.concatenate([np.array([E_mag]), E_dir, mu])
+-    
+-    # MLP with 1 hidden layer, 64 neurons.
+-    # Weights W1 (7, 64), b1 (64), W2 (64, 12) [4 coeffs * 3 channels], b2 (12)
+-    # Zero initialization for final layer is not applicable here as this is the mapping to c'.
+-    # The zero initialization applies to the Enhancement MLP Phi.
+-    
+-    # Placeholder for actual MLP weights which are learned.
+-    # In implementation, these weights are initialized and trained.
+-    pass
+-
+-def mlp_phi(attributes):
+-    """
+-    Attribute-Conditioned SH Enhancement MLP.
+-    attributes: concatenated [mu, s_hat, r, o, c_prime_hat]
+-    Returns: delta_c, shape (4, 3)
+-    """
+-    # MLP with 4 layers, hidden neurons (128, 64, 32, 12)
+-    # Final layer zero-initialized.
+-    pass
++        return (2 - 1.0/norm) * (mu / norm)
++
++def map_to_first_order(E_mag, E_dir, mu, MLP_Psi):
++    """
++    Map latents to first-order SH coefficients.
++    """
++    f_mu = normalize_position(mu)
++    input_vec = np.concatenate([E_mag, E_dir, f_mu])
++    c_prime = MLP_Psi.forward(input_vec)
++    return c_prime
++
++def enhance_sh(c_prime, mu, s, r, o, c_prime_norm, MLP_Phi):
++    """
++    Predict residual offset and add to c_prime.
++    """
++    # Normalize inputs for MLP
++    # mu, s, c_prime_norm are already normalized in some form
++    # r is quaternion
++    input_vec = np.concatenate([mu, s, r, o, c_prime_norm])
++    delta_c = MLP_Phi.forward(input_vec)
++    c_out = c_prime + delta_c
++    return c_out
+ ```
+ 
+-**Parameters:**
+-*   $K$: Number of spherical sample points. Default: 2048. Sensitivity analysis shows PSNR improves from $K=64$ to $K=2048$ and plateaus at $K=4096$ [S1].
+-*   Training Iterations: Third-order SH for first 3,000 iterations; First-order SH thereafter [S1].
+-
+-**Edge Cases and Pitfalls:**
+-*   **Orthogonality:** Naive aggregation of raw SH polynomials is futile because the integral of any purely high-order SH polynomial ($l \ge 1$) over the sphere is zero due to orthogonality [S1].
+-*   **Stability:** The final linear layer of the enhancement MLP $\Phi$ must be strictly zero-initialized to allow the model to fall back to standard 3DGS at the start of training [S1].
+-*   **High-Order Inefficiency:** High-order SH polynomials are inefficient for sharp specular lobes due to their dense and global nature [S1].
+-
+-## Subtopics
+-
+-### Attribute-Conditioned SH Enhancement
+-A module that predicts view-independent SH offsets based on intrinsic Gaussian attributes (position, scale, rotation, opacity, and base SH) to recover high-frequency details lost during compression. It is distinguished by its zero-inference overhead, as the offset is pre-computed and baked into the Gaussian parameters. Choose this when recovering fine detail is critical without increasing rendering cost [S1].
++### Parameters
++*   **K:** Number of Monte Carlo sampling points on the unit sphere. Default value is 2048 [S1]. Sensitivity analysis shows PSNR improves monotonically from $K=64$ to $K=2048$, then plateaus at $K=4096$ [S1].
++*   **MLP Architecture:**
++    *   $\Psi$: 1 hidden layer, 64 neurons [S1].
++    *   $\Phi$: 4 layers, hidden neurons $(128, 64, 32, 12)$, ReLU activation [S1].
++*   **Training Iterations:** Third-order SH for first 3,000 iterations; transition to first-order after [S1].
++
++### Edge Cases and Pitfalls
++*   **Orthogonality:** Naive aggregation of raw SH polynomials is futile because the integral of any purely high-order SH polynomial ($l \ge 1$) over the sphere evaluates to strictly zero due to orthogonality [S1]. The method uses the residual between 3rd and 2nd order to capture non-zero high-frequency energy.
++*   **Initialization:** The final linear layer of the enhancement MLP $\Phi$ is strictly zero-initialized to ensure optimization stability, allowing the model to fall back to standard 3DGS at the start of training [S1].
++*   **Precision:** High-order SH polynomials are inefficient for sharp specular lobes due to their dense and global nature, requiring many coefficients to cancel out background to fit a sparse peak [S1].
+ 
+ ## Operating characteristics
+-*   **Time Complexity:** The aggregation step is $O(K \cdot N)$ where $N$ is the number of Gaussians and $K$ is the number of samples. It is executed only once during the transition from 3rd to 1st order SH [S1].
+-*   **Memory Complexity:** Reduces SH storage from 3rd-order (45 coefficients per channel) to 1st-order (4 coefficients per channel), plus the storage for latents $E_{mag}, E_{dir}$ and the MLP weights for $\Psi$ and $\Phi$ [S1].
+-*   **Performance:** On mobile hardware (Snapdragon 8 Gen 3), Flux-GS achieves 151 FPS compared to 11 FPS for Mobile-GS and 137 FPS for 3DGS, with comparable PSNR (30.31 vs 30.21 vs 30.14) and significantly lower model size (1.6 MB vs 4.2 MB) [S1].
+-*   **Strengths:** No distillation or pre-training required; zero inference overhead for the enhancement module; high FPS on mobile devices [S1].
+-*   **Limitations:** Requires a two-phase training curriculum; compression is a one-time step, so subsequent updates rely on the first-order representation [S1].
++
++### Time and Memory Complexity
++*   **Memory:** Reduces storage from third-order SH (10 coefficients per channel) to first-order SH (4 coefficients per channel) plus compact latents ($E_{mag}, E_{dir}$) and MLP weights [S1]. This significantly reduces memory overhead for mobile rendering [S1].
++*   **Time:** The aggregation step is performed once during training. Inference cost is zero for the aggregation itself. The enhancement module $\Phi$ is pre-computed and baked into static parameters, introducing zero computational overhead during rendering [S1].
++
++### Measured Performance
++*   **Quality:** Achieves PSNR comparable to 3DGS and Mobile-GS [S1].
++*   **Efficiency:** Reduces the number of Gaussian primitives and facilitates significantly higher FPS on mobile hardware (e.g., Snapdragon 8 Gen 3) [S1].
++*   **Storage:** Flux-GS achieves 1.6 MB vs Mobile-GS 4.2 MB [S1].
++
++### Strengths and Limitations
++*   **Strengths:** No pre-training or distillation required. Zero inference overhead for enhancement. Preserves high-frequency specular features.
++*   **Limitations:** Requires initial high-order training (3k iterations). Performance depends on the quality of the Monte Carlo estimation (K).
++
++### When to Use
++*   Use for mobile/edge device rendering where memory and FPS are critical.
++*   Use when high-fidelity speculars are important but high-order SH is too expensive.
++*   Do not use if pre-training resources are unavailable (though it avoids distillation, it still requires initial high-order optimization).
+ 
+ ## Background
+-The method was proposed by Xiaobiao Du, YuAn Wang, Hao Li, Bosheng Wang, Xun Sun, and Xin Yu in the paper "Monte Carlo Energy Aggregation for Mobile 3D Gaussian Splatting" (Flux-GS), published in 2026 [S1]. It addresses the limitations of Mobile-GS, which uses distillation from a high-order teacher model, by replacing it with a direct Monte Carlo aggregation method [S1].
++
++### Origin
++The Monte Carlo Specular Energy Aggregator was introduced in the paper "Monte Carlo Energy Aggregation for Mobile 3D Gaussian Splatting" by Xiaobiao Du et al. (Flux-GS) in 2026 [S1].
++
++### History and Development
++It was developed to address the limitations of Mobile-GS, which used distillation from a high-order teacher model. Flux-GS replaces distillation with direct energy aggregation, improving training efficiency and reducing overhead [S1].
++
++### Usage
++Used in the Flux-GS framework for real-time rendering on resource-constrained mobile devices [S1].
+ 
+ ## Sources
++
+ [S1] Monte Carlo Energy Aggregation for Mobile 3D Gaussian Splatting, https://doi.org/10.1007/978-3-032-37167-6_17, fetched 2026-10-29

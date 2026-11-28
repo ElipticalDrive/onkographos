@@ -1,0 +1,132 @@
+--- v001.md
++++ v002.md
+@@ -4,5 +4,5 @@
+ 
+ ## Overview
+-The Expectation-Maximization (EM) Update is an iterative statistical reconstruction algorithm that finds the maximum likelihood estimate of a volume distribution from incomplete or missing projection data, specifically accounting for Poisson noise inherent in X-ray or emission tomography [S1, S2, unofficial]. Unlike algebraic methods such as [ART](6944-algebraic-reconstruction-technique-art.md) or [SIRT](3101-sirt-simultaneous-iterative-reconstruction-technique.md) which minimize least-squares errors, EM maximizes the likelihood function representing the probability that the reconstructed image generated the measured projections [S2, unofficial]. It is distinguished by its multiplicative update rule, which guarantees non-negativity and conservation of total events, but suffers from slow convergence and high-frequency noise amplification (over-fitting) after many iterations [S1, S2, unofficial].
++The Expectation-Maximization (EM) Update is an iterative statistical reconstruction algorithm that finds the maximum likelihood estimate of a volume distribution from incomplete or missing projection data, specifically accounting for Poisson noise inherent in X-ray or emission tomography [S1, S2, unofficial]. Unlike algebraic methods such as [ART](6944-algebraic-reconstruction-technique-art.md) or [SIRT](3101-sirt-simultaneous-iterative-reconstruction-technique.md) which minimize least-squares errors, EM maximizes the likelihood function representing the probability that the reconstructed image generated the measured projections [S2, unofficial]. It is distinguished by its multiplicative update rule, which guarantees non-negativity and conservation of total events, but suffers from slow convergence and high-frequency noise amplification after many iterations [S1, S2, unofficial].
+ 
+ ## How it works
+@@ -13,5 +13,5 @@
+ *   `iterations`: Integer number of EM updates [S3, unofficial].
+ *   `bounds` (optional): Tuple `[min_val, max_val]` for clipping the volume after each iteration [S3, unofficial].
+-*   `subsets` (optional): Integer $B$ for Ordered Subsets EM (OSEM) acceleration [S1, S2, unofficial]. If 1, standard EM is used.
++*   `subsets` (optional): Integer $B$ for Ordered Subsets EM (OSEM) acceleration [S1, unofficial]. If 1, standard EM is used.
+ 
+ **Outputs:**
+@@ -27,5 +27,5 @@
+ where $R$ is the forward projection operator and $f$ is the image vector [S1, unofficial].
+ 
+-The standard EM multiplicative update for iteration $k+1$ is [S1, S2, unofficial]:
++The standard EM multiplicative update for iteration $k+1$ is [S2, unofficial]:
+ $$ f_j^{(k+1)} = f_j^{(k)} \frac{1}{s_j} \sum_i R_{ij} \frac{proj_i}{(R f^{(k)})_i} $$
+ where $s_j = \sum_i R_{ij}$ is the normalization factor (sum of the backprojected unity image) [S2, unofficial].
+@@ -36,6 +36,6 @@
+ 
+ **Parameters:**
+-*   `iterations`: Typical values range from 10 to 50 for standard EM, though convergence is slow [S1, S3, unofficial].
+-*   `subsets`: For OSEM, $B$ is typically 8-16 [S1, S2, unofficial].
++*   `iterations`: Typically ~12 steps before overfitting occurs [S1, unofficial].
++*   `subsets`: Used in OSEM variants to decompose each iteration into $B$ sub-iterations [S1, unofficial].
+ 
+ **Pitfalls and Edge Cases:**
+@@ -57,5 +57,5 @@
+         projections: 1D or 2D array of measured projections.
+         volume: Initial positive guess of the volume.
+-        geometry: Object with forwardproject and backproject methods.
++        geometry: Object with forward_project and back_project methods.
+         iterations: Number of EM steps.
+         bounds: Optional tuple (min, max) to clip volume.
+@@ -65,5 +65,5 @@
+         volume: Reconstructed volume.
+     """
+-    # Validation
++    # Validation from [S3, unofficial]
+     if np.any(projections < 0):
+         raise ValueError("Projections must be non-negative.")
+@@ -71,51 +71,28 @@
+         raise ValueError("Initial volume guess must be strictly positive.")
+ 
+-    # Precompute normalization factor s_j = sum_i R_ij
+-    # This is the backprojection of a unity image (ones)
++    # Precompute normalization factor s_j = sum_i R_ij [S2, unofficial]
++    # forward_project computes sum_j R_ij * f_j for each projection ray
+     unity_proj = np.ones_like(projections)
+-    s = geometry.backproject(unity_proj, volume.shape, geometry)
+-    
+-    # Handle potential zeros in s to avoid division by zero
+-    # [G] In practice, s should be positive everywhere for valid geometry.
+-    # If s has zeros, those voxels are unobservable and remain at initial value.
+-    s_safe = np.where(s > 0, s, 1.0)
+-    
+-    # Initialize residual norm tracking if needed
+-    rnorms = []
++    s = geometry.back_project(unity_proj, volume.shape, geometry)
++    # Guard against division by zero in unobservable voxels [G]
++    s = np.where(s > 0, s, 1.0)
+ 
+-    for ii in range(iterations):
+-        # Forward project current estimate
+-        estimated_proj = geometry.forwardproject(volume, geometry)
++    for _ in range(iterations):
++        # Forward project current estimate: estimated = R * volume [S1, S2, unofficial]
++        estimated = geometry.forward_project(volume, geometry)
+         
+-        # Compute ratio: measured / estimated
+-        # Guard against division by zero in estimated_proj
+-        # [G] If estimated_proj is 0, the ratio is undefined. 
+-        # Standard practice is to treat 0/0 as 0 or ignore those pixels.
+-        # Here we use a small epsilon for stability.
+-        epsilon = 1e-10
+-        ratio = projections / (estimated_proj + epsilon)
++        # Compute ratio proj / estimated [S1, S2, unofficial]
++        # Guard against zero estimates to prevent division by zero [G]
++        ratio = np.where(estimated > 0, projections / estimated, 0.0)
+         
+-        # Clip ratio to avoid extreme values causing instability
+-        # [G] Source [S3, unofficial] clips ratio based on max, but standard EM uses raw ratio.
+-        # We follow the standard formula derived from likelihood maximization.
+-        
+-        # Backproject the ratio
+-        backprojected_ratio = geometry.backproject(ratio, volume.shape, geometry)
+-        
+-        # Multiplicative update: f_new = f_old * (backprojected_ratio / s)
+-        volume = volume * (backprojected_ratio / s_safe)
+-        
+-        # Apply bounds if specified
++        # Backproject ratio and normalize: volume = volume * (R^*(ratio) / s) [S1, S2, unofficial]
++        # back_project computes sum_i R_ij * r_i for each voxel
++        volume = volume * (geometry.back_project(ratio, volume.shape, geometry) / s)
++
++        # Apply bounds if specified [S3, unofficial]
+         if bounds is not None:
+             volume = np.clip(volume, bounds[0], bounds[1])
+-            
+-        # Compute residual norm for monitoring (optional)
+-        # [G] Source [S3, unofficial] computes L2 norm statistic of positive residuals.
+-        res_pos = ratio[ratio > 0]
+-        if len(res_pos) > 0:
+-            rnorm = np.std(res_pos) / np.mean(res_pos)
+-            rnorms.append(rnorm)
+ 
+-    return volume, rnorms
++    return volume
+ ```
+ 
+@@ -126,11 +103,9 @@
+ 
+ ## Operating characteristics
+-*   **Time Complexity:** $O(I \cdot N \cdot M)$ per iteration, where $I$ is iterations, $N$ is number of voxels, and $M$ is number of projections. Each iteration requires one forward projection and one backprojection [S1, S2, unofficial].
+-*   **Memory Complexity:** $O(N + M)$ for storing the volume and projections, plus temporary buffers for forward/backprojection [S3, unofficial].
+-*   **Performance:** Convergence is slow compared to algebraic methods like SIRT or CG. It typically requires many iterations to reach a stable solution [S2, unofficial].
+-*   **Strengths:** Statistically optimal for Poisson noise; guarantees non-negativity; conserves total activity/events [S2, unofficial].
+-*   **Limitations:** Slow convergence; prone to noise amplification and artifacts after many iterations; sensitive to initial guess [S1, S2, unofficial].
+-*   **When to use:** When data follows Poisson statistics (e.g., low-count X-ray, emission tomography) and non-negativity is critical.
+-*   **When not to use:** For high-count data where Gaussian noise approximation holds (use SIRT/CG); when speed is paramount (use OSEM or algebraic methods).
++*   **Convergence:** Slow compared to algebraic methods like SIRT or CG [S2, unofficial].
++*   **Stability:** Unstable after a large number of iterations; requires regularization or post-filtering (e.g., Gaussian filter) to stabilize [S2, unofficial].
++*   **Properties:** Guarantees non-negativity if initialized positively; conserves total number of events at each iteration [S2, unofficial].
++*   **Noise Handling:** Statistically optimal for Poisson noise inherent in low-count X-ray or emission tomography data [S2, unofficial].
++*   **Regularization:** Prone to high-frequency noise amplification; stabilization typically requires early stopping (~12 steps) or adding a penalty term $B(f)$ [S1, unofficial].
+ 
+ ## Background

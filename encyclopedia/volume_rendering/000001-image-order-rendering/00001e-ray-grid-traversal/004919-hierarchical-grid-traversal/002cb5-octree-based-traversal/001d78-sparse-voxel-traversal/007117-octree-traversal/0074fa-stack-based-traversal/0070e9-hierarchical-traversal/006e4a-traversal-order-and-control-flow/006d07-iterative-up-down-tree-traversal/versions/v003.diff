@@ -1,0 +1,224 @@
+--- v002.md
++++ v003.md
+@@ -4,120 +4,131 @@
+ 
+ ## Overview
+-Iterative Up-Down Tree Traversal is a hierarchical octree traversal algorithm that determines the next voxel to process by combining local ascent and descent operations, avoiding the need to restart the search from the root node for every ray step [S1]. It distinguishes itself from standard top-down methods by leveraging the current node's position awareness to minimize traversal distance, making it more efficient for non-internal transitions while incurring no additional memory overhead [S1].
++Iterative Up-Down Tree Traversal is a hierarchical ray traversal algorithm for octrees that determines the next node by locally analyzing the current node's position relative to its parent, avoiding the overhead of restarting the search from the root for every step [S1]. It distinguishes itself from the [Two-Pass Hierarchy Traversal](3339-two-pass-hierarchy-traversal.md) by maintaining a single continuous traversal state that dynamically ascends and descends the tree based on whether a ray exit constitutes an "internal transition" (exiting a child but remaining within the parent) or an "external transition" (exiting the parent) [S1].
+ 
+ ## How it works
+ **Inputs and Outputs:**
+-- Input: Current node $N_{curr}$ in the octree, ray direction, ray origin (or current position), and the octree structure $\mathcal{H}$.
+-- Output: The next leaf node $N_{next}$ intersected by the ray.
++- **Input:** A ray $R(t) = O + tD$; the root of an octree $\mathcal{T}$; the current node $N$ (initially the root or the first leaf entered); the current entry parameter $t_{entry}$ and exit parameter $t_{exit}$ for the current node's bounding volume.
++- **Output:** The next leaf node $L$ to be processed, and updated $t_{entry}, t_{exit}$ for $L$.
+ 
+ **Data Structures:**
+-- The octree $\mathcal{H}$ is a hierarchical grid where each node has up to 8 children.
+-- Each node maintains a reference to its parent (to enable ascent) and its children (to enable descent).
+-- Nodes are classified as internal (has children) or leaf (no children).
++- **Octree Node:** Contains a bounding box (AABB), a flag indicating if it is a leaf, and pointers to up to 8 children.
++- **Ray-Node Intersection:** A function `intersect(ray, node)` returning the smallest $t > 0$ where the ray enters the node's AABB, or $\infty$ if no intersection.
+ 
+ **Algorithm Steps:**
+-1. **Determine Transition Type:** Calculate whether the ray's exit from the current node $N_{curr}$ corresponds to an *internal transition*. An internal transition is defined as a path crossing a cell wall that does not leave the parent cell of $N_{curr}$ [S1].
+-2. **Check Internal Transition:**
+-   - If the transition is internal:
+-     - Identify the next cell as one of $N_{curr}$'s siblings or its children (if the sibling is not a leaf node) [S1].
+-     - Descend from the identified sibling/child to the appropriate leaf node.
+-   - If the transition is not internal:
+-     - Initiate an **ascent phase**: Iteratively move up the tree starting from $N_{curr}$ to its parent, then to the grandparent, etc., until an internal transition is identified relative to the current ancestor node [S1].
+-     - Initiate a **descent phase**: From the ancestor node where the internal transition was found, iteratively descend the tree until a leaf node is reached [S1].
++1. **Calculate Exit:** Determine the exit parameter $t_{exit}$ of the current ray within the current node $N$'s bounding box.
++2. **Identify Next Cell Wall:** Determine which face of the current node's bounding box the ray exits through. Let this be face $F$.
++3. **Check Internal Transition:** Determine if the adjacent cell sharing face $F$ is a sibling of $N$ or a child of $N$'s parent.
++    - An **Internal Transition** occurs if the ray exits $N$ but remains within the bounding volume of $N$'s parent $P$. This happens if $N$ is not the root and the ray does not exit $P$'s bounds at the same time it exits $N$'s bounds, or more precisely, if the next cell is a sibling or a child of a sibling.
++    - Specifically, if $N$ has a sibling $S$ across face $F$, and $S$ is not a leaf, the next node is $S$ (or its children). If $S$ is a leaf, the next node is $S$.
++    - If the transition is **not internal** (i.e., the ray exits the parent $P$'s bounds), the algorithm must ascend.
++4. **Ascent Phase:**
++    - While the transition is not internal:
++        - Move to the parent of the current node $N \leftarrow \text{parent}(N)$.
++        - Recalculate the exit face relative to the new current node.
++        - If the current node is the root and the ray still exits, terminate traversal (ray has left the volume).
++5. **Descent Phase:**
++    - Once an internal transition is identified (the ray exits the current node but remains within its parent's bounds, or we are at a node where the next cell is a sibling/child):
++        - Identify the target sibling or child across the exit face.
++        - If the target is a leaf, set it as the next node.
++        - If the target is an internal node, descend iteratively:
++            - From the target node, determine which child the ray enters next.
++            - Repeat until a leaf node is reached.
++6. **Update State:** Set the current node to the found leaf. Update $t_{entry}$ to the previous $t_{exit}$ (clamped to 0 if negative due to precision) and calculate the new $t_{exit}$ for the leaf.
+ 
+ **Pseudocode:**
+ ```python
+-def iterative_up_down_traversal(current_node, ray):
++def iterative_up_down_traversal(ray, current_node, t_entry, t_exit):
+     """
+-    Traverses an octree using iterative up-down logic.
+-    
+-    Args:
+-        current_node: The current octree node (leaf or internal).
+-        ray: Ray object with direction and current position.
+-        
+-    Returns:
+-        The next leaf node intersected by the ray.
++    Traverses an octree using the iterative up-down method.
++    Returns the next leaf node and its exit parameter.
+     """
+     node = current_node
+     
+     while True:
+-        # Determine if the ray exit from 'node' is an internal transition
+-        # An internal transition means the ray exits a child but stays within the parent's bounds.
+-        is_internal = check_internal_transition(node, ray)
++        # 1. Determine exit face and parameter for current node
++        t_exit_local, exit_face = ray_exit_info(ray, node)
+         
++        # If ray exits the current node's bounds
++        if t_exit_local <= t_entry:
++            # Precision guard: if t_exit is very close to t_entry, 
++            # it might be the same cell or a degenerate case.
++            # In practice, we proceed to find the next cell.
++            pass
++        
++        # 2. Check if the transition is internal
++        # Internal means: the ray exits 'node' but stays within 'node.parent'
++        # Or, more generally, the next cell is a sibling or child of the current hierarchy level.
++        
++        is_internal = False
++        next_node_candidate = None
++        
++        # Case A: Current node has a sibling across the exit face
++        if node.parent is not None:
++            sibling = get_sibling(node, exit_face)
++            if sibling is not None:
++                # The next cell is the sibling
++                next_node_candidate = sibling
++                # Is it internal? Yes, because sibling is within parent's bounds
++                is_internal = True
++            else:
++                # No sibling (boundary of parent), must ascend
++                is_internal = False
++        else:
++            # Root node has no parent. If we exit, we are done or need to check global bounds.
++            # Assuming the root covers the entire volume of interest.
++            return None, float('inf') # Ray left the volume
++
+         if is_internal:
+-            # Case 1: Internal transition
+-            # Identify the next sibling or child
+-            next_sibling_or_child = get_next_sibling_or_child(node, ray)
++            # 3. Descent Phase
++            # We have identified the next node (sibling or child).
++            # If it is a leaf, we are done.
++            if next_node_candidate.is_leaf:
++                current_node = next_node_candidate
++                t_entry = t_exit_local
++                t_exit = calculate_exit_for_node(ray, current_node)
++                return current_node, t_exit
+             
+-            # Descend to leaf
+-            node = descend_to_leaf(next_sibling_or_child, ray)
+-            return node
++            # If it is not a leaf, we must descend to the next leaf
++            current_node = next_node_candidate
++            while not current_node.is_leaf:
++                # Find which child the ray enters
++                child_index = get_child_index(ray, current_node)
++                current_node = current_node.children[child_index]
++            
++            t_entry = t_exit_local
++            t_exit = calculate_exit_for_node(ray, current_node)
++            return current_node, t_exit
++        
+         else:
+-            # Case 2: Non-internal transition
+-            # Ascend until an internal transition is found
+-            while node.parent is not None:
+-                node = node.parent
+-                # Check if the transition relative to this new node is internal
+-                if check_internal_transition(node, ray):
+-                    break
++            # 4. Ascent Phase
++            # The transition is not internal. Move up.
++            if node.parent is None:
++                return None, float('inf') # Left the root
+             
+-            # If we reached the root and still no internal transition, 
+-            # the ray has exited the entire volume. Handle as needed.
+-            if node.parent is None and not check_internal_transition(node, ray):
+-                return None  # Ray exited volume
+-            
+-            # Descend from the node where internal transition was found
+-            next_sibling_or_child = get_next_sibling_or_child(node, ray)
+-            node = descend_to_leaf(next_sibling_or_child, ray)
+-            return node
+-
+-def check_internal_transition(node, ray):
+-    """
+-    Determines if the ray's exit from 'node' is an internal transition.
+-    This requires knowing the bounding box of 'node' and its parent.
+-    """
+-    # Implementation detail: Compare ray exit point with node's AABB
+-    # and parent's AABB. If exit point is within parent's AABB but outside node's,
+-    # it is internal.
+-    # [G] Placeholder for specific geometric intersection logic.
+-    pass
+-
+-def get_next_sibling_or_child(node, ray):
+-    """
+-    Identifies the next node to visit based on ray direction.
+-    """
+-    # [G] Placeholder for sibling/child selection logic based on ray direction.
+-    pass
+-
+-def descend_to_leaf(node, ray):
+-    """
+-    Descends from 'node' to the first leaf intersected by the ray.
+-    """
+-    while node.is_internal():
+-        node = get_next_child(node, ray)
+-    return node
++            node = node.parent
++            # Note: t_entry for the parent is effectively the old t_entry,
++            # but we are looking for the *next* leaf after the current exit.
++            # The ascent logic relies on the fact that we are now looking for
++            # a node that is a sibling of an ancestor or higher up.
++            # We do not update t_entry here; we keep the original exit point
++            # as the reference for the next intersection test in the new context.
++            # However, strictly speaking, the ray has passed the exit point.
++            # The next intersection will be > t_exit_local.
+ ```
+ 
+-**Parameters:**
+-- Implementation complexity: High. It is described as the most complex of the three methods presented in the source [S1].
+-- Memory overhead: None. No additional data structures are required [S1].
+-
+-**Edge Cases and Pitfalls:**
+-- **Root Exit:** If the ascent reaches the root and the transition is still not internal, the ray has exited the entire volume. The algorithm must handle this termination condition.
+-- **Precision:** Geometric checks for internal transitions require precise floating-point arithmetic to avoid misclassifying transitions near node boundaries.
++**Parameters and Edge Cases:**
++- **Implementation Complexity:** High. It requires maintaining parent pointers and carefully distinguishing between internal and external transitions [S1].
++- **Memory Overhead:** None. It uses no additional memory structures beyond the tree itself [S1].
++- **Precision:** Care must be taken when $t_{exit}$ is very close to $t_{entry}$ to avoid infinite loops or skipping cells [G].
++- **Degenerate Input:** If the ray grazes a face, the exit face determination must be robust.
+ 
+ ## Operating characteristics
+-- **Time Complexity:** Worst-case complexity is similar to top-down traversal ($O(depth)$) if many non-internal transitions occur, but average case is improved by avoiding full root-to-leaf searches for internal transitions.
+-- **Memory Complexity:** $O(1)$ additional memory. The algorithm uses only the existing tree structure [S1].
+-- **Strengths:** No memory overhead; applicable to regular and barycentric octree grids; reduces traversal overhead for internal transitions [S1].
+-- **Limitations:** High implementation complexity; potential for increased branching logic overhead [S1].
+-- **When to Use:** When memory is constrained and the octree has a high proportion of internal transitions (e.g., dense regions).
+-- **When Not to Use:** When implementation simplicity is prioritized over marginal performance gains, or when the octree is very sparse (top-down may be simpler).
++- **Time Complexity:** Average case is $O(1)$ per voxel transition, similar to standard grid traversal, but with higher constant factors due to parent pointer dereferencing and ascent/descent logic. Worst case is $O(D)$ where $D$ is the depth of the tree, if the ray traverses a path requiring frequent ascents and descents.
++- **Memory Complexity:** $O(1)$ auxiliary space.
++- **Strengths:** No memory overhead; avoids the $O(D)$ cost of restarting from the root for every step, which is beneficial for sparse octrees where many transitions are between siblings [S1].
++- **Limitations:** Higher implementation complexity compared to simple top-down or two-pass methods [S1].
+ 
+ ## Background
+-- **Origin:** The method was introduced in the context of Monte Carlo radiative transfer simulations using hierarchical octrees [S1].
+-- **Development:** It was developed as an alternative to standard top-down traversal to improve efficiency by leveraging local tree structure knowledge [S1].
+-- **Usage:** Applied in astrophysical simulations, specifically for modeling disc galaxies with logarithmic spiral structures [S1].
++This method was proposed in the context of Monte Carlo radiative transfer simulations using hierarchical octrees [S1]. It was introduced as an alternative to the standard top-down method (which restarts from the root) and the two-pass method, aiming to balance performance and implementation simplicity [S1]. It is applicable to both regular and barycentric octree grids [S1].
+ 
+ ## Sources

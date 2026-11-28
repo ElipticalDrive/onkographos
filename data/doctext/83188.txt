@@ -1,0 +1,1098 @@
+# Signed Distance Fields in Unity
+
+![Preview Image](promo/banner.png)
+
+[[Download the build on Itch.io]](https://sambigos.itch.io/signed-distance-fields-in-unity)
+
+This is the result of playing around with using signed distance fields to render, deform, and do collision on geometry.
+
+There are no polygons, no rigid bodies, and no standard physiscs engine running. All processing is done on the GPU.
+
+Includes a debug menu to tweak parameters and explore features.
+
+### Assets/Compute/BoidPhysics.compute
+```
+#pragma kernel Step
+
+#include "../Includes/SDF.cginc"
+
+struct Boid
+{
+    float3 position;
+    float3 velocity;
+    float radius;
+};
+
+float3 _planetCentre;
+float _timeStep;
+float _gravity;
+
+int _numBoids;
+RWStructuredBuffer<Boid> _boidBufferIn;
+RWStructuredBuffer<Boid> _boidBufferOut;
+
+float3 projectUonV(float3 u, float3 v) 
+{
+    float3 r;
+    r = v * (dot(u, v) / dot(v, v));
+    return r;
+}
+
+[numthreads(1,1,1)]
+void Step(uint3 id : SV_DispatchThreadID)
+{
+    Boid boid = _boidBufferIn[id.x];
+
+    // Collide with other boids
+    for (uint i = 0; i < (uint)_numBoids; i++)
+    {
+        if (i == id.x)
+            continue;
+
+        float3 p0 = boid.position;
+        float3 p1 = _boidBufferIn[i].position;
+        float3 v0 = boid.velocity;
+        float3 v1 = _boidBufferIn[i].velocity;
+        float r0 = boid.radius;
+        float r1 = _boidBufferIn[i].radius;
+
+        float dist = distance(p0, p1);
+        float r = r0 + r1;
+        float diff = dist - r;
+        if (diff <= 0.0)
+        {
+            float3 mov = diff * 0.5 * normalize(p1 - p0);
+            boid.position += mov;
+            p0 = boid.position;
+
+            float3 nv0 = v0;
+            nv0 += projectUonV(v1, p1 - p0);
+            nv0 -= projectUonV(v0, p0 - p1);
+            boid.velocity = nv0 * 1.0;
+        }
+    }
+
+    float dist = sdfWorld(boid.position.xyz) - boid.radius;
+
+    // Collide with planet
+    {
+        float3 toSurface = -calcNormal(boid.position);
+        dist *= calcEikonalCorrection(toSurface);
+
+        float3 p0 = boid.position;
+        float3 p1 = boid.position + toSurface * (dist + boid.radius);
+        float3 v0 = boid.velocity;
+        float3 v1 = 0.0;
+        float r0 = boid.radius;
+        float r1 = 0.0;
+
+        float dist = distance(p0, p1);
+        float r = r0 + r1;
+        float diff = dist - r;
+        if (diff <= 0.0) // hit
+        {
+            float3 mov = diff * 0.5 * normalize(p1 - p0);
+            boid.position += mov;
+            p0 = boid.position;
+
+            float3 nv0 = v0;
+            nv0 += projectUonV(v1, p1 - p0);
+            nv0 -= projectUonV(v0, p0 - p1);
+            boid.velocity = nv0 * 1.0;
+        }
+    }
+
+    // Gravity
+    float3 toPlanet = normalize(_planetCentre - boid.position);
+    float3 gravity = toPlanet * _gravity;
+    boid.velocity += gravity * _timeStep;    
+    
+    boid.position = boid.position + boid.velocity * _timeStep;
+
+    _boidBufferOut[id.x] = boid;
+}
+```
+
+### Assets/Compute/SDF.compute
+```
+#pragma kernel SDFGen
+#pragma kernel SDFMutate
+
+#include "../Includes/SDF.cginc"
+
+RWTexture3D<float> _sdfTexOut;
+
+float _sphereRadius;
+bool _mouseSubtract;
+bool _mouseAdd;
+float4 _mouseOrigin;
+float4 _mouseDir;
+float _brushSize;
+float _brushHeight;
+bool _doEikonel;
+
+float neighborMin(uint3 kernel, uint3 delta)
+{
+    float a = sdfUV(kernelToUV(kernel + delta));
+    float b = sdfUV(kernelToUV(kernel - delta));
+    return min(abs(a), abs(b));
+}
+
+float eikonal1d(float h, float v, float g)
+{
+    return min(h, v) + g;
+}
+
+float eikonal2d(float h, float v, float g)
+{
+    if (abs(h - v) >= g)
+    {
+        return eikonal1d(h, v, g);
+    }
+    float hv = h + v;
+    float d = hv * hv - 2.0 * (h * h + v * v - g * g);
+    return 0.5 * (hv + sqrt(d));
+}
+
+bool eikonal3d(float3 u, out float e, float g)
+{
+    float xyz = u.x + u.y + u.z;
+    float n = 3.0;
+    float d = (xyz * xyz) - n * ((u.x * u.x + u.y * u.y + u.z * u.z) - (g * g));
+    if (d < 0.0)
+    {
+        return false;
+    }
+    e = (1.0 / n) * (xyz + sqrt(d));
+    return true;
+}
+
+float eikonal(float3 u, float g)
+{
+    float e = 0.0;
+    if (eikonal3d(u, e, g))
+    {
+        return e;
+    }
+    float e1 = eikonal2d(u.x, u.y, g);
+    float e2 = eikonal2d(u.x, u.z, g);
+    float e3 = eikonal2d(u.y, u.z, g);
+    return min(min(e1, e2), e3);
+}
+
+[numthreads(8,8,8)]
+void SDFGen(uint3 id : SV_DispatchThreadID)
+{
+    float3 uv = kernelToUV(id);
+    float3 world = uvToWorld(uv);
+    
+    float current = sdSphere(world, float3(0.0f, 0.0f, 0.0f), _sphereRadius);
+    
+    _sdfTexOut[id.xyz] = pack(current);
+}
+
+[numthreads(8,8,8)]
+void SDFMutate(uint3 id : SV_DispatchThreadID)
+{
+    float3 uv = kernelToUV(id);
+    float current = sdfUV(uv);
+    float3 world = uvToWorld(uv);
+    
+    if (_mouseAdd)
+    {
+        float toSdf = raySphereIntersect(_mouseOrigin.xyz, _mouseDir.xyz, float3(0.0, 0.0, 0.0), _sphereRadius + _brushHeight);
+        float3 ro = _mouseOrigin.xyz + _mouseDir.xyz * toSdf;
+        float d = sdSphere(world, ro, _brushSize);
+        current = opSmoothUnion(d, current, 0.025);
+    }
+    if (_mouseSubtract)
+    {
+        float toSdf = raySphereIntersect(_mouseOrigin.xyz, _mouseDir.xyz, float3(0.0, 0.0, 0.0), _sphereRadius + _brushHeight);
+        float3 ro = _mouseOrigin.xyz + _mouseDir.xyz * toSdf;
+        float d = sdSphere(world, ro, _brushSize * 1.25f);
+        current = opSmoothSubtraction(d, current, 0.025);
+    }    
+    if (_doEikonel)
+    {
+        float3 u;
+        u.x = neighborMin(id, uint3(1, 0, 0));
+        u.y = neighborMin(id, uint3(0, 1, 0));
+        u.z = neighborMin(id, uint3(0, 0, 1));
+    
+        float g = _sdfRadius * 2.0 / _sdfTexSizeX;
+        float e = eikonal(u, g);
+        if (current > g) current = e;
+    }
+    
+    _sdfTexOut[id.xyz] = pack(current);
+}
+```
+
+### Assets/Materials/Shaders/SDFRenderer.shader
+```
+Shader "Unlit/SDFRenderer"
+{
+    Properties
+    {
+    }
+    SubShader
+    {
+        Tags { "Queue" = "Transparent" }
+        Blend SrcAlpha OneMinusSrcAlpha
+        //Blend One OneMinusSrcAlpha
+
+        Pass
+        {
+            CGPROGRAM
+            #pragma vertex vert
+            #pragma fragment frag
+
+            #include "Assets/Includes/SDF.cginc"
+            #include "UnityCG.cginc"
+            
+            struct appdata
+            {
+                float4 vertex : POSITION;
+            };
+
+            struct v2f
+            {
+                float4 vertex : SV_POSITION;
+                float3 worldVertex : TEXCOORD0;
+                float3 vectorToSurface : TEXCOORD1;
+            };
+
+            uniform float _boidCount;
+            uniform float3 _boidPositions[256];
+            uniform float _boidRadii[256];
+
+            uniform float _sphereRadius;
+            uniform float _planetTexHeight;
+            uniform sampler2D _planetTex;
+            uniform int _debugMode = 0;
+            uniform float3 _sunPos;
+            uniform float _shadowIntensity;
+            uniform float _shadowSoftness;
+            
+            v2f vert(appdata v)
+            {
+                v2f o;
+
+                o.worldVertex = mul(unity_ObjectToWorld, v.vertex);
+                o.vectorToSurface = o.worldVertex - _WorldSpaceCameraPos;
+
+                o.vertex = UnityObjectToClipPos(v.vertex);
+                return o;
+            }
+
+            float3 sdfCol(float3 uv)
+            {
+                float2 colUV = float2(0.5, (length(uv) / _sphereRadius));
+                return tex2D(_planetTex, colUV);
+            }
+
+            float worldSample(float3 pos, out float3 col)
+            {
+                float dist = sdfWorld(pos);
+                col = float3(0.8, 0.8, 0.8);
+                if (dist < hitThreshold())
+                {
+                    col = sdfCol(pos);
+                }                
+                for (int i = 0; i < _boidCount; i++)
+                {
+                    dist = min(dist, sdSphere(pos, _boidPositions[i], _boidRadii[i]));
+                }
+                return dist;
+            }
+
+            float3 worldNormal(float3 p)
+            {
+                float h = 0.001;
+                float2 k = float2(1, -1);
+                float3 col;
+                return normalize(k.xyy * worldSample(p + k.xyy * h, col) +
+                    k.yyx * worldSample(p + k.yyx * h, col) +
+                    k.yxy * worldSample(p + k.yxy * h, col) +
+                    k.xxx * worldSample(p + k.xxx * h, col));
+            }
+
+            float worldRayMarch(float3 origin, float3 dir, float k, out float res, out float3 hitPos, out float3 colAtHit)
+            {
+                // Running eikonal equation on the SDF causes distance values to elongate along non-cardinal directions,
+                // the more diagonal the more pronounced. Here, adjust the distance value by the amount of cardinality.
+                float eikonalFix = calcEikonalCorrection(dir);
+                
+                res = 1.0;
+                float t = 0.0;
+                [loop]
+                for (int i = 0; i < _maxRaymarchSteps; i++)
+                {
+                    float3 current = origin + dir * t;
+                    if (outOfBounds(current))
+                    {
+                        return 0.0;
+                    }
+                    float dist = worldSample(current, colAtHit);
+                    if (dist <= hitThreshold())
+                    {
+                        hitPos = current;
+                        res = 0.0;
+                        return 1.0;
+                    }
+                    dist = max(dist, 0.0001) * eikonalFix;
+                    res = min(res, k * dist / t);
+                    t += dist;
+                }
+                return 1.0;
+            }
+
+            fixed4 frag(v2f i) : SV_Target
+            {
+                float3 rayOrigin = i.worldVertex;
+                float3 rayDirection = normalize(i.worldVertex - _WorldSpaceCameraPos);
+
+                if (_debugMode == 1) // 2d sdf cross section
+                {
+                    float3 c;
+                    float d = worldSample(rayOrigin, c);
+
+                    // coloring
+                    float3 col = float3(step(0.0, d), step(d, 0.0), 0.0);
+                    col *= 1.0 - exp(-5.0 * abs(d));
+                    col *= 0.8 + 0.2 * cos(512.0 * abs(d));
+                    col = lerp(col, float3(1.0, 1.0, 1.0), 1.0 - smoothstep(0.0, 0.005, abs(d)));
+
+                    return float4(col, 1.0);
+                }
+                
+                // project forward to the start of the SDF
+                float dist = raySphereIntersect(rayOrigin, rayDirection, float3(0.0, 0.0, 0.0), _sdfRadius);
+                rayOrigin += rayDirection * (dist + 0.01);
+                
+                // hit
+                float res = 0.0;
+                float3 hitPos = float3(0.0, 0.0, 0.0);
+                float3 colAtHit = float3(1.0, 1.0, 1.0);
+                float hit = worldRayMarch(rayOrigin, rayDirection, 16.0, res, hitPos, colAtHit);
+
+                float s = 0.0;
+                float ao = 0.0;
+                float ambient = 0.0;
+                if (hit > 0.0)
+                {
+                    float3 normal = worldNormal(hitPos);
+
+                    // Shadow                    
+                    float3 sOrigin = hitPos + normal * 0.001;
+                    float3 sDir = normalize(_sunPos - hitPos);
+                    float3 h, c;
+
+                    ambient = dot(normal, sDir) * 0.25 + 1.0;
+                    worldRayMarch(sOrigin, sDir, lerp(0.0, 32.0, 1.0 - _shadowSoftness), res, h, c);
+                    s = ambient * lerp(1.0 - _shadowIntensity, 1.0, res);
+                    
+                    // AO
+                    float phi = PI * (3.0 - sqrt(5.0));
+                    [loop]
+                    for (int i = 0; i < _aoSamples; i++)
+                    {
+                        float3 p = float3(0.0, 0.0, 0.0);
+                        p.y = 1.0 - i / float(_aoSamples) * 2.0;
+                        float radius = sqrt(1.0 - pow(p.y, 2.0));
+                        float theta = phi * float(i);
+                        p.x = cos(theta) * radius;
+                        p.z = sin(theta) * radius;
+                        ao += saturate(worldSample(hitPos + p * _aoKernelSize, c) / _aoKernelSize);
+                    }
+                    ao /= float(_aoSamples) * 0.5;
+                    ao = 1.0 - pow(1.0 - ao, 2.0);
+
+                    float3 col = colAtHit;
+                    col *= s;
+                    col *= ao;
+                    
+                    return float4(col, hit);
+                }
+                return float4(0.0, 0.0, 0.0, 0.0);
+            }
+            ENDCG
+        }
+    }
+}
+```
+
+### Assets/Scripts/Boids/BoidController.cs
+```
+using System.Collections.Generic;
+using SDF;
+using UImGui;
+using UnityEngine;
+using UnityEngine.InputSystem;
+
+namespace Boids
+{
+    public class BoidController : MonoBehaviour
+    {
+        public struct Boid
+        {
+            public Vector3 Position;
+            public Vector3 Velocity;
+            public float Radius;
+        }
+
+        [SerializeField] private Vector3 PlanetCentre = new Vector3(0.0f, 0.0f, 0.0f);
+        [SerializeField] private SDFRenderer SDFRendererInstance;
+        [SerializeField] private SDF.SDF SDFInstance;
+        [SerializeField] private ComputeShader BoidPhysicsCompute;
+        [SerializeField] private DebugWindow DebugWindow;
+
+        private readonly List<Boid> _boids = new List<Boid>();
+        private int _playerBoidID;
+
+        private void Start()
+        {
+            BoidPhysicsCompute.SetVector("_planetCentre", PlanetCentre);
+            BoidPhysicsCompute.SetFloat("_gravity", 1.0f);
+        }
+
+        private void PhysicsCompute()
+        {
+            int kernelID = BoidPhysicsCompute.FindKernel("Step");
+            BoidPhysicsCompute.GetKernelThreadGroupSizes(kernelID, out uint _, out uint _, out uint _);
+
+            BoidPhysicsCompute.SetInt("_numBoids", _boids.Count);
+
+            ComputeBuffer boidBufferIn = new ComputeBuffer(_boids.Count, 7 * 4);
+            boidBufferIn.SetData(_boids);
+            BoidPhysicsCompute.SetBuffer(kernelID, "_boidBufferIn", boidBufferIn);
+
+            ComputeBuffer boidBufferOut = new ComputeBuffer(_boids.Count, 7 * 4);
+            boidBufferOut.SetData(_boids);
+            BoidPhysicsCompute.SetBuffer(kernelID, "_boidBufferOut", boidBufferOut);
+
+            BoidPhysicsCompute.SetFloat("_timeStep", Time.deltaTime);
+            BoidPhysicsCompute.SetFloat("_gravity", DebugWindow.Gravity);
+            BoidPhysicsCompute.SetTexture(kernelID, "_sdfTexIn", SDFInstance.SDFTexture);
+
+            BoidPhysicsCompute.Dispatch(kernelID, _boids.Count, 1, 1);
+
+            Boid[] boidArray = new Boid[_boids.Count];
+            boidBufferOut.GetData(boidArray);
+
+            for (int i = 0; i < _boids.Count; i++)
+            {
+                _boids[i] = boidArray[i];
+            }
+
+            boidBufferIn.Dispose();
+            boidBufferOut.Dispose();
+        }
+
+        private void Update()
+        {
+            SDFInstance.SetSDFParams(BoidPhysicsCompute);
+            
+            if (_boids.Count > 0)
+            {
+                PhysicsCompute();
+            }
+            SDFRendererInstance.SetBoids(_boids);
+
+            if (DebugWindow.Spawn)
+            {
+                DebugWindow.Spawn = false;
+                DoSpawn();
+            }
+
+            if (DebugWindow.Reset)
+            {
+                DebugWindow.Reset = false;
+                _boids.Clear();
+                SDFInstance.Reset();
+            }
+        }
+
+        public void Spawn(InputAction.CallbackContext context)
+        {
+            if (context.phase != InputActionPhase.Started)
+                return;
+            
+            DoSpawn();
+        }
+
+        public void DoSpawn()
+        {
+            float impulse = 0.25f;
+            Boid newBoid = new()
+            {
+                Position = new Vector4(0.0f, 1.5f, 0.0f),
+                Velocity = new Vector4(DebugWindow.Gravity * impulse * Random.Range(-1.0f, 1.0f), 0.0f, DebugWindow.Gravity * impulse * Random.Range(-1.0f, 1.0f)),
+                Radius = 0.066f
+            };
+            
+            _boids.Add(newBoid);
+        }
+    }
+}
+```
+
+### Assets/Scripts/Camera/OrbitCameraController.cs
+```
+using UnityEngine;
+using UnityEngine.InputSystem;
+
+public class OrbitCameraController : MonoBehaviour
+{
+    public Camera Camera;
+    public float ZoomSpeed = 1.0f;
+    public float ZoomDeceleration = 20.0f;
+    public float PanSpeed = 0.1f;
+    public float Deceleration = 5.0f;
+    public float MinZoom = 1.5f;
+    public float MaxZoom = 10.0f;
+
+    public GameObject GimbalH;
+    public GameObject GimbalV;
+
+    private Vector2 _velocity;
+    private float _zoomVelocity;
+    private bool _mouseDown;
+    private Transform _transform;
+
+    private void Awake()
+    {
+        _transform = transform;
+    }
+
+    private void Update()
+    {
+        if (_mouseDown)
+        {
+            _velocity += Pointer.current.delta.ReadValue();
+        }
+
+        GimbalH.transform.Rotate(GimbalH.transform.up, _velocity.x * PanSpeed);
+        GimbalV.transform.Rotate(new Vector3(1.0f, 0.0f, 0.0f), _velocity.y * -PanSpeed);
+        _velocity = Vector2.Lerp(_velocity, new Vector2(0.0f, 0.0f), Time.deltaTime * Deceleration);
+
+        Vector3 newPos = transform.localPosition;
+        newPos += new Vector3(0.0f, 0.0f, _zoomVelocity * Mathf.Abs(_transform.localPosition.z));
+        newPos.z = Mathf.Clamp(newPos.z, -MaxZoom, -MinZoom);
+        _transform.localPosition = newPos;
+        _zoomVelocity = Mathf.Lerp(_zoomVelocity, 0.0f, Time.deltaTime * ZoomDeceleration);
+
+        Transform camTransform = Camera.transform;
+        camTransform.position = _transform.position;
+        camTransform.rotation = _transform.rotation;
+    }
+
+    public void RightMouse(InputAction.CallbackContext context)
+    {
+        switch (context.phase)
+        {
+            case InputActionPhase.Started:
+                _mouseDown = true;
+                break;
+            case InputActionPhase.Canceled:
+                _mouseDown = false;
+                break;
+        }
+    }
+
+    public void MouseWheel(InputAction.CallbackContext context)
+    {
+        if (context.phase == InputActionPhase.Started)
+        {
+            Vector2 value = context.ReadValue<Vector2>();
+            value = Vector2.ClampMagnitude(value, 1.0f);
+            _zoomVelocity += value.y * ZoomSpeed;
+        }
+    
+    }
+}
+```
+
+### Assets/Scripts/Camera/WasdCameraController.cs
+```
+using UnityEngine;
+using UnityEngine.InputSystem;
+
+public class WasdCameraController : MonoBehaviour
+{
+    public float Speed = 10.0f;
+    public float LookSpeed = 0.5f;
+    public float Deceleration = 5.0f;
+
+    public Camera Camera;
+
+    private Vector3 _velocity;
+    private bool _mouseDown;
+    private Transform _transform;
+    private Transform _camTransform;
+
+    void Start()
+    {
+        _transform = transform;
+        _camTransform = Camera.transform;
+        
+        Camera.depthTextureMode = DepthTextureMode.Depth;
+        _camTransform.position = _transform.position;
+        _camTransform.rotation = _transform.rotation;
+    }
+
+    void Update()
+    {
+        Vector3 dir = new Vector3();
+
+        if (_mouseDown)
+        {
+            Vector3 foward = _camTransform.forward;
+            Vector3 right = _camTransform.right;
+
+            if (Keyboard.current.wKey.isPressed)
+                dir += foward;
+            if (Keyboard.current.aKey.isPressed)
+                dir -= right;
+            if (Keyboard.current.sKey.isPressed)
+                dir -= foward;
+            if (Keyboard.current.dKey.isPressed)
+                dir += right;
+        }
+
+        float velMod = 1.0f;
+        if (Keyboard.current.leftShiftKey.isPressed)
+        {
+            velMod = 5.0f;
+        }
+        _velocity += dir.normalized * Time.deltaTime * Speed * velMod;
+        _velocity = Vector3.Lerp(_velocity, new Vector3(0.0f, 0.0f, 0.0f), Mathf.Min(Time.deltaTime, 1.0f / 60.0f) * Deceleration);
+
+        Vector3 newPos = transform.localPosition;
+        _transform.localPosition = newPos + _velocity * Time.deltaTime * 120.0f;
+
+        if (_mouseDown)
+        {
+            Vector2 mouse = Pointer.current.delta.ReadValue();
+            transform.Rotate(new Vector3(0.0f, 1.0f, 0.0f), mouse.x * LookSpeed, Space.World);
+            transform.Rotate(_transform.right, -mouse.y * LookSpeed, Space.World);
+        }
+
+        _camTransform.position = _transform.position;
+        _camTransform.rotation = _transform.rotation;
+    }
+    
+    public void RightMouse(InputAction.CallbackContext context)
+    {
+        switch (context.phase)
+        {
+            case InputActionPhase.Started:
+                _mouseDown = true;
+                break;
+            case InputActionPhase.Canceled:
+                _mouseDown = false;
+                break;
+        }
+    }
+}
+```
+
+### Assets/Scripts/SDF/SDF.cs
+```
+using UImGui;
+using UnityEngine;
+using UnityEngine.InputSystem;
+using UnityEngine.Rendering;
+
+namespace SDF
+{
+    public class SDF : MonoBehaviour
+    {
+        [SerializeField] private ComputeShader SDFCompute;
+        [SerializeField] private Vector3Int SDFResolution;
+        [SerializeField] private float SDFRadius;
+        [SerializeField] private float SphereRadius;
+        [SerializeField] private float SDFMaxDist;
+        [SerializeField] private SDFRenderer SDFRendererInstance;
+        [SerializeField] private Camera MainCamera;
+        [SerializeField] private GameObject OrbitCam;
+        [SerializeField] private GameObject WASDCam;
+
+        public RenderTexture SDFTexture => _sdfVolumeTexture[_activeSdfTex];
+
+        private int _activeSdfTex;
+        private readonly RenderTexture[] _sdfVolumeTexture = new RenderTexture[2];
+        private Vector3Int _numKernels;
+        private uint _kernelSizeX;
+        private uint _kernelSizeY;
+        private uint _kernelSizeZ;
+        private bool _reset = true;
+        private int _eikonelPasses;
+        private int _lastCamMode;
+        private static readonly int SDF_TEX_SIZE_X = Shader.PropertyToID("_sdfTexSizeX");
+        private static readonly int SDF_TEX_SIZE_Y = Shader.PropertyToID("_sdfTexSizeY");
+        private static readonly int SDF_TEX_SIZE_Z = Shader.PropertyToID("_sdfTexSizeZ");
+        private static readonly int RADIUS = Shader.PropertyToID("_sdfRadius");
+        private static readonly int MAX_DIST = Shader.PropertyToID("_sdfMaxDist");
+        private static readonly int SPHERE_RADIUS1 = Shader.PropertyToID("_sphereRadius");
+        private static readonly int MAX_RAYMARCH_STEPS = Shader.PropertyToID("_maxRaymarchSteps");
+        private static readonly int SUN_POS = Shader.PropertyToID("_sunPos");
+        private static readonly int SHADOW_INTENSITY = Shader.PropertyToID("_shadowIntensity");
+        private static readonly int SHADOW_SOFTNESS = Shader.PropertyToID("_shadowSoftness");
+
+        private void Start()
+        {
+            _lastCamMode = DebugWindow.Instance.CameraMode;
+        }
+
+        private void Update()
+        {
+            SDFResolution.x = DebugWindow.Instance.SdfResolution * 8;
+            SDFResolution.y = DebugWindow.Instance.SdfResolution * 8;
+            SDFResolution.z = DebugWindow.Instance.SdfResolution * 8;
+            
+            SetSDFParams(SDFCompute);                       
+            SetSDFParams(SDFRendererInstance.SDFRendererMat);
+            
+            // Reset the SDF
+            if (_reset)
+            {
+                InitGenCompute();
+                _reset = false;
+                return;
+            }
+
+            // Only dispatch if we need to update (making a mod or doing eikonal pass)
+            if (Mouse.current.leftButton.isPressed || _eikonelPasses > 0)
+            {
+                Ray ray = MainCamera.ScreenPointToRay(Mouse.current.position.ReadValue());
+                SDFCompute.SetBool("_mouseAdd", Mouse.current.leftButton.isPressed && DebugWindow.Instance.Mode == 0);
+                SDFCompute.SetBool("_mouseSubtract", Mouse.current.leftButton.isPressed && DebugWindow.Instance.Mode == 1);
+                SDFCompute.SetVector("_mouseOrigin", ray.origin);
+                SDFCompute.SetVector("_mouseDir", ray.direction);
+    
+                int inSdfTex = _activeSdfTex;
+                int outSdfTex = (_activeSdfTex + 1) & 2;
+    
+                int kernelID = SDFCompute.FindKernel("SDFMutate");
+                SDFCompute.SetTexture(kernelID, "_sdfTexIn", _sdfVolumeTexture[inSdfTex], 0, RenderTextureSubElement.Color);
+                SDFCompute.SetTexture(kernelID, "_sdfTexOut", _sdfVolumeTexture[outSdfTex], 0, RenderTextureSubElement.Color);
+
+                SDFCompute.Dispatch(kernelID, _numKernels.x, _numKernels.y, _numKernels.z);
+    
+                _activeSdfTex = outSdfTex;
+                SDFRendererInstance.SetSDFTexture(SDFTexture);
+
+                _eikonelPasses--;
+                if (Mouse.current.leftButton.isPressed && DebugWindow.Instance.Mode == 1)
+                {
+                    // Do enough passes to fill in twice the radius of a cut.
+                    _eikonelPasses = (int)(DebugWindow.Instance.BrushSize / (SDFRadius * 2.0 / SDFResolution.x)) * 2;
+                }
+            }
+            
+            if (DebugWindow.Instance.CameraMode != _lastCamMode)
+            {
+                _lastCamMode = DebugWindow.Instance.CameraMode;
+                OrbitCam.SetActive(_lastCamMode == 0);
+                WASDCam.SetActive(_lastCamMode == 1);
+
+                if (_lastCamMode == 1)
+                {
+                    WASDCam.transform.position = OrbitCam.transform.position;
+                    WASDCam.transform.rotation = OrbitCam.transform.rotation;
+                }
+            }
+        }
+
+        public void Reset()
+        {
+            _reset = true;
+        }
+        
+        private void InitGenCompute()
+        {
+            int kernelID = SDFCompute.FindKernel("SDFGen");
+            SDFCompute.GetKernelThreadGroupSizes(kernelID, out _kernelSizeX, out _kernelSizeY, out _kernelSizeZ);
+            if (SDFResolution.x % _kernelSizeX != 0 ||
+                SDFResolution.y % _kernelSizeY != 0 ||
+                SDFResolution.z % _kernelSizeZ != 0)
+            {
+                Debug.LogError("SDF kernel size must be a multiple of SDF resolution.");
+            }
+
+            _numKernels.x = (int)(SDFResolution.x / _kernelSizeX);
+            _numKernels.y = (int)(SDFResolution.y / _kernelSizeY);
+            _numKernels.z = (int)(SDFResolution.z / _kernelSizeZ);
+
+            // Create output 3D render texture.
+            RenderTextureDescriptor renderTexDesc = new RenderTextureDescriptor();
+            renderTexDesc.dimension = TextureDimension.Tex3D;
+            renderTexDesc.colorFormat = RenderTextureFormat.RFloat;
+            renderTexDesc.enableRandomWrite = true;
+            renderTexDesc.width = SDFResolution.x;
+            renderTexDesc.height = SDFResolution.y;
+            renderTexDesc.volumeDepth = SDFResolution.z;
+            renderTexDesc.msaaSamples = 1;
+            renderTexDesc.mipCount = 0;
+            renderTexDesc.useMipMap = false;
+
+            _sdfVolumeTexture[0] = new RenderTexture(renderTexDesc);
+            _sdfVolumeTexture[0].Create();
+            _sdfVolumeTexture[1] = new RenderTexture(renderTexDesc);
+            _sdfVolumeTexture[1].Create();
+
+            SDFCompute.SetTexture(kernelID, "_sdfTexOut", _sdfVolumeTexture[0], 0, RenderTextureSubElement.Color);
+
+            SDFCompute.Dispatch(kernelID, _numKernels.x, _numKernels.y, _numKernels.z);
+
+            SDFRendererInstance.SetSDFTexture(_sdfVolumeTexture[0]);
+        }
+
+        public void SetSDFParams(ComputeShader shader)
+        {
+            shader.SetInt("_sdfTexSizeX", SDFResolution.x);
+            shader.SetInt("_sdfTexSizeY", SDFResolution.y);
+            shader.SetInt("_sdfTexSizeZ", SDFResolution.z);
+            shader.SetFloat("_sdfRadius", SDFRadius);
+            shader.SetFloat("_sdfMaxDist", SDFMaxDist);
+            shader.SetFloat("_sphereRadius", SphereRadius);
+            shader.SetFloat("_brushSize", DebugWindow.Instance.BrushSize);
+            shader.SetFloat("_brushHeight", DebugWindow.Instance.BrushHeight);
+            shader.SetBool("_doEikonel", _eikonelPasses > 0);
+            shader.SetInt("_maxRaymarchSteps", DebugWindow.Instance.MaxRaymarchSteps);
+        }
+        
+        public void SetSDFParams(Material mat)
+        {
+            mat.SetInt(SDF_TEX_SIZE_X, SDFResolution.x);
+            mat.SetInt(SDF_TEX_SIZE_Y, SDFResolution.y);
+            mat.SetInt(SDF_TEX_SIZE_Z, SDFResolution.z);
+            mat.SetFloat(RADIUS, SDFRadius);
+            mat.SetFloat(MAX_DIST, SDFMaxDist);
+            mat.SetFloat(SPHERE_RADIUS1, SphereRadius);
+            mat.SetInt(MAX_RAYMARCH_STEPS, DebugWindow.Instance.MaxRaymarchSteps);
+            mat.SetVector(SUN_POS, DebugWindow.Instance.SunPos);
+            mat.SetFloat(SHADOW_INTENSITY, DebugWindow.Instance.ShadowIntensity);
+            mat.SetFloat(SHADOW_SOFTNESS, DebugWindow.Instance.ShadowSoftness);
+        }
+    }
+}
+```
+
+### Assets/Scripts/SDF/SDFRenderer.cs
+```
+using System.Collections.Generic;
+using Boids;
+using UImGui;
+using UnityEngine;
+
+namespace SDF
+{
+    public class SDFRenderer : MonoBehaviour
+    {
+        [SerializeField] private Texture2D PlanetTexture;
+        
+        public Material SDFRendererMat => _sdfRendererMat;
+        
+        private Material _sdfRendererMat;
+        private Transform _trans;
+
+        private static readonly int BOID_COUNT = Shader.PropertyToID("_boidCount");
+        private static readonly int BOID_POSITIONS = Shader.PropertyToID("_boidPositions");
+        private static readonly int BOID_RADII = Shader.PropertyToID("_boidRadii");
+        private static readonly int PLANET_TEX = Shader.PropertyToID("_planetTex");
+        private static readonly int PLANET_TEX_HEIGHT = Shader.PropertyToID("_planetTexHeight");
+        private static readonly int DEBUG_MODE = Shader.PropertyToID("_debugMode");
+        private static readonly int AO_SAMPLES = Shader.PropertyToID("_aoSamples");
+        private static readonly int AO_KERNEL_SIZE = Shader.PropertyToID("_aoKernelSize");
+        private static readonly int MAX_RAYMARCH_STEPS = Shader.PropertyToID("_maxRaymarchSteps");
+        private static readonly int SDF_TEX_IN = Shader.PropertyToID("_sdfTexIn");
+
+        private void Awake()
+        {
+            _trans = transform;
+        }
+
+        private void Start()
+        {
+            _sdfRendererMat = GetComponent<MeshRenderer>().material;
+            _sdfRendererMat.SetVectorArray(BOID_POSITIONS, new Vector4[256]);
+            _sdfRendererMat.SetFloatArray(BOID_RADII, new float[256]);
+            _sdfRendererMat.SetTexture(PLANET_TEX, PlanetTexture);
+            _sdfRendererMat.SetFloat(PLANET_TEX_HEIGHT, PlanetTexture.height);
+        }
+
+        private void Update()
+        {
+            Shader.SetGlobalInt(DEBUG_MODE, DebugWindow.Instance.DebugDrawMode);
+            if (DebugWindow.Instance.DebugDrawMode == 1)
+            {
+                Vector3 p = _trans.localPosition;
+                p.z = 1.0f;
+                _trans.localPosition = p;
+            }
+            else
+            {
+                Vector3 p = _trans.localPosition;
+                p.z = 0.11f;
+                _trans.localPosition = p;
+            }
+            
+            _sdfRendererMat.SetInt(AO_SAMPLES, DebugWindow.Instance.AOSamples);
+            _sdfRendererMat.SetFloat(AO_KERNEL_SIZE, DebugWindow.Instance.AOKernelSize);
+            _sdfRendererMat.SetInt(MAX_RAYMARCH_STEPS, DebugWindow.Instance.MaxRaymarchSteps);
+        }
+
+        public void SetSDFTexture(RenderTexture tex)
+        {
+            _sdfRendererMat.SetTexture(SDF_TEX_IN, tex);
+        }
+
+        public void SetBoids(List<BoidController.Boid> boids)
+        {
+            _sdfRendererMat.SetFloat(BOID_COUNT, boids.Count);
+            if (boids.Count > 0)
+            {
+                Vector4[] posArray = new Vector4[boids.Count];
+                float[] radArray = new float[boids.Count];
+                for (int i = 0; i <boids.Count; i++)
+                {
+                    posArray[i] = boids[i].Position;
+                    radArray[i] = boids[i].Radius;
+                }
+                _sdfRendererMat.SetVectorArray(BOID_POSITIONS, posArray);
+                _sdfRendererMat.SetFloatArray(BOID_RADII, radArray);
+            }
+        }
+    }
+}
+```
+
+### Assets/Scripts/UI/DebugWindow.cs
+```
+using ImGuiNET;
+using UnityEngine;
+
+namespace UImGui
+{
+    public class DebugWindow : MonoBehaviour
+    {
+        private static DebugWindow _instance;
+        public static DebugWindow Instance => _instance;
+        
+        public int Mode;
+        public float BrushSize = 0.1f;
+        public float BrushHeight;
+        public bool Reset;
+        public bool Spawn;
+        public float Gravity = 1.0f;
+        public int DebugDrawMode;
+        public int CameraMode;
+        public int SdfResolution = 32;
+        public float FPS;
+        public int AOSamples = 8;
+        public float AOKernelSize = 0.075f;
+        public int MaxRaymarchSteps = 128;
+        public Vector3 SunPos = new Vector3(0.0f, 10.0f, 0.0f);
+        public float ShadowIntensity = 0.5f;
+        public float ShadowSoftness = 0.8f;
+        
+        private void Awake()
+        {
+            _instance = this;
+        }
+
+        private void OnEnable()
+        {
+            UImGuiUtility.Layout += OnLayout;
+        }
+
+        private void OnDisable()
+        {
+            UImGuiUtility.Layout -= OnLayout;
+        }
+
+        private void Update()
+        {
+            float fps = 1.0f / Time.deltaTime;
+            FPS = 0.033f * fps + 0.966f * FPS;
+        }
+
+        private void OnLayout(UImGui uImGui)
+        {
+            if (ImGui.Begin("DEBUG MENU", ImGuiWindowFlags.AlwaysAutoResize))
+            {
+                ImGui.Text($"FPS: {FPS:F0}");
+                
+                ImGui.BeginTabBar("DEBUG MENU#left_tabs_bar");
+                if (ImGui.BeginTabItem("General"))
+                {
+                    ImGui.Dummy(Vector2.one * 5.0f);
+                
+                    Spawn = ImGui.Button("Spawn Boid");
+                    ImGui.Dummy(Vector2.one * 5.0f);
+                
+                    ImGui.TextColored(Color.gray, "SDF Modify Mode:");
+                    ImGui.RadioButton("Add", ref Mode, 0); ImGui.SameLine();
+                    ImGui.RadioButton("Cut", ref Mode, 1); ImGui.SameLine();
+                    ImGui.RadioButton("None", ref Mode, 2);
+                    ImGui.Dummy(Vector2.one * 5.0f);
+                
+                    ImGui.TextColored(Color.gray, "Camera Mode:");
+                    ImGui.RadioButton("Orbit", ref CameraMode, 0); ImGui.SameLine();
+                    ImGui.RadioButton("WASD", ref CameraMode, 1);
+                    ImGui.Dummy(Vector2.one * 5.0f);
+                
+                    ImGui.TextColored(Color.gray, "Draw Mode:");
+                    ImGui.RadioButton("Standard", ref DebugDrawMode, 0); ImGui.SameLine();
+                    ImGui.RadioButton("Debug", ref DebugDrawMode, 1);
+                    ImGui.Dummy(Vector2.one * 5.0f);
+                    
+                    ImGui.TextColored(Color.gray, "Brush Size:");
+                    ImGui.SliderFloat("##1", ref BrushSize, 0.005f, 0.25f);
+                    ImGui.TextColored(Color.gray, "Brush Height:");
+                    ImGui.SliderFloat("##2", ref BrushHeight, -1.0f, 1.0f);
+                    ImGui.TextColored(Color.gray, "Gravity:");
+                    ImGui.SliderFloat("##3", ref Gravity, -2.0f, 2.0f);
+
+                    ImGui.Dummy(Vector2.one * 5.0f);
+                
+                    ImGui.TextColored(Color.gray, $"SDF Resolution ({SdfResolution * 8}^3)");
+                    ImGui.SliderInt("##4", ref SdfResolution, 2, 64);
+                    Reset = ImGui.Button("Reset");
+                    ImGui.Dummy(Vector2.one * 5.0f);
+                    
+                    ImGui.EndTabItem();
+                }
+
+                if (ImGui.BeginTabItem("Rendering"))
+                {
+                    ImGui.TextColored(Color.gray, "AO Samples:");
+                    ImGui.SliderInt("##1", ref AOSamples, 0, 32);
+                    
+                    ImGui.TextColored(Color.gray, "AO Kernel Size:");
+                    ImGui.SliderFloat("##2", ref AOKernelSize, 0.0f, 0.25f);
+                    
+                    ImGui.TextColored(Color.gray, "Shadow Intensity:");
+                    ImGui.SliderFloat("##5", ref ShadowIntensity, 0.0f, 1.0f);
+                    
+                    ImGui.TextColored(Color.gray, "Shadow Softness:");
+                    ImGui.SliderFloat("##6", ref ShadowSoftness, 0.0f, 1.0f);
+
+                    ImGui.TextColored(Color.gray, "Max Raymarch Steps:");
+                    ImGui.SliderInt("##3", ref MaxRaymarchSteps, 8, 512);
+
+                    ImGui.TextColored(Color.gray, "Sun Position:");
+                    ImGui.SliderFloat3("##4", ref SunPos, -10.0f, 10.0f);
+                    
+                    ImGui.EndTabItem();
+                }
+
+                ImGui.EndTabBar();
+                ImGui.End();
+            }
+        }
+    }
+}
+```

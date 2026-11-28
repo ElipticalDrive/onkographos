@@ -1,0 +1,187 @@
+--- v002.md
++++ v003.md
+@@ -1,4 +1,4 @@
+ # Generalized Exponential Splatting
+-
++Also called: GES
+ 
+ ## Overview
+@@ -8,11 +8,10 @@
+ ### Inputs and Outputs
+ **Inputs:**
+-- A set of $N$ primitives, each defined by location $\boldsymbol{\mu}$, scale $\boldsymbol{\Sigma}$ (or equivalent parameterization), amplitude $A$, and shape parameter $\beta$ [S1].
+-- Camera parameters (view and projection matrices) [S1].
++- A set of $N$ primitives, each defined by location $\boldsymbol{\mu}$, scale $\alpha$, amplitude $A$, and shape parameter $\beta$ [S1].
+ - Target images for optimization [S1].
+ 
+ **Outputs:**
+ - Rendered 2D images from novel viewpoints [S1].
+-- Optimized primitive parameters ($\boldsymbol{\mu}, \boldsymbol{\Sigma}, A, \beta$) [S1].
++- Optimized primitive parameters ($\boldsymbol{\mu}, \alpha, A, \beta$) [S1].
+ 
+ ### Data Structures
+@@ -31,15 +30,13 @@
+ where $\mu \in \mathbb{R}$ is the location, $\alpha \in \mathbb{R}$ is the scale, $A \in \mathbb{R}^+$ is the amplitude, and $\beta \in (0, \infty)$ is the shape parameter [S1]. When $\beta = 2$, the GEF reduces to a scaled Gaussian function [S1].
+ 
+-For 3D rendering, the GEF is extended to a multivariate form. Let $\mathbf{x}$ be a point in 3D space, $\boldsymbol{\mu}$ be the mean position, and $\boldsymbol{\Sigma}$ be the positive definite covariance matrix. The 3D GEF is defined as [S1]:
+-$$ L(\mathbf{x}; \boldsymbol{\mu}, \boldsymbol{\Sigma}, \boldsymbol{\beta}) = \exp \left\{ -\frac{1}{2} (\mathbf{x} - \boldsymbol{\mu})^T \boldsymbol{\Sigma}^{-1} (\mathbf{x} - \boldsymbol{\mu}) \right\}^{1/\beta} $$
+-*Note: The source defines the 3D form implicitly by extending the 1D exponent structure. The exact 3D formulation involves applying the shape parameter $\beta$ to the Mahalanobis distance term within the exponential, effectively generalizing the Gaussian exponent $-\frac{1}{2}\mathbf{d}^T \boldsymbol{\Sigma}^{-1} \mathbf{d}$ to $-\left(\frac{1}{2}\mathbf{d}^T \boldsymbol{\Sigma}^{-1} \mathbf{d}\right)^{1/\beta}$ or similar, ensuring $\beta=2$ recovers the Gaussian [S1]. The source explicitly states $L(\mathbf{x}; \boldsymbol{\mu}, \boldsymbol{\Sigma}, \boldsymbol{\beta}) = \exp \{ -\frac{1}{2} ((\mathbf{x} - \boldsymbol{\mu})^T \boldsymbol{\Sigma}^{-1} (\mathbf{x} - \boldsymbol{\mu}))^{1/\beta} \}$ is the intended generalization, though the text cuts off. We assume the standard generalization of the exponent power.*
+-
+-The rendering process projects the 3D primitives to 2D screen space. The 2D covariance $\boldsymbol{\Sigma}'_i$ and mean $\boldsymbol{\mu}'_i$ are computed as described in the parent article [G]. The 2D density at pixel $u$ is evaluated as [S1]:
++For 3D rendering, the GEF is extended to a multivariate form [S1]. Let $\mathbf{x}$ be a point in 3D space, $\boldsymbol{\mu}$ be the mean position, and $\boldsymbol{\Sigma}$ be the positive definite covariance matrix [G]. The 3D GEF is defined as [S1]:
++$$ L(\mathbf{x}; \boldsymbol{\mu}, \boldsymbol{\Sigma}, \beta) = \exp \left\{ -\frac{1}{2} \left( (\mathbf{x} - \boldsymbol{\mu})^T \boldsymbol{\Sigma}^{-1} (\mathbf{x} - \boldsymbol{\mu}) \right)^{1/\beta} \right\} $$
++The rendering process projects the 3D primitives to 2D screen space [G]. The 2D covariance $\boldsymbol{\Sigma}'_i$ and mean $\boldsymbol{\mu}'_i$ are computed as described in the parent article [G]. The 2D density at pixel $u$ is evaluated as [S1]:
+ $$ T_i(u) = \exp \left( -\frac{1}{2} (u - \boldsymbol{\mu}'_i)^T (\boldsymbol{\Sigma}'_i)^{-1} (u - \boldsymbol{\mu}'_i) \right)^{1/\beta_i} $$
+-The effective opacity is $\alpha_i T_i(u)$, and colors are composited using alpha blending [G].
++The effective opacity is $A_i T_i(u)$, and colors are composited using alpha blending [G].
+ 
+ ### Parameters and Optimization
+ **Initialization:**
+--   $\beta$ is initialized to 0 (which corresponds to $\beta=2$ in the exponent space if shifted, or simply a starting point for optimization; the source notes "shifted by -2" and "initialized to 0 instead of 2" implying an internal representation offset) [S1].
++-   $\beta$ is initialized to 0, which corresponds to an internal offset; the actual shape parameter used in rendering is $\beta_{\text{actual}} = \beta_{\text{stored}} + 2$ [S1].
+ -   Other parameters ($\boldsymbol{\mu}, \boldsymbol{\Sigma}, A$) are initialized similarly to 3D Gaussian Splatting [S1].
+ 
+@@ -62,89 +59,80 @@
+ 
+ **Loss Function:**
+--   Includes SSIM loss with weight $\lambda_{ssim} = 0.2$ [S1].
+--   Includes a specialized frequency-modulated image loss (Image Laplacian) with weight $\lambda_\omega = 0.5$ [S1].
+--   For the DoG (Difference of Gaussians) term in the loss, if $\sigma^2$ is large, the ground truth image is downsampled by a factor `scaleim,freq` (0.2) and the mask $M_\omega$ is upsampled similarly before calculating the loss [S1].
++-   SSIM loss with weight $\lambda_{ssim} = 0.2$ [S1].
++-   Specialized frequency-modulated image loss (Image Laplacian) with weight $\lambda_\omega = 0.5$ [S1].
++-   For the DoG term in the loss, if $\sigma^2$ is large, the ground truth image is downsampled by a factor `scaleim,freq` (0.2) and the mask $M_\omega$ is upsampled similarly before calculating the loss [S1].
+ 
+ ### Pseudocode
+ ```python
+-def initialize_primitives(images, cameras):
+-    # Initialize N primitives with random or SfM-based positions
+-    # Parameters: mu (3D), Sigma (3x3), A (scalar), beta (scalar)
+-    # Beta is initialized to 0 (internal offset) or 2 (actual value)
++def initialize_primitives(N):
+     primitives = []
+-    for i in range(N):
+-        p = Primitive()
+-        p.mu = random_3d_position()
+-        p.Sigma = random_positive_definite_matrix()
+-        p.A = random_positive_scalar()
+-        p.beta = 0.0  # Internal representation; actual beta = p.beta + 2
++    for _ in range(N):
++        p = {
++            'mu': random_3d_position(),
++            'Sigma': random_positive_definite_matrix(),
++            'A': random_positive_scalar(),
++            'beta': 0.0,
++            'color': random_color()
++        }
+         primitives.append(p)
+     return primitives
+ 
+ def render(primitives, camera):
+-    # Project 3D primitives to 2D screen space
+     screen_primitives = []
+     for p in primitives:
+-        # Compute 2D covariance Sigma' and mean mu' using Jacobian J and View W
+-        # Sigma' = J * W * Sigma * W^T * J^T
+-        # mu' = project(mu)
+-        # Effective beta for rendering
+-        beta_eff = p.beta + 2.0
+-        
+-        # Compute 2D density T(u) for bounding box of primitive
+-        # T(u) = exp( -0.5 * (u - mu')^T * (Sigma')^-1 * (u - mu') )^(1/beta_eff)
++        beta_eff = p['beta'] + 2.0
++        mu_2d = project_3d_to_2d(p['mu'], camera)
++        Sigma_2d = project_covariance(p['Sigma'], camera)
+         screen_primitives.append({
+-            'mu': mu',
+-            'Sigma': Sigma',
+-            'A': p.A,
++            'mu': mu_2d,
++            'Sigma': Sigma_2d,
++            'A': p['A'],
+             'beta': beta_eff,
+-            'color': p.color,
+-            'depth': p.mu.z
++            'color': p['color'],
++            'depth': p['mu'].z
+         })
+     
+-    # Sort by depth
+     screen_primitives.sort(key=lambda x: x['depth'])
+     
+-    # Rasterize and composite
+-    image = zeros(width, height, 3)
++    height, width = camera.resolution
++    image = [[0.0, 0.0, 0.0] for _ in range(height)]
++    alpha_accum = [[0.0 for _ in range(width)] for _ in range(height)]
++    
+     for prim in screen_primitives:
+-        for pixel in bounding_box(prim):
+-            dist_sq = (pixel - prim['mu']).T @ inv(prim['Sigma']) @ (pixel - prim['mu'])
+-            # GEF density
+-            T = exp(-0.5 * dist_sq) ** (1.0 / prim['beta'])
+-            alpha = prim['A'] * T
+-            
+-            # Alpha compositing
+-            # C = sum(c_i * alpha_i * product(1 - alpha_j * T_j))
+-            # Implementation uses standard front-to-back alpha blending
+-            image[pixel] = composite(image[pixel], prim['color'], alpha)
+-            
++        bbox = compute_bounding_box(prim['mu'], prim['Sigma'])
++        for y in range(max(0, bbox.y_min), min(height, bbox.y_max)):
++            for x in range(max(0, bbox.x_min), min(width, bbox.x_max)):
++                dist_sq = (vector_sub((x, y), prim['mu'])).T @ inv(prim['Sigma']) @ vector_sub((x, y), prim['mu'])
++                T = math.exp(-0.5 * dist_sq) ** (1.0 / prim['beta'])
++                alpha = prim['A'] * T
++                
++                if alpha_accum[y][x] >= 1.0:
++                    continue
++                    
++                c = prim['color']
++                image[y][x] = [
++                    image[y][x][0] + c[0] * alpha * (1.0 - alpha_accum[y][x]),
++                    image[y][x][1] + c[1] * alpha * (1.0 - alpha_accum[y][x]),
++                    image[y][x][2] + c[2] * alpha * (1.0 - alpha_accum[y][x])
++                ]
++                alpha_accum[y][x] += alpha * (1.0 - alpha_accum[y][x])
++                
+     return image
+ 
+ def optimize(primitives, images, cameras, iterations=40000):
+-    for iter in range(iterations):
+-        # Select random camera and image
++    for it in range(iterations):
+         cam, gt_image = random_sample(cameras, images)
+-        
+-        # Forward pass
+         pred_image = render(primitives, cam)
+-        
+-        # Compute Loss
+-        # L = lambda_ssim * L_ssim(pred, gt) + lambda_omega * L_omega(pred, gt)
+-        # L_omega involves Image Laplacian
+         loss = compute_loss(pred_image, gt_image)
+-        
+-        # Backward pass and update
+         gradients = compute_gradients(loss, primitives)
+         update_parameters(primitives, gradients, learning_rates)
+         
+-        # Densification and Pruning
+-        if 500 <= iter <= 15000 and iter % 100 == 0:
++        if 500 <= it <= 15000 and it % 100 == 0:
+             densify_primitives(primitives, gradients, threshold=0.0003)
+-        if iter % 100 == 0:
++        if it % 100 == 0:
+             prune_primitives(primitives, opacity_threshold=0.005, shape_threshold=0.005)
+-        if iter % 3000 == 0:
++        if it % 3000 == 0:
+             reset_opacity(primitives)
+-        if iter % 1000 == 0:
++        if it % 1000 == 0:
+             reset_shape(primitives)
+ ```
+@@ -153,5 +141,5 @@
+ -   **Numerical Instability**: Optimization can fail for certain signal types and component counts due to numerical instability in both Gaussian and GEF mixtures [S1].
+ -   **Analytical Difficulty**: The GEF involves complex integrals of exponentials without closed form depending on $\beta$, making analytical study difficult [S1].
+--   **Approximation Error**: In the worst-case scenario (square larger than circle), the GES approximation results in a 36.34% energy error in the lost energy of all rays passing through all splatting components. The error ratio $\eta$ is bounded by $0.2732 \le \eta \le 0.3634$ [S1].
++-   **Approximation Error**: In the worst-case scenario (square larger than circle), the GES approximation results in a 36.34% energy error in the lost energy of all rays passing through all splatting components [S1]. The error ratio $\eta$ is bounded by $0.2732 \le \eta \le 0.3634$ [S1].
+ 
+ ## Operating characteristics

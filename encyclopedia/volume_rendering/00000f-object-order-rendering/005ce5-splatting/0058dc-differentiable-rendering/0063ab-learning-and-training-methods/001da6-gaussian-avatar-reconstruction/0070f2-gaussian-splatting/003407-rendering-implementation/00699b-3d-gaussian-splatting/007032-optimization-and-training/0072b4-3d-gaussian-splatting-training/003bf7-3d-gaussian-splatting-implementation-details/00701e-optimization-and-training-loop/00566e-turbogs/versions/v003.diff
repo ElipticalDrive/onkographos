@@ -1,0 +1,161 @@
+--- v002.md
++++ v003.md
+@@ -72,59 +72,61 @@
+ **Pseudocode:**
+ ```python
+-def turbogs_train(G, Cameras, Images, T, K_max, K_min, S, beta, lambda_d, lambda_theta, lambda_base, r_hard, r_stable):
+-    # Initialization
+-    E = initialize_error_maps(G, Cameras, Images) # Dense eval for G0
+-    A = zeros_like(E, dtype=uint16)
+-    ViewStack = shuffle(list(range(len(Cameras))))
++def turbogs_train(G, Cameras, Images, T, K_max, K_min, S, beta, lambda_d, lambda_theta, lambda_base, r_hard, r_stable, tau_until):
++    # Initialization: densely evaluate error for initial Gaussians G0
++    E = np.zeros((len(Cameras), H, W), dtype=np.float16)
++    for v in range(len(Cameras)):
++        for p in all_pixels:
++            E[v][p] = np.linalg.norm(render(G, Cameras[v], p) - Images[v][p])
++    A = np.zeros_like(E, dtype=np.uint16)
++    ViewStack = list(range(len(Cameras)))
++    np.random.shuffle(ViewStack)
+     
+     for t in range(T):
+-        rho = min(1.0, t / tau_until) # tau_until is a hyperparameter
++        rho = min(1.0, t / tau_until)
+         
+-        # 1. Sampling Parameters
+-        K_t, r_t = query_schedule(K_max, K_min, E, t)
+-        N_pix = max(1, floor(r_t * S * S))
+-        N_hard = ceil(r_hard * N_pix)
+-        N_stable = floor(r_stable * N_pix)
++        # 1. Sampling Parameters: query schedule (not given in sources)
++        K_t, r_t = query_sampling_schedule(K_max, K_min, E, t)
++        N_pix = max(1, int(np.floor(r_t * S * S)))
++        N_hard = int(np.ceil(r_hard * N_pix))
++        N_stable = int(np.floor(r_stable * N_pix))
+         
+         # 2. View Selection
+-        # Anchor view: highest average error
+-        avg_errors = [mean(E[v]) for v in range(len(Cameras))]
+-        v_star = argmax(avg_errors)
+-        
+-        # Sample K_t - 1 neighbors
++        avg_errors = [np.mean(E[v]) for v in range(len(Cameras))]
++        v_star = int(np.argmax(avg_errors))
+         V_t = [v_star]
+         candidates = [u for u in ViewStack if u != v_star]
+         for _ in range(K_t - 1):
+             if not candidates:
+-                ViewStack = shuffle(list(range(len(Cameras))))
++                ViewStack = list(range(len(Cameras)))
++                np.random.shuffle(ViewStack)
+                 candidates = [u for u in ViewStack if u not in V_t]
+-            # Sample from candidates using geometry-aware distribution
+-            # pi(u|v*) ~ exp(-lambda_d * ||c_u - c_v*||^2 - lambda_theta * (1 - <d_u, d_v*>))
+-            u = sample_from_distribution(candidates, v_star, lambda_d, lambda_theta)
++            probs = []
++            for u in candidates:
++                c_u, d_u = Cameras[u].center, Cameras[u].direction
++                c_v, d_v = Cameras[v_star].center, Cameras[v_star].direction
++                score = np.exp(-lambda_d * np.linalg.norm(c_u - c_v)**2 - lambda_theta * (1 - np.dot(d_u, d_v)))
++                probs.append(score)
++            probs = np.array(probs) / np.sum(probs)
++            u_idx = np.random.choice(len(candidates), p=probs)
++            u = candidates[u_idx]
+             V_t.append(u)
+             candidates.remove(u)
+             
+         # 3. Tile-Wise Pixel Sampling
+-        P_t = {} # Dict: view_idx -> list of (tile_idx, pixel_indices)
++        P_t = {}
+         for v in V_t:
+             P_t[v] = []
+             for tile_idx in range(num_tiles):
+                 tile_pixels = get_pixels_in_tile(tile_idx, S)
+-                
+-                # Hard pixels: top N_hard by error
+                 errors_in_tile = [E[v][p] for p in tile_pixels]
+-                hard_indices = top_k_indices(errors_in_tile, N_hard)
++                hard_indices = np.argsort(errors_in_tile)[-N_hard:]
+                 H = [tile_pixels[i] for i in hard_indices]
+-                
+-                # Stable pixels: top N_stable by age from remaining
+                 remaining = [p for p in tile_pixels if p not in H]
+                 ages_in_remaining = [A[v][p] for p in remaining]
+-                stable_indices = top_k_indices(ages_in_remaining, N_stable)
++                stable_indices = np.argsort(ages_in_remaining)[-N_stable:]
+                 S_set = [remaining[i] for i in stable_indices]
+-                
+                 P_t[v].append((tile_idx, H + S_set))
+                 
+-        # 4. Sparse Forward Rendering
+-        # Rasterize only pixels in P_t, ordered by tile
++        # 4. Sparse Forward Rendering: output sampled pixels in tile order, compute offsets via prefix-sum
+         RenderedColors, RenderedDepth = sparse_rasterize_forward(G, Cameras, P_t)
+         
+@@ -133,25 +135,16 @@
+         for v in V_t:
+             for tile_idx, sampled_pixels in P_t[v]:
+-                # Get GT colors for sampled pixels
+                 GT_Colors = [Images[v][p] for p in sampled_pixels]
+                 Rendered = [RenderedColors[v][p] for p in sampled_pixels]
+-                
+-                # L1 Loss
+-                L1 = mean([abs(r - g) for r, g in zip(Rendered, GT_Colors)])
+-                
+-                # S-NCC Loss
++                L1 = np.mean([np.abs(r - g) for r, g in zip(Rendered, GT_Colors)])
+                 NCC = normalized_cross_correlation(Rendered, GT_Colors)
+                 SNCC = 1.0 - NCC
+-                
+-                # Gradient-balanced weighting
+-                # Compute gradient norms for L1 and SNCC w.r.t rendered colors
+-                g_L1 = mean([norm(grad_L1(p)) for p in sampled_pixels])
+-                g_SNCC = mean([norm(grad_SNCC(p)) for p in sampled_pixels])
+-                lambda_ncc = clip(g_L1 / (g_SNCC + epsilon), 0, 1)
+-                
++                g_L1 = np.mean([np.linalg.norm(grad_L1(p)) for p in sampled_pixels])
++                g_SNCC = np.mean([np.linalg.norm(grad_SNCC(p)) for p in sampled_pixels])
++                lambda_ncc = np.clip(g_L1 / (g_SNCC + epsilon), 0, 1)
+                 TileLoss = L1 + lambda_ncc * SNCC
+                 Loss += TileLoss
+                 
+-        # Backward pass to get Gaussian gradients
++        # Backward pass: retrieve sparse pixels via tile-pixel indexing, propagate gradients via warp shuffle
+         GradG = sparse_rasterize_backward(GradLoss, G, P_t)
+         
+@@ -160,29 +153,19 @@
+             for tile_idx, sampled_pixels in P_t[v]:
+                 for p in sampled_pixels:
+-                    err = abs(RenderedColors[v][p] - Images[v][p])
++                    err = np.abs(RenderedColors[v][p] - Images[v][p])
+                     E[v][p] = (1 - beta) * E[v][p] + beta * err
+                     A[v][p] = 0
+-            # Increment age for non-sampled pixels
+-            for v_idx, v in enumerate(Cameras):
+-                if v not in V_t:
+-                    continue
+-                # This loop is inefficient in pseudocode but represents the logic
+-                # In practice, A is incremented globally or via mask
+-                for p in all_pixels:
+-                    if p not in sampled_pixels:
+-                        A[v][p] += 1
++            for p in all_pixels:
++                if p not in sampled_pixels:
++                    A[v][p] += 1
+                         
+         # 7. Moment-Damped LM Solver
+         for g in G:
+-            # Compute local Jacobian J_g and Adam moments m_g, v_g
+             J_g, m_g, v_g = compute_local_jacobian_and_moments(g, GradG)
+-            # Solve (J_g^T J_g + diag(sqrt(v_g) + eps)) Delta_g = -m_g
+-            Delta_g = solve_linear_system(J_g.T @ J_g + diag(sqrt(v_g) + epsilon), -m_g)
++            Delta_g = solve_linear_system(J_g.T @ J_g + np.diag(np.sqrt(v_g) + epsilon), -m_g)
+             g += Delta_g
+             
+-        # 8. Error-Driven Density Control
+-        # Back-project properties
++        # 8. Error-Driven Density Control: back-project properties, densify/prune
+         e_G, D_G, alpha_G = back_project_properties(G, P_t, RenderedColors)
+-        # Densify and prune based on e_G, D_G, alpha_G and screen radii
+         G = error_driven_density_control(G, e_G, D_G, alpha_G, t)
+         

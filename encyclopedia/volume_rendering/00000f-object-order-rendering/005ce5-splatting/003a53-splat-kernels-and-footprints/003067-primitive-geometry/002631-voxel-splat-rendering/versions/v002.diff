@@ -1,0 +1,255 @@
+--- v001.md
++++ v002.md
+@@ -4,184 +4,98 @@
+ 
+ ## Overview
+-Voxel Splat Rendering is an object-space, front-to-back volume rendering technique that projects 3D voxels onto the 2D screen as weighted splats (square or circular primitives) to synthesize a final image [S3, unofficial]. It solves the problem of efficiently visualizing large, sparse volumetric datasets by allowing interactive selection of specific voxel subsets (e.g., based on color or spatial bounds) and fine-tuning visual appearance via alpha and gamma parameters [S2, unofficial]. Unlike traditional raycasting, it avoids per-ray traversal by treating each voxel as an independent contributor to screen-space pixels, making it suitable for real-time interaction with out-of-core data [S2, S3, unofficial].
++Voxel Splat Rendering is an object-order volume rendering technique that projects 3D voxels onto the 2D image plane as geometric primitives (splats), typically quads or circles, which are then rasterized and blended [S2, S3, unofficial]. It solves the problem of interactive visualization of large volumetric datasets by leveraging hardware-accelerated rasterization pipelines, allowing for real-time interaction such as slice-based value selection and parameter tuning [S2, unofficial]. Unlike ray-casting methods that compute contributions per pixel, this method computes contributions per voxel, making it distinct from siblings like Circle Splat Rendering which may use different primitive shapes or kernel approximations [S2, S3, unofficial].
+ 
+ ## How it works
++**Inputs:** A 3D volumetric dataset (voxels with position, color, and optionally normal/density attributes); a camera view (eye position, projection matrix); and rendering parameters (point size, alpha, gamma).
++**Outputs:** A 2D color image.
+ 
+-### Inputs and Outputs
+-**Inputs:**
+-*   A 3D volumetric dataset where each voxel contains position, color, and optionally a surface normal [S1][S2, unofficial].
+-*   Camera parameters: Eye position, view direction, and projection matrix [S1].
+-*   Rendering parameters: Point size (splat diameter), alpha value, gamma value, and anti-aliasing settings [S2, unofficial].
+-*   Selection criteria: A set of active colors/voxelsets and an optional bounding box for spatial culling [S2, unofficial].
++**Data Structures:**
++*   **Voxel:** Contains position $(x, y, z)$, color $(r, g, b)$, and optionally a normal vector $\mathbf{n}$. In out-of-core implementations, voxels are stored with relative positions to reduce disk I/O [S2, unofficial].
++*   **Normal Storage:** Normals can be quantized to one of 240 pre-defined directions distributed nearly uniformly over a sphere (derived from a dodecahedron triangulation), stored in 1 byte [S2, unofficial].
++*   **Bounding Box:** A pre-defined region used to filter voxels during interactive selection to reduce decoding overhead [S2, unofficial].
+ 
+-**Outputs:**
+-*   A 2D color image (and optionally depth/normal buffers) representing the volume from the current viewpoint [S1][S2, unofficial].
++**Steps:**
+ 
+-### Data Structures
+-*   **Voxel:** Contains position $(x, y, z)$, color $(R, G, B)$, and a normal vector $(N_x, N_y, N_z)$ [S1][S2, unofficial].
+-    *   *Note:* Normals may be quantized to one of 240 pre-defined directions stored in a lookup table, requiring only 1 byte per voxel for normal storage [S2, unofficial].
+-*   **Voxel Set:** A subset of voxels selected by color or spatial bounds, retrieved from disk in real-time [S2, unofficial].
+-*   **Screen Buffer:** Accumulates the final color values. If alpha-blending is disabled, a separate buffer may store normals for shading [S2, unofficial].
++1.  **Front-to-Back Traversal:** Traverse the 3D dataset in front-to-back order relative to the current camera view [S3, unofficial]. This ensures correct alpha blending accumulation.
++2.  **Voxel Selection (Optional):** If interactive value selection is active, retrieve and decode only voxels corresponding to selected colors within a pre-defined bounding box [S2, unofficial]. This handles cases where different tissues share similar colors by limiting the rendered subset [S2, unofficial].
++3.  **Projection and Splat Generation:** For each voxel $k$:
++    *   Project the voxel center to screen space.
++    *   Determine the screen-space footprint. The contribution is highest at the center and drops off away from it [S3, unofficial].
++    *   Render the voxel as a square or circular splat (quad or point) using GL commands/extensions [S2, unofficial]. The diameter can be fixed or distance-dependent [S2, unofficial].
++4.  **Weighting (For Multi-View/Texture Mapping):** If weighting contributions based on camera visibility (e.g., for image-based modeling), compute weights for each camera $i$ [S1]:
++    *   Let $\mathbf{V}_{toEye}$ be the unit vector from the voxel center to the eye point.
++    *   Let $\mathbf{N}$ be the unit normal to the surface at the voxel center.
++    *   Let $\mathbf{V}_{toCamera}[i]$ be the unit vector from the voxel center to camera $i$'s position.
++    *   Calculate view weight: $w_V = \max(0, \mathbf{V}_{toEye} \cdot \mathbf{V}_{toCamera}[i])^4$.
++    *   Calculate normal weight: $w_N = \max(0, \mathbf{N} \cdot \mathbf{V}_{toCamera}[i])^4$.
++    *   Total weight: $w[i] = w_V \cdot w_N$.
++    *   Normalize weights by dividing by the sum of all weights [S1].
++5.  **Rasterization and Blending:**
++    *   If alpha-blending is enabled, blend the splat's color into the frame buffer using the computed weights and alpha/gamma parameters [S2, unofficial].
++    *   If alpha-blending is disabled, use the stored normals to shade the points, creating an illusion of a shaded surface if point density is high [S2, unofficial].
++    *   Apply gamma correction to reduce the contribution of points from tissues with differing color value densities [S2, unofficial].
+ 
+-### Algorithm Steps
+-
+-1.  **Voxel Selection and Retrieval:**
+-    *   Identify voxels belonging to the active voxelset based on user-selected colors or spatial bounding box constraints [S2, unofficial].
+-    *   Retrieve and decode only the selected voxels from storage [S2, unofficial].
+-
+-2.  **Front-to-Back Sorting:**
+-    *   Sort the selected voxels by their depth relative to the camera eye position to ensure correct front-to-back blending [S3, unofficial].
+-
+-3.  **Projection and Splat Generation:**
+-    *   For each voxel, compute its screen-space position and axis-aligned bounding rectangle (AABB) [S1].
+-    *   The voxel is projected as a splat whose contribution is highest at the center and drops off away from it [S3, unofficial].
+-    *   The splat is rendered as a quad (two triangles) or a point primitive with a fixed or distance-dependent diameter [S1][S2, unofficial].
+-
+-4.  **Weight Calculation (View-Dependent Blending):**
+-    *   To blend multiple camera views or reduce artifacts, compute a weight for each voxel based on its orientation relative to the eye and the source camera [S1].
+-    *   Let $V_{toEye}$ be the unit vector from the voxel center to the eye.
+-    *   Let $N$ be the unit normal at the voxel center [S1].
+-    *   Let $V_{toCamera[i]}$ be the unit vector from the voxel center to the position of camera $i$ [S1].
+-    *   Compute intermediate dot products:
+-        $$
+-        dotV = V_{toEye} \cdot V_{toCamera[i]}
+-        $$
+-        $$
+-        dotN = N \cdot V_{toCamera[i]}
+-        $$
+-    *   Compute view and normal weights using a power exponent of 4 [S1]:
+-        $$
+-        weightV = \begin{cases} dotV^4 & \text{if } dotV > 0.0 \\ 0.0 & \text{otherwise} \end{cases}
+-        $$
+-        $$
+-        weightN = \begin{cases} dotN^4 & \text{if } dotN > 0.0 \\ 0.0 & \text{otherwise} \end{cases}
+-        $$
+-    *   The raw weight for camera $i$ is:
+-        $$
+-        weight[i] = weightV \times weightN
+-        $$
+-    *   Normalize the weights by dividing by the sum of all weights:
+-        $$
+-        weight_{final}[i] = \frac{weight[i]}{\sum_{j} weight[j]}
+-        $$
+-    *   *Note:* The power function reduces artifacts in transitions between dominant textures [S1].
+-
+-5.  **Rasterization and Blending:**
+-    *   **With Alpha-Blending (Volume View):**
+-        *   Render the splats using alpha blending.
+-        *   Apply gamma correction to reduce the contribution of points from tissues with differing color densities [S2, unofficial].
+-        *   The final color $C_{final}$ is accumulated using standard front-to-back alpha blending:
+-            $$
+-            C_{final} = C_{src} \cdot \alpha_{src} + C_{dst} \cdot (1 - \alpha_{src})
+-            $$
+-            where $\alpha_{src}$ is modulated by the rendering alpha parameter and the computed weights [S1][S2, unofficial].
+-    *   **Without Alpha-Blending (Surface View):**
+-        *   Render splats without blending.
+-        *   Use the stored normals to shade the points (e.g., using Phong shading) to create the illusion of a shaded surface, provided point density is high enough [S2, unofficial].
+-
+-### Pseudocode
++**Pseudocode:**
+ 
+ ```python
+-def render_voxel_splats(voxels, eye_pos, cameras, params):
+-    """
+-    Render voxels as splats.
+-    voxels: List of Voxel objects with pos, color, normal.
+-    eye_pos: Vec3, camera eye position.
+-    cameras: List of Vec3, positions of source cameras for weighting.
+-    params: Dict with 'alpha', 'gamma', 'point_size'.
+-    """
+-    # 1. Sort voxels front-to-back relative to eye
+-    sorted_voxels = sort_by_depth(voxels, eye_pos)
++def render_voxel_splats(voxels, camera, params):
++    # Sort voxels back-to-front relative to camera
++    sorted_voxels = sort_by_depth(voxels, camera.eye_position)
+     
+-    # Initialize output buffer
+-    output_buffer = initialize_buffer()
++    # Initialize frame buffer
++    frame_buffer = zeros(camera.resolution)
+     
+     for voxel in sorted_voxels:
+-        # 2. Project voxel to screen space
+-        screen_rect = project_to_screen(voxel.pos, eye_pos)
++        # 1. Project voxel to screen space
++        screen_pos = project(voxel.position, camera.mvp_matrix)
+         
+-        # 3. Compute weights for blending from multiple cameras
+-        total_weight = 0.0
+-        weighted_color = Vec3(0, 0, 0)
++        # 2. Determine splat footprint (quad/circle)
++        # Size can be fixed or distance-dependent
++        splat_size = params.point_size * (1.0 + params.distance_factor * distance(voxel.position, camera.eye_position))
+         
+-        for cam_pos in cameras:
+-            # Vectors
+-            v_to_eye = normalize(eye_pos - voxel.pos)
+-            v_to_cam = normalize(cam_pos - voxel.pos)
+-            normal = voxel.normal
++        # 3. Compute weight if multi-view weighting is active
++        weight = 1.0
++        if params.use_weighting:
++            v_to_eye = normalize(camera.eye_position - voxel.position)
++            v_to_cam = normalize(camera.camera_positions - voxel.position) # Vector for specific camera
++            n = voxel.normal
+             
+-            # Dot products
+-            dot_v = dot(v_to_eye, v_to_cam)
+-            dot_n = dot(normal, v_to_cam)
++            dot_v = max(0.0, dot(v_to_eye, v_to_cam))
++            dot_n = max(0.0, dot(n, v_to_cam))
+             
+-            # Weight calculation with power 4
+-            weight_v = pow(dot_v, 4) if dot_v > 0.0 else 0.0
+-            weight_n = pow(dot_n, 4) if dot_n > 0.0 else 0.0
+-            weight = weight_v * weight_n
++            # Power exponent 4 reduces artifacts in transitions
++            w_v = pow(dot_v, 4)
++            w_n = pow(dot_n, 4)
++            weight = w_v * w_n
+             
+-            total_weight += weight
+-            
+-            # Accumulate weighted color
+-            weighted_color += voxel.color * weight
+-            
+-        # Normalize weights
+-        if total_weight > 0:
+-            weighted_color /= total_weight
+-        else:
+-            weighted_color = voxel.color
+-            
+-        # 4. Apply Gamma and Alpha
+-        # Gamma correction: typically gamma=2.2 for display, but here used to adjust density contribution
+-        adjusted_color = pow(weighted_color, 1.0 / params['gamma'])
++        # 4. Apply Alpha and Gamma
++        alpha = params.alpha * weight
++        color = apply_gamma(voxel.color, params.gamma)
+         
+         # 5. Rasterize Splat
+-        # Render quad/triangles covering screen_rect
+-        # Use alpha blending if params['alpha'] > 0
+-        if params['alpha'] > 0:
+-            alpha = params['alpha']
+-            blend_into_buffer(output_buffer, screen_rect, adjusted_color, alpha)
+-        else:
+-            # Surface view: shade using normal
+-            shaded_color = shade_point(voxel.pos, voxel.normal, eye_pos, adjusted_color)
+-            rasterize_splat(output_buffer, screen_rect, shaded_color)
+-
+-def blend_into_buffer(buffer, rect, color, alpha):
+-    """
+-    Standard front-to-back alpha blending for the region defined by rect.
+-    """
+-    for pixel in rect:
+-        src_color = color
+-        dst_color = buffer[pixel]
+-        # Simple alpha blend
+-        buffer[pixel] = src_color * alpha + dst_color * (1.0 - alpha)
++        # Render as quad or point using hardware rasterization
++        # Blend into frame buffer
++        blend_pixel(screen_pos, color, alpha, frame_buffer)
++        
++    return frame_buffer
+ ```
+ 
+-### Edge Cases and Pitfalls
+-*   **Close-Range Views:** At close range, voxels project to large areas, appearing as rectangular blocks rather than smooth primitives, causing pixelation artifacts [S1].
+-*   **Single-Pixel Quads:** GPU rasterization is not optimized for very small quads (approx. 1 pixel size at HD resolution for giga-voxel datasets), though performance remains acceptable [S1].
+-*   **Aliasing:** Minor aliasing artifacts occur, similar to non-anti-aliased triangle models [S1].
+-*   **Color Ambiguity:** Different tissues may share similar colors, leading to irrelevant points being selected. Using a bounding box for spatial culling helps mitigate this by limiting the decoded voxelset [S2, unofficial].
+-*   **Normal Quantization:** Using only 240 pre-defined normals (1 byte storage) may reduce shading accuracy compared to continuous normals [S2, unofficial].
++**Edge Cases and Pitfalls:**
++*   **Close-range views:** Voxel splats may appear as rectangular blocks covering many pixels, causing pixelation artifacts due to the finite resolution of RGB images [S1].
++*   **Single-pixel quads:** GPU rasterization is not optimized for single-pixel quads, though performance remains acceptable [S1].
++*   **Aliasing:** Minor aliasing artifacts similar to non-anti-aliased triangle models may occur [S1].
++*   **Color Ambiguity:** Different tissues may share similar colors, requiring bounding box filtering or alpha/gamma tuning to isolate features [S2, unofficial].
+ 
+ ## Operating characteristics
+-
+-*   **Time Complexity:** $O(N \log N)$ or $O(N)$ depending on sorting implementation, where $N$ is the number of selected voxels. Projection and rasterization are linear in the number of splats.
+-*   **Memory Complexity:** $O(N)$ for storing the active voxel set in memory. Out-of-core retrieval allows handling datasets larger than RAM [S2, unofficial].
+-*   **Performance:** Acceptable real-time performance on standard GPUs, even for giga-voxel resolutions, provided the number of active splats is manageable [S1].
+-*   **Strengths:**
+-    *   Interactive value selection via slice clicking [S2, unofficial].
+-    *   Simple implementation using standard GL commands [S2, unofficial].
+-    *   Effective for sparse datasets where many voxels are empty or irrelevant [S1].
+-*   **Limitations:**
+-    *   Artifacts at close range (blockiness) [S1].
+-    *   Less accurate than raycasting for complex internal structures due to the approximation of voxel contribution as a splat [S3, unofficial].
+-    *   Performance degrades if the number of selected voxels is very high [S2, unofficial].
++*   **Time Complexity:** Linear with respect to the number of voxels $N$, $O(N)$, assuming constant-time projection and rasterization [S3, unofficial].
++*   **Memory Complexity:** Depends on the dataset size and whether out-of-core techniques are used. Out-of-core approaches reduce memory footprint by loading only selected voxelsets [S2, unofficial].
++*   **Performance:** Enables real-time interactivity due to hardware acceleration [S2, unofficial]. Performance is acceptable even for giga-voxel resolutions at HD resolution, though single-pixel quads are not optimized by GPUs [S1].
++*   **Strengths:** Simple implementation, efficient for large datasets via out-of-core loading, supports interactive value selection and parameter tuning [S2, unofficial].
++*   **Limitations:** Artifacts at close range (blockiness, pixelation), aliasing, and potential over-rendering if color selection is not precise [S1][S2, unofficial].
+ 
+ ## Background
+-
+-Voxel Splat Rendering is an object-space, front-to-back volume rendering method where voxels are projected onto the screen as contributions that are highest at the center and drop off away from it [S3, unofficial]. The general concept of splatting was first published in [20] (cited in [S3, unofficial]). The specific implementation described in the notes, featuring interactive value selection, alpha/gamma control, and out-of-core rendering, was developed for visualizing very large datasets, such as medical or biological scans, where different tissues share similar colors [S2, unofficial]. It is often compared to Fourier Volume Rendering and Maximum Intensity Projection in terms of visual output but differs in its primitive-based projection approach [S3, unofficial].
++Voxel Splat Rendering was first published in [20] (cited in [S3, unofficial]). It is an object-space front-to-back volume rendering method [S3, unofficial]. The technique has been extended to support interactive visualization of very large datasets using out-of-core point-based approaches, allowing for real-time decoding and rendering [S2, unofficial]. It is also applied in image-based modeling contexts, such as sparse voxelization for novel view synthesis [S1].
+ 
+ ## Sources
+-
+ [S1] Real-time high-resolution sparse voxelization with application to image-based modeling, https://doi.org/10.1145/2492045.2492053, fetched 2026-11-01
+ [S2] Interactive Visualization of Very Large Datasets Using an Out-of-Core Point-based Approach, https://core.ac.uk/download/484268453.pdf, fetched 2026-10-27 (unofficial)

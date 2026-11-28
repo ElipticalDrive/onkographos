@@ -1,0 +1,108 @@
+--- v001.md
++++ v002.md
+@@ -1,5 +1,5 @@
+ # Spherical Light Grid for Shadows
+ 
+-Also called: Light Grid, Shadow Ray Reordering
++Also called: Light Grid, Perspective Grid Traversal, Perspective grids, Shadow Ray Reordering, Spherical Grid
+ 
+ ## Overview
+@@ -8,9 +8,9 @@
+ ## How it works
+ **Inputs and Outputs:**
+-*   **Input:** Primary ray intersection points (recorded at the end of the primary ray tracing step), light source position, camera view frustum, and scene geometry.
+-*   **Output:** A reordered list of shadow rays grouped by light grid tiles, ready for parallel traversal.
++*   **Input:** Primary ray intersection points (recorded at the end of the primary ray tracing step), light source position, camera view frustum, and scene geometry [S1].
++*   **Output:** A reordered list of shadow rays grouped by light grid tiles, ready for parallel traversal [S1].
+ 
+ **Data Structures:**
+-*   **Light Grid:** A perspective grid built with the light source as the camera. It consists of voxels defined by tiles on a rectangle in $\phi$-$\theta$ space and constant depth planes (near/far bounds) [S1].
++*   **Light Grid:** A perspective grid built with the light source as the camera [S1]. It consists of voxels defined by tiles on a rectangle in $\phi$-$\theta$ space and constant depth planes (near/far bounds) [S1].
+ *   **Ray Arrays:** Parallel arrays storing ray properties, specifically `tileIDArr` (tile identifier) and `rayIDArr` (ray identifier) [S1].
+ *   **Auxiliary Arrays:** `pseudoArr`, `scratchArr`, and `oArr` used during the GPU parallel scan process [S1].
+@@ -18,5 +18,5 @@
+ **Coordinate System:**
+ The spherical mapping uses azimuthal ($\phi$) and elevation ($\theta$) angles relative to a "forward" direction [S1]:
+-*   $\phi$: Measured from the forward direction in the forward-right plane.
++*   $\phi$: Measured from the forward direction in the forward-right plane [S1].
+ *   $\theta$: Measured from the forward direction in the forward-up plane [S1].
+ 
+@@ -24,10 +24,10 @@
+ 
+ 1.  **Define Forward Direction:** Choose a forward direction to mitigate pole singularity. A robust choice is the vector joining the light position to the centroid of the model [S1].
+-2.  **Limit Angular Extents:** Restrict the light’s frustum in $\phi$-$\theta$ space to the bounding box of the projection of the camera’s view frustum. This ensures only geometry visible to the camera participates in the grid, reducing triangle count and increasing tile granularity [S1].
+-3.  **Construct Grid:** Define tiles on the rectangle in $\phi$-$\theta$ space. Use constant depth planes to define the near and far bounds of the light frustum [S1].
++2.  **Limit Angular Extents:** Restrict the light’s frustum in $\phi$-$\theta$ space to the bounding box of the projection of the camera’s view frustum [S1]. This ensures only geometry visible to the camera participates in the grid, reducing triangle count and increasing tile granularity [S1].
++3.  **Construct Grid:** Define tiles on the rectangle in $\phi$-$\theta$ space [S1]. Use constant depth planes to define the near and far bounds of the light frustum [S1].
+ 4.  **Record Intersections:** At the end of the primary ray tracing step, record the intersection points for each primary ray [S1].
+-5.  **Map to Spherical Space:** For each shadow ray (originating from a primary intersection point), compute its spherical coordinates relative to the light source. Determine the corresponding tile ID [S1].
+-6.  **Sort by Tile ID:** Sort the list of shadow rays using the tile ID as the key. This groups rays belonging to the same light tile together, restoring spatial coherence [S1].
+-7.  **Load Balancing (Scan):** Perform a parallel scan on the GPU to determine the boundaries of each tile’s ray count. This allows dynamic assignment of thread blocks to tiles, handling cases where ray counts per tile vary widely [S1].
++5.  **Map to Spherical Space:** For each shadow ray (originating from a primary intersection point), compute its spherical coordinates relative to the light source and determine the corresponding tile ID [S1].
++6.  **Sort by Tile ID:** Sort the list of shadow rays using the tile ID as the key [S1]. This groups rays belonging to the same light tile together, restoring spatial coherence [S1].
++7.  **Load Balancing (Scan):** Perform a parallel scan on the GPU to determine the boundaries of each tile’s ray count [S1]. This allows dynamic assignment of thread blocks to tiles, handling cases where ray counts per tile vary widely [S1].
+ 
+ **Pseudocode:**
+@@ -35,20 +35,40 @@
+ 
+ ```python
+-# Parallel execution over all shadow rays
+-for ray in range(totalrays) in parallel:
+-    # Map the ray's starting point (primary intersection) to the light's spherical space
+-    # and determine the tile ID.
+-    # sphericalMap updates tileIDArr[ray] and rayIDArr[ray]
+-    sphericalMap(tileIDArr[ray], rayIDArr[ray])
+-    
+-    # Initialize auxiliary arrays for the scan operation
+-    pseudoArr[ray] = 0
+-    scratchArr[ray] = 1
+-    oArr[ray] = 0
++def reorder_shadow_rays(ray_origins, light_pos, forward_dir, right_dir, up_dir, tile_width, tile_height, near_plane, far_plane, frustum_bbox):
++    totalrays = len(ray_origins)
++    tileIDArr = [0] * totalrays
++    rayIDArr = [0] * totalrays
++    pseudoArr = [0] * totalrays
++    scratchArr = [1] * totalrays
++    oArr = [0] * totalrays
++
++    # Parallel mapping and initialization (Algorithm 1 in [S1])
++    for ray in range(totalrays):
++        dir_vec = ray_origins[ray] - light_pos
++        phi = atan2(dot(dir_vec, right_dir), dot(dir_vec, forward_dir))
++        theta = atan2(dot(dir_vec, up_dir), dot(dir_vec, forward_dir))
++        # Clamp to camera frustum bounding box in phi-theta space
++        phi = max(frustum_bbox.min_phi, min(frustum_bbox.max_phi, phi))
++        theta = max(frustum_bbox.min_theta, min(frustum_bbox.max_theta, theta))
++        # Compute tile ID from phi, theta, and depth planes
++        tileIDArr[ray] = int((theta - theta_min) / tile_height) * tile_width + int((phi - phi_min) / tile_width)
++        rayIDArr[ray] = ray
++
++    # Sort rays by tile ID to group coherent rays [S1]
++    indices = sorted(range(totalrays), key=lambda i: tileIDArr[i])
++    sorted_tileIDArr = [tileIDArr[i] for i in indices]
++    sorted_rayIDArr = [rayIDArr[i] for i in indices]
++
++    # Load balancing: parallel scan and stream compaction [S1]
++    # pseudoArr and scratchArr serve as markers for the scan primitive
++    # The scan computes prefix sums to determine tile boundaries and output offsets
++    # oArr stores the final compacted ray indices
++    # (Parallel scan and compaction implemented via standard GPU primitives [G])
++    return sorted_rayIDArr, sorted_tileIDArr
+ ```
+ 
+ **Parameters:**
+ *   **Forward Direction:** Critical for performance. The line joining the light position to the model centroid is recommended [S1].
+-*   **Frustum Bounds:** Determined by the camera’s view frustum projection [S1].
++*   **Frustum Bounds:** Limited to the bounding box of the projection of the camera’s view frustum in $\phi$-$\theta$ space [S1].
+ *   **Spotlight Clamping:** Implemented by marking a bounding rectangle in the $\phi$-$\theta$ space to clamp the region [S1].
+ 
+@@ -58,7 +78,7 @@
+ 
+ ## Operating characteristics
+-*   **Time Complexity:** Dominated by the parallel sort and scan operations on the GPU. The sorting brings coherence to secondary rays, making subsequent traversal efficient [S1].
++*   **Time Complexity:** Dominated by the parallel sort and scan operations on the GPU [S1]. The sorting brings coherence to secondary rays, making subsequent traversal efficient [S1].
+ *   **Memory Complexity:** Requires storage for the light grid structure and auxiliary arrays for ray reordering (`tileIDArr`, `rayIDArr`, etc.) [S1].
+-*   **Performance:** The method is cheap to build on the GPU, allowing the light grid to be rebuilt dynamically for moving scenes [S1]. It improves performance by reducing the number of triangles participating in grid building and ray-triangle checks through frustum culling [S1].
++*   **Performance:** The method is cheap to build on the GPU, allowing the light grid to be rebuilt dynamically for moving scenes [S1]. It improves performance by reducing the number of triangles participating in grid building and ray-triangle checks through frustum culling [S1]. Perspective grids are three to five times faster than the uniform grid method by Kalojanov and Slusallek for primary and shadow rays on a GTX480 [S1]. Grid building is about ten times cheaper than building an HLBVH with SAH [S1].
+ *   **Strengths:** Unified framework for shadow ray generation; handles spotlights naturally via rectangular clamping in spherical space; exploits GPU parallelism for reordering [S1].
+ *   **Limitations:** Suffers from pole singularity if the forward direction is poorly chosen; requires careful load balancing due to uneven ray distribution per tile [S1].

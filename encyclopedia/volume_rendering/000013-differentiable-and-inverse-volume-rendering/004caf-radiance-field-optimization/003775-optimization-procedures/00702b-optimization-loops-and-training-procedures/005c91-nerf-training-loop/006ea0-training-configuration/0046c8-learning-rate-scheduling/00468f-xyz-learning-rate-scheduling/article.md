@@ -1,0 +1,149 @@
+# XYZ Learning Rate Scheduling
+
+Also called: Spatial Learning Rate Adjustment
+
+## Overview
+XYZ Learning Rate Scheduling adjusts the learning rate specifically for the 3D Gaussian point locations (xyz) during radiance-field optimization to balance training speed and rendering quality [S1, unofficial]. It distinguishes itself from general scalar schedules by targeting the spatial parameters of the Gaussian primitives, addressing the sensitivity of point positions to large learning rates which can degrade rendering quality [S1, unofficial].
+
+## How it works
+**Inputs and Outputs**
+- Input: Current iteration $t$, total iterations $T$, schedule type, and schedule coefficients [S1, unofficial].
+- Output: Scalar learning rate $\eta_{xyz}$ for the xyz position parameters of the 3D Gaussians [S1, unofficial].
+
+**Data Structures**
+The method requires no auxiliary data structures; it computes a scalar value directly from the iteration count and coefficients [S1, unofficial].
+
+**Formulas and Steps**
+The method supports several functional forms for $\eta_{xyz}(t)$ [S1, unofficial]:
+1. **Two-Stage Rectangular Wave Transformation ($rw$)**
+   $$
+   rw(x) = \begin{cases} 
+   a_1, & x \in [0, p_1] \\
+   a_2, & x \in [p_1, p_2] \\
+   a_3, & x \in [p_2, 1]
+   \end{cases}
+   $$
+   Where $x = t/T$ is the normalized iteration [S1, unofficial]. Typical values are $a_1 = 10^{-3}$, $a_2 = 10^{-6}$, $a_3 = 10^{-9}$ [S1, unofficial]. Boundaries are $p_1 = 0.2$ (covering 0%–20% of iterations) and $p_2 = 1.0$ (covering 20%–100%) [S1, unofficial].
+
+2. **Sine-based Schedule ($s(t)$)**
+   $$
+   s(t) = \frac{a_s}{2}\sin\left(b_s\frac{t}{T}2\pi + \frac{\pi}{2}\right) + 1
+   $$
+   Where $a_s$ and $b_s$ are fitting coefficients [S1, unofficial].
+
+3. **Cosine-based Schedule ($c(t)$)**
+   $$
+   c(t) = \frac{a_c}{2}\cos\left(b_c\frac{t}{T}2\pi + \pi\right) + 1
+   $$
+   Where $a_c$ and $b_c$ are fitting coefficients [S1, unofficial].
+
+4. **Linear Schedule ($l(t)$)**
+   Defined by two points $(t_1, p_1)$ and $(t_2, p_2)$ via:
+   $$
+   \frac{l(t)-p_2}{p_1-p_2} = \frac{t-t_2}{t_1-t_2}
+   $$
+   Where $t_1 = 1$ and $t_2 = T$ [S1, unofficial].
+
+5. **Exponential Schedule ($E(t)$)**
+   $$
+   E(t) = \varepsilon e^{\delta t} + \eta
+   $$
+   Where $\varepsilon, \delta, \eta$ are fitting coefficients determined such that the function passes through $(t_1, E(t_1))$ and $(t_2, E(t_2))$ with $t_1=1$ and $t_2=T$ [S1, unofficial].
+
+**Parameters**
+Fixed learning rates in the range $lr \in [10^{-2}, 1]$ significantly improve training speed but quickly reduce rendering quality [S1, unofficial]. Scheduling is recommended to avoid this range or to decay out of it [S1, unofficial].
+
+**Pseudocode**
+> **Unverified code.** The code below did not pass a test run against a reference implementation, or no test fits it, so it may contain errors.
+
+```python
+import math
+
+def compute_xyz_learning_rate(t: int, T: int, schedule_type: str, params: dict) -> float:
+    """
+    Compute the learning rate for 3D Gaussian xyz positions.
+    Assumes t is 1-based (1 to T) to match source formulas where t1=1.
+    """
+    if T <= 0:
+        return 0.0
+        
+    if schedule_type == 'rectangular':
+        a1, a2, a3 = 1e-3, 1e-6, 1e-9
+        p1, p2 = 0.2, 1.0
+        x = t / T
+        if x <= p1:
+            return a1
+        elif x <= p2:
+            return a2
+        else:
+            return a3
+            
+    elif schedule_type == 'sine':
+        a_s = params['a_s']
+        b_s = params['b_s']
+        return (a_s / 2.0) * math.sin(b_s * (t / T) * 2 * math.pi + math.pi / 2) + 1.0
+        
+    elif schedule_type == 'cosine':
+        a_c = params['a_c']
+        b_c = params['b_c']
+        return (a_c / 2.0) * math.cos(b_c * (t / T) * 2 * math.pi + math.pi) + 1.0
+        
+    elif schedule_type == 'linear':
+        # (l(t) - p2) / (p1 - p2) = (t - t2) / (t1 - t2)
+        # t1 = 1, t2 = T
+        t1, t2 = 1, T
+        p1, p2 = params['p1'], params['p2']
+        return p2 + (p1 - p2) * (t - t2) / (t1 - t2)
+        
+    elif schedule_type == 'exponential':
+        # E(t) = eps * exp(delta * t) + eta
+        # Passes through (1, E1) and (T, E2). Coefficients must be pre-computed.
+        eps = params['eps']
+        delta = params['delta']
+        eta = params['eta']
+        return eps * math.exp(delta * t) + eta
+        
+    else:
+        raise ValueError(f"Unknown schedule type: {schedule_type}")
+```
+
+**Edge Cases and Pitfalls**
+- **Fixed Rate Degradation**: Using a fixed learning rate in $[10^{-2}, 1]$ causes rapid degradation of rendering quality [S1, unofficial].
+- **Precision**: The rectangular wave uses values as low as $10^{-9}$, which may be subject to floating-point precision issues in some optimizers [G].
+- **Coefficient Fitting**: For sine, cosine, linear, and exponential schedules, the coefficients are fitting coefficients [S1, unofficial]. The source does not provide a closed-form solution for deriving these from desired start/end points for the exponential case, only stating it passes through two points [S1, unofficial]. Implementers must pre-compute these coefficients or use provided fitted values [G].
+
+## Subtopics
+
+### Training Loop with Adaptive Regularization & LR Decay
+Integrates adaptive regularization terms with learning rate decay during the optimization loop [G]. Sets itself apart by coupling gradient regularization with LR scheduling [G]. Choose when gradient noise destabilizes training [G]. [Link](2408-training-loop-with-adaptive-regularization-lr-decay.md)
+
+### Training Schedule
+Defines the overall progression of training hyperparameters over iterations [G]. Sets itself apart by providing a global timeline rather than per-parameter rules [G]. Choose for high-level training orchestration [G]. [Link](3154-training-schedule.md)
+
+### Hyperparameter Configuration for Stochastic Gradient Estimation
+Configures noise and sampling parameters alongside learning rates [G]. Sets itself apart by focusing on gradient estimator stability [G]. Choose when stochastic sampling introduces high variance [G]. [Link](6748-hyperparameter-configuration-for-stochastic-gradient-estimat.md)
+
+### Exponential Decay Learning Rate Schedule
+Applies general exponential decay for all parameters, not just xyz [G]. Sets itself apart by using a continuous exponential curve [G]. Choose for smooth, monotonic convergence [G]. [Link](9145-exponential-decay-learning-rate-schedule.md)
+
+### Per-Parameter Learning Rate Scheduling
+Assigns distinct learning rates to different parameter groups [G]. Sets itself apart by decoupling optimization rates across model components [G]. Choose when parameters require vastly different update scales [G]. [Link](11832-per-parameter-learning-rate-scheduling.md)
+
+### Annealing Schedules
+Applies general annealing techniques for convergence [G]. Sets itself apart by gradually reducing exploration/exploitation trade-offs [G]. Choose for non-convex optimization landscapes [G]. [Link](11839-annealing-schedules.md)
+
+### Linear Learning Rate Schedule
+Uses linear interpolation for learning rates [G]. Sets itself apart by providing a straight-line transition between start and end values [G]. Choose for predictable, stepwise decay [G]. [Link](11850-linear-learning-rate-schedule.md)
+
+## Operating characteristics
+- **Time Complexity**: $O(1)$ per iteration for computing the learning rate [G].
+- **Memory Complexity**: $O(1)$ as no additional storage is needed [G].
+- **Performance**: The rectangular wave schedule was tested with 500 iterations and showed that balancing the learning rate is crucial [S1, unofficial].
+- **Strengths**: Specifically targets the instability of 3D Gaussian positions, which are more sensitive to learning rate changes than other parameters [S1, unofficial].
+- **Limitations**: Requires careful tuning of coefficients for non-rectangular schedules. The source notes that simply increasing the learning rate (e.g., to $10^{-2}$) improves speed but blurs the result [S1, unofficial].
+
+## Background
+The method is described in the I3DGS preprint, which improves 3D Gaussian Splatting from multiple dimensions [S1, unofficial]. It addresses the observation that the learning rate for 3D Gaussian point locations is a critical factor in the original model, often requiring a balanced approach between training speed and rendering quality [S1, unofficial].
+
+## Sources
+[S1] I3DGS: Improve 3D Gaussian Splatting from Multiple Dimensions, https://arxiv.org/abs/2405.06408v1, fetched 2026-10-26 (unofficial)

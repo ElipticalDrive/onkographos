@@ -1,0 +1,157 @@
+# Differentiable Neural Radiosity
+
+Also called: DNR
+
+## Overview
+Differentiable Neural Radiosity (DNR) is a method for solving the differential rendering equation using a neural network to represent the differential radiance field [S1, unofficial]. It addresses the problem of computing gradients of rendered images with respect to arbitrary scene parameters (such as geometry, material properties, or illumination) by minimizing the residual of the differential rendering equation [S1, unofficial]. Unlike traditional differentiable rendering methods that simulate light transport per optimization step, DNR pre-trains a neural network to cache the differential radiance distribution, enabling view-independent gradient computation with constant time and memory complexity relative to path length [S1, unofficial]. It distinguishes itself from Radiative Backpropagation (RB) by avoiding quadratic time complexity in path length and from Path Replay Backpropagation (PRB) and Automatic Differentiation (AD) by not requiring the storage of per-bounce data or complete light path construction [S1, unofficial].
+
+## How it works
+**Inputs:**
+*   Scene geometry, materials (BRDFs), and illumination [S1, unofficial].
+*   A set of scene parameters $p$ with respect to which derivatives are desired (e.g., BRDF roughness, diffuse albedo, index of refraction) [S1, unofficial].
+*   A pre-trained primal radiance network $L_\phi$ [S1, unofficial].
+
+**Outputs:**
+*   A trained neural network $\partial_p L_\theta(x, \omega_o)$ representing the differential radiance field [S1, unofficial].
+*   Gradients $\partial_p I_k$ for inverse rendering tasks [S1, unofficial].
+
+**Data Structures:**
+1.  **Primal Radiance Network ($L_\phi$):** A neural network with fixed parameters $\phi$ that approximates the outgoing radiance $L(x, \omega_o)$ [S1, unofficial]. Exact layout and sizes are not given in the sources.
+2.  **Differential Radiance Network ($\partial_p L_\theta$):** A neural network with learnable parameters $\theta$ that approximates the differential radiance $\partial_p L(x, \omega_o)$ [S1, unofficial]. Exact layout and sizes are not given in the sources.
+3.  **Scene Parameters ($p$):** A vector of parameters defining the scene state [S1, unofficial].
+
+**Formulas:**
+The differential rendering equation is derived by differentiating the standard rendering equation with respect to $p$ [S1, unofficial]:
+
+$$
+\partial_p L(x, \omega_o) = \partial_p E(x, \omega_o) + \int_{H^2} f(x, \omega_i, \omega_o) \partial_p L(x'(x, \omega_i), -\omega_i) d\omega_i^\perp + \int_{H^2} \partial_p f(x, \omega_i, \omega_o) L(x'(x, \omega_i), -\omega_i) d\omega_i^\perp
+$$
+
+Where:
+*   $L(x, \omega_o)$ is the outgoing radiance [S1, unofficial].
+*   $E(x, \omega_o)$ is the emitted radiance [S1, unofficial].
+*   $f(x, \omega_i, \omega_o)$ is the BRDF [S1, unofficial].
+*   $x'(x, \omega_i)$ is the next intersection point along direction $\omega_i$ [S1, unofficial].
+*   $H^2$ is the projected solid angle hemisphere [S1, unofficial].
+*   $\partial_p$ denotes the derivative with respect to parameter set $p$ [S1, unofficial].
+
+The residual $r_\theta$ is defined as the difference between the left-hand side (LHS) and right-hand side (RHS) of the differential equation, using the neural network approximations [S1, unofficial]:
+
+$$
+r_\theta(x, \omega_o) = \partial_p L_\theta(x, \omega_o) - \partial_p E(x, \omega_o) - \int_{H^2} f(x, \omega_i, \omega_o) \partial_p L_\theta(x'(x, \omega_i), -\omega_i) d\omega_i^\perp - \int_{H^2} \partial_p f(x, \omega_i, \omega_o) L_\phi(x'(x, \omega_i), -\omega_i) d\omega_i^\perp
+$$
+
+The loss function is the L2 norm of this residual [S1, unofficial]:
+
+$$
+\mathcal{L}(\theta) = \| r_\theta \|^2
+$$
+
+**Steps:**
+1.  **Pre-train Primal Radiance:** Train the network $L_\phi$ to approximate the primal radiance field $L(x, \omega_o)$ for the given scene. Fix parameters $\phi$ [S1, unofficial].
+2.  **Initialize Differential Network:** Initialize the network $\partial_p L_\theta$ with parameters $\theta$ [S1, unofficial].
+3.  **Compute Residual:** For a sample point $x$ and direction $\omega_o$:
+    a. Query $L_\phi$ to get incident primal radiance $L_\phi(x'(x, \omega_i), -\omega_i)$ [S1, unofficial].
+    b. Compute $\partial_p f(x, \omega_i, \omega_o)$ analytically or via automatic differentiation of the BRDF function with respect to $p$ [S1, unofficial].
+    c. Compute $\partial_p E(x, \omega_o)$ analytically or via automatic differentiation [S1, unofficial].
+    d. Query $\partial_p L_\theta$ at $x'(x, \omega_i)$ to get $\partial_p L_\theta(x'(x, \omega_i), -\omega_i)$ [S1, unofficial].
+    e. Evaluate the integrals over the hemisphere $H^2$ [S1, unofficial].
+    f. Calculate the residual $r_\theta(x, \omega_o)$ using the formula above [S1, unofficial].
+4.  **Optimize:** Minimize $\mathcal{L}(\theta)$ with respect to $\theta$ using gradient descent [S1, unofficial].
+5.  **Inverse Optimization:** For a new inverse rendering task, use the pre-trained $\partial_p L_\theta$ to compute gradients $\partial_p I_k$ for the measurement equation:
+    $$
+    \partial_p I_k = \int_A \int_{H^2} W_k(x, \omega) \partial_p L_\theta(x, \omega) d\omega_i^\perp dx
+    $$
+    Use the pre-trained network to compute gradients for inverse optimization tasks [S1, unofficial].
+
+**Parameters:**
+*   $\theta$: Learnable parameters of the differential radiance network [S1, unofficial].
+*   $\phi$: Fixed parameters of the primal radiance network [S1, unofficial].
+*   $p$: Scene parameters (e.g., roughness, albedo) [S1, unofficial].
+*   Typical values: Not given in the sources.
+
+**Edge Cases and Pitfalls:**
+*   **Visibility Discontinuities:** The method ignores visibility-related discontinuities (occlusions) for simplicity [S1, unofficial].
+*   **Pre-training Dependency:** The accuracy of the differential gradients depends on the quality of the pre-trained primal radiance network $L_\phi$ [S1, unofficial].
+
+**Pseudocode:**
+> **Unverified code.** The code below did not pass a test run against a reference implementation, or no test fits it, so it may contain errors.
+
+```python
+import torch
+import torch.nn as nn
+
+class DifferentiableNeuralRadiosity:
+    def __init__(self, primal_network, differential_network):
+        self.primal_network = primal_network
+        self.differential_network = differential_network
+        self.primal_network.eval()
+        for param in self.primal_network.parameters():
+            param.requires_grad = False
+
+    def compute_residual(self, x, wo, p, scene_ops, num_samples=100):
+        # LHS: differential radiance at current point
+        dL_theta = self.differential_network(x, wo)
+        # Differential emission
+        dE = scene_ops.compute_emission_derivative(x, wo, p)
+        # Sample directions in hemisphere H^2
+        wi_samples, cos_weights = scene_ops.sample_hemisphere(wo, num_samples)
+        
+        # RHS integral 1: f * dL_theta
+        term1 = torch.zeros_like(dL_theta)
+        for i in range(num_samples):
+            wi = wi_samples[i]
+            x_prime = scene_ops.trace_ray(x, wi)
+            dL_prime = self.differential_network(x_prime, -wi)
+            f = scene_ops.brdf(x, wi, wo)
+            term1 += f * dL_prime * cos_weights[i]
+            
+        # RHS integral 2: df/dp * L_phi
+        term2 = torch.zeros_like(dL_theta)
+        df_dp = scene_ops.compute_brdf_derivative(x, wi_samples, wo, p)
+        for i in range(num_samples):
+            wi = wi_samples[i]
+            x_prime = scene_ops.trace_ray(x, wi)
+            L_phi = self.primal_network(x_prime, -wi)
+            term2 += df_dp[i] * L_phi * cos_weights[i]
+            
+        # Residual r_theta = dL_theta - dE - term1 - term2
+        residual = dL_theta - dE - term1 - term2
+        return residual
+
+    def train(self, optimizer, num_iterations, scene_ops):
+        for _ in range(num_iterations):
+            optimizer.zero_grad()
+            x, wo, p = scene_ops.sample_training_data()
+            residual = self.compute_residual(x, wo, p, scene_ops)
+            loss = torch.norm(residual) ** 2
+            loss.backward()
+            optimizer.step()
+
+    def compute_inverse_gradients(self, p, scene_ops):
+        # Integrate differential radiance over pixel area and hemisphere to get dI_k/dp
+        # Implementation depends on specific pixel sampling strategy
+        pass
+```
+
+## Subtopics
+
+### [Inverse Rendering with Neural Radiosity](7428-inverse-rendering-with-neural-radiosity.md)
+Optimizes scene parameters by minimizing the distance between rendered and reference images, using a neural network to cache the differential radiance field. It amortizes global light transport costs and avoids independent simulations per step.
+
+### [Neural Vertex Features for Global Illumination](12889-neural-vertex-features-for-global-illumination.md)
+Represents the differential radiance field using learnable feature vectors at mesh vertices, reducing memory consumption and avoiding grid artifacts by leveraging geometric priors.
+
+## Operating characteristics
+*   **Time Complexity:** Constant in path length given pre-trained networks, as it queries the network at the first intersection rather than building complete light paths [S1, unofficial]. In contrast, PRB and AD are linear in path length, and RB is quadratic [S1, unofficial].
+*   **Memory Complexity:** Constant in path length, similar to RB and PRB, as it does not store per-bounce data in an adjoint transcript [S1, unofficial].
+*   **Measured Performance:** Gradient computation time per iteration is 0.002s, compared to 0.009s for RB, 0.017s for PRB, and 0.088s for AD [S1, unofficial].
+*   **View-Independence:** Provides view-independent solutions, meaning sensor parameter changes do not require recomputation unless sensor parameters are being optimized [S1, unofficial].
+*   **Strengths:** Faster convergence, lower gradient computation time, view-independence, constant complexity in path length [S1, unofficial].
+*   **Limitations:** Ignores visibility-related discontinuities (occlusions), which can lead to incorrect gradients [S1, unofficial]. Requires pre-training of the primal radiance network [S1, unofficial].
+
+## Background
+Differentiable Neural Radiosity was introduced by Saeed Hadadan and Matthias Zwicker from the University of Maryland, College Park, USA [S1, unofficial]. The method was published as a preprint on arXiv in January 2022 [S1, unofficial]. It builds on the concept of Neural Radiosity, which uses a neural network to solve the rendering equation, by extending it to the differential rendering equation [S1, unofficial]. The method aims to provide a more efficient and accurate way to compute gradients for inverse rendering problems compared to existing differentiable rendering techniques [S1, unofficial].
+
+## Sources
+[S1] Differentiable Neural Radiosity, https://arxiv.org/abs/2201.13190, fetched 2026-10-29 (unofficial)

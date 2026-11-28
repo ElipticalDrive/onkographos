@@ -1,0 +1,149 @@
+--- v001.md
++++ v002.md
+@@ -4,118 +4,48 @@
+ 
+ ## Overview
+-Dense Depth Estimation via Plane Sweep is a multi-view stereo technique that computes a depth map for every pixel by sweeping a virtual plane through the scene and evaluating photometric consistency across multiple camera views [S1, unofficial]. It is distinguished from its sibling [Triangulation for Closest Point](9933-triangulation-for-closest-point.md) by its ability to handle uncalibrated or loosely calibrated views through a global cost aggregation over a discretized depth space, rather than relying on precise epipolar geometry for point-wise triangulation [S1, unofficial].
++Dense Depth Estimation via Plane Sweep reconstructs a dense depth map by projecting a series of depth planes into multiple camera views and evaluating photo-consistency. It solves the problem of recovering per-pixel depth from multi-view imagery by combining rendering and reconstruction into a single step, producing no explicit volume [S1, unofficial]. Unlike [Triangulation for Closest Point](9933-triangulation-for-closest-point.md), which finds the closest consistent point, this method aggregates evidence across a depth range to handle textureless regions and occlusions more robustly.
+ 
+ ## How it works
+-**Inputs and Outputs:**
+-*   **Inputs:** A set of $N$ input images (typically $N \le 4$) captured from different viewpoints, along with their camera intrinsics and extrinsics.
+-*   **Outputs:** A dense depth map $D(u, v)$ for each pixel $(u, v)$ in the reference image, representing the distance to the visible surface.
++**Inputs:** $N$ calibrated images (typically $N \le 4$ [S1, unofficial]), camera matrices, and a depth range $[d_{min}, d_{max}]$.
++**Outputs:** A dense depth map $D(u,v)$ for the reference view.
+ 
+ **Data Structures:**
+-1.  **Depth Range:** A discrete set of depth hypotheses $Z = \{z_1, z_2, ..., z_K\}$ spanning the scene's depth bounds.
+-2.  **Cost Volume:** A 3D tensor $C \in \mathbb{R}^{H \times W \times K}$ storing the photometric consistency cost for each pixel and each depth hypothesis.
+-3.  **Projection Map:** Precomputed mapping from 2D pixel coordinates in the reference view to 2D coordinates in each target view for every depth hypothesis.
++- `photo_cost`: A 2D texture or buffer of size $W \times H$, initialized to infinity.
++- `depth_plane`: A 3D texture or buffer representing the current sweep plane at depth $d$.
+ 
+-**Algorithm Steps:**
+-1.  **Initialization:** For each pixel $(u, v)$ in the reference image and each depth hypothesis $z_k \in Z$:
+-    *   Project the 3D point $P_k$ corresponding to $(u, v, z_k)$ into each of the $N-1$ target camera views.
+-    *   Let $(u_i, v_i)$ be the projected coordinates in target view $i$.
+-2.  **Photometric Consistency Check:**
+-    *   For each target view $i$, sample the color $I_i(u_i, v_i)$ from the target image.
+-    *   Compare $I_i(u_i, v_i)$ with the reference color $I_0(u, v)$.
+-    *   Compute a local consistency cost $c_i(u, v, z_k)$, typically using Sum of Absolute Differences (SAD) or Sum of Squared Differences (SSD) over a local window centered at $(u, v)$ and $(u_i, v_i)$.
+-    *   Aggregate costs across all target views: $C(u, v, z_k) = \sum_{i=1}^{N-1} c_i(u, v, z_k)$.
+-3.  **Cost Aggregation (Optional but common in GPU implementations):**
+-    *   Apply a filtering operation (e.g., median filter, bilateral filter, or cross-based aggregation) to the cost volume $C$ to enforce spatial smoothness and reduce noise [S1, unofficial].
+-4.  **Depth Selection:**
+-    *   For each pixel $(u, v)$, select the depth hypothesis $z_k$ that minimizes the aggregated cost:
+-        $$ D(u, v) = \arg \min_{z_k \in Z} C(u, v, z_k) $$
+-    *   In case of ties, select the smallest depth or use sub-pixel interpolation.
++**Steps:**
++1. **Initialization:** Set `photo_cost` to $\infty$ for all pixels $(u,v)$.
++2. **Depth Sweep:** Iterate through discrete depth samples $d$ from $d_{min}$ to $d_{max}$ with step $\Delta d$.
++3. **Projection:** For each depth $d$, construct a plane $P_d$ in the reference camera coordinate system. Project $P_d$ into all other $N-1$ camera views using their respective projection matrices $M_i$.
++4. **Sampling:** For each pixel $(u,v)$ in the reference view, sample the intensity $I_i(u_i, v_i)$ from each auxiliary view $i$ at the projected coordinates $(u_i, v_i)$.
++5. **Photo-Consistency Check:** Compute a consistency metric (e.g., sum of absolute differences or variance) across the sampled intensities. Let $C(d, u, v)$ be this cost.
++6. **Aggregation:** Update the cost volume:
++   $$ \text{photo\_cost}(u,v) = \min(\text{photo\_cost}(u,v), C(d, u, v)) $$
++   [S1, unofficial] Note: The source indicates the check is performed on each fragment regardless of silhouette/background test rejection.
++7. **Depth Extraction:** After all depths are swept, the depth for each pixel is the $d$ that minimized `photo_cost`.
+ 
+ **Parameters:**
+-*   **Depth Resolution:** Number of depth slices $K$. Higher $K$ increases accuracy but memory usage.
+-*   **Depth Range:** $[z_{min}, z_{max}]$. Must cover the scene.
+-*   **Window Size:** Size of the local neighborhood for photometric comparison.
++- $\Delta d$: Depth sampling step. Not given in the sources.
++- $N$: Number of views. Limited to 4 [S1, unofficial].
+ 
+-**Pitfalls:**
+-*   **Occlusions:** Points visible in the reference view may be occluded in target views, leading to incorrect cost aggregation.
+-*   **Textureless Regions:** Lack of distinctive features leads to ambiguous costs.
+-*   **Reflections/Transparency:** Violate the Lambertian assumption, causing photometric inconsistency.
+-*   **Limited Views:** The method's performance degrades significantly with fewer views or large baseline differences [S1, unofficial].
+-
+-**Pseudocode:**
+-```python
+-def plane_sweep_depth_estimation(reference_image, target_images, camera_matrices, depth_range, num_depth_slices):
+-    """
+-    reference_image: H x W x 3 array
+-    target_images: List of N-1 arrays, each H x W x 3
+-    camera_matrices: List of N-1 4x4 matrices (extrinsics)
+-    depth_range: Tuple (z_min, z_max)
+-    num_depth_slices: Integer K
+-    """
+-    H, W, _ = reference_image.shape
+-    num_targets = len(target_images)
+-    
+-    # Initialize cost volume
+-    cost_volume = np.zeros((H, W, num_depth_slices))
+-    
+-    # Generate depth hypotheses
+-    z_values = np.linspace(depth_range[0], depth_range[1], num_depth_slices)
+-    
+-    # Precompute projection maps for all targets and all depths
+-    # This is expensive, so typically done on GPU or optimized
+-    # For each pixel (u,v) and depth z, compute (u_i, v_i) in each target view
+-    projection_maps = []
+-    for i in range(num_targets):
+-        # Compute 2D coordinates in target view i for all (u,v,z)
+-        # This involves inverse projection to 3D, then projection to target 2D
+-        # Result: H x W x K x 2 array of (u_i, v_i)
+-        proj_map_i = compute_projection_map(reference_image, camera_matrices[i], z_values)
+-        projection_maps.append(proj_map_i)
+-        
+-    # Photometric consistency check
+-    for k, z in enumerate(z_values):
+-        for i in range(num_targets):
+-            proj_map = projection_maps[i][:, :, k, :] # Shape: H x W x 2
+-            target_img = target_images[i]
+-            
+-            # Sample colors from target image using bilinear interpolation
+-            # Handle out-of-bounds pixels (occlusions)
+-            sampled_colors = sample_image(target_img, proj_map)
+-            
+-            # Compute SAD cost
+-            ref_colors = reference_image # Shape: H x W x 3
+-            diff = np.abs(ref_colors - sampled_colors)
+-            # Local window aggregation (simplified as global for brevity, 
+-            # in practice use a sliding window or separable filter)
+-            cost = np.sum(diff, axis=2) # Shape: H x W
+-            
+-            # Accumulate cost
+-            cost_volume[:, :, k] += cost
+-            
+-    # Find minimum cost depth
+-    min_cost_indices = np.argmin(cost_volume, axis=2)
+-    depth_map = z_values[min_cost_indices]
+-    
+-    return depth_map
+-```
++**Edge Cases:**
++- **Occlusions:** Pixels occluded in auxiliary views will have high cost. The method assumes visibility or uses robust metrics.
++- **Textureless Regions:** Low gradient areas yield ambiguous costs. Not given in the sources.
+ 
+ ## Subtopics
+ 
+-### Binocular Depth Estimation (Stereo Matching)
+-A specialized variant using only two views (left and right). It follows a pipeline of feature extraction, cost volume construction, cost aggregation, and disparity computation [S2]. The process is represented as $d = \eta(\delta(\partial(f_\theta(I_l), f_\theta(I_r))))$, where $I_l, I_r$ are input images, $f_\theta$ is feature extraction, $\partial$ is cost volume construction, $\delta$ is cost aggregation, and $\eta$ is disparity computation [S2]. Representative methods include CFNet and PCWNet [S2]. It is chosen when computational resources are limited to two views or when high accuracy is required for close-range objects.
++### [Binocular Depth Estimation (Stereo Matching)](15014-binocular-depth-estimation-stereo-matching.md)
++Binocular depth estimation estimates the depth of a scene by analyzing the geometric correspondence between a pair of images (typically left and right) captured from slightly different viewpoints. It solves the problem of recovering 3D structure from 2D imagery by computing a disparity map, which is then converted to depth. Unlike monocular depth estimation, which relies on learned priors from a single image, this method leverages explicit geometric constraints (epipolar geometry) to provide metrically consistent depth estimates. It serves as a foundational step for dense depth estimation and 3D reconstruction, often feeding into subsequent volume rendering or plane-sweep algorithms.
+ 
+ ## Operating characteristics
+-*   **Time Complexity:** $O(H \cdot W \cdot K \cdot N)$, where $H, W$ are image dimensions, $K$ is the number of depth slices, and $N$ is the number of views.
+-*   **Memory Complexity:** $O(H \cdot W \cdot K)$ for the cost volume.
+-*   **Performance:** Can compute dense depth maps at up to 20 frames per second on GPU hardware [S1, unofficial].
+-*   **Strengths:** Robust to uncalibrated views; provides dense output; efficient on GPU.
+-*   **Limitations:** Limited to a small number of views (typically $\le 4$) due to computational and memory constraints [S1, unofficial]; sensitive to occlusions and textureless regions.
+-*   **When to use:** Real-time applications with limited camera setups (e.g., stereo or quad-camera rigs).
+-*   **When not to use:** Scenes with large baselines, significant occlusions, or when more than 4 views are available and computational resources allow for more complex multi-view fusion.
++- **Time Complexity:** $O(W \cdot H \cdot N \cdot D)$, where $W,H$ are image dimensions, $N$ is views, $D$ is depth samples.
++- **Memory Complexity:** $O(W \cdot H \cdot D)$ for the cost volume, or $O(W \cdot H)$ if aggregated on-the-fly.
++- **Performance:** Dense depth maps computed with up to 20 frames per second [S1, unofficial].
++- **Strengths:** Runs almost entirely on the GPU, leaving the CPU free for other tasks [S1, unofficial]. No explicit volume is produced, saving memory.
++- **Limitations:** Limited to only four camera views [S1, unofficial].
+ 
+ ## Background
+-The method was proposed by Woetzel and Koch in 2004 [S1, unofficial]. It was designed as a live system for image capturing and dense depth estimation, running almost entirely on the GPU to leave the CPU free for other tasks [S1, unofficial]. The approach builds on earlier volumetric reconstruction techniques like Voxel Coloring and Space Carving, which were also accelerated on GPUs [S1, unofficial].
++Woetzel and Koch proposed a live system for image capturing and dense depth estimation in [WoeKoch04]. Their plane-sweep algorithm runs almost entirely on the GPU, leaving the main CPU free for other tasks such as image capture and higher level recognition. Dense depth maps are computed with up to 20 frames per second; however, their system is limited to only four camera views [S1, unofficial].
+ 
+ ## Sources
+-[S1] Accelerated volumetric reconstruction from uncalibrated camera views, http://doras.dcu.ie/157/, fetched 2026-10-26 (unofficial)
+-[S2] Digging into Depth Priors for Outdoor Neural Radiance Fields, https://doi.org/10.1145/3581783.3612306, fetched 2026-10-30+[S1] Accelerated volumetric reconstruction from uncalibrated camera views, http://doras.dcu.ie/157/, fetched 2026-10-26 (unofficial)

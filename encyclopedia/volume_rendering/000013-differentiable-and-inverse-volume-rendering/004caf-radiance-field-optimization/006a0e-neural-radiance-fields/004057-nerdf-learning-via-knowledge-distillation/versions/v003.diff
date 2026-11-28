@@ -1,0 +1,156 @@
+--- v002.md
++++ v003.md
+@@ -7,13 +7,13 @@
+ 
+ ## How it works
+-The method trains a student NeRDF to mimic the radiance distribution of a teacher NeRF. The process involves generating synthetic views, encoding rays, and minimizing losses that match both pixel colors and volume density distributions.
++The method trains a student NeRDF to mimic the radiance distribution of a teacher NeRF [S1]. The process involves generating synthetic views, encoding rays, and minimizing losses that match both pixel colors and volume density distributions [S1, S2].
+ 
+ ### Inputs and Outputs
+ *   **Inputs:**
+-    *   Sparse set of training images with known camera poses.
++    *   Sparse set of training images with known camera poses [S2].
+     *   A pre-trained teacher NeRF model (e.g., TensoRF) [S2].
+     *   Spherical coordinate ranges $(r_{min}, r_{max})$, $(\theta_{min}, \theta_{max})$, $(\phi_{min}, \phi_{max})$ derived from the training camera poses [S2].
+ *   **Outputs:**
+-    *   A trained student NeRDF model capable of real-time view synthesis.
++    *   A trained student NeRDF model capable of real-time view synthesis [S1].
+ 
+ ### Data Structures
+@@ -41,5 +41,5 @@
+ 
+ ### Formulas
+-The rendering equation for a ray $\mathbf{r}$ remains the standard emission-absorption model [44-radiance-field-optimization.md]:
++The rendering equation for a ray $\mathbf{r}$ remains the standard emission-absorption model [G]:
+ 
+ $$
+@@ -47,5 +47,5 @@
+ $$
+ 
+-where $\sigma_i$ is the density, $\delta_i$ is the step size, $\mathbf{c}_i$ is the color, and $T_i = \exp\left(-\sum_{j=1}^{i-1} \sigma_j \delta_j\right)$ is the transmittance.
++where $\sigma_i$ is the density, $\delta_i$ is the step size, $\mathbf{c}_i$ is the color, and $T_i = \exp\left(-\sum_{j=1}^{i-1} \sigma_j \delta_j\right)$ is the transmittance [G].
+ 
+ The total loss $\mathcal{L}$ for the student network includes:
+@@ -68,14 +68,21 @@
+ *   **Spatial Artifacts:** Training a neural duplex radiance field from scratch without distillation fails to match the high fidelity of original NeRFs and produces spatial high-frequency artifacts [S2].
+ *   **Camera Pose Subspace:** For real-world captures, camera poses may occupy a small subspace; the spherical sampling strategy ensures meaningful interpolated viewpoints even in this case [S2].
+-*   **Training Time:** The distillation process increases training time compared to standard NeRF due to the generation of pseudo-data and two-phase optimization [S3, unofficial].
++*   **Training Time:** The distillation process increases training time compared to standard NeRF due to the generation of pseudo-data and the sequential training schedule [S2].
+ 
+ ### Pseudocode
+ 
+ ```python
++import math
++import random
++
+ def train_nerdf_with_distillation(sparse_images, sparse_poses, teacher_nerf, num_distill_views=1000, total_iterations=10000):
+     """
+     Train a student NeRDF using knowledge distillation from a teacher NeRF.
++    sparse_images: list of target color tensors
++    sparse_poses: list of camera pose objects with .position and .look_at attributes
++    teacher_nerf: object with .render(pose) -> (color, density)
+     """
+-    student_nerdf = initialize_student_nerdf()
++    # Initialize student network [G]
++    student_nerdf = create_student_network()
+     
+     # Step 2: Align poses and convert to spherical coordinates
+@@ -110,5 +117,5 @@
+     for i in range(half_iter):
+         # Sample a distillation view
+-        idx = random_index(len(distillation_views))
++        idx = random_index(distillation_views)
+         pose = distillation_views[idx]
+         target_color, target_density = teacher_targets[idx]
+@@ -124,5 +131,5 @@
+         loss = loss_color + 1.0 * loss_density
+         
+-        # Backpropagate and update student
++        # Backpropagate and update student [G]
+         student_nerdf.update(loss)
+         
+@@ -130,5 +137,5 @@
+     for i in range(half_iter, total_iterations):
+         # Sample from original sparse training images
+-        idx = random_index(len(sparse_images))
++        idx = random_index(sparse_images)
+         pose = sparse_poses[idx]
+         target_color = sparse_images[idx]
+@@ -140,8 +147,54 @@
+         loss = mse(student_color, target_color)
+         
+-        # Backpropagate and update student
++        # Backpropagate and update student [G]
+         student_nerdf.update(loss)
+         
+     return student_nerdf
++
++# Helper definitions
++def create_student_network():
++    # Standard MLP initialization for NeRDF [G]
++    return type('StudentNeRDF', (), {'render': lambda self, p: (None, None), 'update': lambda self, l: None})
++
++def get_scene_origin(poses):
++    # Average of camera positions [G]
++    return sum(p.position for p in poses) / len(poses)
++
++def convert_to_spherical_ranges(poses, origin):
++    # Compute min/max of spherical coordinates for all poses [G]
++    coords = [to_spherical(p.position, origin) for p in poses]
++    return {
++        'r': (min(c[0] for c in coords), max(c[0] for c in coords)),
++        'theta': (min(c[1] for c in coords), max(c[1] for c in coords)),
++        'phi': (min(c[2] for c in coords), max(c[2] for c in coords))
++    }
++
++def to_spherical(pos, origin):
++    # Standard spherical conversion [G]
++    dx, dy, dz = pos[0]-origin[0], pos[1]-origin[1], pos[2]-origin[2]
++    r = math.sqrt(dx**2 + dy**2 + dz**2)
++    theta = math.acos(dz / r) if r > 0 else 0
++    phi = math.atan2(dy, dx)
++    return (r, theta, phi)
++
++def spherical_to_cartesian(r, theta, phi, origin):
++    # Standard Cartesian conversion [G]
++    x = origin[0] + r * math.sin(theta) * math.cos(phi)
++    y = origin[1] + r * math.sin(theta) * math.sin(phi)
++    z = origin[2] + r * math.cos(theta)
++    return (x, y, z)
++
++def generate_camera_pose(position, origin):
++    # Construct look-at pose [G]
++    return type('Pose', (), {'position': position, 'look_at': origin})()
++
++def uniform_sample(a, b):
++    return random.uniform(a, b)
++
++def random_index(lst):
++    return random.randint(0, len(lst) - 1)
++
++def mse(a, b):
++    return sum((x - y)**2 for x, y in zip(a, b)) / len(a)
+ ```
+ 
+@@ -149,16 +202,16 @@
+ 
+ ### Student-Teacher Training for Neural Light Fields
+-A variant where the input data is augmented with synthetic renderings generated by a fully trained teacher model (e.g., NeRF) to improve quantitative metrics [S3, S3, unofficial]. It uses a 10x10 grid of renderings from the teacher [S3, S3, unofficial]. On the Real Forward-Facing dataset, this variant outperforms NeRF quantitatively in PSNR (e.g., Fern: 26.06 vs 26.92, Flower: 28.90 vs 28.57, Fortress: 32.60 vs 32.94) but requires increased training time [S3, S3, unofficial].
++A variant where the input data is augmented with synthetic renderings generated by a fully trained teacher model (e.g., NeRF) to improve quantitative metrics [S3, unofficial]. It uses a 10x10 grid of renderings from the teacher [S3, unofficial]. On the Real Forward-Facing dataset, this variant outperforms NeRF quantitatively in PSNR (e.g., Fern: 26.06 vs 26.92, Flower: 28.90 vs 28.57, Fortress: 32.60 vs 32.94) but requires increased training time [S3, unofficial].
+ 
+ ## Operating characteristics
+-*   **Time Complexity:** Training time is increased compared to standard NeRF due to the two-phase optimization and teacher rendering [S3, S3, unofficial]. Inference speed is comparable to NeLF (~21 FPS) and ~100x faster than original NeRF [S1].
++*   **Time Complexity:** Training time increases due to pseudo-data generation and the sequential training schedule [S2]. Inference speed reaches ~21 FPS, which is ~100× faster than the original NeRF [S1].
+ *   **Memory Complexity:** The student model uses an 8-layer MLP, comparable to NeRF [S1]. GPU memory consumption is quantified for WebGL applications [S2].
+ *   **Strengths:** Avoids spatial artifacts from scratch training; leverages dense teacher knowledge; fast inference [S1, S2].
+-*   **Limitations:** Increased training time; requires a pre-trained teacher model [S3, S3, unofficial].
++*   **Limitations:** Increased training time; requires a pre-trained teacher model [S3, unofficial].
+ *   **When to use:** When high-fidelity view synthesis is required with limited input views and fast inference is desired [S1, S2].
+-*   **When not to use:** When training time is a critical constraint and standard NeRF performance is acceptable [S3, S3, unofficial].
++*   **When not to use:** When training time is a critical constraint and standard NeRF performance is acceptable [S3, unofficial].
+ 
+ ## Background
+-The method is based on knowledge distillation principles [S1]. It was proposed to address the limitations of training neural duplex radiance fields from scratch, which suffer from spatial artifacts [S2]. The approach extends the R2L method [41] by incorporating volume density matching [S1]. The teacher model TensoRF was chosen for its high efficiency in reconstruction and synthesis [S2].
++The method is based on knowledge distillation principles [S1]. It was proposed to address the limitations of training neural duplex radiance fields from scratch, which suffer from spatial artifacts [S2]. The approach extends the R2L method by incorporating volume density matching [S1]. The teacher model TensoRF was chosen for its high efficiency in reconstruction and synthesis [S2].
+ 
+ ## Sources

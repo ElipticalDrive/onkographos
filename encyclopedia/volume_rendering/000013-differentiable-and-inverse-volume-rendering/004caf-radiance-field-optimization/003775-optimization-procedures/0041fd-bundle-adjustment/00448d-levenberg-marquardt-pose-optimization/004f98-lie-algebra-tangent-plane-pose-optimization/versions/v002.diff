@@ -1,0 +1,194 @@
+--- v001.md
++++ v002.md
+@@ -32,81 +32,34 @@
+     This is performed via back-propagation [S1, S2].
+ 5.  **Pose Update:** Update the pose by exponentiating the optimal tangent vector and composing it with the initial pose:
+-    $$ \hat{T} = \exp(\hat{\xi}) T_0 $$
+-    Note: The source formula (5) in [S2] writes $\hat{T} = \exp(\hat{\xi}) \hat{T}_0$. Given the context of incremental updates, this represents applying the incremental transform $\exp(\hat{\xi})$ to the current estimate [S2].
++    $$ \hat{T} = \exp(\hat{\xi}) \hat{T}_0 $$
++    This represents applying the incremental transform $\exp(\hat{\xi})$ to the current estimate [S2].
+ 6.  **Iteration:** Repeat steps 3-5 until convergence [S1, S2].
+ 
+ **Pseudocode:**
+ ```python
+-def lie_algebra_pose_optimization(initial_pose_T0, intrinsics_K, image_I, pixel_set_R, network_params_theta, num_iterations):
+-    """
+-    Optimizes camera pose T in the tangent space se(3).
+-    
+-    Args:
+-        initial_pose_T0: 4x4 matrix, initial SE(3) pose.
+-        intrinsics_K: 3x3 matrix, camera intrinsics.
+-        image_I: 2D array, observed image intensities.
+-        pixel_set_R: List of (u, v) coordinates, sparse pixels for tracking.
+-        network_params_theta: Fixed parameters for the implicit network.
+-        num_iterations: Integer, max optimization steps.
+-        
+-    Returns:
+-        optimized_T: 4x4 matrix, optimized SE(3) pose.
+-    """
+-    # Current pose estimate starts at initial pose
+-    current_T = initial_pose_T0
+-    
+-    for i in range(num_iterations):
+-        # 1. Render image using current pose and fixed network parameters
+-        # F(T, K, u; theta) computes the rendered intensity at pixel u
+-        rendered_image = render_image(current_T, intrinsics_K, pixel_set_R, network_params_theta)
+-        
+-        # 2. Compute photometric loss
+-        # L = sum || rendered(u) - observed(u) ||^2
++def lie_algebra_pose_optimization(T0, K, R, theta, num_iterations, learning_rate):
++    # T0: 4x4 initial pose matrix
++    # K: 3x3 intrinsic matrix
++    # R: list of pixel coordinates (u, v)
++    # theta: fixed network parameters
++    # num_iterations: int
++    # learning_rate: float
++    T = T0
++    for _ in range(num_iterations):
++        # [G] Volume rendering procedure is handled by the parent method.
++        rendered = render_image(T, K, R, theta)
+         loss = 0.0
+-        for u in pixel_set_R:
+-            rendered_val = rendered_image[u]
+-            observed_val = image_I[u]
+-            loss += sum((rendered_val - observed_val) ** 2)
+-            
+-        # 3. Compute gradient of loss with respect to the tangent vector xi
+-        # The gradient is computed via back-propagation through the rendering function
+-        # Note: The gradient is with respect to the pose T, but we need it in se(3)
+-        # Standard approach: Compute dL/dT, then map to se(3) via left Jacobian inverse or similar
+-        # However, source [S1] states "updated in each iteration via back-propagation"
+-        # and [S2] formulates optimization directly on xi.
+-        # We assume a standard Lie optimization step:
+-        
+-        # Compute gradient of loss w.r.t current_T
+-        grad_T = compute_gradient_backprop(loss, current_T, intrinsics_K, pixel_set_R, network_params_theta)
+-        
+-        # Map gradient from SE(3) tangent space (matrix form) to se(3) (vector form)
+-        # This involves the inverse of the left Jacobian of SE(3)
+-        # J_inv is the inverse left Jacobian of SE(3) evaluated at current_T
+-        # grad_xi = J_inv @ vec(grad_T)
+-        # [G] Standard SE(3) Jacobian inverse implementation required here.
+-        grad_xi = se3_jacobian_inverse(current_T) @ vec_to_se3_vector(grad_T)
+-        
+-        # 4. Update tangent vector xi using gradient descent (or Levenberg-Marquardt if integrated)
+-        # [G] Source [S2] mentions "gradient-based optimization" and "back propagation".
+-        # It does not specify the optimizer (SGD, Adam, LM). Given the parent is LM,
+-        # we assume an iterative update. For simplicity, we use a gradient step.
+-        learning_rate = 0.01 # [G] Typical value, not specified in sources.
+-        delta_xi = -learning_rate * grad_xi
+-        
+-        # 5. Exponential map to update pose
+-        # T_new = exp(delta_xi) * T_old
+-        current_T = exp_se3(delta_xi) @ current_T
+-        
+-    return current_T
++        for u in R:
++            diff = rendered[u] - observed_image[u]
++            loss += sum(d**2 for d in diff)
++        # [G] Automatic differentiation computes the gradient w.r.t. xi.
++        grad_xi = compute_gradient(loss, T, K, R, theta)
++        delta_xi = [-learning_rate * g for g in grad_xi]
++        T = mat_mul(exp_se3(delta_xi), T)
++    return T
+ 
+ def exp_se3(xi):
+-    """
+-    Exponential map from se(3) to SE(3).
+-    xi is a 6-vector [omega, delta] where omega is rotation (3) and delta is translation (3).
+-    """
+-    omega = xi[0:3]
+-    delta = xi[3:6]
+-    
+-    # Compute rotation matrix R = exp(omega_hat)
++    omega = xi[:3]
++    delta = xi[3:]
+     theta = norm(omega)
+     if theta < 1e-6:
+@@ -114,32 +67,36 @@
+         J = identity(3)
+     else:
+-        omega_hat = skew_symmetric(omega)
+-        R = rotation_matrix_from_axis_angle(omega, theta)
+-        # [G] Approximation of J for small theta, or full formula for large theta.
+-        # J = I + (1-cos(theta))/theta^2 * omega_hat + (theta-sin(theta))/theta^3 * omega_hat^2
+-        J = identity(3) + (1 - cos(theta)) / (theta**2) * omega_hat + \
+-            (theta - sin(theta)) / (theta**3) * (omega_hat @ omega_hat)
+-            
+-    # T = [R, J*delta; 0, 1]
++        w_hat = skew(omega)
++        R = identity(3) + sin(theta)/theta * w_hat + (1-cos(theta))/(theta**2) * mat_mul(w_hat, w_hat)
++        J = identity(3) + (1-cos(theta))/(theta**2) * w_hat + (theta-sin(theta))/(theta**3) * mat_mul(w_hat, w_hat)
+     T = identity(4)
+-    T[0:3, 0:3] = R
+-    T[0:3, 3] = J @ delta
++    T[:3, :3] = R
++    T[:3, 3] = mat_vec(J, delta)
+     return T
+ 
+-def skew_symmetric(v):
+-    return [[0, -v[2], v[1]],
+-            [v[2], 0, -v[0]],
+-            [-v[1], v[0], 0]]
++def skew(v):
++    return [[0, -v[2], v[1]], [v[2], 0, -v[0]], [-v[1], v[0], 0]]
+ 
+-def vec_to_se3_vector(matrix_grad):
+-    """
+-    Converts a 4x4 matrix gradient (in tangent space of SE(3)) to a 6-vector.
+-    [G] Implementation detail not explicitly in sources, but standard in Lie optimization.
+-    """
+-    # Extract rotation and translation parts
+-    # This is a simplified mapping; actual implementation depends on the specific Lie algebra representation.
+-    # Typically, the upper 3x3 skew-symmetric part gives omega, and the translation column gives delta.
+-    # However, the gradient is w.r.t the pose, so it's more complex.
+-    # For the purpose of this article, we assume a helper function exists.
++def identity(n):
++    return [[1 if i==j else 0 for j in range(n)] for i in range(n)]
++
++def norm(v):
++    return sum(x**2 for x in v)**0.5
++
++def mat_mul(A, B):
++    return [[sum(A[i][k]*B[k][j] for k in range(len(B))) for j in range(len(B[0]))] for i in range(len(A))]
++
++def mat_vec(M, v):
++    return [sum(M[i][j]*v[j] for j in range(len(v))) for i in range(len(M))]
++
++def sin(x): return x - x**3/6 + x**5/120
++def cos(x): return 1 - x**2/2 + x**4/24
++
++def render_image(T, K, R, theta):
++    # [G] Handled by parent volume rendering method.
++    pass
++
++def compute_gradient(loss, T, K, R, theta):
++    # [G] Handled by automatic differentiation framework.
+     pass
+ ```
+@@ -153,14 +110,14 @@
+ **Edge Cases and Pitfalls:**
+ *   **Interference from Mapping:** A copy of the SDF decoder and voxel embeddings must be kept for the tracking process, updated only when a new frame is fused into the map, to prevent interference from ongoing mapping updates [S1].
+-*   **Local Minima:** Images are complex signals, making gradient descent prone to local minima. A truncated dynamic low-pass filter (TDLF) can be used to suppress high-frequency signals and escape local minima [S2].
++*   **Local Minima:** Images are complex signals, making gradient descent prone to local minima [S2]. A truncated dynamic low-pass filter (TDLF) can be used to suppress high-frequency signals and escape local minima [S2].
+ *   **Large Offsets:** Localization performance degrades when translation error reaches large values (e.g., 16m) and rotation error is significant (e.g., 16°), due to small overlap between observed and rendered images [S2].
+ 
+ ## Subtopics
+ 
+-### Derivative-free Pose Estimation via Feature Matching
+-Uses feature matching instead of gradient-based photometric optimization. Choose when gradients are unreliable or differentiable rendering is not available. [Derivative-free Pose Estimation via Feature Matching](11310-derivative-free-pose-estimation-via-feature-matching.md)
++### [Error-state Camera Optimization](23094-error-state-camera-optimization.md)
++Error-state camera optimization refines camera poses and intrinsic parameters by optimizing residual corrections in the tangent space of the SE(3) manifold rather than updating the full transformation directly. It builds on Lie Algebra (Tangent Plane) Pose Optimization by specifically handling both extrinsic pose errors and intrinsic focal length perturbations within a differentiable rendering framework. This approach is distinct from direct manifold optimization by linearizing the update around a fixed initialization, ensuring smoother convergence for small residuals. [Error-state Camera Optimization](23094-error-state-camera-optimization.md)
+ 
+ ## Operating characteristics
+-*   **Time and Memory Complexity:** The method requires back-propagation through the volume rendering function, which is computationally intensive. Memory usage is dominated by the voxel embeddings and implicit network parameters, which are kept fixed during tracking [S1].
++*   **Time and Memory Complexity:** Memory usage is dominated by the voxel embeddings and implicit network parameters, which are kept fixed during tracking [S1]. The method requires back-propagation through the volume rendering function, which is computationally intensive [G].
+ *   **Measured Performance:** In experiments with initial translation errors up to 16m, the method achieved translation errors as low as 0.02m and rotation errors as low as 0.09° when combined with TDLF [S2]. Direct manifold optimization (iNeRF) failed or produced large errors (e.g., 22.78m translation error) under similar conditions [S2].
+ *   **Scaling:** The method scales with the number of sampled pixels $N_t$ and the complexity of the implicit network [S1, S2].
+@@ -169,5 +126,5 @@
+ 
+ ## Background
+-This method originates from the need for efficient and robust pose estimation in neural implicit representations. It builds on the principles of Lie group optimization, where updates are performed in the tangent space to maintain the manifold structure [S1, S2]. The specific formulation using the tangent plane for $SE(3)$ optimization was highlighted in [S2] as superior to direct manifold optimization for avoiding noisy photometric loss landscapes. The approach is used in systems like Vox-Fusion for dense tracking and mapping [S1] and LATITUDE for robotic global localization [S2].
++The method builds on the principles of Lie group optimization, where updates are performed in the tangent space to maintain the manifold structure [S1, S2]. The specific formulation using the tangent plane for $SE(3)$ optimization was highlighted in [S2] as superior to direct manifold optimization for avoiding noisy photometric loss landscapes. The approach is used in systems like Vox-Fusion for dense tracking and mapping [S1] and LATITUDE for robotic global localization [S2].
+ 
+ ## Sources

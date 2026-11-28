@@ -1,0 +1,96 @@
+What Mesh point queries (wp.mesh_query_point() and its _no_sign, _sign_parity, _sign_normal, and _sign_winding_number variants) return a wrong closest point, or no result, once a mesh is uniformly scaled beyond about 1e9 or below about 1...
+
+[BUG] Mesh closest-point queries fail for meshes scaled beyond about 1e9 or below about 1e-11 · Issue #27 · christophercrouzet/warp · GitHub
+Skip to content
+You signed in with another tab or window. Reload to refresh your session.
+You signed out in another tab or window. Reload to refresh your session.
+You switched accounts on another tab or window. Reload to refresh your session.
+Dismiss alert
+[BUG] Mesh closest-point queries fail for meshes scaled beyond about 1e9 or below about 1e-11 #27
+New issue
+Copy link
+New issue
+Copy link
+Open
+Open
+[BUG] Mesh closest-point queries fail for meshes scaled beyond about 1e9 or below about 1e-11#27
+Copy link
+Description
+christophercrouzet
+opened on Sep 18, 2026
+Issue body actions
+What
+Mesh point queries (wp.mesh_query_point() and its _no_sign, _sign_parity, _sign_normal, and
+_sign_winding_number variants) return a wrong closest point, or no result, once a mesh is uniformly scaled
+beyond about 1e9 or below about 1e-11. Uniform scaling changes neither the closest face nor its barycentric
+coordinates.
+Two parts of the closest-point search break:
+closest_point_to_triangle() multiplies pairs of dot products (vc, vb, va), which grow with the fourth power
+of the coordinates.
+From about 2e9 the barycentric coordinates are wrong.
+From about 3e9 they overflow to NaN and the query returns no result.
+Below about 1e-15 they underflow and the barycentric coordinates are wrong.
+The adjoint has the same products and returns NaN gradients.
+The sliver test in each query's leaf loop computes length(cross(e0, e1)), whose squared length underflows below
+about 1e-11. Every triangle is then rejected as a sliver and the query returns no result.
+The first version of this issue blamed the winding number. In fact the winding number is correct from about 1e-21
+to 1e18. At the 1e20 scale reported originally, the squared distances overflow float32, so no single-precision
+query can work there.
+Reproduction
+```
+import numpy as np
+import warp as wp
+
+@wp.kernel
+def query(mesh: wp.uint64, p: wp.vec3, max_dist: float, out: wp.array[wp.vec3]):
+    q = wp.mesh_query_point_no_sign(mesh, p, max_dist)
+    out[0] = wp.vec3(float(q.result), q.u, q.v)
+
+verts = np.array([[1, 1, 1], [-1, -1, 1], [-1, 1, -1], [1, -1, -1]], dtype=np.float64)
+tris = np.array([0, 2, 1, 0, 1, 3, 0, 3, 2, 1, 2, 3], dtype=np.int32)
+for device in ("cpu", "cuda:0"):
+    for scale in (1.0, 2.0e9, 3.0e9, 1.0e-12):
+        mesh = wp.Mesh(
+            wp.array(verts * scale, dtype=wp.vec3, device=device),
+            wp.array(tris, dtype=wp.int32, device=device),
+        )
+        out = wp.zeros(1, dtype=wp.vec3, device=device)
+        p = wp.vec3(*(np.array([0.2, 0.1, -0.1]) * scale))
+        wp.launch(query, dim=1, inputs=[mesh.id, p, 10.0 * scale, out], device=device)
+        print(device, scale, out.numpy()[0])
+```
+Expected for every scale: a hit at u = v = 0.35. Observed (CUDA prints the same):
+```
+cpu 1.0 [1.         0.34999987 0.35      ]
+cpu 2000000000.0 [1. 1. 0.]
+cpu 3000000000.0 [0. 0. 0.]
+cpu 1e-12 [0. 0. 0.]
+```
+Why / when it matters
+Results should not depend on the unit of length. Meshes in large world-space coordinates (above about 1e9)
+or tiny units (below about 1e-11) silently get wrong closest points or no hits, even though their squared
+distances fit in float32.
+Environment
+Reproduced against NVIDIA/warp main at d4a8f4213 (Warp 1.19.0.dev2) on Linux, CPU and CUDA.
+Activity
+christophercrouzet
+changed the title [-][BUG] Winding-number mesh queries change under uniform scaling[/-] [+][BUG] Mesh closest-point queries fail for meshes scaled beyond about 1e9 or below about 1e-11[/+] on Oct 23, 2026
+Sign up for free to join this conversation on GitHub. Already have an account? Sign in to comment
+Metadata
+Metadata
+Assignees
+No one assigned
+Labels
+No labels
+No labels
+Projects
+No projects
+Milestone
+No milestone
+Relationships
+None yet
+Development
+No branches or pull requests
+Issue actions
+Open in GitHub Copilot app
+You can’t perform that action at this time.

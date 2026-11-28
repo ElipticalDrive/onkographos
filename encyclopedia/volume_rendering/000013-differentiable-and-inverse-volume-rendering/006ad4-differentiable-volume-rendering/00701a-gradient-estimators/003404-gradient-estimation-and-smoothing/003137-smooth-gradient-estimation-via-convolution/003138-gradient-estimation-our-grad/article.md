@@ -1,0 +1,88 @@
+# Gradient Estimation (Our Grad.)
+Also called: Fischer and Ritschel method
+
+## Overview
+Gradient Estimation (Our Grad.) computes the first-order gradient vector field of a scalar function with respect to its input dimensions, enabling differentiable volume rendering via stochastic sampling [S1]. It specifically targets the $\nabla$ operator, mapping a scalar function $f: \mathbb{R}^n \to \mathbb{R}$ to an $n$-dimensional gradient vector field [S1].
+
+## How it works
+**Inputs:**
+- A scalar function $f(\boldsymbol{\tau})$ where $\boldsymbol{\tau} \in \mathbb{R}^n$ [S1].
+- A smoothing kernel parameter $\sigma$ (standard deviation) [S1].
+- Uniform random samples $\xi \in [0, 1]$ [S1].
+
+**Outputs:**
+- An estimate of the gradient vector $\nabla f(\boldsymbol{\tau})$ [S1].
+
+**Data Structures:**
+- No persistent data structures are required for the core estimation step; the method relies on instantaneous evaluation of the function and the kernel [G].
+
+**Method Steps:**
+1. **Define the Differential Operator:** The gradient operator is defined as $D_G = \nabla = \partial/\partial\tau_i$ [S1]. The smoothed gradient operator combines Gaussian smoothing with differentiation:
+   $$ D_G \kappa_i(\boldsymbol{\tau}) = \nabla_i \mathcal{N}(\boldsymbol{\tau}, \sigma) = -\frac{\tau_i}{\sigma^2} \mathcal{N}(\boldsymbol{\tau}, \sigma) $$
+   where $\mathcal{N}(\boldsymbol{\tau}, \sigma)$ is the multivariate Gaussian kernel [S1].
+2. **Construct the Probability Density Function (PDF):** To enable sampling, the signed integrand is positivized and normalized to form a cumulative distribution function (CDF) $P_G$ [S1].
+3. **Sample the Differentiated Dimension:** For the dimension $i$ being differentiated, sample $\tau_i$ using inverse transform sampling via the Smirnov transform [S1]. Given a uniform random sample $\xi \in [0, 1]$, the inverse CDF $P_G^{-1}(\xi)$ is computed as:
+   $$ P_G^{-1}(\xi) = \begin{cases} -\sqrt{2\sigma^2 \log(2\xi)} & \text{if } \xi \le 0.5 \\ \sqrt{2\sigma^2 \log(1 - \xi)} & \text{otherwise} \end{cases} $$
+   [S1].
+4. **Sample Remaining Dimensions:** Due to the separability of the multivariate Gaussian, the remaining $n-1$ dimensions are sampled independently from a Gaussian distribution $\mathcal{N}(0, \sigma)$ [S1].
+5. **Evaluate Gradient:** Compute the gradient estimate by evaluating the function at the sampled points and aggregating the results according to the ratio estimator for the gradient operator [G].
+
+**Pseudocode:**
+> **Unverified code.** The code below did not pass a test run against a reference implementation, or no test fits it, so it may contain errors.
+
+```python
+import math
+import random
+
+def sample_gradient_dimension(xi: float, sigma: float) -> float:
+    """Samples the differentiated dimension using the inverse CDF of the positivized Gaussian gradient."""
+    if xi <= 0.5:
+        return -math.sqrt(2 * sigma**2 * math.log(2 * xi))
+    else:
+        return math.sqrt(2 * sigma**2 * math.log(1 - xi))
+
+def estimate_gradient_component(f, sigma: float, n_samples: int, target_dim: int, n_dims: int) -> float:
+    """Estimates the gradient component for a specific dimension using the Fischer and Ritschel method."""
+    grad_sum = 0.0
+    for _ in range(n_samples):
+        tau = [0.0] * n_dims
+        # Sample the target dimension using the specialized inverse CDF
+        xi = random.uniform(0, 1)
+        xi = max(1e-9, min(1 - 1e-9, xi))
+        tau[target_dim] = sample_gradient_dimension(xi, sigma)
+        # Sample remaining dimensions independently from N(0, sigma)
+        for j in range(n_dims):
+            if j != target_dim:
+                tau[j] = random.gauss(0, sigma)
+        # Evaluate the integrand at the sampled point
+        grad_sum += f(tau)
+    # [G] Sources do not give the exact ratio estimator normalization; apply standard ratio estimator weighting here.
+    return grad_sum / n_samples
+```
+
+**Parameters:**
+- $\sigma$: Smoothing standard deviation [S1]. Not given in the sources. [G]
+- $n$: Number of dimensions [S1].
+
+**Edge Cases:**
+- $\xi = 0$ or $\xi = 1$: The logarithm in the inverse CDF is undefined. Clamp $\xi$ to $[\epsilon, 1-\epsilon]$ to avoid undefined logarithms [G].
+- Degenerate input: If $\sigma \to 0$, the kernel becomes a delta function, leading to high variance or numerical instability [G].
+
+## Subtopics
+
+### [Dual-Buffer Gradient Estimator](13586-dual-buffer-gradient-estimator.md)
+An unbiased variant that decouples forward and backward passes using two independent samples to cancel bias, suitable when bias must be avoided.
+
+## Operating characteristics
+- **Time Complexity:** $O(n)$ function evaluations without importance sampling (IS), $O(n)$ with IS, and $O(1)$ with Aggregate IS [S1].
+- **Memory Complexity:** Not given in the sources. [G]
+- **Strengths:** Provides an unbiased estimate of the gradient vector field [S1]. Efficient with Aggregate IS [S1].
+- **Limitations:** Variance can be high without importance sampling. Requires careful handling of the positivization and normalization steps [G].
+- **When to use:** When first-order gradients are needed for optimization in differentiable volume rendering and unbiased estimates are preferred [G].
+- **When not to use:** When second-order information (Hessian) is required, or when bias is acceptable for significantly lower variance (consider [Smooth Gradient Marginalization](6472-smooth-gradient-marginalization.md)) [G].
+
+## Background
+The method originates from Fischer and Ritschel [7], who differentiated using the gradient operator $D_G = \nabla$ [S1]. It is part of the broader framework of stochastic gradient estimation for higher-order differentiable rendering [S1]. The approach combines smoothing and differentiation via convolution with a Gaussian kernel, allowing the differential operator to move inside the integral [S1].
+
+## Sources
+[S1] Stochastic Gradient Estimation for Higher-Order Differentiable Rendering, https://doi.org/10.1109/iccv51701.2025.02618, fetched 2026-10-29

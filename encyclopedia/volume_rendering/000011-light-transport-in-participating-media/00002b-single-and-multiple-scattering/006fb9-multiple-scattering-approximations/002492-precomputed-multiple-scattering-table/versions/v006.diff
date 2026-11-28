@@ -1,0 +1,413 @@
+--- v005.md
++++ v006.md
+@@ -4,225 +4,220 @@
+ 
+ ## Overview
+-Precomputed Multiple Scattering Table (PMS) accelerates light simulation in participating media by precomputing the radiance contribution of multiple scattering events (more than two scattering events) in an infinite homogeneous medium, storing the results in compact 4D lookup tables [S2, S3]. It solves the slow convergence of high-order scattering rendering by allowing existing global illumination algorithms (such as VRL, UPBP, and MEMLT) to handle single and double scattering explicitly, while querying the precomputed tables for the remaining multiple scattering contribution [S1, S2]. Unlike [Beam Spreading Width Model](1193-beam-spreading-width-model.md) which approximates scattering via geometric width, or [PSF-based Multiple Scattering Rendering](1297-psf-based-multiple-scattering-rendering.md) which uses spatial filters, PMS relies on Monte-Carlo precomputation of directional lobes [S2, S3].
++Precomputed Multiple Scattering Table (PMS) accelerates light transport in participating media by replacing the slow convergence of high-order scattering simulations with precomputed radiance data from an infinite homogeneous medium [S1, S2]. It solves the problem of expensive Monte Carlo convergence for multiple scattering events by storing the material response in compact 4D tables, allowing existing global illumination algorithms (such as VRL, UPBP, and MEMLT) to handle single and double scattering while querying the table for higher-order effects [S2, S3]. Unlike [Beam Spreading Width Model](1193-beam-spreading-width-model.md) which approximates the shape of the light beam, PMS stores the full angular radiance distribution (lobes) [S3]. It differs from [Neural Network Multiple Scattering Representation](7796-neural-network-multiple-scattering-representation.md) by using discrete lookup tables rather than learned regression functions [S1].
+ 
+ ## How it works
+ **Inputs and Outputs:**
+-*   **Inputs:** Material properties (scattering coefficient $\sigma_s$, absorption coefficient $\sigma_a$, phase function $p(\omega, \omega_t)$, index of refraction $\eta$) [S3]; Light source geometry (point directional or segment) [S2, S3]; Rendering algorithm context (e.g., VRL rays, UPBP beams, MEMLT seed paths) [S1, S3].
+-*   **Outputs:** A compressed quadtree data structure containing 4D radiance tables (two tables: one for point sources, one for segment sources) [S2, S3]; Final pixel radiance combining low-order scattering from the host algorithm and multiple scattering from the table [S1, S3].
++*   **Inputs:** Material properties (index of refraction $\eta$, scattering coefficient $\sigma_s$, absorption coefficient $\sigma_a$, phase function $p(\omega, \omega_t)$); Light source geometry (point directional or segment); Scene geometry (for integration with specific algorithms).
++*   **Outputs:** Two 4D precomputed tables (one for point source, one for segment source) containing outgoing radiance lobes; Rendered image with multiple scattering contributions.
+ 
+ **Data Structures:**
+-The core data structure is a quadtree representing a 2D spatial grid in cylindrical coordinates $(\rho/\ell, z/\ell)$, where $\ell$ is the mean-free path [S3, S4].
+-*   **Spatial Domain:** $\rho$ (radial distance from propagation axis) and $z$ (depth along propagation axis) [S2, S3]. Coordinates are normalized by $\ell$ [S3]. The grid typically spans $0$ to $32$ mfp, extending to $64$ mfp for highly anisotropic materials [S3].
+-*   **Angular Domain:** At each spatial node, outgoing radiance is stored as a "lobe" in spherical coordinates $(\theta, \phi)$ relative to the local propagation frame [S2, S3].
+-*   **Lobe Representation:**
+-    *   **Point Source:** Exploits axial symmetry [S3]. The lobe is approximated by sampling $\theta$ every $10^\circ$ (18 samples) [S3]. Memory cost: 55 floats per lobe [S3].
+-    *   **Segment Source:** Asymmetric lobes [S3]. Memory cost: 91 floats per lobe [S3].
+-*   **Quadtree:** Begins as a $32 \times 32$ regular grid [S3]. Cells are subdivided when a photon count threshold is reached [S3]. Nodes with no scattering events are discarded for further compression [S4].
++The method uses two 4D tables indexed by spatial coordinates $(\rho, z)$ and angular coordinates $(\theta, \phi)$ [S2, S3].
++1.  **Spatial Domain:** Cylindrical coordinates $(\rho, z)$ normalized by the mean-free-path $\ell = 1/(\sigma_s + \sigma_a)$ [S3, S4].
++    *   $\rho$: Radial distance from the propagation axis.
++    *   $z$: Depth along the propagation axis.
++    *   Range: $0$ to $32$ mfp for standard materials; up to $64$ mfp for highly anisotropic materials [S3].
++2.  **Angular Domain:** Spherical coordinates $(\theta, \phi)$ relative to the local frame defined by the light direction [S3, S4].
++    *   $\theta$: Polar angle, sampled every $10^\circ$ (18 samples) [S3].
++    *   $\phi$: Azimuthal angle, sampled with 36 directions [S4].
++3.  **Storage Layout:**
++    *   **Raw Grid:** A $1024 \times 512$ 2D grid for spatial coordinates [S4].
++    *   **Compression:** A quadtree structure subdivides the spatial grid based on photon density [S3, S4]. Nodes with no scattering events are discarded [S4].
++    *   **Lobe Representation:** Inside each active quadtree node, the angular distribution is stored as a "lobe" [S3].
++        *   Point Source Lobe: 55 floats [S3].
++        *   Segment Source Lobe: 91 floats [S3].
++    *   **Memory:** Compressed size is approximately 60–100 MB, down from ~8.4 GB uncompressed [S2, S4].
+ 
+ **Precomputation Steps:**
+-1.  **Define Infinite Medium:** Assume an infinite, homogeneous medium with the target material properties ($\sigma_s, \sigma_a, p, \eta$) [S3]. Calculate mean-free path $\ell = 1/(\sigma_s + \sigma_a)$ [S3].
++1.  **Assume Infinite Medium:** Define an infinite homogeneous medium with the target material properties [S2, S3].
+ 2.  **Define Light Sources:**
+-    *   **Point Source:** Directional light shooting along the z-axis [S3, S4].
+-    *   **Segment Source:** Defined by origin $o=(0,0)$, direction $v$ aligned with z-axis, and length $l = 2 \times \text{mfp}$ [S3].
+-3.  **Photon Shooting:** Shoot photons from the light source into the infinite medium [S2, S4]. Propagate photons using standard Monte-Carlo procedures (scattering and absorption) [S2, S4].
+-4.  **Accumulation:** For each photon, determine its position $(\rho, z)$ relative to the source axis [S3]. Accumulate radiance contributions into the corresponding spatial grid cell [S3]. The radiance is evaluated in spherical coordinates $(\theta, \phi)$ relative to the current frame [S3].
+-5.  **Spatial Subdivision:** After an initial pass, subdivide grid cells based on photon density to create the quadtree structure [S3].
+-6.  **Lobe Approximation:** Inside each final quadtree node, approximate the accumulated directional distribution [S3]. For point sources, fit the axial symmetry; for segment sources, store the asymmetric lobe [S3].
+-7.  **Compression:** Compress the quadtree by removing empty nodes [S4]. Total precomputation time is approx. 1 minute for high-albedo materials; storage cost after compression is around 100 MB [S2], or ~60 MB with hierarchical compression [S4].
+-
+-**Rendering Integration:**
+-The method integrates with host algorithms by replacing complex sub-paths with a "special edge" whose weight is retrieved from the table [S1, S3].
+-
+-*   **For VRL (Virtual Ray Lights):**
+-    1.  Shoot photons in the scene, storing only the first scattering event in the volume (single scattering) [S2, S3].
+-    2.  During rendering, use these virtual rays (segments) as the source [S2, S3].
+-    3.  Compute double scattering via importance sampling [S3].
+-    4.  Compute multiple scattering by querying the segment-source table using the virtual ray as the source and the camera ray as the target [S2, S3].
+-
+-*   **For UPBP (Unified Point Beams and Paths):**
+-    1.  Store first and second scattering events (beams/points) for single and double scattering [S2].
+-    2.  Use single-scattered beams as the source for multiple scattering [S2, S3].
+-    3.  Query the table to compute multiple scattering contributions from these beams to the camera rays [S2, S3].
+-
+-*   **For MEMLT (Manifold Exploration Metropolis Light Transport):**
+-    1.  Identify a seed path with at least three volume scattering events [S3].
+-    2.  Divide the path into three sub-paths: $\bar{x}_1$ (light to first volume event), $\bar{x}_2$ (first to last volume event), $\bar{x}_3$ (last volume event to camera) [S3].
+-    3.  Replace sub-path $\bar{x}_2$ with a special edge connecting the first and last volume events [S3].
+-    4.  The weight of this edge is the multiple scattering contribution $mul(x_2, \omega_1, x_{k-2}, \omega_{k-2})$ retrieved from the table [S3].
+-    5.  **Mutation Rules:** Both endpoints of the special edge are treated as non-specular [S1, S3]. The endpoint from the light source cannot be a mutation source [S1, S3]. The PDF for the special edge is set to 1 [S3].
+-
+-**Lookup Formula:**
+-To compute multiple scattering from a source vertex $v_i$ with direction $\hat{d}_i$ to a target point $P_k$:
+-1.  Calculate cylindrical coordinates of $P_k$ relative to the axis $(v_i, \hat{d}_i)$:
+-    $$ z_k = |\mathbf{r}_i \cdot \hat{\mathbf{d}}_i| $$
+-    $$ \rho_k = \|\mathbf{r}_i - z_k \hat{\mathbf{d}}_i\| $$
+-2.  Normalize by mean-free path $\ell$ [S4].
+-3.  Transform the outgoing direction $\hat{o}$ into the local frame defined by $(v_i, \hat{d}_i)$ using rotation $T_{(i_1, \hat{d}_1)}(\hat{o})$ [S4].
+-4.  Query the table:
+-    $$ \text{mult.}(P_k) = \sum_{i_1} L_0 \left( \frac{\rho_k}{\ell}, \frac{z_k}{\ell}, T_{(i_1, \hat{d}_1)}(\hat{o}) \right) $$
+-    where $L_0$ is the stored radiance in the table [S4].
++    *   **Point Source:** Directional light shooting along the z-axis [S4].
++    *   **Segment Source:** Defined by origin $o=(0,0)$, direction $v$ aligned with z-axis, and length $l=2 \times \text{mfp}$ [S3].
++3.  **Photon Shooting (Monte Carlo):**
++    *   Shoot photons from the light source into the infinite medium [S2, S3].
++    *   Propagate photons using standard Monte Carlo procedures (scattering and absorption) [S4].
++    *   Accumulate contributions into the spatial grid cells [S3].
++4.  **Spatial Subdivision (Quadtree Build):**
++    *   Start with a $32 \times 32$ regular grid [S3].
++    *   Accumulate photon counts. Subdivide cells when a threshold is reached [S3].
++    *   Discard empty nodes [S4].
++5.  **Lobe Computation:**
++    *   Shoot a large number of photons to compute radiance inside each active quadtree node [S3].
++    *   For each cell, compute the outgoing radiance $L_o(\rho/\ell, z/\ell, \theta, \phi)$ [S4].
++    *   **Approximation:**
++        *   For Point Sources: Approximate lobes using axial symmetry [S3].
++        *   For Segment Sources: Approximate lobes using asymmetric lobe fitting [S3].
++6.  **Normalization:** All spatial coordinates are divided by $\ell$ to make the table dependent only on albedo and phase function, allowing reuse across different material scales [S3, S4].
++
++**Rendering Integration (General):**
++The table is queried to compute multiple scattering contribution $g(x_i, \omega_i, x_o, \omega_o)$ between a light-side point/segment and a camera-side point/segment [S3].
++
++**Integration with MEMLT (Example):**
++1.  **Path Division:** Divide a seed path $\bar{x}$ (with $\ge 3$ volume events) into three subpaths: $\bar{x}_1$ (light to first volume event), $\bar{x}_2$ (first to last volume event), $\bar{x}_3$ (last volume event to camera) [S3].
++2.  **Special Edge:** Replace subpath $\bar{x}_2$ with a special edge carrying multiple scattering weight computed from the table [S3].
++3.  **Weight Calculation:**
++    *   Identify the light-side vertex $v_i$ and direction $\hat{d}_i$.
++    *   Identify the target vertex $P_k$.
++    *   Compute cylindrical coordinates of $P_k$ relative to $(v_i, \hat{d}_i)$:
++        $$ z_k = |\mathbf{r}_i \cdot \hat{\mathbf{d}}_i| $$
++        $$ \rho_k = \|\mathbf{r}_i - z_k \hat{\mathbf{d}}_i\| $$
++    *   Query the table for outgoing radiance in direction $\hat{o}$ (transformed to the local frame):
++        $$ \text{mult.}(P_k) = \sum_{i_1} L_0 \left( \frac{\rho_k}{\ell}, \frac{z_k}{\ell}, T_{(i_1, \hat{d}_1)}(\hat{\mathbf{o}}) \right) $$
++        where $T_{(v, d)}(\hat{o})$ maps the global direction $\hat{o}$ to the local frame defined by $(v, d)$ [S4].
++4.  **Mutation Rules:**
++    *   Set the pdf of the special edge to 1 [S3].
++    *   Consider both endpoints as non-specular [S3].
++    *   The endpoint from the light source cannot be a mutation source [S3].
++    *   Only surface events and the endpoints of the special path may be mutated [S1].
++
++**Integration with VRL:**
++*   Store only single scattering events in the volume during the light phase [S2].
++*   Use these virtual rays as the source for multiple scattering queries against the table [S2].
++
++**Integration with UPBP:**
++*   Store single and double scattering beams/points [S2].
++*   Use single-scattered beams as the source for multiple scattering queries [S2].
+ 
+ **Pseudocode:**
+ 
+ ```python
+-import math
+-import random
+-
+-def precompute_table(material, source_type, num_photons):
+-    """
+-    Precomputes the multiple scattering table for an infinite medium.
+-    material: {sigma_s, sigma_a, phase_function, eta}
+-    source_type: 'point' or 'segment'
+-    num_photons: int
+-    Returns: Compressed quadtree structure
+-    """
+-    sigma_t = material.sigma_s + material.sigma_a
+-    l = 1.0 / sigma_t  # Mean-free path [S3]
+-    
+-    # Initialize spatial grid (32x32) [S3]
+-    grid = [[[] for _ in range(32)] for _ in range(32)]
+-    
+-    for _ in range(num_photons):
+-        # Shoot photon from source [S2, S4]
+-        if source_type == 'point':
+-            pos = (0.0, 0.0, 0.0)
+-            dir_vec = (0.0, 0.0, 1.0)
+-        else: # segment
+-            # Segment from (0,0,0) to (0,0, 2*l) [S3]
+-            t = random.uniform(0.0, 2.0 * l)
+-            pos = (0.0, 0.0, t)
+-            dir_vec = (0.0, 0.0, 1.0)
+-            
+-        current_pos = pos
+-        current_dir = dir_vec
+-        throughput = 1.0
++def precompute_tables(material_properties):
++    """
++    Precomputes multiple scattering tables for point and segment sources.
++    material_properties: {eta, sigma_s, sigma_a, phase_function}
++    """
++    sigma_t = material_properties.sigma_s + material_properties.sigma_a
++    mfp = 1.0 / sigma_t
++    
++    # Initialize quadtree structure
++    # Start with 32x32 grid, max depth determined by density threshold
++    quadtree = build_quadtree_grid(32, 32)
++    
++    # Phase 1: Build spatial subdivision (low sample count)
++    shoot_photon_density(quadtree, source_type='point', num_photons=10000, mfp=mfp)
++    shoot_photon_density(quadtree, source_type='segment', num_photons=10000, mfp=mfp)
++    
++    # Phase 2: Compute lobes (high sample count)
++    point_table = {}
++    segment_table = {}
++    
++    for node in quadtree.active_nodes:
++        # Compute radiance lobes for this spatial cell
++        # Coordinates are normalized by mfp
++        rho_norm = node.rho / mfp
++        z_norm = node.z / mfp
+         
+-        while throughput > 1e-3:
+-            # Sample distance to next interaction [S4]
+-            dist = -math.log(random.uniform(0.0, 1.0)) / sigma_t
+-            
+-            # Move photon
+-            next_pos = (current_pos[0] + current_dir[0]*dist,
+-                        current_pos[1] + current_dir[1]*dist,
+-                        current_pos[2] + current_dir[2]*dist)
+-            
+-            # Determine spatial coordinates relative to source axis (z-axis) [S3, S4]
+-            rho = math.sqrt(next_pos[0]**2 + next_pos[1]**2)
+-            z = next_pos[2]
+-            rho_norm = rho / l
+-            z_norm = z / l
+-            
+-            # Accumulate contribution to grid cell [S3]
+-            i = int(z_norm * 32) % 32
+-            j = int(rho_norm * 32) % 32
+-            grid[i][j].append((current_dir, throughput))
+-            
+-            # Scatter [S4]
+-            albedo = material.sigma_s / sigma_t
+-            if random.uniform(0.0, 1.0) < albedo:
+-                throughput *= albedo
+-                current_dir = sample_phase_function(material.phase_function, current_dir)
+-                current_pos = next_pos
+-            else:
+-                break
+-                
+-    # Subdivide cells when photon count threshold is reached [S3]
+-    # Compress quadtree by removing empty nodes [S4]
+-    return compress_quadtree(grid)
+-
+-def query_multiple_scattering(source_vertex, source_dir, target_point, outgoing_dir, table, material):
++        # Point Source Lobe
++        # Sample theta every 10 degrees (18 samples)
++        # Approximate using axial symmetry
++        point_lobe = compute_lobe_approximation(
++            source_type='point', 
++            rho_norm=rho_norm, 
++            z_norm=z_norm, 
++            samples=18,
++            symmetry='axial'
++        )
++        point_table[(rho_norm, z_norm)] = point_lobe
++        
++        # Segment Source Lobe
++        # Sample theta every 10 degrees (18 samples)
++        # Approximate using asymmetric lobes
++        segment_lobe = compute_lobe_approximation(
++            source_type='segment', 
++            rho_norm=rho_norm, 
++            z_norm=z_norm, 
++            samples=18,
++            symmetry='asymmetric'
++        )
++        segment_table[(rho_norm, z_norm)] = segment_lobe
++        
++    return point_table, segment_table
++
++def query_multiple_scattering(light_vertex, light_direction, target_vertex, view_direction, table):
+     """
+     Queries the precomputed table for multiple scattering contribution.
+     """
+-    sigma_t = material.sigma_s + material.sigma_a
+-    l = 1.0 / sigma_t
+-    
+-    # Vector from source to target
+-    r = (target_point[0]-source_vertex[0], target_point[1]-source_vertex[1], target_point[2]-source_vertex[2])
+-    
+-    # Cylindrical coordinates relative to source_dir axis [S4]
+-    z_k = abs(dot(r, source_dir))
+-    projection = (source_dir[0]*z_k, source_dir[1]*z_k, source_dir[2]*z_k)
+-    rho_k = math.sqrt((r[0]-projection[0])**2 + (r[1]-projection[1])**2 + (r[2]-projection[2])**2)
+-    
+-    # Normalize
+-    rho_norm = rho_k / l
+-    z_norm = z_k / l
+-    
+-    # Transform outgoing_dir to local frame of (source_vertex, source_dir) [S4]
+-    theta, phi = transform_to_local_frame(outgoing_dir, source_dir)
+-    
+-    # Query table
+-    # The table stores radiance L0(rho_norm, z_norm, theta, phi)
+-    radiance = table.query(rho_norm, z_norm, theta, phi)
+-    
+-    return radiance
+-
+-def dot(v1, v2):
+-    return v1[0]*v2[0] + v1[1]*v2[1] + v1[2]*v2[2]
+-
+-def normalize(v):
+-    l = math.sqrt(v[0]**2 + v[1]**2 + v[2]**2)
+-    return (v[0]/l, v[1]/l, v[2]/l)
+-
+-def sample_phase_function(phase_func, incoming_dir):
+-    # Standard Monte Carlo phase function sampling [G]
+-    return normalize((random.uniform(-1.0, 1.0), random.uniform(-1.0, 1.0), random.uniform(-1.0, 1.0)))
+-
+-def transform_to_local_frame(outgoing_dir, axis_dir):
+-    # Compute spherical coordinates (theta, phi) of outgoing_dir relative to axis_dir
+-    cos_theta = dot(outgoing_dir, axis_dir)
+-    theta = math.acos(max(-1.0, min(1.0, cos_theta)))
+-    perp = normalize((outgoing_dir[0]-cos_theta*axis_dir[0],
+-                      outgoing_dir[1]-cos_theta*axis_dir[1],
+-                      outgoing_dir[2]-cos_theta*axis_dir[2]))
+-    ref = normalize((1,0,0) if abs(axis_dir[0])<0.9 else (0,1,0))
+-    ref = normalize(ref - dot(ref, axis_dir)*axis_dir)
+-    cross_prod = (axis_dir[1]*perp[2]-axis_dir[2]*perp[1],
+-                  axis_dir[2]*perp[0]-axis_dir[0]*perp[2],
+-                  axis_dir[0]*perp[1]-axis_dir[1]*perp[0])
+-    phi = math.atan2(dot(cross_prod, ref), dot(perp, ref))
+-    return theta, phi
+-
+-def compress_quadtree(grid):
+-    # Discard nodes with no scattering events [S4]
+-    # Subdivide based on photon count threshold [S3]
+-    return grid
++    # Vector from light vertex to target
++    r = target_vertex - light_vertex
++    
++    # Compute cylindrical coordinates relative to light direction
++    # z_k is depth along the axis
++    z_k = abs(dot(r, light_direction))
++    
++    # rho_k is radial distance from the axis
++    projection = z_k * light_direction
++    rho_k = norm(r - projection)
++    
++    # Normalize by mean-free-path (assumed known or passed)
++    rho_norm = rho_k / mfp
++    z_norm = z_k / mfp
++    
++    # Transform view direction to local frame
++    # T(v, d)(o) maps global view direction to local spherical coords
++    local_theta, local_phi = transform_to_local_frame(light_direction, view_direction)
++    
++    # Interpolate lobe from table
++    # Note: In practice, trilinear/bilinear interpolation is used on the quadtree leaves
++    lobe = interpolate_lobe(table, rho_norm, z_norm, local_theta, local_phi)
++    
++    return lobe
++
++def compute_lobe_approximation(source_type, rho_norm, z_norm, samples, symmetry):
++    """
++    Computes the angular radiance distribution (lobe) for a specific spatial cell.
++    """
++    # This function encapsulates the Monte Carlo accumulation and fitting
++    # For implementation, one would run the photon simulation specifically 
++    # for this cell or use the accumulated data from the precomputation phase.
++    
++    lobes = []
++    for i in range(samples):
++        theta = i * 10.0 # degrees
++        # Compute radiance L_o for this theta
++        # The phi dependence is handled by symmetry or specific sampling
++        if symmetry == 'axial':
++            # For point sources, assume rotational symmetry around propagation axis
++            # Store mean radiance over phi or specific phi slice
++            radiance = get_radiance_from_photon_data(rho_norm, z_norm, theta, phi=0)
++        else:
++            # For segment sources, use asymmetric fitting
++            # Fit a function to the accumulated photon directions
++            radiance = fit_asymmetric_lobe(rho_norm, z_norm, theta)
++        lobes.append(radiance)
++    return lobes
+ ```
+ 
+-**Parameters:**
+-*   **Grid Resolution:** $32 \times 32$ initial grid [S3].
+-*   **Spatial Range:** $0$ to $32$ mfp (up to $64$ mfp for high anisotropy $g$) [S3].
+-*   **Angular Sampling:** $\theta$ sampled every $10^\circ$ (18 samples) [S3].
+-*   **Segment Length:** $2 \times \text{mfp}$ [S3].
+-
+ **Edge Cases and Pitfalls:**
+-*   **Bias:** The method introduces bias because the special path contribution is based on density estimation in the precomputation pass [S1]. Bias can be reduced by letting the host algorithm handle more low-order scattering events (3-4 events) [S2].
+-*   **Visibility:** The method does not account for visibility between the source and query or boundaries [S3]. This causes inaccuracy in scenes with occlusion or air inside the medium [S3].
+-*   **Material Dependence:** The table depends only on albedo and phase function [S4]. Different materials require different tables [S4].
++*   **Bias:** The method introduces bias because the special path contribution is based on density estimation in the precomputation pass [S1, S2].
++*   **Visibility:** The method does not consider visibility between the source and query or boundaries [S3]. This causes inaccuracy in scenes with occlusion or air inside the medium [S3].
++*   **Boundary Effects:** The precomputation assumes an infinite medium, ignoring internal surface reflections (bounced multiple scattering) [S1, S4]. This requires a separate correction term [S1].
++*   **Anisotropy:** Highly anisotropic materials require larger spatial ranges (up to 64 mfp) and more complex lobe approximations [S3].
+ 
+ ## Subtopics
+ 
+ ### [Bounced Multiple Scattering](3532-bounced-multiple-scattering.md)
+-Bounced Multiple Scattering corrects for light that has bounced off the internal surface of a material, which is missing from the infinite medium precomputed multiple scattering table. It adds diffuse indirect illumination from inside the material to surface samples, allowing the renderer to account for light that enters the volume, scatters, hits the boundary, reflects back into the volume, and scatters again toward the camera. It is a correction term applied after the primary multiple scattering lookup, distinct from single and double scattering approximations.
++Corrects for light bouncing off internal surfaces, which is missing from the infinite medium table. It adds diffuse indirect illumination from inside the material. Choose when internal reflections are significant.
+ 
+ ### [GPU Implementation of Precomputed Multiple Scattering](4706-gpu-implementation-of-precomputed-multiple-scattering.md)
+-This method adapts the Precomputed Multiple Scattering Table for efficient execution on graphics hardware by reducing memory footprint and enabling hierarchical storage. It solves the problem of high memory consumption and complex traversal required for full 5D multiple scattering data by approximating lobes with rotational symmetry and compressing spatial data. It differs from [Bounced Multiple Scattering](3532-bounced-multiple-scattering.md) by relying on precomputed lookup tables rather than runtime ray bouncing for the multiple scattering component.
++Adapts the table for GPU execution by reducing memory footprint and enabling hierarchical storage. Choose when hardware memory is limited or parallel access is needed.
++
++### [Neural Network Multiple Scattering Representation](7796-neural-network-multiple-scattering-representation.md)
++Encodes multiple scattering in a neural network to reduce memory from MBs to KBs. Choose when storage is the primary bottleneck and training time is acceptable.
+ 
+ ### [Multiple Scattering Precomputation](9418-multiple-scattering-precomputation.md)
+-This method computes the radiative transfer equation for participating media by splitting it into incremental terms for $K$ scattering orders, allowing precomputation of multiple scattering effects that would otherwise require exponentially complex recursive Monte-Carlo evaluation. It differs from [Bounced Multiple Scattering](3532-bounced-multiple-scattering.md) by using explicit integral precomputation of auxiliary fields rather than ray-bouncing, and from [GPU Implementation of Precomputed Multiple Scattering](4706-gpu-implementation-of-precomputed-multiple-scattering.md) by focusing on the mathematical formulation and data layout rather than hardware-specific optimization.
+-
+-### Neural Network Multiple Scattering Representation
+-Uses neural networks instead of tables to represent multiple scattering, reducing memory usage from hundreds of MB to kB without significant reduction in quality [S1]. It maps a seven-dimensional function (anisotropy $g$, albedo $\alpha$, location $r(\rho, z)$, direction $\theta, \phi$) to radiance via a four-layer neural network [S1]. During rendering, the network reproduces the precomputed table for a specific medium, which is then used for multiple scattering computation [S1]. Storage is reduced from 50 GB to 23.6 kB [S1].
++Computes the radiative transfer equation for $K$ scattering orders via integral precomputation. Choose when explicit control over scattering orders is required rather than a black-box table lookup.
+ 
+ ## Operating characteristics
+-*   **Time Complexity:** Precomputation time is approx. 1 minute for high-albedo materials [S2]. Rendering time is significantly reduced compared to full path tracing [S2, S3].
+-*   **Memory Complexity:** Storage cost after compression is around 100 MB for the base method [S2]. Hierarchical representation reduces this to approx. 60 MB [S4]. Neural network variants reduce this to 23.6 kB [S1].
+-*   **Performance:** On a 2.20GHz Intel i7 (40 cores), for a 512x512 image of a BumpS scene, VRL with PMS took 53s (PSNR 34.5) vs 1s for VRL alone (PSNR 23.21) [S3]. For a Wax scene, 180s (PSNR 37.4) vs 40s (PSNR 12.28) [S3].
+-*   **Strengths:** Greatly reduces convergence time for high-order scattering media; integrates easily with existing algorithms (VRL, UPBP, MEMLT); higher spatial and angular resolution than concentric spheres methods [S2, S3].
+-*   **Limitations:** Introduces bias; does not handle visibility or boundaries; requires precomputation per material; less effective for low-albedo materials where multiple scattering is negligible [S1, S2, S3].
++*   **Time Complexity:** Precomputation time is approximately 1 minute for high-albedo materials on a 40-core CPU [S2]. Rendering convergence is significantly faster than raw Monte Carlo methods (e.g., VRL with PMS took 53s vs 1s for VRL alone on BumpS scene, though VRL alone was noisy) [S3].
++*   **Memory Complexity:** Compressed storage is ~60–100 MB [S2, S4]. Uncompressed is ~8.4 GB [S4].
++*   **Performance:** Reduces noise significantly. For the Wax scene, VRL with PMS took 180s (PSNR 37.4) vs 40s for VRL alone (PSNR 12.28) [S3].
++*   **Strengths:** Fast convergence for high-order scattering; compatible with various algorithms (VRL, UPBP, MEMLT); handles any material type including refractive and high/low albedo [S2, S3].
++*   **Limitations:** Introduces bias; ignores visibility and boundaries; requires precomputation per material type [S1, S3].
++*   **When to use:** Scenes with high-albedo participating media where multiple scattering dominates and convergence is too slow.
++*   **When not to use:** Scenes with complex visibility/occlusion inside the medium, or where strict unbiasedness is required.
+ 
+ ## Background
+-Originated by Beibei Wang and Nicolas Holzschuch in 2017 at SIGGRAPH 2017 Talks, extending Wang et al. [2016] by adding multiple scattering from a segment instead of a point [S2]. It was implemented in the Mitsuba Renderer [Jakob 2010] for VRL and MEMLT, and in smallUPBP [Křivánek 2014] for UPBP [S2, S3].
++*   **Origin:** Introduced by Beibei Wang and Nicolas Holzschuch in 2017 at SIGGRAPH 2017 Talks [S2].
++*   **History:** It extends Wang et al. [2016] by adding multiple scattering from a segment source instead of just a point source [S2]. It was implemented in the Mitsuba Renderer [Jakob 2010] and smallUPBP [Křivánek 2014] [S2, S3].
++*   **Development:** Subsequent work included GPU implementations [S1] and neural network approximations [S1].
+ 
+ ## Sources

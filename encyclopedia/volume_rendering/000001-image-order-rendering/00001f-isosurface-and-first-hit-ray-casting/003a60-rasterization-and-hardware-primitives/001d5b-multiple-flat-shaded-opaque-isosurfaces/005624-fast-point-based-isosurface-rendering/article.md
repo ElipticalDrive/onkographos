@@ -1,0 +1,271 @@
+# Fast Point-Based Isosurface Rendering
+
+Also called: Direct rendering with view plane parallel polygons, Fast point-based renderer, Shell Rendering, ShellSplatting
+
+## Overview
+Fast point-based isosurface rendering is a hardware-accelerated direct volume rendering method that displays isosurface cells as opaque, flat-shaded polygons parallel to the viewing plane [S1]. It solves the performance bottleneck of traditional polygonal surface construction (e.g., Marching Cubes) by bypassing triangulation and visibility ordering, instead rendering extracted cells directly as points [S1]. Unlike its sibling [Multiple Flat Shaded Opaque Isosurfaces](1498-multiple-flat-shaded-opaque-isosurfaces.md), which focuses on the general category of flat-shaded opaque isosurfaces, this specific method integrates tightly with incremental isosurface extraction data structures (like the THITree) to enable interactive, time-dependent visualization without intermediate data retrieval or interpolation [S1].
+
+## How it works
+**Inputs and Outputs:**
+*   **Input:** A list of isosurface-spanning cells extracted from a hierarchical data structure (e.g., THITree). The cells are defined in voxel space.
+*   **Output:** A rasterized image of the isosurface.
+
+**Data Structures:**
+*   **Transformation Matrix ($M$):** A $4 \times 4$ homogeneous transformation matrix concatenating voxel-to-model, model-to-world, world-to-view, and projection matrices. This allows movement between projection and voxel spaces [S1].
+*   **Quadric Matrix ($Q$):** A symmetric $4 \times 4$ matrix representing a voxel bounding sphere in voxel space (equivalent to a potentially non-spherical bounding ellipsoid in world space for anisotropic volumes) [S1].
+    *   Layout:
+        $$
+        Q = \begin{bmatrix}
+        a & d & f & g \\
+        d & b & e & h \\
+        f & e & c & j \\
+        g & h & j & k
+        \end{bmatrix}
+        $$
+    *   The implicit function is defined as $P^T Q P = 0$, where $P = [x, y, z, 1]^T$ [S1].
+
+**Algorithm Steps:**
+
+1.  **Matrix Concatenation:** Compute the single transformation matrix $M$ that maps from voxel space to projection space [S1].
+2.  **Bounding Sphere Construction:** Construct a voxel bounding sphere in quadric form $Q$ in voxel space. This accounts for anisotropic sampling by treating the sphere in voxel space as an ellipsoid in world space [S1].
+3.  **Quadric Transformation:** Transform the quadric $Q$ from voxel space to projection space using the inverse of the transformation matrix $M$. The transformed quadric $Q'$ is calculated as:
+    $$
+    Q' = (M^{-1})^T Q M^{-1}
+    $$
+    where $Q'$ represents the quadric in the projection space [S1].
+4.  **Projection and Flattening:** Project the 3D quadric $Q'$ onto the 2D projection plane. The image of the 3D quadric is a conic $C$ described by $C = cA - b b^T$, where $Q'$ is partitioned as:
+    $$
+    Q' = \begin{bmatrix}
+    A & b \\
+    b^T & c
+    \end{bmatrix}
+    $$
+    The conic $C$ defines the projected outline (an ellipse) of the voxel [S1].
+5.  **Polygon Construction:**
+    *   Extract the principal axes of the conic $C$ from its eigenvectors.
+    *   Construct a rectangle in projection space with principal axes identical to those of the ellipse $C$.
+    *   Transform this rectangle back into voxel space using $M^{-1}$ [S1].
+    *   *Note:* For orthogonal projection, the polygon is strictly parallel to the viewing plane. For perspective projection, slightly larger screen-aligned polygons are used for efficiency [S1].
+6.  **Rendering:** Upload the list of cells as a list of view-plane-parallel polygons to the graphics pipeline. Because the polygons are non-textured and completely opaque, they are rendered without depth sorting or visibility ordering [S1]. The graphics hardware performs the necessary anisotropic scaling [S1].
+
+**Pseudocode:**
+
+> **Unverified code.** The code below did not pass a test run against a reference implementation, or no test fits it, so it may contain errors.
+
+```python
+def render_isosurface_cells(cells, M, voxel_spacing):
+    """
+    Render a list of isosurface cells using fast point-based rendering.
+    
+    Args:
+        cells: List of cell objects, each containing a center position (x, y, z) in voxel space.
+        M: 4x4 transformation matrix from voxel space to projection space.
+        voxel_spacing: Tuple (sx, sy, sz) representing anisotropic voxel dimensions.
+        
+    Returns:
+        Rasterized image.
+    """
+    # Step 1 & 2: Prepare transformation and bounding quadric
+    # M is pre-computed concatenation of voxel->model->world->view->projection
+    # Q represents a unit sphere in voxel space, scaled by voxel_spacing
+    # A unit sphere in voxel space corresponds to an ellipsoid in world space
+    # Q for a sphere of radius R centered at origin: diag(R^2, R^2, R^2, -R^2) ? 
+    # Actually, the source defines P^T Q P = 0. For a sphere x^2+y^2+z^2=R^2, 
+    # the implicit form is x^2+y^2+z^2-R^2=0.
+    # In homogeneous coordinates P=[x,y,z,1], the matrix Q_sphere is:
+    # [[1, 0, 0, 0],
+    #  [0, 1, 0, 0],
+    #  [0, 0, 1, 0],
+    #  [0, 0, 0, -R^2]]
+    # However, the source mentions "voxel bounding sphere". Usually, this implies 
+    # the sphere that bounds the voxel cell. Let's assume R is half the voxel size 
+    # or a fixed radius for the splat. The source says "voxel bounding sphere in quadric form Q".
+    # We construct Q in voxel space.
+    
+    R = 0.5 # Radius of the bounding sphere in voxel units (assuming unit voxel for simplicity, scaled by spacing later or in M)
+    # The source says "perform all rendering in isotropic voxel space". 
+    # If voxel_spacing is anisotropic, M handles the warping. 
+    # Let's assume M includes the scaling to isotropic space if needed, 
+    # or M maps directly to projection. The source says "M ... move between projection and voxel spaces".
+    # And "anisotropic volume is warped to be isotropic". 
+    # So M likely includes the anisotropic scaling correction.
+    
+    Q_voxel = [[R*R, 0, 0, 0],
+               [0, R*R, 0, 0],
+               [0, 0, R*R, 0],
+               [0, 0, 0, -R*R]]
+               
+    # Step 3: Transform Quadric to Projection Space
+    # Q' = (M^-1)^T Q M^-1
+    M_inv = inverse(M)
+    Q_proj = transpose(M_inv) @ Q_voxel @ M_inv
+    
+    # Step 4 & 5: For each cell, construct polygon
+    polygons = []
+    for cell in cells:
+        center = cell.center # [x, y, z] in voxel space
+        
+        # The quadric Q_proj is centered at the origin in projection space.
+        # We need to shift it to the cell's center.
+        # Translation matrix T for center [cx, cy, cz, 1]
+        T = [[1, 0, 0, center[0]],
+             [0, 1, 0, center[1]],
+             [0, 0, 1, center[2]],
+             [0, 0, 0, 1]]
+             
+        # Transformed quadric for this specific cell in projection space
+        Q_cell_proj = transpose(T) @ Q_proj @ T
+        
+        # Extract conic C from Q_cell_proj
+        # Q_cell_proj = [[A, b], [b^T, c]]
+        A = Q_cell_proj[0:2, 0:2]
+        b = Q_cell_proj[0:2, 2]
+        c = Q_cell_proj[2, 2]
+        
+        # Conic C = cA - b b^T
+        C = c * A - b @ b.T
+        
+        # Compute principal axes of conic C
+        # Eigendecomposition of C
+        eigenvalues, eigenvectors = eig(C)
+        
+        # The axes lengths are related to eigenvalues. 
+        # For an ellipse Ax^2 + Bxy + Cy^2 = 1, the semi-axes are 1/sqrt(lambda).
+        # The source says "rectangle with principal axes identical to those of the projected ellipse".
+        # We need the direction and magnitude.
+        # Let's assume the "size" of the splat is determined by the eigenvalues.
+        # The source doesn't give exact scaling for the rectangle size from eigenvalues, 
+        # but implies the rectangle bounds the projection.
+        # Standard EWA splatting uses the eigenvalues to determine the ellipse axes.
+        # Here, we construct a rectangle.
+        
+        # Get the two largest eigenvalues (for the ellipse axes)
+        # Sort eigenvalues descending
+        idx = eigenvalues.argsort()[::-1]
+        lambda1 = eigenvalues[idx[0]]
+        lambda2 = eigenvalues[idx[1]]
+        v1 = eigenvectors[:, idx[0]]
+        v2 = eigenvectors[:, idx[1]]
+        
+        # Semi-axes lengths
+        # If the implicit equation is x^T C x = 1, then axes are 1/sqrt(lambda).
+        # However, the conic definition C = cA - bb^T comes from the projection of the quadric.
+        # The exact scaling factor to map eigenvalues to pixel/screen units is implementation dependent 
+        # and not explicitly detailed in the source text beyond "rectangle with principal axes".
+        # We will assume a standard mapping where the rectangle dimensions are derived from the inverse square root of eigenvalues.
+        
+        axis1_len = 1.0 / sqrt(lambda1) if lambda1 > 0 else 0
+        axis2_len = 1.0 / sqrt(lambda2) if lambda2 > 0 else 0
+        
+        # Construct rectangle in projection space
+        # Center is already handled by the translation T.
+        # The rectangle is aligned with v1 and v2.
+        # Vertices relative to center: +/- axis1_len * v1 +/- axis2_len * v2
+        
+        # Transform vertices back to voxel space for rendering?
+        # The source says: "transformed back into voxel space with M^-1 and used to construct the rectangles".
+        # So we transform the projection-space rectangle vertices to voxel space.
+        
+        # Vertices in projection space (homogeneous, w=1)
+        # Note: v1, v2 are 2D vectors in the plane of the projection? 
+        # The source says "subspace spanned by the first two eigenvectors". 
+        # C is 2x2. So v1, v2 are 2D.
+        # We need to embed them in 3D projection space? 
+        # The source says "projected onto the projection plane". 
+        # Usually, this is a 2D plane. 
+        # Let's assume the projection plane is z=0 in some camera space, or we work in 2D screen coords.
+        # The source says "transformed back to voxel space". 
+        # So we need the inverse projection.
+        
+        # Let's assume we have a function `project_to_screen` and `screen_to_voxel`.
+        # But the source uses M. M goes Voxel -> Projection.
+        # So M^-1 goes Projection -> Voxel.
+        # The vertices in projection space are 3D points? 
+        # The conic is 2D. The vertices of the rectangle are 2D points on the projection plane.
+        # We need to lift them to 3D projection space to use M^-1.
+        # The source says "projected outline ... on the projection plane".
+        # Let's assume the projection plane is defined by the camera.
+        # For simplicity, if M includes projection, the "projection space" might be clip space or NDC.
+        # The source says "M ... move between projection and voxel spaces".
+        # And "Q' ... in projection space".
+        # And "C ... in projection space".
+        # And "transformed back into voxel space with M^-1".
+        
+        # So, we construct the rectangle in the 2D projection plane.
+        # We need to represent these 2D points as 3D points in the projection space coordinate system 
+        # to apply M^-1.
+        # This requires knowing the geometry of the projection plane in the projection space.
+        # The source does not specify the exact coordinate system of "projection space" 
+        # (e.g., is it camera space, clip space, or screen space?).
+        # However, it says "graphics hardware perform necessary anisotropic scaling".
+        # And "rendering in isotropic voxel space".
+        
+        # Given the ambiguity, we assume the standard OpenGL/Direct3D pipeline where 
+        # M maps to Clip Space, and the projection plane is at z=1 (or similar).
+        # But the source says "parallel to the viewing plane".
+        
+        # Let's stick to the high-level steps provided:
+        # 1. Get axes v1, v2 and lengths axis1_len, axis2_len in projection plane coordinates.
+        # 2. Create 4 vertices in projection plane.
+        # 3. Transform these vertices to voxel space using M^-1.
+        
+        # Since we don't have the exact projection plane definition, we note this as a gap.
+        # However, the source says "screen-aligned polygons".
+        # This implies the final polygons are screen-aligned.
+        # "For perspective projection, use slightly larger screen-aligned polygons".
+        # This suggests the final output is in screen space.
+        
+        # Let's refine: The source says "transformed back into voxel space ... and used to construct the rectangles".
+        # This implies the rendering happens in voxel space?
+        # "perform all rendering in isotropic voxel space".
+        # So the vertices are in voxel space.
+        
+        # So:
+        # 1. Calculate rectangle in projection plane (2D).
+        # 2. Map 2D projection coords to 3D projection space coords (requires camera model).
+        # 3. Apply M^-1 to get voxel space coords.
+        
+        # Since the source doesn't give the camera model details, we assume M^-1 handles the inverse projection 
+        # if the vertices are in the correct projection space format.
+        
+        # For the purpose of the article, we state the transformation.
+        
+        # Construct rectangle vertices in projection plane (2D)
+        # v1, v2 are 2D vectors.
+        # Vertices: center_2d +/-(axis1_len * v1) +/-(axis2_len * v2)
+        
+        # Lift to 3D projection space (assuming z=0 or similar, depending on M)
+        # This step is implementation-specific and not detailed in the source.
+        # We will assume the vertices are transformed to voxel space via M^-1.
+        
+        # Return the list of polygons (vertices in voxel space)
+        polygons.append(construct_rectangle(center, v1, v2, axis1_len, axis2_len))
+        
+    return polygons
+```
+
+**Edge Cases and Pitfalls:**
+*   **Ordering Constraint:** Due to data structure constraints (specifically in the THITree implementation), voxels must be ordered in at least the fastest-changing dimension. This slows down the data conversion stage [S1].
+*   **Perspective Projection:** Strictly, polygons should be orthogonal to the viewing ray. Using screen-aligned polygons is an approximation for efficiency, which may cause slight quality degradation [S1].
+*   **Anisotropy:** The method relies on the graphics hardware to handle anisotropic scaling. If the hardware does not support this correctly, the isosurface may appear distorted [S1].
+
+## Subtopics
+
+### ShellSplatting
+A higher-quality variant of this method that uses Gaussian textured polygons. It requires strict back-to-front or front-to-back ordering and is slower due to the ordering constraint. It is chosen when visual quality is prioritized over speed [S1].
+
+### Fast Point-Based Renderer (Flat-Shaded)
+The method described in this article. It uses flat-shaded rectangular polygons, ignoring ordering constraints for higher speed at the cost of slightly lower quality (jagged edges). It is chosen for interactive, time-dependent visualization [S1].
+
+## Operating characteristics
+*   **Time Complexity:** The rendering step is $O(N)$ where $N$ is the number of cells, as no sorting or complex intersection tests are required. The extraction step benefits from incremental search, offering significant speedups (e.g., factor of 3 for 50 consecutive time steps) over full searches [S1].
+*   **Memory Complexity:** Low overhead. The only extra space overhead for incremental search is a vector of integers of size $d$ (maximum depth of the time tree) [S1].
+*   **Measured Performance:** Tested on a 2.4 GHz Pentium 4 with 1 GB memory and a 128 MB GeForce 4 Ti4600 graphics card. The method enables interactive isosurface extraction and visualization from time-varying data sets [S1].
+*   **Strengths:** Avoids time-consuming polygonal surface construction (Marching Cubes); no visibility ordering required; handles anisotropic volumes via hardware scaling; tight integration with incremental extraction [S1].
+*   **Limitations:** Slightly lower visual quality compared to ShellSplatting (jagged edges); ordering constraint in data structures can slow down data conversion; perspective projection approximation [S1].
+
+## Background
+The method was introduced by Botha and Post in 2003 [S1]. It was developed to address the challenges of interactive exploration of large, time-dependent data sets, such as flow visualization. The technique combines shell rendering and splatting, leveraging the a priori knowledge that voxels are completely opaque and constitute an isosurface. It was implemented alongside a hierarchical time-dependent data structure (THITree) to enable dynamic visualization of isosurface development in forward or backward time directions [S1].
+
+## Sources
+[S1] Fast time-dependent isosurface extraction and rendering, https://doi.org/10.1145/1037210.1037217, fetched 2026-10-30

@@ -1,0 +1,148 @@
+# Standard Rendering Metrics
+
+Also called: LinearQuantizer.psnr, PSNR (Peak Signal-to-Noise Ratio), PSNR Calculation, PSNR Computation, PSNR Evaluation, Peak Signal to Noise Ratio, Peak Signal-to-Noise Ratio (PSNR) Calculation
+
+## Overview
+Standard Rendering Metrics are full-reference quality assessment measures used to evaluate the fidelity of rendered images against ground-truth references in 3D reconstruction and novel view synthesis [S1][S3, unofficial][S11]. The primary metric is Peak Signal-to-Noise Ratio (PSNR), which quantifies the ratio of the maximum possible signal power to the power of the noise (reconstruction error) corrupting the signal [S11]. It is distinct from perceptual metrics like SSIM or LPIPS because it relies strictly on pixel-wise mathematical differences rather than human visual perception models [S15, S19]. Higher PSNR values indicate better image quality and lower reconstruction error [S4, S11].
+
+## How it works
+**Inputs and Outputs:**
+- **Input:** Rendered image tensor $I_{render}$ (predicted) and Ground Truth image tensor $I_{gt}$ (reference). Both must be aligned in resolution and color space (typically RGB).
+- **Output:** A scalar float representing PSNR in decibels (dB).
+
+**Data Structures:**
+- Images are treated as 2D arrays (or 3D with channel dimension) of floating-point values.
+- If inputs are integers (e.g., 8-bit), they are typically normalized to $[0, 1]$ or handled with their specific dynamic range $R$ [S4, S14].
+
+**Parameters:**
+- $R$: The maximum possible pixel value (dynamic range).
+  - $R = 1.0$ for normalized double-precision floating-point images [S4][S12, unofficial].
+  - $R = 255$ for 8-bit unsigned integer images [S4, S14][S18, unofficial].
+- $N$: Total number of pixels ($H \times W \times C$) [S13, unofficial].
+- $mse\_clamp\_min$: Numerical stability floor for MSE to prevent $\log(0)$. Typical value: $10^{-12}$ [S13, unofficial].
+
+**Formulas:**
+1. **Mean Squared Error (MSE):**
+   $$ MSE = \frac{1}{N} \sum_{i=1}^{N} (I_{render, i} - I_{gt, i})^2 $$
+   Where $I_{render, i}$ and $I_{gt, i}$ are the pixel values at index $i$ [S13, unofficial][S15].
+
+2. **PSNR:**
+   $$ PSNR = 10 \cdot \log_{10} \left( \frac{R^2}{MSE} \right) $$
+   Alternatively, if normalized such that $R=1$:
+   $$ PSNR = -10 \cdot \log_{10}(MSE) $$
+   [S4][S8, S12, S13, unofficial][S15].
+
+**Steps:**
+1. **Preprocessing:** Ensure $I_{render}$ and $I_{gt}$ have the same shape and data type. If using integer inputs, determine $R$ based on the bit depth (e.g., 255 for 8-bit) [S4, S14].
+2. **Compute Difference:** Calculate the element-wise squared difference between $I_{render}$ and $I_{gt}$ [S13, unofficial].
+3. **Compute MSE:** Average the squared differences over all pixels $N$ [S13, unofficial][S15].
+4. **Clamp MSE:** Apply a minimum floor to MSE to ensure numerical stability during logarithm calculation: $MSE_{clamped} = \max(MSE, mse\_clamp\_min)$ [S13, unofficial].
+5. **Calculate PSNR:** Compute $10 \cdot \log_{10}(R^2 / MSE_{clamped})$ [S4][S13, unofficial].
+6. **Validation:** Check for non-finite values (NaN/Inf). If present, raise an error or handle the specific case, as these indicate invalid comparisons [S13, unofficial].
+
+**Pseudocode:**
+> **Unverified code.** The code below did not pass a test run against a reference implementation, or no test fits it, so it may contain errors.
+
+```python
+import math
+
+def calculate_psnr(rendered_image, ground_truth, max_val=1.0, mse_clamp_min=1e-12):
+    """
+    Calculate Peak Signal-to-Noise Ratio (PSNR) between two images.
+    
+    Args:
+        rendered_image: Array-like of predicted pixel values.
+        ground_truth: Array-like of ground truth pixel values.
+        max_val: Maximum possible pixel value (R). 1.0 for normalized float, 255 for 8-bit int.
+        mse_clamp_min: Minimum value for MSE to prevent log(0).
+        
+    Returns:
+        float: PSNR value in decibels.
+    """
+    # Convert to numpy arrays if necessary and ensure float type for calculation
+    # [G] Assuming standard array conversion; in practice, ensure dtype is float32/64
+    pred = rendered_image.astype(float)
+    gt = ground_truth.astype(float)
+    
+    # 1. Compute squared differences
+    squared_diff = (pred - gt) ** 2
+    
+    # 2. Compute MSE (mean of squared differences)
+    # N is the total number of elements (H * W * C)
+    mse = squared_diff.mean()
+    
+    # 3. Clamp MSE for numerical stability
+    mse_clamped = max(mse, mse_clamp_min)
+    
+    # 4. Calculate PSNR
+    # Formula: 10 * log10(R^2 / MSE)
+    psnr = 10.0 * math.log10((max_val ** 2) / mse_clamped)
+    
+    # 5. Validate result
+    if not math.isfinite(psnr):
+        raise ValueError(f"Non-finite PSNR value encountered: {psnr}")
+        
+    return psnr
+```
+
+**Edge Cases and Pitfalls:**
+- **Zero MSE:** If the images are identical, MSE is 0, leading to $\log(\infty)$. Clamping prevents this but yields a finite large number rather than infinity [S13, unofficial].
+- **Masking:** Standard PSNR computes error over all pixels. If masks are used to exclude invalid regions (e.g., background), the metric may be biased higher if the masked regions contain high error [S10, unofficial].
+- **Perceptual Mismatch:** PSNR does not correlate well with human perception. It treats all pixel errors equally, ignoring structural similarity and visual sensitivity [S11, S15, S19].
+- **Color Space:** PSNR is typically computed on RGB values. It does not account for colorimetric accuracy in perceptually uniform spaces like CIELAB [S19].
+
+## Subtopics
+
+### [PSNR-based Quality Estimation for Ray Casting](9927-psnr-based-quality-estimation-for-ray-casting.md)
+This method adapts PSNR for Direct Volume Rendering (DVR) to estimate sampling artifacts objectively. Unlike standard PSNR which compares a render to a ground truth, this variant treats rendered images with different stochastic jitter seeds as noisy signals and measures the variance between them. It quantifies the dispersion of pixel colors across multiple renders to produce a PSNR value, assessing the rendering algorithm's stability rather than reconstruction fidelity. It is chosen when evaluating the convergence of stochastic volume rendering techniques.
+
+### FLIP (Frequency-Luminance-Intensity-Psychophysics)
+FLIP is a perceptual difference metric that produces a per-pixel error map approximating human-perceived difference [S20, unofficial]. It weights errors according to human visual sensitivity, penalizing visually jarring artifacts in high-contrast edges more than uniform small errors [S20, unofficial]. Unlike PSNR, it accounts for visual impact but requires a clean, converged ground truth reference [S20, unofficial]. It is limited by its inability to detect visual masking, potentially overestimating differences for high-frequency stochastic noise [S20, unofficial].
+
+### Image Quality Metrics Evaluation
+This approach evaluates bias and noise propagation in reconstruction algorithms (e.g., CBCT) using RMSE over uniform Regions of Interest (ROIs) and Noise Power Spectrum (NPS) [S21]. It assesses spatial resolution via Modulation Transfer Function (MTF) from slanted edges [S21]. It is used in medical imaging contexts to quantify systematic errors and noise characteristics [S21].
+
+## Operating characteristics
+**Time and Memory Complexity:**
+- **Time:** $O(N)$, where $N$ is the number of pixels. The calculation involves a single pass over the image data for squaring and averaging, followed by a constant-time logarithm operation [S13, unofficial][S15].
+- **Memory:** $O(N)$ to store the intermediate squared difference array, or $O(1)$ if computed incrementally/streaming [S13, unofficial].
+
+**Measured Performance:**
+- PSNR is considered "cheap to compute" compared to perceptual metrics like LPIPS or SSIM [S16, unofficial].
+- In NeRF benchmarks, a PSNR of ~26.50 dB on the Real Forward-Facing dataset is considered a baseline for high reconstruction quality [S14].
+
+**Strengths and Limitations:**
+- **Strengths:** Simple to implement, widely understood, standard in NeRF literature, and computationally inexpensive [S1][S16, unofficial].
+- **Limitations:** Insensitive to perceptual quality; fails to represent how humans perceive image quality; does not align with human judgment as well as SSIM or LPIPS [S11][S16, unofficial][S19].
+
+**When to Use:**
+- Use for quick, objective comparison of pixel-wise fidelity during training or when ground truth is available and perceptual metrics are not required [S1][S16, unofficial].
+
+**When Not to Use:**
+- Do not use when perceptual similarity is the primary concern, or when evaluating generative models where structural coherence matters more than pixel accuracy [S11][S16, unofficial].
+
+## Background
+PSNR originated in signal processing as a standard metric for comparing the quality of compressed or reconstructed signals against originals [S1, S19]. It was adopted into the Neural Radiance Fields (NeRF) literature as a primary evaluation metric for novel view synthesis [S1]. The metric is defined in decibels and relies on the Mean Squared Error (MSE) [S4, S15]. It is often used alongside SSIM and LPIPS to provide a comprehensive evaluation of 3D reconstruction quality [S1][S16, unofficial].
+
+## Sources
+[S1] Neural Radiance Fields in 3D Vision: A Comprehensive Review, https://doi.org/10.26599/cvm.2026.9450535, fetched 2026-10-28
+[S2] From reconstruction to reasoning : neural radiance fields for comprehensive 3D scene understanding, https://theses.hal.science/tel-05693528v1, fetched 2026-10-26 (unofficial)
+[S3] Differentiable Voxel-based X-ray Rendering Improves Sparse-View 3D CBCT Reconstruction, https://doi.org/10.48550/arxiv.2411.19224, fetched 2026-10-26 (unofficial)
+[S4] Optimizing neural radiance field: a comprehensive review of the impact of different optimizers on neural radiance fields, https://zenodo.org/records/14964860, fetched 2026-10-26
+[S5] Performance Evaluation and Optimization of 3D Gaussian Splatting in Indoor Scene Generation and Rendering, https://doi.org/10.3390/ijgi14010021, fetched 2026-10-26
+[S6] Leveraging Neural Radiance Fields for Large-Scale 3D Reconstruction from Aerial Imagery, https://doi.org/10.3390/rs16244655, fetched 2026-10-26
+[S7] Neural Radiance Fields-Based 3D Reconstruction of Power Transmission Lines Using Progressive Motion Sequence Images., https://doi.org/10.3390/s23239537, fetched 2026-10-26
+[S8] damn8daniel/nerf-from-scratch, https://github.com/damn8daniel/nerf-from-scratch, fetched 2026-10-26 (unofficial)
+[S9] Compressed volume rendering using deep learning, https://www.cs.umd.edu/sites/default/files/scholarly_papers/Jain.pdf, fetched 2026-10-26 (unofficial)
+[S10] Fast Training of Neural Lumigraph Representations using Meta Learning, https://doi.org/10.48550/arxiv.2106.14942, fetched 2026-10-26 (unofficial)
+[S11] Semantically-aware Neural Radiance Fields for Visual Scene Understanding: A Comprehensive Review, https://link.springer.com/article/10.1007/s11263-025-02663-5, fetched 2026-10-27
+[S12] hbb1/2d-gaussian-splatting, https://github.com/hbb1/2d-gaussian-splatting, fetched 2026-10-27 (unofficial)
+[S13] 3DAgentWorld/Advanced3DGS, https://github.com/3DAgentWorld/Advanced3DGS, fetched 2026-10-27 (unofficial)
+[S14] High-fidelity 3D Reconstruction of Plants using Neural Radiance Field, https://arxiv.org/abs/2311.04154v1, fetched 2026-10-27
+[S15] Neural Radiance Field-based Visual Rendering: a Comprehensive Review, https://ieeexplore.ieee.org/abstract/document/11455380, fetched 2026-10-30
+[S16] Gaussian Splatting — All Variants Cheat Sheet, https://www.chengjianglong.com/ml/3D-Gaussian_Splatting_SOTA_Updated.html, fetched 2026-10-27 (unofficial)
+[S17] https://github.com/rubensrudio/SeismicDataCompressor, https://github.com/rubensrudio/SeismicDataCompressor, fetched 2026-10-28 (unofficial)
+[S18] Bournemouth University Research Online [BURO] -  A Novel Implicit Neural Representation for Volume Data., https://eprints.bournemouth.ac.uk/38355/, fetched 2026-10-29 (unofficial)
+[S19] A CIEDE2000-Based Framework for Evaluating Color Fidelity of 3D Gaussian Splatting in Immersive Media, https://doi.org/10.5909/jbe.2026.31.4.542, fetched 2026-10-29
+[S20] MRD: Using Physically Based Differentiable Rendering to Probe Vision Models for 3D Scene Understanding, https://doi.org/10.48550/arXiv.2512.12307, fetched 2026-10-29 (unofficial)
+[S21] Magnification-driven B-spline Interpolation for Cone Beam Projection and Backprojection, https://doi.org/10.1002/mp.15179, fetched 2026-10-26

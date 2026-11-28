@@ -1,0 +1,175 @@
+--- v001.md
++++ v002.md
+@@ -1,96 +1,68 @@
+ # Octree-based Address Translation
+ 
+-Also called: GigaVoxels
+ 
+ ## Overview
+-Octree-based address translation is a method for managing multi-resolution volume data during ray-guided rendering by tightly coupling the spatial subdivision of an octree with the resolution levels of the volume data [S1, unofficial]. It solves the problem of efficiently accessing high-resolution bricks while minimizing memory bandwidth by ensuring that each octree node corresponds to exactly one brick in the data set [S1, unofficial]. Unlike page-table hierarchies which decouple spatial and resolution indices, this approach simplifies address calculation but requires keeping the entire path from root to leaf in cache, leading to potential memory overhead [S1, unofficial].
++Octree-based address translation manages multi-resolution volume data during ray-guided rendering by intrinsically coupling the down-sampling ratio between resolution levels with the spatial subdivision of an octree structure [S1, unofficial]. Each octree node corresponds to exactly one brick in the data set [S1, unofficial]. Unlike page-table hierarchies, this approach requires keeping the entire subtree from the root node to the target node in memory to reach a high-resolution brick, which can lead to sub-optimal GPU memory utilization due to the tight coupling of the multi-resolution hierarchy and spatial subdivision [S1, unofficial].
+ 
+ ## How it works
+-**Inputs:** Multi-resolution volume dataset; ray origin and direction for each sample.
+-**Outputs:** Transmittance and color for the ray sample; list of missing bricks for CPU request.
++The method takes a multi-resolution volume dataset and ray parameters as input, and produces ray-marched color and transmittance along with a list of missing brick requests for the CPU [S1, unofficial].
+ 
+ **Data Structures:**
+-1.  **Brick Cache:** Stores the actual voxel data (bricks) for active nodes.
+-2.  **Node Pool:** A cache for octree nodes. Only nodes with bricks resident in the Brick Cache are stored here. These are considered "active" nodes [S1, unofficial].
+-3.  **Octree Node Layout:** Each entry in the Node Pool represents a group of eight sibling nodes sharing the same parent. Each individual node stores:
+-    *   A pointer to its corresponding entry in the Brick Cache.
+-    *   A pointer to the Node Pool entry storing its children (if the node is not a leaf).
+-    *   Metadata describing the region (e.g., a boolean flag indicating if the region contains only zero values) [S1, unofficial].
++1. **Brick Cache:** Stores the actual voxel data (bricks) for active nodes [S1, unofficial].
++2. **Node Pool:** Acts as a cache for octree nodes, where only nodes with corresponding bricks stored in the brick cache are kept in memory [S1, unofficial]. Octree nodes resident in the node pool are considered active [S1, unofficial].
++3. **Octree Node Layout:** Each entry in the node pool is a group of eight nodes that all share the same parent node [S1, unofficial]. Each individual node stores: (1) a pointer to its corresponding brick-cache entry, (2) a pointer to the node-pool entry storing its children, and (3) metadata on the region represented by the node (e.g., a flag indicating if it only contains zero values) [S1, unofficial].
+ 
+ **Algorithm Steps:**
+-1.  **Initialization:** Load the root node of the octree into the Node Pool and its corresponding brick into the Brick Cache.
+-2.  **Ray Traversal:** For each ray sample, traverse the octree from the root node downwards.
+-3.  **Node Access:** At each level, check if the current node is in the Node Pool.
+-    *   If the node is present (active), access its children pointers and the corresponding brick.
+-    *   If the node is missing from the Node Pool, it implies the corresponding brick is not in the Brick Cache.
+-4.  **Brick Request:** If a brick is missing, record the request. Crassin et al. [CNLE09] use multiple render targets to record up to one missing brick per ray and report these requests to the CPU for asynchronous loading [S1, unofficial].
+-5.  **Subtree Requirement:** To reach a high-resolution brick, the entire subtree from the root node to the target node must be kept in both the Node Pool and the Brick Cache [S1, unofficial].
+-6.  **Rendering:** Use the metadata (e.g., zero-value check) to skip translucent or empty regions during the ray march [S1, unofficial].
++1. **Initialization:** Load the root node of the octree into the node pool and its corresponding brick into the brick cache [S1, unofficial].
++2. **Ray Traversal:** During ray casting, the octree hierarchy is traversed for each sample [S1, unofficial].
++3. **Subtree Requirement:** To reach a high-resolution brick, the whole subtree from the root node to the node corresponding to the high-resolution brick must be kept in both the node pool and the brick cache [S1, unofficial].
++4. **Missing Brick Handling:** If a brick is missing, the request is recorded. Crassin et al. [CNLE09] use multiple render targets to record up to one missing brick per ray and report these brick requests to the CPU [S1, unofficial].
++5. **Optimization:** Nodes use their stored metadata (e.g., zero-value flags) to skip over translucent or empty regions during rendering [S1, unofficial].
+ 
+ **Pseudocode:**
+ ```python
+-def traverse_octree(ray, root_node, node_pool, brick_cache):
+-    """
+-    Traverses the octree for a given ray, ensuring cache residency.
+-    Returns the final color/transmittance and a list of missing bricks.
+-    """
++def traverse_octree(ray_origin, ray_direction, root_node, node_pool, brick_cache):
+     missing_bricks = []
+     current_node = root_node
+-    
+-    # Ensure root is in cache
++    # Ensure root node and brick are resident in cache
+     if current_node not in node_pool:
+-        load_node_to_cache(current_node, node_pool, brick_cache, missing_bricks)
+-        if current_node not in node_pool:
+-            return 0.0, 1.0, missing_bricks # Could not load root
+-
++        node_pool[current_node] = True
++        brick_cache[current_node.brick_id] = load_brick_from_storage(current_node.brick_id)
++    color = 0.0
++    transmittance = 1.0
+     while current_node is not None:
+-        # Check if current node's brick is in cache
+-        if current_node.brick not in brick_cache:
+-            # Request brick from CPU
++        # Skip empty regions using node metadata
++        if current_node.metadata.is_zero:
++            break
++        # Request missing brick if not in cache
++        if current_node.brick_id not in brick_cache:
+             missing_bricks.append(current_node.brick_id)
+-            # Attempt to load immediately or proceed with low-res if available
+-            # For simplicity, assume we proceed if not loaded, or block
+-            # In GigaVoxels, missing bricks are reported and rendering continues
+-            # with lower resolution or previous data if available.
+-            pass 
+-        
+-        # Access brick data for shading/ray marching
+-        brick_data = brick_cache.get(current_node.brick)
+-        
+-        # Use metadata to skip empty regions
+-        if current_node.metadata.is_zero:
+-            # Skip this node's contribution
+-            break 
+-            
+-        # Move to children if not leaf
++            if len(missing_bricks) > 1:
++                break
++            brick_cache[current_node.brick_id] = load_brick_from_storage(current_node.brick_id)
++        # Perform standard ray-marching step on the loaded brick data [G]
++        color, transmittance = standard_ray_march(ray_origin, ray_direction, brick_cache[current_node.brick_id], color, transmittance)
++        # Move to child node if not a leaf
+         if not current_node.is_leaf:
+-            # Determine which child the ray enters
+-            child_index = get_ray_child_index(ray, current_node)
+-            child_node = current_node.children[child_index]
+-            
+-            # Ensure child is in cache
++            child_idx = compute_ray_child_index(ray_direction, current_node)
++            child_node = current_node.children[child_idx]
+             if child_node not in node_pool:
+-                load_node_to_cache(child_node, node_pool, brick_cache, missing_bricks)
+-            
+-            if child_node not in node_pool:
+-                # Child not loaded, cannot go deeper
+-                break
+-                
++                node_pool[child_node] = True
++                brick_cache[child_node.brick_id] = load_brick_from_storage(child_node.brick_id)
+             current_node = child_node
+         else:
+             break
+-            
+     return color, transmittance, missing_bricks
+ 
+-def load_node_to_cache(node, node_pool, brick_cache, missing_bricks):
+-    """
+-    Loads a node and its brick into the respective caches.
+-    """
+-    # Load brick from storage
+-    brick = load_brick_from_storage(node.brick_id)
+-    brick_cache[node.brick_id] = brick
+-    
+-    # Load node structure
+-    node_pool[node] = True
++# Standard helper definitions [G]
++def load_brick_from_storage(brick_id):
++    # Fetches brick data from persistent storage or CPU memory
++    pass
++def standard_ray_march(origin, direction, brick_data, color, transmittance):
++    # Advances ray through brick, updates color and transmittance
++    pass
++def compute_ray_child_index(direction, node):
++    # Determines which of the 8 children the ray enters based on direction
++    pass
+ ```
+ 
+@@ -100,25 +72,24 @@
+ 
+ **Edge Cases and Pitfalls:**
+-*   **Memory Utilization:** Because the entire subtree from root to leaf must be kept in memory to reach a high-resolution brick, potentially unused low-resolution bricks are stored in the cache. This leads to sub-optimal GPU memory utilization due to the tight coupling of the multi-resolution hierarchy and spatial subdivision [S1, unofficial].
+-*   **Cache Thrashing:** If the working set of active bricks exceeds GPU memory, frequent swapping between CPU and GPU may occur.
++*   **Memory Utilization:** Because the entire subtree from root to leaf must be kept in memory to reach a high-resolution brick, potentially unused low-resolution bricks are stored in the cache, leading to sub-optimal GPU memory utilization [S1, unofficial]. This is a direct consequence of the tight coupling of the multi-resolution hierarchy and the spatial subdivision of the octree [S1, unofficial].
+ 
+ ## Subtopics
+ 
+ ### GigaVoxels
+-The original system by Crassin et al. [CNLE09] that introduced this method. It uses multiple render targets to report missing bricks to the CPU. Choose this when simplicity of address translation is prioritized over optimal memory usage. [CNLE09]
++The original system by Crassin et al. [CNLE09] that introduced this method [S1, unofficial]. It uses multiple render targets to record up to one missing brick per ray and report these brick requests to the CPU [S1, unofficial].
+ 
+ ### Multi-channel Extension
+-Brix et al. [BPH14] extended the structure to support multi-channel data. Choose this when rendering volumetric data with multiple attributes (e.g., density, temperature, color) simultaneously. [BPH14]
++Brix et al. [BPH14] extended the structure to support multi-channel data [S1, unofficial].
+ 
+ ## Operating characteristics
+-*   **Time Complexity:** Traversal is $O(\log N)$ where $N$ is the number of voxels, assuming a balanced octree. However, cache misses may stall execution.
+-*   **Memory Complexity:** Memory usage is proportional to the number of active nodes and their entire subtrees. This can be significantly higher than necessary because low-resolution bricks for unused parts of the scene may remain in cache to maintain path integrity [S1, unofficial].
+-*   **Strengths:** Straightforward address calculation; easy to substitute missing high-resolution data with low-resolution data; efficient skipping of empty regions via metadata [S1, unofficial].
++*   **Time Complexity:** Not given in the sources.
++*   **Memory Complexity:** Memory usage scales with the number of active nodes and their entire subtrees, as the full path from root to leaf must remain resident to maintain address translation integrity [S1, unofficial].
++*   **Strengths:** Straightforward substitution of missing high-resolution data with low-resolution data; efficient skipping of empty regions via node metadata [S1, unofficial].
+ *   **Limitations:** Sub-optimal GPU memory utilization due to the requirement of keeping the full subtree in cache; tight coupling of resolution and spatial subdivision limits flexibility [S1, unofficial].
+-*   **When to Use:** Suitable for scenes with moderate memory requirements where simplicity of implementation is key.
+-*   **When Not to Use:** When GPU memory is constrained and the scene has large empty spaces or highly variable density, as the subtree requirement wastes memory on unused low-resolution bricks.
++*   **When to Use:** Not given in the sources.
++*   **When Not to Use:** Not given in the sources.
+ 
+ ## Background
+-The method was introduced by Crassin et al. in 2009 as part of the GigaVoxels system [S1, unofficial]. It was one of the first methods to use an octree structure for address translation in ray-guided rendering. Brix et al. [BPH14] later extended the structure to multi-channel data. The approach is part of the broader category of octree-based ray-guided rendering, contrasting with page-table hierarchies [S1, unofficial].
++The method was introduced by Crassin et al. in 2009 as part of the GigaVoxels system [S1, unofficial]. It was one of the first methods to use an octree structure for address translation in ray-guided rendering [S1, unofficial]. Brix et al. [BPH14] later extended the structure to multi-channel data [S1, unofficial]. The approach belongs to the broader category of octree-based ray-guided rendering, which contrasts with page-table hierarchies [S1, unofficial].
+ 
+ ## Sources

@@ -1,0 +1,822 @@
+# kv6view-rs
+A simple KV6 voxel model viewer written in Rust. Something I threw together in a day for fun.
+
+Configuration is hardcoded in `src/controls.rs`.
+
+![caco.kv6](kv6view-rs.png)
+
+## Compiling and running
+
+`cargo run -- <file>`
+
+## Other stuff
+
+Thanks to mat^2 (Mathias Kaerlev) for the *inspiration*.
+<https://code.google.com/archive/p/kv6view/>
+
+Thanks to Ken Silverman for KV6, VOXLAP, and the sample model caco.kv6.
+
+### src/camera.rs
+```
+use cgmath::prelude::*;
+use cgmath::Vector3;
+use cgmath::Matrix3;
+use cgmath::Matrix4;
+
+use crate::controls::*;
+use glium::glutin::event::{ KeyboardInput, ElementState };
+use glium::Surface;
+
+#[derive(Debug)]
+pub struct Camera {
+    pub position: Vector3<f32>,
+    velocity: Vector3<f32>,
+
+    /*pub forward: Vector3<f32>,
+    pub right: Vector3<f32>,
+    pub up: Vector3<f32>,*/
+
+    pub orientation: Matrix3<f32>,
+
+    mx_delta: f32,
+    my_delta: f32,
+
+    move_forward: bool,
+    move_backward: bool,
+    move_left: bool,
+    move_right: bool,
+    move_up: bool,
+    move_down: bool,
+    move_boost: bool
+}
+
+impl Camera {
+    pub fn new(position: Vector3<f32>, forward: Vector3<f32>) -> Camera {
+        const WORLD_UP: Vector3<f32> = Vector3::new(0.0, 0.0, 1.0);
+        
+        let forward_norm = forward.normalize();
+        let right = forward_norm.cross(WORLD_UP);
+        let up = right.cross(forward);
+
+        let orientation = Matrix3::from_cols(up, right, forward_norm);
+
+        Camera {
+            position,
+            velocity: Vector3::zero(),
+            orientation: orientation,
+
+            mx_delta: 0.0,
+            my_delta: 0.0,
+
+            move_forward: false,
+            move_backward: false,
+            move_left: false,
+            move_right: false,
+            move_up: false,
+            move_down: false,
+            move_boost: false
+        }
+    }
+
+    pub fn handle_mouse(&mut self, mx: f32, my: f32) {
+        self.mx_delta += mx;
+        self.my_delta += my;
+    }
+
+    pub fn handle_keyboard(&mut self, event: &KeyboardInput) {
+        let pressed = event.state == ElementState::Pressed;
+        
+        match event.virtual_keycode {
+            Some(KEY_FORWARD) => self.move_forward = pressed,
+            Some(KEY_BACKWARD) => self.move_backward = pressed,
+            Some(KEY_LEFT) => self.move_left = pressed,
+            Some(KEY_RIGHT) => self.move_right = pressed,
+            Some(KEY_UP) => self.move_up = pressed,
+            Some(KEY_DOWN) => self.move_down = pressed,
+            Some(KEY_BOOST) => self.move_boost = pressed,
+            _ => ()
+        }
+    }
+
+    pub fn update(&mut self) {
+        use std::f32::consts::PI;
+
+        // Movement
+        const TICK_STEP: f32 = 1.0 / 60.0;
+        const MOVEMENT_SPEED: f32 = 32.0;
+
+        let mut acceleration = Vector3::zero();
+
+        if self.move_forward  { acceleration += self.orientation.z * TICK_STEP; }
+        if self.move_backward { acceleration -= self.orientation.z * TICK_STEP; }
+        if self.move_left     { acceleration -= self.orientation.y * TICK_STEP; }
+        if self.move_right    { acceleration += self.orientation.y * TICK_STEP; }
+        if self.move_up       { acceleration += self.orientation.x * TICK_STEP; }
+        if self.move_down     { acceleration -= self.orientation.x * TICK_STEP; }
+
+        let norm_accel = acceleration.normalize();
+        if  norm_accel.x.is_finite() { // prevent NaNs...
+            acceleration = norm_accel;
+        }
+
+        if self.move_boost { acceleration *= 2.0; }
+
+        self.velocity += acceleration;
+
+        let drag = TICK_STEP + 1.0;
+        self.velocity /= drag;
+
+        self.position += self.velocity * TICK_STEP * TICK_STEP * MOVEMENT_SPEED;
+
+        // Rotation
+        self.orientation = self.orientation * legacy::orthorotate(
+            Vector3::new(
+                self.orientation.y.z * 0.1,
+                (-self.mx_delta * PI / 180.0) * MOUSE_SENSITIVITY / 100.0,
+                ( self.my_delta * PI / 180.0) * MOUSE_SENSITIVITY / 100.0
+            )
+        );
+
+        self.mx_delta = 0.0;
+        self.my_delta = 0.0;
+    }
+
+    pub fn get_view_matrix(&self, delta: f32) -> Matrix4<f32> {
+        const TICK_STEP: f32 = 1.0 / 60.0;
+        const MOVEMENT_SPEED: f32 = 32.0;
+        let translation = self.position + self.velocity * TICK_STEP * TICK_STEP * MOVEMENT_SPEED * delta;
+
+        Matrix4::new(
+            self.orientation.y.x, self.orientation.x.x, -self.orientation.z.x, 0.0,
+            self.orientation.y.y, self.orientation.x.y, -self.orientation.z.y, 0.0,
+            self.orientation.y.z, self.orientation.x.z, -self.orientation.z.z, 0.0,
+                             0.0,                  0.0,                   0.0, 1.0
+        ) * Matrix4::from_translation(-translation)
+    }
+
+    pub fn get_perspective_matrix(target: &glium::Frame) -> Matrix4<f32> {
+        let (width, height) = target.get_dimensions();
+        let aspect_ratio = width as f32 / height as f32;
+
+        cgmath::perspective(cgmath::Deg(90.0), aspect_ratio, 0.1, 1024.0)
+    }
+}
+
+mod legacy {
+    use cgmath::Vector3;
+    use cgmath::Matrix3;
+
+    pub fn orthorotate(rot: Vector3<f32>) -> Matrix3<f32> {
+        let c = Vector3::new(rot.x.cos(), rot.y.cos(), rot.z.cos());
+        let s = Vector3::new(rot.x.sin(), rot.y.sin(), rot.z.sin());
+
+        Matrix3::new(
+            s.x*s.z*s.y + c.x*c.z, -c.x*s.z*s.y + s.x*c.z, s.z*c.y,
+                         -s.x*c.y,                c.x*c.y,    s.y,
+            s.x*c.z*s.y - c.x*s.z, -c.x*c.z*s.y - s.x*s.z, c.z*c.y
+        )
+    }
+}
+```
+
+### src/controls.rs
+```
+use glium::glutin::event::VirtualKeyCode;
+
+pub const MOUSE_SENSITIVITY: f32 = 5.0;
+
+pub const KEY_EXIT: VirtualKeyCode = VirtualKeyCode::Escape;
+pub const KEY_FORWARD: VirtualKeyCode = VirtualKeyCode::W;
+pub const KEY_BACKWARD: VirtualKeyCode = VirtualKeyCode::S;
+pub const KEY_LEFT: VirtualKeyCode = VirtualKeyCode::A;
+pub const KEY_RIGHT: VirtualKeyCode = VirtualKeyCode::D;
+pub const KEY_UP: VirtualKeyCode = VirtualKeyCode::Space;
+pub const KEY_DOWN: VirtualKeyCode = VirtualKeyCode::LControl;
+pub const KEY_BOOST: VirtualKeyCode = VirtualKeyCode::LShift;
+pub const KEY_MOVE_LIGHT: VirtualKeyCode = VirtualKeyCode::L;
+pub const KEY_SHOW_LIGHT: VirtualKeyCode = VirtualKeyCode::K;
+```
+
+### src/eventutil.rs
+```
+use std::time::{Duration, Instant};
+use glium::glutin::event_loop::{EventLoop, ControlFlow};
+use glium::glutin::event::{Event, StartCause};
+
+pub enum LoopAction {
+    Stop,
+    Continue,
+}
+
+pub fn start_loop<F>(event_loop: EventLoop<()>, mut callback: F)->! where F: 'static + FnMut(&Vec<Event<()>>) -> LoopAction {
+    let mut events_buffer = Vec::new();
+    let mut next_frame_time = Instant::now();
+    event_loop.run(move |event, _, control_flow| {
+        let run_callback = match event {
+            Event::NewEvents(cause) => {
+                match cause {
+                    StartCause::ResumeTimeReached { .. } | StartCause::Init => {
+                        true
+                    },
+                    _ => false
+                }
+            },
+            _ => {
+                events_buffer.push(event);
+                false
+            }
+        };
+
+        let action = if run_callback {
+            let action = callback(&events_buffer);
+            next_frame_time = Instant::now() + Duration::from_nanos(01);
+            events_buffer.clear();
+            action
+        } else {
+            LoopAction::Continue
+        };
+
+        match action {
+            LoopAction::Continue => {
+                *control_flow = ControlFlow::WaitUntil(next_frame_time);
+            },
+            LoopAction::Stop => *control_flow = ControlFlow::Exit
+        }
+    })
+}
+```
+
+### src/main.rs
+```
+#![feature(div_duration)]
+use std::time::{Duration, Instant};
+
+use clap::{Arg, ArgMatches, App};
+
+#[macro_use]
+extern crate glium;
+use glium::glutin;
+use glium::glutin::event::{Event, WindowEvent, DeviceEvent, ElementState};
+use glium::glutin::event_loop::EventLoop;
+use glium::{Display, Surface};
+
+use cgmath::prelude::*;
+use cgmath::Vector3;
+use cgmath::Matrix4;
+
+mod eventutil;
+mod controls;
+mod camera;
+mod shaders;
+mod kv6;
+
+const WINDOW_WIDTH: u32 = 640;
+const WINDOW_HEIGHT: u32 = 480;
+
+struct Viewer {
+    focused: bool,
+
+    camera: camera::Camera,
+    
+    program: glium::Program,
+
+    light_dir: Vector3<f32>,
+    light_kv6: kv6::KV6Mesh,
+    show_light: bool,
+    
+    user_kv6: kv6::KV6Mesh,
+    aos_team_color: Vector3<f32>
+}
+
+fn set_capture(display: &Display, capture: bool) {
+    display.gl_window().window().set_cursor_grab(capture).unwrap();
+    display.gl_window().window().set_cursor_visible(!capture);
+}
+
+fn center_window(display: &Display) {
+    let monitor_size = display.gl_window().window().current_monitor().size();
+    let outer_size = display.gl_window().window().outer_size();
+    display.gl_window().window().set_outer_position(glutin::dpi::LogicalPosition {
+        x: (monitor_size.width / 2.0) - (outer_size.width / 2.0),
+        y: (monitor_size.height / 2.0) - (outer_size.height / 2.0)
+    });
+}
+
+fn main() -> Result<(), Box<dyn std::error::Error>> {
+    let matches = App::new("kv6view-rs")
+        .version("1.0")
+        .about("View KV6 models in OpenGL with Rust")
+        .arg(Arg::with_name("file")
+            .required(true)
+            .index(1))
+        .arg(Arg::with_name("aos-team-color")
+            .long("aos-team")
+            .help("Replace voxels colored 0,0,0 with this color.")
+            .number_of_values(3)
+            .required(false))
+        .get_matches();
+
+    let event_loop = EventLoop::new();
+    let wb = glutin::window::WindowBuilder::new()
+        .with_inner_size((WINDOW_WIDTH, WINDOW_HEIGHT).into())
+        .with_title("KV6View")
+        .with_visible(false);
+    let cb = glutin::ContextBuilder::new();
+    let display = glium::Display::new(wb, cb, &event_loop).expect("Error creating display");
+
+    center_window(&display);
+    display.gl_window().window().set_visible(true);
+
+    set_capture(&display, true);
+
+    let viewer = init_data(matches, &display)?;
+    run_loop(viewer, event_loop, display);
+    Ok(())
+}
+
+fn init_data(matches: ArgMatches, display: &Display) -> Result<Viewer, Box<dyn std::error::Error>> {
+    let camera = camera::Camera::new(
+        Vector3::new(0.0, 32.0, 0.0),
+        Vector3::new(0.0, -1.0, 0.0).normalize()
+    );
+
+    let mut aos_team_color = Vector3::new(0.0, 0.0, 0.0);
+    if let Some(color_string) = matches.values_of("aos-team-color") {
+        let values = color_string.map(|s| s.parse::<u8>().map(|i| i as f32))
+            .collect::<Result<Vec<f32>, _>>()?;
+        // guaranteed to be 3 elements by Arg match
+        aos_team_color = Vector3::new(values[0], values[1], values[2]);
+    }
+
+    let program = glium::Program::from_source(display,
+        &shaders::VERTEX_SHADER_SRC,
+        &shaders::FRAGMENT_SHADER_SRC,
+        None)?;
+
+    let light_kv6 = kv6::KV6Mesh::from_file("kv6/light.kv6", display)?;
+    // file match guaranteed (required), unwrap
+    let user_kv6 = kv6::KV6Mesh::from_file(matches.value_of("file").unwrap(), display)?;
+
+    Ok(Viewer {
+        focused: true,
+
+        camera,
+
+        program,
+        light_dir: (Vector3::new(0.0, 0.0, 0.0) - Vector3::new(-128.0, -128.0, 64.0)).normalize(),
+        light_kv6,
+        show_light: true,
+
+        user_kv6,
+        aos_team_color
+    })
+}
+
+fn run_loop(mut viewer: Viewer, event_loop: EventLoop<()>, display: Display) {
+    let ms_per_update = Duration::new(1, 0).div_f64(60.0); // can't make const Durations in rust?
+
+    let mut prev_time = Instant::now();
+    let mut lag = Duration::new(0, 0);
+
+    let mut ticks = 0;
+    let mut frames = 0;
+
+    eventutil::start_loop(event_loop, move |events| {
+        let mut action = eventutil::LoopAction::Continue;
+
+        lag += prev_time.elapsed();
+        prev_time = Instant::now();
+
+        for event in events {
+            handle_event(&mut viewer, event, &display, &mut action);
+        }
+
+        while lag >= ms_per_update {
+            update(&mut viewer);
+
+            lag -= ms_per_update;
+            ticks += 1;
+            if ticks >= 60 {
+                ticks = 0;
+                frames = 0;
+            }
+        }
+
+        frames += 1;
+
+        render(&mut viewer, &display, lag.div_duration_f32(ms_per_update));
+
+        return action;
+    });
+}
+
+fn handle_event(viewer: &mut Viewer, event: &Event<()>, display: &Display, action: &mut eventutil::LoopAction) {
+    match event {
+        Event::WindowEvent { event, ..} => match event {
+            WindowEvent::CloseRequested =>
+                *action = eventutil::LoopAction::Stop,
+            WindowEvent::Focused(focus) => {
+                viewer.focused = *focus;
+                set_capture(&display, *focus);
+            },
+            WindowEvent::KeyboardInput { input, .. } => if viewer.focused {
+                viewer.camera.handle_keyboard(input);
+
+                let pressed = input.state == ElementState::Pressed;
+                match input.virtual_keycode {
+                    Some(controls::KEY_EXIT) => if pressed { *action = eventutil::LoopAction::Stop; },
+                    Some(controls::KEY_MOVE_LIGHT) => if pressed { viewer.light_dir = -viewer.camera.orientation.z; },
+                    Some(controls::KEY_SHOW_LIGHT) => if pressed { viewer.show_light = !viewer.show_light; },
+                    _ => (),
+                }
+            },
+            _ => (),
+        },
+        Event::DeviceEvent { event, .. } => match event {
+            DeviceEvent::MouseMotion { delta } => if viewer.focused {
+                viewer.camera.handle_mouse(delta.0 as f32, delta.1 as f32)
+            },
+            _ => ()
+        }
+        _ => (),
+    }
+}
+
+// stub, but possibly useful in the future
+fn update(viewer: &mut Viewer) {
+    viewer.camera.update();
+}
+
+fn render(viewer: &mut Viewer, display: &Display, delta: f32) {
+    let mut target = display.draw();
+
+    target.clear_color_and_depth((0.05, 0.05, 0.05, 1.0), 1.0);
+
+    let params = glium::DrawParameters {
+        depth: glium::draw_parameters::Depth {
+            test: glium::DepthTest::IfLess,
+            write: true,
+            .. Default::default()
+        },
+        backface_culling: glium::draw_parameters::BackfaceCullingMode::CullClockwise,
+        .. Default::default()
+    };
+
+    let perspective: [[f32; 4]; 4] = camera::Camera::get_perspective_matrix(&target).into();
+    let view: [[f32; 4]; 4] = viewer.camera.get_view_matrix(delta).into();
+    let model: [[f32; 4]; 4] = Matrix4::from_value(1.0).into(); // identity
+    let light_dir: [f32; 3] = viewer.light_dir.into();
+    let aos_team_color: [f32; 3] = viewer.aos_team_color.into();
+
+    target.draw(&viewer.user_kv6.vertex_buffer, &viewer.user_kv6.indices, &viewer.program,
+        &uniform! { perspective: perspective, view: view, model: model, light_dir: light_dir, aos_team_color: aos_team_color },
+        &params).unwrap();
+
+    if viewer.show_light {
+        let model: [[f32; 4]; 4] = Matrix4::from_translation(-viewer.light_dir * 128.0).into();
+        let light_dir: [f32; 3] = (-viewer.light_dir).into(); // so that it's lit on the side facing the user's kv6
+
+        target.draw(&viewer.light_kv6.vertex_buffer, &viewer.light_kv6.indices, &viewer.program,
+            &uniform! { perspective: perspective, view: view, model: model, light_dir: light_dir, aos_team_color: aos_team_color },
+            &params).unwrap();
+    }
+
+    target.finish().unwrap();
+}
+```
+
+### src/kv6/kv6data.rs
+```
+use std::io::Seek;
+use std::io::SeekFrom;
+use std::fs::File;
+use std::io::Result;
+use byteorder::{LittleEndian, ReadBytesExt};
+
+use cgmath::Vector3;
+
+pub struct KV6Color {
+    pub b: u8,
+    pub g: u8,
+    pub r: u8,
+    pub a: u8
+}
+
+pub struct KV6Voxel {
+    pub color: KV6Color,
+    pub z: u16,
+    pub visibility: u8,
+    pub normal_index: u8,
+}
+
+pub struct KV6Data {
+    pub size: Vector3<u32>,
+    pub pivot: Vector3<f32>,
+    pub voxel_count: u32,
+    pub voxels: Vec<KV6Voxel>,
+    pub x_entries: Vec<u32>,
+    pub xy_entries: Vec<u16>
+}
+
+pub fn load_kv6(path: &str) -> Result<KV6Data> {
+    let mut file = File::open(path)?;
+    file.seek(SeekFrom::Start(4))?;
+
+    let size = Vector3::new(
+        file.read_u32::<LittleEndian>()?,
+        file.read_u32::<LittleEndian>()?,
+        file.read_u32::<LittleEndian>()?
+    );
+
+    let pivot = Vector3::new(
+        file.read_f32::<LittleEndian>()?,
+        file.read_f32::<LittleEndian>()?,
+        file.read_f32::<LittleEndian>()?
+    );
+
+    let voxel_count = file.read_u32::<LittleEndian>()?;
+
+    let mut voxels = Vec::new();
+    for _ in 0..voxel_count {
+        voxels.push(KV6Voxel {
+            color: KV6Color {
+                b: file.read_u8()?,
+                g: file.read_u8()?,
+                r: file.read_u8()?,
+                a: file.read_u8()?,
+            },
+            z: file.read_u16::<LittleEndian>()?,
+            visibility: file.read_u8()?,
+            normal_index: file.read_u8()?
+        });
+    }
+
+    let mut x_entries = Vec::new();
+    for _ in 0..size.x {
+        x_entries.push(file.read_u32::<LittleEndian>()?);
+    }
+
+    let mut xy_entries = Vec::new();
+    for _ in 0..size.x*size.y {
+        xy_entries.push(file.read_u16::<LittleEndian>()?);
+    }
+
+    Ok(KV6Data {
+        size,
+        pivot,
+        voxel_count,
+        voxels,
+        x_entries,
+        xy_entries
+    })
+}
+```
+
+### src/kv6/kv6mesh.rs
+```
+use crate::kv6;
+use crate::kv6::KV6Data;
+
+use std::io::Result;
+
+use cgmath::Vector3;
+
+#[derive(Debug, Copy, Clone, Default)]
+pub struct KV6Vertex {
+    position: [f32; 3],
+    normal: [f32; 3],
+    face: [f32; 3],
+    color: [u8; 3]
+}
+implement_vertex!(KV6Vertex, position, normal, face, color);
+
+mod legacy {
+    use std::f32::consts::PI;
+    use cgmath::Vector3;
+    use cgmath::Zero;
+
+    const GOLDRAT: f32 = 0.3819660112501052;
+    const LUT_POINTS: usize = 255;
+    const ZMULK: f32 = 2.0 / LUT_POINTS as f32;
+    const ZADDK: f32 = ZMULK * 0.5 - 1.0;
+
+    pub fn create_normal_table() -> Vec<Vector3<f32>> {
+        let mut table = Vec::new();
+
+        for i in 0..LUT_POINTS + 1 {
+            let mut vec = Vector3::new(0.0, 0.0, i as f32 * ZMULK + ZADDK);
+            let g = i as f32 * (GOLDRAT * PI * 2.0);
+            let r = (1.0 - vec.z * vec.z).sqrt();
+            vec.x = -g.cos()*r; // flip X for compat
+            vec.y = g.sin()*r;
+            vec.z *= -1.0;
+            table.push(vec);
+        }
+        
+        table[LUT_POINTS] = Vector3::zero();
+        
+        table
+    }
+}
+
+const LEFT_VISIBLE: u8 = 1;
+const RIGHT_VISIBLE: u8 = 2;
+const BACK_VISIBLE: u8 = 4;
+const FRONT_VISIBLE: u8 = 8;
+const TOP_VISIBLE: u8 = 16;
+const BOTTOM_VISIBLE: u8 = 32;
+
+fn kv6_gen_vertices(data: &KV6Data) -> Vec<KV6Vertex> {
+    let mut vertices = Vec::new();
+    let normal_table = legacy::create_normal_table();
+
+    let mut vox_index = 0;
+    for x in 0..data.size.x {
+        for y in 0..data.size.y {
+            for _ in 0..data.xy_entries[(x * data.size.y + y) as usize] {
+                let voxel = &data.voxels[vox_index];
+                let z = voxel.z;
+
+                let vox_pos = Vector3::new(
+                    -(x as f32 - data.pivot.x),   // set center of the model to the pivot
+                    y as f32 - data.pivot.y,      // and flip model axes for compatibility with worldspace
+                    -(z as f32) - data.pivot.z 
+                );
+
+                // TODO: find a way to simplify/automate this process more by generating vertices?
+
+                let mut emit_face = |face: [f32; 3], v1: Vector3<f32>, v2: Vector3<f32>, v3: Vector3<f32>, v4: Vector3<f32>| {
+                    let mut vertex = KV6Vertex {
+                        normal: normal_table[voxel.normal_index as usize].into(),
+                        color: [voxel.color.r, voxel.color.g, voxel.color.b],
+                        face,
+                        .. Default::default()
+                    };
+                    vertex.position = (vox_pos + v1).into(); vertices.push(vertex);
+                    vertex.position = (vox_pos + v2).into(); vertices.push(vertex);
+                    vertex.position = (vox_pos + v3).into(); vertices.push(vertex);
+                    vertex.position = (vox_pos + v3).into(); vertices.push(vertex);
+                    vertex.position = (vox_pos + v4).into(); vertices.push(vertex);
+                    vertex.position = (vox_pos + v1).into(); vertices.push(vertex);
+                };
+
+                if voxel.visibility & FRONT_VISIBLE > 0 {
+                    emit_face( [0.0, 1.0, 0.0],
+                        Vector3::new(-0.5, 0.5, -0.5),
+                        Vector3::new(-0.5, 0.5,  0.5),
+                        Vector3::new( 0.5, 0.5,  0.5),
+                        Vector3::new( 0.5, 0.5, -0.5)
+                    );
+                }
+
+                if voxel.visibility & BACK_VISIBLE > 0 {
+                    emit_face( [0.0, -1.0, 0.0],
+                        Vector3::new(-0.5, -0.5, -0.5),
+                        Vector3::new( 0.5, -0.5, -0.5),
+                        Vector3::new( 0.5, -0.5,  0.5),
+                        Vector3::new(-0.5, -0.5,  0.5)
+                    );
+                }
+
+                if voxel.visibility & TOP_VISIBLE > 0 {
+                    emit_face( [0.0, 0.0, 1.0],
+                        Vector3::new(-0.5, -0.5,  0.5),
+                        Vector3::new( 0.5, -0.5,  0.5),
+                        Vector3::new( 0.5,  0.5,  0.5),
+                        Vector3::new(-0.5,  0.5,  0.5)
+                    );
+                }
+
+                if voxel.visibility & BOTTOM_VISIBLE > 0 {
+                    emit_face( [0.0, 0.0, -1.0],
+                        Vector3::new(-0.5, -0.5, -0.5),
+                        Vector3::new(-0.5,  0.5, -0.5),
+                        Vector3::new( 0.5,  0.5, -0.5),
+                        Vector3::new( 0.5, -0.5, -0.5)
+                    );
+                }
+
+                if voxel.visibility & RIGHT_VISIBLE > 0 {
+                    emit_face( [-1.0, 0.0, 0.0],
+                        Vector3::new(-0.5, -0.5, -0.5),
+                        Vector3::new(-0.5, -0.5,  0.5),
+                        Vector3::new(-0.5,  0.5,  0.5),
+                        Vector3::new(-0.5,  0.5, -0.5)
+                    );
+                }
+
+                if voxel.visibility & LEFT_VISIBLE > 0 {
+                    emit_face( [1.0, 0.0, 0.0],
+                        Vector3::new( 0.5, -0.5, -0.5),
+                        Vector3::new( 0.5,  0.5, -0.5),
+                        Vector3::new( 0.5,  0.5,  0.5),
+                        Vector3::new( 0.5, -0.5,  0.5)
+                    );
+                }
+
+                vox_index += 1;
+            }
+        }
+    }
+
+    vertices
+}
+
+pub struct KV6Mesh {
+    pub vertex_buffer: glium::VertexBuffer<KV6Vertex>,
+    pub indices: glium::index::NoIndices,
+}
+
+impl KV6Mesh {
+    pub fn from_data(data: KV6Data, display: &glium::Display) -> KV6Mesh {
+        let vertices = kv6_gen_vertices(&data);
+
+        KV6Mesh {
+            vertex_buffer: glium::VertexBuffer::new(&*display, &vertices).unwrap(),
+            indices: glium::index::NoIndices(glium::index::PrimitiveType::TrianglesList)
+        }
+    }
+
+    pub fn from_file(path: &str, display: &glium::Display) -> Result<KV6Mesh> {
+        let data = kv6::load_kv6(path)?;
+        Ok(KV6Mesh::from_data(data, display))
+    }
+}
+```
+
+### src/kv6/mod.rs
+```
+pub mod kv6data;
+pub mod kv6mesh;
+
+pub use kv6data::*;
+pub use kv6mesh::*;
+```
+
+### src/shaders/fragment.glsl
+```
+#version 140
+
+in vec3 frag_position;
+in vec3 frag_normal;
+in vec3 frag_face;
+in vec3 frag_color;
+
+uniform vec3 light_dir;
+uniform vec3 aos_team_color;
+
+out vec4 out_color;
+
+void main() {
+    vec3 vox_color = frag_color;
+    if (vox_color == vec3(0.0)) {
+        vox_color = aos_team_color;
+    }
+
+    float ambient_strength = 0.1;
+    vec3 ambient = ambient_strength * vec3(1.0);
+
+    vec3 voxel_norm = normalize(frag_normal);
+    vec3 light_norm = normalize(light_dir);
+
+    float voxel_diff = max(dot(voxel_norm, light_norm) * 0.5 + 0.5, 0.0);
+    float face_diff = max(dot(frag_face, light_norm) * 0.6 + 0.45, 0.0);
+    vec3 diffuse = (voxel_diff * 0.75 + face_diff * 0.15) * vec3(1.0);
+
+    vec3 result = (ambient + diffuse) * (vox_color / 255.0);
+    out_color = vec4(result, 1.0);
+}
+```
+
+### src/shaders/mod.rs
+```
+pub const VERTEX_SHADER_SRC: &'static str = include_str!("vertex.glsl");
+pub const FRAGMENT_SHADER_SRC: &'static str = include_str!("fragment.glsl");
+```
+
+### src/shaders/vertex.glsl
+```
+#version 140
+
+in vec3 position;
+in vec3 normal;
+in vec3 face;
+in vec3 color;
+
+uniform mat4 perspective;
+uniform mat4 view;
+uniform mat4 model;
+
+out vec3 frag_position;
+out vec3 frag_normal;
+out vec3 frag_face;
+out vec3 frag_color;
+
+void main() {
+    gl_Position = perspective * view * model * vec4(position, 1.0);
+    frag_position = vec3(model * vec4(position, 1.0));
+    frag_normal = normal;
+    frag_face = face;
+    frag_color = color;
+}
+```

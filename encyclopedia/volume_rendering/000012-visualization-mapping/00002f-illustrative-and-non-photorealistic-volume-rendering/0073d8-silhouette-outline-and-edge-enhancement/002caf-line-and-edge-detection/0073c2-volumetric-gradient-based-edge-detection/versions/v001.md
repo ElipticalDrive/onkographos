@@ -1,0 +1,26 @@
+# Volumetric Gradient-Based Edge Detection
+
+Also called: Gradient-based edge enhancement, Gradient-driven silhouette detection
+
+## Overview
+Volumetric Gradient-Based Edge Detection is a family of non-photorealistic rendering techniques that identify and emphasize object boundaries by analyzing the spatial derivatives of the scalar volume field . Unlike methods that rely on geometric primitives or image-space depth discontinuities, this family operates directly on the volumetric gradient field to highlight internal structures and surface topology . It sets itself apart from siblings like [Line Illustration Detection](772-line-illustration-detection.md) by focusing on density and gradient magnitude rather than flow advection, and from [Hough Space Silhouette Detection](7957-hough-space-silhouette-detection.md) by using local differential properties instead of global parameter space voting.
+
+## Shared principles
+The family shares the fundamental goal of enhancing perceptual clarity through non-photorealistic edge representation [G]. Common mechanisms include:
+1. **Edge Detection:** Identifying boundaries based on local volumetric properties (gradients, Laplacian of Gaussian) or image-space properties (depth, normal discontinuities) .
+2. **Line Rendering:** Converting detected edges into line primitives (strips, segments) or stylized strokes .
+
+## Subtopics
+
+### [LOG-based Silhouette Detection](6322-log-based-silhouette-detection.md)
+Uses the Laplacian of Gaussian filter and thresholding to identify silhouette voxels. It prevents advection particles from crossing geometric edges, preserving surface topology.
+
+### [Contour Rendering](8471-contour-rendering.md)
+Visualizes boundaries by leveraging gradient magnitude and viewing angle. It produces sparse images containing only significant contours, avoiding complex iso-surface extraction.
+
+### [Silhouette Edges](13930-silhouette-edges.md)
+Renders samples where the gradient is perpendicular to the view direction as opaque black lines. It limits edge visibility to a specific density range to prevent "thick line" artifacts.
+
+## Background
+The use of gradient-based methods for edge detection in volume rendering emerged as a solution to the visual clutter inherent in direct volume rendering. Early approaches relied on simple gradient magnitude thresholding, which often resulted in noisy or overly dense edge maps. The integration of view-dependent weighting, such as the dot product between the gradient and the view vector, allowed for the isolation of silhouette edges that are perceptually relevant to the observer . The Laplacian of Gaussian (LOG) operator was adapted from image processing to provide robust edge detection in noisy volumetric data, replacing exhaustive spatial searches with precomputed filters . These techniques are primarily used in medical visualization and scientific data analysis to clarify complex internal structures without the computational overhead of explicit surface extraction .
+

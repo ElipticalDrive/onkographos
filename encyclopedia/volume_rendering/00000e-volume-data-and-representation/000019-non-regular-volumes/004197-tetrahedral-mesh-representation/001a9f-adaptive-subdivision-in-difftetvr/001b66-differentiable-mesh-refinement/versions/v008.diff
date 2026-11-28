@@ -1,0 +1,123 @@
+--- v007.md
++++ v008.md
+@@ -4,17 +4,17 @@
+ 
+ ## Overview
+-Differentiable Mesh Refinement is a technique that optimizes an explicit triangle mesh extracted from a voxel grid by adjusting vertex positions and performing adaptive subdivision or simplification based on rendering error and geometric consistency [S2, unofficial]. It solves the problem of static mesh resolution by dynamically increasing detail in regions with high reconstruction error or complex geometry, while coarsening simple areas to save memory [S2, unofficial]. Unlike sibling methods that rely solely on recursive geometric criteria, this approach uses differentiable rendering to compute gradients from the final image loss, allowing the mesh topology and geometry to be optimized jointly with appearance [S1, unofficial][S2, unofficial].
++Differentiable Mesh Refinement optimizes an explicit triangle mesh extracted from a voxel grid by adjusting vertex positions and performing adaptive subdivision or simplification based on rendering error and geometric consistency [S2, unofficial]. It solves the problem of static mesh resolution by dynamically increasing detail in regions with high reconstruction error or complex geometry, while coarsening simple areas to save memory [S2, unofficial]. It uses differentiable rendering to optimize vertex offsets and appearance while tracking per-face rendering error [S2, unofficial].
+ 
+ ## How it works
+-The method operates in two phases: initial differentiable optimization of a coarse mesh, followed by adaptive topology modification based on error metrics.
++The method operates in two phases: initial differentiable optimization of a coarse mesh, followed by adaptive topology modification based on error metrics [S1, unofficial][S2, unofficial].
+ 
+ ### Inputs and Outputs
+-- **Inputs**: Initial voxel grid density field, camera parameters (intrinsics, extrinsics), input images, and hyperparameters for thresholds and learning rate.
+-- **Outputs**: Refined triangle mesh with optimized vertex positions, colors, and topology.
++- **Inputs**: Initial voxel grid density field, camera parameters, input images, and hyperparameters for thresholds and learning rate [S1, unofficial][S2, unofficial].
++- **Outputs**: Refined triangle mesh with optimized vertex positions, colors, and topology [S1, unofficial][S2, unofficial].
+ 
+ ### Data Structures
+-- **Mesh**: Defined by vertex positions $V \in \mathbb{R}^{N_v \times 3}$ and face indices $F \in \mathbb{R}^{N_f \times 3}$.
++- **Mesh**: Defined by vertex positions $V \in \mathbb{R}^{N_v \times 3}$ and face indices $F \in \mathbb{R}^{N_f \times 3}$ [G].
+ - **Vertex Parameters**: Vertex positions are stored as trainable PyTorch parameters [S1, unofficial].
+-- **Error Tracking**: Per-face rendering error $E_{render}$ and normal angle deviation $A_{normal}$ are tracked during rasterization [S2, unofficial].
++- **Error Tracking**: Per-face rendering error $E_{\text{render}}$ and normal angle deviation $A_{\text{normal}}$ are tracked during rasterization [S2, unofficial].
+ 
+ ### Steps
+@@ -32,7 +32,7 @@
+         $$ p_{\text{face}} = \sum_{i=0}^{2} \epsilon_i \cdot v_{\text{vertex}, i} $$
+         where $v_{\text{vertex}, i}$ are the vertices of the face [S1, unofficial].
+-     b. **Field Query**: Query the neural network (or voxel representation) for scalar field values at sampled points. If using a neural field, compute:
++     b. **Field Query**: Query the neural network for scalar field values at sampled points. If using a neural field, compute:
+         $$ v_{\text{val}} = \sigma(\text{model.decode}(p_{\text{face}}, c).\text{logits}) $$
+-        where $\sigma$ is the sigmoid function and $c$ is the condition (e.g., view direction) [S1, unofficial].
++        where $\sigma$ is the sigmoid function and $c$ is the condition input to the model [S1, unofficial].
+      c. **Target Normal**: Compute the target normal via automatic differentiation of the scalar field with respect to position:
+         $$ n_{\text{target}} = -\nabla_{p} v_{\text{val}} $$
+@@ -50,5 +50,5 @@
+         $$ L.\text{backward}() $$
+         $$ \text{optimizer.step}() $$
+-     g. **Error Tracking**: During differentiable rasterization (e.g., using nvdiffrast), record the rendering error $E_{render}$ and the angle deviation $A_{normal}$ between adjacent face normals for each face [S2, unofficial].
++     g. **Error Tracking**: During differentiable rasterization (e.g., using nvdiffrast), record the rendering error $E_{\text{render}}$ and the angle deviation $A_{\text{normal}}$ between adjacent face normals for each face [S2, unofficial].
+ 
+ 3. **Adaptive Subdivision and Simplification**:
+@@ -68,17 +68,7 @@
+ def differentiable_mesh_refinement(mesh, voxel_grid, cameras, images, lr=1e-5, 
+                                    threshold=0.5, lambda_normal=0.01, 
+-                                   refine_max_faces=1000):
++                                   refine_max_faces=1000, num_refinement_steps=10):
+     """
+     Refine a mesh using differentiable rendering and adaptive subdivision.
+-    
+-    Args:
+-        mesh: Initial mesh object with vertices V and faces F.
+-        voxel_grid: Voxel representation for appearance query.
+-        cameras: Camera parameters.
+-        images: Target images.
+-        lr: Learning rate.
+-        threshold: Target scalar field value.
+-        lambda_normal: Weight for normal loss.
+-        refine_max_faces: Batch size for face processing.
+     """
+     # Initialize trainable vertices
+@@ -136,10 +126,10 @@
+             
+             # Compute rendering error and normal angle for tracking
+-            # This requires a differentiable rasterizer (e.g., nvdiffrast)
++            # Perform differentiable rasterization to obtain ray-surface intersections and render images [S2, unofficial]
+             rendered_images = differentiable_rasterize(mesh, cameras)
+             render_error = torch.mean((rendered_images - images) ** 2, dim=(1, 2, 3))
+             
+             # Calculate normal angle deviation
+-            # Assuming we can get per-face normals from rasterizer or recompute
++            # Compute angle deviation between adjacent face normals [S2, unofficial]
+             normal_angles = compute_normal_angle_deviation(geo_normals, target_normals)
+             
+@@ -156,4 +146,5 @@
+         sub_mask = (face_errors > e_sub) | (face_normals > a_sub)
+         if torch.any(sub_mask):
++            # Perform mid-point subdivision on faces meeting criteria [S2, unofficial]
+             mesh = mid_point_subdivision(mesh, sub_mask)
+             
+@@ -161,4 +152,5 @@
+         dec_mask = (face_errors < e_dec) | (face_normals < a_dec)
+         if torch.any(dec_mask):
++            # Perform face simplification on faces meeting criteria [S2, unofficial]
+             mesh = face_simplification(mesh, dec_mask)
+             
+@@ -180,6 +172,6 @@
+ SubdivNet performs a remeshing step to create a regular, hierarchical structure using self-parametrization [S3]. It enforces subdivision sequence connectivity to guarantee that every face is surrounded by exactly three adjacent faces, effectively creating a uniform mesh pyramid analogous to a 2D image pyramid [S3]. It defines a highly flexible mesh convolution operator that supports variable kernel sizes, strides, and dilations, and implements pooling and upsampling as uniform 4-to-1 face merging and 1-to-4 face splitting operations [S3].
+ 
+-### SOAR-based Adaptive Refinement
+-SOAR-based Adaptive Refinement is an adaptive refinement scheme for crack-free mesh generation [S4]. It stores object-space error terms and bounding spheres for each 'diamond' (two cousin patches sharing a hypotenuse) [S4]. Errors and spheres are inflated to ensure parent values are at least as large as children's, and cousins agree on single error/sphere values to refine together [S4]. This nesting is enforced for cousins as well [S4].
++### [SOAR-based Adaptive Refinement](10020-soar-based-adaptive-refinement.md)
++SOAR-based Adaptive Refinement is a crack-free mesh generation scheme for adaptive subdivision of tetrahedral meshes. It solves the problem of maintaining geometric consistency during incremental refinement by storing object-space error terms and bounding spheres for "diamonds" (pairs of cousin patches). It sets itself apart from static mesh representations by enforcing a strict nesting hierarchy where parent error/sphere values dominate children, and cousins agree on shared values, ensuring that refinement decisions are globally consistent without requiring full mesh reconstruction.
+ 
+ ### Quality-based Meshing
+@@ -187,14 +179,14 @@
+ 
+ ## Operating characteristics
+-- **Time Complexity**: The method involves iterative optimization steps, each requiring differentiable rasterization and backward passes. The complexity is proportional to the number of faces and the number of refinement iterations. Subdivision increases the number of faces, potentially increasing subsequent iteration costs.
+-- **Memory Complexity**: Memory usage scales with the number of vertices and faces. Adaptive subdivision increases memory usage in complex regions, while simplification reduces it in simple regions.
+-- **Performance**: The method can achieve high-quality rendering with fewer vertices than a uniform high-resolution mesh by concentrating detail where needed [S2, unofficial]. However, the iterative optimization process can be slow compared to static meshing techniques.
+-- **Strengths**: Adapts resolution to content, reducing memory usage in simple areas while maintaining quality in complex areas. Uses differentiable rendering for end-to-end optimization.
+-- **Limitations**: Computationally expensive due to iterative optimization. Sensitive to hyperparameters (learning rate, thresholds). May produce non-manifold geometry if subdivision/simplification is not handled carefully.
+-- **When to Use**: When high-fidelity rendering is required for scenes with varying geometric complexity, and computational resources allow for iterative optimization.
+-- **When Not to Use**: For real-time applications requiring immediate mesh generation, or for scenes with uniform geometry where a static mesh would suffice.
++- **Time Complexity**: Not given in the sources.
++- **Memory Complexity**: Not given in the sources.
++- **Performance**: The method can achieve high-quality rendering with fewer vertices than a uniform high-resolution mesh by concentrating detail where needed [S2, unofficial]. However, the iterative optimization process can be slow compared to static meshing techniques [S1, unofficial][S2, unofficial].
++- **Strengths**: Adapts resolution to content, reducing memory usage in simple areas while maintaining quality in complex areas [S2, unofficial]. Uses differentiable rendering for end-to-end optimization [S2, unofficial].
++- **Limitations**: Computationally expensive due to iterative optimization [S1, unofficial][S2, unofficial]. Sensitive to hyperparameters (learning rate, thresholds) [S2, unofficial]. May produce non-manifold geometry if subdivision/simplification is not handled carefully [G].
++- **When to Use**: When high-fidelity rendering is required for scenes with varying geometric complexity, and computational resources allow for iterative optimization [S2, unofficial].
++- **When Not to Use**: For real-time applications requiring immediate mesh generation, or for scenes with uniform geometry where a static mesh would suffice [G].
+ 
+ ## Background
+-Differentiable Mesh Refinement builds on the principles of differentiable rendering and adaptive meshing. It was developed to address the limitations of static voxel and mesh representations in neural rendering. The method draws inspiration from NeRF2Mesh, which uses differentiable rendering to refine meshes [S2, unofficial]. The specific implementation details, such as the use of percentile-based thresholds and the combination of rendering error and normal angle, are described in recent works on voxel-mesh hybrid representations [S2, unofficial]. The technique is part of a broader trend towards hybrid representations that combine the advantages of voxels (easy subdivision) and meshes (efficient rendering) [S2, unofficial].
++Differentiable Mesh Refinement builds on the principles of differentiable rendering and adaptive meshing [G]. It was developed to address the limitations of static voxel and mesh representations in neural rendering [G]. The method draws inspiration from NeRF2Mesh, which uses differentiable rendering to refine meshes [S2, unofficial]. The specific implementation details, such as the use of percentile-based thresholds and the combination of rendering error and normal angle, are described in recent works on voxel-mesh hybrid representations [S2, unofficial]. The technique is part of a broader trend towards hybrid representations that combine the advantages of voxels (easy subdivision) and meshes (efficient rendering) [S2, unofficial].
+ 
+ ## Sources
+@@ -202,3 +194,3 @@
+ [S2] Voxel-Mesh Hybrid Representation for Real-Time View Synthesis, https://doi.org/10.48550/arxiv.2403.06505, fetched 2026-10-26 (unofficial)
+ [S3] Recent Advances and Trends in Learning‐Based 3D Representations, https://doi.org/10.1111/cgf.70530, fetched 2026-10-26
+-[S4] On-the-fly decompression and rendering of multiresolution terrain, https://doi.org/10.1145/1730804.1730815, fetched 2026-11-01+[S4] Dynamic Triangulation of Implicit Surfaces: towards the handling of topology changes, https://inria.hal.science/inria-00132537, fetched 2026-10-26 (unofficial)

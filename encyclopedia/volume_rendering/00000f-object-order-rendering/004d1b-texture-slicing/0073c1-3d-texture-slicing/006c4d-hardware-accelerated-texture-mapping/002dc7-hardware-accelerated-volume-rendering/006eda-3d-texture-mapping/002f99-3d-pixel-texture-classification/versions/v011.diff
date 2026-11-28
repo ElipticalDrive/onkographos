@@ -1,0 +1,172 @@
+--- v010.md
++++ v011.md
+@@ -4,44 +4,118 @@
+ 
+ ## Overview
+-3D Pixel Texture Classification is a hardware-accelerated volume rendering technique that maps multi-dimensional voxel attributes to color and opacity via a 3D texture lookup [S1]. It solves the problem of high-dimensional transfer function evaluation by encoding classification rules into a volumetric texture, allowing the graphics hardware to perform the classification during ray casting [S1]. It differs from standard 1D transfer functions by supporting multi-dimensional inputs (e.g., value, gradient, curvature) and from general GPU ray casting by offloading the classification logic to the texture unit [S1].
++3D Pixel Texture Classification (VGH Lookup) is a hardware-accelerated volume rendering technique that maps volumetric data to color and opacity using a three-dimensional texture lookup based on Data Value, Gradient Magnitude, and Second Derivative [S1]. It distinguishes itself from standard 1D transfer functions by incorporating local geometric context (gradient and curvature) to enhance boundary emphasis and material differentiation [S1].
+ 
+ ## How it works
+-**Inputs:** Scalar volume data $V$, transfer function parameters defining color $C$ and opacity $\alpha$ for multi-dimensional inputs.
+-**Outputs:** Final image with accumulated color and opacity.
++**Inputs and Outputs:**
++*   **Input:** Scalar volume data $V$, camera parameters, and classification widget settings (opacity controls for second derivative sheets, boundary emphasis slider).
++*   **Output:** Final image with color $C$ and accumulated opacity $\alpha$.
+ 
+ **Data Structures:**
+-The core data structure is a 3D pixel texture (lookup table) with dimensions $D_v \times D_g \times D_s$.
+-- Axis 1 (Data Value): 8-bit resolution (256 entries) [S1].
+-- Axis 2 (Gradient Magnitude): 8-bit resolution (256 entries) [S1].
+-- Axis 3 (Second Derivative): Limited resolution, represented as "sheets" [S1].
+-- Texture Format: RGBA, storing color and opacity values [S1].
++The core data structure is a 3D pixel texture (lookup table) with dimensions $D \times G \times S$.
++*   **Data Value Axis ($D$):** 8-bit resolution (256 entries). Stores the raw scalar value $V(\mathbf{p})$.
++*   **Gradient Magnitude Axis ($G$):** 8-bit resolution (256 entries). Stores the magnitude of the gradient $|\nabla V(\mathbf{p})|$.
++*   **Second Derivative Axis ($S$):** Limited resolution (e.g., 3 entries). Stores the sign and relative magnitude of the second derivative. To maintain the sign for proper interpolation, the signed second derivative value is mapped to this axis using a scale and bias operation [S1].
+ 
+-**Steps:**
+-1. **Ray Casting Setup:** For each pixel, generate a ray $r(t) = \mathbf{o} + t\mathbf{d}$ and discretize into samples [S1, S4].
+-2. **Sample Extraction:** At each sample point $\mathbf{p}_i$, extract the scalar value $d_i = V(\mathbf{p}_i)$, compute the gradient magnitude $g_i = \|\nabla V(\mathbf{p}_i)\|$, and compute the second derivative $s_i$ (e.g., Laplacian or directional second derivative) [S1].
+-3. **Second Derivative Preprocessing:** The second derivative $s_i$ is signed. To maintain sign information for interpolation, apply a scale and bias to map negative, zero, and positive values to distinct regions in the texture coordinate space [S1].
+-4. **Texture Lookup:** Use the triplet $(d_i, g_i, s'_i)$ as 3D texture coordinates to sample the pixel texture. The hardware returns the pre-computed color $C_i$ and opacity $\alpha_i$ [S1].
+-5. **Compositing:** Perform front-to-back compositing using the standard emission-absorption model [S4].
++**Numbered Steps:**
++1.  **Ray Marching:** For each pixel, generate a ray and sample the volume at discrete points $\mathbf{p}_i$ along the ray [S1, S4].
++2.  **Feature Extraction:** At each sample point $\mathbf{p}_i$, compute:
++    *   The scalar value $v = V(\mathbf{p}_i)$.
++    *   The gradient magnitude $g = |\nabla V(\mathbf{p}_i)|$.
++    *   The second derivative $s$. The sign of $s$ is preserved via scale and bias to ensure correct interpolation in the texture [S1].
++3.  **Texture Lookup:** Perform a trilinear interpolation into the 3D pixel texture using coordinates $(v, g, s)$. The texture stores pre-computed color $(C)$ and opacity $(\alpha)$ values [S1].
++4.  **Second Derivative Control:** The opacity component $\alpha$ retrieved from the texture is modulated by the classification widgets:
++    *   The texture contains three "sheets" corresponding to negative, zero, and positive second derivatives [S1].
++    *   The opacity on the center sheet (zero second derivative) is directly controlled by the classification widgets [S1].
++    *   The opacity on the outer sheets (positive/negative second derivatives) is scaled from the center sheet opacity based on a "boundary emphasis" slider [S1].
++5.  **Compositing:** Accumulate the resulting color and opacity using front-to-back compositing [S1, S4].
+ 
+-**Formulas:**
+-The second derivative axis is mapped to three control points: negative, zero, and positive [S1].
+-Let $O_{center}$ be the opacity at the zero-crossing sheet.
+-Let $O_{outer}$ be the opacity at the positive/negative sheets.
+-The opacity for a given second derivative value is determined by linear interpolation between these sheets, scaled by a "boundary emphasis" parameter $E$ [S1]:
+-$$
+-\alpha_{lookup} = \text{Interpolate}(O_{center}, O_{outer}, \text{sign}(s_i)) \times \text{Weight}(s_i, E)
+-$$
+-Specifically, the opacity on the outer sheets is scaled from the center sheet opacity according to the boundary emphasis slider [S1].
++**Pseudocode:**
++```python
++# Assume 3D texture 'tex' of size [256, 256, 3]
++# tex stores (R, G, B, A) for each voxel
++
++def classify(v, g, s_second_deriv):
++    """
++    Maps scalar features to color and opacity using the 3D pixel texture.
++    v: scalar value (0-255)
++    g: gradient magnitude (0-255)
++    s_second_deriv: signed second derivative
++    """
++    # Map signed second derivative to index 0, 1, or 2
++    # 0: negative, 1: zero, 2: positive
++    # Scale and bias are applied to maintain sign for interpolation
++    if s_second_deriv < 0:
++        s_idx = 0
++    elif s_second_deriv > 0:
++        s_idx = 2
++    else:
++        s_idx = 1
++    
++    # Lookup in 3D texture
++    # Trilinear interpolation is handled by hardware
++    color, alpha_raw = tex.lookup(v, g, s_idx)
++    
++    # Apply boundary emphasis scaling
++    # alpha_center is the opacity at s_idx=1 (zero second derivative)
++    # This value is controlled by classification widgets
++    alpha_center = tex.lookup(v, g, 1).alpha
++    
++    if s_idx == 1:
++        alpha = alpha_center
++    else:
++        # Scale outer sheets from center sheet based on boundary emphasis slider
++        emphasis = get_boundary_emphasis_slider_value() # [0.0, 1.0]
++        alpha = alpha_center * emphasis
++        
++    return color, alpha
++
++def render_ray(ray_origin, ray_direction, volume_data):
++    """
++    Renders a single ray using 3D Pixel Texture Classification.
++    """
++    accumulated_color = (0, 0, 0)
++    accumulated_alpha = 0.0
++    
++    # Determine entry and exit points (proxy geometry or hardware acceleration)
++    t_start, t_end = get_ray_bounds(ray_origin, ray_direction)
++    
++    t = t_start
++    step_size = get_step_size() # e.g., 1.0 voxel units
++    
++    while t < t_end and accumulated_alpha < 0.95: # Early Ray Termination
++        # Sample volume
++        p = ray_origin + t * ray_direction
++        v = volume_data.sample(p)
++        
++        # Compute gradient magnitude
++        g = compute_gradient_magnitude(volume_data, p)
++        
++        # Compute second derivative
++        s = compute_second_derivative(volume_data, p)
++        
++        # Classify
++        color, alpha = classify(v, g, s)
++        
++        # Front-to-back compositing
++        # C' = C' + (1 - alpha') * alpha * C
++        # alpha' = alpha' + (1 - alpha') * alpha
++        weight = (1.0 - accumulated_alpha) * alpha
++        accumulated_color += weight * color
++        accumulated_alpha += weight
++        
++        t += step_size
++        
++    return accumulated_color
++```
+ 
+ **Parameters:**
+-- Data Value Resolution: 256 entries [S1].
+-- Gradient Magnitude Resolution: 256 entries [S1].
+-- Second Derivative Control Points: 3 (negative, zero, positive) [S1].
+-- Boundary Emphasis Slider: Controls the relative opacity of outer sheets vs. center sheet [S1].
++*   **Data Value Resolution:** 8-bit (256 entries) [S1].
++*   **Gradient Magnitude Resolution:** 8-bit (256 entries) [S1].
++*   **Second Derivative Resolution:** Limited (e.g., 3 control points) [S1].
++*   **Boundary Emphasis Slider:** Controls the scaling of opacity for non-zero second derivatives relative to the zero-crossing sheet [S1].
+ 
+-**Edge Cases:**
+-- Precision: Full 8-bit resolution is used for data value and gradient to capture fine variations [S1].
+-- Sign Handling: The second derivative must be scaled and biased to preserve sign for correct interpolation [S1].
+-- Degenerate Input: If the second derivative is exactly zero, the center sheet opacity is used directly [S1].
++**Edge Cases and Pitfalls:**
++*   **Sign Preservation:** The second derivative is signed; failing to maintain the sign via scale and bias before interpolation will result in incorrect classification of curvature [S1].
++*   **Texture Size:** Full 8-bit resolution for all three axes would be prohibitively large ($256^3$ entries); limiting the second derivative axis is necessary for hardware feasibility [S1].
+ 
+ ## Subtopics
+@@ -51,12 +125,13 @@
+ 
+ ## Operating characteristics
+-**Time Complexity:** $O(N)$ per pixel, where $N$ is the number of samples along the ray. The classification lookup is $O(1)$ via hardware texture sampling [S1, S2].
+-**Memory Complexity:** $O(D_v \times D_g \times D_s \times 4)$ bytes for the 3D pixel texture. With 256x256x3 entries, this is approximately 480 KB [S1].
+-**Performance:** Enables real-time rendering on GPUs by leveraging hardware texture units [S2].
+-**Strengths:** Efficient multi-dimensional classification; hardware-accelerated [S1, S2].
+-**Limitations:** Texture size is limited by hardware; second derivative axis resolution is limited [S1].
++*   **Time Complexity:** $O(N)$ where $N$ is the number of samples per ray. The lookup is $O(1)$ hardware operation.
++*   **Memory Complexity:** $O(D \times G \times S)$ for the 3D pixel texture. With $D=256, G=256, S=3$, the texture size is manageable in modern GPU memory [S1].
++*   **Strengths:** Provides rich classification based on local geometry (gradient and curvature) without requiring complex shader computations for the transfer function [S1]. Hardware-accelerated via 3D texturing [S1].
++*   **Limitations:** The 3D texture size is constrained by hardware limits; full resolution for all axes is not feasible [S1]. The method relies on pre-computed or pre-classified data in the texture [S1].
++*   **When to use:** When high-quality boundary emphasis and material differentiation are required, and hardware supports 3D textures [S1].
++*   **When not to use:** When the scene requires dynamic transfer functions that cannot be pre-computed into a static 3D texture [S1].
+ 
+ ## Background
+-Originated in the context of interactive volume rendering using multi-dimensional transfer functions [S1]. The method was developed to allow efficient classification of voxel data using hardware-accelerated 3D texturing [S1]. It was later extended in real-time raycasting frameworks to include adaptive pre-integrated voxel classification [S2].
++The method was described by Knittel et al. in the context of interactive volume rendering using multi-dimensional transfer functions [S1]. It leverages the capabilities of 3D pixel textures available in graphics hardware at the time [S1].
+ 
+ ## Sources

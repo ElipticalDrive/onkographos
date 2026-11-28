@@ -1,0 +1,176 @@
+Steve's Game Library — Rust game-building libraries for AI coding agents - Light surfaces from a dynamic GI volume of probes by stevepryde · Pull Request #139 · stevepryde/sgl
+
+Light surfaces from a dynamic GI volume of probes by stevepryde · Pull Request #139 · stevepryde/sgl · GitHub
+Skip to content
+You signed in with another tab or window. Reload to refresh your session.
+You signed out in another tab or window. Reload to refresh your session.
+You switched accounts on another tab or window. Reload to refresh your session.
+Dismiss alert
+Conversation
+stevepryde
+commented
+Oct 4, 2026
+Copy link
+Copy Markdown
+Owner
+Part 1 of 2 of the design's first implementing PR (#120's "The volume"): the volume end to end as a port of Wicked Engine's DDGI. Part 2 follows with the owner-directed improvement over Wicked's restart (an amortised, nearest-first ramp, measured against this baseline) and the example of a lit interior with moving objects.
+Part of #21
+Problem
+Diffuse GI came only from game-authored bakes: lightmaps and irradiance atlases on static instances, and ambient cubes the game interpolates for moving ones. Nothing bounced the frame's lights, the scene's lights, emitters or the sky at runtime.
+Result
+Content and setting. DynamicGiVolume { origin, spacing, probes }, Scene::set_dynamic_gi_volume / Scene::dynamic_gi_volume, SceneError::InvalidDynamicGiVolume (a placement that is not a lattice; DeviceLimit where its probe texture or rays exceed the device's largest 2D texture or its history one storage binding). settings::DynamicGiQuality { Off, Low, High } as Settings::dynamic_gi, High by default: the most rays a probe traces a frame, 256 (Wicked's DDGI_RAYCOUNT) or 128. A scene without a volume runs nothing and renders as before.
+The stage. "Dynamic GI", first after prepare (renderer/frame.rs), in three compute passes and timing groups: dynamic GI allocation (Wicked's ddgi_rayallocationCS with a workgroup reduction for the wave maximum, then the indirect dispatch), dynamic GI rays (ddgi_raytraceCS: spherical Fibonacci rays under a per-frame random rotation through scene_trace_nearest, both kinds) and dynamic GI blend (ddgi_updateCS colour and depth: the per-texel multiscale mean estimator, the depth moments, relocation, the border copies).
+The probe texture. One RGBA16F texture, shading::dynamic_gi's layout: the bordered 18×18 depth maps, the bordered 8×8 irradiance maps of Wicked 95e357f (two lattice slabs to a band, so they fill the depth region's width) and one data texel per probe (relocated offset, blended flag): 389 texels, 3.1 KB, a probe. Lit group 0 lends it at binding 29 to every view that shades; a 1×1 stand-in while no volume runs.
+Hit shading: the probe-hit receiver kind (SHADOW_RECEIVER_PROBE_HIT). shade_ray_hit takes the receiver kind: a probe hit takes its diffuse light alone (no specular lobes, no multiscattered specular, no environment specular), its emission, its indirect diffuse by the one determination (the volume's last frame damped by 0.95, so bounces converge), and one light drawn uniformly from the frame's directional lights and the volume list's lights it takes, times their count, its visibility one any-hit ray (scene_segment_visible, from 1 mm, to a point's or spot's position, along a directional light, to a random point of a rectangle's face) at the light's shadow opacity, the ray not cast at or below the cutoff (Add per-light shadow opacity on surfaces and in the fog #123). A miss takes the environment's radiance along the ray (the diffuse environment's yaw and intensity) plus the hemisphere fill as the radiance field whose irradiance it is (pbr_hemisphere_radiance).
+Sampling: the one determination (surface_indirect_diffuse in surface.wgsl): lightmap, else atlas chart, else the volume where it lights the frame, reaches the receiver and has a blended probe about it, else a moving instance's ambient cube, else the frame's ambient. The sample is Wicked's ddgi_sample_irradiance (eight probes, trilinear from the rest corner, smooth backface, Chebyshev, floor and crush) reading the irradiance map through baked_sampler; an unblended probe weighs nothing, and the volume's share fades over the one spacing past its extent (RTXGI's per-axis blend weight). The volume's irradiance takes the place of the environment's diffuse light and the hemisphere fill, recorded as the ambient that ambient occlusion weights; the ambient cube and the frame's ambient keep the rest of the share.
+History. The probes' state is world-space and GPU-resident, keyed on the scene's identity and the placement in the frame the scene was created in: camera cuts and resizes keep it, Scene::move_origin (Move the scene's render origin without a cut #129, merged during this work) translates the placement and keeps the probes, another placement, another scene or a submitted frame without the stage start it afresh. A restarting frame builds fresh resources beside the committed ones, which stay until that frame is submitted, so an abandoned frame leaves the probes as they were.
+Device floor. Lit group 0 binds one more sampled texture: S3D-1's fragment floor rises from 19 to 20 (world-space trace 19; the DDGI trace binds 12 to a compute stage: lit group 0's eleven compute-visible ones and its ray list). Storage buffers stay at 8: the trace passes its ray list and results as textures.
+Docs. CHANGELOG (scope, migration: none for games without a volume), package README ("Dynamic diffuse GI" section, timing groups, browser floor), docs/ features and settings, S3D-1 and the roadmap status, the architecture's Bind groups numbers and the DDGI paragraph (the bounce's π, per-probe starts). browser_smoke installs a volume over its ground and runs Low dynamic GI in its last configuration.
+Where it plugs in (AR-9)
+As the merged design (#120) places it: a new stage first after prepare; it reads the volume's lit group 0 (a new volume_lit group: the camera's view and frame data with the volume's culled light and decal list, built in prepare from the lights whose range and the decals whose sphere reach the volume's extent, the static shadow layers, installed probes and the probe texture), group 1 (the ray source; a frame now traces when world-space reflections or dynamic GI run), the camera (frustum) and its own state; it writes the probe texture. Contracts touched: Scene content (the placement, under render-origin moves), View and frame data (Frame carries the placement and FRAME_DYNAMIC_GI; the scroll comes with PR 2), Bind groups (binding 29, floors above), Surface shading (one determination), Lights and shadows (the fourth receiver kind; ShadeContext::camera becomes receiver, folding shade_receiver), Lights (the volume's list), Ray source, History, Settings. Nothing is deleted (ambient cubes, lightmaps and atlases stay, by the owner's decision).
+Decisions
+Port sources. Wicked Engine df44c3db4c4927492bc9c791eac715d98d7ed091 (ShaderInterop_DDGI.h, ddgi_rayallocationCS.hlsl, ddgi_indirectprepareCS.hlsl, ddgi_raytraceCS.hlsl, ddgi_updateCS.hlsl, ddgi_updateCS_depth.hlsl, globals.hlsli's RNG and octahedral helpers, wiRenderer.cpp DDGI() 12412–12618 and DDGI_RAYCOUNT/DDGI_BLEND_SPEED, wiScene.cpp max_distance 1037, wiScene.h smooth_backface) and 95e357f73f28d24e70ce7a1ab8f9fb954de457e4 (DDGI_COLOR_RESOLUTION/TEXELS, ddgi_probe_color_pixel/uv, the colour sample, DDGI_COLOR_BORDER_OFFSETS, the colour border copy), MIT; headers in each ported file; licenses/upstreams.json's Wicked prefix records them, bun scripts/refresh-licenses.ts regenerated the source notices and DISTRIBUTION_NOTICES.txt was regenerated.
+Departures the design records, all taken: no L1 SH storage or dominant-light specular, no BC6H, no static-light gather at the probe, no voxel-grid nudge; Wicked's 0.95 bounce damping kept.
+The bounce without df44c3d's further /π (energy_conservation /= PI, ddgi_raytraceCS 496). The colour map holds irradiance / π, which is the radiance a Lambertian hit reflects per unit albedo, and 95e357f bounces it with 0.95 alone; df44's extra division (justified in its comment as "needed for hemisphere sampling") darkens every bounce π-fold. RD-2: an upstream error fixed, recorded in surface.wgsl and the spec. The damped-bounce test pins it.
+Probes start per probe, on the GPU. A probe's estimator, depth and offset start when it is first blended (its blended flag), where Wicked starts every probe on frame 0. With every probe starting together this is Wicked's behaviour; it keeps the restart state on the GPU (so an abandoned frame cannot desynchronise it) and is what part 2's ramp builds on.
+The placement in the creation frame. The scene keeps the volume's origin as an f64 in the frame it was created in, so move_origin translates it with one rounding and the stage's key is exact; re-installing the placement the scene then returns is the same placement.
+Weights. The volume's irradiance is weighted as the environment's diffuse light is (ibl.diffuse + ibl.multi, Three.js's treatment of IBL irradiance), not the hemisphere fill's Lambert; SurfaceMaterial::environment_scale scales the environment and not the volume.
+Every sampled light takes its visibility ray, including a light without casts_shadow, as Wicked's DDGI traces every sampled light (ddgi_raytraceCS 460–483); the ray is skipped only at or below the shadow-opacity cutoff, as for every receiver.
+Low is 128 rays, half of Wicked's default 256 (its editor slider offers 0–512 in steps of 64).
+Why this split. The suggested "stage first, shading integration second" cannot land apart: the one determination serves both the probes' own bounce and every view, so separating them needs a second, temporary path (AR-11). The natural boundary is the faithful port here and the owner-directed improvement over it, measured against it, in part 2.
+Measurements (indicative)
+Apple M5, Metal, release, 480×320, High; the part-2 example's room (a window, a lamp, two moving boxes) with the volume at three densities; median over the second half of 200 frames. Other agents' GPU work ran concurrently, so these are indicative only; Mission Control batches RD-6 on Hyperdrive's route.
+Probes
+Restart frame
+Frames 2–12
+Allocation
+Rays
+Blend
+Steady total
+8×5×8 (320)
+1.6 ms
+1.4–2.3 ms
+0.04 ms
+0.62 ms
+0.23 ms
+≈0.9 ms
+16×8×16 (2048)
+14.9 ms
+9–12 ms
+0.07 ms
+3.99 ms
+1.57 ms
+≈5.6 ms
+32×8×32 (8192)
+54.2 ms
+35–50 ms
+0.35 ms
+18.2 ms
+6.5 ms
+≈25 ms
+The design's estimate of four rays a probe at rest does not hold in a lit, changing scene: Wicked's estimator keeps the in-view probes' inconsistency near 0.3 under one-light-per-hit noise, so a settled 2048-probe volume traces about 80 rays a probe. Memory at High is about 11 KB a probe (texture 3.1 KB, ray list and results 6 KB, blend history 1.9 KB): 22 MB for 2048 probes.
+Validation
+bun scripts/tasks.ts check (macOS, GPU required) passed, browser lane included; cargo clippy -p sgl-3d --all-targets --features diagnostics -- -D warnings clean.
+New GPU tests (stages/dynamic_gi/tests.rs), each observed through the one sample every view shades with or the frame's pixels, expectations from the requirement or an analytic oracle:
+an open volume holds a uniform environment's radiance (exact, 0.5 %), and the hemisphere fill's irradiance by the normal (I·mix(G,S,(1+n.y)/2)/π, 2 %);
+a probe inside a closed room of black emissive walls holds their radiance, nothing of a brighter environment outside (1 %);
+a closed room of half-reflecting emissive walls settles between the emission and the damped-bounce bound (catches a missing bounce and df44's /π);
+a point light and the sun outside a closed room reach no probe inside, and do at shadow opacity 0;
+the volume's share is 1 inside, 0.5 / 0.75 / 0.25 / 0 past one, two faces and beyond;
+the determination: a lightmapped receiver takes nothing of the volume while baked lighting is on and takes it when off; a moving one takes the volume over its cube, and its cube beyond;
+the camera's receiver inside the emissive room is lit by the volume, a bright hemisphere fill does not reach it, and without the volume it is black;
+restarts (traced rays = every probe × the most): continue through a camera cut, a resize and an abandoned frame for another placement; restart for another placement, another scene and after a frame with the setting Off;
+a render-origin move translates the placement exactly and keeps the probes;
+the scene refuses non-lattices and placements over the device's limits, keeping the installed one.
+Mutation checks run by hand: dropping the miss's hemisphere radiance, the visibility ray, the Off frame's restart, the committed volume on a fresh frame — each fails its test.
+Layout tests: Frame's new fields, DdgiVolume, the probe-texture constants and the new binding against naga.
+Browser lane: every configuration ok with the volume, Low dynamic GI in the last.
+Open risks
+Probes see through the back of single-sided surfaces. The design traces through the one acceptance predicate, which rejects back faces of single-sided materials; Wicked df44c3d's trace hits them (its software traversal has no side test, its RTAPI path no cull flag) and pushes their depth inwards ("to help avoid shadow leaks from inwards to outside"). A probe on or inside single-sided geometry therefore sees past it and leaks what lies beyond into receivers nearby. The README tells games to keep probes off surfaces; whether DDGI rays should take back faces is a spec decision I have not taken (AR-9).
+Corner leaks. Wicked's sample biases by the normal 1 mm only; receivers at inside corners can take light from probes beyond the wall where a depth texel straddles the corner. Majercik's normal and view bias would reduce it; the owner judges the look (RD-5) before any constant changes.
+Restart cost is Wicked's (table above) until part 2.
+Hits beyond the volume's fade take the frame's ambient, without bounce: a volume should cover the surfaces it lights.
+GPU timings were taken under concurrent load; Hyperdrive adoption, scrolling and its RD-5/RD-6 pass are PR 2.
+🤖 Generated with Claude Code
+stevepryde
+and others
+added 2 commits
+October 5, 2026 10:41
+Light surfaces from a dynamic GI volume of probes
+…
+1e1ee47
+```
+Add DynamicGiVolume with Scene::set_dynamic_gi_volume, and
+Settings::dynamic_gi, and the dynamic GI stage first after prepare: a
+port of Wicked Engine's DDGI (df44c3d, with 95e357f's octahedral
+irradiance maps) whose probes trace through the scene's ray source, each
+hit lit by one light with a visibility ray, and blend into one RGBA16F
+probe texture that lit group 0 lends every view that shades. One
+determination gives a receiver its indirect diffuse light: its chart,
+else the volume, else its ambient cube, else the frame's ambient. The
+device floor rises to 20 sampled textures per stage.
+
+Part of #21
+
+Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
+```
+Shade a probe hit's light as shade_lit does, and light captures by th…
+…
+be45e6d
+```
+…e submitted probes
+
+A probe hit's one light takes the surface's reflectance with its DFG
+lookup at the view, as shade_lit derives it. A probe capture between
+frames binds the probes of the last submitted frame, whose placement its
+frame data names, rather than those of a frame rendered since and
+abandoned.
+
+Part of #21
+
+Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
+```
+stevepryde
+force-pushed
+the
+claude/issue-21-ddgi-volume
+branch
+from
+26e80fb to
+be45e6d
+Compare
+October 5, 2026 00:15
+stevepryde
+merged commit 708f368
+into
+main
+Oct 5, 2026
+This was referenced Oct 5, 2026
+Design the game-authored irradiance volume with region updates
+#141
+Merged
+Skip Crystal's denoiser on tiles where every ray missed
+#147
+Merged
+Let dynamic GI probe rays see both sides, and trace only shadowing lights
+#148
+Merged
+Roadmap 11: Dynamic diffuse GI (DDGI)
+#21
+Closed
+stevepryde
+deleted the
+claude/issue-21-ddgi-volume
+branch
+October 13, 2026 08:21
+Sign up for free
+to join this conversation on GitHub.
+Already have an account?
+Sign in to comment
+Uh oh!
+There was an error while loading. Please reload this page.
+Labels
+None yet
+1 participant
+Add this suggestion to a batch that can be applied as a single commit.This suggestion is invalid because no changes were made to the code.Suggestions cannot be applied while the pull request is closed.Suggestions cannot be applied while viewing a subset of changes.Only one suggestion per line can be applied in a batch.Add this suggestion to a batch that can be applied as a single commit.Applying suggestions on deleted lines is not supported.You must change the existing code in this line in order to create a valid suggestion.Outdated suggestions cannot be applied.This suggestion has been applied or marked resolved.Suggestions cannot be applied from pending reviews.Suggestions cannot be applied on multi-line comments.Suggestions cannot be applied while the pull request is queued to merge.Suggestion cannot be applied right now. Please check back later.
+You can’t perform that action at this time.

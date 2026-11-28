@@ -1,0 +1,279 @@
+--- v001.md
++++ v002.md
+@@ -1,132 +1,172 @@
+ # UltraVis Cache Optimization
+ 
+-Also called: Knittel's Ray Casting, Optimized CPU Ray-Casting, Pentium III Optimized Ray Casting, UltraVis, UltraVis Cache Management
++Also called: Knittel's Ray Casting, Optimized CPU Ray-Casting, Pentium III Optimized Ray Casting, UltraVis, UltraVis Cache Management, UltraVis System
+ 
+ ## Overview
+-UltraVis is a highly optimized software-based ray casting approach for semi-transparent volume rendering, specifically targeted at the Intel Pentium III processor [S1]. It addresses the problem of cache thrashing caused by the irregular memory access patterns of ray traversal, which typically result in poor cache reuse and limited effective memory bandwidth [S1]. Unlike general-purpose ray casting, UltraVis distinguishes itself by explicitly partitioning the CPU cache into four dedicated blocks and applying a cubic interleaved address function to the voxel data, ensuring that volume data remains resident in its private cache block without being swapped out by competing structures like transfer function tables or image buffers [S2, unofficial].
++UltraVis is a software-based ray casting system for semi-transparent volume rendering that addresses cache thrashing on Intel Pentium III processors by combining bricked volume decomposition with a cubic interleaved memory layout [S1][S2, unofficial][S3, book]. It sets itself apart from standard ray casting by enforcing a private cache block for volume data, ensuring that voxel data is never swapped out by competing structures like transfer functions or image buffers [S2, unofficial][S3, book]. This approach trades a fourfold increase in main memory footprint for significantly higher cache hit ratios during traversal [S1][S3, book].
+ 
+ ## How it works
+-**Inputs and Outputs:**
+-- Input: A 3D volume dataset (typically $256^3$ or similar dimensions), a transfer function, and camera parameters (view direction, image plane resolution).
+-- Output: A 2D rendered image (e.g., $256 \times 256$ pixels).
++**Inputs and Outputs**
++- **Input:** A volumetric dataset (typically $256^3$ or similar dimensions), a transfer function, and camera parameters (view direction, image resolution).
++- **Output:** A rendered 2D image (e.g., $256 \times 256$ pixels).
+ 
+-**Data Structures and Memory Layout:**
+-The core innovation lies in the memory layout of the volume data and the management of the CPU cache hierarchy.
++**Data Structures and Layout**
++1.  **Bricked Volume Decomposition:** The volume is divided into cubic bricks. Rays are processed in "flocks" that traverse a single brick simultaneously [S3, book].
++2.  **Cache Partitioning:** The CPU cache is divided into four distinct, non-overlapping blocks:
++    -   Volume bricks
++    -   Transfer function tables
++    -   Image blocks
++    -   Temporary buffers [S2, unofficial][S3, book]
++3.  **Interleaved Memory Layout:** Voxel data is stored in main memory using a cubic interleaved address function. This alters the linear order of voxel values so that spatially adjacent voxels in 3D space map to cache locations that are also spatially close or identical, reducing conflict misses [S1].
++    -   Let $n$ be the side length of the interleaving cube.
++    -   $n$ must be a power of two.
++    -   The volume of the interleaving cube $n^3$ must be smaller than the cache size [S1].
++    -   The layout ensures that a cube of $n^3$ voxels occupies exactly $n \times n \times n$ cache locations [S1].
++4.  **Private Cache Mapping:** Volume data is allocated such that it maps exclusively into the "volume bricks" cache block. This is achieved by placing voxel data only in the first quarter of memory pages, leaving the remaining three-quarters empty to prevent mapping conflicts [S1]. Consequently, volume data is never swapped out by transfer functions or image tiles [S2, unofficial][S3, book].
+ 
+-1.  **Cache Partitioning:** The L1 cache is logically divided into four distinct blocks [S2, unofficial]:
+-    -   Volume Bricks: Stores the voxel data.
+-    -   Transfer Function Tables: Stores the mapping from scalar values to color/opacity.
+-    -   Image Blocks: Stores the output pixel data.
+-    -   Temporary Buffers: Stores intermediate traversal state and shading results.
+-    By assigning a private block to the volume data, the system prevents the volume voxels from being evicted by other data structures [S2, unofficial].
++**Algorithm Steps**
++1.  **Initialization:**
++    -   Allocate main memory for the volume data with a footprint four times larger than the raw data size to accommodate the private cache slot constraints [S3, book].
++    -   Partition the CPU cache into the four specified blocks [S2, unofficial][S3, book].
++    -   Load transfer functions into the transfer function cache block [S3, book].
++2.  **Brick Selection:**
++    -   Determine which bricks intersect the view frustum or ray paths.
++    -   Group rays into flocks that will traverse the same brick [S3, book].
++3.  **Data Loading:**
++    -   Bring the required brick data from main memory into the private volume cache block [S3, book].
++    -   Because of the private block guarantee, this data remains resident until explicitly discarded [S3, book].
++4.  **Ray Traversal (Flock Processing):**
++    -   For each ray in the flock:
++        -   Trace the ray through the loaded brick.
++        -   Access voxel values using the interleaved address function.
++        -   Perform shading and compositing (semi-transparent accumulation) [S1][S3, book].
++    -   Since all rays in the flock share the same brick, the brick data is loaded once and reused by all rays in the flock [S3, book].
++5.  **Cache Eviction:**
++    -   Once all rays in the flock have finished traversing the current brick, discard the brick data from the cache block [S3, book].
++    -   Load the next brick if necessary.
++6.  **Image Composition:**
++    -   Write the final pixel values to the image block in the cache [S3, book].
+ 
+-2.  **Cubic Interleaved Addressing:** To further optimize cache hits, the linear memory layout of the volume is altered using a cubic interleaved address function [S1].
+-    -   Let $n$ be the side length of a cubic block of voxels.
+-    -   The interleaving assumes $n$ is a power of two.
+-    -   The condition $n^3 < \text{Cache Size}$ must hold, ensuring the entire block fits in the cache.
+-    -   Under this layout, a cube of $n^3$ voxels occupies exactly $n \times n \times n$ cache locations [S1].
+-    -   This layout ensures that neighboring rays, which traverse spatially adjacent voxels, are likely to access voxel values that are already cached, thereby increasing the cache hit ratio [S1].
++**Pseudocode**
++```python
++def ultravis_render(volume_data, transfer_function, camera, image_width, image_height):
++    # 1. Setup Cache Blocks
++    # The system manages four cache blocks:
++    # - cache_volume: Private block for volume bricks
++    # - cache_tf: Block for transfer function tables
++    # - cache_image: Block for image tiles
++    # - cache_temp: Block for temporary buffers
++    cache_volume = CacheBlock(size=PRIVATE_CACHE_SIZE)
++    cache_tf = CacheBlock(size=TF_CACHE_SIZE)
++    cache_image = CacheBlock(size=IMAGE_CACHE_SIZE)
++    cache_temp = CacheBlock(size=TEMP_CACHE_SIZE)
+ 
+-3.  **Page Allocation Strategy:** The volume data is mapped into the first quarter of each memory page. This ensures that data placed in the remaining three-quarters of the pages will never be replaced by voxel data within the cache, as the cache replacement strategy maps specific memory addresses to specific cache sets [S1].
++    # Load transfer function into its private block
++    cache_tf.load(transfer_function)
+ 
+-**Algorithm Steps:**
+-1.  **Initialize Cache Blocks:** Allocate and lock the four cache blocks (Volume, Transfer Function, Image, Temporary) to prevent swapping [S2, unofficial].
+-2.  **Interleave Volume Data:** Reorder the input volume data from standard linear layout to the cubic interleaved layout defined by the address function [S1].
+-3.  **Ray Traversal Loop:** For each pixel in the image plane:
+-    a.  Cast a ray through the volume.
+-    b.  Traverse the volume using the interleaved memory addresses.
+-    c.  Sample voxel values using the interleaved indices.
+-    d.  Apply the transfer function (accessing the dedicated TF cache block).
+-    e.  Accumulate color and opacity (compositing).
+-    f.  Store result in the Image Block cache.
+-4.  **Finalize:** Copy the Image Block from cache to main memory for display [S2, unofficial].
++    # 2. Decompose Volume into Bricks
++    bricks = decompose_volume_into_bricks(volume_data)
+ 
+-**Pseudocode:**
+-```python
+-def ultravis_render(volume_data, transfer_function, image_width, image_height):
+-    # 1. Setup Cache Blocks
+-    # Allocate private cache blocks for volume, TF, image, and temp buffers
+-    cache_volume = allocate_cache_block(size=volume_data.size)
+-    cache_tf = allocate_cache_block(size=transfer_function.size)
+-    cache_image = allocate_cache_block(size=image_width * image_height)
+-    cache_temp = allocate_cache_block(size=TEMP_BUFFER_SIZE)
++    # 3. Initialize Image Buffer
++    image = create_image(image_width, image_height)
+ 
+-    # 2. Interleave Volume Data
+-    # Reorder volume_data into cubic interleaved layout
+-    # n is chosen such that n^3 <= cache_size and n is a power of 2
+-    interleaved_volume = cubic_interleave(volume_data, n)
++    # 4. Process Rays in Flocks per Brick
++    for brick in bricks:
++        if not brick_intersects_view(brick, camera):
++            continue
+ 
+-    # 3. Render Loop
+-    for y in range(image_height):
+-        for x in range(image_width):
+-            # Cast ray for pixel (x, y)
+-            ray = cast_ray(x, y, camera_params)
++        # Get rays that traverse this brick
++        ray_flock = get_rays_for_brick(brick, camera)
++
++        # Load brick data into private cache block
++        # This data is guaranteed not to be swapped out by TF or Image data
++        cache_volume.load(brick.data)
++
++        # Process all rays in the flock using the cached brick
++        for ray in ray_flock:
++            # Trace ray through the brick
++            color = trace_ray_through_brick(ray, brick, cache_volume, cache_tf)
+             
+-            # Initialize compositing state
+-            color = (0.0, 0.0, 0.0)
+-            alpha = 0.0
++            # Composite into image
++            composite_pixel(image, ray, color)
++
++        # Discard brick data from cache after flock is done
++        cache_volume.evict(brick.id)
++
++    return image
++
++def trace_ray_through_brick(ray, brick, cache_volume, cache_tf):
++    # Interleaved address function to access voxel data
++    # n is the interleaving cube side length (power of 2)
++    # This function maps 3D coordinates to memory addresses
++    # such that spatially close voxels map to close cache lines
++    def interleaved_address(x, y, z, n):
++        # Implementation of Knittel's cubic interleaved address function
++        # Specific bit-manipulation details depend on the exact PIII cache line size
++        # and the constraint that n^3 < cache_size
++        pass 
++
++    # Standard ray casting loop with semi-transparent accumulation
++    alpha_accum = 0.0
++    color_accum = (0.0, 0.0, 0.0)
++    
++    # Step through the brick along the ray
++    while ray_inside_brick(ray, brick):
++        # Get voxel position
++        x, y, z = ray_current_position(ray)
++        
++        # Access voxel value using interleaved address
++        # This ensures cache hits due to spatial locality in the interleaved layout
++        voxel_value = cache_volume.read(interleaved_address(x, y, z, brick.n))
++        
++        # Sample transfer function
++        opacity, color = cache_tf.sample(voxel_value)
++        
++        # Front-to-back compositing
++        # C_out = C_in + (1 - alpha_in) * C_sample * alpha_sample
++        color_accum = color_accum + (1.0 - alpha_accum) * color * opacity
++        alpha_accum = alpha_accum + (1.0 - alpha_accum) * opacity
++        
++        if alpha_accum >= 1.0:
++            break
+             
+-            # Traverse volume
+-            while ray.inside_volume():
+-                # Get interleaved index
+-                idx = get_interleaved_index(ray.position, n)
+-                
+-                # Sample voxel from interleaved volume (cached)
+-                voxel_value = interleaved_volume[idx]
+-                
+-                # Get transfer function color/alpha (cached)
+-                tf_color, tf_alpha = transfer_function.sample(voxel_value)
+-                
+-                # Front-to-back compositing
+-                # C = C_prev + C_new * alpha_new * (1 - alpha_prev)
+-                # A = A_prev + alpha_new * (1 - A_prev)
+-                color = color + tf_color * tf_alpha * (1.0 - alpha)
+-                alpha = alpha + tf_alpha * (1.0 - alpha)
+-                
+-                # Advance ray
+-                ray.advance(step_size)
+-                
+-                # Check for early exit if fully opaque
+-                if alpha >= 1.0:
+-                    break
+-            
+-            # Store result in image cache block
+-            cache_image[y * image_width + x] = color
+-
+-    # 4. Output
+-    return cache_image
++        ray_advance(ray)
++        
++    return color_accum
+ ```
+ 
+-**Parameters:**
+--   $n$: Side length of the interleaved cube. Must be a power of two. $n^3$ must be smaller than the cache size [S1].
+--   Volume Resolution: Demonstrated on $256^3$ volumes [S2, unofficial].
+--   Image Resolution: Demonstrated on $256 \times 256$ images [S1].
++**Parameters**
++-   **Interleaving Cube Size ($n$):** Must be a power of two. The volume $n^3$ must be smaller than the CPU cache size [S1].
++-   **Brick Size:** Determined by the interleaving strategy and cache constraints [S3, book].
++-   **Memory Footprint:** Four times the raw volume data size [S3, book].
+ 
+-**Edge Cases and Pitfalls:**
+--   **Cache Thrashing:** If $n^3$ exceeds the cache size, the interleaving benefit is lost, and thrashing may increase [S1].
+--   **Competing Data:** If the cache is not properly partitioned, transfer function lookups or image writes can evict volume voxels, drastically reducing performance [S2, unofficial].
+--   **Precision:** The interleaving function relies on $n$ being a power of two for efficient bit-manipulation addressing [S1].
+-
+-## Subtopics
+-
+-### GPU CSG Ray Tracing with Uniform Grid Index
+-Uses GPU hardware acceleration and CSG operations for efficient traversal, contrasting with UltraVis's CPU cache optimization [4098-gpu-csg-ray-tracing-with-uniform-grid-index.md].
+-
+-### VIZARD II
+-A software renderer that uses different optimization strategies, potentially focusing on different hardware constraints or traversal algorithms [13297-vizard-ii.md].
++**Edge Cases and Pitfalls**
++-   **Cache Thrashing:** If the interleaving parameter $n$ is not chosen correctly (e.g., $n^3$ exceeds cache size or does not align with cache line sizes), cache thrashing will occur, negating performance gains [S1].
++-   **Memory Pressure:** The requirement for a private cache block forces the main memory footprint to be four times larger than the raw data. This may cause out-of-core issues on systems with limited RAM [S3, book].
++-   **Hardware Specificity:** The optimization relies on specific cache replacement strategies of the Intel Pentium III processor. Performance may degrade on architectures with different cache hierarchies or replacement policies [S1].
+ 
+ ## Operating characteristics
+--   **Performance:** Renders a $256^3$ volume at 10 frames/s on a Pentium III 500MHz processor [S2, unofficial]. Renders a $256 \times 256 \times 110$ UNC MRI-head volume at 1.7 to 7.0 fps on the same hardware with $256 \times 256$ image resolution [S1].
+--   **Complexity:** Time complexity is linear with respect to the number of voxels traversed per ray and the number of rays. Memory complexity is dominated by the volume data and the four cache blocks.
+--   **Strengths:** Significantly reduces cache thrashing on Pentium III architecture by ensuring volume data remains in cache. High performance for its time on commodity PCs.
+--   **Limitations:** Highly specific to the Intel Pentium III cache architecture. The cubic interleaving assumes $n$ is a power of two and $n^3$ fits in cache, which may not scale to larger caches or different cache hierarchies. Not suitable for modern multi-core or GPU architectures without significant modification [S1].
+--   **When to use:** When rendering semi-transparent volumes on legacy Intel Pentium III hardware where cache thrashing is the primary bottleneck.
+--   **When not to use:** On modern hardware with larger caches, different cache replacement policies, or GPU-based rendering pipelines.
++-   **Time Complexity:** Not explicitly defined in terms of Big-O, but the method aims to reduce memory access latency, which is the primary bottleneck in ray casting [S1][S2, unofficial].
++-   **Memory Complexity:** Main memory footprint is $4 \times$ the raw volume data size due to the private cache slot requirement [S3, book].
++-   **Measured Performance:**
++    -   Renders a $256^3$ volume at 10 frames/s [S2, unofficial][S3, book].
++    -   Renders a $256 \times 256 \times 110$ UNC MRI-head volume at 1.7 to 7.0 fps on a Pentium III 500MHz processor with a $256 \times 256$ image resolution [S1].
++-   **Strengths:**
++    -   Significantly reduces cache thrashing through interleaved addressing [S1].
++    -   Guarantees volume data residency in cache via private block allocation [S3, book].
++    -   Efficient reuse of brick data across ray flocks [S3, book].
++-   **Limitations:**
++    -   High memory consumption (4x raw size) [S3, book].
++    -   Hardware-specific (optimized for Pentium III cache behavior) [S1].
++    -   Limited to software-based rendering on CPUs [S2, unofficial].
++-   **When to Use:** When rendering semi-transparent volumes on older Intel Pentium III hardware where cache thrashing is the primary performance bottleneck and memory bandwidth is limited [S1].
++-   **When Not to Use:** On modern hardware with larger caches, different cache architectures, or GPU-based rendering where hardware acceleration and different optimization strategies (e.g., texture caching) are more effective [S1][S2, unofficial].
+ 
+ ## Background
+-UltraVis was introduced by Knittel in 2000 [S1]. It was developed as a response to the limitations of memory bandwidth and cache performance in early 2000s CPUs, specifically the Intel Pentium III. The system was one of the first to explicitly manage CPU cache blocks for volume rendering, recognizing that the massive data requirements of volume rendering made cache efficiency critical [S2, unofficial]. It is cited as an example of optimized CPU ray-casting in later surveys [S3, unofficial].
++UltraVis was introduced by Knittel in 2000 (cited as [Kni00] in [S1], though [S4, unofficial] lists "Optimized CPU ray-casting [Knoll et al. ’11]" which may refer to a later survey or related work; the primary source [S1] attributes it to Knittel [Kni00]) [S1][S4, unofficial]. It was designed specifically for the Intel Pentium III processor, addressing the limitations of standard ray casting memory access patterns on that hardware [S1]. The system was one of the early comprehensive software-based volume rendering systems to explicitly manage cache blocks to prevent thrashing [S2, unofficial][S3, book].
+ 
+ ## Sources
+ [S1] Interactive Volume Rendering with Ray Tracing, https://doi.org/10.2312/egst.20061055, fetched 2026-10-24
+ [S2] Overview of Volume Rendering - Stony Brook Computer Science, https://www3.cs.stonybrook.edu/~mueller/papers/volvisOverview.pdf, fetched 2026-10-27 (unofficial)
+-[S3] GPU-Based Large-Scale Scientific Visualization, https://johanna-b.github.io/LargeSciVis2018/slides/LargeScaleVisualization_Architectures.pdf, fetched 2026-10-29 (unofficial)+[S3] PDF Volume Visualization and Volume Graphics, https://www3.cs.stonybrook.edu/~mueller/teaching/cse332/volvisChapter.pdf, fetched 2026-10-28 (book)
++[S4] GPU-Based Large-Scale Scientific Visualization, https://johanna-b.github.io/LargeSciVis2018/slides/LargeScaleVisualization_Architectures.pdf, fetched 2026-10-29 (unofficial)

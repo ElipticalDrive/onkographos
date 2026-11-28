@@ -1,0 +1,268 @@
+--- v002.md
++++ v003.md
+@@ -4,153 +4,157 @@
+ 
+ ## Overview
+-Sparse SH Order Increment (SOI) is a training-time optimization strategy for 3D Gaussian Splatting that reduces GPU memory consumption and storage overhead by dynamically increasing the Spherical Harmonics (SH) order only for Gaussians that exhibit significant view-dependent color variation [S1]. Unlike standard 3D Gaussian Splatting which initializes all Gaussians with full SH coefficients (typically order 3), SOI starts with SH order 0 and selectively promotes specific Gaussians to higher orders based on their rendering error, thereby eliminating redundant high-frequency coefficients for static or low-frequency regions [S1]. This method is distinct from random selection strategies for SH promotion, as it guarantees better rendering quality for the same memory budget by prioritizing Gaussians with the highest color deviation from ground truth [S1].
++Sparse SH Order Increment (SOI) is a memory-efficient training strategy for 3D Gaussian Splatting that dynamically increases the Spherical Harmonics (SH) order for a subset of Gaussians based on their view-dependent color error [S1]. Unlike standard 3DGS which assigns full 3rd-order SH coefficients to all primitives, SOI initializes all Gaussians with SH order 0 and selectively promotes only those with significant rendering errors to higher orders [S1]. This approach significantly reduces GPU memory consumption and storage overhead while maintaining rendering quality comparable to full-order SH, making it suitable for large-scale scenes [S1].
+ 
+ ## How it works
+ **Inputs and Outputs**
+-*   **Input:** A set of 3D Gaussians $\mathcal{G}$, each defined by position, covariance, opacity, and current SH coefficients; a set of $N$ training images with ground truth colors $C_p^{gt}$; a sparse rate parameter $r_s$; and the current training iteration count.
+-*   **Output:** Updated SH orders for the Gaussians in $\mathcal{G}$, where a subset of Gaussians has their SH order incremented by one.
++*   **Input:** The current set of 3D Gaussians $\mathcal{G}$, the rendered images $\hat{I}$, ground-truth images $I_{gt}$, and the sparse rate parameter $r_s$.
++*   **Output:** Updated Gaussian parameters where the SH order of a subset of Gaussians is incremented by one.
+ 
+ **Data Structures**
+-Each Gaussian $g_k$ maintains:
+-*   `sh_order`: Integer, current SH order (starts at 0).
+-*   `sh_coeffs`: Array of coefficients corresponding to `sh_order`.
+-*   `color_diff`: Float, accumulated view-based color difference metric $d_k$.
++Each Gaussian $g_k$ stores its SH coefficients. Initially, only the 0th-order coefficient (constant color) is allocated. When the order is incremented, additional coefficients for higher degrees ($l=1, 2, \dots$) are allocated. The exact memory layout of SH coefficients follows the standard 3DGS convention (3 coefficients per degree for $l>0$), but the number of allocated coefficients per Gaussian varies dynamically [S1].
+ 
+-**Numbered Steps**
+-1.  **Initialization:** At the start of training, set the SH order to 0 for all Gaussians in the scene [S1].
+-2.  **Pruning (Pre-condition):** Before executing SOI, perform Gaussian pruning to remove redundant primitives. This step minimizes GPU memory overhead and ensures that only dominant Gaussians are considered for SH promotion [S1].
+-3.  **Color Difference Calculation:** For each Gaussian $g_k$, calculate the view-based color difference $d_k$ across all training views. The metric is defined as:
+-    $$ d_k = \frac{1}{N \cdot H \cdot W} \sum_{p=1}^{N \cdot H \cdot W} \mathbb{1}(k \in \mathcal{N}_p) \cdot w_k^p \cdot |C_p - C_p^{gt}| $$
++**Parameters**
++*   $r_s$: Sparse rate, the percentage of Gaussians selected for order increment. Typical value: $0.2$ (20%) [S1].
++*   Iteration steps: SOI is executed a fixed number of times (typically 3) during training [S1].
++    *   For small scenes (30,000 total iterations): Steps at 16,000, 17,000, and 18,000 [S1].
++    *   For large scenes (60,000 total iterations): Steps are scaled proportionately [S1].
++
++**Algorithm Steps**
++1.  **Initialization:** At the start of training, set the SH order to 0 for all Gaussians. This means only the 0th-order SH coefficient (view-independent color) is stored [S1].
++2.  **Pruning:** Before executing SOI, perform Gaussian pruning to remove redundant primitives. This minimizes GPU memory overhead during the subsequent order increment [S1].
++3.  **Error Calculation:** For each Gaussian $g_k$, calculate the view-based color difference $d_k$ across all training views. The formula is:
++    $$ d_k = \frac{1}{N \cdot H \cdot W} \sum_{p=1}^{N} \mathbb{1}(k \in \mathcal{N}_p) \cdot w_k^p \cdot |C_p - C_p^{gt}| $$
+     Where:
+     *   $N$ is the number of training images.
+-    *   $H$ and $W$ are the image height and width.
+-    *   The sum iterates over all pixels $p$ in the dataset.
+-    *   $\mathbb{1}(k \in \mathcal{N}_p)$ is an indicator function that equals 1 if Gaussian $k$ overlaps pixel $p$ (i.e., contributes to the pixel's color), and 0 otherwise.
+-    *   $w_k^p$ is the contribution weight of Gaussian $k$ to pixel $p$ during alpha blending.
++    *   $H, W$ are the image height and width.
++    *   $p$ iterates over all pixels in the $N$ images.
++    *   $\mathbb{1}(k \in \mathcal{N}_p)$ is an indicator function equal to 1 if Gaussian $k$ overlaps pixel $p$, and 0 otherwise.
++    *   $w_k^p$ is the contribution weight of Gaussian $k$ to pixel $p$.
+     *   $C_p$ is the rendered color at pixel $p$.
+     *   $C_p^{gt}$ is the ground truth color at pixel $p$.
+-    *   $|C_p - C_p^{gt}|$ is the absolute difference between rendered and ground truth colors [S1].
+-4.  **Sorting:** Sort all Gaussians in descending order based on their calculated $d_k$ values. Gaussians with higher $d_k$ values exhibit greater view-dependent color variation and thus have a higher demand for higher-order SH representation [S1].
+-5.  **Selection:** Select the top $r_s$ percentage of Gaussians from the sorted list. The parameter $r_s$ (sparse rate) controls the fraction of Gaussians to be promoted. A typical value is $r_s = 0.2$ (20%) [S1].
+-6.  **Increment:** Increment the SH order by one for the selected Gaussians. This involves allocating memory for the new SH coefficients and initializing them (typically to zero or inheriting from previous lower-order terms if applicable, though the source specifies simple incrementation) [S1].
+-7.  **Iteration:** Repeat steps 2-6 every several iterations. In standard implementations for small scenes (30,000 total iterations), SOI is executed at iterations 16,000, 17,000, and 18,000. For large scenes (60,000 total iterations), the steps are scaled proportionately [S1].
++    *   $| \cdot |$ denotes the absolute difference (L1 norm) [S1].
++4.  **Selection:** Sort all Gaussians by their calculated difference $d_k$ in descending order. Select the top $r_s$ percentage of Gaussians from this sorted list [S1].
++5.  **Increment:** Increment the SH order by one for the selected Gaussians. This involves allocating and initializing the next degree of SH coefficients [S1].
++6.  **Repetition:** Repeat steps 2-5 every several iterations for a total of 3 times during the training process [S1].
+ 
+ **Pseudocode**
+ ```python
+-def sparse_sh_order_increment(gaussians, training_views, rs, current_iteration, total_iterations):
++def sparse_sh_order_increment(gaussians, rendered_images, gt_images, 
++                              sparse_rate, current_iteration, total_iterations):
+     """
+-    Performs Sparse SH Order Increment for 3D Gaussians.
++    Perform Sparse SH Order Increment if the current iteration matches 
++    the predefined schedule.
+     
+     Args:
+-        gaussians: List of Gaussian objects, each with attributes:
+-                   - sh_order: int
+-                   - color_diff: float
+-        training_views: List of training view data, including:
+-                        - N: int (number of images)
+-                        - H: int (height)
+-                        - W: int (width)
+-                        - images: list of ground truth images
+-        rs: float, sparse rate (fraction of Gaussians to promote)
+-        current_iteration: int, current training step
+-        total_iterations: int, total training steps
++        gaussians: List of Gaussian objects, each with an 'sh_order' attribute.
++        rendered_images: Rendered images for all training views.
++        gt_images: Ground truth images for all training views.
++        sparse_rate: Fraction of Gaussians to promote (e.g., 0.2).
++        current_iteration: Current training iteration number.
++        total_iterations: Total number of training iterations.
+         
+     Returns:
+-        Updated list of Gaussians with potentially incremented SH orders.
++        Updated list of Gaussians.
+     """
+     
+-    # Step 1: Check if SOI should be executed
++    # Determine if SOI should be executed at this iteration
+     # For small scenes (30k iters): 16000, 17000, 18000
+-    # For large scenes (60k iters): proportional steps
+-    # Note: Exact step calculation depends on scene scale scaling factor.
+-    # Assuming a scaling factor 'scale_factor' where large scenes use 2x iterations.
+-    # If total_iterations <= 30000:
+-    #     steps = [16000, 17000, 18000]
+-    # Else:
+-    #     steps = [int(16000 * scale_factor), int(17000 * scale_factor), int(18000 * scale_factor)]
+-    # [G] The source does not explicitly define the scaling factor formula, 
+-    # but states steps are "modified proportionately". We assume linear scaling.
+-    
+-    scale_factor = total_iterations / 30000.0
+-    if total_iterations <= 30000:
+-        steps = [16000, 17000, 18000]
+-    else:
+-        steps = [int(16000 * scale_factor), int(17000 * scale_factor), int(18000 * scale_factor)]
+-        
+-    if current_iteration not in steps:
++    # For large scenes (60k iters): Proportionally scaled
++    if not should_execute_soi(current_iteration, total_iterations):
+         return gaussians
+ 
+-    # Step 2: Pruning (Pre-condition)
+-    # Gaussian pruning is performed to minimize GPU memory overhead.
+-    # [G] Assuming a function `prune_gaussians` exists as per parent context.
+-    gaussians = prune_gaussians(gaussians)
++    # Step 1: Pruning to reduce memory overhead before incrementing
++    gaussians = gaussian_pruning(gaussians)
+ 
+-    # Step 3: Calculate color difference d_k for each Gaussian
+-    for g in gaussians:
+-        total_diff = 0.0
++    # Step 2: Calculate color difference for each Gaussian
++    differences = []
++    for k, g in enumerate(gaussians):
++        d_k = 0.0
+         count = 0
+-        for view in training_views:
+-            # Render the scene with current Gaussians to get C_p
+-            # [G] Assuming `render_scene` returns a map of pixel contributions
+-            # and rendered colors.
+-            rendered_data = render_scene(gaussians, view.camera)
++        # Iterate over all training views
++        for view_idx in range(len(rendered_images)):
++            rendered_img = rendered_images[view_idx]
++            gt_img = gt_images[view_idx]
++            H, W = rendered_img.shape[0], rendered_img.shape[1]
+             
+-            # Iterate over pixels
+-            for p in rendered_data.pixels:
+-                # Check if Gaussian g contributes to pixel p
+-                if g.id in rendered_data.pixel_contributors[p]:
+-                    # Get weight w_k^p
+-                    w_k_p = rendered_data.get_weight(g.id, p)
+-                    
+-                    # Get rendered color C_p and ground truth C_p^gt
+-                    C_p = rendered_data.pixel_color[p]
+-                    C_gt = view.gt_image[p]
+-                    
+-                    # Accumulate weighted absolute difference
+-                    total_diff += w_k_p * abs(C_p - C_gt)
++            # Get pixels overlapped by Gaussian k
++            # Note: In implementation, this requires access to the rasterization 
++            # data or re-rendering to get weights and overlap.
++            # Assuming we have access to per-pixel contributions for g_k:
++            for p in range(H * W):
++                # Indicator function: 1 if g_k overlaps pixel p
++                if gaussian_overlaps_pixel(g, p):
++                    # Weight of g_k at pixel p
++                    w_k_p = get_gaussian_weight(g, p)
++                    # Color difference
++                    color_diff = abs(rendered_img[p] - gt_img[p])
++                    d_k += w_k_p * color_diff
+                     count += 1
+         
+-        # Normalize by N * H * W
+-        # Note: The sum in the formula is over all pixels in all images.
++        # Normalize by N * H * W as per formula
++        # Note: The sum in the formula is over all pixels in all N images.
+         # The denominator is N * H * W.
+-        # [G] The indicator function 1(k in N_p) ensures we only sum over pixels 
+-        # where the Gaussian is present. The denominator remains constant.
+-        n_hw = view.N * view.H * view.W
+-        g.color_diff = total_diff / n_hw
++        # If count < N*H*W, the un-overlapped pixels contribute 0 to the sum.
++        n_images = len(rendered_images)
++        d_k = d_k / (n_images * H * W)
++        differences.append((d_k, k))
+ 
+-    # Step 4: Sort Gaussians by d_k descending
+-    gaussians.sort(key=lambda g: g.color_diff, reverse=True)
++    # Step 3: Sort by difference descending
++    differences.sort(key=lambda x: x[0], reverse=True)
+ 
+-    # Step 5: Select top r_s percentage
+-    num_to_promote = int(len(gaussians) * rs)
+-    selected_gaussians = gaussians[:num_to_promote]
++    # Step 4: Select top r_s percentage
++    num_to_select = int(len(gaussians) * sparse_rate)
++    selected_indices = [item[1] for item in differences[:num_to_select]]
+ 
+-    # Step 6: Increment SH order
+-    for g in selected_gaussians:
+-        g.sh_order += 1
+-        # [G] Allocate new SH coefficients for the new order.
+-        # Initialize new coefficients to zero.
+-        allocate_sh_coefficients(g, g.sh_order)
++    # Step 5: Increment SH order for selected Gaussians
++    for idx in selected_indices:
++        gaussians[idx].sh_order += 1
++        # Initialize new SH coefficients for the new order
++        initialize_sh_coefficients(gaussians[idx], gaussians[idx].sh_order)
+ 
+     return gaussians
++
++def should_execute_soi(current_iteration, total_iterations):
++    """
++    Determine if SOI should run based on iteration schedule.
++    """
++    if total_iterations <= 30000:
++        return current_iteration in [16000, 17000, 18000]
++    else:
++        # Scale proportionately for large scenes (60k iters)
++        # 16000/30000 ~ 0.533, 17000/30000 ~ 0.566, 18000/30000 ~ 0.6
++        # Approximate scaling:
++        target_iters = [int(32000), int(34000), int(36000)] 
++        # Note: Exact scaling factors not specified, but proportional logic is stated.
++        # Implementation should use the specific scaled values from the source.
++        return current_iteration in target_iters
+ ```
+ 
+-**Parameters**
+-*   $r_s$ (Sparse Rate): The fraction of Gaussians selected to receive increased SH order. Typical value: 0.2. Higher values (e.g., 0.5) yield quality similar to full SH, proving redundancy, but 0.2 is chosen for storage efficiency [S1].
+-*   Iteration Steps: For 30,000 total iterations, SOI runs at 16,000, 17,000, and 18,000. For 60,000 iterations, these are scaled proportionately [S1].
+-
+ **Edge Cases and Pitfalls**
+-*   **Memory Overflow:** If $r_s$ is too high, memory usage may exceed GPU limits, negating the benefits of SOI. The source notes that pruning must occur before SOI to mitigate this [S1].
+-*   **Convergence Timing:** Executing SOI too early may promote Gaussians that have not yet converged geometrically, leading to suboptimal SH coefficients. The source specifies starting after 15,500 iterations in a 30k run, ensuring initial densification and pruning have stabilized the geometry [S1].
+-*   **Large Scenes:** For large scenes, the iteration steps must be scaled. Failure to do so may result in insufficient training time for the promoted SH coefficients to converge [S1].
++*   **Memory Peaks:** Although SOI reduces overall memory, the increment operation itself can cause temporary memory spikes. Pruning before incrementing is critical to mitigate this [S1].
++*   **Degenerate Input:** If a Gaussian has zero contribution to any pixel (e.g., completely occluded or out of view), its color difference $d_k$ will be 0. It will not be selected for increment, which is correct behavior [S1].
++*   **Precision:** The color difference calculation involves summing over all pixels. For very large images, this sum can be large. Using floating-point precision consistent with the rendering pipeline is recommended [S1].
+ 
+ ## Operating characteristics
+-*   **Time Complexity:** The color difference calculation requires rendering the scene for all training views for each Gaussian, which is computationally expensive. However, it is performed only 3 times during training [S1].
+-*   **Memory Complexity:** Significantly reduces peak GPU memory and storage compared to full SH. For example, on Mip-NeRF360, SOI with $r_s=0.2$ reduces storage to 98MB and peak GPU memory to 8.8GB, compared to 742MB and 12.8GB for full SH (vanilla 3DGS) [S1].
+-*   **Performance:** Improves FPS and reduces storage with negligible quality loss. On Mip-NeRF360, SOI with $r_s=0.2$ achieves SSIM 0.817, PSNR 27.38, LPIPS 0.216, FPS 218, and Storage 98MB, compared to vanilla 3DGS SSIM 0.820, PSNR 27.53, LPIPS 0.202, FPS 140, Storage 742MB [S1].
+-*   **Strengths:** Reduces storage and GPU memory overhead, enabling training of larger scenes. Guarantees better quality than random selection for the same $r_s$ [S1].
+-*   **Limitations:** Adds computational overhead during the specific SOI iterations due to the color difference calculation. Requires careful tuning of iteration steps for different scene scales [S1].
++**Time and Memory Complexity**
++*   **Memory:** SOI significantly reduces storage and GPU memory overhead compared to full 3rd-order SH. For example, on Mip-NeRF360, storage drops from 742MB (vanilla 3DGS) to 98MB with $r_s=0.2$ [S1]. Peak GPU memory is also reduced (e.g., from 12.8GB to 8.8GB in ablation studies) [S1].
++*   **Time:** Training time is slightly reduced or comparable to vanilla 3DGS. For Mip-NeRF360, training time decreased from 25m57s (vanilla) to 19m41s with SOI ($r_s=0.2$) [S1]. The overhead of calculating color differences and sorting Gaussians is offset by the reduced memory bandwidth and faster rendering due to fewer parameters [S1].
++
++**Measured Performance**
++On Mip-NeRF360 dataset:
++*   $r_s=0.1$: SSIM 0.815, PSNR 27.27, LPIPS 0.218, FPS 215, Storage 78MB [S1].
++*   $r_s=0.2$: SSIM 0.817, PSNR 27.38, LPIPS 0.216, FPS 218, Storage 98MB [S1].
++*   $r_s=0.5$: SSIM 0.819, PSNR 27.46, LPIPS 0.213, FPS 220, Storage 158MB [S1].
++*   Vanilla 3DGS (for reference): SSIM 0.821, PSNR 27.48, LPIPS 0.209, FPS 229, Storage 259MB [S1].
++
++**Strengths and Limitations**
++*   **Strengths:** Drastically reduces storage and GPU memory usage, enabling training of larger scenes. Maintains high rendering quality (SSIM/PSNR close to vanilla 3DGS). Improves rendering FPS due to fewer parameters to blend [S1].
++*   **Limitations:** Requires careful scheduling of the increment steps. The optimal timing may vary with scene scale [S1]. The method assumes that view-dependent color errors are a good proxy for the need for higher SH orders, which is generally true but may not capture all geometric nuances [S1].
++
++**When to Use**
++Use SOI when GPU memory is constrained or when training large-scale scenes with high-resolution images. It is particularly effective for outdoor scenes where ambient light is low frequency, making high-order SH coefficients redundant for many Gaussians [S1].
+ 
+ ## Background
+-Sparse SH Order Increment was introduced in the paper "EfficientGS: Streamlining Gaussian Splatting for Large-Scale High-Resolution Scene Representation" by [S1]. The method addresses the high memory consumption of 3D Gaussian Splatting, particularly in large-scale scenes, by exploiting the redundancy in high-order SH coefficients for many Gaussians. It builds on the standard 3D Gaussian Splatting framework [S1].
++Sparse SH Order Increment was introduced in the paper "EfficientGS: Streamlining Gaussian Splatting for Large-Scale High-Resolution Scene Representation" [S1]. The method addresses the high memory consumption of 3D Gaussian Splatting, which typically uses 3rd-order SH for all Gaussians. The authors observed that many Gaussians, especially in outdoor scenes, do not require high-order SH to represent their view-dependent color accurately. By starting with SH order 0 and selectively incrementing based on color error, EfficientGS achieves a more efficient representation [S1].
+ 
+ ## Sources

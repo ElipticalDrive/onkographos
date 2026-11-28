@@ -1,0 +1,83 @@
+# Slice Parallelisation
+
+Also called: Slice-based parallelisation, Bundle-slice mapping
+
+## Overview
+Slice Parallelisation is a parallelisation scheme for Coherent Grid Traversal (CGT) where processing elements are assigned to specific slices of the volume rather than individual rays or bundles [S1, S2, unofficial]. It solves the problem of determining which ray bundles intersect a given slice when traversal is not incremental, requiring explicit data structures to map bundles to slices [S1, S2, unofficial]. Unlike Bundle Parallelisation, it reduces redundant block fetches from neighbouring bundles by organizing work per slice [S1, S2, unofficial].
+
+## How it works
+**Inputs:**
+*   A set of ray bundles defined by their entry and exit points.
+*   The volume grid structure (implied by CGT).
+*   The dominant traversal axis $k$ (from CGT).
+
+**Outputs:**
+*   For each slice $s$, a list of bundles that intersect it, ready for processing.
+
+**Data Structures:**
+The method maintains two sets of structures to track bundle-slice intersections [S1, S2, unofficial]:
+
+1.  **Primary Vectors and Tables:**
+    *   Vector $A$: Stores references to bundles that start at the beginning of the volume ($k=0$).
+    *   Vector $D$: Stores references to bundles that end at the end of the volume ($k=k_{max}$).
+    *   Table $P$: Index table corresponding to $A$. $P[i]$ stores the slice index $s$ where bundle $A[i]$ starts.
+    *   Table $Q$: Index table corresponding to $D$. $Q[j]$ stores the slice index $s$ where bundle $D[j]$ ends.
+
+2.  **Secondary Lists and Tables:**
+    *   List $S$: Stores references to "remaining" bundles (those that do not start at $k=0$ and do not end at $k=k_{max}$).
+    *   List $E$: Stores references to the same "remaining" bundles.
+    *   Table $M$: Index table corresponding to $S$. $M[i]$ stores the slice index $s$ where bundle $S[i]$ *first* intersects the volume.
+    *   Table $N$: Index table corresponding to $E$. $N[j]$ stores the slice index $s$ where bundle $E[j]$ *last* intersects the volume.
+    *   List $S$ is sorted by the values in $M$ (ascending).
+    *   List $E$ is sorted by the values in $N$ (ascending).
+
+**Algorithm Steps:**
+
+1.  **Initialization:** During the initial setup or tracing phase, classify every bundle into one of three categories:
+    *   **Starters:** Bundles where the first voxel index is $k=0$. Add these to vector $A$. Record their starting slice index in table $P$.
+    *   **Finishers:** Bundles where the last voxel index is $k=k_{max}$. Add these to vector $D$. Record their ending slice index in table $Q$.
+    *   **Remaining:** Bundles that neither start at $k=0$ nor end at $k=k_{max}$. Add these to list $S$ and list $E$. Record their first intersecting slice in table $M$ (for $S$) and their last intersecting slice in table $N$ (for $E$). Sort $S$ by $M$ and $E$ by $N$.
+
+2.  **Processing a Slice $s$:** For a processing element assigned to slice $s$, identify all intersecting bundles using the following logic [S1, S2, unofficial]:
+
+    *   **Identify Starters:** Retrieve all bundles from $A$ where the corresponding entry in $P$ equals $s$.
+        *   Mathematically, if $A$ and $D$ fit in cache/local store, this requires 0 memory reads beyond the cache. Otherwise, it requires 2 memory reads (one for $A$, one for $P$) per bundle check or via direct indexing if $P$ is sparse [S1, S2, unofficial].
+        *   Let $B_{start}(s) = \{ A[i] \mid P[i] == s \}$.
+
+    *   **Identify Finishers:** Retrieve all bundles from $D$ where the corresponding entry in $Q$ equals $s$.
+        *   Similarly, this requires 2 memory reads (one for $D$, one for $Q$) [S1, S2, unofficial].
+        *   Let $B_{end}(s) = \{ D[j] \mid Q[j] == s \}$.
+
+    *   **Identify Remaining Bundles:**
+        *   Find bundles in $S$ that start at or before slice $s$. Since $S$ is sorted by $M$, these are bundles where $M[i] \le s$.
+        *   Find bundles in $E$ that end at or after slice $s$. Since $E$ is sorted by $N$, these are bundles where $N[j] \ge s$.
+        *   The intersection of these two sets gives the remaining bundles active in slice $s$.
+        *   Let $B_{mid}(s) = \{ S[i] \mid M[i] \le s \} \cap \{ E[j] \mid N[j] \ge s \}$.
+        *   Note: The sources state that "we need to run through both these lists to find that out" [S1, S2, unofficial]. In practice, this is often done by maintaining pointers or indices into $S$ and $E$ that advance as $s$ increments, or by binary search if random access is required. However, the text implies a linear scan or list traversal is acceptable as it "does not hit performance" [S1, S2, unofficial].
+
+    *   **Combine:** The total set of bundles for slice $s$ is $B(s) = B_{start}(s) \cup B_{end}(s) \cup B_{mid}(s)$.
+
+3.  **Traversal:** For each bundle in $B(s)$, perform the CGT traversal steps for the cells within slice $s$.
+
+**Parameters:**
+*   $k_{max}$: The maximum index along the dominant axis.
+*   Average percentage of "Remaining" bundles: ~14% [S1, S2, unofficial].
+*   Maximum percentage of "Remaining" bundles: 33% [S1, S2, unofficial].
+
+**Edge Cases and Pitfalls:**
+*   **Cache Locality:** If vectors $A$ and $D$ are large, they may not fit in cache/local store, increasing memory read costs [S1, S2, unofficial].
+*   **Redundant Fetches:** While Slice Parallelisation is less likely to exhibit redundant block fetches from neighbouring bundles compared to other methods, it is still possible [S1, S2, unofficial].
+*   **Roll Angle:** When the "roll" angle of the bundles to the volume angle is close to $\pi/4$, the number of block fetches can double [S1, S2, unofficial]. A solution is noted as "not yet published" in the source [S1, S2, unofficial].
+
+## Operating characteristics
+*   **Complexity:** The identification of bundles for a slice $s$ requires constant time for starters and finishers (2 memory reads) [S1, S2, unofficial]. The identification of remaining bundles requires scanning lists $S$ and $E$. Since the remaining bundles are a small fraction (avg 14%, max 33%), this overhead is considered negligible and "does not hit performance" [S1, S2, unofficial].
+*   **Memory:** Requires storage for vectors $A, D$ and lists $S, E$, plus index tables $P, Q, M, N$.
+*   **Strengths:** Trivial to implement (e.g., 1 line of OpenMP code in C++ [S1, S2, unofficial]). Reduces redundant block fetches compared to bundle parallelisation [S1, S2, unofficial].
+*   **Limitations:** Traversal is not incremental, requiring explicit tracking of bundle-slice intersections [S1, S2, unofficial]. Performance may degrade if the roll angle is near $\pi/4$ [S1, S2, unofficial].
+
+## Background
+Slice Parallelisation is a parallelisation strategy developed for the Coherent Grid Traversal (CGT) algorithm for volume rendering. It was presented by researchers at the UCL Department of Computer Science [S1, S2, unofficial]. The method addresses the non-incremental nature of slice-based traversal by introducing explicit data structures to map bundles to slices.
+
+## Sources
+[S1] A Coherent Grid Traversal Algorithm for Volume Rendering PowerPoint Presentation, https://slideserve.com/kineta/a-coherent-grid-traversal-algorithm-for-volume-rendering-powerpoint-ppt-presentation, fetched 2026-10-24 (unofficial)
+[S2] A Coherent Grid Traversal Algorithm for Volume Rendering, https://www.slideserve.com/iliana-house/a-coherent-grid-traversal-algorithm-for-volume-rendering, fetched 2026-10-26 (unofficial)

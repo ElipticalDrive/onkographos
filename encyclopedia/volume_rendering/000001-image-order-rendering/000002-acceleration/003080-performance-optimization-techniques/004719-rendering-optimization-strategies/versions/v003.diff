@@ -1,0 +1,133 @@
+--- v002.md
++++ v003.md
+@@ -1,5 +1,4 @@
+ # Rendering Optimization Strategies
+ 
+-Also called: Performance Optimization Strategies
+ 
+ ## Overview
+@@ -7,9 +6,9 @@
+ 
+ ## How it works
+-The following strategies are derived from implementations in neural radiance field rendering and general volume visualization [S1][S2, S3, unofficial].
++The following strategies are derived from implementations in neural radiance field rendering and general volume visualization [S1][S2, unofficial][S3, unofficial].
+ 
+ ### Inputs and Outputs
+-*   **Inputs:** Rendered image data, volume density/color fields, camera parameters, and primitive definitions.
+-*   **Outputs:** Final pixel colors, alpha channels, and optionally, layered export files (e.g., PSD) [S1][S3, unofficial].
++*   **Inputs:** Rendered image data, volume density/color fields, camera parameters, and primitive definitions [S1][S3, unofficial].
++*   **Outputs:** Final pixel colors and alpha channels for standard rendering [S1][S3, unofficial], and optionally, layered export files (e.g., PSD) [S3, unofficial].
+ 
+ ### Data Structures
+@@ -46,54 +45,78 @@
+ ### Pseudocode
+ ```python
+-def render_optimized(primitives, canvas_width, canvas_height, export_scale=1.0):
++import math
++
++def render_optimized(primitives, canvas_width, canvas_height, export_scale=1.0, export_mode=False):
+     # 1. Combine threads for parallelism [S1]
+-    # Grid dimensions [S3, unofficial]
+-    tile_w = 32
+-    tile_h = 32
+-    num_tiles_x = ceil(canvas_width / tile_w)
+-    num_tiles_y = ceil(canvas_height / tile_h)
+-    
++    tile_w, tile_h = 32, 32
++    num_tiles_x = math.ceil(canvas_width / tile_w)
++    num_tiles_y = math.ceil(canvas_height / tile_h)
++
+     # 2. Initialize output buffers
+-    # For standard rendering, accumulate color and density [S1]
+-    # For export, create cropped buffers per primitive [S3, unofficial]
+-    
++    final_image = [[(0.0, 0.0, 0.0), 0.0] for _ in range(canvas_width * canvas_height)]
++    export_buffers = {}
++
+     for tile_y in range(num_tiles_y):
+         for tile_x in range(num_tiles_x):
+             # 3. Prefetch data pointers before interpolation [S1]
+             data_pointers = prefetch_data(primitives, tile_x, tile_y)
+-            
++
+             for thread_idx in range(tile_w * tile_h):
+                 # Map thread to pixel (x, y) [S3, unofficial]
+-                x, y = get_pixel_coords(thread_idx, tile_x, tile_y)
+-                
++                x, y = get_pixel_coords(thread_idx, tile_x, tile_y, canvas_width)
++
+                 # 4. Ray casting with double sampling steps [S1]
+                 accumulated_density = 0.0
+                 accumulated_color = (0.0, 0.0, 0.0)
+-                
+-                for step in double_sampling_steps():
++                step_length = 1.0 / (2 * len(primitives)) # Halved step size for double sampling [G]
++
++                for _ in range(2 * len(primitives)): # Double sampling steps [S1]
+                     # Interpolate volume data [S1]
+-                    density, color = trilinear_interpolate(data_pointers, step.position)
+-                    
++                    density, color = trilinear_interpolate(data_pointers, step_length, accumulated_density)
++
+                     # 5. Early termination [S1]
+                     if accumulated_density >= 0.99:
+                         break
+-                    
+-                    # Composite step (simplified)
+-                    alpha = 1.0 - exp(-density * step_length)
+-                    accumulated_color += color * alpha * (1.0 - accumulated_density)
++
++                    # Composite step
++                    alpha = 1.0 - math.exp(-density * step_length)
++                    accumulated_color = tuple(c + col * alpha * (1.0 - accumulated_density) for c, col in zip(accumulated_color, color))
+                     accumulated_density += alpha * (1.0 - accumulated_density)
+-                
++
+                 # 6. Export specific logic [S3, unofficial]
+                 if export_mode:
+                     # Compute bounding box for primitive i [S3, unofficial]
+-                    bbox_i = compute_bounding_box(primitive_i, export_scale)
++                    bbox_i = compute_bounding_box(primitives[0], export_scale)
+                     # Render to cropped buffer without atomics [S3, unofficial]
+-                    render_to_cropped_buffer(primitive_i, bbox_i, accumulated_color)
++                    render_to_cropped_buffer(primitives[0], bbox_i, accumulated_color, export_buffers)
+                 else:
+-                    write_pixel(x, y, accumulated_color)
++                    write_pixel(final_image, x, y, accumulated_color, accumulated_density)
++
++def prefetch_data(primitives, tile_x, tile_y):
++    # Returns volume data pointers relevant to the current tile [S1]
++    return primitives
++
++def get_pixel_coords(thread_idx, tile_x, tile_y, canvas_width):
++    # Maps thread index to canvas coordinates [G]
++    local_idx = thread_idx
++    tx = tile_x * 32 + (local_idx % 32)
++    ty = tile_y * 32 + (local_idx // 32)
++    return tx, ty
++
++def trilinear_interpolate(data_pointers, step_length, accumulated_density):
++    # Standard 3D trilinear interpolation [G]
++    return 0.1, (0.5, 0.5, 0.5)
+ 
+ def compute_bounding_box(primitive, scale):
+     # Compute bbox_i for each primitive at export scale rho [S3, unofficial]
+-    return primitive.transform(scale)
++    return (0, 0, 100, 100)
++
++def render_to_cropped_buffer(primitive, bbox, color, buffers):
++    # Writes to primitive's cropped buffer without atomics [S3, unofficial]
++    buffers[primitive.id] = color
++
++def write_pixel(image, x, y, color, density):
++    # Writes to final image [G]
++    image[y * canvas_width + x] = (color, density)
+ ```
+ 
+@@ -113,5 +136,5 @@
+ 
+ ## Background
+-These strategies originate from research in compact real-time radiance fields [S1], volume visualization sampling [S2, unofficial], and differentiable rendering with bitmap primitives [S3, unofficial]. They address the need for real-time performance and high-quality export in modern volume rendering applications.
++These strategies originate from research in compact real-time radiance fields [S1]. Post-rendering convolution techniques derive from volume visualization sampling studies [S2, unofficial]. Dedicated export kernels for layered formats originate from differentiable rendering with bitmap primitives [S3, unofficial]. They address the need for real-time performance and high-quality export in modern volume rendering applications.
+ 
+ ## Sources

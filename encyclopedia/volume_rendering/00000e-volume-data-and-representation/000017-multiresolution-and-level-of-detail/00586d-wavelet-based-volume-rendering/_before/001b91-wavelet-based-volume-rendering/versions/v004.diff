@@ -1,0 +1,322 @@
+--- v003.md
++++ v004.md
+@@ -4,211 +4,64 @@
+ 
+ ## Overview
+-Wavelet-based Volume Rendering is a technique that compresses volumetric data using wavelet transforms to enable efficient storage and rendering, particularly for large-scale or time-varying datasets [S1, unofficial]. It solves the problem of high memory bandwidth and storage requirements by representing the volume in a frequency domain where coefficients can be pruned or encoded [S1, unofficial]. It is distinguished from its sibling [Laplacian Pyramid Volume Rendering](2261-laplacian-pyramid-volume-rendering.md) by its use of orthogonal or biorthogonal wavelet bases (such as Haar or Daubechies) which provide multi-resolution analysis with better frequency localization, whereas Laplacian pyramids use fixed Gaussian filters [S3].
++Wavelet-based Volume Rendering is a compressed rendering technique that encodes volumetric data into a multiresolution wavelet coefficient hierarchy, allowing for on-demand or block-wise reconstruction during the rendering process [S2][S3]. It solves the problem of high memory bandwidth and storage requirements for large volumetric datasets by exploiting spatial coherence and sparsity in the frequency domain [S3]. It sets itself apart from sibling methods like [Mipmap Generation](2602-mipmap-generation.md) and [Level-of-Detail Volume Rendering via 3D Textures](1706-level-of-detail-volume-rendering-via-3d-textures.md) by using orthogonal basis functions that maintain spatial locality while separating data into approximation and detail coefficients, enabling efficient lossy/lossless compression and adaptive resolution selection based on error metrics rather than fixed geometric distance [S3, S1588].
+ 
+ ## How it works
+-**Inputs:** Original volumetric data $V$ of size $N \times N \times N$ [G].
+-**Outputs:** Rendered image $I$ and/or compressed bitstream [G].
++**Inputs:** Original volumetric data grid $V$ of size $N \times N \times N$; rendering parameters (view direction, transfer function, error tolerance $\epsilon$).
++**Outputs:** Rendered image (frame buffer).
+ 
+ **Data Structures:**
+-1. **Wavelet Coefficients:** A hierarchical set of coefficients organized by scale (level) and subband [G]. For a 3D transform, each level $j$ produces 8 subbands [G]. The dataset is filtered along every data direction with a given function/basis/filter to separate data into low-pass and high-pass components [S3]. The low-pass filtered data results in approximation coefficients, while the high-pass filtered data results in detail coefficients [S3].
+-2. **Compressed Bitstream:** Entropy-encoded wavelet coefficients [G].
+-
+-**Parameters:**
+-* **Wavelet Basis:** e.g., Haar ($m=2$), Daubechies W6 ($m=6$) [S5, unofficial].
+-* **Quantization:** Optional. If used, the method is lossy; if not, it is lossless [S1, unofficial].
+-* **Error Tolerance:** User-specified threshold for adaptive resolution selection [S4, unofficial].
++The data is stored as a hierarchy of wavelet coefficients. For a 3D volume, the decomposition at each level $l$ produces:
++1.  **Approximation Coefficients ($A_l$):** Low-pass filtered data, representing the coarse structure. Size $(N/2^{l+1})^3$.
++2.  **Detail Coefficients ($D_l$):** High-pass filtered data in 7 subbands (e.g., $f_{LLL}, f_{LLH}, f_{LHL}, f_{LHH}, f_{HLL}, f_{HLH}, f_{HHL}, f_{HHH}$). Each subband has size $(N/2^{l+1})^3$.
++The hierarchy is often organized in an octree or brick-based structure where nodes represent blocks of coefficients [S3].
+ 
+ **Steps:**
+ 
+-1. **Encoding (Compression):**
+-    1. Apply 3D Wavelet Transform to $V$ to obtain coefficients $C$ [S1, unofficial].
+-    2. (Optional) Apply quantization to $C$ for lossy compression [S1, unofficial].
+-    3. Apply entropy reduction (run-length, arithmetic, or Huffman encoding) to $C$ to produce the bitstream [S1, unofficial].
++1.  **Encoding (Preprocessing):**
++    *   Apply 3D Discrete Wavelet Transform (DWT) to the input volume. This is typically done recursively on the approximation coefficients to generate multiple resolution levels [S3].
++    *   Filter the data along each axis using a chosen wavelet basis (e.g., Haar, Daubechies). This separates data into low-pass (approximation) and high-pass (detail) components [S3].
++    *   Apply entropy coding (e.g., run-length, Huffman, arithmetic, or Rice coding) to the coefficients to reduce size [S1, unofficial][S3].
++    *   *Optional:* Quantize coefficients for lossy compression. Thresholding coefficients close to zero creates a sparse representation [S3].
+ 
+-2. **Decoding (Reconstruction):**
+-    1. Decode the compressed data [S1, unofficial].
+-    2. Perform Inverse Wavelet Transform on the decoded coefficients to reconstruct voxel values [S1, unofficial]. Reconstruction can be done point-wise, block-wise, or on-the-fly [S5, unofficial].
+-    3. Perform conditional reconstruction to select the data representation sufficiently accurate for rendering [S1, unofficial]. This may involve traversing the wavelet tree based on an error tolerance to decompress only necessary blocks [S4, unofficial].
++2.  **Working Set Selection:**
++    *   Traverse the multiresolution data structure (e.g., octree) to identify blocks belonging to the "working set" based on the current view, camera distance, and error tolerance [S3].
++    *   Filter out blocks that do not contribute significantly to the image (culling) [S2].
+ 
+-3. **Rendering:**
+-    1. Render the reconstructed volume using standard volume rendering techniques (e.g., raycasting) [G].
++3.  **Decoding and Reconstruction:**
++    *   Decode the selected blocks from the compressed format. Note: Lossless decoding is serial and difficult to parallelize on GPUs [S1, unofficial].
++    *   Reconstruct voxel values from the wavelet coefficients. This can be done via:
++        *   **Block-wise Reconstruction:** Reconstructing a block of voxels by convolving with a wavelet kernel [S4, unofficial].
++        *   **On-the-fly Reconstruction:** Calculating specific voxel values on demand by traversing the wavelet tree from the coarsest level containing the voxel down to level 0 [S4, unofficial].
++    *   *On-the-fly Algorithm:*
++        1.  Given target voxel $(x_0, y_0, z_0)$ and a wavelet coefficient at level $k$, map indices to the coarsest level: $x_k = \lfloor x_0 / 2^k \rfloor$, $y_k = \lfloor y_0 / 2^k \rfloor$, $z_k = \lfloor z_0 / 2^k \rfloor$ [S4, unofficial].
++        2.  Identify the corresponding voxel in the 8 subbands of level $k$ (LLL, LLH, etc.). For subbands with high-pass components, add $2^{k-1}$ to the respective coordinate to find the corresponding position in that subband [S4, unofficial].
++        3.  Apply the inverse wavelet transform to these 8 values to reconstruct a sub-cube of size $2 \times 2 \times 2$ at level $k-1$ [S4, unofficial].
++        4.  Repeat steps 2-3 until level 0 is reached. The final value is the voxel $(x_0, y_0, z_0)$ [S4, unofficial].
+ 
+-**Pseudocode:**
++4.  **Rendering:**
++    *   Perform standard volume rendering (e.g., ray casting, splatting) using the reconstructed voxel values [S3].
++    *   GPU implementations often use fragment programs to reconstruct 3D wavelets and tile-boards to distribute coefficients [S3].
+ 
+-```python
+-def wavelet_volume_rendering(volume_data, wavelet_type='haar', quantize=False, error_tolerance=None):
+-    """
+-    Main pipeline for wavelet-based volume rendering.
+-    """
+-    # Step 1: Encoding
+-    coefficients = wavelet_transform_3d(volume_data, wavelet_type)
+-    
+-    # Optional Quantization
+-    if quantize:
+-        coefficients = quantize_coefficients(coefficients)
+-        
+-    # Entropy Encoding (Compression)
+-    bitstream = entropy_encode(coefficients)
+-    
+-    # Step 2: Decoding
+-    # Decode bitstream
+-    decoded_coeffs = entropy_decode(bitstream)
+-    
+-    # Conditional Reconstruction / Adaptive Resolution
+-    if error_tolerance is not None:
+-        # Traverse tree and select blocks based on error tolerance
+-        selected_blocks = select_blocks_by_error(decoded_coeffs, error_tolerance)
+-        # Decompress only selected blocks
+-        reconstructed_volume = reconstruct_blocks(selected_blocks, wavelet_type)
+-    else:
+-        # Full reconstruction
+-        reconstructed_volume = inverse_wavelet_transform_3d(decoded_coeffs, wavelet_type)
+-        
+-    # Step 3: Rendering
+-    image = render_volume(reconstructed_volume)
+-    return image
++**Parameters:**
++*   **Wavelet Basis:** Determines reversibility. Reversible wavelets (e.g., 5/3 biorthogonal) allow lossless reconstruction; irreversible wavelets (e.g., 9/7) are lossy [S3].
++*   **Kernel Size ($m$):** For block-wise reconstruction, $m$ is the wavelet filter length. Haar: $m=2$; Daubechies W6: $m=6$ [S4, unofficial].
++*   **Quantization:** If used, introduces lossiness. If not, compression is lossless (assuming perfect entropy coding) [S1, unofficial].
+ 
+-def wavelet_transform_3d(data, wavelet_type):
+-    """
+-    Performs 3D wavelet transform using separable 1D transforms.
+-    """
+-    # Apply 1D transform along x
+-    temp_x = apply_1d_wavelet(data, axis=0, wavelet_type=wavelet_type)
+-    # Apply 1D transform along y
+-    temp_y = apply_1d_wavelet(temp_x, axis=1, wavelet_type=wavelet_type)
+-    # Apply 1D transform along z
+-    coefficients = apply_1d_wavelet(temp_y, axis=2, wavelet_type=wavelet_type)
+-    return coefficients
+-
+-def apply_1d_wavelet(data, axis, wavelet_type):
+-    """
+-    Applies 1D wavelet transform along a specific axis.
+-    Performs convolution with wavelet kernel followed by downsampling.
+-    """
+-    # Transpose to process along axis
+-    data = transpose_3d(data, axis, 0)
+-    low, high = [], []
+-    for row in data:
+-        for i in range(0, len(row) - 1, 2):
+-            low.append((row[i] + row[i+1]) / 2.0)
+-            high.append((row[i] - row[i+1]) / 2.0)
+-        if len(row) % 2 == 1:
+-            low.append(row[-1])
+-            
+-    # Pack low and high bands
+-    result = []
+-    for l, h in zip(low, high):
+-        result.append([l, h])
+-    if len(low) > len(high):
+-        result.append([low[-1], 0.0])
+-        
+-    # Restore original axis order
+-    return transpose_3d(result, 0, axis)
+-
+-def apply_1d_inverse_wavelet(data, axis, wavelet_type):
+-    """
+-    Applies 1D inverse wavelet transform along a specific axis.
+-    Upsamples and convolves with inverse kernel.
+-    """
+-    data = transpose_3d(data, axis, 0)
+-    reconstructed = []
+-    for pair in data:
+-        reconstructed.append(pair[0] + pair[1])
+-    return transpose_3d(reconstructed, 0, axis)
+-
+-def inverse_wavelet_transform_3d(coefficients, wavelet_type):
+-    """
+-    Performs inverse 3D wavelet transform.
+-    """
+-    temp_z = apply_1d_inverse_wavelet(coefficients, axis=2, wavelet_type=wavelet_type)
+-    temp_y = apply_1d_inverse_wavelet(temp_z, axis=1, wavelet_type=wavelet_type)
+-    reconstructed = apply_1d_inverse_wavelet(temp_y, axis=0, wavelet_type=wavelet_type)
+-    return reconstructed
+-
+-def transpose_3d(data, src_axis, dst_axis):
+-    """
+-    Pure Python 3D array transpose.
+-    """
+-    shape = [len(data), len(data[0]), len(data[0][0])]
+-    new_shape = list(shape)
+-    new_shape[src_axis], new_shape[dst_axis] = new_shape[dst_axis], new_shape[src_axis]
+-    result = [[[0 for _ in range(new_shape[2])] for _ in range(new_shape[1])] for _ in range(new_shape[0])]
+-    for i in range(shape[0]):
+-        for j in range(shape[1]):
+-            for k in range(shape[2]):
+-                indices = [i, j, k]
+-                new_indices = [indices[0], indices[1], indices[2]]
+-                new_indices[src_axis], new_indices[dst_axis] = new_indices[dst_axis], new_indices[src_axis]
+-                result[new_indices[0]][new_indices[1]][new_indices[2]] = data[i][j][k]
+-    return result
+-
+-def quantize_coefficients(coefficients):
+-    """
+-    Quantizes wavelet coefficients for lossy compression.
+-    """
+-    return [[c / 4.0 for c in row] for row in coefficients]
+-
+-def entropy_encode(coefficients):
+-    """
+-    Applies run-length encoding as per [S1, unofficial][S3].
+-    """
+-    encoded = []
+-    if not coefficients: return encoded
+-    current = coefficients[0]
+-    count = 1
+-    for val in coefficients[1:]:
+-        if val == current:
+-            count += 1
+-        else:
+-            encoded.append((current, count))
+-            current = val
+-            count = 1
+-    encoded.append((current, count))
+-    return encoded
+-
+-def entropy_decode(bitstream):
+-    """
+-    Decodes the bitstream.
+-    """
+-    decoded = []
+-    for val, count in bitstream:
+-        decoded.extend([val] * count)
+-    return decoded
+-
+-def select_blocks_by_error(coefficients, error_tolerance):
+-    """
+-    Traverses the wavelet tree to select blocks that satisfy the error tolerance.
+-    """
+-    selected = []
+-    for coeff in coefficients:
+-        if abs(coeff) > error_tolerance:
+-            selected.append(coeff)
+-    return selected
+-
+-def reconstruct_blocks(selected_blocks, wavelet_type):
+-    """
+-    Reconstructs volume from selected wavelet blocks.
+-    """
+-    return inverse_wavelet_transform_3d(selected_blocks, wavelet_type)
+-
+-def render_volume(volume):
+-    """
+-    Renders the volume using raycasting or similar method.
+-    """
+-    return [sum(row) for row in volume]
+-```
+-
+-**Edge Cases and Pitfalls:**
+-* **Serial Decoding:** Lossless compression decoding is serial because it requires previous information to make the next decoding decision, making it difficult to implement efficiently on GPU [S1, unofficial].
+-* **Memory Access:** Without specific optimizations, the whole volumetric data must be decompressed in main memory to allow access for parts of the data [S1, unofficial].
+-* **Redundant Computation:** In block-wise reconstruction, adjacent blocks have redundant computation because the wavelet kernel extends outside the target block boundary [S5, unofficial].
++**Pitfalls:**
++*   **Serial Decoding:** Lossless entropy decoding requires previous information, making it inefficient for parallel GPU implementation [S1, unofficial].
++*   **Hierarchical Dependency:** Reconstructing finer levels requires coarser levels, creating decompression dependencies [S3].
++*   **Boundary Redundancy:** In block-wise reconstruction, adjacent blocks have redundant computation because the wavelet kernel extends beyond block boundaries (by approx. $m/2$) [S4, unofficial].
++*   **Memory Access:** Without specific optimizations, whole volumetric data may need to be decompressed in main memory for random access [S1, unofficial].
+ 
+ ## Subtopics
+ 
++### [Wavelet-based Adaptive Resolution Volume Rendering](1171-wavelet-based-adaptive-resolution-volume-rendering.md)
++A parallel rendering technique that reduces reconstruction cost by storing reconstructed data at pre-selected wavelet tree nodes based on available storage resources. It traverses the wavelet tree according to a user-specified error tolerance to identify and decompress data blocks of varying resolutions, which are then rendered in parallel to compose the final image. It sets itself apart from its siblings by explicitly optimizing for parallel load balancing and minimizing run-time communication costs through hierarchical space-filling curve distribution and error-guided bucketization, rather than focusing solely on single-processor memory hierarchy or splatting optimization.
++
+ ### [Wavelet-based Multiresolution Rendering](1588-wavelet-based-multiresolution-rendering.md)
+-An interactive rendering method for isosurfaces in a voxel grid where the underlying trivariate function is represented as a spline wavelet hierarchy. It allows adaptive, view-dependent selection of level-of-detail by superimposing appropriately weighted basis functions, decreasing resolution for distant parts to improve performance with minimal visual impact. It is distinguished from its sibling [Hierarchical Wavelet Transform on Omnitrees](2216-hierarchical-wavelet-transform-on-omnitrees.md) by its specific use of polynomial spline wavelets with B-spline basis functions to guarantee continuous surfaces and its implementation of a gathering-based CUDA kernel for reconstruction rather than scattering.
++An interactive rendering method for isosurfaces in a voxel grid that represents the underlying trivariate function as a spline wavelet hierarchy. It enables adaptive, view-dependent selection of level-of-detail by superimposing appropriately weighted basis functions, allowing distant parts of the volume to be rendered at lower resolution to improve performance with minimal visual impact. It distinguishes itself from sibling methods by explicitly combining GPU-accelerated wavelet reconstruction with a view-dependent error metric to selectively activate octree chunks, ensuring continuity by reconstructing necessary neighbors.
+ 
+ ### [Hierarchical Wavelet Transform on Omnitrees](2216-hierarchical-wavelet-transform-on-omnitrees.md)
+-This method transforms nodal omnitree data into wavelet coefficients to enable lossless or lossy compression via pruning and tree restructuring (downsplit). It operates directly on the omnitree's anisotropic structure, allowing coarsening in specific dimensions while preserving the hierarchical spatial layout.
++Hierarchical Wavelet Transform on Omnitrees is a compression strategy that transforms nodal omnitree data into wavelet coefficients to enable lossless or lossy compression via pruning and tree restructuring (downsplit). It solves the problem of minimizing storage size for 3D volumetric data by exploiting anisotropic refinement, setting itself apart from isotropic siblings like [Wavelet-based Multiresolution Rendering](1588-wavelet-based-multiresolution-rendering.md) by explicitly defining mathematical basis functions over the omnitree structure to achieve superior approximation rates.
+ 
+ ### [L2-optimal wavelet splatting](2816-l2-optimal-wavelet-splatting.md)
+@@ -218,50 +71,33 @@
+ The Point-wise Inverse Discrete Wavelet Transform (PW-IDWT) via Generalized Projection (GP) reconstructs a single signal sample (or a set of samples) from a wavelet decomposition by determining the minimal set of subband coefficients required. It solves the problem of identifying which coefficients at a coarser level contribute to a specific sample at a finer level during synthesis, exploiting the recursive nature of the lifting scheme. Unlike methods that decode entire subbands, this approach calculates the exact "Generalized Projection" of a sample into the transformed domain, minimizing the number of subband images to decode. It builds on [Wavelet-based Volume Rendering](1052-wavelet-based-volume-rendering.md) by providing an efficient, sample-specific inverse transform mechanism [G].
+ 
+-### Wavelet-based Adaptive Resolution Volume Rendering
+-A rendering technique that stores reconstructed data at pre-selected wavelet tree nodes based on available storage to reduce reconstruction cost, then traverses the tree per error tolerance to decompress and render blocks in parallel [S4, unofficial].
+-* **Steps:** 1. Traverse the wavelet tree according to a user-specified error tolerance [S4, unofficial]. 2. Identify data blocks of different resolutions that satisfy the error tolerance [S4, unofficial]. 3. Decompress the selected blocks [S4, unofficial]. 4. Render the decompressed blocks in parallel to compose the final image [S4, unofficial].
+-* **Parameters:** Error tolerance: User-specified threshold that controls wavelet tree traversal depth and determines which resolution blocks are decompressed and rendered [S4, unofficial].
+-* **Characteristics:** Reduces run-time communication cost to a minimum and ensures a well-balanced workload among processors when visualizing gigabytes of data with arbitrary error tolerances [S4, unofficial].
+-
+ ### Block-wise Wavelet Reconstruction
+-A reconstruction method that processes wavelet coefficients in blocks rather than point-wise to reduce redundant computation during volume rendering [S5, unofficial].
+-* **Steps:** Reconstruct a block of voxels along the z dimension by convolving the input with a wavelet kernel of size $m$ row by row [S5, unofficial]. Perform three passes (one for each dimension) to complete the reconstruction [S5, unofficial].
+-* **Formula:** The computational cost for one pass is $mn^3$, where $m$ is the kernel size and $n$ is the dimension size. Total cost for three passes is $3mn^3$. Point-wise cost is $m^3n^3$. The efficiency factor is $k = m^2/3$ [S5, unofficial].
+-* **Parameters:** Kernel size $m$: For Haar wavelet, $m=2$; for Daubechies W6, $m=6$ [S5, unofficial].
+-* **Pitfall:** Adjacent blocks have redundant computation because the wavelet kernel extends outside the target block boundary [S5, unofficial].
++A reconstruction method that processes wavelet coefficients in blocks rather than point-wise to reduce redundant computation during volume rendering [S4, unofficial]. It reconstructs a block of voxels along the z dimension by convolving the input with a wavelet kernel of size $m$ row by row, performing three passes (one for each dimension) to complete the reconstruction [S4, unofficial]. The computational cost for one pass is $mn^3$, where $m$ is the kernel size and $n$ is the dimension size. Total cost for three passes is $3mn^3$. Point-wise cost is $m^3n^3$. The efficiency factor is $k = m^2/3$ [S4, unofficial]. For Haar wavelet, $m=2$; for Daubechies W6, $m=6$ [S4, unofficial]. A pitfall is that adjacent blocks have redundant computation because the wavelet kernel extends outside the target block boundary (width approx. half the kernel length) [S4, unofficial].
+ 
+ ### On-the-fly Voxel Reconstruction
+-A method to reconstruct voxel values on-the-fly from wavelet coefficients during rendering, avoiding pre-computation of the entire volume [S5, unofficial]. It involves finding the appropriate wavelet coefficient at level $k$ and applying inverse wavelet transforms iteratively down to level 0 [S5, unofficial].
+-* **Steps:**
+-    1. Given a wavelet coefficient with $k$ levels and a target voxel $(x_0, y_0, z_0)$, find the voxel (cube of size $1 \times 1 \times 1$) from the level $k$, $w_k$, whose reconstruction contains the target voxel [S5, unofficial]. Map indices $x_0, y_0, z_0$ to $x_k, y_k, z_k$ in $w_k$ by dividing $x_0, y_0, z_0$ by $2^k$ [S5, unofficial]. The resultant voxel is in the LLL region of $w_k$ [S5, unofficial].
+-    2. Find the corresponding voxel in the other seven regions of the decomposed data (fHHH, fLLH, fHHL, fHLL, fLHH, fLHL, fLLH, fLLL) [S5, unofficial]. To do this, add half of the size of $x_k, y_k$, and $z_k$ (dimensions of $w_k$) to $x_k, y_k$, and $z_k$ respectively [S5, unofficial].
+-    3. Apply the inverse wavelet transformation to the above eight sub-cubes to reconstruct a new sub-cube with size doubled in each axis ($x_{k-1}, y_{k-1}, z_{k-1}$) [S5, unofficial]. The new reconstructed sub-cube will be in the LLL of $w_{k-1}$ [S5, unofficial].
+-    4. Repeat steps 2 and 3 until level 0 ($w_0$) is reached [S5, unofficial]. The resultant sub-volume is of size $2^k \times 2^k \times 2^k$ containing the desired voxel $(x_0, y_0, z_0)$ [S5, unofficial].
++A method to reconstruct voxel values on-the-fly from wavelet coefficients during rendering, avoiding pre-computation of the entire volume [S4, unofficial]. It involves finding the appropriate wavelet coefficient at level $k$ and applying inverse wavelet transforms iteratively down to level 0 [S4, unofficial]. Given a target voxel $(x_0, y_0, z_0)$, it maps indices to level $k$ by dividing by $2^k$, finds corresponding voxels in the 7 other subbands by adding half the size of the level $k$ block, and applies the inverse transform to reconstruct a sub-cube of doubled size at level $k-1$ [S4, unofficial]. This repeats until level 0 is reached [S4, unofficial].
+ 
+ ### Wavelet Splatting Method 1
+-A wavelet-based volume rendering method with slower complexity decay compared to Method 2 [S6].
+-* **Complexity:** Time complexity $Op_1$ decays with a factor of $2^j$ per scale $j$ [S6].
+-* **Comparison:** Method 1 is slower than Method 2, with $Op_2$ decaying with up to $2^{3j}$ per scale $j$ whereas $Op_1$ decays with only $2^j$ [S6].
++A wavelet-based volume rendering method with slower complexity decay compared to Method 2 [S5]. Time complexity Op1 decays with a factor of $2^j$ per scale $j$ [S5]. It is slower than Method 2, with Op2 decaying with up to $2^{3j}$ per scale $j$ whereas Op1 decays with only $2^j$ [S5].
+ 
+ ### EZW-3-D
+-A 3-D wavelet-based coding algorithm used for comparison, including a context-modeling variant (3-D CB-EZW) [S7].
+-* **Performance:** On MR-MRI data, 3-D CB-EZW achieved 2.285 bit/voxel (integer 5-3 filter) and 2.195 bit/voxel (two-level integer transform with (1,1) filter) [S7].
++A 3-D wavelet-based coding algorithm used for comparison, including a context-modeling variant (3-D CB-EZW) [S6]. On MR-MRI data, 3-D CB-EZW achieved 2.285 bit/voxel (integer 5-3 filter) and 2.195 bit/voxel (two-level integer transform with (1,1) filter) [S6].
+ 
+ ## Operating characteristics
+-* **Time Complexity:** Depends on the reconstruction method. Point-wise reconstruction has complexity $O(m^3 n^3)$, while block-wise reconstruction reduces this to $O(3mn^3)$, offering an efficiency factor of $k = m^2/3$ [S5, unofficial]. Wavelet splatting Method 1 has complexity decaying with $2^j$ per scale, while Method 2 decays with $2^{3j}$ [S6].
+-* **Memory Complexity:** Lossless compression decoding is serial and may require decompressing the whole volume in main memory unless optimized [S1, unofficial]. Adaptive methods reduce memory usage by only decompressing necessary blocks [S4, unofficial].
+-* **Measured Performance:** On MR-MRI data, 3-D CB-EZW achieved lossless rates of 2.285 and 2.195 bit/voxel [S7].
+-* **Strengths:** High compression ratios, support for multi-resolution rendering, and efficient storage of large datasets [S1, unofficial].
+-* **Limitations:** Serial nature of lossless decoding makes GPU implementation difficult [S1, unofficial]. Redundant computation in block-wise reconstruction [S5, unofficial].
+-* **When to use:** Large-scale time-varying data visualization on PC clusters or workstations [S1, unofficial].
+-* **When not to use:** When real-time interactive rendering on GPU is required with lossless compression and no specific optimizations are used [S1, unofficial].
++*   **Time Complexity:** Encoding is $O(N^3 \log N)$ for 3D DWT [S2]. Rendering complexity depends on the reconstruction method. Block-wise reconstruction is $O(m n^3)$ per block, which is $m^2/3$ times faster than point-wise reconstruction $O(m^3 n^3)$ [S4, unofficial]. Wavelet splatting Method 1 has complexity decaying as $2^j$ per scale, while Method 2 decays as $2^{3j}$ [S5].
++*   **Memory Complexity:** The wavelet representation is compact. Lossless compression ratios vary; for example, 3-D CB-EZW achieves ~2.2 bit/voxel on MR-MRI data [S6]. The data structure stores approximation and detail coefficients, often in an octree [S3].
++*   **Performance:** GPU implementations can achieve interactive speeds on hardware like NVIDIA GeForce Ti4600 when combined with optimizations [S1, unofficial]. However, serial lossless decoding is a bottleneck on GPUs [S1, unofficial].
++*   **Strengths:** High compression ratios, support for lossless/lossy modes, efficient multiresolution traversal, and spatial locality preservation [S3].
++*   **Limitations:** Serial nature of lossless decoding, hierarchical decompression dependencies, and boundary redundancy in block-wise methods [S1, unofficial][S3][S4, unofficial].
++*   **When to use:** Large volumetric datasets where memory bandwidth is a constraint, and adaptive resolution is beneficial [S3].
++*   **When not to use:** When real-time lossless decoding on GPU is required without parallelization tricks, or when the overhead of wavelet transform outweighs the benefits for small datasets [S1, unofficial].
+ 
+ ## Background
+-Wavelet-based volume rendering originated from the application of wavelet transforms to volumetric data compression and rendering [S3]. It has been thoroughly studied by researchers in recent years, with overviews provided by Stollnitz et al. [S1, unofficial]. The method is used in frameworks like WTSP (Wavelet-based Time-Space Partitioning) tree for large-scale time-varying data visualization on PC clusters [S1, unofficial]. The technique leverages the multi-resolution properties of wavelets to enable adaptive rendering and efficient data storage [S1, unofficial].
++Wavelet-based volume rendering was introduced by Muraki [Mur93] [S3]. It triggered significant follow-up work in the late 1990s and early 2000s, including contributions by Westermann [Wes94], Ihm and Park [IP99], and Guthe et al. [GWGS02] [S3]. The method leverages the Discrete Wavelet Transform (DWT), which transforms data into the frequency domain while maintaining spatial information, making it suitable for block-based and multiresolution rendering [S3]. It is used in frameworks like WTSP (Wavelet-based Time-Space Partitioning) for time-varying data [S1, unofficial] and has been implemented in classic renderers like Ihm and Park's [IP99] and later by Lamas-Rodriguez et al. [LRAH13] [S2].
+ 
+ ## Sources
+ [S1] A system for real-time rendering of compressed time-varying volume data, https://doi.org/10.7939/r3041m, fetched 2026-10-26 (unofficial)
+ [S2] PDF State-of-the-art in Compressed GPU-Based Direct Volume Rendering, https://www.ifi.uzh.ch/dam/jcr:00000000-1fe0-1a53-ffff-ffff94c9f943/CompressedDVR.pdf, fetched 2026-10-27
+-[S3] Direct rendering of multiresolution decomposed volume data., https://doi.org/10.82465/4870, fetched 2026-10-26
+-[S4] PDF Wavelet Projections for Volume Rendering, https://bigwww.epfl.ch/publications/horbelt9901.pdf, fetched 2026-10-28 (unofficial)
+-[S5] Three-dimensional encoding/two-dimensional decoding of medical data, https://doi.org/10.1109/tmi.2003.809689, fetched 2026-10-26 (unofficial)+[S3] PDF A Survey of Compressed GPU-Based Direct Volume Rendering, https://www.ifi.uzh.ch/dam/jcr:00000000-7f10-48e5-ffff-ffff94c9f943/CompressedDVR.pdf, fetched 2026-10-27
++[S4] Direct rendering of multiresolution decomposed volume data., https://doi.org/10.82465/4870, fetched 2026-10-26 (unofficial)
++[S5] PDF Wavelet Projections for Volume Rendering, https://bigwww.epfl.ch/publications/horbelt9901.pdf, fetched 2026-10-28
++[S6] Three-dimensional encoding/two-dimensional decoding of medical data, https://doi.org/10.1109/tmi.2003.809689, fetched 2026-10-26

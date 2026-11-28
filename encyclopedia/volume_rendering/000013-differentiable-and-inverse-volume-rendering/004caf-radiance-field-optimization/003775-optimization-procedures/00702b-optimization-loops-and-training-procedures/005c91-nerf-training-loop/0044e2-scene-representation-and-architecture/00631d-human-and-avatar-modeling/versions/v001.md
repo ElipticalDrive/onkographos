@@ -1,0 +1,52 @@
+# Human and Avatar Modeling
+
+Also called: Dynamic NeRF, Neural Avatars, Deformable Radiance Fields
+
+## Overview
+Human and Avatar Modeling extends static scene representation to handle dynamic, non-rigid subjects, specifically humans, by integrating parametric body models or deformation priors with neural radiance fields. Unlike static methods that assume rigid geometry, this family solves the problem of rendering articulated bodies with moving poses and expressions from limited input views (monocular or sparse multi-view) [S1, S2]. It is distinguished from sibling methods like [Specific Model Architectures](8585-specific-model-architectures.md) by its explicit coupling of neural fields with anatomical constraints (e.g., SMPL skeletons or blendshapes) to resolve the ambiguity of non-rigid deformation [S1, S2].
+
+## Shared principles
+All methods in this family share the mechanism of mapping 6D input coordinates (3D position $\mathbf{x}$ and 2D viewing direction $\mathbf{d}$) to 4D output values (density $\sigma$ and color $\mathbf{c}$) using a differentiable neural network [G]. This allows the radiance field to be optimized through the volumetric rendering integral [G].
+
+**Input Representation:**
+Raw coordinates $\mathbf{x}$ and $\mathbf{d}$ are rarely used directly due to the spectral bias of MLPs, which struggle to fit high-frequency details [G]. They are mapped to a higher-dimensional space using positional encoding $\gamma(\cdot)$ [G]. For a coordinate $\mathbf{x}$, the encoding includes the original value and sinusoidal functions at increasing frequencies:
+$$
+\gamma(\mathbf{x}) = (\sin(2^0 \pi \mathbf{x}), \cos(2^0 \pi \mathbf{x}), \dots, \sin(2^{L-1} \pi \mathbf{x}), \cos(2^{L-1} \pi \mathbf{x}))
+$$
+where $L$ is the number of frequency bands [G].
+
+**Network Topology:**
+The canonical implementation uses two coupled Multi-Layer Perceptrons (MLPs): a density network $F_\sigma$ and a color network $F_c$ [G].
+1.  **Density Network:** Takes the encoded position $\gamma(\mathbf{x})$ as input. It consists of $L$ hidden layers with ReLU activations and skip connections from the input to every 4th layer to preserve low-frequency information [G]. The output is the density $\sigma$.
+2.  **Color Network:** Takes the encoded position $\gamma(\mathbf{x})$, the raw viewing direction $\mathbf{d}$, and the intermediate feature vector from the density network (usually the output of the last hidden layer before the density head) as input. It predicts the color $\mathbf{c}$ using a final ReLU or sigmoid activation [G].
+
+**Rendering Integration:**
+During training, rays are sampled at points $\mathbf{x}_i$ along the ray. The MLPs predict $\sigma_i$ and $\mathbf{c}_i$. The pixel color $C(\mathbf{r})$ is computed via volumetric rendering:
+$$
+C(\mathbf{r}) = \sum_{i=1}^N T_i \alpha_i \mathbf{c}_i, \quad \text{where } \alpha_i = 1 - \exp(-\sigma_i \delta_i), \quad T_i = \prod_{j=1}^{i-1} (1 - \alpha_j)
+$$
+and $\delta_i$ is the distance between samples [G].
+
+## Subtopics
+
+### [NeRF with Per-Frame Latent Codes](12042-nerf-with-per-frame-latent-codes.md)
+Extends static NeRF to dynamic human faces by conditioning the radiance field on explicit deformation parameters (blendshape coefficients) and per-frame latent codes. It is distinguished from [NeuMan](12480-neuman.md) (skeletal body deformation) and [AR-NeRF](12493-ar-nerf.md) by its use of blendshape coefficients for implicit facial control. Choose this method for high-fidelity facial reenactment from monocular video where tracking errors need compensation via latent codes.
+
+### [Neural Body](12176-neural-body.md)
+Synthesizes novel views of dynamic human avatars from sparse multi-view videos by combining NeRF with a vertex-based deformable body model (SMPL). It anchors latent variables to mesh vertices, enabling pose interpolation. Choose this method for full-body dynamic avatars where sparse multi-view input is available and skeletal deformation is preferred over dense latent fields.
+
+### [NeuMan](12480-neuman.md)
+Renders a human together with a scene from a single video by jointly optimizing a scene NeRF and a pose-driven human NeRF. It introduces a canonical space based on the Da-pose SMPL mesh to avoid volume collision and an error-correction network for details not expressed by SMPL. Choose this method for single-video human-in-scene synthesis where multi-view data is unavailable.
+
+### Xu et al.
+A method for creating relightable and animatable human avatars from sparse or monocular video [S1]. It models the avatar as MLPs predicting material properties (albedo, roughness) and geometric properties (SDF, surface normal) in canonical space, transformed to world space via a neural deformation field [S1]. It uses a hierarchical distance query algorithm blending world-space KNN and canonical SDF distances for accurate pixel-surface intersection via sphere tracing [S1]. It extends distance field soft shadow (DFSS) computation to deformed SDFs for efficient soft shadow rendering [S1].
+
+### ARAH Pipeline
+A model to create animatable clothed human avatars with detailed geometry that generalizes to out-of-distribution poses, combining an articulated implicit surface representation (SDF) with volume rendering [S2]. It uses a novel joint root-finding algorithm to simultaneously search for the intersection with the SDF iso-surface in observation space and the correspondence in canonical space [S2]. The model consists of three canonical-space networks: a forward linear blend skinning (LBS) network, a canonical SDF network, and a canonical color network, all trained end-to-end with photometric and regularization losses [S2].
+
+## Background
+The field emerged from the need to render dynamic humans, which standard NeRF cannot handle due to its rigid scene assumption. Early works like [NeuMan](12480-neuman.md) and [Neural Body](12176-neural-body.md) introduced parametric models (SMPL) to guide deformation [S1, S2]. Facial modeling was addressed by [NeRF with Per-Frame Latent Codes](12042-nerf-with-per-frame-latent-codes.md) using blendshapes and latent codes [S2]. More recent approaches like Xu et al. and ARAH focus on relighting and generalization to unseen poses using SDFs and advanced deformation fields [S1, S2].
+
+## Sources
+[S1] Neural Radiance Fields in 3D Vision: A Comprehensive Review, https://doi.org/10.26599/cvm.2026.9450535, fetched 2026-10-28
+[S2] ARAH: Animatable Volume Rendering of Articulated Human SDFs, https://doi.org/10.1007/978-3-031-19824-3_1, fetched 2026-10-26

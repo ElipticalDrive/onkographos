@@ -1,0 +1,76 @@
+# Fixed Background Color
+
+Also called: Background Color Handling, Static Background Color
+
+## Overview
+Fixed Background Color is a technique in volume rendering where the background color behind the volumetric scene is held constant during the compositing process. It solves the problem of determining the final pixel color when the ray terminates or when the volume is transparent, by blending the accumulated volume contribution against a predefined, unchanging background color. It differs from NeRF Background Rendering [19907-nerf-background-rendering.md], which typically models the background as a learnable or spatially varying component, by treating the background as a static prior or a specific experimental control.
+
+## How it works
+**Inputs and Outputs:**
+- Input: Accumulated color $C_{vol}$ and accumulated opacity $\alpha_{acc}$ from the volume integration along the ray.
+- Input: Fixed background color $C_{bg}$ (a 3D vector, e.g., RGB).
+- Output: Final pixel color $C_{final}$.
+
+**Data Structures:**
+- $C_{bg}$: Stored as a constant value or a uniform buffer object. No spatial variation.
+
+**Steps:**
+1. Perform volume rendering to compute the accumulated color $C_{vol}$ and the total accumulated opacity $\alpha_{acc}$ along the ray segment $[t_n, t_f]$.
+   $$ C_{vol} = \sum_{i=n}^{f} T_i \cdot (1 - e^{-\sigma_i \Delta t_i}) \cdot c_i $$
+   $$ \alpha_{acc} = 1 - \prod_{i=n}^{f} e^{-\sigma_i \Delta t_i} $$
+   Where $T_i$ is the transmittance up to sample $i$, $\sigma_i$ is density, $\Delta t_i$ is step size, and $c_i$ is emitted color.
+2. Compute the final color by blending the accumulated volume color with the fixed background color using the accumulated opacity as the weight for the volume and $(1 - \alpha_{acc})$ as the weight for the background.
+   $$ C_{final} = C_{vol} + (1 - \alpha_{acc}) \cdot C_{bg} $$
+
+**Parameters:**
+- $C_{bg}$: The specific color value. Common values include pure white $(1, 1, 1)$ or pure black $(0, 0, 0)$ [S1, S2].
+
+**Edge Cases and Pitfalls:**
+- **Ambiguity with Black/Monochrome Backgrounds:** Using a black background creates an ambiguity where high light intensity with low density is indistinguishable from low light intensity with high density [S2]. In this case, transparency cannot be uniquely determined from the target image because the background contribution is zero [S2].
+- **Color Distinguishability:** A background color distinguishable from the volumetric content (e.g., smoke) allows for better recovery of density and transparency [S2].
+- **Experimental Consistency:** The choice of background color must match the training data distribution. For example, ShapeNet renderings often use white backgrounds, while DTU setups may use black backgrounds [S1].
+
+**Pseudocode:**
+> **Unverified code.** The code below did not pass a test run against a reference implementation, or no test fits it, so it may contain errors.
+
+```python
+def fixed_background_composite(accumulated_color, accumulated_opacity, background_color):
+    """
+    Composite the accumulated volume against a fixed background.
+    
+    Args:
+        accumulated_color (vec3): The color accumulated from the volume samples.
+        accumulated_opacity (float): The total opacity accumulated along the ray (0 to 1).
+        background_color (vec3): The fixed background color (e.g., white or black).
+        
+    Returns:
+        vec3: The final pixel color.
+    """
+    # Weight of the background is the transmittance through the volume
+    background_weight = 1.0 - accumulated_opacity
+    
+    # Blend volume color and background color
+    final_color = accumulated_color + (background_weight * background_color)
+    
+    return final_color
+```
+
+## Subtopics
+
+### Background Color Resolution
+This variant emphasizes the role of the background color in resolving ambiguities in density and transparency estimation. It is chosen when the goal is to optimize light intensities or recover accurate density fields from monochrome or ambiguous targets. It differs from standard fixed background usage by explicitly leveraging the color contrast to disambiguate density/lighting trade-offs [S2]. When the target image is monochrome, a black background makes transparency irrelevant, whereas a colored background allows transparency and density to be determined successively [S2]. Colored backgrounds yield better density recovery in shadowed regions compared to black backgrounds [S2]. However, optimizing light intensities alongside this adds degrees of freedom, so light intensities are often determined empirically if not optimized [S2].
+
+## Operating characteristics
+- **Time Complexity:** $O(1)$ per pixel for the compositing step itself, as it involves a simple vector addition and multiplication.
+- **Memory Complexity:** $O(1)$, requiring only the storage of the background color constant.
+- **Strengths:** Simple to implement; computationally negligible cost; provides a stable baseline for volume rendering.
+- **Limitations:** Cannot model complex background scenes; may introduce artifacts if the background color clashes with the volume content (e.g., black background with dark smoke); creates ambiguity in density estimation if the background is not distinguishable from the volume [S2].
+- **When to use:** Synthetic datasets with known background colors (e.g., ShapeNet, DTU); when background modeling is out of scope; when using monochrome targets where a colored background aids optimization [S2].
+- **When not to use:** Real-world scenes with complex, varying backgrounds; when the background is part of the scene geometry to be reconstructed.
+
+## Background
+The use of fixed background colors is standard in synthetic volume rendering datasets. In the context of Neural Radiance Fields (NeRF), a white background is commonly used to match the synthetic ShapeNet renderings, while a black background is used for the DTU setup [S1]. In fluid reconstruction and other volumetric optimization tasks, the choice of background color is critical for disambiguating density and light intensity, with colored backgrounds offering superior recovery in shadowed regions compared to black backgrounds [S2].
+
+## Sources
+[S1] pixelNeRF: Neural Radiance Fields from One or Few Images, https://doi.org/10.1109/cvpr46437.2021.00455, fetched 2026-10-26
+[S2] Global Transport for Fluid Reconstruction with Learned Self-Supervision, https://doi.org/10.1109/cvpr46437.2021.00168, fetched 2026-10-30

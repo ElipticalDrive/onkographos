@@ -1,0 +1,170 @@
+--- v006.md
++++ v007.md
+@@ -4,102 +4,102 @@
+ 
+ ## Overview
+-An out-of-core rendering approach for multi-channel volume datasets where octree nodes and bricks store information on up to $n$ channels [S1, unofficial]. It solves the problem of limited physical memory by using OS-level memory mapping to load only the parts of the data structure actually rendered during tree traversals [S2, unofficial]. Unlike the [Residency Octree](4950-residency-octree.md), which decouples cache residency from spatial subdivision and allows partial subtree residency, this method enforces that the whole subtree is resident in the cache for high-resolution rendering, leading to a higher memory footprint and worse performance for multiple channels [S1, unofficial].
++Octree-based memory virtualization is an out-of-core rendering technique for multi-channel volume datasets that utilizes operating system memory mapping to load octree nodes and bricks on demand [S1, unofficial][S2, unofficial]. It distinguishes itself from sibling methods like [Residency Octree](4950-residency-octree.md) by enforcing full subtree residency in the cache for high-resolution rendering, whereas the Residency Octree allows partial subtree residency [S1, unofficial]. Unlike [Virtual Memory Volume Rendering](16077-virtual-memory-volume-rendering.md), which uses a multi-resolution page table hierarchy to avoid pre-computed 3D hierarchies, this method relies on an explicit octree structure [S1, unofficial].
+ 
+ ## How it works
+ **Inputs and Outputs:**
+-*   **Input:** Multi-channel volume dataset stored on disk; octree structure defining spatial subdivision; current camera view and rendering parameters.
+-*   **Output:** Rendered image with alpha-blended channels.
++*   **Input:** Multi-channel volume dataset stored on disk; octree structure where nodes and bricks store information for up to $n$ channels.
++*   **Output:** Rendered image with channels mixed via alpha blending.
+ 
+ **Data Structures:**
+-*   **Octree Nodes:** Store pointers to bricks and culling metadata. For multi-channel data, a node is marked homogeneous only if its corresponding bricks in *all* channels are homogeneous [S1, unofficial].
++*   **Octree Nodes:** Store culling metadata and pointers to bricks. For multi-channel data, a node is marked homogeneous only if its corresponding bricks in *all* channels are homogeneous [S1, unofficial].
+ *   **Bricks:** Store voxel data for up to $n$ channels.
+-*   **Memory Mapping:** Binary data files are mapped to virtual memory using the OS-provided `mmap` function [S2, unofficial].
++*   **Homogeneous Optimization:** If a brick is homogeneous (all voxels contain the same value up to a user-defined threshold), the node stores the average value of the brick instead of a pointer to the brick’s location in the brick cache [S1, unofficial].
+ 
+ **Parameters:**
+-*   **$n$ (Number of channels):** Implementation-defined and cannot be changed at run-time. In practice, limited to 4 because GPU texture formats are limited to four components [S1, unofficial].
++*   **$n$ (Number of Channels):** Implementation-defined and cannot be changed at run-time [S1, unofficial]. In practice, limited to 4 because GPU texture formats are limited to four components [S1, unofficial].
+ 
+-**Steps:**
+-1.  **Memory Mapping:** Map the binary data files containing the octree and bricks to virtual memory using `mmap` [S2, unofficial].
+-2.  **Tree Traversal:** Traverse the octree from the root.
+-    *   If the current frame-rate is too low, smoothly increase the minimum regular splat size $\delta_r$ and minimum boundary splat size $\delta_b$ [S2, unofficial].
+-    *   For each child of the current node:
+-        *   If the child does not pass culling tests, ignore it [S2, unofficial].
+-        *   Calculate $S$, the screen size of the bounding sphere of the child [S2, unofficial].
+-        *   If the child is a leaf node, render it as a splat (implementation detail not fully specified in sources, but implied by "TetSplat" context) [S2, unofficial].
+-        *   If the child is not a leaf, recursively traverse it [S2, unofficial].
+-3.  **Homogeneous Optimization:** If a node corresponds to homogeneous bricks (all voxels contain the same value up to a user-defined threshold), store the average value in the brick instead of a pointer to the brick’s location in the brick cache [S1, unofficial].
+-4.  **Channel Mixing:** Combine multiple channels using accumulation-level intermixing (alpha blending) [S1, unofficial].
++**Algorithm Steps:**
++1.  **Memory Mapping:** Map the binary data files containing the octree and bricks to virtual memory using the OS-provided `mmap` function [S2, unofficial]. This avoids loading the entire structure into physical memory, ensuring efficient use of physical memory by only loading parts actually rendered during tree traversals [S2, unofficial].
++2.  **Tree Traversal:** Traverse the octree. Since the trees are stored breadth-first, this progressive loading enables fast recursive refinements [S2, unofficial].
++3.  **Culling:** For each child of the current node, perform culling tests. Ignore children that do not pass [S2, unofficial].
++4.  **Homogeneity Check:** Determine if the current node's bricks are homogeneous across all $n$ channels [S1, unofficial].
++5.  **Data Access:**
++    *   If homogeneous: Retrieve the stored average value [S1, unofficial].
++    *   If not homogeneous: Load the brick from the mapped virtual memory into the brick cache [S1, unofficial][S2, unofficial].
++6.  **Rendering:** Render the leaf nodes (e.g., as splats or rays) using the loaded data [S2, unofficial].
++7.  **Adaptive Refinement:** If the current frame rate is too low, smoothly increase the minimum regular splat size ($\delta_r$) and minimum boundary splat size ($\delta_b$) to reduce rendering load [S2, unofficial].
+ 
+ **Pseudocode:**
+ ```python
+-# Global variables
+-delta_r = 0.0  # Minimum regular splat size in pixels
+-delta_b = 0.0  # Minimum boundary splat size in pixels
+-n = 4          # Number of channels (implementation-defined, max 4)
++def render_volume_octree(root_node, n_channels):
++    # Map files to virtual memory using OS mmap
++    virtual_memory = os_mmap(data_files)
++    
++    # Global parameters for adaptive refinement
++    delta_r = initial_min_regular_splat_size
++    delta_b = initial_min_boundary_splat_size
++    
++    traverse_tree(root_node, virtual_memory, n_channels, delta_r, delta_b)
+ 
+-def traverse_tree(node):
+-    # Check frame rate and adjust splat sizes if necessary
+-    if current_frame_rate_is_too_low():
++def traverse_tree(node, virtual_memory, n_channels, delta_r, delta_b):
++    # Adaptive refinement check
++    if current_frame_rate < threshold:
+         delta_r = smooth_increase(delta_r)
+         delta_b = smooth_increase(delta_b)
+-    
++        
+     for child in node.children:
+-        if not passes_culling_tests(child):
++        # Culling test
++        if not passes_culling(child):
+             continue
+             
+-        S = screen_size_of_bounding_sphere(child)
++        # Calculate screen size of bounding sphere
++        screen_size = calculate_screen_size(child.bounding_sphere)
+         
+         if child.is_leaf:
+-            # Render leaf as splat
+-            render_splat(child, S, delta_r, delta_b)
++            # Render leaf node
++            render_leaf(child, virtual_memory, n_channels, delta_r, delta_b)
+         else:
+-            traverse_tree(child)
++            # Recurse
++            traverse_tree(child, virtual_memory, n_channels, delta_r, delta_b)
+ 
+-def render_splat(leaf_node, S, delta_r, delta_b):
+-    # Implementation detail: Render the leaf node's brick data
+-    # using the calculated splat sizes and mapped memory
+-    pass
+-
+-def passes_culling_tests(node):
+-    # Culling logic based on visibility and resolution
+-    # Not fully specified in sources
+-    return True
+-
+-def current_frame_rate_is_too_low():
+-    # Check if frame rate drops below threshold
+-    # Not fully specified in sources
+-    return False
+-
+-def smooth_increase(value):
+-    # Increase value smoothly
+-    # Not fully specified in sources
+-    return value + 0.1
++def render_leaf(leaf, virtual_memory, n_channels, delta_r, delta_b):
++    # Check homogeneity for all n channels
++    is_homogeneous = True
++    average_values = []
++    
++    for c in range(n_channels):
++        brick = leaf.bricks[c]
++        if not is_brick_homogeneous(brick):
++            is_homogeneous = False
++            break
++        average_values.append(brick.average_value)
++        
++    if is_homogeneous:
++        # Use stored average values
++        data = average_values
++    else:
++        # Load brick from virtual memory into cache
++        data = load_brick_from_virtual_memory(leaf.brick_pointers, virtual_memory)
++        
++    # Render using data (e.g., splatting or ray marching)
++    render_data(data, delta_r, delta_b)
+ ```
+-
+-**Edge Cases and Pitfalls:**
+-*   **Channel Limit:** The number of channels $n$ is limited to 4 due to GPU texture format constraints [S1, unofficial].
+-*   **Homogeneity Check:** A node can only be marked homogeneous if its corresponding bricks in *all* channels are homogeneous [S1, unofficial].
+-*   **Occlusion:** Image-level intermixing (alpha blending) cannot handle occlusions between different channels correctly due to missing depth information in accumulated intermediate results [S1, unofficial].
+ 
+ ## Subtopics
+ 
+ ### [Octree-based out-of-core volume rendering](5171-octree-based-out-of-core-volume-rendering.md)
+-Extends this method to support multiple visible channels by storing pointers and culling metadata in each node. Unlike the [Residency Octree](4950-residency-octree.md), it enforces whole subtree residency, leading to higher memory footprint and worse performance for multiple channels.
++Extends this method to support multiple visible channels by storing pointers and culling metadata in each node. Enforces whole subtree residency, leading to higher memory footprint and worse performance for multiple channels compared to the Residency Octree.
+ 
+ ### [Virtual Memory Volume Rendering](16077-virtual-memory-volume-rendering.md)
+-Uses a virtual memory scheme with arbitrary packing and no pre-computed 3D hierarchy, avoiding the need to hold the entire path from leaf to root in GPU memory.
++Uses a virtual memory scheme with arbitrary packing and no pre-computed 3D hierarchy, avoiding the need to hold the entire path from leaf to root in GPU memory required by this method.
+ 
+ ## Operating characteristics
+-*   **Time Complexity:** Not given in the sources.
+-*   **Memory Complexity:** Depends on the number of nodes and bricks actually traversed and rendered. Memory mapping allows efficient use of physical memory by only loading parts of the data structure [S2, unofficial].
+-*   **Measured Performance:** Not given in the sources.
+-*   **Scaling:** Progressive loading gives fast recursive refinements due to breadth-first storage [S2, unofficial].
+-*   **Strengths:** Efficient use of physical memory; fast recursive refinements; supports multi-channel data.
+-*   **Limitations:** Higher memory footprint and worse performance for multiple channels compared to the [Residency Octree](4950-residency-octree.md); limited to 4 channels; cannot handle occlusions between channels correctly [S1, unofficial].
+-*   **When to use:** When rendering multi-channel volume datasets that exceed available texture memory and interactive exploration is required.
+-*   **When not to use:** When occlusions between channels are critical or when more than 4 channels are needed.
++*   **Memory Efficiency:** High efficiency for physical memory usage because only parts of the data structure actually rendered during tree traversals are loaded into physical memory [S2, unofficial].
++*   **Performance:** Fast recursive refinements are enabled by the breadth-first storage of the trees [S2, unofficial].
++*   **Limitations:** The number of channels is limited to 4 due to GPU texture format constraints [S1, unofficial]. The method requires explicit octree traversal and holding the entire path from leaf to root in memory, which can be a drawback compared to page-table methods [S1, unofficial].
++*   **Adaptivity:** Supports adaptive refinement by adjusting splat sizes based on frame rate [S2, unofficial].
+ 
+ ## Background
+-Originated with Crassin et al. [CNLE09] and extended by Brix et al. [BPH14] for multi-channel data. Implemented in Voreen [DLJL22] [S1, unofficial].
++The method was introduced by Crassin et al. [CNLE09] as a scheme for out-of-core rendering. It has been implemented in the Voreen volume rendering framework [DLJL22]. Brix et al. [BPH14] extended this approach to multi-channel data sets.
+ 
+ ## Sources

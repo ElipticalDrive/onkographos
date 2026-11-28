@@ -1,0 +1,144 @@
+# SPC-NeRF
+
+Also called: Spatial Predictive Compression for Voxel-Based Radiance Field
+
+## Overview
+SPC-NeRF is a Rate-Distortion (RD) optimized predictive coding framework designed to compress Explicit Voxel Grid (EVG) represented Neural Radiance Fields (NeRFs) by removing spatial redundancy [S1]. It builds on the DirectVoxGO pipeline and achieves 32% bit savings compared to the state-of-the-art VQRF method on multiple representative test datasets, with comparable training time [S1].
+
+## How it works
+**Inputs:** An uncompressed voxel grid obtained from the DirectVoxGO pipeline [S1].
+**Outputs:** A compressed bitstream containing reference indexes, coarse residuals, fine residuals, prune mask, critical mask, non-prune density grid, weights of the shallow MLP, and metadata [S1].
+
+**Data Structures:** The method operates on an EVG where each voxel stores density and color features [S1]. The compressed bitstream syntax elements are:
+1. Reference indexes: Index pointing to the chosen adjacent voxel for prediction [S1].
+2. Coarse residuals: Quantized differences between actual and predicted values for non-critical voxels [S1].
+3. Fine residuals: Quantized differences for critical voxels, reconstructed after post-finetuning [S1].
+4. Prune mask: Binary indicator for pruned vs. unpruned voxels [S1].
+5. Critical mask: Binary indicator for critical vs. non-critical voxels among unpruned ones [S1].
+6. Non-prune density grid: Density values for unpruned voxels [S1].
+7. Weights of the shallow MLP: Model parameters [S1].
+8. Metadata: Scene-specific information [S1].
+
+**Algorithm Steps:**
+
+1. **Initialization:** Apply the DirectVoxGO pipeline to obtain the uncompressed voxel grid [S1].
+2. **Pruning and Critical Selection:** Prune approximately 90% of unimportant voxels and mark a small part of the remaining voxels as critical [S1].
+3. **Reference Graph Construction:** Select one adjacent voxel from seven possible previously encountered neighboring voxels as the prediction value for each unpruned voxel, and record the index of the reference to construct a reference relation graph [S1].
+4. **RD Loss Formulation and Finetuning:** Apply a unique bit estimation method to form the RD loss and finetune the voxel grid to jointly optimize compression ratio and distortion [S1].
+5. **Coarse Residual Generation:** Perform actual quantization and prediction using the reference graph to generate coarse residuals [S1].
+6. **Post-Finetuning:** Freeze all non-critical voxels and perform a second finetuning step to generate fine residuals for reconstructing the critical voxels [S1].
+7. **Entropy Coding:** Entropy code the residuals and indexes via arithmetic coding [S1]. Code other syntax elements (prune mask, critical mask, etc.) that occupy little storage with a simple LZ77 codec [S1].
+
+**Pseudocode:**
+
+> **Unverified code.** The code below did not pass a test run against a reference implementation, or no test fits it, so it may contain errors.
+
+```python
+def spc_nerf_compress(uncompressed_voxel_grid):
+    voxel_grid = uncompressed_voxel_grid
+    pruning_ratio = 0.9
+
+    # Step 2: Pruning and Critical Selection
+    # Prune ~90% of voxels. Mark a small subset as critical.
+    # Sources do not specify the exact pruning/critical selection criteria [G].
+    prune_mask = [False] * len(voxel_grid)
+    critical_mask = [False] * len(voxel_grid)
+    unpruned_indices = [i for i in range(len(voxel_grid)) if not prune_mask[i]]
+
+    # Step 3: Reference Graph Construction
+    # For each unpruned voxel, select one adjacent voxel from 7 neighbors as reference.
+    reference_graph = {}
+    for idx in unpruned_indices:
+        neighbors = get_7_adjacent_neighbors(idx)
+        ref_idx = select_best_reference(neighbors, voxel_grid)
+        reference_graph[idx] = ref_idx
+
+    # Step 4: RD Loss Formulation and Finetuning
+    # Apply unique bit estimation method to form RD loss and finetune grid.
+    # Sources do not specify the exact bit estimation formula or optimizer [G].
+    voxel_grid = finetune_with_rd_loss(voxel_grid, reference_graph, prune_mask, critical_mask)
+
+    # Step 5: Coarse Residual Generation
+    coarse_residuals = {}
+    for idx in unpruned_indices:
+        if not critical_mask[idx]:
+            ref_idx = reference_graph[idx]
+            predicted = voxel_grid[ref_idx]
+            actual = voxel_grid[idx]
+            coarse_residuals[idx] = quantize(actual - predicted)
+
+    # Step 6: Post-Finetuning for Critical Voxels
+    # Freeze non-critical voxels. Finetune to generate fine residuals for critical voxels.
+    frozen_grid = voxel_grid.copy()
+    for idx in unpruned_indices:
+        if not critical_mask[idx]:
+            frozen_grid[idx] = voxel_grid[idx]
+    # Sources do not specify the exact post-finetuning procedure [G].
+    fine_residuals = {}
+    for idx in unpruned_indices:
+        if critical_mask[idx]:
+            ref_idx = reference_graph[idx]
+            ref_value = frozen_grid[ref_idx] if not critical_mask[ref_idx] else voxel_grid[ref_idx]
+            actual = voxel_grid[idx]
+            fine_residuals[idx] = quantize(actual - ref_value)
+
+    # Step 7: Entropy Coding
+    # Arithmetic coding for residuals and indexes
+    bitstream = encode_arithmetic(reference_graph) + encode_arithmetic(coarse_residuals) + encode_arithmetic(fine_residuals)
+    # LZ77 for small syntax elements
+    bitstream += encode_lz77(prune_mask)
+    bitstream += encode_lz77(critical_mask)
+    bitstream += encode_lz77(get_non_prune_density_grid(voxel_grid, prune_mask))
+    bitstream += encode_lz77(get_shallow_mlp_weights(voxel_grid))
+    bitstream += encode_lz77(metadata)
+
+    return bitstream
+
+def get_7_adjacent_neighbors(idx):
+    # Standard 3D grid neighbor lookup returning up to 7 adjacent indices
+    return []
+
+def select_best_reference(neighbors, grid):
+    # Selects neighbor with highest correlation or lowest prediction error
+    return neighbors[0] if neighbors else None
+
+def finetune_with_rd_loss(grid, ref_graph, prune_m, crit_m):
+    # Applies RD loss optimization. Sources do not specify details [G].
+    return grid
+
+def encode_arithmetic(data):
+    # Standard arithmetic coding implementation
+    return b""
+
+def encode_lz77(data):
+    # Standard LZ77 implementation
+    return b""
+
+def get_non_prune_density_grid(grid, prune_m):
+    return [grid[i] for i in range(len(grid)) if not prune_m[i]]
+
+def get_shallow_mlp_weights(grid):
+    return grid.weights
+
+def quantize(value):
+    return round(value)
+```
+
+**Parameters:**
+*   **Pruning Ratio:** Approximately 90% of unimportant voxels are pruned [S1].
+
+**Edge Cases and Pitfalls:**
+*   **Reference Selection:** The choice of reference from seven neighbors impacts the residual magnitude and thus the bitrate [S1].
+*   **Critical Voxels:** The definition of "critical" is not explicitly detailed in the sources, but it is crucial for the two-stage finetuning [G].
+*   **Precision:** Quantization of residuals is necessary for compression. The sources do not specify the bit depth for quantization [G].
+
+## Operating characteristics
+*   **Compression Performance:** Achieves 32% bit saving compared to VQRF on multiple representative test datasets [S1].
+*   **Training Time:** Comparable to the baseline DirectVoxGO pipeline [S1].
+*   **Strengths:** Effective removal of spatial redundancy through predictive coding; joint optimization of rate and distortion [S1].
+
+## Background
+SPC-NeRF was proposed to address the high computational and storage complexity of NeRF models represented by Explicit Voxel Grids [S1]. It builds on the concept of spatial predictive coding, which exploits statistical dependence between spatially adjacent samples, analogous to image compression techniques [S1]. The method was developed to improve coding efficiency by jointly optimizing compression ratio and distortion [S1].
+
+## Sources
+[S1] SPC-NeRF: Spatial Predictive Compression for Voxel-Based Radiance Field, https://doi.org/10.1145/3795528, fetched 2026-10-26

@@ -1,0 +1,186 @@
+# Hybrid Gaussian Splatting
+
+Also called: HybridGS
+
+## Overview
+HybridGS is a method for novel view synthesis in scenes containing transient objects (e.g., moving people, vehicles) by decoupling the scene representation into static and transient components [S1]. It models static scene elements using multi-view consistent 3D Gaussians and transient elements using single-view independent 2D Gaussians [S1]. This approach addresses the limitation of standard 3D Gaussian Splatting (3DGS), which tends to overfit transient objects into the 3D Gaussian kernels due to RGB loss constraints, causing artifacts in novel views [S1]. By separating these components, HybridGS improves the quality of static scene reconstruction and transient handling compared to vanilla 3DGS [S1].
+
+## How it works
+### Inputs and Outputs
+**Inputs:** A set of $N$ casually captured images $\{I_k\}$ of a scene with minimal illumination changes [S1].
+**Outputs:** Optimized parameters for 3D Gaussians ($\theta_{3d}$) representing statics and 2D Gaussians representing transients, enabling the rendering of novel views [S1].
+
+### Data Structures
+**3D Gaussian Parameters ($\theta_{3d}$):**
+Each 3D Gaussian is defined by:
+*   Centroid: $x_{3d} \in \mathbb{R}^3$
+*   Scale: $S_{3d} \in \mathbb{R}^3$
+*   Rotation: $R_{3d} \in \mathbb{R}^{3\times3}$
+*   Opacity: $\alpha_{3d} \in \mathbb{R}$
+*   Color: $c_{3d} \in \mathbb{R}^3$ (encoded as spherical harmonic coefficients) [S1]
+
+**2D Gaussian Parameters:**
+Each 2D Gaussian is defined by:
+*   Centroid: $x_{2d} \in \mathbb{R}^2$
+*   Covariance: $\Sigma_{2d} \in \mathbb{R}^{2\times2}$
+*   Opacity: $\alpha_{2d} \in \mathbb{R}$
+*   Color: $c_{2d} \in \mathbb{R}^3$ [S1]
+
+**Covariance Factorization:**
+The 3D covariance matrix is computed from rotation and scale as:
+$$ \Sigma_{3d} = R_{3d} S_{3d} S_{3d}^T R_{3d}^T $$
+The 2D covariance matrix is computed from rotation and scale as:
+$$ \Sigma_{2d} = R_{2d} S_{2d} S_{2d}^T R_{2d}^T $$
+where $R_{2d} \in \mathbb{R}^{2\times2}$ and $S_{2d} \in \mathbb{R}^2$ [S1].
+
+### Training Pipeline
+The training consists of three stages: Warm-up, Iterative Training, and Joint Fine-tuning [S1].
+
+#### 1. Warm-up Stage
+The goal is to capture the static scene structure using 3DGS with multi-view regulated supervision [S1].
+1.  **Initialization:** Initialize 3D Gaussians using sparse Structure-from-Motion (SfM) point clouds obtained from the input images [S1].
+2.  **Densification:** Perform densification of 3D Gaussians to establish an initial model of the entire scene [S1].
+3.  **Optimization:** Optimize 3D Gaussians using the warm-up loss $L_{warmup}$ [S1]:
+    $$ L_{warmup} = \lambda L_{DSSIM}(\hat{I}_s, I) + (1 - \lambda)L_1(\hat{I}_s, I) $$
+    where $\hat{I}_s$ is the rendered static image, $I$ is the ground truth, and $\lambda = 0.2$ [S1].
+4.  **Multi-view Regulated Supervision:** To prevent overfitting transients, supervision is applied only to 3D Gaussians within co-visible regions of $K$ sampled images [S1].
+    *   Sample $K$ images randomly from the dataset.
+    *   Compute the intersection of frustums ($F_{inter}$) for these $K$ images.
+    *   Extract 3D Gaussians located within $F_{inter}$.
+    *   Update parameters only for these extracted Gaussians [S1].
+
+#### 2. Iterative Training Stage
+The goal is to alternately optimize 2DGS (transients) and 3DGS (statics) [S1].
+1.  **2DGS Optimization:**
+    *   Hold 3DGS parameters fixed.
+    *   Render static image $\hat{I}_s$ using 3DGS.
+    *   Optimize 2D Gaussians to learn per-view residuals and predict a transient mask $\hat{M}_t$ [S1].
+    *   The 2D Gaussian opacity at pixel $y_{2d}$ is:
+        $$ \alpha_{2d}'^i = \alpha_{2d}^i \cdot e^{-\frac{1}{2}(y_{2d}-x_{2d})^T \Sigma_{2d}^{-1}(y_{2d}-x_{2d})} $$
+    *   The transient mask is the sum of 2D Gaussian opacities:
+        $$ \hat{M}_t(y_{2d}) = \sum_{i \in N} \alpha_{2d}'^i $$
+    *   The transient image is computed via simplified accumulated summation:
+        $$ \hat{I}_t = \sum_{i \in N} \alpha_{2d}'^i c_{2d}^i $$
+    *   Loss for 2DGS:
+        $$ L_{iter2d} = \lambda L_{DSSIM}(I, \hat{I}) + (1 - \lambda)L_1(I, \hat{I}) $$
+        where $\hat{I} = \hat{M}_t \odot \hat{I}_t + (1 - \hat{M}_t) \odot \hat{I}_s$ [S1].
+2.  **3DGS Optimization:**
+    *   Hold 2DGS parameters fixed.
+    *   Binarize the uncertainty mask $\hat{M}_t$ into 0s and 1s using a threshold $\epsilon = 0.1$ [S1].
+    *   Direct 3DGS to focus on areas with smaller residuals (static regions) by masking the loss:
+        $$ L_{iter3d} = (1 - \hat{M}_t) \odot L_{iter2d} $$
+    *   Update 3DGS parameters [S1].
+3.  **Alternation:** Repeat steps 1 and 2 for the specified number of iterations [S1].
+
+#### 3. Joint Fine-tuning Stage
+The goal is to deep integrate 2D and 3D Gaussians for fine-tuning [S1].
+1.  Enable gradient backpropagation for both 2DGS and 3DGS branches simultaneously [S1].
+2.  Optimize all parameters to reduce the error between the final rendered image $\hat{I}$ and ground truth $I$ [S1].
+3.  Loss for joint fine-tuning:
+    $$ L_{joint} = \beta L_{DSSIM}(I, \hat{I}) + (1 - \beta)L_1(I, \hat{I}) $$
+    where $\beta = 0.2$ [S1].
+
+### Rendering
+To render a novel view:
+1.  **3DGS Rendering:**
+    *   Project 3D Gaussians to camera coordinates using the Jacobian $J$ of the affine projective transformation and viewing transformation $W$:
+        $$ \Sigma'_{3d} = JW\Sigma_{3d}W^T J^T $$
+    *   Compute final opacity for splat $i$:
+        $$ \alpha_{3d}'^i = \alpha_{3d}^i \cdot e^{-\frac{1}{2}(y_{3d}-x_{3d})^T \Sigma_{3d}^{-1}(y_{3d}-x_{3d})} $$
+    *   Compute color using $\alpha$-blending:
+        $$ C_{3d} = \sum_{i \in N} \alpha_{3d}'^i c_{3d}^i \prod_{j=1}^{i-1} (1 - \alpha_{3d}'^j) $$
+2.  **Composition:**
+    *   Combine static rendering $\hat{I}_s$ and transient rendering $\hat{I}_t$ using the transient mask $\hat{M}_t$:
+        $$ I = \hat{M}_t \odot \hat{I}_t + (1 - \hat{M}_t) \odot \hat{I}_s $$
+    where $\odot$ is per-pixel multiplication [S1].
+
+### Pseudocode
+> **Unverified code.** The code below did not pass a test run against a reference implementation, or no test fits it, so it may contain errors.
+
+```python
+def hybridgs_training(images, K=4, warmup_steps=1000, iter2d_steps=10000, iter3d_steps=1000, joint_steps=30000, lambda_val=0.2, beta_val=0.2, epsilon=0.1):
+    # Initialize 3D Gaussians from SfM point clouds
+    theta_3d = initialize_3d_gaussians_from_sfm(images)
+    
+    # Initialize 2D Gaussians (constant count per image)
+    theta_2d = initialize_2d_gaussians(images, count=10000)
+    
+    # Stage 1: Warm-up
+    for t in range(warmup_steps):
+        # Multi-view regulated supervision
+        sampled_images = random_sample(images, K)
+        f_inter = compute_frustum_intersection(sampled_images)
+        gaussians_in_frustum = extract_gaussians(theta_3d, f_inter)
+        
+        for g in gaussians_in_frustum:
+            # Render static image Is
+            Is = render_3dgs(theta_3d, g)
+            # Compute Loss
+            loss = lambda_val * L_DSSIM(Is, ground_truth) + (1 - lambda_val) * L1(Is, ground_truth)
+            # Update 3D parameters
+            theta_3d = update_parameters(theta_3d, g, loss)
+            
+    # Stage 2: Iterative Training
+    for t in range(iter2d_steps + iter3d_steps):
+        if t < iter2d_steps:
+            # Optimize 2DGS, freeze 3DGS
+            Is = render_3dgs(theta_3d)
+            It, Mt = render_2dgs(theta_2d)
+            I_hat = Mt * It + (1 - Mt) * Is
+            
+            loss_2d = lambda_val * L_DSSIM(I_hat, ground_truth) + (1 - lambda_val) * L1(I_hat, ground_truth)
+            theta_2d = update_parameters(theta_2d, loss_2d)
+        else:
+            # Optimize 3DGS, freeze 2DGS
+            Is = render_3dgs(theta_3d)
+            It, Mt = render_2dgs(theta_2d)
+            
+            # Binarize mask
+            Mt_bin = (Mt > epsilon).float()
+            
+            I_hat = Mt_bin * It + (1 - Mt_bin) * Is
+            loss_2d = lambda_val * L_DSSIM(I_hat, ground_truth) + (1 - lambda_val) * L1(I_hat, ground_truth)
+            # Mask loss for 3DGS
+            loss_3d = (1 - Mt_bin) * loss_2d
+            theta_3d = update_parameters(theta_3d, loss_3d)
+
+    # Stage 3: Joint Fine-tuning
+    for t in range(joint_steps):
+        Is = render_3dgs(theta_3d)
+        It, Mt = render_2dgs(theta_2d)
+        I_hat = Mt * It + (1 - Mt) * Is
+        
+        loss_joint = beta_val * L_DSSIM(I_hat, ground_truth) + (1 - beta_val) * L1(I_hat, ground_truth)
+        theta_3d = update_parameters(theta_3d, loss_joint)
+        theta_2d = update_parameters(theta_2d, loss_joint)
+
+    return theta_3d, theta_2d
+```
+
+### Parameters
+*   $\lambda$: Weight for DSSIM in warm-up and iterative losses. Value: 0.2 [S1].
+*   $\beta$: Weight for DSSIM in joint fine-tuning loss. Value: 0.2 [S1].
+*   $K$: Number of images sampled per iteration for multi-view regulation. Value: 4 [S1].
+*   $\epsilon$: Mask threshold for binarizing the uncertainty mask. Value: 0.1 [S1].
+*   2D Gaussian count: 10,000 per image, maintained constant throughout training [S1].
+*   Training steps: 1k warm-up, 10k 2DGS iterative, 1k 3DGS iterative, 30k joint fine-tuning [S1].
+
+### Edge Cases and Pitfalls
+*   **Overfitting Transients:** If 3DGS is constrained only by RGB loss, transient objects from different viewpoints are fitted into the 3D Gaussians, causing artifacts in novel views [S1]. This is mitigated by multi-view regulated supervision and sparse training on co-visible regions [S1].
+*   **Static Scene Fitting:** Vanilla 3DGS may fail to effectively fit static scenes if transients are present. The introduction of 2D Gaussians to learn residuals addresses this [S1].
+*   **Lighting Variations:** The method assumes minimal illumination changes. Handling varying lighting conditions is noted as future work [S1].
+
+## Operating characteristics
+*   **Storage:** HybridGS significantly reduces storage compared to vanilla 3DGS. On the Corner scene (NeRF On-the-go), HybridGS uses 42.20 MB (3DGS) + 34.70 MB (2DGS) = 76.90 MB total, whereas 3DGS uses 410.70 MB [S1].
+*   **Training Time:** HybridGS is faster. On the Corner scene, training takes 0.18 hours compared to 0.35 hours for 3DGS [S1].
+*   **Memory Usage:** HybridGS uses less memory during training. On the Corner scene, it uses 2.20 GB compared to 3.21 GB for 3DGS [S1].
+*   **Rendering Speed:** HybridGS achieves higher FPS. On the Corner scene, it reaches 160 Hz compared to 116 Hz for 3DGS [S1].
+*   **Performance:** HybridGS achieves state-of-the-art performance on NeRF On-the-go and RobustNeRF datasets in terms of PSNR, SSIM, and LPIPS [S1].
+*   **Scalability:** The number of training steps scales proportionally with the size of the dataset [S1].
+*   **Limitations:** The method is evaluated on scenes with minimal illumination changes. It may not handle unconstrained conditions with complex lighting variations effectively [S1].
+
+## Background
+HybridGS was proposed by Jingyu Lin, Jiaqi Gu, Lubin Fan, Bojian Wu, Yujing Lou, Renjie Chen, Ligang Liu, and Jieping Ye [S1]. The paper was published in CVPR 2025 (arXiv:2412.03844v4, Feb 28, 2025) [S1]. It builds upon 3D Gaussian Splatting (3DGS) [S1] and 2D Gaussian Splatting (2DGS) [S1]. The method addresses the challenge of generating high-quality novel view renderings in scenes with transient objects, where standard 3DGS struggles due to the assumption of multi-view consistency [S1].
+
+## Sources
+[S1] HybridGS: Decoupling Transients and Statics with 2D and 3D Gaussian Splatting, https://doi.org/10.1109/cvpr52734.2025.00082, fetched 2026-10-29

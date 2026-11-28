@@ -1,0 +1,140 @@
+# Hybrid Optimization
+
+Also called: Combined Gaussian-Volume Loss, Joint Gaussian-Grid Optimization
+
+## Overview
+Hybrid Optimization is a joint training scheme for 3D Gaussian Splatting that integrates a grid-based neural volume to address memory and precision limitations in large-scale scenes [S1]. It distinguishes itself from standard Gaussian splatting by simultaneously optimizing discrete Gaussian attributes and continuous neural volume parameters using a combined loss function [S1].
+
+## How it works
+**Inputs and Outputs:**
+*   **Inputs:** Ground truth images $c(\mathbf{r})$, warped images $c_{v\theta}$ generated from virtual viewpoints, and initial Gaussian attributes (position $\mathbf{x}$, opacity $\alpha$, color $\mathbf{c}$, covariance $\mathbf{\Sigma}$) [S1].
+*   **Outputs:** Optimized Gaussian attributes and grid-based volume MLP parameters [S1].
+
+**Data Structures:**
+1.  **Gaussian Set:** A collection of $N$ 3D Gaussians [S1]. Each Gaussian $i$ stores:
+    *   Position $\mathbf{x}_i \in \mathbb{R}^3$ [S1].
+    *   Opacity $\alpha_i \in [0, 1]$ [S1].
+    *   Color $\mathbf{c}_{\theta_i} \in \mathbb{R}^3$ (predicted by an MLP or stored directly) [S1].
+    *   Covariance matrix $\mathbf{\Sigma}_i \in \mathbb{R}^{3 \times 3}$ (symmetric positive definite) [S1].
+2.  **Grid-based Volume:** Two Multi-Layer Perceptrons (MLPs) mapping 3D coordinates to density and color [S1].
+    *   Density Network: MLP with 1 hidden layer, 64 channels [S1].
+    *   Color Network: MLP with 2 hidden layers, 64 channels [S1].
+    *   Parameters $\theta$ encompass the weights of both MLPs [S1].
+
+**Numbered Steps:**
+1.  **Sampling:** Sample rays $\mathbf{r}$ from both ground truth images and warped images (generated via Neural Warping) to provide diverse viewpoints [S1].
+2.  **Gaussian Rendering:** Render the image $C$ from the current Gaussian set using standard differentiable splatting [S1].
+3.  **Volume Rendering:** Render the image $c_\theta(\mathbf{r})$ from the grid-based volume by integrating density $\sigma_\theta$ and color along the ray [S1].
+4.  **Loss Calculation:** Compute the Gaussian loss $\mathcal{L}_g$ and the Volume loss $\mathcal{L}_{MSE}$ [S1].
+5.  **Joint Optimization:** Update all parameters (Gaussian attributes and MLP weights $\theta$) by minimizing the total loss $\mathcal{L}_{total}$ [S1].
+6.  **Densification and Pruning:**
+    *   Perform clone and split operations to fine-tune positions of inaccurate splats [S1].
+    *   Remove Gaussians with opacity $\alpha < \epsilon_\alpha$ [S1].
+    *   Add new Gaussian points sampled from the grid-based volume at specific training iterations (e.g., 5000, 15000, 25000) to improve coverage [S1].
+
+**Formulas:**
+The Gaussian loss combines L1 and SSIM metrics between the rendered image $C$ and ground truth $c(\mathbf{r})$ [S1]:
+$$
+\mathcal{L}_{\mathrm {g}}=(1-\lambda )\mathcal {L}_{1}(C,c(\mathbf {r}))+\lambda \mathcal {L}_{\text {SSIM}}(C,c(\mathbf {r}))
+$$
+where $\lambda$ is the SSIM weight [S1].
+
+The Volume loss is the Mean Squared Error between the volume-rendered color $c_\theta(\mathbf{r})$ and ground truth $c(\mathbf{r})$ [S1]:
+$$
+\mathcal {L}_{\mathrm {MSE}}\left (\theta ,\mathcal {R}_\mathbf {r}\right )=\sum _{\mathbf {r}\in \mathcal {R}_\mathbf {r}}\left \|{\mathbf {c}}_\theta (\mathbf {r})-\mathbf {c}(\mathbf {r})\right \|^2
+$$
+where $\mathcal {R}_\mathbf {r}$ is the set of sampled rays [S1].
+
+The total loss is the weighted sum [S1]:
+$$
+\mathcal {L}_\mathrm {total}=\mathcal {L}_\mathrm {g}+\lambda _1\mathcal {L}_{\mathrm {MSE}}\left (\theta ,\mathcal {R}_\mathbf {r}\right )
+$$
+where $\lambda_1$ is the weight for the volume loss [S1].
+
+**Parameters:**
+*   $\lambda$: Weight for SSIM in Gaussian loss. Value: 0.2 [S1].
+*   $\lambda_1$: Weight for MSE volume loss in total loss. Value: 0.1 [S1].
+*   $\epsilon_\alpha$: Opacity threshold for removing Gaussians. Value not explicitly given [S1].
+
+**Pseudocode:**
+> **Unverified code.** The code below did not pass a test run against a reference implementation, or no test fits it, so it may contain errors.
+
+```python
+def hybrid_optimization_step(gaussians, volume_mlp, gt_images, warped_images,
+                             lambda_ssim=0.2, lambda_mse_weight=0.1,
+                             opacity_threshold=0.005, iteration=0):
+    # 1. Sample rays from ground truth and warped images
+    rays_gt = [(img.origin, img.direction) for img in gt_images]
+    rays_warped = [(img.origin, img.direction) for img in warped_images]
+    all_rays = rays_gt + rays_warped
+
+    # 2. Render Gaussian image C
+    C = render_gaussians(gaussians, all_rays)
+
+    # 3. Render Volume image c_theta
+    c_theta = render_volume(volume_mlp, all_rays)
+
+    # 4. Get ground truth colors c(r) for all rays
+    c_gt = get_ground_truth_colors(all_rays)
+
+    # 5. Compute Gaussian Loss L_g
+    l1_loss = sum(abs(C[i] - c_gt[i]) for i in range(len(C))) / len(C)
+    ssim_loss = compute_ssim(C, c_gt)
+    L_g = (1 - lambda_ssim) * l1_loss + lambda_ssim * ssim_loss
+
+    # 6. Compute Volume Loss L_MSE
+    L_MSE = sum((c_theta[i] - c_gt[i])**2 for i in range(len(c_theta)))
+
+    # 7. Compute Total Loss
+    L_total = L_g + lambda_mse_weight * L_MSE
+
+    # 8. Backpropagate and update parameters
+    L_total.backward()
+    optimizer.step()
+
+    # 9. Densification and Pruning
+    gaussians = densify_gaussians(gaussians)
+    gaussians = prune_gaussians(gaussians, opacity_threshold)
+
+    # Add Gaussians from volume at specific iterations
+    if iteration in [5000, 15000, 25000]:
+        new_gaussians = sample_gaussians_from_volume(volume_mlp, all_rays)
+        gaussians = add_gaussians(gaussians, new_gaussians)
+
+    return gaussians, volume_mlp
+
+def render_gaussians(gaussians, rays):
+    return [differentiable_splatting(g, r) for r in rays]
+
+def render_volume(mlp, rays):
+    return [neural_volume_rendering(mlp, r) for r in rays]
+
+def get_ground_truth_colors(rays):
+    return [ray.color for ray in rays]
+
+def compute_ssim(img1, img2):
+    return ssim_index(img1, img2)
+
+def densify_gaussians(gaussians):
+    return clone_and_split(gaussians)
+
+def prune_gaussians(gaussians, threshold):
+    return [g for g in gaussians if g.opacity >= threshold]
+
+def sample_gaussians_from_volume(mlp, rays):
+    return [sample_from_density(mlp, r) for r in rays]
+
+def add_gaussians(gaussians, new_gaussians):
+    return gaussians + new_gaussians
+```
+
+## Operating characteristics
+*   **Memory:** Reduces the memory burden on the Gaussian set by offloading some geometric detail to the grid-based volume, allowing for larger scene coverage [S1].
+*   **Accuracy:** Improves reconstruction quality in large-scale urban scenes where pure Gaussian splatting suffers from uneven distribution and low quality [S1].
+*   **Use Case:** Suitable for large-scale urban scenes (e.g., Waymo, Argoverse) with high-resolution cameras (1920×1280/1200) where memory constraints limit pure Gaussian approaches [S1].
+
+## Background
+Hybrid Optimization was introduced in the HO-Gaussian paper for urban scene reconstruction [S1]. It addresses the limitations of 3D Gaussian Splatting in large-scale environments, such as insufficient memory and low-quality reconstructions due to uneven Gaussian distribution [S1]. The method draws inspiration from Mip-NeRF 360 for positional encoding and integrates neural warping for virtual viewpoints [S1].
+
+## Sources
+[S1] HO-Gaussian: Hybrid Optimization of 3D Gaussian Splatting for Urban Scenes, https://doi.org/10.1007/978-3-031-73027-6_2, fetched 2026-10-26

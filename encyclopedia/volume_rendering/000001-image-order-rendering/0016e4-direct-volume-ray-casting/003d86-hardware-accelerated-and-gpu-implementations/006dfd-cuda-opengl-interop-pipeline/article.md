@@ -1,0 +1,143 @@
+# CUDA-OpenGL Interop Pipeline
+
+Also called: CUDA GL interop rendering, CUDA-OpenGL Interop Volume Rendering Pipeline
+
+## Overview
+The CUDA-OpenGL Interop Pipeline enables high-performance volume rendering by executing the ray-casting computation in CUDA kernels while utilizing OpenGL for display and interaction. It solves the latency and bandwidth bottlenecks of CPU-GPU data transfer by mapping OpenGL resources (textures and buffers) directly into CUDA address space, allowing the CUDA kernel to read volume data from OpenGL textures and write final pixel colors directly to an OpenGL pixel unpack buffer [S1, unofficial]. This approach bypasses the need for intermediate CPU-side accumulation, differing from pure OpenGL fragment shader implementations by offloading the heavy ray-marching loop to CUDA [S1, unofficial].
+
+## How it works
+The method integrates CUDA compute capabilities with the OpenGL rendering pipeline through resource sharing.
+
+### Inputs and Outputs
+**Inputs:**
+- Volume data: Stored in an OpenGL 3D texture (`GL_TEXTURE_3D`) with internal format `GL_RGBA8` or similar, mapped to a CUDA `cudaArray` [S1, unofficial].
+- Transfer function: Stored in a 1D texture, mapped to a CUDA texture object [S1, unofficial].
+- Camera parameters: View and projection matrices, origin, and direction vectors [S1, unofficial].
+- Rendering parameters: Resolution scale factor, shading mode (Phong), and slice visualization settings [S1, unofficial].
+
+**Outputs:**
+- Rendered image: Written to an OpenGL `GL_PIXEL_UNPACK_BUFFER` (`resultBuffer`) and displayed via a `GL_TEXTURE_2D` (`resultTexture`) [S1, unofficial].
+
+### Data Structures
+1.  **Volume Texture (`texVolume`)**:
+    -   Type: `texture<unsigned char, cudaTextureType3D, cudaReadModeNormalizedFloat>` [S1, unofficial].
+    -   Layout: 3D texture storing volume scalar values. Normalized float read mode converts 8-bit unsigned integers to $[0.0, 1.0]$ [S1, unofficial].
+2.  **Transfer Function Texture (`transferTexture`)**:
+    -   Type: `texture<float4, cudaTextureType1D, cudaReadModeElementType>` [S1, unofficial].
+    -   Layout: 1D texture mapping scalar values to RGBA color/opacity [S1, unofficial].
+3.  **Result Buffer (`resultBuffer`)**:
+    -   Type: `GL_PIXEL_UNPACK_BUFFER` [S1, unofficial].
+    -   Size: `width * height * 4 * sizeof(GLubyte) / (resolutionScale * resolutionScale)` [S1, unofficial].
+4.  **Result Texture (`resultTexture`)**:
+    -   Type: `GL_TEXTURE_2D` [S1, unofficial].
+    -   Dimensions: `width / resolutionScale` $\times$ `height / resolutionScale` [S1, unofficial].
+    -   Internal Format: `GL_RGBA8` [S1, unofficial].
+    -   Pixel Format: `GL_BGRA` [S1, unofficial].
+    -   Type: `GL_UNSIGNED_BYTE` [S1, unofficial].
+
+### Steps
+1.  **Resource Registration**: In `resizeGL`, allocate `resultBuffer` and `resultTexture`. Register these OpenGL resources with CUDA using `cudaGLRegisterBufferObject` and `cudaGLRegisterImageObject` (or equivalent interop functions) to obtain CUDA resource pointers [S1, unofficial].
+2.  **CUDA Execution**: If `renderingDirty` is true, launch the CUDA kernel `runCuda` with dimensions `(width/resolutionScale, height/resolutionScale, 1)`. Pass slice parameters, camera parameters, shading parameters, and the volume array pointer [S1, unofficial].
+3.  **Ray Marching in CUDA**:
+    -   For each pixel, compute ray origin and direction from camera matrices [G].
+    -   Iterate along the ray, sampling the volume texture using `tex3D` [S1, unofficial].
+    -   Apply the transfer function using `tex1Dfetch` to get color and opacity [S1, unofficial].
+    -   Perform front-to-back compositing:
+        $$
+        C'_{i} = C'_{i-1} + (1 - \alpha'_{i-1}) \alpha_i C_i
+        $$
+        $$
+        \alpha'_{i} = \alpha'_{i-1} + (1 - \alpha'_{i-1}) \alpha_i
+        $$
+    -   Apply Phong shading if enabled, calculating normals from neighboring voxels [S1, unofficial].
+    -   Write the final `float4` color to the shared memory cache, then to the global output buffer [S1, unofficial].
+4.  **OpenGL Display**:
+    -   Copy data from `resultBuffer` to `resultTexture` using `glTexSubImage2D` with a NULL data pointer [S1, unofficial].
+    -   Bind the `screen` shader, set `resultTexture` as a uniform, clear buffers, and draw a full-screen quad [S1, unofficial].
+
+### Pseudocode
+> **Unverified code.** The code below did not pass a test run against a reference implementation, or no test fits it, so it may contain errors.
+
+```python
+# CUDA Kernel Launch Configuration
+block_size = (16, 16, 1)
+grid_size = (ceil(width / resolutionScale / 16), ceil(height / resolutionScale / 16), 1)
+
+# CUDA Kernel Implementation (Simplified)
+__global__ void runCuda(int width, int height, int resolutionScale, 
+                        cudaTextureObject_t texVolume, 
+                        cudaTextureObject_t transferTexture,
+                        unsigned char* resultBuffer,
+                        CameraParams cam,
+                        bool phongShading) {
+    int x = blockIdx.x * blockDim.x + threadIdx.x;
+    int y = blockIdx.y * blockDim.y + threadIdx.y;
+    
+    if (x >= width / resolutionScale || y >= height / resolutionScale) return;
+    
+    // Compute ray parameters from camera matrices [G]
+    float3 rayOrigin = computeRayOrigin(x, y, width, height, resolutionScale, cam);
+    float3 rayDir = computeRayDirection(x, y, width, height, resolutionScale, cam);
+    
+    float4 accumColor = make_float4(0.0f, 0.0f, 0.0f, 0.0f);
+    float accumAlpha = 0.0f;
+    
+    // Ray marching loop [G]
+    float t = 0.0f;
+    while (accumAlpha < 0.95f && t < maxDistance) { // Early Ray Termination [G]
+        float3 pos = rayOrigin + rayDir * t;
+        
+        // Sample volume texture [S1, unofficial]
+        float4 sampled = tex3D(texVolume, pos.x, pos.y, pos.z);
+        float scalar = sampled.x; // Assuming scalar in first component
+        
+        // Transfer function [S1, unofficial]
+        float4 tfColor = tex1Dfetch(transferTexture, (int)(scalar * 255.0f));
+        
+        // Compositing [G]
+        float alpha = tfColor.w;
+        float4 color = tfColor;
+        
+        accumColor = accumColor + (1.0f - accumAlpha) * alpha * color;
+        accumAlpha = accumAlpha + (1.0f - accumAlpha) * alpha;
+        
+        t += stepSize;
+    }
+    
+    // Write to output buffer [S1, unofficial]
+    int idx = y * (width / resolutionScale) + x;
+    resultBuffer[idx * 4 + 0] = (unsigned char)(accumColor.x * 255.0f);
+    resultBuffer[idx * 4 + 1] = (unsigned char)(accumColor.y * 255.0f);
+    resultBuffer[idx * 4 + 2] = (unsigned char)(accumColor.z * 255.0f);
+    resultBuffer[idx * 4 + 3] = (unsigned char)(accumColor.w * 255.0f);
+}
+
+# OpenGL Display Step [S1, unofficial]
+glTexSubImage2D(GL_TEXTURE_2D, 0, 0, 0, 
+                width / resolutionScale, height / resolutionScale, 
+                GL_RGBA, GL_UNSIGNED_BYTE, NULL);
+```
+
+### Parameters
+-   `resolutionScale`: Integer scaling factor for CUDA render resolution. Default value is 3. Reduces CUDA workload by rendering at 1/3rd width and height [S1, unofficial].
+-   `filterOutput`: Boolean flag controlling texture filtering. Default is true. When true, uses `GL_LINEAR`; when false, uses `GL_NEAREST` [S1, unofficial].
+
+### Edge Cases and Pitfalls
+-   **Texture Format Mismatch**: The result texture is defined with `GL_BGRA` format, but `glTexSubImage2D` is called with `GL_RGBA`. This relies on implicit driver conversion or specific CUDA GL interop behavior. For strict compliance, `GL_BGRA` should be used in the sub-image call [S1, unofficial].
+-   **Precision**: Using `unsigned char` for volume data and normalized float read mode may limit precision. Consider using `float` textures for higher precision if needed [S1, unofficial].
+-   **Boundary Checks**: Ensure ray marching loop includes bounds checking to prevent out-of-bounds texture access [S1, unofficial].
+
+## Operating characteristics
+-   **Time Complexity**: $O(W \cdot H \cdot D)$, where $W, H$ are screen dimensions (scaled by `resolutionScale`) and $D$ is the number of ray steps [G].
+-   **Memory Complexity**: $O(W \cdot H \cdot 4)$ bytes for the result buffer, plus volume texture memory [S1, unofficial].
+-   **Performance**: Rendering at 1/3rd resolution (`resolutionScale=3`) significantly reduces CUDA workload, improving frame rates at the cost of visual sharpness [S1, unofficial].
+-   **Strengths**: Low latency, high throughput, direct GPU-to-GPU data transfer [S1, unofficial].
+-   **Limitations**: Requires CUDA-capable GPU and OpenGL interop support. Debugging can be challenging due to the split between CUDA and OpenGL contexts [S1, unofficial].
+-   **When to Use**: Real-time volume rendering applications requiring high performance and interactive frame rates [S1, unofficial].
+-   **When Not to Use**: When strict OpenGL-only compliance is required or when CUDA is not available [S1, unofficial].
+
+## Background
+The CUDA-OpenGL Interop Pipeline is based on the NVIDIA CUDA OpenGL Interoperability API, which allows seamless integration of CUDA compute kernels with OpenGL rendering [S1, unofficial]. The specific implementation described here is from the `jacobstern/volume-viz` repository, which demonstrates volume visualization using Qt and CUDA [S1, unofficial].
+
+## Sources
+[S1] jacobstern/volume-viz, https://github.com/jacobstern/volume-viz, fetched 2026-10-27 (unofficial)

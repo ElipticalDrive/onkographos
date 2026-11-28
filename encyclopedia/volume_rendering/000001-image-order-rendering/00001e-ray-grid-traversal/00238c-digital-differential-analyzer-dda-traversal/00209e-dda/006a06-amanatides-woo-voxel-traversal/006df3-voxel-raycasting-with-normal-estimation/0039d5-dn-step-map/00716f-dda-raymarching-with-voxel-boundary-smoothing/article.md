@@ -1,0 +1,138 @@
+# DDA Raymarching with Voxel Boundary Smoothing
+
+Also called: Slope-aware DDA, Smooth voxel terrain raymarching
+
+## Overview
+This method extends standard Amanatides-Woo voxel traversal [Parent](8596-dn-step-map.md) by smoothing the visual appearance of voxel boundaries during raymarching. It solves the "staircase" or "blocky" artifacts inherent in discrete voxel grids by interpolating surface normals and positions based on voxel orientation flags. Unlike sibling methods that may use adaptive edge smoothing or neighbor averaging [14664-voxel-dda-raymarching-with-adaptive-edge-smoothing.md], this approach relies on per-voxel orientation bits to determine surface continuity and applies a fixed step limit to ensure smooth convergence.
+
+## How it works
+**Inputs:**
+- Ray origin $O$ and direction $D$ (normalized).
+- Voxel grid data structure containing voxel color indices and orientation flags.
+- `step_limit`: Maximum iterations per ray.
+
+**Outputs:**
+- Hit position $P_{hit}$.
+- Surface normal $N_{hit}$.
+- Voxel data at hit location.
+
+**Data Structures:**
+- **Voxel Layout**: Each voxel stores a `color_index` (integer) and orientation flags using 2 bits:
+  - Bit 0: Upside-down flag (1 if surface is inverted vertically).
+  - Bit 1: Sideways flag (1 if surface is inverted horizontally).
+- **State Variables**:
+  - `ray_step`: `float3` indicating traversal direction per axis ($\pm 1$).
+  - `empty_mask`, `entry_mask`, `exit_mask`: Bitmasks tracking traversal state.
+  - `ray_position`: `float3` current position in world space.
+  - `last_ray_position`: `float3` previous position in world space.
+
+**Algorithm Steps:**
+
+1. **Initialization**:
+   - Compute `ray_step` based on ray direction $D$. If $D_i > 0$, `ray_step[i] = 1`; else `-1`.
+   - Initialize `ray_position = O`, `last_ray_position = O`.
+   - Initialize masks: `empty_mask = 0`, `entry_mask = 0`, `exit_mask = 0`.
+   - Set `step_limit = 250` [S1, unofficial].
+
+2. **Traversal Loop** (for $k = 0$ to `step_limit`):
+   - **Termination Check**: If `empty_mask == 0` and (`entry_mask == 0` or `exit_mask == 0`), break immediately. This indicates the ray has hit the ground or empty space [S1, unofficial].
+   - **Voxel Query**: Get voxel $V$ at `ray_position`.
+   - **Hit Check**: If $V$.`color_index` $\neq 0$, the ray has hit a surface. Process hit and break [S1, unofficial].
+   - **Mask Propagation**:
+     - Apply bitwise operations to update masks. Specifically, use bitwise AND with 56, then shift right by 3 bits to extract specific mask segments [S1, unofficial].
+     - Update `entry_mask` and `exit_mask` based on traversal direction and voxel boundaries.
+   - **Boundary Handling**:
+     - Determine hit side (left/right/forward/back) based on `ray_step` and current axis.
+     - If `ray_step.y == 1`, the ray travels up and hits the voxel below; skip height calculation for this axis if no below surface is defined [S1, unofficial].
+     - If `ray_step.y == -1`, the ray travels down and hits the voxel above [S1, unofficial].
+     - If `ray_step.z == 1`, Z moves in one direction (positive). Determine traversal direction based on world space coordinates, not camera direction [S1, unofficial].
+     - If exiting on a side other than the primary hit axis, skip height calculation for that axis [S1, unofficial].
+     - Update min/max bounds or masks based on hit side. For inverted boundaries, reverse the left/right/forward/back mapping [S1, unofficial].
+   - **Position Update**:
+     - Calculate delta distance to next voxel boundary.
+     - **Critical**: Do NOT update `ray_position` directly for traversal continuity. Maintain `ray_position` and `last_ray_position` separately. `ray_position` is used for mask propagation and state, while `last_ray_position` preserves the previous valid state for interpolation [S1, unofficial].
+     - Advance `ray_position` to the next voxel boundary.
+     - Update `last_ray_position` to the previous `ray_position` before update [S1, unofficial].
+
+3. **Normal Estimation**:
+   - Use scalar conditional checks like `midpoint.y < center` to determine surface orientation [S1, unofficial].
+   - Interpolate normal based on `ray_position` and `last_ray_position` and the voxel's orientation flags.
+
+**Pseudocode:**
+
+> **Unverified code.** The code below did not pass a test run against a reference implementation, or no test fits it, so it may contain errors.
+
+```python
+def dda_raymarch_with_smoothing(ray_origin, ray_direction, voxel_grid, step_limit=250):
+    # Initialize ray step direction per axis
+    ray_step = float3(
+        1.0 if ray_direction.x > 0 else -1.0,
+        1.0 if ray_direction.y > 0 else -1.0,
+        1.0 if ray_direction.z > 0 else -1.0
+    )
+    
+    # Initialize state variables
+    ray_position = ray_origin
+    last_ray_position = ray_origin
+    empty_mask = 0
+    entry_mask = 0
+    exit_mask = 0
+    
+    for k in range(step_limit):
+        # Termination check
+        if empty_mask == 0 and (entry_mask == 0 or exit_mask == 0):
+            break
+            
+        # Get voxel data
+        voxel = voxel_grid.get_voxel_at(ray_position)
+        
+        # Hit check
+        if voxel.color_index != 0:
+            # Hit surface
+            normal = estimate_normal(ray_position, last_ray_position, voxel)
+            return ray_position, normal, voxel
+            
+        # Mask propagation
+        # Apply bitwise AND with 56, then shift right by 3 bits
+        mask_segment = (entry_mask & 56) >> 3
+        # Update masks based on traversal direction and voxel boundaries
+        update_masks(entry_mask, exit_mask, ray_step, voxel, mask_segment)
+        
+        # Boundary handling and position update
+        # Determine hit side and update bounds
+        hit_side = determine_hit_side(ray_step, ray_position)
+        update_bounds(hit_side, ray_step)
+        
+        # Calculate delta distance to next boundary
+        delta_dist = calculate_delta_dist(ray_position, ray_direction, ray_step)
+        
+        # Update last_ray_position before moving ray_position
+        last_ray_position = ray_position
+        
+        # Advance ray_position to next boundary
+        ray_position = ray_position + ray_direction * delta_dist
+        
+    return None, None, None # No hit within step limit
+```
+
+**Parameters:**
+- `step_limit`: Integer maximum number of steps per ray. Typical value is 250 [S1, unofficial]. A limit that is too low results in spiky, cube-like artifacts [S1, unofficial].
+
+**Edge Cases and Pitfalls:**
+- **Position Update**: Updating `current_ray_position` directly breaks traversal continuity. Maintain separate `ray_position` and `last_ray_position` to preserve traversal state and mask propagation [S1, unofficial].
+- **Directional Mapping**: Confusing hit directions (left/right/forward/back) causes incorrect mask updates and broken ray tracing. Verify directional mappings carefully, especially for inverted boundaries [S1, unofficial].
+- **Step Limit**: A step limit that is too low results in spiky, cube-like artifacts instead of smooth surfaces. Increase the limit to ~250 for proper smoothing [S1, unofficial].
+- **Inverted Boundaries**: When hitting an inverted boundary, reverse the left/right/forward/back mapping to ensure correct mask updates [S1, unofficial].
+
+## Operating characteristics
+- **Time Complexity**: $O(N)$ where $N$ is the number of voxels traversed, bounded by `step_limit`.
+- **Memory Complexity**: $O(1)$ auxiliary space per ray, plus storage for the voxel grid.
+- **Performance**: The method is efficient for sparse voxel grids but requires careful mask management. The fixed step limit of 250 ensures bounded execution time but may miss distant surfaces if the grid is large [S1, unofficial].
+- **Strengths**: Provides smoother visual results than standard DDA by using orientation flags and position interpolation.
+- **Limitations**: Requires additional bits per voxel for orientation flags. Incorrect mask propagation or directional mapping can lead to visual artifacts.
+
+## Background
+This method originates from practical implementations of voxel terrain rendering, specifically aimed at smoothing the blocky appearance of voxel-based environments. It builds on the Amanatides-Woo DDA traversal algorithm [Parent](8596-dn-step-map.md) and incorporates techniques for handling surface orientation and boundary conditions. The approach is documented in unofficial sources discussing smooth voxel terrain creation [S1, unofficial].
+
+## Sources
+[S1] Trying to make smooth voxel terrain with DDA raymarching, https://www.youtube.com/watch?v=jiGCB9jTEzs, fetched 2026-10-25 (unofficial)

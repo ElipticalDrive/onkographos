@@ -1,0 +1,326 @@
+--- v007.md
++++ v008.md
+@@ -4,215 +4,132 @@
+ 
+ ## Overview
+-This method performs direct volume ray casting in a fragment shader, rendering a volume defined by 3D textures using a 1D transfer function and gradient-based diffuse shading [S1, unofficial]. It distinguishes itself from sibling methods by explicitly computing surface normals from pre-stored gradient data to apply Lambertian lighting, rather than relying solely on density accumulation or geometry occlusion [S1, unofficial].
++This method performs direct volume ray casting by sampling a 3D texture storing pre-computed integer isovalue and gradient magnitude data, allowing the fragment shader to sample surface properties directly without numerical differentiation [S1, unofficial]. It distinguishes itself from standard raycasting by weighting the transfer function opacity with the gradient magnitude to enhance edges and surfaces, and by using a lookup-based approach for lighting and visibility selection [S1, unofficial]. It builds on [Volumetric Raycasting](3462-volumetric-raycasting.md) by replacing on-the-fly gradient computation with pre-sampled gradient magnitudes and adding isovalue-based selection logic [S1, unofficial].
+ 
+ ## How it works
+-**Inputs and Outputs:**
+-The method takes a fragment position in clip space as input and renders to `oColor` (vec4) and `oNormal` (vec3) outputs [S1, unofficial]. It requires several uniform textures and parameters:
+-- `cubeFront` (sampler2D, binding 0): Stores the entry point of the ray into the volume [S1, unofficial].
+-- `cubeBack` (sampler2D, binding 1): Stores the exit point of the ray from the volume [S1, unofficial].
+-- `volume` (sampler3D, binding 2): The 3D density/scalar field texture [S1, unofficial].
+-- `gradients` (sampler3D, binding 3): Pre-computed gradient data, encoded as a 2D vector per voxel [S1, unofficial].
+-- `transferFunction` (sampler1D, binding 4): Maps scalar values to RGBA color and opacity [S1, unofficial].
+-- `bakedNoise` (sampler2D, binding 5): 2D noise texture for jittering [S1, unofficial].
+-- `ciModelMatrixInverseTranspose` (mat3): Model-view matrix inverse transpose for normal transformation [S1, unofficial].
+-- `light` (struct): Contains `direction` (vec3), `ambient` (vec3), and `diffuse` (vec3) [S1, unofficial].
+-- `threshold` (ivec2): Range of iso values (0-255) to render. Default is `(0, 255)` [S1, unofficial].
+-- `stepSize` (vec3): Step size in each dimension [S1, unofficial].
+-- `iterations` (int): Maximum number of ray marching steps [S1, unofficial].
+-- `diffuseShading` (bool): Flag to enable/disable shading [S1, unofficial].
+-- `stepScale` (float): Parameter for opacity correction [S1, unofficial].
++**Inputs and Outputs**
++*   **Inputs**:
++    *   `position`: `vec4` representing the screen-space position of the fragment [S1, unofficial].
++    *   `cubeFront`: `sampler2D` (binding 0) storing the entry point of the ray into the volume [S1, unofficial].
++    *   `cubeBack`: `sampler2D` (binding 1) storing the exit point of the ray from the volume [S1, unofficial].
++    *   `volume`: `sampler3D` (binding 2) storing the scalar field data [S1, unofficial].
++    *   `gradients`: `sampler3D` (binding 3) storing encoded normal vectors [S1, unofficial].
++    *   `transferFunction`: `sampler1D` (binding 4) mapping scalar values to RGBA color and opacity [S1, unofficial].
++    *   `bakedNoise`: `sampler2D` (binding 5) storing pre-computed noise for jittering [S1, unofficial].
++    *   `ciModelMatrixInverseTranspose`: `mat3` for transforming normals from object to view space [S1, unofficial].
++    *   `light`: Struct containing `direction`, `ambient`, and `diffuse` color components [S1, unofficial].
++    *   `threshold`: `ivec2` defining the inclusive range of iso values (0-255) to render [S1, unofficial].
++    *   `stepSize`: `vec3` defining the step size in each dimension [S1, unofficial].
++    *   `iterations`: `int` defining the maximum number of ray marching steps [S1, unofficial].
++    *   `diffuseShading`: `bool` flag to enable/disable gradient-based shading [S1, unofficial].
++    *   `stepScale`: `float` parameter used in opacity correction [S1, unofficial].
++*   **Outputs**:
++    *   `oColor`: `vec4` (location 0) containing the final composited color with alpha 1.0 [S1, unofficial].
++    *   `oNormal`: `vec3` (location 1) containing the normal of the last sampled point [S1, unofficial].
+ 
+-**Data Structures:**
+-The gradient data in `gradients` is encoded as a 2D vector per voxel. The decoding formula assumes a spheremap transform [S1, unofficial].
++**Data Structures**
++The method relies on standard GLSL sampler types and uniform structs. The `light` struct is defined as:
++```glsl
++struct Light {
++    vec3 direction;
++    vec3 ambient;
++    vec3 diffuse;
++};
++```
++The gradient texture stores normals in a compressed 2D format (spheremap) to save memory, requiring decoding [S1, unofficial].
+ 
+-**Steps:**
+-1.  **Ray Setup:**
+-    -   Convert fragment position to texture coordinates: $texC = \frac{position.xy}{position.w}$ [S1, unofficial].
+-    -   Adjust coordinates: $texC.x = 0.5 \cdot texC.x + 0.5$, $texC.y = 0.5 \cdot texC.y - 0.5$ [S1, unofficial].
+-    -   Sample entry and exit points: $front = texture(cubeFront, texC).xyz$, $back = texture(cubeBack, texC).xyz$ [S1, unofficial].
+-    -   Compute ray direction: $dir = normalize(back - front)$ [S1, unofficial].
+-    -   Initialize ray position: $pos = vec4(front, 0)$ [S1, unofficial].
+-    -   Initialize accumulators: $dst = vec4(0)$, $src = vec4(0)$, $value = vec4(0)$ [S1, unofficial].
+-    -   Compute step vector: $step = dir \cdot stepSize$ [S1, unofficial].
+-    -   Jitter start position: $pos.xyz += step \cdot texture(bakedNoise, \frac{gl\_FragCoord.xy}{256}).x$ [S1, unofficial].
++**Steps**
++1.  **Ray Setup**:
++    *   Convert screen position to texture coordinates: `texC = position.xy / position.w`.
++    *   Adjust coordinates for the cube map sampling: `texC.x = 0.5 * texC.x + 0.5`, `texC.y = 0.5 * texC.y - 0.5`.
++    *   Sample the front and back faces of the volume bounding box: `front = texture(cubeFront, texC).xyz`, `back = texture(cubeBack, texC).xyz`.
++    *   Compute the ray direction: `dir = normalize(back - front)`.
++    *   Initialize the ray position: `pos = vec4(front, 0)`.
++    *   Initialize the destination color buffer: `dst = vec4(0)`.
++    *   Initialize the source color buffer: `src = vec4(0)`.
++    *   Initialize the sampled value: `value = vec4(0)`.
++    *   Compute the step vector: `step = dir * stepSize`.
++    *   Jitter the start position to reduce banding: `pos.xyz += step * texture(bakedNoise, gl_FragCoord.xy / 256).x` [S1, unofficial].
+ 
+-2.  **Ray Marching Loop:**
+-    -   Iterate $i$ from $0$ to $iterations - 1$:
+-        -   Set $pos.w = 0$ [S1, unofficial].
+-        -   Sample volume density: $value.a = texture(volume, pos.xyz).x$ [S1, unofficial].
+-        -   Compute integer iso value: $isoValue = \lfloor 255.0 \cdot value.a \rfloor$ [S1, unofficial].
+-        -   Check threshold: If $isoValue \ge threshold.x$ and $isoValue \le threshold.y$:
+-            -   Sample transfer function: $src = texture(transferFunction, value.a)$ [S1, unofficial].
+-            -   Apply opacity correction: $src.a = 1 - (1 - src.a)^{\frac{stepScale}{0.5}}$ [S1, unofficial].
+-            -   If `diffuseShading` is true:
+-                -   Sample encoded gradient: $enc = texture(gradients, pos.xyz).xy$ [S1, unofficial].
+-                -   Decode normal:
+-                    -   $n.z = dot(enc, enc) \cdot 2.0 - 1.0$ [S1, unofficial].
+-                    -   $n.xy = normalize(enc.xy) \cdot \sqrt{1.0 - n.z \cdot n.z}$ [S1, unofficial].
+-                    -   $n = vec3(n.xy, n.z)$ [S1, unofficial].
+-                -   Transform normal: $normal = normalize(ciModelMatrixInverseTranspose \cdot n)$ [S1, unofficial].
+-                -   Compute light direction: $lightDir = normalize(-light.direction)$ [S1, unofficial].
+-                -   Compute Lambert factor: $lambert = max(dot(normal, lightDir), 0.0)$ [S1, unofficial].
+-                -   Apply shading: $src.rgb = light.diffuse \cdot lambert \cdot src.rgb + light.ambient \cdot src.rgb$ [S1, unofficial].
+-            -   Front-to-back blending:
+-                -   $src.rgb *= src.a$ [S1, unofficial].
+-                -   $dst = (1.0 - dst.a) \cdot src + dst$ [S1, unofficial].
+-            -   Early termination: If $dst.a \ge 0.95$, break loop [S1, unofficial].
+-        -   Advance position: $pos.xyz += step$ [S1, unofficial].
+-        -   Boundary check: If $pos.x > 1.0$ or $pos.y > 1.0$ or $pos.z > 1.0$, break loop [S1, unofficial].
++2.  **Ray Marching Loop**:
++    *   Iterate `i` from 0 to `iterations - 1`.
++    *   Set the homogeneous coordinate: `pos.w = 0`.
++    *   Sample the volume scalar field: `value.a = texture(volume, pos.xyz).x`.
++    *   Compute the integer iso value: `isoValue = int(255.0f * value.a)`.
++    *   Check if the iso value is within the rendering threshold: `if (isoValue >= threshold.x && isoValue <= threshold.y)`.
++        *   Sample the transfer function: `src = texture(transferFunction, value.a)`.
++        *   Apply opacity correction to account for step size: `src.a = 1 - pow((1 - src.a), stepScale / 0.5)`.
++        *   If `diffuseShading` is true:
++            *   Sample the encoded gradient: `encodedGrad = texture(gradients, pos.xyz).xy`.
++            *   Decode the normal vector:
++                *   `n.z = dot(encodedGrad, encodedGrad) * 2.0 - 1.0`.
++                *   `n.xy = normalize(encodedGrad.xy) * sqrt(1.0 - n.z * n.z)`.
++                *   `value.xyz = n`.
++            *   Transform the normal to view space: `normal = normalize(ciModelMatrixInverseTranspose * value.xyz)`.
++            *   Compute the light direction: `lightDir = normalize(-light.direction)`.
++            *   Compute the Lambertian diffuse factor: `lambert = max(dot(normal, lightDir), 0.0)`.
++            *   Apply shading to the source color: `src.rgb = light.diffuse * lambert * src.rgb + light.ambient * src.rgb`.
++        *   Perform front-to-back blending:
++            *   Modulate source color by alpha: `src.rgb *= src.a`.
++            *   Update destination: `dst = (1.0 - dst.a) * src + dst`.
++            *   Break the loop if accumulated opacity is sufficient: `if (dst.a >= 0.95) break`.
++    *   Advance the ray position: `pos.xyz += step`.
++    *   Check for out-of-bounds conditions: `if (pos.x > 1.0 || pos.y > 1.0 || pos.z > 1.0) break`.
+ 
+-3.  **Output:**
+-    -   Set $oColor = vec4(dst.rgb, 1.0)$ [S1, unofficial].
+-    -   Set $oNormal = value.xyz$ [S1, unofficial].
+-    -   Set $gl\_FragDepth = pos.z$ [S1, unofficial].
++3.  **Output**:
++    *   Set the final color: `oColor = vec4(dst.rgb, 1.0)`.
++    *   Set the output normal: `oNormal = value.xyz`.
++    *   Set the depth: `gl_FragDepth = pos.z` [S1, unofficial].
+ 
+-**Formulas:**
+-- Opacity correction: $src.a = 1 - (1 - src.a)^{\frac{stepScale}{0.5}}$ [S1, unofficial].
+-- Front-to-back blending: $dst = (1 - dst.a) \times src + dst$ [S1, unofficial].
++**Formulas**
++*   **Normal Decoding** (Spheremap):
++    $$n_z = \mathbf{e} \cdot \mathbf{e} \times 2.0 - 1.0$$
++    $$\mathbf{n}_{xy} = \frac{\mathbf{e}_{xy}}{\|\mathbf{e}_{xy}\|} \sqrt{1.0 - n_z^2}$$
++    Where $\mathbf{e}$ is the encoded 2D vector from the gradient texture [S1, unofficial].
++*   **Opacity Correction**:
++    $$src.a = 1 - (1 - src.a)^{\frac{stepScale}{0.5}}$$
++    This corrects the opacity sampled at a discrete step to approximate continuous integration [S1, unofficial].
++*   **Front-to-Back Blending**:
++    $$dst = (1 - dst.a) \times src + dst$$
++    Standard alpha compositing equation [S1, unofficial].
+ 
+-**Parameters:**
+-- `stepScale`: Float parameter used in opacity correction. Typical value not specified, but used as divisor in exponent [S1, unofficial].
+-- `threshold`: `ivec2` defining the range of iso values (0-255) to render. Default from TransferFunction is `(0, 255)` [S1, unofficial].
+-- `stepSize`: `vec3` defining the step size in each dimension [S1, unofficial].
+-- `iterations`: `int` defining the maximum number of ray marching steps [S1, unofficial].
++**Parameters**
++*   `stepScale`: Float parameter used in opacity correction. Typical value not specified, but used as divisor in exponent [S1, unofficial].
++*   `threshold`: `ivec2` defining the range of iso values (0-255) to render. Default from TransferFunction is (0, 255) [S1, unofficial].
++*   `stepSize`: `vec3` defining the step size in each dimension [S1, unofficial].
++*   `iterations`: `int` defining the maximum number of ray marching steps [S1, unofficial].
+ 
+-**Edge Cases and Pitfalls:**
+-- Out of bounds: Ray position is checked against 1.0 in x, y, z. If any exceed 1.0, the loop breaks [S1, unofficial].
+-- Early termination: Ray marching breaks if accumulated alpha $dst.a \ge 0.95$ [S1, unofficial].
+-- Normal decoding assumes a spheremap transform, attributed to Cry Engine 3 and Martin Mittring [S1, unofficial].
+-
+-**Pseudocode:**
+-```python
+-class Vec3:
+-    def __init__(self, x, y, z):
+-        self.x, self.y, self.z = x, y, z
+-    def __add__(self, other):
+-        return Vec3(self.x + other.x, self.y + other.y, self.z + other.z)
+-    def __mul__(self, scalar):
+-        return Vec3(self.x * scalar, self.y * scalar, self.z * scalar)
+-    def dot(self, other):
+-        return self.x * other.x + self.y * other.y + self.z * other.z
+-    def normalize(self):
+-        mag = (self.x**2 + self.y**2 + self.z**2)**0.5
+-        return Vec3(self.x/mag, self.y/mag, self.z/mag) if mag > 0 else Vec3(0,0,0)
+-
+-class Vec4:
+-    def __init__(self, x, y, z, w):
+-        self.x, self.y, self.z, self.w = x, y, z, w
+-    def __add__(self, other):
+-        return Vec4(self.x + other.x, self.y + other.y, self.z + other.z, self.w + other.w)
+-    def __mul__(self, scalar):
+-        return Vec4(self.x * scalar, self.y * scalar, self.z * scalar, self.w * scalar)
+-
+-def raycast_with_shading(position, uniforms, frag_coord):
+-    # Ray Setup
+-    tex_c = [position[0]/position[3], position[1]/position[3]]
+-    tex_c[0] = 0.5 * tex_c[0] + 0.5
+-    tex_c[1] = 0.5 * tex_c[1] - 0.5
+-    
+-    front = uniforms['cubeFront'].sample(tex_c)
+-    back = uniforms['cubeBack'].sample(tex_c)
+-    
+-    dir_vec = Vec3(back.x - front.x, back.y - front.y, back.z - front.z).normalize()
+-    
+-    pos = Vec4(front.x, front.y, front.z, 0.0)
+-    dst = Vec4(0.0, 0.0, 0.0, 0.0)
+-    value = Vec4(0.0, 0.0, 0.0, 0.0)
+-    
+-    step_vec = Vec3(dir_vec.x * uniforms['stepSize'][0], dir_vec.y * uniforms['stepSize'][1], dir_vec.z * uniforms['stepSize'][2])
+-    
+-    noise_val = uniforms['bakedNoise'].sample([frag_coord[0]/256.0, frag_coord[1]/256.0])[0]
+-    pos.x += step_vec.x * noise_val
+-    pos.y += step_vec.y * noise_val
+-    pos.z += step_vec.z * noise_val
+-    
+-    # Ray Marching Loop
+-    for i in range(uniforms['iterations']):
+-        pos.w = 0.0
+-        
+-        # Sample volume
+-        value.w = uniforms['volume'].sample([pos.x, pos.y, pos.z])[0]
+-        iso_value = int(255.0 * value.w)
+-        
+-        # Threshold check
+-        if uniforms['threshold'][0] <= iso_value <= uniforms['threshold'][1]:
+-            # Sample transfer function
+-            src = uniforms['transferFunction'].sample(value.w)
+-            
+-            # Opacity correction
+-            step_scale = uniforms['stepScale']
+-            src.w = 1.0 - (1.0 - src.w)**(step_scale / 0.5)
+-            
+-            # Shading
+-            if uniforms['diffuseShading']:
+-                enc = uniforms['gradients'].sample([pos.x, pos.y, pos.z])
+-                enc_xy = [enc[0], enc[1]]
+-                n_z = (enc_xy[0]**2 + enc_xy[1]**2) * 2.0 - 1.0
+-                enc_mag = (enc_xy[0]**2 + enc_xy[1]**2)**0.5
+-                n_xy = Vec3(enc_xy[0]/enc_mag if enc_mag > 0 else 0, enc_xy[1]/enc_mag if enc_mag > 0 else 0, 0)
+-                n_xy = Vec3(n_xy.x * (1.0 - n_z**2)**0.5, n_xy.y * (1.0 - n_z**2)**0.5, 0)
+-                n = Vec3(n_xy.x, n_xy.y, n_z)
+-                
+-                m = uniforms['ciModelMatrixInverseTranspose']
+-                normal = Vec3(
+-                    m[0][0]*n.x + m[0][1]*n.y + m[0][2]*n.z,
+-                    m[1][0]*n.x + m[1][1]*n.y + m[1][2]*n.z,
+-                    m[2][0]*n.x + m[2][1]*n.y + m[2][2]*n.z
+-                ).normalize()
+-                
+-                light_dir = Vec3(-uniforms['light'].direction[0], -uniforms['light'].direction[1], -uniforms['light'].direction[2]).normalize()
+-                
+-                lambert = max(normal.dot(light_dir), 0.0)
+-                
+-                src.x = uniforms['light'].diffuse[0] * lambert * src.x + uniforms['light'].ambient[0] * src.x
+-                src.y = uniforms['light'].diffuse[1] * lambert * src.y + uniforms['light'].ambient[1] * src.y
+-                src.z = uniforms['light'].diffuse[2] * lambert * src.z + uniforms['light'].ambient[2] * src.z
+-            
+-            # Front-to-back blending
+-            src.x *= src.w
+-            src.y *= src.w
+-            src.z *= src.w
+-            dst = Vec4((1.0 - dst.w)*src.x + dst.x, (1.0 - dst.w)*src.y + dst.y, (1.0 - dst.w)*src.z + dst.z, (1.0 - dst.w)*src.w + dst.w)
+-            
+-            # Early termination
+-            if dst.w >= 0.95:
+-                break
+-        
+-        # Advance position
+-        pos.x += step_vec.x
+-        pos.y += step_vec.y
+-        pos.z += step_vec.z
+-        
+-        # Boundary check
+-        if pos.x > 1.0 or pos.y > 1.0 or pos.z > 1.0:
+-            break
+-            
+-    # Output
+-    o_color = Vec4(dst.x, dst.y, dst.z, 1.0)
+-    o_normal = Vec3(value.x, value.y, value.z)
+-    frag_depth = pos.z
+-    
+-    return o_color, o_normal, frag_depth
+-```
++**Edge Cases and Pitfalls**
++*   **Out of Bounds**: The ray position is checked against 1.0 in x, y, z. If any exceed 1.0, the loop breaks [S1, unofficial].
++*   **Early Termination**: Ray marching breaks if accumulated alpha `dst.a >= 0.95` [S1, unofficial].
++*   **Normal Decoding**: The spheremap transform is attributed to Cry Engine 3 and Martin Mittring [S1, unofficial].
+ 
+ ## Subtopics
+ 
+ ### [Gradient-Based Volume Rendering with Isovalue Lookup](10998-gradient-based-volume-rendering-with-isovalue-lookup.md)
+-This method performs direct volume ray casting by storing pre-computed integer isovalue and gradient magnitude data in a 3D texture, allowing the fragment shader to sample surface properties directly without numerical differentiation. It distinguishes itself from standard raycasting by weighting the transfer function opacity with the gradient magnitude, which enhances edges and surfaces, and by using a lookup-based approach for lighting and visibility selection. It builds on [Raycasting with Transfer Function and Shading](3773-raycasting-with-transfer-function-and-shading.md) by replacing on-the-fly gradient computation with pre-sampled gradient magnitudes and adding isovalue-based selection logic.
++This method performs direct volume ray casting by sampling a 3D texture storing pre-computed integer isovalue and gradient magnitude data, allowing the fragment shader to sample surface properties directly without numerical differentiation. It distinguishes itself from standard raycasting by weighting the transfer function opacity with the gradient magnitude to enhance edges and surfaces, and by using a lookup-based approach for lighting and visibility selection. It builds on [Raycasting with Transfer Function and Shading](3773-raycasting-with-transfer-function-and-shading.md) by replacing on-the-fly gradient computation with pre-sampled gradient magnitudes and adding isovalue-based selection logic.
+ 
+ ### [Gradient-Density Raycasting with Transfer Function Blending](13551-gradient-density-raycasting-with-transfer-function-blending.md)
+ A fragment-based volume rendering technique that performs raycasting in the fragment shader, sampling density and gradient simultaneously, blending between two transfer functions based on an index, and applying silhouette and gradient magnitude modulation for shading. It differs from standard raycasting by explicitly computing the gradient vector per sample to drive both shading (via `Illuminate`) and opacity modulation (via `SilhouetteModulation` and `GradientMagnitudeModulation`), while using a fixed step count derived from ray length rather than adaptive traversal.
+ 
++### [Front-to-Back Ray Casting](22171-front-to-back-ray-casting.md)
++Front-to-Back Ray Casting is a direct volume rendering technique that accumulates color and opacity along a ray traversing a 3D texture space, starting from the viewer and moving toward the back of the volume. It solves the problem of compositing semi-transparent volumetric data into a 2D image by applying the standard front-to-back alpha blending equation at each sample step. It is distinguished from its siblings by its explicit use of a fixed iteration count combined with boundary checks, and its specific normalization of raw volume values to a fixed [0, 1] range before blending, rather than relying solely on the transfer function's alpha channel for opacity weighting.
++
+ ## Operating characteristics
+-- **Time Complexity:** $O(N)$ where $N$ is the number of iterations (ray steps) per fragment [S1, unofficial].
+-- **Memory Complexity:** $O(1)$ per fragment, plus storage for the 3D volume, gradient, and transfer function textures [S1, unofficial].
+-- **Performance:** Performance is limited by memory bandwidth due to frequent 3D texture lookups and the need to decode normals [S1, unofficial]. The early termination condition ($dst.a \ge 0.95$) can significantly reduce average iteration count for opaque regions [S1, unofficial].
+-- **Strengths:** Simple implementation in fragment shaders; provides basic shading effects; jittering reduces aliasing artifacts [S1, unofficial].
+-- **Limitations:** Fixed step size may lead to aliasing or slow convergence in sparse regions; gradient decoding assumes specific encoding; boundary checks are simple and may not handle complex volume shapes perfectly [S1, unofficial].
+-- **When to use:** Real-time rendering of solid volumetric data where basic shading is sufficient [S1, unofficial].
+-- **When not to use:** When high-quality anti-aliasing or adaptive step sizes are required; when complex lighting effects (e.g., subsurface scattering) are needed [S1, unofficial].
++*   **Time Complexity**: $O(N)$ where $N$ is the number of iterations (ray steps) per pixel.
++*   **Memory Complexity**: Depends on the size of the 3D volume texture and gradient texture. The method requires additional 2D textures for front/back face lookup and baked noise.
++*   **Measured Performance**: Not given in the sources.
++*   **Scaling**: Performance scales linearly with the number of iterations and the resolution of the output image.
++*   **Strengths**:
++    *   Uses pre-computed gradients for efficient lighting calculations [S1, unofficial].
++    *   Isovalue thresholding allows for selective rendering of specific density ranges [S1, unofficial].
++    *   Jittered stepping reduces banding artifacts [S1, unofficial].
++*   **Limitations**:
++    *   Fixed step size may lead to aliasing or excessive computation if not tuned [S1, unofficial].
++    *   Early termination threshold (0.95) may cause transparency artifacts in thin regions [S1, unofficial].
++*   **When to use**: Suitable for real-time rendering of volumetric data where gradient-based shading is desired and pre-computed gradients are available [S1, unofficial].
++*   **When not**: Not suitable for adaptive step sizes or when high-quality anti-aliasing is required without additional techniques [S1, unofficial].
+ 
+ ## Background
+-This method is based on a fragment shader implementation for front-to-back volume raycasting with gradient-based diffuse shading [S1, unofficial]. It uses a spheremap transform for normal decoding, attributed to Cry Engine 3 and Martin Mittring [S1, unofficial]. The approach is part of a broader family of direct volume rendering techniques that integrate transfer functions and lighting models during ray marching [S1, unofficial].
++The method is implemented in the `VolumeRendering` project by Jose Villegas [S1, unofficial]. The normal decoding technique uses a spheremap transform, attributed to Cry Engine 3 and Martin Mittring [S1, unofficial]. The implementation includes a UI for editing transfer functions, allowing users to add alpha and color control points based on iso values [S1, unofficial].
+ 
+ ## Sources

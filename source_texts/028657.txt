@@ -1,0 +1,305 @@
+nice-to-have for quick visualization. We might want to check if this should be carried as an optional submodule, or if we should use our own implementation. Also -- this might be good for turning compound (union) csg into true aSDFs Shou...
+
+Visualization: sphere-traced rendering of shapes and tapes · Issue #93 · rmrsk/EBGeometry · GitHub
+Skip to content
+You signed in with another tab or window. Reload to refresh your session.
+You signed out in another tab or window. Reload to refresh your session.
+You switched accounts on another tab or window. Reload to refresh your session.
+Dismiss alert
+Visualization: sphere-traced rendering of shapes and tapes #93
+New issue
+Copy link
+New issue
+Copy link
+Open
+Open
+Visualization: sphere-traced rendering of shapes and tapes#93
+Copy link
+Description
+rmrsk
+opened on Jul 7, 2026
+Issue body actions
+nice-to-have for quick visualization.
+We might want to check if this should be carried as an optional submodule, or if we should use our own implementation.
+Also -- this might be good for turning compound (union) csg into true aSDFs
+Should also think about a simple ray tracer
+Reactions are currently unavailable
+Activity
+rmrsk commented on Jul 8, 2026
+rmrsk
+on Jul 8, 2026
+OwnerAuthor
+More actions
+Proposed plan: adaptive surface meshing of ImplicitFunction<T>
+Recommendation: Dual Contouring (DC) over an adaptive octree, not Marching Cubes -- DC composes naturally with variable-resolution octree cells (no crack-patching needed between differently-sized neighboring leaf cells, which plain MC requires), and it directly wants the gradient/Hermite data this needs anyway. This also answers the "own implementation vs. submodule" question in the issue body: keep it in-house rather than pulling in OpenVDB/CGAL/libigl, since "zero external dependencies at use-time" is a load-bearing design constraint of this library (header-only, GPL-3.0-or-later). A third-party mesher would only make sense as an illustrative, non-CI-tested ThirdParty/ example, not a Source/ feature.
+Phases
+Phase 0 -- interface prerequisite. Add gradient support to ImplicitFunction<T> (Source/EBGeometry_ImplicitFunction.hpp): a gradient() with a central-finite-difference default, overridable per-shape for analytic normals. Needed for DC's per-cell QEF vertex placement and for output vertex normals.
+Phase 1 -- adaptive octree resolution driver. Reuse EBGeometry::Octree::Node<Meta,Data> (Source/EBGeometry_Octree.hpp) the same way approximateBoundingVolumeOctree already does -- same sign-change/curvature-based SplitFunction, just repurposed to decide isosurface refinement depth instead of a bounding volume. No new spatial-partition primitive needed.
+Phase 2 -- new header(s), e.g. EBGeometry_DualContouring.hpp/Implem.hpp. Per leaf cell: sample corners, detect sign changes, solve a small QEF from Hermite data (edge crossing + gradient) to place one vertex per active cell, connect vertices across shared edges. Output: raw triangle/vertex soup, no DCEL yet.
+Phase 3 -- mesh assembly into DCEL. Weld coincident vertices (spatial hash, epsilon tolerance), then feed into the same triangle-soup -> DCEL::MeshT<T,Meta> construction path Source/EBGeometry_Parser.hpp already uses for OBJ/PLY/STL import. Riskiest step: DC can produce non-manifold output near sharp/degenerate features, and DCEL construction assumes watertight input -- needs an explicit repair/fallback or a documented "manifold-only" restriction for v1.
+Phase 4 -- tests. Tests/TestSurfaceMesher.cpp: mesh analytic primitives (sphere, box, torus, a CSG union) at increasing octree depth; check watertightness (same edge-pairing invariants TestDCEL already checks) and convergence of mesh-to-value() distance toward zero.
+Phase 5 -- example. Examples/SurfaceMesher/, meshing a CSG tree and writing via the existing STL/OBJ/VTK writers.
+Open decisions
+DC vs. MC (recommend DC, above).
+Always route output through DCEL::MeshT, or also support raw triangle-soup for cases where DC yields non-manifold geometry -- likely need both, with soup as the honest fallback.
+Octree::Node is pointer-based (fine for build-time, like TreeBVH) -- a PackedBVH-style flattened variant is a plausible follow-up but out of scope for v1.
+Rough size estimate
+Sized against comparable existing modules (BVH.hpp+Implem = 2,232 lines; DCEL_Mesh.hpp+Implem = 1,025; Octree.hpp+Implem = 496; Parser.hpp+Implem = 2,262):
+Piece
+Files
+Lines
+ImplicitFunction gradient addition (edit existing)
+2 modified
+~30-50
+EBGeometry_DualContouring.hpp+Implem.hpp (core algorithm)
+2 new
+~700-1,000
+Vertex welding + soup->DCEL wiring
+1 new + 2 modified
+~200-300
+Tests/TestSurfaceMesher.cpp + registration
+1 new + 2 modified
+~300-400
+Examples/SurfaceMesher/
+4 new
+~150-200
+Docs
+1 new/modified
+~50-100
+Total: roughly 1,500-2,000 lines across ~15 touched files (~8-9 new, ~6-7 edited). Biggest uncertainty is the QEF solver / non-manifold handling in Phase 2-3, which could swing this 30-40% either way.
+Suggested delivery order: gradient -> fixed-depth DC producing soup + tests -> adaptive octree refinement -> DCEL integration -> example.
+rmrsk
+changed the title [-]Marching cubes[/-] [+]Marching cubes and dual contouring[/+] on Jul 8, 2026
+rmrsk
+changed the title [-]Marching cubes and dual contouring[/-] [+]Visualization[/+] on Jul 14, 2026
+rmrsk commented on Oct 21, 2026
+rmrsk
+on Oct 21, 2026
+OwnerAuthor
+More actions
+Change of direction: sphere tracing instead of meshing
+The Dual Contouring / Marching Cubes plan above is dropped. Visualization will be done by sphere tracing the signed distance directly. The plan is preliminary and will be hardened later.
+Why
+Nothing new in the library. Sphere tracing needs only signedDistance(). There is no mesher, no QEF solver, no octree driver, no vertex welding and no DCEL assembly, which together were the estimated 1,500–2,000 lines and the non-manifold risk in the plan above.
+It works on everything that already exists. Analytic shapes, a Tape compiled from any Expr, mesh SDFs and BVH unions can all be rendered the same way. The plan above was written against ImplicitFunction<T>, which no longer exists.
+It's safe wherever the value is Exact or Bound. A tracer can read getDistanceQuality() and refuse NotADistance shapes, which makes it a good demonstration of what the distance quality means.
+It runs on the device unchanged. One GPU::transform() thread per pixel, with the same functor as on the host.
+No dependencies for still images (PPM). Only an interactive viewer needs a window library such as SDL2, so that part belongs outside Examples/.
+Prototype
+On branch claude/sphere-tracer-scratch, under scratch/. It is not built by CMake or CI. About 450 lines in total:
+Tracer.hpp: orbit camera, sphere tracing, finite-difference normals, diffuse + specular + sky light, soft shadows, ambient occlusion, and a Pixel functor that is EBGEOMETRY_HOST_DEVICE and trivially copyable.
+render.cpp: still image to PPM.
+viewer.cpp: SDL2 window. Left-drag orbits, the wheel zooms, G switches between GPU and CPU. While the camera moves it renders a quarter-resolution preview, then one sharp frame once it stops.
+bench.cpp: frame times on host and device.
+Frame times for 960×720 with 2×2 supersampling, shadows and ambient occlusion: 0.58 s on 24 CPU threads; 0.15 s on an RTX 3080 Ti through a Tape; 7 ms on the GPU with a hand-written SDF. The gap between the last two is #210.
+Rough plan (to be hardened)
+A dependency-free tracer header under Examples/. The CSG examples split in Reorganize Examples and Integrations into smaller, single-topic programs #209 would each write a picture of what they build. The rendered images can also go into the Sphinx example pages.
+An interactive viewer (SDL2) as a thin front end over the same tracer, outside Examples/, in Integrations/ or a new Tools/ folder.
+Open questions:
+Should the tracer become a public library utility (Source/), or stay example code?
+Should it be optionally device-accelerated in the examples?
+How should it handle NotADistance shapes: refuse them, or take a step-size safety factor?
+Does Tape: device evaluator spills its value/point stacks to local memory (~20x slower than a hand-written SDF on GPU) #210 need to be fixed first, so that GPU rendering through a Tape is interactive at full quality?
+The point in the issue body about turning compound CSG into true distance functions is a separate question. Sphere tracing does not need it, since a lower bound on the distance is enough.
+rmrsk
+changed the title [-]Visualization[/-] [+]Visualization: sphere-traced rendering of shapes and tapes[/+] on Oct 21, 2026
+rmrsk commented on Oct 21, 2026
+rmrsk
+on Oct 21, 2026
+OwnerAuthor
+More actions
+Sphere tracing a mesh: where the time goes, and cheap wins
+Measured on branch claude/sphere-tracer-scratch (meshbench.cpp, armadillo.cpp). Setup: float, RTX 3080 Ti, nvcc 12.5 -O3 -arch=sm_86, 24 host threads. Scene: the 100k-face Armadillo from common-3d-test-models, centred and scaled with Translate/Scale, pierced by a CylinderSDF, all compiled into one Tape.
+armadillo.cpp tunnel
+armadillo.cpp rod
+Distance evaluations per pixel
+200×200 pixels rendered on the host, counting every signedDistance() call:
+Shading
+Mean
+Max
+Floor + soft shadows + AO
+56
+206
+Floor, no shadows/AO
+29
+163
+No floor, shadows + AO
+12
+116
+This is a normal count for sphere tracing; the number of steps is not the problem.
+Cost of one mesh distance query on the GPU
+1M queries through GPU::transform(), including about 2 ms of host↔device copies:
+Near the surface (|d| < 1% of the height)
+Inside the bounding box
+Far away (1.5–3 box sizes)
+MeshSDF
+14 ms
+151 ms
+69 ms
+TriMeshSDF
+9 ms
+45 ms
+36 ms
+Tape(Scale(Translate(MeshSDF)))
+19 ms
+148 ms
+129 ms
+A closest-point query is about 10× more expensive away from the surface than close to it. There the search sphere is large, so the BVH prunes little before it finds the nearest triangle. Floor and shadow rays spend almost all their steps in that region. That, not the tape, is what makes a 960×960 frame with 2×2 supersampling take 11–16 s. The tape adds 1.3× (near) to 1.9× (far) over a bare MeshSDF; see #210 for the tape's own overhead.
+Two cheap wins
+Measured on the 960×960 tunnel frame with 2×2 supersampling, rendered on the GPU:
+Setup
+GPU render
+MeshSDF
+11.4–16.4 s (varied between runs)
+TriMeshSDF (MESH=tri)
+6.3–9.1 s
+MeshSDF + bounding-box skip (BOXBOUND=1)
+1.8–2.1 s
+TriMeshSDF + bounding-box skip
+1.0–1.2 s (10–14×)
+Bounding-box skip: farther than 0.1 from the tape's bounding box, the tracer steps by the distance to the box. This is a valid lower bound on the distance to the surface, and it costs almost nothing.
+Soft shadows estimate their penumbra from the distances along the shadow ray. Feeding them box distances produced banding, so shadow rays now use the box distance only to move along the ray.
+The resulting images match the MeshSDF reference to 53 dB PSNR. 0.2% of pixels differ by more than 2%, all of them in the penumbra; the surface is identical.
+Why a ray tracer is much cheaper, and what that means here
+A mesh ray tracer asks one question per ray: where is the first hit? It answers with one front-to-back BVH traversal through a thin tube of nodes, stopping at the first hit. Sphere tracing asks "how far is the nearest surface?" 30–60 times per ray, and each search covers a whole sphere around the point.
+From the literature (not measured here), software GPU BVH ray casting reaches hundreds of millions of rays per second on this class of GPU, and RT cores reach more. Primary + shadow rays for this frame (about 7.4M) would then take tens of milliseconds, two to three orders of magnitude below sphere tracing the mesh.
+Exact ray casting through CSG needs every primitive to return all its entry and exit intervals along a ray, which the boolean operations then combine. That covers union, intersection, difference and affine maps (map the ray, not the point). It does not cover smooth blends, Offset, Annular, Blur or Mollify, which would still need sphere tracing.
+Directions (to be hardened, roughly in order of cost)
+Bounding-box skip inside the tape for single primitives. The BVH union already prunes by box, but only for unions of m_bvhUnionThreshold (8) or more.
+A mesh distance query that only promises a lower bound (stops once it has a safe step, or above a cap). Sphere tracing never needs the exact distance far from the surface, which is exactly where queries are expensive.
+The tape overhead fixes in Tape: device evaluator spills its value/point stacks to local memory (~20x slower than a hand-written SDF on GPU) #210.
+Ray-interval CSG (a ray query on every shape) for exact operations, with sphere tracing as the fallback for smooth and filtered operations. This is what would bring mesh scenes to interactive rates.
+Visualization-only alternatives: a precomputed narrow-band distance grid, or OptiX with RT cores as an Integrations/ example (a third-party dependency, so not in Source/).
+rmrsk commented on Oct 21, 2026
+rmrsk
+on Oct 21, 2026
+OwnerAuthor
+More actions
+Addition to the plan: include a ray tracer, not only a sphere tracer
+The visualization should include a ray tracer (ray–surface intersection) alongside the sphere tracer. The measurements above show why: sphere tracing a mesh asks for the closest point 30–60 times per ray, and those queries are expensive away from the surface. A ray tracer asks one cheaper question per ray (first hit along a ray) with one front-to-back BVH traversal. For mesh scenes that is expected to be two to three orders of magnitude cheaper. Preliminary, to be hardened like the rest of this plan.
+What it would involve
+A ray query on the shapes, as a new capability next to signedDistance():
+analytic shapes: closed-form ray intersections (sphere, box, cylinder, cone, torus, ...);
+mesh SDFs: a BVH ray traversal over the existing packed BVHs, with Möller–Trumbore tests against the TriangleSoA leaves. This needs no new acceleration structure.
+CSG by ray intervals. Each primitive returns the intervals along the ray where the ray is inside it, and Union/Intersection/Difference/Complement combine those intervals. Affine maps transform the ray instead of the point. This is exact and needs no distance at all.
+Falling back to sphere tracing inside sub-expressions that have no ray form: smooth blends, Offset, Annular, Blur, Mollify, Elongate, Repeat, and NotADistance shapes. A hybrid could ray-trace the parts that support it and sphere-trace only within the bounding boxes of the parts that don't.
+Device-capable from the start. Same Pixel functor, same GPU::transform() path as the sphere tracer. The interval lists need a fixed maximum length per ray to stay within the device constraints (no allocation, no recursion).
+Shadows and ambient occlusion become shadow rays and short occlusion rays. Soft shadows need either several shadow rays or a sphere-traced penumbra.
+Open questions
+Is the ray query a public library feature (useful beyond visualization: line-of-sight, cut-cell intersection points along grid lines) or example-only code?
+Should hardware RT cores (OptiX) be offered for meshes as an Integrations/ example? It's a third-party dependency, so it would stay outside Source/.
+How large can the CSG interval lists get on the device before they need to be truncated?
+Interactive prototype
+On the branch, viewer.cpp now also shows the Armadillo scenes (./viewer tunnel <armadillo.obj>, ./viewer rod <armadillo.obj>, using TriMeshSDF with the bounding-box skip). A sharp 960×720 frame with 2×2 supersampling takes about 0.75 s on the RTX 3080 Ti through sphere tracing. A ray-traced version is the natural next comparison.
+rmrsk commented on Oct 21, 2026
+rmrsk
+on Oct 21, 2026
+OwnerAuthor
+More actions
+Ray tracer prototype: results
+On branch claude/sphere-tracer-scratch (RayTracer.hpp, rtarmadillo.cpp). The interactive viewer switches methods with M.
+Tunnel (Difference), ray traced
+Rod (Union), ray traced
+Three methods
+Sphere tracing: the tape, with the mesh as a TriMeshSDF, plus the bounding-box skip described above.
+Pure ray tracing:
+a PackedBVH over the triangles, traversed with PackedBVH::traverse(), using a ray–box slab test as the pruning rule and the ray's entry distance as the node key;
+Möller–Trumbore ray–triangle tests with interpolated vertex normals;
+a closed-form capped cylinder;
+CSG by walking each primitive's crossings along the ray in order, tracking whether the ray is inside each primitive. Affine maps transform the ray.
+All of it uses public library pieces only, and runs through GPU::transform().
+Hybrid: rays walk a BVH of boxes that cover the surface, and the tape is sphere traced only inside the boxes a ray enters.
+For sharp CSG the surface lies on the primitives' surfaces. So the boxes are the mesh's leaf boxes plus the cylinder's box. The cylinder's box is needed because the tunnel wall lies deep inside the Armadillo, where no mesh leaf box reaches.
+Smooth blends and offsets would grow the boxes.
+Timings
+Tunnel scene, 960×960, 2×2 supersampling, soft/hard shadows and AO, float, RTX 3080 Ti, best of 3:
+Method
+Through the tape
+Hand-written SDF, no tape
+Sphere tracing
+1006 ms
+627 ms
+Hybrid, mesh leaves ≤ 8 / 32 / 128 triangles
+617 / 540 / 488 ms
+— / — / 311 ms
+Hybrid ≤ 128, primary rays only (no shadows, no AO)
+—
+229 ms
+Pure ray tracing
+—
+17 ms
+Pure ray tracing, primary rays only
+—
+3.4 ms
+The rod scene gives the same picture: sphere tracing 1145 ms, hybrid 483–596 ms, ray tracing 16 ms.
+Build times: triangle BVH 0.26 s; surface-box BVH about 0.2 s; reading the mesh into a TriMeshSDF 0.45 s.
+Correctness: pure ray tracing and the hybrid agree to 39 dB PSNR. The roughly 2% of pixels that differ are shading only (vertex normals and short occlusion rays in one, distance-gradient normals and distance-based AO in the other). The sphere-traced reference differs further only in the horizon (it marches no farther than 40) and in having soft rather than hard shadows.
+Assessment
+Pure ray tracing is in the expected range for software GPU ray tracing. Working back from the ray counts, it reaches about 1.1 billion primary rays/s and about 1.3 billion rays/s with shadows and AO (about 6 rays per sample). That is derived, not profiled, and includes per-frame host↔device copies. It is interactive at full quality: a sharp 960×720 frame takes about 15 ms in the viewer. There is headroom: the per-frame allocation and copying in the std::vector form of GPU::transform(), an untuned 4-wide traversal, and RT cores (OptiX) beyond that.
+The hybrid is correct but only about 2× faster than sphere tracing. The tape is not the main reason: without it, primary rays alone still cost 229 ms against 3.4 ms ray traced. Sphere tracing near the surface needs many closest-point searches, especially for rays that graze the surface, and each one costs far more than testing the ray against the leaf's triangles.
+The tape adds about 1.6× for these mesh scenes (far more for analytic CSG; see Tape: device evaluator spills its value/point stacks to local memory (~20x slower than a hand-written SDF on GPU) #210).
+Suggested direction for evaluating rays through the tape (to be hardened)
+Primitives that can answer a ray query answer it exactly: nextCrossing(ray, tMin), returning t, the normal, and whether the ray enters or leaves. Analytic shapes do it in closed form; mesh SDFs by ray traversal of their existing BVH.
+A ray version of the tape's clause evaluator combines crossings for Union/Intersection/Complement (so also Difference) by walking them in order, and transforms the ray for affine maps. The prototype's crossing walk is a small instance of this.
+Sphere tracing is kept only for sub-expressions with no ray form: smooth blends, Offset, Annular, Blur, Mollify, Elongate, Repeat, and NotADistance shapes. These are sphere traced inside their boxes, grown by the blend or offset distance. This is where the leaf-box hybrid belongs.
+Device constraints carry over: fixed-size crossing state per ray, no recursion, and the call depth bounded as in the distance evaluator.
+rmrsk commented on Oct 21, 2026
+rmrsk
+on Oct 21, 2026
+OwnerAuthor
+More actions
+Addition to the plan: the examples open the viewer
+Most EBGeometry examples, at least those that build geometry (shapes, CSG, transforms, mesh SDFs, BVH unions; see the reorganization in #209), should show what they built when they run, by opening the renderer on the object. Constraints from the repository's example rules:
+No third-party dependency by default. The dependency-free path writes an image (PPM, or PNG written by our own code). An interactive window is opt-in at build time (for example make VIEWER=SDL2, or a CMake option), since SDL2 is a third-party dependency.
+CI and ctest stay non-interactive. The examples run unattended under ctest (300 s limit, exit 0). The viewer must not block: no window when there is no display, or when a --no-view argument or environment variable is set, and the image is still written.
+Device builds. In a GPU build, the example's last section already runs its query through GPU::transform(); rendering can use the same path.
+Shared code. The renderer would live in the shared example header discussed in Reorganize Examples and Integrations into smaller, single-topic programs #209, so each example adds about one line (view(tape) or similar). Each example folder must still be copyable as a standalone project.
+Prototype and measurements: #211. Preliminary, to be hardened with the rest of this plan.
+rmrsk commented on Oct 23, 2026
+rmrsk
+on Oct 23, 2026
+OwnerAuthor
+More actions
+Review checklist for the renderer (#214 → #215 → #216)
+Rays and hits
+RayT<T> and HitT<T> (EBGeometry_Ray.hpp) are trivially copyable, with a static_assert in the header, and every member is EBGEOMETRY_HOST_DEVICE. A [gpu] test uses them through GPU::transform.
+One facade for ray and sphere tracing
+One user-facing call for every shape: firstHit(shape, ray, tMin, tMax, options) and intersects(...), with the same signature and the same HitT result (t, point, normal, status, exact or within tolerance).
+The facade picks the method itself: a closed-form ray form (RayForm<S>) when the shape has one, otherwise sphere tracing of its signed distance. The caller never chooses.
+Adding a ray form to a shape (RayForm<MyShape>) is documented, and nothing else changes.
+Particles (segment queries)
+The same facade answers "does a particle moving from x0 to x1 hit the scene, and where first?": a segment overload, or a ray with tMax = |x1 - x0|, that is device-callable.
+It is tested on its own, not only through the renderer: a hit, a miss, a particle starting inside, and an end point exactly on the surface.
+Traversal
+Ray traversals of BVHs (TriMeshSDF, BVH unions, the tape's BVH unions) use the existing PackedBVH::traverse with ray-box keys. No second traversal implementation.
+Batched rays: the baseline is one ray per thread through GPU::transform. Add a batch API (many rays at once, e.g. sorted or packeted) only if a measurement shows it is faster.
+Renderer
+The renderer (EBGeometry_Render.hpp) uses only the facade: no if constexpr (RayForm<...>) or other shape-specific branches. Shadows and ambient occlusion go through the same calls.
+Code placement:
+EBGeometry_Ray.hpp: rays, hits, the facade, the analytic ray forms;
+each structure's ray form beside the structure;
+EBGeometry_Render.hpp: camera, settings, image, renderer;
+EBGeometry_Viewer.hpp: SDL2, opt-in (EBGEOMETRY_VIEWER=SDL2).
+Checks
+Tests: the closed-form ray forms against sphere tracing on the same shapes; [gpu] cases; the segment cases above.
+Performance: Performance/Render plus ray-query cases (host and hostdevice) in the receipts.
+Docs: a Sphinx page for ray queries (facade, ray forms, segment queries) and the renderer, cited from an example.
+Sign up for free to join this conversation on GitHub. Already have an account? Sign in to comment
+Metadata
+Metadata
+Assignees
+No one assigned
+Labels
+No labels
+No labels
+Projects
+No projects
+Milestone
+No milestone
+Relationships
+None yet
+Development
+No branches or pull requests
+Issue actions
+Open in GitHub Copilot app
+You can’t perform that action at this time.

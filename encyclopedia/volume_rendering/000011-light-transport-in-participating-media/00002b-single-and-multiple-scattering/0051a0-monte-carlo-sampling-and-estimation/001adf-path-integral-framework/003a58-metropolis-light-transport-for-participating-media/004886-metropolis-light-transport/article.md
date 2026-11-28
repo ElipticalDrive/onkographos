@@ -1,0 +1,53 @@
+# Metropolis Light Transport
+
+Also called: Metropolis, MetropolisRenderer
+
+## Overview
+Metropolis Light Transport (MLT) is a global illumination rendering method that uses Markov Chain Monte Carlo (MCMC) to sample light paths $\bar{x}$ according to a target distribution $\pi(\bar{x})$ proportional to the image contribution of the paths [S1]. It differs from standard path tracing by exploring the space of light transport paths via small and large mutations, allowing it to find complex light transport paths (like those involving multiple bounces) that standard path tracing might miss [S2, unofficial].
+
+## How it works
+**Inputs and Outputs:** The method takes scene geometry, materials, lights, camera parameters, and MLT control parameters as input, and outputs a rendered image (film) with accumulated radiance values [S2, unofficial].
+
+**Data Structures:** The implementation relies on specific sample structures to store the state of light transport paths [S2, unofficial].
+* `PathSample`: Stores samples for path vertices, containing `BSDFSample bsdfSample` (with `uComponent`, `uDir[0]`, `uDir[1]`) and `float rrSample` [S2, unofficial].
+* `LightingSample`: Stores samples for light interactions, containing `BSDFSample bsdfSample`, `float lightNum`, and `LightSample lightSample` (with `uComponent`, `uPos[0]`, `uPos[1]`) [S2, unofficial].
+* `MLTSample`: The primary state container for a light path, containing `CameraSample cameraSample`, `float lightNumSample`, `float lightRaySamples[5]`, `vector<PathSample> cameraPathSamples`, `vector<PathSample> lightPathSamples`, and `vector<LightingSample> lightingSamples` [S2, unofficial]. The vectors are initialized with `maxLength` (typically `maxDepth`) in the constructor, and the sample contains `maxDepth` `PathVertex` objects for camera and light paths to store the geometric state [S2, unofficial].
+* `MLTTask`: Stores parallel task state, including `progress reporter`, `pixel frequency`, `task number`, `pixel bounds` (`x0`, `x1`, `y0`, `y1`), `time bounds` (`t0`, `t1`), `mean intensity b`, `initial sample`, `scene`, `camera`, `renderer`, `mutex`, and `light distribution` [S2, unofficial].
+
+**Algorithm:**
+1. **Direct Lighting Phase:** If `doDirectSeparately` is true, render direct lighting separately using a `DirectLightingIntegrator`, generating `nDirectPixelSamples` per pixel via a stratified sampler and rendering to the film [S2, unofficial].
+2. **Bootstrapping:** Generate `nBootstrap` random samples (seed paths) [S2, unofficial]. For each sample, compute the path radiance $L$ using a path tracer (e.g., `PathL()`) and compute the intensity $I = L.y()$ (luminance) [S2, unofficial]. Sum all intensities into `sumI` and compute the mean intensity $b = \text{sumI} / \text{nBootstrap}$ [S2, unofficial].
+3. **Initial Sample Selection:** Generate a random offset `contribOffset = rng.RandomFloat() * sumI` [S2, unofficial]. Iterate through the bootstrap samples, accumulating their intensities, and select the first sample where the accumulated intensity exceeds `contribOffset` [S2, unofficial].
+4. **Task Setup:** Calculate `largeStepsPerPixel` as $\max(1, \lceil \text{largeStepProbability} \times \text{nPixelSamples} \rceil)$ [S2, unofficial]. If this value is $\ge \text{nPixelSamples}$, divide by 2, and ensure it is at least 1 and less than `nPixelSamples` [S2, unofficial]. Calculate `largeStepRate = nPixelSamples / largeStepsPerPixel` [S2, unofficial]. Create `MLTTask` objects for each task, passing the initial sample, mean $b$, and scene data [S2, unofficial].
+5. **MLT Loop:** For each task, iterate $s$ from $0$ to `nTaskSamples` - 1, where `nTaskSamples = nPixels * largeStepRate` [S2, unofficial]. If $s \pmod{\text{largeStepRate}} == 0$, perform a **LargeStep** (resampling) using a shuffled pixel index; otherwise, perform a **SmallStep** (mutation) on the current sample [S2, unofficial].
+6. **Mutation:** When mutating a value $v$ with bounds $[\text{min}, \text{max}]$, if $\text{min} == \text{max}$ set $v = \text{min}$ [S2, unofficial]. Else, calculate delta $\delta = (\text{max} - \text{min}) \cdot b_{\text{scale}} \cdot \exp(\log\text{Ratio} \cdot \text{rng.RandomFloat}())$, where $b_{\text{scale}} = 1/64$, $a = 1/1024$, and $\log\text{Ratio} = -\log(b_{\text{scale}}/a)$ [S2, unofficial]. If $\text{rng.RandomFloat}() < 0.5$, $v += \delta$; if $v \ge \text{max}$, $v = \text{min} + (v - \text{max})$ [S2, unofficial]. Else, $v -= \delta$; if $v < \text{min}$, $v = \text{max} - (\text{min} - v)$ [S2, unofficial]. If $v < \text{min}$ or $v \ge \text{max}$, set $v = \text{min}$ [S2, unofficial].
+7. **Evaluate & Accept:** Compute radiance $L_{\text{proposed}}$ and intensity $I_{\text{proposed}}$ for the mutated sample [S2, unofficial]. Calculate acceptance probability $a = \min(1, I_{\text{proposed}} / I_{\text{current}})$ [S2, unofficial].
+8. **Splatting:** Before splatting, check if $I_{\text{current}}$ or $I_{\text{proposed}}$ is zero or if $1/I$ is infinite, and skip splatting if so [S2, unofficial]. If $I_{\text{current}} > 0$ and finite, splat $\frac{b}{\text{nPixelSamples}} \cdot \frac{L_{\text{current}}}{I_{\text{current}}}$ to the film at the camera sample position with weight $(1 - a)$ [S2, unofficial]. If $I_{\text{proposed}} > 0$ and finite, splat $\frac{b}{\text{nPixelSamples}} \cdot \frac{L_{\text{proposed}}}{I_{\text{proposed}}}$ with weight $a$ [S2, unofficial].
+
+**Parameters:**
+* `largeStepProbability`: Probability of performing a large step vs. a small step. Default: 0.25 [S2, unofficial].
+* `perPixelSamples`: Total number of samples per pixel. Default: 100 [S2, unofficial].
+* `nBootstrap`: Number of random samples generated during bootstrapping. Default: 100,000 [S2, unofficial].
+* `nDirectPixelSamples`: Number of direct lighting samples per pixel. Default: 4 [S2, unofficial].
+* `maxConsecutiveRejects`: Maximum number of consecutive rejected mutations before forcing an acceptance or reset. Default: 512 [S2, unofficial].
+* `maxDepth`: Maximum depth of light paths. Default: 7 [S2, unofficial].
+
+**Pitfalls:**
+* **Heterogeneous Media:** The Metropolis-Hastings acceptance probability cannot be evaluated in closed form if the target distribution $\pi(\bar{x})$ cannot be evaluated exactly, which occurs in scenes with heterogeneous participating media where transmittance is analytically intractable [S1].
+* **Division by Zero:** Check for zero or infinite intensity before splatting to avoid NaNs or infinities in the image [S2, unofficial].
+
+## Subtopics
+
+### Multiplexed Metropolis Light Transport (MMLT)
+MMLT is a ray tracing method used to render the reference base image, combining Markov chain Monte Carlo and multi-focused sampling to construct paths efficiently and reduce variance [S3]. It constructs paths connecting the light source to the light entering the camera using MCMC, calculates the amount of light entering the camera for each path to generate the CG image, and uses multi-weighted sampling to reduce the variance of the amount of light during Monte Carlo calculation [S3]. It is used to render the static base image in the DLI smoke animation method, where the scattering and absorption coefficients are set to 0 because the medium is not considered [S3]. Motion is not given to objects in the reference image to reproduce smoke motion; instead, motion is added via DLI compositing [S3].
+
+## Operating characteristics
+Not given in the sources.
+
+## Background
+Metropolis Light Transport was introduced by Veach and Guibas in 1997 [S1]. It is based on using Markov Chain Monte Carlo (MCMC) to sample light paths $\{\bar{x}_i\}_{i \ge 1}$ according to a target distribution $\pi(\bar{x})$ proportional to the image contribution of the paths [S1]. The path integral is estimated by the average $\hat{I}_j = \frac{1}{N} \sum_{i=1}^N W_j f(\bar{x}_i)$, where $Z = \int_\Omega L(\bar{x}) d\mu(\bar{x})$ is an unknown normalizing constant [S1]. The scalar contribution function $L(\bar{x})$ is usually constructed to be similar to the luminance of the path contribution function $f(\bar{x})$ [S1].
+
+## Sources
+[S1] Pseudo-marginal metropolis light transport, https://doi.org/10.1145/2820903.2820922, fetched 2026-10-30
+[S2] brianrli/pbrt-photon-beams, https://github.com/brianrli/pbrt-photon-beams, fetched 2026-10-27 (unofficial)
+[S3] Visual Expression of Volumetric Smoke Animation by Dynamic Luminance Information, https://doi.org/10.12792/icisip2019.023, fetched 2026-10-28

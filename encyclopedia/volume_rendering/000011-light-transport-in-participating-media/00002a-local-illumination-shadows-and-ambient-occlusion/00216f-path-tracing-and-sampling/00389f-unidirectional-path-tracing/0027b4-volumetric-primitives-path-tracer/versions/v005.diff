@@ -1,0 +1,247 @@
+--- v004.md
++++ v005.md
+@@ -88,138 +88,141 @@
+ import math
+ 
+-def gaussian_kernel_integral(t_start, t_end, center, alpha):
+-    """
+-    Analytical integral of 1D Gaussian kernel K(t) = exp(-alpha * (t - center)^2)
+-    along ray segment [t_start, t_end].
+-    Result: sqrt(pi/alpha) * 0.5 * [erf(sqrt(alpha)*(t_end - center)) - erf(sqrt(alpha)*(t_start - center))]
+-    """
++def gaussian_kernel_integral(t_a, t_b, center, alpha):
++    """Analytical integral of 1D Gaussian kernel K(t) = exp(-alpha * (t - center)^2)."""
+     sqrt_alpha = math.sqrt(alpha)
+-    arg_end = sqrt_alpha * (t_end - center)
+-    arg_start = sqrt_alpha * (t_start - center)
+-    return (math.sqrt(math.pi) / (2.0 * sqrt_alpha)) * (math.erf(arg_end) - math.erf(arg_start))
+-
+-def epanechnikov_kernel_integral(t_start, t_end, center, radius):
+-    """
+-    Analytical integral of Epanechnikov kernel.
+-    K(t) = 3/4 * (1 - ((t-center)/radius)^2) for |t-center| <= radius, else 0.
+-    """
+-    t_min = max(t_start, center - radius)
+-    t_max = min(t_end, center + radius)
++    arg_b = sqrt_alpha * (t_b - center)
++    arg_a = sqrt_alpha * (t_a - center)
++    return (math.sqrt(math.pi) / (2.0 * sqrt_alpha)) * (math.erf(arg_b) - math.erf(arg_a))
++
++def epanechnikov_kernel_integral(t_a, t_b, center, radius):
++    """Analytical integral of Epanechnikov kernel K(t) = 0.75 * (1 - ((t-center)/radius)^2) for |t-center| <= radius."""
++    t_min = max(t_a, center - radius)
++    t_max = min(t_b, center + radius)
+     if t_min >= t_max:
+         return 0.0
+-    
+     u_min = (t_min - center) / radius
+     u_max = (t_max - center) / radius
+-    # Integral of (1 - u^2) du = u - u^3/3
+     val = (u_max - u_max**3 / 3.0) - (u_min - u_min**3 / 3.0)
+-    return (3.0 / 4.0) * radius * val
++    return 0.75 * radius * val
+ 
+ def compute_optical_depth(primitive, t_a, t_b):
+     """Compute optical depth tau_i for primitive i along ray segment [t_a, t_b]."""
+     if primitive.kernel_type == 'gaussian':
+-        tau = gaussian_kernel_integral(t_a, t_b, primitive.center, primitive.alpha)
++        kernel_int = gaussian_kernel_integral(t_a, t_b, primitive.center, primitive.alpha)
+     elif primitive.kernel_type == 'epanechnikov':
+-        tau = epanechnikov_kernel_integral(t_a, t_b, primitive.center, primitive.radius)
++        kernel_int = epanechnikov_kernel_integral(t_a, t_b, primitive.center, primitive.radius)
+     else:
+-        raise ValueError("Unknown kernel type")
+-    return primitive.sigma * tau
+-
+-def sample_free_flight(t_start, t_end, mu_t_func, T_func, rng):
+-    """
+-    Sample free-flight distance t in [t_start, t_end] proportional to p(t) = mu_t(x_t) * T(x_0, x_t).
+-    Uses bisection on the CDF for general overlapping primitives [S1, unofficial].
+-    """
+-    # Compute total probability mass in segment
+-    mass = 0.0
+-    steps = 100
++        kernel_int = 0.0
++    return primitive.sigma * kernel_int
++
++def compute_segment_transmittance(primitive_list, t_start, t_end):
++    """T = exp(-sum(tau_i)) for all primitives overlapping the segment."""
++    total_tau = 0.0
++    for p in primitive_list:
++        total_tau += compute_optical_depth(p, t_start, t_end)
++    return math.exp(-total_tau)
++
++def sample_scatter_point(t_start, t_end, seg_primitives, T_cumulative, rng):
++    """Sample t in [t_start, t_end] proportional to p(t) = mu_t(x(t)) * T(x_0, x(t)) using bisection."""
++    def mu_t(t):
++        m = 0.0
++        for p in seg_primitives:
++            if p.kernel_type == 'gaussian':
++                m += p.sigma * math.exp(-p.alpha * (t - p.center)**2)
++            elif p.kernel_type == 'epanechnikov':
++                if abs(t - p.center) <= p.radius:
++                    m += p.sigma * 0.75 * (1.0 - ((t - p.center)/p.radius)**2)
++        return m
++
++    def T_at(t):
++        tau_seg = 0.0
++        for p in seg_primitives:
++            tau_seg += compute_optical_depth(p, t_start, t)
++        return T_cumulative * math.exp(-tau_seg)
++
++    target = rng.uniform(0.0, 1.0)
++    steps = 64
+     dt = (t_end - t_start) / steps
+-    for i in range(steps):
+-        t_mid = t_start + (i + 0.5) * dt
+-        mass += mu_t_func(t_mid) * T_func(t_mid) * dt
+-    
+-    target = rng.uniform(0.0, mass)
+-    current_mass = 0.0
++    F_end = sum(mu_t(t_start + (i + 0.5) * dt) * T_at(t_start + (i + 0.5) * dt) * dt for i in range(steps))
++
+     t_low, t_high = t_start, t_end
+-    
+-    for _ in range(50): # Bisection iterations
++    for _ in range(40):
+         t_mid = (t_low + t_high) / 2.0
+-        current_mass += mu_t_func(t_mid) * T_func(t_mid) * dt
+-        if current_mass >= target:
++        F_mid = sum(mu_t(t_start + (i + 0.5) * dt) * T_at(t_start + (i + 0.5) * dt) * dt 
++                    for i in range(steps) if t_start + (i + 0.5) * dt <= t_mid)
++        if F_mid < target * F_end:
++            t_low = t_mid
++        else:
+             t_high = t_mid
+-        else:
+-            t_low = t_mid
+         if t_high - t_low < 1e-6:
+             break
+     return (t_low + t_high) / 2.0
+ 
+-def trace_volumetric_primitives(ray_origin, ray_direction, ray_t_min, ray_t_max, primitives, lights, rng):
++def trace_vppt(ray_o, ray_d, t_min, t_max, primitives, lights, rng):
+     """Main VPPT rendering function."""
+-    # 1. Intersection and Segmentation
+-    intersections = []
++    # 1. Intersection & Segmentation
++    events = []
+     for p in primitives:
+-        t_entry, t_exit = p.intersect(ray_origin, ray_direction)
++        t_entry, t_exit = p.intersect(ray_o, ray_d)
+         if t_entry is not None:
+-            intersections.append((t_entry, t_exit, p))
+-    
+-    intersections.sort(key=lambda x: x[0])
+-    
++            events.append((t_entry, 1))
++            events.append((t_exit, -1))
++    events.sort(key=lambda x: x[0])
++
++    sorted_t = []
++    for t_val, _ in events:
++        if t_min <= t_val <= t_max:
++            if not sorted_t or sorted_t[-1] != t_val:
++                sorted_t.append(t_val)
++    if not sorted_t:
++        return 0.0
++    if sorted_t[0] > t_min:
++        sorted_t.insert(0, t_min)
++    if sorted_t[-1] < t_max:
++        sorted_t.append(t_max)
++
+     segments = []
+-    current_t = ray_t_min
+-    prev_exit = None
+-    
+-    for t_entry, t_exit, p in intersections:
+-        if t_entry > current_t:
+-            if prev_exit is not None and prev_exit > current_t:
+-                segments.append((current_t, prev_exit, []))
+-            current_t = t_entry
+-        if segments and segments[-1][0] == t_entry:
+-            segments[-1] = (segments[-1][0], max(segments[-1][1], t_exit), segments[-1][2] + [p])
+-        else:
+-            segments.append((t_entry, t_exit, [p]))
+-        current_t = t_exit
+-        prev_exit = t_exit
+-        
+-    if current_t < ray_t_max:
+-        segments.append((current_t, ray_t_max, []))
++    for i in range(len(sorted_t) - 1):
++        t_s, t_e = sorted_t[i], sorted_t[i+1]
++        seg_prims = [p for p in primitives if p.intersect(ray_o, ray_d) and 
++                     p.intersect(ray_o, ray_d)[0] < t_e and p.intersect(ray_o, ray_d)[1] > t_s]
++        segments.append((t_s, t_e, seg_prims))
+ 
+     # 2. Radiance Accumulation
+-    total_radiance = 0.0
+-    cumulative_transmittance = 1.0
+-    
+-    for t_start, t_end, overlapping_primitives in segments:
+-        if t_start >= t_end:
++    total_L = 0.0
++    T_cum = 1.0
++
++    for t_start, t_end, seg_prims in segments:
++        if t_start >= t_end or not seg_prims:
+             continue
+-            
+-        # Calculate segment transmittance
+-        total_optical_depth = 0.0
+-        for p in overlapping_primitives:
+-            tau = compute_optical_depth(p, t_start, t_end)
+-            total_optical_depth += tau
+-        segment_transmittance = math.exp(-total_optical_depth)
+-        
++
++        # Sample scatter point for multiple scattering extension [S1, unofficial]
++        t_s = sample_scatter_point(t_start, t_end, seg_prims, T_cum, rng)
++
+         # Compute segment radiance L_k
+-        segment_radiance = 0.0
+-        
++        L_seg = 0.0
+         # Emission contribution
+-        for p in overlapping_primitives:
++        for p in seg_prims:
+             if p.kernel_type == 'gaussian':
+-                emission_integral = gaussian_kernel_integral(t_start, t_end, p.center, p.alpha)
++                int_val = gaussian_kernel_integral(t_start, t_end, p.center, p.alpha)
+             elif p.kernel_type == 'epanechnikov':
+-                emission_integral = epanechnikov_kernel_integral(t_start, t_end, p.center, p.radius)
+-            segment_radiance += p.emission * emission_integral
+-            
+-        # NEE scattering contribution
+-        for light in lights:
+-            # Sample light direction, check visibility, compute transmittance to light
+-            # Add contribution using phase function and emission
+-            pass 
+-            
+-        total_radiance += cumulative_transmittance * segment_radiance
+-        cumulative_transmittance *= segment_transmittance
+-        
+-        # Russian Roulette for path termination could be applied here [G]
+-        # if cumulative_transmittance < threshold: ...
+-
+-    return total_radiance
++                int_val = epanechnikov_kernel_integral(t_start, t_end, p.center, p.radius)
++            else:
++                int_val = 0.0
++            L_seg += p.emission * int_val
++
++        # NEE scattering contribution [G]
++        # Standard NEE: sample point on light, compute direction to t_s,
++        # check visibility, compute transmittance T(t_s, light),
++        # add L_light * f_p * cos / pi * T / pdf [G]
++
++        total_L += T_cum * L_seg
++        T_seg = compute_segment_transmittance(seg_prims, t_start, t_end)
++        T_cum *= T_seg
++
++        # Russian Roulette for path termination [G]
++        # if T_cum < threshold: ...
++
++    return total_L
+ ```
+ 

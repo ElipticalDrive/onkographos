@@ -1,0 +1,174 @@
+--- v008.md
++++ v009.md
+@@ -1,77 +1,74 @@
+ # Backward Projection
+ 
+-Also called: Backward Mapping, Backward and forward texture mapping algorithms, Backward texture mapping, Forward texture mapping, image-order algorithms
++Also called: Backward Mapping, Backward texture mapping, image-order algorithms
+ 
+ ## Overview
+-Backward Projection (also known as Backward Mapping) is an image-order rendering technique that iterates over all pixels of the output image to determine the contributions of the volume integral to the current pixel [S2, unofficial]. It solves the problem of mapping 3D volume data to a 2D image by casting rays from the camera through each pixel into the volume, evaluating the radiative transfer equation along these paths. It is distinguished from forward mapping (object-order) algorithms, which iterate over volume primitives and project them onto the image plane, by ensuring that every output pixel is computed exactly once without requiring complex depth sorting or handling of overlapping projections [S1, unofficial][S2, unofficial].
++Backward projection (also known as backward mapping) is an image-order rendering strategy that iterates over all pixels of the output image to determine the contributions of the volume integral to the current pixel [S2, unofficial]. It solves the problem of mapping 3D volumetric data to a 2D image plane by casting rays from the camera through each pixel into the volume [S2, unofficial]. It is distinguished from its siblings, such as [Front-to-Back Layer Traversal](1212-front-to-back-layer-traversal.md), by its explicit iteration over the output space (pixels) rather than the input space (voxels), which naturally aligns with rasterization hardware and allows for efficient early termination when opacity thresholds are met [S2, unofficial].
+ 
+ ## How it works
+ **Inputs and Outputs:**
+-- Input: A 3D volume dataset $V$ (scalar or vector values), a camera model (origin $\mathbf{o}$, direction vectors $\mathmathbf{d}_{i,j}$ for each pixel $(i,j)$), and rendering parameters (step size $\Delta t$, transfer functions for opacity $\alpha$ and color $c$).
+-- Output: A 2D image buffer $I$ of dimensions $H \times W$.
++*   **Input:** A 3D volume dataset $V$, camera parameters (origin $\mathbf{o}$, direction $\mathbf{d}$ per pixel), and transfer functions for opacity $\alpha$ and color $c$.
++*   **Output:** A 2D image buffer $I$ with dimensions $H \times W$.
+ 
+ **Data Structures:**
+-- Volume $V$: Stored as a 3D array or sparse structure. Access is typically via trilinear interpolation for continuous evaluation.
+-- Image Buffer $I$: A 2D array of size $H \times W \times C$ (where $C$ is channels, e.g., 3 for RGB).
++*   **Volume $V$:** Typically stored as a 3D array or grid. Access is performed via trilinear interpolation or nearest-neighbor sampling based on the ray's position.
++*   **Image Buffer $I$:** A 2D array of size $H \times W \times C$ (where $C$ is channels, e.g., 3 for RGB).
+ 
+-**Steps:**
+-1. **Initialize Image Buffer:** Set all pixel values in $I$ to zero (or background color).
+-2. **Iterate Pixels:** For each pixel $(i, j)$ in the image grid:
+-    a. **Ray Generation:** Compute the ray origin $\mathbf{o}$ and direction $\mathbf{d}_{i,j}$ corresponding to pixel $(i, j)$ based on the camera projection matrix.
+-    b. **Ray Casting:** Traverse the volume along the ray. For each sample point $\mathbf{x}_k$ along the ray:
+-        i. **Sample Volume:** Evaluate the volume value $v_k = V(\mathbf{x}_k)$ using interpolation.
+-        ii. **Transfer Function:** Map $v_k$ to color $c_k$ and opacity $\alpha_k$.
+-        iii. **Accumulate:** Update the pixel color using front-to-back compositing:
+-        $$ C_{out} = C_{in} + c_k \cdot \alpha_k \cdot \prod_{m=0}^{k-1} (1 - \alpha_m) $$
+-        where $C_{in}$ is the accumulated color so far, and the product term represents the transmittance.
+-    c. **Early Termination:** If the accumulated transmittance $\prod (1 - \alpha_m)$ drops below a threshold $\epsilon$, stop sampling for this ray.
+-3. **Finalize:** Store the accumulated color $C_{out}$ in $I[i, j]$.
++**Numbered Steps:**
++1.  Initialize the image buffer $I$ to zero.
++2.  For each pixel $(i, j)$ in the image grid ($0 \le i < H, 0 \le j < W$):
++    a.  Compute the ray origin $\mathbf{o}_{i,j}$ and direction $\mathbf{d}_{i,j}$ corresponding to pixel $(i, j)$.
++    b.  Initialize the accumulated color $C_{acc} = 0$ and accumulated opacity $\alpha_{acc} = 0$.
++    c.  Traverse the ray through the volume. For each sample point $\mathbf{x}_k$ along the ray:
++        i.  Sample the volume density $\rho_k = V(\mathbf{x}_k)$.
++        ii. Map $\rho_k$ to opacity $\alpha_k$ and color $c_k$ using transfer functions.
++        iii. Apply the front-to-back compositing equation:
++        $$ C_{acc} = C_{acc} + c_k \cdot \alpha_k \cdot (1 - \alpha_{acc}) $$
++        $$ \alpha_{acc} = \alpha_{acc} + \alpha_k \cdot (1 - \alpha_{acc}) $$
++        iv. If $\alpha_{acc} \ge 1.0$ (or a predefined threshold), terminate the ray traversal for this pixel [S2, unofficial].
++    d.  Store $C_{acc}$ in $I[i, j]$.
+ 
+ **Pseudocode:**
+ ```python
+-def backward_projection(volume, camera, height, width, step_size, epsilon=1e-4):
+-    """
+-    Renders a volume using backward projection (ray casting).
+-    
+-    Args:
+-        volume: 3D array or callable returning interpolated values.
+-        camera: Object with method get_ray(i, j) returning (origin, direction).
+-        height: Image height.
+-        width: Image width.
+-        step_size: Distance between samples along the ray.
+-        epsilon: Transmittance threshold for early termination.
+-        
+-    Returns:
+-        image: 2D array of shape (height, width, 3) with RGB values.
+-    """
+-    image = np.zeros((height, width, 3))
++def backward_projection(volume, camera, height, width):
++    # Initialize output image
++    image = zeros((height, width, 3))
+     
+     for i in range(height):
+         for j in range(width):
+-            origin, direction = camera.get_ray(i, j)
+-            accumulated_color = np.array([0.0, 0.0, 0.0])
+-            transmittance = 1.0
++            # 1. Determine ray for pixel (i, j)
++            ray_origin, ray_direction = camera.get_ray(i, j)
++            
++            accumulated_color = [0.0, 0.0, 0.0]
++            accumulated_alpha = 0.0
++            
++            # 2. Traverse ray through volume
++            # Note: Exact step size and bounds depend on volume geometry
+             t = 0.0
+-            
+-            # Traverse ray until transmittance is negligible or ray exits volume
+-            while transmittance > epsilon:
++            while t < max_distance:
+                 # Sample position
+-                pos = origin + t * direction
++                pos = ray_origin + t * ray_direction
+                 
+-                # Check if pos is inside volume bounds (implementation specific)
+-                if not volume.is_inside(pos):
++                # Check if pos is inside volume bounds
++                if not volume.contains(pos):
+                     break
+                 
+-                # Sample volume value and apply transfer function
+-                # Note: volume.sample() returns (color, opacity)
+-                color, opacity = volume.sample(pos)
++                # Sample volume value
++                density = volume.sample_trilinear(pos)
++                
++                # Map to color and opacity
++                color, alpha = transfer_function(density)
+                 
+                 # Front-to-back compositing
+-                weight = opacity * transmittance
+-                accumulated_color += color * weight
+-                transmittance *= (1.0 - opacity)
++                weight = alpha * (1.0 - accumulated_alpha)
++                accumulated_color = accumulated_color + color * weight
++                accumulated_alpha = accumulated_alpha + weight
++                
++                # Early termination
++                if accumulated_alpha >= 1.0:
++                    break
+                 
+                 t += step_size
+-                
++            
+             image[i, j] = accumulated_color
+             
+@@ -80,34 +77,34 @@
+ 
+ **Parameters:**
+-- `step_size`: Controls sampling density. Smaller values increase accuracy but reduce performance. Typical values depend on volume resolution and view distance.
+-- `epsilon`: Threshold for early termination. Typical value $10^{-4}$ to $10^{-6}$.
++*   **Step Size:** The distance between samples along the ray. Typical values depend on the volume resolution and desired quality (e.g., 1 voxel width or sub-voxel). Not given in the sources.
++*   **Threshold:** The opacity value at which to terminate the ray. Typically 1.0 or 0.99. Not given in the sources.
+ 
+ **Edge Cases and Pitfalls:**
+-- **Precision:** Floating-point precision errors in ray traversal can cause gaps or overlaps in dense volumes.
+-- **Boundaries:** Ray intersection with volume bounds must be handled correctly to avoid out-of-bounds memory access.
+-- **Degenerate Input:** Empty volumes or volumes with zero opacity everywhere result in a black or background-colored image.
++*   **Precision:** Floating-point precision errors in ray traversal can cause gaps or overlaps in the volume sampling.
++*   **Boundaries:** Rays may miss the volume entirely or intersect it partially. Proper bounding box checks are required.
++*   **Degenerate Input:** If the volume is empty or the camera is inside the volume, special handling is needed. Not given in the sources.
+ 
+ ## Subtopics
+ 
+ ### [GPU Backprojection](5843-gpu-backprojection.md)
+-GPU Backprojection is a rendering pass that visualizes detected scale-space blobs by generating small slices for each blob, computing weighted contributions, and blending them to form the final image, followed by normalization. It is distinct from standard ray-casting as it operates on a sparse abstraction of the volume (scale maxima) rather than the full voxel grid, decoupling the expensive scale-space computation from the frequent backprojection step. It builds on [Backward Projection](1491-backward-projection.md) [G].
++GPU Backprojection is a rendering pass that visualizes detected scale-space blobs by mapping projection data back into a 3D reconstruction volume. It solves the problem of efficiently computing weighted contributions of scale-space features to image pixels by parallelizing the accumulation over the output space (voxels or pixels) on NVIDIA GPUs. It is distinguished from its siblings by its specific application to scale-space blob visualization and its implementation as a CUDA kernel that decouples the expensive scale-space computation from the frequent backprojection step, unlike [Ray Segment Projection to Image](7631-ray-segment-projection-to-image.md) which projects geometric primitives, or [Cone Beam Forward Projection with Trilinear Interpolation](8247-cone-beam-forward-projection-with-trilinear-interpolation.md) which performs the forward mapping.
+ 
+ ### [Ray Segment Projection to Image](7631-ray-segment-projection-to-image.md)
+-Ray Segment Projection to Image computes the bounding segment of a ray (defined by origin and direction) that overlaps with a 2D image frame, returning the parameter range $[t_{min}, t_{max}]$ and the 2D coordinates at the entry and exit points. It solves the problem of determining which parts of a ray contribute to a specific image plane, which is a prerequisite for backward projection in volume rendering. It differs from [GPU Backprojection](5843-gpu-backprojection.md) by explicitly computing the geometric intersection bounds rather than relying on hardware rasterization or texture sampling, and from [Cone Beam Forward Projection with Trilinear Interpolation](8247-cone-beam-forward-projection-with-trilinear-interpolation.md) by operating in image space to define clipping bounds rather than projecting volume data onto the image.
++This method computes the bounding segment of a ray (defined by origin and direction) that overlaps with a canonical image frame, returning the parametric $t$-range and the 2D $xy$ coordinates at the entry and exit points. It solves the problem of determining which parts of a 3D ray are visible within the 2D image plane boundaries, which is a prerequisite for subsequent rasterization or sampling in backward projection pipelines. It differs from [GPU Backprojection](5843-gpu-backprojection.md) by explicitly computing geometric bounds rather than relying on hardware rasterization, and from [Cone Beam Forward Projection with Trilinear Interpolation](8247-cone-beam-forward-projection-with-trilinear-interpolation.md) by operating on individual rays rather than volumetric integration.
+ 
+ ### [Cone Beam Forward Projection with Trilinear Interpolation](8247-cone-beam-forward-projection-with-trilinear-interpolation.md)
+-Cone Beam Forward Projection with Trilinear Interpolation computes the projection of a 3D volume onto a 2D detector array for cone beam geometry by integrating voxel values along explicit source-to-detector segments. It differs from its parent [Backward Projection](1491-backward-projection.md) by performing the forward ray-cast operation, and from siblings like [GPU Backprojection](5843-gpu-backprojection.md) by accumulating values into the detector space rather than distributing them into the volume. It supports circular and helical trajectories, flat and curved detectors, and per-view source offsets.
++Cone Beam Forward Projection computes the line integrals of a 3D volume along rays defined by a source and a 2D detector array, simulating the acquisition of projection data (sinograms) for cone-beam geometry. It differs from its sibling [GPU Backprojection](5843-gpu-backprojection.md) by integrating volume values along rays rather than distributing detector values into the volume, and from [Ray Segment Projection to Image](7631-ray-segment-projection-to-image.md) by explicitly handling the 3D-to-2D perspective projection geometry with trilinear interpolation. It is the primary forward operator for iterative reconstruction algorithms like [Differentiable Forward Projection (Mesh)](13343-differentiable-forward-projection-mesh.md) and [3D Siddon's Method for Intercept Matrix Calculation](14467-3d-siddon-s-method-for-intercept-matrix-calculation.md).
+ 
+ ### [Circular Integral Convolution](8507-circular-integral-convolution.md)
+ Circular Integral Convolution generates a blurred image from a scan by integrating ray values across all angles for each point, effectively filtering the true image with a $1/r$-weighted kernel. It serves as a pre-processing step for deconvolution-based reconstruction rather than a full reconstruction method itself.
+ 
+-#### Visibility Thresholding for Scale Backprojection
+-Visibility Thresholding for Scale Backprojection is a method to prevent scale information from being backprojected to voxels that do not correspond to the target feature (e.g., vessels), improving classification accuracy by using a visibility parameter [S4]. A voxel is determined to be not visible from the Laplacian of Gaussian (LoG) extrema if, at some point along the ray connecting the two positions, the intensity is below the threshold $\tau$. Alternatively, thresholding can be based on gradient magnitude [S4]. The parameter $\tau$ (tau) is a visibility parameter used to control the sensitivity of the visibility test, based on scalar value or gradient magnitude [S4]. This is a fast approximation; more accurate results can be obtained with a region growing approach added as a post-process based on the initial size-based classification [S4].
++### Visibility Thresholding for Scale Backprojection
++Visibility Thresholding for Scale Backprojection is a method to prevent scale information from being backprojected to voxels that do not correspond to the target feature (e.g., vessels), improving classification accuracy by using a visibility parameter [S4]. A voxel is determined to be not visible from the Laplacian of Gaussian (LoG) extrema if, at some point along the ray connecting the two positions, the intensity is below the threshold $\tau$ [S4]. Alternatively, thresholding can be based on gradient magnitude [S4]. The parameter $\tau$ (tau) is a visibility parameter used to control the sensitivity of the visibility test, and it is a thresholding value based on scalar value or gradient magnitude [S4]. This is a fast approximation; more accurate results can be obtained with a region growing approach added as a post-process based on the initial size-based classification [S4].
+ 
+ ## Operating characteristics
+-Backward projection algorithms are generally memory-intensive due to the need to store the full volume dataset and the image buffer. The time complexity is proportional to the number of pixels in the output image multiplied by the average number of samples per ray, which depends on the volume depth and step size. Performance scales linearly with image resolution and volume density. Strengths include high visual quality and straightforward implementation of complex transfer functions. Limitations include high computational cost for large volumes and the inability to easily handle dynamic scenes without recomputing all rays. It is best used for static volume rendering where high fidelity is required.
++Backward projection is generally more efficient for rendering than forward projection when the output image resolution is lower than the volume resolution, as it avoids writing to scattered memory locations [S2, unofficial]. It allows for early termination, which can significantly reduce computation time for opaque regions [S2, unofficial]. However, it may suffer from aliasing if the sampling rate is insufficient [S2, unofficial]. The method is well-suited for hardware acceleration due to its regular memory access patterns [S2, unofficial].
+ 
+ ## Background
+-Backward projection was introduced as part of early volume rendering techniques, with foundational work by Levoy (1988), Sabella (1988), and Danskin and Hanrahan (1992) [S2, unofficial]. It emerged as a standard approach for high-quality volume visualization, leveraging the efficiency of image-order processing to avoid the complexity of object-order sorting. The method has been widely adopted in medical imaging and scientific visualization.
++Backward projection, also known as backward mapping, was introduced as one of two algorithms for high quality and efficient texture mapping featuring backward and forward processing orders [S1, unofficial]. It is also referred to as image-order algorithms [S2, unofficial]. The method has been widely used in volume rendering, with notable contributions from Levoy (1988), Sabella (1988), and Danskin and Hanrahan (1992) [S2, unofficial]. It is a fundamental technique in computer graphics for rendering 3D data to 2D images.
+ 
+ ## Sources

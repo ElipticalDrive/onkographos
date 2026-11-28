@@ -1,0 +1,83 @@
+# Gradient Map Generation
+Also called: Gradient Map Compute Shader
+
+## Overview
+Gradient Map Generation is a compute shader pass that calculates the 3D gradient vector for every voxel in a scalar volume and stores the results in a dedicated 3D image buffer [S1, unofficial]. It differs from its parent [Gradient Computation via Finite Differences](1077-gradient-computation-via-finite-differences.md) by combining gradient calculation, magnitude scaling, normalization, and RGBA storage into a single kernel invocation [S1, unofficial].
+
+## How it works
+**Inputs and Outputs:**
+- Input: 3D scalar volume texture (read-only) [S1, unofficial].
+- Output: 3D image buffer `gradient_map` [S1, unofficial].
+- Parameters: `grad_magnitude_modifier` (float) [S1, unofficial].
+
+**Data Structures:**
+- `gradient_map`: 3D image buffer with `rgba8_snorm` layout [S1, unofficial].
+- Layout: `x, y, z` store the normalized gradient direction, and `w` stores the gradient magnitude clamped to $[0, 1]$ [S1, unofficial].
+
+**Steps:**
+1. Determine the dimensions of the `gradient_map` image [S1, unofficial].
+2. Dispatch a compute shader where each work group corresponds to a block of voxels [S1, unofficial].
+3. For each voxel at $(i, j, k)$, compute the gradient vector $\mathbf{g}$ using finite differences [S1, unofficial].
+4. Calculate the gradient magnitude $m = \|\mathbf{g}\| \times \text{grad\_magnitude\_modifier}$ and clamp the result to $[0, 1]$ [S1, unofficial].
+5. Normalize the gradient vector $\mathbf{d} = \mathbf{g} / \|\mathbf{g}\|$ [S1, unofficial].
+6. Store $\mathbf{d}$ in the `x, y, z` components and the clamped magnitude $m$ in the `w` component of `gradient_map` at the current global invocation ID [S1, unofficial].
+
+**Pseudocode:**
+> **Unverified code.** The code below did not pass a test run against a reference implementation, or no test fits it, so it may contain errors.
+
+```python
+# Inputs: volume (3D texture), gradient_map (3D image buffer)
+# Uniforms: grad_magnitude_modifier (float), volume_dims (vec3)
+# Helpers: texture_fetch(coord) returns scalar value at 3D coordinate [G]
+
+def compute_gradient_map(global_invocation_id):
+    x, y, z = global_invocation_id
+    if x >= volume_dims.x or y >= volume_dims.y or z >= volume_dims.z:
+        return
+
+    # Compute gradient vector using central differences [G]
+    gx = texture_fetch((x + 1, y, z)) - texture_fetch((x - 1, y, z))
+    gy = texture_fetch((x, y + 1, z)) - texture_fetch((x, y - 1, z))
+    gz = texture_fetch((x, y, z + 1)) - texture_fetch((x, y, z - 1))
+    gradient_vector = vec3(gx, gy, gz)
+
+    # Calculate magnitude, apply modifier, and clamp to [0, 1]
+    magnitude = length(gradient_vector)
+    modified_magnitude = magnitude * grad_magnitude_modifier
+    clamped_magnitude = clamp(modified_magnitude, 0.0, 1.0)
+
+    # Normalize direction
+    if magnitude > 0.0:
+        direction = normalize(gradient_vector)
+    else:
+        direction = vec3(0.0, 0.0, 0.0) # [G] Default for zero gradient
+
+    # Store normalized direction in xyz and magnitude in w
+    gradient_map[x, y, z] = vec4(direction.x, direction.y, direction.z, clamped_magnitude)
+```
+
+**Edge Cases and Pitfalls:**
+- **Zero Gradient:** If $\|\mathbf{g}\| = 0$, normalization is undefined; the implementation stores a zero vector [G].
+- **Boundary Conditions:** Finite difference calculations at volume boundaries require padding or one-sided differences to avoid out-of-bounds access [G].
+- **Precision:** The `rgba8_snorm` format provides 8-bit signed normalized precision, which may introduce quantization artifacts for subtle gradients [G].
+
+## Subtopics
+
+### [Gradient Computation & Smoothing](3755-gradient-computation-smoothing.md)
+Extends this method by adding a spatial smoothing pass (box filter) to reduce noise in the gradient field. Choose when the volume data is noisy and smooth gradients are required for stable lighting.
+
+### [Volume Gradient Computation and Light Propagation Compute Shader](3869-volume-gradient-computation-and-light-propagation-compute-sh.md)
+Extends this method by integrating light propagation logic within the same shader, transforming gradients between world and view spaces. Choose when view-space lighting effects are needed directly from the gradient map.
+
+## Operating characteristics
+- **Time Complexity:** Not given in the sources. [S1, unofficial]
+- **Memory Complexity:** Not given in the sources. [S1, unofficial]
+- **Performance:** Not given in the sources. [S1, unofficial]
+- **Strengths:** Not given in the sources. [S1, unofficial]
+- **Limitations:** Not given in the sources. [S1, unofficial]
+
+## Background
+Not given in the sources. [S1, unofficial]
+
+## Sources
+[S1] CalamityMichL/DVR_ESS_PDM, https://github.com/CalamityMichL/DVR_ESS_PDM, fetched 2026-10-26 (unofficial)

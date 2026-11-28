@@ -1,0 +1,123 @@
+--- v003.md
++++ v004.md
+@@ -16,6 +16,6 @@
+ 
+ **Data Structures:**
+-*   **SVR Grid:** A sparse multi-resolution grid (e.g., flat blocking structure) storing global opacity values. The resolution is lower than the data volume to reduce storage and computation [S1].
+-*   **Local Opacity Storage:** Must store the local piecewise integration results for each point along the ray to allow global sampling to start at an arbitrary point [S1].
++*   **SVR Grid:** Sparse multi-resolution grid (e.g., flat blocking structure) storing global opacity values. Exact bit packing and field layout are not given in the sources. Resolution is typically 1:4 relative to the data volume [S1].
++*   **Local Opacity Storage:** Array storing local piecewise integration results for each point along the ray. Exact layout is not given in the sources. Must store results for every point to allow global sampling to start at an arbitrary point [S1].
+ 
+ **Algorithm Steps:**
+@@ -31,22 +31,19 @@
+ **Pseudocode:**
+ ```python
+-def compute_global_opacity(local_opacities, light_direction, svr_resolution, data_volume_shape):
++def compute_global_opacity(local_opacities, light_direction, svr_resolution, data_volume_shape, block_occupancy):
+     """
+     Computes global opacity for SVR grid.
+     
+     Args:
+-        local_opacities: Array of local piecewise opacities alpha_lp for each voxel.
+-        light_direction: Vector pointing from volume to light source.
++        local_opacities: 3D array of local piecewise opacities alpha_lp for each voxel.
++        light_direction: Normalized vector pointing from volume to light source.
+         svr_resolution: Tuple (res_x, res_y, res_z) for SVR grid.
+         data_volume_shape: Tuple (vol_x, vol_y, vol_z) for data volume.
++        block_occupancy: 3D array indicating which blocks are non-empty.
+         
+     Returns:
+-        svr_grid: Sparse grid storing global opacity alpha_g.
++        svr_grid: Dictionary mapping (i, j, k) to global opacity alpha_g.
+     """
+-    # Initialize SVR grid with appropriate sparse structure
+-    svr_grid = SparseGrid(svr_resolution)
+-    
+-    # Determine step size based on resolution ratio
+-    # Typically 1:4 means each SVR sample covers 4^3 voxels
++    svr_grid = {}
+     step_x = data_volume_shape[0] // svr_resolution[0]
+     step_y = data_volume_shape[1] // svr_resolution[1]
+@@ -56,45 +53,52 @@
+         for j in range(svr_resolution[1]):
+             for k in range(svr_resolution[2]):
+-                # Map SVR coordinate to data volume coordinate
+                 s0_x = i * step_x
+                 s0_y = j * step_y
+                 s0_z = k * step_z
+                 
+-                # Check if this block is empty in multi-resolution structure
+-                if is_empty_block(s0_x, s0_y, s0_z):
+-                    # Advance ray to next non-empty block to avoid missing occlusion
+-                    s0_x, s0_y, s0_z = advance_to_next_non_empty_block(s0_x, s0_y, s0_z, light_direction)
++                # Handle empty blocks by advancing ray to next non-empty block
++                if not block_occupancy[s0_x // step_x, s0_y // step_y, s0_z // step_z]:
++                    s0_x, s0_y, s0_z = advance_to_next_non_empty_block(
++                        s0_x, s0_y, s0_z, light_direction, data_volume_shape, 
++                        block_occupancy, step_x, step_y, step_z
++                    )
++                    if s0_x is None:
++                        continue
+                 
+                 # Compute global opacity by integrating local opacities along ray to light
+                 alpha_g = 1.0
+-                current_x, current_y, current_z = s0_x, s0_y, s0_z
++                curr_x, curr_y, curr_z = s0_x, s0_y, s0_z
+                 
+-                # Iterate along ray towards light source
+-                # Note: Exact number of segments 'k' depends on light distance and voxel size
+-                # This loop represents the integration from s0 to light source
+-                while not reached_light_source(current_x, current_y, current_z, light_direction):
+-                    # Get local piecewise opacity at current position
+-                    alpha_lp = local_opacities[current_x, current_y, current_z]
+-                    
+-                    # Apply product formula for transparency
+-                    # alpha_g(s0) = 1 - product(1 - alpha_lp(s_i))
++                # Iterate along ray towards light source until volume boundary
++                while curr_x < data_volume_shape[0] and curr_y < data_volume_shape[1] and curr_z < data_volume_shape[2]:
++                    alpha_lp = local_opacities[curr_x, curr_y, curr_z]
+                     alpha_g *= (1.0 - alpha_lp)
+-                    
+-                    # Move to next segment along light direction
+-                    current_x += light_direction[0]
+-                    current_y += light_direction[1]
+-                    current_z += light_direction[2]
++                    curr_x += int(light_direction[0])
++                    curr_y += int(light_direction[1])
++                    curr_z += int(light_direction[2])
+                 
+-                # Store result in SVR grid
+-                svr_grid.set(i, j, k, 1.0 - alpha_g)
++                svr_grid[(i, j, k)] = 1.0 - alpha_g
+                 
+     return svr_grid
++
++def advance_to_next_non_empty_block(start_x, start_y, start_z, light_direction, data_volume_shape, block_occupancy, step_x, step_y, step_z):
++    """Advances ray coordinates to the next non-empty block along the light direction."""
++    t = 1.0
++    while True:
++        adv_x = int(start_x + t * light_direction[0])
++        adv_y = int(start_y + t * light_direction[1])
++        adv_z = int(start_z + t * light_direction[2])
++        if adv_x < data_volume_shape[0] and adv_y < data_volume_shape[1] and adv_z < data_volume_shape[2]:
++            if block_occupancy[adv_x // step_x, adv_y // step_y, adv_z // step_z]:
++                return adv_x, adv_y, adv_z
++        t += 1.0
++    return None, None, None
+ ```
+ 
+ **Parameters:**
+-*   **SVR Resolution:** The grid resolution of the Shadow Volume Representation. Typically 1:4 relative to the data volume, meaning each sample in the SVR covers $4^3 = 64$ voxels in the data volume [S1]. This resolution can be adjusted interactively [S1].
++*   **SVR Resolution:** The grid resolution of the Shadow Volume Representation. Typically 1:4 relative to the data volume, meaning each sample covers $4^3 = 64$ voxels [S1]. This resolution can be adjusted interactively [S1].
+ 
+ **Edge Cases and Pitfalls:**
+-*   **Empty Blocks:** In flat blocking multi-resolution structures, rays originating in empty blocks (ignored by the structure) may miss occlusion from neighboring non-empty blocks. Solution: Advance the ray to the next non-empty block before computing $\alpha_g$ [S1].
++*   **Empty Blocks:** In flat blocking multi-resolution structures, rays originating in empty blocks (ignored by the structure) may miss occlusion from neighboring non-empty blocks. Solution: Advance ray to next non-empty block before computing $\alpha_g$ [S1].
+ *   **Arbitrary Start Points:** The local piecewise integration must be performed and stored for each point along the ray to allow the global sampling to start at an arbitrary point [S1].
+ *   **Interpolation Errors:** Since linear interpolation is used to estimate local segments, some small errors are introduced in the global opacity calculation [S1].
+@@ -106,5 +110,4 @@
+ *   **Limitations:** Potential for missing occlusion if empty blocks are not handled correctly; small errors due to linear interpolation of local segments [S1].
+ *   **When to Use:** When interactive adjustment of shadow resolution is needed, or when storage/computation of full-resolution shadow volumes is prohibitive [S1].
+-*   **When Not to Use:** When exact high-resolution shadowing is required without any interpolation errors, or when the scene has many small occluders that might be missed by sparse sampling [S1].
+ 
+ ## Background

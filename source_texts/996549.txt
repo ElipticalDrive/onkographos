@@ -1,0 +1,590 @@
+The Irreden Engine. Contribute to jakildev/IrredenEngine development by creating an account on GitHub.
+
+render: compact per-axis resolve scratch storage by jakildev · Pull Request #3999 · jakildev/IrredenEngine · GitHub
+Skip to content
+You signed in with another tab or window. Reload to refresh your session.
+You signed out in another tab or window. Reload to refresh your session.
+You switched accounts on another tab or window. Reload to refresh your session.
+Dismiss alert
+Conversation
+jakildev
+commented
+Oct 1, 2026
+•
+edited
+Loading
+Uh oh!
+There was an error while loading. Please reload this page.
+Copy link
+Copy Markdown
+Owner
+Summary
+Per-axis stores still reserved and cleared a canvas-sized mask region with no shader readers. Remove that region and publish the scratch offsets through one component helper shared by store, sort, lighting and fog. Winner indexing, overflow capacity, bindings and store lifecycle stay the same.
+The saving is alignUp(axisCells, 64) * 4 allocated bytes per resident store and the same reduction in the active frame-prefix clear. A 1024×2048-cell store saves 8 MiB (illustrative layout, not this profile's measured allocation).
+Test plan
+Build IRCanvasStress, IRPerfGrid and IrredenEngineTest; format and header checks (602 headers, 40 Metal compute kernels, 97 GLSL files).
+21 targeted lifecycle/extent/native GPU overflow-sort tests; overflow append and visibility-routing script checks.
+All 18 native IRCanvasStress render checks, including independent cardinal geometry checks.
+27 before/after captures: zero changed RGB pixels in every pair.
+Three focused code reviews: no actionable findings; comment and instruction lint passed.
+Repeated 262,144-voxel-entity control: three runs per revision, fixed 45° yaw, zoom 1, full mode, requested subdivisions 4. Zero dropped overflow records in all runs.
+Steady Debug frame averages were 19.247 ms before and 19.323 ms after on macOS/Metal, battery power. This establishes no reliable FPS gain. The camera is held off-cardinal, not moving; requested subdivision density is not proof of effective density. GPU stage intervals overlap and must not be summed. Native Windows/OpenGL remains pending.
+Existing intermediate-angle geometry differences remain tracked. The earlier centered-projection experiment was rejected because it introduced new errors at 22.5°; no shader edits from that experiment are included.
+Screenshots and evidence
+Full pairs, provenance and raw profiles
+Control
+Before
+After
+default
+compare
+Coordination
+Rebased onto the refreshed parent 1dce7d27860484ae712482ef86db89a5e7f2dd0a after #3980 merged. The slice diff remained byte-identical. All 18 native render checks and all 21 targeted lifecycle/extent/native GPU-sort tests passed again after the rebase; IRCanvasStress, IRPerfGrid, IrredenEngineTest and header-checks rebuilt successfully. The paired timing and screenshot artifacts retain their original measured baseline and candidate provenance; they were not relabeled as post-rebase measurements. Open-PR overlap check: clean.
+jakildev
+added
+fleet:author-codex
+Implementation last authored by Codex; route review to Claude
+fleet:authored-on-macos
+PR was authored and smoke-tested on macOS Metal backend
+fleet:claim-mac-codex-shadow-render
+Interactive Codex rendering worktree claim
+fleet:needs-windows-smoke
+PR needs windows-debug build + smoke-run validation
+labels
+Oct 1, 2026
+jakildev
+added this pull request to stack #3981
+October 1, 2026 01:01
+evin-mac-claude-app
+Bot
+added
+the
+fleet:reviewing-mac-pool-5
+label
+Oct 1, 2026
+evin-mac-claude-app
+Bot
+reviewed
+Oct 1, 2026
+View reviewed changes
+evin-mac-claude-app
+Bot
+left a comment
+Copy link
+Copy Markdown
+Contributor
+There was a problem hiding this comment.
+Choose a reason for hiding this comment
+The reason will be displayed to describe this comment to others. Learn more.
+Review — render: compact per-axis resolve scratch storage
+Verdict: approve (Opus recheck required — GPU scratch layout in engine/prefabs/irreden/render/)
+Stacked on #3994 (open, fleet:approved). Reviewing the child diff only; approval assumes #3994 lands first.
+Big picture. The PR drops the unused viewMaskBaseUints_ region from the per-axis resolve scratch, so the control block now sits directly after the 256-byte-aligned winner region. Offset computation moves into one place, PerAxisCanvasStore::scratchLayoutFor, with overflowScratchLayout() publishing the ivec4 to the store, sort, lighting and fog consumers. The change does what the body claims and the approach is sound.
+What I verified (head 09b3d080):
+No shader reads the .x word. Every GLSL and Metal consumer of overflowScratchLayout uses only .y (ctrl base), .z (entry base) and .w (cap), checked across c_fog_overflow_faces, c_light_overflow_faces, c_per_axis_overflow_sort, the stage-1 and stage-2 bodies and their .metal counterparts. Publishing .x = 0 is therefore safe and matches the "reserved, stays zero" wording.
+ctrlBaseUints_ is still alignUp(axisCells, 64) and entriesBaseUints_ is still ctrlBase + 128, so both stay 256-byte aligned. cellRegionStride_ equals ctrlBaseUints_, which was the same expression before.
+The winner region keeps its position at offset 0, so perAxisWinnerIds[cell] indexing and the [0, ctrlBase) frame-prefix fill are unchanged. The buffer size is (entriesBase + cap*3) * 4, which is consistent with the new offsets.
+No stale viewMaskBaseUints_ references are left in the tree (swept *.{hpp,cpp,h,glsl,metal,lua,md}).
+Every call site that built the ivec4 by hand now goes through the helper: store (stage 1), sort, lighting and fog. The one remaining previousLayout save/restore at system_voxel_to_trixel.hpp:733 is a temporary override and is unaffected.
+The helper asserts negative input and signed-overflow input, and the new tests cover alignment, adjacency, disjointness and the assert paths. The native GPU sort test now derives its layout from the helper instead of hard-coded constants, so it keeps tracking the real layout.
+Checks. format-check, header-checks, comment-refs, instruction-size, no-plan-files, closes-lint and whitespace pass. linux-build and perf-gate are still in progress on this head, so I have not read them. The verdict rests on the diff plus the PR's own macOS/Metal evidence: 18 native render checks, 21 targeted tests, and zero changed RGB pixels across 27 capture pairs.
+Honest framing in the body. The PR claims a memory saving of alignUp(axisCells, 64) * 4 bytes per store and explicitly no measured FPS gain (19.247 → 19.323 ms). That is accurately scoped, and native Windows/OpenGL is stated as pending.
+Nits (follow-up)
+docs/design/per-axis-trixel-canvas-rotation.md:112-128 — the pipeline diagram and step 1 still describe a "view mask ×3 (mode 0)" stage that atomicMins into a scratch region (viewMaskTap). No shader contains viewMaskTap any more and this PR removes the region, so the section describes a mechanism that no longer exists. The PR's edit to the Binding paragraph is accurate; the stale section is older drift and can ride the next PR on this doc.
+test/render/per_axis_canvas_lifecycle_test.cpp:28 — EXPECT_EQ(layout.z - layout.y, Store::kOverflowControlUints) compares an int to a uint32_t. It is harmless (no -Werror, values are small positive), but a static_cast would keep the test warning-clean.
+Praise
+Collapsing four hand-built ivec4 sites into one owned helper removes a class of "one consumer forgot the new offset" bugs, and static_assert(kOverflowControlUints % kScratchAlignUints == 0) pins the 256-byte entries alignment at compile time.
+Test plan the author should run before merge
+Windows/OpenGL: IRCanvasStress native render checks plus the native GPU overflow-sort test (fleet:needs-windows-smoke is already on the PR). The OpenGL path is where a layout mismatch would surface first.
+Confirm linux-build and perf-gate finish green on 09b3d080.
+Opus recheck required: GPU scratch-buffer layout and offsets feeding four render consumers (engine/prefabs/irreden/render/, with GLSL and Metal readers) — please confirm no consumer depends on the old stride, in particular on the OpenGL path where only the author's Metal evidence exists.
+Escalation: please Opus-recheck before merge (touches: engine/prefabs/irreden/render).
+🤖 Reviewed by Claude Sonnet 5.5 (review-pr skill)
+evin-mac-claude-app
+Bot
+added
+fleet:needs-opus-recheck
+Sonnet flagged this PR for Opus recheck before merge
+fleet:reviewing-mac-pool-9
+and removed
+fleet:reviewing-mac-pool-5
+labels
+Oct 1, 2026
+evin-mac-claude-app
+Bot
+reviewed
+Oct 1, 2026
+View reviewed changes
+evin-mac-claude-app
+Bot
+left a comment
+Copy link
+Copy Markdown
+Contributor
+There was a problem hiding this comment.
+Choose a reason for hiding this comment
+The reason will be displayed to describe this comment to others. Learn more.
+Opus recheck — render: compact per-axis resolve scratch storage
+Verdict: approve
+Stacked on #3994 (open, fleet:approved). Reviewing the child diff only — upstream is approved separately. Head 09b3d080.
+Sonnet asked me to confirm that no consumer depends on the old stride, in particular on the OpenGL path. On closer read I confirm: nothing does, on either backend.
+What I traced at the PR head
+No .x reader exists. Every reader of overflowScratchLayout uses .y, .z or .w only. GLSL: c_voxel_to_trixel_stage_1_body (224–235), c_per_axis_overflow_sort (121–202), c_light_overflow_faces (94, 103), c_fog_overflow_faces (43, 48); c_voxel_to_trixel_stage_2_body declares the uniform and never reads it. Metal: the stage-1 body (101–113), the sort kernel (78–109), and the fog and light kernels, whose local layout copy is read as .y and .z only. Publishing .x = 0 changes nothing a shader can observe.
+No offset is derived outside the helper. There is no hard-coded 2 * alignedCells or equivalent in any shader or C++ consumer. Every CPU site reads ctrlBaseUints_ / entriesBaseUints_ from the store: the ctrl reset and drop readback (system_voxel_to_trixel.hpp:676, :694), the finalize bindRange (:1147), and the overflow draw's entry bindRange plus indirect-args offset (system_trixel_to_framebuffer.hpp:551–561). They all move together.
+Fills still cover what they must. The frame-prefix fill is [0, ctrlBase), which is now exactly the padded winner region. The per-axis refill uses winnerScratchBytes = size.x * size.y * 4, independent of the removed region. No shader wrote the removed region, so no clear was load-bearing.
+Alignment is preserved for GL bindRange. ctrlBase is alignUp(axisCells, 64) uints and entriesBase is ctrlBase + 128, so both byte offsets stay multiples of 256. The new static_assert pins the second one. This is the same property as before, so the OpenGL SSBO offset-alignment requirement is unaffected.
+Other binding-28 users are separate buffers. The resolve systems (system_resolve_per_axis_screen_depth) and the sun-shadow bake bind their own scratch at slot 28 and never see this layout.
+Allocation order. overflowCap_ is now computed before cellCompacted_ is created. Nothing between the old and new position reads it, and cellRegionStride_ = ctrlBaseUints_ is the same expression as before.
+Overflow guard. The assert bound INT_MAX - 128 - 63 keeps both the divCeil intermediate and controlBase + 128 inside int.
+OpenGL exposure. This PR changes no shader source, so there is no new GLSL compile risk. The GL-specific risk is limited to buffer size and bindRange offsets, both covered above. The native Windows/OpenGL run remains outstanding as fleet:needs-windows-smoke (already set).
+CI. format-check, header-checks, comment-refs, instruction-size, no-plan-files, closes-lint and whitespace pass. linux-build and perf-gate were still running when I posted this, so I have not read their results; the merge gate still needs them green.
+Sonnet's two nits (stale "view mask" pipeline section in docs/design/per-axis-trixel-canvas-rotation.md, and the int vs uint32_t EXPECT_EQ in the lifecycle test) stand as follow-ups. I have nothing to add to them.
+🤖 Opus recheck by Claude Opus 5.5 (review-pr skill)
+evin-mac-claude-app
+Bot
+added
+fleet:approved
+Fleet reviewer approved — ready for human merge
+and removed
+fleet:needs-opus-recheck
+Sonnet flagged this PR for Opus recheck before merge
+fleet:reviewing-mac-pool-9
+labels
+Oct 1, 2026
+github-actions
+Bot
+commented
+Oct 1, 2026
+Copy link
+Copy Markdown
+Perf gate
+Head host slug: linux-x86_64-epyc-7763-64-unknown
+perf comparison: 408dfb5 → bfeb918-ci
+baseline: /home/runner/work/_temp/perf-baseline/history/linux-x86_64-epyc-7763-64-unknown/408dfb54a162780e908687b6bccc11ba250b1e31
+head: /home/runner/work/IrredenEngine/IrredenEngine/save_files/perf/bfeb9189e-ci
+host calibration
+host: linux-x86_64-epyc-7763-64-unknown (matches baseline)
+ref_ms: head 106.58 vs baseline 103.12 (load_factor 1.03×)
+calibration target: 50.00 ms (informational)
+baseline capture: perf-baseline@408dfb54a (branch tip); master 231e07b86, finished 2026-10-01T01:06:55Z, 0.0 d before the head run, ref_ms 103.12
+weighting: raw (class-matched capture, ref_ms within 1.20× of the head's)
+thresholds: regress ≥ 10%, improve ≥ 5%
+voxel cull effectiveness
+cell
+ratio (base→head)
+avg visible
+total
+avg feeder
+target=IRPerfGrid,zoom=1,sub_mode=full,sub_base=1
+1.000 → 1.000 (+0.0pp)
+262144 → 262144
+262144 → 262144
+0 → 0
+target=IRPerfGrid,zoom=4,sub_mode=full,sub_base=1
+0.990 → 0.990 (+0.0pp)
+255592 → 255592
+262144 → 262144
+3862 → 3862 (1.000×)
+frame timing (ms)
+cell
+avg
+p99
+target=IRPerfGrid,zoom=1,sub_mode=full,sub_base=1
+864.62 → 873.70 (+1.1%)
+7098.50 → 6877.14 (-3.1%)
+target=IRPerfGrid,zoom=4,sub_mode=full,sub_base=1
+1941.27 → 1958.38 (+0.9%)
+1993.91 → 2025.98 (+1.6%)
+GPU frame timing (ms; separate from stage samples)
+cell
+envelope (base→head)
+buffer spans (base→head)
+coverage (base→head)
+target=IRPerfGrid,zoom=1,sub_mode=full,sub_base=1
+unavailable → unavailable
+unavailable → unavailable
+unavailable → unavailable
+target=IRPerfGrid,zoom=4,sub_mode=full,sub_base=1
+unavailable → unavailable
+unavailable → unavailable
+unavailable → unavailable
+GPU stage timing (avg ms per sampled invocation)
+cell
+canvasClear
+voxelCompact
+voxelStage1
+voxelStage2
+voxelSunFaces
+textToTrixel
+buildLightOcclusionGrid
+computeVoxelAO
+bakeSunShadowMap
+computeSunShadow
+computeLightVolume
+lightingToTrixel
+fogToTrixel
+trixelToFb
+resolvePerAxisScreenDepth
+fbToScreen
+target=IRPerfGrid,zoom=1,sub_mode=full,sub_base=1
+44.49→43.69
+71.94→72.01
+57.26→58.26
+46.42→45.76
+9.01→8.92
+0.18→0.18
+0.00→0.00
+0.92→0.92
+0.00→0.00
+6.11→5.90
+432.22→442.99
+4.17→4.18
+2.89→2.90
+0.17→0.19
+0.00→0.00
+3.52→3.67
+target=IRPerfGrid,zoom=4,sub_mode=full,sub_base=1
+100.17→103.46
+510.31→511.06
+401.32→402.57
+339.28→353.17
+5.90→5.86
+0.17→0.17
+0.00→0.00
+0.72→0.74
+0.00→0.00
+5.46→5.77
+396.11→406.85
+5.73→5.95
+4.27→4.26
+0.17→0.19
+0.00→0.00
+3.17→3.28
+top CPU systems by avg ms (head)
+target=IRPerfGrid,zoom=1,sub_mode=full,sub_base=1
+pipeline
+system
+avg ms (base→head)
+RENDER
+ComputeLightVolume
+410.443 → 420.655 (+2.5%)
+RENDER
+SingleVoxelToCanvasFirst
+253.562 → 249.975 (-1.4%)
+RENDER
+LightingToTrixel
+28.826 → 29.229 (+1.4%)
+RENDER
+CanvasToFramebuffer
+23.531 → 23.612 (+0.3%)
+RENDER
+ComputeSunShadow
+20.189 → 20.431 (+1.2%)
+UPDATE
+PropagateTransform
+6.205 → 6.348 (+2.3%)
+RENDER
+ComputeVoxelAO
+3.835 → 3.809 (-0.7%)
+RENDER
+FogToTrixel
+3.741 → 3.767 (+0.7%)
+target=IRPerfGrid,zoom=4,sub_mode=full,sub_base=1
+pipeline
+system
+avg ms (base→head)
+RENDER
+SingleVoxelToCanvasFirst
+1377.447 → 1380.936 (+0.3%)
+RENDER
+ComputeLightVolume
+400.909 → 411.959 (+2.8%)
+RENDER
+CanvasToFramebuffer
+22.368 → 22.596 (+1.0%)
+RENDER
+ComputeVoxelAO
+7.662 → 7.752 (+1.2%)
+UPDATE
+PropagateTransform
+6.152 → 6.300 (+2.4%)
+RENDER
+LightingToTrixel
+5.959 → 6.107 (+2.5%)
+RENDER
+ComputeSunShadow
+5.902 → 5.984 (+1.4%)
+RENDER
+FogToTrixel
+3.297 → 3.191 (-3.2%)
+evin-desktop-claude-app
+Bot
+added
+fleet:reviewing-windows-pool-1
+fleet:verified-windows
+Cross-host smoke passed on windows-debug
+and removed
+fleet:reviewing-windows-pool-1
+fleet:needs-windows-smoke
+PR needs windows-debug build + smoke-run validation
+labels
+Oct 1, 2026
+evin-desktop-claude-app
+Bot
+commented
+Oct 1, 2026
+Copy link
+Copy Markdown
+Contributor
+Cross-host smoke OK on windows (fresh checkout + IRShapeDebug --auto-screenshot 10 — build clean, exit 0, no log warnings).
+evin-desktop-claude-app
+Bot
+removed
+the
+fleet:reviewing-windows-pool-1
+label
+Oct 1, 2026
+Base automatically changed from
+codex/scatter-boundary-ownership
+to
+master
+October 1, 2026 01:57
+render: compact per-axis resolve scratch storage
+…
+76fced6
+```
+Remove the unused aligned mask region and share the owned scratch layout
+across store, sort, lighting and fog. Keep winner indexing, overflow
+capacity, bindings and lifecycle unchanged.
+
+Cover region alignment and bounds, exercise native GPU sort with the
+production layout, and retain 27 identical visual pairs plus repeated
+262,144-entity profiles. Timing does not establish a frame-rate gain.
+```
+jakildev
+force-pushed
+the
+codex/peraxis-resolve-scratch-layout
+branch
+from
+09b3d08 to
+76fced6
+Compare
+October 1, 2026 01:57
+Hide details
+View details
+jakildev
+merged commit 3eabb09
+into
+master
+Oct 1, 2026
+9 of 10 checks passed
+Uh oh!
+There was an error while loading. Please reload this page.
+github-actions
+Bot
+commented
+Oct 1, 2026
+Copy link
+Copy Markdown
+Perf gate
+Head host slug: linux-x86_64-epyc-9v74-80-unknown
+perf comparison: 203a467 → 269e10f-ci
+baseline: /home/runner/work/_temp/perf-baseline/history/linux-x86_64-epyc-9v74-80-unknown/203a467099855f88e5f7cd7f13b8c5d4e1bd6bd7
+head: /home/runner/work/IrredenEngine/IrredenEngine/save_files/perf/269e10f06-ci
+host calibration
+host: linux-x86_64-epyc-9v74-80-unknown (matches baseline)
+ref_ms: head 115.20 vs baseline 115.37 (load_factor 1.00×)
+calibration target: 50.00 ms (informational)
+baseline capture: perf-baseline@203a46709 (class-matched history capture, not the branch tip); master 42b160750, finished 2026-10-01T00:41:47Z, 0.1 d before the head run, ref_ms 115.37
+weighting: raw (class-matched capture, ref_ms within 1.20× of the head's)
+thresholds: regress ≥ 10%, improve ≥ 5%
+voxel cull effectiveness
+cell
+ratio (base→head)
+avg visible
+total
+avg feeder
+target=IRPerfGrid,zoom=1,sub_mode=full,sub_base=1
+1.000 → 1.000 (+0.0pp)
+262144 → 262144
+262144 → 262144
+0 → 0
+target=IRPerfGrid,zoom=4,sub_mode=full,sub_base=1
+0.990 → 0.990 (+0.0pp)
+255592 → 255592
+262144 → 262144
+3862 → 3862 (1.000×)
+frame timing (ms)
+cell
+avg
+p99
+target=IRPerfGrid,zoom=1,sub_mode=full,sub_base=1
+893.09 → 904.01 (+1.2%)
+6474.98 → 6679.54 (+3.2%)
+target=IRPerfGrid,zoom=4,sub_mode=full,sub_base=1
+1979.08 → 2020.80 (+2.1%)
+2032.21 → 2209.09 (+8.7%)
+GPU frame timing (ms; separate from stage samples)
+cell
+envelope (base→head)
+buffer spans (base→head)
+coverage (base→head)
+target=IRPerfGrid,zoom=1,sub_mode=full,sub_base=1
+unavailable → unavailable
+unavailable → unavailable
+unavailable → unavailable
+target=IRPerfGrid,zoom=4,sub_mode=full,sub_base=1
+unavailable → unavailable
+unavailable → unavailable
+unavailable → unavailable
+GPU stage timing (avg ms per sampled invocation)
+cell
+canvasClear
+voxelCompact
+voxelStage1
+voxelStage2
+voxelSunFaces
+textToTrixel
+buildLightOcclusionGrid
+computeVoxelAO
+bakeSunShadowMap
+computeSunShadow
+computeLightVolume
+lightingToTrixel
+fogToTrixel
+trixelToFb
+resolvePerAxisScreenDepth
+fbToScreen
+target=IRPerfGrid,zoom=1,sub_mode=full,sub_base=1
+48.58→48.20
+76.15→73.89
+62.78→61.72
+49.62→49.95
+8.88→8.91
+0.17→0.19 ⚠
+0.00→0.00
+0.94→1.04 ⚠
+0.00→0.00
+8.00→8.11
+438.62→446.42
+4.25→4.42
+2.81→2.98
+0.19→0.21 ⚠
+0.00→0.00
+3.75→4.00
+target=IRPerfGrid,zoom=4,sub_mode=full,sub_base=1
+107.06→108.16
+529.01→531.50
+407.31→408.12
+326.46→328.05
+5.52→5.85
+0.17→0.17
+0.00→0.00
+0.70→0.90 ⚠
+0.00→0.00
+7.18→7.23
+392.68→412.76
+5.58→5.84
+3.89→4.08
+0.18→0.20 ⚠
+0.00→0.00
+3.31→3.53
+top CPU systems by avg ms (head)
+target=IRPerfGrid,zoom=1,sub_mode=full,sub_base=1
+pipeline
+system
+avg ms (base→head)
+RENDER
+ComputeLightVolume
+419.459 → 426.214 (+1.6%)
+RENDER
+SingleVoxelToCanvasFirst
+268.531 → 263.505 (-1.9%)
+RENDER
+LightingToTrixel
+27.851 → 29.163 (+4.7%)
+RENDER
+CanvasToFramebuffer
+25.494 → 26.074 (+2.3%)
+RENDER
+ComputeSunShadow
+18.904 → 19.458 (+2.9%)
+UPDATE
+PropagateTransform
+6.857 → 7.002 (+2.1%)
+RENDER
+FogToTrixel
+3.846 → 3.995 (+3.9%)
+RENDER
+ComputeVoxelAO
+3.847 → 3.930 (+2.2%)
+target=IRPerfGrid,zoom=4,sub_mode=full,sub_base=1
+pipeline
+system
+avg ms (base→head)
+RENDER
+SingleVoxelToCanvasFirst
+1412.617 → 1418.580 (+0.4%)
+RENDER
+ComputeLightVolume
+399.062 → 419.097 (+5.0%)
+RENDER
+CanvasToFramebuffer
+23.607 → 24.671 (+4.5%)
+RENDER
+ComputeVoxelAO
+7.673 → 7.928 (+3.3%)
+UPDATE
+PropagateTransform
+6.805 → 7.124 (+4.7%)
+RENDER
+ComputeSunShadow
+6.172 → 6.453 (+4.6%)
+RENDER
+LightingToTrixel
+5.946 → 6.196 (+4.2%)
+UPDATE
+PeriodicIdle
+2.969 → 3.430 (+15.5%) ⚠
+evin-mac-claude-app
+Bot
+mentioned this pull request
+Oct 1, 2026
+render: fog of war — one subject-classed reveal model (FIELD / BODY / EXEMPT) with creation-facing seams
+#3661
+Closed
+9 tasks done
+This was referenced Oct 2, 2026
+render: fog BODY is the default subject class for voxel sets (#3676)
+#3763
+Merged
+test(macos): fog_demo yaw rows and perf_grid rotation rows are red on master 91fa0d1fc after the per-axis and finite-face merges
+#4042
+Closed
+This was referenced Oct 2, 2026
+test(windows): eight fog_demo windows-debug rows are red on master 89c14c7bd after the per-axis, finite-face and fog-window merges
+#4051
+Closed
+test(windows): re-bless eight fog_demo windows-debug rows after bisect
+#4064
+Merged
+Sign up for free
+to join this conversation on GitHub.
+Already have an account?
+Sign in to comment
+Uh oh!
+There was an error while loading. Please reload this page.
+Labels
+fleet:approved
+Fleet reviewer approved — ready for human merge
+fleet:author-codex
+Implementation last authored by Codex; route review to Claude
+fleet:authored-on-macos
+PR was authored and smoke-tested on macOS Metal backend
+fleet:claim-mac-codex-shadow-render
+Interactive Codex rendering worktree claim
+fleet:verified-windows
+Cross-host smoke passed on windows-debug
+1 participant
+Add this suggestion to a batch that can be applied as a single commit.This suggestion is invalid because no changes were made to the code.Suggestions cannot be applied while the pull request is closed.Suggestions cannot be applied while viewing a subset of changes.Only one suggestion per line can be applied in a batch.Add this suggestion to a batch that can be applied as a single commit.Applying suggestions on deleted lines is not supported.You must change the existing code in this line in order to create a valid suggestion.Outdated suggestions cannot be applied.This suggestion has been applied or marked resolved.Suggestions cannot be applied from pending reviews.Suggestions cannot be applied on multi-line comments.Suggestions cannot be applied while the pull request is queued to merge.Suggestion cannot be applied right now. Please check back later.
+You can’t perform that action at this time.

@@ -1,0 +1,123 @@
+# Implicit Octree Traversal
+
+Also called: ImplicitOctree
+
+## Overview
+Implicit Octree Traversal is a method that builds a sparse octree using Morton coordinates to represent nodes [S1, unofficial]. It samples a distance field to find surface crossings, places vertices at leaf centers, and traverses leaf nodes to invoke a callback for each 2x2x2 cube of neighboring leaf vertices [S1, unofficial].
+
+## How it works
+**Inputs and Outputs:**
+- Input: A distance field (scalar or vector) defined over a 3D domain [S1, unofficial].
+- Output: Callback invocations for 2x2x2 cubes of neighboring leaf vertices [S1, unofficial].
+
+**Data Structures:**
+1. `ImplicitOctree`: Contains `max_depth` (usize). Internally uses a `LinearHashedOctree` structure [S1, unofficial].
+2. `primal_vertices`: A `HashMap<Morton, usize>` mapping Morton coordinates of vertices to their tree level [S1, unofficial].
+3. `Morton`: An integer key representing 3D coordinates via Z-order curve mapping [G].
+
+**Parameters:**
+- `max_depth` ($N$): The maximum depth of the octree. The domain is equivalent to a cubic grid with dimensions $2^N$ along each axis [S1, unofficial].
+
+**Steps:**
+1. **Initialization:** Create an `ImplicitOctree` with the specified `max_depth` $N$ [S1, unofficial].
+2. **Collect Primal Vertices:** Create `HashMap<Morton, usize>` named `primal_vertices` [S1, unofficial]. Walk leaves of the octree. For each leaf key, iterate $i$ from 0 to 7. Compute vertex $v = \text{key.primal\_vertex}(level, i)$ [S1, unofficial]. If $v \neq \text{Morton::with\_key}(0)$, check if $v$ exists in `primal_vertices` [S1, unofficial]. If it exists and $level > \text{existing\_level}$, update the entry; otherwise, insert $(v, level)$ [S1, unofficial].
+3. **Traverse Primal Vertices:** For each $(key, level)$ in `primal_vertices`, iterate $i$ from 0 to 7. Compute $m = \text{key.dual\_vertex}(level, \text{REMAP\_CUBE}[i])$ [S1, unofficial]. While $m > \text{Morton::new()}$, query `octree.get_node(&m)` [S1, unofficial]. If it returns `Some(distance)`, set $keys[i]=m$, $corners[i]=m.center()$, $values[i]=distance$, and break [S1, unofficial]. If it returns `None`, set $m = m.parent()$ [S1, unofficial].
+
+**Formulas:**
+- **Linear Interpolation for Crossing Point:**
+  Given two points $p_a, p_b$ with distance values $a, b$:
+  $$ \Delta = b - a $$
+  $$ t = \begin{cases} 0.5 & \text{if } \Delta = 0.0 \\ -a / \Delta & \text{otherwise} \end{cases} $$
+  $$ p_{cross} = p_a (1 - t) + p_b t $$
+  For directed distance fields (vector-valued), the interpolation is performed along the dominant axis $axis = \text{argmax}(|p_a - p_b|)$ [S1, unofficial].
+
+**Edge Cases and Pitfalls:**
+- **Directed Distance Fields:** Constructing an octree over a directed distance field is not implemented in the reference source; it requires special handling for crossing point calculation along the dominant axis [S1, unofficial].
+- **Empty Vertices:** Vertices at the origin key (0) are excluded from processing [S1, unofficial].
+- **Precision:** Morton coordinate arithmetic must handle large integers correctly to avoid overflow at high depths [G].
+
+**Pseudocode:**
+> **Unverified code.** The code below did not pass a test run against a reference implementation, or no test fits it, so it may contain errors.
+
+```python
+class Morton:
+    def __init__(self, value): self.value = value  # [G]
+    @staticmethod
+    def with_key(v): return Morton(v)  # [G]
+    @staticmethod
+    def new(): return Morton(0)  # [G]
+    def __gt__(self, other): return self.value > other.value  # [G]
+    def parent(self): return Morton(self.value >> 3)  # [G]
+    def center(self): return (self.value, self.value, self.value)  # [G]
+
+REMAP_CUBE = [0, 1, 2, 3, 4, 5, 6, 7]  # [G]
+
+class LinearHashedOctree:
+    def __init__(self, max_depth): self.data = {}  # [G]
+    def set_node(self, key, val): self.data[key.value] = val  # [G]
+    def get_node(self, key): return self.data.get(key.value, None)  # [G]
+    def leaves(self): return []  # [G]
+    def leaves_with_level(self): return []  # [G]
+
+def implicit_octree_traversal(distance_field, max_depth):
+    octree = LinearHashedOctree(max_depth=max_depth)
+    for leaf in octree.leaves():
+        octree.set_node(leaf.key, distance_field.sample(leaf.center()))  # [G]
+
+    primal_vertices = {}
+
+    for leaf_key, leaf_level in octree.leaves_with_level():
+        for i in range(8):
+            vertex_morton = leaf_key.primal_vertex(level=leaf_level, corner_index=i)  # [G]
+            if vertex_morton != Morton.with_key(0):
+                if vertex_morton in primal_vertices:
+                    existing_level = primal_vertices[vertex_morton]
+                    if leaf_level > existing_level:
+                        primal_vertices[vertex_morton] = leaf_level
+                else:
+                    primal_vertices[vertex_morton] = leaf_level
+
+    results = []
+    for key, level in primal_vertices.items():
+        keys = [None] * 8
+        corners = [None] * 8
+        values = [None] * 8
+
+        for i in range(8):
+            m = key.dual_vertex(level=level, remap_index=REMAP_CUBE[i])  # [G]
+            while m > Morton.new():
+                node_data = octree.get_node(m)
+                if node_data is not None:
+                    keys[i] = m
+                    corners[i] = m.center()
+                    values[i] = node_data.distance
+                    break
+                else:
+                    m = m.parent()
+
+        results.append({'keys': keys, 'corners': corners, 'values': values})  # [G]
+
+    return results
+```
+
+## Subtopics
+
+### [Cell Reconstruction via Octree Hashing](1595-cell-reconstruction-via-octree-hashing.md)
+Locates leaf nodes and neighbors using bitwise arithmetic on integer coordinates to reconstruct 8-voxel cells for isosurface primitives. Choose when efficient neighbor finding without explicit cell storage is required.
+
+### [Pointerless Octree for Seed Placement](5280-pointerless-octree-for-seed-placement.md)
+Uses a hierarchical pyramid structure to dynamically select seed points for volume hatching based on curvature and gradient. Choose when generating hatching strokes rather than extracting meshes.
+
+## Operating characteristics
+- **Time Complexity:** Not given in the sources. [G] Typically proportional to the number of leaves and the maximum depth for traversal.
+- **Memory Complexity:** Not given in the sources. [G] Proportional to the number of non-empty leaves and primal vertices.
+- **Strengths:** Efficiently handles sparse volumes; avoids storing empty space; supports adaptive resolution via depth [G].
+- **Limitations:** Does not support directed distance fields in the reference implementation [S1, unofficial].
+- **When to use:** Not given in the sources. [G] Sparse volumetric data extraction where memory is constrained and sparsity is high.
+- **When not to use:** Not given in the sources. [G] Dense volumes where a uniform grid is more efficient.
+
+## Background
+The method is described in the source code of the `isosurface` library by Tristam MacDonald [S1, unofficial]. It builds on the principles of sparse octree structures and Morton ordering for spatial indexing [S1, unofficial]. The approach is particularly relevant for dual contouring and marching cubes algorithms that require access to corner values of cells [S1, unofficial].
+
+## Sources
+[S1] https://github.com/swiftcoder/isosurface, https://github.com/swiftcoder/isosurface, fetched 2026-10-26 (unofficial)

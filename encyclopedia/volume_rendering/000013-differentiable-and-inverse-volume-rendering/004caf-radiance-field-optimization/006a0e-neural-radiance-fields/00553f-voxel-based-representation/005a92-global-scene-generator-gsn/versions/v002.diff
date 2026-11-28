@@ -1,0 +1,473 @@
+--- v001.md
++++ v002.md
+@@ -1,46 +1,65 @@
+ # Global Scene Generator (GSN)
+ 
++
+ ## Overview
+-Global Scene Generator (GSN) is a generative model that synthesizes unconstrained 3D scenes by decomposing them into local regions using a global generator and a locally conditioned radiance field [S1]. Unlike dictionary-based memory models that limit unseen viewpoints, GSN uses a learned scene prior to allow extrapolation beyond given observations [S1]. It sets itself apart from sibling voxel-based methods by explicitly generating a 2D latent "floorplan" grid to condition multiple local radiance fields, rather than storing static features in a 3D voxel grid [S1].
++Global Scene Generator (GSN) is a generative model that synthesizes unconstrained 3D scenes by decomposing them into local regions using a global latent code and a locally conditioned radiance field [S1]. It solves the scalability problem of single-network radiance fields (like standard NeRF or GRAF) by distributing scene representation across a 2D grid of local latent codes, allowing the model to handle large, densely populated environments [S1]. Unlike dictionary-based memory models that are limited to viewing angles present in training data, GSN learns a scene prior that enables extrapolation to unseen viewpoints [S1].
+ 
+ ## How it works
+-**Inputs and Outputs:**
+-*   **Inputs:** Global latent code $z \sim p_z$, camera pose $T = [R, t] \in SE(3)$, and camera intrinsics $K \in \mathbb{R}^{3 \times 3}$ [S1].
+-*   **Outputs:** Rendered image $\hat{X} \in \mathbb{R}^{3 \times w \times h}$ [S1].
++**Inputs:**
++*   Global latent code $z \sim p_z$ sampled from a prior distribution.
++*   Camera pose $T = [R, t] \in SE(3)$ sampled from an empirical pose distribution $p_T$.
++*   Camera intrinsics $K \in \mathbb{R}^{3 \times 3}$.
++
++**Outputs:**
++*   Rendered image $\hat{X} \in \mathbb{R}^{3 \times w \times h}$.
+ 
+ **Data Structures:**
+-1.  **Global Generator Output:** A 2D grid of local latent codes $W \in \mathbb{R}^{c \times s \times s}$, where $c$ is the latent dimension and $s \times s$ is the spatial resolution [S1].
+-2.  **Radiance Field Input:** Concatenated vector $[p_0, d] \in \mathbb{R}^5$ (positional encoded local point and viewing direction) and local latent code $w_{ij} \in \mathbb{R}^c$ [S1].
+-3.  **Radiance Field Architecture:** The network $f$ uses modulation of linear layers by $w_{ij}$, similar to CIPS [S1].
++1.  **Global Generator Output ($W$):** A 2D grid of local latent codes $W \in \mathbb{R}^{c \times s \times s}$. This acts as a "latent floorplan" for the scene.
++2.  **Radiance Field Input:** A concatenated vector $[p_0, d] \in \mathbb{R}^5$ and a local latent code $w_{ij} \in \mathbb{R}^c$.
++3.  **Radiance Field Architecture:** A network $f$ where the local latent code $w_{ij}$ modulates linear layers (similar to CIPS [S1]).
+ 
+ **Numbered Steps:**
+-1.  **Global Generation:** Sample a global latent code $z \sim p_z$ and feed it to the global generator $g$ (implemented as StyleGAN2) to produce the 2D grid of local latent codes $W \in \mathbb{R}^{c \times s \times s}$ [S1].
+-2.  **Local Code Selection:** For a 3D point $p$ in the global coordinate system, determine its projection on the $zx$-plane (assuming the $y$-axis points up) to find discrete grid indices $(i, j)$ [S1].
+-3.  **Bilinear Sampling:** Sample the local latent code $w_{ij} \in \mathbb{R}^c$ from grid $W$ at $(i, j)$ using bi-linear sampling [S1].
+-4.  **Local Coordinate Transformation:** Transform the global point $p$ into a local point $p_0$ relative to the local coordinate system of $w_{ij}$ [S1]. This decomposition prevents the radiance field from relying on absolute coordinates, enabling spatial sharing of latent codes [S1].
+-5.  **Input Preparation:** Apply positional encoding to $p_0$ and concatenate with the viewing direction $d$ to form the input vector $[p_0, d] \in \mathbb{R}^5$ [S1].
+-6.  **Radiance Field Evaluation:** Evaluate the locally conditioned radiance field $f$ with inputs $[p_0, d]$ and modulation by $w_{ij}$ to output occupancy $\sigma \in [0, \infty]$ and appearance $a \in \mathbb{R}^3$ [S1].
+-7.  **Volumetric Rendering:** Render the image by evaluating $f$ along rays $r$. The color $c \in \mathbb{R}^3$ for a ray $r$ is obtained by approximating the integral:
+-    $$
+-    c(r, W) = \int_{u_n}^{u_f} T_r(u) \sigma(r(u), w_{ij}) a(r(u), d, w_{ij}) du
+-    $$
+-    where the transmittance is:
+-    $$
+-    T_r(u) = \exp \left( - \int_{u_n}^{u} \sigma(r(u'), w_{ij}) du' \right)
+-    $$
+-    [S1].
+-8.  **Refinement:** Upsample the rendered feature map using a small convolutional refinement network to achieve the final output resolution $\hat{X}$ [S1].
++
++1.  **Generate Local Latent Grid:** Sample $z \sim p_z$ and feed it to the global generator $g$ (implemented using StyleGAN2 architecture [S1]). The generator outputs the 2D grid of local latent codes $W \in \mathbb{R}^{c \times s \times s}$ [S1].
++
++2.  **Determine Local Context:** For a 3D point $p$ in the global coordinate system, determine its projection onto the $zx$-plane (assuming the $y$-axis points up). This projection yields discrete grid indices $(i, j)$ [S1].
++
++3.  **Sample Local Latent Code:** Sample the local latent code $w_{ij} \in \mathbb{R}^c$ from the grid $W$ at indices $(i, j)$ using bi-linear sampling [S1].
++
++4.  **Transform Coordinates:** Transform the global point $p$ into a local point $p_0$ relative to the local coordinate system defined by $w_{ij}$. This decomposition prevents the radiance field $f$ from relying on absolute global coordinates, enabling spatial sharing of latent codes [S1].
++
++5.  **Prepare Radiance Field Input:** Apply positional encoding to $p_0$ and concatenate it with the camera direction $d$ to form the input vector $[p_0, d] \in \mathbb{R}^5$ [S1].
++
++6.  **Evaluate Radiance Field:** Evaluate the locally conditioned radiance field $f$ using inputs $[p_0, d]$ and modulation by $w_{ij}$. The network outputs occupancy $\sigma \in [0, \infty]$ and appearance $a \in \mathbb{R}^3$ [S1].
++
++7.  **Volumetric Rendering:** Render the image by evaluating $f$ along rays $\mathbf{r}$. The color $c(\mathbf{r})$ for a ray is obtained by approximating the integral in Eq. 1 [S1]:
++
++    $$
++    c(\mathbf{r}, W) = \int_{u_n}^{u_f} T_{\mathbf{r}}(u) \sigma_{\mathbf{r}}(u, w_{ij}) a_{\mathbf{r}}(u, d, w_{ij}) \, du
++    $$
++
++    where the transmittance $T_{\mathbf{r}}(u)$ is defined as:
++
++    $$
++    T_{\mathbf{r}}(u) = \exp \left( - \int_{u_n}^{u} \sigma_{\mathbf{r}}(v, w_{ij}) \, dv \right)
++    $$
++
++    Here, $u_n$ and $u_f$ are the near and far clipping planes, and $w_{ij}$ is the local latent code associated with the spatial location of the point on the ray [S1].
++
++8.  **Refinement:** The rendering step produces a feature map at a lower resolution. This feature map is upsampled using a small convolutional refinement network to achieve the final output resolution $\hat{X}$ [S1].
+ 
+ **Parameters:**
+-*   **Camera Pose:** $T = [R, t] \in SE(3)$ controls the viewpoint [S1].
+-*   **Camera Intrinsics:** $K \in \mathbb{R}^{3 \times 3}$ controls the field of view [S1].
+-*   **Latent Dimension:** $c$ (Not given in the sources).
+-*   **Grid Resolution:** $s \times s$ (Not given in the sources).
++*   $c$: Dimension of the latent codes.
++*   $s$: Spatial resolution of the grid $W$.
++*   $T$: Camera extrinsic parameters.
++*   $K$: Camera intrinsic parameters.
+ 
+ **Edge Cases and Pitfalls:**
+-*   **Invalid Camera Locations:** Sampling camera poses inside walls or solid objects is handled by stochastic weighted sampling over a set of candidate poses from an empirical distribution $p_T$. The weights are derived from the occupancy $\sigma$ predicted by the generator at those locations, normalized via softmin [S1].
+-*   **Spatial Sharing:** To prevent $f$ from relying on absolute coordinates, the global coordinate system must be decomposed into local coordinate systems for each $w_{ij}$ [S1].
++*   **Invalid Camera Poses:** Sampling camera poses inside walls or solid objects is a risk. GSN handles this by performing stochastic weighted sampling over a set of candidate poses. The weights are derived from the occupancy $\sigma$ predicted by the generator at those locations, normalized via a softmin function to create a multinomial distribution [S1].
++*   **Coordinate System Dependency:** If the global coordinate system is not decomposed into local coordinate systems for each $w_{ij}$, the radiance field $f$ will rely on absolute coordinates, breaking the spatial sharing property and preventing the model from generalizing across different grid positions [S1].
++*   **Dimensionality:** The method uses a 2D grid for efficiency. While it can be extended to a 3D grid, the 2D approach is the standard implementation for computational efficiency [S1].
+ 
+ **Pseudocode:**
++
+ ```python
+ import torch
+@@ -49,217 +68,168 @@
+ 
+ class GlobalSceneGenerator:
+-    def __init__(self, latent_dim, grid_size, radiance_field_net):
+-        """
+-        Args:
+-            latent_dim (int): Dimension of local latent codes c.
+-            grid_size (int): Spatial resolution s of the latent grid.
+-            radiance_field_net: Instance of the locally conditioned radiance field f.
+-        """
+-        self.global_generator = StyleGAN2Generator(latent_dim * grid_size * grid_size)
+-        self.grid_size = grid_size
+-        self.latent_dim = latent_dim
+-        self.radiance_field_net = radiance_field_net
+-
+-    def forward(self, z, T, K, num_samples_per_ray):
+-        """
+-        Args:
+-            z (Tensor): Global latent code of shape [batch_size, latent_dim_global].
+-            T (Tensor): Camera pose [R, t] of shape [batch_size, 3, 4] or [batch_size, 6].
+-            K (Tensor): Camera intrinsics of shape [batch_size, 3, 3].
+-            num_samples_per_ray (int): Number of points sampled along each ray.
++    def __init__(self, latent_dim, grid_size, feature_dim):
++        """
++        latent_dim: dimension of global latent code z
++        grid_size: s, spatial dimension of the local latent grid W
++        feature_dim: c, dimension of local latent codes w_ij
++        """
++        super().__init__()
++        # Global generator g using StyleGAN2-like architecture [S1]
++        self.global_generator = StyleGAN2Generator(latent_dim, feature_dim, grid_size)
++        
++        # Locally conditioned radiance field f [S1]
++        self.radiance_field = LocallyConditionedRadianceField(feature_dim)
++        
++        # Convolutional refinement network for upsampling [S1]
++        self.refinement_net = ConvRefinementNetwork()
++
++    def forward(self, z, camera_pose, camera_intrinsics, ray_directions):
++        """
++        z: Global latent code [B, latent_dim]
++        camera_pose: Camera pose T = [R, t] [B, 3, 4] or [B, 6]
++        camera_intrinsics: K [B, 3, 3]
++        ray_directions: Directions for each pixel [B, H, W, 3]
++        
+         Returns:
+-            Tensor: Rendered image of shape [batch_size, 3, height, width].
+-        """
+-        # 1. Generate global latent grid
+-        # Global generator outputs a flat tensor, reshaped to [batch, c, s, s]
+-        flat_w = self.global_generator(z)
+-        W = flat_w.view(flat_w.size(0), self.latent_dim, self.grid_size, self.grid_size)
+-        
+-        # 2. Generate rays from camera parameters T and K
+-        # Helper function to generate ray origins and directions for each pixel
+-        rays_o, rays_d = generate_rays(T, K, image_height, image_width)
+-        
+-        # 3. Sample points along rays
+-        # t_vals are sampled uniformly or hierarchically
+-        t_vals = sample_t_vals(num_samples_per_ray)
+-        # Points p in global coordinates
+-        p_global = rays_o.unsqueeze(-1) + rays_d.unsqueeze(-1) * t_vals.unsqueeze(-1)
+-        
+-        # 4. Determine grid indices (i, j) for each point based on projection on zx-plane
+-        # Assuming y is up, project p_global to zx plane: (x, z)
+-        # Normalize to grid coordinates [0, grid_size-1]
+-        # This requires knowing the scene bounds. Assuming normalized bounds [-1, 1] or similar.
+-        # Let's assume scene bounds are known or normalized.
+-        bounds_min = torch.tensor([-1.0, -1.0, -1.0])
+-        bounds_max = torch.tensor([1.0, 1.0, 1.0])
+-        
+-        # Normalize p_global to [0, 1]
+-        p_norm = (p_global - bounds_min) / (bounds_max - bounds_min)
+-        
+-        # Project to zx plane (indices 0 and 2)
+-        p_zx = p_norm[..., [0, 2]] # Shape: [batch, H, W, N, 2]
+-        
+-        # Map to grid indices [0, grid_size-1]
+-        i = (p_zx[..., 0] * (self.grid_size - 1)).long().clamp(0, self.grid_size - 1)
+-        j = (p_zx[..., 1] * (self.grid_size - 1)).long().clamp(0, self.grid_size - 1)
+-        
+-        # 5. Sample local latent codes w_ij using bilinear sampling
+-        # W is [batch, c, s, s]. We need to gather w_ij for each point.
+-        # Using grid_sample for bilinear interpolation
+-        # Reshape W for grid_sample: [batch, c, s, s] -> needs to be sampled at (j, i)
+-        # Note: grid_sample expects normalized coordinates [-1, 1]
+-        # Convert i, j to normalized coordinates
+-        i_norm = 2.0 * (i.float() / (self.grid_size - 1)) - 1.0
+-        j_norm = 2.0 * (j.float() / (self.grid_size - 1)) - 1.0
+-        
+-        # grid_sample input grid is [batch, h, w, 2] with coords [x, y] -> [j, i]
+-        grid_coords = torch.stack([j_norm, i_norm], dim=-1)
+-        grid_coords = grid_coords.unsqueeze(1) # [batch, 1, H, W, N, 2] -> [batch, 1, H, W, N, 2]
+-        
+-        # We need to sample for each point along the ray.
+-        # Reshape W to [batch, c, 1, 1, 1, s, s] to broadcast? No, grid_sample works on spatial dims.
+-        # Better approach: Reshape W to [batch * H * W, c, s, s] and sample at specific coords?
+-        # Or use gather if discrete, but GSN uses bilinear.
+-        # Let's assume we can sample W at (j, i) for all points.
+-        # Since i, j vary per point, we use grid_sample on the whole batch.
+-        # However, grid_sample samples a 2D grid. Here we have a 3D volume of queries (H, W, N).
+-        # The paper says "sample W at location (i,j)". This implies the latent code is constant for all points 
+-        # sharing the same (i,j) cell in the zx-projection.
+-        # So we can compute w_ij for each pixel (h, w) and then broadcast to N samples.
+-        
+-        # Compute w_ij for each pixel
+-        # Reshape W to [batch, c, s, s]
+-        # Reshape i, j to [batch, H, W]
+-        # Use grid_sample
+-        W_reshaped = W # [B, C, S, S]
+-        # grid_sample expects input [B, C, H, W] and grid [B, H, W, 2]
+-        # We want to sample at (j, i) for each (h, w)
+-        # Create grid for each pixel
+-        # This is complex for variable N. Let's assume we sample once per pixel and broadcast.
+-        
+-        # Create grid for all pixels
+-        # y, x coordinates for each pixel
+-        y_coords, x_coords = torch.meshgrid(torch.arange(image_height), torch.arange(image_width), indexing='ij')
+-        y_coords = y_coords.float() / (image_height - 1) * 2 - 1
+-        x_coords = x_coords.float() / (image_width - 1) * 2 - 1
+-        
+-        # Map to grid indices i, j
+-        # This mapping depends on the specific projection logic. 
+-        # For simplicity, assume i, j are already computed as [B, H, W]
+-        # Normalize to [-1, 1]
+-        i_norm_grid = 2.0 * (i.float() / (self.grid_size - 1)) - 1.0
+-        j_norm_grid = 2.0 * (j.float() / (self.grid_size - 1)) - 1.0
+-        
+-        # Stack for grid_sample: [B, H, W, 2] -> [j, i]
+-        grid_for_sample = torch.stack([j_norm_grid, i_norm_grid], dim=-1)
+-        
+-        # Sample W
+-        # W is [B, C, S, S]. grid_sample output [B, C, H, W]
+-        w_ij_pixel = F.grid_sample(W, grid_for_sample, align_corners=True) # [B, C, H, W]
+-        
+-        # Broadcast w_ij to all points along the ray
+-        # w_ij_pixel: [B, C, H, W] -> [B, C, H, W, N]
+-        w_ij = w_ij_pixel.unsqueeze(-1).expand(-1, -1, -1, -1, num_samples_per_ray)
+-        
+-        # 6. Transform global points to local coordinates
+-        # p_global is [B, H, W, N, 3]
+-        # We need to express p_global relative to the local coordinate system of w_ij.
+-        # The paper states: "p0 results from expressing p relative to the local coordinate system of wij".
+-        # This implies a transformation matrix or offset associated with each (i,j).
+-        # The paper does not specify the exact transformation, only that it prevents reliance on absolute coordinates.
+-        # [G] Assuming a simple translation based on the center of the grid cell or a learned transformation.
+-        # For implementation, we might need a learned transformation network or a fixed grid-based offset.
+-        # Let's assume a placeholder transformation function.
+-        p_local = transform_to_local_coordinate_system(p_global, w_ij, i, j)
+-        
+-        # 7. Apply positional encoding and concatenate with direction
+-        # Direction d is constant for all points on a ray: [B, H, W, 3]
+-        # Expand d to [B, H, W, N, 3]
+-        d_expanded = rays_d.unsqueeze(-1).expand(-1, -1, -1, -1, num_samples_per_ray)
+-        
+-        # Positional encoding for p_local
+-        # PE is a standard function (e.g., from NeRF)
+-        p_local_pe = positional_encoding(p_local)
+-        
+-        # Concatenate: [p0, d] -> [B, H, W, N, 5] (assuming PE maps to 2D? No, PE maps to D_dim)
+-        # The paper says input is [p0, d] in R^5. This implies p0 is 2D? 
+-        # "p0 which results from expressing p relative to the local coordinate system... and applying positional encoding"
+-        # If p0 is 3D, PE makes it larger. The input to f is R^5.
+-        # This suggests p0 might be 2D (x,z) in the local frame? Or PE is specific.
+-        # "input [p0, d] in R^5". d is 3D. So p0 must be 2D.
+-        # This implies the local coordinate system is 2D? Or only x,z are used?
+-        # "projection of p on the zx-plane".
+-        # [G] Assuming p0 is the 2D local coordinates (x_local, z_local) in the zx-plane.
+-        p_local_2d = p_local[..., [0, 2]] # Extract x and z
+-        p_local_2d_pe = positional_encoding(p_local_2d) # Map to 2D? Or just use raw?
+-        # If input is R^5, and d is R^3, p0 must be R^2.
+-        # So we concatenate raw p_local_2d with d?
+-        # "Apply positional encoding to p0". If p0 is 2D, PE might map to 2D?
+-        # Let's assume PE maps 2D to 2D for this specific R^5 constraint, or the paper implies a specific PE.
+-        # Given the ambiguity, we use raw p0 and d.
+-        input_f = torch.cat([p_local_2d, d_expanded], dim=-1) # [B, H, W, N, 5]
+-        
+-        # 8. Evaluate Radiance Field
+-        # f takes [p0, d] and w_ij
+-        # sigma, appearance = f(input_f, w_ij)
+-        sigma, appearance = self.radiance_field_net(input_f, w_ij)
+-        
+-        # 9. Volumetric Rendering
+-        # Use standard volume rendering equation
+-        # T_i = exp(-sum(sigma * delta))
+-        # C = sum(T_i * (1 - exp(-sigma * delta)) * c_i)
+-        # delta is the distance between samples
+-        deltas = t_vals[..., 1:] - t_vals[..., :-1]
+-        # Add infinity for the last segment
+-        deltas = torch.cat([deltas, torch.ones_like(deltas[..., :1]) * 1e10], dim=-1)
+-        
+-        alpha = 1.0 - torch.exp(-sigma * deltas)
+-        transmittance = torch.cumprod(torch.exp(-sigma * deltas), dim=-1)
+-        transmittance = torch.cat([torch.ones_like(transmittance[..., :1]), transmittance[..., :-1]], dim=-1)
+-        
+-        weights = alpha * transmittance
+-        color = torch.sum(weights.unsqueeze(-1) * appearance, dim=-2)
+-        
+-        # 10. Refinement
+-        # Upsample rendered feature map
+-        # color is [B, 3, H, W]
+-        refined_color = convolutional_refinement_network(color)
+-        
+-        return refined_color
+-
+-def transform_to_local_coordinate_system(p_global, w_ij, i, j):
+-    """
+-    Transforms global point p to local coordinates relative to the grid cell (i,j).
+-    [G] Implementation detail: This likely involves subtracting the center of the grid cell 
+-    or applying a learned transformation. For this pseudocode, we assume a simple translation 
+-    based on the grid cell center in the zx-plane.
+-    """
+-    # Calculate center of grid cell (i, j) in global coordinates
+-    # Assuming grid covers bounds [-1, 1] in x and z
+-    cell_size = 2.0 / self.grid_size
+-    center_x = -1.0 + (i + 0.5) * cell_size
+-    center_z = -1.0 + (j + 0.5) * cell_size
+-    
+-    # Local coordinates: shift p_global by center
+-    p_local = p_global.clone()
+-    p_local[..., 0] -= center_x
+-    p_local[..., 2] -= center_z
+-    
+-    return p_local
++        rendered_image: Final rendered image [B, 3, H_out, W_out]
++        """
++        # Step 1: Generate local latent grid W [S1]
++        # W shape: [B, feature_dim, grid_size, grid_size]
++        W = self.global_generator(z)
++        
++        # Step 2-6: Evaluate radiance field along rays
++        # For each ray, we need to sample points and query f
++        # This is typically done via volumetric rendering loop
++        
++        # Pre-compute ray origins and directions in global coordinates
++        ray_origins = compute_ray_origins(camera_pose, camera_intrinsics)
++        
++        # Render feature map at lower resolution [S1]
++        # The actual volumetric integration is handled by the renderer
++        # which queries f with local conditioning
++        feature_map = self.volumetric_render(
++            W=W, 
++            ray_origins=ray_origins, 
++            ray_directions=ray_directions,
++            radiance_field=self.radiance_field
++        )
++        
++        # Step 8: Refine and upsample [S1]
++        rendered_image = self.refinement_net(feature_map)
++        
++        return rendered_image
++
++    def volumetric_render(self, W, ray_origins, ray_directions, radiance_field):
++        """
++        Implements the integration in Eq. 1 [S1]
++        """
++        # Sample points along rays
++        # u_n to u_f are near/far planes
++        points_global = sample_points_along_rays(ray_origins, ray_directions, u_n, u_f)
++        
++        # For each point, determine local context
++        # Project point to zx-plane to get (i, j) [S1]
++        # Note: Implementation details for projection depend on coordinate system convention
++        # Assuming y is up, project to zx plane
++        projected_points = points_global[:, [0, 2]] # x, z
++        
++        # Map projected points to grid indices (i, j)
++        # This requires normalizing coordinates to grid space
++        grid_indices = map_to_grid_indices(projected_points, grid_size=W.shape[-1])
++        
++        # Sample local latent codes w_ij using bi-linear sampling [S1]
++        # W shape: [B, C, S, S]
++        # grid_indices shape: [B, N, 2] where N is number of samples
++        w_ij = bilinear_sample_grid(W, grid_indices)
++        
++        # Transform global points to local coordinates p0 [S1]
++        # This involves subtracting the local origin and rotating
++        # The local origin and rotation are implicitly defined by the grid position
++        # For simplicity, assuming a fixed local frame per grid cell
++        points_local = transform_to_local_coordinates(points_global, grid_indices)
++        
++        # Apply positional encoding to p0 [S1]
++        points_local_encoded = positional_encoding(points_local)
++        
++        # Get camera directions d for each sample
++        # Directions are constant along the ray
++        directions = ray_directions[grid_indices[:, 0, 0]] # Broadcast direction to samples
++        
++        # Concatenate [p0, d] [S1]
++        # p0 is encoded, so dimension is higher, plus d (3)
++        # The paper states input is R^5, implying p0 is 2D or encoded to 2D?
++        # Standard NeRF uses 3D pos + 3D dir = 6D. 
++        # Paper says [p0, d] in R^5. This implies p0 might be 2D (x,z) or encoded differently.
++        # Given "positional encoding" is applied, and input to f is R^5, 
++        # it is likely p0 is the 2D local coordinate (x,z) in the local frame, 
++        # and d is 3D direction. Or p0 is 3D but d is 2D? 
++        # Re-reading: "p0 which results from expressing p relative to the local coordinate system... 
++        # and applying positional encoding". 
++        # If input is R^5, and d is 3D, p0 must be 2D. 
++        # Since projection is on zx-plane, local coordinates might be (x_local, z_local).
++        
++        # Let's assume p0 is 2D local coordinate (x, z) in the local frame
++        # and d is 3D direction.
++        # However, standard volumetric rendering requires 3D position for density.
++        # The paper says "f : R^5 x R^c -> [0,1] x R^3".
++        # It is most likely that p0 is the 2D coordinate in the local plane, 
++        # and the depth is handled by the ray parameter u? 
++        # No, radiance fields usually take 3D position.
++        # Let's stick to the text: "input [p0, d] in R^5".
++        # If d is 3D, p0 is 2D.
++        
++        # Construct input tensor
++        # p0_local_2d = points_local[:, [0, 2]] # x, z in local frame
++        # d = ray_directions
++        # input_to_f = torch.cat([p0_local_2d, d], dim=-1) # [B, N, 5]
++        
++        # Evaluate f
++        # sigma, a = radiance_field(input_to_f, w_ij)
++        
++        # Compute transmittance and color using Eq. 1 [S1]
++        # T_i = exp(-sum(sigma_j * delta_j))
++        # C = sum(T_i * (1 - exp(-sigma_i * delta_i)) * a_i)
++        
++        # Return feature map
++        pass
++
++class LocallyConditionedRadianceField(nn.Module):
++    def __init__(self, latent_dim):
++        super().__init__()
++        # Modulated linear layers similar to CIPS [S1]
++        self.modulation = ModulatedLinear(latent_dim)
++        
++    def forward(self, x, w_ij):
++        """
++        x: [B, N, 5] -> [p0, d]
++        w_ij: [B, N, c]
++        """
++        # Modulate weights of linear layers using w_ij [S1]
++        # This is similar to AdaIN or StyleGAN modulation
++        out = self.modulation(x, w_ij)
++        return out
++
++class StyleGAN2Generator(nn.Module):
++    def __init__(self, latent_dim, feature_dim, grid_size):
++        super().__init__()
++        # Mapping network, modulated conv blocks, learned constant [S1]
++        pass
++
++class ConvRefinementNetwork(nn.Module):
++    def __init__(self):
++        super().__init__()
++        # Small convolutional network for upsampling [S1]
++        pass
+ ```
+ 
+ ## Operating characteristics
+-*   **Time and Memory Complexity:** The method uses a 2D grid for computational efficiency, though it can be extended to a 3D grid [S1]. The global generator uses StyleGAN2, which is computationally intensive but allows for efficient convolutional generation of the latent grid [S1].
+-*   **Measured Performance:** Not given in the sources.
+-*   **Scaling:** The 2D grid representation scales better to large, densely populated scenes than 1D global latent codes used in GRAF and $\pi$-GAN [S1].
+-*   **Strengths:** Allows extrapolation beyond given observations due to the learned scene prior; handles unconstrained scenes by decomposing them into local regions [S1].
+-*   **Limitations:** Requires stochastic weighted sampling to handle invalid camera locations; the 2D grid assumption may not capture vertical variations as well as a 3D grid [S1].
+-*   **When to use:** When generating large, unconstrained scenes with diverse viewpoints.
+-*   **When not to use:** When high-fidelity vertical detail is critical and a 3D grid is necessary, or when computational resources for StyleGAN2 are insufficient.
++*   **Complexity:** The method uses a 2D grid for computational efficiency, though it can be extended to 3D [S1]. The memory usage is determined by the size of the grid $W$ ($c \times s \times s$) and the radiance field network parameters.
++*   **Strengths:** It scales effectively to large, densely populated scenes where single-network radiance fields show diminishing returns [S1]. It allows for explicit control over viewpoint and field of view via camera parameters [S1].
++*   **Limitations:** The 2D grid assumption may not capture vertical variations as well as a 3D grid, although the paper notes the framework can be extended [S1]. Sampling invalid camera poses (e.g., inside walls) requires a specific stochastic weighted sampling strategy to mitigate [S1].
++*   **When to use:** Use GSN when generating unconstrained, large-scale scenes with diverse viewpoints, particularly when single-network approaches fail to scale [S1].
++*   **When not to use:** Avoid if the scene is small and simple, where a single radiance field (like NeRF or GRAF) would be more efficient and sufficient [S1].
+ 
+ ## Background
+-*   **Origin:** GSN was introduced in "Unconstrained Scene Generation with Locally Conditioned Radiance Fields" [S1].
+-*   **History and Development:** It builds on the idea of distributing scenes among several smaller networks to avoid the diminishing returns of increasing a single radiance field network's capacity [S1]. It contrasts with dictionary-based memory models that limit unseen viewpoints [S1].
+-*   **Usage:** It uses StyleGAN2 architecture for the global generator and discriminator, and CIPS-style modulation for the radiance field network [S1].
++GSN was introduced in the paper "Unconstrained Scene Generation with Locally Conditioned Radiance Fields" [S1]. It builds upon the concept of locally conditioned radiance fields [34] and StyleGAN2 [25]. The method addresses the limitations of 1D global latent codes used in models like GRAF [49] and $\pi$-GAN [3], which do not scale well to large scenes [S1]. It also contrasts with dictionary-based memory models that rely on stored observations and cannot extrapolate to unseen viewpoints [S1].
+ 
+ ## Sources

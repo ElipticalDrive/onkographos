@@ -1,0 +1,95 @@
+# Hash-based Pseudo-Random Number Generator
+
+Also called: Hash Functions, Hash-based PRNG, Integer to Float Mapping, Pseudo-Random Number Generator (Hash), Random Number Generation for Noise, hash12, hash13
+
+## Overview
+A hash-based pseudo-random number generator maps integer or floating-point coordinates to a deterministic pseudo-random value in the range $[0, 1)$ or $[-1, 1]$ using arithmetic operations [S4]. It solves the problem of generating unique, seemingly random offsets for ray origins or lattice indices without storing large lookup tables [S1, unofficial]. It is distinguished from [Incremental Random Number Generation](4898-incremental-random-number-generation.md) by its coordinate-based determinism rather than state-based iteration, and from [Deterministic Integer Hashing](4149-deterministic-integer-hashing.md) by its reliance on floating-point sine functions rather than bitwise integer operations [S2, unofficial][G].
+
+## How it works
+**Inputs:** A coordinate vector $p$ (typically `vec2` or `vec3`) [S1, unofficial].
+**Outputs:** A single floating-point value $r \in [0, 1)$ [S4].
+
+**Data Structures:** None. Pure arithmetic functions [G].
+
+**Parameters:**
+*   Constants for the sine-based hash: $C_1 = 127.1, C_2 = 311.7$ (for 2D); $C_3 = 74.7$ (for 3D); Multiplier $M = 43758.5453123$ [S1, unofficial].
+*   Constants for the sin-free hash: $K = 0.1031$, $B = 33.33$ [S4].
+
+**Steps (Sin-based variant):**
+1. Compute the dot product of the input coordinate $p$ and a constant vector $c$: $h = p \cdot c$ [S1, unofficial].
+2. Apply the sine function: $s = \sin(h)$ [S1, unofficial].
+3. Scale by the multiplier: $v = s \times M$ [S1, unofficial].
+4. Extract the fractional part: $r = v - \lfloor v \rfloor$ [S4].
+
+**Steps (Sin-free variant):**
+1. Scale the input $p$ by $K$: $p' = p \times K$ [S4].
+2. Compute a dot product of $p'$ with itself plus a bias: $d = p' \cdot (p' + B)$ [S4].
+3. Combine components and extract the fractional part [S4].
+
+**Pseudocode:**
+
+> **Unverified code.** The code below did not pass a test run against a reference implementation, or no test fits it, so it may contain errors.
+
+```python
+import math
+
+def hash_sin_2d(p_x: float, p_y: float) -> float:
+    """Sin-based hash for 2D coordinates. Constants from [S1, unofficial]."""
+    h = p_x * 127.1 + p_y * 311.7
+    s = math.sin(h)
+    v = s * 43758.5453123
+    return v - math.floor(v)
+
+def hash_sin_3d(p_x: float, p_y: float, p_z: float) -> float:
+    """Sin-based hash for 3D coordinates. Constants from [S1, unofficial]."""
+    h = p_x * 127.1 + p_y * 311.7 + p_z * 74.7
+    s = math.sin(h)
+    v = s * 43758.5453123
+    return v - math.floor(v)
+
+def hash_sin_free_2d(p_x: float, p_y: float) -> float:
+    """Sin-free hash for 2D coordinates. Constants from [S4]."""
+    # vec3 p3 = fract(vec3(p.xyx) * .1031)
+    p3_x = p_x * 0.1031 - math.floor(p_x * 0.1031)
+    p3_y = p_y * 0.1031 - math.floor(p_y * 0.1031)
+    p3_z = p_x * 0.1031 - math.floor(p_x * 0.1031)  # p.xyx -> x, y, x
+    
+    # p3 += dot(p3, p3.yzx + 33.33)
+    # p3.yzx maps to (p3_y, p3_z, p3_x)
+    dot_val = p3_x * (p3_y + 33.33) + p3_y * (p3_z + 33.33) + p3_z * (p3_x + 33.33)
+    p3_x += dot_val
+    p3_y += dot_val
+    p3_z += dot_val
+    
+    # return fract((p3.x + p3.y) * p3.z)
+    return (p3_x + p3_y) * p3_z - math.floor((p3_x + p3_y) * p3_z)
+```
+
+**Edge Cases and Pitfalls:**
+*   **Precision Sensitivity:** The sin-based hash relies on the precision of the sine function and floating-point multiplication [S4].
+*   **Statistical Quality:** The distribution of values may not be perfectly uniform or independent, which is acceptable for visual noise but insufficient for high-quality Monte Carlo rendering where integer/bitwise hashes (like Murmur) are recommended [S1, unofficial].
+
+## Subtopics
+
+### [Deterministic Integer Hashing](4149-deterministic-integer-hashing.md)
+Uses bitwise operations for platform-independent reproducibility; choose when bit-exact CPU/GPU consistency is required.
+
+### [Permutation Table Generation](4174-permutation-table-generation.md)
+Generates a shuffled lookup table; choose when avoiding sine calculations is necessary for performance or when using value noise.
+
+## Operating characteristics
+*   **Time Complexity:** $O(1)$ per coordinate [G].
+*   **Memory Complexity:** $O(1)$. No storage required [G].
+*   **Strengths:** Extremely lightweight, no memory access, easy to implement in shaders [G].
+*   **Limitations:** Statistical quality is lower than integer-based hashes; precision-dependent on hardware [S1, unofficial].
+*   **When to use:** Visual effects, procedural texture generation, ray origin offsetting where perfect statistical independence is not critical [G].
+*   **When not to use:** High-quality Monte Carlo integration, cryptographic applications, or when bit-exact reproducibility across different hardware architectures is required [S1, unofficial][G].
+
+## Background
+The origin of the sin-based hash is unknown, though it is possibly from Rey (1998) and cited by TestU01 [S3, unofficial]. It became a standard one-liner in shader programming due to its brevity and speed [G]. The sin-free variant by Dave Hoskins was developed to address cross-platform precision issues [S4].
+
+## Sources
+[S1] GitHub - razzle-reinizu/Voxel-World-Shader: A GLSL voxel-world shader ..., https://github.com/razzle-reinizu/Voxel-World-Shader, fetched 2026-10-25 (unofficial)
+[S2] Minecraft Voxel DDA Raycast - Shadertoy, https://www.shadertoy.com/view/WccyWl, fetched 2026-10-26 (unofficial)
+[S3] fargiolas/qvrc, https://github.com/fargiolas/qvrc, fetched 2026-10-26 (unofficial)
+[S4] skills/skills/shader-dev/techniques/procedural-noise.md at main ..., https://github.com/MiniMax-AI/skills/blob/main/skills/shader-dev/techniques/procedural-noise.md, fetched 2026-10-27

@@ -1,0 +1,170 @@
+# Instant Neural Graphics Primitives (Instant NGP)
+Also called: INGP, Instant-NGP (iNGP)
+
+## Overview
+Instant Neural Graphics Primitives (Instant NGP) is a high-performance neural radiance field method that drastically accelerates training and inference by replacing the large, deep Multi-Layer Perceptron (MLP) of Vanilla NeRF with a compact structure using multi-resolution learnable hash grids [S2][S5, unofficial]. It solves the bottleneck of slow convergence and high memory usage in implicit neural representations by explicitly encoding spatial information into trainable feature embeddings stored on grid vertices, which are then interpolated and fed into a shallow decoder [S3, unofficial][S7]. Unlike its siblings, it combines this multi-resolution hash encoding with advanced ray marching techniques (exponential stepping, empty space skipping) and fully fused CUDA kernels to achieve real-time rendering and convergence in minutes rather than hours [S2, S6].
+
+## How it works
+**Inputs and Outputs:**
+*   **Inputs:** A set of training images with known camera poses; a 3D scene domain.
+*   **Outputs:** A trained model consisting of multi-resolution hash feature embeddings, an occupancy grid, and a small rendering MLP; rendered pixel colors $\hat{C}(\mathbf{r})$ for arbitrary viewpoints [S4, unofficial][S7].
+
+**Data Structures:**
+1.  **Multi-Resolution Hash Grids:** A hierarchy of $L$ levels [S3, unofficial]. At each level $l \in \{1, \dots, L\}$, there is a 3D grid of resolution $R_l$ (e.g., ranging from 16 to 2048) [S7].
+    *   **Feature Embeddings ($\Theta$):** Instead of storing a unique vector for every vertex, a fixed-size hash table is used per level [S3, unofficial]. Each vertex index is mapped to this table via a spatial hash function [S4, unofficial].
+    *   **Embedding Vector:** Each entry in the hash table is a trainable feature vector $\theta_{il} \in \mathbb{R}^F$ [S4, unofficial].
+    *   **Parameters:** $F$ is the feature dimension (typical value: 8) [S7]. $T_l$ is the size of the hash table at level $l$ [S7].
+2.  **Occupancy Grid:** A sparse grid used to accelerate rendering by identifying empty space [S7].
+3.  **Rendering MLP:** A shallow neural network (decoder) that takes concatenated features and outputs density and color [S2, S6].
+
+**Numbered Steps:**
+
+1.  **Initialization:** Define $L$ levels of 3D grids with increasing resolutions. Initialize the hash tables for feature embeddings $\Theta$ and the occupancy grid [S3, unofficial].
+2.  **Feature Retrieval (Hash Encoding):** For a 3D query point $\mathbf{x}$:
+    *   For each level $l \in \{1, \dots, L\}$, identify the voxel containing $\mathbf{x}$ [S4, unofficial].
+    *   If the grid resolution exceeds a specified threshold, use a spatial hash function to map the voxel vertex indices to the hash table $\Theta$ to retrieve the feature vectors [S7].
+    *   Perform trilinear interpolation of the 8 surrounding vertex features to obtain the feature vector $\mathbf{f}_l(\mathbf{x})$ for level $l$ [S3, unofficial]:
+        $$ \mathbf{f}_l(\mathbf{x}) = \text{interp}(\mathbf{x}, \Theta) $$
+3.  **Feature Concatenation:** Concatenate the interpolated features from all $L$ levels into a single feature vector [S3, unofficial]:
+    $$ \mathbf{f}_{\text{concat}} = [\mathbf{f}_1(\mathbf{x}); \mathbf{f}_2(\mathbf{x}); \dots; \mathbf{f}_L(\mathbf{x})] $$
+4.  **Decoding:** Pass $\mathbf{f}_{\text{concat}}$ (and view direction $\mathbf{d}$) through the shallow rendering MLP to predict density $\sigma(\mathbf{x})$ and color $\mathbf{c}(\mathbf{x}, \mathbf{d})$ [S3, unofficial].
+5.  **Ray Marching:** Cast a ray $\mathbf{r}(v) = \mathbf{o} + v\mathbf{d}$ from the camera origin $\mathbf{o}$:
+    *   Use the **Occupancy Grid** to skip empty space along the ray [S7].
+    *   Sample points along the ray. Use **exponential stepping** and **sample compaction** as advanced ray marching techniques [S2].
+    *   Accumulate color and transmittance using volume rendering integration [S7]:
+        $$ \hat{C}(\mathbf{r}) = \int_{v_n}^{v_f} T(v) \sigma(\mathbf{r}(v)) \mathbf{c}(\mathbf{r}(v), \mathbf{d}) dv $$
+        where transmittance $T(v) = \exp \left( - \int_{v_n}^{v} \sigma(\mathbf{r}(u)) du \right)$ [S7].
+6.  **Training:** Optimize the hash embeddings $\Theta$ and the MLP weights via gradient descent. Updates are local to the embeddings near the sampled points, unlike global weight updates in Vanilla NeRF [S3, unofficial].
+
+**Pseudocode:**
+
+> **Unverified code.** The code below did not pass a test run against a reference implementation, or no test fits it, so it may contain errors.
+
+```python
+import math
+
+def hash_func(index, table_size):
+    """Maps a vertex index to a hash table slot. [G] Original paper uses a custom bit-mixing hash."""
+    return index % table_size
+
+def lerp(a, b, t):
+    return a + t * (b - a)
+
+def get_level_features(point, grid, resolution, table_size):
+    """
+    Retrieves and interpolates features for a single resolution level.
+    point: list of 3 floats in [0, 1]
+    grid: list of arrays or 2D array of shape [table_size, F]
+    resolution: int R_l
+    table_size: int T_l
+    """
+    # Scale point to grid coordinates
+    p = [point[0] * resolution, point[1] * resolution, point[2] * resolution]
+    
+    # Integer voxel coordinates and fractional offsets
+    i = [int(v) for v in p]
+    j = [min(v + 1, resolution - 1) for v in i]  # Clamp to valid indices
+    f = [p[k] - i[k] for k in range(3)]
+    
+    # Fetch 8 surrounding vertices via hash lookup
+    verts = []
+    for dx in (0, 1):
+        for dy in (0, 1):
+            for dz in (0, 1):
+                # Linearize 3D index to 1D
+                idx = (i[0] + dx) * (resolution + 1)**2 + (i[1] + dy) * (resolution + 1) + (i[2] + dz)
+                slot = hash_func(idx, table_size)
+                verts.append(grid[slot])
+                
+    v000, v100, v010, v110, v001, v101, v011, v111 = verts
+    
+    # Trilinear interpolation
+    v00 = [lerp(v000[k], v100[k], f[0]) for k in range(len(v000))]
+    v01 = [lerp(v010[k], v110[k], f[0]) for k in range(len(v010))]
+    v10 = [lerp(v001[k], v101[k], f[0]) for k in range(len(v001))]
+    v11 = [lerp(v011[k], v111[k], f[0]) for k in range(len(v011))]
+    v0 = [lerp(v00[k], v01[k], f[1]) for k in range(len(v00))]
+    v1 = [lerp(v10[k], v11[k], f[1]) for k in range(len(v10))]
+    return [lerp(v0[k], v1[k], f[2]) for k in range(len(v0))]
+
+def render_ray(origin, direction, hash_grids, resolutions, table_sizes, mlp_func, occupancy_intervals):
+    """
+    Renders a single ray using Instant NGP.
+    origin: [ox, oy, oz]
+    direction: [dx, dy, dz]
+    hash_grids: list of feature embedding tables
+    resolutions: list of R_l
+    table_sizes: list of T_l
+    mlp_func: function(features, direction) -> (sigma, color)
+    occupancy_intervals: list of (start, end) distances along ray
+    """
+    total_color = [0.0, 0.0, 0.0]
+    transmittance = 1.0
+    num_samples = 128
+    
+    for start, end in occupancy_intervals:
+        step_size = (end - start) / num_samples
+        for s in range(num_samples):
+            v = start + (s + 0.5) * step_size
+            point = [origin[k] + v * direction[k] for k in range(3)]
+            
+            # Concatenate features from all levels
+            features = []
+            for l in range(len(hash_grids)):
+                f_l = get_level_features(point, hash_grids[l], resolutions[l], table_sizes[l])
+                features.extend(f_l)
+                
+            sigma, color = mlp_func(features, direction)
+            alpha = 1.0 - math.exp(-sigma * step_size)
+            weight = transmittance * alpha
+            total_color = [total_color[k] + weight * color[k] for k in range(3)]
+            transmittance *= (1.0 - alpha)
+            
+            if transmittance < 1e-4:
+                break
+                
+    return total_color
+```
+
+**Parameters:**
+*   $L$: Number of resolution levels. Typical value: 16 [S7].
+*   Resolutions: Range from 16 to 2048 [S7].
+*   $F$: Feature vector dimension. Typical value: 8 [S7].
+*   $T_l$: Size of the hash table at level $l$. Typical value: $2^{19}$ for 3D embeddings [S7].
+*   Training Time: Reduced from several hours to a few minutes (e.g., 170s for 20,000 iterations on Lego model with RTX 3090) [S9, unofficial].
+
+## Subtopics
+
+### [Context-based NeRF Compression (CNC)](16592-context-based-nerf-compression-cnc.md)
+Context-based NeRF Compression (CNC) is a compression framework for multi-resolution Instant-NGP-based NeRFs that utilizes context models to predict probabilities for entropy encoding feature embeddings, quantizes the rendering MLP, and compresses a binary occupancy grid. It achieves significant rate-distortion improvements over prior methods by excavating level-wise and dimension-wise context dependencies to reduce information entropy. Unlike previous methods that rely on pruning and quantization (Deep Compression concept), CNC decreases information uncertainty (entropy) of voxel feature encoding using efficient entropy codecs like Arithmetic Coding.
+
+### fV-SRN
+fV-SRN is an interactive rendering method for compressed Implicit Neural Representations (INRs) that uses a volumetric latent grid and a lightweight MLP to achieve real-time frame rates by fusing network evaluation into shared memory [S10, unofficial]. It constructs a volumetric latent grid (typically 32^3 resolution, 16 features per vertex) paired with a lightweight MLP (four layers, 32 channels) [S10, unofficial]. It executes a custom GPU TensorCore kernel that fuses the entire network evaluation into 48 kB of on-chip shared memory, eliminating global memory access during inference [S10, unofficial]. It predicts density, gradient, and curvature in a single forward pass to avoid finite-difference gradient computation [S10, unofficial]. Rendering achieves a 150–200× speedup over Neurcomp and 12× for shaded rendering, reaching 5–10 FPS at 512^2 resolution on volumes up to 1024^3 [S10, unofficial]. Training requires the full volume in GPU memory, limiting use to offline workflows or requiring sufficient VRAM [S10, unofficial].
+
+### Instant-NGP Large-Scale (INGP)
+Instant-NGP Large-Scale adapts the method to large-scale settings using a foreground and background network, each with one multi-resolution hash encoding and prediction heads [S11]. It sets the hash map size to $2^{22}$ entries in the foreground network [S11]. Training time is approximately 10 hours for 100k steps, comparable to Switch-NeRF++ (11 hours for 100k steps), though Switch-NeRF++ outperforms it with less training time [S11].
+
+## Operating characteristics
+*   **Time Complexity:** Training convergence is significantly faster than Vanilla NeRF, reducing from hours to minutes per scene [S3, unofficial]. Inference is optimized for real-time rendering [S5, unofficial].
+*   **Memory Complexity:** Memory consumption is drastically reduced compared to unique feature vectors per vertex due to embedding sharing via hashing [S3, unofficial]. The total storage includes feature embeddings, occupancy grid, and rendering MLP, with feature embeddings accounting for over 99% of the storage size [S7].
+*   **Performance:** Enables real-time rendering and training within a minute [S6]. On an RTX 3090, training the Lego model (800x800 resolution, 20,000 iterations) took 170 seconds [S9, unofficial].
+*   **Strengths:** High training speed, real-time rendering capability, continuous representation avoiding blocky artifacts, local constraint during training improves stability [S3, unofficial].
+*   **Limitations:** Storage cost is still dominated by hash embeddings, which can be large for high-resolution scenes [S7]. Requires GPU memory for training [S7].
+*   **When to use:** When fast training and real-time rendering are required for neural radiance fields [S5, unofficial].
+*   **When not to use:** When extreme storage compression is the primary goal without considering the complexity of context-based compression techniques like CNC [S1].
+
+## Background
+Instant Neural Graphics Primitives (Instant NGP) was introduced by NVIDIA in January 2022 [S2]. It was developed to address the slow training and inference speeds of previous Neural Radiance Field (NeRF) methods [S2]. The key contribution is the multi-resolution hash encoding, which maps input coordinates to a higher-dimensional embedding space using a cascade of hash tables [S5, unofficial]. This approach, combined with fully fused CUDA kernels and mixed-precision computation, allows for efficient GPU utilization [S8]. The method has become a staple in modern NeRF architectures due to its balance of speed and quality [S4, unofficial]. It is used in the NVlabs framework [S1].
+
+## Sources
+[S1] NERF FOR HERITAGE 3D RECONSTRUCTION, https://doi.org/10.5194/isprs-archives-xlviii-m-2-2023-1051-2023, fetched 2026-10-26
+[S2] Neural Radiance Fields in 3D Vision: A Comprehensive Review, https://doi.org/10.26599/cvm.2026.9450535, fetched 2026-10-28
+[S3] From reconstruction to reasoning : neural radiance fields for comprehensive 3D scene understanding, https://theses.hal.science/tel-05693528v1, fetched 2026-10-26 (unofficial)
+[S4] Advances in Neural Rendering, https://doi.org/10.48550/arxiv.2111.05849, fetched 2026-10-26 (unofficial)
+[S5] Factor Fields: A Unified Framework for Neural Fields and Beyond, https://doi.org/10.48550/arxiv.2302.01226, fetched 2026-10-26 (unofficial)
+[S6] ScanNeRF: a Scalable Benchmark for Neural Radiance Fields, https://doi.org/10.1109/wacv56688.2023.00088, fetched 2026-10-26
+[S7] How Far can we Compress Instant-NGP-Based NeRF?, https://doi.org/10.1109/cvpr52733.2024.01921, fetched 2026-10-26
+[S8] BirdNeRF: fast neural reconstruction of large-scale scenes from aerial imagery., https://doi.org/10.1038/s41598-025-21206-z, fetched 2026-10-26
+[S9] Taichi NeRF (Part 1): Develop and Deploy Instant NGP without writing CUDA | Taichi Docs, https://docs.taichi-lang.org/blog/taichi-instant-ngp, fetched 2026-10-29 (unofficial)
+[S10] PDF Deep Learning Methods and Neural Representations for Scientific Volume ..., https://www.cs.uoregon.edu/Reports/AREA-202603-Mathai.pdf, fetched 2026-10-27 (unofficial)
+[S11] Learning Heterogeneous Mixture of Scene Experts for Large-Scale Neural Radiance Fields., https://doi.org/10.1109/tpami.2025.3603305, fetched 2026-10-26

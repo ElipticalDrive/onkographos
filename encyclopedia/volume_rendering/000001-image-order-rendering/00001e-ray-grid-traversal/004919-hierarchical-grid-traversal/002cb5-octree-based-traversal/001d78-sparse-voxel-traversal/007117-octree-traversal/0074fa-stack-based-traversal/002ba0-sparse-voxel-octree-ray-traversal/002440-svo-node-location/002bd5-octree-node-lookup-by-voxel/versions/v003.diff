@@ -1,0 +1,249 @@
+--- v002.md
++++ v003.md
+@@ -1,155 +1,147 @@
+ # Octree Node Lookup by Voxel
++
++
+ ## Overview
+-This method locates the payload index for a specific 3D voxel coordinate within a Sparse Voxel Octree (SVO) by traversing from the root to the corresponding leaf node [S1, unofficial]. It solves the problem of mapping a discrete voxel coordinate to the sparse data structure's payload array, returning -1 if the voxel lies outside the tree's bounds or in an empty region [S1, unofficial].
++This method traverses a Sparse Voxel Octree (SVO) from the root to locate the leaf node corresponding to a specific 3D integer voxel coordinate, returning the index of the payload associated with that leaf. It solves the problem of mapping dense voxel grid coordinates to sparse tree payloads, which is a prerequisite for operations like trilinear sampling or attribute retrieval. It differs from its sibling, [Octree Voxel Color Retrieval](5015-octree-voxel-color-retrieval.md), by returning only the payload index rather than the interpolated color value itself.
+ 
+ ## How it works
+ **Inputs:**
+ - `nodes`: Array of `NodeDescriptor` structures representing the octree nodes.
+-- `num_nodes`: Total number of nodes in the `nodes` array.
+-- `leaf_payload_indices`: Array of indices mapping leaf IDs to payload rows.
+-- `num_leaves`: Total number of leaves.
+-- `max_depth`: The maximum depth of the octree (root is depth 0).
+-- `voxel`: A 3D integer coordinate `(x, y, z)` to look up.
++- `num_nodes`: Number of nodes in the `nodes` array.
++- `leaf_payload_indices`: Array of indices mapping leaf IDs to payload data.
++- `num_leaves`: Number of leaves in the octree.
++- `max_depth`: The maximum depth of the octree.
++- `voxel`: A 3D integer coordinate $(x, y, z)$ to look up.
+ 
+ **Outputs:**
+-- `payload_index`: The index into the payload array corresponding to the voxel. Returns -1 if the voxel is invalid or empty [S1, unofficial].
++- An integer representing the payload index for the voxel. Returns $-1$ if the voxel is out of bounds, the path does not exist, or the leaf is invalid.
+ 
+ **Data Structures:**
+-- `NodeDescriptor`: Contains the following fields:
+-  - `child_mask`: 8-bit bitmask indicating which of the 8 children exist.
+-  - `leaf_mask`: 8-bit bitmask indicating which children are leaf nodes.
+-  - `payload_base`: Offset into `leaf_payload_indices` for the first leaf child.
+-  - `internal_child_mask`: 8-bit bitmask indicating which children are internal nodes.
+-  - `child_base`: Offset into the `nodes` array for the first internal child.
++The `NodeDescriptor` contains the following fields:
++- `child_mask`: A bitmask indicating which of the 8 children exist (bit $i$ set if child $i$ exists).
++- `leaf_mask`: A bitmask indicating which existing children are leaf nodes (subset of `child_mask`).
++- `payload_base`: An offset into `leaf_payload_indices` for the first leaf child.
++- `internal_child_mask`: A bitmask indicating which existing children are internal nodes (subset of `child_mask`).
++- `child_base`: An offset into the `nodes` array for the first internal child.
+ 
+-**Formulas:**
+-1.  **Grid Size:** $grid\_size = 2^{max\_depth}$ [S1, unofficial]
+-2.  **Child Index:** For a given depth $d$ (where $d$ ranges from $max\_depth-1$ down to 0), the child index $c$ is:
+-    $$c = ((x \gg d) \& 1) \mid (((y \gg d) \& 1) \ll 1) \mid (((z \gg d) \& 1) \ll 2)$$ [S1, unofficial]
+-3.  **Prefix Rank:** The number of set bits in a mask strictly below a given index $i$:
+-    $$prefix\_rank(mask, i) = \text{popcount}(mask \& ((1 \ll i) - 1))$$ [S1, unofficial]
++**Algorithm:**
++1. **Empty Check:** If `num_nodes` is 0, return $-1$.
++2. **Depth 0 Check:** If `max_depth` is 0, check if a root leaf exists. If the root is a leaf and valid, return its payload index; otherwise, return $-1$.
++3. **Bounds Check:** Calculate `grid_size` as $2^{\text{max\_depth}}$. If the voxel coordinate $(x, y, z)$ is not within the range $[0, \text{grid\_size})$, return $-1$.
++4. **Initialization:** Set `node_index` = 0 (root node index) and `depth_remaining` = `max_depth`.
++5. **Traversal Loop:**
++   a. If `node_index` >= `num_nodes`, return $-1$ (invalid node reference).
++   b. Retrieve the `NodeDescriptor` at `nodes[node_index]`.
++   c. Calculate the `child_index` for the current depth using bit extraction from the voxel coordinate:
++      $$ \text{child\_index} = ((x \gg \text{depth\_remaining}) \& 1) \mid ((y \gg \text{depth\_remaining}) \& 1) \ll 1 \mid ((z \gg \text{depth\_remaining}) \& 1) \ll 2 $$
++   d. Calculate `child_bit` as $1 \ll \text{child\_index}$.
++   e. **Existence Check:** If `(descriptor.child_mask() & child_bit) == 0`, the child does not exist. Return $-1$.
++   f. **Leaf Check:** If `(descriptor.leaf_mask() & child_bit) != 0`, the child is a leaf.
++      i. Calculate the leaf ID relative to the node's leaves: `leaf_id` = `prefix_rank(descriptor.leaf_mask(), child_index)`.
++      ii. Calculate the global leaf index: `global_leaf_index` = `descriptor.payload_base()` + `leaf_id`.
++      iii. Retrieve `payload_index` from `leaf_payload_indices[global_leaf_index]`.
++      iv. Validate `payload_index`. If valid, return it. If invalid, return $-1$.
++   g. **Internal Node Check:** Otherwise, the child is an internal node.
++      i. Calculate the new node index: `new_node_index` = `descriptor.child_base()` + `prefix_rank(descriptor.internal_child_mask(), child_index)`.
++      ii. Decrement `depth_remaining` by 1.
++      iii. If `depth_remaining` <= 0, return $-1$ (reached max depth without finding a leaf).
++      iv. Update `node_index` = `new_node_index` and continue the loop.
+ 
+-**Algorithm Steps:**
+-1.  If `num_nodes` is 0, return -1 [S1, unofficial].
+-2.  If `max_depth` is 0, the root is a leaf. If `leaf_payload_indices` is valid and contains data, return `leaf_payload_indices[0]`. Otherwise, return -1 [S1, unofficial].
+-3.  Calculate $grid\_size = 2^{max\_depth}$ [S1, unofficial].
+-4.  If `voxel.x`, `voxel.y`, or `voxel.z` is not in the range $[0, grid\_size)$, return -1 [S1, unofficial].
+-5.  Initialize `node_index = 0` and `depth_remaining = max_depth` [S1, unofficial].
+-6.  Loop indefinitely:
+-    a.  If `node_index >= num_nodes`, return -1 (traversal exceeded node array bounds) [S1, unofficial].
+-    b.  Retrieve `descriptor = nodes[node_index]` [S1, unofficial].
+-    c.  Calculate `child_index` using the formula above with `child_depth = depth_remaining - 1` [S1, unofficial].
+-    d.  Compute `child_bit = 1 << child_index` [S1, unofficial].
+-    e.  If `(descriptor.child_mask & child_bit) == 0`, the child does not exist. Return -1 [S1, unofficial].
+-    f.  If `(descriptor.leaf_mask & child_bit) != 0`, the child is a leaf:
+-        i.  Compute `leaf_id = descriptor.payload_base + prefix_rank(descriptor.leaf_mask, child_index)` [S1, unofficial].
+-        ii. Retrieve `payload_index = leaf_payload_indices[leaf_id]` [S1, unofficial].
+-        iii. Validate `payload_index` (e.g., check if it is within bounds of the payload array). If valid, return `payload_index`. Else, return -1 [S1, unofficial].
+-    g.  Otherwise, the child is an internal node:
+-        i.  Compute `new_node_index = descriptor.child_base + prefix_rank(descriptor.internal_child_mask, child_index)` [S1, unofficial].
+-        ii. Decrement `depth_remaining` [S1, unofficial].
+-        iii. If `depth_remaining <= 0`, return -1 (should have hit a leaf or invalid path) [S1, unofficial].
+-        iv. Set `node_index = new_node_index` and continue loop [S1, unofficial].
++**Helper Function: `prefix_rank`**
++Calculates the number of set bits in `mask` that are strictly less significant than `child_index`.
++$$ \text{prefix\_rank}(\text{mask}, \text{child\_index}) = \text{popcount}(\text{mask} \& ((1 \ll \text{child\_index}) - 1)) $$
+ 
+ **Pseudocode:**
+ ```python
+ def lookup_payload_index_by_voxel(nodes, num_nodes, leaf_payload_indices, num_leaves, max_depth, voxel):
+-    # Step 1: Empty tree check
++    x, y, z = voxel
++    
++    # 1. Empty Check
+     if num_nodes == 0:
+         return -1
+-
+-    # Step 2: Max depth 0 check (Root is leaf)
++    
++    # 2. Depth 0 Check
+     if max_depth == 0:
+-        if num_leaves > 0 and len(leaf_payload_indices) > 0:
++        # Assuming root is always a leaf if max_depth is 0 and nodes exist
++        # Check if root payload is valid
++        if num_leaves > 0:
+             return leaf_payload_indices[0]
+         else:
+             return -1
+-
+-    # Step 3 & 4: Bounds check
++            
++    # 3. Bounds Check
+     grid_size = 1 << max_depth
+-    if not (0 <= voxel.x < grid_size and 0 <= voxel.y < grid_size and 0 <= voxel.z < grid_size):
++    if not (0 <= x < grid_size and 0 <= y < grid_size and 0 <= z < grid_size):
+         return -1
+-
+-    # Step 5: Initialization
++        
+     node_index = 0
+     depth_remaining = max_depth
+-
+-    # Step 6: Traversal Loop
++    
+     while True:
+-        # Step 6a: Bounds check for node array
++        # 5a. Invalid Node Check
+         if node_index >= num_nodes:
+             return -1
+-
++            
+         descriptor = nodes[node_index]
+-
+-        # Step 6b: Calculate child index
++        
++        # 5c. Calculate Child Index
+         child_depth = depth_remaining - 1
+-        x_bit = (voxel.x >> child_depth) & 1
+-        y_bit = (voxel.y >> child_depth) & 1
+-        z_bit = (voxel.z >> child_depth) & 1
++        x_bit = (x >> child_depth) & 1
++        y_bit = (y >> child_depth) & 1
++        z_bit = (z >> child_depth) & 1
+         child_index = x_bit | (y_bit << 1) | (z_bit << 2)
+-
+-        # Step 6d: Check if child exists
++        
+         child_bit = 1 << child_index
++        
++        # 5e. Existence Check
+         if (descriptor.child_mask & child_bit) == 0:
+             return -1
+-
+-        # Step 6f: Check if child is leaf
++            
++        # 5f. Leaf Check
+         if (descriptor.leaf_mask & child_bit) != 0:
+-            # Compute leaf_id
++            # Calculate rank among leaves
+             lower_mask = (1 << child_index) - 1
+-            rank = (descriptor.leaf_mask & lower_mask).bit_count()
+-            leaf_id = descriptor.payload_base + rank
++            leaf_rank = popcount(descriptor.leaf_mask & lower_mask)
+             
+-            # Retrieve payload index
+-            if leaf_id < num_leaves and leaf_id < len(leaf_payload_indices):
+-                payload_index = leaf_payload_indices[leaf_id]
+-                # Validate payload_index (e.g., non-negative, within payload bounds)
++            global_leaf_index = descriptor.payload_base + leaf_rank
++            
++            if global_leaf_index < num_leaves:
++                payload_index = leaf_payload_indices[global_leaf_index]
++                # Validate payload index (e.g., check if it's not a sentinel value like -1 or UINT32_MAX)
++                # [G] Assuming valid payload indices are non-negative integers.
+                 if payload_index >= 0:
+                     return payload_index
+-                else:
+-                    return -1
+-            else:
+-                return -1
+-
+-        # Step 6g: Internal node
+-        # Compute new node index
++            return -1
++            
++        # 5g. Internal Node Check
++        # Calculate rank among internal children
+         lower_mask = (1 << child_index) - 1
+-        rank = (descriptor.internal_child_mask & lower_mask).bit_count()
+-        new_node_index = descriptor.child_base + rank
++        internal_rank = popcount(descriptor.internal_child_mask & lower_mask)
+         
++        new_node_index = descriptor.child_base + internal_rank
+         depth_remaining -= 1
++        
+         if depth_remaining <= 0:
+             return -1
+-        
++            
+         node_index = new_node_index
+ ```
+ 
+-**Parameters:**
+-- `payload_rows`: Total number of payload rows. Used to validate the returned `payload_index` [S1, unofficial].
+-
+-**Edge Cases and Pitfalls:**
+-- **Empty Tree:** An empty tree (`num_nodes == 0`) must return -1 immediately [S1, unofficial].
+-- **Zero Depth:** A tree with `max_depth == 0` has only a root leaf; validation of `leaf_payload_indices` is required [S1, unofficial].
+-- **Out-of-Bounds Voxels:** Voxels at or beyond `grid_size` are invalid and return -1 [S1, unofficial].
+-- **Missing Children:** If the target child bit is not set in `child_mask`, the path is empty and returns -1 [S1, unofficial].
+-- **Invalid Indices:** If `leaf_id` or `payload_index` is out of bounds or negative, return -1 [S1, unofficial].
+-
+ ## Subtopics
+ 
+-### [Octree Voxel Color Retrieval](5015-octree-voxel-color-retrieval.md)
+-Retrieves the actual color/value by interpolating between payload values. Use when rendering or shading is required.
+-
+-### [SVO Node Location](3249-svo-node-location.md)
+-Locates the node descriptor itself rather than the payload index. Use when node properties (e.g., density, type) are needed.
++### [WriteLeafOctree](16593-writeleafoctree.md)
++WriteLeafOctree is a compute shader that traverses a Sparse Voxel Octree (SVO) to locate the leaf node corresponding to each input voxel, then maps the voxel's attributes into a 3D brick pool texture. It differs from its parent, [Octree Node Lookup by Voxel](5120-octree-node-lookup-by-voxel.md), by not just returning the leaf index but actively populating a structured brick-based texture memory with the voxel data, effectively bridging the gap between sparse tree representation and dense brick-based rendering buffers.
+ 
+ ## Operating characteristics
+-- **Time Complexity:** $O(max\_depth)$, as the traversal visits exactly one node per depth level [S1, unofficial].
+-- **Memory Complexity:** $O(1)$ auxiliary space, using a fixed set of integer variables for traversal state [S1, unofficial].
+-- **Strengths:** Exact discrete lookup with minimal branching overhead; efficiently skips empty branches via bitmask checks [S1, unofficial].
+-- **Limitations:** Requires integer voxel coordinates; does not support continuous sampling or interpolation natively [S1, unofficial].
++- **Time Complexity:** $O(D)$, where $D$ is the maximum depth of the octree. Each step involves constant-time bit operations and array lookups.
++- **Memory Complexity:** $O(1)$ auxiliary space. The traversal uses a fixed number of registers/stack variables.
++- **Performance:** The method is highly efficient for random access lookups in sparse data. Performance is limited by memory latency when accessing `nodes` and `leaf_payload_indices` arrays, which may be scattered in memory.
++- **Strengths:** Exact mapping from voxel coordinates to payloads; handles sparse data efficiently; no interpolation overhead.
++- **Limitations:** Does not handle partial overlaps (sub-voxel queries); requires exact integer coordinates; returns $-1$ for empty space, requiring caller handling.
++- **When to use:** When exact payload retrieval for a specific voxel is needed, e.g., for building lookup tables or initializing dense buffers.
++- **When not to use:** For trilinear sampling (use [Octree Voxel Color Retrieval](5015-octree-voxel-color-retrieval.md)); for dense grid access where a simple array lookup suffices.
+ 
+ ## Background
+-The method is part of the Sparse Voxel Octree (SVO) rendering pipeline, specifically designed for efficient voxel-based data access [S1, unofficial]. It leverages compacted bitmasks and prefix ranks to navigate the octree structure without explicit child pointers, optimizing memory usage and cache locality [S1, unofficial].
++The method is derived from implementations of Sparse Voxel Octrees used in modern ray tracing and volume rendering pipelines. The specific implementation details, including the `NodeDescriptor` layout and traversal logic, are found in the `hectorpiteau/sparse-voxels` repository [S1, unofficial]. The use of prefix ranks on child masks allows for compact storage of tree topology without explicit child pointers, a common optimization in SVOs.
+ 
+ ## Sources

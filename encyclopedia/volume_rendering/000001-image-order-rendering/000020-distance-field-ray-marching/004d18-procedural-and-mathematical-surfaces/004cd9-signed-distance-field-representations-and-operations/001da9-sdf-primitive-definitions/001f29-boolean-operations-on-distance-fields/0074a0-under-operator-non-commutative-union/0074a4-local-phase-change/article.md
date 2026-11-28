@@ -1,0 +1,128 @@
+# Local Phase Change
+
+Also called: Phase Change Operator, Phase Replacement
+
+## Overview
+The Local Phase Change operator modifies the phase labels of a multiphase Signed Distance Field (SDF) within a specific spatial region defined by another SDF. It solves the problem of selectively reassigning material identities (phases) in a composite object without altering the underlying geometry's shape, effectively performing a "cut and paste" of phase labels. It differs from global phase reassignment by being spatially localized and from geometric Boolean operations by preserving the distance values of the target phase while only updating the label.
+
+## How it works
+**Inputs:**
+*   A multiphase SDF object $\mathcal{A}$, represented by a set of phase functions $\{\phi_i\}$.
+*   A region $\mathcal{S}$ defined by a signed distance field $f$.
+*   Two phase indices: $i$ (source phase to be removed from the region) and $k$ (target phase to be assigned to the region).
+
+**Outputs:**
+*   A new multiphase SDF object $\mathcal{B}$ with updated phase functions $\{\phi'_j\}$.
+
+**Data Structures:**
+The implementation assumes a structure capable of storing multiple scalar fields (one per phase) or a vector field where each component corresponds to a phase index. For an object with $N$ phases, the state is typically stored as an array or vector of $N$ scalar fields.
+
+**Algorithm:**
+The operator performs two logical steps:
+1.  **Subtraction:** Remove phase $i$ from the region $\mathcal{S}$. This is achieved by taking the maximum of the original phase $i$ distance and the negative of the region SDF. This ensures that inside $\mathcal{S}$ (where $f < 0$), the distance for phase $i$ becomes positive (outside), effectively removing it.
+2.  **Addition:** Assign phase $k$ to the intersection of the region $\mathcal{S}$ and the original phase $i$. The new phase $k$ distance is the minimum of the original phase $k$ and the maximum of the original phase $i$ (after subtraction) and the region SDF.
+
+**Formulas:**
+The resulting phase functions $\Phi$ are computed as follows [S1]:
+
+$$
+\Phi = \begin{cases} 
+\phi_i = \max(\phi_{\mathcal{A}_i}, -f) \\
+\phi_k = \min(\phi_{\mathcal{A}_k}, \max(\phi_i, f)) \\
+\phi_j = \phi_{\mathcal{A}_j} & \forall j \neq i, k
+\end{cases}
+$$
+
+Where:
+*   $\phi_{\mathcal{A}_i}$ is the original distance field for phase $i$.
+*   $\phi_{\mathcal{A}_k}$ is the original distance field for phase $k$.
+*   $f$ is the signed distance field defining region $\mathcal{S}$.
+*   $\phi_i$ in the second equation refers to the *updated* value from the first line.
+
+**Pseudocode:**
+The following Python-like pseudocode computes the new phase fields for a given voxel or point evaluation. It assumes `phases` is a list/array of scalar fields, `f` is the region SDF, and `i`, `k` are integer indices.
+
+> **Unverified code.** The code below did not pass a test run against a reference implementation, or no test fits it, so it may contain errors.
+
+```python
+def local_phase_change(phases, f, i, k):
+    """
+    Computes the new phase fields after applying local phase change.
+    
+    Args:
+        phases: List of scalar fields (functions or arrays) for each phase.
+        f: Signed distance field defining the region S.
+        i: Index of the source phase (to be removed from S).
+        k: Index of the target phase (to be added to S).
+        
+    Returns:
+        List of updated scalar fields.
+    """
+    n_phases = len(phases)
+    new_phases = [None] * n_phases
+    
+    # Step 1: Update phase i
+    # phi_i = max(phi_A_i, -f)
+    # Note: In a voxel-based implementation, this is element-wise max.
+    # In a procedural evaluation, this is computed on the fly.
+    phi_i_old = phases[i]
+    phi_i_new = elementwise_max(phi_i_old, negate(f))
+    
+    # Step 2: Update phase k
+    # phi_k = min(phi_A_k, max(phi_i_new, f))
+    phi_k_old = phases[k]
+    phi_k_intermediate = elementwise_max(phi_i_new, f)
+    phi_k_new = elementwise_min(phi_k_old, phi_k_intermediate)
+    
+    # Step 3: Copy other phases unchanged
+    for j in range(n_phases):
+        if j == i:
+            new_phases[j] = phi_i_new
+        elif j == k:
+            new_phases[j] = phi_k_new
+        else:
+            new_phases[j] = phases[j]
+            
+    return new_phases
+
+def elementwise_max(a, b):
+    # Placeholder for vectorized max operation
+    return [max(x, y) for x, y in zip(a, b)]
+
+def elementwise_min(a, b):
+    # Placeholder for vectorized min operation
+    return [min(x, y) for x, y in zip(a, b)]
+
+def negate(f):
+    # Placeholder for negation operation
+    return [-x for x in f]
+```
+
+**Edge Cases and Pitfalls:**
+*   **Identity of Indices:** If $i = k$, the operation is a no-op for the phase labels, but the distance field for phase $k$ is still modified by the region $S$. Specifically, $\phi_k = \min(\phi_{\mathcal{A}_k}, \max(\phi_{\mathcal{A}_k}, f))$. If $f < \phi_{\mathcal{A}_k}$, the distance is clamped to $f$. This effectively clips the phase $k$ boundary to the region $S$ [G].
+*   **Precision:** When $f$ is close to zero (boundary of region $\mathcal{S}$), floating-point precision errors in the `max` and `min` operations can cause artifacts in the resulting distance field.
+*   **Region Definition:** The region $\mathcal{S}$ must be well-defined. If $f$ is not a valid SDF, the topological guarantees of the phase change are lost.
+
+## Subtopics
+
+### Deformed Phase Operator
+A high-level operator that deforms a specific target phase $k$ within a multiphase set $\mathcal{A}$, while optionally preserving or replacing other phases using over/under operators [S1]. It generalizes the local phase change by applying a deformation map $\omega$ and scaling factor $\lambda$ to the target phase. The operator is defined as $D(\mathcal{A}, k) = D(\mathcal{A}_k) \cup_+ (\mathcal{A} - \mathcal{A}_k)$, where $\cup_+$ is the over operator [S1]. The resulting phase functions are:
+$$
+\Phi = \begin{cases} 
+\phi_i = \max(\phi_{\mathcal{A}_i}, -\phi_{\mathcal{A}_i} \circ \omega^{-1}/\lambda) & \forall i \neq k \\
+\phi_k = \phi_{\mathcal{A}_k} \circ \omega^{-1}/\lambda & 
+\end{cases}
+$$
+where $\omega$ is the deformation map, $\lambda$ is a scaling factor, and $\circ$ denotes composition [S1]. This allows for warping specific materials within a composite object.
+
+## Operating characteristics
+*   **Time Complexity:** $O(N)$ per evaluation point, where $N$ is the number of phases. The operation involves a constant number of arithmetic operations per phase.
+*   **Memory Complexity:** $O(N \cdot V)$, where $V$ is the number of voxels or evaluation points, as all phase fields must be stored or recomputed.
+*   **Strengths:** Allows for complex material editing without reconstructing the geometry. Efficient for interactive editing of multiphase models.
+*   **Limitations:** The resulting distance field may not be a perfect SDF if the region $\mathcal{S}$ is not convex or if the phase change creates topological inconsistencies. The distance values for phase $k$ are clamped, which may affect subsequent smoothing or offsetting operations.
+
+## Background
+The Local Phase Change operator was introduced in the context of the PhaseTree model for multiphase Signed Distance Fields [S1]. It is part of a suite of smooth-Boolean operators designed to handle complex multiphase objects in computer graphics and geometric modeling. The operator enables the manipulation of material identities in implicit surfaces, extending the capabilities of traditional Boolean operations to multiphase contexts.
+
+## Sources
+[S1] The PhaseTree: Multiphase Signed Distance Fields, https://doi.org/10.1145/3811379, fetched 2026-10-26

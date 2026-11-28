@@ -1,0 +1,227 @@
+# TetraHashGridEncode
+
+Also called: Tetrahedral Hash Grid Encoding
+
+## Overview
+TetraHashGridEncode is a differentiable hash grid encoding method for 3D coordinates that utilizes tetrahedral decomposition for interpolation, implemented via CUDA extensions for forward and backward passes [S1, unofficial]. It builds on [HashGrid Encoding](3866-hashgrid-encoding.md) by replacing standard trilinear interpolation within hash-grid cells with barycentric interpolation over a fixed tetrahedral decomposition [S1, unofficial].
+
+## How it works
+**Inputs and Outputs:**
+- **Input:** A tensor of input coordinates `input_coords` of shape $(N, 3)$, where $N$ is the number of points [S1, unofficial].
+- **Output:** A tensor of encoded features `output_features` of shape $(N, L \times F)$, where $L$ is the number of resolution levels and $F$ is the number of features per level per hash entry [S1, unofficial].
+
+**Data Structures:**
+The method relies on several fixed buffers and a learnable feature table [S1, unofficial]. All buffers are stored on the device (GPU) [S1, unofficial].
+
+1.  **Feature Table (`feature_table`):**
+    -   Shape: `(total_features,)`, where `total_features = num_levels * table_size * num_features_per_level`.
+    -   Type: `torch.float32`.
+    -   Initialization: Uniformly in $[-10^{-4}, 10^{-4}]$ [S1, unofficial].
+    -   This is the only learnable parameter (`nn.Parameter`) [S1, unofficial].
+
+2.  **Cube Vertices (`cube_vertices`):**
+    -   Shape: `(8, 3)`.
+    -   Type: `torch.int32`.
+    -   Values: `[[0,0,0],[1,0,0],[0,1,0],[1,1,0],[0,0,1],[1,0,1],[0,1,1],[1,1,1]]` [S1, unofficial].
+
+3.  **Tetrahedra Index (`tetrahedra_index`):**
+    -   Shape: `(6, 4)`.
+    -   Type: `torch.int32`.
+    -   Values: `[[0,1,5,7],[0,1,3,7],[0,2,3,7],[0,2,6,7],[0,4,6,7],[0,4,5,7]]` [S1, unofficial].
+    -   Defines the 6 tetrahedra that decompose the unit cube [S1, unofficial].
+
+4.  **Prime Factors (`prime_factors`):**
+    -   Shape: `(7)`.
+    -   Type: `torch.int64`.
+    -   Values: `[1, 2654435761, 805459861, 3674653429, 2097192037, 1434869437, 2165219737]` [S1, unofficial].
+    -   Used in the spatial hashing function [S1, unofficial].
+
+5.  **Resolutions Tensor (`resolutions_tensor`):**
+    -   Shape: `(num_levels,)`.
+    -   Type: `torch.int32`.
+    -   Contains the resolution values for each of the $L$ levels [S1, unofficial].
+
+6.  **Scalar Buffers:**
+    -   `F_tensor`: Shape `()`, value `num_features_per_level` [S1, unofficial].
+    -   `table_size_tensor`: Shape `()`, value $2^{\text{log2\_hashmap\_size}}$ [S1, unofficial].
+
+**Parameters:**
+-   `input_dim`: Dimensionality of input coordinates. Default: 3 [S1, unofficial].
+-   `num_levels` ($L$): Number of hash grid levels. Default: 4 [S1, unofficial].
+-   `num_features_per_level` ($F$): Number of features per level per hash entry. Default: 2 [S1, unofficial].
+-   `log2_hashmap_size`: Log base 2 of the hash table size. Default: 22. Table size is $2^{22}$ [S1, unofficial].
+-   `resolutions`: List of resolution values for each level. Required. Raises `AssertionError` if None [S1, unofficial].
+
+**Formulas:**
+-   Grid position and fractional part: $g_x = \lfloor x \cdot R_l \rfloor$, $f_x = x \cdot R_l - g_x$ (analogous for $y, z$) [G].
+-   Tetrahedron selection `select_tet_chain(fx, fy, fz)`:
+    ```
+    if fx >= fy:
+        if fy >= fz: return 1
+        elif fx >= fz: return 0
+        else: return 5
+    else:
+        if fx >= fz: return 2
+        elif fy >= fz: return 3
+        else: return 4
+    ```
+-   Barycentric weights `bary_weights(tet, fx, fy, fz)`:
+    ```
+    case 0: w0=1-fx, w1=fx-fz, w2=fz-fy, w3=fy
+    case 1: w0=1-fx, w1=fx-fy, w2=fy-fz, w3=fz
+    case 2: w0=1-fy, w1=fy-fx, w2=fx-fz, w3=fz
+    case 3: w0=1-fy, w1=fy-fz, w2=fz-fx, w3=fx
+    case 4: w0=1-fz, w1=fz-fy, w2=fy-fx, w3=fx
+    case 5: w0=1-fz, w1=fz-fx, w2=fx-fy, w3=fy
+    ```
+-   Hash index `grid_index_or_hash(vx, vy, vz, T, P)`:
+    $h = (v_x \cdot P_1) \oplus (v_y \cdot P_2) \oplus (v_z \cdot P_3)$ [G]
+    If $T$ is a power of two: $idx = h \ \& \ (T - 1)$
+    Else: $idx = h \ \% \ T$ [S1, unofficial].
+
+**Algorithm Steps:**
+The encoding is performed in parallel for $N$ points across $L$ levels [S1, unofficial]. The kernel processes indices $idx = 0 \dots N \times L - 1$ [S1, unofficial].
+
+1.  **Index Decomposition:**
+    For each thread index $idx$:
+    -   Point index: $p = \lfloor idx / L \rfloor$ [S1, unofficial].
+    -   Level index: $level = idx \pmod L$ [S1, unofficial].
+    -   Retrieve coordinates: $x = \text{input\_coords}[p \times 3 + 0]$, $y = \text{input\_coords}[p \times 3 + 1]$, $z = \text{input\_coords}[p \times 3 + 2]$ [S1, unofficial].
+    -   Retrieve resolution: $R_l = \text{resolutions}[level]$ [S1, unofficial].
+
+2.  **Grid Position and Fractional Part:**
+    Compute the integer grid coordinates $(g_x, g_y, g_z)$ and fractional coordinates $(f_x, f_y, f_z)$ within the cell using `pos_fract_resm1` [S1, unofficial].
+
+3.  **Tetrahedron Selection:**
+    Determine which of the 6 tetrahedra contains the point $(f_x, f_y, f_z)$ using the `select_tet_chain` function [S1, unofficial].
+
+4.  **Vertex Coordinates:**
+    Retrieve the 4 vertices of the selected tetrahedron from `tetrahedra_index[tet]` [S1, unofficial]. Let these indices be $v_0, v_1, v_2, v_3$ [S1, unofficial]. Compute the absolute integer grid coordinates for each vertex by adding the cube vertex offsets to the cell origin $(g_x, g_y, g_z)$ [S1, unofficial].
+
+5.  **Hash Indexing:**
+    Compute the hash index for each vertex using `grid_index_or_hash` [S1, unofficial].
+
+6.  **Barycentric Weights:**
+    Compute the barycentric weights $(w_0, w_1, w_2, w_3)$ for the selected tetrahedron based on $(f_x, f_y, f_z)$ [S1, unofficial].
+
+7.  **Feature Interpolation:**
+    For each feature channel $f \in \{0, \dots, F-1\}$, accumulate the weighted features from the feature table [S1, unofficial].
+
+**Backward Pass:**
+The backward pass computes gradients with respect to the input coordinates (`grad_input_coords`) and the feature table (`grad_feature_table`) [S1, unofficial].
+
+1.  **Gradient Accumulation for Feature Table:**
+    For each point and level, retrieve the gradient of the output `grad_output` [S1, unofficial]. For each feature, accumulate gradients using `atomicAdd` to handle concurrent writes [S1, unofficial].
+
+2.  **Gradient for Input Coordinates:**
+    The gradient with respect to the input coordinates is computed using the chain rule through the barycentric weights [S1, unofficial]. The source code calls `tetra_hash_grid_Jx_times_vec_cuda` which implements the Jacobian-vector product [S1, unofficial]. The Jacobian matrix $J$ for a specific tetrahedron is derived from the derivatives of the barycentric weights with respect to $f_x, f_y, f_z$, scaled by the resolution $R_l$ [S1, unofficial]. The gradient matrix $G$ for each vertex of the tetrahedron is precomputed in `bary_grad_mat` [S1, unofficial]. The gradient flows back through the hash indices and the feature table gradients [S1, unofficial].
+
+3.  **Second-Order Backward:**
+    For second-order gradients required by Eikonal loss, the method calls `tetra_hash_grid_second_order_dOmega_cuda` [S1, unofficial]. This computes the Hessian-vector product or similar second-order derivatives [S1, unofficial]. If the kernel is not available, it raises a `RuntimeError` [S1, unofficial].
+
+**Pseudocode:**
+
+> **Unverified code.** The code below did not pass a test run against a reference implementation, or no test fits it, so it may contain errors.
+
+```python
+import torch
+import math
+
+def select_tet_chain(fx, fy, fz):
+    if fx >= fy:
+        if fy >= fz: return 1
+        elif fx >= fz: return 0
+        else: return 5
+    else:
+        if fx >= fz: return 2
+        elif fy >= fz: return 3
+        else: return 4
+
+def bary_weights(tet, fx, fy, fz):
+    if tet == 0: return 1-fx, fx-fz, fz-fy, fy
+    if tet == 1: return 1-fx, fx-fy, fy-fz, fz
+    if tet == 2: return 1-fy, fy-fx, fx-fz, fz
+    if tet == 3: return 1-fy, fy-fz, fz-fx, fx
+    if tet == 4: return 1-fz, fz-fy, fy-fx, fx
+    return 1-fz, fz-fx, fx-fy, fy
+
+def grid_index_or_hash(vx, vy, vz, table_size, prime_factors):
+    h = (vx * prime_factors[1]) ^ (vy * prime_factors[2]) ^ (vz * prime_factors[3])
+    if (table_size & (table_size - 1)) == 0:
+        return h & (table_size - 1)
+    return h % table_size
+
+def tetra_hash_grid_encode_forward(input_coords, feature_table, resolutions, table_size, prime_factors, cube_vertices, tetrahedra_index, num_levels, num_features_per_level):
+    N = input_coords.shape[0]
+    L = num_levels
+    F = num_features_per_level
+    output_features = torch.zeros(N, L * F, dtype=torch.float32)
+    
+    for p in range(N):
+        x, y, z = input_coords[p]
+        for level in range(L):
+            res = resolutions[level]
+            gx = int(math.floor(x * res))
+            fx = x * res - gx
+            gy = int(math.floor(y * res))
+            fy = y * res - gy
+            gz = int(math.floor(z * res))
+            fz = z * res - gz
+            
+            tet = select_tet_chain(fx, fy, fz)
+            v_indices = tetrahedra_index[tet]
+            
+            vertex_coords = []
+            for v_idx in v_indices:
+                vx = gx + cube_vertices[v_idx][0]
+                vy = gy + cube_vertices[v_idx][1]
+                vz = gz + cube_vertices[v_idx][2]
+                vertex_coords.append((vx, vy, vz))
+            
+            hash_indices = [grid_index_or_hash(vx, vy, vz, table_size, prime_factors) for vx, vy, vz in vertex_coords]
+            weights = bary_weights(tet, fx, fy, fz)
+            
+            level_offset = level * table_size * F
+            out_offset = p * L * F + level * F
+            
+            for f in range(F):
+                acc = 0.0
+                for k in range(4):
+                    acc += weights[k] * feature_table[level_offset + hash_indices[k] * F + f]
+                output_features[p, out_offset + f] = acc
+    return output_features
+```
+
+## Subtopics
+
+### Multi-resolution Hash Encoding
+Not given in the sources.
+
+### Dense Grid Encoding
+Not given in the sources.
+
+### ACORN
+Not given in the sources.
+
+### RHINO
+Not given in the sources.
+
+### HollowNeRF Saliency Grid Weighting
+Not given in the sources.
+
+### Progressive Training
+Not given in the sources.
+
+## Operating characteristics
+-   **Time Complexity:** Not given in the sources.
+-   **Memory Complexity:** The memory usage is dominated by the feature table, which is $O(L \times \text{table\_size} \times F)$ [S1, unofficial].
+-   **Strengths:** Differentiable, efficient memory usage via hashing, supports multi-resolution, compatible with SDF-based losses (e.g., Eikonal loss) via second-order backward passes [S1, unofficial].
+-   **Limitations:** Requires CUDA extensions, which may not be available on all systems. Hash collisions can occur, though the large table size mitigates this. The fixed tetrahedral decomposition may not adapt to scene complexity as well as octree-based methods [S1, unofficial].
+-   **When to use:** When training NeRFs or SDFs on consumer GPUs with limited memory, and when tetrahedral interpolation is desired for its gradient properties.
+-   **When not to use:** When CPU-only inference is required, or when adaptive resolution is critical for the scene structure.
+
+## Background
+TetraHashGridEncode was introduced as part of the TetraSDF project by NAVER Corp. It is designed to provide a differentiable encoding method that combines the efficiency of hash grids with the geometric properties of tetrahedral decomposition. The method is implemented via CUDA extensions for both forward and backward passes, including support for second-order gradients required by Eikonal losses [S1, unofficial].
+
+## Sources
+[S1] naver-ai/TetraSDF, https://github.com/naver-ai/TetraSDF, fetched 2026-10-27 (unofficial)

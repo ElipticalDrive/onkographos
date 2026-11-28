@@ -1,0 +1,157 @@
+--- v008.md
++++ v009.md
+@@ -3,67 +3,82 @@
+ 
+ ## Overview
+-Network architectures in NeRF define the function approximators (typically MLPs) and data structures used to map 3D spatial coordinates and viewing directions to volume density and color. While the original NeRF [S1] uses a single MLP for both properties, subsequent architectures modify this structure to address specific challenges such as inference speed, memory footprint, dynamic scenes, or object manipulation. These variants set themselves apart by altering the input/output mappings, introducing hierarchical or modular components, or replacing dense grids with sparse/latent representations.
++This article details specific modifications to the standard Multi-Layer Perceptron (MLP) architecture used in Neural Radiance Fields (NeRF) to address constraints such as inference speed, memory footprint, dynamic scene representation, and object manipulation. While the standard NeRF architecture [Parent](11313-model-architecture-modifications.md) employs two MLPs ($\Phi_{pos}$ and $\Phi_{shade}$) to map spatial and directional inputs to density and color, these variants introduce structural changes including multi-input multi-output (MIMO) parallel processing, sparse latent spaces, feature distillation, and residual modeling. These methods aim to improve training convergence, reduce parameter counts, or enable specific capabilities like continual learning and transparent object handling, distinguishing them from the baseline dense MLP approach.
+ 
+ ## How it works
+-The core task of a NeRF network architecture is to learn a continuous volumetric scene representation $F_\Theta: (\mathbf{x}, \mathbf{d}) \rightarrow (\sigma, \mathbf{c})$, where $\mathbf{x} \in \mathbb{R}^3$ is the spatial position, $\mathbf{d} \in \mathbb{R}^3$ is the viewing direction, $\sigma$ is the volume density, and $\mathbf{c} \in \mathbb{R}^3$ is the view-dependent color. The rendering process integrates these outputs along rays using standard volume rendering equations.
+ 
+-### Standard NeRF Architecture
++### Standard NeRF Baseline
+ The baseline architecture [S1] employs two MLPs:
+-1.  **Position MLP ($\Phi_{pos}$)**: Takes $\mathbf{x}$ and positional encoding $\gamma(\mathbf{x})$ to produce a feature vector $\mathbf{h}$.
+-2.  **Shading MLP ($\Phi_{shade}$)**: Takes $\mathbf{h}$ and directional encoding $\gamma(\mathbf{d})$ to predict $\sigma$ and $\mathbf{c}$.
++1.  **Position MLP ($\Phi_{pos}$)**: Takes spatial position $\mathbf{x}$ and positional encoding $\gamma(\mathbf{x})$ to produce a feature vector $\mathbf{h}$.
++2.  **Shading MLP ($\Phi_{shade}$)**: Takes $\mathbf{h}$ and directional encoding $\gamma(\mathbf{d})$ to predict volume density $\sigma$ and view-dependent color $\mathbf{c}$.
+ 
+-### Specific Architectural Modifications
+-Different methods modify this baseline as follows:
++### MobileNeRF Architecture
++MobileNeRF [S1] modifies the standard architecture to exploit the polygon rasterization pipeline for efficient rendering on mobile devices. It replaces the continuous volumetric integration with a discrete, texture-based approach.
+ 
+-#### MobileNeRF (Texture-Based)
+-MobileNeRF [S1] replaces the density/color prediction MLPs with a texture-based approach to leverage mobile GPU rasterization pipelines.
+-*   **Structure**: It uses two large MLPs, $A$ and $F$, and one small MLP, $H$.
+-*   **MLP A and F**: These are identical to the NeRF MLPs but with hidden layer sizes increased from 256 to 384 neurons [S1]. They are used exclusively during training to generate features for texture storage and are not used during inference [S1].
+-*   **MLP H**: A small network with two hidden layers, each containing 16 neurons, identical to the one used in SNeRG [S1].
+-*   **Feature Storage**: The architecture stores 8-dimensional features in texture images. To accommodate hardware constraints (power-of-2 size, max $4096 \times 4096$), features are split across two PNG images [S1]. The alpha channel is squeezed into the first feature channel: if the first feature channel is non-zero, alpha is 1; otherwise, it is 0 [S1].
++**Data Structures:**
++*   **Texture Images**: Two PNG images are used to store 8-dimensional feature vectors. Each PNG has 4 channels; the two images provide 8 channels total.
++*   **Alpha Channel Encoding**: The binary alpha (opacity) channel is squeezed into the first feature channel. If the first feature channel is non-zero, alpha is 1; if zero, alpha is 0. This avoids storing a separate alpha texture.
++*   **Texture Constraints**: Texture sizes must be powers of 2 and at most $4096 \times 4096$. Larger feature sets are split across multiple texture images.
+ 
+-#### DM-NeRF (Point-Based Decomposition)
+-DM-NeRF [S2, unofficial] adapts Point-NeRF for scene geometry decomposition and manipulation.
+-*   **Data Structure**: Uses a neural point cloud instead of a dense grid or single MLP.
+-*   **Training Input**: Uses ground truth dense point clouds (e.g., 400 million points per scene) rather than MVSNet-generated points to ensure high-quality scene-level representation [S2, unofficial].
+-*   **Inference**: Feeds spatial locations of all neural points into a DM-NeRF module to infer corresponding object codes [S2, unofficial].
+-*   **Manipulation**: Transforms neural points based on predefined manipulation information and renders the new cloud using point-based volume rendering [S2, unofficial].
++**Network Components:**
++*   **MLP A and F**: These MLPs are designed using the standard NeRF architecture but with hidden layer sizes increased from 256 to 384. They are used only during training to generate the texture features and are not used during inference.
++*   **MLP H**: A small MLP identical to the one used in SNeRG, consisting of two hidden layers, each with 16 neurons.
+ 
+-#### Pyramid NeRF
+-Pyramid NeRF [S3] accelerates training and inference through frequency optimization and network segmentation.
+-*   **Strategy**: Employs a "low-frequency-first, high-frequency-second" approach [S3].
+-*   **Network Structure**: Substitutes large MLPs with thousands of smaller MLPs via progressive segmentation [S3].
+-*   **Sampling**: Introduces depth-aware sampling to enhance rendering quality and convergence speed [S3].
++**Steps:**
++1.  **Training**: Use MLPs A and F (384 hidden units) to predict features for spatial locations. Encode these features into the two PNG texture images.
++2.  **Inference**: Use the rasterization pipeline to sample from the texture images based on the projected geometry. Use MLP H to process the sampled features for final rendering.
+ 
+-#### Residual-NeRF
+-Residual-NeRF [S4] is designed for scenes with transparent objects by leveraging a static background prior.
+-*   **Structure**: Consists of a Background NeRF ($\Phi_{bg}$) and a Residual NeRF ($\Phi_{res}$).
+-*   **Background NeRF**: Learns the static scene without transparent objects.
+-*   **Residual NeRF**: Learns the difference caused by transparent objects.
+-*   **Mixnet**: A network that merges the outputs of $\Phi_{bg}$ and $\Phi_{res}$.
+-*   **Residual-NeRF-S (Ablation)**: An ablation variant [S4] that merges outputs by simply adding them before activation, using a sigmoid $S(x) = \frac{1}{1+e^{-x}}$:
+-    $$ c'_{bg+res} = S(c'_{bg} + c'_{res}) $$
+-    $$ \hat{C}(\mathbf{r}) = \sum_{i=1}^{N} T_i (1 - \exp(-(\sigma_{bg} + \sigma_{res})_i \delta_i)) (c_{bg+res})_i $$
+-    where $(c'_{bg}, \sigma_{bg}) = \Phi_{bg}(\mathbf{x}, \mathbf{d})$ and $(c'_{res}, \sigma_{res}) = \Phi_{res}(\mathbf{x}, \mathbf{d})$ [S4]. This variant produces worse depth and view reconstruction for partially opaque objects compared to the Mixnet version [S4].
++### DM-NeRF (Point-NeRF Adaptation)
++DM-NeRF [S2, unofficial] adapts Point-NeRF for 3D scene geometry decomposition and manipulation. It uses a neural point cloud representation rather than a dense voxel or grid.
+ 
+-#### MIMO-DONeRF
+-MIMO-DONeRF [S1] applies Multi-Input Multi-Output (MIMO) concepts to the DONeRF architecture.
+-*   **Structure**: Modifies the shading network to accept $N_p$ spatial inputs and view directions simultaneously.
+-*   **Output**: Produces multiple color and density outputs per forward pass.
+-*   **Mechanism**: Processes samples in parallel rather than sequentially, allowing the network to accumulate neighbor information [S1].
++**Inputs:**
++*   Spatial locations of neural points.
++*   Object codes inferred from a DM-NeRF model.
+ 
+-#### Residual-NeRF (Mixnet Details)
+-The standard Residual-NeRF [S4] uses a Mixnet to combine the background and residual predictions. The background NeRF is trained first on static scenes. Then, the residual NeRF and Mixnet are trained jointly to handle transparent objects, improving depth perception and training speed [S4].
++**Steps:**
++1.  **Training Data Generation**: Use ground truth dense point clouds (e.g., 400 million points per scene) instead of MVSNet-generated points to create the neural point cloud, ensuring high-quality scene-level representation [S2, unofficial].
++2.  **Inference - Object Code Inference**: Feed the spatial locations of all neural points into the DM-NeRF model to infer corresponding object codes [S2, unofficial].
++3.  **Manipulation**: Identify points to be edited based on manipulation information. Transform the corresponding neural points to desired new locations [S2, unofficial].
++4.  **Rendering**: Render the image with object manipulation from a given view using point-based volume rendering in Point-NeRF with the modified neural point cloud [S2, unofficial].
++
++### Pyramid NeRF
++Pyramid NeRF [S3] accelerates training and inference through an image pyramid and frequency optimization strategy.
++
++**Steps:**
++1.  **Frequency Optimization**: Utilize a "low-frequency-first, high-frequency-second" approach.
++2.  **Network Segmentation**: Substitute large MLPs with thousands of smaller MLPs via progressive segmentation.
++3.  **Depth-Aware Sampling**: Introduce a sampling approach aware of depth to enhance rendering quality and hasten training convergence [S3].
++
++### Residual-NeRF-S
++Residual-NeRF-S [S4] is an ablation variant of Residual-NeRF where background and residual NeRFs are merged by simply adding their outputs before activation, instead of using a Mixnet.
++
++**Formulas:**
++The rendered color $\hat{\mathbf{C}}(\mathbf{r})$ along a ray $\mathbf{r}$ is computed as:
++$$
++\hat{\mathbf{C}}(\mathbf{r}) = \sum_{i=1}^{N} T_i (1 - \exp(-(\sigma_{bg} + \sigma_{res})_i \delta_i)) (\mathbf{c}_{bg} + \mathbf{c}_{res})_i
++$$
++where:
++*   $T_i = \exp(-\sum_{j=1}^{i-1} (\sigma_{bg} + \sigma_{res})_j \delta_j)$ is the transmittance.
++*   $\delta_i$ is the distance between sample points.
++*   $(\mathbf{c}'_{bg}, \sigma_{bg}) = \Phi_{bg}(h(\mathbf{x}, \theta, \phi))$ are the background outputs.
++*   $(\mathbf{c}'_{res}, \sigma_{res}) = \Phi_{res}(h(\mathbf{x}, \theta, \phi))$ are the residual outputs.
++*   The combined color $\mathbf{c}_{bg+res}$ is calculated as:
++    $$
++    \mathbf{c}_{bg+res} = S(\mathbf{c}'_{bg} + \mathbf{c}'_{res})
++    $$
++    where $S(x) = \frac{1}{1 + e^{-x}}$ is the sigmoid activation function [S4].
++
++**Comparison:**
++Residual-NeRF-S produces worse depth and view reconstruction compared to Residual-NeRF with Mixnet, especially for partially opaque objects [S4].
+ 
+ ## Subtopics
+ 
+ ### [MIMO-DONeRF](16217-mimo-donerf.md)
+-MIMO-DONeRF is a method that applies the Multi-Input Multi-Output (MIMO) neural rendering concept to the DONeRF architecture. It modifies the shading network to accept multiple spatial inputs and view directions simultaneously, producing multiple color and density outputs per forward pass. This approach improves inference speed compared to increasing the number of samples in standard DONeRF, while maintaining or improving image quality by allowing the network to accumulate neighbor information through grouped samples. It differs from standard DONeRF by processing $N_p$ samples in parallel rather than sequentially, and from MIMO-NeRF by being specifically adapted to the two-network structure (depth oracle and shading) of DONeRF.
++MIMO-DONeRF applies the Multi-Input Multi-Output (MIMO) neural rendering concept to the DONeRF architecture. It modifies the shading network to accept multiple spatial inputs and view directions simultaneously, producing multiple color and density outputs per forward pass. This improves inference speed compared to increasing the number of samples in standard DONeRF, while maintaining or improving image quality by allowing the network to accumulate neighbor information through grouped samples. It differs from standard DONeRF by processing $N_p$ samples in parallel rather than sequentially, and from MIMO-NeRF by being specifically adapted to the two-network structure (depth oracle and shading) of DONeRF.
+ 
+ ### [Sparse Latent Space for 4D Novel View Synthesis (SLS4D)](18112-sparse-latent-space-for-4d-novel-view-synthesis-sls4d.md)
+-SLS4D is a method for 4D novel-view synthesis that represents dynamic radiance fields using a learnable sparse latent space, reducing network parameters compared to dense grid discretizations while maintaining high-frequency detail via attention-based interpolation. It differs from dense grid methods (like TiNeuVox) by avoiding the $O(N^3TF)$ space complexity of 4D grids, and from per-image latent code methods by offering better generalization across time through continuous temporal interpolation.
++SLS4D represents dynamic radiance fields using a learnable sparse latent space, reducing network parameters compared to dense grid discretizations while maintaining high-frequency detail via attention-based interpolation. It differs from dense grid methods (like TiNeuVox) by avoiding the $O(N^3TF)$ space complexity of 4D grids, and from per-image latent code methods by offering better generalization across time through continuous temporal interpolation.
+ 
+ ### [Neural Feature Fusion Fields (N3F)](18114-neural-feature-fusion-fields-n3f.md)
+-Neural Feature Fusion Fields (N3F) is a method that distills dense 2D image features from a pre-trained teacher network into a 3D neural field (student) via differentiable volumetric rendering, enabling 3D-aware feature representation. Unlike Semantic NeRF or Panoptic NeRF which fuse discrete semantic labels, N3F fuses continuous dense feature vectors, allowing for open-world applications without manual labels. It differs from standard feature distillation because the student operates in 3D world space (ensuring spatial consistency) while the teacher operates in 2D image space.
++Neural Feature Fusion Fields (N3F) distills dense 2D image features from a pre-trained teacher network into a 3D neural field (student) via differentiable volumetric rendering, enabling 3D-aware feature representation. Unlike Semantic NeRF or Panoptic NeRF which fuse discrete semantic labels, N3F fuses continuous dense feature vectors, allowing for open-world applications without manual labels. It differs from standard feature distillation because the student operates in 3D world space (ensuring spatial consistency) while the teacher operates in 2D image space.
+ 
+ ### [CLNeRF Architecture with Embeddings](18159-clnerf-architecture-with-embeddings.md)
+@@ -71,15 +86,20 @@
+ 
+ ### Point-NeRF Adaptation for Object Manipulation
+-This variant adapts Point-NeRF for object manipulation tasks [S2, unofficial]. During training, it uses ground truth dense point clouds (e.g., 400 million points per scene) instead of MVSNet-generated points to generate the neural point cloud [S2, unofficial]. During inference, it feeds spatial locations of all neural points into DM-NeRF to infer corresponding object codes [S2, unofficial]. It then transforms specific neural points based on manipulation instructions and renders the modified cloud using point-based volume rendering [S2, unofficial].
++This variant, detailed under DM-NeRF [S2, unofficial], adapts Point-NeRF for object manipulation by using ground truth dense point clouds during training and inferring object codes for neural points during inference. It enables geometry decomposition and manipulation by transforming neural points based on manipulation information and rendering via point-based volume rendering.
++
++### Pyramid NeRF
++Pyramid NeRF [S3] accomplishes rapid NeRF training and inference through the application of an image pyramid and a strategy based on frequency optimization. It utilizes a "low-frequency-first, high-frequency-second" approach, substitutes large MLPs with thousands of smaller ones via progressive segmentation, and introduces depth-aware sampling. It enhances training speed by 15x and inference speed by 805x relative to the original NeRF [S3].
++
++### Residual-NeRF-S
++Residual-NeRF-S [S4] is an ablation variant of Residual-NeRF where background and residual NeRFs are merged by simply adding their outputs before activation, instead of using a Mixnet. It uses a sigmoid function to combine the color outputs. It produces worse depth and view reconstruction compared to Residual-NeRF with Mixnet, especially for partially opaque objects [S4].
+ 
+ ## Operating characteristics
+-*   **MobileNeRF**: Optimized for mobile inference by removing heavy MLPs ($A$ and $F$) from the inference path, replacing them with texture lookups [S1]. Training is slower due to larger MLPs (384 hidden units) [S1].
+-*   **Pyramid NeRF**: Enhances training speed by 15x and inference speed by 805x relative to the original NeRF [S3]. It improves structural and perceptual resemblance [S3].
+-*   **Residual-NeRF**: Improves depth perception in static scenes with transparent objects and speeds up training by leveraging a pre-trained background model [S4]. The ablation variant (Residual-NeRF-S) performs worse in depth and view reconstruction for partially opaque objects [S4].
+-*   **MIMO-DONeRF**: Improves inference speed compared to standard DONeRF by processing samples in parallel [S1].
+-*   **DM-NeRF**: Relies on high-quality point clouds; using MVSNet points may degrade quality, hence the use of ground truth points during training [S2, unofficial].
++*   **MobileNeRF**: Optimized for mobile hardware constraints (texture size limits, power of 2 dimensions). Training time is increased due to larger MLPs (384 hidden units), but inference is accelerated by leveraging rasterization pipelines [S1].
++*   **Pyramid NeRF**: Offers significant speedups: 15x faster training and 805x faster inference compared to original NeRF [S3].
++*   **Residual-NeRF-S**: Simpler architecture than Residual-NeRF with Mixnet, but results in inferior depth and view reconstruction quality [S4].
++*   **DM-NeRF**: Requires high-quality input data (ground truth dense point clouds) for training to ensure quality, which may be difficult to obtain for real-world scenes [S2, unofficial].
+ 
+ ## Background
+-NeRF architectures have evolved from the single-MLP baseline [S1] to address limitations in training speed, inference latency, memory usage, and specific scene types (dynamic, transparent, manipulable). Key developments include texture-based approaches for mobile devices [S1], frequency-optimized pyramid structures [S3], residual modeling for transparency [S4], and point-based decompositions for manipulation [S2, unofficial].
++NeRF architectures have evolved from the original two-MLP design [Parent](11313-model-architecture-modifications.md) to address specific limitations in speed, memory, and functionality. MobileNeRF [S1] was introduced to enable neural field rendering on mobile devices by exploiting rasterization. Pyramid NeRF [S3] was proposed to accelerate training and inference through frequency optimization and network segmentation. Residual-NeRF [S4] was developed to improve depth perception and training speed for scenes with transparent objects. DM-NeRF [S2, unofficial] extends Point-NeRF for scene decomposition and manipulation.
+ 
+ ## Sources

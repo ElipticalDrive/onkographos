@@ -1,0 +1,157 @@
+# BRDF-SMAE
+
+Also called: Smooth Material Auto-Encoder
+
+## Overview
+BRDF-SMAE is a method for spatially varying BRDF decomposition in neural volumes, where a single BRDF embedding is stored at each point to enable spatially varying material representation [S1, unofficial]. It differs from standard neural volume rendering by explicitly encoding material properties via an auto-encoder structure rather than implicit color or density fields, allowing for disentangled material analysis [S1, unofficial]. It builds on [BRDF Decoder Strategies](8147-brdf-decoder-strategies.md).
+
+## How it works
+**Inputs and Outputs:**
+- Input: A point $\mathbf{x}$ in the neural volume.
+- Output: A BRDF parameter set (e.g., diffuse albedo $a$ and roughness $r$) encoded in a latent space and decoded [S1, unofficial].
+
+**Data Structures:**
+- **Neural Volume:** Stores a BRDF embedding (latent code) at each 3D point [S1, unofficial].
+- **Encoder:** Multi-Layer Perceptron (MLP) with 3 layers, 32 output features [S1, unofficial].
+- **Decoder:** MLP with 3 layers, 32 output features [S1, unofficial].
+- **Discriminator:** MLP with 3 layers, 32 output features [S1, unofficial] (used for adversarial training of the latent space smoothness) [S1, unofficial].
+
+**Parameters:**
+- Loss weights: $\lambda_1 = 0.01$, $\lambda_2 = 0.01$, $\lambda_3 = 0.001$ [S1, unofficial].
+- Reconstruction loss: Mean Absolute Error (MAE) on BRDF parameters [S1, unofficial].
+- Training steps: 1,500,000 [S1, unofficial].
+- Batch size: 256 [S1, unofficial].
+- Optimizer: Adam, learning rate $1 \times 10^{-4}$ [S1, unofficial].
+- Latent space interpolation: 64 steps [S1, unofficial].
+
+**Steps:**
+1. **Encode:** For each point $\mathbf{x}$ in the neural volume, pass $\mathbf{x}$ through the Encoder MLP to obtain a latent code $\mathbf{z}$ [S1, unofficial].
+2. **Decode:** Pass $\mathbf{z}$ through the Decoder MLP to reconstruct the BRDF parameters (e.g., albedo and roughness) [S1, unofficial].
+3. **Discriminate:** Pass the latent code $\mathbf{z}$ through the Discriminator MLP to distinguish between real material embeddings and generated ones [S1, unofficial].
+4. **Loss Calculation:**
+   - Compute reconstruction loss using MAE between predicted and target BRDF parameters [S1, unofficial].
+   - Compute adversarial loss using the Discriminator output [S1, unofficial].
+   - Compute smoothness loss to ensure latent space continuity [S1, unofficial].
+   - Total loss: $\mathcal{L} = \lambda_1 \mathcal{L}_{rec} + \lambda_2 \mathcal{L}_{adv} + \lambda_3 \mathcal{L}_{smooth}$ [S1, unofficial].
+5. **Optimize:** Update Encoder, Decoder, and Discriminator weights using Adam optimizer [S1, unofficial].
+6. **Interpolation:** To ensure smoothness, interpolate between latent codes $\mathbf{z}_1$ and $\mathbf{z}_2$ using 64 steps and verify decoder output continuity [S1, unofficial].
+
+**Edge Cases and Pitfalls:**
+- High dynamic range lighting may require specific care to ensure smooth training, as noted in related Light-SMAE variants [S1, unofficial].
+- Not given in the sources.
+
+**Pseudocode:**
+> **Unverified code.** The code below did not pass a test run against a reference implementation, or no test fits it, so it may contain errors.
+
+```python
+import torch
+import torch.nn as nn
+import torch.optim as optim
+
+class MLP(nn.Module):
+    def __init__(self, input_dim, hidden_dim=32, num_layers=3):
+        super(MLP, self).__init__()
+        layers = []
+        for _ in range(num_layers):
+            layers.append(nn.Linear(input_dim, hidden_dim))
+            layers.append(nn.ReLU())
+            input_dim = hidden_dim
+        self.network = nn.Sequential(*layers)
+
+    def forward(self, x):
+        return self.network(x)
+
+class BRDF_SMAE:
+    def __init__(self, input_dim=3, latent_dim=32):
+        self.encoder = MLP(input_dim, latent_dim, 3)
+        self.decoder = MLP(latent_dim, 2, 3)  # Output: albedo, roughness
+        self.discriminator = MLP(latent_dim, 1, 3)  # Output: real/fake score
+        self.optimizer = optim.Adam(list(self.encoder.parameters()) + 
+                                    list(self.decoder.parameters()) + 
+                                    list(self.discriminator.parameters()), lr=1e-4)
+        self.lambda1 = 0.01
+        self.lambda2 = 0.01
+        self.lambda3 = 0.001
+        self.interpolation_steps = 64
+
+    def encode(self, x):
+        return self.encoder(x)
+
+    def decode(self, z):
+        return self.decoder(z)
+
+    def discriminate(self, z):
+        return self.discriminator(z)
+
+    def compute_reconstruction_loss(self, pred, target):
+        return torch.mean(torch.abs(pred - target))
+
+    def compute_adversarial_loss(self, pred_real, pred_fake):
+        # Simplified GAN loss
+        loss_real = torch.mean(torch.square(pred_real - 1.0))
+        loss_fake = torch.mean(torch.square(pred_fake))
+        return loss_real + loss_fake
+
+    def compute_smoothness_loss(self, z1, z2):
+        # Interpolate between z1 and z2
+        losses = []
+        for t in torch.linspace(0, 1, self.interpolation_steps):
+            z_interp = (1 - t) * z1 + t * z2
+            pred_interp = self.decode(z_interp)
+            # Check smoothness by comparing adjacent interpolated points
+            if t > 0:
+                z_prev = (1 - (t - 1/self.interpolation_steps)) * z1 + (t - 1/self.interpolation_steps) * z2
+                pred_prev = self.decode(z_prev)
+                losses.append(torch.mean(torch.abs(pred_interp - pred_prev)))
+        return torch.mean(torch.stack(losses))
+
+    def train_step(self, x_batch, target_brdf_batch):
+        self.optimizer.zero_grad()
+        
+        # Encode
+        z_batch = self.encode(x_batch)
+        
+        # Decode
+        pred_brdf = self.decode(z_batch)
+        
+        # Discriminate
+        disc_pred_real = self.discriminate(z_batch)
+        disc_pred_fake = self.discriminate(z_batch.detach()) # For generator loss
+        
+        # Losses
+        rec_loss = self.compute_reconstruction_loss(pred_brdf, target_brdf_batch)
+        adv_loss = self.compute_adversarial_loss(disc_pred_real, disc_pred_fake)
+        
+        # Smoothness loss using random pairs from batch
+        z1, z2 = z_batch[0], z_batch[1]
+        smooth_loss = self.compute_smoothness_loss(z1, z2)
+        
+        total_loss = self.lambda1 * rec_loss + self.lambda2 * adv_loss + self.lambda3 * smooth_loss
+        
+        total_loss.backward()
+        self.optimizer.step()
+        
+        return total_loss.item()
+```
+
+## Subtopics
+
+### SVBRDF with Sparse Latent Space
+Represents Spatially Varying BRDF (SVBRDF) using an encoder-decoder network with a sparse latent space to impose a prior that real-world objects consist of limited types of materials, alleviating noisy roughness caused by lack of supervision [S2]. It transforms input surface point $\mathbf{x}$ to latent code $\mathbf{z}$, then decodes $\mathbf{z}$ to diffuse albedo and roughness [S2]. It uses a sparsity constraint loss $\mathcal{L}_{KL} = \sum_{j=1}^n KL(\rho || \hat{\rho}_j)$ where $\rho=0.05$ and $\hat{\rho}_j$ is the average of the $j$-th channel of $\mathbf{z}$ over the batch [S2]. It also applies a smooth loss $\mathcal{L}_s = || D(\mathbf{z}) - D(\mathbf{z} + \boldsymbol{\xi}) ||_1$ where $\boldsymbol{\xi}$ is noise from $\mathcal{N}(0, 0.01^2)$ [S2]. The decoder is a 2-layer network with 32-dimensional input and 128 hidden units [S2]. It uses Simplified Disney BRDF with fixed $F_0=0.02$ [S2].
+
+## Operating characteristics
+- **Time Complexity:** Not given in the sources.
+- **Memory Complexity:** Not given in the sources.
+- **Measured Performance:** Training takes approximately 3.5 hours on a single NVIDIA 1080 TI GPU for 1.5 million steps [S1, unofficial].
+- **Scaling:** Not given in the sources.
+- **Strengths:** Enables spatially varying BRDF decomposition; smooth latent space; reduces noisy roughness [S1, unofficial][S2].
+- **Limitations:** Requires significant training time; dependent on dataset quality [S1, unofficial].
+- **When to use:** When spatially varying material decomposition is needed in neural volumes [S1, unofficial].
+- **When not to use:** When computational resources are limited or real-time performance is critical [S1, unofficial].
+
+## Background
+BRDF-SMAE was introduced in the context of Neural Pre-Integrated Lighting for Reflectance Decomposition [S1, unofficial]. It leverages a neural volume to store BRDF embeddings, allowing for spatially varying material representation [S1, unofficial]. The method was trained on the material dataset of Boss et al. [S1, unofficial].
+
+## Sources
+[S1] Neural-PIL: Neural Pre-Integrated Lighting for Reflectance Decomposition, https://doi.org/10.48550/arxiv.2110.14373, fetched 2026-10-26 (unofficial)
+[S2] Modeling Indirect Illumination for Inverse Rendering, https://doi.org/10.1109/cvpr52688.2022.01809, fetched 2026-10-26

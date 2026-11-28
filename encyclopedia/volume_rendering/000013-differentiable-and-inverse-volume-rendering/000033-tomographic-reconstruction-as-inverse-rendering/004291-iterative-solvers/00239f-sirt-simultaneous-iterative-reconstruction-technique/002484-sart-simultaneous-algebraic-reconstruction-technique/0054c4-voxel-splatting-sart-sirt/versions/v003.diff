@@ -1,0 +1,124 @@
+--- v002.md
++++ v003.md
+@@ -29,10 +29,10 @@
+ 1.  **Initialize:** Zero out the Ray-sum Image $R$ and Weights Image $W$ [G].
+ 2.  **Splat Voxels:** For each voxel $v$ in the volume $V$:
+-    a.  Determine the kernel support (the set of detector pixels affected by the voxel) [S1].
++    a.  Determine the kernel support (the spatial extent of the splatting kernel) [S1].
+     b.  For each pixel $i$ in the kernel support:
+         i.  Calculate the geometric weight $w_{v,i}$ using the pre-computed LUT based on the distance between the voxel center and pixel $i$ [S1].
+         ii. Update the Ray-sum Image: $R[i] \leftarrow R[i] + w_{v,i} \cdot V[v]$ [S1].
+         iii. Update the Weights Image: $W[i] \leftarrow W[i] + w_{v,i}$ [S1].
+-    *   *Note:* Data races may occur if multiple voxels update the same pixel $i$ simultaneously in $R$ and $W$ [S1]. Atomic operations or parallel reduction are required to ensure correctness [G].
++    *   *Note:* Data races can occur if two voxels try to update the same pixels at once, either in the ray-sum image or the weights image [S1]. Atomic operations or parallel reduction are required to ensure correctness [G].
+ 
+ #### Correction Image Computation
+@@ -53,5 +53,5 @@
+         ii. Retrieve the weight $w_{v,i}$ from the LUT (same weight used in forward projection) [S1].
+         iii. Accumulate the contribution: $V_{new}[v] \leftarrow V_{new}[v] + w_{v,i} \cdot C[i]$ [S1].
+-    *   *Note:* No data races occur in back-projection because each voxel writes to a unique memory location in the volume buffer [S1].
++    *   *Note:* There are no data races in the back-projection operation because each voxel writes to a unique memory location in the volume buffer [S1].
+ 3.  **Update Volume:** Replace $V$ with $V_{new}$ [G].
+ 
+@@ -71,15 +71,20 @@
+     return support
+ 
+-def voxel_splatting_sart_sirt(volume, projections, alpha, weight_lut, detector_shape, kernel_radius):
++def lookup_weight(voxel_center, pixel_center):
++    """Performs a table lookup for the pre-integrated kernel weight [S1]."""
++    # In practice, this reads from the pre-computed LUT based on geometric distance.
++    return 1.0  # Placeholder for actual LUT read operation [G]
++
++def voxel_splatting_sart_sirt(volume, projections, alpha, detector_shape, kernel_radius):
+     """
+     volume: 3D list (D, H, W) of voxel values
+     projections: list of 2D lists (detector images) in log space
+     alpha: float, relaxation parameter
+-    weight_lut: function(voxel_center, pixel_center) -> float
+     detector_shape: tuple (H_det, W_det)
+     kernel_radius: float, spatial extent of the splatting kernel
+     """
++    D, H, W = len(volume), len(volume[0]), len(volume[0][0])
+     num_views = len(projections)
+-    updated_volume = [[[0.0 for _ in range(volume[0][1])] for _ in range(volume[0][0])] for _ in range(len(volume))]
++    updated_volume = [[[0.0] * W for _ in range(H)] for _ in range(D)]
+     
+     for view_idx in range(num_views):
+@@ -87,7 +92,7 @@
+         weights_image = zeros(detector_shape)
+         
+-        for d in range(len(volume)):
+-            for h in range(len(volume[0])):
+-                for w in range(len(volume[0][0])):
++        for d in range(D):
++            for h in range(H):
++                for w in range(W):
+                     voxel_val = volume[d][h][w]
+                     if voxel_val == 0.0:
+@@ -98,5 +103,5 @@
+                     
+                     for pixel in kernel_support:
+-                        w_val = weight_lut(voxel_center, pixel)
++                        w_val = lookup_weight(voxel_center, pixel)
+                         ray_sum_image[pixel[1]][pixel[0]] += w_val * voxel_val
+                         weights_image[pixel[1]][pixel[0]] += w_val
+@@ -113,20 +118,20 @@
+                     correction_image[i][j] = 0.0
+         
+-        view_contribution = [[[0.0 for _ in range(volume[0][1])] for _ in range(volume[0][0])] for _ in range(len(volume))]
++        view_contribution = [[[0.0] * W for _ in range(H)] for _ in range(D)]
+         
+-        for d in range(len(volume)):
+-            for h in range(len(volume[0])):
+-                for w in range(len(volume[0][0])):
++        for d in range(D):
++            for h in range(H):
++                for w in range(W):
+                     voxel_center = (h, w)
+                     kernel_support = compute_kernel_support(voxel_center, detector_shape, kernel_radius)
+                     
+                     for pixel in kernel_support:
+-                        w_val = weight_lut(voxel_center, pixel)
++                        w_val = lookup_weight(voxel_center, pixel)
+                         c_val = correction_image[pixel[1]][pixel[0]]
+                         view_contribution[d][h][w] += w_val * c_val
+         
+-        for d in range(len(volume)):
+-            for h in range(len(volume[0])):
+-                for w in range(len(volume[0][0])):
++        for d in range(D):
++            for h in range(H):
++                for w in range(W):
+                     updated_volume[d][h][w] += view_contribution[d][h][w]
+         
+@@ -136,23 +141,23 @@
+ ### Parameters
+ *   **$\alpha$ (Relaxation Parameter):** Controls the step size of the update. Not given in the sources.
+-*   **Kernel Support:** The spatial extent of the splatting kernel. This determines how many detector pixels are updated per voxel. It depends on the interpolation kernel used (e.g., linear, cubic) [S1].
++*   **Kernel Support:** The spatial extent of the splatting kernel [S1].
+ *   **Weight Lookup Table (LUT):** Pre-computed weights based on line integrals of radially symmetric filter kernels at different distances [S1].
+ 
+ ### Edge Cases and Pitfalls
+-*   **Data Races:** In forward projection, multiple voxels may update the same detector pixel simultaneously. This requires atomic operations or parallel reduction techniques to avoid race conditions [S1].
++*   **Data Races:** In forward projection, multiple voxels may update the same detector pixel simultaneously [S1].
+ *   **Division by Zero:** If a detector pixel has no contributing voxels ($W[i] = 0$), the correction term calculation must handle this to avoid NaNs [G].
+-*   **Precision:** The use of pre-integrated LUTs introduces approximation errors compared to exact ray casting, but linear interpolation yields results "practically the same" as ray-based methods [S1].
++*   **Precision:** The use of pre-integrated LUTs introduces approximation errors compared to exact ray casting, but linear interpolation yields results practically the same as ray-based methods [S1].
+ 
+ ## Subtopics
+ 
+ ### Ray Casting SART/SIRT
+-An alternative implementation of SART/SIRT proximal operators based on ray casting [S1]. In this variant, threads compute line integrals and correction terms for forward projection by casting rays from the detector through the volume, and update voxels based on correction images for back-projection [S1]. Forward projection involves casting a ray from each pixel, sampling the volume at equidistant points, and retrieving volume values via tri-linear interpolation [S1]. The correction term is computed as $(I(p_i) - \text{sample\_rate} \times \sum_{s=1}^k v_{sk}) / \text{ray\_length}$, where $I(p_i)$ is the measured line integral, $S$ is the number of samples, $\text{sample\_rate}$ is the distance between samples, $v_{sk}$ is the volume estimate at sample $s$, and $\text{ray\_length}$ is the ray-volume intersection length [S1]. Back-projection involves casting a ray from each voxel to the detector, retrieving a correction value via bi-linear interpolation, and updating the voxel [S1]. In this way, the forward projection and backward projection are not exact [S1].
++An alternative implementation of SART/SIRT proximal operators based on ray casting [S1]. In this variant, threads compute line integrals and correction terms for forward projection by casting rays from the detector through the volume, and update voxels based on correction images for back-projection [S1]. Forward projection involves casting a ray from each pixel, sampling the volume at equidistant points, and retrieving volume values via tri-linear interpolation [S1]. The correction term is computed as $(I(p_i) - \text{sample\_rate} \times \sum_{s=1}^S v_{sk}) / \text{ray\_length}$, where $I(p_i)$ is the measured line integral, $S$ is the number of samples, $\text{sample\_rate}$ is the distance between samples, $v_{sk}$ is the volume estimate at sample $s$, and $\text{ray\_length}$ is the ray-volume intersection length [S1]. Back-projection involves casting a ray from each voxel to the detector, retrieving a correction value via bi-linear interpolation, and updating the voxel [S1]. In this way, the forward projection and backward projection are not exact [S1].
+ 
+ ## Operating characteristics
+-*   **Time Complexity:** The complexity is proportional to the number of voxels times the kernel support size for forward projection, and the number of detector pixels for correction image computation. Back-projection is proportional to the number of voxels times the kernel support size. Overall, it is $O(N_v \cdot K + N_p)$, where $N_v$ is the number of voxels, $K$ is the kernel support size, and $N_p$ is the number of detector pixels [S1].
+-*   **Memory Complexity:** Requires storage for the volume, two 2D images (ray-sum and weights), and the correction image. The LUT size depends on the resolution of the pre-computed weights [S1].
++*   **Time Complexity:** Not given in the sources.
++*   **Memory Complexity:** Not given in the sources.
+ *   **Performance:** The voxel splatting approach is highly parallelizable on GPUs, making it suitable for large volumes in cryo-ET [S1]. The use of pre-integrated LUTs reduces the computational cost of weight calculation during runtime [S1].
+ *   **Strengths:** Efficient parallelization, no data races in back-projection, practical equivalence to ray-based methods with linear interpolation [S1].
+-*   **Limitations:** Data races in forward projection require atomic operations, which can reduce performance on some GPU architectures. Approximation errors from LUTs [S1].
++*   **Limitations:** Data races in forward projection require synchronization to ensure correctness [S1].
+ *   **When to Use:** Suitable for cryo-ET with parallel ray geometry where high performance is needed and slight approximation errors are acceptable [S1].
+ *   **When Not to Use:** Not given in the sources.

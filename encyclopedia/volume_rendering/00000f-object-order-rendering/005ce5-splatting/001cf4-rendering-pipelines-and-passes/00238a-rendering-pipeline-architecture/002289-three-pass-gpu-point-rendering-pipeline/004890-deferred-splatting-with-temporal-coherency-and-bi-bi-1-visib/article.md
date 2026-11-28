@@ -1,0 +1,197 @@
+# Deferred Splatting with Temporal Coherency and Bi-Bi-1 Visibility Pass
+
+Also called: Accurate Point Selection, Deferred Point Selection, Deferred Splatting, Deferred Splatting with Temporal Coherency
+
+## Overview
+A rendering algorithm that reduces the performance cost of high-quality point-based rendering by performing expensive Elliptical Weighted Average (EWA) splatting computations only on visible surfels, using a multi-pass approach similar to deferred shading [S1, unofficial]. It separates visibility determination from color accumulation, using temporal coherency to accelerate the visibility pass and a secondary visibility pass ($B_i - B_{i-1}$) to fix artifacts caused by hidden points becoming visible [S1, unofficial]. Unlike previous methods that perform low-level selection entirely by the GPU during rendering, this method performs low-level selection (visibility culling) explicitly before the expensive EWA splatting pass, allowing the expensive filtering to be skipped for hidden points [S1, unofficial].
+
+## How it works
+### Inputs and Outputs
+**Inputs:**
+*   A set of dynamic point clouds or surfels, organized by object [S1, unofficial].
+*   High-level selection results: A set of potentially visible surfels for the current frame $i$, determined by per-object view frustum culling, LOD selection, and simple per-object occlusion culling [S1, unofficial].
+*   The set of surfels visible in the previous frame, denoted $B_{i-1}$ [S1, unofficial].
+*   Transformation matrices for all objects at the current frame $i$ [S1, unofficial].
+
+**Outputs:**
+*   The final normalized color buffer representing the rendered image [S1, unofficial].
+*   The set of visible surfels for the current frame, denoted $B_i$, which is stored in index buffers for use in the next frame [S1, unofficial].
+
+### Data Structures
+**Surfel Index Buffer:**
+*   A single video memory buffer used for all objects [S1, unofficial].
+*   Stores $2^n$ consecutive integers from $0$ to $2^n - 1$ [S1, unofficial].
+*   $n$ is the number of bits reserved for the surfel index within the 32-bit identifier [S1, unofficial]. Typical value: $n=20$, allowing 1M surfels per object [S1, unofficial].
+
+**Boolean Flags Array:**
+*   An array of boolean flags used to approximate the set difference $B_i - B_{i-1}$ [S1, unofficial].
+*   Each flag is associated with a group of $m$ consecutive surfel indices [S1, unofficial].
+*   The flag indicates if one of the surfels in the group belongs to $B_{i-1}$ [S1, unofficial].
+*   Typical group size $m=64$ surfels [S1, unofficial].
+*   Memory cost: Requires 8MB for storing flags in the worst case (for $2^{20}$ surfels) [S1, unofficial].
+
+**32-bit Identifier:**
+*   Used to store surfel identity in the color buffer during Pass 2 [S1, unofficial].
+*   Split into $n$ bits for the surfel index ($i_s$) and $(32-n)$ bits for the object index ($i_o$) [S1, unofficial].
+*   Typical allocation: $n=20$ for $i_s$, leaving 12 bits for $i_o$ (allowing 4096 visible objects) [S1, unofficial].
+*   For large landscapes, alternative schemes (e.g., 11/20 or 14/17) may be used, with a single bit storing the active scheme [S1, unofficial].
+
+### Numbered Steps
+The rendering algorithm for frame $i$ consists of the following passes:
+
+1.  **Visibility Splatting with $B_{i-1}$**: Render all surfels visible in the previous frame ($B_{i-1}$) into the depth buffer using hardware point primitives with per-fragment depth and shape correction [S1, unofficial]. This pre-computes a depth buffer without holes for the majority of the scene, accelerating the process by exploiting temporal coherency [S1, unofficial].
+    *   *Note:* Use each object's transformation matrix at the current frame $i$, not the previous frame, to support dynamic scenes [S1, unofficial].
+
+2.  **Render Surfel Indices**: Render all input surfels declared visible by the high-level selection as a single pixel of the color buffer using the surfel index instead of color [S1, unofficial].
+    *   The depth test discards hidden points [S1, unofficial].
+    *   The resulting subset of visible surfels is denoted $B_i$ [S1, unofficial].
+    *   The GPU vertex program computes the 32-bit identifier on the fly using 1 instruction: `identifier = (i_o << n) | i_s` [S1, unofficial].
+    *   The object index ($i_o$) is passed as a uniform parameter [S1, unofficial].
+    *   The clear color value before this pass must be set to `0xFFFFFFFF` (the last allowed surfel of the last allowed visible object) to ensure it never represents a real surfel index [S1, unofficial].
+
+3.  **Compute $B_i - B_{i-1}$ Approximation**: While sorting the result of Pass 2, compute a conservative approximation of the set difference $B_i - B_{i-1}$ using the Boolean Flags Array [S1, unofficial]. This identifies surfels that are visible in the current frame but were hidden in the previous frame [S1, unofficial].
+
+4.  **Visibility Splatting with $B_i - B_{i-1}$**: Perform visibility splatting only on surfels that are visible in the current frame but were hidden in the previous frame ($B_i - B_{i-1}$) [S1, unofficial]. This handles newly visible geometry and fixes holes in the depth buffer caused by temporal coherency artifacts [S1, unofficial].
+
+5.  **EWA Splatting with $B_i$**: Render only the visible surfels ($B_i$) onto the color buffer using hardware point primitives with additive blending mode [S1, unofficial].
+    *   The weight of each fragment is computed from a Gaussian centered at the current surfel position in screen space, using a fragment program [S1, unofficial].
+    *   To avoid aliasing, use surfel mipmaps (several prefiltered texture samples per surfel) [S1, unofficial].
+    *   The vertex program performs linear interpolation between the two closest mipmap levels [S1, unofficial].
+    *   The interpolation coefficient is computed from the Jacobian matrix, which was already computed during the resampling filter determination [S1, unofficial].
+
+6.  **Normalization**: Render the resulting color buffer as a full-screen textured rectangle with a simple fragment program that divides RGB components by the alpha component, which contains the sum of weights [S1, unofficial].
+
+### Pseudocode
+> **Unverified code.** The code below did not pass a test run against a reference implementation, or no test fits it, so it may contain errors.
+
+```python
+# Global Constants
+N_BITS_SURFEL = 20
+N_BITS_OBJECT = 32 - N_BITS_SURFEL
+CLEAR_IDENTIFIER = 0xFFFFFFFF
+GROUP_SIZE_M = 64
+
+def deferred_splatting(frame_i, B_prev, high_level_selection, transforms):
+    """
+    Renders frame i using deferred splatting with temporal coherency.
+    B_prev: set of (object_id, surfel_index) visible in frame i-1
+    high_level_selection: list of (object_id, surfel_index) from frustum/occlusion culling
+    transforms: dict mapping object_id -> transformation matrix at frame i
+    """
+    # Pass 1: Visibility Splatting with B_{i-1}
+    # Render surfels from B_prev to build initial depth buffer.
+    # Uses transforms[frame_i] for dynamic scenes.
+    # [G] GPU pass: draw points with per-fragment depth/shape correction.
+    for oid, si in B_prev:
+        draw_point_with_depth_correction(oid, si, transforms[oid])
+    
+    # Pass 2: Render Surfel Indices
+    # Render high-level selected surfels as 1-pixel points.
+    # Store 32-bit identifier in color buffer. Depth test discards hidden points.
+    # [G] GPU pass: vertex program computes identifier = (oid << N_BITS_SURFEL) | si
+    for oid, si in high_level_selection:
+        identifier = (oid << N_BITS_SURFEL) | si
+        draw_1px_point_with_identifier(identifier)
+        
+    # Read color buffer and decode identifiers to build B_i and index buffers.
+    color_buffer = read_color_buffer_from_gpu()
+    B_curr = []
+    index_buffers = {}
+    num_groups = (1 << N_BITS_SURFEL + GROUP_SIZE_M - 1) // GROUP_SIZE_M
+    boolean_flags = [False] * num_groups
+    
+    for pixel in color_buffer:
+        identifier = pixel.color
+        if identifier == CLEAR_IDENTIFIER:
+            continue
+        object_id = identifier >> N_BITS_SURFEL
+        surfel_index = identifier & ((1 << N_BITS_SURFEL) - 1)
+        
+        B_curr.append((object_id, surfel_index))
+        if object_id not in index_buffers:
+            index_buffers[object_id] = []
+        index_buffers[object_id].append(surfel_index)
+        
+        # Update boolean flags: mark group if surfel was in B_prev
+        if surfel_index in B_prev:
+            boolean_flags[surfel_index // GROUP_SIZE_M] = True
+
+    # Pass 3: Visibility Splatting with B_i - B_{i-1}
+    # Identify surfels in B_curr not covered by B_prev flags.
+    B_diff = []
+    for object_id, surfel_index in B_curr:
+        if not boolean_flags[surfel_index // GROUP_SIZE_M]:
+            B_diff.append((object_id, surfel_index))
+            
+    # [G] GPU pass: draw points with depth correction for newly visible geometry
+    for oid, si in B_diff:
+        draw_point_with_depth_correction(oid, si, transforms[oid])
+    
+    # Pass 4: EWA Splatting with B_i
+    # Render visible surfels with additive blending and EWA filtering.
+    # [G] GPU pass: fragment program computes Gaussian weight, interpolates surfel mipmaps
+    for oid, surfel_indices in index_buffers.items():
+        for si in surfel_indices:
+            draw_ewa_splat(oid, si, transforms[oid])
+    
+    # Pass 5: Normalization
+    # Divide RGB by Alpha (sum of weights).
+    # [G] GPU pass: full-screen quad with fragment program dividing RGB by A
+    normalized_buffer = normalize_color_buffer()
+    
+    return normalized_buffer, B_curr
+```
+
+### Parameters
+*   **$B_i$**: The set of surfels visible in frame $i$, determined by the depth test in Pass 2 [S1, unofficial].
+*   **$B_{i-1}$**: The set of surfels visible in the previous frame ($i-1$), used to exploit temporal coherency [S1, unofficial].
+*   **Identifier Bit Allocation**: The 32-bit identifier is split into $n$ bits for the surfel index ($i_s$) and $(32-n)$ bits for the object index ($i_o$). Typical value: $n=20$, allowing 1M surfels per object and 4096 visible objects [S1, unofficial].
+*   **Group Size ($m$)**: The size of the groups for the boolean flags array. Typical value: 64 surfels. This requires 8MB for storing flags in the worst case. It is a compromise between accuracy and memory cost [S1, unofficial].
+
+### Edge Cases and Pitfalls
+*   **Temporal Coherency Artifacts (Holes)**: Occur when objects move significantly between frames, causing surfels visible in the current frame to be missed if only $B_{i-1}$ is used. This is handled by Pass 3, which processes $B_i - B_{i-1}$ [S1, unofficial].
+*   **Clear Color Value**: The clear color value before Pass 2 must never represent a real surfel index. It is set to `0xFFFFFFFF` (the last allowed surfel of the last allowed visible object) to ensure it is the most improbable identifier [S1, unofficial].
+*   **Hidden Splat Accumulation**: Holes in the depth buffer cause hidden splats to be accumulated into the color buffer, creating artifacts. Pass 3 prevents this by ensuring all newly visible points are depth-corrected [S1, unofficial].
+*   **Dynamic Scenes**: During Pass 1 and Pass 3, use each object's transformation matrix at the current frame $i$, not the previous frame. This allows the algorithm to work on dynamic scenes and dynamic point clouds [S1, unofficial].
+*   **Aliasing**: Oversampling discards superfluous points, leading to aliasing artifacts for high-frequency textures. This is mitigated by using surfel mipmaps and linear interpolation between mipmap levels [S1, unofficial].
+
+## Operating characteristics
+### Time and Memory Complexity
+*   **Time Complexity**: The algorithm accelerates rendering by reducing the number of surfels processed in the expensive EWA splatting pass (Pass 4) to only those visible in the current frame ($B_i$), rather than all surfels [S1, unofficial]. The cost of the EWA pass becomes independent of scene complexity [S1, unofficial].
+*   **Memory Complexity**: Requires storage for the Surfel Index Buffer ($2^n$ integers) and the Boolean Flags Array (8MB for typical settings) [S1, unofficial].
+
+### Measured Performance
+Measured on a 2GHz AMD Athlon system with an NVIDIA GeForceFX 5900 graphic card, at 512x512 resolution [S1, unofficial]:
+
+| Scene | Points | FPS Without Selection | FPS With Selection | Culled % |
+| :--- | :--- | :--- | :--- | :--- |
+| Head | 285k | 34 | 39 | 70% |
+| Tree | 750k | 8.6 | 32 | 88% |
+| Forest | 6800 trees | 0.8-1.5 | 10-16 | 90-98% |
+
+*   **Pass 1 Time**: 7-11 ms (11.5-13.5M primitives/sec) [S1, unofficial].
+*   **Pass 2 Time**: 6.6 ms (reading color buffer) + 1.7-2.2 ms (sorting indices). Total ~8.3-8.8 ms [S1, unofficial].
+*   **Pass 3 Time**: 0.8-1.2 ms (11.5-13.5M primitives/sec) [S1, unofficial].
+*   **Pass 4 Time**: 9-11.5 ms (11-13M primitives/sec) [S1, unofficial].
+*   **Pass 5 Time**: 0.7 ms [S1, unofficial].
+
+### Strengths and Limitations
+*   **Strengths**: No preprocessing required; suitable for dynamic point clouds; accurate per-primitive view frustum and occlusion culling; hardware accelerated; significant speedup on complex scenes (up to 10x) [S1, unofficial].
+*   **Limitations**: Pass 2 (Render Indices) can become the most expensive pass for large scenes due to color buffer read-back and sorting; requires CPU involvement for sorting indices unless using SuperBuffers/PixelBufferObjects [S1, unofficial].
+
+### When to Use
+*   Use for applications manipulating dynamic point clouds for editing, modelling, and implicit surface visualization via particle systems [S1, unofficial].
+*   Particularly effective when the scene has high occlusion and temporal coherency between frames [S1, unofficial].
+
+## Background
+### Origin
+The method was introduced by G. Guennebaud, L. Barthe, and M. Paulin in the paper "Deferred Splatting" [S1, unofficial]. It builds on previous work such as the GPU-based EWA splatting algorithm by Guennebaud and the surfel splatting techniques by Pfister et al. [S1, unofficial].
+
+### History and Development
+The algorithm was developed to address the performance bottleneck of high-quality point-based rendering, where expensive EWA filtering is applied to hidden points [S1, unofficial]. By deferring the expensive splatting to only visible points, similar to deferred shading in rasterization, the method achieves significant performance gains [S1, unofficial].
+
+### Usage
+It is used in applications requiring real-time rendering of dynamic point clouds, such as implicit surface visualization and particle systems [S1, unofficial].
+
+## Sources
+[S1] Deferred Splatting, https://inria.hal.science/inria-00355034v1, fetched 2026-10-29 (unofficial)

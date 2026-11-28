@@ -1,0 +1,387 @@
+--- v001.md
++++ v002.md
+@@ -4,255 +4,166 @@
+ 
+ ## Overview
+-Voxel Chunk Management organizes sparse voxel data into fixed-size cubic blocks (chunks) to enable efficient memory allocation, neighbor traversal, and incremental mesh generation. It solves the problem of managing large, sparse 3D grids by isolating updates to local regions, ensuring that changes to voxel properties trigger only necessary remeshing of affected chunk boundaries. Unlike dense voxel grids, which allocate memory for the entire volume, this method uses a sparse structure where chunks are allocated on demand, and it differs from SVO-based approaches by maintaining a flat, fixed-resolution block structure rather than a hierarchical tree [S1, unofficial].
++Voxel Chunk Management handles the storage, state tracking, and dirty-flag propagation for a fixed-size 3D block of voxel data within a sparse voxel architecture [S1, unofficial]. It solves the problem of efficiently determining when a chunk's geometric representation (mesh) or logical state (colliders, handlers) requires regeneration after voxel modifications, specifically by isolating boundary updates to prevent cascading recomputations across the voxel grid [S1, unofficial]. It differs from sibling methods by focusing on the internal block state and neighbor coordination rather than the global sparse structure (SVO) or the rasterization pipeline itself [S1, unofficial].
+ 
+ ## How it works
+-### Inputs and Outputs
+-*   **Input**: A world coordinate system, voxel data updates (set operations), and configuration parameters (chunk size, default voxel ID).
+-*   **Output**: Updated voxel arrays, neighbor references, dirty flags, and queued mesh generation requests.
++**Inputs and Outputs**
++*   **Input:** A 3D array of voxel IDs (uint16), chunk dimensions $N \times N \times N$, and a registry of voxel properties (solidity, opacity, object type, handler IDs).
++*   **Output:** Updated chunk state flags (`_terrainDirty`, `_objectsDirty`), neighbor dirtiness propagation, and queued mesh regeneration requests.
+ 
+-### Data Structures
+-The core data structure is the **Chunk**, which contains the following fields:
++**Data Structures**
++The chunk maintains the following internal state [S1, unofficial]:
++1.  `voxels`: A 3D array (e.g., `ndarray`) of shape `[size, size, size]` storing voxel IDs as `Uint16`.
++2.  `_neighbors`: A 3x3x3 `ndarray` of neighbor chunk references. The center element `[1,1,1]` refers to the chunk itself. This allows O(1) access to adjacent chunks for boundary checks.
++3.  `_wholeLayerVoxel`: An array of length `size` caching the voxel ID for entire layers (used for optimization during full-layer scans).
++4.  `_terrainDirty`: Boolean flag indicating if the terrain mesh needs regeneration.
++5.  `_objectsDirty`: Boolean flag indicating if object-specific meshes or handlers need updates.
+ 
+-1.  **`voxels`**: A 3D array of type `Uint16Array` with shape `[size, size, size]`. It stores the voxel ID for each position within the chunk. The default fill value is `fillVoxelID` (typically `-1` to indicate empty/uninitialized).
+-2.  **`_neighbors`**: A 3D array of shape `[3, 3, 3]` containing references to adjacent chunks. The center element `[1, 1, 1]` refers to the chunk itself. Indices `[0,0,0]` to `[2,2,2]` correspond to relative offsets from `-1` to `+1` in each dimension. This allows O(1) access to the 26 neighbors.
+-3.  **`_wholeLayerVoxel`**: An array of length `size` (indexed by `j`). It caches the voxel ID for an entire horizontal layer if all voxels in that layer share the same ID. If the layer is not uniform, the value is `-1`. This optimization speeds up opacity and solidity checks.
+-4.  **`_terrainDirty`**: A boolean flag indicating that the chunk's geometry needs regeneration.
+-5.  **`_objectsDirty`**: A boolean flag indicating that object-specific mesh data needs update.
+-6.  **`_blockHandlerLocs`**: A collection (e.g., set or list) storing coordinates `(i, j, k)` of voxels that require special handler execution (e.g., physics or logic updates).
++**Parameters**
++*   `size`: The dimension $N$ of the cubic chunk.
++*   `fillVoxelID`: The default ID to initialize the voxel array with (commonly -1 for empty/air) [S1, unofficial].
+ 
+-### Parameters
+-*   **`size`**: The dimension $N$ of the cubic chunk ($N \times N \times N$). Typical values are powers of two (e.g., 16, 32) for efficient memory alignment, though not strictly required.
+-*   **`fillVoxelID`**: The default ID for empty space. Default is `-1`.
++**Algorithm Steps**
+ 
+-### Algorithm Steps
++1.  **Initialization**:
++    *   Allocate `voxels` array of size $N^3$.
++    *   Initialize `_neighbors` array.
++    *   Set `_terrainDirty` and `_objectsDirty` to `false`.
++    *   Initialize `_wholeLayerVoxel` with -1.
+ 
+-#### 1. Initialization
+-1.  Allocate `voxels` as a `Uint16Array` of size $N^3$.
+-2.  Fill `voxels` with `fillVoxelID`.
+-3.  Initialize `_neighbors` as a `[3, 3, 3]` array. Set `_neighbors[1][1][1]` to `this`. Initialize other entries to `null`.
+-4.  Initialize `_wholeLayerVoxel` as an array of length $N$ with value `-1`.
+-5.  Set `_terrainDirty` and `_objectsDirty` to `false`.
++2.  **Voxel Scan (Initial or Full Update)**:
++    *   Iterate through all voxels $(i, j, k)$ in the chunk.
++    *   Determine global chunk properties:
++        *   `fullyOpaque`: True if all non-air voxels are opaque.
++        *   `fullyAir`: True if all voxels are air (ID 0 or empty).
++    *   Check for "constant layers": If an entire layer $j$ has the same voxel ID, cache it in `_wholeLayerVoxel[j]`.
++    *   For each voxel ID:
++        *   If it is an "object" voxel, register the chunk as an object block and set `_objectsDirty = true`.
++        *   If it has block handlers, register the position $(i,j,k)$ and call `onLoad` handlers.
++    *   If `fullyOpaque` or `fullyAir` status changes, set `_terrainDirty = true` [S1, unofficial].
+ 
+-#### 2. Voxel Update (`set(i, j, k, newID)`)
+-When a voxel at local coordinates $(i, j, k)$ is updated to `newID`:
+-1.  Update `voxels[i][j][k] = newID`.
+-2.  Determine if the change affects solidity or opacity. This requires looking up properties of `newID` and the old ID in a global registry (`solidityLookup`, `opacityLookup`).
+-3.  Set `_terrainDirty = true` and queue the chunk for remeshing.
+-4.  **Neighbor Propagation**: If the voxel is on a chunk boundary (i.e., $i=0, i=N-1, j=0, j=N-1, k=0, k=N-1$) AND the change affects solidity or opacity, propagate dirtiness to adjacent chunks.
+-    *   Define boundary offsets:
+-        $$
+-        \begin{aligned}
+-        imin &= (i == 0) ? -1 : 0 \\
+-        imax &= (i == N-1) ? 1 : 0 \\
+-        jmin &= (j == 0) ? -1 : 0 \\
+-        jmax &= (j == N-1) ? 1 : 0 \\
+-        kmin &= (k == 0) ? -1 : 0 \\
+-        kmax &= (k == N-1) ? 1 : 0
+-        \end{aligned}
+-        $$
+-    *   Iterate $ni$ from $imin$ to $imax$, $nj$ from $jmin$ to $jmax$, $nk$ from $kmin$ to $kmax$.
+-    *   Skip if $ni=nj=nk=0$ (self).
+-    *   If `_neighbors[ni+1][nj+1][nk+1]` exists:
++3.  **Voxel Update (Single Voxel Change)**:
++    *   When `set(i, j, k, newID)` is called:
++        *   Update `voxels[i, j, k] = newID`.
++        *   Check if the change affects solidity or opacity.
++        *   If solidity/opacity changed, propagate dirtiness to neighboring chunks on the chunk boundary.
++        *   Set `_terrainDirty = true` if the chunk's overall opacity/air status changed.
++        *   Set `_objectsDirty = true` if the new/old ID involves object blocks or handlers [S1, unofficial].
++
++4.  **Neighbor Dirtiness Propagation**:
++    *   If a voxel at $(i, j, k)$ changes solidity or opacity, and it lies on a chunk boundary, notify adjacent chunks.
++    *   Determine boundary offsets:
++        *   If $i=0$, neighbor $i-1$ exists; if $i=N-1$, neighbor $i+1$ exists.
++        *   Same for $j$ and $k$.
++    *   For each existing neighbor chunk reference in `_neighbors`:
+         *   Set `neighbor._terrainDirty = true`.
+-        *   Queue `neighbor` for remeshing.
++        *   Queue the neighbor chunk for remeshing [S1, unofficial].
+ 
+-#### 3. Mesh Generation (`updateMeshes`)
+-Triggered when `_terrainDirty` or `_objectsDirty` is true.
+-1.  If `_terrainDirty`:
+-    *   Scan `voxels` to determine visibility and solidity.
+-    *   Use `_wholeLayerVoxel` to optimize checks for uniform layers.
+-    *   Generate terrain geometry (e.g., marching cubes, face culling) based on voxel IDs.
+-    *   Clear `_terrainDirty`.
+-2.  If `_objectsDirty`:
+-    *   Identify object blocks using `objectLookup`.
+-    *   Generate object-specific geometry.
+-    *   Clear `_objectsDirty`.
++5.  **Mesh Regeneration**:
++    *   When `updateMeshes` is called:
++        *   If `_terrainDirty`, regenerate terrain mesh and clear flag.
++        *   If `_objectsDirty`, update object meshes/handlers and clear flag.
+ 
+-#### 4. Disposal
+-1.  Call `onUnload` handlers for all blocks in `_blockHandlerLocs`.
+-2.  Nullify `_neighbors` references to allow garbage collection.
+-
+-### Pseudocode
++**Pseudocode**
+ 
+ ```python
+ class VoxelChunk:
+-    def __init__(self, size, fillVoxelID=-1):
++    def __init__(self, size, fill_voxel_id=-1):
+         self.size = size
+-        self.fillVoxelID = fillVoxelID
++        self.voxels = create_ndarray_3d(size, size, size, dtype=Uint16, fill=fill_voxel_id)
++        self._neighbors = create_ndarray_3d(3, 3, 3, dtype=ChunkRef)
++        self._neighbors[1, 1, 1] = self  # Center is self
++        self._whole_layer_voxel = [-1] * size
++        self._terrain_dirty = False
++        self._objects_dirty = False
++        self._block_handler_locs = set()
++
++    def set_voxel(self, i, j, k, new_id):
++        old_id = self.voxels[i, j, k]
++        if old_id == new_id:
++            return
++
++        self.voxels[i, j, k] = new_id
+         
+-        # Data structures
+-        # voxels: 1D Uint16Array of size size*size*size, or 3D array [size][size][size]
+-        self.voxels = [fillVoxelID] * (size * size * size)
++        # Check if solidity or opacity changed
++        solidity_changed = self._is_solid(old_id) != self._is_solid(new_id)
++        opacity_changed = self._is_opaque(old_id) != self._is_opaque(new_id)
++
++        # Update local dirty flags
++        if solidity_changed or opacity_changed:
++            self._terrain_dirty = True
+         
+-        # _neighbors: 3x3x3 array of Chunk references
+-        self._neighbors = [[[None for _ in range(3)] for _ in range(3)] for _ in range(3)]
+-        self._neighbors[1][1][1] = self  # Center is self
++        # Handle object/handler changes
++        if self._is_object(old_id) != self._is_object(new_id):
++            self._objects_dirty = True
++            if self._is_object(new_id):
++                self._register_object_block(i, j, k, new_id)
++            else:
++                self._unregister_object_block(i, j, k)
+         
+-        # _wholeLayerVoxel: Array of length size, initialized to -1
+-        self._wholeLayerVoxel = [-1] * size
+-        
+-        # Dirty flags
+-        self._terrainDirty = False
+-        self._objectsDirty = False
+-        
+-        # Handlers
+-        self._blockHandlerLocs = set()
++        if self._has_handlers(old_id) != self._has_handlers(new_id):
++            self._objects_dirty = True
++            if self._has_handlers(new_id):
++                self._block_handler_locs.add((i, j, k))
++                self._call_handlers(new_id, 'onLoad', i, j, k)
++            else:
++                self._block_handler_locs.remove((i, j, k))
+ 
+-    def set_voxel(self, i, j, k, newID, registry):
+-        """
+-        Update a voxel and handle neighbor propagation.
+-        registry: dict mapping ID to properties {solidity, opacity, is_object, handlers}
+-        """
+-        oldID = self.voxels[i * self.size * self.size + j * self.size + k]
+-        self.voxels[i * self.size * self.size + j * self.size + k] = newID
+-        
+-        # Check if properties changed
+-        old_props = registry.get(oldID, {})
+-        new_props = registry.get(newID, {})
+-        
+-        solidity_changed = old_props.get('solidity') != new_props.get('solidity')
+-        opacity_changed = old_props.get('opacity') != new_props.get('opacity')
+-        
+-        # Always dirty for terrain if voxel changes
+-        self._terrainDirty = True
+-        queue_chunk_for_remesh(self)
+-        
+-        # Propagate to neighbors if on boundary and properties changed
++        # Propagate dirtiness to neighbors if on boundary
+         if solidity_changed or opacity_changed:
+-            edge = self.size - 1
+-            imin = -1 if i == 0 else 0
+-            imax = 1 if i == edge else 0
+-            jmin = -1 if j == 0 else 0
+-            jmax = 1 if j == edge else 0
+-            kmin = -1 if k == 0 else 0
+-            kmax = 1 if k == edge else 0
+-            
+-            for ni in range(imin, imax + 1):
+-                for nj in range(jmin, jmax + 1):
+-                    for nk in range(kmin, kmax + 1):
+-                        if ni == 0 and nj == 0 and nk == 0:
+-                            continue
+-                        
+-                        neighbor = self._neighbors[ni + 1][nj + 1][nk + 1]
+-                        if neighbor is not None:
+-                            neighbor._terrainDirty = True
+-                            queue_chunk_for_remesh(neighbor)
++            self._propagate_boundary_dirtiness(i, j, k)
+ 
+-    def update_meshes(self, terrain_mesher, object_mesher, registry):
+-        """
+-        Regenerate geometry if dirty.
+-        """
+-        if self._terrainDirty:
+-            self._scan_and_generate_terrain(terrain_mesher, registry)
+-            self._terrainDirty = False
+-            
+-        if self._objectsDirty:
+-            self._generate_objects(object_mesher, registry)
+-            self._objectsDirty = False
++    def _propagate_boundary_dirtiness(self, i, j, k):
++        edge = self.size - 1
++        # Determine neighbor offsets: -1 if on boundary, 0 otherwise
++        imin = -1 if i == 0 else 0
++        jmin = -1 if j == 0 else 0
++        kmin = -1 if k == 0 else 0
++        imax = 1 if i == edge else 0
++        jmax = 1 if j == edge else 0
++        kmax = 1 if k == edge else 0
+ 
+-    def _scan_and_generate_terrain(self, mesher, registry):
+-        """
+-        Scan voxels to determine terrain geometry.
+-        Uses _wholeLayerVoxel for optimization.
+-        """
+-        fullyOpaque = True
+-        fullyAir = True
+-        
+-        # Optimization: Check layers
+-        for j in range(self.size):
+-            layerID = self._wholeLayerVoxel[j]
+-            
+-            # If layer is cached and uniform
+-            if layerID >= 0:
+-                props = registry.get(layerID, {})
+-                if not props.get('opaque', False):
+-                    fullyOpaque = False
+-                if layerID != 0: # Assuming 0 is air
+-                    fullyAir = False
+-                continue
+-            
+-            # Check if layer is uniform
+-            constantID = self.voxels[0 * self.size * self.size + j * self.size + 0]
+-            is_uniform = True
+-            
+-            for i in range(self.size):
+-                for k in range(self.size):
+-                    idx = i * self.size * self.size + j * self.size + k
+-                    id = self.voxels[idx]
+-                    
+-                    if constantID >= 0 and id != constantID:
+-                        is_uniform = False
+-                        constantID = -1
+-                        break
+-                    
+-                    if id == 0: # Air
+-                        fullyOpaque = False
++        for ni in range(imin, imax + 1):
++            for nj in range(jmin, jmax + 1):
++                for nk in range(kmin, kmax + 1):
++                    if ni == 0 and nj == 0 and nk == 0:
+                         continue
+-                    
+-                    props = registry.get(id, {})
+-                    if not props.get('opaque', False):
+-                        fullyOpaque = False
+-                    
+-                    if id != 0:
+-                        fullyAir = False
+-                    
+-                    if props.get('is_object', False):
+-                        self._objectsDirty = True
+-                        object_mesher.set_object_block(self, id, i, j, k)
+-                    
+-                    if props.get('handlers'):
+-                        self._blockHandlerLocs.add((i, j, k))
+-                
+-                if not is_uniform:
+-                    break
+-            
+-            if is_uniform and constantID >= 0:
+-                self._wholeLayerVoxel[j] = constantID
++                    neighbor = self._neighbors[1 + ni, 1 + nj, 1 + nk]
++                    if neighbor is not None:
++                        neighbor._terrain_dirty = True
++                        queue_chunk_for_remesh(neighbor)
+ 
+-        # Call mesher with chunk data
+-        mesher.generate(self)
++    def update_meshes(self):
++        if self._terrain_dirty:
++            regenerate_terrain_mesh(self)
++            self._terrain_dirty = False
++        if self._objects_dirty:
++            update_object_meshes(self)
++            self._objects_dirty = False
+ 
+     def dispose(self):
+-        """
+-        Clean up resources.
+-        """
+-        for (i, j, k) in self._blockHandlerLocs:
+-            call_block_handler(self, 'onUnload', i, j, k)
+-        
+-        # Nullify neighbors
+-        for x in range(3):
+-            for y in range(3):
+-                for z in range(3):
+-                    self._neighbors[x][y][z] = None
+-
+-def queue_chunk_for_remesh(chunk):
+-    """
+-    Add chunk to a global queue for processing in the next frame or batch.
+-    """
+-    pass # Implementation detail of the engine
++        for loc in self._block_handler_locs:
++            self._call_handlers(self.voxels[loc], 'onUnload', *loc)
++        self._neighbors = None
++        self.voxels = None
+ ```
+ 
+-### Edge Cases and Pitfalls
+-*   **Cascading Updates**: Neighbor dirtiness propagation must be limited to immediate neighbors on the chunk boundary. Propagating to all neighbors or recursively can cause performance degradation. The check `i==0`, `i==edge`, etc., ensures only boundary voxels trigger neighbor updates [S1, unofficial].
+-*   **Precision**: Voxel IDs are `Uint16`, limiting the number of distinct voxel types to 65,535. Ensure the registry fits within this range.
+-*   **Boundary Conditions**: When accessing `_neighbors`, always check for `None` to avoid null pointer exceptions at the world boundary.
++**Edge Cases and Pitfalls**
++*   **Cascading Updates**: Dirtiness propagation must strictly limit updates to immediate neighbors on the chunk boundary. Updating internal neighbors or propagating beyond one hop causes performance degradation [S1, unofficial].
++*   **Boundary Checks**: When $i=0$ or $i=N-1$, the neighbor array index must be correctly mapped to the adjacent chunk. Failure to check boundaries leads to null references or incorrect chunk updates [S1, unofficial].
++*   **Constant Layers**: Caching whole-layer voxel IDs (`_whole_layer_voxel`) optimizes full-chunk scans but must be invalidated when any voxel in that layer changes [S1, unofficial].
+ 
+ ## Operating characteristics
+ *   **Time Complexity**:
+-    *   `set_voxel`: $O(1)$ for the update, plus $O(1)$ for neighbor propagation (max 26 neighbors, but typically only 1-6 are affected).
+-    *   `update_meshes`: $O(N^3)$ for scanning the chunk, where $N$ is the chunk size. This is done only when dirty.
+-*   **Memory Complexity**: $O(N^3)$ per chunk for the voxel array. The neighbor array is $O(1)$ (constant 27 references).
+-*   **Scaling**: Memory usage scales linearly with the number of active chunks. For sparse worlds, this is significantly more efficient than dense grids.
+-*   **Strengths**:
+-    *   Efficient incremental updates.
+-    *   Simple neighbor traversal.
+-    *   Good cache locality within a chunk.
+-*   **Limitations**:
+-    *   Fixed resolution within a chunk.
+-    *   Boundary artifacts if not handled correctly (e.g., lighting, normals).
+-    *   Not suitable for highly dynamic, high-frequency changes across many chunks without a robust batching system.
++    *   Initialization: $O(N^3)$ to scan all voxels.
++    *   Single Voxel Update: $O(1)$ for local update, $O(1)$ for neighbor propagation (max 26 neighbors, but only boundary neighbors are updated).
++    *   Mesh Regeneration: Depends on the meshing algorithm, but triggered only when dirty flags are set.
++*   **Memory Complexity**: $O(N^3)$ for voxel storage plus $O(1)$ for neighbor references (fixed 3x3x3 array).
++*   **Strengths**: Efficiently isolates updates to chunk boundaries, preventing global scene recomputation. Simple state management with dirty flags.
++*   **Limitations**: Fixed chunk size limits flexibility. Boundary propagation logic is complex to implement correctly. Not suitable for highly dynamic scenes with frequent voxel changes across many chunks without careful batching [S1, unofficial].
++*   **When to Use**: Ideal for terrain or static object voxelization where changes are localized and mesh regeneration is expensive.
++*   **When Not to Use**: Unsuitable for real-time, high-frequency voxel updates across the entire grid where a more global sparse structure (like SVO) might be more efficient [S1, unofficial].
+ 
+ ## Background
+-Voxel Chunk Management is a common technique in voxel-based games and simulations, particularly in engines like Noa (Node.js Open Architecture) [S1, unofficial]. It builds on the principles of sparse voxel storage by dividing the world into manageable blocks. This approach allows for efficient culling and localized updates, which is critical for real-time applications. The method is often used in conjunction with terrain generation algorithms and physics engines.
++Voxel Chunk Management is a component of the `noa` (Node Object Architecture) library, developed by fenomas [S1, unofficial]. It is part of a broader ecosystem for voxel-based game development and terrain generation, where efficient chunk-based storage and meshing are critical for performance [S1, unofficial]. The method emphasizes boundary-aware updates to maintain consistency across chunk boundaries without global synchronization [S1, unofficial].
+ 
+ ## Sources

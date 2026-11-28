@@ -1,0 +1,257 @@
+--- v001.md
++++ v002.md
+@@ -8,14 +8,10 @@
+ ## How it works
+ **Inputs and Outputs:**
+-*   **Inputs:** A reference image $I_{ref}$ and a set of source images $I_{src} = \{I^m \mid m = 1 \dots M\}$ capturing the same scene. The camera poses for all images are assumed known.
+-*   **Outputs:** For each pixel $l$ in $I_{ref}$ (where $l \in \{1, \dots, L\}$), the method predicts:
+-    *   Depth $d_l \in \mathbb{R}^+$
+-    *   Normal $n_l \in \mathbb{R}^3$ with $\|n_l\| = 1$
+-    *   Occlusion indicator $Z_{src} = \{Z^m_l \mid l=1\dots L, m=1\dots M\}$ indicating visibility in source views.
+-    *   The final output is the set of optimized parameters $\{d^*_l, n^*_l\}$ and the fused global point cloud.
++*   **Inputs:** A reference image $I_{ref}$ and a set of source images $I_{src} = \{I^m \mid m = 1 \dots M\}$ capturing the same scene [S1]. The camera poses for all images are assumed known [G].
++*   **Outputs:** For each pixel $l$ in $I_{ref}$ (where $l \in \{1, \dots, L\}$), the method predicts depth $d_l \in \mathbb{R}^+$, normal $n_l \in \mathbb{R}^3$ with $\|n_l\| = 1$, and an occlusion indicator $Z_{src} = \{Z^m_l \mid l=1\dots L, m=1\dots M\}$ indicating visibility in source views [S1]. The final output is the set of optimized parameters $\{d^*_l, n^*_l\}$ and the fused global point cloud [S1].
+ 
+ **Data Structures:**
+ *   **Patches:** For each pixel $l$ and source view $m$, a homography-warped patch $A^m_l$ is extracted from the source image $I^m$ [S1].
+-*   **Probability Distribution:** $P_l(m)$ serves as a view selection probability, assigning weights to source views based on consistency [S1].
++*   **Probability Distribution:** $P_l(m)$ serves as a view selection probability that assigns weights to source views based on consistency [S1].
+ 
+ **Optimization Objective:**
+@@ -42,14 +38,14 @@
+ *   $\phi^m_l(d_l, n_l)$: Forward-backward reprojection error, evaluating geometric consistency incurred by the predicted $d_l$ and $n_l$ [S1].
+ *   $\phi_{max}$: A pre-defined cap for the reprojection error $\phi^m_l$ [S1].
+-*   $\eta$: A weighting parameter for the geometric consistency term [S1].
++*   $\eta$: A weighting parameter for the geometric consistency term [G].
+ *   $P_l(m)$: View selection probability [S1].
+ 
+ **Algorithm Steps:**
+-1.  **Initialization:** For each pixel $l$ in $I_{ref}$, initialize depth $d_l$ and normal $n_l$ randomly or using a coarse estimate. Initialize view probabilities $P_l(m)$ uniformly or based on initial consistency.
++1.  **Initialization:** For each pixel $l$ in $I_{ref}$, initialize depth $d_l$ and normal $n_l$ randomly or using a coarse estimate [G]. Initialize view probabilities $P_l(m)$ uniformly [G].
+ 2.  **Patch Extraction:** For each source view $m$, extract the homography-warped patch $A^m_l$ corresponding to the current estimate $(d_l, n_l)$ [S1].
+ 3.  **Cost Computation:** Compute the photometric cost $\rho^m_l(d_l, n_l)$ using NCC between $A^l_{ref}$ and $A^m_l$. Compute the geometric cost $\phi^m_l(d_l, n_l)$ using forward-backward reprojection error [S1].
+-4.  **PatchMatch Optimization:** Use the PatchMatch algorithm [3, 4] to efficiently establish pixel-wise correspondences across multi-view images. This involves random and deterministic propagation steps to find the optimal $(d_l, n_l)$ that minimizes the total cost $\sum_{m=1}^M P_l(m) \xi^m_l(d_l, n_l)$ [S1].
+-5.  **View Selection:** Update the view selection probabilities $P_l(m)$ based on the consistency scores $\xi^m_l$. Views with lower costs (higher consistency) receive higher probabilities [S1].
+-6.  **Iteration:** Repeat steps 2-5 until convergence or a maximum number of iterations is reached.
++4.  **PatchMatch Optimization:** Use the PatchMatch algorithm to efficiently establish pixel-wise correspondences across multi-view images [S1]. The algorithm propagates and randomly searches for estimates $(d_l, n_l)$ that minimize the total cost $\sum_{m=1}^M P_l(m) \xi^m_l(d_l, n_l)$ [G].
++5.  **View Selection:** Update the view selection probabilities $P_l(m)$ based on the consistency scores $\xi^m_l$ [S1].
++6.  **Iteration:** Repeat steps 2-5 until convergence or a maximum number of iterations is reached [G].
+ 7.  **Fusion:** Fuse the depth maps from all reference images into a global point cloud using filtering operations [S1].
+ 
+@@ -57,40 +53,80 @@
+ 
+ ```python
+-def patchmatch_mvs(I_ref, I_src, camera_poses, num_iterations):
++import math
++import random
++
++def compute_ncc(patch_ref, patch_src):
++    """Normalized cross-correlation between two image patches."""
++    mean_ref = sum(patch_ref) / len(patch_ref)
++    mean_src = sum(patch_src) / len(patch_src)
++    num = sum((x - mean_ref) * (y - mean_src) for x, y in zip(patch_ref, patch_src))
++    den = math.sqrt(sum((x - mean_ref)**2 for x in patch_ref) * sum((y - mean_src)**2 for y in patch_src))
++    return num / (den + 1e-8)
++
++def compute_reprojection_error(d, n, cam_pose_ref, cam_pose_src):
++    """Forward-backward reprojection error in pixels."""
++    # [G] Simplified geometric reprojection model
++    x_cam = d * n
++    x_world = cam_pose_ref.inv() @ (x_cam - cam_pose_ref.t)
++    x_src_proj = cam_pose_src @ x_world
++    return abs(x_src_proj[0] - x_src_proj[1])  # Simplified error metric
++
++def softmax(costs):
++    """Compute softmax probabilities over costs."""
++    max_c = max(costs)
++    exps = [math.exp(-c + max_c) for c in costs]
++    sum_exps = sum(exps)
++    return [e / sum_exps for e in exps]
++
++def get_neighbors(pixel_idx, width, height):
++    """Return indices of 4-connected neighbors."""
++    neighbors = []
++    x, y = pixel_idx % width, pixel_idx // width
++    for dx, dy in [(-1, 0), (1, 0), (0, -1), (0, 1)]:
++        nx, ny = x + dx, y + dy
++        if 0 <= nx < width and 0 <= ny < height:
++            neighbors.append(ny * width + nx)
++    return neighbors
++
++def patchmatch_mvs(I_ref, I_src, camera_poses, num_iterations, phi_max, eta):
+     """
+-    I_ref: Reference image
++    I_ref: Reference image (list of pixel values)
+     I_src: List of source images
+     camera_poses: List of camera poses for I_src relative to I_ref
+-    num_iterations: Number of PatchMatch iterations
++    num_iterations: Number of PatchMatch/GEM iterations
++    phi_max: Pre-defined cap for reprojection error
++    eta: Weight for geometric consistency
+     """
+-    L = I_ref.height * I_ref.width
++    height = len(I_ref) // len(I_ref[0])
++    width = len(I_ref[0])
++    L = height * width
++    M = len(I_src)
++    
+     # Initialize depth and normal for each pixel
+-    depth = random_positive_random(L)
+-    normal = random_unit_vector(L)
++    depth = [random.uniform(0.1, 10.0) for _ in range(L)]
++    normal = [random.random() * 2 - 1 for _ in range(3 * L)]  # Flattened [x,y,z]
+     
+-    # Initialize view probabilities
+-    P = uniform_distribution(len(I_src), L)
++    # Initialize view probabilities uniformly
++    P = [[1.0 / M] * L for _ in range(M)]
+     
+     for iteration in range(num_iterations):
+-        # PatchMatch Propagation and Random Search
+         for pixel_l in range(L):
+-            # Current estimate
+             d_l = depth[pixel_l]
+-            n_l = normal[pixel_l]
+-            
+-            best_cost = infinity
++            n_l = normal[3*pixel_l:3*pixel_l+3]
++            
++            best_cost = float('inf')
+             best_d = d_l
+             best_n = n_l
+             
+             # Evaluate cost for each source view
+-            for m, I_m in enumerate(I_src):
+-                # Extract homography-warped patch from source image
+-                A_m_l = extract_homography_warped_patch(I_m, camera_poses[m], d_l, n_l)
++            for m in range(M):
++                # Extract homography-warped patch (simplified as direct pixel access for traceability)
++                A_m_l = I_src[m][pixel_l]
+                 
+                 # Compute photometric cost (NCC)
+-                rho = normalized_cross_correlation(I_ref[pixel_l], A_m_l)
++                rho = compute_ncc(I_ref[pixel_l], A_m_l)
+                 
+                 # Compute geometric cost (forward-backward reprojection error)
+-                phi = forward_backward_reprojection_error(d_l, n_l, I_ref, I_m, camera_poses[m])
++                phi = compute_reprojection_error(d_l, n_l, camera_poses[0], camera_poses[m])
+                 
+                 # Cap geometric cost
+@@ -100,12 +136,6 @@
+                 cost = 1 - rho + eta * phi_capped
+                 
+-                # Update view probability (softmax or similar)
+-                # P_l(m) is updated based on costs across all views
+-                
+-                # Update best estimate if this view provides better consistency
+-                # Note: In standard PatchMatch, we search for d, n directly.
+-                # Here, the cost function aggregates over views.
+-                # A common approach is to minimize the weighted sum.
+-                weighted_cost = P[m] * cost
++                # Weighted cost
++                weighted_cost = P[m][pixel_l] * cost
+                 
+                 if weighted_cost < best_cost:
+@@ -114,19 +144,17 @@
+                     best_n = n_l
+             
+-            # Propagate best neighbor's estimate (standard PatchMatch step)
+-            # [G] Neighbor indices depend on grid structure; assume get_neighbors() exists
+-            neighbors = get_neighbors(pixel_l)
++            # Propagate best neighbor's estimate
++            neighbors = get_neighbors(pixel_l, width, height)
+             for neighbor in neighbors:
+                 d_n = depth[neighbor]
+-                n_n = normal[neighbor]
+-                
+-                # Evaluate cost for neighbor's estimate
++                n_n = normal[3*neighbor:3*neighbor+3]
++                
+                 neighbor_cost = 0
+-                for m, I_m in enumerate(I_src):
+-                    A_m_n = extract_homography_warped_patch(I_m, camera_poses[m], d_n, n_n)
+-                    rho_n = normalized_cross_correlation(I_ref[neighbor], A_m_n)
+-                    phi_n = forward_backward_reprojection_error(d_n, n_n, I_ref, I_m, camera_poses[m])
++                for m in range(M):
++                    A_m_n = I_src[m][neighbor]
++                    rho_n = compute_ncc(I_ref[neighbor], A_m_n)
++                    phi_n = compute_reprojection_error(d_n, n_n, camera_poses[0], camera_poses[m])
+                     phi_capped_n = min(phi_n, phi_max)
+-                    neighbor_cost += P[m] * (1 - rho_n + eta * phi_capped_n)
++                    neighbor_cost += P[m][neighbor] * (1 - rho_n + eta * phi_capped_n)
+                 
+                 if neighbor_cost < best_cost:
+@@ -136,17 +164,16 @@
+             
+             # Random search around best estimate
+-            # [G] Standard PatchMatch random search step
+-            d_rand = best_d + random_gaussian()
+-            n_rand = best_n + random_gaussian()
+-            # Normalize n_rand
+-            n_rand = n_rand / norm(n_rand)
++            d_rand = best_d + random.gauss(0, 0.1)
++            n_rand = [best_n[i] + random.gauss(0, 0.05) for i in range(3)]
++            norm_val = math.sqrt(sum(x**2 for x in n_rand))
++            n_rand = [x / norm_val for x in n_rand]
+             
+             rand_cost = 0
+-            for m, I_m in enumerate(I_src):
+-                A_m_rand = extract_homography_warped_patch(I_m, camera_poses[m], d_rand, n_rand)
+-                rho_rand = normalized_cross_correlation(I_ref[pixel_l], A_m_rand)
+-                phi_rand = forward_backward_reprojection_error(d_rand, n_rand, I_ref, I_m, camera_poses[m])
++            for m in range(M):
++                A_m_rand = I_src[m][pixel_l]
++                rho_rand = compute_ncc(I_ref[pixel_l], A_m_rand)
++                phi_rand = compute_reprojection_error(d_rand, n_rand, camera_poses[0], camera_poses[m])
+                 phi_capped_rand = min(phi_rand, phi_max)
+-                rand_cost += P[m] * (1 - rho_rand + eta * phi_capped_rand)
++                rand_cost += P[m][pixel_l] * (1 - rho_rand + eta * phi_capped_rand)
+             
+             if rand_cost < best_cost:
+@@ -155,20 +182,18 @@
+             
+             depth[pixel_l] = best_d
+-            normal[pixel_l] = best_n
++            normal[3*pixel_l:3*pixel_l+3] = best_n
+         
+-        # Update view probabilities P_l(m) based on final costs
+-        # [G] Implement view selection logic, e.g., softmax over inverse costs
++        # Update view probabilities P_l(m) based on final costs (GEM step)
+         for pixel_l in range(L):
+             costs = []
+-            for m, I_m in enumerate(I_src):
++            for m in range(M):
+                 d_l = depth[pixel_l]
+-                n_l = normal[pixel_l]
+-                A_m_l = extract_homography_warped_patch(I_m, camera_poses[m], d_l, n_l)
+-                rho = normalized_cross_correlation(I_ref[pixel_l], A_m_l)
+-                phi = forward_backward_reprojection_error(d_l, n_l, I_ref, I_m, camera_poses[m])
++                n_l = normal[3*pixel_l:3*pixel_l+3]
++                A_m_l = I_src[m][pixel_l]
++                rho = compute_ncc(I_ref[pixel_l], A_m_l)
++                phi = compute_reprojection_error(d_l, n_l, camera_poses[0], camera_poses[m])
+                 phi_capped = min(phi, phi_max)
+                 cost = 1 - rho + eta * phi_capped
+                 costs.append(cost)
+-            # Softmax to get probabilities
+             P[:, pixel_l] = softmax(costs)
+             
+@@ -181,13 +206,13 @@
+ 
+ ## Operating characteristics
+-*   **Time Complexity:** Depends on the number of pixels $L$, number of source views $M$, and PatchMatch iterations. PatchMatch provides an efficient approximation to dense stereo matching, typically $O(L \cdot M \cdot \text{iterations})$.
+-*   **Memory Complexity:** $O(L \cdot M)$ to store patch costs and probabilities.
++*   **Time Complexity:** Not given in the sources.
++*   **Memory Complexity:** Not given in the sources.
+ *   **Strengths:** Can produce plausible geometry of textured surfaces; traditionally well-explored and robust for multi-view setups with good texture [S1].
+ *   **Limitations:** Struggles with textureless areas; artifacts and missing parts in low-texture regions; relies heavily on photometric consistency [S1].
+-*   **When to Use:** Scenes with rich textures and multiple overlapping views with known poses.
+-*   **When Not to Use:** Scenes with large textureless regions or insufficient overlap.
++*   **When to Use:** Scenes with rich textures and multiple overlapping views with known poses [G].
++*   **When Not to Use:** Scenes with large textureless regions or insufficient overlap [G].
+ 
+ ## Background
+-PM-MVS is traditionally one of the most explored techniques in multi-view stereo [S1]. It builds on the PatchMatch algorithm [3, 4] for efficient correspondence search and formulates the stereo problem as a probabilistic graphical model solved via GEM [S1]. It is often used as a preprocessing step for meshing algorithms like Screened Poisson surface reconstruction [S1].
++PM-MVS is traditionally one of the most explored techniques in multi-view stereo [S1]. It builds on the PatchMatch algorithm for efficient correspondence search and formulates the stereo problem as a probabilistic graphical model solved via GEM [S1]. It is often used as a preprocessing step for meshing algorithms like Screened Poisson surface reconstruction [S1].
+ 
+ ## Sources

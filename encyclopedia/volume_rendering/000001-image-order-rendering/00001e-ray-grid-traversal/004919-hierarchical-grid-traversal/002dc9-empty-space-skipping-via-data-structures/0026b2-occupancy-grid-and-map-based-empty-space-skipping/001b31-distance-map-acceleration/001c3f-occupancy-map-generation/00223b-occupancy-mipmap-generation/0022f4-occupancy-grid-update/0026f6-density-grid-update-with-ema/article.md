@@ -1,0 +1,203 @@
+# Density Grid Update with EMA
+
+Also called: EMA Occupancy Grid Update, Taichi Dense Grid Evaluation & Occupancy Thresholding
+
+## Overview
+This method periodically refreshes a 3D density grid using an Exponential Moving Average (EMA) of neural network predictions to stabilize training and generate a binary occupancy map for ray-marching acceleration [S1, unofficial][S2, unofficial][S4, unofficial]. It sets itself apart from static grid updates by continuously refining the density representation over time, allowing the occupancy threshold to adapt to the evolving scene geometry [S1, unofficial][S2, unofficial]. It builds on [Occupancy Grid Update](2916-occupancy-grid-update.md) by providing the specific density estimation and EMA smoothing mechanism required to populate the occupancy grid.
+
+## How it works
+**Inputs:**
+- Neural network density evaluation function $f_{net}(x)$ that returns density $\sigma$ at world coordinate $x$ [S3, unofficial][S4, unofficial].
+- Grid resolution $R$ (e.g., $256^3$) [S3, unofficial][S4, unofficial].
+- Bounding box bounds $[-B, B]^3$ [S4, unofficial].
+- EMA decay factor $\alpha$ (typical value: 0.95) [S1, unofficial][S2, unofficial].
+- Occupancy threshold $T_{occ}$ (typical value: 0.01) [S1, unofficial][S2, unofficial].
+- Warmup steps $W$ (typical value: 256) [S1, unofficial][S2, unofficial].
+- Current density grid $D_{old}$ (initialized to zeros) [S4, unofficial].
+
+**Outputs:**
+- Updated density grid $D_{new}$ [S4, unofficial].
+- Binary occupancy grid $O$ where $O_{ijk} = 1$ if $D_{new}[ijk] > T_{occ}$, else 0 [S1, unofficial][S2, unofficial].
+
+**Data Structures:**
+- `density_grid`: 3D tensor of shape $(R, R, R)$ storing EMA-smoothed density values [S4, unofficial].
+- `binaries`: 3D boolean tensor of shape $(R, R, R)$ storing occupancy status [S1, unofficial].
+
+**Steps:**
+
+1. **Initialization**: If $D_{old}$ is not provided, initialize $D_{new} = \mathbf{0}$ with shape $(R, R, R)$ [S4, unofficial]. Set half-grid size $h = B / R$ [S4, unofficial].
+
+2. **Sampling Strategy**:
+   - If current training step $t < W$: Sample all grid cells uniformly [S1, unofficial][S2, unofficial].
+   - If $t \ge W$: Sample $N = R^3 / 4$ cells, mixing uniform samples and cells currently marked as occupied in the occupancy grid [S1, unofficial][S2, unofficial].
+
+3. **Coordinate Generation**:
+   - For each sampled cell index $(i, j, k)$, compute normalized grid coordinates $g_{ijk} = (i, j, k) / R$ [S1, unofficial].
+   - Add uniform random noise $\epsilon \sim \mathcal{U}(-0.5, 0.5)$ to jitter sampling within the voxel: $g'_{ijk} = g_{ijk} + \epsilon / R$ [S1, unofficial].
+   - Transform to world coordinates: $x_{ijk} = (g'_{ijk} - 0.5) \times 2B$ [S1, unofficial][S2, unofficial].
+   - *Alternative Chunked Approach (S4)*: Generate coordinate lines for X, Y, Z axes using `torch.linspace` from $-B + h$ to $B - h$. Construct meshgrid points $P = \{x, y, z\}$. Add noise $\delta \sim \mathcal{U}(-h, h)$ to each point: $P_{noisy} = P + \delta$ [S4, unofficial].
+
+4. **Density Evaluation**:
+   - Query the neural network for density at each world coordinate: $\sigma_{ijk} = f_{net}(x_{ijk})$ [S3, unofficial][S4, unofficial].
+   - Detach gradients if only updating the grid for inference/acceleration purposes [S4, unofficial].
+
+5. **EMA Update**:
+   - Update the density grid using the EMA maximum rule to preserve high-density regions and smooth noise [S1, unofficial][S4, unofficial]:
+     $$ D_{new}[ijk] = \max(D_{old}[ijk] \times \alpha, \sigma_{ijk}) $$
+   - *Note*: Some implementations use `torch.maximum` directly on the tensor slice [S1, unofficial].
+
+6. **Mean Density Calculation**:
+   - Compute the mean density of the updated grid: $\bar{\sigma} = \text{mean}(D_{new})$ [S2, unofficial][S4, unofficial].
+
+7. **Occupancy Thresholding**:
+   - Clamp the threshold $T_{occ}$ to be no greater than the current mean density to ensure sufficient active cells:
+     $$ T_{occ} = \min(T_{occ}, \bar{\sigma}) $$
+   - *Note*: Some sources suggest clamping the mean occupancy itself, but density-based thresholding is standard for density grids [S1, unofficial][S2, unofficial].
+
+8. **Binary Occupancy Generation**:
+   - Create the binary occupancy grid:
+     $$ O[ijk] = (D_{new}[ijk] > T_{occ}) $$
+   - *Note*: In hierarchical grids, this step may involve enabling/disabling specific IJK indices in a sparse data structure (e.g., OpenVDB) based on $O$ [S2, unofficial].
+
+9. **Tree Reinitialization (Optional)**:
+   - If using a hierarchical structure like OpenVDB, reinitialize the density grid tree with the current resolution and levels, then set values from the binary occupancy grid [S1, unofficial].
+
+**Pseudocode:**
+
+> **Unverified code.** The code below did not pass a test run against a reference implementation, or no test fits it, so it may contain errors.
+
+```python
+import torch
+import torch.nn.functional as F
+
+def update_density_grid_with_ema(
+    density_net,
+    resolution: int,
+    bound: float,
+    ema_decay: float = 0.95,
+    occ_thre: float = 0.01,
+    warmup_steps: int = 256,
+    current_step: int = 0,
+    old_density_grid: torch.Tensor = None
+) -> tuple:
+    """
+    Updates the 3D density grid using EMA and generates binary occupancy.
+    
+    Args:
+        density_net: Neural network function f(x) -> density.
+        resolution: Grid resolution R (e.g., 256).
+        bound: Half-size of the bounding box [-bound, bound]^3.
+        ema_decay: EMA decay factor alpha.
+        occ_thre: Initial occupancy threshold T_occ.
+        warmup_steps: Number of steps to sample all cells.
+        current_step: Current training step t.
+        old_density_grid: Previous density grid (R, R, R).
+        
+    Returns:
+        new_density_grid: Updated density grid (R, R, R).
+        occupancy_grid: Binary occupancy grid (R, R, R).
+    """
+    device = old_density_grid.device if old_density_grid is not None else torch.device('cpu')
+    
+    # Initialize density grid if not provided
+    if old_density_grid is None:
+        density_grid = torch.zeros((resolution, resolution, resolution), device=device)
+    else:
+        density_grid = old_density_grid.clone()
+        
+    half_grid_size = bound / resolution
+    
+    # Determine sampling strategy
+    if current_step < warmup_steps:
+        # Sample all cells
+        indices = torch.meshgrid(
+            torch.arange(resolution, device=device),
+            torch.arange(resolution, device=device),
+            torch.arange(resolution, device=device),
+            indexing='ij'
+        )
+        indices = torch.stack(indices, dim=-1).reshape(-1, 3)
+    else:
+        # Sample N = R^3 / 4 cells, mixing uniform and occupied
+        # Note: In practice, 'occupied' refers to the previous occupancy grid
+        # For simplicity, we assume a uniform sample if occupancy grid is not passed
+        # or we sample randomly from the volume
+        N = (resolution ** 3) // 4
+        # Random uniform sampling within the volume
+        coords = torch.rand(N, 3, device=device) * resolution
+        indices = coords.long() % resolution # Wrap around if out of bounds
+        
+    # Generate world coordinates with jitter
+    # Normalize to [0, 1], add noise, then scale to world space
+    # Method 1: Direct from indices
+    grid_coords = indices.float() / resolution # [0, 1]
+    noise = torch.rand_like(grid_coords) - 0.5 # [-0.5, 0.5]
+    jittered_coords = grid_coords + noise / resolution # Jitter within voxel
+    
+    # Transform to world space [-bound, bound]
+    # Centered at 0: (coord - 0.5) * 2 * bound
+    world_coords = (jittered_coords - 0.5) * 2 * bound
+    
+    # Evaluate density
+    # density_net expects [N, 3] input
+    densities = density_net(world_coords).squeeze(-1).detach()
+    
+    # Update density grid using EMA
+    # Map flat indices back to 3D grid for update
+    # Flatten indices for gathering
+    flat_indices = indices[:, 0] * (resolution ** 2) + indices[:, 1] * resolution + indices[:, 2]
+    
+    # Gather current values
+    current_values = density_grid.view(-1)[flat_indices]
+    
+    # EMA Update: max(old * decay, new)
+    new_values = torch.maximum(current_values * ema_decay, densities)
+    
+    # Scatter back
+    density_grid.view(-1)[flat_indices] = new_values
+    
+    # Calculate mean density for thresholding
+    mean_density = torch.mean(density_grid).item()
+    
+    # Clamp threshold
+    effective_thre = min(occ_thre, mean_density)
+    
+    # Generate binary occupancy
+    occupancy_grid = (density_grid > effective_thre)
+    
+    return density_grid, occupancy_grid
+```
+
+## Subtopics
+
+### [Occupancy Grid Update with EMA](4650-occupancy-grid-update-with-ema.md)
+This variant applies the EMA principle directly to occupancy values rather than density values, maintaining a dynamic occupancy grid that is continuously refined during training. It differs from the density grid update by operating on binary or soft occupancy estimates derived from the scene representation, allowing for more efficient empty-space skipping by adapting the empty-space map in real-time. It is chosen when the primary goal is accelerating ray marching through dynamic occupancy updates rather than refining the density field itself.
+
+### [Voxel Prior Loss](10726-voxel-prior-loss.md)
+This is not an update method but a regularization term used in conjunction with voxel grids. It aligns learned Gaussian primitives with a precomputed voxel grid occupancy to suppress floating artifacts in empty space. It sets itself apart by enforcing geometric priors derived from voxel occupancy, ensuring Gaussians in occupied regions maintain appropriate scale and opacity.
+
+### Map Integration (Fmap)
+This method integrates a new local map observation into a global map by averaging latent codes based on observation counts, handling multiple observations of the same 3D point [S5]. It uses the formula:
+$$ m^g_{t}(u,v) = \frac{m^l_{t}(u,v) \cdot n^l_{t}(u,v) + m^g_{t-1}(u,v) \cdot n^g_{t-1}(u,v)}{n^l_t(u,v) + n^g_{t-1}(u,v)} $$
+$$ n^g_{t}(u,v) = n^l_t(u,v) + n^g_{t-1}(u,v) $$
+where $m^g_t$ is the global map feature, $m^l_t$ is the local feature, and $n$ represents observation counts [S5]. It is used in visual navigation contexts to build consistent global maps from local observations [S5].
+
+## Operating characteristics
+- **Time Complexity**: $O(N)$ where $N$ is the number of sampled cells per update step [S1, unofficial][S4, unofficial]. If all cells are sampled (warmup), $N = R^3$ [S1, unofficial].
+- **Memory Complexity**: $O(R^3)$ for the density grid and $O(R^3)$ for the binary occupancy grid [S3, unofficial][S4, unofficial].
+- **Measured Performance**: Not given in the sources.
+- **Scaling**: Linear with respect to the number of sampled cells. The EMA update is element-wise and highly parallelizable on GPU [S1, unofficial][S4, unofficial].
+- **Strengths**: Stabilizes training by smoothing noisy density predictions; adapts to scene changes over time; enables efficient empty-space skipping [S1, unofficial][S2, unofficial].
+- **Limitations**: Requires periodic full or partial grid evaluations; EMA decay factor needs tuning; warmup phase requires sampling all cells which is expensive for high resolutions [S1, unofficial][S2, unofficial].
+- **When to use**: During training of neural radiance fields or Gaussian splatting to maintain an up-to-date occupancy grid for acceleration [S1, unofficial][S2, unofficial].
+- **When not to use**: When the scene is static and a one-time occupancy grid generation is sufficient; when memory bandwidth is a bottleneck and $R^3$ is too large [S1, unofficial].
+
+## Background
+The method originates from implementations in unofficial repositories such as `faster-occgrid` and `taylor-nerf`, which aim to accelerate volume rendering by maintaining dynamic occupancy grids [S1, unofficial][S2, unofficial]. It builds on the concept of using occupancy grids for empty-space skipping, as described in [Occupancy Grid Update](2916-occupancy-grid-update.md), and applies EMA smoothing to density predictions to create a robust occupancy estimator [S1, unofficial][S2, unofficial]. The technique is commonly used in differentiable volume rendering pipelines to improve training efficiency [S1, unofficial][S2, unofficial].
+
+## Sources
+[S1] Yosshi999/faster-occgrid, https://github.com/Yosshi999/faster-occgrid, fetched 2026-10-24 (unofficial)
+[S2] taylor2nerf/taylor-nerf, https://github.com/taylor2nerf/taylor-nerf, fetched 2026-10-26 (unofficial)
+[S3] mdmubarak/OctaNeRF, https://github.com/mdmubarak/OctaNeRF, fetched 2026-10-27 (unofficial)
+[S4] megvii-research/cv-master-ex, https://github.com/megvii-research/cv-master-ex, fetched 2026-10-27 (unofficial)
+[S5] Renderable Neural Radiance Map for Visual Navigation, https://doi.org/10.1109/cvpr52729.2023.00878, fetched 2026-10-26

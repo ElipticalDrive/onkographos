@@ -1,0 +1,146 @@
+--- v002.md
++++ v003.md
+@@ -1,5 +1,4 @@
+ # GPU-accelerated Marching Cubes Pipeline
+ 
+-Also called: Six-stage GPU-accelerated Marching Cubes methodology
+ 
+ ## Overview
+@@ -40,7 +39,5 @@
+ **Pseudocode:**
+ ```python
+-# Standard operations defined inline for self-containment
+ def classify_cell(vertex_values, isovalue):
+-    # Returns integer 0-255 based on sign of (v - h) for 8 vertices
+     index = 0
+     for i, v in enumerate(vertex_values):
+@@ -50,38 +47,26 @@
+ 
+ def count_vertices_for_case(cell_index):
+-    # Returns vertex count for the 15 non-degenerate MC cases
+-    # Case 0, 15: 0 vertices. Others: 2, 4, 6, or 8 depending on topology.
+-    # Simplified mapping for standard MC:
+-    counts = {0: 0, 15: 0, 1: 2, 2: 2, 3: 4, 4: 2, 5: 4, 6: 4, 7: 6,
+-              8: 4, 9: 4, 10: 6, 11: 6, 12: 4, 13: 4, 14: 6}
++    # Standard MC vertex counts per case [G]
++    counts = {0: 0, 1: 2, 2: 2, 3: 4, 4: 2, 5: 4, 6: 4, 7: 6,
++              8: 4, 9: 4, 10: 6, 11: 6, 12: 4, 13: 4, 14: 6, 15: 0}
+     return counts.get(cell_index, 0)
+ 
+-def interpolate_edge(v1, v2, h):
+-    # Linear interpolation t = (h - v1) / (v2 - v1)
++def interpolate_edge(v1, v2, n1, n2, isovalue):
+     denom = v2 - v1
+     if abs(denom) < 1e-9:
+-        return (v1 + v2) * 0.5
+-    return v1 + (h - v1) / denom
+-
+-def get_edge_intersections(cell_index, vertex_values, isovalue):
+-    # Returns list of (position, normal) for the 12 edges
+-    intersections = []
+-    edge_pairs = [(0,1),(1,2),(2,3),(3,0), (4,5),(5,6),(6,7),(7,4),
+-                  (0,4),(1,5),(2,6),(3,7)]
+-    for e1, e2 in edge_pairs:
+-        v1, v2 = vertex_values[e1], vertex_values[e2]
+-        if (v1 < isovalue) != (v2 < isovalue):
+-            t = interpolate_edge(v1, v2, isovalue)
+-            pos = (v1 + v2) * 0.5 # Approximate position along edge
+-            normal = (v1 + v2) * 0.5 # Approximate normal from gradient
+-            intersections.append((pos, normal))
+-    return intersections
++        t = 0.5
++    else:
++        t = (isovalue - v1) / denom
++    pos = v1 + t * (v2 - v1)
++    normal = n1 + t * (n2 - n1) # Interpolated normal [G]
++    return pos, normal
+ 
+ # Stage 1 & 2: CPU Preprocessing
+ def cpu_preprocessing(volume_data, dimensions, structure_type):
+-    ram_volume = volume_data.copy() # Allocate in RAM
+-    vram_volume = volume_data.copy() # Allocate in VRAM
+-    spatial_structure = build_spatial_tree(ram_volume, structure_type) # [G]
+-    del ram_volume # Free RAM
++    ram_volume = volume_data.copy()
++    vram_volume = volume_data.copy()
++    # Construct spatial structure (k-d tree, interval tree, quadtree, or octree) [G]
++    spatial_structure = None # [G]
++    del ram_volume
+     return spatial_structure, vram_volume
+ 
+@@ -89,36 +74,46 @@
+ def cpu_find_active_cells(spatial_structure, isovalue):
+     active_cells = []
++    # Traverse structure to find nodes where isosurface exists [S1]
+     for node in spatial_structure.traverse(isovalue):
+         active_cells.append(node.index)
+     return active_cells
+ 
+-# Stage 4: GPU Buffer Allocation (First Pass)
++# Stage 4: GPU Buffer Allocation
+ def gpu_allocate_buffers(active_cells, vram_volume, isovalue):
+     total_vertices = 0
+-    for cell_index in active_cells:
+-        vertex_values = [vram_volume[cell_index][i] for i in range(8)]
++    for cell_idx in active_cells:
++        vertex_values = [vram_volume[cell_idx][i] for i in range(8)]
+         mc_index = classify_cell(vertex_values, isovalue)
+         total_vertices += count_vertices_for_case(mc_index)
+-    
+-    buffer_P = allocate_vram(total_vertices * 3) # 3 floats per vertex
+-    buffer_N = allocate_vram(total_vertices * 3) # 3 floats per normal
+-    return buffer_P, buffer_N
++    # Allocate exact VRAM space for vertex and normal buffers [S1]
++    buffer_P = [None] * (total_vertices * 3)
++    buffer_N = [None] * (total_vertices * 3)
++    return buffer_P, buffer_N, total_vertices
+ 
+-# Stage 5: GPU Triangle Generation (Second Pass)
++# Stage 5: GPU Triangle Generation
+ def gpu_generate_triangles(active_cells, vram_volume, buffer_P, buffer_N, isovalue):
+-    for cell_index in active_cells:
+-        vertex_values = [vram_volume[cell_index][i] for i in range(8)]
+-        mc_index = classify_cell(vertex_values, isovalue) # Recomputed as per source
+-        
+-        intersections = get_edge_intersections(mc_index, vertex_values, isovalue)
+-        
+-        # Write to buffers using shared memory for intra-block sharing [S1]
++    write_offset = 0
++    for cell_idx in active_cells:
++        vertex_values = [vram_volume[cell_idx][i] for i in range(8)]
++        mc_index = classify_cell(vertex_values, isovalue) # Recomputed [S1]
++        # Get edge intersections using shared memory for intra-block sharing [S1]
++        intersections = []
++        edge_pairs = [(0,1),(1,2),(2,3),(3,0), (4,5),(5,6),(6,7),(7,4),
++                      (0,4),(1,5),(2,6),(3,7)]
++        for e1, e2 in edge_pairs:
++            v1, v2 = vertex_values[e1], vertex_values[e2]
++            if (v1 < isovalue) != (v2 < isovalue):
++                n1, n2 = vram_volume[cell_idx][e1+8], vram_volume[cell_idx][e2+8]
++                pos, normal = interpolate_edge(v1, v2, n1, n2, isovalue)
++                intersections.append((pos, normal))
+         for pos, normal in intersections:
+-            write_to_buffer(buffer_P, pos)
+-            write_to_buffer(buffer_N, normal)
++            buffer_P[write_offset] = pos
++            buffer_N[write_offset] = normal
++            write_offset += 1
+ 
+ # Stage 6: Rendering
+ def gpu_render(buffer_P, buffer_N):
+-    draw_geometry(buffer_P, buffer_N) # [G]
++    # Render from vertex buffers [S1]
++    pass
+ ```
+ 
+@@ -131,8 +126,8 @@
+ 
+ ### [Marching Cubes with Spatial Acceleration Structures](14738-marching-cubes-with-spatial-acceleration-structures.md)
+-A variant that accelerates the search for active cells using spatial data structures (k-d tree, interval tree, quadtree, octree) implemented on the GPU, but where the search itself is performed on the CPU.
++A variant that accelerates the search for active cells using spatial data structures (k-d tree, interval tree, quadtree, octree) implemented on the GPU, but where the search itself is performed on the CPU. It distinguishes itself from pure GPU implementations by offloading the tree traversal logic to the CPU to avoid the overhead of simulating recursion on hardware that lacks native recursive support.
+ 
+ ## Operating characteristics
+-*   **Complexity:** The CPU handles the spatial traversal ($O(N)$ in worst case, but optimized by structure) and the GPU handles the parallel classification and interpolation ($O(A)$ where $A$ is the number of active cells) [S1].
++*   **Complexity:** The CPU handles spatial traversal and the GPU handles parallel classification and interpolation [S1].
+ *   **Performance:** The method balances CPU and GPU tasks to maximize performance [S1]. It relies on the parallelization of the active cell list processing on the GPU [S1].
+ *   **Memory:** Requires allocation for volume data in VRAM, spatial structure in RAM, and exact-sized vertex buffers in VRAM. Extra memory for span-space is needed for non-octree structures [S1].

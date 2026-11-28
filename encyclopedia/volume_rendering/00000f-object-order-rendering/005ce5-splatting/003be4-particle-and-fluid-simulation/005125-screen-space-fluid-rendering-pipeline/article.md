@@ -1,0 +1,151 @@
+# Screen-Space Fluid Rendering Pipeline
+
+Also called: Van der Laan et al. pipeline, vtkOpenGLFluidMapper pipeline
+
+## Overview
+The Screen-Space Fluid Rendering Pipeline is a real-time rendering technique for visualizing particle-based fluid simulations (such as Smoothed Particle Hydrodynamics) by converting discrete particle data into a continuous fluid volume appearance using depth and thickness buffers, thereby avoiding the computational cost of ray tracing [S1, unofficial]. It distinguishes itself from standard particle splatting by accumulating sphere thickness in screen space to derive surface normals and opacity, allowing for the rendering of millions of particles at interactive frame rates [S1, unofficial].
+
+## How it works
+**Inputs and Outputs:**
+*   **Input:** A set of particles $P_i$ provided as `vtkPolyData` [S1, unofficial]. Each particle is defined by its position $\mathbf{p}_i$, radius $r_i$, and optional scalar color $\mathbf{c}_i$ [S1, unofficial].
+*   **Output:** A final composited image with fluid appearance, including surface normals and opacity derived from screen-space buffers [S1, unofficial].
+
+**Data Structures:**
+The pipeline utilizes several render targets (framebuffers) stored in screen space:
+1.  **Depth Buffer:** Stores the depth of the nearest particle surface [S1, unofficial].
+2.  **Thickness Buffer:** Accumulates the radial thickness of overlapping particles [S1, unofficial].
+3.  **Color Buffer (Optional):** Accumulates particle colors [S1, unofficial].
+4.  **Filtered Depth Buffer:** Smoothed version of the depth buffer for normal estimation [S1, unofficial].
+5.  **Filtered Thickness Buffer:** Smoothed version of the thickness buffer for opacity/density [S1, unofficial].
+
+**Numbered Steps:**
+
+1.  **Depth Pass:** Render all particles as spheres into the **Depth Buffer** with the depth test enabled [S1, unofficial]. This creates a bumpy surface representing the fluid boundary, and automatically discards fluid pixels occluded by static objects [S1, unofficial].
+2.  **Thickness Pass:** Render all particles as spheres into the **Thickness Buffer** with the depth test disabled and blending enabled [S1, unofficial]. This accumulates the spheres' thickness [S1, unofficial].
+3.  **Color Pass (Optional):** If particle colors are present, repeat the thickness accumulation pass into a **Color Buffer** using blending to accumulate color intensity [S1, unofficial].
+4.  **Filtering:** Apply filtering to the noisy buffers to produce smooth results [S1, unofficial].
+    *   **Thickness/Color Filtering:** Apply a high-performance, separable Gaussian filter (1-D Gaussian filters in each dimension) [S1, unofficial].
+    *   **Depth Filtering:** Apply a depth-specific filter to the Depth Buffer to create the **Filtered Depth Buffer** [S1, unofficial]. Distinct surfaces close in texture coordinates but with different depths must not be blended, while parts of the same surface with depth differences due to grazing angles must be smoothed [S1, unofficial]. Two modes are available: *Bilateral Gaussian Filter* (simpler, lower quality) and *Narrow-Range Filter* (default, higher quality) [S1, unofficial].
+5.  **Composition:** Combine the **Filtered Depth Buffer** (to derive normals), **Filtered Thickness Buffer** (for opacity/density), and **Color Buffer** (if used) into the final rendering result [S1, unofficial].
+
+**Pseudocode:**
+
+> **Unverified code.** The code below did not pass a test run against a reference implementation, or no test fits it, so it may contain errors.
+
+```python
+import numpy as np
+
+def screen_space_fluid_rendering(particles, viewport_width, viewport_height):
+    # Initialize screen-space buffers
+    depth_buffer = np.full((viewport_height, viewport_width), np.inf, dtype=np.float32)
+    thickness_buffer = np.zeros((viewport_height, viewport_width), dtype=np.float32)
+    color_buffer = np.zeros((viewport_height, viewport_width, 3), dtype=np.float32)
+    has_color = any(p.color is not None for p in particles)
+
+    # Pass 1: Depth Buffer with Depth Test
+    for p in particles:
+        rasterize_sphere_depth(p, depth_buffer)
+
+    # Pass 2: Thickness Buffer without Depth Test, Additive Blending
+    for p in particles:
+        rasterize_sphere_thickness(p, thickness_buffer)
+
+    # Pass 3: Color Buffer (Optional)
+    if has_color:
+        for p in particles:
+            if p.color is not None:
+                rasterize_sphere_color(p, color_buffer)
+
+    # Filtering
+    filtered_thickness = separable_gaussian_filter(thickness_buffer)
+    filtered_color = separable_gaussian_filter(color_buffer) if has_color else None
+    filtered_depth = narrow_range_filter(depth_buffer)  # Default filter
+
+    # Composition
+    normals = compute_normals_from_depth(filtered_depth)
+    opacity = map_thickness_to_opacity(filtered_thickness)
+    return composite_buffers(normals, opacity, filtered_color)
+
+def rasterize_sphere_depth(p, buffer):
+    # Project sphere to screen, rasterize pixels, write min depth
+    screen_pos, radius = project_to_screen(p.position, p.radius)
+    for y in range(max(0, int(screen_pos.y - radius)), min(buffer.shape[0], int(screen_pos.y + radius))):
+        for x in range(max(0, int(screen_pos.x - radius)), min(buffer.shape[1], int(screen_pos.x + radius))):
+            dist = np.sqrt((x - screen_pos.x)**2 + (y - screen_pos.y)**2)
+            if dist <= radius:
+                depth_val = compute_sphere_depth(screen_pos, radius, dist)
+                if depth_val < buffer[y, x]:
+                    buffer[y, x] = depth_val
+
+def rasterize_sphere_thickness(p, buffer):
+    # Project sphere to screen, rasterize pixels, add thickness (additive blend)
+    screen_pos, radius = project_to_screen(p.position, p.radius)
+    for y in range(max(0, int(screen_pos.y - radius)), min(buffer.shape[0], int(screen_pos.y + radius))):
+        for x in range(max(0, int(screen_pos.x - radius)), min(buffer.shape[1], int(screen_pos.x + radius))):
+            dist = np.sqrt((x - screen_pos.x)**2 + (y - screen_pos.y)**2)
+            if dist <= radius:
+                thickness = np.sqrt(radius**2 - dist**2)
+                buffer[y, x] += thickness
+
+def rasterize_sphere_color(p, buffer):
+    # Project sphere to screen, rasterize pixels, add color (additive blend)
+    screen_pos, radius = project_to_screen(p.position, p.radius)
+    for y in range(max(0, int(screen_pos.y - radius)), min(buffer.shape[0], int(screen_pos.y + radius))):
+        for x in range(max(0, int(screen_pos.x - radius)), min(buffer.shape[1], int(screen_pos.x + radius))):
+            dist = np.sqrt((x - screen_pos.x)**2 + (y - screen_pos.y)**2)
+            if dist <= radius:
+                buffer[y, x] += p.color
+
+def project_to_screen(position, radius):
+    # Standard perspective projection to screen coordinates
+    return position.xy, radius
+
+def compute_sphere_depth(screen_pos, radius, dist):
+    # Depth at distance dist from sphere center on screen
+    return screen_pos.z - np.sqrt(radius**2 - dist**2)
+
+def separable_gaussian_filter(buffer):
+    # Apply 1-D Gaussian filter in each dimension
+    kernel = np.array([0.25, 0.5, 0.25], dtype=np.float32)
+    h_filtered = np.convolve(buffer.flatten(), kernel, mode='same').reshape(buffer.shape)
+    return np.convolve(h_filtered.T, kernel, mode='same').T
+
+def narrow_range_filter(depth_buffer):
+    # Narrow-Range Filter algorithm not specified in sources [G]
+    return depth_buffer
+
+def compute_normals_from_depth(depth_buffer):
+    # Estimate normals from depth buffer gradients
+    return np.gradient(depth_buffer)
+
+def map_thickness_to_opacity(thickness_buffer):
+    # Map accumulated thickness to opacity
+    return np.clip(thickness_buffer / (thickness_buffer.max() + 1e-6), 0, 1)
+
+def composite_buffers(normals, opacity, color):
+    # Combine buffers into final image
+    return opacity, normals, color
+```
+
+**Parameters:**
+*   **Depth Filter Mode:** 'Bilateral Gaussian Filter' or 'Narrow-Range Filter' (default) [S1, unofficial].
+*   **Gaussian Kernel Size:** For thickness/color filtering, not explicitly sized in sources, but described as separable 1-D [S1, unofficial].
+
+**Edge Cases and Pitfalls:**
+*   **Grazing Angles:** At grazing angles, depth differences within the same surface can cause noise. The depth filter must smooth these without blending distinct surfaces [S1, unofficial].
+*   **Occlusion:** The pipeline correctly handles occlusion by static objects during the depth pass [S1, unofficial].
+*   **Artifacts:** Discontinuous/noisy surfaces at grazing angles and popping artifacts during camera motion occur due to lack of spatial information in the depth buffer [S1, unofficial].
+
+## Operating characteristics
+*   **Performance:** The pipeline renders more than 10 million particles in real-time [S1, unofficial].
+*   **Hardware:** Benchmarked on Intel Core i7-8700K, 32GB RAM, NVIDIA 1080Ti GPU [S1, unofficial].
+*   **Resolution:** 1920x1080 pixels [S1, unofficial].
+*   **Timing:** Render time averages over 1000 frames with explicit GPU synchronization (`glFinish`) [S1, unofficial].
+*   **Strengths:** Real-time performance for large-scale simulations; simple implementation using standard rasterization; automatic occlusion handling [S1, unofficial].
+*   **Limitations:** Refraction and reflection are non-physical (approximate environment sampling); artifacts at grazing angles and during camera motion; limited to screen-space information [S1, unofficial].
+
+## Background
+The pipeline is based on the screen-space fluid rendering method introduced by Van der Laan et al. [S1, unofficial]. It was implemented in the Visualization Toolkit (VTK) as the `vtkOpenGLFluidMapper` class to provide efficient real-time visualization of large-scale particle-based fluid simulations [S1, unofficial].
+
+## Sources
+[S1] Screen-Space Fluid Rendering in VTK - Kitware, https://www.kitware.com/screen-space-fluid-rendering-vtk/, fetched 2026-10-27 (unofficial)

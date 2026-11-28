@@ -1,0 +1,254 @@
+--- v002.md
++++ v003.md
+@@ -1,5 +1,4 @@
+ # NeRFCodec
+ 
+-Also called: Neural Feature Compression Meets Neural Radiance Fields for Memory-Efficient Scene Representation
+ 
+ ## Overview
+@@ -12,5 +11,5 @@
+ 
+ **Data Structures:**
+-The framework modifies a pre-trained 2D neural image codec (backbone: Cheng et al. [10], implementation: CompressAI [4]) [S1].
++The framework modifies a pre-trained 2D neural image codec (backbone: Cheng et al., implementation: CompressAI) [S1].
+ *   **Encoder Head ($E_{\phi1}$):** The first layer of the 2D codec, modified to accept the channel dimension of the NeRF feature planes [S1].
+ *   **Frozen Decoder Body:** The intermediate layers of the pre-trained 2D decoder remain frozen [S1].
+@@ -27,6 +26,5 @@
+ 
+ **Training Procedure:**
+-The training occurs in three phases [S1]:
+-
++The training occurs in four phases [S1]:
+ 1.  **Pre-training:** Pre-train the hybrid NeRF on the target scene for 100,000 iterations to obtain feature planes $x$ and tiny MLP $f$ [S1].
+ 2.  **Warm-up:** Perform a warm-up of the neural feature codec using only the feature plane reconstruction loss to establish a better starting point [S1].
+@@ -38,32 +36,30 @@
+ ```python
+ def train_nerf_codec(scene_data, pre_trained_neurf, pre_trained_2d_codec):
+-    """
+-    Trains the NeRFCodec framework for a specific scene.
+-    """
+-    # 1. Pre-train Hybrid NeRF
+-    # Obtain feature planes x and tiny MLP f
++    # 1. Pre-train Hybrid NeRF for 100,000 iterations
+     nerf_model = pre_trained_neurf
+-    for i in range(100000):
+-        render_loss = compute_rendering_loss(nerf_model, scene_data)
+-        render_loss.backward()
++    optimizer_neurf = Optimizer(nerf_model.parameters())
++    for _ in range(100000):
++        rays, gt_images = scene_data.sample_batch()
++        rendered_images = volume_render(nerf_model, rays)
++        loss = mse_loss(rendered_images, gt_images)
++        loss.backward()
+         optimizer_neurf.step()
+-    
++
+     feature_planes = nerf_model.get_feature_planes()
+     tiny_mlp = nerf_model.get_mlp()
+ 
+     # 2. Initialize Neural Feature Codec
+-    # Modify encoder and decoder heads of pre-trained 2D codec
+     codec = pre_trained_2d_codec
+-    codec.encoder_head = modify_layer(codec.encoder_head, target_channels=feature_planes.shape[1])
+-    codec.decoder_head = modify_layer(codec.decoder_head, target_channels=feature_planes.shape[1])
+-    
++    # Replace encoder and decoder heads to match feature plane channels
++    codec.encoder_head = replace_head(codec.encoder_head, target_channels=feature_planes.shape[1])
++    codec.decoder_head = replace_head(codec.decoder_head, target_channels=feature_planes.shape[1])
+     # Freeze intermediate decoder layers
+     for param in codec.decoder_body.parameters():
+         param.requires_grad = False
+ 
+-    # 3. Warm-up Phase
+-    # Optimize codec only with feature plane reconstruction loss
+-    optimizer_codec = torch.optim.Adam(codec.parameters())
+-    for i in range(warmup_iterations): # Iteration count not specified in sources
++    # 3. Warm-up Phase (iteration count not specified in sources)
++    optimizer_codec = Optimizer(codec.parameters())
++    warmup_iters = 1000  # [G]
++    for _ in range(warmup_iters):
+         latent = codec.encode(feature_planes)
+         reconstructed_planes = codec.decode(latent)
+@@ -72,36 +68,26 @@
+         optimizer_codec.step()
+ 
+-    # 4. Joint Training Phase
+-    # Supervised by rendering loss and entropy loss
+-    optimizer_joint = torch.optim.Adam(list(codec.parameters()) + list(tiny_mlp.parameters()))
+-    for i in range(100000):
+-        # Encode feature planes
++    # 4. Joint Training Phase (100,000 iterations)
++    optimizer_joint = Optimizer(list(codec.parameters()) + list(tiny_mlp.parameters()))
++    for _ in range(100000):
++        rays, gt_images = scene_data.sample_batch()
+         latent = codec.encode(feature_planes)
+-        
+-        # Decode feature planes
+         reconstructed_planes = codec.decode(latent)
+-        
+-        # Render image using reconstructed planes and tiny MLP
+-        rendered_image = render_scene(reconstructed_planes, tiny_mlp, scene_data)
+-        
+-        # Compute losses
+-        rendering_loss = compute_rendering_loss(rendered_image, scene_data.gt_image)
++        rendered_images = volume_render(reconstructed_planes, tiny_mlp, rays)
++        rendering_loss = mse_loss(rendered_images, gt_images)
+         entropy_loss = compute_entropy_loss(latent, codec.probability_model)
+-        
+         L_total = rendering_loss + entropy_loss
+         L_total.backward()
+         optimizer_joint.step()
+ 
+-    # 5. Quantization-Aware Training Phase
+-    # Quantize parameters to be transmitted: decoder head and MLP
+-    optimizer_qat = torch.optim.Adam(list(codec.decoder_head.parameters()) + list(tiny_mlp.parameters()))
+-    for i in range(10000):
++    # 5. Quantization-Aware Training Phase (10,000 iterations)
++    optimizer_qat = Optimizer(list(codec.decoder_head.parameters()) + list(tiny_mlp.parameters()))
++    for _ in range(10000):
++        rays, gt_images = scene_data.sample_batch()
+         latent = codec.encode(feature_planes)
+         reconstructed_planes = codec.decode(latent)
+-        rendered_image = render_scene(reconstructed_planes, tiny_mlp, scene_data)
+-        
+-        rendering_loss = compute_rendering_loss(rendered_image, scene_data.gt_image)
++        rendered_images = volume_render(reconstructed_planes, tiny_mlp, rays)
++        rendering_loss = mse_loss(rendered_images, gt_images)
+         entropy_loss = compute_entropy_loss(latent, codec.probability_model)
+-        
+         L_total = rendering_loss + entropy_loss
+         L_total.backward()
+@@ -111,71 +97,70 @@
+ 
+ def encode_scene(codec, tiny_mlp, feature_planes):
+-    """
+-    Encodes the scene into a bitstream at test time.
+-    """
+     bitstreams = []
+-    
+-    # 1. Encode Feature Planes
+     # Orthogonal feature planes are fed into the codec one by one
+     for plane in feature_planes:
+         latent = codec.encode(plane)
+         quantized_latent = quantize(latent)
+-        bitstream_latent = entropy_encode(quantized_latent)
+-        bitstreams.append(bitstream_latent)
+-        
+-        # Encode hyperprior if applicable
++        bitstreams.append(entropy_encode(quantized_latent))
+         hyperprior = codec.get_hyperprior(latent)
+         quantized_hyperprior = quantize(hyperprior)
+-        bitstream_hyperprior = entropy_encode(quantized_hyperprior)
+-        bitstreams.append(bitstream_hyperprior)
+-
+-    # 2. Encode Content-Specific Parameters
+-    # Compress decoder head parameters
+-    quantized_decoder_head = quantize(codec.decoder_head.parameters())
+-    bitstream_decoder_head = entropy_encode(quantized_decoder_head)
+-    bitstreams.append(bitstream_decoder_head)
+-    
+-    # Compress feature residual vectors (if used)
+-    # Note: Sources mention residual vectors v_delta_x in bitstream
+-    # Assuming these are derived or stored separately
+-    bitstreams.append(encode_residuals()) 
+-
+-    # 3. Encode Tiny MLP
+-    quantized_mlp = quantize(tiny_mlp.parameters())
+-    bitstream_mlp = entropy_encode(quantized_mlp)
+-    bitstreams.append(bitstream_mlp)
+-
+-    # 4. Multiplex
+-    total_bitstream = multiplex(bitstreams)
+-    return total_bitstream
+-
+-def decode_scene(codec, tiny_mlp, total_bitstream):
+-    """
+-    Decodes the bitstream and reconstructs the scene for rendering.
+-    """
+-    # 1. Demultiplex
++        bitstreams.append(entropy_encode(quantized_hyperprior))
++
++    # Compress content-specific parameters
++    bitstreams.append(entropy_encode(quantize(codec.decoder_head.parameters())))
++    bitstreams.append(entropy_encode(quantize(tiny_mlp.parameters())))
++    # Feature residual vectors are also compressed and transmitted
++    bitstreams.append(entropy_encode(quantize(feature_planes)))
++
++    return multiplex(bitstreams)
++
++def decode_scene(codec, tiny_mlp, total_bitstream, query_points):
+     substreams = demultiplex(total_bitstream)
+-    
+-    # 2. Decode Feature Planes
+-    # Reconstruct feature planes once
++    idx = 0
+     reconstructed_feature_planes = []
+-    for i, plane_substream in enumerate(substreams['latent_streams']):
+-        quantized_latent = entropy_decode(plane_substream)
+-        # Decode using the adapted decoder head
+-        # Note: The decoder head parameters must also be decoded first
++    for _ in range(len(feature_planes)):
++        quantized_latent = entropy_decode(substreams[idx])
++        idx += 1
++        quantized_hyperprior = entropy_decode(substreams[idx])
++        idx += 1
++        codec.decoder_head.set_parameters(entropy_decode(substreams[idx]))
++        idx += 1
+         reconstructed_plane = codec.decode(quantized_latent)
+         reconstructed_feature_planes.append(reconstructed_plane)
+-        
+-    # 3. Decode Parameters
+-    quantized_decoder_head = entropy_decode(substreams['decoder_head_stream'])
+-    codec.decoder_head.set_parameters(quantized_decoder_head)
+-    
+-    quantized_mlp = entropy_decode(substreams['mlp_stream'])
++
++    quantized_mlp = entropy_decode(substreams[idx])
+     tiny_mlp.set_parameters(quantized_mlp)
+-    
+-    # 4. Render
+-    # Subsequent querying operations are executed on the reconstructed planes
+-    rendered_image = render_scene(reconstructed_feature_planes, tiny_mlp, query_points)
++    idx += 1
++
++    rendered_image = volume_render(reconstructed_feature_planes, tiny_mlp, query_points)
+     return rendered_image
++
++# Helper definitions
++def replace_head(layer, target_channels):
++    return LinearLayer(layer.in_features, target_channels)
++
++def quantize(tensor):
++    return round_to_integers(tensor)
++
++def entropy_encode(tensor):
++    return arithmetic_coding_encode(tensor)
++
++def entropy_decode(bitstream):
++    return arithmetic_coding_decode(bitstream)
++
++def multiplex(streams):
++    return bytes_concat(streams)
++
++def demultiplex(total_stream):
++    return bytes_split(total_stream)
++
++def volume_render(feature_planes, mlp, rays):
++    return alpha_compositing(feature_planes, mlp, rays)
++
++def mse_loss(pred, target):
++    return mean_squared_error(pred, target)
++
++def compute_entropy_loss(latent, prob_model):
++    return negative_log_likelihood(latent, prob_model)
+ ```
+ 
+@@ -185,6 +170,6 @@
+ *   **Quantization-Aware Training Iterations:** 10,000 [S1].
+ *   **Pre-training Iterations:** 100,000 [S1].
+-*   **Implementation Base:** CompressAI library [4].
+-*   **Backbone:** Neural image codec proposed by Cheng et al. [10].
++*   **Implementation Base:** CompressAI library [S1].
++*   **Backbone:** Neural image codec proposed by Cheng et al. [S1].
+ 
+ **Edge Cases and Pitfalls:**

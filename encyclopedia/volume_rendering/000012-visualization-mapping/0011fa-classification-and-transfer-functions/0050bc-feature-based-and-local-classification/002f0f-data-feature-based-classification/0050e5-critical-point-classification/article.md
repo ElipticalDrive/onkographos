@@ -1,0 +1,91 @@
+# Critical Point Classification
+
+Also called: Hessian Eigenvalue Classification, Stationary Point Classification
+
+## Overview
+Critical Point Classification identifies and categorizes stationary points (where the gradient vanishes) in a differentiable scalar field based on the signs of the Hessian matrix eigenvalues [S1, unofficial]. It builds on [Data Feature-Based Classification](5934-data-feature-based-classification.md) by evaluating second-order derivative features to produce optical properties [G].
+
+## How it works
+**Inputs and Outputs:**
+*   **Input:** A differentiable scalar field $f(\mathbf{x})$ defined on a 3D grid.
+*   **Output:** For each voxel $\mathbf{x}$, a classification label (Maximum, Minimum, Saddle, or Flat) [S1, unofficial]. Optical properties (opacity $\alpha$, color $C$) are mapped from these labels per parent principles [G].
+
+**Data Structures:**
+Data structure layouts are not given in the sources [G].
+
+**Mathematical Definitions:**
+A point $\mathbf{x}$ is a critical point if $\nabla f(\mathbf{x}) = \mathbf{0}$ [S1, unofficial]. The Hessian matrix $H$ at $\mathbf{x}$ contains second partial derivatives: $H_{ij} = \frac{\partial^2 f}{\partial x_i \partial x_j}$ [G]. Let $\lambda_1, \lambda_2, \lambda_3$ be the eigenvalues of $H$ [G]. Classification depends on the signs of these eigenvalues [S1, unofficial]:
+1. **Maximum:** $\lambda_1 < 0, \lambda_2 < 0, \lambda_3 < 0$ (all negative) [S1, unofficial].
+2. **Minimum:** $\lambda_1 > 0, \lambda_2 > 0, \lambda_3 > 0$ (all positive) [S1, unofficial].
+3. **Saddle:** Mixed signs (e.g., two negative, one positive) [S1, unofficial].
+4. **Flat/Degenerate:** Singular Hessian (at least one eigenvalue is zero). These represent plateaus or line-like structures [S1, unofficial].
+
+**Algorithm Steps:**
+1. **Compute Gradient:** Calculate $\nabla f(\mathbf{x})$ for all voxels using finite differences [G].
+2. **Identify Candidates:** Find voxels where $\|\nabla f(\mathbf{x})\| < \epsilon$ for a small threshold $\epsilon$ [G].
+3. **Compute Hessian:** For each candidate, calculate the $3 \times 3$ Hessian matrix $H(\mathbf{x})$ using second-order finite differences [G].
+4. **Eigenvalue Decomposition:** Compute the eigenvalues $\lambda_1, \lambda_2, \lambda_3$ of $H(\mathbf{x})$ [G].
+5. **Classify:** Apply the sign rules above [S1, unofficial].
+6. **Transfer Function Mapping:** Map the classification label to opacity $\alpha$ and color $C$ using a lookup table or shader function [G].
+
+**Pseudocode:**
+> **Unverified code.** The code below did not pass a test run against a reference implementation, or no test fits it, so it may contain errors.
+
+```python
+def classify_critical_points(field, epsilon=1e-6, delta=1e-6):
+    labels = {}
+    # Iterate over interior voxels to avoid boundary checks [G]
+    for x in field.interior_indices:
+        # Compute gradient using central differences [G]
+        grad = [0.0, 0.0, 0.0]
+        for d in range(3):
+            offset = tuple(1 if k == d else 0 for k in range(3))
+            grad[d] = (field[x + offset] - field[x - offset]) / 2.0
+        # Identify candidates where gradient norm is near zero [G]
+        if sum(g**2 for g in grad)**0.5 >= epsilon:
+            continue
+        # Compute Hessian using second-order central differences [G]
+        H = [[0.0]*3 for _ in range(3)]
+        for i in range(3):
+            for j in range(3):
+                if i == j:
+                    off = tuple(1 if k == i else 0 for k in range(3))
+                    H[i][j] = field[x + off] - 2*field[x] + field[x - off]
+                else:
+                    off_i = tuple(1 if k == i else 0 for k in range(3))
+                    off_j = tuple(1 if k == j else 0 for k in range(3))
+                    H[i][j] = (field[x + tuple(a+b for a,b in zip(off_i,off_j))] 
+                             - field[x + tuple(a-b for a,b in zip(off_i,off_j))] 
+                             - field[x + tuple(-a+b for a,b in zip(off_i,off_j))] 
+                             + field[x + tuple(-a-b for a,b in zip(off_i,off_j))]) / 4.0
+        # Solve characteristic polynomial for eigenvalues [G]
+        lambdas = solve_eigenvalues(H)
+        # Classify based on eigenvalue signs [S1, unofficial]
+        if any(abs(l) < delta for l in lambdas):
+            labels[x] = "Flat"
+        elif all(l < 0 for l in lambdas):
+            labels[x] = "Maximum"
+        elif all(l > 0 for l in lambdas):
+            labels[x] = "Minimum"
+        else:
+            labels[x] = "Saddle"
+    return labels
+```
+
+**Pitfalls:**
+*   **Singular Hessians:** Critical points with a singular Hessian mark flat spots, representing line-like degenerate critical-points or (partial) plateaus [S1, unofficial].
+*   **Discretization and Noise:** True critical points rarely align exactly with voxel centers, and noise creates spurious points. Sub-voxel refinement and field smoothing are standard implementation guards [G].
+
+## Subtopics
+
+### Manifold Extraction
+Extracts gradient flow structures connected to critical points: ascending manifolds (starting at a critical point) and descending manifolds (ending at a critical point) [S1, unofficial]. In 2D scalar fields, these manifolds may be zero-dimensional (the ascending manifold of a maximum is the position of the maximum itself), one-dimensional (the ascending manifolds of a saddle are separatrices), or two-dimensional (ascending manifold of a source) [S1, unofficial]. This allows for the visualization of ridges, valleys, and flow paths rather than just point locations [G].
+
+## Operating characteristics
+Not given in the sources.
+
+## Background
+The classification of stationary points based on Hessian eigenvalues is a standard mathematical definition [S1, unofficial]. The concept of ascending and descending manifolds and the Morse-Smale complex further extends this to topological graph representation of scalar fields [S1, unofficial].
+
+## Sources
+[S1] Multi-Field Visualization, https://kluedo.ub.rptu.de/files/2291/_diss.pdf, fetched 2026-10-27 (unofficial)

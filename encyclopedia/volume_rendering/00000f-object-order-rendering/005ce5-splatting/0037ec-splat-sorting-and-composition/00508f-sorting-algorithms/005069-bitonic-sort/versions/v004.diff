@@ -1,0 +1,118 @@
+--- v003.md
++++ v004.md
+@@ -4,13 +4,13 @@
+ 
+ ## Overview
+-Bitonic Sort is a data-independent network sorting algorithm used on the GPU to achieve exact depth ordering of splatted voxels for every frame [S1, unofficial]. It is chosen over partial-ordering methods like Odd-Even Merge Sort because volume rendering requires strict front-to-back or back-to-front ordering per frame to correctly composite transparency [S1, unofficial]. It is preferred over Adaptive Bitonic Sort (ABisort) in some implementations due to library accessibility and ease of adaptation, despite ABisort having potentially better theoretical complexity [S1, unofficial].
++Bitonic Sort is a data-independent network sorting algorithm used on the GPU to achieve exact depth ordering of splatted voxels for every frame [S1, unofficial]. It is chosen over partial-ordering methods like Odd-Even Merge Sort because the application requires exact ordering at each frame, making sort-while-drawing inconvenient [S1, unofficial]. It is preferred over Adaptive Bitonic Sort (ABisort) in some implementations due to library accessibility and ease of adaptation, despite ABisort having potentially better theoretical complexity [S1, unofficial].
+ 
+ ## How it works
+ **Inputs and Outputs:**
+-*   **Input:** An array of view-transformed voxels already resident in GPU memory, typically stored in a texture (View Transformed Voxels Texture). Each voxel is represented as a `<key, value>` pair, where the key is the depth value $b$ and the value is the voxel index [S1, unofficial].
++*   **Input:** An array of view-transformed voxels already resident in GPU memory, typically stored in a texture (View Transformed Voxels Texture) [S1, unofficial]. Each voxel is represented as a `<key, value>` pair, where the key is the depth value $b$ and the value is the voxel index [S1, unofficial].
+ *   **Output:** A sorted array of voxels stored in a texture (Depth-Sorted Voxels Texture), ordered by depth [S1, unofficial].
+ 
+ **Data Structures:**
+-The algorithm uses the Multiple Render Target (MRT) extension to store keys and values in separate render targets [S1, unofficial]. A one-to-one correspondence exists between the key texture and the value texture [S1, unofficial]. To optimize memory, four `<key, value>` instances can be packed into a single RGBA texel [S1, unofficial].
++The algorithm uses the Multiple Render Target (MRT) extension to store keys and values in separate render targets [S1, unofficial]. A one-to-one correspondence exists between the key texture and the value texture [S1, unofficial]. This correspondence allows keeping four `<key, value>` instances in a single RGBA texel [S1, unofficial].
+ 
+ **Parameters:**
+@@ -21,10 +21,12 @@
+ 
+ **Algorithm Steps:**
+-1.  **Initialization:** If the sorting direction needs to be reversed (e.g., due to camera movement), reset pass and stage counters [S2, unofficial].
+-2.  **Ping-Pong Buffering:** Use two framebuffers (current and previous) to swap read/write roles between passes [S1, unofficial].
+-3.  **Comparison Logic:** For each element at index $i$, determine the comparison direction and partner index based on the current pass and stage [S2, unofficial].
+-4.  **Fetch and Compare:** Fetch the partner data and perform a comparison using the depth key and the half-vector [S2, unofficial].
+-5.  **Write Result:** Write the sorted result to the appropriate render target [S1, unofficial].
+-6.  **Finalization:** After all passes, a fragment shader fills the final Depth-Sorted Voxels Texture from the sorted render targets [S1, unofficial].
++1.  **Initialization:** Reset pass and stage counters if the sorting direction needs to be reversed [S2, unofficial].
++2.  **Ping-Pong Buffering:** Use two framebuffers to swap read/write roles between passes [S1, unofficial].
++3.  **Index Computation:** Compute the particle index $i$ from texture coordinates [S2, unofficial].
++4.  **Direction Determination:** Determine the comparison direction `compare` based on the current pass, stage, and index $i$ [S2, unofficial].
++5.  **Partner Calculation:** Calculate the partner address using `adr = i + compare * uPass` and fetch partner data [S2, unofficial].
++6.  **Comparison:** Sort based on the dot product with the half vector: output `self` if `selfProjectedLength * compare < partnerProjectedLength * compare`, else output `partner` [S2, unofficial].
++7.  **Write:** Write the sorted result to the appropriate render target [S1, unofficial].
++8.  **Finalization:** After all passes, a fragment shader fills the Depth-Sorted Voxels Texture from the sorted render targets [S1, unofficial].
+ 
+ **Pseudocode:**
+@@ -32,24 +34,14 @@
+ 
+ ```python
+-# Inputs:
+-#   i: Global particle index derived from texture coordinates
+-#   uPass: Current pass number
+-#   uStage: Current stage number
+-#   uHalfVector: Half-angle vector for sorting direction
+-#   prevPositions: Texture containing previous sort state (key=value, value=index)
+-
+-def bitonic_sort_step(i, uPass, uStage, uHalfVector, prevPositions):
+-    # 1. Determine comparison direction and partner offset
+-    # The direction depends on the stage and pass in the bitonic network
+-    compare = determine_compare_direction(uPass, uStage, i)
++def bitonic_sort_step(i, uPass, uStage, prev_positions, current_positions):
++    # [G] Standard bitonic sort direction logic based on stage and index
++    compare = 1 if (i >> uStage) & 1 else -1
+     
+-    # 2. Calculate partner address
+-    # uPass represents the distance to the partner in the bitonic sequence
++    # Calculate partner address
+     adr = i + compare * uPass
+     
+-    # 3. Fetch data from previous render target
+-    # Fetch key (depth) and value (index) for self and partner
+-    self_data = prevPositions.sample(i)
+-    partner_data = prevPositions.sample(adr)
++    # Fetch data from previous render target
++    self_data = prev_positions.sample(i)
++    partner_data = prev_positions.sample(adr)
+     
+     self_key = self_data.key      # Depth value b
+@@ -58,35 +50,14 @@
+     partner_val = partner_data.value
+     
+-    # 4. Perform comparison using dot product with half vector
+-    # This logic implements the bitonic merge step
+-    # If selfProjectedLength * compare < partnerProjectedLength * compare, keep self
+-    # Note: 'compare' acts as a sign multiplier for the direction
++    # Perform comparison using direction multiplier
+     lhs = self_key * compare
+     rhs = partner_key * compare
+     
+     if lhs < rhs:
+-        # Self is "smaller" (or in correct order relative to direction)
+-        output_key = self_key
+-        output_val = self_val
++        current_positions.write(i, self_key, self_val)
++        current_positions.write(adr, partner_key, partner_val)
+     else:
+-        # Partner is "smaller"
+-        output_key = partner_key
+-        output_val = partner_val
+-        
+-    return output_key, output_val
+-
+-def determine_compare_direction(uPass, uStage, i):
+-    # Standard Bitonic Sort logic for determining swap direction
+-    # This is a placeholder for the specific bitonic network index logic
+-    # which depends on the binary representation of i relative to stage/pass
+-    # In standard bitonic sort, direction is determined by the bit at position uStage
+-    # within the block defined by uPass.
+-    # [G] Standard bitonic sort uses the bit at index uStage of i to determine direction.
+-    # If the bit is 0, compare with lower; if 1, compare with higher.
+-    # The 'compare' variable here likely represents +1 or -1.
+-    if (i >> uStage) & 1:
+-        return -1  # Compare with higher index
+-    else:
+-        return 1   # Compare with lower index
++        current_positions.write(i, partner_key, partner_val)
++        current_positions.write(adr, self_key, self_val)
+ ```
+ 
+@@ -94,5 +65,5 @@
+ *   **Data Independence:** Unlike Quicksort, Bitonic Sort does not branch on data values, making it suitable for GPU SIMD/SIMT architectures but potentially slower for small datasets due to fixed work [S1, unofficial].
+ *   **Exact Ordering:** Requires all passes to complete for exact ordering; partial results are insufficient for correct compositing [S1, unofficial].
+-*   **Memory Packing:** Packing four values per texel requires careful handling of texture coordinates and swizzling to ensure correct key/value alignment [S1, unofficial].
++*   **Fixed Operations:** The algorithm performs a predetermined number of comparisons regardless of data distribution, which can be inefficient for partially sorted or small datasets [S1, unofficial].
+ 
+ ## Operating characteristics

@@ -1,0 +1,139 @@
+# 4D Marching Cubes
+
+Also called: Extending MC into the fourth dimension
+
+## Overview
+4D Marching Cubes is an isosurfacing technique for extracting 3D isosurfaces from 4D regular grids (e.g., spatiotemporal data) by extending the Marching Cubes algorithm into the fourth dimension [S1, unofficial][S2]. It sets itself apart from its siblings by decomposing the exponential growth of lookup table cases into patches containing a single connected component, thereby reducing storage and computational costs while maintaining topological validity [S2]. Unlike [Multi-Isosurface Extraction](1162-multi-isosurface-extraction.md) which handles multiple thresholds, or [STEVE](10398-steve-space-time-enclosing-volume-extraction.md) which encloses volumes, 4D MC focuses on the geometric extraction of the $(d-1)$-dimensional manifold from a $d$-dimensional scalar field [S2].
+
+## How it works
+**Inputs and Outputs:**
+*   **Input:** A 4D scalar field $f(x, y, z, t)$ defined on a regular hypercubic grid.
+*   **Output:** A set of 3D triangular patches (simplices) representing the isosurface $f(x, y, z, t) = c$ for a given isovalue $c$.
+
+**Data Structures:**
+The core data structure is a lookup table mapping vertex configurations to triangle patches.
+*   **Configuration:** A 16-bit integer representing the binary state of the 16 vertices of a 4D hypercube relative to the isovalue.
+*   **Lookup Table:** A mapping from configuration indices to a list of triangle patches. The table size is reduced to 222 entries after removing symmetrical configurations [S1, unofficial].
+
+**Steps:**
+1.  **Grid Decomposition:** Decompose the 4D hypercubic grid into individual hypercubic cells. Each cell has 16 vertices.
+2.  **Vertex Classification:** For each cell, determine the sign of $f(v_i) - c$ for all 16 vertices $v_i$. This generates a 16-bit binary configuration index.
+3.  **Lookup:** Retrieve the corresponding triangle patches from the reduced lookup table. The table contains 222 unique configurations [S1, unofficial].
+4.  **Patch Composition:** Each configuration in the lookup table is composed of a set of 'sub-cases' (patches), where each patch contains a single connected component of the isosurface [S2].
+5.  **Ambiguity Handling:** Handle ambiguous configurations (where the topology is not uniquely determined by vertex signs) using a mathematical proof of correctness to verify that the generated topological structures are valid [S1, unofficial]. This ensures the extracted surface is a valid manifold.
+6.  **Assembly:** Collect all generated triangles from all cells to form the final 3D isosurface mesh.
+
+**Pseudocode:**
+> **Unverified code.** The code below did not pass a test run against a reference implementation, or no test fits it, so it may contain errors.
+
+```python
+def extract_4d_isosurface(grid, isovalue):
+    """
+    Extract 3D isosurface from 4D scalar grid using 4D Marching Cubes.
+    
+    Args:
+        grid: 4D numpy array of shape (Nx, Ny, Nz, Nt)
+        isovalue: float, the threshold value for isosurface extraction
+        
+    Returns:
+        triangles: list of 3D triangles, each triangle is a list of 3 vertex indices
+    """
+    triangles = []
+    # Precomputed lookup table with 222 entries
+    # Each entry maps a configuration index to a list of patches
+    # Each patch is a list of triangles (each triangle is a list of 3 vertex indices relative to the cell)
+    lookup_table = get_reduced_4d_marching_cubes_table() 
+    
+    # Iterate over all 4D cells
+    for x in range(grid.shape[0] - 1):
+        for y in range(grid.shape[1] - 1):
+            for z in range(grid.shape[2] - 1):
+                for t in range(grid.shape[3] - 1):
+                    # Get the 16 vertices of the current hypercube
+                    vertices = get_hypercube_vertices(grid, x, y, z, t)
+                    
+                    # Determine configuration index
+                    config_index = 0
+                    for i in range(16):
+                        if vertices[i] > isovalue:
+                            config_index |= (1 << i)
+                    
+                    # Retrieve patches from lookup table
+                    patches = lookup_table[config_index]
+                    
+                    # Process each patch (connected component)
+                    for patch in patches:
+                        # Each patch is a list of triangles
+                        for triangle in patch:
+                            # Convert local vertex indices to global indices
+                            global_triangle = []
+                            for local_idx in triangle:
+                                global_idx = get_global_vertex_index(x, y, z, t, local_idx)
+                                global_triangle.append(global_idx)
+                            triangles.append(global_triangle)
+                            
+    return triangles
+
+def get_reduced_4d_marching_cubes_table():
+    """
+    Returns the reduced lookup table for 4D Marching Cubes.
+    Contains 222 entries after symmetry removal.
+    """
+    # Implementation details for generating the 222 configurations
+    # are not provided in the sources. [G]
+    # This function would return a dictionary mapping config_index -> list of patches
+    pass
+
+def get_hypercube_vertices(grid, x, y, z, t):
+    """
+    Retrieves the 16 scalar values at the vertices of the 4D hypercube.
+    """
+    # Vertices are at (x+dx, y+dy, z+dz, t+dt) where dx, dy, dz, dt in {0, 1}
+    vertices = []
+    for dx in [0, 1]:
+        for dy in [0, 1]:
+            for dz in [0, 1]:
+                for dt in [0, 1]:
+                    vertices.append(grid[x+dx, y+dy, z+dz, t+dt])
+    return vertices
+
+def get_global_vertex_index(x, y, z, t, local_idx):
+    """
+    Converts a local vertex index (0-15) to a global vertex index in the grid.
+    """
+    # Implementation depends on grid indexing scheme. [G]
+    # Assuming a simple linear mapping or coordinate-based lookup
+    pass
+```
+
+**Parameters:**
+*   **Isovalue ($c$):** The scalar threshold for surface extraction. Typical values depend on the data range [S1, unofficial].
+*   **Grid Resolution:** The dimensions $(N_x, N_y, N_z, N_t)$ of the input 4D grid.
+
+**Edge Cases and Pitfalls:**
+*   **Ambiguous Configurations:** Some vertex configurations do not uniquely determine the topology of the isosurface within the cell. These must be handled carefully to avoid topological errors. A mathematical proof of correctness is used to verify validity [S1, unofficial].
+*   **Exponential Growth:** The number of possible configurations in 4D is $2^{16} = 65,536$. The lookup table is reduced to 222 entries by removing symmetrical configurations [S1, unofficial]. Failure to properly reduce the table can lead to excessive memory usage.
+*   **Precision:** Floating-point precision issues may arise when comparing vertex values to the isovalue, potentially leading to incorrect configuration indices.
+
+## Subtopics
+
+### Generalized Marching Cubes
+Extends the concept to arbitrary dimensions and convex cells, using lazy evaluation to handle infrequent cases. See [Generalized Marching Cubes](8320-generalized-marching-cubes.md).
+
+### STEVE (Space-Time-Enclosing Volume Extraction)
+Focuses on enclosing volumes in space-time rather than extracting isosurfaces. See [STEVE (Space-Time-Enclosing Volume Extraction)](10398-steve-space-time-enclosing-volume-extraction.md).
+
+## Operating characteristics
+*   **Time Complexity:** $O(N)$, where $N$ is the number of 4D cells in the grid. Each cell is processed in constant time using the lookup table.
+*   **Memory Complexity:** $O(N)$ for storing the output triangles. The lookup table size is constant (222 entries) [S1, unofficial].
+*   **Strengths:** Reduces the exponential growth of cases in 4D by decomposing isosurface cases into single connected components [S2]. Provides a mathematically valid topological structure [S1, unofficial].
+*   **Limitations:** The lookup table generation is complex. Ambiguous configurations require special handling. Not suitable for irregular grids without decomposition [S2].
+*   **When to Use:** When extracting 3D isosurfaces from 4D spatiotemporal data (e.g., time-varying volumes) [S1, unofficial].
+*   **When Not to Use:** For irregular grids (use tetrahedral decomposition methods [S2]) or when multiple isosurfaces are needed (use [Multi-Isosurface Extraction](1162-multi-isosurface-extraction.md)).
+
+## Background
+4D Marching Cubes was explored by Bhaniramka et al. [76] (cited as [8] in [S2], [76] in [S1, unofficial]). At the time, work on isosurfaces beyond 3D was limited. The method was developed to handle volume data with a time dimension by selecting 3D slices of the hyper-volume [S1, unofficial]. It builds on the shared principles of [Marching Cubes Lookup and Configuration](2518-marching-cubes-lookup-and-configuration.md) and extends them to 4D by reducing the lookup table size through symmetry removal and case decomposition [S1, unofficial][S2].
+
+## Sources
+[S1] Chapter Topological Visualisation Techniques for Volume Multifield Data, https://archive.org/details/oapen-20.500.12657-49310, fetched 2026-10-27 (unofficial)
+[S2] Modeling and Visualization Approaches for Time-Varying Volumetric Data, https://doi.org/10.1007/978-3-540-89646-3_100, fetched 2026-10-30

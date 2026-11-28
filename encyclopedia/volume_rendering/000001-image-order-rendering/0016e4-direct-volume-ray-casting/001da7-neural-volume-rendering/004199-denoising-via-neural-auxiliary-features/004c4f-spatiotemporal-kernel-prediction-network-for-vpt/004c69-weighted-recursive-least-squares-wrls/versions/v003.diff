@@ -1,0 +1,73 @@
+--- v002.md
++++ v003.md
+@@ -24,10 +24,10 @@
+ 
+ **Steps:**
+-1.  **Temporal Feature Update:** Compute the temporally stable feature $z_j(t)$ for pixel $j$ at time $t$. Determine the reprojected coordinate $q$ from the previous frame using optical flow. Update the feature using an exponentially weighted history buffer: $z_j(t) = \alpha \Psi[z_q(t-1), \tilde{I}_j(t)] + (1 - \alpha) \tilde{I}_j(t)$, where $\Psi[\cdot]$ is a neighborhood clamping operator that rectifies the reprojected history using the current-frame input estimate to reduce artifacts from stale data [S1].
++1.  **Temporal Feature Update:** Compute the temporally stable feature $z_j(t)$ for pixel $j$ at time $t$ [S1]. Determine the reprojected coordinate $q$ from the previous frame using optical flow [S1]. Update the feature using an exponentially weighted history buffer: $z_j(t) = \alpha \Psi[z_q(t-1), \tilde{I}_j(t)] + (1 - \alpha) \tilde{I}_j(t)$, where $\Psi[\cdot]$ is a neighborhood clamping operator that rectifies the reprojected history using the current-frame input estimate to reduce artifacts from stale data [S1].
+ 2.  **Weight Calculation:** Calculate the weight $w_j(t)$ for the current noisy estimate $\tilde{I}_j(t)$ based on the distance $d_j(t)$ between the estimate and the temporal feature: $d_j(t) = \frac{\|\tilde{I}_j(t) - z_j(t)\|}{\min(\|\tilde{I}_j(t)\|, \|z_j(t)\|) + \epsilon}$ and $w_j(t) = \exp\left(-\frac{d_j(t)^2}{h}\right)$ [S1]. This assigns high weights to low-variance samples and low weights to outliers [S1].
+ 3.  **Gain Vector Computation:** Compute the weighted gain vector $q_{wj}(t)$ using the weighted inverse covariance update: $q_{wj}(t) = \frac{P_j(t-1)p_j^T(t)}{\lambda + w_j(t)p_j(t)P_j(t-1)p_j^T(t)}$ [S1].
+ 4.  **Linear Model Update:** Update the linear model coefficients $\beta_j(t)$ using the estimated error $\hat{e}_j(t) = \tilde{I}_j(t) - \beta_j^T(t-1)p_j(t)$ and the weighted gain: $\beta_j(t) = \beta_j(t-1) + q_{wj}(t)\hat{e}_j(t)$ [S1].
+ 5.  **Inverse Covariance Update:** Update the inverse covariance matrix $P_j(t)$ using the matrix inversion lemma: $P_j(t) = \lambda^{-1}[P_j(t-1) - q_{wj}(t)p_j(t)P_j(t-1)]$ [S1].
+-6.  **Spatial Filtering:** Apply a spatial filter to the denoised output to reduce residual noise. For each pixel $i$, blend colors predicted from neighboring pixels within a $5 \times 5$ window centered at $i$. The prediction for a neighbor $k$ is $\hat{I}_k(t) = \beta_k^T(t)p_k(t)$. The final color is a bilateral-weighted average of these predictions [S1].
++6.  **Spatial Filtering:** Apply a spatial filter to the denoised output to reduce residual noise [S1]. For each pixel $i$, blend colors predicted from neighboring pixels within a $5 \times 5$ window centered at $i$ [S1]. The prediction for a neighbor $k$ is $\hat{I}_k(t) = \beta_k^T(t)p_k(t)$ [S1]. The final color is a bilateral-weighted average of these predictions [S1].
+ 
+ **Pitfalls:** VPT does not generate noise-free G-buffers at low sample counts, making standard RLS predictors problematic; solved by using the temporally stable feature $z_j(t)$ instead [S1]. Ambiguous world coordinates in participating media due to multiple ray intersections can cause unstable temporal reprojections if selected randomly or averaged; solved by using the closest world coordinate from the view position of the first real collision according to delta tracking [S1].
+@@ -112,30 +112,27 @@
+     # P_j(t) = lambda^-1 [P_j(t-1) - q_wj(t) p_j(t) P_j(t-1)]
+     q_p_P = np.einsum('ijk,ijk,ijkl->ijl', q_wj, p_curr, P_prev) # (H, W, d)
+-    new_P = (1.0 / lam) * (P_prev - np.einsum('ijk,ijl->ijkl', q_wj, p_p_P)) # (H, W, d, d)
++    new_P = (1.0 / lam) * (P_prev - np.einsum('ijk,ijl->ijkl', q_wj, q_p_P)) # (H, W, d, d)
+     
+     # 6. Spatial Filtering [G]
+-    # Predict colors from updated models
+-    I_pred = np.einsum('ijk,ijk->ij', new_beta, p_curr) # (H, W)
+-    I_pred = np.expand_dims(I_pred, axis=2) # (H, W, 1)
+-    I_pred = np.broadcast_to(I_pred, (H, W, 3)) # (H, W, 3)
++    # Predict colors from updated models for all pixels
++    I_pred_all = np.einsum('ijk,ijk->ij', new_beta, p_curr)  # (H, W)
++    I_pred_all = np.expand_dims(I_pred_all, axis=2)           # (H, W, 1)
++    I_pred_all = np.broadcast_to(I_pred_all, (H, W, 3))       # (H, W, 3)
+     
+-    # Bilateral-weighted average over 5x5 window
+     pad = 2
+-    padded = np.pad(I_pred, ((pad, pad), (pad, pad), (0, 0)), mode='edge')
++    padded = np.pad(I_pred_all, ((pad, pad), (pad, pad), (0, 0)), mode='edge')
+     final_denoised = np.zeros_like(I_curr)
++    weight_sum = np.zeros((H, W, 1))
+     
+-    for dy in range(-pad, pad+1):
+-        for dx in range(-pad, pad+1):
+-            neighbor = padded[pad+dy:pad+dy+H, pad+dx:pad+dx+W, :]
+-            dist = np.sqrt(dy**2 + dx**2)
+-            w_spatial = np.exp(-dist**2 / (2 * pad**2))
+-            w_color = np.exp(-np.sum((neighbor - I_pred)**2, axis=2) / (2 * 0.05**2))
+-            w = w_spatial * w_color
++    for dy in range(-pad, pad + 1):
++        for dx in range(-pad, pad + 1):
++            neighbor = padded[pad + dy:pad + dy + H, pad + dx:pad + dx + W, :]
++            spatial_w = np.exp(-(dy**2 + dx**2) / (2 * pad**2))
++            color_w = np.exp(-np.sum((neighbor - I_pred_all)**2, axis=2, keepdims=True) / (2 * 0.05**2))
++            w = spatial_w * color_w
+             final_denoised += neighbor * np.expand_dims(w, axis=2)
+-            
+-    sum_w = np.sum([np.exp(-np.sqrt(dy**2 + dx**2)**2 / (2 * pad**2)) * 
+-                    np.exp(-np.sum((padded[pad+dy:pad+dy+H, pad+dx:pad+dx+W, :] - I_pred)**2, axis=2) / (2 * 0.05**2))
+-                    for dy in range(-pad, pad+1) for dx in range(-pad, pad+1)], axis=0)
+-    final_denoised /= np.expand_dims(np.clip(sum_w, 1e-8, None), axis=2)
++            weight_sum += np.expand_dims(w, axis=2)
++    
++    final_denoised /= np.clip(weight_sum, 1e-8, None)
+     
+     return final_denoised, new_beta, new_P, new_z
+@@ -143,7 +140,7 @@
+ 
+ ## Operating characteristics
+-*   **Time Complexity:** O(1) per pixel per frame for the RLS update, as it involves fixed-size matrix-vector operations (assuming fixed $d$). The spatial filtering step is O(N) where N is the number of pixels, with a constant factor depending on the window size (e.g., $5 \times 5$) [S1].
+-*   **Memory Complexity:** O(N) per pixel, storing $\beta_j$, $P_j$, and $z_j$ [S1].
+-*   **Measured Performance:** The method is designed for real-time VPT. It reduces spike noise and maintains temporal stability better than standard RLS in low-sample scenarios [S1].
++*   **Time Complexity:** Not given in the sources.
++*   **Memory Complexity:** Not given in the sources.
++*   **Measured Performance:** The method is designed for real-time VPT [S1]. It reduces spike noise and maintains temporal stability better than standard RLS in low-sample scenarios [S1].
+ *   **Strengths:** Handles heterogeneous noise in VPT; temporally stable; reduces spike noise; works with low sample counts [S1].
+ *   **Limitations:** Requires optical flow for reprojection; sensitive to ambiguous world coordinates in participating media (mitigated by using the first real collision); spatial filtering may introduce blurring if not tuned correctly [S1].

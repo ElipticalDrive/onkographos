@@ -1,0 +1,185 @@
+# Deformation Network for 4D Gaussian Splatting
+
+Also called: Deformation Field Estimation Network (CDF), Dynamic Gaussian Prediction, Trunk-Branch Deformation Network
+
+## Overview
+The Deformation Network is a neural module within Deformable 3D Gaussian Splatting that predicts the time-dependent evolution of Gaussian primitives (means, scales, rotations, opacity, and spherical harmonic coefficients) from static input features and a time coordinate [S1][S2, unofficial]. It solves the problem of rendering dynamic scenes by mapping a canonical Gaussian representation to a time-varying state, enabling 4D content reconstruction from multi-view video [S1][S2, unofficial]. It differs from sibling methods like VolSegGS by explicitly modeling temporal deformation via a dedicated time-conditioned MLP with a trunk-branch design rather than static or voxel-based approaches [S1][S2, unofficial].
+
+## How it works
+The method constructs a neural network that takes static Gaussian attributes and a time coordinate as input, applies positional encoding, and passes them through a deformation network to output dynamic parameters for a specific timestamp [S1][S2, unofficial].
+
+### Inputs and Outputs
+**Inputs:**
+*   `point`: Static 3D mean position of the Gaussian, shape $(N, 3)$.
+*   `scales`: Static scale parameters, shape $(N, 3)$.
+*   `rotations`: Static rotation parameters (quaternions), shape $(N, 4)$.
+*   `opacity`: Static opacity, shape $(N, 1)$.
+*   `shs`: Static spherical harmonic coefficients, shape $(N, K, 3)$ where $K$ is the number of bands.
+*   `times_sel`: Time coordinates for the target frames, shape $(M, 1)$ or broadcastable to $N$.
+
+**Outputs:**
+*   `dynamic_means`: Predicted 3D means at time $t$, shape $(N, 3)$.
+*   `dynamic_scales`: Predicted scales at time $t$, shape $(N, 3)$.
+*   `dynamic_rotations`: Predicted rotations at time $t$, shape $(N, 4)$.
+*   `dynamic_opacity`: Predicted opacity at time $t$, shape $(N, 1)$.
+*   `dynamic_shs`: Predicted SH coefficients at time $t$, shape $(N, K, 3)$.
+
+### Data Structures
+The `Deformation` class (referenced as `self.deformation_net`) contains:
+1.  `self.timenet`: A `Sequential` module consisting of `Linear -> ReLU -> Linear` that processes time inputs [S2, unofficial].
+2.  `self.deformation_net`: An instance of the `Deformation` MLP class [S2, unofficial].
+3.  Buffers (FloatTensors):
+    *   `time_poc`: Powers of 2 for time positional encoding.
+    *   `pos_poc`: Powers of 2 for position positional encoding.
+    *   `rotation_scaling_poc`: Powers of 2 for scale/rotation positional encoding.
+    *   `opacity_poc`: Powers of 2 for opacity positional encoding [S2, unofficial].
+
+### Positional Encoding
+Positional encoding is applied to inputs using a function `poc_fre` [S2, unofficial]. For an input tensor $x$ and a buffer $B$ (containing powers of 2 from $2^0$ to $2^{n-1}$):
+1.  Multiply $x$ by $B$ (broadcasted).
+2.  Flatten the result.
+3.  Apply $\sin$ and $\cos$.
+4.  Concatenate $[x, \sin(x \cdot B), \cos(x \cdot B)]$ along the last dimension [S2, unofficial].
+
+### Parameters
+*   `net_width`: Width of the deformation network layers [S2, unofficial].
+*   `timebase_pe`: Number of frequency bands for time positional encoding [S2, unofficial].
+*   `defor_depth`: Depth of the deformation network [S2, unofficial].
+*   `posbase_pe`: Number of frequency bands for position positional encoding [S2, unofficial].
+*   `scale_rotation_pe`: Number of frequency bands for scale/rotation positional encoding [S2, unofficial].
+*   `opacity_pe`: Number of frequency bands for opacity positional encoding [S2, unofficial].
+*   `timenet_width`: Width of the time network [S2, unofficial].
+*   `timenet_output`: Output dimension of the time network [S2, unofficial].
+*   `grid_pe`: Parameter passed to the Deformation class for grid positional encoding [S2, unofficial].
+
+### Pseudocode
+> **Unverified code.** The code below did not pass a test run against a reference implementation, or no test fits it, so it may contain errors.
+
+```python
+import torch
+import torch.nn as nn
+
+class DeformationNetwork(nn.Module):
+    def __init__(self, net_width, timebase_pe, defor_depth, posbase_pe, 
+                 scale_rotation_pe, opacity_pe, timenet_width, timenet_output, grid_pe):
+        super().__init__()
+        self.net_width = net_width
+        self.timebase_pe = timebase_pe
+        self.defor_depth = defor_depth
+        self.posbase_pe = posbase_pe
+        self.scale_rotation_pe = scale_rotation_pe
+        self.opacity_pe = opacity_pe
+        self.timenet_width = timenet_width
+        self.timenet_output = timenet_output
+        
+        # Initialize buffers for positional encoding: powers of 2 from 2^0 to 2^(n-1)
+        self.register_buffer('time_poc', torch.pow(2, torch.arange(timebase_pe).float()))
+        self.register_buffer('pos_poc', torch.pow(2, torch.arange(posbase_pe).float()))
+        self.register_buffer('rotation_scaling_poc', torch.pow(2, torch.arange(scale_rotation_pe).float()))
+        self.register_buffer('opacity_poc', torch.pow(2, torch.arange(opacity_pe).float()))
+        
+        # Time network: Linear -> ReLU -> Linear
+        self.timenet = nn.Sequential(
+            nn.Linear(1, timenet_width),
+            nn.ReLU(),
+            nn.Linear(timenet_width, timenet_output)
+        )
+        
+        # Deformation MLP (Trunk-Branch design)
+        # Trunk: 4 linear layers extracting global deformation context
+        # Branches: 2 linear layers each to independently regress offsets for attributes
+        # We define a placeholder structure reflecting the trunk-branch design.
+        self.deformation_net = self._build_deformation_net()
+        
+        self.initialize_weights()
+
+    def _build_deformation_net(self):
+        # Trunk layers
+        trunk = []
+        in_ch = 3 + 3 * self.posbase_pe * 2 + self.timenet_output # Base input channels
+        for _ in range(4):
+            trunk.append(nn.Linear(in_ch, self.net_width))
+            trunk.append(nn.ReLU())
+            in_ch = self.net_width
+        trunk.append(nn.Linear(self.net_width, self.net_width))
+        return nn.Sequential(*trunk)
+
+    def poc_fre(self, x, poc_buf):
+        # x: (N, D), poc_buf: (n,)
+        # Multiply input by poc_buf (broadcasted)
+        x_mul = x.unsqueeze(-1) * poc_buf.view(1, 1, -1)  # (N, D, n)
+        # Flatten
+        x_flat = x_mul.view(x.shape[0], -1)  # (N, D*n)
+        # Sin and Cos
+        sin_x = torch.sin(x_flat)
+        cos_x = torch.cos(x_flat)
+        # Concatenate [input, sin, cos] along last dimension
+        out = torch.cat([x, sin_x, cos_x], dim=-1)  # (N, D + 2*D*n)
+        return out
+
+    def forward(self, point, scales, rotations, opacity, shs, times_sel):
+        # 1. Positional Encoding
+        pos_emb = self.poc_fre(point, self.pos_poc)  # (N, 3 + 2*3*posbase_pe)
+        
+        # Concatenate scales and rotations before encoding
+        scale_rot = torch.cat([scales, rotations], dim=-1)  # (N, 7)
+        scale_rot_emb = self.poc_fre(scale_rot, self.rotation_scaling_poc)  # (N, 7 + 2*7*scale_rotation_pe)
+        
+        # Time encoding
+        # Ensure times_sel matches batch size N
+        if times_sel.shape[0] != point.shape[0]:
+            times_sel = times_sel.expand(point.shape[0], -1)
+        time_emb = self.timenet(times_sel)  # (N, timenet_output)
+        
+        # Flatten SH coefficients
+        shs_flat = shs.view(shs.shape[0], -1)  # (N, 3*K)
+        
+        # 2. Forward Dynamic Pass
+        # Pass embeddings, along with raw opacity, shs, and times_sel to self.deformation_net
+        input_features = torch.cat([
+            pos_emb, 
+            scale_rot_emb, 
+            opacity, 
+            shs_flat, 
+            time_emb
+        ], dim=-1)
+        
+        # Pass through deformation network to predict offsets
+        offsets = self.deformation_net(input_features)
+        
+        # Apply offsets additively to canonical attributes
+        dynamic_means = point + offsets[:, :3]
+        dynamic_scales = scales + offsets[:, 3:6]
+        dynamic_rotations = rotations + offsets[:, 6:10]
+        dynamic_opacity = opacity + offsets[:, 10:11]
+        dynamic_shs = shs + offsets[:, 11:].view(shs.shape)
+        
+        return dynamic_means, dynamic_scales, dynamic_rotations, dynamic_opacity, dynamic_shs
+
+    def initialize_weights(self):
+        for m in self.modules():
+            if isinstance(m, nn.Linear):
+                # Correct initialization
+                nn.init.xavier_uniform_(m.weight)
+                nn.init.constant_(m.bias, 0)
+                # Note: Source code contains a bug where bias is initialized with weight logic:
+                # init.xavier_uniform_(m.weight, gain=1) applied to m.bias.
+```
+
+### Edge Cases and Pitfalls
+*   **Bias Initialization Bug:** The `initialize_weights` function in the source code incorrectly initializes the bias of Linear layers using `init.xavier_uniform_(m.weight, gain=1)` instead of `init.xavier_uniform_(m.bias, gain=1)` or `init.constant_(m.bias, 0)` [S2, unofficial]. This applies weight initialization logic to the bias tensor, which is incorrect and may affect convergence [S2, unofficial].
+*   **Time Broadcasting:** If `times_sel` does not match the batch size $N$, it must be broadcasted or repeated to match $N$ before passing to the time network [S2, unofficial].
+*   **SH Flattening:** Spherical Harmonic coefficients must be flattened before concatenation with other features [S2, unofficial].
+
+## Operating characteristics
+*   **Time Complexity:** Not given in the sources.
+*   **Memory Complexity:** Not given in the sources.
+*   **Strengths:** Handles dynamic scenes effectively by learning temporal deformations through a continuous dynamic mapping from canonical Gaussian space to observation space [S1].
+*   **Limitations:** Requires training the deformation network, which adds computational overhead compared to static 3DGS. Performance depends on the capacity of the network (width, depth, PE bands) [S2, unofficial].
+
+## Background
+The Deformation Network is part of the 4D Gaussian Splatting method, which extends 3D Gaussian Splatting to dynamic scenes [S1][S2, unofficial]. It was introduced in the unofficial repository `ElenaViewSynthesis/4dgs` [S2, unofficial]. The method uses a neural network to predict Gaussian parameters over time, allowing for the reconstruction of 4D content [S1][S2, unofficial].
+
+## Sources
+[S1] CC-4DGS: Computational Deformation and Point-Cloud Compression for Storage-Efficient Dynamic Gaussian Splatting., https://doi.org/10.1109/tvcg.2026.3721136, fetched 2026-10-27
+[S2] ElenaViewSynthesis/4dgs, https://github.com/ElenaViewSynthesis/4dgs, fetched 2026-10-28 (unofficial)

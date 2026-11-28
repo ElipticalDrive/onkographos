@@ -1,0 +1,418 @@
+--- v039.md
++++ v040.md
+@@ -4,238 +4,206 @@
+ 
+ ## Overview
+-3D Gaussian Splatting (3DGS) Training is the iterative optimization process that adjusts the parameters of a set of 3D Gaussian primitives to minimize the difference between rendered images and ground truth views [S2][S6, unofficial]. It solves the problem of reconstructing high-fidelity 3D scenes from 2D images without relying on neural network weights, instead optimizing explicit geometric and appearance attributes [S5, S6, unofficial]. Unlike NeRF-based methods which optimize implicit field weights, 3DGS training directly optimizes the position, rotation, scale, opacity, and spherical harmonic coefficients of discrete Gaussian ellipsoids [S2][S5, unofficial]. It sets itself apart from its siblings by using adaptive density control (splitting, cloning, pruning) to dynamically adjust the number of primitives during optimization, balancing reconstruction fidelity against computational cost [S2][S6, unofficial].
++3D Gaussian Splatting Training is the iterative optimization process that adjusts the parameters of a set of 3D Gaussian primitives to minimize the difference between rendered images and ground truth views [S2][S6, unofficial]. It solves the problem of reconstructing a photorealistic 3D scene from a sparse set of 2D images by optimizing position, rotation, scale, opacity, and appearance (spherical harmonics) attributes [S5, S6, unofficial]. Unlike NeRF-based methods which optimize a continuous neural field, 3DGS training optimizes a discrete set of explicit primitives, offering significantly faster training and inference speeds while achieving comparable image quality [S2][S4, unofficial]. It sets itself apart from its siblings by using adaptive density control (splitting, cloning, and pruning) to dynamically adjust the number of Gaussians during optimization, balancing reconstruction fidelity against computational cost [S2].
+ 
+ ## How it works
+-**Inputs and Outputs:**
++**Inputs and Outputs**
+ *   **Inputs:** A set of $N$ input images (or video frames) with known camera poses (rotation $R_{cw}$, translation $t_{cw}$, intrinsic matrix $K$) [S6, unofficial]. Initial 3D Gaussian parameters are derived from Structure from Motion (SfM) point clouds [S2][S6, unofficial].
+-*   **Outputs:** A PLY file containing the optimized 3D Gaussian primitives (positions, covariances, colors, opacities) [S4, S6, unofficial].
+-
+-**Data Structures:**
++*   **Outputs:** A trained set of 3D Gaussians (position $\mathbf{p}$, rotation $q$, scale $\mathbf{s}$, opacity $\alpha$, spherical harmonic coefficients $h$) stored in a format such as PLY [S4, unofficial].
++
++**Data Structures**
+ Each Gaussian primitive $i$ is defined by:
+-*   Position $\mathbf{p}_i \in \mathbb{R}^3$ (center) [S6, unofficial].
+-*   Rotation $q_i \in \mathbb{R}^4$ (unit quaternion) [S6, unofficial].
+-*   Scale $\mathbf{s}_i \in \mathbb{R}^3$ (standard deviations) [S6, unofficial].
+-*   Opacity $\alpha_i \in [0, 1]$ [S6, unofficial].
+-*   Appearance parameters: Spherical Harmonic (SH) coefficients $h_i$ [S6, unofficial].
+-*   Covariance $\Sigma_i \in \mathbb{R}^{3 \times 3}$, derived from $\mathbf{s}_i$ and $q_i$ [S2].
+-
+-**Numbered Steps:**
+-
+-1.  **Initialization:**
+-    *   Initialize positions $\mathbf{p}_i$ from SfM point cloud (e.g., COLMAP) [S2][S6, unofficial].
+-    *   Initialize scales $\mathbf{s}_i$ uniformly in $[0, 1]$ [S2].
+-    *   Initialize rotations $q_i$ as unit quaternions [S2].
+-    *   Initialize opacities $\alpha_i$ as constants [S6, unofficial].
+-    *   Initialize SH coefficients $h_i$ from the average color of the corresponding SfM point [S6, unofficial].
+-    *   Set iteration counter $i = 0$ [S2].
+-
+-2.  **Camera Sampling:**
+-    *   Select a training camera $V$ and its ground truth image $\hat{I}$ [S2].
+-    *   Cameras are sampled via a shuffled round-robin iterator [S4, unofficial]. If the iterator reaches the end, it is reshuffled [S4, unofficial].
+-    *   Apply a downscale factor to the ground truth image based on the current training step [S4, unofficial].
+-
+-3.  **Forward Rendering (Rasterization):**
+-    *   Project each 3D Gaussian to 2D screen space using the camera matrix [S2].
+-    *   The 2D covariance matrix $\Sigma'$ is computed from the 3D covariance $\Sigma$ and the camera Jacobian [S6, unofficial].
+-    *   Sort Gaussians by depth for each pixel [S2].
+-    *   Compute pixel color $\gamma_j$ via alpha compositing:
+-        $$ \gamma_j = \sum_{i \in N} \alpha'_{ij} c_i \tau_{ij} $$
+-        where $\tau_{ij} = \prod_{k=1}^{i-1} (1 - \alpha'_{kj})$ is the accumulated transmittance, $\alpha'_{ij}$ is the effective opacity, and $c_i$ is the color [S6, unofficial].
+-    *   Effective opacity $\alpha'_{ij} = g \alpha_i$, where $g = \exp(-0.5 \omega'_0 d_0^2 - 0.5 \omega'_2 d_1^2 - \omega'_1 d_0 d_1)$ [S6, unofficial]. Here, $\omega'$ are the upper triangular elements of the inverse 2D covariance matrix, and $d$ are the elements of $u_i - x_j$ (distance from Gaussian center to pixel) [S6, unofficial].
+-
+-4.  **Loss Computation:**
+-    *   Compute the loss $\mathcal{L}$ between the rendered image $\gamma$ and ground truth $\gamma_{gt}$ [S6, unofficial].
+-    *   The loss is a combination of L1 loss and D-SSIM loss:
+-        $$ \mathcal{L} = (1 - \lambda) \mathcal{L}_1 + \lambda \mathcal{L}_{D-SSIM} $$
+-        where $\lambda$ is typically 0.2 [S6, unofficial].
+-
+-5.  **Backpropagation:**
+-    *   Compute gradients $\frac{\partial \mathcal{L}}{\partial \theta}$ for all parameters $\theta \in \{\mathbf{p}_w, q, s, h, \alpha\}$ using the chain rule [S6, unofficial].
+-    *   Key derivatives include:
+-        *   $\frac{\partial \mathcal{L}}{\partial \alpha_i} = \sum_j \frac{\partial \mathcal{L}}{\partial \gamma_j} \frac{\partial \gamma_j}{\partial \alpha'_{ij}} \frac{\partial \alpha'_{ij}}{\partial \alpha_i}$ [S6, unofficial].
+-        *   $\frac{\partial \mathcal{L}}{\partial c_i} = \sum_j \frac{\partial \mathcal{L}}{\partial \gamma_j} \frac{\partial \gamma_j}{\partial c_i}$ [S6, unofficial].
+-        *   $\frac{\partial \mathcal{L}}{\partial q_i}$ and $\frac{\partial \mathcal{L}}{\partial s_i}$ involve derivatives through the covariance matrix [S6, unofficial].
+-        *   $\frac{\partial \mathcal{L}}{\partial \mathbf{p}_{w,i}}$ involves three terms accounting for depth sorting, color, and covariance changes [S6, unofficial].
+-
+-6.  **Parameter Update:**
+-    *   Update parameters using the Adam optimizer [S2][S6, unofficial].
+-
+-7.  **Adaptive Density Control (Refinement):**
+-    *   Perform this step periodically (e.g., every 100–500 steps) [S2][S4, unofficial].
+-    *   **Pruning:** If $\alpha_i < \epsilon$ or the Gaussian is too large ($||\mathbf{s}_i|| > \tau_S$), prune the Gaussian [S2].
+-    *   **Densification:** If the positional gradient magnitude $||\nabla_{\mathbf{p}} \mathcal{L}|| > \tau_p$:
+-        *   **Over-reconstruction:** If $||\mathbf{s}_i|| > \tau_S$, split the Gaussian into two [S2].
+-        *   **Under-reconstruction:** If $||\mathbf{s}_i|| \le \tau_S$, clone the Gaussian [S2].
+-    *   **Reset Opacity:** Reset opacities of newly created Gaussians to a low value to prevent immediate dominance [S4, unofficial].
+-
+-**Pseudocode:**
+-
++*   Position $\mathbf{p}_i \in \mathbb{R}^3$ (initialized from SfM points) [S6, unofficial].
++*   Rotation $q_i \in \mathbb{R}^4$ (unit quaternion) [S2].
++*   Scale $\mathbf{s}_i \in \mathbb{R}^3$ (initialized between 0 and 1) [S2].
++*   Opacity $\alpha_i \in [0, 1]$ (initialized as a constant) [S6, unofficial].
++*   Appearance: Spherical Harmonic coefficients $h_i$ (initialized from SfM colors) [S6, unofficial].
++
++The covariance matrix $\Sigma_i$ is computed from scale and rotation:
++$$ \Sigma_i = R(q_i) S(\mathbf{s}_i) S(\mathbf{s}_i)^T R(q_i)^T $$
++where $R(q_i)$ is the rotation matrix derived from the quaternion [S2]:
++$$ R(q) = 2 \begin{bmatrix} \frac{1}{2} - (q_j^2 + q_k^2) & q_i q_j - q_r q_k & q_i q_k + q_r q_j \\ q_i q_j + q_r q_k & \frac{1}{2} - (q_i^2 + q_k^2) & q_j q_k - q_r q_i \\ q_i q_k - q_r q_j & q_j q_k + q_r q_i & \frac{1}{2} - (q_i^2 + q_j^2) \end{bmatrix} $$
++
++**Numbered Steps**
++1.  **Initialization:** Initialize Gaussian positions $\mathbf{p}$ from SfM points in normalized bounds $[-1, 1]$. Initialize scales $\mathbf{s}$ between 0 and 1. Initialize rotations $q$ as unit quaternions. Initialize opacities $\alpha$ and spherical harmonics $h$ [S2][S6, unofficial].
++2.  **Camera Sampling:** Select a training camera $V$ and its corresponding ground truth image $\hat{I}$ from the dataset [S2]. Cameras are sampled via a shuffled iterator [S4, unofficial].
++3.  **Rendering:** Rasterize the current set of Gaussians using camera $V$ to obtain the rendered image $I$. This involves projecting 3D Gaussians to 2D screen space, sorting by depth, and alpha blending [S2][S6, unofficial].
++    *   Pixel color $\gamma_j$ is computed via alpha blending:
++        $$ \gamma_j = \sum_{i \in N} \alpha'_{ij} c_i \tau_{ij}, \quad \tau_{ij} = \prod_{k=1}^{i-1} (1 - \alpha'_{kj}) $$
++    *   Effective opacity $\alpha'_{ij} = g \alpha_i$, where $g = \exp(-0.5 \omega'_0 d_0^2 - 0.5 \omega'_2 d_1^2 - \omega'_1 d_0 d_1)$ [S6, unofficial].
++4.  **Loss Computation:** Compute the loss $\mathcal{L}$ between the rendered image $I$ and the ground truth image $\hat{I}$ [S2]. The loss is a combination of L1 loss and D-SSIM loss:
++    $$ \mathcal{L} = (1 - \lambda) \mathcal{L}_1 + \lambda \mathcal{L}_{D-SSIM} $$
++    where $\lambda$ is the SSIM weight (default 0.2) [S6, S4, unofficial].
++5.  **Backpropagation:** Compute gradients of $\mathcal{L}$ with respect to all Gaussian parameters ($\mathbf{p}, q, \mathbf{s}, h, \alpha$) using the chain rule [S6, unofficial].
++    *   Jacobian for rotation $q_i$:
++        $$ \frac{\partial \mathcal{L}}{\partial q_i} = \sum_j \frac{\partial \mathcal{L}}{\partial \gamma_j} \frac{\partial \gamma_j}{\partial \sigma'_i} \frac{\partial \sigma'_i}{\partial \sigma_i} \frac{\partial \sigma_i}{\partial q_i} $$
++    *   Jacobian for scale $\mathbf{s}_i$:
++        $$ \frac{\partial \mathcal{L}}{\partial s_i} = \sum_j \frac{\partial \mathcal{L}}{\partial \gamma_j} \frac{\partial \gamma_j}{\partial \sigma'_i} \frac{\partial \sigma'_i}{\partial \sigma_i} \frac{\partial \sigma_i}{\partial s_i} $$
++    *   Jacobian for SH $h_i$:
++        $$ \frac{\partial \mathcal{L}}{\partial h_i} = \sum_j \frac{\partial \mathcal{L}}{\partial \gamma_j} \frac{\partial \gamma_j}{\partial c_i} \frac{\partial c_i}{\partial h_i} $$
++    *   Jacobian for opacity $\alpha_i$:
++        $$ \frac{\partial \mathcal{L}}{\partial \alpha_i} = \sum_j \frac{\partial \mathcal{L}}{\partial \gamma_j} \frac{\partial \gamma_j}{\partial \alpha'_{ij}} \frac{\partial \alpha'_{ij}}{\partial \alpha_i} $$
++    *   Jacobian for position $\mathbf{p}_{w,i}$ involves three terms accounting for depth sorting, color, and covariance changes [S6, unofficial].
++6.  **Optimization Step:** Update parameters using the Adam optimizer [S2][S6, unofficial].
++7.  **Adaptive Density Control:** Periodically (every `refineEvery` steps, default 500), perform densification and pruning [S2]:
++    *   **Pruning:** If opacity $\alpha < \epsilon$ or the Gaussian is too large (`IsTooLarge`), prune the Gaussian [S2].
++    *   **Densification:** If the positional gradient $\nabla_p \mathcal{L} > \tau_p$ (default 0.0002) [S4, unofficial]:
++        *   **Over-reconstruction:** If the norm of the covariance matrix $\|\mathbf{S}\| > \tau_S$ (default 0.01), split the Gaussian into two [S2].
++        *   **Under-reconstruction:** Else, clone the Gaussian [S2].
++    *   **Refinement:** Reset opacity for cloned/split Gaussians to stabilize training [S1].
++
++**Pseudocode**
+ ```python
+-def train_3dgs(cameras, gt_images, initial_points, num_iters=30000):
+-    # 1. Initialization
+-    gaussians = []
+-    for p in initial_points:
+-        g = Gaussian()
+-        g.position = p.xyz
+-        g.rotation = unit_quaternion()
+-        g.scale = random_uniform(0, 1, 3)
+-        g.opacity = 0.1 # Constant initialization
+-        g.color = p.color # From SfM
+-        g.sh_coeffs = compute_sh_from_color(p.color)
+-        gaussians.append(g)
+-    
+-    optimizer = Adam(gaussians.parameters(), lr=1.6e-4)
+-    step = 0
+-    
+-    # Camera iterator
+-    cam_iter = InfiniteRandomIterator(cameras)
+-    
+-    while step < num_iters:
+-        step += 1
+-        
+-        # 2. Camera Sampling
+-        cam = cam_iter.next()
+-        gt_img = gt_images[cam.id]
+-        # Apply downscale based on step
+-        scale_factor = get_downscale_factor(step)
+-        gt_img = resize(gt_img, scale_factor)
+-        
+-        # 3. Forward Rendering
+-        rendered_img = rasterize(gaussians, cam)
+-        
+-        # 4. Loss Computation
+-        loss = compute_loss(rendered_img, gt_img, ssim_weight=0.2)
+-        
+-        # 5. Backpropagation
+-        loss.backward()
+-        
+-        # 6. Parameter Update
+-        optimizer.step()
+-        optimizer.zero_grad()
+-        
+-        # 7. Adaptive Density Control
+-        if step % 100 == 0: # Typical interval
+-            refine_gaussians(gaussians, step)
+-            
+-        if step % 1000 == 0:
+-            update_sh_degree(step)
+-            
+-    return gaussians
+-
+-def refine_gaussians(gaussians, step):
+-    for g in gaussians:
+-        # Pruning
+-        if g.opacity < 0.005 or g.scale_norm() > 0.1:
+-            g.mark_for_deletion()
+-            continue
+-            
+-        # Densification
+-        grad_norm = g.position_gradient_norm()
+-        if grad_norm > 0.0002: # Threshold
+-            if g.scale_norm() > 0.01: # Over-reconstruction
+-                split_gaussian(g)
+-            else: # Under-reconstruction
+-                clone_gaussian(g)
+-                
+-    gaussians.remove_deleted()
++# Initialization
++M = SfM_Initialize_Positions() # Positions from SfM
++S, C, A = Init_Attributes()    # Scales, Colors (SH), Opacities
++q = Init_Quaternions()         # Unit quaternions
++step = 0
++num_iters = 30000              # Default iterations [S4, unofficial]
++
++while step < num_iters:
++    # 1. Camera Sampling
++    cam = Sample_Camera()
++    gt_image = Get_Ground_Truth(cam)
++    
++    # 2. Rendering
++    rendered_image = Rasterize(M, S, C, A, q, cam)
++    
++    # 3. Loss Computation
++    loss = Compute_Loss(rendered_image, gt_image) # L1 + D-SSIM
++    
++    # 4. Backpropagation
++    gradients = Backpropagate(loss, M, S, C, A, q)
++    
++    # 5. Optimization Step
++    M, S, C, A, q = Adam_Update(M, S, C, A, q, gradients)
++    
++    # 6. Adaptive Density Control (Periodic)
++    if step % refine_every == 0:
++        for i in range(len(M)):
++            # Pruning
++            if A[i] < epsilon or Is_Too_Large(S[i]):
++                Prune(i)
++            # Densification
++            elif Gradient_Magnitude(i) > densify_grad_thresh:
++                if Norm_Covariance(S[i]) > densify_size_thresh:
++                    Split(i)
++                else:
++                    Clone(i)
++    
++    step += 1
+ ```
+ 
+-**Parameters with Typical Values:**
+-*   `numIters`: 30,000 [S3, S4, unofficial].
+-*   `sh_degree`: 3 [S4, unofficial].
+-*   `shDegreeInterval`: 1,000 steps [S4, unofficial].
+-*   `densifyFrom`: 500 steps [S3, unofficial].
+-*   `densifyUntil`: min(15,000, numIters / 2) [S3, unofficial].
+-*   `refineEvery`: 100–500 steps [S3, S4, unofficial].
+-*   `densify_grad_thresh`: 0.0002 [S4, unofficial].
+-*   `densify_size_thresh`: 0.01 [S4, unofficial].
+-*   `split_screen_size`: 0.05 pixels [S4, unofficial].
+-*   `stop_screen_size_at`: 4,000 steps [S4, unofficial].
+-*   `maxGaussians`: 5,000,000 (unlimited if 0) [S3, unofficial].
+-*   `bg_color`: [0.613, 0.010, 0.398] (magenta) [S4, unofficial].
+-
+-**Edge Cases and Pitfalls:**
+-*   **No Cameras See Points:** If all cameras are filtered out because no points are in front of them, training fails [S3, unofficial].
++**Parameters**
++*   `numIters`: Total number of optimization steps. Default: 30,000 [S4, unofficial].
++*   `sh_degree`: Spherical harmonic degree. Default: 3 [S4, unofficial].
++*   `shDegreeInterval`: Steps between increasing SH degree. Default: 1,000 [S4, unofficial].
++*   `resolutionSchedule`: Steps between doubling image resolution. Default: 3,000 [S4, unofficial].
++*   `densifyFrom`: Step after which densification begins. Default: 500 [S4, unofficial].
++*   `densifyUntil`: Step after which densification stops. Default: min(15,000, numIters / 2) [S4, unofficial].
++*   `refineEvery`: Frequency of refinement operations. Default: 500 [S4, unofficial].
++*   `densify_grad_thresh`: Gradient threshold for densification. Default: 0.0002 [S4, unofficial].
++*   `densify_size_thresh`: Size threshold for densification. Default: 0.01 [S4, unofficial].
++*   `split_screen_size`: Screen size threshold for splitting. Default: 0.05 [S4, unofficial].
++*   `stop_screen_size_at`: Step at which screen-size based splitting stops. Default: 4,000 [S4, unofficial].
++*   `ssim_weight`: Weight for SSIM loss. Default: 0.2 [S4, unofficial].
++*   `maxGaussians`: Maximum number of Gaussians. Default: 5,000,000 [S4, unofficial].
++
++**Edge Cases and Pitfalls**
++*   **No Cameras See Points:** If all cameras are discarded because they see no sparse points, training fails [S3, unofficial].
++*   **Arbitrary Pose Rendering:** Requires exactly 16 elements for the `cam_to_world` matrix; otherwise, it throws an error [S4, unofficial].
++*   **Evaluation Mode:** Evaluation requires the dataset to be loaded with `eval_mode=True`; otherwise, it throws a runtime error [S4, unofficial].
+ *   **CPU vs GPU:** CPU execution is ~100x slower than GPU [S3, unofficial].
+-*   **Evaluation Mode:** Evaluation requires `eval_mode=True`; otherwise, it throws a runtime error [S4, unofficial].
+-*   **Arbitrary Pose Rendering:** Requires exactly 16 elements for the `cam_to_world` matrix [S4, unofficial].
+-*   **Precision:** The derivative of the effective opacity with respect to the inverse covariance involves matrix determinants and elements, which can be numerically sensitive if the covariance is near-singular [S6, unofficial].
+ 
+ ## Subtopics
+ 
+ ### [Physical Parameter Optimization](4111-physical-parameter-optimization.md)
+-Physical Parameter Optimization replaces the standard spherical harmonic (SH) color and empirical opacity attributes of 3D Gaussian Splatting with a set of physical quantities representing a participating medium. This allows for real-time rendering and dynamic relighting (arbitrary sun direction) by solving the radiative transfer equation through the Gaussian primitives rather than approximating lighting with SH coefficients. It is distinct from standard 3DGS training by optimizing extinction, albedo, and scattering asymmetry instead of color and opacity.
++Replaces standard SH color and empirical opacity with physical quantities (extinction, albedo, scattering) for real-time relighting.
+ 
+ ### [WildGaussians](6064-wildgaussians.md)
+-WildGaussians (SWAG) is a 3D Gaussian Splatting method designed for "in-the-wild" 3D reconstruction from unconstrained photo collections characterized by transient objects, occlusions, and varying illumination. It solves the problem of photometric inconsistency and transient artifacts that cause standard 3DGS to produce floaters or color-shifted renders in such settings. It sets itself apart from its siblings by explicitly modeling image-dependent appearance variations via a lightweight MLP and separating static scene geometry from transient occluders using a learnable opacity variation term, enabling the discarding of transient Gaussians to recover a clean static scene. Unlike [ClipGS](9546-clipgs.md) which uses CLIP features, SWAG relies on DINO features and direct color prediction.
++Handles "in-the-wild" scenes with transients and varying illumination using a lightweight MLP and DINO features.
+ 
+ ### [Non-Pinhole Camera Training](6088-non-pinhole-camera-training.md)
+-Non-Pinhole Camera Training extends 3D Gaussian Splatting to handle camera models that deviate from the standard pinhole assumption, such as fisheye lenses or uncentered projections. It solves the problem of geometric distortion and coordinate misalignment in non-standard imaging systems by integrating differentiable image-space warping and masking into the training loop. It sets itself apart from standard 3DGS by explicitly supporting uncentered-distorted and uncentered-undistorted camera models, whereas standard 3DGS assumes a centered pinhole model.
++Extends training to fisheye and uncentered camera models via differentiable warping.
+ 
+ ### [AbsGS](6127-absgs.md)
+-AbsGS (Absolute Positional Gradients) is a densification strategy for 3D Gaussian Splatting that recovers fine details and thin structures smoothed out during standard optimization. It replaces signed gradient averaging with absolute sums across multiple views to identify "fence-sitting" Gaussians and sharpen edges.
++Uses absolute positional gradients to recover fine details and thin structures.
+ 
+ ### [Densification Strategy](6234-densification-strategy.md)
+-Densification strategies dynamically adjust the number and distribution of 3D Gaussian primitives during the training of 3D Gaussian Splatting (3DGS) to balance reconstruction fidelity against computational cost [Parent]. They solve the problem of static representation capacity, where a fixed set of Gaussians cannot capture high-frequency details (under-reconstruction) or becomes redundant in smooth regions (over-reconstruction) [13466-densification-and-splitting.md]. Unlike static initialization methods, these strategies iteratively spawn, split, or remove Gaussians based on optimization metrics such as gradient magnitude, opacity, and scale [13466-densification-and-splitting.md].
++Dynamically adjusts Gaussian count via splitting, cloning, and pruning based on gradients and opacity.
+ 
+ ### [Regularization and Geometry Constraints](6269-regularization-and-geometry-constraints.md)
+-Regularization and Geometry Constraints are training-time techniques for 3D Gaussian Splatting that enforce structural, spectral, or depth-based consistency to mitigate geometric ambiguity, reduce floaters, and prevent over-reconstruction. Unlike sibling methods that focus on efficiency [9264-optimization-and-training-efficiency.md] or representation modifications [10145-representation-and-kernel-modifications.md], this family explicitly constrains the optimization trajectory by adding auxiliary loss terms or modifying input supervision signals.
++Enforces structural, spectral, or depth consistency to reduce floaters.
+ 
+ ### [Base 3DGS Optimization](7549-base-3dgs-optimization.md)
+-Base 3DGS Optimization initializes the geometric attributes of 3D Gaussian primitives to provide a robust geometric baseline for subsequent shading attribute optimization, such as in [iVR-GS Training](7578-ivr-gs-training.md). It differs from standard 3DGS by incorporating an explicit normal attribute $n$ for each Gaussian and optimizing it via a normal consistency loss, despite the normal not affecting the final rendered color or alpha in the base stage. This initialization accelerates the convergence of editable Gaussian optimization by ensuring accurate surface geometry representation before decomposing color and lighting.
++Initializes geometric attributes with explicit normals for robust baseline optimization.
+ 
+ ### [GSP Training Loss](9156-gsp-training-loss.md)
+-The GSP Training Loss is the objective function used to optimize the parameters of 3D Gaussian kernels, including position, opacity, covariance, and material properties, within the Gaussian Splashing (GSP) framework. It extends the standard color reconstruction loss with normal consistency and anisotropy regularization to prevent artifacts caused by excessive kernel elongation during solid object simulation. Unlike standard 3D Gaussian Splatting which focuses on static geometry, this loss is designed to maintain geometric stability and physical plausibility in dynamic or physically-based rendering contexts.
++Extends color loss with normal consistency and anisotropy regularization for dynamic/physical rendering.
+ 
+ ### [GPS-Gaussian](9197-gps-gaussian.md)
+-GPS-Gaussian is a generalizable 3D Gaussian Splatting technique that estimates instant novel views from sparse source views without requiring per-scene fine-tuning or optimization. It solves the problem of slow, iterative optimization in standard 3D Gaussian Splatting by directly regressing Gaussian parameters from 2D image features. It is distinguished from its sibling [Base 3DGS Optimization](7549-base-3dgs-optimization.md) by its feed-forward nature, and from [WildGaussians](6064-wildgaussians.md) by its specific focus on human subjects trained on large-scale human data.
++Feed-forward generalizable reconstruction from sparse views without per-scene optimization.
+ 
+ ### [Optimization and Training Efficiency](9264-optimization-and-training-efficiency.md)
+-This family addresses the computational bottlenecks of 3D Gaussian Splatting (3DGS) training, specifically the high memory consumption and slow convergence caused by the $O(N \cdot P)$ complexity of differentiable rasterization and the overhead of standard optimizer steps [6233-optimization-and-parallelization]. It distinguishes itself from standard training [3761-3d-gaussian-splatting-training.md] by restructuring data flow, fusing kernel operations, or modifying learning rate schedules to accelerate convergence and reduce VRAM usage, rather than altering the core geometric representation or rendering pipeline [6233-optimization-and-parallelization].
++Reduces VRAM usage and accelerates convergence via data flow restructuring and kernel fusion.
+ 
+ ### [Dynamic and Temporal Modeling](9265-dynamic-and-temporal-modeling.md)
+-Dynamic and Temporal Modeling extends static 3D Gaussian Splatting (3DGS) and Neural Radiance Fields (NeRF) to reconstruct and render scenes that change over time, addressing the limitation of static representations in capturing non-rigid motion, emerging objects, and temporal dynamics. It sets itself apart from static methods by parameterizing scene attributes (position, rotation, opacity, color) as explicit functions of time $t$ or by using deformation fields to map dynamic coordinates to a static canonical space, enabling the synthesis of novel views for arbitrary time steps. Unlike sibling methods that may rely on full offline batch optimization or explicit parametric motion priors, this family includes approaches like On-the-Fly Dynamic NeRF Training that use a first-order Markov assumption to enable streaming reconstruction with minimal optimization iterations per frame.
++Parameterizes attributes as functions of time or uses deformation fields for non-rigid motion.
+ 
+ ### [Compression and Representation Efficiency](9266-compression-and-representation-efficiency.md)
+-This family addresses the excessive memory footprint and training latency of 3D Gaussian Splatting (3DGS) by reducing the number of primitives or compressing their attributes. It differs from [Base 3DGS Optimization](7549-base-3dgs-optimization.md) and [Optimization and Training Efficiency](9264-optimization-and-training-efficiency.md) by focusing specifically on the representation size rather than just the computational speed of the rasterization loop. It contrasts with [Physical Parameter Optimization](4111-physical-parameter-optimization.md) by prioritizing storage and transmission efficiency over physical accuracy.
++Reduces memory footprint by compressing primitives or attributes.
+ 
+ ### [SLAM and Mapping](9268-slam-and-mapping.md)
+-SLAM and Mapping in the context of 3D Gaussian Splatting (3DGS) refers to methods that simultaneously estimate camera poses and reconstruct a scene representation using 3D Gaussians or hybrid neural fields, enabling real-time rendering and localization from monocular, stereo, or RGB-D inputs. Unlike offline training methods that assume known camera poses, SLAM methods must jointly optimize the Gaussian parameters and camera trajectory in an online or incremental fashion. This family distinguishes itself from sibling methods like [Base 3DGS Optimization](7549-base-3d-gaussian-splatting.md) by handling the temporal consistency and pose estimation challenges inherent in continuous video streams, often integrating uncertainty estimation, loop closure, and active exploration strategies.
++Simultaneously estimates camera poses and reconstructs scenes in an online/incremental fashion.
+ 
+ ### [Application-Specific Reconstructions](9269-application-specific-reconstructions.md)
+-Application-Specific Reconstructions refers to the modification of the standard 3D Gaussian Splatting (3DGS) training pipeline to address domain-specific challenges such as dynamic human avatars, displaced objects, or physical plausibility constraints. While [Base 3DGS Optimization](7549-base-3dgs-optimization.md) provides a generic differentiable rendering loop, this family introduces structural changes—such as physical priors, generative inpainting, or mesh-embedded representations—to handle ambiguities inherent in monocular video or specific geometric constraints. It sets itself apart from siblings like [WildGaussians](6064-wildgaussians.md) (which handles wild/non-rigid motion via generic deformation) by enforcing explicit domain rules (e.g., canonical space physics or mesh topology) rather than relying solely on learned deformation fields.
++Modifies training for domain-specific challenges like human avatars or physical plausibility.
+ 
+ ### [Geometry and Surface Priors](9270-geometry-and-surface-priors.md)
+-This family of methods addresses the fundamental limitation of vanilla 3D Gaussian Splatting (3DGS): the production of "floating" volumetric ellipsoids that lack an explicit, watertight geometric boundary [9267-surface-and-geometry-alignment]. By aligning the discrete Gaussian representation with continuous geometric priors (such as SDFs, depth maps, or explicit meshes), these methods enforce positional and normal consistency to enable accurate mesh extraction, physically-based rendering, and robust initialization [9267-surface-and-geometry-alignment]. Unlike sibling methods that may rely solely on photometric loss or implicit constraints, this family explicitly integrates geometric supervision into the training or post-processing pipeline to ensure the Gaussians conform to physical surfaces [9267-surface-and-geometry-alignment].
++Aligns Gaussians with SDFs, depth maps, or meshes for watertight geometry.
+ 
+ ### [Neural Network and Feed-Forward Approaches](9526-neural-network-and-feed-forward-approaches.md)
+-This family encompasses methods that replace or augment the iterative per-scene gradient descent optimization of standard 3D Gaussian Splatting [Parent] with neural networks. These approaches either regress Gaussian parameters directly from input images in a single forward pass (feed-forward) or use neural priors to guide the optimization process. They are distinguished from sibling methods like [Base 3DGS Optimization](7549-base-3dgs-optimization.md) by their reliance on learned generalization or implicit constraints rather than direct parameter tuning, and from [WildGaussians](6064-wildgaussians.md) by their focus on static scene reconstruction or generalizable priors rather than explicit temporal modeling.
++Replaces iterative optimization with neural networks for direct parameter regression.
+ 
+ ### [ClipGS](9546-clipgs.md)
+-ClipGS is a Gaussian Splatting-based framework designed for the real-time interactive cinematic visualization of volumetric medical data with support for dynamic clipping planes. It solves the problem of maintaining rendering quality and continuity when a user interactsively clips a 3D volume, addressing the artifacts caused by hard visibility truncations and the high computational cost of learning full deformation fields for the additional clipping dimension. It sets itself apart from sibling methods like [WildGaussians](6064-wildgaussians.md) or [Dynamic and Temporal Modeling](9265-dynamic-and-temporal-modeling.md) by treating the clipping plane not as a temporal dimension requiring a dense deformation field, but as a geometric visibility constraint managed via a learnable truncation scheme and an Adaptive Adjustment Model (AAM).
++Real-time interactive visualization of volumetric medical data with dynamic clipping planes.
+ 
+ ### [Representation and Kernel Modifications](10145-representation-and-kernel-modifications.md)
+-This family of methods modifies the fundamental 3D Gaussian primitive representation or the rendering kernel function used in 3D Gaussian Splatting to address specific limitations in shape modeling, surface reconstruction, and blur handling. Unlike sibling methods that focus on training dynamics (e.g., [Densification Strategy](6234-densification-strategy.md)) or physical parameters ([Physical Parameter Optimization](4111-physical-parameter-optimization.md)), these techniques alter the mathematical definition of the splat itself—allowing negative colors, anchoring Gaussians to a grid, enforcing tangent-plane densification, replacing the Gaussian kernel with Radial Basis Functions, or modeling spatially-varying blur.
++Alters the Gaussian primitive or kernel function (e.g., negative colors, RBFs).
+ 
+ ### [TideGS Trajectory Ordering](10176-tidegs-trajectory-ordering.md)
+-TideGS Trajectory Ordering is a training strategy for 3D Gaussian Splatting that replaces standard randomized view shuffling with a trajectory-aware ordered sequence of views to improve optimization stability and convergence for large-scale scenes. Unlike standard 3DGS which samples views with random shuffling, TideGS uses a clustered traveling-salesperson (TSP) ordering to preserve trajectory continuity, reducing gradient variation between consecutive steps. It builds on [Base 3DGS Optimization](7549-base-3d-gaussian-splatting-optimization.md) by modifying the view sampling schedule while retaining the standard masked update mechanism.
++Uses TSP-ordered view sequences to improve optimization stability for large scenes.
+ 
+ ### [Gradient Computation and Back-Propagation](10202-gradient-computation-and-back-propagation.md)
+-This method computes the gradients of a scalar loss function with respect to the learnable parameters of 3D Gaussians (position, scale, rotation, opacity, color, and features) to enable optimization via stochastic gradient descent. It solves the problem of training differentiable Gaussian splatting by providing exact analytical derivatives for the alpha-compositing rendering equation. What sets it apart from its siblings is the variety of specialized backward passes required for different rendering formulations: standard RGB alpha-compositing, Time-of-Flight (ToF) signal models, Skew-Normal densities, and memory-efficient deferred back-propagation strategies.
++Computes exact analytical derivatives for various rendering formulations (RGB, ToF, Skew-Normal).
+ 
+ ### [VisibilitySplat](10927-visibilitysplat.md)
+-VisibilitySplat is a two-stage inverse rendering pipeline for 3D Gaussian Splatting (3DGS) that augments the standard rasterized pipeline with a sparse visibility oracle to estimate transmittance-weighted occlusion for Gaussian primitives from sampled lighting directions, enabling material and light decomposition. It addresses the limitation of standard 3DGS rasterization, which provides limited visibility information regarding cast shadows and mutual occlusion, by integrating a BVH-accelerated point-based ray tracer. Unlike NeRF-based methods that use implicit volumetric formulations, VisibilitySplat uses explicit point primitives via differentiable rasterization for real-time rendering while providing robust visibility signals for stabilizing material-light disentanglement under unknown illumination.
++Two-stage inverse rendering with a sparse visibility oracle for material-light decomposition.
+ 
+ ### [MCMC-based 3D Gaussian Splatting](11914-mcmc-based-3d-gaussian-splatting.md)
+-This method reformulates 3D Gaussian Splatting (3DGS) training as a Markov Chain Monte Carlo (MCMC) process, replacing the heuristic-based densification and pruning of [Base 3DGS Optimization](7549-base-3dgs-optimization.md) with a stochastic exploration mechanism. It solves the problem of sensitivity to initialization and local minima by allowing Gaussians to explore the scene space via noise injection and relocation, rather than relying on fixed thresholds for cloning and splitting. Unlike [Base 3DGS Optimization](7549-base-3dgs-optimization.md), which uses deterministic heuristics, this approach is robust to random initialization and prevents "stray" Gaussians from diverging into empty space through specific regularizers.
++Reformulates training as MCMC to replace heuristic densification with stochastic exploration.
+ 
+ ### [3D Gaussian Splatting as Markov Chain Monte Carlo (MCMC)](11915-3d-gaussian-splatting-as-markov-chain-monte-carlo-mcmc.md)
+-This method reinterprets the training of 3D Gaussian Splatting as a sampling process from a target distribution $\mathcal{G}$, rather than a deterministic minimization of a loss function via gradient descent. By framing the optimization as Markov Chain Monte Carlo (MCMC), it enables discrete structural changes (moving, cloning, pruning Gaussians) to be treated as valid state transitions that preserve probability mass, avoiding the discontinuities that break standard gradient-based assumptions. It differs from [Base 3DGS Optimization](7549-base-3dgs-optimization.md) by injecting anisotropic noise into the mean updates and rewriting heuristics as MCMC moves, and from [Physical Parameter Optimization](4111-physical-parameter-optimization.md) by focusing on the probabilistic interpretation of the training dynamics rather than physical constraints.
++Reinterprets training as sampling from a target distribution to handle discrete structural changes.
+ 
+ ### [Sliced Wasserstein-based Gaussian Cloning Update](11919-sliced-wasserstein-based-gaussian-cloning-update.md)
+-A method to determine the scale update for cloned Gaussians by minimizing the difference between the integrated color of the new and old Gaussians along arbitrary 1D slices passing through their centers, ensuring rasterization integral conservation. It sets itself apart from standard densification by enforcing a specific integral constraint on 1D projections rather than relying solely on position gradient magnitudes, leading to improved PSNR, SSIM, and lower LPIPS compared to base 3DGS.
++Minimizes 1D slice color differences to enforce integral conservation during cloning.
+ 
+ ### [Cross-Structure Collaboration Module](12071-cross-structure-collaboration-module.md)
+-The Cross-Structure Collaboration Module (CSCM) is a feature extraction mechanism for 3D Gaussian Splatting that integrates global tri-plane features with local context-aware grid features to generate Hierarchical Dense Embedded (HDE) features. It solves the problem of feature misalignment and insufficient geometric constraints in large-scale scenes by preserving global coherence while capturing local detail. It sets itself apart from standard tri-plane methods by adding a context grid interpolation step and from pure grid methods by maintaining a static global tri-plane backbone.
++Integrates global tri-plane and local grid features for large-scale scene coherence.
++
++### [Structure-View Co-learning](12091-structure-view-co-learning.md)
++Combines structural and view-dependent gradients for joint optimization of position and appearance.
++
++### Wolf et al. Stereo Method
++Trains 3DGS, applies stereo depth estimation, and fuses depth maps via TSDF for mesh extraction.
++
++### Pseudo Ground Truth Acquisition for Gaussians
++Generates Gaussian-specific pseudo labels from point cloud labels, accounting for densification/pruning.
++
++### Cross-View Pruning Mechanism
++Uses cross-view consistency loss and adaptive pruning to reduce redundancy.
++
++### Single-view Mini-batch Strategy
++Samples mini-batches from a single viewpoint to organize training data.
+ 
+ ### Wolf et al. Stereo Method
+@@ -246,8 +214,5 @@
+ 
+ ### Cross-View Pruning Mechanism
+-A mechanism comprising a Cross-View Consistency Loss and adaptive pruning to reduce Gaussian redundancy and ensure geometric validity [S9]. Select adjacent view pairs from $M$ views based on SSIM > 0.6. Compute Cross-View Consistent Loss ($L_{CVC}$) to penalize discrepancies between residuals of paired views. Pruning condition: $d^i_p < 0.01 \land d^j_p < 0.5 \lor d^i_p > 3\sigma$ (inferred from diagram labels $d^i_p, d^j_p$ and context of geometric consistency/pruning, though exact formula text is garbled in image, the logic is pruning based on depth/distance consistency) [S9].
+-
+-### Structure-View Co-learning
+-A module combining structural and view-dependent gradients for robust joint optimization of Gaussian positions and appearance [S9]. Loss function: $\mathcal{L} = \lambda (\lambda_V \mathcal{L}_V + \lambda_S \mathcal{L}_S)$, where $\mathcal{L}_V$ is view gradient loss, $\mathcal{L}_S$ is structure gradient loss [S9].
++A mechanism comprising a Cross-View Consistency Loss and adaptive pruning to reduce Gaussian redundancy and ensure geometric validity [S9]. Select adjacent view pairs from $M$ views based on SSIM > 0.6. Compute Cross-View Consistent Loss ($L_{CVC}$) to penalize discrepancies between residuals of paired views. Pruning condition: $d^i_p < 0.01 \land d^j_p < 0.5 \lor d^i_p > 3\sigma$ [S9].
+ 
+ ### Single-view Mini-batch Strategy
+@@ -255,15 +220,15 @@
+ 
+ ## Operating characteristics
+-*   **Time Complexity:** Training time is significantly faster than NeRFs, typically completing in minutes to hours depending on scene complexity and resolution [S2][S5, unofficial]. The training loop involves $O(N \cdot P)$ operations per step, where $N$ is the number of Gaussians and $P$ is the number of pixels [6233-optimization-and-parallelization].
+-*   **Memory Complexity:** Memory usage scales with the number of Gaussians $N$. The default limit is 5,000,000 Gaussians [S3, unofficial]. High-resolution scenes with many details can exhaust GPU VRAM [6233-optimization-and-parallelization].
+-*   **Measured Performance:** On the Replica dataset, SGS-SLAM achieves PSNR 34.15, SSIM 0.97, and LPIPS 0.096 [S1]. In 1D simulation reconstruction error (MSE) with N=5 components, Modified Sinc (Modulus) achieved 0.0030, worse than Gaussian (0.0002). With N=10 components, it achieved 0.0002, matching Gaussian [S7].
+-*   **Scaling:** Performance scales with the number of input views and resolution. Downscaling schedules are used to accelerate early training [S4, unofficial].
+-*   **Strengths:** Real-time rendering speeds, high visual fidelity, faster training than NeRFs [S2][S5, unofficial].
+-*   **Limitations:** Can produce "floaters" in empty space, sensitive to initialization, high memory usage for large scenes [S2][S6, unofficial].
+-*   **When to Use:** When real-time rendering and high-quality reconstruction from a set of images are required, and computational resources allow for GPU-based training [S2][S5, unofficial].
+-*   **When Not to Use:** When memory is severely constrained, or when the scene is extremely large and cannot fit into VRAM without significant compression [6233-optimization-and-parallelization].
++*   **Time Complexity:** Training time is significantly faster than NeRF-based methods, typically completing in minutes to hours depending on scene complexity and resolution [S2][S5, unofficial]. The training loop involves $O(N \cdot P)$ operations per step, where $N$ is the number of Gaussians and $P$ is the number of pixels, but optimized rasterization reduces this overhead [6233-optimization-and-parallelization].
++*   **Memory Complexity:** Memory usage scales with the number of Gaussians $N$. Default max Gaussians is 5,000,000 [S4, unofficial]. Sinc splatting variants consume less memory than standard Gaussians [S7].
++*   **Measured Performance:** On the Replica dataset, SGS-SLAM achieves PSNR 34.15, SSIM 0.97, and LPIPS 0.096 [S1]. Training on an M4 Max GPU can complete in ~90 seconds for certain benchmarks [S4, unofficial]. CPU execution is ~100x slower than GPU [S3, unofficial].
++*   **Scaling:** Performance scales with resolution and number of input views. Resolution is typically increased during training via a downscale schedule [S4, unofficial].
++*   **Strengths:** Real-time rendering speeds, high photorealism, faster training than NeRFs, explicit representation allows for easy editing and compression [S2][S5, unofficial].
++*   **Limitations:** Can produce "floaters" in empty space, sensitive to initialization, and may require significant VRAM for large scenes [S2][S4, unofficial].
++*   **When to Use:** When real-time rendering and fast training are prioritized over implicit representation flexibility.
++*   **When Not to Use:** When memory is extremely constrained, or when the scene requires continuous volumetric representation without discrete primitives.
+ 
+ ## Background
+-3D Gaussian Splatting was introduced by Kerbl et al. in 2023 [9]. It initializes positions using sparse point clouds from SfM tools like COLMAP [21] [S2]. The method was developed to address the slow training and rendering speeds of Neural Radiance Fields (NeRFs) while maintaining high visual quality [S5, unofficial]. It has since been extended to various domains including SLAM, dynamic scenes, and physical parameter optimization [S1].
++3D Gaussian Splatting was introduced by Kerbl et al. in 2023 [9, cited in S2]. It builds on the concept of radiance fields but uses explicit 3D Gaussians instead of neural networks. The method initializes positions using sparse point clouds from SfM tools like COLMAP [S2][S6, unofficial]. It has since been extended to various domains including SLAM, dynamic scenes, and physical parameter optimization [S1].
+ 
+ ## Sources

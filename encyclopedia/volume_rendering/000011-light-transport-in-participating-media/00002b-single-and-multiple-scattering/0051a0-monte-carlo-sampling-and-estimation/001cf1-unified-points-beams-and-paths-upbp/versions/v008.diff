@@ -1,0 +1,266 @@
+--- v007.md
++++ v008.md
+@@ -1,7 +1,6 @@
+ # Unified Points, Beams, and Paths (UPBP)
+ 
+-
+ ## Overview
+-Unified Points, Beams, and Paths (UPBP) is a combined rendering algorithm that fuses volumetric density estimation estimators (Point-Point, Point-Beam, Beam-Beam) with unbiased bidirectional path tracing (BPT) using Multiple Importance Sampling (MIS) [S2, S3]. It solves the problem of efficiently simulating light transport in diverse participating media by automatically selecting the most suitable representation—points for high-order scattering, beams for low-order scattering, and paths for volume effects with specular surfaces—thereby mitigating the weaknesses of individual estimators [S1, S3]. Unlike its siblings, UPBP subsumes methods like [VCM](873-path-integral-framework.md) and [Photon Mapping](985-delta-tracking.md) by treating them as special cases within a unified MIS framework [S2].
++Unified Points, Beams, and Paths (UPBP) is a combined rendering algorithm that fuses volumetric density estimation estimators (Point-Point, Point-Beam, Beam-Beam) with unbiased bidirectional path tracing (BPT) using Multiple Importance Sampling (MIS) [S2, S3]. It solves the problem of efficiently simulating light transport in diverse participating media by automatically selecting the most suitable representation—points for high-order scattering, beams for low-order scattering, and paths for volume effects with specular surfaces—thereby mitigating the weaknesses of individual estimators [S1, S3]. Unlike its siblings, UPBP subsumes the methods of Georgiev et al. [2012] and Hachisuka et al. [2012] by treating them as special cases within a unified MIS framework [S2].
+ 
+ ## How it works
+@@ -16,9 +15,9 @@
+ 1.  **Hashed Grids:** Separate hashed grids for surface vertices and medium vertices to support Point-Point (P-P) estimators [S2].
+ 2.  **Bounding Volume Hierarchy (BVH):** Built over medium vertices to support Point-Beam (P-B) estimators [S2].
+-3.  **Uniform Grid:** Organizes photon beams to support Beam-Beam (B-B) estimators. This was found faster than a BVH for beam queries, though query performance is suboptimal [S2].
++3.  **Uniform Grid:** Organizes photon beams to support Beam-Beam (B-B) estimators [S2]. This was found faster than a BVH for beam queries, though query performance is suboptimal [S2].
+ 
+ ### Estimators Used
+ The implementation uses a subset of estimators to balance bias and computational cost [S2]:
+-*   **P-P3D:** Point-Point 3D for medium vertices.
++*   **P-P3D:** Point-Point 3D for medium vertices [S2].
+ *   **P-B2D:** Point-Beam 2D for medium vertices (specifically using short photon beams and long query beams, denoted P-Bl2D in some contexts, but formally P-B2D in the estimator family) [S2].
+ *   **B-B1D:** Beam-Beam 1D (specifically short-beam variant Bs-Bl1D) for medium segments [S2].
+@@ -30,5 +29,5 @@
+ ### Numbered Steps
+ 
+-**Stage 1: Light Subpath Generation and Storage**
++**Stage 1: Light Subpath Generation and Storage [S3]**
+ 1.  Generate $n_{BPT}$ light subpaths $\bar{\bf y}$ [S3].
+ 2.  For each light subpath, store vertices on surfaces and vertices/beams in media [S3].
+@@ -58,7 +57,7 @@
+ 
+ Where:
+-*   $n_v$ is the number of light subpaths for technique $v$.
+-*   $s$ is the number of vertices on the light subpath.
+-*   $t$ is the number of vertices on the camera subpath.
++*   $n_v$ is the number of light subpaths for technique $v$ [S3].
++*   $s$ is the number of vertices on the light subpath [S3].
++*   $t$ is the number of vertices on the camera subpath [S3].
+     *   For BPT: $t = k + 1 - s$ [S3].
+     *   For PDE (volumetric estimators): $t = k + 2 - s$ [S3]. Note that PDE techniques require at least two vertices ($2 \le s \le k$) as they cannot be evaluated on light sources or camera lenses [S3].
+@@ -78,33 +77,75 @@
+ 
+ ### Pseudocode
+-
+ ```python
+-def upbp_render(scene, camera, max_path_length_k, n_light_subpaths):
+-    """
+-    Main UPBP rendering loop.
+-    """
++class HashedGrid:
++    def __init__(self): self.cells = {}
++    def insert(self, vertex): self.cells[hash(vertex.position)].append(vertex)
++    def query(self, point, radius): return [v for v in self.cells[hash(point)] if dist(v.position, point) < radius]
++
++class BVH:
++    def __init__(self): self.root = None
++    def insert(self, vertex): self.root = build_bvh([vertex])  # Standard BVH construction [G]
++    def query(self, ray, max_depth): return traverse_bvh(self.root, ray, max_depth)  # Standard ray-BVH traversal [G]
++
++class UniformGrid:
++    def __init__(self, cell_size): self.cell_size = cell_size; self.cells = {}
++    def insert(self, beam): self.cells[hash(beam.center)].append(beam)
++    def query(self, ray, radius): return [b for b in self.cells[hash(ray.origin)] if dist(b.center, ray.origin) < radius]
++
++def generate_light_subpath(scene, max_k):
++    # Generates light subpath y_bar, stores vertices and beams [S3]
++    vertices, beams = [], []
++    origin = sample_light_source(scene)
++    for _ in range(max_k):
++        vertices.append(Vertex(origin, is_surface=is_surface(origin)))
++        if not vertices[-1].is_surface:
++            next_pos = sample_interaction(origin, scene.extinction)
++            beams.append(Beam(vertices[-1].position, next_pos))
++            origin = next_pos
++        else:
++            break
++    return vertices, beams
++
++def generate_camera_subpath(camera, max_k):
++    # Generates camera subpath z_bar per pixel [S3]
++    vertices, beams = [], []
++    origin = sample_camera_rays(camera)
++    for _ in range(max_k):
++        vertices.append(Vertex(origin, is_surface=is_surface(origin)))
++        if not vertices[-1].is_surface:
++            next_pos = sample_interaction(origin, scene.extinction)
++            beams.append(Beam(vertices[-1].position, next_pos))
++            origin = next_pos
++        else:
++            break
++    return vertices, beams
++
++def compute_pdf_bpt(s, t, path): return standard_bpt_pdf(s, t, path)  # Computes BPT PDF [G]
++def compute_pdf_bb1d(s, t, path): return standard_bb1d_pdf(s, t, path)  # Computes B-B1D PDF [G]
++def compute_pdf_pb2d(s, t, path): return standard_pb2d_pdf(s, t, path)  # Computes P-B2D PDF [G]
++def compute_pdf_pp3d(s, t, path): return standard_pp3d_pdf(s, t, path)  # Computes P-P3D PDF [G]
++def compute_pdf_pp2d(s, t, path): return standard_pp2d_pdf(s, t, path)  # Computes P-P2D PDF [G]
++
++def evaluate_bpt(vertex, light_subpath): return connect_camera_to_light(vertex, light_subpath)  # Connects camera vertex to light subpath vertices [S2]
++def evaluate_pp2d(vertex, grid): return density_estimate(vertex, grid.query(vertex.position, radius=0.0))  # Queries surface grid for P-P2D [S2]
++def evaluate_pp3d(vertex, grid): return density_estimate(vertex, grid.query(vertex.position, radius=0.0))  # Queries medium grid for P-P3D [S2]
++def evaluate_pb2d(beam, medium_grid, bvh): return density_estimate(beam, medium_grid.query(beam.origin, radius=0.0))  # Queries for P-B2D [S2]
++def evaluate_bb1d(beam, beam_grid): return density_estimate(beam, beam_grid.query(beam.origin, radius=0.0))  # Queries for B-B1D [S2]
++
++def upbp_render(scene, camera, max_k, n_v):
+     # Initialize data structures
+     surface_grid = HashedGrid()
+     medium_grid = HashedGrid()
+     medium_bvh = BVH()
+-    beam_grid = UniformGrid()
++    beam_grid = UniformGrid(cell_size=0.1)
+     
+     # Stage 1: Light Subpath Generation
+     light_subpaths = []
+-    for _ in range(n_light_subpaths):
+-        # Generate light subpath y_bar
+-        y_bar = generate_light_subpath(scene, max_path_length_k)
+-        
+-        # Store vertices and beams
+-        for vertex in y_bar.vertices:
+-            if vertex.is_surface:
+-                surface_grid.insert(vertex)
+-            else:
+-                medium_grid.insert(vertex)
+-                medium_bvh.insert(vertex)
+-        
+-        for beam in y_bar.beams:
+-            beam_grid.insert(beam)
+-            
++    for _ in range(n_v['BPT']):
++        y_bar = generate_light_subpath(scene, max_k)
++        for vertex in y_bar[0]:
++            if vertex.is_surface: surface_grid.insert(vertex)
++            else: medium_grid.insert(vertex); medium_bvh.insert(vertex)
++        for beam in y_bar[1]: beam_grid.insert(beam)
+         light_subpaths.append(y_bar)
+         
+@@ -112,95 +153,53 @@
+     for pixel in camera.raster:
+         pixel_value = 0.0
+-        
+-        # Generate one camera subpath per pixel
+-        z_bar = generate_camera_subpath(camera, max_path_length_k)
++        z_bar = generate_camera_subpath(camera, max_k)
+         
+         # Evaluate BPT and PDE estimators at vertices
+-        for s, vertex in enumerate(z_bar.vertices):
+-            # Determine t based on technique type
+-            # BPT: t = k + 1 - s
+-            # PDE: t = k + 2 - s
++        for s, vertex in enumerate(z_bar[0]):
++            # BPT: t = k + 1 - s; PDE: t = k + 2 - s
++            t_bpt = max_k + 1 - s
++            t_pde = max_k + 2 - s
+             
+             # BPT Estimator
+-            # Connect to a randomly chosen light subpath
+-            y_bar = random.choice(light_subpaths)
++            y_bar = light_subpaths[hash(pixel) % len(light_subpaths)]
+             bpt_contrib = evaluate_bpt(vertex, y_bar)
+-            bpt_weight = compute_mis_weight('BPT', s, len(z_bar.vertices) - 1 - s, bpt_contrib.pdf)
++            bpt_weight = (n_v['BPT'] * compute_pdf_bpt(s, t_bpt, z_bar)) / compute_denominator(s, max_k, n_v)
+             pixel_value += bpt_weight * bpt_contrib
+             
+             # PDE Estimators (if not on light/camera lens)
+-            if 2 <= s <= max_path_length_k:
+-                # P-P2D for surface
++            if 2 <= s <= max_k:
+                 if vertex.is_surface:
+                     pp2d_contrib = evaluate_pp2d(vertex, surface_grid)
+-                    pp2d_weight = compute_mis_weight('P-P2D', s, len(z_bar.vertices) - 2 - s, pp2d_contrib.pdf)
++                    pp2d_weight = (n_v['P-P2D'] * compute_pdf_pp2d(s, t_pde, z_bar)) / compute_denominator(s, max_k, n_v)
+                     pixel_value += pp2d_weight * pp2d_contrib
+-                    
+-                # P-P3D for medium
+                 else:
+                     pp3d_contrib = evaluate_pp3d(vertex, medium_grid)
+-                    pp3d_weight = compute_mis_weight('P-P3D', s, len(z_bar.vertices) - 2 - s, pp3d_contrib.pdf)
++                    pp3d_weight = (n_v['P-P3D'] * compute_pdf_pp3d(s, t_pde, z_bar)) / compute_denominator(s, max_k, n_v)
+                     pixel_value += pp3d_weight * pp3d_contrib
+-                    
+-                # P-B2D for medium (using beam from vertex)
+-                # Note: P-B2D is evaluated on segments in the source, 
+-                # but the formula sums over s. The source says "At every camera beam... evaluate PDE".
+-                # We handle beams in the next loop.
+         
+         # Evaluate PDE estimators on beams (segments)
+-        for s, beam in enumerate(z_bar.beams):
+-            # Beam connects vertex s to s+1
+-            # P-B2D: Point (from light) to Beam (camera)
++        for s, beam in enumerate(z_bar[1]):
++            t_pde = max_k + 2 - s
+             pb2d_contrib = evaluate_pb2d(beam, medium_grid, medium_bvh)
+-            pb2d_weight = compute_mis_weight('P-B2D', s, len(z_bar.vertices) - 2 - s, pb2d_contrib.pdf)
++            pb2d_weight = (n_v['P-B2D'] * compute_pdf_pb2d(s, t_pde, z_bar)) / compute_denominator(s, max_k, n_v)
+             pixel_value += pb2d_weight * pb2d_contrib
+             
+-            # B-B1D: Beam (light) to Beam (camera)
+             bb1d_contrib = evaluate_bb1d(beam, beam_grid)
+-            bb1d_weight = compute_mis_weight('B-B1D', s, len(z_bar.vertices) - 2 - s, bb1d_contrib.pdf)
++            bb1d_weight = (n_v['B-B1D'] * compute_pdf_bb1d(s, t_pde, z_bar)) / compute_denominator(s, max_k, n_v)
+             pixel_value += bb1d_weight * bb1d_contrib
+             
+         pixel.value = pixel_value
+ 
+-def compute_mis_weight(technique, s, t, pdf_v):
+-    """
+-    Computes the MIS weight using the extended balance heuristic.
+-    """
+-    # Calculate denominator g_v(x)
+-    # Sum over all techniques and valid s ranges
+-    denominator = 0.0
+-    
+-    # BPT: s from 0 to k+1
+-    for j in range(0, max_path_length_k + 2):
+-        # PDF for BPT at s=j
+-        pdf_bpt_j = get_pdf_bpt(j) 
+-        denominator += n_light_subpaths['BPT'] * pdf_bpt_j
+-        
+-    # B-B1D: s from 2 to k
+-    for j in range(2, max_path_length_k + 1):
+-        pdf_bb1d_j = get_pdf_bb1d(j)
+-        denominator += n_light_subpaths['B-B1D'] * pdf_bb1d_j
+-        
+-    # P-B2D: s from 2 to k (single term in sum in source, but implies range)
+-    # Source: n_{P-B2D} p_{P-B2D,j}
+-    # Assuming j ranges similarly to other PDE techniques
+-    for j in range(2, max_path_length_k + 1):
+-        pdf_pb2d_j = get_pdf_pb2d(j)
+-        denominator += n_light_subpaths['P-B2D'] * pdf_pb2d_j
+-        
+-    # P-P3D: s from 2 to k
+-    for j in range(2, max_path_length_k + 1):
+-        pdf_pp3d_j = get_pdf_pp3d(j)
+-        denominator += n_light_subpaths['P-P3D'] * pdf_pp3d_j
+-        
+-    # P-P2D: s from 2 to k
+-    for j in range(2, max_path_length_k + 1):
+-        pdf_pp2d_j = get_pdf_pp2d(j)
+-        denominator += n_light_subpaths['P-P2D'] * pdf_pp2d_j
+-        
+-    # Numerator
+-    numerator = n_light_subpaths[technique] * pdf_v
+-    
+-    return numerator / denominator if denominator > 0 else 0.0
++def compute_denominator(s, max_k, n_v):
++    # Computes g_v(x) from the extended balance heuristic [S3]
++    denom = 0.0
++    for j in range(0, max_k + 2):
++        denom += n_v['BPT'] * compute_pdf_bpt(j, max_k + 1 - j, None)
++    for j in range(2, max_k + 1):
++        denom += n_v['B-B1D'] * compute_pdf_bb1d(j, max_k + 2 - j, None)
++        denom += n_v['P-B2D'] * compute_pdf_pb2d(j, max_k + 2 - j, None)
++        denom += n_v['P-P3D'] * compute_pdf_pp3d(j, max_k + 2 - j, None)
++        denom += n_v['P-P2D'] * compute_pdf_pp2d(j, max_k + 2 - j, None)
++    return denom
+ ```
+ 
+@@ -229,5 +228,5 @@
+ 
+ ## Background
+-UPBP was introduced by Křivánek et al. in 2014 [S1, S2, S3]. It builds on the observation that different representations (points, beams, paths) are suitable for different types of light transport in participating media [S1]. The method unifies Bidirectional Path Tracing (BPT) with Volumetric Density Estimation (VDE) estimators (P-P, P-B, B-B) using Multiple Importance Sampling (MIS) [S2, S3]. It subsumes earlier methods such as Vertex Connection and Merging (VCM) [S2] and Photon Mapping for participating media [S2].
++UPBP was introduced by Křivánek et al. in 2014 [S1, S2, S3]. It builds on the observation that different representations (points, beams, paths) are suitable for different types of light transport in participating media [S1]. The method unifies Bidirectional Path Tracing (BPT) with Volumetric Density Estimation (VDE) estimators (P-P, P-B, B-B) using Multiple Importance Sampling (MIS) [S2, S3]. It subsumes the methods of Georgiev et al. [2012] and Hachisuka et al. [2012] [S2].
+ 
+ ## Sources

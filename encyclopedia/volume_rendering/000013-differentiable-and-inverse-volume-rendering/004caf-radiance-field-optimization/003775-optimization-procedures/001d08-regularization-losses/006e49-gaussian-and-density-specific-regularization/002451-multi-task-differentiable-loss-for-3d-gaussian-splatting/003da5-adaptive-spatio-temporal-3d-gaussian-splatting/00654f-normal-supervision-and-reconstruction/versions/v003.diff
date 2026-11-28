@@ -1,0 +1,73 @@
+--- v002.md
++++ v003.md
+@@ -1,18 +1,64 @@
+ # Normal Supervision and Reconstruction
+-
+-
+ ## Overview
+-Normal Supervision and Reconstruction refers to a family of techniques that enhance 3D Gaussian Splatting (3DGS) by incorporating surface normal constraints into the optimization process [G]. These methods solve the problem of ambiguous or noisy geometry inherent in standard volumetric rendering, where photometric losses alone often fail to recover precise surface details or coherent normals [G]. What sets this family apart from its siblings, such as [Gaussian Frosting Layer Creation](12579-gaussian-frosting-layer-creation.md) or [Ambiguous Gaussians Removal](19220-ambiguous-gaussians-removal.md), is the explicit use of normal alignment—either against monocular estimates, depth gradients, or photometric stereo cues—to enforce surface-aligned geometry rather than just density fitting [S1, S2, S3].
++Normal Supervision and Reconstruction refers to a family of techniques that enhance 3D Gaussian Splatting (3DGS) by incorporating surface normal constraints into the optimization process [S1, S2, S3]. These methods solve the problem of ambiguous or noisy geometry inherent in standard volumetric rendering, where photometric losses alone often fail to recover precise surface details or coherent normals [S1, S2, S3]. What sets this family apart from its siblings, such as [Gaussian Frosting Layer Creation](12579-gaussian-frosting-layer-creation.md) or [Ambiguous Gaussians Removal](19220-ambiguous-gaussians-removal.md), is the explicit use of normal alignment—either against monocular estimates, depth gradients, or photometric stereo cues—to enforce surface-aligned geometry rather than just density fitting [S1, S2, S3].
+ 
+ ## Shared principles
+-The core mechanism involves augmenting the standard 3DGS rendering pipeline with a normal regularization loss term. This requires:
+-1. **Normal Representation:** Extending the Gaussian primitive to include or infer a normal vector $\mathbf{n}_i$. In standard 3DGS, normals are not explicit parameters; they must be derived (e.g., from depth gradients) or explicitly optimized [S1, S2, S3].
++The core mechanism involves augmenting the standard 3DGS rendering pipeline with a normal regularization loss term [S1, S2, S3]. This requires:
++1. **Normal Representation:** Extending the Gaussian primitive to include or infer a normal vector $\mathbf{n}_i$ [S1, S2, S3].
+ 2. **Normal Rendering:** Computing a rendered normal map $\hat{\mathbf{n}}_{uv}$ for a pixel $(u,v)$ by alpha-blending the normals of contributing Gaussians in depth order:
+    $$ \hat{\mathbf{n}}_{uv} = \sum_{i}^{N} \mathbf{n}_{i} \alpha_{i} \prod_{j=1}^{i-1} (1-\alpha_{j}) $$
+    where $\mathbf{n}_i$ is the normal of the $i$-th Gaussian, $\alpha_i$ is its opacity, and the product term represents the transparency of preceding Gaussians [S2].
+-3. **Supervision Signal:** Comparing the rendered normal $\hat{\mathbf{n}}_{uv}$ against a target normal $\mathbf{n}_{uv}$. Targets are derived from monocular normal estimation networks (e.g., Omnidata, MiDaS) [S1, S2], gradients of estimated depth maps [S1], or D-Normal regularization from back-projected depth [S3].
++3. **Supervision Signal:** Comparing the rendered normal $\hat{\mathbf{n}}_{uv}$ against a target normal $\mathbf{n}_{uv}$ [S1, S2, S3]. Targets are derived from monocular normal estimation networks (e.g., Omnidata, MiDaS) [S1, S2], gradients of estimated depth maps [S1], or D-Normal regularization from back-projected depth [S3].
+ 4. **Loss Function:** A cosine distance or similarity loss is added to the total optimization loss:
+    $$ \mathcal{L}_{\text{total}} = \mathcal{L}_{\text{photometric}} + \lambda_{\text{normal}} \mathcal{L}_{\text{normal}} $$
+    where $\mathcal{L}_{\text{normal}}$ measures alignment between $\hat{\mathbf{n}}_{uv}$ and $\mathbf{n}_{uv}$ [S1, S2, S3].
++
++```python
++def render_normals_and_compute_loss(gaussians, camera, gt_normal):
++    """
++    Renders normals for a view and computes the normal alignment loss.
++    gaussians: list of dicts with keys 'mu', 'cov', 'alpha', 'n' (normal vector)
++    camera: dict with 'view_matrix', 'intrinsic_matrix'
++    gt_normal: (H, W, 3) ground truth or predicted normal map
++    """
++    H, W = gt_normal.shape[:2]
++    rendered_normal = np.zeros((H, W, 3))
++    transmittance = np.ones((H, W))
++    
++    # Sort Gaussians by depth in view space
++    view_mu = transform_to_view(gaussians.mu, camera['view_matrix'])
++    sorted_idx = np.argsort(view_mu[:, 2])[::-1]
++    
++    for i in sorted_idx:
++        g = gaussians[i]
++        # Project center and compute 2D covariance
++        screen_pos = project(g.mu, camera['view_matrix'])
++        cov_2d = compute_2d_cov(g.cov, camera['view_matrix'], screen_pos)
++        
++        # Bounding box and pixel loop
++        bbox = get_bounding_box(screen_pos, cov_2d)
++        for u, v in pixels_in_bbox(bbox, H, W):
++            dist = np.array([u - screen_pos[0], v - screen_pos[1]])
++            sigma = np.exp(-0.5 * dist.T @ np.linalg.inv(cov_2d) @ dist)
++            alpha_contrib = g.alpha * sigma
++            
++            T_prev = transmittance[u, v]
++            alpha_final = alpha_contrib * T_prev
++            
++            # Alpha-blend normal
++            rendered_normal[u, v] += g.n * alpha_final
++            transmittance[u, v] *= (1 - alpha_contrib)
++    
++    # Normalize accumulated normal
++    valid = transmittance < 0.99
++    rendered_normal[valid] /= (1 - transmittance[valid, np.newaxis])
++    rendered_normal = normalize(rendered_normal)
++    
++    # Compute cosine distance loss
++    dot_product = np.sum(rendered_normal * gt_normal, axis=-1)
++    dot_product = np.clip(dot_product, -1.0, 1.0)
++    loss = np.sum(1 - dot_product)
++    return loss, rendered_normal
++```
+ 
+ ## Subtopics

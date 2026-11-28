@@ -1,0 +1,52 @@
+# VTK Frame Rate Targeting & Adaptive Sampling
+
+Also called: AutoAdjustSampleDistances, SetDesiredUpdateRate
+
+## Overview
+A technique to maintain a target frame rate in VTK volume rendering by dynamically adjusting the sampling distance per frame based on the allocated render time budget [S1]. It sets apart from static acceleration methods by trading visual fidelity (increased banding) for temporal stability when the computational load exceeds the hardware's capacity to meet a strict FPS goal [S1].
+
+## How it works
+**Inputs and Outputs:**
+*   **Input:** A target frame rate (FPS) for the render window; a scene containing one or more `vtkOpenGLGPUVolumeRayCastMapper` props.
+*   **Output:** A rendered image where the sampling density is adjusted per frame to ensure the render completes within the time budget derived from the target FPS.
+
+**Data Structures:**
+The method relies on internal state within VTK's render window and mapper classes.
+*   `vtkExternalOpenGLRenderWindow`: Stores the desired update rate.
+*   `vtkOpenGLGPUVolumeRayCastMapper`: Stores the current sampling distance and the flag `AutoAdjustSampleDistances`.
+
+**Parameters:**
+*   **Desired Update Rate:** Set via `SetDesiredUpdateRate`. Typical value: 300 fps for VR applications requiring 90 fps per eye plus a screen preview [S1].
+*   **AutoAdjustSampleDistances:** Boolean flag on the mapper. Must be enabled for the adaptation to occur [S1].
+
+**Steps:**
+1.  **Initialize Target:** Call `SetDesiredUpdateRate(target_fps)` on the `vtkExternalOpenGLRenderWindow` [S1].
+2.  **Calculate Time Budget:** VTK calculates the maximum allowable time per frame as $T_{frame} = \frac{1}{target\_fps}$ [S1].
+3.  **Allocate Budget:** The total $T_{frame}$ is divided among all props in the scene. If $N$ props are present, each prop receives an approximate budget of $T_{prop} = \frac{T_{frame}}{N}$, reduced further by overhead [S1].
+4.  **Render Loop:** For each frame:
+    a. The `vtkOpenGLGPUVolumeRayCastMapper` checks if `AutoAdjustSampleDistances` is enabled [S1].
+    b. The mapper estimates the time required to render the current view with the current sampling distance.
+    c. If the estimated time exceeds the allocated $T_{prop}$, the mapper increases the sampling distance (reducing sample count).
+    d. If the estimated time is well below $T_{prop}$, the mapper may decrease the sampling distance (increasing sample count) to improve quality, subject to stability constraints [S1].
+    e. The volume is rendered using the adjusted sampling distance.
+
+**Pitfalls:**
+*   **Banding Artifacts:** Increasing the sampling distance reduces the number of samples per ray, leading to visible banding in the final image [S1].
+*   **Proximity Drop-off:** Without this method, frame rates drop significantly as the volume moves closer to the viewer because more pixels are filled, requiring more rays [S1].
+*   **VR Overhead:** In VR, the target must account for multiple views (left eye, right eye, screen). A 90 fps VR experience requires rendering 3 views, necessitating a higher VTK-level target (e.g., 300 fps) to allow for overhead [S1].
+
+## Operating characteristics
+*   **Time Complexity:** The method does not change the asymptotic complexity of volume rendering but dynamically reduces the constant factor (number of samples) based on available time.
+*   **Memory Complexity:** No additional memory structures are required beyond the standard volume data and mapper state [S1].
+*   **Performance:**
+    *   Without a target, frame rates can drop to 40–50 fps when the volume is close to the viewer [S1].
+    *   With a 300 fps target, frame rates often exceed 100 fps, maintaining viewer comfort [S1].
+*   **Strengths:** Guarantees a minimum frame rate, preventing stutter in interactive applications like VR [S1].
+*   **Limitations:** Visual quality degrades (banding) as the sampling distance increases to meet the time budget [S1].
+
+## Background
+This method is part of the Visualization Toolkit (VTK) library's volume rendering capabilities, specifically within the `vtkOpenGLGPUVolumeRayCastMapper` and `vtkExternalOpenGLRenderWindow` classes [S1]. It was documented in the context of virtual reality (VR) medical imaging applications, where maintaining a high frame rate (90 fps) is critical for user comfort [S1].
+
+## Sources
+
+[S1] Virtual interaction and visualisation of 3D medical imaging data with VTK and Unity, https://doi.org/10.1049/htl.2018.5064, fetched 2026-10-28

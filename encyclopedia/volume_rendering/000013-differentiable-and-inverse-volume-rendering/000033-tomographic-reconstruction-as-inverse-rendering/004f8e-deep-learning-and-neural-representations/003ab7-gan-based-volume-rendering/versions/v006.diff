@@ -1,0 +1,267 @@
+--- v005.md
++++ v006.md
+@@ -8,12 +8,12 @@
+ ## How it works
+ **Inputs and Outputs:**
+-*   **Input:** A visualization parameter vector $w$ containing viewpoint parameters $v$ and sampled transfer function values $\tau$ (opacity) and $t_c$ (color).
++*   **Input:** A visualization parameter vector $w$ containing viewpoint parameters $v$ and sampled transfer function values $\tau$ (opacity) and $t_c$ (color) [S1].
+ *   **Output:** A color image $I \in \mathbb{R}^{3 \times w \times h}$ of fixed resolution $w \times h$ [S1].
+ 
+ **Data Structures:**
+ The visualization parameters $w$ are constructed as a concatenation of:
+-1.  Viewpoint vector $v \in \mathbb{R}^{n_v}$, where $n_v = 5$. The five parameters correspond to azimuth, elevation, in-plane rotation, and distance to the camera. The azimuth angle is separated into its cosine and sine components to handle the wrap-around discontinuity at $0$ and $2\pi$ [S1].
+-2.  Opacity TF sampled vector $\tau \in \mathbb{R}^{n_t}$, where $n_t = 256$.
+-3.  Color TF sampled vector $t_c \in \mathbb{R}^{3 \times n_t}$, where $n_t = 256$.
++1.  Viewpoint vector $v \in \mathbb{R}^{n_v}$, where $n_v = 5$ [S1]. The five parameters correspond to azimuth, elevation, in-plane rotation, and distance to the camera [S1]. The azimuth angle is separated into its cosine and sine components to handle the wrap-around discontinuity at $0$ and $2\pi$ [S1].
++2.  Opacity TF sampled vector $\tau \in \mathbb{R}^{n_t}$, where $n_t = 256$ [S1].
++3.  Color TF sampled vector $t_c \in \mathbb{R}^{3n_t}$, where $n_t = 256$ [S1].
+ Thus, $w = [v, \tau, t_c]$ [S1].
+ 
+@@ -21,14 +21,6 @@
+ The method employs a Generator $G$ and a Discriminator $D$ [S1].
+ 
+-*   **Generator ($G$):** Transforms the low-dimensional vector $w$ into an image. It uses a DCGAN-style architecture interleaving upsampling and 2D convolutional layers [S1].
+-    *   Viewpoint components are processed using Fully Connected (FC) layers because they lack spatial correlation [S1].
+-    *   TF components are processed using 1D Convolutional layers because they are 1D signals with spatial dependencies [S1].
+-    *   Nonlinearity: Rectified Linear Unit (ReLU), $h(x) = \max(0, x)$ [S1].
+-    *   Batch Normalization is used in 2D convolutional layers to stabilize training [S1].
+-
+-*   **Discriminator ($D$):** Takes $w$ and an image $I$ as input and produces a score in $[0, 1]$ indicating if the image is real or fake.
+-    *   It transforms the image into a low-dimensional vector through 2D convolutions with stride 2 [S1].
+-    *   It fuses image features with input parameter features [S1].
+-    *   Nonlinearity: Leaky ReLU, $h(x) = \max(0, x) + \alpha \min(0, x)$ [S1].
++*   **Generator ($G$):** Transforms the low-dimensional vector $w$ into an image using a DCGAN-style architecture that interleaves upsampling and 2D convolutional layers [S1]. Viewpoint components are processed using Fully Connected (FC) layers because they lack spatial correlation [S1]. TF components are processed using 1D Convolutional layers because they are 1D signals with spatial dependencies [S1]. The generator uses Rectified Linear Unit (ReLU) nonlinearities, $h(x) = \max(0, x)$ [S1]. Batch normalization is applied in 2D convolutional layers to stabilize training by normalizing data using batch-computed mean and standard deviation statistics [S1].
++*   **Discriminator ($D$):** Takes $w$ and an image $I$ as input and produces a score in $[0, 1]$ indicating if the image is real or fake [S1]. It transforms the image into a low-dimensional vector through 2D convolutions with stride 2 [S1]. It fuses image features with input parameter features [S1]. The discriminator uses Leaky ReLU nonlinearities, $h(x) = \max(0, x) + \alpha \min(0, x)$ [S1].
+ 
+ **1D Convolution Formula:**
+@@ -44,117 +36,106 @@
+ L_{adv}(G, D) = \mathbb{E}_{I,w \sim p_{data}} [\log(D(w, I))] + \mathbb{E}_{w \sim p_{vis}} [\log(D(w, G(w)))]
+ $$
+-where $I$ is a real volume-rendered image, $w$ represents visualization parameters, $G$ is the generator, and $D$ is the discriminator. The first expectation is over the joint distribution of real images and parameters $p_{data}$, and the second is over the distribution of visualization parameters $p_{vis}$ [S1].
++where $I$ is a real volume-rendered image, $w$ represents visualization parameters, $G$ is the generator, and $D$ is the discriminator [S1]. The first expectation is over the joint distribution of real images and parameters $p_{data}$, and the second is over the distribution of visualization parameters $p_{vis}$ [S1].
+ 
+ **Pseudocode:**
+-
+ ```python
+ import numpy as np
+ 
+-def compute_1d_convolution(X, W, stride=1):
+-    """
+-    Computes 1D convolution as defined in [S1].
+-    X: Input tensor of shape (N, C_in) where N is signal length, C_in is channels.
+-    W: Filter weights of shape (filter_width, C_out, C_in).
+-    stride: Integer stride.
+-    Returns: Z of shape (N_out, C_out).
+-    """
+-    filter_width = W.shape[0]
+-    C_in = W.shape[2]
+-    C_out = W.shape[1]
+-    N = X.shape[0]
+-    
+-    # Calculate output length
+-    N_out = (N - filter_width) // stride + 1
+-    
++def relu(x): return np.maximum(0, x)
++def leaky_relu(x, alpha=0.2): return np.maximum(0, x) + alpha * np.minimum(0, x)
++def sigmoid(x): return 1.0 / (1.0 + np.exp(-np.clip(x, -500, 500)))
++
++def batch_norm(x, gamma, beta, running_mean, running_var, eps=1e-5, momentum=0.1, training=True):
++    if training:
++        mean = np.mean(x, axis=0, keepdims=True)
++        var = np.var(x, axis=0, keepdims=True)
++        running_mean = (1 - momentum) * running_mean + momentum * mean
++        running_var = (1 - momentum) * running_var + momentum * var
++    else:
++        mean, var = running_mean, running_var
++    x_norm = (x - mean) / np.sqrt(var + eps)
++    return gamma * x_norm + beta, running_mean, running_var
++
++def compute_1d_conv(X, W, stride=1):
++    # X: (N, C_in), W: (filter_width, C_out, C_in)
++    N, C_in = X.shape
++    fw, C_out, _ = W.shape
++    N_out = (N - fw) // stride + 1
+     Z = np.zeros((N_out, C_out))
+-    
+     for a in range(N_out):
+         for b in range(C_out):
+-            val = 0.0
+             for k in range(C_in):
+-                for l in range(filter_width):
+-                    input_idx = stride * a + l
+-                    # Guard against boundary if not padded, though sources imply valid convolution
+-                    if 0 <= input_idx < N:
+-                        val += X[input_idx, k] * W[l, b, k]
+-            Z[a, b] = val
++                for l in range(fw):
++                    idx = stride * a + l
++                    if 0 <= idx < N:
++                        Z[a, b] += X[idx, k] * W[l, b, k]
++    return Z
++
++def compute_2d_conv(X, W, stride=1):
++    # X: (H, W, C_in), W: (kh, kw, C_out, C_in)
++    H, W_dim, C_in = X.shape
++    kh, kw, C_out, _ = W.shape
++    H_out = (H - kh) // stride + 1
++    W_out = (W_dim - kw) // stride + 1
++    Z = np.zeros((H_out, W_out, C_out))
++    for i in range(H_out):
++        for j in range(W_out):
++            for c in range(C_out):
++                for ci in range(C_in):
++                    for ki in range(kh):
++                        for kj in range(kw):
++                            idx_i, idx_j = stride * i + ki, stride * j + kj
++                            if 0 <= idx_i < H and 0 <= idx_j < W_dim:
++                                Z[i, j, c] += X[idx_i, idx_j, ci] * W[ki, kj, c, ci]
+     return Z
+ 
+ def generator_forward(w, params):
+-    """
+-    Generator G forward pass.
+-    w: Visualization parameter vector [v, tau, tc].
+-    v: Viewpoint vector (cos/sin azimuth, elevation, rotation, distance).
+-    tau: Opacity TF samples.
+-    tc: Color TF samples.
+-    """
+-    # Split w
+-    v = w[:5] # nv = 5
+-    tau = w[5:5+256] # nt = 256
+-    tc = w[5+256:5+256+3*256]
++    v = w[:5]
++    tau = w[5:261]
++    tc = w[261:1029]
+     
+-    # Process Viewpoint with Fully Connected Layers
+-    # z_v = h(W_v @ v + b_v)
+-    z_v = apply_fc_layers(v) # [G] Placeholder for specific FC layer definitions not in source
++    # Viewpoint: Fully Connected layers
++    z_v = relu(params['W_v1'] @ v + params['b_v1'])
++    z_v = relu(params['W_v2'] @ z_v + params['b_v2'])
+     
+-    # Process TFs with 1D Convolutions
+-    # z_tau = compute_1d_convolution(tau, W_tau)
+-    z_tau = compute_1d_convolution(tau, params['W_tau'])
++    # TFs: 1D Convolutions
++    z_tau = relu(compute_1d_conv(tau.reshape(-1, 1), params['W_tau']))
++    z_tc = relu(compute_1d_conv(tc.reshape(-1, 1), params['W_tc']))
+     
+-    # z_tc = compute_1d_convolution(tc, W_tc)
+-    z_tc = compute_1d_convolution(tc, params['W_tc'])
+-    
+-    # Combine and upsample to image
+-    # Interleave upsampling and 2D convolution
+-    combined = concatenate(z_v, z_tau, z_tc)
+-    image = apply_upsampling_and_conv_layers(combined) # [G] Placeholder for DCGAN-style upsampling
+-    
+-    return image
++    # Combine and upsample (DCGAN-style: interleave upsampling and 2D conv)
++    combined = np.concatenate([z_v, z_tau, z_tc], axis=0)
++    grid = combined.reshape(1, 1, 1, -1)
++    for _ in range(4): # 4 upsampling steps to reach 256x256
++        grid = np.repeat(np.repeat(grid, 2, axis=1), 2, axis=2)
++        grid = relu(compute_2d_conv(grid, params['W_up1']) + params['b_up1'])
++        grid, _, _ = batch_norm(grid, params['gamma_up1'], params['beta_up1'], params['rm_up1'], params['rv_up1'])
++    return grid.transpose(1, 2, 0) # Output shape (256, 256, 3)
+ 
+ def discriminator_forward(w, image, params):
+-    """
+-    Discriminator D forward pass.
+-    """
+-    # Process image with 2D convolutions (stride 2)
+-    img_features = apply_2d_conv_layers(image, params['W_img']) # [G] Placeholder
++    # image: (256, 256, 3)
++    img_feat = relu(compute_2d_conv(image, params['W_img1']))
++    img_feat, _, _ = batch_norm(img_feat, params['gamma_img1'], params['beta_img1'], params['rm_img1'], params['rv_img1'])
++    img_feat = compute_2d_conv(img_feat, params['W_img2'])
+     
+-    # Process parameters w
+-    # Viewpoint via FC, TFs via 1D Conv
+     v = w[:5]
+-    tau = w[5:5+256]
+-    tc = w[5+256:5+256+3*256]
++    tau = w[5:261]
++    tc = w[261:1029]
++    z_v = relu(params['W_v1'] @ v + params['b_v1'])
++    z_tau = relu(compute_1d_conv(tau.reshape(-1, 1), params['W_tau']))
++    z_tc = relu(compute_1d_conv(tc.reshape(-1, 1), params['W_tc']))
++    param_feat = np.concatenate([z_v, z_tau, z_tc], axis=0)
+     
+-    z_v = apply_fc_layers(v)
+-    z_tau = compute_1d_convolution(tau, params['W_tau_disc'])
+-    z_tc = compute_1d_convolution(tc, params['W_tc_disc'])
+-    
+-    param_features = concatenate(z_v, z_tau, z_tc)
+-    
+-    # Fuse image and parameter features
+-    fused = fuse_features(img_features, param_features) # [G] Placeholder for fusion mechanism
+-    
+-    # Produce score [0, 1]
+-    score = sigmoid(apply_final_fc(fused))
++    # Fuse features (concatenate and project)
++    fused = np.concatenate([img_feat.flatten(), param_feat], axis=0)
++    score = sigmoid(params['W_out'] @ fused + params['b_out'])
+     return score
+ 
+-def train_step(G, D, real_images, w_real, w_fake, params):
+-    """
+-    One step of the min-max game.
+-    """
+-    # Generate fake images
+-    fake_images = generator_forward(w_fake, params)
++def train_step(G_params, D_params, real_images, w_real, w_fake):
++    fake_images = generator_forward(w_fake, G_params)
++    d_real = discriminator_forward(w_real, real_images, D_params)
++    d_fake = discriminator_forward(w_fake, fake_images, D_params)
+     
+-    # Update Discriminator
+-    # Maximize D: Real images -> 1, Fake images -> 0
+-    loss_D_real = -np.mean(np.log(discriminator_forward(w_real, real_images, params) + 1e-8))
+-    loss_D_fake = -np.mean(np.log(1 - discriminator_forward(w_fake, fake_images, params) + 1e-8))
+-    loss_D = loss_D_real + loss_D_fake
+-    
+-    # Update Generator
+-    # Minimize G: Fake images -> 1 (trick D into thinking they are real)
+-    # L_adv(G, D) term for G is E[log(D(w, G(w)))]
+-    # To minimize G, we maximize log(D(w, G(w))), so we minimize -log(D(w, G(w)))
+-    loss_G = -np.mean(np.log(discriminator_forward(w_fake, fake_images, params) + 1e-8))
+-    
++    loss_D = -np.mean(np.log(d_real + 1e-8)) - np.mean(np.log(1 - d_fake + 1e-8))
++    loss_G = -np.mean(np.log(d_fake + 1e-8))
+     return loss_D, loss_G
+ ```
+@@ -163,5 +144,5 @@
+ 
+ ### [Multi-pass GAN for Volumetric Super-Resolution](10413-multi-pass-gan-for-volumetric-super-resolution.md)
+-This method performs spatial super-resolution on volumetric data by decomposing the 3D reconstruction problem into orthogonal 2D slice passes, avoiding the memory costs of full 3D convolutions. It distinguishes itself from standard 3D GANs by integrating physics-informed constraints directly into the training objective to ensure physically consistent reconstructions, rather than relying solely on statistical error minimization.
++This method performs spatial super-resolution on volumetric data by decomposing the 3D reconstruction problem into orthogonal 2D slice passes, thereby avoiding the memory costs associated with full 3D convolutions. It distinguishes itself from standard 3D GANs by integrating physics-informed constraints directly into the training objective to ensure physically consistent reconstructions, rather than relying solely on statistical error minimization.
+ 
+ ### [GAN Training Procedure](10451-gan-training-procedure.md)
+@@ -169,20 +150,16 @@
+ 
+ ### Two-stage Conditional GAN for Volume Rendering
+-This is the first learned volume rendering system employing a two-stage conditional GAN architecture [S2, unofficial]. It learns end-to-end mappings from volumetric data and parameters to rendered images, bypassing explicit transfer function specification by encoding opacity transfer functions into a latent space [S2, unofficial].
+-*   **Process:** It encodes opacity transfer functions into an 8-dimensional latent space via 1D convolutions. The first GAN generates 64×64 opacity images conditioned on viewpoint and TF parameters. The second GAN translates these opacity images to 256×256 color renderings using color TF conditioning and skip connections [S2, unofficial].
+-*   **Parameters:** Trained on 200,000 procedurally generated samples per volume [S2, unofficial].
+-*   **Performance:** Achieved RMSE of 0.046–0.116 across six datasets. Inference time is 7ms for interactive TF sensitivity analysis [S2, unofficial].
+-*   **Limitations:** Requires per-volume training with no cross-volume generalization. Limited to 256×256 output resolution and 1D transfer functions [S2, unofficial].
++This is the first learned volume rendering system employing a two-stage conditional GAN architecture [S2, unofficial]. It learns end-to-end mappings from volumetric data and parameters to rendered images, bypassing explicit transfer function specification by encoding opacity transfer functions into a latent space [S2, unofficial]. It encodes opacity transfer functions into an 8-dimensional latent space via 1D convolutions. The first GAN generates 64×64 opacity images conditioned on viewpoint and TF parameters [S2, unofficial]. The second GAN translates these opacity images to 256×256 color renderings using color TF conditioning and skip connections [S2, unofficial]. It was trained on 200,000 procedurally generated samples per volume [S2, unofficial]. The model achieved RMSE of 0.046–0.116 across six datasets, with 7ms inference time for interactive TF sensitivity analysis [S2, unofficial]. It requires per-volume training with no cross-volume generalization, and is limited to 256×256 output resolution and 1D transfer functions [S2, unofficial].
+ 
+ ## Operating characteristics
+-*   **Complexity:** The method avoids the $O(kn)$ memory usage of reverse-mode AD associated with storing intermediate states for differentiable volume rendering [G]. Instead, memory usage is determined by the neural network parameters.
++*   **Complexity:** The method avoids the $O(kn)$ memory usage of reverse-mode AD associated with storing intermediate states for differentiable volume rendering [G]. Instead, memory usage is determined by the neural network parameters [G].
+ *   **Performance:** Inference is extremely fast (e.g., 7ms for the two-stage variant), enabling interactive exploration [S2, unofficial].
+ *   **Strengths:** Bypasses the need for explicit volume data storage during inference; handles complex mappings between parameters and images; perceptually superior to MSE-based methods [S1][S2, unofficial].
+-*   **Limitations:** Requires large datasets for training; may struggle with high-resolution synthesis (256x256) without architectural modifications like the two-stage approach [S1]; the two-stage variant lacks cross-volume generalization [S2, unofficial].
+-*   **When to use:** When interactive exploration of viewpoint and TF space is required, and explicit volume data is either unavailable or too large to store/process in real-time.
+-*   **When not to use:** When exact physical accuracy is required over perceptual quality, or when cross-volume generalization is needed without retraining.
++*   **Limitations:** Requires large datasets for training; may struggle with high-resolution synthesis (256×256) without architectural modifications like the two-stage approach [S1]; the two-stage variant lacks cross-volume generalization [S2, unofficial].
++*   **When to use:** When interactive exploration of viewpoint and TF space is required, and explicit volume data is either unavailable or too large to store/process in real-time [S1][S2, unofficial].
++*   **When not to use:** When exact physical accuracy is required over perceptual quality, or when cross-volume generalization is needed without retraining [S2, unofficial].
+ 
+ ## Background
+-The method was introduced in "A Generative Model for Volume Rendering" [S1]. It frames volume rendering not as a physical simulation but as a learned mapping from visualization parameters to images. This approach addresses the difficulty of exploring the high-dimensional space of viewpoints and transfer functions by using a GAN to synthesize images directly [S1]. The two-stage conditional GAN variant was later introduced as the first learned volume rendering system of its kind [S2, unofficial].
++The method was introduced in "A Generative Model for Volume Rendering" [S1]. It frames volume rendering not as a physical simulation but as a learned mapping from visualization parameters to images [S1]. This approach addresses the difficulty of exploring the high-dimensional space of viewpoints and transfer functions by using a GAN to synthesize images directly [S1]. The two-stage conditional GAN variant was later introduced as the first learned volume rendering system of its kind [S2, unofficial].
+ 
+ ## Sources

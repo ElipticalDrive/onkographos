@@ -1,0 +1,331 @@
+This is a tutorial on how to create advanced shaders in Unity. You will learn volume rendering, interior mapping, and much more. In this section you will learn how to volume render a death star from the star wars movies.
+
+Advanced shaders in Unity - Volume render a death star | Habrador
+Advanced shaders in Unity
+Introduction
+1. Volume rendering: Death Star
+2. Interior mapping
+3. Parallax mapping
+Source code: GitHub
+Share me
+...and follow me on Twitter: @eriknordeus
+1. Volume render a Death Star
+This is a tutorial on the art of volume rendering. But what is volume rendering, you may ask? According to Wikipedia, volume rendering is a set of techniques used to display a 2D projection of a 3D discretely sampled data set, typically a 3D scalar field. So the basic idea is that you have some data you want to display on the screen but you can't construct a mesh from the data. For example, if you have a gas, then it's impossible to create a mesh from the data you have, so you have to use volume rendering to display the gas.
+One good example where you really need volume rendering is if you are making clouds you want to fly through. If you have seen the movie Avatar, then you have seen volume rendered clouds:
+Before you begin, and if you want to understand everything, you should learn how to write shaders in Unity, because volume rendering is all about shaders. If you don't know the basics of shaders, then this is a good introduction: A Crash Course to Writing Custom Unity Shaders.
+Basic scene
+To learn the basics of volume rendering you will here learn how to make a Death Star, famous from the Star Wars movies.
+So begin by creating a plane which will be the ground and a cube at the center of the map that will act like a building. We need this cube so we can see that the Death Star is always in the background of the scene.
+Then you need to create a quad and add the quad as a child to the camera. It is on this quad we will paint the Death Star with the help of volume rendering, so make sure it faces the camera and that it covers the entire screen. Position the quad with z coordinate 0.32 so the camera can see the quad because the standard camera's near clipping plane is at 0.3, so everything closer to the camera is invisible. But if you have another near clipping plane, then change the values to whatever you have.
+To make sure the Death Star is always in the background behind everything else, you need to add another camera as a child to the first camera and set its "clear flags" to "depth only." Then you should add the quad, on which you will paint the Death Star, to its own layer and make sure the first camera is seeing just that layer by selecting it in the "culling mask" which is in the camera settings (and deselect all other layers). Then make sure the child camera is seeing everything except the layer where the Death Star is by selecting all other layers in that camera's "culling mask" setting.
+C# scripts
+Create an empty game object called Death Star and a script called DeathStar, and add the script to that game object. This game object will determine the position of the Death Star, because it is easier to make it rotate by using C# code than to make it rotate by shader code.
+```
+using UnityEngine;
+using System.Collections;
+
+public class DeathStar : MonoBehaviour 
+{
+    public float height; //Something like 50
+    public float distance; //Something like 80
+    public float rotationSpeed; //Something like 5
+
+	void Start() 
+	{
+        transform.position = new Vector3(distance, height, distance);
+	}
+	
+	void Update() 
+	{
+        transform.RotateAround(Vector3.zero, Vector3.up, rotationSpeed * Time.deltaTime);
+    }
+}
+```
+Next up is a script that will communicate with the shader, so it will send information from the scene to the shader. The reason is that the shader is written in another programming language and is running on the GPU, so it can't communicate directly with C#. Add that script to the camera. Don't forget to add the Death Star game object to the script.
+```
+using UnityEngine;
+using System.Collections;
+
+[ExecuteInEditMode]
+public class GlobalShaderVariables : MonoBehaviour 
+{
+    public GameObject deathStar;
+
+    private void OnPreRender()
+    {
+        //The camera positions we need to determines the global position of the shader
+        Shader.SetGlobalVector("_CamPos",     this.transform.position);
+        Shader.SetGlobalVector("_CamRight",   this.transform.right);
+        Shader.SetGlobalVector("_CamUp",      this.transform.up);
+        Shader.SetGlobalVector("_CamForward", this.transform.forward);
+
+        //The position of the death star
+        Shader.SetGlobalVector("_StarPos", deathStar.transform.position);
+    }
+}
+```
+The Death Star shader
+To make a Death Star we will build up a matematical model describing the Death Star's geometry. This model is a so-called distance function. A distance function will return the distance from a position in the scene to the object, and if we are inside of the object then this distance will be negative. This will look like a Death Star. This is a good source if you want to create basic shapes suitable for volume rendering: Modeling with distance functions.
+This basic Death Star consists of two half-spheres with a small distance between them. To make these half-spheres, we will create two spheres and cut them in half with the help of two boxes. When that is done we will create the cutout by cutting a sphere from the top of the half-spheres.
+When we have a mathematical model of the Death Star we can send rays from the camera, through the quad, and see if the ray intersects with the mathematical model of the Death Star. This is similar to the traditional Raycasting method in Unity, but that function is not available in the shader, so we have to create our own. If this ray intersects with the Death Star, we figure out which color the ray should be, and this color will determine the color of the pixel on the sceen.
+```
+Shader "Volume Rendering/Death Star"
+{
+	SubShader
+	{
+		Tags
+		{
+			"Queue" = "Transparent"
+		}
+
+		Pass
+		{
+			//Traditional transparency
+			Blend SrcAlpha OneMinusSrcAlpha
+
+			CGPROGRAM
+
+			//Pragmas
+			#pragma vertex vert
+			#pragma fragment frag
+
+			#include "UnityCG.cginc"
+
+			//Structs
+			struct v2f
+			{
+				float2 uv : TEXCOORD0;
+				float4 vertex : SV_POSITION;
+			};
+
+			//Input
+			//appdata_base includes position, normal and one texture coordinate
+			v2f vert(appdata_base v)
+			{
+				v2f o;
+
+				o.vertex = mul(UNITY_MATRIX_MVP, v.vertex);
+				o.uv = v.texcoord;
+
+				return o;
+			}
+
+			//
+			//User defined functions and variables
+			//
+
+			//Camera
+			float3 _CamPos;
+			float3 _CamRight;
+			float3 _CamUp;
+			float3 _CamForward;
+			//Planet
+			float3 _StarPos;
+			//Unity specific
+			float4 _LightColor0;
+
+			//Standardized distance functions needed to build the death star
+			//Get the distance to a sphere
+			float getDistanceSphere(float sphereRadius, float3 circleCenter, float3 rayPos)
+			{
+				float distance = length(rayPos - circleCenter) - sphereRadius;
+
+				return distance;
+			}
+
+			//Get the distance to a box
+			float getDistanceBox(float3 boxSize, float3 boxCenter, float3 rayPos)
+			{
+				return length(max(abs(rayPos - boxCenter) - boxSize, 0.0));
+			}
+
+			//The distance function, which returns the distance to death star from a position
+			float distFunc(float3 pos)
+			{
+				const float starRadius = 50.0;
+
+				const float3 cutOutBoxSize = float3(starRadius, starRadius, starRadius);
+
+				//The death star consists of 2 half-spheres and this is the gap between them
+				const float distanceBetweenHalf = 0.5;
+
+
+				//Top half
+				float3 starPosTop = _StarPos + float3(0.0, distanceBetweenHalf, 0.0);
+
+				float starDistanceTop = getDistanceSphere(starRadius, starPosTop, pos);
+
+				float3 cutOutPosTop = starPosTop + float3(0.0, starRadius, 0.0);
+
+				float cutOutDistanceTop = getDistanceBox(cutOutBoxSize, cutOutPosTop, pos);
+
+
+				//Bottom half
+				float3 starPosBottom = _StarPos + float3(0.0, -distanceBetweenHalf, 0.0);
+
+				float starDistanceBottom = getDistanceSphere(starRadius, starPosBottom, pos);
+
+				float3 cutOutPosBottom = starPosBottom + float3(0.0, -starRadius, 0.0);
+
+				float cutOutDistanceBottom = getDistanceBox(cutOutBoxSize, cutOutPosBottom, pos);
+
+
+				//The final distance to the main star body
+				float starBodyDist = min(max(starDistanceTop, cutOutDistanceTop), max(starDistanceBottom, cutOutDistanceBottom));
+
+
+				//The cutout hole in the death star
+				const float cutOutRadius = starRadius * 0.3;
+
+				//The cutout is always facing the center of the map
+				//First move the cutout sphere up
+				float3 cutOutPos = _StarPos + float3(0.0, starRadius / 2.0, 0.0);
+
+				//Then move the  cutout sphere in the direction to the center
+				float3 centerDir = normalize(-_StarPos);
+				
+				//Don't move in y direction
+				centerDir.y = 0;
+
+				cutOutPos += starRadius * centerDir;
+
+				float cutOutDistance = getDistanceSphere(cutOutRadius, cutOutPos, pos);
+
+
+				//The final distance to the death star
+				return max(starBodyDist, -cutOutDistance);
+			}
+
+			//Get color at a certain position
+			fixed4 getColor(float3 pos, fixed3 color)
+			{
+				//Find the normal at this point
+				const fixed2 eps = fixed2(0.00, 0.02);
+
+				//Can approximate the surface normal using what is known as the gradient. 
+				//The gradient of a scalar field is a vector, pointing in the direction where the field 
+				//increases or decreases the most.
+				//The gradient can be approximated by numerical differentation
+				fixed3 normal = normalize(float3(
+					distFunc(pos + eps.yxx) - distFunc(pos - eps.yxx),
+					distFunc(pos + eps.xyx) - distFunc(pos - eps.xyx),
+					distFunc(pos + eps.xxy) - distFunc(pos - eps.xxy)));
+
+				//The main light is always a direction and not a position
+				//This is the direction to the light
+				fixed3 lightDir = normalize(_WorldSpaceLightPos0.xyz);
+
+				//Add diffuse light (intensity is already included in _LightColor0 so no need to add it)
+				fixed3 diffuse = _LightColor0.rgb * max(dot(lightDir, normal), 0.0);
+
+				
+				//Add ambient light
+				//According to internet, the ambient light should always be multiplied by 2
+				fixed3 finalLight = diffuse + (UNITY_LIGHTMODEL_AMBIENT.xyz * 2.0);
+
+
+				//Add all lights to the base color
+				color *= finalLight;
+
+				//Add fog to make it more moon-like
+				float distance = length(pos - _CamPos);
+				
+				fixed fogDensity = 0.1;
+
+				const fixed3 fogColor = fixed3(0.8, 0.8, 0.8);
+
+				//Fog fractions
+				//Exponential
+				float f = exp(-distance * fogDensity);
+				//Exponential square
+				//float f = exp(-distance * distance * fogDensity * fogDensity);
+				//Linear - the first term is where the fog begins
+				//float f = fogDensity * (0.0 - distance);
+
+				color = (fogColor * (1.0 - f)) + (color * f);
+
+				//We also need to add alpha to the color
+				fixed4 finalColor = fixed4(color, 1.0);
+
+				//To make it more moon-like, the shadow should be transparent as the moon is when we see it in daylight
+				finalColor.a *= max(dot(lightDir, normal) * 1.0, 0.0);
+
+				return finalColor;
+			}
+
+			//Get the color where the ray hit something, else return transparent color
+			fixed4 getColorFromRaymarch(float3 pos, float3 ray)
+			{
+				//Init the color to transparent
+				fixed4 color = 0;
+
+				for (int i = 0; i < 64; i++)
+				{
+					//Get the current distance to the death star along this ray
+					float d = distFunc(pos);
+
+					//If we have hit or are very close to the death star (negative distance means inside)
+					if (d < 0.005)
+					{
+						//Get the color at this position
+						color = getColor(pos, fixed3(0.7, 0.7, 0.7));
+
+						break;
+					}
+
+					//If we are far away from ever reaching the death star along this ray
+					if (d > 400.0)
+					{
+						break;
+					}
+
+					//Move along the ray with a variable step size
+					//Multiply with a value of your choice to increase/decrease accuracy
+					pos += ray * d * 0.5;
+				}
+
+				return color;
+			}
+
+			//Output
+			fixed4 frag(v2f i) : SV_Target
+			{
+				//Transform the uv so they go from -1 to 1 and not 0 to 1, like a normal coordinate system, 
+				//which begins at the center
+				float2 uv = i.uv * 2.0 - 1.0;
+
+				//Camera - use the camera in the scene
+				float3 startPos = _CamPos;
+
+				//Focal length obtained from experimentation
+				fixed focalLength = 0.62;
+
+				//The final ray at this pixel
+				fixed3 ray = normalize(_CamUp * uv.y + _CamRight * uv.x + _CamForward * focalLength);
+			
+				//Get the color
+				fixed4 color = getColorFromRaymarch(startPos, ray);
+
+				return color;
+			}
+
+			ENDCG
+		}
+	}
+}
+```
+Add this shader to a material, add the material to the quad, and you are done! ...and the result will hopefully look something like this YouTube video:
+Learn more
+Volume rendering is a huge field, so if you want to learn more you should read the following sources:
+Production Volume Rendering
+Volume Rendering 101
+Raymarching Distance Fields
+Realtime volumetric clouds in Unity
+Back
+HOME
+BLOG
+ABOUT
+CONTACT
+SITEMAP
+SOCIAL LINKS
+© 2026 Habrador

@@ -1,0 +1,409 @@
+# Closed-Form Triangle Splatting (CF-Splat)
+Also called: CF-Splat, Closed-Form Triangle Splatting with Mesh Priors
+
+## Overview
+Closed-Form Triangle Splatting (CF-Splat) is a method for efficient scene appearance estimation over a known mesh geometry using calibrated camera views [S1, unofficial]. It formulates rendered pixel colors as a linear function of per-vertex spherical harmonic (SH) coefficients, allowing the global appearance to be solved via a single linear least-squares (LLS) problem rather than iterative nonlinear optimization [S1, unofficial]. Unlike [3D Gaussian Splatting Implementation Details](9128-3d-gaussian-splatting-implementation-details.md), which relies on gradient-based optimization of millions of coupled Gaussian parameters, CF-Splat eliminates iterative updates, thereby avoiding local minima, reducing computation time by 27.5×–378.0×, and lowering peak GPU memory usage [S1, unofficial].
+
+## How it works
+**Inputs and Outputs:**
+*   **Inputs:** A known mesh $M = (V, F)$ with $N_v$ vertices and $N_f$ faces; $K$ calibrated RGB observations $O = \{I_k, K_k, T_k\}_{k=1}^K$, where $I_k$ is the image, $K_k$ is the intrinsic matrix, and $T_k = [R_k | t_k]$ is the extrinsic transformation [S1, unofficial].
+*   **Outputs:** The global SH appearance state $X \in \mathbb{R}^{q N_v \times 3}$, containing the per-vertex SH coefficients [S1, unofficial].
+
+**Data Structures:**
+*   **Mesh:** Vertices $V = \{v_i\}_{i=1}^{N_v}$ and faces $F = \{f_j\}_{j=1}^{N_f}$. Each face $f_j$ is defined by indices $\iota(j, s) \in \{1, \dots, N_v\}$ for $s \in \{0, 1, 2\}$ [S1, unofficial].
+*   **SH Coefficients:** For each vertex $v_i$, the SH coefficients for color channel $\tau \in \{R, G, B\}$ are $c_i^{(\tau)} \in \mathbb{R}^q$, where $q = (L+1)^2$ and $L$ is the maximum SH degree [S1, unofficial]. The global state $X$ stacks these coefficients: $X = [C_1^\top, \dots, C_{N_v}^\top]^\top$, where $C_i = [c_i^{(R)}, c_i^{(G)}, c_i^{(B)}] \in \mathbb{R}^{q \times 3}$ [S1, unofficial].
+*   **Matrices:**
+    *   $A \in \mathbb{R}^{KHW \times q N_v}$: Global observation matrix.
+    *   $B \in \mathbb{R}^{KHW \times 3}$: Stacked observed RGB colors.
+    *   $W \in \mathbb{R}^{KHW \times KHW}$: Diagonal confidence matrix.
+    *   $\Lambda \in \mathbb{R}^{q N_v \times q N_v}$: Block-diagonal adaptive SH regularizer.
+    *   $H \in \mathbb{R}^{q N_v \times q N_v}$: Normal matrix $H = A^\top W A + \Lambda$.
+    *   $G \in \mathbb{R}^{q N_v \times 3}$: Right-hand side $G = A^\top W B$.
+
+**Parameters:**
+*   $L$: Maximum SH degree. Typically $L=3$ for sparse-view evaluations [S1, unofficial].
+*   $\epsilon_w$: Minimum confidence value for grazing-angle observations ($0 < \epsilon_w < 1$) [S1, unofficial].
+*   $\gamma_s$: Weak regularization weight for SH bands with sufficient directional support ($0 < \gamma_s \ll \gamma_u$) [S1, unofficial].
+*   $\gamma_u$: Strong regularization weight for SH bands lacking sufficient directional support [S1, unofficial].
+
+**Steps:**
+
+1.  **Compute Viewing Directions and SH Basis:**
+    For each vertex $v_i$ and camera $k$, compute the camera center in mesh coordinates $o_k = -R_k^\top t_k$ [S1, unofficial]. The viewing direction is:
+    $$ d_k^i = \frac{v_i - o_k}{\|v_i - o_k\|_2} $$
+    Evaluate the SH basis vector $Y(d_k^i) \in \mathbb{R}^q$:
+    $$ Y(d_k^i) = [y_0^0(d_k^i), y_1^{-1}(d_k^i), \dots, y_L^L(d_k^i)]^\top $$
+    where $y_l^m(d)$ is the SH basis function [S1, unofficial].
+
+2.  **Rasterization:**
+    For each camera $k$, rasterize the mesh $M$ using $K_k$ and $T_k$ to find the covering triangle $f_{\rho_k(p_{k,r})}$ for each pixel $p_{k,r}$ in the image $I_k$ (where $r \in \{1, \dots, HW\}$) [S1, unofficial]. Compute the barycentric weights $\lambda_{k,r}^s$ for the three vertices $s \in \{0, 1, 2\}$ of the covering triangle [S1, unofficial].
+
+3.  **Compute Local Observation Features:**
+    For each pixel $p_{k,r}$ and each vertex $s$ of its covering triangle, let $i_{s,k,r} = \iota(\rho_k(p_{k,r}), s)$ be the global vertex index [S1, unofficial]. Compute the local observation feature:
+    $$ \phi_{k,r}^s = \lambda_{k,r}^s Y(d_k^{i_{s,k,r}}) \in \mathbb{R}^q $$
+    [S1, unofficial].
+
+4.  **Construct Per-View Observation Matrix $A_k$:**
+    Construct $A_k \in \mathbb{R}^{HW \times q N_v}$. For row $r$ (corresponding to pixel $p_{k,r}$), the nonzero blocks are:
+    $$ [A_k]_{r, i_{s,k,r}} = (\phi_{k,r}^s)^\top \in \mathbb{R}^{1 \times q} \quad \text{for } s=0,1,2 $$
+    All other entries in row $r$ are zero [S1, unofficial].
+
+5.  **Compute Confidence Weights:**
+    For each pixel $p_{k,r}$, compute the angle-dependent confidence $w_{k,r}$:
+    $$ w_{k,r} = \max\left(\epsilon_w, n_{\rho_k(p_{k,r})}^\top \sum_{s=0}^2 \lambda_{k,r}^s \frac{v_{i_{s,k,r}} - o_k}{\|v_{i_{s,k,r}} - o_k\|_2}\right) $$
+    where $n_{\rho_k(p_{k,r})}$ is the unit normal of the covering triangle [S1, unofficial].
+
+6.  **Construct Global Matrices:**
+    *   Stack observed colors: $B_k = [I_k(p_{k,1}), \dots, I_k(p_{k,HW})]^\top \in \mathbb{R}^{HW \times 3}$ [S1, unofficial].
+    *   Assemble confidence matrices: $W_k = \text{diag}([w_{k,1}, \dots, w_{k,HW}]) \in \mathbb{R}^{HW \times HW}$ [S1, unofficial].
+    *   Assemble global matrices:
+        $$ A = [A_1^\top, \dots, A_K^\top]^\top \in \mathbb{R}^{KHW \times q N_v} $$
+        $$ B = [B_1^\top, \dots, B_K^\top]^\top \in \mathbb{R}^{KHW \times 3} $$
+        $$ W = \text{blkdiag}(W_1, \dots, W_K) \in \mathbb{R}^{KHW \times KHW} $$
+        [S1, unofficial].
+
+7.  **Compute Adaptive Regularization Weights:**
+    For each vertex $v_i$, determine $n_{\text{view}}^{(i)}$, the number of cameras for which the block $A_k^{(i)}$ (associated with $v_i$) contains at least one nonzero row [S1, unofficial].
+    Compute the regularization weight $\gamma_{i,l}$ for SH band $l$:
+    $$ \gamma_{i,l} = \begin{cases} \gamma_s & \text{if } (l+1)^2 \le n_{\text{view}}^{(i)} \\ \gamma_u & \text{if } (l+1)^2 > n_{\text{view}}^{(i)} \end{cases} $$
+    [S1, unofficial].
+
+8.  **Construct Global Regularizer $\Lambda$:**
+    For each vertex $i$, construct the per-vertex regularizer:
+    $$ \Lambda_i = \text{diag}(\gamma_{i,0} I_1, \gamma_{i,1} I_3, \dots, \gamma_{i,L} I_{2L+1}) \in \mathbb{R}^{q \times q} $$
+    [S1, unofficial].
+    Assemble the global regularizer:
+    $$ \Lambda = \text{blkdiag}(\Lambda_1, \dots, \Lambda_{N_v}) \in \mathbb{R}^{q N_v \times q N_v} $$
+    [S1, unofficial].
+
+9.  **Solve the Global LLS Problem:**
+    The objective is:
+    $$ X^* = \arg \min_X \frac{1}{2} \| W^{1/2}(AX - B) \|_F^2 + \frac{1}{2} \| \Lambda^{1/2} X \|_F^2 $$
+    [S1, unofficial].
+    This leads to the normal system:
+    $$ H X^* = G $$
+    where $H = A^\top W A + \Lambda$ and $G = A^\top W B$ [S1, unofficial].
+    Solve this system using a matrix-free preconditioned conjugate-gradient (PCG) solver. The solver applies the normal operator $H$ implicitly without explicitly materializing $H$. It processes observations view-wise, retaining only the current view's features in memory [S1, unofficial].
+
+**Pseudocode:**
+
+> **Unverified code.** The code below did not pass a test run against a reference implementation, or no test fits it, so it may contain errors.
+
+```python
+import numpy as np
+
+def cf_splat(mesh_V, mesh_F, observations, L, epsilon_w, gamma_s, gamma_u):
+    """
+    mesh_V: (N_v, 3) array of vertex coordinates
+    mesh_F: (N_f, 3) array of vertex indices for each face
+    observations: list of dicts with keys 'image' (H,W,3), 'K' (3,3), 'T' (3,4)
+    L: max SH degree
+    epsilon_w: min confidence
+    gamma_s: weak regularization weight
+    gamma_u: strong regularization weight
+    
+    Returns:
+    X: (N_v, 3, q) array of SH coefficients, where q = (L+1)^2
+    """
+    N_v = mesh_V.shape[0]
+    N_f = mesh_F.shape[0]
+    K = len(observations)
+    q = (L + 1) ** 2
+    
+    # Precompute SH basis functions for all unique viewing directions
+    # This step is implicit in the rasterization loop below for efficiency
+    # In practice, Y(d) is computed on the fly or cached per vertex-camera pair
+    
+    # Step 1-3: Rasterize and compute features
+    # We will build the sparse matrix A and dense vector B, W, Lambda implicitly
+    # However, to define the structure clearly:
+    
+    # Global matrices are too large to store explicitly. 
+    # We define functions to compute H*x and G for the PCG solver.
+    
+    # First, we need to know n_view^(i) for regularization
+    # Initialize count of views observing each vertex
+    n_view_counts = np.zeros(N_v, dtype=int)
+    
+    # We need to store the structure of A to compute H*x efficiently
+    # A is block-sparse. Row r of A_k has nonzeros at columns corresponding to 
+    # the 3 vertices of the triangle covering pixel r.
+    
+    # Let's collect all non-zero blocks of A to compute n_view_counts
+    # and to build the operator.
+    
+    # Since A is huge, we cannot build it. We must build the operator H*x.
+    # H*x = (A^T W A + Lambda) * x
+    # A^T W A * x = sum_k (A_k^T W_k A_k x)
+    # A_k x is a vector of size HW.
+    # (A_k x)_r = sum_{s=0}^2 (phi_{k,r}^s)^T * x_{i_{s,k,r}}
+    # where x_{i} is the block of x corresponding to vertex i (size q*3)
+    
+    # To compute n_view_counts, we iterate all pixels and mark vertices
+    # This requires rasterization.
+    
+    all_pixel_data = [] # List of (k, r, i0, i1, i2, phi0, phi1, phi2, w)
+    
+    for k_idx, obs in enumerate(observations):
+        I_k = obs['image'] # H, W, 3
+        K_k = obs['K']
+        T_k = obs['T'] # R, t
+        
+        # Compute camera center in mesh coords
+        R_k = T_k[:, :3]
+        t_k = T_k[:, 3]
+        o_k = -R_k.T @ t_k
+        
+        # Rasterize mesh to find covering triangle and barycentric coords for each pixel
+        # This is a standard rasterization step. 
+        # Output: for each pixel (r), get triangle index f_idx, barycentric weights lambda_0, lambda_1, lambda_2
+        # and the vertex indices of that triangle: v0, v1, v2
+        
+        # Pseudocode for rasterization is omitted as it is a standard graphics primitive.
+        # Assume we have a function rasterize(mesh_V, mesh_F, K_k, T_k)
+        # which returns a list of pixel_data for each pixel in raster order.
+        
+        pixel_data_list = rasterize(mesh_V, mesh_F, K_k, T_k, I_k.shape[0], I_k.shape[1])
+        
+        H, W = I_k.shape[:2]
+        
+        for r_idx, pdata in enumerate(pixel_data_list):
+            # pdata contains: triangle_idx, lambda_0, lambda_1, lambda_2, v0, v1, v2
+            tri_idx = pdata['triangle_idx']
+            lambdas = pdata['lambdas'] # [lambda_0, lambda_1, lambda_2]
+            v_indices = pdata['v_indices'] # [v0, v1, v2]
+            
+            # Get triangle normal
+            v0 = mesh_V[v_indices[0]]
+            v1 = mesh_V[v_indices[1]]
+            v2 = mesh_V[v_indices[2]]
+            n_tri = np.cross(v1 - v0, v2 - v0)
+            n_tri = n_tri / np.linalg.norm(n_tri)
+            
+            # Compute weighted direction for confidence
+            # sum lambda_s * (v_s - o_k) / ||v_s - o_k||
+            weighted_dir_sum = np.zeros(3)
+            for s in range(3):
+                v_s = mesh_V[v_indices[s]]
+                dir_s = v_s - o_k
+                dir_s = dir_s / np.linalg.norm(dir_s)
+                weighted_dir_sum += lambdas[s] * dir_s
+            
+            # Confidence
+            conf = n_tri.dot(weighted_dir_sum)
+            w = max(epsilon_w, conf)
+            
+            # Compute SH basis vectors for each vertex
+            # d_k^i = (v_i - o_k) / ||v_i - o_k||
+            # Y(d) is computed based on L
+            
+            phis = []
+            for s in range(3):
+                v_s = mesh_V[v_indices[s]]
+                dir_s = v_s - o_k
+                norm_s = np.linalg.norm(dir_s)
+                if norm_s < 1e-8:
+                    # Degenerate case, handle appropriately [G]
+                    dir_s = np.array([0, 0, 1]) 
+                else:
+                    dir_s = dir_s / norm_s
+                
+                Y_d = compute_sh_basis(dir_s, L) # Returns vector of size q
+                phi_s = lambdas[s] * Y_d
+                phis.append(phi_s)
+                
+                # Mark vertex as observed by this camera
+                n_view_counts[v_indices[s]] += 1
+            
+            all_pixel_data.append({
+                'k': k_idx,
+                'r': r_idx,
+                'v_indices': v_indices,
+                'phis': phis,
+                'w': w,
+                'image_color': I_k[pdata['y'], pdata['x']] # Assuming raster order maps to y,x
+            })
+
+    # Step 7: Compute Regularizer Lambda
+    # Lambda is block diagonal. Lambda_i is q x q.
+    # We can store Lambda as a list of matrices or apply it implicitly.
+    Lambda_blocks = []
+    for i in range(N_v):
+        n_view = n_view_counts[i]
+        Lambda_i = np.zeros((q, q))
+        for l in range(L + 1):
+            dim = 2 * l + 1
+            start_idx = l * l # (l+1)^2 - (l)^2? No. 
+            # SH basis is ordered by l, then m.
+            # l=0: 1 coeff. l=1: 3 coeffs. l=2: 5 coeffs.
+            # Cumulative: 1, 4, 9, 16...
+            # Index for band l starts at l^2 and has size 2l+1.
+            start_idx = l * l
+            end_idx = start_idx + dim
+            
+            if (l + 1) ** 2 <= n_view:
+                weight = gamma_s
+            else:
+                weight = gamma_u
+            
+            Lambda_i[start_idx:end_idx, start_idx:end_idx] = weight * np.eye(dim)
+        Lambda_blocks.append(Lambda_i)
+    
+    # Step 9: Solve H X = G using PCG
+    # H = A^T W A + Lambda
+    # G = A^T W B
+    
+    # We need to define the matrix-vector product H * x and the vector G
+    # x is flattened: (N_v, 3, q) -> (N_v * 3 * q,)
+    # But H is block structured. It's easier to work with blocks.
+    # Let's define x as a list of N_v matrices, each (3, q) or (q, 3)?
+    # X in formula is (q N_v, 3). So X is stacked column vectors for each vertex.
+    # Let's flatten X into a vector of size N_v * q * 3.
+    
+    # Define function for H * x
+    def matvec_H(x_flat):
+        # x_flat shape: (N_v * q * 3,)
+        # Reshape to (N_v, q, 3)
+        x = x_flat.reshape(N_v, q, 3)
+        
+        # Compute A^T W A x
+        # This is sum over k of A_k^T W_k A_k x
+        # A_k x is a vector of size HW.
+        # (A_k x)_r = sum_{s=0}^2 (phi_{k,r}^s)^T * x_{i_{s,k,r}}
+        # Note: x_{i} is (q, 3). phi is (q,).
+        # (phi^T * x_i) is (1, 3).
+        
+        # We accumulate the result into a vector of size N_v * q * 3
+        # But A^T W A is (q N_v, q N_v).
+        # The result y = A^T W A x has shape (q N_v, 3) if we keep channel dim separate?
+        # No, X is (q N_v, 3). So y is (q N_v, 3).
+        
+        # Let's accumulate into a list of (q, 3) matrices for each vertex
+        y_blocks = [np.zeros((q, 3)) for _ in range(N_v)]
+        
+        # Process each pixel
+        for pdata in all_pixel_data:
+            k = pdata['k']
+            w = pdata['w']
+            v_indices = pdata['v_indices']
+            phis = pdata['phis']
+            
+            # Compute A_k x contribution for this pixel
+            # res_r is (1, 3)
+            res_r = np.zeros(3)
+            for s in range(3):
+                v_idx = v_indices[s]
+                phi_s = phis[s] # (q,)
+                x_v = x[v_idx] # (q, 3)
+                # phi_s^T @ x_v -> (3,)
+                res_r += (phi_s.reshape(1, -1) @ x_v).flatten()
+            
+            # Weighted residual
+            res_r *= w
+            
+            # Add to A^T W A x
+            # The contribution goes to the vertices involved
+            for s in range(3):
+                v_idx = v_indices[s]
+                phi_s = phis[s] # (q,)
+                # The term is phi_s * res_r
+                # phi_s is (q,), res_r is (3,)
+                # Outer product: (q, 3)
+                y_blocks[v_idx] += np.outer(phi_s, res_r)
+                
+        # Convert y_blocks to flat vector
+        y_flat = np.concatenate([b.flatten() for b in y_blocks])
+        
+        # Add Lambda * x
+        # Lambda is block diagonal. Lambda_i * x_i
+        lam_x_flat = np.zeros_like(x_flat)
+        for i in range(N_v):
+            # Lambda_i is (q, q). x_i is (q, 3).
+            # Result is (q, 3).
+            lam_x_i = Lambda_blocks[i] @ x[i]
+            lam_x_flat[i * q * 3 : (i + 1) * q * 3] = lam_x_i.flatten()
+            
+        return y_flat + lam_x_flat
+
+    # Define function for G
+    # G = A^T W B
+    # G is (q N_v, 3).
+    G_blocks = [np.zeros((q, 3)) for _ in range(N_v)]
+    
+    for pdata in all_pixel_data:
+        w = pdata['w']
+        v_indices = pdata['v_indices']
+        phis = pdata['phis']
+        color = pdata['image_color'] # (3,)
+        
+        for s in range(3):
+            v_idx = v_indices[s]
+            phi_s = phis[s] # (q,)
+            # Contribution: phi_s * (w * color)
+            # phi_s is (q,), color is (3,)
+            G_blocks[v_idx] += np.outer(phi_s, w * color)
+            
+    G_flat = np.concatenate([b.flatten() for b in G_blocks])
+    
+    # Solve H x = G using PCG
+    # Initial guess x0 = 0
+    x0 = np.zeros(N_v * q * 3)
+    
+    # PCG Implementation
+    # r0 = G - H x0 = G
+    # p0 = r0
+    # ...
+    
+    x_sol = pcg_solver(matvec_H, G_flat, x0)
+    
+    # Reshape solution
+    X = x_sol.reshape(N_v, q, 3)
+    
+    return X
+
+def compute_sh_basis(d, L):
+    # Returns SH basis vector of size (L+1)^2
+    # Standard SH basis functions y_l^m(d)
+    # Implementation details omitted for brevity, assuming standard library or function
+    pass
+
+def pcg_solver(matvec, b, x0, tol=1e-6, max_iter=1000):
+    # Standard Preconditioned Conjugate Gradient
+    # For simplicity, assume identity preconditioner or simple Jacobi
+    # M = diag(H) approximation
+    # Here we use simple CG for brevity, assuming H is SPD
+    x = x0.copy()
+    r = b - matvec(x)
+    p = r.copy()
+    rs_old = np.dot(r, r)
+    
+    for i in range(max_iter):
+        Ap = matvec(p)
+        pAp = np.dot(p, Ap)
+        if abs(pAp) < 1e-20:
+            break
+        alpha = rs_old / pAp
+        x += alpha * p
+        r -= alpha * Ap
+        rs_new = np.dot(r, r)
+        if np.sqrt(rs_new) < tol:
+            break
+        p = r + (rs_new / rs_old) * p
+        rs_old = rs_new
+        
+    return x
+```
+
+## Operating characteristics
+*   **Time Complexity:** Scales with the number of observations $K$ due to solving the global LLS system, but avoids the iterative overhead of gradient-based methods [S1, unofficial].
+*   **Memory Complexity:** Governed primarily by the number of mesh vertices $N_v$, not $K$. The matrix-free solver retains only the current view's features in memory [S1, unofficial].
+*   **Performance:** On the Oxford Spires dataset (760 views, 1080x1440, 1.55M vertices), CF-Splat achieved 26.88 PSNR in 1.15 minutes with 4.18 GB memory, compared to 3DGS's 24.04 PSNR in 48.93 minutes with 7.18 GB memory [S1, unofficial].
+*   **Scaling:** CF-Splat requires approximately 27.5×–378.0× less computation time and 1.8× lower peak GPU memory on average than 3DGS across scenes of different scales [S1, unofficial].
+*   **Strengths:** Eliminates iterative nonlinear optimization, avoiding local minima and geometric error from view-specific overfitting. Low memory footprint allows scalability to large scenes.
+*   **Limitations:** Requires known mesh geometry and calibrated cameras. Performance depends on the quality of the input mesh [S1, unofficial].
+
+## Background
+CF-Splat was proposed in "CF-Splat: Closed-Form Triangle Splatting with Mesh Priors" [S1, unofficial]. It builds on classical surface light field methods and vertex-centered light fields on triangular meshes, which estimated directional radiance using regularized least squares [S1, unofficial]. Unlike iterative splatting methods like 3DGS, which jointly optimize millions of coupled Gaussian parameters, CF-Splat formulates appearance estimation as a global linear least-squares problem, enabling a closed-form solution [S1, unofficial].
+
+## Sources
+[S1] CF-Splat: Closed-Form Triangle Splatting with Mesh Priors, https://arxiv.org/abs/2610.22108, fetched 2026-10-29 (unofficial)

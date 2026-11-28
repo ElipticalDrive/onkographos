@@ -1,0 +1,266 @@
+Godot version 4.0.dev System information Arch Linux 5.16.14 Issue description When using a Camera3D's project_ray_origin, project_ray_normal, project_position and unproject_position to translate between world and screen coordinates, if t...
+
+Camera3D project_* methods not accounting for frustum offset · Issue #61174 · godotengine/godot · GitHub
+Skip to content
+You signed in with another tab or window. Reload to refresh your session.
+You signed out in another tab or window. Reload to refresh your session.
+You switched accounts on another tab or window. Reload to refresh your session.
+Dismiss alert
+Camera3D project_* methods not accounting for frustum offset #61174
+New issue
+Copy link
+New issue
+Copy link
+Open
+#100121
+Open
+Camera3D project_* methods not accounting for frustum offset#61174
+#100121
+Copy link
+Labels
+bugconfirmedtopic:3dtopic:core
+Description
+Astrono2
+opened on May 19, 2022
+Issue body actions
+Godot version
+4.0.dev
+System information
+Arch Linux 5.16.14
+Issue description
+When using a Camera3D's project_ray_origin, project_ray_normal, project_position and unproject_position to translate between world and screen coordinates, if the camera is set to frustum projection, the projected position does not match the screen position.
+In this example I set up two viewports, one with a frustum camera and an one with an overview perspective camera for debugging. I had a simple script converting positions from InputEventMouseButtons into ray origin and normal, then using a RayCast3D to intersect with the scene (the three prisms have static bodies)
+The expected result (and the one I got with perspective projection, orthographic projection and frustum projection with no offset) is that the green cylinder (that indicates the world position gotten from the conversion) should point to the box in the back, but instead it points at the wall.
+Looking into the source, the error is obvious. None of the methods handles frustum projections, there's just a
+```
+if (mode == PROJECTION_PERSPECTIVE) {
+    // stuff for perspective
+} else {
+    // stuff for orthographic (and implicitly frustum)
+}
+```
+or
+```
+if (mode == PROJECTION_ORTHOGRAPHIC) {
+    // stuff for orthographic
+} else {
+    // stuff for perspective (and implicitly frustum)
+}
+```
+Steps to reproduce
+Set up a 3D scene with a frustum camera with a non-zero offset. Set up a script that uses a world-space position generated from to screen positions using one of the aforementioned methods. I recommend moving a 3D object to the position gotten from a click, as it's the easiest way to see the difference.
+Minimal reproduction project
+Sorry for the messy layout. It's the same project as the screenshot.
+Change the settings of the Camera3D in Node3D.tscn to test that indeed it does work on
+debug_program.zip
+👍React with 👍4Reacted by Giri Prahasta Putra, sinewavey, Jakub Hlusička and Ron Don Jon
+Activity
+Calinou
+added
+bug
+topic:core
+topic:3d
+on May 19, 2022
+igrir commented on Sep 19, 2022
+igrir
+on Sep 19, 2022
+More actions
+looks like this bug also correlated with this issue #39812
+Calinou
+added
+confirmed
+on Sep 19, 2022
+bcmpinc commented on Apr 7, 2023
+bcmpinc
+on Apr 7, 2023
+Contributor
+More actions
+This issue still exists in Godot 4.0.2.
+bcmpinc
+added a commit that references this issue on Apr 8, 2023
+Fix godotengine#61174: Camera3D project_* methods not accounting for …
+...
+This issue will close once commit 56074f9 is merged into the 'master' branch.
+56074f9
+Quinn-L commented on Jul 13, 2023
+Quinn-L
+on Jul 13, 2023
+Last edited by Quinn-L
+More actions
+Bug still exists in 4.1, however if you're using C#, I've found a workaround by using the newly exposed projection matrix & working with System.Numerics to do the matrix calculations.
+From the debug_program.zip provided above, if you make a new Node3dCSharp.cs file and fill in the following, the raycast will be calculated correctly.
+C# Workaround (expand to view)
+```
+using Godot;
+using System;
+
+public partial class Node3dCSharp : Node3D
+{
+    private Camera3D cam;
+    private Node3D ray;
+
+    [Export] public Vector2 pos { get; set; } = Vector2.Zero;
+
+    // Called when the node enters the scene tree for the first time.
+    public override void _Ready()
+    {
+        cam = GetNode<Camera3D>("Camera3D");
+        ray = GetNode<Node3D>("Node3D");
+    }
+
+    void update_ray()
+    {
+        // Original equivalent bugged
+        //var o = cam.ProjectRayOrigin(pos);
+        //var d = cam.ProjectRayNormal(pos);
+        //ray.Position = o;
+        //ray.LookAt(o + d);
+        //var r = ray.GetNode<RayCast3D>("RayCast3D");
+        //r.ForceRaycastUpdate();
+        //if (r.IsColliding())
+        //{
+        //    var rayScale = ray.Scale;
+        //    rayScale.Z = o.DistanceTo(r.GetCollisionPoint());
+        //    ray.Scale = rayScale;
+        //}
+
+        // Correctly calculated ray
+        var screenPos = pos;
+        screenPos /= cam.GetViewport().GetVisibleRect().Size;
+        var sPosNorm = new Vector4();
+        sPosNorm.X = screenPos.X * 2f - 1f;
+        sPosNorm.Y = 1f - screenPos.Y * 2f;
+
+        var gdProjMatrix = cam.GetCameraProjection();
+        var viewTransf = cam.GlobalTransform.AffineInverse();
+        var gdViewMatrix = new Projection(viewTransf);
+        var nmProjMatrix = new System.Numerics.Matrix4x4(
+            gdProjMatrix.X.X, gdProjMatrix.X.Y, gdProjMatrix.X.Z, gdProjMatrix.X.W,
+            gdProjMatrix.Y.X, gdProjMatrix.Y.Y, gdProjMatrix.Y.Z, gdProjMatrix.Y.W,
+            gdProjMatrix.Z.X, gdProjMatrix.Z.Y, gdProjMatrix.Z.Z, gdProjMatrix.Z.W,
+            gdProjMatrix.W.X, gdProjMatrix.W.Y, gdProjMatrix.W.Z, gdProjMatrix.W.W
+            );
+        var nmViewMatrix = new System.Numerics.Matrix4x4(
+            gdViewMatrix.X.X, gdViewMatrix.X.Y, gdViewMatrix.X.Z, gdViewMatrix.X.W,
+            gdViewMatrix.Y.X, gdViewMatrix.Y.Y, gdViewMatrix.Y.Z, gdViewMatrix.Y.W,
+            gdViewMatrix.Z.X, gdViewMatrix.Z.Y, gdViewMatrix.Z.Z, gdViewMatrix.Z.W,
+            gdViewMatrix.W.X, gdViewMatrix.W.Y, gdViewMatrix.W.Z, gdViewMatrix.W.W
+            );
+        var nmViewProjMatrix = nmViewMatrix * nmProjMatrix;
+        System.Numerics.Matrix4x4.Invert(nmViewProjMatrix, out var nmViewProjMatrixInv);
+        var nmScreenPosNear = new System.Numerics.Vector3(sPosNorm.X, sPosNorm.Y, 0);
+        var nmNearVec = System.Numerics.Vector4.Transform(nmScreenPosNear, nmViewProjMatrixInv);
+        var nmNearVecNorm = nmNearVec / nmNearVec.W;
+        var nmScreenPosFar = new System.Numerics.Vector3(sPosNorm.X, sPosNorm.Y, 1);
+        var nmFarVec = System.Numerics.Vector4.Transform(nmScreenPosFar, nmViewProjMatrixInv);
+        var nmFarVecNorm = nmFarVec / nmFarVec.W;
+
+        var gdNearVec = new Vector3(nmNearVecNorm.X, nmNearVecNorm.Y, nmNearVecNorm.Z);
+        var gdFarVec = new Vector3(nmFarVecNorm.X, nmFarVecNorm.Y, nmFarVecNorm.Z);
+
+        ray.Position = gdNearVec;
+        ray.LookAt(gdFarVec);
+
+        var r2 = ray.GetNode<RayCast3D>("RayCast3D");
+        r2.ForceRaycastUpdate();
+
+        if (r2.IsColliding())
+        {
+            var rayScale = ray.Scale;
+            rayScale.Z = gdNearVec.DistanceTo(r2.GetCollisionPoint());
+            ray.Scale = rayScale;
+        }
+    }
+}
+```
+EDIT: Ok, I think I've identified the issue, but those who actually know the codebase should confirm, along with any other places where this issue may occur:
+eg. Camera3D::project_local_ray_normal appears to calculated the ray incorrectly in non-ortho:
+godot/scene/3d/camera_3d.cpp
+Lines 303 to 319
+in
+60f3b79
+Vector3 Camera3D::project_local_ray_normal(const Point2 &p_pos) const {
+ERR_FAIL_COND_V_MSG(!is_inside_tree(), Vector3(), "Camera is not inside scene.");
+Size2 viewport_size = get_viewport()->get_camera_rect_size();
+Vector2 cpos = get_viewport()->get_camera_coords(p_pos);
+Vector3 ray;
+if (mode == PROJECTION_ORTHOGONAL) {
+ray = Vector3(0, 0, -1);
+} else {
+Projection cm = _get_camera_projection(near);
+Vector2 screen_he = cm.get_viewport_half_extents();
+ray = Vector3(((cpos.x / viewport_size.width) * 2.0 - 1.0) * screen_he.x, ((1.0 - (cpos.y / viewport_size.height)) * 2.0 - 1.0) * screen_he.y, -near).normalized();
+}
+return ray;
+};
+It multiplies by Vector2 screen_he = cm.get_viewport_half_extents(); but this does not appear to be enough to getting the ray in world space. It needs to be transformed by the inverse transform matrix, eg. C# equivalent code:
+```
+var clipSpaceRay = new Vector3(
+    ((cpos.X / viewport_size.X) * 2.0f - 1.0f),
+    ((1.0f - (cpos.Y / viewport_size.Y)) * 2.0f - 1.0f),
+    -1   // probably -1 because negative z-axis?
+);
+var camProjInv = cm.Inverse();
+var camProjInvTransf = new Transform3D(camProjInv);
+var rayCamLocalSpacePos = camProjInvTransf * clipSpaceRay;
+var rayCamLocalSpacePosNorm = rayCamLocalSpacePos.Normalized();
+return rayCamLocalSpacePosNorm;
+```
+EDIT2: fixed the names above.
+clayjohn commented on Jul 13, 2023
+clayjohn
+on Jul 13, 2023
+Member
+More actions
+@Quinn-L Have you tested with 4.1.1-RC1 which includes the changes made in #75806?
+Quinn-L commented on Jul 13, 2023
+Quinn-L
+on Jul 13, 2023
+More actions
+@Quinn-L Have you tested with 4.1.1-RC1 which includes the changes made in #75806?
+Yes, it's still broken in that version. That commit only really exposed the projection matrix rather than fixing the underlying issue (though now easier to have a workaround the issue).
+jacob-malaska commented on Apr 10, 2024
+jacob-malaska
+on Apr 10, 2024 · Hidden as off-topic
+Last edited by jacob-malaska
+show commentMore actions
+bcmpinc commented on Apr 11, 2024
+bcmpinc
+on Apr 11, 2024
+Last edited by bcmpinc
+Contributor
+More actions
+Is there intent to eventually address this issue?
+Not from my side. I don't think anyone else has worked on this specific issue. At the moment it cannot really be fixed as it is blocked by godotengine/godot-proposals#2713. The problem is that orthogonal and perspective projection are hard coded in Camera3D. Frustum projection is "handled" by arbitrarily picking either of those two hard coded implementations. This is what causes the bug.
+What has to happen to fix this issue is (imho):
+0. Extensive unit tests have to be written for Camera3D.
+Camera3D has to be rewritten to allow setting a custom projection matrix (see Add custom projection mode to Camera3D, make Camera3D store its CameraMatrix and expose CameraMatrix to user code godot-proposals#2713).
+Camera3D should re-implement the orthogonal, perspective and frustum projection on top of this custom projection matrix support. With custom matrix support, the hard coded handling is no longer necessary and removing it reduces code complexity.
+Test the new implementation to ensure no unintended regressions are introduced
+Document intentional changes in API behavior. There will be some unavoidable changes. Relying on custom projection matrix support will remove some undocumented quirks that exist in the current implementation. For example projection functions are able to return points that exist in front of the near plane and thus outside of the view frustum. This change should be documented and include what users should do who relied on this specific quirk.
+I found writing unit tests for Godot to be far outside my skill set, which is why I stopped working on this issue. The patch I did write at least allows users access to the projection matrix, which is necessary to write a workaround.
+elvisish commented on May 8, 2024
+elvisish
+on May 8, 2024
+More actions
+Is there a workaround for 3.5? I'm using frustum cameras and if I change the viewport size, all of my frustum_offset calculations are incorrect, I'm wondering if there's some way of multiplying the size of the viewport by the amount as a quick fix.
+Sign up for free to join this conversation on GitHub. Already have an account? Sign in to comment
+Metadata
+Metadata
+Assignees
+No one assigned
+Labels
+bugconfirmedtopic:3dtopic:core
+Type
+No type
+Projects
+No projects
+Milestone
+No milestone
+Relationships
+None yet
+Development
+No branches or pull requests
+Issue actions
+Open in GitHub Copilot app
+You can’t perform that action at this time.

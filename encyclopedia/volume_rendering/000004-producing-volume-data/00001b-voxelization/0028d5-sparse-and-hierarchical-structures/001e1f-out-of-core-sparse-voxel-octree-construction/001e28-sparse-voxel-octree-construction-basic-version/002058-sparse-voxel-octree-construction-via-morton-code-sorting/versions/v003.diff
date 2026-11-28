@@ -1,0 +1,180 @@
+--- v002.md
++++ v003.md
+@@ -7,90 +7,46 @@
+ 
+ ## How it works
+-**Inputs:** A list of 3D points (or voxel centers) $P = \{p_0, p_1, \dots, p_{N-1}\}$.
+-**Outputs:** An SVO consisting of an array of `octree_node` structures and an array of `octree_voxel` structures, serialized in a specific binary format.
++**Inputs and Outputs:** A list of 3D points (or voxel centers) $P = \{p_0, p_1, \dots, p_{N-1}\}$ [S1, unofficial]. An SVO consisting of an array of `octree_node` structures and an array of `octree_voxel` structures, serialized in a specific binary format [S1, unofficial].
+ 
+-### Data Structures
+-The output is stored in two contiguous arrays:
+-1.  **`octree_node`** (8 bytes total):
+-    *   `uint32_t info`: Bits 0-7 store the occupancy mask (8 bits for 8 children). Bit 8 is the `is_leaf` flag. Bits 9-31 are padding.
+-    *   `uint32_t child_ptr`: If `is_leaf` is 0, this is an index into the `octree_node` array (children). If `is_leaf` is 1, this is an index into the `octree_voxel` array (data).
+-2.  **`octree_voxel`** (4 bytes total):
+-    *   `uint32_t rgb`: Bits 0-7 padding. Bits 8-15 Blue, Bits 16-23 Green, Bits 24-31 Red.
+-3.  **Binary Serialization Format**:
+-    *   `size_t num_nodes`
+-    *   `size_t num_voxels`
+-    *   `num_nodes * sizeof(octree_node)` bytes
+-    *   `num_voxels * sizeof(octree_voxel)` bytes
++**Data Structures:** The output is stored in two contiguous arrays:
++1. **`octree_node`** (8 bytes total):
++   - `uint32_t info`: Bits 0-7 store the occupancy mask (8 bits for 8 children). Bit 8 is the `is_leaf` flag. Bits 9-31 are padding [S1, unofficial].
++   - `uint32_t child_ptr`: If `is_leaf` is 0, this is an index into the `octree_node` array (children). If `is_leaf` is 1, this is an index into the `octree_voxel` array (data) [S1, unofficial].
++2. **`octree_voxel`** (4 bytes total):
++   - `uint32_t rgb`: Bits 0-7 padding. Bits 8-15 Blue, Bits 16-23 Green, Bits 24-31 Red [S1, unofficial].
++3. **Binary Serialization Format**:
++   - `size_t num_nodes`
++   - `size_t num_voxels`
++   - `num_nodes * sizeof(octree_node)` bytes [S1, unofficial]
++   - `num_voxels * sizeof(octree_voxel)` bytes [S1, unofficial]
+ 
+-### Parameters
+-*   `max_depth`: Maximum recursion depth for the octree. Controls grid resolution. Valid range [1, 12]. Default 8. $2^{\text{max\_depth}}$ defines the side length in voxels.
++**Parameters:**
++- `max_depth`: Maximum recursion depth for the octree. Controls grid resolution. Valid range [1, 12]. Default 8. $2^{\text{max\_depth}}$ defines the side length in voxels [S1, unofficial].
+ 
+-### Algorithm Steps
++**Algorithm Steps:**
++1. **Compute Bounding Box**: Initialize `min_bound` and `max_bound` to the first point $p_0$ [S1, unofficial]. Iterate through all points $p \in P$: $\text{min\_bound} = \min(\text{min\_bound}, p)$, $\text{max\_bound} = \max(\text{max\_bound}, p)$ [S1, unofficial].
++2. **Equalize Aspect Ratio**: Compute extent: $\text{extent} = \text{max\_bound} - \text{min\_bound}$ [S1, unofficial]. Find $\text{max\_extent} = \max(\text{extent})$ [S1, unofficial]. Calculate margin: $\text{margin} = (\text{vec3}(\text{max\_extent}) - \text{extent}) \times 0.5$ [S1, unofficial]. Shift bounds: $\text{min\_bound} \leftarrow \text{min\_bound} - \text{margin}$ [S1, unofficial].
++3. **Compute Grid Scale**: $\text{scale} = \frac{1 \ll \text{max\_depth}}{\max(\text{max\_extent}, 10^{-6})}$ [S1, unofficial].
++4. **Convert to Grid Coordinates**: For each point $p$: $\text{grid\_pos} = \lfloor (p - \text{min\_bound}) \times \text{scale} \rfloor$ [S1, unofficial].
++5. **Clamp Grid Coordinates**: $\text{grid\_pos} = \min(\text{grid\_pos}, \text{vec3}((1 \ll \text{max\_depth}) - 1))$ [S1, unofficial].
++6. **Encode Morton Codes**: For each `grid_pos` $(x, y, z)$, compute a 64-bit Morton code $M$: $M = 0$. For $i$ from 0 to 11: $M \ |= \ ((x \ \& \ (1 \ll i)) \ll 2i) \ | \ ((y \ \& \ (1 \ll i)) \ll (2i + 1)) \ | \ ((z \ \& \ (1 \ll i)) \ll (2i + 2))$ [S1, unofficial].
++7. **Sort and Deduplicate**: Sort the list of Morton codes. Remove duplicates using `std::unique` [S1, unofficial].
++8. **Recursive Construction**: Call `insert_children_recursive(min_bound, 0, N, 1)`, where $N$ is the number of unique Morton codes [S1, unofficial].
++   **Function `insert_children_recursive(min_coord, start_index, end_index, depth)`:**
++   - Compute `half_size` for the current depth: $\text{half\_size} = 1 \ll (\text{max\_depth} - \text{depth})$ [S1, unofficial].
++   - Initialize `occupancy_mask = 0`.
++   - For each octant $i$ from 0 to 7:
++     - Compute child bounds: $\text{child\_min} = \text{min\_coord} + \text{octant\_offset}(i) \times \text{half\_size}$, $\text{child\_max} = \text{child\_min} + \text{half\_size} - 1$ [S1, unofficial].
++     - Find occupied range in the sorted Morton array using binary search: $\text{range\_start} = \text{lower\_bound}(M(\text{child\_min}), \text{begin} + \text{start\_index}, \text{begin} + \text{end\_index})$, $\text{range\_end} = \text{upper\_bound}(M(\text{child\_max}), \text{range\_start}, \text{begin} + \text{end\_index})$ [S1, unofficial].
++     - If $\text{range\_start} < \text{range\_end}$: Set bit $i$ in `occupancy_mask`. If `depth == max_depth`, add voxel to `children_voxels[depth]`. Else, recurse: `child = insert_children_recursive(child_min, range_start, range_end, depth + 1)` and store result in `children_nodes[depth]` [S1, unofficial].
++   - Create `octree_node`: `info` = `occupancy_mask` | (`is_leaf ? 1 : 0`) << 8. `child_ptr` = index to first child or voxel.
+ 
+-1.  **Compute Bounding Box**:
+-    Initialize `min_bound` and `max_bound` to the first point $p_0$. Iterate through all points $p \in P$:
+-    $$ \text{min\_bound} = \min(\text{min\_bound}, p) $$
+-    $$ \text{max\_bound} = \max(\text{max\_bound}, p) $$
++**Edge Cases and Pitfalls:**
++- Division by zero is prevented by clamping `max_extent` to $10^{-6}$ if it is 0 [S1, unofficial].
++- Clamping prevents Morton code overflow. `max_depth` is limited to 12 to ensure coordinates stay $< 4096$ [S1, unofficial].
++- `child_max` is decremented by 1 because `z_order(child_max)` must fall within the same octant as `z_order(child_min)` [S1, unofficial].
++- Duplicates represent multiple voxels at the same grid position; they are merged into a single leaf [S1, unofficial].
+ 
+-2.  **Equalize Aspect Ratio**:
+-    Compute extent: $\text{extent} = \text{max\_bound} - \text{min\_bound}$.
+-    Find $\text{max\_extent} = \max(\text{extent})$.
+-    Calculate margin: $\text{margin} = (\text{vec3}(\text{max\_extent}) - \text{extent}) \times 0.5$.
+-    Shift bounds: $\text{min\_bound} \leftarrow \text{min\_bound} - \text{margin}$.
+-
+-3.  **Compute Grid Scale**:
+-    $$ \text{scale} = \frac{1 \ll \text{max\_depth}}{\max(\text{max\_extent}, 10^{-6})} $$
+-    *(Pitfall: Division by zero is prevented by clamping max_extent to $10^{-6}$ if it is 0.)*
+-
+-4.  **Convert to Grid Coordinates**:
+-    For each point $p$:
+-    $$ \text{grid\_pos} = \lfloor (p - \text{min\_bound}) \times \text{scale} \rfloor $$
+-
+-5.  **Clamp Grid Coordinates**:
+-    $$ \text{grid\_pos} = \min(\text{grid\_pos}, \text{vec3}((1 \ll \text{max\_depth}) - 1)) $$
+-    *(Pitfall: Clamping prevents Morton code overflow. `max_depth` is limited to 12 to ensure coordinates stay $< 4096$.)*
+-
+-6.  **Encode Morton Codes**:
+-    For each `grid_pos` $(x, y, z)$, compute a 64-bit Morton code $M$:
+-    $$ M = 0 $$
+-    For $i$ from 0 to 11:
+-    $$ M \ |= \ ((x \ \& \ (1 \ll i)) \ll 2i) \ | \ ((y \ \& \ (1 \ll i)) \ll (2i + 1)) \ | \ ((z \ \& \ (1 \ll i)) \ll (2i + 2)) $$
+-
+-7.  **Sort and Deduplicate**:
+-    Sort the list of Morton codes. Remove duplicates using `std::unique`.
+-    *(Note: Duplicates represent multiple voxels at the same grid position; they are merged into a single leaf.)*
+-
+-8.  **Recursive Construction**:
+-    Call `insert_children_recursive(min_bound, 0, N, 1)`, where $N$ is the number of unique Morton codes.
+-    
+-    **Function `insert_children_recursive(min_coord, start_index, end_index, depth)`:**
+-    
+-    *   **Base Case**: If `depth == max_depth`, create leaf nodes for all points in range `[start_index, end_index)`.
+-        *   For each unique Morton code in the range, create an `octree_voxel`.
+-        *   Return a node with `is_leaf = 1` and `child_ptr` pointing to the voxel.
+-    
+-    *   **Recursive Step**:
+-        1.  Compute `half_size` for the current depth: $\text{half\_size} = 1 \ll (\text{max\_depth} - \text{depth})$.
+-        2.  Initialize `occupancy_mask = 0`.
+-        3.  For each octant $i$ from 0 to 7:
+-            *   Compute child bounds:
+-                $$ \text{child\_min} = \text{min\_coord} + \text{octant\_offset}(i) \times \text{half\_size} $$
+-                $$ \text{child\_max} = \text{child\_min} + \text{half\_size} - 1 $$
+-                *(Pitfall: `child_max` is decremented by 1 because `z_order(child_max)` must fall within the same octant as `z_order(child_min)`.)*
+-            *   Find occupied range in the sorted Morton array using binary search:
+-                $$ \text{range\_start} = \text{lower\_bound}(M(\text{child\_min}), \text{begin} + \text{start\_index}, \text{begin} + \text{end\_index}) $$
+-                $$ \text{range\_end} = \text{upper\_bound}(M(\text{child\_max}), \text{range\_start}, \text{begin} + \text{end\_index}) $$
+-            *   If $\text{range\_start} < \text{range\_end}$:
+-                *   Set bit $i$ in `occupancy_mask`.
+-                *   Recurse: `child = insert_children_recursive(child_min, range_start, range_end, depth + 1)`.
+-                *   Store `child` in `children_nodes[i]`.
+-        
+-        4.  Create `octree_node`:
+-            *   `info`: `occupancy_mask` | (`is_leaf ? 0 : 0`) | (`depth == max_depth ? 1 : 0`) << 8.
+-            *   `child_ptr`: If `is_leaf`, index to voxels. Else, index to new nodes array.
+-            *   *(Note: The source notes describe a specific layout where `child_ptr` is an index. In a recursive implementation, nodes are typically appended to a global list, and `child_ptr` is the index of that append.)*
+-
+-### Pseudocode
+-
++**Pseudocode:**
+ ```python
+ def build_svo(points, max_depth=8):
+@@ -170,20 +126,7 @@
+ 
+     def octant_offset(i):
+-        x = (i >> 2) & 1
+-        y = (i >> 1) & 1
+-        z = i & 1
+-        return vec3(x, y, z)
++        return vec3(i & 1, (i >> 1) & 1, (i >> 2) & 1)
+ 
+     def insert_children_recursive(min_coord, start_idx, end_idx, depth):
+-        if depth == max_depth:
+-            # Create leaf nodes
+-            voxel_idx = len(voxels)
+-            voxels.append([0, 0, 0, 0]) # Placeholder RGB
+-            node_info = (1 << 8) # is_leaf flag
+-            node_child_ptr = voxel_idx
+-            node_idx = len(nodes)
+-            nodes.append([node_info, node_child_ptr])
+-            return node_idx
+-
+         half_size = 1 << (max_depth - depth)
+         occupancy_mask = 0
+@@ -202,16 +145,20 @@
+             if range_start < range_end:
+                 occupancy_mask |= (1 << i)
+-                child_idx = insert_children_recursive(child_min, range_start, range_end, depth + 1)
+-                child_indices.append(child_idx)
++                if depth == max_depth:
++                    voxel_idx = len(voxels)
++                    voxels.append([0, 0, 0, 0]) # Placeholder RGB
++                    child_indices.append(voxel_idx)
++                else:
++                    child_idx = insert_children_recursive(child_min, range_start, range_end, depth + 1)
++                    child_indices.append(child_idx)
+             else:
+                 child_indices.append(None)
+ 
+-        node_info = occupancy_mask
++        node_info = occupancy_mask | ((1 if depth == max_depth else 0) << 8)
+         node_idx = len(nodes)
+-        nodes.append([node_info, 0]) # Placeholder for child_ptr
++        nodes.append([node_info, 0])
+         
+-        occupied_children = [c for c in child_indices if c is not None]
+-        if occupied_children:
+-            nodes[node_idx][1] = occupied_children[0]
++        if child_indices:
++            nodes[node_idx][1] = child_indices[0]
+         else:
+             nodes[node_idx][1] = 0

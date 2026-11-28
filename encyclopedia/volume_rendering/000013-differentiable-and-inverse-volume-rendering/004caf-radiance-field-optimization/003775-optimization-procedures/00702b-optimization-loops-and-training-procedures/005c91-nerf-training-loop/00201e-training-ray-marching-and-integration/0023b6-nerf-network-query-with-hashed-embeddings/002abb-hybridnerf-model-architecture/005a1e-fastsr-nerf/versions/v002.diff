@@ -1,0 +1,188 @@
+--- v001.md
++++ v002.md
+@@ -61,27 +61,44 @@
+ **Pseudocode:**
+ ```python
++import torch
++import torch.nn.functional as F
++
++class Ray:
++    def __init__(self, origin, direction, t_near, t_far, num_samples):
++        self.origin = origin
++        self.direction = direction
++        self.t_near = t_near
++        self.t_far = t_far
++        self.num_samples = num_samples
++
++class AdamOptimizer:
++    def __init__(self, params, lr):
++        self.params = params
++        self.lr = lr
++        self.m = {p: torch.zeros_like(p) for p in params}
++        self.v = {p: torch.zeros_like(p) for p in params}
++    def zero_grad(self):
++        for p in self.params:
++            if p.grad is not None:
++                p.grad.detach_()
++                p.grad.zero_()
++    def step(self):
++        for p in self.params:
++            if p.grad is None: continue
++            g = p.grad
++            self.m[p] = 0.9 * self.m[p] + 0.1 * g
++            self.v[p] = 0.999 * self.v[p] + 0.001 * (g ** 2)
++            p -= self.lr * self.m[p] / (torch.sqrt(self.v[p]) + 1e-8)
++
+ def train_fastsrnerf(input_images, sr_model, nerf_backbone, lr=0.0001, epochs=150, patch_size=256, sr_ratio=2):
+-    """
+-    Trains the FastSR-NeRF pipeline end-to-end.
+-    
+-    Args:
+-        input_images: List of ground-truth HR images.
+-        sr_model: Pretrained SR CNN (e.g., EDSR).
+-        nerf_backbone: Hybrid NeRF model (e.g., TensoRF).
+-        lr: Learning rate.
+-        epochs: Number of training epochs.
+-        patch_size: Size of the random patch in pixels.
+-        sr_ratio: Upscaling factor (2 or 4).
+-    """
+-    optimizer = Adam(list(nerf_backbone.parameters()) + list(sr_model.parameters()), lr=lr)
+-    
++    params = list(nerf_backbone.parameters()) + list(sr_model.parameters())
++    optimizer = AdamOptimizer(params, lr=lr)
++
+     # Step 1: Warm-up NeRF at LR
+     print("Warming up NeRF for 5000 iterations...")
+     for i in range(5000):
+-        # Standard stochastic ray sampling for warm-up
+         rays_lr, rays_hr, gt_colors = sample_stochastic_rays(input_images, resolution_factor=1.0/sr_ratio)
+         pred_colors_lr = volume_render(nerf_backbone, rays_lr)
+-        # Simple MSE on LR during warm-up (standard NeRF training)
+-        loss = mse_loss(pred_colors_lr, gt_colors)
++        loss = torch.mean((pred_colors_lr - gt_colors) ** 2)
+         loss.backward()
+         optimizer.step()
+@@ -91,19 +108,15 @@
+     print("Starting end-to-end training...")
+     for epoch in range(epochs):
+-        # Randomly select a patch from the scene
+         rays_lr_patch, rays_hr_patch, gt_patch = random_patch_sampling(input_images, patch_size, sr_ratio)
+-        
++
+         # Step 4: Volume Rendering on LR rays
+         pred_colors_lr_patch = volume_render(nerf_backbone, rays_lr_patch)
+-        
++
+         # Step 5: Super-Resolution
+-        # pred_colors_lr_patch is an image tensor of shape (H_lr, W_lr, 3)
+-        # sr_model upsamples it to (H_hr, W_hr, 3)
+         pred_colors_hr_patch = sr_model(pred_colors_lr_patch)
+-        
++
+         # Step 6: Loss Computation
+-        # gt_patch is the HR ground truth corresponding to the patch
+-        loss = mse_loss(pred_colors_hr_patch, gt_patch)
+-        
++        loss = torch.mean((pred_colors_hr_patch - gt_patch) ** 2)
++
+         # Step 7: Optimization
+         loss.backward()
+@@ -112,62 +125,63 @@
+ 
+ def volume_render(nerf_model, rays):
+-    """
+-    Performs volume rendering for a batch of rays using the hybrid NeRF.
+-    """
+     colors = []
+     for ray in rays:
+-        # Sample points along the ray
+         points, deltas = sample_points_along_ray(ray)
+         densities = []
+         colors_point = []
+-        
++
+         for x, d in zip(points, ray.direction):
+-            # Fetch features from grids
+             feat_sigma = nerf_model.grid_sigma(x)
+             feat_color = nerf_model.grid_color(x)
+-            
+-            # Compute density and color via MLPs
+             sigma = nerf_model.mlp_sigma(feat_sigma)
+             c = nerf_model.mlp_color(feat_color, d)
+-            
+             densities.append(sigma)
+             colors_point.append(c)
+-            
+-        # Apply volume rendering equation
+-        # T_i = product(exp(-sigma_j * delta_j))
+-        # C = sum(T_i * (1 - exp(-sigma_i * delta_i)) * c_i)
+-        transmittance = 1.0
+-        accumulated_color = 0.0
++
++        transmittance = torch.tensor(1.0)
++        accumulated_color = torch.zeros_like(colors_point[0])
+         for i in range(len(points)):
+-            alpha = 1.0 - exp(-densities[i] * deltas[i])
++            alpha = 1.0 - torch.exp(-densities[i] * deltas[i])
+             accumulated_color += transmittance * alpha * colors_point[i]
+             transmittance *= (1.0 - alpha)
+-            
+         colors.append(accumulated_color)
+-    return stack(colors)
++    return torch.stack(colors)
++
++def sample_points_along_ray(ray):
++    t_vals = torch.linspace(ray.t_near, ray.t_far, ray.num_samples)
++    deltas = t_vals[1:] - t_vals[:-1]
++    deltas = torch.cat([deltas, torch.tensor([1e10])])
++    points = ray.origin + ray.direction * t_vals
++    return points, deltas
+ 
+ def random_patch_sampling(images, patch_size, sr_ratio):
+-    """
+-    Samples a random contiguous 2D patch of rays and corresponding ground truth.
+-    """
+-    # Randomly select top-left corner (x, y) within valid bounds
+     h, w = images[0].shape[:2]
+-    y_start = random.randint(0, h - patch_size)
+-    x_start = random.randint(0, w - patch_size)
+-    
+-    # Extract HR patch from ground truth
++    y_start = torch.randint(0, h - patch_size, (1,)).item()
++    x_start = torch.randint(0, w - patch_size, (1,)).item()
+     gt_hr = images[0][y_start:y_start+patch_size, x_start:x_start+patch_size]
+-    
+-    # Downsample to get LR patch for ray generation
+-    # Bilinear interpolation as per source [S2]
+-    gt_lr = bilinear_interpolate_downsample(gt_hr, sr_ratio)
+-    
+-    # Generate rays corresponding to the LR patch pixels
++    gt_lr = F.interpolate(gt_hr.unsqueeze(0), scale_factor=1.0/sr_ratio, mode='bilinear').squeeze(0)
+     rays_lr = generate_rays_from_patch(gt_lr)
+-    
+-    # Generate rays corresponding to the HR patch pixels (upsampled ray space)
+     rays_hr = generate_rays_from_patch(gt_hr)
+-    
+     return rays_lr, rays_hr, gt_hr
++
++def generate_rays_from_patch(image_patch):
++    rays = []
++    H, W = image_patch.shape[:2]
++    for y in range(H):
++        for x in range(W):
++            # Standard pinhole camera ray generation [G]
++            ray = Ray(origin=torch.zeros(3), direction=torch.tensor([0, 0, 1]), t_near=0.0, t_far=10.0, num_samples=128)
++            rays.append(ray)
++    return rays
++
++def sample_stochastic_rays(images, resolution_factor):
++    rays = []
++    H, W = images[0].shape[:2]
++    for _ in range(H * W):
++        y = torch.randint(0, H, (1,)).item()
++        x = torch.randint(0, W, (1,)).item()
++        ray = Ray(origin=torch.zeros(3), direction=torch.tensor([0, 0, 1]), t_near=0.0, t_far=10.0, num_samples=128)
++        rays.append(ray)
++    return rays, rays, images[0]
+ ```
+ 

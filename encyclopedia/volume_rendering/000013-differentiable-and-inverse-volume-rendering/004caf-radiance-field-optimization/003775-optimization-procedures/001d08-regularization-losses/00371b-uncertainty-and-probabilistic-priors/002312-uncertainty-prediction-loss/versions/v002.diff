@@ -1,0 +1,107 @@
+--- v001.md
++++ v002.md
+@@ -26,5 +26,5 @@
+     $$ \bar{\sigma}^2(x_P) = \sigma_0^2 + \log(1 + \exp(\sigma^2(x_P))) $$
+ 3.  **Compute Uncertainty Loss Components:**
+-    *   **Squared Error Loss ($\mathcal{L}_{SE}$ or $\mathcal{L}_{MSE}$) [S1]:** Measures the error between the predicted value and the target. In the context of the general uncertainty loss formulation [S1], this is the standard regression loss.
++    *   **Squared Error Loss ($\mathcal{L}_{SE}$) [S1]:** Measures the error between the predicted value and the target: $\mathcal{L}_{SE} = \sum \| \text{prediction} - \text{target} \|^2$.
+     *   **Zero Regularization Loss ($\mathcal{L}_0$) [S1]:** Encourages uncertainty to be close to zero for reliable points:
+         $$ \mathcal{L}_0 = \sum_{r \in \mathcal{R}} \sum_{i=1}^N \max(\delta_{c_i}, 0) $$
+@@ -45,59 +45,47 @@
+ **Pseudocode:**
+ ```python
+-def compute_uncertainty_loss_volume_rendering(predictions, targets, features, alpha1=1.0, alpha2=0.01):
++import math
++
++def compute_uncertainty_loss_volume_rendering(predictions, targets, delta, alpha1=1.0, alpha2=0.01):
+     """
+     Computes Uncertainty Prediction Loss for Volume Rendering (NeRF-like).
+     predictions: Tensor of predicted colors/values.
+     targets: Tensor of ground truth colors/values.
+-    features: Tensor of output features from the network.
++    delta: Tensor of predicted uncertainty values output by the network's linear layer.
+     """
+-    # Step 1: Predict uncertainty delta from features
+-    # Assuming a linear layer is applied to features to get delta
+-    # delta = Linear(features)
+-    # Note: The exact linear layer weights are part of the model, 
+-    # but the loss computation uses the output delta.
+-    delta = predict_uncertainty(features) 
++    # Step 1: Compute Squared Error Loss (L_SE)
++    l_se = sum((p - t) ** 2 for p, t in zip(predictions, targets))
+     
+-    # Step 2: Compute Squared Error Loss (L_SE)
+-    # L_SE is typically the standard MSE or L1 between prediction and target
+-    # The source [S1] refers to L_SE as the error term penalized by uncertainty logic
+-    # However, the formula L_unct = a1 * L_SE + a2 * L_0 implies L_SE is the base regression loss
+-    l_se = mean_squared_error(predictions, targets)
++    # Step 2: Compute Zero Regularization Loss (L_0)
++    # Encourages delta to be close to zero
++    l_0 = sum(max(d, 0.0) for d in delta)
+     
+-    # Step 3: Compute Zero Regularization Loss (L_0)
+-    # Encourages delta to be close to zero
+-    l_0 = sum(max(delta, 0))
+-    
+-    # Step 4: Combine
++    # Step 3: Combine
+     l_unct = alpha1 * l_se + alpha2 * l_0
+     
+     return l_unct
+ 
+-def compute_uncertainty_loss_sdf(points, mlp_sdf, sigma0_sq=1e-6):
++def compute_uncertainty_loss_sdf(f_x, raw_var, sigma0_sq=1e-6):
+     """
+     Computes Uncertainty Estimation Loss for Point Cloud SDF.
+-    points: Tensor of point coordinates x_P.
+-    mlp_sdf: Neural network returning mean, raw_var, feature.
++    f_x: Tensor of predicted SDF means.
++    raw_var: Tensor of raw variance parameters from MLP.
++    sigma0_sq: Minimum variance constraint.
+     """
+-    # Step 1: Get predictions
+-    f_x, raw_var, _ = mlp_sdf(points)
++    # Step 1: Compute valid variance using softplus
++    valid_var = [sigma0_sq + math.log(1.0 + math.exp(rv)) for rv in raw_var]
+     
+-    # Step 2: Compute valid variance
+-    # softplus(raw_var) + sigma0_sq
+-    valid_var = sigma0_sq + softplus(raw_var)
+-    
+-    # Step 3: Compute Negative Log-Likelihood Loss
++    # Step 2: Compute Negative Log-Likelihood Loss
+     # Ideal SDF value is 0
+     target_sdf = 0.0
+-    error_sq = (target_sdf - f_x) ** 2
+-    
+-    # Term 1: Weighted squared error
+-    term1 = error_sq / (2 * valid_var)
+-    
+-    # Term 2: Log variance regularization
+-    term2 = log(valid_var) / 2
++    l_usdf = 0.0
++    for fv, vv in zip(f_x, valid_var):
++        error_sq = (target_sdf - fv) ** 2
++        term1 = error_sq / (2.0 * vv)
++        term2 = math.log(vv) / 2.0
++        l_usdf += term1 + term2
+     
+     # Average over points
+-    l_usdf = mean(term1 + term2)
++    l_usdf = l_usdf / len(f_x)
+     
+     return l_usdf
+@@ -107,5 +95,5 @@
+ 
+ ### [Uniform and Gaussian Noise Models](5127-uniform-and-gaussian-noise-models.md)
+-Uniform and Gaussian Noise Models are parametric statistical methods used to visualize uncertainty in differentiable volume rendering by approximating the distribution of ensemble samples with a uniform or Gaussian distribution. They differ from their parent method, Uncertainty Prediction Loss, by explicitly modeling the shape of the noise distribution rather than just penalizing its magnitude, and they differ from [Nonparametric Uncertainty Modeling for DVR](5230-nonparametric-uncertainty-modeling-for-dvr.md) by assuming a specific parametric form (uniform or Gaussian) rather than using empirical quantiles.
++Uniform and Gaussian Noise Models are parametric statistical methods used to visualize uncertainty in differentable volume rendering by approximating the distribution of ensemble samples with a uniform or Gaussian distribution. They differ from their parent method, Uncertainty Prediction Loss, by explicitly modeling the shape of the noise distribution rather than just penalizing its magnitude, and they differ from [Nonparametric Uncertainty Modeling for DVR](5230-nonparametric-uncertainty-modeling-for-dvr.md) by assuming a specific parametric form (uniform or Gaussian) rather than using empirical quantiles.
+ 
+ ### Uncertainty Loss Parameters
+@@ -124,5 +112,5 @@
+ *   **Memory Complexity:** Requires storing the predicted uncertainty values ($\delta_i$ or $\bar{\sigma}^2$) for each query point during training [S1][S2, unofficial].
+ *   **Strengths:** Helps the model ignore noisy or ambiguous data points by assigning them higher uncertainty, leading to more robust geometry and color reconstruction [S2, unofficial]. Prevents the network from overfitting to noise [S1].
+-*   **Limitations:** Requires careful tuning of regularization weights ($\alpha_2$, $\sigma_0^2$) to prevent uncertainty from blowing up or collapsing [S1][S2, unofficial]. The assumption that ideal SDF values are 0 may not hold for all datasets [S2, unofficial].
++*   **Limitations:** Requires careful tuning of regularization weights ($\alpha_2$, $\sigma_0^2$) to prevent uncertainty from blowing up or collapsing [S1][S2, unofficial]. The assumption that ideal SDF values are 0 is reasonable for point clouds distributed over a zero-value surface [S2, unofficial].
+ *   **When to use:** When the input data contains significant noise or outliers, or when robustness to ambiguous regions is required [S1][S2, unofficial].
+ 

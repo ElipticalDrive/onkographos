@@ -1,0 +1,181 @@
+# Hybrid Volume Rendering with Space Leaping
+
+Also called: Hardware-accelerated Culling with Software Raycasting, Hybrid Texture/Software Raycasting
+
+## Overview
+Hybrid Volume Rendering with Space Leaping is a direct volume ray casting method that combines hardware-accelerated 2D texture mapping for material culling with software-based ray casting for high-quality illumination and compositing [S1]. It solves the memory overhead and image quality limitations of pure texture-based rendering (such as quantization artifacts and the need for gradient maps) while avoiding the performance costs of ray casting through empty space [S1]. Unlike pure texture mapping, which suffers from limited internal texture resolution and color bleeding when interpolating pre-shaded values separately, this method performs ray casting on the original high-resolution data set, allowing for accurate gradient computation and opacity-weighted compositing [S1].
+
+## How it works
+The method consists of two distinct phases: a hardware-accelerated culling pass to determine the visible bounds of the volume, and a software-based ray casting pass to render the illuminated structures within those bounds [S1].
+
+### Inputs and Outputs
+- **Input**: A 3D scalar volume dataset $V$, camera parameters (projection matrix $P$, modelview matrix $M$, viewport $V_{port}$), object-space transformation $S$, transfer function $T$, and lighting parameters.
+- **Output**: A 2D image with accumulated color $\mathbf{C}_{out}$ and opacity $\alpha_{out}$ per pixel.
+
+### Data Structures
+1.  **Depth Buffer**: Stores the distance to the closest non-transparent fragment for each pixel. Initialized to infinity (or maximum depth) before the culling pass.
+2.  **Volume Data**: The original scalar grid. No gradient maps or pre-computed texture stacks are required for the ray casting phase [S1].
+3.  **Transfer Function**: Maps scalar values to color $\mathbf{c}$ and opacity $\alpha$. In the culling pass, values outside the visible range are assigned $\alpha=0$ [S1].
+
+### Parameters
+-   **Sampling Distance ($s$)**: The step size for ray traversal. Chosen to be equal to half of the voxel size to satisfy the sampling theorem [S1].
+-   **Opacity Threshold**: The threshold at which ray traversal stops (early ray termination). Not given in the sources.
+
+### Steps
+
+1.  **Hardware Culling Pass (Space Leaping)**:
+    1.  Enable OpenGL alpha testing and depth testing.
+    2.  Render the volume using 2D texture maps with texture color tables. The transfer function is applied such that culled materials have $\alpha=0$.
+    3.  The alpha test discards transparent fragments. The depth test then stores the distance to the closest fragment with $\alpha > 0$ in the depth buffer [S1].
+    4.  *(Optional)* To determine the exit position, render the texture stack again in front-to-back order with a reversed depth comparison function to store the farthest non-transparent fragment. This requires a second pass and depth buffer read [S1].
+
+2.  **Coordinate Transformation**:
+    1.  Read the depth value $z_s$ for each pixel from the depth buffer.
+    2.  Transform the screen space coordinate $(x_s, y_s, z_s)$ to world space $(x, y, z, w)$ using the inverse of the combined projection, modelview, viewport, and object-space transformation matrices [S1]:
+        $$
+        \begin{bmatrix} x \\ y \\ z \\ w \end{bmatrix} = \mathbf{S}(\mathbf{PM})^{-1} \mathbf{V} \begin{bmatrix} x_s \\ y_s \\ z_s \\ 1 \end{bmatrix}
+        $$
+        where $P$ is the projection matrix, $M$ is the modelview matrix, $\mathbf{V}$ is the viewport transformation, and $\mathbf{S}$ maps world space to local object coordinates [S1].
+    3.  Compute the parametric ray equation in object coordinates. The object-space transformation matrix $\mathbf{S}$ for an axis-aligned object centered at the origin is:
+        $$
+        \mathbf{S} = \begin{pmatrix} (s_x - v_x)/s_x & 0 & 0 & s_x - v_x \\ 0 & (s_y - v_y)/s_y & 0 & s_y - v_y \\ 0 & 0 & (s_z - v_z)/s_z & s_z - v_z \\ 0 & 0 & 0 & 1 \end{pmatrix}
+        $$
+        where components of $\vec{s}$ are half the length of the volume and components of $\vec{v}$ are half the length of a voxel in each direction [S1].
+
+3.  **Determine Ray Bounds**:
+    1.  Calculate the position on the ray where non-transparent media is hit for the first time (start position) using the depth value obtained from the depth buffer [S1].
+    2.  *(Optional)* If the exit position was determined in Step 1.4, use it as the end position. Otherwise, the ray traverses until it leaves the volume or reaches the opacity threshold [S1].
+
+4.  **Software Ray Casting**:
+    1.  Initialize the ray traversal at the determined first hit position.
+    2.  Compute the distance $t$ from this position to the entry point $\vec{e}$ of the ray into the volume.
+    3.  Position the first sample at:
+        $$
+        \vec{p}_{first} = \vec{e} + (\lfloor d/s \rfloor \cdot s)\vec{d}
+        $$
+        where $s$ is the sampling distance and $\vec{d}$ is the normalized ray direction. This shift reduces sampling pattern artifacts [S1].
+    4.  For each sample along the ray:
+        a.  **Interpolation**: Reconstruct the material value from adjacent grid points using tri-linear interpolation. Interpolate pre-shaded scalar values. Approximate the gradient using central differences at each grid point, then interpolate the gradient tri-linearly. This avoids storing gradient maps [S1].
+        b.  **Classification**: Map the interpolated scalar value to color $\mathbf{c}_i$ and opacity $\alpha_i$ using the transfer function.
+        c.  **Compositing**: Composite the sample using opacity-weighted colors in front-to-back order to prevent color bleeding artifacts:
+            $$
+            C_{new} = (1 - \alpha_{front})\tilde{C}_{back} + \tilde{C}_{front}
+            $$
+            $$
+            \alpha_{new} = (1 - \alpha_{front})\alpha_{back} + \alpha_{front}
+            $$
+            where $\tilde{C}$ is the opacity-weighted color (sample color multiplied by opacity before interpolation) [S1].
+    5.  Stop ray traversal when an opacity threshold is reached [S1].
+
+### Pseudocode
+
+> **Unverified code.** The code below did not pass a test run against a reference implementation, or no test fits it, so it may contain errors.
+
+```python
+def hybrid_volume_rendering(volume, camera, transfer_function, lighting_model):
+    # 1. Hardware Culling Pass
+    # Render volume with texture mapping, alpha test enabled, depth test enabled
+    # Culled materials have alpha=0. Depth buffer stores closest non-transparent depth.
+    render_texture_pass(volume, camera, transfer_function, alpha_test=True, depth_test=True)
+    
+    # Optional: Determine exit position by rendering with reversed depth test
+    # render_texture_pass(volume, camera, transfer_function, alpha_test=True, depth_test=True, depth_func=GREATER)
+    
+    # 2. Retrieve Depth and Transform
+    depth_buffer = read_depth_buffer()
+    
+    # Precompute transformation matrices
+    # P: Projection, M: Modelview, V: Viewport, S: Object-space transform
+    # S is computed based on volume dimensions and voxel sizes
+    inv_PM = inverse(camera.projection_matrix @ camera.modelview_matrix)
+    inv_S = inverse(compute_object_space_transform(volume))
+    
+    # 3. Software Ray Casting
+    for each pixel (x_s, y_s):
+        z_s = depth_buffer[x_s, y_s]
+        
+        # Transform screen space to world space
+        # Homogeneous coordinates
+        screen_coord = [x_s, y_s, z_s, 1]
+        world_coord = inv_S @ inv_PM @ camera.viewport_transform @ screen_coord
+        
+        # Normalize homogeneous coordinates
+        x, y, z = world_coord[0]/world_coord[3], world_coord[1]/world_coord[3], world_coord[2]/world_coord[3]
+        
+        # Compute ray origin and direction in object space
+        # Ray origin is camera position transformed to object space
+        ray_origin_obj = transform_to_object_space(camera.origin)
+        ray_dir_obj = normalize(transform_vector_to_object_space(camera.direction))
+        
+        # Calculate entry point into volume (if not already known from depth)
+        # For simplicity, assume ray_origin_obj is outside and we intersect with volume bounds
+        entry_t, entry_point = intersect_ray_volume(ray_origin_obj, ray_dir_obj, volume.bounds)
+        
+        # Start position from depth buffer (closest non-transparent hit)
+        # Convert world space hit point to object space
+        hit_point_obj = transform_to_object_space([x, y, z])
+        
+        # Compute distance from entry to hit point
+        t_start = distance(entry_point, hit_point_obj)
+        
+        # Determine sampling distance
+        s = volume.voxel_size / 2.0
+        
+        # First sample position
+        # d is normalized ray direction
+        first_sample_pos = entry_point + floor(t_start / s) * s * ray_dir_obj
+        
+        # Initialize compositing variables
+        acc_color = [0, 0, 0]
+        acc_alpha = 0.0
+        
+        # Ray traversal
+        current_pos = first_sample_pos
+        while current_pos is inside volume and acc_alpha < opacity_threshold:
+            # Tri-linear interpolation of scalar value
+            scalar_val = tri_linear_interpolate(volume, current_pos)
+            
+            # Compute gradient using central differences at grid points
+            gradient = compute_gradient(volume, current_pos)
+            
+            # Classification
+            color, alpha = transfer_function(scalar_val)
+            
+            # Shading (e.g., Phong)
+            shaded_color = lighting_model(color, gradient, ray_dir_obj)
+            
+            # Opacity-weighted color
+            weighted_color = shaded_color * alpha
+            
+            # Front-to-back compositing
+            # C_new = (1 - alpha_front) * C_back + C_front
+            # alpha_new = (1 - alpha_front) * alpha_back + alpha_front
+            # Here, 'front' is the new sample, 'back' is the accumulator
+            acc_color = (1 - acc_alpha) * acc_color + weighted_color
+            acc_alpha = (1 - acc_alpha) * acc_alpha + alpha
+            
+            # Advance ray
+            current_pos += s * ray_dir_obj
+            
+        # Write to image buffer
+        image[x_s, y_s] = acc_color
+```
+
+### Edge Cases and Pitfalls
+-   **Color Bleeding**: Interpolating pre-shaded color and opacity samples separately during texturing causes color bleeding artifacts [S1]. This is avoided in the software ray-casting step by interpolating pre-shaded scalar values and using opacity-weighted compositing [S1].
+-   **Sampling Pattern Artifacts**: If the first sample position is always located in one of the axis-aligned slices, sampling patterns may arise. The shift formula $\vec{e} + (\lfloor d/s \rfloor \cdot s)\vec{d}$ mitigates this [S1].
+-   **Memory Usage**: Pure texture-based rendering requires gradient maps, increasing memory usage. This hybrid approach avoids gradient map storage by computing gradients on the fly in software [S1].
+-   **Quantization**: Low-cost graphics units restrict internal texture resolution to 8 bits, causing quantization artifacts. Software ray casting on the original data set avoids this [S1].
+
+## Operating characteristics
+-   **Time Complexity**: The culling pass is $O(N_{tex})$ where $N_{tex}$ is the number of texture slices. The ray casting pass is $O(N_{samples})$ per pixel, where $N_{samples}$ is reduced by space leaping. Overall, it is faster than full software ray casting due to skipped empty regions.
+-   **Memory Complexity**: $O(V)$ for the volume data. No additional gradient maps or large texture stacks are required for the ray casting phase, unlike pure texture-based methods [S1].
+-   **Performance**: Provides impressive frame rates due to hardware-accelerated culling. The intermediate image from the texture pass allows for interactive classification and navigation by skipping the ray-casting module when the texture color table is modified or during motion [S1].
+-   **Strengths**: Avoids memory overhead of gradient maps, prevents quantization artifacts, enables accurate lighting models (e.g., Phong) in software, and reduces sampling time via space leaping [S1].
+-   **Limitations**: Requires two depth buffer reads (optional for exit position). The software ray casting step is computationally intensive per sample due to gradient computation and interpolation [S1].
+
+## Background
+The method was proposed in "Accelerated Volume Ray-Casting using Texture Mapping" (2001) [S1]. It addresses the limitations of early hardware-accelerated volume rendering, which suffered from memory constraints and image quality issues due to 8-bit texture resolution and the need for gradient maps [S1]. The approach leverages OpenGL's alpha and depth testing to efficiently cull empty space, allowing software ray casting to focus only on visible regions [S1].
+
+## Sources
+[S1] Accelerated Volume Ray-Casting using Texture Mapping, https://www.cs.cit.tum.de/fileadmin/w00cfj/cg/Research/Publications/2001/vis01.pdf, fetched 2026-10-29

@@ -1,0 +1,64 @@
+# Accelerated Sparse Convolutional Operators
+
+Also called: NanoVDB Convolution, Sparse Convolution Kernels
+
+## Overview
+Accelerated Sparse Convolutional Operators are a set of GPU-optimized CUDA kernels designed to perform stencil-based convolutions on sparse voxel data stored in the NanoVDB format [S1]. The method solves the performance bottleneck of applying 3D convolutional filters to sparse grids by adapting the computational strategy to the local occupancy density and feature depth of the input data [S1]. It sets itself apart from generic sparse convolution libraries (like SpConv v2) by leveraging the inherent spatial locality of NanoVDB's linear indexing scheme and utilizing NVIDIA tensor cores for dense sub-blocks, thereby achieving higher compute bandwidth utilization on specific sparsity patterns [S1].
+
+## How it works
+The method implements three distinct kernel strategies (scenarios) based on the local occupancy of active voxels and the depth of the feature vectors. The input is a `GridBatch` of NanoVDB grids and a `JaggedTensor` of per-voxel features; the output is a `JaggedTensor` of convolved features [S1].
+
+### Data Structures
+*   **GridBatch**: A contiguous block of NanoVDB IndexGrids. It provides metadata for accessing grids and jagged offsets (`joffsets`, `jidx`) for the collection of voxels [S1].
+*   **JaggedTensor**: Encodes per-voxel features for a minibatch where grids have different voxel counts. It consists of three parts [S1]:
+    1.  `jdata`: A tensor of shape $[N, D]$, where $N = \sum_{i=1}^{k} n_i$ is the total number of voxels in the batch, and $D$ is the feature width. This is the concatenation of all per-grid feature tensors.
+    2.  `joffsets`: A tensor of shape $[k, 2]$. `joffsets[i, :]` contains the start and end indices in `jdata` corresponding to the $i$-th grid.
+    3.  `jidx`: A tensor of shape $[N]$. `jidx[i]` is the index (from $0$ to $k-1$) of the grid to which the $i$-th element in `jdata` belongs.
+
+### Scenario 1: Low-depth convolutions / Leaf nodes
+This scenario targets leaf nodes with occupancy $\ge 20\%$ [S1]. It prioritizes regularity over sparsity to maximize tensor core utilization [S1].
+
+1.  **Shared Memory Allocation**:
+    *   Input window: $10 \times 10 \times 10$ block straddling the $8 \times 8 \times 8$ leaf node, plus a 1-voxel halo. Footprint: $31.25$ KB for FP32/TF32 data with feature width 8 [S1].
+    *   Output buffer: $8 \times 8 \times 8$ buffer of 16-wide output feature vectors. Footprint: $32$ KB [S1].
+2.  **Subdivision**: The $8^3$ local domain is subdivided into 32 subtiles of size $8 \times 2 \times 1$ [S1].
+3.  **Thread Assignment**: Each subtile is assigned to a warp (1024 total threads) [S1].
+4.  **Computation**: Within each warp, $16 \times 16 \times 8$ WMMA tensor core GEMMs are executed using TF32 precision with FP32 accumulation [S1]. This is repeated for each of the 27 stencil spokes [S1].
+5.  **Writeback**: Results are written to global memory. Since active indices within a leaf node are sequentially indexed, the writeback occurs on a fully sequential memory range [S1].
+
+### Scenario 2: High local occupancy / Brick
+This scenario targets macroscopically sparse domains where local occupancy exceeds $60-70\%$ and feature depth is moderate-to-high ($\ge 32$) [S1].
+
+1.  **Window Definition**: The kernel produces output on a $4 \times 2 \times 2$ window [S1].
+2.  **Fetch**: Input activations are fetched on-demand from a $6 \times 4 \times 4$ window encompassing the output block, including a 1-voxel halo [S1].
+3.  **Computation**: A custom tensor core implementation (using CuTe) computes the locally dense convolution on the $4 \times 2 \times 2$ window [S1].
+4.  **Optimization**: This approach exceeds 70% peak compute bandwidth for feature depths 32-64 and >90% for depths $\ge 128$ [S1].
+
+### Scenario 3: Highly sparse topology / LGGS
+This scenario targets highly sparse topologies (average active neighbors $\le 4-5$ out of 26) combined with high feature depth ($\ge 128$) [S1]. It avoids the inefficiency of independent streaming passes for each stencil offset [S1].
+
+1.  **Blocking**: The gather-GEMM-scatter operation is blocked on a contiguous subsequence of output indices (e.g., 64 indices) from the NanoVDB data structure [S1]. Due to NanoVDB's locality, these indices correspond to geometrically clustered coordinates [S1].
+2.  **Gather**: Input activations for the 27 stencil offsets are gathered.
+3.  **Accumulation**: Instead of scattering directly to global memory, contributions from all 27 stencil offsets are collected into a temporary buffer in GPU shared memory [S1].
+4.  **Scatter**: The accumulated results are scattered from shared memory to global memory [S1].
+
+### Compatibility Note
+NanoVDB is compatible with SpConv v2 by treating the linear index of each active voxel as a "hash key" with built-in locality properties [S1].
+
+## Subtopics
+
+### [Sparse Convolution](9837-sparse-convolution.md)
+A variant of standard convolution where only a subset of input elements is used, defined by a support set of indices, to improve computational efficiency. It is the foundational concept for the operators described above, which optimize this process for sparse voxel grids.
+
+## Operating characteristics
+*   **Performance (Scenario 1)**: Superior to SpConv v2 default backend for leaf nodes with occupancy $\ge 20\%$, offering a 2.5x-3x advantage in dense domains [S1].
+*   **Performance (Scenario 2)**: Exceeds 70% peak compute bandwidth for feature depths 32-64 and >90% for depths $\ge 128$. Outperforms SpConv v2 for occupancy patterns >60-70% [S1].
+*   **Performance (Scenario 3)**: Optimized for high feature depth and low local occupancy, avoiding the latency of multiple streaming passes [S1].
+*   **Memory**: Uses GPU shared memory for local densification (Scenario 1) and accumulation (Scenario 3) to reduce global memory bandwidth pressure [S1].
+*   **Precision**: Uses TF32 precision with FP32 accumulation for tensor core operations [S1].
+
+## Background
+The method is part of the fVDB framework, a deep-learning framework for sparse, large-scale, and high-performance spatial intelligence developed by NVIDIA Research [S1]. It was introduced to address the limitations of existing sparse convolution libraries when applied to the NanoVDB data structure, leveraging the linear indexing properties of VDB for improved locality and performance [S1]. The framework integrates with PyTorch and supports various tasks including point-cloud segmentation and neural rendering [S1].
+
+## Sources
+[S1] fVDB: A Deep-Learning Framework for Sparse, Large-Scale, and High-Performance Spatial Intelligence, https://research.nvidia.com/labs/prl/publication/williams2024fvdb/, fetched 2026-10-30

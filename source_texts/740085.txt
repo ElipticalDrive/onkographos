@@ -1,0 +1,707 @@
+Create your virtual labs. Contribute to openbraininstitute/core-web-app development by creating an account on GitHub.
+
+Client side morphology mesher / viewer by pgetta · Pull Request #1976 · openbraininstitute/core-web-app · GitHub
+Skip to content
+You signed in with another tab or window. Reload to refresh your session.
+You signed out in another tab or window. Reload to refresh your session.
+You switched accounts on another tab or window. Reload to refresh your session.
+Dismiss alert
+Conversation
+pgetta
+commented
+Sep 28, 2026
+•
+edited
+Loading
+Uh oh!
+There was an error while loading. Please reload this page.
+Copy link
+Copy Markdown
+Collaborator
+The morphology Overview viewer now builds a closed surface mesh from the SWC itself, in a pool of Web Workers, and draws it with three.js. The traced skeleton shows at once, each fibre as wide as the mesh will draw it, and the mesh takes over once it is built: about half a second for a cortical cell. It is a port of the local-morph-meshing proof of concept, with the circuit viewer's chrome around it.
+Replaces the server-generated GLB
+This replaces #1955 and openbraininstitute/morphoviewer#54, which showed the cell_surface_mesh GLB from the server-side mesh generator. With the mesh built in the browser:
+Every morphology with an SWC gets a mesh, not only those with a generated GLB asset, and there is no second download.
+The surface is closed and consistently oriented. The hollow look caused by the generator's inverted winding (the known issue in Switch a morphology between its mesh and skeleton in one viewer #1955) is gone.
+Neurite types can be left out: hiding one rebuilds the mesh without it.
+Mesh and skeleton share one scene, so there is no switching between two views.
+#1955 and morphoviewer#54 stay open until this lands, and can be closed then.
+Changes
+Meshing (morpho-viewer/engine/): tubes are swept where a neurite runs alone, and voxel patches are meshed around branch points, the soma and contacts, joined by collars. The voxel work runs in WebGPU where the browser has it and on the CPU otherwise, and the build falls back to voxels throughout if the tubes fail. Workers start when first needed: a build uses at least 4, and one more per 2 mm of the cable it meshes, up to 12. They talk over Comlink, and a new build or load cancels the running one. The build parameters are fixed in constants.ts.
+Viewer: 14 looks (Studio by default), ambient occlusion, bumps, type tint, wireframe, the traced or processed skeleton, spin and a min. width. It opens in an orthographic view with the scale bar, with a perspective view to switch to.
+Skeletons: the traced skeleton is the file as written, to check the mesh against: a neurite joins the soma at the soma point the file links it to, which on a soma of several points can lie at its edge. The processed skeleton is what the mesh is built from, the necks from the soma's centre included.
+Bumps: an organic roughness of the surface, drawn by the shader and on by default. The looks on three's own materials shade it per pixel, so it shows on the soma's wide triangles and along the tubes, and in a far view it fades out instead of shimmering. The three custom-shader looks and the ambient-occlusion pass keep it per vertex.
+Colours: by section, or by path distance to the soma, which the workers measure. Neurite colours are kept per background, and an eye per type rebuilds the mesh without it.
+Chrome, as the circuit viewer's:
+fullscreen, settings (the look is its first row), and a Debug menu behind the morphology-debug flag, which is listed in local, preview and staging. It holds the statistics, the build controls (the POC's build parameters, a GPU switch and the bump sliders; a change rebuilds the mesh) and export;
+the Colour by pill and the neurite key;
+an axes gizmo in the bottom-right corner, showing the cell's X, Y and Z as the camera sees them. A click on a tip turns the view to look from that axis, or from the opposite one when it already does;
+a "?" help card on every control.
+The viewer is as tall as the circuit viewer.
+Export: GLB, Draco GLB and STL, written in a worker that loads on first use.
+SWC parser: lines ended by a bare carriage return are read, and a repeated sample id or a loop of parents is rejected, saying where; both used to drop or misplace samples silently.
+Detail page: morphologies no longer have a Mesh viewer tab, which showed the same viewer as the Overview. Old /mesh-viewer links to a morphology redirect to the Overview. EM cell meshes keep theirs.
+Shared with the circuit viewer: its settings popover shell moves to color-by/chrome-menu.tsx, and the panel styles to contrast.ts. The circuit viewer's DOM stays the same.
+Dependencies:
+three and @types/three go from ^0.159 to ^0.186;
+new: @gltf-transform/core and /extensions, draco3dgltf and meshoptimizer;
+next.config.ts aliases fs to an empty module in the browser, for Draco's glue.
+The only other three.js code, services/bluenaas-single-cell, has no mounted renderer: the single-neuron workflows draw the neuron with morphoviewer. Only createBubblesInstanced still builds three.js objects that nothing renders, and they build under 0.186.
+Deleted: src/components/MorphoViewer/, src/state/morpho-viewer/ and the orphaned CSS modules under morpho-viewer/.
+Docs
+morpho-viewer/README.md is the overview, with diagrams of what runs where and of a build. morpho-viewer/engine/README.md is the in-depth reference for the meshing.
+Testing
+Vitest: new suites under src/__tests__/cell-morphology/:
+the engine: closed-surface checks on a sample cell, the worker pool, path distances and the exports;
+the React side, with the engine faked.
+The full suite passes (2,973 tests).
+Lint and build: Biome is clean on the changed files. next build passed before the axes gizmo commits; the files they change type-check.
+In the browser (Chromium):
+cells: ch150801A1, C261296A-P1 (a soma of stacked points), an Allen Pvalb interneuron, a MICrONS EM cell, MouseLight AA0187 and a synthesized morphology;
+all 14 looks, with and without the bumps, perspective, the dark background, distance colours, hiding types and the three exports;
+the axes gizmo: the tips' turns and flips, a drag during a turn, keyboard focus on a light look, and the neurite key in the shortest viewer, where it now scrolls above the gizmo;
+after the review fixes: ch150801A1 on the GPU and the CPU, with tubes and with voxels throughout (all closed), the workers per build (7, 6 with the axon hidden, 12 for the projection neuron 191812_00037), Cajal with AO, the Toon outline in the wireframe, the /mesh-viewer redirect, and the single-neuron simulate and synaptome build pages.
+Not checked yet: fullscreen and double-click fullscreen, Firefox and Safari, a file without a soma (unit tests only), and opening the exports in Blender.
+pgetta
+added 4 commits
+September 28, 2026 16:12
+Mesh the morphology in the browser, in a viewer with the circuit view…
+…
+3303227
+```
+…er's chrome
+
+The cell-morphology viewer now builds a closed surface from the SWC itself, in a pool of
+Web Workers (tubes where a section runs alone, voxel patches where sections blend,
+WebGPU where there is one and the CPU otherwise), and draws it with three.js.
+
+- 15 looks with their own backgrounds, ambient occlusion, bumps, type tint, wireframe,
+  the traced or processed skeleton, spin, a min. width, and an orthographic view with the
+  scale bar or a perspective one.
+- Colour by section or by path distance to the soma, measured in the workers; neurite
+  colours per background, and an eye per type that rebuilds the mesh without it.
+- Settings, statistics and export (GLB, Draco GLB, STL, written in a worker loaded on
+  first use), with a "?" help card on every control.
+- The circuit viewer's settings popover moves to a shared chrome-menu.tsx; both viewers
+  use it, and its panel styles move to contrast.ts.
+- three and @types/three go to ^0.186; glTF-Transform, draco3dgltf and meshoptimizer come
+  in, with an fs alias for Draco's glue in the browser.
+- The old MorphoViewer component tree and its state move or go.
+```
+docs: morphology viewer port plan
+2029ebc
+Document the morphology viewer and its mesher
+…
+d5d4097
+```
+- morpho-viewer/README.md is the overview: what runs where, with Mermaid diagrams of
+  the architecture, the load-build-rebuild sequence, the build's stages, a voxel patch,
+  where tubes meet patches, and the GPU/CPU choice. It ends with where to change what.
+- engine/README.md, the POC's notes, becomes the in-depth reference: the file paths are
+  fixed, the POC page's controls go, the build parameters table gets the platform's
+  values, and distances.ts joins the layout.
+```
+docs: note the viewer docs in the port plan
+a86e85b
+github-actions
+Bot
+commented
+Sep 28, 2026
+•
+edited
+Loading
+Uh oh!
+There was an error while loading. Please reload this page.
+Copy link
+Copy Markdown
+Preview Deployment
+Branch
+Status
+Preview
+Updated
+feat/advanced-morphology-mesher-viewer
+❌ Deleted
+-
+Oct 1, 2026 at 8:30 AM (UTC)
+github-actions
+Bot
+commented
+Sep 28, 2026
+•
+edited
+Loading
+Uh oh!
+There was an error while loading. Please reload this page.
+Copy link
+Copy Markdown
+Test Coverage
+Commit: 1275c8a7454e
+Unit Tests
+Status: Passed
+Metric
+Covered
+Total
+Coverage
+Statements
+18483
+55050
+33.57%
+Branches
+8648
+34122
+25.34%
+Functions
+3154
+13651
+23.10%
+Lines
+16478
+49769
+33.10%
+pgetta
+added 11 commits
+September 28, 2026 17:07
+Merge the morphology statistics and export into a Debug menu behind a…
+…
+37c69b9
+```
+… flag
+
+- One chrome button, a bug, in place of Statistics and Export mesh. The statistics
+  scroll at the top and the three downloads stay in view under them.
+- It shows only where the morphology-debug flag is on. The Feature Flags tab lists
+  it in local, preview and staging, off by default.
+- export-menu.tsx becomes debug-menu.tsx, and stats-menu.tsx becomes stats.tsx,
+  the statistics alone.
+```
+docs: note the Debug menu in the port plan
+ebdbaa8
+Give the meshing tests time for coverage on CI
+…
+947d474
+```
+CI runs the suite under coverage on a small runner, where the engine tests mesh
+four to fifteen times slower than alone: 16 of them passed their 5 s (or 30 s)
+limit on the first run of this branch.
+
+- The engine test files that mesh set a 60 s limit, MESH_TIMEOUT, and the tests
+  that mesh the sample cell 180 s.
+- The React viewer tests, which go through the menus in jsdom, set 20 s.
+```
+Add the build controls to the morphology Debug menu
+…
+f4e26f8
+```
+- Between the statistics and the downloads, set off by dividers: the POC's build
+  parameters (smoothing σ, axon radius and step, simplify, untangle, tubes and
+  their aspect, voxel size, min radius, neurite and soma blend, mesh simplify),
+  a GPU switch, and the bump sliders, which move there from the settings.
+- A change rebuilds the mesh after the eyes' pause and draws the processed
+  skeleton again; Reset puts the defaults back. The GPU switch is held off, with
+  the reason, when the session has no GPU.
+- DEFAULT_BUILD and buildParams() in constants.ts replace BUILD_PARAMS; the
+  defaults build the same mesh as before.
+- The settings menu's rows move to chrome/menu-rows.tsx, shared by both menus,
+  and the shared MenuSlider can be disabled.
+- Help cards for every control; those that rebuild say so.
+```
+docs: note the Debug menu's controls in the port plan
+207331a
+Fix the review findings on the Debug menu's build controls
+…
+67a4bf8
+```
+- A build superseded while the GPU was being probed no longer starts, so it
+  cannot cancel the newer build and leave the progress pill stuck.
+- The processed skeleton is drawn with its mesh, not when the plan comes in, so
+  it always matches the mesh on show.
+- Reset gives the bumps back the look's own, where the look has them.
+- The GPU status is patched once, in a finally; disabled slider rows no longer
+  highlight on hover.
+- Tests for both hook fixes and Reset, a GPU-off test that waits for the reason,
+  and build-params.test.ts pinning the default build parameters.
+```
+Put the bumps and occlusion back when leaving a look that brought its…
+…
+fe459a7
+```
+… own
+
+EM segmentation turns the bumps and the ambient occlusion on, and they stayed on
+for every look after it. Choosing a look now keeps what the bumps and the
+occlusion were before a look turned its own on, and choosing a look without them
+puts that back: bumps turned on by hand stay on, in their own shape.
+```
+Stop a slider drag in the viewer menus from selecting the page
+…
+7a773f3
+```
+A drag that started beside a slider's handle, on its row, began a text selection
+that followed the pointer out of the menu across the page. The viewer menus'
+popover is select-none now, which the circuit viewer's settings share; the Debug
+statistics stay selectable, to be copied.
+```
+Draw the skeleton at the mesh's widths while the mesh is built
+…
+6e7dc01
+```
+The traced skeleton that stands in for the mesh was a 2 px line in a 1 px
+casing, 4 px wide, and the mesh that took over drew its fibres far thinner.
+The stand-in now draws each fibre at its traced radius, with the Min. width
+as its floor, as the mesh does, and the soma as a disc of the mesh's soma.
+
+- engine/skeleton-lines.ts holds the patched line materials and
+  skeletonStyle(): the viewer picks the skeleton on show and how to draw it
+  in the same call that brings or drops the mesh, so no frame shows one
+  without the other. React only passes on the Skeleton choice.
+- Only the traced skeleton carries radii and the soma segment
+  (sectionSegments options, somaSphere() shared with the mesher); the
+  overlay line leaves segments of no length out.
+- The shader patches warn if three rewords them, and skeleton-lines.test.ts
+  runs them against the installed three.
+```
+docs: note the stand-in skeleton's widths in the port plan
+1b6db07
+docs: remove the morphology viewer port plan, done with the implement…
+…
+4713a95
+```
+…ation
+```
+pgetta
+self-assigned this
+Sep 29, 2026
+pgetta
+added 5 commits
+September 29, 2026 10:26
+Draw the processed skeleton as the mesh builds it, necks included
+…
+ab72b3c
+```
+In an SWC file, each arbor's first point names one soma point as its
+parent. On a soma of several points (an outline, or MorphIO's stack of
+cross-sections) that is usually the first one, at the edge, so the
+skeleton's lines met outside the mesh's soma, which is built around the
+average of the soma points.
+
+- The Processed skeleton now comes from `meshedSections` (mesher.ts): an
+  arbor with a neck (`somaNecks`) starts at the soma's centre and goes on
+  from the neck's target, as the mesh builds it. Arbors without a neck
+  keep their traced start, as in the mesh. Every type is included, since
+  the viewer hides types in the skeleton itself.
+- The Traced skeleton, and the stand-in drawn from it while the mesh
+  builds, stay as the file is written, to check the mesh against.
+- The Skeleton help card and the README say what each one shows.
+- Tests: valid, too-near and far arbors through both planners, a plan
+  that meshes only the soma, a cut arbor, and a point untangling added
+  ahead of a first sample.
+```
+Shade the bumps per pixel in every look on three's own materials
+…
+13545b1
+```
+Only the EM segmentation look shaded the bumps per pixel. The others
+tilted each vertex's normal and let the triangles interpolate, which
+drew the soma's wide triangles as crumpled facets and left the long
+strips of a swept tube smooth: Studio with bumps looked nothing like EM.
+
+- `withDisplacement` now shades the bumps per fragment in any shader
+  with three's `normal_fragment_begin`: every look but Fluorescence,
+  Cajal and Depth-coded, whose custom shaders keep the tilt per vertex.
+  The vertex normal stays untilted there, so three's specular
+  anti-aliasing reads the smooth normal as without bumps. Glossy's
+  clearcoat takes the bumped normal too.
+- An octave fades out as its noise cells shrink from four pixels across
+  to two, so a far view does not shimmer; the fragment code runs only
+  while the bumps are on.
+- The declarations go in front of the shader, which the gold leaf's
+  flakes now share instead of their own noise and position varying.
+- The ambient-occlusion pass keeps its normals tilted per vertex
+  (`perFragment: false`): it rebuilds the surface from depth, which has
+  only the per-vertex displacement.
+- The toon outline is pushed out just before it is projected, after the
+  displacement whichever hook runs first.
+- Tests: which looks shade per fragment, the clearcoat, the occlusion
+  pass's normals, the gold leaf's flakes after the hash, and no shader
+  declaring a function, uniform or varying twice.
+```
+Drop the cutaway look, and border the viewer card as the others
+…
+ae0744f
+```
+The cutaway look goes with the clipping plane only it used. The viewer card takes the detail view's card border, over a background clipped to the padding so the white stays out from under it.
+```
+Keep the viewer card's white inside its border, and the view directio…
+…
+a52ba29
+```
+…n to the depth range
+
+The white moves to the div inside the card, so nothing paints under the border and the variant prop and bg-clip-padding go. With the cut plane gone, only the depth-coded range needs the view direction, so it is taken there.
+```
+Turn the morphology on the screen's axes, from above and below too
+…
+fb879ab
+```
+OrbitControls is a turntable about the `camera.up` it reads when it is
+made. Seen from above or below, a drag sideways spun the cell in the
+screen's plane, and a drag down stopped at the pole.
+
+- After every change, `followScreenUp` puts OrbitControls' axis and
+  `up` on the screen's vertical, so each turn starts on the equator: a
+  drag sideways turns the cell about the screen's vertical and a drag
+  down about its horizontal, whichever way it faces. The spin follows
+  the screen's vertical too. OrbitControls keeps every gesture, its
+  easing and the spin.
+- Reset view drops what is left of a drag's or a pan's easing, so it
+  lands on the fitted, upright view.
+- A spin held off by a still pointer starts again when the pointer is
+  let go: the loop could have stopped in the meantime.
+- The axis and the easing are OrbitControls' own fields. If three
+  renames them, the viewer falls back to the plain turntable.
+- Tests: with OrbitControls eased as in the viewer, drags from above,
+  below and in between, over the top, the spin, the stopped easing and
+  the fallback. On the viewer, with a stand-in renderer: the spin after
+  a held pointer, and Reset view while a drag and a pan ease out.
+```
+pgetta
+marked this pull request as ready for review
+September 29, 2026 11:23
+pgetta
+changed the title
+Build the morphology mesh in the browser, with the circuit viewer's chrome
+Advanced morphology mesher / viewer
+Sep 29, 2026
+pgetta
+changed the title
+Advanced morphology mesher / viewer
+Client side morphology mesher / viewer
+Sep 29, 2026
+pgetta
+added
+the
+feature
+label
+Sep 29, 2026
+pgetta
+added 2 commits
+September 29, 2026 14:06
+docs: one line per paragraph in the morphology viewer READMEs
+…
+f785ca9
+```
+The paragraphs and list items were wrapped by hand at different widths,
+which the diff on GitHub shows as ragged lines. Each is one line now;
+code fences, the diagrams, tables and headings are as they were, and
+the rendered pages are the same.
+```
+Turn the bumps on by default, a little broader and smoother
+…
+7d78f18
+```
+The bumps are on from the start, at a height of 0.08 × the radius, a
+scale of 2.1 µm and a smoothness of 0.8. EM segmentation still brings
+its own and puts back what was on before. The tests check the defaults
+come back after it, and bumps turned off by hand stay off; the engine
+README says where the sliders are, the Debug menu.
+```
+pgetta
+commented
+Sep 29, 2026
+Copy link
+Copy Markdown
+Collaborator
+Author
+Relates to https://github.com/openbraininstitute/prod-build-emodel/issues/219.
+bilalesi
+reviewed
+Sep 30, 2026
+View reviewed changes
+Comment thread
+src/features/entities/cell-morphology/morpho-viewer/engine/mesher-api.ts
+Resolved
+Uh oh!
+There was an error while loading. Please reload this page.
+bilalesi
+reviewed
+Sep 30, 2026
+View reviewed changes
+Comment thread
+src/features/entities/cell-morphology/morpho-viewer/engine/pool.ts
+Resolved
+Uh oh!
+There was an error while loading. Please reload this page.
+bilalesi
+reviewed
+Sep 30, 2026
+View reviewed changes
+Comment thread
+src/features/entities/cell-morphology/morpho-viewer/engine/mesher-api.ts
+Resolved
+Uh oh!
+There was an error while loading. Please reload this page.
+bilalesi
+reviewed
+Sep 30, 2026
+View reviewed changes
+Comment thread
+src/entity-configuration/domain/experimental/cell-morphology.ts
+Resolved
+Uh oh!
+There was an error while loading. Please reload this page.
+pgetta
+added 3 commits
+September 30, 2026 14:52
+Start the mesher workers when first needed, as many as the cell needs
+…
+ab263c6
+```
+The pool started every worker, up to 12, as the viewer mounted, each
+loading the mesher bundle and meshoptimizer, whatever the cell.
+
+- A worker starts on its first call, and is kept for the next builds.
+- A build uses at least 4 workers and one more per 2 mm of the cable it
+  meshes, up to the pool's size (workersFor), and cuts its work for as
+  many. A build starts them as it begins, so they load while worker 0
+  plans.
+- On 40 cells a rebuild on 4 workers instead of 12 took 25 ms more below
+  8 mm of cable (median), where most human cells are; the big cells
+  still get all of them.
+```
+Load the skeleton without waiting for the mesh simplifier
+…
+a2ade07
+```
+A worker's calls were chained from the meshoptimizer WASM being ready,
+so the load waited for it, and if it failed to load, the load failed
+and no cell showed at all. Only the meshing calls wait for it now: the
+skeleton shows either way, and a failed simplifier fails the build,
+which says so.
+```
+Send old Mesh viewer links of morphologies to the Overview
+…
+5330a5c
+```
+The tab is gone for morphologies, so its links gave a 404. They
+redirect to the Overview now, with their query, from the data and the
+workflow views; EM cell meshes keep their Mesh viewer.
+```
+bilalesi
+reviewed
+Sep 30, 2026
+View reviewed changes
+Comment thread
+src/features/entities/cell-morphology/morpho-viewer/engine/mesher.ts
+Resolved
+Uh oh!
+There was an error while loading. Please reload this page.
+bilalesi
+reviewed
+Sep 30, 2026
+View reviewed changes
+Comment thread
+src/features/entities/cell-morphology/morpho-viewer/engine/untangle.ts
+Resolved
+Uh oh!
+There was an error while loading. Please reload this page.
+bilalesi
+reviewed
+Sep 30, 2026
+View reviewed changes
+Comment thread
+src/features/entities/cell-morphology/morpho-viewer/engine/swc.ts
+Resolved
+Uh oh!
+There was an error while loading. Please reload this page.
+bilalesi
+reviewed
+Sep 30, 2026
+View reviewed changes
+Comment thread
+src/features/entities/cell-morphology/morpho-viewer/engine/swc.ts
+Resolved
+Uh oh!
+There was an error while loading. Please reload this page.
+bilalesi
+reviewed
+Sep 30, 2026
+View reviewed changes
+Comment thread
+src/features/entities/cell-morphology/morpho-viewer/engine/swc.ts
+Resolved
+Uh oh!
+There was an error while loading. Please reload this page.
+bilalesi
+reviewed
+Sep 30, 2026
+View reviewed changes
+Comment thread
+src/features/entities/cell-morphology/morpho-viewer/engine/clip.ts
+Resolved
+Uh oh!
+There was an error while loading. Please reload this page.
+bilalesi
+reviewed
+Sep 30, 2026
+View reviewed changes
+Comment thread
+src/features/entities/cell-morphology/morpho-viewer/engine/gpu-slab.ts
+Resolved
+Uh oh!
+There was an error while loading. Please reload this page.
+bilalesi
+reviewed
+Sep 30, 2026
+View reviewed changes
+Comment thread
+src/features/entities/cell-morphology/morpho-viewer/engine/viewer.ts
+Resolved
+Uh oh!
+There was an error while loading. Please reload this page.
+bilalesi
+reviewed
+Sep 30, 2026
+View reviewed changes
+Comment thread
+src/features/entities/cell-morphology/morpho-viewer/engine/viewer.ts
+Resolved
+Uh oh!
+There was an error while loading. Please reload this page.
+bilalesi
+reviewed
+Sep 30, 2026
+View reviewed changes
+Comment thread
+src/features/entities/cell-morphology/morpho-viewer/chrome/debug-menu.tsx
+Resolved
+Uh oh!
+There was an error while loading. Please reload this page.
+pgetta
+added 7 commits
+September 30, 2026 15:16
+Take a field block only where a segment's band reaches it
+…
+7005279
+```
+The CPU splat gave every block in a segment's box a scratch buffer and
+a place in the field before it tested the reach, so a long diagonal
+segment cost its length cubed: a 200 µm one took 22 000 blocks at
+0.5 µm, most never reached. It tests the reach first now, as the GPU
+binning does, and the two take the same blocks.
+```
+Look for touching fibres as far as a fork's fillet reaches
+…
+a5e3f0f
+```
+The first search for contacts reached the radii and one and a half
+clearances, but a pair in a star touches with its fillets on too. Near
+a fork, a contact was found or missed as the cells fell, and a missed
+one was never untangled. The search now reaches twice the widest fillet
+further.
+```
+Read classic Mac line ends, and reject repeated ids and parent loops …
+…
+4dc9833
+```
+…in an SWC
+
+- A file with bare carriage returns was one line, of which the first
+  node was kept and the rest silently dropped.
+- A sample id given twice attached the children to the wrong node.
+- Samples whose parents lead back round started no section and dropped
+  out of the mesh, the skeletons and the cable length.
+The parser says which line or sample, as for other broken lines.
+```
+Refuse a mesh too big for the clip's edge keys to be exact
+…
+28eabbf
+```
+An edge's key, a · 2³² + b, is exact in a double while a < 2²¹. A
+patch that size is far off, but two edges with one key would join the
+wrong loop; the clip now refuses a mesh past 2²⁰ vertices, and the
+build falls back to the voxel mesher.
+```
+Free the WebGPU devices after a GPU error, and once the GPU is off
+…
+43b6bd9
+```
+A readback that failed left its buffer behind, and once the GPU was
+turned off for the session every worker kept its device and all its
+buffers. A worker now destroys its device when a GPU call fails, and
+the pool has every worker it started let its device go when the viewer
+turns the GPU off.
+```
+Keep Cajal's paper out of tone mapping with AO on, and the Toon outli…
+…
+4592012
+```
+…ne out of the wireframe
+
+- With ambient occlusion on, the composer's output pass put ACES tone
+  mapping on the whole frame, Cajal included, whose paper then no
+  longer matched its background. The renderer's tone mapping now
+  follows the look (`Look.toneMapped`), in both paths.
+- The wireframe left the Toon look's outline as a solid silhouette
+  behind the wires; it is hidden while the wireframe is on.
+```
+Drop an export error once the mesh is built again
+…
+f329133
+```
+The error of a failed export stayed in the Debug menu for a mesh built
+since, which was never exported. It is kept with the mesh it is about.
+```
+bilalesi
+approved these changes
+Oct 1, 2026
+View reviewed changes
+bilalesi
+left a comment
+Copy link
+Copy Markdown
+Collaborator
+There was a problem hiding this comment.
+Choose a reason for hiding this comment
+The reason will be displayed to describe this comment to others. Learn more.
+nice job @pgetta
+pgetta
+commented
+Oct 1, 2026
+Copy link
+Copy Markdown
+Collaborator
+Author
+Thank you Bilal!
+Hide details
+View details
+pgetta
+merged commit 6141640
+into
+main
+Oct 1, 2026
+7 checks passed
+Uh oh!
+There was an error while loading. Please reload this page.
+pgetta
+deleted the
+feat/advanced-morphology-mesher-viewer
+branch
+October 1, 2026 08:30
+This was referenced Oct 1, 2026
+Draw a morphology's surface mesh in the skeleton's scene
+openbraininstitute/morphoviewer#54
+Closed
+Switch a morphology between its mesh and skeleton in one viewer
+#1955
+Closed
+Sign up for free
+to join this conversation on GitHub.
+Already have an account?
+Sign in to comment
+Uh oh!
+There was an error while loading. Please reload this page.
+Labels
+feature
+2 participants
+Add this suggestion to a batch that can be applied as a single commit.This suggestion is invalid because no changes were made to the code.Suggestions cannot be applied while the pull request is closed.Suggestions cannot be applied while viewing a subset of changes.Only one suggestion per line can be applied in a batch.Add this suggestion to a batch that can be applied as a single commit.Applying suggestions on deleted lines is not supported.You must change the existing code in this line in order to create a valid suggestion.Outdated suggestions cannot be applied.This suggestion has been applied or marked resolved.Suggestions cannot be applied from pending reviews.Suggestions cannot be applied on multi-line comments.Suggestions cannot be applied while the pull request is queued to merge.Suggestion cannot be applied right now. Please check back later.
+You can’t perform that action at this time.

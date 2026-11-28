@@ -1,0 +1,114 @@
+--- v004.md
++++ v005.md
+@@ -8,17 +8,17 @@
+ ## How it works
+ **Inputs and Outputs:**
+-- Inputs: A set of $N$ images $I_1, \dots, I_N$ with known camera projection matrices [G].
++- Inputs: A set of $N$ images $I_1, \dots, I_N$ with known camera projection matrices and intrinsics [G].
+ - Outputs: A dense depth map $D$ for a reference view [G].
+ 
+ **Data Structures:**
+-- Depth planes: Defined by a minimum depth $d_{min}$, maximum depth $d_{max}$, and step size $\Delta d$ [G].
++- Depth planes: Defined by a minimum depth $d_{\min}$, maximum depth $d_{\max}$, and step size $\Delta d$ [G].
+ - Cost accumulation: Per-pixel scalar values; no explicit 3D volume is stored [S1, unofficial].
+ 
+ **Steps:**
+ 1. Initialize a cost accumulator $C(u, v) = \infty$ and a depth map $D(u, v) = 0$ for each pixel $(u, v)$ in the reference image [G].
+-2. Iterate through depth values $d$ from $d_{min}$ to $d_{max}$ with step $\Delta d$ [G]:
+-   a. Construct a depth plane at distance $d$ in the reference camera coordinate system [G].
++2. Iterate through depth values $d$ from $d_{\min}$ to $d_{\max}$ with step $\Delta d$ [G]:
++   a. Construct a 3D point $\mathbf{X}_1$ corresponding to $(u, v, d)$ in the reference camera coordinate system [G].
+    b. For each pixel $(u, v)$ and each other camera $k \in \{2, \dots, N\}$:
+-      i. Project the 3D point corresponding to $(u, v, d)$ from the reference view into camera $k$'s image plane to obtain coordinates $(u_k, v_k)$ [G].
++      i. Project $\mathbf{X}_1$ into camera $k$'s image plane to obtain coordinates $(u_k, v_k)$ [G].
+       ii. Sample the intensity or color value $I_k(u_k, v_k)$ from image $k$ [G].
+       iii. Compute a photometric consistency cost between $I_k(u_k, v_k)$ and the reference pixel value $I_1(u, v)$ [G].
+@@ -27,9 +27,12 @@
+ 
+ **Formulas:**
+-- Projection: $\mathbf{x}_k = P_k \mathbf{X}_1$, where $\mathbf{X}_1$ is the 3D point at depth $d$ for pixel $(u,v)$ in camera 1, and $P_k$ is the projection matrix of camera $k$ [G].
+-- Depth Selection: $D(u, v) = \arg\min_{d} C(u, v, d)$ [G].
++- Unprojection: $\mathbf{X}_1 = \begin{bmatrix} (u - c_x) \frac{d}{f_x} \\ (v - c_y) \frac{d}{f_y} \\ d \\ 1 \end{bmatrix}$, where $(c_x, c_y)$ is the principal point and $(f_x, f_y)$ are focal lengths [G].
++- Projection: $\mathbf{x}_k = P_k \mathbf{X}_1$, where $P_k$ is the $4 \times 4$ projection matrix of camera $k$ [G].
++- Pixel mapping: $u_k = \frac{x_k}{z_k} f_{x,k} + c_{x,k}$, $v_k = \frac{y_k}{z_k} f_{y,k} + c_{y,k}$ [G].
++- Cost accumulation: $C(u, v) = \sum_{k=2}^N |I_1(u, v) - I_k(u_k, v_k)|$ [G].
++- Depth selection: $D(u, v) = \arg\min_{d} C(u, v, d)$ [G].
+ 
+ **Parameters:**
+-- $d_{min}, d_{max}$: Depth range [G].
++- $d_{\min}, d_{\max}$: Depth range [G].
+ - $\Delta d$: Depth resolution [G].
+ - $N$: Number of views [G].
+@@ -37,11 +40,9 @@
+ **Edge Cases:**
+ - The original implementation is limited to only four camera views [S1, unofficial].
+-- Not given in the sources.
++- Not given in the sources. [G]
+ 
+ **Pseudocode:**
+ ```python
+-import math
+-
+-def plane_sweep_depth_estimation(images, cameras, d_min, d_max, d_step):
++def plane_sweep_depth_estimation(images, projection_matrices, intrinsics, d_min, d_max, d_step):
+     height, width = len(images[0]), len(images[0][0])
+     depth_map = [[0.0] * width for _ in range(height)]
+@@ -49,18 +50,13 @@
+     
+     d = d_min
+-    while d < d_max:
++    while d <= d_max:
+         for y in range(height):
+             for x in range(width):
+-                X_ref = unproject(x, y, d, cameras[0])
++                X_ref = unproject_pinhole(x, y, d, intrinsics[0])
+                 
+                 cost = 0.0
+                 for k in range(1, len(images)):
+-                    X_k = [cameras[k][i][0]*X_ref[0] + cameras[k][i][1]*X_ref[1] + cameras[k][i][2]*X_ref[2] + cameras[k][i][3]*X_ref[3] for i in range(4)]
+-                    if X_k[2] <= 0:
+-                        continue
+-                    u_k = X_k[0] / X_k[2]
+-                    v_k = X_k[1] / X_k[2]
+-                    
+-                    if not (0 <= u_k < width and 0 <= v_k < height):
++                    u_k, v_k = project_pinhole(X_ref, projection_matrices[k], intrinsics[k])
++                    if u_k is None:
+                         continue
+                         
+@@ -75,8 +71,16 @@
+     return depth_map
+ 
+-def unproject(u, v, d, K):
+-    x = (u - K[0][2]) * d / K[0][0]
+-    y = (v - K[1][2]) * d / K[1][1]
+-    return [x, y, d, 1.0]
++def unproject_pinhole(u, v, depth, K):
++    x = (u - K[0][2]) * depth / K[0][0]
++    y = (v - K[1][2]) * depth / K[1][1]
++    return [x, y, depth, 1.0]
++
++def project_pinhole(X, P, K):
++    X_k = [sum(P[i][j] * X[j] for j in range(4)) for i in range(4)]
++    if X_k[2] <= 0:
++        return None, None
++    u = X_k[0] / X_k[2] * K[0][0] + K[0][2]
++    v = X_k[1] / X_k[2] * K[1][1] + K[1][2]
++    return u, v
+ ```
+ 
+@@ -89,9 +93,9 @@
+ - Performance: Dense depth maps are computed with up to 20 frames per second [S1, unofficial].
+ - Limitations: Limited to only four camera views in the original implementation [S1, unofficial].
+-- Time Complexity: Not given in the sources.
+-- Memory Complexity: Not given in the sources.
+-- Strengths: Not given in the sources.
+-- When to use: Not given in the sources.
+-- When not to use: Not given in the sources.
++- Time Complexity: Not given in the sources. [G]
++- Memory Complexity: Not given in the sources. [G]
++- Strengths: Not given in the sources. [G]
++- When to use: Not given in the sources. [G]
++- When not to use: Not given in the sources. [G]
+ 
+ ## Background

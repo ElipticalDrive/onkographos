@@ -1,0 +1,219 @@
+# Omnitree Coarsening
+
+Also called: Last-level coarsening, reverse refinement
+
+## Overview
+Omnitree Coarsening is the inverse operation of Omnitree Refinement, designed to reduce the resolution of a sparse voxel octree by merging child nodes back into their parent. It solves the problem of data reduction and memory management in dynamic volume rendering by reversing local subdivisions, thereby simplifying the tree structure while preserving the spatial coverage of the leaf boxes [S1, unofficial]. Unlike static compression methods that operate on a fixed hierarchy, coarsening is integrated into the dynamic update cycle of omnitrees, allowing for real-time adaptation of detail levels based on user interaction or rendering requirements [S1, unofficial]. It is distinguished from general tree pruning by its specific mechanism of fusing children along selected dimensions via negative splitting markers, ensuring the resulting structure remains a valid omnitree with normalized splitting labels [S1, unofficial].
+
+## How it works
+The method operates by applying "coarsening markers" to internal nodes of the omnitree. These markers instruct the tree construction algorithm to remove specific split dimensions from a node's splitting label, effectively merging the node's children. The implementation relies on the assumption of "last-level coarsening," where the operation is restricted to reversing refinements that occurred at the deepest level of the current tree, ensuring that the subtrees being merged are identical and the fusion is well-defined [S1, unofficial].
+
+### Inputs and Outputs
+*   **Input:** An initial omnitree $T$ with a set of internal nodes $V_{internal}$, each characterized by a splitting label $\vec{b}(v) \in \{0, 1\}^d$. A set of coarsening requests, represented as negative markers $\vec{m}(v)$ attached to specific internal nodes.
+*   **Output:** A target omnitree $T'$ with a new linearized descriptor and a mapping $M$ from indices in $T$ to indices in $T'$.
+
+### Data Structures
+*   **Splitting Label $\vec{b}(v)$:** A binary vector of length $d$ (where $d$ is the dimensionality, typically 3). $\vec{b}(v)_j = 1$ indicates a split in dimension $j$, and $0$ indicates no split.
+*   **Coarsening Marker $\vec{m}(v)$:** A vector of length $d$ with values in $\{-1, 0\}$.
+    *   $m_j = -1$ if dimension $j$ is to be coarsened (merged).
+    *   $m_j = 0$ otherwise.
+*   **Mapping $M$:** An array or hash map where $M[a]$ stores the index of the corresponding node in the target tree $T'$ for a node at index $a$ in the initial tree $T$.
+
+### Definitions
+Let $v$ be an internal node of a $d$-dimensional omnitree.
+Let $\sigma(v) = \{j \in D : b_j(v) = 1\}$ be the set of split dimensions for node $v$.
+Let $C \subseteq \sigma(v), C \neq \emptyset$ be the set of dimensions in which coarsening is requested.
+Let $\bar{C} = \sigma(v) \setminus C$ be the set of split dimensions that remain after coarsening.
+
+### Steps
+
+1.  **Attach Markers:** For each node $v$ targeted for coarsening, attach a negative marker $\vec{m}(v)$ to the internal node itself. The marker is defined such that $m_j(v) = -1$ for all $j \in C$ and $m_j(v) = 0$ otherwise. Unlike refinement markers, these negative markers do not propagate during upward or downward sweeps [S1, unofficial].
+
+2.  **Compute New Splitting Label:** Calculate the new splitting label $\vec{b}(v')$ for the coarsened node $v'$ using component-wise addition:
+    $$ \vec{b}(v') = \vec{b}(v) + \vec{m}(v) $$
+    Since $b_j \in \{0, 1\}$ and $m_j \in \{-1, 0\}$:
+    *   If $b_j(v) = 1$ and $m_j(v) = -1$, then $b_j(v') = 0$ (dimension removed from split).
+    *   If $b_j(v) = 1$ and $m_j(v) = 0$, then $b_j(v') = 1$ (dimension retained).
+    *   If $b_j(v) = 0$, then $b_j(v') = 0$.
+
+3.  **Determine Fusion Groups:** The $2^{|\sigma(v)|}$ children of $v$ in the initial tree are indexed by local Morton codes (binary tuples) $e \in \{0, 1\}^{\sigma(v)}$. Children are grouped for fusion based on their coordinates in the non-coarsened dimensions $\bar{C}$. All children sharing the same indices in $\bar{C}$ are fused into a single child $v'_a$ in the target tree. The target node $v'$ will have $2^{|\bar{C}|}$ children.
+
+4.  **Construct Target Descriptor and Mapping:** Iterate through the initial tree's linearized descriptor to build $T'$ and $M$:
+    *   When encountering the first member $v_a$ of a fusion group (identified by its location code stack $\$$), emit the corresponding node $v'_a$ in the target tree.
+    *   Record the mapping: $M[a] = \text{index}(v'_a)$.
+    *   Identify all other members $v_i$ of the same fusion group by appending their local binary location to the location code stack $\$$ and locating them in the initial tree's structure.
+    *   For each subsequent member $v_i$ in the group, set $M[i] = \text{index}(v'_a)$ to map them to the same target node.
+    *   Skip emitting duplicate nodes for $v_i$ in the target descriptor; they are conceptually merged into $v'_a$ [S1, unofficial].
+
+5.  **Handle Leaf Absorption (Special Case):** If $C = \sigma(v)$, then $\bar{C} = \emptyset$ and $\vec{b}(v') = \vec{0}$. The node $v'$ becomes a leaf with no children.
+    *   No children of $v'$ are emitted to the target tree.
+    *   All $2^{|\sigma(v)|}$ direct children of $v$ in the initial tree (which are leaves) are mapped to the index of $v'$ in $M$.
+    *   These children are identified as the immediate successors of $v$ in the initial tree's linearized descriptor [S1, unofficial].
+
+### Pseudocode
+
+> **Unverified code.** The code below did not pass a test run against a reference implementation, or no test fits it, so it may contain errors.
+
+```python
+def coarsen_omnitree(initial_tree, coarsening_requests):
+    """
+    Coarsens an omnitree based on negative markers.
+    
+    Args:
+        initial_tree: Linearized descriptor of the source omnitree.
+        coarsening_requests: Dict mapping node_index -> set of dimensions to coarsen.
+        
+    Returns:
+        target_tree: Linearized descriptor of the coarsened omnitree.
+        mapping: Dict mapping initial_index -> target_index.
+    """
+    target_tree = []
+    mapping = {}
+    
+    # Helper to get split dimensions from splitting label
+    def get_split_dims(splitting_label):
+        return [j for j, b in enumerate(splitting_label) if b == 1]
+
+    # Process nodes in initial tree
+    # Note: This assumes a top-down traversal similar to the refinement algorithm
+    # adapted for coarsening.
+    
+    for node_idx, node_data in enumerate(initial_tree):
+        splitting_label = node_data['splitting_label']
+        children_indices = node_data['children_indices'] # List of indices in initial_tree
+        
+        # Check if this node has a coarsening request
+        if node_idx in coarsening_requests:
+            dims_to_coarsen = coarsening_requests[node_idx]
+            
+            # 1. Compute new splitting label
+            new_splitting_label = list(splitting_label)
+            for j in dims_to_coarsen:
+                if new_splitting_label[j] == 1:
+                    new_splitting_label[j] = 0
+            
+            # 2. Determine remaining split dimensions
+            remaining_dims = [j for j, b in enumerate(new_splitting_label) if b == 1]
+            num_remaining_children = 2 ** len(remaining_dims)
+            
+            # 3. Group children for fusion
+            # Children are indexed by local Morton codes.
+            # We need to map initial children to new fused children.
+            
+            # Create a map from 'fused key' to 'new child index in target_tree'
+            fused_children_map = {} 
+            
+            # Process each child of the current node
+            for child_idx in children_indices:
+                # Determine the local Morton code of this child relative to parent
+                # This requires knowing the position of the child in the parent's space.
+                # In a linearized descriptor, this is often derived from the location code stack.
+                # For simplicity, assume we can retrieve the local binary index 'e' for child_idx.
+                local_e = get_local_morton_code(child_idx, node_idx)
+                
+                # Create a key based on coordinates in remaining_dims
+                # e is a tuple of bits for all split dims. We filter for remaining_dims.
+                key = tuple(local_e[j] for j in remaining_dims)
+                
+                if key not in fused_children_map:
+                    # First time seeing this group: emit new node in target tree
+                    new_child_idx = len(target_tree)
+                    fused_children_map[key] = new_child_idx
+                    
+                    # Create the new node in target tree
+                    # It inherits the parent's location code + the key bits
+                    new_node = {
+                        'splitting_label': new_splitting_label,
+                        'children_indices': [], # To be filled if not leaf
+                        'location_code': node_data['location_code'] + key
+                    }
+                    target_tree.append(new_node)
+                    
+                    # Map the first initial child to this new target node
+                    mapping[child_idx] = new_child_idx
+                else:
+                    # Subsequent child in the same group: map to existing target node
+                    new_child_idx = fused_children_map[key]
+                    mapping[child_idx] = new_child_idx
+            
+            # If all dims coarsened (leaf), no children emitted.
+            # The mapping for all children already points to the parent's target index?
+            # No, the parent itself is emitted. The children are mapped to the parent.
+            # Wait, the algorithm says: "all coarsened children nodes vi ... map to the index of v'".
+            # v' is the node being created/updated.
+            # If new_splitting_label is all zeros, v' is a leaf.
+            # The children of v' in target_tree are empty.
+            # The mapping for the initial children should point to the index of v' in target_tree.
+            
+            if len(remaining_dims) == 0:
+                # v' is a leaf. Its index in target_tree is the last appended one?
+                # Actually, if no children are emitted, we might not append a new node for v'
+                # if v' is just a leaf replacement.
+                # However, the parent node v' itself must exist in target_tree.
+                # The code above appends a node for v' only if it has children?
+                # Let's refine: The node v' is always emitted.
+                # If it has no children, it's a leaf.
+                
+                # Re-evaluating step 4: "When emitting target node v'a... it emits a node v'a"
+                # If num_remaining_children == 0, we still emit v' as a leaf.
+                # But the loop above only appends if key is new.
+                # If num_remaining_children == 0, there is only one key (empty tuple).
+                # So one node is appended.
+                
+                # The children of v (initial) are mapped to this new leaf node.
+                # This is handled by the loop above.
+                pass
+
+        else:
+            # No coarsening: standard refinement-like copy or pass-through
+            # In a pure coarsening pass, unmodified nodes are copied.
+            # This pseudocode assumes a full tree rebuild.
+            new_node = {
+                'splitting_label': splitting_label,
+                'children_indices': [], # Simplified
+                'location_code': node_data['location_code']
+            }
+            new_child_idx = len(target_tree)
+            target_tree.append(new_node)
+            mapping[node_idx] = new_child_idx
+            
+            # Copy children mappings recursively? 
+            # The algorithm relies on the location code stack to find children.
+            # For a complete implementation, a recursive or stack-based traversal is needed.
+            pass
+
+    return target_tree, mapping
+
+def get_local_morton_code(child_idx, parent_idx):
+    """
+    [G] Placeholder for retrieving the local binary index of a child.
+    In a real implementation, this uses the location code stack $
+    to determine the offset of the child relative to the parent.
+    """
+    # This function would parse the linearized descriptor to find the
+    # specific bit pattern of the child within the parent's split.
+    return (0, 0, 0) # Placeholder
+```
+
+### Parameters and Edge Cases
+*   **Last-Level Restriction:** Coarsening is restricted to nodes whose children are all leaves. This ensures that the subtrees being fused are identical, avoiding complex conditional logic [S1, unofficial].
+*   **Precision:** The method relies on exact binary arithmetic for splitting labels. No floating-point operations are involved in the structural changes.
+*   **Degenerate Input:** If a coarsening request is made on a node that is not an internal node (i.e., a leaf), the operation is invalid. The algorithm assumes valid input where $C \subseteq \sigma(v)$.
+
+## Subtopics
+
+### [User-Defined ROI Refinement](23548-user-defined-roi-refinement.md)
+An interactive technique that uses coarsening and refinement to allow users to dynamically adjust detail levels in specific regions of interest, balancing performance and fidelity.
+
+## Operating characteristics
+*   **Time Complexity:** The coarsening process is linear with respect to the number of nodes in the tree, $O(N)$, as it involves a single pass to compute new labels and a second pass to build the mapping and target descriptor [S1, unofficial].
+*   **Memory Complexity:** Requires $O(N)$ memory to store the initial tree, the target tree, and the mapping array. The mapping array is crucial for identifying data locations for subsequent compression steps (e.g., wavelet compression) [S1, unofficial].
+*   **Performance:** Coarsening is efficient because it reuses the existing tree construction infrastructure. The restriction to last-level coarsening avoids the need for complex subtree rotation or validation, making it suitable for real-time applications [S1, unofficial].
+*   **Strengths:** Allows for dynamic reduction of memory footprint and rendering complexity. Preserves the omnitree's normalization and uniqueness properties.
+*   **Limitations:** Cannot coarsen arbitrary internal nodes; restricted to last-level refinements. Requires careful management of the mapping array to ensure data consistency for compression [S1, unofficial].
+
+## Background
+Omnitree Coarsening was introduced as part of the framework for fully dynamic omnitrees, specifically in the context of moment-conserving anisotropic compression with wavelets. The method was developed to support interactive volume rendering of large scattered datasets, where users need to dynamically adjust the level of detail. The approach is detailed in the paper "Towards Fully Dynamic Omnitrees: Moment-Conserving Anisotropic Compression With Wavelets" [S1, unofficial].
+
+## Sources
+[S1] Towards Fully Dynamic Omnitrees: Moment-Conserving Anisotropic Compression With Wavelets, https://doi.org/10.48550/arxiv.2607.04881, fetched 2026-10-26 (unofficial)

@@ -1,0 +1,357 @@
+**PointConv**: Deep Convolutional Networks on 3D Point Clouds
+
+## Prior Research
+- **PointNet** : permutation invariant한 max-pooling 이용 → local region의 semantic feature 놓침
+- **PointNet++** : hierarchical한 Set Abstraction layer 이용 → local feature 고려 O but 내부에서 **PointNet** 이용
+- local region의 semantic feature를 손실없이 고려하는 구조 필요 **(PointConv)** 
+
+## Abstract
+**PointConv**
+- **Convolution kernel** : nonlinear function of local coordinates of 3D points
+  - Weight function learned with MLP
+  - Density function through kernel density estimation
+  - Translation-invariant & Permutation-invariant on any point set in 3D space
+- **Deconvolution operator** (PointDeconv) : propagating features (subsampled → original resol)
+
+
+## 1. Introduction
+- **(Indoor/Outdoor) Sensors** : directly obtaining 3D data (depth info, surface normals) = important
+- **CNNs for 2D** : translation invariance → all locations에 same set of filters 사용 가능 → params# ↓, generalization ↑
+- **3D data (ex. pc)** = a set of unordered 3D points (+additional features)
+  - Regular lattice grid : 불가 → conventional CNNs 어려움
+  - Volumetric grid : 가능 but sparse → high-resol에서 CNNs 어려움
+
+**PointConv** : Convolution operation on 3D pc with Non-uniform sampling
+- **Input** : positions of pc
+- **Goal** : MLP로 weight function 학습(근사)
+  - Convolution operation = discrete approximation of a continuous convolution
+  - weights in 3D space = (Lipschitz) continuous function of local point w.r.t. a reference point
+  - continuous function : MLP로 근사 가능
+- **보완** : 학습된 weights에 Non-uniform sampling 위해 Inverse density scale
+  - Inverse density scale = re-weighting continuous function
+  - =  Monte Carlo approximation of continuous convolution
+- **개선** (Memory efficient version) : summation order 변경
+- **Results** : translation-invariance (2D CNN 비슷) & permutation-invariance (pc 특성 고려)
+
+### ∴ 3 Contributions
+- **PointConv** : Density re-weighted convolution to fully approximate 3D continuous conv on any set of 3D points
+- **Memory efficient** version : summation order 변경 → modern CNN level까지 scale up 가능
+- **PointDeconv** : better segmentation 가능
+
+
+## 3. PointConv
+- **PointConv** :  MC approximation of 3D continuous convolution
+  - **MLP** to approximate weight function
+  - → **Inverse density scale** to re-weight 
+
+### 3.1 Convolution on 3D Point Clouds
+#### 1) Image vs Point Cloud
+- **Images** : 2D discrete functions (grid-shaped matrices)
+  - relative positions bw different pixels : 항상 고정
+  - discretized filter : summation of real-valued weight for each location within local region
+- **Point Cloud** : a set of 3D points (fixed grid X, 임의의 continuous value)
+  - Point = position (x, y, z) + additional features (ex. color, surface normal)
+  - relative positions of different points : 다양 in each local region
+  - discretized filter 적용 불가 → ∴ permutation-invariant한 Convolution 등장 (PointConv)
+![image](https://user-images.githubusercontent.com/83633885/194370792-4d2f7a63-a40d-46c4-88e4-1e42aaf2a175.png)
+
+#### 2) Operations
+- **Conventional (2D) Convolution**
+![image](https://user-images.githubusercontent.com/83633885/194363211-9c03bf05-7bb5-46ad-a097-83f8a50f745f.png)
+
+- **Continuous 3D Convolution**
+![image](https://user-images.githubusercontent.com/83633885/194364296-9ea814ff-bd90-47c7-9dd6-013d38ac5b2c.png)
+  - $F$ : feature of a point in local region $G$ centered around point $p = (x,y,z)$
+  - $W$ : $F$의 continuous kernel
+  - $(\delta_x, \delta_y, \delta_z)$ : local region $G$에 속한 local point가 target point $p$를 중심으로 떨어진 정도
+
+- **PointConv** : entire convolution operation for PC (not full approx)
+![image](https://user-images.githubusercontent.com/83633885/194365598-7b28ea4e-4126-4e56-befc-3c168aa078c3.png)
+  - 실제로 local region $G$에서 얻을 수 있는 것 = sample point pc
+  - PC : very non-uniform sample from continuous $R^3$ space
+  - $S$ : inverse density scale at any possible point in local region 
+
+![image](https://user-images.githubusercontent.com/83633885/194370972-b8be1890-b1bf-494e-9b1b-ac67076f6806.png)
+
+#### Continuous input 대해서 PointConv가 잘 작동하는 이유
+- Continuous input PC를 discretize하여 discrete convolution으로 local feature 뽑아냄
+- raster img에서의 relative positions은 고정됨
+- ∴ relative positions을 input으로 받으면 전체 img 대해 same weight and density 출력 가능
+
+#### 3) PointConv
+- **Main idea** : To approximate continuous weight function $W$ by MLP & KDE(Kernelized density estimation)
+- $W$ (Weights of MLP in PointConv) : permutation-invariant 위해 모든 points에서 공유됨
+#### [Code] Weight Network
+```python
+class WeightNet(nn.Module):
+
+    def __init__(self, in_channel, out_channel, hidden_unit = [8, 8]):
+        super(WeightNet, self).__init__()
+
+        self.mlp_convs = nn.ModuleList()
+        self.mlp_bns = nn.ModuleList()
+        if hidden_unit is None or len(hidden_unit) == 0:
+            self.mlp_convs.append(nn.Conv2d(in_channel, out_channel, 1))
+            self.mlp_bns.append(nn.BatchNorm2d(out_channel))
+        else:
+            self.mlp_convs.append(nn.Conv2d(in_channel, hidden_unit[0], 1))
+            self.mlp_bns.append(nn.BatchNorm2d(hidden_unit[0]))
+            for i in range(1, len(hidden_unit)):
+                self.mlp_convs.append(nn.Conv2d(hidden_unit[i - 1], hidden_unit[i], 1))
+                self.mlp_bns.append(nn.BatchNorm2d(hidden_unit[i]))
+            self.mlp_convs.append(nn.Conv2d(hidden_unit[-1], out_channel, 1))
+            self.mlp_bns.append(nn.BatchNorm2d(out_channel))
+        
+    def forward(self, localized_xyz):
+        #xyz : BxCxKxN
+
+        weights = localized_xyz
+        for i, conv in enumerate(self.mlp_convs):
+            bn = self.mlp_bns[i]
+            weights =  F.relu(bn(conv(weights)))
+
+        return weights
+```
+
+- $S$ (Inverse density Scale) : 계산 위해 KDE로 각 point의 density 구해서 MLP for 1D nonlinear transform에 feed
+  - Why nonlinear transform ? network가 density estimates를 사용할지를 adaptively 결정하도록 하기 위함
+#### [Code] KDE(Kernelized density estimation)
+```python
+def compute_density(xyz, bandwidth):
+    '''
+    xyz: input points position data, [B, N, C]
+    '''
+    #import ipdb; ipdb.set_trace()
+    B, N, C = xyz.shape
+    sqrdists = square_distance(xyz, xyz)
+    gaussion_density = torch.exp(- sqrdists / (2.0 * bandwidth * bandwidth)) / (2.5 * bandwidth)
+    xyz_density = gaussion_density.mean(dim = -1)
+
+    return xyz_density
+```
+#### [Code] Density Network
+```python
+class DensityNet(nn.Module):
+    def __init__(self, hidden_unit = [16, 8]):
+        super(DensityNet, self).__init__()
+        self.mlp_convs = nn.ModuleList()
+        self.mlp_bns = nn.ModuleList() 
+
+        self.mlp_convs.append(nn.Conv2d(1, hidden_unit[0], 1))
+        self.mlp_bns.append(nn.BatchNorm2d(hidden_unit[0]))
+        for i in range(1, len(hidden_unit)):
+            self.mlp_convs.append(nn.Conv2d(hidden_unit[i - 1], hidden_unit[i], 1))
+            self.mlp_bns.append(nn.BatchNorm2d(hidden_unit[i]))
+        self.mlp_convs.append(nn.Conv2d(hidden_unit[-1], 1, 1))
+        self.mlp_bns.append(nn.BatchNorm2d(1))
+
+    def forward(self, density_scale):
+        for i, conv in enumerate(self.mlp_convs):
+            bn = self.mlp_bns[i]
+            density_scale =  bn(conv(density_scale))
+            if i == len(self.mlp_convs):
+                density_scale = F.sigmoid(density_scale)
+            else:
+                density_scale = F.relu(density_scale)
+        
+        return density_scale
+```
+- $C_{in}$, $C_{out}$ : # of channels for input feature and output feature
+- **PointConv** on K-point local region
+  - **Input feature** $F_{in}$ =  ( $K$ x $C_{in}$ ) dim vector
+  - **Input** of  Computing Weight part :  $P_{local}$ = ( $K$ x 3 ) dim vector  = (relative) 3D local positions of points
+  - **MLP** (1x1 conv)
+  - ➀ **Output** of  Computing Weight part : $W$ = $K$ x ( $C_{in}$, $C_{out}$ ) dim vector
+  - ➁ Inverse Density Scale : $S$ = ( $K$ x 1 ) dim vector → tile해서 $K$ x ( $C_{in}$, $C_{out}$ ) dim vector 맞춤
+  - ➀과 ➁를 element-wise product → summation 거쳐 **Output feature** $F_{out}$ = ( 1 x $C_{out}$ ) dim vector
+
+- **Feature Encoding Modules**
+  - **Purpose** : To aggregate features in entire point set
+  - **Structure** : hierarchical structure to combine detailed small region features → large abstract features
+  - **Key layers** : sampling layer, grouping layer, **PointConv** layer ... PointNet++ 비슷
+    - $S$와 $W$를 이용하여 **PointConv** layer 구성 → PointNet의 Set Abstraction Block의 PointNet layer 대체 
+    - ∴ 더 좋은 local representation aggregate 가능!
+
+ ![image](https://user-images.githubusercontent.com/83633885/194453469-bfa64f2d-a1d8-4edd-b646-a0a2250eaad7.png)
+![image](https://user-images.githubusercontent.com/83633885/194906831-cdea51c7-8cd1-445b-b051-d409b58e378c.png)
+
+#### [Code] Density Set Abstraction
+```python
+class PointConvDensitySetAbstraction(nn.Module):
+    def __init__(self, npoint, nsample, in_channel, mlp, bandwidth, group_all):
+        super(PointConvDensitySetAbstraction, self).__init__()
+        self.npoint = npoint
+        self.nsample = nsample
+        self.mlp_convs = nn.ModuleList()
+        self.mlp_bns = nn.ModuleList()
+        last_channel = in_channel
+        for out_channel in mlp:
+            self.mlp_convs.append(nn.Conv2d(last_channel, out_channel, 1))
+            self.mlp_bns.append(nn.BatchNorm2d(out_channel))
+            last_channel = out_channel
+
+        self.weightnet = WeightNet(3, 16)
+        self.linear = nn.Linear(16 * mlp[-1], mlp[-1])
+        self.bn_linear = nn.BatchNorm1d(mlp[-1])
+        self.densitynet = DensityNet()
+        self.group_all = group_all
+        self.bandwidth = bandwidth
+
+    def forward(self, xyz, points):
+        """
+        Input:
+            xyz: input points position data, [B, C, N]
+            points: input points data, [B, D, N]
+        Return:
+            new_xyz: sampled points position data, [B, C, S]
+            new_points_concat: sample points feature data, [B, D', S]
+        """
+        B = xyz.shape[0]
+        N = xyz.shape[2]
+        xyz = xyz.permute(0, 2, 1)
+        if points is not None:
+            points = points.permute(0, 2, 1)
+
+        xyz_density = compute_density(xyz, self.bandwidth)
+        inverse_density = 1.0 / xyz_density 
+
+        if self.group_all:
+            new_xyz, new_points, grouped_xyz_norm, grouped_density = sample_and_group_all(xyz, points, inverse_density.view(B, N, 1))
+        else:
+            new_xyz, new_points, grouped_xyz_norm, _, grouped_density = sample_and_group(self.npoint, self.nsample, xyz, points, inverse_density.view(B, N, 1))
+        # new_xyz: sampled points position data, [B, npoint, C]
+        # new_points: sampled points data, [B, npoint, nsample, C+D]
+        new_points = new_points.permute(0, 3, 2, 1) # [B, C+D, nsample,npoint]
+        for i, conv in enumerate(self.mlp_convs):
+            bn = self.mlp_bns[i]
+            new_points =  F.relu(bn(conv(new_points)))
+
+        inverse_max_density = grouped_density.max(dim = 2, keepdim=True)[0]
+        density_scale = grouped_density / inverse_max_density
+        density_scale = self.densitynet(density_scale.permute(0, 3, 2, 1))
+        new_points = new_points * density_scale
+
+        grouped_xyz = grouped_xyz_norm.permute(0, 3, 2, 1)
+        weights = self.weightnet(grouped_xyz)     
+        new_points = torch.matmul(input=new_points.permute(0, 3, 1, 2), other = weights.permute(0, 3, 2, 1)).view(B, self.npoint, -1)
+        new_points = self.linear(new_points)
+        new_points = self.bn_linear(new_points.permute(0, 2, 1))
+        new_points = F.relu(new_points)
+        new_xyz = new_xyz.permute(0, 2, 1)
+
+        return new_xyz, new_points
+```
+
+#### [Code] PointConv for Classification
+```python
+class PointConvDensityClsSsg(nn.Module):
+    def __init__(self, num_classes = 40):
+        super(PointConvDensityClsSsg, self).__init__()
+        feature_dim = 3
+        self.sa1 = PointConvDensitySetAbstraction(npoint=512, nsample=32, in_channel=feature_dim + 3, mlp=[64, 64, 128], bandwidth = 0.1, group_all=False)
+        self.sa2 = PointConvDensitySetAbstraction(npoint=128, nsample=64, in_channel=128 + 3, mlp=[128, 128, 256], bandwidth = 0.2, group_all=False)
+        self.sa3 = PointConvDensitySetAbstraction(npoint=1, nsample=None, in_channel=256 + 3, mlp=[256, 512, 1024], bandwidth = 0.4, group_all=True)
+        self.fc1 = nn.Linear(1024, 512)
+        self.bn1 = nn.BatchNorm1d(512)
+        self.drop1 = nn.Dropout(0.7)
+        self.fc2 = nn.Linear(512, 256)
+        self.bn2 = nn.BatchNorm1d(256)
+        self.drop2 = nn.Dropout(0.7)
+        self.fc3 = nn.Linear(256, num_classes)
+
+    def forward(self, xyz, feat):
+        B, _, _ = xyz.shape
+        l1_xyz, l1_points = self.sa1(xyz, feat)
+        l2_xyz, l2_points = self.sa2(l1_xyz, l1_points)
+        l3_xyz, l3_points = self.sa3(l2_xyz, l2_points)
+        x = l3_points.view(B, 1024)
+        x = self.drop1(F.relu(self.bn1(self.fc1(x))))
+        x = self.drop2(F.relu(self.bn2(self.fc2(x))))
+        x = self.fc3(x)
+        x = F.log_softmax(x, -1)
+        return x
+```
+
+
+### 3.2 Feature Propagation Using Deconvolution [Segmentation]
+- Segmentation : point-wise prediction 필요 (subsampled pc에서 denser pc로 propagate 하여 모든 input features)
+- PointNet++ : distance-based Interpolation 제안 → full advantage of deconv 고려X
+- **PointDeconv** : Interpolation + PointConv 구성
+  - **Linear Interpolation** from 3 nearest points : propagating coarse features from previous layers
+  - **Skip links** : concatenating interpolated features
+  - **PointConv** : applying PointConv on concatenated features to obtain final output  
+![image](https://user-images.githubusercontent.com/83633885/194908645-605c4a8a-5f23-4652-bc13-d0f3c429a61e.png)
+
+
+## 4. Efficient PointConv
+- **Motivation** : MLP는 point마다 공유되어도, MC 기반 weight function으로 구한 weight $W$는 point마다 다름 → high memory consumption
+- **Implementation** : Matrix multiplication & 2d 1x1 convolution
+  - PointConv 마지막에 전체 points에 대한 summation 있으므로 K에 대한 summation을 먼저 수행하자 
+  - → W : intermediate output $M$에 대해 마지막 weight인 $H$로 1x1 conv를 수행한 것  
+  - ∴ $K$ x $C_{out}$을 $C_{mid}$로 대체한 것 = 효율적!
+- **Advantage** : parallel computing of GPU, easy implementation, → low memory consumption (1/64)
+- **Generated weights filters** : 두 파트로 나눔 (Intermediate output $M$ & Convolution kernel $H$)
+
+![image](https://user-images.githubusercontent.com/83633885/194677267-cc9375e2-5408-403c-a5aa-c4d8d5f27c16.png)
+
+![image](https://user-images.githubusercontent.com/83633885/194906564-8e8cb62e-a9c9-4dcb-ad85-236c6d1ca150.png)
+
+
+
+## 5. Experiments
+### 5.1 Classification on ModelNet40
+- **Dataset** : ModelNet40 (12,311 CAD models from 40 man-made object categories)
+- **Using PointNet** to sample 1024 points uniformly & compute normal vector from mesh models
+- **Data augmentation** : random rotating along z-axis, jittering by gaussian noise
+- Result : PointConv = SOTA among 3D input methods
+
+### 5.2 ShapeNet Part Segmentation
+- **Dataset** : ShapeNet (16,881 shapes from 16 classes, 50 parts)
+- **Goal** : To assign a part category label to each point (fine-grained 3D recognition task)
+- **Eval Metric** : point IoU
+- **Result** : class avg mIoU 82.8%, instance avg mIoU 85.7% = par with SOTA
+![image](https://user-images.githubusercontent.com/83633885/194678281-7b5b7882-f743-4fc5-9b80-dbf7f1f0459f.png)
+
+### 5.3 Semantic Scene Labeling(Segmentation)
+- **Dataset** : ScanNet (noisy dataset for realistic pc)
+- **Goal** : To predict semantic object labels on each 3D point given indoor scenes represented by pc
+- **Train** : 3m x 1.5m x 1.5m random cube samples 사용
+- **Eval** : using sliding window over entire scan
+- **Eval Metric** : IoU, mIouU
+- **Result** : PointConv outperforms other methods
+![image](https://user-images.githubusercontent.com/83633885/194678655-c22f79b7-aec8-4be3-8cc4-7766fd97dff2.png)
+![image](https://user-images.githubusercontent.com/83633885/194678667-ec00227f-f206-4217-afe2-a7b758f6955b.png)
+
+### 5.4 Classification on CIFAR-10
+- **Dataset** : CIFAR-10
+  - each pixel as a 2D point with (x, y) + RGB features
+  - pc scaled onto unit ball
+- **Result** : same learning capacity as 2D CNN
+![image](https://user-images.githubusercontent.com/83633885/194679211-d5fcecec-fc3c-4b72-b458-8b057fc37d43.png)
+ 
+
+## 6. Ablation Experiments and Visualization
+### 6.1 The Structure of MLP
+![image](https://user-images.githubusercontent.com/83633885/194681033-e51df55f-0d71-48de-936e-01e3e96e7d47.png)
+- Dataset : 20 scene types for ScanNet (realistic 3D pc with RGB)
+- $C_{mid}$ : 크다고 성능이 반드시 좋은건 X, memory efficiency에 영향 O
+- MLP의 layers 수가 성능에 미치는 영향 적음
+
+### 6.2 Inverse Density Scale
+- Dataset : ScanNet
+- **Density** > No Density → Effect of IDS
+  - more effective in layers closer to input
+  - FPS for sub-sampling → deeper layer : uniformly distributed 라서 density scale 영향이 줄어
+ 
+### 6.3 Ablation Studies on ScanNet
+- **Stride Size** : 작을수록 좋음 
+- **RGB information** : 있으면 좋지만 큰 효과는 없음
+![image](https://user-images.githubusercontent.com/83633885/194681565-4e48001c-9edc-4596-822b-cfce4b5f6afc.png)
+
+
+### 6.4 Visualization
+- Some patterns in learned continuous filters
+![image](https://user-images.githubusercontent.com/83633885/194681575-74842ac8-dea1-4cb1-9e82-76071f60f455.png)
+
+
+

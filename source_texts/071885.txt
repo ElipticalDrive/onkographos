@@ -1,0 +1,170 @@
+This page covers the first sphere tracing implementation in the repository: how a ray is set up per-pixel, how a Signed Distance Function (SDF) describes scene geometry, and how the ray marching loop 
+
+Sphere Tracing Basics | ronja-tutorials/ShaderTutorials | DeepWiki
+Index your code with Devin
+DeepWiki
+DeepWiki
+ronja-tutorials/ShaderTutorials
+Index your code with
+Devin
+Edit WikiShare
+Last indexed: 26 February 2026 (31899f)
+Overview
+Project Setup and Configuration
+Unity Package Management
+IDE Configuration
+Shader Fundamentals
+Basic Color and Transparency Shaders
+Custom Surface Lighting and Toon Shading
+Inverse Interpolation and Value Remapping
+Procedural Noise Generation
+White Noise
+Value Noise
+Perlin Noise
+Voronoi Noise
+Layered and Tiling Noise
+Sphere Tracing and Ray Marching
+Sphere Tracing Basics
+Sphere Tracing with Shading
+Sphere Tracing with Depth Buffer Output
+GPU Compute Shaders
+Basic Compute Shader
+Procedural GPU Rendering with DrawProcedural
+Visual Effects
+HSV Color Space Manipulation
+Halftone Shading
+Distance-Based Dithering
+Dissolve Effect
+Screen-Space Textures
+Partial Derivatives and Anti-Aliasing
+Polar Coordinate Manipulation
+Outline and Masking Effects
+Stencil Buffer Masking
+Inverted Hull Outlines
+Sprite Outline
+Screen-Space Object Outline
+Advanced Rendering Techniques
+GPU Instancing with Material Property Blocks
+Unlit Dynamic Decals
+2D SDF Shadows
+SDF Space Manipulation
+Post-Processing Effects
+Shared Project Assets
+3D Models
+Sprite and Texture Assets
+Menu
+Sphere Tracing Basics
+Relevant source files
+Assets/014_Polygon/PolygonController.cs
+Assets/043_SphereTracingBasics.meta
+Assets/043_SphereTracingBasics/SphereTracingBasics.mat
+Assets/043_SphereTracingBasics/SphereTracingBasics.mat.meta
+Assets/043_SphereTracingBasics/SphereTracingBasics.shader
+Assets/043_SphereTracingBasics/SphereTracingBasics.shader.meta
+Assets/043_SphereTracingBasics/SphereTracingBasics.unity
+Assets/043_SphereTracingBasics/SphereTracingBasics.unity.meta
+Assets/044_SphereTracingShading.meta
+Assets/044_SphereTracingShading/ShadedTracedObject 1.mat
+Assets/044_SphereTracingShading/ShadedTracedObject 1.mat.meta
+Assets/044_SphereTracingShading/ShadedTracedObject.mat
+Assets/044_SphereTracingShading/ShadedTracedObject.mat.meta
+Assets/044_SphereTracingShading/SphereTracingShading.shader
+Assets/044_SphereTracingShading/SphereTracingShading.shader.meta
+Assets/044_SphereTracingShading/SphereTracingShading.unity
+Assets/044_SphereTracingShading/SphereTracingShading.unity.meta
+ProjectSettings/EditorSettings.asset
+This page covers the first sphere tracing implementation in the repository: how a ray is set up per-pixel, how a Signed Distance Function (SDF) describes scene geometry, and how the ray marching loop finds a surface hit. The result is a flat-colored, unlit shape rendered entirely in a fragment shader without polygon geometry describing the visible surface.
+For lighting calculations added on top of this foundation, see Sphere Tracing with Shading. For depth buffer integration so that sphere-traced objects correctly occlude rasterized meshes, see Sphere Tracing with Depth Buffer Output.
+Overview
+Sphere tracing (a form of ray marching) renders geometry by shooting a ray through each pixel and repeatedly querying a Signed Distance Function (SDF). The SDF returns the distance to the nearest surface at any given point. Each step advances the ray by exactly that distance, which is safe because no geometry can be closer than what the SDF returns. When the accumulated distance falls below a threshold, the pixel is considered a surface hit.
+The key difference from traditional rasterization is that the visible shape is defined mathematically by scene(), not by a triangle mesh. The host mesh (a Unity cube in the demo scene) serves only as a bounding volume to determine which pixels invoke the fragment shader.
+Source file: Assets/043_SphereTracingBasics/SphereTracingBasics.shader
+Shader Architecture
+Diagram: Data flow from vertex to fragment
+```
+distance < THICKNESSdistance >= THICKNESSiter < MAX_STEPSiter == MAX_STEPSappdata(POSITION)vert()v2f.position(SV_POSITION, clip space)v2f.localPosition(TEXCOORD0, ray origin)v2f.viewDirection(TEXCOORD1, unnormalized)frag()scene()SDF evaluationreturn _Coloradvance progressnext iterationdiscard
+```
+Sources: Assets/043_SphereTracingBasics/SphereTracingBasics.shader27-78
+Material Properties and Constants
+NameTypeDefaultPurpose
+_Colorfixed4(0,0,0,1)Flat color returned on surface hit
+MAX_STEPS#define10Maximum iterations before the ray is discarded
+THICKNESS#define0.01Minimum SDF distance accepted as a surface hit
+The MAX_STEPS and THICKNESS values are compile-time constants, not material properties. Adjusting them requires editing the shader source.
+Sources: Assets/043_SphereTracingBasics/SphereTracingBasics.shader17-24
+Vertex Shader: Ray Setup
+The vert function in Assets/043_SphereTracingBasics/SphereTracingBasics.shader38-49 prepares two values that are interpolated to every covered pixel:
+localPosition — the mesh vertex position in object/local space. Used as the starting point of the ray for that pixel.
+viewDirection — the vector from the camera (in object space) to the vertex. This is not normalized; normalization happens in frag.
+The camera position is transformed into object space using unity_WorldToObject:
+```
+objectSpaceCameraPos = mul(unity_WorldToObject, float4(_WorldSpaceCameraPos, 1))
+viewDirection = vertex - objectSpaceCameraPos
+```
+Working in local/object space keeps the SDF definition simple: it does not need to account for the object's world transform.
+Why DisableBatching? The tag "DisableBatching"="True" is required because batching combines objects into a shared mesh, which invalidates the per-object unity_WorldToObject matrix used to convert the camera position.
+Sources: Assets/043_SphereTracingBasics/SphereTracingBasics.shader8-9 Assets/043_SphereTracingBasics/SphereTracingBasics.shader38-49
+Scene SDF: scene()
+```
+float scene(float3 pos){
+    return length(pos) - 0.5;
+}
+```
+This is the SDF for a sphere of radius 0.5 centered at the local origin. length(pos) - 0.5 returns:
+A negative value when pos is inside the sphere.
+Zero exactly on the surface.
+A positive value outside the sphere, equal to the distance to the nearest surface point.
+All more complex scenes replace or extend this single function. The sphere tracing loop only ever calls scene() and checks the result — the entire shape of the rendered object is determined here.
+Sources: Assets/043_SphereTracingBasics/SphereTracingBasics.shader52-54
+Fragment Shader: Ray Marching Loop
+Diagram: Ray marching step sequence
+```
+"scene(float3 pos)""frag()""scene(float3 pos)""frag()"alt["distance <THICKNESS"]loop["iter < MAX_STEPS"]"pos = localPosition (ray origin)""dir = normalize(viewDirection)""progress = 0""samplePoint = pos + dir * progress""scene(samplePoint)""distance""return _Color""progress += distance""discard (no hit)"
+```
+Sources: Assets/043_SphereTracingBasics/SphereTracingBasics.shader56-78
+Step-by-step
+Initialize: pos = interpolated local-space position from the mesh surface. dir = normalized view direction. progress = 0 (start at the mesh surface, not at the camera).
+Sample: Compute samplePoint = pos + dir * progress.
+Query: Call scene(samplePoint) to get distance to nearest geometry.
+Hit check: If distance < THICKNESS, the ray is inside (or close enough to) the surface — return _Color.
+Advance: Add distance to progress. Because the SDF guarantees no surface is closer than distance, this step cannot skip over a surface.
+Miss: If MAX_STEPS is exhausted, call discard to throw away the pixel entirely (make it transparent).
+The starting point is the mesh surface, not the camera. This means the ray begins at the bounding cube's face, not somewhere behind it. Pixels that correspond to the back half of the cube (where the cube face is already past the sphere) will fail to hit anything and be discarded.
+Sources: Assets/043_SphereTracingBasics/SphereTracingBasics.shader56-78
+Render Queue and Tags
+TagValueReason
+RenderTypeOpaqueTreated as opaque for rendering passes
+QueueGeometryRendered with standard opaque geometry
+DisableBatchingTrueRequired for per-object matrix access
+ZWrite is left at its default (On) in the basics shader, so the cube's depth is written normally. This becomes a problem when sphere-traced surfaces are intended to coexist with rasterized geometry — a limitation addressed in Sphere Tracing with Depth Buffer Output.
+Sources: Assets/043_SphereTracingBasics/SphereTracingBasics.shader7-10
+Relationship to the Shading Tutorial (044)
+The follow-up shader at Assets/044_SphereTracingShading/SphereTracingShading.shader extends the same structure. The changes are additive:
+Diagram: Structural comparison between 043 and 044
+```
+044_SphereTracingShading043_SphereTracingBasicsextended tovert()scene()frag()returns _Color on hitvert()scene()frag()calls material()normal()finite difference SDF gradientlightColor()dot(normal, lightDir)material()_Color * lightColor
+```
+The frag loop logic is identical between both shaders. Only the value returned on hit differs: _Color directly in 043, and material(samplePoint) in 044.
+Sources: Assets/043_SphereTracingBasics/SphereTracingBasics.shader56-78 Assets/044_SphereTracingShading/SphereTracingShading.shader95-116
+Demo Scene
+The scene file Assets/043_SphereTracingBasics/SphereTracingBasics.unity contains:
+Main Camera at (0, 0, -2.186) pointing forward.
+Directional Light providing scene illumination (not used by the basics shader, since it returns a flat color).
+Cube game object with the SphereTracingBasics material applied. The cube acts as the bounding volume; the SDF sphere (radius 0.5) fits inside it.
+The material SphereTracingBasics.mat sets _Color to a pale blue/lavender (r: 0.741, g: 0.713, b: 1.0).
+Sources: Assets/043_SphereTracingBasics/SphereTracingBasics.unity126-206 Assets/043_SphereTracingBasics/SphereTracingBasics.mat76
+Dismiss
+Refresh this wiki
+Enter email to refresh
+On this page
+Sphere Tracing Basics
+Overview
+Shader Architecture
+Material Properties and Constants
+Vertex Shader: Ray Setup
+Scene SDF: `scene()`
+Fragment Shader: Ray Marching Loop
+Step-by-step
+Render Queue and Tags
+Relationship to the Shading Tutorial (044)
+Demo Scene

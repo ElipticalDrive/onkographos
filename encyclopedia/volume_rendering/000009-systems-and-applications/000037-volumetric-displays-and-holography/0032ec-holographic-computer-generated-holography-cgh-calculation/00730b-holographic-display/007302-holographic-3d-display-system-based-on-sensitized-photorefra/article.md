@@ -1,0 +1,159 @@
+# Holographic 3D display system based on sensitized photorefractive polymer
+
+Also called: PRP holographic imaging system, University of Arizona PRP Holographic Video Display, sensitized photorefractive polymer display
+
+## Overview
+This method implements a dynamic holographic 3D display system that utilizes sensitized photorefractive polymer (PRP) material to record and reconstruct computer-generated holograms (CGH) [S1, unofficial]. It solves the traditional dichotomy between static printed holography and dynamic CGH by enabling image refreshment every 2 seconds, effectively blurring the boundary between the two categories [S1, unofficial]. Unlike liquid-crystal-based volumetric displays, this system relies on the nonlinear optical properties of PRP to store holographic fringes in a bulk volume, allowing for high-brightness reconstruction visible under ambient room light [S1, unofficial].
+
+## How it works
+**Inputs and Outputs**
+*   **Input:** Computer-generated holographic data for a 3D scene; coherent laser light at $\lambda = 532$ nm; incoherent color LEDs for reconstruction.
+*   **Output:** A reconstructed 3D holographic image displayed on a physical PRP screen (e.g., 4 in. $\times$ 4 in.).
+
+**Data Structures**
+The display volume is organized as a grid of "hogels" (holographic elements).
+*   **Hogel Resolution:** Each hogel occupies a physical area of 1 mm [S1, unofficial].
+*   **Hogel Count:**
+    *   Horizontal Parallax Only (HPO): 100 hogels [S1, unofficial].
+    *   Full Parallax: $100 \times 100 = 10,000$ hogels [S1, unofficial].
+*   **Storage:** The holographic information is stored as refractive index modulations within the bulk PRP volume, not on a surface layer [S1, unofficial].
+
+**Parameters**
+*   **Laser Wavelength:** $\lambda = 532$ nm [S1, unofficial].
+*   **Laser Pulse Energy:** 200 mJ [S1, unofficial].
+*   **Laser Pulse Duration:** 6 ns [S1, unofficial].
+*   **Laser Repetition Rate:** 50 Hz [S1, unofficial].
+*   **Angular Separation (Full Color):** 5° between object beams for Red, Green, and Blue channels [S1, unofficial].
+*   **Refresh Time:** 2 seconds per frame for a 4 in. $\times$ 4 in. screen [S1, unofficial].
+
+**Algorithm Steps**
+1.  **Beam Splitting:** A coherent laser beam at 532 nm is split into an object beam and a reference beam using a beam splitter [S1, unofficial].
+2.  **CGH Modulation:** The object beam is modulated with the computer-generated holographic interference pattern of the 3D scene using a Spatial Light Modulator (SLM) [S1, unofficial].
+3.  **Fourier Transformation:** The modulated object beam undergoes a Fourier transform [S1, unofficial].
+4.  **Interference and Recording:** The Fourier-transformed object beam interferes with the reference beam within the volume of the photorefractive polymer [S1, unofficial].
+5.  **Spatial Multiplexing (Raster Scanning):** The system addresses the entire display volume using a spatial multiplexing raster scanning method [S1, unofficial].
+6.  **Hogel Writing:** Each individual hogel is written using a single nanosecond laser pulse (6 ns, 200 mJ) [S1, unofficial].
+7.  **Full-Color Multiplexing:** To achieve full color, an angular multiplexing scheme records up to three holograms (Red, Green, Blue) simultaneously at different angles [S1, unofficial]. The object beams for these colors are separated by 5° [S1, unofficial].
+8.  **Reconstruction:** The 3D image is viewed by illuminating the PRP screen with incoherent color LEDs incident at the Bragg angle [S1, unofficial].
+9.  **Erasure:** The hologram fades naturally after a couple of minutes due to dark decay, or is erased immediately by recording a new 3D image [S1, unofficial].
+
+**Pseudocode**
+> **Unverified code.** The code below did not pass a test run against a reference implementation, or no test fits it, so it may contain errors.
+
+```python
+def prp_holographic_display_setup():
+    # Constants from source [S1, unofficial]
+    WAVELENGTH = 532e-9  # meters
+    PULSE_ENERGY = 0.2   # Joules
+    PULSE_DURATION = 6e-9  # seconds
+    REPETITION_RATE = 50   # Hz
+    HOGEL_SIZE_MM = 1.0
+    SCREEN_SIZE_INCH = 4.0
+    ANGULAR_SEPARATION_DEG = 5.0
+    
+    # Initialize optical components
+    laser = CoherentLaser(wavelength=WAVELENGTH)
+    beam_splitter = BeamSplitter()
+    slm = SpatialLightModulator()
+    prp_screen = PhotorefractivePolymerScreen()
+    
+    # Define hogel grid for full parallax
+    # 4 inches = ~101.6 mm. Hogel size 1mm. 
+    # Source specifies 100x100 for full parallax [S1, unofficial]
+    hogel_grid = create_grid(rows=100, cols=100, cell_size=HOGEL_SIZE_MM)
+    
+    return {
+        "laser": laser,
+        "slm": slm,
+        "prp_screen": prp_screen,
+        "hogel_grid": hogel_grid,
+        "pulse_params": {"energy": PULSE_ENERGY, "duration": PULSE_DURATION, "rate": REPETITION_RATE}
+    }
+
+def record_hologram_frame(scene_data, setup):
+    """
+    Records a single frame of holographic data onto the PRP screen.
+    Takes 2 seconds for a 4x4 inch screen [S1, unofficial].
+    """
+    laser = setup["laser"]
+    slm = setup["slm"]
+    prp = setup["prp_screen"]
+    grid = setup["hogel_grid"]
+    
+    # 1. Split beam
+    object_beam, reference_beam = laser.split(beam_splitter)
+    
+    # 2. Modulate object beam with CGH data
+    # scene_data contains the 3D scene geometry/intensity
+    modulated_beam = slm.apply_hologram_pattern(object_beam, scene_data)
+    
+    # 3. Fourier Transform
+    fourier_beam = optical_fourier_transform(modulated_beam)
+    
+    # 4. Angular Multiplexing for Full Color
+    # Record R, G, B simultaneously with 5 degree separation [S1, unofficial]
+    # Note: Source implies simultaneous recording for alignment precision
+    colors = ["Red", "Green", "Blue"]
+    angles = [0, 5, 10] # Relative angles in degrees
+    
+    for i, color in enumerate(colors):
+        # Adjust object beam angle for this color channel
+        angled_object_beam = rotate_beam(fourier_beam, angle=angles[i])
+        
+        # 5. Interfere and Record
+        # The reference beam is also adjusted or the geometry ensures interference
+        # within the PRP volume [S1, unofficial]
+        interference_pattern = interfere(angled_object_beam, reference_beam)
+        
+        # 6. Raster Scan and Write Hogels
+        # Each hogel written with a single pulse [S1, unofficial]
+        for hogel in grid:
+            # Extract local holographic info for this hogel
+            hogel_data = extract_hogel_region(interference_pattern, hogel.position)
+            
+            # Write using pulsed laser
+            # Source: 6 ns pulse, 200 mJ, 50 Hz [S1, unofficial]
+            write_pulse(prp, hogel.position, hogel_data, 
+                        energy=200e-3, duration=6e-9)
+            
+            # Wait for repetition rate if scanning sequentially
+            # However, source mentions array of pulsed lasers for speed [S1, unofficial]
+            # Assuming single beam raster scan for the 2s total time
+            wait_for_pulse_rate(50)
+            
+    return "Frame recorded in ~2 seconds"
+
+def display_hologram(setup):
+    """
+    Views the recorded hologram using incoherent LEDs.
+    """
+    prp = setup["prp_screen"]
+    
+    # 7. Reconstruction
+    # Illuminate with incoherent color LEDs at Bragg angle [S1, unofficial]
+    # The hologram diffracts the LED light to reconstruct the 3D image
+    # Visible under ambient room light [S1, unofficial]
+    
+    # Erasure happens naturally over minutes or via new recording [S1, unofficial]
+    pass
+```
+
+**Edge Cases and Pitfalls**
+*   **Refresh Rate Limitation:** The system refreshes at 0.5 Hz (2 seconds per frame), which is significantly slower than the standard 30 fps video rate [S1, unofficial]. This limits the method to static or slow-moving scenes.
+*   **Alignment Sensitivity:** Full-color reconstruction requires precise alignment of diffractive beams for different colors. The source notes that recording R, G, and B simultaneously with a 5° separation ensures this alignment [S1, unofficial].
+*   **Material Transparency:** The PRP is mostly transparent in the visible spectrum, which is necessary for viewing but requires sufficient laser energy (200 mJ) for effective recording [S1, unofficial].
+
+## Operating characteristics
+*   **Time Complexity:** Recording a 4 in. $\times$ 4 in. screen takes 2 seconds [S1, unofficial]. This is a fixed physical constraint of the raster scanning and polymer response time.
+*   **Memory/Storage:** The hologram is stored physically in the PRP volume. No digital memory is required for the display itself, only for the CGH generation on the SLM.
+*   **Performance:** The image is clearly visible under ambient room light [S1, unofficial].
+*   **Strengths:** Blurs the line between static printing and dynamic CGH; high brightness; full-color capability via angular multiplexing; works in ambient light.
+*   **Limitations:** Slow refresh rate (2 s/frame vs 30 fps); requires complex optical setup (lasers, SLM, beam splitters); limited to specific material properties (PRP).
+*   **When to use:** Applications requiring high-quality, ambient-light-visible 3D holograms where high frame rates are not critical (e.g., museum displays, static art installations).
+*   **When not to use:** Real-time interactive applications requiring >30 fps.
+
+## Background
+This system was developed by Blanche et al. at the University of Arizona [S1, unofficial]. It represents a significant step toward dynamic holography by introducing sensitized photorefractive polymer (PRP) materials that can refresh images rapidly compared to traditional photopolymer or silver halide prints [S1, unofficial]. The technology emerged from the need to combine the high fidelity of printed holography with the flexibility of computer-generated holography [S1, unofficial].
+
+## Sources
+[S1] Three-dimensional display technologies, https://pmc.ncbi.nlm.nih.gov/articles/PMC4269274, fetched 2026-10-29 (unofficial)

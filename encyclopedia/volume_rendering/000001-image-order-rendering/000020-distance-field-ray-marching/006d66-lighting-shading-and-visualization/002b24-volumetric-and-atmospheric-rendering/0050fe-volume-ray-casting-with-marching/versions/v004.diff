@@ -1,0 +1,209 @@
+--- v003.md
++++ v004.md
+@@ -4,5 +4,5 @@
+ 
+ ## Overview
+-Volume Ray Casting with Marching is an image-order rendering technique that casts rays from the camera through a volumetric scalar field, sampling the field at discrete intervals to accumulate color and opacity using front-to-back compositing [S2, unofficial]. It solves the problem of visualizing 3D scalar data (such as medical CT scans or atmospheric density) by projecting it onto a 2D screen while preserving depth cues and transparency [S2, unofficial]. It integrates color and opacity along a ray [S3, unofficial]. Builds on the family principle of discretizing the Radiative Transfer Equation (RTE) along a ray [Volumetric and Atmospheric Rendering](4968-volumetric-and-atmospheric-rendering.md).
++Volume Ray Casting with Marching is an image-order rendering technique that casts rays from the camera through a volumetric scalar field, sampling the field at discrete intervals to accumulate color and opacity using front-to-back compositing [S2, unofficial]. It solves the problem of visualizing 3D scalar data (such as medical CT scans or atmospheric density) by projecting it onto a 2D screen while preserving depth cues and transparency [S2, unofficial]. It integrates color and opacity along a ray [S3, unofficial]. Builds on [Volumetric and Atmospheric Rendering](4968-volumetric-and-atmospheric-rendering.md).
+ 
+ ## How it works
+@@ -11,20 +11,15 @@
+ ### Inputs and Outputs
+ *   **Inputs**:
+-    *   Camera parameters: Origin $\mathbf{o}$, normalized direction $\mathbf{d}$, view matrix, projection matrix.
+-    *   Volume data: A 3D texture (scalar field) defined by dimensions $V_{dims} = (V_x, V_y, V_z)$ and bounds $[box_{min}, box_{max}]$.
+-    *   Transfer function: A 2D colormap texture mapping scalar values to RGBA color.
+-    *   Parameters: Step size scale factor $dt_{scale}$, early termination threshold $T_{thresh}$ (typically 0.95 opacity), and a 16-bit normalization flag.
++    *   Camera origin $\mathbf{o}$ and normalized direction $\mathbf{d}$ [G].
++    *   Volume 3D texture with dimensions $V_{dims} = (V_x, V_y, V_z)$ and bounding box $[box_{min}, box_{max}]$ [S2, unofficial].
++    *   2D colormap texture for the transfer function [S2, unofficial].
++    *   Parameters: step size scale $dt_{scale}$, early termination threshold (default 0.95 opacity) [S2, unofficial].
+ *   **Outputs**:
+-    *   Final pixel color $C_{final}$ and accumulated opacity $A_{final}$.
++    *   Final pixel color and accumulated opacity [G].
+ 
+ ### Data Structures
+-*   **Volume Texture**: 3D texture storing scalar values. For 16-bit data, values are normalized by 65536.0; for 8-bit/float, values are used directly [S2, unofficial].
+-*   **Colormap Texture**: 2D texture where the x-coordinate represents the normalized scalar value and the y-coordinate is fixed (e.g., 0.5) to sample the transfer function [S2, unofficial].
+-*   **Ray State**:
+-    *   $t_{entry}$: Distance to volume entry.
+-    *   $t_{exit}$: Distance to volume exit.
+-    *   $p$: Current position in world space.
+-    *   $C$: Accumulated color (RGB).
+-    *   $A$: Accumulated opacity (A).
++*   **Volume Texture**: 3D texture storing scalar values; 16-bit data is normalized by 65536.0 [S2, unofficial].
++*   **Colormap Texture**: 2D texture mapping normalized scalar values (x-axis) to RGBA, with y-axis fixed at 0.5 [S2, unofficial].
++*   **Ray State**: Tracks entry/exit distances ($t_{entry}, t_{exit}$), current position $p$, and accumulators $C, A$ [S2, unofficial].
+ 
+ ### Numbered Steps
+@@ -45,5 +40,5 @@
+     $$ p = \mathbf{o} + (t_{entry} + \text{offset} \cdot \Delta t) \cdot \mathbf{d} $$
+     [S2, unofficial].
+-8.  **Marching Loop**: Iterate along the ray from $t_{entry}$ to $t_{exit}$ with step $\Delta t$. In each iteration:
++8.  **Marching Loop**: Iterate along the ray from $t_{entry}$ to $t_{exit}$ with step $\Delta t$ [S2, unofficial]. In each iteration:
+     a. **Sample Volume Value**: Sample the scalar value $v$ from the volume texture at position $p$ [S2, unofficial].
+         *   For 16-bit data: $v = \text{texture}(\text{volume}, p).r / 65536.0$ [S2, unofficial].
+@@ -73,85 +68,72 @@
+ 
+ ```python
+-def volume_ray_casting(camera_origin, camera_direction, volume_texture, colormap_texture, volume_dims, box_min, box_max, dt_scale, t_thresh, is_16bit):
+-    """
+-    Renders a single pixel using volume ray casting with marching.
+-    
+-    Args:
+-        camera_origin: vec3, camera position.
+-        camera_direction: vec3, normalized ray direction.
+-        volume_texture: 3D texture object.
+-        colormap_texture: 2D texture object.
+-        volume_dims: vec3, dimensions of the volume (Vx, Vy, Vz).
+-        box_min: vec3, minimum bounds of the volume.
+-        box_max: vec3, maximum bounds of the volume.
+-        dt_scale: float, step size multiplier.
+-        t_thresh: float, opacity threshold for early termination.
+-        is_16bit: bool, flag for 16-bit volume texture normalization.
+-        
+-    Returns:
+-        vec4, final color with accumulated opacity.
+-    """
++class Vec3:
++    def __init__(self, x, y, z):
++        self.x, self.y, self.z = x, y, z
++    def __mul__(self, s): return Vec3(self.x*s, self.y*s, self.z*s)
++    def __rmul__(self, s): return self.__mul__(s)
++    def __add__(self, o): return Vec3(self.x+o.x, self.y+o.y, self.z+o.z)
++    def __sub__(self, o): return Vec3(self.x-o.x, self.y-o.y, self.z-o.z)
++    def __truediv__(self, s): return Vec3(self.x/s, self.y/s, self.z/s)
++    def abs(self): return Vec3(abs(self.x), abs(self.y), abs(self.z))
++    def min(self): return min(self.x, self.y, self.z)
++    def max(self): return max(self.x, self.y, self.z)
++
++def volume_ray_casting(camera_origin, camera_direction, volume_texture, colormap_texture, volume_dims, box_min, box_max, dt_scale, t_thresh, is_16bit, frag_coord):
+     # 1. Intersect ray with bounding box [box_min, box_max]
+     t0, t1 = intersect_box(camera_origin, camera_direction, box_min, box_max)
+-    
+-    # If no intersection, return transparent black
+     if t0 is None or t1 is None:
+-        return vec4(0.0, 0.0, 0.0, 0.0)
+-    
+-    # Clamp entry to non-negative
++        return Vec3(0.0, 0.0, 0.0), 0.0
++
+     t_entry = max(t0, 0.0)
+     t_exit = t1
+-    
++
+     # 2. Calculate step size
+-    dt_vec = vec3(1.0) / (volume_dims * abs(camera_direction))
+-    dt = dt_scale * min(dt_vec.x, dt_vec.y, dt_vec.z)
+-    
++    dt_vec = Vec3(1.0, 1.0, 1.0) / (volume_dims * camera_direction.abs())
++    dt = dt_scale * dt_vec.min()
++
+     # 3. Generate jitter offset
+-    frag_coord = get_frag_coord() # vec2, current fragment coordinates from rendering context
+     offset = wang_hash(int(frag_coord.x + 640.0 * frag_coord.y))
+-    
++
+     # 4. Initialize position and accumulators
+     p = camera_origin + (t_entry + offset * dt) * camera_direction
+-    acc_color = vec3(0.0)
++    acc_color = Vec3(0.0, 0.0, 0.0)
+     acc_alpha = 0.0
+     t = t_entry + offset * dt
+-    
++
+     # 5. Marching loop
+-    while t < t_exit + dt:
+-        # Sample volume value
++    while t < t_exit:
+         val_raw = texture(volume_texture, p).r
+-        # Normalize if 16-bit, else use directly
+         val = val_raw / 65536.0 if is_16bit else val_raw
+-        
+-        # Map to color via colormap
+-        trans_sample = texture(colormap_texture, vec2(val, 0.5))
+-        
+-        # Combine color and opacity
++
++        trans_sample = texture(colormap_texture, (val, 0.5))
+         sample_color = trans_sample.rgb
+         sample_alpha = val * trans_sample.a
+-        
+-        # Apply opacity correction for step size
+-        corrected_alpha = 1.0 - pow(1.0 - sample_alpha, dt_scale)
+-        
+-        # Front-to-back compositing
++
++        corrected_alpha = 1.0 - (1.0 - sample_alpha) ** dt_scale
++
+         acc_color += (1.0 - acc_alpha) * corrected_alpha * sample_color
+         acc_alpha += (1.0 - acc_alpha) * corrected_alpha
+-        
+-        # Early Ray Termination
++
+         if acc_alpha >= t_thresh:
+             break
+-            
+-        # Advance
++
+         t += dt
+         p = camera_origin + t * camera_direction
+-        
+-    return vec4(acc_color, acc_alpha)
++
++    return acc_color, acc_alpha
+ 
+ def intersect_box(origin, direction, box_min, box_max):
+-    """Standard slab method for ray-AABB intersection."""
+-    t_min = (box_min - origin) / direction
+-    t_max = (box_max - origin) / direction
+-    t0 = min(t_min.x, t_min.y, t_min.z)
+-    t1 = max(t_max.x, t_max.y, t_max.z)
++    t_min = Vec3(-float('inf'), -float('inf'), -float('inf'))
++    t_max = Vec3(float('inf'), float('inf'), float('inf'))
++    for i, (o, d, bmin, bmax) in enumerate(zip(origin, direction, box_min, box_max)):
++        if abs(d) > 1e-8:
++            t_min[i] = (bmin - o) / d
++            t_max[i] = (bmax - o) / d
++        else:
++            if o < bmin or o > bmax:
++                return None, None
++    t0 = t_min.min()
++    t1 = t_max.max()
+     if t0 > t1:
+         return None, None
+@@ -159,14 +141,8 @@
+ 
+ def wang_hash(n):
+-    """Standard integer hash function returning a float in [0, 1)."""
+     n = (n >> 16) ^ n
+     n = n * 0x45d9f3b
+     n = (n >> 16) ^ n
+     return (n & 0x7fffffff) / 2147483647.0
+-
+-def get_frag_coord():
+-    """Returns the current fragment's (x, y) coordinates from the shader context."""
+-    # In a real shader, this is a built-in varying. Here it represents the context input.
+-    return vec2(0.0, 0.0) 
+ ```
+ 
+@@ -179,4 +155,5 @@
+ *   **Double Launch**: Calculating the front and back plate positions separately may require launching the process twice. It is recommended to calculate the front plate and start marching in the same shader pass to avoid redundant computation [S1, unofficial].
+ *   **Precision**: Ensure correct normalization of volume texture data (e.g., dividing by 65536.0 for 16-bit data) to prevent incorrect density interpretation [S2, unofficial].
++*   **Zero Direction Components**: Ray-box intersection must handle zero components in the direction vector to avoid division by zero; rays parallel to slab faces are handled by checking if the origin lies within the slab bounds [G].
+ 
+ ## Subtopics
+@@ -195,11 +172,9 @@
+ 
+ ## Operating characteristics
+-*   **Time Complexity**: Linear with respect to the number of samples along the ray, which depends on volume depth and step size [S2, unofficial].
++*   **Time Complexity**: Linear with respect to the number of samples along the ray [G].
+ *   **Memory Complexity**: Depends on the size of the 3D volume texture and the 2D colormap texture [S2, unofficial].
+ *   **Performance**: Computationally intensive due to many texture samples. ERT reduces average samples for opaque regions [S2, unofficial].
+ *   **Strengths**: High-quality, physically-based volume rendering with accurate transparency and depth cues. Flexible for any scalar field [S2, unofficial].
+-*   **Limitations**: Susceptible to aliasing artifacts ("wood grain") if not jittered; jittering causes artifacts on flat surfaces [S2, unofficial]. Performance degrades with large volumes or high resolution.
+-*   **When to Use**: General-purpose volume visualization where quality is prioritized over extreme performance, or when ERT effectively culls opaque regions.
+-*   **When Not to Use**: Real-time applications with very large volumes or strict performance constraints without optimization (e.g., hierarchical level-of-detail).
++*   **Limitations**: Susceptible to aliasing artifacts ("wood grain") if not jittered; jittering causes artifacts on flat surfaces [S2, unofficial].
+ 
+ ## Background

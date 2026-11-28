@@ -1,0 +1,159 @@
+# Partial Region Growing for Transfer Function Generation
+
+Also called: Derived Transfer Function, Partial Growing, Partial Region Growing for Transfer Function Derivation, Partial Region Growing with Derived Transfer Functions, Semi-automatic feature extraction, Transfer function derivation from region growing
+
+## Overview
+Partial Region Growing for Transfer Function Generation is a semi-automatic technique that derives a 2D transfer function from the statistical properties of a partially segmented region to visualize similar, disconnected features throughout the entire volume [S1][S2, unofficial]. Unlike full region growing which segments all connected components, this method performs growth on only a subset of the data or a small subset of regions, significantly reducing computation time while providing a robust classifier for the whole dataset [S2, unofficial]. It is particularly useful when features of the same type are disconnected in the volume, preventing a single region growing pass from capturing all instances [S1].
+
+## How it works
+**Inputs and Outputs**
+*   **Input:** A 3D volume dataset $V$ with scalar values and computed gradient magnitudes; a seed point or initial region for partial growth; a growth limit (percentage or voxel count) [S1][S2, unofficial].
+*   **Output:** A 2D transfer function (classifier) defined on the scatterplot of data values vs. gradient magnitudes, ready for volume rendering [S1][S2, unofficial].
+
+**Data Structures**
+*   **Volume Data:** A 3D array of scalar values with pre-computed or on-the-fly gradient magnitudes [G].
+*   **Region Growing State:** A queue or stack of voxels to process, and a visited mask to prevent re-processing [G].
+*   **Statistical Accumulators:** Variables to store the sum, sum of squares, count, min, and max of data values and gradient magnitudes for the extracted region [S1].
+*   **Classifier Representation:** Rectangular region defined by center $(\mu_v, \mu_g)$ and size $(\sigma_v, \sigma_g)$, or a set of merged regions in the 2D histogram space constructed via k-d tree partitioning [S1][S2, unofficial].
+
+**Steps**
+1. Perform region growing on a subset of the volume or a small subset of regions to capture specific structures [S1][S2, unofficial].
+2. Calculate the average data value ($\mu_v$), average gradient magnitude ($\mu_g$), standard deviation of data values ($\sigma_v$), and standard deviation of gradient magnitudes ($\sigma_g$) for the extracted region [S1][S2, unofficial].
+3. Define a rectangular region on the 2D scatterplot of data values vs. gradient magnitudes. The center coordinates are $(\mu_v, \mu_g)$, and the size is defined by $\sigma_v$ and $\sigma_g$ [S1][S2, unofficial].
+4. Apply the derived transfer function to the whole volume to reveal other features matching the statistical profile of the partial extraction [S1][S2, unofficial].
+5. Alternative classifier generation: Partition the histogram region defined by partial growing using a k-d tree. Sort data points in each leaf node by value. Construct local classifiers for points over a pre-selected threshold. Recursively merge local classifiers if the new classifier contains most data points and has area similar to or less than the sum of the original two areas. Assign an opacity map and color map to the generated classifier [S2, unofficial].
+
+**Formulas**
+$$ \mu_v = \frac{1}{|R|} \sum_{v \in R} \text{value}(v) $$
+$$ \mu_g = \frac{1}{|R|} \sum_{v \in R} \text{gradient}(v) $$
+$$ \sigma_v = \sqrt{\frac{1}{|R|} \sum_{v \in R} (\text{value}(v) - \mu_v)^2} $$
+$$ \sigma_g = \sqrt{\frac{1}{|R|} \sum_{v \in R} (\text{gradient}(v) - \mu_g)^2} $$
+where $R$ is the set of extracted voxels [S1][S2, unofficial].
+
+**Pseudocode**
+> **Unverified code.** The code below did not pass a test run against a reference implementation, or no test fits it, so it may contain errors.
+
+```python
+def partial_region_growing_transfer_function(volume, seed_voxel, growth_limit_voxels):
+    """
+    Derives a 2D transfer function from partial region growing.
+    
+    Args:
+        volume: 3D numpy array of scalar values.
+        seed_voxel: (x, y, z) tuple of the starting voxel.
+        growth_limit_voxels: Integer voxel count to stop growth.
+        
+    Returns:
+        rectangular_classifier: A callable returning True if a (value, gradient) pair falls within the derived rectangle.
+    """
+    # Step 1: Initialize region growing
+    queue = [seed_voxel]
+    visited = {seed_voxel}
+    extracted_region = []
+
+    # Step 2: Perform partial region growing
+    # The sources do not specify the exact connectivity criterion or threshold [G].
+    # A standard value-difference threshold is used here.
+    VALUE_THRESHOLD = 50.0  # [G]
+
+    while queue and len(extracted_region) < growth_limit_voxels:
+        current = queue.pop(0)
+        extracted_region.append(current)
+        for neighbor in get_neighbors(current, volume.shape):
+            if neighbor not in visited and is_connected(current, neighbor, volume, VALUE_THRESHOLD):
+                visited.add(neighbor)
+                queue.append(neighbor)
+
+    # Step 3: Compute statistics
+    if not extracted_region:
+        raise ValueError("No voxels extracted")
+    values = [volume[v[0], v[1], v[2]] for v in extracted_region]
+    gradients = [compute_gradient_magnitude(volume, v) for v in extracted_region]
+    n = len(values)
+    mu_v = sum(values) / n
+    mu_g = sum(gradients) / n
+    sigma_v = (sum((v - mu_v)**2 for v in values) / n)**0.5
+    sigma_g = (sum((g - mu_g)**2 for g in gradients) / n)**0.5
+
+    # Step 4: Generate rectangular classifier
+    # Rectangle bounds: [mu - sigma, mu + sigma] for both dimensions
+    def rectangular_classifier(data_value, gradient_value):
+        return (mu_v - sigma_v <= data_value <= mu_v + sigma_v) and \
+               (mu_g - sigma_g <= gradient_value <= mu_g + sigma_g)
+
+    return rectangular_classifier
+
+def get_neighbors(voxel, shape):
+    x, y, z = voxel
+    neighbors = []
+    for dx, dy, dz in [(-1,0,0),(1,0,0),(0,-1,0),(0,1,0),(0,0,-1),(0,0,1)]:
+        nx, ny, nz = x+dx, y+dy, z+dz
+        if 0 <= nx < shape[0] and 0 <= ny < shape[1] and 0 <= nz < shape[2]:
+            neighbors.append((nx, ny, nz))
+    return neighbors
+
+def compute_gradient_magnitude(volume, voxel):
+    x, y, z = voxel
+    # Central difference for interior, forward/backward for boundaries [G]
+    gx = volume[x+1, y, z] - volume[x-1, y, z] if 0 < x < volume.shape[0]-1 else volume[x+1, y, z] - volume[x, y, z]
+    gy = volume[x, y+1, z] - volume[x, y-1, z] if 0 < y < volume.shape[1]-1 else volume[x, y+1, z] - volume[x, y, z]
+    gz = volume[x, y, z+1] - volume[x, y, z-1] if 0 < z < volume.shape[2]-1 else volume[x, y, z+1] - volume[x, y, z]
+    return (gx**2 + gy**2 + gz**2)**0.5
+
+def is_connected(current, neighbor, volume, threshold):
+    # Standard connectivity: difference in data value must be below threshold [G]
+    val_diff = abs(volume[current[0], current[1], current[2]] - volume[neighbor[0], neighbor[1], neighbor[2]])
+    return val_diff < threshold
+```
+
+**Parameters**
+*   **Growth Extent:** 20-40% of the full region growing result is often sufficient to derive a good transfer function [S2, unofficial].
+*   **Thresholds:** Pre-selected thresholds for noise discarding in the histogram-based method [S2, unofficial].
+
+**Edge Cases and Pitfalls**
+*   **Noise:** The histogram-based method discards low-value points as noise, making it more robust than the rectangular classifier [S2, unofficial].
+*   **Precision:** Standard deviation calculations are sensitive to outliers; robust statistics are not specified in the sources [G].
+*   **Boundaries:** Gradient computation at volume boundaries requires forward/backward differences or padding [G].
+
+## Subtopics
+
+### RGVis Region Growing
+The parent method that provides the interactive framework for region growing in volume visualization. Partial Region Growing is an optimization within this framework. [RGVis Region Growing](14368-rgvis-region-growing.md)
+
+## Operating characteristics
+**Time and Memory Complexity**
+*   **Time:** Partial region growing is significantly faster than full region growing. On a 1.8GHz Pentium 4, partial growing (20-40%) took under 0.2 seconds, while full growing took 2.8-8.1 seconds for various datasets [S2, unofficial]. The transfer function generation step is negligible in comparison.
+*   **Memory:** Requires memory for the volume data, the visited mask, and the queue for region growing. The classifier storage is minimal (4 values for rectangular, or a set of regions for histogram-based) [G].
+
+**Measured Performance**
+*   **Confocal Microscopy ganglion (55x512x512):** Full=5.7s, Partial=0.022s [S2, unofficial].
+*   **MRA head vasculature (125x250x250):** Full=7.2s, Partial=0.028s [S2, unofficial].
+*   **MRI head (128^3):** Full=2.8s, Partial=0.34s [S2, unofficial].
+*   **MRI Chest (256^3):** Full=8.1s, Partial=0.12s [S2, unofficial].
+
+**Strengths and Limitations**
+*   **Strengths:**
+    *   Drastically reduces computation time for feature extraction [S2, unofficial].
+    *   Automatically suggests a transfer function, reducing manual trial-and-error [S1].
+    *   Effective for visualizing disconnected features of the same type [S1].
+    *   The histogram-based classifier is robust to noise [S2, unofficial].
+*   **Limitations:**
+    *   Requires a representative seed region to derive an accurate transfer function [S1].
+    *   The rectangular classifier may be too simplistic for complex feature distributions [S2, unofficial].
+    *   Does not provide a geometric surface representation directly, though this can be generated from the segmented volume [S1].
+
+**When to Use**
+*   Use when features are disconnected and full region growing is too slow or captures unwanted noise.
+*   Use when a quick exploration of similar features is needed.
+*   Use when the user wants to avoid manual tuning of the transfer function.
+
+**When Not to Use**
+*   Use when features are highly heterogeneous and a single transfer function cannot represent them.
+*   Use when a precise geometric surface is required immediately (though this can be derived later).
+
+## Background
+This method was developed as part of the RGVis system for visualizing industrial CT volume data for nondestructive testing (NDT) applications [S1]. It was introduced to lower the cost of segmentation and facilitate volumetric feature extraction by coupling region growing techniques with a 2D histogram interface [S1]. The technique allows users to quickly identify and display relevant features in NDT data, which often contain concealed structures and noise [S1]. The method was further detailed in the RGVis thesis, which explored various region growing based visualization techniques [S2, unofficial].
+
+## Sources
+[S1] Visualizing industrial CT volume data for nondestructive testing applications, https://doi.org/10.1109/visual.2003.1250418, fetched 2026-10-27
+[S2] RGVis: Region Growing Based Visualization Techniques for Volume Visualization, https://escholarship.org/uc/item/3td71868, fetched 2026-11-03 (unofficial)

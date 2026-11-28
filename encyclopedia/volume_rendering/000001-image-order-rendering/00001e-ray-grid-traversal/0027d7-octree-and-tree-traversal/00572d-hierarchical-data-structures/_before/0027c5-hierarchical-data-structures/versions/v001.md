@@ -1,0 +1,28 @@
+# Hierarchical Data Structures
+
+
+## Overview
+Hierarchical data structures organize volumetric data into multi-resolution trees to accelerate image-order rendering by skipping empty or inactive regions during ray traversal [S1, S2, unofficial]. Unlike flat grid traversal, these structures enable rays to jump over large empty spaces or identify active cells for rendering, significantly reducing computational cost [S1, unofficial]. This family serves as the foundational acceleration mechanism for sibling methods such as [Ray-marching reference (min-max octree accelerated)](1554-ray-marching-reference-min-max-octree-accelerated.md) and [ExaBricks Rendering with RTX BVH](2577-exabricks-rendering-with-rtx-bvh.md).
+
+## Shared principles
+The core mechanism involves constructing a tree where nodes represent spatial regions and store aggregate information (e.g., binary occupancy flags, min/max values) derived from child nodes or leaf voxels. Traversal proceeds from the root; if a node indicates an empty or inactive region (e.g., flag is 0, or min/max bounds are outside the view), the entire subtree is skipped. Construction typically follows a bottom-up approach: leaf nodes encode voxel properties, and internal nodes aggregate these properties from their children. The hierarchy depth is determined by the data dimensions, often requiring specific size constraints (e.g., $N=2^M+1$) or padding to maintain regular subdivision [S1, unofficial].
+
+## Subtopics
+
+### [Hierarchical Spatial Enumeration Optimization](1663-hierarchical-spatial-enumeration-optimization.md)
+Encodes spatial coherence using a pyramid of binary volumes to skip empty space in image-order rendering. It uses a complete octree (pyramid) rather than a sparse structure, allowing rays to jump over large empty regions. Choose this when fast image-order traversal of regular grids with significant empty space is required.
+
+### [Jiang et al. Acceleration Structure](1673-jiang-et-al-acceleration-structure.md)
+A hybrid object-order and image-order structure designed to locate active cells for direct and indirect visualization. It solves redundant ray marching by rendering only relevant active cells. Performance is resolution-dependent. Choose this for hybrid rendering approaches where identifying active cells is critical.
+
+### [Silhouette Image Space Acceleration Structure (Mip Pyramid)](3731-silhouette-image-space-acceleration-structure-mip-pyramid.md)
+Uses a mip pyramid over silhouette images to accelerate voxel/silhouette coverage queries. Each level stores min/max values of 4 texels from the next lower level, providing conservative bounds. Choose this when silhouette-based culling is the primary optimization goal.
+
+### Spatial Partitioning Tree for Unstructured Data
+A preprocessing step that performs parallel, synchronized partitioning of volume data to produce a hierarchical spatial tree [S1, unofficial]. This tree optimizes the compositing process, reduces runtime memory consumption, and speeds up cell searching for zoom-in viewing [S1, unofficial]. It is used in parallel cell-projection rendering where data is distributed in round-robin fashion to disperse nearby cells among processors [S1, unofficial].
+
+## Background
+The concept of hierarchical acceleration for volume rendering emerged in the mid-1990s to address the high cost of ray traversal through large datasets. Early work focused on unstructured data, where parallel cell-projection algorithms required efficient spatial partitioning to manage load balancing and memory consumption [S1, unofficial]. The "Hierarchical Spatial Enumeration" approach was developed to handle regular grids by creating a binary pyramid that explicitly marks empty regions, enabling efficient skipping during ray tracing [S1, unofficial]. The Jiang et al. structure [JRZ*16] later introduced a hybrid approach for locating active cells, reflecting the shift towards resolution-dependent acceleration [S1, unofficial]. These methods form the basis for modern block-based and octree acceleration techniques.
+
+## Sources
+[S1] DTIC ADA329328: A Scalable Parallel Cell-Projection Volume Rendering Algorithm for Three-Dimensional Unstructured Data, https://archive.org/details/DTIC_ADA329328, fetched 2026-10-26 (unofficial)

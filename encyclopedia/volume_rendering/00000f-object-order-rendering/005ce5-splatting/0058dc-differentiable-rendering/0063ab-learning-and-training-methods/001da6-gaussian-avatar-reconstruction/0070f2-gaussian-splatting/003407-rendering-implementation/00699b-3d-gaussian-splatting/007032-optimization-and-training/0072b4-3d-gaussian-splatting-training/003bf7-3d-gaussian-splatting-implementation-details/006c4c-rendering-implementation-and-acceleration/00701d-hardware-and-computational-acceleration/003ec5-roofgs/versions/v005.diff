@@ -1,0 +1,196 @@
+--- v004.md
++++ v005.md
+@@ -8,19 +8,17 @@
+ ## How it works
+ **Inputs and Outputs:**
+-*   **Input:** A set of 3D Gaussians $\mathcal{G}$, each defined by center $\mathbf{t}$, covariance $\mathbf{\Sigma}$, opacity $o$, and spherical harmonic (SH) coefficients $\mathbf{c}_{SH}$. Camera parameters (view/projection matrices).
+-*   **Output:** Rasterized 2D image pixels.
++*   **Input:** A set of 3D Gaussians $\mathcal{G}$, each defined by center $\mathbf{t}$, covariance $\mathbf{\Sigma}$, opacity $o$, and spherical harmonic (SH) coefficients $\mathbf{c}_{SH}$ [S1, unofficial]. Camera parameters (view and projection matrices) [G].
++*   **Output:** Rasterized 2D image pixels [S1, unofficial].
+ 
+ **Data Structures:**
+ *   **Gaussian Attributes:** Compressed to reduce memory footprint. For third-degree SHs ($D_{SH}=3$), the baseline requires 192 bytes per Gaussian (48 coefficients $\times$ 4 bytes) [S1, unofficial]. RoofGS uses low-bit quantization with a single shared scale for all SH coefficients [S1, unofficial].
+-*   **Depth Keys:** Compressed dynamic keys for sorting.
+-*   **Tile Data:** Intermediate buffers for front-end fusion.
++*   **Depth Keys:** Compressed dynamic keys for sorting [S1, unofficial].
++*   **Tile Data:** Intermediate buffers for front-end fusion [S1, unofficial].
+ 
+ **Numbered Steps:**
+-
+ 1.  **Front-End Fusion (Memory-Bound Optimization):**
+     *   **Compact Attribute Storage:** Quantize SH coefficients to reduce global memory traffic. Instead of storing full-precision coefficients, store quantized values with a shared scale factor [S1, unofficial].
+     *   **Dynamic Depth-Key Compression:** Compress the depth keys used for sorting to reduce memory bandwidth usage during the projection and sorting phase [S1, unofficial].
+     *   **Cross-Stage Kernel Fusion:** Fuse the projection, sorting, and attribute fetching kernels to avoid writing intermediate data to global memory [S1, unofficial]. This reduces the dominant global memory traffic in bandwidth-bound stages [S1, unofficial].
+-
+ 2.  **Rasterization Reorganization (Compute-Bound Optimization):**
+     *   **Dual-Pixel ILP:** Reformulate the per-pixel Gaussian evaluation to increase instruction-level parallelism inside the blending loop [S1, unofficial].
+@@ -28,82 +26,96 @@
+ 
+ **Formulas:**
+-
+ The Gaussian power $p(x, y)$ for a pixel at $(x, y)$ relative to a Gaussian center $(u, v)$ is computed as [S1, unofficial]:
+-
+-$$
+-p(x, y) = -\frac{1}{2} \left( a(x - w)^2 + b(x - u)(y - v) + c(y - v)^2 \right)
+-$$
+-
+-where $a, b, c$ are derived from the projected 2D covariance matrix, and $(w, v)$ are the center coordinates [S1, unofficial]. Note: The source uses $(u, v)$ for center and $(w, v)$ in the formula; standard notation typically aligns center as $(u, v)$ and uses $(x-u, y-v)$ [S1, unofficial].
+-
++$$p(x, y) = -\frac{1}{2} \left( a(x - u)^2 + b(x - u)(y - v) + c(y - v)^2 \right)$$
++where $a, b, c$ are derived from the projected 2D covariance matrix, and $(u, v)$ are the center coordinates [S1, unofficial]. (Corrected from source typo $(x-w)^2$).
+ The unclamped opacity contribution is then computed as [S1, unofficial]:
+-
+-$$
+-\tilde{\alpha}(x, y) = o \exp(p(x, y))
+-$$
+-
++$$\tilde{\alpha}(x, y) = o \exp(p(x, y))$$
+ where $o$ is the base opacity [S1, unofficial].
+ 
+ **Pseudocode:**
+-
+ ```python
+-def roofgs_render(gaussians, camera):
++def roofgs_render(gaussians, camera, resolution):
+     # 1. Front-End: Memory-Bound Optimization
+-    # Project Gaussians to 2D and compute depth keys
+     projected = []
+     for g in gaussians:
+-        # Project center and covariance
+         center_2d, cov_2d = project_2d(g.center, g.cov, camera)
+-        depth = g.center.z # Or projected depth
+-        projected.append({
+-            'center': center_2d,
+-            'cov': cov_2d,
+-            'depth': depth,
+-            'opacity': g.opacity,
+-            'sh_coeffs': quantize_sh(g.sh_coeffs) # Low-bit compression
+-        })
++        depth = center_2d.z
++        sh_quant, scale = quantize_sh(g.sh_coeffs)
++        projected.append({'center': center_2d, 'cov': cov_2d, 'depth': depth,
++                          'opacity': g.opacity, 'sh_quant': sh_quant, 'scale': scale})
+ 
+-    # Sort Gaussians front-to-back using compressed keys
+-    # Cross-stage fusion: combine sorting with attribute fetching
++    # Compressed radix-sort keys & cross-stage kernel fusion
+     sorted_gaussians = sort_front_to_back(projected, key='depth')
+ 
+     # 2. Rasterization: Compute-Bound Optimization
+-    # Initialize output image
+-    image = zeros_like(target_resolution)
+-
+-    # Process each tile
+-    for tile in tiles:
+-        # Fetch Gaussians relevant to the tile
++    image = zeros_like(resolution)
++    for tile in generate_tiles(resolution):
+         tile_gaussians = get_tile_gaussians(sorted_gaussians, tile)
+-
+-        # Process pixels in the tile with Dual-Pixel ILP
+         for y, x in tile.pixels:
+-            # Accumulate color and alpha
+-            color = vec3(0)
+-            alpha = 0.0
++            color = [0.0, 0.0, 0.0]
+             transmittance = 1.0
+-
+             for g in tile_gaussians:
+-                # Compute Gaussian power
+                 dx = x - g.center.x
+                 dy = y - g.center.y
+-                # a, b, c derived from g.cov
++                a, b, c = compute_covariance_terms(g.cov)
+                 p = -0.5 * (a * dx**2 + b * dx * dy + c * dy**2)
++                alpha_g = g.opacity * fast_exp(p)
++                color = add_color(color, scale_color(reconstruct_color(g.sh_quant, g.scale, x, y), alpha_g * transmittance))
++                transmittance *= (1.0 - alpha_g)
++                if transmittance < 1e-4:
++                    break
++            image[tile.y][tile.x] = color
++    return image
+ 
+-                # Fast exponential evaluation
+-                alpha_g = g.opacity * fast_exp(p)
++def project_2d(center_3d, cov_3d, camera):
++    view_mat = camera.view_matrix
++    proj_mat = camera.projection_matrix
++    center_2d = (proj_mat @ view_mat @ center_3d)[:2]
++    cov_2d = compute_2d_covariance(cov_3d, view_mat, proj_mat, center_3d)
++    return center_2d, cov_2d
+ 
+-                # Alpha compositing
+-                color += g.color * alpha_g * transmittance
+-                transmittance *= (1.0 - alpha_g)
+-                alpha += alpha_g * transmittance
++def quantize_sh(coeffs, bits=8):
++    scale = max(abs(coeffs))
++    quantized = [round(c / scale * (2**bits - 1)) for c in coeffs]
++    return quantized, scale
+ 
+-                # Early exit if transmittance is negligible
+-                if transmittance < epsilon:
+-                    break
++def sort_front_to_back(data, key):
++    return sorted(data, key=lambda x: x[key])
+ 
+-            image[tile.y, tile.x] = color
++def get_tile_gaussians(sorted_gaussians, tile):
++    return [g for g in sorted_gaussians if tile.contains(g.center)]
+ 
+-    return image
++def zeros_like(resolution):
++    return [[0.0, 0.0, 0.0] for _ in range(resolution[1])]
++
++def generate_tiles(resolution, tile_size=16):
++    tiles = []
++    for y in range(0, resolution[1], tile_size):
++        for x in range(0, resolution[0], tile_size):
++            tiles.append(Tile(x, y, tile_size))
++    return tiles
++
++def compute_covariance_terms(cov_2d):
++    return cov_2d[0][0], cov_2d[0][1], cov_2d[1][1]
++
++def fast_exp(x):
++    return math.exp(x) # Hardware-specific approximation [G]
++
++def reconstruct_color(sh_quant, scale, x, y):
++    # Standard SH evaluation from quantized coefficients [G]
++    return scale * evaluate_sh_basis(sh_quant, x, y)
++
++def add_color(c1, c2):
++    return [c1[i] + c2[i] for i in range(3)]
++
++def scale_color(c, s):
++    return [c[i] * s for i in range(3)]
++
++class Tile:
++    def __init__(self, x, y, size):
++        self.x, self.y, self.size = x, y, size
++        self.pixels = [(y2, x2) for y2 in range(y, y+size) for x2 in range(x, x+size)]
++    def contains(self, center):
++        return self.x <= center.x < self.x + self.size and self.y <= center.y < self.y + self.size
+ ```
+ 
+@@ -113,6 +125,6 @@
+ 
+ **Edge Cases and Pitfalls:**
+-*   **Precision Loss:** Quantizing SH coefficients may introduce color artifacts if the scale is not chosen carefully [S1, unofficial].
+-*   **Depth Key Compression:** Aggressive compression may lead to sorting errors if depth precision is insufficient [S1, unofficial].
++*   **Precision Limits:** Quantization reduces SH coefficient precision, which may affect high-frequency appearance details [S1, unofficial].
++*   **Depth Precision:** Dynamic depth-key compression requires sufficient bit-depth to maintain correct front-to-back sorting order [S1, unofficial].
+ 
+ ## Subtopics
+@@ -122,8 +134,8 @@
+ 
+ ## Operating characteristics
+-*   **Time Complexity:** Not given in the sources.
++*   **Time Complexity:** Not given in the sources. [S1, unofficial]
+ *   **Memory Complexity:** Reduced due to low-bit Gaussian-attribute compression and dynamic depth-key compression [S1, unofficial].
+-*   **Measured Performance:** Not given in the sources.
+-*   **Scaling:** Not given in the sources.
++*   **Measured Performance:** Not given in the sources. [S1, unofficial]
++*   **Scaling:** Not given in the sources. [S1, unofficial]
+ *   **Strengths:** Reduces dominant global memory traffic in bandwidth-bound stages and increases ILP in compute-bound stages [S1, unofficial].
+ *   **Limitations:** Relies on accurate Roofline characterization; quantization may affect visual quality [S1, unofficial].

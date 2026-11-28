@@ -1,0 +1,546 @@
+# Selected-splat Collision Mesh for Lichtfeld Studio
+
+Standalone smooth 3D voxel mesher for selected splats, with perimeter walls and a ceiling. Mesh detail presets: 0.05, **0.1**, 0.2, 0.5, and 1 meter. Wall height defaults to 3 meters.
+
+## Use
+
+1. Restart Lichtfeld and open **Collision Mesh**.
+2. Select ground covering the desired area, plus floating blobs or other geometry to include. For rooms, end the ground selection at open doorways. Select the ground beneath floating objects too, so it defines the enclosure footprint.
+3. Choose mesh detail, **Voxel surface** (Smooth remesh is the default), smoothing amount, and wall height. Optionally enable **Ignore transparent splats / floaters** and set **Minimum splat opacity** (default 0.15). Then **Generate from selected splats**. The mesh appears in the scene tree.
+4. Choose **Export format**: OBJ, GLB, or PlayCanvas voxel. **Export collision mesh** opens the Windows save picker with `model-name-collision` and the appropriate suffix. All three formats are also in **Save as type**. Cancel writes nothing. Delete or hide old generated meshes after regeneration.
+
+## Meshing and ceiling
+
+Selected centers are rasterized into a sparse 3D grid, preserving separate height layers, floating blobs, and overhangs. The generator adds solid walls along the perimeter and holes of the selected horizontal footprint, plus a ceiling over that footprint. Disconnected footprint components remain separate. Ceiling height is **highest selected splat center + wall height**, measured upward along native -Y. OBJ and GLB ceiling surfaces end at that exact height. Selecting a high floating blob raises the common ceiling accordingly.
+
+**Smooth remesh** extracts an interpolated surface with Lewiner marching cubes after a light Gaussian filter of the 3D occupancy field. This rounds voxel edges in the actual geometry, similar in intent to Blender's voxel remesh; it is not Blender's implementation. OBJ, GLB, and the scene preview have smooth vertex normals. Smoothing defaults to 0.35 voxels and can be set from 0 to 0.45. A **Blocky merged faces** mode remains available for simpler planar meshes. Voxel size controls detail and triangle count. Thin shapes and edges can change slightly during smoothing. The smooth mesher limits its dense grid to 32 million samples and its surface to two million triangles; select a smaller area or coarser detail if it exceeds that budget. Marching cubes reference: https://scikit-image.org/docs/stable/api/skimage.measure.html#skimage.measure.marching_cubes
+
+**Ignore transparent splats / floaters** is an optional pre-mesh filter, enabled by default. It removes all selected splats whose individual opacity is below the cutoff, including low-opacity floating artifacts. Raw opacity logits are converted by an equivalent stable threshold comparison. This uses per-splat opacity rather than accumulated rendered opacity, and does not identify floaters by connectivity: dense low-opacity surfaces may also be excluded, while high-opacity floating objects remain. Excluded splats do not affect the footprint or the ceiling height. The filter changes only the generated collision mesh, not the splat scene or selection.
+
+The generator samples selected centers rather than each Gaussian's full ellipsoid. Sparse selection can leave floor gaps; select dense ground or use coarser spacing. Cells with multiple selected heights retain separate layers. Perimeter walls occupy the inside boundary voxel column. Binary voxel roofs are quantized to voxel size and may extend less than one voxel beyond the exact mesh ceiling. The binary format remains solid/empty voxels: smoothing applies to OBJ/GLB/preview geometry, while voxel export retains the underlying occupancy grid.
+
+
+Scene units must be meters, with native **-Y up**. Limits: 100,000 footprint cells, five million solid voxels, and one million merged surface quads. The extension creates and exports geometry; the consuming engine handles collision and navigation.
+
+## Export formats
+
+- **OBJ**: native Lichtfeld world coordinates.
+- **GLB**: standalone glTF 2.0 binary mesh, normals, and preview material. **GLB coordinate frame** defaults to **Lichtfeld world (same as OBJ)**, matching the generated scene mesh. Node transforms are already baked; the GLB node has no additional transform. An explicit PlayCanvas option rotates 180 degrees about Z.
+- **PlayCanvas voxel**: version 1.1 `.voxel.json` / `.voxel.bin` file pair in PlayCanvas engine coordinates. Uses exactly the mesher's solid voxel set, including floating blobs, walls, and roof. Keep the two files together with the same stem. Mesh detail is voxel size. Informational scene bounds describe the collision proxy, not the entire source Gaussian scene. Repeated exports replace both files.
+
+Voxel output follows the [PlayCanvas voxel format specification](https://developer.playcanvas.com/user-manual/splat-transform/voxel-format/). Export a GLB separately if required. Earlier GLBs always applied the PlayCanvas rotation; native alignment now defaults to the Lichtfeld frame.
+
+## Install and verification
+
+Copy `lichtfeld_collision_mesh` into `%USERPROFILE%\.lichtfeld\plugins\` and install its NumPy, SciPy, and scikit-image dependencies through Lichtfeld's plugin setup. No other extension is required.
+
+Smooth geometry tests verify rounded vertices, closed manifold edges, outward winding, floating components, air gaps, opacity filtering, filtered ceiling height, and dense-grid limits. Geometry checks cover the ceiling formula, holes, disconnected regions, floating voxels with air underneath, nondegenerate triangles, signed enclosed volume, face merging, and budgets. Export checks independently decode octrees and validate GLB geometry and native/PlayCanvas frames. Plugin validation passes. Live operation and loading the exports in the destination engine remain to be verified.
+
+License: GPL-3.0-or-later.
+
+### __init__.py
+```
+# SPDX-License-Identifier: GPL-3.0-or-later
+from pathlib import Path
+import numpy as np
+import lichtfeld as lf
+from .geometry import build, write_obj, opacity_keep, vertex_normals
+from .save_dialog import collision_filename, choose_export_path
+from .voxel import write_voxel
+from .glb import write_glb
+
+active = None
+status = 'Select floor or ground splats, then generate a collision mesh.'
+detail = 1
+wall_height = 3.
+surface_mode = 0
+smoothing = .35
+ignore_transparent = True
+opacity_cutoff = .15
+export_format = 0
+glb_frame = 0
+export_name = 'splat-model-collision.obj'
+
+def generate():
+    global active, status, export_name
+    scene = lf.get_scene()
+    if scene is None or lf.context().is_training:
+        raise ValueError('Load a scene and pause training first.')
+    nodes = [n for n in scene.get_nodes() if n.type == lf.scene.NodeType.SPLAT]
+    total = sum(n.gaussian_count for n in nodes)
+    mask = scene.selection_mask
+    if mask is None:
+        raise ValueError('Select floor/ground splats first.')
+    mask = np.asarray(mask.cpu().numpy()).reshape(-1).astype(bool)
+    if len(mask) != total:
+        raise ValueError('Selection layout does not match this scene.')
+    chunks, source_names, offset, ignored = [], [], 0, 0
+    for n in nodes:
+        selected = mask[offset:offset+n.gaussian_count].copy(); offset += n.gaussian_count
+        if not scene.is_node_effectively_visible(n.id) or not selected.any():
+            continue
+        data = n.splat_data()
+        if data.has_deleted_mask():
+            selected &= ~np.asarray(data.deleted.cpu().numpy()).reshape(-1).astype(bool)
+        if ignore_transparent:
+            candidates=np.flatnonzero(selected)
+            logits=np.asarray(data.opacity_raw.cpu().numpy()).reshape(-1)[candidates]
+            keep=opacity_keep(logits,opacity_cutoff)
+            ignored+=int((~keep).sum())
+            selected[candidates[~keep]]=False
+        xyz = np.asarray(data.means_raw.cpu().numpy())[selected]
+        if not len(xyz):
+            continue
+        source_names.append(n.name)
+        matrix = np.asarray(n.world_transform).reshape(4,4)
+        chunks.append(xyz @ matrix[:3,:3].T + matrix[:3,3])
+    if not chunks or not sum(len(c) for c in chunks):
+        raise ValueError('No selected splats remain. Lower the opacity cutoff or disable the transparent-splat filter.')
+    mesh = build(np.concatenate(chunks), [.05,.1,.2,.5,1.][detail], wall_height,
+                 smooth=surface_mode == 0,smoothing=smoothing)
+    # Add the generated mesh in native world coordinates.
+    vertices = np.asarray(mesh['vertices'],dtype=np.float32)*[-1,-1,1]
+    normals = lf.Tensor.from_numpy((vertex_normals(mesh)*[-1,-1,1]).astype(np.float32)) if surface_mode == 0 else None
+    scene.add_mesh('Selected-splat collision mesh',lf.Tensor.from_numpy(vertices.astype(np.float32)),
+                   lf.Tensor.from_numpy(np.asarray(mesh['faces'],dtype=np.int32)),normals=normals)
+    active = mesh
+    export_name = collision_filename(source_names[0])
+    status = f"Generated {mesh['surfaceMode']} mesh: {len(mesh['faces']):,} triangles. Ignored {ignored:,} transparent splats. Ceiling at {mesh['ceilingHeight']:.3f} m."
+
+class CollisionPanel(lf.ui.Panel):
+    id = 'lichtfeld_collision_mesh.panel'
+    label = 'Collision Mesh'
+    space = lf.ui.PanelSpace.MAIN_PANEL_TAB
+    order = 112
+    template = str(Path(__file__).with_name('panel.rml'))
+    def draw(self, ui):
+        global detail, wall_height, active, status, export_format, glb_frame
+        global surface_mode, smoothing, ignore_transparent, opacity_cutoff
+        ui.heading('Selected splats → collision mesh')
+        ui.text_wrapped('Select ground plus any floating blobs to include. 3D voxels preserve separate height layers. Walls close the selection footprint; a ceiling closes the top at highest selected splat + wall height. Native -Y is up; scene units must be meters.')
+        _, detail = ui.combo('Mesh detail',detail,['0.05 m','0.1 m (default)','0.2 m','0.5 m','1 m'])
+        _, surface_mode = ui.combo('Voxel surface',surface_mode,['Smooth remesh (default)','Blocky merged faces'])
+        if surface_mode == 0:
+            _, smoothing = ui.slider_float('Surface smoothing (voxels)',smoothing,0.,.45)
+        _, ignore_transparent = ui.checkbox('Ignore transparent splats / floaters',ignore_transparent)
+        if ignore_transparent:
+            _, opacity_cutoff = ui.slider_float('Minimum splat opacity',opacity_cutoff,.01,.95)
+            ui.text_wrapped('Filters selected splats below this opacity before meshing and calculating the ceiling. High-opacity floating objects remain.')
+        _, wall_height = ui.slider_float('Wall height (m)',wall_height,.5,10.)
+        _, export_format = ui.combo('Export format',export_format,['OBJ mesh','PlayCanvas voxel (.voxel.json + .voxel.bin)','GLB mesh'])
+        _, glb_frame = ui.combo('GLB coordinate frame',glb_frame,['Lichtfeld world (same as OBJ)','PlayCanvas splat import (180 degrees about Z)'])
+        if ui.button('Generate from selected splats'):
+            try: generate()
+            except Exception as exc: status = str(exc); lf.log.error(status)
+        if active is not None:
+            if export_format == 1:
+                ui.text_wrapped('Voxel export uses the same 3D solids as the mesher, including floating blobs and ceiling. Mesh detail is voxel size. Keep both exported files together.')
+            if ui.button('Export collision mesh'):
+                try:
+                    if active is None: raise ValueError('Generate a mesh first.')
+                    suffix = ['.obj','.voxel.json','.glb'][export_format]
+                    name = export_name[:-4]+suffix
+                    chosen = choose_export_path(name,voxel=export_format == 1,glb=export_format == 2)
+                    if chosen:
+                        selected_path, export_format = chosen
+                        path = Path(selected_path)
+                        if export_format == 1:
+                            binary_path = write_voxel(active,path)
+                            status = f'Exported {path} and {binary_path.name}'
+                        elif export_format == 2:
+                            write_glb(active,path,playcanvas_frame=glb_frame == 1)
+                            status = f'Exported {path}'
+                        else:
+                            write_obj(active,path)
+                            status = f'Exported {path}'
+                except Exception as exc: status = str(exc)
+        ui.text_wrapped(status)
+        ui.text_wrapped('Export the mesh for use as collision geometry in your target viewer or engine.')
+
+def on_load(): lf.register_class(CollisionPanel)
+def on_unload():
+    global active
+    active = None
+    lf.unregister_class(CollisionPanel)
+```
+
+### geometry.py
+```
+# SPDX-License-Identifier: GPL-3.0-or-later
+"""Sparse 3D voxel enclosure with merged planar surface faces."""
+import math
+import numpy as np
+
+def opacity_keep(logits, threshold):
+    """Raw Lichtfeld opacity is a logit; compare in logit space without overflow."""
+    if not 0 < threshold < 1:
+        raise ValueError('Opacity cutoff must be between zero and one.')
+    values=np.asarray(logits)
+    return np.isfinite(values) & (values >= math.log(threshold/(1-threshold)))
+
+def smooth_surface(voxels, spacing, ceiling, roof_layer, smoothing=.35,
+                   max_samples=32000000, max_faces=2000000):
+    from scipy.ndimage import gaussian_filter
+    from skimage.measure import marching_cubes
+    if not 0 <= smoothing <= .45:
+        raise ValueError('Smoothing must be between 0 and 0.45 voxels.')
+    positions=np.asarray(sorted(voxels),dtype=np.int64)
+    low=positions.min(axis=0)-2
+    shape=positions.max(axis=0)-low+3
+    if math.prod(map(int,shape))>max_samples:
+        raise ValueError('Smooth remesh grid exceeds 32 million samples. Choose coarser detail or a smaller region.')
+    field=np.zeros(tuple(shape),dtype=np.float32)
+    indices=positions-low
+    field[tuple(indices.T)]=1.
+    if smoothing:
+        field=gaussian_filter(field,sigma=smoothing,mode='constant',cval=0.,truncate=3.)
+    vertices,faces,_,_=marching_cubes(field,level=.5,spacing=(spacing,)*3,
+                                     allow_degenerate=False,method='lewiner')
+    if len(faces)>max_faces:
+        raise ValueError('Smooth remesh exceeds two million triangles. Choose coarser detail.')
+    # Scalar samples live at voxel centers, not grid corners.
+    vertices=vertices.astype(np.float64)+(low+.5)*spacing
+    roof_bottom=roof_layer*spacing
+    top_region=vertices[:,1]>=roof_bottom
+    vertices[top_region,1]=roof_bottom+(vertices[top_region,1]-roof_bottom)*(ceiling-roof_bottom)/spacing
+    top=vertices[:,1].max()
+    vertices[np.isclose(vertices[:,1],top,atol=1e-7,rtol=0),1]=ceiling
+    # Ensure glTF and OBJ use outward triangle winding.
+    triangles=vertices[faces]
+    volume=np.einsum('ij,ij->i',triangles[:,0],np.cross(triangles[:,1],triangles[:,2])).sum()
+    if volume<0:faces=faces[:,[0,2,1]]
+    return vertices.tolist(),faces.tolist()
+
+def surface(voxels, spacing, ceiling, roof_layer, max_quads=1000000):
+    planes = {}
+    for p in voxels:
+        for axis in range(3):
+            other = [a for a in range(3) if a != axis]
+            for sign in [-1,1]:
+                q = list(p); q[axis] += sign
+                if tuple(q) not in voxels:
+                    key = (axis,sign,p[axis]+(sign>0))
+                    planes.setdefault(key,set()).add((p[other[0]],p[other[1]]))
+    vertices, faces, lookup = [], [], {}
+    def vertex(p):
+        point = [v*spacing for v in p]
+        if p[1] == roof_layer+1: point[1] = ceiling
+        key = tuple(point)
+        if key not in lookup:
+            lookup[key]=len(vertices);vertices.append(point)
+        return lookup[key]
+    quads=0
+    for (axis,sign,level),tiles in sorted(planes.items()):
+        other = [a for a in range(3) if a != axis]
+        for u,v in sorted(tiles):
+            if (u,v) not in tiles:continue
+            width=1
+            while (u+width,v) in tiles:width+=1
+            height=1
+            while all((u+i,v+height) in tiles for i in range(width)):height+=1
+            for i in range(width):
+                for j in range(height):tiles.remove((u+i,v+j))
+            corners=[]
+            for a,b in [(u,v),(u+width,v),(u+width,v+height),(u,v+height)]:
+                p=[0,0,0];p[axis]=level;p[other[0]]=a;p[other[1]]=b;corners.append(vertex(p))
+            if sign != (-1 if axis==1 else 1):corners.reverse()
+            a,b,c,d=corners;faces.extend([[a,b,c],[a,c,d]])
+            quads+=1
+            if quads>max_quads:raise ValueError('Surface exceeds one million quads. Choose coarser detail.')
+    return vertices,faces
+
+def build(points, spacing=.1, wall_height=3., max_cells=100000, max_voxels=5000000,
+          smooth=True, smoothing=.35):
+    points=np.asarray(points,dtype=float)
+    if points.ndim!=2 or points.shape[1]!=3 or not len(points):
+        raise ValueError('Select ground/scene splats first.')
+    if not np.isfinite(points).all() or not .025<=spacing<=1 or not .5<=wall_height<=20:
+        raise ValueError('Invalid coordinates, spacing, or wall height.')
+    points=points*[-1,-1,1]
+    selected=np.unique(np.floor(points/spacing).astype(np.int64),axis=0)
+    if len(selected)>max_voxels:raise ValueError('Too many selected voxels. Choose coarser detail.')
+    solids={tuple(map(int,p)) for p in selected}
+    floor={}
+    for x,y,z in solids:floor[x,z]=min(floor.get((x,z),y),y)
+    if len(floor)>max_cells:raise ValueError('Mesh exceeds 100,000 footprint cells. Choose coarser detail.')
+    highest=float(points[:,1].max())
+    ceiling=highest+wall_height
+    roof_layer=math.ceil(ceiling/spacing)-1
+    boundary_edges=0
+    for (x,z),bottom in floor.items():
+        exposed=sum(k not in floor for k in [(x-1,z),(x+1,z),(x,z-1),(x,z+1)])
+        boundary_edges+=exposed
+        if exposed:
+            count=roof_layer-bottom+1
+            if len(solids)+count>max_voxels:raise ValueError('Enclosure exceeds five million voxels. Choose coarser detail.')
+            solids.update((x,y,z) for y in range(bottom,roof_layer+1))
+        else:solids.add((x,roof_layer,z))
+        if len(solids)>max_voxels:raise ValueError('Enclosure exceeds five million voxels. Choose coarser detail.')
+    vertices,faces=(smooth_surface(solids,spacing,ceiling,roof_layer,smoothing)
+                    if smooth else surface(solids,spacing,ceiling,roof_layer))
+    return {'version':2,'spacing':spacing,'wallHeight':wall_height,
+            'ceilingHeight':ceiling,'highestSelectedHeight':highest,
+            'surfaceMode':'smooth' if smooth else 'blocky','smoothing':smoothing if smooth else 0.,
+            'cells':[[x,z,y*spacing] for (x,z),y in sorted(floor.items())],
+            'voxels':sorted(solids),'vertices':vertices,'faces':faces,'boundaryEdges':boundary_edges}
+
+def vertex_normals(mesh):
+    vertices=np.asarray(mesh['vertices'],dtype=np.float32)
+    faces=np.asarray(mesh['faces'],dtype=np.int32)
+    triangles=vertices[faces]
+    normals=np.zeros_like(vertices)
+    n=np.cross(triangles[:,1]-triangles[:,0],triangles[:,2]-triangles[:,0])
+    for i in range(3):np.add.at(normals,faces[:,i],n)
+    normals/=np.maximum(np.linalg.norm(normals,axis=1)[:,None],1e-20)
+    return normals
+
+def write_obj(mesh, path):
+    with open(path,'w',encoding='utf-8') as f:
+        f.write('# Lichtfeld collision mesh; native world coordinates; meters\n')
+        for x,y,z in mesh['vertices']:f.write(f'v {-x:.9g} {-y:.9g} {z:.9g}\n')
+        if mesh.get('surfaceMode')=='smooth':
+            for x,y,z in vertex_normals(mesh):f.write(f'vn {-x:.9g} {-y:.9g} {z:.9g}\n')
+            f.write('s 1\n')
+            for a,b,c in mesh['faces']:f.write(f'f {a+1}//{a+1} {b+1}//{b+1} {c+1}//{c+1}\n')
+        else:
+            for a,b,c in mesh['faces']:f.write(f'f {a+1} {b+1} {c+1}\n')
+```
+
+### glb.py
+```
+# SPDX-License-Identifier: GPL-3.0-or-later
+"""Standalone glTF 2.0 binary collision mesh, native world frame by default."""
+import json
+import struct
+from pathlib import Path
+import numpy as np
+
+def write_glb(mesh, path, playcanvas_frame=False):
+    vertices = np.asarray(mesh['vertices'],dtype='<f4')
+    if not playcanvas_frame:
+        # Undo the generator's internal Z-180 rotation, matching scene.add_mesh
+        # and OBJ world vertices. Translation/scale are already baked by generate.
+        vertices = (vertices * np.array([-1,-1,1],dtype='<f4')).astype('<f4')
+    faces = np.asarray(mesh['faces'],dtype='<u4')
+    normals = np.zeros_like(vertices)
+    triangles = vertices[faces]
+    face_normals = np.cross(triangles[:,1]-triangles[:,0],triangles[:,2]-triangles[:,0])
+    for i in range(3):
+        np.add.at(normals,faces[:,i],face_normals)
+    lengths = np.linalg.norm(normals,axis=1)
+    normals /= np.maximum(lengths[:,None],1e-20)
+    positions = vertices.tobytes()
+    normal_bytes = normals.astype('<f4').tobytes()
+    indices = faces.tobytes()
+    binary = positions+normal_bytes+indices
+    views = [dict(buffer=0,byteOffset=0,byteLength=len(positions),target=34962),
+             dict(buffer=0,byteOffset=len(positions),byteLength=len(normal_bytes),target=34962),
+             dict(buffer=0,byteOffset=len(positions)+len(normal_bytes),byteLength=len(indices),target=34963)]
+    document = dict(asset={'version':'2.0','generator':'Lichtfeld Collision Mesh 0.4.0'},
+                    scene=0,scenes=[{'nodes':[0]}],nodes=[{'mesh':0,'name':'Collision mesh'}],
+                    meshes=[{'primitives':[{'attributes':{'POSITION':0,'NORMAL':1},'indices':2,'material':0,'mode':4}]}],
+                    materials=[{'name':'Collision preview','doubleSided':True,
+                                'pbrMetallicRoughness':{'baseColorFactor':[.2,.7,.9,1.],'metallicFactor':0.,'roughnessFactor':1.}}],
+                    buffers=[{'byteLength':len(binary)}],bufferViews=views,
+                    accessors=[{'bufferView':0,'componentType':5126,'count':len(vertices),'type':'VEC3',
+                                'min':vertices.min(axis=0).tolist(),'max':vertices.max(axis=0).tolist()},
+                               {'bufferView':1,'componentType':5126,'count':len(vertices),'type':'VEC3'},
+                               {'bufferView':2,'componentType':5125,'count':faces.size,'type':'SCALAR'}])
+    header = json.dumps(document,separators=(',',':')).encode('utf-8')
+    header += b' '*((-len(header))%4)
+    binary += b'\0'*((-len(binary))%4)
+    output = struct.pack('<III',0x46546C67,2,12+8+len(header)+8+len(binary))
+    output += struct.pack('<II',len(header),0x4E4F534A)+header
+    output += struct.pack('<II',len(binary),0x004E4942)+binary
+    Path(path).write_bytes(output)
+```
+
+### save_dialog.py
+```
+# SPDX-License-Identifier: GPL-3.0-or-later
+"""Windows native collision export save dialog."""
+import ctypes
+from ctypes import wintypes
+import re
+from pathlib import Path
+
+def collision_filename(model_name):
+    name = Path(str(model_name).replace('\\', '/')).stem
+    name = re.sub(r'[<>:"/\\|?*\x00-\x1f]', '_', name).strip(' .') or 'splat-model'
+    return name[:180] + '-collision.obj'
+
+def format_path(filename, format_index):
+    suffix = ['.obj','.voxel.json','.glb'][format_index]
+    name = str(filename)
+    if name.lower().endswith(suffix):
+        return name
+    for extension in ['.voxel.json','.obj','.glb','.json']:
+        if name.lower().endswith(extension):
+            name = name[:-len(extension)]
+            break
+    return name+suffix
+
+def choose_export_path(default_name, voxel=False, glb=False):
+    class OPENFILENAMEW(ctypes.Structure):
+        _fields_ = [
+            ('lStructSize', wintypes.DWORD), ('hwndOwner', wintypes.HWND),
+            ('hInstance', wintypes.HINSTANCE), ('lpstrFilter', wintypes.LPCWSTR),
+            ('lpstrCustomFilter', wintypes.LPWSTR), ('nMaxCustFilter', wintypes.DWORD),
+            ('nFilterIndex', wintypes.DWORD), ('lpstrFile', wintypes.LPWSTR),
+            ('nMaxFile', wintypes.DWORD), ('lpstrFileTitle', wintypes.LPWSTR),
+            ('nMaxFileTitle', wintypes.DWORD), ('lpstrInitialDir', wintypes.LPCWSTR),
+            ('lpstrTitle', wintypes.LPCWSTR), ('Flags', wintypes.DWORD),
+            ('nFileOffset', wintypes.WORD), ('nFileExtension', wintypes.WORD),
+            ('lpstrDefExt', wintypes.LPCWSTR), ('lCustData', wintypes.LPARAM),
+            ('lpfnHook', ctypes.c_void_p), ('lpTemplateName', wintypes.LPCWSTR),
+            ('pvReserved', ctypes.c_void_p), ('dwReserved', wintypes.DWORD),
+            ('FlagsEx', wintypes.DWORD)]
+    filename = ctypes.create_unicode_buffer(default_name, 32768)
+    user32 = ctypes.WinDLL('user32', use_last_error=True)
+    user32.GetActiveWindow.restype = wintypes.HWND
+    dialog = OPENFILENAMEW()
+    dialog.lStructSize = ctypes.sizeof(dialog)
+    dialog.hwndOwner = user32.GetActiveWindow()
+    dialog.lpstrFilter = ('Wavefront OBJ mesh (*.obj)\0*.obj\0'
+                         'PlayCanvas voxel header (*.voxel.json)\0*.voxel.json\0'
+                         'glTF binary mesh (*.glb)\0*.glb\0\0')
+    dialog.nFilterIndex = 2 if voxel else 3 if glb else 1
+    dialog.lpstrFile = ctypes.cast(filename, wintypes.LPWSTR)
+    dialog.nMaxFile = len(filename)
+    dialog.lpstrTitle = 'Export collision mesh'
+    # Apply the chosen filter's suffix ourselves, including the compound voxel suffix.
+    dialog.lpstrDefExt = None
+    # Explorer UI, overwrite prompt, existing destination directory, keep cwd.
+    dialog.Flags = 0x00080000 | 0x00000002 | 0x00000800 | 0x00000008
+    comdlg32 = ctypes.WinDLL('comdlg32', use_last_error=True)
+    comdlg32.GetSaveFileNameW.argtypes = [ctypes.POINTER(OPENFILENAMEW)]
+    comdlg32.GetSaveFileNameW.restype = wintypes.BOOL
+    if comdlg32.GetSaveFileNameW(ctypes.byref(dialog)):
+        format_index = dialog.nFilterIndex-1
+        selected = format_path(filename.value,format_index)
+        if selected != filename.value and Path(selected).exists():
+            user32.MessageBoxW.argtypes = [wintypes.HWND,wintypes.LPCWSTR,wintypes.LPCWSTR,wintypes.UINT]
+            user32.MessageBoxW.restype = ctypes.c_int
+            if user32.MessageBoxW(dialog.hwndOwner,f'{selected}\n\nReplace this file?',
+                                 'Confirm export overwrite',0x00000004|0x00000030|0x00000100) != 6:
+                return None
+        return selected, format_index
+    error = comdlg32.CommDlgExtendedError()
+    if error:
+        raise RuntimeError(f'Save dialog failed (Windows error {error:#x}).')
+    return None
+```
+
+### voxel.py
+```
+# SPDX-License-Identifier: GPL-3.0-or-later
+"""PlayCanvas voxel 1.1 writer: sparse octree, engine-space floor/wall solids."""
+import json
+import math
+import os
+import struct
+import tempfile
+from collections import deque
+from pathlib import Path
+
+def encode_voxels(voxels, resolution, scene_bounds):
+    if not voxels:
+        raise ValueError('No collision voxels to export.')
+    origin = [min(p[a] for p in voxels)//4*4 for a in range(3)]
+    maximum = [(max(p[a] for p in voxels)//4+1)*4 for a in range(3)]
+    blocks = {}
+    for p in voxels:
+        q = tuple(p[a]-origin[a] for a in range(3))
+        key = tuple(v//4 for v in q)
+        bit = q[0]%4 + (q[1]%4)*4 + (q[2]%4)*16
+        blocks[key] = blocks.get(key, 0) | (1 << bit)
+    depth = max(1, (max((maximum[a]-origin[a])//4 for a in range(3))-1).bit_length())
+    root = {}
+    for key, mask in blocks.items():
+        node = root
+        for shift in range(depth-1, 0, -1):
+            octant = ((key[0]>>shift)&1)|(((key[1]>>shift)&1)<<1)|(((key[2]>>shift)&1)<<2)
+            node = node.setdefault(octant, {})
+        octant = (key[0]&1)|((key[1]&1)<<1)|((key[2]&1)<<2)
+        node[octant] = mask
+    nodes, leaf_data = [0], []
+    queue = deque([(root, 0)])
+    interiors = mixed = 0
+    while queue:
+        node, index = queue.popleft()
+        if isinstance(node, int):
+            if node == (1 << 64)-1:
+                nodes[index] = 0xFF000000
+            else:
+                if len(leaf_data)//2 >= 1 << 24:
+                    raise ValueError('Voxel format leaf limit exceeded.')
+                nodes[index] = len(leaf_data)//2
+                leaf_data.extend([node & 0xFFFFFFFF, node >> 32]); mixed += 1
+        else:
+            if len(nodes)+len(node) > 1 << 24:
+                raise ValueError('Voxel format node limit exceeded.')
+            first = len(nodes)
+            nodes[index] = (sum(1<<octant for octant in node)<<24)|first
+            interiors += 1
+            for octant in sorted(node):
+                queue.append((node[octant],len(nodes))); nodes.append(0)
+    meta = dict(version='1.1',asset={'generator':'Lichtfeld Collision Mesh 0.4.0'},
+                gridBounds={'min':[v*resolution for v in origin],'max':[v*resolution for v in maximum]},
+                sceneBounds=scene_bounds,voxelResolution=resolution,leafSize=4,
+                treeDepth=depth,numInteriorNodes=interiors,numMixedLeaves=mixed,
+                nodeCount=len(nodes),leafDataCount=len(leaf_data))
+    binary = struct.pack(f'<{len(nodes)+len(leaf_data)}I',*(nodes+leaf_data))
+    return meta, binary
+
+def voxelize(mesh, max_voxels=5000000):
+    if 'voxels' in mesh:
+        voxels = {tuple(v) for v in mesh['voxels']}
+        if len(voxels)>max_voxels:
+            raise ValueError('Voxel export exceeds five million solid voxels.')
+        vertices = mesh['vertices']
+        bounds = {'min':[min(p[a] for p in vertices) for a in range(3)],
+                  'max':[max(p[a] for p in vertices) for a in range(3)]}
+        return encode_voxels(voxels,mesh['spacing'],bounds)
+    s = mesh['spacing']
+    cells = {(x,z):h for x,z,h in mesh['cells']}
+    corners = {}
+    for (x,z),h in cells.items():
+        for key in [(x,z),(x+1,z),(x,z+1),(x+1,z+1)]:
+            corners.setdefault(key,[]).append(h)
+    heights = {key:sum(v)/len(v) for key,v in corners.items()}
+    voxels = set()
+    for x,z in cells:
+        values = [heights[k] for k in [(x,z),(x+1,z),(x,z+1),(x+1,z+1)]]
+        # Conservative rasterization: solid floor layer, inward one-voxel walls.
+        low = math.floor(min(values)/s)-1
+        boundary = any(k not in cells for k in [(x-1,z),(x+1,z),(x,z-1),(x,z+1)])
+        high = math.ceil((max(values)+(mesh['wallHeight'] if boundary else 0))/s)-1
+        if len(voxels)+high-low+1 > max_voxels:
+            raise ValueError('Voxel export exceeds 5 million solid voxels. Choose coarser mesh detail.')
+        voxels.update((x,y,z) for y in range(low,high+1))
+    vertices = mesh['vertices']
+    bounds = {'min':[min(p[a] for p in vertices) for a in range(3)],
+              'max':[max(p[a] for p in vertices) for a in range(3)]}
+    return encode_voxels(voxels,s,bounds)
+
+def write_voxel(mesh, path):
+    path = Path(path)
+    if not str(path).lower().endswith('.voxel.json'):
+        raise ValueError('Choose a filename ending in .voxel.json.')
+    binary_path = path.with_name(path.name[:-len('.voxel.json')]+'.voxel.bin')
+    meta,binary = voxelize(mesh)
+    # Prepare both files before replacing either destination; publish header last.
+    staged = []
+    try:
+        for destination,data in [(binary_path,binary),
+                                 (path,(json.dumps(meta,indent=2)+'\n').encode('utf-8'))]:
+            with tempfile.NamedTemporaryFile(dir=path.parent,prefix='.collision-',delete=False) as f:
+                staged.append((Path(f.name),destination))
+                f.write(data)
+        for temporary,destination in staged:
+            os.replace(temporary,destination)
+    finally:
+        for temporary,_ in staged:
+            temporary.unlink(missing_ok=True)
+    return binary_path
+```

@@ -1,0 +1,142 @@
+# Radiance Surfaces Loss Reformulation
+
+Also called: Dual-loss reformulation, Surface-based NeRF loss derivation
+
+## Overview
+This method reformulates the stochastic background expectation loss used in Radiance Surfaces [S1] into a differentiable form that structurally matches the standard NeRF volume rendering loss. This allows the surface-based optimization to leverage standard gradient descent algorithms while maintaining the ability to handle stochastic background sampling [S1]. Unlike traditional image-space methods that only compute a loss, this approach operates in scene space, allowing background distributions to be tailored to focus on regions of interest [S1].
+
+## How it works
+**Inputs and Outputs:**
+*   **Inputs:** A set of $m$ sample points $\{t_1, \dots, t_m\}$ along a ray, their corresponding occupancies $\alpha_i$, colors $L_i$, and a loss function $\ell(L_i, L_{\text{target}})$ comparing rendered color to target.
+*   **Outputs:** A scalar loss value $\mathcal{L}$ and its gradients with respect to the network parameters (embedded in $\alpha_i$ and $L_i$).
+
+**Data Structures:**
+*   Arrays for occupancy $\alpha \in [0,1]^m$, color $L \in \mathbb{R}^{3m}$, and accumulated transmittance $T \in [0,1]^m$.
+*   The occupancy $\alpha_i$ is derived from the density $\sigma_i$ and step size $\delta_i$ as $\alpha_i = 1 - \exp(-\sigma_i \delta_i)$ [S1].
+
+**Parameters:**
+*   $c$: A constant for the color-dependent background distribution. The sources specify $c=16$ for experiments [S1].
+
+**Step-by-Step Derivation and Implementation:**
+
+1.  **Define the Stochastic Background Expectation:**
+    The original loss involves an expectation over background samples $t > t_i$. This is computed as a sum over subsequent samples [S1]:
+    $$ \hat{\mathbb{E}}_{t > t_i}[\ell(L_t)] = \sum_{j=i+1}^m \left( \prod_{t=i+1}^{j-1} (1 - \alpha_t) \right) \alpha_j \ell(L_j) \quad (9) $$
+
+2.  **Formulate the Initial Loss with Detached Terms:**
+    The loss is structured to minimize the weighted sum of candidate losses and background expectations. To preserve derivatives and minima locations while allowing the loss value to differ by a constant, the method uses an $\text{argmin}$ formulation. Terms not meant for differentiation (the weight term and the background expectation) are treated as constants (detached) [S1]. We denote differentiated terms with an underline $\underline{\cdot}$ [S1].
+    $$ \text{argmin} \sum_{i=1}^m \left[ \underbrace{\left( \prod_{k=1}^{i-1} (1 - \alpha_k) \right)}_{\text{weight}} \underbrace{\left( \underline{\alpha_i} \ell(\underline{L_i}) + (1 - \underline{\alpha_i}) \hat{\mathbb{E}}_{t > t_i}[\ell(L_t)] \right)}_{\text{candidate}} \right] \quad (8) $$
+
+3.  **Expand Using the Product Rule:**
+    Expand the expression into three terms (a), (b), and (c) to isolate the dependencies [S1]:
+    $$ \begin{aligned} &\text{argmin} \sum_{i=1}^m \left[ \underbrace{\left( \prod_{k=1}^{i-1} (1 - \alpha_k) \right)}_{\text{(a)}} \left( \underline{\alpha_i} \ell(\underline{L_i}) + (1 - \underline{\alpha_i}) \hat{\mathbb{E}}_{t > t_i}[\ell(L_t)] \right) \right] \\ &= \text{argmin} \underbrace{\sum_{i=1}^m \underbrace{\left( \prod_{k=1}^{i-1} (1 - \alpha_k) \right)}_{\text{(a)}} \alpha_i \ell(\underline{L_i})}_{\text{(b)}} + \underbrace{\sum_{i=1}^m \underbrace{\left( \prod_{k=1}^{i-1} (1 - \alpha_k) \right)}_{\text{(b)}} \underline{\alpha_i} \ell(L_i)}_{\text{(c)}} \\ &\quad + \underbrace{\sum_{i=1}^m \underbrace{\left( \prod_{k=1}^{i-1} (1 - \alpha_k) \right)}_{\text{(c)}} \left( (1 - \underline{\alpha_i}) \hat{\mathbb{E}}_{t > t_i}[\ell(L_t)] \right)}, \end{aligned} \quad (10) $$
+    *Note: The source text contains a notational inconsistency in Eq. 10 where term (b) and (c) labels are duplicated in the expansion line. Based on the subsequent derivation, term (b) corresponds to the direct loss component $\alpha_i \ell(L_i)$ and term (c) corresponds to the background expectation component.*
+
+4.  **Reorder and Simplify Term (c):**
+    Substitute Eq. (9) into term (c) and reorder the double summation [S1]:
+    $$ (c) = \sum_{i=1}^m \sum_{j=i+1}^m \left( \prod_{k=1}^{i-1} (1 - \alpha_k) \right) \left( (1 - \underline{\alpha_i}) \left( \prod_{t=i+1}^{j-1} (1 - \alpha_t) \right) \alpha_j \ell(L_j) \right) \quad (11) $$
+    Rename indices $i \leftrightarrow j$ to align the outer loop with the final sample index $i$ [S1]:
+    $$ (11) = \sum_{i=1}^m \sum_{j=1}^{i-1} \prod_{k=1}^{j-1} (1 - \alpha_k) (1 - \underline{\alpha_j}) \alpha_i \ell(L_i) \quad (12) $$
+
+5.  **Combine Terms (b) and (c):**
+    Combine the simplified term (c) with term (b). The summation over $j$ in term (c) effectively reconstructs the transmittance product excluding the current $\alpha_i$, leading to a telescoping-like simplification where the combined weight becomes $\prod_{k=1}^{i-1} (1 - \underline{\alpha}_k) \underline{\alpha}_i$ plus a constant $c_1$ [S1]:
+    $$ (b)+(c) = \sum_{i=1}^m \left( \prod_{k=1}^{i-1} (1 - \underline{\alpha}_k) \underline{\alpha}_i \ell(L_i) \right) + c_1 \quad (13) $$
+
+6.  **Final Differentiable Loss:**
+    Insert the result back into the $\text{argmin}$ expression. The constant $c_1$ and the detached weight term from the original Eq. (8) are absorbed or ignored for gradient computation, resulting in a loss function identical in structure to the standard NeRF loss, where all variables are differentiable [S1]:
+    $$ \text{argmin} \sum_{i=1}^m \left( \prod_{k=1}^{i-1} (1 - \underline{\alpha}_k) \underline{\alpha}_i \ell(\underline{L_i}) \right) \quad (14) $$
+
+**Pseudocode:**
+The following Python-like pseudocode implements the final differentiable loss derived above. It assumes `alpha` and `L` are tensors of shape `(num_rays, num_samples, 3)` and `(num_rays, num_samples)`, and `target` is `(num_rays, num_samples, 3)`. The loss function $\ell$ is assumed to be a standard pixel-wise loss (e.g., MSE).
+
+> **Unverified code.** The code below did not pass a test run against a reference implementation, or no test fits it, so it may contain errors.
+
+```python
+import torch
+import torch.nn.functional as F
+
+def radiance_surfaces_loss_reformulation(alpha, L, target):
+    """
+    Computes the reformulated Radiance Surfaces loss.
+    
+    Args:
+        alpha: Tensor of shape (num_rays, num_samples), occupancy values.
+        L: Tensor of shape (num_rays, num_samples, 3), rendered colors.
+        target: Tensor of shape (num_rays, num_samples, 3), target colors.
+        
+    Returns:
+        Scalar loss tensor.
+    """
+    # 1. Compute per-sample loss
+    # l(L_i) = MSE between rendered color and target
+    # Note: In the derivation, L_i is the color at sample i.
+    # The loss is typically computed against the target image patch, 
+    # but here we assume target is aligned with samples or we take the 
+    # first sample's target per ray if target is per-ray. 
+    # Based on standard NeRF/Surface losses, target is usually per-ray.
+    # However, the derivation sums over samples. We assume target is broadcast 
+    # or L_i is compared to the target color for that ray.
+    # Let's assume target is (num_rays, 3) and we compare L_i to target.
+    
+    # Reshape target for broadcasting: (num_rays, 1, 3)
+    target_expanded = target.unsqueeze(1) 
+    
+    # Per-sample loss: (num_rays, num_samples)
+    # Using MSE loss: mean squared error over 3 channels
+    loss_per_sample = F.mse_loss(L, target_expanded, reduction='none').mean(dim=2)
+    
+    # 2. Compute transmittance T_i = product_{k=1}^{i-1} (1 - alpha_k)
+    # T[0] = 1.0
+    # T[i] = T[i-1] * (1 - alpha[i-1])
+    
+    # 1 - alpha
+    one_minus_alpha = 1.0 - alpha
+    
+    # Cumulative product of (1 - alpha)
+    # We need T_i for each i, which is the product of all previous (1-alpha)
+    # torch.cumprod computes cumulative product. 
+    # T[i] = prod_{k=0}^{i-1} (1-alpha[k])
+    # So T[0] = 1, T[1] = (1-alpha[0]), T[2] = (1-alpha[0])*(1-alpha[1])
+    
+    # Create tensor of ones for the first element
+    ones = torch.ones_like(one_minus_alpha[:, :1])
+    one_minus_alpha_cum = torch.cat([ones, one_minus_alpha[:, :-1]], dim=1)
+    
+    # Cumulative product
+    T = torch.cumprod(one_minus_alpha_cum, dim=1)
+    
+    # 3. Compute weights w_i = T_i * alpha_i
+    # Note: The final formula (14) uses \prod_{k=1}^{i-1} (1 - \alpha_k) \alpha_i
+    # This is exactly T_i * alpha_i
+    weights = T * alpha
+    
+    # 4. Compute final loss
+    # Loss = sum_i (w_i * loss_per_sample_i)
+    # We sum over samples for each ray, then mean over rays (or sum, depending on convention)
+    # The derivation sums over i=1 to m.
+    
+    ray_loss = (weights * loss_per_sample).sum(dim=1)
+    
+    # Return mean loss over rays
+    return ray_loss.mean()
+```
+
+**Edge Cases and Pitfalls:**
+*   **Precision:** The product of many $(1-\alpha_k)$ terms can underflow to zero. Standard techniques for stable transmittance computation (e.g., using log-space or careful ordering) should be applied if $m$ is large [G].
+*   **Instant NGP Slowdown:** The Instant NGP codebase targets a fixed sample size per iteration (default $2^{18}$). Because this method reconstructs surfaces and requires fewer samples per ray in converged regions, it spawns more rays to meet the sample budget, causing a slowdown [S1]. This is an implementation artifact of the training strategy, not a limitation of the method itself [S1].
+*   **Color-Dependent Background:** If using the color-dependent background distribution, the occupancy is modified as $\alpha' = \frac{\alpha}{1 + c \ell(L_p, L_{\text{target}})}$ with $c=16$. This reduces effective occupancy for misaligned colors, helping the optimizer penetrate incorrect surfaces [S1].
+
+## Operating characteristics
+*   **Time Complexity:** Linear in the number of samples per ray $m$, same as standard NeRF [S1].
+*   **Memory Complexity:** Linear in $m$ for storing intermediate transmittance and loss values [S1].
+*   **Performance:** Theoretically at least as fast as NeRF. However, in practice, when implemented in Instant NGP, it can be slower due to the increased number of rays spawned to meet the fixed sample budget [S1].
+*   **Strengths:** Operates in scene space, allowing tailored background distributions. Efficiently uses fewer resources per ray in converged regions [S1].
+*   **Limitations:** Sensitive to the training strategy's sample budgeting (e.g., Instant NGP's fixed sample size) [S1].
+
+## Background
+*   **Origin:** The method was introduced in "Radiance Surfaces: Optimizing Surface Representations with a 5D Radiance Field Loss" [S1].
+*   **History:** It was implemented in the Instant NGP codebase [Müller et al. 2022] and the ZipNeRF codebase [S1].
+*   **Usage:** Used for surface reconstruction from multi-view images, providing a dual-loss relationship with NeRF [S1].
+
+## Sources
+[S1] Radiance Surfaces: Optimizing Surface Representations with a 5D Radiance Field Loss, https://doi.org/10.1145/3721238.3730713, fetched 2026-10-26

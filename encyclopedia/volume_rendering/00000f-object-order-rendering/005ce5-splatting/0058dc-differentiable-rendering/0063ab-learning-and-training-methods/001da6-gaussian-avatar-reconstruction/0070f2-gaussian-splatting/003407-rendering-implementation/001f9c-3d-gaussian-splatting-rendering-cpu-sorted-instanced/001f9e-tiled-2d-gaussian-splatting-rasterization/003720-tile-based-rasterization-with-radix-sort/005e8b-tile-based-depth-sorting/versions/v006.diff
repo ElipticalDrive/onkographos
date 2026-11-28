@@ -1,0 +1,64 @@
+--- v005.md
++++ v006.md
+@@ -7,13 +7,46 @@
+ 
+ ## How it works
+-Inputs: A list of projected 2D Gaussian splats. Outputs: A tile-sorted list of splats ready for rasterization.
+-Data structures: Not given in the sources.
++Inputs: List of $N$ projected 2D Gaussian splats, each with center $(x_i, y_i)$, 2D covariance $\Sigma'_i$, color $c_i$, opacity $\alpha_i$, and depth $Z_c$ [G]. Outputs: A dictionary mapping each tile ID to a list of splats sorted front-to-back by depth [G].
++Data structures: A flat list of work items, each containing a 64-bit sort key, a 1D tile ID, and a splat index [Sibling: Tile-based Rasterization with Radix Sort](7921-tile-based-rasterization-with-radix-sort.md). The output is a tile-indexed array of splat lists [G].
+ Numbered steps:
+-1. Replace the standard per-ray depth sorting mechanism with a tile-based sorting approach [S1][S2, unofficial].
+-2. Ensure that the depth order of Gaussians remains consistent across neighboring pixels within a tile, preventing visual artifacts caused by inconsistent sorting when the viewpoint changes [S1][S2, unofficial].
+-Formulas: Not given in the sources.
+-Parameters: Not given in the sources.
+-Edge cases and pitfalls: Not given in the sources.
+-Pseudocode: Not given in the sources.
++1. Tile Assignment: Each Gaussian is assigned to every tile its projected 2D splat bounding box touches [Sibling: Tile-based Rasterization with Radix Sort](7921-tile-based-rasterization-with-radix-sort.md). If a splat straddles tile boundaries, it is duplicated into each relevant tile, creating one work item per (splat, tile) pair [Sibling: Tile-based Rasterization with Radix Sort](7921-tile-based-rasterization-with-radix-sort.md).
++2. Key Packing: For each work item, a 64-bit integer sort key is constructed by packing the tile ID into the high 32 bits and the splat's depth $Z_c$ into the low 32 bits [Sibling: Tile-based Rasterization with Radix Sort](7921-tile-based-rasterization-with-radix-sort.md).
++3. Global Radix Sort: A single GPU radix sort is performed over all work items [Sibling: Tile-based Rasterization with Radix Sort](7921-tile-based-rasterization-with-radix-sort.md). This simultaneously bins splats by tile ID and sorts them by depth within each tile [Sibling: Tile-based Rasterization with Radix Sort](7921-tile-based-rasterization-with-radix-sort.md).
++4. Tile Processing: Each tile is processed by one GPU thread block that walks the sorted list, performing front-to-back compositing and breaking early when transmittance $T < \epsilon$ [Sibling: Tile-based Rasterization with Radix Sort](7921-tile-based-rasterization-with-radix-sort.md).
++Formulas: The sort key is formed as $\text{key} = (\text{tile\_id} \ll 32) \mid (\text{uint32\_t})Z_c$, where $\text{tile\_id} = y \times \text{grid\_width} + x$ and $Z_c$ is cast to a 32-bit unsigned integer [Sibling: Tile-based Rasterization with Radix Sort](7921-tile-based-rasterization-with-radix-sort.md).
++Parameters: Tile dimensions $T_w \times T_h$, typically $16 \times 16$ pixels [Sibling: Tile-based Rasterization with Radix Sort](7921-tile-based-rasterization-with-radix-sort.md).
++Edge cases and pitfalls: Per-ray depth sorting causes inconsistent ordering when viewpoints rotate, leading to "popping" artifacts and less faithful view-dependent effects [S1][S2, unofficial]. Tile-based sorting ensures consistent local ordering but may introduce slight depth inaccuracies at tile boundaries if splats are large [G]. Precision loss can occur when casting $Z_c$ to uint32_t if depth values exceed $2^{32}$ units [G].
++Pseudocode:
++```python
++def tile_based_depth_sorting(splats, image_w, image_h, tile_size=16):
++    grid_w = (image_w + tile_size - 1) // tile_size
++    grid_h = (image_h + tile_size - 1) // tile_size
++    tile_splats = {}
++
++    # 1. Tile Assignment & Key Packing
++    work_items = []
++    for i, s in enumerate(splats):
++        min_tx = max(0, int((s['x'] - s['radius']) // tile_size))
++        max_tx = min(grid_w - 1, int((s['x'] + s['radius']) // tile_size))
++        min_ty = max(0, int((s['y'] - s['radius']) // tile_size))
++        max_ty = min(grid_h - 1, int((s['y'] + s['radius']) // tile_size))
++
++        for ty in range(min_ty, max_ty + 1):
++            for tx in range(min_tx, max_tx + 1):
++                tile_id = ty * grid_w + tx
++                key = (tile_id << 32) | (s['Zc'] & 0xFFFFFFFF)
++                work_items.append((key, tile_id, i))
++
++    # 2. Global Radix Sort
++    work_items.sort(key=lambda x: x[0])
++
++    # 3. Group sorted splats by tile
++    for key, tile_id, idx in work_items:
++        if tile_id not in tile_splats:
++            tile_splats[tile_id] = []
++        tile_splats[tile_id].append(splats[idx])
++
++    return tile_splats
++```
+ 
+ ## Subtopics
+@@ -26,5 +59,5 @@
+ 
+ ## Background
+-StopThePop [S1][S2, unofficial] points out that 3DGS tends to cheat view-dependent effects by popping 3D Gaussians due to the per-ray depth sorting, which leads to less faithful results when the viewpoint is rotated [S1][S2, unofficial]. To mitigate the potential of popping 3D Gaussians, StopThePop [S1][S2, unofficial] replaces the per-ray depth sorting with tile-based sorting to ensure consistent sorting order in a local region [S1][S2, unofficial].
++StopThePop [S1][S2, unofficial] identifies that standard 3D Gaussian Splatting cheats view-dependent effects by popping Gaussians due to per-ray depth sorting, yielding less faithful results upon viewpoint rotation [S1][S2, unofficial]. To mitigate this, StopThePop replaces per-ray sorting with tile-based sorting to enforce consistent depth ordering within local regions [S1][S2, unofficial].
+ 
+ ## Sources

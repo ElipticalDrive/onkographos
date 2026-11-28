@@ -1,0 +1,153 @@
+# WaveRange Compression
+
+Also called: TYMIP-G7 compression workflow, WaveRange Compression for Global Weather Simulations, concatenated wavelet compression
+
+## Overview
+WaveRange Compression is a data compression workflow designed for 3D atmospheric simulation restart files that maximizes compression ratio by concatenating decomposed sub-domains into a single 3D array per field before applying wavelet transform and range coding [S1]. It differs from independent sub-domain processing by leveraging the global statistical properties of the full domain to achieve higher compression, at the cost of increased memory usage and sequential execution requirements [S1].
+
+## How it works
+**Inputs and Outputs:**
+*   **Input:** A set of binary files containing hydrodynamic fields from a domain-decomposed simulation. Specifically, $n_f = 12$ fields per file, stored in $N_{files}$ files (e.g., 1024 files for Yin/Yang grids) [S1]. Each file contains a sub-domain of size $254 \times 43 \times 55$ grid points in double precision [S1].
+*   **Output:** A compressed binary file (or set of files) containing the encoded wavelet coefficients, along with metadata required for reconstruction [S1].
+
+**Data Structures:**
+1.  **Concatenated Array:** For each hydrodynamic field, all sub-domain subsets are merged into a single 3D array. For the reference dataset, this results in an array of size $4064 \times 2752 \times 55$ [S1].
+2.  **Temporary Storage:** Working arrays for the wavelet transform and encoding, requiring up to 6.4 GB of RAM in addition to the 4.6 GB input array storage [S1].
+
+**Steps:**
+1.  **Concatenation:** For each of the $n_f$ hydrodynamic fields, read the data from all sub-domain binary files and concatenate them into a single contiguous 3D array $V_{field}$ [S1].
+2.  **Wavelet Transform:** Apply a separable 3D wavelet transform to $V_{field}$ to generate a set of coefficients $C$ [S1]. This decomposes the volume into approximation and detail subbands [G].
+3.  **Quantization/Thresholding:** Quantize the coefficients based on a tolerance parameter $\varepsilon$. The maximum relative error $e_\infty$ is calculated as the maximum relative error over all data points [S1]. Note that $e_\infty$ saturates at $10^{-14}$ due to round-off errors, regardless of the threshold $\epsilon$ [S1].
+4.  **Range Coding:** Encode the quantized coefficients using range coding (arithmetic coding) to produce the compressed bitstream [S1].
+5.  **Serialization:** Write the encoded data and necessary metadata (grid dimensions, field identifiers) into the output binary file [S1].
+
+**Formulas:**
+The compressed file size $\Sigma_T$ (as a percentage of the original size) for global weather data is approximated by the linear fit:
+$$ \Sigma_T = (-9.5 - 2.7 \log_{10} e_\infty) \times 100\% $$
+where $e_\infty$ is the maximum relative error over all data points [S1].
+
+**Parameters:**
+*   **Tolerance ($\varepsilon$):** Controls the trade-off between compression ratio and numerical accuracy.
+    *   Typical values: $\varepsilon < 10^{-4}$ for stable restarts.
+    *   Critical threshold: $\varepsilon \ge 10^{-3}$ causes numerical instability during simulation restart [S1].
+    *   Onset of instability: Noticeable deviations in wind speed begin at $\varepsilon = 10^{-4}$ [S1].
+
+**Edge Cases and Pitfalls:**
+*   **Numerical Instability:** Using a tolerance $\varepsilon \ge 10^{-3}$ makes it impossible to restart the simulation due to numerical instability [S1]. Even at $\varepsilon = 10^{-4}$, slight deviations in wind speed occur at the beginning of the simulation [S1].
+*   **Memory Limits:** The concatenated approach requires significant RAM (4.6 GB for input + 6.4 GB for temporary/output arrays in the reference case) [S1].
+*   **Round-off Saturation:** The relative error $e_\infty$ cannot be reduced below $10^{-14}$ due to floating-point round-off limits [S1].
+
+**Pseudocode:**
+> **Unverified code.** The code below did not pass a test run against a reference implementation, or no test fits it, so it may contain errors.
+
+```python
+def wave_range_compress(input_files, num_fields, grid_dims_sub, num_subdomains):
+    """
+    Compresses 3D simulation data by concatenating sub-domains and applying wavelet transform.
+    
+    Args:
+        input_files: List of binary file paths for sub-domains.
+        num_fields: Number of hydrodynamic fields per file (e.g., 12).
+        grid_dims_sub: Tuple (nx, ny, nz) of a single sub-domain (e.g., 254, 43, 55).
+        num_subdomains: Total number of sub-domain files (e.g., 1024).
+        
+    Returns:
+        compressed_data: Encoded binary data.
+        metadata: Dict containing original dimensions and field info.
+    """
+    # Calculate full domain dimensions
+    # Note: The reference uses 4064 x 2752 x 55. 
+    # 4064 = 16 * 254, 2752 = 64 * 43. This implies a specific decomposition structure.
+    # We assume the concatenation order matches the physical domain layout.
+    nx_full = 4064
+    ny_full = 2752
+    nz_full = 55
+    
+    # Step 1: Concatenate sub-domains for each field
+    # Initialize the full volume array for one field
+    full_volume = zeros((nx_full, ny_full, nz_full), dtype=float64)
+    
+    # Read and place sub-domain data into the full volume
+    # The exact mapping of files to sub-domain coordinates depends on the grid decomposition (Yin/Yang)
+    # This step requires knowledge of the domain decomposition layout.
+    for i, file_path in enumerate(input_files):
+        sub_data = read_binary_file(file_path) # Shape: (254, 43, 55, 12)
+        # Extract coordinates for this sub-domain based on file index i
+        # This is implementation-specific to the grid structure
+        coords = get_subdomain_coords(i, num_subdomains)
+        x_start, y_start, z_start = coords
+        x_end = x_start + grid_dims_sub[0]
+        y_end = y_start + grid_dims_sub[1]
+        z_end = z_start + grid_dims_sub[2]
+        
+        for f in range(num_fields):
+            full_volume[x_start:x_end, y_start:y_end, z_start:z_end, f] = sub_data[:, :, :, f]
+            
+    # Step 2: Process each field sequentially
+    compressed_chunks = []
+    for f in range(num_fields):
+        field_data = full_volume[:, :, :, f]
+        
+        # Apply 3D Wavelet Transform
+        # Using a separable filter bank as per shared principles [G]
+        coefficients = wavelet_transform_3d(field_data)
+        
+        # Quantize based on tolerance epsilon
+        # epsilon must be chosen carefully to avoid instability (< 10^-4)
+        epsilon = 1e-5 
+        quantized_coeffs = quantize(coefficients, epsilon)
+        
+        # Calculate max relative error for metadata
+        e_inf = calculate_max_relative_error(field_data, coefficients, quantized_coeffs)
+        
+        # Encode using Range Coding
+        encoded_chunk = range_encode(quantized_coeffs)
+        compressed_chunks.append(encoded_chunk)
+        
+    # Step 3: Combine and return
+    metadata = {
+        'original_dims': (nx_full, ny_full, nz_full, num_fields),
+        'e_inf': e_inf,
+        'epsilon': epsilon
+    }
+    
+    return concatenate(compressed_chunks), metadata
+
+def calculate_max_relative_error(original, coeffs, quantized_coeffs):
+    """
+    Calculates the L-infinity norm of the relative error.
+    """
+    # Reconstruct from quantized coefficients
+    reconstructed = inverse_wavelet_transform_3d(quantized_coeffs)
+    
+    # Calculate relative error
+    # Avoid division by zero
+    mask = abs(original) > 1e-15
+    relative_error = zeros_like(original)
+    relative_error[mask] = abs(original[mask] - reconstructed[mask]) / abs(original[mask])
+    
+    return max(relative_error)
+```
+
+## Subtopics
+
+### Independent Sub-domain Processing
+Processes each sub-domain file separately. Allows for ideal parallel speedup but results in a compressed file size ~2% larger than the concatenated approach due to lower compression ratios and local normalization [S1].
+
+### Concatenated (United) Processing
+The method described above. Merges all sub-domains before transformation. Yields higher compression ratios but requires sequential execution and high memory [S1].
+
+## Operating characteristics
+*   **Time Complexity:** Sequential processing of fields limits parallelization for the concatenated approach. Independent processing allows ideal parallel speedup [S1].
+*   **Memory Complexity:** High. Requires storing the full concatenated 3D array in memory. For the reference dataset, 4.6 GB for input and up to 6.4 GB for temporary/output arrays [S1].
+*   **Compression Ratio:** For global weather data, the compressed size $\Sigma_T$ follows $\Sigma_T = (-9.5 - 2.7 \log_{10} e_\infty) \times 100\%$ [S1]. The fields are heterogeneous and have sparser wavelet transforms, compressing more efficiently than incompressible Navier-Stokes data [S1].
+*   **Strengths:** High compression ratio for large-scale atmospheric simulations; handles heterogeneous fields efficiently [S1].
+*   **Limitations:** High memory requirement; sequential processing bottleneck; numerical instability if tolerance is too high [S1].
+*   **When to use:** When storage space is critical and memory is sufficient, and the simulation can tolerate the slight performance overhead of sequential processing.
+*   **When not to use:** When parallel processing speed is the primary constraint, or when memory is limited. Also avoid if $\varepsilon \ge 10^{-3}$ is required, as it causes instability [S1].
+
+## Background
+WaveRange Compression was developed for the TYMIP-G7 project, specifically for compressing restart files from global weather simulations (typhoon simulations) [S1]. It addresses the need to store large 3D atmospheric datasets efficiently while maintaining numerical stability for simulation restarts [S1]. The method was evaluated on datasets from the Global Environmental Multiscale (GEM) model [S1].
+
+## Sources
+[S1] WaveRange: wavelet-based data compression for three-dimensional numerical simulations on regular grids, https://doi.org/10.1007/s12650-021-00813-8, fetched 2026-10-29

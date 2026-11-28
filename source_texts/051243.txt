@@ -1,0 +1,492 @@
+Contribute to openvdb/fvdb-core development by creating an account on GitHub.
+
+Add `dual_contour` (DC+QEF) mesh extraction op by swahtz · Pull Request #670 · openvdb/fvdb-core · GitHub
+Skip to content
+You signed in with another tab or window. Reload to refresh your session.
+You signed out in another tab or window. Reload to refresh your session.
+You switched accounts on another tab or window. Reload to refresh your session.
+Dismiss alert
+Conversation
+swahtz
+commented
+Jun 24, 2026
+•
+edited
+Loading
+Uh oh!
+There was an error while loading. Please reload this page.
+Copy link
+Copy Markdown
+Contributor
+Add dual_contour (DC + QEF) mesh extraction op
+Overview
+Adds dual_contour, a CUDA dual-contouring surface mesher that turns a narrow-band signed distance field on an OnIndex grid into a triangle mesh, alongside the existing marching_cubes. It composes directly with the reinitialize_sdf / retopologize_sdf ops, which produce exactly the kind of clean narrow-band SDF it consumes. The op is built on the NanoVDB VoxelBlockManager (VBM): the $3 \times 3 \times 3$ box stencil is decoded once per voxel and reused by every downstream stage.
+It returns (vertices, faces, normals) as three JaggedTensors jagged over the grid batch — vertices and normals are float32 of shape [B, -1, 3], faces are int64 of shape [B, -1, 3] with grid-local indices, and normals are the normalized SDF gradient at each vertex.
+Algorithm
+For each cube cell whose 8 corners are all active and straddle the isovalue, one vertex is placed by minimizing a quadratic error function (QEF) over the 12 edge zero-crossings $\mathbf{p}_i$ and their interpolated gradient normals $\mathbf{n}_i$:
+$$E(\mathbf{x}) = \sum_i \big[, \mathbf{n}_i \cdot (\mathbf{x} - \mathbf{p}_i) ,\big]^2 .$$
+Geometrically each term is the squared distance to the tangent plane at a crossing, so the minimizer best-fits all of them and snaps onto sharp features that a plain crossing-average would round off. Setting $\partial E / \partial \mathbf{x} = 0$ gives the $3 \times 3$ normal equations
+$$A,\mathbf{x} = \mathbf{b}, \qquad A = \sum_i \mathbf{n}_i \mathbf{n}_i^{\top}, \qquad \mathbf{b} = \sum_i \mathbf{n}_i ,(\mathbf{n}_i \cdot \mathbf{p}_i),$$
+solved with a closed-form symmetric solve, re-centred on the crossing centroid and Tikhonov-regularized for stability in flat / underconstrained cells.
+Connectivity is the dual of marching cubes: for each sign-changing minimal grid edge, the 4 cells sharing that edge each contribute their vertex to one quad; quads are split into triangles and oriented outward by the SDF gradient. Triangle output is deterministic (per-cell count -> cumsum -> write), and unreferenced vertices are pruned.
+Optional cluster-collapse decimation: reduce = F collapses uniform $F \times F \times F$ index-space blocks of surface cells to a single QEF-solved vertex each ($\sim F^2$ fewer vertices); adaptivity keeps feature cells at full detail and only collapses "flat" coarse blocks (those whose cells' edge normals are well aligned). Connectivity merges for free, since quads referencing cells that collapsed to the same vertex become degenerate and are dropped.
+```
+flowchart TD
+    A["narrow-band SDF on OnIndex grid"] --> B["gatherFusedKernel: one VBM decode/voxel<br/>→ neighbour table + gradient + surface flag + coord"]
+    B --> C["compact surface cells"]
+    C --> D{"decimate?"}
+    D -- "reduce = 1, adaptivity = 0" --> E["QEF: one vertex per surface cell"]
+    D -- "reduce / adaptivity" --> F["cluster cells → one merged QEF vertex per cluster"]
+    E --> G["connectivity: quad per sign-changing minimal edge<br/>→ triangles, oriented by the SDF gradient"]
+    F --> G
+    G --> H["prune unreferenced vertices + normalise normals"]
+    H --> I["(vertices, faces, normals) JaggedTensors"]
+```
+Loading
+Relationship to OpenVDB VolumeToMesh
+This follows the dual-contouring approach of OpenVDB's tools/VolumeToMesh.h, but is a leaner VBM-native reimplementation that diverges in two deliberate ways: it places vertices by a QEF least-squares solve (classic Dual Contouring) rather than by averaging the edge crossings (the "mass point" VolumeToMesh uses by default), and it decimates by simple cluster-collapse rather than VolumeToMesh's seam-stitched octree region merge. It does not reproduce VolumeToMesh's marching-cubes-style ambiguous-cell handling or its quad output (we always triangulate). For the watertight, smooth, isotropic narrow-band SDFs this op targets, these simplifications are reasonable.
+References (cited in the source)
+T. Ju, F. Losasso, S. Schaefer, J. Warren, "Dual Contouring of Hermite Data", ACM TOG 21(3) / SIGGRAPH 2002 — the core method (QEF vertex placement on edge Hermite data, dual connectivity, octree adaptive simplification our decimation is a simplified form of).
+M. Garland, P. Heckbert, "Surface Simplification Using Quadric Error Metrics", SIGGRAPH 1997 — the quadric error metric $A = \sum_i \mathbf{n}_i \mathbf{n}_i^{\top}$ that the vertex placement minimizes.
+L. Kobbelt, M. Botsch, U. Schwanecke, H.-P. Seidel, "Feature Sensitive Surface Extraction from Volume Data", SIGGRAPH 2001 — placing the vertex at the intersection of the edge-crossing tangent planes.
+W. Lorensen, H. Cline, "Marching Cubes: A High Resolution 3D Surface Construction Algorithm", SIGGRAPH 1987 — the sign-based isosurface extraction that dual contouring is the dual of.
+Shared VoxelBlockManager scaffolding
+Factors the NanoVDB VBM scaffolding shared by the VBM-based ops into a new header src/fvdb/detail/utils/cuda/VoxelBlockManagerHelper.h: the grid/buffer type aliases, the block width, the build-once VBMHelper, and the per-block decode helpers (vbmDecodeBlock, the VbmFaceStencil read, and the vbmDecodeFaceStencil preamble). ReinitializeSdf is refactored onto this header (its previous VBM_FACES_BEGIN macro is replaced by the shared, type-safe device helpers). The two ops still write their own per-voxel neighbour read — they differ in which neighbours they touch (6 faces vs the full 27-entry box stencil) — but the decode is now defined once.
+Public API and wiring
+Grid.dual_contour(field, iso=0.0, reduce=1, adaptivity=0.0) and GridBatch.dual_contour(...).
+Functional entrypoints fvdb.functional.dual_contour_single / dual_contour_batch.
+pybind binding _fvdb_cpp.dual_contour and the corresponding .pyi stub.
+src/fvdb/detail/ops/DualContour.{h,cu}, added to the CUDA build in src/CMakeLists.txt.
+Tests
+tests/unit/test_dc.py covers both validity and analytic ground truth:
+Valid closed genus-0 mesh on a sphere SDF: in-range non-degenerate triangles, no boundary or non-manifold edges, and Euler characteristic $V - E + F = 2$.
+Analytic planar SDF reproduced exactly: interior vertices lie on the plane $\mathbf{n} \cdot \mathbf{x} = d + \mathrm{iso}$ and carry the plane normal $\mathbf{n}$ to float precision (QEF reproduces planes exactly).
+Sphere radius / normals: every vertex within a sub-voxel band of the analytic radius, with radial normals.
+Composition with reinitialize_sdf and retopologize_sdf(pad=True).
+Extent agreement with marching_cubes (cross-implementation sanity check).
+Batch-vs-single parity on the non-decimated path.
+Decimation bounds (reduce=4 strictly fewer vertices; adaptivity=0.5 non-empty, no more than full detail).
+Empty-surface case returns correctly-shaped (0, 3) outputs.
+Assumptions and limitations
+Field is cast to float32 for the SDF; the QEF accumulators are double internally.
+A >= ~3-voxel half-width band is required for a watertight result (e.g. from retopologize_sdf(band=3)).
+Decimation (reduce > 1 or adaptivity > 0) accumulates per-cluster QEFs with double atomicAdd, so decimated vertex positions are not bit-reproducible run to run; the decimation tests use count / validity / tolerance assertions rather than exact equality.
+swahtz
+added 2 commits
+June 24, 2026 05:05
+Add dual_contour (DC+QEF) mesh extraction op
+…
+6883d2d
+```
+Add dual_contour, a VoxelBlockManager-based dual-contouring mesher that turns
+a narrow-band SDF on an OnIndex grid into a triangle mesh, alongside the
+existing marching_cubes. It returns (vertices, faces, normals) as three
+JaggedTensors jagged over the grid batch, where normals are the normalized
+SDF gradient at each vertex.
+
+Algorithm: one vertex per surface cell placed by minimizing a quadratic error
+function over the 12 edge zero-crossings and their interpolated
+normals (centroid-recentred + Tikhonov-regularized); dual connectivity (one
+quad per sign-changing minimal grid edge, triangulated and grad
+and optional cluster-collapse decimation via `reduce` (uniform F^3 blocks) or
+`adaptivity` (flat-block collapse). CUDA only; consumes a >= ~3
+half-width band (e.g. from retopologize_sdf) for a watertight result. Follows
+the dual-contouring approach of OpenVDB's VolumeToMesh, but pla
+QEF rather than an averaged mass-point and decimates by clustering rather than
+a seam-stitched octree merge. Sources are cited in the code: Ju
+Garland & Heckbert 1997, Kobbelt et al. 2001, Lorensen & Cline 1987.
+
+API: Grid.dual_contour / GridBatch.dual_contour, functional
+dual_contour_{single,batch}, the pybind binding, and the .pyi s
+
+Factor the shared NanoVDB VBM scaffolding (grid/buffer aliases,
+the build-once VBMHelper, and the per-block decode + 6-face stencil helpers)
+into detail/utils/cuda/VoxelBlockManagerHelper.h, and refactor
+onto it (replacing its VBM_FACES_BEGIN macro with the shared device helpers).
+Also tidy the SDF op docstrings: describe `band` as the narrow-
+and use the repo's shape/dtype docstring style.
+
+Tests (tests/unit/test_dc.py): mesh validity + closed genus-0 (Euler
+characteristic) topology; analytic ground truth (a planar SDF r
+exactly, sphere radius/normals); composition with reinitialize/retopologize_sdf;
+batch-vs-single parity; decimation bounds; and the empty-surfac
+
+Signed-off-by: Jonathan Swartz <jonathan@jswartz.info>
+```
+docs update and use pi from nano math
+…
+a48eb8f
+```
+Signed-off-by: Jonathan Swartz <jonathan@jswartz.info>
+```
+swahtz
+requested a review
+from Copilot
+June 24, 2026 05:15
+Copilot started reviewing on behalf of
+swahtz
+June 24, 2026 05:15
+View session
+Copilot
+AI
+reviewed
+Jun 24, 2026
+View reviewed changes
+Copilot
+AI
+left a comment
+Copy link
+Copy Markdown
+Contributor
+There was a problem hiding this comment.
+Choose a reason for hiding this comment
+The reason will be displayed to describe this comment to others. Learn more.
+Pull request overview
+Adds a new CUDA-only dual-contouring meshing operator (dual_contour, DC+QEF) alongside existing meshing/SDF ops, exposing it through the C++ op layer, pybind, Python Grid/GridBatch APIs, typing stubs, and a dedicated unit test suite. The PR also factors shared NanoVDB VoxelBlockManager (VBM) scaffolding into a reusable CUDA helper header and updates SDF-related docstrings for consistency.
+Changes:
+Implement fvdb.detail.ops::dualContour (DC+QEF with optional clustering/decimation) and bind it to Python (_fvdb_cpp.dual_contour, Grid.dual_contour, GridBatch.dual_contour, functional wrappers).
+Add shared VBM decode + face-stencil helpers in VoxelBlockManagerHelper.h and refactor ReinitializeSdf.cu to use them.
+Add tests/unit/test_dc.py covering correctness, topology, batching parity, and decimation bounds; plus minor docstring cleanups around narrow-band semantics.
+Reviewed changes
+Copilot reviewed 14 out of 14 changed files in this pull request and generated 4 comments.
+Show a summary per file
+File
+Description
+tests/unit/test_dc.py
+Adds unit tests for dual contour meshing validity, accuracy (plane/sphere), batching parity, and decimation behavior.
+src/python/GridBatchOps.cpp
+Exposes dual_contour via pybind alongside existing meshing/SDF ops.
+src/fvdb/detail/utils/cuda/VoxelBlockManagerHelper.h
+New shared CUDA helper for VBM build/decode and 6-face stencil reads.
+src/fvdb/detail/ops/ReinitializeSdf.h
+Updates docstrings to match jagged shape/dtype conventions.
+src/fvdb/detail/ops/ReinitializeSdf.cu
+Refactors VBM decode/stencil preamble to use the new helper header.
+src/fvdb/detail/ops/DualContour.h
+Declares the new dual contour op API and documents inputs/outputs and decimation options.
+src/fvdb/detail/ops/DualContour.cu
+Implements the DC+QEF pipeline, optional decimation, connectivity/orientation, and jagged output assembly.
+src/CMakeLists.txt
+Adds DualContour.cu to the CUDA build.
+fvdb/grid.py
+Adds Grid.dual_contour Python API and updates SDF docstrings.
+fvdb/grid_batch.py
+Adds GridBatch.dual_contour Python API and updates SDF docstrings.
+fvdb/functional/_sdf.py
+Updates retopologize_sdf_* docstrings to describe the full ±band*vx band.
+fvdb/functional/_meshing.py
+Adds dual_contour_single / dual_contour_batch functional entrypoints.
+fvdb/functional/__init__.py
+Re-exports the new meshing functions and adjusts import grouping.
+fvdb/_fvdb_cpp.pyi
+Adds typing for _fvdb_cpp.dual_contour.
+💡 Add Copilot custom instructions for smarter, more guided reviews. Learn how to get started.
+Comment thread
+src/fvdb/detail/ops/DualContour.cu
+Show resolved
+Hide resolved
+Uh oh!
+There was an error while loading. Please reload this page.
+Comment thread
+src/fvdb/detail/ops/DualContour.cu
+Show resolved
+Hide resolved
+Uh oh!
+There was an error while loading. Please reload this page.
+Comment thread
+src/fvdb/detail/ops/DualContour.cu
+Show resolved
+Hide resolved
+Uh oh!
+There was an error while loading. Please reload this page.
+Comment thread
+src/fvdb/detail/ops/DualContour.cu
+Show resolved
+Hide resolved
+Uh oh!
+There was an error while loading. Please reload this page.
+Address review: guard int32 value indexing, document isotropic-voxel …
+…
+a33dabb
+```
+…assumption
+
+Add a per-grid TORCH_CHECK in dualContour so a grid with more than 2^31 voxels fails clearly instead of overflowing the int32 value-index buffers (neighbour table / surface cells / coords).
+
+Document that vertex placement and the emitted normals are computed in index space, which is exact for isotropic voxel sizes -- the assumption of the reinitialize_sdf/retopologize_sdf pipeline this op consumes. (Scaling the gradient by the voxel size, as suggested in review, is a no-op for isotropic voxels and would break the index-space QEF for anisotropic ones; full anisotropic support would need a world-space QEF.)
+
+Co-Authored-By: Claude Opus 4.8 <noreply@anthropic.com>
+Signed-off-by: Jonathan Swartz <jonathan@jswartz.info>
+```
+swahtz
+requested a review
+from Copilot
+June 25, 2026 00:50
+Copilot started reviewing on behalf of
+swahtz
+June 25, 2026 00:50
+View session
+format fix
+…
+fc31dbf
+```
+Signed-off-by: Jonathan Swartz <jonathan@jswartz.info>
+```
+Copilot
+AI
+reviewed
+Jun 25, 2026
+View reviewed changes
+Copilot
+AI
+left a comment
+Copy link
+Copy Markdown
+Contributor
+There was a problem hiding this comment.
+Choose a reason for hiding this comment
+The reason will be displayed to describe this comment to others. Learn more.
+Pull request overview
+Copilot reviewed 14 out of 14 changed files in this pull request and generated 2 comments.
+Comment thread
+src/fvdb/detail/utils/cuda/VoxelBlockManagerHelper.h
+Show resolved
+Hide resolved
+Uh oh!
+There was an error while loading. Please reload this page.
+Comment thread
+tests/unit/test_dc.py
+Outdated
+Show resolved
+Hide resolved
+Uh oh!
+There was an error while loading. Please reload this page.
+swahtz
+and others
+added 2 commits
+June 25, 2026 01:07
+Address review: clarify VBM decode-helper usage docs and fix a test d…
+…
+7bf3003
+```
+…ocstring
+
+Clarify VoxelBlockManagerHelper.h: document the two decode paths together (vbmDecodeBlock with a caller-declared __shared__ VbmBlockMaps vs vbmDecodeFaceStencil which owns its own shared scratch), and warn that whichever is used must be called at most once per kernel since each allocates a block-sized __shared__ array.
+
+Fix the test_dc_sphere_is_valid_closed_genus0 docstring: it claimed to check normal/vertex alignment, but the body only checks n.shape == v.shape. Reword to 'one normal per vertex' and point to test_dc_sphere_radius_and_normals_accurate, which asserts normal direction.
+
+Co-Authored-By: Claude Opus 4.8 <noreply@anthropic.com>
+Signed-off-by: Jonathan Swartz <jonathan@jswartz.info>
+```
+Format fix
+…
+1df5954
+```
+Signed-off-by: Jonathan Swartz <jonathan@jswartz.info>
+```
+swahtz
+requested a review
+from Copilot
+June 25, 2026 01:10
+Copilot started reviewing on behalf of
+swahtz
+June 25, 2026 01:11
+View session
+Copilot
+AI
+reviewed
+Jun 25, 2026
+View reviewed changes
+Copilot
+AI
+left a comment
+Copy link
+Copy Markdown
+Contributor
+There was a problem hiding this comment.
+Choose a reason for hiding this comment
+The reason will be displayed to describe this comment to others. Learn more.
+Pull request overview
+Copilot reviewed 14 out of 14 changed files in this pull request and generated 5 comments.
+Comment thread
+src/fvdb/detail/ops/DualContour.h
+Outdated
+Show resolved
+Hide resolved
+Uh oh!
+There was an error while loading. Please reload this page.
+Comment thread
+fvdb/grid.py
+Outdated
+Show resolved
+Hide resolved
+Uh oh!
+There was an error while loading. Please reload this page.
+Comment thread
+fvdb/grid_batch.py
+Outdated
+Show resolved
+Hide resolved
+Uh oh!
+There was an error while loading. Please reload this page.
+Comment thread
+fvdb/functional/_meshing.py
+Outdated
+Show resolved
+Hide resolved
+Uh oh!
+There was an error while loading. Please reload this page.
+Comment thread
+fvdb/functional/_meshing.py
+Outdated
+Show resolved
+Hide resolved
+Uh oh!
+There was an error while loading. Please reload this page.
+swahtz
+and others
+added 2 commits
+June 25, 2026 01:23
+Address review: clarify reduce=1 is full detail only when adaptivity==0
+…
+b1bd0a8
+```
+The reduce parameter docs said reduce=1 means full resolution, but the adaptive path (adaptivity>0) collapses flat blocks using a default coarse block size (8) even at reduce=1. Clarify across DualContour.h and the Python docstrings (grid.py, grid_batch.py, functional/_meshing.py) that reduce is the decimation block size, that reduce=1 is full detail only when adaptivity==0, and that adaptivity>0 simplifies the mesh even at reduce=1.
+
+Co-Authored-By: Claude Opus 4.8 <noreply@anthropic.com>
+Signed-off-by: Jonathan Swartz <jonathan@jswartz.info>
+```
+format
+…
+2a2a2e9
+```
+Signed-off-by: Jonathan Swartz <jonathan@jswartz.info>
+```
+swahtz
+requested a review
+from Copilot
+June 25, 2026 01:25
+Copilot started reviewing on behalf of
+swahtz
+June 25, 2026 01:26
+View session
+Copilot
+AI
+reviewed
+Jun 25, 2026
+View reviewed changes
+Copilot
+AI
+left a comment
+Copy link
+Copy Markdown
+Contributor
+There was a problem hiding this comment.
+Choose a reason for hiding this comment
+The reason will be displayed to describe this comment to others. Learn more.
+Pull request overview
+Copilot reviewed 14 out of 14 changed files in this pull request and generated no new comments.
+swahtz
+marked this pull request as ready for review
+June 25, 2026 02:47
+swahtz
+requested a review
+from a team
+as a code owner
+June 25, 2026 02:47
+swahtz
+requested review from
+blackencino and
+sifakis
+June 25, 2026 02:47
+DRY up the shared edge crossing code
+…
+4c42fcd
+```
+Improve some organization and comments
+
+Signed-off-by: Jonathan Swartz <jonathan@jswartz.info>
+```
+swahtz
+requested a review
+from Copilot
+June 25, 2026 04:00
+Copilot started reviewing on behalf of
+swahtz
+June 25, 2026 04:00
+View session
+Copilot
+AI
+reviewed
+Jun 25, 2026
+View reviewed changes
+Copilot
+AI
+left a comment
+Copy link
+Copy Markdown
+Contributor
+There was a problem hiding this comment.
+Choose a reason for hiding this comment
+The reason will be displayed to describe this comment to others. Learn more.
+Pull request overview
+Copilot reviewed 14 out of 14 changed files in this pull request and generated 1 comment.
+Comment thread
+src/fvdb/detail/ops/DualContour.cu
+Show resolved
+Hide resolved
+Uh oh!
+There was an error while loading. Please reload this page.
+Address review: clarify corner-0 active check and the adaptive 8^3 bl…
+…
+2478de1
+```
+…ock size
+
+Add a comment in gatherFusedKernel explaining that the allCornersActive loop skips corner 0 because it is the cell's anchor voxel (cornerSpoke[0]==spoke 13==centerIndex), which is always active in this kernel -- so the guard skips a tautological check, not a real corner. Also add a comment in meshOneGrid explaining the adaptive path's 8^3 coarse-block size (it only sets how coarse flat regions become; feature blocks stay full resolution).
+
+Co-Authored-By: Claude Opus 4.8 <noreply@anthropic.com>
+Signed-off-by: Jonathan Swartz <jonathan@jswartz.info>
+```
+swahtz
+added
+the
+core library
+Core fVDB library. i.e. anything in the _Cpp module (C++) or fvdb python module
+label
+Jun 25, 2026
+swahtz
+added this to the
+v0.6 milestone
+Jul 15, 2026
+swahtz
+added this to fVDB
+Aug 11, 2026
+swahtz
+modified the milestones:
+v0.6,
+v0.7
+Aug 20, 2026
+swahtz
+marked this pull request as draft
+September 10, 2026 00:14
+swahtz
+marked this pull request as ready for review
+October 20, 2026 02:23
+swahtz
+marked this pull request as draft
+October 20, 2026 02:44
+This branch has not been deployed
+No deployments
+Sign up for free
+to join this conversation on GitHub.
+Already have an account?
+Sign in to comment
+Uh oh!
+There was an error while loading. Please reload this page.
+Labels
+core library
+Core fVDB library. i.e. anything in the _Cpp module (C++) or fvdb python module
+2 participants
+Add this suggestion to a batch that can be applied as a single commit.This suggestion is invalid because no changes were made to the code.Suggestions cannot be applied while the pull request is closed.Suggestions cannot be applied while viewing a subset of changes.Only one suggestion per line can be applied in a batch.Add this suggestion to a batch that can be applied as a single commit.Applying suggestions on deleted lines is not supported.You must change the existing code in this line in order to create a valid suggestion.Outdated suggestions cannot be applied.This suggestion has been applied or marked resolved.Suggestions cannot be applied from pending reviews.Suggestions cannot be applied on multi-line comments.Suggestions cannot be applied while the pull request is queued to merge.Suggestion cannot be applied right now. Please check back later.
+You can’t perform that action at this time.

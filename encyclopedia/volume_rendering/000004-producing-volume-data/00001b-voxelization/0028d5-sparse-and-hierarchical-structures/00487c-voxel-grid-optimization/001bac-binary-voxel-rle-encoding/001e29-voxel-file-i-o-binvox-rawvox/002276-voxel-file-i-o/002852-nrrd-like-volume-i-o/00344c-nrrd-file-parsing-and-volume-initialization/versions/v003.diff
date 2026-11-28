@@ -1,0 +1,750 @@
+--- v002.md
++++ v003.md
+@@ -1,328 +1,470 @@
+ # NRRD File Parsing and Volume Initialization
+ 
+-Also called: NRRD Header Parsing, NRRDLoader
++Also called: NRRD Header Field Parsing, NRRD Header Parsing, NRRD Metadata Extraction, NRRD Volume Loading, NRRD parser, NRRD volume loading with quantization, NRRDLoader, readNrrd
+ 
+ ## Overview
+-This method parses the Network Common Data Form (NRRD) specification to initialize a volumetric dataset for rendering [S1, S2, unofficial]. It handles the conversion of raw byte streams into structured volume objects containing dimensions, data types, physical spacing, and coordinate transformations [S1, S2, unofficial]. It is distinguished from generic binary loaders by its specific handling of NRRD header key-value pairs, support for various encodings (raw, ASCII, gzipped), and automatic construction of IJK-to-RAS transformation matrices based on space directions and space types [S1, S2, unofficial].
++This method parses the NRRD (Nearly Raw Raster Data) file format to extract volumetric metadata and raw voxel data, initializing a runtime volume object with spatial transformations and data buffers. It solves the problem of converting a standardized, self-describing file format into a GPU-ready or CPU-accessible data structure with correct physical spacing and coordinate system alignment. It differs from binary voxel formats (like [binvox](52-binvox.md)) by supporting arbitrary data types, multi-component vectors, and explicit physical spacing metadata, at the cost of larger file sizes and more complex parsing logic.
+ 
+ ## How it works
+ 
+ ### Inputs and Outputs
+-**Input:** A raw byte array (e.g., `Uint8Array` or `ArrayBuffer`) representing an NRRD file [S1, S2, unofficial].
++**Input:** A byte buffer or file stream containing an NRRD file. The file must begin with a header followed by raw binary or ASCII-encoded data.
+ **Output:** A `Volume` object containing:
+-*   `xLength`, `yLength`, `zLength`: Integer dimensions [S2, unofficial].
+-*   `axisOrder`: Array of strings (`['x', 'y', 'z']` or derived from vectors) [S2, unofficial].
+-*   `data`: TypedArray of voxel values [S2, unofficial].
+-*   `spacing`: Array of three floats representing physical distance between voxels [S2, unofficial].
+-*   `matrix`: 4x4 transformation matrix (IJK to RAS) [S2, unofficial].
+-*   `inverseMatrix`: Inverse of the transformation matrix [S2, unofficial].
+-*   `RASDimensions`: Physical dimensions in RAS space [S2, unofficial].
+-*   `windowLow`, `windowHigh`: Thresholds for data visualization [S2, unofficial].
+-*   `dimensions`: Array of `[xLength, yLength, zLength]` [S2, unofficial].
++- `data`: A TypedArray (e.g., `Uint8Array`, `Float32Array`) holding the voxel values.
++- `dimensions`: An array `[xiSize, yiSize, ziSize]` of integers.
++- `spacing`: An array `[xSpc, ySpc, zSpc]` of floats representing voxel size in physical units.
++- `matrix`: A 4x4 transformation matrix mapping voxel indices (IJK) to physical coordinates (RAS or world space).
++- `inverseMatrix`: The inverse of the transformation matrix.
++- `RASDimensions`: Physical dimensions of the volume bounding box.
++- `lowerThreshold` / `upperThreshold`: Default intensity thresholds.
+ 
+ ### Data Structures
+ 
+ **Volume Object Layout:**
+-```javascript
+-{
+-  xLength: number,
+-  yLength: number,
+-  zLength: number,
+-  axisOrder: string[],
+-  data: TypedArray, // Uint8Array, Int16Array, Float32Array, etc.
+-  windowLow: number,
+-  windowHigh: number,
+-  dimensions: number[],
+-  spacing: number[],
+-  matrix: Matrix4, // 4x4 matrix
+-  inverseMatrix: Matrix4,
+-  RASDimensions: number[],
+-  lowerThreshold: number,
+-  upperThreshold: number
++```text
++Volume {
++    xLength: number,       // Physical length in X
++    yLength: number,       // Physical length in Y
++    zLength: number,       // Physical length in Z
++    axisOrder: Array<string>, // e.g., ['x', 'y', 'z']
++    data: TypedArray,      // Raw voxel data
++    windowLow: number,     // Lower display threshold
++    windowHigh: number,    // Upper display threshold
++    dimensions: Array<number>, // [xiSize, yiSize, ziSize]
++    spacing: Array<number>,    // [xSpc, ySpc, zSpc]
++    matrix: Matrix4,       // IJK to RAS transformation
++    inverseMatrix: Matrix4,// RAS to IJK transformation
++    RASDimensions: Array<number>, // [xLength, yLength, zLength]
++    lowerThreshold: number,
++    upperThreshold: number
+ }
+ ```
+ 
+-**Header Object (Internal):**
+-```javascript
+-{
+-  isNrrd: boolean,
+-  sizes: number[],
+-  vectors: number[][], // 3x3 matrix stored as array of 3 vectors
+-  spacings: number[],
+-  space: string, // 'left-posterior-superior', 'left-anterior-superior', etc.
+-  encoding: string, // 'raw', 'ascii', 'gz', etc.
+-  type: string, // 'uchar', 'float', etc.
+-  [key: string]: any // Other parsed fields
+-}
+-```
++**Header Field Parsing Map:**
++The parser maps NRRD string type identifiers to JavaScript TypedArray constructors:
++- `'uchar'`, `'uint8'`, `'uint8_t'` → `Uint8Array`
++- `'int8'`, `'int8_t'` → `Int8Array`
++- `'short'`, `'int16'`, `'int16_t'` → `Int16Array`
++- `'ushort'`, `'uint16'`, `'uint16_t'` → `Uint16Array`
++- `'int'`, `'int32'`, `'int32_t'` → `Int32Array`
++- `'uint'`, `'uint32'`, `'uint32_t'` → `Uint32Array`
++- `'float'` → `Float32Array`
++- `'double'` → `Float64Array`
++- `'longlong'` types throw an error [S1, S3, unofficial].
+ 
+ ### Steps
+ 
+-1.  **Locate Header Boundary:** Scan the raw byte array to find two consecutive newline characters (`\n`, byte value 10). The header ends at index `i-2` and the data starts at `_data_start = i + 1` [S2, unofficial].
+-2.  **Parse Header Text:** Split the header text by newlines. For each line, if it matches `NRRD\d+`, set `headerObject.isNrrd = true` [S2, unofficial]. If it starts with `#`, ignore it as a comment [S2, unofficial]. Otherwise, split the line by the first colon `:` to extract `key` and `value` [S2, unofficial]. Check if `key` exists in a predefined map of `_fieldFunctions`. If yes, call the function with `value` to populate the `headerObject`. If no, store `value` directly in `headerObject[key]` [S2, unofficial]. Specific field parsers: `space directions` extracts a 3x3 matrix `vectors`; `spacings` extracts an array; `space origin` extracts an array [S2, unofficial].
+-3.  **Validate NRRD:** If `headerObject.isNrrd` is false, throw an error [S2, unofficial]. If `headerObject.encoding` is `'bz2'` or `'bzip2'`, throw an error as these are not supported [S2, unofficial].
+-4.  **Decompress and Decode Data:** If `encoding` is `'gz'`, decompress the raw data payload using a standard gzip decompression routine (e.g., `gunzipSync`) [S2, unofficial]. If `encoding` is `'raw'`, copy the raw bytes into a new buffer to detach from the header memory [S2, unofficial]. If `encoding` is `'ascii'`, `'text'`, `'txt'`, or `'hex'`, parse the data as text [S1, unofficial]. Iterate through bytes, accumulating non-whitespace characters (excluding ASCII 9-13 and 32) into a number string [S1, unofficial]. When a separator is found, parse the accumulated string using `parseInt` or `parseFloat` based on the target array type, and store in the result array [S1, unofficial]. Handle trailing numbers after the loop ends [S2, unofficial].
+-5.  **Map Data Type:** Map `headerObject.type` to a JavaScript TypedArray: `'uchar'`, `'unsigned char'`, `'uint8'`, `'uint8_t'` -> `Uint8Array`; `'signed char'`, `'int8'`, `'int8_t'` -> `Int8Array`; `'short'`, `'int16'`, `'int16_t'` -> `Int16Array`; `'ushort'`, `'uint16'`, `'uint16_t'` -> `Uint16Array`; `'int'`, `'int32'`, `'int32_t'` -> `Int32Array`; `'uint'`, `'uint32'`, `'uint32_t'` -> `Uint32Array`; `'float'` -> `Float32Array`; `'double'` -> `Float64Array` [S2, unofficial]. `'longlong'` types throw an error [S2, unofficial].
+-6.  **Determine Dimensions and Axis Order:** Set `volume.dimensions` from `headerObject.sizes` [S2, unofficial]. Identify axis order from `headerObject.vectors` by finding the non-zero component index in each vector (0 for x, 1 for y, 2 for z) [S2, unofficial]. If indices are unique, map them; otherwise default to `['x', 'y', 'z']` [S2, unofficial]. Set `volume.xLength`, `volume.yLength`, `volume.zLength` based on the mapped dimensions [S2, unofficial].
+-7.  **Calculate Physical Spacing:** If `headerObject.spacings` is defined, multiply each vector component in `vectors` by the corresponding spacing value [S2, unofficial]. If `headerObject.vectors` is missing, default `vectors` to the identity matrix: `[[1,0,0], [0,1,0], [0,0,1]]` [S2, unofficial]. Calculate `volume.spacing` as the magnitude (length) of each vector in `vectors` [S2, unofficial].
+-8.  **Construct Transformation Matrix:** Determine `transitionMatrix` based on `headerObject.space`: if `'left-posterior-superior'`, use `diag(-1, -1, 1)`; if `'left-anterior-superior'`, use `diag(1, 1, -1)`; otherwise, identity [S2, unofficial]. Construct `ijk_to_transition` matrix using `vectors` as columns: column 0 is `vectors[0]`, column 1 is `vectors[1]`, column 2 is `vectors[2]`, column 3 is `[0, 0, 0, 1]` [S2, unofficial]. Calculate `volume.matrix` = `ijk_to_transition` $\times$ `transitionMatrix` [S2, unofficial]. If `vectors` is missing, set `volume.matrix` to Identity [S2, unofficial]. Calculate `volume.inverseMatrix` as the inverse of `volume.matrix` [S2, unofficial].
+-9.  **Calculate RAS Dimensions:** Calculate physical dimensions: $D_{RAS} = [xLength \times spacing_x, yLength \times spacing_y, zLength \times spacing_z]$ [S2, unofficial]. Set `volume.RASDimensions` to the floor of each component in $D_{RAS}$ [S2, unofficial].
+-10. **Set Thresholds:** If `lowerThreshold` is `-Infinity`, set it to the minimum value in `data` [S2, unofficial]. If `upperThreshold` is `Infinity`, set it to the maximum value in `data` [S2, unofficial].
++1.  **Identify NRRD Format:**
++    Scan the raw byte data for the string "NRRD" followed by a digit (e.g., "NRRD0", "NRRD1"). If not found, the file is not valid NRRD [S3, unofficial].
++
++2.  **Locate Header Boundary:**
++    Scan the byte array for two consecutive line breaks (ASCII 10). The header ends at the index before the second line break. The data payload starts at the index immediately after the second line break (`_data_start = i + 1`) [S1, S2, S3, unofficial].
++
++3.  **Parse Header Fields:**
++    Split the header text by newlines. For each line:
++    - Ignore lines starting with `#` (comments) [S3, unofficial].
++    - Split the line into `key` and `value` using the first colon `:`.
++    - Dispatch to specific field parsers based on the key:
++        - **`type`**: Map to TypedArray constructor. Throw error if unsupported [S1, S3, unofficial].
++        - **`sizes`**: Split string by whitespace, convert each token to integer. Result: `[xiSize, yiSize, ziSize]` [S1, unofficial].
++        - **`spacings`**: Split string by whitespace, convert each token to float. Result: `[xSpc, ySpc, zSpc]` [S1, unofficial].
++        - **`space directions`**: Extract substrings matching `\(.*?\)`. Remove parentheses, split by comma, convert components to float. Result: Array of 3 vectors `[v0, v1, v2]`. If missing, default to identity matrix `[[1,0,0], [0,1,0], [0,0,1]]` [S1, S3, unofficial].
++        - **`space`**: String indicating coordinate system (e.g., 'left-posterior-superior', 'left-anterior-superior') [S3, unofficial].
++        - **`encoding`**: String ('raw', 'ascii', 'text', 'hex', 'gz', 'bz2') [S1, S3, unofficial].
++
++4.  **Validate Encoding:**
++    If `encoding` is 'bz2' or 'bzip2', throw an error as it is not supported [S3, unofficial]. If 'gz', decompress the data payload using `gunzipSync` [S3, unofficial].
++
++5.  **Parse Data Payload:**
++    - **If `encoding` is 'raw':** Copy the bytes from `_data_start` to the end of the buffer into a new `Uint8Array` to detach from the header buffer. Then, view this buffer as the target TypedArray determined by `type` [S2, S3, unofficial].
++    - **If `encoding` is 'ascii', 'text', 'txt', or 'hex':**
++        - Determine base: 10 for 'ascii'/'text', 16 for 'hex' [S2, unofficial].
++        - Iterate through bytes. Accumulate non-whitespace characters (excluding ASCII 9-13 and 32) into a number string [S2, S3, unofficial].
++        - When a separator (whitespace) is encountered, parse the accumulated string:
++            - Use `parseFloat` if the target type is `Float32Array` or `Float64Array`.
++            - Use `parseInt` with the determined base for integer types [S2, S3, unofficial].
++        - Store parsed values in the result TypedArray. Handle trailing number after the loop ends [S3, unofficial].
++
++6.  **Handle Data Type Specifics (Quantization):**
++    - **If `type` is 'ushort'/'uint16':**
++        - Allocate an `Uint16Array` of size `xiSize * yiSize * ziSize * nelts`.
++        - Read/parse data into this array. Verify read count equals expected size [S4, unofficial].
++        - Allocate an `Uint8Array` of the same size.
++        - Call `quantize(ucdata, xiSize, yiSize, ziSize, data)` to convert 16-bit values to 8-bit. Note: This is explicitly restricted to scalar data only. Multi-component short data triggers a warning but no fallback is shown [S4, unofficial].
++        - Assign `ucdata` as the volume data [S4, unofficial].
++    - **If `type` is 'uchar'/'uint8':**
++        - Allocate `Uint8Array`. Read/parse data. Verify count. Assign as volume data [S4, unofficial].
++
++7.  **Compute Physical Dimensions and Spacing:**
++    - Calculate physical sizes:
++      $$ xfSize = xSpc \times xiSize $$
++      $$ yfSize = ySpc \times yiSize $$
++      $$ zfSize = zSpc \times ziSize $$
++    - Find the maximum dimension: $max = \max(xfSize, yfSize, zfSize)$.
++    - Normalize physical dimensions:
++      $$ xfSize /= max, \quad yfSize /= max, \quad zfSize /= max $$
++    - Set `volume.spacing` to the lengths of the `space directions` vectors. If `spacings` are defined, multiply each vector component by the corresponding spacing value [S3, S4, unofficial].
++    - Set `volume.xLength`, `volume.yLength`, `volume.zLength` to the normalized $xfSize, yfSize, zfSize$ [S4, unofficial].
++    - Calculate `volume.RASDimensions` by multiplying physical dimensions and flooring the result:
++      $$ RASDimensions = [\lfloor xLength \times spacingX \rfloor, \lfloor yLength \times spacingY \rfloor, \lfloor zLength \times spacingZ \rfloor] $$
++      [S3, unofficial].
++
++8.  **Construct Transformation Matrix (IJK to RAS):**
++    - Determine `transitionMatrix` based on `headerObject.space`:
++        - If 'left-posterior-superior': Diagonal matrix with `[-1, -1, 1]`.
++        - If 'left-anterior-superior': Diagonal matrix with `[1, 1, -1]`.
++        - Otherwise: Identity matrix [S3, unofficial].
++    - Construct `ijk_to_transition` matrix using `space directions` as columns:
++      $$ M_{ijk} = \begin{bmatrix} v_{0x} & v_{1x} & v_{2x} & 0 \\ v_{0y} & v_{1y} & v_{2y} & 0 \\ v_{0z} & v_{1z} & v_{2z} & 0 \\ 0 & 0 & 0 & 1 \end{bmatrix} $$
++      If `space directions` are missing, use identity scaling [S3, unofficial].
++    - Compute final `volume.matrix`:
++      $$ volume.matrix = M_{ijk} \times transitionMatrix $$
++    - Compute `volume.inverseMatrix` as the inverse of `volume.matrix` [S3, unofficial].
++
++9.  **Set Thresholds:**
++    - If `lowerThreshold` is `-Infinity`, set to `min(data)`.
++    - If `upperThreshold` is `Infinity`, set to `max(data)` [S3, unofficial].
++
++10. **Initialize Volume Object:**
++    - Set `volume.data` to the parsed TypedArray.
++    - Set `volume.dimensions` to `[xiSize, yiSize, ziSize]`.
++    - Set `volume.axisOrder` by identifying the non-zero component in each `space directions` vector (x, y, z). If indices are unique, map them; otherwise default to `['x', 'y', 'z']` [S3, unofficial].
++    - Set `numSubVols = 1` and assign data to the volume structure [S4, unofficial].
+ 
+ ### Pseudocode
+ 
+ ```python
+-import math
+-import struct
+-import gzip
+-
+-def parse_nrrd(raw_bytes: bytes) -> dict:
+-    # Step 1: Locate Header Boundary
++def parse_nrrd_volume(raw_bytes):
++    # Step 1: Identify NRRD
++    if not raw_bytes.startswith(b"NRRD"):
++        raise ValueError("Not an NRRD file")
++
++    # Step 2: Locate Header Boundary
++    # Find two consecutive line breaks (ASCII 10)
++    i = 0
++    line_break_count = 0
+     header_end = -1
+-    for i in range(len(raw_bytes) - 1):
+-        if raw_bytes[i] == 10 and raw_bytes[i+1] == 10:
+-            header_end = i - 1
+-            break
++    while i < len(raw_bytes):
++        if raw_bytes[i] == 10: # ASCII 10 is newline
++            line_break_count += 1
++            if line_break_count == 2:
++                header_end = i - 1 # End before the second newline
++                break
++        else:
++            line_break_count = 0
++        i += 1
++    
+     if header_end == -1:
+-        raise ValueError("Invalid NRRD: No double newline found")
+-    
+-    header_text = raw_bytes[:header_end].decode('utf-8')
+-    data_start = header_end + 2
++        raise ValueError("Invalid NRRD header: no double line break found")
++    
++    data_start = i + 1
++    header_text = raw_bytes[:header_end].decode('ascii', errors='ignore')
+     data_bytes = raw_bytes[data_start:]
+-    
+-    # Step 2: Parse Header Text
+-    header_obj = {
+-        'isNrrd': False, 'sizes': [], 'vectors': [], 'spacings': [],
+-        'space': '', 'encoding': 'raw', 'type': 'uchar',
+-        'lowerThreshold': -math.inf, 'upperThreshold': math.inf
++
++    # Step 3: Parse Header Fields
++    header = {
++        'isNrrd': True,
++        'type': None,
++        'sizes': [],
++        'spacings': [],
++        'vectors': [],
++        'space': 'unknown',
++        'encoding': 'raw'
+     }
+-    
++
+     for line in header_text.split('\n'):
+-        if line.startswith('#'):
++        line = line.strip()
++        if line.startswith('#') or not line:
+             continue
+-        if line.startswith('NRRD'):
+-            header_obj['isNrrd'] = True
++        
++        if ':' not in line:
+             continue
+-        if ':' in line:
+-            key, value = line.split(':', 1)
+-            key = key.strip()
+-            value = value.strip()
+             
+-            if key == 'space directions':
+-                parts = value.split('(')
+-                vectors = []
+-                for part in parts[1:]:
+-                    nums = part.split(')')[0].split(',')
+-                    vectors.append([float(n) for n in nums])
+-                header_obj['vectors'] = vectors
+-            elif key == 'spacings':
+-                header_obj['spacings'] = [float(x) for x in value.split()]
+-            elif key == 'space':
+-                header_obj['space'] = value
+-            elif key == 'encoding':
+-                header_obj['encoding'] = value
+-            elif key == 'type':
+-                header_obj['type'] = value
+-            elif key == 'sizes':
+-                header_obj['sizes'] = [int(x) for x in value.split()]
+-            elif key == 'lowerThreshold':
+-                header_obj['lowerThreshold'] = float(value)
+-            elif key == 'upperThreshold':
+-                header_obj['upperThreshold'] = float(value)
++        key, value = line.split(':', 1)
++        key = key.strip()
++        value = value.strip()
++
++        if key == 'type':
++            header['type'] = value
++        elif key == 'sizes':
++            header['sizes'] = [int(x) for x in value.split()]
++        elif key == 'spacings':
++            header['spacings'] = [float(x) for x in value.split()]
++        elif key == 'space directions':
++            # Extract vectors like (1,0,0)
++            parts = re.findall(r'\(.*?\)', value)
++            vectors = []
++            for part in parts:
++                coords = part[1:-1].split(',')
++                vectors.append([float(c) for c in coords])
++            header['vectors'] = vectors
++        elif key == 'space':
++            header['space'] = value
++        elif key == 'encoding':
++            header['encoding'] = value
++
++    # Step 4: Validate Encoding
++    if header['encoding'] in ('bz2', 'bzip2'):
++        raise ValueError("Bzip2 encoding is not supported")
++    
++    if header['encoding'] == 'gz':
++        import gzip
++        data_bytes = gzip.decompress(data_bytes)
++
++    # Step 5: Parse Data Payload
++    type_map = {
++        'uchar': Uint8Array, 'uint8': Uint8Array, 'uint8_t': Uint8Array,
++        'int8': Int8Array, 'int8_t': Int8Array,
++        'short': Int16Array, 'int16': Int16Array, 'int16_t': Int16Array,
++        'ushort': Uint16Array, 'uint16': Uint16Array, 'uint16_t': Uint16Array,
++        'int': Int32Array, 'int32': Int32Array, 'int32_t': Int32Array,
++        'uint': Uint32Array, 'uint32': Uint32Array, 'uint32_t': Uint32Array,
++        'float': Float32Array,
++        'double': Float64Array
++    }
++    
++    if header['type'] not in type_map:
++        raise ValueError(f"Unsupported NRRD type: {header['type']}")
++    
++    TypedArrayClass = type_map[header['type']]
++    xiSize, yiSize, ziSize = header['sizes']
++    total_elements = xiSize * yiSize * ziSize
++    
++    # Handle multi-component if present (nelts)
++    # Note: Basic implementation assumes scalar unless sizes imply otherwise
++    # For simplicity, we assume scalar data as per most NRRD volume examples
++    # If 'nelts' > 1, data would be interleaved. This implementation focuses on scalar.
++    
++    if header['encoding'] == 'raw':
++        # Copy to clean buffer
++        clean_buffer = data_bytes
++        # View as TypedArray
++        # In JS: new TypedArray(new Uint8Array(data_bytes).buffer)
++        # Here we simulate the view
++        data_array = TypedArrayClass(clean_buffer)
++    else:
++        # ASCII/Hex parsing
++        data_array = TypedArrayClass(total_elements)
++        base = 16 if header['encoding'] == 'hex' else 10
++        is_float = TypedArrayClass in (Float32Array, Float64Array)
++        
++        current_num_str = ""
++        idx = 0
++        for byte in data_bytes:
++            char = chr(byte)
++            if char in (' ', '\t', '\n', '\r', '\f'):
++                if current_num_str:
++                    if is_float:
++                        data_array[idx] = float(current_num_str)
++                    else:
++                        data_array[idx] = int(current_num_str, base)
++                    idx += 1
++                    current_num_str = ""
+             else:
+-                header_obj[key] = value
+-
+-    # Step 3: Validate
+-    if not header_obj['isNrrd']:
+-        raise ValueError("Not an NRRD file")
+-    if header_obj['encoding'] in ['bz2', 'bzip2']:
+-        raise ValueError("Bzip2 encoding not supported")
++                current_num_str += char
+         
+-    # Step 4: Decompress and Decode Data
+-    if header_obj['encoding'] == 'gz':
+-        data_bytes = gzip.decompress(data_bytes)
+-    elif header_obj['encoding'] in ['ascii', 'text', 'txt', 'hex']:
+-        data_bytes = parse_data_as_text(data_bytes, header_obj['type'])
+-    elif header_obj['encoding'] == 'raw':
++        # Handle last number
++        if current_num_str:
++            if is_float:
++                data_array[idx] = float(current_num_str)
++            else:
++                data_array[idx] = int(current_num_str, base)
++
++    # Step 6: Quantization for ushort
++    if header['type'] in ('ushort', 'uint16', 'uint16_t'):
++        # Quantize to uint8
++        uc_data = Uint8Array(total_elements)
++        for i in range(total_elements):
++            # Simple linear quantization or clamping? 
++            # Sources imply a quantize function exists. 
++            # Standard approach: scale 0-65535 to 0-255
++            val = data_array[i]
++            uc_data[i] = int(val * 255 / 65535)
++        data_array = uc_data
++        # Update type info for subsequent steps if needed, 
++        # but Volume.data is now Uint8Array
++        TypedArrayClass = Uint8Array
++
++    # Step 7: Physical Dimensions
++    xSpc, ySpc, zSpc = header['spacings'] if header['spacings'] else [1.0, 1.0, 1.0]
++    
++    # If vectors are present, spacing is derived from vector lengths
++    if header['vectors']:
++        # Calculate length of each vector
++        def vec_len(v):
++            return (v[0]**2 + v[1]**2 + v[2]**2)**0.5
++        
++        xSpc = vec_len(header['vectors'][0])
++        ySpc = vec_len(header['vectors'][1])
++        zSpc = vec_len(header['vectors'][2])
++        
++        # If spacings field is also present, multiply? 
++        # Sources say: "If spacings are defined, multiply each vector component by the corresponding spacing value"
++        # This usually means the vectors are unit vectors and spacings scale them.
++        # However, standard NRRD 'space directions' are the actual axes.
++        # We follow the source logic: use vector lengths as spacing.
+         pass
++
++    xfSize = xSpc * xiSize
++    yfSize = ySpc * yiSize
++    zfSize = zSpc * ziSize
++    
++    max_dim = max(xfSize, yfSize, zfSize)
++    if max_dim > 0:
++        xfSize /= max_dim
++        yfSize /= max_dim
++        zfSize /= max_dim
++
++    # Step 8: Transformation Matrix
++    # Transition Matrix based on space
++    if header['space'] == 'left-posterior-superior':
++        transition_matrix = [
++            [-1, 0, 0, 0],
++            [0, -1, 0, 0],
++            [0, 0, 1, 0],
++            [0, 0, 0, 1]
++        ]
++    elif header['space'] == 'left-anterior-superior':
++        transition_matrix = [
++            [1, 0, 0, 0],
++            [0, 1, 0, 0],
++            [0, 0, -1, 0],
++            [0, 0, 0, 1]
++        ]
+     else:
+-        raise ValueError(f"Unsupported encoding: {header_obj['encoding']}")
+-        
+-    # Step 5: Map Data Type
+-    type_map = {
+-        'uchar': 'B', 'unsigned char': 'B', 'uint8': 'B', 'uint8_t': 'B',
+-        'signed char': 'b', 'int8': 'b', 'int8_t': 'b',
+-        'short': 'h', 'int16': 'h', 'int16_t': 'h',
+-        'ushort': 'H', 'uint16': 'H', 'uint16_t': 'H',
+-        'int': 'i', 'int32': 'i', 'int32_t': 'i',
+-        'uint': 'I', 'uint32': 'I', 'uint32_t': 'I',
+-        'float': 'f', 'double': 'd'
++        transition_matrix = [
++            [1, 0, 0, 0],
++            [0, 1, 0, 0],
++            [0, 0, 1, 0],
++            [0, 0, 0, 1]
++        ]
++
++    # IJK to Transition Matrix
++    if header['vectors']:
++        v0 = header['vectors'][0]
++        v1 = header['vectors'][1]
++        v2 = header['vectors'][2]
++        ijk_matrix = [
++            [v0[0], v1[0], v2[0], 0],
++            [v0[1], v1[1], v2[1], 0],
++            [v0[2], v1[2], v2[2], 0],
++            [0, 0, 0, 1]
++        ]
++    else:
++        ijk_matrix = [
++            [1, 0, 0, 0],
++            [0, 1, 0, 0],
++            [0, 0, 1, 0],
++            [0, 0, 0, 1]
++        ]
++
++    # Multiply: volume.matrix = ijk_matrix * transition_matrix
++    volume_matrix = matrix_multiply(ijk_matrix, transition_matrix)
++    inverse_matrix = matrix_inverse(volume_matrix)
++
++    # Step 9: Thresholds
++    min_val = min(data_array)
++    max_val = max(data_array)
++    lower_threshold = -float('inf')
++    upper_threshold = float('inf')
++    
++    if lower_threshold == -float('inf'):
++        lower_threshold = min_val
++    if upper_threshold == float('inf'):
++        upper_threshold = max_val
++
++    # Step 10: Construct Volume Object
++    volume = {
++        'data': data_array,
++        'dimensions': [xiSize, yiSize, ziSize],
++        'spacing': [xSpc, ySpc, zSpc],
++        'xLength': xfSize,
++        'yLength': yfSize,
++        'zLength': zfSize,
++        'matrix': volume_matrix,
++        'inverseMatrix': inverse_matrix,
++        'RASDimensions': [
++            int(xfSize * xSpc), # Note: Source says "physical dimensions (xLength * spacingX)"
++            int(yfSize * ySpc),
++            int(zfSize * zSpc)
++        ],
++        'lowerThreshold': lower_threshold,
++        'upperThreshold': upper_threshold,
++        'axisOrder': ['x', 'y', 'z'] # Default if axis detection fails
+     }
+-    if header_obj['type'] not in type_map:
+-        raise ValueError(f"Unsupported type: {header_obj['type']}")
+-        
+-    fmt = type_map[header_obj['type']]
+-    itemsize = struct.calcsize(fmt)
+-    if len(data_bytes) % itemsize != 0:
+-        raise ValueError("Data size mismatch with type")
+-        
+-    # Create typed array equivalent (Python bytearray for demonstration)
+-    volume_data = bytearray(data_bytes)
+-    
+-    # Step 6: Determine Dimensions and Axis Order
+-    sizes = header_obj['sizes']
+-    if len(sizes) != 3:
+-        raise ValueError("NRRD must have 3 dimensions")
+-        
+-    vectors = header_obj['vectors']
+-    if not vectors:
+-        vectors = [[1,0,0], [0,1,0], [0,0,1]]
+-        
+-    axis_order = ['x', 'y', 'z']
+-    # Find non-zero component in each vector
+-    # Simplified: assume vectors[0] corresponds to x, etc., or map based on non-zero index
+-    # The source checks for unique indices, otherwise defaults to ['x', 'y', 'z']
+-    
+-    x_len, y_len, z_len = sizes
+-    
+-    # Step 7: Calculate Physical Spacing
+-    spacings = header_obj['spacings']
+-    if spacings:
+-        for i in range(3):
+-            for j in range(3):
+-                vectors[i][j] *= spacings[i]
+-                
+-    spacing = []
+-    for v in vectors:
+-        mag = math.sqrt(v[0]**2 + v[1]**2 + v[2]**2)
+-        spacing.append(mag)
+-        
+-    # Step 8: Construct Transformation Matrix
+-    space = header_obj['space']
+-    if space == 'left-posterior-superior':
+-        transition_matrix = [[-1, 0, 0, 0], [0, -1, 0, 0], [0, 0, 1, 0], [0, 0, 0, 1]]
+-    elif space == 'left-anterior-superior':
+-        transition_matrix = [[1, 0, 0, 0], [0, 1, 0, 0], [0, 0, -1, 0], [0, 0, 0, 1]]
+-    else:
+-        transition_matrix = [[1, 0, 0, 0], [0, 1, 0, 0], [0, 0, 1, 0], [0, 0, 0, 1]]
+-        
+-    ijk_to_transition = [
+-        [vectors[0][0], vectors[1][0], vectors[2][0], 0],
+-        [vectors[0][1], vectors[1][1], vectors[2][1], 0],
+-        [vectors[0][2], vectors[1][2], vectors[2][2], 0],
+-        [0, 0, 0, 1]
+-    ]
+-    
+-    volume_matrix = multiply_matrices(ijk_to_transition, transition_matrix)
+-    volume_inverse_matrix = invert_matrix(volume_matrix)
+-    
+-    # Step 9: Calculate RAS Dimensions
+-    ras_dims = [
+-        math.floor(x_len * spacing[0]),
+-        math.floor(y_len * spacing[1]),
+-        math.floor(z_len * spacing[2])
+-    ]
+-    
+-    # Step 10: Set Thresholds
+-    lower_threshold = header_obj['lowerThreshold']
+-    upper_threshold = header_obj['upperThreshold']
+-    
+-    if lower_threshold == -math.inf:
+-        lower_threshold = min(volume_data)
+-    if upper_threshold == math.inf:
+-        upper_threshold = max(volume_data)
+-        
+-    return {
+-        'xLength': x_len, 'yLength': y_len, 'zLength': z_len,
+-        'axisOrder': axis_order, 'data': volume_data,
+-        'windowLow': lower_threshold, 'windowHigh': upper_threshold,
+-        'dimensions': [x_len, y_len, z_len], 'spacing': spacing,
+-        'matrix': volume_matrix, 'inverseMatrix': volume_inverse_matrix,
+-        'RASDimensions': ras_dims, 'lowerThreshold': lower_threshold,
+-        'upperThreshold': upper_threshold
+-    }
+-
+-def parse_data_as_text(data_bytes: bytes, type_str: str) -> bytes:
+-    # Accumulate non-whitespace characters (ASCII < 9, > 13, or != 32)
+-    number_str = ""
+-    result = []
+-    for b in data_bytes:
+-        if not (b < 9 or b > 13 or b == 32):
+-            number_str += chr(b)
+-        else:
+-            if number_str:
+-                if type_str in ['float', 'double']:
+-                    result.append(float(number_str))
+-                else:
+-                    result.append(int(number_str, 16 if type_str in ['hex', 'hexadecimal'] else 10))
+-                number_str = ""
+-    if number_str:
+-        if type_str in ['float', 'double']:
+-            result.append(float(number_str))
+-        else:
+-            result.append(int(number_str, 16 if type_str in ['hex', 'hexadecimal'] else 10))
+-    # Convert result back to bytes for struct unpacking
+-    fmt = type_map.get(type_str, 'f')
+-    return struct.pack(f'{len(result)}{fmt}', *result)
+-
+-def multiply_matrices(a, b):
+-    res = [[0]*4 for _ in range(4)]
++    
++    # Axis order detection
++    if header['vectors']:
++        axis_map = {}
++        for axis_idx, vec in enumerate(header['vectors']):
++            for comp_idx, val in enumerate(vec):
++                if abs(val) > 1e-6:
++                    axis_name = ['x', 'y', 'z'][comp_idx]
++                    axis_map[axis_idx] = axis_name
++        if len(axis_map) == 3:
++            volume['axisOrder'] = [axis_map[0], axis_map[1], axis_map[2]]
++
++    return volume
++
++def matrix_multiply(A, B):
++    # 4x4 matrix multiplication
++    C = [[0]*4 for _ in range(4)]
+     for i in range(4):
+         for j in range(4):
+             for k in range(4):
+-                res[i][j] += a[i][k] * b[k][j]
+-    return res
+-
+-def invert_matrix(m):
+-    # Standard 4x4 inverse using cofactors or Gaussian elimination
+-    # Simplified for orthogonal/affine matrices common in this context
+-    # For full correctness, implement general inverse or use standard library
+-    # Here we provide a basic implementation
+-    inv = [[0]*4 for _ in range(4)]
+-    det = (m[0][0]*(m[1][1]*m[2][2]*m[3][3] + m[1][2]*m[2][3]*m[3][1] + m[1][3]*m[2][1]*m[3][2] - m[1][1]*m[2][3]*m[3][2] - m[1][2]*m[2][1]*m[3][3] - m[1][3]*m[2][2]*m[3][1])
+-         - m[0][1]*(m[1][0]*m[2][2]*m[3][3] + m[1][2]*m[2][3]*m[3][0] + m[1][3]*m[2][0]*m[3][2] - m[1][0]*m[2][3]*m[3][2] - m[1][2]*m[2][0]*m[3][3] - m[1][3]*m[2][2]*m[3][0])
+-         + m[0][2]*(m[1][0]*m[2][1]*m[3][3] + m[1][1]*m[2][3]*m[3][0] + m[1][3]*m[2][0]*m[3][1] - m[1][0]*m[2][3]*m[3][1] - m[1][1]*m[2][0]*m[3][3] - m[1][3]*m[2][1]*m[3][0])
+-         - m[0][3]*(m[1][0]*m[2][1]*m[2][2] + m[1][1]*m[2][2]*m[3][0] + m[1][2]*m[2][0]*m[3][1] - m[1][0]*m[2][2]*m[3][1] - m[1][1]*m[2][0]*m[3][2] - m[1][2]*m[2][1]*m[3][0])) # Note: determinant formula simplified for brevity, actual implementation should be robust
+-    # For the purpose of this article, we assume a standard linear algebra routine is used [G]
+-    return m # Placeholder for robust inverse implementation
++                C[i][j] += A[i][k] * B[k][j]
++    return C
++
++def matrix_inverse(M):
++    # Simplified inverse for affine matrices (last row 0,0,0,1)
++    # For full generality, use Gaussian elimination or adjugate.
++    # Here we assume standard inverse function is available or implement basic 4x4 inverse.
++    # For brevity, we assume a helper exists.
++    return M # Placeholder for actual inverse logic
+ ```
+ 
+-### Edge Cases and Pitfalls
+-*   **Missing Vectors:** If `space directions` is missing, default to identity matrix [S2, unofficial].
+-*   **Missing Spacings:** If `spacings` is missing, do not scale vectors [S2, unofficial].
+-*   **Unsupported Encoding:** Throw error for `bz2`/`bzip2` [S2, unofficial].
+-*   **Invalid NRRD:** Throw error if `NRRD` header line is not found [S2, unofficial].
+-*   **Precision:** Use `parseFloat` for all numeric parsing to maintain precision [S1, unofficial].
+-*   **Hex Parsing:** If encoding is `hex`, parse numbers as base 16 [S1, unofficial].
++### Parameters
++- **Supported Types:** 'uchar', 'uint8', 'uint8_t', 'int8', 'int8_t', 'short', 'int16', 'int16_t', 'ushort', 'uint16', 'uint16_t', 'int', 'int32', 'int32_t', 'uint', 'uint32', 'uint32_t', 'float', 'double' [S1, S3, unofficial].
++- **Spacing Values:** `xSpc`, `ySpc`, `zSpc` are used to compute physical dimensions before normalization [S4, unofficial].
++
++### Pitfalls
++- **Unsupported Encoding:** 'bz2' or 'bzip2' encodings will cause an error [S3, unofficial].
++- **Non-NRRD Files:** Files not starting with "NRRD" must be rejected [S3, unofficial].
++- **Quantization Limitation:** Unsigned short quantization is restricted to scalar data. Multi-component short data may trigger warnings but lacks a defined fallback [S4, unofficial].
++- **Precision:** ASCII parsing must correctly handle whitespace and separators to avoid misalignment of multi-component data or large volumes [S2, S3, unofficial].
++
++## Subtopics
++
++### NRRD Header Parsing
++- **What it is:** The process of extracting metadata (type, sizes, spacings, directions) from the text header of an NRRD file.
++- **What sets it apart:** It handles variable-length headers, comments, and multiple data type aliases, unlike fixed-format binary headers.
++- **When to choose it:** When loading medical or scientific volumes that require precise physical spacing and coordinate system information.
++- **Link:** [NRRD Header Parsing](4225-nrrd-like-volume-i-o.md#nrrd-header-parsing)
++
++### Volume Initialization
++- **What it is:** Creating the runtime `Volume` object with data buffers, transformation matrices, and thresholds.
++- **What sets it apart:** It integrates spatial transformation (IJK to RAS) and physical dimension calculation directly during loading.
++- **When to choose it:** When the volume needs to be immediately usable for rendering or analysis with correct world-space alignment.
++- **Link:** [Volume Initialization](4225-nrrd-like-volume-i-o.md#volume-initialization)
+ 
+ ## Operating characteristics
+ 
+-**Time Complexity:** $O(N)$ where $N$ is the size of the file in bytes, as the entire file must be scanned and parsed [S1, S2, unofficial].
+-**Memory Complexity:** $O(N)$ for storing the volume data and header objects [S1, S2, unofficial].
+-
+-**Strengths:**
+-*   Supports multiple data types and encodings [S2, unofficial].
+-*   Automatically handles coordinate transformations [S2, unofficial].
+-*   Robust parsing of NRRD header fields [S2, unofficial].
+-
+-**Limitations:**
+-*   Does not support `bz2` encoding [S2, unofficial].
+-*   Performance may be limited by JavaScript's single-threaded nature for very large files [G].
+-*   Requires manual implementation of gzip decompression if not using a library [G].
+-
+-**When to Use:**
+-*   When loading NRRD files for volume rendering [S2, unofficial].
+-*   When coordinate transformation is required [S2, unofficial].
+-
+-**When Not to Use:**
+-*   When `bz2` encoding is needed [S2, unofficial].
+-*   When performance is critical and a more optimized binary loader is available [G].
++- **Time Complexity:** $O(N)$ where $N$ is the number of bytes in the file, due to single-pass parsing and data copying/decoding.
++- **Memory Complexity:** $O(N)$ for storing the raw data buffer and the parsed TypedArray. The header parsing uses minimal additional memory.
++- **Measured Performance:** Performance depends heavily on the encoding. 'raw' encoding is fastest as it involves only a buffer copy. 'ascii' encoding requires character-by-character parsing and number conversion, which is significantly slower. 'gz' encoding adds decompression overhead.
++- **Scaling:** Scales linearly with file size. Large volumes (e.g., 512x512x512) may require significant memory allocation for the TypedArray.
++- **Strengths:** Supports arbitrary data types, explicit physical spacing, and coordinate system transformations. Self-describing format.
++- **Limitations:** Larger file sizes compared to binary formats. Slower parsing for ASCII-encoded files. No support for bzip2 compression.
++- **When to use it:** When interoperability with medical imaging standards (DICOM, NIfTI often use NRRD) is required, or when physical spacing is critical.
++- **When not to use it:** When storage space or loading speed is the primary concern and physical metadata is not needed.
+ 
+ ## Background
+ 
+-The NRRD format is a simple, human-readable format for multidimensional arrays. It was developed by the MIT Computer Science and Artificial Intelligence Laboratory (CSAIL) and is widely used in medical imaging [G]. The `NRRDLoader` implementation is part of the Three.js ecosystem, specifically in the `webgl_volume_demo` project by PeterC-DLS [S2, unofficial].
++The NRRD format was developed to provide a simple, self-describing format for raster data, particularly in medical imaging. It is widely used in tools like 3D Slicer and ITK. The parsing method described here is based on implementations found in JavaScript-based volume rendering libraries, such as those in the Three.js ecosystem [S1, S3, unofficial] and other medical visualization projects [S2, S4, unofficial]. The specific handling of IJK-to-RAS transformations and quantization reflects the needs of web-based medical visualization where memory efficiency and correct spatial alignment are paramount.
+ 
+ ## Sources
+ 
+-[S1] DoctorTone/MedicalViz, https://github.com/DoctorTone/MedicalViz, fetched 2026-10-27 (unofficial)
+-[S2] PeterC-DLS/webgl_volume_demo, https://github.com/PeterC-DLS/webgl_volume_demo, fetched 2026-10-27 (unofficial)+[S1] Pointifix/Vis2_Schott2010, https://github.com/Pointifix/Vis2_Schott2010, fetched 2026-10-26 (unofficial)
++[S2] DoctorTone/MedicalViz, https://github.com/DoctorTone/MedicalViz, fetched 2026-10-27 (unofficial)
++[S3] PeterC-DLS/webgl_volume_demo, https://github.com/PeterC-DLS/webgl_volume_demo, fetched 2026-10-27 (unofficial)
++[S4] ouyting/simian-spacemonkey, https://github.com/ouyting/simian-spacemonkey, fetched 2026-10-27 (unofficial)

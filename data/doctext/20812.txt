@@ -1,0 +1,945 @@
+# Neural Articulated Radiance Field
+
+Atsuhiro Noguchi1 Xiao Sun2 Stephen Lin2 Tatsuya Harada1,3
+
+1The University of Tokyo 2Microsoft Research Asia 3RIKEN
+
+### Abstract
+
+We present Neural Articulated Radiance Field (NARF), a novel deformable 3D representation for articulated objects learned from images. While recent advances in 3D implicit representation have made it possible to learn models of complex objects, learning pose-controllable representations of articulated objects remains a challenge, as current methods require 3D shape supervision and are unable to render appearance. In formulating an implicit representation of 3D articulated objects, our method considers only the rigid transformation of the most relevant object part in solving for the radiance field at each 3D location. In this way, the proposed method represents pose-dependent changes without significantly increasing the computational complexity. NARF is fully differentiable and can be trained from images with pose annotations. Moreover, through the use of an autoencoder, it can learn appearance variations over multiple instances of an object class. Experiments show that the proposed method is efficient and can generalize well to novel poses. The code is available for research purposes at https://github.com/nogu-atsu/NARF.
+
+### 1. Introduction
+
+In this work, we aim to learn a representation for rendering novel views and poses of 3D articulated objects, such as human bodies, from images. Our approach follows the inverse graphics paradigm [29, 28, 39, 30] of analyzing an image by attempting to synthesize it with compact graphics codes. These codes are typically disentangled to allow for rendering of scenes/objects with fine-grained control over individual appearance properties such as object location, pose, lighting, texture, and shape. For the case of humans, synthesis of novel views and poses can be useful for applications such as movie making, photo editing, virtual clothing [68, 31] and motion transfer [35, 4].
+
+Various inverse graphics based approaches have been specifically designed for static scenes [64, 21, 57], rigid objects [9, 72, 66, 59, 3], blend shapes for keypoints [65, 4] and dense meshes [68, 35]. However, efficient deformation
+
+
+
+Figure 1. Training pipeline of Disentangled NARF (NARFD). NARF is an efficient pose-aware 3D representation trained from only pose-annotated images. The learned representation is partbased and able to render novel poses of articulated 3D objects by changing the input object pose configurations.
+
+modeling of articulated 3D objects using neural networks remains a challenging task due to the large variance of joint locations (especially for endpoints such as hands), severe self-occlusions, and high non-linearity in forward kinematic transformations [73]. Though work has been done to enable explicit control over the underlying human pose [35] and key point locations [4], their neural rendering methods are either limited to 2D [4], which prevents modeling of view-dependent appearance [7], or based on mesh representations [35], where rendering quality can be affected by the resolution of the discrete template mesh.
+
+Recent progress on the implicit representation of 3D objects and scenes, such as signed distance functions [20, 45] and occupancy fields [12, 40], has greatly promoted the development of the inverse graphics paradigm. Such representations are lightweight in model size, continuous, and differentiable, making them highly practical in comparison with the previously-dominant volumetric representations [11, 16, 24, 41, 49, 58, 60, 71]. Particularly, Mildenhall et al. [42] propose the neural radiance field (NeRF) that takes a single continuous 5D coordinate (3D spatial location and 2D viewing direction) as input and outputs the volume density and view-dependent emitted radiance at each spatial location. Combined with a classical differentiable volume rendering technique [23], it is able to synthesize novel views by learning from a sparse set of input views of static scenes. NeRF completely discards the mesh-based representation and replaces it with a radiance-based model which can effectively and efficiently encode view-dependent appearance, enabling it to reproduce scenes of complex geometry with high fidelity.
+
+In this paper, we extend NeRF to an articulated NeRF, called a Neural Articulated Radiance Field (NARF), to represent articulated 3D objects. Accounting for 3D articulation within the NeRF framework is a challenging problem because a complex, non-linear relationship exists between a kinematic representation of 3D articulations and the resulting radiance field, making it hard to model implicitly in a neural network [73]. In addition, the radiance field at a given 3D location is influenced by at most a single articulated part and its parents along the kinematic tree, while the full kinematic model is provided as input. As a result, dependencies of the output to irrelevant parts may inadvertently be learned, which is known to hurt model generalization to poses unseen in training [69].
+
+To address these issues, we propose a method that predicts the radiance field at a 3D location based on only the most relevant articulated part. This part is identified using a set of sub-networks that output the probability for each part given the 3D location and the 3D geometric configuration of the parts. The spatial configurations of parts are computed explicitly with a kinematic model, rather than modeled implicitly in the network. A NARF then predicts the density and view-dependent radiance of the 3D location conditioned on the properties of only the selected part. An overview of the method is shown in Fig. 1.
+
+The presented NARF has the following properties:
+
+- It learns a disentangled representation of camera viewpoint, bone parameters, and bone pose, allowing these properties to be individually controlled in rendering.
+- A dense 3D representation is learned from a sparse set of 2D images with pose annotations of the articulated object, which could potentially be obtained through external pose estimation techniques on multi-view images with known camera parameters [22].
+- Part segmentation is learned from images with pose annotation. Additional supervision is not needed.
+- NARF can be trained for articulated objects of various shape and appearance, through the use of an autoencoder that extracts latent shape and appearance vectors which are additionally disentangled.
+
+With this approach, it becomes possible to render both novel views and poses of articulated 3D objects from pose annotated 2D images with little increase in computational complexity.
+
+### 2. Related Work
+
+Articulated 3D Shape Representations The deformation of articulated objects is traditionally modeled by skinning techniques [18, 19, 32, 33] in which the location of surface mesh vertices is determined from bone transformations controlled by the kinematics [2]. Effective skinning models with subtle pose-dependent and identity-dependent deformation modeling have been developed for the human body [36, 17, 44] and animals [74]. However, the representation capacity of skinning based models is limited to the resolution of the discrete template mesh, and sophisticated shading techniques [51] are usually required for high quality image rendering. In addition, a large amount of 3D scan data and expert supervision are required to prepare a template mesh.
+
+Recently, Deng et al. [8] proposed a neural network based articulated shape representation (NASA). NASA learns the neural indicator/occupancy function [6, 40, 46] of every point in space, conditioned on a latent pose vector that encodes a piece-wise decomposition. NASA provides a continuous and differentiable representation for 3D articulated shapes. However, ground truth occupancy is required to train the network, and NASA does not learn appearance, a critical element for rendering.
+
+Articulated Pose Conditioned Image Generation The recent advance of image generation models such as variational autoencoders (VAE) [27] and generative adversarial networks (GANs) [15] provides powerful tools for generating realistic-looking images. Image generation for articulated objects (typically persons) conditioned on target poses is an important direction with various applications like movie making, photo editing, virtual clothing [68, 31] and motion transfer [35, 4]. A majority of these works [4, 37, 38, 55, 62, 10, 1] generate the image of a person in a target pose by learning a GAN model from 2D keypoint maps of the target pose. The appearance information of this person is provided by explicit concatenation with an image of this person in the target pose [37, 55], automatically encoded for a single person [4] or using autoencoders [38]. These works are limited to 2D, which prevents modeling of view-dependent appearance [7]. Some works [68] leverage the underlying 3D mesh representation and transfer appearance from one mesh to another using aligned mesh triangles. The quality of a mesh based representation is bounded by the resolution of its discrete template mesh, and a 3D template mesh is required.
+
+Implicit 3D representation Our work builds on the recent success of the implicit 3D representation. This representation is memory efficient, continuous, and topologyfree, and has been used for learning 3d shape [40, 46, 56], 3d texture [43], static scenes [42, 57], parts decomposition [14, 13], articulated objects [8], deformation [50, 34, 67, 47], 3d reconstruction from sparse images [52, 53], and image synthesis [54, 5].
+
+Early methods required ground truth 3D geometry [40, 46], but in combination with differentiable rendering, they evolved to learn from 2D images. In particular, neural radiance fields (NeRF) [42] is capable of learning a 3D representation of complex scenes using only multi-view posed images. However, NeRF addresses static scenes and cannot handle deformable objects. Very recently, methods have been proposed to extend NeRF to learn deformations and dynamics [50, 34, 67, 47]. These models have been successful in learning deformable implicit representations using posed video frames [50, 34, 67, 47]. However, these models do not take into account the structure of the object, so they cannot generate images with explicit pose control.
+
+#### 3. Method
+
+In this section, we present neural articulated radiance field, a novel implicit representation for articulated 3D objects based on NeRF. We start by briefly reviewing the basic NeRF formulation for static scenes in Sec. 3.1. In Sec. 3.2, NeRF is extended to be conditioned on pose via a kinematic model, and a straightforward baseline is derived from this. We reformulate the pose-conditioned NeRF to allow for rigid object transformations as well as global shape variations in Sec. 3.3. In Sec. 3.4, we represent articulated 3D objects as a composition of movable rigid object parts controlled by forward kinematic rules. To achieve constant model complexity with respect to the number of object parts, we propose an efficient Disentangled NARF architecture. The training strategy is then presented in Sec. 3.5.
+
+#### 3.1. Neural Radiance Field Revisited
+
+A neural network is used to represent a Radiance Field such that 3D location x = (x, y, z) and 2D viewing direction d is converted to density σ and RGB color value c. The density σ acts like a differential opacity controlling how much radiance is accumulated by a ray passing through x [42].
+
+$$F_{\Theta} : (\gamma(\mathbf{x}), \gamma(\mathbf{d})) \rightarrow (c, \sigma), \quad (1)$$
+
+where γ(p) = [(sin(2lπp), cos(2lπp)]L 0 is a positional encoding (PE) layer that maps an input scalar into a higher dimensional space to represent high-frequency detail of the scene. FΘ consists of two ReLU MLP networks. Specifically, the volume density σ is a function of the location x only, while the RGB color c is a function of both location x and viewing direction d.
+
+| $F_{\Theta_\sigma} : (\gamma(\mathbf{x})) \rightarrow (\sigma, \mathbf{h}), \quad F_{\Theta_c} : (\mathbf{h}, \gamma(\mathbf{d})) \rightarrow (c), \quad (2)$ |
+|---------------------------------------------------------------------------------------------------------------------------------------------------------------|
+|---------------------------------------------------------------------------------------------------------------------------------------------------------------|
+
+where h is a hidden feature vector.
+
+Classical volume rendering [23] is used to render the color C(r) of a camera ray r(t) = o + td with near and far bounds tn and tf , and where o denotes the camera position.
+
+$$T(t) = \exp\left(-\int_{t_n}^t \sigma(\mathbf{r}(s)) ds\right), \quad (3)$$
+
+
+$$\sigma_{t_n}$$
+
+$$\mathbf{C}(\mathbf{r}) = \int_{t_n}^{t_f} T(t) \sigma(\mathbf{r}(t)) c(\mathbf{r}(t), \mathbf{d}) dt \quad (4)$$
+
+T(t) denotes the accumulated transmittance along the ray. The integrals are computed by a discrete approximation over sampled points along the ray r.
+
+$$T_j = \exp \left( - \sum_{k=1}^{j-1} \sigma_k \delta_k \right), \mathbf{C}(\mathbf{r}) = \sum_{j=1}^N T_j (1 - \exp(-\sigma_j \delta_j)) c_j \quad (5)$$
+
+Here, σj and cj are the density and color at the j th point on the ray r, and δj is the distance between the j th and (j+1)th sample points.
+
+NeRF is trained on images of a single static scene taken from multiple views with known camera parameters. The density and color of each location are trained so that the rendered image for each of the views becomes close to its ground truth. After training, high resolution images can be synthesized from any viewpoint.
+
+#### 3.2. Pose-Conditioned NeRF: A Baseline
+
+Our goal is to extend the representation capacity of NeRF from static scenes to deformable articulated objects whose configurations can be described by a kinematic model [2]. The radiance field of a 3D location is thus conditioned on the pose configuration. Once this "poseconditioned NeRF" is learned, novel poses can be rendered in addition to novel views, by changing the input pose configurations.
+
+In this work, we focus on modeling articulated objects without considering the background. Therefore, for compactness, we assume that the backgrounds are pre-cleaned.
+
+Kinematic Model Formally, the kinematic model [2] represents an articulated object of P + 1 joints, including endpoints, and P bones in a tree structure where one of the joints is selected as the root joint and each remaining joint is linked to its single parent joint by a bone of fixed length.
+
+Specifically, the root joint J0 is defined by a global transformation matrix T0 . Let ζi be the bone length from the i th joint Ji to its parent, i ∈ {1, ...P}, and θi denotes the rotation angles of the joint with respect to its parent joint. A bone, considered as a rigid object, defines a local rigid transformation between a joint and its parent. The transformation matrix Ti local is computed as
+
+
+$$\mathbf{T}_{local}^i = \text{Rot}(\boldsymbol{\theta}_i) \text{Trans}(\boldsymbol{\zeta}_i), \quad (6)$$
+
+where Rot and Trans are the rotation and translation matrix, respectively. The global transformation from the root joint to joint Ji can thus be obtained by multiplying the transformation matrices along the bones from the root joint to the i th joint:
+
+
+$$\mathbf{T}^i = (\Pi_{k \in \mathbf{Pa}(i)} \mathbf{T}_{local}^k) \mathbf{T}^0 \quad (7)$$
+
+where Pa(i) includes the i th joint and all of its parent joints along the kinematic tree. The corresponding global rigid transformation l i = {Ri , t i} for the i th joint can then be obtained from the transformation matrix Ti .
+
+Baseline The most straightforward way to condition the radiance field at a 3D location x on a kinematic pose configuration P = {T0 , ζ, θ} is to directly concatenate a vector representing P as the model input. Since the forward kinematic computation is a complex non-linear function [73] that is hard to simulate in neural networks, we use the transformations l i = {Ri , t i} obtained by the forward kinematics as network inputs.
+
+$$F_{\Theta}^{\mathcal{P}} : (\gamma(\mathbf{x}), \gamma(\{|i| = 1, \dots, P\}), \gamma(\mathbf{d})) \rightarrow (\sigma, c) \quad (8)$$
+
+We refer to this naive approach as Pose-conditioned NeRF (P-NeRF). The implementation details can be found in the supplemental material. Though P-NeRF establishes dependency between the radiance field and pose, generalization with this model is difficult because of the following two reasons.
+
+- Implicit Transformations. An articulated object consists of several rigid bodies, and the surface points on the object should move with the rigid transformations of the parts when the pose changes. Therefore, the movement of points can be explicitly described using rigid body transformations of each part, but such transformations may be difficult for a neural network to learn implicitly.
+- Part Dependency. The density at a 3D location depends only on the parameters of the bone it lies on and its parents along the kinematic tree. However, all the parameters are used to estimate the radiance field of a single location in Eq. 8. As the training on such 3D locations is backpropagated to all the parameters, the network may learn erroneous dependencies that do not physically exist. Correct pose predictions may still be obtained for test poses seen in the training data, but model generalization to novel poses may be degraded [69].
+
+Towards addressing the above issues, we decompose the articulated object into P rigid object parts. Each part has its own local coordinate system defined by the rigid transformation l i = {Ri , t i}, which is explicitly estimated using forward kinematics, rather than modeled implicitly by a neural network. Then, we show how a rigidly transformed object part can be effectively modeled in a rigidly transformed neural radiance field (RT-NeRF) in Section 3.3. Based on RT-NeRF, we describe in Section 3.4 how to train a single unified NeRF that encodes multiple parts in a manner that avoids the part dependency issue.
+
+#### 3.3. Rigidly Transformed Neural Radiance Field
+
+Given a rigid transformation l = {R, t} of an object, we now estimate the radiance field in the object coordinate system where the density is constant with respect to a local 3D location. Formally,
+
+$$F_{\Theta_{\sigma}}^l : (\gamma(\mathbf{x}^l)) \rightarrow (\sigma, \mathbf{h}) \quad (9)$$
+
+where x l = R−1 (x − t) represents the 3D location in the local object coordinate system.
+
+We expect the model to handle certain shape variations. For example, the limb length and thickness of a child should differ significantly from those of an adult. To account for shape variation, we further condition the model on bone parameter ζ.
+
+
+$$F_{\Theta_\sigma^l}^{l, \zeta} : (\gamma(\mathbf{x}^l), \gamma(\boldsymbol{\zeta})) \rightarrow (\sigma, \mathbf{h}) \quad (10)$$
+
+Meanwhile, the color c at a local 3D location may change with a transformation of the object coordinate system, as this may lead to changes in the local lighting condition. Since the RGB color c at a local 3D location should further depend on rigid transformation l, we use a 6D vector se(3) representation ξ of transformation l as a network input.
+
+
+$$F_{\Theta_c^L}^{1, \zeta} : (\mathbf{h}, \boldsymbol{\gamma}(\mathbf{d}^l), \boldsymbol{\gamma}(\boldsymbol{\xi})) \rightarrow (c) \quad (11)$$
+
+where d l = R−1d is the 2D view direction in the object coordinate system.
+
+Combining Eqs. 10-11, the rigidly transformed neural radiance field (RT-NeRF) defined in the l = {R, t} space is expressed as
+
+
+$$F_\Theta^{l,\xi} : (\gamma(\mathbf{x}^l), \gamma(\mathbf{d}^l), \gamma(\boldsymbol{\xi}), \gamma(\boldsymbol{\zeta})) \rightarrow (c, \sigma) \quad (12)$$
+
+RT-NeRF serves as the basic building block in the neural articulated radiance field, and we will next show how it is utilized to overcome the 'Implicit Transformations' and 'Part Dependency' issues.
+
+#### 3.4. Neural Articulated Radiance Field
+
+Local locations
+Po
+
+on
+
+<latexit sha1_base64="oBc5g5yw4JP+1v//RJ2lj45o5AI=">AAACanichVHLSsNAFD2N7/qqulG6KdaKq3IjguKq6MZltbYVWpEkTjU0TUKSFmvxB9y5EuxKQUT8DDf+gIt+guhOwY0Lb9OAaFHvMDNnztxz58yMahu66xG1QlJPb1//wOBQeHhkdGw8MjGZc62qo4msZhmWs6MqrjB0U2Q93TPEju0IpaIaIq+W19v7+ZpwXN0yt726LXYryoGpl3RN8ZjKN4pqKXZ0sheJU5L8iHUDOQBxBJG2IjcoYh8WNFRRgYAJj7EBBS63AmQQbOZ20WDOYaT7+wInCLO2ylmCMxRmyzwe8KoQsCav2zVdX63xKQZ3h5UxJOiRbumVHuiOnujj11oNv0bbS51ntaMV9t746XTm/V9VhWcPh1+qPz17KGHF96qzd9tn2rfQOvra8flrZnUr0ZinK3pm/5fUonu+gVl70643xVYTYf4A+edzd4PcYlKmpLy5FE+tBV8xiChmscDvvYwUNpBG1nd3hgs0Qy/SpDQjRTupUijQTOFbSHOfVySMcA==</latexit>
+
+x
+
+Global
+location
+
+NARFH
+
+<latexit sha1_base64="oBc5g5yw4JP+1v//RJ2lj45o5AI=">AAACanichVHLSsNAFD2N7/qqulG6KdaKq3IjguKq6MZltbYVWpEkTjU0TUKSFmvxB9y5EuxKQUT8DDf+gIt+guhOwY0Lb9OAaFHvMDNnztxz58yMahu66xG1QlJPb1//wOBQeHhkdGw8MjGZc62qo4msZhmWs6MqrjB0U2Q93TPEju0IpaIaIq+W19v7+ZpwXN0yt726LXYryoGpl3RN8ZjKN4pqKXZ0sheJU5L8iHUDOQBxBJG2IjcoYh8WNFRRgYAJj7EBBS63AmQQbOZ20WDOYaT7+wInCLO2ylmCMxRmyzwe8KoQsCav2zVdX63xKQZ3h5UxJOiRbumVHuiOnujj11oNv0bbS51ntaMV9t746XTm/V9VhWcPh1+qPz17KGHF96qzd9tn2rfQOvra8flrZnUr0ZinK3pm/5fUonu+gVl70643xVYTYf4A+edzd4PcYlKmpLy5FE+tBV8xiChmscDvvYwUNpBG1nd3hgs0Qy/SpDQjRTupUijQTOFbSHOfVySMcA==</latexit>
+
+<latexit sha1_base64="bs8QlLljyYde7WbNFuyzJJm+ZMk=">AAACVXichVG7SgNBFD1ZX3F9JMFGsAmGiFW4a6NYCTaWeZgHxBB2N6Mu2ewuu5tADP5AWgsLKwUR8TNs/AGL9DZiGcHGwrubgKiod5iZM2fm3DlzR3NMw/OJBhFpYnJqeiY6K8/NywuLsfh8ybPbri6Kum3abkVTPWEalij6hm+KiuMKtaWZoqw1d4P9cke4nmFb+37XEbWWemQZh4au+kxl6/EUZSiM5E+gjEEK47DjNzhAAzZ0tNGCgAWfsQkVHrcqFBAc5mroMecyMsJ9gVPIrG3zKcEnVGabPB7xqjpmLV4HOb1QrfMtJneXlUmk6ZFuaUgPdEfP9P5rrl6YI/DS5VkbaYVTj/WXC2//qlo8+zj+VP3p2cchtkKvBnt3QiZ4hT7Sd07Oh4XtfLq3Rlf0wv4vaUD3/AKr86pf50T+AjLXX/le7Z+gtJFRKKPkCFGsYBXrXOZN7GAPWRT5ugb6OIs8SbKUGP2TFBl/WAJfQlr6AAYJh7c=</latexit>
+sha1_base64="vJ8K056ZivmoDgqO7ICXMVcilH8=">AAACcHichVFNLwNBGH66vqo+WlwkDj4aIg7Nuy7EqUjESShFQtPsrsGm2921O21U4w/4Aw4uSETEz3DxBxz6E8QNiYuDt9tNBME7mZlnnnmfd56Z0V3L9CVRLaI0Nbe0tkXbYx2dXd3xRE/vuu+UPENkDcdyvE1d84Vl2iIrTWmJTdcTWlG3xIZemK/vb5SF55uOvSYrrsgVtT3b3DUNTTKV25biUFaXZjMLx/nFfCJJKQpi6CdQQ5BEGMtO4hrb2IEDAyUUIWBDMragwee2BRUEl7kcqsx5jMxgX+AYMdaWOEtwhsZsgcc9Xm2FrM3rek0/UBt8isXdY+UQRumBbuiF7umWHun911rVoEbdS4VnvaEVbj5+0r/69q+qyLPE/qfqT88Su5gOvJrs3Q2Y+i2Mhr58dPqyOpMZrY7RJT2x/wuq0R3fwC6/GlcrInOGGH+A+v25f4L1yZRKKXWFkum58CuiGMAIxvm9p5DGIpaR5XMPcIpzXESelX5lUBlupCqRUNOHL6FMfACztI7b</latexit>
+sha1_base64="OT/PpXn8UMxnf8/fJZL+ARBfR0w=">AAACcHichVHLSsNAFD2N7/qquim48FEUcVFuRFBc+QBxJbZaFbSUJE41mCYxmRa19Af8ARduVBARP8ONP+CinyDuVHDjwts0ICrqHWbmzJl77pyZ0V3L9CVRNaI0NDY1t7S2Rds7Oru6Yz29675T9AyRMRzL8TZ1zReWaYuMNKUlNl1PaAXdEhv6/kJtf6MkPN907DV55IpsQdu1zbxpaJKp7LYUh7K8PJderOSWcrEEJSmIwZ9ADUECYaw4sWtsYwcODBRRgIANydiCBp/bFlQQXOayKDPnMTKDfYEKoqwtcpbgDI3ZfR53ebUVsjavazX9QG3wKRZ3j5WDGKEHuqEXuqdbeqT3X2uVgxo1L0c863WtcHPdJ/HVt39VBZ4l9j5Vf3qWyGM68Gqydzdgarcw6vrS8enL6kx6pDxKl/TE/i+oSnd8A7v0alylRPoMUf4A9ftz/wTrE0mVkmpqMjE7H35FK/oxjDF+7ynMYgkryPC5BzjFOS4iz0pcGVCG6qlKJNT04Uso4x+09I7f</latexit>
+sha1_base64="0kGJiM3yP5q/b/g0zoVVT3YZNF8=">AAACZXichVFNLwNBGH66vqu0nCQOihCn5l0X4kQk4iS0qk1omt01rU23u2t32qDpH/AHenBBIiJ+hos/4OAniBsSFwdvt02EBu9kZp55Zp53nplXdy3Tl0SPIaWru6e3r38gPBgZGo7GRiI7vlPxDJE2HMvxsrrmC8u0RVqa0hJZ1xNaWbdERi+tNvczVeH5pmNvy2NX5Mpa0TYLpqFJpnJ7UhzJ2sZKcq2eX8/HpilBQcQ7gdoG02jHphO7xh724cBABWUI2JCMLWjwue1CBcFlLocacx4jM9gXqCPM2gqfEnxCY7bEY5FXu23W5nUzpx+oDb7F4u6xMo4ZeqAbeqV7uqUn+vg1Vy3I0fRyzLPe0go3Hz0dS73/qyrzLHHwpfrTs0QBi4FXk727AdN8hdHSV08ar6ml5Extli7pmf1f0CPd8Qvs6ptxtSWSZwhzAdSf390JduYTKiXULUI/xjGFOf7mBSxjHZtI83WHaOAcF6EXZUyZaJVKCbVrNopvoUx+AouTjgM=</latexit>
+
+P
+
+<latexit sha1_base64="bs8QlLljyYde7WbNFuyzJJm+ZMk=">AAACVXichVG7SgNBFD1ZX3F9JMFGsAmGiFW4a6NYCTaWeZgHxBB2N6Mu2ewuu5tADP5AWgsLKwUR8TNs/AGL9DZiGcHGwrubgKiod5iZM2fm3DlzR3NMw/OJBhFpYnJqeiY6K8/NywuLsfh8ybPbri6Kum3abkVTPWEalij6hm+KiuMKtaWZoqw1d4P9cke4nmFb+37XEbWWemQZh4au+kxl6/EUZSiM5E+gjEEK47DjNzhAAzZ0tNGCgAWfsQkVHrcqFBAc5mroMecyMsJ9gVPIrG3zKcEnVGabPB7xqjpmLV4HOb1QrfMtJneXlUmk6ZFuaUgPdEfP9P5rrl6YI/DS5VkbaYVTj/WXC2//qlo8+zj+VP3p2cchtkKvBnt3QiZ4hT7Sd07Oh4XtfLq3Rlf0wv4vaUD3/AKr86pf50T+AjLXX/le7Z+gtJFRKKPkCFGsYBXrXOZN7GAPWRT5ugb6OIs8SbKUGP2TFBl/WAJfQlr6AAYJh7c=</latexit>
+sha1_base64="QdmkRFHA/33wHlrJDPVCoP0+9OA=">AAACcHichVFNLwNBGH66vuujxUXioDRERJp3XYiTcHGsjyKhZHeNmnS/7G6bVOMP+AMOLkhExM9w8Qcc+hPETSUuDt5uNxEE72Rmnnnmfd55ZkZ3TekHRLWY0tLa1t7R2RXv7untSyT7BzZ8p+QZImc4puNt6ZovTGmLXCADU2y5ntAs3RSbenGpsb9ZFp4vHXs9qLgib2kFWx5IQwuYyu/4smBpu9nplLGb3UumKUNhpH4CNQJpRJF1kjfYwT4cGCjBgoCNgLEJDT63bagguMzlUWXOYyTDfYETxFlb4izBGRqzRR4LvNqOWJvXjZp+qDb4FJO7x8oUxumRbqlOD3RHT/T+a61qWKPhpcKz3tQKdy9xOrT29q/K4jnA4afqT88BDjAXepXs3Q2Zxi2Mpr58fFZfm18dr07QFT2z/0uq0T3fwC6/GtcrYvUccf4A9ftz/wQbMxmVMuoKpRcWo6/oxDDGMMnvPYsFLCOLHJ97hDNc4DL2ogwpI8poM1WJRZpBfAll6gPTp45s</latexit>
+sha1_base64="nFfcSP/4vd32tWAarCOJq32UiSU=">AAACcHichVHLLgRBFD3T3uM12EgsDBMiIpPbIiFWwsZyHgYJQ7pbGRX90t0zCRM/4AcsbIxERHyGjR+w8Alih8TGwp2eTgTBrVTVqVP33DpVpbum9AOih5jS1NzS2tbeEe/s6u7pTfT1r/pO2TNEwXBMx1vXNV+Y0haFQAamWHc9oVm6Kdb0/aX6/lpFeL507JXg0BVFSyvZclcaWsBUcdOXJUvbykwlja3MdiJFaQoj+ROoEUghioyTuMImduDAQBkWBGwEjE1o8LltQAXBZa6IKnMeIxnuCxwjztoyZwnO0Jjd57HEq42ItXldr+mHaoNPMbl7rExijO7pml7ojm7okd5/rVUNa9S9HPKsN7TC3e49Gcy//auyeA6w96n603OAXcyFXiV7d0Omfgujoa8cnb7k53Nj1XG6oCf2X6MHuuUb2JVX4zIrcmeI8weo35/7J1idTquUVrMzqYXF6CvaMYRRTPB7z2IBy8igwOce4BTnqMWelUFlWBlppCqxSDOAL6FMfgDU545w</latexit>
+sha1_base64="EGinvbLd9eK8dAn2mOX9uX/rq8s=">AAACZXichVG7SgNBFD1ZXzE+Eq0EC6MSsZBw10axEmws4yMaiInsrmMcsi93N4EY/AF/IIWNCiLiZ9j4AxZ+gtgZwcbCm01ANKh3mJkzZ+bcOTNXd03pB0RPEaWnt69/IDoYGxoeGY0nxoZ3fKfiGSJrOKbj5XTNF6a0RTaQgSlyric0SzfFrl5ea+3vVoXnS8feDmquKFhayZaH0tACpgp7vixZWjGzkDSKmf3ELKUpjGQ3UDtgFp3IOIkb7OEADgxUYEHARsDYhAafWx4qCC5zBdSZ8xjJcF/gFDHWVviU4BMas2UeS7zKd1ib162cfqg2+BaTu8fKJFL0SLfUpAe6o2f6+DVXPczR8lLjWW9rhbsfP5vYev9XZfEc4OhL9afnAIdYDr1K9u6GTOsVRltfPWk0t1Y2U/U5uqIX9n9JT3TPL7Crb8b1htg8R4wLoP787m6ws5hWKa1uEKKYxAzm+ZuXsIp1ZJDl647RwAUuI6/KhDLVLpUS6dRsHN9Cmf4EsEuNlA==</latexit>
+
+⇣
+
+x
+
+x
+
+NARFD
+
+, c1 Weighted sun
+,c
+
+P
+
+MLP
+
+(x )
+
+⇣
+
+P
+
+(x )
+
+(p1
+
+<latexit sha1_base64="uPf4mDIPX8DlkAQP1j2xjevz59M=">AAACcHichVHLSsNAFD2N7/qquim48FEUcVFuRFBc+UJciVargpaSxLGGpklMpkUt/oA/0IUbFUTEz3DjD7jwE8SdCm5ceJsGREW9w8ycOXPPnTMzumuZviR6iCh19Q2NTc0t0da29o7OWFf3uu8UPUOkDcdyvE1d84Vl2iItTWmJTdcTWkG3xIaen6vub5SE55uOvSYPXZEpaDnb3DUNTTKV2ZbiQJaXZlILx9n5bCxBSQqi/ydQQ5BAGMtO7Arb2IEDA0UUIGBDMragwee2BRUEl7kMysx5jMxgX+AYUdYWOUtwhsZsnsccr7ZC1uZ1taYfqA0+xeLusbIfQ3RP1/RCd3RDj/T+a61yUKPq5ZBnvaYVbrbzJL769q+qwLPE3qfqT88Su5gMvJrs3Q2Y6i2Mmr50VHlZnUoNlYfpgp7Y/zk90C3fwC69GpcrInWKKH+A+v25f4L1saRKSXVlPDE9G35FM3oxiBF+7wlMYxHLSPO5+6jgDOeRZyWu9CkDtVQlEmp68CWU0Q+s9I7b</latexit>
+
+<latexit sha1_base64="MLr3/PPeANW/g79Sp/iq9VIuXDI=">AAACcHichVFNLwNBGH66vuuruDRxUBoiIs27IiFOwsWxRZFQsrumNbFfdrdNaPwBf8DBRSUi4me4+AMOfoK4IXFx8Ha7iSB4JzPzzDPv884zM7prSj8geogpTc0trW3tHfHOru6e3kRf/5rvlD1D5A3HdLwNXfOFKW2RD2Rgig3XE5qlm2Jd31+s769XhOdLx14NDl1RsLSSLYvS0AKmClu+LFnatjqZMrbVnUSaMhRG6idQI5BGFFkncYUt7MKBgTIsCNgIGJvQ4HPbhAqCy1wBVeY8RjLcFzhGnLVlzhKcoTG7z2OJV5sRa/O6XtMP1QafYnL3WJnCKN3TNb3QHd3QI73/Wqsa1qh7OeRZb2iFu9N7klx5+1dl8Rxg71P1p+cARcyGXiV7d0Omfgujoa8cnb6szC2PVsfogp7Yf40e6JZvYFdejcucWD5DnD9A/f7cP8HaVEaljJqbTs8vRF/RjkGMYJzfewbzWEIWeT73AKc4Ry32rCSVIWW4karEIs0AvoQy8QFYTI4y</latexit>
+
+…
+
+<latexit sha1_base64="Aul7rMczFa+IYTjqJHtJXSeRcWU=">AAACcHichVHLLgRBFD3T3uM12EgsDBMiFpPbIiFWHolYyRgGCZNJdyt09Et3zQQTP+AHLGyQiIjPsPEDFvMJYofExsKdnk4Ewa1U1alT99w6VaV7lhlIokpMqatvaGxqbom3trV3dCa6ulcDt+gbIme4luuv61ogLNMROWlKS6x7vtBs3RJr+t5cdX+tJPzAdJ0VeeiJvK3tOOa2aWiSqfymFAeyvDiTnT8uZAqJFKUpjORPoEYghSgybuIam9iCCwNF2BBwIBlb0BBw24AKgsdcHmXmfEZmuC9wjDhri5wlOENjdo/HHV5tRKzD62rNIFQbfIrF3WdlEkP0QDf0Qvd0S4/0/mutclij6uWQZ72mFV6h86R3+e1flc2zxO6n6k/PEtuYDL2a7N0LmeotjJq+dHT6sjyVHSoP0yU9sf8LqtAd38ApvRpXSyJ7hjh/gPr9uX+C1bG0Sml1aTw1PRt9RTP6MIgRfu8JTGMBGeT43H2c4hwXsWelV+lXBmqpSizS9OBLKKMfxPSO5w==</latexit>
+
+1
+
+MLP
+
+…
+
+NARFP
+
+1
+
+(x )
+
+n od ng
+
+(x )
+
+pP )
+
+Se ec o
+
+(x )
+
+P
+
+(x )
+
+⌘
+
+⌘
+
+We gh ed
+conca
+
+,c
+
+Density
+and color
+<latexit sha1_base64="bs8QlLljyYde7WbNFuyzJJm+ZMk=">AAACVXichVG7SgNBFD1ZX3F9JMFGsAmGiFW4a6NYCTaWeZgHxBB2N6Mu2ewuu5tADP5AWgsLKwUR8TNs/AGL9DZiGcHGwrubgKiod5iZM2fm3DlzR3NMw/OJBhFpYnJqeiY6K8/NywuLsfh8ybPbri6Kum3abkVTPWEalij6hm+KiuMKtaWZoqw1d4P9cke4nmFb+37XEbWWemQZh4au+kxl6/EUZSiM5E+gjEEK47DjNzhAAzZ0tNGCgAWfsQkVHrcqFBAc5mroMecyMsJ9gVPIrG3zKcEnVGabPB7xqjpmLV4HOb1QrfMtJneXlUmk6ZFuaUgPdEfP9P5rrl6YI/DS5VkbaYVTj/WXC2//qlo8+zj+VP3p2cchtkKvBnt3QiZ4hT7Sd07Oh4XtfLq3Rlf0wv4vaUD3/AKr86pf50T+AjLXX/le7Z+gtJFRKKPkCFGsYBXrXOZN7GAPWRT5ugb6OIs8SbKUGP2TFBl/WAJfQlr6AAYJh7c=</latexit>
+sha1_base64="w+vyjzLRaqfCbnnmjgYsym4DkgQ=">AAACbHichVG7SgNBFD1ZXzE+Eh+FEIRgUCwk3LVRrII2lpoYH6jI7jrGwX2xuwlo8AdsLSzUQkFE/Awbf8AinyCCjYKNhTebBVFR7zAzZ87cc+fMjO6a0g+I6jGlpbWtvSPemejq7ulNpvr6l32n4hmiZDim463qmi9MaYtSIANTrLqe0CzdFCv63lxjf6UqPF869lKw74pNSyvbckcaWsDU2oYvy5Y2kTG2UlnKURiZn0CNQBZRLDipa2xgGw4MVGBBwEbA2IQGn9s6VBBc5jZRY85jJMN9gUMkWFvhLMEZGrN7PJZ5tR6xNq8bNf1QbfApJnePlRmM0gPd0Avd0y090vuvtWphjYaXfZ71pla4W8mjoeLbvyqL5wC7n6o/PQfYwXToVbJ3N2QatzCa+urByUtxpjBaG6NLemL/F1SnO76BXX01rhZF4RQJ/gD1+3P/BMuTOZVy6iJl87PRV8SRxgjG+b2nkMc8FlDicy0c4wznsWdlUEkrw81UJRZpBvAllLEPdnqM6A==</latexit>
+sha1_base64="xLICqgnLdOyx9328uwWP5bEz21Q=">AAACbHichVG7SgNBFD1Z3/GR+CgEEYLBYCHhrgiKVdDGMj7iAxXZXcc4ZF/sbgIa/AFbCwu1UBARP8PGH7DwE0SwUbCx8GazIBrUO8zMmTP33Dkzo7um9AOix5jS1NzS2tbeEe/s6u5JJHv7Vnyn7BmiYDim463pmi9MaYtCIANTrLme0CzdFKt6aa62v1oRni8deznYd8WWpRVtuSsNLWBqfdOXRUsbTxnbyTRlKYxUI1AjkEYUeSd5jU3swIGBMiwI2AgYm9Dgc9uACoLL3BaqzHmMZLgvcIg4a8ucJThDY7bEY5FXGxFr87pW0w/VBp9icvdYmcIoPdANvdI93dITffxaqxrWqHnZ51mva4W7nTgaXHr/V2XxHGDvS/Wn5wC7mA69SvbuhkztFkZdXzk4eV2aWRytZuiSntn/BT3SHd/ArrwZVwti8RRx/gD153M3gpWJrEpZdWEynZuNvqIdQxjBGL/3FHKYRx4FPtfCMc5wHntRBpQhZbieqsQiTT++hZL5BHe6jOw=</latexit>
+sha1_base64="WU4CaESs2YErP0m7UdzaP4NDS4Q=">AAACYXichVG7SgNBFD1Z3zFqFAtBhKBELCTctVGsBBtLX9FIImF3HOPgvtjdBDT4A7YWFmqhICJ+ho0/YOEniGATwcbCm01ANKh3mJkzZ+bcOTPX9CwVhERPMa2tvaOzq7sn3pvo6x9IDiY2ArfsC5kVruX6OdMIpKUcmQ1VaMmc50vDNi25ae4v1vc3K9IPlOushwee3LaNkqN2lTBCprYKgSrZxnRKFJMTlKEoUq1Ab4IJNGPZTd6ggB24ECjDhoSDkLEFAwG3PHQQPOa2UWXOZ6SifYkjxFlb5lOSTxjM7vNY4lW+yTq8rucMIrXgWyzuPitTSNMj3VKNHuiOnunj11zVKEfdywHPZkMrveLA8cja+78qm+cQe1+qPz2H2MVc5FWxdy9i6q8QDX3l8LS2Nr+ark7SFb2w/0t6ont+gVN5E9crcvUMcS6A/vO7W8HGTEanjL5C6MYoxjHF3zyLBSxhGVm+zsYJznERe9WGtdFGqbRYs2ZD+Bba2CdjEowU</latexit>
+
+P
+
+MLP
+
+<latexit sha1_base64="bs8QlLljyYde7WbNFuyzJJm+ZMk=">AAACVXichVG7SgNBFD1ZX3F9JMFGsAmGiFW4a6NYCTaWeZgHxBB2N6Mu2ewuu5tADP5AWgsLKwUR8TNs/AGL9DZiGcHGwrubgKiod5iZM2fm3DlzR3NMw/OJBhFpYnJqeiY6K8/NywuLsfh8ybPbri6Kum3abkVTPWEalij6hm+KiuMKtaWZoqw1d4P9cke4nmFb+37XEbWWemQZh4au+kxl6/EUZSiM5E+gjEEK47DjNzhAAzZ0tNGCgAWfsQkVHrcqFBAc5mroMecyMsJ9gVPIrG3zKcEnVGabPB7xqjpmLV4HOb1QrfMtJneXlUmk6ZFuaUgPdEfP9P5rrl6YI/DS5VkbaYVTj/WXC2//qlo8+zj+VP3p2cchtkKvBnt3QiZ4hT7Sd07Oh4XtfLq3Rlf0wv4vaUD3/AKr86pf50T+AjLXX/le7Z+gtJFRKKPkCFGsYBXrXOZN7GAPWRT5ugb6OIs8SbKUGP2TFBl/WAJfQlr6AAYJh7c=</latexit>
+sha1_base64="w+vyjzLRaqfCbnnmjgYsym4DkgQ=">AAACbHichVG7SgNBFD1ZXzE+Eh+FEIRgUCwk3LVRrII2lpoYH6jI7jrGwX2xuwlo8AdsLSzUQkFE/Awbf8AinyCCjYKNhTebBVFR7zAzZ87cc+fMjO6a0g+I6jGlpbWtvSPemejq7ulNpvr6l32n4hmiZDim463qmi9MaYtSIANTrLqe0CzdFCv63lxjf6UqPF869lKw74pNSyvbckcaWsDU2oYvy5Y2kTG2UlnKURiZn0CNQBZRLDipa2xgGw4MVGBBwEbA2IQGn9s6VBBc5jZRY85jJMN9gUMkWFvhLMEZGrN7PJZ5tR6xNq8bNf1QbfApJnePlRmM0gPd0Avd0y090vuvtWphjYaXfZ71pla4W8mjoeLbvyqL5wC7n6o/PQfYwXToVbJ3N2QatzCa+urByUtxpjBaG6NLemL/F1SnO76BXX01rhZF4RQJ/gD1+3P/BMuTOZVy6iJl87PRV8SRxgjG+b2nkMc8FlDicy0c4wznsWdlUEkrw81UJRZpBvAllLEPdnqM6A==</latexit>
+sha1_base64="xLICqgnLdOyx9328uwWP5bEz21Q=">AAACbHichVG7SgNBFD1Z3/GR+CgEEYLBYCHhrgiKVdDGMj7iAxXZXcc4ZF/sbgIa/AFbCwu1UBARP8PGH7DwE0SwUbCx8GazIBrUO8zMmTP33Dkzo7um9AOix5jS1NzS2tbeEe/s6u5JJHv7Vnyn7BmiYDim463pmi9MaYtCIANTrLme0CzdFKt6aa62v1oRni8deznYd8WWpRVtuSsNLWBqfdOXRUsbTxnbyTRlKYxUI1AjkEYUeSd5jU3swIGBMiwI2AgYm9Dgc9uACoLL3BaqzHmMZLgvcIg4a8ucJThDY7bEY5FXGxFr87pW0w/VBp9icvdYmcIoPdANvdI93dITffxaqxrWqHnZ51mva4W7nTgaXHr/V2XxHGDvS/Wn5wC7mA69SvbuhkztFkZdXzk4eV2aWRytZuiSntn/BT3SHd/ArrwZVwti8RRx/gD153M3gpWJrEpZdWEynZuNvqIdQxjBGL/3FHKYRx4FPtfCMc5wHntRBpQhZbieqsQiTT++hZL5BHe6jOw=</latexit>
+sha1_base64="WU4CaESs2YErP0m7UdzaP4NDS4Q=">AAACYXichVG7SgNBFD1Z3zFqFAtBhKBELCTctVGsBBtLX9FIImF3HOPgvtjdBDT4A7YWFmqhICJ+ho0/YOEniGATwcbCm01ANKh3mJkzZ+bcOTPX9CwVhERPMa2tvaOzq7sn3pvo6x9IDiY2ArfsC5kVruX6OdMIpKUcmQ1VaMmc50vDNi25ae4v1vc3K9IPlOushwee3LaNkqN2lTBCprYKgSrZxnRKFJMTlKEoUq1Ab4IJNGPZTd6ggB24ECjDhoSDkLEFAwG3PHQQPOa2UWXOZ6SifYkjxFlb5lOSTxjM7vNY4lW+yTq8rucMIrXgWyzuPitTSNMj3VKNHuiOnunj11zVKEfdywHPZkMrveLA8cja+78qm+cQe1+qPz2H2MVc5FWxdy9i6q8QDX3l8LS2Nr+ark7SFb2w/0t6ont+gVN5E9crcvUMcS6A/vO7W8HGTEanjL5C6MYoxjHF3zyLBSxhGVm+zsYJznERe9WGtdFGqbRYs2ZD+Bba2CdjEowU</latexit>
+
+,c
+
+MLP
+
+<latexit sha1_base64="bs8QlLljyYde7WbNFuyzJJm+ZMk=">AAACVXichVG7SgNBFD1ZX3F9JMFGsAmGiFW4a6NYCTaWeZgHxBB2N6Mu2ewuu5tADP5AWgsLKwUR8TNs/AGL9DZiGcHGwrubgKiod5iZM2fm3DlzR3NMw/OJBhFpYnJqeiY6K8/NywuLsfh8ybPbri6Kum3abkVTPWEalij6hm+KiuMKtaWZoqw1d4P9cke4nmFb+37XEbWWemQZh4au+kxl6/EUZSiM5E+gjEEK47DjNzhAAzZ0tNGCgAWfsQkVHrcqFBAc5mroMecyMsJ9gVPIrG3zKcEnVGabPB7xqjpmLV4HOb1QrfMtJneXlUmk6ZFuaUgPdEfP9P5rrl6YI/DS5VkbaYVTj/WXC2//qlo8+zj+VP3p2cchtkKvBnt3QiZ4hT7Sd07Oh4XtfLq3Rlf0wv4vaUD3/AKr86pf50T+AjLXX/le7Z+gtJFRKKPkCFGsYBXrXOZN7GAPWRT5ugb6OIs8SbKUGP2TFBl/WAJfQlr6AAYJh7c=</latexit>
+sha1_base64="w+vyjzLRaqfCbnnmjgYsym4DkgQ=">AAACbHichVG7SgNBFD1ZXzE+Eh+FEIRgUCwk3LVRrII2lpoYH6jI7jrGwX2xuwlo8AdsLSzUQkFE/Awbf8AinyCCjYKNhTebBVFR7zAzZ87cc+fMjO6a0g+I6jGlpbWtvSPemejq7ulNpvr6l32n4hmiZDim463qmi9MaYtSIANTrLqe0CzdFCv63lxjf6UqPF869lKw74pNSyvbckcaWsDU2oYvy5Y2kTG2UlnKURiZn0CNQBZRLDipa2xgGw4MVGBBwEbA2IQGn9s6VBBc5jZRY85jJMN9gUMkWFvhLMEZGrN7PJZ5tR6xNq8bNf1QbfApJnePlRmM0gPd0Avd0y090vuvtWphjYaXfZ71pla4W8mjoeLbvyqL5wC7n6o/PQfYwXToVbJ3N2QatzCa+urByUtxpjBaG6NLemL/F1SnO76BXX01rhZF4RQJ/gD1+3P/BMuTOZVy6iJl87PRV8SRxgjG+b2nkMc8FlDicy0c4wznsWdlUEkrw81UJRZpBvAllLEPdnqM6A==</latexit>
+sha1_base64="xLICqgnLdOyx9328uwWP5bEz21Q=">AAACbHichVG7SgNBFD1Z3/GR+CgEEYLBYCHhrgiKVdDGMj7iAxXZXcc4ZF/sbgIa/AFbCwu1UBARP8PGH7DwE0SwUbCx8GazIBrUO8zMmTP33Dkzo7um9AOix5jS1NzS2tbeEe/s6u5JJHv7Vnyn7BmiYDim463pmi9MaYtCIANTrLme0CzdFKt6aa62v1oRni8deznYd8WWpRVtuSsNLWBqfdOXRUsbTxnbyTRlKYxUI1AjkEYUeSd5jU3swIGBMiwI2AgYm9Dgc9uACoLL3BaqzHmMZLgvcIg4a8ucJThDY7bEY5FXGxFr87pW0w/VBp9icvdYmcIoPdANvdI93dITffxaqxrWqHnZ51mva4W7nTgaXHr/V2XxHGDvS/Wn5wC7mA69SvbuhkztFkZdXzk4eV2aWRytZuiSntn/BT3SHd/ArrwZVwti8RRx/gD153M3gpWJrEpZdWEynZuNvqIdQxjBGL/3FHKYRx4FPtfCMc5wHntRBpQhZbieqsQiTT++hZL5BHe6jOw=</latexit>
+sha1_base64="WU4CaESs2YErP0m7UdzaP4NDS4Q=">AAACYXichVG7SgNBFD1Z3zFqFAtBhKBELCTctVGsBBtLX9FIImF3HOPgvtjdBDT4A7YWFmqhICJ+ho0/YOEniGATwcbCm01ANKh3mJkzZ+bcOTPX9CwVhERPMa2tvaOzq7sn3pvo6x9IDiY2ArfsC5kVruX6OdMIpKUcmQ1VaMmc50vDNi25ae4v1vc3K9IPlOushwee3LaNkqN2lTBCprYKgSrZxnRKFJMTlKEoUq1Ab4IJNGPZTd6ggB24ECjDhoSDkLEFAwG3PHQQPOa2UWXOZ6SifYkjxFlb5lOSTxjM7vNY4lW+yTq8rucMIrXgWyzuPitTSNMj3VKNHuiOnunj11zVKEfdywHPZkMrveLA8cja+78qm+cQe1+qPz2H2MVc5FWxdy9i6q8QDX3l8LS2Nr+ark7SFb2w/0t6ont+gVN5E9crcvUMcS6A/vO7W8HGTEanjL5C6MYoxjHF3zyLBSxhGVm+zsYJznERe9WGtdFGqbRYs2ZD+Bba2CdjEowU</latexit>
+
+,c
+npu s
+
+Part-W se NARF (NARFP ) G ven a k nema c 3D pose
+configura on of an ar cu a ed ob ec {T0 ζ θ} we firs
+compu e he g oba r g d ransforma on { i = 1
+P}
+for each r g d par us ng he forward k nema cs n Eqs 6-7
+To es ma e he dens y and co or (σ c) of a g oba 3D oca on x from a 2D v ew ng d rec on d we ra n a separa e
+RT-NeRF FΘ ζ
+
+FΘ
+
+ζ
+
+−1
+
+(x − t ) d = R
+
+−1
+
+d
+
+(γ(x ) γ(d ) γ(ξ ) γ(ζ)) → (c σ )
+
+(13)
+(14)
+
+for each par us ng Eq 12 and comb ne he dens es and
+co ors {σ c i = 1
+P } es ma ed by d fferen RTNeRFs n o one We deno e h s approach as Par -W se
+NARF (NARFP )
+S nce a surface po n of an ob ec can be ong o on y one
+of he ob ec par s on y one of he es ma es n {σ c i =
+1
+P } shou d be nonzero The dens y and co or (σ c)
+of a g oba 3D oca on x can be de erm ned by ak ng he
+es ma e w h he h ghes dens y However he max opera on s no d fferen ab e so we ns ead use he sof max
+func on wh ch s a d fferen ab e we gh ed sum over a he
+es ma es
+PP
+PP
+exp(σ /τ )c
+=1 exp(σ /τ )σ
+σ = PP
+c = P=1
+(15)
+P
+=1 exp(σ /τ )
+=1 exp(σ /τ )
+
+where τ s he empera ure parame er of he sof max funcon Vo ume render ng s hen app ed us ng he comb ned
+dens y σ and co or c o genera e he rendered co or C(r)
+by Eq 5 S nce he render ng and sof max opera ons are
+bo h d fferen ab e he mage recons ruc on oss can pass
+grad en s o a he RT-NeRF mode s for effec ve ra n ng
+We no e ha n add on o co or C(r) he foreground
+mask M(r) can a so be es ma ed as an n egra of he opacy a ong he camera ray
+M(r) =
+
+N
+X
+j=1
+
+sj (r) = arg max{σj i ∈ 1 P }
+S (r) =
+
+N
+X
+j=1
+
+F gu e 2 Th ee ypes o neu a a cu a ed ad ance fie d
+o he han pos on x a e om ed o g ea e c a y
+
+x =R
+
+We can fur her render a segmen a on mage ha nd ca es
+wh ch RT-NeRF (ob ec par ) s used for render ng each
+p xe
+
+Tj (1 − exp(−σj δj ))
+
+(16)
+
+Tj (1 − exp(−σj δj ))(sj (r) == i)
+
+(17)
+(18)
+
+where sj s he ndex of he par w h he grea es dens y
+and S deno es a segmen a on mask for he ith par
+D scuss on The NARFP approach mode s he r g d y
+ransformed par s of an ar cu a ed ob ec n separa e RTNeRFs where each par has a cons s en rad ance fie d under d fferen 3D pose configura ons As he r g d ransforma on of each RT-NeRF s compu ed exp c y v a forward
+k nema cs ra her han mp c y w h n he ne work he
+ssue of mp c ransforma ons and par dependency are
+avo ded The par dependency ssue s a so addressed by
+ak ng he es ma e w h he h ghes dens y wh e suppressng he con r bu on of o her par s for a g oba 3D oca on
+n Eq 15 However s compu a on s neffic en for he
+fo ow ng reasons
+• The compu a ona cos s propor ona o he number
+of ob ec par s m ng he represen a on capac y for
+comp ex ar cu a ed ob ec s
+• Tra n ng s dom na ed by he arge number of zero dens y po n samp es As a surface po n on an ob ec can
+be ong o on y one of he ob ec par s w be ra ned
+as a zero dens y samp e for he rema n ng par s S nce
+par s w h sma dens es do no affec he va ue of he
+equa on very much
+s no rea y necessary o ca cua e he dens y of hose par s
+Ho st c NARF (NARFH ) To address he above ssues
+we presen ano her approach ha comb nes he npu s of he
+RT-NeRF mode s n NARFP hen feeds hem as a who e
+n o a s ng e NeRF mode for d rec regress on of he fina dens y and co or (σ c) We ca h s approach Ho s c
+NARF (NARFH ) Forma y
+FΘσζ Ca ({γ(x ) i ∈ 1 P } γ(ζ)) → (σ h)
+
+FΘcζ Ca (h {(γ(d ) γ(ξ )) i ∈ 1 P }) → (c)
+
+(19)
+(20)
+
+where Ca deno es he conca ena on opera or
+D scuss on There s on y a s ng e NeRF mode ra ned
+n NARFH The compu a ona cos s a mos cons an o
+he number of ob ec par s and he zero dens y prob em
+s na ura y avo ded However un ke Par -W se NARF
+NARFH does no sa sfy Par Dependency because a parame ers are cons dered for each 3D oca on Moreover
+ob ec par segmen a on masks canno be genera ed from
+Eq 18 w hou par dependenc es
+
+
+
+The proposed neural articulated radiance field (NARF) is built upon RT-NeRF. We first introduce two basic solutions, Part-Wise NARF and Holistic NARF, and analyze the pros and cons of each. Then, we propose our final solution named Disentangled NARF that shares the merits of both Part-Wise and Holistic NARF. Conceptual figures are visualized in Fig. 2.
+
+
+
+Figure 2. Three types of neural articulated radiance field. Inputs other than position x are omitted for greater clarity.
+
+Part-Wise NARF (NARFP ) Given a kinematic 3D pose configuration of an articulated object {T0 , ζ, θ}, we first compute the global rigid transformation {l i |i = 1, ..., P} for each rigid part using the forward kinematics in Eqs. 6-7. To estimate the density and color (σ, c) of a global 3D location x from a 2D viewing direction d, we train a separate RT-NeRF, F l ,ζ Θi ,
+
+$$\mathbf{x}^i = R^{i-1}(\mathbf{x} - \mathbf{t}^i), \mathbf{d}^i = R^{i-1}\mathbf{d}$$
+ (13)
+
+$$F_{\Theta^i}^{l^i, \boldsymbol{\zeta}} : (\gamma(x^{l^i}), \gamma(\mathbf{d}^{l^i}), \gamma(\boldsymbol{\xi}^i), \gamma(\boldsymbol{\zeta})) \rightarrow (c^i, \sigma^i), \quad (14)$$
+
+for each part using Eq. 12 and combine the densities and colors {σ i , ci |i = 1, ..., P} estimated by different RT-NeRFs into one. We denote this approach as Part-Wise NARF (NARFP ).
+
+Since a surface point of an object can belong to only one of the object parts, only one of the estimates in {σ i , ci |i = 1, ..., P} should be nonzero. The density and color (σ, c) of a global 3D location x can be determined by taking the estimate with the highest density. However, the max operation is not differentiable, so we instead use the softmax function, which is a differentiable weighted sum over all the estimates:
+
+$$\sigma = \frac{\sum_{i=1}^P \exp(\sigma^i/\tau)\sigma^i}{\sum_{i=1}^P \exp(\sigma^i/\tau)}, c = \frac{\sum_{i=1}^P \exp(\sigma^i/\tau)c^i}{\sum_{i=1}^P \exp(\sigma^i/\tau)}, \quad (15)$$
+
+where τ is the temperature parameter of the softmax function. Volume rendering is then applied using the combined density σ and color c to generate the rendered color C(r) by Eq. 5. Since the rendering and softmax operations are both differentiable, the image reconstruction loss can pass gradients to all the RT-NeRF models for effective training.
+
+We note that, in addition to color C(r), the foreground mask M(r) can also be estimated as an integral of the opacity along the camera ray:
+
+
+
+| $\mathbf{M}(\mathbf{r}) = \sum_{j=1}^N T_j(1 - \exp(-\sigma_j \delta_j))$ | (16) |
+|---------------------------------------------------------------------------|------|
+|                                                                           |      |
+
+We can further render a segmentation image that indicates which RT-NeRF (object part) is used for rendering each pixel:
+
+
+$$s_j(\mathbf{r}) = \arg \max_i \{\sigma_j^i | i \in [1, P]\} \quad (17)$$
+
+| $\mathbf{S}^i(\mathbf{r}) = \sum_{j=1}^N T_j(1 - \exp(-\sigma_j \delta_j))(s_j(\mathbf{r}) == i)$ | (18) |
+|---------------------------------------------------------------------------------------------------|------|
+|                                                                                                   |      |
+
+where sj is the index of the part with the greatest density, and S i denotes a segmentation mask for the i th part.
+
+Discussion. The NARFP approach models the rigidly transformed parts of an articulated object in separate RT-NeRFs, where each part has a consistent radiance field under different 3D pose configurations. As the rigid transformation of each RT-NeRF is computed explicitly via forward kinematics, rather than implicitly within the network, the issue of implicit transformations and part dependency are avoided. The part dependency issue is also addressed by taking the estimate with the highest density while suppressing the contribution of other parts for a global 3D location in Eq. 15. However, its computation is inefficient for the following reasons.
+
+- The computational cost is proportional to the number of object parts, limiting the representation capacity for complex articulated objects.
+- Training is dominated by the large number of zero density point samples. As a surface point on an object can belong to only one of the object parts, it will be trained as a zero density sample for the remaining parts. Since parts with small densities do not affect the value of the equation very much, it is not really necessary to calculate the density of those parts.
+
+Holistic NARF (NARFH) To address the above issues, we present another approach that combines the inputs of the RT-NeRF models in NARFP then feeds them as a whole into a single NeRF model for direct regression of the final density and color (σ, c). We call this approach Holistic NARF (NARFH). Formally,
+
+$$F_{\Theta_{\sigma}}^{l,\zeta} : \text{Cat}(\{\gamma(\mathbf{x}^i) | i \in [1, P]\}, \gamma(\zeta)) \rightarrow (\sigma, \mathbf{h}), \quad (19)$$
+
+$$F_{\Theta_c}^{l, \zeta} : \text{Cat}(\mathbf{h}, \{(\gamma(\mathbf{d}^i), \gamma(\boldsymbol{\xi}^i)) | i \in [1, P]\}) \rightarrow (c), \quad (20)$$
+
+where Cat denotes the concatenation operator.
+
+Discussion. There is only a single NeRF model trained in NARFH. The computational cost is almost constant to the number of object parts and the zero density problem is naturally avoided. However, unlike Part-Wise NARF, NARFH does not satisfy Part Dependency, because all parameters are considered for each 3D location. Moreover, object part segmentation masks cannot be generated from Eq. 18 without part dependencies.
+
+Disentangled NARF (NARFD) We propose Disentangled NARF (NARFD) which shares the merits of both NARFP and NARFH while avoiding their weaknesses by introducing a selector S.
+
+The selector S identifies which object part a global 3D location x belongs to. S consists of P lightweight subnetworks for each part. For the i th part, a sub-network Oi Γ takes the local 3D position of x in l i = {Ri , t i} and the bone parameter ζ as input and outputs the probability p i of x belonging to the i th part. Since x should be assigned to only one of the object parts, the softmax activation is used to normalize the selector's outputs:
+
+$$O_\Gamma^i : (\gamma(\mathbf{x}^i), \gamma(\boldsymbol{\zeta})) \rightarrow (o^i), \quad p^i = \frac{\exp(o^i)}{\sum_{k=1}^P \exp(o^k)} \quad (21)$$
+
+It can be seen that Oi Γ is actually an occupancy network [40, 8] defined in the local object coordinate system. Comparing this with NASA [8], NASA's occupancy networks learn absolute occupancy values to estimate an explicit surface, but our networks learn relative occupancy values to other parts for part selection. For implementation, we use a two-layer MLP with ten hidden nodes for each occupancy net, which is lightweight yet effective.
+
+Disentangled NARF is defined by (softly) masking out the irrelevant parts in the concatenated input using the outputs p i of the selector.
+
+$$F_{\Theta_{\sigma}}^{l, \zeta} : \text{Cat}(\{\gamma(\mathbf{x}^i) * p^i | i \in [1, P]\}, \gamma(\zeta)) \rightarrow (\sigma, \mathbf{h}), \quad (22)$$
+
+$$F_{\Theta_c}^{\mathcal{X}} : \text{Cat}(\mathbf{h}, \{(\gamma(\mathbf{d}^i) * p^i, \gamma(\boldsymbol{\xi}^i) * p^i) | i \in [1, P]\}) \rightarrow (C, p) \quad (23)$$
+
+Note that though we have removed the dependency on irrelevant parts by masking their inputs, the resulting input is still in the form of a concatenation. This is done purposely because all the bones share a single NeRF, which needs to distinguish the different bones in order to generate the corresponding density and color. Different bones are distinguished by dimensions of the concatenated vector that represent them, similar to part identity encoding. The detailed network architecture can be found in Fig. 7 of the supplemental material.
+
+Since the selector outputs the probabilities of a global 3D location belonging to each part, we can generate the segmentation mask by selecting the locations occupied by a specific part followed by Eq. 18:
+
+$$s_j(\mathbf{r}) = \arg \max_i \{p_j^i | i \in [1, P]\} \quad (24)$$
+
+### 3.5. Training Details
+
+The positional encoding dimensions we set for the 3D location x and other parameters are 10 and 4 respectively. During training, at each optimization iteration, we randomly sample a batch of camera rays from the set of all pixels, and then follow the hierarchical volume sampling strategy of the original NeRF [42] to query N samples for each ray. With known kinematic 3D pose configuration {T0 , ζ, θ}, the samples' densities and colors are estimated by the NARF model. Volume rendering is then used to render the color C(r) and mask M(r) of this ray using Eq. 5 and 16, respectively. The loss is the total squared error between the rendered and true pixel colors and masks.
+
+
+$$\mathcal{L} = \sum_{\mathbf{r} \in \mathcal{R}} \|\hat{\mathbf{C}}(\mathbf{r}) - \mathbf{C}(\mathbf{r})\|_2^2 + \|\hat{\mathbf{M}}(\mathbf{r}) - \mathbf{M}(\mathbf{r})\|_2^2 \quad (25)$$
+
+where R is the set of rays in each batch, Cˆ and Mˆ are the ground truth color and foreground mask. In the supplemental material, we empirically show that the extra mask loss helps to learn a cleaner background. Other training details on the learning rate, batch size and optimizer can be found in the supplemental material.
+
+#### 4. Results of Training on a Single Object
+
+In this section, we evaluate our model in the case of a single articulated 3D object.
+
+Dataset and Settings We create our own synthetic dataset of human bodies for experimentation. It consists of two persons, one male and one female, selected from the human 3D textured mesh (THUman) dataset [70]. Each person has 56 and 48 different poses, 26 of which are used for training and the others for testing. We render 100 images with various orientations and scaling of each mesh for training and 20 for testing, ending up with 2600 training images for each person. Note that the viewpoint distribution of training and testing sets are the same under this setting. We denote this test data setting as the novel pose/same view setting. All rendered images have a resolution of 128 × 128. Additionally, we introduce three other test settings for a more comprehensive comparison. The same pose/same view setting uses testing images rendered from the same poses and same viewpoint distribution as in training. The novel pose/novel view setting uses novel poses and a different viewpoint distribution than in training. Finally, the same pose/novel view setting uses the same poses but the viewpoint distribution is different from training. The kinematic 3D pose configurations are inferred from the SMPL model parameters provided by the THUman dataset and we use bone length as the bone parameter ζ in Eq. 10.
+
+Metrics Three metrics are used to evaluate performance. The peak signal to noise ratio (PSNR) and structural similarity index (SSIM) [63] are two commonly used evaluation metrics for image reconstruction (higher is better). In addition, we introduce the L2 distance error of mask images (Mask), which better describes how close the 3D shape of the rendered object is to the ground truth (lower is better).
+
+Cost Same pose, same view Novel pose, same view Same pose, novel view Novel pose, novel view
+
+Method #Params #FLOPS #Memory Mask↓ PSNR ↑ SSIM ↑ Mask ↓ PSNR ↑ SSIM ↑ Mask ↓ PSNR ↑ SSIM ↑ Mask ↓ PSNR ↑ SSIM ↑ CNN 15.6M - - 76.9 29.12 0.9429 134.8 27.30 0.9211 365.9 25.19 0.8532 392.2 24.53 0.8470 P-NeRF 0.85M 156M 356K 778.7 21.42 0.8006 1077.0 20.42 0.7696 844.9 21.19 0.7897 1110.1 20.27 0.7648 D-NARF 0.66M 121M 382K 2182.6 18.90 0.1143 2308.2 18.81 0.1140 2137.3 19.09 0.1144 2241.3 18.88 0.1133 NARFP 11.8M 2140M 6544K 92.0 28.56 0.9258 116.2 26.83 0.9052 101.5 27.54 0.9144 125.8 26.50 0.9104 NARFH 1.06M 197M 344K 55.6 29.91 0.9470 376.8 24.09 0.8665 70.5 28.81 0.9370 374.6 23.98 0.8646 NARFD 1.10M 205M 382K 50.5 30.86 0.9586 114.4 27.93 0.9317 64.1 29.44 0.9466 123.8 27.24 0.9230 Table 1. Quantitative comparison for a single object. Best results in bold.
+
+RGB
+
+Depth
+
+Segmentation
+
+CNN P-NeRF D-NARF NARFP NARFH NARFD
+
+GT
+
+
+
+Figure 3. Generative results comparison for a single object with a novel pose and novel view. One model per person identity. Triangles point to areas that should be noted. NARFD best generalizes to novel view/novel poses among the six methods.
+
+
+
+Figure 4. Disentangled representations learned by NARFD. For bone parameter interpolation, the right leg length is interpolated.
+
+Baselines In addition to the three variants of NARF (NARFP , NARFH and NARFD), three other baselines are included for comparison. The first is a 2D CNN-based method similar to [4] that generates the target subject image from "pose stick figures". The pose stick figures in our case are generated by projecting the 3D joints into the 2D image (with given camera parameters) then adding lines to connect these 2D keypoints. The second is the P-NeRF method described in Sec. 3.2. The third one is D-NARF, a simple extension of D-NERF [47] to articulated objects. D-NARF aims to learn the mapping Ψ : x → x 0 that transforms a given point to its position in a canonical shape space. In our implementation, a static NeRF model for a canonical pose P c is learned, then a mapping network [47] Ψ estimates the deformation field between the scene of a specific pose instance P and the scene of the canonical pose P c . The details of the three baselines can be found in the supplemental material.
+
+Results Quantitative comparison results are given in Table 1. #Params, #FLOPS, and #Memory denote the number of parameters, floating point operations per ray, and number of elements to preserve during forward propagation per ray, which is proportional to the memory cost.
+
+It can be seen that our method, NARFD, outperforms the others under all the evaluation metrics and test data settings (best results shown in bold). Particularly, it exhibits high performance under novel pose and/or novel view settings (slight performance drop on SSIM within 4%) with low computational cost (close to a single NeRF model, P-NeRF). Hence, we can conclude that NARFD effectively and efficiently learns the radiance field of an articulated 3D object and the model generalizes to novel poses and views with high fidelity.
+
+In contrast, all the other methods are deficient in one way or another. The CNN-based method fails when tested under novel views (10% performance drop on SSIM) since it is difficult to learn an effective 3D representation from 2D inputs. P-NeRF and D-NARF fail in almost all cases mainly due to both the Implicit Transformations and Part Dependency issues. NARFP exhibits good performance and generalization ability but requires much more computation (10× #FLOPS and 17× #Memory of NARFD). NARFH is less effective when tested on novel poses (8% performance drop on SSIM) due to the Part Dependency issue.
+
+Qualitative results under the novel pose/novel view setting are shown in Fig. 3. Rendered RGB images (first row), depth maps (second row), and part segmentation maps (third row), as well as ground truth RGB images (bottom left corner) are displayed. It can be seen that the NeRF based methods (except for the CNN-based one) can obtain depth images and the "part dependent" methods (NARFP
+
+and NARFD) can obtain segmentation maps. Our final solution NARFD generates higher quality RGB, depth and segmentation maps for novel views and poses than the others. Moreover, as shown in Fig. 4, NARFD learns a disentangled representation of camera viewpoint, bone parameters and pose, allowing these appearance properties to be individually controlled in rendering.
+
+#### 5. Appearance Variation with Autoencoder
+
+In this section, we train an autoencoder based on NARF to model shape and appearance variation among multiple articulated objects. The autoencoder consists of an encoder and decoder. First, a 2D CNN-based encoder is used to generate a latent vector z from an input image. The obtained latent vector together with the given camera viewpoint and human pose are fed into our NARF based decoder to reconstruct the input image.
+
+Following the implementation for the NeRF-based generator [54], we first decompose z into a shape latent vector zs and an appearance latent vector za. Then, zs is concatenated to the density-dependent inputs, namely, the positionally encoded location x and bone parameters ζ. Meanwhile, za is concatenated to the color-dependent inputs, namely, the positionally encoded view direction d and the local transformation ξ. Specifically, when combining the autoencoder with the NARFD model, we have
+
+$$\begin{aligned} F_{\Theta,\sigma}^{t,\zeta,\mathbf{z}} : \text{Cat}(\{\gamma(\mathbf{x}^{t^i}) * p^i | i \in [1, P]\}, \gamma(\zeta), \mathbf{z}_s) &\rightarrow (\sigma, \mathbf{h}), \\ F_{\Theta,c}^{t,\zeta,\mathbf{z}} : \text{Cat}(\mathbf{h}, \{(\gamma(\mathbf{d}^{t^i}) * p^i, \gamma(\xi^i) * p^i) | i \in [1, P]\}, \mathbf{z}_a) &\rightarrow (c) \end{aligned} \quad (26) \quad (27)$$
+
+The encoder and decoder are trained jointly using the same loss in Eq. 25. For the experiment, we use the best performing NARFD by default. Comparison results for other models can be found in the supplemental material.
+
+Dataset We create another synthetic human body dataset from THUman [70] for experimentation. All of the males (112 in total) and poses (35 on average for each person) in the THUman dataset are used. We render 10 images for each pose with randomly sampled viewpoints to generate 35450 images for training and 3940 images for evaluation. All rendered images have a resolution of 128 × 128.
+
+Results Fig. 5 shows the reconstructed RGB images as well as the additional depth images and segmentation maps generated from the input RGB images. A single autoencoder is trained for all objects, indicating that appearance variation is effectively modeled. Fig. 6 shows that the NARF-based autoencoder learns a disentangled representation of camera viewpoint, bone parameters, human pose, and color appearance, allowing these properties to be individually controlled in rendering. For color appearance, it is controlled by replacing the appearance latent vector za with
+
+
+
+Figure 5. Single-view reconstruction results from NARFD with an autoencoder. All outputs are generated from a single model.
+
+
+
+Figure 6. Disentangled representations learned with an autoencoder. For bone parameter interpolation, the head position is interpolated.
+
+that of another person. Additional results can be found in the supplemental material.
+
+### 6. Conclusion and Future work
+
+In this paper, we propose a method for learning implicit representations for articulated objects. We show that it is possible to learn explicitly controllable representations of viewpoint, pose, bone parameters, and appearance from 3D pose annotated images. Although pose annotation is required to train the model, the model is differentiable and thus may be extended to reduce the required supervisory information, for example, by simultaneously training 3D pose estimation and segmentation with the model. In addition, since the proposed representation provides explicit 3D shape and part segmentation, it may be applied to unsupervised depth estimation and segmentation learning.
+
+### 7. Acknowledgement
+
+This work was supported by D-CORE Grant from Microsoft Research Asia and partially supported by JST AIP Acceleration Research Grant Number JPMJCR20U3, and JSPS KAKENHI Grant Number JP19H01115. We would like to thank Sho Maeoki, Thomas Westfechtel, and Yang Li for the helpful discussions. We are also grateful for the GPU resources provided by Microsoft Azure Machine Learning.
+
+### References
+
+[1] Guha Balakrishnan, Amy Zhao, Adrian V Dalca, Fredo Durand, and John Guttag. Synthesizing images of humans in unseen poses. In CVPR, 2018. 2 [2] Oene Bottema and Bernard Roth. Theoretical kinematics, volume 24. 1990. 2, 3 [3] Arunkumar Byravan and Dieter Fox. Se3-nets: Learning rigid body motion using deep neural networks. In ICRA, 2017. 1 [4] Caroline Chan, Shiry Ginosar, Tinghui Zhou, and Alexei A Efros. Everybody dance now. In ICCV, 2019. 1, 2, 7 [5] Eric Chan, Marco Monteiro, Petr Kellnhofer, Jiajun Wu, and Gordon Wetzstein. pi-gan: Periodic implicit generative adversarial networks for 3d-aware image synthesis. In CVPR, 2021. 3 [6] Zhiqin Chen and Hao Zhang. Learning implicit fields for generative shape modeling. In CVPR, 2019. 2 [7] Paul E Debevec, Camillo J Taylor, and Jitendra Malik. Modeling and rendering architecture from photographs: A hybrid geometry-and image-based approach. In Proceedings of the 23rd annual conference on Computer graphics and interactive techniques, 1996. 1, 2 [8] Boyang Deng, JP Lewis, Timothy Jeruzalski, Gerard Pons-Moll, Geoffrey Hinton, Mohammad Norouzi, and Andrea Tagliasacchi. Nasa: Neural articulated shape approximation. In ECCV, 2020. 2, 3, 6 [9] Alexey Dosovitskiy, Jost Tobias Springenberg, and Thomas Brox. Learning to generate chairs with convolutional neural networks. In CVPR, 2015. 1 [10] Patrick Esser, Ekaterina Sutter, and Bjorn Ommer. A varia- ¨ tional u-net for conditional appearance and shape generation. In CVPR, 2018. 2 [11] John Flynn, Michael Broxton, Paul Debevec, Matthew Du-Vall, Graham Fyffe, Ryan Overbeck, Noah Snavely, and Richard Tucker. Deepview: View synthesis with learned gradient descent. In CVPR, 2019. 1 [12] Kyle Genova, Forrester Cole, Avneesh Sud, Aaron Sarna, and Thomas Funkhouser. Local deep implicit functions for 3d shape. In CVPR, 2020. 1 [13] Kyle Genova, Forrester Cole, Avneesh Sud, Aaron Sarna, and Thomas Funkhouser. Local deep implicit functions for 3d shape. In CVPR, 2020. 3 [14] Kyle Genova, Forrester Cole, Daniel Vlasic, Aaron Sarna, William T Freeman, and Thomas Funkhouser. Learning shape templates with structured implicit functions. In CVPR, 2019. 3 [15] Ian Goodfellow, Jean Pouget-Abadie, Mehdi Mirza, Bing Xu, David Warde-Farley, Sherjil Ozair, Aaron Courville, and Yoshua Bengio. Generative adversarial nets. In NIPS, 2014. 2 [16] Phlipp Henzler, Volker Rasche, Timo Ropinski, and Tobias Ritschel. Single-image tomography: 3d volumes from 2d cranial x-rays. In Computer Graphics Forum, volume 37, pages 377–388, 2018. 1 [17] Nikolas Hesse, Sergi Pujades, Michael J Black, Michael Arens, Ulrich G Hofmann, and A Sebastian Schroeder. Learning and tracking the 3d body shape of freely moving infants from rgb-d sequences. TPAMI, 42(10):2540–2551, 2019. 2 [18] Alec Jacobson, Zhigang Deng, Ladislav Kavan, and JP Lewis. Skinning: Real-time shape deformation. In ACM SIGGRAPH 2014 Courses, 2014. 2 [19] Doug L James and Christopher D Twigg. Skinning mesh animations. ACM Transactions on Graphics (TOG), 24(3):399– 407, 2005. 2 [20] Chiyu Jiang, Avneesh Sud, Ameesh Makadia, Jingwei Huang, Matthias Nießner, Thomas Funkhouser, et al. Local implicit grid representations for 3d scenes. In CVPR, 2020. 1 [21] Justin Johnson, Agrim Gupta, and Li Fei-Fei. Image generation from scene graphs. In CVPR, 2018. 1 [22] Hanbyul Joo, Tomas Simon, Xulong Li, Hao Liu, Lei Tan, Lin Gui, Sean Banerjee, Timothy Scott Godisart, Bart Nabbe, Iain Matthews, Takeo Kanade, Shohei Nobuhara, and Yaser Sheikh. Panoptic studio: A massively multiview system for social interaction capture. TPAMI, 2017. 2 [23] James T Kajiya and Brian P Von Herzen. Ray tracing volume densities. ACM SIGGRAPH computer graphics, 18(3):165– 174, 1984. 2, 3 [24] Abhishek Kar, Christian Hane, and Jitendra Malik. Learning ¨ a multi-view stereo machine. In NIPS, 2017. 1 [25] Tero Karras, Timo Aila, Samuli Laine, and Jaakko Lehtinen. Progressive growing of GANs for improved quality, stability, and variation. In ICLR, 2018. 15 [26] Diederik P Kingma and Jimmy Ba. Adam: A method for stochastic optimization. In ICLR, 2015. 15 [27] Diederik P Kingma and Max Welling. Auto-encoding variational bayes. In ICLR, 2014. 2 [28] Tejas D Kulkarni, Pushmeet Kohli, Joshua B Tenenbaum, and Vikash Mansinghka. Picture: A probabilistic programming language for scene perception. In CVPR, 2015. 1 [29] Tejas D Kulkarni, Vikash K Mansinghka, Pushmeet Kohli, and Joshua B Tenenbaum. Inverse graphics with probabilistic cad models. arXiv preprint arXiv:1407.1339, 2014. 1 [30] Tejas D Kulkarni, Will Whitney, Pushmeet Kohli, and Joshua B Tenenbaum. Deep convolutional inverse graphics network. In NIPS, 2015. 1 [31] Christoph Lassner, Gerard Pons-Moll, and Peter V Gehler. A generative model of people in clothing. In ICCV, 2017. 1, 2 [32] Binh Huy Le and Zhigang Deng. Smooth skinning decomposition with rigid bones. ACM Transactions on Graphics (TOG), 31(6):1–10, 2012. 2 [33] John P Lewis, Matt Cordner, and Nickson Fong. Pose space deformation: a unified approach to shape interpolation and skeleton-driven deformation. In Proceedings of the 27th annual conference on Computer graphics and interactive techniques, 2000. 2 [34] Zhengqi Li, Simon Niklaus, Noah Snavely, and Oliver Wang. Neural scene flow fields for space-time view synthesis of dynamic scenes. In CVPR, 2021. 3 [35] Lingjie Liu, Weipeng Xu, Michael Zollhoefer, Hyeongwoo Kim, Florian Bernard, Marc Habermann, Wenping Wang,
+
+and Christian Theobalt. Neural rendering and reenactment of human actor videos. ACM Transactions on Graphics (TOG), 38(5):1–14, 2019. 1, 2 [36] Matthew Loper, Naureen Mahmood, Javier Romero, Gerard Pons-Moll, and Michael J Black. Smpl: A skinned multiperson linear model. ACM transactions on graphics (TOG), 34(6):1–16, 2015. 2, 15 [37] Liqian Ma, Xu Jia, Qianru Sun, Bernt Schiele, Tinne Tuytelaars, and Luc Van Gool. Pose guided person image generation. In NIPS, 2017. 2 [38] Liqian Ma, Qianru Sun, Stamatios Georgoulis, Luc Van Gool, Bernt Schiele, and Mario Fritz. Disentangled person image generation. In CVPR, 2018. 2 [39] Vikash K Mansinghka, Tejas D Kulkarni, Yura N Perov, and Joshua B Tenenbaum. Approximate bayesian image interpretation using generative probabilistic graphics programs. In NIPS, 2013. 1 [40] Lars Mescheder, Michael Oechsle, Michael Niemeyer, Sebastian Nowozin, and Andreas Geiger. Occupancy networks: Learning 3d reconstruction in function space. In CVPR, 2019. 1, 2, 3, 6 [41] Ben Mildenhall, Pratul P Srinivasan, Rodrigo Ortiz-Cayon, Nima Khademi Kalantari, Ravi Ramamoorthi, Ren Ng, and Abhishek Kar. Local light field fusion: Practical view synthesis with prescriptive sampling guidelines. ACM Transactions on Graphics (TOG), 38(4):1–14, 2019. 1 [42] Ben Mildenhall, Pratul P. Srinivasan, Matthew Tancik, Jonathan T. Barron, Ravi Ramamoorthi, and Ren Ng. Nerf: Representing scenes as neural radiance fields for view synthesis. In ECCV, 2020. 2, 3, 6 [43] Michael Oechsle, Lars Mescheder, Michael Niemeyer, Thilo Strauss, and Andreas Geiger. Texture fields: Learning texture representations in function space. In ICCV, 2019. 3 [44] Ahmed A A Osman, Timo Bolkart, and Michael J. Black. STAR: A sparse trained articulated human body regressor. In ECCV, 2020. 2 [45] Jeong Joon Park, Peter Florence, Julian Straub, Richard Newcombe, and Steven Lovegrove. Deepsdf: Learning continuous signed distance functions for shape representation. In CVPR, 2019. 1 [46] Jeong Joon Park, Peter Florence, Julian Straub, Richard Newcombe, and Steven Lovegrove. Deepsdf: Learning continuous signed distance functions for shape representation. In CVPR, 2019. 2, 3 [47] Keunhong Park, Utkarsh Sinha, Jonathan T Barron, Sofien Bouaziz, Dan B Goldman, Steven M Seitz, and Ricardo-Martin Brualla. Nerfies: Deformable neural radiance fields. In ICCV, 2021. 3, 7, 13 [48] Sida Peng, Yuanqing Zhang, Yinghao Xu, Qianqian Wang, Qing Shuai, Hujun Bao, and Xiaowei Zhou. Neural body: Implicit neural representations with structured latent codes for novel view synthesis of dynamic humans. In CVPR, 2021. 15, 16 [49] Eric Penner and Li Zhang. Soft 3d reconstruction for view synthesis. ACM Transactions on Graphics (TOG), 36(6):1– 11, 2017. 1 [50] Albert Pumarola, Enric Corona, Gerard Pons-Moll, and Francesc Moreno-Noguer. D-nerf: Neural radiance fields for dynamic scenes. In CVPR, 2021. 3 [51] Randi J Rost, Bill Licea-Kane, Dan Ginsburg, John Kessenich, Barthold Lichtenbelt, Hugh Malan, and Mike Weiblen. OpenGL shading language. 2009. 2 [52] Shunsuke Saito, Zeng Huang, Ryota Natsume, Shigeo Morishima, Angjoo Kanazawa, and Hao Li. Pifu: Pixel-aligned implicit function for high-resolution clothed human digitization. In ICCV, 2019. 3 [53] Shunsuke Saito, Tomas Simon, Jason Saragih, and Hanbyul Joo. Pifuhd: Multi-level pixel-aligned implicit function for high-resolution 3d human digitization. In CVPR, 2020. 3 [54] Katja Schwarz, Yiyi Liao, Michael Niemeyer, and Andreas Geiger. Graf: Generative radiance fields for 3d-aware image synthesis. NeurIPS, 2020. 3, 8 [55] Aliaksandr Siarohin, Enver Sangineto, Stephane Lathuiliere, ´ and Nicu Sebe. Deformable gans for pose-based human image generation. In CVPR, 2018. 2 [56] Vincent Sitzmann, Julien Martel, Alexander Bergman, David Lindell, and Gordon Wetzstein. Implicit neural representations with periodic activation functions. In NeurIPS, 2020. 3 [57] Vincent Sitzmann, Michael Zollh o fer, and Gordon Wet- ¨ zstein. Scene representation networks: Continuous 3dstructure-aware neural scene representations. In NeurIPS, 2019. 1, 3 [58] Pratul P Srinivasan, Richard Tucker, Jonathan T Barron, Ravi Ramamoorthi, Ren Ng, and Noah Snavely. Pushing the boundaries of view extrapolation with multiplane images. In CVPR, 2019. 1 [59] Maxim Tatarchenko, Alexey Dosovitskiy, and Thomas Brox. Multi-view 3d models from single images with a convolutional network. In ECCV, 2016. 1 [60] Shubham Tulsiani, Tinghui Zhou, Alexei A Efros, and Jitendra Malik. Multi-view supervision for single-view reconstruction via differentiable ray consistency. In CVPR, 2017. 1 [61] Gul Varol, Javier Romero, Xavier Martin, Naureen Mah- ¨ mood, Michael J. Black, Ivan Laptev, and Cordelia Schmid. Learning from synthetic humans. In CVPR, 2017. 15 [62] Ruben Villegas, Jimei Yang, Yuliang Zou, Sungryull Sohn, Xunyu Lin, and Honglak Lee. Learning to generate longterm future via hierarchical prediction. In ICML, 2017. 2 [63] Zhou Wang, Alan C Bovik, Hamid R Sheikh, and Eero P Simoncelli. Image quality assessment: from error visibility to structural similarity. IEEE transactions on image processing, 13(4), 2004. 6 [64] Jiajun Wu, Joshua B Tenenbaum, and Pushmeet Kohli. Neural scene de-rendering. In CVPR, 2017. 1 [65] Jiajun Wu, Tianfan Xue, Joseph J Lim, Yuandong Tian, Joshua B Tenenbaum, Antonio Torralba, and William T Freeman. Single image 3d interpreter network. In ECCV, 2016. 1 [66] Xinchen Yan, Jimei Yang, Ersin Yumer, Yijie Guo, and Honglak Lee. Perspective transformer nets: Learning singleview 3d object reconstruction without 3d supervision. In NIPS, 2016. 1
+
+[67] Wentao Yuan, Zhaoyang Lv, Tanner Schmidt, and Steven Lovegrove. Star: Self-supervised tracking and reconstruction of rigid objects in motion with neural rendering. In CVPR, 2021. 3 [68] Mihai Zanfir, Alin-Ionut Popa, Andrei Zanfir, and Cristian Sminchisescu. Human appearance transfer. In CVPR, 2018. 1, 2 [69] Ailing Zeng, Xiao Sun, Fuyang Huang, Minhao Liu, Qiang Xu, and Stephen Lin. Srnet: Improving generalization in 3d human pose estimation with a split-and-recombine approach. In ECCV, 2020. 2, 4 [70] Zerong Zheng, Tao Yu, Yixuan Wei, Qionghai Dai, and Yebin Liu. Deephuman: 3d human reconstruction from a single image. In ICCV, 2019. 6, 8, 15 [71] Tinghui Zhou, Richard Tucker, John Flynn, Graham Fyffe, and Noah Snavely. Stereo magnification: Learning view synthesis using multiplane images. In SIGGRAPH, 2018. 1 [72] Tinghui Zhou, Shubham Tulsiani, Weilun Sun, Jitendra Malik, and Alexei A Efros. View synthesis by appearance flow. In ECCV, 2016. 1 [73] Xingyi Zhou, Xiao Sun, Wei Zhang, Shuang Liang, and Yichen Wei. Deep kinematic pose regression. In ECCV, 2016. 1, 2, 4 [74] Silvia Zuffi, Angjoo Kanazawa, David Jacobs, and Michael J. Black. 3D menagerie: Modeling the 3D shape and pose of animals. In CVPR, 2017. 2
+
+#### Supplemental Materials: Neural Articulated Radiance Field
+
+### A. Ablation Studies for AutoEncoder
+
+In Table 1 of the main paper, we quantitatively evaluate our model in the case of a single articulated 3D object, while in Section 5 in the main paper, we only show qualitative results in the case of Autoencoder. Here, we supplement those results with the quantitative ablation study for Autoencoder in Table 2. The same test data settings (namely "same pose/same view", "novel pose/same view", "same pose/novel view", and "novel pose/novel view"), metrics (namely PSNR, SSIM, and Mask), and baseline methods (namely NARFP , NARFH and NARFD, CNN-based, P-NeRF and D-NARF) are used for comparison. The same dataset as in Section 5 of the main paper is used for experimentation.
+
+At testing phase, when extracting the latent shape and appearance vectors (zs and za) using the encoder, we use images under the same viewpoint distribution as in the training images as input. Then, images from novel views and poses are rendered by combining zs and za with unseen views and poses in the training data.
+
+Results Quantitative comparison results are given in Table 2. Qualitative results under the novel pose/novel view setting are shown in Fig. 8. Consistent with the case of a single object, our method NARFD outperforms the others under all the evaluation metrics and test data settings (best results shown in bold). High quality depth and segmentation images are jointly generated as shown in Fig. 8 (rightmost column). CNN based models cannot represent 3D structure effectively, so the performance drops significantly in the "novel view" settings. Fig. 8 (left-top) shows that in the novel view testing, the CNN-based method produces fuzzy images. Meanwhile, it cannot generate depth and segmentation images. P-NeRF and D-NARF fail in almost all settings due to implicit transformation and part dependency problems. NARFP generally performs well, but the computational cost is too high. NARFH has poor performance on "novel pose" due to part dependency issues. The performance drop on novel pose in the Autoencoder case is not as significant as in the single object case (shown in Table 1 of the main paper) since the pose diversity in the training data is much larger in the Autoencoder case.
+
+# B. Ablation Studies in RT-NeRF
+
+In Section 3.3 of the main paper, we introduced the rigidly transformed neural radiance field (RT-NeRF) to effectively model a rigidly transformed object part. Here, we evaluate the effectiveness of the two most critical design elements in RT-NeRF. The first is the explicit transformation that converts a global 3D location into the local coordinate system and the local 3D location is then used to estimate the density using Eqs. 9 and 10 of the main paper. The second is the pose-dependent color estimation defined in Eq. 11 of the main paper. It takes the 6D vector se(3) representation ξ of transformation l as a network input to estimate the RGB color c. To this end, two more baseline methods are introduced accordingly to compare to RT-NeRF. The first is the rigid pose conditioned NeRF (RP-NeRF) that takes the global 3D location and the rigid transformation ξ as network inputs, similar to the P-NeRF defined in Eq. 8 of the main paper. The second is RT-NeRF w/o ξ that estimates the RGB color c without using the transformation ξ as input in Eq. 11 of the main paper.
+
+Dataset We create a synthetic rigid object dataset of a rendered bulldozer using Blender (a software for rendering) for experimentation. In the dataset, the object (a bulldozer) can rigidly transform in the world coordinate system. For each rendered image, both rigid transformation and the camera viewpoint are randomly set. The camera will be translated to point to the center of the object so that the object will appear in the center of the rendered image. The resolution for all rendered images is set to 200 × 200. In total, 480 images are used for training and another 20 images are used for testing. The loss function is the same as in Eq. 25 of the main paper.
+
+<latexit sha1_base64="W8Nj7cE9SAhhGMsxOQizC+qfl+E=">AAACaXichVFNLwNBGH66vqq+ikvDpbEhTs2sCOLUcHFs0ZIgsrtGDfuV3WkTGn/AyU1wIhERP8PFH3DoT5AeSVwcvLvdRBC8k5l55pn3eeeZGcOzRCAZaySUtvaOzq5kd6qnt69/ID04VA7cqm/ykularr9u6AG3hMNLUkiLr3s+123D4mvGwWK4v1bjfiBcZ1UeenzL1iuO2BWmLokqbwaiYuvbaZXlWBTZn0CLgYo4Cm76FpvYgQsTVdjgcCAJW9ARUNuABgaPuC3UifMJiWif4xgp0lYpi1OGTuwBjRVabcSsQ+uwZhCpTTrFou6TMotx9sTu2At7ZPfsmb3/Wqse1Qi9HNJstLTc2x44yay8/auyaZbY+1T96VliF3ORV0HevYgJb2G29LWjs5eV+eXx+gS7Zk3yf8Ua7IFu4NRezZsiX75Eij5A+/7cP0F5KqfN5LTitJpfiL8iiVGMYZLeexZ5LKGAEp27j1Oc4yLRVAaVjDLSSlUSsWYYX0JRPwCjkYwl</latexit>
+
+1
+
+<latexit sha1_base64="g4prLP4C7+wzpYOc6UfkTyiCZFI=">AAACd3ichVHLSsNAFD2Nr1pfVTeCC8Wi1E2ZiKi4Et247MNqoS+SONZgXiRpqQZ/wB9wIQgKUsXPcOMPuOgniEsFEVx4kwZERb3DzJw5c8+dMzOypamOy1g7InR19/T2RftjA4NDwyPx0bFtx6zbCs8rpmbaBVlyuKYaPO+qrsYLls0lXdb4jnyw4e/vNLjtqKax5R5avKxLNUPdUxXJJaoaH7MqYqkm6bqUbFY8rSIez1fjCZZiQUz/BGIIEggjbcZbKGEXJhTUoYPDgEtYgwSHWhEiGCziyvCIswmpwT7HMWKkrVMWpwyJ2AMaa7QqhqxBa7+mE6gVOkWjbpNyGrPsgd2wZ3bPbtkje/+1lhfU8L0c0ix3tNyqjpxM5F7/Vek0u9j/VP3p2cUeVgKvKnm3Asa/hdLRN45On3Or2Vlvjl2yJ/J/wdrsjm5gNF6UqwzPniFGHyB+f+6fYHshJS6lxMxiYm09/IooJjGDJL33MtawiTTydG4T52jhOvImTAlzQrKTKkRCzTi+hCB+ADTekNk=</latexit>
+
+p1 (xl )
+
+60
+
+…
+
+(a)
+
+60 p
+
+P
+
+c
+<latexit sha1_base64="QAdzNYaOeZJJk7+FfeY7N2Czq1M=">AAACZHichVHLSsNAFD2Nr1qrrRZBEKRYKq7KRETFVdGNyz7sA2opSZxqaJqEJC3U4g/oVnHhSkFE/Aw3/oCL/oAgLiu4ceFtGhAt6h1m5syZe+6cmZFNTbUdxjo+YWh4ZHTMPx6YCE5OhcLTM3nbaFgKzymGZlhFWbK5puo856iOxoumxaW6rPGCXNvu7Rea3LJVQ991WiYv16UDXa2qiuQQlVYq4RhLMDeig0D0QAxepIzwLfawDwMKGqiDQ4dDWIMEm1oJIhhM4spoE2cRUt19jmMESNugLE4ZErE1Gg9oVfJYnda9mrarVugUjbpFyiji7IndsS57ZPfshX38Wqvt1uh5adEs97XcrIRO5rLv/6rqNDs4/FL96dlBFRuuV5W8my7Tu4XS1zePLrrZzUy8vcSu2Sv5v2Id9kA30Jtvyk2aZy4RoA8Qfz73IMivJMS1hJhejSW3vK/wYx6LWKb3XkcSO0ghR+dynOIM575nIShEhNl+quDzNBF8C2HhE85Eiek=</latexit>
+
+256
+
+lP
+
+<latexit sha1_base64="bdHPh7r2+tCtDXFd8rvsvN+SEa8=">AAACd3ichVHLSgMxFD0d3/XRqhvBhWJpqZuSEVFxJbpxWR99QF/MjGkdnBcz09Ja+gP+gAtBUJAqfoYbf8CFnyAuFURw4e10QLSoNyQ5Obnn5iSRLU11XMYeA0Jf/8Dg0PBIcHRsfCIUnpxKO2bVVnhKMTXTzsqSwzXV4ClXdTWetWwu6bLGM/LRVmc/U+O2o5rGvtuweEGXKoZaVhXJJaoUnrKKyXxF0nUpXi82tWKytVgKR1iCeTHfC0QfROBH0gy3kccBTCioQgeHAZewBgkOtRxEMFjEFdAkziakevscLQRJW6UsThkSsUc0VmiV81mD1p2ajqdW6BSNuk3KeUTZA7thL+ye3bIn9vFrraZXo+OlQbPc1XKrFDqZ2Xv7V6XT7OLwS/WnZxdlrHleVfJueUznFkpXXzs+fdlb3402Y+ySPZP/C/bI7ugGRu1Vudrhu2cI0geIP5+7F6SXEuJKQtxZjmxs+l8xjFksIE7vvYoNbCOJFJ1bxznauA68C3NCTIh3U4WAr5nGtxDET7LtkRc=</latexit>
+
+(x )
+
+256
+
+256
+
+256
+
+256
+
+256
+
+256
+
+256
+
+256
+
+128
+
+<latexit sha1_base64="R/IW1Ikdj22RbFMdf0lsCPM+dhc=">AAACeHichVHLSgMxFD0dX7W+qt0IbopFbTclI6LiqujGpa+qYEvJjGkdnBczaaGW/oA/4MKFKIiKn+HGH3DhJ4hLBUFceDsdEC3qDUlOTu65OUk01zR8ydhjROnq7unti/bHBgaHhkfio2PbvlP1dJHXHdPxdjXuC9OwRV4a0hS7rie4pZliRztcae3v1ITnG469JeuuKFq8YhtlQ+eSqFI8Uahwy+LpRkErJwtHQvJmphRPsSwLItkJ1BCkEMaaE79CAftwoKMKCwI2JGETHD61PahgcIkrokGcR8gI9gWaiJG2SlmCMjixhzRWaLUXsjatWzX9QK3TKSZ1j5RJTLEHdsNe2D27ZU/s49dajaBGy0udZq2tFW5p5Hh88+1flUWzxMGX6k/PEmUsBl4N8u4GTOsWeltfOzp52VzamGpMswv2TP7P2SO7oxvYtVf9cl1snCJGH6D+fO5OsD2bVeez6vpcKrccfkUUE5hEmt57ATmsYg15OreOM1zjJvKuJJUZJdNOVSKhJoFvocx+AmoLkWc=</latexit>
+
+(⇣)
+
+8P
+
++
+1
+
+<latexit sha1_base64="2TYEjIfP+iJ+gmbhZtrrLy4Qkhg=">AAACd3ichVHLSsNAFD2Nr1ofrXUjuFAsLXVTJiIqropuXPpqFbQtSRxraF4kabEGf8AfcCEICqLiZ7jxB1z4CeKyggguvEkDokW9w8ycOXPPnTMzsqWpjsvYU0To6u7p7Yv2xwYGh4bjiZFk0THrtsILiqmZ9rYsOVxTDV5wVVfj25bNJV3W+JZcW/b3txrcdlTT2HSbFi/pUtVQ91VFcomqJJJWWdytSrouZffKnlYWj6criRTLsSAmO4EYghTCWDUT19jFHkwoqEMHhwGXsAYJDrUdiGCwiCvBI84mpAb7HMeIkbZOWZwyJGJrNFZptROyBq39mk6gVugUjbpNykmk2SO7ZS32wO7YM/v4tZYX1PC9NGmW21puVeInYxtv/6p0ml0cfKn+9OxiHwuBV5W8WwHj30Jp6xtHp62NxfW0l2GX7IX8X7Andk83MBqvytUaXz9DjD5A/PncnaA4kxPncuLabCq/FH5FFOOYQpbeex55rGAVBTr3EOe4xk3kXZgQMkK2nSpEQs0ovoUgfgIMUpDF</latexit>
+
+1
+
+<latexit sha1_base64="itYlp+pjpwLmh4t1zgCfQEb7EJ4=">AAACenichVHLSsNAFD2N7/poVQTBTbFUFKFMpKi4Et247MOq0NaSxGkNzYskLWroD/gDLlwpiGg/w40/4KKfIC4V3LjwNg2IFvUOM3PmzD13zszIlqY6LmPtkNDXPzA4NDwSHh0bn4hEJ6f2HLNuKzyvmJppH8iSwzXV4HlXdTV+YNlc0mWN78u17c7+foPbjmoau+6pxUu6VDXUiqpILlHl6EyxKum6tOgV5UrspHnoaYdic6kcjbMk8yPWC8QAxBFE2ozeoogjmFBQhw4OAy5hDRIcagWIYLCIK8Ejziak+vscTYRJW6csThkSsTUaq7QqBKxB605Nx1crdIpG3SZlDAn2xO7YK3tkLfbMPn6t5fk1Ol5OaZa7Wm6VI+ezufd/VTrNLo6/VH96dlHBuu9VJe+Wz3RuoXT1jbOL19xGNuEtsGv2Qv6vWJs90A2Mxptyk+HZS4TpA8Sfz90L9laS4mpSzKTim1vBVwxjDvNYpPdewyZ2kEaezvVwhXu0Qh/CvLAkLHdThVCgmca3EFKfNrOSNA==</latexit>
+
+<latexit sha1_base64="R/IW1Ikdj22RbFMdf0lsCPM+dhc=">AAACeHichVHLSgMxFD0dX7W+qt0IbopFbTclI6LiqujGpa+qYEvJjGkdnBczaaGW/oA/4MKFKIiKn+HGH3DhJ4hLBUFceDsdEC3qDUlOTu65OUk01zR8ydhjROnq7unti/bHBgaHhkfio2PbvlP1dJHXHdPxdjXuC9OwRV4a0hS7rie4pZliRztcae3v1ITnG469JeuuKFq8YhtlQ+eSqFI8Uahwy+LpRkErJwtHQvJmphRPsSwLItkJ1BCkEMaaE79CAftwoKMKCwI2JGETHD61PahgcIkrokGcR8gI9gWaiJG2SlmCMjixhzRWaLUXsjatWzX9QK3TKSZ1j5RJTLEHdsNe2D27ZU/s49dajaBGy0udZq2tFW5p5Hh88+1flUWzxMGX6k/PEmUsBl4N8u4GTOsWeltfOzp52VzamGpMswv2TP7P2SO7oxvYtVf9cl1snCJGH6D+fO5OsD2bVeez6vpcKrccfkUUE5hEmt57ATmsYg15OreOM1zjJvKuJJUZJdNOVSKhJoFvocx+AmoLkWc=</latexit>
+
+<latexit sha1_base64="JYNmbXPSJUDcBqqAbAATr4xAqVs=">AAACZnichVHLSsNAFD2Nr1q1rYoouCmWiqsyEVFxVXTjsg/7gFpLEscamiYhSQu1+AOCW7twpSAifoYbf8BF/0BxWcGNC2/TgGhR7zAzZ87cc+fMjGxqqu0w1vEJQ8Mjo2P+8cDE5FQwFJ6eydlG3VJ4VjE0wyrIks01VedZR3U0XjAtLtVkjefl6k5vP9/glq0a+p7TNHmpJlV09UhVJIeojHkglsNRFmduRAaB6IEovEga4Vvs4xAGFNRRA4cOh7AGCTa1IkQwmMSV0CLOIqS6+xynCJC2TlmcMiRiqzRWaFX0WJ3WvZq2q1boFI26RcoIYuyJ3bEue2T37IV9/Fqr5dboeWnSLPe13CyHzhYy7/+qajQ7OP5S/enZwRE2Xa8qeTddpncLpa9vnLS7ma10rLXMrtkr+b9iHfZAN9Abb8pNiqcvEaAPEH8+9yDIrcbF9biYWosmtr2v8GMRS1ih995AArtIIkvnVnCOC7R9z0JQmBPm+6mCz9PM4lsIkU9SYoqZ</latexit>
+
+o1
+<latexit sha1_base64="D9rA/Rhqr7Ec0BCgaR+z+1MzI90=">AAACZnichVHLSsNAFD2Nr1q1rYoouCmWiqsyEVFxVXTjsg/7gFpLEscamiYhSQu1+AOCW7twpSAifoYbf8BF/0BxWcGNC2/TgGhR7zAzZ87cc+fMjGxqqu0w1vEJQ8Mjo2P+8cDE5FQwFJ6eydlG3VJ4VjE0wyrIks01VedZR3U0XjAtLtVkjefl6k5vP9/glq0a+p7TNHmpJlV09UhVJIeojHEglsNRFmduRAaB6IEovEga4Vvs4xAGFNRRA4cOh7AGCTa1IkQwmMSV0CLOIqS6+xynCJC2TlmcMiRiqzRWaFX0WJ3WvZq2q1boFI26RcoIYuyJ3bEue2T37IV9/Fqr5dboeWnSLPe13CyHzhYy7/+qajQ7OP5S/enZwRE2Xa8qeTddpncLpa9vnLS7ma10rLXMrtkr+b9iHfZAN9Abb8pNiqcvEaAPEH8+9yDIrcbF9biYWosmtr2v8GMRS1ih995AArtIIkvnVnCOC7R9z0JQmBPm+6mCz9PM4lsIkU9QYIqY</latexit>
+
+10
+
+<latexit sha1_base64="DD+ltmwdJOnWqkDfk1JZ3EvYF88=">AAACd3ichVHLSsNAFD2N7/porBvBhcWi1E2ZiKi4Krpx2aq1BbUlSac1NC+StKilP+APuBAEBaniZ7jxB1z0E8SlggguvE0DoqLeYWbOnLnnzpkZxdY112OsHRJ6evv6BwaHwsMjo2MRcTy641o1R+VZ1dItJ6/ILtc1k2c9zdN53na4bCg6zynV9c5+rs4dV7PMbe/I5vuGXDG1sqbKHlFFMWoX0nsV2TDkRKnQ0Avp5nxRjLMk8yP2E0gBiCOItCW2sIcSLKiowQCHCY+wDhkutV1IYLCJ20eDOIeQ5u9zNBEmbY2yOGXIxFZprNBqN2BNWndqur5apVN06g4pY5hlD+yGPbN7dsse2fuvtRp+jY6XI5qVrpbbxcjJ5NbrvyqDZg8Hn6o/PXsoY8X3qpF322c6t1C7+vrx6fPW6uZsY45dsifyf8Ha7I5uYNZf1KsM3zxDmD5A+v7cP8HOQlJaSkqZxXhqLfiKQUxhBgl672WksIE0snTuIc7RwnXoTZgW5oREN1UIBZoJfAlB+gCKYZED</latexit>
+
+1
+
+<latexit sha1_base64="IKMlwlHHF/D+AgJi2QDRO7kiX1w=">AAACeXichVFNLwNBGH66vqq+6uMgcUFTKYdmFkGchIsjpUj0I7tr1KT7ld1to238AX/AwQWJCH6Giz/g0J8gjiQOHLzdbiII3snMPPPM+7zzzIxq68L1GKuHpJbWtvaOcGekq7unty/aP7DlWiVH42nN0i1nR1VcrguTpz3h6XzHdrhiqDrfVosrjf3tMndcYZmbXsXmWUMpmGJfaIpHVD46ZOfkTEExDCWRORS5mp6Tjybz0RhLMj9GfwI5ADEEsWZFr5DBHixoKMEAhwmPsA4FLrVdyGCwicuiRpxDSPj7HEeIkLZEWZwyFGKLNBZotRuwJq0bNV1frdEpOnWHlKOIswd2zZ7ZPbtlj+z911o1v0bDS4Vmtanldr7veHjj9V+VQbOHg0/Vn5497GPB9yrIu+0zjVtoTX25evK8sZiK1ybYBXsi/+eszu7oBmb5Rbtc56lTROgD5O/P/RNsTSfluaS8PhtbWg6+IowRjCNB7z2PJaxiDWk6t4ozXOMm9CaNSQlpqpkqhQLNIL6ENPMBF9+Rsg==</latexit>
+
+1
+l
+48 p (⇠ )
+
+<latexit sha1_base64="R/IW1Ikdj22RbFMdf0lsCPM+dhc=">AAACeHichVHLSgMxFD0dX7W+qt0IbopFbTclI6LiqujGpa+qYEvJjGkdnBczaaGW/oA/4MKFKIiKn+HGH3DhJ4hLBUFceDsdEC3qDUlOTu65OUk01zR8ydhjROnq7unti/bHBgaHhkfio2PbvlP1dJHXHdPxdjXuC9OwRV4a0hS7rie4pZliRztcae3v1ITnG469JeuuKFq8YhtlQ+eSqFI8Uahwy+LpRkErJwtHQvJmphRPsSwLItkJ1BCkEMaaE79CAftwoKMKCwI2JGETHD61PahgcIkrokGcR8gI9gWaiJG2SlmCMjixhzRWaLUXsjatWzX9QK3TKSZ1j5RJTLEHdsNe2D27ZU/s49dajaBGy0udZq2tFW5p5Hh88+1flUWzxMGX6k/PEmUsBl4N8u4GTOsWeltfOzp52VzamGpMswv2TP7P2SO7oxvYtVf9cl1snCJGH6D+fO5OsD2bVeez6vpcKrccfkUUE5hEmt57ATmsYg15OreOM1zjJvKuJJUZJdNOVSKhJoFvocx+AmoLkWc=</latexit>
+
+(xl )
+(⇣)
+
+oP
+<latexit sha1_base64="1Up2iGPhbnBI1kcR10CNWNDlKtI=">AAACZnichVHLSsNAFD2Nr1q1rYoouCmWiqsyEVFxVXTjsg/7gFpLEscamiYhSQu1+AOCW7twpSAifoYbf8BF/0BxWcGNC2/TgGhR7zAzZ87cc+fMjGxqqu0w1vEJQ8Mjo2P+8cDE5FQwFJ6eydlG3VJ4VjE0wyrIks01VedZR3U0XjAtLtVkjefl6k5vP9/glq0a+p7TNHmpJlV09UhVJIeojHGQLIejLM7ciAwC0QNReJE0wrfYxyEMKKijBg4dDmENEmxqRYhgMIkroUWcRUh19zlOESBtnbI4ZUjEVmms0KrosTqtezVtV63QKRp1i5QRxNgTu2Nd9sju2Qv7+LVWy63R89KkWe5ruVkOnS1k3v9V1Wh2cPyl+tOzgyNsul5V8m66TO8WSl/fOGl3M1vpWGuZXbNX8n/FOuyBbqA33pSbFE9fIkAfIP587kGQW42L63ExtRZNbHtf4ccilrBC772BBHaRRJbOreAcF2j7noWgMCfM91MFn6eZxbcQIp+OYIq3</latexit>
+
+10
+
+<latexit sha1_base64="0a3QwWGoVshLaCJQQoRrVt7joSc=">AAACZnichVHLSsNAFD2Nr1q1rYoouCmWiqsyEVFxVXTjsg/7gFpLEscamiYhSQu1+AOCW7twpSAifoYbf8BF/0BxWcGNC2/TgGhR7zAzZ87cc+fMjGxqqu0w1vEJQ8Mjo2P+8cDE5FQwFJ6eydlG3VJ4VjE0wyrIks01VedZR3U0XjAtLtVkjefl6k5vP9/glq0a+p7TNHmpJlV09UhVJIeojHmQLIejLM7ciAwC0QNReJE0wrfYxyEMKKijBg4dDmENEmxqRYhgMIkroUWcRUh19zlOESBtnbI4ZUjEVmms0KrosTqtezVtV63QKRp1i5QRxNgTu2Nd9sju2Qv7+LVWy63R89KkWe5ruVkOnS1k3v9V1Wh2cPyl+tOzgyNsul5V8m66TO8WSl/fOGl3M1vpWGuZXbNX8n/FOuyBbqA33pSbFE9fIkAfIP587kGQW42L63ExtRZNbHtf4ccilrBC772BBHaRRJbOreAcF2j7noWgMCfM91MFn6eZxbcQIp+QYoq4</latexit>
+
+pP
+
+<latexit sha1_base64="mbkoOGAKklCyY0MCh6zN+ykV14M=">AAACeXichVFNLwNBGH66vuuj9XGQuJSGlEMziyBOwsWxRZGoNrtrWpPuV3a3DW36B/wBBxckIvgZLv6Ag58gjiQOHLzdbiII3snMPPPM+7zzzIxq68L1GHsISS2tbe0dnV3h7p7evki0f2DTtcqOxjOapVvOtqq4XBcmz3jC0/m27XDFUHW+pZZWGvtbFe64wjI3vEOb7xpK0RQFoSkeUfnokJ1LZYuKYSiJ7IHI1fRcqj6Zj8ZZkvkR+wnkAMQRRMqKXiKLPVjQUIYBDhMeYR0KXGo7kMFgE7eLGnEOIeHvc9QRJm2ZsjhlKMSWaCzSaidgTVo3arq+WqNTdOoOKWMYZ/fsij2zO3bDHtn7r7Vqfo2Gl0Oa1aaW2/nI0fD6678qg2YP+5+qPz17KGDB9yrIu+0zjVtoTX2levy8vrg2Xptg5+yJ/J+xB3ZLNzArL9pFmq+dIEwfIH9/7p9gczopzyXl9Gx8aTn4ik6MYAwJeu95LGEVKWTo3CpOcYXr0Js0KiWkqWaqFAo0g/gS0swHliyR8A==</latexit>
+
+…
+
+P
+
+<latexit sha1_base64="59a6UNsW/FHiP5PGbR45VAy3jX4=">AAACenichVHLSsNAFD2N7/qqiiC4KS0VRSgTERVXRTcu22ptodWSxGkN5kWSFmvoD/gDLlxVENF+hht/wIWfIC4V3HThbRoQFfUOM3PmzD13zszIlqY6LmNPIaGvf2BwaHgkPDo2PjEZmZred8yarfCcYmqmXZAlh2uqwXOu6mq8YNlc0mWN5+WT7e5+vs5tRzWNPbdh8QNdqhpqRVUkl6hyZLZUlXRdWvRKciV62jz0tMN0c6kcibMk8yP6E4gBiCOItBm5QQlHMKGgBh0cBlzCGiQ41IoQwWARdwCPOJuQ6u9zNBEmbY2yOGVIxJ7QWKVVMWANWndrOr5aoVM06jYpo0iwR3bLXtkDa7Nn1vm1lufX6Hpp0Cz3tNwqT57P7b7/q9JpdnH8qfrTs4sKNnyvKnm3fKZ7C6Wnr59dvO5uZhPeArtiL+S/xZ7YPd3AqL8p1xmevUSYPkD8/tw/wf5KUlxLipnVeGor+IphzCOGRXrvdaSwgzRydK6HFu7QDnWEmLAkLPdShVCgmcGXEFY/AHTxklM=</latexit>
+
+60
+
+P
+
+P
+l
+24 p (d )
+
+softmax
+
+…
+
+(b)
+
+8P
+
+p
+
+p1 (dl )
+
+24
+
+1
+
+…
+
+60
+8P
+
+(xl )
+(⇣)
+
+P
+
+pP (⇠ l )
+
+48
+
+Figure 7. Network architecture of Disentangled NARF in our experiments. (a) Network architecture of FΘl,ζσ and FΘl,ζc in Eqs. 22 and 23 in
+the main paper, modified from the original NeRF architecture diagram. ‘+’ represents concatenation operation. (b) Network architecture
+of the selector S.
+
+CNN
+
+P-NeRF
+
+D-NARF
+
+NARFP
+
+NARFH
+
+NARFD
+
+RT-NeRF w/o ⇠
+
+RT-NeRF w/ ⇠
+
+RGB
+
+Depth
+
+GT
+
+Segmentation
+
+Figure 8. Generative results comparison for AutoEncoder
+
+Results The quantitative results are shown in Table 3 and
+the qualitative results are shown in Fig. 9. The experimental
+results show that RP-NeRF is unable to learn a good 3D representation and fails to generalize to novel poses and views.
+In contrast, RT-NeRF effectively models the rigidly transformed object by explicitly transforming the global 3D location into the local coordinate system. In addition, the color
+estimation without the transformation input is less effective.
+This is concluded by comparing the results of “RT-NeRF
+w/o ξ” with the results of “RT-NeRF”. Quantitatively, the
+performance of “RT-NeRF w/o ξ” drops significantly under
+the Mask metric in Table 3. Qualitatively, the rendered images from “RT-NeRF w/o ξ” look blurry compared to “RTNeRF” in Fig. 9.
+
+RGB
+
+Depth
+
+GT
+
+RP-NeRF
+<latexit sha1_base64="LVyzOgZVNIsdPeLXTwWBXz6mPJw=">AAACcXichVHLSsNAFD2Nr1pfVTeKm2JRBLHciKC4KgriSmq1KvgiiaMG0yQk02It/QF/QMFVCyLiZ7jxB1z4CeKyghsX3qYBUVHvMDNnztxz58yM7lqmL4meIkpLa1t7R7Qz1tXd09sX7x/Y8J2CZ4ic4ViOt6VrvrBMW+SkKS2x5XpCy+uW2NRPFhv7m0Xh+aZjr8uSK3bz2pFtHpqGJpna25HiVJazmakVkV2q7MeTlKIgEj+BGoIkwsg48Rvs4AAODBSQh4ANydiCBp/bNlQQXOZ2UWbOY2QG+wIVxFhb4CzBGRqzJzwe8Wo7ZG1eN2r6gdrgUyzuHisTGKNHuqU6PdAdPdP7r7XKQY2GlxLPelMr3P2+86G1t39VeZ4ljj9Vf3qWOMRc4NVk727ANG5hNPXFs4v62nx2rDxONXph/1V6onu+gV18Na5XRfYKMf4A9ftz/wQb0ymVUurqTDK9EH5FFCMYxQS/9yzSWEYGOT7XwyWqqEXqyrCSUEabqUok1AziSyiTH3bbjzU=</latexit>
+
+<latexit sha1_base64="Chir1an347bumy41jFyYVdHs1k0=">AAACfHicSyrIySwuMTC4ycjEzMLKxs7BycXNw8vHLyAoFFacX1qUnBqanJ+TXxSRlFicmpOZlxpaklmSkxpRUJSamJuUkxqelO0Mkg8vSy0qzszPCympLEiNzU1Mz8tMy0xOLAEKxQuIx5SkVpRUB4Xo+qUGuSmU6+cr1CrEVGTGCygb6BmAgQImwxDKUGaAgoB8geUMMQwpDPkMyQylDLkMqQx5DCVAdg5DIkMxEEYzGDIYMBQAxWIZqoFiRUBWJlg+laGWgQuotxSoKhWoIhEomg0k04G8aKhoHpAPMrMYrDsZaEsOEBcBdSowqBpcNVhp8NnghMFqg5cGf3CaVQ02A+SWSiCdBNGbWhDP3yUR/J2grlwgXcKQgdCF180lDGkMFmC3ZgLdXgAWAfkiGaK/rGr652CrINVqNYNFBq+B7l9ocNPgMNAHeWVfkpcGpgbNZuACRoAhenBjMsKM9AwN9AwDTZQdnKBRwcEgzaDEoAEMb3MGBwYPhgCGULC9ixnWMKxl/MekwqTNpAtRysQI1SPMgAKYzAD0CJJ2</latexit>
+
+<latexit sha1_base64="Mm8k6m3ut/9oIGKpUi4RuR7bBXM=">AAACe3icSyrIySwuMTC4ycjEzMLKxs7BycXNw8vHLyAoFFacX1qUnBqanJ+TXxSRlFicmpOZlxpaklmSkxpRUJSamJuUkxqelO0Mkg8vSy0qzszPCympLEiNzU1Mz8tMy0xOLAEKxQuIxZSkVpRUB4Xo+qUGuSmU6yvUKsRUZMYLKBvoGYCBAibDEMpQZoCCgHyB5QwxDCkM+QzJDKUMuQypDHkMJUB2DkMiQzEQRjMYMhgwFADFYhmqgWJFQFYmWD6VoZaBC6i3FKgqFagiESiaDSTTgbxoqGgekA8ysxisOxloSw4QFwF1KjCoGlw1WGnw2eCEwWqDlwZ/cJpVDTYD5JZKIJ0E0ZtaEM/fJRH8naCuXCBdwpCB0IXXzSUMaQwWYLdmAt1eABYB+SIZor+savrnYKsg1Wo1g0UGr4HuX2hw0+Aw0Ad5ZV+SlwamBs1m4AJGgCF6cGMywoz0DA30DANNlB2coFHBwSDNoMSgAQxvcwYHBg+GAIZQoL01DIsYVjOsYfzLpMykxaQDUcrECNUjzIACmEwB6DaR/Q==</latexit>
+
+Figure 9. Qualitative results for RT-NeRF comparison
+
+
+
+
+
+
+
+Figure 7. Network architecture of Disentangled NARF in our experiments. (a) Network architecture of F l,ζ Θσ and F l,ζ Θc in Eqs. 22 and 23 in the main paper, modified from the original NeRF architecture diagram. '+' represents concatenation operation. (b) Network architecture of the selector S.
+
+
+
+Figure 8. Generative results comparison for AutoEncoder
+
+Results The quantitative results are shown in Table 3 and the qualitative results are shown in Fig. 9. The experimental results show that RP-NeRF is unable to learn a good 3D representation and fails to generalize to novel poses and views. In contrast, RT-NeRF effectively models the rigidly transformed object by explicitly transforming the global 3D location into the local coordinate system. In addition, the color estimation without the transformation input is less effective. This is concluded by comparing the results of "RT-NeRF w/o ξ" with the results of "RT-NeRF". Quantitatively, the performance of "RT-NeRF w/o ξ" drops significantly under the Mask metric in Table 3. Qualitatively, the rendered images from "RT-NeRF w/o ξ" look blurry compared to "RT-NeRF" in Fig. 9.
+
+
+
+Figure 9. Qualitative results for RT-NeRF comparison
+
+
+
+|        | Method | #Params | Cost #FLPOS | #Memory | Same Mask ↓ | pose, PSNR | same view ↑ SSIM | Novel ↑ Mask ↓ | pose, PSNR | same view ↑ SSIM | Same ↑ Mask ↓ | pose, PSNR | novel view ↑ SSIM | Novel ↑ Mask ↓ | pose, PSNR | novel view ↑ SSIM ↑ |
+|--------|--------|---------|-------------|---------|-------------|------------|------------------|----------------|------------|------------------|---------------|------------|-------------------|----------------|------------|---------------------|
+| CNN    |        | 15.6M   |             |         | 89.0        | 25.59      | 0.8966           | 157.2          | 24.70      | 0.8757           | 385.0         | 22.70      | 0.8213            | 381.5          | 22.98      | 0.8243              |
+| P-NeRF |        | 0.85M   | 156M        | 356K    | 1526.6      | 19.24      | 0.5362           | 1572.1         | 19.60      | 0.5346           | 1911.3        | 18.13      | 0.4666            | 1963.2         | 19.08      | 0.4746              |
+| D-N    | A RF   | 0.66M   | 121M        | 382K    | 2067.2      | 18.27      | 0.6733           | 2060.2         | 18.81      | 0.6706           | 2026.7        | 18.00      | 0.5983            | 2049.5         | 18.82      | 0.6121              |
+| NARF   | P      | 11.8M   | 2140M       | 6544K   | 159.5       | 22.57      | 0.8250           | 182.3          | 22.58      | 0.8211           | 196.4         | 21.32      | 0.8056            | 205.0          | 21.80      | 0.8088              |
+| NARF   | H      | 1.06M   | 197M        | 344K    | 201.1       | 22.89      | 0.8244           | 225.1          | 23.14      | 0.8205           | 265.1         | 21.48      | 0.7891            | 275.1          | 22.36      | 0.7961              |
+| NARF   | D      | 1.10M   | 205M        | 382K    | 123.4       | 23.84      | 0.8568           | 163.5          | 23.55      | 0.8435           | 166.2         | 22.25      | 0.8313            | 186.3          | 22.81      | 0.8294              |
+
+Table 2. Quantitative comparison for autoencoders. Best results in bold.
+
+| Method        | Mask ↓ | PSNR ↑ | SSIM ↑ |
+|---------------|--------|--------|--------|
+| RP-NeRF       | 4511.0 | 11.25  | 0.3103 |
+| RT-NeRF w/o ξ | 29.2   | 19.83  | 0.8255 |
+| RT-NeRF       | 16.9   | 20.05  | 0.8388 |
+
+Table 3. RT-NeRF quantitative comparison. Best results in bold.
+
+# C. Additional Ablation Studies in NARF
+
+In this section, we provide more ablation studies on the effects of the mask loss (the second item in Eq. 25 of the main paper), temperature parameter for NARFP (in Eq. 15 of the main paper), and softmax activation function for NARFD (in Eq. 21 of the main paper).
+
+W/ and w/o mask loss We conduct experiments to evaluate the effect of the mask loss (the second term of Eq. 25 of the main paper) added to the rendered mask image. While the color loss optimizes the final RGB color of the rendered pixels, the gradient from the mask loss directly optimizes the densities of the 3D locations on the camera rays. Therefore, the additional mask loss is helpful in learning 3D shapes efficiently. The quantitative and qualitative results of w/ and w/o mask loss are shown in Table 4 and Fig. 10 respectively. In Table 4, it can be seen that performances of all the three variants of NARF drop significantly without the mask loss, especially under the novel pose/novel view setting. Particularly, in Fig. 10, the NARFH model is not able to converge at all without the mask loss. The NARFP and NARFD models still work without the mask loss but the rendered images get very blurry, especially on the background regions around the object.
+
+Temperature parameter τ in NARFP We study the effect of the temperature parameter τ ∈ (0, ∞) in NARFP (in Eq. 15 of the main paper). The temperature parameter determines how soft the selection is among the multiple RT-NeRFs. When τ is close to 0, hard selection is performed. Though the Part Dependency prior is strictly satisfied in this case, convergence in the training is difficult since the highest current estimate will completely block the gradient from back-propagating to the others. It is especially worse in the early stage of the training when the highest estimate is almost random. In turn, when τ is close to ∞, averaging is performed. In this case, the gradient is back-propagated to all RT-NeRFs, but the Part Dependency issue arises again, which will harm the generalization ability to novel poses. The quantitative and qualitative results are shown in Table 4 and Fig. 11, respectively. We empirically use the bestperforming τ = 100 setting as shown in Table 4.
+
+Softmax vs. sigmoid activation in NARFD In Eq. 21 of the main paper, we use softmax activation, which is also motivated by the Part Dependency prior. Here, we provide the results of using the sigmoid activation as an alternative. Formally, Eq. 21 of the main paper is replaced with Eq. 28:
+
+
+
+| $O_{\Gamma}^i : (\gamma(\mathbf{x}^i), \gamma(\boldsymbol{\zeta})) \rightarrow (o^i), \quad p^i = \frac{1}{1 + \exp(-o^i)} \quad (28)$ |
+|----------------------------------------------------------------------------------------------------------------------------------------|
+|----------------------------------------------------------------------------------------------------------------------------------------|
+
+The quantitative results are shown in Table 4. In conclusion, softmax outperforms sigmoid, especially in the "novel pose/novel view" setting.
+
+# D. Implementation Details in P-NeRF
+
+In Eq. 8 of the main paper, P-NeRF takes a global 3D location x and the part transformations {l i |i = 1, ..., P} as input. For implementation, we use the 6D vector se(3) representation ξ i of transformation l i , and concatenate them together with x and the bone length ζ as the network input. Positional encoding is performed before the concatenation. Formally,
+
+$$F_{\Theta}^{\mathcal{P}} : (\gamma(\mathbf{x}), \{\gamma(\xi^i) | i = 1, \dots, P\}, \gamma(\zeta), \gamma(\mathbf{d})) \rightarrow (\sigma, c). \quad (29)$$
+
+The density and color sub-networks are defined as
+
+| $F_{\theta_\sigma}^{\mathcal{P}} : (\gamma(\mathbf{x}), \{\gamma(\xi^i)   i = 1, \dots, P\}, \gamma(\zeta)) \rightarrow (\sigma, \mathbf{h})$ , | (30) |
+|-------------------------------------------------------------------------------------------------------------------------------------------------|------|
+| $F_{\theta_e}^{\mathcal{P}} : (\mathbf{h}, \{\gamma(\xi^i)   i = 1, \dots, P\}, \gamma(\mathbf{d})) \rightarrow (c)$ .                          | (31) |
+
+# E. Implementation Details in D-NARF
+
+D-NERF [47] uses a canonical template and learns the observation-to-canonical deformation
+
+$$\Psi : (\mathbf{x}, \omega) \rightarrow \mathbf{x}' \quad (32)$$
+
+where ω is a deformation latent code.
+
+|        | Method |            | #Params | Cost #FLPOS | #Memory | Same Mask L2 ↓ | pose, same PSNR | view ↑ SSIM ↑ | Novel Mask L2 ↓ | pose, same PSNR | view ↑ SSIM ↑ | Same Mask L2 ↓ | pose, novel PSNR | view ↑ SSIM ↑ | Novel Mask L2 ↓ | pose, novel PSNR | view ↑ SSIM ↑ |
+|--------|--------|------------|---------|-------------|---------|----------------|-----------------|---------------|-----------------|-----------------|---------------|----------------|------------------|---------------|-----------------|------------------|---------------|
+| CNN    |        |            | 15.6M   |             |         | 76.9           | 29.12           | 0.9429        | 134.8           | 27.30           | 0.9211        | 365.9          | 25.19            | 0.8532        | 392.2           | 24.53            | 0.8470        |
+| P-NeRF |        |            | 0.85M   | 156M        | 356K    | 778.7          | 21.42           | 0.8006        | 1077.0          | 20.42           | 0.7696        | 844.9          | 21.19            | 0.7897        | 1110.1          | 20.27            | 0.7648        |
+| D-N    | A RF   |            | 0.66M   | 121M        | 382K    | 2182.6         | 18.90           | 0.1143        | 2308.2          | 18.81           | 0.1140        | 2137.3         | 19.09            | 0.1144        | 2241.3          | 18.88            | 0.1133        |
+| NARF   | P      |            | 11.8M   | 2149M       | 6544K   | 92.0           | 28.56           | 0.9258        | 116.2           | 26.83           | 0.9052        | 101.5          | 27.54            | 0.9144        | 125.8           | 26.50            | 0.9104        |
+| NARF   | H      |            | 1.06M   | 197M        | 344K    | 55.6           | 29.91           | 0.9470        | 376.8           | 24.09           | 0.8665        | 70.5           | 28.81            | 0.9370        | 374.6           | 23.98            | 0.8646        |
+| NARF   | D      |            | 1.10M   | 205M        | 382K    | 50.5           | 30.86           | 0.9586        | 114.4           | 27.93           | 0.9317        | 64.1           | 29.44            | 0.9466        | 123.8           | 27.24            | 0.9230        |
+| NARF   | D      | sigmoid    | 1.10M   | 205M        | 382K    | 50.8           | 30.74           | 0.9578        | 117.7           | 27.83           | 0.9304        | 64.6           | 29.35            | 0.9459        | 125.4           | 26.17            | 0.9129        |
+| NARF   | P      | 32         | 0.32M   | 59M         | 824K    | 114.8          | 27.85           | 0.9191        | 139.9           | 26.86           | 0.9068        | 122.9          | 27.14            | 0.9105        | 147.3           | 25.74            | 0.8933        |
+| NARF   | P      | 64         | 0.98M   | 178M        | 1641K   | 105.5          | 27.86           | 0.9212        | 126.9           | 26.78           | 0.9094        | 113.8          | 27.21            | 0.9127        | 133.1           | 26.28            | 0.9041        |
+| NARF   | P      | 128        | 3.28M   | 596M        | 3275K   | 93.8           | 28.46           | 0.9284        | 116.1           | 27.15           | 0.9135        | 102.9          | 27.56            | 0.9180        | 124.2           | 26.23            | 0.9068        |
+| NARF   | P      | 256        | 11.8M   | 2149M       | 6544K   | 92.0           | 28.56           | 0.9258        | 116.2           | 26.83           | 0.9052        | 101.5          | 27.54            | 0.9144        | 125.8           | 26.50            | 0.9104        |
+| NARF   | P      | , τ = 0 01 | 0.32M   | 59M         | 824K    | 240.1          | 25.81           | 0.8730        | 282.0           | 24.92           | 0.8541        | 256.0          | 25.32            | 0.8624        | 287.9           | 23.72            | 0.8333        |
+| NARF   | P      | , τ = 0 1  | 0.32M   | 59M         | 824K    | 168.1          | 26.79           | 0.8995        | 196.7           | 25.92           | 0.8863        | 176.1          | 26.26            | 0.8911        | 204.8           | 25.10            | 0.8756        |
+| NARF   | P      | , τ = 1    | 0.32M   | 59M         | 824K    | 141.5          | 27.24           | 0.9077        | 169.9           | 26.29           | 0.8949        | 150.9          | 26.56            | 0.8989        | 178.2           | 25.16            | 0.8809        |
+| NARF   | P      | , τ = 10   | 0.32M   | 59M         | 824K    | 114.8          | 27.85           | 0.9191        | 139.9           | 26.86           | 0.9068        | 122.9          | 27.14            | 0.9105        | 147.3           | 25.74            | 0.8933        |
+| NARF   | P      | , τ = 100  | 0.32M   | 59M         | 824K    | 107.9          | 27.83           | 0.9190        | 130.2           | 26.96           | 0.9059        | 115.9          | 27.23            | 0.9117        | 137.5           | 26.24            | 0.8983        |
+| NARF   | P      | , τ = 1000 | 0.32M   | 59M         | 824K    | 109.0          | 27.44           | 0.9137        | 130.8           | 26.68           | 0.9014        | 117.0          | 26.91            | 0.9072        | 138.3           | 26.08            | 0.8953        |
+| NARF   | P      | w/o L mask | 0.32M   | 59M         | 824K    | 193.9          | 28.01           | 0.9131        | 220.2           | 26.72           | 0.8994        | 208.7          | 27.33            | 0.9028        | 229.8           | 25.54            | 0.8792        |
+| NARF   | H      | w/o L mask | 1.06M   | 197M        | 344K    | 6816.2         | 24.25           | 0.7004        | 6893.1          | 21.10           | 0.6636        | 6876.3         | 23.40            | 0.7029        | 6957.2          | 20.53            | 0.5244        |
+| NARF   | D      | w/o L mask | 1.10M   | 205M        | 382K    | 113.4          | 31.39           | 0.9630        | 165.7           | 28.09           | 0.9346        | 132.8          | 29.90            | 0.9508        | 263.7           | 25.71            | 0.8889        |
+
+Table 4. Quantitative results of ablation studies.
+
+
+
+
+
+Figure 10. Comparison of mask loss.
+
+D-NERF is defined on the deformed position x 0 in the canonical template,
+
+$$G : (\Psi(\mathbf{x}, \omega), \mathbf{d}, \psi) \rightarrow (\sigma, c) \quad (33)$$
+
+where ψ is a latent appearance code.
+
+In our case, ω and ψ correspond to the pose configuration P and the appearance latent vector za respectively. Ψ is implemented using MLP, which seems to suffer from the problem of implicit transformation. In our setup, the pose of each part is given, so it can be implemented more directly. In our implementation, we first use the occupancy network similar to the one defined in Eq. 21 of the main paper to decide which part the input point belongs to.
+
+$$O_\Gamma^i : (\gamma(\mathbf{x}^{i^j}), \gamma(\boldsymbol{\zeta})) \rightarrow (o^i), \quad (34)$$
+
+$$p^i = \frac{\exp(o^i)}{\sum_{k=1}^P \exp(o^k)}, \quad (35)$$
+
+Then, we calculate the coordinates x 0 on the canonical shape as
+
+$$\mathbf{x}' = \sum_i (\mathbf{x}^i + \mathbf{t}_{\text{canonical}}^i) * p_i \quad (36)$$
+
+where t i canonical is the origin of a canonical pose's i th part in the global coordinate system. View direction in the canonical space and the transformation vector are defined as
+
+$$\mathbf{d} = \sum_i \mathbf{d}^{l^i} * p_i, \quad \xi = \sum_i \xi^i * p_i \quad (37)$$
+
+Then, the D-NARF we have implemented in the experiment is defined as
+
+$$F_{\Theta_{\sigma}}^{l, \zeta} : (\gamma(\mathbf{x}'), \gamma(\boldsymbol{\zeta})) \rightarrow (\sigma, \mathbf{h}), \quad (38)$$
+
+$$F_{\Theta_c}^{l, \xi} : (\mathbf{h}, \gamma(\mathbf{d}), \gamma(\boldsymbol{\xi})) \rightarrow (c). \quad (39)$$
+
+This implementation is similar to the implementation of NARFD, differing only in how the coordinates are input to the model. The results of the experiments show that a
+
+
+
+Figure 11. Comparison of temperature τ of NARFP .
+
+concatenation-based NARFD model that retains the coordinates for all parts is more effective than a transformation on the input coordinates in D-NARF.
+
+# F. Training Details
+
+We used the Adam [26] optimizer with an initial equalized learning rate [25] of 0.01. The learning rate is decayed to 0.99995× of the previous iteration. Particularly, P-NeRF and NARFH based autoencoders are trained with an initial learning rate of 0.001 since the training will explode if a learning rate of 0.01 is used. The batch size is set to 16 for all experiments. We sample as many camera rays as can be fit in the GPU memory. The training converges at about 100,000 iterations. The training of our method NARFD takes 24 hours on 4 V100 GPUs. The code for creating our synthetic datasets is available at https://github.com/noguatsu/NARF.
+
+### G. Cross Dataset Evaluation on SURREAL Dataset
+
+In order to verify the generalization ability of NARF autoencoder across different datasets, we use a cross dataset evaluation protocol that trains the model on THUman dataset [70], then tests it on SURREAL dataset [61]. There are several differences between the THUman and SUR-REAL datasets. First, even though the human samples in SURREAL contain rendered SMPL meshes and textures as in THUman, but unlike in THUman, the meshes do not contain clothing. Second, the camera and shape parameters in SURREAL, including the distance between camera and human, human pose distribution and the range of body size are quite different from that in THUman. Even so, we test images from the test set of SURREAL using the NARF autoencoder trained on THUman. The qualitative reconstruction results are shown in Fig. 12. From left to right, we show the input SURREAL images, their reconstructed images,
+
+
+
+
+
+Figure 12. Qualitative results on SURREAL dataset. The cross dataset protocol is used for evaluation.
+
+and the images re-rendered under different pose configurations. Since the THUman dataset is not diverse enough in terms of clothing and body size, the reconstructions of short pants and fat people are less effective. But the novel view and pose rendering results look quite reasonable.
+
+# H. Experiment on Real Human Images
+
+In this section, we test our approach on a real human dataset ZJU-MOCAP [48]. ZJU-MOCAP is a multi-view person video dataset. For each frame, SMPL parameters [36] are given. We use the first 1969 frames (90%, 2185 frames in total) of the Taichi class video for training and the remaining 216 frames (10%) for testing (novel pose). The
+
+resolution of the image is 512 × 512. The qualitative results of NARFD on this dataset are shown in Fig. 13. The left part of Fig. 13 shows the pose used in the training, but rendered from novel viewpoints, and the right part of Fig. 13 shows the novel pose/novel
+
+
+
+Figure 13. Results of NARFD on real human images
+
+view testing results. The quality of the rendered images is not as good as testing on our synthetic datasets. This might be caused by the assumption that the parts are rigid objects, which may not be perfectly satisfied for real images. For example, loose clothes may move when a person makes a movement. This issue can be considered in future work, for example, by learning latent variables to account for both pose-dependent and pose-independent deformations similar to Neural Body [48].
+
+Although the quality of the rendered images for a real person from our method still has room for improvement, we believe that the proposed explicitly controllable representation of viewpoint, pose, bone parameters, and appearance for the articulated object is an important contribution.

@@ -1,0 +1,117 @@
+# Geometry Calibration in Tomography with a Differentiable Ray-Based Model
+
+Companion code for the paper:
+
+> Y. Haouchat, A. Boquet-Pujadas, S. Kashani, P. Thévenaz, M. Unser,
+> **"Geometry Calibration in Tomography with a Differentiable Ray-Based Model"**,
+> [arXiv:2606.21405](https://arxiv.org/abs/2606.21405)
+
+An X-ray transform with a matched adjoint and — the contribution of the paper —
+**ray-traced gradients with respect to the acquisition geometry**: per-ray
+derivatives of the projections with respect to the ray anchors `s`
+(`xrt_ad_t_*`) and directions `θ` (`xrt_ad_n_*`), computed by DDA passes of the
+same structure and cost as the forward operator (Algorithms 1–2 of the paper;
+one gradient entry ≈ 1.07× the forward runtime, memory `O(rays)` instead of the
+`O(rays × voxels)` of native autodiff). The volume is represented by B-spline
+basis functions (`order` 0 = voxels, 1–2 = B-splines), which makes the forward
+model continuously differentiable in the geometry and the calibration landscape
+smooth — see the demo. Built on the [Dr.Jit](https://github.com/mitsuba-renderer/drjit)
+JIT compiler (CUDA), and on top of the
+[XRT Toolkit](https://github.com/SepandKashani/xrt_toolkit) of Sepand Kashani,
+from which the forward/adjoint X-ray transform this work differentiates is
+derived (see [Acknowledgements](#acknowledgements)).
+
+## Getting started
+
+```bash
+pip install -r requirements.txt      # numpy, matplotlib, drjit>=1.0, cupy
+jupyter notebook tutorial.ipynb
+```
+
+A CUDA GPU is required. **Use the AD array types** (`drjit.cuda.ad`) for rays and
+coefficients — the gradient passes need them.
+
+* [`tutorial.ipynb`](tutorial.ipynb) — the operator, finite-difference
+  verification of both geometry gradients, and a full **joint reconstruction +
+  calibration** example (per-view detector jitter, σ = 4 elements): uncalibrated
+  vs calibrated reconstructions, recovered vs true geometry.
+* [`demo.ipynb`](demo.ipynb) — why B-splines beat voxels for calibration
+  (Fig. 9 of the paper): the voxel loss landscape is a **staircase** (zero
+  gradient on every plateau) while the B-spline landscape is smooth; calibrating
+  the same data with both bases (6× lower geometry error with B-splines here).
+
+## Package
+
+```python
+import drjit as dr
+from drjit.cuda.ad import Float, Array2f
+import differentiable_xrt as dx
+
+ks = dx.UniformSpec(start=(0.5, 0.5), step=(1, 1), num=(N, N))
+y  = dx.xrt_apply((t, n), ks, order, x)          # forward
+bp = dx.xrt_adjoint((t, n), ks, order, y)        # matched adjoint
+gs = dx.xrt_ad_t_x((t, n), ks, order, x)         # per-ray dP/ds_x  (same for _y/_z)
+gn = dx.xrt_ad_n_x((t, n), ks, order, x)         # per-ray dP/dθ_x  (same for _y/_z)
+
+# or, wired into Dr.Jit autodiff as an explicit VJP (Fig. 4 of the paper):
+y = dr.custom(dx.XRT, t, n, ks, order, x, want_x, want_t, want_n)
+```
+
+| file | content |
+|---|---|
+| `differentiable_xrt/ray_xrt.py` | forward / adjoint / geometry-gradient DDA passes (2D orders 0–2; 3D voxel closed forms, Algorithms 3–4; 3D spline forward via a learned basis footprint) |
+| `differentiable_xrt/operator.py` | `XRT`: `dr.CustomOp` exposing the passes as a vector-Jacobian product |
+| `differentiable_xrt/dda.py`, `bbox.py`, `box_spline.py`, `util.py` | traversal, intersection, projected-basis primitives, lattice descriptor |
+
+## Practical notes
+
+* **Work in knot units** (`step = 1`): the single-precision gradient kernels
+  lose accuracy when the knot step is small in physical units.
+* Gradient accuracy (finite-difference check, quadratic B-splines): `xrt_ad_t_*`
+  and `xrt_ad_n_*` agree to well below 1% along generic rays. For voxels
+  (`order=0`) the θ-gradient is kink-limited — the loss itself is piecewise
+  constant in typical calibration parameters, which is precisely the argument
+  for B-splines made in the paper.
+* Separate learning rates for image and geometry, and a warm start of the image,
+  make the joint optimization robust (both notebooks do this).
+
+## Acknowledgements
+
+This package builds on **[XRT Toolkit](https://github.com/SepandKashani/xrt_toolkit)**
+(XTK) by Sepand Kashani, which is released under the MIT License
+(Copyright (c) 2024 Sepand KASHANI). The X-ray transform that this work makes
+differentiable with respect to the acquisition geometry comes from that project:
+
+* `differentiable_xrt/ray_xrt.py` — `xrt_apply` / `xrt_adjoint` (the forward and
+  matched-adjoint DDA passes, their API and their box-spline basis handling) are
+  adapted from XTK's ray-traced X-ray transform. The geometry-gradient passes
+  (`xrt_ad_t_*`, `xrt_ad_n_*`) are the contribution of this work and follow the
+  same structure.
+* `differentiable_xrt/util.py` — `UniformSpec` and the Dr.Jit type helpers are
+  vendored from XTK.
+* `differentiable_xrt/bbox.py` — the ray/bounding-box intersection primitives are
+  adapted from XTK.
+
+If you use this code, please also credit XRT Toolkit:
+
+```bibtex
+@software{kashani_xrt_toolkit,
+  author = {Kashani, Sepand},
+  title  = {XRT Toolkit},
+  url    = {https://github.com/SepandKashani/xrt_toolkit},
+  note   = {MIT License}
+}
+```
+
+## Citation
+
+```bibtex
+@article{haouchat2026calibration,
+  title   = {Geometry Calibration in Tomography with a Differentiable Ray-Based Model},
+  author  = {Haouchat, Youssef and Boquet-Pujadas, Aleix and Kashani, Sepand and
+             Th\'evenaz, Philippe and Unser, Michael},
+  year    = {2026},
+  eprint  = {2606.21405},
+  archivePrefix = {arXiv}
+}
+```

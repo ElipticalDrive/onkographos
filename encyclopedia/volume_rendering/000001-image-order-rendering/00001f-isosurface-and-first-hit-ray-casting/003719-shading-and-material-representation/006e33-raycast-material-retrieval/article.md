@@ -1,0 +1,127 @@
+# Raycast Material Retrieval
+
+Also called: GetData, GetDataFast, GetMaterialFromRaycastHit, Texture Mapping in Ray Casting, Triangle Data Retrieval, UV Mapping for Ray Casting
+
+## Overview
+Raycast Material Retrieval is the process of extracting surface attributes—specifically normal, albedo, emissivity, and alpha—at a ray-surface intersection point $\mathbf{p}$ to drive shading calculations [S1, unofficial]. It solves the problem of mapping geometric data (vertices, textures) to the specific location where a ray hits a triangle, enabling physically based or local illumination models [S3]. It differs from [Deferred Shading for Isosurfaces](867-deferred-shading-for-isosurfaces.md) by performing attribute retrieval and shading in a single pass without intermediate buffers, and from [Isosurface Color Enhancement](7670-isosurface-color-enhancement.md) by relying on explicit triangle geometry and UV interpolation rather than scalar field gradients or density accumulation [S1, unofficial][S3].
+
+## How it works
+**Inputs**: Ray origin $\mathbf{o}$, direction $\vec{d}$, BVH structure containing triangle indices (`BVHTris`) and vertex data (`BVHVertices`), material references (`BVHTextureReferences`, `BVHEntities`), and intersection parameters (barycentric coordinates `TUVW`, triangle index).
+**Outputs**: Surface normal $\mathbf{n}$, albedo color $\mathbf{c}_{albedo}$, emissivity $E$, and alpha $\alpha$.
+
+**Data Structures**:
+*   `BVHTris`: Array of triangle descriptors. Each contains a `PackedData` field storing vertex indices and potentially packed UV/Normal data.
+*   `BVHVertices`: Array of vertex structures. Each vertex stores position and packed attributes:
+    *   `PackedData.xy`: Normal, encoded as half-precision floats (2x16 bits).
+    *   `PackedData.w`: UV coordinates, encoded as half-precision floats (2x16 bits).
+*   `BVHTextureReferences`: Array mapping mesh indices to texture resources and model colors.
+*   `BVHEntities`: Array storing entity-specific data, including emissivity and alpha packed as 32-bit integers (representing float bits).
+
+**Steps**:
+
+1.  **Validation**: Check if the hit is valid. If `TUVW.x < 0.0f` or `Mesh < 0`, return default values: $\mathbf{n} = (-1, -1, -1)$, $\mathbf{c}_{albedo} = (0, 0, 0)$, $E = 0$, $\alpha = 0$ [S1, unofficial].
+2.  **Triangle Fetch**: Retrieve the triangle index from the hit result. If `hit.triangleIndex >= m_triangleCount`, return failure [S2, unofficial]. Fetch the three vertices $A, B, C$ from `BVHVertices` using indices stored in `BVHTris[hit.triangleIndex].PackedData` [S1, unofficial].
+3.  **Barycentric Interpolation**:
+    *   **UVs**: Unpack UVs from vertex `PackedData.w` using `unpackHalf2x16`. Interpolate using barycentric coordinates $w, y, z$ (where $w$ corresponds to vertex A, $y$ to B, $z$ to C, and $x$ is the distance parameter):
+        $$ \mathbf{UV} = (\mathbf{UV}_A \cdot w) + (\mathbf{UV}_B \cdot y) + (\mathbf{UV}_C \cdot z) $$
+        [S1, unofficial]
+    *   **Normals**: Unpack normals from vertex `PackedData.xy` using `unpackHalf2x16`. Interpolate and normalize:
+        $$ \mathbf{n}_{raw} = (\mathbf{n}_A \cdot w) + (\mathbf{n}_B \cdot y) + (\mathbf{n}_C \cdot z) $$
+        $$ \mathbf{n} = \frac{\mathbf{n}_{raw}}{|\mathbf{n}_{raw}|} $$
+        [S1, unofficial]
+4.  **Attribute Retrieval**:
+    *   **Albedo**: If a texture reference `Ref > -1` and `Mesh > -1`, sample the texture at $\mathbf{UV}$: $\mathbf{c}_{albedo} = \text{texture}(\text{Textures}[Ref], \mathbf{UV}.xy).xyz$. If no texture, use `BVHTextureReferences[Mesh].ModelColor.xyz` [S1, unofficial].
+    *   **Emissivity & Alpha**: Retrieve from `BVHEntities[EntityIdx]`. Pack/unpack 32-bit integers to floats:
+        $$ E = \text{intBitsToFloat}(\text{BVHEntities}[EntityIdx].\text{Data}[0]) $$
+        $$ \alpha = \text{intBitsToFloat}(\text{BVHEntities}[EntityIdx].\text{Data}[1]) $$
+        [S1, unofficial]
+
+**Pseudocode**:
+> **Unverified code.** The code below did not pass a test run against a reference implementation, or no test fits it, so it may contain errors.
+
+```python
+def GetMaterialFromRaycastHit(hit, BVHTris, BVHVertices, BVHTextureReferences, BVHEntities):
+    # 1. Validation
+    if hit.TUVW.x < 0.0 or hit.Mesh < 0:
+        return Normal=(-1.0, -1.0, -1.0), Albedo=(0.0, 0.0, 0.0), Emissivity=0.0, Alpha=0.0
+
+    # 2. Fetch Triangle and Vertices
+    tri_idx = hit.triangleIndex
+    if tri_idx >= m_triangleCount:
+        return False
+
+    # Get packed data for vertices A, B, C
+    # Note: BVHTris stores packed vertex indices or direct packed data
+    packed_A = BVHTris[tri_idx].PackedData.vertex_A
+    packed_B = BVHTris[tri_idx].PackedData.vertex_B
+    packed_C = BVHTris[tri_idx].PackedData.vertex_C
+    
+    # Fetch full vertex structures
+    A = BVHVertices[packed_A]
+    B = BVHVertices[packed_B]
+    C = BVHVertices[packed_C]
+
+    # 3. Interpolate UVs
+    # unpackHalf2x16 extracts two floats from the lower 32 bits of a 64-bit integer
+    uv_A = unpackHalf2x16(A.PackedData.w)
+    uv_B = unpackHalf2x16(B.PackedData.w)
+    uv_C = unpackHalf2x16(C.PackedData.w)
+    
+    # TUVW: x=distance, y=barycentric_B, z=barycentric_C, w=barycentric_A
+    # Note: Barycentric coordinates usually sum to 1. w = 1 - y - z.
+    UV = (uv_A * hit.TUVW.w) + (uv_B * hit.TUVW.y) + (uv_C * hit.TUVW.z)
+
+    # 4. Interpolate Normal
+    n_A = unpackHalf2x16(A.PackedData.xy) # Returns vec3 or vec2? Usually vec3 for normals, packed into xy?
+    # Assuming unpackHalf2x16 on xy returns a normalized vector representation or raw components.
+    # Based on source: UnpackNormal(A.PackedData.xy)
+    n_A = UnpackNormal(A.PackedData.xy)
+    n_B = UnpackNormal(B.PackedData.xy)
+    n_C = UnpackNormal(C.PackedData.xy)
+    
+    n_raw = (n_A * hit.TUVW.w) + (n_B * hit.TUVW.y) + (n_C * hit.TUVW.z)
+    Normal = normalize(n_raw)
+
+    # 5. Retrieve Albedo
+    Ref = BVHTextureReferences[hit.Mesh].TextureRef
+    if Ref > -1:
+        Albedo = texture(Textures[Ref], UV.xy).xyz
+    else:
+        Albedo = BVHTextureReferences[hit.Mesh].ModelColor.xyz
+
+    # 6. Retrieve Emissivity and Alpha
+    EntityIdx = hit.EntityIndex
+    Emissivity = intBitsToFloat(BVHEntities[EntityIdx].Data[0])
+    Alpha = intBitsToFloat(BVHEntities[EntityIdx].Data[1])
+
+    return Normal, Albedo, Emissivity, Alpha
+```
+
+**Parameters**:
+*   `TUVW`: Barycentric coordinates and distance. `TUVW.x` is distance. `TUVW.y, z, w` are barycentric weights for vertices B, C, A respectively [S1, unofficial].
+*   `Ref`: Texture reference index. `-1` indicates no texture [S1, unofficial].
+
+**Edge Cases**:
+*   **Invalid Hit**: `TUVW.x < 0` or `Mesh < 0` returns a default "invalid" material state [S1, unofficial].
+*   **Out of Bounds**: `triangleIndex` exceeding mesh count returns false [S2, unofficial].
+*   **Precision**: Half-precision packing (`unpackHalf2x16`) may introduce quantization artifacts in normals and UVs [S1, unofficial].
+
+## Subtopics
+
+### Attribute Retrieval and Shading
+Retrieves normal, albedo, emissivity, and alpha for a hit triangle using barycentric interpolation for normals and UVs. It specifically handles the unpacking of `PackedData` fields (XY for normals, W for UVs) and samples textures if a reference is valid. It is chosen when explicit triangle-based shading is required over volume-based or gradient-based shading [S1, unofficial].
+
+## Operating characteristics
+*   **Time Complexity**: $O(1)$ per hit, assuming BVH traversal is $O(\log N)$ and texture lookup is constant time.
+*   **Memory Complexity**: Depends on the size of `BVHVertices` and `BVHTextureReferences`. Storing normals and UVs in packed 16-bit formats reduces memory bandwidth compared to 32-bit floats [S1, unofficial].
+*   **Performance**: `GetDataFast` variant uses `textureLod` with LOD 7, likely to avoid filtering overhead or for specific mip-map requirements, potentially improving performance on certain hardware [S1, unofficial].
+*   **Strengths**: Efficiently maps complex textures to ray-cast surfaces without additional ray bounces. Supports per-vertex attribute interpolation.
+*   **Limitations**: Requires explicit triangle geometry (BVH). Does not handle volume-based materials directly. Precision loss from half-precision packing [S1, unofficial].
+
+## Background
+The method originates from GPU-based volumetric and mesh rendering implementations, specifically those utilizing BVH acceleration structures for ray-triangle intersection [S1, unofficial][S2, unofficial]. It integrates texture mapping into ray casting by deriving UV coordinates from the parametric representation of the intersection point, allowing 2D texture images to modulate base material colors [S3]. This technique adds surface detail efficiently as the lookup occurs post-intersection [S3].
+
+## Sources
+[S1] swr06/VolumetricDisplay, https://github.com/swr06/VolumetricDisplay, fetched 2026-10-26 (unofficial)
+[S2] Tantenfisch/Voxels, https://github.com/Tantenfisch/Voxels, fetched 2026-10-26 (unofficial)
+[S3] ray casting, https://grokipedia.com/page/Ray_casting, fetched 2026-10-26

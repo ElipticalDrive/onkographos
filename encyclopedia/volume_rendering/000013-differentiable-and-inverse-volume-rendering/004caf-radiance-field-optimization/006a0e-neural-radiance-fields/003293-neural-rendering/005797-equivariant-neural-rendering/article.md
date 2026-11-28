@@ -1,0 +1,146 @@
+# Equivariant Neural Rendering
+
+Also called: Forward renderer, Inverse renderer
+
+## Overview
+Equivariant Neural Rendering is a framework for learning neural scene representations directly from 2D images without requiring 3D ground truth or camera pose supervision at inference time [S1, unofficial]. It solves the problem of novel view synthesis by enforcing that the learned implicit scene representation transforms like a real 3D scene, specifically satisfying the equivariance relation $T_X g(z) = g(T_Z z)$ [S1, unofficial]. Unlike sibling methods such as Rendering-Invariant State Predictor (RISP) which may rely on different invariance assumptions, this method explicitly models 3D rotation equivariance using deep voxel grids, allowing the model to generalize across camera transformations without absolute pose alignment [S1, unofficial].
+
+## How it works
+**Inputs and Outputs:**
+*   **Input:** A pair of images $(x_1, x_2)$ of the same scene and their relative 3D rotation transformation $\theta$ [S1, unofficial].
+*   **Output:** A rendered image matching the target view, derived from the transformed scene representation [S1, unofficial].
+
+**Data Structures:**
+*   **Scene Representation ($z$):** A deep voxel grid with layout $\mathbb{R}^{c_s \times d_s \times h_s \times w_s}$ [S1, unofficial]. In the reference implementation, dimensions are $64 \times 32 \times 32 \times 32$ (width $\times$ height $\times$ depth $\times$ channels) [S1, unofficial].
+*   **Image ($x$):** 2D image tensor of size $128 \times 128$ pixels [S1, unofficial].
+*   **Transformation ($\theta$):** Parameterized as axis-angle $\theta \hat{n}$, where $\theta$ is the angle and $\hat{n}$ is the axis [S1, unofficial]. In implementation, this is converted to a $3 \times 3$ rotation matrix [S1, unofficial].
+
+**Network Architecture:**
+The method consists of two transposed networks:
+1.  **Inverse Renderer ($f: X \rightarrow Z$):** Maps images to scene representations [S1, unofficial].
+    *   Submodels: 2D Convolutional Network $\rightarrow$ Inverse Projection Layer $\rightarrow$ 3D Convolutional Network [S1, unofficial].
+    *   Components: Residual blocks (1x1, 3x3, 1x1 convolutions), GroupNorm, LeakyReLU. Strided convolutions for downsampling [S1, unofficial].
+2.  **Forward Renderer ($g: Z \rightarrow X$):** Maps scene representations to images [S1, unofficial].
+    *   Architecture: Transpose of the inverse renderer.
+    *   Sequence: 3D Convolutions $\rightarrow$ 1x1 Projection Convolutions $\rightarrow$ 2D Convolutions $\rightarrow$ Image [S1, unofficial].
+    *   Output: Sigmoid activation ensures pixel values are in $[0, 1]$ [S1, unofficial].
+
+**Voxel Rotation Implementation:**
+To apply rotation $R^Z_\theta$ to the voxel grid $z$:
+1.  Define a grid of coordinates corresponding to the voxel locations [S1, unofficial].
+2.  Apply the 3D rotation matrix to these coordinates [S1, unofficial].
+3.  Use inverse warping with trilinear interpolation to reconstruct feature values at the rotated coordinates [S1, unofficial].
+
+**Training Algorithm:**
+The model is trained to minimize the rendering loss, which enforces equivariance [S1, unofficial].
+
+1.  **Data Sampling:** For a given scene, capture multiple views [S1, unofficial]. Randomly sample a pair of images $(x_1, x_2)$ and compute the relative rotation $\theta$ between their camera poses [S1, unofficial]. Assume cameras are on a sphere looking at the origin [S1, unofficial].
+2.  **Encoding:** Pass both images through the inverse renderer $f$ to obtain scene representations:
+    $$z_1 = f(x_1)$$
+    $$z_2 = f(x_2)$$
+3.  **Rotation:** Rotate the encoded representations by the relative transformation $\theta$ [S1, unofficial]. Let $R^Z_\theta$ be the rotation operator in scene space [S1, unofficial]. Compute:
+    $$\tilde{z}_1 = R^Z_\theta z_1$$
+    $$\tilde{z}_2 = (R^Z_\theta)^{-1} z_2$$
+    *Note: $(R^Z_\theta)^{-1}$ is the inverse rotation, equivalent to rotating by $-\theta$ [S1, unofficial].*
+4.  **Rendering:** Pass the rotated representations through the forward renderer $g$:
+    $$\hat{x}_2 = g(\tilde{z}_1)$$
+    $$\hat{x}_1 = g(\tilde{z}_2)$$
+5.  **Loss Calculation:** Compute the rendering loss $L_{render}$:
+    $$L_{render} = \|x_2 - \hat{x}_2\| + \|x_1 - \hat{x}_1\|$$
+    The norm $\|\cdot\|$ is typically a weighted sum of L1 and SSIM losses [S1, unofficial].
+6.  **Optimization:** Minimize $L_{render}$ using gradient descent [S1, unofficial]. This loss ensures that transforming the representation and rendering is equivalent to rendering and transforming the image, satisfying $T_X g(z) = g(T_Z z)$ [S1, unofficial].
+
+**Pseudocode:**
+
+> **Unverified code.** The code below did not pass a test run against a reference implementation, or no test fits it, so it may contain errors.
+
+```python
+import torch
+import torch.nn.functional as F
+
+def rotate_voxel_grid(z: torch.Tensor, R: torch.Tensor) -> torch.Tensor:
+    """
+    Rotates a voxel grid z by inverse warping with trilinear interpolation.
+    Args:
+        z: Tensor of shape (B, C, D, H, W)
+        R: 3x3 rotation matrix for scene space
+    Returns:
+        Rotated tensor of shape (B, C, D, H, W)
+    """
+    B, C, D, H, W = z.shape
+    # Create normalized coordinate grid [-1, 1] for the output voxel locations
+    coords = torch.stack(torch.meshgrid(
+        torch.linspace(-1, 1, D),
+        torch.linspace(-1, 1, H),
+        torch.linspace(-1, 1, W),
+        indexing='ij'
+    ), dim=-1)  # Shape (D, H, W, 3)
+
+    # Flatten spatial dimensions
+    coords_flat = coords.view(-1, 3)  # Shape (D*H*W, 3)
+
+    # Inverse warping: source coordinates = R^{-1} @ target coordinates
+    R_inv = R.inverse()
+    source_coords_flat = (R_inv @ coords_flat.T).T  # Shape (D*H*W, 3)
+
+    # Reshape back to grid format
+    source_grid = source_coords_flat.view(D, H, W, 3)
+
+    # Expand to batch dimension for grid_sample
+    source_grid = source_grid.unsqueeze(0).expand(B, -1, -1, -1, -1)  # Shape (B, D, H, W, 3)
+
+    # Trilinear interpolation
+    return F.grid_sample(z, source_grid, mode='trilinear', padding_mode='border', align_corners=True)
+
+def training_step(f, g, x1: torch.Tensor, x2: torch.Tensor, R: torch.Tensor) -> torch.Tensor:
+    """
+    Performs one training step.
+    Args:
+        f: Inverse renderer (Image -> VoxelGrid)
+        g: Forward renderer (VoxelGrid -> Image)
+        x1: Image tensor (B, 3, 128, 128)
+        x2: Image tensor (B, 3, 128, 128)
+        R: 3x3 rotation matrix R_theta
+    Returns:
+        Loss scalar
+    """
+    # 1. Encoding
+    z1 = f(x1)
+    z2 = f(x2)
+    
+    # 2. Rotation
+    z_tilde_1 = rotate_voxel_grid(z1, R)
+    z_tilde_2 = rotate_voxel_grid(z2, R.inverse())
+    
+    # 3. Rendering
+    x2_pred = g(z_tilde_1)
+    x1_pred = g(z_tilde_2)
+    
+    # 4. Loss (L1 norm as base; weighted sum with SSIM is typical)
+    loss = torch.mean(torch.abs(x2 - x2_pred)) + torch.mean(torch.abs(x1 - x1_pred))
+    
+    return loss
+```
+
+**Parameters:**
+*   **Loss Function:** Weighted sum of L1 norm and SSIM [S1, unofficial]. The model is not highly sensitive to the choice, but this combination works well [S1, unofficial].
+*   **Non-linearity:** LeakyReLU [S1, unofficial].
+*   **Normalization:** GroupNorm [S1, unofficial].
+*   **Camera Assumption:** Camera is on a sphere looking at the origin [S1, unofficial].
+
+**Edge Cases and Pitfalls:**
+*   **Rotation Interpolation:** Rotated voxel coordinates may not align with the grid [S1, unofficial]. Trilinear interpolation is required to reconstruct values, which can introduce blurring or artifacts if the rotation is large or the grid resolution is low [S1, unofficial].
+*   **Inference Speed:** While inference is fast (22ms on Tesla V100), it is slower than explicit renderers but significantly faster than optimization-based methods like SRNs (2 minutes) [S1, unofficial].
+
+## Operating characteristics
+*   **Performance:**
+    *   **Chairs (ShapeNet):** PSNR 22.83 dB (vs SRN 22.89 dB, dGQN 21.59 dB, TCO 21.27 dB) [S1, unofficial].
+    *   **Cars (ShapeNet):** PSNR 22.26 dB (vs SRN 22.36 dB, SRN Relative 21.05 dB) [S1, unofficial].
+*   **Strengths:** Real-time inference; no pose estimation required at inference; handles complex lighting and backgrounds (e.g., MugsHQ dataset) [S1, unofficial].
+*   **Limitations:** Struggles with fine texture and geometry details compared to SRNs; requires spherical camera assumption [S1, unofficial].
+
+## Background
+Equivariant Neural Rendering was proposed by Emilien Dupont, Miguel Angel Bautista, Alex Colburn, Aditya Sankar, Carlos Guestrin, Joshua Susskind, and Qi Shan [S1, unofficial]. The work was published on arXiv in June 2020 (v2 in December 2020) [S1, unofficial]. It builds on the concept of equivariance in neural networks, extending it to 3D scene representations [S1, unofficial]. The method addresses limitations of previous implicit scene representations like SRNs, which require optimization at inference time, and flow-based methods, which do not explicitly enforce 3D rotation equivariance [S1, unofficial]. The authors introduced two new datasets, MugsHQ, to test the model on complex scenes with reflections and cluttered backgrounds [S1, unofficial].
+
+## Sources
+[S1] Equivariant Neural Rendering, https://doi.org/10.48550/arxiv.2006.07630, fetched 2026-10-26 (unofficial)

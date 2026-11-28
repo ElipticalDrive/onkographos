@@ -1,0 +1,35 @@
+# Gaussian Grouping
+## Overview
+Gaussian Grouping is a method that enhances 3D Gaussian Splatting (3DGS) by incorporating identity encodings for 3D objects, enabling the system to group splats based on their semantic identity [S1]. It solves the problem of precise object-level manipulation in 3D scenes, specifically enabling object removal, inpainting, and recomposition [S1]. The method simultaneously rebuilds and segments open-world 3D objects under the supervision of 2D mask predictions from SAM and 3D spatial consistency constraints [S2, unofficial]. Compared to sibling methods like DFF, Gaussian Grouping removes objects with greatly reduced artifacts and avoids leaving a blurry background [S1].
+
+## How it works
+**Inputs and Outputs:** The method takes a 3DGS scene representation and training images as input, and outputs a 3DGS scene where each Gaussian is associated with an object identity for grouped editing [S1].
+
+**Data Structures:** The data structure extends standard 3DGS attributes (position, covariance, opacity, spherical harmonics) with an additional Object ID feature [S3]. The exact bit layout and storage size of the Object ID are not given in the sources. [G]
+
+**Steps:** 
+1. Initialization assigns initial object IDs to splats using the method from [38] [S3].
+2. Training refines object IDs throughout the process [S3]. The training process allows the number of splats assigned to each object to be non-uniform, as object IDs are not constrained during training, enabling dynamic allocation for optimal visual quality [S3].
+3. Rendering and editing use the object IDs to group splats for operations such as removal, inpainting, and recomposition [S1].
+
+**Formulas:** Not given in the sources. [G]
+
+**Parameters:** The primary parameter is the Object ID, an additional feature added to each splat [S3]. Typical values are not given in the sources. [G]
+
+**Pitfalls:** A key pitfall is that the number of splats assigned to each object is non-uniform because object IDs are not constrained during training [S3].
+
+## Subtopics
+
+### Object Segmentation in 3DGS
+This technique segments a 3DGS scene into semantically meaningful objects by adding an object ID feature to each splat, allowing for object-level scheduling and editing [S3]. Initial object IDs are assigned using the method from [38], and these IDs are refined throughout the training process [S3]. The number of splats per object is non-uniform as IDs are unconstrained during training [S3].
+
+## Operating characteristics
+The method enables object removal, inpainting, and recomposition [S1]. Compared to DFF, it removes objects with greatly reduced artifacts without leaving a blurry background [S1]. Measured performance, time complexity, memory complexity, and scaling characteristics are not given in the sources. [G]
+
+## Background
+Gaussian Grouping [56] enhances 3DGS by incorporating identity encodings for 3D objects [S1]. It is cited in surveys on 3D editing based on NeRF and 3DGS [S1].
+
+## Sources
+[S1] A survey on 3D editing based on NeRF and 3DGS, https://link.springer.com/article/10.1007/s11704-025-41176-9, fetched 2026-10-28
+[S2] PDF Recent advances in 3D Gaussian splatting - Springer, https://link.springer.com/content/pdf/10.1007/s41095-024-0436-y.pdf, fetched 2026-10-29 (unofficial)
+[S3] L3GS: Layered 3D Gaussian Splats for Efficient 3D Scene Delivery, https://doi.org/10.1145/3680207.3723485, fetched 2026-10-27

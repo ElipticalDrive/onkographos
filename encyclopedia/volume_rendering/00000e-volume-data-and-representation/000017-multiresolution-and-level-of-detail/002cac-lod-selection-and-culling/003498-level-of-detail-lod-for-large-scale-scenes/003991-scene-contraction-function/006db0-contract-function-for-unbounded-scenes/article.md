@@ -1,0 +1,162 @@
+# Contract Function for Unbounded Scenes
+
+Also called: Contracted-Space Representation, Cube Contraction, L-infinity Norm Contraction
+
+## Overview
+The Contract Function for Unbounded Scenes maps points from an unbounded world space into a finite, bounded cubic domain [S1, unofficial][S2]. This transformation allows distant scene content to be indexed by the same sparse voxel structures without distorting near-field geometry [S1, unofficial]. It differs from spherical contraction methods by using the $L_\infty$ norm to preserve the cubic grid alignment, which is convenient for grid-based representations [Parent].
+
+## How it works
+**Inputs and Outputs**
+*   **Input**: A 3D world-space point $\mathbf{x} \in \mathbb{R}^3$.
+*   **Parameters**:
+    *   $\mathbf{w}_c$: The center of the identity box (typically the origin or scene centroid) [S1, unofficial].
+    *   $r_i$: Half-extent of the inner identity box centered at $\mathbf{w}_c$ [S1, unofficial].
+    *   $r_c$: Outer contraction radius [S1, unofficial].
+    *   $m$: A scaling parameter related to the voxel size or grid resolution [S1, unofficial].
+*   **Output**: A contracted coordinate $\tilde{\mathbf{x}}$ within the bounded domain [S1, unofficial][S2].
+
+**Data Structures**
+No specific data structures are required for the function itself; it operates on scalar/vector values. However, it is typically applied to coordinates before they are hashed or indexed into a sparse voxel grid (e.g., Octree or Hash Grid) [S1, unofficial][S2].
+
+**Algorithm**
+The function defines a piecewise mapping. If the point is within the inner identity box, it remains unchanged. Otherwise, it is scaled towards the center based on its distance.
+
+Two variations exist in the literature. The first, used in sparse voxel radiance fields, uses a complex scale factor $s(\mathbf{x})$ dependent on $m$, $r_c$, and the $L_2$ norm $\rho$ [S1, unofficial]. The second, used in neural implicit representations, uses a simpler algebraic form that maps the exterior of the unit cube to the exterior of the unit cube, compressing infinity to the boundary [S2].
+
+**Formulas**
+
+*Variation 1: Sparse Voxel Radiance Field (SpaRV)* [S1, unofficial]
+
+Let $\mathbf{v} = \mathbf{x} - \mathbf{w}_c$.
+Let $\rho = \|\mathbf{v}\|_\infty$ (the $L_\infty$ norm).
+Let $\rho_2 = \|\mathbf{v}\|_2$ (the $L_2$ norm).
+
+$$
+\tilde{\mathbf{x}} = \text{Contr}(\mathbf{x}) =
+\begin{cases}
+\mathbf{x}, & \text{if } \|\mathbf{x} - \mathbf{w}_c\|_\infty \leq r_i \\
+\mathbf{w}_c + s(\mathbf{x})(\mathbf{x} - \mathbf{w}_c), & \text{otherwise}
+\end{cases}
+$$
+
+Where the scale factor $s(\mathbf{x})$ is:
+
+$$
+s(\mathbf{x}) = \frac{m^2 r_c - r_i^2 \rho_2}{m (m(r_c + \rho) - 2 r_i \rho_2)}
+$$
+
+*Variation 2: Neural Implicit Representation* [S2]
+
+Assuming $\mathbf{w}_c = \mathbf{0}$ and normalized bounds:
+
+$$
+\text{contract}(\mathbf{x}) =
+\begin{cases}
+\mathbf{x}, & \text{if } \|\mathbf{x}\|_\infty \leq 1 \\
+\left( 2 - \frac{1}{\|\mathbf{x}\|_\infty} \right) \left( \frac{\mathbf{x}}{\|\mathbf{x}\|_\infty} \right), & \text{otherwise}
+\end{cases}
+$$
+
+**Pseudocode**
+The following implementation combines the general structure of Variation 1 with the specific algebraic simplification of Variation 2 where applicable. Note that Variation 1 requires $m, r_c, r_i$ while Variation 2 assumes unit bounds. The code below implements Variation 1 as it is more general for sparse voxel contexts, with Variation 2 as a special case comment.
+
+> **Unverified code.** The code below did not pass a test run against a reference implementation, or no test fits it, so it may contain errors.
+
+```python
+import math
+
+def contract_unbounded(x, w_c, r_i, r_c, m):
+    """
+    Contracts an unbounded world-space point x into a finite domain.
+    
+    Args:
+        x: numpy array or list of 3 floats [x, y, z].
+        w_c: numpy array or list of 3 floats, center of the identity box.
+        r_i: float, half-extent of the inner identity box.
+        r_c: float, outer contraction radius.
+        m: float, scaling parameter related to voxel size.
+        
+    Returns:
+        numpy array of 3 floats, the contracted coordinate.
+    """
+    # Calculate vector from center
+    v = [x[i] - w_c[i] for i in range(3)]
+    
+    # Calculate L-infinity norm (max absolute component)
+    rho_inf = max(abs(v[0]), abs(v[1]), abs(v[2]))
+    
+    # Check if inside the inner identity box
+    if rho_inf <= r_i:
+        return x
+    
+    # Calculate L-2 norm for the scale factor in Variation 1
+    rho_2 = math.sqrt(v[0]**2 + v[1]**2 + v[2]**2)
+    
+    # Calculate scale factor s(x)
+    # Numerator: m^2 * r_c - r_i^2 * rho_2
+    numerator = (m**2 * r_c) - (r_i**2 * rho_2)
+    
+    # Denominator: m * (m * (r_c + rho_inf) - 2 * r_i * rho_2)
+    denominator = m * (m * (r_c + rho_inf) - 2 * r_i * rho_2)
+    
+    # Guard against division by zero
+    if denominator == 0:
+        # Fallback to identity or limit behavior. 
+        # As rho_inf -> infinity, s(x) -> 0. 
+        # Here we clamp to a very small number or handle as error.
+        scale = 0.0
+    else:
+        scale = numerator / denominator
+        
+    # Apply contraction: w_c + s(x) * (x - w_c)
+    contracted = [w_c[i] + scale * v[i] for i in range(3)]
+    
+    return contracted
+
+def contract_unbounded_simple(x, w_c):
+    """
+    Simplified contraction for unit bounds (Variation 2 from [S2]).
+    Assumes w_c is origin for the formula provided in [S2], 
+    but generalizes by shifting to w_c.
+    """
+    v = [x[i] - w_c[i] for i in range(3)]
+    rho_inf = max(abs(v[0]), abs(v[1]), abs(v[2]))
+    
+    if rho_inf <= 1.0:
+        return x
+        
+    # Formula: (2 - 1/rho_inf) * (x / rho_inf)
+    # Note: [S2] applies this to x directly, implying w_c=0.
+    # To generalize, we apply the scaling to the vector v.
+    factor = (2.0 - (1.0 / rho_inf)) / rho_inf
+    
+    contracted = [w_c[i] + factor * v[i] for i in range(3)]
+    return contracted
+```
+
+**Parameters with Typical Values**
+*   $r_i$: Not given in the sources as a fixed number, but defined as the half-extent of the inner identity box [S1, unofficial].
+*   $r_c$: Defined as $0.5 \times \text{voxel size}$ in SpaRV [S1, unofficial].
+*   $m$: Related to voxel size [S1, unofficial].
+*   For Variation 2, the bounds are normalized to 1 [S2].
+
+**Edge Cases and Pitfalls**
+*   **Division by Zero**: In Variation 1, the denominator $m (m(r_c + \rho) - 2 r_i \rho_2)$ can theoretically be zero. Implementers must add a guard [G].
+*   **Precision**: For points very far from the center, $\rho$ becomes large. Floating-point precision may cause $\rho$ and $\rho_2$ to lose relative accuracy. Using the simplified Variation 2 avoids the complex $L_2$ dependency but assumes unit bounds [S2].
+*   **Boundary Continuity**: The function is continuous at $\|\mathbf{x} - \mathbf{w}_c\|_\infty = r_i$ (or 1 for Variation 2) because the scale factor approaches 1 (or the linear term matches) at the boundary [S1, unofficial][S2].
+
+## Operating characteristics
+*   **Time Complexity**: $O(1)$ per point. It involves basic arithmetic operations (addition, multiplication, division, square root for $L_2$ in Variation 1).
+*   **Memory Complexity**: $O(1)$. No additional storage is required for the transformation itself.
+*   **Strengths**: Allows sparse voxel structures to cover infinite space without requiring infinite levels of detail. Near-field geometry is preserved without distortion [S1, unofficial].
+*   **Limitations**: Distant content is compressed, potentially reducing resolution for far-away objects if the voxel grid is not sufficiently deep [S1, unofficial]. The choice of $r_i$ and $r_c$ affects the trade-off between near-field precision and far-field coverage [S1, unofficial].
+*   **When to Use**: Large-scale scene reconstruction, LiDAR-visual mapping, and neural radiance fields where the scene extent is unknown or unbounded [S1, unofficial][S2].
+
+## Background
+The concept of contracting unbounded space into a bounded domain originated in neural radiance field (NeRF) research to handle large-scale environments [S1, unofficial][S2].
+*   **SpaRV**: The specific formula with parameters $m, r_c, r_i$ was introduced in *SpaRV: Sparse Radiance Voxels for Scalable Geometrically Consistent LiDAR-Visual Mapping and Rendering* [S1, unofficial]. It was designed to allow sparse voxels to index distant content without distorting near-field geometry.
+*   **Neural Implicit Representations**: The simpler algebraic contraction (Variation 2) was used in *Incremental Joint Learning of Depth, Pose, and Implicit Scene Representation on Monocular Camera in Large-Scale Scenes* [S2]. This approach re-parameterized the scene representation to handle unbounded scenes similarly to prior work [S2].
+
+## Sources
+[S1] SpaRV: Sparse Radiance Voxels for Scalable Geometrically Consistent LiDAR-Visual Mapping and Rendering, https://doi.org/10.48550/arxiv.2610.25665, fetched 2026-10-26 (unofficial)
+[S2] Incremental Joint Learning of Depth, Pose, and Implicit Scene Representation on Monocular Camera in Large-Scale Scenes, https://doi.org/10.1109/tase.2025.3617654, fetched 2026-10-29

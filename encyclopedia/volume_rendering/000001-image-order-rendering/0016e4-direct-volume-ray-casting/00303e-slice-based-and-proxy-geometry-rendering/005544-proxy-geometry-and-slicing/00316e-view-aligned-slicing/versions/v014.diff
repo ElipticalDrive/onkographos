@@ -1,0 +1,182 @@
+--- v013.md
++++ v014.md
+@@ -4,12 +4,12 @@
+ 
+ ## Overview
+-View-aligned slicing is a direct volume rendering technique that decomposes a 3D volume into a series of 2D planar slices (proxy geometry) aligned with the camera's view direction [S2, S3, S4, unofficial]. Unlike standard ray casting which samples the volume texture directly per pixel, this method generates explicit geometric primitives (triangles or quads) that are rasterized by the GPU [S2, unofficial][S5]. The primary advantage is consistent sampling distance relative to the camera, which minimizes sampling artifacts and maintains uniform slice thickness regardless of viewing angle [S4, S1, unofficial]. It builds on [Proxy Geometry and Slicing](15424-proxy-geometry-and-slicing.md) by dynamically regenerating geometry every frame to maintain view alignment.
++View-aligned slicing is a direct volume rendering technique that decomposes a 3D volume into a series of 2D planar slices (proxy geometry) aligned with the camera's view direction [S2, S3, S4, unofficial]. Unlike standard ray casting which samples the volume texture directly per pixel, this method generates explicit geometric primitives (triangles or quads) that are rasterized by the GPU [S2, unofficial][S5]. The primary advantage is consistent sampling distance relative to the camera, which minimizes sampling artifacts and maintains uniform slice thickness regardless of viewing angle [S4, S1, unofficial]. It builds on [Proxy Geometry and Slicing](15424-proxy-geometry-and-slicing.md) by dynamically regenerating geometry every frame to maintain view alignment [S2, S3, unofficial].
+ 
+ ## How it works
+-The method renders the volume by intersecting parallel slicing planes with the volume bounding box, generating billboards that face the camera. These billboards are rasterized, and fragment shaders sample the 3D volume texture at interpolated 3D texture coordinates.
++The method renders the volume by intersecting parallel slicing planes with the volume bounding box, generating billboards that face the camera [S3, unofficial]. These billboards are rasterized, and fragment shaders sample the 3D volume texture at interpolated 3D texture coordinates [S2, unofficial].
+ 
+ ### Inputs and Outputs
+-*   **Inputs**: 3D volume data (scalar field), camera position (`eyePos`), view matrix (`mtx`), volume dimensions (`res`), and sampling rate (`sampleRate` or `numberOfSlices`).
+-*   **Outputs**: 2D image with color and opacity composited via alpha blending.
++*   **Inputs**: 3D volume data (scalar field), camera position (`eyePos`), view matrix (`mtx`), volume dimensions (`res`), and sampling rate (`sampleRate` or `numberOfSlices`) [S3, unofficial].
++*   **Outputs**: 2D image with color and opacity composited via alpha blending [S3, unofficial].
+ 
+ ### Data Structures
+@@ -73,47 +73,96 @@
+         *   Calculate billboard center:
+             $$
+-            billboardCenter[x] = eyePos[x] + i \cdot (-mtx[3x]) \quad \text{for } x=0,1,2
+-            $$
+-            Using `mtx[2]`, `mtx[6]`, `mtx[10]` for the view direction components [S3, unofficial].
++            billboardCenter[0] = eyePos[0] - i \cdot mtx[2]
++            $$
++            $$
++            billboardCenter[1] = eyePos[1] - i \cdot mtx[6]
++            $$
++            $$
++            billboardCenter[2] = eyePos[2] - i \cdot mtx[10]
++            $$
++            [S3, unofficial].
+         *   Construct a polygon primitive (triangle fan or quad) centered at `billboardCenter` with `size` [S3, S1, unofficial].
+-        *   Assign 3D texture coordinates to vertices. The coordinates map the unit quad to the volume bounds. In some implementations, a rotation matrix transforms texture coordinates in the vertex shader to align with the view, keeping the slice geometry stationary while changing the texture content [S4, unofficial].
++        *   Assign 3D texture coordinates to vertices. The coordinates map the unit quad to the volume bounds [S4, unofficial]. In some implementations, a rotation matrix transforms texture coordinates in the vertex shader to align with the view, keeping the slice geometry stationary while changing the texture content [S4, unofficial].
+         *   Store vertices in `a_position` and record `[offset, length]` in `offsets_length` [S2, unofficial].
+ 
+ 3.  **Rendering**:
+-    *   Enable blending:
+-        ```python
+-        glEnable(GL_BLEND)
+-        glBlendFunc(GL_SRC_ALPHA, GL_ONE_MINUS_SRC_ALPHA)
+-        ```
+-        [S3, G, unofficial].
++    *   Enable blending and set blend function to standard alpha compositing [S3, unofficial].
+     *   Bind vertex buffer and enable vertex attribute array for `a_position` [S2, unofficial].
+     *   Iterate through `offsets_length`:
+-        *   Set vertex pointer:
+-            ```python
+-            glVertexAttribPointer(
+-                location,
+-                size=3,
+-                type=GL_FLOAT,
+-                normalize=False,
+-                stride=0,
+-                offset=offset * 4
+-            )
+-            ```
+-            [S2, unofficial].
+-        *   Draw slice:
+-            ```python
+-            glDrawArrays(GL_TRIANGLES, 0, length)
+-            ```
+-            [S2, unofficial].
++        *   Set vertex pointer with size 3, type `FLOAT`, normalized false, stride 0, and offset calculated as `offset * 4` (for `Float32` byte alignment) [S2, unofficial].
++        *   Draw slice using triangle primitives with the recorded vertex count [S2, unofficial].
+     *   Fragment Shader:
+         *   Sample `tex3D` at interpolated 3D texture coordinates to get scalar value [G].
+-        *   Map scalar value to color and opacity using `tex1D` (transfer function) [S4, unofficial].
++        *   Map scalar value to color and opacity using a 1D transfer function texture [S4, unofficial].
+         *   Composite using alpha blending [G].
+ 
++### Pseudocode
++```python
++def generate_view_aligned_slices(number_of_slices, eye_pos, mtx, res):
++    # 1. Define volume bounds and 8 corners
++    x_bound, y_bound, z_bound = res.x, res.y, res.z
++    corners = []
++    for dx in [-1, 1]:
++        for dy in [-1, 1]:
++            for dz in [-1, 1]:
++                corners.append([dx * x_bound / 2, dy * y_bound / 2, dz * z_bound / 2])
++
++    # 2. Calculate distance from eye to origin along view normal
++    d = mtx[2] * eye_pos[0] + mtx[6] * eye_pos[1] + mtx[10] * eye_pos[2]
++
++    # 3. Find nearest and furthest intersection distances
++    distances = []
++    for corner in corners:
++        dist = abs(-mtx[2] * corner[0] - mtx[6] * corner[1] - mtx[10] * corner[2] + d)
++        distances.append(dist)
++    nearest = min(distances)
++    furthest = max(distances)
++
++    # 4. Calculate step size and billboard size
++    delta_d = (furthest - nearest) / number_of_slices
++    size = 2.0 * sqrt(x_bound**2 + y_bound**2 + z_bound**2)
++
++    # 5. Generate slice geometry
++    vertices = []
++    offsets = []
++    for i in range(furthest, nearest - delta_d, -delta_d):
++        # Billboard center calculation using view direction components
++        center = [
++            eye_pos[0] - i * mtx[2],
++            eye_pos[1] - i * mtx[6],
++            eye_pos[2] - i * mtx[10]
++        ]
++        # Construct polygon primitive (triangle fan or quad) centered at billboardCenter with size
++        # Assign 3D texture coordinates mapping unit quad to volume bounds
++        # Transform texture coordinates in vertex shader to align with view [S4, unofficial]
++        slice_vertices = construct_billboard(center, size)
++        vertices.extend(slice_vertices)
++        offsets.append([len(vertices) * 4, len(slice_vertices)]) # offset in bytes for Float32
++
++    return vertices, offsets
++
++def render_slices(vertices, offsets, tex3d, tex1d):
++    # Enable blending and set blend function to standard alpha compositing [S3, unofficial]
++    enable_blending()
++    set_blend_func(SRC_ALPHA, ONE_MINUS_SRC_ALPHA)
++    
++    # Bind vertex buffer and enable vertex attribute array for a_position [S2, unofficial]
++    bind_buffer(vertices)
++    enable_vertex_attribute("a_position")
++    
++    # Iterate through offsets_length to draw each slice individually [S2, unofficial]
++    for offset, length in offsets:
++        # Set vertex pointer: size=3, type=FLOAT, normalize=False, stride=0, offset=offset*4 [S2, unofficial]
++        set_vertex_pointer(location=0, size=3, type=FLOAT, normalize=False, stride=0, offset=offset * 4)
++        # Draw slice using triangle primitives [S2, unofficial]
++        draw_arrays(TRIANGLES, start=0, count=length)
++```
++
+ ### Parameters
+-*   `numberOfSlices` / `sampleRate`: Determines the number of slices. Higher values increase quality but reduce performance [S3, S4, unofficial].
+-*   `nearClip`, `farClip`: Orthographic projection planes (default 200.0, 600.0) [S3, unofficial].
+-*   `viewBound`: Half-width of the orthographic projection box (default 50) [S3, unofficial].
+-*   `boundary`: Integer flag for shader boundary checks (default 0) [S3, unofficial].
++*   `numberOfSlices` / `sampleRate`: Determines the number of slices [S4, unofficial].
++*   `nearClip`: Near plane of the orthographic projection, default 200.0 [S3, unofficial].
++*   `farClip`: Far plane of the orthographic projection, default 600.0 [S3, unofficial].
++*   `viewBound`: Half-width of the orthographic projection box, default 50, adjustable by keys 'z' (multiply by 0.9) and 'x' (multiply by 10/9) [S3, unofficial].
++*   `boundary`: Integer flag passed to shader, default 0, toggled by keys '1' (0) and '2' (1) [S3, unofficial].
+ 
+ ### Edge Cases and Pitfalls
+@@ -121,10 +170,10 @@
+ *   **Index Wrapping**: When constructing triangles from slice vertices, ensure the index for the third vertex wraps correctly (e.g., to index 1) if `k + 1` exceeds the array length to form closed polygons [S2, unofficial].
+ *   **View Alignment**: The proxy geometry must be strictly view-aligned to ensure samples can be correctly read from the frame buffer if post-processing or compositing relies on buffer reads [S5].
+-*   **Performance**: Geometry regeneration every frame is computationally expensive. The number of slices is often automatically reduced during rotation to maintain interactive rates [S7, unofficial].
++*   **Performance Management**: The number of slices is automatically reduced during rotation to guarantee interactive rates [S7, unofficial].
+ 
+ ## Subtopics
+ 
+-### Object-Aligned Slicing
+-Object-aligned slicing divides the volume into slices along the principal axes (x, y, z) rather than the view direction [S1, unofficial]. It uses three stacks of 2D textures corresponding to these directions. The active stack is swapped based on the viewpoint's closest principal direction [S1, unofficial]. It is faster and simpler but suffers from 3x memory consumption, data replication, image popping artifacts during stack swaps, and inconsistent sampling distances as the camera moves [S1, unofficial].
++### [Object-Aligned Slicing](6531-object-aligned-slicing.md)
++Object-aligned slicing divides the volume into slices along the principal axes (x, y, z) rather than the view direction. It uses fixed texture coordinates assigned to slice vertices and avoids per-ray intersection calculations. It is distinguished from its parent [View-Aligned Slicing](6530-view-aligned-slicing.md) by its simplicity and speed, but suffers from higher memory consumption and visual artifacts due to inconsistent sampling distances and stack swapping.
+ 
+ ### Arbitrary Slicing
+@@ -138,14 +187,14 @@
+ 
+ ## Operating characteristics
+-*   **Time Complexity**: $O(N \cdot S)$, where $N$ is the number of slices and $S$ is the number of fragments per slice (proportional to screen resolution). Geometry generation is $O(N)$ [S3, S7, unofficial].
+-*   **Memory Complexity**: $O(V)$ for the 3D volume texture, where $V$ is the volume resolution [S3, S7, unofficial]. Object-aligned variants use $3 \times$ memory [S1, unofficial].
+-*   **Performance**: Interactive rates are achievable with moderate slice counts. Performance degrades if slice count is too high or if geometry regeneration is not optimized [S7, unofficial].
++*   **Time Complexity**: Not given in the sources.
++*   **Memory Complexity**: Not given in the sources.
++*   **Performance**: Interactive rates are achievable; the number of slices is automatically reduced during rotation to guarantee interactive rates [S7, unofficial].
+ *   **Strengths**: Consistent sampling distance, minimal aliasing artifacts compared to object-aligned methods, efficient use of GPU rasterization [S1, S4, unofficial].
+-*   **Limitations**: Requires geometry regeneration every frame (CPU-GPU communication overhead), less flexible than ray casting for complex lighting effects without additional passes [S2, unofficial][S6].
++*   **Limitations**: Requires geometry regeneration every frame [S2, unofficial].
+ *   **When to use**: Interactive volume visualization where view alignment is critical for quality and performance is acceptable [S7, unofficial].
+ *   **When not to use**: When extreme lighting complexity (e.g., accurate indirect illumination) is required without additional techniques, or when memory bandwidth is severely constrained [S6][S1, unofficial].
+ 
+ ## Background
+-View-aligned slicing emerged as a method to combine the quality of ray casting with the speed of rasterization. It was notably implemented in systems like "Scientific-visualization-Slicing-volume-rendering" [S3, unofficial] and "SliceBasedVolumeRendering" [S4, unofficial]. The technique is discussed in the context of proxy geometry for interactive volume visualization [S5] and in implementations of pre-integrated volume rendering [S7, unofficial]. It addresses the limitations of object-aligned slicing, such as popping artifacts and inconsistent sampling [S1, unofficial].
++View-aligned slicing was implemented in systems like "Scientific-visualization-Slicing-volume-rendering" [S3, unofficial] and "SliceBasedVolumeRendering" [S4, unofficial]. The technique is discussed in the context of proxy geometry for interactive volume visualization [S5] and in implementations of pre-integrated volume rendering [S7, unofficial].
+ 
+ ## Sources

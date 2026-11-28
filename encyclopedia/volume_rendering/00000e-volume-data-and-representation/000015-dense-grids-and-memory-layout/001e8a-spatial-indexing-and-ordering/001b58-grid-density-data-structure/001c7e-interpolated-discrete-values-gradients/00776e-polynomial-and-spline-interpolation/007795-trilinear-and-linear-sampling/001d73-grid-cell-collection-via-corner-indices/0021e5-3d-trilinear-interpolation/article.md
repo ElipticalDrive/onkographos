@@ -1,0 +1,183 @@
+# 3D Trilinear Interpolation
+
+Also called: 3D Linear Interpolation, Interpolação trilinear, Trilinear Filtering, Trilinear Interpolant, Trilinear Sampling, Trilinear Volume Sampling, Trivariate Trilinear Interpolation
+
+## Overview
+3D Trilinear Interpolation estimates the value of a scalar field at an arbitrary point within a voxel by computing a weighted average of the values at the voxel's eight corners [S1, S22]. It solves the problem of sampling discrete volume data at non-integer coordinates, which is essential for ray casting where sample points rarely align with grid vertices [S3, S4, unofficial]. Unlike nearest-neighbor interpolation, which produces blocky artifacts, trilinear interpolation provides $C^0$ continuity and smoother gradients, though it is less accurate than higher-order splines for data with high curvature [S14, S6, unofficial].
+
+## How it works
+**Inputs and Outputs:**
+- Input: A query point $P = (x, y, z)$ in world or grid coordinates; a dense 3D grid of values $V$ with dimensions $N_x \times N_y \times N_z$ and uniform spacing $\Delta x, \Delta y, \Delta z$ [S22][S24, unofficial].
+- Output: A scalar value $V(P)$ [S22].
+
+**Data Structures:**
+The grid is typically stored as a 1D array in row-major order to allow $O(1)$ access [S28, unofficial]. For a point $(x,y,z)$, the eight corner values are accessed using integer indices derived from the floor of the normalized coordinates [S22].
+
+**Steps:**
+1. **Coordinate Normalization:** Determine the integer indices of the lower-left corner of the containing voxel. For a grid with origin $(x_0, y_0, z_0)$ and spacing $\Delta$, compute:
+   $$ i = \lfloor \frac{x - x_0}{\Delta x} \rfloor, \quad j = \lfloor \frac{y - y_0}{\Delta y} \rfloor, \quad k = \lfloor \frac{z - z_0}{\Delta z} \rfloor $$
+   Clamp $i, j, k$ to $[0, N-2]$ to ensure the upper corners exist [S18, S19, unofficial].
+2. **Fractional Offsets:** Compute the fractional distances within the voxel:
+   $$ t = \frac{x - x_0}{\Delta x} - i, \quad u = \frac{y - y_0}{\Delta y} - j, \quad v = \frac{z - z_0}{\Delta z} - k $$
+   where $t, u, v \in [0, 1)$ [S22][S28, unofficial].
+3. **Corner Fetching:** Retrieve the eight corner values $V_{ijk}$ where indices range from $i$ to $i+1$, $j$ to $j+1$, and $k$ to $k+1$ [S12, S28, unofficial].
+4. **Interpolation:** Perform linear interpolation along the x-axis, then y-axis, then z-axis (or any separable order) [S8, unofficial][S22].
+
+**Formula:**
+The value is computed as:
+$$ V(P) = \sum_{a=0}^{1} \sum_{b=0}^{1} \sum_{c=0}^{1} V_{i+a, j+b, k+c} \cdot w_a(t) w_b(u) w_c(v) $$
+where $w_0(\alpha) = 1 - \alpha$ and $w_1(\alpha) = \alpha$ [S22][S27, unofficial].
+
+Expanded for efficiency (7 multiplications, 12 additions):
+$$
+\begin{aligned}
+c_{00} &= V_{i,j,k}(1-t) + V_{i+1,j,k}t \\
+c_{10} &= V_{i,j+1,k}(1-t) + V_{i+1,j+1,k}t \\
+c_{01} &= V_{i,j,k+1}(1-t) + V_{i+1,j,k+1}t \\
+c_{11} &= V_{i,j+1,k+1}(1-t) + V_{i+1,j+1,k+1}t \\
+c_0 &= c_{00}(1-u) + c_{10}u \\
+c_1 &= c_{01}(1-u) + c_{11}u \\
+V(P) &= c_0(1-v) + c_1v
+\end{aligned}
+$$
+[S27, S30, unofficial]
+
+**Parameters:**
+- Grid spacing $\Delta x, \Delta y, \Delta z$: Assumed uniform in the standard formulation. For non-uniform grids, the fractional offsets must be calculated using local spacings: $t = \frac{x - x_i}{x_{i+1} - x_i}$ [S22][S24, unofficial].
+- Boundary handling: Typically clamps indices or returns 0 for out-of-bounds queries [S18, S19, unofficial].
+
+**Edge Cases and Pitfalls:**
+- **Boundary Conditions:** If the query point lies outside the grid, indices must be clamped or the function must return a default value (e.g., 0) to prevent out-of-bounds memory access [S18, S19, unofficial].
+- **Continuity:** Trilinear interpolation provides $C^0$ continuity (continuous value) but discontinuous first derivatives at voxel boundaries [S14, S24, unofficial]. This can cause artifacts in gradient-based optimization or shading [S11, unofficial].
+- **Non-Linear Artifacts:** Along diagonals, the function behaves as a higher-order polynomial (quadratic in 2D, cubic in 3D), which can introduce "cross" or "diamond" artifacts during magnification [S14, S11, unofficial].
+- **Curvilinear Grids:** For non-orthogonal or curvilinear cells, the standard trilinear function may not fit the geometry correctly, and continuity across faces is not guaranteed [S2].
+
+**Pseudocode:**
+> **Unverified code.** The code below did not pass a test run against a reference implementation, or no test fits it, so it may contain errors.
+
+```python
+import math
+
+def trilinear_interpolate(grid, origin, spacing, x, y, z):
+    """
+    grid: 1D array of values, shape (Nx, Ny, Nz)
+    origin: (ox, oy, oz)
+    spacing: (dx, dy, dz)
+    x, y, z: query coordinates
+    """
+    # 1. Normalize coordinates
+    nx = (x - origin[0]) / spacing[0]
+    ny = (y - origin[1]) / spacing[1]
+    nz = (z - origin[2]) / spacing[2]
+
+    # 2. Compute integer indices and fractional parts
+    ix = math.floor(nx)
+    iy = math.floor(ny)
+    iz = math.floor(nz)
+    
+    fx = nx - ix
+    fy = ny - iy
+    fz = nz - iz
+
+    # 3. Clamp indices to valid range [0, N-2]
+    Nx, Ny, Nz = grid.shape
+    ix = max(0, min(ix, Nx - 2))
+    iy = max(0, min(iy, Ny - 2))
+    iz = max(0, min(iz, Nz - 2))
+
+    # 4. Fetch corner values
+    # Helper to get 1D index from 3D coordinates (row-major: i + j*Nx + k*Nx*Ny)
+    def get_idx(i, j, k):
+        return i + j * Nx + k * Nx * Ny
+
+    v000 = grid[get_idx(ix, iy, iz)]
+    v100 = grid[get_idx(ix + 1, iy, iz)]
+    v010 = grid[get_idx(ix, iy + 1, iz)]
+    v110 = grid[get_idx(ix + 1, iy + 1, iz)]
+    v001 = grid[get_idx(ix, iy, iz + 1)]
+    v101 = grid[get_idx(ix + 1, iy, iz + 1)]
+    v011 = grid[get_idx(ix, iy + 1, iz + 1)]
+    v111 = grid[get_idx(ix + 1, iy + 1, iz + 1)]
+
+    # 5. Interpolate along X
+    c00 = v000 * (1 - fx) + v100 * fx
+    c10 = v010 * (1 - fx) + v110 * fx
+    c01 = v001 * (1 - fx) + v101 * fx
+    c11 = v011 * (1 - fx) + v111 * fx
+
+    # 6. Interpolate along Y
+    c0 = c00 * (1 - fy) + c10 * fy
+    c1 = c01 * (1 - fy) + c11 * fy
+
+    # 7. Interpolate along Z
+    result = c0 * (1 - fz) + c1 * fz
+
+    return result
+```
+
+## Subtopics
+
+### [Trilinear Interpolation (Compressed/Linked)](2629-trilinear-interpolation-compressed-linked.md)
+Performs trilinear interpolation on a compressed sparse grid using a links array to map voxel indices to compressed value indices, handling boundary checks via masking or a zero-value hack. It builds on [3D Trilinear Interpolation](2613-3d-trilinear-interpolation.md) by adding a link lookup step that translates grid coordinates to compressed indices while retaining the regular 8-corner neighborhood structure.
+
+### [Trilinear Gradient Interpolation](3470-trilinear-gradient-interpolation.md)
+Computes the gradient of the trilinear interpolation function with respect to its input data values, enabling the backpropagation of loss gradients through a differentiable volume rendering or sampling pipeline. It solves the problem of efficiently distributing output gradients from sampled points back to the underlying sparse voxel octree (SVO) leaf payloads without recomputing the forward interpolation.
+
+### [Cubic Volume Interpolation](4278-cubic-volume-interpolation.md)
+Extends standard 3D trilinear interpolation by replacing linear mixture weights with cubic polynomial weights for each spatial axis. It differs from its parent [3D Trilinear Interpolation](2613-3d-trilinear-interpolation.md) by using cubic mixture weights to determine texture sampling coordinates and interpolation factors.
+
+### [Quantile Interpolation for Uncertain Data](5008-quantile-interpolation-for-uncertain-data.md)
+Interpolates nonparametric probability distributions (PDFs) represented as histograms or KDEs by breaking them into a fixed number of quantiles and interpolating the quantile widths linearly, resulting in a closed-form PDF at the interpolated point. It solves the problem of reconstructing uncertain volume data where each grid vertex holds a distribution rather than a scalar, enabling Direct Volume Rendering (DVR) that preserves statistical properties like modality and variance.
+
+### [Analytic Derivative of Tri-linear Interpolation](6919-analytic-derivative-of-tri-linear-interpolation.md)
+Computes the exact partial derivatives of a tri-linearly interpolated grid function (such as color $\vec{c}$ or density $\sigma$) with respect to the sample location $p_i = (x_i, y_i, z_i)$. It is primarily used for gradient-based optimization in neural implicit representations, such as SLAM and NeRF variants, where analytical gradients are required for backpropagation or optimization steps.
+
+### [Multivariate Functional Approximation](8173-multivariate-functional-approximation.md)
+Models 3D scalar fields using polynomial functions (specifically B-splines) defined over micro-blocks of the data grid. It solves the problem of accurate off-grid sample evaluation and smooth shading in volume rendering by providing higher-order continuity than trilinear interpolation without requiring ghost voxels or boundary padding.
+
+### [Ghost Cell Stitching for Node-Centered AMR](8949-ghost-cell-stitching-for-node-centered-amr.md)
+Handles data continuity between different Adaptive Mesh Refinement (AMR) levels in node-centered grids by introducing ghost cells at level boundaries. It solves the problem of rendering artifacts (such as cracks or "ghosting") that occur when isosurface extraction or volume rendering requires access to neighboring cells that reside on different processing elements or different refinement levels.
+
+### [Smoothstep Trilinear Interpolation](9344-smoothstep-trilinear-interpolation.md)
+Used in multiresolution hash encodings to achieve $C^1$-smooth interpolation (continuous first derivatives) in the spatial domain. It solves the problem of derivative discontinuities at grid boundaries inherent in standard trilinear interpolation, which can cause artifacts in neural rendering and gradient-based optimization.
+
+### [Barycentric Interpolation](9603-barycentric-interpolation.md)
+Interpolates learnable feature vectors at the $n+1$ vertices of a simplex cell using barycentric coordinates derived from sorted, skewed coordinates. It serves as an efficient alternative to computationally expensive $n$-linear interpolation (such as trilinear interpolation) by maintaining similarity to standard interpolation schemes while avoiding the kernel summation overhead found in simplex noise algorithms.
+
+### [Semi-Lagrangian Fluid Advection](12285-semi-lagrangian-fluid-advection.md)
+Updates physical quantities (volume and velocity) on a fixed Eulerian grid by back-tracing from the current grid center to the previous time step using the velocity field, then interpolating the value. It differs from Lagrangian methods by keeping particles fixed to the grid, and from pure Eulerian finite-difference advection by using characteristic tracing which allows larger time steps without instability.
+
+### [Multilinear Interpolation](16111-multilinear-interpolation.md)
+Generalizes trilinear interpolation to $n$ dimensions, estimating function values within an $n$-dimensional hypercube defined by $2^n$ grid points at its vertices. It constructs the approximation via the tensor product of univariate linear interpolations across each dimension. Unlike [3D Trilinear Interpolation](2613-3d-trilinear-interpolation.md), which is limited to three spatial dimensions, this method applies the same weighted-sum logic to arbitrary dimensions, though it suffers from exponential complexity growth.
+
+## Operating characteristics
+- **Time Complexity:** $O(1)$ per query, involving a fixed number of arithmetic operations (7 multiplications and 12 additions in the optimized form) [S8, S30, unofficial].
+- **Memory Complexity:** $O(1)$ auxiliary memory; requires access to 8 neighboring values [S28, unofficial].
+- **Performance:** Significantly faster than higher-order interpolations (e.g., cubic) and suitable for real-time rendering [S6, unofficial]. However, it is slower than nearest-neighbor interpolation [S27, unofficial].
+- **Strengths:** Provides smooth, continuous variation between sample points, reducing the blockiness of nearest-neighbor sampling [S24, S3, unofficial]. It is the standard filter for ray casting in many volume rendering pipelines [S3, unofficial].
+- **Limitations:** Introduces aliasing or halo artifacts around high-contrast boundaries if sampling is insufficient [S16]. It can over-smooth high-frequency details in data with sharp variations [S16]. The discontinuous derivative can cause artifacts in gradient-based applications [S11, unofficial].
+- **When to Use:** Standard volume rendering and scenarios requiring a balance between smoothness and performance [S3, unofficial].
+- **When Not to Use:** When $C^1$ continuity is required (use Smoothstep or Cubic), when data has very high curvature and accuracy is paramount (use Cubic or Spline), or when nearest-neighbor blockiness is acceptable for performance (use Nearest Neighbor) [S10, unofficial][S16].
+
+## Background
+Trilinear interpolation originated in finite element methods during the 1970s, particularly for isoparametric hexahedral elements using trilinear shape functions $N_i(\xi,\eta,\zeta) = \frac{1}{8}(1 \pm \xi)(1 \pm \eta)(1 \pm \zeta)$ to map distorted geometries to a reference cube [S2]. It has since become the most common reconstruction filter for structured rectilinear data in volume rendering [S14, unofficial]. It is widely used in OpenGL's `GL_LINEAR_MIPMAP_LINEAR` mode for texture sampling, in 3D gaming engines (Unity, Unreal) for volumetric textures, and in medical imaging (CT, MRI) for density estimation [S26, unofficial].
+
+## Sources
+[S1] Interactive Volume Rendering with Ray Tracing, https://doi.org/10.2312/egst.20061055, fetched 2026-10-24
+[S2] Direct volume rendering of curvilinear volumes, https://doi.org/10.1145/99308.99318, fetched 2026-10-28
+[S3] Direct Volume Rendering Techniques, https://www.scribd.com/presentation/380929057/10-raycasting, fetched 2026-10-25 (unofficial)
+[S4] Direct Volume Rendering (DVR): Ray-casting | PPT - SlideShare, https://www.slideshare.net/slideshow/direct-volume-rendering-dvr-raycasting/265104120, fetched 2026-10-26 (unofficial)
+[S6] GPU-based Compressive Volume Rendering, https://doi.org/10.11575/prism/5366, fetched 2026-10-26 (unofficial)
+[S8] Antara: An Interactive 3D Volume Rendering and Visualization Framework, https://arxiv.org/abs/1812.04233v1, fetched 2026-10-26 (unofficial)
+[S10] Real-Time Mono- and Multi-Volume Rendering of Large Medical Datasets on Standard PC Hardware, https://doi.org/10.2312/diss.20058170, fetched 2026-10-26 (unofficial)
+[S11] Iso-Surface Volume Rendering : speed and accuracy for medical applications, https://doi.org/10.3990/1.9789036513982, fetched 2026-10-26 (unofficial)
+[S12] faviasono/raycastingrendering, https://github.com/faviasono/raycastingrendering, fetched 2026-10-26 (unofficial)
+[S14] Iso-Surface Volume Rendering : speed and accuracy for medical applications, https://doi.org/10.3990/1.9789036513982, fetched 2026-10-26 (unofficial)
+[S18] faviasono/raycastingrendering, https://github.com/faviasono/raycastingrendering, fetched 2026-10-26 (unofficial)
+[S19] lamdao/sdvr, https://github.com/lamdao/sdvr, fetched 2026-10-26 (unofficial)
+[S22] trilinear interpolation, https://grokipedia.com/page/Trilinear_interpolation, fetched 2026-10-26
+[S24] szat/Jax-Volumetric-Renderer, https://github.com/szat/Jax-Volumetric-Renderer, fetched 2026-10-27 (unofficial)
+[S26] Chapter 7 - Advanced Computer Graphics - VTK, https://examples.vtk.org/site/VTKBook/07Chapter7/, fetched 2026-10-29 (unofficial)
+[S27] Volume Rendering Volume Rendering, https://docslib.org/doc/1400821/volume-rendering, fetched 2026-10-28 (unofficial)
+[S28] wagenadl/gvox, https://github.com/wagenadl/gvox, fetched 2026-10-28 (unofficial)
+[S30] PDF Direct Volume Rendering, https://www.cs.unh.edu/~cs880/lectureNotes/DVR.pdf, fetched 2026-10-28 (unofficial)

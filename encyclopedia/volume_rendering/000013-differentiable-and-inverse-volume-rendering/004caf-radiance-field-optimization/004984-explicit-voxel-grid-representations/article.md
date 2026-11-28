@@ -1,0 +1,25 @@
+# Explicit Voxel/Grid Representations
+## Overview
+Explicit Voxel/Grid Representations optimize scene parameters (density, color, features) stored in discrete 3D grids or hierarchical structures, avoiding the implicit parameterization of multi-layer perceptrons (MLPs) used in [Neural Radiance Fields](4972-neural-radiance-fields.md) [G]. This family distinguishes itself by enabling direct optimization of grid values, which significantly reduces training time and memory overhead compared to implicit methods, while offering more structured scene representations than point-based methods like [3D Gaussian Splatting](1795-3d-gaussian-splatting.md) [G].
+
+## Shared principles
+Builds on [Radiance-field optimization](44-radiance-field-optimization.md) [G]. All methods in this family represent the scene using discrete 3D voxel grids or hierarchical grid structures to store parameters such as volume density, color, and features [G]. These parameters are optimized directly from input images, bypassing the need for training large implicit neural networks [G]. The forward rendering model evaluates the volume rendering equation along camera rays, integrating density and color samples to produce pixel colors [G]. Gradients are propagated back through the differentiable rendering operator to update the voxel grid values [G].
+
+## Subtopics
+
+### [Explicit Radiance Fields](806-explicit-radiance-fields.md)
+What it is: A method that reconstructs 3D scenes by formulating volumetric reconstruction as a non-linear least-squares problem solved explicitly using a Gauss-Newton solver, avoiding neural networks. What sets it apart: It represents the scene as a discrete voxel grid for the foreground and a hierarchy of environment maps for the background, achieving significantly faster convergence (2-3 orders of magnitude) compared to implicit radiance fields that use MLPs and Adam optimization, while maintaining comparable quality. When to choose it: When fast convergence without neural networks is required. Link: [Explicit Radiance Fields](806-explicit-radiance-fields.md)
+
+### [Direct Voxel Grid Optimization](4694-direct-voxel-grid-optimization.md)
+What it is: A method that reconstructs per-scene radiance fields from calibrated images by directly optimizing a dense 3D voxel grid for volume density and a feature voxel grid for color. What sets it apart: It eliminates the need for lengthy MLP training compared to implicit methods, and trains the voxel grid directly from scratch unlike earlier explicit voxel methods. It uses a shallow MLP to handle view-dependent appearance, balancing speed and quality compared to methods that optimize colors directly in the grid. When to choose it: When per-scene optimization in under 15 minutes on a single GPU is needed. Link: [Direct Voxel Grid Optimization](4694-direct-voxel-grid-optimization.md)
+
+### [Canonical Radiance Field with Voxel Grid](8920-canonical-radiance-field-with-voxel-grid.md)
+What it is: A method that replaces the continuous, coordinate-based MLP of NeRF with a discrete, learnable voxel grid to represent a static scene in a canonical time frame. What sets it apart: It explicitly separates density and color features into distinct grids optimized for canonical static representation, differing from other explicit methods by serving as a foundational static representation for dynamic scene warping rather than direct view synthesis optimization. When to choose it: When a static canonical representation is needed for forward warping in dynamic scenes. Link: [Canonical Radiance Field with Voxel Grid](8920-canonical-radiance-field-with-voxel-grid.md)
+
+### [Forward Flow for Novel View Synthesis of Dynamic Scenes](13903-forward-flow-for-novel-view-synthesis-of-dynamic-scenes.md)
+What it is: A dynamic NeRF method that replaces backward flow deformation with forward flow to warp a canonical radiance field to target time steps. What sets it apart: It maps canonical space to current time, yielding smooth flow norms for the same 3D position along the timeline, avoiding the discontinuity and non-smoothness of backward flow methods. When to choose it: When smooth and continuous motion modeling is required for dynamic scenes. Link: [Forward Flow for Novel View Synthesis of Dynamic Scenes](13903-forward-flow-for-novel-view-synthesis-of-dynamic-scenes.md)
+
+## Background
+Explicit voxel representations emerged as a response to the computational bottlenecks of implicit neural radiance fields [G]. Early works like [Explicit Radiance Fields](806-explicit-radiance-fields.md) demonstrated that direct optimization of voxel grids could achieve fast convergence for static scenes [G]. [Direct Voxel Grid Optimization](4694-direct-voxel-grid-optimization.md) later popularized the approach by showing that a dense voxel grid combined with a shallow MLP could match the quality of NeRF while training orders of magnitude faster [G]. These methods are widely used in real-time rendering, dynamic scene reconstruction, and scenarios requiring rapid per-scene optimization [G].
+
+## Sources

@@ -1,0 +1,147 @@
+Steve's Game Library — Rust game-building libraries for AI coding agents - Inject SGL3D fog volumes only into the froxels they reach by stevepryde · Pull Request #64 · stevepryde/sgl
+
+Inject SGL3D fog volumes only into the froxels they reach by stevepryde · Pull Request #64 · stevepryde/sgl · GitHub
+Skip to content
+You signed in with another tab or window. Reload to refresh your session.
+You signed out in another tab or window. Reload to refresh your session.
+You switched accounts on another tab or window. Reload to refresh your session.
+Dismiss alert
+Conversation
+stevepryde
+commented
+Oct 4, 2026
+•
+edited
+Loading
+Uh oh!
+There was an error while loading. Please reload this page.
+Copy link
+Copy Markdown
+Owner
+Problem
+inject (crates/sgl-3d/src/stages/fog.wgsl) looped over every scene fog volume in every froxel. At High 1080p that is about 1.04 M froxels × 32 volumes in Hyperdrive. Every iteration loaded the volume's record and tested its bounding sphere. For a long tunnel box, that sphere covers far more than the box itself. This loop accounted for about 1.3–1.5 ms of the 4.5 ms fog injection (#42).
+Result
+Each frame the fog stage works out which froxels each scene fog volume may reach, using the volume's eight corners (Godot's per-volume froxel bounds). It drops volumes that lie behind the camera, beyond Fog::length, or wholly in front of the camera and beside the frame. A volume that holds or crosses the camera's plane is bounded by the whole frame up to its farthest corner's slice. The README now advises splitting long volumes, such as a tunnel's, into segments, because such a volume costs every froxel up to its far end. It uploads the rest as (first, last, volume) froxel ranges, in scene order. inject walks that list. One integer range test skips a volume whose range does not hold the froxel. The froxel evaluates only the volumes that pass, in the same order as before. The bounds are conservative and a skipped volume added exactly zero before, so each froxel's density and albedo-weighted scattering are unchanged. Nothing changes in the public API or settings, so games need no code changes.
+Decisions
+Upstream: Godot b130438 (MIT), servers/rendering/renderer_rd/environment/fog.cpp and shaders/environment/volumetric_fog.glsl:
+fog.cpp 703–752 computes each local volume's froxel bounds from its 8 corners through _point_get_position_in_froxel_volume (551–566). When the camera is within the near plane's reach of the volume (729–743), it takes the whole frame up to the farthest corner's slice.
+fog.cpp 760–762 skips an empty kernel, and 787 dispatches each volume over its bounds.
+volumetric_fog.glsl 119–303 is the per-volume kernel. It accumulates with imageAtomicAdd (or storage-buffer atomicAdd under NO_IMAGE_ATOMICS) in fixed point. Density is scaled by 1024 and truncated (230–235). Scattering is albedo × clamp(density, 0, 1), clamped to [0, 1] and packed as R11G11B10 (270–298).
+Options compared:
+A: Godot's per-volume dispatch into storage-buffer atomics
+B: per-volume froxel bounds and a culled per-froxel loop (chosen)
+Faithfulness
+Godot's structure. WGSL has no storage-texture atomics, so it would be atomic<u32> storage buffers with Godot's fixed point (its NO_IMAGE_ATOMICS path).
+Godot's bounds and culling. Keeps SGL3D's per-froxel sum, which the provenance header already listed as a change from Godot.
+Results
+Changes the image. Density is quantised to 1/1024. Scattering is clamped to [0, 1] at 10–11 bits and weighted by clamp(density, 0, 1). A finer fixed point is still not identical and risks u32 overflow.
+Same f32 sums in the same order.
+Cost in Hyperdrive's case (32 long boxes, 0–2 per froxel)
+Evaluates only inside each volume's bounds. Adds a per-frame clear of 2–4 u32 per froxel (about 8–16 MB at High 1080p), up to 32 dispatches serialised by storage barriers, atomics, a decode in inject, and the jitter/reprojection code duplicated into the volume kernel.
+Evaluates only where a range holds the froxel. Adds one scalar 32-byte load and an integer range test per in-view volume per froxel. Adds no pass or clear, just one 32-byte record per volume per frame.
+WebGPU
+Works: storage-buffer atomics are core.
+Works: needs no atomics.
+Simplicity
+Needs a new pass, its buffers, a clear and fixed-point encode/decode.
+Adds one storage buffer, about 100 lines of CPU bounds and 4 shader lines.
+Per-tile volume lists (binning volumes into froxel tiles) would remove the per-froxel range test. They need a binning pass or per-tile storage, plus ordered compaction so the float sums stay deterministic. With at most 32 volumes in view, the range test is a few integer compares on uniform data, which is small next to each froxel's lighting. I did not build them.
+How the bounds differ from Godot's (needed so results stay unchanged):
+Godot snaps each corner to the froxel whose centre comes before it, and its dispatch excludes the max froxel. Godot can therefore miss up to about a froxel and a half on the far side. SGL3D takes every froxel the corners' coordinates fall in, inclusive, widened by 0.01 froxel to absorb rounding.
+Godot clamps corners behind the camera to 1 cm in front. That does not bound the projection of a box that crosses the camera's plane without holding the camera. SGL3D takes the whole frame up to the farthest corner's slice whenever any corner is on or behind the camera's plane. This also covers Godot's camera-inside case.
+SGL3D places froxels by the camera's projection rather than Godot's interpolated frustum sizes. The bounds therefore invert froxel_view_position and fog_volume_coordinate (their Rust mirror, as AR-2 allows).
+Where it plugs in (AR-9)
+Stage order: unchanged. This is the volumetric fog stage (3), injection pass.
+Reads:
+the scene's fog volume corners: Transient::fog_volume_corners, computed in update_fog_volumes. It replaces fog_volume_count.
+the camera's view.
+a new stage-owned storage buffer, fog_volume_froxels (group 1, binding 9; the filter from Filter the fog's froxels with Godot's Gaussian, as a setting #62 uses 7 and 8), read by the shader. Injection now binds 7 storage buffers to the compute stage, within S3D-1's floor of 8.
+Writes: the stage's new per-frame fog volume froxels buffer. The froxel and integrated volumes are unchanged.
+Contracts:
+New FogVolumeFroxels layout, mirrored in WGSL and Rust and covered by the layout test.
+FroxelVolume.volume_count now counts that list.
+FogVolumeRecord, group 0 and the public API are untouched.
+It fits specs/sgl3d-architecture.md as written: the fog stage reads the scene's fog volumes and writes its own volumes. No spec amendment.
+Deletes: the loop over every volume in every froxel, and Transient::fog_volume_count.
+New module: crates/sgl-3d/src/stages/fog/volume_froxels.rs owns the bounds, their per-frame buffer (ReachedFroxels) and the FogVolumeFroxels layout mirror. It keeps fog.rs under AR-8's ~600 lines (598 after the rebase onto Filter the fog's froxels with Godot's Gaussian, as a setting #62 and Scale each light's light in the volumetric fog by its fog energy #63), and its own provenance header cites the Godot lines it ports. shading/fog.wgsl and stages/fog.wgsl point to it as the Rust inverse of fog_slice_depth, fog_volume_coordinate, froxel_ndc and froxel_view_position (AR-2).
+Validation
+New GPU test stages::fog::tests::fog_volumes_add_their_medium_to_every_froxel_they_reach. It replaces a_fog_volume_adds_its_density_inside_its_box, whose checks it covers.
+Scene, nine volumes:
+three that reach no froxel (behind the camera, beside the frame, beyond the fog's length), listed first so the culled list's indices shift;
+one beside the camera, crossing its plane;
+a tunnel holding the camera;
+one across the frame's left edge;
+one across the volume's far end;
+two overlapping.
+Camera: placed away from the origin, turned 0.7 rad about y, with an off-centre projection (offsets 0.1, -0.05). Each froxel's view-space centre is mapped through view.inverse() before the box checks.
+Check: every froxel's extinction and scattering against the frame's medium plus each box's Godot box density (its signed distance with the 0.1 m cull fade) and albedo. The light is an isotropic, unshadowed directional light of 4π, so each froxel scatters exactly its albedo-weighted density. The expected values come from the volume definitions, not from the new code.
+Against today's path: with inject switched back locally to the old every-volume loop, the test also passes, so its expectations match the existing per-froxel path.
+Against mutations of the new code, it fails for each of these:
+projecting corners that are behind the camera;
+reading the record by list index;
+dropping the last froxel on every axis, or only on x;
+dropping the first froxel;
+culling boxes that cross the far end;
+culling boxes partly off the frame;
+the wrong detail-spread exponent;
+a flipped y;
+dropping the view's translation (transform_vector3);
+bounding through view.inverse();
+a flipped projection-offset sign.
+New CPU test stages::fog::volume_froxels::tests::only_boxes_that_may_reach_a_froxel_are_bounded, through the same moved and turned camera. Boxes behind the camera, beside the frame (not crossing its plane) and beyond the volume give no entry. A box from 6 m behind to 6 m in front takes the whole frame from the first slice up to the slice that holds 6 m. An in-view box's range holds the froxel of its centre (found through the projection matrix) and does not span the frame. It fails for: projecting corners behind the camera, culling boxes across the plane, dropping the frame-side cull, the wrong spread exponent, and dropping the view's translation.
+Rebased onto origin/main at 71855f9 (Filter the fog's froxels with Godot's Gaussian, as a setting #62's fog filter and Scale each light's light in the volumetric fog by its fog energy #63's per-light fog energy).
+SGL_REQUIRE_GPU=1 cargo test -p sgl-3d --lib stages::fog (8 passed), cargo test -p sgl-3d --lib layout (6 passed), cargo clippy -p sgl-3d --all-targets -- -D warnings and cargo fmt --check all pass.
+bun scripts/tasks.ts check passes (exit 0) on the rebased head, including both new tests, the browser WebGPU lane and timing::tests::pass_groups_report_completed_frames_in_flight.
+RD-6 fog injection timings: not measured here. Concurrent GPU load on this machine makes them meaningless, and Mission Control measures before/after on Hyperdrive's route centrally.
+Not done: an AR-10 independent review against the architecture spec. Mission Control owns review.
+Closes #42
+🤖 Generated with Claude Code
+Inject SGL3D fog volumes only into the froxels they reach
+…
+e0f1d65
+```
+Each frame the fog stage bounds the froxels every scene fog volume may
+reach from its corners, as Godot's volumetric_fog_update does, drops
+volumes behind the camera, beside the frame or beyond the fog's length,
+and the injection evaluates a volume only in froxels its bounds hold,
+summing in the scene's order so every froxel's medium is unchanged.
+
+Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
+```
+stevepryde
+force-pushed
+the
+claude/issue-42-fog-volume-injection
+branch
+from
+a4932e8 to
+e0f1d65
+Compare
+October 4, 2026 09:54
+stevepryde
+merged commit eda17b7
+into
+main
+Oct 4, 2026
+stevepryde
+deleted the
+claude/issue-42-fog-volume-injection
+branch
+October 4, 2026 09:57
+stevepryde
+mentioned this pull request
+Oct 4, 2026
+Give the fog Godot's one-cascade, one-tap directional shadow
+#66
+Merged
+Sign up for free
+to join this conversation on GitHub.
+Already have an account?
+Sign in to comment
+Uh oh!
+There was an error while loading. Please reload this page.
+Labels
+None yet
+1 participant
+Add this suggestion to a batch that can be applied as a single commit.This suggestion is invalid because no changes were made to the code.Suggestions cannot be applied while the pull request is closed.Suggestions cannot be applied while viewing a subset of changes.Only one suggestion per line can be applied in a batch.Add this suggestion to a batch that can be applied as a single commit.Applying suggestions on deleted lines is not supported.You must change the existing code in this line in order to create a valid suggestion.Outdated suggestions cannot be applied.This suggestion has been applied or marked resolved.Suggestions cannot be applied from pending reviews.Suggestions cannot be applied on multi-line comments.Suggestions cannot be applied while the pull request is queued to merge.Suggestion cannot be applied right now. Please check back later.
+You can’t perform that action at this time.

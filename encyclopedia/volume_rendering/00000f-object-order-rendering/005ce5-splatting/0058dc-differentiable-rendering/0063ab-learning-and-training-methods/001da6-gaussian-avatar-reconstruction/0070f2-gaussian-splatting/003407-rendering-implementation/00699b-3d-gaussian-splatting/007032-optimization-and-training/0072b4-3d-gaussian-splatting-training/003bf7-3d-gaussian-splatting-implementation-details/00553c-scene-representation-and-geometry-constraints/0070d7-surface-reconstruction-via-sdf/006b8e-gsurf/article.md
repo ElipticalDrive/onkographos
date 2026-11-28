@@ -1,0 +1,150 @@
+# GSurf
+
+Also called: GSurf: Learning Signed Distance Fields from Splatting Opaque Gaussians for High-quality 3D Reconstruction
+
+## Overview
+GSurf is a single-branch framework for high-fidelity 3D surface reconstruction that jointly optimizes discrete 2D Gaussian primitives and a continuous Signed Distance Field (SDF) without an auxiliary volume-rendering branch [S1]. It solves the trade-off between the computational intensity of neural implicit surfaces and the geometric fragmentation of standard Gaussian Splatting by using Gaussian centroids for direct SDF supervision and opacity regularization to create a compact, opaque surface shell [S1]. Unlike hybrid approaches that rely on heavy volumetric sampling or point-cloud deformation methods that oversmooth details, GSurf achieves faster convergence and sharper geometric detail by integrating SDF-derived normals and features into the appearance modeling [S1].
+
+## How it works
+**Inputs and Outputs:**
+*   **Inputs:** A set of multi-view images of a scene.
+*   **Outputs:** A set of optimized 2D Gaussian primitives (positions, tangents, scales, opacities) and a learned SDF MLP, enabling the rendering of novel views and the extraction of a mesh via marching cubes.
+
+**Data Structures:**
+The scene is represented by two coupled components:
+1.  **2D Gaussian Primitives:** Each primitive $k$ is defined by:
+    *   Central position $\mathbf{p}_k \in \mathbb{R}^3$.
+    *   Two principal tangent vectors $\mathbf{t}_u, \mathbf{t}_v \in \mathbb{R}^3$.
+    *   Two scaling factors $s_u, s_v \in \mathbb{R}$.
+    *   Opacity $\alpha_k \in [0, 1]$.
+    *   The local transformation matrix $\mathbf{H}_k \in \mathbb{R}^{4 \times 4}$ is constructed as:
+        $$ \mathbf{H}_k = \begin{bmatrix} \mathbf{R}_k \mathbf{S}_k & \mathbf{0} \\ \mathbf{p}_k & 1 \end{bmatrix} $$
+        where $\mathbf{R}_k = [\mathbf{t}_u, \mathbf{t}_v, \mathbf{t}_u \times \mathbf{t}_v]$ is the rotation matrix and $\mathbf{S}_k = \text{diag}(s_u, s_v, 0)$ is the scaling matrix [S1].
+2.  **SDF Network:** A Multi-Layer Perceptron (MLP) that maps 3D coordinates to signed distance values. It also takes geometric features (normals derived from the SDF) and viewing directions as input to predict view-dependent colors [S1].
+
+**Numbered Steps:**
+
+1.  **Initialization:** Initialize a set of 2D Gaussian primitives from the input images (e.g., using standard 3DGS initialization). Initialize the SDF MLP [S1].
+2.  **Sorting:** Sort the 2D Gaussians based on the depth of their centers along the view ray [S1].
+3.  **Rendering (Appearance):**
+    *   For a pixel $\mathbf{x}$, cast a ray and compute the 2D Gaussian value for each primitive $i$ at the intersection point $\mathbf{u}(\mathbf{x})$ in the local plane:
+        $$ G_i(\mathbf{u}) = \exp \left( -\frac{u^2 + v^2}{2} \right) $$
+        where $\mathbf{u} = (u, v)^T$ are the local coordinates [S1].
+    *   Accumulate color using volumetric alpha blending:
+        $$ c(\mathbf{x}) = \sum_{i=1}^{N} w_i c_i $$
+        where the weight $w_i$ is:
+        $$ w_i = \alpha_i G_i(\mathbf{u}(\mathbf{x})) \prod_{j=1}^{i-1} (1 - \alpha_j G_j(\mathbf{u}(\mathbf{x}))) $$
+    *   The color $c_i$ is not determined by spherical harmonics but is predicted by the appearance MLP using the Gaussian centroid, SDF-derived normals, geometric features, and viewing direction [S1].
+    *   Compute the appearance loss $L_{gs}$, which includes RGB reconstruction loss $L_{rgb}$, depth distortion loss $L_{dep}$, and depth-normal consistency loss $L_{dnc}$ (as defined in 2DGS) [S1].
+4.  **SDF Supervision:**
+    *   Feed the centroids $\mathbf{p}_k$ of all Gaussians into the SDF MLP to obtain predicted distances $d_k = \text{SDF}(\mathbf{p}_k)$ [S1].
+    *   Compute the SDF loss $L_{sdf}$, which typically includes an Eikonal regularization term ($|\nabla \text{SDF}| = 1$) and a distance loss encouraging $d_k \approx 0$ for surface points [S1].
+5.  **Opacity Regularization:**
+    *   Compute the opacity entropy loss $L_{ent}$ to drive opacities toward binary values (0 or 1), effectively binarizing primitives into an opaque bounding shell [S1].
+6.  **Optimization:**
+    *   Minimize the total loss: $L_{total} = L_{gs} + \lambda_{sdf} L_{sdf} + \lambda_{ent} L_{ent}$ [S1].
+7.  **Pruning:**
+    *   Periodically prune Gaussians with low opacity to retain a compact set of mostly opaque surface-supporting primitives [S1].
+
+**Pseudocode:**
+
+> **Unverified code.** The code below did not pass a test run against a reference implementation, or no test fits it, so it may contain errors.
+
+```python
+# GSurf Optimization Step
+def gsurf_step(gaussians, sdf_mlp, appearance_mlp, images, cameras):
+    # 1. Render Appearance
+    # Sort gaussians by depth for each camera
+    sorted_gaussians = sort_by_depth(gaussians, cameras)
+    
+    rendered_colors = []
+    for camera in cameras:
+        rays = cast_rays(camera)
+        pixel_colors = []
+        for ray in rays:
+            # Find intersecting gaussians
+            hits = find_hits(ray, sorted_gaussians)
+            
+            accumulated_color = 0.0
+            accumulated_alpha = 0.0
+            
+            for hit in hits:
+                # Compute local coordinates u, v in the 2D Gaussian plane
+                u, v = transform_to_local_plane(hit.gaussian, ray.origin, ray.direction)
+                
+                # Compute 2D Gaussian value
+                g_val = exp(-(u**2 + v**2) / 2.0)
+                
+                # Get color from Appearance MLP
+                # Inputs: centroid, SDF normal, SDF feature, view direction
+                centroid = hit.gaussian.position
+                sdf_val = sdf_mlp(centroid)
+                sdf_normal = compute_sdf_normal(sdf_mlp, centroid)
+                view_dir = ray.direction
+                
+                color = appearance_mlp(centroid, sdf_normal, sdf_val, view_dir)
+                
+                # Alpha blending
+                alpha = hit.gaussian.opacity * g_val
+                weight = alpha * (1.0 - accumulated_alpha)
+                accumulated_color += weight * color
+                accumulated_alpha += weight
+                
+            pixel_colors.append(accumulated_color)
+        rendered_colors.append(pixel_colors)
+        
+    # 2. Compute Appearance Loss
+    # L_gs = L_rgb + L_dep + L_dnc
+    loss_gs = compute_appearance_loss(rendered_colors, images)
+    
+    # 3. Compute SDF Loss
+    # Supervise SDF directly at Gaussian centroids
+    centroids = [g.position for g in gaussians]
+    sdf_values = sdf_mlp(centroids)
+    
+    # Eikonal loss: gradient of SDF should be 1
+    eikonal_loss = compute_eikonal_loss(sdf_mlp, centroids)
+    
+    # Distance loss: encourage centroids to be on zero-level set
+    distance_loss = mean_squared_error(sdf_values, zeros_like(sdf_values))
+    
+    loss_sdf = eikonal_loss + distance_loss
+    
+    # 4. Compute Opacity Entropy Loss
+    # Drive opacities to 0 or 1
+    opacities = [g.opacity for g in gaussians]
+    loss_ent = compute_entropy_loss(opacities)
+    
+    # 5. Total Loss and Backprop
+    total_loss = loss_gs + lambda_sdf * loss_sdf + lambda_ent * loss_ent
+    total_loss.backward()
+    
+    # 6. Pruning (Periodic)
+    if step % prune_interval == 0:
+        gaussians = prune_low_opacity(gaussians, threshold=0.01)
+        
+    return total_loss
+```
+
+**Parameters:**
+*   $\lambda_{sdf}$: Weight for SDF loss. Not given in the sources.
+*   $\lambda_{ent}$: Weight for opacity entropy loss. Not given in the sources.
+*   Pruning threshold: Typically 0.01 or similar low value to remove transparent primitives [S1].
+
+**Edge Cases and Pitfalls:**
+*   **Reflective Surfaces:** Standard depth-based methods fail on reflective surfaces. GSurf handles this by using reflective viewpoints to model view-dependent appearance via the MLP, avoiding unreliable depth maps [S1].
+*   **Semi-transparent Objects:** The opacity entropy regularization actively binarizes primitives, which may struggle with genuinely semi-transparent objects if the entropy loss is too strong, though the method claims to handle them better than TSDF/Poisson methods [S1].
+*   **Degenerate Gaussians:** The 2D Gaussian formulation avoids the degeneracy of 3D Gaussians with zero depth extent by using tangent vectors and scaling in a local plane [S1].
+
+## Operating characteristics
+*   **Time Complexity:** $O(N_{gs})$ per pixel, where $N_{gs}$ is the number of Gaussians. This is significantly faster than hybrid methods like VolSDF or NeuS which have complexity $O(N_{ray} N_{smp})$ due to volumetric ray marching [S1].
+*   **Memory Complexity:** Proportional to the number of Gaussians $N_{gs}$ and the size of the SDF MLP. GSurf produces fewer Gaussians than standard 3DGS or other GS+SDF approaches due to pruning and entropy regularization [S1].
+*   **Measured Performance:** Requires less training time (avoiding the 2-16 hours typical of volumetric SDF approaches) and produces fewer primitives while maintaining or exceeding reconstruction quality [S1].
+*   **Strengths:** Fast convergence, compact representation, sharp geometric details (better than GS-Pull), robust handling of reflective and semi-transparent surfaces [S1].
+*   **Limitations:** Relies on the quality of the initial Gaussian initialization; the single-branch design means it does not explicitly model volume scattering, unlike volumetric methods [S1].
+
+## Background
+GSurf was proposed by Baixin Xu, Jiangbei Hu, Jiaze Li, and Ying He from Nanyang Technological University and Dalian University of Technology [S1]. It was published on arXiv in November 2024 (v4 in July 2026) and later in the Journal of Computer-Aided Design in 2026 [S1]. The work addresses the limitations of neural implicit surfaces (computational intensity) and standard Gaussian Splatting (geometric fragmentation) by coupling continuous SDF learning with discrete Gaussian splatting [S1]. It builds on 2DGS [23] and contrasts with methods like VolSDF [76], GS-Pull [85], and GOF [78] [S1].
+
+## Sources
+[S1] GSurf: Learning signed distance fields from splatting opaque Gaussians for high-quality 3D reconstruction, https://doi.org/10.1016/j.cad.2026.104106, fetched 2026-10-26

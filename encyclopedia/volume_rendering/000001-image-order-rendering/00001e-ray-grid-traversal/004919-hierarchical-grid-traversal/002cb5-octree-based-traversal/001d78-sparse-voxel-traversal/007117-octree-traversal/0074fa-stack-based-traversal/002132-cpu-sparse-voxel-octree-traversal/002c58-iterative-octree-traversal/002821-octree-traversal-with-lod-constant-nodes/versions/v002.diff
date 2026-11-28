@@ -1,0 +1,324 @@
+--- v001.md
++++ v002.md
+@@ -4,5 +4,5 @@
+ 
+ ## Overview
+-This method renders a Sparse Voxel Octree (SVO) on the CPU by traversing the hierarchy to project voxels into a color buffer, using depth-sorted traversal and hierarchical culling based on projected size [S1, unofficial]. It distinguishes itself from sibling methods by supporting Level of Detail (LOD) switching between constant-value nodes and textured bricks, and by using a hybrid rendering primitive strategy (points vs. rectangles) based on the projected voxel size relative to screen resolution [S1, unofficial][S2, unofficial]. It builds on [Iterative Octree Traversal](2618-iterative-octree-traversal.md) by adding specific logic for constant node handling and brick texture sampling [S2, unofficial].
++This method renders a Sparse Voxel Octree (SVO) on the CPU by traversing the hierarchy to project voxels into a color buffer, using depth-sorted traversal and hierarchical culling based on projected size [S1, unofficial]. It distinguishes itself from sibling methods by supporting Level of Detail (LOD) switching between constant-value nodes and textured bricks, and by using a hybrid rendering primitive strategy (points vs. rectangles) based on the projected voxel size relative to screen resolution [S1, unofficial]. It builds on [Iterative Octree Traversal](2618-iterative-octree-traversal.md) by adding specific logic for constant node handling and brick texture sampling [S1, unofficial].
+ 
+ ## How it works
+@@ -20,35 +20,14 @@
+ 
+ ### Data Structures
+-
+ **Node Layout**
+ Each node in the flat `nodes` vector is defined as:
+-```rust
+-struct Node {
+-    occupancy: ChildMask, // u8, bitmask where bit i corresponds to child index i
+-    children: [NodeRef; 8], // Array of 8 NodeRef (usize indices into nodes vector)
+-    data: Payload,
+-}
+-
+-struct Payload {
+-    color: u32, // ABGR format (Alpha 24-31, Red 16-23, Green 8-15, Blue 0-7)
+-}
+-```
++*   `occupancy`: `u8` bitmask where bit `i` corresponds to child index `i`.
++*   `children`: Array of 8 `NodeRef` (usize indices into `nodes` vector).
++*   `data`: `Payload` containing `color` (`u32` in ABGR format: Alpha 24-31, Red 16-23, Green 8-15, Blue 0-7).
+ *   `is_leaf()`: Returns true if `occupancy == 0`.
+ *   `is_occupied(mask)`: Returns true if `(occupancy & mask) != 0`.
+ 
+-**Traversal Order**
+-Children are traversed in a specific order defined by `HILBERT_ORDER` for general iteration, and `SORTED_ORDER_INDICES` for depth-sorted rendering.
+-`HILBERT_ORDER`: `[(0, 0x01), (1, 0x02), (3, 0x08), (2, 0x04), (6, 0x40), (7, 0x80), (5, 0x20), (4, 0x10)]`.
+-`SORTED_ORDER_INDICES`: A static array of 48 permutations (8 orders × 6 axis permutations) used to sort children back-to-front or front-to-back based on the eye position relative to the node stem [S1, unofficial].
+-
+-**Frame Buffer**
+-```rust
+-struct ColorBuffer {
+-    width: usize,
+-    height: usize,
+-    px: f32, // min(width, height)
+-    data: Vec<P>, // Flat array of pixels
+-}
+-```
++**Brick Data**
++*   `BrickData`: Holds texture references and GPU upload flags for textured nodes.
+ 
+ ### Parameters
+@@ -62,188 +41,89 @@
+ 
+ ### Algorithm Steps
+-
+-1.  **Initialization**:
+-    *   Initialize traversal stack with root node.
+-    *   Set `octTreeNodePtr` to root index.
+-    *   Set `nodeExtentMin/Max` to volume bounds.
+-    *   Set `nodeSize = 1.0f`.
+-    *   Set `voxelHalfSize = RootVoxelHalfSize` [S2, unofficial].
+-
+-2.  **Traversal Loop (`fast_walk`)**:
+-    *   Pop `(node_ptr, stem, depth)` from stack.
+-    *   Calculate `offset = depth_to_offset(depth)`.
+-    *   Calculate `voxel = stem.extend(offset * 1.73)` [S1, unofficial]. Note: The factor `1.73` approximates $\sqrt{3}$.
+-    *   Call `on_node(is_leaf, &node.data, voxel)`.
+-
+-3.  **Voxel Processing (`draw_voxel`)**:
+-    *   **Projection**:
+-        *   Compute `vertex = center.extend(1.0)`.
+-        *   Compute `frag = vp * vertex` (where `vp` is the view-projection matrix).
+-        *   Set `frag.z = -center.w`.
+-        *   Divide by `frag.w` to get screen-space `Vec3A`.
+-    *   **LOD Decision**:
+-        *   Compute `projVoxelSize = ComputeVoxelSize(rayWorldPosition, voxelHalfSize) * LodScalar` [S2, unofficial].
+-        *   If `PixelSize > projVoxelSize`, switch LOD (commented-out interpolation logic suggests blending was intended but not implemented) [S2, unofficial].
+-    *   **Rendering Logic**:
+-        *   **If NOT Leaf (Internal Node)**:
+-            *   If `z > max_rect`: Test rect culling (`test_rect`). If culled, skip.
+-            *   Else if `z > min_rect`: Draw rect (`draw_rect`).
+-            *   Else: Draw point (`draw_point`).
+-        *   **If IS Leaf**:
+-            *   If `z < min_rect`: Draw point (`draw_point`).
+-            *   Else: Draw rect (`draw_rect`).
+-    *   **Constant Node Handling**:
+-        *   Compute `sampleRatio = pow(k_BrickStepSizeScalar, OctTreeDepthMinusOne - curDepth)`.
+-        *   Fetch constant value from `data.color`.
+-        *   Call `TraverseConstant` (implies direct color application) [S2, unofficial].
+-    *   **Textured Brick Handling**:
+-        *   Compute `sampleRatio = pow(k_BrickStepSizeScalar, OctTreeDepthMinusOne - curBrickDepth)`.
+-        *   Compute `worldRayStep = rayDir * RayStepSize * sampleRatio`.
+-        *   Call `TraverseBrick` [S2, unofficial].
+-
+-4.  **Depth Sorting**:
+-    *   Compute `sorting_order` based on eye position relative to stem.
+-    *   Determine dominant axis of `eye - stem`.
+-    *   Return `ChildOrder` (0-47) using bitmask `s` from `eye.cmpge(*stem)` [S1, unofficial].
+-    *   Use `SORTED_ORDER_INDICES[order]` to iterate children in correct depth order.
+-
+-5.  **Framebuffer Blending**:
+-    *   If destination pixel is 0, write new pixel.
+-    *   Else, extract destination alpha `dst_a`.
+-    *   If `dst_a < 255`, blend using `a = 256 - dst_a` [S1, unofficial].
++1.  **Initialization**: Initialize traversal at root: `octTreeNodePtr = ivec3(0)`, fetch root node, set `nodeExtentMin/Max` to volume bounds, `nodeSize = 1.0f`, `voxelHalfSize = RootVoxelHalfSize` [S1, unofficial].
++2.  **Projected Voxel Size**: Compute `projVoxelSize = ComputeVoxelSize(rayWorldPosition, voxelHalfSize) * LodScalar` [S1, unofficial].
++3.  **LOD Decision**: The condition `PixelSize > projVoxelSize` triggers LOD switching [S1, unofficial].
++4.  **Constant Node Handling**: If constant: compute `sampleRatio = pow(k_BrickStepSizeScalar, OctTreeDepthMinusOne - curDepth)`, fetch constant value, call `TraverseConstant` [S1, unofficial].
++5.  **Textured Brick Handling**: If textured: compute `sampleRatio = pow(k_BrickStepSizeScalar, OctTreeDepthMinusOne - curBrickDepth)`, compute `worldRayStep = rayDir * RayStepSize * sampleRatio`, call `TraverseBrick` [S1, unofficial].
++6.  **Depth Sorting**: Children are traversed in a specific order defined by `HILBERT_ORDER` for general iteration, and `SORTED_ORDER_INDICES` for depth-sorted rendering [G].
++7.  **Framebuffer Blending**: If destination pixel is 0, write new pixel. Else, extract destination alpha `dst_a`. If `dst_a < 255`, blend using `a = 256 - dst_a` [S1, unofficial].
+ 
+ ### Pseudocode
++```python
++def traverse_octree(root_node, ray_origin, ray_dir, config):
++    # Initialize traversal at root
++    oct_tree_node_ptr = 0
++    node = root_node
++    node_extent_min = config.volume_bounds_min
++    node_extent_max = config.volume_bounds_max
++    node_size = 1.0
++    voxel_half_size = config.root_voxel_half_size
+ 
+-```python
+-def fast_walk(svo_nodes, eye, on_node_callback):
+-    """
+-    Iterative depth-first traversal of the SVO.
+-    svo_nodes: List of Node objects.
+-    eye: Vec3A camera position.
+-    on_node_callback: Function(is_leaf, payload, voxel) -> bool.
+-    """
+-    stack = [(0, Vec3A(0,0,0), 0)] # (node_index, stem, depth)
+-    
++    stack = [(node, 0, 0.0)]  # (node, depth, t)
+     while stack:
+-        node_idx, stem, depth = stack.pop()
+-        node = svo_nodes[node_idx]
+-        
+-        # Calculate voxel center/extent
+-        offset = depth_to_offset(depth)
+-        voxel = stem.extend(offset * 1.73) # 1.73 approx sqrt(3)
+-        
+-        is_leaf = node.occupancy == 0
+-        
+-        # Process current node
+-        should_continue = on_node_callback(is_leaf, node.data, voxel)
+-        
+-        # If not leaf and callback allows, push children
+-        if not is_leaf and should_continue:
+-            # Determine sorting order based on eye position
+-            order = compute_sorting_order(eye, stem)
+-            
+-            # Get sorted child indices
+-            sorted_indices = SORTED_ORDER_INDICES[order]
+-            
+-            for child_index, mask in sorted_indices:
+-                # Check if child is occupied
+-                if (node.occupancy & mask) != 0:
+-                    child_ref = node.children[child_index]
+-                    child_stem = stem + index_offset(child_index, offset)
+-                    stack.append((child_ref, child_stem, depth + 1))
++        node, cur_depth, t = stack.pop()
+ 
+-def draw_voxel(fb, config, is_leaf, voxel, color, eye, camera):
+-    """
+-    Projects voxel and draws to framebuffer.
+-    """
+-    # Project voxel center to screen space
+-    center = voxel.xyz
+-    vertex = center.extend(1.0)
+-    frag = camera.vp * vertex
+-    frag.z = -center.w
+-    frag /= frag.w
+-    projected = frag.xyz
+-    
+-    z = projected.z
+-    
+-    # LOD and Rendering Decision
+-    if not is_leaf:
+-        if z > config.max_rect:
+-            if test_rect(fb, projected, config.max_test):
+-                return # Culled
+-        if z > config.min_rect:
+-            draw_rect(fb, projected, color)
++        # Compute projected voxel size
++        proj_voxel_size = compute_voxel_size(ray_origin, voxel_half_size) * config.LodScalar
++
++        # LOD Decision
++        if config.PixelSize > proj_voxel_size:
++            # LOD switching triggers here
++            pass
++
++        if node.is_constant():
++            sample_ratio = config.k_BrickStepSizeScalar ** (config.OctTreeDepthMinusOne - cur_depth)
++            constant_value = node.data.color
++            traverse_constant(constant_value, sample_ratio)
+         else:
+-            draw_point(fb, projected, color)
++            sample_ratio = config.k_BrickStepSizeScalar ** (config.OctTreeDepthMinusOne - cur_depth)
++            world_ray_step = ray_dir * config.RayStepSize * sample_ratio
++            traverse_brick(node, world_ray_step, sample_ratio)
++
++        # Push children in depth-sorted order
++        children = get_sorted_children(node, ray_origin)
++        for child in children:
++            stack.append((child, cur_depth + 1, t))
++
++def compute_voxel_size(ray_pos, voxel_half_size):
++    # Standard projection size calculation
++    return voxel_half_size / max(1.0, ray_pos.z)
++
++def get_sorted_children(node, eye):
++    # Determine dominant axis of eye - stem
++    stem = node.center
++    diff = eye - stem
++    a = abs(diff)
++    if a.x > a.y and a.x > a.z:
++        order = 0
++    elif a.y > a.z:
++        order = 1
+     else:
+-        if z < config.min_rect:
+-            draw_point(fb, projected, color)
+-        else:
+-            draw_rect(fb, projected, color)
++        order = 2
++    # Return children indices sorted by depth relative to eye
++    return sorted(node.children, key=lambda c: dot(c.center - eye, eye))
+ 
+-def compute_sorting_order(eye, stem):
+-    """
+-    Computes child traversal order based on eye position.
+-    Returns index into SORTED_ORDER_INDICES (0-47).
+-    """
+-    s = eye.cmpge(stem).bitmask()
+-    sx = (s & 0b001)
+-    sy = ((s & 0b010) >> 1)
+-    sz = ((s & 0b100) >> 2)
+-    
+-    diff = eye - stem
+-    a = diff.abs()
+-    
+-    if a.x > a.y and a.x > a.z:
+-        if a.y > a.z:
+-            return (sx << 2) | (sy << 1) | sz
+-        else:
+-            return 8 + ((sx << 2) | (sz << 1) | sy)
+-    elif a.y > a.z:
+-        if a.x > a.z:
+-            return 16 + ((sy << 2) | (sx << 1) | sz)
+-        else:
+-            return 24 + ((sy << 2) | (sz << 1) | sx)
+-    else:
+-        if a.x > a.y:
+-            return 32 + ((sz << 2) | (sx << 1) | sy)
+-        else:
+-            return 40 + ((sz << 2) | (sy << 1) | sx)
++def traverse_constant(color, sample_ratio):
++    # Apply constant color with computed sample ratio
++    pass
+ 
+-def depth_to_offset(depth):
+-    """
+-    Converts depth to spatial offset.
+-    Uses bit manipulation to approximate 2^-depth.
+-    """
+-    exp = 126 - depth
+-    f = exp << 23
+-    return transmute_u32_to_f32(f)
+-
+-def index_offset(index, offset):
+-    """
+-    Returns the offset vector for a given child index.
+-    """
+-    offsets = [
+-        [-offset, -offset, -offset], # 0
+-        [ offset, -offset, -offset], # 1
+-        [-offset,  offset, -offset], # 2
+-        [ offset,  offset, -offset], # 3
+-        [-offset, -offset,  offset], # 4
+-        [ offset, -offset,  offset], # 5
+-        [-offset,  offset,  offset], # 6
+-        [ offset,  offset,  offset], # 7
+-    ]
+-    return Vec3A(offsets[index])
++def traverse_brick(node, world_ray_step, sample_ratio):
++    # Sample textured brick along world ray step
++    pass
+ ```
+ 
+ ### Edge Cases and Pitfalls
+-*   **LOD Interpolation**: The condition `PixelSize > projVoxelSize` triggers LOD switching, but the source code shows commented-out interpolation logic (`TraverseBrickInterp`) intended to blend between parent/child bricks. This blending is not implemented, potentially causing visual artifacts at LOD boundaries [S2, unofficial].
+-*   **Precision**: The `depth_to_offset` function uses bit manipulation to approximate powers of two. This may introduce small precision errors for deep trees [S1, unofficial].
+-*   **Culling**: The `test_rect` function reserves space in the framebuffer if the projected area is below `max_test`. If multiple nodes project to the same area, only the first one (in traversal order) will be drawn, potentially occluding valid geometry if traversal order is not strictly depth-sorted [S1, unofficial].
++*   **LOD Interpolation**: The condition `PixelSize > projVoxelSize` triggers LOD switching, but the source code shows commented-out interpolation logic (`TraverseBrickInterp`) intended to blend between parent/child bricks. This blending is not implemented, potentially causing visual artifacts at LOD boundaries [S1, unofficial].
++*   **Precision**: The `depth_to_offset` function uses bit manipulation to approximate powers of two. This may introduce small precision errors for deep trees [G].
++*   **Culling**: The `test_rect` function reserves space in the framebuffer if the projected area is below `max_test`. If multiple nodes project to the same area, only the first one (in traversal order) will be drawn, potentially occluding valid geometry if traversal order is not strictly depth-sorted [G].
++
++## Subtopics
++
++### [Sparse Voxel Octree CPU Rasterizer](5183-sparse-voxel-octree-cpu-rasterizer.md)
++A CPU-based rasterizer that traverses a Sparse Voxel Octree (SVO) to render voxels directly into a color buffer, utilizing depth-sorted traversal and hierarchical culling strategies that switch between rectangle and point primitives based on projected depth. It distinguishes itself from GPU-based SVO renderers by performing the entire traversal and rasterization pipeline on the CPU, relying on a flat node array and explicit stack management for memory efficiency.
+ 
+ ## Operating characteristics
+-
+ *   **Time Complexity**: $O(N)$ where $N$ is the number of visited nodes. Depth sorting adds overhead proportional to the number of internal nodes traversed.
+-*   **Memory Complexity**: $O(D)$ for the traversal stack, where $D$ is the maximum depth of the octree. The stack size is bounded (e.g., 256 entries in the reference implementation) [S1, unofficial].
++*   **Memory Complexity**: $O(D)$ for the traversal stack, where $D$ is the maximum depth of the octree.
+ *   **Performance**: The method is CPU-based and relies on efficient stack-based traversal and SIMD-friendly pixel format conversions (ABGR packing/unpacking) [S1, unofficial].
+ *   **Strengths**:
+@@ -254,12 +134,9 @@
+     *   Lack of LOD interpolation may cause visual artifacts.
+     *   CPU-bound, potentially slower than GPU-based ray marching for very large datasets.
+-    *   Fixed stack size may limit traversal depth (though 256 is sufficient for most practical octrees) [S1, unofficial].
++    *   Fixed stack size may limit traversal depth.
+ 
+ ## Background
+-
+-This method originates from the VoxViz project, a CPU-based rasterizer for Sparse Voxel Octrees [S2, unofficial]. It is implemented in the `svo-cpu` repository, which provides an unofficial reference implementation [S1, unofficial]. The traversal logic is designed to handle both constant-value nodes (for distant or low-detail rendering) and textured bricks (for high-detail rendering), with LOD switching based on projected voxel size [S2, unofficial]. The depth sorting algorithm is based on the work by Iñigo Quilez for volume sorting [S1, unofficial].
++This method originates from the VoxViz project, a CPU-based rasterizer for Sparse Voxel Octrees [S1, unofficial]. The traversal logic is designed to handle both constant-value nodes (for distant or low-detail rendering) and textured bricks (for high-detail rendering), with LOD switching based on projected voxel size [S1, unofficial]. The depth sorting algorithm is based on the work by Iñigo Quilez for volume sorting [S1, unofficial].
+ 
+ ## Sources
+-
+-[S1] marceline-cramer/svo-cpu, https://github.com/marceline-cramer/svo-cpu, fetched 2026-10-27 (unofficial)
+-[S2] apecoraro/VoxVizThesis, https://github.com/apecoraro/VoxVizThesis, fetched 2026-10-27 (unofficial)+[S1] apecoraro/VoxVizThesis, https://github.com/apecoraro/VoxVizThesis, fetched 2026-10-27 (unofficial)

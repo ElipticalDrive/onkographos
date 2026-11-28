@@ -1,0 +1,144 @@
+--- v006.md
++++ v007.md
+@@ -23,4 +23,5 @@
+     *   `perturb`: Boolean flag to enable perturbation, `bool` [S3, unofficial].
+     *   `align`: Alignment padding value, `int` [S3, unofficial].
++    *   `step_counter`: Optional int array `[2]`, defaults to zeros if `None` [S3, unofficial].
+ *   **Outputs:**
+     *   `rays_a`: Ray metadata, shape `[N_rays, 3]`, dtype `int64_t`. Columns: `[ray_idx, start_idx, N_samples]` [S2, unofficial].
+@@ -28,9 +29,9 @@
+     *   `dirs`: Sample directions, shape `[M, 3]` [S2, unofficial].
+     *   `deltas`: Step sizes, shape `[M]` [S2, unofficial].
+-    *   `ts`: T-values, shape `[M]` [S2, unofficial].
++    *   `ts`: T-values, shape `[M]` (or `[M, 2]` for depth intervals per [S1, unofficial]) [S2, unofficial].
+     *   `counter`: Atomic counter, shape `[2]`, dtype `int32_t` [S2, unofficial].
+ 
+ **Data Structures:**
+-*   `rays`: Internal int array `[N, 3]` storing ray metadata: column 0 is ray ID, column 1 is offset into the `xyzs`/`dirs`/`deltas` arrays, column 2 is number of steps for that ray [S2, unofficial].
++*   `rays`: Internal int array `[N, 3]` storing ray metadata: column 0 is ray ID, column 1 is offset into the `xyzs`/`dirs`/`deltas` arrays, column 2 is number of steps for that ray [S1, unofficial].
+ *   `density_bitfield`: Bit-packed occupancy grid. Index `idx` corresponds to voxel `(nx, ny, nz)` via Morton code [S2, unofficial].
+ 
+@@ -42,10 +43,9 @@
+ *   `mean_density`: Mean density value [S3, unofficial].
+ *   `iter_density`: Density value for current iteration [S3, unofficial].
+-*   `step_counter`: Optional int array `[2]`, defaults to zeros if `None` [S3, unofficial].
+ 
+ **Algorithm Steps:**
+ 
+ 1.  **Reshape Inputs:** Reshape `rays_o` and `rays_d` to contiguous views of shape `[-1, 3]` [S1, unofficial].
+-2.  **Initialize Loop Variables:** For each ray, set `t = t1` (start t from `hits_t`), `N_samples = 0` [S2, unofficial].
++2.  **Initialize Loop Variables:** For each ray, set `t = t1` (start t from `hits_t`), `N_samples = 0` [S2, unofficial]. If `perturb` is true, add random noise to `t` [S1, unofficial].
+ 3.  **Calculate Position:** Compute current 3D position: `x = ox + t*dx`, `y = oy + t*dy`, `z = oz + t*dz` [S2, unofficial].
+ 4.  **Calculate Step Size:** Compute `dt` using helper function: `dt = calc_dt(t, exp_step_factor, max_samples, grid_size, scale)` [S2, unofficial].
+@@ -88,22 +88,25 @@
+ 
+ def calc_dt(t, exp_step_factor, max_samples, grid_size, scale):
+-    """Helper to calculate step size dt."""
+-    # Standard exponential spacing logic for NGP-style ray marching
++    """Helper to calculate step size dt. Exact formula not given in sources [G]."""
++    # Standard NGP exponential spacing [G]
+     return exp_step_factor * (scale / grid_size) * (2.0 ** (t / max_samples))
+ 
+ def mip_from_pos(x, y, z, cascades):
+-    """Placeholder for MIP level selection based on position."""
+-    # Not given in the sources. Returns 0 as fallback.
++    """MIP level selection based on position. Exact logic not given in sources [G]."""
+     return 0
+ 
+ def mip_from_dt(dt, grid_size, cascades):
+-    """Placeholder for MIP level selection based on step size."""
+-    # Not given in the sources. Returns 0 as fallback.
++    """MIP level selection based on step size. Exact logic not given in sources [G]."""
+     return 0
+ 
+ def __morton3D(nx, ny, nz):
+-    """Placeholder for Morton code calculation."""
+-    # Not given in the sources. Simple interleaving for demonstration.
+-    return (nx << 10) | (ny << 5) | nz
++    """Standard 3D Morton code interleaving [G]."""
++    def interleave_bits(v):
++        v = (v | (v << 16)) & 0x00030000FF
++        v = (v | (v << 8))  & 0x0300F00FF
++        v = (v | (v << 4))  & 0x030C30C3
++        v = (v | (v << 2))  & 0x09249249
++        return v
++    return interleave_bits(nx) | (interleave_bits(ny) << 1) | (interleave_bits(nz) << 2)
+ 
+ def clamp(val, min_val, max_val):
+@@ -181,9 +184,13 @@
+         t1, t2 = hits_t[r]
+         
++        # Perturbation
++        if perturb:
++            t1 += noise[r].item()
++        
+         # First Pass: Count samples
+         t = t1
+         N_samples = 0
+         
+-        while (0 <= t and t < t2 and N_samples < max_samples):
++        while 0 <= t < t2 and N_samples < max_samples:
+             # Calculate position
+             x = ox + t * dx
+@@ -210,7 +217,6 @@
+             idx = mip * grid_size3 + __morton3D(int(nx), int(ny), int(nz))
+             
+-            # Check occupancy (simulated bitfield access)
+-            # In real implementation, this accesses density_bitfield[idx // 8] & (1 << (idx % 8))
+-            occ = False  # Placeholder: Actual occupancy check depends on bitfield
++            # Check occupancy
++            occ = (density_bitfield[idx // 8] & (1 << (idx % 8))) != 0
+             
+             if occ:
+@@ -232,8 +238,8 @@
+                     t += calc_dt(t, exp_step_factor, max_samples, grid_size, scale)
+         
+-        # Allocate output indices
+-        start_idx = counter[0] + N_samples  # Simulated atomicAdd
+-        ray_count = counter[1] + 1  # Simulated atomicAdd
++        # Allocate output indices (simulated atomics)
++        start_idx = counter[0].item()
+         counter[0] += N_samples
++        ray_count = counter[1].item()
+         counter[1] += 1
+         
+@@ -246,5 +252,5 @@
+         samples = 0
+         
+-        while (t < t2 and samples < N_samples):
++        while t < t2 and samples < N_samples:
+             x = ox + t * dx
+             y = oy + t * dy
+@@ -263,5 +269,5 @@
+             idx = mip * grid_size3 + __morton3D(int(nx), int(ny), int(nz))
+             
+-            occ = False  # Placeholder
++            occ = (density_bitfield[idx // 8] & (1 << (idx % 8))) != 0
+             
+             if occ:
+@@ -288,5 +294,5 @@
+                 
+     # Slice outputs to actual size if needed
+-    actual_samples = counter[0]
++    actual_samples = counter[0].item()
+     xyzs = xyzs[:actual_samples]
+     dirs = dirs[:actual_samples]
+@@ -303,12 +309,12 @@
+ 
+ ## Operating characteristics
+-*   **Time Complexity:** Two passes over the ray space. The first pass counts occupied samples, the second pass writes them. Complexity is proportional to the number of rays and the average number of occupied samples per ray [S2, unofficial].
+-*   **Memory Complexity:** Memory allocation is dynamic based on `mean_count` or `max_samples`. The `xyzs`, `dirs`, `deltas`, and `ts` tensors are allocated up to size `M` [S1, unofficial].
+-*   **Measured Performance:** Not given in the sources.
+-*   **Scaling:** Scales with the number of rays `N_rays` and the density of the voxel grid.
+-*   **Strengths:** Avoids over-allocation by using `mean_count` from previous epochs. Supports `force_all_rays` for stability.
++*   **Time Complexity:** Two passes over the ray space [S2, unofficial]. The first pass counts occupied samples, the second pass writes them [S2, unofficial]. Complexity is proportional to the number of rays and the average number of occupied samples per ray [S2, unofficial].
++*   **Memory Complexity:** Memory allocation is dynamic based on `mean_count` or `max_samples` [S1, unofficial]. The `xyzs`, `dirs`, `deltas`, and `ts` tensors are allocated up to size `M` [S1, unofficial].
++*   **Measured Performance:** Not given in the sources [S2, unofficial].
++*   **Scaling:** Scales with the number of rays `N_rays` and the density of the voxel grid [S2, unofficial].
++*   **Strengths:** Avoids over-allocation by using `mean_count` from previous epochs [S3, unofficial]. Supports `force_all_rays` for stability [S3, unofficial].
+ *   **Limitations:** If `mean_count` underestimates the required points, rays may be randomly ignored unless `force_all_rays` is enabled [S3, unofficial].
+ *   **When to use:** Training neural radiance fields with sparse voxel grids where memory efficiency is critical [S1, unofficial].
+-*   **When not to use:** Inference where fixed allocation is preferred for simplicity, or when `mean_count` is not available.
++*   **When not to use:** Inference where fixed allocation is preferred for simplicity, or when `mean_count` is not available [S3, unofficial].
+ 
+ ## Background

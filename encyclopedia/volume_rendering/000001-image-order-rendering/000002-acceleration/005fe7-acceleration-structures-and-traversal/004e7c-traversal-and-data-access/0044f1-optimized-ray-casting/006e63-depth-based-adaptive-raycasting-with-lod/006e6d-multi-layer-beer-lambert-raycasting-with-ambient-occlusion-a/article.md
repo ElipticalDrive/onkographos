@@ -1,0 +1,222 @@
+# Multi-layer Beer-Lambert Raycasting with Ambient Occlusion and Shadowing
+
+Also called: EA-raycasting, Unified Raycasting
+
+## Overview
+Multi-layer Beer-Lambert raycasting is a GPU-based volume rendering technique that splits a ray into discrete segments (layers) based on accumulated opacity thresholds, computing color and alpha using Beer-Lambert law parameters (emission/absorption) for each segment [S1, unofficial]. It distinguishes itself from standard front-to-back alpha blending by decoupling the compositing into layers that can be stored in separate buffers, while simultaneously applying ambient occlusion (AO) from neighboring samples and shadow sampling along a specific direction [S1, unofficial]. This method builds on [Depth-based Adaptive Raycasting with LOD](21575-depth-based-adaptive-raycasting-with-lod.md) by utilizing its LOD and variable step size capabilities to optimize the sampling density within each layer [S1, unofficial].
+
+## How it works
+### Inputs and Outputs
+**Inputs:**
+*   `volume_texture`: 3D texture containing volume data.
+*   `front_uvw_map`, `back_uvw_map`: Textures providing start and end UVW coordinates for rays per pixel.
+*   `uStepSize`: Base step size for ray traversal.
+*   `uShadowRayDirection`: Direction vector for shadow rays.
+*   Uniforms: `ALPHA_SCALE`, `AMBIENT_OCCLUSION_SCALE`, `AMBIENT_OCCLUSION_RADIUS`, `ABSORPTION_SCALE`, `SHADOW_SCALE`, `CUBEMAP_STRENGTH`, `ERT_THRESHOLD`.
+
+**Outputs:**
+*   `fragColor1..4`: Four `vec4` buffers storing `layerColor[0..3]`.
+*   `fragDepth.x..w`: Four components storing `layerDepth[0..3]`.
+*   `result.color`: Final accumulated color.
+*   Optional: `fragColorDebug`, `fragFirstHit` (if `FIRST_HIT` is defined).
+
+### Data Structures
+*   **RaycastResult**:
+    *   `color`: `vec4` (end color).
+    *   `firstHit`: `vec4` (position of first non-zero alpha hit).
+    *   `lastHit`: `vec4` (position of last non-zero alpha hit).
+*   **Layer State**:
+    *   `layerColor[4]`: Array of `vec4` storing color per layer.
+    *   `layerDepth[4]`: Array of `float` storing depth per layer.
+    *   `segmentColor`: `vec4` (accumulated color for current layer).
+    *   `segmentAlpha`: `float` (accumulated alpha for current layer).
+
+### Parameters
+*   `ALPHA_SCALE`: Default 20.0. Scaling factor for alpha in transfer functions.
+*   `AMBIENT_OCCLUSION_SCALE`: Default 2.0. Scales accumulated AO.
+*   `AMBIENT_OCCLUSION_RADIUS`: Default 2.0. Radius in steps for AO neighbor sampling.
+*   `ABSORPTION_SCALE`: Default 10.0. Scaling factor for absorption in `EMISSION_ABSORPTION_RAW` mode.
+*   `SHADOW_SCALE`: Default 1.0. Scales shadow factor.
+*   `ERT_THRESHOLD`: Default 0.99. Threshold for early ray termination (used in defines, logic relies on `currentLayerThreshold`).
+
+### Algorithm Steps
+
+1.  **Ray Initialization**:
+    *   Get `uvwStart` from `front_uvw_map` and `uvwEnd` from `back_uvw_map`.
+    *   If `uvwEnd.a == 0.0`, discard the pixel (back face not visible) [S1, unofficial].
+    *   If `uvwStart.a == 0.0` (camera inside volume), clamp `uvwStart` to the near plane using `uViewToTexture` and `getViewCoord` [S1, unofficial].
+    *   Calculate `startDistance` and `endDistance` as the length of view-space coordinates corresponding to UVW depths.
+
+2.  **Ray Traversal Loop**:
+    *   Initialize `curUVW = uvwStart`, `curDistance = startDistance`, `curAlpha = 0.0`, `segmentColor = vec4(0.0)`, `currentLayer = 1`, `currentLayerThreshold = 1.0 / 4.0`.
+    *   While `curDistance < endDistance`:
+        *   Sample `volume_texture` at `curUVW` to get `sampleColor` (color/alpha from transfer function).
+        *   **Ambient Occlusion (AO)**:
+            *   If `AMBIENT_OCCLUSION` is defined:
+                *   Initialize `ao_accum = 0.0`.
+                *   For each neighbor offset `i` in X, Y, Z directions within radius `AMBIENT_OCCLUSION_RADIUS * curStepSize`:
+                    *   Sample `volume_texture` at neighbor position (use `textureLod` if `LEVEL_OF_DETAIL` is defined) to get `ao_value`.
+                    *   If `EMISSION_ABSORPTION_RAW` is defined:
+                        *   `ao_contrib = 1.0 - exp( - (pow(transferFunctionRaw(ao_value).a * ABSORPTION_SCALE, 2.0)) * curStepSize )`.
+                    *   Else:
+                        *   `ao_contrib = transferFunction(ao_value, curStepSize).a`.
+                    *   `ao_accum += ao_contrib`.
+                *   `self_occlusion = sampleColor.a`.
+                *   `ao_accum = max(0.0, ao_accum - self_occlusion) * AMBIENT_OCCLUSION_SCALE`.
+                *   `sampleColor.rgb *= max(0.0, min(1.0, 1.0 - (ao_accum / num_samples)))`. (Note: `num_samples` is typically the number of AO neighbors or a constant; if undefined, assume 1.0 or omit modulation if not specified [G]).
+        *   **Cubemap Indirect Lighting**:
+            *   If `CUBEMAP_SAMPLING` is defined:
+                *   Generate `num_opacity_samples` random directions using `rand() = hash(curUVW, seed)`.
+                *   For each direction:
+                    *   Cast shadow ray: Sample `volume_texture` at distances `pow(2.0, float(j)) * curStepSize` for `j = 0..num_steps`.
+                    *   Calculate `shadow_alpha` using `EMISSION_ABSORPTION_RAW` or standard transfer function.
+                    *   `shadow = (1.0 - shadow) * shadow_alpha + shadow`.
+                *   `cubemap_color *= (1.0 - shadow)`.
+                *   `sampleColor.rgb = mix(sampleColor.rgb, cubemap_color, CUBEMAP_STRENGTH)`.
+        *   **Shadow Sampling**:
+            *   If `SHADOW_SAMPLING` is defined:
+                *   Initialize `shadow = 0.0`.
+                *   For `k = 0` to `uShadowRayNumSteps`:
+                    *   `shadow_stepSize = curStepSize * 2.5` (or use LoD if `LEVEL_OF_DETAIL` is active).
+                    *   `shadow_sampleUVW = curUVW + k * shadow_stepSize * uShadowRayDirection`.
+                    *   Sample `volume_texture` at `shadow_sampleUVW` to get `shadow_alpha`.
+                    *   `shadow = (1.0 - shadow) * shadow_alpha + shadow`.
+                *   `sampleColor.rgb *= max(0.25, min(1.0, 1.0 - shadow * SHADOW_SCALE))`.
+        *   **Layer Compositing**:
+            *   `segmentColor.rgb = (1.0 - segmentColor.a) * sampleColor.rgb + segmentColor.rgb`.
+            *   `segmentColor.a = (1.0 - segmentColor.a) * sampleColor.a + segmentColor.a`.
+            *   `curAlpha = segmentColor.a`.
+            *   `curDistance += curStepSize`.
+            *   `curUVW += curStepSize * ray_direction`.
+        *   **Layer Threshold Check**:
+            *   If `curAlpha >= currentLayerThreshold` and `currentLayer < 4`:
+                *   Convert `segmentColor` to Beer-Lambert emission/absorption parameters:
+                    *   `emission, absorption = beerLambertColorTransmissionToEmissionAbsorption(segmentColor.rgb, 1.0 - segmentColor.a, distance_segment)`.
+                *   Convert back to color transmission for storage:
+                    *   `segmentColor = beerLambertEmissionAbsorptionToColorTransmission(emission, absorption, distance_segment)`.
+                *   `layerColor[currentLayer-1] = segmentColor`.
+                *   `layerDepth[currentLayer-1] = curDistance`.
+                *   Reset `segmentColor = vec4(0.0)`, `currentLayer++`.
+                *   `currentLayerThreshold = float(currentLayer) / 4.0`.
+                *   `lastDistance = curDistance`.
+
+3.  **Finalization**:
+    *   Fill the last layer (index 3) with remaining `segmentColor` and `layerDepth[3] = endDistance`.
+    *   Write `layerColor[0..3]` to `fragColor1..4` and `layerDepth[0..3]` to `fragDepth.x..w`.
+    *   Output final `curColor` (accumulated from all layers) to `result.color`.
+
+### Pseudocode
+
+> **Unverified code.** The code below did not pass a test run against a reference implementation, or no test fits it, so it may contain errors.
+
+```python
+def multi_layer_beer_lambert_raycasting(uvw_start, uvw_end, u_step_size, volume_texture, view_direction):
+    # 1. Initialization
+    if uvw_end.a == 0.0:
+        return discard_pixel()
+    
+    if uvw_start.a == 0.0:
+        uvw_start = clamp_to_near_plane(uvw_start)
+        
+    start_distance = length(view_space(uvw_start))
+    end_distance = length(view_space(uvw_end))
+    
+    cur_uvw = uvw_start
+    cur_distance = start_distance
+    segment_color = vec4(0.0)
+    current_layer = 1
+    current_layer_threshold = 0.25 # 1/4
+    layer_color = [vec4(0.0)] * 4
+    layer_depth = [0.0] * 4
+    
+    # 2. Ray Loop
+    while cur_distance < end_distance:
+        sample = sample_volume(cur_uvw, volume_texture)
+        sample_color = transfer_function(sample, u_step_size)
+        
+        # Ambient Occlusion
+        if AMBIENT_OCCLUSION:
+            ao_accum = 0.0
+            for offset in get_ao_offsets(AMBIENT_OCCLUSION_RADIUS * u_step_size):
+                ao_sample = sample_volume(cur_uvw + offset, volume_texture)
+                ao_val = transfer_function(ao_sample, u_step_size).a
+                if EMISSION_ABSORPTION_RAW:
+                    ao_contrib = 1.0 - exp(-(pow(ao_val * ABSORPTION_SCALE, 2.0)) * u_step_size)
+                else:
+                    ao_contrib = ao_val
+                ao_accum += ao_contrib
+            
+            self_occlusion = sample_color.a
+            ao_accum = max(0.0, ao_accum - self_occlusion) * AMBIENT_OCCLUSION_SCALE
+            sample_color.rgb *= max(0.0, min(1.0, 1.0 - ao_accum)) # Assuming num_samples=1 for simplicity if not defined
+            
+        # Shadow Sampling
+        if SHADOW_SAMPLING:
+            shadow = 0.0
+            for k in range(uShadowRayNumSteps):
+                shadow_step = u_step_size * 2.5
+                shadow_uvw = cur_uvw + k * shadow_step * uShadowRayDirection
+                shadow_sample = sample_volume(shadow_uvw, volume_texture)
+                shadow_alpha = transfer_function(shadow_sample, shadow_step).a
+                shadow = (1.0 - shadow) * shadow_alpha + shadow
+            sample_color.rgb *= max(0.25, min(1.0, 1.0 - shadow * SHADOW_SCALE))
+            
+        # Cubemap Sampling
+        if CUBEMAP_SAMPLING:
+            shadow = 0.0
+            for j in range(num_opacity_samples):
+                rand_dir = get_random_direction(cur_uvw, j)
+                for m in range(num_shadow_steps):
+                    dist = pow(2.0, float(m)) * u_step_size
+                    shadow_uvw = cur_uvw + dist * rand_dir
+                    shadow_sample = sample_volume(shadow_uvw, volume_texture)
+                    shadow_alpha = transfer_function(shadow_sample, dist).a
+                    shadow = (1.0 - shadow) * shadow_alpha + shadow
+            cubemap_color = sample_cubemap(rand_dir) * (1.0 - shadow)
+            sample_color.rgb = mix(sample_color.rgb, cubemap_color, CUBEMAP_STRENGTH)
+
+        # Compositing
+        segment_color.rgb = (1.0 - segment_color.a) * sample_color.rgb + segment_color.rgb
+        segment_color.a = (1.0 - segment_color.a) * sample_color.a + segment_color.a
+        
+        cur_distance += u_step_size
+        cur_uvw += u_step_size * view_direction
+        
+        # Layer Threshold Check
+        if segment_color.a >= current_layer_threshold and current_layer < 4:
+            # Convert to Beer-Lambert and back for storage
+            emission, absorption = beer_lambert_color_to_emission_absorption(segment_color.rgb, 1.0 - segment_color.a, u_step_size)
+            segment_color = beer_lambert_emission_absorption_to_color(emission, absorption, u_step_size)
+            
+            layer_color[current_layer - 1] = segment_color
+            layer_depth[current_layer - 1] = cur_distance
+            
+            segment_color = vec4(0.0)
+            current_layer += 1
+            current_layer_threshold = float(current_layer) / 4.0
+            
+    # 3. Final Layer
+    layer_color[3] = segment_color
+    layer_depth[3] = end_distance
+    
+    # Output
+    write_fbo(fragColor1, layer_color[0])
+    write_fbo(fragColor2, layer_color[1])
+    write_fbo(fragColor3, layer_color[2])
+    write_fbo(fragColor4, layer_color[3])
+    write_fbo(fragDepth, layer_depth)
+    return segment_color # Final accumulated color
+```
+
+## Operating characteristics
+*   **Time Complexity**: $O(N \cdot L)$, where $N$ is the number of steps per ray and $L$ is the number of layers (4). Shadow and AO sampling add constant factors per step.
+*   **Memory Complexity**: $O(1)$ per pixel for layer buffers (4 layers).
+*   **Performance**: Optimized for GPU execution due to parallel ray casting. LOD reduces sampling density in distant layers.
+*   **Strengths**: Real-time capable with AO and shadows; Beer-Lambert model provides physically plausible light transport; layer separation allows for post-processing or further compositing.
+*   **Limitations**: Discrete layers may introduce banding if thresholds are not chosen carefully; AO and shadow sampling increase computational cost significantly.
+
+## Background
+This method is described in the context of VR volume rendering, specifically in the GitHub repository [Secumfex/VRVRVive](https://github.com/Secumfex/VRVRVive) [S1, unofficial]. It is an implementation of a unified raycasting approach that integrates Beer-Lambert law, ambient occlusion, and shadowing into a multi-layer framework.
+
+## Sources
+[S1] Secumfex/VRVRVive, https://github.com/Secumfex/VRVRVive, fetched 2026-10-28 (unofficial)

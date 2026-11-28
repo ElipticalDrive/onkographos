@@ -1,0 +1,172 @@
+--- v001.md
++++ v002.md
+@@ -4,16 +4,16 @@
+ 
+ ## Overview
+-This method converts high-resolution 3D meshes (e.g., from Blender or Maya) into volumetric cloud geometry by replacing triangle faces with fitted ellipsoids [S1]. It solves the problem of rendering complex, organic shapes in real-time by decimating the input mesh and approximating its surface with smooth primitives [S1]. Unlike raw mesh rendering, this approach acts as a real-time filter that produces softer, cumuliform shapes suitable for smoke and cloud simulation [S1]. It builds on [Cloud Mesh Generation](4822-cloud-mesh-generation.md) by providing the specific geometric fitting and optimization steps required to transform discrete triangles into continuous volumetric primitives.
++This method converts high-resolution 3D meshes (e.g., from Blender or Maya) into volumetric cloud geometry by replacing triangle faces with fitted ellipsoids [S1]. It solves the problem of rendering complex, organic shapes in real-time by decimating the input mesh and approximating its surface with smooth primitives [S1]. Unlike raw mesh rendering, this approach acts as a real-time filter that produces softer, cumuliform shapes suitable for smoke and cloud simulation [S1].
+ 
+ ## How it works
+-**Inputs:** A decimated 3D mesh consisting of $N$ triangles, where each triangle has vertices $\mathbf{v}_1, \mathbf{v}_2, \mathbf{v}_3$.
+-**Outputs:** A set of ellipsoid parameters (center, radii, rotation matrix) for each triangle, ready for GPU rendering.
++**Inputs:** A decimated 3D mesh consisting of $N$ triangles, where each triangle has vertices $\mathbf{v}_1, \mathbf{v}_2, \mathbf{v}_3$ [S1].
++**Outputs:** A set of ellipsoid parameters (center, radii, rotation matrix) for each triangle, ready for GPU rendering [S1].
+ 
+ **Data Structures:**
+-*   **Triangle:** Struct containing three 3D vertex coordinates $\mathbf{v}_i \in \mathbb{R}^3$.
++*   **Triangle:** Struct containing three 3D vertex coordinates $\mathbf{v}_i \in \mathbb{R}^3$ [S1].
+ *   **Ellipsoid:** Struct containing:
+-    *   Center $\mathbf{c} \in \mathbb{R}^3$
+-    *   Radii $(a, b, c) \in \mathbb{R}^3$
+-    *   Rotation Matrix $\mathbf{R} \in \mathbb{R}^{3 \times 3}$
++    *   Center $\mathbf{c} \in \mathbb{R}^3$ [S1].
++    *   Radii $(a, b, c) \in \mathbb{R}^3$ [S1].
++    *   Rotation Matrix $\mathbf{R} \in \mathbb{R}^{3 \times 3}$ [S1].
+ 
+ **Steps:**
+@@ -28,10 +28,10 @@
+     *   **Axis and Angle:** Calculate the rotation axis $\mathbf{k}$ and angle $\theta$ using cross and dot products of the relevant direction vectors [S1]:
+         $$ \mathbf{k} = \frac{\mathbf{u} \times \mathbf{v}}{\|\mathbf{u} \times \mathbf{v}\|}, \quad \theta = \arccos\left(\frac{\mathbf{u} \cdot \mathbf{v}}{\|\mathbf{u}\| \|\mathbf{v}\|}\right) \quad \text{(Eq. 27, 28)} $$
+-        *(Note: $\mathbf{u}$ and $\mathbf{v}$ represent the initial and target direction vectors for alignment.)*
++        where $\mathbf{u}$ is the ellipsoid's initial principal axis and $\mathbf{v}$ is the vector from the barycenter to the furthest scaled vertex [S1].
+     *   **Skew-Symmetric Matrix:** Compute matrix $\mathbf{A}$ corresponding to the axis vector $\mathbf{x}$ (where $\mathbf{x}$ is the normalized rotation axis) [S1]:
+         $$ \mathbf{A} = \begin{bmatrix} 0 & -x_z & x_y \\ x_z & 0 & -x_x \\ -x_y & x_x & 0 \end{bmatrix} \quad \text{(Eq. 30)} $$
+     *   **Rotation Matrix:** Calculate $\mathbf{R}$ using the exponential map (Rodrigues' formula) [S1]:
+         $$ \mathbf{R} = \mathbf{I} + (\sin \theta)\mathbf{A} + (1 - \cos \theta)\mathbf{A}^2 \quad \text{(Eq. 29)} $$
+-6.  **GPU Transfer:** Pre-calculate formulas (1)–(3) on the CPU. Only the final rotation matrix $\mathbf{R}$ and ellipsoid parameters are passed to the GPU for rendering [S1].
++6.  **GPU Transfer:** Pre-calculate formulas (1)–(3) on the CPU [S1]. Only the final rotation matrix $\mathbf{R}$ is passed to the GPU for rendering [S1].
+ 
+ **Pseudocode:**
+@@ -47,8 +47,8 @@
+ def scale_triangle(v1, v2, v3, barycenter, scale_factor):
+     """Scale triangle vertices from barycenter by scale_factor."""
+-    v1_scaled = barycenter + scale_factor * (v1 - barycenter)
+-    v2_scaled = barycenter + scale_factor * (v2 - barycenter)
+-    v3_scaled = barycenter + scale_factor * (v3 - barycenter)
+-    return v1_scaled, v2_scaled, v3_scaled
++    v1_s = barycenter + scale_factor * (v1 - barycenter)
++    v2_s = barycenter + scale_factor * (v2 - barycenter)
++    v3_s = barycenter + scale_factor * (v3 - barycenter)
++    return v1_s, v2_s, v3_s
+ 
+ def get_max_radius(barycenter, v1, v2, v3):
+@@ -64,41 +64,32 @@
+     Uses Rodrigues' Rotation Formula.
+     """
+-    # Normalize vectors
+     u_norm = u / np.linalg.norm(u)
+     v_norm = v / np.linalg.norm(v)
+-    
+-    # Calculate axis and angle
+     cross_product = np.cross(u_norm, v_norm)
+     dot_product = np.dot(u_norm, v_norm)
+     
+-    # Handle parallel vectors
+     if np.linalg.norm(cross_product) < 1e-6:
+         if dot_product > 0:
+-            return np.eye(3) # No rotation needed
++            return np.eye(3)
+         else:
+-            # 180 degree rotation, need an arbitrary orthogonal axis
+-            # [G] Fallback: rotate around an orthogonal vector
+-            axis = np.array([1, 0, 0])
++            # [G] Fallback for 180-degree rotation: use arbitrary orthogonal axis
++            axis = np.array([1.0, 0.0, 0.0])
+             if abs(np.dot(axis, u_norm)) > 0.9:
+-                axis = np.array([0, 1, 0])
++                axis = np.array([0.0, 1.0, 0.0])
+             axis = axis - np.dot(axis, u_norm) * u_norm
+             axis = axis / np.linalg.norm(axis)
++            cross_product = axis
+             theta = math.pi
+-        cross_product = axis
+-        theta = math.pi
+     else:
+         cross_product = cross_product / np.linalg.norm(cross_product)
+         theta = math.acos(np.clip(dot_product, -1.0, 1.0))
+ 
+-    # Skew-symmetric matrix A
+     x = cross_product
+     A = np.array([
+-        [0, -x[2], x[1]],
+-        [x[2], 0, -x[0]],
+-        [-x[1], x[0], 0]
++        [0.0, -x[2], x[1]],
++        [x[2], 0.0, -x[0]],
++        [-x[1], x[0], 0.0]
+     ])
+-    
+-    # Rotation matrix R = I + sin(theta)A + (1-cos(theta))A^2
+-    R = np.eye(3) + math.sin(theta) * A + (1 - math.cos(theta)) * np.dot(A, A)
++    R = np.eye(3) + math.sin(theta) * A + (1.0 - math.cos(theta)) * np.dot(A, A)
+     return R
+ 
+@@ -108,26 +99,12 @@
+     Returns center, radii, and rotation matrix.
+     """
+-    # 1. Barycenter
+     B = compute_barycenter(v1, v2, v3)
+-    
+-    # 2. Scale vertices
+     v1_s, v2_s, v3_s = scale_triangle(v1, v2, v3, B, scale_factor)
+-    
+-    # 3. Determine radii (max distance defines the primary radius)
+     max_r = get_max_radius(B, v1_s, v2_s, v3_s)
+     
+-    # [G] The source defines radii (a,b,c) based on max distance but does not specify 
+-    # how minor axes are derived. We assume a sphere or isotropic scaling for simplicity 
+-    # if not specified, or use the max_r for the largest axis.
+-    # The source states: "maximum distance ... is used to calculate a circumscribing ellipsoid with radii (a, b, c)"
+-    # We set the largest radius to max_r. Other radii are not explicitly defined in the text.
+-    # [G] Assuming isotropic ellipsoid (sphere) for the base fit, or that a=b=c=max_r 
+-    # is a simplification of "circumscribing". However, the rotation implies anisotropy.
+-    # Since specific minor axis calculation is missing, we return max_r for all or note it.
+-    # Given the rotation optimization aligns the "maximum radius", we assume the ellipsoid 
+-    # has one major axis aligned with the max distance vector.
+-    
+-    # 4. Rotation Optimization
+-    # Find the vertex with the maximum distance to align the ellipsoid
++    # [G] Source does not specify how minor radii b and c are derived from max_r.
++    # We assume isotropic scaling (sphere) or that max_r applies to the primary axis.
++    radii = [max_r, max_r, max_r]
++
+     dists = [
+         np.linalg.norm(v1_s - B),
+@@ -137,22 +114,8 @@
+     max_idx = np.argmax(dists)
+     max_vertex = [v1_s, v2_s, v3_s][max_idx]
+-    
+-    # Direction vector from barycenter to the furthest vertex
+     target_dir = max_vertex - B
+-    
+-    # Initial direction (e.g., local Z axis or arbitrary reference)
+-    # [G] The source says "align the maximum radius ... with the maximum distance".
+-    # It implies rotating the ellipsoid's principal axis to match this vector.
+-    # We assume the ellipsoid's initial principal axis is along Z (0,0,1).
+     initial_axis = np.array([0.0, 0.0, 1.0])
+-    
+-    # Compute rotation matrix to align initial_axis with target_dir
+     R = compute_rotation_matrix(initial_axis, target_dir)
+-    
+-    return {
+-        'center': B,
+-        'radii': [max_r, max_r, max_r], # [G] Specific minor radii not defined in source
+-        'rotation_matrix': R
+-    }
++    return {'center': B, 'radii': radii, 'rotation_matrix': R}
+ ```
+ 
+@@ -167,11 +130,9 @@
+ 
+ ## Operating characteristics
+-*   **Time Complexity:** Pre-calculation is $O(N)$ where $N$ is the number of triangles. This is done once on the CPU. GPU rendering is $O(N)$ per frame.
+-*   **Memory Complexity:** $O(N)$ to store ellipsoid parameters (center, radii, rotation matrix) for each triangle.
++*   **Time Complexity:** Not given in the sources.
++*   **Memory Complexity:** Not given in the sources.
+ *   **Performance:** Significantly improves performance on lower-end GPUs by reducing vertex count and simplifying geometry to ellipsoids [S1]. Benchmarks confirm no hindrance on lower-speed hardware [S1].
+ *   **Strengths:** Real-time capability; produces soft, organic cloud shapes; leverages standard 3D modeling tools [S1].
+ *   **Limitations:** Requires manual or automated decimation; approximation error increases with high decimation rates (>95%) though visual quality remains acceptable [S1].
+-*   **When to use:** Real-time cloud rendering where organic shapes are needed and high-fidelity mesh rendering is too expensive.
+-*   **When not to use:** Static, high-precision cloud visualization where decimation artifacts are visible.
+ 
+ ## Background

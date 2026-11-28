@@ -1,0 +1,197 @@
+# Real Time Single Scattering Effects
+
+Also called: Biri's method, Single scattering with volumetric shadows
+
+## Overview
+This method provides a real-time algorithm for rendering participating media by computing direct single scattering, indirect single scattering, and volumetric shadows using shadow volumes and spatial coherence [S1, unofficial]. It solves the problem of efficiently rendering light beams and volumetric shadows in dynamic scenes without the high memory cost of voxel-based methods or the sampling artifacts of shadow maps [S1, unofficial]. Unlike its siblings, it integrates all three single-scattering components (direct, indirect, and shadowed) into a hardware-accelerated pipeline using precomputed 2D lookup tables and stencil buffers [S1, unofficial].
+
+## How it works
+**Inputs and Outputs**
+*   **Inputs:** Scene geometry, camera position, point light source position (assumed isotropic), participating medium properties (extinction coefficient $k_t$, albedo $\Omega$, phase function $p$), and object silhouettes relative to the light.
+*   **Outputs:** Final image with volumetric lighting effects, including light shafts and shadows cast by objects within the medium.
+
+**Data Structures**
+*   **Precomputed 2D Tables:** Textures storing the angular formulation of the radiative transfer equation. These tables allow direct lookup of scattering contributions based on geometric parameters, avoiding runtime integration [S1, unofficial].
+*   **Stencil Buffer:** Used to accumulate volumetric shadows. The method renders shadow planes in back-to-front order to correctly handle overlapping occluders [S1, unofficial].
+
+**Parameters**
+*   $k_t$: Extinction coefficient, defined as the sum of the absorption coefficient and the diffusion coefficient of the participating medium [S1, unofficial].
+*   $\Omega$: Albedo, defined as the fraction between the diffuse coefficient and the extinction coefficient of the medium [S1, unofficial].
+*   $p$: Phase function, expressing for any incoming direction the ratio of light following the ray direction [S1, unofficial].
+*   $I_S$: Directional intensity of the source computed relatively to a reference direction [S1, unofficial].
+
+**Method Steps**
+
+1.  **Precompute 2D Lookup Tables:**
+    Compute and store the angular formulation of the radiative transfer equation in 2D textures. This table maps geometric variables to the integrated scattering contribution, enabling real-time evaluation via simple shader lookups [S1, unofficial].
+
+2.  **Render Object Silhouettes:**
+    Determine the silhouette of scene objects relative to the light source. This geometry defines the boundaries of the volumetric shadows [S1, unofficial].
+
+3.  **Render Volumetric Shadows:**
+    *   Render the shadow volumes (extruded silhouettes) into the scene.
+    *   Use the stencil buffer to mark pixels inside the shadow volumes.
+    *   Render shadow planes (quads extending from the silhouette edges to infinity or the scene boundary) in back-to-front order.
+    *   Use spatial coherence to optimize the stencil operations. This step ensures correct volumetric shadows, particularly around light sources, avoiding the aliasing artifacts associated with shadow maps [S1, unofficial].
+
+4.  **Compute Direct Single Scattering ($L_{dss}$):**
+    For each pixel, calculate the direct single scattering contribution along the view ray. This is done using the precomputed 2D table and the geometric parameters of the view ray relative to the light source [S1, unofficial].
+
+5.  **Compute Indirect Single Scattering ($L_{oiss}$ and $L_{iss}$):**
+    *   Calculate the indirect single scattering received by points on objects ($L_{iss}$) and along the view ray ($L_{oiss}$).
+    *   This involves evaluating the scattering along illumination rays from the light source to the object points [S1, unofficial].
+
+6.  **Composite Final Radiance:**
+    Combine the computed terms to determine the final observed radiance.
+
+**Formulas**
+
+The observed radiance $L_{\vec{u_P}}$ along a view ray from point $P$ is given by [S1, unofficial]:
+
+$$ L_{\vec{u_P}} = L_{dss}(\vec{u_P}) + e^{-k_t OP} L(P) + L_a e^{-k_t OP} + L_{oiss}(\vec{u_P}) $$
+
+Where:
+*   $L_{dss}(\vec{u_P})$ is the direct single scattering contribution.
+*   $L(P)$ is the radiance of point $P$ attenuated by absorption and out-scattering.
+*   $OP$ is the distance from the camera origin $O$ to point $P$.
+*   $k_t$ is the extinction coefficient.
+*   $L_a$ is a constant ambient radiance representing emission and multiple scattering.
+*   $L_{oiss}(\vec{u_P})$ is the object indirect single scattering contribution.
+
+The radiance of point $P$, $L(P)$, is defined as [S1, unofficial]:
+
+$$ L(P) = L_{iss}(P) + e^{-k_t SP} L_d(P) + L_a e^{-k_t SP} $$
+
+Where:
+*   $L_{iss}(P)$ is the indirect single scattering received on point $P$.
+*   $L_d(P)$ is the usual direct illumination (e.g., Phong model) at point $P$.
+*   $SP$ is the distance from the light source to point $P$.
+
+The in-scattering radiance $L_{ss}$ (used to compute $L_{dss}$ and $L_{iss}$) using the angular formulation is [S1, unofficial]:
+
+$$ L_{ss}(\theta, d, l) = \int_{\gamma_0}^{\pi/2} \frac{k_t \Omega e^{-k_t t} \gamma_d}{4\pi h} I_S(\alpha+\beta) p(\alpha+\beta) e^{-k_t h \cos(\alpha)} d\alpha $$
+
+This integral is simplified using the variable change $x = t + h \cdot \tan(\alpha)$, where $t$ and $h$ are constant along the ray [S1, unofficial]. The geometric terms are defined as [S1, unofficial]:
+
+$$ \gamma_0 = -\frac{t}{h} + \phi = \text{atan}\left(\frac{-t}{h}\right) $$
+$$ \gamma_d = \text{atan}\left(\frac{d - l\cos(\phi)}{l\sin(\phi)}\right) = \text{atan}\left(\frac{d-t}{h}\right) $$
+
+Where:
+*   $\alpha$ is the integration variable (angle).
+*   $\beta$ is the angle between the light direction and the view direction.
+*   $\phi$ is the angle of the view ray.
+*   $d, l, h, t$ are geometric factors derived from the scene configuration (see Figure 2 in [S1, unofficial]).
+
+**Pseudocode**
+
+> **Unverified code.** The code below did not pass a test run against a reference implementation, or no test fits it, so it may contain errors.
+
+```python
+# Precomputation Phase
+def precompute_scattering_tables():
+    """
+    Precompute 2D textures for the angular formulation of the radiative transfer equation.
+    Maps geometric parameters to integrated scattering values.
+    """
+    # Initialize 2D texture with dimensions based on angular resolution
+    scattering_table = create_2d_texture(width=RESOLUTION, height=RESOLUTION)
+    
+    for alpha in range(0, RESOLUTION):
+        for beta in range(0, RESOLUTION):
+            # Convert indices to angles
+            angle_alpha = alpha_to_angle(alpha)
+            angle_beta = beta_to_angle(beta)
+            
+            # Calculate geometric factors t, h, d, l, phi based on camera and light setup
+            t, h, d, l, phi = get_geometric_factors()
+            
+            # Compute the integral using the simplified angular formulation
+            # L_ss = integral from gamma_0 to pi/2 of ... d_alpha
+            # Note: The integral is precomputed and stored in the table
+            value = compute_integral(alpha, beta, t, h, d, l, phi)
+            
+            scattering_table.set(alpha, beta, value)
+            
+    return scattering_table
+
+# Rendering Phase
+def render_single_scattering(scene, camera, light, scattering_table):
+    """
+    Render the scene with single scattering effects and volumetric shadows.
+    """
+    # Step 1: Render Object Silhouettes
+    silhouettes = compute_silhouettes(scene.objects, light.position)
+    
+    # Step 2: Render Volumetric Shadows using Stencil Buffer
+    # Render shadow volumes/planes in back-to-front order
+    shadow_planes = extrude_silhouettes(silhouettes)
+    sort_back_to_front(shadow_planes)
+    
+    for plane in shadow_planes:
+        render_shadow_plane(plane, stencil_buffer=INCREMENT)
+        
+    # Step 3: Render Scene with Single Scattering Shaders
+    for object in scene.objects:
+        # Pass precomputed table and geometric parameters to shader
+        shader = create_shader(scattering_table, light, camera)
+        render_object(object, shader)
+        
+    # Step 4: Composite Final Image
+    # The shader computes:
+    # L_uP = L_dss + e^(-kt*OP)*L(P) + L_a*e^(-kt*OP) + L_oiss
+    # Where L(P) = L_iss + e^(-kt*SP)*L_d(P) + L_a*e^(-kt*SP)
+    return final_image
+
+def compute_integral(alpha, beta, t, h, d, l, phi):
+    """
+    Compute the single scattering integral for given parameters.
+    Uses the angular formulation:
+    L_ss = integral from gamma_0 to pi/2 of (kt * Omega * e^(-kt*t) * gamma_d / (4*pi*h)) *
+           I_S(alpha+beta) * p(alpha+beta) * e^(-kt*h*cos(alpha)) d_alpha
+    """
+    # Define integration bounds
+    gamma_0 = atan(-t/h) + phi
+    gamma_d = atan((d - l*cos(phi))/(l*sin(phi)))
+    
+    # Numerical integration (e.g., Simpson's rule)
+    # In the actual method, this is precomputed and stored in a texture
+    integral_value = 0
+    num_steps = 100
+    step = (pi/2 - gamma_0) / num_steps
+    
+    for i in range(num_steps):
+        a = gamma_0 + i * step
+        # Evaluate integrand at midpoint
+        mid = a + step/2
+        integrand = (kt * Omega * exp(-kt*t) * gamma_d / (4*pi*h)) * \
+                    I_S(mid + beta) * p(mid + beta) * exp(-kt*h*cos(mid))
+        integral_value += integrand * step
+        
+    return integral_value
+```
+
+**Edge Cases and Pitfalls**
+*   **Sharp Edges:** Volume rendering methods using voxels or textured slices are not suitable for shafts of light with sharp edges. This method addresses this by using shadow volumes [S1, unofficial].
+*   **Moving Lights:** Unlike methods that precompute shadow maps (e.g., Dobashi et al.), this method supports moving lights and animated objects as it does not rely on light-specific precomputation [S1, unofficial].
+*   **Homogeneous Media:** The method assumes homogeneous participating media defined all over the scene [S1, unofficial].
+
+## Operating characteristics
+*   **Time Complexity:** Real-time performance is achieved by replacing expensive runtime integration with texture lookups from precomputed 2D tables. The complexity is dominated by the rendering of shadow volumes and the final shading pass, which are hardware-accelerated [S1, unofficial].
+*   **Memory Complexity:** Requires very little additional texture memory compared to voxel-based methods, as only 2D lookup tables are stored [S1, unofficial].
+*   **Strengths:**
+    *   Supports dynamic scenes with moving lights and objects [S1, unofficial].
+    *   Avoids aliasing artifacts associated with shadow maps by using shadow volumes [S1, unofficial].
+    *   Integrates direct single scattering, indirect single scattering, and volumetric shadows [S1, unofficial].
+    *   Simple shader implementation suitable for integration into existing graphics engines [S1, unofficial].
+*   **Limitations:**
+    *   Assumes homogeneous media [S1, unofficial].
+    *   Assumes point light sources that are isotropic [S1, unofficial].
+    *   Requires computation of object silhouettes relative to the light [S1, unofficial].
+*   **When to Use:** Suitable for real-time hardware rendering in computer games and graphics engines where realistic light beams and volumetric shadows are desired for dynamic scenes [S1, unofficial].
+*   **When Not to Use:** Not suitable for scenes with heterogeneous media, complex light sources (e.g., area lights), or when multiple scattering effects are required [S1, unofficial].
+
+## Background
+The method was introduced by Venceslas Biri in 2006 at the 9th International Conference on Computer Games (CGAMES’06) [S1, unofficial]. It builds upon earlier work on single scattering, such as Blinn (1982) and Sun et al. [S1, unofficial]. While Sun et al. considered indirect single scattering, they ignored shadows. Biri's method is the first to integrate direct single scattering, indirect single scattering, and volumetric shadows in a real-time hardware implementation [S1, unofficial]. It addresses the limitations of previous methods, such as the high memory cost of voxel-based approaches and the static-light limitation of shadow map-based methods [S1, unofficial].
+
+## Sources
+[S1] Real Time Single Scattering Effects, https://hal.science/hal-00622215v1, fetched 2026-10-26 (unofficial)

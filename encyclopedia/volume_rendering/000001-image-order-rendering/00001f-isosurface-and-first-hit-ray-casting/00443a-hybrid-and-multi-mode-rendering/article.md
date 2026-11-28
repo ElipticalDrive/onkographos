@@ -1,0 +1,45 @@
+# Hybrid and multi-mode rendering
+## Overview
+Hybrid and multi-mode rendering combines volume rendering and surface rendering techniques to optimize computational cost and visual fidelity [S1]. It solves the problem of efficiently rendering scenes containing both discrete volumetric data and sharp surface boundaries by using clipping planes or proxy meshes to restrict volume integration to the region in front of the nearest surface [S1]. Unlike pure volume rendering, which integrates through the entire ray, or pure mesh rendering, which lacks internal density, this family shortens the ray at the first surface hit to prevent occlusion of volume data behind the surface [S1].
+
+## Shared principles
+Builds on the image-order rendering and isosurface detection principles of [Isosurface and first-hit ray casting](20-isosurface-and-first-hit-ray-casting.md) [G].
+
+## Subtopics
+
+### [Multi-Mode Rendering with Iso-surfaces and Meshes](2165-multi-mode-rendering-with-iso-surfaces-and-meshes.md)
+Combines hardware-accelerated ray-triangle intersection for explicit surface geometry (meshes) and implicit isosurfaces with volume ray marching for volumetric data. It solves the problem of efficiently rendering scenes containing both discrete volumetric data and sharp surface boundaries by using clipping planes to restrict volume integration to the region in front of the nearest surface. Unlike pure volume rendering, which integrates through the entire ray, or pure mesh rendering, which lacks internal density, this method shortens the ray at the first surface hit to prevent occlusion of volume data behind the surface. It is distinguished from [Hybrid Isosurface/DVR Rendering](8367-hybrid-isosurface-dvr-rendering.md) by its explicit support for hardware-accelerated triangle meshes alongside implicit surfaces, and from [Hybrid Implicit Isosurface Ray Tracing](11176-hybrid-implicit-isosurface-ray-tracing.md) by its specific traversal order prioritizing mesh BVHs before iso-surface BVHs.
+
+### [Hybrid Isosurface/DVR Rendering](8367-hybrid-isosurface-dvr-rendering.md)
+A technique for viewpoints inside a volume with a wide field of view, such as virtual colonoscopy, that combines surface rendering for near structures (e.g., the colon wall) with Direct Volume Rendering (DVR) for structures behind it. It sets itself apart from pure isosurface methods by preserving the visibility of internal volumetric details behind the first-hit surface, and from pure DVR by providing sharp, shaded surface definition for the immediate foreground.
+
+### [Hybrid Implicit Isosurface Ray Tracing](11176-hybrid-implicit-isosurface-ray-tracing.md)
+A rendering technique that combines explicit voxel selection with implicit ray-surface intersection to render high-quality, crack-free isosurfaces from rectilinear or adaptive mesh refinement (AMR) volumes. Unlike sample-based methods that use fixed step sizes and often miss surface details in refined regions, this method builds a Bounding Volume Hierarchy (BVH) over active voxel primitives and performs exact implicit intersections within each primitive, avoiding the memory overhead of explicit polygon extraction. It is particularly suited for interactive visualization of large-scale AMR data where surface continuity and detail preservation are critical.
+
+### [Hybrid Volume-Surface Rendering](11497-hybrid-volume-surface-rendering.md)
+A strategy that combines volume rendering with rasterized proxy meshes to enable real-time performance on consumer hardware. It solves the computational bottleneck of pure volume rendering by using a surface approximation to quickly determine the distance to the object, thereby restricting the volume sampling interval. Unlike [Hybrid Isosurface/DVR Rendering](8367-hybrid-isosurface-dvr-rendering.md) which may use explicit isosurfaces for occlusion, this method specifically leverages a decimated proxy mesh derived from the density field to guide cone-casting samples.
+
+### [Mesh-based Neural Rendering](11555-mesh-based-neural-rendering.md)
+A technique that determines the final color of a pixel by evaluating a neural network at the intersection point between a camera ray and a triangular mesh surface, rather than sampling a volumetric field. It reformulates the standard volume rendering integral into a single-point evaluation, assuming the object is solid and opaque. This method distinguishes itself from implicit neural rendering (e.g., [Hybrid Implicit Isosurface Ray Tracing](11176-hybrid-implicit-isosurface-ray-tracing.md)) by operating directly on explicit geometry, allowing the use of differentiable rasterizers for efficient gradient computation.
+
+### [Sur2f](13145-sur2f.md)
+A hybrid representation for multi-view surface reconstruction that learns two parallel streams: an implicit Signed Distance Field (SDF) and an explicit surrogate surface mesh. It unifies volume rendering of the implicit SDF and surface rendering of the surrogate mesh with a shared neural shader to promote convergence to the same underlying surface. Unlike pure implicit methods, it leverages the efficiency of explicit mesh rendering; unlike pure explicit methods, it maintains the topological flexibility of an implicit field.
+
+### [Hybrid Rendering](15213-hybrid-rendering.md)
+Combines volume rendering (ray marching) and surface rendering (rasterization) to optimize computational cost and visual fidelity. It confines ray marching to the region between the viewpoint and a pre-existing mesh surface, treating the mesh intersection as the termination point for volume integration. This approach leverages the mesh for high-fidelity geometry and texture where available, while using the volume to represent complex details or occlusions in front of the surface.
+
+#### Interactive Mode with Deferred Rendering
+- Definition: A rendering mode that prioritizes interaction speed by skipping expensive visibility and suggestive contour calculations during user manipulation [S1].
+- Step: During camera movement or isosurface sweeping, draw only contours (no suggestive contours, no hidden surface removal) [S1]. When motion stops, render the full drawing including suggestive contours and hidden surface removal [S1].
+- Comparison: This mode is necessary because computing suggestive contours and visibility takes significantly more time than contour extraction alone [S1].
+
+#### Multiple Volume Rendering with Surface Models
+- Definition: A method to overlay multiple volume data sets on a 3D surface model by computing contributions of each volume set individually and combining them, optimizing memory access patterns [S2].
+- Step: Classify shader methods into two groups: those where rays fully penetrate the volume (1, 2, 4, 7) and those where rays end at a point inside the volume (3, 5, 6) [S2]. Optimize memory access patterns and compact address blocks to maximize memory caching [S2]. Compute the contributions of each volume data set to the resulting ray per volume individually [S2]. Subsequently combine the individual contributions [S2]. Check if the volume data can contain boundaries using the specified shader method [S2]. Out of all 'bounded' volume data sets, compute the boundary nearest to the viewer for the ray concerned [S2]. Compute 'un-bounded' volume data sets to this nearest boundary point [S2]. Calculate the final color value of the pixel using an optional transfer function [S2]. For the combination with the 3D surface model, inform the graphic-card-based ray-casting algorithm of the position of a boundary (e.g., the building) from the given perspective [S2].
+
+## Background
+Not given in the sources.
+
+## Sources
+[S1] Line drawings from volume data, https://doi.org/10.1145/1073204.1073222, fetched 2026-10-28
+[S2] Volume Rendering in Architecture: Overlapping and combining 3d voxel volume data with 3d building models, https://doi.org/10.52842/conf.ecaade.2012.1.719, fetched 2026-10-26

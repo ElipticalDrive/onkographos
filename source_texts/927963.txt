@@ -1,0 +1,97 @@
+2026-10-12 訂正：旧全コードのmap()はmin(min(body, ground), 0.0)を返し、距離が常に0以下でした。初回の探索で終了するため「完全再現」という説明を撤回します。本文の全コードを、平面とカプセルの最小検証例へ差し替えました。旧Code...
+
+WebGL2のSDFを修正する：正の距離・命中判定・最小描画例 #3DCG - Qiita
+0
+Go to list of users who liked
+0
+Share on X(Twitter)
+Share on Facebook
+Add to Hatena Bookmark
+more_horiz
+Delete article
+close
+Deleted articles cannot be recovered.
+Draft of this article would be also deleted.
+Are you sure you want to delete this article?
+CancelDeletedelete
+@YushiYamamoto(山本 勇志)
+in株式会社プロドウガ
+WebGL2のSDFを修正する：正の距離・命中判定・最小描画例
+3DCG
+WebGL
+シェーダー
+sdf
+レイマーチング
+0
+Last updated at 2026-10-11Posted at 2025-02-18
+2026-10-12 訂正：旧全コードのmap()はmin(min(body, ground), 0.0)を返し、距離が常に0以下でした。初回の探索で終了するため「完全再現」という説明を撤回します。本文の全コードを、平面とカプセルの最小検証例へ差し替えました。旧CodePenの作品と下の最小例は別です。
+旧作品へのリンク
+See the Pen
+蚯蚓の行進 by Yushi Yamamoto (@yamamotoyushi)
+on CodePen.
+旧作品の埋込と画像を保持しています。今回CodePen内のソースは変更・照合しておらず、本文の旧コードがその作品を再現するとは主張しません。
+距離が正になる空間を残す
+SDFは外側で正、境界で0、内側で負となる符号付き距離を表します。球やカプセルの式と、合成・変形した距離場は区別します。旧min(...,0.0)は外側の正の距離を失わせ、d<0.001で即終了させていました。外側で一定の0になると差分による法線も0となり、normalize(0)に依存できません。
+下の例ではカプセルと平面をminで合成し、正の領域を保ちます。カプセルの両端は異なる固定点で、線分への射影の分母は0になりません。時間変化はx方向の平行移動だけです。旧非一様な座標変形やsmooth blendは省き、距離の過大評価を避ける補正を未検証のまま推奨しません。
+固定刻みではなく距離で前進する
+raymarchは広い手法の呼び方ですが、ここでは評価した距離dだけtを増やします。固定ステップという旧説明を訂正します。カメラは外側に置き、abs(d)<0.001で命中、負の距離への飛越し・距離15超・128回で探索を終了します。命中していない点を表面として照明しません。
+法線は軸方向の差分で近似し、長さが極小なら上向きへfallbackします。今回の照明は環境成分と拡散成分だけです。目・瞳・影・鏡面反射・mouseによる角度操作は実装していません。旧iMouseはx>0の分岐しかしておらず、位置に応じた角度操作という説明と一致しませんでした。
+保存して実行する最小コード
+外部libraryやtextureは使いません。WebGL2非対応、shader compile／program link失敗で描画を開始せず、context消失時に予約済frameを止めて再読込を案内します。context復元の自動再構築は実装していません。canvasのdrawing bufferは固定480×320で、device pixel ratioごとの最適化は行っていません。
+```
+<!doctype html><html lang="ja"><meta charset="utf-8"><title>Capsule SDF</title><style>canvas{width:480px;height:320px;max-width:100%}</style><h1>カプセルと平面のSDF</h1><p id="status" role="status"></p><canvas id="scene" width="480" height="320"></canvas><script>
+const canvas=document.getElementById('scene'),status=document.getElementById('status');
+const gl=canvas.getContext('webgl2');let frame=0;
+function stop(message){cancelAnimationFrame(frame);status.textContent=message;}
+try{
+ if(!gl)throw Error('WebGL2に対応していません');
+ function shader(type,source){const s=gl.createShader(type);if(!s)throw Error('shader作成失敗');gl.shaderSource(s,source);gl.compileShader(s);if(!gl.getShaderParameter(s,gl.COMPILE_STATUS)){const reason=gl.getShaderInfoLog(s);gl.deleteShader(s);throw Error(reason||'shader compile失敗');}return s;}
+ const vs=shader(gl.VERTEX_SHADER,`#version 300 es
+ in vec2 position;void main(){gl_Position=vec4(position,0.,1.);}`);
+ const fs=shader(gl.FRAGMENT_SHADER,`#version 300 es
+ precision highp float;uniform vec2 resolution;uniform float time;out vec4 color;
+ float capsule(vec3 p,vec3 a,vec3 b,float r){vec3 pa=p-a,ba=b-a;float h=clamp(dot(pa,ba)/dot(ba,ba),0.,1.);return length(pa-ba*h)-r;}
+ float body(vec3 p){p.x-=.25*sin(time);return capsule(p,vec3(0.,0.,-.8),vec3(0.,0.,.8),.25);}
+ float scene(vec3 p){return min(body(p),p.y+.4);}
+ vec3 normal(vec3 p){vec2 e=vec2(.001,0.);vec3 g=vec3(scene(p+e.xyy)-scene(p-e.xyy),scene(p+e.yxy)-scene(p-e.yxy),scene(p+e.yyx)-scene(p-e.yyx));float n=length(g);return n>1e-8?g/n:vec3(0.,1.,0.);}
+ void main(){vec2 uv=(gl_FragCoord.xy-.5*resolution)/resolution.y;vec3 ro=vec3(2.,1.5,3.);vec3 f=normalize(-ro),r=normalize(cross(f,vec3(0.,1.,0.))),u=cross(r,f);vec3 rd=normalize(f+uv.x*r+uv.y*u);float t=0.;bool hit=false;vec3 p=ro;
+ for(int i=0;i<128;i++){p=ro+rd*t;float d=scene(p);if(abs(d)<.001){hit=true;break;}if(d<0.||t>15.)break;t+=d;}
+ vec3 c=vec3(.15,.25,.35);if(hit){float light=max(dot(normal(p),normalize(vec3(-1.,2.,1.))),0.);vec3 material=body(p)<p.y+.4?vec3(.8,.25,.2):vec3(.45);c=material*(.2+.8*light);}color=vec4(c,1.);}`);
+ const program=gl.createProgram();if(!program)throw Error('program作成失敗');gl.attachShader(program,vs);gl.attachShader(program,fs);gl.linkProgram(program);gl.deleteShader(vs);gl.deleteShader(fs);if(!gl.getProgramParameter(program,gl.LINK_STATUS))throw Error(gl.getProgramInfoLog(program)||'link失敗');gl.useProgram(program);
+ const buffer=gl.createBuffer();if(!buffer)throw Error('buffer作成失敗');gl.bindBuffer(gl.ARRAY_BUFFER,buffer);gl.bufferData(gl.ARRAY_BUFFER,new Float32Array([-1,-1,1,-1,-1,1,1,1]),gl.STATIC_DRAW);const loc=gl.getAttribLocation(program,'position');if(loc<0)throw Error('position未取得');gl.enableVertexAttribArray(loc);gl.vertexAttribPointer(loc,2,gl.FLOAT,false,0,0);
+ const res=gl.getUniformLocation(program,'resolution'),time=gl.getUniformLocation(program,'time');if(res===null||time===null)throw Error('uniform未取得');
+ canvas.addEventListener('webglcontextlost',event=>{event.preventDefault();stop('context消失。再読み込みしてください');});
+ function render(now){gl.viewport(0,0,canvas.width,canvas.height);gl.uniform2f(res,canvas.width,canvas.height);gl.uniform1f(time,now/1000);gl.drawArrays(gl.TRIANGLE_STRIP,0,4);frame=requestAnimationFrame(render);}
+ status.textContent='描画開始';frame=requestAnimationFrame(render);
+}catch(error){stop(error.message);}
+</script></html>
+```
+確認したことと残ること
+ローカルのheadless Chromiumで6項目を確認しました。shader compile/linkを通って描画を開始し、JavaScript例外なし、WebGL error=0、pixel readbackに複数色が含まれること、context消失時の停止表示、WebGL2非対応時の表示です。pixel照合では同じ処理内で描画してreadPixelsしました。通常の既定bufferはpresentation後に保持されるとは限りません。
+この確認は「ミミズがリアルに再現された」という視覚評価ではありません。実端末GPU、他ブラウザ、長時間負荷、性能、accessibility、compile/link失敗を注入した分岐、旧CodePenとの差分は未確認です。step数を増やせば必ず細部が出るとは限らず、距離場と閾値、最大距離、GPU負荷を合わせて評価します。
+MDNのshader compile APIでAPIの役割を確認しました。compile呼出しだけで成功と扱わず、コードでCOMPILE_STATUSとLINK_STATUSを検査しています。
+この記事を書いた人✏️@YushiYamamoto
+ITPRODX.com代表 / AIアーキテクト
+Next.js / TypeScript / n8nを活用した自律型アーキテクチャ設計を専門としています。
+日々の自動化の検証結果や、ビジネス側の視点（ROI等）に関するより深い考察は、以下の公式サイトおよびnoteで発信しています。
+0
+Go to list of users who liked
+0
+comment0
+Go to list of comments
+Register as a new user and use Qiita more conveniently
+You get articles that match your needs
+You can efficiently read back useful information
+You can use dark theme
+What you can do with signing up
+Sign upLogin
+0
+Go to list of users who liked
+0
+more_horiz
+Delete article
+close
+Deleted articles cannot be recovered.
+Draft of this article would be also deleted.
+Are you sure you want to delete this article?
+CancelDeletedelete

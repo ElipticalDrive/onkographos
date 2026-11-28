@@ -1,0 +1,123 @@
+--- v001.md
++++ v002.md
+@@ -1,62 +1,79 @@
+ # Multi-Resolution Rendering for Clouds
+-
+ Also called: Low-resolution first rendering for clouds, Progressive resolution cloud rendering
+ 
+ ## Overview
+-Multi-resolution rendering for clouds is an acceleration technique that limits the total number of volume samples by initially rendering the scene at a low resolution to identify regions requiring detailed sampling, followed by higher-resolution passes in those specific areas [S1, unofficial]. This approach distinguishes itself from sibling methods like [Resolution Adaptation](3063-resolution-adaptation.md) by decoupling the coarse visibility/structure estimation from the fine detail accumulation, rather than dynamically adjusting step sizes or sampling probabilities per ray based on local error metrics. It addresses the high computational cost of volumetric cloud rendering by avoiding expensive high-resolution queries in empty or uniform sky regions.
++Multi-resolution rendering for clouds is an acceleration technique that limits the total number of volume samples by initially rendering the cloud field at a low resolution to identify regions requiring detailed sampling, then accumulating the final image with higher-resolution passes [S1, unofficial]. Unlike standard adaptive sampling which varies sample counts per pixel based on local error metrics, this method varies the spatial resolution of the entire rendering pass, using the coarse pass as a guide to skip or reduce expensive high-frequency evaluations in empty or uniform areas [S1, unofficial].
+ 
+ ## How it works
+-The method operates in two distinct phases: a coarse pass and a refinement pass.
+-
+-**Inputs:**
+-- Cloud volume data (density field $\rho$, scattering properties).
+-- Camera parameters (view matrix, projection matrix).
+-- Target output resolution $R_{high}$ and initial low resolution $R_{low}$ (where $R_{low} \ll R_{high}$).
+-
+-**Outputs:**
+-- Final accumulated color buffer $C_{final}$.
++**Inputs and Outputs:**
++*   **Input:** A volumetric cloud density field $\rho(x,y,z)$, a camera configuration, and a target output resolution $R_{target}$.
++*   **Output:** A final rendered image $I_{final}$.
+ 
+ **Data Structures:**
+-- $C_{low}$: Color buffer at resolution $R_{low} \times R_{low}$.
+-- $C_{high}$: Color buffer at resolution $R_{high} \times R_{high}$, initialized to zero.
+-- $M_{mask}$: Binary mask at resolution $R_{high} \times R_{high}$ indicating regions to refine.
++*   **Coarse Buffer:** A framebuffer of resolution $R_{low} \ll R_{target}$ storing intermediate density or color values.
++*   **Fine Buffer:** A framebuffer of resolution $R_{target}$ storing the accumulated result.
+ 
+ **Steps:**
+-
+-1.  **Coarse Pass:** Render the cloud volume at resolution $R_{low}$. For each pixel $(u, v)$ in the low-res grid, cast a ray and perform standard volume integration (e.g., ray marching) to compute color $C_{low}(u, v)$. This pass uses a reduced number of samples or a lower-resolution density field to execute quickly [S1, unofficial].
+-
+-2.  **Upsampling and Masking:** Upsample $C_{low}$ to the resolution $R_{high} \times R_{high}$ using bilinear or nearest-neighbor interpolation to create a base color estimate $C_{base}$. Simultaneously, generate a mask $M_{mask}$ to identify pixels that require refinement. A pixel is marked for refinement if:
+-    - The low-resolution color indicates significant density (e.g., $\rho_{avg} > \epsilon$).
+-    - The gradient of the low-resolution color exceeds a threshold, indicating edges or complex structures.
+-    - The low-resolution pass failed to converge or has high variance.
+-    [S1, unofficial]
+-
+-3.  **Refinement Pass:** For each pixel $(i, j)$ in the high-resolution grid:
+-    - If $M_{mask}(i, j)$ is false, set $C_{high}(i, j) = C_{base}(i, j)$.
+-    - If $M_{mask}(i, j)$ is true, cast a ray at high resolution and perform volume integration with a higher sample count or finer step size. Compute the refined color $C_{refined}(i, j)$.
+-    - Combine the base and refined colors. A simple accumulation is:
+-      $$ C_{high}(i, j) = C_{refined}(i, j) $$
+-      Alternatively, the low-res result can serve as a bias or initial guess, but the primary goal is to replace the low-fidelity estimate with high-fidelity data only where necessary [S1, unofficial].
+-
+-4.  **Final Output:** The buffer $C_{high}$ is the final rendered image.
++1.  **Low-Resolution Pass:** Render the cloud volume at resolution $R_{low}$. This involves casting rays and performing volume integration (e.g., ray marching) at the lower resolution. This pass is computationally cheap and provides a quick indication of where the cloud density is significant [S1, unofficial].
++2.  **Analysis:** Identify pixels in the low-resolution buffer that correspond to empty space or low-density regions. These areas require fewer samples in the subsequent pass [S1, unofficial].
++3.  **High-Resolution Accumulation:** Render the cloud volume at resolution $R_{target}$. For pixels identified as low-complexity in step 2, reduce the number of samples or skip the ray march entirely, using the low-resolution result or a constant background value. For high-complexity pixels, perform full-resolution ray marching [S1, unofficial].
++4.  **Composition:** Combine the results. The low-resolution pass acts as a guide; the high-resolution pass refines the details only where necessary. The final image is accumulated from these passes [S1, unofficial].
+ 
+ **Parameters:**
+-- $R_{low}$: Typically $1/4$ to $1/16$ of $R_{high}$ in each dimension.
+-- $\epsilon$: Density threshold for mask generation. Not given in the sources.
++*   $R_{low}$: The initial low resolution. Typical values are not given in the sources.
++*   $R_{target}$: The final output resolution.
+ 
+-**Edge Cases:**
+-- **Temporal Consistency:** Rapid changes in resolution masks between frames can cause flickering. The source notes that temporal accumulation is difficult to apply to clouds due to velocity vectors, implying that this method may require careful temporal filtering or is best suited for static or slowly moving scenes [S1, unofficial].
+-- **Aliasing:** Upsampling $C_{low}$ may introduce artifacts if the low-res pass did not adequately sample high-frequency details.
++**Edge Cases and Pitfalls:**
++*   **Aliasing:** Switching between resolutions may introduce visible seams or aliasing artifacts if not handled carefully [S1, unofficial].
++*   **Complexity:** The technique adds complexity to the rendering pipeline, as it requires managing multiple passes and buffers [S1, unofficial].
++
++**Pseudocode:**
++```python
++def multi_resolution_cloud_rendering(camera, cloud_field, R_target):
++    # Define low resolution, typically a fraction of target
++    R_low = R_target / 4  # Example ratio, not specified in sources
++    
++    # Step 1: Low-resolution pass
++    # Render at low resolution to get a quick indication of density
++    low_res_image = render_cloud_at_resolution(camera, cloud_field, R_low)
++    
++    # Step 2: Identify regions needing high resolution
++    # This could be based on density threshold or gradient
++    # Not fully specified in sources, so we assume a simple density check
++    high_detail_mask = compute_high_detail_mask(low_res_image, threshold=0.1)
++    
++    # Step 3: High-resolution pass with adaptive sampling
++    # Initialize final image
++    final_image = zeros_like(R_target)
++    
++    for each pixel (x, y) in R_target:
++        if high_detail_mask[x, y]:
++            # Full resolution ray marching for high-detail areas
++            color = ray_march_cloud(camera, cloud_field, x, y, samples=64)
++        else:
++            # Skip or use low-res result for low-detail areas
++            # Bilinear interpolation from low_res_image to match R_target
++            color = interpolate(low_res_image, x, y)
++        
++        final_image[x, y] = color
++        
++    return final_image
++```
+ 
+ ## Subtopics
+ 
++### [Iteratively Increasing Resolution](9448-iteratively-increasing-resolution.md)
++Iteratively Increasing Resolution is a rendering strategy that reduces computation time by starting at a low resolution and gradually increasing it to the target final resolution. It solves the problem of expensive high-resolution ray-surface intersection tests by deferring them until necessary, using cone-tracing to guarantee that no surface points are skipped during the resolution transition. Unlike standard adaptive sampling which varies sample counts per pixel, this method varies the spatial resolution of the entire rendering pass, building on the acceleration principles of [Multi-Resolution Rendering for Clouds](7260-multi-resolution-rendering-for-clouds.md) but applied specifically to sphere tracing and SDF rendering.
++
+ ## Operating characteristics
+-- **Time Complexity:** $O(N_{low} \cdot S_{low} + N_{refine} \cdot S_{high})$, where $N_{low}$ is the number of low-res pixels, $S_{low}$ is samples per low-res ray, $N_{refine}$ is the number of pixels marked for refinement, and $S_{high}$ is samples per high-res ray. Since $N_{refine} \ll N_{high}$ and $S_{low} \ll S_{high}$, this is significantly faster than full high-resolution rendering.
+-- **Memory Complexity:** Requires storage for two color buffers and a mask at high resolution.
+-- **Strengths:** Reduces total sample count by avoiding high-resolution queries in empty or uniform regions.
+-- **Limitations:** Requires two passes. Temporal stability is challenging. The source author did not implement this, so exact performance metrics are not provided [S1, unofficial].
++*   **Time Complexity:** Reduces total computation time by avoiding full-resolution ray marching in empty or uniform regions. The cost is dominated by the low-resolution pass plus the high-resolution pass only for relevant pixels.
++*   **Memory Complexity:** Requires additional memory for the low-resolution buffer and the high-resolution buffer.
++*   **Strengths:** Effective for scenes with large empty spaces or uniform cloud regions, significantly reducing sample count.
++*   **Limitations:** Adds pipeline complexity; may introduce artifacts at resolution boundaries; not suitable for highly dynamic or temporally coherent scenes without additional techniques like temporal accumulation [S1, unofficial].
++*   **When to Use:** When rendering static or slowly moving clouds with significant empty space.
++*   **When Not to Use:** When high temporal coherence is required and the overhead of managing multiple passes outweighs the savings, or for highly detailed, dense clouds where most pixels require full resolution.
+ 
+ ## Background
+-This technique was proposed as a potential optimization for efficient volumetric cloud rendering. The author of the source considered it but did not implement it, suspecting it could be very effective. The idea is to use a low-resolution pass to guide a higher-resolution pass, limiting the number of expensive samples [S1, unofficial].
++The technique was proposed by the author of the three.js forum post "Efficient volumetric clouds" as a potential optimization for cloud rendering [S1, unofficial]. The author considered it but did not implement it, suspecting it could be very effective. The idea is to use a low-resolution pass to guide a higher-resolution pass, limiting the number of samples needed [S1, unofficial].
+ 
+ ## Sources

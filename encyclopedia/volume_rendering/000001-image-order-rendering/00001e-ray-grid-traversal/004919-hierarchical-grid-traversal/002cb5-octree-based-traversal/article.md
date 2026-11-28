@@ -1,0 +1,42 @@
+# Octree-based traversal
+
+Also called: Sparse Voxel Octree (SVO) traversal, Octree sphere tracing, Detail-adaptive octree sampling
+
+## Overview
+Octree-based traversal accelerates rendering by recursively navigating a hierarchical spatial subdivision to skip empty or low-detail regions, thereby reducing intersection tests and sampling operations [G]. It solves the performance bottleneck of dense voxel traversal by allowing rays to take larger steps through empty space [G]. Unlike [Hierarchical Grid Traversal](2560-hierarchical-grid-traversal.md) which uses fixed-level mipmap grids, this family explicitly uses regular 2×2×2 subdivision to build a sparse hierarchy, distinguishing it from siblings that focus on hash grids or specific traversal optimizations [G].
+
+## Shared principles
+All methods in this family share the core mechanism of hierarchical spatial partitioning using octrees (or quadtrees for 2D terrain) to cull empty space [G].
+
+1. **Spatial Subdivision**: The domain is divided recursively into 8 sub-cubes (octants) [G]. A node is classified as `Empty`, `Leaf`, or `Branch` [G].
+2. **Ray-Node Intersection**: For each node, the ray is tested against the node's Axis-Aligned Bounding Box (AABB) [G]. If the ray misses, the node is skipped [G].
+3. **Traversal Logic**:
+    * **Empty Nodes**: Skipped immediately. The exit time (Time of Intersection, TOI) is calculated to determine the next node to visit [G].
+    * **Branch Nodes**: The ray intersection point is compared to the node's midpoint to determine which of the 8 children to descend into [G].
+    * **Leaf Nodes**: Processing occurs here [G]. For volume rendering, this involves sampling or checking for active values [G]. For implicit surfaces, this involves sphere tracing or distance evaluation [G].
+4. **Exit Calculation**: When a node is fully traversed or missed, the exit time $t_{exit}$ for side $s$ in dimension $dim$ is calculated as:
+$$ t_{exit} = \frac{B - \mathbf{o}_{dim}}{\mathbf{d}_{dim}} $$
+where $B$ is the world-space bound value and $\mathbf{o}_{dim}$ is the ray origin component [G].
+5. **Backtracking**: If the ray exits a node, the traversal backtracks to the parent or sibling based on the exit side and ray direction [G].
+
+## Subtopics
+
+### [Sparse Voxel Traversal](1525-sparse-voxel-traversal.md)
+Sparse Voxel Traversal is a hierarchical ray-intersection method that accelerates volume rendering by recursively traversing a sparse voxel octree (SVO) to find intersections with leaf nodes or branches, skipping empty regions to reduce sampling cost. It solves the performance bottleneck of dense voxel traversal by allowing the ray to take larger steps through empty space, significantly reducing the total number of intersection tests and node visits required to reach active data. Unlike [Voxel Grid Raycasting](2218-voxel-grid-raycasting.md) which steps through every voxel boundary in a uniform grid, this method uses hierarchical spatial subdivision to find non-empty space faster. It is distinguished from its siblings by its explicit use of regular 2×2×2 subdivision and mid-plane sorting logic for interior nodes, whereas other methods may focus purely on traversal optimization or specific data structures like hash grids. Choose it when rendering sparse volumetric data with high empty-space ratios.
+
+### [Octree Partitioning for Sphere Tracing](1541-octree-partitioning-for-sphere-tracing.md)
+Octree partitioning for sphere tracing accelerates implicit surface rendering by dividing the spatial domain into an octree, allowing the imposition of local Lipschitz bounds on the signed distance function (SDF). This yields tighter distance bounds than global bounds, enabling the culling of octree nodes guaranteed not to intersect the implicit surface, which solves slow convergence in high-gradient regions. Choose it when rendering complex implicit surfaces where global Lipschitz constants cause excessive step sizes.
+
+### [Octree Enhancement](1566-octree-enhancement.md)
+Octree Enhancement replaces expensive distance evaluations in sphere tracing with octree parsing overhead to accelerate convergence. It sets itself apart from standard sphere tracing by using spatial hierarchy to skip empty space, though experiments on simple scenes have shown it may not always outperform other enhancements like convexity or triangle inequality optimizations. Choose it for complex scenes where unenhanced sphere tracing produces a humped step-size distribution and oscillations at high end of the spectrum.
+
+### [Block-based Quadtree Index with GPU Frustum Culling](10846-block-based-quadtree-index-with-gpu-frustum-culling.md)
+This method organizes large-scale terrain data into a block-based quadtree index where node metadata (bounding boxes, hierarchy levels, offsets) is packed into a compact structure array residing entirely in GPU video memory. It solves the CPU traversal and assembly overhead bottleneck by executing frustum culling and occlusion determination in parallel on the GPU via compute shaders, with each thread processing one node to output a list of visible nodes and their Level of Detail (LOD) levels. It differs from CPU-side hierarchical traversal by offloading the culling logic to the GPU, leveraging parallel processing for cache-friendly Z-order storage. Choose it for rendering massive terrain datasets where CPU-GPU synchronization is a bottleneck.
+
+### [Detail-adaptive Octree Sampling](13594-detail-adaptive-octree-sampling.md)
+Detail-adaptive Octree Sampling is a method for rendering irregular or curvilinear grids by sampling the data into a detail-adaptive octree where the local height (resolution) is determined by the local granularity of the source grid. It solves the problem of fixed-resolution limitations in regular grids, which often require excessive storage and rendering time to capture the smallest cells of an irregular dataset. Unlike its siblings, which may use uniform sparse voxel grids or sphere-tracing partitioning, this method explicitly adapts the octree structure to the varying density of the input data. Choose it when rendering irregular or curvilinear grids where uniform sampling is inefficient.
+
+## Background
+The concept of using octrees for ray tracing was introduced by Williams [G]. The specific application to sparse voxel volumes for rendering was popularized by Laine and Karras [G]. The use of octrees for sphere tracing implicit surfaces was explored by Akenine-Möller et al. [G]. GPU-based frustum culling for quadtree terrain was detailed by [G].
+
+## Sources

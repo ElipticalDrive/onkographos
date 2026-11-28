@@ -1,0 +1,193 @@
+--- v012.md
++++ v013.md
+@@ -1,127 +1,92 @@
+ # NeRF Editing Procedure
+ 
+-Also called: Feature Field Distillation Editing, DFF Editing
++Also called: Feature Field Distillation Editing, DFF-based Editing
+ 
+ ## Overview
+-This method enables direct, differentiable editing of a trained NeRF representation $f_\theta$ by modulating the density and color outputs at specific 3D coordinates based on semantic or geometric queries, without requiring iterative optimization of the network weights [S1]. It distinguishes itself from optimization-based siblings like [NeRF-In](12372-nerf-in-inpainting-optimization.md) by performing edits as a post-processing inference-time transform using a distilled Feature Field (DFF), allowing for immediate application of deletion, colorization, and geometric transformations [S1].
++The NeRF Editing Procedure [S1] enables direct manipulation of a pre-trained Neural Radiance Field (NeRF) by integrating a Distilled Feature Field (DFF) to guide density and color transformations. Unlike methods that rely on iterative 2D guidance or external diffusion models for every view [S2], this approach defines edits through coordinate selection probabilities derived from semantic or feature queries, allowing for deletion, colorization, and geometric translation/rescaling directly within the volume rendering loop. It sets itself apart by decoupling the editing logic from the NeRF's internal weights during inference, using a separate teacher network to determine *where* and *how* to edit [S1].
+ 
+ ## How it works
+ **Inputs:**
+-*   A trained NeRF $f_\theta$ mapping $(\mathbf{x}, \mathbf{d}) \to (\sigma, \mathbf{c})$.
+-*   A distilled Feature Field (DFF) or teacher network (e.g., LSeg, DINO) capable of providing semantic probability $p$ for a coordinate $\mathbf{x}$ [S1].
+-*   An editing query defining a set of target coordinates or semantic classes.
+-*   A user-defined probability threshold $\tau$ for selection [S1].
+-*   For geometric edits: an editing transformation function $g$ and its inverse $g^{-1}$ [S1].
++*   Pre-trained NeRF representation $f_\theta$ mapping $(\mathbf{x}, \mathbf{d}) \to (\sigma, \mathbf{c})$, where $\mathbf{x}$ is 3D coordinate and $\mathbf{d}$ is view direction.
++*   Distilled Feature Field (DFF) model $f_{DFF}$, typically a teacher network (e.g., LSeg or DINO) [S1].
++*   Editing query $Q$ (e.g., text prompt, semantic label, or geometric transformation parameters).
++*   User-defined selection threshold $\tau \in [0, 1]$.
++*   Colorization function $b(\cdot)$ for color editing [S1].
++*   Inverse editing transformation $g^{-1}(\cdot)$ for translation/rescaling [S1].
+ 
+ **Outputs:**
+-*   Edited pixel colors $\hat{C}(r)$ for rays $r$.
++*   Edited rendered image $I'$.
+ 
+ **Data Structures:**
+-*   **Ray Samples:** A list of points $\{\mathbf{x}_i\}$ along a ray, with distances $\delta_i$.
+-*   **DFF Query:** A function $Q(\mathbf{x})$ returning a probability $p \in [0, 1]$ that $\mathbf{x}$ matches the editing query [S1].
++*   **Ray:** A sequence of sampled points $\mathbf{x}_i$ along a camera ray.
++*   **DFF Query Result:** Probability $p \in [0, 1]$ indicating the likelihood that coordinate $\mathbf{x}$ matches the editing query $Q$.
+ 
+ **Steps:**
+-1.  **Ray Sampling:** Sample points $\mathbf{x}_i$ along the ray $r$ as in standard NeRF rendering [S1].
+-2.  **Query Evaluation:** For each point $\mathbf{x}_i$, query the DFF to obtain the selection probability $p_i = Q(\mathbf{x}_i)$ [S1].
+-3.  **Selection Logic:** Define the point as "selected" if $p_i > \tau$. Alternatively, use a soft mixture where the contribution is weighted by $p_i$ [S1].
+-4.  **Transform Application:**
+-    *   **If not selected:** Compute density $\sigma_i$ and color $\mathbf{c}_i$ using the vanilla NeRF $f_\theta(\mathbf{x}_i, \mathbf{d})$ [S1].
+-    *   **If selected:** Apply the specific editing transform:
+-        *   **Deletion:** Set $\sigma_i = 0$. The color $\mathbf{c}_i$ becomes irrelevant for transmittance but may be retained for blending if needed [S1].
+-        *   **Color Editing:** Query the NeRF for $\sigma_i$ and $\mathbf{c}_i$. Transform the color using a colorization function $b(\cdot)$, resulting in $\mathbf{c}'_i = b(\mathbf{c}_i)$ [S1].
+-        *   **Translation/Rescaling:** Compute the inverse transformed coordinate $\mathbf{x}'_i = g^{-1}(\mathbf{x}_i)$ [S1].
+-            *   Query the DFF for $\mathbf{x}'_i$. If $\mathbf{x}'_i$ is also selected, use $\mathbf{x}'_i$ to query the NeRF for density $\sigma'_i$ and color $\mathbf{c}'_i$ [S1].
+-            *   If both $\mathbf{x}_i$ and $\mathbf{x}'_i$ are selected and have non-zero density, mix the colors $\mathbf{c}_i$ and $\mathbf{c}'_i$ in proportion to their respective alphas (transmittance contributions) [S1].
+-5.  **Volume Rendering:** Perform standard volume rendering using the modified series of $(\sigma_i, \mathbf{c}_i)$ tuples [S1].
++1.  **Ray Sampling:** For each pixel, sample a set of points $\{\mathbf{x}_1, \dots, \mathbf{x}_K\}$ along the viewing ray, as in standard NeRF volume rendering [S1].
++2.  **Coordinate Selection:** For each point $\mathbf{x}_i$, query the DFF to obtain the probability $p_i$ that $\mathbf{x}_i$ matches the editing query $Q$ [S1].
++    *   Define the selection status $s_i$:
++        $$ s_i = \begin{cases} \text{Selected} & \text{if } p_i \geq \tau \\ \text{Not Selected} & \text{if } p_i < \tau \end{cases} $$
++    *   *Note:* The source also mentions using a mixture of selected and not-selected results proportional to $p$ without a hard threshold, but the primary procedure uses the threshold $\tau$ [S1].
++3.  **Transform Application:** For each point $\mathbf{x}_i$, compute the effective density $\sigma'_i$ and color $\mathbf{c}'_i$ based on $s_i$:
++    *   **If Not Selected ($s_i = \text{Not Selected}$):**
++        *   Query the vanilla NeRF: $(\sigma_i, \mathbf{c}_i) = f_\theta(\mathbf{x}_i, \mathbf{d})$.
++        *   Set $(\sigma'_i, \mathbf{c}'_i) = (\sigma_i, \mathbf{c}_i)$ [S1].
++    *   **If Selected ($s_i = \text{Selected}$):** Apply one of the following transforms based on the editing intent [S1]:
++        *   **Deletion:** Set density to zero.
++            $$ \sigma'_i = 0, \quad \mathbf{c}'_i = \mathbf{c}_i \quad (\text{color irrelevant as } \sigma'=0) $$
++        *   **Color Editing:**
++            *   Query NeRF: $(\sigma_i, \mathbf{c}_i) = f_\theta(\mathbf{x}_i, \mathbf{d})$.
++            *   Transform color: $\mathbf{c}'_i = b(\mathbf{c}_i)$.
++            *   Keep density: $\sigma'_i = \sigma_i$.
++        *   **Translation / Rescaling:**
++            *   Compute deformed coordinate: $\mathbf{x}_0 = g^{-1}(\mathbf{x}_i)$, where $g$ is the forward editing transformation (e.g., translation vector addition) [S1].
++            *   Query DFF for $\mathbf{x}_0$ to get probability $p_0$.
++            *   Determine selection status $s_0$ for $\mathbf{x}_0$ using threshold $\tau$.
++            *   **Case A:** If $s_0 = \text{Not Selected}$:
++                *   Use original point $\mathbf{x}_i$ for NeRF query.
++                *   $(\sigma'_i, \mathbf{c}'_i) = f_\theta(\mathbf{x}_i, \mathbf{d})$.
++            *   **Case B:** If $s_0 = \text{Selected}$:
++                *   Query NeRF for $\mathbf{x}_0$: $(\sigma_0, \mathbf{c}_0) = f_\theta(\mathbf{x}_0, \mathbf{d})$.
++                *   Query NeRF for $\mathbf{x}_i$: $(\sigma_i, \mathbf{c}_i) = f_\theta(\mathbf{x}_i, \mathbf{d})$.
++                *   **Boundary Mixing:** If both $\mathbf{x}_i$ and $\mathbf{x}_0$ are selected and have non-zero density (e.g., at object boundaries), mix colors based on their alphas:
++                    $$ \alpha_i = 1 - e^{-\sigma_i \Delta t}, \quad \alpha_0 = 1 - e^{-\sigma_0 \Delta t} $$
++                    $$ \mathbf{c}'_i = \frac{\alpha_i \mathbf{c}_i + \alpha_0 \mathbf{c}_0}{\alpha_i + \alpha_0} $$
++                    $$ \sigma'_i = \sigma_i \quad (\text{or combined density, source specifies mixing colors for simplicity}) $$
++                *   If only one is selected, use the corresponding $(\sigma, \mathbf{c})$ pair [S1].
++4.  **Volume Rendering:** Perform standard volume rendering using the modified series of $(\sigma'_i, \mathbf{c}'_i)$ tuples to compute the final pixel color [S1].
+ 
+-**Pseudocode:**
+-```python
+-def render_edited_ray(ray, nerf_model, dff_query, editing_transform, threshold):
+-    """
+-    Renders a single ray with editing applied via DFF.
+-    """
+-    # 1. Sample points along the ray
+-    points = sample_points_along_ray(ray)
+-    
+-    rendered_color = 0.0
+-    transmittance = 1.0
+-    
+-    for x in points:
+-        # 2. Query DFF for selection probability
+-        p = dff_query(x)
+-        
+-        # 3. Determine if point is selected
+-        is_selected = p > threshold
+-        
+-        if not is_selected:
+-            # 4a. Vanilla NeRF query
+-            sigma, color = nerf_model(x, ray.direction)
+-        else:
+-            # 4b. Apply editing transform
+-            sigma, color = nerf_model(x, ray.direction)
+-            
+-            if editing_transform.type == "deletion":
+-                sigma = 0.0
+-            elif editing_transform.type == "color":
+-                color = editing_transform.function(color)
+-            elif editing_transform.type == "translation":
+-                # Compute inverse coordinate
+-                x_prime = editing_transform.inverse(x)
+-                
+-                # Check if inverse coordinate is also selected
+-                p_prime = dff_query(x_prime)
+-                is_selected_prime = p_prime > threshold
+-                
+-                if is_selected_prime:
+-                    sigma_prime, color_prime = nerf_model(x_prime, ray.direction)
+-                    # Mix colors based on alpha ratio if both have density
+-                    if sigma > 0 and sigma_prime > 0:
+-                        # Simplified mixing: weighted by sigma (approx alpha contribution)
+-                        total_sigma = sigma + sigma_prime
+-                        alpha_mix = sigma / total_sigma
+-                        color = alpha_mix * color + (1 - alpha_mix) * color_prime
+-                        sigma = sigma_prime # Use the density of the transformed point for rendering weight
+-                    else:
+-                        # Fallback if one has zero density
+-                        if sigma_prime > 0:
+-                            sigma = sigma_prime
+-                            color = color_prime
+-                else:
+-                    # x_prime not selected, use original x but potentially apply transform logic if defined
+-                    # Standard behavior: use original x values if inverse not selected
+-                    pass
+-        
+-        # 5. Volume rendering step
+-        weight = transmittance * (1.0 - exp(-sigma * ray.delta))
+-        rendered_color += weight * color
+-        transmittance *= exp(-sigma * ray.delta)
+-        
+-        if transmittance < 1e-4:
+-            break
+-            
+-    return rendered_color
+-```
++**Parameters:**
++*   $\tau$: User-defined threshold for coordinate selection. Typical values not specified in sources, but must be in $[0, 1]$ [S1].
++*   $b(\cdot)$: Colorization function (e.g., learned mapping or heuristic) [S1].
++*   $g^{-1}(\cdot)$: Inverse geometric transformation [S1].
++
++**Edge Cases and Pitfalls:**
++*   **Boundary Artifacts:** When translating objects, points near the boundary may have both $\mathbf{x}$ and $\mathbf{x}_0$ selected. The source suggests mixing colors in the ratio of their alphas for simplicity, which may cause blending artifacts if densities are high [S1].
++*   **Threshold Sensitivity:** The choice of $\tau$ directly controls the extent of the edit. A high threshold may result in incomplete editing, while a low threshold may affect unintended regions [S1].
++*   **DFF Accuracy:** The quality of editing depends on the DFF's ability to accurately segment or feature-match the query. Misalignment between the DFF and the NeRF geometry can lead to erroneous selections [S1].
+ 
+ ## Subtopics
+ 
+ ### Local Editing via SAM and Depth Propagation
+-A technique to edit specific objects within a NeRF without altering the background, using 2D segmentation masks propagated across views via depth information [S2]. It employs the Segment Anything Model (SAM) to derive masks for each image, allowing users to isolate a target instance with a single point [S2]. The identified mask is then projected across different views using depth information, continuing as long as the projected mask sufficiently overlaps with the corresponding mask in the current view, ensuring multi-view consistency [S2]. This addresses the pitfall of existing methods that often induce simultaneous changes in both background and foreground [S2].
++A technique to edit specific objects within a NeRF without altering the background, using 2D segmentation masks propagated across views via depth information [S2]. It employs the Segment Anything Model (SAM) to derive masks for all components in each image, allowing users to isolate a target instance with a single point [S2]. The identified mask is then projected across different views progressively using depth information, continuing as long as the projected mask sufficiently overlaps with the corresponding mask in the current view [S2]. The wrapped segmentation mask is integrated with the segmented masks in the current view to enable exclusive modification of the target object [S2]. This method addresses the pitfall of existing methods that often induce simultaneous changes in both background and foreground [S2].
+ 
+ ### ViCA-NeRF Warm-Up
+-A strategy to efficiently warm up the editing process by blending edits directly before the entire iterative editing process, accelerating convergence while preserving consistency [S2]. It randomly selects a view to edit and projects the edited view onto all other views [S2]. The update for a view $i$ given an edited view $j$ is calculated as:
++A strategy to efficiently warm up the editing process by blending edits directly before the entire editing process, accelerating editing while preserving consistency [S2]. It randomly selects a view to edit and projects the edited view onto all other views [S2]. The update for a given view $i$ and edited view $j$ is calculated as:
+ $$ I'_i = \lambda I_i \odot m_w + (1 - \lambda) I_{i,j} \odot m_w + I_i \odot (1 - m_w) $$
+-where $m_w$ is the binary mask for the projected area and $\lambda$ controls the ratio preserved from the original pixel value [S2].
++where $m_w$ is the binary mask for the projected area and $\lambda$ is a hyperparameter controlling the ratio preserved from the original pixel value [S2].
+ 
+ ### NeRF-RPN Application
+-A method for scene editing using object detection proposals [S3]. It edits the scene by setting the density inside a proposal bounding box to zero during rendering, effectively removing the detected object [S3].
++A method for scene editing using object proposals from NeRF-RPN [S3]. It edits the scene by setting the density inside the proposal bounding box to zero when rendering, effectively removing the detected object [S3].
+ 
+ ## Operating characteristics
+-*   **Time Complexity:** The editing step adds a constant overhead per sample point for the DFF query and potential inverse transformation lookup. It avoids the iterative gradient descent required by optimization-based methods, making inference significantly faster per frame once the DFF is distilled [S1].
+-*   **Memory Complexity:** Requires storing the distilled Feature Field (DFF) or teacher network features in addition to the NeRF weights [S1].
+-*   **Strengths:** Immediate application of edits; supports semantic (colorization) and geometric (translation/deletion) edits simultaneously; no retraining of the NeRF backbone required [S1].
+-*   **Limitations:** Quality depends on the accuracy of the DFF/teacher network; geometric edits may suffer from aliasing or artifacts at boundaries if the transformation is not smooth [S1].
++*   **Time Complexity:** Depends on the number of samples per ray and the cost of querying the DFF. The DFF query is performed for every sample point, adding overhead to the standard NeRF rendering time [S1].
++*   **Memory Complexity:** Requires storing the pre-trained NeRF weights and the DFF model weights. No additional large data structures are mentioned for the core editing procedure [S1].
++*   **Strengths:** Allows for direct, non-iterative editing of NeRFs using semantic or geometric queries. Supports multiple edit types (deletion, colorization, translation) within a unified framework [S1].
++*   **Limitations:** Relies on the accuracy of the DFF. May produce artifacts at object boundaries during geometric transformations [S1]. The threshold $\tau$ requires manual tuning or careful selection [S1].
++*   **When to use:** When semantic or feature-based editing is required without retraining the NeRF from scratch, and when the DFF provides accurate feature representations for the target objects [S1].
++*   **When not to use:** When high-fidelity geometric consistency is critical and boundary artifacts are unacceptable, or when the DFF does not align well with the NeRF's geometry [S1].
+ 
+ ## Background
+-This procedure originates from the work on Decomposing NeRF for Editing Via Feature Field Distillation (DFF) [S1]. It leverages pre-trained teacher networks like LSeg and DINO to distill semantic and geometric information into a field that guides the editing of the radiance field [S1].
++The NeRF Editing Procedure was introduced in "Decomposing NeRF for Editing Via Feature Field Distillation" [S1]. It builds on the concept of decomposing the NeRF into a feature field (distilled from a teacher network like LSeg or DINO) and the radiance field, allowing edits to be guided by the feature field's semantic understanding [S1]. This approach contrasts with methods that rely on iterative optimization against 2D guidance [S2] or explicit 3D object detection frameworks [S3].
+ 
+ ## Sources

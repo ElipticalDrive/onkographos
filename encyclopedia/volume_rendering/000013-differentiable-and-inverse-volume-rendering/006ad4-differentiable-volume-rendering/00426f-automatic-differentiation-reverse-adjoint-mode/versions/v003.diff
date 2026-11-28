@@ -1,0 +1,85 @@
+--- v002.md
++++ v003.md
+@@ -17,5 +17,5 @@
+ **Data Structures:**
+ 1.  **Forward-Backward Map (`fwd_bwds_map`):** A map from forward variables to a list of backward gradient variables. Key: `Variable` (representing a tensor or scalar in the forward pass); Value: `Variables` (list of gradient contributions) [S3].
+-2.  **Function Queue (`func_queue`):** A priority queue or stack storing `Function` objects (nodes in the computational graph) to be processed in reverse topological order [S3].
++2.  **Function Queue (`func_queue`):** A stack or priority queue storing `Function` objects (nodes in the computational graph) to be processed in reverse topological order [S3].
+ 3.  **Seen Set:** A set of processed functions to avoid redundant computation [S3].
+ 
+@@ -39,6 +39,6 @@
+         *   For each input variable `x` at index `x_idx` in `xs`:
+             *   If `x` does not require gradients (`!x.getRequiresGrad()`), continue [S3].
++            *   If `gy` is zero or undefined, skip (no gradient to propagate) [S3].
+             *   Compute the gradient contribution for `x` using the function's backward pass: `gx = func.buildBwd(gy, x_idx)` [S3].
+-            *   If `gy` is zero or undefined, skip (no gradient to propagate) [S3].
+             *   Append `gx` to the gradient list for `x` in `fwd_bwds_map`: `fwd_bwds_map[x].push_back(gx)` [S3].
+             *   Retrieve the creator function of `x`: `x_creator = x.getCreator()` [S3].
+@@ -53,6 +53,29 @@
+     *   Return `input_vars` and `input_grad_vars` [S3].
+ 
++**Formulas:**
++*   Reverse mode evaluates a vector-Jacobian product (VJP) of the form $\delta \mathbf{x} = \delta \mathbf{y}^T J_f$, where $J_f$ is the Jacobian of the primal computation $\mathbf{y} = f(\mathbf{x})$ [S1].
++*   The method inverts the data dependencies of the original program, referencing intermediate steps of the primal calculation [S1].
++
++**Parameters:**
++*   **Checkpointing Interval:** Not given in the sources. The sources mention that exhaustive storage does not scale and recommend storing state at sparse checkpoints [S1].
++*   **Loss Variable:** The scalar output from which differentiation starts [S3].
++
++**Edge Cases and Pitfalls:**
++*   **Memory Usage:** Exhaustive storage of intermediate states is inefficient and does not scale for modern processors generating terabytes of state per second [S1].
++*   **Remedy:** Use checkpointing with reevaluation. Store state at sparse checkpoints and recover intermediate values by reevaluating the forward pass from the nearest checkpoint [S1].
++*   **Complexity Reduction:** Automatic recursive usage of checkpointing reduces storage and runtime overheads to $O(\log t)$ for a program with $t$ operations [S1].
++*   **Zero Gradients:** If the gradient `gy` is zero, the backward pass can be skipped for that branch [S3].
++
+ **Pseudocode:**
+ ```python
++def is_zero(v):
++    """Check if a value is numerically zero."""
++    if v is None:
++        return True
++    if isinstance(v, (int, float)):
++        return v == 0.0
++    # Fallback for array-like types
++    return hasattr(v, '__len__') and len(v) == 0
++
+ def reverse_mode_ad(loss_var, graph_functions):
+     """
+@@ -105,11 +128,12 @@
+                 continue
+                 
++            # Skip if incoming gradient is zero
++            if is_zero(gy):
++                continue
++                
+             # Compute gradient w.r.t input x
+             # func.build_bwd returns the gradient contribution
+             gx = func.build_bwd(gy, x_idx)
+             
+-            if gx is None or is_zero(gx):
+-                continue
+-                
+             # Accumulate gradient for x
+             if x not in fwd_bwds_map:
+@@ -133,14 +157,4 @@
+     return input_vars, input_grad_vars
+ ```
+-
+-**Parameters:**
+-*   **Checkpointing Interval:** Not given in the sources. The sources mention that exhaustive storage does not scale and recommend storing state at sparse checkpoints [S1].
+-*   **Loss Variable:** The scalar output from which differentiation starts [S3].
+-
+-**Edge Cases and Pitfalls:**
+-*   **Memory Usage:** Exhaustive storage of intermediate states is inefficient and does not scale for modern processors generating terabytes of state per second [S1].
+-*   **Remedy:** Use checkpointing with reevaluation. Store state at sparse checkpoints and recover intermediate values by reevaluating the forward pass from the nearest checkpoint [S1].
+-*   **Complexity Reduction:** Automatic recursive usage of checkpointing reduces storage and runtime overheads to $O(\log t)$ for a program with $t$ operations [S1].
+-*   **Zero Gradients:** If the gradient `gy` is zero, the backward pass can be skipped for that branch [S3].
+ 
+ ## Subtopics
+@@ -168,5 +182,5 @@
+ *   **Memory Complexity:** $O(t)$ with exhaustive storage, which is prohibitive for large scenes [S1]. With recursive checkpointing, storage is reduced to $O(\log t)$ [S1].
+ *   **Scaling:** Computational complexity is largely constant with respect to the number of input parameters, making it efficient for optimizing millions of unknowns (e.g., density fields) [S1].
+-*   **Strengths:** Efficient for functions with few outputs and many inputs (typical in rendering) [S1]. Automates gradient computation, reducing manual derivation errors [S1].
++*   **Strengths:** Efficient for functions with few outputs and many inputs, as it computes all input gradients in a single backward pass [S1]. Automates gradient computation, reducing manual derivation errors [S1].
+ *   **Limitations:** High memory consumption without checkpointing [S1]. Requires storing the computational graph or intermediate states [S1].
+ *   **When to Use:** Optimizing high-dimensional parameters (density, transfer functions) in differentiable volume rendering [S1].

@@ -1,0 +1,160 @@
+--- v004.md
++++ v005.md
+@@ -8,10 +8,10 @@
+ ## How it works
+ **Inputs and Outputs:**
+-*   **Inputs:** Camera poses, training images (RGB and optionally depth), and a set of rays $\mathcal{R}$ sampled from these images.
++*   **Inputs:** Camera poses, training images (RGB and optionally depth), and a set of rays $\mathcal{R}$ sampled from these images [S1].
+ *   **Outputs:** For each ray $r$, the method outputs the expected color $\hat{C}(r)$, color variance $\hat{\sigma}_C^2(r)$, expected depth $\hat{z}(r)$, and depth variance $\hat{\sigma}_z^2(r)$ [S1].
+ 
+ **Data Structures:**
+-The scene is represented by a single Multilayer Perceptron (MLP).
+-*   **MLP Architecture:** The MLP takes a 3D position $\mathbf{x} \in \mathbb{R}^3$ and viewing direction $\mathbf{d} \in \mathbb{R}^3$, transformed by positional encoding $\phi(\cdot)$, as input.
++The scene is represented by a single Multilayer Perceptron (MLP) [S1].
++*   **MLP Architecture:** The MLP takes a 3D position $\mathbf{x} \in \mathbb{R}^3$ and viewing direction $\mathbf{d} \in \mathbb{R}^3$, transformed by positional encoding $\phi(\cdot)$, as input [S1].
+ *   **MLP Output:** The network outputs a tuple $(\tau, \bar{\mathbf{c}}, \bar{\sigma}_c^2)$ for each sampled point along the ray [S1]:
+     *   $\tau$: Volume density (scalar).
+@@ -21,5 +21,5 @@
+ **Numbered Steps:**
+ 
+-1.  **Ray Sampling:** For a camera ray $r(t) = \mathbf{o} + t\mathbf{d}$ traversing range $[t_n, t_f]$, partition the range into $N$ bins and sample $N$ points $\mathbf{x}_i$ uniformly within each bin [S1]. Let $t_i$ be the depth (distance from origin) of the $i$-th sample.
++1.  **Ray Sampling:** For a camera ray $r(t) = \mathbf{o} + t\mathbf{d}$ traversing range $[t_n, t_f]$, partition the range into $N$ bins and sample $N$ points $\mathbf{x}_i$ uniformly within each bin [S1]. Let $t_i$ be the depth (distance from origin) of the $i$-th sample [S1].
+ 
+ 2.  **MLP Evaluation:** For each sample $\mathbf{x}_i$ and direction $\mathbf{d}$, compute the MLP output:
+@@ -85,35 +85,15 @@
+     Computes transmittance T and weights w for volume rendering.
+     tau: [N] volume density at each sample
+-    delta: [N] distance between samples
++    delta: [N] bin width for each sample
+     Returns:
+-        T: [N] transmittance before each sample
++        T: [N] transmittance arriving at each sample
+         w: [N] weight for each sample
+     """
+     # T_i = exp(-sum_{j=1}^{i-1} tau_j * delta_j)
+-    # Accumulate negative optical depth
+-    neg_optical_depth = torch.cumsum(tau * delta, dim=0)
+-    # Shift to get T_i (transmittance arriving at sample i)
+-    # T_0 = 1 (implicitly), T_i for i>0 is exp(-sum_{j=0}^{i-1})
+-    # Using shift: T[i] = exp(-sum_{j=0}^{i-1} tau[j]*delta[j])
+-    # torch.roll with fill_value=0.0 for the first element being 1.0 before exp
+-    # Actually, standard implementation:
+-    # alpha = 1 - exp(-tau * delta)
+-    # T = exp(-cumsum(tau * delta[:-1])) # Careful with indices
+-    
+-    # Let's follow the formula strictly:
+-    # T_i = exp(- sum_{j=1}^{i-1} tau_j delta_j)
+-    # For i=1, sum is empty -> T_1 = 1.
+-    
+-    # Compute cumulative sum of tau * delta
++    # For i=0, sum is empty -> T_0 = 1.0
+     cum_tau_delta = torch.cumsum(tau * delta, dim=0)
+-    
+-    # T_i corresponds to exp(-cum_tau_delta[i-1])
+-    # For i=0 (first sample), T_0 = 1.0
+     T = torch.cat([torch.ones_like(tau[:1]), torch.exp(-cum_tau_delta[:-1])])
+-    
+-    # w_i = T_i * (1 - exp(-tau_i * delta_i))
+     alpha = 1.0 - torch.exp(-tau * delta)
+     w = T * alpha
+-    
+     return T, w
+ 
+@@ -129,5 +109,4 @@
+     """
+     C_hat = torch.sum(w.unsqueeze(-1) * c_mean, dim=0)
+-    # Variance is sum of w_i^2 * sigma_c_i^2
+     sigma_C_sq = torch.sum(w**2 * c_var)
+     return C_hat, sigma_C_sq
+@@ -143,5 +122,4 @@
+     """
+     z_hat = torch.sum(w * t)
+-    # Variance is sum of w_i * (t_i - z_hat)^2
+     sigma_z_sq = torch.sum(w * (t - z_hat)**2)
+     return z_hat, sigma_z_sq
+@@ -150,23 +128,11 @@
+     """
+     Computes Negative Log-Likelihood loss for Gaussian distribution.
+-    mean: predicted mean
+-    var: predicted variance
+-    target: ground truth
+-    Returns:
+-        loss: scalar NLL loss
+-    """
+-    # L = ||target - mean||^2 / (2 * var) + log(sqrt(var))
+-    # Note: log(sigma) = 0.5 * log(var)
+-    # The source formula uses log(sigma_hat(r)), which is 0.5 * log(var)
+-    # However, standard NLL for N(mu, sigma^2) is:
+-    # 0.5 * log(2*pi*sigma^2) + 0.5 * (x-mu)^2 / sigma^2
+-    # The source formula (2) is: ||C-C_hat||^2 / (2*sigma^2) + log(sigma_hat)
+-    # This matches 0.5 * (x-mu)^2 / sigma^2 + 0.5 * log(var)
+-    
++    Matches source formula: ||target - mean||^2 / (2*var) + log(sqrt(var))
++    """
+     diff_sq = torch.sum((target - mean)**2)
+     loss = diff_sq / (2.0 * var) + 0.5 * torch.log(var)
+     return loss
+ 
+-def train_step(mlp, rays, targets, zeta, lambda_depth):
++def train_step(mlp, rays, targets, delta, zeta, lambda_depth):
+     """
+     Single training step for U-NeRF.
+@@ -174,4 +140,5 @@
+     rays: List of rays, each containing (origin, direction, t_samples)
+     targets: Dict with 'color' [N_rays, 3] and 'depth' [N_rays, 1]
++    delta: [N] bin widths for t_samples
+     zeta: Hyperparameter for color loss weighting
+     lambda_depth: Weight for depth loss
+@@ -183,11 +150,8 @@
+     
+     for ray_idx, (origin, direction, t_samples) in enumerate(rays):
+-        # 1. Sample points and get positions
+-        # t_samples is [N]
++        # 1. Compute sample positions
+         positions = origin + direction.unsqueeze(0) * t_samples.unsqueeze(-1) # [N, 3]
+         
+         # 2. MLP Forward Pass
+-        # Input: positions and direction
+-        # Output: tau, c_mean, c_var_pre
+         tau, c_mean, c_var_pre = mlp(positions, direction) # Shapes: [N], [N, 3], [N]
+         
+@@ -196,19 +160,4 @@
+         
+         # 4. Compute Weights
+-        # delta is difference between consecutive t_samples
+-        delta = torch.diff(t_samples, dim=0)
+-        # Pad delta to match N? No, w has N elements.
+-        # Standard NeRF: delta_i = t_{i+1} - t_i. 
+-        # If we have N samples, we have N-1 intervals? 
+-        # The source says "partition [tn, tf] into N bins and sample uniformly in each bin".
+-        # Usually N samples implies N weights. 
+-        # Let's assume delta is computed such that it aligns with weights.
+-        # If t_samples has N elements, delta usually has N-1 or N elements depending on boundary.
+-        # Source Eq 1: w_i = T_i (1 - exp(-tau_i delta_i)).
+-        # If N samples, we need N deltas. Typically delta_i is the width of the bin containing sample i.
+-        # Let's assume delta is passed or computed as bin widths.
+-        # For simplicity in pseudocode, assume delta is available or computed from t_samples boundaries.
+-        # Here we assume delta is [N].
+-        
+         T, w = volume_rendering_weights(tau, delta)
+         
+@@ -227,12 +176,7 @@
+         
+         # Apply Zeta-NLL weighting with stop-gradient
+-        # sigma_C is sqrt(sigma_C_sq)
+         sigma_C = torch.sqrt(sigma_C_sq)
+-        # Stop gradient on sigma_C
+         sigma_C_sg = sigma_C.detach()
+-        
+-        # Weighting factor: sigma_C^{-2*zeta}
+         weight_factor = sigma_C_sg ** (-2 * zeta)
+-        
+         L_color = weight_factor * L_color_nll
+         
+@@ -256,5 +200,5 @@
+ 
+ ## Operating characteristics
+-*   **Time Complexity:** Training time is comparable to standard NeRF, though the additional variance predictions add minor computational overhead to the MLP forward pass. Rendering remains efficient as it involves simple weighted sums [S1].
++*   **Time Complexity:** Training time is comparable to standard NeRF, though the additional variance predictions add minor computational overhead to the MLP forward pass [S1].
+ *   **Memory Complexity:** The MLP must store an additional scalar output channel for variance per sample point, increasing model size negligibly [S1].
+ *   **Strengths:** Provides pixel-level reliability metrics, allowing for the filtering of poorly rendered images and weighting of pixels in downstream tasks like Scene Coordinate Regression [S1]. The $\zeta$-NLL loss prevents the model from ignoring hard-to-fit regions, leading to better mean fits than standard NLL [S1].

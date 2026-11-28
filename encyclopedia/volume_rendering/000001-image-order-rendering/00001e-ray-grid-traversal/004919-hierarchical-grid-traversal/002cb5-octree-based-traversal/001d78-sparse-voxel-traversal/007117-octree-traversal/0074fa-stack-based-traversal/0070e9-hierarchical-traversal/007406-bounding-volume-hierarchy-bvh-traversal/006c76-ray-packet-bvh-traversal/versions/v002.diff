@@ -1,0 +1,284 @@
+--- v001.md
++++ v002.md
+@@ -1,189 +1,122 @@
+ # Ray Packet BVH Traversal
+ 
+-Also called: Ray Packet Traversal (Closest Hit), closest (packet), occluded, primary ray packet traversal, shadow ray packet traversal
++Also called: occluded, closest (packet), shadow ray packet traversal, primary ray packet traversal, Ray Packet Traversal (Closest Hit)
+ 
+ ## Overview
+-Ray Packet BVH Traversal traverses a Wald-ordered Bounding Volume Hierarchy (BVH) for a packet of rays to find the closest intersection for each active ray in the packet [S1, unofficial]. It differs from single-ray traversal by processing multiple rays simultaneously, allowing for batched culling and intersection tests, which improves throughput on SIMD architectures [S1, unofficial]. It supports specialized modes for closest hit (primary rays) and occlusion (shadow rays) via flag-based dispatch [S1, unofficial].
++Ray Packet BVH Traversal traverses a Wald-ordered Bounding Volume Hierarchy (BVH) for a packet of rays to find the closest intersection for each active ray in the packet, or to determine which rays are occluded by triangles [S1, unofficial]. It differs from single-ray traversal by processing multiple rays simultaneously, leveraging SIMD-like parallelism within the traversal stack and leaf intersection tests. It builds on [Bounding Volume Hierarchy (BVH) Traversal](18487-bounding-volume-hierarchy-bvh-traversal.md) by extending the node visitation logic to handle a range of ray indices (`first` to `first + packet_size`) rather than a single ray.
+ 
+ ## How it works
+ **Inputs:**
+-- A BVH tree (Wald-ordered, binary tree).
+-- A packet of rays, defined by origin $O_i$, direction $D_i$, and inverse direction $1/D_i$ for each ray $i$ in the packet.
+-- Flags determining traversal mode: `INTERVALARITH`, `SHAREDORG`, and others controlling the specific intersection kernel [S1, unofficial].
++- `bvhtree`: A Wald-ordered BVH structure.
++- `p`: Ray packet data containing origin, direction, and flags.
++- `hit`: Output structure for intersection results.
++- `flags`: Bitwise combination of `raypacket::INTERVALARITH`, `raypacket::SHAREDORG`, and others determining optimization paths [S1, unofficial].
+ 
+ **Outputs:**
+-- For closest hit: The closest intersection distance and hit point for each ray in the packet.
+-- For occlusion: A boolean indicating if each ray is occluded (hits any primitive) [S1, unofficial].
++- `hit`: Intersection data for the closest hit for each ray in the packet.
++- `occnum`: Count of occluded rays (in shadow ray variants).
+ 
+ **Data Structures:**
+-- **Stack:** An array of pairs `pair<node*, u32>` with a fixed size of 64. Each element stores a pointer to a BVH node and the index of the first active ray in the packet that needs to be tested against that node [S1, unofficial].
+-- **Active Array:** An array of booleans (or integers) `active[MAXRAYNUM]` indicating which rays in the packet are still active (have not yet found a closest hit or have not been culled) [S1, unofficial].
+-- **Signs:** An array `s32 signs[3]` computed once per packet, where `signs[axis] = (ray_dir[axis] >= 0.0f) ? 1 : 0` [S1, unofficial].
++- `stack`: Array of `pair<intersector::node*, u32>` with fixed size 64. Each element stores a BVH node pointer and the starting ray index (`first`) for that node in the packet [S1, unofficial].
++- `active`: Array of integers (or bitmasks) indicating which rays in the current packet are still active (have not yet hit an object). Size is `MAXRAYNUM` [S1, unofficial].
++- `signs`: Array of 3 integers (0 or 1) indicating the sign of each ray direction component: `signs[i] = 1` if `dir[i] >= 0`, else `0` [S1, unofficial].
+ 
+ **Parameters:**
+-- `flags`: Bitwise combination of `raypacket::INTERVALARITH`, `raypacket::SHAREDORG`, etc. [S1, unofficial].
+-- `MAXRAYNUM`: Maximum number of rays in a packet (implementation-dependent, e.g., 16, 32) [S1, unofficial].
++- `MAXRAYNUM`: Maximum number of rays in a packet. Not given in the sources.
++- `INTERVALARITH`: Flag enabling interval arithmetic optimizations.
++- `SHAREDORG`: Flag indicating all rays in the packet share the same origin.
+ 
+ **Steps:**
+ 
+-1. **Initialization:**
+-   - Compute `signs[3]` for the packet's rays. If rays have different directions, this optimization is not applicable or requires per-ray handling [S1, unofficial].
+-   - Initialize the stack: `stack[0] = {bvhtree.root, 0}`, `stacksz = 1` [S1, unofficial].
+-   - Initialize `occnum = 0` for occlusion queries [S1, unofficial].
++1. **Initialize Traversal State:**
++   - Compute sign bits for ray direction components:
++     ```python
++     signs[0] = 1 if p.dir().x >= 0 else 0
++     signs[1] = 1 if p.dir().y >= 0 else 0
++     signs[2] = 1 if p.dir().z >= 0 else 0
++     ```
++   - Initialize stack with root node and starting ray index 0:
++     ```python
++     stack[0] = (bvhtree.root, 0)
++     stacksz = 1
++     occnum = 0  # For shadow ray variants
++     ```
+ 
+ 2. **Traversal Loop:**
+    - While `stacksz > 0`:
+-     - Pop from stack: `elem = stack[--stacksz]`, `node = elem.first`, `first = elem.second` [S1, unofficial].
+-     - **Culling/Intersection Check:**
+-       - If `flags & INTERVALARITH`:
+-         - If `flags & SHAREDORG`:
+-           - Call `slaboneco(node, p, signs)` to check if any ray intersects the node's AABB. If `res` is true, jump to `processnode`.
+-           - Call `culliaco(node, p, signs)`. If it returns true, break the loop (no rays intersect) [S1, unofficial].
+-         - Else:
+-           - Call `slabone(node, p, signs)`. If `res` is true, jump to `processnode`.
+-           - Call `cullia(node, p, signs)`. If it returns true, break the loop [S1, unofficial].
+-       - Find the first active ray in the packet that intersects the node's box:
+-         - If `flags & SHAREDORG`: `res = slabfirstco(node, p, signs, first)` [S1, unofficial].
+-         - Else: `res = slabfirst(node, p, signs, first)` [S1, unofficial].
+-         - If `!res`, break the loop (no active rays intersect this node) [S1, unofficial].
+-     - **Process Node (`processnode` label):**
+-       - Get `flag = node->getflag()` [S1, unofficial].
+-       - **If NONLEAF:**
+-         - Get `offset = node->getoffset()` and `axis = node->getaxis()` [S1, unofficial].
+-         - Determine `farindex = signs[axis]` and `nearindex = farindex ^ 1` [S1, unofficial].
+-         - Push far child to stack: `stack[stacksz++] = {node + offset + farindex, first}` [S1, unofficial].
+-         - Move to near child: `node = node + offset + nearindex` [S1, unofficial].
+-         - Continue loop (process near child) [S1, unofficial].
+-       - **If TRILEAF:**
+-         - Get triangles: `tris = node->getptr<waldtriangle>()`, `n = tris->num` [S1, unofficial].
+-         - Initialize `active` array: `active[first] = 1`, others 0 [S1, unofficial].
+-         - Filter active rays within the node's box:
+-           - If `SHAREDORG`: `slabfilterco(tris, p, active, first, signs)` [S1, unofficial].
+-           - Else: `slabfilter(tris, p, active, first, signs)` [S1, unofficial].
+-         - Loop over triangles `i` from 0 to `n-1`:
+-           - Call `closest<flags>(tris[i], p, active, first, hit)` for closest hit, or `occluded<flags>(tris[i], p, active, first, s)` for occlusion [S1, unofficial].
+-           - If occlusion: `occnum += result`. If `occnum == p.raynum`, return immediately (all rays occluded) [S1, unofficial].
+-         - Break loop (leaf processed) [S1, unofficial].
+-       - **If Sub-BVH Leaf:**
+-         - Get child intersector: `node = node->getptr<intersector>()->root` [S1, unofficial].
+-         - Jump to `processnode` [S1, unofficial].
++     - Pop element from stack: `elem = stack[--stacksz]`
++     - Extract `node = elem.first` and `first = elem.second`
+ 
+-3. **Dispatch:**
+-   - Initialize extra data: `CACHE_LINE_ALIGNED raypacketextra extra` [S1, unofficial].
+-   - Get flags via `initextra(extra, p, hit)` [S1, unofficial].
+-   - Switch on flags, calling `closest<X>(bvhtree, p, extra, hit)` for `X` in `0, 4, 8, 12` [S1, unofficial].
++3. **Interval Arithmetic Check (if `INTERVALARITH` flag set):**
++   - If `SHAREDORG` is set:
++     - Call `slaboneco(node, p)`. If it returns true, jump to `processnode`.
++     - Call `culliaco(node, p)`. If it returns true, break loop (no rays intersect this node).
++   - Else (not `SHAREDORG`):
++     - Call `slabone(node, p)`. If it returns true, jump to `processnode`.
++     - Call `cullia(node, p)`. If it returns true, break loop.
+ 
+-**Pseudocode:**
++4. **First Slab Intersection Check:**
++   - If `SHAREDORG` is set:
++     - Call `slabfirstco(node, p)`. If it returns false, break loop (no rays intersect this node).
++   - Else:
++     - Call `slabfirst(node, p)`. If it returns false, break loop.
+ 
+-```python
+-def ray_packet_bvh_traversal(bvhtree, rays, flags):
+-    # Initialization
+-    # Compute signs for the packet (assuming shared direction or handling per-ray)
+-    # For simplicity, assume shared direction for this example
+-    signs = [1 if rays[0].dir[axis] >= 0 else 0 for axis in range(3)]
+-    
+-    stack = [(bvhtree.root, 0)]
+-    stacksz = 1
+-    occnum = 0
+-    
+-    while stacksz > 0:
+-        # Pop from stack
+-        stacksz -= 1
+-        node, first = stack[stacksz]
+-        
+-        # Culling/Intersection Check
+-        if flags & INTERVALARITH:
+-            if flags & SHAREDORG:
+-                res = slaboneco(node, rays, signs)
+-                if res:
+-                    goto processnode
+-                if culliaco(node, rays, signs):
+-                    break
+-            else:
+-                res = slabone(node, rays, signs)
+-                if res:
+-                    goto processnode
+-                if cullia(node, rays, signs):
+-                    break
+-        
+-        # Find first active ray intersecting node
+-        if flags & SHAREDORG:
+-            res = slabfirstco(node, rays, signs, first)
+-        else:
+-            res = slabfirst(node, rays, signs, first)
+-            
+-        if not res:
+-            break
+-            
+-        # Process Node
+-        processnode:
+-        flag = node.get_flag()
+-        
+-        if flag == NONLEAF:
+-            offset = node.get_offset()
+-            axis = node.get_axis()
+-            farindex = signs[axis]
+-            nearindex = farindex ^ 1
+-            
+-            # Push far child
+-            stack[stacksz] = (node + offset + farindex, first)
+-            stacksz += 1
+-            
+-            # Move to near child
+-            node = node + offset + nearindex
+-            continue # Continue loop to process near child
+-            
+-        elif flag == TRILEAF:
+-            tris = node.get_ptr_wald_triangle()
+-            n = tris.num
+-            active = [0] * MAXRAYNUM
+-            active[first] = 1
+-            
+-            if flags & SHAREDORG:
+-                slabfilterco(tris, rays, active, first, signs)
+-            else:
+-                slabfilter(tris, rays, active, first, signs)
+-                
+-            for i in range(n):
+-                if flags & OCCLUSION:
+-                    result = occluded(tris[i], rays, active, first, flags)
+-                    occnum += result
+-                    if occnum == rays.raynum:
+-                        return True # All rays occluded
+-                else:
+-                    closest(tris[i], rays, active, first, flags)
+-            break # Leaf processed
+-            
+-        elif flag == SUBBVH_LEAF:
+-            node = node.get_ptr_intersector().root
+-            goto processnode
+-            
+-    return occnum == rays.raynum if flags & OCCLUSION else None
+-```
++5. **Process Node (`processnode` label):**
++   - Get node flag: `flag = node.getflag()`
++   - If `flag == NONLEAF`:
++     - Get split axis and offset:
++       ```python
++       axis = node.getaxis()
++       offset = node.getoffset()
++       farindex = signs[axis]
++       nearindex = farindex ^ 1
++       ```
++     - Push far child to stack:
++       ```python
++       stack[stacksz] = (node + offset + farindex, first)
++       stacksz += 1
++       ```
++     - Move to near child:
++       ```python
++       node = node + offset + nearindex
++       ```
++     - Continue loop (process near child)
++   - If `flag == TRILEAF`:
++     - Get triangle pointer: `tris = node.getptr<waldtriangle>()`
++     - Get triangle count: `n = tris.num`
++     - Initialize active array: `active[first] = 1` (and other rays as needed, typically all 1 initially)
++     - Filter active rays within node's box:
++       - If `SHAREDORG`: `slabfilterco(active, first, node, p)`
++       - Else: `slabfilter(active, first, node, p)`
++     - Loop over triangles `i` from 0 to `n-1`:
++       - Call `closest<flags>(tris[i], p, active, first, hit)`
++       - If shadow ray variant: `occnum += result`
++       - If `occnum == p.raynum`: return immediately (all rays occluded)
++     - Break loop (leaf processed)
++   - If `flag` is neither `NONLEAF` nor `TRILEAF` (sub-BVH leaf):
++     - Get pointer to child intersector: `node = node.getptr<intersector>().root`
++     - Jump to `processnode`
++
++6. **Dispatch to Specialized Implementation:**
++   - Initialize extra data: `extra = initextra(p, hit)`
++   - Switch on flags, calling `closest<X>(bvhtree, p, extra, hit)` for `X` in `{0, 4, 8, 12}` [S1, unofficial].
+ 
+ **Edge Cases and Pitfalls:**
+-- **Unreachable Code:** If flags do not match 0, 4, 8, or 12, an assert is triggered [S1, unofficial].
+-- **Shared Origin:** `SHAREDORG` flag assumes all rays in the packet share the same origin. If not, this optimization is invalid [S1, unofficial].
+-- **Stack Overflow:** The stack size is fixed at 64. Deep BVHs may overflow, requiring a dynamic stack or larger fixed size [S1, unofficial].
+-
+-## Subtopics
+-
+-### [Ray Packet BVH Traversal (Closest Hit)](18487-bounding-volume-hierarchy-bvh-traversal.md#ray-packet-bvh-traversal-closest-hit)
+-Finds the closest intersection for each ray in the packet. Used for primary rays.
+-
+-### [Ray Packet BVH Traversal (Occlusion/Shadow)](18487-bounding-volume-hierarchy-bvh-traversal.md#ray-packet-bvh-traversal-occlusion-shadow)
+-Determines if each ray in the packet is occluded by any primitive. Used for shadow rays.
++- Unreachable code path if flags do not match 0, 4, 8, or 12. Handled by assert [S1, unofficial].
++- Precision issues in slab intersection tests may cause rays to be incorrectly culled. Interval arithmetic flags help mitigate this.
++- Stack overflow if BVH depth exceeds 64 levels. Not given in the sources.
+ 
+ ## Operating characteristics
+-- **Time Complexity:** $O(N \cdot \log M)$ on average, where $N$ is the number of rays in the packet and $M$ is the number of nodes in the BVH. The packet size $N$ allows for SIMD parallelism, reducing constant factors.
+-- **Memory Complexity:** $O(D)$ for stack depth $D$, plus $O(N)$ for active ray tracking.
+-- **Performance:** Improves throughput on SIMD hardware by processing multiple rays simultaneously. Culling is batched, reducing branch divergence.
+-- **Strengths:** High throughput for large numbers of rays, efficient culling, SIMD-friendly.
+-- **Limitations:** Fixed stack size may overflow for very deep BVHs. Shared origin/direction assumptions limit applicability.
+-- **When to Use:** Primary ray tracing, shadow ray tracing where many rays are processed together.
+-- **When Not to Use:** Single-ray tracing, highly divergent ray directions/origins without packetization.
++- **Time Complexity:** $O(N \cdot \log M)$ on average, where $N$ is the number of rays in the packet and $M$ is the number of nodes in the BVH. The packet size $N$ provides parallelism, but traversal depth remains logarithmic.
++- **Memory Complexity:** $O(D)$ for stack depth $D$, where $D$ is the BVH depth. Fixed stack size of 64 elements [S1, unofficial].
++- **Measured Performance:** Not given in the sources.
++- **Scaling:** Scales well with packet size up to SIMD width (e.g., 4, 8, 16 rays). Beyond that, diminishing returns due to divergence in ray paths.
++- **Strengths:** Reduced traversal overhead per ray due to packet processing; efficient culling using slab tests on the entire packet.
++- **Limitations:** Divergence in ray paths within a packet can lead to wasted work; stack size limit may require dynamic stack for deep BVHs.
++- **When to Use:** When rendering with many rays (e.g., primary rays, shadow rays) and hardware supports SIMD-like parallelism.
++- **When Not to Use:** For very small packets (single ray) or highly divergent ray paths where overhead of packet management outweighs benefits.
+ 
+ ## Background
+-Ray Packet BVH Traversal is an optimization technique for ray tracing, leveraging SIMD capabilities to process multiple rays simultaneously. It builds on the BVH traversal algorithm, extending it to handle packets of rays. The technique is commonly used in real-time and offline renderers to improve performance.
++Origin: Implementation details from the mini.q engine [S1, unofficial]. History and development: Part of the mini.q ray tracer's BVH traversal system, optimized for Wald-ordered BVHs. Where it is used: In the mini.q engine for rendering scenes with BVH-accelerated ray tracing [S1, unofficial].
+ 
+ ## Sources

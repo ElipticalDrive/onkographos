@@ -1,0 +1,279 @@
+--- v002.md
++++ v003.md
+@@ -13,5 +13,5 @@
+ 
+ **Data Structures:**
+-The geometry shader processes a single triangle input primitive [S1, unofficial]. It generates output vertices for triangle strips. The number of vertices emitted is $3 + 4n$, where $n$ is the number of slices the triangle spans [S1, unofficial]. The method detects triangle emittance and does not produce degenerate quads [S1, unofficial].
++The geometry shader processes a single triangle input primitive [S1, unofficial]. It generates output vertices for triangle strips [S1, unofficial]. The number of vertices emitted is $3 + 4n$, where $n$ is the number of slices the triangle spans [S1, unofficial]. The method detects triangle emittance and does not produce degenerate quads [S1, unofficial].
+ 
+ **Algorithm Steps:**
+@@ -20,10 +20,10 @@
+ 1.  **Sort Vertices:** Sort $v_1, v_2, v_3$ according to their Z-depth in ECS such that $z(v_1) \le z(v_2) \le z(v_3)$ [S1, unofficial].
+ 2.  **Calculate Bounds:** Compute the minimum and maximum slice indices ($s_{min}, s_{max}$) that the triangle intersects [S1, unofficial]:
+-    $$ s_{min} = \lfloor \frac{\min(z(v_1, v_2, v_3) - z_{volume\_min})}{z_{slice}} \rfloor $$
+-    $$ s_{max} = \lfloor \frac{\max(z(v_1, v_2, v_3) - z_{volume\_min})}{z_{slice}} \rfloor $$
++    $$ s_{min} = \left\lfloor \frac{\min(z(v_1, v_2, v_3) - z_{volume\_min})}{z_{slice}} \right\rfloor $$
++    $$ s_{max} = \left\lfloor \frac{\max(z(v_1, v_2, v_3) - z_{volume\_min})}{z_{slice}} \right\rfloor $$
+     Integer truncation is used for slice indexing [S1, unofficial].
+-3.  **Initialize:** Set `layer` to $s_{min}$. Set `slice` depth to the start of the current slice in ECS [S1, unofficial].
+-4.  **Iterate Slices:** Loop while $z(v_3) \ge slice$ [S1, unofficial]:
+-    *   **Case A:** If $z(v_3) \ge slice$ at the initial check, emit the original triangle $(v_1, v_2, v_3)$ to `layer` and return [S1, unofficial].
++3.  **Initialize:** Set `layer` to $s_{min}$ [S1, unofficial]. Set `slice` depth to the start of the current slice in ECS [S1, unofficial].
++4.  **Case A (Full Containment):** If $z(v_3) \ge slice$ at the initial check, emit the original triangle $(v_1, v_2, v_3)$ to `layer` and return [S1, unofficial].
++5.  **Iterate Slices:** Loop while $z(v_3) \ge slice$ [S1, unofficial]:
+     *   **Determine Left/Right Intersections:**
+         *   If $z(v_2) \ge slice$:
+@@ -48,20 +48,19 @@
+ 
+ **Pseudocode:**
+-The following pseudocode implements Algorithm 1 from [S1, unofficial]. It assumes helper functions `IntersectEdge(vA, vB, zPlane)` which returns the point on the segment $v_A-v_B$ at depth $zPlane$.
++The following pseudocode implements Algorithm 1 from [S1, unofficial]. It is self-contained and defines all helper operations.
+ 
+ ```python
+ def GeometryShaderTriangleSlicing(v1, v2, v3, z_slice_thickness, z_volume_min):
+-    # 1. Check alignment
++    # 1. Check alignment with Z-axis
+     if not is_aligned_with_z(v1, v2, v3):
+         return
+ 
+     # 2. Sort vertices by Z depth
+-    vertices = sort_by_z([v1, v2, v3])
+-    v1, v2, v3 = vertices[0], vertices[1], vertices[2]
++    verts = sorted([v1, v2, v3], key=lambda v: v.z)
++    v1, v2, v3 = verts[0], verts[1], verts[2]
+ 
+     # 3. Calculate slice bounds
+     z_min_tri = min(v1.z, v2.z, v3.z)
+     z_max_tri = max(v1.z, v2.z, v3.z)
+-    
+     s_min = int((z_min_tri - z_volume_min) / z_slice_thickness)
+     s_max = int((z_max_tri - z_volume_min) / z_slice_thickness)
+@@ -69,141 +68,83 @@
+     # 4. Initialize loop variables
+     layer = s_min
+-    current_slice_z = z_volume_min + s_min * z_slice_thickness
++    current_slice_z = z_volume_min + layer * z_slice_thickness
+     
+-    # Previous intersection points for the "right" side of the strip
+-    # Initially undefined or handled by Case A
++    # Track intersection points from previous slice
+     v1L = None
+     v1R = None
+     v2L = None
+     v2R = None
+-    
+-    # Flag to track if v2 was above the previous slice
+     v2_was_above = False
+ 
+-    for s in range(s_min, s_max + 1):
+-        current_slice_z = z_volume_min + s * z_slice_thickness
+-        
+-        # Case A: Triangle fits entirely in the first slice or simple case
+-        # The source pseudocode has a specific early return if v3 >= slice at start.
+-        # However, the loop structure suggests iterative processing.
+-        # We follow the iterative strip generation logic described in the source.
+-        
+-        if v3.z >= current_slice_z:
+-            # Determine v1L, v1R based on v1 and v2 position relative to slice
+-            if v2.z >= current_slice_z:
+-                if v1.z >= current_slice_z:
+-                    v1L = v1
+-                    v1R = v1
+-                else:
+-                    v1L = v2
+-                    v1R = v1
+-                
+-                # Intersect edges (v1-v2) and (v1-v3)? 
+-                # Source says "Intersect Edges (slice)". 
+-                # Given v1 < slice <= v2 <= v3, the edges crossing are (v1,v2) and (v1,v3)?
+-                # Actually, standard triangle slicing intersects the two edges that cross the plane.
+-                # If v1 < slice and v2, v3 >= slice, edges are (v1,v2) and (v1,v3).
+-                # But the source output is (v1R, v1L, v2L, v2R).
+-                # Let's assume IntersectEdges returns points on the two edges crossing the plane.
+-                v2L, v2R = intersect_edges_crossing_plane(v1, v2, v3, current_slice_z)
+-                
+-                emit_triangle_strip([v1R, v1L, v2L, v2R], layer)
+-                
+-                # Update for next iteration
+-                v1L = v2L
+-                v1R = v2R
+-                v2_was_above = True
++    # Case A: Triangle fits entirely within the first slice
++    if v3.z >= current_slice_z:
++        emit_triangle_strip([v1, v2, v3], layer)
++        return
++
++    # 5. Iterate through slices
++    while v3.z >= current_slice_z:
++        if v2.z >= current_slice_z:
++            # v2 is above or at slice plane
++            if v1.z >= current_slice_z:
++                v1L = v1
++                v1R = v1
+             else:
+-                # v2 < current_slice_z. This implies v1 < v2 < slice <= v3.
+-                # Edges crossing are (v2, v3) and (v1, v3)? No, (v1,v3) and (v2,v3).
+-                # Source Case E/F logic applies here in subsequent iterations.
+-                # For the first slice, if v2 < slice, we might need different handling.
+-                # The source pseudocode flow is tricky. 
+-                # Let's stick to the explicit Case B/C/D/E/F structure.
+-                pass
++                v1L = v2
++                v1R = v1
++            v2L, v2R = intersect_edges(v1, v2, v3, current_slice_z)
++            emit_triangle_strip([v1R, v1L, v2L, v2R], layer)
++            v1L = v2L
++            v1R = v2R
++            v2_was_above = True
++        else:
++            # v2 is below slice plane
++            if v2_was_above:
++                # Case E
++                v2L, v2R = intersect_edges(v1, v2, v3, current_slice_z)
++            else:
++                # Case F
++                v2L, v2R = intersect_edges(v1, v2, v3, v2.z)
++            emit_triangle_strip([v1R, v1L, v2L, v2R], layer)
++            v1L = v2L
++            v1R = v2R
++            v2L, v2R = intersect_edges(v1, v2, v3, current_slice_z)
++            emit_triangle_strip([v1R, v1L, v2L, v2R], layer)
++            v2_was_above = False
+ 
+-        # The source pseudocode is a single loop with internal state.
+-        # Re-implementing strictly per Algorithm 1 text:
+-        
+-        # Reset state for the specific iteration logic if needed, 
+-        # but the source maintains v1L/v1R across iterations.
+-        
+-        # Check Case A condition again as per source: "if v3 depth is >= slice then CASE A ... return"
+-        # This implies if the triangle is fully contained in the current slice (and it's the start?), emit and exit.
+-        # But the loop continues. The source likely means:
+-        # If we are at the start and v3 >= slice, we enter the loop.
+-        
+-        # Let's follow the exact sequence of the source pseudocode block:
+-        
+-        if v3.z >= current_slice_z:
+-            if v2.z >= current_slice_z:
+-                # Case B logic (or initial Case A if first iter)
+-                if v1.z >= current_slice_z:
+-                    v1L = v1
+-                    v1R = v1
+-                else:
+-                    v1L = v2
+-                    v1R = v1
+-                
+-                v2L, v2R = intersect_edges(v1, v2, v3, current_slice_z) # Intersect edges with slice
+-                emit_triangle_strip([v1R, v1L, v2L, v2R], layer)
+-                
+-                # Prepare for next slice
+-                v1L = v2L
+-                v1R = v2R
+-                v2_was_above = True
+-            else:
+-                # v2 < current_slice_z
+-                # This falls into Case E/F logic in the source's "else if" chain
+-                if v2_was_above: # Was v2 >= previous slice?
+-                    # Case E
+-                    v2L, v2R = intersect_edges(v1, v2, v3, current_slice_z)
+-                else:
+-                    # Case F
+-                    v2L, v2R = intersect_edges(v1, v2, v3, v2.z) # Intersect with v2 depth?
+-                
+-                emit_triangle_strip([v1R, v1L, v2L, v2R], layer)
+-                v1L = v2L
+-                v1R = v2R
+-                
+-                # Calculate new v2L, v2R for next step?
+-                v2L, v2R = intersect_edges(v1, v2, v3, current_slice_z)
+-                emit_triangle_strip([v1R, v1L, v2L, v2R], layer)
+-                
+-                v2_was_above = False # v2 is below current slice
+-        
+         # Increment slice
++        current_slice_z += z_slice_thickness
+         layer += 1
+-        current_slice_z += z_slice_thickness
+-        
+-        # Check termination
+-        if v3.z < current_slice_z:
+-            break
+ 
+-    # Helper to find intersection points of triangle edges with a Z-plane
+-    def intersect_edges(va, vb, vc, z_plane):
+-        # Find which two edges cross z_plane
+-        # Edges: (va,vb), (vb,vc), (vc,va)
+-        pts = []
+-        if (va.z - z_plane) * (vb.z - z_plane) <= 0:
+-            pts.append(intersect_point(va, vb, z_plane))
+-        if (vb.z - z_plane) * (vc.z - z_plane) <= 0:
+-            pts.append(intersect_point(vb, vc, z_plane))
+-        if (vc.z - z_plane) * (va.z - z_plane) <= 0:
+-            pts.append(intersect_point(vc, va, z_plane))
+-        return pts[0], pts[1]
++    # Handle final slice where v3.z < current_slice_z
++    if v3.z < current_slice_z:
++        if v2_was_above:
++            # Case C
++            v2L = v2
++            v2R = v3
++        else:
++            # Case D
++            v2L = v2R = v3
++        emit_triangle_strip([v1R, v1L, v2L, v2R], layer)
+ 
+-    def intersect_point(va, vb, z_plane):
+-        t = (z_plane - va.z) / (vb.z - va.z)
+-        return va + t * (vb - va)
++# Helper: Intersect triangle edges with a Z-plane
++def intersect_edges(va, vb, vc, z_plane):
++    pts = []
++    if (va.z - z_plane) * (vb.z - z_plane) <= 0:
++        pts.append(intersect_point(va, vb, z_plane))
++    if (vb.z - z_plane) * (vc.z - z_plane) <= 0:
++        pts.append(intersect_point(vb, vc, z_plane))
++    if (vc.z - z_plane) * (va.z - z_plane) <= 0:
++        pts.append(intersect_point(vc, va, z_plane))
++    return pts[0], pts[1]
+ 
+-    def is_aligned_with_z(v1, v2, v3):
+-        # Check if triangle normal is parallel to Z axis or vertices have same Z?
+-        # Source says "if triangle not aligned with Z-axis then return".
+-        # This likely means the triangle's plane is perpendicular to the XY plane (vertical) 
+-        # or simply that the sweep direction is Z.
+-        # For Z-pass, we assume the triangle has extent in Z.
+-        # If all Zs are equal, it's a degenerate slice case.
+-        return not (v1.z == v2.z == v3.z)
++# Helper: Linear interpolation to find point on segment at z_plane
++def intersect_point(va, vb, z_plane):
++    t = (z_plane - va.z) / (vb.z - va.z)
++    return va + t * (vb - va)
++
++# Helper: Check if triangle is aligned with Z-axis
++def is_aligned_with_z(v1, v2, v3):
++    # Triangle is aligned if it has extent in Z (non-degenerate in sweep direction)
++    return not (v1.z == v2.z == v3.z)
+ ```
+ 
+@@ -215,5 +156,5 @@
+ *   Triangles not aligned with the Z-axis are ignored (returned) in this specific Z-Pass implementation [S1, unofficial].
+ *   The method detects triangle emittance and does not produce degenerate quads [S1, unofficial].
+-*   On GPU architectures with small bandwidth, the alternative Pixel Shader Clipping method produces many fragments that are rejected in the pixel shader, which is an issue. The Geometry Shader Slicing method is favored here because it produces exactly the fragments rasterized in the final volume slices [S1, unofficial].
++*   On GPU architectures with small bandwidth, the alternative Pixel Shader Clipping method produces many fragments that are rejected in the pixel shader, which is an issue [S1, unofficial]. The Geometry Shader Slicing method is favored here because it produces exactly the fragments rasterized in the final volume slices [S1, unofficial].
+ 
+ ## Subtopics
+@@ -223,9 +164,9 @@
+ 
+ ## Operating characteristics
+-*   **Time Complexity:** Linear with respect to the number of triangles and the number of slices each triangle intersects. The number of vertices emitted is $3 + 4n$, where $n$ is the number of slices [S1, unofficial].
+-*   **Memory Complexity:** Depends on the volume grid size and the number of multi-channel render targets (MRTs). The method uses layered rendering to write directly to volume texture layers [S1, unofficial].
+-*   **Performance:** Tested on an Intel Core i7 860 @ 2.80GHz, 8 GB RAM, nVIDIA GeForce GTX 285 GPU (1 GB memory). For the Bunny model (69,451 triangles) at a $256^3$ grid size, Geometry Slicing took 6.43 ms (15 vertices out) and 6.98 ms (19 vertices out) [S1, unofficial].
+-*   **Strengths:** Produces exactly the fragments rasterized in the final volume slices, avoiding fragment rejection overhead. Preferred on non-unified architectures if pixel shader cores are intensively used, and on architectures with small bandwidth [S1, unofficial].
+-*   **Limitations:** Requires geometry shader support. Triangles not aligned with the Z-axis are ignored. Performance varies with the number of output vertices allowed by the GPU [S1, unofficial].
++*   **Time Complexity:** Linear with respect to the number of triangles and the number of slices each triangle intersects [S1, unofficial]. The number of vertices emitted is $3 + 4n$, where $n$ is the number of slices [S1, unofficial].
++*   **Memory Complexity:** Depends on the volume grid size and the number of multi-channel render targets (MRTs) [S1, unofficial]. The method uses layered rendering to write directly to volume texture layers [S1, unofficial].
++*   **Performance:** Tested on an Intel Core i7 860 @ 2.80GHz, 8 GB RAM, nVIDIA GeForce GTX 285 GPU (1 GB memory) [S1, unofficial]. For the Bunny model (69,451 triangles) at a $256^3$ grid size, Geometry Slicing took 6.43 ms (15 vertices out) and 6.98 ms (19 vertices out) [S1, unofficial].
++*   **Strengths:** Produces exactly the fragments rasterized in the final volume slices, avoiding fragment rejection overhead [S1, unofficial]. Preferred on non-unified architectures if pixel shader cores are intensively used, and on architectures with small bandwidth [S1, unofficial].
++*   **Limitations:** Requires geometry shader support [S1, unofficial]. Triangles not aligned with the Z-axis are ignored [S1, unofficial]. Performance varies with the number of output vertices allowed by the GPU [S1, unofficial].
+ 
+ ## Background

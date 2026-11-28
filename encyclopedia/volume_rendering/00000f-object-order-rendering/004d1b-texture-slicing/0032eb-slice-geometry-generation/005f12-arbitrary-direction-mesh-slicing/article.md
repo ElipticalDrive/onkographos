@@ -1,0 +1,155 @@
+# Arbitrary Direction Mesh Slicing
+
+
+## Overview
+Arbitrary Direction Mesh Slicing generates cross-sectional slices from a 3D surface mesh by intersecting mesh edges with a user-defined plane [S1]. It solves the problem of visualizing oblique anatomical structures or off-axis phenomena that standard axial, coronal, or sagittal slicing might overlook [S1]. Unlike fixed-grid texture slicing, this method explicitly constructs a local coordinate system for the cutting plane, allowing for unlimited, publication-quality cross-sections of complex, misaligned structures [S1].
+
+## How it works
+**Inputs and Outputs:**
+*   **Input:** A 3D surface mesh $M(V, F)$, where $V$ is the matrix of Cartesian vertex coordinates and $F$ is the set of faces [S1]. The mesh is typically derived from CT or MRI segmentation (e.g., STL format) [S1].
+*   **Output:** A set of slice segments (splines) defined by intersection points, and modified mesh faces if the mesh is being updated for visualization [S1].
+
+**Data Structures:**
+*   **Vertices:** $v_i = (v_{ix}, v_{iy}, v_{iz})$ [S1].
+*   **Edges:** An edge $e_k$ connects two vertices $v_i$ and $v_{i+1}$ [S1].
+*   **Faces:** Triangular faces defined by three vertices [S1].
+
+**Steps:**
+1.  **Coordinate Alignment:** Align and rotate the entire mesh $M$ according to the axis defined by the user [S1]. This transforms the arbitrary cutting direction into a principal axis of the local coordinate system.
+2.  **Plane Definition:** Define the intersection plane $\alpha'$ in the rotated coordinate system as $y = s$, where $s$ is a numeric value acquired in real-time (e.g., from a user mouse roll position) [S1].
+3.  **Edge Intersection:** For each edge $e_k(v_i, v_{i+1})$, calculate the intersection point $p(x, y, z)$ with the plane $\alpha'$ [S1].
+4.  **Face Splitting:** For each face whose edges intersect the plane, divide the face into three new triangular faces based on the calculated intersection points [S1].
+5.  **Slice Extraction:** Define the segment of the intersection spline as the new edge connecting two intersection points on a face; this segment represents the slice [S1].
+
+**Formulas:**
+The intersection point $p(x,y,z)$ of edge $e_k(v_i, v_{i+1})$ and plane $\alpha'$ is calculated by solving the linear interpolation equation [S1]:
+
+$$
+\frac{x - v_{ix}}{v_{ix+1} - v_{ix}} = \frac{y - v_{iy}}{v_{iy+1} - v_{iy}} = \frac{z - v_{iz}}{v_{iz+1} - v_{iz}} = s
+$$
+
+Where:
+*   $v_i = (v_{ix}, v_{iy}, v_{iz})$ and $v_{i+1} = (v_{ix+1}, v_{iy+1}, v_{iz+1})$ are the endpoints of the edge [S1].
+*   $s$ is the $y$-coordinate of the intersection plane $\alpha'$ [S1].
+*   The resulting point $p$ lies on the plane $y=s$ [S1].
+
+**Parameters:**
+*   $s$: The position of the cutting plane along the rotated Y-axis. Typically controlled interactively by the user [S1].
+
+**Edge Cases and Pitfalls:**
+*   **Vertex on Plane:** If one of the vertices of a face belongs to the intersection plane, the face is not divided [S1]. This prevents degenerate geometry generation but requires careful handling to ensure the slice continuity is maintained across adjacent faces [S1].
+*   **Precision:** The method relies on exact arithmetic for intersection; floating-point errors may cause gaps or overlaps in the slice spline if not handled [G].
+
+**Pseudocode:**
+
+> **Unverified code.** The code below did not pass a test run against a reference implementation, or no test fits it, so it may contain errors.
+
+```python
+def arbitrary_direction_mesh_slicing(mesh, user_rotation_matrix, s_value):
+    """
+    mesh: Object containing vertices V and faces F
+    user_rotation_matrix: 3x3 matrix to align mesh with user-defined axis
+    s_value: Float, the y-coordinate of the cutting plane in the rotated frame
+    """
+    # Step 1: Rotate mesh vertices
+    rotated_vertices = apply_rotation(mesh.vertices, user_rotation_matrix)
+    
+    # Step 2: Identify intersecting edges and calculate points
+    intersection_points = {} # Map edge_id to point (x, y, z)
+    intersecting_edges = []
+    
+    for edge in mesh.edges:
+        v1 = rotated_vertices[edge.v1]
+        v2 = rotated_vertices[edge.v2]
+        
+        # Check if edge straddles the plane y = s
+        if (v1.y - s_value) * (v2.y - s_value) < 0:
+            # Calculate intersection using linear interpolation
+            # Formula: (y - v1.y) / (v2.y - v1.y) = t
+            # We know y = s_value
+            t = (s_value - v1.y) / (v2.y - v1.y)
+            
+            x = v1.x + t * (v2.x - v1.x)
+            y = s_value
+            z = v1.z + t * (v2.z - v1.z)
+            
+            intersection_points[edge.id] = (x, y, z)
+            intersecting_edges.append(edge)
+            
+    # Step 3: Process faces to generate slice segments and split faces
+    slice_segments = []
+    new_faces = []
+    
+    for face in mesh.faces:
+        # Count how many edges of this face intersect the plane
+        intersecting_edge_ids = [eid for eid in face.edge_ids if eid in intersection_points]
+        
+        if len(intersecting_edge_ids) == 2:
+            # Standard case: two edges intersect
+            p1 = intersection_points[intersecting_edge_ids[0]]
+            p2 = intersection_points[intersecting_edge_ids[1]]
+            
+            # Add segment to slice spline
+            slice_segments.append((p1, p2))
+            
+            # Split face into three triangles (Source [S1])
+            # Note: The exact topology of the split depends on vertex ordering.
+            # Generally, the face is split by the new edge (p1, p2).
+            # The source states "divide the face into three new triangular faces".
+            # This implies the original face vertices are retained and connected to p1 and p2.
+            # Assuming face vertices v_a, v_b, v_c and intersections on edges (v_a,v_b) and (v_b,v_c):
+            # New triangles: (v_a, p1, p2), (p1, v_b, p2), (p2, v_c, v_a) -- logic varies by topology.
+            # We record the split for reconstruction.
+            new_faces.extend(split_face(face, p1, p2))
+            
+        elif len(intersecting_edge_ids) == 0:
+            # No intersection, keep original face
+            new_faces.append(face)
+            
+        else:
+            # Case: One vertex lies on the plane or 3 edges intersect (degenerate)
+            # Source [S1]: "The face is not divided if the one of vertex belongs to the intersection plane."
+            # If a vertex is exactly on the plane, we do not split.
+            # If 3 edges intersect, it implies a vertex is on the plane or numerical error.
+            # We keep the face as is to avoid degenerate triangles [S1].
+            new_faces.append(face)
+            
+    return slice_segments, new_faces
+
+def split_face(face, p1, p2):
+    """
+    Splits a triangular face into three new triangles based on intersection points p1 and p2.
+    Assumes p1 and p2 lie on two distinct edges of the triangle.
+    """
+    # This is a placeholder for the specific topological split logic.
+    # The source [S1] states "divide the face into three new triangular faces".
+    # A common triangulation for a quad formed by two vertices and two intersection points
+    # involves splitting into triangles. For a triangle cut by a line segment (p1, p2),
+    # the result is usually a smaller triangle and a quadrilateral, which is then split.
+    # However, the source explicitly says "three new triangular faces".
+    # This might imply the original face is replaced by 3 triangles in a specific configuration
+    # or refers to the local refinement of the mesh around the cut.
+    # Without explicit vertex ordering in the source, we return the segment for the slice
+    # and mark the face for replacement.
+    return [face] # Placeholder: Actual implementation requires vertex indexing.
+```
+
+## Subtopics
+
+### [Arbitrarily-Aligned Plane Visualization](19526-arbitrarily-aligned-plane-visualization.md)
+Extracts a 2D image from a 3D volumetric dataset by intersecting it with a user-defined plane not aligned with cardinal axes. It solves the problem of missing off-axis phenomena and explicitly constructs a local coordinate system for the cutting plane. Choose this when publication-quality plots of complex, misaligned structures are required.
+
+## Operating characteristics
+*   **Time Complexity:** Linear with respect to the number of edges and faces, as each edge and face must be checked for intersection [S1].
+*   **Memory Complexity:** Linear, storing the mesh and the resulting slice segments [S1].
+*   **Performance:** The method allows for real-time interaction, as the plane position $s$ is acquired in real-time from user input (e.g., mouse roll) [S1].
+*   **Strengths:** Unlimited number of cross-sections; handles arbitrary orientations; suitable for generating large training sets for machine learning in medical diagnosis [S1].
+*   **Limitations:** Requires mesh preprocessing (rotation); degenerate cases (vertices on the plane) must be handled to avoid splitting errors [S1].
+*   **When to use:** When visualizing oblique anatomical structures or off-axis phenomena in medical imaging or astrophysical simulations [S1].
+*   **When not to use:** When fixed axial/coronal/sagittal views are sufficient, or when volumetric ray-casting is preferred over surface mesh slicing [S1].
+
+## Background
+The method was proposed in a framework for virtual reality visualization of complex volume images from CT and MRI data [S1]. It is designed to support medical diagnosis and educational applications by allowing students to interactively explore 3D models [S1]. The approach addresses the limitations of solid models generated from CT/MRI, which often have sharp faces and shapes that are not perceptually attractive in VR [S1].
+
+## Sources
+[S1] A New Technique of the Virtual Reality Visualization of Complex Volume Images from the Computer Tomography and Magnetic Resonance Imaging, https://link.springer.com/chapter/10.1007/978-3-030-87595-4_28, fetched 2026-10-28

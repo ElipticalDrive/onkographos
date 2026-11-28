@@ -1,0 +1,91 @@
+# Z-buffer merging
+Also called: Z-buffer merge
+## Overview
+Z-buffer merging is a hybrid rendering technique that simultaneously displays volumetric and non-volumetric (polygonal) objects by computing two independent images and combining them based on depth information [S1, unofficial]. It solves the problem of integrating static volume data with interactive surface geometry by decoupling the rendering pipelines. Unlike [Hybrid Volume-Surface Rendering](15213-hybrid-volume-surface-rendering.md) which integrates surface and volume data in a single pass, Z-buffer merging uses a post-processing step to select pixels, making it a "brute-force" strategy that prioritizes simplicity and interactivity for moving polygons over complex occlusion handling [S1, unofficial].
+## How it works
+**Inputs and Outputs:**
+- Input 1: Volume dataset (scalar field).
+- Input 2: Polygonal surface mesh.
+- Input 3: Camera parameters.
+- Output: Composite image containing both volume and surface contributions.
+
+**Data Structures:**
+1.  **Volume Image ($I_V$):** 2D array of color values.
+2.  **Volume Z-buffer ($Z_V$):** 2D array of depth values.
+3.  **Surface Image ($I_S$):** 2D array of color values.
+4.  **Surface Z-buffer ($Z_S$):** 2D array of depth values.
+
+**Steps:**
+1.  **Compute Volume Image and Z-buffer:**
+    - Perform volume rendering (e.g., ray casting) to generate $I_V$.
+    - Compute $Z_V$ for each pixel. The depth value is either the depth of the first non-zero voxel encountered or the depth at which a user-defined opacity threshold is exceeded [S1, unofficial].
+2.  **Compute Surface Image and Z-buffer:**
+    - Perform traditional rasterization or ray tracing of the polygonal mesh to generate $I_S$.
+    - Compute $Z_S$ for each pixel, representing the depth of the nearest surface intersection [S1, unofficial].
+3.  **Merge Images:**
+    - For each pixel $(x, y)$, compare $Z_V(x, y)$ and $Z_S(x, y)$.
+    - If $Z_V(x, y) < Z_S(x, y)$, the pixel color is $I_V(x, y)$.
+    - Otherwise, the pixel color is $I_S(x, y)$.
+    - This selects the object closest to the camera [S1, unofficial].
+
+**Pseudocode:**
+> **Unverified code.** The code below did not pass a test run against a reference implementation, or no test fits it, so it may contain errors.
+
+```python
+def z_buffer_merge(volume_data, surface_mesh, camera):
+    # Step 1: Render volume
+    I_V, Z_V = render_volume(volume_data, camera)
+    
+    # Step 2: Render surface
+    I_S, Z_S = render_surface(surface_mesh, camera)
+    
+    # Step 3: Merge
+    composite_image = empty_image_like(I_V)
+    for y in range(height):
+        for x in range(width):
+            if Z_V[y, x] < Z_S[y, x]:
+                composite_image[y, x] = I_V[y, x]
+            else:
+                composite_image[y, x] = I_S[y, x]
+                
+    return composite_image
+```
+
+**Parameters:**
+- **Opacity Threshold:** A user-defined value determining when to stop volume integration for $Z_V$ calculation [S1, unofficial].
+- **Depth Comparison:** Standard less-than comparison for depth values [S1, unofficial].
+
+**Edge Cases and Pitfalls:**
+- **Complex Occlusion:** The method may not handle complex occlusion correctly because it does not account for transparency or partial overlaps between volume and surface in a physically based manner [S1, unofficial].
+- **Static Volume Assumption:** The method is most useful when the volume rendered image remains static while polygonal objects move, as only the surface rendering needs to be repeated [S1, unofficial].
+- **Voxelization Artifacts:** Surfaces usually exhibit strange artifacts after voxelization, requiring high-resolution volume datasets for reasonable quality [S1, unofficial].
+
+## Subtopics
+
+### Levoy's Z-buffer optimized ray casting
+An improvement to Z-buffer merging where ray casting integration is terminated early based on pre-computed surface depth [S1, unofficial]. It avoids traversing the whole volume by stopping ray integration when the depth specified in the pre-computed Z-buffer is reached [S1, unofficial]. The accumulated opacity from volume rendering determines the blending weight between the volume color and the underlying surface color [S1, unofficial]. This reduces computational cost compared to full volume rendering while maintaining the hybrid display capability [S1, unofficial].
+
+## Operating characteristics
+**Time and Memory Complexity:**
+- Time: $O(N_V + N_S)$, where $N_V$ is the number of volume samples and $N_S$ is the number of surface primitives. In Levoy's variant, $N_V$ is reduced by early termination.
+- Memory: $O(W \times H)$ for the two images and two Z-buffers, where $W$ and $H$ are image dimensions.
+
+**Measured Performance:**
+- Not given in the sources.
+
+**Scaling:**
+- Scales linearly with image resolution. Performance is independent of volume resolution in the basic merge, but depends on it in Levoy's variant due to early termination benefits.
+
+**Strengths and Limitations:**
+- **Strengths:** Simple to implement; allows interactive movement of polygonal objects in a static volume scene [S1, unofficial].
+- **Limitations:** Brute-force strategy; may not handle complex occlusion correctly; artifacts from voxelization [S1, unofficial].
+
+**When to use it and when not:**
+- Use when interactive surface movement is required in a static volume scene.
+- Do not use when accurate transparency blending or complex occlusion between volume and surface is critical.
+
+## Background
+Originated as a simple technique to simultaneously display volumetric and non-volumetric objects [S1, unofficial]. An improvement was suggested by Levoy [S1, unofficial]. It is used in volume rendering systems where hybrid display of surfaces and volumes is needed [S1, unofficial].
+
+## Sources
+[S1] Volume Rendering Mathematical Models and Algorithmic Aspects, https://core.ac.uk/works/16970577, fetched 2026-10-29 (unofficial)

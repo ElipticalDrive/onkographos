@@ -1,0 +1,56 @@
+# Hybrid and Mixed Geometry
+
+Also called: Hybrid ray-volume rendering
+
+## Overview
+Hybrid and Mixed Geometry rendering intermixes explicit polygonal geometry with implicit volumetric data in a single image, ensuring correct visibility and attenuation [S4, unofficial]. It is distinguished from pure slice-based rasterization by explicitly combining ray-casting or slab compositing with polygon rendering, and from pure ray tracing by leveraging GPU-accelerated volume sampling [S1].
+
+## Shared principles
+This family builds on [Slice-based and Proxy Geometry Rendering](6225-slice-based-and-proxy-geometry-rendering.md). All methods intermix polygonal geometry and volumetric data by compositing them in depth-sorted order, handling both opaque and translucent surfaces alongside volumetric samples [S4, unofficial]. The core mechanism involves sampling the volume along viewing rays or through slabs, intersecting or rasterizing polygons, and blending contributions using front-to-back alpha compositing [G]. Polygonal surfaces are shaded to yield color and opacity, while volumetric samples are classified via transfer functions to yield matching color and opacity values [G]. The final image is assembled by iterating through depth-sorted events (volume slivers and polygons) and applying the over operator to accumulate color and opacity [G].
+
+## Subtopics
+
+### [Hybrid Volume Rendering](2308-hybrid-volume-rendering.md)
+Hybrid Volume Rendering mixes geometric and volumetric data by casting rays through both, drawing samples of each, and compositing them in depth-sorted order. It solves the problem of rendering scenes containing both polygonal models and volumetric data in a single pass with correct visibility and attenuation. Unlike pure volume rendering which rasterizes slices, or pure ray tracing which handles only geometry, this method simultaneously traces rays through volumetric sample arrays and polygonal databases, resampling both at equally spaced intervals to handle mixtures of geometric and volumetric data. It is distinguished from slice-based or proxy-geometry rasterization by its explicit ray-casting approach to mixing.
+
+### [Hybrid Volume Rendering Scheme](16812-hybrid-volume-rendering-scheme.md)
+The Hybrid Volume Rendering Scheme is a parallel volume rendering algorithm for unstructured grids that combines object-order and image-order techniques to handle complex block boundaries, dramatic cell size variations, and camera-induced load imbalances. Unlike pure image-order methods, which suffer from replicated cell loading and unequal cell distribution, or pure object-order methods, where image compositing becomes a bottleneck, this approach bounds the computation of each processing phase to adapt dynamically to the workload.
+
+### [ABR Glyph-Volume Hybrid Visualization](18663-abr-glyph-volume-hybrid-visualization.md)
+Artifact-Based Rendering (ABR) is a hybrid visualization technique for Diffusion-Tensor MRI (DT-MRI) data that combines volume rendering for anatomical context with sparsely sampled, texture-encoded glyphs and oriented ellipsoids to represent crossing fibers and microstructural parameters. It solves the problem of occlusion in 3D representations of complex white matter by using a "magic lens" design: volume rendering and sparse glyphs provide global context, while high-resolution glyph data is presented in an interactively defined small volume. It differs from prior slice-based approaches by encoding fiber orientation via glyph texture variations instead of color, freeing the color channel to encode a derived variable (similarity between primary and secondary directions).
+
+### [Flow Volume Rendering](22566-flow-volume-rendering.md)
+Flow Volume Rendering visualizes steady 3D vector fields by rendering a "flow volume"—the space swept by a generating polygon $P$ as it is advected by the flow velocity field. It solves the problem of efficiently visualizing phenomena like smoke or wind in steady flows without the computational cost of full-volume ray casting or the sorting overhead of standard polyhedron compositing. It is distinguished from its siblings by its specific use of the Shirley and Tuchman tetrahedron projection method to enable order-independent hardware compositing for constant-color tracers, allowing interactive performance by rendering only the swept volume rather than the entire data set.
+
+### [Image-order parallel volume rendering](23165-image-order-parallel-volume-rendering.md)
+Image-order parallel volume rendering is a distributed rendering technique that decomposes the final image into non-overlapping spatial regions, assigning each region to a separate processor. Unlike object-order methods that distribute the volume dataset, this approach assigns distinct regions of screen space to each processor, allowing the resulting partial images to be combined without an ordered composition step. It is distinguished from its siblings by its screen-space decomposition strategy, which eliminates the need for global depth sorting of fragments but introduces significant data duplication and view-dependent load imbalance.
+
+### Cutter Geometry Rendering
+Rendering occurs only inside the selected geometric object's volume. If Fire Lights are enabled, only those inside the cutter are rendered. Parameters: `usegizmo` (enable), `gizmo` (object) [S2].
+
+**Invert Cutter** (`invgizmo`): When enabled, rendering occurs only outside the render cutter. Rays not intersecting the cutter are shaded. This is distinct from a cutter with inverted geometry [S2].
+
+**Pitfall**: Cutter Geom does not work in Volumetric Geometry mode [S2].
+
+### Image Based Rendering Assisted Volume Rendering
+A technique that achieves interactive rendering by avoiding full volume rerendering per frame, instead computing arbitrary views from nearby prerendered images [S3].
+
+**Steps**: Partition the volume data using slab decomposition. Volume render each data slab to generate a set of prerendered source images. Warp and blend images from the known prerendered views to synthesize what would be seen from an arbitrary new view [S3].
+
+**Parameter**: The total number of source images equals the number of data slabs created by the partitioning [S3].
+
+**Comparison**: Trades off the cost of prerendering slabs for interactive frame rates, eliminating the need to completely rerender the volume for every frame [S3].
+
+### Mixing Geometry with Volume Slabs
+A method to intermix opaque and translucent geometry with volumetric data by interlacing slab images. This ensures all contributing objects are composited in the correct order [S4, unofficial].
+
+**Steps**: For opaque polygons: Render geometry into the framebuffer, then draw slab images with z-depth test to correctly occlude volume samples behind the geometry. For translucent polygons: Draw polygons between each slab image in between texture mapping the individual slab images [S4, unofficial].
+
+## Background
+The concept of hybrid rendering, specifically blending OpenGL-rendered volumes with ray-traced non-volume objects, is implemented in software such as PyMOL via the `ray_volume` setting [S1]. Ray trace specific features like shadows or outlines (`ray_trace_mode`) are not available with the base approach; the `ray_volume` setting activates the hybrid solution instead [S1]. Image sizes other than the current window size are not possible with the hybrid ray-volume solution, and neither solution works in headless (batch) mode [S1].
+
+## Sources
+[S1] Volume - PyMOL Wiki, https://pymolwiki.org/Volume, fetched 2026-10-29
+[S2] FireSmoke Rendering - Phoenix for 3ds Max, https://documentation.chaos.com/space/PHX4MAX/124396558, fetched 2026-10-27
+[S3] Using High-Speed WANs and Network Data Caches to Enable Remote and Distributed Visualization, https://doi.org/10.5555/370049.370397, fetched 2026-10-26
+[S4] Real-Time Volume Rendering, https://cfcs.pku.edu.cn/baoquan/docs/20180622110335231616.pdf, fetched 2026-10-30 (unofficial)

@@ -1,0 +1,141 @@
+--- v001.md
++++ v002.md
+@@ -4,31 +4,27 @@
+ 
+ ## Overview
+-This method generates a dense Signed Distance Field (SDF) by explicitly computing the distance from every voxel in a 3D grid to the nearest surface of an input triangle mesh. It solves the problem of converting a polygonal representation into a continuous scalar field suitable for raymarching or simulation. Unlike hierarchical methods or approximate techniques, this approach guarantees exact distance values for the grid resolution by iterating through all mesh triangles for each voxel, resulting in high accuracy at the cost of quadratic computational complexity relative to the number of voxels and triangles.
++This method generates a dense Signed Distance Field (SDF) by explicitly computing the distance from every voxel in a 3D grid to the nearest surface of an input triangle mesh [S1, unofficial]. It converts a polygonal representation into a continuous scalar field suitable for raymarching or simulation [S1, unofficial]. Unlike hierarchical methods, this approach guarantees exact distance values for the grid resolution by iterating through all mesh triangles for each voxel, resulting in high accuracy at the cost of quadratic computational complexity [S1, unofficial].
+ 
+ ## How it works
+ **Inputs and Outputs:**
+-*   **Input:** A triangle mesh defined by a vertex array and an index array (32-bit or two 16-bit indices packed into 32-bit).
+-*   **Input:** Grid dimensions $(W, H, D)$ and the mesh bounding box.
+-*   **Output:** A 3D voxel grid (image) where each cell stores a signed distance value.
++*   **Input:** A triangle mesh defined by a vertex array and an index array (32-bit or two 16-bit indices packed into 32-bit) [S1, unofficial].
++*   **Input:** Grid dimensions $(W, H, D)$ and the mesh bounding box [S1, unofficial].
++*   **Output:** A 3D voxel grid image where each cell stores a signed distance value [S1, unofficial].
+ 
+ **Data Structures:**
+-*   **Voxel Grid:** A 3D image allocated in device local memory.
++*   **Voxel Grid:** A 3D image allocated on the GPU from device local memory for maximum read/write performance in shaders [S1, unofficial].
+     *   **Format:** `VK_FORMAT_R32_SFLOAT` (32-bit floating point per cell) [S1, unofficial].
+-    *   **Initialization:** All cells are initialized to $F32\_MAX$ (the maximum representable floating-point value) [S1, unofficial].
+-    *   **Memory:** Half precision (16-bit) is preferable for memory reduction but requires SPIR-V and Vulkan extensions for 16-bit floating point atomics, which may not be supported on all drivers [S1, unofficial].
++    *   **Initialization:** All cells are initialized to `F32_MAX` (the maximum representable floating-point value) [S1, unofficial].
++    *   **Memory:** Half precision (16-bit) is preferable for memory reduction but requires SPIR-V and Vulkan extensions for 16-bit floating point atomics, which were unsupported on the author's drivers [S1, unofficial].
+ 
+ **Preprocessing (Transformation):**
+-To ensure the mesh fits within the grid and utilizes the full resolution, triangles are transformed using a scaling factor and an offset. This centers the mesh and scales it to match the grid's physical dimensions. Without this, parts of the mesh (e.g., ears, tail) may fall outside the grid bounds and be clipped [S1, unofficial].
++Triangles are transformed by a scaling factor and an offset within the voxel grid to ensure the SDF grid represents the same size as the original mesh and is centered to fully utilize cells [S1, unofficial]. Without this transformation, the mesh extends out of grid bounds, clipping parts like ears and tails [S1, unofficial].
+ 
+ **Algorithm Steps:**
+-1.  **Parallel Dispatch:** Launch a compute shader where each thread (or group of threads) is responsible for one voxel cell $(x, y, z)$ in the grid. This is an "embarrassingly parallel" problem as cells are independent [S1, unofficial].
+-2.  **Initialize Distance:** For the current voxel, set the current minimum distance $d_{min} = F32\_MAX$.
+-3.  **Iterate Triangles:** Loop through every triangle in the mesh.
+-    *   Let the triangle be defined by vertices $v_0, v_1, v_2$.
+-    *   Calculate the signed distance from the voxel center $P$ to the triangle plane.
+-    *   Calculate the absolute distance from $P$ to the triangle surface (handling cases where the projection falls outside the triangle edges).
+-    *   Update $d_{min} = \min(d_{min}, \text{absolute\_distance})$.
+-4.  **Assign Sign:** Determine the sign of the distance. The inside of the object must be negative. This is typically done by checking the winding order or using a ray-casting test from the voxel center to determine if it is inside or outside the mesh [S1, unofficial].
+-5.  **Store Result:** Write the signed distance value to the voxel grid at $(x, y, z)$.
++1.  **Parallel Dispatch:** Launch a compute shader where each thread is responsible for one voxel cell $(x, y, z)$, exploiting the embarrassingly parallel nature of independent cell computations [S1, unofficial].
++2.  **Initialize Distance:** For the current voxel, set the current minimum distance $d_{min} = \text{F32\_MAX}$ [S1, unofficial].
++3.  **Iterate Triangles:** Loop through every triangle in the mesh [S1, unofficial]. For each triangle, calculate the distance from the voxel center to the triangle surface [S1, unofficial]. Use the absolute value of the distance during comparison to find the nearest surface regardless of front/back orientation [S1, unofficial]. Update $d_{min} = \min(d_{min}, \text{absolute\_distance})$ [S1, unofficial].
++4.  **Assign Sign:** Assign the signed value to the cell so that the inside of the object is maintained as negative [S1, unofficial]. (Note: The specific sign-determination algorithm is not specified in the sources.)
++5.  **Store Result:** Write the signed distance value to the voxel grid at $(x, y, z)$ [S1, unofficial].
+ 
+ **Formula:**
+@@ -37,5 +33,5 @@
+ $$ d = \min_{t \in \text{Triangles}} (\text{dist}(P, t)) $$
+ 
+-Where $\text{dist}(P, t)$ is the Euclidean distance from point $P$ to triangle $t$. The absolute value of the distance is used during the minimization step to find the nearest surface regardless of front/back orientation, but the final stored value retains the sign indicating interior/exterior status [S1, unofficial].
++Where $\text{dist}(P, t)$ is the Euclidean distance from voxel center $P$ to triangle $t$ [S1, unofficial]. The absolute value is used for minimization, but the final stored value retains the sign indicating interior/exterior status [S1, unofficial].
+ 
+ **Pseudocode:**
+@@ -47,20 +43,23 @@
+ # Input: grid_scale (float)
+ # Input: grid_offset (vec3)
++# Input: grid_dims (vec3: W, H, D)
+ # Output: voxel_grid (write-only image3D)
+ 
+-def compute_sdf_brute_force(voxel_index, mesh_vertices, mesh_indices, grid_scale, grid_offset):
++def compute_sdf_brute_force(voxel_index, mesh_vertices, mesh_indices, grid_scale, grid_offset, grid_dims):
+     # 1. Map voxel index to 3D coordinates
+-    x, y, z = voxel_index_to_3d(voxel_index)
++    W, H, D = grid_dims
++    x = voxel_index % W
++    y = (voxel_index // W) % H
++    z = voxel_index // (W * H)
+     
+     # 2. Get voxel center in world space
+-    # Assuming grid origin is at (0,0,0) and spans grid_scale units
+     voxel_center = vec3(x, y, z) * grid_scale + grid_offset
+     
+     # 3. Initialize minimum distance to infinity
+-    min_dist = F32_MAX
++    min_dist = float('inf')
+     
+     # 4. Iterate through all triangles
+     num_triangles = len(mesh_indices) // 3
+-    for i in range(0, num_triangles, 3):
++    for i in range(0, num_triangles * 3, 3):
+         idx0 = mesh_indices[i]
+         idx1 = mesh_indices[i+1]
+@@ -72,6 +71,4 @@
+         
+         # 5. Calculate distance from voxel_center to triangle (v0, v1, v2)
+-        # This involves projecting the point onto the triangle plane
+-        # and clamping to the triangle edges if the projection falls outside.
+         dist = distance_point_to_triangle(voxel_center, v0, v1, v2)
+         
+@@ -81,8 +78,8 @@
+             
+     # 7. Determine sign (Inside/Outside)
+-    # [G] Standard method: Cast a ray from voxel_center in a fixed direction.
+-    # Count intersections with the mesh. Odd intersections = Inside (negative).
+-    # Even intersections = Outside (positive).
+-    is_inside = ray_march_intersection_test(voxel_center, mesh_vertices, mesh_indices)
++    # [G] Sign determination method not specified in sources; standard approach uses ray casting or winding number.
++    # is_inside = ray_cast_test(voxel_center, mesh_vertices, mesh_indices)
++    # For implementation completeness, a standard ray-cast is assumed:
++    is_inside = False # Placeholder for standard [G] sign test
+     
+     if is_inside:
+@@ -96,21 +93,11 @@
+ def distance_point_to_triangle(p, v0, v1, v2):
+     # [G] Standard geometric distance calculation
+-    # 1. Compute normal of triangle
+-    normal = cross(v1 - v0, v2 - v0)
+-    normal = normalize(normal)
+-    
+-    # 2. Project p onto plane
+-    # Distance to plane
++    normal = normalize(cross(v1 - v0, v2 - v0))
+     dist_plane = dot(p - v0, normal)
+-    
+-    # 3. Project p onto triangle plane to find closest point on plane
+     p_proj = p - normal * dist_plane
+     
+-    # 4. Check if p_proj is inside triangle
+-    # Use barycentric coordinates or edge functions
+     if is_point_in_triangle(p_proj, v0, v1, v2):
+-        return dist_plane # Signed distance to plane is valid
++        return dist_plane
+         
+-    # 5. If outside, find closest point on edges
+     d0 = distance_point_to_segment(p, v0, v1)
+     d1 = distance_point_to_segment(p, v1, v2)
+@@ -147,5 +134,5 @@
+ *   **Grid Bounds:** If the mesh is not transformed (scaled/offset) to fit the grid, parts of the mesh may lie outside the voxel grid boundaries, resulting in clipped geometry (e.g., ears or tails of a bunny mesh) [S1, unofficial].
+ *   **Precision:** Using 16-bit floats reduces memory but requires specific hardware support for atomic operations, which may be unavailable [S1, unofficial].
+-*   **Performance:** The brute force approach is computationally expensive. For large meshes, optimization techniques like mesh hierarchies (e.g., BVH) or spatial partitioning (e.g., K-D trees) are suggested to reduce the number of triangle checks per voxel [S1, unofficial].
++*   **Performance:** The brute force approach is computationally expensive. For large meshes, optimization techniques like organizing a mesh hierarchy before computing distances are suggested to reduce the number of triangle checks per voxel [S1, unofficial].
+ 
+ ## Operating characteristics
+@@ -156,5 +143,5 @@
+ *   **Limitations:** Poor performance for high-resolution grids or complex meshes; memory-intensive for large volumes; requires careful handling of mesh-to-grid transformation [S1, unofficial].
+ *   **When to Use:** Small to medium-sized meshes where high accuracy is required and resolution is manageable; suitable for preprocessing steps before applying faster refinement algorithms like JFA [S1, unofficial].
+-*   **When Not to Use:** Very large meshes or extremely high-resolution grids where quadratic complexity becomes prohibitive; hierarchical methods (BSP, K-D trees) are preferred for large-scale scenes [S1, unofficial].
++*   **When Not to Use:** Very large meshes or extremely high-resolution grids where quadratic complexity becomes prohibitive [S1, unofficial].
+ 
+ ## Background

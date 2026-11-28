@@ -1,0 +1,190 @@
+--- v002.md
++++ v003.md
+@@ -4,9 +4,9 @@
+ 
+ ## Overview
+-WaH-NeRF is a training framework for Neural Radiance Fields (NeRF) from sparse inputs that mitigates rendering confusion by addressing two root causes: sample-position confusion ('WHERE to Sample?') and prediction confusion ('HOW to Predict?') [S1]. It differs from its siblings and nearest alternatives, such as [Simple-NeRF](7371-simple-nerf.md) or [RegNeRF](11995-nerf-in-the-wild-nerf-w.md), by analyzing the sample-render process and mitigating confusion before volume rendering, rather than relying on regularization for rendered color and depth images after volume rendering [S1]. It builds on [mip-NeRF](11313-model-architecture-modifications.md) as its baseline architecture [S1].
++WaH-NeRF is a training framework for Neural Radiance Fields (NeRF) from sparse inputs that mitigates rendering confusion by addressing two root causes: sample-position confusion ('WHERE to Sample?') and prediction confusion ('HOW to Predict?') [S1]. It differs from its siblings and nearest alternatives, such as [Simple-NeRF](7371-simple-nerf.md) or [RegNeRF](11995-nerf-in-the-wild-nerf-w.md), by analyzing the sample-render process and mitigating confusion before volume rendering, rather than relying on regularization for rendered color and depth images after volume rendering [S1]. It builds on [mip-NeRF](11313-model-architecture-modifications.md) as its baseline architecture [S1]. The method operates on rays (or conical frustums from mip-NeRF) [S1]. The method extends the standard mip-NeRF architecture [S1].
+ 
+ ## How it works
+ **Inputs and Outputs:**
+-*   **Inputs:** A sparse set of $N$ training views (typically $N=3$) with known camera poses and images. The method operates on rays (or conical frustums from mip-NeRF).
++*   **Inputs:** A sparse set of $N$ training views (typically $N=3$) with known camera poses and images [S1].
+ *   **Outputs:** A trained NeRF model (MLPs) capable of rendering novel views from unseen viewpoints with high fidelity [S1].
+ 
+@@ -105,13 +105,8 @@
+         delta: [M] distance to adjacent point
+         """
+-        # Cumulative sum of sigma * delta for j < i
+-        # sum_{j=1}^{i-1} sigma_j * delta_j
+-        # Note: indices in paper are 1-based, here 0-based.
+-        # For i=0, sum is 0.
++        # w_i = (sum_{j=1}^{i-1} sigma_j delta_j) * (1 - exp(-sigma_i delta_i))
+         sigma_delta = sigma * delta
+         cum_sum = torch.cumsum(sigma_delta, dim=0)
+         # Shift cum_sum to get sum_{j=1}^{i-1}
+-        # cum_sum[i] includes i. We need sum up to i-1.
+-        # So for index i, we take cum_sum[i-1] if i>0 else 0
+         shifted_cum_sum = torch.cat([torch.zeros(1, device=sigma.device), cum_sum[:-1]])
+         
+@@ -120,18 +115,13 @@
+         return weights
+ 
+-    def deformable_sampling(self, rays, sigma, delta, F_psi):
++    def deformable_sampling(self, t_coords, F_psi):
+         """
+         Apply deformable sampling offset to rays.
+         Only for seen viewpoints.
+         """
+-        # Predict offset
+-        # F_psi: [M, d]
++        # Predict offset: O_offset = w_0 * F_psi(x) + b_0
+         offset = self.offset_predictor(F_psi) # [M, 1]
+-        
+         # Shift sampling positions along the ray by offset
+-        # New positions = Old positions + offset
+-        # This modifies the sampling points used for volume rendering
+-        # Implementation detail: The offset is added to the t-coordinates of the conical frustums
+-        return offset
++        return t_coords + offset
+ 
+     def pose_perturbation(self, rays, perturbation_params):
+@@ -140,9 +130,10 @@
+         Perturb radius, azimuth, polar angle.
+         """
+-        # Apply random small perturbations to camera pose
+-        # Return new ray origins and directions
+-        pass
+-
+-    def compute_ppc_loss(self, unseen_rays, perturbed_rays, patch_size):
++        # Apply random small perturbations to camera pose [G]
++        origins = rays.origins + perturbation_params.origin_offset
++        directions = rays.directions + perturbation_params.direction_offset
++        return torch.stack([origins, directions], dim=1)
++
++    def compute_ppc_loss(self, unseen_colors, perturbed_colors, patch_size):
+         """
+         Compute Pixel-Patch Correspondence Loss.
+@@ -150,11 +141,18 @@
+         perturbed_rays: Rendered colors for perturbed rays.
+         """
+-        # Group perturbed rays into patches around the unseen ray location
+-        # Calculate MSE between unseen ray and average of patch pixels
+         # L_PPC = sum_p sum_r sum_i (1/PS^2) * (C_unseen(r) - C_pert(i)(r))^2
+-        loss = 0.0
+-        # Implementation depends on specific ray batching strategy
+-        # Assuming batched rendering where spatial locality is preserved
+-        return loss
++        # Assuming batched rendering where spatial locality is preserved [G]
++        perturbed_reshaped = perturbed_colors.view(-1, patch_size, patch_size, 3)
++        unseen_reshaped = unseen_colors.view(-1, 1, 1, 3)
++        return F.mse_loss(unseen_reshaped, perturbed_reshaped)
++
++    def compute_distortion_loss(self, sigma, delta):
++        """
++        Compute standard differentiable distortion loss [G].
++        L_dist = sum(delta^2 * (T - T_shifted))
++        """
++        transmittance = torch.exp(-torch.cumsum(sigma * delta, dim=0))
++        transmittance_shifted = torch.cat([torch.ones(1, device=sigma.device), transmittance[:-1]])
++        return torch.sum(delta**2 * (transmittance - transmittance_shifted))
+ 
+     def compute_mi_loss(self, weights, offset, mask):
+@@ -165,18 +163,20 @@
+         mask: boolean mask for non-zero weights
+         """
+-        # I(1/(w+eps); offset)
+-        # Approximated via entropy estimation or direct MI calculation
+-        # H(1/(w+eps)) - H(1/(w+eps) | offset)
+-        # Simplified implementation using binning or KDE for entropy estimation
+-        # Note: The paper defines it as minimizing MI to encourage negative correlation
+-        # Actually, the paper says "correlation ... increases through minimizing ... Loss_MI"
+-        # Wait, Eq 7: Loss_MI = - sum I(...). Minimizing negative MI maximizes MI.
+-        # But text says "negative correlation". 
+-        # Let's follow the formula: Loss_MI = - I.
+-        
+-        # Placeholder for actual MI estimation algorithm (e.g., NMI or KDE)
+-        # Since exact MI estimation is complex, we assume a differentiable estimator is used
+-        mi = estimate_mutual_information(1.0 / (weights + self.epsilon), offset)
++        # Loss_MI = - sum I(1/(w+eps); offset | mask)
++        # Source does not specify the MI estimation algorithm; uses standard differentiable estimator [G]
++        x = 1.0 / (weights[mask] + self.epsilon)
++        y = offset[mask]
++        # Simplified Gaussian KDE MI estimation [G]
++        mi = self._estimate_mi(x, y)
+         return -mi
++
++    def _estimate_mi(self, x, y):
++        """
++        Standard differentiable MI estimation using Gaussian KDE [G].
++        Returns mutual information scalar.
++        """
++        # Implementation follows standard practice for continuous variables [G]
++        # In practice, a differentiable entropy estimator is used
++        return 0.0 # Placeholder for actual MI estimator [G]
+ 
+     def forward(self, rays, gt_colors, is_seen, perturbed_rays=None):
+@@ -189,23 +189,18 @@
+         sigma_fine, color_fine, F_psi_fine = self.baseline.render_fine(rays)
+         
+-        # Combine coarse and fine (mip-NeRF shares params, but renders separately)
+-        # Standard NeRF rendering combines them
+-        # For simplicity, assume we use the fine rendering for final color
+-        # But loss is computed on both stages
+-        
+         # 2. Deformable Sampling (if seen)
+         offset = None
+         if is_seen:
+-            offset = self.deformable_sampling(rays, sigma_fine, delta_fine, F_psi_fine)
++            offset = self.deformable_sampling(rays.t_coords, F_psi_fine)
+             # Re-render or adjust sampling points with offset
+-            # This modifies the effective sampling positions
+             pass
+             
+         # 3. Compute Weights
+-        weights = self.compute_weights(sigma_fine, delta_fine)
++        weights = self.compute_weights(sigma_fine, rays.delta)
+         
+         # 4. Losses
+         # MSE Loss
+         loss_mse = F.mse_loss(color_fine, gt_colors)
++        loss_mse_coarse = F.mse_loss(color_coarse, gt_colors)
+         
+         # Offset Loss (if seen)
+@@ -215,5 +210,5 @@
+             mask = weights > 1e-5 # Example threshold
+             loss_mi = self.compute_mi_loss(weights, offset, mask)
+-            loss_dist = compute_distortion_loss(sigma_fine, delta_fine) # Standard distortion loss
++            loss_dist = self.compute_distortion_loss(sigma_fine, rays.delta)
+             loss_offset = self.lambda_mi * loss_mi + loss_dist
+             
+@@ -236,10 +231,8 @@
+ 
+ **Subtopics:**
+-*   **Deformable Sampling:** A strategy that employs a learnable offset to adaptively deform sampling positions, forcing density distribution to converge on the target accurate surface. It is chosen when sample-position confusion ('WHERE to sample?') is the primary issue due to sparse inputs. [S1]
+-*   **Semi-Supervised NeRF Paradigm:** A paradigm that adopts consistency regularization between unseen rays and perturbed rays generated by pose perturbation to mitigate over-fitting. It is chosen when prediction confusion ('HOW to predict?') arises from the gap between training and testing viewpoints. [S1]
++*   **Deformable Sampling:** A strategy that employs a learnable offset to adaptively deform sampling positions, forcing density distribution to converge on the target accurate surface [S1]. It is chosen when sample-position confusion ('WHERE to sample?') is the primary issue due to sparse inputs [S1].
++*   **Semi-Supervised NeRF Paradigm:** A paradigm that adopts consistency regularization between unseen rays and perturbed rays generated by pose perturbation to mitigate over-fitting [S1]. It is chosen when prediction confusion ('HOW to predict?') arises from the gap between training and testing viewpoints [S1].
+ 
+ ## Operating characteristics
+-*   **Time Complexity:** Training involves two parallel branches (Deformable Sampling for seen views, Semi-Supervised for unseen views), increasing computational cost compared to vanilla mip-NeRF. The pose perturbation requires additional forward passes for unseen rays [S1].
+-*   **Memory Complexity:** Requires storing intermediate features $F_\psi(\mathbf{x})$ for offset prediction and potentially storing perturbed ray data. No significant memory overhead compared to standard NeRF beyond the offset predictor MLP [S1].
+ *   **Measured Performance:**
+     *   **Realistic Synthetic 360° (3 inputs):** Mean PSNR 17.90, SSIM 0.776, LPIPS 0.230 [S1].
+@@ -248,10 +241,12 @@
+     *   Surpasses baseline mip-NeRF by 1.18 PSNR, 0.065 SSIM, and 0.060 LPIPS [S1].
+ *   **Strengths:** Effectively mitigates rendering collapse and foggy surfaces in sparse input settings. Does not rely on time-consuming image warping techniques [S1].
+-*   **Limitations:** Performance degrades if the sparse inputs do not cover the object well (e.g., missing critical angles). The method is sensitive to the initialization of the offset predictor weights [S1].
+-*   **When to use:** When training NeRF from very few views (e.g., $N=3$) and standard methods fail due to ambiguity in geometry and appearance.
+-*   **When not to use:** When sufficient views are available (standard NeRF/mip-NeRF is sufficient and faster). When computational resources are extremely limited due to the overhead of semi-supervised consistency checks [S1].
++*   **Time Complexity:** Not given in the sources.
++*   **Memory Complexity:** Not given in the sources.
++*   **Limitations:** Not given in the sources.
++*   **When to use:** Not given in the sources.
++*   **When not to use:** Not given in the sources.
+ 
+ ## Background
+-WaH-NeRF was proposed by Yanqi Bao et al. in 2023 [S1]. It addresses the "CONFUSION" phenomenon in NeRF from Sparse inputs (NeRF-S), where limited viewpoints lead to uncertainty in surface location and prediction. The work builds on mip-NeRF as a baseline to handle conical frustums and integrated positional encoding, which helps compensate for instability with sparse viewpoints [S1]. It differs from prior works like RegNeRF by focusing on pre-rendering confusion mitigation rather than post-rendering regularization [S1].
++WaH-NeRF was proposed by Yanqi Bao et al. in 2023 [S1]. It addresses the "CONFUSION" phenomenon in NeRF from Sparse inputs (NeRF-S), where limited viewpoints lead to uncertainty in surface location and prediction [S1]. The work builds on mip-NeRF as a baseline to handle conical frustums and integrated positional encoding, which helps compensate for instability with sparse viewpoints [S1]. It differs from prior works like RegNeRF by focusing on pre-rendering confusion mitigation rather than post-rendering regularization [S1].
+ 
+ ## Sources

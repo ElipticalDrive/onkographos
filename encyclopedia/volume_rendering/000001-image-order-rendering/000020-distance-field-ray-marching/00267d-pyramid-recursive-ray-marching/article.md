@@ -1,0 +1,201 @@
+# Pyramid Recursive Ray Marching
+
+Also called: Depth Rendering Pipeline, trivial
+
+## Overview
+Pyramid Recursive Ray Marching is a multi-scale acceleration technique for Signed Distance Field (SDF) ray marching that initializes depth estimates at low resolution and recursively refines them at higher resolutions [S1, unofficial]. It distinguishes itself from standard aggressive ray marching by decoupling the coarse initialization phase from the fine-grained recursive refinement, allowing for larger initial steps in empty space while maintaining precision near surfaces [S1, unofficial].
+
+## How it works
+**Inputs:**
+- Latent code vector $z \in \mathbb{R}^d$.
+- Camera pose (intrinsic matrix $K$, extrinsic matrix $RT$).
+- Image resolution $(H, W)$.
+- Parameters: `march_step` (total steps), `ray_marching_ratio` (step scaling factor), `threshold` (SDF surface threshold), `clamp_dist` (distance clamping, default 0.1), `split_type` ('depth' or 'raydepth'), `sample_index_type` ('min_abs', default).
+
+**Outputs:**
+- Rendered depth map $Z \in \mathbb{R}^{H \times W}$.
+- Valid mask $M \in \{0, 1\}^{H \times W}$.
+- Minimum SDF sample per ray for differentiability.
+- Points and SDF values along the ray.
+
+**Data Structures:**
+- `scale_list`: List of resolutions from lowest to highest.
+- `rays_list`: List of ray origins and directions for each scale.
+- `grid_maps`: List of SDF values sampled at each scale.
+- `index_maps`: Mapping indices for upsampling from lower to higher resolution.
+- `recalib_maps`: Recalibration factors for ray direction/origin adjustments.
+
+**Algorithm Steps:**
+
+1.  **Initialization:**
+    - Compute camera rays for the target resolution $(H, W)$.
+    - Calculate initial intersection with unit spheres to determine `init_zdepth` and a preliminary `valid_mask` [S1, unofficial].
+    - Initialize `min_sdf_sample_new` tensor with zeros and enable gradients [S1, unofficial].
+
+2.  **Scale Pyramid Construction:**
+    - Generate a list of downscaled grid maps, rays, index maps, recalib maps, and valid masks for each scale in `scale_list` (reversed order, from coarsest to finest) [S1, unofficial].
+    - For scales other than the original (index $idx > 0$), compute downscaled grid maps and rays using `get_downscaled_camera_rays` [S1, unofficial].
+    - Calculate the valid mask for the current scale by max-pooling the previous scale's valid mask using `maxpool_valid_mask_with_index` [S1, unofficial].
+
+3.  **Coarse-to-Fine Marching Loop:**
+    - Iterate through scales from largest (lowest resolution) to smallest (original resolution).
+    - For non-final scales ($idx > 0$):
+        - Perform single-scale ray marching using `ray_marching_trivial` [S1, unofficial].
+        - Unmap the results from the valid mask indices to full image dimensions using `unmap_tensor_with_valid_mask` [S1, unofficial].
+        - Upsample the SDF, points, and z-depth to the next higher resolution using the `index_map` and `recalib_map` [S1, unofficial].
+    - For the final scale ($idx == 0$, original resolution):
+        - Perform recursive ray marching using `ray_marching_recursive` [S1, unofficial].
+        - Concatenate the final scale results with the upsampled results from previous scales, filtering by the valid mask [S1, unofficial].
+
+4.  **Differentiable Sample Selection:**
+    - Identify the minimum SDF sample along the marching path [S1, unofficial].
+    - Copy `min_sdf_sample` values to `min_sdf_sample_new` at valid mask indices [S1, unofficial].
+    - For invalid mask indices, set `min_sdf_sample_new` to $dist + threshold - radius$ to handle camera gradients [S1, unofficial].
+
+5.  **Depth Computation:**
+    - Compute source z-depth as `init_zdepth` at valid mask plus `marching_zdepth` [S1, unofficial].
+    - Copy `src_zdepth` to $Z$ at valid mask indices and reshape to $(H, W)$ [S1, unofficial].
+    - Update `valid_mask` using `valid_mask_render` [S1, unofficial].
+    - If `no_grad_depth` is true, detach $Z$ from the computation graph [S1, unofficial].
+
+**Pseudocode:**
+
+> **Unverified code.** The code below did not pass a test run against a reference implementation, or no test fits it, so it may contain errors.
+
+```python
+def pyramid_recursive_ray_marching(latent_code, camera, resolution, march_step, threshold, clamp_dist=0.1, split_type='depth', sample_index_type='min_abs'):
+    """
+    Implements Pyramid Recursive Ray Marching.
+    """
+    # 1. Initialization
+    H, W = resolution
+    rays = get_camera_rays(camera, H, W)
+    init_zdepth, valid_mask = compute_initial_sphere_intersection(rays)
+    
+    # Initialize differentiable min SDF tensor
+    min_sdf_sample_new = torch.zeros((H, W), requires_grad=True)
+    
+    # 2. Build Pyramid
+    # Determine scale list based on resolution and march_step
+    scale_list = generate_scale_list(H, W, march_step)
+    rays_list = []
+    grid_maps = []
+    index_maps = []
+    recalib_maps = []
+    valid_masks = []
+    
+    # Generate lists for all scales (reversed order: coarsest first)
+    for i, scale in enumerate(reversed(scale_list)):
+        if i == 0:
+            # Coarsest scale
+            current_rays = get_downscaled_camera_rays(rays, scale)
+            current_grid = sample_sdf_grid(latent_code, current_rays, scale)
+            current_valid = compute_valid_mask(current_rays)
+        else:
+            # Intermediate scales
+            prev_scale = scale_list[-(i-1)] # Logic simplified for description
+            current_rays = get_downscaled_camera_rays(rays, scale)
+            current_grid = sample_sdf_grid(latent_code, current_rays, scale)
+            # Max-pool previous valid mask
+            current_valid = maxpool_valid_mask_with_index(valid_masks[-1], index_maps[-1])
+            
+        rays_list.append(current_rays)
+        grid_maps.append(current_grid)
+        valid_masks.append(current_valid)
+        # Index and recalib maps generated for upsampling
+        index_maps.append(generate_index_map(scale, prev_scale if i > 0 else None))
+        recalib_maps.append(generate_recalib_map(split_type, current_rays))
+
+    # 3. Coarse-to-Fine Iteration
+    upsampled_sdf = None
+    upsampled_zdepth = None
+    upsampled_points = None
+    
+    # Iterate from coarsest (index 0 in reversed list) to finest
+    for idx in range(len(scale_list)):
+        # Note: rays_list[0] is coarsest, rays_list[-1] is finest (original)
+        current_rays = rays_list[idx]
+        current_grid = grid_maps[idx]
+        current_valid = valid_masks[idx]
+        
+        if idx < len(scale_list) - 1:
+            # Non-final scale: Trivial marching
+            sdf_list, zdepth_list, points_list = ray_marching_trivial(
+                current_rays, current_grid, march_step, threshold, clamp_dist
+            )
+            
+            # Unmap to full resolution
+            sdf_full = unmap_tensor_with_valid_mask(sdf_list, current_valid, H, W)
+            zdepth_full = unmap_tensor_with_valid_mask(zdepth_list, current_valid, H, W)
+            points_full = unmap_tensor_with_valid_mask(points_list, current_valid, H, W)
+            
+            # Upsample to next scale
+            next_idx = idx + 1
+            upsampled_sdf = upsample_tensor(sdf_full, index_maps[next_idx], recalib_maps[next_idx])
+            upsampled_zdepth = upsample_tensor(zdepth_full, index_maps[next_idx], recalib_maps[next_idx])
+            upsampled_points = upsample_tensor(points_full, index_maps[next_idx], recalib_maps[next_idx])
+            
+        else:
+            # Final scale: Recursive marching
+            sdf_list, zdepth_list, points_list = ray_marching_recursive(
+                current_rays, current_grid, march_step, threshold, clamp_dist,
+                init_zdepth=upsampled_zdepth, 
+                sdf_init=upsampled_sdf
+            )
+            
+            # Concatenate final results with upsampled history
+            final_sdf = concatenate_with_upsampled(sdf_list, upsampled_sdf, current_valid)
+            final_zdepth = concatenate_with_upsampled(zdepth_list, upsampled_zdepth, current_valid)
+            final_points = concatenate_with_upsampled(points_list, upsampled_points, current_valid)
+
+    # 4. Differentiable Sample Selection
+    # Find min SDF sample
+    min_sdf = find_min_sdf(final_sdf)
+    
+    # Copy to new tensor at valid indices
+    min_sdf_sample_new[current_valid == 1] = min_sdf[current_valid == 1]
+    
+    # Handle invalid indices for gradient flow
+    invalid_mask = current_valid == 0
+    if invalid_mask.any():
+        # dist is distance to camera, radius is object radius
+        min_sdf_sample_new[invalid_mask] = dist + threshold - radius
+
+    # 5. Depth Computation
+    src_zdepth = init_zdepth + final_zdepth
+    Z = torch.zeros((H, W))
+    Z[current_valid == 1] = src_zdepth[current_valid == 1]
+    
+    # Update valid mask
+    valid_mask = valid_mask_render(final_sdf, threshold)
+    
+    # Detach if necessary
+    if no_grad_depth:
+        Z = Z.detach()
+        
+    return Z, valid_mask, min_sdf_sample_new, final_points
+```
+
+**Parameters:**
+- `ray_marching_type`: String specifying the marching algorithm. Valid values are 'trivial_non_parallel', 'trivial', 'recursive', and 'pyramid_recursive' [S1, unofficial].
+- `split_type`: String specifying the splitting strategy for pyramid recursive marching. Valid values are 'depth' and 'raydepth' [S1, unofficial]. If 'raydepth', `recalib_map_now` is set to ones [S1, unofficial].
+- `clamp_dist`: Float parameter for distance clamping, default 0.1 [S1, unofficial].
+- `sample_index_type`: String for selecting the sample index, default 'min_abs' [S1, unofficial].
+
+**Edge Cases and Pitfalls:**
+- **Precision:** Upsampling artifacts may occur if index maps are not accurately computed.
+- **Boundaries:** Invalid mask indices must be handled explicitly to prevent NaN gradients during backpropagation [S1, unofficial].
+- **Degenerate Input:** If `march_step_list[-1] == -1`, it must be set to `march_step - sum(march_step_list[:-1])` to ensure total steps are preserved [S1, unofficial].
+
+## Operating characteristics
+- **Time Complexity:** $O(N \log N)$ where $N$ is the number of pixels, due to the multi-scale approach reducing the number of samples needed at high resolution.
+- **Memory Complexity:** $O(N)$ for storing the pyramid levels and intermediate results.
+- **Performance:** Significantly faster than single-scale recursive marching for high-resolution images, as coarse scales quickly eliminate empty space [S1, unofficial].
+- **Strengths:** Efficient initialization of depth, robust handling of large empty spaces, differentiable rendering.
+- **Limitations:** Complexity of implementation due to multiple upsampling and recalibration steps. Potential for aliasing if downsampling is not handled carefully.
+
+## Background
+Pyramid Recursive Ray Marching is part of the DIST-Renderer project, an unofficial implementation of DeepSDF rendering techniques [S1, unofficial]. It was developed to address the computational cost of high-resolution SDF rendering by leveraging multi-scale processing. The method is used in the context of neural implicit surface representation and differentiable rendering.
+
+## Sources
+[S1] B1ueber2y/DIST-Renderer, https://github.com/B1ueber2y/DIST-Renderer, fetched 2026-10-26 (unofficial)

@@ -1,0 +1,121 @@
+# Diagonal Voxel Peek Rendering
+
+Also called: DenseVoxelDraw Diagonal, DenseVoxelDraw DiagonalPeek
+
+## Overview
+Diagonal Voxel Peek Rendering is a debug and visualization method for rendering 3D voxel grids from a diagonal (isometric-like) perspective [S1, unofficial]. It maps pixel columns to diagonals in the X-Y plane at fixed Z heights, drawing visible top, left, and right faces of voxels [S1, unofficial]. It sets itself apart from standard axis-aligned debug renderers by providing a "peek" capability: it draws the top face of a voxel if it is on the top boundary or if there is empty space above it, revealing the internal structure of the volume [S1, unofficial].
+
+## How it works
+**Inputs:**
+- `model`: A 3D voxel grid of bytes (or similar scalar type) [S1, unofficial].
+- `scaleX`: Horizontal scaling factor, default 4 [S1, unofficial].
+- `scaleY`: Vertical scaling factor, default 6 [S1, unofficial].
+
+**Outputs:**
+- A 2D image where each pixel column corresponds to a diagonal slice of the voxel volume [S1, unofficial].
+
+**Data Structures:**
+- The voxel model is accessed as `model[x, y, z]` [S1, unofficial].
+- Coordinates are integer indices [S1, unofficial].
+
+**Algorithm:**
+The rendering iterates over screen coordinates `(pixelX, pixelY)` and scans diagonals through the voxel volume [S1, unofficial].
+1. Calculate `pixelWidth = model.SizeX + model.SizeY` [S1, unofficial].
+2. Loop `pixelY` from 0 to `model.SizeZ - 1` (fixed off-by-one to prevent negative Z indices) [S1, unofficial].
+3. Loop `pixelX` from 0 to `pixelWidth` with a step of 2 [S1, unofficial].
+4. Initialize `leftDone = false`, `rightDone = false` [S1, unofficial].
+5. Calculate start coordinates: `startX = max(pixelX - model.SizeY + 1, 0)`, `startY = max(model.SizeY - 1 - pixelX, 0)`, `voxelZ = model.SizeZ - 1 - pixelY` [S1, unofficial].
+6. Right Edge Check: If `pixelX >= pixelWidth - 1` and `model[SizeX-1, 0, voxelZ]` is a non-zero byte, draw a Right face rect at `(pixelX, pixelY)` and continue to the next `pixelX` iteration [S1, unofficial].
+7. Diagonal Scan: Loop `voxelX` from `startX` and `voxelY` from `startY` while `voxelX < model.SizeX` and `voxelY < model.SizeY` and `!(leftDone && rightDone)`, incrementing both `voxelX` and `voxelY` (fixed off-by-one from `<=` to `<`) [S1, unofficial].
+8. Left Boundary Check: If `!leftDone` and `voxelX > 0` and `model[voxelX-1, voxelY, voxelZ]` is a non-zero byte, draw a Right face rect at `(pixelX, pixelY)` and set `leftDone = true` [S1, unofficial].
+9. Bottom Boundary Check: If `!rightDone` and `voxelY > 0` and `model[voxelX, voxelY-1, voxelZ]` is a non-zero byte, draw a Left face rect at `(pixelX+1, pixelY)` and set `rightDone = true` [S1, unofficial].
+10. Current Voxel Check: If `model[voxelX, voxelY, voxelZ]` is a non-zero byte, draw a Left face rect at `(pixelX, pixelY)` if `!leftDone`, and a Right face rect at `(pixelX+1, pixelY)` if `!rightDone`, then break the voxel loop [S1, unofficial].
+11. Peek Logic: The basic logic extends with a `peek` boolean parameter in the drawing functions [S1, unofficial]. For the Right Edge check, `peek` is true if `voxelZ >= model.SizeZ` OR `voxelZ < SizeZ-1` and `model[SizeX-1, 0, voxelZ+1]` is non-zero [S1, unofficial]. For the Left Boundary check, `peek` is true if `voxelZ == SizeZ-1` OR `voxelZ < SizeZ-1` and `model[voxelX-1, voxelY, voxelZ+1]` is zero [S1, unofficial]. For the Bottom Boundary check, `peek` is true if `voxelZ == SizeZ-1` OR `voxelZ < SizeZ-1` and `model[voxelX, voxelY-1, voxelZ+1]` is zero [S1, unofficial].
+
+**Pseudocode:**
+> **Unverified code.** The code below did not pass a test run against a reference implementation, or no test fits it, so it may contain errors.
+
+```python
+def render_diagonal_peek(model, scaleX=4, scaleY=6):
+    pixel_width = model.SizeX + model.SizeY
+    
+    for pixel_y in range(model.SizeZ):
+        for pixel_x in range(0, pixel_width, 2):
+            start_x = max(pixel_x - model.SizeY + 1, 0)
+            start_y = max(model.SizeY - 1 - pixel_x, 0)
+            voxel_z = model.SizeZ - 1 - pixel_y
+            
+            left_done = False
+            right_done = False
+            
+            # Right Edge Check
+            if pixel_x >= pixel_width - 1 and model[model.SizeX - 1, 0, voxel_z] != 0:
+                peek = (voxel_z >= model.SizeZ) or (voxel_z < model.SizeZ - 1 and model[model.SizeX - 1, 0, voxel_z + 1] != 0)
+                draw_right(pixel_x, pixel_y, scaleX, scaleY, peek)
+                continue
+            
+            voxel_x = start_x
+            voxel_y = start_y
+            
+            while voxel_x < model.SizeX and voxel_y < model.SizeY and not (left_done and right_done):
+                # Left Boundary Check (Right Face)
+                if not left_done and voxel_x > 0 and model[voxel_x - 1, voxel_y, voxel_z] != 0:
+                    peek = (voxel_z == model.SizeZ - 1) or (voxel_z < model.SizeZ - 1 and model[voxel_x - 1, voxel_y, voxel_z + 1] == 0)
+                    draw_right(pixel_x, pixel_y, scaleX, scaleY, peek)
+                    left_done = True
+                
+                # Bottom Boundary Check (Left Face)
+                if not right_done and voxel_y > 0 and model[voxel_x, voxel_y - 1, voxel_z] != 0:
+                    peek = (voxel_z == model.SizeZ - 1) or (voxel_z < model.SizeZ - 1 and model[voxel_x, voxel_y - 1, voxel_z + 1] == 0)
+                    draw_left(pixel_x + 1, pixel_y, scaleX, scaleY, peek)
+                    right_done = True
+                
+                # Current Voxel Check
+                if model[voxel_x, voxel_y, voxel_z] != 0:
+                    if not left_done:
+                        draw_left(pixel_x, pixel_y, scaleX, scaleY, False)
+                    if not right_done:
+                        draw_right(pixel_x + 1, pixel_y, scaleX, scaleY, False)
+                    break
+                
+                voxel_x += 1
+                voxel_y += 1
+
+def draw_right(x, y, scaleX, scaleY, peek):
+    if peek:
+        draw_rect(x * scaleX, y * scaleY, scaleX, 1)
+        draw_rect(x * scaleX, y * scaleY + 1, scaleX, scaleY - 1)
+    else:
+        draw_rect(x * scaleX, y * scaleY, scaleX, scaleY)
+
+def draw_left(x, y, scaleX, scaleY, peek):
+    if peek:
+        draw_rect(x * scaleX, y * scaleY, scaleX, 1)
+        draw_rect(x * scaleX, y * scaleY + 1, scaleX, scaleY - 1)
+    else:
+        draw_rect(x * scaleX, y * scaleY, scaleX, scaleY)
+
+def draw_rect(x, y, w, h):
+    # Standard rasterization primitive to draw a filled rectangle [G]
+    pass
+```
+
+## Subtopics
+
+### [DenseVoxelDraw FrontPeek](16676-densevoxeldraw-frontpeek.md)
+A rendering method similar to Front but with scaling and 'peek' capability, drawing top and front faces if the voxel is on the top boundary or has empty space above it. Choose this when a front-facing orthographic view with peek is needed instead of a diagonal view.
+
+## Operating characteristics
+Time and memory complexity: Not given in the sources. [S1, unofficial]
+Performance: Not given in the sources. [S1, unofficial]
+Strengths: Not given in the sources. [S1, unofficial]
+Limitations: Not given in the sources. [S1, unofficial]
+When to use: Not given in the sources. [S1, unofficial]
+When not to use: Not given in the sources. [S1, unofficial]
+
+## Background
+Origin and history: Not given in the sources. [S1, unofficial]
+Where it is used: Not given in the sources. [S1, unofficial]
+
+## Sources
+[S1] GitHub - BenMcLean/Voxel2Pixel: Graphics library for rendering voxel ..., https://github.com/BenMcLean/Voxel2Pixel, fetched 2026-10-29 (unofficial)

@@ -1,0 +1,368 @@
+Physically based light in the browser: a WebGPU path tracer in real units (cd/m², lux), with a scene builder, a measuring tool and an optics bench for LED and luminaire design. Nothing to install. - Scatter inside a material: milky glass, and the photon map in the volume by lampmaker · Pull Request #69 · lampmaker/ShadyTracer
+
+Scatter inside a material: milky glass, and the photon map in the volume by lampmaker · Pull Request #69 · lampmaker/ShadyTracer · GitHub
+Skip to content
+You signed in with another tab or window. Reload to refresh your session.
+You signed out in another tab or window. Reload to refresh your session.
+You switched accounts on another tab or window. Reload to refresh your session.
+Dismiss alert
+Conversation
+lampmaker
+commented
+Nov 3, 2026
+Copy link
+Copy Markdown
+Owner
+Part 2 of the translucency work (#67 was part 1, released in 0.81.0).
+The volume of a material can now scatter, so a thick part is milkier than a thin one. The photon map now works inside such glass too, so a collimated beam through slightly milky acrylic shows its track, as a laser's does. The change note is changes/scatter-inside.md (bump: minor; scene format 26).
+What changed
+Scatter inside a material (core/haze.js THE MEDIUM'S WALK, materials.js, tracebasics.js)
+Two new material fields:
+scatter distance: the mean free path, in mm whatever the scene's unit;
+scatter forward: Henyey-Greenstein's g.
+The walk runs in the march: each collision is a march step, not a bounce.
+Only a scene with a scattering material compiles it. Every other scene's march is the text it was.
+A medium's absorption and scattering are packed in f16 per mm on the ray. A colour depth's exp(-μL) moves by at most 3e-4 over 10 m.
+Every kernel's text changed with the new ray layout.
+The library gains milky glass (scatters inside).
+The photon map in the volume (sppm.js sppmGatherVolume, haze.js THE BEAM SEEN INSIDE)
+How it works:
+Photons store a record where they collide in the glass.
+A camera ray gathers at its first collision.
+Shade then turns the ray there, as the march would have.
+Light only the map can count: light sampling cannot reach inside smooth glass, and a collimated light reaches the picture only through photons. So this is how that light is seen at all.
+Its own radius inside glass (sppmRadiusGlass, a developer setting, default 10 px):
+Records stored in glass go on a grid of their own.
+The radius shrinks as a volume: R³ by the factor the surface's r² is.
+Added after the user found the beam's track too grainy at the surface's radius.
+Bindings: it needs two more storage buffers in the march. On an adapter without room for them (volumeOf), the beam stays unseen, as before.
+The photon map's keep, planned on the GPU (sppm.js sppmPlan)
+The bug (read in code):
+The share of stores a sample keeps was planned on the CPU from a readback of the sample before.
+RT.step, which the Tests panel's image rows use, records all its samples before that readback lands.
+So every sample ran on the first guess.
+The fix: one dispatch of the map's own kernel now plans the keep at each sample's start, from the count still in the heads. The plan sits in four words after the records, which nothing clears.
+The surface map took the same plan: it had the same dependency.
+Tests panel
+An image row waits for the kernels its settings ask for, as a timing row did. Switching the photon map in a scene that scatters builds every kernel again. Samples were refused meanwhile ("trace while the scene's pipelines are being built").
+The map's columns, shared with sppm: records, dropped, samples over, cut, kept, radius, radius inside glass. They are read after the row's samples finish.
+New rows: volume, volume-light, volume-map.
+Measured
+On the user's Ampere:
+volume-light agreed on three presses: 1.0008 and 1.0006 (02117f0), 1.0025 and 1.0005 (fd1b21f), 1.0001 and 0.99978 (88fd430).
+volume-map:
+0.546 at 02117f0: every sample overflowed on the first guess.
+1.0099 at fd1b21f, on a map 30× too sparse (kept 0.00082).
+1.0006 at 94a1903 (880×896): map M 1.699 (0.85 of the room), kept 0.032, nothing dropped or cut.
+Not yet pressed: the radius inside glass (ca68221).
+On Dawn over lavapipe (volume.gpu.mjs, 19 checks pass):
+The walk: an index-matched slab passes what the JS walk does. Milky spheres vanish in the furnace.
+A floor lit through a milky slab: the camera's own paths, the sun's photons and the map agree.
+A milky slab seen side on:
+The map reads what the camera's own paths read.
+With 63 samples recorded in one call, the last sample's stores fill 82 % of the room. On the engine before, 2 %.
+With the radius inside glass at twice the surface's, the spread across the face fell from 0.172 to 0.068.
+Checks run
+check-shaders.mjs: all four passes, naga included.
+Every node … .test.mjs in CLAUDE.md: 117, all pass.
+On Dawn: volume, sppm, lens, haze and transmission GPU suites.
+Headless: renderer.check.mjs.
+Tutorial review
+The list: tutorial/review/affected.mjs against dev gives a long list, chiefly citations into raytrace_main.js, wavefront.js and sppm.js.
+Sections rewritten:
+Photons (ch. 19): the store excerpt, the shared walk (${take}, its grid), the keep's data-why, and a new bullet in what went wrong: the keep planned from a reading that never came.
+Dust in the air (ch. 20): the medium's walk.
+Wavefront (ch. 22): the iteration's excerpt (the march's sppmGeom and sppmVol; the plan dispatch).
+A GPU for beginners (ch. 21): UB is now 110 fields in 784 bytes, 48 of them padding.
+Glass (ch. 10) and Aim at the light (ch. 14): one line each.
+Open problems (ch. 33): volume-map and volume-light are answered and off the board.
+Stamped: every changed excerpt was re-read and then stamped, and tutorial.test.mjs passes.
+Blank-reader pass: not yet done for the rewritten sections.
+What to look at
+The beam: a collimated light through a thin sheet of slightly milky glass, seen from the side, the photon map on. The track should show inside the glass and sharpen with samples.
+If it is still grainy, raise radius inside glass.
+If the glass reads dark near its faces, lower it.
+The library's milky glass, thin and thick: the thin one should show what lies behind it, the thick one should glow.
+Tests: press volume and volume-map again. volume-map now gathers at 10 px (r glass mm).
+Generated by Claude Code
+claude
+added 9 commits
+November 2, 2026 09:22
+Scatter inside a material: milky glass, walked in the march
+…
+7fedd62
+```
+Haze scatters at a material's faces, whatever its thickness. The user asked for the volume too,
+so that a thick part is milkier than a thin one (roadmap/DIFFUSERS.md option A). A material now
+has a scatter distance (the mean free path, in real millimetres like the colour depth) and an
+asymmetry g. The scattering is pure; the colour stays the colour depth's.
+
+The walk is in the march kernel, not a shade vertex. Inside a solid, every shadow ray and photon
+connection is stopped by the solid's own wall, so a collision there only turns the ray. The march
+turns it and marches on, so a collision is a march step against Max Iterations rather than a
+bounce. A leg's flight is drawn when it starts, from its vertex (absLtot). An internal reflection
+keeps the draw, which is exact because the free path is memoryless. A collided ray goes on as
+light sampling could not have made it (prevPdf -1), and shadow rays take the scattering as
+extinction. The walk is compiled in only for a scene that scatters (scene.scatter, set by
+codegen); every other scene's march is the text it was, and build.test holds that.
+
+The Ray had no word left, so its medium became six f16 in the three words the absorption's f32
+used, per millimetre, and the Ray stays 112 bytes. The f16 rounds a material constant by at most
+2^-11 of itself. Over 10 m, exp(-mu L) moves by at most f16's subnormal half step (3e-4);
+volume.test bounds both.
+
+The Dawn test caught a real bias. Drawn from after shade's step off the surface (ten
+tolerances), the flight could never collide within that step, and a slab of optical depth 6
+passed 0.3952 where an independent walk passes 0.3813. Drawn from the vertex it reads 0.3786 to
+0.3809. Two rules for the tolerance skin at a wall were tried, showed no measurable difference
+at a sane tolerance, and were left out. The comments say what is not modelled.
+
+Tested: the JS walk is held to exp(-tau), to T + R = 1 and to the diffusion regime's
+1/(tau + 2q). On Dawn, the march's walk agrees with it at three depths; milky spheres vanish in
+the furnace; a floor lit through a milky slab reads one mean with the photons and the photon map
+on or off. Bench rows `volume` and `volume-light`. The library gains milky glass. Help, docs,
+the tutorial (the haze chapter, two excerpts re-read and stamped) and the change note follow.
+
+Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
+Claude-Session: https://claude.ai/code/session_019cy8snjbsrEc3DP2piBVg7
+```
+Merge dev (0.81.0) into the scatter work: scene format 26, a change n…
+…
+d4a01e5
+```
+…ote of its own
+
+PR #67 was merged and released as 0.81.0 before the scatter commit reached it. This brings dev in
+and fixes up what the release changed under that commit.
+
+Scene format 25 shipped without the scatter fields, so the fields now make it 26: v25to26 gives
+a file of 25 a clear volume. The examples and the fixtures that were at 25 are saved at 26 with
+the two keys. Part 1's change note became 0.81.0's changelog entry; the scatter work gets its
+own, changes/scatter-inside.md. The conflicts were the release's 0.next -> 0.81.0 beside the new
+rows, so dev's lines are kept and the new ones added. The dispersion GPU test now hands shade the
+packed medium (vec3<u32>); it compiled the old vec3 before.
+
+Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
+Claude-Session: https://claude.ai/code/session_019cy8snjbsrEc3DP2piBVg7
+```
+A beam seen inside milky glass: the photon map in the volume
+…
+1e79138
+```
+The user shone a collimated beam through slightly milky glass and expected to see its track, as
+a laser shows in hazy acrylic; nothing inside the glass showed. The cause, read in code: a
+collision only turns a ray in the march. Light sampling and a photon's connection both stop at
+the glass's own face, and a collimated light no camera path can meet at all. So the light the
+glass scattered had no way into the picture. The user chose the photon map over bringing back
+the manifold connection, and this is MEDIA.md phase 2 for a scattering material.
+
+A photon now stores a record where it collides, in the march: SPPM_VOL, its normal word empty,
+by the surface map's own rules for who stores. A camera ray whose lens field is 1 hands its first
+collision to the shade queue (RAY_GATHER). The map's kernel gathers there:
+sum p(l.v) Phi / (sigma_s 4/3 pi r^3), over n^2. Shade then turns the ray as the march would
+have. That collision is the map's D (lensStep, EV_EVAL), so the camera's path then leaves the
+class. One JS template writes the eight cells' walk for both gathers, and the surface gather now
+skips volume records, whose empty normal word would read as "up". The store is one sppmPut for
+surfaces and media.
+
+The march takes the map's two buffers only where the stage has room for them beside its own
+(volumeOf, against the adapter's limit), and the march and shade are rebuilt with the map when it
+is switched on or off for a scene that scatters. It must also be handed the sample's sppmGeom:
+without it, every photon was stored in a cell of size 0, and no gather found any (Dawn).
+
+Checked on Dawn over lavapipe: a sunlit milky slab seen side on reads 0.952 +- 0.042 of the
+camera's own paths with the map on, an independent estimator; no JS mirror of the gather against
+a closed form yet. A radius near the part's size reads low (0.747 at 7 cm), the sphere sticking
+out of the face; the map's own radius shrinks. Every other GPU suite still passes. Bench row
+`volume-map`; help, library, docs, the change note and the tutorial follow (three excerpts re-read
+and stamped).
+
+Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
+Claude-Session: https://claude.ai/code/session_019cy8snjbsrEc3DP2piBVg7
+```
+build.test: read the march's collision as the block it now is
+…
+02117f0
+```
+The photon map in the volume made the march's collision a block (a camera ray's hand-off and a
+photon's store sit before the turn when the map is in it), so the check that matched it as one
+line failed. It now matches the turn inside the block. What it checks is unchanged: a scene that
+scatters draws a leg's flight and turns a ray at its collision.
+
+Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
+Claude-Session: https://claude.ai/code/session_019cy8snjbsrEc3DP2piBVg7
+```
+Photon map in a medium: plan the first samples' keep for a walk's sto…
+…
+fd1b21f
+```
+…res, not a surface's
+
+volume-map read 0.546 on the user's card at 853 x 1186. The camera's own row agreed with Dawn's
+within 0.6 %; only the map fell. A sample's keep is planned from the stores the sample before
+asked. The first sample had nothing before it, so it was planned from twice its photons: a
+surface's two stores. A photon walking milky glass stores at every collision, about 8.4 on the
+bench's sheet. So the first samples kept four times what fits, and dropped 72 % of their stores
+past the room.
+
+Reproduced on Dawn: the bench row's scene, pin and camera at 96 x 132, with the capacity scaled
+so the keep is what the user's size asks (0.025).
+- before: 0.74 of what the same samples read with the demand given;
+- after: no sample over the room, about 0.97 (32 samples, noisy);
+- at keep 1 (48 x 66, 512 samples) the estimator reads 0.993.
+
+With the map in a medium the first guess is now SPPM_GUESS_MEDIUM, 256 stores a photon. A guess
+too high thins one sample's map, which is exact in expectation; one too low drops light.
+
+The read-back now tallies how many of the samples it read went over the room. volume-map pins
+the map's radius and capacity, which it had taken from the user's own settings. It also shows
+the map's columns, shared with the sppm row: records, dropped, samples over, cut, kept, radius.
+
+volume.gpu.mjs gains the case. It has room for 2000 records and starts with no demand known, as
+the bench's row 1 leaves it. With the old guess it failed (1 of 10 samples over); now 0 of 10.
+
+The 0.546 is more than two overflowing samples in 64 should cost (about 3 % on Dawn). If the
+next press still reads low, the new columns say whether stores are still dropped.
+
+Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
+Claude-Session: https://claude.ai/code/session_019cy8snjbsrEc3DP2piBVg7
+```
+The photon map's keep, planned on the GPU from the sample before
+…
+88fd430
+```
+volume-map passed its second press on the user's card at 853 x 1186 (fd1b21f): 1.0099. But its
+new columns showed the fix had only hidden the bug. The last sample's keep read 0.00082, which is
+fd1b21f's first guess; where 0.025 fits. The map held 56k records where 1.7M fit.
+
+The host planned the keep from a readback of the sample before. That readback lands only when the
+GPU is done and the page yields. RT.step, which the Tests panel's image rows sample with, awaits
+only each trace's recording (lib/render-loop.js step; R.trace awaits only the sky), so all 64
+samples were recorded before the first readback landed, and every one ran on the first guess.
+- With 02117f0's guess (a surface's two stores a photon), every sample overflowed: 0.546.
+- With fd1b21f's (256), every sample was 30x too sparse: the right mean, at an efficiency of 0.06.
+This is the repository's usual shape: true for the live loop, which yields every frame, and
+false for a second caller. The surface map had the same dependency.
+
+Now the GPU plans the keep (sppm.js sppmPlan, sppmPlanJS its mirror). The map's own kernel is
+dispatched once at a sample's first batch, before the heads are cleared, with sppmCtl.w set
+(1, or 2 for a fresh map). Its thread 0 reads the count the heads still hold, the sample
+before's, and that sample's keep. It writes this sample's keep and demand to four words after
+the records, which no clear touches. Every store reads its keep there (sppmKeepNow). The host
+hands over only the first guess (sppmGeom.w) and says when the map is fresh: a new size, mode or
+scene. Render stats' keep and demand are the plan's words, read back. It is one dispatch of an
+existing kernel, so the engine's kernel table, and the compile chapter's model of it, is
+unchanged.
+
+volume.gpu.mjs records 63 samples in one R.trace call with room for 2000 records, and reads the
+last sample's count from the map once the GPU is done. On the engine before: 48 stored, 2 % of
+the room (FAIL). Now: 1645, against the 85 % planned. build.test holds the plan's dispatch once a
+sample before its clear, the guess in every bag, the fresh flag, the arithmetic, and the stats'
+words.
+
+Tests run: check-shaders (naga); build, sppm, stats, samples, bench, dichroics, kerneltime,
+release, version and the tutorial; on Dawn over lavapipe the volume, sppm, lens, haze and
+transmission suites.
+
+Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
+Claude-Session: https://claude.ai/code/session_019cy8snjbsrEc3DP2piBVg7
+```
+Tests: an image row waits for its kernels; the map's columns read aft…
+…
+94a1903
+```
+…er its samples
+
+Two things the user's runs showed (2026-11-03).
+
+"trace while the scene's pipelines are being built", on volume-map and its neighbours, right on a
+second press. A bench row waits for the kernels its settings ask for (measureBench,
+RT.kernelsSettled); an image row did not. That was harmless while switching the photon map built
+only its own kernel. Since the map in a medium, switching it in a scene that scatters builds every
+kernel again (applyKernelOptions), and R.trace refuses to trace while that runs. measureImage now
+waits the same way, and fails the row by name if the build put the kernels before back.
+
+volume-map's kept read 0.00051 at 1384 x 1186 (88fd430). That is the first guess
+(0.85 x 2M / (256 x 13.1M photons)), which the GPU's plan uses for a fresh map's first sample
+only. The trace issues at most one map readback at a time, and RT.step records all 64 samples
+before the GPU has done one. So the only reading came from after sample 1, and the row's columns
+showed it. R.readSppmStats reads the heads and the plan now, for a caller that has drained the
+queue; the map's columns (SPPM_COLUMNS) use it. build.test holds it.
+
+Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
+Claude-Session: https://claude.ai/code/session_019cy8snjbsrEc3DP2piBVg7
+```
+volume-map and volume-light answered on the user's card
+…
+9a6fd37
+```
+volume-map read 1.0006 at its third press (94a1903, Ampere, 880 x 896): map M 1.699, 0.85 of the
+2M room; kept 0.032, which is what the GPU's plan gives for about 53M stores asked; nothing
+dropped, over or cut. That confirms the keep planned at each sample's start. Its cost is
+recorded as measured: 21 s against the camera's 3.7 s, efficiency 0.10. A sparse volume gather at
+a pixel-sized radius is written as the hypothesis it is. volume-light agreed on all three
+presses, within 0.25 %.
+
+Both rows come off chapter 33's board of open rows. The change note says what was measured.
+
+Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
+Claude-Session: https://claude.ai/code/session_019cy8snjbsrEc3DP2piBVg7
+```
+The photon map's radius inside glass, a setting of its own
+…
+ca68221
+```
+The user (2026-11-03): "the beam track is too grainy, add the volume radius". A gather inside glass
+counts the records in a sphere, so what it finds goes as the radius cubed. At the surface's
+radius it found about 0.01 records on volume-map's sheet (0.72 mm in 0.26 m^3; inferred from the
+user's numbers, not measured), and the map row was noisier than the camera's own paths.
+
+sppmRadiusGlass (Render settings > Light sources > Photon map, a developer setting beside the
+surface's radius) is in pixels at the distance in focus. It defaults to 10, where the surface's is
+3; that is a choice made without seeing it. The host turns it into UB.sppmVol: the radius, the
+cell 2R, and 1 / (4/3 pi R^3). It shrinks as a volume shrinks (sppm.js sppmRadiusVolume: R^3 by
+the factor the surface's r^2 is).
+
+The records stored where photons scatter in glass (SPPM_VOL) go on a grid of their own: sppmPut
+picks the cell by the record's flag. sppmWalk takes the grid it walks, so the medium's gather
+walks its own cells with its own radius, and the surface's gather is unchanged (sppm.gpu.mjs
+passes). The march and the map's kernel take sppmVol with the sample's other values.
+
+A large radius reads dark near the glass's faces: the sphere sticks out and is divided as if
+whole. The setting's help says to keep it under the thickness.
+
+On Dawn (volume.gpu.mjs) the side-on slab with the radius inside glass at twice the surface's read
+0.941 +- 0.031 of the camera's own paths, and the spread across its face fell from 0.172 to 0.068.
+volume-map pins 10 pixels and shows it as r glass mm. The tutorial is updated: the uniform block's
+110 fields in 784 bytes (chapter 21), and the walk, the store and the iteration's excerpts re-read
+and stamped.
+
+Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
+Claude-Session: https://claude.ai/code/session_019cy8snjbsrEc3DP2piBVg7
+```
+Hide details
+View details
+lampmaker
+merged commit 63ba655
+into
+dev
+Nov 3, 2026
+2 checks passed
+Uh oh!
+There was an error while loading. Please reload this page.
+lampmaker
+deleted the
+claude/clever-allen-wjstqa
+branch
+November 3, 2026 19:22
+Sign up for free
+to join this conversation on GitHub.
+Already have an account?
+Sign in to comment
+Uh oh!
+There was an error while loading. Please reload this page.
+Labels
+None yet
+2 participants
+Add this suggestion to a batch that can be applied as a single commit.This suggestion is invalid because no changes were made to the code.Suggestions cannot be applied while the pull request is closed.Suggestions cannot be applied while viewing a subset of changes.Only one suggestion per line can be applied in a batch.Add this suggestion to a batch that can be applied as a single commit.Applying suggestions on deleted lines is not supported.You must change the existing code in this line in order to create a valid suggestion.Outdated suggestions cannot be applied.This suggestion has been applied or marked resolved.Suggestions cannot be applied from pending reviews.Suggestions cannot be applied on multi-line comments.Suggestions cannot be applied while the pull request is queued to merge.Suggestion cannot be applied right now. Please check back later.
+You can’t perform that action at this time.

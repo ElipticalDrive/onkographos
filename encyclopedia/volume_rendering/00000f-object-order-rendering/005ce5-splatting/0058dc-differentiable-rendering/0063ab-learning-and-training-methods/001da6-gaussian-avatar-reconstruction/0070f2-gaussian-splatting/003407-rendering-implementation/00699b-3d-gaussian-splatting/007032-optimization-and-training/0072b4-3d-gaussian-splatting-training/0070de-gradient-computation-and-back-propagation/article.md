@@ -1,0 +1,119 @@
+# Gradient Computation and Back-Propagation
+
+Also called: Backward Pass, Gradient Flow, Differentiable Rendering Gradients
+
+## Overview
+Gradient Computation and Back-Propagation refers to the mechanism of calculating the derivatives of a rendering loss with respect to the learnable parameters of 3D Gaussian primitives (position, covariance, opacity, color, and spherical harmonic coefficients) to enable end-to-end optimization [18365-3d-gaussian-splatting-backward-pass.md]. It differs from standard rasterization by propagating gradients through the differentiable alpha-compositing equation and the 2D projection approximation, allowing the scene representation to be refined via gradient descent [18365-3d-gaussian-splatting-backward-pass.md]. The core challenge is efficiently computing these gradients on the GPU while managing memory constraints and numerical stability, leading to various optimizations such as per-splat parallelization, deferred back-propagation, and specialized gradient formulations for specific primitives like Skew-Normal Splatting [5989-parallelization-for-backpropagation.md][13506-deferred-back-propagation.md][10040-sns-backward-pass-with-intermediate-variable-q.md].
+
+## Shared principles
+The fundamental mechanism relies on the differentiable alpha-compositing equation. For a pixel $\mathbf{x}$, the rendered color $\mathbf{C}(\mathbf{x})$ is computed as:
+$$
+\mathbf{C}(\mathbf{x}) = \sum_{k=1}^{N} \mathbf{c}_k \alpha_k(\mathbf{x}) T_k(\mathbf{x})
+$$
+where $\mathbf{c}_k$ is the color of the $k$-th Gaussian, $\alpha_k(\mathbf{x})$ is its opacity at pixel $\mathbf{x}$, and $T_k(\mathbf{x})$ is the transmittance up to the $k$-th Gaussian:
+$$
+T_k(\mathbf{x}) = \prod_{j=1}^{k-1} (1 - \alpha_j(\mathbf{x}))
+$$
+The Gaussians are sorted by depth from closest to farthest [18365-3d-gaussian-splatting-backward-pass.md].
+
+The gradient of the loss $L$ with respect to the parameters $\theta_k$ of the $k$-th Gaussian is computed via the chain rule:
+$$
+\frac{\partial L}{\partial \theta_k} = \frac{\partial L}{\partial \mathbf{C}(\mathbf{x})} \frac{\partial \mathbf{C}(\mathbf{x})}{\partial \alpha_k(\mathbf{x})} \frac{\partial \alpha_k(\mathbf{x})}{\partial \theta_k}
+$$
+The term $\frac{\partial \mathbf{C}(\mathbf{x})}{\partial \alpha_k(\mathbf{x})}$ represents the contribution of the $k$-th Gaussian to the pixel color gradient. It is computed efficiently using recursive accumulators traversed in reverse depth order to avoid $O(N^2)$ complexity [18365-3d-gaussian-splatting-backward-pass.md]. Specifically:
+$$
+\frac{\partial \mathbf{C}(\mathbf{x})}{\partial \alpha_k(\mathbf{x})} = T_k(\mathbf{x}) \mathbf{c}_k - \alpha_k(\mathbf{x}) \sum_{j=k+1}^{N} \mathbf{c}_j \alpha_j(\mathbf{x}) T_j(\mathbf{x}) \frac{1}{1-\alpha_k(\mathbf{x})}
+$$
+In practice, this is implemented by maintaining a running transmittance $T$ and a running accumulated color $C_{acc}$ [18365-3d-gaussian-splatting-backward-pass.md].
+
+The term $\frac{\partial \alpha_k(\mathbf{x})}{\partial \theta_k}$ depends on the parameterization:
+*   **Opacity**: $\alpha_k$ is typically the sigmoid of a learnable scalar. The gradient is $\frac{\partial \alpha_k}{\partial \text{opacity}_{raw}} = \alpha_k (1 - \alpha_k)$ [18365-3d-gaussian-splatting-backward-pass.md].
+*   **2D Projection**: The 2D covariance $\Sigma_{2D}$ is derived from the 3D covariance $\Sigma_{3D}$ and the view matrix. The conic matrix $C = \Sigma_{2D}^{-1}$ is used for efficient evaluation. Gradients $\frac{\partial \alpha_k}{\partial C}$ are computed based on the Gaussian PDF derivative [18365-3d-gaussian-splatting-backward-pass.md].
+*   **3D Covariance**: $\Sigma_{3D}$ is parameterized by scale and rotation ($\Sigma_{3D} = R S S^T R^T$). Gradients flow to scale and rotation via the chain rule through $\Sigma_{3D}$ and then to $\Sigma_{2D}$ [18365-3d-gaussian-splatting-backward-pass.md].
+*   **Color/SH**: $\mathbf{c}_k$ is computed from spherical harmonic (SH) coefficients. Gradients flow directly to SH coefficients based on the basis function evaluation at the viewing direction [18365-3d-gaussian-splatting-backward-pass.md].
+
+## Subtopics
+
+### [Parallelization for Backpropagation](5989-parallelization-for-backpropagation.md)
+Parallelization for Backpropagation changes the backward pass parallelization strategy from per-pixel to per-splat to address training speed obstacles [5989-parallelization-for-backpropagation.md]. It derives faster, numerically equivalent solutions for gradient computation and attribute updates, yielding a 4–5× reduction in training time and lower compute and memory requirements compared to the standard approach [5989-parallelization-for-backpropagation.md]. Choose this when training speed is the primary bottleneck and the standard per-pixel atomic add operations cause synchronization bottlenecks.
+
+### [AbsGS](6127-absgs.md)
+AbsGS addresses the "over-reconstruction" artifact in 3D Gaussian Splatting, where large Gaussians in high-frequency regions fail to split, resulting in blurry rendering [6127-absgs.md]. It replaces the standard view-space positional gradient with a homodirectional gradient that sums the absolute values of pixel-wise sub-gradients, preventing gradient collision where positive and negative components cancel each other out [6127-absgs.md]. Unlike standard 3D-GS, which requires lowering the densification threshold to catch these errors (causing memory overflow), AbsGS accurately identifies over-reconstructed Gaussians using fewer primitives, achieving higher quality with roughly half the memory consumption [6127-absgs.md]. Choose this when dealing with high-frequency details and memory constraints.
+
+### [Gradient-Weighted Feature Back-Projection](9769-gradient-weighted-feature-back-projection.md)
+Gradient-Weighted Feature Back-Projection is a training-free method for rendering feature fields in 3D Gaussian Splatting by aggregating 2D feature embeddings from training views into pre-trained 3D Gaussians [9769-gradient-weighted-feature-back-projection.md]. It solves the problem of assigning semantic or visual features to 3D Gaussians without the computational cost of training a separate feature field or distilling features from a 2D foundation model [9769-gradient-weighted-feature-back-projection.md]. Unlike training-based alternatives like Feature 3DGS, which require iterative optimization of feature parameters, this method computes features in a single pass using the rendering gradients as weights, offering a significant speedup while maintaining high-quality 3D segmentation results [9769-gradient-weighted-feature-back-projection.md]. Choose this for feature field reconstruction without iterative training.
+
+### [SNS Backward Pass with Intermediate Variable Q](10040-sns-backward-pass-with-intermediate-variable-q.md)
+The SNS Backward Pass with Intermediate Variable Q computes exact gradients for 3D Skew-Normal Splatting (SNS) parameters by decoupling the complex interaction between rotation and scale matrices [10040-sns-backward-pass-with-intermediate-variable-q.md]. Unlike standard 3D Gaussian Splatting (3DGS) which computes gradients with respect to the inverse covariance matrix $\Omega^{-1}$ before backpropagating to rotation $R$ and scale $S$, this method introduces an intermediate variable $Q = ARS$ to reformulate the 2D Skew-Normal density [10040-sns-backward-pass-with-intermediate-variable-q.md]. This allows for direct, closed-form gradient computation of the skew parameter $k$, the mean $\mu$, and the shape matrix $Q$, avoiding the high computational complexity of differentiating the coupled $RS$ terms directly [10040-sns-backward-pass-with-intermediate-variable-q.md]. Choose this when using Skew-Normal Splatting primitives.
+
+### [Specular-Aware Gradient Gating](13432-specular-aware-gradient-gating.md)
+Specular-Aware Gradient Gating is a training optimization technique for differentiable Gaussian splatting that suppresses specular reflection artifacts while preserving transmission details in semi-transparent scenes [13432-specular-aware-gradient-gating.md]. It differs from standard back-propagation by modulating the gradients of the transmission color component using a local variance-based gating factor, ensuring the forward pass remains unchanged [13432-specular-aware-gradient-gating.md]. Choose this when training scenes with significant specular highlights and semi-transparency.
+
+### [Deferred Back-propagation](13506-deferred-back-propagation.md)
+Deferred Back-propagation is a memory-efficient training technique that enables the optimization of radiance fields and Gaussian splats using full-resolution image losses (such as CNN-based style losses or global attention mechanisms) despite limited GPU memory [13506-deferred-back-propagation.md]. It solves the problem where standard differentiable rendering is too memory-intensive for full-resolution images, forcing a trade-off between resolution and the ability to compute complex, non-pixel-wise losses [13506-deferred-back-propagation.md]. Unlike sparse pixel sampling, which fails for global losses, or naive cropping, which breaks global consistency, DBP separates the forward pass from the backward pass, allowing full-resolution rendering without gradients followed by patch-wise re-rendering with gradients [13506-deferred-back-propagation.md]. Choose this when using global losses (e.g., LPIPS, Style Loss) that require full-resolution images.
+
+### [Weight Freezing by Mask](15877-weight-freezing-by-mask.md)
+Weight Freezing by Mask is a gradient modification technique used during the optimization of 3D Gaussian Splatting models to selectively disable updates for specific attributes [15877-weight-freezing-by-mask.md]. It solves the problem of unwanted parameter drift by zeroing out gradients for designated attributes (e.g., rotation, scale) via element-wise multiplication with a binary mask [15877-weight-freezing-by-mask.md]. It differs from [AbsGS](6127-absgs.md) by applying a static or dynamic mask to the gradient tensor rather than modifying the gradient magnitude based on absolute values, and from [Specular-Aware Gradient Gating](13432-specular-aware-gradient-gating.md) by operating on attribute-level tensors rather than pixel-level contributions [15877-weight-freezing-by-mask.md]. Choose this when specific parameters need to be fixed or constrained during training.
+
+### [Softmax Depth Gradient Derivation](17405-softmax-depth-gradient-derivation.md)
+Softmax Depth Gradient Derivation computes the gradients for a depth rendering formulation that uses softmax scaling to bias accumulation toward high-weight Gaussians while allowing gradients to propagate to off-mode Gaussians [17405-softmax-depth-gradient-derivation.md]. It solves the problem of mode-selection depth, which restricts gradients to the single highest-weight Gaussian and fails when closer Gaussians are translucent [17405-softmax-depth-gradient-derivation.md]. Unlike mode-selection, this method approximates mode depth while maintaining gradient flow to all contributing Gaussians, modulated by a temperature parameter $\beta$ [17405-softmax-depth-gradient-derivation.md]. Choose this when using softmax-based depth rendering.
+
+### [3D Gaussian Splatting Backward Pass](18365-3d-gaussian-splatting-backward-pass.md)
+The 3D Gaussian Splatting backward pass computes the gradients of a rendering loss with respect to the learnable parameters of the 3D Gaussian primitives (position, covariance, opacity, color, and spherical harmonic coefficients) [18365-3d-gaussian-splatting-backward-pass.md]. It differs from standard rasterization by propagating gradients through the differentiable alpha-compositing equation and the 2D projection approximation, enabling end-to-end training of the scene representation [18365-3d-gaussian-splatting-backward-pass.md]. This is the standard baseline method for most 3DGS implementations.
+
+### [Opacity and Score Gradient Computation](22870-opacity-and-score-gradient-computation.md)
+This family defines the gradient computation for opacity parameters in differentiable volume rendering, specifically addressing standard alpha-compositing, probabilistic masking, and Time-of-Flight (ToF) signal formation [22870-opacity-and-score-gradient-computation.md]. It distinguishes itself from standard 3D Gaussian Splatting backpropagation by handling non-linear opacity interactions in ToF models [9733-tof-gradient-computation-for-gaussian-splatting.md] and explicit mask modulation [4254-maskgaussian-gradient-computation.md], as well as score-based probability gradients for triangle-soup representations [22870-opacity-and-score-gradient-computation.md]. Choose this when using non-standard opacity models like ToF or probabilistic masks.
+
+### Faster-GS
+Faster-GS addresses oscillation in gradient updates for scaling and rotation parameters caused by a poorly conditioned learning rate ratio [S2, unofficial]. It rescales the scaling gradient with the inverse of the current scale to stabilize convergence [S2, unofficial]. This cuts training time by nearly half compared to standard 3DGS [S2, unofficial].
+
+### Cut-Set Gradient Update
+During each training iteration, identify the cut set of Gaussians intersecting the current training view [S3, unofficial]. Update only the parameters of this cut set [S3, unofficial]. Gradients propagate to Gaussians in the middle of the hierarchy, diffusing across the entire structure over many iterations with diverse views [S3, unofficial].
+
+### Backward Pass in Half Precision
+A gradient computation method using half-precision (FP16) arithmetic to optimize accuracy-throughput trade-off, omitting block-local reductions [S4, unofficial]. It calculates $\frac{\partial I}{\partial M_i}$ using Eqs. (3, 4, 5), $\frac{\partial M_i}{\partial u}$ using Eq. (2) and bilinear interpolation, and $\frac{\partial u}{\partial x_i}, \frac{\partial v}{\partial x_i}, \frac{\partial u}{\partial y_i}, \frac{\partial v}{\partial y_i}, \frac{\partial u}{\partial s_i}, \frac{\partial v}{\partial s_i}, \frac{\partial u}{\partial \theta_i}, \frac{\partial v}{\partial \theta_i}$ from Eq. (1) [S4, unofficial]. The gradient of image $I$ w.r.t. primitive position $x_i$ is $\frac{\partial I(x,y)}{\partial x_i} = \frac{\partial I(x,y)}{\partial M_i(x,y)} \left( \frac{\partial M_i(x,y)}{\partial u} \frac{\partial u}{\partial x_i} + \frac{\partial M_i(x,y)}{\partial v} \frac{\partial v}{\partial x_i} \right)$ [S4, unofficial]. It differs from standard implementations by using half precision and omitting block-local reductions to align with accuracy-throughput goals [S4, unofficial].
+
+### Feature Optimization via Backpropagation
+An optimization step where appearance features on each point are updated via backpropagation through the aggregation and rendering network [S5]. The gradient on point feature $i$ is updated using the chain rule: $\Delta F_i = -lr \times w(p,h,w)_i \times g(p,h,w)$, where $g(p,h,w)$ is the gradient from the loss function [S5].
+
+### Local Self-Attention
+A module integrated into DBP to maintain consistency between the forward-only rendering step and the gradient-based re-rendering step [S6]. Without Local Self-Attention, the rendered images between the first (Render w/o Grad) and second (Re-Render w/ Grad) steps of DBP are inconsistent, causing the loss from the forward-only pass to fail as a gradient guide, which drops PSNR after ~1,500 training steps [S6]. With Local Self-Attention, PSNR remains stable at 32.34 dB throughout training [S6].
+
+### Screenspace Points Gradient Tracking
+Creates a zero tensor for 2D screen-space means with gradient tracking enabled, allowing gradients to flow back to 2D positions during backpropagation [S7, unofficial]. Initialize `screenspace_points` as a zero tensor with the same dtype and device as `pc.get_xyz`, with `requires_grad=True` [S7, unofficial]. Attempt to retain gradients for `screenspace_points` using `retain_grad()` to preserve intermediate gradients [S7, unofficial]. `retain_grad()` may raise an exception in older PyTorch versions or specific execution contexts, requiring a try/except block to prevent crashes [S7, unofficial].
+
+### Pre-Backward Strategy
+Pre-optimization step for strategies, called only on the first view to retain gradients [S8, unofficial]. Check if `vi == 0` and `gsplat_strategy` is not None [S8, unofficial]. Call `gsplat_strategy.step_pre_backward(splats, optimizers, strategy_state, step, info)` [S8, unofficial].
+
+### 2DGS Ray Transform VJP
+Computes the vector-Jacobian product (VJP) for the ray transform matrix in 2DGS, propagating gradients from 2D means back to ray transforms, quaternions, scales, and camera-space means [S9, unofficial]. If `v_means2d[0]` or `v_means2d[1]` is non-zero, compute `distance = ray_transforms[6]^2 + ray_transforms[7]^2 - ray_transforms[8]^2` [S9, unofficial]. Compute `f = 1/distance` [S9, unofficial]. Compute partial derivatives `dpx_dT00`, `dpx_dT01`, `dpx_dT02`, `dpy_dT10`, `dpy_dT11`, `dpy_dT12`, `dpx_dT30`, `dpx_dT31`, `dpx_dT32`, `dpy_dT30`, `dpy_dT31`, `dpy_dT32` using `f` and `ray_transforms` values [S9, unofficial]. Accumulate gradients into `_v_ray_transforms` using `v_means2d` and the computed partial derivatives [S9, unofficial]. Compute rotation matrix `R` from `quat` [S9, unofficial]. Compute `v_M = P * transpose(_v_ray_transforms)` [S9, unofficial]. Compute `W_t = transpose(W)` [S9, unofficial]. Compute `v_RS = W_t * v_M` [S9, unofficial]. Compute `v_tn = W_t * v_normals` [S9, unofficial]. Compute `tn = W * R[2]` [S9, unofficial]. Compute `cos = dot(-tn, mean_c)` [S9, unofficial]. Set `multiplier = 1` if `cos > 0` else `-1` [S9, unofficial]. Multiply `v_tn` by `multiplier` [S9, unofficial]. Compute `v_R = mat3(v_RS[0]*scale[0], v_RS[1]*scale[1], v_tn)` [S9, unofficial]. Compute `v_quat` using `quat_to_rotmat_vjp` [S9, unofficial]. Compute `v_scale[0] = dot(v_RS[0], R[0])`, `v_scale[1] = dot(v_RS[1], R[1])` [S9, unofficial]. Add `v_RS[2]` to `v_mean` [S9, unofficial].
+
+### Gradient Descent with Global Transport
+Split sequence to perform auto-back-propagation for one frame at a time [S10]. Back-propagation between frames is handled explicitly (see Algorithm 4, line 19) [S10]. Keep all resources in CPU RAM [S10]. Only current frame and intermediate steps needed for auto-diff are moved to GPU [S10]. Naive auto-diff of full sequence requires recording all intermediate results, consuming excessive memory [S10]. Result is the same as full auto-diff, at least when using Equation (4) instead of the EMA version (Eq. (5)) [S10].
+
+### Unlimited Gradient Splats
+Allow unlimited number of splats to have gradients [S11]. Vs Limited Gradients: Limiting gradients to front-most points (e.g., N=10) causes unstable optimization and severe quality degradation (11dB PSNR drop), whereas unlimited gradients maintain quality [S11].
+
+### Center-Gradient Direction Operator
+A mechanism-analysis tool applied to center gradients before optimizer updates to scale orthogonal components based on structural confidence, though disabled in default configuration [S12, unofficial]. Application timing: Applied after back-propagation of the joint loss, before the optimizer update and before estimating first- and second-order moments [S12, unofficial]. Gradient modification: $\tilde{g} = D g$, where $D = \text{diag}(d_1, d_2, d_3)$ in the local PCA basis [S12, unofficial]. $d_i = 1$ if $\hat{C} < \tau$ (identity), else $d_{orth} = \alpha_0$ for orthogonal directions and $d_{allowed} = 1$ [S12, unofficial]. $\alpha_0$: Retention coefficient for the orthogonal direction. Range: $0 \le \alpha_0 < 1$ [S12, unofficial]. Preserves sufficient correction capacity for initialization errors [S12, unofficial]. Directional projection does not stably translate into reconstruction-quality gains under the current protocol, so it is disabled in the default configuration [S12, unofficial].
+
+### Index-Mapped Gradient Scattering
+A method to scatter gradients from sorted rendering view back to canonical parameter buffer using a permutation $\pi$, avoiding data movement and keeping optimizer states aligned [S13, unofficial]. Gradient scattering: $\nabla \theta_{\pi(i)} += g_i$, where $g_i$ is gradient of $i$-th sorted element, $\pi(i)$ is canonical index [S13, unofficial].
+
+## Background
+The 3D Gaussian Splatting (3DGS) method, introduced by Kerbl et al. in 2023 [S11], established the standard differentiable rendering pipeline for Gaussian primitives. The backward pass implementation, often encapsulated in a `DiffRasterizer` class, takes forward pass buffers and the upstream loss gradient to compute per-primitive gradients [18365-3d-gaussian-splatting-backward-pass.md]. Subsequent research has focused on optimizing this backward pass for speed (e.g., Parallelization for Backpropagation [5989-parallelization-for-backpropagation.md]), memory (e.g., Deferred Back-propagation [13506-deferred-back-propagation.md]), and specific artifact reduction (e.g., AbsGS [6127-absgs.md], Specular-Aware Gradient Gating [13432-specular-aware-gradient-gating.md]). The method is widely used in real-time radiance field rendering, neural rendering, and 3D reconstruction from images or video.
+
+## Sources
+[S1] XiaoBin2001/Improved-GS, https://github.com/XiaoBin2001/Improved-GS, fetched 2026-10-27 (unofficial)
+[S2] 3D Gaussian Splatting Rasterization: A Survey, https://doi.org/10.20944/preprints202607.0776.v2, fetched 2026-10-26 (unofficial)
+[S3] A LoD of Gaussians: Unified Training and Rendering for Ultra-Large Scale Reconstruction with External Memory, https://doi.org/10.48550/arXiv.2507.01110, fetched 2026-10-28 (unofficial)
+[S4] DiffBMP: Differentiable Rendering with Bitmap Primitives, https://doi.org/10.48550/arXiv.2602.22625, fetched 2026-10-27 (unofficial)
+[S5] Neural Point Cloud Rendering via Multi-Plane Projection, https://doi.org/10.1109/cvpr42600.2020.00785, fetched 2026-10-30
+[S6] GGRt: Towards Pose-Free Generalizable 3D Gaussian Splatting in Real-Time, https://doi.org/10.1007/978-3-031-73209-6_19, fetched 2026-10-29
+[S7] Ruyi-Zha/r2_gaussian, https://github.com/Ruyi-Zha/r2_gaussian, fetched 2026-10-26 (unofficial)
+[S8] SpaceCollectors/dust3r-3dgs, https://github.com/SpaceCollectors/dust3r-3dgs, fetched 2026-10-27 (unofficial)
+[S9] SNU-ARC/GS-Scale, https://github.com/SNU-ARC/GS-Scale, fetched 2026-10-27 (unofficial)
+[S10] Global Transport for Fluid Reconstruction with Learned Self-Supervision, https://doi.org/10.1109/cvpr46437.2021.00168, fetched 2026-10-30
+[S11] 3D Gaussian Splatting for Real-Time Radiance Field Rendering, https://arxiv.org/abs/2308.04079, fetched 2026-10-26
+[S12] Visibility-Aware Texture Consensus and Local Structural Constraints for 3D Gaussian Reconstruction in Texture- Degraded Scenes, https://doi.org/10.21203/rs.3.rs-10727268/v1, fetched 2026-10-26 (unofficial)
+[S13] PocketGS: High-Fidelity On-Device Training for 3D Gaussian Splatting, https://doi.org/10.48550/arxiv.2601.17354, fetched 2026-10-26 (unofficial)

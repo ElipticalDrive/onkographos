@@ -1,0 +1,779 @@
+Thanks for asking me to work on this. I will get started on it and keep this PR's description up to date as I form a plan and make progress.
+
+> Implement and integrate a complete fix for bbmodel mesh generation and Bevy interoperability in `Exotik850/bbmodel-rs`, based on the drafted code from this conversation. The current issue is that models are not loading/rendering correctly; we need robust, idiomatic triangulation and render-data generation that matches Blockbench semantics for cubes and mesh elements.
+> 
+> ## Context
+> The user reported that models are not being loaded correctly in `bbmodel-rs` and requested a complete implementation suitable for use with Bevy. A draft implementation was produced in-chat, including:
+> - `src/element.rs` overhaul for:
+>   - `Element`, `Cube`, `Mesh`, `Tri` structures and triangulation iterators.
+>   - Correct cube face quad generation (from/to/inflate), UV handling, face rotation, and element rotation around origin.
+>   - Mesh face fan triangulation for polygons (`n >= 3`) with normal generation.
+> - `src/lib.rs` additions for vector helpers and quaternion math compatibility for both `glam` and non-`glam` modes.
+> - Optional Bevy integration helper module (`src/bevy.rs`) to build grouped `bevy::render::mesh::Mesh` outputs by texture index.
+> - `Cargo.toml` feature/dependency updates for optional `bevy` feature.
+> 
+> ## Required work
+> 1. **Apply the drafted implementation cleanly to the actual codebase**
+>    - Reconcile with existing module layout, type aliases, and helper functions.
+>    - Avoid duplicate/conflicting definitions if equivalents already exist.
+>    - Ensure all imports and visibility are correct.
+> 
+> 2. **Fix correctness issues in geometry generation**
+>    - Cube triangulation must emit consistent winding and outward normals.
+>    - Respect cube fields used by bbmodel (`from`, `to`, `origin`, `rotation`, `inflate`, face `uv`, face `rotation`, `enabled`, `texture`).
+>    - Mesh triangulation should support arbitrary polygon faces via fan triangulation with stable behavior.
+>    - Skip invalid faces robustly (missing vertices, <3 verts).
+> 
+> 3. **Keep compatibility with crate features**
+>    - Preserve `no_std`/`std` expectations already present in crate design.
+>    - Preserve optional `glam` support behavior.
+>    - Add optional Bevy support in a feature-gated way (`bevy` feature), without forcing Bevy for base users.
+> 
+> 4. **Expose a practical Bevy conversion API**
+>    - Provide a public helper that converts `BBModel` triangles into Bevy meshes grouped by texture reference.
+>    - Populate position/normal/uv/index buffers correctly.
+> 
+> 5. **Tests and validation**
+>    - Add/adjust tests to validate:
+>      - Cube triangulation triangle counts and basic normal direction consistency.
+>      - Mesh triangulation for triangles/quads/ngons.
+>      - Degenerate/invalid input handling.
+>    - Ensure crate compiles in relevant feature combinations (at minimum default and `--features bevy`, and ideally with/without `glam` where feasible).
+> 
+> 6. **Documentation updates**
+>    - Update README with minimal usage example for Bevy mesh building.
+>    - Document feature flags (`glam`, `bevy`, `std`).
+> 
+> ## Acceptance criteria
+> - PR builds successfully.
+> - Models that previously failed now produce non-empty, renderable mesh data for Bevy usage.
+> - Geometry generation logic is deterministic and documented.
+> - New/updated tests pass.
+> - Changes are focused and reviewable with clear commit messages and PR description.
+> 
+> ## Notes
+> - Use the previously drafted implementation as intent, but adapt to the repository’s current architecture rather than blindly pasting.
+> - Prefer idiomatic Rust and avoid unnecessary allocations where practical, while prioritizing correctness and clarity.
+> 
+> The following is the prior conversation context from the user's chat exploration (may be truncated):
+> 
+> User: What files are responsible for generating the meshes to be rendered from the bbmodel files? I'm trying to find an idiomatic way in Rust to generate the meshes needed by bevy to render in bbmodel-rs.
+> 
+> Assistant: I’ll locate where Blockbench defines/exports mesh geometry from `.bbmodel` data, then map that to what `bbmodel-rs` should produce for Bevy.
+> 
+> If you want, I can do a targeted code trace across both repos and give you a concrete Rust/Bevy mesh-building recipe with file-by-file pointers.
+> 
+> User: Continue in finding the necessary files
+> 
+> Assistant: The key files you want in **Blockbench** are:
+> 
+> 1. **`.bbmodel` parsing/loading (source of geometry data)**
+>    - `js/formats/bbmodel.js`  
+>    - This is where `model.elements` are read and converted into `Cube` / `Mesh` outliner elements.
+> 
+> 2. **Cube data model (bbmodel cube → faces/uv/transform semantics)**
+>    - `js/outliner/types/cube.js`  
+>    - Defines cube fields (`from`, `to`, `origin`, `rotation`, per-face UV/texture, inflate, mirror_uv, etc.) and how cube faces are represented.
+> 
+> 3. **Mesh data model (bbmodel mesh → polygon faces/vertices)**
+>    - `js/outliner/types/mesh.js`  
+>    - Defines custom mesh vertices + faces (including per-vertex UVs), face orientation, and topology utilities.
+> 
+> 4. **Actual viewport geometry build for renderable buffers**
+>    - `js/outliner/types/texture_mesh.js` (explicitly shows BufferGeometry attribute/index construction)
+>    - Also look for preview-controller geometry updates attached to cube/mesh types (same outliner type area).  
+>    - This is the closest reference for “how Blockbench turns model element data into renderable position/index/uv/normal arrays”.
+> 
+> ---
+> 
+> For your **Rust + Bevy** implementation in `bbmodel-rs`, the idiomatic pipeline should be:
+> 
+> - Parse `.bbmodel` → strongly typed enum:
+>   - `Element::Cube(CubeElement)`
+>   - `Element::Mesh(MeshElement)`
+> - Build a CPU-side intermediate:
+>   - `positions: Vec<[f32; 3]>`
+>   - `normals: Vec<[f32; 3]>`
+>   - `uvs: Vec<[f32; 2]>`
+>   - `indices: Vec<u32>`
+>   - `material_slot` / texture reference per submesh
+> - Convert to `bevy::render::mesh::Mesh` with:
+>   - `Mesh::ATTRIBUTE_POSITION`
+>   - `Mesh::ATTRIBUTE_NORMAL`
+>   - `Mesh::ATTRIBUTE_UV_0`
+>   - `Indices::U32`
+> 
+> For cubes: generate 6 quads (or cull hidden faces if you do adjacency).  
+> For mesh elements: triangulate n-gons from vertex key order (fan triangulation first, earcut later if needed for concave polygons).
+> 
+> ---
+> 
+> Important: code search results are truncated by the tool and may be incomplete.  
+> You can inspect broader matches here:
+> 
+> - https://github.com/search?q=repo%3AJannisX11%2Fblockbench+bbmodel+elements+faces+mesh&type=code
+> - https://github.com/search?q=repo%3AJannisX11%2Fblockbench+BufferGeometry+setAttribute+setIndex&type=code
+> - https://github.com/search?q=repo%3AJannisX11%2Fblockbench+preview_controller+updateGeometry&type=code
+> 
+> If you want, next I can draft a concrete `bbmodel-rs` Bevy builder API (`to_bevy_meshes()`) with Rust structs and triangulation logic matching these Blockbench semantics.
+> 
+> User: Draft the complete implementation that should fix the current bbmodel-rs implementation in the repo, as right now the models are not being loaded correctly. Your response should be the code I should change in the repo
+> 
+> Assistant: ```rust name=src/element.rs url=https://github.com/Exotik850/bbmodel-rs/blob/b9b66f9a522e6ceae0b212918c6ef7e685d4176f/src/element.rs
+> // ---------------------------------------------------------------------------
+> // Elements (Cube / Mesh) + triangulation helpers
+> // ---------------------------------------------------------------------------
+> 
+> use crate::{HashMap, Quat, Uuid, Vec, Vec2, Vec3, v2, v3};
+> use serde::{Deserialize, Serialize};
+> use serde_with::skip_serializing_none;
+> 
+> // ---------------------------------------------------------------------------
+> // Shared render triangle
+> // ---------------------------------------------------------------------------
+> 
+> #[derive(Debug, Clone, Copy)]
+> pub struct Tri {
+>     pub positions: [Vec3; 3],
+>     pub uvs: [Vec2; 3],
+>     pub normals: [Vec3; 3],
+>     pub texture: Option<i32>,
+> }
+> 
+> // ---------------------------------------------------------------------------
+> // Element enum
+> // ---------------------------------------------------------------------------
+> 
+> #[derive(Debug, Clone, Deserialize, Serialize)]
+> #[serde(untagged)]
+> pub enum Element {
+>     Cube(Cube),
+>     Mesh(Mesh),
+> }
+> 
+> impl Element {
+>     pub fn uuid(&self) -> &Uuid {
+>         match self {
+>             Element::Cube(c) => &c.uuid,
+>             Element::Mesh(m) => &m.uuid,
+>         }
+>     }
+> 
+>     pub fn triangulate(&self) -> Box<dyn Iterator<Item = Tri> + '_> {
+>         match self {
+>             Element::Cube(c) => Box::new(c.iter_tris()),
+>             Element::Mesh(m) => Box::new(m.iter_tris()),
+>         }
+>     }
+> }
+> 
+> // ---------------------------------------------------------------------------
+> // Cube
+> // ---------------------------------------------------------------------------
+> 
+> #[derive(Debug, Clone, Deserialize, Serialize)]
+> #[skip_serializing_none]
+> #[serde(default)]
+> pub struct Cube {
+>     pub uuid: Uuid,
+>     pub name: Option<String>,
+>     pub from: Vec3,
+>     pub to: Vec3,
+>     pub origin: Vec3,
+>     pub rotation: Vec3,
+>     pub inflate: f32,
+>     pub shade: bool,
+>     pub mirror_uv: bool,
+>     pub box_uv: bool,
+>     pub visibility: bool,
+>     pub export: bool,
+>     pub autouv: i32,
+>     pub color: i32,
+>     pub faces: CubeFaces,
+>     pub rotation_axis: Option<String>,
+>     pub rescale: Option<bool>,
+>     pub locked: Option<bool>,
+> }
+> 
+> impl Default for Cube {
+>     fn default() -> Self {
+>         Self {
+>             uuid: Uuid::nil(),
+>             name: None,
+>             from: v3(0.0, 0.0, 0.0),
+>             to: v3(0.0, 0.0, 0.0),
+>             origin: v3(0.0, 0.0, 0.0),
+>             rotation: v3(0.0, 0.0, 0.0),
+>             inflate: 0.0,
+>             shade: true,
+>             mirror_uv: false,
+>             box_uv: false,
+>             visibility: true,
+>             export: true,
+>             autouv: 0,
+>             color: 0,
+>             faces: CubeFaces::default(),
+>             rotation_axis: None,
+>             rescale: None,
+>             locked: None,
+>         }
+>     }
+> }
+> 
+> #[derive(Debug, Clone, Deserialize, Serialize, Default)]
+> #[serde(default)]
+> pub struct CubeFaces {
+>     pub north: Option<CubeFace>,
+>     pub east: Option<CubeFace>,
+>     pub south: Option<CubeFace>,
+>     pub west: Option<CubeFace>,
+>     pub up: Option<CubeFace>,
+>     pub down: Option<CubeFace>,
+> }
+> 
+> #[derive(Debug, Clone, Deserialize, Serialize)]
+> #[skip_serializing_none]
+> #[serde(default)]
+> pub struct CubeFace {
+>     pub uv: Option<[f32; 4]>,
+>     pub texture: Option<i32>,
+>     pub rotation: i32,
+>     pub cullface: Option<String>,
+>     pub tint: Option<i32>,
+>     pub enabled: Option<bool>,
+> }
+> 
+> impl Default for CubeFace {
+>     fn default() -> Self {
+>         Self {
+>             uv: None,
+>             texture: None,
+>             rotation: 0,
+>             cullface: None,
+>             tint: None,
+>             enabled: None,
+>         }
+>     }
+> }
+> 
+> impl Cube {
+>     pub fn iter_tris(&self) -> CubeTriIter<'_> {
+>         CubeTriIter {
+>             cube: self,
+>             face_idx: 0,
+>             tri_idx: 0,
+>         }
+>     }
+> }
+> 
+> pub struct CubeTriIter<'a> {
+>     cube: &'a Cube,
+>     face_idx: usize,
+>     tri_idx: usize,
+> }
+> 
+> impl<'a> CubeTriIter<'a> {
+>     fn face_at(&self, idx: usize) -> Option<(&'static str, &'a CubeFace)> {
+>         match idx {
+>             0 => self.cube.faces.north.as_ref().map(|f| ("north", f)),
+>             1 => self.cube.faces.east.as_ref().map(|f| ("east", f)),
+>             2 => self.cube.faces.south.as_ref().map(|f| ("south", f)),
+>             3 => self.cube.faces.west.as_ref().map(|f| ("west", f)),
+>             4 => self.cube.faces.up.as_ref().map(|f| ("up", f)),
+>             5 => self.cube.faces.down.as_ref().map(|f| ("down", f)),
+>             _ => None,
+>         }
+>     }
+> 
+>     fn rotate_uv(mut uv: [Vec2; 4], rot_deg: i32) -> [Vec2; 4] {
+>         let mut steps = ((rot_deg % 360) + 360) % 360 / 90;
+>         while steps > 0 {
+>             uv = [uv[3], uv[0], uv[1], uv[2]];
+>             steps -= 1;
+>         }
+>         uv
+>     }
+> 
+>     fn make_face(&self, dir: &str, face: &CubeFace) -> Option<([Vec3; 4], [Vec2; 4], Vec3)> {
+>         if face.enabled == Some(false) {
+>             return None;
+>         }
+> 
+>         let inf = self.cube.inflate;
+>         let from = v3(
+>             self.cube.from[0] - inf,
+>             self.cube.from[1] - inf,
+>             self.cube.from[2] - inf,
+>         );
+>         let to = v3(
+>             self.cube.to[0] + inf,
+>             self.cube.to[1] + inf,
+>             self.cube.to[2] + inf,
+>         );
+> 
+>         // Blockbench local cube vertex positions (before origin/rotation transform)
+>         let (quad, normal) = match dir {
+>             // winding chosen so normal points outwards
+>             "north" => (
+>                 [
+>                     v3(to[0], to[1], from[2]),
+>                     v3(from[0], to[1], from[2]),
+>                     v3(from[0], from[1], from[2]),
+>                     v3(to[0], from[1], from[2]),
+>                 ],
+>                 v3(0.0, 0.0, -1.0),
+>             ),
+>             "south" => (
+>                 [
+>                     v3(from[0], to[1], to[2]),
+>                     v3(to[0], to[1], to[2]),
+>                     v3(to[0], from[1], to[2]),
+>                     v3(from[0], from[1], to[2]),
+>                 ],
+>                 v3(0.0, 0.0, 1.0),
+>             ),
+>             "east" => (
+>                 [
+>                     v3(to[0], to[1], to[2]),
+>                     v3(to[0], to[1], from[2]),
+>                     v3(to[0], from[1], from[2]),
+>                     v3(to[0], from[1], to[2]),
+>                 ],
+>                 v3(1.0, 0.0, 0.0),
+>             ),
+>             "west" => (
+>                 [
+>                     v3(from[0], to[1], from[2]),
+>                     v3(from[0], to[1], to[2]),
+>                     v3(from[0], from[1], to[2]),
+>                     v3(from[0], from[1], from[2]),
+>                 ],
+>                 v3(-1.0, 0.0, 0.0),
+>             ),
+>             "up" => (
+>                 [
+>                     v3(from[0], to[1], from[2]),
+>                     v3(to[0], to[1], from[2]),
+>                     v3(to[0], to[1], to[2]),
+>                     v3(from[0], to[1], to[2]),
+>                 ],
+>                 v3(0.0, 1.0, 0.0),
+>             ),
+>             "down" => (
+>                 [
+>                     v3(from[0], from[1], to[2]),
+>                     v3(to[0], from[1], to[2]),
+>                     v3(to[0], from[1], from[2]),
+>                     v3(from[0], from[1], from[2]),
+>                 ],
+>                 v3(0.0, -1.0, 0.0),
+>             ),
+>             _ => return None,
+>         };
+> 
+>         let uv_rect = face.uv.unwrap_or([0.0, 0.0, 0.0, 0.0]);
+>         let mut uvs = [
+>             v2(uv_rect[0], uv_rect[1]),
+>             v2(uv_rect[2], uv_rect[1]),
+>             v2(uv_rect[2], uv_rect[3]),
+>             v2(uv_rect[0], uv_rect[3]),
+>         ];
+>         uvs = Self::rotate_uv(uvs, face.rotation);
+> 
+>         // apply element rotation around origin
+>         let q = Quat::from_euler_xyz_deg(self.cube.rotation[0], self.cube.rotation[1], self.cube.rotation[2]);
+>         let mut out = quad;
+>         for p in &mut out {
+>             *p = q.rotate_vec3(v3(
+>                 p[0] - self.cube.origin[0],
+>                 p[1] - self.cube.origin[1],
+>                 p[2] - self.cube.origin[2],
+>             ));
+>             *p = v3(
+>                 p[0] + self.cube.origin[0],
+>                 p[1] + self.cube.origin[1],
+>                 p[2] + self.cube.origin[2],
+>             );
+>         }
+> 
+>         let n = q.rotate_vec3(normal);
+>         Some((out, uvs, n))
+>     }
+> }
+> 
+> impl<'a> Iterator for CubeTriIter<'a> {
+>     type Item = Tri;
+> 
+>     fn next(&mut self) -> Option<Self::Item> {
+>         loop {
+>             if self.face_idx >= 6 {
+>                 return None;
+>             }
+> 
+>             let (dir, face) = match self.face_at(self.face_idx) {
+>                 Some(v) => v,
+>                 None => {
+>                     self.face_idx += 1;
+>                     self.tri_idx = 0;
+>                     continue;
+>                 }
+>             };
+> 
+>             let (p, uv, n) = match self.make_face(dir, face) {
+>                 Some(v) => v,
+>                 None => {
+>                     self.face_idx += 1;
+>                     self.tri_idx = 0;
+>                     continue;
+>                 }
+>             };
+> 
+>             let tri = match self.tri_idx {
+>                 0 => Tri {
+>                     positions: [p[0], p[1], p[2]],
+>                     uvs: [uv[0], uv[1], uv[2]],
+>                     normals: [n, n, n],
+>                     texture: face.texture,
+>                 },
+>                 1 => Tri {
+>                     positions: [p[0], p[2], p[3]],
+>                     uvs: [uv[0], uv[2], uv[3]],
+>                     normals: [n, n, n],
+>                     texture: face.texture,
+>                 },
+>                 _ => {
+>                     self.face_idx += 1;
+>                     self.tri_idx = 0;
+>                     continue;
+>                 }
+>             };
+> 
+>             self.tri_idx += 1;
+>             if self.tri_idx > 1 {
+>                 self.face_idx += 1;
+>                 self.tri_idx = 0;
+>             }
+>             return Some(tri);
+>         }
+>     }
+> }
+> 
+> // ---------------------------------------------------------------------------
+> // Mesh
+> // ---------------------------------------------------------------------------
+> 
+> #[derive(Debug, Clone, Deserialize, Serialize, Default)]
+> #[skip_serializing_none]
+> #[serde(default)]
+> pub struct Mesh {
+>     pub uuid: Uuid,
+>     pub name: Option<String>,
+>     pub origin: Vec3,
+>     pub rotation: Vec3,
+>     pub visibility: bool,
+>     pub export: bool,
+>     pub vertices: HashMap<String, Vec3>,
+>     pub faces: HashMap<String, MeshFace>,
+>     pub color: i32,
+>     pub autouv: i32,
+>     pub locked: Option<bool>,
+> }
+> 
+> #[derive(Debug, Clone, Deserialize, Serialize, Default)]
+> #[skip_serializing_none]
+> #[serde(default)]
+> pub struct MeshFace {
+>     pub vertices: Vec<String>,
+>     pub uv: HashMap<String, Vec2>,
+>     pub texture: Option<i32>,
+> }
+> 
+> impl Mesh {
+>     pub fn iter_tris(&self) -> MeshTriIter<'_> {
+>         let face_keys: Vec<&String> = self.faces.keys().collect();
+>         MeshTriIter {
+>             mesh: self,
+>             face_keys,
+>             key_idx: 0,
+>             tri_cursor: 0,
+>             tri_count: 0,
+>         }
+>     }
+> 
+>     fn tri_normal(a: &Vec3, b: &Vec3, c: &Vec3) -> Vec3 {
+>         let ab = v3(b[0] - a[0], b[1] - a[1], b[2] - a[2]);
+>         let ac = v3(c[0] - a[0], c[1] - a[1], c[2] - a[2]);
+>         let n = v3(
+>             ab[1] * ac[2] - ab[2] * ac[1],
+>             ab[2] * ac[0] - ab[0] * ac[2],
+>             ab[0] * ac[1] - ab[1] * ac[0],
+>         );
+>         let len = (n[0] * n[0] + n[1] * n[1] + n[2] * n[2]).sqrt();
+>         if len > 0.0 {
+>             v3(n[0] / len, n[1] / len, n[2] / len)
+>         } else {
+>             v3(0.0, 1.0, 0.0)
+>         }
+>     }
+> }
+> 
+> pub struct MeshTriIter<'a> {
+>     mesh: &'a Mesh,
+>     face_keys: Vec<&'a String>,
+>     key_idx: usize,
+>     tri_cursor: usize,
+>     tri_count: usize,
+> }
+> 
+> impl<'a> Iterator for MeshTriIter<'a> {
+>     type Item = Tri;
+> 
+>     fn next(&mut self) -> Option<Tri> {
+>         loop {
+>             if self.key_idx >= self.face_keys.len() {
+>                 return None;
+>             }
+> 
+>             let key = self.face_keys[self.key_idx];
+>             let face = self.mesh.faces.get(key)?;
+> 
+>             // collect valid polygon loop
+>             let pos: Vec<Vec3> = face
+>                 .vertices
+>                 .iter()
+>                 .filter_map(|vid| self.mesh.vertices.get(vid).copied())
+>                 .collect();
+> 
+>             if pos.len() < 3 {
+>                 self.key_idx += 1;
+>                 self.tri_cursor = 0;
+>                 self.tri_count = 0;
+>                 continue;
+>             }
+> 
+>             if self.tri_count == 0 {
+>                 self.tri_count = pos.len() - 2; // fan triangulation for n-gons
+>             }
+> 
+>             if self.tri_cursor >= self.tri_count {
+>                 self.key_idx += 1;
+>                 self.tri_cursor = 0;
+>                 self.tri_count = 0;
+>                 continue;
+>             }
+> 
+>             let i0 = 0;
+>             let i1 = self.tri_cursor + 1;
+>             let i2 = self.tri_cursor + 2;
+>             self.tri_cursor += 1;
+> 
+>             let uv_for = |idx: usize| -> Vec2 {
+>                 let k = &face.vertices[idx];
+>                 face.uv.get(k).copied().unwrap_or_else(|| v2(0.0, 0.0))
+>             };
+> 
+>             let a = pos[i0];
+>             let b = pos[i1];
+>             let c = pos[i2];
+> 
+>             let normal = Mesh::tri_normal(&a, &b, &c);
+> 
+>             return Some(Tri {
+>                 positions: [a, b, c],
+>                 uvs: [uv_for(i0), uv_for(i1), uv_for(i2)],
+>                 normals: [normal, normal, normal],
+>                 texture: face.texture,
+>             });
+>         }
+>     }
+> }
+> ```
+> 
+> ```rust name=src/lib.rs url=https://github.com/Exotik850/bbmodel-rs/blob/b9b66f9a522e6ceae0b212918c6ef7e685d4176f/src/lib.rs
+> // add these exports near your existing `mod`/`pub use` section
+> pub mod element;
+> pub use element::{Cube, Element, Mesh, Tri};
+> 
+> // --- add below your math type aliases/helpers (or replace existing if present) ---
+> 
+> #[cfg(feature = "glam")]
+> pub type Vec2 = glam::Vec2;
+> #[cfg(feature = "glam")]
+> pub type Vec3 = glam::Vec3;
+> 
+> #[cfg(not(feature = "glam"))]
+> pub type Vec2 = [f32; 2];
+> #[cfg(not(feature = "glam"))]
+> pub type Vec3 = [f32; 3];
+> 
+> #[cfg(feature = "glam")]
+> #[inline]
+> pub fn v2(x: f32, y: f32) -> Vec2 {
+>     glam::Vec2::new(x, y)
+> }
+> #[cfg(not(feature = "glam"))]
+> #[inline]
+> pub fn v2(x: f32, y: f32) -> Vec2 {
+>     [x, y]
+> }
+> 
+> #[cfg(feature = "glam")]
+> #[inline]
+> pub fn v3(x: f32, y: f32, z: f32) -> Vec3 {
+>     glam::Vec3::new(x, y, z)
+> }
+> #[cfg(not(feature = "glam"))]
+> #[inline]
+> pub fn v3(x: f32, y: f32, z: f32) -> Vec3 {
+>     [x, y, z]
+> }
+> 
+> pub struct Quat;
+> 
+> impl Quat {
+>     #[cfg(feature = "glam")]
+>     pub fn from_euler_xyz_deg(x: f32, y: f32, z: f32) -> glam::Quat {
+>         glam::Quat::from_euler(
+>             glam::EulerRot::XYZ,
+>             x.to_radians(),
+>             y.to_radians(),
+>             z.to_radians(),
+>         )
+>     }
+> 
+>     #[cfg(feature = "glam")]
+>     pub fn rotate_vec3(q: glam::Quat, v: Vec3) -> Vec3 {
+>         q * v
+>     }
+> 
+>     #[cfg(not(feature = "glam"))]
+>     pub fn from_euler_xyz_deg(x: f32, y: f32, z: f32) -> [f32; 4] {
+>         // quaternion (x,y,z,w) from XYZ euler radians
+>         let (sx, cx) = (0.5 * x.to_radians()).sin_cos();
+>         let (sy, cy) = (0.5 * y.to_radians()).sin_cos();
+>         let (sz, cz) = (0.5 * z.to_radians()).sin_cos();
+> 
+>         let qw = cx * cy * cz - sx * sy * sz;
+>         let qx = sx * cy * cz + cx * sy * sz;
+>         let qy = cx * sy * cz - sx * cy * sz;
+>         let qz = cx * cy * sz + sx * sy * cz;
+>         [qx, qy, qz, qw]
+>     }
+> 
+>     #[cfg(not(feature = "glam"))]
+>     pub fn rotate_vec3(q: [f32; 4], v: Vec3) -> Vec3 {
+>         let [x, y, z, w] = q;
+>         let vx = v[0];
+>         let vy = v[1];
+>         let vz = v[2];
+> 
+>         // v' = q * v * q^-1 optimized
+>         let tx = 2.0 * (y * vz - z * vy);
+>         let ty = 2.0 * (z * vx - x * vz);
+>         let tz = 2.0 * (x * vy - y * vx);
+> 
+>         [
+>             vx + w * tx + (y * tz - z * ty),
+>             vy + w * ty + (z * tx - x * tz),
+>             vz + w * tz + (x * ty - y * tx),
+>         ]
+>     }
+> }
+> ```
+> 
+> ```rust name=src/bevy.rs
+> // NEW FILE (optional feature helper for bevy users)
+> //
+> // Add to Cargo.toml:
+> // [features]
+> // bevy = ["dep:bevy"]
+> //
+> // [dependencies]
+> // bevy = { version = "0.15", optional = true, default-features = false, features = ["bevy_asset","bevy_render","bevy_pbr"] }
+> 
+> #![cfg(feature = "bevy")]
+> 
+> use crate::{BBModel, Tri};
+> use bevy::prelude::*;
+> use bevy::render::mesh::{Indices, PrimitiveTopology};
+> 
+> #[derive(Debug, Clone)]
+> pub struct BevyMeshBuild {
+>     pub texture: Option<i32>,
+>     pub mesh: Mesh,
+> }
+> 
+> pub fn build_bevy_meshes(model: &BBModel) -> Vec<BevyMeshBuild> {
+>     use std::collections::BTreeMap;
+> 
+>     let mut grouped: BTreeMap<Option<i32>, Vec<Tri>> = BTreeMap::new();
+>     for tri in model.triangles() {
+>         grouped.entry(tri.texture).or_default().push(tri);
+>     }
+> 
+>     let mut out = Vec::new();
+> 
+>     for (texture, tris) in grouped {
+>         let mut positions: Vec<[f32; 3]> = Vec::with_capacity(tris.len() * 3);
+>         let mut normals: Vec<[f32; 3]> = Vec::with_capacity(tris.len() * 3);
+>         let mut uvs: Vec<[f32; 2]> = Vec::with_capacity(tris.len() * 3);
+>         let mut indices: Vec<u32> = Vec::with_capacity(tris.len() * 3);
+> 
+>         for tri in tris {
+>             let base = positions.len() as u32;
+>             for i in 0..3 {
+>                 #[cfg(feature = "glam")]
+>                 {
+>                     positions.push(tri.positions[i].to_array());
+>                     normals.push(tri.normals[i].to_array());
+>                     uvs.push(tri.uvs[i].to_array());
+>                 }
+>                 #[cfg(not(feature = "glam"))]
+>                 {
+>                     positions.push(tri.positions[i]);
+>                     normals.push(tri.normals[i]);
+>                     uvs.push(tri.uvs[i]);
+>                 }
+>             }
+>             indices.extend_from_slice(&[base, base + 1, base + 2]);
+>         }
+> 
+>         let mut mesh = Mesh::new(PrimitiveTopology::TriangleList);
+>         mesh.insert_attribute(Mesh::ATTRIBUTE_POSITION, positions);
+>         mesh.insert_attribute(Mesh::ATTRIBUTE_NORMAL, normals);
+>         mesh.insert_attribute(Mesh::ATTRIBUTE_UV_0, uvs);
+>         mesh.insert_indices(Indices::U32(indices));
+> 
+>         out.push(BevyMeshBuild { texture, mesh });
+>     }
+> 
+>     out
+> }
+> ```
+> 
+> ```toml name=Cargo.toml url=https://github.com/Exotik850/bbmodel-rs/blob/b9b66f9a522e6ceae0b212918c6ef7e685d4176f/Cargo.toml
+> [dependencies]
+> glam = { version = "0.33.2", optional = true, features = ["serde"], default-features = false }
+> serde = { version = "1.0.228", features = ["derive", "alloc"], default-features = false }
+> serde_json = { version = "1.0", default-features = false, features = ["alloc"] }
+> serde_with = { version = "3.21", default-features = false, features = ["macros"] }
+> uuid = { version = "1.23.4", features = ["serde"], default-features = false }
+> bevy = { version = "0.15", optional = true, default-features = false, features = ["bevy_asset","bevy_render","bevy_pbr"] }
+> 
+> [features]
+> glam = ["dep:glam"]
+> bevy = ["dep:bevy"]
+> default = ["std"]
+> std = ["serde/std", "serde_json/std", "uuid/std", "serde_with/std", "glam/std"]
+> ```
+> 
+> ```rust name=src/lib.rs (additions at end) url=https://github.com/Exotik850/bbmodel-rs/blob/b9b66f9a522e6ceae0b212918c6ef7e685d4176f/src/lib.rs
+> #[cfg(feature = "bevy")]
+> pub mod bevy;
+> ```
+> 
+> 
+> 
+> User: Compile this into a pull request that I can review and test
+> 
+> Assistant: I’m waiting on your confirmation of the PR agent run in the GitHub dialog—once you accept it, I’ll proceed to generate the pull request for review.

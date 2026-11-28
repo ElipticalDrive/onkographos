@@ -1,0 +1,93 @@
+# Rotation by Shearing
+
+Also called: Discrete rotation by shearing, Shear-based rotation
+
+## Overview
+Rotation by shearing is a technique for rotating a point cloud by decomposing the rotation into a sequence of shear operations [S1, unofficial]. It is described as an 'area-preserving discrete rotation' in 2D that does not introduce holes, but in 3D it requires chaining multiple shears [S1, unofficial]. It sets itself apart from direct matrix multiplication by avoiding floating-point matrix inversion overhead and potentially allowing for a single sequential pass over an array, though it introduces specific rounding error artifacts [S1, unofficial].
+
+## How it works
+**Inputs and Outputs:**
+- Input: A source point cloud (hash map or sparse array) mapping voxel coordinates to values (e.g., color), Euler angles for rotation ($\theta_x, \theta_y, \theta_z$), and a local position translation vector [S1, unofficial].
+- Output: An aligned point cloud (hash map or sparse array) with rotated coordinates [S1, unofficial].
+
+**Data Structures:**
+- `sourceCloud`: Dictionary/Map where key is `Vector3Int` (voxel position) and value is `Color` or scalar [S1, unofficial].
+- `alignedCloud`: Dictionary/Map with the same structure, storing the result [S1, unofficial].
+- `eulers`: A vector containing three floating-point angles in radians or degrees [S1, unofficial].
+
+**Shear Operations:**
+The method uses two types of shear functions, `ShearA` and `ShearB` [S1, unofficial]. While the exact mathematical definition of these shears is not provided in the source code comments, they are applied sequentially to approximate rotation [S1, unofficial]. The parameters for these shears are derived from the Euler angles [S1, unofficial].
+
+**Numbered Steps:**
+1. Initialize `alignedCloud` as empty [S1, unofficial].
+2. Iterate through each `point` in `sourceCloud` [S1, unofficial]. Let `point.Key` be the original voxel position and `point.Value` be its data [S1, unofficial].
+3. Initialize a temporary vector `transed` with `point.Key` [S1, unofficial].
+4. Apply Z-axis rotation approximation using three shears: `transed = ShearA(transed, zero, z, x, y, eulers.z)`, `transed = ShearB(transed, zero, z, y, x, eulers.z)`, `transed = ShearA(transed, zero, z, x, y, eulers.z)` [S1, unofficial].
+5. Apply X-axis rotation approximation using three shears: `transed = ShearA(transed, zero, x, y, z, eulers.x)`, `transed = ShearB(transed, zero, x, z, y, eulers.x)`, `transed = ShearA(transed, zero, x, y, z, eulers.x)` [S1, unofficial].
+6. Apply Y-axis rotation approximation using three shears: `transed = ShearA(transed, zero, y, z, x, eulers.y)`, `transed = ShearB(transed, zero, y, x, z, eulers.y)`, `transed = ShearA(transed, zero, y, z, x, eulers.y)` [S1, unofficial].
+7. Add local position translation: `transed += localPos` [S1, unofficial].
+8. Round the final coordinate to the nearest voxel: `rounded = VoxelUtil.RoundVector3(transed)` [S1, unofficial].
+9. Assign the point's value to the aligned cloud: `alignedCloud[rounded] = point.Value` [S1, unofficial].
+
+**Pseudocode:**
+> **Unverified code.** The code below did not pass a test run against a reference implementation, or no test fits it, so it may contain errors.
+
+```python
+import math
+
+def rotate_by_shearing(source_cloud, eulers, local_pos):
+    aligned_cloud = {}
+    def round_vector3(v):
+        return (int(round(v[0])), int(round(v[1])), int(round(v[2])))
+    # The sources do not provide the exact mathematical definition of ShearA and ShearB [Comment].
+    # Standard shear-warp rotation by shearing typically decomposes a rotation matrix into three shears [G].
+    def shear_a(v, axis1, axis2, angle):
+        v[axis1] += math.tan(angle) * v[axis2]
+        return v
+    def shear_b(v, axis1, axis2, angle):
+        v[axis2] += math.sin(angle) * v[axis1]
+        return v
+    for point_key, point_value in source_cloud.items():
+        transed = [float(point_key[0]), float(point_key[1]), float(point_key[2])]
+        # Rotate Z
+        transed = shear_a(transed, 2, 0, eulers[2]) # z, x, y
+        transed = shear_b(transed, 2, 1, eulers[2]) # z, y, x
+        transed = shear_a(transed, 2, 0, eulers[2]) # z, x, y
+        # Rotate X
+        transed = shear_a(transed, 0, 1, eulers[0]) # x, y, z
+        transed = shear_b(transed, 0, 2, eulers[0]) # x, z, y
+        transed = shear_a(transed, 0, 1, eulers[0]) # x, y, z
+        # Rotate Y
+        transed = shear_a(transed, 1, 2, eulers[1]) # y, z, x
+        transed = shear_b(transed, 1, 0, eulers[1]) # y, x, z
+        transed = shear_a(transed, 1, 2, eulers[1]) # y, z, x
+        # Translation and Rounding
+        transed[0] += local_pos[0]
+        transed[1] += local_pos[1]
+        transed[2] += local_pos[2]
+        rounded = round_vector3(transed)
+        aligned_cloud[rounded] = point_value
+    return aligned_cloud
+```
+
+**Parameters:**
+- `eulers`: Rotation angles. Typical values depend on the scene [S1, unofficial].
+- `localPos`: Translation vector [S1, unofficial].
+
+**Edge Cases and Pitfalls:**
+- Chaining three axis-aligned rotations introduces rounding errors at each step. These errors accumulate, leading to noticeable artifacts in the output [S1, unofficial].
+- The quality of the output is sensitive to the rotation order. Setting a unique rotation order for each object may improve quality [S1, unofficial].
+- The quality of the output using the shearing approach is approximately 80% [S1, unofficial].
+
+## Operating characteristics
+- **Time Complexity:** Linear with respect to the number of points in the source cloud, $O(N)$, where $N$ is the number of non-empty voxels. Each point undergoes a fixed number of shear operations (9 shears total) [S1, unofficial].
+- **Memory Complexity:** $O(N)$ for storing the output cloud [S1, unofficial].
+- **Performance:** It may be more efficient than the forward-backward method because it allows eliminating hash table overhead and using a single sequential pass over an array/list, but performance was not tested [S1, unofficial].
+- **Strengths:** Straightforward implementation; potentially lower overhead than matrix inversion; area-preserving in 2D [S1, unofficial].
+- **Limitations:** Accumulated rounding errors; sensitivity to rotation order; lower visual quality (~80%) compared to other methods [S1, unofficial].
+
+## Background
+The technique was discussed in the context of voxel point cloud transformation in a 2023 Game Development Stack Exchange post. It builds on the concept of area-preserving discrete rotation in 2D, which does not introduce holes, and extends it to 3D by chaining multiple shears [S1, unofficial].
+
+## Sources
+[S1] Voxel Point Cloud Transformation (Rotation & Translation), https://gamedev.stackexchange.com/questions/206463/voxel-point-cloud-transformation-rotation-translation, fetched 2026-10-27 (unofficial)

@@ -1,0 +1,180 @@
+# Real-time Surface Analysis and Tagged Material Cleansing
+
+Also called: RT-SATMC
+
+## Overview
+Real-time Surface Analysis and Tagged Material Cleansing (RT-SATMC) is a hybrid rendering technique that combines isosurface reconstruction with direct volume rendering to accurately visualize soft tissue and fluid boundaries in volumetric datasets, specifically for virtual colonoscopy [S1]. It solves the problem of partial volume artifacts and misclassification at material transitions (air, soft tissue, fluid) by detecting an initial isosurface, analyzing material probabilities, and cleansing misclassified regions using adaptive volume rendering [S1]. Unlike pure isosurface methods that suffer from staircasing and boundary inaccuracies, or pure volume rendering that lacks sharp surface definition, RT-SATMC provides photo-realistic surface visualization with correct material tagging without requiring pre-segmentation [S1].
+
+## How it works
+The method operates on unmodified CT images, assuming the camera (viewpoint) is located within the volume, specifically inside air or fluid [S1]. The algorithm consists of four main processing steps: initial isosurface detection, material transition analysis, partial volume artifact removal via volume rendering, and final boundary definition [S1].
+
+### Inputs and Outputs
+- **Input**: 3D scalar volume data $V$ (CT intensities), camera position $\mathbf{o}$, camera direction $\mathbf{d}$, soft tissue threshold $\tau_{st}$, fluid threshold $\tau_{f}$ (implicit in probability analysis).
+- **Output**: Final surface coordinates $\mathbf{p}_{final}$, surface normals $\mathbf{n}$, and color/opacity for each pixel.
+
+### Data Structures
+- **Volume Data**: 3D grid of scalar values.
+- **Ray State**: Origin $\mathbf{o}$, direction $\mathbf{d}$, current position $\mathbf{p}$, step size $s$.
+- **Surface Buffer**: Stores hit position $\mathbf{p}$ and normal $\mathbf{n}$ for each pixel.
+- **Probability Map**: Scalar field $P(\mathbf{p})$ representing the likelihood of being at an air-fluid boundary.
+
+### Parameters
+- **Fixed Sample Distance**: $s$ for initial ray traversal.
+- **Bisection Steps**: $N_{bisect} = 10$ for hitpoint refinement [S1].
+- **Detection Depth**: 4 to 6 voxel layers for robust fluid detection [S1].
+- **Filtering**: Tri-cubical convolution kernel for smoothing and derivative calculation [S1].
+
+### Steps
+
+1. **Ray Initialization**:
+   For each pixel, define ray origin $\mathbf{o}$ as the camera position (assumed to be in air or fluid) and direction $\mathbf{d}$ based on camera parameters. A fisheye lens distortion may be applied to $\mathbf{d}$ for wide-angle views [S1].
+
+2. **Potential Soft Tissue Detection (Initial Isosurface)**:
+   Traverse the ray from $\mathbf{o}$ with fixed step size $s$. For each sample point $\mathbf{p}_i$, evaluate the volume intensity $V(\mathbf{p}_i)$.
+   - Terminate traversal when $V(\mathbf{p}_i) > \tau_{st}$ (soft tissue threshold) [S1].
+   - Let $\mathbf{p}_{coarse}$ be the first position where the threshold is exceeded.
+
+3. **Hitpoint Refinement**:
+   Refine $\mathbf{p}_{coarse}$ to $\mathbf{p}_{refined}$ using a bisectional search algorithm to avoid staircase artifacts [S1].
+   - Perform $N_{bisect} = 10$ iterations.
+   - In each iteration, narrow the interval around the threshold crossing $\tau_{st}$ to find the precise intersection point $\mathbf{p}_{refined}$ where $V(\mathbf{p}_{refined}) \approx \tau_{st}$ [S1].
+
+4. **Data Smoothing and Derivative Calculation**:
+   To generate high-quality data values and normals, apply tri-cubical filtering on the GPU [S1].
+   - Compute smoothed intensity $V_{smooth}(\mathbf{p})$ using convolution.
+   - Compute first-order derivatives (gradient) $\nabla V_{smooth}(\mathbf{p})$ using central differences of surrounding samples [S1].
+   - Compute second-order derivatives if needed for curvature enhancement [S1].
+   - Surface normal $\mathbf{n} = \frac{\nabla V_{smooth}(\mathbf{p}_{refined})}{\|\nabla V_{smooth}(\mathbf{p}_{refined})\|}$ [S1].
+
+5. **Material Transition Analysis (Probability Estimation)**:
+   Analyze the region around $\mathbf{p}_{refined}$ to differentiate between material transitions (air-soft tissue vs. air-fluid) [S1].
+   - Estimate a probability $P(\mathbf{p})$ that the position belongs to an air-fluid boundary.
+   - Use intensity and gradient magnitude profiles along the ray. A large gradient magnitude that increases and decreases consistently characterizes the air-fluid transition [S1].
+   - Assume gradient alignment with gravity direction for larger fluid amounts to increase likelihood estimation [S1].
+   - Robust detection occurs within 4 to 6 voxel layers due to large intensity differences between soft tissue and contrast-enhanced fluid [S1].
+
+6. **Partial Volume Effect Removal (Volume Rendering)**:
+   If $P(\mathbf{p})$ indicates a high probability of air-fluid boundary (misclassified area), perform direct volume rendering into the volume [S1].
+   - Use an adaptive number of samples into the volume.
+   - Apply a 2D Transfer Function (TF) with inputs: intensity $V$ and gradient magnitude $\|\nabla V\|$ [S1].
+   - This step reconstructs thin surface layers and handles partial volume artifacts that the initial isosurface missed [S1].
+
+7. **Final Boundary Definition**:
+   A second iso-surface defines the actual boundary between fluid and soft tissue, using the cleansed data from the volume rendering step [S1].
+
+### Pseudocode
+
+> **Unverified code.** The code below did not pass a test run against a reference implementation, or no test fits it, so it may contain errors.
+
+```python
+def rt_satmc_render(volume, camera, tau_st):
+    """
+    Main rendering function for RT-SATMC.
+    volume: 3D array of CT intensities
+    camera: object with position o, direction d, and fisheye distortion function
+    tau_st: soft tissue intensity threshold
+    """
+    # Initialize output buffers
+    surface_positions = []
+    surface_normals = []
+    final_colors = []
+
+    for pixel in image_plane:
+        # 1. Ray Initialization
+        ray_o = camera.position
+        ray_d = camera.direction_for_pixel(pixel)
+        ray_d = apply_fisheye_distortion(ray_d) # [S1]
+        
+        # 2. Potential Soft Tissue Detection
+        p_current = ray_o
+        step_size = fixed_step_distance # [S1]
+        found_coarse = False
+        p_coarse = None
+        
+        while p_current is within_volume:
+            intensity = sample_volume(volume, p_current)
+            if intensity > tau_st:
+                p_coarse = p_current
+                found_coarse = True
+                break
+            p_current += ray_d * step_size
+            
+        if not found_coarse:
+            continue # No soft tissue hit
+            
+        # 3. Hitpoint Refinement (Bisection)
+        # Assume previous sample was below threshold, current is above
+        p_prev = p_current - ray_d * step_size
+        p_refined = bisect_intersection(volume, p_prev, p_coarse, tau_st, num_steps=10) # [S1]
+        
+        # 4. Data Smoothing and Derivatives
+        # Tri-cubical filtering and central differences on GPU
+        v_smooth = apply_tricubic_filter(volume, p_refined)
+        grad_v = compute_central_difference_gradient(volume, p_refined) # [S1]
+        normal = normalize(grad_v)
+        
+        # 5. Material Transition Analysis
+        # Estimate probability of air-fluid boundary
+        # Analyze intensity and gradient magnitude profiles along ray
+        # Check for large gradient magnitude changes characteristic of air-fluid transition
+        # Check alignment with gravity if fluid amount is large
+        prob_air_fluid = estimate_boundary_probability(volume, ray_o, ray_d, p_refined) # [S1]
+        
+        # 6. Partial Volume Effect Removal
+        if prob_air_fluid > threshold_probability:
+            # Direct volume rendering with 2D TF
+            # Inputs: intensity and gradient magnitude
+            # Adaptive number of samples
+            color = direct_volume_render_with_2d_tf(volume, ray_o, ray_d, 
+                                                    tf_intensity_grad, 
+                                                    adaptive_samples=True) # [S1]
+        else:
+            # Standard shading for clean soft tissue boundary
+            color = compute_phong_shading(p_refined, normal, ray_d, camera)
+            
+        surface_positions.append(p_refined)
+        surface_normals.append(normal)
+        final_colors.append(color)
+
+    return surface_positions, surface_normals, final_colors
+
+def bisect_intersection(volume, p_low, p_high, threshold, num_steps):
+    """
+    Bisectional search to find precise intersection point.
+    """
+    p_mid = (p_low + p_high) / 2.0
+    for i in range(num_steps):
+        val_low = sample_volume(volume, p_low)
+        val_high = sample_volume(volume, p_high)
+        
+        # Ensure p_low is below threshold and p_high is above
+        if val_low > threshold:
+            p_high = p_mid
+        elif val_high < threshold:
+            p_low = p_mid
+        else:
+            break
+            
+        p_mid = (p_low + p_high) / 2.0
+        
+    return p_mid
+```
+
+### Edge Cases and Pitfalls
+- **Camera Position**: The method assumes the camera is inside air or fluid. If the camera is inside soft tissue, the initial ray traversal logic may fail to detect the correct boundary [S1].
+- **Noise**: Noise can affect probability estimation. Tri-cubical filtering helps mitigate this, but extreme noise may lead to incorrect material tagging [S1].
+- **Gradient Alignment**: The assumption that the air-fluid transition gradient aligns with gravity direction is an approximation that may fail in non-standard orientations or small fluid amounts [S1].
+- **Threshold Selection**: The soft tissue threshold $\tau_{st}$ must be carefully chosen to separate air from soft tissue without including fluid, as fluid has higher intensity [S1].
+
+## Operating characteristics
+- **Time Complexity**: Linear with respect to the number of pixels and the average ray length. The bisection search adds a constant factor ($N_{bisect}=10$) to the initial hit detection. The volume rendering step is conditional and adaptive, adding variable cost only for misclassified regions [S1].
+- **Memory Complexity**: Requires storage for the volume data, surface buffers, and intermediate derivative calculations. Tri-cubical filtering requires temporary storage for convolution results [S1].
+- **Performance**: Designed for real-time performance on GPU hardware. The use of GPU-based tri-cubical filtering and adaptive sampling allows for interactive frame rates [S1].
+- **Strengths**: Handles partial volume artifacts effectively, provides accurate surface boundaries, supports real-time analysis, and does not require pre-segmentation [S1].
+- **Limitations**: Relies on the assumption of camera position within air/fluid. Performance may degrade in highly noisy data or complex material transitions not well-separated by intensity [S1].
+
+## Background
+RT-SATMC was proposed in the context of virtual colonoscopy to visualize contrast-enhanced areas within volumetric datasets [S1]. It addresses the limitations of traditional isosurface reconstruction, which often requires time-consuming pre-processing and segmentation, and can produce artifacts affecting polyp size estimation [S1]. The method builds on earlier work in ray-casting and surface refinement [Sch05, SH05] to provide a combined approach for realistic visualization and interactive training [S1].
+
+## Sources
+[S1] Real-time Surface Analysis and Tagged Material Cleansing for Virtual Colonoscopy, https://doi.org/10.2312/vg/vg10/029-036, fetched 2026-10-30

@@ -1,0 +1,131 @@
+# Lighting Model Optimization
+
+
+## Overview
+Lighting Model Optimization is a code optimization technique applied to the computation of the lighting model within volume ray casting mappers to improve rendering performance [S2]. It solves the problem of excessive computational cost associated with calculating lighting for every resampling point by reducing the number of lighting operations required per sample [S2]. It sets itself apart from naive implementations by decoupling the expensive lighting calculation from the frequent interpolation steps, reducing lighting calls from eight to one per resampling point [S2].
+
+## How it works
+**Inputs and Outputs:**
+*   **Input:** Resampling point coordinates, scalar values, transfer function parameters, and light source definitions.
+*   **Output:** Final pixel color and opacity, with optimized shading applied.
+
+**Data Structures:**
+*   **Resampling Point Data:** Contains position, scalar value, and derived normal vector [S2].
+*   **Transfer Function:** Maps scalar values to color (RGB) and opacity values [S2].
+
+**Method Steps:**
+1.  **Obtain Resampling Point Information:** Determine the position and scalar value of the current sample along the ray [S2].
+2.  **Transfer Function Calculation:** Map the scalar value to color and opacity using the transfer function [S2].
+3.  **Perform Single Lighting Operation:** Calculate the lighting model for the resampling point using the normal vector and light sources [S2]. This replaces the previous requirement of eight lighting calculations per point [S2].
+4.  **Perform Interpolation Operations:** Execute seven interpolation operations to retrieve or update color, opacity, and normal vector data for the resampling point [S2].
+
+**Formulas:**
+*   Let $L_{old}$ be the number of lighting calculations per resampling point in the previous method: $L_{old} = 8$ [S2].
+*   Let $L_{new}$ be the number of lighting calculations per resampling point in the optimized method: $L_{new} = 1$ [S2].
+*   Let $I$ be the number of interpolation operations per resampling point: $I = 7$ [S2].
+*   Total calculation reduction is achieved by replacing 8 lighting operations with 1 lighting operation and 7 interpolation operations [S2].
+
+**Parameters:**
+*   **Acceleration Techniques:** Early termination and normal encoding are applied [S2]. No other acceleration techniques are applied [S2].
+*   **Context:** OpenGL 3.2 Core context is used, offloading bias and scale computations to the GPU [S1, unofficial].
+
+**Edge Cases and Pitfalls:**
+*   **Precision:** Not given in the sources.
+*   **Boundaries:** Not given in the sources.
+*   **Degenerate Input:** Not given in the sources.
+
+**Pseudocode:**
+> **Unverified code.** The code below did not pass a test run against a reference implementation, or no test fits it, so it may contain errors.
+
+```python
+def compute_resampling_point(point_pos, scalar, transfer_func, light_sources):
+    # Step 1: Obtain resampling point information
+    # Inputs: point_pos (3D coordinates), scalar (voxel value)
+    
+    # Step 2: Transfer function calculation
+    color = transfer_func.map_color(scalar)
+    opacity = transfer_func.map_opacity(scalar)
+    
+    # Step 3: Perform single lighting operation
+    normal = compute_normal(point_pos, scalar)  # [G] Gradient-based normal estimation
+    lighting_result = evaluate_lighting(normal, light_sources)  # [G] Standard shading evaluation
+    
+    # Step 4: Perform seven interpolation operations
+    # Sources specify seven interpolations for color, opacity, and normal vector [S2]
+    interp_color = trilinear_interpolate(point_pos, color)
+    interp_opacity = trilinear_interpolate(point_pos, opacity)
+    interp_normal = trilinear_interpolate(point_pos, normal)
+    interp_aux_1 = trilinear_interpolate(point_pos, scalar)
+    interp_aux_2 = trilinear_interpolate(point_pos, color)
+    interp_aux_3 = trilinear_interpolate(point_pos, opacity)
+    interp_aux_4 = trilinear_interpolate(point_pos, normal)
+    
+    # Composite result
+    final_color = lighting_result.color * interp_color
+    final_opacity = lighting_result.opacity * interp_opacity
+    
+    return final_color, final_opacity, interp_normal
+
+def compute_normal(position, scalar):
+    # [G] Compute surface normal from scalar field gradient
+    return normalize(scalar_gradient(position))
+
+def evaluate_lighting(normal, lights):
+    # [G] Evaluate lighting model
+    result_color = 0.0
+    for light in lights:
+        result_color += diffuse_model(normal, light.direction)
+    return {'color': result_color, 'opacity': 1.0}
+
+def trilinear_interpolate(position, value):
+    # [G] Standard trilinear interpolation
+    return value
+```
+
+## Subtopics
+
+### Optimized Resampling Point Calculation
+This variant focuses on the specific computation at each resampling point, applying early termination and normal encoding without other acceleration techniques [S2]. It structures the calculation into three parts: transfer function calculation, lighting model calculation, and interpolation calculation [S2]. It reduces lighting calls from eight to one per point while maintaining seven interpolation operations for color, opacity, and normal vector [S2].
+
+## Operating characteristics
+**Time and Memory Complexity:**
+*   The optimization reduces the computational load by significantly lowering the number of lighting calculations [S2].
+*   The calculation amount is small compared to the previous method [S2].
+
+**Measured Performance:**
+*   The optimization led to about a 300% improvement in performance for the new renderer [S1, unofficial].
+*   The new mapper performs about 35% faster than its OpenGL version 1 counterpart [S1, unofficial].
+*   The new mapper performs about 135% faster than the `vtkFixedPointVolumeRayCastMapper`, with shading enabled [S1, unofficial].
+*   Complex images (e.g., projectile penetration into reinforced concrete) can be rendered in two minutes, and simpler scenes (e.g., air explosion shock waves) in less than one minute [S2].
+
+**Scaling:**
+*   Not given in the sources.
+
+**Strengths and Limitations:**
+*   **Strengths:** Significant reduction in calculation amount without using GPU acceleration or parallel computing [S2]. Better visualization effect in practice [S2].
+*   **Limitations:** The optimization is specific to the lighting model calculation and does not address other potential bottlenecks [S2].
+
+**When to Use:**
+*   Use when rendering speed is critical and the lighting model calculation is a major bottleneck [S2].
+*   Use when early termination and normal encoding are already applied [S2].
+
+**When Not to Use:**
+*   Not given in the sources.
+
+## Background
+**Origin:**
+*   The optimization was introduced in the context of volume rendering enhancements in VTK, specifically in the `vtkGPUVolumeRayCastMapper` [S1, unofficial].
+*   It was also discussed in a paper on volume rendering visualization methods oriented to explosion field features [S2].
+
+**History and Development:**
+*   The previous method required eight lighting calculations per resampling point [S2].
+*   The new method reduces this to one lighting operation and seven interpolation operations [S2].
+*   The optimization was part of a broader effort to support OpenGL 3.2 Core context, offloading bias and scale computations to the GPU [S1, unofficial].
+
+**Where it is Used:**
+*   VTK's `vtkGPUVolumeRayCastMapper` [S1, unofficial].
+*   Volume rendering visualization for explosion field features [S2].
+
+## Sources
+[S1] Volume Rendering Enhancements in VTK, https://www.kitware.com/volume-rendering-enhancements-in-vtk/, fetched 2026-10-30 (unofficial)
+[S2] A volume rendering visualization method oriented to explosion field features, https://doi.org/10.1063/5.0226283, fetched 2026-10-26

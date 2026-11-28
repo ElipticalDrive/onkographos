@@ -1,0 +1,125 @@
+--- v001.md
++++ v002.md
+@@ -4,9 +4,9 @@
+ 
+ ## Overview
+-Neural Radiance Caching (NRC) is a neural rendering technique that uses a Multi-Layer Perceptron (MLP) to predict photorealistic pixel colors from per-pixel feature buffers containing world-space positions and auxiliary features [S2, unofficial]. It solves the problem of real-time indirect illumination by deferring shading computations to a trained neural model, allowing for online adaptation to dynamic scenes [S1][S2, unofficial]. Unlike sibling methods that may require scene-specific retraining or lack dynamic support, NRC continuously overfits to the current lighting and geometry using sparse light paths spawned from the camera view, enabling real-time performance with a strict training budget [S2, unofficial].
++Neural Radiance Caching (NRC) is a neural rendering technique that uses a Multi-Layer Perceptron (MLP) to predict photorealistic pixel colors from per-pixel feature buffers containing world-space positions and auxiliary features [S2, unofficial]. It enables real-time rendering by continuously overfitting to the current lighting and geometry using sparse light paths spawned from the camera view, operating within a strict training budget [S2, unofficial]. Unlike sibling methods that may require scene-specific retraining or lack dynamic support, NRC processes each pixel independently, allowing feature buffers to be treated as per-pixel feature vectors [S2, unofficial].
+ 
+ ## How it works
+ **Inputs and Outputs:**
+-*   **Input:** Per-pixel feature buffers containing the world-space position $\mathbf{x}$ and additional auxiliary encoded dimensions (e.g., view direction, surface normals) [S2, unofficial].
++*   **Input:** Per-pixel feature buffers containing the world-space position $\mathbf{x}$ and additional auxiliary encoded dimensions (e.g., view direction) [S2, unofficial].
+ *   **Output:** Predicted photorealistic pixel color (RGB) [S2, unofficial].
+ 
+@@ -24,12 +24,17 @@
+ 1.  **Feature Buffer Construction:** For each pixel, retrieve the world-space position $\mathbf{x}$ and any additional auxiliary features (e.g., view direction) [S2, unofficial].
+ 2.  **Position Encoding:** Encode the world-space position $\mathbf{x}$ using multi-resolution hash encoding [S2, unofficial].
+-3.  **Feature Concatenation:** Concatenate the encoded position with the encoded auxiliary dimensions using the same encoding scheme as Müller et al. [2021] [S2, unofficial].
++3.  **Feature Concatenation:** Encode the auxiliary features using the same encoding scheme and concatenate them with the encoded position [S2, unofficial].
+ 4.  **MLP Inference:** Feed the concatenated vector into the MLP to predict the pixel color [S2, unofficial].
+-5.  **Online Training:** Continuously update the MLP using sparse light paths spawned from the camera view, adhering to a 1 ms per frame training budget [S2, unofficial].
+-6.  **Dynamic Object Handling (Deferred Shading):** If a ray hits a dynamic object not part of the static training domain, defer the cache query by one or more bounces until it hits a static surface where the neural cache is valid [S1].
+-7.  **Denoising:** Apply a denoiser to remove variance resulting from the deferred path depth [S1].
++5.  **Online Training:** Continuously update the MLP using sparse light paths spawned from the camera view, adhering to the 1 ms per frame training budget [S2, unofficial].
+ 
+ **Pseudocode:**
+ ```python
++def concatenate(vectors):
++    """Concatenate a list of 1D vectors into a single 1D vector."""
++    result = []
++    for v in vectors:
++        result.extend(v)
++    return result
++
+ def neural_radiance_caching_pixel(x_world, aux_features, mlp, hash_encoder):
+     """
+@@ -49,11 +54,6 @@
+     
+     # Step 3: Encode auxiliary features and concatenate
+-    # Note: Auxiliary features are encoded using the same scheme as position
+-    encoded_aux = []
+-    for feat in aux_features:
+-        encoded_aux.append(hash_encoder.encode(feat))
+-        
+-    # Concatenate encoded position and encoded auxiliary features
+-    input_vector = concatenate(encoded_pos, encoded_aux)
++    encoded_aux = [hash_encoder.encode(feat) for feat in aux_features]
++    input_vector = concatenate([encoded_pos] + encoded_aux)
+     
+     # Step 4: MLP Inference
+@@ -62,62 +62,25 @@
+     return color
+ 
+-def handle_dynamic_object_ray(ray, cache, denoiser):
+-    """
+-    Handles rays hitting dynamic objects by deferring shading.
+-    
+-    Args:
+-        ray: The current ray segment.
+-        cache: The neural radiance cache (MLP + Hash Encoder).
+-        denoiser: The denoising filter.
+-        
+-    Returns:
+-        Shaded color.
+-    """
+-    # Check if ray hits a dynamic object not in training domain
+-    if is_dynamic_object(ray.hit):
+-        # Step 6: Defer cache query
+-        # Trace ray further until it hits a static surface
+-        deferred_ray = trace_ray_until_static(ray, cache.static_meshes)
+-        
+-        if deferred_ray.hit:
+-            # Query cache for the deferred hit point
+-            color = neural_radiance_caching_pixel(
+-                deferred_ray.hit_point, 
+-                deferred_ray.aux_features, 
+-                cache.mlp, 
+-                cache.hash_encoder
+-            )
+-            # Step 7: Denoise to remove variance from deferral
+-            color = denoiser.filter(color)
+-            return color
+-        else:
+-            # Fallback if no static surface hit
+-            return background_color
+-    else:
+-        # Direct cache query for static objects
+-        return neural_radiance_caching_pixel(
+-            ray.hit_point, 
+-            ray.aux_features, 
+-            cache.mlp, 
+-            cache.hash_encoder
+-        )
++# Step 5 is handled externally by the renderer's online training loop,
++# which backpropagates the pixel loss against the MLP and hash encoder
++# within the 1 ms per frame budget [S2, unofficial].
+ ```
+ 
+ **Edge Cases and Pitfalls:**
+-*   **Hash Collisions:** Hash collisions cause microstructure artifacts at the finest grid resolution. These artifacts do not disappear with longer training times [S2, unofficial].
+-*   **Dynamic Object Shading:** Objects not part of the training domain (dynamic objects) cannot be directly shaded. Ray tracing is required to defer shading, which increases variance proportional to the deferred path depth [S1].
+-*   **Variance:** Increasing model capacity reduces bias but does not significantly improve quality because variance from deferring is the major source of error [S1].
++*   **Hash Collisions:** Hash collisions cause microstructure artifacts at the finest grid resolution, which do not disappear with longer training times [S2, unofficial].
++*   **Model Capacity:** Increasing the MLP capacity reduces bias but does not significantly improve quality because variance is the dominant error source in related deferred variants [S1].
++*   **Training Budget:** The 1 ms per frame constraint requires efficient encoding and small network sizes to maintain real-time performance [S2, unofficial].
+ 
+ ## Operating characteristics
+-*   **Time Complexity:** Runtime overhead is approximately 0.7 ms at 1920x1080 resolution, including training and runtime costs [S2, unofficial]. However, when handling dynamic objects, ray tracing and denoising add 5-10 ms per frame overhead [S1].
++*   **Time Complexity:** Runtime overhead is approximately 0.7 ms at 1920x1080 resolution, including both training and inference costs [S2, unofficial].
+ *   **Memory Complexity:** Uses 2 or 4 grid levels, consuming 0.16 to 1.20 MB of memory [S1].
+-*   **Performance:** Achieves 133 FPS with multi-resolution hash encoding vs. 147 FPS with triangle wave encoding at 1920x1080 resolution [S2, unofficial].
+-*   **Strengths:** Real-time performance, online adaptability to dynamic scenes, high quality for static scenes [S1][S2, unofficial].
+-*   **Limitations:** Requires ray tracing and denoising for dynamic objects, leading to higher variance and runtime overhead compared to methods like NIV [S1]. Hash collisions cause persistent artifacts [S2, unofficial].
++*   **Measured Performance:** Achieves 133 FPS with multi-resolution hash encoding versus 147 FPS with triangle wave encoding at 1920x1080 resolution [S2, unofficial].
++*   **Strengths:** Real-time performance, online adaptability to dynamic scenes, and high quality for static scenes [S1][S2, unofficial].
++*   **Limitations:** Hash collisions produce persistent microstructure artifacts, and the method requires careful budget management to stay within the 1 ms training limit [S2, unofficial].
+ *   **When to Use:** Suitable for real-time rendering of scenes with static geometry and dynamic objects where online adaptation is needed [S1][S2, unofficial].
+-*   **When Not to Use:** Not suitable for scenes with many dynamic objects where low variance is critical, or when hardware ray tracing is unavailable [S1].
++*   **When Not to Use:** Not suitable for scenes where hash collision artifacts are unacceptable or where hardware acceleration for the specific encoding is unavailable [S2, unofficial].
+ 
+ ## Background
+-Neural Radiance Caching was introduced by Müller et al. in 2021 [S2, unofficial]. It builds on the concept of neural surface caches [RWG∗ 13, HCZ21, CDD∗ 24] but adapts it for real-time rendering with online learning [S1][S2, unofficial]. The method was later augmented with multi-resolution hash encoding [MESK22] to improve quality and performance [S1][S2, unofficial]. It is used in real-time rendering applications, particularly in the context of instant neural graphics primitives [S2, unofficial].
++Neural Radiance Caching was introduced by Müller et al. in 2021 [S2, unofficial]. It builds on the concept of neural surface caches but adapts it for real-time rendering with online learning [S1][S2, unofficial]. The method was later augmented with multi-resolution hash encoding [MESK22] to improve quality and performance [S1][S2, unofficial]. It is used in real-time rendering applications, particularly within the instant neural graphics primitives framework [S2, unofficial].
+ 
+ ## Sources

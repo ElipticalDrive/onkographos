@@ -1,0 +1,148 @@
+# Dynamic 3D Gaussian Splatting
+
+Also called: 3DGS with temporal constraints, DG-Mesh, Li et al
+
+## Overview
+Dynamic 3D Gaussian Splatting extends static 3D Gaussian Splatting to handle time-varying scenes by assigning time-varying position and rotation attributes to each Gaussian primitive [S1, unofficial]. It solves the problem of temporal flicker and storage explosion inherent in per-frame baselines by enforcing physical plausibility through local-rigid and As-Rigid-As-Possible (ARAP) or isometry constraints [S1, unofficial]. Unlike [4D Gaussian Splatting](7992-4d-gaussian-splatting.md) which uses implicit neural fields or planes to predict deformation offsets from a canonical space, this method explicitly tracks the motion of each Gaussian particle, offering a more direct representation of dynamic geometry [S1, unofficial].
+
+## How it works
+**Inputs and Outputs:**
+*   **Inputs:** A sequence of $T$ images $\{I_t\}_{t=1}^T$ with known camera poses $\{C_t\}_{t=1}^T$ [S2, unofficial].
+*   **Outputs:** A set of $N$ dynamic 3D Gaussians, where each Gaussian $i$ is defined by a time-varying position $\boldsymbol{\mu}_i(t)$, rotation $q_i(t)$, scale $\mathbf{s}_i$ (static), opacity $\alpha_i(t)$, and color representation [S2, unofficial].
+
+**Data Structures:**
+Each Gaussian $i$ stores:
+*   $\boldsymbol{\mu}_i(t) \in \mathbb{R}^3$: Time-varying center position.
+*   $q_i(t) \in \mathbb{R}^4$: Time-varying unit quaternion for rotation.
+*   $\mathbf{s}_i \in \mathbb{R}^3$: Static scale vector.
+*   $\alpha_i(t) \in \mathbb{R}$: Time-varying opacity.
+*   Color features: Base color $\mathbf{c}_{base}$, view-related feature $\mathbf{f}_{view}$, time-related feature $\mathbf{f}_{time}$ [S2, unofficial].
+
+**Method Steps:**
+
+1.  **Initialization:** Initialize a set of 3D Gaussians from the first frame or via structure-from-motion, similar to static 3DGS [G].
+2.  **Temporal Parameterization:**
+    *   **Position and Rotation:** Model $\boldsymbol{\mu}_i(t)$ and $q_i(t)$ using a polynomial function [S2, unofficial]. Other variants use local-rigid constraints or ARAP/isometry constraints to ensure physically plausible deformation [S1, unofficial].
+    *   **Opacity:** Model $\alpha_i(t)$ using a temporal radial basis function (RBF) to handle appearance and disappearance of content [S2, unofficial].
+    *   **Color:** Replace spherical harmonics with a feature-based approach. The final color $\mathbf{c}_i(t, \mathbf{v})$ is computed as:
+        $$ \mathbf{c}_i(t, \mathbf{v}) = \mathbf{c}_{base} + \text{MLP}(\mathbf{f}_{view}, \mathbf{f}_{time}) $$
+        where $\mathbf{c}_{base}$ is the base color, and the MLP outputs a residual color based on view direction $\mathbf{v}$ and time $t$ [S2, unofficial].
+3.  **Optimization:**
+    *   Minimize the photometric loss between rendered images and ground truth images [G].
+    *   Apply **Temporal Smoothness Loss**: Encourages smooth motion trajectories over time [S2, unofficial].
+    *   Apply **kNN Rigid Loss**: Enforces local rigidity by comparing the motion of neighboring Gaussians [S2, unofficial].
+    *   **Densification:** During optimization, sample new 3D Gaussians at under-optimized positions based on training error and coarse depth estimates to capture new details or dynamic regions [S2, unofficial].
+4.  **Rendering:** For a given time $t$ and camera pose $C_t$:
+    *   Compute $\boldsymbol{\mu}_i(t)$ and $q_i(t)$ for all Gaussians [S2, unofficial].
+    *   Project the Gaussians to 2D using the standard 3DGS rasterization pipeline [G].
+    *   Render using the time-varying opacity and color features [S2, unofficial].
+
+**Pseudocode:**
+
+> **Unverified code.** The code below did not pass a test run against a reference implementation, or no test fits it, so it may contain errors.
+
+```python
+import math
+
+class DynamicGaussian:
+    def __init__(self, mu_0, q_0, s, c_base, f_view, f_time, poly_pos, poly_rot, rbf_centers, rbf_weights):
+        self.mu_0 = mu_0
+        self.q_0 = q_0
+        self.s = s
+        self.c_base = c_base
+        self.f_view = f_view
+        self.f_time = f_time
+        self.poly_pos = poly_pos
+        self.poly_rot = poly_rot
+        self.rbf_centers = rbf_centers
+        self.rbf_weights = rbf_weights
+
+def evaluate_polynomial(coeffs, t):
+    """Evaluates polynomial given coefficients [c0, c1, ...] at time t."""
+    dim = len(coeffs[0])
+    result = [0.0] * dim
+    for k, c in enumerate(coeffs):
+        for d in range(dim):
+            result[d] += c[d] * (t ** k)
+    return result
+
+def normalize_quaternion(q):
+    norm = math.sqrt(sum(x*x for x in q))
+    return [x / norm for x in q] if norm > 1e-8 else q
+
+def compute_attributes(g, t):
+    mu_t = evaluate_polynomial(g.poly_pos, t)
+    q_t = normalize_quaternion(evaluate_polynomial(g.poly_rot, t))
+    alpha_t = 0.0
+    for center, weight in zip(g.rbf_centers, g.rbf_weights):
+        alpha_t += weight * math.exp(-((t - center) ** 2))
+    alpha_t = max(0.0, min(1.0, alpha_t))
+    residual = [sum(a*b for a, b in zip(g.f_view, g.f_time)) / len(g.f_view)] * 3
+    color = [g.c_base[i] + residual[i] for i in range(3)]
+    return mu_t, q_t, alpha_t, color
+
+def render_frame(gaussians, camera, t):
+    frame_gaussians = []
+    for g in gaussians:
+        mu_t, q_t, alpha_t, color = compute_attributes(g, t)
+        frame_gaussians.append({'pos': mu_t, 'rot': q_t, 'scale': g.s, 'opacity': alpha_t, 'color': color})
+    
+    projected = []
+    for g in frame_gaussians:
+        depth = g['pos'][2]
+        projected.append({'depth': depth, 'opacity': g['opacity'], 'color': g['color']})
+    
+    projected.sort(key=lambda x: x['depth'])
+    image = [0.0, 0.0, 0.0]
+    for g in projected:
+        alpha = g['opacity']
+        for c in range(3):
+            image[c] = image[c] * (1 - alpha) + g['color'][c] * alpha
+    return image
+```
+
+**Parameters:**
+*   Polynomial degree for position/rotation: Not given in the sources [S2, unofficial].
+*   RBF centers and widths: Not given in the sources [S2, unofficial].
+*   MLP architecture: Not given in the sources [S2, unofficial].
+
+**Edge Cases and Pitfalls:**
+*   **Vanishing Content:** The RBF opacity model handles appearance and disappearance of content over time [S2, unofficial].
+
+## Subtopics
+
+### [GaussianFlow](6149-gaussianflow.md)
+GaussianFlow is a point-based differentiable rendering approach for dynamic 3D scene reconstruction that models a 4D scene as a set of deformable 3D Gaussian particles advected by an explicit 3D velocity field. It solves the problem of efficient dynamic scene reconstruction by introducing a Dual-Domain Deformation Model (DDDM) that explicitly models attribute deformations (position, rotation, radiance) in both time and frequency domains, eliminating the need for implicit neural fields or per-frame optimization. Unlike [Dynamic 3D Gaussians](5703-dynamic-3d-gaussian-splatting.md) which tracks motion via persistent view synthesis and local constraints, GaussianFlow uses a global flow-based deformation model, achieving 5× faster training than per-frame 3DGS while preserving real-time rendering speeds.
+
+### [Dynamic 3D Gaussians](7336-dynamic-3d-gaussians.md)
+Dynamic 3D Gaussians performs tracking by persistent dynamic view synthesis, linking the motion of each Gaussian to the movement of a corresponding 3D point in the scene. It extends static 3D Gaussian Splatting to handle dynamic scenes by explicitly defining a tracking mechanism that differs from its parent [Dynamic 3D Gaussian Splatting](5703-dynamic-3d-gaussian-splatting.md) and from [GaussianFlow](6149-gaussianflow.md) by relying on persistent synthesis rather than flow-based deformation fields.
+
+### [SWAGS](17376-swags.md)
+SWAGS is a dynamic 3D Gaussian Splatting method that addresses the challenge of modeling complex, non-rigid motion in dynamic scenes by partitioning the temporal sequence into distinct windows based on motion intensity. Unlike sibling methods that track a single global deformation field or flow across the entire sequence, SWAGS trains separate dynamic 3DGS models for each window, each with its own canonical space and deformation field, thereby isolating local motion characteristics. This approach improves reconstruction fidelity for highly dynamic segments while maintaining temporal consistency through fine-tuning on overlapping frames.
+
+### SpeeDe3DGS
+SpeeDe3DGS is a method that accelerates deformable 3DGS by applying temporal pruning [S3, unofficial]. It identifies static and active Gaussians and groups the dynamic parts by motion similarity to reduce the number of deformation queries [S3, unofficial].
+
+### Opacity Offset Table Construction
+This variant constructs an opacity offset table to model changes in digital subtraction angiography [S2, unofficial].
+
+### Dynamic 3D Gaussian Splatting with Diffusion Prior and Neural Bone Transformation
+This method leverages a diffusion prior to enhance dynamic scene reconstruction and proposes a neural bone transformation module for reconstructing animatable objects from monocular video [S2, unofficial].
+
+### DynMF
+DynMF assumes that each dynamic scene is composed of a finite, fixed number of motion trajectories represented in a learned basis, generated by a small temporal MLP [S2, unofficial]. All motion trajectories in the scene can be linearly represented in this learned basis, with regularization, sparsity, and local rigidity terms introduced during optimization [S2, unofficial].
+
+## Operating characteristics
+*   **Time Complexity:** Training time is reduced compared to per-frame baselines due to explicit deformation modeling, but depends on the complexity of the temporal functions (polynomial/RBF) and the MLP for color [S2, unofficial]. GaussianFlow claims 5× faster training than per-frame 3DGS [S3, unofficial].
+*   **Memory Complexity:** Storage is linear in the number of Gaussians $N$ and the size of the temporal parameters (polynomial coefficients, RBF weights, MLP weights) [S2, unofficial]. It is more compact than storing a full 3DGS per frame but potentially larger than implicit deformation fields if the number of Gaussians is high [S1, unofficial].
+*   **Measured Performance:** Not given in the sources.
+*   **Scaling:** Large-scale scenes stress the rasterizer through primitive count and memory bandwidth, similar to static 3DGS [S2, unofficial].
+*   **Strengths:** Real-time rendering of dynamic scenes; explicit representation allows for easy editing and manipulation; avoids overfitting associated with implicit neural fields [S2, unofficial].
+
+## Background
+Dynamic 3D Gaussian Splatting was introduced by Luiten et al. in 3DV'24 [S1, unofficial]. It emerged as a response to the limitations of per-frame 3DGS training, which suffers from storage explosion and temporal flicker [S1, unofficial]. The method builds on the explicit nature of 3D Gaussian Splatting, extending it to 4D by parameterizing the Gaussian attributes over time [S1, unofficial]. It is part of a broader family of dynamic 3DGS methods, including [4D Gaussian Splatting](7992-4d-gaussian-splatting.md) and [Deformable 3DGS](7992-4d-gaussian-splatting.md), which explore different approaches to modeling temporal dynamics [S1, unofficial].
+
+## Sources
+[S1] Gaussian Splatting — All Variants Cheat Sheet, https://www.chengjianglong.com/ml/3D-Gaussian_Splatting_SOTA_Updated.html, fetched 2026-10-27 (unofficial)
+[S2] PDF Recent advances in 3D Gaussian splatting - Springer, https://link.springer.com/content/pdf/10.1007/s41095-024-0436-y.pdf, fetched 2026-10-29 (unofficial)
+[S3] 3D Gaussian Splatting Rasterization: A Survey, https://doi.org/10.20944/preprints202607.0776.v2, fetched 2026-10-26 (unofficial)

@@ -1,0 +1,98 @@
+# Sparse Voxel Octree (SVO) Spatial Partitioning and LOD Management
+
+Also called: Octree Chunk LOD, SVO LOD
+
+## Overview
+This method replaces flat, hash-map-based chunk storage with a hierarchical Sparse Voxel Octree (SVO) to enable dynamic Level-of-Detail (LOD) selection based on camera distance and efficient spatial traversal [S1, unofficial]. It solves the performance bottleneck of unconditional per-frame full-grid scans by limiting processing to visible, relevant subtrees, significantly reducing memory footprint and CPU overhead for large render distances [S1, unofficial]. Unlike sibling methods that may use fixed chunk grids, this approach subdivides space hierarchically, allowing distant chunks to be represented by coarser data structures or collapsed entirely [S1, unofficial].
+
+## How it works
+**Inputs and Outputs:**
+*   **Input:** Camera position, camera frustum parameters (FOV, aspect ratio), current render distance, and the set of loaded chunks [G].
+*   **Output:** A prioritized list of chunks and LOD representations to process/mesh, ready for GPU upload or CPU-side heightmap generation [G].
+
+**Data Structures:**
+*   The core structure is an octree where the root spans the world coordinate space [S1, unofficial].
+*   Each internal node holds exactly eight children, subdividing by chunk coordinate as the camera approaches [S1, unofficial].
+*   Each leaf node holds a single `Chunk` object or a coarser LOD representation (e.g., a simplified heightmap or merged mesh) [S1, unofficial].
+*   The `Chunk` object stores 2D integer coordinates (`ivec2`) and heightmap data, specifically `m_HeightMap[16][16]` and an extended neighbor halo `m_ExtendedHeightMap[18][18]` (where `kExtSide = LENGTH + 2 = 18`) [S1, unofficial].
+
+**Parameters:**
+*   `RENDER_DISTANCE_CHUNKS`: 32. Defines the radius of the legacy flat grid scan (65×65 = 4225 positions) that this method replaces [S1, unofficial].
+*   `RENDER_DISTANCE_BLOCKS`: 512. The `FOG_END` constant; geometry beyond this distance is fully resident but fully fogged out [S1, unofficial].
+*   `Constants::Chunk::LENGTH`: 16. Fixed chunk width/depth in blocks [S1, unofficial].
+*   `Constants::Chunk::HEIGHT`: 256. Fixed chunk height in blocks [S1, unofficial].
+
+**Algorithm Steps:**
+1. Initialize traversal at the octree root node [G].
+2. Perform frustum culling: check if the current node's bounding volume intersects the camera's view frustum; if not, prune the entire subtree [S1, unofficial].
+3. Calculate the distance from the camera to the center (or closest point) of the current node's bounding volume [G].
+4. Select the LOD tier based on the calculated distance; for small distances, retain full-resolution `Chunk` leaves, while for large distances, collapse to coarser heightmaps or merged meshes spanning multiple chunks [S1, unofficial].
+5. Apply hysteresis to transitions between LOD tiers to prevent thrashing when the camera crosses chunk boundaries [S1, unofficial].
+6. If the node is a leaf at the selected LOD, add it to the processing queue or generate the simplified mesh/heightmap [S1, unofficial].
+7. If the node is internal and requires higher detail than the current LOD supports, subdivide and recursively visit its eight children [S1, unofficial].
+8. Return the set of processed chunks and LOD representations [G].
+
+**Pseudocode:**
+> **Unverified code.** The code below did not pass a test run against a reference implementation, or no test fits it, so it may contain errors.
+
+```python
+def traverse_svo(node, camera_pos, frustum_planes, lod_thresholds, hysteresis_margin):
+    """
+    Recursively traverse the SVO to find visible chunks at appropriate LODs.
+    """
+    processed = []
+    
+    # Standard frustum culling: test node bounding box against 6 frustum planes
+    if not intersects_frustum(node.bounding_box, frustum_planes):
+        return processed
+        
+    # Standard distance calculation: min distance from camera to bounding box
+    dist = distance_to_box(camera_pos, node.bounding_box)
+    
+    # LOD selection based on distance thresholds
+    target_lod = 0
+    for i, threshold in enumerate(lod_thresholds):
+        if dist < threshold:
+            target_lod = i
+            break
+        else:
+            target_lod = len(lod_thresholds)
+            
+    # Hysteresis guard to prevent thrashing near boundaries
+    if abs(target_lod - node.current_lod) <= hysteresis_margin:
+        target_lod = node.current_lod
+        
+    # Subdivide if internal node requires higher detail
+    if node.is_internal() and target_lod > node.current_lod:
+        node.subdivide()
+        node.current_lod = target_lod
+        
+    # Process leaf or recurse
+    if node.is_leaf():
+        processed.append(node.chunk_data)
+    else:
+        for child in node.children:
+            processed.extend(traverse_svo(child, camera_pos, frustum_planes, lod_thresholds, hysteresis_margin))
+            
+    return processed
+```
+
+**Edge Cases and Pitfalls:**
+*   Frustum side planes must be computed using radians, not degrees. Using degrees causes incorrect culling (e.g., keeping 2812 chunks instead of 2103 at FOV 45, or inverting culling at FOV 30) [S1, unofficial].
+*   The camera aspect ratio must be updated on window resize. A hardcoded ratio (e.g., 800/600) causes culling cone drift, leading to entire subtrees being incorrectly discarded [S1, unofficial].
+*   GPU SSBO slots must not be recycled before deferred readback is complete. Additionally, the `uSlot` compute uniform must be registered. Failure leads to all chunks targeting slot 0, causing data corruption [S1, unofficial].
+*   Without hysteresis, camera movement near LOD boundaries causes frequent subtree regeneration and frame rate spikes [S1, unofficial].
+
+## Operating characteristics
+*   **Time Complexity:** Replaces the $O(R^2)$ full-grid scan (where $R$ is render distance in chunks) with an $O(\text{tree depth})$ traversal proportional to newly visible chunks, reducing per-frame spawn work to $O(1)$ when not crossing boundaries [S1, unofficial].
+*   **Memory Complexity:** Reduces memory footprint by storing only visible or near-visible chunks at full detail. Distant chunks are stored at lower LODs or collapsed, significantly reducing memory usage for large render distances (e.g., 64+ chunks) [S1, unofficial].
+*   **Strengths:** Efficient spatial traversal, dynamic LOD, reduced memory usage for large worlds [S1, unofficial].
+*   **Limitations:** Increased complexity in data structure management, potential for thrashing without hysteresis, dependency on correct frustum culling and aspect ratio handling [S1, unofficial].
+*   **When to Use:** Large open-world environments with sparse voxel data, where render distances are large and memory/CPU efficiency is critical [S1, unofficial].
+*   **When Not to Use:** Small, dense worlds where a flat grid scan is negligible, or where hardware limitations prevent efficient tree traversal [G].
+
+## Background
+This method was proposed as a design improvement for the `ChunkManager` in the "linterra" project (GitHub issue #6) [S1, unofficial]. The motivation stemmed from the inefficiency of the existing flat hash map storage, which required a per-frame full-grid scan of 4225 positions (for a 32-chunk render distance) and stored all chunks at full resolution regardless of distance [S1, unofficial]. The proposal targets the current 1.5 GB memory footprint at a 64-chunk render distance, which is dominated by full-detail chunks far outside the fog end, by dynamically adjusting LOD and reducing the memory footprint [S1, unofficial].
+
+## Sources
+[S1] Add Sparse Voxel Octree (SVO) Spatial Partitioning and LOD Management, https://github.com/amodhakal/linterra/issues/6, fetched 2026-10-26 (unofficial)

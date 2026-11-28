@@ -1,0 +1,42 @@
+# Ghost Ellipsoids for Chunked Training
+Also called: Ghost cell techniques adapted for unstructured primitives
+## Overview
+Ghost Ellipsoids for Chunked Training resolves boundary artifacts in chunked volume training by including ellipsoids from neighboring chunks in the loss computation without updating their parameters, providing boundary context without requiring a global volume or merged model [S1, unofficial]. Unlike chunk-based 3DGS methods that resolve boundary inconsistencies by merging chunks into a global coarse model or through post-training stages, this method requires boundary support during training itself without access to a global volume [S1, unofficial].
+## How it works
+**Inputs and Outputs:**
+*   **Input:** A set of 3D ellipsoids partitioned into spatial chunks, each with a defined spatial extent and normalized coordinate space [S1, unofficial].
+*   **Output:** Updated parameters for the current chunk's ellipsoids, with boundary context provided by ghost ellipsoids from neighbors [S1, unofficial].
+
+**Data Structures:**
+*   **Chunk:** A spatial subdivision of the volume [S1, unofficial].
+*   **Ellipsoid Primitive:** Defined by position $\mathbf{p}$, rotation matrix $R$, scale matrix $S$, and covariance $\Sigma = R S S^T R^T$ [S1, unofficial]. Positions are stored with a per-chunk spatial offset mapping them to the shared world coordinate system [S1, unofficial].
+*   **Ghost Region:** A boundary region around each chunk, defined by the chunk boundary offset, used to identify neighboring ellipsoids that influence the current chunk's loss [S1, unofficial].
+
+**Steps:**
+1.  **Chunk Partitioning:** Divide the volume into chunks. Each chunk is trained in its own normalized coordinate space scaled to its spatial extent (e.g., $[-0.5, 0.5]^3$ for a volume split into $2 \times 2 \times 2$ chunks) [S1, unofficial].
+2.  **Ghost Ellipsoid Identification:** For each chunk, identify boundary ellipsoids from all neighboring chunks (face-, edge-, and vertex-adjacent) by selecting those whose centers fall within the ghost region of the current chunk [S1, unofficial].
+3.  **Voxelization and Loss Computation:** Voxelize the ghost ellipsoids together with the current chunk's ellipsoids during the loss computation step [S1, unofficial].
+4.  **Gradient Update:** Ensure that ghost ellipsoids receive no gradient updates. Only the parameters of the ellipsoids belonging to the current chunk are updated [S1, unofficial].
+5.  **Training Mode Selection:**
+    *   **Sequential Mode (Single-GPU):** Chunks are trained one at a time using ghost ellipsoids from completed neighbors [S1, unofficial].
+    *   **Parallel Mode (Multi-GPU):** All chunks are trained simultaneously with ghost ellipsoids periodically synchronized across GPUs [S1, unofficial].
+
+**Pitfalls and Edge Cases:**
+*   **Coordinate Space Rescaling:** Training all chunks in a shared $[-1, 1]^3$ space and applying post-hoc rescaling is computationally impractical [S1, unofficial]. It requires computing $\Sigma' = K \Sigma K^T = K R S S^T R^T K^T$ for each primitive, where $K$ is a chunk-dependent anisotropic scale matrix [S1, unofficial]. Since $K$ and $R$ do not generally commute, this cannot be simplified by scaling $S$ alone [S1, unofficial]. Correctly decomposing $\Sigma'$ back into rotation and scale parameters requires a QR decomposition per primitive [S1, unofficial].
+*   **Merging:** The per-chunk primitive sets resulting from this method can be merged through simple concatenation without additional alignment, avoiding the need for global model merging [S1, unofficial].
+## Subtopics
+
+### Ghost Ellipsoids for Scalable Chunk-based Training
+A training scheme for large volumes that partitions the volume into spatially non-overlapping chunks and uses ghost ellipsoids to provide boundary context [S1, unofficial]. Ghost ellipsoids are used to provide boundary context across neighboring chunks during optimization, enabling scalable learning on volumes exceeding GPU memory [S1, unofficial]. Training chunks separately introduces boundary artifacts because ellipsoids near chunk borders lack support from neighboring regions [S1, unofficial].
+
+## Operating characteristics
+*   **Complexity:** Not given in the sources.
+*   **Performance:** Not given in the sources.
+*   **Strengths:** Eliminates boundary artifacts without requiring a global volume or merged model [S1, unofficial]. Avoids computationally expensive QR decompositions associated with post-hoc rescaling [S1, unofficial].
+*   **Limitations:** Requires identification of neighboring ellipsoids and synchronization (in parallel mode) [S1, unofficial].
+*   **When to use:** When training large volumes on limited GPU memory by chunking, and boundary consistency is critical [S1, unofficial].
+*   **When not to use:** When a global model can be afforded or when post-training merging is acceptable [S1, unofficial].
+## Background
+The technique is inspired by ghost cell techniques [45], but adapted for unstructured primitives [S1, unofficial]. Classical ghost cells copy boundary values from adjacent regular grid cells, but this method cannot rely on grid adjacency since the primitives are spatially unstructured [S1, unofficial]. The method addresses the incompatibility of standard 3DGS screenspace rasterization with accurate TF mapping in volumetric settings [S1, unofficial].
+## Sources
+[S1] ESVR: 3D Ellipsoid-based Sparse Volume Rendering via Structure-aware Primitive Learning and Per-primitive Ray Sampling, https://arxiv.org/abs/2608.05564v1, fetched 2026-10-26 (unofficial)

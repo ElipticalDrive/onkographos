@@ -1,0 +1,391 @@
+--- v004.md
++++ v005.md
+@@ -4,71 +4,54 @@
+ 
+ ## Overview
+-HyperNeRF is a method for modeling non-rigidly deforming scenes with topological variations (e.g., openings, closings, or peeling) by extending the canonical space of a Neural Radiance Field into a higher-dimensional ambient space [S3][S4, unofficial]. It addresses the limitation of continuous deformation fields, which cannot model discontinuities required for topological changes, by treating each observation frame as a non-planar slice through a hyperdimensional "template" NeRF [S3][S5, unofficial]. Unlike strictly deformation-based approaches like Nerfies, HyperNeRF combines deformation with latent conditioning in higher dimensions, allowing it to capture topology changes by sacrificing hard spatial correspondences [S2, S4, unofficial].
++HyperNeRF is a method for modeling non-rigidly deforming scenes with topological variations (e.g., mouth opening/closing) by extending NeRF’s 3D input coordinate space to include higher-dimensional coordinates [S3][S4, unofficial]. It addresses the limitation of continuous deformation fields, which cannot model discontinuities required for topological changes [S3]. Unlike its sibling [Strata-NeRF](14015-strata-nerf.md) which focuses on stratified sampling for efficiency, HyperNeRF focuses on representational capacity for topology, achieving lower error rates than deformation-only baselines like Nerfies [S3].
+ 
+ ## How it works
+-HyperNeRF builds on [Deformable NeRF (Nerfies)](14015-strata-nerf.md) by embedding the scene representation in a higher-dimensional space. The core idea is that a 3D scene undergoing topological change can be represented as a static object in a higher-dimensional ambient space, where the observed 3D scene is a "slice" through this hyper-space [S3].
+-
+-### Inputs and Outputs
+-*   **Inputs:** A set of $N$ images $\{I_i\}_{i=1}^N$ with known camera poses, viewing directions $\mathbf{d}$, and spatial coordinates $\mathbf{x}$.
+-*   **Outputs:** A rendered color $\mathbf{c}$ and volume density $\sigma$ for any ray $(\mathbf{x}, \mathbf{d})$ at a specific "moment" or observation index $i$.
+-
+-### Data Structures and Networks
+-The method consists of three primary neural networks (MLPs):
+-
+-1.  **Deformation Field ($W$):** Maps observation-space coordinates to canonical hyper-space coordinates.
+-    *   Input: Spatial position $\mathbf{x} \in \mathbb{R}^3$, latent deformation code $\boldsymbol{\omega}_i \in \mathbb{R}^{D_\omega}$.
+-    *   Output: A vector in $\mathfrak{se}(3)$ encoding rotation $\mathbf{r}$ and translation $\mathbf{v}$ [S3].
+-    *   Note: This is identical to the deformation field in Nerfies [S3].
+-
+-2.  **Ambient Slicing Surface ($H$):** Defines the non-planar surface that slices the hyper-space to yield the 3D scene for observation $i$.
+-    *   Input: Spatial position $\mathbf{x} \in \mathbb{R}^3$, latent deformation code $\boldsymbol{\omega}_i$.
++**Inputs and Outputs:**
++*   **Inputs:** A set of $N$ images with known camera poses, viewing directions $\mathbf{d}$, and spatial positions $\mathbf{x}$. Per-frame latent codes for deformation $\boldsymbol{\omega}_i$ and appearance $\boldsymbol{\psi}_i$.
++*   **Outputs:** Volume density $\sigma$ and view-dependent color $\mathbf{c}$ for ray marching.
++
++**Data Structures:**
++1.  **Template NeRF ($F$):** An MLP mapping $(\mathbf{x}', \mathbf{w}, \mathbf{d}, \boldsymbol{\psi}_i) \rightarrow (\mathbf{c}, \sigma)$.
++    *   $\mathbf{x}' \in \mathbb{R}^3$: Canonical spatial coordinates.
++    *   $\mathbf{w} \in \mathbb{R}^W$: Ambient (hyper) coordinates.
++    *   $\mathbf{d} \in \mathbb{R}^3$: View direction.
++    *   $\boldsymbol{\psi}_i \in \mathbb{R}^{D_\psi}$: Appearance embedding for frame $i$.
++2.  **Deformation Field ($T$):** An MLP mapping $(\mathbf{x}, \boldsymbol{\omega}_i) \rightarrow \mathbf{x}'$.
++    *   $\mathbf{x} \in \mathbb{R}^3$: Observation-space spatial coordinates.
++    *   $\boldsymbol{\omega}_i \in \mathbb{R}^{D_\omega}$: Deformation latent code for frame $i$.
++    *   Output: Canonical spatial coordinates $\mathbf{x}'$.
++3.  **Slicing Surface Field ($H$):** An MLP mapping $(\mathbf{x}, \boldsymbol{\omega}_i) \rightarrow \mathbf{w}$.
++    *   $\mathbf{x} \in \mathbb{R}^3$: Observation-space spatial coordinates.
++    *   $\boldsymbol{\omega}_i \in \mathbb{R}^{D_\omega}$: Deformation latent code for frame $i$.
+     *   Output: Ambient coordinates $\mathbf{w} \in \mathbb{R}^W$.
+-    *   The slicing surface is defined as $\mathbf{w} = H(\mathbf{x}, \boldsymbol{\omega}_i)$ [S3].
+-
+-3.  **Template NeRF ($F$):** The radiance field defined in the canonical hyper-space.
+-    *   Input: Canonical spatial position $\mathbf{x}' \in \mathbb{R}^3$, ambient coordinates $\mathbf{w} \in \mathbb{R}^W$, viewing direction $\mathbf{d} \in \mathbb{R}^3$, latent appearance code $\boldsymbol{\psi}_i \in \mathbb{R}^{D_\psi}$.
+-    *   Output: Color $\mathbf{c} \in \mathbb{R}^3$ and density $\sigma \in \mathbb{R}$ [S3].
+-    *   Formula: $F: (\mathbf{x}', \mathbf{w}, \mathbf{d}, \boldsymbol{\psi}_i) \rightarrow (\mathbf{c}, \sigma)$ [S3].
+-
+-### Parameters
++
++**Parameters:**
+ *   $W$: Number of ambient dimensions. Typical value: 2 [S3].
+-*   $m$: Number of sinusoids in positional encoding. $m=6$ for spatial input $\mathbf{x}$ to $H$; $m=1$ for ambient input $\mathbf{w}$ to $F$ [S3].
+-*   $\alpha$: Bandwidth control parameter for coarse-to-fine optimization [S3].
+-
+-### Numbered Steps
+-
+-1.  **Positional Encoding:**
+-    Apply sinusoidal positional encoding $\gamma(\cdot)$ to inputs. For a coordinate $\mathbf{u}$ and bandwidth parameter $m$:
+-    $$ \gamma(\mathbf{u}) = [\sin(\mathbf{u}), \cos(\mathbf{u}), \dots, \sin(2^{m-1}\mathbf{u}), \cos(2^{m-1}\mathbf{u})]^T $$
+-    For optimization, use windowed positional encoding $\gamma_\alpha(\mathbf{u})$ to control the Neural Tangent Kernel (NTK) bandwidth [S3]:
+-    $$ \gamma_\alpha(\mathbf{u}) = [w_0(\alpha)\sin(\mathbf{u}), \dots, w_{m-1}(\alpha)\cos(2^{m-1}\mathbf{u})]^T $$
+-    where $w_j(\alpha) = \frac{1 - \cos(\pi \text{clamp}(\alpha - j, 0, 1))}{2}$ and $\alpha$ increases linearly from 0 to $m$ [S3].
+-
+-2.  **Deformation (Observation to Canonical Space):**
+-    For a pixel at observation $i$ with spatial coordinate $\mathbf{x}$ and latent code $\boldsymbol{\omega}_i$:
+-    *   Compute deformation parameters $(\mathbf{r}, \mathbf{v}) = W(\gamma(\mathbf{x}), \boldsymbol{\omega}_i)$.
+-    *   Apply the rigid transformation defined by $(\mathbf{r}, \mathbf{v})$ to $\mathbf{x}$ to get the canonical spatial coordinate $\mathbf{x}'$.
+-    *   Note: The deformation field $W$ is shared across all observations but conditioned on $\boldsymbol{\omega}_i$ [S3].
+-
+-3.  **Slicing Surface Evaluation:**
+-    *   Compute the ambient coordinates $\mathbf{w}$ for the current spatial position $\mathbf{x}$ and observation $i$:
+-        $$ \mathbf{w} = H(\gamma(\mathbf{x}), \boldsymbol{\omega}_i) $$
+-    *   This $\mathbf{w}$ represents the "height" or position along the ambient axes for the slice at $\mathbf{x}$ [S3].
+-
+-4.  **Template NeRF Query:**
+-    *   Construct the full input to the template NeRF $F$:
+-        *   Spatial: $\mathbf{x}'$ (from Step 2).
+-        *   Ambient: $\mathbf{w}$ (from Step 3).
+-        *   Direction: $\mathbf{d}$ (ray direction).
+-        *   Appearance: $\boldsymbol{\psi}_i$ (latent appearance code for frame $i$) [S3].
+-    *   Query the network:
+-        $$ (\mathbf{c}, \sigma) = F(\gamma(\mathbf{x}'), \gamma(\mathbf{w}), \gamma(\mathbf{d}), \boldsymbol{\psi}_i) $$
+-    *   Note: The input $\mathbf{w}$ to $F$ is typically encoded with $m=1$ [S3].
+-
+-5.  **Volume Rendering:**
+-    *   Integrate $(\mathbf{c}, \sigma)$ along the ray using standard volume rendering equations to produce the final pixel color [G].
+-
+-### Pseudocode
+-
++*   $m$: Number of sinusoids in positional encoding. $m=1$ for $\mathbf{w}$, $m=6$ for $\mathbf{x}$ in $H$ [S3].
++*   $\alpha$: Window function parameter for coarse-to-fine optimization [S3].
++
++**Algorithm:**
++The method combines deformation-based and modulation-based approaches [S3]. It retains a deformation field $T$ to model motion and fuse information, but extends the input space to handle topology changes via ambient dimensions [S3].
++
++1.  **Positional Encoding:** Apply sinusoidal positional encoding $\gamma$ to inputs.
++    $$ \gamma(\mathbf{z}) = [\sin(\mathbf{z}), \cos(\mathbf{z}), \dots, \sin(2^{m-1}\mathbf{z}), \cos(2^{m-1}\mathbf{z})]^T $$
++    For optimization, use windowed positional encoding $\gamma_\alpha$ to control Neural Tangent Kernel (NTK) bandwidth [S3]:
++    $$ \gamma_\alpha(\mathbf{z}) = [w_0(\alpha)\sin(\mathbf{z}), \dots, w_{m-1}(\alpha)\cos(2^{m-1}\mathbf{z})]^T $$
++    where $w_j(\alpha) = \frac{1 - \cos(\pi \cdot \text{clamp}(\alpha - j, 0, 1))}{2}$ and $\alpha$ increases from 0 to $m$ [S3].
++
++2.  **Compute Canonical Coordinates:**
++    For a pixel at observation space $\mathbf{x}$ in frame $i$:
++    $$ \mathbf{x}' = T(\mathbf{x}, \boldsymbol{\omega}_i) $$
++    $$ \mathbf{w} = H(\mathbf{x}, \boldsymbol{\omega}_i) $$
++    The pair $(\mathbf{x}', \mathbf{w})$ represents the point in the canonical hyper-space [S3].
++
++3.  **Evaluate Radiance Field:**
++    Query the template NeRF $F$ with the canonical coordinates, ambient coordinates, view direction, and appearance code:
++    $$ (\mathbf{c}, \sigma) = F(\mathbf{x}', \mathbf{w}, \mathbf{d}, \boldsymbol{\psi}_i) $$
++
++4.  **Volume Rendering:**
++    Integrate $\sigma$ and $\mathbf{c}$ along the ray using standard volume rendering equations [G].
++
++**Pseudocode:**
+ ```python
+ import jax.numpy as jnp
+@@ -76,25 +59,13 @@
+ 
+ def positional_encoding(x, m):
+-    """
+-    Standard sinusoidal positional encoding.
+-    x: (..., D)
+-    m: int, number of frequency bands
+-    Returns: (..., D * 2 * m)
+-    """
++    """Standard sinusoidal positional encoding."""
+     freq_bands = 2.0 ** jnp.arange(m)
+-    scaled_x = x[..., None, :] * freq_bands[None, None, :]
+-    encoded = jnp.concatenate([jnp.sin(scaled_x), jnp.cos(scaled_x)], axis=-1)
+-    return encoded
++    x = jnp.expand_dims(x, axis=-1) * freq_bands
++    return jnp.concatenate([jnp.sin(x), jnp.cos(x)], axis=-1)
+ 
+ def windowed_positional_encoding(x, m, alpha):
+-    """
+-    Windowed positional encoding for coarse-to-fine optimization.
+-    x: (..., D)
+-    m: int
+-    alpha: float, bandwidth control parameter [0, m]
+-    Returns: (..., D * 2 * m)
+-    """
++    """Windowed positional encoding for coarse-to-fine optimization."""
+     freq_bands = 2.0 ** jnp.arange(m)
+-    scaled_x = x[..., None, :] * freq_bands[None, None, :]
++    x = jnp.expand_dims(x, axis=-1) * freq_bands
+     
+     # Window function w_j(alpha)
+@@ -105,114 +76,142 @@
+     weights = (1.0 - jnp.cos(jnp.pi * clamped)) / 2.0
+     
+-    # Apply weights to sin and cos components
+-    sin_part = jnp.sin(scaled_x) * weights[None, None, :]
+-    cos_part = jnp.cos(scaled_x) * weights[None, None, :]
+-    
+-    return jnp.concatenate([sin_part, cos_part], axis=-1)
+-
+-def hypernerf_forward(x_obs, d, omega_i, psi_i, params, m_spatial=6, m_ambient=1):
++    sin_x = jnp.sin(x)
++    cos_x = jnp.cos(x)
++    
++    # Apply weights to frequency bands
++    # weights shape: (m,), sin_x shape: (..., m)
++    # Broadcast weights to match sin_x/cos_x dimensions
++    weights_expanded = jnp.expand_dims(weights, axis=0)
++    
++    encoded_sin = weights_expanded * sin_x
++    encoded_cos = weights_expanded * cos_x
++    
++    return jnp.concatenate([encoded_sin, encoded_cos], axis=-1)
++
++def hypernerf_forward(x_obs, d, omega_i, psi_i, T_params, H_params, F_params, m_w, m_x, alpha):
+     """
+     Forward pass for HyperNeRF.
+     
+     Args:
+-        x_obs: (..., 3) Observation space spatial coordinates.
+-        d: (..., 3) Viewing directions.
+-        omega_i: (..., D_omega) Latent deformation code for frame i.
+-        psi_i: (..., D_psi) Latent appearance code for frame i.
+-        params: Dictionary containing weights for W, H, F.
+-        m_spatial: int, positional encoding bands for spatial input.
+-        m_ambient: int, positional encoding bands for ambient input.
++        x_obs: (3,) Spatial position in observation space.
++        d: (3,) View direction.
++        omega_i: (D_omega,) Deformation latent code for frame i.
++        psi_i: (D_psi,) Appearance latent code for frame i.
++        T_params: Parameters for deformation MLP T.
++        H_params: Parameters for slicing surface MLP H.
++        F_params: Parameters for template NeRF MLP F.
++        m_w: Number of frequency bands for ambient coord w.
++        m_x: Number of frequency bands for spatial coord x.
++        alpha: Current optimization bandwidth parameter.
+         
+     Returns:
+-        color: (..., 3) Rendered color.
+-        density: (..., 1) Volume density.
++        sigma: Volume density.
++        c: View-dependent color.
+     """
+-    
+-    # 1. Deformation Field W: x_obs, omega_i -> se(3)
+-    # W takes encoded spatial pos and latent code
+-    x_obs_enc = windowed_positional_encoding(x_obs, m_spatial, alpha=1.0) # Alpha handled in training loop
+-    w_input = jnp.concatenate([x_obs_enc, omega_i], axis=-1)
+-    se3_params = MLP_W(w_input, params['W']) # Returns (..., 6)
+-    r, v = jnp.split(se3_params, 2, axis=-1)
+-    
+-    # Apply rigid transformation to x_obs to get x_canonical
+-    # Note: Simplified rigid transform application. 
+-    # In practice, r and v are used to construct a 4x4 matrix or applied via rotation/translation.
+-    x_canonical = apply_se3_transform(x_obs, r, v) 
+-    
+-    # 2. Slicing Surface H: x_obs, omega_i -> w (ambient coords)
+-    # H takes encoded spatial pos and latent code
+-    h_input = jnp.concatenate([x_obs_enc, omega_i], axis=-1)
+-    w_ambient = MLP_H(h_input, params['H']) # Returns (..., W)
+-    
+-    # 3. Template NeRF F: x_canonical, w_ambient, d, psi_i -> c, sigma
+-    # Encode all inputs
+-    x_can_enc = windowed_positional_encoding(x_canonical, m_spatial, alpha=1.0)
+-    w_enc = windowed_positional_encoding(w_ambient, m_ambient, alpha=1.0)
+-    d_enc = windowed_positional_encoding(d, m_spatial, alpha=1.0)
+-    
+-    f_input = jnp.concatenate([x_can_enc, w_enc, d_enc, psi_i], axis=-1)
+-    output = MLP_F(f_input, params['F']) # Returns (..., 4) -> [c_r, c_g, c_b, sigma]
+-    
+-    color = output[..., :3]
+-    density = output[..., 3:]
+-    
+-    return color, density
+-
+-def apply_se3_transform(x, r, v):
+-    """
+-    Applies a rigid transformation defined by rotation r and translation v to x.
+-    r: (..., 3) rotation vector (axis-angle or similar)
+-    v: (..., 3) translation vector
+-    Returns: (..., 3) transformed coordinates.
+-    """
+-    # Convert rotation vector to rotation matrix R
+-    R = rotation_vector_to_matrix(r)
+-    # x' = R @ x + v
+-    # Broadcasting: R is (..., 3, 3), x is (..., 3)
+-    rotated_x = jnp.einsum('...ij,...j->...i', R, x)
+-    return rotated_x + v
+-
+-def rotation_vector_to_matrix(r):
+-    """
+-    Converts a rotation vector (axis-angle) to a rotation matrix.
+-    r: (..., 3)
+-    Returns: (..., 3, 3)
+-    """
+-    # Implementation of Rodrigues' rotation formula
+-    # This is a standard math operation, assumed available or implemented
+-    theta = jnp.linalg.norm(r, axis=-1, keepdims=True)
+-    axis = r / (theta + 1e-8)
+-    sin_theta = jnp.sin(theta)
+-    cos_theta = jnp.cos(theta)
+-    I = jnp.eye(3)
+-    K = jnp.array([[[0, -axis[..., 2], axis[..., 1]],
+-                    [axis[..., 2], 0, -axis[..., 0]],
+-                    [-axis[..., 1], axis[..., 0], 0]]])
+-    # R = I + sin(theta)*K + (1-cos(theta))*K^2
+-    # Note: Broadcasting K needs to match batch dims
+-    # Simplified for pseudocode clarity
+-    K_skew = jnp.zeros_like(r)[..., None, :] # Placeholder for skew-symmetric matrix construction
+-    # Actual implementation requires careful broadcasting
+-    return I + sin_theta * K_skew + (1 - cos_theta) * jnp.matmul(K_skew, K_skew)
++    # 1. Compute canonical spatial coordinates x'
++    # T: (x, omega_i) -> x'
++    # Assuming T is a standard MLP (e.g., MLP with ReLU)
++    x_prime = mlp_T(x_obs, omega_i, T_params)
++    
++    # 2. Compute ambient coordinates w
++    # H: (x, omega_i) -> w
++    # Assuming H is a standard MLP
++    w = mlp_H(x_obs, omega_i, H_params)
++    
++    # 3. Positional Encoding
++    # Encode w with m_w bands, x with m_x bands
++    # Note: The paper specifies m=1 for w and m=6 for x in H, 
++    # but F takes the raw w or encoded w? 
++    # Paper says: "We use m=1 for the hyper-coordinate input w to the template T"
++    # and "m=6 for the spatial position input x to the slicing surface field H".
++    # It implies F takes encoded inputs.
++    
++    # Encode w for F
++    w_enc = positional_encoding(w, m_w)
++    
++    # Encode x_prime for F? 
++    # Paper: "F: (x, w, d, psi_i) -> (c, sigma)"
++    # Usually x in F is the canonical spatial coordinate x'.
++    # We need to encode x_prime. The paper doesn't explicitly state m for x' in F,
++    # but standard NeRF uses m=10. However, H uses m=6 for x. 
++    # Let's assume standard positional encoding for x' in F with a default m_x_f.
++    # Given the constraint "No placeholders", and source S3 says "m=6 for ... x to ... H",
++    # it's ambiguous for F. However, S3 says "F: (x, w, d, psi_i)".
++    # Let's assume x' is encoded similarly to standard NeRF or as specified.
++    # To be safe and implementable, we use a standard m_x_f.
++    # But wait, S3 says "We use m=6 for the spatial position input x to the slicing surface field H".
++    # It does not specify m for x' in F. 
++    # Let's look at S3 again: "F: (x, w, d, psi_i) -> (c, sigma)".
++    # And "We use m=1 for the hyper-coordinate input w to the template T".
++    # This phrasing is slightly confusing. "template T" likely refers to the NeRF F.
++    # So m_w=1 for w in F.
++    # For x' in F, standard NeRF uses m=10. Let's assume m_x_f=10.
++    x_prime_enc = positional_encoding(x_prime, 10) # Standard NeRF m
++    
++    # Encode d for F
++    d_enc = positional_encoding(d, 10) # Standard NeRF m
++    
++    # 4. Query Template NeRF F
++    # F takes encoded x', w, d and latent psi_i
++    # Concatenate encoded features
++    input_to_F = jnp.concatenate([x_prime_enc, w_enc, d_enc, psi_i])
++    sigma, c = mlp_F(input_to_F, F_params)
++    
++    return sigma, c
++
++def mlp_T(x, omega, params):
++    """Deformation MLP T."""
++    # Simple MLP implementation
++    h = jnp.concatenate([x, omega])
++    for i, (W, b) in enumerate(params):
++        h = jnp.dot(h, W) + b
++        if i < len(params) - 1:
++            h = jnp.relu(h)
++    # Output is 3D canonical position
++    return h
++
++def mlp_H(x, omega, params):
++    """Slicing Surface MLP H."""
++    h = jnp.concatenate([x, omega])
++    for i, (W, b) in enumerate(params):
++        h = jnp.dot(h, W) + b
++        if i < len(params) - 1:
++            h = jnp.relu(h)
++    # Output is W-dimensional ambient position
++    return h
++
++def mlp_F(x_enc, params):
++    """Template NeRF MLP F."""
++    h = x_enc
++    for i, (W, b) in enumerate(params):
++        h = jnp.dot(h, W) + b
++        if i < len(params) - 2:
++            h = jnp.relu(h)
++        elif i == len(params) - 2:
++            # Density layer
++            sigma = jnp.exp(h) # Ensure positive density
++            h = h[:-1] # Remove last element for color
++    # Color layer
++    c = jnp.sigmoid(h) # Ensure color in [0,1]
++    return sigma, c
+ ```
+ 
+-### Edge Cases and Pitfalls
+-*   **Topological Discontinuities:** Continuous deformation fields (like Nerfies) fail on topological changes because MLPs with positional encoding perform band-limited interpolation, making it difficult to model the discontinuities required for openings/closings [S3]. HyperNeRF solves this by using higher dimensions.
+-*   **Elastic Regularization:** The elastic regularization loss from Nerfies (penalizing non-unit singular values of the deformation Jacobian) is ill-suited for HyperNeRF because topological variations violate the as-rigid-as-possible assumption [S3].
+-*   **Camera Registration:** HyperNeRF is dependent on accurate camera registration. Poor registration leads to artifacts or degraded performance [S4, unofficial].
+-*   **Occlusions and Rapid Motion:** The method is limited to observed data and cannot faithfully reconstruct rapid motion or occluded regions [S4, unofficial].
+-*   **Illumination and Transients:** HyperNeRF fails on real-world photos with varying illumination and transient occluders (e.g., people walking through the scene) [S4, unofficial].
+-*   **Ambient Dimension Choice:** Increasing the number of ambient dimensions $W$ beyond 2 did not improve performance in the original experiments, suggesting $W=2$ is sufficient for the tested sequences [S3].
++## Subtopics
++
++### Deformable NeRF (Nerfies)
++Uses a single canonical frame and a deformation field $T$ conditioned on a latent code. It assumes rigid or smooth non-rigid deformations and cannot handle topological changes [S3]. Choose HyperNeRF when topology changes are present.
++
++### NR-NeRF
++Uses a rigidity flag to distinguish rigid and non-rigid regions. It handles small non-rigid deformations without topological changes [S2, unofficial]. Choose HyperNeRF for topological variations.
+ 
+ ## Operating characteristics
+-*   **Time Complexity:** Training is computationally intensive. The original implementation trained at half 1080p resolution (960x540) for 250k iterations, taking roughly 8 hours on 4 TPU v4s. Full-HD training took roughly 64 hours [S3].
+-*   **Memory Complexity:** Depends on the size of the MLPs ($W, H, F$) and the batch size. The method uses 128 samples per ray during training [S3].
+-*   **Performance:** HyperNeRF outperforms Nerfies, reducing average error rates by 4.1% for interpolation and 8.6% for novel-view synthesis, as measured by LPIPS [S3].
+-*   **Strengths:** Capable of modeling topological changes (e.g., mouth opening, banana peeling) which are impossible for standard deformation-based NeRFs [S1, S3].
+-*   **Limitations:** Requires precise camera poses; struggles with unobserved regions, rapid motion, and transient occlusions; sensitive to illumination changes [S4, unofficial].
++*   **Time Complexity:** Training is computationally intensive. Full-HD training takes roughly 64 hours on 4 TPU v4s for 1M iterations [S3].
++*   **Memory Complexity:** Depends on the size of the MLPs for $F$, $T$, and $H$. The addition of ambient dimensions $W$ increases the input size to $F$ slightly.
++*   **Performance:** Reduces average error rates by 4.1% for interpolation and 8.6% for novel-view synthesis compared to Nerfies, measured by LPIPS [S3].
++*   **Strengths:** Handles topological changes (e.g., mouth opening, banana peeling) that deformation-only methods cannot [S1][S3].
++*   **Limitations:** Dependent on accurate camera registration; poor registration leads to artifacts [S4, unofficial]. Limited to observed data; cannot reconstruct rapid motion or occluded regions faithfully [S4, unofficial]. Fails on real-world photos with varying illumination and transient occluders [S4, unofficial]. The elastic regularization from Nerfies is ill-suited for these scenes [S3].
+ 
+ ## Background
+-HyperNeRF was introduced by Keunhong Park et al. in June 2021 [S1, S3]. It is an extension of Deformable NeRF (Nerfies) [S2, unofficial]. The method is inspired by level set methods pioneered in the late 1980s by Osher and Sethian, which model moving scenes as static objects in a higher-dimensional ambient space [S3]. HyperNeRF adapts this framework to neural radiance fields, using MLPs to represent general, curved slicing manifolds rather than restricting them to hyperplanes [S3]. It was designed to address the limitations of continuous deformation fields in modeling topological variations in dynamic scenes [S3].
++HyperNeRF was introduced by Park et al. in June 2021 [S1]. It is inspired by level set methods pioneered in the late 1980s by Osher and Sethian, which model moving scenes as static objects in a higher-dimensional ambient space [S3]. The method extends Deformable NeRF (Nerfies) by embedding the template NeRF in a higher-dimensional space $(\mathbf{x}, \mathbf{w}) \in \mathbb{R}^{3+W}$, where a slice taken by an intersecting high-dimensional slicing surface yields a full 3D NeRF [S3].
+ 
+ ## Sources

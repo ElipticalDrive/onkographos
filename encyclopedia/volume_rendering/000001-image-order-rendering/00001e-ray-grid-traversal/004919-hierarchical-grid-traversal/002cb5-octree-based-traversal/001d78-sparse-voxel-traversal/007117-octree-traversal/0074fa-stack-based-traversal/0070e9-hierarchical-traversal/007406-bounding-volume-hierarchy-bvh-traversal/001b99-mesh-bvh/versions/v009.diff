@@ -1,0 +1,240 @@
+--- v008.md
++++ v009.md
+@@ -8,17 +8,17 @@
+ ## How it works
+ **Inputs and Outputs:**
+-The primary implementation takes a triangle mesh defined by vertices $V \in \mathbb{R}^{N_v \times 3}$ (float32) and faces $F \in \mathbb{Z}^{N_f \times 3}$ (int32 vertex indices) [S1, unofficial]. Queries accept a set of points $P \in \mathbb{R}^{N_p \times 3}$ (float32) [S1, unofficial][S4].
++The primary implementation takes a triangle mesh defined by vertices $V \in \mathbb{R}^{N_v \times 3}$ (float32) and faces $F \in \mathbb{Z}^{N_f \times 3}$ (int32 vertex indices) [S1, unofficial]. Queries accept a set of points $P \in \mathbb{R}^{N_p \times 3}$ (float32) [S1, unofficial][S4]. The `closest` method returns distances $(N,)$, closest points $(N, 3)$, and face IDs $(N)$ [S1, unofficial]. The `sign` method returns $(N,)$ float32: $+1$ for outside, $-1$ for inside [S1, unofficial]. The `winding_number` method returns $(N,)$ float32: $1$ inside a closed mesh, $0$ outside [S1, unofficial].
+ 
+ **Data Structures:**
+-The hierarchy is a binary tree where internal nodes contain Axis-Aligned Bounding Boxes (AABBs) enclosing their descendants [S1, unofficial][S4]. Leaves contain individual triangles [S1, unofficial]. For signed distance computation, the structure supports traversal for unsigned distance and subsequent ray casting for sign determination [S4].
++The hierarchy is a bounding volume hierarchy where internal nodes contain Axis-Aligned Bounding Boxes (AABBs) enclosing their descendants [S1, unofficial][S4]. Leaves contain triangle geometry for distance queries [S1, unofficial]. For signed distance computation, the structure supports traversal for unsigned distance and subsequent ray casting for sign determination [S4].
+ 
+ **Algorithm Steps:**
+ 
+-1.  **Construction:** Build the BVH from input vertices and faces. On GPU implementations, this is often done via a parallel cluster merging approach to avoid CPU-GPU synchronization bottlenecks [S1, unofficial]. The builder assigns triangles to leaf nodes and computes AABBs for internal nodes by merging child bounds [S1, unofficial].
+-2.  **Unsigned Distance Query:** Given a query point $p$, traverse the BVH to find the closest triangle.
++1.  **Construction:** Build the BVH from input vertices and faces on the GPU [S1, unofficial].
++2.  **Unsigned Distance Query:** Given a query point $p$, traverse the BVH to find the closest triangle [G].
+     *   Start at the root.
+-    *   For each node, compute the distance from $p$ to the node's AABB. If the distance exceeds the current best distance $d_{min}$, prune the node.
++    *   For each node, compute the distance from $p$ to the node's AABB. If the distance exceeds the current best distance $d_{min}$, prune the node [G].
+     *   If a leaf (triangle) is reached, compute the exact distance from $p$ to the triangle using Voronoi region tests [S1, unofficial].
+-    *   Update $d_{min}$ if the triangle distance is smaller.
++    *   Update $d_{min}$ if the triangle distance is smaller [G].
+     *   Return the minimum distance $d$, the closest point $c$, and the face ID [S1, unofficial].
+ 3.  **Sign Determination (SDF):** To determine if $p$ is inside or outside the mesh:
+@@ -26,5 +26,5 @@
+     *   If any ray reaches infinity (no intersection), $p$ is outside (sign $+1$) [S4].
+     *   If all rays intersect the mesh, $p$ is inside (sign $-1$) [S4].
+-    *   **Method B (Normal Check):** For watertight meshes, use the normal of the closest triangle found in Step 2. If the dot product of the vector $(p - c)$ and the triangle normal is positive, $p$ is outside; otherwise, inside. This is disabled by default due to incompatibility with non-watertight meshes [S4].
++    *   **Method B (Normal Check):** For watertight meshes, use the normal of the closest triangle found in Step 2. If the dot product of the vector $(p - c)$ and the triangle normal is positive, $p$ is outside; otherwise, inside [S4]. This is disabled by default due to incompatibility with non-watertight meshes [S4].
+ 4.  **Winding Number:** Compute the winding number by summing the solid angle subtended by each triangle at $p$, or via ray casting parity [S1, unofficial].
+ 
+@@ -34,22 +34,66 @@
+ import math
+ 
++def distance_point_aabb(p, aabb_min, aabb_max):
++    """Computes squared distance from point p to AABB."""
++    dx = max(aabb_min[0] - p[0], 0.0, p[0] - aabb_max[0])
++    dy = max(aabb_min[1] - p[1], 0.0, p[1] - aabb_max[1])
++    dz = max(aabb_min[2] - p[2], 0.0, p[2] - aabb_max[2])
++    return dx*dx + dy*dy + dz*dz
++
++def ray_triangle_intersect(origin, direction, v0, v1, v2, tmax):
++    """Möller-Trumbore ray-triangle intersection [G]."""
++    epsilon = 1e-8
++    edge1 = (v1[0]-v0[0], v1[1]-v0[1], v1[2]-v0[2])
++    edge2 = (v2[0]-v0[0], v2[1]-v0[1], v2[2]-v0[2])
++    h = (direction[1]*edge2[2]-direction[2]*edge2[1],
++         direction[2]*edge2[0]-direction[0]*edge2[2],
++         direction[0]*edge2[1]-direction[1]*edge2[0])
++    a = edge1[0]*h[0] + edge1[1]*h[1] + edge1[2]*h[2]
++    if a < epsilon and a > -epsilon:
++        return False
++    f = 1.0 / a
++    s = (origin[0]-v0[0], origin[1]-v0[1], origin[2]-v0[2])
++    u = f * (s[0]*h[0] + s[1]*h[1] + s[2]*h[2])
++    if u < 0.0 or u > 1.0:
++        return False
++    q = (s[1]*edge2[2]-s[2]*edge2[1],
++         s[2]*edge2[0]-s[0]*edge2[2],
++         s[0]*edge2[1]-s[1]*edge2[0])
++    v = f * (direction[0]*q[0] + direction[1]*q[1] + direction[2]*q[2])
++    if v < 0.0 or u + v > 1.0:
++        return False
++    t = f * (edge1[0]*q[0] + edge1[1]*q[1] + edge1[2]*q[2])
++    return 0.0 <= t <= tmax
++
++def ray_intersects_mesh(origin, direction, bvh_root, tmax=float('inf')):
++    """Traverses BVH to check if ray intersects any triangle."""
++    stack = [bvh_root]
++    while stack:
++        node = stack.pop()
++        if node.is_leaf():
++            v0, v1, v2 = node.triangle_vertices()
++            if ray_triangle_intersect(origin, direction, v0, v1, v2, tmax):
++                return True
++        else:
++            if distance_point_aabb(origin, node.aabb_min, node.aabb_max) <= tmax*tmax:
++                stack.append(node.right)
++                stack.append(node.left)
++    return False
++
+ def closest_point_triangle(p, a, b, c):
+-    """
+-    Computes the closest point on triangle abc to point p.
+-    Based on Ericson, Real-Time Collision Detection, 5.1.5.
+-    """
+-    ab = b - a
+-    ac = c - a
+-    ap = p - a
+-    
+-    d1 = dot(ab, ap)
+-    d2 = dot(ac, ap)
++    """Computes the closest point on triangle abc to point p. Based on Ericson, Real-Time Collision Detection, 5.1.5 [S1, unofficial]."""
++    ab = (b[0]-a[0], b[1]-a[1], b[2]-a[2])
++    ac = (c[0]-a[0], c[1]-a[1], c[2]-a[2])
++    ap = (p[0]-a[0], p[1]-a[1], p[2]-a[2])
++    
++    d1 = ab[0]*ap[0] + ab[1]*ap[1] + ab[2]*ap[2]
++    d2 = ac[0]*ap[0] + ac[1]*ap[1] + ac[2]*ap[2]
+     
+     if d1 <= 0.0 and d2 <= 0.0:
+         return a
+     
+-    bp = p - b
+-    d3 = dot(ab, bp)
+-    d4 = dot(ac, bp)
++    bp = (p[0]-b[0], p[1]-b[1], p[2]-b[2])
++    d3 = ab[0]*bp[0] + ab[1]*bp[1] + ab[2]*bp[2]
++    d4 = ac[0]*bp[0] + ac[1]*bp[1] + ac[2]*bp[2]
+     
+     if d3 >= 0.0 and d4 <= d3:
+@@ -59,9 +103,9 @@
+     if vc <= 0.0 and d1 >= 0.0 and d3 <= 0.0:
+         v = d1 / (d1 - d3)
+-        return a + ab * v
+-    
+-    cp = p - c
+-    d5 = dot(ab, cp)
+-    d6 = dot(ac, cp)
++        return (a[0]+ab[0]*v, a[1]+ab[1]*v, a[2]+ab[2]*v)
++    
++    cp = (p[0]-c[0], p[1]-c[1], p[2]-c[2])
++    d5 = ab[0]*cp[0] + ab[1]*cp[1] + ab[2]*cp[2]
++    d6 = ac[0]*cp[0] + ac[1]*cp[1] + ac[2]*cp[2]
+     
+     if d6 >= 0.0 and d5 <= d6:
+@@ -71,11 +115,11 @@
+     if vb <= 0.0 and d2 >= 0.0 and d6 <= 0.0:
+         w = d2 / (d2 - d6)
+-        return a + ac * w
+-    
+-    de = dot(ab, ac)
+-    dv = de * de - dot(ab, ab) * dot(ac, ac)
++        return (a[0]+ac[0]*w, a[1]+ac[1]*w, a[2]+ac[2]*w)
++    
++    de = ab[0]*ac[0] + ab[1]*ac[1] + ab[2]*ac[2]
++    dv = de*de - (ab[0]*ab[0]+ab[1]*ab[1]+ab[2]*ab[2]) * (ac[0]*ac[0]+ac[1]*ac[1]+ac[2]*ac[2])
+     
+     if dv == 0.0:
+-        return (a + b) * 0.5
++        return ((a[0]+b[0])*0.5, (a[1]+b[1])*0.5, (a[2]+b[2])*0.5)
+     
+     u = (de * d4 - d3 * de) / dv
+@@ -85,8 +129,6 @@
+         if u < 0.0:
+             u = 0.0
+-            if w < 0.0:
+-                w = 0.0
+-            else:
+-                w = 1.0 - u
++            if w < 0.0: w = 0.0
++            else: w = 1.0 - u
+         elif w < 0.0:
+             w = 0.0
+@@ -95,24 +137,18 @@
+         if u < 0.0:
+             u = 0.0
+-            if w > 1.0:
+-                w = 1.0
+-            else:
+-                w = 1.0 - u
++            if w > 1.0: w = 1.0
++            else: w = 1.0 - u
+         elif w > 1.0:
+             w = 1.0
+     
+-    return a + ab * u + ac * w
++    return (a[0]+ab[0]*u+ac[0]*w, a[1]+ab[1]*u+ac[1]*w, a[2]+ab[2]*u+ac[2]*w)
+ 
+ def query_bvh_distance(root, p, current_min_dist=float('inf')):
+-    """
+-    Recursive BVH traversal to find closest triangle distance.
+-    """
++    """Recursive BVH traversal to find closest triangle distance [G]."""
+     if root is None:
+         return current_min_dist
+     
+-    # Compute distance from p to node AABB
+-    dist_to_aabb = distance_point_aabb(p, root.aabb)
+-    
+-    if dist_to_aabb >= current_min_dist:
++    dist_sq = distance_point_aabb(p, root.aabb_min, root.aabb_max)
++    if dist_sq >= current_min_dist * current_min_dist:
+         return current_min_dist
+     
+@@ -120,8 +156,8 @@
+         a, b, c = root.triangle_vertices()
+         closest = closest_point_triangle(p, a, b, c)
+-        dist = length(p - closest)
++        dx, dy, dz = p[0]-closest[0], p[1]-closest[1], p[2]-closest[2]
++        dist = math.sqrt(dx*dx + dy*dy + dz*dz)
+         return min(current_min_dist, dist)
+     
+-    # Visit children
+     dist_left = query_bvh_distance(root.left, p, current_min_dist)
+     if dist_left < current_min_dist:
+@@ -132,12 +168,7 @@
+ 
+ def compute_signed_distance(p, bvh, num_stab_rays=32):
+-    """
+-    Computes signed distance using BVH for unsigned distance and stab rays for sign.
+-    """
+-    # 1. Unsigned distance
++    """Computes signed distance using BVH for unsigned distance and stab rays for sign [S4]."""
+     dist, closest_point, face_id = query_bvh_distance(bvh.root, p)
+     
+-    # 2. Sign determination via stab rays
+-    # Generate directions using Fibonacci lattice
+     directions = []
+     golden_ratio = (1 + math.sqrt(5)) / 2
+@@ -145,5 +176,4 @@
+         theta = 2 * math.pi * i / golden_ratio
+         phi = math.acos(1 - 2 * (i + 0.5) / num_stab_rays)
+-        # Add pseudorandom offset per point (omitted for brevity, assumed handled)
+         x = math.sin(phi) * math.cos(theta)
+         y = math.sin(phi) * math.sin(theta)
+@@ -153,7 +183,5 @@
+     is_outside = False
+     for dir in directions:
+-        # Trace ray from p in direction dir
+-        # If ray hits infinity (no intersection), point is outside
+-        if not ray_intersects_mesh(p, dir, bvh):
++        if not ray_intersects_mesh(p, dir, bvh.root):
+             is_outside = True
+             break
+@@ -169,5 +197,4 @@
+ **Edge Cases and Pitfalls:**
+ *   **Non-watertight meshes:** Normal-based signing is unreliable and disabled by default [S4]. Stab rays are required.
+-*   **Precision:** Floating-point errors in ray casting may cause incorrect sign determination for points very close to the surface [S4].
+ *   **Degenerate triangles:** The closest point algorithm handles degenerate triangles (lines/points) via the Voronoi region logic [S1, unofficial].
+ 
+@@ -178,5 +205,5 @@
+ 
+ ### [Voxel Mesh Ray Intersection via BVH](6900-voxel-mesh-ray-intersection-via-bvh.md)
+-Voxel Mesh Ray Intersection via BVH is a raycasting method for voxel meshes that traverses a grid of oriented sub-cubes to find intersections with voxel geometry using Binary Volume Hierarchy (BVH) triangle intersection tests. It handles multiple meshes by first checking bounding boxes and then delegating to the specific mesh's BVH. This method builds on [Mesh BVH](1062-mesh-bvh.md) by providing the specific traversal logic and data structures required to query triangle meshes stored within a voxelized world structure.
++A raycasting method for voxel meshes that traverses a grid of oriented sub-cubes to find intersections with voxel geometry using BVH triangle intersection tests. It differs from its parent [Mesh BVH](1062-mesh-bvh.md) by adding a spatial grid traversal layer that maps ray positions to specific voxel meshes before delegating to the mesh's internal BVH. It differs from siblings like [Position-Normal Tree](4222-position-normal-tree.md) by relying on explicit triangle intersection tests within leaf nodes rather than implicit distance fields.
+ 
+ ### [GPU BVH Construction via Cluster Merging](16461-gpu-bvh-construction-via-cluster-merging.md)

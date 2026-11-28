@@ -1,0 +1,59 @@
+# Sparse Voxel Grid
+
+Also called: Sparse Voxel List, Non-zero Voxel Storage
+
+## Overview
+A sparse voxel grid is a volume representation that stores only non-zero elements as a list of coordinates and corresponding data, reducing memory usage compared to dense grids [S1, unofficial]. It differs from its sibling [Uniform Grid Indexing](6941-uniform-grid-indexing.md) by avoiding storage of empty space, but requires accelerated data structures for efficient querying, unlike the direct indexing of uniform grids.
+
+## How it works
+**Inputs:** A set of non-zero voxel data points, where each point consists of a 3D coordinate $(x, y, z)$ and associated attribute data (e.g., density, color, SDF value).
+**Outputs:** A data structure enabling lookup of attributes for any given coordinate.
+
+**Data Structures:**
+The core representation is a list of tuples: $[(x_1, y_1, z_1, d_1), (x_2, y_2, z_2, d_2), \dots]$, where $d_i$ is the data value [S1, unofficial].
+To accelerate queries, this list is typically indexed by:
+1.  **Tree:** A hierarchical structure such as an octree or KD-tree [S1, unofficial].
+2.  **Hash Table:** A hash map mapping coordinates to data values [S1, unofficial].
+
+**Querying Algorithm:**
+Given a target coordinate $P = (x, y, z)$:
+1.  If using a **Tree**: Traverse the tree from the root. At each node, determine which child octant (if octree) or region contains $P$. Continue until a leaf node is reached. If the leaf contains $P$, return its data; otherwise, the voxel is empty [S1, unofficial].
+2.  If using a **Hash Table**: Compute the hash of $P$. Retrieve the value from the hash table. If the key exists, return the data; otherwise, the voxel is empty [S1, unofficial].
+3.  If using a **Linear List** (naive): Iterate through all elements. If an element's coordinates match $P$, return its data. If the end of the list is reached without a match, the voxel is empty [S1, unofficial].
+
+**Parameters:**
+*   **Resolution:** Not explicitly defined for the sparse grid itself, as it adapts to the data. However, the underlying coordinate system usually implies a discrete grid space.
+*   **Data Type:** Depends on the application (e.g., float for SDF, uint8 for material indices).
+
+**Edge Cases and Pitfalls:**
+*   **Query Performance:** Naive iteration over the list is $O(N)$, which is inefficient for large $N$ [S1, unofficial]. Accelerated structures are required for practical use.
+*   **Empty Space:** The method inherently handles empty space by not storing it, but queries must correctly identify absence of data [S1, unofficial].
+
+## Subtopics
+
+### Sparse Volume Data Storage
+A storage strategy for volume data (e.g., in terrain rendering) that keeps sampled data in separate cells, discarding SDFs after Hermite data construction to allow parallel modifications and culling [S2]. It uses typed arrays for efficiency.
+*   **Layout:** Material indices are stored in a 1D `uint8` array. Edge data (edges, zero crossings, normals) is stored in typed arrays simulating a hash map, split into three groups (edges, zero crossings, normals), each further split into X, Y, Z axis arrays. Edges are stored as starting grid point indices in ascending order [S2].
+*   **Indexing:** Flattened index for grid point $(x, y, z)$ with resolution $n$: $index = z \times (n+1)^2 + y \times (n+1) + x$ [S2].
+*   **Edge Endpoints:** Given start index $a$, end index $b$ is $a+1$ (X-axis), $a+(n+1)$ (Y-axis), or $a+(n+1)^2$ (Z-axis) [S2].
+*   **Resolution:** $n$ is an integer from 1 to 256 [S2].
+*   **Data Association:** Zero crossing values and normal vectors (x,y,z floats) correspond to the order of edges [S2].
+
+### Weight-sharing Voxel Representation
+A voxel representation where weights are shared across different spatial scales to reduce memory usage and enhance performance [S3]. It reduces model size compared to maintaining independent voxels for each scale [S3].
+
+## Operating characteristics
+*   **Time Complexity:** Query time depends on the acceleration structure: $O(1)$ average for hash tables, $O(\log N)$ for trees, $O(N)$ for linear lists [S1, unofficial].
+*   **Memory Complexity:** Proportional to the number of non-zero voxels, significantly less than dense grids for sparse scenes [S1, unofficial].
+*   **Strengths:** Efficient memory usage for sparse data; supports high resolution without proportional memory cost [S1, unofficial].
+*   **Limitations:** Querying is more complex than dense grids; requires additional data structures for acceleration [S1, unofficial].
+*   **When to Use:** When the volume data is sparse or has large empty regions [S1, unofficial].
+*   **When Not to Use:** When the volume is dense, as the overhead of the acceleration structure may outweigh memory savings.
+
+## Background
+The concept of sparse voxel grids is used to increase the resolution of voxel grids by harnessing the sparsity of 3D space [S1, unofficial]. It is a fundamental component in methods like Neural Sparse Voxel Fields, which propose learning sparse voxel grids in a progressive manner [S1, unofficial]. The term "sparse voxel grid" is often associated with octrees, which are a variant using a tree structure for search [S1, unofficial].
+
+## Sources
+[S1] Faster Neural Radiance Fields Inference — Chris Choy, https://chrischoy.org/posts/nerfs/, fetched 2026-10-29 (unofficial)
+[S2] Volumetric Terrain Rendering with WebGL, https://doi.org/10.2352/issn.2470-1173.2018.06.mobmu-136, fetched 2026-10-26
+[S3] FrugalNeRF: Fast Convergence for Extreme Few-shot Novel View Synthesis without Learned Priors, https://doi.org/10.1109/cvpr52734.2025.01049, fetched 2026-10-29

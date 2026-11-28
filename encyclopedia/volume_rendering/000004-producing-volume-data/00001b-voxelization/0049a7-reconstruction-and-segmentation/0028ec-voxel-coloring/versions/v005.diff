@@ -1,0 +1,320 @@
+--- v004.md
++++ v005.md
+@@ -4,24 +4,23 @@
+ 
+ ## Overview
+-Voxel Coloring is a volumetric reconstruction technique that computes photo-realistic 3D models from multiple color images by assigning colors (radiances) to voxels in a 3D volume, guaranteeing consistency with the input images [S1]. It distinguishes itself from other reconstruction methods by using a "carving" approach: it initializes an opaque volume and iteratively removes (makes transparent) voxels that fail a color consistency test across views [S2, unofficial]. Unlike [Space Carving](link-to-space-carving), which handles arbitrary camera arrangements through multiple scans, Voxel Coloring relies on an ordinal visibility constraint to allow reconstruction in a single scan [S2, unofficial].
++Voxel Coloring is a volumetric reconstruction technique that computes photo-realistic 3D models from multiple color images by assigning colors (radiances) to voxels in a 3D volume, guaranteeing consistency with the input images [S1]. It distinguishes itself from other reconstruction methods by using a "carving" approach: it starts with an opaque volume and iteratively removes (carves) voxels that are inconsistent with the observed image colors, rather than building geometry from surface points [S2, unofficial]. Unlike [Space Carving](link), which allows arbitrary camera placement through multiple scans, Voxel Coloring relies on an ordinal visibility constraint to allow reconstruction in a single scan [S2, unofficial].
+ 
+ ## How it works
+ **Inputs:**
+-- A set of $n+1$ color images $V_0, \dots, V_n$ [S1].
+-- Camera parameters for each image: position, focal angles (vertical and horizontal) [S1].
+-- Depth information accompanying the images (e.g., from a modified ray casting or stereo matching) [S1].
+-- A correlation error threshold `thresh` [S1].
++- A set of $N$ color images $V_0, \dots, V_{N-1}$ [S1].
++- Camera parameters for each image: position, focal angles (vertical and horizontal), and depth information (or synthesized depth maps) [S1].
++- A 3D grid defining the spatial domain with resolution $(N_x, N_y, N_z)$ and a bounding box containing the scene [S1].
+ 
+ **Outputs:**
+-- A 3D grid of voxels where each voxel has an associated color and alpha value [S1].
++- A 3D volume where each voxel stores a color value (RGB) and an alpha value (transparency) [S1].
+ 
+ **Data Structures:**
+-- **Voxel Grid:** A 3D array representing the scene volume. Each voxel stores:
+-  - `color`: A 3-component vector (RGB) [S1].
+-  - `alpha`: An integer value, typically 0 (transparent) or 255 (opaque) [S1].
+-- **Pixel Map ($\pi$):** A set or mask marking which pixels in the input images have been processed to ensure coverage [S1].
++- **Voxel Grid:** A 3D array of voxels. Each voxel contains:
++  - `color`: A 3-component vector (RGB) representing the assigned radiance [S1].
++  - `alpha`: A scalar value (typically 0–255) representing transparency. 0 indicates transparent (carved), 255 indicates opaque [S1].
++- **Pixel Map ($\pi$):** A set or mask tracking which image pixels have been successfully mapped to voxels, used to ensure coverage [S1].
+ 
+ **Parameters:**
+-- `thresh`: The maximum allowable correlation error. A low value yields precise but potentially incomplete reconstruction; a larger value yields a more complete reconstruction but may include false voxels [S1].
++- `thresh`: The maximum allowable correlation error threshold for color consistency. A low value yields precise but potentially incomplete reconstruction; a larger value yields a more complete reconstruction but may include false voxels [S1].
+ 
+ **Algorithm Steps:**
+@@ -29,165 +28,163 @@
+ 1. **Initialization:**
+    - Construct a 3D grid of transparent voxels where the initial alpha value is 0 [S1].
+-   - Alternatively, initialize a reconstruction volume of voxels as opaque (alpha = 255) to define the initial bounding volume of the scene [S2, unofficial].
++   - Alternatively, initialize a reconstruction volume of voxels as opaque (alpha = 255) to represent the initial volume containing the scene [S2, unofficial].
++   - *Note:* The sources describe two variations: one starting transparent and coloring, and one starting opaque and carving. The standard Voxel Coloring algorithm described by Seitz and Dyer starts with an opaque volume and carves inconsistent voxels [S2, unofficial]. The following steps assume the opaque-initialization/carving approach as it is the canonical definition of the "Voxel Coloring" algorithm [S2, unofficial].
+ 
+ 2. **Camera Space Transformation:**
+    - For each camera, compute the change of scale matrix $M$ between object space and camera space [S1].
+-   - The matrix is defined as $M = R_X \times R_Y \times T$ [S1].
+-   - $R_X$ and $R_Y$ are rotation matrices that bring the vision vector to the OZ axis [S1].
+-   - $T$ is the translation matrix that brings the camera to the center of the scene [S1].
++   - The matrix is defined as $M = R_X \times R_Y \times T$, where:
++     - $R_X$ and $R_Y$ are rotation matrices that bring the vision vector to the OZ axis [S1].
++     - $T$ is the translation matrix that brings the camera to the center of the scene [S1].
+ 
+-3. **Voxel Projection and Coloring (Forward Pass):**
+-   - Traverse the voxel grid. For each voxel, determine if it corresponds to a visible surface point in any input image.
+-   - Using the depth information $\lambda$ and the ray direction $D$ from the camera origin $O$, compute the 3D position $P$ of the point:
+-     $$ P = O + \lambda \times D $$
+-     where $D$ is the normalized vector of the ray direction and $\lambda$ is the depth of the point [S1].
+-   - Map $P$ to the corresponding voxel in the grid.
+-   - Assign the color of the pixel from the input image to the voxel.
+-   - Set the voxel's alpha value to 255 (opaque) [S1].
+-   - Mark the corresponding pixel in the image as processed (add to $\pi$) [S1].
++3. **Voxel Traversal:**
++   - Traverse the voxels in a monotonic order (near-to-far relative to the cameras) to ensure correct visibility handling [S2, unofficial].
++   - *Constraint:* The camera locations must satisfy an ordinal visibility constraint, meaning cameras cannot surround the scene, ensuring voxels can be visited in a single near-to-far scan relative to every camera [S2, unofficial].
+ 
+-4. **Color Consistency Testing (Carving):**
+-   - Traverse the opaque voxels in a monotonic order (near-to-far relative to the cameras) to ensure correct visibility handling [S2, unofficial].
+-   - For each opaque voxel, project it into all input images.
+-   - Compare the voxel's color with the color of the corresponding pixel in each image.
+-   - Calculate the correlation error or color difference.
+-   - If the error exceeds the threshold `thresh` for any view, the voxel is considered inconsistent.
++4. **Projection and Consistency Test:**
++   - For each voxel $v$ in the traversal order:
++     - Compute the position of the voxel in the camera's image plane using the transformation matrix $M$ and the voxel's 3D coordinates [S1].
++     - Retrieve the color $C_{img}$ from the corresponding pixel in each input image $V_i$ [S1].
++     - Test for color consistency: Check if the voxel's current color (or the projected image colors) are consistent across all views.
++     - The consistency is determined by comparing the projected colors against a threshold `thresh` [S1]. If the correlation error exceeds `thresh`, the voxel is considered inconsistent [S1].
+ 
+ 5. **Carving:**
+-   - Make inconsistent voxels transparent (set alpha to 0) [S2, unofficial].
++   - If a voxel is found to be color inconsistent across the input images, carve it by setting its alpha value to 0 (transparent) [S2, unofficial].
++   - If the voxel is consistent, retain its opacity (alpha = 255) and assign the average or representative color from the consistent views [S2, unofficial].
+ 
+ 6. **Termination:**
+-   - Repeat the consistency testing and carving steps until all remaining opaque voxels are color consistent across all views [S2, unofficial].
++   - Stop when all remaining opaque voxels are color consistent [S2, unofficial].
+ 
+ **Pseudocode:**
+ 
+ ```python
+-def voxel_coloring(images, camera_params, depth_maps, thresh, grid_bounds, resolution):
++def voxel_coloring(images, cameras, grid_resolution, bounding_box, thresh):
+     """
+     Reconstructs a 3D volume using Voxel Coloring.
+     
+     Args:
+-        images: List of color images V_0...V_n.
+-        camera_params: List of camera parameters (position, rotation, translation).
+-        depth_maps: List of depth maps corresponding to images.
+-        thresh: Maximum allowable correlation error.
+-        grid_bounds: Bounding box of the scene.
+-        resolution: (Nx, Ny, Nz) grid dimensions.
++        images: List of N color images.
++        cameras: List of N camera objects with position, rotation, and depth info.
++        grid_resolution: Tuple (Nx, Ny, Nz) defining the voxel grid size.
++        bounding_box: Tuple defining the 3D space bounds.
++        thresh: Maximum allowable correlation error threshold.
+         
+     Returns:
+-        voxel_grid: 3D array of voxels with color and alpha.
++        volume: 3D array of voxels with 'color' and 'alpha' fields.
+     """
+-    # Initialize voxel grid: 0 = transparent, 255 = opaque
+-    # Initialize colors to black or undefined
+-    voxel_grid = initialize_voxel_grid(resolution, grid_bounds, alpha=0)
+-    
+-    # Step 1: Project depth maps to color the volume (Forward Coloring)
+-    for i, (image, depth_map, cam_param) in enumerate(zip(images, depth_maps, camera_params)):
+-        # Compute transformation matrix M = Rx * Ry * T
+-        M = compute_camera_matrix(cam_param)
++    # Initialize volume with opaque voxels
++    volume = create_volume(grid_resolution, bounding_box)
++    for voxel in volume:
++        voxel.alpha = 255
++        voxel.color = [0, 0, 0]  # Initial color, will be overwritten
++
++    # Ensure ordinal visibility constraint is met
++    if not check_ordinal_visibility(cameras):
++        raise ValueError("Cameras do not satisfy ordinal visibility constraint.")
++
++    # Traverse voxels in monotonic order (near-to-far)
++    for voxel in volume.get_monotonic_traversal():
++        is_consistent = True
++        accumulated_color = [0, 0, 0]
++        count = 0
++
++        for i, camera in enumerate(cameras):
++            # Compute transformation matrix M for this camera
++            M = compute_camera_matrix(camera)
++            
++            # Project voxel to image plane
++            pixel_coords = project_3d_to_2d(voxel.position, M)
++            
++            # Check if projection falls within image bounds
++            if not is_within_bounds(pixel_coords, images[i].shape):
++                is_consistent = False
++                break
++            
++            # Get color from image
++            img_color = images[i].get_color(pixel_coords)
++            
++            # Test consistency against threshold
++            # Note: Exact consistency metric (e.g., correlation) is not fully detailed in sources
++            # Assuming a simple distance metric for implementation clarity [G]
++            if voxel.alpha > 0:
++                # If voxel already has color, compare with image color
++                error = color_distance(voxel.color, img_color)
++            else:
++                # If voxel is new, accumulate color
++                accumulated_color = [c + img_color[j] for j, c in enumerate(accumulated_color)]
++                count += 1
++                continue
++            
++            if error > thresh:
++                is_consistent = False
++                break
+         
+-        # Iterate over pixels in the image
+-        for y in range(image.height):
+-            for x in range(image.width):
+-                # Get depth lambda for this pixel
+-                lambda_val = depth_map[y, x]
+-                
+-                # Compute ray origin O and direction D in object space
+-                # Note: D must be transformed by M or computed in object space directly
+-                O, D = get_ray_from_pixel(x, y, cam_param, M)
+-                
+-                # Compute 3D position P = O + lambda * D
+-                P = O + lambda_val * D
+-                
+-                # Map P to voxel coordinates
+-                voxel_coords = world_to_voxel(P, grid_bounds, resolution)
+-                
+-                if is_inside_grid(voxel_coords, resolution):
+-                    # Assign color and set alpha to opaque
+-                    voxel_grid[voxel_coords].color = image[y, x]
+-                    voxel_grid[voxel_coords].alpha = 255
+-                    
+-    # Step 2: Carve inconsistent voxels
+-    # Traverse in monotonic order (e.g., sorted by distance to camera center)
+-    opaque_voxels = get_opaque_voxels(voxel_grid)
+-    sorted_voxels = sort_by_distance(opaque_voxels, camera_params[0].position) # Simplified ordering
+-    
+-    changed = True
+-    while changed:
+-        changed = False
+-        for voxel in sorted_voxels:
+-            if voxel.alpha == 0:
+-                continue
+-                
+-            is_consistent = True
+-            for image, cam_param in zip(images, camera_params):
+-                # Project voxel center to image plane
+-                u, v = project_voxel_to_image(voxel.center, cam_param)
+-                
+-                if is_pixel_valid(u, v, image.width, image.height):
+-                    # Get pixel color
+-                    pixel_color = image[v, u]
+-                    
+-                    # Compute color difference/correlation error
+-                    error = compute_color_error(voxel.color, pixel_color)
+-                    
+-                    if error > thresh:
+-                        is_consistent = False
+-                        break
+-            
+-            if not is_consistent:
+-                voxel.alpha = 0
+-                changed = True
+-                
+-    return voxel_grid
++        if is_consistent:
++            if count > 0:
++                # Assign average color from consistent views
++                voxel.color = [c / count for c in accumulated_color]
++            voxel.alpha = 255
++        else:
++            # Carve the voxel
++            voxel.alpha = 0
+ 
+-def compute_camera_matrix(cam_param):
++    return volume
++
++def compute_camera_matrix(camera):
+     """
+-    Computes M = Rx * Ry * T.
+-    Rx, Ry: Rotation matrices to align vision vector with OZ axis.
+-    T: Translation to center of scene.
++    Computes M = RX * RY * T.
++    RX, RY: Rotation matrices to align vision vector with OZ axis.
++    T: Translation to center scene.
+     """
+-    # Implementation details depend on specific camera model
+-    # [G] Standard rotation and translation matrix multiplication
+-    Rx = compute_rotation_x(cam_param)
+-    Ry = compute_rotation_y(cam_param)
+-    T = compute_translation(cam_param)
+-    return Rx @ Ry @ T
++    # Implementation details for rotation/translation depend on specific camera model [G]
++    # This is a placeholder for the mathematical operation described in [S1]
++    pass
+ 
+-def compute_color_error(color1, color2):
++def project_3d_to_2d(position, M):
+     """
+-    Computes the correlation error or distance between two colors.
+-    [G] Typically Euclidean distance or normalized cross-correlation.
++    Projects a 3D voxel position to 2D image coordinates using matrix M.
+     """
+-    # Example: Euclidean distance
+-    return sum((c1 - c2)**2 for c1, c2 in zip(color1, color2))
++    # Homogeneous transformation and projection [G]
++    pass
++
++def color_distance(c1, c2):
++    """
++    Computes distance between two RGB colors.
++    """
++    return sum((a - b) ** 2 for a, b in zip(c1, c2)) ** 0.5
++
++def check_ordinal_visibility(cameras):
++    """
++    Checks if cameras satisfy the ordinal visibility constraint.
++    """
++    # This check ensures cameras do not surround the scene [S2, unofficial]
++    # Implementation depends on specific geometric arrangement [G]
++    pass
+ ```
+ 
+ **Edge Cases and Pitfalls:**
+-- **Ordinal Visibility Constraint:** Cameras must be arranged such that voxels can be visited in a single near-to-far scan relative to every camera. This prevents cameras from surrounding the scene, meaning surfaces not visible in any image cannot be reconstructed [S2, unofficial].
+-- **Threshold Selection:** A low `thresh` yields precise but incomplete reconstruction; a larger `thresh` yields complete reconstruction with potential false voxels [S1].
+-- **Precision:** Depth information accuracy directly impacts the initial coloring step. Errors in depth maps lead to misaligned voxels [S1].
++- **Ordinal Visibility Constraint:** If cameras surround the scene, the monotonic traversal order cannot be established, leading to incorrect visibility handling and reconstruction artifacts [S2, unofficial].
++- **Threshold Selection:** A low `thresh` may result in an incomplete reconstruction (holes), while a high `thresh` may include false voxels (noise) [S1].
++- **Depth Information:** The method relies on depth information or synthesized depth maps to project voxels accurately. Lack of accurate depth can lead to misalignment [S1].
+ 
+ ## Subtopics
+ 
+ ### [Generalized Voxel Coloring](5526-generalized-voxel-coloring.md)
+-Improves upon standard Voxel Coloring by computing visibility exactly using Item Buffers or Layered Depth Images, rather than approximately.
++Improves upon standard Voxel Coloring by computing visibility exactly using Item Buffers or Layered Depth Images, allowing for more accurate color-consistent models.
+ 
+ ### [Multi-view Color Consistency and Smoothing](6445-multi-view-color-consistency-and-smoothing.md)
+-A post-processing method that refines color attributes of surface voxels, handling non-Lambertian reflectance and preserving sharp edges.
++A post-processing method that refines voxel colors to handle noise and non-Lambertian reflectance, preserving sharp edges.
+ 
+ ### [Volumetric Texture Rendering via Image Layers](11395-volumetric-texture-rendering-via-image-layers.md)
+-Represents a volume as N 2D RGBA images, treating them as a volume of precalculated colors with fixed shading.
++Renders volumetric textures by converting the voxel volume into 2D image layers for real-time rendering on standard graphics hardware.
+ 
+ ## Operating characteristics
+-- **Time Complexity:** Depends on the number of voxels $N_v$, number of images $n$, and resolution. The carving step requires iterating over opaque voxels and projecting them into $n$ images. In the worst case, this is $O(N_v \cdot n)$. However, the monotonic traversal and early termination of consistency checks can reduce this.
+-- **Memory Complexity:** $O(N_v)$ to store the voxel grid. The size of the grid is determined by the resolution and bounding box.
+-- **Strengths:** Produces photo-realistic results directly from color images. Simple to implement. Single-scan efficiency due to ordinal visibility constraint.
+-- **Limitations:** Requires depth information or stereo matching to initialize the volume. Cannot reconstruct occluded surfaces not visible in any input image. Sensitive to camera calibration errors and noise. The ordinal visibility constraint limits camera placement.
+-- **When to Use:** When high-quality photo-realistic reconstruction is needed from a set of calibrated images with known depth or stereo correspondence, and camera positions allow for a monotonic scan.
+-- **When Not to Use:** When cameras surround the scene (use Space Carving instead) or when depth information is unavailable/unreliable.
++- **Time Complexity:** The algorithm traverses all voxels in the volume and checks consistency against all camera views. Complexity is $O(V \times N)$, where $V$ is the number of voxels and $N$ is the number of cameras [S2, unofficial].
++- **Memory Complexity:** Requires storage for the 3D volume ($O(V)$) and the input images ($O(N \times I)$, where $I$ is image size) [S1].
++- **Performance:** The method is computationally intensive due to the voxel traversal and consistency checks. However, it allows for a single scan reconstruction if the ordinal visibility constraint is met, which is faster than multi-scan methods like Space Carving [S2, unofficial].
++- **Strengths:** Produces photo-realistic volume models with consistent colors across views. Simple to implement conceptually [S1].
++- **Limitations:** Restricted by the ordinal visibility constraint; cannot handle scenes surrounded by cameras. Sensitive to the threshold parameter [S1][S2, unofficial].
+ 
+ ## Background
+-Voxel Coloring was introduced by Seitz and Dyer in 1997 in the paper "Photorealistic Scene Reconstruction by Voxel Coloring" [S1]. It is a foundational technique in volumetric 3D reconstruction, using color consistency to distinguish object surface voxels from background [S2, unofficial]. The method builds on the concept of space carving but optimizes for efficiency under specific camera constraints. It is widely used in computer vision for 3D modeling from multi-view imagery.
++Voxel Coloring was introduced by Seitz and Dyer in 1997 in the paper "Photorealistic Scene Reconstruction by Voxel Coloring" [S1]. It was one of the first methods to use color consistency as a criterion for distinguishing object surface voxels from background in a volumetric reconstruction [S2, unofficial]. The method laid the foundation for subsequent voxel-based reconstruction techniques [S1].
+ 
+ ## Sources

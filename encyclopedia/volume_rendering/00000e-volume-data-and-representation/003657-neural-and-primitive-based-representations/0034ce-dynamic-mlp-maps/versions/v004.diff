@@ -1,0 +1,103 @@
+--- v003.md
++++ v004.md
+@@ -58,9 +58,9 @@
+ 
+ 6.  **Aggregation (Orthogonal Variant):**
+-    *   If using three orthogonal MLP maps (one for each plane), predict $(\sigma_i, \mathbf{c}_i)$ for $i=1,2,3$.
++    *   If using three orthogonal MLP maps (one for each plane), predict $(\sigma_i, \mathbf{c}_i)$ for $i=1,2,3$ [S1].
+     *   Aggregate results via summation [S1].
+ 
+ 7.  **Rendering:**
+-    *   Perform volume rendering by sampling points along rays.
++    *   Perform volume rendering by sampling points along rays [S1].
+     *   Use Empty Space Skipping (ESS): Skip sampling in voxels marked as empty in the Occupancy Volume [S1].
+ 
+@@ -76,59 +76,44 @@
+     return math.sin(scaled_v)
+ 
++def decode_latent(z):
++    """Generate MLP maps from latent code [S1]."""
++    # Map z to 4096-dim vector, reshape to 4x4 feature map with 256 channels [S1]
++    feature_map = fully_connected(z) # [G]
++    feature_map = reshape(feature_map, (4, 4, 256)) # [G]
++    # Upsample to D x D feature map using deconvolutional layers [S1]
++    feature_map = upsample(feature_map, target_size=D) # [G]
++    # Predict density map (256x256, 32 params/pixel) and color map (16x16, 2624 params/pixel) [S1]
++    density_map = conv_predict(feature_map, stride=1, out_channels=32) # [G]
++    color_map = conv_predict(feature_map, stride=2, out_channels=2624) # [G]
++    return density_map, color_map
++
+ def query_scene(point, direction, hash_tables, mlp_maps, tri_plane_maps):
+-    """
+-    Query density and color for a point [S1].
+-    point: tuple (x, y, z)
+-    direction: tuple (dx, dy, dz)
+-    hash_tables: list of 3 hash tables [h_xy, h_xz, h_yz]
+-    mlp_maps: dict with 'density_map' and 'color_map'
+-    tri_plane_maps: dict with tri-plane feature maps
+-    """
+-    # 1. Spatial Embedding: Hash features
+-    features = []
+-    for table in hash_tables:
+-        # Project point to plane, query hash table, aggregate via summation [S1]
+-        projected_point = project_to_plane(point, table.plane)
+-        feat = table.query(projected_point)
+-        features.append(feat)
+-    gamma_ph = sum(features)
+-    
+-    # 2. Spatial Embedding: Tri-plane features (follows EG3D [6]) [G]
+-    gamma_pt = interpolate_from_planes(point, tri_plane_maps)
+-    
++    """Query density and color for a point [S1]."""
++    # 1. Hash features: project point to 3 orthogonal planes, query hash tables, sum features [S1]
++    gamma_ph = sum(table.query(project_to_plane(point, plane)) for table, plane in zip(hash_tables, ['xy', 'xz', 'yz']))
++    # 2. Tri-plane features: interpolate from 2D CNN-decoded planes [S1]
++    gamma_pt = interpolate_from_planes(point, tri_plane_maps) # [G]
+     # 3. Combine features
+     gamma_p = gamma_ph + gamma_pt
+-    
+-    # 4. Direction Encoding
++    # 4. Direction encoding
+     gamma_d = positional_encoding(direction)
+-    
+-    # 5. Retrieve MLP Parameters from Maps
+-    density_params = retrieve_from_map(point, mlp_maps['density_map'])
+-    color_params = retrieve_from_map(point, mlp_maps['color_map'])
+-    
+-    # 6. Build and Evaluate MLP
+-    # Density Head: 1 layer, Color Head: 3 layers [S1]
+-    mlp = build_small_mlp(density_params, color_params)
+-    sigma, color = mlp(gamma_p, gamma_d)
+-    
++    # 5. Retrieve MLP parameters from maps via spatial binning [S1]
++    density_params = mlp_maps['density_map'].query(point)
++    color_params = mlp_maps['color_map'].query(point)
++    # 6. Build and evaluate small MLP (1-layer density head, 3-layer color head) [S1]
++    sigma, color = evaluate_small_mlp(density_params, color_params, gamma_p, gamma_d) # [G]
+     return sigma, color
+ 
+ def render_frame(latent_code, hash_tables, occupancy_volume, camera_params, tri_plane_maps):
+-    """
+-    Render a single frame [S1].
+-    """
+-    # 1. Decode MLP Maps from Latent Code
+-    feature_map = decode_latent_to_feature_map(latent_code)
+-    density_map = predict_density_map(feature_map)
+-    color_map = predict_color_map(feature_map)
++    """Render a single frame [S1]."""
++    density_map, color_map = decode_latent(latent_code)
+     mlp_maps = {'density_map': density_map, 'color_map': color_map}
+-    
+-    # 2. Ray Marching with ESS
+     image = []
+     for y in range(camera_params.height):
+         for x in range(camera_params.width):
+-            ray = generate_ray(camera_params, x, y)
+-            samples = sample_ray(ray, occupancy_volume)
+-            color = volume_render(samples, hash_tables, mlp_maps, tri_plane_maps)
++            ray = generate_ray(camera_params, x, y) # [G]
++            # Sample along ray, skip empty voxels using occupancy volume [S1]
++            samples = sample_ray(ray, occupancy_volume) # [G]
++            color = volume_render(samples, hash_tables, mlp_maps, tri_plane_maps) # [G]
+             image.append(color)
+     return image

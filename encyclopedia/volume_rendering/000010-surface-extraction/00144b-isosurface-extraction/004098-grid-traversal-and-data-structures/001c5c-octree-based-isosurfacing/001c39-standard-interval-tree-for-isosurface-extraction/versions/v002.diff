@@ -1,0 +1,242 @@
+--- v001.md
++++ v002.md
+@@ -1,75 +1,113 @@
+ # Standard Interval Tree for Isosurface Extraction
++
+ Also called: Cignoni et al. Interval Tree, Interval Tree, Interval-Tree Based Isosurface Extraction, Normal Interval Tree
+ 
+ ## Overview
+-The Standard Interval Tree is a spatial indexing structure used to efficiently identify active cells (cells intersected by an isosurface) in volumetric data, serving as a pre-processing step for surface extraction algorithms like Marching Cubes or Marching Tetrahedra [S1, unofficial][S3, unofficial]. It solves the problem of $O(N)$ traversal cost by providing optimal output-sensitive query complexity $O(\log n + k)$, where $n$ is the number of cells and $k$ is the number of active cells [S1, unofficial]. It sets itself apart from its parent [Octree-based Isosurfacing](1247-octree-based-isosurfacing.md) by operating on a fixed logical grid structure rather than an adaptive octree, and from siblings like [IsoOctree](1744-isooctree.md) by using a binary tree of value intervals rather than a spatial hierarchy of cell groups [S1, unofficial][S3, unofficial].
++The Standard Interval Tree is a spatial indexing structure used to efficiently identify "active cells" (cells intersected by an isosurface) in volumetric data, serving as a pre-processing step for surface extraction algorithms like Marching Cubes or Marching Tetrahedra [S1, S3, unofficial]. It solves the problem of $O(N)$ brute-force traversal by achieving optimal output-sensitive query complexity, reporting only the cells relevant to a specific isovalue [S1, S3, unofficial]. It sets itself apart from its parent [Octree-based Isosurfacing](1247-octree-based-isosurfacing.md) by operating on a fixed Cartesian grid structure rather than an adaptive octree, and from siblings like [Wilhelms and Van Gelder Octree](2107-wilhelms-and-van-gelder-octree.md) by using a binary tree of value intervals rather than a spatial hierarchy, thereby decoupling spatial locality from value-based filtering [S1, S3, unofficial].
+ 
+ ## How it works
+-**Inputs:** A structured volume grid of dimensions $\Delta x \times \Delta y \times \Delta z$, containing $m = (\Delta x - 1)(\Delta y - 1)(\Delta z - 1)$ cells. Each cell $i$ has a scalar value range $[v_{min}^i, v_{max}^i]$. A target isovalue $t$.
+-**Outputs:** A list of active cells $C_{active}$ such that $v_{min}^i \le t \le v_{max}^i$ for all $i \in C_{active}$.
++**Inputs:**
++- A structured 3D volume grid of dimensions $\Delta x \times \Delta y \times \Delta z$.
++- Scalar field values $V$ for each cell.
++- A target isovalue $t$.
++
++**Outputs:**
++- A list of active cells whose scalar range $[v_{min}, v_{max}]$ contains $t$.
+ 
+ **Data Structures:**
+-The structure is a binary tree. Each node stores:
+-1.  A threshold value $t_0$.
+-2.  Two doubly-linked lists (or arrays) of cell indices:
+-    *   `min-list`: Cells sorted by increasing $v_{min}$.
+-    *   `max-list`: Cells sorted by decreasing $v_{max}$.
+-3.  Pointers to left and right children.
+-
+-**Memory Layout:**
+-For each cell stored in a node, the storage consists of:
+-*   $v_{min}$ (2 bytes, typically)
+-*   $v_{max}$ (2 bytes, typically)
+-*   Pointer to cell in `min-list` (4 bytes)
+-*   Pointer to cell in `max-list` (4 bytes)
+-Total per cell: 12 bytes [S3, unofficial].
+-The total memory overhead for the general representation is $3h + 2m$ words, where $h$ is the number of distinct extremes of intervals and $m$ is the number of cells [S2, book]. In 8-bit volumes, the total space usage including the volume data is approximately 9 times the size of the raw volume data [S1, unofficial].
+-
+-**Construction Algorithm:**
+-1.  Collect all cell intervals $[v_{min}^i, v_{max}^i]$ for $i = 1 \dots m$.
+-2.  Call `BuildTree(intervals)`:
+-    a.  If `intervals` is empty, return `null`.
+-    b.  Choose a threshold $t_0$ from the set of interval endpoints. (Optimal choice minimizes tree height; a common heuristic is the median of the endpoints) [S3, unofficial].
+-    c.  Partition `intervals` into three sets:
+-        *   $S_{contain}$: Intervals where $v_{min} \le t_0 \le v_{max}$.
+-        *   $S_{below}$: Intervals where $v_{max} < t_0$.
+-        *   $S_{above}$: Intervals where $v_{min} > t_0$.
+-    d.  Create a new node with threshold $t_0$.
+-    e.  For each cell in $S_{contain}$:
+-        i.  Add cell to the node's `min-list` and `max-list`.
+-        ii. Insert into `min-list` maintaining sort order of $v_{min}$.
+-        iii. Insert into `max-list` maintaining sort order of $v_{max}$.
+-    f.  Set `node.left` = `BuildTree(S_below)`.
+-    g.  Set `node.right` = `BuildTree(S_above)`.
+-    h.  Return `node`.
++The interval tree is a binary tree where each node stores a subset of cells.
++- **Node Structure:** Each node contains two sorted lists of pointers to cells:
++  1. `min-list`: Cells sorted by increasing $v_{min}$.
++  2. `max-list`: Cells sorted by decreasing $v_{max}$.
++- **Cell Storage:** Each cell reference in the lists stores:
++  - $v_{min}$: Minimum scalar value in the cell (2 bytes).
++  - $v_{max}$: Maximum scalar value in the cell (2 bytes).
++  - Pointer to the cell data (4 bytes).
++  - Total per-cell overhead: 12 bytes [S3, unofficial].
++- **Tree Construction:**
++  1. Calculate $v_{min}$ and $v_{max}$ for every cell in the volume.
++  2. Choose a threshold $t_0$ (typically the median of all $v_{min}$ and $v_{max}$ values to balance the tree) [S3, unofficial].
++  3. Partition cells into three sets:
++     - $S_{contain}$: Cells where $v_{min} \le t_0 \le v_{max}$.
++     - $S_{below}$: Cells where $v_{max} < t_0$.
++     - $S_{above}$: Cells where $v_{min} > t_0$.
++  4. Store $S_{contain}$ in the current node's `min-list` and `max-list`.
++  5. Recursively build the left child from $S_{below}$ and the right child from $S_{above}$ [S3, unofficial].
+ 
+ **Query Algorithm:**
+-1.  Start at `root`.
+-2.  If `root` is `null`, return empty list.
+-3.  Let $t$ be the target isovalue.
+-4.  If $t < root.t_0$:
+-    a.  Iterate through `root.min-list` from the beginning.
+-    b.  For each cell $c$ in the list:
+-        i.  If $c.v_{min} > t$, stop iteration (list is sorted by increasing $v_{min}$, so no subsequent cells can contain $t$).
+-        ii. Else, add $c$ to $C_{active}$.
+-    c.  Recurse: $C_{active} \leftarrow C_{active} \cup \text{Query}(root.left, t)$.
+-5.  Else If $t > root.t_0$:
+-    a.  Iterate through `root.max-list` from the beginning.
+-    b.  For each cell $c$ in the list:
+-        i.  If $c.v_{max} \le t$, stop iteration (list is sorted by decreasing $v_{max}$, so no subsequent cells can contain $t$).
+-        ii. Else, add $c$ to $C_{active}$.
+-    c.  Recurse: $C_{active} \leftarrow C_{active} \cup \text{Query}(root.right, t)$.
+-6.  Else ($t = root.t_0$):
+-    a.  Add all cells in `root.min-list` (or `root.max-list`) to $C_{active}$.
+-    b.  Return $C_{active}$ (terminate search, as all containing intervals are stored here) [S3, unofficial].
++To find all active cells for isovalue $t$:
++1. Start at the root node with threshold $t_0$.
++2. If $t < t_0$:
++   - Iterate through the `min-list`. Report all cells where $v_{min} \le t$.
++   - Stop when encountering a cell with $v_{min} > t$ (since the list is sorted ascending, subsequent cells will also fail).
++   - Recurse into the left child.
++3. If $t > t_0$:
++   - Iterate through the `max-list`. Report all cells where $v_{max} \ge t$.
++   - Stop when encountering a cell with $v_{max} < t$ (since the list is sorted descending, subsequent cells will also fail).
++   - Recurse into the right child.
++4. If $t = t_0$:
++   - Report all cells in the current node's lists.
++   - Terminate search (no further recursion needed as all containing intervals are stored here) [S3, unofficial].
++
++**Pseudocode:**
++
++```python
++def query_interval_tree(node, t):
++    """
++    Recursively query the interval tree for cells containing isovalue t.
++    node: The current tree node containing min_list and max_list.
++    t: The target isovalue.
++    node.threshold: The threshold t0 used to partition this node.
++    """
++    active_cells = []
++    
++    # Case 1: Target is below the node's threshold
++    if t < node.threshold:
++        # Check min-list (sorted by increasing vmin)
++        for cell in node.min_list:
++            if cell.vmin <= t:
++                active_cells.append(cell)
++            else:
++                # Since vmin is increasing, all subsequent cells will have vmin > t
++                break
++        
++        # Recurse left
++        if node.left_child is not None:
++            active_cells.extend(query_interval_tree(node.left_child, t))
++            
++    # Case 2: Target is above the node's threshold
++    elif t > node.threshold:
++        # Check max-list (sorted by decreasing vmax)
++        for cell in node.max_list:
++            if cell.vmax >= t:
++                active_cells.append(cell)
++            else:
++                # Since vmax is decreasing, all subsequent cells will have vmax < t
++                break
++        
++        # Recurse right
++        if node.right_child is not None:
++            active_cells.extend(query_interval_tree(node.right_child, t))
++            
++    # Case 3: Target equals the node's threshold
++    else: # t == node.threshold
++        # All cells in this node contain the threshold
++        active_cells.extend(node.min_list)
++        # Note: min_list and max_list may contain duplicates if implemented naively,
++        # but typically one list is sufficient or duplicates are handled by the caller.
++        # Based on [S3, unofficial], the entire list is reported.
++        
++    return active_cells
++```
+ 
+ **Parameters:**
+-*   Pointer size: 4 bytes [S1, unofficial].
+-*   Value type size: 2 bytes (commonly used for 16-bit scalars) [S3, unofficial].
++- **Pointer Size:** 4 bytes [S1, unofficial].
++- **Value Type:** Typically 2 bytes (16-bit) for $v_{min}, v_{max}$ [S3, unofficial].
++- **Threshold Selection:** Not explicitly defined in sources, but optimal balance requires median selection [S3, unofficial].
+ 
+ **Edge Cases and Pitfalls:**
+-*   **Space Inefficiency:** The memory overhead is significant. For 8-bit volumes, total space is ~9x the volume size. This can be prohibitive for large datasets [S1, unofficial].
+-*   **Threshold Selection:** Poor choice of $t_0$ leads to unbalanced trees, degrading query performance from $O(\log n)$ to $O(n)$ [S3, unofficial].
+-*   **Duplicate Reporting:** The algorithm ensures each active cell is reported exactly once because intervals are partitioned into disjoint sets ($S_{contain}, S_{below}, S_{above}$) at each step [S3, unofficial].
++- **Precision:** Floating-point comparisons must handle the equality case $t = t_0$ carefully to avoid missing cells or double-counting if lists overlap [S3, unofficial].
++- **Memory Overhead:** The structure is space-inefficient. For 8-bit volumes, the total space usage is approximately 9 times the size of the raw volume data (1x volume + 8x overhead for pointers and lists) [S1, unofficial].
++- **Degenerate Input:** If all cells have the same $v_{min}$ and $v_{max}$, the tree depth becomes 1, and all cells are stored in the root. Query time becomes $O(k)$ but construction is trivial [S3, unofficial].
+ 
+ ## Subtopics
+@@ -90,54 +128,23 @@
+ The Interval Table is a pre-processing data structure that maps scalar value intervals to tetrahedron IDs, allowing the extraction algorithm to skip tetrahedra whose function span does not contain the isovalue. It differs from the Standard Interval Tree by using a fixed-size array of buckets (intervals) rather than a dynamic tree structure, offering a simpler implementation with comparable performance for uniform scalar distributions.
+ 
++### [Search Data Structure Based Isosurface Extraction](6738-search-data-structure-based-isosurface-extraction.md)
++Search Data Structure Based Isosurface Extraction is a family of methods that utilize external search structures (indices) to accelerate isosurface extraction for multiple queries on the same dataset. By creating an index that allows the algorithm to disregard regions containing only non-active cells, these methods achieve significant performance gains over brute-force traversal when repeated queries are required. This approach is distinct from single-pass methods because the overhead of index construction must be amortized over multiple queries; it is not feasible if the dataset is examined only once or if the index transfer overhead is prohibitive.
++
+ ### Matryoshka Layer Insertion
+-Matryoshka Layer Insertion is a data structure construction technique where cells are inserted into layers defined by six planes ($X=x_0, X=x_1, Y=y_0, Y=y_1, Z=z_0, Z=z_1$) based on coordinate minima, allowing $O(1)$ insertion and $O(k)$ total construction time for $k$ cells [S1, unofficial].
+-**Steps:**
+-1.  Calculate $min^*1$ as the minimum of the values $cellx, celly, cellz$.
+-2.  Calculate $min^*2$ as the minimum of the values $(\Delta x - 1) - cellx, (\Delta y - 1) - celly, (\Delta z - 1) - cellz$.
+-3.  Determine the layer index by taking the minimum of $min^*1$ and $min^*2$.
+-4.  Inside the selected layer, insert the cell into the appropriate plane list by checking if $cellx$ equals $x_0$ or $x_1$; if not, check $celly$ against $y_0/y_1$, then $cellz$ against $z_0/z_1$ [S1, unofficial].
+-**Pitfall:** To avoid a second processing round, the insertion of a cell in the layers is merged into the query process of the interval tree [S1, unofficial].
+-**Complexity:** Construction complexity is $O(k)$ where $k$ is the number of cells; memory overhead is directly proportional to $k$ [S1, unofficial].
++Matryoshka Layer Insertion is a data structure construction where cells are inserted into layers defined by six planes (X=x0, X=x1, Y=y0, Y=y1, Z=z0, Z=z1) based on coordinate minima, allowing O(1) insertion and O(k) total construction time for k cells [S1, unofficial]. The algorithm calculates `min*1` as the minimum of the cell's coordinates $(cellx, celly, cellz)$ and `min*2` as the minimum of the distances to the opposite boundaries $((\Delta x-1)-cellx, (\Delta y-1)-celly, (\Delta z-1)-cellz)$. The layer index is the minimum of `min*1` and `min*2`. Inside the layer, the cell is inserted into the appropriate plane list based on which coordinate matches the boundary plane. To avoid a second processing round, this insertion is merged into the query process of the interval tree [S1, unofficial]. Construction complexity is $O(k)$ where $k$ is the number of active cells, with memory overhead directly proportional to $k$ [S1, unofficial].
+ 
+ ### Edge-Covering Space Reduction
+-Edge-Covering Space Reduction is a space reduction technique for interval/kd-trees by restricting the data structure to a subset of cells that covers all edges, reducing storage by a factor of 4 [S3, unofficial].
+-**Steps:**
+-1.  Select a subset of cells such that every edge in the volume grid is covered by at least one selected cell. Since an edge is shared by four cells, only one out of four neighboring cells needs to be considered [S3, unofficial].
+-2.  After extraction from the data structure, propagate the isosurface from the reported active cells onto neighboring cells that were not covered in the data structure [S3, unofficial].
++Edge-Covering Space Reduction is a space reduction technique for interval/kd-trees by restricting the data structure to a subset of cells that covers all edges, reducing storage by a factor of 4 [S3, unofficial]. The method selects a subset of cells such that every edge in the volume grid is covered by at least one selected cell. Since an edge is shared by four cells, only one out of four neighboring cells needs to be considered. After extraction from the data structure, the isosurface is propagated from the reported active cells onto neighboring cells that were not covered in the data structure. This increases extraction time but significantly reduces memory requirements [S3, unofficial].
+ 
+ ## Operating characteristics
+-**Time Complexity:**
+-*   Query: $O(\log n + k)$, where $n$ is the number of cells and $k$ is the number of active cells [S1, unofficial].
+-*   Search Complexity: Specifically $O(k + \log h)$, where $h$ is the number of nodes in the tree [S3, unofficial].
+-*   For scalar data volumes, $k$ (active cells) usually dominates $\log n$, as $k$ is often in the hundreds of thousands or millions [S1, unofficial].
+-
+-**Memory Complexity:**
+-*   General representation: $O(n)$ space. Specifically $3h + 2m$ words, where $h$ is the number of distinct extremes and $m$ is the number of cells [S2, book].
+-*   Pointer overhead: For 8-bit volumes, the interval tree holds pointers to cells in two auxiliary lists, with each cell referenced by two pointers. With 4-byte pointers, the space overhead is $8(\Delta x - 1)(\Delta y - 1)(\Delta z - 1)$ bytes [S1, unofficial].
+-*   Total space usage including volume data is approximately 9 times the size of the volume [S1, unofficial].
+-
+-**Performance and Scaling:**
+-*   The method considerably improves the performance of the traversal phase with respect to standard marching tetrahedra and marching cubes algorithms [S2, book].
+-*   Memory overhead becomes a critical factor in high-resolution datasets [S2, book].
+-*   Strategies to reduce space occupancy include optimized representations for unstructured datasets (reducing overhead to $3h + m$, <25%) and chess-board approaches for structured datasets [S2, book].
+-
+-**Strengths:**
+-*   Optimal output-sensitive time complexity for active cell extraction [S1, unofficial].
+-*   Effective speedup for isosurface extraction traversal [S2, book].
+-
+-**Limitations:**
+-*   High memory consumption (up to 9x volume size) can be prohibitive [S1, unofficial].
+-*   Not adaptive to memory constraints without hybrid approaches [S3, unofficial].
+-
+-**When to use:**
+-*   When fast extraction of active cells is required and sufficient memory is available.
+-*   When the number of active cells is large relative to the total cells, making $O(\log n + k)$ significantly better than $O(n)$.
+-
+-**When not to use:**
+-*   When memory is severely constrained and $O(n)$ overhead is unacceptable.
+-*   When the dataset is extremely large and out-of-core processing is required (use [Out-of-core Interval Tree Extraction](2146-out-of-core-interval-tree-extraction.md)).
++- **Time Complexity:** Query time is $O(\log n + k)$, where $n$ is the number of cells and $k$ is the number of active cells reported [S1, S3, unofficial]. In practice, for scalar volumes, $k$ dominates $\log n$ as active cells often number in the hundreds of thousands or millions [S1, unofficial]. Search complexity is also described as $O(k + \log h)$, where $h$ is the number of nodes in the tree [S3, unofficial].
++- **Memory Complexity:** $O(n)$. The space overhead is significant. For a volume of size $(\Delta x - 1)(\Delta y - 1)(\Delta z - 1)$, the overhead is $8(\Delta x - 1)(\Delta y - 1)(\Delta z - 1)$ bytes for pointers alone (2 pointers per cell, 4 bytes each), plus the volume data itself, totaling 9 times the volume size [S1, unofficial]. A more precise analysis for general interval trees states memory overhead is $3h + 2m$ words, where $h$ is the number of distinct extremes and $m$ is the number of cells [S2, book].
++- **Strengths:** Optimal output-sensitive performance for single-query isosurface extraction; significantly faster than brute-force traversal for sparse isosurfaces [S2, book].
++- **Limitations:** High memory consumption makes it prohibitive for very large high-resolution datasets without variants like Cell Grouping or Edge-Covering [S1, S3, unofficial].
++- **When to use:** When memory is sufficient and fast single-query extraction is required.
++- **When not to use:** When memory is constrained (use [Interval Tree with Cell Grouping](1342-interval-tree-with-cell-grouping.md) or [Edge-Covering Space Reduction]) or when multiple queries are needed (consider [Search Data Structure Based Isosurface Extraction](6738-search-data-structure-based-isosurface-extraction.md)).
+ 
+ ## Background
+-The Standard Interval Tree for isosurface extraction was proposed by Cignoni, Marino, Montani, and Puppo [S3, unofficial]. It is based on the general properties of interval trees [BvKOS00, Ede80] and was introduced as an alternative to kd-trees for spatial indexing in visualization [S3, unofficial]. The method was tested on various structured and unstructured datasets, demonstrating significant speedups over standard marching algorithms [S2, book]. It is cited in the Visualization Handbook [S2, book] and various research papers on optimal hybrid memory constrained isosurface extraction [S3, unofficial].
++The Standard Interval Tree for isosurface extraction was proposed by Cignoni, Marino, Montani, and Puppo [S1, S3, unofficial]. It was introduced as an alternative to kd-trees for spatial indexing in volume visualization, addressing the space inefficiency of kd-trees while maintaining optimal query complexity [S3, unofficial]. The method is detailed in the *Visualization Handbook* (2005) and various conference papers [S1, unofficial][S2, book]. It is widely used in scientific visualization pipelines where adaptive resolution is not required, but speed of active cell identification is critical [S2, book].
+ 
+ ## Sources

@@ -1,0 +1,137 @@
+--- v001.md
++++ v002.md
+@@ -28,5 +28,5 @@
+ 
+ 2.  **Check for Transition Requirement**:
+-    If `voxel_size_lod == 2` and any coordinate of the base position is odd (`x % 2 == 1 || y % 2 == 1 || z % 2 == 1`), set `draw_voxel = false`. This indicates the voxel is part of a transition region and should not be drawn as a standard cell [S1, unofficial]. Calculate a position offset based on parity bits [S1, unofficial].
++    If `voxel_size_lod == 2` and any coordinate of the base position is odd (`x % 2 == 1 || y % 2 == 1 || z % 2 == 1`), set `draw_voxel = false` [S1, unofficial]. Calculate a position offset based on parity bits [G].
+ 
+ 3.  **Query Neighbors**:
+@@ -46,5 +46,5 @@
+ 
+ 6.  **Compute Cell Class**:
+-    Compute `left_index` by iterating `i` from 0 to 8. For each corner, if `corner_sample[i] < iso_value`, set bit `k` in the index [S1, unofficial].
++    Compute `left_index` by iterating `i` from 0 to 8. For each corner, if `corner_sample[i] < iso_value`, set bit `k` in `left_index` [S1, unofficial].
+     
+     Copy corner samples to indices 9-12 to prepare for transition sampling:
+@@ -89,5 +89,5 @@
+ 
+ ```python
+-def transvoxel_geometry_shader(position, voxel_size, iso_value, lod_function, sample_volume, compute_gradient):
++def transvoxel_geometry_shader(position, voxel_size, iso_value, lod_function, sample_volume, compute_gradient, transitionCellClass, transitionCellData, transitionCellVertexData, transvoxel_cell_multiplier, project_transvoxel):
+     # 1. Calculate base position
+     x_base = (position.x - (position.x % 2)) * voxel_size
+@@ -100,5 +100,5 @@
+     draw_voxel = True
+     transvoxel = False
+-    transvoxel_adjust = [0, 0, 0, 0] # Assuming 4 adjustment slots
++    transvoxel_adjust = 0.0
+     
+     # 3. Check for transition requirement
+@@ -118,16 +118,15 @@
+             # 5. Determine transition adjustments
+             if lod_left < voxel_size_lod:
+-                transvoxel_adjust[0] += voxel_size
++                transvoxel_adjust += voxel_size
+                 transvoxel = True
+             if lod_right < voxel_size_lod:
+-                transvoxel_adjust[1] += voxel_size
++                transvoxel_adjust += voxel_size
+                 transvoxel = True
+             if lod_down < voxel_size_lod:
+-                transvoxel_adjust[2] += voxel_size
++                transvoxel_adjust += voxel_size
+                 transvoxel = True
+             if lod_top < voxel_size_lod:
+-                transvoxel_adjust[3] += voxel_size
+-                transvoxel = True
+-            # Note: Source mentions adding to specific indices based on neighbor direction [S1, unofficial]
++                transvoxel_adjust += voxel_size
++                transvoxel = True
+ 
+     # 6. Sample volume
+@@ -144,21 +143,14 @@
+     corner_sample[7] = sample_volume(vec3(x_base, y_base + voxel_size, z_base + voxel_size))
+     
+-    # 4 face centers (indices 1,3,5,7 in source context, mapped to specific faces)
+-    # Assuming standard face centers for a cube
+-    corner_sample[8] = sample_volume(vec3(x_base + voxel_size/2, y_base, z_base)) # Face 1?
+-    corner_sample[9] = sample_volume(vec3(x_base, y_base + voxel_size/2, z_base)) # Face 3?
+-    corner_sample[10] = sample_volume(vec3(x_base + voxel_size, y_base + voxel_size/2, z_base)) # Face 5?
+-    corner_sample[11] = sample_volume(vec3(x_base + voxel_size/2, y_base + voxel_size, z_base)) # Face 7?
++    # 4 face centers
++    corner_sample[8] = sample_volume(vec3(x_base + voxel_size/2, y_base, z_base))
++    corner_sample[9] = sample_volume(vec3(x_base, y_base + voxel_size/2, z_base))
++    corner_sample[10] = sample_volume(vec3(x_base + voxel_size, y_base + voxel_size/2, z_base))
++    corner_sample[11] = sample_volume(vec3(x_base + voxel_size/2, y_base + voxel_size, z_base))
+     
+     # 1 center
+     corner_sample[12] = sample_volume(vec3(x_base + voxel_size/2, y_base + voxel_size/2, z_base + voxel_size/2))
+     
+-    # 4 additional positions defined by transvoxel_adjust
+-    # Source says indices 9-12 are copied from 0,2,4,6 then sampled. 
+-    # This implies the "additional positions" are actually the corners being re-sampled or adjusted?
+-    # The source says: "Copy corner samples to indices 9-12... Sample the volume at positions 9-12"
+-    # This is ambiguous. It likely means the transition vertices are interpolated from corners.
+-    # We will follow the source's explicit copy and sample steps.
+-    
++    # Copy corner samples to indices 9-12 for transition sampling
+     corner_sample[9] = corner_sample[0]
+     corner_sample[10] = corner_sample[2]
+@@ -166,12 +158,7 @@
+     corner_sample[12] = corner_sample[6]
+     
+-    # Re-sample at these positions? The source says "Sample the volume at positions 9-12".
+-    # If they are just copies, sampling again yields the same value.
+-    # This step might refer to sampling at the *adjusted* positions.
+-    # Given the ambiguity, we assume the values are used as is for the class calculation.
+-    
+     # 7. Compute cell class
+     left_index = 0
+-    for i in range(0, 9):
++    for i in range(9):
+         if corner_sample[i] < iso_value:
+             left_index |= (1 << i)
+@@ -188,5 +175,5 @@
+         
+         # 10. Generate vertices
+-        for i in range(0, trans_vertex_count):
++        for i in range(trans_vertex_count):
+             vertex_index = vertex_data[i].index
+             if vertex_index == 0:
+@@ -197,20 +184,19 @@
+             # Interpolate or use endpoint
+             if sign(corner_sample[corner_1]) != sign(corner_sample[corner_2]):
+-                # Linear interpolation
+                 t = abs(corner_sample[corner_1]) / (abs(corner_sample[corner_1]) + abs(corner_sample[corner_2]))
+-                pos = lerp(positions[corner_1], positions[corner_2], t)
++                pos = lerp(get_vertex_position(corner_1, x_base, y_base, z_base, voxel_size), 
++                           get_vertex_position(corner_2, x_base, y_base, z_base, voxel_size), t)
+             else:
+-                pos = positions[corner_1] # Use endpoint if close
++                pos = get_vertex_position(corner_1, x_base, y_base, z_base, voxel_size)
+             
+             # 11. Handle Transvoxel Adjustments for standard MC
+             if transvoxel:
+-                # Compute adjusted positions
+-                a_adj = positions[corner_1] + transvoxel_adjust * transvoxel_cell_multiplier
+-                b_adj = positions[corner_2] + transvoxel_adjust * transvoxel_cell_multiplier
+-                pos = a_adj # Or interpolated adjusted position [G]
++                a_adj = get_vertex_position(corner_1, x_base, y_base, z_base, voxel_size) + transvoxel_adjust * transvoxel_cell_multiplier
++                b_adj = get_vertex_position(corner_2, x_base, y_base, z_base, voxel_size) + transvoxel_adjust * transvoxel_cell_multiplier
++                pos = lerp(a_adj, b_adj, t)
+                 
+                 # 12. Compute normals
+-                grad_a = compute_gradient(positions[corner_1])
+-                grad_b = compute_gradient(positions[corner_2])
++                grad_a = compute_gradient(get_vertex_position(corner_1, x_base, y_base, z_base, voxel_size))
++                grad_b = compute_gradient(get_vertex_position(corner_2, x_base, y_base, z_base, voxel_size))
+                 normal = lerp(grad_a, grad_b, t)
+                 normal = normalize(normal)
+@@ -224,5 +210,5 @@
+             
+         # 11. Generate triangles
+-        for i in range(0, trans_triangle_count):
++        for i in range(trans_triangle_count):
+             tri_indices = transitionCellData[trans_cell_class & 0x7F].triangles[i]
+             emit_triangle(tri_indices[0], tri_indices[1], tri_indices[2])

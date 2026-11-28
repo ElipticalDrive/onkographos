@@ -1,0 +1,153 @@
+# GPU-Based Chunk Culling via Indirect Commands
+
+Also called: Compute Shader Culling, Compute Shader Frustum Culling with Indirect Draw, Frustum culling in compute shader, GPU frustum culling, GPU-side Frustum Culling, Indirect Draw Culling, Indirect Rendering Culling
+
+## Overview
+A rendering optimization that uses a compute shader to filter visible chunks and generates indirect draw arguments on the GPU, reducing CPU-GPU synchronization overhead [S1, S2, unofficial]. It differs from CPU-side culling by moving the visibility test and command buffer population entirely to the GPU, and from general GPU-driven visibility culling by specifically targeting chunk-based mesh data and using atomic counters to compact the output command list [S1, S2, unofficial].
+
+## How it works
+**Inputs and Outputs:**
+*   **Input:** A list of chunk mesh data (bounding boxes, geometry references) and camera frustum parameters (position, plane normals/distances).
+*   **Output:** An indirect draw command buffer containing draw calls only for visible chunks.
+
+**Data Structures:**
+
+1.  **IndirectCommand** (CPU-side preparation, D3D12 style) [S1, unofficial]:
+    *   `render_resources`: Struct containing `scene_constant_buffer_index` and `chunk_constant_buffer_index`.
+    *   `index_buffer_view`: `D3D12_INDEX_BUFFER_VIEW`.
+    *   `draw_arguments`: `D3D12_DRAW_INDEXED_ARGUMENTS` struct with fields:
+        *   `IndexCountPerInstance` (uint)
+        *   `InstanceCount` (uint)
+        *   `StartIndexLocation` (uint)
+        *   `BaseVertexLocation` (int)
+        *   `StartInstanceLocation` (uint)
+
+2.  **MeshData** (GPU-side input, GLSL std430) [S2, unofficial]:
+    *   `center`: `vec3` (mesh center position).
+    *   `data1`: `uint` (packed: bits 0-2 are `normalID`, bits 3-31 are `squaresCount`).
+    *   `size`: `vec3` (bounding box half-extents or size).
+    *   `data2`: `uint` (packed: `startSquare` offset).
+
+3.  **GPUCullRenderResources** (CPU-side constants, D3D12 style) [S1, unofficial]:
+    *   `number_of_chunks`: `u32`.
+    *   `indirect_command_srv_index`: `u32`.
+    *   `output_command_uav_index`: `u32`.
+    *   `scene_constant_buffer_index`: `u32`.
+
+4.  **IndirectDrawArgs** (GPU-side output, GLSL std430) [S2, unofficial]:
+    *   `count`: `uint`.
+    *   `instanceCount`: `uint`.
+    *   `first`: `uint`.
+    *   `baseInstance`: `uint`.
+
+5.  **Uniforms** (Camera data) [S2, unofficial]:
+    *   `position`: `vec3`.
+    *   `farPlane`, `leftPlane`, `rightPlane`, `upPlane`, `downPlane`: `vec4` (xyz = plane normal, w = distance).
+
+**Numbered Steps:**
+
+1.  **CPU Preparation:**
+    *   Iterate through loaded chunks and populate a vector of `IndirectCommand` structs [S1, unofficial].
+    *   Set root constants (D3D12) or uniforms (OpenGL) with `GPUCullRenderResources` and camera frustum planes [S1, S2, unofficial].
+    *   Copy CPU data to the indirect command buffer's upload resource [S1, unofficial].
+
+2.  **GPU Culling Dispatch:**
+    *   Reset the UAV counter buffer to zero [S1, unofficial].
+    *   Transition the indirect command buffer state: `COPY_DEST` -> `UNORDERED_ACCESS` [S1, unofficial].
+    *   Dispatch the compute shader. Workgroup count is `ceil(meshData.size() / threadGroupSize)` [S2, unofficial]. One workgroup per mesh is typical [S2, unofficial].
+
+3.  **Compute Shader Execution:**
+    *   Read `MeshData` from the readonly buffer [S2, unofficial].
+    *   Reconstruct the normal vector from `data1`:
+        *   `normalID = data1 & 7u` (mask 3 bits) [S2, unofficial].
+        *   Axis index: `normalID >> 1`.
+        *   Sign: `normalID & 1u`.
+        *   Normal vector: `axis * (-2 * float(normalID & 1u) + 1)` [S2, unofficial].
+    *   Test visibility against the camera frustum [S2, unofficial]:
+        *   Check if the mesh is behind the camera relative to its normal: `dot(center - normal * size - position, normal) > 0`. If true, discard [S2, unofficial].
+        *   Check if the bounding box is outside any frustum plane (far, left, right, up, down) using `outsidePlane` [S2, unofficial].
+    *   If visible:
+        *   Atomically increment the command counter [S2, unofficial].
+        *   Write the `IndirectDrawArgs` (or equivalent draw arguments) to the output buffer at the returned index [S2, unofficial].
+
+4.  **Execution:**
+    *   Transition the indirect command buffer state: `UNORDERED_ACCESS` -> `INDIRECT_ARGUMENT` [S1, unofficial].
+    *   Issue a memory barrier for indirect commands [S2, unofficial].
+    *   Execute indirect draw using the counter offset to determine the number of commands [S1, unofficial].
+
+**Pseudocode (Compute Shader Logic):**
+
+> **Unverified code.** The code below did not pass a test run against a reference implementation, or no test fits it, so it may contain errors.
+
+```python
+# Pseudocode for the compute shader kernel
+# Inputs: meshDataBuffer (readonly), commandsBuffer (writeonly), commandsCount (atomic), 
+#         frustumPosition, farPlane, leftPlane, rightPlane, upPlane, downPlane
+
+kernel void cull_meshes(uint3 mesh_id) {
+    uint index = mesh_id.x;
+    MeshData mesh = meshDataBuffer[index];
+    
+    // Reconstruct normal
+    uint normalID = mesh.data1 & 7u;
+    uint axisIdx = normalID >> 1;
+    int sign = -2 * int(normalID & 1u) + 1;
+    vec3 normal = vec3(0.0);
+    if (axisIdx == 0) normal.x = float(sign);
+    else if (axisIdx == 1) normal.y = float(sign);
+    else normal.z = float(sign);
+    
+    // Check if facing away from camera
+    vec3 centerToPos = mesh.center - frustumPosition;
+    if (dot(centerToPos, normal) > dot(mesh.size, normal)) { // Simplified backface check based on source [S2, unofficial]
+        return;
+    }
+    
+    // Frustum culling
+    if (outsidePlane(mesh.center, mesh.size, farPlane)) return;
+    if (outsidePlane(mesh.center, mesh.size, leftPlane)) return;
+    if (outsidePlane(mesh.center, mesh.size, rightPlane)) return;
+    if (outsidePlane(mesh.center, mesh.size, upPlane)) return;
+    if (outsidePlane(mesh.center, mesh.size, downPlane)) return;
+    
+    // Write command
+    uint cmdIndex = atomicAdd(commandsCount, 1u);
+    commandsBuffer[cmdIndex] = IndirectDrawArgs(
+        mesh.data1 & 0x1FFFFFFFu, // squaresCount as count
+        1u,
+        mesh.data2,               // startSquare as first
+        0u
+    );
+}
+
+bool outsidePlane(vec3 center, vec3 size, vec4 plane) {
+    vec3 normalSign = sign(plane.xyz);
+    vec3 closestPoint = center + size * normalSign;
+    return dot(closestPoint, plane.xyz) + plane.w < 0.0;
+}
+```
+
+**Parameters:**
+*   `MAX_CHUNKS_TO_BE_DRAWN`: Maximum number of indirect draw calls per frame. Used as the second argument to `ExecuteIndirect` [S1, unofficial].
+*   `threadGroupSize`: Typically 32 or 64, depending on hardware and implementation [S2, unofficial].
+
+**Edge Cases and Pitfalls:**
+*   **Resource State Transitions:** Must strictly follow API rules (e.g., D3D12: `INDIRECT_ARGUMENT` -> `COPY_DEST` -> `UNORDERED_ACCESS` -> `INDIRECT_ARGUMENT`). Missing transitions cause validation errors or undefined behavior [S1, unofficial].
+*   **Normal Reconstruction:** Assumes `normalID >> 1` maps to axis index (0=x, 1=y, 2=z) and `normalID & 1` maps to sign [S2, unofficial].
+*   **Backface Culling:** The logic `dot(center - normal * size - position, normal) > 0` ignores meshes whose normal points away from the camera position relative to the mesh center [S2, unofficial].
+
+## Operating characteristics
+*   **Time Complexity:** O(N) for culling, where N is the number of chunks. The compute shader dispatch is parallelized.
+*   **Memory Complexity:** O(N) for storing the indirect command buffer and mesh data.
+*   **Performance:** Reduces CPU-GPU synchronization overhead by eliminating CPU-side frustum culling and command buffer population [S1, S2, unofficial].
+*   **Strengths:** Efficient for large scenes with many chunks; minimal CPU intervention [S1, S2, unofficial].
+*   **Limitations:** Requires GPU support for indirect drawing and compute shaders; overhead of buffer management and state transitions [S1, unofficial].
+*   **When to use:** Large voxel terrains or chunk-based scenes where culling is a bottleneck [S1, S2, unofficial].
+*   **When not to use:** Small scenes where CPU culling is sufficient; hardware without indirect draw support.
+
+## Background
+Originating from implementations in voxel engines and terrain renderers, this technique leverages modern GPU capabilities (compute shaders, indirect drawing) to optimize rendering [S1, S2, unofficial]. It is commonly used in real-time voxel rendering applications [S1, S2, unofficial].
+
+## Sources
+[S1] rtarun9/voxel-engine, https://github.com/rtarun9/voxel-engine, fetched 2026-10-27 (unofficial)
+[S2] Gamengineer314/GLVoxelTerrain, https://github.com/Gamengineer314/GLVoxelTerrain, fetched 2026-10-27 (unofficial)

@@ -1,0 +1,211 @@
+# Volume Rendering (Single Scattering Stratified)
+
+Also called: Homogenous volume rendering, Participating media rendering, Single Scattering Stratified Sampling
+
+## Overview
+This method renders participating media (fog, smoke, smog) by numerically integrating the radiance transfer equation along view rays using stratified sampling [S1, unofficial]. It solves the problem of light attenuation and in-scattering in volumetric scenes by decomposing the rendering equation into separate attenuation and augmentation terms, estimating the latter via single scattering from direct light sources [S1, unofficial]. It is distinguished from general single scattering methods by its use of stratified sampling to reduce variance in the 1D light transfer integral, and from multiple scattering methods by its neglect of indirect lighting contributions [S1, unofficial].
+
+## How it works
+**Inputs and Outputs**
+*   **Inputs:** View ray origin $\mathbf{o}$ and direction $\mathbf{d}$; media properties (attenuation coefficient $\sigma_t$, scattering coefficient $\sigma_s$, emission $L_e$, phase function $p$); light source positions and intensities; step size $\Delta t$ for ray marching.
+*   **Outputs:** Final radiance $L$ at the camera pixel.
+
+**Data Structures**
+*   **Ray Segment:** Defined by start parameter $t_{start}$, end parameter $t_{end}$, and length $\Delta t = t_{end} - t_{start}$.
+*   **Sample Point:** A position $\mathbf{x} = \mathbf{o} + t \mathbf{d}$ within the segment, determined by a stratified offset.
+*   **Accumulators:**
+    *   `mask` (float): Accumulated transmittance $T$. Initialized to 1.0.
+    *   `color` (vector): Accumulated in-scattered radiance. Initialized to 0.
+
+**Formulas**
+1.  **Radiance Transfer Equation:**
+    $$ \frac{dL}{ds} = -\sigma_t L + \sigma_s \int_{4\pi} p(\omega, \omega') L(\omega') d\omega' + L_e $$
+    Where $\sigma_t$ is the attenuation coefficient (absorption + out-scattering), $\sigma_s$ is the scattering coefficient, $p$ is the phase function, and $L_e$ is media emission [S1, unofficial].
+2.  **Homogenous Attenuation (Beer's Law):**
+    $$ T(s) = \exp(-\sigma_t s) $$
+    Derived from solving $\frac{dT}{ds} = -\sigma_t T$ [S1, unofficial].
+3.  **Henyey-Greenstein Phase Function:**
+    $$ p(\cos \theta) = \frac{1}{4\pi} \frac{1 - g^2}{(1 + g^2 - 2g \cos \theta)^{3/2}} $$
+    Where $g$ is the asymmetry parameter ranging from -1 to 1 (e.g., 0.7 for forward scattering) [S1, unofficial]. For isotropic media, $p = \frac{1}{4\pi}$ [S1, unofficial].
+4.  **Rendering Equation Decomposition:**
+    $$ L = T \cdot L_{background} + \int_{t_{near}}^{t_{far}} T(t) \left( \sigma_s \int_{4\pi} p L_{incident} d\omega' + L_e \right) dt $$
+    Computed as: `color` += `mask` * `augmentation_term` * $\Delta t$; `mask` *= `transmittance` [S1, unofficial].
+
+**Parameters**
+*   **Step Size ($\Delta t$):** Determines ray marching resolution. Smaller values increase accuracy but cost more [S1, unofficial].
+*   **Asymmetry Parameter ($g$):** Controls scattering polarity. $g=0$ is isotropic, $g>0$ is forward, $g<0$ is backward [S1, unofficial].
+
+**Numbered Steps**
+1.  **Initialize:** Set `mask` = 1.0, `color` = 0. Generate a random stratified offset for the current ray.
+2.  **Ray Marching Loop:** For each segment along the view ray from $t_{near}$ to $t_{far}$ with step size $\Delta t$:
+    a.  **Calculate Transmittance:** Compute $T_{seg} = \exp(-\sigma_t \Delta t)$ assuming homogenous media within the segment [S1, unofficial].
+    b.  **Update Mask:** `mask` = `mask` * $T_{seg}$ [S1, unofficial].
+    c.  **Estimate Augmentation (In-scattering):**
+        i.  Determine sample position $\mathbf{x}$ within the segment using the stratified offset.
+        ii. Perform Next Event Estimation (NEE): For each light source, shoot a shadow ray from $\mathbf{x}$ to the light.
+        iii. If visible, calculate incident radiance $L_{incident}$ from the light.
+        iv. Evaluate phase function $p(\omega_{light}, \omega_{view})$ at $\mathbf{x}$ [S1, unofficial].
+        v.  Compute `augmentation_term` = $\sigma_s \cdot p \cdot L_{incident} + L_e$ [S1, unofficial].
+        vi. `color` = `color` + `mask` * `augmentation_term` * $\Delta t$ [S1, unofficial].
+    d.  **Advance:** Increment $t$ by $\Delta t$. Generate a new random offset for the next ray (stratified sampling resets per ray) [S1, unofficial].
+3.  **Composite:** Add `mask` * `background_color` to `color` [S1, unofficial].
+4.  **Output:** Return `color`.
+
+**Edge Cases and Pitfalls**
+*   **Indirect Lighting:** This method neglects indirect lighting in in-scattering. This is acceptable as indirect contributions are often weak, but causes inaccuracies in highly reflective or enclosed scenes [S1, unofficial].
+*   **Precision:** Using exponential functions for transmittance requires care with very small $\sigma_t \Delta t$ to avoid precision loss, though standard `exp` is usually sufficient [S1, unofficial].
+*   **Homogeneity Assumption:** The Beer's law application assumes constant coefficients within $\Delta t$. If media density varies rapidly, $\Delta t$ must be small enough to approximate homogeneity [S1, unofficial].
+
+**Pseudocode**
+> **Unverified code.** The code below did not pass a test run against a reference implementation, or no test fits it, so it may contain errors.
+
+```python
+import math
+import random
+
+def heney_greenstein(cos_theta, g):
+    """
+    Henyey-Greenstein phase function.
+    cos_theta: cosine of the angle between incident and view direction.
+    g: asymmetry parameter (-1 to 1).
+    """
+    if abs(1 - g * g) < 1e-9:
+        return 1.0 / (4.0 * math.pi)
+    denom = 1 + g * g - 2 * g * cos_theta
+    if denom < 1e-9:
+        denom = 1e-9
+    return (1 - g * g) / (4 * math.pi * (denom ** 1.5))
+
+def volume_render_single_scattering_stratified(ray_origin, ray_dir, media_sigma_t, media_sigma_s, media_L_e, lights, step_size, background_color):
+    """
+    Renders volume using single scattering and stratified sampling.
+    """
+    mask = 1.0
+    color = [0.0, 0.0, 0.0]
+    
+    # Generate random offset for stratified sampling for this ray
+    # The offset is uniform in [0, step_size)
+    offset = random.uniform(0, step_size)
+    
+    t = 0.0
+    while t < 100.0: # Arbitrary far plane limit
+        # Determine segment bounds
+        t_start = t
+        t_end = t + step_size
+        
+        # Calculate transmittance for this segment (Beer's Law)
+        # T = exp(-sigma_t * s)
+        transmittance_seg = math.exp(-media_sigma_t * step_size)
+        
+        # Update accumulated mask
+        mask *= transmittance_seg
+        
+        # Calculate sample point within segment using stratified offset
+        # The offset is applied relative to the start of the segment
+        # Note: In strict stratified sampling for 1D integral, 
+        # we might use a fixed offset pattern or randomize per ray.
+        # Source says: "assigns same offset for each segment and randomizes 
+        # the offset for a new ray". This implies the offset is constant 
+        # across segments for a single ray, or reset per ray.
+        # We use the ray-level offset.
+        t_sample = t_start + offset
+        
+        # Clamp sample to segment
+        if t_sample > t_end:
+            t_sample = t_end
+            
+        # Position of sample
+        sample_pos = [
+            ray_origin[0] + t_sample * ray_dir[0],
+            ray_origin[1] + t_sample * ray_dir[1],
+            ray_origin[2] + t_sample * ray_dir[2]
+        ]
+        
+        # Estimate augmentation term (In-scattering + Emission)
+        augmentation = [0.0, 0.0, 0.0]
+        
+        # Add emission
+        augmentation[0] += media_L_e[0]
+        augmentation[1] += media_L_e[1]
+        augmentation[2] += media_L_e[2]
+        
+        # Single scattering from direct lights (Next Event Estimation)
+        for light in lights:
+            # Vector to light
+            light_dir = [
+                light.pos[0] - sample_pos[0],
+                light.pos[1] - sample_pos[1],
+                light.pos[2] - sample_pos[2]
+            ]
+            dist_to_light = math.sqrt(light_dir[0]**2 + light_dir[1]**2 + light_dir[2]**2)
+            
+            # Normalize
+            if dist_to_light < 1e-9:
+                continue
+            light_dir_norm = [d / dist_to_light for d in light_dir]
+            
+            # Shadow ray check
+            # Simple implementation: assume visible if no occlusion check provided
+            # In a real engine, this would involve a ray-march or BVH query
+            is_visible = True # Placeholder for shadow ray logic
+            
+            if is_visible:
+                # Cosine of phase function angle
+                # Angle between view direction (ray_dir) and light direction (light_dir_norm)
+                # Note: ray_dir is incoming to surface, light_dir_norm is outgoing from sample to light
+                # Phase function usually takes angle between incoming light and outgoing view
+                # Here, view direction is -ray_dir (from sample to camera)
+                # Light direction is light_dir_norm (from sample to light)
+                # Dot product of (-ray_dir) and light_dir_norm
+                cos_theta = - (ray_dir[0]*light_dir_norm[0] + ray_dir[1]*light_dir_norm[1] + ray_dir[2]*light_dir_norm[2])
+                
+                # Evaluate phase function
+                # g is assumed to be a property of the media, e.g., 0.7
+                g = 0.7 
+                phase = heney_greenstein(cos_theta, g)
+                
+                # Incident radiance from light
+                # L_incident = light.intensity / dist^2 (simplified point light)
+                incident_L = light.intensity / (dist_to_light ** 2)
+                
+                # Add to augmentation: sigma_s * p * L_incident
+                augmentation[0] += media_sigma_s * phase * incident_L[0]
+                augmentation[1] += media_sigma_s * phase * incident_L[1]
+                augmentation[2] += media_sigma_s * phase * incident_L[2]
+        
+        # Accumulate color
+        # color += mask * augmentation * delta_t
+        color[0] += mask * augmentation[0] * step_size
+        color[1] += mask * augmentation[1] * step_size
+        color[2] += mask * augmentation[2] * step_size
+        
+        # Advance ray
+        t += step_size
+        
+        # Stratified sampling note: 
+        # "assigns same offset for each segment" -> offset is constant for the ray.
+        # "randomizes the offset for a new ray" -> offset is regenerated per ray.
+        # So we do NOT change offset here.
+        
+    # Composite with background
+    color[0] += mask * background_color[0]
+    color[1] += mask * background_color[1]
+    color[2] += mask * background_color[2]
+    
+    return color
+```
+
+## Operating characteristics
+*   **Time Complexity:** $O(N \cdot L)$, where $N$ is the number of ray march steps and $L$ is the number of light sources. Each step requires a shadow ray cast to each light.
+*   **Memory Complexity:** $O(1)$ auxiliary space per ray, excluding scene data structures for lights and media.
+*   **Measured Performance:** Performance is heavily dependent on scene density and number of lights. Stratified sampling reduces variance, allowing for fewer samples per pixel compared to standard Monte Carlo, but the single-scattering approximation limits visual fidelity in dense media [S1, unofficial].
+*   **Strengths:** Physically plausible for thin to medium density media; efficient due to single scattering approximation; stratified sampling provides smoother results than naive Monte Carlo [S1, unofficial].
+*   **Limitations:** Neglects indirect lighting, leading to dark shadows and lack of color bleeding in dense scenes; assumes homogeneity within step size; computationally expensive for many lights due to NEE [S1, unofficial].
+*   **When to Use:** Real-time or interactive rendering of fog, smoke, or clouds where indirect lighting is negligible or can be approximated by ambient terms.
+*   **When Not to Use:** Dense, optically thick media where multiple scattering dominates; scenes requiring accurate global illumination within the volume.
+
+## Background
+The method is based on the integro-differential equation of transfer for participating media, originally described by Chandrasekhar (1960) [S1, unofficial]. The use of the Henyey-Greenstein phase function dates to Henyey and Greenstein (1941) [S1, unofficial]. The specific application of stratified sampling for volume rendering to reduce variance in the 1D light transfer integral is attributed to Pauly (1999) [S1, unofficial]. This approach is a standard technique in computer graphics for rendering participating media, often implemented in real-time engines and offline renderers for effects like fog and smoke [S1, unofficial].
+
+## Sources
+[S1] [GAPT Series - 10] Rendering Effects - Daqi's Blog, https://dqlin.xyz/tech/2017/06/30/10_fx/, fetched 2026-10-29 (unofficial)

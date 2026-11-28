@@ -1,0 +1,103 @@
+# DenseVoxelDraw FrontPeek
+
+Also called: DenseVoxelDraw Front, FrontPeek
+
+## Overview
+DenseVoxelDraw FrontPeek is a front-view rendering method that iterates through every pixel column of the X-Z plane and casts a ray along the Y-axis to find the first visible voxel, stopping at the first non-zero entry [S1, unofficial]. It extends the standard Front method by adding scaling and a 'peek' capability, drawing top and front faces when a voxel is on the top boundary or has empty space above it [S1, unofficial].
+
+## How it works
+**Inputs and Outputs:**
+*   **Input:** A 3D byte array `model` with dimensions `SizeX`, `SizeY`, and `SizeZ` [S1, unofficial].
+*   **Parameters:** `scaleX` (horizontal scaling factor, default 6), `scaleY` (vertical scaling factor, default 6), and `VisibleFace` (enum indicating the rendered face, default `VisibleFace.Front`) [S1, unofficial].
+*   **Output:** Screen-space rectangles drawn via a drawing primitive [S1, unofficial].
+
+**Data Structures:**
+*   `model`: Indexed as `model[x, y, z]` [S1, unofficial].
+*   Coordinate mapping: `x` maps to screen X, `z` maps to screen Y (inverted), and `y` is the ray direction [S1, unofficial]. Screen Y is calculated as `(SizeZ - 1 - z) * scaleY` [S1, unofficial].
+
+**Parameters:**
+*   `scaleX`: Horizontal scaling factor. Default: 6 [S1, unofficial].
+*   `scaleY`: Vertical scaling factor. Default: 6 [S1, unofficial].
+*   `VisibleFace`: Enum for face selection. Default: `VisibleFace.Front` [S1, unofficial].
+
+**Steps:**
+1.  Initialize outer loop `z` from 0 to `SizeZ - 1` [S1, unofficial].
+2.  Initialize middle loop `x` from 0 to `SizeX - 1` [S1, unofficial].
+3.  Initialize inner loop `y` from 0 to `SizeY - 1` [S1, unofficial].
+4.  Check if `model[x, y, z]` is a non-zero byte [S1, unofficial].
+5.  If a non-zero voxel is found, calculate screen coordinates `screen_x = x * scaleX` and `screen_y = (SizeZ - 1 - z) * scaleY` [S1, unofficial].
+6.  Evaluate the peek condition: `z >= SizeZ - 1` OR `model[x, y, z+1] == 0` [S1, unofficial].
+7.  If the condition is true, draw a top face rectangle at `(screen_x, screen_y)` with width `scaleX` and height 1, followed by a front face rectangle at `(screen_x, screen_y + 1)` with width `scaleX` and height `scaleY - 1` [S1, unofficial].
+8.  Otherwise, draw a single front face rectangle at `(screen_x, screen_y)` with width `scaleX` and height `scaleY` [S1, unofficial].
+9.  Break the inner loop to stop casting the ray along the Y-axis [S1, unofficial].
+
+**Pseudocode:**
+> **Unverified code.** The code below did not pass a test run against a reference implementation, or no test fits it, so it may contain errors.
+
+```python
+def draw_rect(x, y, w, h):
+    """Standard drawing primitive for screen-space rectangles [G]."""
+    pass
+
+def DenseVoxelDrawFrontPeek(model, scaleX=6, scaleY=6, visible_face="Front"):
+    size_x = model.SizeX
+    size_y = model.SizeY
+    size_z = model.SizeZ
+
+    for z in range(size_z):
+        for x in range(size_x):
+            for y in range(size_y):
+                if model[x, y, z] != 0:
+                    screen_x = x * scaleX
+                    screen_y = (size_z - 1 - z) * scaleY
+
+                    # Peek condition: top boundary or empty space above in Z
+                    is_top_boundary = (z >= size_z - 1)
+                    has_empty_above = False
+                    if not is_top_boundary:
+                        has_empty_above = (model[x, y, z + 1] == 0)
+
+                    if is_top_boundary or has_empty_above:
+                        draw_rect(screen_x, screen_y, scaleX, 1)
+                        draw_rect(screen_x, screen_y + 1, scaleX, scaleY - 1)
+                    else:
+                        draw_rect(screen_x, screen_y, scaleX, scaleY)
+
+                    break
+```
+
+**Edge Cases and Pitfalls:**
+*   **Boundary Access:** The condition `model[x, y, z+1]` accesses the next Z index. The short-circuit evaluation `z >= SizeZ - 1 or ...` prevents out-of-bounds access when `z` is at the maximum index [S1, unofficial].
+*   **Degenerate Scaling:** If `scaleY` is 1, the front face rectangle height becomes 0. If `scaleY` is 0, the entire draw call produces a zero-area rectangle. Default is 6 [S1, unofficial].
+*   **Coordinate System:** The method assumes a fixed front-view projection where `z` increases downward on screen (inverted Y), and `y` is the viewing direction [S1, unofficial].
+
+## Operating characteristics
+**Time and Memory Complexity:**
+*   **Time:** $O(N)$ in the worst case (empty volume or all zeros), but typically $O(C)$ where $C = SizeX \times SizeZ$ is the number of pixel columns, as the inner loop breaks on the first hit [S1, unofficial].
+*   **Memory:** $O(1)$ auxiliary memory, excluding the voxel model storage [S1, unofficial].
+
+**Measured Performance:**
+*   Not given in the sources.
+
+**Scaling:**
+*   Scales linearly with the number of pixel columns ($SizeX \times SizeZ$) and linearly with the scaling factors for output resolution [S1, unofficial].
+
+**Strengths and Limitations:**
+*   **Strengths:** Simple iteration order, fast for sparse or front-heavy volumes, provides structural visibility via the peek capability [S1, unofficial].
+*   **Limitations:** Renders only the front-most voxel per column, no depth cueing, transparency, or occlusion handling beyond the first hit [S1, unofficial].
+
+**When to Use:**
+*   Fast voxel previews, debugging, and visualization where performance is critical and full ray-marching is unnecessary [S1, unofficial].
+
+## Background
+**Origin:**
+*   The method originates from the Voxel2Pixel graphics library [S1, unofficial].
+
+**History and Development:**
+*   Developed as a lightweight alternative to standard front-facing voxel renderers, adding diagonal peek capability through conditional face splitting [S1, unofficial].
+
+**Where it is Used:**
+*   Debugging and visualization of voxel data [S1, unofficial].
+
+## Sources
+[S1] GitHub - BenMcLean/Voxel2Pixel: Graphics library for rendering voxel data, https://github.com/BenMcLean/Voxel2Pixel, fetched 2026-10-29 (unofficial)

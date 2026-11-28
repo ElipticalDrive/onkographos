@@ -1,0 +1,63 @@
+# GS-IR
+Also called: 3D Gaussian Splatting for Inverse Rendering, Inverse Rendering with Gaussians
+
+## Overview
+GS-IR is an inverse rendering approach based on 3D Gaussian Splatting that leverages forward mapping volume rendering to achieve photorealistic novel view synthesis and relighting results, estimating scene geometry, surface material, and environment illumination from multi-view images captured under unknown lighting conditions [S1]. It sets itself apart from NeRF-based inverse rendering methods by using 3D Gaussians and forward mapping splatting for real-time rendering efficiency, avoiding the low expressive power and high computational complexity of implicit neural representations [S1]. Unlike sibling methods that may rely on ray tracing for occlusion, GS-IR handles occlusion via a baking-based cache, making it available for both objects and unbounded scenes [S1].
+
+## How it works
+The GS-IR framework consists of three stages: 1) Initial stage: optimize 3D Gaussians for geometry reconstruction using differentiable splatting and supervise normals using depth gradients; 2) Second stage: precompute occlusion based on learned geometry (depth and normal) and store it in a spherical harmonics-based architecture to model indirect illumination; 3) Final stage: combine differentiable splatting with the physical-based rendering (PBR) pipeline to optimize illumination and material-aware 3D Gaussians [S1].
+
+**Inputs and Outputs:**
+*   **Inputs:** Multi-view images captured under unknown lighting conditions [S1].
+*   **Outputs:** Optimized 3D Gaussians with geometry (position, covariance, opacity), normals, material parameters (albedo, metallic, roughness), and an environment map for lighting [S1][S2, unofficial].
+
+**Data Structures:**
+Each Gaussian $i$ extends the standard 3D Gaussian representation defined in [3D Gaussian Splatting Implementation Details](9128-3d-gaussian-splatting-implementation-details.md) with additional fields for inverse rendering [S1][S2, unofficial]:
+*   Mean position $\mu_i \in \mathbb{R}^3$ [G]
+*   Covariance matrix $\Sigma_i \in \mathbb{R}^{3 \times 3}$, decomposed into scaling $S$ and rotation $R$ [G]
+*   Opacity $\alpha_i$ [G]
+*   Color $c_i$, modeled via Spherical Harmonics coefficients [G]
+*   Normal $n_i$, estimated via depth derivation [S1]
+*   Material parameters (Albedo, Metallic, Roughness) for texture representation [S2, unofficial]
+*   Spherical Harmonics coefficients for indirect illumination/occlusion caching [S1]
+
+**Numbered Steps:**
+1.  **Initial Stage: Geometry and Normal Optimization**
+    *   Optimize 3D Gaussians using differentiable splatting to reconstruct geometry [S1].
+    *   Address the challenge that 3DGS does not support producing plausible normals natively and its adaptive control may lead to loose geometry [S1].
+    *   Introduce a depth-derivation-based regularization strategy: render a depth map $\hat{D}$, compute pseudo-normals $\hat{n}_D = \nabla_{uv} \hat{D}$, and use these to supervise the optimization of normals within the 3D Gaussians [S1].
+2.  **Second Stage: Occlusion Baking**
+    *   Address the challenge that forward mapping cannot trace occlusion like backward mapping [S1].
+    *   Precompute occlusion based on the learned geometric information (depth and normal) [S1].
+    *   Store occlusion in a spherical harmonics-based architecture to model indirect illumination, inspired by the "Indirect Lighting Cache" used in real-time rendering [S1].
+    *   *Note: Specific implementation details for the SH-based occlusion baking pipeline are not given in the sources.*
+3.  **Final Stage: Material and Lighting Optimization**
+    *   Combine differentiable splatting with the physical-based rendering (PBR) pipeline [S1].
+    *   Optimize material-aware 3D Gaussians (Albedo, Metallic, Roughness) and the environment map (lighting) [S1][S2, unofficial].
+    *   Lighting is approximated by a learnable environment map [S2, unofficial].
+
+**Formulas:**
+*   Gaussian function: $g(x|\mu, \Sigma) = e^{-\frac{1}{2}(x-\mu)^\top \Sigma^{-1} (x-\mu)}$ [S1].
+*   Pseudo-normal derivation: $\hat{n}_D = \nabla_{uv} \hat{D}$ [S1].
+
+**Parameters:**
+*   Not given in the sources.
+
+**Edge Cases and Pitfalls:**
+*   3DGS does not support producing plausible normals natively [S1].
+*   Forward mapping cannot trace occlusion like backward mapping [S1].
+*   3DGS adaptive control of Gaussian density may lead to loose geometry, making it difficult to estimate accurate scene normals [S1].
+
+## Operating characteristics
+*   **Time and Memory Complexity:** Not given in the sources.
+*   **Measured Performance:** Not given in the sources.
+*   **Scaling:** Not given in the sources.
+*   **Strengths and Limitations:** GS-IR improves rendering efficiency compared to NeRF-based methods by using forward mapping splatting [S1]. It handles occlusion via baking, making it available for both objects and unbounded scenes, unlike TensoIR which is limited to object-level [S1].
+*   **When to use it and when not:** Use when real-time rendering efficiency is required and the scene is unbounded or object-level [S1]. Not suitable when ray-traced occlusion is strictly necessary for high-fidelity indirect lighting without baking approximations [S1].
+
+## Background
+GS-IR was proposed by researchers from the School of Data Science, The Chinese University of Hong Kong, Shenzhen, and Tencent [S1]. It is the first work to introduce the 3DGS technique for inverse rendering, simultaneously estimating scene geometry, materials, and illumination from multi-view images [S1]. The source code is available at https://github.com/lzhnb/GSIR [S1].
+
+## Sources
+[S1] GS-IR: 3D Gaussian Splatting for Inverse Rendering, https://doi.org/10.1109/cvpr52733.2024.02045, fetched 2026-10-26
+[S2] PDF Recent advances in 3D Gaussian splatting - Springer, https://link.springer.com/content/pdf/10.1007/s41095-024-0436-y.pdf, fetched 2026-10-29 (unofficial)

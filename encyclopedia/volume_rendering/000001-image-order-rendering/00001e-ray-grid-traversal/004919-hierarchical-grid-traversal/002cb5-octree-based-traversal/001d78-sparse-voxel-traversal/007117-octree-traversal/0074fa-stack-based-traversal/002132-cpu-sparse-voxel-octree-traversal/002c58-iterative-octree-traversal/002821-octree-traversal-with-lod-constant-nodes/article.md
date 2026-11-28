@@ -1,0 +1,107 @@
+# Octree Traversal with LOD & Constant Nodes
+
+Also called: Octree Brick Traversal with LOD & Constant Nodes, VoxViz Traversal, main traversal loop
+
+## Overview
+This method renders a Sparse Voxel Octree (SVO) on the CPU by traversing the hierarchy to project voxels into a color buffer, using depth-sorted traversal and hierarchical culling based on projected size [S1, unofficial]. It distinguishes itself from sibling methods by supporting Level of Detail (LOD) switching between constant-value nodes and textured bricks [S1, unofficial]. It builds on [Iterative Octree Traversal](2618-iterative-octree-traversal.md) by adding specific logic for constant node handling and brick texture sampling [S1, unofficial].
+
+## How it works
+
+### Inputs and Outputs
+**Inputs:**
+*   `root_node`: Root of the Sparse Voxel Octree.
+*   `ray_origin`, `ray_dir`: Ray position and direction in world space.
+*   `config`: Rendering configuration containing thresholds and scalars.
+*   `fb`: Framebuffer for output.
+
+**Outputs:**
+*   `fb`: Updated color buffer with rendered voxels.
+
+### Data Structures
+Exact node layouts, field sizes, and bit packing are not given in the sources.
+
+### Parameters
+*   `k_MaxNodesPerPixel = 12` [S1, unofficial].
+*   `k_NumNodeLists = 3` [S1, unofficial].
+*   `k_NumComponentsPerList = 4` [S1, unofficial].
+*   `LodScalar`: Scalar for LOD calculation [S1, unofficial].
+*   `k_BrickStepSizeScalar`: Scalar for brick step size calculation [S1, unofficial].
+*   `OctTreeDepthMinusOne`: Constant derived from tree depth [S1, unofficial].
+*   `RayStepSize`: Base step size for ray marching [S1, unofficial].
+
+### Algorithm Steps
+1.  Initialize traversal at root: `octTreeNodePtr = ivec3(0)`, fetch root node, set `nodeExtentMin/Max` to volume bounds, `nodeSize = 1.0f`, `voxelHalfSize = RootVoxelHalfSize` [S1, unofficial].
+2.  Compute projected voxel size: `projVoxelSize = ComputeVoxelSize(rayWorldPosition, voxelHalfSize) * LodScalar` [S1, unofficial].
+3.  LOD Decision: The condition `PixelSize > projVoxelSize` triggers LOD switching [S1, unofficial].
+4.  Constant Node Handling: If constant: compute `sampleRatio = pow(k_BrickStepSizeScalar, OctTreeDepthMinusOne - curDepth)`, fetch constant value, call `TraverseConstant` [S1, unofficial].
+5.  Textured Brick Handling: If textured: compute `sampleRatio = pow(k_BrickStepSizeScalar, OctTreeDepthMinusOne - curBrickDepth)`, compute `worldRayStep = rayDir * RayStepSize * sampleRatio`, call `TraverseBrick` [S1, unofficial].
+
+### Pseudocode
+> **Unverified code.** The code below did not pass a test run against a reference implementation, or no test fits it, so it may contain errors.
+
+```python
+def traverse_octree(root_node, ray_origin, ray_dir, config):
+    oct_tree_node_ptr = (0, 0, 0)
+    node = root_node
+    node_extent_min = config.volume_bounds_min
+    node_extent_max = config.volume_bounds_max
+    node_size = 1.0
+    voxel_half_size = config.root_voxel_half_size
+    cur_depth = 0
+    cur_brick_depth = 0
+    stack = [(node, cur_depth, cur_brick_depth, 0.0)]
+
+    while stack:
+        node, cur_depth, cur_brick_depth, t = stack.pop()
+
+        proj_voxel_size = compute_voxel_size(ray_origin, voxel_half_size) * config.LodScalar
+
+        if config.PixelSize > proj_voxel_size:
+            # LOD switching triggers here
+            pass
+
+        if node.is_constant():
+            sample_ratio = config.k_BrickStepSizeScalar ** (config.OctTreeDepthMinusOne - cur_depth)
+            constant_value = node.data.color
+            # TraverseConstant: fetch constant value and apply [S1, unofficial]
+        else:
+            sample_ratio = config.k_BrickStepSizeScalar ** (config.OctTreeDepthMinusOne - cur_brick_depth)
+            world_ray_step = ray_dir * config.RayStepSize * sample_ratio
+            # TraverseBrick: sample textured brick along world ray step [S1, unofficial]
+
+        children = get_sorted_children(node, ray_origin)
+        for child in children:
+            stack.append((child, cur_depth + 1, cur_brick_depth + 1, t))
+
+def compute_voxel_size(ray_pos, voxel_half_size):
+    return voxel_half_size / max(1.0, ray_pos.z)
+
+def get_sorted_children(node, eye):
+    stem = node.center
+    diff = eye - stem
+    a = (abs(diff.x), abs(diff.y), abs(diff.z))
+    if a[0] > a[1] and a[0] > a[2]:
+        order = 0
+    elif a[1] > a[2]:
+        order = 1
+    else:
+        order = 2
+    return sorted(node.children, key=lambda c: dot(c.center - eye, eye))
+```
+
+### Edge Cases and Pitfalls
+*   **LOD Interpolation**: The condition `PixelSize > projVoxelSize` triggers LOD switching, but the source code shows commented-out interpolation logic (`TraverseBrickInterp`) intended to blend between parent/child bricks [S1, unofficial]. This blending is not implemented, potentially causing visual artifacts at LOD boundaries [S1, unofficial].
+
+## Subtopics
+
+### [Sparse Voxel Octree CPU Rasterizer](5183-sparse-voxel-octree-cpu-rasterizer.md)
+A CPU-based rasterizer that traverses a Sparse Voxel Octree (SVO) to render voxels directly into a color buffer, utilizing depth-sorted traversal and hierarchical culling strategies that switch between rectangle and point primitives based on projected depth. It distinguishes itself from GPU-based SVO renderers by performing the entire traversal and rasterization pipeline on the CPU, relying on a flat node array and explicit stack management for memory efficiency.
+
+## Operating characteristics
+Time and memory complexity are not given in the sources. The method uses a fixed maximum of 12 nodes per pixel (`k_MaxNodesPerPixel = 12`) to control traversal overhead [S1, unofficial]. Strengths include LOD switching between constant and textured nodes and efficient culling using projected size thresholds [S1, unofficial]. Limitations include the lack of LOD interpolation, which may cause visual artifacts at LOD boundaries, and CPU-bound execution, which can be slower than GPU-based ray marching for very large datasets [S1, unofficial].
+
+## Background
+This method originates from the VoxViz project, a CPU-based rasterizer for Sparse Voxel Octrees [S1, unofficial]. The traversal logic is designed to handle both constant-value nodes (for distant or low-detail rendering) and textured bricks (for high-detail rendering), with LOD switching based on projected voxel size [S1, unofficial].
+
+## Sources
+[S1] apecoraro/VoxVizThesis, https://github.com/apecoraro/VoxVizThesis, fetched 2026-10-27 (unofficial)

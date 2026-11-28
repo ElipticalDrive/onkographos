@@ -1,0 +1,95 @@
+--- v002.md
++++ v003.md
+@@ -23,5 +23,5 @@
+ 
+ 2. **Fetch Samples and Flags:**
+-   For each contributing tile $T_i$ (where $i \in \{x, y, z\}$), fetch the color $c_i$ and the interpolated alpha flag $\alpha_i$ at the projection of $P$ onto the tile face [S1]. If a sample is undefined (e.g., in boundary-leaves or n-leaves interior where the surface does not cover the entire tile), fill the undefined color by reading from the neighboring leaf tile [S1]. The flag $\alpha_i$ is interpolated using hardware bilinear filtering. It equals 1 if the tile contains proper samples for the surface and drops to 0 when irrelevant [S1].
++   For each contributing tile $T_i$ (where $i \in \{x, y, z\}$), fetch the color $c_i$ and the interpolated alpha flag $\alpha_i$ at the projection of $P$ onto the tile face [S1]. If a sample is undefined (e.g., in boundary-leaves or n-leaves interior where the surface does not cover the entire tile), fill the undefined color by reading from the neighboring leaf tile [S1]. The flag $\alpha_i$ is interpolated using hardware bilinear filtering [S1]. It equals 1 if the tile contains proper samples for the surface and drops to 0 when irrelevant [S1].
+ 
+ 3. **Compute Dampening Factors:**
+@@ -33,5 +33,5 @@
+ 
+ 4. **Compute Weights:**
+-   Calculate the weights $w_x, w_y, w_z$ using the dampened flags. Add a small epsilon $\epsilon$ to $\alpha_i$ to avoid division by zero [S1]:
++   Calculate the weights $w_x, w_y, w_z$ using the dampened flags [S1]. Add a small epsilon $\epsilon$ to $\alpha_i$ to avoid division by zero [S1]:
+    $$
+    w_x = \frac{\alpha_x d_x (1 - \alpha_y d_y) (1 - \alpha_z d_z)}{\alpha_x d_x (1 - \alpha_y d_y) (1 - \alpha_z d_z) + \alpha_y d_y (1 - \alpha_z d_z) (1 - \alpha_x d_x) + \alpha_z d_z (1 - \alpha_x d_x) (1 - \alpha_y d_y)}
+@@ -60,38 +60,39 @@
+     max_abs_n = max(abs(nx), abs(ny), abs(nz))
+     if max_abs_n == 0:
+-        max_abs_n = 1e-6
++        max_abs_n = 1e-6  # [G] Guard against zero-length normal
+         
+-    # 1. Identify contributing tiles based on normal
+-    tiles = []
+-    if abs(nx) >= abs(ny) and abs(nx) >= abs(nz): tiles.append(tile_tree.get_tile_x(point_p))
+-    if abs(ny) >= abs(nx) and abs(ny) >= abs(nz): tiles.append(tile_tree.get_tile_y(point_p))
+-    if abs(nz) >= abs(nx) and abs(nz) >= abs(ny): tiles.append(tile_tree.get_tile_z(point_p))
++    # 1. Identify contributing tiles based on normal axes
++    tile_x = tile_tree.get_tile_x(point_p)
++    tile_y = tile_tree.get_tile_y(point_p)
++    tile_z = tile_tree.get_tile_z(point_p)
+     
+     # 2. Fetch samples and flags
+-    colors = []
+-    flags = []
+-    for tile in tiles:
+-        c, alpha = tile.bilinear_interpolate(point_p)
+-        if c is None:
+-            c = tile.neighbor_sample(point_p)
+-        colors.append(c)
+-        flags.append(alpha)
+-        
++    c_x, alpha_x = tile_x.bilinear_interpolate(point_p)
++    c_y, alpha_y = tile_y.bilinear_interpolate(point_p)
++    c_z, alpha_z = tile_z.bilinear_interpolate(point_p)
++    
++    # Fill undefined colors from neighbors if necessary
++    if c_x is None: c_x = tile_x.neighbor_sample(point_p)
++    if c_y is None: c_y = tile_y.neighbor_sample(point_p)
++    if c_z is None: c_z = tile_z.neighbor_sample(point_p)
++    
+     # 3. Compute dampening factors
+-    damp = [abs(nx)/max_abs_n, abs(ny)/max_abs_n, abs(nz)/max_abs_n]
++    d_x = abs(nx) / max_abs_n
++    d_y = abs(ny) / max_abs_n
++    d_z = abs(nz) / max_abs_n
+     
+     # 4. Compute weights
+-    epsilon = 1e-6
+-    alpha_damp = [(flags[i] + epsilon) * damp[i] for i in range(len(tiles))]
++    epsilon = 1e-6  # [G] Small constant to prevent division by zero
++    ad_x = (alpha_x + epsilon) * d_x
++    ad_y = (alpha_y + epsilon) * d_y
++    ad_z = (alpha_z + epsilon) * d_z
+     
+-    num_x = alpha_damp[0] * (1 - alpha_damp[1]) * (1 - alpha_damp[2])
+-    num_y = alpha_damp[1] * (1 - alpha_damp[2]) * (1 - alpha_damp[0])
+-    num_z = alpha_damp[2] * (1 - alpha_damp[0]) * (1 - alpha_damp[1])
++    num_x = ad_x * (1 - ad_y) * (1 - ad_z)
++    num_y = ad_y * (1 - ad_z) * (1 - ad_x)
++    num_z = ad_z * (1 - ad_x) * (1 - ad_y)
+     
+     denom = num_x + num_y + num_z
+-    
+-    # 5. Compute final color
+     if denom == 0:
+-        return colors[0]
++        return c_x  # [G] Fallback if all dampened flags are zero
+         
+     w_x = num_x / denom
+@@ -99,5 +100,6 @@
+     w_z = num_z / denom
+     
+-    final_color = (colors[0] * w_x + colors[1] * w_y + colors[2] * w_z) / (w_x + w_y + w_z)
++    # 5. Compute final color
++    final_color = (c_x * w_x + c_y * w_y + c_z * w_z) / (w_x + w_y + w_z)
+     return final_color
+ ```
+@@ -114,5 +116,5 @@
+ 
+ ## Operating characteristics
+-- **Time Complexity:** Constant time per sample, involving a few multiplications and additions. Relies on hardware bilinear filtering for flag interpolation [S1].
++- **Time Complexity:** Per-sample computation requires only a few multiplications and additions, relying on hardware bilinear filtering for flag interpolation [S1].
+ - **Memory Complexity:** Increases space overhead due to one-pixel border replication between neighboring tiles, especially for thick layers [S1].
+ - **Strengths:** Seamless interpolation over smooth surfaces; handles partial coverage and adaptive resolution; robust against geometric features between tile samples [S1].

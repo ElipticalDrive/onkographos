@@ -1,0 +1,233 @@
+Dual Contouring - isoext documentation
+Contents
+Menu
+Expand
+Light mode
+Dark mode
+Auto light/dark, in light mode
+Auto light/dark, in dark mode
+Skip to content
+Back to top
+View this page
+Edit this page
+Dual Contouring¶
+Dual contouring is a dual extraction method: it places one vertex
+inside each cell the surface crosses and connects the vertices of
+neighboring cells, and it puts each vertex on the sharp edge or corner
+if the cell contains one. The default variant finds that point from
+the surface normals at the edge crossings. A second variant finds it
+from the signed distance samples alone.
+Basic Usage¶
+```
+vertices, faces = isoext.dual_contouring(grid, level=0.0)
+```
+grid: A UniformGrid or SparseGrid with values set
+level: The iso-value to extract (default: 0.0)
+intersection: Optional precomputed edge crossings from
+get_intersection, with or without normals; computed automatically
+when omitted
+method: "ju" (default) or "carrera", described below
+Called like this, the edge crossings and normals are estimated from
+the grid values, which is enough for smooth surfaces. A cube rotated so
+that none of its edges align with the grid, sampled on 32 cells per
+axis, comes out with rounded edges:
+```
+import torch
+import isoext
+from isoext.sdf import CuboidSDF, RotationOp, get_sdf_normal, project_to_surface
+from isoext import viewer
+```
+```
+cube = RotationOp(sdf=CuboidSDF(size=[1.0, 1.0, 1.0]), axis=[1, 1, 0], angle=30)
+grid = isoext.UniformGrid([33, 33, 33])
+grid.set_values(cube(grid.get_points()))
+
+vertices, faces = isoext.dual_contouring(grid)
+
+print(f"Vertices: {vertices.shape}")
+print(f"Faces: {faces.shape}")
+print(f"max vertex error: {cube(vertices).abs().max():.4f} (cell size {2 / 32:.4f})")
+
+viewer.embed(vertices, faces, color="lightblue", flat_shading=True)
+```
+```
+Vertices: torch.Size([2146, 3])
+Faces: torch.Size([4292, 3])
+max vertex error: 0.0184 (cell size 0.0625)
+```
+How It Works¶
+Like surface nets, dual contouring puts one vertex inside each
+crossed cell and one quad around each crossed edge (see
+Surface Nets). The difference is where the vertex goes. Every
+edge crossing together with its surface normal defines a tangent
+plane, and the vertex is placed to minimize the total squared
+distance to all of the cell’s planes, a least-squares problem known
+as the QEF (Ju et al. [2002]). If the cell contains a sharp corner, the planes are the
+corner’s faces and their intersection point is the corner itself.
+The cell below contains the corner of a tilted box. The gold dots
+are the crossings, the arrows their normals, and each translucent
+square is a piece of the tangent plane it defines, drawn large
+enough to reach their common intersection. The centroid of the
+crossings (green) sits away from the feature; the QEF solution (red)
+is the corner. When the crossings do not pin down all three axes, on
+flat faces or straight creases, the QEF is degenerate and the solver
+regularizes it toward the centroid.
+Show code cell source
+Hide code cell source
+```
+planes = torch.nn.functional.normalize(torch.tensor([
+    [1.0, 0.3, -0.2],
+    [-0.25, 1.0, 0.3],
+    [0.2, -0.3, 1.0],
+], device="cuda"), dim=-1)
+corner = torch.tensor([0.1, 0.15, 0.2], device="cuda")
+corner_box = lambda q: ((q - corner) @ planes.T).amax(dim=-1)
+
+corner_cell = isoext.UniformGrid([2, 2, 2])
+corner_cell.set_values(corner_box(corner_cell.get_points()))
+
+its = isoext.get_intersection(corner_cell)
+crossings = project_to_surface(corner_box, its.get_points())
+normals = get_sdf_normal(corner_box, crossings)
+
+centroid = crossings.mean(dim=0, keepdim=True)
+qef = torch.linalg.lstsq(normals, (normals * crossings).sum(-1)).solution[None]
+print(f"centroid: {[round(x, 2) for x in centroid[0].tolist()]}")
+print(f"qef:      {[round(x, 2) for x in qef[0].tolist()]}")
+
+viewer.embed(grid=corner_cell, height=340, draw=lambda s: (
+    viewer.add_points(s, crossings, point_size=0.09),
+    viewer.add_arrows(s, crossings, 0.45 * normals),
+    viewer.add_planes(s, (crossings + qef) / 2, normals, size=1.0, opacity=0.3),
+    viewer.add_points(s, centroid, color="seagreen", point_size=0.13),
+    viewer.add_points(s, qef, color="crimson", point_size=0.13),
+))
+```
+```
+centroid: [-0.6, -0.59, -0.64]
+qef:      [0.1, 0.15, 0.2]
+```
+Custom Normals for Sharp Features¶
+The vertex placement is only as good as the normals. Estimated from
+grid values they are smeared near sharp features; computed from the
+SDF gradient they are exact. To supply your own, get the edge
+crossings with get_intersection, attach normals to them, and pass
+the result in:
+```
+intersection = isoext.get_intersection(grid)
+points = intersection.get_points()
+intersection.set_normals(get_sdf_normal(cube, points))
+
+vertices, faces = isoext.dual_contouring(grid, intersection=intersection)
+print(f"max vertex error: {cube(vertices).abs().max():.4f}")
+viewer.embed(vertices, faces, color="salmon", flat_shading=True)
+```
+```
+max vertex error: 0.0097
+```
+Refined Points and Unclamped Vertices¶
+Two more steps make the edges exact:
+project_to_surface moves the intersection points from their linear
+interpolation estimate onto the actual surface.
+clamp=False lets a vertex leave its cell to sit on a sharp feature.
+By default vertices are kept inside their cells, which is safer but
+rounds edges whose feature line passes through a neighboring cell.
+Unclamped vertices can produce self-intersections on noisy data.
+The refinement works with any field that can be evaluated at arbitrary
+points, including neural networks. Disabling the clamp is another
+matter: it is only safe for exact fields like analytic SDFs. On
+approximate fields, such as distance estimators or neural networks,
+noise in the points and normals can throw unclamped vertices far from
+the surface, producing what Schaefer and Warren [2002] call spikes. For those fields, and for purely
+sampled volumes, keep the default clamp.
+With the refinement, the tangent planes pass through the exact
+surface and the edges come out clean:
+```
+points = project_to_surface(cube, intersection.get_points())
+intersection.set_points(points)
+intersection.set_normals(get_sdf_normal(cube, points))
+
+vertices, faces = isoext.dual_contouring(grid, intersection=intersection, clamp=False)
+print(f"max vertex error: {cube(vertices).abs().max():.4f}")
+viewer.embed(vertices, faces, color="gold", flat_shading=True)
+```
+```
+max vertex error: 0.0002
+```
+Sharp Features Without Normals¶
+Exact normals need a field you can evaluate at any point. When all you
+have is the grid of signed distance samples, from a scan, a
+precomputed distance field or a swept volume, method="carrera"
+recovers the sharp features from those samples alone
+(Carrera et al. [2026]). The same cube, with nothing but the grid
+values:
+```
+vertices, faces = isoext.dual_contouring(grid, method="carrera")
+print(f"max vertex error: {cube(vertices).abs().max():.4f}")
+viewer.embed(vertices, faces, color="lightblue", flat_shading=True)
+```
+```
+max vertex error: 0.0054
+```
+The idea: every sample says how far the surface is from its grid
+point, so every sample is a sphere the surface must touch without
+cutting into it. The cell below is mostly filled by a corner of the
+cube. Its six outside samples are drawn as spheres with their distance
+as radius, and the true surface (grey) rests against every one of
+them. The centroid of the edge crossings (green), where surface nets
+and this method start, sits away from the corner (red); any surface
+through it would cut into the spheres around the corner. The
+method moves each vertex until a small local mesh around it is
+tangent to the spheres assigned to its cell, hands the spheres out
+again on the moved mesh, and repeats, 100 times by default. Sharp
+corners fall out of this, because only the corner touches all of its
+spheres at once.
+Show code cell source
+Hide code cell source
+```
+# A cell around one corner of the cube, and the exact surface inside it
+corner = torch.tensor([0.6768, 0.3232, 0.4330], device="cuda")
+size = 0.6
+lo = corner - size * torch.tensor([0.8, 0.65, 0.8], device="cuda")
+one_cell = isoext.UniformGrid([2, 2, 2], aabb_min=lo.tolist(), aabb_max=(lo + size).tolist())
+samples = one_cell.get_points().reshape(-1, 3)
+values = cube(samples)
+one_cell.set_values(values.reshape(2, 2, 2))
+
+fine = isoext.UniformGrid([41, 41, 41], aabb_min=(lo - 0.15 * size).tolist(), aabb_max=(lo + 1.15 * size).tolist())
+fine.set_values(cube(fine.get_points()))
+surface_v, surface_f = isoext.marching_cubes(fine)
+
+crossings = isoext.get_intersection(one_cell).get_points()
+outside = values > 0
+viewer.embed(surface_v, surface_f, color="lightgray", flat_shading=True, side="double", grid=one_cell, height=400,
+    frame=torch.stack([lo - 0.3 * size, lo + 1.3 * size]), draw=lambda s: (
+    viewer.add_spheres(s, samples[outside], values[outside], color="goldenrod", opacity=0.3),
+    viewer.add_points(s, crossings.mean(dim=0, keepdim=True), color="seagreen", point_size=0.05),
+    viewer.add_points(s, corner[None], color="crimson", point_size=0.05),
+))
+```
+This costs time: a fraction of a second on grids of a hundred cells
+per axis and seconds at 512, where the default variant takes
+milliseconds (see Performance). The samples must be true
+signed distances; for densities or occupancies use the default
+variant, Surface Nets or Dual Marching Cubes. Like the
+default variant, it is sensitive to noise in the samples.
+outer_iters and inner_iters (100 each) trade accuracy for time,
+band (3 cell diagonals) selects the samples used, and the remaining
+options keep the defaults of the authors’ code. Where that code
+differs from the paper, the code is followed, since it produced the
+published results: the Hermite normal blend, the radius weighting of
+the sphere terms, and qef_assignment, which hands out the first
+samples on the QEF mesh. Each was more accurate in our comparison
+against the reference implementation, which also showed that the band
+loses nothing against the code’s random batches of far samples. An
+intersection with normals seeds the Hermite data in place of the
+estimate from the grid values.
+References¶
+[1]
+Tao Ju, Frank Losasso, Scott Schaefer, and Joe Warren. Dual contouring of hermite data. In Proceedings of the 29th Annual Conference on Computer Graphics and Interactive Techniques (SIGGRAPH '02), 339–346. 2002. doi:10.1145/566570.566586.
+[2]
+Scott Schaefer and Joe Warren. Dual contouring: “the secret sauce”. Technical Report TR 02-408, Rice University, 2002. URL: https://www.cs.rice.edu/~jwarren/papers/techreport02408.pdf.
+[3]
+Xiana Carrera, Ningna Wang, Christopher Batty, Oded Stein, and Silvia Sellán. Dual contouring of signed distance data. In Proceedings of the Special Interest Group on Computer Graphics and Interactive Techniques Conference Conference Papers (SIGGRAPH '26). 2026. doi:10.1145/3799902.3811116.

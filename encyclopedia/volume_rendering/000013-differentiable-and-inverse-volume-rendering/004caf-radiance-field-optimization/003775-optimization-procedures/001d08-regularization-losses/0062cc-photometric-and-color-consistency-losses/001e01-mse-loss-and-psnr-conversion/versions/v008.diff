@@ -1,0 +1,290 @@
+--- v007.md
++++ v008.md
+@@ -1,105 +1,118 @@
+ # MSE Loss and PSNR Conversion
+ 
+-Also called: Masked MSE and PSNR Computation, Masked Volume MSE/PSNR Computation, Mean Squared Error (MSE) Calculation, Mean Squared Error Loss, Photometric Loss Computation, img2mse
++Also called: img2mse, MSE Loss, Mean Squared Error Loss, MSE (Mean Squared Error), Mean Squared Error (MSE)
+ 
+ ## Overview
+-This method computes the Mean Squared Error (MSE) between predicted and target RGB values (or volume voxels) to serve as the primary photometric loss for training neural volume rendering models, and converts this error into Peak Signal-to-Noise Ratio (PSNR) for logging and evaluation [S1, unofficial][S2, unofficial][S3, unofficial]. It differs from structural metrics like SSIM by treating all pixel errors equally without accounting for luminance or contrast correlations [S2, unofficial], and from perceptual losses by operating directly on raw pixel intensities rather than feature spaces [S2000-perceptual-loss-training.md]. It is the standard baseline loss for optimizing radiance fields [S3, unofficial].
++The Mean Squared Error (MSE) loss computes the average of the squared differences between predicted and target RGB values, serving as the primary photometric reconstruction loss for training neural volume rendering models [S1, unofficial][S2, unofficial][S4, unofficial]. It is often converted to Peak Signal-to-Noise Ratio (PSNR) for logging, providing a logarithmic measure of fidelity where higher values indicate better reconstruction quality [S1, unofficial][S2, unofficial]. Unlike structural metrics such as SSIM, MSE treats all pixel errors equally and is sensitive to large smooth regions but less responsive to high-frequency details [S1, unofficial].
+ 
+ ## How it works
+ **Inputs and Outputs:**
+-*   **Inputs:** Predicted RGB color tensor $\hat{C}$ (shape $[N, 3]$ or volume equivalent) and Target RGB tensor $C_{gt}$ (shape $[N, 3]$ or volume equivalent). Optional: A binary mask $M$ indicating valid voxels/pixels.
+-*   **Outputs:** Scalar MSE loss value, PSNR value (for logging), and optionally the count of valid elements.
++- **Inputs:** Predicted RGB tensor $x$ (shape: $[B, H, W, 3]$ or flattened $[N, 3]$) and Target RGB tensor $y$ (same shape and data type, typically normalized to $[0, 1]$).
++- **Outputs:** Scalar MSE value and, optionally, the corresponding PSNR value.
+ 
+ **Data Structures:**
+-*   **Tensors:** $\hat{C}$ and $C_{gt}$ are typically floating-point tensors in the range $[0, 1]$ or $[0, 255]$. Consistency in range is critical; if the target is $[0, 255]$ and prediction is $[0, 1]$, the target must be normalized or the prediction scaled before computation [S2, unofficial].
+-*   **Mask:** A boolean tensor $M$ of the same spatial dimensions as the input, where $M_{i,j} = 1$ if the pixel/voxel is valid, $0$ otherwise.
++- Tensors $x$ and $y$ are dense floating-point arrays. No special bit-packing is required beyond standard IEEE 754 single or double precision.
+ 
+ **Steps:**
++1. **Compute Element-wise Difference:** Calculate the difference between predicted and target values: $d = x - y$.
++2. **Square the Difference:** Square each element of the difference tensor: $s = d^2$.
++3. **Flatten Spatial Dimensions:** Reshape the tensor to shape $[B, -1]$ to flatten height and width dimensions, keeping the batch dimension.
++4. **Compute Mean:** Calculate the mean of the squared differences over the flattened spatial dimension (dimension 1) to obtain the MSE.
++   $$
++   MSE = \frac{1}{N} \sum_{i=1}^{N} (x_i - y_i)^2
++   $$
++   where $N$ is the total number of pixels (or voxels) in the batch.
++5. **Convert to PSNR (Optional):** Calculate PSNR from the MSE.
++   $$
++   PSNR = -10 \cdot \log_{10}(MSE)
++   $$
++   Alternatively, using the square root form:
++   $$
++   PSNR = 20 \cdot \log_{10}\left(\frac{1}{\sqrt{MSE}}\right)
++   $$
++   If $MSE = 0$, PSNR is defined as $\infty$ [S5, unofficial].
+ 
+-1.  **Compute Squared Error:** Calculate the element-wise squared difference between the predicted and target values.
+-    $$
+-    E_i = (\hat{C}_i - C_{gt, i})^2
+-    $$
+-    where $i$ indexes over all pixels or voxels.
++**Pseudocode:**
++```python
++import math
++import torch
+ 
+-2.  **Apply Mask (Optional):** If a mask $M$ is provided, zero out errors for invalid regions.
+-    $$
+-    E'_i = E_i \cdot M_i
+-    $$
+-    If no mask is used, $E'_i = E_i$.
++def img2mse(x: torch.Tensor, y: torch.Tensor) -> torch.Tensor:
++    """
++    Compute Mean Squared Error between predicted (x) and target (y) RGB values.
++    
++    Args:
++        x: Predicted RGB tensor of shape (..., 3) or (batch, H, W, 3).
++        y: Target RGB tensor of the same shape as x.
++        
++    Returns:
++        Scalar MSE value.
++    """
++    # 1. Compute element-wise difference
++    diff = x - y
++    
++    # 2. Square the difference
++    sq_diff = diff ** 2
++    
++    # 3. Flatten spatial dimensions and compute mean
++    # Reshape to (batch_size, -1) to flatten H, W, C (if C=3, it's included in -1)
++    # However, standard MSE usually averages over all elements including channels.
++    # The source [S3, unofficial] specifies flattening spatial dimensions and averaging over batch dim 1.
++    # Assuming input is (B, H, W, 3), we flatten H, W, 3 into one dimension.
++    batch_size = x.shape[0]
++    flattened = sq_diff.reshape(batch_size, -1)
++    
++    # 4. Compute mean along dimension 1 (flattened spatial)
++    mse = torch.mean(flattened, dim=1)
++    
++    # If a single scalar is needed for the whole batch, take mean of the batch means
++    # Or sum if treating as total loss. Standard implementation [S1, unofficial] uses reduce_mean over all dims.
++    # Let's align with [S1, unofficial] tf.reduce_mean which averages over ALL dimensions.
++    mse_scalar = torch.mean(sq_diff)
++    
++    return mse_scalar
+ 
+-3.  **Compute Mean Squared Error (MSE):** Average the squared errors over the valid elements. Let $N$ be the number of valid elements (where $M_i=1$ or all elements if unmasked).
+-    $$
+-    MSE = \frac{1}{N} \sum_{i=1}^{N} E'_i
+-    $$
+-    [S1, unofficial][S4, unofficial]
+-
+-4.  **Compute PSNR:** Convert MSE to PSNR. If $MSE > 0$:
+-    $$
+-    PSNR = 20 \cdot \log_{10}\left(\frac{1}{\sqrt{MSE}}\right) = -10 \cdot \log_{10}(MSE)
+-    $$
+-    [S1, unofficial][S4, unofficial]
+-    If $MSE = 0$, $PSNR = \infty$. [S4, unofficial]
++def mse2psnr(mse: torch.Tensor) -> torch.Tensor:
++    """
++    Convert MSE to PSNR.
++    
++    Args:
++        mse: Mean Squared Error tensor (scalar or array).
++        
++    Returns:
++        PSNR tensor.
++    """
++    # Handle zero MSE to avoid log(0)
++    # If mse is 0, psnr is infinity.
++    # In practice, add a small epsilon or handle explicitly.
++    # Source [S1, unofficial] uses -10 * log10(mse).
++    # Source [S5, unofficial] uses 20 * log10(1/sqrt(mse)) if mse > 0 else inf.
++    
++    # Using the standard formula derived from [S1, unofficial] and [S5, unofficial]
++    # PSNR = -10 * log10(MSE)
++    
++    # Guard against division by zero / log(0)
++    # [G] Standard practice is to clamp MSE to a small positive value or return inf.
++    # Here we follow [S5, unofficial] logic: if mse is 0, return inf.
++    
++    # Note: torch.log10 requires positive input.
++    # We can use a small epsilon for numerical stability if not strictly inf.
++    # However, to be precise to sources:
++    
++    if mse == 0:
++        return torch.tensor(float('inf'), device=mse.device)
++    
++    psnr = -10.0 * torch.log10(mse)
++    return psnr
++```
+ 
+ **Parameters:**
+-*   **Data Range:** The maximum possible pixel value ($max\_val$). If inputs are normalized to $[0, 1]$, $max\_val = 1$. If inputs are in $[0, 255]$, $max\_val = 255$. The standard formula assumes $max\_val=1$ when using the $-10 \log_{10}(MSE)$ form derived from $20 \log_{10}(max\_val / \sqrt{MSE})$ with normalized inputs. [S1, unofficial][S4, unofficial]
+-*   **Mask Threshold (for volume masks):** In volume rendering, a relative threshold `mask_threshold_rel` (default 0.01) is often applied to a normalized mask volume to create the boolean mask: $threshold = mask\_threshold\_rel \cdot \max(mask\_volume)$. [S4, unofficial]
+-
+-**Pseudocode:**
+-
+-```python
+-import math
+-import numpy as np
+-
+-def compute_mse_and_psnr(predicted: np.ndarray, target: np.ndarray, mask: np.ndarray = None) -> dict:
+-    """
+-    Computes MSE and PSNR between predicted and target arrays.
+-    
+-    Args:
+-        predicted: Array of predicted values (e.g., RGB colors).
+-        target: Array of ground truth values.
+-        mask: Optional boolean array indicating valid regions.
+-        
+-    Returns:
+-        Dictionary with 'mse', 'psnr', and 'valid_count'.
+-    """
+-    # Ensure same shape and dtype
+-    assert predicted.shape == target.shape, "Predicted and target must have the same shape"
+-    
+-    # Compute squared error
+-    squared_error = (predicted - target) ** 2
+-    
+-    if mask is not None:
+-        # Apply mask
+-        masked_squared_error = squared_error * mask
+-        valid_count = int(np.sum(mask))
+-        
+-        if valid_count == 0:
+-            raise RuntimeError("Mask has no true values (empty region).")
+-            
+-        mse = float(np.mean(masked_squared_error))
+-    else:
+-        # No mask: use all elements
+-        valid_count = int(np.prod(predicted.shape))
+-        mse = float(np.mean(squared_error))
+-        
+-    # Compute PSNR
+-    if mse > 0.0:
+-        psnr = 20.0 * math.log10(1.0 / math.sqrt(mse))
+-    else:
+-        psnr = float('inf')
+-        
+-    return {
+-        'mse': mse,
+-        'psnr': psnr,
+-        'valid_count': valid_count
+-    }
+-```
++- **Batch Size:** Number of random pixels sampled per iteration [S4, unofficial].
++- **Learning Rate:** Adam optimizer learning rate, typically from configuration (e.g., `cfg.training.lr`) [S4, unofficial].
+ 
+ **Edge Cases and Pitfalls:**
+-*   **Division by Zero:** If $MSE = 0$, $\log_{10}(0)$ is undefined. The PSNR is set to infinity ($\infty$) to avoid numerical errors. [S4, unofficial]
+-*   **Empty Mask:** If a mask is provided but contains no `True` values, the method should raise an error or handle it gracefully, as division by zero would occur in the mean calculation. [S4, unofficial]
+-*   **Data Range Mismatch:** If the target images are in $[0, 255]$ and predictions are in $[0, 1]$, the MSE will be artificially large. Ensure both tensors are in the same range (typically $[0, 1]$) before computation. [S2, unofficial]
+-*   **Precision:** For very small MSE values, PSNR can become very large. Use float32 or float64 appropriately to avoid overflow in log calculations. [G]
++- **Zero MSE:** If the predicted image perfectly matches the target, MSE is 0. The logarithm in PSNR calculation is undefined. The implementation must handle this by returning infinity or a large constant [S5, unofficial].
++- **Empty Mask:** When using masked MSE (e.g., for volume rendering where only occupied voxels matter), if the boolean mask has no true values, a `RuntimeError` should be raised [S5, unofficial].
++- **Precision:** Use floating-point precision (FP32 or FP64) to avoid overflow when squaring differences, especially if inputs are not normalized to $[0, 1]$ [S6, unofficial].
+ 
+ ## Subtopics
+@@ -118,33 +131,67 @@
+ 
+ ### Masked Volume Metrics
+-A method to exclude empty froxels from evaluation metrics by including only froxels affected by radiance [S6, unofficial]. A froxel is included if any of its RGB channels contain a non-zero value at any point during the test scenario [S6, unofficial]. The Region of Interest (ROI) is computed separately for each tested algorithm, and the union of the scenario's ROI and the ground truth's ROI is used: $ROI_{effective} = ROI_{scenario} \cup ROI_{truth}$ [S6, unofficial]. This ensures that only relevant froxels are included for each output while excluding completely empty regions [S6, unofficial].
++A method to exclude empty froxels from evaluation metrics by including only froxels affected by radiance [S7, unofficial]. A froxel is included if any of its RGB channels contain a non-zero value at any point during the test scenario [S7, unofficial]. The Region of Interest (ROI) is computed separately for each tested algorithm; the union of the scenario's ROI and the ground truth's ROI is used to create an effective ROI, ensuring only relevant froxels are included while excluding completely empty regions [S7, unofficial].
++$$
++ROI_{effective} = ROI_{scenario} \cup ROI_{truth}
++$$
++Masked MSE is calculated as the mean of squared errors over voxels in the mask:
++$$
++MSE = \frac{1}{N} \sum_{i \in mask} (v_{ref, i} - v_{comp, i})^2
++$$
++where $N$ is the number of voxels in the mask [S5, unofficial]. Masked PSNR is calculated as:
++$$
++PSNR = 20 \cdot \log_{10}\left(\frac{1}{\sqrt{MSE}}\right)
++$$
++if $MSE > 0$, otherwise $PSNR = \infty$ [S5, unofficial].
+ 
+ ### MSE Bias-Variance Decomposition
+-Treating the TAA algorithm as a biased estimator to analyze correctness using Mean Squared Error (MSE), decomposed into variance and bias squared [S6, unofficial]. The formula is $MSE[F] = E[(F - G)^2] = V[F] + \beta[F]^2$, where $F$ is the output of the estimator, $G$ is the true value (ground truth), $V[F]$ is the variance of the estimator, and $\beta[F]$ is its bias [S6, unofficial].
++Treating the TAA algorithm as a biased estimator to analyze correctness using Mean Squared Error (MSE), decomposed into variance and bias squared [S7, unofficial].
++$$
++MSE[F] = \mathbb{E}[(F - G)^2] = V[F] + \beta[F]^2
++$$
++where $F$ is the output of the estimator, $G$ is the true value (ground truth), $V[F]$ is the variance of the estimator, and $\beta[F]$ is its bias [S7, unofficial].
+ 
+ ### Training Loss Computation with Huber and Masking
+-An extension that uses Huber loss instead of MSE for RGB, masked by ray validity [S7, unofficial]. It renders predicted RGB and depth, blends ground truth RGB with background, and computes per-ray Huber loss with delta=0.1, averaged over valid rays [S7, unofficial].
++In some implementations, Huber loss is used instead of MSE for robustness, combined with masking [S8, unofficial].
++1. Render predicted RGB and depth values.
++2. Split predicted RGBD tensor into RGB and depth.
++3. Blend ground truth RGB with background to match rendering conditions.
++4. Compute per-ray Huber loss for RGB with delta=0.1, masked by `ray_is_valid`, and averaged over valid rays:
++   $$
++   loss_{rgb} = \frac{\sum_{i \in valid} \text{Huber}(pred\_rgbs_i, gt\_rgbs_i, \delta=0.1)}{n_{valid\_rays}}
++   $$
++5. Aggregate loss components [S8, unofficial].
+ 
+ ### Area Loss Scaling
+-Scaling the loss of each pixel by the area of that pixel's footprint in the original image to ensure low-resolution pixels have comparable influence to high-resolution pixels in multiscale datasets [S8]. For a downsampling factor of $k$, the area factor is $k^2$ [S8].
++Scaling the loss of each pixel by the area of that pixel's footprint in the original image to ensure low-resolution pixels have comparable influence to high-resolution pixels in multiscale datasets [S9]. For a downsampling factor of $k$, the area scaling factor is $k^2$ [S9].
++
++### IoU Loss
++A binary segmentation loss metric that computes the ratio of overlapping voxels above a threshold to the total union of predicted and target voxels [S10, unofficial].
++$$
++\text{IoU} = \frac{|\{v \mid \hat{v} > \tau\} \cap \{v \mid t_v > 0\}|}{|\{v \mid \hat{v} > \tau\} \cup \{v \mid t_v > 0\}|}
++$$
++where $\tau$ is the prediction threshold for binarization, default 0.9 [S10, unofficial].
+ 
+ ## Operating characteristics
+-*   **Time Complexity:** $O(N)$, where $N$ is the number of pixels or voxels. The computation involves a single pass to compute squared differences and a mean reduction.
+-*   **Memory Complexity:** $O(N)$ to store the squared error tensor, or $O(1)$ if computed incrementally.
+-*   **Strengths:** Simple to implement, differentiable everywhere, computationally efficient, and widely used as a baseline for comparing other loss functions.
+-*   **Limitations:** Does not account for structural information or perceptual quality, often leading to blurry results in high-frequency regions compared to perceptual or structural losses. Sensitive to outliers due to the squared term.
+-*   **When to Use:** As a primary loss for initial training, for datasets with high-quality ground truth, or as a component in a composite loss function.
+-*   **When Not to Use:** When structural fidelity is more important than pixel-wise accuracy, or when the dataset contains significant noise/outliers that could skew the loss.
++- **Time Complexity:** $O(N)$, where $N$ is the number of pixels or voxels being compared. The operation is element-wise and parallelizable on GPUs.
++- **Memory Complexity:** $O(N)$ to store the difference and squared difference tensors during computation, though optimized implementations can compute the sum in-place or in streaming fashion to reduce memory to $O(1)$ auxiliary space.
++- **Measured Performance:** MSE is extremely fast to compute and backpropagate, making it suitable for high-frequency updates during training [S4, unofficial]. PSNR calculation is $O(1)$ given the MSE.
++- **Strengths:** Simple to implement, differentiable everywhere, and provides a direct measure of pixel-wise accuracy [S2, unofficial].
++- **Limitations:** Does not account for structural information or perceptual quality, often leading to blurry results in optimization [S1, unofficial]. Sensitive to outliers.
++- **When to Use:** Standard photometric loss for training neural radiance fields when structural fidelity is less critical than pixel-wise accuracy, or as a baseline metric [S4, unofficial].
++- **When Not to Use:** When perceptual quality is paramount (use Perceptual Loss [2000-perceptual-loss-training.md]) or when structural similarity is important (use SSIM [3650-ssim-metric-calculation.md]).
+ 
+ ## Background
+-The Mean Squared Error (MSE) loss is a fundamental metric in image processing and computer vision, originating from statistical estimation theory [S1, unofficial]. In the context of neural volume rendering, it was popularized by the NeRF paper [S1, unofficial] as the primary photometric loss for optimizing radiance fields. The conversion to PSNR for evaluation is a standard practice in image quality assessment [S4, unofficial]. Variants like masked MSE for volume rendering have been developed to handle sparse or incomplete data [S4, unofficial].
++The Mean Squared Error loss is a fundamental metric in signal processing and image reconstruction, widely adopted in neural volume rendering for its simplicity and differentiability [S1, unofficial][S4, unofficial]. It was prominently used in the original NeRF paper and subsequent implementations [S1, unofficial][S2, unofficial]. The conversion to PSNR is a standard practice for reporting results in the field, allowing for comparison across different scenes and resolutions [S1, unofficial][S4, unofficial].
+ 
+ ## Sources
+ [S1] bmild/nerf, https://github.com/bmild/nerf, fetched 2026-10-26 (unofficial)
+ [S2] damn8daniel/nerf-from-scratch, https://github.com/damn8daniel/nerf-from-scratch, fetched 2026-10-26 (unofficial)
+-[S3] Fhz2346/Neural-Volume-Rendering-and-Surface-Rendering, https://github.com/Fhz2346/Neural-Volume-Rendering-and-Surface-Rendering, fetched 2026-10-27 (unofficial)
+-[S4] ValentinKraft/vgs, https://github.com/ValentinKraft/vgs, fetched 2026-10-27 (unofficial)
+-[S5] hardik0001/ct-reconstruction-gpu, https://github.com/hardik0001/ct-reconstruction-gpu, fetched 2026-10-27 (unofficial)
+-[S6] Temporal Anti-Aliasing for Real-Time Froxel-Based Volumetric Rendering - Advances in volumetric temporal anti-aliasing for real-time ren dering of participating media, https://openalex.org/W7218067689, fetched 2026-11-01 (unofficial)
+-[S7] blurgyy/jaxngp, https://github.com/blurgyy/jaxngp, fetched 2026-10-27 (unofficial)
+-[S8] Mip-NeRF: A Multiscale Representation for Anti-Aliasing Neural Radiance Fields, https://doi.org/10.1109/iccv48922.2021.00580, fetched 2026-10-26+[S3] hbb1/2d-gaussian-splatting, https://github.com/hbb1/2d-gaussian-splatting, fetched 2026-10-27 (unofficial)
++[S4] Fhz2346/Neural-Volume-Rendering-and-Surface-Rendering, https://github.com/Fhz2346/Neural-Volume-Rendering-and-Surface-Rendering, fetched 2026-10-27 (unofficial)
++[S5] ValentinKraft/vgs, https://github.com/ValentinKraft/vgs, fetched 2026-10-27 (unofficial)
++[S6] hardik0001/ct-reconstruction-gpu, https://github.com/hardik0001/ct-reconstruction-gpu, fetched 2026-10-27 (unofficial)
++[S7] Temporal Anti-Aliasing for Real-Time Froxel-Based Volumetric Rendering - Advances in volumetric temporal anti-aliasing for real-time ren dering of participating media, https://openalex.org/W7218067689, fetched 2026-11-01 (unofficial)
++[S8] blurgyy/jaxngp, https://github.com/blurgyy/jaxngp, fetched 2026-10-27 (unofficial)
++[S9] Mip-NeRF: A Multiscale Representation for Anti-Aliasing Neural Radiance Fields, https://doi.org/10.1109/iccv48922.2021.00580, fetched 2026-10-26
++[S10] Dr. TVAM – Inverse Rendering for Tomographic Volumetric Additive Manufacturing, https://github.com/rgl-epfl/drtvam, fetched 2026-10-26 (unofficial)

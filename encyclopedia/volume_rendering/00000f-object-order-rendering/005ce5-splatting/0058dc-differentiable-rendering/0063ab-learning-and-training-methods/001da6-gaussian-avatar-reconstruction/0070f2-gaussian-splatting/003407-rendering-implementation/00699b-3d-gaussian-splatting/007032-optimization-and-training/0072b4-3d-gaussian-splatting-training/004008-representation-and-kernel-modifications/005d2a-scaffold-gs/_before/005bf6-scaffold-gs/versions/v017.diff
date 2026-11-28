@@ -1,0 +1,324 @@
+--- v016.md
++++ v017.md
+@@ -4,29 +4,18 @@
+ 
+ ## Overview
+-Scaffold-GS is a Gaussian-based scene representation that utilizes anchor points to establish a hierarchical and region-aware 3D scene structure, predicting neural Gaussian attributes on-the-fly based on viewing direction and distance [S2]. Unlike vanilla 3D-GS, which allows Gaussians to freely drift and split, Scaffold-GS exploits scene structure to guide and constrain Gaussian distribution while allowing local adaptation to varying viewing angles [S2]. It achieves comparable or superior reconstruction quality to 3D-GS with significantly reduced storage requirements (4.4x–10.2x reduction) and real-time rendering speeds (~100 FPS at 1K resolution) [S2].
++Scaffold-GS is a Gaussian-based scene representation that utilizes anchor points to establish a hierarchical and region-aware 3D scene structure, predicting neural Gaussian attributes on-the-fly based on viewing direction and distance [S2]. Unlike vanilla 3D-GS, which allows Gaussians to drift and split freely, Scaffold-GS exploits scene structure to guide and constrain Gaussian distribution while allowing local adaptation to varying viewing angles [S2]. It achieves comparable or superior reconstruction quality to 3D-GS with significantly reduced storage requirements and real-time rendering speeds [S2].
+ 
+ ## How it works
+ **Inputs and Outputs:**
+-*   **Input:** Sparse Structure-from-Motion (SfM) point cloud $P \in \mathbb{R}^{M \times 3}$ and a set of camera poses.
+-*   **Output:** A set of anchor points with learnable features, and a rendering pipeline that dynamically spawns and rasterizes "neural Gaussians" conditioned on the camera view.
++*   **Input:** Sparse Structure-from-Motion (SfM) point cloud $P \in \mathbb{R}^{M \times 3}$ [S2].
++*   **Output:** A set of anchor points with learnable features, and a rendering pipeline that dynamically spawns and rasterizes neural Gaussians [S2].
+ 
+ **Data Structures:**
+-1.  **Voxel Grid:** A sparse grid of voxel centers $V \in \mathbb{R}^{N \times 3}$ derived from $P$.
++1.  **Voxel Grid:** Created from SfM points. Centers $V \in \mathbb{R}^{N \times 3}$ are computed by voxelizing $P$ with size $\epsilon$ and removing duplicates [S2].
+ 2.  **Anchor Point $v$:** Each voxel center $v$ is an anchor point equipped with:
+-    *   Local context feature $f_v \in \mathbb{R}^{32}$.
+-    *   Scaling factor $l_v \in \mathbb{R}^3$.
+-    *   $k$ learnable offsets $O_v \in \mathbb{R}^{k \times 3}$.
+-3.  **Neural Gaussian:** A 3D Gaussian primitive spawned from an anchor, defined by position $\mu$, opacity $\alpha$, covariance (via quaternion $q$ and scale $s$), and color $c$.
+-
+-**Parameters:**
+-*   $k$: Number of neural Gaussians spawned per visible anchor. Default: 10 [S2].
+-*   $\epsilon$: Voxel size for initializing anchors from SfM points [S2].
+-*   $\epsilon_g$: Base voxel size for gradient-based growing. Default: $64\epsilon$ (or $16\epsilon$ for intricate/texture-less scenes) [S2].
+-*   $\tau_g$: Gradient threshold for anchor growing. Default: $64\epsilon$ [S2].
+-*   $N$: Number of training iterations over which gradients/opacities are averaged for growing/pruning. Default: 100 [S2].
+-*   $\tau_\alpha$: Opacity threshold for rasterization. Only Gaussians with $\alpha \ge \tau_\alpha$ are rasterized [S2].
+-*   $\lambda_{SSIM}$: Weight for SSIM loss. Value: 0.2 [S2].
+-*   $\lambda_{vol}$: Weight for volume regularization loss. Value: 0.001 [S2].
+-*   MLP Architecture: All MLPs ($F_\alpha, F_c, F_q, F_s, F_w$) are 2-layer MLPs with ReLU activation and hidden dimension 32 [S2].
++    *   Local context feature $f_v \in \mathbb{R}^{32}$ [S2].
++    *   Scaling factor $l_v \in \mathbb{R}^3$ [S2].
++    *   $k$ learnable offsets $O_v \in \mathbb{R}^{k \times 3}$ [S2].
++3.  **Neural Gaussian:** A 3D Gaussian defined by position $\mu$, opacity $\alpha$, covariance-related quaternion $q$, scaling $s$, and color $c$ [S2].
+ 
+ **Method Steps:**
+@@ -34,164 +23,123 @@
+ 1.  **Anchor Initialization:**
+     Voxelize the input SfM point cloud $P$ to create voxel centers $V$:
+-    $$ V = \{ \lfloor P / \epsilon \rfloor \cdot \epsilon \} $$
+-    Remove duplicate entries [S2]. For each voxel $v \in V$, initialize an anchor point with $f_v, l_v, O_v$ [S2].
++    $$ V = \left\{ \lfloor P / \epsilon \rfloor \cdot \epsilon \right\} $$
++    Remove duplicate entries to reduce redundancy [S2].
+ 
+-2.  **Neural Gaussian Derivation (On-the-Fly Prediction):**
+-    For each visible anchor $v$ within the viewing frustum of camera $x_c$:
++2.  **Neural Gaussian Derivation (On-the-fly Prediction):**
++    For each visible anchor $v$ within the viewing frustum:
+     a.  **Feature Bank Creation:** Create a multi-resolution feature bank $\{f_v, f_{v\downarrow1}, f_{v\downarrow2}\}$, where $\downarrow n$ denotes $f_v$ down-sampled by $2^n$ factors [S2].
+-    b.  **View-Dependent Blending:** Calculate relative distance $\delta_{vc} = \|x_v - x_c\|_2$ and viewing direction $d_{vc} = (x_v - x_c) / \|x_v - x_c\|_2$. Predict blending weights using MLP $F_w$:
+-        $$ \{w, w_1, w_2\} = \text{Softmax}(F_w(\delta_{vc}, d_{vc})) $$
++    b.  **View-Dependent Blending:** Calculate relative distance $\delta_{vc}$ and viewing direction $\vec{d}_{vc}$ between anchor $x_v$ and camera $x_c$:
++        $$ \delta_{vc} = \|x_v - x_c\|_2, \quad \vec{d}_{vc} = \frac{x_v - x_c}{\|x_v - x_c\|_2} $$
++        Predict blending weights using a 2-layer MLP $F_w$ (hidden dim 32, ReLU):
++        $$ \{w, w_1, w_2\} = \text{Softmax}(F_w(\delta_{vc}, \vec{d}_{vc})) $$
+         Compute integrated feature:
+         $$ \hat{f}_v = w \cdot f_v + w_1 \cdot f_{v\downarrow1} + w_2 \cdot f_{v\downarrow2} $$
+-    c.  **Spawn Gaussians:** Spawn $k$ neural Gaussians from anchor $x_v$. Positions are calculated as:
++    c.  **Spawn Neural Gaussians:** Spawn $k$ neural Gaussians from anchor $x_v$. Positions are calculated as:
+         $$ \{\mu_0, \dots, \mu_{k-1}\} = x_v + \{O_0, \dots, O_{k-1}\} \cdot l_v $$
+-    d.  **Attribute Decoding:** Decode attributes in one-pass from $\hat{f}_v, \delta_{vc}, d_{vc}$ via MLPs $F_\alpha, F_c, F_q, F_s$. For example, opacity:
+-        $$ \{\alpha_0, \dots, \alpha_{k-1}\} = F_\alpha(\hat{f}_v, \delta_{vc}, d_{vc}) $$
+-        Similarly derive colors $\{c_i\}$, quaternions $\{q_i\}$, and scales $\{s_i\}$ [S2].
+-    e.  **Filtering:** Discard neural Gaussians with $\alpha < \tau_\alpha$ [S2].
++        where $O_i$ are learnable offsets and $l_v$ is the scaling factor [S2].
++    d.  **Attribute Decoding:** Decode attributes ($\alpha, c, q, s$) in one-pass from $\hat{f}_v$, $\delta_{vc}$, and $\vec{d}_{vc}$ via MLPs $F_\alpha, F_c, F_q, F_s$ (all 2-layer MLPs, hidden dim 32, ReLU). Example for opacity:
++        $$ \{\alpha_0, \dots, \alpha_{k-1}\} = F_\alpha(\hat{f}_v, \delta_{vc}, \vec{d}_{vc}) $$
++        Colors, quaternions, and scales are derived similarly [S2].
++    e.  **Filtering:** Only keep neural Gaussians with opacity $\alpha \geq \tau_\alpha$ to cut computational load [S2].
+ 
+-3.  **Rasterization:**
+-    Project the surviving neural Gaussians to 2D ellipses. Sort by depth. Accumulate color via alpha blending:
+-    $$ C(x') = \sum_{i \in \mathcal{N}} c_i \sigma_i \prod_{j=1}^{i-1} (1 - \sigma_j) $$
+-    where $\sigma_i = \alpha_i G'_i(x')$ and $G'_i(x')$ is the 2D Gaussian projection [S2].
+-
+-4.  **Anchor Refinement (Growing and Pruning):**
+-    Performed every $N$ iterations [S2].
++3.  **Anchor Refinement (Growing and Pruning):**
++    Performed every $N$ training iterations [S2].
+     a.  **Growing:** Quantize neural Gaussians into multi-resolution voxels of size $\epsilon_g^{(m)} = \epsilon_g / 4^{m-1}$ for levels $m \in \{1, 2, 3\}$. Compute averaged gradients $\nabla_g$ over $N$ iterations. If $\nabla_g > \tau_g^{(m)} = \tau_g \cdot 2^{m-1}$, deploy a new anchor at the voxel center if none exists. Apply random elimination to candidates to curb rapid expansion [S2].
+     b.  **Pruning:** Accumulate opacity values of neural Gaussians associated with an anchor over $N$ iterations. If accumulated opacity $< 0.5$, remove the anchor [S2].
++
++4.  **Rendering:**
++    Project 3D Gaussians to 2D ellipses. The covariance matrix $\Sigma$ is formulated as $\Sigma = RSS^T R^T$ to maintain positive semi-definiteness [S2]. Render via alpha-blending of sorted 2D Gaussians:
++    $$ C(x') = \sum_{i \in N} c_i \sigma_i \prod_{j=1}^{i-1} (1 - \sigma_j) $$
++    where $\sigma_i = \alpha_i G'_i(x')$ and $G'(x')$ is the 2D Gaussian [S2].
+ 
+ 5.  **Optimization:**
+     Minimize total loss:
+     $$ L = L_1 + \lambda_{SSIM} L_{SSIM} + \lambda_{vol} L_{vol} $$
+-    Optimize learnable parameters ($f_v, l_v, O_v$) and MLP weights [S2].
++    where $\lambda_{SSIM} = 0.2$ and $\lambda_{vol} = 0.001$ [S2].
++
++**Parameters:**
++*   $k$: Number of neural Gaussians per anchor. Default: 10 [S2].
++*   $\tau_\alpha$: Opacity threshold for rasterization. Not given in the sources.
++*   $N$: Iterations for gradient/opacity averaging. Default: 100 [S2].
++*   $\tau_g$: Gradient threshold for growing. Default: $64\epsilon$. For intricate/texture-less scenes: $16\epsilon$ [S2].
++*   $\epsilon$: Voxel size for initialization. Not given in the sources.
++*   $\epsilon_g$: Voxel size for growing quantization. Not given in the sources.
+ 
+ **Pseudocode:**
+ 
+ ```python
+-import math
+ import numpy as np
+ 
+-# Constants
+-K = 10  # Number of Gaussians per anchor
+-N = 100 # Iterations for averaging
+-EPSILON_G = 64 * EPSILON # Base voxel size for growing
+-TAU_G = 64 * EPSILON      # Gradient threshold
+-TAU_ALPHA = 0.0           # Opacity threshold for rasterization (example value)
+-LAMBDA_SSIM = 0.2
+-LAMBDA_VOL = 0.001
++def scaffold_gs_render(sfm_points, camera, epsilon, k, tau_alpha, tau_g, N, epsilon_g):
++    """
++    Renders a frame using Scaffold-GS.
++    Note: This pseudocode assumes the anchor grid and MLPs are already initialized/trained.
++    """
++    # 1. Initialize Anchor Grid (One-time or during refinement)
++    # Voxelize SfM points
++    voxel_centers = np.unique(np.floor(sfm_points / epsilon) * epsilon, axis=0)
++    anchors = []
++    for v in voxel_centers:
++        # Each anchor has f_v (32), l_v (3), O_v (k x 3)
++        # These are learnable parameters stored in the model
++        anchors.append(Anchor(v))
++    
++    # 2. For each visible anchor, spawn and render neural Gaussians
++    all_gaussians = []
++    
++    for anchor in anchors:
++        # Check if anchor is in view frustum (omitted for brevity)
++        
++        # Calculate view-dependent info
++        delta_vc = np.linalg.norm(anchor.pos - camera.pos)
++        d_vc = (anchor.pos - camera.pos) / delta_vc
++        
++        # Feature blending
++        # f_v_down1, f_v_down2 are pre-computed down-sampled features
++        weights = softmax(MLP_Fw(delta_vc, d_vc))
++        f_hat = weights[0]*anchor.f_v + weights[1]*anchor.f_v_down1 + weights[2]*anchor.f_v_down2
++        
++        # Spawn k Gaussians
++        for i in range(k):
++            # Position
++            mu = anchor.pos + anchor.O_v[i] * anchor.l_v
++            
++            # Attributes via MLPs
++            alpha = MLP_Falpha(f_hat, delta_vc, d_vc)[i]
++            color = MLP_Fc(f_hat, delta_vc, d_vc)[i]
++            quat = MLP_Fq(f_hat, delta_vc, d_vc)[i]
++            scale = MLP_Fs(f_hat, delta_vc, d_vc)[i]
++            
++            # Filter by opacity
++            if alpha >= tau_alpha:
++                all_gaussians.append(Gaussian(mu, alpha, color, quat, scale))
++    
++    # 3. Rasterize
++    # Project to 2D, sort by depth, alpha blend
++    image = tile_based_rasterize(all_gaussians, camera)
++    return image
+ 
+-class MLP:
+-    """2-layer MLP with ReLU, hidden dim 32."""
+-    def __init__(self, in_dim, out_dim):
+-        self.W1 = np.random.randn(in_dim, 32)
+-        self.b1 = np.zeros(32)
+-        self.W2 = np.random.randn(32, out_dim)
+-        self.b2 = np.zeros(out_dim)
+-
+-    def forward(self, x):
+-        # x shape: (..., in_dim)
+-        h = np.maximum(0, x @ self.W1 + self.b1)
+-        return h @ self.W2 + self.b2
+-
+-class Anchor:
+-    def __init__(self, position, feature_dim=32):
+-        self.pos = position
+-        self.f_v = np.random.randn(feature_dim)
+-        self.l_v = np.ones(3) # Scaling factor
+-        self.O_v = np.random.randn(K, 3) # Learnable offsets
+-        # MLPs for decoding
+-        self.F_w = MLP(2, 3) # Predicts weights for 3 features
+-        self.F_alpha = MLP(feature_dim + 2, K)
+-        self.F_c = MLP(feature_dim + 2, K * 3)
+-        self.F_q = MLP(feature_dim + 2, K * 4)
+-        self.F_s = MLP(feature_dim + 2, K * 3)
+-
+-    def get_feature_bank(self, downsample_factors=[1, 2, 4]):
+-        # In practice, f_v_down1 and f_v_down2 are stored or computed
+-        # Here we assume they are available or f_v is the base
+-        return [self.f_v] # Simplified for pseudocode; actual method uses multi-res bank
+-
+-    def spawn_gaussians(self, camera_pos):
+-        # 1. View-dependent info
+-        delta_vc = np.linalg.norm(self.pos - camera_pos)
+-        d_vc = (self.pos - camera_pos) / np.linalg.norm(self.pos - camera_pos)
+-        view_input = np.array([delta_vc, np.linalg.norm(d_vc)]) # d_vc is unit vector, norm is 1, but input expects direction components? 
+-        # Note: Source says d_vc = (xv - xc) / ||xv - xc||. Input to MLP is (delta_vc, d_vc). 
+-        # d_vc is a vector. MLP input dim must handle vector. 
+-        # Source: "Fw(delta_vc, d_vc)". d_vc is R^3. delta_vc is scalar.
+-        # Total input dim for Fw: 1 + 3 = 4? 
+-        # Source says Fw predicts {w, w1, w2}. 
+-        # Let's assume MLP handles concatenation.
++def scaffold_gs_refine(anchors, gaussians, gradients, opacities, N, tau_g, epsilon_g):
++    """
++    Refines anchors based on accumulated gradients and opacities.
++    """
++    # Growing
++    # Quantize Gaussians into voxels of size epsilon_g^(m)
++    for m in [1, 2, 3]:
++        voxel_size = epsilon_g / (4 ** (m - 1))
++        threshold = tau_g * (2 ** (m - 1))
+         
+-        # Re-reading source: "Fw(delta_vc, d_vc)". 
+-        # d_vc is a vector. 
+-        # Let's assume the MLP takes [delta_vc, d_vc_x, d_vc_y, d_vc_z]
+-        view_vec = np.concatenate([[delta_vc], d_vc])
++        # Compute avg gradients per voxel
++        voxel_gradients = compute_voxel_gradients(gaussians, voxel_size)
+         
+-        # 2. Feature Bank Blending
+-        # Assume f_v_down1, f_v_down2 are pre-computed or stored
+-        # For pseudocode, we assume we have access to them
+-        f_bank = [self.f_v, self.f_v_down1, self.f_v_down2]
+-        
+-        # Predict weights
+-        # Fw input: delta_vc (scalar), d_vc (vector)
+-        # Output: 3 weights
+-        raw_weights = self.F_w.forward(view_vec)
+-        weights = raw_weights / np.sum(raw_weights) # Softmax approximation or explicit softmax
+-        
+-        # Blend features
+-        f_hat_v = weights[0] * f_bank[0] + weights[1] * f_bank[1] + weights[2] * f_bank[2]
+-        
+-        # 3. Spawn Positions
+-        # mu_i = x_v + O_i * l_v
+-        positions = self.pos + self.O_v * self.l_v
+-        
+-        # 4. Decode Attributes
+-        # Input to decoders: f_hat_v (32), delta_vc (1), d_vc (3) -> total 36?
+-        # Or f_hat_v concatenated with view info
+-        decoder_input = np.concatenate([f_hat_v, view_vec])
+-        
+-        alphas = self.F_alpha.forward(decoder_input)
+-        colors = self.F_c.forward(decoder_input)
+-        quats = self.F_q.forward(decoder_input)
+-        scales = self.F_s.forward(decoder_input)
+-        
+-        # Filter by opacity
+-        valid_indices = np.where(alphas >= TAU_ALPHA)[0]
+-        
+-        return {
+-            'positions': positions[valid_indices],
+-            'alphas': alphas[valid_indices],
+-            'colors': colors[valid_indices],
+-            'quats': quats[valid_indices],
+-            'scales': scales[valid_indices]
+-        }
+-
+-def grow_prune_anchors(anchors, gradients, opacities, iteration):
+-    if iteration % N != 0:
+-        return anchors
+-    
+-    # Growing
+-    new_anchors = []
+-    for v in anchors:
+-        # Quantize gradient in voxel grid
+-        # Simplified: check if avg gradient > threshold
+-        # Multi-resolution logic omitted for brevity, using base level
+-        if np.mean(gradients[v.id]) > TAU_G:
+-            # Check if voxel is empty
+-            if not voxel_has_anchor(v.pos):
+-                new_anchor = Anchor(v.pos)
+-                new_anchors.append(new_anchor)
+-                # Random elimination logic would apply here
+-    
++        for voxel, grad in voxel_gradients.items():
++            if grad > threshold and not voxel_has_anchor(voxel):
++                # Add new anchor with random initialization
++                add_anchor(voxel.center)
++                
+     # Pruning
+-    pruned_ids = []
+-    for v in anchors:
+-        if np.sum(opacities[v.id]) < 0.5:
+-            pruned_ids.append(v.id)
+-            
+-    # Update anchor list
+-    anchors = [a for a in anchors if a.id not in pruned_ids] + new_anchors
+-    return anchors
++    for anchor in anchors:
++        if anchor.accumulated_opacity < 0.5:
++            remove_anchor(anchor)
+ ```
+ 
+@@ -199,15 +147,15 @@
+ 
+ ### [Scaffold-GS Integration](12513-scaffold-gs-integration.md)
+-Applies DART and AGE modules to the Scaffold-GS backbone. It augments the anchor-seeding SfM cloud before optimization and gates primitive growth during it, without modifying the rendering path or the optimizer. This approach is distinct from representation-level changes (like 3D-HGS) by operating as a backbone-agnostic add-on that specifically targets sparse initialization regions.
++Applies DART and AGE modules to the Scaffold-GS backbone, augmenting initialization and gating growth without modifying the rendering path.
+ 
+ ## Operating characteristics
+-*   **Time Complexity:** Rendering speed is around 100 FPS at 1K resolution, comparable to original 3D-GS with little computational overhead [S2]. On-the-fly prediction is limited to anchors within the view frustum [S2].
+-*   **Memory Complexity:** Storage requirements are significantly reduced. Only anchor points and MLP predictors are stored per scene. Reduction is 4.4x–10.2x compared to 3D-GS [S2].
++*   **Time Complexity:** Rendering speed is around 100 FPS at 1K resolution, comparable to original 3D-GS with little computational overhead [S2].
++*   **Memory Complexity:** Storage is significantly reduced. On Mip-NeRF360, storage is reduced by 4.4x; on Deep Blending, by 10.2x compared to 3D-GS [S2].
+ *   **Performance:** Achieves comparable PSNR/SSIM to 3D-GS on Mip-NeRF360 but surpasses SOTA on Tanks&Temples and DeepBlending [S2].
+-*   **Strengths:** Robust to view changes due to view-dependent attribute prediction; compact storage; real-time rendering; handles noisy initialization via growing/pruning [S2].
+-*   **Limitations:** Relies on initial SfM points for anchor placement; MLP inference adds some overhead compared to direct attribute lookup, though mitigated by frustum culling and opacity filtering [S2].
++*   **Strengths:** Robust to view changes, compact storage, real-time rendering [S2].
++*   **Limitations:** Relies on initial SfM points; performance may vary if SfM initialization is poor (though refinement helps) [S2].
+ 
+ ## Background
+-Scaffold-GS was introduced by Tao Lu, Mulin Yu, Linning Xu, Yuanbo Xiangli, Limin Wang, Dahua Lin, and Bo Dai from Shanghai Artificial Intelligence Laboratory, The Chinese University of Hong Kong, Nanjing University, and Cornell University [S2]. It was presented at CVPR 2024 (arXiv:2312.00109v1, Nov 2023) [S2]. The method builds on the differentiable rendering framework of 3D Gaussian Splatting [Parent](3761-3d-gaussian-splatting-training.md) and addresses limitations of vanilla 3D-GS regarding free drifting Gaussians and lack of structural guidance [S2].
++Scaffold-GS was introduced by Tao Lu, Mulin Yu, Linning Xu, Yuanbo Xiangli, Limin Wang, Dahua Lin, and Bo Dai from the Shanghai Artificial Intelligence Laboratory, The Chinese University of Hong Kong, Nanjing University, and Cornell University [S2]. It was published on arXiv on November 30, 2023, and later in CVPR 2024 [S2]. The method addresses the limitations of vanilla 3D-GS, such as unstructured Gaussian distribution and high storage costs, by introducing a structured, anchor-based representation [S2].
+ 
+ ## Sources

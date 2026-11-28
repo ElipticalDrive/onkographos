@@ -1,0 +1,208 @@
+--- v001.md
++++ v002.md
+@@ -1,5 +1,4 @@
+ # Boundary Sampling Methods
+ 
+-Also called: Edge sampling methods, Discontinuity sampling methods
+ 
+ ## Overview
+@@ -7,9 +6,9 @@
+ 
+ ## How it works
+-**Inputs:** Scene geometry (triangle meshes), scene parameters $\pi$ (e.g., vertex positions, material properties), camera parameters, and the rendering equation for pixel intensity $I$.
+-**Outputs:** The gradient of the pixel intensity with respect to the scene parameters, $\frac{\partial I}{\partial \pi}$.
++**Inputs:** Scene geometry (triangle meshes), scene parameters $\pi$ (e.g., vertex positions, material properties), camera parameters, and the rendering equation for pixel intensity $I$ [G].
++**Outputs:** The gradient of the pixel intensity with respect to the scene parameters, $\frac{\partial I}{\partial \pi}$ [G].
+ 
+ **Data Structures:**
+-*   **Edge List:** A collection of all triangle edges that contribute to geometric discontinuities. These are categorized into:
++*   **Edge List:** A collection of all triangle edges that contribute to geometric discontinuities [S1]. These are categorized into:
+     1.  **Boundary edges:** Topological boundaries of the mesh (only if the mesh is not closed) [S1].
+     2.  **Silhouette edges:** Edges causing occlusion between meshes or self-occlusion [S1].
+@@ -30,5 +29,5 @@
+ *   The summation is over all subdivided small domains [S1].
+ 
+-The derivative of the pixel intensity $I$ with respect to a scene parameter $\pi$ is derived by applying the chain rule. Since the derivative of the Heaviside step function is the Dirac delta function $\delta(\cdot)$, the gradient is:
++The derivative of the pixel intensity $I$ with respect to a scene parameter $\pi$ is derived by applying the chain rule [S1]. Since the derivative of the Heaviside step function is the Dirac delta function $\delta(\cdot)$, the gradient is:
+ 
+ $$
+@@ -38,5 +37,5 @@
+ where $\delta(\cdot)$ is the Dirac delta function [S1].
+ 
+-This 2D integral containing the Dirac delta function reduces to a 1D integral over the domains where the delta function is non-zero (i.e., the edges). The physically correct gradient formula is:
++This 2D integral containing the Dirac delta function reduces to a 1D integral over the domains where the delta function is non-zero (i.e., the edges) [S1]. The physically correct gradient formula is:
+ 
+ $$
+@@ -54,8 +53,8 @@
+ 2.  **Decompose the Gradient:** Separate the gradient computation into the interior term (smooth, handled by auto-diff) and the boundary term (discontinuous, handled by explicit sampling) [S1, 6708-differential-edge-sampling.md].
+ 3.  **Precompute Edges (Primary Visibility):** For primary visibility (the first segment of light paths), precompute all triangle edges that may contribute to geometric discontinuities [S1].
+-4.  **Importance Sample Boundaries:** Sample the boundary integrals.
++4.  **Importance Sample Boundaries:** Sample the boundary integrals [S1].
+     *   For primary visibility, importance sample the precomputed edges [S1].
+     *   For higher-order visibility (subsequent light path segments), importance sample geometric discontinuities viewed from arbitrary shading points [S1].
+-5.  **Initialize Guiding Structures (Advanced):** To reduce variance, project rays that intersect the shape being differentiated onto the corresponding geometry boundary. Calculate these projected rays' contributions to the boundary integral to initialize the guiding structure [S1].
++5.  **Initialize Guiding Structures (Advanced):** To reduce variance, project rays that intersect the shape being differentiated onto the corresponding geometry boundary [S1]. Calculate these projected rays' contributions to the boundary integral to initialize the guiding structure [S1].
+ 6.  **Adaptive Sampling (Advanced):** Use adaptive data structures and edge-sorting algorithms to reorganize the boundary sample space and guide the sampling process for improved efficiency [S1].
+ 
+@@ -63,62 +62,62 @@
+ ```python
+ def compute_gradient_boundary_sampling(scene, camera, params):
+-    """
+-    Computes the gradient of pixel intensity w.r.t. scene parameters
+-    using boundary sampling methods.
+-    """
+-    # 1. Identify discontinuities
+-    # Identify boundary edges, silhouette edges, and sharp edges
+-    edges = identify_discontinuity_edges(scene.meshes)
+-    
+-    # 2. Compute Interior Term (Auto-diff)
+-    # Render the image using standard path tracing with auto-diff enabled
+-    # This computes the integral of the smooth parts of the integrand
++    # 1. Compute interior term via automatic differentiation of the standard rendering equation [G]
+     interior_gradient = auto_diff_render(scene, camera, params)
+-    
+-    # 3. Compute Boundary Term (Explicit Sampling)
++
++    # 2. Identify discontinuity edges: boundary, silhouette, and sharp edges [S1]
++    edges = get_all_triangle_edges(scene.meshes)
++
+     boundary_gradient = 0.0
+-    
+-    # Precompute edges for primary visibility
+-    primary_edges = filter_edges_for_primary_visibility(edges, camera)
+-    
+-    # Sample primary visibility boundaries
++
++    # 3. Primary visibility: precompute and importance sample edges [S1]
++    primary_edges = filter_edges_visible_from_camera(edges, camera)
+     for edge in primary_edges:
+-        # Sample points along the edge
+-        samples = sample_edge(edge, num_samples=K)
+-        for sample in samples:
+-            # Calculate the contribution of the discontinuity at this edge
+-            # Formula: integral of (grad_alpha / |grad_alpha|) * f_i(x,y) dt
+-            contribution = compute_edge_contribution(edge, sample, scene, camera, params)
+-            boundary_gradient += contribution
+-            
+-    # Handle higher-order visibility (global illumination)
+-    # This requires sampling discontinuities from arbitrary shading points
+-    # which is more complex than primary visibility [S1]
+-    # Implementation details vary by specific method (e.g., Li et al. [9], Zhang et al. [11])
+-    global_illumination_gradient = compute_global_illumination_boundary_terms(scene, camera, params, edges)
+-    boundary_gradient += global_illumination_gradient
+-    
+-    # 4. Combine
+-    total_gradient = interior_gradient + boundary_gradient
+-    return total_gradient
++        # Sample along the edge parameter t
++        for t in sample_edge_parameter(edge, num_samples=K):
++            # Evaluate scene function f_i at the sample point by tracing a ray [G]
++            radiance = trace_ray(scene, camera, edge.point_at(t), params)
++            # Compute boundary integrand: (grad_alpha / ||grad_alpha||) * f_i * dt
++            grad_alpha = edge.gradient_at(t)
++            direction = grad_alpha / vector_norm(grad_alpha)
++            boundary_gradient += direction * radiance * edge.differential_length(t)
+ 
+-def compute_edge_contribution(edge, sample, scene, camera, params):
+-    """
+-    Computes the contribution of a specific edge sample to the boundary integral.
+-    """
+-    # Get the edge equation alpha_i(x,y) and its gradient
+-    alpha = edge.equation
+-    grad_alpha = edge.gradient
+-    
+-    # Normalize the gradient direction
+-    direction = grad_alpha / norm(grad_alpha)
+-    
+-    # Evaluate the scene function f_i(x,y) at the sample point
+-    # This involves tracing a ray from the camera through the sample point
+-    # to determine visibility and radiance
+-    radiance = trace_ray(scene, camera, sample.position, params)
+-    
+-    # Return the integrand value
+-    return direction * radiance
++    # 4. Higher-order visibility: sample discontinuities from arbitrary shading points [S1]
++    # Project rays intersecting the differentiated shape onto the geometry boundary to initialize guiding structures [S1]
++    gi_gradient = compute_global_illumination_boundary_terms(scene, camera, params, edges)
++    boundary_gradient += gi_gradient
++
++    return interior_gradient + boundary_gradient
++
++# Helper definitions for standard operations not detailed in the source [G]
++def auto_diff_render(scene, camera, params):
++    # Standard differentiable path tracing pass returning interior gradient
++    return standard_differentiable_path_trace(scene, camera, params)
++
++def get_all_triangle_edges(meshes):
++    # Iterate over all triangles and collect unique vertex pairs
++    return unique_vertex_pairs_from_triangles(meshes)
++
++def filter_edges_visible_from_camera(edges, camera):
++    # Test each edge's bounding volume against camera frustum and visibility
++    return [e for e in edges if is_edge_visible(e, camera)]
++
++def sample_edge_parameter(edge, num_samples):
++    # Uniform or importance sampling of parameter t in [0, 1]
++    return uniform_sample_interval(0.0, 1.0, num_samples)
++
++def trace_ray(scene, camera, point, params):
++    # Cast ray from camera through point, accumulate radiance
++    return cast_camera_ray(scene, camera, point, params)
++
++def compute_global_illumination_boundary_terms(scene, camera, params, edges):
++    # Trace higher-order paths, project intersections onto geometry boundaries,
++    # and accumulate boundary integral contributions [S1]
++    return path_trace_with_boundary_projection(scene, camera, params, edges)
++
++def vector_norm(v):
++    return math.sqrt(sum(c**2 for c in v))
++
++def uniform_sample_interval(min_val, max_val, count):
++    return [min_val + (max_val - min_val) * i / count for i in range(count)]
+ ```
+ 
+@@ -133,23 +132,28 @@
+ *   **Variance in complex scenes:** The 6D Hough tree scheme by Li et al. [9] does not scale well to high-complexity scenes and does not match the contribution function shape closely, resulting in large variance [S1].
+ 
++## Subtopics
++
++### [Pixel Boundary Sampling](22805-pixel-boundary-sampling.md)
++Handles discontinuities at pixel filter boundaries by explicitly integrating over the boundary, allowing box filters instead of Gaussian filters to reduce variance. Sets itself apart by avoiding the extra variance from the derivative of Gaussian weights in the divergence term. Choose when using box filters or when Gaussian filter derivatives introduce excessive noise.
++
+ ## Operating characteristics
+-*   **Time Complexity:** Not given in the sources.
+-*   **Memory Complexity:** Not given in the sources.
+-*   **Measured Performance:** Li et al. [9] achieved lower variance with less computation time compared to earlier methods under equal-sample configurations [S1]. Zhang et al. [11] significantly reduced the variance of the gradient estimator with less computation time by introducing multi-directional boundary integrals [S1]. Yan et al. [41] provided better exploration of the boundary sample space, resulting in lower variance for gradient estimates under equal-time configurations [S1].
+-*   **Scaling:** The 6D Hough tree scheme by Li et al. [9] does not scale well to scenes with high complexity [S1].
+-*   **Strengths:** Explicitly handles discontinuities, providing unbiased gradients. Modern variants (Zhang et al. [11], Yan et al. [41]) reduce variance significantly compared to early methods.
+-*   **Limitations:** Complexity increases significantly for higher-order visibility (global illumination). Early importance sampling schemes (Li et al. [9]) suffer from high variance in complex scenes.
+-*   **When to use:** When unbiased gradients are required for scenes with triangle meshes and discontinuities are a significant source of error.
+-*   **When not to use:** When computational resources are limited and high-complexity scenes are used with early sampling schemes (Li et al. [9]).
++* **Time Complexity:** Not given in the sources.
++* **Memory Complexity:** Not given in the sources.
++* **Measured Performance:** Li et al. [9] results in relatively large variance because their scheme does not match the contribution function shape closely [S1]. Zhang et al. [11] significantly reduced the variance of the gradient estimator with less computation time by introducing multi-directional boundary integrals [S1]. Yan et al. [41] provided better exploration of the boundary sample space, resulting in lower variance for gradient estimates under equal-time configurations [S1].
++* **Scaling:** The 6D Hough tree scheme by Li et al. [9] does not scale well to scenes with high complexity [S1].
++* **Strengths:** Explicitly handles discontinuities, providing unbiased gradients [S1]. Modern variants (Zhang et al. [11], Yan et al. [41]) reduce variance significantly compared to early methods [S1].
++* **Limitations:** Complexity increases significantly for higher-order visibility (global illumination) [S1]. Early importance sampling schemes (Li et al. [9]) suffer from high variance in complex scenes [S1].
++* **When to use:** When unbiased gradients are required for scenes with triangle meshes and discontinuities are a significant source of error [S1].
++* **When not to use:** When computational resources are limited and high-complexity scenes are used with early sampling schemes (Li et al. [9]) [S1].
+ 
+ ## Background
+-*   **Origin:** Li et al. [9] presented the first physics-based differentiable rendering technique for scenes composed of triangle meshes using an edge sampling method [S1]. They realized that automatic differentiation could not be used directly due to the discontinuity of the integrand in global illumination techniques like path tracing [S1].
+-*   **Development:**
+-    *   Zhang et al. [12] extended the edge sampling method to scenes containing participating media, supporting arbitrary surface and volumetric configurations [S1].
+-    *   Zhang et al. [11] introduced a transport relation from fluid mechanics to establish a mathematical framework for modern boundary sampling techniques. They also introduced a multi-directional form of the boundary integral, allowing silhouette paths to be generated "from the middle" to reduce variance [S1].
+-    *   Zhang et al. [13] extended the method of Zhang et al. [11] to scenes containing participating media [S1].
+-    *   Yan et al. [41] employed adaptive data structures to guide the sampling process within the boundary sample space and proposed an edge-sorting algorithm to reorganize the boundary sample space to improve sampling efficiency [S1].
+-    *   Zhang et al. [14] re-derived the local formulation of the perimeter and proposed the first local formulation of the interior. They also found that calculating the boundary term can benefit from information gathered during the interior term's simulation by projecting rays onto the geometry boundary to initialize the guiding structure [S1].
+-*   **Usage:** Used in differentiable rendering for inverse problems, shape optimization, and material estimation in scenes with triangle meshes [S1].
++* **Origin:** Li et al. [9] presented the first physics-based differentiable rendering technique for scenes composed of triangle meshes using an edge sampling method [S1]. They realized that automatic differentiation could not be used directly due to the discontinuity of the integrand in global illumination techniques like path tracing [S1].
++* **Development:**
++    * Zhang et al. [12] extended the edge sampling method to scenes containing participating media, supporting arbitrary surface and volumetric configurations [S1].
++    * Zhang et al. [11] introduced a transport relation from fluid mechanics to establish a mathematical framework for modern boundary sampling techniques [S1]. They also introduced a multi-directional form of the boundary integral, allowing silhouette paths to be generated "from the middle" to reduce variance [S1].
++    * Zhang et al. [13] extended the method of Zhang et al. [11] to scenes containing participating media [S1].
++    * Yan et al. [41] employed adaptive data structures to guide the sampling process within the boundary sample space and proposed an edge-sorting algorithm to reorganize the boundary sample space to improve sampling efficiency [S1].
++    * Zhang et al. [14] re-derived the local formulation of the perimeter and proposed the first local formulation of the interior [S1]. They also found that calculating the boundary term can benefit from information gathered during the interior term's simulation by projecting rays onto the geometry boundary to initialize the guiding structure [S1].
++* **Usage:** Used in differentiable rendering for inverse problems, shape optimization, and material estimation in scenes with triangle meshes [S1].
+ 
+ ## Sources

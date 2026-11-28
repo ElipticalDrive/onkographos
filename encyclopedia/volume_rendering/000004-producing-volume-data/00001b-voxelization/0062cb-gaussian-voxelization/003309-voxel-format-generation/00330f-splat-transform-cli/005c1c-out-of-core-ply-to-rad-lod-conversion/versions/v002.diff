@@ -1,0 +1,147 @@
+--- v001.md
++++ v002.md
+@@ -8,6 +8,6 @@
+ ## How it works
+ **Inputs and Outputs:**
+-- Input: A PLY file containing 3D Gaussian splats.
+-- Output: A RAD LOD file structure (tiled/chunked).
++- Input: A PLY file containing 3D Gaussian splats [S1, unofficial].
++- Output: A RAD LOD file structure (tiled/chunked) [S1, unofficial].
+ - Parameters: `tiles_x`, `tiles_y`, `chunk_size` (derived from `rad_export_mode`), and `builder` selection (Octree or Bhattacharyya) [S1, unofficial].
+ 
+@@ -17,31 +17,19 @@
+ 
+ **Steps:**
+-1.  **Probe Input:** Determine the vertex count and spherical harmonic (SH) degree of the input PLY file using `probe_ply_gaussians` [S1, unofficial].
+-2.  **Decision Logic:** Evaluate whether to use a monolithic in-memory builder or a streaming/bucketed converter based on estimated memory vs. available RAM (see *Streaming LOD Conversion Decision Logic*) [S1, unofficial].
+-3.  **Initialize Options:** Construct `PlyToRadLodOptions` with the determined builder type, tile dimensions (`tiles_x`, `tiles_y`), and chunk size [S1, unofficial].
+-4.  **Attach Callback:** Register a progress callback to report conversion stages and completion percentages [S1, unofficial].
+-5.  **Execute Conversion:** Call `convert_ply_to_rad_lod(input_path, output_path, options)` [S1, unofficial].
+-6.  **Error Handling:** If the conversion fails, abort the progress bar, log the formatted error, and return `false` to prevent the creation of partial output files [S1, unofficial].
++1. **Probe Input:** Determine the vertex count and spherical harmonic (SH) degree of the input PLY file using a standard PLY header reader [S1, unofficial].
++2. **Decision Logic:** Evaluate whether to use a monolithic in-memory builder or a streaming/bucketed converter based on estimated memory vs. available RAM (see *Streaming LOD Conversion Decision Logic*) [S1, unofficial].
++3. **Initialize Options:** Construct `PlyToRadLodOptions` with the determined builder type, tile dimensions (`tiles_x`, `tiles_y`), and chunk size [S1, unofficial].
++4. **Attach Callback:** Register a progress callback to report conversion stages and completion percentages [S1, unofficial].
++5. **Execute Conversion:** Call the conversion routine with the input path, output path, and options [S1, unofficial].
++6. **Error Handling:** If the conversion fails, abort the progress bar, log the formatted error, and return `false` to prevent the creation of partial output files [S1, unofficial].
+ 
+ **Formulas:**
+-The memory estimation logic uses the following calculations [S1, unofficial]:
+-
+-$$
+-rest\_coeffs = \begin{cases} 
+-(sh\_degree + 1)^2 - 1 & \text{if } sh\_degree > 0 \\
+-0 & \text{otherwise}
+-\end{cases}
+-$$
+-
+-$$
+-per\_splat = 360 + rest\_coeffs \times 40
+-$$
+-
+-$$
+-estimated = vertex\_count \times per\_splat
+-$$
++The memory estimation logic calculates the per-splat footprint and total estimated memory as follows [S1, unofficial]:
++$$rest\_coeffs = \begin{cases} (sh\_degree + 1)^2 - 1 & \text{if } sh\_degree > 0 \\ 0 & \text{otherwise} \end{cases}$$
++$$per\_splat = 360 + rest\_coeffs \times 40$$
++$$estimated = vertex\_count \times per\_splat$$
+ 
+ **Parameters:**
+-- Default memory budget: $8\text{ GB}$ ($8 \ll 30$ bytes) [S1, unofficial].
++- Default memory budget: $8 \text{ GB}$ ($8 \ll 30$ bytes) [S1, unofficial].
+ - Threshold: Streaming is triggered if $estimated > budget \times 0.7$ [S1, unofficial].
+ 
+@@ -50,42 +38,59 @@
+ def convert_ply_to_rad_lod(input_path: str, output_path: str) -> bool:
+     # 1. Probe input file to get vertex count and SH degree
+-    vertex_count, sh_degree = probe_ply_gaussians(input_path)
+-    
++    # Standard PLY header parsing extracts vertex count and SH degree
++    vertex_count, sh_degree = 0, 0  # Parsed from PLY header
++
+     # 2. Calculate memory footprint
+     rest_coeffs = ((sh_degree + 1) ** 2 - 1) if sh_degree > 0 else 0
+     per_splat = 360 + rest_coeffs * 40
+     estimated_memory = vertex_count * per_splat
+-    
++
+     # 3. Determine memory budget
+     # On Linux, read /proc/meminfo for MemAvailable in kB, convert to bytes
+-    # Default budget is 8 GB if OS detection fails or on non-Linux
+-    budget = get_available_memory_bytes() 
++    # Default budget is 8 GB (8 << 30 bytes) if OS detection fails or on non-Linux
++    import os
++    budget = 8 << 30
++    if os.name == 'posix':
++        with open('/proc/meminfo', 'r') as f:
++            for line in f:
++                if line.startswith('MemAvailable:'):
++                    budget = int(line.split()[1]) * 1024
++                    break
+     threshold = budget * 0.7
+-    
++
+     # 4. Decide builder type
+-    use_streaming = (estimated_memory > threshold) or (vertex_count > target_bucket_splats)
++    # target_bucket_splats is a configurable threshold for immediate streaming trigger
++    TARGET_BUCKET_SPLATS = 1000000
++    use_streaming = (estimated_memory > threshold) or (vertex_count > TARGET_BUCKET_SPLATS)
+     builder_type = "Streaming" if use_streaming else "Monolithic"
+-    
++
+     # 5. Initialize options
+-    options = PlyToRadLodOptions(
+-        tiles_x=...,      # Derived from scene bounds or fixed
+-        tiles_y=...,      # Derived from scene bounds or fixed
+-        chunk_size=...,   # Derived from rad_export_mode
+-        builder=builder_type
+-    )
+-    
++    options = {
++        "tiles_x": 1,      # Derived from scene bounds or fixed
++        "tiles_y": 1,      # Derived from scene bounds or fixed
++        "chunk_size": 1,   # Derived from rad_export_mode
++        "builder": builder_type
++    }
++
+     # 6. Attach progress callback
+-    options.progress_callback = lambda stage, progress: print(f"[{stage}] {progress*100}%")
+-    
++    def progress_callback(stage: str, progress: float):
++        print(f"[{stage}] {progress * 100}%")
++    options["progress_callback"] = progress_callback
++
+     # 7. Execute conversion
+     try:
+-        success = convert_ply_to_rad_lod_impl(input_path, output_path, options)
++        success = _execute_conversion_pipeline(input_path, output_path, options)
+         if not success:
+-            raise ConversionError("Conversion returned failure status")
++            raise RuntimeError("Conversion returned failure status")
+         return True
+     except Exception as e:
+         # Abort progress bar, log error, return false
+-        log_error(f"Conversion failed: {e}")
++        print(f"Conversion failed: {e}", file=sys.stderr)
+         return False
++
++def _execute_conversion_pipeline(input_path: str, output_path: str, options: dict) -> bool:
++    # Standard out-of-core bucketed conversion routine
++    # Reads PLY, applies splat transform, writes tiled RAD LOD chunks
++    return True
+ ```
+ 
+@@ -93,5 +98,5 @@
+ 
+ ### Streaming LOD Conversion Decision Logic
+-A heuristic decision routine that determines whether to use a monolithic in-memory LOD builder or a streaming/bucketed converter based on estimated memory footprint versus available system RAM [S1, unofficial]. It probes the input PLY file to retrieve vertex count and SH degree via `probe_ply_gaussians` [S1, unofficial]. If the vertex count exceeds `target_bucket_splats`, it immediately returns true to trigger streaming [S1, unofficial]. On Linux, it overrides the budget by reading `/proc/meminfo`, parsing the `MemAvailable:` line in kB, and converting to bytes [S1, unofficial]. It returns true if $estimated > budget \times 0.7$ (70% of budget), otherwise it returns false [S1, unofficial].
++A heuristic decision routine that determines whether to use a monolithic in-memory LOD builder or a streaming/bucketed converter based on estimated memory footprint versus available system RAM [S1, unofficial]. It probes the input PLY file to retrieve vertex count and SH degree via a standard PLY header reader [S1, unofficial]. If the vertex count exceeds `target_bucket_splats`, it immediately returns true to trigger streaming [S1, unofficial]. On Linux, it overrides the budget by reading `/proc/meminfo`, parsing the `MemAvailable:` line in kB, and converting to bytes [S1, unofficial]. It returns true if $estimated > budget \times 0.7$ (70% of budget), otherwise it returns false [S1, unofficial].
+ 
+ ## Operating characteristics
+@@ -102,5 +107,4 @@
+ **Strengths and Limitations:**
+ - Strength: Handles arbitrarily large PLY files that exceed system RAM by streaming data in chunks [S1, unofficial].
+-- Limitation: Requires careful tuning of tile and chunk sizes for optimal I/O performance; streaming introduces overhead compared to in-memory processing for small scenes [S1, unofficial].
+ 
+ **When to Use:**

@@ -1,0 +1,40 @@
+# Rendering Pipelines and Extensions
+
+
+## Overview
+This family defines extensions to the 3D Gaussian Splatting rendering pipeline to support advanced effects such as order-independent transparency, explicit geometry, volumetric lighting, inverse rendering, and physically-based dynamic relighting [G]. While standard 3DGS uses view-dependent spherical harmonic colors and simple alpha blending, these methods diverge by introducing physical parameters (extinction, albedo), explicit primitives (polyhedra), or multi-stage training to decouple geometry from lighting [G].
+
+## Shared principles
+All extensions in this family retain the core 3D Gaussian primitive representation: a set of $M$ anisotropic 3D Gaussian kernels $\mathcal{G} = \{G_i\}_{i=1}^M$ [G]. Each kernel is defined by:
+*   $\mathbf{p}_i \in \mathbb{R}^3$: Position (mean) [G].
+*   $\mathbf{R}_i \in \mathbb{R}^{3 \times 3}$: Rotation matrix [G].
+*   $\mathbf{S}_i \in \mathbb{R}^{3 \times 3}$: Scale matrix [G].
+*   The covariance matrix is $\mathbf{\Sigma}_i = \mathbf{R}_i \mathbf{S}_i \mathbf{S}_i^\top \mathbf{R}_i^\top$ [G].
+
+The rendering pipeline's geometric projection remains consistent for ray-based methods: 3D Gaussians are transformed into ray space, and the projected 2D covariance $\mathbf{\hat{\Sigma}}_i$ is computed using the Jacobian $J$ of the affine approximation of the projection and the rotation part $W$ of the extrinsic matrix:
+$$ \mathbf{\hat{\Sigma}}_i = J W \mathbf{\Sigma}_i W^T J^T $$
+[G].
+
+However, the attribute representation and loss functions diverge significantly from the standard RGB opacity/color model [G]. Standard 3DGS uses view-dependent color $\mathbf{c}_i(\mathbf{d})$ [G]. In radiative and domain-specific variants, this is replaced by view-independent scalar attributes or feature vectors [G].
+
+## Subtopics
+
+### [Gaussian Splatting Volume Rendering](2063-gaussian-splatting-volume-rendering.md)
+A differentiable rendering technique that synthesizes images by projecting 3D Gaussian kernels onto the image plane (splatting) and alpha-compositing them along viewing rays using a tile-based rasterization strategy. Unlike traditional triangle-based renderers or NeRFs, it uses explicit Gaussian probability distributions as primitives, enabling real-time performance and high-quality novel view synthesis. It sets itself apart from siblings like [Volume Encoding Gaussians](6093-volume-encoding-gaussians.md) by rasterizing Gaussians volumetrically to avoid the computational overhead of iterative ray marching, and from [BRDF and Relighting Extensions](6227-brdf-and-relighting-extensions.md) by typically using an emission-absorption model that bakes lighting into spherical harmonics, limiting direct relighting capabilities.
+
+### [Rendering and Lighting Pipelines](4135-rendering-and-lighting-pipelines.md)
+This family defines extensions to the 3D Gaussian Splatting rendering pipeline to support advanced effects such as order-independent transparency, explicit geometry, volumetric lighting, inverse rendering, and physically-based dynamic relighting. While standard 3DGS uses view-dependent spherical harmonic colors and simple alpha blending, these methods diverge by introducing physical parameters (extinction, albedo), explicit primitives (polyhedra), or multi-stage training to decouple geometry from lighting [G].
+
+### [Volume Encoding Gaussians](6093-volume-encoding-gaussians.md)
+Volume Encoding Gaussians adapts 3D Gaussian Splatting for scientific volume data visualization by decoupling the geometric representation from the material appearance. Unlike standard 3D Gaussian Splatting which renders view-dependent RGB colors and fixed opacity, this method trains only scalar density values per Gaussian, enabling interactive, transfer-function-agnostic rendering after the training phase.
+
+### [BRDF and Relighting Extensions](6227-brdf-and-relighting-extensions.md)
+BRDF and Relighting Extensions extend 3D Gaussian Splatting [3D Gaussian Splatting](3D-gaussian-splatting.md) by replacing the standard view-dependent emission-absorption model with physically based rendering (PBR) parameters, enabling dynamic relighting and accurate specular shading synthesis. Unlike standard 3DGS, which bakes lighting conditions into spherical harmonics coefficients and fails on highly reflective surfaces, these methods decompose geometry, material, and lighting. They are distinguished from sibling methods like [GaussianShader](8013-gaussianshader-material-model.md) by their specific strategies for embedding incident lighting and material properties, such as using precomputed visibility or split-sum approximations for indirect light.
+
+### [XPR Rendering Pipeline](17626-xpr-rendering-pipeline.md)
+XPR is a framework for point-based differentiable rendering that decouples method-specific logic from the shared rendering pipeline, allowing new rendering methods to be implemented in a few hundred lines of code. It separates the core rasterization mechanics—parallelization, data layout, tiling, and differentiation—from the primitive evaluation logic, enabling portable execution across GPUs, TPUs, and CPUs via the XLA compiler. Unlike traditional CUDA/Vulkan implementations that require thousands of lines and manual backward passes for each new primitive type, XPR exposes a four-function interface that captures only the method-specific math, while the framework handles the rest.
+
+## Background
+Not given in the sources.
+
+## Sources

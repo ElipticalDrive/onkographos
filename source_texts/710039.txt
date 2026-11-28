@@ -1,0 +1,187 @@
+# cupy-mc33
+
+CUDA-resident, directly indexed, corrected Marching Cubes 33 for CuPy arrays.
+It implements Lewiner's lookup-table algorithm with the later corrected
+interior tests, including the pathological case 13.5.
+
+This repository is the independent verification project for the single-file
+FRTFM owner at `frtfm/image/marching_cubes.py`. It remains standalone so the
+geometry algorithm, exhaustive oracles, and public packaging stay separable
+from the scientific pipeline.
+
+## Status
+
+CPU and CUDA verification on 2026-07-21:
+
+- exact production decision source compiled as host C++;
+- all 256 corner-sign configurations exercised;
+- 10,000 seeded scalar cubes differential-tested against scikit-image;
+- all differences confined to the six corrected ambiguous case families;
+- published C-MC33 10,000-grid Euler corpus: **10,000/10,000 pass**;
+- published case-13.5 counterexample: corrected 10-face tunnel versus
+  scikit-image 0.25.2's incorrect 6-face triangulation;
+- closed sphere, torus and two-sphere manifold/topology tests pass;
+- open-border and empty/full-field behavior passes;
+- scikit-image's isotropic/anisotropic ellipsoids, tiny exact-level ellipsoid,
+  and double-torus regression objects pass;
+- CUDA source compiles offline with CUDA 13.3 `nvcc`;
+- dtype, layout, device, current-stream and chunk-boundary CUDA tests pass;
+- complete suite: **23 passed**, including the external 10,000-case corpus.
+
+CUDA runtime and memory were measured on an RTX 5090 with CuPy 13.6.0 and
+Torch 2.11.0.dev20260119+cu130. Both the standalone synthetic measurements and
+the exact active FRTFM call measurements are reported below.
+
+## Development provenance
+
+The implementation, tests, benchmark harness, and documentation were generated
+and iteratively revised by **OpenAI Codex under Pete Newman's direction**. They
+were not accepted on generation alone. The release was checked against:
+
+- the published Lewiner and corrected Custodio MC33 algorithms;
+- scikit-image's independently maintained Lewiner implementation and regression
+  objects;
+- every one of the 256 cube sign configurations;
+- 10,000 seeded random scalar cubes;
+- the authors' 10,000-grid C-MC33 Euler corpus;
+- analytic closed objects with known Euler characteristics;
+- CUDA compilation, device, dtype, non-contiguous-layout, chunk-boundary, and
+  non-default-stream tests;
+- real FRTFM cell, fiber, and AFM-tip production inputs.
+
+The phrase "verification" here means that these documented automated and
+scientific comparisons passed. It is not formal certification, a proof that no
+defects remain, or a substitute for validation in a downstream scientific
+application. Human maintainers remain responsible for review, release, and use.
+
+No source was copied from the C-MC33 implementation. Lookup values derived from
+scikit-image are identified and licensed in `THIRD_PARTY_LICENSES.md`; the
+C-MC33 corpus is fetched only for testing and is not redistributed because its
+reuse license is unclear.
+
+## Scientific contract
+
+The operation extracts the piecewise-linear triangle mesh selected by corrected
+MC33 for the trilinear interpolant of a scalar grid.
+
+- Input and node coordinates are `(Z, Y, X)`.
+- A corner is positive only when `value > level`, matching scikit-image.
+- Output is an indexed mesh, not polygon soup.
+- Grid-edge intersections are shared by global lattice-edge identity.
+- MC33 interior nodes are unique to their owning cube.
+- Nodes remain on the input CuPy device.
+- Floating input dtype is preserved in output nodes; integer/bool input returns
+  float32 nodes. Decisions and interpolation use scikit-compatible float32
+  volume values with float64 ambiguity arithmetic.
+- Faces are int64 and follow scikit-image's public
+  `gradient_direction="descent"` winding.
+- Empty/full or out-of-range fields return empty `(0, 3)` arrays.
+- Non-contiguous positive- or negative-stride CuPy arrays are accepted.
+
+The corrected implementation intentionally does not match scikit-image in all
+ambiguous cells. Custodio et al. demonstrated that the original Lewiner
+interior decision can select the wrong topology. The published corrected Euler
+invariants are authoritative for those cases.
+
+References:
+
+- [Lewiner et al., Efficient implementation of Marching Cubes' cases with topological guarantees](https://thomas.lewiner.org/pdfs/marching_cubes_jgt.pdf)
+- [Custodio et al., Practical considerations on the topological correctness of Marching Cubes 33](https://liscustodio.github.io/C_MC33/)
+- [scikit-image marching cubes](https://scikit-image.org/docs/stable/api/skimage.measure.html#skimage.measure.marching_cubes)
+
+## Algorithm
+
+1. A lightweight CUDA pass classifies every cube into one byte. Empty/full
+   cubes become zero, so one CuPy compaction produces the active cube list.
+2. One CUDA thread per active cube reloads its eight corners, runs the corrected
+   face/interior tests and emits up to 12 triangles as compact int8 edge codes.
+3. Active-cube processing is bounded in four-million-cube chunks for dense
+   pathological fields; production masks normally fit in one chunk.
+4. Local edge codes become global X/Y/Z lattice-edge identities. Cube-center
+   vertices occupy a disjoint identity range.
+5. One one-dimensional integer `cupy.unique` creates the compact indexed mesh.
+6. Coordinates are interpolated once per used global edge; MC33 center nodes
+   use Lewiner's inverse-distance corner weighting.
+
+This avoids polygon-soup materialization and the expensive floating-point
+`unique(axis=0)` pass used by the superseded FRTFM implementation.
+
+## Installation
+
+Use the CuPy wheel matching the installed CUDA runtime, then install this
+project. For a CUDA 13 environment:
+
+```bash
+python -m pip install 'cupy-cuda13x>=13.6,<14'
+python -m pip install -e '.[test]'
+```
+
+No compiled extension is built at installation time. CuPy/NVRTC compiles and
+caches the kernel on first use.
+
+## Usage
+
+```python
+import cupy as cp
+from cupy_mc33 import marching_cubes
+
+volume = cp.zeros((128, 128, 128), dtype=cp.float32)
+volume[24:-24, 24:-24, 24:-24] = 1
+nodes_vox, faces = marching_cubes(volume, level=0.5)
+```
+
+The package accepts and returns CuPy arrays. Torch/DLPack/current-stream
+interoperability belongs in FRTFM's deepest `image.marching_cubes` owner, not in
+this general geometry package.
+
+## Test inventory
+
+| Test family | Coverage and oracle |
+|---|---|
+| Lookup completeness | All 256 sign configurations and every selected edge code |
+| Random differential | 10,000 seeded, log-uniform scalar cubes versus scikit-image |
+| Corrected topology | Published 10,000 C-MC33 grids and Euler invariants |
+| Pathology | Published case 13.5 counterexample |
+| Analytic closed objects | Sphere (χ=2), torus (χ=0), two spheres (χ=4) |
+| Mesh validity | Boundary/non-manifold edge counts and zero-area faces |
+| Borders and degeneracy | Open plane, empty field, full field, exact level convention |
+| Layout and dtype | bool, int16, float16/32/64, non-contiguous arrays |
+| Chunking | Tiny chunks crossing X/Y/Z row and slab boundaries |
+| CUDA semantics | Input device, output device, non-default current stream |
+| Scikit regressions | Isotropic/anisotropic ellipsoids, exact-level ellipsoid, double torus |
+| CUDA build | Offline `nvcc` compilation of the actual kernel source |
+
+The upstream C-MC33 archive is intentionally not committed because its reuse
+license is unclear. Fetch and verify it locally:
+
+```bash
+python tools/fetch_cmc33_corpus.py ./testdata/external
+export C_MC33_CASES_DIR="$PWD/testdata/external/MarchingCubes_cases"
+```
+
+Run CPU certification without touching a GPU:
+
+```bash
+PYTHONDONTWRITEBYTECODE=1 PYTHONPATH=src \
+  python -m pytest -p no:cacheprovider tests -q
+```
+
+After confirming the GPU is unoccupied, run the complete CUDA suite:
+
+```bash
+C_MC33_CASES_DIR="$PWD/testdata/external/MarchingCubes_cases" \
+CUPY_MC33_RUN_GPU=1 PYTHONDONTWRITEBYTECODE=1 PYTHONPATH=src \
+  python -m pytest -p no:cacheprovider tests -q
+```
+
+## Benchmark
+
+`benchmarks/benchmark_marching_cubes.py` separates first-call NVRTC/JIT cost
+from seven synchronized steady-state runs. Its memory hook records peak active
+bytes from CuPy's pool as well as total retained pool bytes. Results are written
+only beneath `benchmarks/_benchmark_marching_cubes/`.
+
+```bash
+PYTHONDONTWRITEBYTECODE=1 PYTHONPATH=src \
+  python benchmarks/benchmark_marching_cubes.py
+```

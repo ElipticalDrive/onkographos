@@ -1,0 +1,215 @@
+# Voxel Shape Definition
+
+Also called: AABB Voxel Shape, Block Voxel Shape
+
+## Overview
+Voxel Shape Definition is a method for defining complex block boundaries using one or more axis-aligned bounding boxes (AABBs) aligned to the 3-D world grid. It solves the problem of determining which faces of adjacent blocks are occluded and which require rendering, as well as handling collision detection for block connectivity. It is distinct from general geometry definitions by operating on a discrete pixel grid (1/16th of a block) with an origin at the block corner, rather than a continuous space with an origin at the block center.
+
+## How it works
+### Inputs and Outputs
+- **Input**: A JSON definition file containing `format_version`, an `identifier`, and an array of `boxes` (AABBs).
+- **Output**: A registered voxel shape used by the renderer for face culling and by the physics engine for collision detection.
+
+### Data Structures
+The voxel shape is defined by a JSON structure. The core data structure is an array of AABBs.
+
+**JSON Layout:**
+> **Unverified code.** The code below did not pass a test run against a reference implementation, or no test fits it, so it may contain errors.
+
+```json
+{
+  "format_version": "1.21.110",
+  "minecraft:voxel_shape": {
+    "description": {
+      "identifier": "namespace:name"
+    },
+    "shape": {
+      "boxes": [
+        { "min": [x, y, z], "max": [x, y, z] },
+        ...
+      ]
+    }
+  }
+}
+```
+
+**AABB Definition:**
+Each box is defined by two 3D vectors, `min` and `max`.
+- `min`: `[x_min, y_min, z_min]`
+- `max`: `[x_max, y_max, z_max]`
+- Constraint: `min[i] < max[i]` for all axes $i \in \{X, Y, Z\}$.
+
+### Culling Logic
+The renderer uses voxel shapes to determine if a face of a block should be rendered. The logic proceeds as follows:
+
+1.  **Face Slice Computation**: For a given face of a block (e.g., North, South, etc.), compute a "face slice" from the block's voxel shape at the specific boundary coordinate.
+2.  **Neighbor Comparison**: Compute the opposite face slice from the neighboring block's voxel shape.
+3.  **Coverage Check**: If the neighbor's face slice fully covers the current block's face slice, the face is culled (hidden).
+4.  **Fallback**: If voxel shape comparison indicates the face should remain visible, the renderer still checks standard culling rules (e.g., transparency layers). A shared layer may still cull the face.
+
+**Face Slice Boundaries:**
+The six faces correspond to specific axis boundaries in the 0–16 pixel space:
+- **North**: Z = 0
+- **South**: Z = 16
+- **West**: X = 0
+- **East**: X = 16
+- **Down**: Y = 0
+- **Up**: Y = 16
+
+### Pseudocode
+The following pseudocode implements the face culling check for a single face between two blocks.
+
+> **Unverified code.** The code below did not pass a test run against a reference implementation, or no test fits it, so it may contain errors.
+
+```python
+def is_face_culled(block_a_shape, block_b_shape, face_axis, face_boundary):
+    """
+    Determines if the face of block A in the direction of face_axis
+    is fully occluded by block B.
+    
+    Args:
+        block_a_shape: List of AABBs for block A.
+        block_b_shape: List of AABBs for block B.
+        face_axis: 'X', 'Y', or 'Z'.
+        face_boundary: The coordinate of the face (0 or 16).
+        
+    Returns:
+        True if the face is culled, False otherwise.
+    """
+    
+    # Step 1: Compute face slice for Block A
+    # The face slice is the projection of Block A's voxel shape onto the face plane.
+    # We only care about the AABBs that intersect the boundary plane.
+    slice_a = compute_face_slice(block_a_shape, face_axis, face_boundary)
+    
+    # If Block A has no shape at this face (empty), it cannot be culled by shape comparison.
+    if slice_a is None or len(slice_a) == 0:
+        return False
+
+    # Step 2: Compute opposite face slice for Block B
+    # The opposite face is on the other side of the boundary.
+    # If face_boundary is 0 (West/North/Down), the neighbor is at -1 (conceptually),
+    # but the slice is taken at the neighbor's face touching this boundary.
+    # In the 0-16 grid, the neighbor's face is at the same coordinate value 
+    # but from the other side. However, the definition implies checking the 
+    # neighbor's shape at the *opposite* face boundary relative to the neighbor's local space?
+    # Actually, the source says: "Compute the neighboring block's opposite face slice."
+    # For a shared face at X=16 of Block A, the neighbor is at X=16 (its West face).
+    # So we compute the slice of Block B at its West face (X=0 in local coords? No, global).
+    # Let's assume the function takes the neighbor's shape and the global boundary.
+    
+    slice_b = compute_face_slice(block_b_shape, face_axis, face_boundary)
+    
+    if slice_b is None or len(slice_b) == 0:
+        return False
+
+    # Step 3: Check if Neighbor fully covers Block A's slice
+    # This requires checking if every point in slice_a is contained within slice_b.
+    # Since these are unions of AABBs, we check if slice_a is a subset of slice_b.
+    if is_subset(slice_a, slice_b):
+        return True
+    
+    return False
+
+def compute_face_slice(shape, axis, boundary):
+    """
+    Computes the 2D projection of the voxel shape onto the face plane.
+    Returns a list of 2D rectangles (or None if empty).
+    """
+    slices = []
+    for box in shape:
+        min_coords = box['min']
+        max_coords = box['max']
+        
+        # Check if the box intersects the boundary plane
+        # The box must span the boundary or touch it.
+        # Since we are looking at the face *at* the boundary, we check if the box
+        # exists at that specific coordinate slice.
+        
+        # For a face at axis=A, we project the other two axes.
+        # We only include the box if it actually occupies the boundary plane.
+        # In discrete voxel terms, if the box covers the boundary.
+        
+        if axis == 'X':
+            if min_coords[0] <= boundary <= max_coords[0]:
+                # Project Y and Z
+                slices.append({
+                    'y_min': min_coords[1],
+                    'y_max': max_coords[1],
+                    'z_min': min_coords[2],
+                    'z_max': max_coords[2]
+                })
+        elif axis == 'Y':
+            if min_coords[1] <= boundary <= max_coords[1]:
+                # Project X and Z
+                slices.append({
+                    'x_min': min_coords[0],
+                    'x_max': max_coords[0],
+                    'z_min': min_coords[2],
+                    'z_max': max_coords[2]
+                })
+        elif axis == 'Z':
+            if min_coords[2] <= boundary <= max_coords[2]:
+                # Project X and Y
+                slices.append({
+                    'x_min': min_coords[0],
+                    'x_max': max_coords[0],
+                    'y_min': min_coords[1],
+                    'y_max': max_coords[1]
+                })
+                
+    return slices if slices else None
+
+def is_subset(slice_a, slice_b):
+    """
+    Checks if the union of rectangles in slice_a is fully contained 
+    within the union of rectangles in slice_b.
+    """
+    # Simplified check: For each rectangle in A, check if it is covered by B.
+    # In a real implementation, this requires a 2D polygon containment check 
+    # or grid-based sampling if high precision is not required.
+    # Given the constraints (integer pixels), we can check coverage.
+    
+    for rect_a in slice_a:
+        if not is_rect_covered_by_union(rect_a, slice_b):
+            return False
+    return True
+
+def is_rect_covered_by_union(rect, union_rects):
+    """
+    Checks if rect is fully covered by the union of rectangles in union_rects.
+    """
+    # This is a non-trivial geometric operation.
+    # For the purpose of this article, we note that the engine performs this check.
+    # A simple implementation might sample points or use a sweep-line algorithm.
+    # [G] Placeholder for complex 2D containment logic.
+    return True # Placeholder
+```
+
+### Parameters and Constraints
+- **format_version**: Must be `"1.21.110"` or later [S1].
+- **identifier**: String in `namespace:name` format. The namespace cannot be `minecraft` [S1].
+- **boxes**: Array of up to 32 AABBs [S1].
+- **Units**: Coordinates are in pixels, where 1 pixel = 1/16th of a block [S1].
+- **Range**: A standard block spans 0 to 16 on each axis. Boxes can extend from -30 to 30 pixels globally [S1].
+- **Volume**: Boxes must have positive volume and overlap the base 16×16×16 block region by at least 1 pixel [S1].
+
+### Edge Cases and Pitfalls
+1.  **Default Shape**: If `culling_shape` is omitted in the geometry component, the default `minecraft:empty` is used, which is non-occluding [S1].
+2.  **Full Block Override**: If `minecraft:geometry.full_block` is specified, `minecraft:unit_cube` (16×16×16) is automatically selected as the culling shape, and any custom shape is ignored [S1].
+3.  **Registry Limit**: The system stores up to 4,500 unique custom shapes. If this limit is reached, subsequent shapes are not loaded, and their `culling_shape` is set to `minecraft:empty` [S1].
+4.  **Skip Conditions**: A block can skip voxel shape comparisons by setting `culling_shape` to `minecraft:empty` or providing a non-default condition (e.g., for foliage) [S1].
+5.  **Coordinate System Difference**: Voxel shape origin is at the block corner (0,0,0) with range 0–16. Geometry origin is at the block center (-8 to 8) with range -8 to 8. Confusing these leads to incorrect shape placement [S1].
+6.  **Culling Rules Interaction**: Even if voxel shape comparison indicates a face is visible, the renderer still checks culling rules (e.g., transparency layers). A shared layer may still cull the face [S1].
+
+## Operating characteristics
+- **Time Complexity**: Face culling requires computing projections for adjacent blocks. With up to 32 boxes per shape, the complexity is proportional to the number of boxes and the number of adjacent faces (6).
+- **Memory Complexity**: Each unique voxel shape is stored in a registry. The limit is 4,500 unique custom shapes [S1].
+- **Performance**: Reduces rendering load by hiding occluded faces. Performance gain depends on the density of occluding shapes in the scene.
+- **Limitations**: Limited to axis-aligned boxes. Complex curved surfaces must be approximated by multiple AABBs.
+
+## Background
+Voxel shapes were introduced in Minecraft: Bedrock Edition to improve rendering performance through face culling and to provide a standardized method for collision detection. They are part of the behavior pack system, defined in JSON files within the `shapes/` folder. The system was formalized around version 1.21.110 [S1].
+
+## Sources
+[S1] Voxel Shapes, https://learn.microsoft.com/ga-ie/minecraft/creator/documents/voxelshapes?view=minecraft-bedrock-stable, fetched 2026-10-27

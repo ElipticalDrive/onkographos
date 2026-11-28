@@ -1,0 +1,119 @@
+# Adaptive Empty Node Aggregation into Bounding Volumes
+
+Also called: Bounding volume merging, Octree empty node clustering
+
+## Overview
+This method reduces ray intersection tests in empty space by adaptively clustering empty octree nodes into bounding volumes, allowing rays to skip blank areas faster [S1, unofficial]. It sets itself apart from [Octree Traversal with Min/Max Pruning](1739-octree-traversal-with-min-max-pruning.md) and [Octree Empty Block Culling](2687-octree-empty-block-culling.md) by explicitly merging multiple empty nodes into a single larger bounding volume, rather than just culling individual nodes or using min/max bounds for pruning [S1, unofficial]. It builds on [Empty Space Skipping with Octree](1610-empty-space-skipping-with-octree.md) by optimizing the storage and traversal of those empty regions [S1, unofficial].
+
+## How it works
+**Inputs and Outputs:**
+*   Input: An octree structure representing the volume, where nodes are classified as empty, real, or gray.
+*   Output: An optimized octree where empty nodes are aggregated into bounding volumes, and leaf nodes store pointers to these volumes or patches.
+
+**Data Structures:**
+*   **Leaf Nodes:** Store either:
+    *   Pointers to patches (for real and gray nodes).
+    *   Pointers to the bounding volume of the node (for empty nodes).
+*   **Constraint:** No pointers to child or parent nodes are stored in leaf nodes [S1, unofficial].
+*   **Empty Cells:** Each empty cell contains a pointer to the empty box (bounding volume) that covers it [S1, unofficial].
+
+**Steps:**
+1.  **Identify Empty Nodes:** Traverse the octree to identify nodes classified as empty.
+2.  **Adaptive Aggregation:** Adaptively cluster these empty nodes into bounding volumes. The method uses a simple creation strategy that does not guarantee the minimum number of empty boxes but produces enough to efficiently traverse dynamic scenes [S1, unofficial].
+3.  **Update Pointers:** All nodes participating in the bounding volume merging are updated to point to the new bounding volume. This eliminates redundant storage of empty space information [S1, unofficial].
+4.  **Constant Update:** The bounding volume is constantly updated during the octree merging process to maintain accuracy [S1, unofficial].
+
+**Pseudocode:**
+> **Unverified code.** The code below did not pass a test run against a reference implementation, or no test fits it, so it may contain errors.
+
+```python
+def aggregate_empty_nodes(octree):
+    """
+    Aggregates empty octree nodes into bounding volumes.
+    Assumes octree has nodes with type (EMPTY, REAL, GRAY) and children.
+    """
+    # Step 1: Identify all empty nodes
+    empty_nodes = find_empty_nodes(octree)
+    
+    # Step 2: Adaptive aggregation into bounding volumes
+    # The specific clustering algorithm is not detailed, but it groups empty nodes
+    # into larger bounding volumes (empty boxes).
+    # [G] A simple heuristic might be to merge adjacent empty nodes at a certain depth.
+    bounding_volumes = create_bounding_volumes(empty_nodes)
+    
+    # Step 3: Update leaf nodes to point to bounding volumes
+    for node in empty_nodes:
+        if is_leaf(node):
+            # Find the bounding volume that covers this node
+            bv = find_covering_bounding_volume(node, bounding_volumes)
+            node.pointer = bv
+        else:
+            # For non-leaf empty nodes, they might be replaced or their children updated
+            # The text says "all nodes participating... point to the bounding volume"
+            # This implies even internal empty nodes might be redirected or their
+            # children are the ones storing the pointer.
+            # Based on "Leaf nodes store pointers...", we focus on leaves.
+            pass
+            
+    # Step 4: Constant update during merging
+    # This is an iterative process. In a static scene, this runs once.
+    # In dynamic scenes, it runs continuously.
+    return octree
+
+def find_empty_nodes(octree):
+    """Returns a list of all nodes classified as EMPTY."""
+    empty_list = []
+    queue = [octree.root]
+    while queue:
+        node = queue.pop(0)
+        if node.type == EMPTY:
+            empty_list.append(node)
+            if not is_leaf(node):
+                queue.extend(node.children)
+    return empty_list
+
+def create_bounding_volumes(empty_nodes):
+    """
+    Creates bounding volumes from a list of empty nodes.
+    Uses a simple creation method.
+    """
+    # [G] Implementation detail not provided.
+    # A simple approach: group nodes by spatial proximity or depth.
+    # Return a list of bounding volume objects.
+    return [] # Placeholder for unspecified algorithm
+
+def find_covering_bounding_volume(node, bounding_volumes):
+    """Finds the bounding volume that contains the node's space."""
+    for bv in bounding_volumes:
+        if bv.contains(node):
+            return bv
+    return None
+```
+
+**Parameters:**
+*   **Empty Box Count:** Fewer empty boxes improve traversal speed [S1, unofficial]. The algorithm aims to minimize this count without guaranteeing the absolute minimum [S1, unofficial].
+
+**Edge Cases and Pitfalls:**
+*   **Dynamic Scenes:** The bounding volume must be constantly updated. Failure to do so may lead to incorrect culling in dynamic environments [S1, unofficial].
+*   **Precision:** The method relies on simple integer operations for speed, which may limit precision in complex geometries [S1, unofficial].
+*   **Degenerate Input:** The simple creation method may not handle all edge cases of empty space distribution optimally, potentially leading to suboptimal bounding volume counts [S1, unofficial].
+
+## Subtopics
+
+### Merged Bounding Volume Intersection Test
+This variant focuses on the intersection test phase. During intersection testing, the ray and the merged bounding volume can cross several blank nodes at once without intersecting the boundary of each individual node. This reduces the number of ray intersection tests in empty areas, improving tracking speed [S1, unofficial]. The key parameter is the number of empty boxes; fewer boxes lead to better traversal speed [S1, unofficial].
+
+## Operating characteristics
+*   **Time Complexity:** Not explicitly given, but the method claims to increase running speed by about 56.5% compared to existing fastest single-step algorithms [S1, unofficial].
+*   **Memory Complexity:** Reduces memory usage by eliminating redundant storage of empty space information, as all participating nodes point to a single bounding volume [S1, unofficial].
+*   **Measured Performance:** In the context of solar ray tracing, the algorithm improved speed by 56.5% [S1, unofficial].
+*   **Strengths:** Simple integer operations, effective for dynamic scenes, reduces intersection tests.
+*   **Limitations:** Does not guarantee minimum number of empty boxes, potential precision issues with simple integer operations.
+*   **When to Use:** Suitable for ray tracing in large-scale solar energy simulations or other dynamic scenes where empty space skipping is critical.
+*   **When Not to Use:** Not suitable if absolute minimum bounding volume count is required or if high precision floating-point operations are necessary.
+
+## Background
+The method was proposed in the context of improving the speed of ray tracing algorithms for large-scale solar ray tracing [S1, unofficial]. It was published in the *Academic Journal of Engineering and Technology Science* in 2020 [S1, unofficial]. The work is part of a broader effort to optimize solar energy tracking systems using ray tracing.
+
+## Sources
+[S1] Research on Large-Scale Solar Ray Tracing Based on Ray Adaptation, https://doi.org/10.25236/ajets.2020.030810, fetched 2026-10-24 (unofficial)

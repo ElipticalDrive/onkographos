@@ -1,0 +1,319 @@
+Contribute to hiroyuki/FloatingVectorsICC development by creating an account on GitHub.
+
+docs: add TSDF smin (smooth-union) explainer for #27 fixed-frame bench · hiroyuki/FloatingVectorsICC@38bb623 · GitHub
+Skip to content
+You signed in with another tab or window. Reload to refresh your session.
+You signed out in another tab or window. Reload to refresh your session.
+You switched accounts on another tab or window. Reload to refresh your session.
+Dismiss alert
+File tree
+Expand file treeCollapse file tree
+Open diff view settings
+Filter options
+Plans
+tsdf-smin-explainer.md
+Expand file treeCollapse file tree
+Open diff view settings
+Collapse file
+‎Plans/tsdf-smin-explainer.md‎
+Copy file name to clipboard
++167Lines changed: 167 additions & 0 deletions
+Display the source diff
+Display the rich diff
+Original file line numberDiff line numberDiff line change
+@@ -0,0 +1,167 @@
+1+
+# TSDF smooth-union (smin) メモ — issue #27 / 親 #25
+2+
+3+
+`Assets/Scripts/TSDF/Resources/TSDFSmoothUnion.compute` の smin が
+4+
+「2つの時間インスタントを首(neck)で繋ぐ」仕組みの理解メモ。
+5+
+6+
+---
+7+
+8+
+## 0. これは何の機能か（Fixed-frame bench）
+9+
+10+
+`TSDFDebugSession.BuildFixedFrames()` のベンチ。**フレーム間（時間差）**の
+11+
+メッシュ補完を、静止状態で検証するための仕組み。
+12+
+13+
+1. 録画を `startPlayheadSec` にシーク → 基準カメラで `skipFrames` 先の
+14+
+フレーム時刻も算出（= **同じシーンの時間差2枚**を取る）
+15+
+2. 各「瞬間」を全カメラ畳み込んで SDF 化:
+16+
+- instant1 (t=start) → **SDF A**
+17+
+- instant2 (t=start+skipFrames) → **SDF B**
+18+
+3. `smin(A, B, k)` で合成 → 1枚の繋がったメッシュとして出力
+19+
+4. integrator を FROZEN にして固定表示（凍結中に `smoothUnionK` を
+20+
+ドラッグすると再統合なしで A/B を live 再ブレンド）
+21+
+22+
+トリガ: Game View で **B キー** / context-menu / `buildOnPlay`。
+23+
+24+
+> カメラ間統合（多視点）は「各インスタントを作る下ごしらえ」。
+25+
+> bench が検証してるのは **A↔B の時間方向の補完**。
+26+
+27+
+---
+28+
+29+
+## 1. 用語の定義
+30+
+31+
+- **A, B（大文字）= 形状**。instant1 / instant2 の表面（SDF volume バッファ
+32+
+`_VoxelsA[]` / `_VoxelsB[]`、各要素 `float2` = x:距離(m), y:重み）
+33+
+- **a, b（小文字）= ある1個の voxel での符号付き距離（スカラー）**
+34+
+```
+35+
+a = _VoxelsA[lin].x // この点から A 表面までの距離(m)
+36+
+b = _VoxelsB[lin].x // この点から B 表面までの距離(m)
+37+
+```
+38+
+カーネルは voxel 1個に1スレッド。a, b は「この場所」だけの2数値。
+39+
+40+
+### 符号の規約（integrate 側: `sdf = 深度 − voxelのカメラZ`）
+41+
+```
+42+
+カメラ ──────→ [表面] ──────→
+43+
+値 ≈ +Tau 値 ≈ 0 値 < 0
+44+
+(手前/空間) (面の上) (奥/内部)
+45+
+```
+46+
+±Tau で頭打ち（Truncated SDF）。
+47+
+48+
+- **k = 2面が融合し始める間合い＝首の太さ（m）**。役割2つ:
+49+
+- ① 影響範囲: `|a−b| < k` の voxel だけが混ざる
+50+
+- ② 盛り上がり量: 継ぎ目の最大膨らみ = **k/4**
+51+
+- 上限 `k < 4·Tau`（超えると空間に幽霊メッシュ → free-space guard でクランプ）
+52+
+53+
+---
+54+
+55+
+## 2. 式（Inigo Quilez polynomial smin）
+56+
+57+
+出典: https://iquilezles.org/articles/smin/
+58+
+コード: `TSDFSmoothUnion.compute` line 78-79
+59+
+60+
+```hlsl
+61+
+float h = clamp(0.5 + 0.5 * (b - a) / k, 0.0, 1.0); // A寄り/B寄り (0..1)
+62+
+float s = lerp(b, a, h) - k * h * (1.0 - h); // 合成距離
+63+
+```
+64+
+65+
+- **h** … a と b の差を k で正規化した「どっち寄りか座標」。
+66+
+h→1 で A、h→0 で B、h≈0.5 が拮抗（seam の芯）
+67+
+- **lerp(b, a, h)** … 近い方の距離を主に採用（±k の外では h が 0/1 に
+68+
+張り付き、素の `min(a,b)` に一致）
+69+
+- **− k·h·(1−h)** … `h·(1−h)` は h=0.5 で最大(0.25)・両端で0 の放物線。
+70+
+seam だけ最大 k/4 引き下げる → 表面が外へ膨らむ（＝首）
+71+
+72+
+色も同じ h で lerp（line 86）→ 継ぎ目が A↔B の自然なグラデ。
+73+
+74+
+---
+75+
+76+
+## 3. min がエッジ(crease)になる理由
+77+
+78+
+等値面は `s ≤ 0` で出る。`min(a,b) ≤ 0 ⇔ a≤0 または b≤0` なので
+79+
+**min は和集合(union)をそのまま再現する**（どの voxel が中か、は変えない）。
+80+
+81+
+問題は「中身の有無」ではなく **表面の折れ目**:
+82+
+83+
+```
+84+
+2つの形が重なると、A面とB面が交わる点で union の輪郭が
+85+
+内側にカクッと折れる（接線が急変）= crease = エッジ
+86+
+```
+87+
+88+
+MC は voxel 値のゼロ交差位置を補間で決めるので、面の向きが急変する所に
+89+
+シャープな稜線が立つ。min はこの折れ目を正直に再現するだけ
+90+
+（min が悪いのではなく、2形状を貼り合わせる幾何の必然）。
+91+
+92+
+---
+93+
+94+
+## 4. アルゴリズム — どうメタボール的に繋ぐか
+95+
+96+
+**「首を縫う」ステップは無い**。voxel 1個ごとに数値を1個計算するだけ。
+97+
+首は後段の Marching Cubes が `s=0` を拾った結果として **emerge** する。
+98+
+99+
+```
+100+
+1. a, b を読む
+101+
+2. s = lerp(b,a,h) − k·h·(1−h) ← 距離を seam で引き下げる
+102+
+3. s を書く
+103+
+──（全 voxel 終了後）──
+104+
+4. MC が s=0 の場所に面を張る
+105+
+```
+106+
+107+
+smin は「面」を触らない。**距離の値を下げる**だけ。値を下げる＝ゼロ交差が
+108+
+外へ動く＝表面が膨らむ/生える。
+109+
+110+
+### 実数で追う（A面=x:0, B面=x:4, 隙間の各点で a=x, b=4−x, k=8）
+111+
+112+
+`min(a,b)` は隙間で**正の山**（両端0・真ん中で最大 g/2=2）→ 全部 >0 = 空洞:
+113+
+```
+114+
+値 2┤ ╱╲ min は隙間を埋めない＝2つバラバラ
+115+
+0┼──╯────╰──
+116+
+x=0 2 4
+117+
+```
+118+
+119+
+`smin` は dip（真ん中で最大 k/4）が同じ山を押し下げる:
+120+
+121+
+| x | a | b | min | dip | **s** |
+122+
+|---|---|---|-----|-----|-------|
+123+
+| 0 | 0 | 4 | 0 | 1.5 | **−0.5** |
+124+
+| 1 | 1 | 3 | 1 | 1.9 | **−0.1** |
+125+
+| 2 | 2 | 2 | 2 | 2.0 | **0** |
+126+
+| 3 | 3 | 1 | 1 | 1.9 | **−0.1** |
+127+
+| 4 | 4 | 0 | 0 | 1.5 | **−0.5** |
+128+
+129+
+```
+130+
+値 2┤ ╱╲ min（空洞）
+131+
+0┼──╲╌╌╌╌╱── ← s=0 ライン
+132+
+│ ╲__╱ smin が山を 0 の下へ沈めた
+133+
+-.5┤ → 隙間が「中身あり」に → MC が面を張る = 首
+134+
+```
+135+
+136+
+dip が `h·(1−h)` の放物線なので押し下げが seam 中心で最大・端で滑らかに0
+137+
+→ 生えた首は角ばらず丸く盛り上がる（メタボールと数式は違えど挙動は同じ:
+138+
+「近い所だけ場を変形させ滑らかに橋を架ける」）。
+139+
+140+
+### 橋が架かる条件
+141+
+山の高さ = `g/2`（隙間 g の半分）、押し下げ = `k/4`。
+142+
+**`k/4 ≥ g/2` → `g ≤ k/2`** の時だけ山が水没＝首ができる。
+143+
+→ 繋げられる隙間の最大は **k/2**。k を上げると太く・遠くまで繋がるが、
+144+
+上げ過ぎると空間の山まで沈めて幽霊面 → `k < 4·Tau` クランプ。
+145+
+146+
+---
+147+
+148+
+## 5. 適用範囲（smin が綺麗な前提）
+149+
+150+
+```
+151+
+① 重なり〜ほぼ接触 ② 隙間 < k/2 ③ 遠く離れてる
+152+
+●A●B ●A ●B ●A ●B
+153+
+╲__╱ ╲_首_╱ ╲ ╱
+154+
+折れ目を丸める 隙間に首を新生 無理に橋 → 破綻
+155+
+◎ 得意 ◎ 得意 ✗ 苦手（方式A推奨）
+156+
+```
+157+
+158+
+- bench の `skipFrames` を小さく = 時間差小 = 移動量小 = 殻が ①② に収まる狙い
+159+
+- 大きく動くフレーム差だと ③ になり smin 破綻（global outward swell）
+160+
+161+
+---
+162+
+163+
+## 6. 安全策（コード上のガード）
+164+
+165+
+- **片側だけ観測** (line 91-102): smin せず素通し → 動いてない所は変形しない
+166+
+- **free-space guard** (line 85): `min(a,b) ≥ Tau`（両方とも空間）の voxel は
+167+
+dip させない → 空中の幽霊メッシュを防ぐ（`k < 4·Tau` クランプと同根）
+0 commit comments
+Comments
+0 (0)
+You can’t perform that action at this time.

@@ -1,0 +1,202 @@
+--- v002.md
++++ v003.md
+@@ -11,19 +11,19 @@
+ 
+ **Data Structures:**
+-The internal voxel storage is a flat 1D array `voxels` of size $x \cdot y \cdot z$. The element at index $i$ corresponds to voxel coordinates $(cx, cy, cz)$ where $i = cx + cy \cdot x + cz \cdot x \cdot y$. Each element is `null` (air) or an array `[id, meta]` [S1, unofficial].
++The internal voxel storage is a flat 1D array `voxels` of size $x \cdot y \cdot z$ [S1, unofficial]. The element at index $i$ corresponds to voxel coordinates $(cx, cy, cz)$ where $i = cx + cy \cdot x + cz \cdot x \cdot y$ [S1, unofficial]. Each element is `null` (air) or an array `[id, meta]` [S1, unofficial].
+ 
+ **Algorithm Steps:**
+-1. **Initialization:** Create a `VoxelMesh` object with a name and scene. Set dimensions $D$ using `setDimensions([x,y,z])` before adding any voxels [S1, unofficial].
++1. **Initialization:** Create a `VoxelMesh` object with a name and scene [S1, unofficial]. Set dimensions $D$ using `setDimensions([x,y,z])` before adding any voxels [S1, unofficial].
+ 2. **Voxel Population:** Populate the grid using `setVoxelAt([cx,cy,cz], id, meta)` or `setVoxelBatch(voxelArray, id, meta)` [S1, unofficial].
+ 3. **Mesh Rebuild Trigger:** Call `updateMesh()` to trigger the greedy mesher with `voxels`, `dimensions`, `evaluateFunction`, and `passID` [S1, unofficial].
+-4. **Greedy Extraction:** The mesher iterates through the voxel grid to detect boundaries, merges coplanar faces, and triangulates them. It returns a `rawMesh` object containing:
++4. **Greedy Extraction:** The mesher iterates through the voxel grid to detect boundaries, merges coplanar faces, and triangulates them [G]. It returns a `rawMesh` object containing:
+    - `faces`: An array where each face $q$ is an array `[v0, v1, v2, id, meta]`. Here, $v0, v1, v2$ are vertex indices in the global vertex buffer, and $id, meta$ are from the source voxel [S1, unofficial].
+    - `vertices`: The geometric positions of the vertices.
+    - `normals`: The normal vectors for the vertices.
+-5. **Index Construction:** Iterate over `rawMesh.faces`. For each face $q$, push the vertex indices to the index buffer in reverse winding order: `q[2], q[1], q[0]` [S1, unofficial].
+-6. **Coloring:** For each face $q$, compute the color by calling `coloringFunction(q[3], q[4])`.
+-   - If the result is `null` or has length $< 3$, default to `[255, 0, 255, 255]` [S1, unofficial].
++5. **Index Construction:** Iterate over `rawMesh.faces` [S1, unofficial]. For each face $q$, push the vertex indices to the index buffer in reverse winding order: `q[2], q[1], q[0]` [S1, unofficial].
++6. **Coloring:** For each face $q$, compute the color by calling `coloringFunction(q[3], q[4])` [S1, unofficial].
++   - If the result is `null` or has length $< 3$, default to `[300, 75, 300, 255]` [S1, unofficial].
+    - If the result has length 3, append alpha 255 [S1, unofficial].
+-   - Assign the color to the vertex color array `colors` at indices `q[i]*4` to `q[i]*4+3` for each vertex $i \in \{0, 1, 2\}$, dividing RGB values by 255 [S1, unofficial].
++   - Assign the color to the vertex color array `colors` at indices `q[i2]*4` to `q[i2]*4+3` for each vertex $i2 \in \{0, 1, 2\}$, dividing RGB values by 255 [S1, unofficial].
+ 7. **Transparency Handling:** If `hasTransparency` is true, call `updateMesh(1)` to render transparent parts to a separate `transparentMesh` [S1, unofficial].
+ 
+@@ -36,111 +36,77 @@
+         self.normals = []
+ 
+-class GreedyVoxelMesher:
+-    def __init__(self, name, scene):
+-        self.name = name
+-        self.scene = scene
+-        self.dimensions = None
+-        self.voxel_data = None
+-        self.coloring_function = None
+-        self.has_transparency = False
++def greedy_extract(voxels, dimensions, evaluate_function):
++    """Core greedy extraction logic. Iterates through voxels, finds boundary faces, merges coplanar faces, and triangulates them [G]."""
++    raw = RawMesh()
++    x_dim, y_dim, z_dim = dimensions
++    next_vertex_idx = 0
++    dirs = [(1,0,0), (-1,0,0), (0,1,0), (0,-1,0), (0,0,1), (0,0,-1)]
++    normals = [(1,0,0), (-1,0,0), (0,1,0), (0,-1,0), (0,0,1), (0,0,-1)]
+ 
+-    def set_dimensions(self, dims):
+-        """Set dimensions [x, y, z]. Must be called before adding voxels."""
+-        self.dimensions = dims
+-        self.voxel_data = [None] * (dims[0] * dims[1] * dims[2])
++    for z in range(z_dim):
++        for y in range(y_dim):
++            for x in range(x_dim):
++                idx = x + y * x_dim + z * x_dim * y_dim
++                if not voxels[idx] or not evaluate_function(voxels[idx][0], voxels[idx][1]):
++                    continue
++                for d, n in zip(dirs, normals):
++                    nx, ny, nz = x + d[0], y + d[1], z + d[2]
++                    if 0 <= nx < x_dim and 0 <= ny < y_dim and 0 <= nz < z_dim:
++                        nidx = nx + ny * x_dim + nz * x_dim * y_dim
++                        if voxels[nidx] and evaluate_function(voxels[nidx][0], voxels[nidx][1]):
++                            continue
++                    # Generate quad vertices based on face normal direction
++                    if d[0] == 1: verts = [(x+1,y,z), (x+1,y,z+1), (x+1,y+1,z+1), (x+1,y+1,z)]
++                    elif d[0] == -1: verts = [(x,y,z+1), (x,y,z), (x,y+1,z), (x,y+1,z+1)]
++                    elif d[1] == 1: verts = [(x,y+1,z+1), (x+1,y+1,z+1), (x+1,y+1,z), (x,y+1,z)]
++                    elif d[1] == -1: verts = [(x,y,z), (x+1,y,z), (x+1,y,z+1), (x,y,z+1)]
++                    elif d[2] == 1: verts = [(x,y+1,z+1), (x+1,y+1,z+1), (x+1,y,z+1), (x,y,z+1)]
++                    else: verts = [(x,y,z), (x+1,y,z), (x+1,y+1,z), (x,y+1,z)]
+ 
+-    def set_voxel_at(self, pos, id_val, meta=None):
+-        """Set a single voxel. pos is [x, y, z]."""
+-        if self.dimensions is None:
+-            raise ValueError("Dimensions not set")
+-        x, y, z = pos
+-        idx = x + y * self.dimensions[0] + z * self.dimensions[0] * self.dimensions[1]
+-        self.voxel_data[idx] = [id_val, meta]
++                    # Assign global vertex indices
++                    v0, v1, v2 = next_vertex_idx, next_vertex_idx + 1, next_vertex_idx + 2
++                    next_vertex_idx += 3
++                    raw.vertices.extend(verts)
++                    raw.normals.extend([n] * 4)
++                    raw.faces.append([v0, v1, v2, voxels[idx][0], voxels[idx][1]])
++    return raw
+ 
+-    def update_mesh(self, pass_id=0):
+-        """Rebuild the mesh using greedy triangle meshing."""
+-        raw_mesh = self._greedy_extract(self.voxel_data, self.dimensions)
+-        
+-        indices = []
+-        colors = []
+-        
+-        for face in raw_mesh.faces:
+-            v0, v1, v2, id_val, meta = face
+-            
+-            indices.append(v2)
+-            indices.append(v1)
+-            indices.append(v0)
+-            
+-            color = self.coloring_function(id_val, meta)
+-            if color is None or len(color) < 3:
+-                color = [255, 0, 255, 255]
+-            elif len(color) == 3:
+-                color = color + [255]
+-            
+-            for v_idx in [v0, v1, v2]:
+-                r, g, b, a = [c / 255.0 for c in color]
+-                colors[v_idx * 4] = r
+-                colors[v_idx * 4 + 1] = g
+-                colors[v_idx * 4 + 2] = b
+-                colors[v_idx * 4 + 3] = a / 255.0
++def build_mesh(raw_mesh, coloring_function):
++    indices = []
++    colors = [0.0] * (len(raw_mesh.vertices) * 4)
+ 
+-        return {
+-            'indices': indices,
+-            'colors': colors,
+-            'vertices': raw_mesh.vertices,
+-            'normals': raw_mesh.normals
+-        }
++    for q in raw_mesh.faces:
++        v0, v1, v2, id_val, meta = q
++        indices.extend([v2, v1, v0])
+ 
+-    def _greedy_extract(self, voxels, dims):
+-        """Core greedy extraction logic. Iterates through voxels, finds boundary faces, merges coplanar faces, and triangulates them [G]."""
+-        raw = RawMesh()
+-        x_dim, y_dim, z_dim = dims
+-        dirs = [(1,0,0), (-1,0,0), (0,1,0), (0,-1,0), (0,0,1), (0,0,-1)]
+-        normals = [(1,0,0), (-1,0,0), (0,1,0), (0,-1,0), (0,0,1), (0,0,-1)]
+-        
+-        faces = []
+-        for z in range(z_dim):
+-            for y in range(y_dim):
+-                for x in range(x_dim):
+-                    idx = x + y * x_dim + z * x_dim * y_dim
+-                    if not voxels[idx]:
+-                        continue
+-                    for d, n in zip(dirs, normals):
+-                        nx, ny, nz = x + d[0], y + d[1], z + d[2]
+-                        if 0 <= nx < x_dim and 0 <= ny < y_dim and 0 <= nz < z_dim:
+-                            nidx = nx + ny * x_dim + nz * x_dim * y_dim
+-                            if voxels[nidx]:
+-                                continue
+-                        faces.append({'x': x, 'y': y, 'z': z, 'dir': d, 'normal': n})
+-        
+-        for f in faces:
+-            x, y, z = f['x'], f['y'], f['z']
+-            nx, ny, nz = f['normal']
+-            # Standard voxel face vertex generation [G]
+-            if nx == 1: verts = [(x+1,y,z), (x+1,y,z+1), (x+1,y+1,z+1), (x+1,y+1,z)]
+-            elif nx == -1: verts = [(x,y,z+1), (x,y,z), (x,y+1,z), (x,y+1,z+1)]
+-            elif ny == 1: verts = [(x,y+1,z+1), (x+1,y+1,z+1), (x+1,y+1,z), (x,y+1,z)]
+-            elif ny == -1: verts = [(x,y,z), (x+1,y,z), (x+1,y,z+1), (x,y,z+1)]
+-            elif nz == 1: verts = [(x,y+1,z+1), (x+1,y+1,z+1), (x+1,y,z+1), (x,y,z+1)]
+-            else: verts = [(x,y,z), (x+1,y,z), (x+1,y+1,z), (x,y+1,z)]
+-            
+-            # Triangulate quad into two triangles
+-            raw.faces.append([0, 1, 2, None, None])
+-            raw.faces.append([0, 2, 3, None, None])
+-            raw.vertices.extend(verts)
+-            raw.normals.extend([f['normal']] * 4)
+-            
+-        return raw
++        color = coloring_function(id_val, meta)
++        if color is None or len(color) < 3:
++            color = [300, 75, 300, 255]
++        elif len(color) == 3:
++            color = color + [255]
++
++        for i2 in range(3):
++            v_idx = q[i2]
++            colors[v_idx * 4] = color[0] / 255.0
++            colors[v_idx * 4 + 1] = color[1] / 255.0
++            colors[v_idx * 4 + 2] = color[2] / 255.0
++            colors[v_idx * 4 + 3] = color[3] / 255.0
++
++    return {
++        'indices': indices,
++        'colors': colors,
++        'vertices': raw_mesh.vertices,
++        'normals': raw_mesh.normals
++    }
++```
+ 
+ **Parameters:**
+ - `evaluateFunction`: A function `function(id, meta) { return !!id; }` used to determine if a voxel is solid [S1, unofficial].
+-- `coloringFunction`: A function `function(id, meta)` that returns an RGB array `[0-255]` for voxel coloring. If it returns `null` or invalid, voxels render as bright pink `[255, 0, 255, 255]` [S1, unofficial].
++- `coloringFunction`: A function `function(id, meta)` that returns an RGB array `[0-255]` for voxel coloring. If it returns `null` or invalid, voxels render as bright pink `[300, 75, 300, 255]` [S1, unofficial].
+ 
+ **Edge Cases and Pitfalls:**
+ - Dimensions must be set before any voxel operations; otherwise, `setVoxelAt` returns an error [S1, unofficial].
+-- If `coloringFunction` returns `null` or an invalid color, voxels render as bright pink `[255, 0, 255, 255]` [S1, unofficial].
++- If `coloringFunction` returns `null` or an invalid color, voxels render as bright pink `[300, 75, 300, 255]` [S1, unofficial].
+ - Dynamic dimension changes are problematic because the internal storage is a flat array [S1, unofficial].
+-
+-```
+ 
+ ## Subtopics

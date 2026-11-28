@@ -1,0 +1,39 @@
+# RayTracer — a ray tracer in ClickHouse SQL
+
+![ClickHouse over a Perlin-noise terrain](images/clickhouse_over_terrain.png)
+
+A path tracer written entirely as **ClickHouse SQL queries**, rendering straight to a PNG
+via ClickHouse's `PNG` output format. No UDFs and no external code — a single `SELECT`
+computes every pixel.
+
+It renders the word **ClickHouse** as glassy, chrome lettering — in the spirit of Andrew
+Kensler's famous Pixar business-card ray tracer — and, in the scene above, sets it floating
+over a procedurally generated landscape, reflecting the terrain and casting shadows on the hills.
+
+See also:
+- [NoiSQL — Generating Music With SQL Queries](https://github.com/ClickHouse/NoiSQL)
+- [SQL Mandelbrot Benchmark](https://github.com/ClickHouse/sql-mandelbrot-benchmark)
+- [Click-V: A RISC-V emulator built with ClickHouse SQL](https://github.com/SpencerTorres/Click-V)
+- [DOOMHouse is a "Doom-like" game engine that renders the 3D graphics entirely in ClickHouse SQL](https://github.com/arniwesth/DoomHouse)
+
+## How it works
+
+The whole renderer lives in one query:
+
+- **Pixels are rows.** `numbers_mt(width * height * samples)` produces one row per
+  `(pixel, sample)`; samples are averaged with `GROUP BY pixel`, and the output columns
+  `r, g, b` (in `[0, 1]`) plus explicit `x, y` coordinate columns (`pixel % width`,
+  `intDiv(pixel, width)`) are written to the `PNG` output format. The explicit coordinates let
+  the writer place each pixel by its position, so the rows need no `ORDER BY` and the heavy
+  per-pixel work stays parallel across all cores.
+- **3D math on tuples.** Vectors are `Tuple(Float64, Float64, Float64)`; `dotProduct`,
+  `L2Normalize`, `tuplePlus`, `tupleMultiplyByNumber`, … do the linear algebra, wrapped in
+  short lambda aliases (`va`, `vs`, `vm`, `vd`, `vn`, `vc`, `vref`).
+- **The bounce loop is `arrayFold`.** Every ray is advanced exactly one mirror bounce per
+  fold step over `range(maxDepth)` — a loop *inside each row*, so rows stay independent and
+  the render parallelizes across all CPU cores. (The first version used a `WITH RECURSIVE`
+  CTE instead — see the queries below.)
+- **`let`-bindings via `arrayMap`.** ClickHouse `WITH` lambdas are call-by-name, so passing a
+  value as a parameter re-expands the expression and blows up the query tree. Intermediates
+  are therefore bound *by value* with `arrayMap(x -> body, [expr])[1]`, a one-element-array
+  "let".

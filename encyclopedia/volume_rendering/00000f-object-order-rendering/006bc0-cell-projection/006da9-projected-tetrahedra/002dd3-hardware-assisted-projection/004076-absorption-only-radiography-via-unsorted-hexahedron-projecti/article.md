@@ -1,0 +1,103 @@
+# Absorption-Only Radiography via Unsorted Hexahedron Projection
+
+Also called: Unsorted Hexahedron Projection, Absorption-Only Radiography
+
+## Overview
+This method simulates X-ray radiographs for curvilinear hexahedral meshes by accumulating optical thickness additively, thereby eliminating the need for a global back-to-front visibility sort [S1, unofficial]. It differs from its parent [Hardware-Assisted Projection](5625-hardware-assisted-projection.md) by exploiting the commutative property of addition in the absorption-only regime ($J=0$) to allow unsorted rendering, and from [Hardware-Assisted Projected Tetrahedra](1729-hardware-assisted-projected-tetrahedra.md) by supporting direct projection of hexahedral cells to reduce mesh storage and rendering overhead [S1, unofficial].
+
+## How it works
+**Inputs:** A curvilinear hexahedral mesh where each cell has an extinction coefficient $K_v$ and geometric definition, and an image plane resolution [S1, unofficial].
+**Outputs:** A radiograph image representing accumulated optical thickness per pixel [S1, unofficial].
+
+**Data Structures:**
+*   **Mesh Cell:** Defined by 8 vertices [S1, unofficial]. Each vertex $v$ has an associated extinction coefficient $K_v$ and a precomputed thickness $t_v$ [S1, unofficial].
+*   **P-buffer:** A floating-point off-screen buffer (texture) storing the accumulated attenuation $\tau_{acc}$ for each pixel, initialized to zero [S1, unofficial].
+*   **Projection Geometry:** For each hexahedron, a set of triangle fans or strips is generated based on the projection of its faces [S1, unofficial].
+
+**Steps:**
+1.  Precompute vertex attenuation $a_v = K_v \cdot t_v$ for each vertex using the cell's geometry [S1, unofficial].
+2.  Classify each hexahedron: it is valid for direct projection if it is non-degenerate (no coinciding vertices) and the projection of each of its six faces is a convex quadrilateral [S1, unofficial].
+3.  If valid, generate triangle fans or strips for the hexahedron using the method of Max [12] [S1, unofficial]. If invalid, subdivide the hexahedron into five tetrahedra [S1, unofficial]. Note that if these tetrahedra share non-planar faces with adjacent non-subdivided cells, gaps or overlaps in viewing ray segments may occur, introducing small errors in total absorption [S1, unofficial].
+4.  Group cells into batches of non-overlapping cells to minimize P-buffer to texture copies [S1, unofficial].
+5.  Initialize the P-buffer texture with zero attenuation [S1, unofficial].
+6.  For each batch, render the triangles (fans/strips) of the cells [S1, unofficial].
+7.  In the fragment program, interpolate the vertex attenuations $a_v$ from the triangle's vertices to get the local attenuation $\tau_{cell}$ for the fragment [S1, unofficial].
+8.  Read the current accumulated attenuation $\tau_{acc}$ from the P-buffer texture at the fragment's screen position [S1, unofficial].
+9.  Compute the new accumulated attenuation $\tau_{new} = \tau_{acc} + \tau_{cell}$ and write it to the P-buffer [S1, unofficial].
+10. After rendering the batch, copy the P-buffer contents to the input texture for the next batch [S1, unofficial]. This copy is necessary because writes to output buffers are not guaranteed to be in polygon order, and the texture caching mechanism does not account for textures changing on the fly [S1, unofficial].
+11. After all cells are processed, the P-buffer contains the total optical thickness $\tau_{total}$ for each pixel [S1, unofficial].
+12. Compute the final intensity using the absorption-only recurrence $I_V[i+1] = e^{-\tau[i]} I_V[i]$, which solves to a product of exponential terms equivalent to a sum of optical thicknesses [S1, unofficial].
+13. Accumulate attenuation for up to four different X-ray wavelength bands in parallel using the red, green, blue, and alpha channels of the buffer [S1, unofficial].
+
+**Pseudocode:**
+> **Unverified code.** The code below did not pass a test run against a reference implementation, or no test fits it, so it may contain errors.
+
+```python
+def render_absorption_only(mesh, image_width, image_height):
+    # Initialize P-buffer texture with zero attenuation
+    p_buffer = create_texture(image_width, image_height, format=FLOAT32, clear=0.0)
+    input_texture = p_buffer
+
+    # Precompute vertex data and classify cells
+    batches = []
+    current_batch = []
+    for cell in mesh.hexahedra:
+        # Compute vertex attenuation
+        for v in cell.vertices:
+            v.attenuation = v.extinction_coefficient * compute_thickness(v, cell.geometry)
+
+        # Classify cell for direct projection
+        if is_valid_hexahedron(cell) and all(is_convex_quad(face_projection) for face in cell.faces):
+            triangles = generate_triangle_fans_strips_max(cell)
+        else:
+            tetrahedra = subdivide_into_tetrahedra(cell)
+            triangles = []
+            for tet in tetrahedra:
+                triangles.extend(generate_triangle_fans_shirley_tuchman(tet))
+
+        current_batch.append((triangles, cell))
+
+        # Flush batch when non-overlapping constraint is violated or batch limit reached
+        if should_flush_batch(current_batch):
+            batches.append(current_batch)
+            current_batch = []
+    if current_batch:
+        batches.append(current_batch)
+
+    # Render passes
+    for batch in batches:
+        render_triangles(batch, input_texture, p_buffer)
+        # Copy P-buffer to texture for next iteration
+        input_texture = copy_texture(p_buffer)
+
+    return p_buffer
+```
+
+**Formulas:**
+*   **Vertex Attenuation:** $a_v = K_v \cdot t_v$ [S1, unofficial].
+*   **Accumulation:** $\tau_{new} = \tau_{acc} + \tau_{cell}$ [S1, unofficial].
+*   **Recurrence:** $I_V[i+1] = e^{-\tau[i]} I_V[i]$ [S1, unofficial].
+
+**Parameters:**
+*   **Floating Point Precision:** 32-bit floating point is required for the P-buffer to maintain accuracy in attenuation computation [S1, unofficial].
+*   **Parallelism:** Up to 4 wavelength bands can be accumulated in parallel using the RGBA channels [S1, unofficial].
+
+**Edge Cases and Pitfalls:**
+*   **Degenerate Hexahedra:** Must be subdivided into tetrahedra [S1, unofficial].
+*   **Non-Convex Face Projections:** Must be subdivided into tetrahedra [S1, unofficial].
+*   **Non-Planar Faces:** Subdividing a hexahedron into tetrahedra may create non-planar faces with adjacent non-subdivided cells, leading to gaps or overlaps in viewing ray segments and small errors in total absorption [S1, unofficial].
+*   **Texture Copy Overhead:** Copying the P-buffer to a texture after every cell is slow; batching non-overlapping cells is necessary for performance [S1, unofficial].
+
+## Operating characteristics
+*   **Time Complexity:** Not given in the sources.
+*   **Memory Complexity:** Not given in the sources.
+*   **Strengths:** No global sort required; supports curvilinear hexahedral meshes directly; parallel accumulation of multiple wavelength bands [S1, unofficial].
+*   **Limitations:** Limited to absorption-only regime ($J=0$); potential errors from subdivision of degenerate/non-convex cells; texture copy overhead [S1, unofficial].
+*   **When to Use:** Industrial and medical X-ray simulation where emissivity is negligible and hexahedral meshes are used [S1, unofficial].
+*   **When Not to Use:** Not given in the sources.
+
+## Background
+This method was developed for industrial and medical settings where X-ray self-emission is negligible [S1, unofficial]. It builds on the polyhedron projection method [S1, unofficial] and uses the method of Max [12] for hexahedral projection and Shirley and Tuchman [16] for tetrahedral projection [S1, unofficial]. The technique addresses the need for floating-point accuracy in attenuation computation, which is not supported by standard framebuffer compositing operations [S1, unofficial].
+
+## Sources
+[S1] Hardware-Accelerated Simulated Radiography, https://digital.library.unt.edu/ark:/67531/metadc876978/?q=front-to-back compositing, fetched 2026-10-29 (unofficial)

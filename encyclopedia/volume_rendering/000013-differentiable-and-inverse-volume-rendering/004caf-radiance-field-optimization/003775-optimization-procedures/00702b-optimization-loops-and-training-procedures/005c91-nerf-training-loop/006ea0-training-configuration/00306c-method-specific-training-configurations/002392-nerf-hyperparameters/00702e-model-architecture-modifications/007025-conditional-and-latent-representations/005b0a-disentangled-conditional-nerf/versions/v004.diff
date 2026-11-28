@@ -1,0 +1,386 @@
+--- v003.md
++++ v004.md
+@@ -4,75 +4,323 @@
+ 
+ ## Overview
+-Disentangled Conditional NeRF is a generative radiance field architecture that achieves individual control over the shape and appearance of 3D objects by isolating their conditioning mechanisms [S1]. Unlike standard conditional NeRFs where concatenating latent codes to position features causes mutual intervention (e.g., shape changes altering color), this method uses explicit volumetric deformation for shape conditioning and direct latent injection for appearance, preventing cross-talk between the two attributes [S1]. It is typically trained in two stages: first, a GAN-based training of the generator and deformation network, and second, the training of CLIP-driven mappers for text-based manipulation [S1].
++Disentangled Conditional NeRF is a generative radiance field architecture that achieves independent control over the shape and appearance of 3D objects by isolating their conditioning mechanisms [S1]. Unlike trivial conditional NeRF formulations where concatenating latent codes leads to mutual intervention (e.g., shape changes affecting color), this method uses explicit volumetric deformation for shape and deferred color conditioning for appearance [S1]. It is built upon [Conditional and Latent Representations](15989-conditional-and-latent-representations.md) and differs from [HeadNerf](18595-headnerf.md) by its specific two-stage training pipeline involving CLIP-driven mappers for text-based manipulation [S1].
+ 
+ ## How it works
+-**Inputs and Outputs:**
+-*   **Inputs:** Spatial position $\mathbf{x} \in \mathbb{R}^3$, view direction $\mathbf{v}$, shape code $\mathbf{z}_s$, appearance code $\mathbf{z}_a$, and optionally a text prompt $\mathbf{t}$.
+-*   **Outputs:** Density $\sigma$ and color $\mathbf{c}$ for volume rendering.
+-
+-**Data Structures:**
+-1.  **Deformation Network $T$:** An MLP mapping $(\mathbf{x}, \mathbf{z}_s) \rightarrow \Delta \mathbf{x}$.
+-    *   $\Delta \mathbf{x} \in \mathbb{R}^{3 \times 2m}$: Displacement vectors corresponding to each band of the positional encoding $\Gamma(\mathbf{x})$, where $m$ is the number of frequency bands.
+-2.  **Generator $F_\Theta$:** The main NeRF MLP mapping $(\mathbf{x}^*, \mathbf{v}, \mathbf{z}_a) \rightarrow (\sigma, \mathbf{c})$.
+-    *   $\mathbf{x}^*$: Deformed positional encoding.
++The method consists of two distinct phases: training the disentangled generator and training the CLIP-driven manipulation mappers.
++
++### Inputs and Outputs
++*   **Inputs:** Spatial position $\mathbf{x} \in \mathbb{R}^3$, view direction $\mathbf{v}$, shape latent code $\mathbf{z}_s$, appearance latent code $\mathbf{z}_a$, and optionally a text prompt $\mathbf{t}$.
++*   **Outputs:** Volume density $\sigma$ and view-dependent color $\mathbf{c}$.
++
++### Data Structures
++1.  **Deformation Network $T$:** A neural network mapping $(\mathbf{x}, \mathbf{z}_s) \rightarrow \Delta \mathbf{x}$.
++    *   Input: Position $\mathbf{x}$ and shape code $\mathbf{z}_s$.
++    *   Output: Displacement vector $\Delta \mathbf{x} \in \mathbb{R}^{3 \times 2m}$, where $m$ is the number of frequency bands in the positional encoding.
++2.  **Generator $F_\Theta$:** The main NeRF MLP.
++    *   Input: Deformed positional encoding $\Gamma^*(\mathbf{x}, \mathbf{z}_s)$, view direction $\mathbf{v}$, and appearance code $\mathbf{z}_a$.
++    *   Output: Density $\sigma$ and color $\mathbf{c}$.
+ 3.  **Discriminator $D$:** A standard GAN discriminator evaluating image realism.
+-4.  **CLIP Encoders $\hat{E}_t, \hat{E}_i$:** Pre-trained text and image encoders (frozen during Stage 2).
+-5.  **Mappers $M_s, M_a$:** MLPs mapping CLIP text embeddings to shape and appearance code adjustments.
+-
+-**Numbered Steps:**
+-
+-1.  **Conditional Shape Deformation:**
+-    *   Input spatial position $\mathbf{x}$ and shape code $\mathbf{z}_s$ to the deformation network $T$.
+-    *   Network outputs displacement vectors $\Delta \mathbf{x} \in \mathbb{R}^{3 \times 2m}$.
+-    *   Compute the deformed positional encoding $\Gamma^*(\mathbf{x}, \mathbf{z}_s)$. The displacement is applied to the position before positional encoding or directly to the encoded features. The source defines $\Gamma^*(\mathbf{p}, \Delta \mathbf{p})$ as the result of applying displacement $\Delta \mathbf{p}$ to position $\mathbf{p}$ [S1]. Specifically, $\Delta \mathbf{x}$ corresponds to each band of $\Gamma(\mathbf{x})$.
+-    *   Formula: $T: (\mathbf{x}, \mathbf{z}_s) \rightarrow \Delta \mathbf{x}$ [S1].
+-
+-2.  **Radiance Field Evaluation:**
+-    *   Feed the deformed encoding $\Gamma^*(\mathbf{x}, \mathbf{z}_s)$, view direction $\mathbf{v}$, and appearance code $\mathbf{z}_a$ into the main NeRF MLP $F_\Theta$.
+-    *   Output density $\sigma$ and color $\mathbf{c}$.
+-    *   Render the image $I_{gen} = F_\Theta(\mathbf{v}, \mathbf{z}_s, \mathbf{z}_a)$ using standard volume rendering [S1].
+-
+-3.  **Stage 1: GAN Training of Generator and Deformation Network:**
+-    *   Randomly sample $\mathbf{z}_s \sim \mathcal{Z}_s$ (normal distribution), $\mathbf{z}_a \sim \mathcal{Z}_a$ (normal distribution), and camera pose $\mathbf{v} \sim \mathcal{Z}_v$ (upper hemisphere) [S1].
+-    *   Sample real images $\mathbf{I}$ from the training data distribution $\mathcal{D}$.
+-    *   Minimize the GAN loss $L_{GAN}$ with respect to $F_\Theta$ and $T$:
+-        $$ L_{GAN} = \mathbb{E}_{\mathbf{z}_s, \mathbf{z}_a, \mathbf{v}} [f(D(F_\Theta(\mathbf{v}, \mathbf{z}_s, \mathbf{z}_a)))] + \mathbb{E}_{\mathbf{I} \sim \mathcal{D}} [f(-D(\mathbf{I}))] + \lambda_r \|\nabla D(\mathbf{I})\|^2 $$
+-        where $f(x) = -\log(1 + \exp(-x))$ and $\lambda_r$ is the gradient penalty regularization weight [S1].
+-
+-4.  **Stage 2: CLIP-Driven Manipulation (Mapper Training):**
+-    *   Fix weights of $F_\Theta$, $T$, and $D$ (denoted $\hat{F}_\Theta, \hat{T}, \hat{D}$).
+-    *   Train shape mapper $M_s$ and appearance mapper $M_a$.
+-    *   Sample $\mathbf{z}_s, \mathbf{z}_a, \mathbf{v}$ as in Stage 1, and text prompt $\mathbf{t}$ from a pre-defined library $\mathcal{T}$ [S1].
+-    *   Compute CLIP text embedding $\mathbf{e}_t = \hat{E}_t(\mathbf{t})$.
+-    *   **Shape Mapper Loss:**
+-        $$ L_{shape} = f(\hat{D}(\hat{F}_\Theta(\mathbf{v}, M_s(\mathbf{e}_t) + \mathbf{z}_s, \mathbf{z}_a))) + \lambda_c D_{CLIP}(\hat{F}_\Theta(\mathbf{v}, M_s(\mathbf{e}_t) + \mathbf{z}_s, \mathbf{z}_a), \mathbf{t}) $$
+-    *   **Appearance Mapper Loss:**
+-        $$ L_{appear} = f(\hat{D}(\hat{F}_\Theta(\mathbf{v}, \mathbf{z}_s, M_a(\mathbf{e}_t) + \mathbf{z}_a))) + \lambda_c D_{CLIP}(\hat{F}_\Theta(\mathbf{v}, \mathbf{z}_s, M_a(\mathbf{e}_t) + \mathbf{z}_a), \mathbf{t}) $$
+-        where $\lambda_c$ is the weight for the CLIP distance term [S1].
+-
+-**Parameters:**
+-*   $\lambda_r$: Regularization weight for the gradient penalty in $L_{GAN}$. Value not given in the sources.
+-*   $\lambda_c$: Weight for the CLIP distance term in mapper losses. Value not given in the sources.
+-*   $m$: Number of frequency bands in positional encoding. Value not given in the sources.
+-
+-**Pitfalls:**
+-*   **Mutual Intervention:** Trivially concatenating the shape code $\mathbf{z}_s$ to the position features causes shape changes to affect color. This is solved by deferring color conditioning to the main MLP and applying shape conditioning via explicit deformation [S1].
+-*   **Precision:** The displacement $\Delta \mathbf{x}$ is applied per band of the positional encoding. Implementation must ensure the dimensionality of $\Delta \mathbf{x}$ matches the output dimension of $\Gamma(\mathbf{x})$ [S1].
++4.  **CLIP Mappers:**
++    *   Shape Mapper $M_s$: Maps CLIP text embedding to shape code adjustment.
++    *   Appearance Mapper $M_a$: Maps CLIP text embedding to appearance code adjustment.
++5.  **Positional Encoding $\Gamma(\mathbf{x})$:** Standard sine/cosine encoding with $m$ bands.
++
++### Training Stage 1: Disentangled Generator
++The generator $F_\Theta$ and deformation network $T$ are trained jointly using a non-saturating GAN objective.
++
++1.  **Sampling:** Randomly sample $\mathbf{z}_s \sim \mathcal{N}(0, I)$, $\mathbf{z}_a \sim \mathcal{N}(0, I)$, and camera pose $\mathbf{v}$ from the upper hemisphere $\mathcal{Z}_v$. Sample real image $\mathbf{I}$ from the training distribution $\mathcal{D}$.
++2.  **Deformation:** Compute displacement $\Delta \mathbf{x} = T(\mathbf{x}, \mathbf{z}_s)$.
++3.  **Deformed Encoding:** Apply displacement to the positional encoding bands. The deformed encoding $\Gamma^*(\mathbf{x}, \mathbf{z}_s)$ is computed by adding $\Delta \mathbf{x}$ to the standard positional encoding components. Specifically, if $\Gamma(\mathbf{x})$ consists of bands $\gamma_i(\mathbf{x})$, the deformed band is $\gamma^*_i(\mathbf{x}, \Delta \mathbf{x}_i) = \gamma_i(\mathbf{x} + \Delta \mathbf{x}_i)$ [S1].
++4.  **Rendering:** Feed $\Gamma^*(\mathbf{x}, \mathbf{z}_s)$, $\mathbf{v}$, and $\mathbf{z}_a$ into $F_\Theta$ to predict $\sigma$ and $\mathbf{c}$. Render the image $\mathbf{I}_{gen} = F_\Theta(\mathbf{v}, \mathbf{z}_s, \mathbf{z}_a)$.
++5.  **Discriminator Update:** Update $D$ to distinguish real images $\mathbf{I}$ from generated images $\mathbf{I}_{gen}$.
++6.  **Generator Update:** Update $F_\Theta$ and $T$ to fool $D$.
++
++The GAN loss is defined as [S1]:
++$$
++L_{GAN} = \mathbb{E}_{\mathbf{z}_s \sim \mathcal{Z}_s, \mathbf{z}_a \sim \mathcal{Z}_a, \mathbf{v} \sim \mathcal{Z}_v} [f(D(F_\Theta(\mathbf{v}, \mathbf{z}_s, \mathbf{z}_a)))] + \mathbb{E}_{\mathbf{I} \sim \mathcal{D}} [f(-D(\mathbf{I}))] + \lambda_r \|\nabla_{\mathbf{I}} D(\mathbf{I})\|^2
++$$
++where $f(x) = -\log(1 + \exp(-x))$ and $\lambda_r$ is the gradient penalty regularization weight [S1].
++
++### Training Stage 2: CLIP-Driven Manipulation
++The generator weights are fixed ($\hat{F}_\Theta, \hat{D}$), and the mappers $M_s$ and $M_a$ are trained.
++
++1.  **Sampling:** Sample $\mathbf{z}_s, \mathbf{z}_a, \mathbf{v}$ as in Stage 1. Sample text prompt $\mathbf{t}$ from a pre-defined library $\mathcal{T}$.
++2.  **CLIP Encoding:** Encode text $\mathbf{t}$ using CLIP text encoder $\hat{E}_t$ to get embedding $\mathbf{e}_t = \hat{E}_t(\mathbf{t})$.
++3.  **Mapper Application:**
++    *   Shape adjustment: $\mathbf{z}'_s = M_s(\mathbf{e}_t) + \mathbf{z}_s$.
++    *   Appearance adjustment: $\mathbf{z}'_a = M_a(\mathbf{e}_t) + \mathbf{z}_a$.
++4.  **Rendering:** Render image using fixed generator: $\mathbf{I}_{clip} = \hat{F}_\Theta(\mathbf{v}, \mathbf{z}'_s, \mathbf{z}'_a)$.
++5.  **Loss Calculation:**
++    *   Shape Mapper Loss [S1]:
++        $$
++        L_{shape} = f(\hat{D}(\hat{F}_\Theta(\mathbf{v}, M_s(\hat{E}_t(\mathbf{t})) + \mathbf{z}_s, \mathbf{z}_a))) + \lambda_c D_{CLIP}(\hat{F}_\Theta(\mathbf{v}, M_s(\hat{E}_t(\mathbf{t})) + \mathbf{z}_s, \mathbf{z}_a), \mathbf{t})
++        $$
++    *   Appearance Mapper Loss [S1]:
++        $$
++        L_{appear} = f(\hat{D}(\hat{F}_\Theta(\mathbf{v}, \mathbf{z}_s, M_a(\hat{E}_t(\mathbf{t})) + \mathbf{z}_a))) + \lambda_c D_{CLIP}(\hat{F}_\Theta(\mathbf{v}, \mathbf{z}_s, M_a(\hat{E}_t(\mathbf{t})) + \mathbf{z}_a), \mathbf{t})
++        $$
++    where $\lambda_c$ is the weight for the CLIP distance term [S1].
++
++### Pseudocode
++
++```python
++import torch
++import torch.nn as nn
++import torch.optim as optim
++
++# Standard positional encoding function
++def positional_encoding(x, num_bands):
++    """
++    Computes standard positional encoding for x.
++    Returns tensor of shape (..., 2 * num_bands * 3)
++    """
++    # Implementation details of standard NeRF PE
++    pass
++
++# Deformation Network
++class DeformationNetwork(nn.Module):
++    def __init__(self, input_dim, hidden_dim, output_dim):
++        super().__init__()
++        self.net = nn.Sequential(
++            nn.Linear(input_dim, hidden_dim),
++            nn.ReLU(),
++            nn.Linear(hidden_dim, hidden_dim),
++            nn.ReLU(),
++            nn.Linear(hidden_dim, output_dim)
++        )
++    
++    def forward(self, x, z_s):
++        # x: (B, 3), z_s: (B, Z_dim)
++        # Output: delta_x (B, 3 * 2 * m)
++        return self.net(torch.cat([x, z_s], dim=-1))
++
++# Main NeRF Generator
++class NeRFGenerator(nn.Module):
++    def __init__(self, input_dim, hidden_dim, output_dim):
++        super().__init__()
++        self.net = nn.Sequential(
++            nn.Linear(input_dim, hidden_dim),
++            nn.ReLU(),
++            nn.Linear(hidden_dim, hidden_dim),
++            nn.ReLU(),
++            nn.Linear(hidden_dim, output_dim)
++        )
++        
++    def forward(self, encoded_pos, v, z_a):
++        # encoded_pos: (B, 6*m), v: (B, 3), z_a: (B, Z_dim)
++        # Output: sigma (B, 1), color (B, 3)
++        x = torch.cat([encoded_pos, v, z_a], dim=-1)
++        out = self.net(x)
++        sigma = out[:, :1]
++        color = out[:, 1:]
++        return sigma, color
++
++# Discriminator
++class Discriminator(nn.Module):
++    def __init__(self, input_dim):
++        super().__init__()
++        self.net = nn.Sequential(
++            nn.Linear(input_dim, 512),
++            nn.LeakyReLU(0.2),
++            nn.Linear(512, 256),
++            nn.LeakyReLU(0.2),
++            nn.Linear(256, 1)
++        )
++        
++    def forward(self, x):
++        return self.net(x)
++
++# CLIP Mappers
++class CLIPMapper(nn.Module):
++    def __init__(self, input_dim, output_dim):
++        super().__init__()
++        self.net = nn.Linear(input_dim, output_dim)
++        
++    def forward(self, x):
++        return self.net(x)
++
++def apply_deformation(pe, delta_x, num_bands):
++    """
++    Applies displacement delta_x to the positional encoding pe.
++    pe: (B, 6*m), delta_x: (B, 6*m)
++    """
++    return pe + delta_x
++
++def gan_loss(real_logits, fake_logits, lambda_r, discriminator):
++    """
++    Computes the non-saturating GAN loss with gradient penalty.
++    """
++    f = lambda x: -torch.log(1 + torch.exp(-x))
++    
++    # Generator loss (fooling discriminator)
++    gen_loss = torch.mean(f(fake_logits))
++    
++    # Discriminator loss
++    real_loss = torch.mean(f(-real_logits))
++    
++    # Gradient penalty
++    real_images = ... # Placeholder for real image tensor
++    # Compute gradient of D(I) w.r.t I
++    grad = torch.autograd.grad(
++        outputs=real_logits.sum(), 
++        inputs=real_images, 
++        create_graph=True, 
++        retain_graph=True, 
++        only_inputs=True
++    )[0]
++    grad_penalty = lambda_r * torch.mean((grad.norm(2, dim=1) - 1) ** 2)
++    
++    disc_loss = real_loss + grad_penalty
++    return gen_loss, disc_loss
++
++def train_stage_1(generator, deformation_net, discriminator, optimizer_gen, optimizer_disc, 
++                  batch_size, num_bands, lambda_r, device):
++    """
++    Stage 1: Train disentangled conditional NeRF generator and deformation network.
++    """
++    generator.train()
++    deformation_net.train()
++    discriminator.train()
++    
++    # Sample latents
++    z_s = torch.randn(batch_size, z_s_dim, device=device)
++    z_a = torch.randn(batch_size, z_a_dim, device=device)
++    v = sample_camera_pose(batch_size, device=device) # Upper hemisphere
++    
++    # Sample real images
++    real_images = sample_real_images(batch_size, device=device)
++    
++    # Forward pass
++    # 1. Deformation
++    # x is sampled from scene geometry or random points
++    x = sample_points(batch_size, device=device)
++    delta_x = deformation_net(x, z_s)
++    
++    # 2. Positional Encoding and Deformation
++    pe = positional_encoding(x, num_bands)
++    deformed_pe = apply_deformation(pe, delta_x, num_bands)
++    
++    # 3. Rendering
++    sigma, color = generator(deformed_pe, v, z_a)
++    # Render image from sigma and color (standard volume rendering)
++    fake_images = volume_render(sigma, color, v)
++    
++    # 4. Discriminator
++    real_logits = discriminator(real_images)
++    fake_logits = discriminator(fake_images.detach())
++    
++    gen_loss, disc_loss = gan_loss(real_logits, fake_logits, lambda_r, discriminator)
++    
++    # Update Discriminator
++    optimizer_disc.zero_grad()
++    disc_loss.backward()
++    optimizer_disc.step()
++    
++    # Update Generator
++    optimizer_gen.zero_grad()
++    gen_loss.backward()
++    optimizer_gen.step()
++
++def train_stage_2(generator, deformation_net, discriminator, shape_mapper, appearance_mapper,
++                  optimizer_mappers, lambda_c, device):
++    """
++    Stage 2: Train CLIP-driven mappers. Generator weights are fixed.
++    """
++    generator.eval()
++    deformation_net.eval()
++    discriminator.eval()
++    shape_mapper.train()
++    appearance_mapper.train()
++    
++    # Sample inputs
++    z_s = torch.randn(batch_size, z_s_dim, device=device)
++    z_a = torch.randn(batch_size, z_a_dim, device=device)
++    v = sample_camera_pose(batch_size, device=device)
++    text_prompts = sample_text_prompts(batch_size, device=device)
++    
++    # CLIP Encoding
++    # Assuming pre-trained CLIP text encoder is available
++    text_embeddings = clip_text_encoder(text_prompts)
++    
++    # Mapper Outputs
++    z_s_adj = shape_mapper(text_embeddings) + z_s
++    z_a_adj = appearance_mapper(text_embeddings) + z_a
++    
++    # Rendering with fixed generator
++    x = sample_points(batch_size, device=device)
++    delta_x = deformation_net(x, z_s) # Use fixed deformation net
++    pe = positional_encoding(x, num_bands)
++    deformed_pe = apply_deformation(pe, delta_x, num_bands)
++    
++    sigma, color = generator(deformed_pe, v, z_a_adj)
++    fake_images = volume_render(sigma, color, v)
++    
++    # Discriminator Loss (using fixed discriminator)
++    fake_logits = discriminator(fake_images)
++    # Note: In Stage 2, we typically only update mappers to fool D and match CLIP
++    # The GAN loss term is included in L_shape and L_appear as per source
++    f = lambda x: -torch.log(1 + torch.exp(-x))
++    
++    # Shape Mapper Loss
++    # L_shape = f(D(F(v, Ms(et) + zs, za))) + lambda_c * D_CLIP(F(...), t)
++    # Note: Source formula uses Ms(et) + zs for shape, but za is passed as is.
++    # However, the generator input is (v, z_s_adj, z_a).
++    # The source formula for L_shape uses: F(v, Ms(et) + zs, za)
++    # This implies z_a is NOT adjusted in shape loss calculation? 
++    # Re-reading source: "L_shape = ... D(F(v, Ms(et) + zs, za))"
++    # It seems z_a is the original sampled z_a, not adjusted.
++    
++    # Let's stick strictly to the source formulas.
++    # For L_shape: z_s is adjusted, z_a is original.
++    # For L_appear: z_s is original, z_a is adjusted.
++    
++    # Re-render for specific losses if needed, or use the same fake_images if z_a_adj was used for both?
++    # The source defines L_shape and L_appear separately.
++    # L_shape uses z_s_adj and z_a.
++    # L_appear uses z_s and z_a_adj.
++    
++    # Render for Shape Loss
++    sigma_s, color_s = generator(deformed_pe, v, z_a) # z_a is original
++    fake_images_shape = volume_render(sigma_s, color_s, v)
++    logits_shape = discriminator(fake_images_shape)
++    loss_gan_shape = f(logits_shape)
++    loss_clip_shape = clip_distance(fake_images_shape, text_prompts)
++    L_shape = loss_gan_shape + lambda_c * loss_clip_shape
++    
++    # Render for Appearance Loss
++    # Need to re-compute deformed PE with original z_s? 
++    # Deformation depends on z_s. If we use original z_s, delta_x is original.
++    pe_orig = positional_encoding(x, num_bands)
++    delta_x_orig = deformation_net(x, z_s)
++    deformed_pe_orig = apply_deformation(pe_orig, delta_x_orig, num_bands)
++    
++    sigma_a, color_a = generator(deformed_pe_orig, v, z_a_adj)
++    fake_images_appear = volume_render(sigma_a, color_a, v)
++    logits_appear = discriminator(fake_images_appear)
++    loss_gan_appear = f(logits_appear)
++    loss_clip_appear = clip_distance(fake_images_appear, text_prompts)
++    L_appear = loss_gan_appear + lambda_c * loss_clip_appear
++    
++    # Update Mappers
++    optimizer_mappers.zero_grad()
++    (L_shape + L_appear).backward()
++    optimizer_mappers.step()
++```
+ 
+ ## Subtopics
+ 
+ ### CLIP Manipulator Training
+-A two-stage training procedure where the generator is fixed, and CLIP-driven mappers ($M_s, M_a$) are trained to map text embeddings to latent code adjustments [S1]. It allows text-based editing of shape and appearance independently. The shape mapper modifies the shape code $\mathbf{z}_s$ via $M_s(\hat{E}_t(\mathbf{t}))$, while the appearance mapper modifies $\mathbf{z}_a$ via $M_a(\hat{E}_t(\mathbf{t}))$. It uses a GAN loss on the discriminator and a CLIP distance loss to align the generated image with the text prompt [S1].
++A variant training phase where the pre-trained generator is fixed, and specific mappers ($M_s, M_a$) are trained to map CLIP text embeddings to latent code adjustments [S1]. It is chosen when text-driven editing is required without retraining the entire NeRF. It differs from Stage 1 by freezing the generator and discriminator and optimizing only the mappers using a combination of GAN loss and CLIP distance [S1].
+ 
+ ## Operating characteristics
+-*   **Time Complexity:** Training involves two stages. Stage 1 requires GAN training of the generator and deformation network. Stage 2 requires training two smaller mapper networks. No specific time metrics are given in the sources.
+-*   **Memory Complexity:** Requires storing the generator, deformation network, discriminator, and CLIP encoders. No specific memory metrics are given in the sources.
+-*   **Strengths:** Provides individual control over shape and appearance, preventing mutual intervention. Enables text-driven manipulation via CLIP mappers. Produces more natural color editing results compared to methods like EditNeRF [S1].
+-*   **Limitations:** Requires a GAN framework, which can be unstable to train. Relies on pre-trained CLIP models. The deformation network adds complexity to the pipeline.
+-*   **When to use:** When individual control over shape and appearance is required, and text-driven manipulation is desired.
+-*   **When not to use:** When computational resources for GAN training are limited, or when simple per-scene optimization is sufficient.
++*   **Time Complexity:** Training is computationally expensive due to the GAN objective and the two-stage process. Stage 1 requires training the deformation network and generator jointly. Stage 2 requires additional forward passes for CLIP distance computation.
++*   **Memory Complexity:** Requires storing the generator, deformation network, discriminator, and CLIP encoders. The deformation network adds memory overhead proportional to the number of positional encoding bands.
++*   **Strengths:** Achieves clean disentanglement where shape changes do not affect color, and vice versa. Allows for text-driven manipulation via CLIP mappers.
++*   **Limitations:** Requires a GAN discriminator, which can be unstable to train. The deformation network must be carefully regularized to avoid unrealistic deformations.
++*   **When to use:** When independent control over shape and appearance is critical, and text-based editing is desired.
++*   **When not to use:** When computational resources are limited or when simple per-scene optimization suffices.
+ 
+ ## Background
+-Disentangled Conditional NeRF was introduced in the paper "CLIP-NeRF: Text-and-Image Driven Manipulation of Neural Radiance Fields" [S1]. It addresses the limitation of standard conditional NeRFs where latent codes for shape and appearance are entangled, leading to unwanted side effects during manipulation [S1]. The method builds on the conditional NeRF framework [S1] and integrates GAN training and CLIP-driven manipulation to achieve robust and disentangled 3D editing.
++Disentangled Conditional NeRF was introduced in "CLIP-NeRF: Text-and-Image Driven Manipulation of Neural Radiance Fields" (CVPR 2022) [S1]. It addresses the mutual intervention problem found in earlier conditional NeRF models where latent codes for shape and appearance were concatenated directly, leading to entangled outputs [S1]. The method builds on the principles of conditional latent representations [S1].
+ 
+ ## Sources

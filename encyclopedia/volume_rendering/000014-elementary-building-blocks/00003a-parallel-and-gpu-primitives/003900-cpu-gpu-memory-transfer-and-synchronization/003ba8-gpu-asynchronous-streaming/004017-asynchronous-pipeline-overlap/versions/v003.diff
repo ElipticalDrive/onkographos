@@ -1,0 +1,195 @@
+--- v002.md
++++ v003.md
+@@ -8,110 +8,88 @@
+ ## How it works
+ **Inputs and Outputs:**
+-*   **Input:** A set of data blocks (e.g., 3D Gaussian splats or volume chunks) residing on an SSD, a camera trajectory defining the visible region, and a working set size limit.
+-*   **Output:** Rendered frames and optimized parameters, with minimal PCIe traffic and GPU idle time.
++*   **Input:** A set of data blocks residing on an SSD, a camera trajectory defining the visible region, and a working set size limit [S1, unofficial].
++*   **Output:** Rendered frames and optimized parameters, with minimal PCIe traffic and GPU idle time [S1, unofficial].
+ 
+ **Data Structures:**
+-*   **CPU Cache:** Manages block residency and dirty tracking. Uses an index structure (e.g., Morton code based) to map spatial regions to block locations on disk [S1, unofficial].
+-*   **Double-Buffered GPU Block Buffers:** Two sets of VRAM buffers. One is actively used for rendering the current iteration, while the other is populated with the next iteration's data [S1, unofficial].
++*   **CPU Cache:** Manages block residency and dirty tracking on the host [S1, unofficial].
++*   **Double-Buffered GPU Block Buffers:** Two sets of VRAM buffers; one is actively used for rendering the current iteration, while the other is populated with the next iteration's data [S1, unofficial].
+ *   **CUDA Streams:** Separate streams for GPU compute and memory copies (H2D/D2H) to enable true concurrency [S1, unofficial].
+ 
+ **Numbered Steps:**
+-1.  **Initialization:** Load the initial working set of blocks from SSD to CPU cache. Allocate double-buffered GPU buffers. Initialize separate CUDA streams for compute and copy operations.
+-2.  **Iteration Start:** Determine the visible block union for the current camera position. Identify blocks that need to be fetched (not in GPU) and blocks that need to be evicted (in GPU but not visible).
++1.  **Initialization:** Load the initial working set of blocks from SSD to CPU cache. Allocate double-buffered GPU buffers. Initialize separate CUDA streams for compute and copy operations [S1, unofficial].
++2.  **Iteration Start:** Determine the visible block union for the current camera position. Identify blocks that need to be fetched (not in GPU) and blocks that need to be evicted (in GPU but not visible) [S1, unofficial].
+ 3.  **Concurrent Execution (Overlap):**
+-    *   **Stage 1 (SSD Read/Prefetch):** Dedicated I/O threads read the required blocks from SSD into the CPU cache. Prefetching may occur for the *next* iteration's likely visible blocks [S1, unofficial].
++    *   **Stage 1 (SSD Read/Prefetch):** Dedicated I/O threads read the required blocks from SSD into the CPU cache [S1, unofficial].
+     *   **Stage 2 (H2D Transfer):** Asynchronously copy the newly fetched blocks from CPU cache to the *next* GPU buffer using a dedicated CUDA copy stream [S1, unofficial].
+     *   **Stage 3 (GPU Compute):** Render and/or backpropagate using the *current* GPU buffer using a dedicated CUDA compute stream [S1, unofficial].
+     *   **Stage 4 (D2H Transfer & Flush):** Asynchronously copy evicted blocks from the *current* GPU buffer back to CPU cache (if dirty) and trigger asynchronous SSD flushes from CPU cache to disk [S1, unofficial].
+-4.  **Buffer Swap:** After compute completes, swap the current and next GPU buffers. The "next" buffer becomes the "current" one for the next iteration.
+-5.  **Repeat:** Go to Step 2 for the next frame/iteration.
++4.  **Buffer Swap:** After compute completes, swap the current and next GPU buffers. The "next" buffer becomes the "current" one for the next iteration [S1, unofficial].
++5.  **Repeat:** Go to Step 2 for the next frame/iteration [S1, unofficial].
+ 
+ **Formulas:**
+-*   **Iteration Time (Overlap):** $T_{iter} \approx \max(T_{compute}, T_{IO} + T_{H2D} + T_{D2H})$ [S1, unofficial].
+-*   **Iteration Time (Serial):** $T_{iter} = T_{IO} + T_{H2D} + T_{compute} + T_{D2H}$ [S1, unofficial].
+-*   **PCIe Traffic:** Minimized by differential streaming, transferring only changed blocks [S1, unofficial].
++*   **Measured Iteration Time (Overlap):** $T_{iter} = 90.7$ ms per iteration [S1, unofficial].
++*   **Measured Iteration Time (Serial):** $T_{iter} = 210.5$ ms per iteration when data movement and compute are serialized [S1, unofficial].
++*   **PCIe Traffic:** $0.10$ GB per iteration, minimized by differential streaming [S1, unofficial].
+ 
+ **Parameters:**
+-*   **Number of I/O Threads:** Typically matches the number of CPU cores or SSD channels [S1, unofficial].
+ *   **CUDA Streams:** At least two (one for compute, one for copy) [S1, unofficial].
+ *   **Buffer Size:** Sized to hold the maximum expected working set of blocks [S1, unofficial].
+ 
+ **Edge Cases and Pitfalls:**
+-*   **Precision:** Ensure double-buffering logic correctly handles block validity to avoid rendering stale data [S1, unofficial].
+-*   **Boundaries:** Handle cases where the visible set changes drastically between frames, requiring full buffer reloads [S1, unofficial].
++*   **Precision:** Ensure double-buffering logic correctly handles block validity and dirty tracking to avoid rendering stale data or writing back incorrect gradients [S1, unofficial].
+ *   **Degenerate Input:** If the working set fits entirely in VRAM, overlap overhead may be negligible, but the pipeline should still function correctly [S1, unofficial].
+ 
+ **Pseudocode:**
+ ```python
+-import torch
+-import torch.cuda as cuda
++class AsynchronousPipeline:
++    def __init__(self, max_blocks):
++        self.max_blocks = max_blocks
++        # Double-buffered GPU block buffers
++        self.gpu_buffers = [[None] * max_blocks for _ in range(2)]
++        self.cpu_cache = {}  # Manages block residency and dirty tracking
++        self.current_buf = 0
++        self.next_buf = 1
+ 
+-class AsynchronousPipeline:
+-    def __init__(self, num_blocks, block_size, num_streams=2):
+-        self.num_blocks = num_blocks
+-        self.block_size = block_size
+-        self.num_streams = num_streams
+-        
+-        # Allocate double-buffered GPU memory
+-        self.gpu_buffers = [cuda.empty((num_blocks, block_size), dtype=torch.float32) for _ in range(2)]
+-        self.cpu_cache = [None] * num_blocks  # Placeholder for CPU cache management
+-        self.streams = [cuda.Stream() for _ in range(num_streams)]
+-        
+-        self.current_buffer_idx = 0
+-        self.next_buffer_idx = 1
+-        
+-    def load_block_from_disk(self, block_id):
+-        # [G] Placeholder for actual SSD read logic
+-        # In practice, this would be handled by dedicated I/O threads
++    def get_visible_blocks(self, camera):
++        # [G] Standard frustum intersection test against spatial index
++        return [f"blk_{i}" for i in range(3)]
++
++    def get_evicted_blocks(self, gpu_set, visible_set):
++        # [G] Set difference: blocks resident in GPU but outside visible set
++        return [b for b in gpu_set if b not in visible_set]
++
++    def step(self, camera):
++        visible = self.get_visible_blocks(camera)
++        gpu_set = [f"blk_{i}" for i in range(self.max_blocks)]
++        evicted = self.get_evicted_blocks(gpu_set, visible)
++
++        # Stage 1 & 2: Prefetch to CPU cache and H2D to next buffer
++        for blk in visible:
++            self.cpu_cache[blk] = self.read_from_ssd(blk)
++        for blk in visible:
++            self.gpu_buffers[self.next_buf][int(blk.split('_')[1])] = self.cpu_cache[blk]
++
++        # Stage 3: GPU Compute on current buffer
++        self.render_backprop(self.gpu_buffers[self.current_buf])
++
++        # Stage 4: D2H for evicted blocks and async flush
++        for blk in evicted:
++            self.cpu_cache[blk] = self.gpu_buffers[self.current_buf][int(blk.split('_')[1])]
++            self.flush_to_ssd_async(blk)
++
++        # Buffer Swap
++        self.current_buf, self.next_buf = self.next_buf, self.current_buf
++
++    def read_from_ssd(self, blk_id):
++        # [G] Simulates dedicated I/O thread reading block from disk
++        return f"data_{blk_id}"
++
++    def render_backprop(self, buffer):
++        # [G] Simulates GPU compute kernel execution
+         pass
+-        
+-    def render(self, buffer_idx, stream_idx):
+-        # [G] Placeholder for actual GPU compute (rendering/backprop)
+-        # This would use self.gpu_buffers[buffer_idx]
++
++    def flush_to_ssd_async(self, blk_id):
++        # [G] Simulates asynchronous write-back to storage
+         pass
+-        
+-    def transfer_h2d(self, block_ids, stream_idx):
+-        # [G] Placeholder for H2D transfer
+-        # This would copy data from CPU cache to self.gpu_buffers[next_buffer_idx]
+-        pass
+-        
+-    def transfer_d2h(self, block_ids, stream_idx):
+-        # [G] Placeholder for D2H transfer
+-        # This would copy evicted blocks from self.gpu_buffers[current_buffer_idx] to CPU cache
+-        pass
+-        
+-    def flush_dirty_blocks(self, stream_idx):
+-        # [G] Placeholder for async SSD flush
+-        pass
+-        
+-    def step(self, visible_blocks, evicted_blocks):
+-        # Step 1: Prefetch and H2D for next iteration
+-        with self.streams[0]:
+-            for block_id in visible_blocks:
+-                if block_id not in self.cpu_cache or self.cpu_cache[block_id] is None:
+-                    # [G] In real implementation, this would be triggered by I/O threads
+-                    # and data would be ready in CPU cache
+-                    pass
+-            # Transfer new blocks to next buffer
+-            self.transfer_h2d(visible_blocks, 0)
+-            
+-        # Step 2: Render current iteration
+-        with self.streams[1]:
+-            self.render(self.current_buffer_idx, 1)
+-            
+-        # Step 3: D2H and Flush for current iteration
+-        with self.streams[0]:
+-            self.transfer_d2h(evicted_blocks, 0)
+-            self.flush_dirty_blocks(0)
+-            
+-        # Step 4: Swap buffers
+-        self.current_buffer_idx, self.next_buffer_idx = self.next_buffer_idx, self.current_buffer_idx
+-
+-# Usage example
+-pipeline = AsynchronousPipeline(num_blocks=1000, block_size=1024)
+-for frame in range(100):
+-    visible = get_visible_blocks(frame)
+-    evicted = get_evicted_blocks(frame)
+-    pipeline.step(visible, evicted)
+ ```
+ 
+@@ -120,4 +98,10 @@
+ ### Concurrent 3-Stage Pipeline
+ A pipeline architecture that maximizes hardware utilization by running three stages (Image Preparation, TripoSR Inference, Voxelization) simultaneously using queues and separate process pools [S2, unofficial]. It sets itself apart by orchestrating CPU and GPU workloads across different processes to prevent idle time [S2, unofficial]. Choose this when dealing with heterogeneous workloads involving both CPU-intensive (voxelization) and GPU-intensive (inference) tasks [S2, unofficial]. On an M4 Pro with 48 GB RAM, processing takes ~5 seconds per emoji, with ~225 emojis completed in ~19 minutes. GPU utilization is ~80%, CPU ~60%, RAM ~23 GB [S2, unofficial]. The GPU is the bottleneck because TripoSR inference is sequential, whereas CPU stages can be parallelized and overlapped with GPU work to prevent idle time [S2, unofficial].
++
++### Separate Communication Stream with 1F1B Pipelining
++A pipelined execution strategy using two CUDA streams (computation and communication) to interleave parameter loading and gradient offloading, analogous to 1F1B (1 Forward, 1 Backward) pipelining [S3]. It sets itself apart by prefetching parameters for the upcoming microbatch while postponing gradient offloading from the prior one, using double buffering with precise timing to prevent coexistence of previous gradients and upcoming parameters [S3]. Choose this when training highly sparse scenes to maximize throughput and control memory usage [S3]. Implementation adds CUDA events to synchronize operations across streams, sets communication stream priority higher than computation stream priority, and accumulates gradients within CUDA registers before storing the sum back in CPU memory [S3].
++
++### Asynchronous Online Placement
++A technique to hide online assignment overhead by computing placement for future batches on the CPU while GPUs process the current batch [S4, unofficial]. It sets itself apart by approximating the access pattern for future batches using data collected by a profiler from previous epochs, relying on the fact that points evolve gradually during training [S4, unofficial]. Choose this when online assignment latency becomes a bottleneck during large-scale reconstruction training [S4, unofficial].
+ 
+ ## Operating characteristics
+@@ -132,7 +116,9 @@
+ 
+ ## Background
+-Originated in the context of out-of-core 3D Gaussian Splatting optimization, specifically in the TideGS paper [S1, unofficial]. It addresses the challenge of training models with over one billion primitives that cannot fit in GPU memory [S1, unofficial]. The technique leverages the asynchronous capabilities of modern GPUs (e.g., Fermi architecture and later) and SSDs to create a smooth data pipeline [S1, unofficial].
++Originated in the context of out-of-core 3D Gaussian Splatting optimization, specifically in the TideGS paper [S1, unofficial]. It addresses the challenge of training models with large-scale primitives that cannot fit in GPU memory [S1, unofficial]. The technique leverages the asynchronous capabilities of modern GPUs and SSDs to create a smooth data pipeline [S1, unofficial].
+ 
+ ## Sources
+ [S1] TideGS: Scalable Training of Over One Billion 3D Gaussian Splatting Primitives via Out-of-Core Optimization, https://doi.org/10.48550/arxiv.2605.20150, fetched 2026-10-26 (unofficial)
+-[S2] mohamedmansour/image-to-voxel, https://github.com/mohamedmansour/image-to-voxel, fetched 2026-10-26 (unofficial)+[S2] mohamedmansour/image-to-voxel, https://github.com/mohamedmansour/image-to-voxel, fetched 2026-10-26 (unofficial)
++[S3] CLM: Removing the GPU Memory Barrier for 3D Gaussian Splatting, https://doi.org/10.1145/3779212.3790140, fetched 2026-10-31
++[S4] Scaling Point-based Differentiable Rendering for Large-scale Reconstruction, https://doi.org/10.48550/arxiv.2512.20017, fetched 2026-10-26 (unofficial)

@@ -1,0 +1,154 @@
+# Out-of-Core Sampling
+
+Also called: Random Block Buffering, Asynchronous Block Streaming
+
+## Overview
+Out-of-core sampling is a technique for training neural volume representations on datasets that exceed available system memory by maintaining a buffer of randomly selected 3D blocks in RAM, asynchronously streaming data to support random access without page swapping [S1]. It differs from virtual memory-based approaches (like `CreateFileMapping`) by avoiding the massive page fault overhead caused by uniformly random coordinate access, and from structured streaming methods by decoupling spatial locality from sampling order to maximize I/O bandwidth utilization on random-access storage [S1].
+
+## How it works
+**Inputs:**
+*   A large volume dataset stored on disk (e.g., NVMe SSD) [S1].
+*   Buffer size parameters: $R$ (total blocks in buffer) and $S$ (blocks to refresh per step) [S1].
+
+**Outputs:**
+*   Interpolated sample values $(x, y, z, \text{value})$ for neural network training [S1].
+
+**Data Structures:**
+*   **Random Buffer:** A collection of $R$ 3D blocks held in system memory [S1].
+*   **Block Layout:** Each block is approximately 64KB in size [S1]. The specific dimensions of the 3D block are not critical for performance but are chosen to balance streaming performance and scalability [S1].
+*   **Ghost Voxels:** If trilinear interpolation is enabled, each block includes a layer of additional "ghost" voxels surrounding the core data to support neighbor access [S1].
+
+**Parameters:**
+*   $R = 65536$: Default total number of blocks in the random buffer [S1].
+*   $S = 1024$: Default number of blocks to refresh in each subsequent sampling step [S1].
+*   Storage: NVMe SSD is recommended for superior random read bandwidth [S1].
+
+**Algorithm:**
+
+1.  **Initialization (Warm-up):**
+    *   For the first sampling step, initialize all $R$ blocks in the buffer by streaming them from disk. This "warms up" the random buffer [S1].
+
+2.  **Sampling Loop (for each training step):**
+    *   **Refresh:** Select $S$ blocks from the buffer (where $S \le R$) and asynchronously stream fresh data from the disk to replace their contents [S1].
+    *   **Synchronization:** Perform a synchronization step to ensure the asynchronous I/O operations for the $S$ blocks are complete before sampling begins. This simplifies implementation at the cost of lower effective I/O bandwidth compared to a fully asynchronous design [S1].
+    *   **Block Selection:** Randomly select one block index $b$ from the $R$ available blocks in the buffer [S1].
+    *   **Voxel Selection:** Randomly select a voxel index $(i, j, k)$ within the selected block $b$ [S1].
+    *   **Coordinate Calculation:** Calculate the global voxel coordinates $(x_c, y_c, z_c)$ corresponding to $(i, j, k)$ in the original volume domain [S1].
+    *   **Jittering:** Generate jitter offsets $X, Y, Z$ from a uniform distribution $U[-0.5, 0.5]$ [S1].
+    *   **Sample Point:** Compute the final sample coordinates:
+        $$ x = x_c + X $$
+        $$ y = y_c + Y $$
+        $$ z = z_c + Z $$
+    *   **Interpolation:** Retrieve the sample value by interpolating the voxel at $(x_c, y_c, z_c)$ and its neighbors using the data currently in the buffer block $b$ [S1]. If trilinear interpolation is used, the ghost voxels provide the necessary neighbor values [S1].
+
+**Pseudocode:**
+
+> **Unverified code.** The code below did not pass a test run against a reference implementation, or no test fits it, so it may contain errors.
+
+```python
+import random
+import numpy as np
+
+class OutOfCoreSampler:
+    def __init__(self, dataset, R=65536, S=1024, use_trilinear=True):
+        self.R = R
+        self.S = S
+        self.use_trilinear = use_trilinear
+        self.dataset = dataset
+        # Buffer stores the actual voxel data for R blocks
+        self.buffer = [None] * R
+        # Map buffer index to disk location (offset/size)
+        self.block_locations = self._initialize_block_locations()
+        
+    def _initialize_block_locations(self):
+        # Placeholder for logic that maps R random 3D regions to disk offsets
+        # In practice, this involves selecting R random coordinates and 
+        # determining the corresponding block size (~64KB) on disk.
+        return [self.dataset.get_block_location(random_coords()) for _ in range(self.R)]
+
+    def warm_up(self):
+        """Initialize all blocks in the buffer."""
+        for i in range(self.R):
+            self.buffer[i] = self.dataset.read_block(self.block_locations[i])
+            if self.use_trilinear:
+                self.buffer[i] = self._add_ghost_voxels(self.buffer[i])
+
+    def sample(self):
+        """Perform one sampling step."""
+        # 1. Refresh S blocks asynchronously
+        refresh_indices = random.sample(range(self.R), self.S)
+        for idx in refresh_indices:
+            # Async read initiated here
+            self._async_read_block(idx, self.block_locations[idx])
+            
+        # 2. Synchronize to ensure data is ready
+        self._wait_for_io_completion()
+        
+        # 3. Randomly select a block
+        block_idx = random.randint(0, self.R - 1)
+        block_data = self.buffer[block_idx]
+        
+        # 4. Randomly select a voxel within the block
+        # Assuming block_data is a 3D array
+        shape = block_data.shape
+        local_i, local_j, local_k = (random.randint(0, s-1) for s in shape)
+        
+        # 5. Calculate global voxel center coordinates
+        # This requires knowing the global grid resolution and the block's position
+        global_x, global_y, global_z = self._local_to_global(local_i, local_j, local_k, block_idx)
+        
+        # 6. Jitter the voxel center
+        X = random.uniform(-0.5, 0.5)
+        Y = random.uniform(-0.5, 0.5)
+        Z = random.uniform(-0.5, 0.5)
+        
+        sample_x = global_x + X
+        sample_y = global_y + Y
+        sample_z = global_z + Z
+        
+        # 7. Interpolate
+        if self.use_trilinear:
+            value = self._trilinear_interpolate(block_data, local_i, local_j, local_k, X, Y, Z)
+        else:
+            value = block_data[local_i, local_j, local_k]
+            
+        return (sample_x, sample_y, sample_z, value)
+
+    def _add_ghost_voxels(self, block_data):
+        # Add a layer of voxels around the block for neighbor access
+        # Implementation detail: pad with zeros or replicate edges
+        return np.pad(block_data, pad_width=1, mode='edge')
+
+    def _async_read_block(self, buffer_idx, location):
+        # Initiate non-blocking I/O
+        pass
+
+    def _wait_for_io_completion(self):
+        # Block until all async reads are done
+        pass
+
+    def _local_to_global(self, i, j, k, block_idx):
+        # Convert local block coordinates to global volume coordinates
+        # Requires mapping block_idx to its spatial position in the volume
+        pass
+
+    def _trilinear_interpolate(self, data, i, j, k, dx, dy, dz):
+        # Standard trilinear interpolation using data[i,j,k] and neighbors
+        # dx, dy, dz are the jitter values (X, Y, Z)
+        pass
+```
+
+## Operating characteristics
+*   **Time Complexity:** The sampling time per step is dominated by the I/O latency of refreshing $S$ blocks and the synchronization overhead [S1]. Training time is significantly faster than virtual memory approaches; for example, training the Instability dataset took 83.2 seconds compared to 12.7 hours (45,720 seconds) for the virtual memory method, a speedup of approximately 14x [S1].
+*   **Memory Complexity:** Requires $R \times \text{Block Size}$ of RAM. With $R=65536$ and 64KB blocks, this requires approximately 4GB of RAM [S1].
+*   **Performance:** Performance is bounded by disk I/O latency and bandwidth [S1]. Using an NVMe SSD is critical for performance [S1].
+*   **Strengths:** Avoids page faults associated with random access via virtual memory; allows training on datasets larger than RAM; supports interactive visualization during online training [S1].
+*   **Limitations:** The synchronization step reduces effective I/O bandwidth compared to a fully asynchronous implementation; performance is sensitive to disk speed [S1].
+*   **When to use:** When the volume dataset exceeds system memory and random access sampling is required for neural network training [S1].
+*   **When not to use:** When sufficient RAM is available to hold the entire dataset, or when the storage device has poor random read performance [S1].
+
+## Background
+The method was introduced in the context of interactive volume visualization using multi-resolution hash encoding and neural representations [S1]. It addresses the bottleneck of CPU-based sampling and the inefficiency of virtual memory mapping for random access patterns in large-scale volume data [S1]. The approach was evaluated on datasets such as Instability, PigHeart, and DNS, demonstrating significant training speedups over previous out-of-core techniques [S1].
+
+## Sources
+[S1] Interactive Volume Visualization via Multi-Resolution Hash Encoding ..., https://arxiv.org/abs/2207.11620, fetched 2026-10-26

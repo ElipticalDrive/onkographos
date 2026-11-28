@@ -1,0 +1,97 @@
+# Specular Radiance Calculation
+
+Also called: Direct Specular Radiance, Indirect Specular Radiance via Cone Tracing, Specular Lighting
+
+## Overview
+Specular radiance calculation determines the view-dependent specular contribution of a surface in real-time volume rendering, a component that cannot be precomputed in a voxel texture due to its dependency on camera position and surface reflection [S1, unofficial]. It distinguishes itself by splitting the calculation into indirect specular radiance (computed via cone tracing through the voxel volume) and direct specular radiance (computed via a geometric visibility term) [S1, unofficial].
+
+## How it works
+**Inputs:**
+- $I$: Incoming camera direction vector (view direction) [S1, unofficial].
+- $N$: Surface normal vector [S1, unofficial].
+- $\theta$: Cone width (diameter), determined by surface roughness [S1, unofficial].
+- $P$: Surface position (3D fragment position) [S1, unofficial].
+- $L$: Light direction vector [S1, unofficial].
+- $V$: Visibility factor (occlusion) [S1, unofficial].
+
+**Outputs:**
+- $R_{indirect}$: Indirect specular radiance [S1, unofficial].
+- $R_{direct}$: Direct specular radiance [S1, unofficial].
+
+**Data Structures:**
+- The method relies on a voxel texture for sampling during cone tracing [S1, unofficial].
+
+**Steps:**
+1. **Calculate Reflected Direction:** Compute the direction of reflection based on the incident view direction and surface normal [S1, unofficial].
+   $$ \text{Reflect Direction} = \text{normalize}(I - 2.0 \cdot \text{dot}(N, I) \cdot N) $$
+   where $I$ is the incoming camera direction and $N$ is the surface normal [S1, unofficial].
+
+2. **Determine Cone Width:** The cone width $\theta$ is derived from the surface roughness [S1, unofficial]. For a completely smooth surface, the cone diameter is close to $1^\circ$ of the hemisphere [S1, unofficial]. As roughness increases, the diameter increases up to a maximum of $180^\circ$ coverage to emulate light spreading on uneven surfaces [S1, unofficial].
+
+3. **Calculate Indirect Specular Radiance:** Perform cone tracing from the surface position in the reflected direction to gather indirect specular light from the environment/volume [S1, unofficial].
+   $$ \text{Indirect Specular Radiance} = \text{cone trace}(\theta, P, \text{Reflect Direction}) $$
+   The `cone trace` function implements iterative distance stepping and voxel sampling with occlusion accumulation [S1, unofficial].
+
+4. **Calculate Direct Specular Radiance:** Compute the direct specular contribution using a geometry term that depends on the camera's point of view hitting the surface and the light's direction, scaled by PBR shininess [S1, unofficial].
+   $$ \text{direct specular radiance} = V \cdot \max(0, \text{dot}(\text{reflectDir}, L)) $$
+   where `reflectDir` is the result from Step 1, `L` is the light direction, and `V` accounts for occlusion [S1, unofficial].
+
+**Pseudocode:**
+> **Unverified code.** The code below did not pass a test run against a reference implementation, or no test fits it, so it may contain errors.
+
+```python
+def calculate_specular_radiance(I, N, P, L, V, roughness):
+    # Step 1: Calculate Reflected Direction [S1, unofficial]
+    reflect_dir = normalize(I - 2.0 * dot(N, I) * N)
+
+    # Step 2: Determine Cone Width from roughness [S1, unofficial]
+    # Smooth surface: ~1 degree, Rough surface: up to 180 degrees
+    cone_width_deg = 1.0 + roughness * 179.0
+    cone_width_rad = cone_width_deg * 3.141592653589793 / 180.0
+
+    # Step 3: Calculate Indirect Specular Radiance via Cone Tracing [S1, unofficial]
+    indirect_radiance = cone_trace(cone_width_rad, P, reflect_dir)
+
+    # Step 4: Calculate Direct Specular Radiance [S1, unofficial]
+    direct_radiance = V * max(0.0, dot(reflect_dir, L))
+
+    return indirect_radiance, direct_radiance
+
+def cone_trace(theta, start_pos, direction):
+    distance = 0.0
+    radiance = 0.0
+    occlusion = 0.0
+    # Cone tracing loop from source [S1, unofficial]
+    while occlusion < 1.0:
+        pos = start_pos + direction * distance
+        distance = distance + 2.0 * tan(theta / 2.0) * distance
+        lod_level = log2(distance)
+        sample = sample_voxels(pos, lod_level)
+        radiance = radiance + sample * (1.0 - occlusion)
+        occlusion = occlusion + (1.0 - occlusion) * radiance
+    return radiance
+
+def sample_voxels(pos, lod_level):
+    # Standard voxel texture lookup at position and LOD [G]
+    return texture_lookup(pos, lod_level)
+```
+
+**Edge Cases and Pitfalls:**
+- **Precision:** The calculation is view-dependent and must be performed in real-time; precomputing it in a voxel texture is not feasible [S1, unofficial].
+- **Roughness Mapping:** The cone width must correctly map from 0 to 1 roughness to 1 degree to 180 degrees to accurately simulate surface scattering [S1, unofficial].
+- **Visibility:** The visibility term must accurately reflect occlusion to prevent light leaking through geometry [S1, unofficial].
+
+## Operating characteristics
+- **Time Complexity:** Not given in the sources.
+- **Memory Complexity:** Requires access to the voxel texture for cone tracing [S1, unofficial].
+- **Performance:** Evaluated by timing the overall program and specific functions like rendering and light calculation, varying with voxel texture size and scene complexity [S1, unofficial].
+- **Strengths:** Provides accurate, view-dependent specular reflections in real-time by leveraging cone tracing for indirect light and geometric terms for direct light [S1, unofficial].
+- **Limitations:** Computationally expensive due to iterative cone tracing [S1, unofficial].
+- **When to use:** When real-time, view-dependent specular reflections are required in a voxel-based rendering pipeline [S1, unofficial].
+- **When not to use:** Not given in the sources.
+
+## Background
+The method originates from the evaluation of voxel cone tracing for real-time applications, specifically focusing on the specular radiance component of the lighting model [S1, unofficial]. It builds on the principles of physically based rendering (PBR) and cone tracing techniques for approximating indirect lighting in voxel environments [S1, unofficial].
+
+## Sources
+[S1] PDF Voxel Cone Tracing Evaluation for Real-Time Applications, https://kth.diva-portal.org/smash/get/diva2:1886204/FULLTEXT01.pdf, fetched 2026-10-27 (unofficial)

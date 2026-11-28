@@ -1,0 +1,123 @@
+# GPU-based Raycasting Rendering
+
+Also called: GPU-accelerated volume ray casting, Hardware-accelerated direct volume rendering
+
+## Overview
+GPU-based raycasting renders volumetric datasets by casting rays from the camera through the volume on the GPU, accumulating color and opacity along each ray path [S2]. It differs from CPU-based raycasting by leveraging massive parallelism to achieve real-time frame rates, which is mandatory for high-refresh-rate displays like the HTC Vive (90 Hz) [S2]. It builds on the [GPU Ray Casting Pipeline](14281-gpu-ray-casting-pipeline.md) [G].
+
+## How it works
+**Inputs:**
+*   Volumetric dataset (scalar field) [G].
+*   Camera parameters (position, orientation, projection) [G].
+*   Transfer function (mapping scalar values to color and opacity) [G].
+*   Optional pre-computed gradient data [S2].
+
+**Outputs:**
+*   Final image (color and alpha per pixel) [G].
+
+**Data Structures:**
+*   **Volume Texture:** 3D texture storing scalar values [G].
+*   **Gradient Texture:** 3D RGBA texture storing pre-computed gradients, where each voxel stores gradient direction and magnitude [S2].
+*   **Transfer Function Texture:** 1D or 2D texture mapping scalar values to RGBA [G].
+
+**Steps:**
+1.  **Ray Generation:** For each pixel in the viewport, generate a ray originating from the camera position and passing through the pixel center in world space [S2].
+2.  **Ray-Volume Intersection:** Determine the entry ($t_{min}$) and exit ($t_{max}$) distances of the ray with the volume bounding box. If $t_{max} < 0$ or $t_{min} > t_{max}$, the ray misses the volume or points away from it [G].
+3.  **Step Size Calculation:** Determine the step size along the ray. This may be fixed or adaptive based on resolution and desired accuracy [G].
+4.  **Sampling Loop:**
+    a.  Sample the volume texture at the current ray position to get the scalar value $v$.
+    b.  Sample the transfer function using $v$ to get color $c$ and opacity $\alpha$.
+    c.  If pre-computed gradients are used, sample the gradient texture at the current position to get $\nabla v$. Otherwise, compute gradients on-the-fly using finite differences, which requires 6 extra texture fetches [S2].
+    d.  **Compositing:** Update the accumulated color $C_{acc}$ and opacity $A_{acc}$ using front-to-back compositing:
+        $$ C_{acc} = C_{acc} + c \cdot \alpha \cdot (1 - A_{acc}) $$
+        $$ A_{acc} = A_{acc} + \alpha \cdot (1 - A_{acc}) $$
+    e.  Advance the ray position by the step size.
+    f.  If $A_{acc} \geq 1$ or the ray has exited the volume, terminate the loop.
+5.  **Post-Processing:** Apply any final image processing (e.g., tone mapping, anti-aliasing) [G].
+
+**Parameters:**
+*   **Step Size:** Determines sampling density. Smaller steps increase accuracy but reduce performance [G].
+*   **Gradient Pre-computation:** Trade-off between memory usage and computational cost. Pre-computing gradients saves texture fetches but increases memory bandwidth requirements [S2].
+
+**Edge Cases and Pitfalls:**
+*   **Overlapping Material Ranges:** When transfer functions for different materials have overlapping scalar ranges, the color contribution should be set as the average of the non-transparent materials for the sample, rather than a sum [S1, unofficial].
+*   **Empty-Space Skipping:** Rays traversing transparent regions can be skipped to avoid unnecessary sampling [S2].
+*   **Boundary Conditions:** Ensure correct handling of rays that do not intersect the volume or intersect only at the boundary [G].
+
+**Pseudocode:**
+> **Unverified code.** The code below did not pass a test run against a reference implementation, or no test fits it, so it may contain errors.
+
+```python
+def gpu_ray_casting(volume_tex, gradient_tex, tf_tex, camera, viewport, volume_bbox, step_size, background_color, use_precomputed_gradients):
+    image = [[background_color] * viewport.width for _ in range(viewport.height)]
+    for y in range(viewport.height):
+        for x in range(viewport.width):
+            ray_origin, ray_direction = camera.generate_ray(x, y, viewport)
+            t_min, t_max = ray_box_intersect(ray_origin, ray_direction, volume_bbox)
+            if t_max < 0 or t_min > t_max:
+                continue
+            acc_color = [0.0, 0.0, 0.0]
+            acc_alpha = 0.0
+            t = t_min
+            while t < t_max and acc_alpha < 1.0:
+                pos = [ray_origin[i] + t * ray_direction[i] for i in range(3)]
+                v = volume_tex.sample(pos)
+                c, alpha = tf_tex.sample(v)
+                if use_precomputed_gradients:
+                    grad = gradient_tex.sample(pos)
+                else:
+                    grad = compute_gradient_on_fly(volume_tex, pos)
+                weight = alpha * (1.0 - acc_alpha)
+                acc_color[0] += c[0] * weight
+                acc_color[1] += c[1] * weight
+                acc_color[2] += c[2] * weight
+                acc_alpha += weight
+                t += step_size
+            image[y][x] = acc_color + [acc_alpha]
+    return image
+
+def ray_box_intersect(origin, direction, bbox):
+    t_min, t_max = -float('inf'), float('inf')
+    for i in range(3):
+        if direction[i] == 0:
+            if origin[i] < bbox.min[i] or origin[i] > bbox.max[i]:
+                return -float('inf'), -float('inf')
+        else:
+            t1 = (bbox.min[i] - origin[i]) / direction[i]
+            t2 = (bbox.max[i] - origin[i]) / direction[i]
+            t_min = max(t_min, min(t1, t2))
+            t_max = min(t_max, max(t1, t2))
+    return t_min, t_max
+
+def compute_gradient_on_fly(tex, pos):
+    # Standard central differences requiring 6 texture fetches [S2]
+    dx = tex.sample([pos[0]+0.5, pos[1], pos[2]]) - tex.sample([pos[0]-0.5, pos[1], pos[2]])
+    dy = tex.sample([pos[0], pos[1]+0.5, pos[2]]) - tex.sample([pos[0], pos[1]-0.5, pos[2]])
+    dz = tex.sample([pos[0], pos[1], pos[2]+0.5]) - tex.sample([pos[0], pos[1], pos[2]-0.5])
+    return [dx, dy, dz]
+```
+
+## Subtopics
+
+### Reduced Viewport Rendering
+Renders the volume at a lower resolution viewport and scales the result up to the target display resolution using interpolation to reduce computational cost [S2]. It differs from full-resolution raycasting by trading spatial resolution for performance; effective because raycasting is a screen-space algorithm [S2]. Used in Unity 3D VR systems for HTC Vive to achieve real-time rendering at 90 fps, allowing comfortable movement without motion sickness [S2].
+
+### Direct Rendering of Function-Based Models
+Renders function-based microstructure models directly using accelerated ray-tracing/ray-casting on the GPU, avoiding intermediate representations like BRep or voxels [S3]. Performance reaches approximately 20 frames per second on an NVidia 9600 graphics card for a 512x512 image size, independent of microstructure complexity [S3]. Rendering time remains almost identical for lattices with different densities because the complexity of the underlying mathematical function does not depend on the density of the microstructures [S3].
+
+## Operating characteristics
+*   **Time Complexity:** $O(N \cdot M)$, where $N$ is the number of pixels and $M$ is the average number of samples per ray [G].
+*   **Memory Complexity:** Scales with the volume dataset size, plus additional memory for pre-computed gradient textures if used [S2].
+*   **Performance:** Achieves real-time frame rates (e.g., 90 fps) on modern GPUs, essential for VR applications [S2]. Function-based models achieve ~20 fps on an NVidia 9600 for 512x512 resolution [S3].
+*   **Strengths:** High parallelism, real-time capability, flexible transfer functions, and effective optimization via reduced viewports or pre-computed gradients [S2][S3].
+*   **Limitations:** Pre-computed gradients increase memory usage, while reduced viewports trade spatial resolution for performance [S2]. Performance depends on step size and transfer function complexity [G].
+*   **When to Use:** Real-time visualization of volumetric data, especially in VR/AR environments or for interactive inspection [S2].
+*   **When Not to Use:** When high spatial resolution is critical and performance is not a constraint, or when memory bandwidth is severely limited [S2].
+
+## Background
+GPU-based raycasting was developed to overcome the performance limitations of CPU-based raycasting for volume visualization [G]. It is used in medical imaging for tasks such as MR bile duct examination [S1, unofficial] and in VR/AR applications with head-mounted displays like the HTC Vive [S2]. The technique has also been applied to the direct rendering of function-based microstructure models for digital fabrication workflows [S3].
+
+## Sources
+[S1] Multi-Dimensional Transfer Function Design Using Sorted Histograms, https://doi.org/10.2312/vg/vg06/001-008, fetched 2026-10-26 (unofficial)
+[S2] Rendering and Interacting With Volume Models in Immersive Environments, https://doi.org/10.2312/ceig.20181153, fetched 2026-10-26
+[S3] Procedural function-based modelling of volumetric microstructures, https://doi.org/10.1016/j.gmod.2011.03.001, fetched 2026-10-26

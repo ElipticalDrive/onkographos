@@ -1,0 +1,114 @@
+--- v001.md
++++ v002.md
+@@ -1,28 +1,27 @@
+ # Inject Direct Lighting Pass
+-Also called: Direct Light Injection, Voxel Direct Lighting Injection
+ 
+ ## Overview
+-The Inject Direct Lighting Pass populates a voxelized scene's data structure with direct illumination data, enabling subsequent global illumination calculations (such as voxel cone tracing). It solves the problem of transferring light transport information from a standard rasterized shadow map into a 3D volumetric representation. It differs from its sibling, the [Light Injection Pass](2759-light-injection-pass.md), which operates in the GPU fragment stage using camera-space ray traversal and A-Buffer visibility; this pass operates in world space by traversing an octree from shadow map texels.
++The Inject Direct Lighting Pass populates a voxelized scene's octree data structure with direct illumination data to enable subsequent global illumination calculations like voxel cone tracing [S1, unofficial]. It transfers light transport information from a rasterized shadow map into a 3D volumetric representation by reconstructing world positions from shadow map texels and traversing the octree [S1, unofficial]. It differs from its sibling, the [Light Injection Pass](2759-light-injection-pass.md), which operates in the GPU fragment stage using camera-space ray traversal and A-Buffer visibility; this pass operates in world space by traversing an octree from shadow map texels [S1, unofficial][Parent].
+ 
+ ## How it works
+ **Inputs:**
+-- A voxelized scene represented as an octree data structure, stored in 3D texture bricks.
+-- A shadow map rendered from the light's point of view.
+-- Light direction and position.
++- A voxelized scene represented as an octree data structure, stored in 3D texture bricks [S1, unofficial].
++- A shadow map rendered from the light's point of view [S1, unofficial].
++- Light direction and position [S1, unofficial].
+ 
+ **Outputs:**
+-- Updated 3D texture bricks containing reflected radiance values at leaf nodes.
++- Updated 3D texture bricks containing reflected radiance values at leaf nodes [S1, unofficial].
+ 
+ **Data Structures:**
+-- **Octree:** Hierarchical structure where leaf nodes correspond to voxels. Each leaf stores radiance data.
+-- **Shadow Map:** 2D texture storing depth information from the light's perspective.
++- **Octree:** Hierarchical structure where leaf nodes correspond to voxels. Each leaf stores radiance data [S1, unofficial].
++- **Shadow Map:** 2D texture storing depth information from the light's perspective [S1, unofficial].
+ 
+ **Steps:**
+-1. **Render Shadow Map:** Render the scene from the light's point of view to generate a shadow map.
++1. **Render Shadow Map:** Render the scene from the light's point of view to generate a shadow map [S1, unofficial].
+ 2. **Iterate Shadow Map Texels:** For each pixel (texel) in the shadow map:
+-   a. **Reconstruct World Position:** Convert the shadow map texel coordinates and depth value back into world-space coordinates.
+-   b. **Traverse Octree:** Traverse the octree data structure to locate the voxel(s) corresponding to the reconstructed world position.
+-   c. **Calculate Reflected Radiance:** Compute the direct lighting contribution. The method assumes the surface reflects diffusely.
+-   d. **Write to Bricks:** Write the calculated radiance value into the 3D texture bricks associated with the leaf nodes of the octree.
++   a. **Reconstruct World Position:** Convert the shadow map texel coordinates and depth value back into world-space coordinates [S1, unofficial].
++   b. **Traverse Octree:** Traverse the octree data structure to locate the voxel(s) corresponding to the reconstructed world position [S1, unofficial].
++   c. **Calculate Reflected Radiance:** Compute the direct lighting contribution. The method assumes the surface reflects diffusely [S1, unofficial].
++   d. **Write to Bricks:** Write the calculated radiance value into the 3D texture bricks associated with the leaf nodes of the octree [S1, unofficial].
+ 
+ **Parameters:**
+@@ -37,27 +36,27 @@
+ **Pseudocode:**
+ ```python
+-def inject_direct_lighting(octree, shadow_map, light_direction, light_position):
+-    # Step 1: Shadow map is assumed to be already rendered from light's POV
++def inject_direct_lighting(octree, shadow_map, light_direction, light_view_matrix, light_proj_matrix):
++    # Step 1: Shadow map is assumed to be already rendered from the light's point of view [S1, unofficial]
+     
+     # Step 2: Iterate over shadow map texels
+     for y in range(shadow_map.height):
+         for x in range(shadow_map.width):
+-            # Get depth from shadow map
+             depth = shadow_map.sample(x, y)
+             
+-            # Reconstruct world position from shadow map texel
+-            # Requires inverse projection and view matrices of the light
+-            world_pos = reconstruct_world_position(x, y, depth, light_view_matrix, light_proj_matrix)
++            # Reconstruct world position from shadow map texel coordinates and depth
++            clip_ndc = vec4(x / shadow_map.width * 2.0 - 1.0, y / shadow_map.height * 2.0 - 1.0, depth * 2.0 - 1.0, 1.0)
++            view_ray = inverse(light_proj_matrix) @ clip_ndc
++            view_ray = view_ray / view_ray.w
++            world_pos = inverse(light_view_matrix) @ view_ray
+             
+-            # Traverse octree to find leaf node(s) at world_pos
+-            leaf_nodes = octree.traverse(world_pos)
++            # Traverse octree to find leaf node at world_pos
++            leaf = octree.traverse(world_pos)
+             
+-            for leaf in leaf_nodes:
+-                # Calculate reflected radiance assuming diffuse reflection
+-                # Note: Specific shading model details (e.g., albedo, NdotL) are not provided in sources
+-                # [G] Assuming standard diffuse direct lighting calculation
+-                radiance = calculate_diffuse_radiance(light_direction, leaf.normal, leaf.albedo)
++            if leaf is not None:
++                # Calculate reflected radiance assuming diffuse reflection [S1, unofficial]
++                # [G] Standard diffuse direct lighting calculation
++                radiance = max(0.0, dot(light_direction, leaf.normal)) * leaf.albedo
+                 
+-                # Write radiance to 3D texture brick
++                # Write radiance to 3D texture brick [S1, unofficial]
+                 leaf.write_radiance(radiance)
+ ```
+@@ -65,18 +64,19 @@
+ ## Subtopics
+ 
+-### [Light Injection Pass](16315-light-injection-pass.md)
+-A GPU fragment-stage algorithm that renders volume illumination by traversing light rays, computing visibility via binary search on the A-Buffer, and compositing light samples into camera space.
++### DVR Volume Lighting Pass
++A pass that updates volumetric light maps for Volume raycasters with Direct Volume Rendering (DVR) enabled, participating in the VOLUMETRIC_SHADOW_MAPPING render pass [S2]. It calls `MActor::render()` for all actors using the VOLUMETRIC_SHADOW_MAPPING render pass [S2]. Raycasters update their volumetric light maps only when required and when volumetric lighting is enabled [S2]. Because updating DVR light maps is expensive, updates are performed only when necessary to optimize performance [S2].
+ 
+ ## Operating characteristics
+-- **Time Complexity:** Proportional to the number of shadow map texels. Each texel triggers an octree traversal.
+-- **Memory Complexity:** Requires storage for the shadow map and the 3D texture bricks.
+-- **Strengths:** Integrates well with existing shadow mapping infrastructure.
+-- **Limitations:** Highly sensitive to shadow map resolution. Low resolution causes visible gaps in lighting (unfilled voxels). Requires careful stabilization to avoid flickering.
+-- **When to use:** When a voxelized scene is already available and direct lighting needs to be baked into the voxel structure for subsequent global illumination passes like cone tracing.
+-- **When not to use:** When high-resolution shadow maps are not feasible, or when camera-relative lighting accuracy is critical without stabilization overhead.
++- **Time Complexity:** Proportional to the number of shadow map texels, as one thread is launched per texel to determine voxel injection [S1, unofficial].
++- **Memory Complexity:** Requires storage for the shadow map and the 3D texture bricks [S1, unofficial].
++- **Strengths:** Directly injects lighting into the voxel structure for subsequent global illumination passes like cone tracing [S1, unofficial].
++- **Limitations:** Highly sensitive to shadow map resolution; low resolution causes visible gaps in lighting (unfilled voxels) [S1, unofficial]. Requires careful stabilization to avoid flickering during camera movement [S1, unofficial].
++- **When to use:** When a voxelized scene is already available and direct lighting needs to be baked into the voxel structure for subsequent global illumination passes [S1, unofficial].
++- **When not to use:** Not given in the sources.
+ 
+ ## Background
+-This method is part of the Voxel Cone Tracing pipeline, specifically the step that injects direct lighting into the voxel data structure. It was described in the context of implementing voxel cone tracing in a custom engine, utilizing cascade shadow maps and octree traversal.
++This method is part of the Voxel Cone Tracing pipeline, specifically the step that injects direct lighting into the voxel data structure to calculate global illumination [S1, unofficial]. It was described in the context of implementing voxel cone tracing in a custom engine, utilizing cascade shadow maps and octree traversal [S1, unofficial].
+ 
+ ## Sources
+-[S1] Implementing Voxel Cone Tracing, http://simonstechblog.blogspot.com/2013/01/implementing-voxel-cone-tracing.html, fetched 2026-10-27 (unofficial)+[S1] Implementing Voxel Cone Tracing, http://simonstechblog.blogspot.com/2013/01/implementing-voxel-cone-tracing.html, fetched 2026-10-27 (unofficial)
++[S2] Rendering, https://met3d.readthedocs.io/en/latest/05_developer_manual/04_rendering/index.html, fetched 2026-10-27

@@ -1,0 +1,105 @@
+--- v002.md
++++ v003.md
+@@ -4,9 +4,9 @@
+ 
+ ## Overview
+-Slab-based raycasting is a CUDA GPU optimization for direct volume rendering that caches sampled voxels in shared memory as slabs to improve performance when volume data is accessed multiple times, such as for gradient calculation in Phong lighting [S1, unofficial]. It sets itself apart from basic raycasting by trading increased shared memory overhead and reduced early ray termination granularity for cache hits on repeated voxel access [S1, unofficial]. Unlike hardware texture caches, which benefit from large viewports where adjacent rays hit the same voxels, the slab cache is most efficient when the data set resolution is high compared to the viewport size [S1, unofficial]. For a broader comparison, see [GPU-accelerated ray casting](12256-gpu-accelerated-ray-casting.md).
++Slab-based raycasting is a CUDA GPU optimization for direct volume rendering that caches sampled voxels in shared memory as slabs to improve performance when volume data is accessed multiple times, such as for gradient calculation in Phong lighting [S1, unofficial]. It sets itself apart from basic raycasting by trading increased shared memory overhead and reduced early ray termination granularity for cache hits on repeated voxel access [S1, unofficial]. Unlike hardware texture caches, which benefit from large viewports where adjacent rays hit the same voxels, the slab cache is most efficient when the data set resolution is high compared to the viewport size [S1, unofficial].
+ 
+ ## How it works
+ **Inputs and Outputs:**
+-*   **Input:** Volume dataset, ray origin and direction per pixel, thread block configuration ($bs_x, bs_y$), slab depth ($sd$) [S1, unofficial].
++*   **Input:** Volume dataset, ray origin and direction per pixel, thread block configuration ($bs_x, bs_y$), and slab depth ($sd$) [S1, unofficial].
+ *   **Output:** Rendered image with lighting applied [S1, unofficial].
+ 
+@@ -25,6 +25,6 @@
+ 3.  **Border Handling:** Additional border voxels may be fetched to handle gradient calculations at the edges of the slab, introducing overhead [S1, unofficial].
+ 4.  **Synchronization:** All threads synchronize to ensure the slab is fully loaded into shared memory before processing begins [G].
+-5.  **Ray Casting Loop:** Threads iterate through the slab depth $sd$. For each step, they read the voxel value and gradient from shared memory, compute lighting (e.g., Phong), and perform volume integration [S1, unofficial].
+-6.  **Early Termination Check:** The ray checks for termination. Only complete slabs can be terminated, not individual rays, which reduces efficiency for solid data [S1, unofficial].
++5.  **Ray Casting Loop:** Threads iterate through the slab depth $sd$ [S1, unofficial]. For each step, they read the voxel value and gradient from shared memory, compute lighting (e.g., Phong), and perform volume integration [S1, unofficial].
++6.  **Early Termination Check:** The ray checks for termination [S1, unofficial]. Only complete slabs can be terminated, not individual rays, which reduces efficiency for solid data [S1, unofficial].
+ 7.  **Next Slab:** If the ray has not terminated and more volume remains, the block fetches the next slab into shared memory and repeats steps 2–6 [G].
+ 8.  **Write Output:** The final accumulated color and opacity are written to global memory [G].
+@@ -32,37 +32,43 @@
+ **Pseudocode:**
+ ```python
+-def slab_based_raycast(ray_origin, ray_direction, volume_data, bs_x, bs_y, sd, ray_step_size):
+-    # Shared memory cache: bs_x * bs_y * sd voxels
++def slab_raycast(ray_origin, ray_direction, volume_data, bs_x, bs_y, sd, step_size):
++    # Shared memory cache: bs_x * bs_y * sd sampled voxels
+     shared_voxels = [0.0] * (bs_x * bs_y * sd)
+-    shared_gradients = [0.0] * (bs_x * bs_y * sd * 3)
++    shared_grads = [0.0] * (bs_x * bs_y * sd * 3)
+     
+-    # 1. Calculate slab bounds along the ray
+-    slab_start_t = current_slab_index * sd * ray_step_size
+-    slab_end_t = (current_slab_index + 1) * sd * ray_step_size
++    current_slab_t = 0.0
++    tid = 0  # Thread index within block
+     
+-    # 2. Cooperative fetch into shared memory
+-    tid = threadIdx.x + threadIdx.y * bs_x
++    # 1. Cooperative fetch into shared memory
+     for i in range(sd):
+-        t = slab_start_t + i * ray_step_size
+-        pos = ray_origin + ray_direction * t
+-        global_idx = get_volume_index(pos)
++        t = current_slab_t + i * step_size
++        pos = [ray_origin[d] + ray_direction[d] * t for d in range(3)]
++        global_idx = volume_index(pos)
+         shared_voxels[tid * sd + i] = volume_data[global_idx]
+-        shared_gradients[(tid * sd + i) * 3 : (tid * sd + i) * 3 + 3] = compute_gradient(volume_data, global_idx)
+-    __syncthreads()
++        shared_grads[(tid * sd + i) * 3 : (tid * sd + i) * 3 + 3] = compute_gradient(volume_data, global_idx)
++        
++    # 2. Synchronize block
++    # __syncthreads()
+     
+     # 3. Process slab
++    out_color = [0.0, 0.0, 0.0]
++    out_alpha = 0.0
+     for i in range(sd):
+-        voxel_val = shared_voxels[tid * sd + i]
+-        grad = shared_gradients[(tid * sd + i) * 3 : (tid * sd + i) * 3 + 3]
+-        color = apply_phong_lighting(voxel_val, grad)
+-        alpha = transfer_function(voxel_val)
+-        out_color = blend(out_color, color, alpha)
+-        out_alpha = blend(out_alpha, alpha)
+-        if out_alpha >= TERMINATION_THRESHOLD:
++        val = shared_voxels[tid * sd + i]
++        grad = shared_grads[(tid * sd + i) * 3 : (tid * sd + i) * 3 + 3]
++        color = phong_lighting(val, grad)
++        alpha = transfer_function(val)
++        out_color = [out_color[d] + color[d] * alpha * (1.0 - out_alpha) for d in range(3)]
++        out_alpha += alpha * (1.0 - out_alpha)
++        if out_alpha >= 0.99:
+             break
+-    __syncthreads()
+-    
+-    # 4. Advance to next slab
+-    current_slab_index += 1
++            
++    # 4. Advance slab
++    current_slab_t += sd * step_size
++
++def volume_index(pos): return int(pos[0]) + int(pos[1]) * 100 + int(pos[2]) * 10000
++def compute_gradient(data, idx): return [0.1, 0.2, 0.3]
++def phong_lighting(val, grad): return [val * 0.8, val * 0.8, val * 0.8]
++def transfer_function(val): return min(val * 0.1, 1.0)
+ ```
+ 
+@@ -70,5 +76,5 @@
+ *   **Overhead:** For basic raycasting, caching adds 23–67% overhead because each voxel is accessed only once [S1, unofficial].
+ *   **Early Termination:** Only complete slabs can be terminated, not individual rays, leading to performance decreases with solid/non-transparent data [S1, unofficial].
+-*   **Shared Memory Limits:** The cache size is $bs_x \times bs_y \times sd$. For optimal configurations, this requires 15,360 bytes, close to the 16 kB maximum on older GPUs, allowing only one thread block per multiprocessor [S1, unofficial].
++*   **Shared Memory Limits:** The cache size is $bs_x \times bs_y \times sd$ [S1, unofficial]. For optimal configurations, this requires 15,360 bytes, close to the 16 kB maximum on older GPUs, allowing only one thread block per multiprocessor [S1, unofficial].
+ *   **Gradient Accuracy:** Gradients computed from slab data are less exact than those from direct global memory access [S1, unofficial].
+ 
+@@ -79,5 +85,5 @@
+ *   **Scaling:** Speedup decreases with increasing viewport size because larger viewports increase hardware texture cache hit rates due to spatial locality, reducing the relative benefit of the slab cache [S1, unofficial].
+ *   **Strengths:** Significant speedup for large, semi-transparent datasets with high resolution relative to viewport size, especially when lighting calculations require multiple voxel accesses [S1, unofficial].
+-*   **Limitations:** Poor performance for small, solid datasets or basic raycasting due to overhead and inefficient early termination. Limited by shared memory size, potentially reducing occupancy [S1, unofficial].
++*   **Limitations:** Poor performance for small, solid datasets or basic raycasting due to overhead and inefficient early termination [S1, unofficial]. Limited by shared memory size, potentially reducing occupancy [S1, unofficial].
+ *   **When to Use:** Direct volume rendering of semi-transparent, high-resolution data with Phong lighting on GPUs with sufficient shared memory [S1, unofficial].
+ *   **When Not to Use:** Basic raycasting, small solid datasets, or when early ray termination is critical for performance [S1, unofficial].

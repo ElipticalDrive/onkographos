@@ -1,0 +1,120 @@
+A survey of ways to get voxels onto a screen — cubes, iso-surfaces, octree ray-casting, cone tracing.
+
+Voxel rendering techniques · ./jerome{m}Skip to content
+~/Notes/Voxel rendering techniques.md · note · budding · 5 min · updated 2026-08-30
+Voxel rendering, a survey
+// status: budding
+"Voxels" covers a lot of ground. A Minecraft world and an MRI volume are both voxel data but ask for very different rendering strategies. This note maps the territory so the other voxel notes (Marching Cubes, Dual Contouring, Sparse Voxel Octrees) have a home.
+The basic split
+Two big questions decide almost everything:
+Are my voxels "blocky" or are they samples of a continuous field? Minecraft cubes are an enumeration of discrete types; a CT scan's Hounsfield units are samples of something continuous.
+Do I rasterize or march rays? Meshes go through the usual GPU pipeline; octrees and density fields are often sampled by rays.
+Blocky / cubic voxels
+The Minecraft family. Each cell has a discrete material or is empty. Typical pipeline:
+Greedy meshing — merge coplanar faces of the same material into bigger quads. Dramatically fewer triangles than naively emitting 6 faces per voxel. Mikola Lysenko's write-up is the canonical reference.
+Face culling — don't emit faces between two opaque neighbours.
+Chunking — group cells (e.g. 16×16×16 or 32×32×32), stream only what's near the camera, remesh dirty chunks async.
+Lighting — flood-fill sky/block light per chunk. Smooth lighting = vertex AO from neighbours.
+It rasterizes like any other mesh after that. The whole problem is mesh maintenance, not drawing.
+Greedy meshing in more detail
+For each axis and each slice along it, reduce the 2D slice to a mask of exposed faces (material ID, or 0 for "no face"). Merge runs into rectangles:
+ccopy
+```
+1
+2
+3
+4
+5
+6
+7
+8for each slice k along axis X:
+    build mask[y][z] = exposedFaceMaterial(cell(k, y, z))
+    while mask has non-zero entries:
+        find first non-zero (y, z)
+        extend width w along y while mask[y..y+w][z] all equal
+        extend height h along z while mask[y..y+w][z..z+h] all equal
+        emit quad at (k, y, z) with size (w, h, material)
+        clear the rectangle from the mask
+```
+Do both +X and -X faces (different masks). Repeat for Y and Z. A typical 16³ Minecraft chunk drops from ~6000 quads to a few hundred, identical appearance. Mikola Lysenko's Meshing in a Minecraft Game is the canonical reference.
+Ambient occlusion & smooth lighting (blocky)
+Per-vertex AO is the Minecraft trick: for each vertex of a face, look at the three neighbour voxels on that corner — if two are solid, the vertex is dark; one, medium; zero, light. The rasterizer interpolates across the quad and you get surprisingly convincing crease shading for free.
+Block/sky light uses the same scheme: a chunk-local BFS propagates light values cell-by-cell (Minecraft uses 4-bit sky and 4-bit block channels), stored per-voxel and interpolated at vertices. Re-run the BFS on edits. Modern voxel engines often push this to a compute shader.
+Texture atlases & arrays
+Hundreds of materials, one draw call. Two flavours:
+Atlas — every material packed into one big image; per-face UV offsets. Beware of bleeding at mip levels — add padding or use a half-texel inset.
+Array — GL_TEXTURE_2D_ARRAY / Vulkan array image; sample with an extra integer layer index. No bleeding, native mip behaviour. Modern default.
+Bindless textures (OpenGL's GL_ARB_bindless_texture, Vulkan descriptor indexing) sidestep both — store a texture handle per voxel material and sample directly. See OpenGL - learning log / Vulkan - learning log.
+Iso-surface extraction
+When voxels store a density and the surface is an iso-contour, you extract a mesh:
+Marching Cubes — the 1987 classic. 256 cases from 8 corner signs, look up the triangulation, interpolate edges. Smooth, simple, has ambiguity artefacts.
+Dual Contouring — places a vertex per cell by minimising a quadratic error. Preserves sharp features like edges and corners, handles adaptive (octree) resolution.
+Transvoxel — Lengyel's extension to stitch chunks at different LODs without cracks. Essential once you have more than one resolution.
+Surface Nets / Naive Surface Nets — simpler dual of marching cubes; nice middle ground when you don't need sharp features.
+Once you have the mesh, it's a normal rasterization problem again.
+Ray-cast voxels
+Skip the mesh; have rays query the voxel grid directly. The grid's structure decides performance.
+Dense grid + DDA — Amanatides & Woo's line traversal. Simple, cache-friendly for small worlds.
+Sparse Voxel Octrees — compress empty space, traverse with stack-based or stackless algorithms (Laine & Karras ESVO is the canonical modern reference).
+Brickmaps — octree of dense bricks. Pixar-style volume representation. Good sweet spot between granularity and memory overhead.
+DDA on hashed grids — OpenVDB and NanoVDB. The production volumetric standard in VFX.
+Volumetric / participating media
+Not a surface — integrate along the ray:
+glslcopy
+```
+1
+2
+3
+4
+5
+6
+7
+8
+9
+10
+11
+12vec4 raymarchVolume(vec3 ro, vec3 rd) {
+    vec4 accum = vec4(0);
+    float t = 0.0, dt = 0.05;
+    for (int i = 0; i < 128 && accum.a < 0.99; i++) {
+        vec3 p = ro + rd * t;
+        vec4 sample_ = transfer(densityField(p));   // colour + opacity
+        sample_.rgb *= sample_.a;                    // premultiply
+        accum += (1.0 - accum.a) * sample_;          // front-to-back
+        t += dt;
+    }
+    return accum;
+}
+```
+Tricks that matter:
+Empty-space skipping via a low-res occupancy grid — often 2–10× speedup.
+Early termination at α > 0.99.
+Henyey-Greenstein phase function for anisotropic in-scattering (forward scattering in clouds).
+Ratio / delta tracking for unbiased volumetric shadows with a single sample per pixel.
+For clouds specifically: low-frequency base shape (Worley + Perlin), high-frequency detail noise, a coverage map for placement. Decima's and Horizon Zero Dawn's cloud papers are the usual starting points.
+Production-grade volumetric formats
+OpenVDB / NanoVDB — the industry hierarchical grid, everywhere in VFX. NanoVDB is the read-only GPU form.
+Brickmap — octree where leaves are dense 8³ or 16³ bricks. Balances sparse topology with cache-friendly traversal. GigaVoxels is built on this.
+Clipmaps — infinite virtual grid centred on the camera. Pairs naturally with voxel cone tracing for GI.
+Voxel cone tracing (GI)
+Cyril Crassin's trick for global illumination:
+Voxelize the scene into a hierarchical 3D texture (usually a sparse octree or clipmap).
+At each shading pixel, cone-trace a handful of rays through the hierarchy, sampling a wider mip level the further out you go.
+Compose diffuse + specular indirect from those cones.
+Approximate but real-time-capable. NVIDIA's VXGI demos were the poster child. Modern engines have largely moved to DDGI / hardware ray tracing for GI, but cone tracing is still a great fit for voxel-native games.
+Picking a technique
+NeedStart here
+Minecraft-style destructible blocksGreedy meshing + chunks
+Smooth sculpted terrain (finite view distance)Marching Cubes
+Terrain with hard edges / LODDual Contouring + Transvoxel
+Huge sparse static worlds rendered by raySparse Voxel Octrees
+Medical / scientific volumeRay-cast volumetric
+Real-time GI in a voxel gameVoxel cone tracing
+Gotchas that bite everyone
+Chunk seams — normals averaged only within a chunk leave visible edges. Always sample across boundaries.
+LOD transitions — the hardest problem in voxel rendering. Transvoxel, skirts, stitching meshes… pick your poison early.
+Memory layout matters more than the algorithm — a naïve voxels[x][y][z] of u32 is usually the bottleneck. Morton order and palette compression pay for themselves fast.
+Float precision drifts at large coordinates — rebase the camera, or store voxel positions as ints.
+Back to Notes · see also Raym - Interactive Terrain Generation with Marching Cubes
+›Jump to a page
+enter openup/down moveesc close

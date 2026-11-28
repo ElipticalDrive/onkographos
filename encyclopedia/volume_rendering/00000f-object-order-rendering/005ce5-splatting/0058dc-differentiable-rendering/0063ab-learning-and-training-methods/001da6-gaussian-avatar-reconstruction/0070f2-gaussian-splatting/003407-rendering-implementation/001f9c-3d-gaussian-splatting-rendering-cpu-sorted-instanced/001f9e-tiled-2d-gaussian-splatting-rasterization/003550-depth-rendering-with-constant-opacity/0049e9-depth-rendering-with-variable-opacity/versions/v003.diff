@@ -1,0 +1,78 @@
+--- v002.md
++++ v003.md
+@@ -17,9 +17,9 @@
+ **Steps:**
+ 1.  **Configuration:** Enable `GsplatConfig::outputDepth` to activate depth buffer writing [S1, unofficial]. Ensure the device feature `fragmentStoresAndAtomics` is enabled if using the raster backend, as it requires atomic operations [S1, unofficial].
+-2.  **Projection Correction:** Apply `cropProjection()` if rendering an off-centre view or crop. This centers the Gaussian projection guard band on the view rather than the optical axis to prevent distortion of Gaussians elongated along the view direction [S1, unofficial].
++2.  **Projection Correction:** Apply `cropProjection()` if rendering an off-centre view or crop [S1, unofficial]. This centers the Gaussian projection guard band on the view rather than the optical axis to prevent distortion of Gaussians elongated along the view direction [S1, unofficial].
+ 3.  **Sorting:** Sort Gaussians by depth relative to the camera [S2, unofficial].
+ 4.  **Rasterization and Compositing:**
+-    *   **Compute Backend:** Blend Gaussians front-to-back. For each pixel, track the accumulated transmittance $T_n$. Record the depth $z_n$ of the Gaussian at which the transmittance first falls to 0.5 (median depth) [S1, unofficial].
+-    *   **Raster Backend:** Blend Gaussians back-to-front. For each pixel, use `atomicMin` on an order-preserving uint encoding of depth to keep the nearest depth of a single splat that alone covers the pixel with an opacity of at least 0.5. After the render pass, a compute pass decodes this uint encoding into the final depth buffer [S1, unofficial].
++    *   **Compute Backend:** Blend Gaussians front-to-back [S1, unofficial]. For each pixel, track the accumulated transmittance $T_n$ [S1, unofficial]. Record the depth $z_n$ of the Gaussian at which the transmittance first falls to 0.5 (median depth) [S1, unofficial].
++    *   **Raster Backend:** Blend Gaussians back-to-front [S1, unofficial]. For each pixel, use `atomicMin` on an order-preserving uint encoding of depth to keep the nearest depth of a single splat that alone covers the pixel with an opacity of at least 0.5 [S1, unofficial]. After the render pass, a compute pass decodes this uint encoding into the final depth buffer [S1, unofficial].
+ 5.  **Expected Depth Calculation:** If expected depth is required instead of median/nearest, compute the alpha-weighted average depth using the formula below [S2, unofficial].
+ 
+@@ -43,5 +43,5 @@
+ **Edge Cases and Pitfalls:**
+ *   **Off-centre Projection Distortion:** If the guard band is not centered on the view (e.g., in cropped renders), Gaussians away from the optical axis are incorrectly clamped, distorting their footprints [S1, unofficial]. Use `cropProjection()` to fix this [S1, unofficial].
+-*   **Backend Disagreement:** The Compute backend (median depth) and Raster backend (nearest splat with $\alpha \ge 0.5$) use different definitions. They agree on opaque surfaces with a median difference of 0.4% on the lantern scene, but may differ in semi-transparent regions [S1, unofficial].
++*   **Backend Disagreement:** The Compute backend (median depth) and Raster backend (nearest splat with $\alpha \ge 0.5$) use different definitions [S1, unofficial]. They agree on opaque surfaces with a median difference of 0.4% on the lantern scene, but may differ in semi-transparent regions [S1, unofficial].
+ *   **Hardware Support:** The Raster backend requires `fragmentStoresAndAtomics` support on the GPU [S1, unofficial].
+ 
+@@ -49,9 +49,14 @@
+ 
+ ```python
++# Standard linear depth encoding/decoding [G]
++def linear_encode_depth(z, min_z, max_z):
++    return int(((z - min_z) / (max_z - min_z)) * 0xFFFFFFFF)
++
++def linear_decode_depth(encoded_z, min_z, max_z):
++    return (encoded_z / 0xFFFFFFFF) * (max_z - min_z) + min_z
++
+ # Compute Backend Implementation (Front-to-Back)
+-def compute_depth_buffer(gaussians, camera, width, height):
++def compute_depth_buffer(gaussians, camera, width, height, min_z, max_z):
+     depth_buffer = [float('inf')] * (width * height)
+-    
+-    # Sort Gaussians by depth (front to back)
+     sorted_gaussians = sorted(gaussians, key=lambda g: g.depth_at(camera))
+     
+@@ -63,4 +68,5 @@
+             
+             for gaussian in sorted_gaussians:
++                # Standard rasterization coverage check [G]
+                 if not gaussian.intersects_pixel(x, y):
+                     continue
+@@ -80,12 +86,11 @@
+ 
+ # Raster Backend Implementation (Back-to-Front, Pseudocode for Fragment Shader Logic)
+-def raster_depth_buffer(gaussians, camera, width, height):
+-    # Requires atomicMin support
++def raster_depth_buffer(gaussians, camera, width, height, min_z, max_z):
++    # Requires atomicMin support [G]
+     depth_uint_buffer = [0xFFFFFFFF] * (width * height)
+-    
+-    # Sort Gaussians by depth (back to front)
+     sorted_gaussians = sorted(gaussians, key=lambda g: g.depth_at(camera), reverse=True)
+     
+     for gaussian in sorted_gaussians:
++        # Iterate over pixels covered by this Gaussian [G]
+         for x, y in gaussian.covered_pixels():
+             pixel_idx = y * width + x
+@@ -93,6 +98,6 @@
+             z = gaussian.depth_at(x, y)
+             
+-            # Encode depth into order-preserving uint (standard linear mapping)
+-            encoded_z = int(z * 1000000) % 0xFFFFFFFF
++            # Encode depth into order-preserving uint
++            encoded_z = linear_encode_depth(z, min_z, max_z)
+             
+             # Atomic minimum to keep nearest depth
+@@ -103,5 +108,5 @@
+                     
+     # Decode uint buffer in a separate compute pass
+-    depth_buffer = [z / 1000000.0 for z in depth_uint_buffer]
++    depth_buffer = [linear_decode_depth(z, min_z, max_z) for z in depth_uint_buffer]
+     return depth_buffer
+ ```

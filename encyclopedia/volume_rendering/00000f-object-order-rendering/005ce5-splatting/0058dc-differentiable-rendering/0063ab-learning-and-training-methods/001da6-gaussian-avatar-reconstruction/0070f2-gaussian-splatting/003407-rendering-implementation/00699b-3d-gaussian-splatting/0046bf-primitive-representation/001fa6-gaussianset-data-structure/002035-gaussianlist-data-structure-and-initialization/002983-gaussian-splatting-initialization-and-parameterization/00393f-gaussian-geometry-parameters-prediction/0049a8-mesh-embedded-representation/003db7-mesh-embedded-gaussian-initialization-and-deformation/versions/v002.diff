@@ -1,0 +1,131 @@
+--- v001.md
++++ v002.md
+@@ -4,74 +4,81 @@
+ 
+ ## Overview
+-This method anchors 3D Gaussians to a triangle mesh using barycentric coordinates and normal displacement, enabling deformation tracking through mesh topology rather than direct vertex positions [S1, unofficial]. It differs from standard Gaussian Splatting by decoupling Gaussian positions from fixed world coordinates, allowing them to deform with the underlying mesh, and from [Textured-GS](9436-textured-gs.md) by using explicit geometric embeddings rather than texture maps for spatial definition.
++This method anchors 3D Gaussians to a triangle mesh via barycentric coordinates and a normal displacement, allowing deformation tracking through mesh topology rather than direct vertex positions [S1, unofficial]. It differs from sibling methods like [Mesh-Embedded Gaussian Splatting](9553-mesh-embedded-gaussian-splatting.md) by explicitly parameterizing the Gaussian mean as a displacement from the mesh surface, and from [GaMeS](12542-games-gaussian-mesh-splatting.md) by using barycentric interpolation for rotation and area-based scaling rather than face-vertex convex combinations.
+ 
+ ## How it works
+-**Inputs:** A canonical triangle mesh with vertices $V$, per-vertex normals $n$, and per-vertex quaternions $q$ (computed from tangent frames); a set of Gaussian embeddings $E$.
+-**Outputs:** Deformed Gaussian parameters (position $\mu$, rotation $q$, scale $s$) for a target pose.
++**Inputs and Outputs:**
++*   **Input:** A canonical triangle mesh with vertices $V$, per-vertex normals $n$, and per-vertex quaternions $q$ (for dynamic scenes).
++*   **Output:** A set of Gaussians defined by mean $\mu$, rotation $q$, scale $s$, and color $c$.
+ 
+ **Data Structures:**
+-*   **Embedding $E_i$**: A tuple $(k, u, v, d)$ where:
+-    *   $k$: Triangle index.
+-    *   $u, v$: Barycentric coordinates ($u \ge 0, v \ge 0, u+v \le 1$).
+-    *   $d$: Normal displacement scalar.
+-*   **Mesh Attributes**:
+-    *   $V_k = \{V_1, V_2, V_3\}$: Vertices of triangle $k$.
+-    *   $n_k = \{n_1, n_2, n_3\}$: Per-vertex normals of triangle $k$.
+-    *   $q_k = \{q_1, q_2, q_3\}$: Per-vertex quaternions of triangle $k$.
++Each Gaussian $i$ is defined by an embedding $E_i = \{k, u, v, d\}$:
++*   $k$: Triangle index.
++*   $u, v$: Barycentric coordinates.
++*   $d$: Normal displacement scalar.
+ 
+ **Initialization:**
+-1.  Randomly select $10,000$ pairs of triangle indices and barycentric coordinates on the canonical mesh [S1, unofficial].
+-2.  Set the embedding's $u, v$ to the selected barycentric coordinates.
+-3.  Initialize all displacements $d$ to zero [S1, unofficial].
+-4.  Compute initial position $\mu$ using the canonical mesh geometry (see Formulas).
+-5.  Initialize other Gaussian properties (opacity, color) as per standard Gaussian Splatting, but disable spherical harmonics for simplicity [S1, unofficial].
++1.  Randomly select $N$ pairs of triangle indices $k$ and barycentric coordinates $(u, v)$ on the canonical mesh.
++2.  Initialize the displacement $d$ for all Gaussians to zero.
++3.  Set initial barycentric coordinates $(u, v)$ to the sampled values.
++4.  Initialize other Gaussian properties (color, etc.) based on the canonical position.
+ 
+-**Deformation Steps for Frame $t$:**
+-1.  **Compute Interpolated Position:**
+-    Calculate the base position $P$ on triangle $k$ using barycentric interpolation of vertices:
++**Canonical Space Calculation:**
++For a Gaussian with embedding $E_i = \{k, u, v, d\}$ in the canonical space:
++1.  Compute the position $P$ on triangle $k$ using barycentric interpolation of vertices $V_1, V_2, V_3$:
+     $$P = \mathcal{V}(k, u, v) = u V_1 + v V_2 + (1 - u - v) V_3$$
+-    Calculate the interpolated normal $n$:
++2.  Compute the interpolated normal $n$ using per-vertex normals $n_1, n_2, n_3$:
+     $$n = \mathcal{N}(k, u, v) = u n_1 + v n_2 + (1 - u - v) n_3$$
+-    The Gaussian mean $\mu$ is then:
++3.  Compute the Gaussian mean $\mu$:
+     $$\mu = P + d \cdot n$$
+-    [S1, unofficial]
+ 
+-2.  **Compute Interpolated Rotation:**
+-    For the target pose, compute the rotation matrix $R_k$ for triangle $k$ based on its tangent, bitangent, and normal in both canonical and posed spaces. Convert to quaternions $q_1, q_2, q_3$ for the triangle vertices.
+-    Compute the barycentric interpolated rotation $\delta q_{i,t}$:
+-    $$\delta q_{i,t} = u q_1 + v q_2 + (1 - u - v) q_3$$
+-    Normalize $\delta q_{i,t}$ if necessary (quaternion interpolation usually requires slerp or normalization to maintain unit length, though the source specifies linear combination) [S1, unofficial].
+-    The final Gaussian rotation $q_{i,t}$ is:
+-    $$q_{i,t} = \delta q_{i,t} * \bar{q}_i$$
+-    where $\bar{q}_i$ is the canonical rotation of the Gaussian and $*$ denotes quaternion multiplication [S1, unofficial].
++**Deformation to Posed Space (Frame $t$):**
++For dynamic scenes, the Gaussian parameters are transformed from canonical to posed space using the mesh deformation.
+ 
+-3.  **Compute Interpolated Scale:**
+-    Calculate the area of the triangle in the posed space ($A_{pose}$) and canonical space ($A_{cano}$).
+-    The scale $s_{i,t}$ is:
+-    $$s_{i,t} = \left( \frac{A_{pose}}{A_{cano}} \right) s_i$$
+-    where $s_i$ is the canonical scale [S1, unofficial].
++1.  **Rotation:**
++    *   Compute per-vertex quaternions $q_1, q_2, q_3$ for the triangle vertices in the posed space. These are typically derived from the rotation matrix $R_k$ (constructed from tangent, bitangent, and normal) converted to quaternion, then area-weighted averaged from surrounding neighbor triangles [S1, unofficial].
++    *   Interpolate the rotation $\delta q_{i,t}$ using barycentric weights:
++        $$\delta q_{i,t} = u q_1 + v q_2 + (1 - u - v) q_3$$
++    *   Apply the interpolated rotation to the canonical rotation $q_i$:
++        $$q_{i,t} = \delta q_{i,t} * \bar{q}_i$$
++        where $\bar{q}_i$ is the canonical rotation quaternion.
+ 
+-4.  **Walking on Triangle (Constraint):**
+-    To prevent Gaussians from moving beyond their triangle boundaries, clip the barycentric coordinates $(u, v)$ to the valid triangle domain ($u \ge 0, v \ge 0, u+v \le 1$) [S1, unofficial].
++2.  **Scale:**
++    *   Compute the area of the embedded triangle in the posed space ($A_{pose}$) and canonical space ($A_{cano}$).
++    *   Update the scale $s_{i,t}$ based on the area change ratio:
++        $$s_{i,t} = \left( \frac{A_{pose}}{A_{cano}} \right) s_i$$
++
++**Color:**
++Spherical harmonics are turned off for simplicity, using a single color value per Gaussian [S1, unofficial].
+ 
+ **Edge Cases and Pitfalls:**
+-*   **Boundary Artifacts:** Disabling the "walking on triangle" constraint causes Gaussians to stick and pile up on triangle boundaries, leading to visible artifacts during novel pose animation [S1, unofficial].
+-*   **Precision:** Barycentric interpolation assumes linear variation of normals and rotations across the triangle. Large triangles may introduce interpolation errors.
+-*   **Degenerate Input:** If the mesh has non-manifold edges or degenerate triangles, barycentric coordinates may be undefined or unstable.
++*   **Boundary Crossing:** If barycentric updates cause a Gaussian to cross a triangle boundary, the embedding must be re-expressed in the neighboring triangle to maintain differentiability. Failure to handle this breaks gradient flow [S1, unofficial].
++*   **Sticking Artifacts:** Disabling the "Walking on Triangle" mechanism causes Gaussians to stick and pile up on triangle boundaries, leading to artifacts when animated by novel poses [S1, unofficial].
+ 
+ ## Subtopics
+ 
+ ### Walking on Triangle
+-A mechanism that constrains Gaussians to move within their corresponding mesh triangles by clipping UV values to prevent movement beyond triangle boundaries [S1, unofficial]. It prevents Gaussians from sticking and piling up on triangle boundaries during animation [S1, unofficial]. Disabling it reduces performance: for the 'bala' head avatar, PSNR drops from 30.04 to 29.91, SSIM from 0.938 to 0.933, and LPIPS increases from 0.062 to 0.070; for 'male-3-casual', PSNR drops from 33.01 to 32.48, SSIM from 0.982 to 0.979, and LPIPS increases from 0.020 to 0.024 [S1, unofficial].
++A mechanism that constrains Gaussians to move within their corresponding mesh triangles, preventing them from moving beyond triangle boundaries [S1, unofficial]. It works by clipping the UV values of the Gaussians to ensure they remain within the bounds of their corresponding mesh triangles [S1, unofficial]. Disabling this mechanism causes Gaussians to stick and pile up on the boundaries of mesh triangles, leading to artifacts when animated by novel poses [S1, unofficial]. For the 'bala' head avatar, disabling walking on triangle reduces PSNR from 30.04 to 29.91, SSIM from 0.938 to 0.933, and increases LPIPS from 0.062 to 0.070. For the 'male-3-casual' full-body avatar, disabling walking on triangle reduces PSNR from 33.01 to 32.48, SSIM from 0.982 to 0.979, and increases LPIPS from 0.020 to 0.024 [S1, unofficial].
+ 
+ ## Operating characteristics
+-*   **Time Complexity:** Linear in the number of Gaussians for interpolation and deformation calculation. Triangle area computation is constant per Gaussian if precomputed or cached.
+-*   **Memory Complexity:** $O(N)$ for $N$ Gaussians, storing $(k, u, v, d)$ per Gaussian.
+-*   **Performance:** The method provides high-fidelity deformation tracking for avatars. The ablation study shows that the "walking on triangle" constraint is critical for maintaining PSNR and SSIM, particularly for full-body avatars [S1, unofficial].
+-*   **Strengths:** Explicit geometric control; avoids the need for dense Gaussian distributions to approximate surfaces; handles deformation naturally via mesh topology.
+-*   **Limitations:** Requires a valid input mesh; spherical harmonics are disabled for simplicity, potentially limiting view-dependent color accuracy [S1, unofficial].
++**Time and Memory Complexity:**
++Not given in the sources.
++
++**Measured Performance:**
++*   **Bala Head Avatar:**
++    *   With Walking on Triangle: PSNR 30.04, SSIM 0.938, LPIPS 0.062.
++    *   Without Walking on Triangle: PSNR 29.91, SSIM 0.933, LPIPS 0.070.
++*   **Male-3-Casual Full-Body Avatar:**
++    *   With Walking on Triangle: PSNR 33.01, SSIM 0.982, LPIPS 0.020.
++    *   Without Walking on Triangle: PSNR 32.48, SSIM 0.979, LPIPS 0.024.
++
++**Strengths and Limitations:**
++*   **Strengths:** Ensures that modifying the underlying mesh automatically updates the Gaussian representation. Allows for relightable modeling with explicit shape representations.
++*   **Limitations:** Requires handling of boundary crossings to maintain differentiability. Disabling boundary constraints leads to significant performance drops and visual artifacts.
++
++**When to Use:**
++Use when dynamic mesh deformation is required and the Gaussian representation needs to track the mesh topology closely.
+ 
+ ## Background
+-Originated in the SplattingAvatar paper [S1, unofficial], this method builds on the idea of embedding Gaussians in a continuous space defined by a mesh. It addresses the limitation of standard Gaussian Splatting in handling articulated or deforming geometry by anchoring Gaussians to a mesh structure.
++Originated in SplattingAvatar [S1, unofficial]. The method builds on the principles of mesh-embedded representations, where Gaussian geometry is defined as a function of mesh attributes.
+ 
+ ## Sources

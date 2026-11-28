@@ -1,0 +1,139 @@
+# MPI Defocus Rendering
+
+Also called: Multiplane image defocus, Synthetic Defocus Rendering, Synthetic Defocus Rendering from MPI
+
+## Overview
+MPI Defocus Rendering synthesizes images with realistic depth-of-field blur and lateral camera translation by compositing a precomputed Multi-Plane Image (MPI) representation [S1]. It differs from standard ray casting by operating on discrete disparity planes rather than continuous volumetric samples, allowing for efficient simulation of defocus blur via 2D image-space convolutions [S1]. This method is specifically designed for view synthesis from trained neural radiance fields (NeRFs), particularly in low-light conditions where raw sensor data is utilized [S1].
+
+## How it works
+### Inputs and Outputs
+**Inputs:**
+*   $N$: Number of planes in the MPI.
+*   $\mathbf{c}_{mpi}^{(i)}$: Color tensor for plane $i$ (RGB, linear HDR space).
+*   $\alpha_{mpi}^{(i)}$: Opacity tensor for plane $i$.
+*   $i_{focus}$: Index of the focal plane.
+*   $\Delta r$: Scalar controlling the simulated aperture size (defocus strength).
+*   $\Delta \mathbf{d}$: 2D vector controlling lateral camera translation parallel to the image plane.
+
+**Outputs:**
+*   $C$: The final composited image.
+
+### Data Structures
+The MPI consists of $N$ fronto-parallel RGBA planes [S1]. The planes are indexed from back to front ($i = 0$ to $N-1$) [S1]. Colors are stored in linear HDR space [S1].
+
+### Parameters
+*   $i_{focus}$: Controls the focal plane depth [S1].
+*   $\Delta r$: Controls the simulated aperture size, determining defocus strength [S1].
+*   $\Delta \mathbf{d}$: A 2D vector controlling camera translation parallel to the image plane [S1].
+
+### Steps
+1.  **Precompute MPI:** Generate the MPI representation from the trained model (e.g., RawNeRF) [S1]. The MPI comprises a series of fronto-parallel RGBA planes sampled linearly in disparity within a camera frustum at a central camera pose [S1].
+2.  **Initialize Accumulator:** Set the output color accumulator $C \leftarrow 0$ [S1].
+3.  **Iterate Planes:** For each plane $i$ from $0$ to $N-1$ (back to front):
+    a.  **Calculate Blur Radius:** Compute the blur radius $r$ based on the distance of the current plane from the focal plane:
+        $$ r = \Delta r \cdot |i - i_{focus}| $$
+    b.  **Generate Kernel:** Create a blur kernel $k_{blur}$ using a circular mask of radius $r$ centered at the origin [S1]. This is implemented as a 2D Fourier space convolution [S1].
+    c.  **Blur Color:** Premultiply the plane's color by its alpha ($\mathbf{c}_{mpi}^{(i)} \cdot \alpha_{mpi}^{(i)}$) and convolve with the kernel:
+        $$ \mathbf{c}_{blur} = \text{convolve}(\mathbf{c}_{mpi}^{(i)} \cdot \alpha_{mpi}^{(i)}, k_{blur}) $$
+    d.  **Blur Alpha:** Convolve the plane's alpha with the kernel:
+        $$ \alpha_{blur} = \text{convolve}(\alpha_{mpi}^{(i)}, k_{blur}) $$
+    e.  **Calculate Translation Offset:** Compute the translation vector $\mathbf{d}$ for the current plane:
+        $$ \mathbf{d} = \Delta \mathbf{d} \cdot i $$
+    f.  **Translate Blurred Layers:** Apply continuous 2D image translation using bilinear resampling to the blurred color and alpha:
+        $$ \mathbf{c}_{trans} = \text{translate}(\mathbf{c}_{blur}, \mathbf{d}) $$
+        $$ \alpha_{trans} = \text{translate}(\alpha_{blur}, \mathbf{d}) $$
+    g.  **Composite:** Add the translated color to the accumulator. The transmittance is $(1 - \alpha_{trans})$ [S1]. Note that $\mathbf{c}_{trans}$ is not multiplied by $\alpha_{trans}$ here because the color was already premultiplied by alpha in step 3c [S1].
+        $$ C \leftarrow \mathbf{c}_{trans} + (1 - \alpha_{trans}) C $$
+4.  **Return Result:** Output $C$ [S1].
+
+### Pseudocode
+> **Unverified code.** The code below did not pass a test run against a reference implementation, or no test fits it, so it may contain errors.
+
+```python
+def mpi_defocus_rendering(c_mpi, alpha_mpi, i_focus, delta_r, delta_d):
+    """
+    Synthetic defocus rendering from a Multi-Plane Image.
+    
+    Args:
+        c_mpi: List of N tensors (H, W, 3), colors in linear HDR space.
+        alpha_mpi: List of N tensors (H, W, 1), opacities.
+        i_focus: Integer index of the focal plane.
+        delta_r: Float, simulated aperture size (defocus strength).
+        delta_d: Tuple (dx, dy), 2D vector for lateral camera translation.
+        
+    Returns:
+        C: Tensor (H, W, 3), the final composited image.
+    """
+    N = len(c_mpi)
+    C = zeros_like(c_mpi[0])  # Initialize accumulator to 0
+    
+    for i in range(N):
+        # 1. Calculate blur radius based on distance from focal plane
+        r = delta_r * abs(i - i_focus)
+        
+        # 2. Generate blur kernel (circular mask, radius r)
+        # Implemented as 2D Fourier space convolution
+        k_blur = blurkernel(r)
+        
+        # 3. Premultiply color by alpha before blurring
+        c_premult = c_mpi[i] * alpha_mpi[i]
+        
+        # 4. Convolve color and alpha with kernel
+        c_blur = convolve_2d(c_premult, k_blur)
+        alpha_blur = convolve_2d(alpha_mpi[i], k_blur)
+        
+        # 5. Calculate translation offset for this plane
+        d = (delta_d[0] * i, delta_d[1] * i)
+        
+        # 6. Translate blurred layers using bilinear resampling
+        c_trans = translate_2d(c_blur, d)
+        alpha_trans = translate_2d(alpha_blur, d)
+        
+        # 7. Composite: C = c_trans + (1 - alpha_trans) * C
+        # Note: c_trans is already premultiplied, so no alpha multiplication here
+        transmittance = 1.0 - alpha_trans
+        C = c_trans + transmittance * C
+        
+    return C
+
+def blurkernel(r):
+    """
+    Returns a circular mask at the origin with radius r pixels.
+    """
+    # Implementation detail: 2D Fourier space convolution kernel
+    # Not given in sources, assumed to be a standard circular box or Gaussian
+    # normalized to sum to 1.
+    pass
+
+def convolve_2d(image, kernel):
+    """
+    2D convolution of image with kernel.
+    """
+    pass
+
+def translate_2d(image, offset):
+    """
+    Continuous 2D image translation using bilinear resampling.
+    offset: (dx, dy)
+    """
+    pass
+```
+
+### Edge Cases and Pitfalls
+*   **Premultiplication:** The color must be premultiplied by alpha *before* blurring. If alpha is not applied to the translated color component ($\mathbf{c}_{trans}$) during accumulation, it is because the premultiplication in the blur step already accounts for it [S1]. Failing to premultiply will result in incorrect color bleeding at alpha boundaries [S1].
+*   **Indexing:** MPI planes are indexed from back to front ($i=0$ is back) [S1].
+*   **Color Space:** Colors must be in linear HDR space during processing [S1].
+
+## Operating characteristics
+*   **Time Complexity:** $O(N \cdot H \cdot W \cdot K^2)$, where $N$ is the number of planes, $H \times W$ is the image resolution, and $K$ is the blur kernel size (proportional to $\Delta r$). The convolution and translation are performed per plane.
+*   **Memory Complexity:** $O(N \cdot H \cdot W)$. The MPI requires storing $N$ planes of color and alpha.
+*   **Strengths:** Efficient simulation of defocus blur and lateral translation without per-pixel ray marching. Suitable for high dynamic range (HDR) raw image synthesis [S1].
+*   **Limitations:** Relies on the quality of the precomputed MPI. Discrete plane representation may introduce artifacts if disparity sampling is insufficient. Defocus blur is approximated via 2D convolution, which assumes thin-lens optics and may not capture complex lens aberrations [S1].
+*   **When to use:** When synthetic defocus and camera translation are required for view synthesis from a NeRF, especially in low-light scenarios using raw data [S1].
+*   **When not to use:** When high-fidelity volumetric rendering with continuous depth is required, or when lens effects beyond simple defocus are needed.
+
+## Background
+MPI Defocus Rendering was introduced in the context of "NeRF in the Dark," a method for high dynamic range view synthesis from noisy raw images [S1]. The approach leverages the efficiency of Multi-Plane Images (MPIs) [S1] to avoid the computational cost of full volumetric ray casting for defocus effects. It builds on prior work addressing synthetic defocus [2, 45, 51] (cited in [S1]) but adapts it for raw sensor data and HDR rendering [S1]. The method was developed to handle the challenges of low-light photography, where Bayer masking and raw domain processing are necessary to mitigate noise artifacts [S1].
+
+## Sources
+[S1] NeRF in the Dark: High Dynamic Range View Synthesis from Noisy Raw Images, https://doi.org/10.1109/cvpr52688.2022.01571, fetched 2026-10-26

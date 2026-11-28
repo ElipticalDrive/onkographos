@@ -1,0 +1,115 @@
+--- v010.md
++++ v011.md
+@@ -4,5 +4,5 @@
+ 
+ ## Overview
+-3-Pass Voxelization is a rasterization-based technique that eliminates geometric cracks and missing data in the voxel grid by rendering the scene from three orthogonal directions (along the X, Y, and Z axes) [S1, S2, unofficial]. Unlike single-view projection methods which suffer from occlusion gaps and perspective distortion, this method ensures complete volumetric coverage by aggregating fragments from all three principal axes [S2, unofficial]. It is a simple and easy-to-implement approach that trades three draw calls per object for robust occupancy [S1, unofficial].
++3-Pass Voxelization is a rasterization-based technique that eliminates geometric cracks and missing data in the voxel grid by rendering the scene from three orthogonal directions (along the X, Y, and Z axes) [S1, unofficial][S2, unofficial]. Unlike single-view projection methods which suffer from occlusion gaps and perspective distortion, this method ensures complete volumetric coverage by aggregating fragments from all three principal axes [S2, unofficial]. It is a simple and easy-to-implement approach that trades three draw calls per object for robust occupancy [S1, unofficial].
+ 
+ ## How it works
+@@ -24,6 +24,6 @@
+ 
+ **Parameters:**
+-- **Frustum Expansion:** The orthographic frustum should be expanded slightly to ensure corners of the AABB are covered [Parent].
+-- **Depth Testing:** Disabled or configured for write-through to capture all intersecting fragments, not just the nearest surface [Parent].
++- **Frustum Expansion:** The orthographic frustum should be expanded slightly to ensure corners of the AABB are covered [G].
++- **Depth Testing:** Disabled or configured for write-through to capture all intersecting fragments, not just the nearest surface [G].
+ 
+ **Steps:**
+@@ -32,50 +32,52 @@
+ 3. **Pass 2 (Axis 2):** Construct the view matrix for the second axis (e.g., +X or -X) [S2, unofficial]. Multiply $M_{clip}$ by the rotation matrix for this axis [S1, unofficial]. Render the scene [S2, unofficial].
+ 4. **Pass 3 (Axis 3):** Construct the view matrix for the third axis (e.g., +Y or -Y) [S2, unofficial]. Multiply $M_{clip}$ by the rotation matrix for this axis [S1, unofficial]. Render the scene [S2, unofficial].
+-5. **Aggregation:** For each voxel hit by any of the three passes, mark it as occupied. This is typically an atomic "OR" operation for occupancy [Parent, G].
++5. **Aggregation:** For each voxel hit by any of the three passes, mark it as occupied. This is typically an atomic "OR" operation for occupancy [G].
+ 
+ **Pseudocode:**
+ ```python
+ def voxelize_3_pass(mesh, bb_min, bb_max, resolution, voxel_grid):
+-    # 1. Compute voxel-space transformation matrix (no rotation) [S1, unofficial]
+-    scale = [resolution[0] / (bb_max[0] - bb_min[0]),
+-             resolution[1] / (bb_max[1] - bb_min[1]),
+-             resolution[2] / (bb_max[2] - bb_min[2])]
+-    offset = [-bb_min[0] * scale[0], -bb_min[1] * scale[1], -bb_min[2] * scale[2]]
+-    M_voxel = scale_matrix(scale) @ translate_matrix(offset)
+-
++    # 1. Setup coordinate system at grid center, axes parallel to grid edges [S2, unofficial]
+     # 2. Define rotation matrices for the three principal axes [G]
+-    rot_z = identity_matrix()
+-    rot_x = rotation_matrix_x(90.0)
+-    rot_y = rotation_matrix_y(-90.0)
++    rot_z = [[1,0,0,0],[0,1,0,0],[0,0,1,0],[0,0,0,1]]
++    rot_x = [[1,0,0,0],[0,0,-1,0],[0,1,0,0],[0,0,0,1]]
++    rot_y = [[0,0,1,0],[0,1,0,0],[-1,0,0,0],[0,0,0,1]]
+     rotations = [rot_z, rot_x, rot_y]
+ 
+     for rot in rotations:
+         # 3. Multiply clip-space projection matrix by rotation to align view [S1, unofficial]
+-        M_view_proj = rot @ M_clip # M_clip is standard orthographic projection [G]
+-        
++        M_view_proj = matrix_multiply(rot, orthographic_projection_matrix())
++
+         # 4. Rasterize mesh to voxel grid
+-        # For each triangle in mesh:
+-        #   Project vertices: p_clip = M_view_proj * p_world
+-        #   Clip and scan-convert to fragments
+-        #   For each fragment at clip position p_clip:
+-        #     i = floor(M_voxel * p_clip.xyz)
+-        #     atomic_or(voxel_grid[i], 1) # Depth testing disabled to capture all intersections [Parent]
++        for triangle in mesh.triangles:
++            # Project vertices to clip space
++            p0_clip = matrix_multiply(M_view_proj, triangle.v0)
++            p1_clip = matrix_multiply(M_view_proj, triangle.v1)
++            p2_clip = matrix_multiply(M_view_proj, triangle.v2)
+ 
+-def scale_matrix(s):
+-    return [[s[0], 0, 0, 0], [0, s[1], 0, 0], [0, 0, s[2], 0], [0, 0, 0, 1]]
++            # Standard triangle rasterization generates fragments at clip-space positions [G]
++            fragments = rasterize_triangle(p0_clip, p1_clip, p2_clip)
+ 
+-def translate_matrix(t):
+-    return [[1, 0, 0, t[0]], [0, 1, 0, t[1]], [0, 0, 1, t[2]], [0, 0, 0, 1]]
++            for frag in fragments:
++                # 5. Map clip-space coordinates to voxel indices [Parent]
++                scale_x = resolution[0] / (bb_max[0] - bb_min[0])
++                scale_y = resolution[1] / (bb_max[1] - bb_min[1])
++                scale_z = resolution[2] / (bb_max[2] - bb_min[2])
++                voxel_index = [
++                    floor((frag.p_clip[0] - bb_min[0]) * scale_x),
++                    floor((frag.p_clip[1] - bb_min[1]) * scale_y),
++                    floor((frag.p_clip[2] - bb_min[2]) * scale_z)
++                ]
++                # 6. Atomic OR for occupancy [G]
++                atomic_or(voxel_grid[voxel_index], 1)
+ 
+-def identity_matrix():
+-    return [[1, 0, 0, 0], [0, 1, 0, 0], [0, 0, 1, 0], [0, 0, 0, 1]]
++def orthographic_projection_matrix():
++    return [[1,0,0,0],[0,1,0,0],[0,0,1,0],[0,0,0,1]] # Identity for standard orthographic view [G]
+ 
+-def rotation_matrix_x(angle_deg):
+-    c, s = cos(radians(angle_deg)), sin(radians(angle_deg))
+-    return [[1, 0, 0, 0], [0, c, -s, 0], [0, s, c, 0], [0, 0, 0, 1]]
++def matrix_multiply(A, B):
++    return [[sum(A[i][k]*B[k][j] for k in range(4)) for j in range(4)] for i in range(4)]
+ 
+-def rotation_matrix_y(angle_deg):
+-    c, s = cos(radians(angle_deg)), sin(radians(angle_deg))
+-    return [[c, 0, s, 0], [0, 1, 0, 0], [-s, 0, c, 0], [0, 0, 0, 1]]
++def rasterize_triangle(p0, p1, p2):
++    # Standard rasterization logic to generate fragments from clip-space vertices [G]
++    return []
+ ```
+ 
+@@ -83,10 +85,10 @@
+ - **Performance:** Requires 3 render calls per object. Cost grows with mesh complexity [S1, unofficial].
+ - **Dynamic Objects:** If separating dynamic and static objects, dynamic voxel grids must be cleared every frame, requiring separate grids [S1, unofficial].
+-- **Precision:** Ensure the voxel-space matrix correctly handles the coordinate mapping to avoid off-by-one errors at boundaries [Parent].
++- **Precision:** Ensure the voxel-space matrix correctly handles the coordinate mapping to avoid off-by-one errors at boundaries [G].
+ 
+ ## Operating characteristics
+ - **Time Complexity:** $O(N \cdot P)$, where $N$ is the number of triangles and $P=3$ is the number of passes. Each pass is a standard rasterization operation [G].
+ - **Memory Complexity:** $O(R_x \cdot R_y \cdot R_z)$ for the voxel grid. No additional large buffers if rendering directly to the grid [G].
+-- **Performance:** Slower than single-pass methods due to 3x draw calls. Suitable for static or infrequently updated geometry. Can be optimized by LOD interleaving or resolution scaling [S1, unofficial].
++- **Performance:** Slower than single-pass methods due to 3x draw calls. Suitable for static or infrequently updated geometry [S1, unofficial]. Can be optimized by LOD interleaving or resolution scaling [S1, unofficial].
+ - **Strengths:** Eliminates cracks and gaps inherent in single-view projection; robust against orientation [S2, unofficial].
+ - **Limitations:** High computational cost for complex dynamic scenes; requires separate handling for dynamic/static splits [S1, unofficial].

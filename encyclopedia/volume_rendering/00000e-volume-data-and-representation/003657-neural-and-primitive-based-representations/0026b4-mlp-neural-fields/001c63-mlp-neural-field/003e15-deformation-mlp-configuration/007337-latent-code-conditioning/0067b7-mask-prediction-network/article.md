@@ -1,0 +1,135 @@
+# Mask Prediction Network
+
+
+## Overview
+The Mask Prediction Network (MPN) predicts per-point activation masks to selectively enable or disable specific semantic attributes during rendering [S1]. It solves the problem of disentangling multiple dynamic or static elements within a single neural field by ensuring only the relevant attribute contributes to the final output at any given query point [S1]. Unlike sibling conditioning methods that modify the decoder's weights or inputs to change appearance or shape globally, the MPN operates as a local gating mechanism that filters contributions based on lifted attributes and canonicalized coordinates [S1].
+
+## How it works
+**Inputs and Outputs:**
+*   **Inputs:** $\alpha(x)$: Lifted attributes for query point $x$ [S1]. $\beta(x)$: Lifted latent code for query point $x$ [S1]. $K(x)$: Canonicalized points for query point $x$ [S1].
+*   **Output:** $m(x)$: A vector of mask values, one for each attribute $a \in A$, plus a background mask $m_0(x)$ [S1].
+
+**Data Structures and Layout:**
+The network consists entirely of fully connected layers with ReLU activations [S1]. The architecture processes inputs through specific positional encodings before merging them into the hidden layers [S1].
+
+1.  **Positional Encoding of $\alpha(x)$ and $\beta(x)$:** The lifted attributes $\alpha(x)$ and lifted latent code $\beta(x)$ are transformed using a windowed positional encoding [S1]. This encoding starts at the 1,000th training step and linearly increases a single sine component for the next 10,000 steps [S1].
+2.  **Encoding of $K(x)$:** The canonicalized points $K(x)$ are encoded using a fixed 8-component positional encoding [S1].
+3.  **Feature Fusion:** The encoded $\alpha(x)$, $\beta(x)$, and $K(x)$ are concatenated and passed through a series of fully connected layers [S1]. The hidden layer dimensions are 128 [S1].
+4.  **Output Activation:** The final layer outputs raw scores which are passed through a sigmoid function to produce values in the range $[0, 1]$ [S1].
+5.  **Normalization:** The output is clipped to ensure values remain in $[0, 1]$ [S1].
+
+**Formulas:**
+Let $A$ be the set of active attributes. For each attribute $a \in A$, the network predicts a mask value $m_a(x)$ [S1]. The background mask $m_0(x)$ is computed to ensure the total probability mass sums to 1:
+$$m_0(x) = 1 - \sum_{a \in A} m_a(x)$$
+The final mask vector is $m(x) = [m_0(x), m_{a_1}(x), \dots, m_{a_n}(x)]$ [S1].
+
+**Parameters:**
+*   **Positional Encoding Schedule:** Windowed PE for $\alpha(x)$ and $\beta(x)$ starts at step 1,000 and linearly increases a single sine component for the next 10,000 steps [S1].
+*   **K(x) Encoding:** 8 components [S1].
+*   **Hidden Layer Size:** 128 [S1].
+
+**Edge Cases and Pitfalls:**
+*   **Spurious Interpolations:** The model may learn spurious interpolations for controlled elements that occupy little space in the image or have insufficient/careless annotations (e.g., ignoring fast-moving specular objects like a metronome pendulum) [S1].
+*   **Independence from View:** The network is not conditioned on view directions or appearance codes, which distinguishes it from the radiance field prediction network [S1].
+
+**Pseudocode:**
+> **Unverified code.** The code below did not pass a test run against a reference implementation, or no test fits it, so it may contain errors.
+
+```python
+import math
+
+def mask_prediction_network(alpha, beta, K, step, num_attributes):
+    # Inputs: alpha, beta, K are lists of floats representing vectors
+    # step: int, num_attributes: int
+    # Outputs: m is a list of floats
+    
+    # 1. Windowed positional encoding for alpha and beta
+    alpha_pe = windowed_pos_enc(alpha, step, 1000, 10000)
+    beta_pe = windowed_pos_enc(beta, step, 1000, 10000)
+    
+    # 2. Fixed 8-component positional encoding for K
+    K_pe = fixed_8d_pos_enc(K)
+    
+    # 3. Concatenate encoded inputs and project to hidden dimension 128
+    x_combined = concat([alpha_pe, beta_pe, K_pe])
+    h = fc_layer(x_combined, 128)
+    h = relu(h)
+    h = fc_layer(h, 128)
+    h = relu(h)
+    # Additional hidden layers follow the same pattern [G]
+    
+    # 4. Output layer and sigmoid activation
+    raw_output = fc_layer(h, num_attributes + 1)
+    m_raw = sigmoid(raw_output)
+    
+    # 5. Compute background mask m0(x) = 1 - sum(m_a(x))
+    m_attributes = m_raw[:num_attributes]
+    m_background = 1.0 - sum(m_attributes)
+    
+    # 6. Clip output to [0, 1] and return
+    m = clip(concat([m_background, m_attributes]), 0.0, 1.0)
+    return m
+
+def windowed_pos_enc(x, step, start_step, duration):
+    if step < start_step:
+        return x
+    progress = min(1.0, (step - start_step) / duration)
+    # Linearly increase a single sine component
+    freq = progress * 2.0 * math.pi
+    return [xi * math.sin(freq * xi) for xi in x]
+
+def fixed_8d_pos_enc(x):
+    # Standard 8-component positional encoding
+    scales = [1.0, 2.0, 3.0, 4.0, 5.0, 6.0, 7.0, 8.0]
+    pe = []
+    for xi in x:
+        for s in scales:
+            pe.append(math.sin(s * xi))
+    return pe
+
+def concat(lists):
+    return [item for sublist in lists for item in sublist]
+
+def fc_layer(x, out_features):
+    # Standard linear transformation [G]
+    weights = [0.1] * (len(x) * out_features)
+    bias = [0.0] * out_features
+    out = []
+    for i in range(out_features):
+        val = bias[i]
+        for j in range(len(x)):
+            val += x[j] * weights[i * len(x) + j]
+        out.append(val)
+    return out
+
+def relu(x):
+    return [max(0.0, xi) for xi in x]
+
+def sigmoid(x):
+    return [1.0 / (1.0 + math.exp(-xi)) for xi in x]
+
+def clip(x, min_val, max_val):
+    return [max(min_val, min(max_val, xi)) for xi in x]
+```
+
+## Subtopics
+
+### Basic Gate Module
+A module used to filter invalid values in neural descriptors learned from sparse point clouds using a learned mask [S2]. It extracts features of a neural descriptor $D_i$ using $3 \times 3$ convolution layers, learns a mask via a sigmoid function to filter invalid values, and applies ELU activation to improve learning efficiency [S2]. The initial feature is concatenated with the filtered feature, refined by a $1 \times 1$ convolution layer, and re-filtered using Gate convolution [S2].
+
+### Masked Point Modeling (MPM)
+A self-supervised learning strategy for 3D point clouds where 50% of points are masked, and the encoder predicts scene Gaussians from visible points to render RGB images, encouraging the capture of geometric and spatial information [S3, unofficial]. It masks 50% of point clouds generated by back-projecting RGB-D images, uses visible points to predict scene Gaussians via a point cloud encoder and Gaussian prediction network, and renders RGB images for supervision [S3, unofficial].
+
+## Operating characteristics
+*   **Strengths:** Enables fine-grained control over specific attributes within a unified neural field representation [S1].
+*   **Limitations:** Sensitive to annotation quality; may fail to learn dynamics for small or fast-moving objects if annotations are insufficient [S1].
+*   **When to use:** When disentangling multiple semantic or dynamic attributes in a neural field is required [S1].
+*   **When not to use:** When view-dependent appearance is the primary factor to be controlled, as the network is not conditioned on view directions or appearance codes [S1].
+
+## Background
+The Mask Prediction Network was introduced in the context of Controllable Neural Radiance Fields (CoNeRF) [S1]. It was designed to allow users to control specific elements of a scene independently by predicting masks that activate or deactivate corresponding attributes during rendering [S1].
+
+## Sources
+[S1] CoNeRF: Controllable Neural Radiance Fields, https://doi.org/10.1109/cvpr52688.2022.01807, fetched 2026-10-26
+[S2] READ: Large-Scale Neural Scene Rendering for Autonomous Driving, https://doi.org/10.1609/aaai.v37i2.25238, fetched 2026-10-29
+[S3] Point Cloud Unsupervised Pre-training via 3D Gaussian Splatting, https://doi.org/10.48550/arxiv.2411.18667, fetched 2026-10-26 (unofficial)

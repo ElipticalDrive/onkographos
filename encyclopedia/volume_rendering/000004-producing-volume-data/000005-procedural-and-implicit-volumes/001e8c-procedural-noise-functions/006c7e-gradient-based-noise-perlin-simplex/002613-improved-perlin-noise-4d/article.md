@@ -1,0 +1,125 @@
+# Improved Perlin Noise (4D)
+
+Also called: 4D Perlin Noise, GLM Perlin Noise (4D)
+
+## Overview
+Improved Perlin Noise (4D) is a procedural noise function that generates smooth, continuous random values by interpolating dot products of gradient vectors at the corners of a 4D hypercube [S1, unofficial]. It extends the 3D Improved Perlin Noise algorithm to four dimensions, primarily to support time-varying texture generation and animation by treating time as the fourth spatial axis [S1, unofficial]. Unlike its 3D sibling, it handles 16 corners and 4D gradient vectors, often optimized for graphics hardware using texture-based lookup tables to avoid branching [S2, unofficial].
+
+## How it works
+**Inputs and Outputs**
+*   **Input:** A 4D query point $\mathbf{p} = (x, y, z, w)$, typically where $w$ represents time or a seed offset [S1, unofficial][S3, unofficial].
+*   **Output:** A scalar noise value [S1, unofficial].
+
+**Data Structures**
+The implementation relies on precomputed lookup tables stored in textures to optimize GPU performance [S1, unofficial][S2, unofficial]:
+1.  **Permutation Table 1D (`_PermTable1D`):** A `Texture2D` of size $SIZE \times 1$ (e.g., $256 \times 1$), format `Alpha8`, stores permutation indices normalized to $[0, 1]$ in the alpha channel [S2, unofficial].
+2.  **Permutation Table 2D (`_PermTable2D`):** A `Texture2D` of size $SIZE \times SIZE$ (e.g., $256 \times 256$), format `ARGB32`, each texel stores four precomputed permutation sums $(AA, AB, BA, BB)$ normalized to $[0, 1]$ [S1, unofficial].
+3.  **Gradient Table 4D (`_Gradient4D`):** A `Texture2D` of size $SIZE \times 1$ (e.g., $256 \times 1$), format `ARGB32`, stores 32 gradient vectors normalized to $[0, 1]$ in RGBA channels [S2, unofficial].
+
+**Algorithm Steps**
+1.  **Grid Location:** Compute integer coordinates of the unit hypercube: $\mathbf{P} = \text{fmod}(\lfloor \mathbf{p} \rfloor, 256.0)$. Compute relative position: $\mathbf{p}_{rel} = \mathbf{p} - \lfloor \mathbf{p} \rfloor$ [S1, unofficial][S2, unofficial].
+2.  **Fade Function:** Compute fade curve for $C^1$ continuity: $f(t) = 6t^5 - 15t^4 + 10t^3$. Applied component-wise to $\mathbf{p}_{rel}$ to get $\mathbf{f}$ [S1, unofficial][S2, unofficial].
+3.  **Hashing Corners:** Normalize $\mathbf{P}$ for texture lookup: $\mathbf{P}_{norm} = \mathbf{P} / 256.0$. Hash XY coordinates and add Z offset: $\mathbf{AA} = \text{perm2d}(\mathbf{P}_{norm}.xy) + \mathbf{P}_{norm}.z$, where $\mathbf{AA}$ is a `float4` containing base permutation indices for the XY plane offset by Z [S1, unofficial].
+4.  **Corner Indices:** Compute permutation indices for all 16 corners. Let $\text{one} = 1.0/256.0$. Indices are derived by adding $\mathbf{P}_{norm}.w$ and incrementing components by $\text{one}$:
+    $$
+    \begin{aligned}
+    \text{AAA} &= \text{perm}(\mathbf{AA}.x) + \mathbf{P}_{norm}.w, & \text{AAB} &= \text{perm}(\mathbf{AA}.x + \text{one}) + \mathbf{P}_{norm}.w \\
+    \text{ABA} &= \text{perm}(\mathbf{AA}.y) + \mathbf{P}_{norm}.w, & \text{ABB} &= \text{perm}(\mathbf{AA}.y + \text{one}) + \mathbf{P}_{norm}.w \\
+    \text{BAA} &= \text{perm}(\mathbf{AA}.z) + \mathbf{P}_{norm}.w, & \text{BAB} &= \text{perm}(\mathbf{AA}.z + \text{one}) + \mathbf{P}_{norm}.w \\
+    \text{BBA} &= \text{perm}(\mathbf{AA}.w) + \mathbf{P}_{norm}.w, & \text{BBB} &= \text{perm}(\mathbf{AA}.w + \text{one}) + \mathbf{P}_{norm}.w
+    \end{aligned}
+    $$
+    The `+one` variants correspond to corners at $+1$ in the respective dimension [S2, unofficial].
+5.  **Gradient Contributions:** For each corner, retrieve gradient $\mathbf{g}$ from `_Gradient4D` and scale to $[-1, 1]$. Compute dot product with distance vector: $n_i = \mathbf{g}_i \cdot (\mathbf{p}_{rel} + \mathbf{o}_i)$, where $\mathbf{o}_i$ is the corner offset (e.g., $\mathbf{0}$ for AAA, $\mathbf{(-1, 0, 0, 0)}$ for BAA) [S2, unofficial].
+6.  **Interpolation:** Interpolate the 16 gradient contributions using nested linear interpolation along X, Y, Z, and W axes, weighted by $\mathbf{f}$ [S1, unofficial][S2, unofficial].
+
+**Pseudocode**
+> **Unverified code.** The code below did not pass a test run against a reference implementation, or no test fits it, so it may contain errors.
+
+```python
+def fade(t):
+    return t * t * t * (t * (t * 6.0 - 15.0) + 10.0)
+
+def lerp(a, b, t):
+    return a + t * (b - a)
+
+def dot(v1, v2):
+    return sum(x * y for x, y in zip(v1, v2))
+
+def fmod(x, y):
+    return x - y * floor(x / y)
+
+def sample_perm1d(tex, x):
+    return tex[int(x) % len(tex)]
+
+def sample_perm2d(tex, uv):
+    return tex[int(uv[0]) % len(tex)][int(uv[1]) % len(tex)]
+
+def sample_gradient(tex, x):
+    vec = tex[int(x) % len(tex)]
+    return [g * 2.0 - 1.0 for g in vec]
+
+def inoise(p, perm1d, perm2d, gradients):
+    P = [fmod(floor(c), 256.0) for c in p]
+    p_rel = [c - floor(c) for c in p]
+    f = [fade(t) for t in p_rel]
+    P_norm = [x / 256.0 for x in P]
+    one = 1.0 / 256.0
+    
+    AA = [v + P_norm[2] for v in sample_perm2d(perm2d, (P_norm[0], P_norm[1]))]
+    
+    AAA = sample_perm1d(perm1d, AA[0]) + P_norm[3]
+    AAB = sample_perm1d(perm1d, AA[0] + one) + P_norm[3]
+    ABA = sample_perm1d(perm1d, AA[1]) + P_norm[3]
+    ABB = sample_perm1d(perm1d, AA[1] + one) + P_norm[3]
+    BAA = sample_perm1d(perm1d, AA[2]) + P_norm[3]
+    BAB = sample_perm1d(perm1d, AA[2] + one) + P_norm[3]
+    BBA = sample_perm1d(perm1d, AA[3]) + P_norm[3]
+    BBB = sample_perm1d(perm1d, AA[3] + one) + P_norm[3]
+    
+    def gradperm(idx, offset):
+        g = sample_gradient(gradients, idx)
+        return dot(g, [p_rel[i] + offset[i] for i in range(4)])
+        
+    return lerp(
+        lerp(
+            lerp(
+                lerp(gradperm(AAA, [0,0,0,0]), gradperm(BAA, [-1,0,0,0]), f[0]),
+                lerp(gradperm(ABA, [0,-1,0,0]), gradperm(BBA, [-1,-1,0,0]), f[0]), f[1]),
+            lerp(
+                lerp(gradperm(AAB, [0,0,-1,0]), gradperm(BAB, [-1,0,-1,0]), f[0]),
+                lerp(gradperm(ABB, [0,-1,-1,0]), gradperm(BBB, [-1,-1,-1,0]), f[0]), f[1]), f[2]),
+        lerp(
+            lerp(
+                lerp(gradperm(AAA+one, [0,0,0,-1]), gradperm(BAA+one, [-1,0,0,-1]), f[0]),
+                lerp(gradperm(ABA+one, [0,-1,0,-1]), gradperm(BBA+one, [-1,-1,0,-1]), f[0]), f[1]),
+            lerp(
+                lerp(gradperm(AAB+one, [0,0,-1,-1]), gradperm(BAB+one, [-1,0,-1,-1]), f[0]),
+                lerp(gradperm(ABB+one, [0,-1,-1,-1]), gradperm(BBB+one, [-1,-1,-1,-1]), f[0]), f[1]), f[2]),
+    f[3])
+```
+
+**Parameters**
+*   **Frequency:** Scaling factor for the input coordinate. Typical value: $1.0$ [S2, unofficial].
+*   **Lacunarity:** Multiplier for frequency in each octave of fractal noise. Typical value: $2.0$ [S1, unofficial][S2, unofficial].
+*   **Gain:** Multiplier for amplitude in each octave. Typical value: $0.5$ [S1, unofficial][S2, unofficial].
+*   **Seed:** A value used to offset the 4th dimension ($w$) to simulate different seeds, preventing floating-point precision errors (e.g., `pos4D.w += 1.618033 * (seed % 1000)`) [S3, unofficial].
+
+**Edge Cases and Pitfalls**
+*   **Gradient Scaling:** Gradient vectors must be normalized or scaled appropriately (e.g., mapping texture $[0,1]$ to $[-1,1]$) to ensure consistent noise amplitude [S2, unofficial].
+*   **Precision:** When using the 4th dimension for time or seeds, large coordinate values can cause floating-point precision errors. Offsetting the 4th dimension by a seed-derived value modulo 1000 mitigates this [S3, unofficial].
+
+## Operating characteristics
+*   **Complexity:** The algorithm performs 16 gradient lookups and 15 linear interpolations per octave.
+*   **Performance:** Not given in the sources.
+*   **Strengths:** $C^1$ continuity, supports 4D for animation, GPU-optimized via texture lookups.
+*   **Limitations:** Dependent texture lookups may limit older hardware; higher instruction count than simpler variants.
+
+## Background
+Improved Perlin Noise was described by Green in 2005 [S3, unofficial]. The 4D variant is used in real-time procedural volumetric fire simulations [S3, unofficial]. The GLM library provides a periodic tiling implementation that offsets the 4th dimension with a seed-derived value [S3, unofficial].
+
+## Sources
+
+[S1] Scrawk/Marching-Cubes-On-The-GPU, https://github.com/Scrawk/Marching-Cubes-On-The-GPU, fetched 2026-10-26 (unofficial)
+[S2] keijiro/MarchingCubesOnGPU, https://github.com/keijiro/MarchingCubesOnGPU, fetched 2026-10-26 (unofficial)
+[S3] sixthsurge/volume-noise-generator, https://github.com/sixthsurge/volume-noise-generator, fetched 2026-10-27 (unofficial)

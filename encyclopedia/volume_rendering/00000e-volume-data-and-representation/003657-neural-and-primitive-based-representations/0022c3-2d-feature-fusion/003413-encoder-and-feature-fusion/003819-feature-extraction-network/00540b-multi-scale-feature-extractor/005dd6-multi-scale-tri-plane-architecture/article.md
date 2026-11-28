@@ -1,0 +1,122 @@
+# Multi-Scale Tri-Plane Architecture
+
+Also called: MSA, Multi-Scale Architecture, Multi-resolution Tri-Planes
+
+## Overview
+The Multi-Scale Tri-Plane Architecture (MSA) is a neural representation method that uses learnable feature planes at multiple resolutions to encode scene geometry and appearance, serving as an alternative to Self-Attention Convolution (SAC) for handling multi-frequency information [S1]. It differs from single-resolution tri-plane methods by explicitly constructing a hierarchy of planes to mimic frequency bands, allowing the network to capture details across different scales through feature concatenation [S1, S2].
+
+## How it works
+**Inputs:** A 3D point $\mathbf{x} \in \mathbb{R}^3$ and a set of learnable tri-planes at $L$ resolution levels.
+**Outputs:** A multi-scale feature vector $\mathbf{F}(\mathbf{x})$.
+
+**Data Structures:**
+The architecture maintains a set of $L$ independent tri-planes $\{P_l\}_{l=1}^L$. Each tri-plane $P_l$ consists of three orthogonal 2D feature grids: $P_{xy}^l, P_{yz}^l, P_{zx}^l$.
+*   **Resolution:** The resolutions are fixed to four levels in the baseline implementation [S1]:
+    *   Level 1 (Highest Frequency): $512 \times 512$
+    *   Level 2: $256 \times 256$
+    *   Level 3: $128 \times 128$
+    *   Level 4 (Lowest Frequency): $64 \times 64$
+*   **Feature Dimension:** Each grid cell stores a feature vector of dimension $D$ [S2].
+*   **Layout:** The planes form a 3D cube centered at the origin $(0,0,0)$ [S2].
+
+**Algorithm:**
+1.  **Initialization:** Initialize $L$ tri-planes with random or learned weights.
+2.  **Projection:** For a query point $\mathbf{x} = (x, y, z)$, project it onto the three orthogonal planes for each level $l$:
+    *   $P_{xy}^l$: Project to $(x, y)$
+    *   $P_{yz}^l$: Project to $(y, z)$
+    *   $P_{zx}^l$: Project to $(z, x)$
+3.  **Interpolation:** Gather features from each plane using bilinear interpolation [S2]. Let $f_{xy}^l, f_{yz}^l, f_{zx}^l \in \mathbb{R}^D$ be the interpolated features from level $l$.
+4.  **Concatenation:** Concatenate the features from the three planes for each level:
+    $$ \mathbf{F}_l = \text{Concat}(f_{xy}^l, f_{yz}^l, f_{zx}^l) \in \mathbb{R}^{3D} $$
+5.  **Multi-Scale Aggregation:** Concatenate the original input coordinates $\mathbf{x}$ with the features from all $L$ levels to form the final feature vector [S2]:
+    $$ \mathbf{F}(\mathbf{x}) = \text{Concat}(\mathbf{x}, \mathbf{F}_1, \mathbf{F}_2, \dots, \mathbf{F}_L) $$
+    The resulting vector has length $3 + L \times 3D$ [S2]. Note: Source [S2] states the length is $3 + L \times D$, but since each level concatenates 3 planes of dimension $D$, the effective dimension per level is $3D$. The source text "length is $3+L \times D$" likely assumes $D$ represents the total dimension per level or contains a typo. We follow the explicit construction: $\mathbf{F}_l$ is $3D$. If $D$ is defined as the dimension of *each* plane, the total length is $3 + 3LD$. If $D$ is the dimension of the *concatenated* level feature, the length is $3 + LD$. Given [S2] says "feature $F$ with dimensionality $D$" after concatenating 3 planes, $D$ is the total per-level dimension. Thus, length is $3 + LD$.
+
+**Parameters:**
+*   $L$: Number of resolution levels. Typical value: 4 [S1].
+*   $D$: Dimensionality of the feature vector per level (after concatenating 3 planes). Not given in the sources for specific values, but implied by the $512$ dimension mention in [S1] for SAC comparison.
+*   Resolutions: $512, 256, 128, 64$ [S1].
+
+**Pseudocode:**
+> **Unverified code.** The code below did not pass a test run against a reference implementation, or no test fits it, so it may contain errors.
+
+```python
+def multi_scale_tri_plane_forward(x, tri_planes):
+    """
+    x: Tensor of shape (N, 3), query points.
+    tri_planes: List of L dictionaries, each containing 'xy', 'yz', 'zx' tensors.
+                Each tensor is shape (H, W, D).
+    Returns: Tensor of shape (N, 3 + L*D)
+    """
+    L = len(tri_planes)
+    features = []
+    
+    # Concatenate original coordinates
+    # x is (N, 3)
+    all_features = [x]
+    
+    for l in range(L):
+        plane_xy = tri_planes[l]['xy']
+        plane_yz = tri_planes[l]['yz']
+        plane_zx = tri_planes[l]['zx']
+        
+        # Get H, W, D from any plane (assuming square grids)
+        H, W, D = plane_xy.shape
+        
+        # Normalize coordinates to [-1, 1] for bilinear sampling
+        # Assuming x is in world space, needs normalization based on scene bounds
+        # For simplicity, assume x is already normalized or a helper normalizes it
+        x_norm, y_norm, z_norm = normalize(x) 
+        
+        # Project and sample
+        # xy plane: use x, y
+        f_xy = bilinear_sample(plane_xy, x_norm, y_norm) # Shape (N, D)
+        
+        # yz plane: use y, z
+        f_yz = bilinear_sample(plane_yz, y_norm, z_norm) # Shape (N, D)
+        
+        # zx plane: use z, x
+        f_zx = bilinear_sample(plane_zx, z_norm, x_norm) # Shape (N, D)
+        
+        # Concatenate features from 3 planes for this level
+        f_level = torch.cat([f_xy, f_yz, f_zx], dim=-1) # Shape (N, 3*D)
+        
+        # Note: Source [S2] defines D as the dimensionality of the feature F 
+        # after concatenation. If D in the source refers to per-plane dim, 
+        # then f_level is 3*D. If D is the total per-level dim, then 
+        # the planes might be stored differently. 
+        # Based on "feature F with dimensionality D" after concatenating 3 planes,
+        # D is the total dimension per level.
+        # However, standard tri-plane implementations store D per plane.
+        # We will assume D_source = 3 * D_per_plane.
+        # To be safe, we return the concatenated tensor.
+        
+        all_features.append(f_level)
+        
+    # Final concatenation
+    # Length is 3 + L * D_source
+    result = torch.cat(all_features, dim=-1)
+    return result
+```
+
+**Edge Cases:**
+*   **Boundary Conditions:** Points outside the unit cube (or defined scene bounds) require clamping or padding during bilinear interpolation [S2].
+*   **Discretization Discontinuities:** Single-resolution tri-planes suffer from discretization artifacts; multi-scale helps mitigate this by providing lower-frequency context [S1].
+
+## Subtopics
+
+### Multi-scale Tri-plane Encoding
+A specific application of the architecture where the multi-scale tri-planes replace traditional frequency position encoding. It constructs a set of tri-planes $\{P_l\}_{l=1}^L$ and defines a position encoding function $E(\mathbf{x})$ that concatenates the input $\mathbf{x}$ with features from every level, forming $\mathbf{F}(\mathbf{x}) = (\mathbf{x}, \mathbf{F}_1, \dots, \mathbf{F}_L)$ [S2]. This provides explicit representation while guaranteeing different levels of detail [S2].
+
+## Operating characteristics
+*   **Memory Complexity:** Scales linearly with the number of levels $L$ and the square of the resolution. For 4 levels ($512^2, 256^2, 128^2, 64^2$), the memory footprint is significantly larger than a single tri-plane but smaller than high-resolution 3D volumes.
+*   **Performance:** In comparisons on the DTU dataset, the proposed method (PET-NeuS with SAC) outperformed the MSA baseline by 7% on average [S1]. The MSA was found to be less effective than Self-Attention Convolution (SAC) because the smoothing kernel in SAC handles noise influence more effectively [S1].
+*   **Strengths:** Explicit multi-resolution representation; mimics frequency bands without complex attention mechanisms.
+*   **Limitations:** Less effective than SAC at suppressing noise interference; discretization discontinuities can still occur if not properly modulated (e.g., with positional encoding) [S1].
+
+## Background
+The Multi-Scale Tri-Plane Architecture was introduced as a baseline comparison in the PET-NeuS paper [S1] to evaluate the effectiveness of Self-Attention Convolution (SAC). It was designed to mimic the multi-frequency bands of SAC using a multi-resolution data structure. The concept of using tri-planes for 3D representation was further developed in Anti-Aliased Neural Implicit Surfaces with Encoding Level of Detail [S2], which applied multi-scale tri-planes to replace traditional frequency position encoding for anti-aliasing purposes.
+
+## Sources
+[S1] PET-NeuS: Positional Encoding Tri-Planes for Neural Surfaces, http://arxiv.org/abs/2305.05594v1, fetched 2026-10-27
+[S2] Anti-Aliased Neural Implicit Surfaces with Encoding Level of Detail, https://doi.org/10.1145/3610548.3618197, fetched 2026-10-27

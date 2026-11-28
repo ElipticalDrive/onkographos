@@ -1,0 +1,207 @@
+--- v001.md
++++ v002.md
+@@ -4,116 +4,130 @@
+ 
+ ## Overview
+-This method generates stratified cosine-weighted diffuse rays for bounded one-bounce voxel global illumination, sampling from primary hit positions [S1, unofficial]. It differs from its siblings by specifically targeting the second bounce (GI) in a voxel-based pipeline, using stratified sampling to reduce variance compared to pure random generation, while restricting rays to a fixed maximum distance for performance [S1, unofficial].
++This method generates stratified cosine-weighted diffuse rays for bounded one-bounce voxel global illumination, sampling from primary hit positions [S1, unofficial]. It differs from its siblings by specifically targeting the second bounce in a voxel-based pipeline and restricting rays to a fixed maximum distance [S1, unofficial].
+ 
+ ## How it works
+ **Inputs:**
+-- `globalIndex`: The unique thread ID in the compute dispatch.
+-- `primaryHitBuffer`: An array of `TraceRay` structures containing the result of the primary ray trace pass.
+-- `activeSamples`: The number of active samples per pixel for the current frame.
+-- `pixelIndex`: Derived from `globalIndex`.
+-- `sampleIndex`: Derived from `globalIndex`.
++- `globalIndex`: The unique compute dispatch thread ID [S1, unofficial].
++- `primary_buffer`: An array of primary hit results indexed by pixel [S1, unofficial].
++- `activeSamples`: The number of active samples per pixel for the current frame [S1, unofficial].
++- `kMaximumGiSamples`: The maximum number of GI samples per pixel [S1, unofficial].
++- `gGiFrameSeed`: The seed for the PCG random number generator [S1, unofficial].
++- `gGlobalIlluminationMaxDistanceMeters`: The maximum ray distance in meters [S1, unofficial].
++- `gShadowBiasMeters`: The shadow bias in meters [S1, unofficial].
++- `voxel_scale`: The conversion factor from meters to voxel units [G].
+ 
+ **Outputs:**
+-- `giRayBuffer`: An array of `TraceRay` structures containing the generated GI rays.
++- `output_buffer`: An array of `TraceRay` structures containing the generated GI rays [S1, unofficial].
+ 
+ **Data Structures:**
+-- `TraceRay`: Contains fields `hit` (uint, 0 if miss, non-zero if hit), `origin` (float3), `direction` (float3), `maxDistance` (float), and `id` (uint).
+-- `randomPair`: A pair of floats `(u, v)` representing the stratified sample coordinates.
++- `TraceRay`: Contains fields `hit` (uint, 0 if miss, non-zero if hit), `origin` (float3), `direction` (float3), `maxDistance` (float), and `id` (uint) [G].
++- `randomPair`: A pair of floats `(u, v)` representing the stratified sample coordinates [S1, unofficial].
++
++**Numbered Steps & Formulas:**
++1. Map the dispatch thread ID to pixel and sample indices: `pixelIndex = globalIndex // kMaximumGiSamples` and `sampleIndex = globalIndex % kMaximumGiSamples` [S1, unofficial]. If `globalIndex >= totalCapacity`, return an empty `TraceRay` [S1, unofficial].
++2. Fetch the primary trace result for `pixelIndex` [S1, unofficial]. If `primary.hit == 0` or `sampleIndex >= activeSamples`, return an empty `TraceRay` [S1, unofficial].
++3. Compute the stratified sample coordinates: `hashVal = PcgHash(pixelIndex ^ gGiFrameSeed)` and `randomPair = RotatedHammersley2D(sampleIndex, activeSamples, hashVal)` [S1, unofficial].
++4. Set the ray direction using cosine-weighted hemisphere sampling relative to the surface normal at the primary hit point: `ray.direction = CosineWeightedHemisphereSample(primary.normal, randomPair)` [S1, unofficial].
++5. Set `ray.maxDistance` to `gGlobalIlluminationMaxDistanceMeters` converted to voxel units, assign `ray.id = globalIndex`, and write the result to `output_buffer` [S1, unofficial].
+ 
+ **Parameters:**
+ - `kMaximumGiSamples`: Fixed at 16 [S1, unofficial].
++- `gGiPrimaryRayCount`: Number of primary rays processed in the previous pass [S1, unofficial].
+ - `gGiFrameSeed`: Seed for the PCG random number generator [S1, unofficial].
++- `gGlobalIlluminationMode`: Controls GI activation; GI is active when equal to `kGlobalIlluminationVoxelOneBounce` [S1, unofficial].
++- `gGlobalIlluminationSamples`: User-requested number of GI samples per pixel [S1, unofficial].
+ - `gShadowBiasMeters`: Shadow bias in meters, converted to voxel units for ray origin offset [S1, unofficial].
+ - `gGlobalIlluminationMaxDistanceMeters`: Maximum distance for GI rays in meters, converted to voxel units [S1, unofficial].
+-- `gGlobalIlluminationMode`: Controls GI activation. GI is active when equal to `kGlobalIlluminationVoxelOneBounce` [S1, unofficial].
+ 
+-**Steps:**
+-1. **Map Thread ID:** Calculate `pixelIndex = globalIndex / kMaximumGiSamples` and `sampleIndex = globalIndex % kMaximumGiSamples`. If `globalIndex >= totalCapacity`, return an empty `TraceRay` [S1, unofficial].
+-2. **Fetch Primary Result:** Retrieve the primary trace result for `pixelIndex` and `sampleIndex`. If `primary.hit == 0u` or `sampleIndex >= activeSamples`, return an empty `TraceRay` [S1, unofficial].
+-3. **Compute Stratified Sample:** Generate a deterministic random pair using a rotated Hammersley sequence: `randomPair = RotatedHammersley2D(sampleIndex, activeSamples, PcgHash(pixelIndex ^ gGiFrameSeed))` [S1, unofficial].
+-4. **Sample Direction:** Compute the ray direction using cosine-weighted hemisphere sampling relative to the surface normal at the primary hit point: `ray.direction = CosineWeightedHemisphereSample(normal, randomPair)` [S1, unofficial].
+-5. **Set Ray Properties:** Set `ray.maxDistance` to `gGlobalIlluminationMaxDistanceMeters` (converted to voxel units) and assign a unique `ray.id`. Write the result to `giRayBuffer` [S1, unofficial].
++**Edge Cases and Pitfalls:**
++- If `activeSamples` is less than `sampleIndex`, the ray is discarded [S1, unofficial].
++- Precision issues may arise if `gShadowBiasMeters` is too small relative to `voxel_scale`, causing self-intersection [G].
++- Non-unit cell sizes require explicit `voxel_scale` multiplication for distance and bias values [G].
++- Degenerate surface normals (zero length) must be normalized before hemisphere sampling [G].
+ 
+ **Pseudocode:**
+ ```python
+-def generate_gi_ray(global_index, primary_hit_buffer, active_samples, k_maximum_gi_samples, g_gi_frame_seed, g_shadow_bias_meters, g_global_illumination_max_distance_meters, voxel_scale):
++def generate_gi_ray(global_index, primary_buffer, active_samples, k_maximum_gi_samples, g_gi_frame_seed, g_shadow_bias_meters, g_global_illumination_max_distance_meters, voxel_scale, total_capacity):
+     # Step 1: Map thread ID
+     pixel_index = global_index // k_maximum_gi_samples
+     sample_index = global_index % k_maximum_gi_samples
+     
+-    # Check capacity
+-    total_capacity = len(primary_hit_buffer) * k_maximum_gi_samples
+     if global_index >= total_capacity:
+-        return empty_trace_ray()
++        return TraceRay(hit=0, origin=(0.0, 0.0, 0.0), direction=(0.0, 0.0, 0.0), maxDistance=0.0, id=0)
+     
+-    # Step 2: Fetch primary trace result
+-    primary_hit = primary_hit_buffer[pixel_index][sample_index]
++    # Step 2: Fetch primary result
++    primary = primary_buffer[pixel_index]
+     
+-    if primary_hit.hit == 0 or sample_index >= active_samples:
+-        return empty_trace_ray()
++    if primary.hit == 0 or sample_index >= active_samples:
++        return TraceRay(hit=0, origin=(0.0, 0.0, 0.0), direction=(0.0, 0.0, 0.0), maxDistance=0.0, id=0)
+     
+     # Step 3: Compute stratified sample
+-    # PcgHash is a pseudo-random number generator hash function
+-    hash_value = pcg_hash(pixel_index ^ g_gi_frame_seed)
+-    random_pair = rotated_hammersley_2d(sample_index, active_samples, hash_value)
++    hash_val = pcg_hash(pixel_index ^ g_gi_frame_seed)
++    random_pair = rotated_hammersley_2d(sample_index, active_samples, hash_val)
+     
+     # Step 4: Sample direction
+-    # CosineWeightedHemisphereSample uses the surface normal from primary_hit
+-    ray_direction = cosine_weighted_hemisphere_sample(primary_hit.normal, random_pair)
++    ray_direction = cosine_weighted_hemisphere_sample(primary.normal, random_pair)
+     
+     # Step 5: Set ray properties
+-    # Convert max distance to voxel units
+     max_distance_voxel = g_global_illumination_max_distance_meters * voxel_scale
++    origin_offset = primary.normal * g_shadow_bias_meters * voxel_scale
++    ray_origin = (primary.origin[0] + origin_offset[0], primary.origin[1] + origin_offset[1], primary.origin[2] + origin_offset[2])
+     
+-    # Apply shadow bias to origin
+-    origin_offset = primary_hit.normal * g_shadow_bias_meters * voxel_scale
+-    ray_origin = primary_hit.origin + origin_offset
+-    
+-    # Create and return the GI ray
+-    return TraceRay(
+-        hit=1,
+-        origin=ray_origin,
+-        direction=ray_direction,
+-        maxDistance=max_distance_voxel,
+-        id=global_index
+-    )
++    return TraceRay(hit=1, origin=ray_origin, direction=ray_direction, maxDistance=max_distance_voxel, id=global_index)
+ 
+-def empty_trace_ray():
+-    return TraceRay(hit=0, origin=(0,0,0), direction=(0,0,0), maxDistance=0, id=0)
++def pcg_hash(x):
++    x = ((x >> 16) ^ x) * 0x45d9f3b
++    x = ((x >> 16) ^ x) * 0x45d9f3b
++    x = (x >> 16) ^ x
++    return x
++
++def rotated_hammersley_2d(sample_idx, active_samples, seed):
++    u = (sample_idx + 0.5) / active_samples
++    v = (seed + sample_idx * 2654435761) & 0xFFFFFFFF
++    v = ((v >> 1) ^ (-(v & 1))) & 0xFFFFFFFF
++    v = (v * 0x21f0aaad) & 0xFFFFFFFF
++    v = (v * 0xd35a2d97) & 0xFFFFFFFF
++    return (u, v / 4294967296.0)
++
++def cosine_weighted_hemisphere_sample(normal, random_pair):
++    u1, u2 = random_pair
++    x = math.sqrt(1.0 - u1) * math.cos(2.0 * math.pi * u2)
++    y = math.sqrt(1.0 - u1) * math.sin(2.0 * math.pi * u2)
++    z = math.sqrt(u1)
++    # Construct orthonormal basis from normal
++    if abs(normal[2]) < 0.9999:
++        up = (0.0, 0.0, 1.0)
++    else:
++        up = (1.0, 0.0, 0.0)
++    tangent = math_normalize(math_cross(up, normal))
++    bitangent = math_cross(normal, tangent)
++    return (tangent[0]*x + bitangent[0]*y + normal[0]*z, tangent[1]*x + bitangent[1]*y + normal[1]*z, tangent[2]*x + bitangent[2]*y + normal[2]*z)
++
++def math_normalize(v):
++    length = math.sqrt(v[0]**2 + v[1]**2 + v[2]**2)
++    return (v[0]/length, v[1]/length, v[2]/length)
++
++def math_cross(a, b):
++    return (a[1]*b[2] - a[2]*b[1], a[2]*b[0] - a[0]*b[2], a[0]*b[1] - a[1]*b[0])
++
++class TraceRay:
++    def __init__(self, hit, origin, direction, maxDistance, id):
++        self.hit = hit
++        self.origin = origin
++        self.direction = direction
++        self.maxDistance = maxDistance
++        self.id = id
+ ```
+ 
+-**Edge Cases and Pitfalls:**
+-- If `activeSamples` is less than `sampleIndex`, the ray is discarded [S1, unofficial].
+-- Precision issues may arise if `gShadowBiasMeters` is too small relative to voxel scale, causing self-intersection [G].
+-- The `RotatedHammersley2D` function must be implemented to ensure low discrepancy properties [G].
+-
+-## Subtopics
+-
+-### [Ray Sampling and Neural Rendering Pipeline](4255-ray-sampling-and-neural-rendering-pipeline.md)
+-Uses neural networks to predict ray directions, differing by learning-based vs. analytical sampling.
+-
+-### [Near-Middle-Far Ray Generation](6817-near-middle-far-ray-generation.md)
+-Divides space into zones for ray generation, differing by spatial partitioning vs. uniform hemisphere sampling.
+-
+-### [Refined Ray Generation via PDF Sampling](6837-refined-ray-generation-via-pdf-sampling.md)
+-Uses importance sampling based on PDFs, differing by adaptive weighting vs. fixed cosine-weighted distribution.
+-
+-### [Near-Far Linear Ray Generation](6841-near-far-linear-ray-generation.md)
+-Generates rays linearly between near and far planes, differing by linear interpolation vs. hemisphere sampling.
+-
+-### [Grid-based Stratified Camera Sampling](11819-grid-based-stratified-camera-sampling.md)
+-Stratifies camera rays on a grid, differing by camera-space stratification vs. surface-normal hemisphere stratification.
+-
+ ## Operating characteristics
+-- **Time Complexity:** O(1) per ray, as it involves constant-time arithmetic and hashing operations [S1, unofficial].
+-- **Memory Complexity:** O(N) where N is the number of pixels times `kMaximumGiSamples` [S1, unofficial].
+-- **Performance:** Performance depends on the efficiency of the `RotatedHammersley2D` and `CosineWeightedHemisphereSample` functions [S1, unofficial].
+-- **Strengths:** Reduces variance through stratification, suitable for one-bounce GI [S1, unofficial].
+-- **Limitations:** Fixed sample count limits accuracy, and cosine-weighted sampling may not be optimal for all surface types [G].
+-- **When to Use:** When one-bounce voxel GI is required and variance reduction is needed [S1, unofficial].
+-- **When Not to Use:** When multi-bounce GI or importance sampling is required [G].
++- Time complexity: Not given in the sources.
++- Memory complexity: Not given in the sources.
++- Measured performance: Not given in the sources.
++- Scaling: Not given in the sources.
++- Strengths and limitations: Not given in the sources.
++- When to use it and when not: Not given in the sources.
+ 
+ ## Background
+-This method is part of the destructible voxel engine's global illumination system, developed by HiroSakuraba [S1, unofficial]. It is designed for real-time applications where performance is critical [S1, unofficial].
++This method originates from the destructible voxel engine's global illumination system developed by HiroSakuraba [S1, unofficial]. It is implemented as a compute shader pass that follows the primary ray tracing pass [S1, unofficial].
+ 
+ ## Sources

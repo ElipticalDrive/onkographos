@@ -1,0 +1,156 @@
+# Line Segment-based Transformer (Lineformer)
+Also called: LS-MSA, Line Segment-based Multi-Head Self-Attention, Lineformer
+
+## Overview
+The Line Segment-based Transformer (Lineformer) is a neural architecture designed for sparse-view X-ray 3D reconstruction, specifically serving as the backbone for Structure-Aware X-ray Neural Radiodensity Fields (SAX-NeRF) [S1]. It solves the problem of capturing internal 3D structural dependencies in X-ray projections by computing self-attention locally within line segments of an X-ray, rather than globally across all sampled points [S1]. Unlike vanilla Transformers which exhibit quadratic computational complexity relative to the number of input points, Lineformer achieves linear complexity, making it efficient enough to integrate into iterative volume rendering pipelines [S1].
+
+## How it works
+**Inputs and Outputs:**
+*   **Input:** A batch of X-ray rays. For each ray, $N$ points are sampled along the ray path [S1]. Each point is represented by its 3D position $\mathbf{P} \in \mathbb{R}^3$ [S1]. The input to the attention module is the point feature matrix $\mathbf{X} \in \mathbb{R}^{N \times C}$, where $C$ is the channel dimension [S1].
+*   **Output:** A refined feature representation $\mathbf{Y} \in \mathbb{R}^{N \times C}$ and, subsequently, a predicted radiodensity value $D \in \mathbb{R}^N$ for each point [S1].
+
+**Data Structures:**
+*   **Point Features ($\mathbf{X}$):** A matrix of shape $N \times C$ [S1].
+*   **Segmented Features ($\mathbf{X}_i$):** Sub-matrices of shape $\frac{N}{M} \times C$, where $M$ is the number of line segments [S1].
+*   **Attention Heads ($\mathbf{Q}_i^j, \mathbf{K}_i^j, \mathbf{V}_i^j$):** Matrices of shape $\frac{N}{M} \times d_h$, where $d_h = C/k$ [S1].
+*   **Learnable Scale ($\alpha_i^j$):** A scalar parameter for each head and segment [S1].
+
+**Parameters:**
+*   $N$: Number of sampled points along an X-ray. Typical value: 320 [S1].
+*   $M$: Number of line segments the input points are partitioned into. Not given in the sources.
+*   $k$: Number of attention heads. Not given in the sources.
+*   $C$: Channel dimension of the point features. Not given in the sources.
+*   $d_h$: Dimension for each attention head, calculated as $d_h = C/k$ [S1].
+
+**Algorithm Steps:**
+1.  **Hash Encoding:** The 3D positions $\mathbf{P}$ of the $N$ sampled points are fed into a hash encoding module $\mathcal{H}$ to produce initial point features $\mathbf{F} \in \mathbb{R}^{N \times C}$ [S1].
+    $$ \mathbf{F} = \mathcal{H}(\mathbf{P}) $$
+2.  **Partitioning:** The input feature matrix $\mathbf{X}$ (initially $\mathbf{F}$, or the output of previous layers) is partitioned into $M$ contiguous line segments along the point dimension:
+    $$ \mathbf{X} = [\mathbf{X}_1, \mathbf{X}_2, \dots, \mathbf{X}_M]^{\text{T}} $$
+    where each segment $\mathbf{X}_i \in \mathbb{R}^{\frac{N}{M} \times C}$ for $i = 1, \dots, M$ [S1].
+3.  **Linear Projection:** For each segment $\mathbf{X}_i$, linear projections generate Query ($\mathbf{Q}_i$), Key ($\mathbf{K}_i$), and Value ($\mathbf{V}_i$) matrices using learnable weight matrices $\mathbf{W}^{\mathbf{Q}_i}, \mathbf{W}^{\mathbf{K}_i}, \mathbf{W}^{\mathbf{V}_i} \in \mathbb{R}^{C \times C}$:
+    $$ \mathbf{Q}_i = \mathbf{X}_i \mathbf{W}^{\mathbf{Q}_i}, \quad \mathbf{K}_i = \mathbf{X}_i \mathbf{W}^{\mathbf{K}_i}, \quad \mathbf{V}_i = \mathbf{X}_i \mathbf{W}^{\mathbf{V}_i} $$
+    [S1].
+4.  **Head Splitting:** The Query, Key, and Value matrices for segment $i$ are split into $k$ heads along the channel dimension:
+    $$ \mathbf{Q}_i = [\mathbf{Q}_i^1, \mathbf{Q}_i^2, \dots, \mathbf{Q}_i^k], \quad \mathbf{K}_i = [\mathbf{K}_i^1, \mathbf{K}_i^2, \dots, \mathbf{K}_i^k], \quad \mathbf{V}_i = [\mathbf{V}_i^1, \mathbf{V}_i^2, \dots, \mathbf{V}_i^k] $$
+    where each head $\mathbf{Q}_i^j, \mathbf{K}_i^j, \mathbf{V}_i^j \in \mathbb{R}^{\frac{N}{M} \times d_h}$ and $d_h = C/k$ [S1].
+5.  **Local Self-Attention:** For each head $j$ and segment $i$, compute the attention output $\mathbf{H}_i^j$:
+    $$ \mathbf{H}_i^j = \text{Attn}(\mathbf{Q}_i^j, \mathbf{K}_i^j, \mathbf{V}_i^j) = \mathbf{V}_i^j \text{softmax}\left(\frac{{\mathbf{K}_i^j}^{\text{T}}\mathbf{Q}_i^j}{\alpha_i^j}\right) $$
+    where $\alpha_i^j \in \mathbb{R}$ is a learnable scaling parameter specific to the segment and head [S1].
+6.  **Concatenation and Output:** The outputs from all $k$ heads for segment $i$ are concatenated along the channel dimension, passed through a final linear layer, and added with a positional embedding $\mathbf{E}_i \in \mathbb{R}^{\frac{N}{M} \times C}$ to produce the output segment $\mathbf{Y}_i$:
+    $$ \mathbf{Y}_i = \text{Linear}(\text{Concat}(\mathbf{H}_i^1, \dots, \mathbf{H}_i^k)) + \mathbf{E}_i $$
+    [S1]. The final output $\mathbf{Y}$ is the concatenation of all $\mathbf{Y}_i$ [S1].
+7.  **Radiodensity Prediction:** The output features $\mathbf{Y}$ pass through two fully connected layers to derive the point radiodensity $D \in \mathbb{R}^N$ [S1].
+
+**Pseudocode:**
+> **Unverified code.** The code below did not pass a test run against a reference implementation, or no test fits it, so it may contain errors.
+
+```python
+import torch
+import torch.nn as nn
+import torch.nn.functional as F
+
+class LineSegmentAttention(nn.Module):
+    def __init__(self, N, M, C, k):
+        super().__init__()
+        self.N = N
+        self.M = M
+        self.C = C
+        self.k = k
+        self.d_h = C // k
+        self.segment_size = N // M
+        
+        # Learnable weights for linear projections
+        self.W_Q = nn.Linear(C, C)
+        self.W_K = nn.Linear(C, C)
+        self.W_V = nn.Linear(C, C)
+        
+        # Learnable scaling parameters for each segment and head
+        # Shape: [M, k]
+        self.alpha = nn.Parameter(torch.ones(M, k))
+        
+        # Final linear layer after concatenation
+        self.out_linear = nn.Linear(C, C)
+        
+        # Positional embedding per segment
+        # Shape: [M, N/M, C]
+        self.pos_embed = nn.Parameter(torch.randn(M, self.segment_size, C))
+
+    def forward(self, X):
+        """
+        X: [N, C] Input point features
+        Returns: [N, C] Output features
+        """
+        # 1. Partition X into M segments
+        X_seg = X.view(self.M, self.segment_size, self.C)
+        
+        # 2. Linear Projections for each segment
+        Q_seg = self.W_Q(X_seg)
+        K_seg = self.W_K(X_seg)
+        V_seg = self.W_V(X_seg)
+        
+        # 3. Split into k heads: [M, N/M, C] -> [M, N/M, k, d_h] -> [M, k, N/M, d_h]
+        Q_heads = Q_seg.view(self.M, self.segment_size, self.k, self.d_h).permute(0, 2, 1, 3)
+        K_heads = K_seg.view(self.M, self.segment_size, self.k, self.d_h).permute(0, 2, 1, 3)
+        V_heads = V_seg.view(self.M, self.segment_size, self.k, self.d_h).permute(0, 2, 1, 3)
+        
+        # 4. Compute Attention: K^T Q / alpha
+        # K_heads: [M, k, N/M, d_h] -> transpose last two dims -> [M, k, d_h, N/M]
+        K_T = K_heads.transpose(-2, -1)
+        
+        # Inner product: [M, k, d_h, N/M] @ [M, k, N/M, d_h] -> [M, k, d_h, d_h]
+        inner_prod = torch.matmul(K_T, Q_heads)
+        
+        # Scale by alpha: [M, k, 1, 1]
+        alpha_scaled = self.alpha.unsqueeze(-1).unsqueeze(-1)
+        scaled = inner_prod / alpha_scaled
+        
+        # Softmax over the channel dimension (d_h) to normalize weights
+        attn_weights = F.softmax(scaled, dim=-1)
+        
+        # Multiply by V: [M, k, N/M, d_h] @ [M, k, d_h, d_h] -> [M, k, N/M, d_h]
+        # Flatten batch dims for standard matmul
+        V_flat = V_heads.view(-1, self.segment_size, self.d_h)
+        Attn_flat = attn_weights.view(-1, self.d_h, self.d_h)
+        H_flat = torch.matmul(V_flat, Attn_flat)
+        
+        # Reshape back to [M, k, N/M, d_h]
+        H = H_flat.view(self.M, self.k, self.segment_size, self.d_h)
+        
+        # 5. Concatenate heads: [M, k, N/M, d_h] -> [M, N/M, k*d_h] = [M, N/M, C]
+        H_concat = H.permute(0, 2, 1, 3).contiguous().view(self.M, self.segment_size, self.C)
+        
+        # 6. Final Linear + Pos Embed
+        Y_seg = self.out_linear(H_concat) + self.pos_embed
+        
+        # 7. Flatten to [N, C]
+        Y = Y_seg.view(self.N, self.C)
+        
+        return Y
+```
+
+**Edge Cases and Pitfalls:**
+*   **Division by Zero:** The learnable parameter $\alpha_i^j$ must be initialized to positive values and constrained during training to avoid zero values, which would cause division by zero in the attention scaling [G].
+*   **Segment Size:** $N$ must be divisible by $M$ to ensure uniform segment sizes. If not, padding or irregular segmentation is required, which is not described in the source [G].
+*   **Channel Dimension:** $C$ must be divisible by $k$ to ensure integer head dimensions $d_h$ [G].
+
+## Operating characteristics
+**Time and Memory Complexity:**
+*   The computational complexity of LS-MSA is $\mathcal{O}(\text{LS-MSA}) = \frac{2NC^2}{k}$, which is linear with respect to the number of input points $N$ [S1].
+*   This is derived from $k \times M$ matrix multiplications of size $d_h \times \frac{N}{M}$ and $\frac{N}{M} \times d_h$ [S1].
+*   In contrast, global multi-head self-attention (G-MSA) has a complexity of $\mathcal{O}(\text{G-MSA}) = 2N^2C$, which is quadratic in $N$ [S1].
+*   Lineformer significantly reduces the computational burden of G-MSA, allowing it to be integrated into each basic unit of the backbone [S1].
+
+**Measured Performance:**
+*   On the X3D dataset, SAX-NeRF using Lineformer surpassed previous NeRF-based methods by 12.56 dB on novel view synthesis (NVS) and 2.49 dB on CT reconstruction [S1].
+*   Experiments were conducted on an RTX 8000 GPU [S1].
+
+**Strengths and Limitations:**
+*   **Strengths:** Linear computational complexity enables efficient processing of X-ray rays; captures internal 3D structural dependencies better than global attention on sparse data [S1].
+*   **Limitations:** Relies on the assumption that structural dependencies are local to line segments; performance depends on the effectiveness of the Masked Local-Global (MLG) ray sampling strategy for contextual information [S1].
+
+## Background
+The Line Segment-based Transformer was proposed in the paper "Structure-Aware Sparse-View X-Ray 3D Reconstruction" (SAX-NeRF) by Cai Yuanhao et al., presented at CVPR 2024 [S1]. It was developed to address the limitations of existing NeRF algorithms in capturing structural contents of imaged objects in sparse-view X-ray tomography [S1]. The method is part of a framework that also includes a Masked Local-Global (MLG) ray sampling strategy and utilizes the X3D dataset [S1].
+
+## Sources
+[S1] Structure-Aware Sparse-View X-Ray 3D Reconstruction, https://doi.org/10.1109/cvpr52733.2024.01062, fetched 2026-10-26

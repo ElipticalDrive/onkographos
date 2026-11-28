@@ -1,0 +1,127 @@
+--- v004.md
++++ v005.md
+@@ -4,50 +4,67 @@
+ 
+ ## Overview
+-Shadow Volume Voxelization is a technique to generate a 3D shadow volume texture by voxelizing scene geometry into a 3D grid, where each voxel stores a bitmask representing which of its 8 constituent sub-voxels are occluded [S1, unofficial]. It builds on [Orthographic Multi-View Voxelization](3892-orthographic-multi-view-voxelization.md) by replacing the standard occupancy bit with a 3-bit occlusion mask per coarse voxel, enabling fine-grained shadow information for subsequent volume rendering [S1, unofficial].
++Shadow Volume Voxelization generates a 3D shadow volume texture by voxelizing scene geometry into a 3D grid, where each coarse voxel stores an 8-bit bitmask representing which of its 8 constituent sub-voxels are occluded [S1, unofficial]. It extends [Orthographic Multi-View Voxelization](3892-orthographic-multi-view-voxelization.md) by storing a full 8-bit occlusion mask per coarse voxel instead of a single occupancy bit, enabling fine-grained shadow information for subsequent volume rendering [S1, unofficial].
+ 
+ ## How it works
+ **Inputs and Outputs:**
+ - Input: Scene geometry (meshes with model matrices), scene bounding box dimensions ($W, H, D$ in world units), and a scale factor (e.g., 10 units per meter) [S1, unofficial].
+-- Output: A 3D texture (`GL_R8UI`) with 3 mip levels (Level 0: $W \times H \times D$, Level 1: $W/2 \times H/2 \times D/2$, Level 2: $W/4 \times H/4 \times D/4$) [S1, unofficial].
++- Output: A 3D texture with internal format `GL_R8UI` (unsigned byte, red channel only) containing 3 mip levels [S1, unofficial].
+ 
+ **Data Structures:**
+-- `ShadowVolume` class containing:
+-  - `width`, `height`, `depth`: Integer dimensions of the finest mip level [S1, unofficial].
+-  - `volume_texture`: OpenGL 3D texture handle [S1, unofficial].
+-  - `shadow_volume_mip0`: Pointer to host-side memory for Level 0 (`uint8_t*`) [S1, unofficial].
+-  - `scene_xml`, `scene_root`: XML representation of the scene hierarchy [S1, unofficial].
++- `ShadowVolume` class fields: `width`, `height`, `depth` (integer dimensions of the finest mip level), `volume_texture` (OpenGL 3D texture handle), `shadow_volume_mip0` (pointer to Level 0 data, `uint8_t*`), `scene_xml` and `scene_root` (XML scene hierarchy representation) [S1, unofficial].
+ 
+ **Steps:**
++1. **Initialization:** Create a 3D texture with 3 mip levels. Level 0 dimensions are $(W, H, D)$, Level 1 are $(W/2, H/2, D/2)$, and Level 2 are $(W/4, H/4, D/4)$ [S1, unofficial]. Initialize Level 0 memory to zero [S1, unofficial].
++2. **Voxel Processing:** For each voxel $(x_v, y_v, z_v)$ in the input shape:
++   - Calculate world position: $\text{voxel\_pos} = \text{vec3}(x_v, y_v, z_v) + \text{vec3}(0.5, 0.5, 0.5)$, then transform: $\text{voxel\_pos} = \text{vec3}(\text{model\_matrix} \times \text{vec4}(\text{voxel\_pos}, 10.0))$ [S1, unofficial].
++   - Map to grid coordinates: $x = \lfloor \text{voxel\_pos}.x \rfloor + \text{width} / 2$, $y = \lfloor \text{voxel\_pos}.y \rfloor$, $z = \lfloor \text{voxel\_pos}.z \rfloor + \text{depth} / 2$ [S1, unofficial].
++   - Boundary check: If $x < 0$ or $x \ge \text{width}$ or $y < 0$ or $y \ge \text{height}$ or $z < 0$ or $z \ge \text{depth}$, skip the voxel [S1, unofficial].
++3. **Bitmask Calculation:**
++   - Calculate Level 0 index for the coarse 2x2x2 block using integer division: $\text{index} = (x / 2) + \text{width} \times ((y / 2) + \text{height} \times (z / 2))$ [S1, unofficial].
++   - Calculate sub-voxel bit offset: $\text{offset} = (x \% 2) + 2 \times (y \% 2) + 4 \times (z \% 2)$ [S1, unofficial].
++   - Update bitmask: $\text{shadow\_volume\_mip0}[\text{index}] \ |= \ (1 \ll \text{offset})$ [S1, unofficial].
++4. **Mipmap Generation:**
++   - Level 1: Iterate over Level 0 dimensions $(i, j, k)$. Compute $\text{index\_mip1} = (i / 2) + \text{width\_mip1} \times ((j / 2) + \text{height\_mip1} \times (k / 2))$. Accumulate: $\text{shadow\_volume\_mip1}[\text{index\_mip1}] \ |= \ \text{shadow\_volume\_mip0}[\text{index}]$ [S1, unofficial].
++   - Level 2: Iterate over Level 1 dimensions $(i, j, k)$. Compute $\text{index\_mip2} = (i / 2) + \text{width\_mip2} \times ((j / 2) + \text{height\_mip2} \times (k / 2))$. Accumulate: $\text{shadow\_volume\_mip2}[\text{index\_mip2}] \ |= \ \text{shadow\_volume\_mip1}[\text{index}]$ [S1, unofficial].
+ 
+-1. **Initialization:** Create a 3D texture with internal format `GL_R8UI` (unsigned byte, red channel only) and 3 mip levels [S1, unofficial]. Initialize Level 0 memory (`shadow_volume_mip0`) to zero [S1, unofficial].
++**Pseudocode:**
++```python
++def initialize_shadow_volume(width, height, depth):
++    mip0 = [0] * (width * height * depth)
++    mip1 = [0] * ((width // 2) * (height // 2) * (depth // 2))
++    mip2 = [0] * ((width // 4) * (height // 4) * (depth // 4))
++    return mip0, mip1, mip2
+ 
+-2. **Voxel Processing:** For each voxel $(x_v, y_v, z_v)$ in the input shape:
+-   - Calculate world position:
+-     $$ \text{voxel\_pos} = \text{vec3}(x_v, y_v, z_v) + \text{vec3}(0.5, 0.5, 0.5) $$
+-     $$ \text{voxel\_pos} = \text{vec3}(\text{model\_matrix} \times \text{vec4}(\text{voxel\_pos}, 10.0)) $$
+-     (Assuming 10 units per meter scale) [S1, unofficial].
+-   - Map to grid coordinates $(x, y, z)$:
+-     $$ x = \lfloor \text{voxel\_pos}.x \rfloor + \text{width} / 2 $$
+-     $$ y = \lfloor \text{voxel\_pos}.y \rfloor $$
+-     $$ z = \lfloor \text{voxel\_pos}.z \rfloor + \text{depth} / 2 $$
+-   - **Boundary Check:** If $x < 0$ or $x \ge \text{width}$ or $y < 0$ or $y \ge \text{height}$ or $z < 0$ or $z \ge \text{depth}$, skip the voxel [S1, unofficial].
++def add_voxel(xv, yv, zv, model_matrix, width, height, depth, mip0):
++    voxel_pos = (xv + 0.5, yv + 0.5, zv + 0.5)
++    # Apply model matrix with 10.0f w-component scale [S1, unofficial]
++    voxel_pos = apply_model_matrix(voxel_pos, model_matrix, w=10.0)
++    x = int(math.floor(voxel_pos[0])) + width // 2
++    y = int(math.floor(voxel_pos[1]))
++    z = int(math.floor(voxel_pos[2])) + depth // 2
++    if x < 0 or x >= width or y < 0 or y >= height or z < 0 or z >= depth:
++        return
++    index = (x // 2) + width * ((y // 2) + height * (z // 2))
++    offset = (x % 2) + 2 * (y % 2) + 4 * (z % 2)
++    mip0[index] |= (1 << offset)
+ 
+-3. **Bitmask Calculation:**
+-   - Calculate Level 0 index for the coarse 2x2x2 block:
+-     $$ \text{index} = (x / 2) + \text{width} \times ((y / 2) + \text{height} \times (z / 2)) $$
+-     (Integer division) [S1, unofficial].
+-   - Calculate sub-voxel bit offset within the 2x2x2 block:
+-     $$ \text{offset} = (x \% 2) + 2 \times (y \% 2) + 4 \times (z \% 2) $$
+-   - Update the bitmask:
+-     $$ \text{shadow\_volume\_mip0}[\text{index}] \ |= \ (1 \ll \text{offset}) $$
+-     (Bitwise OR to accumulate occlusion bits) [S1, unofficial].
+-
+-4. **Mipmap Generation:**
+-   - **Level 1:** Iterate over Level 0 dimensions $(i, j, k)$. Compute Level 1 index:
+-     $$ \text{index\_mip1} = (i / 2) + \text{width\_mip1} \times ((j / 2) + \text{height\_mip1} \times (k / 2)) $$
+-     $$ \text{shadow\_volume\_mip1}[\text{index\_mip1}] \ |= \ \text{shadow\_volume\_mip0}[\text{index}] $$
+-   - **Level 2:** Iterate over Level 1 dimensions $(i, j, k)$. Compute Level 2 index:
+-     $$ \text{index\_mip2} = (i / 2) + \text{width\_mip2} \times ((j / 2) + \text{height\_mip2} \times (k / 2)) $$
+-     $$ \text{shadow\_volume\_mip2}[\text{index\_mip2}] \ |= \ \text{shadow\_volume\_mip1}[\text{index}] $$
++def generate_mipmaps(mip0, width, height, depth):
++    mip1 = [0] * ((width // 2) * (height // 2) * (depth // 2))
++    mip2 = [0] * ((width // 4) * (height // 4) * (depth // 4))
++    for i in range(width):
++        for j in range(height):
++            for k in range(depth):
++                idx0 = (i // 2) + width * ((j // 2) + height * (k // 2))
++                idx1 = (i // 2) + (width // 2) * ((j // 2) + (height // 2) * (k // 2))
++                mip1[idx1] |= mip0[idx0]
++    for i in range(width // 2):
++        for j in range(height // 2):
++            for k in range(depth // 2):
++                idx1 = (i // 2) + (width // 2) * ((j // 2) + (height // 2) * (k // 2))
++                idx2 = (i // 2) + (width // 4) * ((j // 2) + (height // 4) * (k // 2))
++                mip2[idx2] |= mip1[idx1]
++    return mip1, mip2
++```
++*(Note: `apply_model_matrix` performs a standard 4x4 matrix-vector multiplication followed by perspective division and casting to vec3 [G].)*
+ 
+ **Parameters:**
+@@ -57,11 +74,11 @@
+ 
+ **Pitfalls:**
+-- The shadow volume fragment shader is empty, indicating it may be used for depth testing or stencil operations rather than direct rendering [S1, unofficial].
+-- Precision issues may arise from floating-point to integer conversion in grid coordinate mapping [G].
++- The shadow volume fragment shader is empty, indicating it is intended for depth testing or stencil operations rather than direct color rendering [S1, unofficial].
++- Floating-point to integer conversion during grid coordinate mapping may cause precision issues near boundaries [G].
+ 
+ ## Subtopics
+ 
+ ### Directional Shadow Map Volume Generation
+-A variant that generates shadow volumes specifically for directional lights by rendering scene geometry from a light-aligned orthographic camera into a 3D texture [S2, unofficial]. It checks a `ContinousVoxelizationPass` setting; if false, it skips rendering [S2, unofficial]. It calculates a tight orthographic frustum by transforming the scene bounding box corners into light space, applying a `LIGHT_CAMERA_OFFSET` of 50.0f to near/far planes [S2, unofficial]. It enables depth testing, blending `GL_ONE, GL_ZERO`, and front-face culling [S2, unofficial]. It iterates scene objects, skipping those not in `DEFERRED_STAGE` or without colliders, and performs frustum vs primitive culling before drawing to the shadow map volume [S2, unofficial].
++A variant that generates shadow volumes specifically for directional lights by rendering scene geometry from a light-aligned orthographic camera into a 3D texture [S2, unofficial]. It checks a `ContinousVoxelizationPass` setting; if false, it skips rendering and returns [S2, unofficial]. It calculates a tight orthographic frustum by transforming the scene bounding box corners into light space, applying a `LIGHT_CAMERA_OFFSET` of 50.0f to the near and far planes [S2, unofficial]. It enables depth testing, blending with `GL_ONE, GL_ZERO`, and front-face culling (`GL_CULL_FACE` with `GL_FRONT`) [S2, unofficial]. It iterates scene objects, skipping those not in `DEFERRED_STAGE` or without colliders, performs frustum vs primitive culling, locks the shader based on layers, and draws the object to the shadow map volume before ending the pass [S2, unofficial].
+ 
+ ## Operating characteristics
+@@ -69,5 +86,5 @@
+ 
+ ## Background
+-Originated in the context of voxel-based real-time rendering engines, specifically as part of the Voxel-Render project [S1, unofficial]. It is used to provide shadow information for volume rendering by voxelizing shadow volumes into a 3D texture [S1, unofficial].
++Not given in the sources.
+ 
+ ## Sources

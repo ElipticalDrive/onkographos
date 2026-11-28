@@ -1,0 +1,433 @@
+--- v004.md
++++ v005.md
+@@ -4,162 +4,294 @@
+ 
+ ## Overview
+-Compositing Tree Rendering is a time-varying volume rendering strategy that avoids re-rendering unmodified data by retaining partial images of static subtrees and incrementally compositing them with newly rendered partial images from modified regions [S1, S2, unofficial]. It differs from standard incremental rendering by maintaining a persistent pointer-based octree structure (the compositing tree) that mirrors the data compression structure, allowing for efficient splicing of new branches and recomposition of ancestors, whereas methods like [Octree-based Entropy Rendering](13580-octree-based-entropy-rendering.md) focus on spatial resolution adaptation rather than temporal delta-compositing.
++Compositing Tree Rendering is a time-varying volume rendering strategy that avoids re-rendering the entire volume for every frame by retaining and reusing partial images of unmodified data [S1, S2, unofficial]. It constructs a pointer-based octree (the compositing tree) mirroring the compressed data structure, where leaves store rendered partial images and interior nodes store the composite of their children [S1, S2, unofficial]. Unlike [Octree-based Entropy Rendering](13580-octree-based-entropy-rendering.md), which selects nodes based on visual information density, this method selects nodes based on temporal data modification, splicing in new branches only where the underlying volume data has changed [S1, S2, unofficial].
+ 
+ ## How it works
+-**Inputs and Outputs:**
+-*   **Input:** A sequence of compressed octrees representing time-varying volume data. The first tree is the initial state; subsequent trees represent changes (deltas) or full states where modifications are identified.
+-*   **Output:** A final image for each time step, constructed from the root of the compositing tree.
+-
+-**Data Structures:**
+-1.  **Compositing Tree:** A pointer-based octree with the exact same hierarchical structure as the compressed data octree [S1, S2, unofficial].
+-    *   **Interior Nodes:** Contain a "partial image" which is the result of compositing the images of all its children.
+-    *   **Leaves:** Contain a "partial image" rendered directly from the volume data represented by the corresponding leaf in the compressed octree.
+-2.  **Partial Image:** A 2D image buffer (typically RGBA) corresponding to the pixel coverage of the subtree's bounding box projected onto the image plane.
+-
+-**Algorithm Steps:**
+-
+-1.  **Initialization (Time Step 0):**
+-    *   Render the first compressed octree completely using ray casting.
+-    *   Populate the Compositing Tree:
+-        *   For each leaf in the compressed octree, render the corresponding subvolume and store the result in the leaf's partial image.
+-        *   For each interior node, composite the partial images of its children (using front-to-back compositing) and store the result in the node's partial image.
+-    *   The image at the root of the Compositing Tree is the final image for Time Step 0.
++
++### Inputs and Outputs
++**Inputs:**
++1. A sequence of compressed octree structures representing time-varying volume data [S1, S2, unofficial].
++2. A transfer function mapping data values to color and opacity [S1, S2, unofficial].
++3. Camera parameters (viewing position, orientation, projection) [S1, S2, unofficial].
++4. The original uncompressed volume data (required for boundary handling) [S1, S2, unofficial].
++
++**Outputs:**
++1. A final composite image for the current time step [S1, S2, unofficial].
++2. An updated compositing tree structure for the next time step [S1, S2, unofficial].
++
++### Data Structures
++
++**Compositing Tree:**
++A pointer-based octree with the same hierarchical structure as the compressed input octree [S1, S2, unofficial].
++*   **Interior Node:**
++    *   `children`: Array of 8 pointers to child nodes (or null if the node is a leaf in the compressed tree, though typically interior nodes in the compositing tree correspond to interior nodes in the compressed tree) [S1, S2, unofficial].
++    *   `image`: A 2D image buffer (partial image) representing the front-to-back compositing result of all rays passing through this node's spatial domain, derived from its children [S1, S2, unofficial].
++*   **Leaf Node:**
++    *   `data_ref`: Reference or pointer to the corresponding leaf in the compressed octree [S1, S2, unofficial].
++    *   `image`: A 2D image buffer (partial image) rendered directly from the volume data represented by this leaf [S1, S2, unofficial].
++
++**Compressed Octree (Input):**
++*   Nodes indicate spatial subdivision.
++*   Leaves represent uniform blocks or modified regions [S1, S2, unofficial].
++*   Metadata indicates which subtrees have changed between time steps [S1, S2, unofficial].
++
++### Algorithm Steps
++
++1.  **Initialization (Time Step $t=0$):**
++    *   Render the entire compressed octree completely using standard ray casting [S1, S2, unofficial].
++    *   Construct the initial compositing tree. Each leaf in the compositing tree contains the partial image rendered from its corresponding leaf in the compressed octree [S1, S2, unofficial].
++    *   For each interior node, compute its partial image by compositing the images of its 8 children [S1, S2, unofficial].
++    *   The image at the root of the compositing tree is the final image for $t=0$ [S1, S2, unofficial].
+ 
+ 2.  **Update (Time Step $t > 0$):**
+-    *   **Identify Modifications:** Compare the current compressed octree with the previous one to identify modified subtrees. [S1, S2, unofficial]
+-    *   **Create New Branch:** For each modified subtree, create a new branch in the Compositing Tree. This involves rendering the modified data.
+-        *   Render the leaves of the modified subtrees.
+-        *   Composite the results up to the root of the new branch.
+-    *   **Splice:** Replace the old branch in the Compositing Tree with the new branch.
+-    *   **Recompose Ancestors:** Starting from the parent of the spliced branch, recompute the partial image for each ancestor node by compositing its children's partial images (including the new branch and unchanged siblings).
+-    *   **Final Image:** The image at the root of the Compositing Tree is the final image for Time Step $t$.
+-
+-**Optimizations for Constant Subvolumes:**
+-When an octree leaf represents a uniform block (constant value), rendering is optimized by avoiding sample coordinate calculation and trilinear interpolation [S1, S2, unofficial].
+-
+-*   **General Discretized Volume Rendering Integral:**
+-    The accumulated color $C$ up to $n$ sample points is:
+-    $$ C = \sum_{i=1}^{n} C_i \alpha_i \prod_{j=1}^{i-1} (1 - \alpha_j) $$
+-    Where $C_i$ is the color and $\alpha_i$ is the opacity at sample $i$ [S1, S2, unofficial].
+-
+-*   **Simplified Formula for Constant Subvolume:**
+-    If all samples have identical color $C$ and opacity $\alpha$ (or $a$), the sum simplifies to a geometric series:
+-    $$ C_{total} = C \alpha \frac{1 - (1 - \alpha)^{n-1}}{1 - (1 - \alpha)} = C \frac{1 - (1 - \alpha)^n}{1 - (1 - \alpha)} $$
+-    *(Note: Sources [S1, unofficial] and [S2, unofficial] provide slightly different notations for the exponent, but both derive from the geometric series sum for $n$ samples. [S1, unofficial] uses $n-1$ in the exponent for the term $(1-\alpha)$, while [S2, unofficial] uses $n$. Given the standard front-to-back accumulation for $n$ samples with constant $\alpha$, the transmittance after $n$ samples is $(1-\alpha)^n$. The accumulated color is $C \sum_{i=1}^n \alpha (1-\alpha)^{i-1} = C \frac{1-(1-\alpha)^n}{1-(1-\alpha)}$. We use the form consistent with $n$ samples.)*
+-    
+-    Only the number of samples $n$ along the ray is required.
+-
+-**Pseudocode:**
++    *   Identify modified subtrees in the compressed octree by comparing the current compressed tree with the previous one [S1, S2, unofficial].
++    *   For each modified subtree:
++        *   Create a new compositing branch. This involves rendering the modified leaves and compositing them up to the root of the new branch [S1, S2, unofficial].
++        *   Splice this new branch into the existing compositing tree, replacing the old branch corresponding to the modified data [S1, S2, unofficial].
++    *   For unmodified subtrees:
++        *   Retain the existing partial images from the previous compositing tree [S1, S2, unofficial].
++        *   *Approximation:* Due to opacity accumulation obscuring back details, subtrees representing the back portion of the data may not be completely sampled in front-to-back rendering. As an approximation, these unchanged subtrees are not re-rendered even if they are in the back [S1, S2, unofficial].
++    *   Recomposite ancestors:
++        *   Starting from the spliced branches, traverse up to the root.
++        *   For each interior node on the path, update its partial image by compositing the images of its 8 children (some of which may be from the new branch, others from the retained old tree) [S1, S2, unofficial].
++    *   The image at the root of the compositing tree is the final image for time step $t$ [S1, S2, unofficial].
++
++### Formulas
++
++**General Discretized Volume Rendering Integral:**
++The accumulated color $C$ up to $n$ sample points on a ray is given by the front-to-back compositing equation [S1, S2, unofficial]:
++
++$$
++C = \sum_{i=1}^{n} C_i \alpha_i \prod_{j=1}^{i-1} (1 - \alpha_j)
++$$
++
++Where:
++*   $C_i$ is the color at sample point $i$.
++*   $\alpha_i$ is the opacity at sample point $i$.
++*   The term $\prod_{j=1}^{i-1} (1 - \alpha_j)$ represents the transmittance from the camera to sample $i$.
++
++**Simplified Compositing for Constant Subvolumes:**
++When an octree leaf represents a uniform block where all sample points have identical color $C$ and opacity $\alpha$, the rendering can be optimized. The calculations for sample coordinates and trilinear interpolation are avoided; only the number of samples $n$ is required [S1, S2, unofficial].
++
++The accumulated color $C_{total}$ is derived from the geometric series:
++
++$$
++C_{total} = C \alpha \frac{1 - (1 - \alpha)^{n-1}}{1 - (1 - \alpha)} = C \frac{1 - (1 - \alpha)^n}{1 - (1 - \alpha)}
++$$
++
++Note: Source [S1, unofficial] presents the formula as $C \alpha (1 - (1-\alpha)^{n-1}) / (1 - (1-\alpha))$ [S1, unofficial], while Source [S2, unofficial] presents it as $C \frac{1-(1-a)^n}{1-(1-a)}$ [S2, unofficial]. Both represent the sum of a geometric series of opacity contributions. The sources use $a$ and $\alpha$ interchangeably for opacity [S1, S2, unofficial].
++
++### Pseudocode
+ 
+ ```python
+-def render_time_step(compositing_tree, compressed_tree, time_step):
+-    """
+-    Renders a time step by updating the compositing tree.
+-    """
+-    if time_step == 0:
+-        # Initial full render
+-        render_subtree(compositing_tree.root, compressed_tree.root)
+-        return compositing_tree.root.image
+-
+-    # Identify modified subtrees
+-    modified_nodes = identify_modifications(compositing_tree, compressed_tree)
+-    
+-    # Create new branches for modified subtrees
++def render_compositing_tree(compressed_tree, uncompressed_data, camera, transfer_func, prev_compositing_tree):
++    """
++    Renders the volume for the current time step using the compositing tree strategy.
++    
++    Args:
++        compressed_tree: The compressed octree for the current time step.
++        uncompressed_data: The full volume data array (for boundary handling).
++        camera: Camera parameters (viewing position, orientation, etc.).
++        transfer_func: Function mapping data value to (color, opacity).
++        prev_compositing_tree: The compositing tree from the previous time step.
++        
++    Returns:
++        final_image: The composite image for the current time step.
++        new_compositing_tree: The updated compositing tree for the next step.
++    """
++    
++    # Step 1: Identify modified subtrees
++    modified_nodes = identify_modified_subtrees(compressed_tree, prev_compositing_tree)
++    
++    # Step 2: Initialize new compositing tree structure
++    # The structure mirrors the compressed tree.
++    # We can reuse nodes from prev_compositing_tree that are NOT modified.
++    new_compositing_tree = copy_structure(compressed_tree)
++    
++    # Step 3: Render modified subtrees
+     for node in modified_nodes:
+-        new_branch = create_new_branch(compositing_tree, node)
+-        render_subtree(new_branch, node)
+-        splice_into_tree(compositing_tree, node, new_branch)
++        render_subtree(node, compressed_tree, uncompressed_data, camera, transfer_func, new_compositing_tree)
+         
+-    # Recompose ancestors
+-    recompute_ancestors(compositing_tree, modified_nodes)
+-    
+-    return compositing_tree.root.image
+-
+-def render_subtree(compositing_node, compressed_node):
+-    """
+-    Renders a subtree. If leaf, render data. If interior, render children then composite.
+-    """
+-    if compressed_node.is_leaf():
+-        # Check if constant subvolume
+-        if compressed_node.is_constant():
+-            # Optimization: Use simplified formula
+-            n = compressed_node.sample_count
+-            C = compressed_node.constant_color
+-            alpha = compressed_node.constant_opacity
+-            compositing_node.image = constant_composite(C, alpha, n)
++    # Step 4: Retain unmodified subtrees
++    # Nodes not in modified_nodes are copied from prev_compositing_tree.
++    # Their partial images are already valid.
++    retain_unmodified_subtrees(compressed_tree, prev_compositing_tree, new_compositing_tree, modified_nodes)
++    
++    # Step 5: Recomposite ancestors
++    # Traverse up from modified leaves to root, updating partial images
++    update_ancestors(new_compositing_tree, modified_nodes)
++    
++    # Step 6: Return root image and tree
++    final_image = new_compositing_tree.root.image
++    return final_image, new_compositing_tree
++
++def render_subtree(node, compressed_tree, uncompressed_data, camera, transfer_func, compositing_tree):
++    """
++    Renders a subtree and populates the compositing tree.
++    """
++    if node.is_leaf():
++        # Render leaf directly from data
++        # Handle boundaries: if the leaf represents a uniform block, 
++        # use the simplified formula. If it contains boundaries, 
++        # use uncompressed data for accurate sampling.
++        if node.is_uniform_block():
++            n_samples = compute_ray_intersection_length(node, camera)
++            color, opacity = transfer_func(node.constant_value)
++            # Simplified formula for constant subvolume
++            if opacity == 0:
++                partial_image = empty_image()
++            else:
++                # C_total = C * (1 - (1-a)^n) / a
++                # Note: Source [S1, unofficial] uses (1-a)^(n-1) in numerator, [S2, unofficial] uses (1-a)^n.
++                # Standard front-to-back for n samples with constant alpha:
++                # C = C_val * alpha * sum_{i=0}^{n-1} (1-alpha)^i
++                #   = C_val * alpha * (1 - (1-alpha)^n) / (1 - (1-alpha))
++                #   = C_val * (1 - (1-alpha)^n)
++                # Wait, the source formula [S1, unofficial] is C * alpha * (1 - (1-alpha)^(n-1)) / (1 - (1-alpha))
++                # This simplifies to C * (1 - (1-alpha)^(n-1)).
++                # Let's stick to the source's explicit formula [S1, unofficial]:
++                # C_total = C * alpha * (1 - (1-alpha)^(n-1)) / alpha = C * (1 - (1-alpha)^(n-1))
++                # Source [S2, unofficial] says C * (1 - (1-a)^n) / (1 - (1-a)) = C * (1 - (1-a)^n) / a
++                # There is a discrepancy in the exponent (n vs n-1) and denominator.
++                # Source [S1, unofficial] text: "C_total = C alpha (1 - alpha^(n-1)) / (1 - alpha)" -> This is likely a typo in the source or my interpretation.
++                # Let's use the standard geometric sum for n samples:
++                # Transmittance T_0 = 1. T_i = T_{i-1} * (1-alpha).
++                # Contribution_i = C * alpha * T_{i-1}.
++                # Sum = C * alpha * (1 + (1-alpha) + ... + (1-alpha)^(n-1))
++                #     = C * alpha * (1 - (1-alpha)^n) / (1 - (1-alpha))
++                #     = C * (1 - (1-alpha)^n)
++                # Source [S1, unofficial] formula (4.2): C * alpha * (1 - (1-alpha)^(n-1)) / (1 - alpha)
++                # This equals C * (1 - (1-alpha)^(n-1)).
++                # Source [S2, unofficial] formula (4.2): C * (1 - (1-a)^n) / (1 - (1-a))
++                # This equals C * (1 - (1-a)^n) / a.
++                # Given the ambiguity, we implement the standard correct physics:
++                # C_final = C * (1 - (1-alpha)^n)
++                
++                factor = 1 - (1 - opacity)**n
++                partial_image = fill_image_with_color(color * factor)
+         else:
+-            # Standard ray casting for this leaf's region
+-            compositing_node.image = ray_cast(compressed_node)
++            # Boundary handling: use uncompressed data
++            partial_image = ray_cast_leaf(node, uncompressed_data, camera, transfer_func)
++            
++        compositing_tree.set_leaf_image(node, partial_image)
++        
+     else:
+-        # Render children
+-        for i in range(8):
+-            if compressed_node.children[i] is not None:
+-                render_subtree(compositing_node.children[i], compressed_node.children[i])
+-        
++        # Recursively render children
++        for child in node.children:
++            render_subtree(child, compressed_tree, uncompressed_data, camera, transfer_func, compositing_tree)
++            
+         # Composite children images
+-        compositing_node.image = composite_children(compositing_node.children)
+-
+-def constant_composite(C, alpha, n):
+-    """
+-    Computes color for a constant subvolume with n samples.
+-    Formula: C * (1 - (1-alpha)^n) / alpha
+-    """
+-    if alpha == 0:
+-        return (0, 0, 0, 0)
+-    transmittance = (1 - alpha) ** n
+-    accumulated_color = C * (1 - transmittance) / alpha
+-    return accumulated_color
+-
+-def composite_children(children):
+-    """
+-    Front-to-back compositing of 8 child images.
+-    Assumes children are ordered back-to-front or are composited in correct order.
+-    """
+-    result = (0, 0, 0, 0) # Clear color
+-    transmittance = 1.0
+-    
+-    # Note: Order of children depends on octree convention and view direction.
+-    # Standard front-to-back requires processing from front to back.
+-    for child in children_ordered_front_to_back(children):
+-        if child.image is not None:
+-            c, a = child.image.color, child.image.opacity
+-            result = result + c * a * transmittance
+-            transmittance *= (1 - a)
+-            
+-    return result
+-
+-def recompute_ancestors(compositing_tree, modified_nodes):
+-    """
+-    Recomputes partial images for all ancestors of modified nodes.
+-    """
++        child_images = [compositing_tree.get_child_image(child) for child in node.children]
++        partial_image = composite_images(child_images)
++        compositing_tree.set_node_image(node, partial_image)
++
++def identify_modified_subtrees(compressed_tree, prev_compositing_tree):
++    """
++    Returns a list of nodes that have changed data between time steps.
++    """
++    # Implementation depends on the specific compression scheme's change detection.
++    # Typically, this involves comparing metadata or hashes of the compressed leaves.
++    return [] # Placeholder for specific change detection logic
++
++def retain_unmodified_subtrees(compressed_tree, prev_compositing_tree, new_compositing_tree, modified_nodes):
++    """
++    Copies nodes from prev_compositing_tree to new_compositing_tree for unmodified regions.
++    """
++    # Implementation details depend on tree traversal and node matching.
++    pass
++
++def update_ancestors(compositing_tree, modified_nodes):
++    """
++    Recomposites images up the tree from modified nodes to the root.
++    """
++    # Collect all ancestors of modified nodes
+     ancestors = set()
+     for node in modified_nodes:
+-        current = node.parent
+-        while current is not None:
+-            ancestors.add(current)
++        current = node
++        while current.parent is not None:
++            ancestors.add(current.parent)
+             current = current.parent
+             
+-    # Process in topological order (children before parents)
+-    for ancestor in sorted_ancestors_by_depth(ancestors):
+-        ancestor.image = composite_children(ancestor.children)
++    # Sort ancestors by depth (bottom-up)
++    sorted_ancestors = sort_by_depth(ancestors, ascending=True)
++    
++    for node in sorted_ancestors:
++        child_images = [compositing_tree.get_child_image(child) for child in node.children]
++        partial_image = composite_images(child_images)
++        compositing_tree.set_node_image(node, partial_image)
++
++def composite_images(images):
++    """
++    Performs front-to-back compositing of 8 child images into one parent image.
++    """
++    # This is a 2D operation on the image buffers.
++    # For each pixel (x,y), composite the 8 values.
++    # Result = sum(C_i * alpha_i * prod(1-alpha_j))
++    pass
++
++def ray_cast_leaf(node, data, camera, transfer_func):
++    """
++    Standard ray casting for a leaf node using uncompressed data.
++    """
++    pass
++
++def compute_ray_intersection_length(node, camera):
++    """
++    Computes the number of samples n along a ray through the node's domain.
++    """
++    pass
++
++def fill_image_with_color(color):
++    """
++    Fills an image buffer with a single color.
++    """
++    pass
++
++def empty_image():
++    """
++    Returns an image with zero color and zero opacity.
++    """
++    pass
+ ```
+ 
+-**Edge Cases and Pitfalls:**
+-*   **Boundary Rendering:** Octree leaves represent uniform blocks, but boundaries between blocks must be rendered carefully. To avoid traversal overhead for boundary values, the original data is kept uncompressed, and the octree serves as a map into this volume data [S1, S2, unofficial].
+-*   **Viewing Position:** The optimization assumes a fixed viewing position. Changing the view requires rerendering the entire tree and creating a new compositing tree [S1, S2, unofficial].
+-*   **Temporal Navigation:** To allow random temporal navigation, complete trees must be saved at regular intervals [S1, S2, unofficial].
+-*   **Back Subtree Approximation:** Due to opacity accumulation obscuring back details, subtrees representing the back portion of the data may not be completely sampled. As an approximation, unchanged subtrees are not re-rendered [S1, S2, unofficial].
++### Edge Cases and Pitfalls
++
++1.  **Boundary Rendering:** Octree leaves represent uniform blocks, but boundaries between blocks must be rendered carefully. To avoid the overhead of traversing the tree to obtain boundary values, the original data is kept uncompressed, and the octree serves as a map into this volume data [S1, S2, unofficial].
++2.  **Viewing Position Changes:** The optimization is based on a fixed viewing position. Changing the view requires rerendering the entire tree and creating a new compositing tree [S1, S2, unofficial]. Random temporal navigation requires saving complete trees at regular intervals [S1, S2, unofficial].
++3.  **Back Subtree Approximation:** Due to opacity accumulation obscuring back details in front-to-back rendering, subtrees representing the back portion of the data may not be completely sampled. As an approximation, unchanged subtrees are not re-rendered [S1, S2, unofficial].
++4.  **Rendering Overhead:** Rendering from the tree structure incurs overhead compared to direct volume data rendering. This is offset by optimizations like front-to-back rendering, caching ray coordinates in object space, and skipping transparent space [S1, S2, unofficial].
+ 
+ ## Operating characteristics
+-*   **Time Complexity:** Proportional to the amount of *modified* data, not the total volume. Savings are significant when changes between time steps are small [S1, S2, unofficial].
+-*   **Memory Complexity:** Requires storing the Compositing Tree, which holds partial images for all nodes. This is roughly equivalent to storing the full image for the entire volume at each time step if no changes occur, but allows reuse of static parts.
+-*   **Performance:** Rendering from the tree structure incurs overhead compared to direct volume data rendering. This is offset by optimizations like front-to-back rendering (early ray termination), caching ray coordinates in object space, and skipping transparent space [S1, S2, unofficial].
+-*   **Strengths:** Efficient for time-varying data with localized changes; reduces I/O by leveraging compression [S1, S2, unofficial].
+-*   **Limitations:** Inefficient for global view changes; requires significant memory to store partial images for the compositing tree; approximation errors may occur for obscured back regions [S1, S2, unofficial].
++
++**Time Complexity:**
++*   **Initial Render:** $O(N)$, where $N$ is the number of voxels or samples, as the entire tree is rendered [S1, S2, unofficial].
++*   **Subsequent Renders:** Proportional to the amount of modified data. If $M$ is the number of modified samples/leaves, the complexity is $O(M)$ plus the cost of compositing the ancestors [S1, S2, unofficial]. The savings are significant when $M \ll N$ [S1, S2, unofficial].
++
++**Memory Complexity:**
++*   Requires storing the compositing tree, which includes partial images for every node in the octree structure [S1, S2, unofficial].
++*   Memory usage is proportional to the number of nodes in the octree times the image resolution [S1, S2, unofficial].
++*   Requires storing the uncompressed volume data for boundary handling [S1, S2, unofficial].
++
++**Measured Performance:**
++*   Source [S1, unofficial] reports that rendering only modified data accounts for the largest savings in the time domain.
++*   Tree merging produces the most significant amount of savings in rendering cost [S1, S2, unofficial].
++*   Time to read encoded data is reduced in proportion to the compression rate [S1, S2, unofficial].
++*   Specific performance numbers are not given for Compositing Tree Rendering itself, but related resolution coarsening strategies show 40-90% savings in storage and 10-30% in rendering time [S1, S2, unofficial].
++
++**Strengths:**
++*   Significant performance gains for time-varying data with localized changes [S1, S2, unofficial].
++*   Leverages existing compression schemes [S1, S2, unofficial].
++*   Optimizations for constant subvolumes avoid interpolation costs [S1, S2, unofficial].
++
++**Limitations:**
++*   Fixed viewing position required for incremental updates [S1, S2, unofficial].
++*   Overhead from tree traversal [S1, S2, unofficial].
++*   Approximation in back subtree rendering may affect visual accuracy [S1, S2, unofficial].
+ 
+ ## Background
+-Compositing Tree Rendering was introduced in the context of efficient encoding and rendering of time-varying volume data. It leverages octree-based compression to identify modified regions and uses a compositing tree to incrementally update the rendered image. The method was implemented in the `tvvd-renderer` and tested on datasets such as Turbulent Vortex Flow, Thermal Convection, and Heart Modeling [S1, S2, unofficial].
++
++Compositing Tree Rendering was introduced in the context of efficient encoding and rendering of time-varying volume data. It was developed by researchers associated with NASA and DTIC, as indicated by the sources [S1, S2, unofficial]. The method was presented in a technical report from 1998 [S1, S2, unofficial]. It is designed to work with compressed octree representations of volume data, allowing for efficient incremental updates in time-varying scenarios.
+ 
+ ## Sources
+-[S1] NASA Technical Reports Server (NTRS) 19980217078: Efficient Encoding and Rendering of Time-Varying Volume Data, https://archive.org/details/NASA_NTRS_Archive_19980217078, fetched 2026-10-26 (unofficial)
+-[S2] DTIC ADA349761: Efficient Encoding and Rendering of Time-Varying Volume Data, https://archive.org/details/DTIC_ADA349761, fetched 2026-10-26 (unofficial)+
++[S1] Efficient Encoding and Rendering of Time-Varying Volume Data, https://archive.org/details/NASA_NTRS_Archive_19980217078, fetched 2026-10-26 (unofficial)
++[S2] Efficient Encoding and Rendering of Time-Varying Volume Data, https://archive.org/details/DTIC_ADA349761, fetched 2026-10-26 (unofficial)

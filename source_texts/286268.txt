@@ -1,0 +1,327 @@
+raytracing - Ray-tracing and CUDA - Stack Overflow
+By using our site, you acknowledge that you have read and understand our Cookie Policy, Privacy Policy, and our Terms of Service.
+Podcast Episode #126: We chat GitHub Actions, fake boyfriends apps, and the dangers of legacy code. Listen now.
+Ray-tracing and CUDA [closed]
+Ask Question
+Asked
+10 months ago
+Active
+10 months ago
+Viewed
+203 times
+0
+I have a ray-tracing model where I fire 20k rays against a mesh object with ~100k triangular faces.
+To calculate coordinates of intersection point I wrote this function based on Moller-trumbore algorithm (https://en.wikipedia.org/wiki/M%C3%B6ller%E2%80%93Trumbore_intersection_algorithm):
+```
+void MT_intersection(std::vector<double> origin, std::vector<double> dir, std::vector<double> v0, std::vector<double> v1, std::vector<double> v2, std::vector<double> &int_point) {
+    double eps = 0.0000001;
+    std::vector<double> E1(3);
+    std::vector<double> E2(3);
+    std::vector<double> s(3);
+    for (int i = 0; i < 3; i++) {
+        E1[i] = v1[i] - v0[i];
+        E2[i] = v2[i] - v0[i];
+        s[i] = origin[i] - v0[i];
+    }
+    std::vector<double> h(3);
+    h[0] = dir[1] * E2[2] - dir[2] * E2[1];
+    h[1] = -(dir[0] * E2[2] - dir[2] * E2[0]);
+    h[2] = dir[0] * E2[1] - dir[1] * E2[0];
+    double a;
+    a = E1[0] * h[0] + E1[1] * h[1] + E1[2] * h[2];
+    if (a > -eps && a < eps) {
+        int_point[0] = false;
+    }
+    else {
+        double f = 1 / a;
+        double u;
+        u = f * (s[0] * h[0] + s[1] * h[1] + s[2] * h[2]);
+        if (u < 0 || u > 1) {
+            int_point[0] = false;
+        }
+        else {
+            std::vector<double> q(3);
+            q[0] = s[1] * E1[2] - s[2] * E1[1];
+            q[1] = -(s[0] * E1[2] - s[2] * E1[0]);
+            q[2] = s[0] * E1[1] - s[1] * E1[0];
+            double v;
+            v = f * (dir[0] * q[0] + dir[1] * q[1] + dir[2] * q[2]);
+            if (v < 0 || (u + v)>1) {
+                int_point[0] = false;
+            }
+            else {
+                double t;
+                t = f * (E2[0] * q[0] + E2[1] * q[1] + E2[2] * q[2]);
+                if (t > eps) {
+                    for (int i = 0; i < 3; i++) {
+                        int_point[i] = origin[i] + dir[i] * t;
+                    }
+                }
+            }
+        }
+
+    }
+
+}
+```
+I give as input the origin and the direction of my ray and 3 vectors with triangles vertices coordinates (v0,v1,v2).
+Then I use this function in a for loop with ~100k (number of triangles) repetitions inside another for loop with 20k (number of rays) repetitions.
+Since this code is very slow (it takes approx 2 days and a half to calculate everything), I want to run it in parallel with Cuda, hoping to reduce this time.
+Since I'm working with Python, I'm using PyCuda and I tried to write a C kernel with my "MT_intersection" function:
+```
+import pycuda.driver as drv
+import pycuda.autoinit
+from pycuda.compiler import SourceModule
+import numpy as np
+from stl import mesh
+
+my_mesh = mesh.Mesh.from_file('sfera1.stl')
+n = my_mesh.normals
+v0 = my_mesh.v0
+v1 = my_mesh.v1
+v2 = my_mesh.v2
+
+mod = SourceModule("""
+    #include <math.h>
+    //#include <vector>
+  __global__ void intersect(float *origin,float *dir,float *v0,float *v1,float *v2,float *int_point_real)
+  {
+    using namespace std;
+    //#include <vector>
+    //#include <math.h>
+    int idx = threadIdx.x;
+    //a[idx] *= 2;
+    int count = 0;
+
+    //std::vector<double> v0_current(3);
+    float v0_current[3];
+    float v1_current[3];
+    float v2_current[3];
+    float dir_current[3] = {dir[idx][0],dir[idx][1],dir[idx][2]}; 
+    //std::vector<double> v1_current(3);
+    //std::vector<double> v2_current(3);
+    float int_point[3];
+    //std::vector<float> int_point(3);
+    //std::vector<std::vector<float>> int_pointS;
+    float int_pointS[2][3];
+    //std::vector<std::vector<double>> int_point;
+    //std::vector<int> int_faces;
+    int int_faces[2];
+    float dist[2];
+    //std::vector<float> dist;
+    int n_tri = 960;
+
+    for(int i = 0; i<n_tri; i++) {
+        for (int j = 0; j<3; j++){
+            v0_current[j] = v0[i][j];
+            v1_current[j] = v1[i][j];
+            v2_current[j] = v2[i][j];
+        }
+        double eps = 0.0000001;
+        //std::vector<float> E1(3);
+        float E1[3];
+        //std::vector<float> E2(3);
+        float E2[3];
+        //std::vector<float> s(3);
+        float s[3];
+        for (int j = 0; j < 3; j++) {
+            E1[j] = v1_current[j] - v0_current[j];
+            E2[j] = v2_current[j] - v0_current[j];
+            s[j] = origin[j] - v0_current[j];
+        }
+        //std::vector<float> h(3);
+        float h[3];
+        h[0] = dir[1] * E2[2] - dir[2] * E2[1];
+        h[1] = -(dir[0] * E2[2] - dir[2] * E2[0]);
+        h[2] = dir[0] * E2[1] - dir[1] * E2[0];
+        float a;
+        a = E1[0] * h[0] + E1[1] * h[1] + E1[2] * h[2];
+        if (a > -eps && a < eps) {
+            int_point[0] = false;
+            //return false;
+        }
+        else {
+            double f = 1 / a;
+            float u;
+            u = f * (s[0] * h[0] + s[1] * h[1] + s[2] * h[2]);
+            if (u < 0 || u > 1) {
+                int_point[0] = false;
+                //return false;
+            }
+            else {
+                //std::vector<float> q(3);
+                float q[3];
+                q[0] = s[1] * E1[2] - s[2] * E1[1];
+                q[1] = -(s[0] * E1[2] - s[2] * E1[0]);
+                q[2] = s[0] * E1[1] - s[1] * E1[0];
+                float v;
+                v = f * (dir[0] * q[0] + dir[1] * q[1] + dir[2] * q[2]);
+                if (v < 0 || (u + v)>1) {
+                    int_point[0] = false;
+                    //return false;
+                }
+                else {
+                    float t;
+                    t = f * (E2[0] * q[0] + E2[1] * q[1] + E2[2] * q[2]);
+                    if (t > eps) {
+                        for (int j = 0; j < 3; j++) {
+                            int_point[j] = origin[j] + dir_current[j] * t;
+                        }
+                        //return t;
+                    }
+                }
+            }
+        }
+        if (int_point[0] != false) {
+            count = count+1;
+            //int_faces.push_back(i);
+            int_faces[count-1] = i;
+            //dist.push_back(sqrt(pow((origin[0] - int_point[0]), 2) + pow((origin[1] - int_point[1]), 2) + pow((origin[2] - int_point[2]), 2)));
+            //dist.push_back(x);
+            dist[count-1] = sqrt(pow((origin[0] - int_point[0]), 2) + pow((origin[1] - int_point[1]), 2) + pow((origin[2] - int_point[2]), 2));
+            //int_pointS.push_back(int_point);
+            for (int j = 0; j<3; j++) {
+                int_pointS[count-1][j] = int_point[j];
+            }
+        } 
+    }
+    double min = dist[0];
+    int ind_min = 0;
+    for (int i = 0; i < int_pointS.size(); i++){
+        if (min > dist[i]) {
+            min = dist[i];
+            ind_min = i;
+        }
+    }
+    //dist_real[Idx] = dist[ind_min];
+    //int_point_real_x[Idx] = int_pointS[ind_min][0];
+    //int_point_real_y[Idx] = int_pointS[ind_min][1];
+    //int_point_real_z[Idx] = int_pointS[ind_min][2];
+    int_point_real[Idx][0] = int_pointS[ind_min][0];
+    int_point_real[Idx][1] = int_pointS[ind_min][1];
+    int_point_real[Idx][2] = int_pointS[ind_min][2];
+}
+  """)
+
+origin = np.asarray([1, 1, 1]).astype(np.float32)
+direction = np.ones((100, 3)).astype(np.float32)
+int_point_real = np.zeros((100, 3)).astype(np.float32)
+
+intersect = mod.get_function("intersect")
+intersect(drv.In(origin), drv.In(direction), drv.In(v0), drv.In(v1), drv.In(v2), drv.Out(int_point_real), block=(512,1,1), grid=(64,1,1))
+```
+My idea is to run the 20k rays in parallel.
+This Python script is giving me different errors:
+kernel.cu(18): error: expression must have pointer-to-object type
+kernel.cu(18): error: expression must have pointer-to-object type
+kernel.cu(18): error: expression must have pointer-to-object type
+kernel.cu(34): error: expression must have pointer-to-object type
+kernel.cu(35): error: expression must have pointer-to-object type
+kernel.cu(36): error: expression must have pointer-to-object type
+kernel.cu(108): error: expression must have class type
+kernel.cu(118): error: expression must have pointer-to-object type
+kernel.cu(119): error: expression must have pointer-to-object type
+kernel.cu(120): error: expression must have pointer-to-object type
+kernel.cu(27): warning: variable "int_faces" was set but never used
+10 errors detected in the compilation of
+"C:/Users/20180781/AppData/Local/Temp/tmpxft_00000d44_00000000-10_kernel.cpp1.ii".
+]
+Any idea why?
+Does anyone know a smarter and more efficient way to calculate the intersection point when I have a lot of rays and a lot of faces?
+cuda raytracing raycasting pycuda
+share|improve this question
+edited Dec 12 '18 at 18:12
+talonmies
+61.4k1717 gold badges141141 silver badges209209 bronze badges
+asked Dec 12 '18 at 16:23
+Davide BassanoDavide Bassano
+966 bronze badges
+closed as too broad by talonmies, pushkin, Bob Dalgleish, LarsTech, C8H10N4O2 Dec 13 '18 at 2:39
+Please edit the question to limit it to a specific problem with enough detail to identify an adequate answer. Avoid asking multiple distinct questions at once. See the How to Ask page for help clarifying this question. If this question can be reworded to fit the rules in the help center, please edit the question.
+add a comment
+|
+1 Answer
+1
+active
+oldest
+votes
+0
+It seems all the errors are reported for lines where you try to double-index things. The line numbering is a little off, but from the warning kernel.cu(27): warning: variable "int_faces" was set but never used it can be deduced that the first few error messages refer to the following lines:
+```
+float dir_current[3] = {dir[idx][0],dir[idx][1],dir[idx][2]}; 
+```
+[...]
+```
+v0_current[j] = v0[i][j];
+v1_current[j] = v1[i][j];
+v2_current[j] = v2[i][j];
+```
+And it makes sense, because dir, v0, v1, and v2 are all defined as float *. Which is just a float pointer. You can index it once like dir[idx], yielding a float, but it doesn't make sense to index it (a mere float) again, like dir[idx][0].
+After this point point, the line numbers are off again, but accepting my hypothesis, it can be assumed that these are the last 3 problematic lines:
+```
+int_point_real[Idx][0] = int_pointS[ind_min][0];
+int_point_real[Idx][1] = int_pointS[ind_min][1];
+int_point_real[Idx][2] = int_pointS[ind_min][2];
+```
+And indeed, int_point_real is also just a pointer to a float.
+Also, notice how although int_pointS is referenced in several other lines, there are no errors reported for them, because that variable is correctly declared as a two-dimensional array (which can be indexed twice).
+share|improve this answer
+answered Dec 12 '18 at 16:42
+szmate1618szmate1618
+54311 gold badge77 silver badges1414 bronze badges
+add a comment
+|
+Not the answer you're looking for? Browse other questions tagged cuda raytracing raycasting pycuda or ask your own question.
+Blog
+My Most Embarrassing Mistakes as a Programmer (so far)
+The Overflow Newsletter #3 – The 75 lines of code that changed history
+Featured on Meta
+Feedback post: Moderator review and reinstatement processes
+Post for clarifications on the updated pronouns FAQ
+New Post Notices (Closed/On Hold/etc.) rolling out on Stack Overflow
+Related
+0
+cuda, pycuda — how to write complex numbers — errors:class “cuComplex” has no member “i”
+374
+How to get the cuda version?
+2
+Ray Tracing vs Radiosity in Graphic
+1
+ray tracing: “size” of the field of depth
+3
+Ray tracing: Bresenham's vs Siddon's algorithm
+2
+What is the term 't' in Ray definition? Ray Tracing
+0
+Ray tracing glossy reflection: sampling ray direction
+0
+Generating refracted rays in ray tracing
+0
+Ray-tracing (or casting) between rays and STL file
+Hot Network Questions
+Is an SSH key with a passphrase a 2FA?
+Did Catherine the Great really call for the abolition of serfdom?
+Potential Postdoc advisor giving exams (assignment) as part of hiring process
+How does an all-female medieval country maintain itself?
+Jamaican expired passport
+How to get a large amount of cash abroad if a debit card stops working?
+Is the MCU origin for the "Avengers” name consistent with the comics?
+What do you call the movement you do by car within a local distance?
+Why is the air inside airliners so dry (low humidity)?
+Would rocket engine exhaust create pockets of gas in space which could hinder further space exploration?
+Why the real and imaginary parts of a complex analytic function are not independent?
+When is the best time to visit the Australian outback?
+What is the difference between money and currency?
+Faraday Cage Explain (Gauss Law)
+Installing a sliding patio door...why does the entire frame have to be square, level and plumb?
+Languages which changed their writing direction
+After upgrading Xcode 11.2 from Xcode 11.1, app crashes due to _UITextLayoutView
+Mechanics to keep mobs and environment alive without using tons of memory?
+Totally Blind Chess
+Complete the Pointer Set
+Perspective text in a circle - Adobe Illustrator
+How did Beit Shammai and Beit Hillel arrive at the conclusion that it would have been preferable had man not been created?
+Feasibility of keeping an Electrical Bike in poor (wet) storage conditions
+Missing Extract Type on Data Extract Activity. Why my account is missing this feature?
+more hot questions
+default

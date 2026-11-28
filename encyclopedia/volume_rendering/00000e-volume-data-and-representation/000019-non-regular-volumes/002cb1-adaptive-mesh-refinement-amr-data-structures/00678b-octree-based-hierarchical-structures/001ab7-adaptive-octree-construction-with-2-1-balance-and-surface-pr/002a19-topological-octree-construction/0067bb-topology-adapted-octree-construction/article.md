@@ -1,0 +1,128 @@
+# Topology-Adapted Octree Construction
+
+Also called: Topology-Adapted Octree
+
+## Overview
+This method constructs an adaptive octree for approximating the offset surface of a triangle mesh, guaranteeing that the discretized offset never misses the exact offset surface up to floating-point precision [S1]. It differs from standard adaptive octrees by using topological criteria (specifically the Disk Criterion) to halt subdivision in regions where the offset surface has simple topology, thereby reducing computational overhead and output complexity [S1]. It serves as the spatial data structure for Dual Contouring to generate closed, manifold offset meshes [S1].
+
+## How it works
+**Inputs:**
+- Input triangle mesh $T = \{t_i\}$.
+- Offset distance $\delta$.
+- Maximum octree depth $D_{max}$ (user-defined) [S1].
+
+**Outputs:**
+- An octree where each leaf cell satisfies the termination criteria, ensuring the offset surface is captured within floating-point precision [S1].
+
+**Data Structures:**
+- **Octree Node:** Contains a bounding sphere (circumscribing sphere of the cell) and a list of relevant triangles.
+- **Triangle List:** Each node stores all triangles $t_i \in T$ such that the offset volume $V(t_i, \delta)$ intersects the node's circumscribing sphere. This is a conservative approximation; if the sphere intersects, the cell *might* intersect, but if the sphere does not intersect, the cell definitely does not [S1].
+
+**Algorithm Steps:**
+
+1.  **Initialization:** Create a root octree cell large enough to contain the entire input mesh $T$ and its offset surface $S(T, \delta)$. Initialize its triangle list with all triangles $t_i \in T$ [S1].
+
+2.  **Recursive Subdivision:** For each cell, evaluate the termination criteria. If none are met, subdivide the cell into 8 children. For each child:
+    -   Compute its circumscribing sphere.
+    -   Filter the parent's triangle list: retain only triangles $t_i$ where the offset volume $V(t_i, \delta)$ intersects the child's sphere [S1].
+
+3.  **Termination Criteria:** A cell is a leaf if any of the following conditions are met [S1]:
+    1.  **Intersection Criterion (Negative):** No triangle offset intersects the cell. This is checked by verifying that no triangle in the cell's list has an offset volume intersecting the cell's circumscribing sphere.
+    2.  **Intersection Criterion (Positive/Enclosed):** The cell is fully enclosed inside the offset surface of a single triangle $t_i$. This implies the cell is inside the offset volume $V(t_i, \delta)$ and does not intersect the boundary surface $S(t_i, \delta)$ [S1].
+    3.  **Disk Criterion:** The offset surface $S(T, \delta)$ within the cell is topologically equivalent to a disk. This indicates that further subdivision does not add relevant topological information for the offset surface [S1].
+    4.  **Depth Limit:** The current depth equals $D_{max}$ [S1].
+
+4.  **Non-Manifold Prevention:** If Dual Contouring is used for reconstruction, additional checks may force subdivision if the current configuration might generate non-manifold vertices or edges. This is handled conservatively to ensure the final output is a 2-manifold [S1].
+
+**Formulas and Definitions:**
+-   $V(t_i, \delta)$: The volume enclosed by the offset surface of triangle $t_i$ at distance $\delta$.
+-   $S(t_i, \delta)$: The offset surface of triangle $t_i$.
+-   **Intersection Check:** To check if $V(t_i, \delta)$ intersects a sphere with center $c$ and radius $r$, find the nearest point $\tilde{p}_i$ on the triangle $t_i$ to $c$. If the distance $||\tilde{p}_i - c|| < r + \delta$, the offset volume intersects the sphere [S1]. Note: The source mentions finding the nearest point submitted to Euclidean distance, implying standard point-to-triangle distance calculation.
+
+**Pseudocode:**
+
+> **Unverified code.** The code below did not pass a test run against a reference implementation, or no test fits it, so it may contain errors.
+
+```python
+def build_topology_adapted_octree(mesh, delta, max_depth):
+    # Initialize root cell
+    root = Cell(bounding_sphere=mesh.bounding_sphere())
+    root.triangles = mesh.triangles # All triangles initially
+    
+    queue = [root]
+    
+    while queue:
+        cell = queue.pop(0)
+        
+        # Check termination criteria
+        if is_leaf(cell, delta, max_depth):
+            continue
+            
+        # Subdivide
+        children = cell.subdivide()
+        
+        for child in children:
+            # Filter triangles: keep only those whose offset volume 
+            # intersects the child's circumscribing sphere
+            child.triangles = []
+            for t in cell.triangles:
+                if offset_volume_intersects_sphere(t, delta, child.sphere):
+                    child.triangles.append(t)
+            queue.append(child)
+
+def is_leaf(cell, delta, max_depth):
+    # Criterion 4: Depth limit
+    if cell.depth >= max_depth:
+        return True
+        
+    # Criterion 1: No intersection
+    if not any(offset_volume_intersects_sphere(t, delta, cell.sphere) 
+               for t in cell.triangles):
+        return True
+        
+    # Criterion 2: Fully enclosed (simplified check: 
+    # if only one triangle is relevant and cell is inside its offset volume)
+    # Note: Exact "fully enclosed" check requires point-in-volume tests.
+    # Conservative approximation: if only one triangle and it covers the cell?
+    # The source states this is part of the Intersection Criterion.
+    if len(cell.triangles) == 1:
+        t = cell.triangles[0]
+        if cell.is_fully_inside_offset_volume(t, delta):
+            return True
+            
+    # Criterion 3: Disk Topology
+    # This requires analyzing the topology of the offset surface within the cell.
+    # If the surface patch is a disk, stop.
+    if has_disk_topology(cell, delta):
+        return True
+        
+    return False
+
+def offset_volume_intersects_sphere(triangle, delta, sphere):
+    # Find nearest point on triangle to sphere center
+    p_nearest = nearest_point_on_triangle(triangle, sphere.center)
+    dist = distance(p_nearest, sphere.center)
+    # If dist < sphere_radius + delta, the offset volume (expanded by delta)
+    # intersects the sphere.
+    return dist < (sphere.radius + delta)
+```
+
+**Parameters:**
+-   $D_{max}$: Maximum octree depth. Can be set to a large value without hampering runtime if the topological criteria terminate subdivision earlier [S1].
+
+**Edge Cases and Pitfalls:**
+-   **Non-manifold inputs:** The method handles triangle soups (non-closed, non-manifold inputs) correctly, guaranteeing a closed and manifold output [S1].
+-   **Conservatism:** All criteria are evaluated conservatively. This means the algorithm may over-refine (subdivide more than strictly necessary) but will never terminate too early, ensuring no part of the exact offset surface is missed [S1].
+-   **Precision:** The guarantee holds up to floating-point precision [S1].
+
+## Operating characteristics
+-   **Complexity:** The method reduces computational overhead compared to methods like [VM04] and [PK08] by performing fewer subdivisions in regions with disk topology [S1].
+-   **Performance:** The conservative cell-to-triangle distance approximation is computationally lighter than pairwise-convex Minkowski sum methods [S1].
+-   **Strengths:** Guarantees manifold output; handles non-manifold inputs; adaptive refinement based on topology reduces complexity [S1].
+-   **Limitations:** Requires evaluation of topological criteria (Disk Criterion), which may add complexity to the leaf check compared to simple geometric bounds [S1].
+
+## Background
+This method was introduced by D. Zint, N. Maruani, P. Alliez, and M. Rouxel-Labbé in "Feature-Preserving Offset Mesh Generation from Topology-Adapted Octrees" [S1]. It addresses the problem of generating offset meshes from triangle soups while preserving topology and ensuring manifoldness, building on earlier adaptive octree constructions like those by Pavić and Kobbelt [PK08] (cited in [S1]).
+
+## Sources
+[S1] Feature-Preserving Offset Mesh Generation from Topology-Adapted Octrees, https://doi.org/10.1111/cgf.14906, fetched 2026-10-26

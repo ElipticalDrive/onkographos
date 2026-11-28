@@ -1,0 +1,134 @@
+A fork of Comfyfluffy Ray-traced renderer for Minecraft 26.2's Vulkan backend. Gameplay focused and highly customizable for aesthetics. Support for other gpus is planned. - Froxel volumetric fog with path-traced volumetric shadows by arena-ai-coding-agent[bot] · Pull Request #15 · Lumitos0-0/LumisCaustica
+
+Froxel volumetric fog with path-traced volumetric shadows by arena-ai-coding-agent[bot] · Pull Request #15 · Lumitos0-0/LumisCaustica · GitHub
+Skip to content
+You signed in with another tab or window. Reload to refresh your session.
+You signed out in another tab or window. Reload to refresh your session.
+You switched accounts on another tab or window. Reload to refresh your session.
+Dismiss alert
+Conversation
+arena-ai-coding-agent
+Bot
+commented
+Aug 30, 2026
+Copy link
+Copy Markdown
+Implements a frustum-aligned volumetric fog grid (froxels) in the Caustica path tracer, lit entirely by path tracing rather than a shadow map.
+What it does
+froxel.rgen (world raygen idx 2): each frustum voxel reconstructs its world position, computes height-falloff density, and casts the same visibility() NEE shadow ray the surfaces use, accumulating real per-channel Beer–Lambert transmittance through tinted glass/ice/water/entity dielectrics — so a magenta pane scatters magenta fog. In-scatter = σₛ · HG(phase) · illuminance · toLight plus an isotropic sky-ambient fill; stores float4(inscatter, density).
+froxel.comp: per-pixel screen raymarch over the grid with analytic segment Beer–Lambert integration, stopped at the reversed-Z surface depth, composited as scene·T + fog·preExposure (same exposure seam as the path tracer).
+Java: RtFroxel compute pipeline, RtContext.createStorageImage3D, RtPipeline WORLD_FROXEL binding + traceVolume 3D dispatch, RtComposite frame-graph wiring (light pass → barrier → raymarch → barrier before DLSS-RR), WorldPush froxel0/1/2, nearPlaneDistance().
+Config: CausticaConfig.Rt.Fog — enabled/density/strength/phase-g/ambient/far/height-falloff, live-tunable via -Dcaustica.* or TOML.
+Constraints honored
+No shadow map — the grid's light is path-traced via the existing NEE ray, inheriting real color transmission through glass.
+Reuses the pathtracer's ACEScg basis, dominantCelestialLight, and preExposure seam.
+CI
+Relies on the GitHub Actions gradlew build to compile the new Slang shaders and verify generated WorldPushData/RtBindings. Default fog density/falloff are plausible starting values pending runtime tuning.
+Lumitos0-0
+and others
+added 5 commits
+August 26, 2026 02:35
+Restore to d9c8a18, cleaning up all volumetrics
+…
+64b4499
+```
+Restores the repository tree to commit d9c8a18 (Create gradle-publish.yml),
+the state of main before the froxel volumetrics pipeline was merged via
+PR #4. Removes the volumetric/froxel shaders, RtFroxelGrid/RtVolumetrics
+classes, fog-related settings, shader bindings, docs, and tests.
+
+Co-authored-by: arena-agent <297053741+arena-agent@users.noreply.github.com>
+```
+Add froxel-frustum volumetric fog with path-traced volumetric shadows
+…
+3b042a8
+```
+Implements a frustum-aligned 3D fog grid (froxels) in the Caustica path
+tracer, lit entirely by path tracing rather than a shadow map:
+
+- froxel.rgen (world raygen idx 2): each frustum voxel reconstructs its
+  world position, computes height-falloff density, and casts the same
+  visibility() NEE shadow ray the surfaces use, accumulating real per-channel
+  Beer-Lambert transmittance through tinted glass/ice/water/entity dielectrics,
+  so semitransparent surfaces colour the light that lights up the fog.
+  In-scatter = sigma_s * HG(phase) * illuminance * toLight plus an isotropic
+  sky-ambient fill; stores float4(inscatter, density).
+- froxel.comp: per-pixel screen raymarch over the grid with analytic segment
+  Beer-Lambert integration, stopped at the reversed-Z surface depth, composited
+  as scene*T + fog*preExposure (same exposure seam as the path tracer).
+- RtFroxel compute pipeline + RtContext.createStorageImage3D (RGBA16F 3D grid).
+- RtPipeline WORLD_FROXEL storage binding + traceVolume 3D dispatch.
+- RtComposite: grid lifecycle, world SBT raygen idx 2, two-stage dispatch
+  (light pass -> barrier -> raymarch -> barrier) before DLSS-RR, WorldPush
+  froxel0/1/2, nearPlaneDistance().
+- CausticaConfig.Rt.Fog: enabled/density/strength/phase-g/ambient/far/
+  height-falloff settings.
+
+Co-authored-by: arena-agent <297053741+arena-agent@users.noreply.github.com>
+```
+Fix froxel.comp.slang: integ is float3, not float
+…
+68cf358
+```
+compileShaders failed with E30019: 'float integ' was assigned the float3
+result of the Beer-Lambert segment integral (source is float3). Declare
+the integral as float3 so it carries RGB in-scatter.
+
+Co-authored-by: arena-agent <297053741+arena-agent@users.noreply.github.com>
+```
+Froxel: light fog from the real sky dome, not a flat uniform ambient
+…
+81a13a0
+```
+The volumetric fog read as a flat, featureless shell at a fixed distance
+from the camera with no visible scattering. Root cause: the ambient term was
+a huge isotropic constant (ambientFactor * luminance(illuminance) * tint),
+uniform across every cell and independent of shadowing, which washed out the
+directional sun scattering and flattened the volume.
+
+Light each froxel with the actual sky radiance in the view direction by
+sampling the frame's sky-view LUT (skyDome, moved into sky.slang and shared
+with sky.rmiss). The fog now mirrors the real dome: it picks up the sun's Mie
+glow toward the light, follows the day/night cycle, and varies with view
+direction. The path-traced sun-shaft term is kept on top, and the old ambient
+becomes a tiny isotropic night/ground floor so moonless shadows never clip.
+
+skyDome takes the skyViewLut sampler as a parameter so sky.slang stays
+decoupled from the world bindings.
+
+Co-authored-by: arena-agent <297053741+arena-agent@users.noreply.github.com>
+```
+Froxel: make the fog clearly visible with stronger default density
+…
+2516999
+```
+With DENSITY=0.0008/block the fog was ~99.6% transparent at a few blocks,
+so it only ever appeared as a faint, distant band that followed the camera
+and showed no visible scattering up close. Raise the default density to
+0.005 and shorten FAR to 300: ~20% fog over 50 blocks and ~80% at the far
+plane, so the sunlit volume (and its sky-dome glow + shadowed shafts) is
+clearly visible in the near/mid field instead of only at the horizon. All
+values remain live-tunable via -Dcaustica.rt.fogDensity / fog.far.
+
+Co-authored-by: arena-agent <297053741+arena-agent@users.noreply.github.com>
+```
+arena-ai-coding-agent
+Bot
+closed this
+Aug 30, 2026
+Lumitos0-0
+deleted the
+arena/01a050aa-lumiscaustica
+branch
+August 30, 2026 05:24
+Sign up for free
+to join this conversation on GitHub.
+Already have an account?
+Sign in to comment
+Uh oh!
+There was an error while loading. Please reload this page.
+Labels
+None yet
+1 participant
+Add this suggestion to a batch that can be applied as a single commit.This suggestion is invalid because no changes were made to the code.Suggestions cannot be applied while the pull request is closed.Suggestions cannot be applied while viewing a subset of changes.Only one suggestion per line can be applied in a batch.Add this suggestion to a batch that can be applied as a single commit.Applying suggestions on deleted lines is not supported.You must change the existing code in this line in order to create a valid suggestion.Outdated suggestions cannot be applied.This suggestion has been applied or marked resolved.Suggestions cannot be applied from pending reviews.Suggestions cannot be applied on multi-line comments.Suggestions cannot be applied while the pull request is queued to merge.Suggestion cannot be applied right now. Please check back later.
+You can’t perform that action at this time.

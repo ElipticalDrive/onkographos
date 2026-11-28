@@ -1,0 +1,130 @@
+# Mask Cleaning (Speckle Kill and Grow)
+
+Also called: Speckle Kill and Grow
+
+## Overview
+Mask Cleaning (Speckle Kill and Grow) is a post-processing method for dynamism masks in volume rendering that removes isolated noise artifacts ("speckles"), expands the mask to cover blur halos, and softens edges via feathering [S1, unofficial]. It differs from standard morphological operations by combining a support-based speckle kill with an iterative growth phase that blends the original mask with its filtered version, preserving the underlying intensity distribution better than binary erosion/dilation [S1, unofficial]. It builds on [Foreground Selection with Cleanup](11591-foreground-selection-with-cleanup.md).
+
+## How it works
+**Inputs:**
+- `m`: A 3D volume of float values (the dynamism mask), typically in range $[0, 1]$.
+- `GROW_ITERS`: Integer number of growth iterations.
+- `SMOOTH_MIX`: Float mixing factor for edge feathering.
+
+**Outputs:**
+- `m_clean`: The cleaned 3D volume.
+
+**Data Structures:**
+- `m`: Input mask volume.
+- `m_temp`: Temporary volume for iterative updates.
+- `box_filter_m`: Volume resulting from a 3x3x3 box filter.
+
+**Steps:**
+1. **Strong Mask Creation:** Create a binary strong mask $s$ where $s_{i,j,k} = 1$ if $m_{i,j,k} \ge 0.5$, else $0$.
+2. **Box Filtering:** Compute the 3x3x3 box filter of the strong mask $s$. Let $support_{i,j,k}$ be the sum of the 27 neighbors (including self) in $s$.
+3. **Speckle Kill:** For each voxel $(i,j,k)$:
+   - If $m_{i,j,k} > 0$ AND $support_{i,j,k} < 2.5/9.0$:
+     - $m_{i,j,k} \leftarrow m_{i,j,k} \times 0.2$
+   - Else:
+     - $m_{i,j,k}$ remains unchanged.
+4. **Iterative Growth:** Iterate $GROW\_ITERS$ times:
+   - Compute $b = \text{BoxFilter}(m)$, where $\text{BoxFilter}$ averages the 27 neighbors (including self).
+   - Update $m$: $m_{i,j,k} \leftarrow \max(m_{i,j,k}, 0.9 \times b_{i,j,k})$.
+5. **Feathering:** Compute $f = \text{BoxFilter}(m)$.
+   - $m_{clean, i,j,k} = (1 - SMOOTH\_MIX) \times m_{i,j,k} + SMOOTH\_MIX \times f_{i,j,k}$.
+
+**Parameters:**
+- `GROW_ITERS`: Not specified in sources. [G] Typical values range from 1 to 5 depending on desired halo coverage.
+- `SMOOTH_MIX`: Not specified in sources. [G] Typical values range from 0.1 to 0.5 for subtle edge softening.
+
+**Edge Cases and Pitfalls:**
+- **Precision:** The threshold $2.5/9.0$ is approximately $0.277$. Floating point comparisons should account for precision.
+- **Boundaries:** Box filters require handling of volume boundaries. [G] Standard practice is to clamp or reflect boundary conditions, or treat out-of-bounds voxels as 0.
+- **Degenerate Input:** If the mask is entirely empty or full, the method has minimal effect.
+
+**Pseudocode:**
+> **Unverified code.** The code below did not pass a test run against a reference implementation, or no test fits it, so it may contain errors.
+
+```python
+def mask_cleaning(m: Volume3D, grow_iters: int, smooth_mix: float) -> Volume3D:
+    """
+    Cleans dynamism masks by killing speckles, growing to cover blur halos,
+    and feathering edges.
+    
+    Args:
+        m: Input 3D volume of float values (dynamism mask).
+        grow_iters: Number of growth iterations.
+        smooth_mix: Mixing factor for edge feathering.
+        
+    Returns:
+        Cleaned 3D volume.
+    """
+    # Step 1: Create strong binary mask
+    strong_mask = Volume3D.zeros_like(m)
+    for i, j, k in m.indices():
+        if m[i, j, k] >= 0.5:
+            strong_mask[i, j, k] = 1.0
+            
+    # Step 2: Compute 3x3x3 box filter of strong mask (support)
+    support = box_filter_3x3x3(strong_mask)
+    
+    # Step 3: Kill lone speckles
+    for i, j, k in m.indices():
+        if m[i, j, k] > 0 and support[i, j, k] < 2.5 / 9.0:
+            m[i, j, k] *= 0.2
+            
+    # Step 4: Iterative growth
+    for _ in range(grow_iters):
+        box_filtered_m = box_filter_3x3x3(m)
+        for i, j, k in m.indices():
+            m[i, j, k] = max(m[i, j, k], 0.9 * box_filtered_m[i, j, k])
+            
+    # Step 5: Feather the edge
+    box_filtered_m = box_filter_3x3x3(m)
+    m_clean = Volume3D.zeros_like(m)
+    for i, j, k in m.indices():
+        m_clean[i, j, k] = (1.0 - smooth_mix) * m[i, j, k] + smooth_mix * box_filtered_m[i, j, k]
+        
+    return m_clean
+
+def box_filter_3x3x3(volume: Volume3D) -> Volume3D:
+    """
+    Computes a 3x3x3 box filter (average of 27 neighbors including self).
+    Handles boundaries by treating out-of-bounds voxels as 0.
+    """
+    result = Volume3D.zeros_like(volume)
+    dims = volume.dims
+    for i, j, k in volume.indices():
+        total = 0.0
+        count = 0
+        for di in range(-1, 2):
+            for dj in range(-1, 2):
+                for dk in range(-1, 2):
+                    ni, nj, nk = i + di, j + dj, k + dk
+                    if 0 <= ni < dims[0] and 0 <= nj < dims[1] and 0 <= nk < dims[2]:
+                        total += volume[ni, nj, nk]
+                        count += 1
+        result[i, j, k] = total / count
+    return result
+```
+
+## Subtopics
+
+### Object Extraction (Despeckling)
+A technique to eliminate air speckles (salt and pepper noise) from images to extract objects (e.g., bone from CT) when simple thresholding fails due to noise spikes [S2]. It uses a sequence of smoothing, thresholding, erosion, and dilation [S2]. Unlike the Speckle Kill and Grow method which blends intensities, this method operates on binary masks after an initial smoothing step [S2]. It is chosen when the goal is to extract a solid object from noisy background, particularly in medical imaging like CT scans [S2]. Parameters include an air/surface threshold and 2-3 erode/dilate cycles [S2].
+
+## Operating characteristics
+- **Time Complexity:** $O(N)$ per iteration, where $N$ is the number of voxels. The box filter is $O(N)$ with a constant factor of 27. Total time is $O(N \times (GROW\_ITERS + 1))$.
+- **Memory Complexity:** $O(N)$ for storing the mask, strong mask, support, and temporary volumes.
+- **Measured Performance:** Not given in the sources. [S1, unofficial][S2]
+- **Strengths:** Effectively removes isolated noise speckles while preserving the main object structure. The iterative growth helps cover blur halos without aggressive binary dilation. Feathering provides smooth edges.
+- **Limitations:** The choice of parameters ($GROW\_ITERS$, $SMOOTH\_MIX$) can significantly affect the result. The support threshold ($2.5/9.0$) is fixed and may not be optimal for all noise distributions.
+- **When to Use:** When cleaning dynamism masks for volume rendering where isolated noise artifacts are present and edge softening is desired.
+- **When Not to Use:** When preserving sharp, binary boundaries is critical, or when the noise is not isolated (e.g., structured noise).
+
+## Background
+The "Speckle Kill and Grow" method originates from the `volumetric-video-4dgs` project, an unofficial implementation related to 4D Gaussian Splatting for volumetric video [S1, unofficial]. The "Object Extraction (Despeckling)" technique is documented in the MRIcro manual for volume rendering, specifically for removing air speckles in medical images like CT scans [S2].
+
+## Sources
+[S1] devarshh/volumetric-video-4dgs, https://github.com/devarshh/volumetric-video-4dgs, fetched 2026-10-26 (unofficial)
+[S2] Volume Rendering the Cortex - University of South Carolina, https://people.cas.sc.edu/rorden/mricro/render/index.html, fetched 2026-10-27

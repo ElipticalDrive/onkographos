@@ -1,0 +1,2236 @@
+FAASCH, KALL, STACHNISS: COMPACT FF-3DGS VIA SALIENCY-GUIDED MERGING
+1
+Compact Feed-Forward 3D Gaussians
+via Saliency-Guided Primitive Merging
+Tim-Felix Faasch1
+1
+Bosch Research
+Hildesheim, Germany
+2
+University of Bonn
+Bonn, Germany
+3
+Lamarr Institute for Machine Learning
+and Artificial Intelligence
+Bonn, Germany
+arXiv:2608.10712v3 [cs.CV] 28 Sep 2026
+tim-felix.faasch@de.bosch.com
+Jochen Kall1
+jochen.kall@de.bosch.com
+Cyrill Stachniss2, 3
+cyrill.stachniss@igg.uni-bonn.de
+Abstract
+3D scene reconstruction, modeling, and rendering are highly relevant for numerous
+tasks, and 3D Gaussian splatting has become a standard choice in this context. Its feedforward variants provide fast reconstruction from sparse input views but often produce
+per-pixel primitives, leading to highly redundant and thus inefficient representations. We
+present a structure-aware merging pipeline that takes per-pixel primitives from any feedforward method and consolidates them into a compact, content-adaptive Gaussian set
+while largely retaining visual quality at just 1/20th of the Gaussians of a per-pixel method.
+We group spatially coherent Gaussians of similar appearance into variable-size clusters
+via adaptive superpixel segmentation guided by a saliency map, which allocates fine segments to textured regions and coarse segments to homogeneous areas. We compress each
+cluster into a compact latent representation through a learned encoder, then match and
+consolidate representations across views based on geometric overlap and feature similarity via a learned merger. A level-of-detail decoder then produces the final Gaussians
+at a controllable resolution, enabling a flexible quality-efficiency trade-off at inference.
+As a post-processing module, the pipeline is backbone-agnostic, leveraging the strengths
+of existing feed-forward methods. This leads to better and more robust quality than
+achieved by previous approaches that target a reduction in primitive count, while providing a highly compact representation, that can be rendered efficiently.
+1
+Introduction
+3D Gaussian splatting (3DGS) [17] has emerged as a powerful representation for reconstructing 3D scenes with photorealistic quality, leading to its widespread adoption in simulation [16, 46], 3D generation [57, 59], and robotics [38, 50]. Traditional per-scene optimization requires dense scene observations and consumes substantial compute, limiting its
+applicability to large-scale scenarios. Feed-forward (FF) reconstruction methods address this
+by predicting Gaussian primitives directly from input views [7, 11, 15, 37, 48, 49, 51, 52],
+© 2026. The copyright of this document resides with its authors.
+It may be distributed unchanged freely in print or electronic forms.
+FAASCH, KALL, STACHNISS: COMPACT FF-3DGS VIA SALIENCY-GUIDED MERGING
+16
+SSIM ↑
+PSNR ↑
+0.7
+0.6
+18
+14
+0.6
+0.5
+LPIPS ↓
+2
+0.4
+0.5
+0.4
+0.3
+12
+5 10 15 20
+93 100
+Primitives (%)
+Mom. Match.
+Ours K = 1
+0.3
+5 10 15 20
+93 100
+Primitives (%)
+Ours K = 2
+Ours K = 4
+ReSplat Init
+5 10 15 20
+93 100
+Primitives (%)
+ReSplat Rec.
+VolSplat
+Unmerged
+Figure 1: NVS quality vs. relative primitive count (DA3 backbone, averaged over DL3DVBench, MipNeRF360, and Tanks & Temples). Arrows indicate favorable direction.
+but they typically produce per-pixel or per-voxel Gaussians, resulting in highly redundant
+representations [29, 43].
+Since rendering cost in 3DGS scales with primitive count — each Gaussian must be
+sorted, projected, and alpha-composited — redundant primitives inflate inference latency
+and memory footprint without contributing additional visual detail. This inefficiency is particularly problematic for applications that scale to many scenes and complex downstream
+tasks, such as simulation-driven training of models for robotics or autonomous driving,
+where fast rendering is crucial for large-scale data generation. Redundancy can also hinder generalization to novel views, as overfitting to input views may lead to high-frequency
+artifacts. To address these challenges, we focus on reducing the number of primitives in
+FF-reconstructed scenes while maintaining visual quality. A good merging strategy should
+be content-adaptive, allocating representational capacity where it matters most, and it should
+be able to consolidate redundant primitives across overlapping views.
+Existing approaches have made significant progress in addressing the problem of redundant Gaussians through spatial discretization [15, 42, 43], iterative refinement [47], or
+through detection-based primitive placement [29]. While these methods achieve notable
+reductions in primitive count with good rendering quality, opportunities for further improvement remain: uniform discretization strategies do not fully exploit the varying visual importance across scene regions, iterative refinement methods can lead to overfitting on input
+views, and detection-based methods operate during initial reconstruction without support for
+merging primitives across multiple views or adapting to new reconstruction backbones. We
+aim to address these open challenges with our work.
+The main contribution of this paper is a novel technique to substantially reduce the complexity of 3D Gaussian scenes that feed-forward methods produce. We propose a structureaware, superpixel-based primitive merging strategy that takes per-pixel Gaussians from any
+feed-forward method and consolidates them into a highly compact representation. Contentadaptive superpixel segmentation, guided by local image structure, groups spatially coherent,
+perceptually similar per-pixel Gaussians. A learned set-attention encoder compresses each
+group into a compact latent representation, which we then match across views and merge
+using a learned fusion module. A local self-attention module refines the result, and a decoder produces output Gaussians at a controllable level of detail. This encode-merge-decode
+pipeline retains the bulk of the novel view synthesis quality at just 1/20th of the Gaussians
+FAASCH, KALL, STACHNISS: COMPACT FF-3DGS VIA SALIENCY-GUIDED MERGING
+3
+of a per-pixel method, vastly increasing the rendering speed for downstream applications
+while providing more robust and reliable reconstructions than competing reduced-primitive
+methods, particularly in sparse-view settings. Crucially, the merging module attaches to any
+per-pixel Gaussian predictor without retraining the backbone, making it a flexible solution
+for improving the efficiency of existing FF 3DGS methods.
+2
+Related Work
+3D Scene Representations: Traditional computer graphics has long relied on explicit representations such as meshes and point clouds for rasterization-based rendering pipelines [2].
+Neural Radiance Fields (NeRF) [28] introduced a neural implicit approach that learns to represent scenes from multi-view imagery, enabling applications in reconstruction [5, 28], simulation [38], and content generation [31, 33]. Despite their quality, NeRFs suffer from high
+computational demands due to volumetric rendering. 3D Gaussian splatting (3DGS) [17]
+is an explicit representation that addresses this limitation by representing scenes as collections of 3D Gaussians rendered through differentiable rasterization, achieving both faster
+optimization and interactive rendering frame rates. However, 3DGS still requires per-scene
+optimization, which incurs significant computational cost when scaling to a large number of
+scenes and fails to converge to a meaningful geometry for sparse-view settings.
+Feed-Forward Reconstruction: To overcome the limitations of per-scene optimization, feed-forward (FF) methods predict 3D Gaussians directly from input views [7, 11, 15,
+37, 48, 49, 51, 52]. The backbone is typically a large vision transformer (ViT) [12] that
+encodes the input views and regresses the Gaussian parameters. FF reconstruction runs
+significantly faster than per-scene optimization and can handle sparse-view settings, but
+often places Gaussians less efficiently. Most existing FF methods predict per-pixel Gaussians [7, 11, 23, 37, 48, 49, 51, 52], which results in a highly redundant representation with
+an excessive number of sub-optimally placed primitives.
+Efficient 3D Gaussian Splatting: The number of primitives in a 3DGS reconstruction
+directly affects rendering speed, memory consumption, and storage cost. Several strategies aim to reduce this overhead. Compression techniques such as quantization and learned
+entropy coding lower the per-primitive memory footprint without reducing the number of
+Gaussians [8, 9, 10, 20, 30, 40]. In contrast, compaction methods aim to reduce the primitive count itself: hierarchical representations merge primitives that contribute primarily to
+the background [18], and modified densification strategies prune redundant Gaussians during
+optimization [3, 13, 20, 21, 26]. Compression and compaction are complementary: attributecompression schemes such as HAC/HAC++ [8, 10] can be applied on compact Gaussian
+scenes for further storage savings. However, both compression and compaction methods
+of this kind are tightly coupled to the per-scene optimization process, and are therefore not
+directly compatible with feed-forward reconstruction methods.
+Some methods specifically tackle the efficiency of FF-produced representations. The
+most common approach is voxelization, where some methods directly predict voxel-aligned
+Gaussians [27, 32, 42] and others apply post-processing voxelization [15, 43]; yet uniform
+spatial discretization does not account for varying visual complexity across scene regions.
+Detection-based approaches [29] move from per-pixel regression to importance-driven Gaussian placement, allocating primitives according to visual saliency. Iterative refinement methods [47] predict Gaussians in a subsampled space and refine them using gradient-free feedback from the rendering error, yielding 16× fewer primitives than per-pixel methods. Both
+4
+FAASCH, KALL, STACHNISS: COMPACT FF-3DGS VIA SALIENCY-GUIDED MERGING
+directions integrate Gaussian reduction directly into the reconstruction model itself, which is
+fundamentally different and complementary to our post-hoc compression approach. While
+these methods potentially allow for more efficient FF reconstruction, they are less flexible
+than our post-processing pipeline, and cannot directly leverage the strong performance of
+existing FF backbones. Graph-based fusion mechanisms [44, 54] address the redundancy
+of Gaussians in overlapping views by progressively merging per-pixel Gaussians across
+views via depth-proximity matching, GRU-based feature updates, or graph convolutions with
+overlap-weighted edges followed by pooling layers that prune geometrically close primitives.
+These methods rely on globally uniform proximity thresholds and do not account for visual
+complexity, allocating primitives uniformly regardless of scene content. In contrast, our
+method focuses on redistributing primitive capacity based on visual complexity, in addition
+to addressing the redundancy of overlapping views, which allows for much greater compression of the Gaussian representation while retaining high reconstruction quality. A complementary direction compresses redundant multi-view inputs into a compact latent state before
+Gaussian prediction using an Information Bottleneck formulation, enabling FF models to
+scale to over a hundred input views [41]. This acts as an input-side compression module and
+does not address the redundancy of the predicted per-pixel Gaussians; it could therefore be
+combined with our output-side primitive merging to obtain an end-to-end efficient pipeline.
+Superpixel Segmentation: Superpixel segmentation is a widely used technique in computer vision that groups pixels into small, perceptually meaningful regions based on color
+and spatial proximity [1, 35, 55]. Practitioners often apply it as a pre-processing step for
+tasks such as object recognition, image segmentation, and scene understanding to reduce
+computational complexity and improve efficiency of subsequent processing steps [4]. Recent superpixel methods with adaptive sizing capabilities [39, 56] are particularly effective,
+as they can allocate more segments to visually complex regions. However, as far as we are
+aware, no prior work has applied these methods to 3D scene reconstruction.
+3
+Preliminaries
+3D Gaussian Splatting. In 3DGS [17], a scene is represented as a set of N anisotropic
+Gaussians G = {G1 , . . . , GN }. Each Gaussian Gi is parameterized by a mean µ i ∈ R3 and a
+covariance Σi ∈ R3×3 , with its evaluation at position x ∈ R3 given by
+
+
+(1)
+Gi (x) = exp − 21 (x − µ i )⊤ Σ−1
+i (x − µ i ) .
+For rendering, Gaussians are projected into image space via EWA splatting [60], yielding a
+2D covariance Σ′i = JWΣi W⊤ J⊤ with the viewing transformation W and the projection Ja⊤
+cobian J. The 3D covariance is decomposed as Σi = Ri Si S⊤
+i Ri into rotation Ri and diagonal
+4
+scale Si , and is parameterized by a quaternion qi ∈ R and scale vector si ∈ R3 . The viewdependent color ci of Gi is encoded via spherical harmonic (SH) coefficients ĉ0,i , . . . , ĉM,i ,
+3
+where ci = ∑M
+k=0 ĉk,i Hk (d) for view direction d ∈ R , with the SH basis functions Hk . The
+final pixel color is obtained by front-to-back alpha blending:
+N
+cpixel = ∑ Ti αi ci ,
+i=1
+i−1
+Ti = ∏ (1 − α j ),
+(2)
+j=1
+where Ti is the transmittance, and αi the opacity of Gi . Each Gaussian is fully described
+by its set of parameters Θi = (µ i , qi , si , αi , ĉ0...M,i ). In the standard per-scene optimization
+FAASCH, KALL, STACHNISS: COMPACT FF-3DGS VIA SALIENCY-GUIDED MERGING
+5
+L
+rendered view Îv
+Mref
+splatting
+Refiner
+input view Iv
+saliency λ v
+G̃
+Mdec
+K
+GK
+FG Scene
+Decoder
+compressed 3DGS
+segmentation Mv
+per-view preprocessing
+unmatched
+MFF
+G FF
+Menc
+G̃ new
+FF-GS
+per-pixel 3DGS
+Encoder
+new FGs
+Frozen
+Trained
+Scene Representation
+3D
+Match
+matched
+Mmrg
+Merger
+Algorithmic
+Optional
+Figure 2: Pipeline overview. Per-pixel Gaussians G FF are grouped into saliency-guided superpixels. The encoder Menc compresses each group into a single Feature Gaussian (FG),
+the merger Mmrg fuses FGs that overlap across views, the refiner Mref updates each FG
+based on its neighbors. The decoder Mdec
+K expands each FG into K output Gaussians, resulting in the output scene GK .
+setting, these parameters are optimized via gradient descent, minimizing a combination of
+different photometric losses between images rendered through differentiable rasterization
+and ground-truth images.
+Feed-Forward Gaussian Splatting. Feed-forward (FF) methods [11, 15, 23, 48] bypass per-scene optimization by predicting Gaussian parameters directly from N input views
+{Iv }Nv=1 . A typical architecture feeds each view through a vision transformer (ViT) [12] backbone to extract per-patch features, and applies multi-view cross-attention to obtain multiview-aware feature maps. Prediction heads then regress point maps, which can be projected
+into 3D space to retrieve the Gaussian means µ i using known camera parameters. The remaining parameters are similarly predicted from the patch features. FF methods have varying
+input requirements: posed methods require known camera intrinsics and extrinsics [7, 11],
+whereas unposed methods jointly predict camera parameters and scene geometry [15, 51].
+4
+Saliency-Guided Superpixel Merging
+Given per-pixel Gaussian primitives predicted by an arbitrary frozen feed-forward backbone
+MFF , our method consolidates them into a compact representation that largely retains visual
+fidelity. A key design goal is content-adaptivity: homogeneous regions (e.g., sky, walls)
+can be aggressively compressed, whereas fine detail (e.g., at edges or textures) requires a
+higher representational capacity. We achieve this through an encode-merge-decode pipeline
+depicted in Fig. 2. First, saliency-guided superpixel segmentation groups spatially coherent,
+perceptually similar Gaussians at a content-adaptive granularity (Sec. 4.1). A learned encoder Menc compresses each group into a latent-augmented representation we call a Feature
+Gaussian (Sec. 4.2). A level-of-detail decoder Mdec
+K reconstructs 3D Gaussians, compati-
+6
+FAASCH, KALL, STACHNISS: COMPACT FF-3DGS VIA SALIENCY-GUIDED MERGING
+(a) Input Iv
+(b) Saliency λ v
+(c) SLIC
+(d) BASS
+(e) BASS +λ v
+Figure 3: Superpixel comparison at similar segment count: SLIC (uniform), BASS with
+uniform seeds, and BASS with saliency-guided seeds λ v .
+ble with existing rendering pipelines, at a controllable resolution K (Sec. 4.3). Cross-view
+matching identifies overlapping Feature Gaussians, and a learned merger Mmrg consolidates
+them, enabling further compression (Sec. 4.4). A local self-attention refiner Mref provides
+neighborhood awareness so that thin structures spanning multiple groups can be faithfully
+reconstructed (Sec. 4.5). The pipeline is trained end-to-end with photometric losses on the
+rendered output (Sec. 4.6).
+4.1
+Content-Adaptive Superpixel Grouping
+The first step partitions each view’s per-pixel Gaussians into groups that the encoder can
+compress. A good group for merging should be color-homogeneous (so appearance can
+be preserved), spatially contiguous (necessary for 3D coherence), and have regular shape
+(easier to represent with few Gaussians). At the same time, group size should adapt to local
+scene complexity: edges and corners carry geometric detail that merging would destroy, so
+they require smaller groups and thus more output primitives; flat regions can be aggressively
+merged.
+Bayesian Adaptive Superpixel Segmentation (BASS) [39] produces segments with the
+first three properties by iteratively maximizing a posterior that balances color homogeneity
+with spatial compactness, while maintaining regular segment boundaries. Standard BASS
+initializes seeds on a uniform hexagonal grid, and achieves content adaptivity by iteratively
+shifting superpixel centers and borders. For very small segment sizes, this can still lead to
+a large number of segments in flat regions, which is undesirable for our application. We
+replace the uniform initialization with a saliency-guided seed placement: we compute the
+Shi-Tomasi corner response λ v [36] at each pixel (the minimum eigenvalue of the image
+structure tensor [34]) and sample seeds densely where this response is high and sparsely
+elsewhere. BASS then refines these seeds into final segments of similar color and a regular
+shape. The output is a per-view partition map Mv that assigns each pixel (and its associated
+Gaussian) to a superpixel group S j . Through the combination of saliency-guided seeding and
+BASS segmentation, we obtain small segments in regions of high detail and larger segments
+in flatter regions, effectively adapting to local scene complexity (Fig. 3).
+4.2
+Feature Gaussian Encoder
+Given a superpixel group S j , the encoder Menc compresses its Gaussians into an intermediate representation that downstream stages (matching, merging, refinement) can process
+efficiently. To achieve this, we introduce the Feature Gaussian G̃ j , a latent-augmented representation that encodes the entire group with a single set of parameters. A Feature Gaussian
+7
+FAASCH, KALL, STACHNISS: COMPACT FF-3DGS VIA SALIENCY-GUIDED MERGING
+(a) Encoder Menc / Merger Mmrg
+G1
+MLP
+G2
+MLP
+(b) Decoder Mdec
+K
+G̃
+Q
+MLP1
+MLP
+G1
+MLP
+G2
+.
+.
+.
+.
+.
+.
+1 input
+.
+.
+.
+.
+.
+.
+Gn
+MLP
+n inputs
+encode
+MLP2
+SAB
+PMA
+SAB
+.
+.
+.
+MLP
+self-attn
+G̃
+aggregate & predict 1 output
+MLPK
+K slots
+self-attn
+MLP
+GK
+predict
+K outputs
+Figure 4: Internal architecture of our modules built on the Set Transformer [22] building
+blocks SAB and PMA. (a) The encoder and merger share the same many-to-one pattern: n
+input tokens are refined by SABs and aggregated into a single output via PMA and a learnable query Q. (b) The decoder inverts this pattern: a single Feature Gaussian is expanded
+into K output Gaussians via learned slot tokens.
+has the same spatial format as a regular Gaussian (position µ j , scale s j , and rotation q j ), but
+replaces view-dependent color with a base color c j and a latent vector z j ∈ Rd . The latent
+stores the visual appearance and geometric structure of the entire group so that the decoder
+can later expand it into one or more output Gaussians that capture the group’s complexity.
+Compressing a variable-size set of Gaussians into a single Feature Gaussian requires
+an architecture that is permutation-invariant (the output should not depend on input order)
+and handles arbitrary group sizes. We use the Set Transformer [22]: an MLP projects perGaussian attributes into tokens, a stack of Set Attention Blocks (SABs) refines them via
+pairwise interactions, and a Pooling-by-Multihead-Attention (PMA) layer aggregates the set
+into a single output using a learnable query Q (Fig. 4). We bound the encoder’s compute
+budget for very large superpixels as detailed in the supplementary material (Sec. E). A final
+MLP produces the latent feature z j , and a position offset from the opacity-weighted centroid,
+allowing the encoder to compensate for outliers that would otherwise skew the placement
+of the Feature Gaussian. The base color c j is the opacity-weighted average of the group
+members’ diffuse color. Notably, the encoder does not predict the scale s j or rotation q j that
+are needed for cross-view matching; these are produced by the decoder Mdec
+1 . This design
+prevents a collapse mode where the encoder shrinks geometry to avoid cross-view matching
+entirely, which would simplify reconstruction but hurts compression.
+4.3
+Level-of-Detail Decoder
+The decoder Mdec
+K produces the K output Gaussians from each Feature Gaussian, which are
+compatible with any differentiable rasterizer and can be directly rendered. We train multiple
+decoder heads for different K: the K =1 head provides the geometry of the Feature Gaussian,
+which is used for cross-view matching and serves as maximum-compression output, while
+heads with K > 1 trade a higher number of Gaussians for higher reconstruction fidelity. This
+exposes K as an inference-time knob, allowing the user to balance quality against rendering
+compute cost without retraining.
+Expanding a single latent into K outputs requires learned specialization. We use a slotbased design (Fig. 4): a slot-seed MLP maps the latent feature z j and base color c j into K slot
+tokens, per-slot self-attention lets slots coordinate, and output heads predict each Gaussian’s
+8
+FAASCH, KALL, STACHNISS: COMPACT FF-3DGS VIA SALIENCY-GUIDED MERGING
+parameters. Mean µ i and base color ci are predicted as offsets from the Feature Gaussian’s
+parameters. At inference, we prune Gaussians with αi < τa for further compression.
+4.4
+Cross-View Matching and Merging
+Feature Gaussians G̃ from different views that observe the same 3D region should be merged
+to reduce redundancy. We identify candidate groups using spatial overlap and feature similarity, then fuse them with a learned merger Mmrg .
+For each Feature Gaussian G̃ j , we retrieve the k nearest neighbors via 3D kNN on positions, excluding candidates from the same input view. A candidate pair passes the match
+gate if both (i) the cosine similarity between latent features exceeds τ f , and (ii) the AABB
+intersection-over-union of the FGs’ geometry exceeds τg . This produces a set of matched
+edges over all Feature Gaussians.
+Since one FG may match several others, and matching is not transitive, we take the
+connected components of this edge graph as the final merge groups. Feature Gaussians
+with no matches are appended to the final set G̃ unchanged. Mmrg merges each connected
+group using the same SAB+PMA [22] backbone as the encoder (Fig. 4). Dedicated zeroinitialized residual heads predict parameter updates to the 0th Feature Gaussian in the group:
+∆µ, ∆z, ∆m, ∆c0 , ∆s, ∆q. This way the merger starts as an identity and training remains stable.
+4.5
+Refinement and Online Reconstruction
+Refinement. The final rendering quality depends in part on how well neighboring Feature
+Gaussians G̃ interact — particularly along thin structures or at depth boundaries. In these
+areas, individually compressed groups might not perfectly line up in the final reconstruction.
+The refiner Mref addresses this by updating each Feature Gaussian G̃ j based on its kNN
+neighborhood through self-attention: neighbors’ relative positions and attributes serve as
+context tokens, and residual heads predict parameter updates ∆µ, ∆z, ∆m, ∆c0 , ∆s, ∆q. As
+with the merger, all residual projections are zero-initialized for stable training.
+Online reconstruction. Our pipeline also supports online reconstruction, where views
+are processed as a sequence as they arrive rather than in a single batch. This allows for
+updates to the reconstructed scene as new observations become available and enables reconstruction of large scenes that do not fit into memory at once. In practice, we initialize
+the Feature Gaussian set G̃ from a first batch of observations. When a new view arrives,
+the pipeline groups and encodes its per-pixel Gaussians into new Feature Gaussians, then
+matches and merges them into the existing set G̃. The decoder produces output Gaussians on
+demand from the current state of G̃ via Mdec
+K .
+4.6
+Training Objectives
+During training, the feed-forward backbone MFF remains frozen; we optimize only the encoder Menc , merger Mmrg , refiner Mref , and decoders Mdec
+K . We train the pipeline end-toend on multi-view image data with the following losses.
+Photometric reconstruction. The primary supervision consists of Mean Squared Error (MSE), SSIM [45], and LPIPS [53] losses between rendered and ground-truth images,
+optionally computed on both input views and held-out novel views.
+FAASCH, KALL, STACHNISS: COMPACT FF-3DGS VIA SALIENCY-GUIDED MERGING
+9
+Teacher loss. Due to randomly initialized weights of our modules, the geometry of the
+compressed Gaussians is in turn essentially random during early training. This can cause single Gaussians to cover the renders from the training views entirely, inhibiting gradient flow.
+To address this, we supervise the encoder with a closed-form moment-matching target [18]:
+for each superpixel group S j , we fit a single Gaussian to the group’s opacity-weighted mean
+∑i∈S j αi µ i
+∑i∈S j αi
+(3)
+)(µ i − µ teach
+)⊤
+∑i∈S j αi (µ i − µ teach
+j
+j
+.
+∑i∈S j αi
+(4)
+µ teach
+=
+j
+and opacity-weighted covariance
+Σteach
+=
+j
+We compare the resulting Gaussian parameters to the output of our merging pipeline using
+a weighted sum of a geodesic quaternion loss for qi and L1 losses for the remaining parameters. This teacher signal decays on a schedule, allowing the learned encoder to eventually
+surpass the moment-matched initialization.
+Decoder diversification. For K > 1 decoders, a regularizer encourages the K output
+Gaussians to be spatially diverse without collapsing into identical copies. We define a target
+AABB-IoU and apply an attraction/repulsion term around it, and additionally penalize large
+opacity differences within a group to prevent single-primitive dominance. Decaying this
+loss during training lets the photometric objective override it once diversity is established,
+allowing the model to collapse to fewer Gaussians where a single primitive suffices. The full
+formulation of this regularizer is given in the supplementary material (Sec. D).
+The complete training objective combines all terms:
+L = λMSE LMSE + λSSIM LSSIM + λLPIPS LLPIPS + λteach Lteach + λdiv Ldiv ,
+(5)
+where λteach and λdiv follow a decay schedule and concrete weight values are provided in the
+supplementary material (Sec. B).
+5
+Experimental Evaluation
+We evaluate our saliency-guided superpixel-based primitive merging strategy on novel view
+synthesis quality and number of primitives.
+5.1
+Experimental Setup
+Implementation Details. We evaluate our approach with three complementary FF backbones: DepthSplat [48], a posed method that leverages multi-view cost volumes augmented
+with monocular depth features; AnySplat [15], an unposed method that jointly estimates geometry from unconstrained views; and Depth Anything 3 (DA3) [23], a foundation model
+that unifies depth estimation, pose estimation, and per-pixel 3D Gaussian prediction in a single ViT backbone, supporting both posed and unposed operation. We train all added modules
+with the AdamW optimizer [25] for 300 000 steps on the DL3DV-10K dataset [24], using a
+cosine schedule with a maximum learning rate of 5 × 10−5 . For the level-of-detail decoder,
+10
+FAASCH, KALL, STACHNISS: COMPACT FF-3DGS VIA SALIENCY-GUIDED MERGING
+Table 1: Novel view synthesis quality for all backbone variants and baselines. Best in bold,
+second best underlined.
+DL3DV-Bench
+Backbone
+AnySplat
+ReSplat
+VolSplat
+T&T
+rc (%)↓ PSNR↑ SSIM↑ LPIPS↓ PSNR↑ SSIM↑ LPIPS↓ PSNR↑ SSIM↑ LPIPS↓
+Unmerged
+Voxelized
+100.0%
+83.2%
+13.73
+13.76
+0.361
+0.360
+0.495
+0.497
+12.17
+12.17
+0.345
+0.344
+0.497
+0.498
+11.89
+11.89
+0.416
+0.413
+0.466
+0.468
+Mom. Match.
+Ours (K = 1)
+Ours (K = 2)
+Ours (K = 4)
+5.3%
+4.4%
+8.9%
+17.8%
+14.45
+14.70
+14.81
+14.78
+0.410
+0.408
+0.411
+0.409
+0.566
+0.550
+0.549
+0.547
+13.46
+14.48
+14.74
+14.81
+0.398
+0.405
+0.406
+0.408
+0.559
+0.544
+0.544
+0.542
+12.49
+13.24
+13.81
+13.93
+0.463
+0.458
+0.473
+0.474
+0.517
+0.504
+0.505
+0.503
+Unmerged
+100.0%
+15.78
+0.577
+0.347
+13.96
+0.480
+0.389
+13.72
+0.549
+0.377
+6.1%
+5.3%
+10.5%
+21.1%
+13.16
+17.17
+17.41
+17.50
+0.466
+0.529
+0.536
+0.539
+0.573
+0.440
+0.436
+0.433
+12.35
+15.37
+16.05
+16.31
+0.424
+0.457
+0.469
+0.474
+0.569
+0.452
+0.448
+0.446
+11.43
+14.33
+14.60
+14.78
+0.498
+0.508
+0.517
+0.522
+0.550
+0.461
+0.458
+0.457
+Unmerged
+100.0%
+18.68
+0.620
+0.297
+16.71
+0.495
+0.356
+15.07
+0.546
+0.353
+Mom. Match.
+Ours (K = 1)
+Ours (K = 2)
+Ours (K = 4)
+4.9%
+4.4%
+8.8%
+17.3%
+13.79
+18.37
+18.50
+18.54
+0.459
+0.578
+0.582
+0.583
+0.637
+0.422
+0.417
+0.416
+14.04
+17.87
+18.02
+18.06
+0.440
+0.514
+0.517
+0.518
+0.601
+0.442
+0.440
+0.439
+12.55
+16.00
+16.09
+16.09
+0.505
+0.562
+0.566
+0.566
+0.611
+0.421
+0.418
+0.418
+Init
+Recurrent 4
+—
+6.2%
+6.2%
+93.4%
+13.17
+15.39
+14.12
+0.380
+0.468
+0.366
+0.556
+0.519
+0.607
+15.57
+16.79
+11.81
+0.369
+0.418
+0.251
+0.566
+0.558
+0.700
+12.37
+13.38
+11.71
+0.383
+0.437
+0.320
+0.591
+0.578
+0.650
+DepthSplat Mom. Match.
+Ours (K = 1)
+Ours (K = 2)
+Ours (K = 4)
+DA3
+MipNeRF360
+Method
+we maintain three heads with K =1, K =2, and K =4 output Gaussians per Feature Gaussian,
+which are jointly trained. We keep the backbones frozen during training.
+Evaluation Details. We test the reconstruction quality on DL3DV-Bench [24], which
+contains 140 scenes not used during training. We additionally evaluate on MipNeRF360 [5]
+and Tanks and Temples [19], two widely used benchmarks that were not included in the
+training data. We sample input views at regular intervals along the camera trajectory, with
+novel views placed in-between. Images are resized so that the longer side is 476 pixels. We
+mask out areas of the scene not visible in any input view and exclude them from metric computation to focus evaluation on the quality of the reconstruction rather than the extrapolation.
+Each experiment uses 3, 6, 9, and 12 input views; results are averaged across all scenes and
+view splits. Detailed per-view-count results (Sec. G) and input view reconstruction metrics
+(Sec. F) appear in the supplementary material, which also reports results computed without
+visibility masking (Sec. A). We report PSNR, SSIM [45], and LPIPS [53] for novel view
+synthesis. For efficiency we report the relative primitive count rc (fraction of the unmerged
+count that is retained), which directly correlates with rendering time and memory usage.
+Further evaluation details are provided in the supplementary material (Sec. A).
+In addition to reporting the quality of the reconstruction directly produced by the three
+backbones, we compare against ReSplat [47], which predicts Gaussians in a 16× subsampled
+space and refines them recurrently, and VolSplat [42], a voxel-based method producing Gaussian in a regular grid. We additionally report the performance of AnySplat’s built-in post-hoc
+voxelization and of heuristic moment matching of Gaussians grouped into superpixels. Due
+to unavailable public code, we could not include Off The Grid [29] and Fuse-and-Refine [43]
+in our evaluation.
+FAASCH, KALL, STACHNISS: COMPACT FF-3DGS VIA SALIENCY-GUIDED MERGING
+11
+Table 2: Online reconstruction quality at end-of-sequence, averaged over all 9 MipNeRF360
+scenes (target views). Best per column in bold.
+5.2
+Method
+#Prim.↓
+rc (%)↓
+PSNR↑
+SSIM↑
+LPIPS↓
+Naïve backbone
+16.1 M
+100.0
+15.27
+0.372
+0.560
+FPS↑
+60
+Ours K = 1
+Ours K = 2
+Ours K = 4
+1.0 M
+2.0 M
+4.0 M
+6.2
+12.4
+24.8
+15.33
+15.41
+15.45
+0.367
+0.368
+0.370
+0.612
+0.611
+0.610
+365
+378
+245
+Main Results
+Novel View Synthesis Quality. Tab. 1 reports novel view synthesis results for all methods. Using our pipeline with the strongest backbone (DA3), the K = 1 decoder achieves
+17.41 dB PSNR averaged over all benchmarks at rc = 4.4%, even slightly surpassing the
+DA3 unmerged quality at 16.82 dB. The gain in performance over DA3 is only achieved
+on MipNeRF360 and Tanks & Temples, which have much larger viewpoint changes than
+DL3DV-Bench. This reflects the regularising effect of superpixel-based merging: fusing
+per-pixel Gaussians into compact, spatially coherent groups can remove floaters and overly
+large Gaussians, and reduces high-frequency noise. These effects are consistent across all
+backbones, with the largest gain for DepthSplat, which sometimes produces overly large
+Gaussians that strongly impact the reconstruction quality. LPIPS responds very sensitively
+to texture degradation from merging, and therefore our pipeline does not fully preserve it.
+ReSplat achieves a comparable rc of 6.2% but with lower quality than our method, and without the flexibility of adapting to more powerful foundation models, as they become available.
+VolSplat performs significantly worse than the other methods, and fails to reproduce the reconstruction quality reported in its original paper. This is likely due to the fact that VolSplat
+was exclusively trained on RealEstate-10K [58], which mostly contains scenes with smaller
+viewpoint changes, different to our benchmarks.
+Primitive Count vs. Quality Trade-off. Fig. 1 shows the quality–efficiency trade-off
+for the DA3 backbone, averaged over all three benchmarks. Our method (K = 1, 2, 4) traces
+a favorable curve that stays close to the unmerged quality ceiling with rc between 4.4% and
+17.3%. ReSplat and VolSplat produce suboptimal results, failing to achieve the same quality
+as our method at comparable or higher primitive counts.
+Qualitative Comparisons. Fig. 5 shows qualitative novel view synthesis results at 12
+input views across all three benchmarks. Our method (K = 1, DA3 backbone) largely reproduces the unmerged quality at a fraction of the primitive count. ReSplat occasionally yields
+sharper detail but introduces more severe structured artifacts elsewhere. VolSplat fully fails
+to reconstruct the scene structure for many scenes.
+Online Reconstruction. We evaluate our pipeline in an online setting where views are
+integrated incrementally. Starting from an empty scene, batches of 12 views are processed
+in sequence, in the order of the camera trajectory, until all context views are integrated.
+Half of the total views are used as input and the rest as target views for evaluation. We
+report primitive growth averaged over the 7 scenes from MipNeRF360 that provide at least
+84 context views (bicycle, bonsai, counter, flowers, garden, kitchen, room), and novel view
+synthesis quality at the end of the sequence averaged over all 9 MipNeRF360 scenes. Fig. 6
+compares the cumulative Gaussian count of our three decoders against the naïve baseline,
+which accumulates all raw per-pixel Gaussians without merging. The naïve baseline grows
+at ∼1.84 M Gaussians per 12 views; our K = 1 decoder grows at ∼0.12 M per step — a
+16× reduction in slope owing to within-step compression from superpixel grouping, with
+12
+FAASCH, KALL, STACHNISS: COMPACT FF-3DGS VIA SALIENCY-GUIDED MERGING
+GT
+DA3 (backbone)
+Ours (K = 1)
+ReSplat
+VolSplat
+rc (%)
+100
+4.4
+6.2
+93.4
+DL3DV-Bench
+MipNeRF360
+Tanks & Temples
+Figure 5: Qualitative novel view synthesis comparison at 12 input views (DA3 backbone).
+Unseen areas are highlighted in red and excluded from metric computation.
+additional savings from cross-step merging of overlapping regions. At 84 integrated views,
+K =1 retains 0.82 M Gaussians against 12.9 M for the naïve baseline. Tab. 2 summarises perscene-average quality at the end of each sequence. Despite holding 16× fewer primitives,
+our K = 1 decoder closely approaches the naïve backbone on PSNR and SSIM while trading
+off some perceptual fidelity (LPIPS), and renders 6.1× faster.
+5.3
+Ablation Studies
+Replacing our learned merger with heuristic moment matching to combine the Gaussians
+within each superpixel performs worse across all metrics, confirming that a learned representation is essential for quality-preserving fusion. The magnitude of the benefit of the
+learned merging pipeline depends on the uniformity of the Gaussians predicted by the backbone: with the more uniform AnySplat Gaussians, moment matching performs better and
+the gap to our method is smaller (Tab. 1).
+FAASCH, KALL, STACHNISS: COMPACT FF-3DGS VIA SALIENCY-GUIDED MERGING
+Gaussians (M)
+14
+13
+Naïve (unmerged)
+Ours K = 4
+Ours K = 2
+Ours K = 1
+12
+10
+8
+6
+4
+2
+0
+12
+24
+48
+36
+72
+60
+84
+Views integrated
+Figure 6: Gaussian count vs. integrated views in the online setting, averaged over 7 MipNeRF360 scenes.
+Table 3: Ablation study (AnySplat backbone, K = 1, averaged over all benchmarks). Best in
+bold, second best underlined.
+Variant
+rc (%)↓
+PSNR↑
+Backbone (unm.)
+100.0%
+4.4%
+4.7%
+5.3%
+2.0%
+8.7%
+Ours (full)
+w/o refiner
+w/o cross-view
+zero shot larger SPs
+zero shot smaller SPs
+SSIM↑
+LPIPS↓
+12.59
+0.374
+0.486
+14.14
+13.49
+14.13
+13.97
+14.11
+0.423
+0.389
+0.424
+0.424
+0.420
+0.533
+0.534
+0.531
+0.548
+0.523
+All further ablations use the AnySplat backbone and report the K = 1 decoder averaged
+over DL3DV-Bench, MipNeRF360, and Tanks & Temples. Tab. 3 summarizes all variants
+against the unmerged reference. Removing the refiner Mref degrades all metrics (Tab. 3),
+indicating that the refiner contributes significantly to overall performance. Disabling crossview merging slightly improves PSNR at the cost of a higher primitive count, suggesting
+that cross-view fusion reduces redundancy at the cost of a slight quality drop. Within-view
+merging is the dominant source of compression in our pipeline, while cross-view merging is
+an optional addition that provides a smaller, but not negligible, further reduction: relative to
+within-view merging alone, cross-view merging retains 84.6% of the Gaussians, a compression roughly comparable to AnySplat’s built-in post-hoc voxelization (83.2%, Tab. 1).
+Superpixel Algorithm Comparison. To evaluate the segmentation quality of different
+superpixel algorithms across a wide range of segment counts, without the cost of the full
+pipeline evaluation, we use a proxy metric: each pixel in an image is replaced by the mean
+color of its superpixel, and the resulting image is compared to the ground truth. This measures how faithfully a given superpixel layout can represent the visual image content, which
+determines the upper bound on merging quality. We apply this proxy to 1 000 images (100
+scenes × 10 views) from the training set and report PSNR against the original pixels. Fig. 7
+shows the quality vs. superpixel count trade-off for BASS [39] with uniform seeding, BASS
+with our Shi-Tomasi corner detector seeding, and SLIC [1]. BASS with Shi-Tomasi corner
+seeding consistently dominates the other algorithms at all budgets, achieving higher proxy
+PSNR at equal superpixel count. Based on these results, we evaluate the full pipeline (without retraining) with BASS and Shi-Tomasi seeding at three superpixel size settings, which
+yield ∼23k, ∼12k, and ∼5k superpixels per image on average.
+Larger superpixels reduce the relative primitive count rc at the cost of quality, e.g., from
+14.14 dB PSNR to 13.97 dB PSNR at roughly half the rc (Tab. 3). This confirms that finer
+14
+FAASCH, KALL, STACHNISS: COMPACT FF-3DGS VIA SALIENCY-GUIDED MERGING
+15
+36
+PSNR ↑
+PSNR ↑
+34
+32
+BASS + Shi-Tom.
+BASS (uniform)
+SLIC
+30
+28
+0
+10
+20
+30
+40
+Superpixels (k)
+50
+60
+14
+13
+12
+Lrg. SP
+Sm. SP
+K =2
+Unm.
+Med. SP
+K =1
+K =4
+Vox.
+5 10 15 20 25 30 35
+83 100
+rc (%)
+Figure 7: Left: Proxy PSNR vs. superpixel count for three segmentation algorithms (100
+scenes × 10 views). Each pixel is replaced by its superpixel mean color and compared to the
+original image. Right: NVS PSNR vs. relative primitive count for three SP sizes (AnySplat
+backbone, zero-shot, averaged over all benchmarks). Arrows indicate favorable direction.
+superpixels better preserve reconstruction quality, at the cost of a higher rc , with diminishing
+returns at very small superpixel sizes. Using larger superpixels therefore provides a similar
+trade-off to using the higher K decoder heads, with the decoder heads being slightly more
+effective at the same rc . For example, the K = 2 decoder achieves 14.45 dB PSNR at rc =
+8.9%, while the K = 4 decoder with larger superpixels achieves 14.45 dB PSNR at a similar
+rc = 8.0%. This provides the user with two complementary mechanisms to flexibly adjust
+the quality–efficiency trade-off according to their needs, both without retraining.
+6
+Conclusion
+We present a structure-aware approach for strongly compressing Gaussian splatting representations generated by feed-forward networks. Our superpixel-based primitive merging
+strategy intelligently consolidates per-pixel Gaussians into a compact, content-adaptive representation. We group Gaussians via saliency-guided superpixel segmentation, encode each
+group into a Feature Gaussian with a learned encoder, and match and merge Feature Gaussians across views. A level-of-detail decoder provides explicit control over the output primitive count at inference, enabling flexible quality-efficiency trade-offs. The pipeline operates
+as a backbone-agnostic post-processing module that retains the bulk of the reconstruction
+quality across three benchmarks and three feed-forward backbones at just 1/20th of the Gaussians, accepting a slight reduction in fine-detail fidelity in exchange for dramatically improved efficiency. Compared to other reduced-primitive methods, our approach provides
+more robust and higher quality reconstructions, particularly in sparse-view settings. Additionally, for large viewpoint changes, the merged primitives can even improve some metrics
+by suppressing common FF artifacts such as semi-transparent fog, or high-frequency noise.
+Limitations. Our method depends on the quality of the underlying feed-forward reconstruction; if the initial primitives are of low quality, merging may not recover a good
+representation. The matching and merging pipeline introduces a computational overhead of
+540 ms compared to direct feed-forward inference (details in the supplementary material,
+Sec. C). While SSIM and PSNR metrics are preserved or improved, the LPIPS metric is
+slightly degraded due to some loss of fine detail in the merged representation.
+FAASCH, KALL, STACHNISS: COMPACT FF-3DGS VIA SALIENCY-GUIDED MERGING
+15
+Future work. Promising directions include extensions to dynamic scenes where temporal consistency must be maintained, and replacing the algorithmic superpixel grouping with a
+learned grouping mechanism that can be optimized jointly with the merging pipeline. LPIPS
+degradation could potentially be mitigated by using a richer output representation, such as
+Textured Gaussians [6] or 3D Convex Splatting [14].
+Acknowledgements. This work has partially been funded by the Deutsche Forschungsgemeinschaft (DFG, German Research Foundation) under Germany’s Excellence Strategy,
+EXC-2070 – 390732324 – PhenoRob and by the German Federal Ministry of Research,
+Technology and Space (BMFTR) under the Robotics Institute Germany (RIG). As part of
+the IPCEI ME/CT the project is supported by the Federal Ministry for Economic Affairs and
+Energy, by the Ministry for Economic Affairs, Labor and Tourism of Baden-Württemberg
+and financed by the European Union – NextGenerationEU.
+References
+[1] Radhakrishna Achanta, Appu Shaji, Kevin Smith, Aurelien Lucchi, Pascal Fua, and
+Sabine Süsstrunk. SLIC Superpixels Compared to State-of-the-Art Superpixel Methods. IEEE Trans. on Pattern Analysis and Machine Intelligence (TPAMI), 34(11):2274–
+2282, 2012. doi: 10.1109/TPAMI.2012.120.
+[2] Tomas Akenine-Möller, Eric Haines, Naty Hoffman, Angelo Pesce, Michaël Iwanicki,
+and Sébastien Hillaire. Real-Time Rendering. CRC Press, 4 edition, 2018. doi: 10.
+1201/b22086.
+[3] Yinlong Bai, Hongxin Zhang, Sheng Zhong, Junkai Niu, Hai Li, Yijia He, and Yi Zhou.
+MemGS: Memory-Efficient Gaussian Splatting for Real-Time SLAM. In Proc. of the
+IEEE/RSJ Intl. Conf. on Intelligent Robots and Systems (IROS), 2025.
+[4] Isabela B. Barcelos, Felipe D.C. Belem, Leonardo D.M. Joao, Zenilton K.G.D. Patrocínio Jr., Alexandre X. Falcao, and Silvio J.F. Guimarães. A Comprehensive Review
+and New Taxonomy on Superpixel Segmentation. ACM Computing Surveys, 56(8):
+1–39, 2024. doi: 10.1145/3643826.
+[5] Jonathan T. Barron, Ben Mildenhall, Dor Verbin, Pratul P. Srinivasan, and Peter Hedman. Mip-NeRF 360: Unbounded Anti-Aliased Neural Radiance Fields. In Proc. of
+the IEEE/CVF Conf. on Computer Vision and Pattern Recognition (CVPR), 2022.
+[6] Brian Chao, Hung-Yu Tseng, Lorenzo Porzi, Chen Gao, Tuotuo Li, Qinbo Li, Ayush
+Saraf, Jia-Bin Huang, Johannes Kopf, Ming-Hsuan Yang, and Yung-Yu Chuang. Textured Gaussians for Enhanced 3D Scene Appearance Modeling. In Proc. of the
+IEEE/CVF Conf. on Computer Vision and Pattern Recognition (CVPR), 2025.
+[7] David Charatan, Sizhe Lester Li, Andrea Tagliasacchi, and Vincent Sitzmann. pixelSplat: 3D Gaussian Splats from Image Pairs for Scalable Generalizable 3D Reconstruction. In Proc. of the IEEE/CVF Conf. on Computer Vision and Pattern Recognition
+(CVPR), 2024.
+[8] Yihang Chen, Qianyi Wu, Weiyao Lin, Mehrtash Harandi, and Jianfei Cai. HAC:
+Hash-grid Assisted Context for 3D Gaussian Splatting Compression. In Proc. of the
+Europ. Conf. on Computer Vision (ECCV), 2024.
+16
+FAASCH, KALL, STACHNISS: COMPACT FF-3DGS VIA SALIENCY-GUIDED MERGING
+[9] Yihang Chen, Qianyi Wu, Mengyao Li, Weiyao Lin, Mehrtash Harandi, and Jianfei Cai.
+Fast Feedforward 3D Gaussian Splatting Compression. In Proc. of the Intl. Conf. on
+Learning Representations (ICLR), 2025.
+[10] Yihang Chen, Qianyi Wu, Weiyao Lin, Mehrtash Harandi, and Jianfei Cai. HAC++:
+Towards 100X Compression of 3D Gaussian Splatting. IEEE Trans. on Pattern Analysis and Machine Intelligence (TPAMI), 47(11):10210–10226, 2025. doi: 10.1109/
+TPAMI.2025.3594066.
+[11] Yuedong Chen, Haofei Xu, Chuanxia Zheng, Bohan Zhuang, Marc Pollefeys, Andreas
+Geiger, Tat-Jen Cham, and Jianfei Cai. MVSplat: Efficient 3D Gaussian Splatting from
+Sparse Multi-View Images. In Proc. of the Europ. Conf. on Computer Vision (ECCV),
+2024.
+[12] Alexey Dosovitskiy, Lucas Beyer, Alexander Kolesnikov, Dirk Weissenborn, Xiaohua Zhai, Thomas Unterthiner, Mostafa Dehghani, Matthias Minderer, Georg Heigold,
+Sylvain Gelly, Jakob Uszkoreit, and Neil Houlsby. An Image is Worth 16x16 Words:
+Transformers for Image Recognition at Scale. In Proc. of the Intl. Conf. on Learning
+Representations (ICLR), 2021.
+[13] Guangchi Fang and Bing Wang. Mini-Splatting: Representing Scenes with a Constrained Number of Gaussians. In Proc. of the Europ. Conf. on Computer Vision
+(ECCV), 2024.
+[14] Jan Held, Renaud Vandeghen, Abdullah Hamdi, Adrien Deliege, Anthony Cioppa, Silvio Giancola, Andrea Vedaldi, Bernard Ghanem, and Marc Van Droogenbroeck. 3D
+Convex Splatting: Radiance Field Rendering with 3D Smooth Convexes. In Proc. of
+the IEEE/CVF Conf. on Computer Vision and Pattern Recognition (CVPR), 2025.
+[15] Lihan Jiang, Yucheng Mao, Linning Xu, Tao Lu, Kerui Ren, Yichen Jin, Xudong Xu,
+Mulin Yu, Jiangmiao Pang, and Feng Zhao. AnySplat: Feed-Forward 3D Gaussian
+Splatting from Unconstrained Views. ACM Trans. on Graphics (TOG), 44(6):1–16,
+2025. doi: 10.1145/3763326.
+[16] Ying Jiang, Chang Yu, Tianyi Xie, Xuan Li, Yutao Feng, Huamin Wang, Minchen
+Li, Henry Y.K. Lau, Feng Gao, Yin Yang, and Chenfanfu Jiang. VR-GS: A Physical
+Dynamics-Aware Interactive Gaussian Splatting System in Virtual Reality. In Proc. of
+the Intl. Conf. on Computer Graphics and Interactive Techniques (SIGGRAPH), 2024.
+[17] Bernhard Kerbl, Georgios Kopanas, Thomas Leimkühler, and George Drettakis. 3D
+Gaussian Splatting for Real-Time Radiance Field Rendering. ACM Trans. on Graphics
+(TOG), 42(4):1–14, 2023. doi: 10.1145/3592433.
+[18] Bernhard Kerbl, Andréas Meuleman, Georgios Kopanas, Michael Wimmer, Alexandre
+Lanvin, and George Drettakis. A Hierarchical 3D Gaussian Representation for RealTime Rendering of Very Large Datasets. ACM Trans. on Graphics (TOG), 43(4):1–15,
+2024. doi: 10.1145/3658160.
+[19] Arno Knapitsch, Jaesik Park, Qian-Yi Zhou, and Vladlen Koltun. Tanks and Temples:
+Benchmarking Large-Scale Scene Reconstruction. ACM Trans. on Graphics (TOG),
+36(4):1–13, 2017. doi: 10.1145/3072959.3073599.
+FAASCH, KALL, STACHNISS: COMPACT FF-3DGS VIA SALIENCY-GUIDED MERGING
+17
+[20] Joo Chan Lee, Daniel Rho, Xiangyu Sun, Jong Hwan Ko, and Eunbyung Park. Compact 3D Gaussian Representation for Radiance Field. In Proc. of the IEEE/CVF
+Conf. on Computer Vision and Pattern Recognition (CVPR), 2024.
+[21] Joo Chan Lee, Jong Hwan Ko, and Eunbyung Park. Optimized Minimal 3D Gaussian
+Splatting. In Proc. of the Conf. on Neural Information Processing Systems (NeurIPS),
+2025.
+[22] Juho Lee, Yoonho Lee, Jungtaek Kim, Adam R. Kosiorek, Seungjin Choi, and
+Yee Whye Teh. Set Transformer: A Framework for Attention-based PermutationInvariant Neural Networks. In Proc. of the Intl. Conf. on Machine Learning (ICML),
+2019.
+[23] Haotong Lin, Sili Chen, Jun Hao Liew, Donny Y. Chen, Zhenyu Li, Guang Shi, Jiashi
+Feng, and Bingyi Kang. Depth Anything 3: Recovering the Visual Space from Any
+Views. arXiv preprint, arXiv:2511.10647, 2025.
+[24] Lu Ling, Yichen Sheng, Zhi Tu, Wentian Zhao, Cheng Xin, Kun Wan, Lantao Yu,
+Qianyu Guo, Zixun Yu, Yawen Lu, Xuanmao Li, Xingpeng Sun, Rohan Ashok, Aniruddha Mukherjee, Hao Kang, Xiangrui Kong, Gang Hua, Tianyi Zhang, Bedrich Benes,
+and Aniket Bera. DL3DV-10K: A Large-Scale Scene Dataset for Deep Learning-Based
+3D Vision. In Proc. of the IEEE/CVF Conf. on Computer Vision and Pattern Recognition (CVPR), 2024.
+[25] Ilya Loshchilov and Frank Hutter. Decoupled Weight Decay Regularization. In Proc. of
+the Intl. Conf. on Learning Representations (ICLR), 2019.
+[26] Saswat Subhajyoti Mallick, Rahul Goel, Bernhard Kerbl, Markus Steinberger, Francisco Vicente Carrasco, and Fernando De La Torre. Taming 3DGS: High-Quality Radiance Fields with Limited Resources. In Proc. of the Intl. Conf. on Computer Graphics
+and Interactive Techniques (SIGGRAPH) Asia, 2024.
+[27] Sheng Miao, Jiaxin Huang, Dongfeng Bai, Xu Yan, Hongyu Zhou, Yue Wang, Bingbing Liu, Andreas Geiger, and Yiyi Liao. EVolSplat: Efficient Volume-Based Gaussian
+Splatting for Urban View Synthesis. In Proc. of the IEEE/CVF Conf. on Computer Vision and Pattern Recognition (CVPR), 2025.
+[28] Ben Mildenhall, Pratul P. Srinivasan, Matthew Tancik, Jonathan T. Barron, Ravi Ramamoorthi, and Ren Ng. NeRF: Representing Scenes as Neural Radiance Fields for
+View Synthesis. In Proc. of the Europ. Conf. on Computer Vision (ECCV), 2020.
+[29] Arthur Moreau, Richard Shaw, Michal Nazarczuk, Jisu Shin, Thomas Tanay, Zhensong
+Zhang, Songcen Xu, and Eduardo Pérez-Pellitero. Off The Grid: Detection of Primitives for Feed-Forward 3D Gaussian Splatting. In Proc. of the IEEE/CVF Conf. on
+Computer Vision and Pattern Recognition (CVPR), 2026.
+[30] Simon Niedermayr, Josef Stumpfegger, and Rüdiger Westermann. Compressed 3D
+Gaussian Splatting for Accelerated Novel View Synthesis. In Proc. of the IEEE/CVF
+Conf. on Computer Vision and Pattern Recognition (CVPR), 2024.
+18
+FAASCH, KALL, STACHNISS: COMPACT FF-3DGS VIA SALIENCY-GUIDED MERGING
+[31] Guocheng Qian, Jinjie Mai, Abdullah Hamdi, Jian Ren, Aliaksandr Siarohin, Bing
+Li, Hsin-Ying Lee, Ivan Skorokhodov, Peter Wonka, Sergey Tulyakov, and Bernard
+Ghanem. Magic123: One Image to High-Quality 3D Object Generation Using Both
+2D and 3D Diffusion Priors. In Proc. of the Intl. Conf. on Learning Representations
+(ICLR), 2024.
+[32] Xuanchi Ren, Yifan Lu, Hanxue Liang, Zhangjie Wu, Huan Ling, Mike Chen, Sanja
+Fidler, Francis Williams, and Jiahui Huang. SCube: Instant Large-Scale Scene Reconstruction Using VoxSplats. In Proc. of the Conf. on Neural Information Processing
+Systems (NeurIPS), 2024.
+[33] Kyle Sargent, Zizhang Li, Tanmay Shah, Charles Herrmann, Hong-Xing Yu, Yunzhi
+Zhang, Eric Ryan Chan, Dmitry Lagun, Li Fei-Fei, Deqing Sun, and Jiajun Wu. ZeroNVS: Zero-Shot 360-Degree View Synthesis from a Single Image. In Proc. of the
+IEEE/CVF Conf. on Computer Vision and Pattern Recognition (CVPR), 2024.
+[34] Hanno Scharr. Optimale Operatoren in der digitalen Bildverarbeitung. PhD thesis,
+Ruprecht-Karls-Universität Heidelberg, 2000.
+[35] Jianbo Shi and Jitendra Malik. Normalized Cuts and Image Segmentation. IEEE
+Trans. on Pattern Analysis and Machine Intelligence (TPAMI), 22(8):888–905, 2000.
+doi: 10.1109/34.868688.
+[36] Jianbo Shi and Carlo Tomasi. Good Features to Track. In Proc. of the IEEE/CVF
+Conf. on Computer Vision and Pattern Recognition (CVPR), 1994.
+[37] Stanislaw Szymanowicz, Christian Rupprecht, and Andrea Vedaldi. Splatter Image:
+Ultra-Fast Single-View 3D Reconstruction. In Proc. of the IEEE/CVF Conf. on Computer Vision and Pattern Recognition (CVPR), 2024.
+[38] Adam Tonderski, Carl Lindström, Georg Hess, William Ljungbergh, Lennart Svensson,
+and Christoffer Petersson. NeuRAD: Neural Rendering for Autonomous Driving. In
+Proc. of the IEEE/CVF Conf. on Computer Vision and Pattern Recognition (CVPR),
+2024.
+[39] Roy Uziel, Meitar Ronen, and Oren Freifeld. Bayesian Adaptive Superpixel Segmentation. In Proc. of the IEEE/CVF Intl. Conf. on Computer Vision (ICCV), 2019.
+[40] Haishan Wang, Mohammad Hassan Vali, and Arno Solin. Smol-GS: Compact Representations for Abstract 3D Gaussian Splatting. arXiv preprint, arXiv:2512.00850,
+2025.
+[41] Weijie Wang, Donny Y. Chen, Zeyu Zhang, Duochao Shi, Akide Liu, and Bohan
+Zhuang. ZPressor: Bottleneck-Aware Compression for Scalable Feed-Forward 3DGS.
+In Proc. of the Conf. on Neural Information Processing Systems (NeurIPS), 2025.
+[42] Weijie Wang, Yeqing Chen, Zeyu Zhang, Hengyu Liu, Haoxiao Wang, Zhiyuan Feng,
+Wenkang Qin, Zheng Zhu, Donny Y. Chen, and Bohan Zhuang. VolSplat: Rethinking
+Feed-Forward 3D Gaussian Splatting with Voxel-Aligned Prediction. arXiv preprint,
+arXiv:2509.19297, 2025.
+FAASCH, KALL, STACHNISS: COMPACT FF-3DGS VIA SALIENCY-GUIDED MERGING
+19
+[43] Yiming Wang, Lucy Chai, Xuan Luo, Michael Niemeyer, Manuel Lagunas, Stephen
+Lombardi, Siyu Tang, and Tiancheng Sun. Learning Efficient Fuse-and-Refine for
+Feed-Forward 3D Gaussian Splatting. In Proc. of the Conf. on Neural Information
+Processing Systems (NeurIPS), 2025.
+[44] Yunsong Wang, Tianxin Huang, Hanlin Chen, and Gim Hee Lee. FreeSplat: Generalizable 3D Gaussian Splatting Towards Free-View Synthesis of Indoor Scenes. In Proc. of
+the Conf. on Neural Information Processing Systems (NeurIPS), 2024.
+[45] Zhou Wang, Alan C. Bovik, Hamid R. Sheikh, and Eero P. Simoncelli. Image Quality
+Assessment: From Error Visibility to Structural Similarity. IEEE Trans. on Image
+Processing, 13(4):600–612, 2004. doi: 10.1109/TIP.2003.819861.
+[46] Tianyi Xie, Zeshun Zong, Yuxing Qiu, Xuan Li, Yutao Feng, Yin Yang, and Chenfanfu
+Jiang. PhysGaussian: Physics-Integrated 3D Gaussians for Generative Dynamics. In
+Proc. of the IEEE/CVF Conf. on Computer Vision and Pattern Recognition (CVPR),
+2024.
+[47] Haofei Xu, Daniel Barath, Andreas Geiger, and Marc Pollefeys. ReSplat: Learning
+Recurrent Gaussian Splatting. arXiv preprint, arXiv:2510.08575, 2025.
+[48] Haofei Xu, Songyou Peng, Fangjinhua Wang, Hermann Blum, Daniel Barath, Andreas
+Geiger, and Marc Pollefeys. DepthSplat: Connecting Gaussian Splatting and Depth.
+In Proc. of the IEEE/CVF Conf. on Computer Vision and Pattern Recognition (CVPR),
+2025.
+[49] Yinghao Xu, Zifan Shi, Wang Yifan, Hansheng Chen, Ceyuan Yang, Sida Peng, Yujun
+Shen, and Gordon Wetzstein. GRM: Large Gaussian Reconstruction Model for Efficient 3D Reconstruction and Generation. In Proc. of the Europ. Conf. on Computer
+Vision (ECCV), 2024.
+[50] Chi Yan, Delin Qu, Dan Xu, Bin Zhao, Zhigang Wang, Dong Wang, and Xuelong
+Li. GS-SLAM: Dense Visual SLAM with 3D Gaussian Splatting. In Proc. of the
+IEEE/CVF Conf. on Computer Vision and Pattern Recognition (CVPR), 2024.
+[51] Botao Ye, Sifei Liu, Haofei Xu, Xueting Li, Marc Pollefeys, Ming-Hsuan Yang, and
+Songyou Peng. No Pose, No Problem: Surprisingly Simple 3D Gaussian Splats from
+Sparse Unposed Images. arXiv preprint, arXiv:2410.24207, 2024.
+[52] Kai Zhang, Sai Bi, Hao Tan, Yuanbo Xiangli, Nanxuan Zhao, Kalyan Sunkavalli, and
+Zexiang Xu. GS-LRM: Large Reconstruction Model for 3D Gaussian Splatting. In
+Proc. of the Europ. Conf. on Computer Vision (ECCV), 2024.
+[53] Richard Zhang, Phillip Isola, Alexei A. Efros, Eli Shechtman, and Oliver Wang. The
+Unreasonable Effectiveness of Deep Features as a Perceptual Metric. In Proc. of the
+IEEE/CVF Conf. on Computer Vision and Pattern Recognition (CVPR), 2018.
+[54] Shengjun Zhang, Xin Fei, Fangfu Liu, Haixu Song, and Yueqi Duan. Gaussian
+Graph Network: Learning Efficient and Generalizable Gaussian Representations from
+Multi-view Images. In Proc. of the Conf. on Neural Information Processing Systems
+(NeurIPS), 2024.
+20
+FAASCH, KALL, STACHNISS: COMPACT FF-3DGS VIA SALIENCY-GUIDED MERGING
+[55] Yuhang Zhang, Richard Hartley, John Mashford, and Stewart Burn. Superpixels via
+Pseudo-Boolean Optimization. In Proc. of the IEEE/CVF Intl. Conf. on Computer
+Vision (ICCV), 2011.
+[56] Tingyu Zhao, Bo Peng, Zhenguang Zhang, Daipeng Yang, and Xi Wu. Content-Aware
+Dynamic Superpixel Segmentation. In Proc. of the IEEE International Conference on
+Acoustics, Speech and Signal Processing (ICASSP), 2025.
+[57] Yuhang Zheng, Xiangyu Chen, Yupeng Zheng, Songen Gu, Runyi Yang, Bu Jin,
+Pengfei Li, Chengliang Zhong, Zengmao Wang, Lina Liu, Chao Yang, Dawei Wang,
+Zhen Chen, Xiaoxiao Long, and Meiqing Wang. GaussianGrasper: 3D Language Gaussian Splatting for Open-Vocabulary Robotic Grasping. IEEE Robotics and Automation
+Letters (RA-L), 9(9):7827–7834, 2024. doi: 10.1109/LRA.2024.3432348.
+[58] Tinghui Zhou, Richard Tucker, John Flynn, Graham Fyffe, and Noah Snavely. Stereo
+Magnification: Learning View Synthesis Using Multiplane Images. ACM Trans. on
+Graphics (TOG), 37(4):1–12, 2018. doi: 10.1145/3197517.3201323.
+[59] Xiaoyu Zhou, Zhiwei Lin, Xiaojun Shan, Yongtao Wang, Deqing Sun, and Ming-Hsuan
+Yang. DrivingGaussian: Composite Gaussian Splatting for Surrounding Dynamic Autonomous Driving Scenes. In Proc. of the IEEE/CVF Conf. on Computer Vision and
+Pattern Recognition (CVPR), 2024.
+[60] Matthias Zwicker, Hanspeter Pfister, Jeroen van Baar, and Markus Gross. EWA Volume
+Splatting. In Proc. of the IEEE Visualization Conf. (VIS), 2001.
+FAASCH, KALL, STACHNISS: COMPACT FF-3DGS VIA SALIENCY-GUIDED MERGING
+1
+Compact Feed-Forward 3D Gaussians
+via Saliency-Guided Primitive Merging
+Supplementary Material
+In this supplementary material we provide additional details that expand on the main paper. Sec. A gives the full evaluation protocol and reports results without visibility masking.
+Sec. B lists the training hyperparameters including loss weights and decay schedules. Sec. C
+provides a timing analysis of the pipeline components, together with storage size and the
+rendering-vs-reconstruction break-even point. Sec. D describes the decoder diversification
+regularizer. Sec. E explains how the encoder’s compute budget is bounded for large superpixels. Sec. F provides input-view reconstruction metrics. Sec. G provides a per-view-count
+breakdown of novel view synthesis quality. Sec. H discusses extensions to the method, including content-adaptive per-superpixel K and compaction of voxel-based FF backbones.
+Sec. I provides additional qualitative results. Sec. J compares the posed and unposed DA3
+backbone configurations. We have also included the code for training and evaluation of our
+method. Please refer to the README for information on setup and usage. We will make the
+code public upon acceptance, after internal review.
+A
+Evaluation Protocol Details
+We provide the full details of our evaluation protocol here to allow independent reproduction.
+Image resolution. All images (input and ground-truth target views) are resized so that
+the longer side equals 476 px, preserving the original aspect ratio without any cropping.
+Visibility masking. None of our three benchmarks provide ground-truth scene geometry,
+so we cannot directly determine which regions of a target view are unobserved by the input
+views. Instead, we estimate a depth map for every input view using Depth Anything 3 [23],
+reproject each input view’s depth into every target view using the known (or estimated, for
+unposed backbones) camera parameters, and mark a target pixel as visible if it receives
+at least one reprojected sample. To account for depth estimation uncertainty near depth
+discontinuities, we dilate the resulting binary visibility mask with a 3 ×3 max-pooling kernel
+before excluding unmarked pixels from all metric computations.
+View sampling. Context (input) views are sampled at equal intervals along the full
+camera trajectory of each scene, for each of the four view counts (3, 6, 9, 12) evaluated
+in the main paper. Target (novel) views are placed at the midpoint between each pair of
+consecutive context views. Because scenes have varying trajectory lengths, the exact frame
+indices used differ from scene to scene, but the sampling rule itself is deterministic and
+reproducible given the scene’s frame count.
+Results without visibility masking. Tab. S4 reports PSNR, SSIM, and LPIPS without
+visibility masking (i.e., computed over the full target image, including regions unobserved by
+any input view) for the DA3 backbone, averaged over all three benchmarks and all four input
+view counts (3, 6, 9, 12), matching the aggregation used throughout the main evaluation. The
+relative ordering of methods is consistent with the masked results in Tab. 1, confirming that
+our masking protocol does not unfairly favor any particular method.
+2
+FAASCH, KALL, STACHNISS: COMPACT FF-3DGS VIA SALIENCY-GUIDED MERGING
+Table S4: Novel view synthesis quality without visibility masking (DA3 backbone, averaged over all three benchmarks and all four input view counts). Best in bold, second best
+underlined. Compare to the masked results in Tab. 1.
+B
+Method
+PSNR↑
+SSIM↑
+LPIPS↓
+Ours (K = 4)
+Ours (K = 1)
+Mom. Match.
+DA3 (unmerged)
+ReSplat
+VolSplat
+17.09
+16.95
+13.29
+16.13
+14.81
+12.24
+0.488
+0.484
+0.406
+0.480
+0.441
+0.313
+0.520
+0.524
+0.723
+0.430
+0.551
+0.652
+Training Hyperparameters
+Tab. S6 summarizes the loss weights and their decay schedules. We train all added modules
+jointly for 300 000 steps with AdamW [25] on DL3DV-10K [24] using a randomly sampled
+subset of 1 to 12 input views. For depthsplat we use 2 to 12 views as the backbone does
+not support single view input. The learning rate follows a cosine schedule from a peak of
+5 × 10−5 after 2 000 linear warmup steps down to a minimum of 10−6 . We apply gradient
+clipping with a maximum norm of 10.0.
+C
+Timing, Storage, and Rendering Throughput
+We measured runtimes on a single NVIDIA B200 GPU at 12 input views at 476 × 476 resolution, averaged over DL3DV-Bench, MipNeRF360, and T&T. They cover the full inference
+path from input images to output Gaussians, excluding data loading and metric computation.
+The BASS superpixel algorithm with Shi-Tomasi seeding runs at 13.0 ms per image. For
+a 12-view scene this amounts to approximately 155 ms of segmentation overhead, independent of backbone choice. The backbone inference time spans from 236 ms (AnySplat) to
+443 ms (DepthSplat), with the DA3 backbone in between at 387 ms. Including superpixel
+segmentation and backbone inference, the total reconstruction time for deployment of our
+pipeline is approximately 765 ms (AnySplat backbone), 965 ms (DepthSplat backbone), and
+925 ms (DA3 backbone). Among the baselines, ReSplat (Recurrent 4) requires 319 ms and
+VolSplat 511 ms per scene.
+Storage size and rendering throughput. We additionally measure uncompressed storage size and rendering throughput using the same protocol as the main NVS evaluation
+(DA3 posed backbone, images resized so the longer side is 476 px as in Sec. A, 3/6/9/12 input views), computed on the 9 MipNeRF360 scenes. Tab. S5 reports the resulting Gaussian
+count, uncompressed .ply storage size, per-frame rendering time (at randomly sampled
+novel viewpoints, decoupled from the specific context/target view split), and the renderingvs-reconstruction break-even point across all four view counts.
+At 12 input views, the unmerged per-pixel Gaussians require 501 MB in uncompressed
+.ply format, compared to 20.6 MB for our compacted K = 1 output — a 24.4× reduction. Attribute-compression schemes such as HAC/HAC++ [8, 10] are complementary to
+our primitive-count compaction and could be applied on top of our already-compacted output for further storage savings.
+Rendering-vs-reconstruction break-even. Rendering our compacted K = 1 Gaussians
+is 4.7× faster per frame than the unmerged backbone output at 12 input views (0.82 ms
+FAASCH, KALL, STACHNISS: COMPACT FF-3DGS VIA SALIENCY-GUIDED MERGING
+3
+Table S5: Storage size and rendering throughput vs. input view count (DA3 posed backbone,
+MipNeRF360, same protocol as the main NVS evaluation).
+#Gaussians (M)
+Storage (MB)
+Render (ms/frame)
+#Views Unmerged Ours Unmerged Ours Ratio↓ Unmerged
+3
+6
+9
+12
+0.51
+1.01
+1.52
+2.02
+Cumulative time (ms)
+600
+0.02
+0.04
+0.06
+0.08
+125
+249
+374
+501
+5.5
+10.6
+16.1
+20.6
+Ours
+Merge
+Break-even
+Speedup overhead (ms)
+22.9×
+23.6×
+23.5×
+24.4×
+1.74
+2.47
+3.15
+3.83
+0.71
+0.74
+0.77
+0.82
+2.4×
+3.3×
+4.1×
+4.7×
+80
+100
+120
+140
+86
+185
+304
+452
+(frames)
+84
+107
+128
+150
+3 views
+6 views
+9 views
+12 views
+400
+200
+0
+0
+20
+40
+60
+160
+180
+200
+Rendered frames
+Figure S8: Rendering-vs-reconstruction break-even (DA3 posed backbone, MipNeRF360)
+for 3/6/9/12 input views. Dashed lines: constant one-time merging overhead. Solid lines:
+cumulative rendering time saved by our compacted K = 1 output vs. the unmerged backbone
+output. Markers indicate the break-even frame count per view count.
+vs. 3.83 ms per frame). Our merging pipeline (superpixel segmentation, encoding, crossview matching and merging, and decoding) adds 452 ms of reconstruction overhead over
+direct backbone inference at 12 views. Dividing this overhead by the per-frame rendering
+time saved gives a break-even point of 150 rendered frames, after which the cumulative
+rendering-time savings exceed the added reconstruction cost; this ranges from 84 frames at
+3 input views to 150 frames at 12 (Tab. S5). Fig. S8 visualizes this trade-off directly: for
+each view count, the dashed line marks the (constant) one-time reconstruction overhead, and
+the solid line marks the cumulative rendering time saved as a function of rendered frames;
+their intersection is the break-even point. For applications rendering many frames per reconstructed scene at high resolution (e.g., simulation for autonomous driving or robotics),
+the amortized rendering throughput benefit of compaction typically dominates the one-time
+reconstruction overhead.
+D
+Decoder Diversification Regularizer
+For K > 1 decoder heads, a regularizer prevents the K output Gaussians from collapsing into
+identical copies while encouraging spatial coverage of the original superpixel region. Both
+√
+terms below are pair-size-weighted: each pair contribution is scaled by wi j = vi v j where
+vi = exp(∑k sk,i ) is the volume proxy of Gaussian i.
+For each pair (i, j) within a group, we evaluate a U-shaped profile f over the AABB IoU
+4
+FAASCH, KALL, STACHNISS: COMPACT FF-3DGS VIA SALIENCY-GUIDED MERGING
+Table S6: Loss weights and decay schedules.
+Loss term
+Weight
+Decay schedule
+Notes
+LMSE
+LSSIM
+LLPIPS
+Lteach
+Ldiv
+1.0
+0.05
+0.05
+0.25
+1.0
+–
+–
+–
+→ 0 at 2k steps
+→ 0 at 50k steps
+MSE
+SSIM
+LPIPS with VGG backbone
+Moment-matching teacher
+Decoder diversification (attraction-repulsion)
+ui j and the normalized gap γi j = max(0, di j − dicontact
+)/dicontact
+, where di j is the Euclidean
+j
+j
+distance between means and dicontact
+is
+the
+sum
+of
+the
+two
+AABB
+half-extent norms. The
+j
+profile switches between a repulsion branch (IoU ≥ 0.5) and an attraction branch (IoU <
+0.5):
+
+
+
+ui j − 0.5 3
+
+
+ui j ≥ 0.5,
+
+0.5
+(6)
+f (ui j , γi j ) =
+3
+
+
+
+0.5 − ui j
+
+−3γ
+
+i
+j
+0.5
++ 0.5 1 − e
+ui j < 0.5.
+0.5
+The repulsion branch penalizes excessive overlap; the attraction branch prevents Gaussians
+from drifting apart when non-overlapping, with the distance term saturating at a gap of twice
+the contact distance. The geometric term averages these weighted profile values over all
+pairs P:
+1
+wi j f (ui j , γi j ).
+(7)
+Lgeom =
+|P| (i,∑
+j)∈P
+To prevent single-Gaussian dominance, we penalize pairwise opacity differences:
+Lopa =
+1
+wi j |αi − α j |2 .
+|P| (i,∑
+j)∈P
+(8)
+The combined diversification loss blends both terms:
+Ldiv = 0.75 Lgeom + 0.25 Lopa .
+E
+(9)
+Bounding the Compute Budget of the Encoder
+In order to allow maximum compression capability, we do not impose a hard limit on the
+number of Gaussians that can be grouped into a superpixel, and thus encoded into a single
+Feature Gaussian. For textureless regions, the superpixel segmentation can produce very
+large segments that group hundreds or even thousands of Gaussians, which could lead to
+an excessively high computational cost during encoding due to the attention mechanism.
+We therefore subsample a fixed number of Gaussians from each superpixel group exceeding
+an absolute upper limit, which allows us to maintain a bounded compute budget regardless
+of the superpixel size. To allow the representation to still encode the visual importance of
+the entire group, we compute the group mass m across all member Gaussians (not just the
+subsampled ones), append it to the parameters of the Feature Gaussian, and provide it as an
+additional input to all modules.
+FAASCH, KALL, STACHNISS: COMPACT FF-3DGS VIA SALIENCY-GUIDED MERGING
+5
+Table S7: Input-view reconstruction quality for the same backbone variants and baselines as
+in Tab. 1. Best in bold, second best underlined.
+DL3DV-Bench
+Backbone
+AnySplat
+ReSplat
+VolSplat
+T&T
+rc (%)↓ PSNR↑ SSIM↑ LPIPS↓ PSNR↑ SSIM↑ LPIPS↓ PSNR↑ SSIM↑ LPIPS↓
+Unmerged
+Voxelized
+100.0%
+83.2%
+15.78
+15.84
+0.407
+0.406
+0.428
+0.433
+18.58
+18.62
+0.449
+0.449
+0.364
+0.365
+16.50
+16.54
+0.487
+0.482
+0.409
+0.422
+Mom. Match.
+Ours (K = 1)
+Ours (K = 2)
+Ours (K = 4)
+5.3%
+4.4%
+8.9%
+17.8%
+15.91
+15.38
+15.56
+15.65
+0.413
+0.392
+0.398
+0.402
+0.564
+0.522
+0.517
+0.514
+16.73
+17.83
+18.17
+18.36
+0.387
+0.419
+0.427
+0.431
+0.590
+0.529
+0.524
+0.522
+15.60
+15.75
+16.15
+16.27
+0.469
+0.448
+0.464
+0.469
+0.555
+0.517
+0.510
+0.507
+Unmerged
+100.0%
+17.11
+0.652
+0.300
+16.49
+0.534
+0.368
+16.16
+0.633
+0.343
+6.1%
+5.3%
+10.5%
+21.1%
+13.19
+18.41
+18.61
+18.72
+0.446
+0.578
+0.583
+0.587
+0.609
+0.433
+0.427
+0.424
+12.23
+17.97
+18.68
+18.99
+0.341
+0.486
+0.501
+0.508
+0.685
+0.492
+0.482
+0.477
+11.68
+16.94
+17.26
+17.41
+0.450
+0.558
+0.568
+0.572
+0.643
+0.484
+0.479
+0.477
+DepthSplat Mom. Match.
+Ours (K = 1)
+Ours (K = 2)
+Ours (K = 4)
+DA3
+MipNeRF360
+Method
+Unmerged
+100.0%
+18.84
+0.612
+0.281
+18.23
+0.439
+0.367
+16.48
+0.521
+0.366
+Mom. Match.
+Ours (K = 1)
+Ours (K = 2)
+Ours (K = 4)
+4.9%
+4.4%
+8.8%
+17.3%
+13.74
+19.21
+19.32
+19.37
+0.426
+0.579
+0.585
+0.586
+0.696
+0.431
+0.424
+0.421
+13.88
+19.38
+19.47
+19.51
+0.344
+0.466
+0.470
+0.470
+0.737
+0.490
+0.485
+0.482
+12.45
+17.74
+17.85
+17.84
+0.438
+0.537
+0.541
+0.541
+0.736
+0.472
+0.466
+0.464
+Init
+Recurrent 4
+—
+6.2%
+6.2%
+93.4%
+14.67
+17.77
+16.19
+0.509
+0.633
+0.518
+0.462
+0.389
+0.522
+19.70
+22.45
+13.47
+0.626
+0.687
+0.383
+0.395
+0.335
+0.618
+15.89
+18.03
+14.34
+0.593
+0.665
+0.512
+0.428
+0.372
+0.519
+The group mass sums the individual Gaussian contributions:
+n
+m = ∑ αi (2π)3/2 exp(sx,i + sy,i + sz,i ),
+(10)
+i=1
+reflecting each primitive’s opacity-weighted volume.
+Additionally, we bin the superpixel groups according to their number of member Gaussians, and pad the input to the encoder to the maximum group size within each bin, allowing
+to parallelize the encoding of groups with similar sizes while still supporting a wide range
+of group sizes.
+F
+Input-View Reconstruction Quality
+Tab. S7 reports the input-view reconstruction quality for all backbone variants. ReSplat
+generally achieves the best input reconstruction quality, as it iteratively refines the primitives
+based on the rendering error. As shown by the novel view synthesis results in the main paper,
+this does not translate to better novel view quality, as the refinement is prone to overfitting
+to the input views.
+G
+Per-View-Count NVS Quality
+The main paper reports NVS metrics averaged over all four input-view counts (3, 6, 9, 12
+views) to give a single summary number. Tab. S8 breaks this down by view count for each
+of the three backbone variants from the main table. Notice that the unseen regions in the
+6
+FAASCH, KALL, STACHNISS: COMPACT FF-3DGS VIA SALIENCY-GUIDED MERGING
+Table S8: Novel view synthesis quality per input view count, averaged across DL3DVBench, MipNeRF360, and T&T. Best in bold, second best underlined.
+3 views
+Backbone Method
+AnySplat
+ReSplat
+VolSplat
+9 views
+12 views
+Unmerged
+Voxelized
+12.07
+12.05
+0.392
+0.389
+0.471
+0.473
+12.37
+12.39
+0.379
+0.378
+0.475
+0.477
+12.81
+12.83
+0.366
+0.365
+0.494
+0.495
+13.13
+13.17
+0.358
+0.357
+0.505
+0.506
+Mom. Match.
+Ours (K = 1)
+Ours (K = 2)
+Ours (K = 4)
+12.71
+13.24
+13.89
+13.94
+0.424
+0.421
+0.434
+0.437
+0.527
+0.526
+0.528
+0.526
+13.41
+14.11
+14.47
+14.48
+0.434
+0.435
+0.441
+0.440
+0.534
+0.521
+0.520
+0.518
+13.80
+14.51
+14.66
+14.71
+0.423
+0.423
+0.427
+0.427
+0.556
+0.537
+0.536
+0.534
+13.94
+14.70
+14.80
+14.88
+0.413
+0.414
+0.417
+0.418
+0.572
+0.547
+0.547
+0.545
+Unmerged
+15.11
+0.584
+0.318
+14.05
+0.537
+0.362
+14.23
+0.514
+0.393
+14.56
+0.506
+0.411
+12.03
+15.85
+16.30
+16.51
+0.478
+0.533
+0.546
+0.551
+0.537
+0.423
+0.420
+0.418
+12.08
+15.23
+15.72
+15.90
+0.470
+0.501
+0.512
+0.516
+0.545
+0.445
+0.441
+0.439
+12.46
+15.57
+15.90
+16.09
+0.456
+0.482
+0.490
+0.494
+0.576
+0.463
+0.460
+0.458
+12.68
+15.86
+16.15
+16.29
+0.448
+0.475
+0.482
+0.485
+0.600
+0.472
+0.469
+0.467
+Unmerged
+16.77
+0.576
+0.306
+16.42
+0.552
+0.340
+16.90
+0.546
+0.346
+17.18
+0.540
+0.351
+Mom. Match.
+Ours (K = 1)
+Ours (K = 2)
+Ours (K = 4)
+13.52
+17.58
+17.75
+17.77
+0.492
+0.575
+0.580
+0.581
+0.574
+0.404
+0.400
+0.400
+13.46
+17.07
+17.19
+17.23
+0.477
+0.554
+0.558
+0.559
+0.603
+0.425
+0.422
+0.421
+13.43
+17.41
+17.54
+17.57
+0.458
+0.543
+0.546
+0.547
+0.634
+0.439
+0.436
+0.435
+13.41
+17.58
+17.67
+17.69
+0.445
+0.534
+0.537
+0.537
+0.654
+0.446
+0.443
+0.442
+Init
+Recurrent 4
+—
+12.37
+14.06
+12.63
+0.323
+0.409
+0.302
+0.598
+0.582
+0.617
+13.15
+14.59
+12.09
+0.358
+0.422
+0.307
+0.587
+0.571
+0.665
+14.23
+15.70
+12.80
+0.403
+0.457
+0.320
+0.557
+0.535
+0.662
+15.05
+16.41
+12.65
+0.425
+0.476
+0.322
+0.542
+0.517
+0.665
+DepthSplat Mom. Match.
+Ours (K = 1)
+Ours (K = 2)
+Ours (K = 4)
+DA3
+6 views
+PSNR↑ SSIM↑ LPIPS↓ PSNR↑ SSIM↑ LPIPS↓ PSNR↑ SSIM↑ LPIPS↓ PSNR↑ SSIM↑ LPIPS↓
+GT views are masked, so the metrics do not increase dramatically with more views as they
+would if the entire GT image was considered. ReSplat performs much worse with fewer
+views, as the refinement is more prone to overfitting to the sparse input views and thus does
+not generalize as well to novel views. Meanwhile, our approach maintains a more consistent
+performance across view counts, leveraging the strong sparse-view capabilities of the feedforward backbone while improving the performance in terms of PSNR and SSIM through
+the merging and decoding process.
+H
+Method extensions
+Content-Adaptive Per-Superpixel K. The content-adaptive distribution of primitives in our
+pipeline is handled entirely by the saliency-guided superpixel segmentation (Sec. 4.1), which
+already allocates larger superpixels to homogeneous regions and smaller ones to detailed areas; the K decoder heads instead offer a single global knob for the overall quality–efficiency
+trade-off (Sec. 4.3). As an alternative, training-free mechanism for content-adaptivity, we
+evaluate assigning a mixed, per-superpixel K based on the saliency map λ v , instead of a
+fixed global K: each superpixel is assigned to one of the three decoder heads (K ∈ {1, 2, 4})
+by its saliency percentile, so that each head decodes one third of the superpixels, ranked
+from least to most salient. With our segmentation, this mixed-K variant (17.55 dB at 9.8%
+rc ) does not yield a favorable trade-off compared to simply using a larger fixed K: it reaches
+a similar quality–efficiency point as the K = 2 decoder alone (17.56 dB at 8.5% rc ). This
+suggests that, for a segmentation method that already places larger segments in flat regions
+and smaller ones at detailed boundaries, allocating additional primitives per superpixel based
+on saliency does not provide further benefits. A per-superpixel K mechanism may however
+FAASCH, KALL, STACHNISS: COMPACT FF-3DGS VIA SALIENCY-GUIDED MERGING
+7
+Table S9: Compaction of AnySplat’s voxelized output vs. merging its per-pixel Gaussians
+directly, averaged over DL3DV-Bench, MipNeRF360, and T&T (all four input view counts).
+Best in bold, second best underlined.
+Method
+rc (%)↓
+PSNR↑
+SSIM↑
+LPIPS↓
+AnySplat (unmerged)
+AnySplat (voxelized)
+100.00
+83.76
+12.68
+12.69
+0.3784
+0.3768
+0.4860
+0.4872
+Merged, per-pixel (K = 1)
+Merged, per-pixel (K = 2)
+Merged, per-pixel (K = 4)
+4.20
+8.40
+16.78
+14.22
+14.52
+14.53
+0.4322
+0.4371
+0.4362
+0.5312
+0.5321
+0.5301
+Merged, voxelized (K = 1)
+Merged, voxelized (K = 2)
+Merged, voxelized (K = 4)
+3.58
+7.15
+14.28
+14.09
+14.43
+14.58
+0.4241
+0.4317
+0.4363
+0.5278
+0.5266
+0.5241
+be beneficial for less content-adaptive segmentation methods that produce more uniformly
+sized superpixels.
+Compaction of Non-Pixel-Aligned FF Backbones. Our grouping stage assumes a oneto-one correspondence between image pixels and Gaussians to build the partition map Mv
+(Sec. 4.1). Backbones that instead predict voxel-aligned or otherwise non-pixel-aligned
+Gaussians (e.g., VolSplat [42] or AnySplat’s [15] built-in voxelization) do not admit this
+mapping directly. However, their already-reduced primitive sets still leave room for further compaction (e.g., AnySplat’s voxelization retains 83.2% of the original count, Tab. 1).
+Supporting such backbones would let our pipeline compound the efficiency already gained
+during reconstruction and offer the same controllable level-of-detail on top of a more compact starting representation.
+To recover a per-Gaussian superpixel grouping without pixel alignment, we compute the
+rendering contribution of every Gaussian to every superpixel according to the rasterization
+described in Sec. 3. For every (Gaussian, pixel) pair visited by the renderer, we compute
+the alpha-compositing weight wip = αip Tip in closed form. Summing these weights per
+(Gaussian, superpixel) pair with a sparse tensor, each Gaussian is assigned to its dominant
+superpixel:
+s⋆i = arg max ∑ wip
+s
+(11)
+p∈Ss
+Gaussians with negligible accumulated weight across all views (occluded or outside all view
+frustums) are marked invalid and excluded from the final set. This recovers a dominant view
+and superpixel id for every valid Gaussian, after which our encoding, cross-view matching
+and merging, and decoding stages (Sec. 4.2–Sec. 4.4) apply unchanged.
+Tab. S9 reports results for applying our pipeline to AnySplat’s voxelized output, in place
+of the per-pixel Gaussians, using the same benchmarks and metrics as Tab. 1. Merging the
+already-compact voxelized representation compounds both compaction stages: the K =1 decoder reaches rc =3.58%, the lowest primitive count of all variants. All three metrics (PSNR,
+SSIM, LPIPS) show a similar performance, whether applied to the per-pixel or voxelized
+backbones, with a slight drop in PSNR and SSIM for the voxelized variant for the K = 1
+and K = 2 decoders. LPIPS degrades similarly for both variants relative to the unmerged
+and voxelized backbones, consistent with the general perceptual-detail loss from merging
+discussed in Sec. 6. These results show that while our pipeline is optimized for and works
+best with pixel-aligned backbones, it can also be applied on top of voxel-based backbones
+such as AnySplat’s built-in voxelization, further compounding their efficiency gains.
+8
+FAASCH, KALL, STACHNISS: COMPACT FF-3DGS VIA SALIENCY-GUIDED MERGING
+Table S10: Novel view synthesis quality for posed and unposed DA3 backbones, reported per
+benchmark (averaged over 3, 6, 9, and 12 input views). Best in bold, second best underlined.
+DL3DV-Bench
+Backbone
+DA3
+T&T
+rc (%)↓ PSNR↑ SSIM↑ LPIPS↓ PSNR↑ SSIM↑ LPIPS↓ PSNR↑ SSIM↑ LPIPS↓
+Unmerged
+100.0%
+18.68
+0.620
+0.297
+16.71
+0.495
+0.356
+15.07
+0.546
+0.353
+Mom. Match.
+Ours (K = 1)
+Ours (K = 2)
+Ours (K = 4)
+4.9%
+4.4%
+8.8%
+17.3%
+13.79
+18.37
+18.50
+18.54
+0.459
+0.578
+0.582
+0.583
+0.637
+0.422
+0.417
+0.416
+14.04
+17.87
+18.02
+18.06
+0.440
+0.514
+0.517
+0.518
+0.601
+0.442
+0.440
+0.439
+12.55
+16.00
+16.09
+16.09
+0.505
+0.562
+0.566
+0.566
+0.611
+0.421
+0.418
+0.418
+Unmerged
+100.0%
+18.25
+0.573
+0.315
+16.50
+0.464
+0.381
+14.67
+0.507
+0.398
+4.9%
+4.3%
+8.6%
+17.1%
+13.69
+17.92
+17.99
+18.02
+0.454
+0.546
+0.550
+0.551
+0.644
+0.429
+0.424
+0.424
+14.00
+17.36
+17.47
+17.49
+0.434
+0.488
+0.492
+0.493
+0.607
+0.464
+0.459
+0.458
+12.30
+15.19
+15.22
+15.23
+0.498
+0.526
+0.528
+0.529
+0.620
+0.453
+0.450
+0.450
+DA3 (Unposed) Mom. Match.
+Ours (K = 1)
+Ours (K = 2)
+Ours (K = 4)
+I
+MipNeRF360
+Method
+Additional Qualitative Results
+Fig. S9, Fig. S10, and Fig. S11 extend the qualitative comparison from the main paper
+(Fig. 5) to additional scenes from all three benchmarks, using the same DA3 backbone.
+Columns show the ground truth and backbone reconstructions, alongside our decoder output
+at K = 1 and both baselines.
+J
+Posed vs. Unposed DA3 Backbone
+The DA3 backbone can be used in a posed or unposed configuration. In the main paper we
+report the posed variant, which achieves better NVS quality by leveraging the explicit camera
+information to predict a more view-consistent representation. This is consistent with the used
+baselines, which both rely on camera poses. In Tab. S10, we compare the posed and unposed
+DA3 variants across all three benchmarks, showing that even without pose conditioning, our
+approach still outperforms the baselines.
+FAASCH, KALL, STACHNISS: COMPACT FF-3DGS VIA SALIENCY-GUIDED MERGING
+GT
+DA3 (backbone)
+Ours (K = 1)
+ReSplat
+VolSplat
+rc (%)
+100
+4.4
+6.2
+93.4
+9
+Figure S9: Additional qualitative results on DL3DV-Bench (12 input views, DA3 backbone).
+GT
+DA3 (backbone)
+Ours (K = 1)
+ReSplat
+VolSplat
+rc (%)
+100
+4.4
+6.2
+93.4
+Figure S10: Additional qualitative results on MipNeRF360 (12 input views, DA3 backbone).
+10
+FAASCH, KALL, STACHNISS: COMPACT FF-3DGS VIA SALIENCY-GUIDED MERGING
+GT
+DA3 (backbone)
+Ours (K = 1)
+ReSplat
+VolSplat
+rc (%)
+100
+4.4
+6.2
+93.4
+Figure S11: Additional qualitative results on Tanks & Temples (12 input views, DA3 backbone).

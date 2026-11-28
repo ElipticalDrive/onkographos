@@ -1,0 +1,123 @@
+# Bilateral Grid
+
+Also called: Bilateral Space Grid
+
+## Overview
+The Bilateral Grid constructs a sparse 5D grid in spatial-luminance-chrominance space to facilitate efficient bilateral filtering via splatting and slicing [S1, unofficial]. It differs from standard bilateral filters by discretizing the feature space into a grid, allowing the filter to be implemented as a sequence of sparse matrix-vector multiplications, which decouples kernel size from spatial resolution [S1, unofficial]. It builds on the Grid-based Implementation of Cross-Bilateral Filter [13144-grid-based-implementation-of-cross-bilateral-filter.md].
+
+## How it works
+**Inputs:** An input image $I$ (RGB), spatial sigma $\sigma_s$, luma sigma $\sigma_l$, and chroma sigma $\sigma_c$ [S1, unofficial].
+**Outputs:** A filtered image $I_{\text{out}}$ [S1, unofficial].
+
+**Data Structures:**
+1. **Grid Coordinates:** A set of 5D coordinates for each pixel, computed from spatial position and YUV color values [S1, unofficial].
+2. **Splat Matrix ($S$):** A sparse matrix mapping pixel values to grid vertices [S1, unofficial].
+3. **Blur Matrices ($B_d$):** Sparse matrices representing 1D connections along each grid dimension [S1, unofficial].
+
+**Steps:**
+1. **Color Conversion:** Convert the input RGB image $I$ to YUV color space [S1, unofficial].
+   $$ I_{\text{yuv}} = \text{rgb2yuv}(I) $$
+   Let $Y$ be the luma channel and $U, V$ be the chroma channels [S1, unofficial].
+2. **Coordinate Computation:** Compute 5D coordinates for each pixel $(x, y)$ in the image grid [S1, unofficial].
+   * Spatial coordinates: $x_{\text{grid}} = x / \sigma_s$, $y_{\text{grid}} = y / \sigma_s$ [S1, unofficial].
+   * Luma coordinate: $l_{\text{grid}} = Y / \sigma_l$ [S1, unofficial].
+   * Chroma coordinates: $c1_{\text{grid}} = U / \sigma_c$, $c2_{\text{grid}} = V / \sigma_c$ [S1, unofficial].
+   * Stack into a 5D coordinate vector $p_i = [x_{\text{grid}}, y_{\text{grid}}, l_{\text{grid}}, c1_{\text{grid}}, c2_{\text{grid}}]$ for each pixel $i$ [S1, unofficial].
+3. **Grid Construction (Implicit):** The grid vertices are determined by the unique rounded coordinates of $p_i$ [S1, unofficial]. The grid is sparse, containing only vertices that are hit by at least one pixel [S1, unofficial].
+4. **Splat Matrix Construction ($S$):** Map each pixel $i$ to the nearest grid vertex $v_i$ by rounding its 5D coordinates [S1, unofficial]. Construct a sparse matrix $S$ of size $N_v \times N_p$ (where $N_v$ is the number of vertices and $N_p$ is the number of pixels) such that $S_{v_i, i} = 1$ if vertex $v_i$ is the nearest neighbor to pixel $i$, otherwise $0$ [S1, unofficial]. This is implemented as a Compressed Sparse Row (CSR) matrix [S1, unofficial].
+5. **Blur Matrix Construction:** For each of the 5 dimensions $d \in \{0, 1, 2, 3, 4\}$, construct a 1D blur matrix $B_d$ [S1, unofficial]. $B_d$ connects vertex $j$ to its neighbors $j \pm 1$ along dimension $d$ [S1, unofficial]. Valid neighbor indices are computed using a hash lookup to ensure boundary conditions are handled correctly [S1, unofficial].
+6. **Filtering (Splat and Slice):**
+   * **Splat:** Project the input image values $x$ (flattened) onto the grid vertices: $y = S x$ [S1, unofficial].
+   * **Blur:** Apply the blur operator to the grid values: $y_{\text{blurred}} = (\prod_d B_d) y$ [S1, unofficial].
+   * **Slice:** Project the blurred grid values back to the image pixels: $x_{\text{out}} = S^T y_{\text{blurred}}$ [S1, unofficial].
+
+**Parameters:**
+* $\sigma_s$: Spatial sigma for grid coordinate scaling. Default: 32 [S1, unofficial].
+* $\sigma_l$: Luma sigma for grid coordinate scaling. Default: 8 [S1, unofficial].
+* $\sigma_c$: Chroma sigma for grid coordinate scaling. Default: 8 [S1, unofficial].
+
+**Edge Cases and Pitfalls:**
+* **Precision:** Coordinate rounding can introduce quantization artifacts if $\sigma_s$ is too small relative to image resolution [S1, unofficial].
+* **Boundaries:** Neighbor indices must be validated to avoid out-of-bounds access in the grid [S1, unofficial].
+* **Degenerate Input:** If the image has constant color, the chroma coordinates may be undefined or zero; standard YUV conversion handles this, but grid sparsity may increase [S1, unofficial].
+
+> **Unverified code.** The code below did not pass a test run against a reference implementation, or no test fits it, so it may contain errors.
+
+```python
+import numpy as np
+import scipy.sparse
+
+def rgb2yuv(rgb):
+    # Standard ITU-R BT.601 conversion [G]
+    return np.dot(rgb, [[0.299, 0.587, 0.114], [-0.169, -0.331, 0.5], [0.5, -0.419, -0.081]]).T
+
+def bilateral_grid_filter(image, sigma_spatial=32, sigma_luma=8, sigma_chroma=8):
+    H, W, _ = image.shape
+    npixels = H * W
+    pixels = np.arange(npixels)
+
+    # 1. Color conversion
+    yuv = rgb2yuv(image)
+    Y, U, V = yuv[..., 0], yuv[..., 1], yuv[..., 2]
+
+    # 2. Coordinate computation
+    x_coords = (pixels % W).astype(float) / sigma_spatial
+    y_coords = (pixels // W).astype(float) / sigma_spatial
+    l_coords = Y.flatten().astype(float) / sigma_luma
+    c1_coords = U.flatten().astype(float) / sigma_chroma
+    c2_coords = V.flatten().astype(float) / sigma_chroma
+    coords = np.stack([x_coords, y_coords, l_coords, c1_coords, c2_coords], axis=1)
+
+    # 3. Grid construction & Splat matrix
+    grid_indices = np.round(coords).astype(int)
+    unique_vertices, vertex_map = np.unique(grid_indices, axis=0, return_inverse=True)
+    N_vertices = len(unique_vertices)
+    S = scipy.sparse.csr_matrix((np.ones(npixels), (vertex_map, pixels)), shape=(N_vertices, npixels))
+
+    # 4. Blur matrices construction
+    # Use hash lookup to find valid neighbor hashes as specified in the source [S1, unofficial]
+    vertex_to_idx = {tuple(v): i for i, v in enumerate(unique_vertices)}
+    blur_matrices = []
+    for d in range(5):
+        rows, cols, vals = [], [], []
+        for i, v in enumerate(unique_vertices):
+            for offset in [1, -1]:
+                neighbor = list(v)
+                neighbor[d] += offset
+                if tuple(neighbor) in vertex_to_idx:
+                    j = vertex_to_idx[tuple(neighbor)]
+                    rows.append(i)
+                    cols.append(j)
+                    vals.append(1.0)
+        B_d = scipy.sparse.csr_matrix((vals, (rows, cols)), shape=(N_vertices, N_vertices))
+        blur_matrices.append(B_d)
+
+    # 5. Splat
+    y = S.dot(image.flatten())
+    # 6. Blur
+    for B_d in blur_matrices:
+        y = B_d.dot(y)
+    # 7. Slice
+    x_out = S.T.dot(y)
+    return x_out.reshape(H, W, 3)
+```
+
+## Subtopics
+
+### Bilateral Solver
+The Bilateral Solver uses the Bilateral Grid to solve for an output image that balances fidelity to the input and smoothness in bilateral space [S1, unofficial]. It differs from standard filtering by formulating the operation as a linear system solved via conjugate gradient optimization, enabling differentiable optimization [S1, unofficial]. Choose it when gradient-based refinement or weight-aware smoothing is required [S1, unofficial]. Initialize by calling `bistochastize(grid)` to get $D_n, D_m$ [S1, unofficial]. Construct smoothness matrix $A_{\text{smooth}} = D_m - D_n \cdot \text{grid.blur}(D_n)$ [S1, unofficial]. Construct data matrix $A_{\text{data}}$ by splatting weights $w$ to get $w_{\text{splat}}$ and creating a diagonal matrix from $w_{\text{splat}}[:,0]$ [S1, unofficial]. Construct total matrix $A = \lambda A_{\text{smooth}} + A_{\text{data}}$ [S1, unofficial]. Construct right-hand side $b$ by splatting $x \cdot w$ [S1, unofficial]. Construct Jacobi preconditioner $M = \text{diags}(1 / \max(A.\text{diagonal}(), A_{\text{diag\_min}}))$ [S1, unofficial]. Initialize solution $y_0 = \text{grid.splat}(xw) / (w_{\text{splat}} + 10^{-10})$ [S1, unofficial]. Solve for each channel $d$ using conjugate gradient to solve $A y = b[...,d]$ with preconditioner $M$, initial guess $y_0[...,d]$, tolerance $\text{cg\_tol}$, and max iterations $\text{cg\_maxiter}$ [S1, unofficial]. Slice result to return the output image [S1, unofficial]. Parameters: $\lambda = 128$, $A_{\text{diag\_min}} = 10^{-5}$, $\text{cg\_tol} = 10^{-5}$, $\text{cg\_maxiter} = 25$ [S1, unofficial].
+
+## Operating characteristics
+* **Time Complexity:** The splat and slice operations are $O(N_p)$ where $N_p$ is the number of pixels [G]. The blur operation depends on the grid size $N_v$ and the number of non-zero entries in the blur matrices, which is proportional to $N_v$ [G]. For the Bilateral Solver, each PCG iteration is $O(N_v)$, so the total time is $O(k \cdot N_v)$ where $k$ is the number of iterations [G]. Not given in the sources.
+* **Memory Complexity:** $O(N_v + N_p)$ for storing the grid vertices, splat matrix, and blur matrices [G]. Not given in the sources.
+* **Performance:** Significantly faster than direct bilateral filtering for large kernels because the kernel size is effectively decoupled from the spatial resolution [S1, unofficial]. The grid size is determined by the sigmas, not the image size [S1, unofficial].
+* **Strengths:** Efficient implementation of bilateral filtering; enables differentiable operations (Bilateral Solver); handles large kernels efficiently [S1, unofficial].
+* **Limitations:** Quantization artifacts if grid resolution is too low; requires careful tuning of sigmas; the Bilateral Solver requires solving a large linear system, which can be memory-intensive for very high-resolution images [S1, unofficial].
+* **When to use:** When real-time or near-real-time bilateral filtering is required, or when differentiable filtering is needed for optimization tasks [S1, unofficial].
+* **When not to use:** For very small kernels where direct filtering is faster; when high precision is required and grid quantization artifacts are unacceptable [S1, unofficial].
+
+## Background
+The Bilateral Grid was introduced as a method for efficient bilateral filtering [S1, unofficial]. It is implemented in the `weiyithu/NerfingMVS` repository, which uses it for image processing tasks within the context of NeRF and MVS pipelines [S1, unofficial]. The method leverages the separability of the bilateral filter in a higher-dimensional space to reduce computational cost [S1, unofficial]. Not given in the sources.
+
+## Sources
+[S1] weiyithu/NerfingMVS, https://github.com/weiyithu/NerfingMVS, fetched 2026-10-27 (unofficial)

@@ -1,0 +1,173 @@
+# Diffusive INR (DINR)
+
+Also called: Diffusion-regularized Implicit Neural Representation, Diffusive Computed Tomography Inversion Framework
+
+## Overview
+DINR is a sparse-view computed tomography (CT) reconstruction method that regularizes an Implicit Neural Representation (INR) using a pretrained diffusion model prior to suppress noise and artifacts in raw projection data [S1]. It addresses the ill-posed inverse problem of sparse-view CT, where insufficient projection views cause severe artifacts in traditional methods like Filtered Back Projection (FBP) [S1]. Unlike standard INRs, which suffer from spectral bias toward low-frequency components and instability under sparse supervision [S1], DINR incorporates a proximal formulation that integrates denoised diffusion outputs into the INR loss [S1]. It differs from sibling methods like DD3IP by replacing the UNet-based volume representation with an INR, enabling resolution-independent and memory-efficient posterior mean estimation [S1].
+
+## How it works
+**Inputs and Outputs:**
+- **Inputs:**
+  - $S$: A 3D coordinate grid (cubic lattice) defining the volumetric domain [S1].
+  - $y$: Sparse-view parallel-beam CT projection data (sinogram) [S1].
+  - $A$: Sparse-view parallel beam projector matrix [S1].
+  - $A^* y$: The analytical solution (FBP estimate) of the projection data [S1].
+  - $\theta_T$: Pretrained diffusion model weights [S1].
+  - $\omega$: Scaling parameter for noise injection (typically 0.002) [S1].
+  - $\rho$: Regularization parameter for the proximal term, chosen such that the ratio of the proximal term to the data-fidelity term is $1 \times 10^{-6}$ [S1] (or $1 \times 10^{-5}$ in some experimental setups [S1]).
+  - $\eta$: Stochasticity control variable in $[0, 1]$ for DDIM sampling [S1].
+  - $\alpha_{1:T}$: Decreasing sequence in $(0, 1]^T$ parameterizing the reverse diffusion process [S1].
+- **Outputs:**
+  - $x_0$: The final reconstructed 3D volume tensor of attenuation coefficient values [S1].
+
+**Data Structures:**
+- **INR Model ($F_\phi$):** A neural network (typically a multilayer perceptron) parameterized by weights $\phi$ [S1]. It maps spatial coordinates $S$ and the FBP estimate $A^* y$ to attenuation coefficient values [S1].
+- **Diffusion Model ($D_\theta$):** A pretrained denoising model (e.g., UNet) parameterized by weights $\theta$, conditioned on the projection data $y$ [S1].
+- **Projector ($A$):** Implemented as a distance-driven parallel-beam projector (e.g., via Tomosipo/ASTRA toolbox) [S1].
+
+**Formulas:**
+1. **Forward Model:** $y = Ax + n$, where $x$ is the 3D tensor of attenuation coefficients, $A$ is the projection matrix, and $n$ is additive noise [S1].
+2. **Proximal Loss ($L_\phi$):** Used to update INR weights $\phi$:
+   $$L_\phi (S, y, \hat{x}_t, \rho) = \text{MSE} (AF_\phi (S, A^* y), y) + \rho \text{MSE} (\hat{x}_t, F_\phi (S, A^* y))$$
+   where $\hat{x}_t$ is the denoised estimate from the diffusion model at step $t$ [S1].
+3. **DDIM Sampling Step:**
+   $$\text{DDIM}_\theta (\hat{x}_t, \eta) := \sqrt{\alpha_{t-1}} \hat{x}_t + \sqrt{1 - \alpha_{t-1}} \eta \epsilon + (1 - \eta) \epsilon_\theta$$
+   where $\epsilon$ is spherically interpolated Gaussian noise and $\epsilon_\theta$ is the noise removed by the denoising model $D_\theta$ [S1].
+4. **Initialization of Reverse Process:**
+   $$x_T \leftarrow \sqrt{\alpha_T} A^* y + \sqrt{1 - \alpha_T} \epsilon * w$$
+   where $w$ is a scaling factor related to $\omega$ [S1].
+
+**Algorithm Steps:**
+1. Initialize the 3D coordinate grid $S$, the sparse-view parallel beam projector $A$, and the sparse-view CT projection $y$ [S1].
+2. Compute the FBP estimate $A^* y$ [S1].
+3. Initialize the INR weights $\phi_T$ by minimizing the standard MSE loss without the diffusion prior ($\rho=0$):
+   $$\phi_T \leftarrow \arg \min_\phi \{L_\phi (S, y, -, \rho = 0)\}$$
+   where $L_\phi (S, y, -, \rho = 0) = \text{MSE} (AF_\phi (S, A^* y), y)$ [S1].
+4. Load the pretrained diffusion model weights as $\theta_T$ [S1].
+5. Initialize the volume estimate $x_T$ using the formula:
+   $$x_T \leftarrow \sqrt{\alpha_T} A^* y + \sqrt{1 - \alpha_T} \epsilon * w$$
+   where $\epsilon$ is Gaussian noise and $w$ is the scaling parameter $\omega$ [S1].
+6. Iterate the diffusion reverse process for $t = T$ down to $1$:
+   a. **Update Diffusion Model:** Update the diffusion model parameters $\theta_{t-1}$ by minimizing the data consistency loss between the projected INR reconstruction and the measured projections:
+      $$\theta_{t-1} \leftarrow \arg \min_\theta \{\text{MSE} (A D_\theta (x_t |y), y)\}$$
+      [S1].
+   b. **Denoise:** Generate the denoised estimate $\hat{x}_t$ by applying the updated diffusion model $D_{\theta_{t-1}}$ to the current latent $x_t$ conditioned on $y$:
+      $$\hat{x}_t \leftarrow D_{\theta_{t-1}} (x_t |y)$$
+      [S1].
+   c. **Update INR:** Update the INR parameters $\phi_{t-1}$ by minimizing the proximal loss $L_\phi (S, y, \hat{x}_t, \rho)$, which incorporates the diffusion prior estimate $\hat{x}_t$ and the regularization parameter $\rho$ [S1].
+   d. **Compute Next Latent:**
+      - If $t = 1$: Compute the final output $x_{t-1}$ by evaluating the final INR $F_{\phi_{t-1}}$ at the coordinate grid $S$ with the FBP estimate $A^* y$:
+        $$x_{t-1} \leftarrow F_{\phi_{t-1}} (S, A^* y)$$
+        [S1].
+      - If $t > 1$: Compute the next latent $x_{t-1}$ using the DDIM sampler with the updated diffusion model $\theta_{t-1}$, the INR output $F_{\phi_{t-1}} (S, A^* y)$, and the noise scaling factor $\eta$:
+        $$x_{t-1} \leftarrow \text{DDIM}_{\theta_{t-1}} (F_{\phi_{t-1}} (S, A^* y), \eta)$$
+        [S1].
+7. Return the final reconstruction $x_0$ [S1].
+
+**Pseudocode:**
+> **Unverified code.** The code below did not pass a test run against a reference implementation, or no test fits it, so it may contain errors.
+
+```python
+import math
+import numpy as np
+
+def F_phi(coords, fbp_estimate, weights):
+    """INR forward pass: maps coordinates and FBP estimate to attenuation values."""
+    # Standard MLP evaluation; weights are flattened parameters
+    return np.tanh(np.dot(weights, np.concatenate([coords, fbp_estimate])))
+
+def D_theta(latent, condition, weights):
+    """Diffusion denoising model forward pass."""
+    return np.tanh(np.dot(weights, np.concatenate([latent, condition])))
+
+def sgd_step(params, loss_fn, lr=0.01):
+    """Standard gradient descent update."""
+    loss = loss_fn()
+    grad = np.gradient(loss, params)
+    return params - lr * grad
+
+def minimize_mse(model_fn, params, data_fn, target, lr=0.01, epochs=100):
+    """Minimize MSE loss between model output and target."""
+    for _ in range(epochs):
+        pred = model_fn(data_fn(), params)
+        loss_fn = lambda: np.mean((pred - target) ** 2)
+        params = sgd_step(params, loss_fn, lr)
+    return params
+
+def minimize_proximal_loss(model_fn, params, data_fn, target, prior, rho, lr=0.01, epochs=100):
+    """Minimize proximal loss: MSE(data) + rho * MSE(prior)."""
+    for _ in range(epochs):
+        pred = model_fn(data_fn(), params)
+        data_term = np.mean((pred - target) ** 2)
+        prior_term = np.mean((prior - pred) ** 2)
+        loss_fn = lambda: data_term + rho * prior_term
+        params = sgd_step(params, loss_fn, lr)
+    return params
+
+def sample_gaussian_noise(shape):
+    """Standard normal noise."""
+    return np.random.normal(0, 1, shape)
+
+def sample_spherical_gaussian_noise(shape):
+    """Spherically interpolated Gaussian noise."""
+    return sample_gaussian_noise(shape) / np.linalg.norm(sample_gaussian_noise(shape))
+
+def get_alpha_schedule(t, T=1000):
+    """Decreasing sequence parameterizing the reverse diffusion process."""
+    return 1.0 - (t / T)
+
+def DINR(S, y, A, A_star_y, theta_T, alpha_T, omega, rho, eta, T):
+    # 1. Initialize INR weights with standard MSE loss (rho=0)
+    phi = minimize_mse(F_phi, np.zeros(10), lambda: (S, A_star_y), A(F_phi(lambda: (S, A_star_y), np.zeros(10))))
+
+    # 2. Initialize diffusion model weights
+    theta = theta_T
+
+    # 3. Initialize volume estimate x_T
+    epsilon = sample_gaussian_noise(S.shape)
+    x_t = math.sqrt(alpha_T) * A_star_y + math.sqrt(1 - alpha_T) * epsilon * omega
+
+    # 4. Iterate reverse diffusion process
+    for t in range(T, 0, -1):
+        # a. Update diffusion model weights theta_{t-1}
+        theta = minimize_mse(D_theta, theta, lambda: (x_t, y), y)
+
+        # b. Compute denoised estimate x_hat_t
+        x_hat_t = D_theta(x_t, y, theta)
+
+        # c. Update INR weights phi_{t-1}
+        phi = minimize_proximal_loss(F_phi, phi, lambda: (S, A_star_y), A(F_phi(lambda: (S, A_star_y), phi)), x_hat_t, rho)
+
+        # d. Compute next latent x_{t-1}
+        if t == 1:
+            x_next = F_phi(S, A_star_y, phi)
+        else:
+            epsilon_theta = x_t - D_theta(x_t, y, theta)
+            epsilon_next = sample_spherical_gaussian_noise(S.shape)
+            alpha_t_minus_1 = get_alpha_schedule(t - 1)
+            x_next = math.sqrt(alpha_t_minus_1) * x_hat_t + \
+                     math.sqrt(1 - alpha_t_minus_1) * eta * epsilon_next + \
+                     (1 - eta) * epsilon_theta
+        x_t = x_next
+
+    return x_t
+```
+
+**Edge Cases and Pitfalls:**
+- **Spectral Bias:** Standard INRs exhibit strong spectral bias toward low-frequency components, leading to poor reconstruction of high-frequency structure under sparse supervision [S1]. DINR mitigates this by incorporating the diffusion prior [S1].
+- **Initialization:** The initialization of $x_T$ uses the FBP estimate $A^* y$ corrupted with noise [S1]. The scaling parameter $\omega$ controls the regularization by scaling the values of $A^* y$ relative to the noise variance [S1].
+- **Parameter Tuning:** The parameter $\rho$ must be chosen carefully [S1]. In experiments, it was set such that the ratio of the proximal term to the data-fidelity term was $1 \times 10^{-6}$ or $1 \times 10^{-5}$ [S1]. The parameter $\omega$ was set to 0.002 [S1].
+
+## Operating characteristics
+- **Time Complexity:** The method involves iterative optimization of both the diffusion model weights $\theta$ and the INR weights $\phi$ at each diffusion timestep $t$ [S1]. This makes it computationally expensive compared to single-pass methods like FBP or standard INR training [S1].
+- **Memory Complexity:** The INR representation is memory-efficient and resolution-independent compared to voxel-based methods like DD3IP, as it only stores the neural network weights rather than a 3D grid [S1].
+- **Performance:** DINR delivers superior performance, reduces reconstruction artifacts, and achieves gains in PSNR and SSIM compared to traditional methods (FBP) and state-of-the-art sparse-view techniques (DD3IP, Siren) [S1]. It performs on par with MBIR with a qGGMRF prior in sparse-view settings and outperforms it in the ultra-sparse regime [S1].
+- **Strengths:** High-quality reconstruction from sparse views, resolution-independent representation, ability to integrate learned priors with traditional inverse problem formulations [S1].
+- **Limitations:** Computationally intensive due to the iterative nature of the diffusion process and the joint optimization of $\theta$ and $\phi$ [S1]. Requires a pretrained diffusion model [S1].
+- **When to use:** Sparse-view CT reconstruction, particularly when data is extremely limited (e.g., 5-33 views) and high-quality microstructural characterization is required [S1].
+
+## Background
+DINR was proposed in the paper "Regularizing INR with Diffusion Prior for Self-Supervised 3D Reconstruction OF Neutron Computed Tomography Data" [S1]. It builds upon the DD3IP framework and the use of Implicit Neural Representations (INRs) for inverse imaging problems [S1]. The method is designed for sparse-view parallel-beam neutron CT reconstruction of concrete microstructures [S1]. It addresses the limitations of standard INRs (spectral bias) and traditional methods (artifacts in sparse views) by combining the flexibility of INRs with the powerful generative prior of diffusion models [S1].
+
+## Sources
+[S1] Regularizing INR with Diffusion Prior for Self-Supervised 3D Reconstruction OF Neutron Computed Tomography Data, https://doi.org/10.1109/ICASSP55912.2026.11464479, fetched 2026-10-26

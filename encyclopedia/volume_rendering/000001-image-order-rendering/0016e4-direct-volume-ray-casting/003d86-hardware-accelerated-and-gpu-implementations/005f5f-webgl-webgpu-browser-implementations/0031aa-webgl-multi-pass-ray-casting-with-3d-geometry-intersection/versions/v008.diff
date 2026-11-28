@@ -1,0 +1,155 @@
+--- v007.md
++++ v008.md
+@@ -8,5 +8,5 @@
+ ## How it works
+ **Inputs and Outputs:**
+-*   **Inputs:** A set of 3D triangular meshes (opaque), a volumetric dataset (represented as a 2D texture atlas), camera matrices, and transfer functions.
++*   **Inputs:** A set of 3D triangular meshes (opaque), a volumetric dataset (represented as a 2D texture atlas), camera matrices, and transfer functions [S1].
+ *   **Outputs:** A final 2D image composited from volume and mesh data.
+ 
+@@ -14,5 +14,5 @@
+ *   **Volume Data:** Stored as a 2D texture atlas where 2D slices are stacked in the Z-axis arranged in a matrix configuration on a single 2D plane [S1].
+ *   **Depth Data:** Since WebGL 1.0 lacks native float texture support, depth values from intermediate passes are encoded into RGBA color channels of Frame Buffer Objects (FBOs) [S1].
+-*   **FBOs:** Multiple Frame Buffer Objects are used to store intermediate results: depth maps, surface colors, and volume coordinates [S1].
++*   **FBOs:** Multiple Frame Buffer Objects are used to store intermediate results: depth maps (Passes 1 and 3), surface colors (Pass 2), and volume back coordinates (Pass 4) [S1].
+ 
+ **Numbered Steps:**
+@@ -30,7 +30,7 @@
+ ```python
+ # Inputs:
+-# depth_mesh_tex: Texture from Pass 1 (Mesh Depth)
++# depth_mesh_tex: Texture from Pass 1 (Mesh Depth, RGBA encoded)
+ # color_mesh_tex: Texture from Pass 2 (Mesh Color)
+-# depth_vol_tex: Texture from Pass 3 (Volume Back Depth)
++# depth_vol_tex: Texture from Pass 3 (Volume Back Depth, RGBA encoded)
+ # coord_vol_tex: Texture from Pass 4 (Volume Back Coordinates/3D TexCoords)
+ # volume_atlas_tex: 2D Texture Atlas containing volume slices
+@@ -38,34 +38,22 @@
+ # screen_pos: vec2 (current fragment coordinate)
+ # projection_matrix, view_matrix: Matrices
++# bounding_box_min, bounding_box_max: vec3
+ 
+-# Helper: Unpack float from RGBA (GLSL-style logic implemented in Python-like pseudocode)
+ def unpack_rgba_to_float(r, g, b, a):
+-    # Corresponds to the GLSL function in [S1]
+-    # value = r * 256^3 + g * 256^2 + b * 256 + a
+-    # Note: The source uses bit shifting logic. 
+-    # bitSh = [256^3, 256^2, 256, 1]
+-    # bitMsk = [0, 1/256, 1/256, 1/256]
+-    # The unpacking reverses the packing.
+-    # Standard packing: val = r*256^3 + g*256^2 + b*256 + a
++    # Reverses the packing: value = r * 256^3 + g * 256^2 + b * 256 + a
+     return r * (256.0**3) + g * (256.0**2) + b * 256.0 + a
+ 
+ # 1. Initialize Ray Parameters
+-# Compute ray direction based on camera and screen position
++# Compute ray direction from camera and screen position using inverse projection/view matrices [G]
+ ray_direction = compute_ray_direction(camera_pos, screen_pos, projection_matrix, view_matrix)
+ ray_pos = camera_pos
+ 
+-# Determine ray bounds
+-# Front face position is typically known or computed via ray-box intersection
+-# Back face depth is sampled from depth_vol_tex
++# Sample back volume depth to determine maximum distance D
+ back_depth_rgba = sample_texture(depth_vol_tex, screen_pos)
+-back_depth_float = unpack_rgba_to_float(back_depth_rgba.r, back_depth_rgba.g, back_depth_rgba.b, back_depth_rgba.a)
+-
+-# Calculate maximum distance D to the back of the volume bounding box
+-# Assuming ray_pos is at camera, and back_depth_float is the depth along the ray
+-max_distance = back_depth_float 
++max_distance = unpack_rgba_to_float(back_depth_rgba.r, back_depth_rgba.g, back_depth_rgba.b, back_depth_rgba.a)
+ 
+ # Compute number of steps S and step size s
+-# S is determined by resolution and max_distance
+-step_size = max_distance / S
++S = 100  # Not given in the sources.
++s = max_distance / S
+ 
+ # 2. Ray Traversal Loop
+@@ -73,57 +61,32 @@
+ accumulated_alpha = 0.0
+ 
+-for i from 0 to S:
+-    # Current sample position
+-    current_sample_pos = ray_pos + (i * step_size) * ray_direction
+-    
+-    # Check for 3D Geometry Intersection
+-    # Sample depth from mesh depth texture
++for i in range(S):
++    # Interpolate sample at current ray_pos
++    volume_value = sample_volume_atlas(volume_atlas_tex, ray_pos)
++
++    # Compute color with transfer function
++    color, alpha = apply_transfer_function(volume_value)
++
++    # Accumulate color and opacity
++    accumulated_color = accumulated_color + (1.0 - accumulated_alpha) * alpha * color
++    accumulated_alpha = accumulated_alpha + (1.0 - accumulated_alpha) * alpha
++
++    # Check for 3D Geometry Intersection using depth data from Pass 1 and 3
+     mesh_depth_rgba = sample_texture(depth_mesh_tex, screen_pos)
+     mesh_depth_float = unpack_rgba_to_float(mesh_depth_rgba.r, mesh_depth_rgba.g, mesh_depth_rgba.b, mesh_depth_rgba.a)
+-    
+-    # Determine if a mesh exists at this depth closer than current ray position
+-    # Note: Depth comparison depends on coordinate system (NDC vs View Space)
+-    # If mesh_depth_float < current_depth_along_ray, a mesh occludes the volume
+-    if mesh_exists_at_depth(mesh_depth_float, current_sample_pos):
+-        # Get mesh color
++    current_ray_depth = dot(ray_pos - camera_pos, ray_direction)
++    if mesh_depth_float < current_ray_depth:
+         mesh_color = sample_texture(color_mesh_tex, screen_pos)
+-        
+-        # Composite mesh color with accumulated volume color
+-        # Back-to-front blending
+-        # C_out = C_vol + (1 - alpha_vol) * C_mesh
+-        # alpha_out = alpha_vol + (1 - alpha_vol) * alpha_mesh (assuming opaque mesh, alpha_mesh=1)
+-        
+-        # If mesh is opaque, it blocks further volume sampling
+         accumulated_color = accumulated_color + (1.0 - accumulated_alpha) * mesh_color
+         accumulated_alpha = 1.0
+-        break # Terminate ray due to occlusion
+-    
+-    # Sample Volume Data
+-    # Use coord_vol_tex to get 3D texture coordinates for the current ray position
+-    # The 3D coordinates are interpolated from the back face rendering in Pass 4
+-    # However, standard ray casting uses ray_pos to index into the volume atlas
+-    # The source [S1] implies using the 3D texture coordinates from the back face 
+-    # to map the ray position to the volume atlas.
+-    
+-    # Interpolate sample at current ray_pos from volume atlas
+-    # This requires mapping ray_pos to the 2D atlas coordinates
+-    volume_value = sample_volume_atlas(volume_atlas_tex, ray_pos)
+-    
+-    # Compute color and opacity using transfer function
+-    color, alpha = apply_transfer_function(volume_value)
+-    
+-    # Accumulate
+-    # Standard front-to-back compositing for volume
+-    accumulated_color = accumulated_color + (1.0 - accumulated_alpha) * alpha * color
+-    accumulated_alpha = accumulated_alpha + (1.0 - accumulated_alpha) * alpha
+-    
++        break
++
+     # Early Ray Termination
+-    if accumulated_alpha >= 1.0:
++    if accumulated_alpha >= 1.0 or ray_pos > bounding_box_max:
+         break
+-        
+-    # Increment ray position
+-    ray_pos = ray_pos + step_size * ray_direction
+ 
+-# Final Output
++    # Increment ray_pos with s
++    ray_pos = ray_pos + s * ray_direction
++
+ output_color = accumulated_color
+ ```
+@@ -136,6 +99,6 @@
+ **Edge Cases and Pitfalls:**
+ *   **Lack of 3D Textures:** WebGL lacks support for 3D textures, requiring the use of a 2D texture atlas workaround to sample volumetric data [S1].
+-*   **Lack of Float Textures:** WebGL lacks support for Float textures, requiring depth data to be encoded into RGBA color channels for storage in FBOs. Precision loss may occur during packing/unpacking [S1].
+-*   **Occlusion Handling:** Correctly determining if a 3D object occludes the volume requires comparing the depth of the mesh (from Pass 1) with the current ray position. This must be done at each step or at least at the entry point [S1].
++*   **Lack of Float Textures:** WebGL lacks support for Float textures, requiring depth data to be encoded into RGBA color channels for storage in FBOs [S1].
++*   **Occlusion Handling:** Correctly determining if a 3D object occludes the volume requires comparing the depth of the mesh (from Pass 1) with the current ray position [S1].
+ 
+ ## Operating characteristics

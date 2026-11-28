@@ -1,0 +1,152 @@
+--- v001.md
++++ v002.md
+@@ -4,45 +4,47 @@
+ 
+ ## Overview
+-Per-Parameter Learning Rate Scheduling adjusts the learning rates for specific parameter groups (scaling, opacity, rotation, and features) independently during each training iteration [S1, unofficial]. It addresses the need to tune convergence speed and final rendering quality by allowing distinct optimization dynamics for different geometric and radiometric properties, setting it apart from uniform scheduling methods that apply a single rate to all parameters.
++Per-Parameter Learning Rate Scheduling adjusts the learning rates for specific parameter groups (scaling, opacity, rotation, and features) independently during each training iteration [S2, unofficial].
+ 
+ ## How it works
+ **Inputs and Outputs:**
+-- Input: Current training iteration $t$, initial learning rates for each parameter group ($\eta_{scale}, \eta_{opacity}, \eta_{rotation}, \eta_{feature}$), and the base learning rate schedule.
++- Input: Current training iteration $t$, initial learning rates for each parameter group ($\eta_{scale}, \eta_{opacity}, \eta_{rotation}, \eta_{feature}$) [S2, unofficial].
+ - Output: Updated learning rates for each parameter group for the current iteration.
+ 
+ **Data Structures:**
+-- A dictionary or object mapping parameter group names to their current learning rate values.
+-- Fields: `scale_lr`, `opacity_lr`, `rotation_lr`, `feature_lr`.
++- A dictionary or object mapping parameter group names to their current learning rate values [G].
+ 
+ **Steps:**
+-1. Initialize learning rates for each parameter group. For scaling, the optimal range is typically between $10^{-3}$ and $10^{-6}$ [S1, unofficial]. Other parameters (opacity, rotation, feature) can be initialized similarly or derived from a base rate.
++1. Initialize learning rates for each parameter group. For scaling, the optimal range is typically between $10^{-3}$ and $10^{-6}$ [S2, unofficial]. Other parameters (opacity, rotation, feature) can be initialized similarly or derived from a base rate [G].
+ 2. For each training iteration $t$:
+-   a. Determine the scaling factor or decay function for each parameter group. This may involve exponential decay, step decay, or constant values depending on the specific variant.
++   a. Determine the scaling factor or decay function for each parameter group. This may involve exponential decay, step decay, or constant values depending on the specific variant [S2, unofficial][S4].
+    b. Update the learning rate for each group:
+       $$ \eta_{group}(t) = \eta_{group, initial} \times \text{decay}(t) $$
+-      where $\text{decay}(t)$ is specific to the group and iteration.
+-   c. Apply the updated learning rates to the respective parameter groups in the optimizer (e.g., Adam).
++      where $\text{decay}(t)$ is specific to the group and iteration [G].
++   c. Apply the updated learning rates to the respective parameter groups in the optimizer (e.g., Adam) [G].
+ 
+ **Parameters:**
+-- $\eta_{scale, initial}$: Initial learning rate for scaling parameters. Typical optimal range: $[10^{-3}, 10^{-6}]$ [S1, unofficial].
+-- $\eta_{opacity, initial}$: Initial learning rate for opacity parameters.
+-- $\eta_{rotation, initial}$: Initial learning rate for rotation parameters.
+-- $\eta_{feature, initial}$: Initial learning rate for feature parameters.
++- $\eta_{scale, initial}$: Initial learning rate for scaling parameters. Typical optimal range: $[10^{-3}, 10^{-6}]$ [S2, unofficial]. Recommended value: $0.005$; using $0.05$ increases training time by a factor of 2–3 with similar PSNR [S1].
++- $\eta_{opacity, initial}$: Initial learning rate for opacity parameters. Not given in the sources.
++- $\eta_{rotation, initial}$: Initial learning rate for rotation parameters. Not given in the sources.
++- $\eta_{feature, initial}$: Initial learning rate for feature parameters. Not given in the sources.
+ 
+ **Edge Cases and Pitfalls:**
+-- Setting $\eta_{feature} = 0$ does not significantly change training speed or quality, indicating that feature learning has less impact on improvement compared to other parameters [S1, unofficial].
+-- Precision issues may arise if learning rates are too small, leading to negligible updates.
+-- Boundary conditions: Ensure learning rates do not drop below a minimum threshold to prevent stagnation.
++- Setting $\eta_{feature} = 0$ does not significantly change training speed or quality, indicating that feature learning has less impact on improvement compared to other parameters [S2, unofficial].
++- High learning rates for scaling cause a wider distribution of Gaussian scales, leading to excessively large Gaussians (high computational demand) and negligibly small Gaussians (negligible contribution) [S1].
++- Large learning rates can cause numerical instability (NaN values) during optimization [S1].
+ 
+ **Pseudocode:**
+ ```python
+-def update_per_parameter_lrs(iteration, initial_lrs, decay_functions):
++import math
++
++def update_per_parameter_lrs(iteration, initial_lrs, decay_configs):
+     """
+-    Update learning rates for each parameter group based on iteration and decay functions.
++    Update learning rates for each parameter group based on iteration and decay configurations.
+     
+     Args:
+     iteration (int): Current training iteration.
+     initial_lrs (dict): Dictionary with initial learning rates for 'scale', 'opacity', 'rotation', 'feature'.
+-    decay_functions (dict): Dictionary with decay functions for each parameter group.
++    decay_configs (dict): Dictionary with decay parameters for each parameter group.
++                          Format: {'type': 'cosine'|'exponential'|'constant', 'params': {...}}
+     
+     Returns:
+@@ -52,32 +54,25 @@
+     for group in ['scale', 'opacity', 'rotation', 'feature']:
+         initial_lr = initial_lrs[group]
+-        decay_func = decay_functions[group]
+-        updated_lrs[group] = initial_lr * decay_func(iteration)
++        config = decay_configs[group]
++        decay_type = config['type']
++        
++        if decay_type == 'constant':
++            factor = 1.0
++        elif decay_type == 'exponential':
++            gamma = config.get('gamma', 0.99)
++            factor = gamma ** iteration
++        elif decay_type == 'cosine':
++            start_iter = config.get('start', 0)
++            end_iter = config.get('end', 10000)
++            if iteration < start_iter:
++                factor = 1.0
++            else:
++                progress = min(1.0, max(0.0, (iteration - start_iter) / (end_iter - start_iter)))
++                factor = 0.5 * (1.0 + math.cos(math.pi * progress))
++        else:
++            factor = 1.0
++        
++        updated_lrs[group] = initial_lr * factor
+     return updated_lrs
+-
+-# Example decay functions
+-def constant_decay(iteration):
+-    return 1.0
+-
+-def exponential_decay(iteration, gamma=0.99):
+-    return gamma ** iteration
+-
+-# Example usage
+-initial_lrs = {
+-    'scale': 1e-3,
+-    'opacity': 1e-2,
+-    'rotation': 1e-2,
+-    'feature': 1e-2
+-}
+-
+-decay_functions = {
+-    'scale': exponential_decay,
+-    'opacity': constant_decay,
+-    'rotation': constant_decay,
+-    'feature': constant_decay
+-}
+-
+-# Update learning rates for iteration 100
+-updated_lrs = update_per_parameter_lrs(100, initial_lrs, decay_functions)
+ ```
+ 
+@@ -85,19 +80,20 @@
+ 
+ ### Stepwise Constant Learning Rate Schedule
+-Modifies the positional learning rate schedule to align with DashGaussian's two-stage (LR/HR) optimization, holding it constant during LR training and decaying it only after a specific iteration threshold [S2]. The positional learning rate is kept constant at its initial value throughout the LR optimization stage and only allowed to decay from the iteration $i = \arg\min_i \lfloor r(i) \rfloor = 1/3$ [S2]. This approach is beneficial when using a resolution scheduler that transitions from low to high resolution, ensuring stable optimization during the initial phase.
++Modifies the positional learning rate schedule to align with DashGaussian's two-stage (LR/HR) optimization, holding it constant during LR training and decaying it only after a specific iteration threshold [S4]. The positional learning rate is kept constant at its initial value throughout the LR optimization stage and only allowed to decay from the iteration $i = \arg\min_i \lfloor r(i) \rfloor = 1$ [S4].
+ 
+ ## Operating characteristics
+-- **Time Complexity:** The overhead of updating per-parameter learning rates is minimal, typically $O(1)$ per iteration, as it involves simple arithmetic operations.
+-- **Memory Complexity:** Negligible, as it only requires storing a few additional scalar values for each parameter group.
+-- **Measured Performance:** Adjusting the scaling learning rate within the range $[10^{-3}, 10^{-6}]$ can explicitly change the final rendering result and training speed [S1, unofficial]. Other parameters have less impact on quality and speed but are still useful.
+-- **Strengths:** Allows fine-tuned control over different aspects of the model, potentially leading to better convergence and higher quality results.
+-- **Limitations:** Requires careful tuning of initial learning rates and decay functions for each parameter group. Setting feature learning rate to zero may not significantly impact performance, suggesting limited benefit from tuning this parameter.
+-- **When to Use:** When different parameters require different optimization dynamics, such as in complex scenes where geometric and radiometric properties need distinct handling.
+-- **When Not to Use:** When computational resources are limited, or when the impact of per-parameter tuning is negligible for the specific application.
++- **Time Complexity:** The overhead of updating per-parameter learning rates is minimal, typically $O(1)$ per iteration, as it involves simple arithmetic operations [G].
++- **Memory Complexity:** Negligible, as it only requires storing a few additional scalar values for each parameter group [G].
++- **Measured Performance:** Adjusting the scaling learning rate within the range $[10^{-3}, 10^{-6}]$ explicitly changes the final rendering result and training speed [S2, unofficial]. Using a learning rate of $0.05$ for scaling increases training time by a factor of 2–3 compared to $0.005$ with similar PSNR [S1].
++- **Strengths:** Allows fine-tuned control over different aspects of the model, potentially leading to better convergence and higher quality results [G].
++- **Limitations:** Requires careful tuning of initial learning rates and decay functions for each parameter group. Setting feature learning rate to zero may not significantly impact performance, suggesting limited benefit from tuning this parameter [S2, unofficial].
++- **When to Use:** When different parameters require different optimization dynamics, such as in complex scenes where geometric and radiometric properties need distinct handling [G].
++- **When Not to Use:** When computational resources are limited, or when the impact of per-parameter tuning is negligible for the specific application [G].
+ 
+ ## Background
+-Per-Parameter Learning Rate Scheduling originated from the need to optimize 3D Gaussian Splatting (3DGS) and related radiance field representations more effectively. The method was introduced in I3DGS: Improve 3D Gaussian Splatting from Multiple Dimensions [S1, unofficial], which explored the impact of adjusting learning rates for scaling, opacity, rotation, and feature parameters. The approach has since been adopted and adapted in various other works, such as DashGaussian [S2], to enhance optimization efficiency and rendering quality.
++Per-Parameter Learning Rate Scheduling originated from the need to optimize 3D Gaussian Splatting (3DGS) and related radiance field representations more effectively. The method was introduced in I3DGS: Improve 3D Gaussian Splatting from Multiple Dimensions [S2, unofficial], which explored the impact of adjusting learning rates for scaling, opacity, rotation, and feature parameters. The approach has since been adopted and adapted in various other works, such as DashGaussian [S4], to enhance optimization efficiency and rendering quality.
+ 
+ ## Sources
+-[S1] I3DGS: Improve 3D Gaussian Splatting from Multiple Dimensions, https://arxiv.org/abs/2405.06408v1, fetched 2026-10-26 (unofficial)
+-[S2] DashGaussian: Optimizing 3D Gaussian Splatting in 200 Seconds, https://doi.org/10.1109/cvpr52734.2025.01041, fetched 2026-10-31+[S1] 3DGR-CT: Sparse-view CT reconstruction with a 3D Gaussian representation, https://doi.org/10.1016/j.media.2025.103585, fetched 2026-10-26
++[S2] I3DGS: Improve 3D Gaussian Splatting from Multiple Dimensions, https://arxiv.org/abs/2405.06408v1, fetched 2026-10-26 (unofficial)
++[S4] DashGaussian: Optimizing 3D Gaussian Splatting in 200 Seconds, https://doi.org/10.1109/cvpr52734.2025.01041, fetched 2026-10-31

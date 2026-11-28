@@ -1,0 +1,749 @@
+# Gabor Fields: Orientation-Selective Level-of-Detail for Volume Rendering
+
+[JORGE CONDOR](https://orcid.org/0000-0002-9958-0118)∗ , Università della Svizzera Italiana, Lugano, Switzerland
+
+[NICOLAI HERMANN](https://orcid.org/0009-0004-7936-6757)∗ , Università della Svizzera Italiana, Lugano, Switzerland
+
+[MEHMET ATA YURTSEVER,](https://orcid.org/0009-0006-6509-760X) Università della Svizzera Italiana, Lugano, Switzerland
+
+[PIOTR DIDYK,](https://orcid.org/0000-0003-0768-8939) Università della Svizzera Italiana, Lugano, Switzerland
+
+
+
+
+
+Fig. 1. Example level-of-detail decomposition of our Gabor Fields, a new volumetric density field representation using primitive Gabor kernels. The frequencyand orientation-selectivity of the representation enables continuous control over level of detail, reduced rendering time, and a trade-off between variance and bias for performance when sample cost is critical. Here, we show four levels obtained by masking particle collections from the highest-quality asset at render time. (Volumetric Bunny from the OpenVDB database [DreamWorksAnimation 2023])
+
+Gaussian-based representations have enabled efficient physically-based volume rendering at a fraction of the memory cost of regular, discrete, voxelbased distributions. One of the remaining advantages of classic voxel grids, however, is the ease of constructing hierarchical representations by either storing volumetric mipmaps or selectively pruning branches of an already hierarchical voxel grid. Such strategies reduce rendering time and eliminate aliasing when lower levels of detail are required. Constructing similar strategies for Gaussian-based volumes is not trivial. Straightforward solutions, such as prefiltering or computing mipmap-style representations, lead to increased memory requirements or expensive re-fitting of each level separately. Additionally, such solutions do not guarantee a smooth transition between different hierarchy levels. To address these limitations,
+
+∗Both authors contributed equally to this research.
+
+Authors' Contact Information: [Jorge Condor,](https://orcid.org/0000-0002-9958-0118) jorge.condor@usi.ch, Università della Svizzera Italiana, Lugano, Lugano, Ticino, Switzerland; [Nicolai Hermann,](https://orcid.org/0009-0004-7936-6757) nicolai. hermann@usi.ch, Università della Svizzera Italiana, Lugano, Lugano, Switzerland; [Mehmet Ata Yurtsever,](https://orcid.org/0009-0006-6509-760X) ata.yurtsever@usi.ch, Università della Svizzera Italiana, Lugano, Lugano, Switzerland; [Piotr Didyk,](https://orcid.org/0000-0003-0768-8939) piotr.didyk@usi.ch, Università della Svizzera Italiana, Lugano, Lugano, Switzerland.
+
+[This work is licensed under a Creative Commons Attribution 4.0 International License.](https://creativecommons.org/licenses/by/4.0) © 2026 Copyright held by the owner/author(s).
+
+ACM 1557-7368/2026/7-ART62  we propose Gabor Fields, a mixture of Gabor kernels that enables continuous, orientation-selective frequency filtering at no cost. The frequency content of the asset is reduced by selectively pruning primitives, directly benefiting rendering performance, without refitting or extra storage. Beyond filtering, we demonstrate that stochastically sampling from different frequencies and orientations at each ray recursion enables masking substantial portions of the volume, accelerating ray traversal time in singleand multiple-scattering settings. Furthermore, inspired by procedural volumes, we present an application for efficient design and rendering of procedural clouds as Gabor-noise-modulated Gaussians. Code available here [https://arcanous98.github.io/projectPages/gaborVolumes.html.](https://arcanous98.github.io/projectPages/gaborVolumes.html)
+
+CCS Concepts: • Computing methodologies → Visibility; Ray tracing; Volumetric models; Image-based rendering.
+
+#### ACM Reference Format:
+
+Jorge Condor, Nicolai Hermann, Mehmet Ata Yurtsever, and Piotr Didyk. 2026. Gabor Fields: Orientation-Selective Level-of-Detail for Volume Rendering. ACM Trans. Graph. 45, 4, Article 62 (July 2026), 22 pages. [https:](https://doi.org/10.1145/3811369) [//doi.org/10.1145/3811369](https://doi.org/10.1145/3811369)
+
+# 1 Introduction
+
+High-quality volumetric representations are central for many applications in computer graphics. They are widely used, especially when obtaining or using explicit representations is difficult or prohibitively expensive. Examples include modeling and simulation of
+
+particle aggregates [Meng et al. 2015; Moon et al. 2007], clouds [Kallweit et al. 2017], foliage [Loubet and Neyret 2017; Neyret 1998], cloth [Schröder et al. 2011; Zhao et al. 2011] and hair [Petrovic et al. 2005]. Most of the above methods use discrete density distributions as their primitive model, organized in 3D voxel grids that can be dense, adaptive [Museth 2013] or partly implicit [Kim et al. 2024]. A significant drawback of these methods is their poor memory scalability and the need to use stochastic methods for efficient rendering with physically-based path tracers [Novák et al. 2018], which limits the potential of volumetric rendering techniques.
+
+In recent years, Lagrangian-style particle methods have become the volumetric representation of choice underpinning applications including radiance field reconstructions [Kerbl et al. 2023; Lassner and Zollhofer 2021; Wu et al. 2024; Zhou et al. 2025c], simultaneous localization and mapping (SLAM) [Keetha et al. 2024], mesh extraction [Guédon and Lepetit 2024], or fast tomographic rendering [Gao et al. 2025]. Inspired by these developments, Condor et al. [2025] proposed a technique to efficiently model and render kernel mixture models bounded by volumetric primitives. The method replaced discrete volumetric density distributions with continuous ones, providing substantial memory and speed improvements over traditional voxel grids. The generality of this technique enables both path tracing and radiance field rendering, offering multiple advantages over previous rasterized frameworks, such as support for complex camera models, the ability to trace secondary rays to compute relighting, shadowing, scattering, and analytic transmittance integrals. However, the approach has several limitations. The modeling power of the Gaussian kernels is limited, and the regression scales poorly. Moreover, Gaussian volumetric primitives are not directly compatible with level-of-detail (LOD) strategies. The analogous approach to downsampling voxel grids would require convolving primitives with a low-pass filter, for example, another Gaussian, producing new Gaussian primitives with larger spatial supports. Such a representation would have the same complexity yet slower rendering time. While aggregating primitives after filtering is possible, it would require energy-based optimizations or re-fitting of the asset.
+
+To address these limitations, we draw inspiration from steerable pyramid decompositions [Simoncelli and Freeman 1995; Simoncelli et al. 1992] and propose a hierarchical volumetric primitive representation based on mixtures of Gaussian and Gabor kernels. Gabor kernels, harmonically modulated Gaussians, have a frequency-domain representation consisting of symmetric, opposed Gaussians centered around their peak modulation frequency (see Figure 3\). This spectral localization makes them ideal for constructing a spectrally aware volumetric representation in which filtering specific spatial frequency bands corresponds to removing certain kernels. This enables a simple LOD strategy that does not require additional memory or create discontinuities between levels. These properties make LOD both natural and efficient, similar to a continuous Laplacian pyramid but with orientation selectivity. We support this representation with analytically derived line integrals for the Gabor kernels and a novel hierarchical regression scheme. In addition, we propose an efficient stochastic rendering approach that leverages the unique properties of the representation to drastically reduce cost per sample in brute-force multiple-scattering path tracing settings. Furthermore, Gabor kernels are orientation-selective. They model residuals only in specific frequencies and orientations, contributing negligibly in others. We demonstrate, for the first time, that this property can be effectively leveraged to improve rendering time by selectively masking particles that do not contribute significantly to a given ray. Our main contributions can be summarized as:
+
+- a novel frequency- and orientation-selective volumetric density representation,
+- analytic line integral and sampling solutions for tomographic rendering, single and multiple scattering, forward and inverse path tracing,
+- a regression scheme for distilling 3D density fields into Gabor Fields,
+- strategies leveraging the new representation to accelerate physically based rendering,
+- applications to efficient LOD, motion blur, and noise-inspired procedural asset generation.
+
+# 2 Related Work
+
+Monte Carlo Volume Rendering. Simulating light transport in participating media has been a longstanding area of research in computer graphics, typically requiring solutions to the radiative transfer equation [Chandrasekhar 1960]. Due to the dimensionality of the integral, it is most often estimated stochastically using Monte Carlo approaches; an excellent survey can be found in [Novák et al. 2018]. Some popular approaches include ray marching [Kettunen et al. 2021; Tuy and Tuy 1984], also used transversally in many implicit radiance field rendering applications [Mildenhall et al. 2020; Müller et al. 2022]; and null-scattering estimators [Woodcock 1965], either fully analog [Novák et al. 2018] or with partial closed-form estimation and sample reweighting (i.e. control variates) [Crespo et al. 2021; Novák et al. 2014; Szirmay-Kalos et al. 2017], or leveraging power-series expansions [Georgiev et al. 2019]. Representing heterogeneous media typically involves voxel grids due to their simplicity and support for hierarchical acceleration structures [Museth 2013, 2021a], though these become memory-intensive when high amounts of detail are required.
+
+Physically Based Volume Rendering with Volumetric Primitives. Alternatives to voxel grids have been studied in the past. Sparse representations, such as collections of isotropic volumes used in particle physics [Brown and Martin 2003; Max 1979], suffer from the limited modelling power of isotropic primitives. Recent similar efforts in vision and graphics do not fully leverage the advantages of closed-form integration [Knoll et al. 2021; Lassner and Zollhofer 2021] and do not support scattering. Other alternatives include hierarchical grids [Fong et al. 2017], implicit MLP mixtures [Lombardi et al. 2021; Reiser et al. 2021] and sparse feature grids [Müller et al. 2022]; these trade off quality, speed or compression, but overall do not provide a completely rounded solution. More recently, and inspired by primitive-based radiance field efforts [Kerbl et al. 2023], anisotropic ellipsoid-bounded kernel mixture models [Condor et al. 2025; Zhou et al. 2024] were proposed, providing a compact, fast and relatively high-quality alternative. Our work is directly based on these, where our novel hierarchical, spectrally-bounded regression and the introduction of a new kernel (anisotropic Gabors) improves
+
+on some of the limitations of the approach, namely, regression quality for low mixture complexities, rendering speed and efficient support of level of detail.
+
+Gabor Kernels and Noise in Rendering. A Gabor kernel combines a Gaussian envelope with a sinusoidal wave. Its sensitivity to frequency and orientation is widely exploited in image processing and computer vision. Gabor kernels are commonly used in the study and modeling of human visual perception, as they can mimic the human visual system's sensitivity to specific orientations, spatial frequencies, and locations within the visual field [Marcelja 1980]. They ˆ have been successfully used to define procedural noise and texture synthesis methods [Galerne et al. 2012; Lagae and Drettakis 2011; Lagae et al. 2009], offering a compact and resolution-independent approach to generate structured randomness in textures and materials which reduces storage and bandwidth requirements of image-based textures, and support infinite detail through frequency-aware evaluation. In the particular case of volume modeling and rendering, procedural noise is ubiquitous, as it is common for games and VFX production to allow artists or fluid dynamics solvers to create a guide distribution (i.e., metaballs or constant density ellipsoids [Wrenninge et al. 2011]) and layer noise on top to create compact and visually appealing assets [Fajardo et al. 2023]. Our work bridges the gap between procedural and explicitly generated assets through a unified framework. It enables us to construct extremely compact multi-resolution volumetric fields. Assets can be produced in a forward (procedural noise generation) or inverse manner (regression of already existing discrete density fields), and both can be efficiently rendered leveraging closed-form transmittance integrals and distance sampling, which we pioneer for Gabor kernels in this work.
+
+Level of Detail in Rendering. The concept of LOD is crucial for optimizing runtime, memory usage and preventing aliasing. LOD is most commonly associated with meshes, where the geometric complexity of rendered objects is adjusted according to their size in the image space, either through precomputed mesh decompositions [Luebke et al. 2002; Surace et al. 2023a] or through virtualized geometry [Karis et al. 2021]. For appearance, mip-mapping [Crow 1984] is a standard LOD technique for textures, where multiple prefiltered versions of a texture, so-called (Gaussian) pyramids, are stored, allowing for quick access to the appropriate level based on the texture's screen-space footprint during rendering. Higher-order appearance aggregation has also been explored, e.g. aggregating local light transport [Bako et al. 2023; Kallweit et al. 2017; Vicini et al. 2021; Weier et al. 2023; Zhou et al. 2025b]. The concept of LOD has also been applied to explicit volumes. One of the pioneering methods for pyramidal volumetric representations, introduced by Laur and Hanrahan [Laur and Hanrahan 1991], allowed efficient rendering based on the viewer's location by approximating projected density through kernel splatting; however, it was not possible to compute physically-based light transport on such a structure. Building on these ideas, Weiler et al. [2000] proposed an approach for volumes that ensures consistent interpolation between different resolution levels. Additionally, while not always explicitly, more recent volumetric representations, such as OpenVDB [Museth 2013] and derivative works [Kim et al. 2024; Museth 2021b], also provide a hierarchy to accelerate volume rendering. In contrast to these methods,
+
+Table 1. Important variables used in the paper with their symbols.
+
+| Symbol         | Variable Name                                     |
+|----------------|---------------------------------------------------|
+| $\kappa$       | Extinction Field                                  |
+| $\alpha$       | Kernel Weight                                     |
+| $K_i$          | Kernel                                            |
+| $\tau$         | Optical Depth                                     |
+| $T$            | Transmittance                                     |
+| $L$            | In-scattered Radiance                             |
+| $\sigma$       | Standard Deviation                                |
+| $\mu$          | Kernel Mean                                       |
+| $\vec{\omega}$ | Frequency and Orientation of the Gabor Modulation |
+| $\hat{f}_0$    | Peak Frequency of the Gabor Modulation            |
+| $\Sigma$       | Covariance Matrix                                 |
+| $W$            | Whitening Matrix                                  |
+| $\vec{k}_W$    | Frequency and Orientation in Whitened Space       |
+
+our approach does not rely on a discrete volumetric representation; and furthermore, enables continuous control over frequency content, without the need of static, discrete pyramid decompositions. We represent the volume using mixtures of explicit functions, specifically Gabor kernels.
+
+Closer to our work are wavelet-based representations [Guthe et al. 2002]. Compared to them, our method offers a more expressive representation due to the flexibility of the kernels (which are of arbitrary frequency, covariance and location, as opposed to fixed basis) and analytical transmittance integrals, which are critical for efficient volume rendering.
+
+Level of Detail for Primitive-based Models. In the context of primitive representations, LOD has been left largely unexplored until very recently. In radiance field reconstructions, work has focused on Gaussian-pyramid-like decompositions: training scenes at different scales, then proposing solutions to online switching between the different levels to maximize performance while minimizing artifacts during rendering [Windisch et al. 2025]. If explicit storage is unfeasible due to the scale of the asset, chunking systems have been proposed [Kerbl et al. 2024], as well as streaming from global memory and implicit encoding of Gaussian parameters [Yang et al. 2025]. Similarly, different texturing alternatives have been proposed in order to compress the representation (via providing higher modelling power per primitive) [Chao et al. 2025; Condor et al. 2026], but so far it's unproven whether the learned textures can be safely filtered to provide LOD tools.
+
+In contrast, we propose the first pure primitive-based volumetric model that can naturally decompose not only into different frequency bands, but that is also orientation-selective. This structure maximizes rendering speed and compression, as we do not need to further compute or store new pyramid levels to provide LOD, but rather simply mask out parts of the same asset to naturally obtain a continuous representation, spectrally-wise.
+
+# 3 Background - Primitive Volume Rendering
+
+Here we summarize how to perform physically-based volume rendering with volumetric primitives [Condor et al. 2025]. We further
+
+compiled a table of the most important variables for reference in Table 1. Each primitive defines a localized region of matter characterized by a density kernel  $K_i(\mathbf{x})$ , weight  $\alpha_i$ , emission, and phase function (the latter two omitted here for conciseness). Each kernel has limited support, being bounded by an ellipsoid with a primary axis radius of  $3\sigma$ , which in practice and for efficiency reasons, is approximated by a triangle mesh. The extinction field at any point  $\mathbf{x}$  is expressed as the sum over contributing primitives:
+
+$$\kappa_t = \sum_{i=1}^N \alpha_i K_i(\mathbf{x}) \quad (1)$$
+
+where  $N$  is the number of primitives influencing  $\mathbf{x}$ . For an arbitrary ray  $r = x_0 + \vec{v} \cdot t$ , each primitive's contribution to the optical depth along a ray segment  $[a, b]$  is given by
+
+$$\tau_i(\mathbf{x}_a, \mathbf{x}_b) = \alpha_i \int_a^b K_i(\mathbf{x}_t) dt \quad (2)$$
+
+Using an exponential decay model, the total transmittance  $T$  through the segment becomes
+
+$$T(\mathbf{x}_a, \mathbf{x}_b) = \exp\left(-\sum_{i=1}^N \tau_i(\mathbf{x}_a, \mathbf{x}_b)\right), \quad (3)$$
+
+Segment-Based Radiative Transfer. To evaluate radiance, the ray is partitioned into segments, determined by entry and exit points of the primitives. Radiance is computed as the sum of each segment's contribution, weighted by the accumulated transmittance:
+
+$$L(\mathbf{x}_0, \mathbf{x}_M, \vec{v}) = \sum_{k=1}^M T_{k-1}(\mathbf{x}_0, \mathbf{x}_k) L_k(\mathbf{x}_{k-1}, \mathbf{x}_k, \vec{v}), \quad (4)$$
+
+where  $L_k$  denotes the integrated in-scattered radiance within segment  $k$ , and  $T_{k-1}$  is the cumulative transmittance up to segment  $k$ . Sampling the interaction distance along the ray is achieved via inversion of the cumulative density function along the ray, for a given random sample  $\xi \in (0, 1)$ :
+
+$$\log(1 - \xi) = -\sum_i \tau_i(\mathbf{x}_0, \mathbf{x}_i). \quad (5)$$
+
+This allows for efficient sampling strategies via root-finding (e.g. Newton-Raphson, bisection) or closed-form inversion, depending on the choice of kernels. For dense scenes, uniform sampling within segments offers a bias-performance trade-off that remains effective in practice.
+
+## 4 Our method
+
+### 4.1 Motivation
+
+As discussed in Section 1, Gaussian primitives are not directly compatible with practical LOD strategies due to their spectral properties. Their power spectrum spans all frequencies centered at the origin. We visualize this in Figure 2. In essence, analytically filtering Gaussians to create LOD levels creates a new asset that retains the same number of Gaussians with larger spatial support. Consequently, this method does not yield any performance improvements. Pruning Gaussians based on their size is not a viable solution, as even small Gaussians carry important low-frequency information. Removing
+
+them results in artifacts at the coarser levels. An even more costly option would be to refit the pre-filtered asset using a smaller set of Gaussians. This would require solving multiple expensive optimization problems and would have higher memory requirements. Furthermore, interpolation between levels could introduce artifacts if the levels are not refitted jointly.
+
+Our first insight is that, ideally, an effective primitive volume LOD strategy should be constructed like a Laplacian pyramid. A single asset could be decomposed into different LODs by simply removing a subset of primitives, allowing regression in a single pass, and continuous filtering during rendering, at no extra memory cost. This requires a kernel that, in the frequency domain, solely exists within specific frequency bands, effectively modelling a residual between the current and previous levels. This is where harmonic-modulated kernels come into play. In particular, we propose using an adaptation of the Gabor kernel [Lagae et al. 2009]. We extend the kernel by making it anisotropic, deriving closed-form line integrals for arbitrary segments, and a novel optimization scheme to regress volumetric density fields as mixtures of the kernel. We will then introduce several new strategies to leverage this volumetric representation to further accelerate rendering time in practical scenarios.
+
+### 4.2 The 3D Anisotropic Gabor Kernel
+
+Our 3D anisotropic Gabor kernel has the form
+
+
+$$g(x; \mu, \Sigma, \vec{\omega}) = \frac{1}{\sqrt{8\pi^3 |\Sigma|}} e^{-\frac{1}{2}(x-\mu)^T \Sigma^{-1}(x-\mu)} \cos\left(\vec{\omega}^T (x-\mu)\right) \quad (6)$$
+
+with  $S$  the diagonal scale matrix (principal axis standard deviations) and rotation matrix  $R$  of the Gaussian. Together they form a factorization of the covariance matrix  $\Sigma = RSS^T R^T$  [Kerbl et al. 2023]; and  $\vec{\omega}$  being the orientation and magnitude of our planar wave (i.e., 2D wave in 3D) modulation. In practice, we model the modulation  $\vec{\omega}$  using a scalar  $\omega$  and fix the orientation to be diagonal as  $\vec{\omega} = RS^{-1}(\omega, \omega, \omega)^T$ , making it relative to its envelope. This reduces the parameter count and simplifies the optimization. Our Gabor formulation is slightly different from the Gabor kernels typically used in Gaussian Textures [Galerne et al. 2012; Lagae and Drettakis 2011], as the peak frequency of the modulation is entangled with the Gaussian's size. This is to naturally reinforce that smaller Gabor kernels cover higher frequencies (otherwise, the modulation and the envelope can be completely disentangled). We derive the closed-form solution for its analytical Fourier Transform and include detailed steps in the Appendix C. Given the peak frequency of the modulation  $f_0 = \|\vec{\omega}\|$ , its final derivation is
+
+$$\mathcal{F}\{g(x)\}(k) = \frac{1}{2} e^{-ik^T \mu} \left[ e^{-\frac{1}{2}(k-f_0)^T \Sigma(k-f_0)} + e^{-\frac{1}{2}(k+f_0)^T \Sigma(k+f_0)} \right] \quad (7)$$
+
+Since we can analytically compute the spectral content of each Gabor kernel, we can easily obtain a good approximation of the band-limited filtered volume by removing the undesired kernels (Figure 2).
+
+
+
+Fig. 2. Comparison of different LOD strategies for primitive-based volumetric representations. In each cell, we show a purely absorbing medium's transmittance integral and its corresponding power spectra of the Fourier Transform. Our method closely replicates the effect of analytically filtering the Gaussian-based volume. However, filtering Gaussians analytically produces mixtures of equal complexity but with larger overlap, severely impacting performance. In contrast, our method composes the asset as a mixture of Gabor kernels, achieving filtering through simple removal of parts of the asset at runtime. While explored in radiance field rendering literature, we also show that a simple heuristic Gaussian pruning fails to create LOD levels with a low-pass characteristic.
+
+# 4.3 Gabor Fields
+
+Inspired by Laplacian and Steerable pyramid decompositions [Simoncelli and Freeman 1995], we pose primitive volumes as the composition of different kernel mixtures, each modelling specific spectral bands. If separated into discrete band-passes or levels, they compose a volumetric Laplacian pyramid, which we can further separate in different orientations to compose a "relaxed" Steerable pyramid (relaxed, as in we do not ensure orthogonality, due to the unlimited theoretical support of Gabor kernels). In practice, we combine positive, zero-frequency Gabor kernels (i.e., Gaussians) for the base of our pyramid (the low-pass), and Gabor kernels (��0 &gt; 0) for the remaining frequencies (residual). Gabor kernels can have both positive and negative density values, which discards them as a valid density function on their own. An example of our "pyramid decomposition" for a regressed asset can be found in Figure 1. While it is easier to think of it as separated "layers", in practice, we have total control over the frequency content, and continuous decompositions are perfectly possible.
+
+### 4.4 Efficient Physically-based Rendering with Gabor Kernels
+
+A key component in primitive-based volume rendering is the ability to compute transmittance integrals analytically. We thus derive
+
+closed-form definite line integrals for the projected 3D anisotropic Gabor kernel along an arbitrary ray. We include step-by-step derivations in the Appendix A, we present here the final integral expressions. For an arbitrary ray �� = ��0 + ®�� · ��, and transforming the anisotropic Gabor into its canonical (i.e., whitened) local space, the full-domain integral of the projected Gabor kernel ���� along the ray is
+
+
+$$\int_{-\infty}^{\infty} g_r(x; \mu, \Sigma, \vec{\omega}) \, dt = \mathcal{K} \, e^{-\frac{1}{2}(c-b^2+\Omega^2)} \cos(d-\Omega b) \quad (8)$$
+
+For the segment-definite integral with general bounds [��0, ��1]:
+
+$$\int_{t_0}^{t_1} g(\mathbf{r}, \omega, \Sigma, \mu) dt = \frac{\mathcal{K}}{2} e^{-\frac{1}{2} (c - b^2 + \Omega^2)} \times \text{Re} \left\{ e^{i(d - \Omega b)} \left[ \text{erf} \left( \frac{t_1 + b - i\Omega}{\sqrt{2}} \right) - \text{erf} \left( \frac{t_0 + b - i\Omega}{\sqrt{2}} \right) \right] \right\}$$
+
+with
+
+$$b = \mathbf{p}_W \cdot \vec{v}_W, \quad c = \mathbf{p}_W \cdot \mathbf{p}_W \quad (10)$$
+
+$$\Omega = \vec{k}_W \cdot \vec{v}_W, \quad d = \vec{k}_W \cdot \mathbf{p}_W \quad \mathcal{K} = \frac{1}{2\pi\sqrt{|\Sigma|} \cdot \|\mathbf{W} \cdot \vec{v}\|}$$
+
+where we define the whitened ray parameters and frequency vector using ZCA whitening matrix �� as:
+
+$$W = R^T S^{-1}, \quad \mathbf{p}_W = W(\mathbf{x}_0 - \boldsymbol{\mu}), \quad \tilde{\mathbf{v}}_W = \frac{W \cdot \tilde{\mathbf{v}}}{\|W \cdot \tilde{\mathbf{v}}\|} \quad \tilde{\mathbf{k}}_W = W \cdot \tilde{\mathbf{\sigma}} \quad (11)$$
+
+Here ��0 and ��® are the ray origin and direction, �� and Σ are the Gabor kernel mean and covariance, respectively. The whitened direction w˜ is normalized so that ∥®���� ∥ = 1. The factor ∥�� · ®�� ∥ −1 is the Jacobian that arises as we normalize ��®�� to unit length for simpler integration. The integration parameter �� in whitened-normalized space relates to world space by this factor. The term (�� − �� 2 ) represents the squared perpendicular distance from the kernel center to the ray in canonical space. The complex error function erf(·) (Faddeeva function) handles the finite integration bounds.
+
+Complex-valued Error Function. A key issue when integrating Gabor kernels analytically is the computation of complex-valued error functions. A number of algorithms can be found in the literature [Gautschi 1970; Poppe and Wijers 1990; Zaghloul and Ali 2012], but their accuracy, speed and ability to converge largely depend on the expected range of input arguments. In order to avoid branching on render time among many different algorithms, we implemented a truncated Taylor expansion [Poppe and Wijers 1990] for an effective tradeoff between performance and accuracy, ensuring its convergence for our expected value range. We thus approximate the erf term in Equation 9 as:
+
+$$\text{Re} [\text{erf}(z)] \approx \frac{2}{\sqrt{\pi}} \sum_{n=0}^{\infty} \frac{(-1)^n \text{Re}(z^{2n+1})}{n!(2n+1)} \quad (12)$$
+
+with
+
+$$z = \frac{t + b - i\Omega}{\sqrt{2}} \quad (13)$$
+
+Implementation details. We implement it in DrJIT with early exits based on the relative size of newer terms in the series with respect to the previous term; in practice, we exploit the symmetries in the pair of erf terms to compute them jointly in a single loop. We truncate the series at a maximum of 16 terms to avoid numerical instability and bound the cost of the computation. Since this is a relatively expensive operation, we further optimize performance by catching segment sizes below a manually selected threshold (≈ 10−4 in whitened, local space units) and directly approximating their integral through the midpoint rule. This reduces the computation to a single Gabor probability density function evaluation.
+
+Distance Sampling. For the inversion of the cumulative density function (to enable distance sampling in multiple scattering), we resort to a bisection solver, as proposed by Condor et al [2025]. In practice, segments are generally very small, so uniformly sampling the segment, without inversion, is a good and cheap approximation we can optionally employ. While individual Gabor kernels do have areas where density is negative, it becomes irrelevant if the total mixture (considering all overlapping primitives, including Gaussians) is positive at any given 3D point.
+
+Adaptive Clamping. Ray-intersection queries and overlap processing dominate rendering time in volumetric primitive rendering. Reducing the extent (spatial support) of primitives greatly benefits rendering speed; however, reducing below 3�� could create artifacts (e.g. clipped primitives with obvious boundaries). The specific properties of Gabor kernels allow us to benefit particularly from spatial clamping while keeping error low. We develop a small heuristic to clamp the extent of each of our particles adaptively.
+
+We start from Equation 9. Considering a perpendicular ray (maximum contribution), our goal is to find at which eccentricity from the kernel's mean the contribution becomes insignificant. While Gabor kernels have infinite zero-crossings due to their harmonic modulation, we can approximate that in the worst-case scenario (with a phase shift producing a cosine term of value 1), their contribution will be given by the attenuated integral �� along the perpendicular ray to ��® at extent �� = �� − �� 2 .
+
+$$\rho(E) = \alpha \cdot \mathcal{K} \cdot \exp\left(-\frac{1}{2}(E^2 + \Omega^2)\right), \quad (14)$$
+
+where �� is the learned opacity scaler (Section 5\). Setting �� (��) = �� for a threshold �� (minimum contribution to consider) and solving for the extent:
+
+$$E_{\text{adaptive}} = \sqrt{-2 \ln \left( 2\pi \cdot \epsilon \sqrt{|\Sigma|} \right) - \vec{k}_W^2}, \quad (15)$$
+
+The ®�� �� term captures the frequency-induced decay: thus, higherfrequency Gabors can benefit from smaller extents. For Gaussian primitives (��0 = 0), this simplifies to:
+
+$$E_{\text{adaptive}} = \sqrt{-2 \ln \left( 2\pi \cdot \epsilon \sqrt{|\Sigma|} \right)}, \quad (16)$$
+
+### 4.5 Frequency and Orientation-aware Volume Rendering
+
+Interesting opportunities for acceleration arise when a volume can be decomposed spectrally and angularly. In certain orientations, Gabor kernels have line integral values close to zero. This allows us to simply avoid ray-tracing subsets of the mixture depending on the ray orientation, or importance sample sets of particles based on their frequency, density, and orientation. In order to explain the concept of orientation selectivity, we plot several Gabor kernels with different frequencies in the spatial domain and their respective power spectrum plots in Fourier space in Figure 3. We also include an animated version of this plot in the Supplementary material. In essence, the projected integral and frequency of a Gabor kernel along a ray is highly dependent on its orientation with respect to the modulation plane. In the extreme case of integrating along the plane itself, its integral tends to zero. Higher frequencies (right in Figure 3\) exhibit higher orientation selectivity. We further include the integral of an exemplary 3D Gabor kernel along a plane for visualization at different orientations in Figure 4.
+
+4.5.1 Stochastic Laplacian Path Tracing. Spectral selectivity enables a number of unorthodox acceleration strategies. Reducing mixture complexity and overlap for a given ray directly delivers substantial improvements in performance. In multiple scattering setups or complex scenes, a substantial amount of variance comes from the recursive nature of the integral itself. While obtaining exact
+
+
+
+Fig. 3. Top: 2D Gabor kernels in the spatial domain with different frequency magnitudes. Bottom: their respective power-spectrum representations. Gabor kernels exhibit directional attenuation, effectively modelling residuals in certain frequencies and orientations. As we clip their support to 3��, we can estimate at which orientations, relative to the integrating ray, their contribution decays enough to be considered (shaded area). In our work, we leverage this insight to extract performance by masking non-contributing Gabor kernels before an intersection query is even traced.
+
+
+
+Fig. 4. Visualization of the integral over a plane of a 3D Gabor kernel at different rotations around the Y axis. As we can see, projected frequency and integral magnitude both depend on orientation. In the limit, integrating along its modulation plane causes destructive interference that attenuates the
+
+integral value significantly. Higher frequencies see their contributions decay even faster angularly, and to smaller integral magnitudes, as we show in our 2D example in Figure 3.
+
+transmittance integrals for every path segment reduces variance, much greater gains may be achieved by simply reducing traversal time across the volume and affording more samples.
+
+Inspired by recent work on stochastic texture filtering [Fajardo et al. 2023] and procedural noise using Monte Carlo sampling [Fajardo and Pharr 2023], we develop a stochastic-analytical estimator: at render time, for each path segment, we stochastically decide which frequency bands of the asset to integrate. This essentially trades off increased variance (or bias, depending on the scenario)
+
+per sample with substantially faster traversal time across the volume (as in, reduced intersections in a simpler geometry structure). We propose a number of strategies in the Appendix (Table 5\). In particular, we found the control-variate inspired techniques to be a good compromise between increased rendering performance and variance. This essentially means always including the low-pass (i.e., Gaussian band) within the set of primitives to intersect with, and additionally including another band (or multiple) of higher frequency Gabor kernels. This allows shifting variance or bias to lower or higher frequencies, as desired.
+
+4.5.2 Stochastic Orientation-selective Path Tracing. Additionally to sampling from the frequency levels, we can exploit the angular selectivity of the volume to further accelerate rendering. For a 3D Gabor kernel ��(��; ��, Σ,��®) (Equation 6\) integrated along a ray with direction ��®, the contribution depends on the alignment angle �� between ��® and the frequency direction ��®. Defining �� = | cos �� | ∈ [0, 1] as the alignment factor: when the ray is perpendicular to the frequency direction (�� = 0), the cosine modulation contributes uniformly along the ray. When parallel (�� = 1), destructive interference reduces the contribution by K exp(−�� 0 /2). We can then implement different strategies to reduce the number of kernels we trace against based on ray direction (Appendix Table 6\). In practice, we put the Gabor kernels in a pre-processing step into different bins based on the orientation and frequency of their modulations. During render time, for every new ray, and before we intersect with the scene, we compute its alignment with the representative bin orientations. Based on this alignment and the frequencies contained in the bin, we decide which primitives to mask out and which to include in the set to be "intersected". This choice can be deterministic (i.e. we simply prune low contributing orientations, paying with a small amount of error) or stochastic (i.e. we use importance sampling to sample proportionally from orientations contributing more to the given ray). For importance sampling, the sampling weight is essentially the dampened contribution by the projected frequency along the ray:
+
+$$w(a) = e^{-\frac{f_0^2 a^2}{2}} \quad (17)$$
+
+We showcase this in a Supplementary material video (rotating Bunny). Both directional and Laplacian strategies can be used jointly, incrementing the performance boost.
+
+4.5.3 Analysis on Bias. For individual segments, both proposed methods are unbiased. A renderer computing just ray transmittance integrals or tomographic reconstruction would be unbiased. However, this is not the case in multiple scattering settings, due to Jensen's inequality. Let �� be a convex function (in our case, an exponential) and �� a random variable. Jensen's inequality states:
+
+$$f(\mathbb{E}[X]) \leq \mathbb{E}[f(X)]. \quad (18)$$
+
+resulting in a biased estimator of transmittance, despite our density integral estimator being unbiased. We can quantify the bias using a second-order Taylor expansion of �� −��ˆ around E[��ˆ]:
+
+$$\mathbb{E}[e^{-\hat{t}}] \approx e^{-\mathbb{E}[\hat{t}]} + \frac{1}{2} \text{Var}(\hat{t}) \cdot e^{-\mathbb{E}[\hat{t}]} \quad (19)$$
+
+Therefore:
+
+$$\text{Bias} = \mathbb{E}[\hat{T}] - T_{\text{true}} \approx \frac{1}{2} \text{Var}(\hat{t}) \cdot T_{\text{true}} > 0 \quad (20)$$
+
+The bias is thus proportional to the variance of the optical depth estimator and the true transmittance (smaller �� means larger relative bias). Tuning the sampling strategy for specific needs and assets can reduce such bias (i.e. importance sampling based on the total energy of a pyramid level), or steer it in a perceptually-aware manner (by shifting error to specific spatial frequencies).
+
+#### 4.6 Implementation Details
+
+We implement our method in Mitsuba 3 [Jakob et al. 2022], using a modified version of VPPT [Condor et al. 2025]. To maximize performance, we partition the assets at load time into a pyramid of frequencies and orientations, in order to leverage Optix ray visibility masking at the Top-level Acceleration Structure (TLAS). We extended Mitsuba 3 to support ray visibility masking, such that we can selectively decide which levels of the pyramid to integrate/interact with before even traversing the BVH. In practice, this means that each level has its own Geometry Acceleration Structure (GAS), which may be suboptimal but turns out to be more efficient than rejecting primitives after the intersection routine. More concretely, each pyramid level �� is assigned a visibility mask:
+
+$$\mathcal{V}_l = 2^l \quad (21)$$
+
+The ray carries a mask V�� whose active bits are sampled according to some strategy (see Table 6\). We compute a bit-wise AND between ray and visibility masks during intersection tests. Only primitives with common active bits (e.g., (V�� ∧ V��) ≠ 0) are considered. As an example, for a single ray, the rendering pipeline proceeds as follows:
+
+- (1) Sample a pyramid level based on the chosen strategy.
+- (2) Set the bits in V�� according to the sampling outcome.
+- (3) Perform ray-primitive intersection (filtered by mask) collecting overlapping primitives along the ray.
+- (4) Distance sampling (multiple-scattering, VPPT) or integrate the projected field directly (tomography).
+- (5) Reweight integrals based on sampling probabilities.
+- (6) Recurse ray (multiple scattering).
+
+In the tomography case, only after all samples are collected, we turn accumulated density into a transmittance estimate, assuming exponentially decaying media, as �� = exp(−��); this makes it an unbiased estimator. While collecting the product of individual transmittances is mathematically equivalent, our density importance sampling strategy would make it a biased estimator (see Jensen's inequality above). In practice, primary path and secondary rays (i.e. next-event estimation, NEE) can also use different strategies: for NEE in particular, we can heavily skew the sampling towards the Gaussian level of the pyramid, which contains most of the energy in the volume, drastically reducing rendering time. We explore some of these in Section 6 as well.
+
+# 5 Regressing Gabor Fields
+
+In order to transform discrete density fields (voxel grids) into Gabor Fields, we develop a novel regression scheme specifically tailored to our method.
+
+#### 5.1 Hierarchical Differentiable Rendering-Based Kernel Regression
+
+Similarly to stochastic sliced Wasserstein regression [Kolouri et al. 2019], Condor et al [2025] proposed a regression scheme based on image-based differentiable rendering, optionally warm-started on a Gaussian mixture obtained through expectation-maximization. While their approach is effective with simple and low-resolution assets, it does not scale well. This can be inferred by the limited complexity shown on high-resolution assets such as the Walt Disney Cloud1 . We attribute this to 1) the limited representation or modeling power of individual Gaussians and 2) scalability issues of an endto-end regression scheme. Our proposed Gabor kernels improve on 1), and we leverage the strengths of these kernels by coupling them with a hierarchical regression procedure with tight controls over the frequencies modeled during regression.
+
+Volume Filtering. We create a Gaussian pyramid ���� with a spatial standard deviation ���� that has the same perceived blur irrespective of grid resolution. Doing so simplifies the optimization of the lowest level, as the frequency range is fixed for all voxel grids. To achieve this, we work in a normalized continuous domain Ω = [0, 1] 3 . At level ��, we define ���� = ��02 , where ��0 (in normalized units) controls the blur radius at the finest scale. A larger ��0 corresponds to stronger blur at all levels. For a discrete voxel grid of resolution, ���� ×���� ×���� , let ��max = max (���� , ����, ���� ). We map normalized coordinates to voxel indices by �� = ����max, �� ∈ Ω. The corresponding standard deviation in voxel units is
+
+
+$$\sigma_l^{\text{vox}} = \sigma_l N_{\max}. \quad (22)$$
+
+Hierarchical Regression. To distill voxel density grids into a hierarchical Gabor field, we first build the Gaussian pyramid {���� }��=0,...,�� using eq. \(22\) with ��0 = 1 120�� , which we determined empirically. The lowest level (typically 3 or 4) contains the lowest frequencies. All voxel grids are zero-padded to match ��max in all dimensions and placed in a [−1, 1] 3 cube to render reference images. We render tomographic reference images using ratio tracking [Novák et al. 2014] with a high count of samples per pixel. We sample cameras from a hemisphere surrounding the [−1, 1] 3 cube. We directly fit a Gaussian mixture to the lowest level. The remaining levels are jointly fit by a single Gabor mixture.
+
+Initialization. We derive analytic formulas to define the exact frequency band that our mixture has to model. The Gaussian kernels model the lowest frequency band, and their scale solely determines their spectral footprint. The smallest appropriate scale for each level �� is given by
+
+$$s_{\min}(l) = L\sigma_0 2^l, \quad (23)$$
+
+where �� is the size of the continuous domain. The scale matching the signals' Nyquist frequency depends on the grid's resolution, and is given by
+
+$$\text{Slimit} = \frac{L\sqrt{2\log\frac{1}{\epsilon}}}{\pi N_{\max}}, \quad (24)$$
+
+where �� is the effective cutoff, e.g., the magnitude response of the Gaussian filter at the cutoff frequency |��(���� )| = ��. We choose �� =
+
+1
+
+0.25. We sample the scales for the base layer using ��high = ��min (��base+ 1) and ��low = ��min (��base) by drawing from a Normal distribution:
+
+$$s_{\text{init}} \sim \left| \mathcal{N}\left(\mathbf{0}, \frac{s_{\text{high}} - s_{\text{low}}}{3}\right) \right| + s_{\text{low}}. \quad (25)$$
+
+For the Gabor kernels, we use ��low = 1.5 ��limit ��high instead, thereby biasing the initialization to higher frequencies. We initialize the rotations randomly and ��init ∼ Unif[0.7, 1.5]. Centers are sampled from non-empty voxel locations to ensure good coverage, and opacities are drawn from ��initN (1, 4 ) where ��init is the only hyperparameter adjusted depending on the reference voxel grid's density.
+
+Optimization Procedure. We follow the image-based differentiable rendering regression scheme introduced by Condor et al. [2025]. Since Gabor kernels are not valid probability distributions, we can not warm start using expectation-maximization. Inspired by Kheradmand et al. [2024], we define our optimization procedure as a stochastic sampling process from the underlying density distribution. This enables stronger exploration during early optimization and defines strategies to relocate unused primitives throughout the optimization. They show that optimization steps can be converted to Stochastic Gradient Langevin Dynamics by injecting noise into the gradients. The gradient update for a single Gaussian or Gabor kernel g becomes
+
+$$g \leftarrow g - \lambda_{\text{Ir}} \cdot \nabla_g \mathbf{E}_{1\sim I} [\mathcal{L}(g; \mathbf{I})] + \lambda_{\text{noise}} \cdot \epsilon, \quad (26)$$
+
+where �� is the gradient noise facilitating exploration, ��noise controls the noise magnitude, ��lr is the learning rate, and I is an image sampled from the training dataset I. In practice, we compute the gradients over 32 renderings and use the Adam [Kingma and Ba 2014] optimizer update for ∇gEI∼I [L (g; I)]. We follow Kheradmand et al. [2024] and only add gradient noise for the centers ��. The noise term is given by
+
+$$\epsilon_\mu = \lambda_{\text{Ir}} \cdot \text{sigmoid} \left( -100(t - \alpha) \right) \cdot \Sigma \eta, \quad \eta \sim \mathcal{N}(\mathbf{0}, \mathbf{1}), \quad (27)$$
+
+where ��, Σ is the primitive's weight and covariance, �� is a hyperparameter and set to 1�� − 6, which we later use as a threshold to determine primitives to be resampled through the MCMC optimization framework. The sigmoid term reduces noise around the threshold to ensure a smooth decay for subsequent resampling. Essentially, we inject anisotropic noise identical to the primitive's Gaussian envelope.
+
+Resampling Primitives. For a stable optimization, it is crucial to ensure that the resampled primitives blend well into the current asset. The underlying idea is to teleport "dead" primitives (weight ���� &lt; 1�� − 6) to primitives that are alive and update their parameters to minimize visual change. The parameter update of Kheradmand et al. was developed for rasterization; therefore we re-derive it for analytic ray tracing. All dead primitives will be teleported to a live primitive which we sample with probabilities proportional to their integral. The 3D integral of a Gabor kernel is given by
+
+$$\int g(x; \mu, \Sigma, \omega) = \frac{\alpha}{(2\pi)^{\frac{3}{2}} |\Sigma|^{\frac{1}{2}} e^{-\frac{3}{2}\omega^2}}. \quad (28)$$
+
+Consider primitives ��1,...,�� −1 being teleported to the alive primitive ���� . The new parameters are given by:
+
+| $\mu_{1,\dots,N}^{\text{new}} = \mu_N^{\text{old}}$ ,       | $\alpha_{1,\dots,N}^{\text{new}} = \frac{\alpha_N^{\text{old}}}{N}$ | (29) |
+|-------------------------------------------------------------|---------------------------------------------------------------------|------|
+| $\Sigma_{1,\dots,N}^{\text{new}} = \Sigma_N^{\text{old}}$ , | $\omega_{1,\dots,N}^{\text{new}} = \omega_N^{\text{old}}$ ,         |      |
+
+This update keeps the density field of the mixture almost constant, except for the negligible loss of density at the location of the previously "dead" primitives. To further facilitate exploration, we keep the momentum statistics of Adam for the revived primitives but reset them for the sampled live primitives to discourage big movements.
+
+Loss Definition. The main component of our loss is a mix of SSIM [Wang et al. 2004] and L1. We further add regularization terms to favor smaller scales to improve render times and a weight decay, facilitating compact assets such that unused primitives can be resampled or later pruned. Opposed to Gaussian kernels, constraining the frequency content of anisotropic Gabor kernels is substantially more difficult, as constraining parameters independently will not suffice. As seen in Figure 3, depending on their orientation and peak frequency of their harmonic modulation ��, their spectral footprint changes drastically. To avoid aliasing, we derive a regularization term as a soft constraint. The angular cutoff frequency of each layer is given by
+
+$$\phi^{\text{cutoff}}(l) = \frac{\sqrt{2 \log \frac{1}{\epsilon}}}{\sigma_0 L l^2}, \quad (30)$$
+
+and the angular Nyquist frequency yields the upper bound.
+
+$$\phi_{\text{limit}} = \frac{\pi N_{\text{max}}}{L} \quad (31)$$
+
+We propose
+
+$$\mathcal{L}_{\text{freq}} = \sum_i \text{sigmoid}(a(f_{0,i} - \phi_{\text{limit}})), \quad (32)$$
+
+where ��0,�� is the peak frequency of a kernel and �� = 10 is a hyperparameter creating a steep transition, effectively activating the regularization term only when the peak frequency comes close to aliasing. The final loss term is given by
+
+$$\begin{aligned} \mathcal{L} &= 0.80 \cdot \mathcal{L}_{\text{L1}} + 0.20 \cdot \mathcal{L}_{\text{SSIM}} + \mathcal{L}_{\text{freq}} \\ &+ \lambda_\alpha \cdot \sum_i |\alpha_i| + \lambda_s \cdot \sum_i |s_i| \end{aligned} \quad (33)$$
+
+Implementation Details. We optimize our mixture models for 300 iterations using a cosine learning rate scheduler. We resample "dead" primitives every 30 iterations and have an exponential decay on the gradient noise level �� it noise = �� 0 noise · �� it, where �� = 0.65. We include our final hyperparameters in the Appendix in Table 7. We further ablated the influence of our components in an Ablation study in Table 2. Optimizing the low-frequency layer usually takes 2-8 minutes and the full volume between 0.1-2h (RTX 4090), depending on asset size and the number of primitives.
+
+### 6 Results
+
+In this section, we compare our proposed modeling approach in terms of storage, regression quality, and rendering speed against previous works on classic voxel grid distributions and Gaussian
+
+
+
+Fig. 5. Scalability evaluation of Gabor-based representations on the Tornado dataset. The primitive count ranged from 1,024 to 32,768, with an additional 768 base Gaussian primitives. PSNR was measured with respect to the original voxel grid, and runtime was averaged over 50 runs. Storage costs assume 32-bit floating-point precision without compression. Measured on an RTX 4090.
+
+Table 2. Ablation study on the Bunny volume with 300×300 resolution. PSNR Δ shown relative to the full method. Runtime was averaged over 50 runs on an RTX 4090.
+
+|      | Ablation   |         | PSNR (dB) | ↑ Δ ↑ (dB) | SSIM   | ↑ LPIPS | ↓ Render ↓ (ms) |
+|------|------------|---------|-----------|------------|--------|---------|-----------------|
+| Full | Method     |         | 48.86     | +0.00      | 0.9996 | 0.0073  | 24.1            |
+| w/o  | Scale      | Regu.   | 48.78     | -0.08      | 0.9996 | 0.0089  | 37.7            |
+| w/o  | Trainable  | ��      | 48.66     | -0.20      | 0.9995 | 0.0078  | 27.3            |
+| w/o  | Frequency  | Regu.   | 46.95     | -1.92      | 0.9994 | 0.0102  | 26.9            |
+| w/o  | Importance |         |           |            |        |         |                 |
+|      | Sampling   | Centers | 46.36     | -2.50      | 0.9993 | 0.0170  | 38.0            |
+| w/o  | Opacity    | Regu.   | 45.50     | -3.37      | 0.9991 | 0.0133  | 31.0            |
+
+primitive volumes [Condor et al. 2025]. We also showcase novel rendering approaches that exploit the orientation- and frequencyselectivity of our decomposition to improve rendering performance and enable new applications.
+
+#### 6.1 Regression Quality and Compression
+
+In Table 3, we compare Gabor Fields against Gaussian Primitive volumes [Condor et al. 2025], regressed with our own pipeline for a fair comparison, as the code for the full optimization process has not been released by the authors. We also include compression details in Table 4, against compressed voxel grids, as well as Gaussian volumes. For the same number of primitives, Gaussian kernels are slightly more compact, as we include an extra parameter per particle (��). However, we also achieve superior quality, which becomes evident in the higher quality of details in Figure 9, where we showcase a variety of different assets. In Figure 5, we study how quality scales with the number of primitives for both Gabor and Gaussian assets. Further, we fit all individual frames of the animated Tornado asset2 , without hand-tuning of optimization parameters for individual volumes, to demonstrate the robustness and quality of our optimization. A rendered animation of the Tornado asset is available in the Supplementary material. Additionally, we include an ablation to
+
+
+
+Fig. 6. Quality vs rendering time with the different stochastic-analytical estimators (see Appendix Table 5\). Starting from 1 spp, each dot represents powers of two extra samples per pixel (1, 2, 4, 8, etc).
+
+validate our choices in our regression method in Table 2. In general, Gabor Fields retain the compactness and quality of Gaussian Primitive Volumes, while providing fine-grained spectral control and a vast array of acceleration opportunities.
+
+#### 6.2 Rendering Performance
+
+6.2.1 Stochastic Laplacian and Orientation-selective rendering. We showcase several configurations for stochastic Laplacian rendering in Figure 7. We include an analysis on previously reported strategies in Figure 6. We also include a video showcasing orientation-selective strategies in the Supplementary material. While analytic rendering provides the best quality vs time tradeoff, stochastic methods can significantly reduce per-sample cost, which may be interesting in some applications. In tomographic rendering, these methods are unbiased. We also run an ablation with the Tornado dataset trained with 33k particles on the choice of our parameter �� for the control variate power law setup in Figure 8. Substantial acceleration is possible for some increased variance. We also run an ablation with the Tornado dataset trained with 33k particles on the choice of our parameter �� for the control variate power law setup in Figure 8. Substantial acceleration is possible for some increased variance.
+
+6.2.2 Path Tracing with Multiple Scattering. We compare rendering performance and quality against Gaussian Primitive Volumes [Condor et al. 2025] in Figure 9. Additional examples of higher quality renders with our Gabor Field Path Tracer can be seen in Figures 1, 10 and 11. For a fair comparison, we allow Gaussian volumes to benefit from the same acceleration strategies we describe for Gabor Fields in Section 4.6: small-segment integral approximation, adaptive clamping and whitened-space integration. Still, our Gabor Fields routinely
+
+2
+
+Table 3. Comparison of Gabor and Gaussian kernel performance on volumetric assets tomography regression. We report WDAS Cloud at 1 8 resolution.
+
+| Asset      | Gabor | PSNR ↑ Gauss | Gabor  | SSIM ↑ Gauss | Gabor    | L1 ↓ Gauss |          | L2 ↓ Gabor Gauss | Gabor  | LPIPS ↓ Gauss | Gabor  | #Primitives ↓ Gauss |
+|------------|-------|--------------|--------|--------------|----------|------------|----------|------------------|--------|---------------|--------|---------------------|
+| Dust Devil | 52.54 | 49.12        | 0.9997 | 0.9987       | 0.000868 | 0.001382   | 0.000006 | 0.000012         | 0.0068 | 0.0161        | 24,576 | 24,576              |
+| Explosion  | 53.12 | 51.47        | 0.9998 | 0.9997       | 0.001072 | 0.001335   | 0.000005 | 0.000007         | 0.0030 | 0.0067        | 24,576 | 24,576              |
+| Fire       | 51.13 | 49.22        | 0.9996 | 0.9988       | 0.001218 | 0.001692   | 0.000008 | 0.000012         | 0.0145 | 0.0226        | 24,576 | 24,576              |
+| Smoke      | 50.08 | 47.20        | 0.9996 | 0.9982       | 0.001190 | 0.001999   | 0.000010 | 0.000019         | 0.0087 | 0.0187        | 16,384 | 16,384              |
+| WDAS Cloud | 47.15 | 46.92        | 0.9987 | 0.9988       | 0.002045 | 0.002044   | 0.000019 | 0.000020         | 0.0424 | 0.0416        | 24,576 | 24,576              |
+| Dust       | 42.30 | 40.73        | 0.9985 | 0.9985       | 0.003774 | 0.004396   | 0.000059 | 0.000084         | 0.0930 | 0.0781        | 42,496 | 42,496              |
+| Average    | 49.39 | 47.44        | 0.9993 | 0.9988       | 0.001695 | 0.002141   | 0.000018 | 0.000026         | 0.0281 | 0.0306        | 26,197 | 26,197              |
+
+Table 4. Memory footprint analysis for Gabor and Gaussian mixtures with an equal number of primitives, optimized for maximum quality vs. memory footprint of a voxel grid. The superscript of WDAS Cloud represents the downsampling factor used.
+
+| Asset      | 1        | Voxels | #Prim  | Gabor (MB) | Gauss (MB) | Voxel Grid (MB) |
+|------------|----------|--------|--------|------------|------------|-----------------|
+| WDAS Cloud |          |        |        |            |            |                 |
+|            | 1 4 2.04 | B      | 46,749 | 1.95       | 1.78       | 7764.75         |
+| Bunny      | 144.6    | M      | 32,768 | 1.38       | 1.25       | 578.24          |
+| Tornado    | 78.7     | M      | 24,576 | 1.03       | 0.94       | 314.90          |
+| Dust       | 58.9     | M      | 42,496 | 1.78       | 1.62       | 225.00          |
+| Dust Devil | 18.7     | M      | 24,576 | 1.03       | 0.94       | 71.16           |
+| WDAS Cloud |          |        |        |            |            |                 |
+|            | 8 13.0   | M      | 24,576 | 1.03       | 0.94       | 49.77           |
+| Explosion  | 12.6     | M      | 24,576 | 1.03       | 0.94       | 47.97           |
+| Fire       | 9.0      | M      | 24,576 | 1.03       | 0.94       | 34.20           |
+| Smoke      | 2.8      | M      | 16,384 | 0.69       | 0.62       | 10.53           |
+
+
+
+Fig. 7. Some renders with our stochastic-analytical rendering methods (Tornado).
+
+outperform Gaussian Primitive Volumes in performance at roughly equal variance. This is still without any frequency or angular-based acceleration technique, rendering at the highest possible detail. On top of improved performance, we can observe higher quality detail, particularly in the higher frequency content (e.g., smoke plume on the first row); this is in line with the superior regression results we report in Table 3. At the same time, if LOD is required, our method will also outperform Gaussian volumes in terms of memory, as it can
+
+
+
+Fig. 8. We ablate the choice of curve shape �� in our Control Variate Power Law strategy, for tomographic reconstruction in the Tornado asset.
+
+be naturally filtered right away, while Gaussian Primitives would need additional storage for e.g. a volumetric mipmap (Figure 2\).
+
+Biased Acceleration strategies. The amount of bias with spectral and orientation-selective acceleration techniques depends largely on the scene and strategy selected; we do a short showcase of an example scene in Figure 10. As can be observed, substantial performance can be extracted for a small exactness or quality price, with full control over the spectral content of the error.
+
+# 6.3 Level of Detail
+
+A prime application of our method is providing seamless LOD. We showcase it in Figures 1, 11 and 2 and in the Supplementary materials, where we include videos of cameras zooming in and out of one of our assets, and a static visualization for comparison. Particularly, in Figure 2, we compare it against two baseline approaches for providing LoD in Gaussian-based volumes: analytical filtering of the Gaussians, and pruning-based bandlimiting. While the former provides perfect filtering, it does so at a substantial performance and memory cost. In the second approach, since Gaussian modelling high frequencies also model low frequencies (their power spectrum's mean is located at 0), pruning high-frequency Gaussians degrades quality. This can be seen more prominently in the Fourier power spectra of the three examples. In contrast, our work seamlessly supports LoD rendering; for any given desired frequency limit, we can select the minimal asset that matches the criteria by simply masking out part of the Gabor kernels.
+
+
+
+
+
+Fig. 9. Comparison of Gabor Fields (Ours) vs Gaussian Primitive Volumes [Condor et al. 2025], for the assets, from top to bottom: Smoke, Explosion and Dust Devil. For roughly equal variance and primitive count, Gabor Fields are not only faster, but higher quality, featuring higher frequency detail, as reported in Table 3. Times reported measured on an RTX 4090.
+
+
+
+Fig. 10. Showcase of different acceleration strategies enabled by our method with a WDAS Cloud dataset with 42k Gabor Kernels, and 512 spp. Control Variate Power Law Accumulating (see Appendix Table 5\) is used on primary paths, biasing slightly at high frequencies, given our choice of �� = 0.2. Zero NEE indicates that for secondary shadow rays (next-event estimation), we only trace against the Gaussian level. This is a powerful strategy, as most of the energy in the density field is contained in the Gaussian level, with Gabors only modelling residual densities. This yields a substantial performance gain in exchange for some amount of error, which may be acceptable in some situations. Other alternatives, such as tracing against Gaussians only in the primary path after a number of recursions, are also explored in Supplementary materials. Timings reported on an RTX 6000. Asset is part of the Walt Disney Animation Studios cloud dataset (CC-BY-SA 3.0)
+
+
+
+Fig. 11. Stress-test of our LOD strategy using multiple scattering. Each Bunny is composed of 33,280 Gabor kernels. We place 176 of them, which amounts to 5,857,280 primitives. Using our Laplacian decomposition, we can directly filter them on demand during render time, significantly accelerating rendering speed and eliminating aliasing. In the end, this frame featured an effective count of 759,164 primitives (x7.7 smaller). We visualize the chosen LOD levels on the right with colorized albedos.
+
+## 7 Other Applications
+
+Our representation can be useful in other applications where frequency and/or orientation selectivity is critical. Here we demonstrate applications to foveated rendering, motion blur and procedural asset generation.
+
+### 7.1 Foveated Rendering
+
+Similar to LOD control, our Gabor-based representation can be used for foveated rendering to reduce rendering costs when the observer's gaze location is provided [Guenter et al. 2012; Mohanto et al. 2022; Surace et al. 2023b]. A common approach is to reduce the rendering resolution in peripheral vision, which can be easily achieved by progressively discarding Gabor primitives as the distance from the gaze location (i.e., eccentricity) increases. This can be done on a per-ray basis at render time. We discuss our strategy with more detail in the Supplementary material. Figure 12 demonstrates an example of applying our strategy. Our method reduces both the primitive count via level masking and the integration cost by discarding individual primitives. The primary bottleneck is still BVH traversal. Our approach can be further combined with stochastic and directional rendering strategies (Section 4.5\) to reduce sample cost at the periphery. Furthermore, higher acceleration can be achieved with adaptive resolution. In our demonstration, we focus only on truncating the representation. Finally, given that real-time ray tracing suffers from limited sample budgets, combining tight control over spectral content with post-rendering filtering techniques, such as [Edelsten et al. 2019], can yield better results. For example, accounting for denoising capabilities could enable more aggressive removal of the Gabor primitives [Karpenko et al. 2025].
+
+# 7.2 Motion Blur
+
+Our representation provides an efficient way to filter primitives for motion-blur rendering. In particular, it can be used to discard primitives that contribute little to the motion-blur image at an early stage due to their frequency or orientation. One specific example is when a Gabor primitive moves half a cycle in the wave-plane
+
+
+
+Fig. 12. Results of proof-of-concept foveated renderering. The figure shows the full reference on the left and our foveated version on the right. The insets present different versions of our method with overall speedup with respect to the reference rendering. Note that under realistic foveated rendering conditions (i.e., following the CSF and proper eccentricity decay), level transitions in Level masking mode would be invisible.
+
+direction, and the pair of original and shifted primitives cancel each other. This observation can be leveraged to reduce the cost of synthesizing motion blur, either by tuning sampling weights for specific directions and frequencies (Section 4.4\) or by not considering primitives that contribute little to the final image. We implemented a basic motion blur using our method, which is further detailed in the Supplementary material. Figure 13 shows an example of applying motion blur to an asset. We achieve a speedup of 1.78x over rendering the full asset, while obtaining almost the same result. This result is despite our Gabor kernels having low peak frequencies, which reduces their orientation selectivity. This points out the practicality of
+
+
+
+
+
+Fig. 13. Results of our proof-of-concept motion blur implementation using the WDAS Cloud. We compute the expected attenuation for a given linear motion (direction and magnitude), given an orientation and frequency decomposition of an asset (in this case, 3 frequencies and 3 orientations). At load time, we define ray visibility masks given this attenuation and a manually selected threshold, which results in culling two orientations at two frequency levels, amounting to a 23% reduction in the number of particles. This renders a substantial performance uplift at minimal error, validating our attenuation model.
+
+
+
+Fig. 14. Behaviour of motion blur attenuation for different motion magnitudes, directions, and Gabor frequencies, and an arbitrary cutoff threshold.
+
+our approach. Adapting directional importance sampling techniques could yield further efficiency gains and quality-speed trade-offs, as many combinations of motion directions and magnitudes result in significant attenuation. We consider this as an interesting extension.
+
+## 7.3 Procedural Cloud Authoring Tool
+
+Inspired by the gradient noise density erosion common in industry [Fajardo and Pharr 2023; Wrenninge et al. 2011], we created our own authoring pipeline for cloud generation that leverages our volume representation. Through an interactive application, users can generate clouds that can be rendered directly with our approach without the need for any regression. To create a realistic cloud, we start by defining a cloud chunk similar to textured ellipsoids [Gardner 1985]. In the Supplementary material, we detail how to generate these cloud chunks. Even though our cloud chunk can model the microstructure of a cloud, a typical cloud consists of several levels. A cloud can form a smaller cloud on its surface when inner pressure builds. To model this behavior, inspired by Bouthors and Neyret [2004] and Dobashi et al. [2000], we define our cloud structure as a tree of cloud chunks. Figure 15 shows multiple procedurally generated clouds. Using the application the user can generate multiple clouds by controlling individual parameters and placing kernels in 3D space with their mouse to achieve any shape desired. A real-time tomography image of the generated cloud supports this process. Supplementary materials include a video of interaction with the application.
+
+### 8 Limitations and Future Work
+
+Discussion on Gabor Transforms and Wavelets. While the regression procedure delivers high-quality assets, it can be slow (0.1-2h depending on the asset and mixture complexity, on a single RTX 4090) and may require some small fine-tuning between assets of substantially different classes. We acknowledge that a forward method, akin to discrete wavelet decompositions (DWT) and Gabor Transforms, could be devised. However, Gabor kernels are not orthonormal, which generally rules them out as a valid wavelet basis; a complete frame without spectral overlap is impossible. While our work starts bridging the gap between wavelet and primitive-based rendering, we expect future work to finally enable seamless forward construction of kernel volumes without convolved regression schemes. An alternative approach for forward reconstruction could involve recent advances in Transformer-based feedforward pointbased reconstruction approaches [Wang et al. 2025].
+
+Radiance fields. While promising due to its similarity to cosinemodulated Gaussians, already showcased in 3DGRT [Moenne-Loccoz et al. 2024] and Gabor filter banks for 2D images [Wurster et al. 2024], and despite some concurrent work showing limited success in similar radiance-field settings [Chan et al. 2026; Zhou et al. 2025a], there are fundamental limitations for using pure Gabor kernels (i.e., without a constant density base), mainly due to the view-dependence. Without dense enough training camera sampling, optimization could become tricky, as Gabor kernels might orient themselves into directions where they do not contribute to any image, appearing as artifacts after training. Regularization on the orientations, supervision on in-between frames [Hermann et al. 2025] or better pruning strategies during training may improve its chances. Nevertheless, it remains a promising direction for future work, one which could enable a natural and continuous level of detail for primitive-based radiance field methods.
+
+Limitations of Optix Visibility Masking. While practical when using simple decompositions, using higher numbers of orientation bins and frequency levels would require changing the way we implement them, due to the limitation of 8 possible masks. Our alternative solution using the current Optix API, used in Section 7.1, is to define some through visibility masks, and others via direct masking in the rendering kernel (i.e., avoiding integration but keeping them in the visible set). In our experiments, the biggest bottleneck remains
+
+
+
+Fig. 15. Rendering of 100 randomly placed, procedurally generated clouds. In total, the scene consists of 18902 Gaussian kernels and 308032 Gabor kernels. Clouds that are further back are entirely made up of Gaussian kernels. Cirrus clouds in the background are part of the environment map and not procedurally generated.
+
+BVH traversal and ray intersection queries, which makes this latter strategy only marginally better in terms of performance.
+
+Comparison to voxel grids. We include a comparison to a highly optimized voxel grid implementation in Mitsuba 3 in the Supplementary material. It includes hierarchical Super-Voxel (SV) structures [Szirmay-Kalos et al. 2011], tricubic texture sampling, a residual ratio tracking estimator [Novák et al. 2014] with local majorant estimates from the SV, and a weighted delta tracking distance sampler. Under these settings, our method, while achieving similar quality and unbiased rendering at a ∼ 4300�� compression rate, is substantially slower, despite also achieving smaller variance per sample, due to our analytic integration. This is a known trade-off between compression rate, quality and render time in primitivebased methods [Condor et al. 2025]. Future work could explore different runtime optimization strategies, from hierarchical traversal [Williams et al. 2024], complementary compression techniques (codebooks, half precision, fixed-frequency primitives), usage of anyhit shaders to collect overlapping primitives, decomposition tracking for distance sampling [Kutz et al. 2017], and plenty of others.
+
+Performance and Bias. While we manage to generally beat Gaussians across a wide range of metrics and datasets, in some scenarios (like extreme view-dependent frequency in the "volumetrically unrealistic" edges in Bunny), the amount of residual kernels required to uplift a low-passed Gaussian version into a high-quality, high-frequency feature hampers performance substantially. Also, for multiple-scattering settings, most of our acceleration strategies rely on inducing certain amounts of bias to the render, which may not be adequate for all applications.
+
+Negative Density Fields. In practice, even when considering all overlapping primitives (both Gaussians and Gabors), some negative densities may occur on the volume's boundaries. VPPT can handle locally negative segments, due to the regular-tracking style integration. But when negative areas occur within a critical segment (i.e., the sampled one), the solver's performance may decrease, due to breaking the assumption of a monotonically increasing function. In reality, the contribution of the solver is very small, and negative areas in the final mixture are very limited, which makes it a relatively small source of error.
+
+Halo Artifacts. In some scenarios, when the lowest frequency level modelled by base Gaussians (i.e., zero-frequency Gabor kernels) is very aggressive (as in, filtered with an extreme sigma), density halolike artifacts can appear in the final asset. We visualize them in Figure 16. Due to the extreme smoothness of the base layer, which drastically increases its spatial span, higher frequency residuals struggle to recover sharp edges, with a shallow density halo covering the asset. This is hardly visible in rendered assets, but becomes evident upon closer inspection. It essentially imposes a practical limit on the amount of filtering our method can efficiently model, as removing the halo would require larger numbers of residual primitives, straining the performance and compactness of the models.
+
+### 9 Conclusions
+
+We have presented Gabor Fields, a new volumetric kernel mixture. It naturally offers continuous frequency control by being tightly parameterized in the frequency domain, thus being perfect for LOD applications. We have provided analytical estimators for these new kernels and a specialized hierarchical regression technique. Furthermore, we have proposed a number of techniques that specifically leverage these primitives' properties to accelerate physically-based rendering, in particular exploiting angularity for the first time to significantly reduce scene traversal cost. We believe our work further connects procedural generation, wavelet volumetric approximations, and primitive-based volumes, providing a path towards ever more compact and efficient physically-based rendering.
+
+
+
+Fig. 16. Multiple-scattering render of our Dust asset (A); Tomographic visualization of its density field for the base, zero-frequency layer (B), the full Gabor field asset (C) and the original voxel grid reference (D); and absolute difference between the reference and the full Gabor field (E). When using aggressive low-pass filters for the lowest level, halo-like density artifacts can start to appear. This is due to it being a low-frequency error, compared to the high-frequency reference, which is attempted to be minimized through high-frequency residuals, requiring large quantities of Gabor kernels to remove; still, these are hardly noticeable in regular rendering settings (A). Acknowledgements. This project has received funding from the Swiss National Science Foundation (SNSF, Grant 200502) and an academic gift from Meta. We acknowledge access to Alps at the Swiss National Supercomputing Centre, Switzerland under USI's share (project ID u6). References Steve Bako, Pradeep Sen, and Anton Kaplanyan. 2023. Deep Appearance Prefiltering. ACM Trans. Graph. 42, 2, Article 23 (Jan. 2023), 23 pages. [doi:10.1145/3570327](https://doi.org/10.1145/3570327) Antoine Bouthors and Fabrice Neyret. 2004. Modeling clouds shape. In Eurographics (short papers). Eurographics Association. Forrest B Brown and William R Martin. 2003. Direct sampling of Monte Carlo flight paths in media with continuously varying cross-sections. In Proc. ANS Mathematics & Computation Topical Meeting, Vol. 2. Jiewen Chan, Zhenjun Zhao, and Yu-Lun Liu. 2026. AdaGaR: Adaptive Gabor Representation for Dynamic Scene Reconstruction. arXiv[:2601.00796](https://arxiv.org/abs/2601.00796) [cs.CV] [https:](https://arxiv.org/abs/2601.00796) [//arxiv.org/abs/2601.00796](https://arxiv.org/abs/2601.00796) Subrahmanyan Chandrasekhar. 1960. Radiative Transfer. Courier Corporation. Brian Chao, Hung-Yu Tseng, Lorenzo Porzi, Chen Gao, Tuotuo Li, Qinbo Li, Ayush Saraf, Jia-Bin Huang, Johannes Kopf, Gordon Wetzstein, and Changil Kim. 2025. Textured Gaussians for Enhanced 3D Scene Appearance Modeling. arXiv[:2411.18625](https://arxiv.org/abs/2411.18625) [cs.CV]  Jorge Condor, Nicolas Moenne-Loccoz, Merlin Nimier-David, Piotr Didyk, Zan Gojcic, and Qi Wu. 2026. Neural Harmonic Textures for High-Quality Primitive Based Neural Reconstruction. arXiv[:2604.01204](https://arxiv.org/abs/2604.01204) [cs.CV] Jorge Condor, Sebastien Speierer, Lukas Bode, Aljaz Bozic, Simon Green, Piotr Didyk, and Adrian Jarabo. 2025. Don't Splat your Gaussians: Volumetric Ray-Traced Primitives for Modeling and Rendering Scattering and Emissive Media. ACM Trans. Graph. (month = jan 2025). [doi:10.1145/3711853](https://doi.org/10.1145/3711853) Miguel Crespo, Adrian Jarabo, and Adolfo Muñoz. 2021. Primary-space adaptive control variates using piecewise-polynomial approximations. ACM Trans. Graph. 40, 3 (2021). Franklin C Crow. 1984. Summed-area tables for texture mapping. In Proceedings of the 11th annual conference on Computer graphics and interactive techniques. 207–212. Yoshinori Dobashi, Kazufumi Kaneda, Hideo Yamashita, Tsuyoshi Okita, and Tomoyuki Nishita. 2000. A simple, efficient method for realistic animation of clouds. In Proceedings of the 27th annual conference on Computer graphics and interactive techniques. 19–28. DreamWorksAnimation. 2012–2023. OpendVDB. [https://github.com/](https://github.com/AcademySoftwareFoundation/openvdb) [AcademySoftwareFoundation/openvdb.](https://github.com/AcademySoftwareFoundation/openvdb) Andrew Edelsten, Paula Jukarainen, and Anjul Patney. 2019. Truly next-gen: Adding deep learning to games and graphics. In In NVIDIA Sponsored Sessions (Game Developers Conference), Vol. 2. 7. Marcos Fajardo and Matt Pharr. 2023. Fast Procedural Noise By Monte Carlo Sampling. [doi:10.2312/sr.20231141](https://doi.org/10.2312/sr.20231141) Marcos Fajardo, Bartlomiej Wronski, Marco Salvi, and Matt Pharr. 2023. Stochastic Texture Filtering. arXiv preprint arXiv:2305.05810 (2023). Julian Fong, Magnus Wrenninge, Christopher Kulla, and Ralf Habel. 2017. Production volume rendering. In ACM SIGGRAPH 2017 Courses. Bruno Galerne, Ares Lagae, Sylvain Lefebvre, and George Drettakis. 2012. Gabor Noise by Example. ACM Transactions on Graphics - TOG 31 (07 2012). [doi:10.1145/2185520.](https://doi.org/10.1145/2185520.2185569) [2185569](https://doi.org/10.1145/2185520.2185569) Zhongpai Gao, Benjamin Planche, Meng Zheng, Anwesa Choudhuri, Terrence Chen, and Ziyan Wu. 2025. 6DGS: Enhanced Direction-Aware Gaussian Splatting for Volumetric Rendering. In The Thirteenth International Conference on Learning Representations. Geoffrey Y Gardner. 1985. Visual simulation of clouds. In Proceedings of the 12th annual conference on Computer graphics and interactive techniques. 297–304. Walter Gautschi. 1970. Efficient computation of the complex error function. SIAM J. Numer. Anal. 7, 1 (1970), 187–198. Iliyan Georgiev, Zackary Misso, Toshiya Hachisuka, Derek Nowrouzezahrai, Jaroslav Křivánek, and Wojciech Jarosz. 2019. Integral formulations of volumetric transmittance. ACM Trans. Graph. 38, 6 (2019). Antoine Guédon and Vincent Lepetit. 2024. Sugar: Surface-aligned gaussian splatting for efficient 3d mesh reconstruction and high-quality mesh rendering. In Proceedings of the IEEE/CVF Conference on Computer Vision and Pattern Recognition. 5354–5363. Brian Guenter, Mark Finch, Steven Drucker, Desney Tan, and John Snyder. 2012. Foveated 3D graphics. ACM Transactions on Graphics 31, 6 (2012). [doi:10.1145/](https://doi.org/10.1145/2366145.2366183) [2366145.2366183](https://doi.org/10.1145/2366145.2366183) Stefan Guthe, Michael Wand, Julius Gonser, and Wolfgang Straßer. 2002. Interactive rendering of large volume data sets. In IEEE Visualization, 2002. VIS 2002. IEEE, 53–60. Nicolai Hermann, Jorge Condor, and Piotr Didyk. 2025. Puzzle Similarity: A Perceptuallyguided Cross-Reference Metric for Artifact Detection in 3D Scene Reconstructions. In Proceedings of the IEEE/CVF International Conference on Computer Vision (ICCV). 28881–28891. Wenzel Jakob, Sébastien Speierer, Nicolas Roussel, Merlin Nimier-David, Delio Vicini, Tizian Zeltner, Baptiste Nicolet, Miguel Crespo, Vincent Leroy, and Ziyi Zhang. 2022. Mitsuba 3 renderer. https://mitsuba-renderer.org. Simon Kallweit, Thomas Müller, Brian Mcwilliams, Markus Gross, and Jan Novák. 2017. Deep Scattering: Rendering Atmospheric Clouds with Radiance-Predicting Neural Networks. ACM Trans. Graph. 36, 6 (2017). Brian Karis, Rune Stubbe, and Graham Wihlidal. 2021. A Deep Dive into Nanite Virtualized Geometry. In ACM SIGGRAPH 2021 Courses: Advances in Real-Time Rendering in Games (SIGGRAPH '21). ACM, New York, NY, USA. [https://advances.realtimerendering.com/s2021/Karis\\_Nanite\\_SIGGRAPH\\_](https://advances.realtimerendering.com/s2021/Karis_Nanite_SIGGRAPH_Advances_2021_final.pdf) [Advances\\_2021\\_final.pdf](https://advances.realtimerendering.com/s2021/Karis_Nanite_SIGGRAPH_Advances_2021_final.pdf) Course notes. Volodymyr Karpenko, Taimoor Tariq, Jorge Condor, and Piotr Didyk. 2025. Human Vision Constrained Super-Resolution. In Proceedings of the IEEE/CVF International Conference on Computer Vision. 4742–4751. Nikhil Keetha, Jay Karhade, Krishna Murthy Jatavallabhula, Gengshan Yang, Sebastian Scherer, Deva Ramanan, and Jonathon Luiten. 2024. Splatam: Splat track & map 3d gaussians for dense rgb-d slam. In Proceedings of the IEEE/CVF Conference on Computer Vision and Pattern Recognition. 21357–21366. Bernhard Kerbl, Georgios Kopanas, Thomas Leimkühler, and George Drettakis. 2023. 3D Gaussian Splatting for Real-Time Radiance Field Rendering. ACM Trans. Graph. 42, 4 (2023). Bernhard Kerbl, Andreas Meuleman, Georgios Kopanas, Michael Wimmer, Alexandre Lanvin, and George Drettakis. 2024. A hierarchical 3d gaussian representation for real-time rendering of very large datasets. ACM Transactions On Graphics (TOG) 43, 4 (2024), 1–15. Markus Kettunen, Eugene D'Eon, Jacopo Pantaleoni, and Jan Novák. 2021. An unbiased ray-marching transmittance estimator. ACM Trans. Graph. 40, 4 (2021). Shakiba Kheradmand, Daniel Rebain, Gopal Sharma, Weiwei Sun, Yang-Che Tseng, Hossam Isack, Abhishek Kar, Andrea Tagliasacchi, and Kwang Moo Yi. 2024. 3D Gaussian Splatting as Markov Chain Monte Carlo. In Advances in Neural Information Processing Systems (NeurIPS). Spotlight Presentation. Doyub Kim, Minjae Lee, and Ken Museth. 2024. NeuralVDB: High-resolution Sparse Volume Representation using Hierarchical Neural Networks. ACM Trans. Graph. 43, 2 (2024). Diederik P. Kingma and Jimmy Ba. 2014. Adam: A Method for Stochastic Optimization. CoRR abs/1412.6980 (2014). Aaron Knoll, Gregory P. Johnson, and Johannes Meng. 2021. Path Tracing RBF Particle Volumes. In Ray Tracing Gems II, Adam Marrs, Peter Shirley, and Ingo Wald (Eds.). Apress. Soheil Kolouri, Kimia Nadjahi, Umut Simsekli, Roland Badeau, and Gustavo Rohde. 2019. Generalized sliced wasserstein distances. Advances in neural information processing systems 32 (2019). Peter Kutz, Ralf Habel, Yining Karl Li, and Jan Novák. 2017. Spectral and decomposition tracking for rendering heterogeneous volumes. ACM Trans. Graph. 36, 4 (2017), 1–16. Ares Lagae and George Drettakis. 2011. Filtering solid Gabor noise. ACM Trans. Graph. 30, 4, Article 51 (July 2011), 6 pages. [doi:10.1145/2010324.1964946](https://doi.org/10.1145/2010324.1964946) Ares Lagae, Sylvain Lefebvre, George Drettakis, and Philip Dutré. 2009. Procedural noise using sparse Gabor convolution. ACM Transactions on Graphics (TOG) 28, 3
+
+
+
+
+
+- (2009), 1–10. Christoph Lassner and Michael Zollhofer. 2021. Pulsar: Efficient sphere-based neural rendering. In Proceedings of the IEEE/CVF conference on computer vision and pattern recognition. 1440–1449. David Laur and Pat Hanrahan. 1991. Hierarchical splatting: A progressive refinement algorithm for volume rendering. ACM SIGGRAPH computer graphics 25, 4 (1991), 285–288. Stephen Lombardi, Tomas Simon, Gabriel Schwartz, Michael Zollhoefer, Yaser Sheikh, and Jason Saragih. 2021. Mixture of Volumetric Primitives for Efficient Neural Rendering. ACM Trans. Graph. 40, 4 (2021). Guillaume Loubet and Fabrice Neyret. 2017. Hybrid mesh-volume LoDs for all-scale pre-filtering of complex 3D assets. Computer Graphics Forum 36, 2 (2017), 431–
+- 442. arXiv[:https://onlinelibrary.wiley.com/doi/pdf/10.1111/cgf.13138](https://arxiv.org/abs/https://onlinelibrary.wiley.com/doi/pdf/10.1111/cgf.13138) [doi:10.1111/cgf.](https://doi.org/10.1111/cgf.13138) [13138](https://doi.org/10.1111/cgf.13138) David Luebke, Martin Reddy, Jonathan D Cohen, Amitabh Varshney, Benjamin Watson, and Robert Huebner. 2002. Level of detail for 3D graphics. Elsevier. S Marcelja. 1980. Mathematical description of the responses of simple cortical cells. ˆ Journal of the Optical society of America 70, 11 (1980), 1297–1300. Nelson L Max. 1979. ATOMLLL: ATOMS with shading and highlights. ACM SIGGRAPH Computer Graphics 13, 2 (1979). Johannes Meng, Marios Papas, Ralf Habel, Carsten Dachsbacher, Steve Marschner, Markus Gross, and Wojciech Jarosz. 2015. Multi-Scale Modeling and Rendering of Granular Materials. ACM Trans. Graph. 34, 4 (2015). Ben Mildenhall, Pratul P. Srinivasan, Matthew Tancik, Jonathan T. Barron, Ravi Ramamoorthi, and Ren Ng. 2020. NeRF: Representing Scenes as Neural Radiance Fields for View Synthesis. In Proceedings of ECCV. Nicolas Moenne-Loccoz, Ashkan Mirzaei, Or Perel, Riccardo de Lutio, Janick Martinez Esturo, Gavriel State, Sanja Fidler, Nicholas Sharp, and Zan Gojcic. 2024. 3D Gaussian Ray Tracing: Fast Tracing of Particle Scenes. ACM Trans. Graph. 43, 6, Article 232 (Nov. 2024), 19 pages. [doi:10.1145/3687934](https://doi.org/10.1145/3687934) Bipul Mohanto, ABM Tariqul Islam, Enrico Gobbetti, and Oliver Staadt. 2022. An Integrative View of Foveated Rendering. Computers & Graphics 102 (2022), 474–501. [doi:doi.org/10.1016/j.cag.2021.10.010](https://doi.org/doi.org/10.1016/j.cag.2021.10.010) Jonathan T. Moon, Bruce Walter, and Stephen R. Marschner. 2007. Rendering Discrete Random Media Using Precomputed Scattering Solutions. In Proceedings of EGSR. Thomas Müller, Alex Evans, Christoph Schied, and Alexander Keller. 2022. Instant Neural Graphics Primitives with a Multiresolution Hash Encoding. ACM Trans. Graph. 41, 4 (2022). Ken Museth. 2013. VDB: High-resolution sparse volumes with dynamic topology. ACM Trans. Graph. 32, 3 (2013). Ken Museth. 2021a. NanoVDB: A GPU-friendly and portable VDB data structure for real-time rendering and simulation. In ACM SIGGRAPH 2021 Talks. Ken Museth. 2021b. NanoVDB: A GPU-friendly and portable VDB data structure for real-time rendering and simulation. In ACM SIGGRAPH 2021 Talks. 1–2. Fabrice Neyret. 1998. Modeling, Animating, and Rendering Complex Scenes Using Volumetric Textures. IEEE Trans. Vis. Comput. Graph. 4, 1 (1998). Jan Novák, Iliyan Georgiev, Johannes Hanika, and Wojciech Jarosz. 2018. Monte Carlo methods for volumetric light transport simulation. Computer Graphics Forum 37, 2 (2018). Jan Novák, Andrew Selle, and Wojciech Jarosz. 2014. Residual ratio tracking for estimating attenuation in participating media. ACM Trans. Graph. 33, 6 (2014). Lena Petrovic, Mark Henne, and John Anderson. 2005. Volumetric methods for simulation and rendering of hair. Pixar Animation Studios 2, 4 (2005). Gert PM Poppe and Christianus MJ Wijers. 1990. More efficient computation of the complex error function. ACM Transactions on Mathematical Software (TOMS) 16, 1 (1990), 38–46. Christian Reiser, Songyou Peng, Yiyi Liao, and Andreas Geiger. 2021. KiloNeRF: Speeding up Neural Radiance Fields with Thousands of Tiny MLPs. In Proceedings of
+- ICCV. Kai Schröder, Reinhard Klein, and Arno Zinke. 2011. A Volumetric Approach to Predictive Rendering of Fabrics. Computer Graphics Forum 30, 4 (2011). Eero P Simoncelli and William T Freeman. 1995. The steerable pyramid: A flexible architecture for multi-scale derivative computation. In Proceedings of International Conference on Image Processing, Vol. 3. IEEE, 444–447. Eero P Simoncelli, William T Freeman, Edward H Adelson, and David J Heeger. 1992. Shiftable multiscale transforms. IEEE transactions on Information Theory 38, 2 (1992), 587–607. Hans Strasburger, Ingo Rentschler, and Martin Jüttner. 2011. Peripheral vision and pattern recognition: A review. Journal of Vision 11, 5 (12 2011). [doi:10.1167/11.5.13](https://doi.org/10.1167/11.5.13) Luca Surace, Cara Tursun, Ufuk Celikcan, and Piotr Didyk. 2023a. Gaze-Contingent Perceptual Level of Detail Prediction. In Eurographics Symposium on Rendering, Tobias Ritschel and Andrea Weidlich (Eds.). The Eurographics Association. [doi:10.](https://doi.org/10.2312/sr.20231130) [2312/sr.20231130](https://doi.org/10.2312/sr.20231130) Luca Surace, Marek Wernikowski, Cara Tursun, Karol Myszkowski, Radosław Mantiuk, and Piotr Didyk. 2023b. Learning GAN-Based Foveated Reconstruction to Recover Perceptually Important Image Features. ACM Transactions on Applied Perception 20, 2 (2023). [doi:10.1145/3583072](https://doi.org/10.1145/3583072) László Szirmay-Kalos, Iliyan Georgiev, Milán Magdics, Balázs Molnár, and Dávid Légrády. 2017. Unbiased light transport estimators for inhomogeneous participating media. Computer Graphics Forum 36, 2 (2017). László Szirmay-Kalos, Balázs Tóth, and Milán Magdics. 2011. Free path sampling in high resolution inhomogeneous participating media. Computer Graphics Forum 30, 1 (2011). Heang K Tuy and Lee Tan Tuy. 1984. Direct 2-D display of 3-D objects. IEEE Computer Graphics and Applications 4, 10 (1984). Delio Vicini, Wenzel Jakob, and Anton Kaplanyan. 2021. A non-exponential transmittance model for volumetric scene representations. ACM Trans. Graph. 40, 4 (2021). Jianyuan Wang, Minghao Chen, Nikita Karaev, Andrea Vedaldi, Christian Rupprecht, and David Novotny. 2025. Vggt: Visual geometry grounded transformer. In Proceedings of the Computer Vision and Pattern Recognition Conference. 5294–5306. Zhou Wang, A.C. Bovik, H.R. Sheikh, and E.P. Simoncelli. 2004. Image quality assessment: from error visibility to structural similarity. IEEE Transactions on Image Processing 13, 4 (2004). Philippe Weier, Tobias Zirr, Anton Kaplanyan, Ling-Qi Yan, and Philipp Slusallek. 2023. Neural Prefiltering for Correlation-Aware Levels of Detail. ACM Trans. Graph. 42, 4, Article 78 (July 2023), 16 pages. [doi:10.1145/3592443](https://doi.org/10.1145/3592443) Manfred Weiler, Rüdiger Westermann, Chuck Hansen, Kurt Zimmermann, and Thomas Ertl. 2000. Level-of-detail volume rendering via 3D textures. In Proceedings of the 2000 IEEE symposium on Volume visualization. 7–13. Francis Williams, Jiahui Huang, Jonathan Swartz, Gergely Klar, Vijay Thakkar, Matthew Cong, Xuanchi Ren, Ruilong Li, Clement Fuji-Tsang, Sanja Fidler, Eftychios Sifakis, and Ken Museth. 2024. fVDB: A Deep-Learning Framework for Sparse, Large Scale, and High Performance Spatial Intelligence. ACM Transactions on Graphics 43, 4 (2024). [doi:10.1145/3658226](https://doi.org/10.1145/3658226) Felix Windisch, Thomas Köhler, Lukas Radl, Michael Steiner, Dieter Schmalstieg, and Markus Steinberger. 2025. A LoD of Gaussians: Unified Training and Rendering for Ultra-Large Scale Reconstruction with External Memory. arXiv[:2507.01110](https://arxiv.org/abs/2507.01110) [cs.GR]  E Woodcock. 1965. Techniques used in the GEM code for Monte Carlo neutronics calculations in reactors and other systems of complex geometry. In Proceedings of the Conference on Applications of Computing Methods to Reactor Problems, Vol. 557. Magnus Wrenninge, Nafees Bin Zafar, O Harding, G Graham, J Tessendorf, V Grant, A Clinton, and A Bouthors. 2011. Production volume rendering. ACM SIGGRAPH Course notes. Guanjun Wu, Taoran Yi, Jiemin Fang, Lingxi Xie, Xiaopeng Zhang, Wei Wei, Wenyu Liu, Qi Tian, and Xinggang Wang. 2024. 4d gaussian splatting for real-time dynamic scene rendering. In Proceedings of the IEEE/CVF conference on computer vision and pattern recognition. 20310–20320. Wei Wu and Greg M McFarquhar. 2018. Statistical theory on the functional form of cloud particle size distributions. Journal of the Atmospheric Sciences 75, 8 (2018), 2801–2814. Skylar Wurster, Ran Zhang, and Changxi Zheng. 2024. Gabor Splatting for High-Quality Gigapixel Image Representations. In ACM SIGGRAPH 2024 Posters (Denver, CO, USA) (SIGGRAPH '24). Association for Computing Machinery, New York, NY, USA, Article 66, 2 pages. [doi:10.1145/3641234.3671081](https://doi.org/10.1145/3641234.3671081) Xijie Yang, Linning Xu, Lihan Jiang, Dahua Lin, and Bo Dai. 2025. Virtualized 3D Gaussians: Flexible Cluster-based Level-of-Detail System for Real-Time Rendering of Composed Scenes. In Proceedings of the Special Interest Group on Computer Graphics and Interactive Techniques Conference Conference Papers (SIGGRAPH Conference Papers '25). ACM, 1–11. [doi:10.1145/3721238.3730602](https://doi.org/10.1145/3721238.3730602) Mofreh R. Zaghloul and Ahmed N. Ali. 2012. Algorithm 916: Computing the Faddeyeva and Voigt Functions. ACM Trans. Math. Softw. 38, 2, Article 15 (Jan. 2012), 22 pages. [doi:10.1145/2049673.2049679](https://doi.org/10.1145/2049673.2049679) Shuang Zhao, Wenzel Jakob, Steve Marschner, and Kavita Bala. 2011. Building Volumetric Appearance Models of Fabric Using Micro CT Imaging. ACM Trans. Graph. 30, 4 (2011). Junyu Zhou, Yuyang Huang, Wenrui Dai, Junni Zou, Ziyang Zheng, Nuowen Kan, Chenglin Li, and Hongkai Xiong. 2025a. 3DGabSplat: 3D Gabor Splatting for Frequency-adaptive Radiance Field Rendering. arXiv[:2508.05343](https://arxiv.org/abs/2508.05343) [cs.CV] [https:](https://arxiv.org/abs/2508.05343) [//arxiv.org/abs/2508.05343](https://arxiv.org/abs/2508.05343) Xilong Zhou, Bao-Huy Nguyen, Loïc Magne, Vladislav Golyanik, Thomas Leimkühler, and Christian Theobalt. 2025c. Splat the Net: Radiance Fields with Splattable Neural Primitives. arXiv preprint arXiv:2510.08491 (2025). Yang Zhou, Tao Huang, Ravi Ramamoorthi, Pradeep Sen, and Ling-Qi Yan. 2025b. Appearance-Preserving Scene Aggregation for Level-of-Detail Rendering. ACM Trans. Graph. 44, 1, Article 8 (Jan. 2025), 23 pages. Yang Zhou, Songyin Wu, and Ling-Qi Yan. 2024. Unified Gaussian Primitives for Scene Representation and Rendering. arXiv[:2406.09733](https://arxiv.org/abs/2406.09733) [cs.GR] [https://arxiv.org/abs/2406.](https://arxiv.org/abs/2406.09733) [09733](https://arxiv.org/abs/2406.09733)
+
+
+
+## A Deriving Analytical Line Integrals of the 3D Anisotropic Gabor Kernel
+
+Here we present the step-by-step derivation of the closed-form definite line integrals for the 3D anisotropic Gabor kernel along an arbitrary ray. Following the Gabor kernel defined in Eq. (6),
+
+Kernel definition. Recall that
+
+$$g(x; \mu, \Sigma, \vec{\omega}) = \frac{1}{\sqrt{8\pi^3|\Sigma|}} e^{-\frac{1}{2}(x-\mu)^T \Sigma^{-1}(x-\mu)} \cos\left(\vec{\omega}^T(x-\mu)\right) \quad (34)$$
+
+Defining the effective modulation vector
+
+$$\vec{\omega} \equiv RS^{-1}(\omega, \omega, \omega), \quad (35)$$
+
+Line parameterization. Let the line be parameterized as
+
+$$x(t) = p_0 + \vec{v}t, \quad t \in [t_0, t_1], \quad (36)$$
+
+and define the offset
+
+$$d = p_0 - \mu. \quad (37)$$
+
+The line integral is
+
+$$I = \int_{t_0}^{t_1} g(x(t)) dt. \quad (38)$$
+
+A.1 Reduction to a 1D Integral. Substituting the line parameterization,
+
+$$I = \frac{1}{\sqrt{8\pi^3|\Sigma|}} \int_{t_0}^{t_1} \exp\left(-\frac{1}{2}(d+tv)^T \Sigma^{-1}(d+tv)\right) \cos\left(\vec{\omega}^T(d+tv)\right) dt. \quad (39)$$
+
+Introduce the scalar quantities, resulting from partial whitening of the space (only translation and rotation to local coordinates for better clarity)
+
+$$a = v^T \Sigma^{-1} v, \quad (40)$$
+
+$$\beta = v^T \Sigma^{-1} d, \quad (41)$$
+
+$$\gamma = d^T \Sigma^{-1} d, \quad (42)$$
+
+$$B = \vec{\omega}^T v, \quad (43)$$
+
+$$\delta = \vec{\omega}^T d. \quad (44)$$
+
+Then
+
+$$(d+tv)^T \Sigma^{-1}(d+tv) = at^2 + 2\beta t + \gamma, \quad (45)$$
+
+$$\vec{\omega}^T(d+tv) = Bt + \delta. \quad (46)$$
+
+Thus,
+
+$$I = \frac{1}{\sqrt{8\pi^3|\Sigma|}} \int_{t_0}^{t_1} \exp\left(-\frac{1}{2}(at^2 + 2\beta t + \gamma)\right) \cos(Bt + \delta) dt. \quad (47)$$
+
+A.2 Complex Exponential Form. Using Euler's formula, we can transform the cosine as  $\cos \theta = \Re(e^{i\theta})$ ,
+
+$$I = \frac{1}{\sqrt{8\pi^3|\Sigma|}} \Re\left\{e^{i\delta} e^{-\frac{1}{2}\gamma} \int_{t_0}^{t_1} \exp\left(-\frac{1}{2}at^2 - \beta t + iBt\right) dt\right\}. \quad (48)$$
+
+Completing the square,
+
+$$-\frac{1}{2}at^2 - \beta t + iBt = -\frac{1}{2}a\left(t - \frac{-\beta + iB}{a}\right)^2 + \frac{(-\beta + iB)^2}{2a}. \quad (49)$$
+
+A.3 Finite-Domain Closed Form. Define
+
+$$\alpha = \sqrt{\frac{a}{2}}, \quad \zeta = \frac{-\beta + iB}{\sqrt{2a}}. \quad (50)$$
+
+The finite-domain integral evaluates to
+
+$$I = \frac{1}{\sqrt{8\pi^3|\Sigma|}} \Re\left\{e^{i\delta} e^{-\frac{1}{2}\gamma} \sqrt{\frac{\pi}{2a}} \exp\left(\frac{(-\beta + iB)^2}{2a}\right) \times [\operatorname{erf}(\alpha t_1 - \zeta) - \operatorname{erf}(\alpha t_0 - \zeta)]\right\}. \quad (51)$$
+
+This expression is exact and valid for any finite ray segment.
+
+A.4 Infinite-Domain Limit. Taking the limits  $t_0 \rightarrow -\infty$ ,  $t_1 \rightarrow +\infty$  and using  $\operatorname{erf}(\pm\infty) = \pm 1$ , we obtain
+
+$$I_\infty = \frac{1}{\sqrt{8\pi^3|\Sigma|}} \sqrt{\frac{2\pi}{a}} \exp\left(-\frac{1}{2}\left(\gamma - \frac{\beta^2}{a}\right)\right) \exp\left(-\frac{B^2}{2a}\right) \cos\left(\delta - \frac{\beta B}{a}\right). \quad (52)$$
+
+In a fully whitened space (including scale), the expression simplifies by turning  $a = 1$ , and multiplying by the corresponding length scaler to compensate for the space compression, rendering  $\mathcal{K}$  as defined in Section 4.
+
+## B Frequency and Orientation Sampling Strategies
+
+We include a number of stochastic-analytic estimators in Tables 5 and 6.
+
+
+
+## C Analytic Fourier Transform for Gabor Kernels
+
+Recalling again that the Gabor kernel is defined as a Gaussian modulated by a cosine function:
+
+$$g(x; \mu, \Sigma, \vec{\omega}) = \frac{1}{\sqrt{8\pi^3|\Sigma|}} e^{-\frac{1}{2}(x-\mu)^T \Sigma^{-1}(x-\mu)} \cos\left(\vec{\omega}^T(x-\mu)\right) \quad (53)$$
+
+In our experiments, we redefine  $\vec{\omega}$  with a scalar  $\omega$ , but for the derivation, without loss of generalization, we use  $\vec{\omega}$  as an arbitrary orientation of the modulation. We derive the analytic continuous Fourier Transform of the Gabor kernel using angular frequencies  $k = 2\pi\xi$ . We define  $y = x - \mu$  and use the shift theorem to shift to zero mean.
+
+$$\mathcal{F}\{g(x)\}(k) = e^{-ik^T \mu} \mathcal{F}\{f(y)\}(k) \quad (54)$$
+
+where
+
+$$f(y) = \frac{1}{\sqrt{8\pi^3|\Sigma|}} e^{-\frac{1}{2}y^T \Sigma^{-1}y} \cos\left(\vec{\omega}^T y\right) \quad (55)$$
+
+Using Euler's formula
+
+$$\cos(b^T y) = \frac{1}{2} \left[ e^{i\vec{\omega}^T y} + e^{-i\vec{\omega}^T y} \right] \quad (56)$$
+
+and applying the frequency-shifting property
+
+$$\mathcal{F}\{h(y)e^{i\vec{\omega}^T y}\}(k) = \mathcal{F}\{h(y)\}(k - \vec{\omega}) \quad (57)$$
+
+twice, we obtain by linearity
+
+$$\mathcal{F}\{f(y)\}(k) = \frac{1}{2} [\mathcal{F}\{h(y)\}(k - \vec{\omega}) + \mathcal{F}\{h(y)\}(k + \vec{\omega})] \quad (58)$$
+
+where
+
+$$h(y) = \frac{1}{\sqrt{8\pi^3|\Sigma|}} e^{-\frac{1}{2}y^T \Sigma^{-1}y} \quad (59)$$
+
+
+
+Table 5. Stochastic sampling strategies across frequency levels, with  $\mathcal{P}$  being the number of levels in the pyramid,  $\beta$  the power law shape parameter and  $a, b$  the limits on the segment bucket the sample fell into (e.g. in a pyramid with  $\mathcal{P} = 4$ , the first level would have  $a = 0, b = \frac{1}{4}$ ). In control variate modes, Gaussians (i.e. zero-frequency Gabor kernels) have a weight of 1.
+
+| Strategy                    | Description                                                         | Sampling Function $f(x)$ | Sampling Weight (Reciprocal Probability)                       |
+|-----------------------------|---------------------------------------------------------------------|--------------------------|----------------------------------------------------------------|
+| Deterministic               | Renders all frequency levels (no sampling).                         | $-$                      | $1$                                                            |
+| Uniform Sampling            | Samples frequency levels uniformly.                                 | $\mathcal{P}^{-1}$       | $\mathcal{P}$                                                  |
+| Power-law Weighted          | Samples proportionally to a tuned power-law function.               | $x^{(1-\beta)^{-1}}$     | $\left(b^{(1-\beta)} - a^{(1-\beta)}\right)^{-1}$              |
+| Uniform + Control Variate   | Gaussians as a control variate; samples remaining levels uniformly. | $(\mathcal{P} - 1)^{-1}$ | $\mathcal{P} - 1$                                              |
+| Power-law + Control Variate | Gaussians as a control variate; others sampled via power-law.       | $x^{(1-\beta)^{-1}}$     | $\left(b^{(1-\beta)} - a^{(1-\beta)}\right)^{-1}$              |
+| Power-law + CV (Accum.)     | Samples level $k$ via power-law; renders all levels 0 to $k$ .      | $x^{(1-\beta)^{-1}}$     | $\left(1 - \left(\frac{j}{\beta}\right)^{1-\beta}\right)^{-1}$ |
+
+
+
+Table 6. Orientation-selective sampling strategies for steerable pyramid rendering, with  $K$  being the number of orientation bins,  $\gamma$  the decay rate parameter,  $a_i = |\vec{v} \cdot \mathbf{o}_i|$  the alignment between ray direction  $\vec{v}$  and orientation bin  $\mathbf{o}_i$ , and  $\delta$  the alignment threshold. The contribution weight is  $w_i = \exp(-f_0^2 a_i^2/2)$ , with  $W = \sum_{i=1}^K w_i$ . For deterministic threshold culling, we can simply tune "aggressiveness" in the form of the factor  $\delta$ ; this allows us to sacrifice quality for performance in a direct manner, as lower thresholds result in more aggressive dropping of orientation bins, eventually degenerating into simply integrating the highest contributing one. Volumes with high  $f_0$  will benefit from such a setting due to their high orientation selectivity, for example. Note: In Threshold + Control Variate mode, below-threshold bins have weight 1, and  $N_{\text{above}}$  is the per-ray count of bins with  $a_i > \delta$ .
+
+| Strategy            | Description                                                                           | Sampling Probability    | Sampling Weight    |
+|---------------------|---------------------------------------------------------------------------------------|-------------------------|--------------------|
+| Deterministic       | Renders all orientation bins (no culling).                                            | $-$                     | $1$                |
+| Threshold Culling   | Renders bins with $a_i \leq \delta$ (perpendicular enough).                           | $-$                     | $1$                |
+| Uniform Sampling    | Uniformly samples one orientation bin.                                                | $K^{-1}$                | $K$                |
+| Importance Sampling | Samples bins proportionally to contribution weight.                                   | $\frac{w_i}{W}$         | $\frac{W}{w_i}$    |
+| Threshold + Uniform | Renders all bins with $a_i \leq \delta$ ; uniformly samples one with $a_i > \delta$ . | $N_{\text{above}}^{-1}$ | $N_{\text{above}}$ |
+
+and
+
+$$\mathcal{F}\{h(y)\}(k) = e^{-\frac{1}{2}k^T \Sigma k} \quad (60)$$
+
+Putting everything together, we conclude with the final form
+
+$$\mathcal{F}\{g(x)\}(k) = \frac{1}{2} e^{-ik^T \mu} \left[ e^{-\frac{1}{2}(k-\vec{\omega})^T \Sigma (k-\vec{\omega})} + e^{-\frac{1}{2}(k+\vec{\omega})^T \Sigma (k+\vec{\omega})} \right] \quad (61)$$
+
+Lastly, we show how to convert between our continuous, angular frequency definition and Discrete Fourier Transforms (DFT) in cycles as computed by most FFT packages. Cycles and radians are related by  $k = 2\pi\xi$ , thus  $F_{\text{cont}}(k) = F_{\text{cont}}(2\pi\xi)$ . Then we discretize our continuous function by approximating it with a Riemann sum over a discrete grid  $V \in \mathbb{R}^{N_x \times N_y \times N_z}$  and a physical domain  $[a, b]^3$  with  $a, b \in \mathbb{R}$  and a uniform sample spacing of  $\Delta V = \Delta x \Delta y \Delta z = \frac{(b-a)^3}{N_x N_y N_z}$ :
+
+$$\int_{[a,b]^3} f(\mathbf{r}) e^{-2\pi i \xi^T \mathbf{r}} d\mathbf{r} \approx \Delta V \sum_{n=0}^{N_x-1} \sum_{m=0}^{N_y-1} \sum_{l=0}^{N_z-1} f(\mathbf{r}_{n,m,l}) e^{-2\pi i \xi^T \mathbf{r}_{n,m,l}} \quad (62)$$
+
+The 3D DFT is unnormalized and defined as:
+
+$$F_{\text{DFT}}[p, q, r] = \sum_{n=0}^{N_x-1} \sum_{m=0}^{N_y-1} \sum_{l=0}^{N_z-1} f(\mathbf{r}_{n,m,l}) e^{-2\pi i \left( \frac{pn}{N_x} + \frac{qm}{N_y} + \frac{rl}{N_z} \right)} \quad (63)$$
+
+thus
+
+$$\xi^T \mathbf{r}_{n,m,l} = \frac{pn}{N_x} + \frac{qm}{N_y} + \frac{rl}{N_z} \quad (64)$$
+
+yields
+
+$$F_{\text{cont}}(2\pi\xi) \approx \Delta V F_{\text{DFT}}[p, q, r] \quad (65)$$
+
+which we solve for  $F_{\text{DFT}}$ :
+
+$$F_{\text{DFT}}[p, q, r] = \frac{1}{\Delta V} F_{\text{cont}}(k_x = 2\pi\xi_p, k_y = 2\pi\xi_q, k_z = 2\pi\xi_r) \quad (66)$$
+
+with  $\xi_p = \frac{p}{N_x \Delta x}$  and  $p = 0, \dots, N_x - 1$ , and similarly for  $\xi_q$  and  $\xi_r$ .
+
+## D Optimization Hyperparameters
+
+In Table 7, we summarize the hyperparameters used to regress all assets presented in this work.
+
+Table 7. Resulting optimization parameters after conducting hyperparameter searches on the bunny volume.
+
+| Parameter                                | Learning Rate |
+|------------------------------------------|---------------|
+| Parameter-specific Learning Rates |               |
+| Centers $\mu$                            | 0.012         |
+| Scales $s$                               | 0.0008        |
+| Quaternions $q$                          | 0.0012        |
+| Weight $\alpha$                          | 0.00008       |
+| Omega $\omega$                           | 0.002         |
+| Regularization &amp; Control      |               |
+| $\lambda_\alpha$                         | 0.00001       |
+| $\lambda_s$                              | 0.02          |
+| $\lambda_{\text{noise}}$                 | 250           |
+| $Y$                                      | 0.65          |
+| Optimization Schedule             |               |
+| Warmup ratio                             | 0.15          |
+| Min LR ratio                             | 0.1           |
+| Iterations (Gaussian)                    | 300           |
+| Iterations (Gabor)                       | 300           |
+| Densification &amp; Pruning       |               |
+| Resample Primitives                      | every 30 it   |
+| Resample until                           | 210 it        |
+
+### E LOD Selection
+
+In the following, we show how to prefilter a Gabor mixture for LOD. Given a perspective camera with a field of view �� [������] at resolution �� = max(�� , ��) in pixels, we compute the visible width at distance �� [����������] in world units as
+
+$$W_{\text{world}}(d) = 2d \tan\left(\frac{\phi}{2}\right). \quad (67)$$
+
+The angular Nyquist frequency in world units is then given by
+
+$$\hat{f}_{\text{limit}}(d) = \frac{\pi R}{W_{\text{world}}(d)}. \quad (68)$$
+
+We filter the mixture by comparing this cutoff to the peak frequency ��0 of each Gabor kernel (see Table 1 of the main paper). Note that using the peak frequency is an approximation, as no closed-form solution exists for the projection of a general Gabor kernel to screen space. Counterintuitively, this threshold is independent of the screen-space extent of the mixture. Although larger objects cover more pixels, they also span proportionally more worldspace distance, leaving the projected sampling density unchanged. Consequently, the cutoff depends only on camera parameters and depth, i.e., the local projection scale, rather than the overall size of the object in screen space.
+
+## F Comparison to Voxel Grids
+
+In Fig. 17, we compare rendering performance between our Gabor fields and dense voxel grids. While both ran in Mitsuba 3, in order to make our comparison as fair as possible, we extended the native voxel grid support with the following:
+
+- SuperVoxels [Szirmay-Kalos et al. 2011] for both faster distance sampling and providing aggregated statistics. At load time, the voxel grid is downsampled by a constant factor in each of its axes, and stored with aggregated medium density, local majorant and minorant statistics for the larger voxel.
+- Residual Ratio Tracking [Novák et al. 2014] estimator for next-event shadow ray transmittance queries, using also aggregated statistics from the SuperVoxels structure.
+- A weighted free flight distance sampler which also uses the local SuperVoxels to reduce memory traffic.
+- Tricubic interpolation for texture taps to the volume grid, reducing "blocky" artifacts at lower levels of detail.
+
+For each LOD, we showcase converged references next to low sample (8 spp) renderings and compute RMSE and FLIP between them. While voxel grids are significantly faster, our method yields lower variance per sample, thanks to analytic integration (middle column). We report unbiased results, but substantial acceleration can be obtained by employing stochastic integration strategies, adaptive clamping, and approximate segment sampling, which we showcase in the second column of Figure 17 (described in more detail in Appendix B, Figure 10 of the main paper, and the caption of Figure 17\). Furthermore, our method achieves ∼ 4000�� compression rate vs the voxel grids, without using any particular compression scheme (e.g., quantization, compression, pruning), which could further increase the gap. We expect subsequent improvements to hardware support for primitive rendering, definition of primitive hierarchies for traversal, usage of anyhit shaders for overlap collection, or even employing decomposition tracking with analytical CDF inversion could soon bridge the performance gap.
+
+# G Foveated Rendering
+
+In the following, we discuss our implementation of foveated rendering with our method. We have implemented foveated rendering by assuming a linear relationship between eccentricity and the frequency threshold for discarding primitives. While correct foveation should consider the limitations of the human visual system [Strasburger et al. 2011], we focus here on demonstrating a proof-of-concept implementation. For each pixel, we first discard all levels that contain Gabor primitives with frequencies above the threshold. This step provides the most significant efficiency boost, as we can mask entire hierarchy levels, significantly reducing the cost of BVH traversal. Since the levels are discrete, this strategy does not provide truly continuous foveation. To improve continuity, we can check each remaining primitive's frequency content for the given ray direction and prevent its integration if its frequency falls below the threshold. The checks and additional code branching, however, make it slightly slower than pure level masking, although it depends on the asset and frequency distributions within each level. As the final step, we apply stochastic smoothing by randomly perturbing the per-pixel frequency threshold around transitions between levels.
+
+# H Motion Blur
+
+Here we share details about our motion blur implementation. In our simple motion blur implementation, we assume objects to move
+
+
+
+
+
+Fig. 17. Multiple Scattering rendering comparison between Gabor fields and dense voxel grids + SuperVoxels [Szirmay-Kalos et al. 2011], using a residual ratio tracking [Novák et al. 2014] with local statistics. The first and last columns show converged renders and the middle columns show 8 spp renders. We report RMSE and FLIP between the converged reference LOD level and the lower spp counterpart. We used a 1.4x downsampled version of the WDAS Cloud cloud as this represents the maximum voxel grid size that Mitsuba 3 supports. Subsequent levels are repeatedly downsampled by a factor of two (box filtering). Our mixture uses 46k primitives, yielding a ∼ 4000�� compression rate compared to the voxel grids. In the middle row, we showcase our unbiased integrator, while in the second row, we trade exactness for render time with a number of strategies: 1) after 3 recursions in the primary path, we only interact with the Gaussian level 2) use the Gaussian level for next event estimation shadow rays 3) uniform sampling of critical segments (no solver to invert the CDF) 4) adaptive clamping and 5) reduced number of maximum rounds for the Taylor series-based complex erf computation. All times were measured on an NVIDIA RTX 6000 Pro (Blackwell).
+
+along the direction ®�� with motion magnitude ��. We model motion blur as a convolution with a 1D box filter oriented in direction ®�� and with size ��. In the frequency domain, this filter has a sinc function profile that attenuates frequencies aligned with the motion direction. For a Gabor kernel with modulation ��® this attenuation can be derived as:
+
+$$\text{attenuation} = \left| \text{sinc}(m |\vec{\omega} \cdot \vec{d}|) \right| \quad (69)$$
+
+The alignment of ��® and ®�� directly influences the attenuation. As the vectors get more parallel to each other, | ®�� · ®��| approaches ��0 = ∥ ®��∥, the motion causes destructive interference, especially for small Gabor primitives. Conversely, when the vectors become perpendicular, the primitives are not attenuated and fully contribute to the resulting image. Note that this analysis holds for any motion in 3D regardless of the camera orientation. We present the analysis of the attenuation function in Figure 14 of the main paper.
+
+To implement this strategy, we first group Gabor primitives into bins ���� containing different orientations and frequencies. Given motion parameters ( ®��,��), we cull bin ��, if the attenuation for the mean frequency and orientation in that bin falls below a fixed threshold.
+
+# I Procedural Cloud Generation
+
+In the following sections, we detail our strategy for procedural generation of clouds. A cloud chunk is defined using a Gaussian kernel and several Gabor kernels on its surface. This way, we can represent the core of a cloud and the splittings and wispy look caused by
+
+effects such as wind. For the placement of Gabor kernels, we first define a grid on the surface. Similar to Gabor noise, a Gabor kernel is generated within a random position inside each grid cell [Galerne et al. 2012; Lagae et al. 2009]. The frequency and the orientation of these Gabor kernels are randomly picked from a uniform distribution. Scales of the kernels, on the other hand, are randomized using a Maxwell distribution [Wu and McFarquhar 2018], which provides a physical intuition for the stability of the cloud.
+
+When the cloud collides with a higher temperature upstream, it encounters water bubbles with increased speed. This results in higher inner pressure for the cloud. When the inner pressure breaks
+
+through the outer edge of a cloud, a smaller cloud that is semiconnected to the original cloud develops. Keeping this in mind, we used our cloud chunks to generate more complex cloud formations. A full cloud is generated through randomly generated cloud chunks in layers similar to a fractal. These multi-layer clouds have smaller cloud chunks on their surface. These smaller chunks are placed uniformly at random on the surface, with the radius drawn from a Maxwell distribution.
+
+Another complex cloud formation occurs when two different clouds merge. This is easily doable in our application by generating different multi-layer clouds and merging them by moving them together.

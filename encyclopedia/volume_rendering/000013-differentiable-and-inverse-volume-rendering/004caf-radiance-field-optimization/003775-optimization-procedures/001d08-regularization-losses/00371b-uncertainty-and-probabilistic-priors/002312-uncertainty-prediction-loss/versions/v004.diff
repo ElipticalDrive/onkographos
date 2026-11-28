@@ -1,0 +1,199 @@
+--- v003.md
++++ v004.md
+@@ -4,115 +4,55 @@
+ 
+ ## Overview
+-Uncertainty Prediction Loss is a regularization technique used in differentiable volume rendering and neural implicit surface reconstruction to model aleatoric uncertainty (noise inherent in the input data) [S1][S2, unofficial]. It extends the standard rendering pipeline by predicting an uncertainty parameter for each query point, which is then used to weight the reconstruction loss [S1][S2, unofficial]. Unlike methods that assume fixed noise distributions, this approach allows the network to learn heteroscedastic uncertainty, assigning higher variance to noisy or ambiguous regions and lower variance to reliable ones [S2, unofficial]. It is distinct from [Beta Distribution Prior on Exit Opacity](2274-beta-distribution-prior-on-exit-opacity.md), which applies priors to physical properties like opacity, and [ConfEviSurrogate](10417-confevisurrogate.md), which focuses on confidence evidence surrogates [S1][S2, unofficial].
++Uncertainty Prediction Loss is a regularization technique used in differentiable volume rendering and neural implicit reconstruction to model aleatoric uncertainty (noise inherent in the input data) alongside the primary scene representation [S1][S2, unofficial]. It solves the problem of overconfident predictions in noisy or sparse data regimes by predicting a variance parameter for each query point, which is then used to weight the data fidelity term in the optimization objective [S2, unofficial]. Unlike methods that assume a fixed noise model, this approach allows the network to learn heteroscedastic uncertainty, assigning higher variance to points with high noise and lower variance to reliable points [S2, unofficial]. It is distinguished from [Uncertainty-aware Squared Error Loss](2964-uncertainty-aware-squared-error-loss.md) by its specific formulation as a weighted sum of a squared error term and a zero-regularization term, and from [ConfEviSurrogate](10417-confevisurrogate.md) by its direct prediction of variance parameters rather than surrogate confidence metrics [S1, S3].
+ 
+ ## How it works
+-The method operates in two primary contexts: differentiable volume rendering (e.g., NeRF variants) and point cloud SDF reconstruction (e.g., NeuS variants). Both share the core principle of predicting a variance parameter and optimizing a negative log-likelihood loss.
++The method extends the standard neural network output by adding a branch that predicts uncertainty (variance) for each query coordinate. The optimization minimizes a composite loss function that balances fitting the observed data against the predicted uncertainty, while preventing the uncertainty from collapsing to zero or exploding.
+ 
+ ### Inputs and Outputs
+-*   **Inputs:** Query coordinates $\mathbf{c}_i$ (for volume rendering) or point positions $\mathbf{x}_P$ (for SDF reconstruction); target values (e.g., color or ideal SDF value 0).
+-*   **Outputs:** Predicted mean (color or SDF) and predicted variance $\bar{\sigma}^2$ (or $\delta$).
++*   **Inputs:** Query coordinates $c_i$ (or point cloud points $x_P$), target values (e.g., color, SDF), and network parameters.
++*   **Outputs:** Predicted mean value (e.g., color, SDF) and predicted variance (uncertainty) for each query point.
+ 
+ ### Data Structures
+-*   **Network Output:** A linear layer or MLP head outputs the uncertainty parameter alongside the primary feature.
+-    *   For volume rendering [S1]: The output feature $y_{p_i}$ from the network $F_{\Phi_i}$ is passed through a Linear layer to predict $\delta_{c_i}$.
+-    *   For SDF [S2, unofficial]: An MLP $MLP_{sdf}$ outputs the mean $f(\mathbf{x}_P)$, raw variance parameter $\sigma^2(\mathbf{x}_P)$, and a feature vector $fea$.
++The network architecture typically includes:
++1.  **Feature Network ($F_{\Phi}$):** Takes coordinates as input and outputs a feature vector $y_{p_i}$ [S1].
++2.  **Uncertainty Head:** A Linear layer (or MLP) that takes $y_{p_i}$ as input and outputs the raw variance parameter $\sigma^2$ [S1][S2, unofficial].
++    *   In [S1], the output is denoted as $\delta_{c_i}$ or $\sigma_i$.
++    *   In [S2, unofficial], the MLP outputs $f(x_P)$, $\sigma^2(x_P)$, and a feature vector $fea$.
+ 
+-### Formulas and Steps
++### Numbered Steps
++1.  **Feature Extraction:** For each query point $c_i$ (or $x_P$), pass the coordinates through the feature network to obtain the feature vector $y_{p_i}$ [S1][S2, unofficial].
++2.  **Uncertainty Prediction:** Pass $y_{p_i}$ through a Linear layer (or MLP) to predict the raw variance parameter $\sigma^2$ [S1][S2, unofficial].
++3.  **Variance Regularization:** Apply a softplus function to the raw variance and add a minimum variance constraint $\sigma_0^2$ to ensure the variance is valid and non-zero [S2, unofficial].
++    *   Formula: $\bar{\sigma}^2 = \sigma_0^2 + \log(1 + \exp(\sigma^2))$ [S2, unofficial].
++    *   In [S1], the predicted uncertainty $\delta_{c_i}$ is used directly in the loss, with a separate regularization term $\mathcal{L}_0$ applied to $\delta_{c_i}$ [S1].
++4.  **Loss Calculation:** Compute the Uncertainty Prediction Loss $\mathcal{L}_{unct}$ as a weighted sum of the squared error loss $\mathcal{L}_{SE}$ (or $\mathcal{L}_{usdf}$) and the zero regularization loss $\mathcal{L}_0$ [S1].
++    *   Formula: $\mathcal{L}_{unct} = \alpha_1 \mathcal{L}_{SE} + \alpha_2 \mathcal{L}_0$ [S1].
++    *   In [S2, unofficial], the loss is derived from the Negative Log-Likelihood (NLL) of a Gaussian distribution, assuming the ideal SDF value is 0:
++        $$ \mathcal{L}_{usdf} = \frac{1}{D_P} \sum_{x_P \in P} \left( \frac{\|f_\varepsilon(x_P) - f(x_P)\|_2^2}{2\bar{\sigma}^2(x_P)} + \frac{\log \bar{\sigma}^2(x_P)}{2} \right) $$
++        where $f_\varepsilon(x_P) = 0$ [S2, unofficial].
++5.  **Optimization:** Update network parameters to minimize $\mathcal{L}_{unct}$ using gradient descent [S1][S2, unofficial].
+ 
+-#### 1. Variance Prediction
+-The raw variance output by the network must be transformed to ensure positivity and stability.
+-
+-**For Volume Rendering [S1]:**
+-The uncertainty $\delta_{c_i}$ is predicted directly. To prevent it from blowing up, a regularization term $\mathcal{L}_0$ is introduced:
+-$$ \mathcal{L}_0 = \sum_{r \in \mathcal{R}} \sum_{i=1}^N \max(\delta_{c_i}, 0) $$
+-where $\mathcal{R}$ is the set of rays and $N$ is the number of samples per ray.
+-
+-**For SDF Reconstruction [S2, unofficial]:**
+-The raw variance $\sigma^2(\mathbf{x}_P)$ is passed through a softplus function and a minimum variance constraint $\sigma_0^2$ is added:
+-$$ \bar{\sigma}^2(\mathbf{x}_P) = \sigma_0^2 + \log(1 + \exp(\sigma^2(\mathbf{x}_P))) $$
+-where $\sigma_0^2$ is a small constant to prevent collapse to trivial solutions.
+-
+-#### 2. Uncertainty-Aware Loss Calculation
+-The total loss combines a standard error term weighted by the inverse uncertainty and a regularization term.
+-
+-**For Volume Rendering [S1]:**
+-The uncertainty loss $\mathcal{L}_{unct}$ is a weighted sum of the squared error loss $\mathcal{L}_{SE}$ and the zero regularization loss $\mathcal{L}_0$:
+-$$ \mathcal{L}_{unct} = \alpha_1 \mathcal{L}_{SE} + \alpha_2 \mathcal{L}_0 $$
+-Typical parameters are $\alpha_1 = 1.0$ and $\alpha_2 = 0.01$ [S1]. The use of $\mathcal{L}_0$ instead of a direct L1 loss on $\delta_i$ allows the network to penalize low uncertainty more heavily than high uncertainty, facilitating the learning of uncertainty into the features [S1].
+-
+-**For SDF Reconstruction [S2, unofficial]:**
+-Assuming ideal SDF values $f_\varepsilon(\mathbf{x}_P)$ are 0, the negative log-likelihood loss $\mathcal{L}_{usdf}$ is minimized:
+-$$ \mathcal{L}_{usdf} = \frac{1}{D_P} \sum_{\mathbf{x}_P \in P} \left[ \frac{\|f_\varepsilon(\mathbf{x}_P) - f(\mathbf{x}_P)\|_2^2}{2\bar{\sigma}^2(\mathbf{x}_P)} + \frac{\log \bar{\sigma}^2(\mathbf{x}_P)}{2} \right] $$
+-where $D_P$ is the number of points in the set $P$ [S2, unofficial]. The first term reduces the importance of points with high noise (large $\bar{\sigma}^2$), while the second term prevents infinite variance [S2, unofficial].
+-
+-### Pseudocode
+-
+-```python
+-def compute_uncertainty_loss_volume_rendering(predictions, targets, uncertainties, alpha1=1.0, alpha2=0.01):
+-    """
+-    Computes the Uncertainty Loss for volume rendering as described in [S1].
+-    
+-    Args:
+-        predictions: Tensor of predicted values (e.g., color).
+-        targets: Tensor of ground truth values.
+-        uncertainties: Tensor of predicted uncertainty parameters delta.
+-        alpha1: Weight for squared error loss.
+-        alpha2: Weight for zero regularization loss.
+-        
+-    Returns:
+-        Total uncertainty loss.
+-    """
+-    # Squared Error Loss
+-    se_loss = torch.mean((predictions - targets) ** 2)
+-    
+-    # Zero Regularization Loss: sum of max(delta, 0) over all samples
+-    # Note: Source [S1] defines L0 as sum, not mean, but typically losses are averaged.
+-    # We follow the formula structure exactly.
+-    zero_reg_loss = torch.sum(torch.clamp(uncertainties, min=0.0))
+-    
+-    # Combined Uncertainty Loss
+-    loss = alpha1 * se_loss + alpha2 * zero_reg_loss
+-    return loss
+-
+-def compute_uncertainty_loss_sdf(predictions, raw_variances, sigma0_sq=1e-6):
+-    """
+-    Computes the Uncertainty Loss for SDF reconstruction as described in [S2, unofficial].
+-    
+-    Args:
+-        predictions: Tensor of predicted SDF means f(x_P).
+-        raw_variances: Tensor of raw variance outputs from MLP.
+-        sigma0_sq: Minimum variance constraint.
+-        
+-    Returns:
+-        Negative log-likelihood loss.
+-    """
+-    # Compute valid variance using softplus and minimum constraint
+-    # sigma_bar^2 = sigma0^2 + log(1 + exp(raw_variance))
+-    valid_variances = sigma0_sq + torch.log(1 + torch.exp(raw_variances))
+-    
+-    # Ideal SDF value is 0
+-    targets = torch.zeros_like(predictions)
+-    
+-    # Compute terms for the loss
+-    # Term 1: Squared error / (2 * variance)
+-    term1 = (predictions - targets) ** 2 / (2 * valid_variances)
+-    
+-    # Term 2: log(variance) / 2
+-    term2 = torch.log(valid_variances) / 2
+-    
+-    # Average over all points
+-    loss = torch.mean(term1 + term2)
+-    return loss
+-```
++### Formulas
++*   **Valid Variance (from [S2, unofficial]):**
++    $$ \bar{\sigma}^2(x_P) = \sigma_0^2 + \log(1 + \exp(\sigma^2(x_P))) $$
++*   **Uncertainty Loss (from [S1]):**
++    $$ \mathcal{L}_{unct} = \alpha_1 \mathcal{L}_{SE} + \alpha_2 \mathcal{L}_0 $$
++    where $\mathcal{L}_{SE}$ is the squared error loss between predicted and target values, and $\mathcal{L}_0$ is the regularization term encouraging uncertainty to be close to zero:
++    $$ \mathcal{L}_0 = \sum_{r \in \mathcal{R}} \sum_{i=1}^N \max(\delta_{c_i}, 0) $$
++*   **NLL Loss (from [S2, unofficial]):**
++    $$ \mathcal{L}_{usdf} = \frac{1}{D_P} \sum_{x_P \in P} \left( \frac{\|f_\varepsilon(x_P) - f(x_P)\|_2^2}{2\bar{\sigma}^2(x_P)} + \frac{\log \bar{\sigma}^2(x_P)}{2} \right) $$
+ 
+ ### Parameters
+-*   **$\alpha_1, \alpha_2$**: Weights for the squared error and zero regularization components in volume rendering. Typical values: $\alpha_1 = 1.0, \alpha_2 = 0.01$ [S1].
+-*   **$\sigma_0^2$**: Minimum variance constraint in SDF reconstruction to prevent collapse. Value not explicitly given in sources, but described as a small constant [S2, unofficial].
+-*   **$\beta_1, \beta_2$**: Weights for MSE and uncertainty loss in multi-scale joint training. Typical values: $\beta_1 = 1.0, \beta_2 = 0.1$ [S1].
++*   $\alpha_1$: Weight for the squared error loss. Typical value: $1.0$ [S1].
++*   $\alpha_2$: Weight for the zero regularization loss. Typical value: $0.01$ [S1].
++*   $\sigma_0^2$: Minimum variance constraint to prevent collapse to trivial solutions. Value not specified in sources [S2, unofficial].
++*   $D_P$: Number of points in the point set $P$ [S2, unofficial].
++*   $f_\varepsilon(x_P)$: Ideal SDF value for point $x_P$, set to $0$ [S2, unofficial].
+ 
+ ### Edge Cases and Pitfalls
+-*   **Variance Collapse:** Without the minimum variance constraint $\sigma_0^2$ or the regularization term $\mathcal{L}_0$, the network may predict infinite variance for all points, effectively ignoring the data [S2, unofficial].
+-*   **Precision:** The softplus function $\log(1 + \exp(x))$ can suffer from numerical instability for large positive inputs. Clamping or using a stable implementation is recommended [S2, unofficial].
+-*   **Multi-scale Training:** In dynamic growth strategies, all query coordinates are output through all outlets during training, which increases memory usage [S1].
++*   **Variance Collapse:** Without the minimum variance constraint $\sigma_0^2$ or the regularization term $\mathcal{L}_0$, the network may predict zero variance, leading to overconfident and incorrect predictions [S2, unofficial].
++*   **Variance Explosion:** Without regularization, the network may predict infinite variance to minimize the data fidelity term, effectively ignoring the data [S2, unofficial].
++*   **Precision:** The softplus function ensures numerical stability for the variance prediction [S2, unofficial].
++*   **Input Noise:** The method is designed to handle aleatoric uncertainty (noise in input data). It may not be suitable for epistemic uncertainty (lack of knowledge) without additional mechanisms [S2, unofficial].
+ 
+ ## Subtopics
+@@ -122,23 +62,30 @@
+ 
+ ### Uncertainty Loss Parameters
+-In the context of volume rendering, the uncertainty loss $\mathcal{L}_{unct}$ is composed of a weighted sum of squared error loss $\mathcal{L}_{SE}$ and zero regularization loss $\mathcal{L}_0$ [S1]. The weights are typically set to $\alpha_1 = 1.0$ and $\alpha_2 = 0.01$ [S1].
+-
+-### Multi-scale Joint Training Loss
+-In dynamic growth strategies, the total loss $\mathcal{L}$ is a sum over $D$ stages: $\mathcal{L} = \sum_{i=1}^D \beta_1 \mathcal{L}_{MSE}^i + \beta_2 \mathcal{L}_{unct}^i$, where $\mathcal{L}_{MSE}^i$ and $\mathcal{L}_{unct}^i$ are the MSE and uncertainty losses for layer $i$ [S1]. The weights are typically $\beta_1 = 1.0$ and $\beta_2 = 0.1$ [S1].
++In the context of [S1], the Uncertainty Loss $\mathcal{L}_{unct}$ is composed of two weighted terms: the squared error loss $\mathcal{L}_{SE}$ and the zero regularization loss $\mathcal{L}_0$. The weights are set to $\alpha_1 = 1.0$ and $\alpha_2 = 0.01$ [S1].
+ 
+ ### Uncertainty Estimation for Point Cloud SDF
+-This variant models the SDF value of each point in a point cloud as a Gaussian distribution with learnable mean and variance to capture aleatoric uncertainty [S2, unofficial]. It uses a negative log-likelihood loss assuming ideal SDF values are 0 [S2, unofficial].
++This variant, described in [S2, unofficial], models the Signed Distance Function (SDF) value of each point in a point cloud as a Gaussian distribution with learnable mean and variance to capture aleatoric uncertainty (noise) in the input data [S2, unofficial]. For each point $x_P$ in point set $P$, the SDF mean $f(x_P)$ and raw variance parameter are computed using an MLP: $f(x_P), \sigma^2(x_P), fea = MLP_{sdf}(x_P)$ [S2, unofficial]. The valid variance $\bar{\sigma}^2(x_P)$ is computed by applying softplus to the raw variance and adding a minimum variance constraint $\sigma_0^2$: $\bar{\sigma}^2(x_P) = \sigma_0^2 + \log(1 + \exp(\sigma^2(x_P)))$ [S2, unofficial]. The model is optimized by minimizing the negative log-likelihood loss $\mathcal{L}_{usdf}$, assuming ideal SDF values $f_\varepsilon(x_P)$ are 0: $\mathcal{L}_{usdf} = \frac{1}{D_P} \sum_{x_P \in P} \left[ \frac{\|f_\varepsilon(x_P) - f(x_P)\|_2^2}{2\bar{\sigma}^2(x_P)} + \frac{\log \bar{\sigma}^2(x_P)}{2} \right]$ [S2, unofficial]. Parameters include $\sigma_0^2$ (minimum variance constraint), $D_P$ (number of points), and $f_\varepsilon(x_P)$ (ideal SDF value, set to 0) [S2, unofficial].
++
++### LUE (Uncertainty-aware Regularization Loss)
++LUE is a regularization loss that models ray uncertainty to improve rendering reliability and reduce artifacts in few-shot settings, applied to both original rays ($r$) and flipped rays ($r'$) [S3]. With LUE, NLL drops to 2.56 (vs 4.88 without LUE or Lemp.), PSNR reaches 19.55, SSIM 0.767, LPIPS 0.180, and Average Error 0.101 on Realistic Synthetic 360◦ [S3]. Unlike MixNeRF which uses a mixture-of-distributions model, LUE consistently produces more reliable outputs with lower Negative Log-Likelihood (NLL). Naively applying Lemp. (emptiness loss) degrades performance below MixNeRF, whereas LUE improves it [S3].
++
++### Uncertainty-aware Emptiness Loss
++This is a regularization loss that reduces floating artifacts by considering the uncertainty of model outputs [S3]. It uses the estimated scale parameters for mixture models to represent the uncertainty of the samples' estimated probability density distributions [S3]. The scale parameters ($\beta$: $\beta_{ir}, \beta_{ig}, \beta_{ib}$) are estimated parameters for mixture models representing uncertainty, but their specific values are not specified in the text [S3].
+ 
+ ## Operating characteristics
+-*   **Time Complexity:** Adds minimal overhead to the forward pass (one additional linear layer or MLP head for variance prediction). The backward pass involves computing gradients for the variance parameters, which is comparable to standard regression [S1][S2, unofficial].
+-*   **Memory Complexity:** Requires storing the predicted variance for each query point. In multi-scale training, this increases memory usage as all query coordinates are output through all outlets [S1].
+-*   **Performance:** Improves reconstruction quality in noisy regions by down-weighting unreliable points [S2, unofficial]. It helps the network focus on high-fidelity data for precise geometry [S2, unofficial].
+-*   **Strengths:** Handles heteroscedastic noise well; prevents overfitting to noisy data; provides a measure of confidence in predictions [S1][S2, unofficial].
+-*   **Limitations:** Requires careful tuning of regularization weights ($\alpha_2, \sigma_0^2$); may converge slower than standard MSE loss due to the additional uncertainty parameters [S1][S2, unofficial].
++*   **Time Complexity:** Not given in the sources.
++*   **Memory Complexity:** Not given in the sources.
++*   **Measured Performance:** In [S3], LUE improved rendering quality and reliability, achieving an NLL of 2.56 compared to 4.88 without LUE, and a PSNR of 19.55 on Realistic Synthetic 360◦ [S3].
++*   **Scaling:** Not given in the sources.
++*   **Strengths:** Captures aleatoric uncertainty, handles noisy input data, reduces artifacts in few-shot settings [S2, unofficial][S3].
++*   **Limitations:** Requires additional network parameters for uncertainty prediction, may be sensitive to hyperparameters ($\alpha_1, \alpha_2, \sigma_0^2$) [S1][S2, unofficial].
++*   **When to use:** When input data is noisy or sparse, and reliable uncertainty estimates are needed [S2, unofficial][S3].
++*   **When not to use:** When data is clean and dense, and uncertainty estimation is not required [S2, unofficial].
+ 
+ ## Background
+-The concept of modeling aleatoric uncertainty in neural networks for geometry reconstruction was introduced in the context of point-guided neural implicit surfaces [S2, unofficial]. Inspired by Bayesian deep learning, the method treats the SDF value as a Gaussian distribution rather than a single value, allowing the network to learn different variances for different points based on local noise levels [S2, unofficial]. In volume rendering, uncertainty prediction was adopted to handle noisy observations and improve the robustness of the rendering pipeline [S1]. The approach has been integrated into dynamic growth strategies for NeRFs to guide network expansion based on uncertainty [S1].
++Uncertainty Prediction Loss originates from the need to model aleatoric uncertainty in neural implicit surface reconstruction and differentiable volume rendering [S2, unofficial][S3]. It was introduced in [S2, unofficial] for point-guided neural implicit surface reconstruction to handle noise in point cloud data, and in [S3] for few-shot novel view synthesis to reduce floating artifacts. The method builds on the principles of Bayesian deep learning, where the output is modeled as a probability distribution rather than a single value [S2, unofficial].
+ 
+ ## Sources
+ [S1] Recursive-NeRF: An Efficient and Dynamically Growing NeRF, https://doi.org/10.1109/tvcg.2022.3204608, fetched 2026-10-26
+-[S2] Point-NeuS: Point-Guided Neural Implicit Surface Reconstruction by Volume Rendering, https://doi.org/10.48550/arXiv.2310.07997, fetched 2026-10-30 (unofficial)+[S2] Point-NeuS: Point-Guided Neural Implicit Surface Reconstruction by Volume Rendering, https://doi.org/10.48550/arXiv.2310.07997, fetched 2026-10-30 (unofficial)
++[S3] FlipNeRF: Flipped Reflection Rays for Few-shot Novel View Synthesis, https://doi.org/10.1109/iccv51070.2023.02092, fetched 2026-10-29

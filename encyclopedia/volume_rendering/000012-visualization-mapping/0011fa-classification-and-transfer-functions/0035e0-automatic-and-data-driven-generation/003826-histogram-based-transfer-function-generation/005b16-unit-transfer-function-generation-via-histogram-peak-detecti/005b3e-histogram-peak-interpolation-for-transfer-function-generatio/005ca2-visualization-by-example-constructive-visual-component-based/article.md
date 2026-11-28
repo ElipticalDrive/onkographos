@@ -1,0 +1,159 @@
+# Visualization by Example / Constructive Visual Component-based Interface
+
+Also called: Programming-by-example approach, Spreadsheet-like interface
+
+## Overview
+This method enables users to create direct volume rendering (DVR) visualizations by combining automatically generated unit transfer functions, requiring no knowledge of the DVR process or transfer function design [S1, unofficial]. Unlike traditional manual transfer function design, it prioritizes speed and ease of use for inexperienced users at the cost of precise control over material boundaries and opacity [S1, unofficial].
+
+## How it works
+### Inputs and Outputs
+*   **Input:** A scalar volume dataset (e.g., CT scan, simulation data) [S1, unofficial].
+*   **Output:** A composite transfer function and the resulting volume rendering [S1, unofficial].
+
+### Data Structures
+The system is implemented within the Voreen framework using C++ and the Qt UI framework [S1, unofficial].
+*   **TransFuncIntensity:** Each unit transfer function is stored as a `TransFuncIntensity` object containing fields for center intensity, width, opacity, and color [S1, unofficial].
+*   **VoreenPainter:** Each `TransFuncIntensity` is associated with a `VoreenPainter` object to handle the rendering pipeline [S1, unofficial].
+*   **QtCanvas:** The UI connects each `TransFuncIntensity` object to a `QtCanvas` representing a cell in the spreadsheet interface [S1, unofficial].
+
+### Numbered Steps
+1.  Compute the one-dimensional histogram of the volume dataset [S1, unofficial].
+2.  Apply the Douglas-Peucker algorithm to the histogram curve to identify peaks [S1, unofficial].
+3.  Iterate with a decreasing epsilon ($\epsilon$) threshold until three peaks are found or $\epsilon$ reaches 2 [S1, unofficial].
+4.  Map each identified peak to a unit transfer function with a fixed triangle shape [S1, unofficial].
+5.  Assign opacity values that typically increase for higher density peaks; users cannot modify opacity [S1, unofficial].
+6.  Assign colors randomly to each unit transfer function [S1, unofficial].
+7.  Allow the user to select two visualizations and apply the interpolation function to generate intermediate peaks or equidistant placements [S1, unofficial].
+8.  Allow the user to select multiple visualizations and apply the merge function to combine unit transfer functions and remove overlapping sections [S1, unofficial].
+
+### Formulas
+*   **Douglas-Peucker Simplification:** Given a polyline $P = \{p_1, p_2, \dots, p_n\}$ and threshold $\epsilon$, the algorithm recursively splits the polyline at the point $p_k$ with the maximum perpendicular distance $d(p_k, \overline{p_1 p_n}) \ge \epsilon$ [S1, unofficial].
+*   **Peak Condition:** A histogram bin $h_i$ is a peak if $h_i > h_{i-1}$ and $h_i > h_{i+1}$ [G].
+*   **Equidistant Placement:** If no peaks exist in the interval $[a, b]$, new centers are placed at $c_j = a + j \cdot \frac{b-a}{4}$ for $j=1, 2, 3$ [G].
+
+### Parameters
+*   **Douglas-Peucker Epsilon ($\epsilon$):** The threshold for peak detection. It is decreased iteratively. The process stops when three peaks are found or when $\epsilon$ reaches 2 [S1, unofficial].
+*   **Unit Transfer Function Shape:** Always triangle [S1, unofficial].
+*   **Opacity:** Cannot be modified by the user [S1, unofficial].
+
+### Edge Cases and Pitfalls
+*   **Color Ambiguity:** Colors are assigned randomly. If two different materials have very similar colors, ambiguity arises [S1, unofficial].
+*   **Opacity Limitation:** The use of increasing opacity values for histogram peaks works well for objects where innermost structures have highest densities (e.g., CT scans) but is not suitable for general applications [S1, unofficial].
+*   **Histogram Limitation:** Using a one-dimensional histogram and restricting peak identification is insufficient for identifying all structures in a data set, particularly those not corresponding to histogram peaks or enhanced by shading [S1, unofficial].
+*   **Spatial Unrelatedness:** Neighboring peaks in the histogram can correspond to spatially completely unrelated structures, leading to confusion about spatial relationships [S1, unofficial].
+
+### Pseudocode
+> **Unverified code.** The code below did not pass a test run against a reference implementation, or no test fits it, so it may contain errors.
+
+```python
+class TransFuncIntensity:
+    def __init__(self, center, width, opacity, color):
+        self.center = center
+        self.width = width
+        self.opacity = opacity
+        self.color = color
+
+    def overlaps(self, other):
+        return abs(self.center - other.center) < (self.width + other.width)
+
+    def merge(self, other):
+        new_center = (self.center + other.center) / 2
+        new_width = max(self.width, other.width)
+        new_opacity = min(1.0, self.opacity + other.opacity)
+        return TransFuncIntensity(new_center, new_width, new_opacity, self.color)
+
+def perpendicular_distance(point, line_start, line_end):
+    dx, dy = line_end[0] - line_start[0], line_end[1] - line_start[1]
+    if dx == 0 and dy == 0:
+        return ((point[0]-line_start[0])**2 + (point[1]-line_start[1])**2)**0.5
+    t = max(0, min(1, ((point[0]-line_start[0])*dx + (point[1]-line_start[1])*dy) / (dx*dx + dy*dy)))
+    proj = (line_start[0] + t*dx, line_start[1] + t*dy)
+    return ((point[0]-proj[0])**2 + (point[1]-proj[1])**2)**0.5
+
+def douglas_peucker_simplify(points, epsilon):
+    if len(points) < 3:
+        return points
+    d_max, index = 0, 0
+    for i in range(1, len(points) - 1):
+        d = perpendicular_distance(points[i], points[0], points[-1])
+        if d > d_max:
+            index, d_max = i, d
+    if d_max >= epsilon:
+        res1 = douglas_peucker_simplify(points[:index+1], epsilon)
+        res2 = douglas_peucker_simplify(points[index:], epsilon)
+        return res1[:-1] + res2[1:]
+    return [points[0], points[-1]]
+
+def find_local_peaks(data):
+    peaks = []
+    for i in range(1, len(data) - 1):
+        if data[i] > data[i-1] and data[i] > data[i+1]:
+            peaks.append(i)
+    return peaks
+
+def generate_unit_transfer_functions(histogram_data):
+    unit_functions = []
+    epsilon = 10.0
+    while epsilon > 2:
+        points = [(i, histogram_data[i]) for i in range(len(histogram_data))]
+        simplified = douglas_peucker_simplify(points, epsilon)
+        peak_indices = find_local_peaks([p[1] for p in simplified])
+        if len(peak_indices) >= 3:
+            top_peaks = sorted(peak_indices, key=lambda i: histogram_data[i], reverse=True)[:3]
+        else:
+            top_peaks = peak_indices
+        for idx in top_peaks:
+            tf = TransFuncIntensity(center=idx, width=2, opacity=0.8, color=random_color())
+            unit_functions.append(tf)
+        epsilon -= 1.0
+    return unit_functions
+
+def interpolate_visualizations(vis_a, vis_b, histogram_data):
+    peak_a, peak_b = vis_a.tf.center, vis_b.tf.center
+    start, end = min(peak_a, peak_b), max(peak_a, peak_b)
+    section = histogram_data[start:end+1]
+    section_peaks = find_local_peaks(section)
+    if len(section_peaks) >= 3:
+        top_peaks = sorted(section_peaks, key=lambda i: section[i], reverse=True)[:3]
+        intermediate_centers = [start + i for i in top_peaks]
+    else:
+        intermediate_centers = [start + i * (end - start) // 3 for i in range(1, 4)]
+    new_vis = []
+    for center in intermediate_centers:
+        tf = TransFuncIntensity(center=center, width=2, opacity=0.8, color=random_color())
+        new_vis.append(create_visualization(tf))
+    return new_vis
+
+def merge_visualizations(vis_list):
+    combined_tf = TransFuncIntensity(center=0, width=255, opacity=0.0, color=(0,0,0))
+    for vis in vis_list:
+        combined_tf = combined_tf.merge(vis.tf)
+    final_tf = remove_overlaps(combined_tf)
+    return create_visualization(final_tf)
+
+def create_visualization(tf):
+    return {"tf": tf, "renderer": "VoreenPainter"}
+
+def remove_overlaps(tf):
+    # Logic to resolve overlapping ranges by clamping or averaging
+    return tf
+```
+
+## Operating characteristics
+*   **Time Complexity:** Not explicitly given. However, usability tests suggest that meaningful visualizations can be constructed in less than a minute [S1, unofficial].
+*   **Memory Complexity:** Not explicitly given. The system stores `TransFuncIntensity` objects and associated `VoreenPainter` objects for each visualization cell [S1, unofficial].
+*   **Measured Performance:**
+    *   **NCAT Phantom (8 Bit, $128^3$ voxels):** Inexperienced user took less than 30 seconds; experienced user took about 90 seconds with the original Voreen interface [S1, unofficial].
+    *   **Nucleon Dataset (8 Bit, $4^{13}$ voxels):** Inexperienced student created meaningful visualization with both interfaces [S1, unofficial].
+    *   **Bonsai CT Dataset (8 Bit, $256^3$ voxels):** Visualized using the spreadsheet-like interface [S1, unofficial].
+    *   **CT Scan of Two Feet (16 Bit, $256 \times 256 \times 250$ voxels):** Provided by Osirix, visualized using the interface [S1, unofficial].
+*   **Strengths:** Faster than traditional transfer function design; requires no knowledge of DVR; intuitive for inexperienced users [S1, unofficial].
+*   **Limitations:** Less accurate results due to lack of direct control; manual transfer functions result in sharper material boundaries and more appropriate opacity values, making shape perception slightly easier [S1, unofficial]. Users struggled with datasets where there is no clear relationship between data set features and histogram features (e.g., CT feet) [S1, unofficial].
+
+## Background
+*   **Origin:** Introduced in GRAPP 2010 - International Conference on Computer Graphics Theory and Applications [S1, unofficial].
+*   **Implementation:** Implemented in Voreen (Meyer-Spradow et al., 2009), a rapid-prototyping environment for ray-casting-based volume visualizations, using C++ and Qt UI framework [S1, unofficial].
+*   **History:** The approach combines a "programming-by-example" method with automatic transfer function design. It builds on the concept of spreadsheet-like interfaces for visualization exploration [S1, unofficial].
+
+## Sources
+[S1] SCITEPRESS - SCIENCE AND TECHNOLOGY PUBLICATIONS, https://www.scitepress.org/PublishedPapers/2010/28441/, fetched 2026-10-29 (unofficial)

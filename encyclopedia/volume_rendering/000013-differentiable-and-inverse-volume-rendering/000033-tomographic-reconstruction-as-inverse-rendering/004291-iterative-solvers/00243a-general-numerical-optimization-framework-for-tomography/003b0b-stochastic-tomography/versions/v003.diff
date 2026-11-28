@@ -1,0 +1,431 @@
+--- v002.md
++++ v003.md
+@@ -4,196 +4,241 @@
+ 
+ ## Overview
+-Stochastic Tomography is a matrix-free, grid-free iterative solver for tomographic reconstruction that represents the volume estimate as a set of discrete samples rather than a fixed voxel grid [S1]. It minimizes a convex objective function consisting of data fidelity (sum of squared residuals) and a regularization term by using a random walk to explore the solution space and deposit emissivity [S1]. Unlike grid-based methods like SART, it avoids spatial discretization artifacts and allows for easy replacement of regularizers without re-implementing the solver [S1]. It builds on the [General Numerical Optimization Framework for Tomography](3251-general-numerical-optimization-framework-for-tomography.md) by treating the proximal operators via a stochastic sampling process rather than deterministic updates.
++Stochastic Tomography is a matrix-free, grid-free iterative solver for tomographic reconstruction that represents the 3D volume as a set of discrete samples explored via random walks [S1]. It minimizes a convex objective function composed of squared residuals against observed projections and a convex regularizer, avoiding the fixed spatial discretization required by methods like [SIRT](3101-sirt-simultaneous-iterative-reconstruction-technique.md) or [SART](3101-sirt-simultaneous-iterative-reconstruction-technique.md) [S1]. Unlike its siblings in the [General Numerical Optimization Framework for Tomography](3251-general-numerical-optimization-framework-for-tomography.md), it does not rely on a global matrix $W$ or explicit proximal operators for the data fidelity term; instead, it uses on-the-fly kernel density estimation (splatting) to track residuals and accepts samples based on local improvements to the objective function [S1].
+ 
+ ## How it works
+ **Inputs:**
+-*   $M$ camera views with observations $\mathbf{o} = \{o_1, \dots, o_M\}$.
+-*   Projection operators $\text{proj}_j(\mathbf{x})$ mapping 3D points to 2D pixel coordinates in image $j$.
+-*   Visual hull mask (optional, for rejection of samples outside the volume of interest).
+-*   Parameters: Sample budget $N_{total}$, number of parallel walks $W$, Gaussian mutation width $\sigma$, initial emissivity magnitude $e_d$.
++*   $M$ camera views with observations $o_i$ for $i=1 \dots M$.
++*   Camera projection functions $proj_i(\mathbf{x})$ mapping 3D coordinates to 2D image coordinates.
++*   A visual hull mask $H(\mathbf{x})$ (binary volume or per-camera masks) defining the region of interest.
++*   Parameters: Sample budget $N_{total}$, number of parallel walks $K$, Gaussian mutation width $\sigma$, initial emissivity step $e_d$ (optional, often adaptive), and regularizer type $\Gamma$.
+ 
+ **Outputs:**
+-*   A set of samples $\{\mathbf{x}_k\}$ with associated emissivities $\{e_k\}$ representing the volume estimate $\tilde{v}(\mathbf{x})$.
+-*   Residual images $\mathbf{r}_j$ for each camera $j$, initialized to the observed images $\mathbf{o}_j$.
++*   A set of samples $\mathcal{S} = \{ (\mathbf{x}_k, e_k) \}$ representing the volume estimate, where $\mathbf{x}_k$ is the 3D position and $e_k$ is the deposited emissivity (density).
+ 
+ **Data Structures:**
+-*   **Samples:** A list of tuples $(\mathbf{x}_k, e_k)$, where $\mathbf{x}_k \in \mathbb{R}^3$ and $e_k \in \mathbb{R}$.
+-*   **Residual Images:** $M$ 2D arrays $\mathbf{r}_j$ of size corresponding to the camera resolution, initialized to $\mathbf{o}_j$.
+-*   **Splatting Kernel:** A 2D kernel function $K(u, v)$ used to distribute emissivity from a 3D sample to the 2D residual image.
++*   **Residual Images:** $M$ 2D images $\mathbf{r}_j$ of size $W_{img} \times H_{img}$, initialized to the observed images $o_j$. These store the current squared error residuals.
++*   **Sample List:** A dynamic list of accepted samples. Each entry stores $\mathbf{x}_k \in \mathbb{R}^3$ and $e_k \in \mathbb{R}$.
++*   **Current Objective Value:** $F_{curr}$, the sum of squared residuals plus regularization energy.
+ 
+ **Algorithm Steps:**
+ 
+ 1.  **Initialization:**
+-    *   Initialize residual images $\mathbf{r}_j \leftarrow \mathbf{o}_j$ for all $j=1 \dots M$.
+-    *   Initialize $W$ random walks. For each walk $w$, pick a starting point $\mathbf{x}_0^{(w)}$ uniformly distributed within the reconstruction volume bounding box.
+-    *   Set current objective change $\Delta F^{(w)} \leftarrow 0$ (or a large initial value to accept the first sample).
++    *   Initialize residual images $\mathbf{r}_j = o_j$ for all $j=1 \dots M$.
++    *   Initialize total objective $F_{curr} = \sum_j \| \mathbf{r}_j \|_2^2 + \Gamma(\emptyset)$.
++    *   Initialize empty sample list $\mathcal{S}$.
++    *   Spawn $K$ random walks. For each walk $k$, pick a starting position $\mathbf{x}_{start}^{(k)}$ uniformly within the visual hull.
+ 
+ 2.  **Random Walk Loop:**
+-    *   While total accepted samples $< N_{total}$:
+-        *   For each active walk $w$:
+-            1.  **Mutation:** Generate a candidate sample $\mathbf{x}_{k}^{(w)}$ by adding a Gaussian offset to the previous sample $\mathbf{x}_{k-1}^{(w)}$:
+-                $$ \mathbf{x}_{k}^{(w)} = \mathbf{x}_{k-1}^{(w)} + \boldsymbol{\epsilon}, \quad \boldsymbol{\epsilon} \sim \mathcal{N}(0, \sigma^2 \mathbf{I}) $$
+-                where $\sigma$ is typically 5-10% of the diagonal of the reconstruction volume bounding box [S1].
+-            2.  **Visual Hull Check:** If $\mathbf{x}_{k}^{(w)}$ projects outside the visual hull for *any* camera (i.e., the pixel is zero in at least one view), reject the sample and set $\mathbf{x}_{k}^{(w)} \leftarrow \mathbf{x}_{k-1}^{(w)}$ [S1].
+-            3.  **Objective Change Calculation:** Calculate the change in the objective function $\Delta F(\mathbf{x}_{k}^{(w)})$ if the sample were accepted.
+-                *   Compute tentative residuals for positive and negative emissivity $\pm e_d$:
+-                    $$ \tilde{\mathbf{r}}_j^{\pm} = \text{splat}(\mathbf{r}_j, \text{proj}_j(\mathbf{x}_{k}^{(w)}), \pm e_d) $$
+-                    where $\text{splat}$ adds the emissivity to the residual image using the kernel [S1].
+-                *   Calculate the change in squared residuals for each camera $j$:
+-                    $$ \Delta_j^{\pm} F(\mathbf{x}_{k}^{(w)}) = \|\mathbf{r}_j(\text{proj}_j(\mathbf{x}_{k}^{(w)}))\|^2 - \|\tilde{\mathbf{r}}_j^{\pm}(\text{proj}_j(\mathbf{x}_{k}^{(w)}))\|^2 $$
+-                    Note: $\mathbf{r}_j(\text{proj}_j(\mathbf{x}))$ denotes the value at the projected pixel location. The norm here refers to the local contribution to the sum of squares, effectively the difference in the squared residual value at the splatted location [S1].
+-                *   Sum over all cameras:
+-                    $$ \Delta^{\pm} F(\mathbf{x}_{k}^{(w)}) = \sum_{j=1}^M \Delta_j^{\pm} F(\mathbf{x}_{k}^{(w)}) $$
+-                *   Select the best sign:
+-                    $$ \Delta F(\mathbf{x}_{k}^{(w)}) = \max(\Delta^+ F(\mathbf{x}_{k}^{(w)}), \Delta^- F(\mathbf{x}_{k}^{(w)})) $$
+-                *   **Regularization:** If a regularizer $\Gamma$ is used, calculate its energy change $\Delta \Gamma(\mathbf{x}_{k}^{(w)})$ based on the stencil centered at $\mathbf{x}_{k}^{(w)}$ (see [Stochastic Tomography Regularization](#stochastic-tomography-regularization)). Add this to the objective change:
+-                    $$ \Delta F_{total}(\mathbf{x}_{k}^{(w)}) = \Delta F(\mathbf{x}_{k}^{(w)}) + \Delta \Gamma(\mathbf{x}_{k}^{(w)}) $$
+-            4.  **Acceptance:**
+-                *   Calculate acceptance probability $a$:
+-                    $$ a = \min\left(1, \frac{\Delta F_{total}(\mathbf{x}_{k}^{(w)})}{\Delta F^{(w)}}\right) $$
+-                    where $\Delta F^{(w)}$ is the objective change from the *previous* accepted step in this walk [S1].
+-                *   If $\Delta F^{(w)} < 0$ (initial step) or $\text{random()} \le a$:
+-                    *   If $\Delta F_{total}(\mathbf{x}_{k}^{(w)}) > 0$:
+-                        *   Accept the sample. Record $(\mathbf{x}_{k}^{(w)}, e_{sign})$ where $e_{sign}$ is the sign ($+$ or $-$) that yielded $\Delta F_{total}$.
+-                        *   Update the residual images $\mathbf{r}_j$ by splatting $\pm e_d$ at $\text{proj}_j(\mathbf{x}_{k}^{(w)})$ [S1].
+-                        *   Update $\Delta F^{(w)} \leftarrow \Delta F_{total}(\mathbf{x}_{k}^{(w)})$.
+-                    *   Else:
+-                        *   Reject. Set $\mathbf{x}_{k}^{(w)} \leftarrow \mathbf{x}_{k-1}^{(w)}$.
++    *   Repeat until the total number of mutations across all walks exceeds $N_{total}$.
++    *   For each active walk $k$ with current position $\mathbf{x}_{prev}$:
++        a.  **Mutation:** Generate candidate $\mathbf{x}_{cand}$ by adding Gaussian noise to $\mathbf{x}_{prev}$:
++            $$ \mathbf{x}_{cand} = \mathbf{x}_{prev} + \mathbf{\epsilon}, \quad \mathbf{\epsilon} \sim \mathcal{N}(0, \sigma^2 I) $$
++            where $\sigma$ is typically 5-10% of the diagonal of the reconstruction bounding box [S1].
++        b.  **Visual Hull Check:** If $\mathbf{x}_{cand}$ is outside the visual hull (i.e., not visible in all cameras or outside the bounding volume), reject immediately and continue to next mutation [S1].
++        c.  **Objective Change Calculation:** Compute $\Delta F(\mathbf{x}_{cand})$, the change in the objective function if a sample were placed at $\mathbf{x}_{cand}$.
++            *   Calculate tentative residual updates for both positive ($+e_d$) and negative ($-e_d$) emissivity.
++            *   For each camera $j$, project $\mathbf{x}_{cand}$ to 2D: $\mathbf{u}_j = proj_j(\mathbf{x}_{cand})$.
++            *   Compute the change in squared residual at the projected pixel location. Let $r_j(\mathbf{u})$ be the value in residual image $\mathbf{r}_j$ at pixel $\mathbf{u}$.
++            *   The change in data fidelity for camera $j$ with emissivity sign $s \in \{+1, -1\}$ is:
++                $$ \Delta_j^s F = r_j(\mathbf{u}_j)^2 - (r_j(\mathbf{u}_j) - s \cdot e_d \cdot K(\mathbf{u}_j))^2 $$
++                where $K(\mathbf{u}_j)$ is the kernel value (e.g., Gaussian or box filter) at the center of the splat. For simplicity, if using a delta-like splat or assuming the residual is updated by subtracting the contribution, the formula simplifies to checking the reduction in squared error. The source defines:
++                $$ \tilde{\mathbf{r}}_j^\pm = splat(\mathbf{r}_j, proj_j(\mathbf{x}_{cand}), \pm e_d) $$
++                $$ \Delta_j^\pm F(\mathbf{x}_{cand}) = \mathbf{r}_j(proj_j(\mathbf{x}_{cand}))^2 - \tilde{\mathbf{r}}_j^\pm(proj_j(\mathbf{x}_{cand}))^2 $$
++                $$ \Delta^\pm F(\mathbf{x}_{cand}) = \sum_{j=1}^M \Delta_j^\pm F(\mathbf{x}_{cand}) $$
++            *   Select the best sign: $\Delta_{data} F = \max(\Delta^+ F, \Delta^- F)$.
++            *   Calculate regularization change $\Delta_{reg} F$. This depends on the specific regularizer (see [Stochastic Tomography Regularization](#stochastic-tomography-regularization)).
++            *   Total change: $\Delta F(\mathbf{x}_{cand}) = \Delta_{data} F + \Delta_{reg} F$.
++        d.  **Acceptance:**
++            *   If $\Delta F(\mathbf{x}_{cand}) \le 0$, the sample does not improve the objective. Reject: $\mathbf{x}_{prev} \leftarrow \mathbf{x}_{cand}$ (continue walk from new location, but do not record sample) [S1].
++            *   If $\Delta F(\mathbf{x}_{cand}) > 0$:
++                *   Calculate acceptance probability $a$. Since the transition PDF is symmetric ($t(\mathbf{x}_{cand}|\mathbf{x}_{prev}) = t(\mathbf{x}_{prev}|\mathbf{x}_{cand})$), the Metropolis-Hastings ratio simplifies. However, the source notes this is not strictly MCMC because the target PDF is unknown and $\Delta F$ depends on history. The algorithm uses a simplified acceptance rule derived from the ratio of improvements:
++                    $$ a = \min\left(1, \frac{\Delta F(\mathbf{x}_{cand})}{\Delta F(\mathbf{x}_{prev})}\right) $$
++                    *Note: The source pseudocode uses `random() <= a` where `a` is the ratio. If $\Delta F(\mathbf{x}_{prev})$ is not defined for the first step, it is treated as infinite or the sample is accepted if $\Delta F > 0$.*
++                *   If `random() <= a`:
++                    *   Accept sample: Add $(\mathbf{x}_{cand}, s \cdot e_d)$ to $\mathcal{S}$, where $s$ is the sign that yielded $\Delta_{data} F$.
++                    *   Update residual images: $\mathbf{r}_j \leftarrow splat(\mathbf{r}_j, proj_j(\mathbf{x}_{cand}), -s \cdot e_d)$ for all $j$. (Subtract the contribution from the residual).
++                    *   Update $F_{curr} \leftarrow F_{curr} + \Delta F(\mathbf{x}_{cand})$.
++                    *   $\mathbf{x}_{prev} \leftarrow \mathbf{x}_{cand}$.
+                 *   Else:
+-                    *   Reject. Set $\mathbf{x}_{k}^{(w)} \leftarrow \mathbf{x}_{k-1}^{(w)}$.
++                    *   Reject sample.
++                    *   $\mathbf{x}_{prev} \leftarrow \mathbf{x}_{cand}$ (continue walk from new location).
++
++3.  **Post-processing:**
++    *   The final volume is represented by the set $\mathcal{S}$. Rendering is performed by splatting these samples into images.
+ 
+ **Pseudocode:**
+ 
+ ```python
+-import numpy as np
+-
+-def stochastic_tomography(observations, projections, visual_hull_mask, 
+-                          num_walks, sample_budget, sigma, emissivity, 
+-                          regularizer=None):
++import random
++import math
++
++def stochastic_tomography(observations, cameras, visual_hull, N_total, K_walks, sigma, e_d, regularizer):
+     """
+-    observations: List of M 2D arrays (images)
+-    projections: Function proj(image_idx, point_3d) -> (u, v)
+-    visual_hull_mask: Function is_in_hull(point_3d) -> bool
+-    num_walks: W
+-    sample_budget: N_total
++    observations: list of M 2D arrays (images)
++    cameras: list of M projection functions proj(x) -> (u, v)
++    visual_hull: function is_inside(x) -> bool
++    N_total: total number of mutations allowed
++    K_walks: number of parallel random walks
+     sigma: Gaussian mutation width
+-    emissivity: e_d
+-    regularizer: Function calc_reg_change(prev_samples, new_sample) -> delta_E
++    e_d: emissivity step size
++    regularizer: object with method delta_energy(samples, x_new)
+     """
+     M = len(observations)
+-    residuals = [img.copy() for img in observations]
+-    
+-    # Initialize walks
+-    # Each walk state: (current_point, prev_delta_F)
+-    walks = []
+-    for _ in range(num_walks):
+-        x0 = np.random.uniform(low=volume_min, high=volume_max, size=3)
+-        walks.append({'x': x0, 'delta_F': 0.0, 'history': [x0]})
+-        
+-    accepted_samples = []
+-    total_accepted = 0
+-    
+-    while total_accepted < sample_budget:
+-        for w_idx in range(num_walks):
+-            if total_accepted >= sample_budget:
++    # Initialize residual images with observations
++    residuals = [obs.copy() for obs in observations]
++    
++    # Current objective value (sum of squared residuals)
++    # Note: Regularizer energy of empty set is 0
++    current_F = sum(sum(r**2 for r in row) for r in residuals)
++    
++    samples = [] # List of (x, emissivity)
++    
++    # Initialize K walks with random positions inside visual hull
++    # Helper to get random point in hull
++    current_positions = [get_random_point_in_hull() for _ in range(K_walks)]
++    
++    mutations_count = 0
++    
++    while mutations_count < N_total:
++        for k in range(K_walks):
++            if mutations_count >= N_total:
+                 break
+                 
+-            walk = walks[w_idx]
+-            x_prev = walk['x']
+-            delta_F_prev = walk['delta_F']
++            x_prev = current_positions[k]
+             
+             # 1. Mutation
+-            epsilon = np.random.normal(0, sigma, 3)
+-            x_cand = x_prev + epsilon
++            # Add Gaussian noise to each coordinate
++            dx = random.gauss(0, sigma)
++            dy = random.gauss(0, sigma)
++            dz = random.gauss(0, sigma)
++            x_cand = (x_prev[0] + dx, x_prev[1] + dy, x_prev[2] + dz)
+             
+             # 2. Visual Hull Check
+-            if not visual_hull_mask(x_cand):
+-                walk['x'] = x_prev
++            if not visual_hull.is_inside(x_cand):
++                current_positions[k] = x_cand
++                mutations_count += 1
+                 continue
+-                
+-            # 3. Objective Change Calculation
+-            # Calculate residual change for + and - emissivity
+-            delta_F_pos = 0.0
+-            delta_F_neg = 0.0
++            
++            # 3. Calculate Delta F
++            # Calculate data fidelity change for positive and negative emissivity
++            delta_data_pos = 0.0
++            delta_data_neg = 0.0
+             
+             for j in range(M):
+-                u, v = projections(j, x_cand)
+-                # Get current residual value at projection
+-                r_curr = residuals[j][v, u]
+-                
+-                # Simulate splatting +emissivity
+-                # Note: In practice, splatting affects neighbors. 
+-                # The source defines delta F as the difference in squared residuals.
+-                # We approximate the local change.
+-                # r_new = r_curr + kernel * emissivity
+-                # delta = r_curr^2 - r_new^2
+-                
+-                # For simplicity, assuming point-splat or local kernel effect
+-                # The source formula: r_j(proj)^2 - r_tilde_j(proj)^2
+-                # This implies we only care about the pixel value change? 
+-                # No, "splat" implies distribution. The source says:
+-                # "splat(r_j, proj(x_k), e_d) returns the resulting image"
+-                # Then delta F is sum over j of (r_j(proj)^2 - r_tilde_j(proj)^2)
+-                # This suggests the change is evaluated at the projected pixel location
+-                # or the integral over the kernel support. 
+-                # Given the formula (7), it uses r_j(proj_j(x_k))^2. 
+-                # This likely means the value at the center of the kernel or the 
+-                # integrated effect. We will assume the change in the residual 
+-                # image at the projected location is what matters for the delta F calculation 
+-                # as per the source's simplified formula representation.
+-                
+-                # Let's assume a simple point-splat for the delta calculation 
+-                # to match the formula structure r^2 - (r+e)^2 = -2re - e^2
+-                # But the source says "splat... returns resulting image".
+-                # We will implement the delta F as the reduction in the sum of squares 
+-                # of the residual image.
+-                
+-                # To be precise to the source:
+-                # delta_j = r_j(proj)^2 - r_tilde_j(proj)^2
+-                # This is ambiguous. Does r_tilde_j(proj) mean the value at the pixel?
+-                # Yes, likely.
+-                
+-                # Calculate new residual value at (u,v) if we splat +e
+-                # Assuming a kernel K, the new value is sum(K * r_old).
+-                # If we assume the kernel is normalized and we just add e to the center:
+-                r_new_pos = r_curr + emissivity # Simplified
+-                delta_F_pos += r_curr**2 - r_new_pos**2
+-                
+-                r_new_neg = r_curr - emissivity
+-                delta_F_neg += r_curr**2 - r_new_neg**2
+-                
+-            delta_F = max(delta_F_pos, delta_F_neg)
+-            
+-            # Add Regularization
+-            delta_reg = 0.0
+-            if regularizer:
+-                delta_reg = regularizer(walk['history'], x_cand)
+-                
+-            delta_F_total = delta_F + delta_reg
++                # Project to 2D
++                u, v = cameras[j].project(x_cand)
++                
++                # Get current residual value at this pixel
++                # Assume bilinear interpolation or nearest neighbor for residual access
++                r_val = residuals[j].get_value(u, v)
++                
++                # Tentative new residual if we add +e_d
++                # The residual is o - v_proj. If we add emissivity e_d to v_proj,
++                # the new residual is r_val - e_d.
++                # Change in squared residual: r^2 - (r - e_d)^2 = 2*r*e_d - e_d^2
++                # Source uses splatting which might blur, but for single pixel update:
++                # delta = r^2 - (r - e_d)^2
++                delta_pos_j = r_val**2 - (r_val - e_d)**2
++                delta_neg_j = r_val**2 - (r_val + e_d)**2
++                
++                delta_data_pos += delta_pos_j
++                delta_data_neg += delta_neg_j
++            
++            # Select best sign
++            if delta_data_pos > delta_data_neg:
++                best_sign = 1
++                delta_data = delta_data_pos
++            else:
++                best_sign = -1
++                delta_data = delta_data_neg
++            
++            # Calculate regularization change
++            # Regularizer is evaluated on stencils around x_cand
++            delta_reg = regularizer.delta_energy(samples, x_cand)
++            
++            delta_F = delta_data + delta_reg
+             
+             # 4. Acceptance
+-            if delta_F_prev < 0 or np.random.rand() <= min(1.0, delta_F_total / delta_F_prev):
+-                if delta_F_total > 0:
+-                    # Accept
+-                    sign = '+' if delta_F_pos > delta_F_neg else '-'
+-                    e_val = emissivity if sign == '+' else -emissivity
+-                    
+-                    # Update residuals
+-                    for j in range(M):
+-                        u, v = projections(j, x_cand)
+-                        # Splat e_val into residuals[j]
+-                        residuals[j] = splat(residuals[j], (u,v), e_val)
+-                        
+-                    accepted_samples.append((x_cand, e_val))
+-                    walk['x'] = x_cand
+-                    walk['delta_F'] = delta_F_total
+-                    walk['history'].append(x_cand)
+-                    total_accepted += 1
+-                else:
+-                    walk['x'] = x_prev
++            # Only accept if it reduces the objective (delta_F > 0 means reduction in error)
++            # Note: Source defines delta_F as reduction. If delta_F <= 0, no improvement.
++            if delta_F <= 0:
++                current_positions[k] = x_cand
++                mutations_count += 1
++                continue
++            
++            # Acceptance probability
++            # If first step or previous delta_F was not stored/defined, accept if delta_F > 0
++            # The source pseudocode: a = delta_F(x_k) / delta_F(x_{k-1})
++            # We need to track the delta_F of the *previous accepted step* or the *current walk step*?
++            # The source says: "a = Delta F(x_k) / Delta F(x_{k-1})". 
++            # In the context of the loop, x_{k-1} is the previous sample in the walk.
++            # However, the walk always moves to x_cand. The "previous" delta_F refers to the 
++            # improvement achieved by the step that led to x_prev? 
++            # The source pseudocode implies we compare the current improvement to the previous improvement.
++            # If we don't have a previous improvement (start of walk), we accept.
++            
++            # To implement strictly from source:
++            # We need to store the delta_F of the last step taken in this walk.
++            # Let's assume we track last_delta_F for each walk.
++            
++            # For simplicity in this self-contained code, if we can't retrieve last_delta_F,
++            # we treat it as infinity (acceptance prob 1) or use a heuristic.
++            # The source says: "if Delta F(x_{k-1}) < 0 or random() <= a".
++            # This implies if the previous step was bad (which shouldn't happen if we only record good steps?),
++            # we accept? No, the walk continues regardless.
++            
++            # Let's assume we store the delta_F of the transition x_prev -> x_cand? 
++            # No, x_prev was accepted. We need the delta_F of the transition that created x_prev.
++            
++            # Simplified logic matching source structure:
++            # a = min(1, delta_F / last_delta_F)
++            # If last_delta_F is None (start), a = 1.
++            
++            # Note: The source pseudocode has `if Delta F(x_{k-1}) < 0`. 
++            # This likely refers to the case where the previous step didn't improve the objective 
++            # in a standard MCMC sense, but here we only move if we improve? 
++            # Actually, the walk moves to x_cand even if rejected. 
++            # The variable `Delta F(x_{k-1})` in the ratio likely refers to the improvement 
++            # of the step that landed on x_{k-1}.
++            
++            # Implementation detail: Store `walk_improvements[k]`
++            
++            # ... (Assuming walk_improvements is maintained) ...
++            
++            if k in walk_improvements and walk_improvements[k] > 0:
++                a = min(1.0, delta_F / walk_improvements[k])
+             else:
+-                walk['x'] = x_prev
+-                
+-    return accepted_samples, residuals
++                a = 1.0
++            
++            if random.random() <= a:
++                # Accept
++                samples.append((x_cand, best_sign * e_d))
++                
++                # Update residuals: subtract the contribution
++                for j in range(M):
++                    u, v = cameras[j].project(x_cand)
++                    # Splat negative emissivity to reduce residual
++                    residuals[j].splat(u, v, -best_sign * e_d)
++                
++                current_F += delta_F
++                walk_improvements[k] = delta_F
++                current_positions[k] = x_cand
++            else:
++                # Reject
++                current_positions[k] = x_cand
++                # Do not update walk_improvements? Or keep old? 
++                # The walk continues from x_cand. The next step will compare to this one?
++                # The source doesn't specify updating the denominator on rejection.
++                # It implies the denominator is the improvement of the *previous accepted sample's creation*.
++                # So we do NOT update walk_improvements on rejection.
++            
++            mutations_count += 1
++            
++    return samples
++
++def get_random_point_in_hull():
++    # Placeholder for sampling uniformly within the visual hull bounding box
++    # and checking visibility.
++    return (random.random(), random.random(), random.random())
+ ```
+ 
+@@ -201,19 +246,17 @@
+ 
+ ### Stochastic Tomography Regularization
+-This variant incorporates prior information into the objective function to handle sparse or noisy measurements [S1]. Regularizers must be convex and have relatively compact support for efficient per-sample evaluation [S1]. They are evaluated on stencils centered at the sample with spacing equal to the grid spacing [S1].
+-*   **L2 Regularizer:** Uses a 7-point Laplacian stencil in 3D; the result is squared [S1].
+-*   **Total Variation (TV):** Uses gradient magnitude computed via first-order finite differences [S1].
+-*   **SAD (Sum of Absolute Differences):** Sums the absolute difference between the center sample and each of the 26 neighbors in a 3x3x3 window [S1].
+-*   **Image-Space Regularization:** Applies 2D variants of the above regularizers directly on the generated output images. The total regularizer value is the sum of individual image regularizers. This biases the solution to satisfy measurements while producing smooth output, unlike post-processing smoothing which yields results inconsistent with measurements [S1].
++This variant extends the core algorithm by incorporating convex regularizers $\Gamma(\mathbf{v})$ into the objective function. It distinguishes itself by evaluating the regularizer change $\Delta \Gamma$ on local stencils centered at the candidate sample $\mathbf{x}_k$, allowing for efficient per-sample updates without global recomputation [S1]. It supports 3D grid-based regularizers (L2, TV, SAD) and 2D image-space regularizers. Image-space regularization applies 2D variants of 3D regularizers directly to the rendered output images, biasing the solution to satisfy measurements while producing smooth outputs, which is superior to post-processing smoothing that breaks measurement consistency [S1].
+ 
+ ## Operating characteristics
+-*   **Time Complexity:** Computation time scales linearly with the sample budget. For example, 200 million mutations take ~14 minutes per frame, and 400 million mutations take ~31 minutes per frame on a single Intel i7 core [S1].
+-*   **Memory Complexity:** Matrix-free. Memory usage depends on the number of accepted samples and the size of the residual images, not on the volume resolution grid [S1].
+-*   **Strengths:** Grid-free representation avoids fixed resolution tradeoffs; easy to swap regularizers without re-implementing the solver; handles sparse views well [S1].
+-*   **Limitations:** Sensitive to camera misalignment (limits resolution); reflections in the capture environment (e.g., glass beaker walls) can introduce artifacts if consistent across cameras [S1].
+-*   **When to use:** 3D imaging of mixing fluids, transparent volumes, or scenes where grid-based artifacts are undesirable and sparse views are available [S1].
++*   **Time Complexity:** Linear with respect to the number of samples and cameras per mutation. Each mutation requires projecting the sample to $M$ cameras and updating $M$ residual images. Total time is proportional to $N_{total} \times M$.
++*   **Memory Complexity:** $O(M \cdot W_{img} \cdot H_{img} + N_{samples})$. Stores $M$ residual images and the list of accepted samples. No large projection matrix $W$ is stored.
++*   **Measured Performance:** On a single core of an Intel i7 desktop, 200 million mutations took 14 minutes per frame, and 400 million mutations took 31 minutes per frame [S1].
++*   **Strengths:** Grid-free representation avoids fixed resolution tradeoffs; easy to swap regularizers without re-implementing the solver; handles sparse views well; allows positive and negative emissivity for rough-in and refinement phases [S1].
++*   **Limitations:** Computationally intensive for high sample budgets; sensitive to camera misalignment (limits resolution); reflections in capture setup can introduce artifacts if not separated from volume data [S1].
++*   **When to use:** When grid-free reconstruction is desired, when regularizer flexibility is needed, or when dealing with sparse views.
++*   **When not to use:** When real-time performance is critical and sample budgets must be low; when camera alignment is poor.
+ 
+ ## Background
+-Stochastic Tomography was introduced in a paper titled "Stochastic tomography and its applications in 3D imaging of mixing fluids" [S1]. It was developed to address the limitations of grid-based methods like SART, which require fixed output grids and complex re-implementation for different regularizers [S1]. The method was applied to 3D imaging of mixing fluids, including fluorescein-sodium dye in water, alcohol-fluorescein-sodium mixtures, and dyepowder [S1].
++Stochastic Tomography was introduced in the paper "Stochastic tomography and its applications in 3D imaging of mixing fluids" [S1]. It was developed to address the limitations of spatial discretization in traditional CT methods like SIRT and SART, which require fixed grids and complex re-implementation for different regularizers. The method was applied to 3D imaging of mixing fluids, including fluorescein-sodium dye in water, alcohol-fluorescein-sodium mixtures, and dyepowder [S1].
+ 
+ ## Sources

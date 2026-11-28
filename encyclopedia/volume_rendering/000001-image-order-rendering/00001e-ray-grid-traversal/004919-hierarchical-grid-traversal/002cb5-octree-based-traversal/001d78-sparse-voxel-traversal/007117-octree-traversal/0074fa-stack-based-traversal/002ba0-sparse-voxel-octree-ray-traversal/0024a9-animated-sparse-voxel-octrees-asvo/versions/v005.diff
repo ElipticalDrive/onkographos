@@ -1,0 +1,170 @@
+--- v004.md
++++ v005.md
+@@ -4,21 +4,16 @@
+ 
+ ## Overview
+-ASVO is a GPU-based raycasting method for rendering animated sparse voxel octrees (SVOs) using X-Toon shading [S1, S2, unofficial]. It solves the problem of efficiently rendering voxel-based characters and models that undergo rigid transformations or skinning by animating rigid octree parts via a keyframed skeleton and placing them in a per-frame top-level bounding volume hierarchy (BVH) [S1, unofficial]. Unlike static SVO renderers, ASVO dynamically updates the spatial acceleration structure every frame to account for bone-driven deformation, allowing for real-time animation of complex voxel models [S2, unofficial].
++ASVO is a GPU-based raycasting method for rendering animated sparse voxel octrees (SVOs) using X-Toon shading [S1, unofficial]. It solves the problem of efficiently rendering voxel-based characters and models that undergo rigid transformations or skinning by animating rigid octree parts via a keyframed skeleton and placing them in a per-frame top-level bounding volume hierarchy (BVH) [S1, unofficial]. Unlike static SVO renderers, ASVO dynamically updates the spatial acceleration structure every frame to account for bone-driven deformation, allowing for real-time animation of complex voxel models [S2, unofficial].
+ 
+ ## How it works
+-The method consists of an octree builder, an animation system, a traversal kernel, and a shading/draw kernel. It is implemented using OpenGL 4.5 compute shaders [S1, unofficial].
++The method consists of an octree builder, an animation system, a traversal kernel, and a shading/draw kernel [S1, S2, unofficial]. It is implemented using OpenGL 4.5 compute shaders [S1, unofficial].
+ 
+ ### Inputs and Outputs
+-**Inputs:**
+-*   Sparse Voxel Octree data: Inner nodes, leaf nodes (visual data), and animation bone matrices.
+-*   Scene data: Camera position, view/projection matrices, light position, and texture maps (diffuse, illumination, normal, specular) [S2, unofficial].
+-*   Animation frame index [S2, unofficial].
+-
+-**Outputs:**
+-*   Color buffer (final rendered image) [S2, unofficial].
+-*   Depth buffer (for visibility culling) [S2, unofficial].
++**Inputs:** Sparse Voxel Octree data including inner nodes, leaf nodes (visual data), and animation bone matrices [S2, unofficial]. Scene data including camera position, view and projection matrices, light position, and texture maps (diffuse, illumination, normal, specular) [S2, unofficial].
++
++**Outputs:** Color buffer containing the final rendered image [S2, unofficial]. Depth buffer used for visibility culling [S2, unofficial].
+ 
+ ### Data Structures
+-The implementation uses parallel arrays to store the octree and job queue.
++The implementation uses parallel arrays to store the octree and job queue [S2, unofficial].
+ 
+ **Inner Nodes (`BFSInnerNode`):**
+@@ -44,5 +39,5 @@
+ 1.  **Octree Building (Pre-processing):**
+     *   Build the octree from Signed Distance Fields (SDFs) or raw volumes using a Morton-sorted, bottom-up approach [S1, unofficial].
+-    *   Prefilter color and normal data during construction [S1, unofficial].
++    *   Prefilter colour and normal data during construction [S1, unofficial].
+     *   Perform size checks on nodes [S1, unofficial].
+ 
+@@ -53,5 +48,5 @@
+ 
+ 3.  **Traversal Kernel (Job Queue Processing):**
+-    *   Each thread processes one job from a shared queue.
++    *   Each thread processes one job from a shared queue [S2, unofficial].
+     *   **Grid Cell Calculation:** Calculate the dimensions of the voxel at the current octree level:
+         $$gridCellDim = \frac{dimension}{2^{octreeLevel}}$$
+@@ -59,5 +54,5 @@
+         [S2, unofficial]
+     *   **Skinning Application:**
+-        *   Compute the voxel center in world space.
++        *   Compute the voxel center in world space [S2, unofficial].
+         *   If the leaf node has bone weights (`node.vd.boneWeights.x > 0`), interpolate the center position using up to 4 bone transformations from the `animation` buffer based on `boneIndex0-3` and `boneWeights.x-w` [S2, unofficial].
+         *   Otherwise, use the original center [S2, unofficial].
+@@ -79,5 +74,5 @@
+             $$depth = center.z \times \text{INT\_MAX}$$
+             [S2, unofficial]
+-        *   If the voxel has children (`d_getChildCountFromMask(node.mask) != 0`) and spans more than 1 pixel (`dimVec.x > 1.0`), add child jobs to the queue using `atomicAdd` on `sharedTravQueuePtr` [S2, unofficial].
++        *   If the voxel has children (`childCount != 0`) and spans more than 1 pixel (`dimVec.x > 1.0`), add child jobs to the queue using `atomicAdd` on `sharedTravQueuePtr` [S2, unofficial].
+         *   Otherwise, update the depth buffer:
+             $$atomicMin(depthBuffer + index, depth)$$
+@@ -100,12 +95,9 @@
+ 
+ ```python
+-# Traversal Kernel
+-def traversal_kernel(job_queue, inner_nodes, leaves, animation, world_matrix, view_matrix, projection_matrix, cam_pos, depth_buffer, voxel_buffer, shared_trav_queue_ptr):
++INT_MAX = 2147483647
++
++def traversal_kernel(job_queue, inner_nodes, leaves, animation, world_matrix, view_matrix, projection_matrix, cam_pos, depth_buffer, voxel_buffer, shared_trav_queue_ptr, dimension, octree_level, dim_vec, original_center, width):
+     job = job_queue.pop()
+     node = inner_nodes[job.index]
+-    
+-    # Determine octree level from job context or global state
+-    octree_level = get_octree_level(job)
+-    dimension = get_world_dimension()
+     
+     # Grid cell dimensions
+@@ -113,19 +105,16 @@
+     grid_cell_half_dim = grid_cell_dim * 0.5
+     
+-    # Get leaf visual data if this is a leaf traversal, or process children
+-    # Assuming job points to a node to be expanded or a leaf to be rendered
+-    # For simplicity, assuming we are processing a leaf node's contribution here
+-    # In the actual BFS, jobs point to inner nodes to expand. 
+-    # The logic below reflects the leaf processing described in notes.
+-    
+-    # If this job represents a leaf node (or we are processing leaf data):
+-    vd = leaves[job.index] # Simplified indexing for leaf
++    # Get leaf visual data
++    vd = leaves[job.index]
+     
+     # Skinning
+-    center = get_original_center(job)
++    center = original_center
+     if vd.bone_weights[0] > 0.0:
+-        involved_bones = count_non_zero(vd.bone_weights)
++        involved_bones = sum(1 for w in vd.bone_weights if w > 0.0)
+         # Interpolate center using up to 4 bone transformations
+-        center = interpolate_skinning(center, vd.bone_index_0, vd.bone_index_1, vd.bone_index_2, vd.bone_index_3, vd.bone_weights, animation)
++        center = (vd.bone_weights[0] * (animation[job.bone_index_0] @ original_center) +
++                  vd.bone_weights[1] * (animation[job.bone_index_1] @ original_center) +
++                  vd.bone_weights[2] * (animation[job.bone_index_2] @ original_center) +
++                  vd.bone_weights[3] * (animation[job.bone_index_3] @ original_center))
+         # Counteract stretching
+         grid_cell_half_dim *= min(2.0, involved_bones)
+@@ -133,5 +122,5 @@
+     # Transform to clip space
+     center_world = center
+-    center_clip = projection_matrix * view_matrix * world_matrix * center_world
++    center_clip = projection_matrix @ view_matrix @ world_matrix @ center_world
+     
+     # Eye vector
+@@ -151,6 +140,5 @@
+     
+     # Check if leaf or has children
+-    child_count = get_child_count_from_mask(node.mask)
+-    dim_vec = get_dimension_vector(node)
++    child_count = bin(node.mask).count('1')
+     
+     if child_count != 0 and dim_vec.x > 1.0:
+@@ -160,9 +148,9 @@
+                 new_job = BFSJob(node.child_ptr + i, (job.x * 2) + (i & 1), (job.y * 2) + ((i & 2) >> 1), (job.z * 2) + ((i & 4) >> 2))
+                 atomic_add(shared_trav_queue_ptr, 1)
+-                job_queue[atomic_add(shared_trav_queue_ptr, -1)] = new_job # Push to queue
++                job_queue[atomic_add(shared_trav_queue_ptr, -1)] = new_job
+     else:
+         # Update depth buffer
+-        index = get_screen_index(x_screen, y_screen)
+-        old_depth = atomic_min(depth_buffer + index, depth)
++        index = y_screen * width + x_screen
++        old_depth = atomic_min(depth_buffer[index], depth)
+         
+         # If we won the depth test (or it was the first write)
+@@ -171,6 +159,5 @@
+             voxel_buffer[index] = VisualData(vd.normal, vd.tangent, center_world, vd.tex_coord, eye_vec, vd.original_center)
+ 
+-# Draw Kernel
+-def draw_kernel(depth_buffer, voxel_buffer, shadow_map, diffuse_map, illum_map, spec_map, normal_map, color_buffer):
++def draw_kernel(depth_buffer, voxel_buffer, shadow_map, diffuse_map, illum_map, spec_map, normal_map, color_buffer, width, height):
+     x, y = get_pixel_coordinates()
+     
+@@ -181,5 +168,5 @@
+     for dy in range(-1, 2):
+         for dx in range(-1, 2):
+-            idx = get_screen_index(x + dx, y + dy)
++            idx = (y + dy) * width + (x + dx)
+             d = depth_buffer[idx]
+             if d < min_depth:
+@@ -218,14 +205,20 @@
+ 
+ ## Operating characteristics
+-*   **Time Complexity:** The traversal is hierarchical DDA with pixel-footprint LOD [S1, unofficial]. The complexity depends on the depth of the octree and the number of visible voxels. The use of a job queue allows for parallel processing on the GPU [S2, unofficial].
+-*   **Memory Complexity:** Requires storage for inner nodes, leaf nodes, animation matrices, and the BVH [S1, S2, unofficial]. The BVH is rebuilt per frame, which adds overhead but allows for efficient culling of animated parts [S1, unofficial].
++*   **Time Complexity:** The traversal follows a hierarchical DDA with pixel-footprint LOD [S1, unofficial]. The traversal complexity depends on the depth of the octree and the number of visible voxels [S2, unofficial]. The use of a job queue allows for parallel processing on the GPU [S2, unofficial].
++*   **Memory Complexity:** Requires storage for inner nodes, leaf nodes, animation matrices, and the per-frame BVH [S1, S2, unofficial]. The per-frame BVH allows for efficient culling of non-visible animated parts [S1, unofficial].
+ *   **Performance:** The implementation includes unit tests for traversal and BVH against brute force, and a `--compare` mode that checks GPU output against the CPU renderer, ensuring correctness [S1, unofficial].
+-*   **Strengths:** Efficiently handles animated voxel models using skinning and hierarchical culling. The per-frame BVH allows for efficient culling of non-visible animated parts.
++*   **Strengths:** Efficiently handles animated voxel models using skinning and hierarchical culling [S1, unofficial].
+ *   **Limitations:** The per-frame BVH construction adds overhead. The method is specific to OpenGL 4.5 compute shaders in the provided implementation [S1, unofficial].
+ 
+ ## Background
+-ASVO was introduced as part of a thesis project on animated sparse voxel octrees [S2, unofficial]. The original implementation was in CUDA/C++ with an XNA/C# prototype for design [S2, unofficial]. A later rebuild by Andre Rogers added an OpenGL 4.5 compute shader implementation with X-Toon shading, fixing several shader bugs from the original 2016 version [S1, unofficial]. The method is demonstrated with scenes such as a crowd of walkers sharing limb octrees and a bonsai tree [S1, unofficial].
++ASVO originated as a thesis project on animated sparse voxel octrees [S2, unofficial]. The initial high-performance implementation used CUDA/C++ with an XNA/C# prototype for data structure and algorithm design [S2, unofficial]. A later rebuild by Andre Rogers introduced an OpenGL 4.5 compute shader implementation with X-Toon shading, fixing several shader bugs from the original 2016 version [S1, unofficial]. The method is demonstrated with scenes such as a crowd of walkers sharing limb octrees and a bonsai tree [S1, unofficial].
++
++## Subtopics
++
++### Voxel Animation Playback
++Animates imported voxel scenes using keyed transforms (nTRN) and frame-by-frame model switching (nSHP) [S3, unofficial]. Tracks nTRN frame keys for transform animation (rotation and translation) and nSHP model keys for switching [S3, unofficial]. Driven by a root VoxelAnimationPlayback3DComponent clock [S3, unofficial]. Parameter: `autoplay` boolean in Model3DSource controls automatic playback start [S3, unofficial].
+ 
+ ## Sources
+ [S1] Add svo/: animated sparse voxel octree renderer with X-Toon shading, https://github.com/andrerogers/XToonVolume/pull/1, fetched 2026-10-25 (unofficial)
+-[S2] denniskb/asvo, https://github.com/denniskb/asvo, fetched 2026-10-26 (unofficial)+[S2] denniskb/asvo, https://github.com/denniskb/asvo, fetched 2026-10-26 (unofficial)
++[S3] Voxel graphics: MagicaVoxel import, animation, dynamic world and physics (ADR-0025), https://github.com/AdaEngine/Ada/pull/136, fetched 2026-10-26 (unofficial)

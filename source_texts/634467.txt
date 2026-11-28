@@ -1,0 +1,132 @@
+Now Navigator takes point on zero altitude as a root point for gesture. It makes gestures to rotate around point below the surface. It is wrong! Camera should take lookAt point on the surface and the best way is just use pick terrain on ...
+
+Fix navigator lookAt point calculation considering terrain elevation · Issue #247 · NASAWorldWind/WorldWindAndroid · GitHub
+Skip to content
+You signed in with another tab or window. Reload to refresh your session.
+You signed out in another tab or window. Reload to refresh your session.
+You switched accounts on another tab or window. Reload to refresh your session.
+Dismiss alert
+Fix navigator lookAt point calculation considering terrain elevation #247
+New issue
+Copy link
+New issue
+Copy link
+Open
+Open
+Fix navigator lookAt point calculation considering terrain elevation#247
+Copy link
+Description
+EMaksymenko
+opened on Oct 28, 2021
+Issue body actions
+Now Navigator takes point on zero altitude as a root point for gesture. It makes gestures to rotate around point below the surface. It is wrong!
+Camera should take lookAt point on the surface and the best way is just use pick terrain on the gesture begin.
+```
+    @Override
+    protected LookAt cameraToLookAt(Globe globe, Camera camera, LookAt result) {
+        this.cameraToViewingMatrix(globe, camera, this.modelview);
+
+        // Pick terrain located behind the viewport center point
+        PickedObject terrainPickedObject = wwd.pick(wwd.getViewport().width / 2f, wwd.getViewport().height / 2f).terrainPickedObject();
+        if (terrainPickedObject != null) {
+            // Use picked terrain position including approximate rendered altitude
+            this.originPos.set(terrainPickedObject.getTerrainPosition());
+            globe.geographicToCartesian(this.originPos.latitude, this.originPos.longitude, this.originPos.altitude, this.originPoint);
+            globe.cartesianToLocalTransform(this.originPoint.x, this.originPoint.y, this.originPoint.z, this.origin);
+        } else {
+            // Center is outside the globe - use point on horizon
+            this.modelview.extractEyePoint(this.forwardRay.origin);
+            this.modelview.extractForwardVector(this.forwardRay.direction);
+            this.forwardRay.pointAt(globe.horizonDistance(camera.altitude), this.originPoint);
+            globe.cartesianToGeographic(this.originPoint.x, this.originPoint.y, this.originPoint.z, this.originPos);
+            globe.cartesianToLocalTransform(this.originPoint.x, this.originPoint.y, this.originPoint.z, this.origin);
+        }
+
+        // Calculate look at rotation matrix (code from original Navigator implementation)
+        this.modelview.multiplyByMatrix(this.origin);
+
+        result.latitude = this.originPos.latitude;
+        result.longitude = this.originPos.longitude;
+        result.altitude = this.originPos.altitude;
+        result.range = -this.modelview.m[11];
+        result.heading = this.modelview.extractHeading(camera.roll); // disambiguate heading and roll
+        result.tilt = this.modelview.extractTilt();
+        result.roll = camera.roll; // roll passes straight through
+
+        return result;
+    }
+```
+It is also required to remove one line from BasicFrameController.renderTerrainPickedObject() method:
+this.pickPos.altitude = 0; // report the actual altitude, which may not lie on the terrain's surface
+This line reset picked point altitude calculated using current terrain details tesellation and do not allows to use pick functionality in Navigator.
+Movement event should be executed via handler, because its listeners may call Navigator.getAsLookAt(), which use pick() and render next frame from inside of current frame causing recursion.
+Initial frame rendering must call stop event to initialize UI with initial navigator state.
+```
+class CustomNavigatorEventSupport extends NavigatorEventSupport {
+
+    private Handler moveHandler = new Handler(Looper.getMainLooper(), new Handler.Callback() {
+        @Override
+        public boolean handleMessage(Message msg) {
+            onNavigatorMoved();
+            return false;
+        }
+    });
+
+    CustomNavigatorEventSupport(CustomWorldWindow wwd) {
+        super(wwd);
+    }
+
+    @Override
+    public void onFrameRendered(RenderContext rc) {
+        if (this.listeners.isEmpty()) {
+            return; // no listeners to notify; ignore the event
+        }
+
+        if (this.lastModelview == null) { // this is the first frame; copy the frame's modelview
+            this.lastModelview = new Matrix4(rc.modelview);
+            // Notify listeners with stopped event on first frame
+            this.stopHandler.removeMessages(0 /*what*/);
+            this.stopHandler.sendEmptyMessage(0 /*what*/);
+        } else if (!this.lastModelview.equals(rc.modelview)) { // the frame's modelview has changed
+            this.lastModelview.set(rc.modelview);
+            // Notify the listeners of a navigator moved event.
+            this.moveHandler.removeMessages(0 /*what*/);
+            this.moveHandler.sendEmptyMessage(0/*what*/);
+            // Schedule a navigator stopped event after a specified delay in milliseconds.
+            this.stopHandler.removeMessages(0 /*what*/);
+            this.stopHandler.sendEmptyMessageDelayed(0 /*what*/, this.stoppedEventDelay);
+        }
+    }
+
+    @Override
+    public void reset() {
+        super.reset();
+        this.moveHandler.removeMessages(0/*what*/);
+    }
+
+}
+```
+WorldWindEarth#9
+🚀React with 🚀1Reacted by Patrick Hogan
+Activity
+Sign up for free to join this conversation on GitHub. Already have an account? Sign in to comment
+Metadata
+Metadata
+Assignees
+No one assigned
+Labels
+No labels
+No labels
+Type
+No type
+Projects
+No projects
+Milestone
+No milestone
+Relationships
+None yet
+Development
+No branches or pull requests
+Issue actions
+Open in GitHub Copilot app
+You can’t perform that action at this time.

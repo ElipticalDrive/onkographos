@@ -1,0 +1,215 @@
+# Differential path integral estimator with MIS and NEE
+
+Also called: Differential NEE estimator, MIS-weighted differential path estimator
+
+## Overview
+This method computes the gradient of the rendered image with respect to scene parameters $\theta$ by integrating differential measurement contributions over path space [S1]. It solves the problem of high variance in gradient estimation for specular materials and complex lighting by combining standard BRDF sampling with Next Event Estimation (NEE) using Multiple Importance Sampling (MIS) [S1]. Unlike standard NEE which only connects paths to emitters at the final vertex, this method allows the differential vertex (the location where the derivative is taken) to be located at any intermediate vertex $i$ or at the emitter connection, combining BRDF and emitter sampling probabilities into a single mixture weight [S1]. It builds on [Reparameterization Estimators](6499-reparameterization-estimators.md) by applying the reparameterization principle to path-space integrals with explicit MIS weights for discontinuous contributions [S1].
+
+## How it works
+**Inputs:**
+- Scene parameters $\theta$ (e.g., material roughness, light intensity, geometry) [S1].
+- Camera configuration [G].
+- Number of samples per pixel $M$ [S1].
+- Maximum path depth $N$ [G].
+- Probability $q$ of switching to differential sampling at each vertex [S1].
+
+**Outputs:**
+- Gradient estimate $\hat{\nabla}_\theta I_{\text{NEE}}$ [S1].
+
+**Data Structures:**
+- Path $x = (x_0, x_1, \dots, x_N)$, where $x_0$ is the camera position and $x_k$ are surface/media vertices [S1].
+- Emitter connection path $x_j x_{e,j}$, where $x_j$ is a vertex on the main path and $x_{e,j}$ is a point on an emitter [S1].
+- Differential contribution $g(x, i; \theta)$ for vertex $i$ on path $x$ [S1].
+- Differential contribution $g(x, x_j x_{e,j}, i; \theta)$ for vertex $i$ on path $x$ connected to emitter at $j$ [S1].
+
+**Steps:**
+1. Initialize gradient accumulator $G = 0$. [G]
+2. For each sample $m = 1 \dots M$: [S1]
+    a. Generate a standard path $x^m$ of depth $N$ using BRDF sampling. [S1]
+    b. Compute the mixture probability $p_{\text{mix}}(x^m)$ using Equation (41). [S1]
+    c. For each vertex $i = 0 \dots N$: [S1]
+        i. Compute the differential contribution $g(x^m, i; \theta)$. [S1]
+        ii. Add $\frac{g(x^m, i; \theta)}{p_{\text{mix}}(x^m)}$ to $G$. [S1]
+    d. For each vertex $j = 1 \dots N-1$: [S1]
+        i. Generate an NEE path $x^m_j x^m_{e,j}$ by connecting vertex $x^m_j$ to an emitter. [S1]
+        ii. Compute the mixture probability $p_{\text{mix}}(x^m, x^m_j x^m_{e,j})$ using Equation (42). [S1]
+        iii. For each vertex $i = 0 \dots j$: [S1]
+            1. Compute the differential contribution $g(x^m, x^m_j x^m_{e,j}, i; \theta)$. [S1]
+            2. Add $\frac{g(x^m, x^m_j x^m_{e,j}, i; \theta)}{p_{\text{mix}}(x^m, x^m_j x^m_{e,j})}$ to $G$. [S1]
+3. Return $G / M$. [S1]
+
+**Formulas:**
+The gradient estimator is given by [S1]:
+$$
+\partial_\theta I_{\text{NEE}} = \frac{1}{M} \sum_{m=1}^M \left[ \sum_{i=0}^{N^m} \frac{g(x^m, i; \theta)}{p_{\text{mix}}(x^m)} + \sum_{j=1}^{N^m-1} \sum_{i=0}^j \frac{g(x^m, x^m_j x^m_{e,j}, i; \theta)}{p_{\text{mix}}(x^m, x^m_j x^m_{e,j})} \right]
+$$
+
+The differential contribution for a standard path $x$ with differential vertex $i$ is derived from the expansion of $\partial_\theta I$ in Eq (35) [S1]:
+$$
+g(x, i; \theta) = \left( \prod_{k=0, k \neq i}^{N} f_k(x) \right) \frac{\partial_\theta f_i(x)}{f_i(x)} L_e(x_N)
+$$
+
+The differential contribution for an NEE path $x, x_j x_{e,j}$ with differential vertex $i$ is [S1]:
+$$
+g(x, x_j x_{e,j}, i; \theta) = \left[ \prod_{k=1}^{j-1} f_k(x) \right] G(x_j, x_{e,j}) \rho_s(x_{j-1}, x_j, x_{e,j}) \cdot \frac{\partial_\theta f_i(x)}{f_i(x)} \cdot L_e(x_{e,j})
+$$
+where:
+- $f_k(x)$ is the BSDF at vertex $x_k$.
+- $G(x_j, x_{e,j})$ is the geometry term between $x_j$ and the emitter point $x_{e,j}$.
+- $\rho_s(x_{j-1}, x_j, x_{e,j})$ is the shadow term (visibility) between $x_{j-1}$ and $x_{e,j}$ via $x_j$.
+- $L_e(x_{e,j})$ is the radiance from the emitter at $x_{e,j}$.
+
+The mixture probability for a standard path $x$ is [S1]:
+$$
+p_{\text{mix}}(x) = p(x) + \sum_{i=1}^{N-1} p(x, i) + p_{\text{nee}}(x, x_{N-1}x_N)
+$$
+where $p(x)$ is the probability of generating $x$ via BRDF sampling, $p(x, i)$ is the probability of generating $x$ with differential vertex $i$ via BRDF sampling, and $p_{\text{nee}}(x, x_{N-1}x_N)$ is the probability of generating $x$ with an NEE connection at the last vertex.
+
+The mixture probability for an NEE path $x, x_j x_{e,j}$ is [S1]:
+$$
+p_{\text{mix}}(x, x_j x_{e,j}) = p(x, x_j x_{e,j}) + \sum_{i=1}^j p(x, x_j x_{e,j}, i) + p_{\text{nee}}(x, x_j x_{e,j}) + \sum_{i=1}^{j-1} p_{\text{nee}}(x, x_j x_{e,j}, i)
+$$
+
+The probability of generating the NEE path with differential vertex $i$ ($1 \le i < j$) via BRDF sampling is [S1]:
+$$
+p(x, x_j x_{e,j}, i) = \begin{cases} p_{\text{nee}}(x, x_j x_{e,j}) \frac{p_f(x_{j-1}x_j x_{e,j})}{p_e(x_j x_{e,j})} & \text{if } 1 \le i < j \\ p_{\text{nee}}(x, x_j x_{e,j}) \frac{p_{\partial f}(x_{j-1}x_j x_{e,j})}{p_e(x_j x_{e,j})} & \text{if } i = j \end{cases}
+$$
+
+The probability of generating the NEE path with differential vertex $i$ ($1 \le i < j$) via differential sampling is [S1]:
+$$
+p_{\text{nee}}(x, x_j x_{e,j}, i) = \frac{\prod_{k=0}^{j-1} p_f(x_k)}{p_f(x_i)} p_{\partial f}(x_i) (1-q)^{i-1} q
+$$
+where $p_f(x_k)$ is the BRDF sampling probability at vertex $k$, $p_{\partial f}(x_i)$ is the differential sampling probability at vertex $i$, and $q$ is the switching probability.
+
+The probability of generating the NEE path without a specific differential vertex (standard NEE) is [S1]:
+$$
+p_{\text{nee}}(x, x_j x_{e,j}) = \left[ \prod_{k=0}^{j-1} p_f(x_k) \right] p_e(x_j x_{e,j}) (1-q)^{j-1}
+$$
+where $p_e(x_j x_{e,j})$ is the emitter sampling probability.
+
+**Parameters:**
+- $q$: Probability of switching to differential sampling at each vertex. Typical values are not given in the sources. [S1]
+- $M$: Number of independent samples drawn per pixel. [S1]
+
+**Edge cases and pitfalls:**
+- Precision: Division by $p_{\text{mix}}$ can lead to numerical instability if the probability is very small. Guard against division by zero. [G]
+- Boundaries: The sums for $i$ and $j$ have specific ranges. Ensure indices are within bounds. [S1]
+- Degenerate input: If $N=1$, the loops for $j$ may be empty. Handle accordingly. [G]
+
+**Pseudocode:**
+> **Unverified code.** The code below did not pass a test run against a reference implementation, or no test fits it, so it may contain errors.
+
+```python
+def differential_path_integral_estimator_with_mis_and_nee(scene_params, camera, M, N, q):
+    gradient_accumulator = 0.0
+    for m in range(M):
+        # 1. Generate standard path x of depth N using BRDF sampling [G]
+        x = generate_standard_path(scene_params, camera, N)
+        f_probs = [scene_params.get_bsdf_sampling_prob(x[k]) for k in range(N)]
+
+        # 2. Compute mixture probability p_mix(x) [S1]
+        p_mix_x = compute_p_mix_standard(x, f_probs, N, q)
+
+        # 3. Accumulate standard path contributions [S1]
+        for i in range(N + 1):
+            g = compute_g_standard(x, i, f_probs, scene_params)
+            gradient_accumulator += g / p_mix_x
+
+        # 4. Generate NEE paths for j = 1 to N-1 [S1]
+        for j in range(1, N):
+            x_ee, p_e = connect_to_emitter(x[j], scene_params)
+
+            # 5. Compute mixture probability p_mix(x, x_j x_{e,j}) [S1]
+            p_mix_nee = compute_p_mix_nee(x, f_probs, j, p_e, q)
+
+            # 6. Accumulate NEE path contributions [S1]
+            for i in range(j + 1):
+                g_nee = compute_g_nee(x, j, x_ee, i, f_probs, p_e, scene_params)
+                gradient_accumulator += g_nee / p_mix_nee
+
+    return gradient_accumulator / M
+
+def generate_standard_path(scene, camera, N):
+    path = [camera.position]
+    for k in range(N):
+        path.append(sample_bsdf_and_intersect(scene, path[k], scene.get_bsdf(path[k])))
+    return path
+
+def connect_to_emitter(vertex, scene):
+    x_ee, p_e = sample_emitter_point(scene, vertex)
+    return x_ee, p_e
+
+def compute_p_mix_standard(path, f_probs, N, q):
+    p_x = 1.0
+    for p in f_probs: p_x *= p
+    sum_p_x_i = sum(
+        p_x * (get_differential_prob(path[i], q, f_probs[i]) / f_probs[i]) * ((1 - q) ** (i - 1)) * q
+        for i in range(1, N)
+    )
+    p_nee_last = p_x * scene.get_emitter_sampling_prob(path[N-1]) * ((1 - q) ** (N - 1))
+    return p_x + sum_p_x_i + p_nee_last
+
+def compute_p_mix_nee(path, f_probs, j, p_e, q):
+    p_x = 1.0
+    for p in f_probs: p_x *= p
+    p_x_xj_ee = p_x * p_e * ((1 - q) ** (j - 1))
+    sum_p_x_xj_ee_i = sum(
+        p_x_xj_ee * (f_probs[j-1] / p_e) if i < j else p_x_xj_ee * (get_differential_prob(path[i], q, f_probs[i]) / p_e)
+        for i in range(1, j + 1)
+    )
+    p_nee = p_x * p_e * ((1 - q) ** (j - 1))
+    sum_p_nee_i = sum(
+        p_nee * (get_differential_prob(path[i], q, f_probs[i]) / f_probs[i])
+        for i in range(1, j)
+    )
+    return p_x_xj_ee + sum_p_x_xj_ee_i + p_nee + sum_p_nee_i
+
+def compute_g_standard(path, i, f_probs, scene):
+    prod_except_i = 1.0
+    for k, p in enumerate(f_probs):
+        if k != i: prod_except_i *= p
+    diff_ratio = scene.get_bsdf_deriv(path[i], i) / f_probs[i] if i < len(f_probs) else 1.0
+    return prod_except_i * diff_ratio * scene.get_emitter_radiance(path[-1])
+
+def compute_g_nee(path, j, x_ee, i, f_probs, p_e, scene):
+    prod_except_i = 1.0
+    for k in range(1, j):
+        if k != i: prod_except_i *= f_probs[k]
+    geo_term = compute_geometry_term(path[j], x_ee)
+    shadow_term = compute_shadow_term(path[j-1], path[j], x_ee)
+    diff_ratio = scene.get_bsdf_deriv(path[i], i) / f_probs[i] if i < len(f_probs) else 1.0
+    return prod_except_i * geo_term * shadow_term * diff_ratio * scene.get_emitter_radiance(x_ee)
+```
+
+## Subtopics
+
+### [Differential Vertex Sampling with MIS](6338-differential-vertex-sampling-with-mis.md)
+Differential Vertex Sampling with MIS is a method to estimate the gradient of a loss function with respect to scene parameters by importance sampling an intermediate path vertex as the differential vertex. It solves the problem of high variance in gradient estimation, particularly for specular materials, by combining differential vertex sampling with standard BRDF sampling using Multiple Importance Sampling (MIS). Unlike standard BRDF sampling, which treats all vertices identically, this method explicitly biases the sampling distribution to capture the boundary component of the gradient integral, significantly reducing variance for microfacet and mixture BRDFs. See [Differential Vertex Sampling with MIS](6338-differential-vertex-sampling-with-mis.md).
+
+### [Differential Edge Sampling](6708-differential-edge-sampling.md)
+Differential Edge Sampling computes the gradient of physically-based rendered images with respect to arbitrary scene parameters (camera, lights, materials, geometry) by explicitly sampling visibility discontinuities. It solves the problem that standard Monte Carlo estimators fail to capture derivatives at boundaries where visibility changes abruptly, such as object silhouettes and occlusion edges. Unlike its sibling [Differential Vertex Sampling with MIS](6338-differential-vertex-sampling-with-mis.md), which focuses on vertex-based contributions, this method decomposes the rendering derivative into a smooth interior integral (estimated via automatic differentiation) and a boundary integral (estimated by sampling triangle edges). See [Differential Edge Sampling](6708-differential-edge-sampling.md).
+
+### [Cross-reduction of variance using pairs of paths](14985-cross-reduction-of-variance-using-pairs-of-paths.md)
+This method reduces the variance of gradient estimates in differentiable volume rendering by sampling pairs of similar paths and applying a control variate technique known as the cross-weighting scheme. It allows the use of suitable parameter values from one path estimate to reduce the variance of the other without introducing bias, addressing the high variance inherent in estimating derivatives of discontinuous integrands. It builds on [Differential path integral estimator with MIS and NEE](6332-differential-path-integral-estimator-with-mis-and-nee.md) by providing a specific variance reduction strategy for the differential contributions computed therein. See [Cross-reduction of variance using pairs of paths](14985-cross-reduction-of-variance-using-pairs-of-paths.md).
+
+### [SDF Prb Reparam Integrator](15437-sdf-prb-reparam-integrator.md)
+A differentiable path tracer that computes gradients of radiance with respect to scene parameters (e.g., Signed Distance Function shape parameters) by warping random samples via reparameterization, supporting both forward and backward mode automatic differentiation. It distinguishes itself from sibling methods by explicitly integrating reparameterization gradients into the path sampling loop, allowing for stable gradient flow through the SDF evaluation and sphere tracing steps, whereas siblings like [Differential Vertex Sampling with MIS](6338-differential-vertex-sampling-with-mis.md) rely on vertex perturbation and [Differential Edge Sampling](6708-differential-edge-sampling.md) on edge perturbations. See [SDF Prb Reparam Integrator](15437-sdf-prb-reparam-integrator.md).
+
+### Vectorized Total Derivative Estimation
+This approach effectively shares all paths traced by Algorithm 1 to calculate derivatives with respect to all scene parameters simultaneously [S2, unofficial]. It executes Algorithm 1 once in a vectorized fashion to estimate the total scene derivative $d_\pi L$. It replaces all partial derivatives with their vector-valued total derivative counterparts and performs component-wise calculations between all total-derivative-related quantities [S2, unofficial].
+
+## Operating characteristics
+- **Time Complexity:** The method requires tracing additional side paths for NEE, making it more expensive than conventional Volume Path Tracing (VPT). The time complexity is $O(K^2)$ for each sample path of length $K$, due to the additional side paths needed to estimate $\Delta L$ and $L_{ins}$ [S2, unofficial].
+- **Memory Complexity:** Not given in the sources.
+- **Measured Performance:** The method reduces the variance of image gradients for scenes with varying roughnesses compared to standard BRDF sampling [S1].
+- **Strengths:** Reduces variance for specular materials and complex lighting by combining BRDF and emitter sampling [S1]. Allows differential vertex to be at any intermediate vertex or emitter connection [S1].
+- **Limitations:** More expensive than conventional VPT due to additional side paths [S2, unofficial].
+- **When to use:** Differentiable rendering, inverse rendering, and joint material/lighting estimation [S1].
+- **When not to use:** When computational efficiency is critical and variance is not a major issue.
+
+## Background
+The method originates from the work of T. Su and I. Gkioulekas, "Path Sampling Methods for Differentiable Rendering" [S1]. It builds on earlier work in differentiable rendering, such as "Differentiable Monte Carlo ray tracing through edge sampling" by Li et al. [LADL18] and "Unbiased inverse volume rendering with differential trackers" by Nimier-David et al. [NDMKJ22]. The use of MIS for differential path integrals is a key contribution of [S1].
+
+## Sources
+[S1] Path Sampling Methods for Differentiable Rendering, https://doi.org/10.2312/sr.20241148, fetched 2026-10-29
+[S2] PDF A Differential Theory of Radiative Transfer, https://cseweb.ucsd.edu/~ravir/diff_rendering.pdf, fetched 2026-10-29 (unofficial)

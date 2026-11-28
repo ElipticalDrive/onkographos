@@ -1,0 +1,122 @@
+360度カメラ画像からの空間再構成 - 360 Gaussian Splatting はじめに 昨年からgaussian splattingが注目を集めるようになっています。luma aiもgaussian splattingに対応し、よりフォトリアルな3D表現が可能に...
+
+360度カメラ画像からの空間再構成 - 360 Gaussian Splatting #VR - Qiita
+19
+Go to list of users who liked
+7
+Share on X(Twitter)
+Share on Facebook
+Add to Hatena Bookmark
+more_horiz
+Delete article
+close
+Deleted articles cannot be recovered.
+Draft of this article would be also deleted.
+Are you sure you want to delete this article?
+CancelDeletedelete
+info
+More than 1 year has passed since last update.
+@inuex35
+360度カメラ画像からの空間再構成 - 360 Gaussian Splatting
+3DCG
+AR
+VR
+360度カメラ
+GaussianSplatting
+19
+Last updated at 2024-03-25Posted at 2024-03-24
+360度カメラ画像からの空間再構成 - 360 Gaussian Splatting
+はじめに
+昨年からgaussian splattingが注目を集めるようになっています。luma aiもgaussian splattingに対応し、よりフォトリアルな3D表現が可能になりました。しかし、gaussian splattingはperspectiveカメラを前提としており、360度カメラで撮影した環境をそのまま3D化することには対応していません。そのため、多くのユーザーは360度カメラで撮影した画像をクロップして利用している状況でした。
+そのため360度カメラで利用できるよう元レポジトリを修正しました。
+360 Gaussian Splatting は、OpenSfMとGaussian Splattingを組み合わせて、360度画像から高品質な3D空間を生成します。
+これがレポジトリです。
+360 Gaussian Splattingとは？
+360 Gaussian Splattingには、以下の2つのオープンソースプロジェクトを使いました。
+OpenSfM：Structure from Motion (SfM) ライブラリ。画像セットから3次元構造を推定
+Gaussian Splatting：点群からレンダリングしてgaussian化するアルゴリズム
+OpenSfMで360度画像セットから疎な点群を生成し、Gaussian Splattingでそれを密なgaussianに変換します。
+元レポジトリはcolmapにより点群を生成し、gaussian splattingに入れていますがcolmapでは360度カメラのequirectangular画像に対応していないため、画像を分割してトレーニングするしかありませんでした。
+しかしopensfmは360度カメラの画像がそのまま利用できるため、これを利用しました。
+こんな風に空間が生成されます。
+YouTube
+ようやく動いたところなのでもう少しモデルは改良できるかも？
+変更点
+このプロジェクトでは以下の改修を行いました。
+gaussian splattingの読み込み部分を改修しopensfmのデータを読み込めるようにする。
+diff gaussian rasterizationを改修し360度カメラのrenderingができるようにする。
+（おまけ）opensfmのキーポイント検出マッチングをGPU利用できる新しい特徴点アルゴリズムに対応させる。
+変更内容1
+基本的なことはgaussian splattingの元動画を見てください。
+まず、gaussian splattingに必要なものは以下のデータです。
+ワールド座標での点群の位置
+カメラ位置
+カメラパラメータ
+opensfmではこれらのパラメータがreconstruction.jsonというjson形式で保存されています。
+以下のファイルのread_opensfm_points3Dで点群の位置を、read_opensfmという関数でカメラ位置とカメラパラメータを取得しています。
+点群にはerrorの値があるみたいですが、トレーニングには利用されていないようなのでread_opensfm_points3Dではとりあえず0を入れておきました。
+ちなみにコードに今は使ってない残骸が残ってますがお気になさらず。
+変更内容2 一番ヘビーｗ
+gaussian splattingではsubmodulesフォルダにdiff gaussian splattingというモジュールをインストールして利用しますが、モジュールというよりこれがgaussian splattingの本体です。splatされたgaussianから2D画像をレンダリングするためのコードです。
+最終的にrenderという関数をpythonで読み込めるようにしています、これにrender_sphericalという関数を追加しequirectangular形式のレンダリングを使用できるようにしています。読む必要があるのはこの3つぐらいです。
+forward.cu gaussianから2D画像をレンダリング
+backward.cu トレーニングのための誤差伝播
+auxiliary.h 処理で使われる共通な関数
+auxiliary.hで３D点をequirectangular形式にレンダリングする関数があります。
+詳細は省きますがequirectangularでは緯度経度が画像のxyになっています。
+```
+__forceinline__ __device__ float3 point_to_equirect(
+	float3 p_orig,
+	const float* viewmatrix)
+{
+	float3 direction_vector = transformPoint4x3(p_orig, viewmatrix);
+	float direction_vector_length = sqrtf(direction_vector.x * direction_vector.x + direction_vector.y * direction_vector.y + direction_vector.z * direction_vector.z);
+	float longitude = atan2f(direction_vector.x, direction_vector.z);
+	float latitude = atan2f(direction_vector.y , sqrtf(direction_vector.x * direction_vector.x + direction_vector.z * direction_vector.z));
+	float normalized_latitude = latitude / (M_PI / 2.0f);
+	float normalized_longitude = longitude / M_PI;
+	float3 p_view = {normalized_longitude, normalized_latitude, direction_vector_length};
+	return p_view;
+}
+```
+基本的なアイデアは以下の論文と同じです。
+球体にsplatを投影してます。
+てか1月ぐらいに思いついたら2月に論文出てた。とか言っても
+ただ実装は少し違うかも、jacobianとかなんでこれで動いてるのかよくわからん。
+360-GS: Layout-guided Panoramic Gaussian Splatting For Indoor
+Roaming
+変更内容3
+おまけですがopensfmで特徴点アルゴリズムが昔のsiftとかばかりでしかもGPUも使えず劇遅だったので修正しました。
+修正といってもunityが元レポジトリでsuperpointとかdiskとかalikedを使えるようにしたレポジトリがあったので動かなかった部分を修正して利用してます。
+特徴点はsuperpoint, disk, alikedが使えます。
+マッチングはlightglueが使えます。
+今のところ特徴点が多く取れるalikedがよさそうです。
+使い方
+レポジトリのREADMEに書いてあるので読んでください。
+（反響があれば）書きます。
+基本的にopensfmでこんな点群を作ってからgaussian splattingのトレーニングに入れます。
+終わりに
+gaussian splattingは24GBのVRAMのGPUが推奨されてますが、トレーニング画像を全部GPU上に置いてるからなだけでトレーニングの時だけGPU上に取り込むようにすればVRAM使用量だいぶ減りました。
+トレーニングは遅くなりますが、paperspaceの16GB GPUでも5K画像でトレーニングできました。多分最大11GBぐらい。
+なんで誰も思いつかないんだろう。。。
+19
+Go to list of users who liked
+7
+comment1
+Go to list of comments
+Register as a new user and use Qiita more conveniently
+You get articles that match your needs
+You can efficiently read back useful information
+You can use dark theme
+What you can do with signing up
+Sign upLogin
+19
+Go to list of users who liked
+7
+more_horiz
+Delete article
+close
+Deleted articles cannot be recovered.
+Draft of this article would be also deleted.
+Are you sure you want to delete this article?
+CancelDeletedelete

@@ -1,0 +1,124 @@
+# MVDream Multi-View Diffusion Guidance
+
+Also called: MVDream Guidance, Multi-View Dream
+
+## Overview
+MVDream is a guidance method that fine-tunes Stable Diffusion with 3D-aware components trained on Objaverse to improve multi-view consistency and alleviate the Janus problem in text-to-3D generation [S1]. It provides gradient guidance for 3D optimization by encoding RGB images and camera poses into a multi-view diffusion model, predicting noise, and stepping the DDIM scheduler [S2, unofficial]. Unlike standard Stable Diffusion guidance which treats views independently, MVDream explicitly conditions on camera poses to enforce geometric coherence across multiple viewpoints [S1].
+
+## How it works
+**Inputs and Outputs**
+- **Input:** Text prompts, a batch of rendered RGB images (`pred_rgb_256`) from the current 3D representation, and corresponding camera pose matrices [S2, unofficial].
+- **Output:** Gradient signal for optimizing the 3D representation via the latent space update [S2, unofficial].
+
+**Data Structures**
+- **Camera Tensor:** Shape `[batch_size, 16]`, created by normalizing the 4×4 camera pose matrix and flattening it [S2, unofficial].
+- **Context Dictionary:** Contains `'context'` (text embeddings of shape `[B, 77, 768]`), `'camera'` (camera tensor of shape `[B, 16]`), and `'num_frames'` (integer, typically 4) [S2, unofficial].
+
+**Parameters**
+- **t_range:** List of floats, default `[0.02, 0.98]`, defines the range of noise levels for training. `min_step = int(1000 * t_range[0])`, `max_step = int(1000 * t_range[1])` [S2, unofficial].
+- **guidance_scale:** Float, default `100`, multiplier for classifier-free guidance in noise prediction [S2, unofficial].
+
+**Steps**
+1. **Encode Text:** Generate text embeddings and repeat them to match the number of views (typically 4) [S2, unofficial].
+   $$ \text{pos\_embeds} = \text{encode\_text(prompts)}.repeat(4, 1, 1) $$
+2. **Convert Camera Convention:** Convert camera poses to Blender convention by permuting axes and flipping the Y-axis [S2, unofficial].
+   $$ \text{camera} = \text{camera}[:, [0, 2, 1, 3]] $$
+   $$ \text{camera}[:, 1] *= -1 $$
+3. **Normalize Camera:** Normalize the camera poses and flatten to 16 dimensions [S2, unofficial].
+   $$ \text{camera} = \text{normalize\_camera(camera)}.view(\text{batch\_size}, 16) $$
+4. **Encode Images:** Encode the rendered RGB images into latent space [S2, unofficial].
+   $$ \text{latents} = \text{encode\_imgs(pred\_rgb\_256)} $$
+5. **Sample Timestep:** Sample a timestep $t$ uniformly between `min_step` and `max_step` [S2, unofficial].
+6. **Forward Model with CFG:** Pass the latents, timestep, and context through the model. Split the output into conditional and unconditional predictions and combine them using classifier-free guidance [S2, unofficial].
+   $$ \text{noise\_pred} = \text{model.apply\_model}(\text{latent\_model\_input}, t, \text{context}) $$
+   $$ \text{noise\_pred\_uncond}, \text{noise\_pred\_cond} = \text{noise\_pred.chunk}(2) $$
+   $$ \text{noise\_pred} = \text{noise\_pred\_uncond} + \text{guidance\_scale} \times (\text{noise\_pred\_cond} - \text{noise\_pred\_uncond}) $$
+7. **Step Scheduler:** Update the latents using the DDIM scheduler [S2, unofficial].
+   $$ \text{latents} = \text{scheduler.step}(\text{noise\_pred}, t, \text{latents}).\text{prev\_sample} $$
+
+**Pseudocode**
+> **Unverified code.** The code below did not pass a test run against a reference implementation, or no test fits it, so it may contain errors.
+
+```python
+def mvdream_guidance_step(model, scheduler, encode_text, encode_imgs, 
+                          prompts, pred_rgb_256, camera_poses, batch_size, 
+                          guidance_scale=100, t_range=(0.02, 0.98)):
+    # 1. Encode text prompts
+    pos_embeds = encode_text(prompts)
+    pos_embeds = pos_embeds.repeat(4, 1, 1)
+    
+    # 2. Convert camera to Blender convention
+    # camera_poses shape is assumed to be [batch_size, 4, 4] or [batch_size, 4, 16]
+    # The source applies permutation and flip before normalization
+    camera = camera_poses[:, [0, 2, 1, 3]]
+    camera[:, 1] *= -1
+    
+    # 3. Normalize camera and flatten to [batch_size, 16]
+    # normalize_camera is not defined in the sources [G]
+    camera = normalize_camera(camera).view(batch_size, 16)
+    
+    # 4. Encode RGB images to latents
+    latents = encode_imgs(pred_rgb_256)
+    
+    # 5. Sample timestep uniformly between min_step and max_step
+    min_step = int(1000 * t_range[0])
+    max_step = int(1000 * t_range[1])
+    t = torch.randint(min_step, max_step, (batch_size,)).to(latents.device)
+    
+    # 6. Forward model with Classifier-Free Guidance (CFG)
+    # Prepare null context for CFG
+    null_text = encode_text([""])
+    null_text = null_text.repeat(4, 1, 1)
+    null_camera = torch.zeros_like(camera)
+    
+    # Concatenate conditional and unconditional inputs along batch dimension
+    latents_cfg = torch.cat([latents, latents], dim=0)
+    context_cfg = {
+        'context': torch.cat([pos_embeds, null_text], dim=0),
+        'camera': torch.cat([camera, null_camera], dim=0),
+        'num_frames': 4
+    }
+    
+    noise_pred = model.apply_model(latents_cfg, t.repeat(2), context_cfg)
+    noise_pred_uncond, noise_pred_cond = noise_pred.chunk(2)
+    noise_pred = noise_pred_uncond + guidance_scale * (noise_pred_cond - noise_pred_uncond)
+    
+    # 7. Step scheduler
+    latents = scheduler.step(noise_pred, t, latents).prev_sample
+    
+    return latents
+```
+
+**Edge Cases and Pitfalls**
+- **Complex Prompts:** MVDream tends to ignore specific prompt details (e.g., moss on a suit, vines on a car) compared to standard Stable Diffusion guidance [S1].
+- **Janus Problem:** While MVDream alleviates the Janus problem, it does not completely eliminate it due to the ill-posed nature of text-to-3D generation [S1].
+
+## Subtopics
+
+### GALA3D
+GALA3D is a method for 3D scene generation that leverages both object-level and scene-level models to achieve realistic composition [G]. It addresses the challenge of generating coherent 3D scenes by first synthesizing individual objects and then composing them into a global environment [G]. Unlike single-stage text-to-3D methods, GALA3D separates the generation of local geometry (objects) from global layout (scenes), using MVDream for object synthesis and a scene-level diffusion model for composition [G].
+
+### Multi-View Diffusion Guidance for 3D Generation — RealmDreamer
+RealmDreamer utilizes diffusion priors from inpainting and depth estimation models to generate different viewpoints of a scene iteratively [S3].
+
+### Conditional Diffusion Model for Viewpoint Generation
+This method generates high-quality viewpoint images of unobserved viewpoints by utilizing multidimensional features from MTL-FeatureNet and viewpoint data from an improved NeRF model, ensuring geometric and physical realism [S4]. It uses features from MTL-FeatureNet as inputs to the conditional diffusion model to guide the generation process, ensuring visual coherence and geometric/physical consistency with original viewpoints [S4]. It improves the traditional backward diffusion process by fusing and using conditional information $c$ to determine the mean $\mu_\theta$ and covariance $\Sigma_\theta$ for the Gaussian transition from $O_t$ to $O_{t-1}$ [S4]:
+$$ \rho_\theta(O_{t-1}|O_t, c) = \mathcal{N}(O_{t-1}; \mu_\theta(O_t, c, t), \Sigma_\theta(O_t, c, t)) $$
+The conditional information $c$ is derived from features extracted via MTL-FeatureNet [S4].
+
+## Operating characteristics
+- **Multi-View Consistency:** MVDream significantly improves multi-view consistency and geometry completeness (e.g., Janus-free ostrich) compared to standard guidance [S1].
+- **Prompt Adherence:** It sacrifices fine-grained prompt adherence on complex scenes, tending to ignore specific prompt details (e.g., moss on a suit, vines on a car) compared to standard Stable Diffusion guidance [S1].
+- **Performance:** The method relies on the computational cost of the Stable Diffusion model and the DDIM scheduler steps [S2, unofficial].
+- **Scaling:** Not given in the sources.
+- **Strengths:** Better 3D geometry and consistency.
+- **Limitations:** Loss of detail for complex prompts; incomplete elimination of Janus problem due to the ill-posed nature of text-to-3D generation [S1].
+
+## Background
+MVDream was proposed as a concurrent work to improve text-to-3D generation by fine-tuning Stable Diffusion with 3D-aware components trained on Objaverse [S1]. It aims to enhance multi-view consistency and alleviate the Janus problem [S1]. The method is cited in the context of Gaussian Splatting for text-to-3D generation [S1] and is part of the broader family of diffusion-based guidance methods for radiance field optimization [S2, unofficial].
+
+## Sources
+[S1] Text-to-3D using Gaussian Splatting, https://doi.org/10.1109/cvpr52733.2024.02022, fetched 2026-10-26
+[S2] dreamgaussian/dreamgaussian, https://github.com/dreamgaussian/dreamgaussian, fetched 2026-10-27 (unofficial)
+[S3] Recent advances in 3D Gaussian splatting, https://doi.org/10.1007/s41095-024-0436-y, fetched 2026-10-26
+[S4] 3D reconstruction of toys based on adaptive scaled neural radiation field., https://doi.org/10.7717/peerj-cs.3053, fetched 2026-10-26

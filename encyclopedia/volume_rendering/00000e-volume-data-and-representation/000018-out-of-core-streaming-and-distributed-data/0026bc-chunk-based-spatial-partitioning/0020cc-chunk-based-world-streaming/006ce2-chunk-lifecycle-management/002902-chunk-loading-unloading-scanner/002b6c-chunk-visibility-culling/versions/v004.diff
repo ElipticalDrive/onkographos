@@ -1,0 +1,105 @@
+--- v003.md
++++ v004.md
+@@ -8,15 +8,15 @@
+ ## How it works
+ **Inputs:**
+-- Camera object with projection matrix and world inverse matrix [S3, unofficial].
+-- List of currently loaded chunks, each possessing a world-space bounding box or position data [S2, S3, S4, unofficial].
++- Camera object containing projection matrix and world inverse matrix [S3, unofficial].
++- List of currently loaded chunks, each providing world-space position and bounding volume data [S2, S3, S4, unofficial].
+ - `renderRadius`: Optional radius in chunk coordinates around the center chunk to limit the search space [S3, unofficial].
+ 
+ **Outputs:**
+ - `_chunkVisibleSet`: A set of chunks determined to be inside the frustum [S2, unofficial].
+-- `_chunkRenderSet`: A subset of visible chunks, typically sorted by distance, ready for the renderer queue [S2, S3, unofficial].
++- `_chunkRenderSet`: A subset of visible chunks, sorted by distance, ready for the renderer queue [S2, S3, unofficial].
+ 
+ **Data Structures:**
+-- `Chunk`: Contains methods `GetXWorldPos()`, `GetZWorldPos()` (or equivalent for Y in 3D) and size constants `m_XSize`, `m_ZSize` [S4, unofficial].
+-- `Frustum`: An object with method `IsChunkInFrustum(float x, float z)` or `intersectsBox(bounds)` [S3, S4, unofficial].
++- `Chunk`: Stores world-space position and bounding volume parameters [S2, S4, unofficial].
++- `Frustum`: An object holding the six view frustum planes derived from the camera matrices [S3, unofficial].
+ - `ChunkManager`: Maintains `_chunkVisibleSet` (`std::set<Chunk*>`) and `_chunkRenderSet` (`std::set<Chunk*>`) [S2, unofficial].
+ 
+@@ -35,10 +35,10 @@
+ 4. **Check Bounding Volume Validity:** If the chunk's bounding volume may be out of date due to transformations, rebuild or validate it.
+    $$ \text{if } \text{boundingVolumeOutOfDate}(): \text{rebuildBounds}() $$
+-   [S2, G, unofficial]
++   [S2, unofficial]
+ 
+ 5. **Frustum Intersection Test:**
+    - **Method A (Explicit World Pos):** Calculate the chunk's world position and call the frustum's specific intersection test.
+-     $$ wx = \text{chunk}.\text{GetXWorldPos}() \times \text{Chunk::m\_XSize} $$
+-     $$ wz = \text{chunk}.\text{GetZWorldPos}() \times \text{Chunk::m\_ZSize} $$
++     $$ wx = \text{chunk.GetXWorldPos}() \times \text{Chunk.m\_XSize} $$
++     $$ wz = \text{chunk.GetZWorldPos}() \times \text{Chunk.m\_ZSize} $$
+      $$ \text{visible} = \text{frustum.IsChunkInFrustum}(wx, wz) $$
+      [S4, unofficial]
+@@ -57,7 +57,7 @@
+ ```python
+ def update_visibility_list(camera, chunk_manager, render_radius=None):
+-    # 1. Extract Frustum
++    # 1. Extract Frustum Planes
+     proj_screen_matrix = camera.projection_matrix * camera.matrix_world_inverse
+-    frustum = Frustum.set_from_projection_matrix(proj_screen_matrix)
++    frustum_planes = extract_frustum_planes_from_matrix(proj_screen_matrix)  # [G]
+     
+     # 2. Calculate Center Chunk
+@@ -77,7 +77,8 @@
+             chunk.calculate_bounds(chunk_manager.world_transform)
+             
+-        # 5. Frustum Intersection Test
+-        # Using AABB intersection method [S3, unofficial]
+-        if frustum.intersects_box(chunk.bounds):
++        # 5. Frustum Intersection Test (Standard AABB vs 6-Plane check) [G]
++        aabb_min = chunk.bounds.min
++        aabb_max = chunk.bounds.max
++        if aabb_frustum_intersect(aabb_min, aabb_max, frustum_planes):
+             visible_chunks.append(chunk)
+             
+@@ -95,4 +96,28 @@
+     
+     return visible_chunks
++
++def extract_frustum_planes_from_matrix(matrix):
++    # Standard extraction of 6 frustum planes from a 4x4 projection*view matrix [G]
++    planes = []
++    for i in range(6):
++        plane = [matrix[3][i] + matrix[0][i],
++                 matrix[3][i] + matrix[1][i],
++                 matrix[3][i] + matrix[2][i],
++                 matrix[3][i]]
++        planes.append(plane)
++    return planes
++
++def aabb_frustum_intersect(min_pt, max_pt, planes):
++    # Standard AABB vs Frustum plane intersection test [G]
++    for plane in planes:
++        # Check if any corner of the AABB is strictly outside the plane
++        # Plane equation: Ax + By + Cz + D > 0 means outside
++        # Test the corner that maximizes the dot product with the plane normal
++        x = max_pt.x if plane[0] > 0 else min_pt.x
++        y = max_pt.y if plane[1] > 0 else min_pt.y
++        z = max_pt.z if plane[2] > 0 else min_pt.z
++        if plane[0]*x + plane[1]*y + plane[2]*z + plane[3] > 0:
++            return False
++    return True
+ ```
+ 
+@@ -113,7 +138,7 @@
+ ## Operating characteristics
+ - **Time Complexity:** $O(N)$ where $N$ is the number of loaded chunks, as each chunk's bounding box is tested against the frustum [S1, S3, S4, unofficial]. Sorting adds $O(V \log V)$ where $V$ is the number of visible chunks [S3, unofficial].
+-- **Memory Complexity:** $O(V)$ to store the visible set [S2, unofficial].
++- **Memory Complexity:** Not given in the sources.
+ - **Performance:** Highly efficient for large scenes with sparse loading, as it avoids rendering off-screen geometry [S1, S4, unofficial]. Performance degrades if the number of loaded chunks $N$ is very high, as the linear scan becomes costly [S2, unofficial].
+-- **Strengths:** Simple to implement; low CPU overhead for typical chunk counts; effective at reducing draw calls [S1, S4, unofficial].
++- **Strengths:** Simple to implement; effective at reducing off-screen rendering work [S1, S4, unofficial].
+ - **Limitations:** Does not handle occlusion (chunks behind other opaque chunks are still tested and potentially rendered) [S3, S4, unofficial]. Bounding volumes must be kept up-to-date with transformations [S2, unofficial].
+ - **When to Use:** Standard chunk-based rendering where occlusion culling is handled separately or not needed [S1, S3, unofficial].
+@@ -121,5 +146,5 @@
+ 
+ ## Background
+-Chunk Visibility Culling is a standard technique in voxel and chunk-based rendering engines, originating from early 3D game engines and voxel terrain generators [S1, S2, S4, unofficial]. It is widely used in modern voxel engines like HelloVoxel [S1, unofficial], VoxelEngine [S2, S4, unofficial], and web-based voxel terrain renderers [S3, unofficial]. The method relies on the fundamental graphics pipeline concept of view frustum culling, adapted for discrete spatial partitions (chunks) rather than individual meshes [S1, S3, S4, unofficial].
++Chunk Visibility Culling is a technique adapted from standard view frustum culling for discrete spatial partitions (chunks) rather than individual meshes [S1, S3, S4, unofficial]. It is used in chunk-based volume rendering and voxel terrain systems to manage rendering eligibility [S2, S3, S4, unofficial].
+ 
+ ## Sources

@@ -1,0 +1,169 @@
+# Octree Based Voxel Model
+Also called: Octree Voxel Model
+## Overview
+A method to discretize 3D product assemblies and empty spaces into voxels using an octree data structure to represent volumetric space and detect spatial conflicts, avoiding the memory issues of dense 3D arrays [S1, book]. It builds on [Octree Data Structure](1276-octree-data-structure.md) by using leaf nodes as conditions for subdivision to achieve a user-defined resolution. It is preferred over array data structures when the ratio of modeled space to total space is up to 30 percent [S1, book].
+## How it works
+**Inputs:** CAD geometry (via CAD API), target voxel resolution.
+**Outputs:** An in-memory Octree Voxel Model representing the spatial configuration of the CAD model and associated empty space blocks.
+
+**Data Structures:**
+The implementation uses three primary classes [S1, book]:
+
+1.  **`Octree`**:
+    *   Fields:
+        *   `root`: `OctreeNode` (The root of the tree).
+        *   `obj`: `object` (Associated object reference).
+        *   `x`, `y`, `z`: `double` (Coordinates).
+    *   Methods:
+        *   `Octree(x_min, x_max, y_min, y_max, z_min, z_max)`: Constructor defining the global bounding box.
+        *   `AddNode(x, y, z, obj)`: Adds a point/leaf to the tree.
+        *   `getTreeDepth()`: Returns the depth of the tree.
+        *   `getNumberOfOuterNodes()`: Returns the count of leaf nodes.
+
+2.  **`OctreeLeafObj`**:
+    *   Fields:
+        *   `x`, `y`, `z`: `double` (Point coordinates).
+        *   `obj`: `object` (Associated data, e.g., CAD entity or knowledge element).
+    *   Methods:
+        *   `getX()`, `getY()`, `getZ()`: Accessors for coordinates.
+        *   `getObj()`: Accessor for the associated object.
+
+3.  **`OctreeNode`**:
+    *   Fields:
+        *   `bounds`: `OctreeBounds` (Defines spatial boundaries).
+        *   `children`: `OctreeNode[]` (Array of 8 child nodes).
+        *   `leafobjs`: `List<OctreeLeafObj>` (List of leaf objects contained in this node).
+        *   `innerNode`: `bool` (Flag indicating if the node is an internal node).
+        *   `EmptyNode`: `bool` (Flag indicating if the node represents empty space).
+        *   `solidbodynum`: `int` (Identifier for the solid body).
+    *   `OctreeBounds` fields: `x_min`, `x_max`, `y_min`, `y_max`, `z_min`, `z_max` (all `double`).
+
+**Steps:**
+1.  **Ray Intersection:** Convert CAD geometry to a point cloud by ray-intersecting the model using standard ray intersection methods provided by CAD APIs [S1, book].
+2.  **Leaf Creation:** Create an `OctreeLeafObj` for each point in the point cloud, storing its coordinates $(x, y, z)$ and the associated CAD object [S1, book].
+3.  **Insertion:** Add each `OctreeLeafObj` to the `Octree` using `AddNode`. The insertion logic places the leaf in the appropriate node based on its location relative to the root octree object [S1, book].
+4.  **Subdivision:** Sub-divide octree nodes based on the location of the `OctreeLeaf` objects. A node is divided if it contains leaves and has not yet reached the user-given voxel resolution [S1, book]. The node splits into eight children (`OctreeNode[]`) [S1, book].
+5.  **Resolution Limit:** Continue subdivision until the user-specified voxel resolution is reached. The `OctreeLeafObj` serves as the condition for division [S1, book].
+6.  **On-the-Fly Generation:** The octree voxel model is created on the fly when needed, rather than being saved to XML or other persistent formats [S1, book]. This allows dynamic association with knowledge elements (e.g., Design requirements, Product Lifecycle states) stored in SysML-compatible XML [S1, book].
+
+**Pseudocode:**
+> **Unverified code.** The code below did not pass a test run against a reference implementation, or no test fits it, so it may contain errors.
+
+```python
+class OctreeBounds:
+    def __init__(self, x_min, x_max, y_min, y_max, z_min, z_max):
+        self.x_min = x_min
+        self.x_max = x_max
+        self.y_min = y_min
+        self.y_max = y_max
+        self.z_min = z_min
+        self.z_max = z_max
+
+class OctreeLeafObj:
+    def __init__(self, x, y, z, obj):
+        self.x = x
+        self.y = y
+        self.z = z
+        self.obj = obj
+
+class OctreeNode:
+    def __init__(self, bounds):
+        self.bounds = bounds
+        self.children = [None] * 8  # 8 children for octree
+        self.leafobjs = []
+        self.innerNode = False
+        self.EmptyNode = True
+        self.solidbodynum = -1
+
+    def is_leaf(self):
+        return len(self.children) == 0 or all(c is None for c in self.children)
+
+class Octree:
+    def __init__(self, x_min, x_max, y_min, y_max, z_min, z_max):
+        self.root = OctreeNode(OctreeBounds(x_min, x_max, y_min, y_max, z_min, z_max))
+        self.obj = None
+        self.x = 0.0
+        self.y = 0.0
+        self.z = 0.0
+
+    def _get_child_index(self, x, y, z, bounds):
+        # Determine which of the 8 octants the point falls into
+        mid_x = (bounds.x_min + bounds.x_max) / 2
+        mid_y = (bounds.y_min + bounds.y_max) / 2
+        mid_z = (bounds.z_min + bounds.z_max) / 2
+        
+        idx = 0
+        if x >= mid_x: idx += 1
+        if y >= mid_y: idx += 2
+        if z >= mid_z: idx += 4
+        return idx
+
+    def _add_node_recursive(self, node, x, y, z, obj, current_depth, max_depth):
+        # Add leaf object to current node
+        node.leafobjs.append(OctreeLeafObj(x, y, z, obj))
+        node.innerNode = True
+        node.EmptyNode = False
+        
+        # If not at max depth, subdivide
+        if current_depth < max_depth:
+            # If children are not initialized, create them
+            if node.children[0] is None:
+                mid_x = (node.bounds.x_min + node.bounds.x_max) / 2
+                mid_y = (node.bounds.y_min + node.bounds.y_max) / 2
+                mid_z = (node.bounds.z_min + node.bounds.z_max) / 2
+                
+                # Define sub-bounds for all 8 children
+                sub_bounds = []
+                for i in range(8):
+                    x_min = node.bounds.x_min if (i & 1) == 0 else mid_x
+                    x_max = mid_x if (i & 1) == 0 else node.bounds.x_max
+                    y_min = node.bounds.y_min if (i & 2) == 0 else mid_y
+                    y_max = mid_y if (i & 2) == 0 else node.bounds.y_max
+                    z_min = node.bounds.z_min if (i & 4) == 0 else mid_z
+                    z_max = mid_z if (i & 4) == 0 else node.bounds.z_max
+                    sub_bounds.append(OctreeBounds(x_min, x_max, y_min, y_max, z_min, z_max))
+                
+                node.children = [OctreeNode(b) for b in sub_bounds]
+
+            # Recurse into the specific child
+            child_idx = self._get_child_index(x, y, z, node.bounds)
+            self._add_node_recursive(node.children[child_idx], x, y, z, obj, current_depth + 1, max_depth)
+
+    def AddNode(self, x, y, z, obj):
+        # Determine max depth based on user-given voxel resolution
+        # Note: Exact formula for max_depth from resolution is not given in sources [G]
+        # Assuming a pre-calculated max_depth is available or derived from bounds/resolution
+        max_depth = 10 # Placeholder for user-given resolution logic
+        self._add_node_recursive(self.root, x, y, z, obj, 0, max_depth)
+        return True
+
+    def getTreeDepth(self):
+        # Implementation detail not fully specified in sources [G]
+        # Typically involves traversing the tree to find max depth
+        return 0
+
+    def getNumberOfOuterNodes(self):
+        # Implementation detail not fully specified in sources [G]
+        # Typically counts leaf nodes
+        return 0
+```
+
+**Edge Cases and Pitfalls:**
+*   **Memory Efficiency:** The octree is only preferred over 3D arrays when the ratio of modeled space to total space is up to 30 percent [S1, book]. Beyond this, the overhead of the tree structure may negate benefits.
+*   **Resolution:** The subdivision stops at a user-given voxel resolution. Failure to define this clearly may result in infinite recursion or insufficient detail [S1, book].
+*   **Empty Space:** The model explicitly handles empty space blocks. Knowledge from SysML is used to select which empty space blocks are connected to design requirements, implying that not all empty space is voxelized or stored [S1, book].
+
+## Operating characteristics
+*   **Time Complexity:** Not explicitly given. Ray intersection is $O(N)$ for $N$ rays. Tree insertion is $O(\log M)$ where $M$ is the number of voxels, but depends on the depth and distribution of points [S1, book].
+*   **Memory Complexity:** Significantly lower than dense 3D arrays for sparse data. A $1000 \times 1000 \times 1000$ array requires 1 billion voxels, which is difficult to handle [S1, book]. The octree stores only occupied nodes and necessary empty nodes up to the resolution limit.
+*   **Performance:** Efficient for large spaces with sparse modeled content. Computationally efficient for Boolean operations (union, subtraction) once voxelized [S1, book].
+*   **Strengths:** Avoids memory issues of dense arrays; supports on-the-fly generation; integrates with CAD APIs and SysML knowledge; efficient for spatial conflict detection.
+*   **Limitations:** Only efficient when modeled space is $\le 30\%$ of total space; requires CAD API access for ray intersection; visualization requires external OpenGL libraries [S1, book].
+*   **When to use:** Spatial conflict detection in product assembly design, especially when integrating geometric data with non-geometric knowledge (SysML).
+*   **When not to use:** When the modeled space exceeds 30% of the total volume, or when persistent storage (XML) is required instead of on-the-fly generation.
+
+## Background
+The concept of voxelization was first introduced for volume graphics in 1993 [S1, book]. It has applications in volume modelling, virtual medicine, haptic rendering, visualization of geometric models, CSG modelling, collision detection, and spatial analysis [S1, book]. This specific implementation was developed to represent spatial conflicts across multiple design domains (e.g., electromagnetics, thermal, structural) in the design of Coupled Cavity Travelling Wave Tubes (CCTWT) for RADAR [S1, book]. It was implemented in C# and visualized using OpenGL [S1, book].
+
+## Sources
+[S1] Octree Based Voxel Model for Representation of Spatial Conflicts Across Multiple Design Domains, https://doi.org/10.1007/978-3-030-42250-9_2, fetched 2026-10-26 (book)

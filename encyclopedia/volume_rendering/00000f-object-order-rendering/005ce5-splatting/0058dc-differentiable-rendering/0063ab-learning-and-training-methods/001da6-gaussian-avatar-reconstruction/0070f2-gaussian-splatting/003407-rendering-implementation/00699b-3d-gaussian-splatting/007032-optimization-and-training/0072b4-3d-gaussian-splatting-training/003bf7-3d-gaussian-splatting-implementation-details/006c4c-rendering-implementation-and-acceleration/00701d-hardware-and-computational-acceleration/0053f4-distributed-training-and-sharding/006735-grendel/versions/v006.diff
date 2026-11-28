@@ -1,0 +1,173 @@
+--- v005.md
++++ v006.md
+@@ -8,99 +8,104 @@
+ ## How it works
+ **Inputs and Outputs:**
+-*   **Input:** A set of 3D Gaussians (defined by mean $\mu$, covariance $\Sigma$, opacity $\alpha$, and color/radiance parameters), a batch of $B$ training images (views), and the number of GPUs $G$.
+-*   **Output:** Optimized 3D Gaussian parameters and reconstructed scene.
++*   **Inputs:** A set of 3D Gaussians (parameters and optimizer states), a batch of $B$ training images (camera views), and the number of GPUs $G$.
++*   **Outputs:** Optimized 3D Gaussian parameters and rendered images matching the input batch.
+ 
+ **Data Structures:**
+-*   **Gaussian Parameters:** Distributed uniformly across $G$ GPUs. Each GPU stores a subset of Gaussians, including their parameters and optimizer states (Adam moments) [S1].
+-*   **Pixel Blocks:** Images are partitioned into $16 \times 16$-pixel blocks [S1].
+-*   **Runtime Estimates:** A history of rendering times per pixel block is maintained to estimate computational load [S1].
++*   **Gaussian Set:** Distributed uniformly across $G$ GPUs. Each GPU stores a subset of Gaussians, including their mean, covariance, opacity, and spherical harmonics coefficients, along with their Adam optimizer states (first and second moments) [S1].
++*   **Pixel Blocks:** Each image is partitioned into non-overlapping $16 \times 16$ pixel blocks [S1]. These blocks are serialized into a list and distributed to GPUs [S1].
+ 
+-**Steps:**
++**Algorithm Steps:**
+ 
+ 1.  **Gaussian-wise Distribution (Forward):**
+-    Partition the 3D Gaussians uniformly across the $G$ GPUs. Each GPU independently computes the Gaussian transformation (projection to screen space) for its assigned subset of Gaussians [S1].
++    *   Partition the 3D Gaussians uniformly across the $G$ GPUs [S1].
++    *   Each GPU independently computes the Gaussian transformation (projection to screen space) for its assigned subset of Gaussians [S1].
+ 
+ 2.  **Sparse All-to-All Communication (Forward):**
+-    After transformation, each GPU determines which of its transformed Gaussians intersect with the pixels in its assigned image partition. Using spatial locality, each GPU identifies the subset of Gaussians required by its pixel partition. A sparse all-to-all communication operation transfers these intersecting Gaussians to the GPUs responsible for rendering those pixels [S1].
++    *   Each GPU determines the set of Gaussians from its local subset that intersect with the pixels in its assigned pixel partition [S1].
++    *   Perform a sparse all-to-all communication where GPUs exchange the necessary Gaussians. A GPU sends Gaussians to other GPUs if they intersect with pixels assigned to those remote GPUs [S1].
++    *   This step exploits spatial locality: each pixel partition only requires a small subset of all Gaussians, minimizing data transfer compared to dense sharding [S1].
+ 
+-3.  **Pixel-wise Distribution (Rendering):**
+-    The image is partitioned into $16 \times 16$-pixel blocks. These blocks are distributed to GPUs using an adaptive strategy based on estimated workload. Each GPU renders its assigned blocks, computing the loss and gradients [S1]. Note that a GPU may be assigned blocks from different images within the batch [S1].
++3.  **Pixel-wise Rendering and Loss Computation:**
++    *   Each GPU renders the pixels in its assigned partition using the received Gaussians and computes the loss [S1].
++    *   Note: A GPU may be assigned blocks from different images in the batch [S1].
+ 
+ 4.  **Sparse All-to-All Communication (Backward):**
+-    A reversed all-to-all communication is performed during the backward pass to aggregate gradients and update the Gaussian parameters [S1].
++    *   Perform a reversed all-to-all communication to distribute gradient updates back to the GPUs holding the original Gaussian parameters [S1].
+ 
+-5.  **Gaussian-wise Rebalancing:**
+-    After every few densification steps (cloning and splitting), the 3D Gaussians are redistributed uniformly across GPUs. This restores uniformity because newly added Gaussians cause imbalance due to varying densification rates across the scene [S1].
++5.  **Gaussian-wise Distribution (Backward/Update):**
++    *   Each GPU updates the parameters and optimizer states for its locally stored Gaussians using the received gradients [S1].
+ 
+-6.  **Pixel-wise Rebalancing:**
+-    To handle workload imbalances caused by varying Gaussian densities and scene complexity, Grendel dynamically adjusts pixel block assignments.
+-    *   **Measurement:** Record the rendering time (including image rendering, loss computation, and backward computation) of each pixel block assigned to a GPU during every epoch (after the first few) [S1].
+-    *   **Estimation:** Compute the average per-pixel computation time for each GPU. Assume that any pixel $p$ assigned to a GPU requires time proportional to this average [S1].
+-    *   **Re-splitting:** In subsequent iterations, re-split the image into $16 \times 16$ pixel blocks such that the sum of estimated computation times for pixels assigned to all GPUs is equal. This is achieved by calculating division points based on the cumulative sum of estimated runtimes [S1].
++6.  **Dynamic Load Balancing (Pixel-wise):**
++    *   **Measurement:** After the first few epochs, record the rendering time (including loss and backward computation) for each $16 \times 16$ pixel block [S1].
++    *   **Estimation:** Compute the average per-pixel computation time for each GPU based on its assigned blocks [S1].
++    *   **Rebalancing:** In subsequent iterations, re-split the images into subsequences of blocks such that the sum of estimated computation times for pixels assigned to all GPUs is equal [S1].
++    *   **Division Point Calculation:** Use Algorithm 1 to determine split points based on cumulative estimated runtimes [S1].
++
++7.  **Dynamic Load Balancing (Gaussian-wise):**
++    *   Monitor the densification process (cloning and splitting of Gaussians) [S1].
++    *   Redistribute the 3D Gaussians uniformly across GPUs after every few densification steps to restore balance, as new Gaussians are added at varying rates depending on local scene detail [S1].
+ 
+ **Hyperparameter Scaling for Batched Training:**
+ Grendel supports batch sizes greater than 1. To maintain stability and efficiency, hyperparameters are scaled based on the batch size $b$ using the Independent Gradients Hypothesis [S1]:
+-*   **Learning Rate:** $\lambda' = \lambda \times \sqrt{b}$, where $\lambda$ is the original learning rate and $\lambda'$ is the adjusted rate [S1].
+-*   **Momentum:** $\beta_1' = \beta_1^b$ and $\beta_2' = \beta_2^b$, where $\beta_1, \beta_2$ are the original Adam momentum parameters and $\beta_1', \beta_2'$ are the adjusted parameters [S1].
++*   **Learning Rate:** $\lambda' = \lambda \times \sqrt{b}$, where $\lambda$ is the original learning rate [S1].
++*   **Momentum:** $\beta_1' = \beta_1^b$ and $\beta_2' = \beta_2^b$, where $\beta_1, \beta_2$ are the original Adam momentum parameters [S1].
+ 
+-**Pseudocode for Pixel-wise Rebalancing:**
+-The following algorithm calculates the division points to split an image into load-balanced subsequences of pixel blocks.
++**Pseudocode: Pixel-wise Rebalancing (Algorithm 1)**
++```python
++import torch
+ 
+-```python
+-def calculate_division_points(estimated_runtimes, num_gpus):
++def calculate_division_points(estimated_runtimes: list, num_gpus: int) -> list:
+     """
+-    Calculate division points to distribute pixel blocks across GPUs
+-    based on estimated runtimes.
+-
++    Calculates division points to split pixel blocks among GPUs for load balancing.
++    
+     Args:
+-        estimated_runtimes (list[float]): Estimated runtime for each pixel block.
+-        num_gpus (int): Number of GPUs (G).
+-
++        estimated_runtimes: List of estimated runtimes for each pixel block (ET).
++        num_gpus: Number of GPUs (G).
++        
+     Returns:
+-        list[int]: Division points (indices) to split the blocks.
++        DP: List of division points (indices) to split the blocks.
+     """
+-    import torch
+-
+-    # B is the number of pixel blocks
+-    B = len(estimated_runtimes)
+-    G = num_gpus
+-
+-    # 1: CT <- torch.cumsum(ET)
+-    # Cumulative sum of estimated runtimes
+-    cumulative_times = torch.cumsum(torch.tensor(estimated_runtimes), dim=0)
+-
+-    # 2: ETgpu <- CT[B-1] / G
+-    # Estimated total runtime per GPU
+-    et_gpu = cumulative_times[-1] / G
+-
+-    # 3: TH <- torch.arange(0, G) * ETgpu
+-    # Thresholds for Division Points
+-    thresholds = torch.arange(0, G) * et_gpu
+-
+-    # 4: DP <- torch.searchsorted(CT, TH)
+-    # Division Points
+-    division_points = torch.searchsorted(cumulative_times, thresholds)
+-
+-    # 5: return DP
++    # 1. Compute cumulative sum of estimated runtimes
++    # CT[i] is the total estimated time for blocks 0 to i
++    ct = torch.cumsum(torch.tensor(estimated_runtimes), dim=0)
++    
++    # 2. Calculate the target runtime per GPU
++    # Total time divided by number of GPUs
++    total_time = ct[-1]
++    target_time_per_gpu = total_time / num_gpus
++    
++    # 3. Create thresholds for division points
++    # Thresholds are multiples of target_time_per_gpu: [0, T, 2T, ..., (G-1)T]
++    thresholds = torch.arange(num_gpus) * target_time_per_gpu
++    
++    # 4. Find the indices in the cumulative sum array that correspond to these thresholds
++    # searchsorted finds the indices where thresholds would be inserted to maintain order
++    # This effectively finds the block indices that split the cumulative time evenly
++    division_points = torch.searchsorted(ct, thresholds)
++    
+     return division_points.tolist()
+ ```
+ 
+ **Edge Cases and Pitfalls:**
+-*   **Gradient Correlation:** Increasing batch size without adjusting hyperparameters leads to unstable training. The Independent Gradients Hypothesis assumes gradients from different views are independent, but cameras with similar poses produce correlated gradients, changing sparsity and dynamics as batch size increases [S1].
+-*   **Densification Imbalance:** New Gaussians added via cloning/splitting densify at different rates depending on local scene details, causing immediate imbalance in Gaussian-wise distribution if not rebalanced [S1].
+-*   **Static Partitioning Failure:** Static workload partitioning becomes suboptimal due to dynamic and unbalanced workloads varying across space and time [S1].
++*   **Gradient Correlation:** Increasing batch size without adjusting hyperparameters leads to unstable training. The Independent Gradients Hypothesis assumes gradients from different views are independent, but cameras with similar poses produce correlated gradients, causing sparsity changes [S1].
++*   **Workload Imbalance:** Static partitioning fails due to varying Gaussian densities and scene complexity (e.g., sky vs. detailed foreground) [S1]. Dynamic rebalancing is required [S1].
++*   **Densification Imbalance:** New Gaussians added via cloning/splitting disrupt uniform distribution. Regular redistribution is necessary [S1].
+ 
+ ## Operating characteristics
+-*   **Time Complexity:** Training time scales with the number of Gaussians and images. Grendel achieves near-linear speedup in rendering time with added GPUs. For example, on the Rubble scene (3436x4591), rendering speed increases from 8.8 img/s on 1 GPU to 21.7 img/s on 4 GPUs [S1]. On the Matrixcity Block-all scene (1080x1920), it increases from 29.2 img/s to 76.8 img/s on 4 GPUs [S1].
+-*   **Memory Complexity:** Memory usage per GPU is reduced by partitioning Gaussians and pixels. This allows handling of high-resolution scenes (e.g., 4K Rubble with 40.4 million Gaussians) that exceed single-GPU memory limits [S1].
+-*   **Performance:** On the Rubble scene, Grendel training time on 4 A100s is 51 minutes, compared to 2 hours 3 minutes for CityGS Official and 2 hours 18 minutes for CityGS 200K-images [S1]. On the Matrixcity Block-all scene, training time is 54 minutes on 4 A100s, compared to 3 hours 31 minutes and 3 hours 36 minutes for CityGS variants [S1]. On the Bicycle scene (1275x1920), training time is 1 hour 13 minutes on 4 A100s, compared to 1 hour 20 minutes and 1 hour 24 minutes for CityGS variants [S1].
+-*   **Scalability:** Tested up to 16 GPUs for large scenes (e.g., Rubble with 40.4 million Gaussians) and 4 GPUs for medium scenes [S1]. Maximum tested batch size is 32 [S1].
+-*   **Strengths:** Handles high-resolution and large-scale scenes; supports batched training for better GPU utilization; dynamic load balancing handles unbalanced workloads; sparse communication reduces overhead compared to dense sharding [S1].
+-*   **Limitations:** Requires complex communication logic (sparse all-to-all); dynamic rebalancing adds overhead; hyperparameter scaling rules are heuristic and may not generalize to all scenarios [S1].
+-*   **When to use:** Large-scale, high-resolution 3D reconstruction tasks where single-GPU memory is insufficient and training time is a bottleneck [S1].
+-*   **When not to use:** Small-scale scenes that fit on a single GPU; scenarios where communication overhead outweighs computation benefits; when strict reproducibility with single-GPU hyperparameters is required without scaling adjustments [S1].
++*   **Time Complexity:** The system achieves near-linear scaling in rendering speed with the number of GPUs. For example, on the Rubble scene, rendering speed increases from 8.8 img/s on 1 GPU to 21.7 img/s on 4 GPUs [S1].
++*   **Memory Complexity:** By distributing Gaussians and optimizer states, Grendel overcomes single-GPU memory limits, allowing for significantly larger scene representations (e.g., 40.4 million Gaussians on 16 GPUs vs. 11.2 million on 1 GPU) [S1].
++*   **Communication Overhead:** Sparse all-to-all communication minimizes data transfer by only moving relevant Gaussians, leveraging spatial locality [S1].
++*   **Strengths:**
++    *   Supports large batch sizes (tested up to 32) for better GPU utilization [S1].
++    *   Enables high-resolution reconstruction (4K) with superior visual quality (PSNR 27.28 vs 26.28) [S1].
++    *   Simplifies multi-GPU usage compared to divide-and-conquer methods; users can simply allocate more GPUs [S1].
++*   **Limitations:**
++    *   Requires dynamic load balancing logic, adding complexity to the training loop [S1].
++    *   Performance depends on the effectiveness of the sparse communication; highly irregular Gaussian distributions may reduce efficiency [S1].
++*   **When to Use:** Use Grendel for large-scale, high-resolution 3DGS training where single-GPU memory is insufficient or when faster training times are desired via batched parallelism [S1].
++*   **When Not to Use:** For small scenes that fit comfortably on a single GPU, the overhead of distributed communication and rebalancing may not be justified [S1].
+ 
+ ## Background
+-Grendel was introduced in the paper "On Scaling Up 3D Gaussian Splatting Training" [S1]. It addresses the limitations of single-GPU 3DGS training, which is constrained by memory and unable to handle high-resolution, large-scale scenes effectively [S1]. The system was developed to enable distributed training by leveraging mixed parallelism and spatial locality, allowing 3DGS to be scaled up to multiple GPUs while maintaining reconstruction quality and data efficiency [S1]. It is an open-source project available at https://github.com/nyu-systems/Grendel-GS [S1].
++Grendel was introduced in the paper "On Scaling Up 3D Gaussian Splatting Training" [S1]. It addresses the limitation of standard 3DGS training, which is confined to single GPUs, thereby restricting the scale and resolution of reconstructible scenes [S1]. The system was developed to enable distributed training by exploiting the mixed parallelism inherent in 3DGS rendering [S1]. It is available as an open-source project at https://github.com/nyu-systems/Grendel-GS [S1].
+ 
+ ## Sources

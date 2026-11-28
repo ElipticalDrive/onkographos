@@ -1,0 +1,184 @@
+# HIVE (HIerarchical Volume Encoding)
+
+## Overview
+HIVE is a hierarchical volume encoding module for neural implicit surface reconstruction that explicitly encodes spatial information using multi-scale feature volumes to capture high-frequency details while enforcing spatial consistency [S1, unofficial]. It replaces or augments the implicit encoding of MLPs by concatenating trilinearly interpolated features from low-to-medium resolution volumes with sparsified high-resolution volumes [S1, unofficial]. Unlike single high-resolution volumes that suffer from global incoherence due to isolated voxel updates, or hash-table encodings that suffer from collisions, HIVE uses low-resolution volumes to enforce smoothness and high-resolution volumes for detail, reducing memory consumption via sparsification [S1, unofficial].
+
+## How it works
+**Inputs and Outputs**
+*   **Inputs:** Multi-view images $\{I_i\}_{i=1}^N$, camera poses, and a query point $\mathbf{x} \in \mathbb{R}^3$ with viewing direction $\mathbf{v} \in S^2$.
+*   **Outputs:** Signed Distance Field (SDF) value $s(\mathbf{x})$ and color $\mathbf{c}(\mathbf{x}, \mathbf{v})$.
+
+**Data Structures**
+The method employs $K=8$ feature volumes $\mathcal{V} = \{V_1, \dots, V_K\}$ [S1, unofficial].
+*   **Resolutions:** The volumes increase in resolution. The text specifies a basic setting with resolutions increasing from $2 \times 2 \times 2$ up to $256 \times 256 \times 256$ [S1, unofficial]. Figure 3 indicates the sequence includes $2, 8, 32, 128, 512, 1024$ [S1, unofficial].
+*   **Feature Dimension:** Each voxel stores a feature vector. The text notes "small-feature-channel" volumes compared to octree-based methods [S1, unofficial]. The specific channel count is not explicitly defined in the text, but Figure 3 labels the volumes with a dimension of 4 (e.g., $2 \times 2 \times 2 \times 4$) [S1, unofficial].
+*   **Sparse High-Resolution Volumes:** Volumes with resolution 512 or 1024 are sparsified. Only voxels near the preliminary surface reconstruction are retained [S1, unofficial].
+
+**Algorithm Steps**
+The optimization is performed in two stages [S1, unofficial]:
+
+1.  **Stage 1 (Coarse Reconstruction):**
+    *   Compute an initial result using features from low-to-medium resolution volumes (resolutions 2 to 256) [S1, unofficial].
+    *   For a query point $\mathbf{x}$, retrieve features $f_i(\mathbf{x})$ from each volume $V_i$ via trilinear interpolation.
+    *   Concatenate these features to form the input feature vector $\mathbf{F}(\mathbf{x})$:
+        $$ \mathbf{F}(\mathbf{x}) = \text{concat}(f_1(\mathbf{x}), \dots, f_K(\mathbf{x})) $$
+    *   Input $\mathbf{F}(\mathbf{x})$ into the SDF network $S_\Theta$ and Color network $C_\Theta$ [S1, unofficial].
+    *   The SDF network outputs $s(\mathbf{x}) = S_\Theta(\mathbf{F}(\mathbf{x}))$ [S1, unofficial].
+
+2.  **Stage 2 (Fine Reconstruction):**
+    *   **Sparsification:** Based on the preliminary surface from Stage 1, sparsify the high-resolution volumes (512 or 1024). Keep only voxels nearby the surface [S1, unofficial].
+    *   **Finalization:** Finalize the result using features from the sparsified high-resolution volumes [S1, unofficial]. The same interpolation and concatenation logic applies, but now including the sparse high-res volumes.
+
+**Decoding and Rendering**
+*   **SDF Network:** $s(\mathbf{x}) = S_\Theta(\mathbf{F}(\mathbf{x}))$ [S1, unofficial].
+*   **Color Network:** $\mathbf{c}(\mathbf{x}, \mathbf{v}) = C_\Theta(\mathbf{F}(\mathbf{x}), \mathbf{v})$ [S1, unofficial].
+*   **Volume Rendering:** Images are rendered by integrating along rays $\mathbf{p}(t) = \mathbf{o} + t\mathbf{d}$:
+    $$ \mathbf{C}(\mathbf{d}) = \int_{t_n}^{t_f} w(t) \mathbf{c}(\mathbf{p}(t), \mathbf{v}) dt $$
+    where the weighting function is $w(t) = T(t)\rho(t)$ [S1, unofficial].
+*   **Transmittance:**
+    $$ T(t) = e^{-\int_{t_n}^{t} \rho(u) du} $$
+*   **Density:** Derived from the SDF using the derivative of a sigmoid function $\Phi_s(x) = (1 + e^{-sx})^{-1}$:
+    $$ \rho(t) = \max\left(-\frac{d\Phi}{dt}(\text{sdf}(\mathbf{p}(t))), 0\right) = \max\left(\frac{s e^{-s \cdot \text{sdf}(\mathbf{p}(t))}}{(1 + e^{-s \cdot \text{sdf}(\mathbf{p}(t))})^2}, 0\right) $$
+    where $s$ is the sharpness parameter of the sigmoid [S1, unofficial].
+
+**Optimization**
+*   Minimize the difference between rendered images and input images.
+*   Add two regularization terms for smoothness [S1, unofficial]. The specific formulas for these terms are not provided in the text [S1, unofficial].
+
+**Pseudocode**
+
+> **Unverified code.** The code below did not pass a test run against a reference implementation, or no test fits it, so it may contain errors.
+
+```python
+import numpy as np
+
+def trilinear_interpolate(grid, point):
+    """
+    Performs trilinear interpolation on a 3D grid at a given point.
+    grid: numpy array of shape (D, H, W, C)
+    point: numpy array of shape (3,) with coordinates in [0, 1]
+    Returns: feature vector of shape (C,)
+    """
+    # Scale point to grid dimensions
+    coords = point * np.array(grid.shape[:3])
+    
+    # Get integer and fractional parts
+    x0, y0, z0 = np.floor(coords).astype(int)
+    x1, y1, z1 = x0 + 1, y0 + 1, z0 + 1
+    
+    # Handle boundary conditions
+    x0 = np.clip(x0, 0, grid.shape[0] - 1)
+    x1 = np.clip(x1, 0, grid.shape[0] - 1)
+    y0 = np.clip(y0, 0, grid.shape[1] - 1)
+    y1 = np.clip(y1, 0, grid.shape[1] - 1)
+    z0 = np.clip(z0, 0, grid.shape[2] - 1)
+    z1 = np.clip(z1, 0, grid.shape[2] - 1)
+    
+    # Fractional weights
+    fx, fy, fz = coords - np.floor(coords)
+    
+    # Interpolate
+    c00 = grid[x0, y0, z0] * (1 - fx) * (1 - fy) * (1 - fz) + \
+          grid[x1, y0, z0] * fx * (1 - fy) * (1 - fz) + \
+          grid[x0, y1, z0] * (1 - fx) * fy * (1 - fz) + \
+          grid[x1, y1, z0] * fx * fy * (1 - fz)
+          
+    c10 = grid[x0, y0, z1] * (1 - fx) * (1 - fy) * fz + \
+          grid[x1, y0, z1] * fx * (1 - fy) * fz + \
+          grid[x0, y1, z1] * (1 - fx) * fy * fz + \
+          grid[x1, y1, z1] * fx * fy * fz
+          
+    return c00 * (1 - fz) + c10 * fz
+
+def hive_encode(point, volumes):
+    """
+    Concatenates features from hierarchical volumes.
+    point: numpy array (3,)
+    volumes: list of numpy arrays (grids)
+    Returns: concatenated feature vector
+    """
+    features = []
+    for vol in volumes:
+        features.append(trilinear_interpolate(vol, point))
+    return np.concatenate(features)
+
+def sigmoid_derivative(sdf_val, sharpness):
+    """
+    Computes density from SDF using sigmoid derivative.
+    sdf_val: float
+    sharpness: float (s)
+    Returns: density
+    """
+    # Phi_s(x) = (1 + exp(-s*x))^-1
+    # dPhi/dx = s * exp(-s*x) / (1 + exp(-s*x))^2
+    exp_term = np.exp(-sharpness * sdf_val)
+    denom = (1 + exp_term) ** 2
+    dPhi = (sharpness * exp_term) / denom
+    return max(-dPhi, 0)
+
+def render_ray(ray_origin, ray_direction, sdf_net, color_net, volumes, t_near, t_far, sharpness):
+    """
+    Renders a single ray using neural volume rendering.
+    """
+    # Sample points along the ray
+    t_vals = np.linspace(t_near, t_far, 128)
+    points = ray_origin + ray_direction * t_vals[:, np.newaxis]
+    
+    # Get features
+    features = np.array([hive_encode(p, volumes) for p in points])
+    
+    # Get SDF and Color
+    sdf_vals = sdf_net(features)
+    colors = color_net(features, ray_direction)
+    
+    # Compute density
+    densities = np.array([sigmoid_derivative(s, sharpness) for s in sdf_vals])
+    
+    # Compute transmittance and weights
+    # T(t) = exp(-int rho du)
+    # Approximate integral using trapezoidal rule or simple sum
+    dt = t_vals[1] - t_vals[0]
+    alpha = 1 - np.exp(-densities * dt)
+    T = np.ones_like(alpha)
+    T[1:] = np.cumprod(1 - alpha[:-1])
+    
+    weights = T * alpha
+    
+    # Composite color
+    color = np.sum(weights[:, np.newaxis] * colors, axis=0)
+    return color
+```
+
+**Parameters**
+*   **Number of Volumes:** 8 in the basic setting [S1, unofficial].
+*   **Resolutions:** $2, 8, 32, 128, 256$ (dense), $512, 1024$ (sparse) [S1, unofficial].
+*   **Sharpness ($s$):** Parameter for the sigmoid function $\Phi_s$ [S1, unofficial]. Value not specified.
+
+**Edge Cases and Pitfalls**
+*   **Memory Consumption:** High-resolution dense volumes consume significant memory. Sparsification is required for resolutions 512 and 1024 [S1, unofficial].
+*   **Sparsification Threshold:** The method keeps voxels "nearby the surface" but does not specify the exact distance threshold for sparsification [S1, unofficial].
+*   **Hash Collisions:** Avoided by using hierarchical volumes instead of hash tables [S1, unofficial].
+
+## Subtopics
+
+### Voxel and Grid Representations
+Uses regular 3D grids for feature storage. HIVE differs by using a hierarchy of grids and sparsification. [Voxel and Grid Representations](18218-voxel-and-grid-representations.md)
+
+### Triplane and Planar Representations
+Uses 2D planes for feature storage. HIVE uses 3D volumes, capturing volumetric information directly. [Triplane and Planar Representations](18410-triplane-and-planar-representations.md)
+
+### Octree-based Implicit Surface Representation with SH and SDF Optimization
+Uses octrees with summed features. HIVE uses concatenated features from multiple small-channel volumes, consuming less memory. [Octree-based Implicit Surface Representation with SH and SDF Optimization](22788-octree-based-implicit-surface-representation-with-sh-and-sdf.md)
+
+## Operating characteristics
+*   **Time Complexity:** Query time is proportional to the number of volumes ($K=8$) and the cost of trilinear interpolation. Sparsification reduces the number of active high-resolution voxels, potentially speeding up memory access but adding overhead for sparsification logic [S1, unofficial].
+*   **Memory Complexity:** Reduced compared to a single dense high-resolution volume due to sparsification and the use of small feature channels. The text states it consumes less memory than octree-based methods with large feature channels [S1, unofficial].
+*   **Performance:** On the DTU dataset, HIVE reduced error by 25% for NeuS (0.84 mm to 0.63 mm), 23% for VolSDF (0.86 mm to 0.66 mm), and 10% for NeuralWarp (0.68 mm to 0.61 mm) [S1, unofficial]. On EPFL, NeuralWarp error reduced by 31% [S1, unofficial].
+*   **Strengths:** Captures high-frequency details, enforces spatial consistency, avoids hash collisions, reduces memory via sparsification.
+*   **Limitations:** Requires multi-stage optimization. Sparsification threshold is not specified.
+
+## Background
+HIVE was introduced in the paper "HIVE: HIerarchical Volume Encoding for Neural Implicit Surface Reconstruction" [S1, unofficial]. It addresses limitations in existing volume encoding methods (global incoherence) and hash-table encoding (collisions) [S1, unofficial]. It is demonstrated on DTU, EPFL, and BlendedMVS datasets [S1, unofficial].
+
+## Sources
+[S1] HIVE: HIerarchical Volume Encoding for Neural Implicit Surface Reconstruction, https://doi.org/10.48550/arxiv.2408.01677, fetched 2026-10-26 (unofficial)

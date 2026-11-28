@@ -1,0 +1,265 @@
+--- v002.md
++++ v003.md
+@@ -4,159 +4,127 @@
+ 
+ ## Overview
+-A mesh-native voxelizer that produces an occupancy grid or a signed-distance field (SDF) over a Piecewise Linear Complex (PLC)'s bounding box, using exact-predicate classification to avoid epsilon-ray speckle [S1, unofficial][S2]. Unlike approximate ray-casting methods, this method uses Shewchuk's exact predicates for geometric calculations to ensure robust classification of watertight meshes in single precision [S2]. It differs from CAD kernels like OCCT by classifying against the input tessellation rather than exact analytic surfaces, meaning fidelity is bounded by the input faceting accuracy [S1, unofficial][S2].
++A mesh-native voxelizer that produces an occupancy grid or a signed-distance field (SDF) over a Piecewise Linear Complex (PLC)'s bounding box, using exact-predicate classification to avoid epsilon-ray speckle [S1, unofficial]. It sets itself apart from its siblings by relying on Shewchuk's exact geometric predicates for robust inside/outside determination, ensuring watertight meshes classify correctly in single precision without the artifacts common in epsilon-based ray casting [S2]. Unlike [Fake Voxelization via Triangle-Cube Intersection](6951-fake-voxelization-via-triangle-cube-intersection.md) which approximates intersections, this method provides exact topological classification for the input tessellation [S1, unofficial].
+ 
+ ## How it works
+ **Inputs and Outputs:**
+ *   **Input:** A Piecewise Linear Complex (PLC), defined as a triangle mesh [S2].
+-*   **Parameters:**
+-    *   `resolution`: Grid density (default 64) [S1, unofficial].
+-    *   `mode`: Output type, either "occupancy" or "sdf" [S1, unofficial].
+-    *   `pad`: Boundary padding value (default 1) [S1, unofficial].
+-*   **Output:** A `VoxelGrid` data structure containing `origin`, `spacing`, `dims`, and `data` [S2]. The `data` is exposed as a NumPy array with shape `(nx, ny, nz)` and dtype `uint8` for occupancy or `float32` for SDF [S1, unofficial][S2].
++*   **Output:** A `VoxelGrid` data structure containing origin, spacing, dimensions, and data fields. The data is exposed as a NumPy array of shape $(n_x, n_y, n_z)$ with `uint8` for occupancy or `float32` for SDF, along with origin and spacing metadata [S1, unofficial].
+ 
+ **Data Structures:**
+-*   **CarveGrid:** A boundary-triangle spatial index used for xy-projection bucketing and spatial queries [S2].
+-*   **VoxelGrid:** Contains `origin` (3D vector), `spacing` (scalar), `dims` (3D integer vector), and `data` (1D array reshaped to 3D) [S2].
++*   **CarveGrid:** A boundary-triangle spatial index used for spatial queries [S2].
++*   **VoxelGrid:** Contains `origin` (3D vector), `spacing` (scalar), `dims` (3D integer vector), and `data` (array) [S2].
++
++**Parameters:**
++*   `resolution`: Controls grid density. Default value is 64 [S1, unofficial].
++*   `mode`: Selects output type. Values are `"occupancy"` or `"sdf"` [S1, unofficial].
++*   `pad`: Padding for the grid (Python API) [S1, unofficial].
+ 
+ **Algorithm Steps:**
+-1.  **Initialization:** Compute the bounding box of the input PLC [G]. Determine grid dimensions `(nx, ny, nz)` based on `resolution` and bounding box size [G]. Initialize the `VoxelGrid` with `origin`, `spacing`, and `dims` [S1, unofficial][S2].
+-2.  **Spatial Indexing:** Build the `CarveGrid` spatial index from the input triangles to bucket them by xy-projection [S2].
+-3.  **Column Processing:** Iterate over each xy-column `(x, y)` in the grid [G]. Retrieve the list of triangles intersecting the column's xy-projection from `CarveGrid` [S1, unofficial][S2].
+-4.  **Exact-Predicate Classification:** For each column, cast a vertical scanline [G]. Count crossings against the fan-triangulated boundary using `cmg::robust::orient3d` [S1, unofficial]. The predicate determines plane-side sign change and matching edge orientations [S1, unofficial]. If `orient3d` returns exactly 0 (grazing case), apply a deterministic `(x, y)` nudge to the scanline to ensure robustness [S1, unofficial].
+-5.  **Occupancy Calculation:** A cell is inside if an odd number of crossings lie above its center [S1, unofficial].
+-6.  **SDF Calculation:** If `mode` is "sdf", compute the exact point-to-triangle distance for each cell center using Ericson's method [S1, unofficial]. Sign the distance by the parity (negative inside, positive outside) [S1, unofficial].
+-7.  **Output:** Return the populated `VoxelGrid` [S2].
++1.  **Spatial Indexing:** Bucket triangles by their xy-projection into the `CarveGrid` to optimize queries, achieving approximately $O(\text{cells} + \text{triangles})$ complexity [S1, unofficial].
++2.  **Grid Iteration:** Iterate over each voxel cell $(i, j, k)$ within the PLC's bounding box.
++3.  **Classification (Occupancy):**
++    *   Cast a vertical scanline (along the z-axis) through the center of the voxel cell's xy-projection [S1, unofficial].
++    *   Count the number of crossings with the fan-triangulated boundary triangles that lie above the voxel center [S1, unofficial].
++    *   Use `cmg::robust::orient3d` (Shewchuk's exact predicate) to determine plane-side sign changes and matching edge orientations for each intersection [S1, unofficial].
++    *   **Grazing Case:** If `orient3d` returns exactly 0 (grazing), apply a deterministic $(x, y)$ nudge to the scanline to ensure robustness [S1, unofficial].
++    *   The cell is **inside** if the number of crossings is odd [S1, unofficial].
++4.  **SDF Calculation (if mode is "sdf"):**
++    *   Compute the exact point-to-triangle distance using Ericson's algorithm [S1, unofficial].
++    *   Sign the distance: negative if the voxel center is inside (odd parity), positive if outside (even parity) [S1, unofficial].
++5.  **Output Generation:** Populate the `VoxelGrid` data array with the computed values [S2].
+ 
+ **Pseudocode:**
+ ```python
+-import numpy as np
+-from typing import List, Tuple
++def voxelize(plc, resolution=64, mode="occupancy", pad=1):
++    # 1. Setup grid parameters
++    bbox = plc.bounding_box()
++    dims = compute_dims(bbox, resolution, pad)
++    spacing = compute_spacing(bbox, dims)
++    origin = bbox.min - spacing * pad
++    
++    # 2. Build spatial index (CarveGrid)
++    carve_grid = CarveGrid()
++    for tri in plc.triangles:
++        carve_grid.insert(tri)
++        
++    # 3. Initialize output grid
++    if mode == "occupancy":
++        grid = numpy.zeros(dims, dtype=numpy.uint8)
++    else:
++        grid = numpy.zeros(dims, dtype=numpy.float32)
++        
++    # 4. Iterate over voxels
++    for k in range(dims.z):
++        for j in range(dims.y):
++            for i in range(dims.x):
++                # Voxel center in world space
++                center = origin + numpy.array([i, j, k]) * spacing
++                
++                # Get candidate triangles for this xy-column
++                candidates = carve_grid.query_xy(center.x, center.y)
++                
++                # Count crossings using exact predicates
++                crossings = 0
++                for tri in candidates:
++                    # Determine if the vertical ray from center intersects the triangle
++                    # and if the intersection point is above the center
++                    # Use orient3d for robustness
++                    is_crossing = classify_vertical_ray(center, tri)
++                    if is_crossing:
++                        crossings += 1
++                        
++                # Determine occupancy
++                is_inside = (crossings % 2 == 1)
++                
++                if mode == "occupancy":
++                    grid[i, j, k] = 1 if is_inside else 0
++                else:
++                    # Compute SDF
++                    dist = compute_point_triangle_distance(center, plc.triangles)
++                    if is_inside:
++                        grid[i, j, k] = -dist
++                    else:
++                        grid[i, j, k] = dist
++                        
++    return VoxelGrid(origin=origin, spacing=spacing, dims=dims, data=grid)
+ 
+-class VoxelGrid:
+-    def __init__(self, origin: np.ndarray, spacing: float, dims: Tuple[int, int, int], data: np.ndarray):
+-        self.origin = origin
+-        self.spacing = spacing
+-        self.dims = dims
+-        self.data = data
++def classify_vertical_ray(center, tri):
++    # Cast vertical ray from center upwards
++    # Use orient3d to check intersection robustly
++    # Apply deterministic nudge if orient3d is 0
++    # Return True if intersection exists and z_intersect > center.z
++    pass
+ 
+-def orient3d(ax: float, ay: float, az: float, bx: float, by: float, bz: float, cx: float, cy: float, cz: float, dx: float, dy: float, dz: float) -> int:
+-    """Shewchuk's exact predicate determinant for 3D orientation [G]."""
+-    det = (dx - ax) * ((by - ay) * (cz - az) - (bz - az) * (cy - ay)) - \
+-          (dy - ay) * ((bx - ax) * (cz - az) - (bz - az) * (cx - ax)) + \
+-          (dz - az) * ((bx - ax) * (cy - ay) - (by - ay) * (cx - ax))
+-    return 1 if det > 0 else (-1 if det < 0 else 0)
+-
+-def point_triangle_distance(p: np.ndarray, tri: np.ndarray) -> float:
+-    """Ericson's exact point-to-triangle distance [G]."""
+-    v0, v1, v2 = tri[0], tri[1], tri[2]
+-    e1 = v1 - v0
+-    e2 = v2 - v0
+-    d = p - v0
+-    a = np.dot(e1, e1)
+-    b = np.dot(e1, e2)
+-    c = np.dot(e2, e2)
+-    d1 = np.dot(e1, d)
+-    d2 = np.dot(e2, d)
+-    det = a * c - b * b
+-    u, v = 0.0, 0.0
+-    if det <= 1e-9:
+-        u = max(0, d1 / a) if a > 1e-9 else 0
+-        v = max(0, d2 / c) if c > 1e-9 else 0
+-    else:
+-        u = (c * d1 - b * d2) / det
+-        v = (a * d2 - b * d1) / det
+-    u = max(0, min(1, u))
+-    v = max(0, min(1, v))
+-    closest = v0 + u * e1 + v * e2
+-    return float(np.linalg.norm(p - closest))
+-
+-def voxelize(plc_triangles: List[np.ndarray], resolution: int = 64, mode: str = "occupancy", pad: int = 1) -> VoxelGrid:
+-    # 1. Compute bounding box and dimensions
+-    all_verts = np.vstack(plc_triangles)
+-    bbox_min = all_verts.min(axis=0)
+-    bbox_max = all_verts.max(axis=0)
+-    dims = np.array([resolution, resolution, resolution], dtype=int)
+-    origin = bbox_min
+-    spacing = (bbox_max - bbox_min) / dims
+-
+-    # 2. Initialize output grid
+-    data = np.zeros(dims, dtype=np.uint8 if mode == "occupancy" else np.float32)
+-
+-    # 3. Bucket triangles by xy-projection (CarveGrid simulation)
+-    col_triangles = [[[] for _ in range(dims[1])] for _ in range(dims[0])]
+-    for tri in plc_triangles:
+-        min_x = int(np.floor((np.min(tri[:, 0]) - origin[0]) / spacing[0]))
+-        max_x = int(np.floor((np.max(tri[:, 0]) - origin[0]) / spacing[0]))
+-        min_y = int(np.floor((np.min(tri[:, 1]) - origin[1]) / spacing[1]))
+-        max_y = int(np.floor((np.max(tri[:, 1]) - origin[1]) / spacing[1]))
+-        for x in range(min_x, max_x + 1):
+-            for y in range(min_y, max_y + 1):
+-                if 0 <= x < dims[0] and 0 <= y < dims[1]:
+-                    col_triangles[x][y].append(tri)
+-
+-    # 4. Process columns
+-    for x in range(dims[0]):
+-        for y in range(dims[1]):
+-            cx = origin[0] + (x + 0.5) * spacing[0]
+-            cy = origin[1] + (y + 0.5) * spacing[1]
+-            crossings = 0
+-            nudge = 0.0
+-
+-            for tri in col_triangles[x][y]:
+-                p1, p2, p3 = tri
+-                n = np.cross(p2 - p1, p3 - p1)
+-                denom = n[2]
+-                if abs(denom) < 1e-9:
+-                    continue
+-                ray_t = (n[0] * (p1[0] - cx) + n[1] * (p1[1] - cy)) / denom
+-                if ray_t < 0:
+-                    continue
+-
+-                # Check if intersection point is inside triangle using orient3d
+-                o1 = orient3d(cx, cy, 0, cx, cy, ray_t, p1[0], p1[1], p1[2], p2[0], p2[1], p2[2])
+-                o2 = orient3d(cx, cy, 0, cx, cy, ray_t, p2[0], p2[1], p2[2], p3[0], p3[1], p3[2])
+-                o3 = orient3d(cx, cy, 0, cx, cy, ray_t, p3[0], p3[1], p3[2], p1[0], p1[1], p1[2])
+-
+-                # Handle grazing cases with deterministic nudge
+-                if o1 == 0 or o2 == 0 or o3 == 0:
+-                    nudge = 1e-7
+-                    o1 = orient3d(cx + nudge, cy, 0, cx + nudge, cy, ray_t, p1[0], p1[1], p1[2], p2[0], p2[1], p2[2])
+-                    o2 = orient3d(cx + nudge, cy, 0, cx + nudge, cy, ray_t, p2[0], p2[1], p2[2], p3[0], p3[1], p3[2])
+-                    o3 = orient3d(cx + nudge, cy, 0, cx + nudge, cy, ray_t, p3[0], p3[1], p3[2], p1[0], p1[1], p1[2])
+-
+-                if o1 > 0 and o2 > 0 and o3 > 0:
+-                    crossings += 1
+-
+-            is_inside = (crossings % 2) == 1
+-
+-            # 5 & 6. Fill grid
+-            for z in range(dims[2]):
+-                if mode == "occupancy":
+-                    data[x, y, z] = 1 if is_inside else 0
+-                else:
+-                    vz = origin[2] + (z + 0.5) * spacing[2]
+-                    center = np.array([cx, cy, vz])
+-                    dist = point_triangle_distance(center, tri)
+-                    data[x, y, z] = -dist if is_inside else dist
+-
+-    return VoxelGrid(origin, spacing, tuple(dims), data)
++def compute_point_triangle_distance(point, triangles):
++    # Ericson's exact point-to-triangle distance algorithm
++    min_dist = infinity
++    for tri in triangles:
++        d = distance_point_triangle(point, tri)
++        if d < min_dist:
++            min_dist = d
++    return min_dist
+ ```
+ 
+ **Edge Cases and Pitfalls:**
+-*   **Grazing Cases:** When `orient3d` returns exactly 0, a deterministic `(x, y)` nudge must be applied to the scanline to avoid ambiguity [S1, unofficial].
+-*   **Curved Inputs:** The method only sees the triangle mesh, so curved inputs (e.g., from STEP/IGES) are only as accurate as their faceting [S1, unofficial][S2].
+-*   **Non-Watertight Input:** The method does not handle non-watertight input; it assumes a watertight PLC [S1, unofficial].
++*   **Grazing Intersections:** `orient3d` returning exactly 0 must be handled by a deterministic $(x, y)$ nudge to the scanline [S1, unofficial].
++*   **Curved Inputs:** The method only sees the triangle mesh; curved CAD inputs (STEP/IGES) are not handled with exact surface precision, so fidelity is bounded by the input faceting [S1, unofficial][S2].
++*   **Non-Watertight Input:** Healing non-watertight input is a non-goal; the method assumes a watertight PLC for robust parity classification [S1, unofficial].
++
++## Subtopics
++
++### [Bolt](15747-bolt.md)
++An optimization for solid mesh voxelization that skips expensive BVH distance queries for exterior voxels by leveraging parity check results. Choose this when performance is critical for solid meshes and you can accept placeholder infinite distances for exterior points.
+ 
+ ## Operating characteristics
+-*   **Time Complexity:** Approximately $O(\text{cells} + \text{triangles})$ due to bucketing triangles by xy-projection [S1, unofficial].
+-*   **Memory Complexity:** Proportional to the number of voxels in the grid, $O(nx \cdot ny \cdot nz)$ [S1, unofficial][S2].
+-*   **Performance:** Fast, parallel spatial-grid classifier [S2].
+-*   **Strengths:** Robust classification in single precision, no epsilon-ray speckle, mesh-native (no CAD dependency) [S1, unofficial][S2].
+-*   **Limitations:** Fidelity bounded by input tessellation, does not handle B-Rep/exact-surface voxelization, does not heal non-watertight input [S1, unofficial][S2].
+-*   **When to Use:** When robust voxelization of a triangle mesh is required, especially in single precision, and CAD kernel integration is not desired [S2].
+-*   **When Not to Use:** When exact curved-surface fidelity is required (use OCCT instead) [S1, unofficial][S2].
++*   **Time Complexity:** Approximately $O(\text{cells} + \text{triangles})$ due to triangle bucketing by xy-projection [S1, unofficial].
++*   **Memory Complexity:** Proportional to the number of voxels in the grid plus the spatial index size [S2].
++*   **Performance:** Validated with 138 tests including cube and sphere volume convergence, determinism, and watertight no-speckle checks in single precision [S1, unofficial].
++*   **Strengths:** Robust exact-predicate classification avoids epsilon-ray speckle; mesh-native (no CAD kernel dependency); fast parallel spatial-grid classifier [S2].
++*   **Limitations:** Fidelity is bounded by input tessellation; does not support B-Rep/exact-surface voxelization; SDF calculation is brute-force point-triangle distance in v1 [S1, unofficial].
++*   **When to Use:** When robust voxelization of a triangle mesh is required without external CAD dependencies, and exact topological classification is critical.
++*   **When Not to Use:** When exact curved-surface fidelity (STEP/IGES) is required (use OCCT instead) [S1, unofficial][S2].
+ 
+ ## Background
+-Proposed by leonardoaraujosantos in Pull Request #20 to the CyberdyneCorp/CyberMeshGenerator repository on July 4, 2026 [S2]. The method is part of the CyberMeshGenerator (cmg) library, a modern C++20 library for generating tetrahedral meshes [S2]. It was designed to provide a mesh-native voxelizer that reuses existing point-in-solid classifiers and spatial indices within the cmg ecosystem [S2]. The method explicitly positions itself against OCCT, noting that while OCCT provides exact curved-surface fidelity, cmg offers speed, smaller footprint, and better integration with meshing tools [S1, unofficial][S2].
++Proposed by leonardoaraujosantos in Pull Request #20 to the CyberdyneCorp/CyberMeshGenerator repository on July 4, 2026 [S2]. It is part of the CyberMeshGenerator (cmg) library, a modern C++20 library for generating tetrahedral meshes of 3D polyhedral geometry [S2]. The method was designed to provide a mesh-native voxelizer that reuses existing point-in-solid classifiers and Shewchuk's exact predicates, distinguishing it from B-Rep based tools like OCCT which offer exact analytic surface classification but are heavier and CAD-focused [S2].
+ 
+ ## Sources

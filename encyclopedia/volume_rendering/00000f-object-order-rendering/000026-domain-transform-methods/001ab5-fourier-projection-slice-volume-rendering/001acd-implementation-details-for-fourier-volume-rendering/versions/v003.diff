@@ -1,0 +1,324 @@
+--- v002.md
++++ v003.md
+@@ -4,36 +4,55 @@
+ 
+ ## Overview
+-This article details the specific algorithmic steps, data structures, and parameter choices required to implement the Fourier Projection-Slice Volume Rendering method [Parent](824-fourier-projection-slice-volume-rendering.md) [S1, unofficial]. It solves the problem of efficiently generating attenuation-only images (X-ray-like projections) and shaded volume renderings by exploiting the Fourier projection-slice theorem [S1, unofficial]. What sets this implementation apart from standard digital compositing is the use of frequency-domain slicing and inverse transformation, reducing the per-view complexity from $O(N^3)$ to $O(N^2 \log N)$ [S1, unofficial].
++This article details the specific implementation steps, data structures, and numerical stability measures required to realize Fourier Projection-Slice Volume Rendering. It solves the practical challenges of spectral leakage, numerical divergence in triangle transforms, and interactive segmentation constraints. It sets itself apart from its parent method by providing the concrete algorithmic pipeline—from preprocessing to per-view synthesis—necessary for a working implementation, distinguishing itself from sibling methods like [Depth Cueing via Linear Attenuation](966-depth-cueing-via-linear-attenuation.md) by relying on frequency-domain interpolation rather than spatial compositing.
+ 
+ ## How it works
+ 
+ ### Inputs and Outputs
+-*   **Input:** A 3D voxel volume $V$ of size $N \times N \times N$ (typically $128^3$) [S1, unofficial].
+-*   **Output:** A 2D image $I$ of size $128 \times 128$ [S1, unofficial].
++**Inputs:**
++1.  Input volume data $V_{in}$ of size $N \times N \times N$ (typically $128^3$ voxels) [S1, S2, unofficial].
++2.  Mesh geometry (vertices and triangles) if rendering implicit surfaces [S3, unofficial].
++3.  Viewing direction $\mathbf{v}$ and lighting direction $\mathbf{l}$ [S1, S2, unofficial].
++
++**Outputs:**
++1.  A 2D attenuation-only image of size $M \times M$ (typically $128 \times 128$) [S1, S2, unofficial].
+ 
+ ### Data Structures
+-1.  **Preprocessed Volume ($V_{pad}$):** A 3D array of size $N_{pad} \times N_{pad} \times N_{pad}$, where $N_{pad} = \lceil 1.16 N \rceil$ [S1, unofficial]. The original data occupies the center, surrounded by a 16% zero-margin [S1, unofficial].
+-2.  **3D Spectrum ($\hat{V}$):** The result of the 3D FFT of $V_{pad}$ [S1, unofficial].
+-3.  **Slices:** 2D arrays extracted from $\hat{V}$ corresponding to specific viewing angles [S1, unofficial].
++1.  **Preprocessed Volume ($V_{pad}$):** A 3D array of size $N_{pad} \times N_{pad} \times N_{pad}$, where $N_{pad} = N \times 1.16$. The central $N \times N \times N$ region contains the windowed and edge-enhanced data; the outer 16% margin is filled with zeros [S1, S2, unofficial].
++2.  **3D Spectrum ($\hat{V}$):** The result of the 3D FFT of $V_{pad}$. Stored as complex numbers. Memory usage varies from 48 MB to 256 MB depending on the shading model complexity (e.g., equation 3.1.4 vs 3.3.2 in [S1, unofficial]) [S1, S2, unofficial].
++3.  **Triangle FT Cache (Optional):** If rendering meshes, a cache of Fourier Transforms for each triangle, computed using the stable formulas below [S3, unofficial].
+ 
+ ### Preprocessing Steps
+-1.  **Edge Enhancement:** Apply an edge sharpening operator to the input volume $V$ [S1, unofficial].
+-2.  **Nonlinear Windowing:** Apply a nonlinear density range windowing operator to the edge-enhanced data [S1, unofficial]. This step may be skipped for specific attenuation-only visualizations (e.g., X-ray projections) [S1, unofficial].
+-3.  **Zero Padding:** Surround the processed volume with a margin of zeros equal to 16% of the volume width [S1, unofficial]. The padded dimension is $N_{pad} = \lceil 1.16 N \rceil$ [S1, unofficial]. This margin prevents "ghosting" artifacts caused by spectral leakage [S1, unofficial].
+-
+-### Precomputation
+-1.  **Weighting:** Apply the desired shading or attenuation weighting function $W$ to the preprocessed volume $V_{pad}$ to create a weighted volume $V_w$ [S1, unofficial].
+-2.  **3D FFT:** Compute the 3D Fast Fourier Transform of $V_w$ to obtain the spectrum $\hat{V}$ [S1, unofficial].
+-    *   $\hat{V} = \text{FFT3D}(V_w)$
+-
+-### Per-View Rendering
+-For each viewing direction defined by a normal vector $\mathbf{n}$:
+-
+-1.  **Slice Extraction:** Extract a 2D slice from the 3D spectrum $\hat{V}$ that corresponds to the projection plane orthogonal to $\mathbf{n}$ [S1, unofficial]. The slice width equals the spectral width of the volume [S1, unofficial]. Use a **tricubic interpolating spline** to extract the slice values from the discrete 3D spectrum grid [S1, unofficial].
+-2.  **2D Inverse FFT:** Compute the 2D Inverse Fast Fourier Transform of the extracted slice to obtain a 2D projection in the spatial domain [S1, unofficial].
+-    *   $P = \text{IFFT2D}(\text{Slice}(\hat{V}, \mathbf{n}))$
+-3.  **Weighting:** Apply viewing or lighting direction weights to the projection $P$ [S1, unofficial].
+-4.  **Summation:** Sum the weighted projections from all necessary angles (or a single projection for attenuation-only) to produce the final $128 \times 128$ image $I$ [S1, unofficial].
+-    *   $I = \sum P_i$
++1.  **Edge Enhancement:** Apply an edge sharpening operator to $V_{in}$ [S1, S2, unofficial].
++2.  **Nonlinear Windowing:** Apply a nonlinear density range windowing operator to enhance contrast [S1, S2, unofficial].
++    *   *Note:* This step is hardwired into the preprocessing pipeline. Changing these operators requires recomputing the entire 3D Fourier spectrum, which hinders interactive data segmentation [S1, unofficial].
++3.  **Zero Padding:** Surround the processed volume with a 16% margin of zeros. This prevents the "ghosting problem" caused by spectral leakage (circular convolution artifacts) [S1, S2, unofficial].
++4.  **3D FFT:** Compute the 3D Fast Fourier Transform of the padded volume to obtain $\hat{V}$ [S1, S2, unofficial].
++
++### Per-View Rendering Steps
++1.  **Slice Extraction:** For the current viewing direction, extract a 2D slice from the 3D spectrum $\hat{V}$. The slice width equals the spectral extent.
++2.  **Interpolation:** Use a **tricubic interpolating spline** to extract the slice values from the 3D frequency grid [S1, S2, unofficial].
++3.  **Weighting:** Apply weighting factors corresponding to the current viewing direction $\mathbf{v}$ and lighting direction $\mathbf{l}$ to the extracted slice. This implements the shading model (e.g., attenuation, diffuse shading) [S1, S2, unofficial].
++4.  **2D Inverse FFT:** Compute the 2D Inverse Fast Fourier Transform of the weighted slice to generate the 2D image contribution [S1, S2, unofficial].
++5.  **Summation:** Sum the contributions from all necessary slices (or the single slice, depending on the specific projection-slice variant) to produce the final $128 \times 128$ image [S1, S2, unofficial].
++
++### Numerical Stability for Triangle FT (Mesh Rendering)
++When rendering meshes, the Fourier Transform of a triangle $\hat{u}_{\mathcal{T}}(\boldsymbol{\xi})$ involves denominators that can approach zero, causing numerical divergence [S3, unofficial].
++
++**Formula:**
++The base function $g(s, t, u)$ for triangle edges projected onto frequency vector $\boldsymbol{\xi}$ is:
++$$g(s, t, u) = \frac{-e^{is}}{(s-t)(s-u)} + \frac{-e^{it}}{(t-u)(t-s)} + \frac{-e^{iu}}{(u-s)(u-t)} \quad (11)$$
++where $s = \mathbf{e}_1 \cdot \boldsymbol{\xi}$, $t = \mathbf{e}_2 \cdot \boldsymbol{\xi}$, $u = \mathbf{e}_3 \cdot \boldsymbol{\xi}$ [S3, unofficial].
++
++**Stability Check:**
++1.  Calculate $s, t, u$.
++2.  Check if any pair $(a, b)$ among $(s, t, u)$ satisfies $|a - b| < \epsilon$, where $\epsilon$ is the floating-point precision threshold [S3, unofficial].
++3.  If $|a - b| < \epsilon$, use the special case formula instead of Eq. 11 [S3, unofficial].
++
++**Special Cases:**
++*   If $t = u$ (or permutations $t=s$ or $u=s$):
++    $$g(t, t, u) = i \frac{e^{-it}}{t-u} + \frac{e^{-it}}{(t-u)^2} - \frac{e^{-iu}}{(t-u)^2} \quad (12a)$$
++*   If $s = t = u$:
++    $$g(u, u, u) = \frac{e^{-iu}}{2} \quad (12b)$$
++    [S3, unofficial]
+ 
+ ### Pseudocode
+@@ -42,108 +61,155 @@
+ import numpy as np
+ 
+-def edge_enhance(volume):
+-    # [G] Standard edge enhancement applies a spatial filter (e.g., Laplacian)
+-    # The exact operator is not specified in the sources.
+-    return volume  # Placeholder for spatial convolution [G]
+-
+-def nonlinear_window(volume, alpha=2.0):
+-    # [G] Nonlinear windowing remaps intensity (e.g., power law or sigmoid)
+-    # The exact function is not specified in the sources.
+-    return np.power(volume, alpha)  # Placeholder for intensity remapping [G]
+-
+-def apply_weighting(volume, weights):
+-    # [G] Weights depend on the shading model (attenuation, diffuse, etc.)
+-    return volume * weights
+-
+-def get_slice_coordinates(view_direction, N_pad):
+-    # [G] Maps view_direction to 2D plane coordinates in the frequency grid.
+-    # Standard approach computes orthonormal basis vectors u, v orthogonal to view_direction.
+-    # The exact geometric mapping is not detailed in the sources.
+-    return np.zeros((N_pad, N_pad))  # Placeholder for coordinate mapping [G]
+-
+-def tricubic_interpolate(spectrum, coords):
+-    # [G] Standard tricubic spline interpolation samples the 3D spectrum at coords.
+-    # The exact implementation is not detailed in the sources.
+-    return np.zeros_like(coords)  # Placeholder for spline interpolation [G]
+-
+-def apply_view_weights(projection, view_direction):
+-    # [G] Applies lighting/attenuation weights based on view direction.
+-    # Model-specific weighting is not detailed in the sources.
+-    return projection * 0.5  # Placeholder for directional weighting [G]
+-
+-def fourier_volume_rendering(V, views, weights_3d, image_size=128):
+-    N = V.shape[0]
++def preprocess_volume(V_in, edge_sharpen_kernel, window_func):
++    """
++    Preprocesses input volume for Fourier Volume Rendering.
++    V_in: numpy array of shape (N, N, N)
++    """
++    # 1. Edge Enhancement
++    V_edge = convolve_3d(V_in, edge_sharpen_kernel)
++    
++    # 2. Nonlinear Windowing
++    V_windowed = window_func(V_edge)
++    
++    # 3. Zero Padding (16% margin)
++    N = V_windowed.shape[0]
+     margin = int(0.16 * N)
+     N_pad = N + 2 * margin
+-    
+-    # Initialize padded volume with zeros
+-    V_pad = np.zeros((N_pad, N_pad, N_pad), dtype=V.dtype)
+-    
+-    # Place original data in the center
+-    start, end = margin, N + margin
+-    V_pad[start:end, start:end, start:end] = V
+-    
+-    # Preprocessing
+-    V_pad = edge_enhance(V_pad)
+-    V_pad = nonlinear_window(V_pad)
+-    
+-    # Precomputation
+-    V_weighted = apply_weighting(V_pad, weights_3d)
+-    spectrum = np.fft.fftn(V_weighted)
+-    
+-    # Per-View Rendering
+-    final_image = np.zeros((image_size, image_size))
+-    for view in views:
+-        coords = get_slice_coordinates(view, N_pad)
+-        slice_2d = tricubic_interpolate(spectrum, coords)
+-        projection = np.fft.ifftn(slice_2d)
+-        projection = apply_view_weights(projection, view)
+-        final_image += np.real(projection)
+-        
+-    return final_image
++    V_pad = np.zeros((N_pad, N_pad, N_pad), dtype=np.complex128)
++    
++    # Place centered data in the middle
++    start = margin
++    end = start + N
++    V_pad[start:end, start:end, start:end] = V_windowed
++    
++    return V_pad
++
++def compute_3d_spectrum(V_pad):
++    """
++    Computes the 3D FFT of the padded volume.
++    """
++    return np.fft.fftn(V_pad)
++
++def extract_slice_tricubic(spectrum, view_direction, slice_index, grid_shape):
++    """
++    Extracts a 2D slice from the 3D spectrum using tricubic interpolation.
++    spectrum: 3D complex array (N_pad, N_pad, N_pad)
++    view_direction: vector defining the slice plane in frequency space
++    slice_index: index along the view direction
++    grid_shape: shape of the output 2D slice
++    """
++    # Implementation of tricubic interpolation for slice extraction
++    # This involves sampling the 3D spectrum along a 2D plane defined by view_direction
++    # and interpolating using cubic splines in all 3 dimensions.
++    # Note: Specific tricubic spline coefficients are not provided in sources [S1, S2, unofficial].
++    # [G] Standard tricubic interpolation requires 64 neighboring voxels per sample point.
++    slice_data = interpolate_tricubic_2d_plane(spectrum, view_direction, slice_index, grid_shape)
++    return slice_data
++
++def render_view(spectrum, view_direction, light_direction, shading_model):
++    """
++    Renders a single view using the Fourier Projection-Slice Theorem.
++    """
++    # 1. Extract slice from 3D spectrum
++    # The slice width equals the spectral extent.
++    slice_2d = extract_slice_tricubic(spectrum, view_direction, 0, (128, 128))
++    
++    # 2. Apply shading weights based on view and light directions
++    # This implements the specific shading model (e.g., attenuation, diffuse)
++    weighted_slice = shading_model(slice_2d, view_direction, light_direction)
++    
++    # 3. Inverse 2D FFT to get spatial domain image
++    image = np.fft.ifftn(weighted_slice)
++    
++    # 4. Return magnitude/real part as the final image
++    return np.abs(image)
++
++def triangle_ft_stable(e1, e2, e3, xi, epsilon=1e-9):
++    """
++    Computes the Fourier Transform of a triangle with numerical stability.
++    e1, e2, e3: Edge vectors of the triangle
++    xi: Frequency vector
++    """
++    s = np.dot(e1, xi)
++    t = np.dot(e2, xi)
++    u = np.dot(e3, xi)
++    
++    # Check for degenerate cases
++    if abs(s - t) < epsilon or abs(t - u) < epsilon or abs(u - s) < epsilon:
++        # Use special case formulas to prevent division by zero
++        # Simplified logic for t=u case (Eq 12a)
++        if abs(t - u) < epsilon:
++            return 1j * np.exp(-1j*t) / (t - u) + np.exp(-1j*t) / (t - u)**2 - np.exp(-1j*u) / (t - u)**2
++        # Additional cases for s=t and u=s would follow similarly
++    else:
++        # Standard formula (Eq 11)
++        term1 = -np.exp(1j*s) / ((s - t) * (s - u))
++        term2 = -np.exp(1j*t) / ((t - u) * (t - s))
++        term3 = -np.exp(1j*u) / ((u - s) * (u - t))
++        return term1 + term2 + term3
+ ```
+ 
+-### Parameters
+-*   **Zero Padding Margin:** 16% of the volume width [S1, unofficial].
+-*   **Interpolation Method:** Tricubic interpolating spline [S1, unofficial].
+-*   **Input Volume Size:** Typically $128^3$ voxels [S1, unofficial].
+-*   **Output Image Size:** Typically $128 \times 128$ pixels [S1, unofficial].
+-
+-### Pitfalls
+-*   **Ghosting:** Failing to add the 16% zero-padding margin results in ghosting artifacts due to spectral leakage [S1, unofficial].
+-*   **Interactive Segmentation:** Preprocessing steps (edge sharpening, nonlinear windowing) are applied *before* the 3D FFT [S1, unofficial]. Changing these operators requires recomputing the entire 3D spectrum, which hinders interactive data segmentation [S1, unofficial].
+-    *   *Mitigation:* If segmentation is linear, it can be handled by precomputing spectra for basis materials (e.g., fat, muscle, bone) and weighting them at image generation time [S1, unofficial].
+-
+ ## Subtopics
+ 
+ ### [Adaptive Frequency Domain Filtering](968-adaptive-frequency-domain-filtering.md)
+-An optimization technique for frequency domain volume rendering that selects between a large and a small interpolation filter based on the local spectral energy of the 3D spectrum, reducing interpolation cost while maintaining image quality.
++Adaptive Frequency Domain Filtering is an optimization technique for frequency domain volume rendering that reduces interpolation cost by selectively applying larger or smaller interpolation filters based on local spectral properties marked during preprocessing. It solves the performance bottleneck of slice extraction in Fourier-based rendering by identifying regions of the 3D spectrum where the signal magnitude is sufficiently low to permit coarser approximation without visible quality loss. It sets itself apart from standard frequency domain methods by introducing a preprocessing step that marks voxels, allowing the extraction phase to skip expensive multi-voxel support checks. See [Adaptive Frequency Domain Filtering](968-adaptive-frequency-domain-filtering.md).
++
++### [FDK Pre-Filtering (Ramp Filter + Cone Weighting)](5010-fdk-pre-filtering-ramp-filter-cone-weighting.md)
++This method implements the pre-filtering stage of the Feldkamp-Davis-Kress (FDK) algorithm on the CPU, preparing 2D projection data for subsequent backprojection. It solves the problem of correcting for the cone-beam geometry and high-frequency attenuation inherent in filtered backprojection by applying a ramp filter and cone weighting to each projection slice. It is distinguished from its sibling [Adaptive Frequency Domain Filtering](968-adaptive-frequency-domain-filtering.md) by its fixed, global ramp filter kernel and explicit geometric cone weighting, rather than adaptive frequency-domain adjustments. See [FDK Pre-Filtering (Ramp Filter + Cone Weighting)](5010-fdk-pre-filtering-ramp-filter-cone-weighting.md).
++
++### [Gamma-Corrected Hemispherical Shading](5967-gamma-corrected-hemispherical-shading.md)
++Gamma-Corrected Hemispherical Shading (GCHS) is a method for computing diffuse illumination in Fourier Volume Rendering (FVR) that approximates the non-linear `max(0, N·L)` operator with a cubic polynomial of the gradient and light direction, enabling efficient evaluation in the frequency domain. It improves upon standard hemispherical shading by raising the term to the power of three, which effectively culls back-lit surfaces and preserves visual contrast without requiring non-linear operations that break Fourier linearity. See [Gamma-Corrected Hemispherical Shading](5967-gamma-corrected-hemispherical-shading.md).
+ 
+ ### Pre-FFT Edge Sharpening and Nonlinear Windowing
+-This variant highlights the preprocessing stage where edge sharpening and nonlinear density range windowing operators are applied directly to the input volume data before computing the forward 3D Fourier transform [S1, unofficial]. The key pitfall is that modifying these operators requires recomputing the entire 3D Fourier spectra, which hinders interactive data segmentation if hardwired into the preprocessing pipeline [S1, unofficial].
++This variant involves applying edge sharpening and nonlinear density range windowing operators directly to the input volume data before computing the forward 3D Fourier transform [S1, unofficial]. The pitfall is that modifying these operators requires recomputing the entire 3D Fourier spectra, which hinders interactive data segmentation if hardwired into the preprocessing pipeline [S1, unofficial].
+ 
+ ## Operating characteristics
+ 
+-*   **Time Complexity:** $O(N^2 \log N)$ per view, avoiding the $O(N^3)$ cost of digital compositing [S1, unofficial].
+-*   **Memory Complexity:** Varies by shading model. 48 MB for simple attenuation models (equation 3.1.4) to 256 MB for complex shading models (equation 3.3.2) for a $128^3$ volume [S1, unofficial].
+-*   **Performance:** On a 36 MHz Silicon Graphics 4D/320 VGX with a sequential C implementation:
+-    *   Simple model: ~6 seconds per view (~1.5 seconds per slice) [S1, unofficial].
+-    *   Complex model: >1 minute per view (due to paging) [S1, unofficial].
+-*   **Optimizations:**
+-    *   Replacing FFT with Fast Hartley Transform (FHT) halves per-view rendering time and memory requirements [S1, unofficial].
+-    *   Optimizing the filter and trimming zero padding can provide another factor of two speedup [S1, unofficial].
+-    *   Parallelization is possible at fine grain (within FFT) or coarse grain (between slices) [S1, unofficial].
+-    *   Hardware acceleration using video coprocessors or DSPs is amenable, especially with fixed-point frequency spectra [S1, unofficial].
+-*   **Strengths:** Asymptotically faster than conventional volume rendering for very large volumes [S2, unofficial].
+-*   **Limitations:** High constant factor makes it slower than conventional methods for small volumes [S2, unofficial]. Preprocessing changes require full spectrum recomputation [S1, unofficial].
++**Time Complexity:**
++*   Preprocessing: $O(N^3 \log N)$ for the 3D FFT [S1, S2, unofficial].
++*   Per-View Rendering: $O(M^2 \log M)$ for the 2D inverse FFT of the extracted slice, where $M$ is the image resolution [S1, S2, unofficial].
++*   Overall: Asymptotically less expensive than conventional volume rendering ($O(N^3)$ compositing), but has a high constant factor [S2, unofficial].
++
++**Memory Complexity:**
++*   Varies from 48 MB to 256 MB for a $128^3$ volume, depending on the shading model complexity (e.g., equation 3.1.4 vs 3.3.2) [S1, S2, unofficial].
++*   Using an FHT (Fast Hartley Transform) instead of FFT halves memory requirements [S1, unofficial].
++
++**Measured Performance:**
++*   Tested on a 36 MHz Silicon Graphics 4D/320 VGX using a sequential C implementation [S1, S2, unofficial].
++*   Per-view rendering time varied from 6 seconds (simple shading) to over a minute (complex shading, due mostly to paging) [S1, S2, unofficial].
++*   Optimizing the filter and trimming zero padding can provide another factor of two speedup [S1, unofficial].
++
++**Strengths:**
++*   Fast generation of attenuation-only images (X-ray-like) [S1, S2, unofficial].
++*   Amenable to hardware acceleration using video coprocessors or DSPs [S1, unofficial].
++*   Can be parallelized at fine grain (within FFT) or coarse grain (between slices) [S1, unofficial].
++
++**Limitations:**
++*   High constant factor makes it slower than conventional methods for very small volumes [S2, unofficial].
++*   Hardwired preprocessing (edge enhancement/windowing) hinders interactive segmentation [S1, unofficial].
++*   Ghosting artifacts if zero padding is insufficient [S1, S2, unofficial].
++
++**When to Use:**
++*   When generating attenuation-only projections or X-ray-like images is the primary goal.
++*   When the volume is large enough that the $O(N^2 \log N)$ per-view cost is advantageous over $O(N^3)$ compositing.
++
++**When Not to Use:**
++*   When interactive segmentation with dynamic preprocessing is required.
++*   For very small volumes where the overhead of FFT and interpolation outweighs the benefits.
+ 
+ ## Background
+ 
+-*   **Origin:** The method is based on the Fourier Projection-Slice Theorem, as described by Marc Levoy in "Volume Rendering using the Fourier Projection-Slice Theorem" [S1, unofficial].
+-*   **History:** The implementation was tested on early 1990s hardware (Silicon Graphics 4D/320 VGX) [S1, unofficial]. The approach was developed to address the high computational cost of traditional volume rendering [S1, unofficial].
+-*   **Usage:** Used for generating attenuation-only projections (X-rays) and shaded volume renderings [S1, unofficial].
++**Origin:**
++The method is based on the Fourier Projection-Slice Theorem, introduced by Marc Levoy in his 1988 paper "Volume Rendering using the Fourier Projection-Slice Theorem" [S1, S2, unofficial].
++
++**History and Development:**
++Levoy demonstrated that volume rendering could be performed in the frequency domain, exploiting the theorem to compute projections in $O(N^2 \log N)$ time per view. The implementation details described here, including zero padding, tricubic interpolation, and specific shading models, were developed to make this theoretical approach practical. Subsequent work has explored optimizations like adaptive filtering and stable numerical implementations for mesh rendering [S3, unofficial].
++
++**Usage:**
++Primarily used in scientific visualization for generating X-ray-like projections and attenuation-only images from 3D volumetric data or meshes. It has been tested on confocal microscopy images and other scientific datasets [S3, unofficial].
+ 
+ ## Sources
+ 
+ [S1] PDF Volume Rendering using the Fourier Projection-Slice Theorem, https://graphics.stanford.edu/papers/fourier/fourier.pdf, fetched 2026-10-27 (unofficial)
+-[S2] Fourier Projection-Slice Theorem in Volume Rendering, https://www.scribd.com/document/796298963/Marc-Levoy-Volume-rendering-using-the-Fourier-projection-slice-theorem, fetched 2026-10-27 (unofficial)+[S2] Fourier Projection-Slice Theorem in Volume Rendering, https://www.scribd.com/document/796298963/Marc-Levoy-Volume-rendering-using-the-Fourier-projection-slice-theorem, fetched 2026-10-27 (unofficial)
++[S3] Differentiable Rendering for 3D Fluorescence Microscopy, https://doi.org/10.48550/arxiv.2303.10440, fetched 2026-10-27 (unofficial)

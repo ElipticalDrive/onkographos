@@ -1,0 +1,111 @@
+# Gradient Theorem Violation Metric
+
+Also called: Integral Consistency Error, L1 Difference Metric
+
+## Overview
+The Gradient Theorem Violation Metric is a quantitative error metric used to evaluate the accuracy of gradient approximations in differentiable volume rendering by measuring the extent to which the fundamental theorem of calculus (gradient theorem) is violated [S1]. It distinguishes itself from standard $L_1$ or $L_2$ norm comparisons against reference gradients, which are sensitive to distribution shape limits and finite difference errors, by instead comparing the line integral of the estimated gradient field against the difference of the function values at the endpoints of a parameter curve [S1].
+
+## How it works
+The method evaluates the consistency of a gradient estimator $\nabla_\theta f(\theta)$ by verifying the gradient theorem over a differentiable curve $\Theta$ in the parameter space. Because the gradient theorem requires a continuously differentiable function, the discontinuous program $f$ must be pre-filtered before applying the metric [S1].
+
+**Inputs and Outputs:**
+*   **Input:** A differentiable curve $\Theta$ in parameter space $\theta$, moving from $\theta_0$ to $\theta_1$. An estimated gradient function $\nabla_\theta f(\theta)$. A pre-filtering kernel $K$.
+*   **Output:** A scalar error value representing the $L_1$ difference between the left-hand side (LHS) and right-hand side (RHS) of the pre-filtered gradient theorem.
+
+**Data Structures:**
+*   **Parameter Space:** An $n$-dimensional space for program parameters.
+*   **Image Space:** 2D pixel coordinates.
+*   **Combined Space:** The metric operates in an $(n+2)$-dimensional space combining image and parameter dimensions.
+
+**Formulas:**
+The core identity is the gradient theorem [S1]:
+$$ \int_{\Theta} \nabla_{\theta} f(\theta) d\theta = f(\theta_1) - f(\theta_0) $$
+
+To handle discontinuities, the function $f$ is pre-filtered with a kernel $f^* = K^* * f$. The metric evaluates the following equality [S1]:
+$$ \int_{\Theta} \nabla (f^* * f(\theta)) d\theta = f^* * f(\theta_1) - f^* * f(\theta_0) $$
+
+The final error metric $E$ is the $L_1$ difference between the LHS and RHS [S1]:
+$$ E = \left| \int_{\Theta} \nabla (f^* * f(\theta)) d\theta - (f^* * f(\theta_1) - f^* * f(\theta_0)) \right| $$
+
+**Parameters:**
+*   **Filter Kernel $K^*$:** An $(n+2)$-dimensional box filter defined as $K^* = K_{[-1,1]^2} \times K_{[-\tau, \tau]^n}$ [S1].
+    *   $K_{[-1,1]^2}$: A 2D box filter in image space smoothing a $3 \times 3$ region centered at the current pixel.
+    *   $K_{[-\tau, \tau]^n}$: An $n$-dimensional box filter in parameter space.
+*   **Filter Size $\tau$:** Chosen such that the diagonal length of the $n$-dimensional box kernel is $1/10$ that of the line integral length [S1]. This keeps the filter size small to mitigate the curse of dimensionality.
+
+**Numbered Steps:**
+1.  **Pre-filtering Setup:** Define the target $(n+2)$-dimensional box filter $K^*$. Note that different gradient estimation methods may have internal pre-filtering assumptions. The kernel $K$ used in the LHS integrand must be adapted for each specific method so that the combination of the method's internal prefilter and the evaluation kernel $K$ results in the same target $K^*$ [S1].
+2.  **Estimate RHS:** Compute the right-hand side $f^* * f(\theta_1) - f^* * f(\theta_0)$ by sampling the $(n+2)$-dimensional box filter $K^*$ around the endpoints $\theta_0$ and $\theta_1$ [S1].
+3.  **Estimate LHS:** Compute the left-hand side $\int_{\Theta} \nabla (f^* * f(\theta)) d\theta$ using numerical quadrature, specifically the midpoint rule [S1].
+4.  **Compute Error:** Calculate the absolute difference between the estimated LHS and RHS values [S1].
+
+**Pseudocode:**
+> **Unverified code.** The code below did not pass a test run against a reference implementation, or no test fits it, so it may contain errors.
+
+```python
+def gradient_theorem_violation_metric(
+    curve_theta,       # List of points [theta_0, ..., theta_1] along the curve
+    grad_estimator,    # Function returning gradient estimate at theta
+    f_program,         # Function returning scalar value at theta
+    image_pixel,       # 2D pixel coordinates (center)
+    n_param_dims,      # Number of parameter dimensions
+    tau                # Filter radius in parameter space
+):
+    # 1. Define the combined filter kernel K*
+    # Image part: 3x3 box filter centered at image_pixel
+    # Parameter part: n-dimensional box filter with radius tau
+    # Note: The exact implementation of K* sampling depends on the specific
+    # method's internal prefiltering, which must be convolved with K to
+    # yield the target K*. Here we assume f_program and grad_estimator
+    # are already adapted or that K is applied explicitly.
+    
+    # 2. Estimate RHS: f*(theta_1) - f*(theta_0)
+    # Sample the (n+2)-dim box filter around theta_0 and theta_1
+    rhs_val_0 = sample_prefiltered_value(f_program, image_pixel, curve_theta[0], tau)
+    rhs_val_1 = sample_prefiltered_value(f_program, image_pixel, curve_theta[-1], tau)
+    rhs = rhs_val_1 - rhs_val_0
+    
+    # 3. Estimate LHS: Integral of gradient along curve
+    # Use midpoint rule quadrature
+    lhs = 0.0
+    for i in range(len(curve_theta) - 1):
+        theta_mid = (curve_theta[i] + curve_theta[i+1]) / 2.0
+        grad = grad_estimator(image_pixel, theta_mid)
+        # Vector dot product of gradient and curve segment direction
+        segment = curve_theta[i+1] - curve_theta[i]
+        lhs += dot(grad, segment)
+        
+    # 4. Compute L1 Error
+    error = abs(lhs - rhs)
+    return error
+
+def sample_prefiltered_value(f_program, pixel, theta, tau):
+    """
+    Estimates f*(theta) by sampling the (n+2)-dim box filter K*.
+    This involves integrating f over the image 3x3 neighborhood and
+    the parameter box [-tau, tau]^n around theta.
+    Implementation detail: This requires numerical integration over
+    the (n+2) dimensions. [G]
+    """
+    # Not given in the sources. [G]
+    # In practice, this is approximated by sampling f at points within
+    # the 3x3 image neighborhood and the parameter box, weighted by the
+    # box filter (uniform weights).
+    pass
+```
+
+**Edge Cases and Pitfalls:**
+*   **Curse of Dimensionality:** The metric is always evaluated without random variables (i.e., deterministic parameters) due to computational constraints. Evaluating the integrals with random variables would require an additional pre-filtering integral along all dimensions of the parameter space, requiring a very large number of samples for accuracy [S1].
+*   **Filter Size Selection:** The filter size $\tau$ must be small enough to avoid excessive sampling requirements but large enough to smooth discontinuities. The guideline is to set the diagonal length of the parameter box kernel to $1/10$ of the line integral length [S1].
+
+## Operating characteristics
+*   **Complexity:** The complexity is dominated by the numerical integration required to estimate the RHS (sampling the $(n+2)$-dimensional box filter) and the LHS (quadrature along the curve). The RHS estimation suffers from the curse of dimensionality as $n$ increases, requiring more samples to maintain accuracy [S1].
+*   **Performance:** The metric provides a robust measure of gradient accuracy that is less sensitive to the shape of the error distribution than $L_1/L_2$ norms against reference gradients [S1].
+*   **Strengths:** Avoids the need to compute a reference gradient analytically, which can be infeasible for complex programs [S1]. It directly tests the fundamental property that gradients should integrate to the function difference.
+*   **Limitations:** Computationally expensive for high-dimensional parameter spaces due to the need to sample the $(n+2)$-dimensional filter for the RHS. Cannot easily incorporate random variables without significant sampling overhead [S1].
+
+## Background
+The Gradient Theorem Violation Metric was introduced in the paper "A $\delta$" [S1]. It was developed as an alternative to comparing gradient estimates against analytically derived reference gradients, which requires substantial human effort and may not be feasible for complex shader programs [S1]. The method is used in the evaluation of differentiable volume rendering techniques, specifically to compare against baselines like TEG [Bangaru et al. 2021] and finite difference methods [S1].
+
+## Sources
+[S1] A $\delta$, https://doi.org/10.1145/3528223.3530125, fetched 2026-10-30

@@ -1,0 +1,113 @@
+# Edge Contouring for Dual Contouring
+
+Also called: ContourEdgeProc, ContourProcessEdge
+
+## Overview
+Edge Contouring is a recursive procedure that processes the edges of an adaptive octree to generate triangle indices for a dual contouring mesh [S1, unofficial]. It builds on [Manifold Dual Contouring - Index Processing and Triangle Generation](3699-manifold-dual-contouring-index-processing-and-triangle-gener.md) by providing the specific octree-aware traversal logic required for adaptive volumetric data [S1, unofficial].
+
+## How it works
+**Inputs:**
+- `nodes`: An array of 4 node references or `null` [S1, unofficial].
+- `dir`: An integer representing the edge direction (0, 1, or 2) [S1, unofficial].
+- `indexBuffer`: A list or buffer where generated triangle indices are appended [S1, unofficial].
+- `edgeProcEdgeMask`: A 3D array of integers with layout `[3][2][5]` [S1, unofficial].
+
+**Outputs:**
+- Triangle indices appended to `indexBuffer` [S1, unofficial].
+
+**Data Structures:**
+- `edgeProcEdgeMask`: Maps edge direction `dir`, sub-edge index `i`, and mask components [S1, unofficial].
+  - Components 0-3: Child indices for the four nodes in the current level [S1, unofficial].
+  - Component 4: The sub-direction for the recursive call [S1, unofficial].
+- Node types: `Node_Leaf`, `Node_Pseudo` (spelled `Node_Psuedo` in the source), and `Node_Internal` [S1, unofficial].
+
+**Steps:**
+1. **Base Case:** If any of the 4 input nodes in `nodes` is `null`, return immediately [S1, unofficial].
+2. **Leaf/Pseudo Case:** If all 4 nodes are not `Node_Internal`, call `ContourProcessEdge(nodes, dir, indexBuffer)` [S1, unofficial].
+3. **Internal Case:** Iterate `i` from 0 to 1 [S1, unofficial].
+   a. Extract child indices `c[0..3]` from `edgeProcEdgeMask[dir][i][0..3]` [S1, unofficial].
+   b. Initialize `edgeNodes` array of size 4 [S1, unofficial].
+   c. For each `j` from 0 to 3: if `nodes[j]` is `null`, `edgeNodes[j]` remains `null`; if `nodes[j]` is `Node_Leaf` or `Node_Pseudo`, set `edgeNodes[j] = nodes[j]`; if `nodes[j]` is `Node_Internal`, set `edgeNodes[j] = nodes[j].children[c[j]]` [S1, unofficial].
+   d. Recurse: Call `ContourEdgeProc(edgeNodes, edgeProcEdgeMask[dir][i][4], indexBuffer, edgeProcEdgeMask)` [S1, unofficial].
+
+**Pseudocode:**
+> **Unverified code.** The code below did not pass a test run against a reference implementation, or no test fits it, so it may contain errors.
+
+```python
+# Node type constants
+Node_Leaf = 0
+Node_Pseudo = 1
+Node_Internal = 2
+
+def ContourProcessEdge(nodes, dir, indexBuffer):
+    # Final mesh generation step when all nodes are leaves or pseudo-leaves.
+    # Implementation details are not provided in the sources.
+    pass
+
+def ContourEdgeProc(nodes, dir, indexBuffer, edgeProcEdgeMask):
+    # nodes: list of 4 node references or None
+    # dir: int (0, 1, 2)
+    # indexBuffer: list of ints
+    # edgeProcEdgeMask: 3D array [3][2][5]
+
+    # Base case: if any node is null, return
+    for node in nodes:
+        if node is None:
+            return
+
+    # Leaf/Pseudo case: if all nodes are not Internal
+    all_leaf_or_pseudo = True
+    for node in nodes:
+        if node.type == Node_Internal:
+            all_leaf_or_pseudo = False
+            break
+
+    if all_leaf_or_pseudo:
+        ContourProcessEdge(nodes, dir, indexBuffer)
+        return
+
+    # Internal case: recurse into children
+    for i in range(2):
+        # Extract child indices from mask
+        child_indices = edgeProcEdgeMask[dir][i][0:4]
+        sub_dir = edgeProcEdgeMask[dir][i][4]
+
+        edge_nodes = [None] * 4
+        for j in range(4):
+            if nodes[j] is None:
+                edge_nodes[j] = None
+            elif nodes[j].type in (Node_Leaf, Node_Pseudo):
+                edge_nodes[j] = nodes[j]
+            else:
+                # Node is Internal, get child
+                child_idx = child_indices[j]
+                edge_nodes[j] = nodes[j].children[child_idx]
+
+        # Recurse
+        ContourEdgeProc(edge_nodes, sub_dir, indexBuffer, edgeProcEdgeMask)
+```
+
+**Parameters:**
+- `edgeProcEdgeMask`: A 3D array `[3][2][5]` mapping edge direction `dir`, sub-edge index `i`, and mask components [S1, unofficial].
+
+**Edge Cases and Pitfalls:**
+- Null nodes: The algorithm explicitly checks for null nodes at the start and skips recursion for that branch [S1, unofficial].
+- Pseudo-leaf nodes: Nodes converted from internal to pseudo-leaf (e.g., due to QEF mass point projection) are treated as leaves for contouring purposes [S1, unofficial].
+
+## Subtopics
+
+### [Octree-based Dual Contouring Edge/Face Processing](4297-octree-based-dual-contouring-edge-face-processing.md)
+This method is a recursive procedure that processes the edges and faces of an adaptive octree to generate triangle indices for a dual contouring mesh. It handles both leaf and pseudo-leaf nodes by descending into children when necessary, ensuring that geometry is generated only at the boundaries between solid and air regions. It builds on [Edge Contouring for Dual Contouring](3711-edge-contouring-for-dual-contouring.md) by providing the specific octree-aware traversal and edge processing logic required for adaptive volumetric data.
+
+### Manifold Dual Contouring - Edge Clustering
+If all four nodes in the `nodes` array are either `null` or `Node_Leaf` (not `Node_Internal`), call `ClusterIndexes(nodes, direction, intHolder, collected_vertices)` [S2, unofficial]. Otherwise, loop `i` from 0 to 1. Create `edge_nodes` array of size 4. Loop `j` from 0 to 3: if `nodes[j]` is `null`, continue. If `nodes[j].Type == Node_Leaf`, `edge_nodes[j] = nodes[j]`. Else, `edge_nodes[j] = nodes[j].children[Utilities.TEdgeProcEdgeMask[direction][i][j]]` [S2, unofficial].
+
+## Operating characteristics
+Not given in the sources.
+
+## Background
+The implementation originates from the `DualContouringSample` repository, which includes an octree structure and mesh generation code licensed under the GNU Lesser General Public License (LGPL) version 2.1 or later [S1, unofficial].
+
+## Sources
+[S1] DualContouringSample, https://github.com/nickgildea/DualContouringSample, fetched 2026-10-26 (unofficial)
+[S2] Manifold-dual-contouring-Java, https://github.com/proton2/Manifold-dual-contouring-Java, fetched 2026-10-26 (unofficial)

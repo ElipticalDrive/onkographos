@@ -1,0 +1,145 @@
+# Sampling Proportional to Transmittance
+
+Also called: Transmittance-weighted sampling using Delta/Ratio trackers
+
+## Overview
+Sampling Proportional to Transmittance is a technique for generating free-flight distances distributed according to the transmittance function $T(t)$, rather than the standard extinction-weighted distribution [S1]. It solves the problem of needing to sample from $T(t)$ for unbiased inverse volume rendering estimators without requiring explicit evaluation of the normalization constant $C = \int_0^{t_s} T(t') dt'$, which is generally intractable [S1]. It sets itself apart from standard delta tracking by producing samples proportional to $T(t)$ directly, whereas standard delta tracking produces samples proportional to $\sigma_t(t)T(t)$ (the probability of the *first* interaction) [S1]. It builds on [Weighted Next-Fight Estimator](9226-weighted-next-fight-estimator.md) by providing the specific sampling distribution required for the uncollided radiance term [S1].
+
+## How it works
+The method generates weighted samples $(t, w)$ such that the weighted density matches the transmittance $T(0, t)$ [S1]. It relies on the fact that while $T(t)$ is not a probability density function (PDF), it can be sampled using a weighted approach derived from delta tracking [S1].
+
+**Inputs:**
+- $\bar{\sigma}$: Majorant density, satisfying $\bar{\sigma} \geq \sigma_t(t)$ for all $t \in [0, t_s]$ [S1].
+- $t_s$: Upper bound of the ray segment (location of closest surface or medium bounding box) [S1].
+- $\sigma_t(t)$: Extinction coefficient function [S1].
+
+**Outputs:**
+- $t$: A sampled distance in $[0, t_s)$ [S1].
+- $w$: A sampling weight [S1].
+
+**Data Structures:**
+- No persistent data structures are required [S1]. The method is stateless per sample generation, relying on random number generation for the tracker steps [S1].
+
+**Steps:**
+1. **Delta Tracking Phase:** Perform delta tracking to find the first interaction distance $t_1$ in the homogenized medium [S1].
+   - Initialize current position $t_{curr} = 0$ [G].
+   - Loop:
+     - Sample step size $\Delta t$ from exponential distribution with rate $\bar{\sigma}$: $\Delta t = -\ln(u_1) / \bar{\sigma}$, where $u_1 \sim \mathcal{U}(0, 1)$ [G].
+     - Update position: $t_{curr} \leftarrow t_{curr} + \Delta t$ [G].
+     - If $t_{curr} \geq t_s$, the ray exits the segment without interaction [S1]. Return a special "no interaction" state or handle as boundary case [G].
+     - Sample acceptance probability $u_2 \sim \mathcal{U}(0, 1)$ [G].
+     - If $u_2 < \sigma_t(t_{curr}) / \bar{\sigma}$, a real interaction occurs [S1]. Set $t_1 = t_{curr}$ and break [S1].
+     - Otherwise, it is a null collision; continue loop [S1].
+
+2. **Scaling Phase:**
+   - Sample a scaling factor $s$ uniformly from $[0, 1)$: $s = u_3$, where $u_3 \sim \mathcal{U}(0, 1)$ [S1].
+   - Compute the final sampled distance: $t = t_1 \cdot s$ [S1].
+
+3. **Weight Calculation:**
+   - Compute the weight: $w = t_1$ [S1].
+   - Note: $w$ can also be computed as $t / s$ if $s > 0$. If $s=0$, $t=0$ and the weight is still $t_1$ [S1].
+
+**Formulas:**
+The target PDF is:
+$$ p_T(t) = \frac{T(t)}{C}, \quad C = \int_0^{t_s} T(t') dt' $$
+[S1]
+
+The PDF of the first interaction distance in delta tracking is:
+$$ p_1(t) = \sigma_t(t) T(0, t) $$
+[S1]
+
+The resulting weighted PDF for the scaled distance $t$ is:
+$$ p_2(t) = T(0, t) $$
+[S1]
+
+The weight $w$ serves two purposes:
+1. It corrects the PDF from $p_1(t/s)/s$ to $T(0, t)$ [S1].
+2. It provides an unbiased estimate of the normalization constant $C$. Specifically, the expected value of the weight $w$ over many samples equals $C$ [S1].
+
+**Parameters:**
+- $t_s$: The maximum distance along the ray. Typically determined by the nearest surface intersection or the end of the medium bounding box [S1].
+- $\bar{\sigma}$: The majorant. Must be tight enough for efficiency but valid everywhere in $[0, t_s]$ [S1].
+
+**Edge Cases and Pitfalls:**
+- **$s=0$**: If $s=0$, $t=0$. The weight $w=t_1$ remains valid. In practice, floating-point precision may result in $s$ being extremely small but non-zero [S1].
+- **No Interaction in Delta Tracking**: If delta tracking fails to find an interaction within $t_s$ (i.e., the ray passes through the medium without scattering/absorbing), this corresponds to the transmittance $T(0, t_s)$. The method as described samples $t \in [0, t_s)$. If the goal is to sample from the entire distribution including the "exit" event, additional handling is required. However, for the purpose of estimating the integral $C$, the samples generated within $[0, t_s)$ are sufficient, and the weight $w$ estimates the area under $T$ [S1].
+- **Precision**: Computing $\sigma_t(t_{curr}) / \bar{\sigma}$ requires accurate evaluation of $\sigma_t$. If $\sigma_t$ is discontinuous, care must be taken at boundaries [G].
+
+**Pseudocode:**
+
+> **Unverified code.** The code below did not pass a test run against a reference implementation, or no test fits it, so it may contain errors.
+
+```python
+import random
+import math
+
+def sample_proportional_to_transmittance(sigma_t_func, sigma_bar, t_s):
+    """
+    Samples a distance t proportional to transmittance T(0, t) with weight w.
+    
+    Args:
+        sigma_t_func: Function sigma_t(t) returning extinction at distance t.
+        sigma_bar: Majorant density, sigma_bar >= sigma_t(t) for all t in [0, t_s].
+        t_s: Upper bound of the ray segment.
+        
+    Returns:
+        t: Sampled distance in [0, t_s).
+        w: Sampling weight.
+        success: Boolean indicating if a valid sample was generated within [0, t_s).
+                 If False, the ray exited the medium without interaction.
+    """
+    # Step 1: Delta Tracking to find first interaction t1
+    t_curr = 0.0
+    while True:
+        # Sample step from exponential distribution with rate sigma_bar
+        u1 = random.random()
+        # Guard against log(0)
+        if u1 == 0.0:
+            u1 = 1e-10
+        delta_t = -math.log(u1) / sigma_bar
+        t_curr += delta_t
+        
+        if t_curr >= t_s:
+            # Ray exits the segment without interaction
+            return None, None, False
+        
+        # Evaluate extinction at current position
+        sigma_t = sigma_t_func(t_curr)
+        
+        # Acceptance test
+        u2 = random.random()
+        if u2 < sigma_t / sigma_bar:
+            t1 = t_curr
+            break
+        # Else: null collision, continue
+    
+    # Step 2: Scaling
+    u3 = random.random()
+    s = u3
+    
+    # Step 3: Compute t and w
+    t = t1 * s
+    w = t1
+    
+    return t, w, True
+```
+
+## Subtopics
+
+### Differential Delta Tracking
+Differential Delta Tracking is a technique to sample a distance $t$ proportional to the transmittance function $T(0, t)$ and return a weight $w$ that estimates the integral of transmittance $C = \int_0^{t_s} T(s) ds$, using delta tracking [S1]. It samples a free-flight distance $t_1$ from the homogenized medium using delta tracking, with probability density $p_1(t) = \sigma_t(t) T(t)$ [S1]. It samples a scaling factor $s$ uniformly from the interval $[0, 1)$, i.e., $s \sim p_s(s) := \mathbb{1}_{[0,1)}(s)$ [S1]. It computes the sampled distance $t_2 = t_1 s$ [S1]. It computes the sampling weight $w = t_1$ (which is equal to $t_2/s$) [S1]. This weight represents the area under the binary tracking function $f_{DT}$ [S1]. The resulting weighted sample density is $p_2(t) = T(0, t)$, derived from the product density correction: $p_2(t) = \int_{-\infty}^{+\infty} p_1\left(\frac{t}{s}\right) p_s(s) \frac{t}{s} \frac{1}{|s|} ds = T(0, t)$ [S1]. The method operates on the interval $[0, t_s)$ [S1]. It is chosen when one needs to sample from the transmittance distribution $T(t)$ for inverse rendering or when estimating the normalization constant $C$ is required [S1]. It differs from standard delta tracking in that it produces samples distributed as $T(t)$ rather than $\sigma_t(t)T(t)$ [S1]. It is preferred over ratio tracking in this context because it directly yields the weight $w=t_1$ which estimates $C$, whereas ratio tracking requires more complex bookkeeping for the null scattering correction [S1].
+
+## Operating characteristics
+- **Time Complexity**: Not given in the sources. The expected number of steps depends on the ratio of the majorant $\bar{\sigma}$ to the actual extinction $\sigma_t(t)$ [S1].
+- **Memory Complexity**: $O(1)$. No data structures are stored [S1].
+- **Measured Performance**: Not given in the sources.
+- **Strengths**: Unbiased estimation of transmittance-weighted samples without explicit integration [S1]. The weight $w$ provides an unbiased estimate of $C$ [S1]. Simple to implement [S1].
+- **Limitations**: Requires a valid majorant $\bar{\sigma}$ [S1]. If $\bar{\sigma}$ is loose, performance degrades due to many null collisions [S1]. The method samples from $[0, t_s)$; handling the boundary $t_s$ requires care if the full distribution is needed [S1].
+- **When to use**: When implementing inverse volume rendering or any estimator that requires sampling proportional to $T(t)$ [S1].
+- **When not to use**: When standard forward rendering is used, where sampling proportional to $\sigma_t(t)T(t)$ is standard [S1].
+
+## Background
+The method originates from the family of delta and ratio trackers [Butcher and Messel 1958; Woodcock et al. 1965; Novák et al. 2014] [S1]. It was formalized in the context of unbiased inverse volume rendering with differential trackers [S1]. The technique builds piecewise approximations $f$ of the true transmittance function $T$ and samples a distance proportional to the area under $f$, which, together with a sampling weight equal to the total area under the curve, yields unbiased samples of $T$ [S1]. The key insight is that the weight $w=t_1$ from delta tracking corresponds to the area under the binary tracking function, which estimates the normalization constant $C$ [S1]. This allows for unbiased estimation without explicit integration [S1].
+
+## Sources
+[S1] Unbiased inverse volume rendering with differential trackers, https://doi.org/10.1145/3528223.3530073, fetched 2026-11-01

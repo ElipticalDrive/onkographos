@@ -1,0 +1,213 @@
+--- v002.md
++++ v003.md
+@@ -1,133 +1,116 @@
+ # Image-Conditional Triplanar Representation
++
+ Also called: Tri-plane Features
+ 
+ ## Overview
+-Image-Conditional Triplanar Representation is a 3D scene representation that constructs a fixed set of three axis-aligned 2D feature grids from input images, enabling efficient neural rendering without the cubic complexity of voxel-based methods [S1]. It differs from standard triplane approaches by explicitly conditioning the feature grid construction on camera poses and intrinsic parameters via a back-projected 3D feature volume, allowing the representation to capture appearance details directly from the input view rather than relying solely on a generic latent code [S1].
++Image-Conditional Triplanar Representation is a 3D scene representation that constructs axis-aligned orthogonal feature planes from input images, enabling efficient neural rendering of outdoor scenes without the cubic complexity of voxel-based methods [S1]. It differs from standard static triplane representations (e.g., EG3D) by explicitly conditioning the feature grid on camera poses and depth, allowing the planes to encode appearance information derived from multiple viewpoints rather than representing a fixed canonical volume [S1].
+ 
+ ## How it works
+ **Inputs and Outputs**
+-*   **Input:** An input image $I \in \mathbb{R}^{H_i \times W_i \times 3}$, camera pose $\gamma_i$, and camera intrinsic matrix $K_i$.
+-*   **Output:** A triplanar feature tensor $S \in \mathbb{R}^{3 \times C \times D \times D}$, where the three planes correspond to the $xy$, $xz$, and $yz$ canonical planes [S1].
++*   **Inputs:** Input images $I \in \mathbb{R}^{H_i \times W_i \times 3}$, camera poses $\gamma_i$, and intrinsic matrices $K_i$.
++*   **Outputs:** A triplanar feature tensor $\mathbf{S} \in \mathbb{R}^{3 \times G \times D \times D}$, where $G = C/4$ is the output channel dimension and $D \times D$ is the spatial resolution (upsampled to match the image feature space $H/2 \times W/2$) [S1].
+ 
+ **Data Structures**
+-The core data structure is the triplane tensor $S$.
+-*   **Shape:** $\mathbb{R}^{3 \times C \times D \times D}$.
+-*   **Dimensions:**
+-    *   First dimension (size 3): Indexes the three orthogonal planes ($xy, xz, yz$).
+-    *   Second dimension (size $C$): Feature dimension per grid cell.
+-    *   Last two dimensions (size $D \times D$): Spatial resolution of each 2D plane [S1].
++The core data structure is the triplane tensor $\mathbf{S}$, composed of three 2D planes $\mathbf{S}_{xy}, \mathbf{S}_{xz}, \mathbf{S}_{yz}$ [S1].
++*   **Shape:** $\mathbb{R}^{3 \times C \times D \times D}$ initially, transformed to $\mathbb{R}^{3 \times G \times D \times D}$ via 2D convolutions [S1].
++*   **Dimensions:** The first dimension indexes the orthogonal planes ($xy, xz, yz$) [S1].
++*   **Channels:** $C$ is the intermediate feature dimension; $G = C/4$ is the final channel count [S1].
++*   **Resolution:** $D \times D$ corresponds to the spatial resolution of the image feature map ($H/2 \times W/2$) [S1].
+ 
+-**Algorithm Steps**
+-1.  **Image Feature Extraction:** Extract low-resolution spatial features from the input image $I$ using an ImageNet pre-trained ConvNet backbone $E$. This transforms the input image into a 2D feature map $F_I \in \mathbb{R}^{H_i/2 \times W_i/2 \times C}$ [S1].
+-2.  **Back-Projection to 3D Volume:** Project the local features from $F_I$ backwards along every ray into a 3D feature volume $V_F$. This projection uses the camera pose $\gamma_i$ and intrinsic matrix $K_i$ to map 2D feature locations to 3D space [S1].
+-3.  **Depth Encoding:** Since features along a single camera ray are identical in the raw grid, encode the depth of individual features using an MLP $Z$. The MLP $V_Z = Z(V_F, x_c, d)$ takes as input:
+-    *   Concatenated features in the grid ($V_F$).
+-    *   Positions of the grid in the camera frame ($x_c$).
+-    *   Directions from the world frame positions ($x_w$) to the camera frame [S1].
+-    *   The output is the depth-encoded feature volume $V_Z$ [S1].
+-4.  **Triplane Construction (Feature Aggregation):** Construct the triplane features $S_{xy}, S_{xz}, S_{yz}$ by summing weighted depth-encoded features from $V_Z$. The weights are softmax scores obtained from dedicated aggregation MLPs ($A_{xy}, A_{xz}, A_{yz}$) conditioned on the encoded features and world coordinates [S1]. The formulas are:
+-    $$
+-    \mathbf{S}_{xy} = \sum_i w_{xy_i} \mathbf{V}_{Z_i}, \quad w_{xy} = A_{xy}(V_{Z_i}, x_{w_z})
+-    $$
+-    $$
+-    \mathbf{S}_{xz} = \sum_i w_{xz_i} \mathbf{V}_{Z_i}, \quad w_{xz} = A_{xz}(V_{Z_j}, x_{w_y})
+-    $$
+-    $$
+-    \mathbf{S}_{yz} = \sum_i w_{yz_i} \mathbf{V}_{Z_i}, \quad w_{yz} = A_{yz}(V_{Z_j}, x_{w_x})
+-    $$
+-    Here, $w_{xy}, w_{xz}, w_{yz}$ are softmax scores obtained after summing over the $z, y,$ and $x$ dimensions respectively [S1].
+-5.  **Upsampling and Refinement:** Transform the built image-conditional triplanes into a new $G$-channel output using learned 2D convolutions. The channel dimension is reduced such that $G = C/4$, while the spatial dimension of the planes is upsampled from $D \times D$ to the image feature space resolution ($H/2 \times W/2$). These convolutions act as inpainting networks to fill in missing features [S1].
+-6.  **Rendering:** The resulting triplane features condition the neural volumetric rendering process. Points are sampled along rays, features are gathered by projecting points onto the canonical planes and bilinearly interpolating, and a lightweight MLP (NeRF decoder) predicts density and color [S1].
++**Steps**
++1.  **Feature Extraction:** Extract low-resolution spatial features from input image $I$ using an ImageNet pre-trained ConvNet backbone $E$. This transforms $I$ into a 2D feature map $\mathbf{F}_I \in \mathbb{R}^{H_i/2 \times W_i/2 \times C}$ [S1].
++2.  **Back-Projection:** Project local features from $\mathbf{F}_I$ backwards along every ray into a 3D feature volume $\mathbf{V}_F$ using the camera pose $\gamma_i$ and intrinsic matrix $K_i$ [S1].
++3.  **Depth Encoding:** Encode the depth of individual features in the grid using an MLP $Z$. The MLP takes concatenated features from the grid, the position of the grid in the camera frame ($\mathbf{x}_c$), and the direction from the world frame position ($\mathbf{x}_w$) to the camera frame. It outputs depth-encoded features $\mathbf{V}_Z$ [S1].
++    $$ \mathbf{V}_Z = Z(\mathbf{V}_F, \mathbf{x}_c, \mathbf{d}) $$
++4.  **Triplane Construction:** Obtain triplane features by summing weighted depth-encoded features. The weights are softmax scores from aggregation MLPs ($A_{xy}, A_{xz}, A_{yz}$) conditioned on $\mathbf{V}_Z$ and world coordinates [S1].
++    $$ \mathbf{S}_{xy} = \sum_i w_{xy_i} \mathbf{V}_{Z_i}, \quad w_{xy} = A_{xy}(\mathbf{V}_{Z_i}, \mathbf{x}_{w_z}) $$
++    $$ \mathbf{S}_{xz} = \sum_i w_{xz_i} \mathbf{V}_{Z_i}, \quad w_{xz} = A_{xz}(\mathbf{V}_{Z_j}, \mathbf{x}_{w_y}) $$
++    $$ \mathbf{S}_{yz} = \sum_i w_{yz_i} \mathbf{V}_{Z_i}, \quad w_{yz} = A_{yz}(\mathbf{V}_{Z_j}, \mathbf{x}_{w_x}) $$
++    Where $w_{xy}, w_{xz}, w_{yz}$ are softmax scores obtained after summing over the $z, y, x$ dimensions respectively [S1].
++5.  **Transformation:** Transform the built image-conditional triplanes into a new $G$-channel output using learned 2D convolutions, where $G = C/4$. This step upsamples the spatial dimension of the planes from $D \times D$ to the image feature space ($H/2 \times W/2$) [S1].
++6.  **Rendering:** Use the resulting triplanes as a global feature representation. Dedicated NeRF decoder MLPs regress density and color for foreground and background based on queries into these planes [S1].
+ 
+ **Pseudocode**
+ ```python
+-def build_image_conditional_triplane(image, camera_pose, camera_intrinsics, 
+-                                     encoder_backbone, depth_mlp, 
+-                                     agg_mlp_xy, agg_mlp_xz, agg_mlp_yz,
+-                                     upsample_conv, D, C):
++def image_conditional_triplane_representation(images, poses, intrinsics):
+     """
+-    Constructs the triplanar representation from a single input view.
++    Construct image-conditional triplanes from input views.
+     
+     Args:
+-        image: Input image tensor of shape (H_i, W_i, 3).
+-        camera_pose: Camera pose matrix gamma_i.
+-        camera_intrinsics: Camera intrinsic matrix K_i.
+-        encoder_backbone: Pre-trained ConvNet E.
+-        depth_mlp: MLP Z for depth encoding.
+-        agg_mlp_xy, agg_mlp_xz, agg_mlp_yz: Aggregation MLPs A_xy, A_xz, A_yz.
+-        upsample_conv: Learned 2D convolution for upsampling.
+-        D: Spatial resolution of the output triplane planes.
+-        C: Feature dimension of the initial feature map.
++        images: List of input images I (H_i, W_i, 3)
++        poses: List of camera poses gamma_i
++        intrinsics: List of intrinsic matrices K_i
+         
+     Returns:
+-        S: Triplane tensor of shape (3, C, D, D).
++        S: Triplane tensor (3, G, D, D)
+     """
+-    # Step 1: Extract 2D features
+-    # E transforms I to F_I
+-    F_I = encoder_backbone(image) 
+-    # F_I shape: (H_i/2, W_i/2, C)
+-    
+-    # Step 2: Back-project to 3D volume V_F
+-    # Project features from F_I backwards along rays using gamma_i and K_i
+-    # This creates a 3D volume where features are associated with 3D coordinates
+-    V_F = back_project_features(F_I, camera_pose, camera_intrinsics)
+-    # V_F shape depends on the 3D grid resolution, but conceptually holds features per voxel
++    # Step 1: Feature Extraction
++    # E is ImageNet pre-trained ConvNet backbone
++    F_I = []
++    for I in images:
++        # Transform I to 2D feature map
++        f = E(I) 
++        F_I.append(f) # Shape: (H_i/2, W_i/2, C)
++        
++    # Step 2: Back-Projection to 3D Feature Volume
++    # V_F is the 3D feature volume
++    V_F = back_project_features(F_I, poses, intrinsics)
+     
+     # Step 3: Depth Encoding
+-    # For each voxel in V_F, compute depth-encoded features V_Z
+-    # Inputs to Z: V_F features, camera-frame positions x_c, world-to-camera directions
+-    V_Z = depth_mlp(V_F) 
+-    # V_Z shape matches V_F but contains depth-aware features
++    # Z is an MLP
++    # x_c: position of grid in camera frame
++    # x_w: position of grid in world frame
++    # d: direction from x_w to camera frame
++    V_Z = depth_encode(V_F, x_c, x_w)
+     
+-    # Step 4: Construct Triplanes via Aggregation
+-    # Initialize triplane planes
+-    S_xy = torch.zeros(3, C, D, D) # Placeholder for aggregation logic
+-    S_xz = torch.zeros(3, C, D, D)
+-    S_yz = torch.zeros(3, C, D, D)
++    # Step 4: Triplane Construction
++    # A_xy, A_xz, A_yz are feature aggregation MLPs
++    # x_w_z, x_w_y, x_w_x are world coordinates projected to respective planes
+     
+-    # The aggregation sums weighted V_Z features. 
+-    # Weights are softmax scores from aggregation MLPs conditioned on V_Z and world coords.
+-    # Note: The source describes summing over dimensions (z, y, x) to get weights.
+-    # Implementation requires iterating or vectorizing over the 3D grid indices.
++    # For xy plane
++    w_xy = softmax(A_xy(V_Z, x_w_z))
++    S_xy = sum(w_xy * V_Z, dim=channel_dim)
+     
+-    # For S_xy (projection onto xy plane, summing over z):
+-    # w_xy = A_xy(V_Z, x_w_z)
+-    # S_xy = sum_i (w_xy_i * V_Z_i)
+-    # This effectively collapses the z-dimension into the xy-plane features.
++    # For xz plane
++    w_xz = softmax(A_xz(V_Z, x_w_y))
++    S_xz = sum(w_xz * V_Z, dim=channel_dim)
+     
+-    # Similarly for S_xz (summing over y) and S_yz (summing over x)
+-    # ... (Implementation details for the specific summation and weighting logic) ...
++    # For yz plane
++    w_yz = softmax(A_yz(V_Z, x_w_x))
++    S_yz = sum(w_yz * V_Z, dim=channel_dim)
+     
+-    # Step 5: Upsampling and Channel Reduction
+-    # Transform S to G-channel output, G = C/4, upsample spatial to H/2 x W/2
+-    # Then potentially downsample or adjust to final D x D if required by architecture
+-    # The source states upsampling from DxD to H/2 x W/2, implying D might be smaller initially
+-    # or the final output is at image resolution. Assuming D is the target resolution for the 
+-    # "triplane features" passed to the decoder.
++    S = [S_xy, S_xz, S_yz]
+     
+-    # Apply learned 2D convolutions
+-    S_final = upsample_conv(S_xy, S_xz, S_yz)
+-    
++    # Step 5: Transformation
++    # G = C / 4
++    # 2D convolutions upsample spatial dimension to H/2 x W/2
++    S_final = []
++    for plane in S:
++        # Conv2D with upsampling
++        plane_out = Conv2D_Upsample(plane, G)
++        S_final.append(plane_out)
++        
+     return S_final
+ ```
+ 
+ **Parameters**
+-*   $D$: Spatial resolution of each plane. Not given in the sources.
+-*   $C$: Feature dimension. Not given in the sources.
+-*   $G$: Output channel dimension, defined as $G = C/4$ [S1].
++*   $C$: Feature dimension per grid cell.
++*   $G = C/4$: Output channel dimension after 2D convolutions [S1].
++*   $D \times D$: Spatial resolution, upsampled to image feature space ($H/2 \times W/2$) [S1].
+ 
+ **Edge Cases and Pitfalls**
+-*   **Missing Features:** The method relies on 2D convolutions to act as inpainting networks to fill in missing features in the triplanes, suggesting that sparse input views may result in incomplete initial projections [S1].
+-*   **Depth Ambiguity:** The explicit depth encoding MLP $Z$ is required because features along a ray are identical in the raw back-projected volume; without this, the triplane representation would lose depth information [S1].
++*   **Missing Features:** The 2D convolutions act as inpainting networks to fill in missing features in the triplanes, which is crucial for sparse view synthesis [S1].
++*   **Coordinate Systems:** Care must be taken to correctly map world coordinates ($\mathbf{x}_w$) to camera frame positions ($\mathbf{x}_c$) and directions for the depth encoding MLP [S1].
+ 
+ ## Operating characteristics
+-*   **Complexity:** Avoids the cubic complexity of voxel-based representations ($O(D^3)$) by using a fixed number of 2D planes ($O(D^2)$ per plane, total $O(D^2)$) [S1].
+-*   **Expressiveness:** More expressive than BEV or 2D feature representations because it retains all three dimensions (unlike BEV which omits the z-axis) [S1].
+-*   **Performance:** Enables accurate neural rendering and full expressivity at scale [S1].
+-*   **Strengths:** Computationally efficient compared to 3D CNNs or voxels; leverages pre-trained 2D CNNs for feature extraction [S1].
+-*   **Limitations:** Relies on the quality of the input image features and camera poses; performance may degrade with very sparse views if the inpainting mechanism is insufficient [S1].
++*   **Complexity:** Avoids the cubic complexity of 3D CNNs/voxels by using 2D planes [S1].
++*   **Expressivity:** More expressive than BEV or 2D representations as it retains all three dimensions, avoiding the omission of the z-axis [S1].
++*   **Performance:** Enables computationally efficient estimation of the entire scene's appearance and accurate neural rendering [S1].
++*   **Use Case:** Suitable for sparse view synthesis of outdoor scenes where full 3D expressivity is needed but cubic complexity is prohibitive [S1].
+ 
+ ## Background
+-The Image-Conditional Triplanar Representation was introduced in the paper "NeO 360: Neural Fields for Sparse View Synthesis of Outdoor Scenes" [S1]. It builds upon prior works involving volumetric reconstruction [55, 39, 25] and aims to address the limitations of cubic complexity in voxels and the lack of expressiveness in 2D/BEV representations [S1].
++*   **Origin:** Introduced in "NeO 360: Neural Fields for Sparse View Synthesis of Outdoor Scenes" [S1].
++*   **Motivation:** To model 3D scenes with full expressivity at scale without omitting dimensions (as in 2D/BEV) and avoiding cubic complexity (as in voxels) [S1].
++*   **Development:** Builds on prior volumetric reconstruction methods but extends them to estimate appearance and enable neural rendering, using depth-encoded features and image-conditioned aggregation [S1].
+ 
+ ## Sources

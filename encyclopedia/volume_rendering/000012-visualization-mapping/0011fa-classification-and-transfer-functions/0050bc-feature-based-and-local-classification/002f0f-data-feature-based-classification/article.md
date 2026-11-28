@@ -1,0 +1,81 @@
+# Data Feature-Based Classification
+## Overview
+Data Feature-Based Classification is a family of volume rendering methods that determine optical properties by evaluating a classification function $C(\mathbf{x})$ on a feature vector $\mathbf{f}(\mathbf{x})$ derived from the scalar data at position $\mathbf{x}$ [S1, unofficial][S2]. It solves the limitation of intensity-only classification by incorporating derived attributes such as gradients, curvature, color, or topological structures to distinguish features with overlapping intensity ranges [G]. It differs from [Feature-Based Transfer Functions](13183-feature-based-transfer-functions.md) by explicitly constructing multi-dimensional transfer functions from these derived attributes rather than relying solely on user-defined scalar mappings, and from [Boundary-Enhanced Opacity](795-boundary-enhanced-opacity.md) by using a broader set of feature types beyond just boundary detection [G].
+
+## Shared principles
+All methods in this family evaluate a classification function $C(\mathbf{x})$ for each sample point $\mathbf{x}$ in the volume to produce optical properties [G].
+
+**Input Domain:**
+The input to the classification function is a feature vector $\mathbf{f}(\mathbf{x})$ associated with position $\mathbf{x}$ [G]. While basic methods use scalar intensity $v = f(\mathbf{x})$, this family extends the domain to include derived features such as gradient magnitude [S2], color components [S2], and domain knowledge attributes like range weight and local variance [S1, unofficial].
+
+**Output Range:**
+The output is a set of optical properties, most commonly:
+*   **Opacity ($\alpha$):** A value in $[0, 1]$ representing the probability of absorption or the inverse of transparency. $\alpha=0$ is fully transparent; $\alpha=1$ is fully opaque [G].
+*   **Color ($C$):** A vector $(r, g, b)$ representing the emitted or reflected light color [G].
+*   **Weight:** In some emission-only models, a weight $w$ is assigned to modulate the contribution of samples during accumulation [G].
+
+**Classification Types:**
+1.  **Binary Classification:** Uses hard thresholds to include or exclude data [G]. Values below a threshold are assigned $\alpha=0$, and values above are assigned $\alpha=1$ (or a constant high value) [G].
+2.  **Soft Classification:** Uses smooth transitions (e.g., piecewise linear ramps, Gaussian bumps, or power functions) to assign intermediate opacity values [G].
+
+**Evaluation Order:**
+The timing of classification relative to sampling interpolation defines two main approaches [G]:
+*   **Pre-classification:** The transfer function is applied to scalar values at the grid points (voxels) before sampling [G]. Colors and opacities are interpolated during ray casting [G]. Pre-classification produces blurred images when the image resolution is higher than the volume resolution, but prevents color bleeding if color interpolation is done with opacity-weighted colors [G].
+*   **Post-classification:** Scalar values are interpolated from the volume texture during ray casting, and the transfer function is applied to these continuous sample values [G]. Post-classification produces images with defined edges but is prone to aliasing because high-frequency details may be missed [G].
+
+**Implementation Structures:**
+Transfer functions are commonly implemented as piecewise linear functions defined by user-specified keypoints, lookup tables (LUTs) stored as 1D, 2D, or 3D textures for fast GPU sampling, or shader functions evaluated dynamically during ray casting [G].
+
+## Subtopics
+
+### [Curvature-based Transfer Function](5452-curvature-based-transfer-function.md)
+A method that maps scalar data values and local surface curvature to optical properties to highlight structural contours, ridges, and valleys. It distinguishes itself by utilizing second-order derivative information to differentiate features of similar intensity but different geometric shapes.
+
+### [Shape-based Transfer Function Generation](5941-shape-based-transfer-function-generation.md)
+Assigns optical properties based on 3D shape descriptors derived from curve-skeletons to distinguish features with overlapping intensity ranges. Unlike per-voxel methods, it assigns uniform descriptors to entire volumetric segments, allowing intuitive assignment to shape classes.
+
+### [High-Dimensional Classification with Color Data](6327-high-dimensional-classification-with-color-data.md)
+Classifies color volume data using a high-dimensional classification function based on RGB values, neighbor colors, and spatial position. It allows users to work directly with original RGB data, avoiding the derived data space required by methods like Independent Component Analysis (ICA).
+
+### [Robust Material Graph Deduction](7459-robust-material-graph-deduction.md)
+Automatically constructs transfer functions by discovering the topological structure of materials, producing a graph where nodes represent materials and edges represent interfaces. It explicitly models adjacency relationships for automatic background removal, differing from local feature extraction methods.
+
+### [Feature Graph](8595-feature-graph.md)
+A hierarchical data structure (DAG) representing classified voxel models to visualize complex semantic hierarchies where voxels belong to multiple non-exclusive classes. It enables focus+context rendering through multiresolution support and explicit subset modeling.
+
+### [Attribute Ranking Heuristic](11691-attribute-ranking-heuristic.md)
+A greedy method for selecting relevant volumetric attributes for multidimensional transfer function classification by ranking candidates based on information content and redundancy. It uses entropy for initial selection, differing from its child which balances entropy against redundancy.
+
+### [Feature Visualization](12064-feature-visualization.md)
+Maps high-dimensional learned feature vectors to RGB colors by projecting them onto the first three principal components to make abstract neural representations interpretable. It operates on multi-dimensional feature embeddings rather than raw intensity.
+
+### [Machine Learning and Feature Extraction](12097-machine-learning-and-feature-extraction.md)
+Applies machine learning algorithms (e.g., SVMs, Neural Networks) and statistical clustering to determine optical properties automatically or semi-automatically. It differs from static heuristic functions by using learned decision boundaries.
+
+### [Similarity-based Classification](12242-similarity-based-classification.md)
+Determines optical properties by measuring the distance or agreement between a sample's feature vector and a reference set, rather than relying on absolute scalar thresholds. It leverages geometric, spectral, or learned latent relationships to define boundaries.
+
+### [Local Histogram-based Classification Probability](14137-local-histogram-based-classification-probability.md)
+Separates overlapping tissues by using local histogram range weights as a second attribute alongside intensity. It computes a signed classification certainty $P$ derived from the narrowness of local intensity distributions, enabling separation of materials indistinguishable by scalar value alone.
+
+### [Critical Point Classification](14338-critical-point-classification.md)
+Identifies and categorizes stationary points (where the gradient vanishes) in a scalar field to define optical properties. It focuses on topological singularities (maxima, minima, saddles) rather than local curvature magnitude or shape descriptors.
+
+### Domain Knowledge Attributes for Classification
+Attributes that capture domain knowledge to complement gradient-based measures [S1, unofficial]. The paper specifically employs 'range weight' and 'local variance' as examples of these attributes to enable additional visualization possibilities [S1, unofficial].
+
+### Color-based Feature Detectors
+Feature detectors that exploit color separation in RGB image data to highlight specific tissues by computing normalized ratios of individual color channels [S2].
+*   **Formula:**
+    *   $c_R = R / (R + G + B)$, where $c_R$ is the red feature detector, and $R, G, B$ are the red, green, and blue channel values respectively [S2].
+    *   $c_G = G / (R + G + B)$, where $c_G$ is the green feature detector [S2].
+    *   $c_B = B / (R + G + B)$, where $c_B$ is the blue feature detector [S2].
+    *   $c_{BR} = 0.5 * c_R + 1.0 * c_G$, a brown feature detector created by a weighted linear combination of red and green feature detectors [S2].
+*   **Parameter:** Brown color composition: Brown is composed of 0.5*R + 1.0*G + 0.0*B [S2].
+
+## Background
+The concept of using attributes beyond simple intensity to guide volume rendering classification has evolved to address the ambiguity of overlapping data ranges [G]. Early work introduced multi-dimensional transfer functions (MDTFs) that incorporated domain knowledge attributes like range weight and local variance to complement gradient-based measures [S1, unofficial]. Subsequent developments applied these principles to specific data types, such as high-resolution color cryo-imaging, where color-based feature detectors (e.g., normalized channel ratios) were developed to highlight specific tissues [S2].
+
+## Sources
+[S1] Multi-Dimensional Transfer Function Design Using Sorted Histograms, https://doi.org/10.2312/vg/vg06/001-008, fetched 2026-10-26 (unofficial)
+[S2] Enhanced volume rendering techniques for high-resolution color cryo-imaging data, https://doi.org/10.1117/12.813756, fetched 2026-11-08

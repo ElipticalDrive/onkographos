@@ -1,0 +1,136 @@
+# Parallel Prefix Sum (Scan) Orchestration
+
+Also called: Blelloch Scan, Exclusive/Inclusive Scan via Ping-Pong, Parallel Prefix Sum, Prefix Sum (Scan), Up-Sweep Down-Sweep Scan, Work-Efficient GPU Scan
+
+## Overview
+Parallel Prefix Sum (Scan) Orchestration computes prefix sums of an input array on the GPU using a multi-timestep iterative reduction strategy with a ping-pong buffer swap [S1, unofficial]. It solves the problem of efficiently aggregating data (such as vertex counts or fragment indices) into a sequential format for subsequent parallel processing steps like stream compaction or indirect dispatch [S1, unofficial]. Unlike naive iterative approaches that may require multiple kernel launches per level or fixed-size assumptions, this orchestration explicitly manages the up-sweep and down-sweep phases of a work-efficient tree-based scan across discrete timesteps, handling arbitrary input sizes via padding and ensuring memory consistency through strict barrier synchronization between ping-pong buffers [S2, unofficial].
+
+## How it works
+**Inputs and Outputs:**
+- Input: An array $I$ of $N$ elements (typically integers or floats) representing values to be summed [S1, unofficial].
+- Output: An array $O$ of prefix sums. The method can produce either an exclusive scan ($O[i] = \sum_{j=0}^{i-1} I[j]$ with $O[0]=0$) or an inclusive scan ($O[i] = \sum_{j=0}^{i} I[j]$), depending on post-processing or specific kernel configuration [S3, unofficial].
+
+**Data Structures:**
+1. **Ping-Pong Buffers (`prefixSumPingBuffer`, `prefixSumPongBuffer`):** Two storage buffers (e.g., `std430` in Vulkan or `cudaBuffer` in CUDA) of size equal to the padded input length (next power of two). They hold intermediate results during the up-sweep and down-sweep phases and are swapped each iteration with explicit read/write barriers to prevent race conditions [S1, unofficial].
+2. **Push Constant (`timestep`):** A 32-bit integer indicating the current iteration step of the scan algorithm, used to determine the stride and operation within the kernel [S1, unofficial].
+3. **Host Buffer (`totalSumBufferHost`):** A host-accessible buffer used to retrieve the final total sum from the last element $(N-1)$ of the active ping-pong buffer after computation completes [S1, unofficial].
+
+**Algorithm Steps:**
+1. **Padding:** Pad the input array size $N$ to the next power of two, $N_{p2}$ [S2, unofficial].
+2. **Initialization:** Allocate `prefixSumPingBuffer` and `prefixSumPongBuffer` of size $N_{p2}$. Copy input data to `prefixSumPingBuffer` and zero-initialize `prefixSumPongBuffer` [S1, unofficial].
+3. **Iteration Count:** Calculate the number of timesteps required: $T = \lceil \log_2(N) \rceil$ [S1, unofficial].
+4. **Loop over Timesteps ($t = 0$ to $T-1$):**
+   a. **Dispatch:** Launch a compute shader/kernel with workgroup size $256 \times 1 \times 1$ and grid size $\lceil N_{p2} / 256 \rceil$. Pass `timestep = t` as a push constant [S1, unofficial].
+   b. **Kernel Execution:** Each thread computes its global index $idx = \text{gl\_GlobalInvocationID.x}$ [S1, unofficial].
+      - **Bounds Check:** If $idx \ge N_{p2}$, return immediately [S1, unofficial].
+      - **Update Logic:** 
+        - If $t$ is even: if $idx < 2^t$, $dst[idx] = src[idx]$; else $dst[idx] = src[idx] + src[idx - 2^t]$ [S1, unofficial].
+        - If $t$ is odd: if $idx < 2^t$, $src[idx] = dst[idx]$; else $src[idx] = dst[idx] + dst[idx - 2^t]$ [S1, unofficial].
+   c. **Swap Buffers:** Swap `prefixSumPingBuffer` and `prefixSumPongBuffer`. Apply synchronization barriers matching the timestep parity to prevent GPU read/write conflicts [S1, unofficial].
+5. **Finalization:** Copy the final sum from the last element $(N_{p2}-1)$ of the active buffer to `totalSumBufferHost` using a buffer copy region [S1, unofficial]. Convert to an exclusive scan if needed by shifting the inclusive result right by one position and setting $O[0]=0$ [S2, unofficial].
+
+**Pseudocode:**
+> **Unverified code.** The code below did not pass a test run against a reference implementation, or no test fits it, so it may contain errors.
+
+```python
+import math
+
+def scan_kernel_step(src, dst, timestep, n_p2):
+    stride = 1 << timestep
+    for idx in range(n_p2):
+        if idx >= n_p2:
+            continue
+        if timestep % 2 == 0:
+            if idx < stride:
+                dst[idx] = src[idx]
+            else:
+                dst[idx] = src[idx] + src[idx - stride]
+        else:
+            if idx < stride:
+                src[idx] = dst[idx]
+            else:
+                src[idx] = dst[idx] + dst[idx - stride]
+    return src, dst
+
+def parallel_prefix_sum_orchestration(input_array, N):
+    if N <= 0:
+        return [], 0
+    
+    # 1. Padding
+    n_p2 = 1
+    while n_p2 < N:
+        n_p2 *= 2
+    
+    # 2. Initialization
+    src = list(input_array) + [0] * (n_p2 - N)
+    dst = [0] * n_p2
+    
+    # 3. Iteration Count
+    iters = math.ceil(math.log2(N))
+    
+    # 4. Loop over Timesteps
+    for t in range(iters):
+        src, dst = scan_kernel_step(src, dst, t, n_p2)
+        # Swap ping-pong buffers
+        src, dst = dst, src
+        # Apply synchronization barriers here in real implementation
+        
+    # 5. Finalization
+    total_sum = src[n_p2 - 1]
+    
+    # Optional: Convert to exclusive scan
+    # exclusive_scan = [0] + src[:-1]
+    
+    return src, total_sum
+```
+
+**Parameters:**
+- `timestep`: Integer push constant, current iteration step $t$ [S1, unofficial].
+- `numGroups`: Number of compute shader workgroups, calculated as $\lceil N_{p2} / 256 \rceil$ [S1, unofficial].
+- `iters`: Number of iterations, $\lceil \log_2(N) \rceil$ [S1, unofficial].
+
+**Edge Cases and Pitfalls:**
+- **Non-Power-of-Two Inputs:** Must be padded to the next power of two. Elements beyond $N$ should be initialized to 0 to avoid affecting the sum [S2, unofficial].
+- **Barrier Ordering:** The ping-pong swap direction and barrier placement must strictly match the timestep parity to prevent GPU read/write conflicts [S1, unofficial].
+- **Power Calculation:** Using a naive loop for $2^t$ is inefficient; bit shifting (`1 << t`) should be used [S1, unofficial].
+- **Bounds Checking:** Threads with $idx \ge N_{p2}$ must return immediately to avoid out-of-bounds memory access [S1, unofficial].
+
+## Subtopics
+
+### [CUDA-based Exclusive Prefix Sum for Vertex Indexing](1112-cuda-based-exclusive-prefix-sum-for-vertex-indexing.md)
+Solves the duplicate vertex calculation problem in GPU-based parallel isosurface extraction by using an exclusive prefix sum to compute correct global vertex indices for vertices found by parallel threads. Unlike sibling methods that may only apply stream compaction to triangles, this approach applies scan-based indexing to both vertices and triangles, ensuring unique global indices without expensive post-processing merging.
+
+### [Wait-Free Radix Sort](1879-wait-free-radix-sort.md)
+A parallel sorting algorithm designed for GPU execution that avoids inter-workgroup spin-waiting by using a hierarchical Blelloch scan to compute element positions, ensuring consistent behavior across heterogeneous GPU schedulers. It differs from naive parallel prefix sum approaches by explicitly decoupling the global position calculation from the scatter phase via a two-level hierarchical scan, allowing each level to be executed as an independent compute dispatch without cross-workgroup polling.
+
+### [Group Prefix Sum for Shell Lists](2746-group-prefix-sum-for-shell-lists.md)
+A parallel shell list compaction method used in GPU-based isosurface extraction that replaces sequential processing by thread 0 with a parallel prefix sum approach. It coordinates with the octree to derive block offsets from the first active octree nodes (AOs) in each shell.
+
+### [Exclusive Prefix Sum (Scan)](3007-exclusive-prefix-sum-scan.md)
+Computes an output array $O$ from an input array $I$ such that each element $O[i]$ is the sum of all input elements preceding index $i$ ($O[i] = \sum_{j=0}^{i-1} I[j]$), with $O[0]=0$. In volume rendering, this primitive maps parallel voxel culling decisions to sequential indices in a compacted list, allowing culled voxels to be removed in parallel without data races. It differs from its siblings by serving as the fundamental indexing engine for stream compaction and hierarchical subdivision, whereas [CUDA-based Exclusive Prefix Sum for Vertex Indexing](1112-cuda-based-exclusive-prefix-sum-for-vertex-indexing.md) targets specific vertex buffer layouts and [Naive Parallel Prefix Sum (Scan)](10348-naive-parallel-prefix-sum-scan.md) lacks the work-efficient tree-based optimization.
+
+### [Naive Parallel Prefix Sum (Scan)](10348-naive-parallel-prefix-sum-scan.md)
+A GPU-based algorithm for computing the inclusive prefix sum of an array using global memory and multiple kernel invocations. It serves as a baseline implementation compatible with arbitrary input sizes, distinguishing itself from work-efficient variants by its iterative, level-by-level reduction approach which results in higher computational work ($O(n \log n)$) but simpler synchronization logic within each kernel launch. Unlike in-place tree-based methods, it avoids race conditions by double-buffering data between two device arrays across iterations.
+
+### [Global Accumulator + Compaction](10410-global-accumulator-compaction.md)
+A two-pass GPU compute system that gathers visible splat counts per proxy and computes prefix sums to generate indirect dispatch and draw arguments for global Phase-3 rendering passes. It aggregates per-proxy visibility data into a global array and prepares execution parameters for subsequent geometry generation and indexing stages.
+
+### [Group Prefix Sum for Shell Lists](2746-group-prefix-sum-for-shell-lists.md)
+Python-bound CUDA functions for chunked inclusive/exclusive prefix sums and products that support normalization and backward passes for gradients. Parameters include `chunk_starts` (start indices for each chunk), `chunk_cnts` (counts of elements in each chunk), `inputs` (input tensor), `normalize` (flag to normalize the output), and `backward` (flag to compute backward pass/gradients).
+
+## Operating characteristics
+- **Time Complexity:** $O(\log N)$ parallel steps for the tree-based scan, with $O(N)$ work per step distributed across threads [S2, unofficial].
+- **Memory Complexity:** $O(N)$ for the input and output arrays, plus $O(N)$ for the ping-pong buffers [S1, unofficial].
+- **Performance:** Work-efficient variants (Blelloch) perform $2N$ additions for up-sweep and $2N$ for down-sweep, totaling $4N$ operations [S2, unofficial]. Naive iterative approaches serve as a baseline with higher computational work ($O(n \log n)$) but simpler synchronization logic [S2, unofficial].
+- **Strengths:** Handles arbitrary input sizes, work-efficient, suitable for GPU architectures with shared memory and barriers [S2, unofficial].
+- **Limitations:** Requires padding to power of two, complex synchronization logic, potential for race conditions if barriers are mismanaged [S1, unofficial].
+- **When to Use:** When stream compaction, indirect dispatch, or parallel aggregation is needed in volume rendering or isosurface extraction [S1, S2, unofficial].
+- **When Not to Use:** For small arrays where CPU sequential scan is faster, or when memory bandwidth is severely constrained and $O(N)$ extra storage is prohibitive [G].
+
+## Background
+The parallel prefix sum is a fundamental primitive in parallel computing, with origins in the 1970s. The Blelloch scan algorithm, introduced by Guy E. Blelloch in 1990, is a work-efficient method using up-sweep and down-sweep phases [G]. It has become a standard for GPU implementations due to its balance of work efficiency and memory access patterns [S2, unofficial]. In volume rendering, it is used for tasks like fragment list compaction, vertex indexing, and indirect draw call generation [S1, S2, unofficial].
+
+## Sources
+[S1] Show HN: 3DGS.cpp – performant, cross platform Gaussian Splatting with Vulkan, https://github.com/shg8/3DGS.cpp, fetched 2026-10-26 (unofficial)
+[S2] GitHub - jichumao/Stream-Compaction, https://github.com/jichumao/Stream-Compaction, fetched 2026-10-29 (unofficial)
+[S3] YihangChen-ee/CNC, https://github.com/YihangChen-ee/CNC, fetched 2026-10-27 (unofficial)

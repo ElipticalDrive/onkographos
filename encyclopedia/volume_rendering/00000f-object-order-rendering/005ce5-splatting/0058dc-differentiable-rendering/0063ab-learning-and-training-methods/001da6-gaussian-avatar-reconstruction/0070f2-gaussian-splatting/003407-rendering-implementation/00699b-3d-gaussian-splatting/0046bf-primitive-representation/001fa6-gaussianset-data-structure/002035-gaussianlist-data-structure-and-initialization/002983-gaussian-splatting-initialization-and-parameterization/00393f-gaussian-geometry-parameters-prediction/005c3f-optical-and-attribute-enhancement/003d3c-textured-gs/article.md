@@ -1,0 +1,78 @@
+# Textured-GS
+
+Also called: Gaussian Splatting with Spatially Defined Color and Opacity
+
+## Overview
+Textured-GS is a rendering method that enhances the textural representation of individual 3D Gaussians by modeling spatially defined color and opacity variations across the Gaussian ellipsoidal surface using Spherical Harmonics (SH) [S1]. Unlike standard 3D Gaussian Splatting (3DGS), where each Gaussian exhibits a single color per viewing direction and fixed opacity, Textured-GS allows a single Gaussian to display different colors and opacities at different locations on its surface [S1]. This is achieved by evaluating SH basis functions against the normalized surface intersection vector rather than the global viewing vector, enabling "unidirectional" behaviors (e.g., opaque on one side, transparent on the other) without increasing the number of Gaussians [S1]. It builds on [Optical and Attribute Enhancement](17107-optical-and-attribute-enhancement.md) by introducing spatially varying attributes baked into the SH framework.
+
+## How it works
+**Inputs and Outputs:**
+*   **Inputs:** A set of 3D Gaussians initialized from [Mini-Splatting](17107-optical-and-attribute-enhancement.md) output (position, rotation, scale, base opacity) [S1]. No pre-computed view-dependent color is loaded as input [S1].
+*   **Outputs:** Rendered image with spatially varying color and opacity per Gaussian.
+
+**Data Structures:**
+Each Gaussian $i$ stores:
+*   Position $\mathbf{x} \in \mathbb{R}^3$.
+*   Rotation $\mathbf{q} \in \mathbb{R}^4$ (quaternion).
+*   Scale $\mathbf{s} \in \mathbb{R}^3$ (optimized as $\sqrt{\mathbf{s}}$) [S1].
+*   Base Opacity $\alpha \in [0, 1]$ [S1].
+*   **Color SH Coefficients:** 16 coefficients (Degree 3, 4 channels: 3 for RGB, 1 for Alpha) [S1]. Standard 3DGS uses 3 channels; Textured-GS uses 4 [S1].
+*   **Opacity SH Coefficients:** 16 coefficients (Degree 3, 1 channel) [S1].
+
+**Algorithm:**
+1.  **Ellipsoid Definition:** Define the Gaussian as an ellipsoid in its local coordinate system:
+    $$ \frac{x^2}{s_x^2} + \frac{y^2}{s_y^2} + \frac{z^2}{s_z^2} = 1 $$
+    where $s_x, s_y, s_z$ are the scale parameters [S1].
+
+2.  **Ray Intersection:** For a viewing ray $\mathbf{r}(t) = \mathbf{o} + t\mathbf{d}$ (where $\mathbf{o}$ is origin, $\mathbf{d}$ is direction, both transformed to the Gaussian's local coordinate system), substitute into the ellipsoid equation:
+    $$ \frac{(o_x + t d_x)^2}{s_x^2} + \frac{(o_y + t d_y)^2}{s_y^2} + \frac{(o_z + t d_z)^2}{s_z^2} = 1 $$
+    Expand to form the quadratic equation $At^2 + Bt + C = 0$, where:
+    $$ A = \frac{d_x^2}{s_x^2} + \frac{d_y^2}{s_y^2} + \frac{d_z^2}{s_z^2} $$
+    $$ B = 2 \left( \frac{o_x d_x}{s_x^2} + \frac{o_y d_y}{s_y^2} + \frac{o_z d_z}{s_z^2} \right) $$
+    $$ C = \frac{o_x^2}{s_x^2} + \frac{o_y^2}{s_y^2} + \frac{o_z^2}{s_z^2} - 1 $$
+    Solve for $t$:
+    $$ t = \frac{-B \pm \sqrt{B^2 - 4AC}}{2A} $$
+    Select the intersection point with the lower $t$ value (closer to ray origin) [S1].
+
+3.  **Normalization Vector Calculation:** Transform the selected intersection point $\mathbf{p}$ into the Gaussian's local coordinate system. Normalize each dimension by the scale to obtain the normalized vector $\mathbf{n}$:
+    $$ \mathbf{n} = \left( \frac{p_x}{s_x}, \frac{p_y}{s_y}, \frac{p_z}{s_z} \right) $$
+    Note: $\mathbf{n}$ lies on the unit sphere [S1].
+
+4.  **SH Evaluation:** Evaluate the Spherical Harmonics basis functions $Y_{lm}$ using $\mathbf{n}$ instead of the viewing vector $\mathbf{v}$ [S1].
+    *   Color: $c_i = \sum_{l=0}^{L} \sum_{m=-l}^{l} \gamma_{lm}^{(i)} Y_{lm}(\mathbf{n})$
+    *   Opacity: $\alpha_i = \sum_{l=0}^{L} \sum_{m=-l}^{l} \alpha_{lm}^{(i)} Y_{lm}(\mathbf{n})$
+    where $\gamma_{lm}^{(i)}$ and $\alpha_{lm}^{(i)}$ are the SH coefficients for color and opacity respectively [S1].
+    Apply Sigmoid activation to the resulting color and opacity values to ensure smooth gradients [S1].
+
+5.  **Optimization Update:** Unlike standard 3DGS which aggregates loss for SH coefficients at the end of an iteration, Textured-GS updates SH coefficients incrementally after each pixel is processed [S1]. This is necessary because the input vector $\mathbf{n}$ varies per pixel, unlike the constant viewing vector in standard view-dependent shading [S1].
+
+**Parameters:**
+*   **SH Degree Level:** 3 for both color and opacity [S1].
+*   **Learning Rate:** 0.0025 for color texture, 0.005 for opacity texture [S1].
+*   **Loss Weight ($\lambda$):** 0.2 for D-SSIM term in $L = (1 - \lambda)L_1 + \lambda L_{D-SSIM}$ [S1].
+*   **Initialization:** Start with Gaussians from Mini-Splatting output. Do not load view-dependent color [S1].
+*   **Scale Parameterization:** Use $\sqrt{\mathbf{s}}$ for the ellipsoid equation during optimization to favor larger ellipsoids, though this does not alter the actual Gaussian size in splatting [S1].
+
+**Edge Cases and Pitfalls:**
+*   **Storage:** Requires 4 channels of SH coefficients (3 color, 1 opacity) instead of 3, slightly increasing storage size compared to baseline with the same Gaussian count [S1].
+*   **Adaptive Control:** Remove adaptive control modules (splitting/cloning) from the 3DGS framework to ensure optimization stability and efficiency [S1].
+*   **Precision:** The quadratic formula calculation must handle degenerate cases where $A \approx 0$ (ray parallel to ellipsoid axis) or discriminant $< 0$ (no intersection) [G].
+
+## Subtopics
+
+### Recolorable Textures with Palette Color
+Extends Textured-GS with a learnable palette color $\mathbf{c}_{pal}$ to enable real-time color editing by shifting the view-independent color [S2]. The view-independent color $\mathbf{c}_{ind}$ of the $i$-th Gaussian at intersection point $\mathbf{p}_i$ is defined as $\mathbf{c}_{ind} = \mathbf{c}_{pal} + (\mathbf{c}_{tex})_i(\mathbf{p}_i)$, where $\mathbf{c}_{pal}$ is shared across all Gaussians in a basic scene and initialized as the mean color of input multi-view images [S2]. Optimization uses RGB reconstruction loss combined with L1 sparsity regularization on $\mathbf{c}_{tex}$ [S2].
+
+## Operating characteristics
+*   **Performance:** On Mip-NeRF 360, Textured-GS achieves SSIM 0.828, PSNR 28.54, LPIPS 0.189 with 0.49M Gaussians [S1]. On Tanks&Temples, SSIM 0.841, PSNR 23.14, LPIPS 0.183 with 0.20M Gaussians [S1]. On Deep Blending, SSIM 0.903, PSNR 29.41, LPIPS 0.243 with 0.35M Gaussians [S1].
+*   **Resource Usage:** On the Bicycle Scene (Mip-NeRF 360), it achieves 161 FPS, 10m52s train time, 4.53GB memory, and 164MB file size [S1].
+*   **Comparison:** Outperforms standard 3DGS (SSIM 0.815, PSNR 27.69) and Mini-Splatting (SSIM 0.822, PSNR 25.59) on Mip-NeRF 360 [S1]. Requires significantly fewer Gaussians than standard 3DGS for comparable quality [S1].
+*   **Strengths:** Enhances sharp feature representation and local texture detail without increasing Gaussian count [S1].
+*   **Limitations:** Slightly higher storage due to 4-channel SH [S1]. Rendering speed and training time have room for optimization [S1].
+
+## Background
+Textured-GS was introduced to address the bottleneck of Gaussian representation in rendering performance, where standard Gaussians exhibit only a single color from a specific viewing angle [S1]. The method adapts the Mini-Splatting architecture to integrate textured Gaussians, validating the approach on pre-optimized 3D Gaussian scenes [S1]. It leverages the differentiable rendering process of 3DGS but modifies the parameterization to allow spatial variation [S1].
+
+## Sources
+[S1] Textured-GS: Gaussian Splatting with Spatially Defined Color and Opacity, https://core.ac.uk/works/391755422, fetched 2026-10-30
+[S2] TexGS-VolVis: Expressive Scene Editing for Volume Visualization via Textured Gaussian Splatting., https://doi.org/10.1109/tvcg.2025.3634643, fetched 2026-10-30

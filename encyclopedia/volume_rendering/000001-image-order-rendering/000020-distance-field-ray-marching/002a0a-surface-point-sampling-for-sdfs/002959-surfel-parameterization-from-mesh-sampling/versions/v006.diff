@@ -1,0 +1,135 @@
+--- v005.md
++++ v006.md
+@@ -8,8 +8,8 @@
+ ## How it works
+ **Inputs:** A triangle mesh.
+-**Outputs:** A point cloud with surfel parameters.
++**Outputs:** A point cloud with surfel parameters [S1, unofficial].
+ 
+ **Data Structures:**
+-*   **Point Cloud:** A list of points. Each point stores a 3D position, a face normal, two tangent vectors, and two scale parameters defining the surfel kernel.
++*   **Point Cloud:** A list of points. Each point stores a 3D position, a face normal, two tangent vectors, and two scale parameters defining the surfel kernel [S1, unofficial].
+ *   **Spatial Acceleration Structure:** A spatial index (e.g., KD-tree, octree) built on the sampled points to enable efficient nearest-neighbor queries. The same structure is shared with optimization initialization and splitting criteria [S1, unofficial].
+ 
+@@ -31,43 +31,68 @@
+ **Pseudocode:**
+ ```python
++import math
++
++def dot(a, b):
++    return sum(x * y for x, y in zip(a, b))
++
++def cross(a, b):
++    return (a[1]*b[2] - a[2]*b[1], a[2]*b[0] - a[0]*b[2], a[0]*b[1] - a[1]*b[0])
++
++def normalize(v):
++    l = math.sqrt(sum(x*x for x in v))
++    return tuple(x/l for x in v) if l > 0 else (0, 0, 0)
++
++def add3(a, b):
++    return tuple(a[k] + b[k] for k in range(3))
++
++def scale3(s, v):
++    return tuple(s * v[k] for k in range(3))
++
+ def estimate_surfel_parameters(points, normals, spatial_index, strategy='anisotropic'):
+     for i in range(len(points)):
+         p_i = points[i]
+         n_i = normals[i]
+-        
++
+         if strategy == 'isotropic':
+             # Standard orthonormal frame construction from normal [G]
+             t1, t2 = _standard_orthonormal_frame(n_i)
+-            
++
+             # Query orientation-aware nearest neighbors [S1, unofficial]
+             neighbors = spatial_index.query_orientation_aware(p_i, n_i)
+-            distances = [math.sqrt(sum((p_j - p_i)**2 for p_j in neighbors))]
+-            scale = sum(distances) / len(distances)
++            if not neighbors:
++                scale = 1.0
++            else:
++                distances = [math.sqrt(sum((a-b)**2 for a, b in zip(p_j, p_i))) for p_j in neighbors]
++                scale = sum(distances) / len(distances)
+             scales = (scale, scale)
+-            
++
+         elif strategy == 'anisotropic':
+             # Identify neighbors with compatible normal orientation [S1, unofficial]
+             neighbors = spatial_index.query_compatible(p_i, n_i)
+-            
++
+             # Project to tangent plane defined by sample normal [S1, unofficial]
+-            projected = [p_j - dot(p_j - p_i, n_i) * n_i for p_j in neighbors]
+-            
++            projected = []
++            for p_j in neighbors:
++                diff = tuple(p_j[k] - p_i[k] for k in range(3))
++                proj = tuple(p_j[k] - dot(diff, n_i) * n_i[k] for k in range(3))
++                projected.append(proj)
++
+             # Construct local 2D basis for tangent plane [G]
+             u1, u2 = _standard_orthonormal_frame(n_i)
+-            
++
+             # Compute 2D coordinates for PCA [S1, unofficial]
+             coords = [(dot(v, u1), dot(v, u2)) for v in projected]
+             cov_matrix = _compute_2x2_covariance(coords)
+-            
++
+             # Eigendecomposition of 2x2 covariance matrix [S1, unofficial]
+             eigenvalues, eigenvectors = _eig_2x2(cov_matrix)
+-            
++
+             # Eigenvectors define tangent directions in 3D [S1, unofficial]
+-            t1 = eigenvectors[0][0] * u1 + eigenvectors[0][1] * u2
+-            t2 = eigenvectors[1][0] * u1 + eigenvectors[1][1] * u2
+-            
++            t1 = add3(scale3(eigenvectors[0][0], u1), scale3(eigenvectors[0][1], u2))
++            t2 = add3(scale3(eigenvectors[1][0], u1), scale3(eigenvectors[1][1], u2))
++
+             # Eigenvalues determine anisotropic scales [S1, unofficial]
+-            scales = (math.sqrt(eigenvalues[0]), math.sqrt(eigenvalues[1]))
+-            
++            scales = (math.sqrt(max(0, eigenvalues[0])), math.sqrt(max(0, eigenvalues[1])))
++
+         points[i].tangents = (t1, t2)
+         points[i].scales = scales
+@@ -79,5 +104,5 @@
+     else:
+         a = (1, 0, 0)
+-    t1 = normalize(a - dot(a, n) * n)
++    t1 = normalize(tuple(a[k] - dot(a, n)*n[k] for k in range(3)))
+     t2 = cross(n, t1)
+     return t1, t2
+@@ -85,4 +110,6 @@
+ def _compute_2x2_covariance(coords):
+     n = len(coords)
++    if n == 0:
++        return [[1.0, 0.0], [0.0, 1.0]]
+     mean_x = sum(c[0] for c in coords) / n
+     mean_y = sum(c[1] for c in coords) / n
+@@ -110,7 +137,5 @@
+ 
+ **Parameters:**
+-*   Neighbor count for spatial queries: Not given in the sources.
+-*   Normal compatibility threshold: Not given in the sources.
+-*   Scale multiplier for eigenvalues: Not given in the sources.
++The sources do not specify the neighbor count for spatial queries, the normal compatibility threshold, or a scale multiplier for eigenvalues [S1, unofficial].
+ 
+ **Edge Cases and Pitfalls:**
+@@ -121,5 +146,5 @@
+ 
+ ### Local Differential Geometry Computation
+-A method to compute curvatures (Gaussian and Mean) and local differential geometry for a visible oriented point $(p, v)$ using only the directional distance field $d(p, v)$ and its derivatives with respect to $p$ [S2]. It constructs a local coordinate system at the surface point $q = p + d(p, v)v$ by choosing two tangent vectors $t_x, t_y \in T_q(S)$ such that $||t_\alpha||_2 = 1$ and $t_x^T t_y = 0$. In practice, this is done by sampling Gaussian vectors and extracting an orthogonal tangent basis [S2]. The surface is reparameterized near $q_0$ via $S(x, y) = q_0 + x t_x + y t_y + f_S(x, y)n_0$, where $x$ and $y$ control position on the tangent plane, or equivalently $p(u) = p_0 + x t_x + y t_y$ where $u = (x, y)$ [S2]. The first-order derivatives of the surface at $u=0$ are $\partial_i S|_{u=0} = t_i + (\nabla_p d(p, v_0) t_i) v_0$, where $i \in \{x, y\}$ [S2]. The metric tensor (first fundamental form) is $g_{ij} = \partial_i S^T \partial_j S = \delta_{ij} + c_i c_j + c_i v_0^T t_j + c_j v_0^T t_i$, where $c_k = \nabla_p d t_k$. In theory, since $\nabla_p d$ is parallel to normal $n$ and orthogonal to tangents, $c_x = c_y = 0$, so $g_{ij} = \delta_{ij}$. In practice, use the theoretical value $g = I_2$ [S2]. The shape tensor (second fundamental form) is $\Pi_{ij} = (t_j^T H_p[d] t_i) n_0^T v_0$, where $H_p[d]$ is the Hessian of $d$ with respect to $p$ at $u=0$, and $n_0$ is the surface normal at $q_0$ [S2]. Gaussian curvature is $C_K = \det(\Pi) / \det(g)$ and Mean curvature is $C_H = \text{tr}(\Pi g^{-1})$ [S2].
++A method to compute curvatures (Gaussian and Mean) and local differential geometry for a visible oriented point $(p, v)$ using only the directional distance field $d(p, v)$ and its derivatives with respect to $p$ [S2]. It constructs a local coordinate system at the surface point $q = p + d(p, v)v$ by choosing two tangent vectors $t_x, t_y \in T_q(S)$ such that $||t_\alpha||_2 = 1$ and $t_x^T t_y = 0$ [S2]. In practice, this is done by sampling Gaussian vectors and extracting an orthogonal tangent basis [S2]. The surface is reparameterized near $q_0$ via $S(x, y) = q_0 + x t_x + y t_y + f_S(x, y)n_0$, where $x$ and $y$ control position on the tangent plane, or equivalently $p(u) = p_0 + x t_x + y t_y$ where $u = (x, y)$ [S2]. The first-order derivatives of the surface at $u=0$ are $\partial_i S|_{u=0} = t_i + (\nabla_p d(p, v_0) t_i) v_0$, where $i \in \{x, y\}$ [S2]. The metric tensor (first fundamental form) is $g_{ij} = \partial_i S^T \partial_j S = \delta_{ij} + c_i c_j + c_i v_0^T t_j + c_j v_0^T t_i$, where $c_k = \nabla_p d t_k$ [S2]. In theory, since $\nabla_p d$ is parallel to normal $n$ and orthogonal to tangents, $c_x = c_y = 0$, so $g_{ij} = \delta_{ij}$ [S2]. In practice, use the theoretical value $g = I_2$ [S2]. The shape tensor (second fundamental form) is $\Pi_{ij} = (t_j^T H_p[d] t_i) n_0^T v_0$, where $H_p[d]$ is the Hessian of $d$ with respect to $p$ at $u=0$, and $n_0$ is the surface normal at $q_0$ [S2]. Gaussian curvature is $C_K = \det(\Pi) / \det(g)$ and Mean curvature is $C_H = \text{tr}(\Pi g^{-1})$ [S2].
+ 
+ ## Operating characteristics
+@@ -129,5 +154,5 @@
+ 
+ ## Background
+-The method originates from the 3DSS (3D Surface Splatting for Inverse Rendering) paper [S1, unofficial]. It is used in inverse rendering pipelines to prepare point clouds for splatting-based rendering and relighting. The local differential geometry computation is described in the context of Probabilistic Directed Distance Fields for Ray-Based Shape Representations [S2].
++The method originates from the 3DSS (3D Surface Splatting for Inverse Rendering) paper [S1, unofficial]. It is used in inverse rendering pipelines to prepare point clouds for splatting-based rendering and relighting [S1, unofficial]. The local differential geometry computation is described in the context of Probabilistic Directed Distance Fields for Ray-Based Shape Representations [S2].
+ 
+ ## Sources

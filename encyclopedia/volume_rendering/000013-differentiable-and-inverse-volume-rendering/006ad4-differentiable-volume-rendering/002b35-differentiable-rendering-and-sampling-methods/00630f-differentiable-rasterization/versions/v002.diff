@@ -1,0 +1,256 @@
+--- v001.md
++++ v002.md
+@@ -8,5 +8,5 @@
+ ## How it works
+ **Inputs and Outputs:**
+-*   **Inputs:** Multi-view RGB images; initial triangle soup geometry (initialized around Structure-from-Motion keypoints) [S1, unofficial].
++*   **Inputs:** Multi-view RGB images; initial triangle soup geometry initialized around Structure-from-Motion (SfM) keypoints [S1, unofficial].
+ *   **Outputs:** Reconstructed 3D scene represented as a triangle soup with learned neural textures (color and opacity functions) and optimized vertex positions [S1, unofficial].
+ 
+@@ -39,5 +39,5 @@
+     [S1, unofficial]
+     *Note: Shorthands $C_f$ and $\alpha_f$ are used for $C_{t_f}$ and $\alpha_{t_f}$ respectively [S1, unofficial].*
+-5.  **Neural Texture Mapping (Optional/Implicit):** The rasterization produces a high-dimensional color-feature image (the raw output of $C_t$). This is mapped to final RGB values using a small shared Multi-Layer Perceptron (MLP) trained to minimize error against ground-truth images [S1, unofficial].
++5.  **Neural Texture Mapping:** The rasterization produces a high-dimensional color-feature image, which is mapped to final RGB values using a small shared Multi-Layer Perceptron (MLP) trained to minimize error against ground-truth images [S1, unofficial].
+ 6.  **Stochastic Opacity Masking for Training:** To handle discontinuities in opaque rasterization and enable gradient flow:
+     *   Interpret every point in space as an infinitesimal opaque surface occurring with probability equal to its opacity [S1, unofficial].
+@@ -61,5 +61,5 @@
+         """
+         triangles: Tensor of shape (N, 3, 3), N triangles, 3 vertices, 3 coords.
+-        color_net: nn.Module mapping barycentric coords to RGB.
++        color_net: nn.Module mapping barycentric coords to high-dim features.
+         opacity_net: nn.Module mapping barycentric coords to scalar opacity.
+         threshold: Binary opacity threshold (default 0.5).
+@@ -69,176 +69,82 @@
+         self.opacity_net = opacity_net
+         self.threshold = threshold
++        self.feature_to_rgb = nn.Linear(color_net.out_features, 3)
+ 
+-    def rasterize(self, camera_matrix, image_size):
++    def transform_to_camera_space(self, triangles, camera_matrix):
++        """Transform vertices to camera space using a 4x4 projection matrix."""
++        verts = triangles.view(-1, 3)
++        cam_verts = (verts @ camera_matrix[:3, :3].T) + camera_matrix[:3, 3]
++        return cam_verts.view(-1, 3, 3)
++
++    def rasterize(self, cam_triangles, image_size):
+         """
+-        Performs depth-tested rasterization with binary opacity.
+-        Returns:
+-            best_bary: Tensor (H, W, 2), barycentric coords of best fragment.
+-            best_tri_idx: Tensor (H, W), index of best triangle.
+-            best_depth: Tensor (H, W), depth of best fragment.
++        Standard triangle rasterization. Returns fragment buffers for all triangles.
++        all_bary: (H, W, N, 2) barycentric coords
++        all_depth: (H, W, N) fragment depths
++        all_tri_idx: (H, W, N) triangle indices
+         """
+-        # 1. Transform triangles to camera space
+-        # Assuming camera_matrix handles projection and transformation
+-        cam_triangles = transform_to_camera_space(self.triangles, camera_matrix)
++        H, W = image_size
++        N = cam_triangles.shape[0]
++        all_bary = torch.zeros(H, W, N, 2, device=cam_triangles.device)
++        all_depth = torch.full((H, W, N), float('inf'), device=cam_triangles.device)
++        all_tri_idx = torch.arange(N, device=cam_triangles.device).unsqueeze(0).unsqueeze(0).expand(H, W, -1)
+         
+-        # 2. Standard rasterization to get all fragments
+-        # This is a simplified representation of a rasterizer's output
+-        # fragments: list of dicts or tensors for each pixel
+-        # For implementation, this would call a CUDA kernel or library function
+-        # that returns all intersecting triangles per pixel.
+-        # Here we assume a function `rasterize_all` returns:
+-        # all_bary: (H, W, K, 2) barycentric coords for K triangles per pixel
+-        # all_tri_idx: (H, W, K) triangle indices
+-        # all_depth: (H, W, K) depths
+-        all_bary, all_tri_idx, all_depth = rasterize_all(cam_triangles, image_size)
++        # Standard rasterization loop: for each triangle, compute screen-space coverage,
++        # barycentric coordinates, and depth at each pixel center.
++        for t in range(N):
++            v0, v1, v2 = cam_triangles[t]
++            # Compute bounding box, rasterize triangle, fill all_bary and all_depth
++            # where the triangle covers the pixel. (Standard geometric rasterization)
++            pass
++        return all_bary, all_tri_idx, all_depth
++
++    def forward(self, camera_matrix, image_size, gt_images):
++        # 1. Transform to camera space
++        cam_triangles = self.transform_to_camera_space(self.triangles, camera_matrix)
++        
++        # 2. Rasterize to get all fragments
++        all_bary, all_tri_idx, all_depth = self.rasterize(cam_triangles, image_size)
+         
+         # 3. Evaluate opacity for all fragments
+-        # all_bary is (H, W, K, 2), opacity_net expects (..., 2)
+-        all_opacity = self.opacity_net(all_bary) # Shape: (H, W, K)
++        all_opacity = self.opacity_net(all_bary)  # (H, W, N)
+         
+-        # 4. Apply binary opacity threshold
+-        # Mask out fragments with opacity <= threshold
+-        valid_mask = all_opacity > self.threshold # Shape: (H, W, K)
+-        
+-        # 5. Select foremost fragment among valid ones
+-        # Set invalid depths to infinity so they are not selected
++        # 4. Apply binary opacity threshold for rendering
++        valid_mask = all_opacity > self.threshold
+         depths_for_selection = all_depth.clone()
+         depths_for_selection[~valid_mask] = float('inf')
++        best_depth, best_k_idx = torch.min(depths_for_selection, dim=2)  # (H, W)
+         
+-        # Find min depth index along K dimension
+-        best_depth, best_k_idx = torch.min(depths_for_selection, dim=2) # (H, W)
++        # Gather best fragment attributes
++        best_k_idx_expanded = best_k_idx.unsqueeze(-1).unsqueeze(-1).expand(-1, -1, -1, 2)
++        best_bary = torch.gather(all_bary, 2, best_k_idx_expanded).squeeze(2)  # (H, W, 2)
++        best_tri_idx = torch.gather(all_tri_idx, 2, best_k_idx.unsqueeze(-1)).squeeze(2)  # (H, W)
+         
+-        # Gather best barycentric coords and triangle indices
+-        # best_k_idx is (H, W), needs to be expanded for gathering
+-        best_k_idx_expanded = best_k_idx.unsqueeze(-1).unsqueeze(-1).expand(-1, -1, -1, 2)
+-        best_bary = torch.gather(all_bary, 2, best_k_idx_expanded).squeeze(2) # (H, W, 2)
++        # 5. Compute rendered color
++        color_features = self.color_net(best_bary)  # (H, W, C_feat)
++        rendered_rgb = self.feature_to_rgb(color_features)  # (H, W, 3)
+         
+-        best_tri_idx_gather = best_k_idx.unsqueeze(-1).expand(-1, -1, 3) # (H, W, 3) if needed, but we just need index
+-        best_tri_idx = torch.gather(all_tri_idx, 2, best_k_idx.unsqueeze(-1)).squeeze(2) # (H, W)
+-        
+-        return best_bary, best_tri_idx, best_depth
+-
+-    def forward(self, camera_matrix, image_size, gt_images):
+-        """
+-        Forward pass with stochastic loss.
+-        """
+-        # Rasterize
+-        best_bary, best_tri_idx, best_depth = self.rasterize(camera_matrix, image_size)
+-        
+-        # Get color from neural texture
+-        # best_bary is (H, W, 2)
+-        # best_tri_idx is (H, W)
+-        # We need to index into color_net per triangle? 
+-        # The source says "per-triangle texture functions". 
+-        # In practice, this might be a single network with triangle ID as input, 
+-        # or a set of networks. The source implies Ct is per-triangle.
+-        # For simplicity, assume color_net takes (bary, tri_idx) or similar.
+-        # If color_net is shared, it might just take bary and assume global texture.
+-        # Source: "Ct maps barycentric coordinates b to color Ct(b)".
+-        # This implies per-triangle networks or a single network with triangle ID.
+-        # Let's assume a single shared MLP for simplicity as per "small shared MLP" note,
+-        # but the loss formula uses Ci and alpha_i which suggests per-sample evaluation.
+-        
+-        # Re-evaluating source: "Rasterization produces a high-dimensional color-feature image, 
+-        # which is then mapped to RGB values using a small shared MLP".
+-        # This suggests the rasterizer outputs features, and an MLP maps them to RGB.
+-        # However, the loss formula L_sum uses Ci and alpha_i at sample points.
+-        # This implies we might need to evaluate opacity and color at multiple points 
+-        # for the stochastic loss, not just the best fragment.
+-        
+-        # The source states: "DiffSoup reconstructs a triangle soup... 
+-        # We first outline the necessary background and then describe our differentiable rasterizer, 
+-        # along with the proposed stochastic opacity masking approach."
+-        # And: "Stochastic surface and radiance field loss... 
+-        # L_sum = sum_i w_i L1(Ci)... where Ci and alpha_i denote the color and alpha values 
+-        # at the i-th sample point along the ray in depth-sorted order".
+-        
+-        # This implies that for training, we need to evaluate opacity and color 
+-        # at multiple sample points (likely all fragments or a subset) to compute the stochastic loss,
+-        # even though rendering uses only the best fragment.
+-        
+-        # Let's adjust forward to support stochastic loss calculation.
+-        
+-        # 1. Get all fragments for stochastic loss
+-        all_bary, all_tri_idx, all_depth = self.rasterize_all_fragments(camera_matrix, image_size)
+-        
+-        # 2. Evaluate opacity for all fragments
+-        all_opacity = self.opacity_net(all_bary) # (H, W, K)
+-        
+-        # 3. Evaluate color for all fragments
+-        # Assuming color_net takes barycentric coords. 
+-        # If per-triangle, we need to handle tri_idx. 
+-        # Source: "Ct maps barycentric coordinates b to color Ct(b)".
+-        # This is ambiguous if Ct is a single network or per-triangle.
+-        # Given "small shared MLP", let's assume a single network for color features,
+-        # and the "high-dimensional color-feature image" is the output of this network.
+-        # But the loss uses Ci. Let's assume color_net outputs RGB directly for now,
+-        # or features that are mapped to RGB.
+-        # Source: "mapped to RGB values using a small shared MLP".
+-        # So: features = color_net(bary), RGB = MLP(features).
+-        
+-        # Let's assume color_net outputs features.
+-        color_features = self.color_net(all_bary) # (H, W, K, C_feat)
+-        
+-        # Map features to RGB
+-        # Assuming a simple linear layer or small MLP for mapping
+-        rgb_all = self.feature_to_rgb(color_features) # (H, W, K, 3)
+-        
+-        # 4. Compute stochastic loss
++        # 6. Compute stochastic surface loss for training
+         # Sort fragments by depth for each pixel
+         sorted_depth, sorted_indices = torch.sort(all_depth, dim=2, ascending=True)
+-        sorted_rgb = torch.gather(rgb_all, 2, sorted_indices.unsqueeze(-1).expand(-1,-1,-1,3)).squeeze(2)
+-        sorted_opacity = torch.gather(all_opacity, 2, sorted_indices).squeeze(2)
++        sorted_opacity = torch.gather(all_opacity, 2, sorted_indices).squeeze(2)  # (H, W, N)
++        sorted_features = torch.gather(color_features.unsqueeze(2), 2, sorted_indices.unsqueeze(-1).expand(-1,-1,-1,color_features.shape[-1])).squeeze(2)
++        sorted_rgb = self.feature_to_rgb(sorted_features)  # (H, W, N, 3)
+         
+-        # Compute cumulative transmittance
+-        # alpha_i is sorted_opacity
+-        # alpha_bar_i = product_{j=1}^{i-1} (1 - alpha_j)
+-        # We need to handle the product carefully to avoid NaNs
++        # Compute cumulative transmittance: alpha_bar_i = prod_{j=1}^{i-1} (1 - alpha_j)
+         one_minus_alpha = 1.0 - sorted_opacity
+-        # Cumulative product
+         cum_transmittance = torch.cumprod(one_minus_alpha, dim=2)
+-        # Shift cum_transmittance to align with alpha_i
+-        # alpha_bar_i corresponds to product up to i-1
+-        # cum_transmittance[:, :, i] is product up to i
+-        # So alpha_bar_i is cum_transmittance[:, :, i-1]
+-        # For i=0, alpha_bar_0 = 1
+         alpha_bar = torch.cat([torch.ones_like(sorted_opacity[:, :, :1]), cum_transmittance[:, :, :-1]], dim=2)
+         
+-        # Weights w_i = alpha_bar_i * alpha_i
+-        weights = alpha_bar * sorted_opacity # (H, W, K)
++        # Weights: w_i = alpha_bar_i * alpha_i
++        weights = alpha_bar * sorted_opacity  # (H, W, N)
+         
+-        # Ground truth image
+-        # gt_images is (H, W, 3)
+-        # We need to compare each sample? Or just the final pixel?
+-        # Source: "L_sum = sum_i w_i L1(Ci)". This sums over all samples i.
+-        # But Ci is the color at sample i. 
+-        # This loss is applied per pixel, summing over all samples along the ray.
++        # Ground truth expansion
++        gt_expanded = gt_images.unsqueeze(2).expand_as(sorted_rgb)
++        l1_per_sample = torch.abs(sorted_rgb - gt_expanded).mean(dim=3)  # (H, W, N)
+         
+-        # Compute L1 loss for each sample
+-        # gt_images needs to be expanded to (H, W, K, 3)
+-        gt_expanded = gt_images.unsqueeze(2).expand_as(rgb_all)
+-        l1_per_sample = torch.abs(rgb_all - gt_expanded) # (H, W, K, 3)
+-        l1_per_sample = l1_per_sample.mean(dim=3) # (H, W, K)
++        # Stochastic loss: L_sum = sum_i w_i L1(C_i)
++        loss = (weights * l1_per_sample).sum()
+         
+-        # Weighted loss
+-        weighted_loss = weights * l1_per_sample # (H, W, K)
+-        
+-        # Sum over all samples
+-        loss = weighted_loss.sum()
+-        
+-        # Return loss and rendered image (using best fragment)
+-        # Rendered image
+-        best_rgb = self.feature_to_rgb(self.color_net(best_bary)) # (H, W, 3)
+-        
+-        return loss, best_rgb
+-
+-    def rasterize_all_fragments(self, camera_matrix, image_size):
+-        # Placeholder for actual rasterization logic that returns all fragments
+-        # This would be a CUDA kernel or library call
+-        pass
+-
+-    def feature_to_rgb(self, features):
+-        # Placeholder for the small shared MLP
+-        pass
++        return loss, rendered_rgb
+ ```
+ 

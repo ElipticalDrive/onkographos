@@ -1,0 +1,1789 @@
+# PyMCubes
+
+`PyMCubes` is an implementation of the marching cubes algorithm to extract
+iso-surfaces from volumetric data. The volumetric data can be given as a
+three-dimensional `NumPy` array or as a Python function ``f(x, y, z)``.
+
+`PyMCubes` also provides functions to export the results of the marching cubes
+in a number of mesh file formats.
+
+## Installation
+
+Use `pip`:
+```
+$ pip install --upgrade PyMCubes
+```
+
+## Example
+
+The following example creates a `NumPy` volume with spherical iso-surfaces and
+extracts one of them (i.e., a sphere) with `mcubes.marching_cubes`. The result
+is exported to `sphere.dae`:
+
+```Python
+  >>> import numpy as np
+  >>> import mcubes
+
+  # Create a data volume (30 x 30 x 30)
+  >>> X, Y, Z = np.mgrid[:30, :30, :30]
+  >>> u = (X-15)**2 + (Y-15)**2 + (Z-15)**2 - 8**2
+
+  # Extract the 0-isosurface
+  >>> vertices, triangles = mcubes.marching_cubes(u, 0)
+
+  # Export the result to sphere.dae
+  >>> mcubes.export_mesh(vertices, triangles, "sphere.dae", "MySphere")
+```
+
+Alternatively, you can use a Python function to represent the volume instead of
+a `NumPy` array:
+
+```Python
+  >>> import numpy as np
+  >>> import mcubes
+
+  # Create the volume
+  >>> f = lambda x, y, z: x**2 + y**2 + z**2
+
+  # Extract the 16-isosurface
+  >>> vertices, triangles = mcubes.marching_cubes_func((-10,-10,-10), (10,10,10),
+  ... 100, 100, 100, f, 16)
+
+  # Export the result to sphere.dae (requires PyCollada)
+  >>> mcubes.export_mesh(vertices, triangles, "sphere.dae", "MySphere")
+
+  # Or export to an OBJ file
+  >>> mcubes.export_obj(vertices, triangles, 'sphere.obj')
+```
+
+Note that using a function to represent the volumetric data is **much** slower
+than using a `NumPy` array.
+
+## Smoothing binary arrays
+
+![Overview](images/smoothing_overview.png "Overview of mcubes.smooth")
+
+Many segmentation methods build binary masks to separate _inside_ and _outside_
+areas of the segmented object. When passing these binary mask to the marching
+cubes algorithm the resulting mesh looks jagged. The following code shows an
+example with a binary array embedding a sphere.
+```Python
+x, y, z = np.mgrid[:100, :100, :100]
+binary_sphere = (x - 50)**2 + (y - 50)**2 + (z - 50)**2 - 25**2 < 0
+
+# Extract the 0.5-levelset since the array is binary
+vertices, triangles = mcubes.marching_cubes(binary_sphere, 0.5)
+```
+![Mesh of a binary embedding](images/binary.jpg "Marching cubes with a binary embedding")
+
+`PyMCubes` provides the function `mcubes.smooth` that takes a 2D or 3D binary
+embedding function and produces a smooth version of it.
+```Python
+smoothed_sphere = mcubes.smooth(binary_sphere)
+
+# Extract the 0-levelset (the 0-levelset of the output of mcubes.smooth is the
+# smoothed version of the 0.5-levelset of the binary array).
+vertices, triangles = mcubes.marching_cubes(smoothed_sphere, 0)
+```
+![Mesh of a smoothed embedding](images/smooth.jpg "Marching cubes after smoothing the binary embedding")
+
+`mcubes.smooth` builds a smooth embedding array with negative values in the
+areas where the binary embedding array is 0, and positive values in the areas
+where it is 1. In this way, `mcubes.smooth` keeps all the information from the
+original embedding function, including fine details and thin structures that
+are commonly eroded by other standard smoothing methods.
+
+### setup.py
+```
+# -*- encoding: utf-8 -*-
+
+import runpy
+
+from setuptools import setup
+
+from setuptools.extension import Extension
+
+from Cython.Build import cythonize
+import numpy
+
+
+__version__ = runpy.run_path("mcubes/version.py")["__version__"]
+
+
+def extensions():
+
+    numpy_include_dir = numpy.get_include()
+
+    mcubes_module = Extension(
+        "mcubes._mcubes",
+        [
+            "mcubes/src/_mcubes.pyx",
+            "mcubes/src/pywrapper.cpp",
+            "mcubes/src/marchingcubes.cpp"
+        ],
+        language="c++",
+        extra_compile_args=['-std=c++11', '-Wall'],
+        include_dirs=[numpy_include_dir],
+        depends=[
+            "mcubes/src/marchingcubes.h",
+            "mcubes/src/pyarray_symbol.h",
+            "mcubes/src/pyarraymodule.h",
+            "mcubes/src/pywrapper.h"
+        ],
+        define_macros=[("NPY_NO_DEPRECATED_API", "NPY_1_7_API_VERSION")],
+    )
+
+    return cythonize(
+        [mcubes_module],
+        language_level="3"
+    )
+
+
+setup(
+    name="PyMCubes",
+    version=__version__,
+    description="Marching cubes for Python",
+    author="Pablo Márquez Neila",
+    author_email="pablo.marquez@unibe.ch",
+    url="https://github.com/pmneila/PyMCubes",
+    license="BSD 3-clause",
+    long_description="""
+    Marching cubes for Python
+    """,
+    classifiers=[
+        "Development Status :: 5 - Production/Stable",
+        "Environment :: Console",
+        "Intended Audience :: Developers",
+        "Intended Audience :: Science/Research",
+        "License :: OSI Approved :: BSD License",
+        "Natural Language :: English",
+        "Operating System :: OS Independent",
+        "Programming Language :: C++",
+        "Programming Language :: Python",
+        "Topic :: Multimedia :: Graphics :: 3D Modeling",
+        "Topic :: Scientific/Engineering :: Image Recognition",
+    ],
+    packages=["mcubes"],
+    ext_modules=extensions(),
+    install_requires=['numpy>=1.21', 'scipy>=1.0.0'],
+)
+```
+
+### test_mcubes.py
+```
+import pytest
+
+import numpy as np
+from numpy.testing import assert_array_equal, assert_allclose
+
+import mcubes
+
+
+def test_empty():
+
+    levelset = np.zeros((50, 50, 50))
+    vertices, triangles = mcubes.marching_cubes(levelset, 0.5)
+
+    assert len(vertices) == len(triangles) == 0
+
+
+def test_sphere():
+    x, y, z = np.mgrid[:100, :100, :100]
+    u = (x - 50)**2 + (y - 50)**2 + (z - 50)**2 - 25**2
+
+    def func(x, y, z):
+        return (x - 50)**2 + (y - 50)**2 + (z - 50)**2 - 25**2
+
+    vertices1, triangles1 = mcubes.marching_cubes(u, 0.0)
+    vertices2, triangles2 = mcubes.marching_cubes_func(
+        (0, 0, 0),
+        (99, 99, 99),
+        100, 100, 100,
+        func, 0.0
+    )
+
+    assert_allclose(vertices1, vertices2)
+    assert_array_equal(triangles1, triangles2)
+
+
+def test_no_duplicates():
+    def sphere(x, y, z):
+        return np.sqrt((x - 4)**2 + (y - 4)**2 + (z - 4)**2) - 4
+
+    vertices, _ = mcubes.marching_cubes_func((2, 2, 2), (9, 9, 9), 20, 20, 20, sphere, 0)
+
+    assert len(vertices) == len(np.unique(vertices, axis=0))
+
+
+def test_export():
+
+    u = np.zeros((10, 10, 10))
+    u[2:-2, 2:-2, 2:-2] = 1.0
+    vertices, triangles = mcubes.marching_cubes(u, 0.5)
+
+    mcubes.export_obj(vertices, triangles, "output/test.obj")
+    mcubes.export_off(vertices, triangles, "output/test.off")
+    mcubes.export_mesh(vertices, triangles, "output/test.dae")
+
+
+def test_invalid_input():
+
+    def func(x, y, z):
+        return x**2 + y**2 + z**2 - 1
+
+    mcubes.marching_cubes_func((-1.5, -1.5, -1.5), (1.5, 1.5, 1.5), 10, 10, 10, func, 0)
+
+    with pytest.raises(ValueError):
+        mcubes.marching_cubes_func((0, 0, 0), (0, 0, 0), 10, 10, 10, func, 0)
+
+    with pytest.raises(ValueError):
+        mcubes.marching_cubes_func((-1.5, -1.5, -1.5), (1.5, 1.5, 1.5), 1, 10, 10, func, 0)
+
+    with pytest.raises(Exception):
+        mcubes.marching_cubes_func((-1.5, -1.5), (1.5, 1.5, 1.5), 10, 10, 10, func, 0)
+
+    with pytest.raises(Exception):
+        mcubes.marching_cubes_func((-1.5, -1.5, -1.5), (1.5, 1.5), 10, 10, 10, func, 0)
+```
+
+### test_smoothing.py
+```
+import pytest
+
+import numpy as np
+
+import mcubes
+
+
+def test_sphere():
+
+    # Create sphere with radius 25 centered at (50, 50, 50)
+    x, y, z = np.mgrid[:100, :100, :100]
+    levelset = np.sqrt((x - 50)**2 + (y - 50)**2 + (z - 50)**2) - 25
+
+    # vertices, triangles = mcubes.marching_cubes(levelset, 0)
+    # mcubes.export_obj(vertices, triangles, 'sphere1.obj')
+
+    binary_levelset = levelset > 0
+    smoothed_levelset = mcubes.smooth(
+        binary_levelset,
+        method='constrained',
+        max_iters=500,
+        rel_tol=1e-4
+    )
+
+    vertices, _ = mcubes.marching_cubes(smoothed_levelset, 0.0)
+
+    # Check all vertices have same distance to (50, 50, 50)
+    dist = np.sqrt(np.sum((vertices - [50, 50, 50])**2, axis=1))
+
+    assert dist.min() > 24.5 and dist.max() < 25.5
+    assert np.all(np.abs(smoothed_levelset - levelset) < 1)
+    assert np.all((smoothed_levelset > 0) == binary_levelset)
+
+
+def test_gaussian_smoothing():
+
+    # Create sphere with radius 25 centered at (50, 50, 50)
+    x, y, z = np.mgrid[:100, :100, :100]
+    levelset = np.sqrt((x - 50)**2 + (y - 50)**2 + (z - 50)**2) - 25
+
+    binary_levelset = levelset > 0
+    smoothed_levelset = mcubes.smooth(
+        binary_levelset,
+        method='gaussian',
+        sigma=3
+    )
+
+    vertices, _ = mcubes.marching_cubes(smoothed_levelset, 0.0)
+
+    # Check all vertices have same distance to (50, 50, 50)
+    dist = np.sqrt(np.sum((vertices - [50, 50, 50])**2, axis=1))
+    assert dist.min() > 24 and dist.max() < 25
+
+
+def test_wrong_ndim():
+
+    binary_levelset = np.random.uniform(size=(10)) < 0.5
+
+    with pytest.raises(ValueError):
+        mcubes.smooth(
+            binary_levelset,
+            method='constrained',
+            max_iters=500,
+            rel_tol=1e-4
+        )
+
+    binary_levelset = np.random.uniform(size=(10, 10, 10, 10)) < 0.5
+
+    with pytest.raises(ValueError):
+        mcubes.smooth(
+            binary_levelset,
+            method='constrained',
+            max_iters=500,
+            rel_tol=1e-4
+        )
+
+
+def test_wrong_method():
+
+    with pytest.raises(ValueError):
+        mcubes.smooth(
+            np.zeros((10, 10), dtype=np.bool_),
+            method='wrong',
+            max_iters=500,
+            rel_tol=1e-4
+        )
+
+
+def test_circle():
+
+    x, y = np.mgrid[:100, :100]
+    levelset = np.sqrt((x - 50)**2 + (y - 50)**2) - 25
+    binary_levelset = levelset > 0
+
+    smoothed_levelset = mcubes.smooth(
+        binary_levelset,
+        max_iters=500,
+        rel_tol=1e-4
+    )
+
+    assert np.all(np.abs(smoothed_levelset - levelset) < 1)
+    assert np.all((smoothed_levelset > 0) == binary_levelset)
+
+
+# if __name__ == '__main__':
+#     # logging.basicConfig(level=logging.DEBUG)
+#     test_circle()
+#     test_sphere()
+#     test_large_sphere()
+```
+
+### examples/spheres.py
+```
+import numpy as np
+import mcubes
+
+print("Example 1: Isosurface in NumPy volume...")
+
+# Create a data volume
+X, Y, Z = np.mgrid[:100, :100, :100]
+u = (X-50)**2 + (Y-50)**2 + (Z-50)**2 - 25**2
+
+# Extract the 0-isosurface
+vertices1, triangles1 = mcubes.marching_cubes(u, 0)
+
+# Export the result to sphere.dae
+mcubes.export_mesh(vertices1, triangles1, "sphere1.dae", "MySphere")
+
+print("Done. Result saved in 'sphere1.dae'.")
+
+print("Example 2: Isosurface in Python function...")
+print("(this might take a while...)")
+
+
+# Create the volume
+def f(x, y, z):
+    return x**2 + y**2 + z**2
+
+
+# Extract the 16-isosurface
+vertices2, triangles2 = mcubes.marching_cubes_func(
+        (-10, -10, -10),    # Lower bound
+        (10, 10, 10),       # Upper bound
+        100, 100, 100,      # Number of samples in each dimension
+        f,                  # Implicit function
+        16)                 # Isosurface value
+
+# Export the result to sphere2.dae
+mcubes.export_mesh(vertices2, triangles2, "sphere2.dae", "MySphere")
+print("Done. Result saved in 'sphere2.dae'.")
+
+try:
+    print("Plotting mesh...")
+    from mayavi import mlab
+    mlab.triangular_mesh(
+        vertices1[:, 0], vertices1[:, 1], vertices1[:, 2],
+        triangles1)
+    print("Done.")
+    mlab.show()
+except ImportError:
+    print("Could not import mayavi. Interactive demo not available.")
+```
+
+### mcubes/__init__.py
+```
+from ._mcubes import marching_cubes, marching_cubes_func
+from .exporter import export_mesh, export_obj, export_off
+from .smoothing import smooth, smooth_constrained, smooth_gaussian
+from .version import __version__
+```
+
+### mcubes/exporter.py
+```
+import numpy as np
+
+
+def export_obj(vertices: np.ndarray, triangles: np.ndarray, filename: str, flip_normals: bool = False):
+    """
+    Export a 3D mesh to a Wavefront (.obj) file.
+
+    If `flip_normals` is True, reverses the order of the vertices in each face
+    to flip the normals. Default is False.
+    """
+
+    with open(filename, 'w') as fh:
+
+        for v in vertices:
+            fh.write("v {} {} {}\n".format(*v))
+
+        if not flip_normals:
+            for f in triangles:
+                fh.write("f {} {} {}\n".format(*(f + 1)))
+        else:
+            for f in triangles:
+                fh.write("f {} {} {}\n".format(*(f[::-1] + 1)))
+
+
+def export_off(vertices: np.ndarray, triangles: np.ndarray, filename: str):
+    """
+    Exports a mesh in the (.off) format.
+    """
+
+    with open(filename, 'w') as fh:
+        fh.write('OFF\n')
+        fh.write('{} {} 0\n'.format(len(vertices), len(triangles)))
+
+        for v in vertices:
+            fh.write("{} {} {}\n".format(*v))
+
+        for f in triangles:
+            fh.write("3 {} {} {}\n".format(*f))
+
+
+def export_mesh(vertices: np.ndarray, triangles: np.ndarray, filename: str, mesh_name: str = "mcubes_mesh"):
+    """
+    Exports a mesh in the COLLADA (.dae) format.
+
+    Needs PyCollada (https://github.com/pycollada/pycollada).
+    """
+
+    import collada
+
+    mesh = collada.Collada()
+
+    vert_src = collada.source.FloatSource("verts-array", vertices, ('X', 'Y', 'Z'))
+    geom = collada.geometry.Geometry(mesh, "geometry0", mesh_name, [vert_src])
+
+    input_list = collada.source.InputList()
+    input_list.addInput(0, 'VERTEX', "#verts-array")
+
+    triset = geom.createTriangleSet(np.copy(triangles), input_list, "")
+    geom.primitives.append(triset)
+    mesh.geometries.append(geom)
+
+    geomnode = collada.scene.GeometryNode(geom, [])
+    node = collada.scene.Node(mesh_name, children=[geomnode])
+
+    myscene = collada.scene.Scene("mcubes_scene", [node])
+    mesh.scenes.append(myscene)
+    mesh.scene = myscene
+
+    mesh.write(filename)
+```
+
+### mcubes/numpy_smoothing.py
+```
+import numpy as np
+from scipy import ndimage as ndi
+
+__all__ = [
+    'numpy_smooth',
+]
+
+FILTER = np.array([1, -2, 1], dtype=np.float64)
+
+JACOBI_R_2D = np.array([
+    [0, 0, 1, 0, 0],
+    [0, 0, -4, 0, 0],
+    [1, -4, 0, -4, 1],
+    [0, 0, -4, 0, 0],
+    [0, 0, 1, 0, 0]
+], dtype=np.float64)
+JACOBI_D_2D = 1/12
+
+JACOBI_R_3D = np.array([
+    [[0, 0, 0, 0, 0],
+     [0, 0, 0, 0, 0],
+     [0, 0, 1, 0, 0],
+     [0, 0, 0, 0, 0],
+     [0, 0, 0, 0, 0]],
+    [[0, 0, 0, 0, 0],
+     [0, 0, 0, 0, 0],
+     [0, 0, -4, 0, 0],
+     [0, 0, 0, 0, 0],
+     [0, 0, 0, 0, 0]],
+    [[0, 0, 1, 0, 0],
+     [0, 0, -4, 0, 0],
+     [1, -4, 0, -4, 1],
+     [0, 0, -4, 0, 0],
+     [0, 0, 1, 0, 0]],
+    [[0, 0, 0, 0, 0],
+     [0, 0, 0, 0, 0],
+     [0, 0, -4, 0, 0],
+     [0, 0, 0, 0, 0],
+     [0, 0, 0, 0, 0]],
+    [[0, 0, 0, 0, 0],
+     [0, 0, 0, 0, 0],
+     [0, 0, 1, 0, 0],
+     [0, 0, 0, 0, 0],
+     [0, 0, 0, 0, 0]]
+], dtype=np.float64)
+
+JACOBI_D_3D = 1/18
+
+
+def signed_distance_function(binary_arr: np.ndarray) -> np.ndarray:
+
+    arr = np.where(binary_arr > 0, 1.0, 0.0)
+    dist_func = ndi.distance_transform_edt
+    distance = np.where(
+        binary_arr,
+        dist_func(arr) - 0.5,
+        -dist_func(1 - arr) + 0.5
+    )
+    return distance
+
+
+def energy(arr: np.ndarray) -> np.ndarray:
+
+    darr2 = [ndi.convolve1d(arr, FILTER, axis=i)**2 for i in range(arr.ndim)]
+    return np.sum(darr2) / 2
+
+
+def solve_jacobi(
+        arr: np.ndarray,
+        lower_bound: np.ndarray,
+        upper_bound: np.ndarray,
+        max_iters: int = 500,
+        jacobi_weight: float = 0.5
+        ) -> np.ndarray:
+
+    jacobi_d = JACOBI_D_2D if arr.ndim == 2 else JACOBI_D_3D
+    jacobi_r = JACOBI_R_2D if arr.ndim == 2 else JACOBI_R_3D
+
+    for it in range(max_iters):
+        # energy_it = torch.sum(diff_energy(arr) * arr[2:-2, 2:-2, 2:-2]) / 2
+        energy_it = energy(arr)
+        print("Energy in iteration {}: {:.4g}".format(it, energy_it))
+
+        r_arr = ndi.convolve(arr, jacobi_r, mode='nearest')
+        arr_1 = - jacobi_d * r_arr
+        arr = jacobi_weight * arr_1 + (1 - jacobi_weight) * arr
+
+        arr = np.maximum(arr, lower_bound)
+        arr = np.minimum(arr, upper_bound)
+
+    return arr
+
+
+def numpy_smooth(binary_array: np.ndarray, max_iters: int = 500) -> np.ndarray:
+
+    arr = signed_distance_function(binary_array)
+
+    upper_bound = np.where(arr < 0, arr, np.inf)
+    lower_bound = np.where(arr > 0, arr, -np.inf)
+
+    upper_bound[np.abs(upper_bound) < 1] = 0
+    lower_bound[np.abs(lower_bound) < 1] = 0
+
+    return solve_jacobi(arr, lower_bound, upper_bound, max_iters)
+```
+
+### mcubes/smoothing.py
+```
+# -*- coding: utf-8 -*-
+
+"""
+Utilities for smoothing the 0.5 level-set of binary arrays.
+"""
+
+import logging
+from typing import Tuple
+
+import numpy as np
+from scipy import sparse
+from scipy import ndimage as ndi
+
+__all__ = [
+    'smooth',
+    'smooth_constrained',
+    'smooth_gaussian',
+    'signed_distance_function'
+]
+
+
+def _build_variable_indices(band: np.ndarray) -> np.ndarray:
+    num_variables = np.count_nonzero(band)
+    variable_indices = np.full(band.shape, -1, dtype=np.int32)
+    variable_indices[band] = np.arange(num_variables)
+    return variable_indices
+
+
+def _buildq3d(variable_indices: np.ndarray):
+    """
+    Builds the filterq matrix for the given variables.
+    """
+
+    num_variables = variable_indices.max() + 1
+    filterq = sparse.lil_matrix((3*num_variables, num_variables))
+
+    # Pad variable_indices to simplify out-of-bounds accesses
+    variable_indices = np.pad(
+        variable_indices,
+        [(0, 1), (0, 1), (0, 1)],
+        mode='constant',
+        constant_values=-1
+    )
+
+    coords = np.nonzero(variable_indices >= 0)
+    for count, (i, j, k) in enumerate(zip(*coords)):
+
+        assert variable_indices[i, j, k] == count
+
+        filterq[3*count, count] = -2
+        neighbor = variable_indices[i-1, j, k]
+        if neighbor >= 0:
+            filterq[3*count, neighbor] = 1
+        else:
+            filterq[3*count, count] += 1
+
+        neighbor = variable_indices[i+1, j, k]
+        if neighbor >= 0:
+            filterq[3*count, neighbor] = 1
+        else:
+            filterq[3*count, count] += 1
+
+        filterq[3*count+1, count] = -2
+        neighbor = variable_indices[i, j-1, k]
+        if neighbor >= 0:
+            filterq[3*count+1, neighbor] = 1
+        else:
+            filterq[3*count+1, count] += 1
+
+        neighbor = variable_indices[i, j+1, k]
+        if neighbor >= 0:
+            filterq[3*count+1, neighbor] = 1
+        else:
+            filterq[3*count+1, count] += 1
+
+        filterq[3*count+2, count] = -2
+        neighbor = variable_indices[i, j, k-1]
+        if neighbor >= 0:
+            filterq[3*count+2, neighbor] = 1
+        else:
+            filterq[3*count+2, count] += 1
+
+        neighbor = variable_indices[i, j, k+1]
+        if neighbor >= 0:
+            filterq[3*count+2, neighbor] = 1
+        else:
+            filterq[3*count+2, count] += 1
+
+    filterq = filterq.tocsr()
+    return filterq.T.dot(filterq)
+
+
+def _buildq2d(variable_indices: np.ndarray):
+    """
+    Builds the filterq matrix for the given variables.
+
+    Version for 2 dimensions.
+    """
+
+    num_variables = variable_indices.max() + 1
+    filterq = sparse.lil_matrix((3*num_variables, num_variables))
+
+    # Pad variable_indices to simplify out-of-bounds accesses
+    variable_indices = np.pad(
+        variable_indices,
+        [(0, 1), (0, 1)],
+        mode='constant',
+        constant_values=-1
+    )
+
+    coords = np.nonzero(variable_indices >= 0)
+    for count, (i, j) in enumerate(zip(*coords)):
+
+        assert variable_indices[i, j] == count
+
+        filterq[2*count, count] = -2
+        neighbor = variable_indices[i-1, j]
+        if neighbor >= 0:
+            filterq[2*count, neighbor] = 1
+        else:
+            filterq[2*count, count] += 1
+
+        neighbor = variable_indices[i+1, j]
+        if neighbor >= 0:
+            filterq[2*count, neighbor] = 1
+        else:
+            filterq[2*count, count] += 1
+
+        filterq[2*count+1, count] = -2
+        neighbor = variable_indices[i, j-1]
+        if neighbor >= 0:
+            filterq[2*count+1, neighbor] = 1
+        else:
+            filterq[2*count+1, count] += 1
+
+        neighbor = variable_indices[i, j+1]
+        if neighbor >= 0:
+            filterq[2*count+1, neighbor] = 1
+        else:
+            filterq[2*count+1, count] += 1
+
+    filterq = filterq.tocsr()
+    return filterq.T.dot(filterq)
+
+
+def _jacobi(
+        filterq,
+        x0: np.ndarray,
+        lower_bound: np.ndarray,
+        upper_bound: np.ndarray,
+        max_iters: int = 10,
+        rel_tol: float = 1e-6,
+        weight: float = 0.5):
+    """Jacobi method with constraints."""
+
+    jacobi_r = sparse.lil_matrix(filterq)
+    shp = jacobi_r.shape
+    jacobi_d = 1.0 / filterq.diagonal()
+    jacobi_r.setdiag((0,) * shp[0])
+    jacobi_r = jacobi_r.tocsr()
+
+    x = x0
+
+    # We check the stopping criterion each 10 iterations
+    check_each = 10
+    cum_rel_tol = 1 - (1 - rel_tol)**check_each
+
+    energy_now = np.dot(x, filterq.dot(x)) / 2
+    logging.debug("Energy at iter %d: %.6g", 0, energy_now)
+    for i in range(max_iters):
+
+        x_1 = - jacobi_d * jacobi_r.dot(x)
+        x = weight * x_1 + (1 - weight) * x
+
+        # Constraints.
+        x = np.maximum(x, lower_bound)
+        x = np.minimum(x, upper_bound)
+
+        # Stopping criterion
+        if (i + 1) % check_each == 0:
+            # Update energy
+            energy_before = energy_now
+            energy_now = np.dot(x, filterq.dot(x)) / 2
+
+            logging.debug("Energy at iter %d: %.6g", i + 1, energy_now)
+
+            # Check stopping criterion
+            cum_rel_improvement = (energy_before - energy_now) / energy_before
+            if cum_rel_improvement < cum_rel_tol:
+                break
+
+    return x
+
+
+def signed_distance_function(
+        levelset: np.ndarray,
+        band_radius: int
+        ) -> Tuple[np.ndarray, np.ndarray, np.ndarray]:
+    """
+    Return the distance to the 0.5 levelset of a function, the mask of the
+    border (i.e., the nearest cells to the 0.5 level-set) and the mask of the
+    band (i.e., the cells of the function whose distance to the 0.5 level-set
+    is less of equal to `band_radius`).
+    """
+
+    binary_array = np.where(levelset > 0, True, False)
+
+    # Compute the band and the border.
+    dist_func = ndi.distance_transform_edt
+    distance = np.where(
+        binary_array,
+        dist_func(binary_array) - 0.5,
+        -dist_func(~binary_array) + 0.5
+    )
+    border = np.abs(distance) < 1
+    band = np.abs(distance) <= band_radius
+
+    return distance, border, band
+
+
+def smooth_constrained(
+        binary_array: np.ndarray,
+        band_radius: int = 4,
+        max_iters: int = 500,
+        rel_tol: float = 1e-6
+        ) -> np.ndarray:
+    """
+    Implementation of the smoothing method from
+
+    "Surface Extraction from Binary Volumes with Higher-Order Smoothness"
+    Victor Lempitsky, CVPR10
+    """
+
+    # # Compute the distance map, the border and the band.
+    logging.info("Computing distance transform...")
+    distance, _, band = signed_distance_function(binary_array, band_radius)
+
+    variable_indices = _build_variable_indices(band)
+
+    # Compute filterq.
+    logging.info("Building matrix filterq...")
+    if binary_array.ndim == 3:
+        filterq = _buildq3d(variable_indices)
+    elif binary_array.ndim == 2:
+        filterq = _buildq2d(variable_indices)
+    else:
+        raise ValueError("binary_array.ndim not in [2, 3]")
+
+    # Initialize the variables.
+    res = np.asarray(distance, dtype=np.double)
+    x = res[band]
+    upper_bound = np.where(x < 0, x, np.inf)
+    lower_bound = np.where(x > 0, x, -np.inf)
+
+    upper_bound[np.abs(upper_bound) < 1] = 0
+    lower_bound[np.abs(lower_bound) < 1] = 0
+
+    # Solve.
+    logging.info("Minimizing energy...")
+    x = _jacobi(
+        filterq=filterq,
+        x0=x,
+        lower_bound=lower_bound,
+        upper_bound=upper_bound,
+        max_iters=max_iters,
+        rel_tol=rel_tol
+    )
+
+    res[band] = x
+    return res
+
+
+def smooth_gaussian(binary_array: np.ndarray, sigma: float = 3) -> np.ndarray:
+    vol = np.float64(binary_array) - 0.5
+    return ndi.gaussian_filter(vol, sigma=sigma)
+
+
+def smooth(
+        binary_array: np.ndarray,
+        method: str = 'auto',
+        **kwargs
+        ) -> np.ndarray:
+    """
+    Smooths the 0.5 level-set of a binary array. Returns a floating-point
+    array with a smoothed version of the original level-set in the 0 isovalue.
+
+    This function can apply two different methods:
+
+    - A constrained smoothing method which preserves details and fine
+      structures, but it is slow and requires a large amount of memory. This
+      method is recommended when the input array is small (smaller than
+      (500, 500, 500)).
+    - A Gaussian filter applied over the binary array. This method is fast, but
+      not very precise, as it can destroy fine details. It is only recommended
+      when the input array is large and the 0.5 level-set does not contain
+      thin structures.
+
+    Parameters
+    ----------
+    binary_array : ndarray
+        Input binary array with the 0.5 level-set to smooth.
+    method : str, one of ['auto', 'gaussian', 'constrained']
+        Smoothing method. If 'auto' is given, the method will be automatically
+        chosen based on the size of `binary_array`.
+
+    Parameters for 'gaussian'
+    -------------------------
+    sigma : float
+        Size of the Gaussian filter (default 3).
+
+    Parameters for 'constrained'
+    ----------------------------
+    max_iters : positive integer
+        Number of iterations of the constrained optimization method
+        (default 500).
+    rel_tol: float
+        Relative tolerance as a stopping criterion (default 1e-6).
+
+    Output
+    ------
+    res : ndarray
+        Floating-point array with a smoothed 0 level-set.
+    """
+
+    binary_array = np.asarray(binary_array)
+
+    if method == 'auto':
+        if binary_array.size > 500**3:
+            method = 'gaussian'
+        else:
+            method = 'constrained'
+
+    if method == 'gaussian':
+        return smooth_gaussian(binary_array, **kwargs)
+
+    if method == 'constrained':
+        return smooth_constrained(binary_array, **kwargs)
+
+    raise ValueError("Unknown method '{}'".format(method))
+```
+
+### mcubes/version.py
+```
+__version__ = "0.1.6"
+```
+
+### mcubes/src/marchingcubes.cpp
+```
+#include "marchingcubes.h"
+
+namespace mc
+{
+
+int edge_table[256] =
+{
+    0x000, 0x109, 0x203, 0x30a, 0x406, 0x50f, 0x605, 0x70c, 0x80c, 0x905, 0xa0f, 0xb06, 0xc0a, 0xd03, 0xe09, 0xf00,
+    0x190, 0x099, 0x393, 0x29a, 0x596, 0x49f, 0x795, 0x69c, 0x99c, 0x895, 0xb9f, 0xa96, 0xd9a, 0xc93, 0xf99, 0xe90,
+    0x230, 0x339, 0x033, 0x13a, 0x636, 0x73f, 0x435, 0x53c, 0xa3c, 0xb35, 0x83f, 0x936, 0xe3a, 0xf33, 0xc39, 0xd30,
+    0x3a0, 0x2a9, 0x1a3, 0x0aa, 0x7a6, 0x6af, 0x5a5, 0x4ac, 0xbac, 0xaa5, 0x9af, 0x8a6, 0xfaa, 0xea3, 0xda9, 0xca0,
+    0x460, 0x569, 0x663, 0x76a, 0x066, 0x16f, 0x265, 0x36c, 0xc6c, 0xd65, 0xe6f, 0xf66, 0x86a, 0x963, 0xa69, 0xb60,
+    0x5f0, 0x4f9, 0x7f3, 0x6fa, 0x1f6, 0x0ff, 0x3f5, 0x2fc, 0xdfc, 0xcf5, 0xfff, 0xef6, 0x9fa, 0x8f3, 0xbf9, 0xaf0,
+    0x650, 0x759, 0x453, 0x55a, 0x256, 0x35f, 0x055, 0x15c, 0xe5c, 0xf55, 0xc5f, 0xd56, 0xa5a, 0xb53, 0x859, 0x950,
+    0x7c0, 0x6c9, 0x5c3, 0x4ca, 0x3c6, 0x2cf, 0x1c5, 0x0cc, 0xfcc, 0xec5, 0xdcf, 0xcc6, 0xbca, 0xac3, 0x9c9, 0x8c0,
+    0x8c0, 0x9c9, 0xac3, 0xbca, 0xcc6, 0xdcf, 0xec5, 0xfcc, 0x0cc, 0x1c5, 0x2cf, 0x3c6, 0x4ca, 0x5c3, 0x6c9, 0x7c0,
+    0x950, 0x859, 0xb53, 0xa5a, 0xd56, 0xc5f, 0xf55, 0xe5c, 0x15c, 0x055, 0x35f, 0x256, 0x55a, 0x453, 0x759, 0x650,
+    0xaf0, 0xbf9, 0x8f3, 0x9fa, 0xef6, 0xfff, 0xcf5, 0xdfc, 0x2fc, 0x3f5, 0x0ff, 0x1f6, 0x6fa, 0x7f3, 0x4f9, 0x5f0,
+    0xb60, 0xa69, 0x963, 0x86a, 0xf66, 0xe6f, 0xd65, 0xc6c, 0x36c, 0x265, 0x16f, 0x066, 0x76a, 0x663, 0x569, 0x460,
+    0xca0, 0xda9, 0xea3, 0xfaa, 0x8a6, 0x9af, 0xaa5, 0xbac, 0x4ac, 0x5a5, 0x6af, 0x7a6, 0x0aa, 0x1a3, 0x2a9, 0x3a0,
+    0xd30, 0xc39, 0xf33, 0xe3a, 0x936, 0x83f, 0xb35, 0xa3c, 0x53c, 0x435, 0x73f, 0x636, 0x13a, 0x033, 0x339, 0x230,
+    0xe90, 0xf99, 0xc93, 0xd9a, 0xa96, 0xb9f, 0x895, 0x99c, 0x69c, 0x795, 0x49f, 0x596, 0x29a, 0x393, 0x099, 0x190,
+    0xf00, 0xe09, 0xd03, 0xc0a, 0xb06, 0xa0f, 0x905, 0x80c, 0x70c, 0x605, 0x50f, 0x406, 0x30a, 0x203, 0x109, 0x000
+};
+
+int triangle_table[256][16] =
+{
+    {-1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1},
+    {0, 8, 3, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1},
+    {0, 1, 9, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1},
+    {1, 8, 3, 9, 8, 1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1},
+    {1, 2, 10, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1},
+    {0, 8, 3, 1, 2, 10, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1},
+    {9, 2, 10, 0, 2, 9, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1},
+    {2, 8, 3, 2, 10, 8, 10, 9, 8, -1, -1, -1, -1, -1, -1, -1},
+    {3, 11, 2, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1},
+    {0, 11, 2, 8, 11, 0, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1},
+    {1, 9, 0, 2, 3, 11, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1},
+    {1, 11, 2, 1, 9, 11, 9, 8, 11, -1, -1, -1, -1, -1, -1, -1},
+    {3, 10, 1, 11, 10, 3, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1},
+    {0, 10, 1, 0, 8, 10, 8, 11, 10, -1, -1, -1, -1, -1, -1, -1},
+    {3, 9, 0, 3, 11, 9, 11, 10, 9, -1, -1, -1, -1, -1, -1, -1},
+    {9, 8, 10, 10, 8, 11, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1},
+    {4, 7, 8, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1},
+    {4, 3, 0, 7, 3, 4, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1},
+    {0, 1, 9, 8, 4, 7, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1},
+    {4, 1, 9, 4, 7, 1, 7, 3, 1, -1, -1, -1, -1, -1, -1, -1},
+    {1, 2, 10, 8, 4, 7, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1},
+    {3, 4, 7, 3, 0, 4, 1, 2, 10, -1, -1, -1, -1, -1, -1, -1},
+    {9, 2, 10, 9, 0, 2, 8, 4, 7, -1, -1, -1, -1, -1, -1, -1},
+    {2, 10, 9, 2, 9, 7, 2, 7, 3, 7, 9, 4, -1, -1, -1, -1},
+    {8, 4, 7, 3, 11, 2, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1},
+    {11, 4, 7, 11, 2, 4, 2, 0, 4, -1, -1, -1, -1, -1, -1, -1},
+    {9, 0, 1, 8, 4, 7, 2, 3, 11, -1, -1, -1, -1, -1, -1, -1},
+    {4, 7, 11, 9, 4, 11, 9, 11, 2, 9, 2, 1, -1, -1, -1, -1},
+    {3, 10, 1, 3, 11, 10, 7, 8, 4, -1, -1, -1, -1, -1, -1, -1},
+    {1, 11, 10, 1, 4, 11, 1, 0, 4, 7, 11, 4, -1, -1, -1, -1},
+    {4, 7, 8, 9, 0, 11, 9, 11, 10, 11, 0, 3, -1, -1, -1, -1},
+    {4, 7, 11, 4, 11, 9, 9, 11, 10, -1, -1, -1, -1, -1, -1, -1},
+    {9, 5, 4, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1},
+    {9, 5, 4, 0, 8, 3, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1},
+    {0, 5, 4, 1, 5, 0, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1},
+    {8, 5, 4, 8, 3, 5, 3, 1, 5, -1, -1, -1, -1, -1, -1, -1},
+    {1, 2, 10, 9, 5, 4, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1},
+    {3, 0, 8, 1, 2, 10, 4, 9, 5, -1, -1, -1, -1, -1, -1, -1},
+    {5, 2, 10, 5, 4, 2, 4, 0, 2, -1, -1, -1, -1, -1, -1, -1},
+    {2, 10, 5, 3, 2, 5, 3, 5, 4, 3, 4, 8, -1, -1, -1, -1},
+    {9, 5, 4, 2, 3, 11, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1},
+    {0, 11, 2, 0, 8, 11, 4, 9, 5, -1, -1, -1, -1, -1, -1, -1},
+    {0, 5, 4, 0, 1, 5, 2, 3, 11, -1, -1, -1, -1, -1, -1, -1},
+    {2, 1, 5, 2, 5, 8, 2, 8, 11, 4, 8, 5, -1, -1, -1, -1},
+    {10, 3, 11, 10, 1, 3, 9, 5, 4, -1, -1, -1, -1, -1, -1, -1},
+    {4, 9, 5, 0, 8, 1, 8, 10, 1, 8, 11, 10, -1, -1, -1, -1},
+    {5, 4, 0, 5, 0, 11, 5, 11, 10, 11, 0, 3, -1, -1, -1, -1},
+    {5, 4, 8, 5, 8, 10, 10, 8, 11, -1, -1, -1, -1, -1, -1, -1},
+    {9, 7, 8, 5, 7, 9, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1},
+    {9, 3, 0, 9, 5, 3, 5, 7, 3, -1, -1, -1, -1, -1, -1, -1},
+    {0, 7, 8, 0, 1, 7, 1, 5, 7, -1, -1, -1, -1, -1, -1, -1},
+    {1, 5, 3, 3, 5, 7, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1},
+    {9, 7, 8, 9, 5, 7, 10, 1, 2, -1, -1, -1, -1, -1, -1, -1},
+    {10, 1, 2, 9, 5, 0, 5, 3, 0, 5, 7, 3, -1, -1, -1, -1},
+    {8, 0, 2, 8, 2, 5, 8, 5, 7, 10, 5, 2, -1, -1, -1, -1},
+    {2, 10, 5, 2, 5, 3, 3, 5, 7, -1, -1, -1, -1, -1, -1, -1},
+    {7, 9, 5, 7, 8, 9, 3, 11, 2, -1, -1, -1, -1, -1, -1, -1},
+    {9, 5, 7, 9, 7, 2, 9, 2, 0, 2, 7, 11, -1, -1, -1, -1},
+    {2, 3, 11, 0, 1, 8, 1, 7, 8, 1, 5, 7, -1, -1, -1, -1},
+    {11, 2, 1, 11, 1, 7, 7, 1, 5, -1, -1, -1, -1, -1, -1, -1},
+    {9, 5, 8, 8, 5, 7, 10, 1, 3, 10, 3, 11, -1, -1, -1, -1},
+    {5, 7, 0, 5, 0, 9, 7, 11, 0, 1, 0, 10, 11, 10, 0, -1},
+    {11, 10, 0, 11, 0, 3, 10, 5, 0, 8, 0, 7, 5, 7, 0, -1},
+    {11, 10, 5, 7, 11, 5, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1},
+    {10, 6, 5, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1},
+    {0, 8, 3, 5, 10, 6, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1},
+    {9, 0, 1, 5, 10, 6, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1},
+    {1, 8, 3, 1, 9, 8, 5, 10, 6, -1, -1, -1, -1, -1, -1, -1},
+    {1, 6, 5, 2, 6, 1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1},
+    {1, 6, 5, 1, 2, 6, 3, 0, 8, -1, -1, -1, -1, -1, -1, -1},
+    {9, 6, 5, 9, 0, 6, 0, 2, 6, -1, -1, -1, -1, -1, -1, -1},
+    {5, 9, 8, 5, 8, 2, 5, 2, 6, 3, 2, 8, -1, -1, -1, -1},
+    {2, 3, 11, 10, 6, 5, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1},
+    {11, 0, 8, 11, 2, 0, 10, 6, 5, -1, -1, -1, -1, -1, -1, -1},
+    {0, 1, 9, 2, 3, 11, 5, 10, 6, -1, -1, -1, -1, -1, -1, -1},
+    {5, 10, 6, 1, 9, 2, 9, 11, 2, 9, 8, 11, -1, -1, -1, -1},
+    {6, 3, 11, 6, 5, 3, 5, 1, 3, -1, -1, -1, -1, -1, -1, -1},
+    {0, 8, 11, 0, 11, 5, 0, 5, 1, 5, 11, 6, -1, -1, -1, -1},
+    {3, 11, 6, 0, 3, 6, 0, 6, 5, 0, 5, 9, -1, -1, -1, -1},
+    {6, 5, 9, 6, 9, 11, 11, 9, 8, -1, -1, -1, -1, -1, -1, -1},
+    {5, 10, 6, 4, 7, 8, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1},
+    {4, 3, 0, 4, 7, 3, 6, 5, 10, -1, -1, -1, -1, -1, -1, -1},
+    {1, 9, 0, 5, 10, 6, 8, 4, 7, -1, -1, -1, -1, -1, -1, -1},
+    {10, 6, 5, 1, 9, 7, 1, 7, 3, 7, 9, 4, -1, -1, -1, -1},
+    {6, 1, 2, 6, 5, 1, 4, 7, 8, -1, -1, -1, -1, -1, -1, -1},
+    {1, 2, 5, 5, 2, 6, 3, 0, 4, 3, 4, 7, -1, -1, -1, -1},
+    {8, 4, 7, 9, 0, 5, 0, 6, 5, 0, 2, 6, -1, -1, -1, -1},
+    {7, 3, 9, 7, 9, 4, 3, 2, 9, 5, 9, 6, 2, 6, 9, -1},
+    {3, 11, 2, 7, 8, 4, 10, 6, 5, -1, -1, -1, -1, -1, -1, -1},
+    {5, 10, 6, 4, 7, 2, 4, 2, 0, 2, 7, 11, -1, -1, -1, -1},
+    {0, 1, 9, 4, 7, 8, 2, 3, 11, 5, 10, 6, -1, -1, -1, -1},
+    {9, 2, 1, 9, 11, 2, 9, 4, 11, 7, 11, 4, 5, 10, 6, -1},
+    {8, 4, 7, 3, 11, 5, 3, 5, 1, 5, 11, 6, -1, -1, -1, -1},
+    {5, 1, 11, 5, 11, 6, 1, 0, 11, 7, 11, 4, 0, 4, 11, -1},
+    {0, 5, 9, 0, 6, 5, 0, 3, 6, 11, 6, 3, 8, 4, 7, -1},
+    {6, 5, 9, 6, 9, 11, 4, 7, 9, 7, 11, 9, -1, -1, -1, -1},
+    {10, 4, 9, 6, 4, 10, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1},
+    {4, 10, 6, 4, 9, 10, 0, 8, 3, -1, -1, -1, -1, -1, -1, -1},
+    {10, 0, 1, 10, 6, 0, 6, 4, 0, -1, -1, -1, -1, -1, -1, -1},
+    {8, 3, 1, 8, 1, 6, 8, 6, 4, 6, 1, 10, -1, -1, -1, -1},
+    {1, 4, 9, 1, 2, 4, 2, 6, 4, -1, -1, -1, -1, -1, -1, -1},
+    {3, 0, 8, 1, 2, 9, 2, 4, 9, 2, 6, 4, -1, -1, -1, -1},
+    {0, 2, 4, 4, 2, 6, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1},
+    {8, 3, 2, 8, 2, 4, 4, 2, 6, -1, -1, -1, -1, -1, -1, -1},
+    {10, 4, 9, 10, 6, 4, 11, 2, 3, -1, -1, -1, -1, -1, -1, -1},
+    {0, 8, 2, 2, 8, 11, 4, 9, 10, 4, 10, 6, -1, -1, -1, -1},
+    {3, 11, 2, 0, 1, 6, 0, 6, 4, 6, 1, 10, -1, -1, -1, -1},
+    {6, 4, 1, 6, 1, 10, 4, 8, 1, 2, 1, 11, 8, 11, 1, -1},
+    {9, 6, 4, 9, 3, 6, 9, 1, 3, 11, 6, 3, -1, -1, -1, -1},
+    {8, 11, 1, 8, 1, 0, 11, 6, 1, 9, 1, 4, 6, 4, 1, -1},
+    {3, 11, 6, 3, 6, 0, 0, 6, 4, -1, -1, -1, -1, -1, -1, -1},
+    {6, 4, 8, 11, 6, 8, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1},
+    {7, 10, 6, 7, 8, 10, 8, 9, 10, -1, -1, -1, -1, -1, -1, -1},
+    {0, 7, 3, 0, 10, 7, 0, 9, 10, 6, 7, 10, -1, -1, -1, -1},
+    {10, 6, 7, 1, 10, 7, 1, 7, 8, 1, 8, 0, -1, -1, -1, -1},
+    {10, 6, 7, 10, 7, 1, 1, 7, 3, -1, -1, -1, -1, -1, -1, -1},
+    {1, 2, 6, 1, 6, 8, 1, 8, 9, 8, 6, 7, -1, -1, -1, -1},
+    {2, 6, 9, 2, 9, 1, 6, 7, 9, 0, 9, 3, 7, 3, 9, -1},
+    {7, 8, 0, 7, 0, 6, 6, 0, 2, -1, -1, -1, -1, -1, -1, -1},
+    {7, 3, 2, 6, 7, 2, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1},
+    {2, 3, 11, 10, 6, 8, 10, 8, 9, 8, 6, 7, -1, -1, -1, -1},
+    {2, 0, 7, 2, 7, 11, 0, 9, 7, 6, 7, 10, 9, 10, 7, -1},
+    {1, 8, 0, 1, 7, 8, 1, 10, 7, 6, 7, 10, 2, 3, 11, -1},
+    {11, 2, 1, 11, 1, 7, 10, 6, 1, 6, 7, 1, -1, -1, -1, -1},
+    {8, 9, 6, 8, 6, 7, 9, 1, 6, 11, 6, 3, 1, 3, 6, -1},
+    {0, 9, 1, 11, 6, 7, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1},
+    {7, 8, 0, 7, 0, 6, 3, 11, 0, 11, 6, 0, -1, -1, -1, -1},
+    {7, 11, 6, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1},
+    {7, 6, 11, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1},
+    {3, 0, 8, 11, 7, 6, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1},
+    {0, 1, 9, 11, 7, 6, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1},
+    {8, 1, 9, 8, 3, 1, 11, 7, 6, -1, -1, -1, -1, -1, -1, -1},
+    {10, 1, 2, 6, 11, 7, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1},
+    {1, 2, 10, 3, 0, 8, 6, 11, 7, -1, -1, -1, -1, -1, -1, -1},
+    {2, 9, 0, 2, 10, 9, 6, 11, 7, -1, -1, -1, -1, -1, -1, -1},
+    {6, 11, 7, 2, 10, 3, 10, 8, 3, 10, 9, 8, -1, -1, -1, -1},
+    {7, 2, 3, 6, 2, 7, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1},
+    {7, 0, 8, 7, 6, 0, 6, 2, 0, -1, -1, -1, -1, -1, -1, -1},
+    {2, 7, 6, 2, 3, 7, 0, 1, 9, -1, -1, -1, -1, -1, -1, -1},
+    {1, 6, 2, 1, 8, 6, 1, 9, 8, 8, 7, 6, -1, -1, -1, -1},
+    {10, 7, 6, 10, 1, 7, 1, 3, 7, -1, -1, -1, -1, -1, -1, -1},
+    {10, 7, 6, 1, 7, 10, 1, 8, 7, 1, 0, 8, -1, -1, -1, -1},
+    {0, 3, 7, 0, 7, 10, 0, 10, 9, 6, 10, 7, -1, -1, -1, -1},
+    {7, 6, 10, 7, 10, 8, 8, 10, 9, -1, -1, -1, -1, -1, -1, -1},
+    {6, 8, 4, 11, 8, 6, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1},
+    {3, 6, 11, 3, 0, 6, 0, 4, 6, -1, -1, -1, -1, -1, -1, -1},
+    {8, 6, 11, 8, 4, 6, 9, 0, 1, -1, -1, -1, -1, -1, -1, -1},
+    {9, 4, 6, 9, 6, 3, 9, 3, 1, 11, 3, 6, -1, -1, -1, -1},
+    {6, 8, 4, 6, 11, 8, 2, 10, 1, -1, -1, -1, -1, -1, -1, -1},
+    {1, 2, 10, 3, 0, 11, 0, 6, 11, 0, 4, 6, -1, -1, -1, -1},
+    {4, 11, 8, 4, 6, 11, 0, 2, 9, 2, 10, 9, -1, -1, -1, -1},
+    {10, 9, 3, 10, 3, 2, 9, 4, 3, 11, 3, 6, 4, 6, 3, -1},
+    {8, 2, 3, 8, 4, 2, 4, 6, 2, -1, -1, -1, -1, -1, -1, -1},
+    {0, 4, 2, 4, 6, 2, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1},
+    {1, 9, 0, 2, 3, 4, 2, 4, 6, 4, 3, 8, -1, -1, -1, -1},
+    {1, 9, 4, 1, 4, 2, 2, 4, 6, -1, -1, -1, -1, -1, -1, -1},
+    {8, 1, 3, 8, 6, 1, 8, 4, 6, 6, 10, 1, -1, -1, -1, -1},
+    {10, 1, 0, 10, 0, 6, 6, 0, 4, -1, -1, -1, -1, -1, -1, -1},
+    {4, 6, 3, 4, 3, 8, 6, 10, 3, 0, 3, 9, 10, 9, 3, -1},
+    {10, 9, 4, 6, 10, 4, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1},
+    {4, 9, 5, 7, 6, 11, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1},
+    {0, 8, 3, 4, 9, 5, 11, 7, 6, -1, -1, -1, -1, -1, -1, -1},
+    {5, 0, 1, 5, 4, 0, 7, 6, 11, -1, -1, -1, -1, -1, -1, -1},
+    {11, 7, 6, 8, 3, 4, 3, 5, 4, 3, 1, 5, -1, -1, -1, -1},
+    {9, 5, 4, 10, 1, 2, 7, 6, 11, -1, -1, -1, -1, -1, -1, -1},
+    {6, 11, 7, 1, 2, 10, 0, 8, 3, 4, 9, 5, -1, -1, -1, -1},
+    {7, 6, 11, 5, 4, 10, 4, 2, 10, 4, 0, 2, -1, -1, -1, -1},
+    {3, 4, 8, 3, 5, 4, 3, 2, 5, 10, 5, 2, 11, 7, 6, -1},
+    {7, 2, 3, 7, 6, 2, 5, 4, 9, -1, -1, -1, -1, -1, -1, -1},
+    {9, 5, 4, 0, 8, 6, 0, 6, 2, 6, 8, 7, -1, -1, -1, -1},
+    {3, 6, 2, 3, 7, 6, 1, 5, 0, 5, 4, 0, -1, -1, -1, -1},
+    {6, 2, 8, 6, 8, 7, 2, 1, 8, 4, 8, 5, 1, 5, 8, -1},
+    {9, 5, 4, 10, 1, 6, 1, 7, 6, 1, 3, 7, -1, -1, -1, -1},
+    {1, 6, 10, 1, 7, 6, 1, 0, 7, 8, 7, 0, 9, 5, 4, -1},
+    {4, 0, 10, 4, 10, 5, 0, 3, 10, 6, 10, 7, 3, 7, 10, -1},
+    {7, 6, 10, 7, 10, 8, 5, 4, 10, 4, 8, 10, -1, -1, -1, -1},
+    {6, 9, 5, 6, 11, 9, 11, 8, 9, -1, -1, -1, -1, -1, -1, -1},
+    {3, 6, 11, 0, 6, 3, 0, 5, 6, 0, 9, 5, -1, -1, -1, -1},
+    {0, 11, 8, 0, 5, 11, 0, 1, 5, 5, 6, 11, -1, -1, -1, -1},
+    {6, 11, 3, 6, 3, 5, 5, 3, 1, -1, -1, -1, -1, -1, -1, -1},
+    {1, 2, 10, 9, 5, 11, 9, 11, 8, 11, 5, 6, -1, -1, -1, -1},
+    {0, 11, 3, 0, 6, 11, 0, 9, 6, 5, 6, 9, 1, 2, 10, -1},
+    {11, 8, 5, 11, 5, 6, 8, 0, 5, 10, 5, 2, 0, 2, 5, -1},
+    {6, 11, 3, 6, 3, 5, 2, 10, 3, 10, 5, 3, -1, -1, -1, -1},
+    {5, 8, 9, 5, 2, 8, 5, 6, 2, 3, 8, 2, -1, -1, -1, -1},
+    {9, 5, 6, 9, 6, 0, 0, 6, 2, -1, -1, -1, -1, -1, -1, -1},
+    {1, 5, 8, 1, 8, 0, 5, 6, 8, 3, 8, 2, 6, 2, 8, -1},
+    {1, 5, 6, 2, 1, 6, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1},
+    {1, 3, 6, 1, 6, 10, 3, 8, 6, 5, 6, 9, 8, 9, 6, -1},
+    {10, 1, 0, 10, 0, 6, 9, 5, 0, 5, 6, 0, -1, -1, -1, -1},
+    {0, 3, 8, 5, 6, 10, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1},
+    {10, 5, 6, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1},
+    {11, 5, 10, 7, 5, 11, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1},
+    {11, 5, 10, 11, 7, 5, 8, 3, 0, -1, -1, -1, -1, -1, -1, -1},
+    {5, 11, 7, 5, 10, 11, 1, 9, 0, -1, -1, -1, -1, -1, -1, -1},
+    {10, 7, 5, 10, 11, 7, 9, 8, 1, 8, 3, 1, -1, -1, -1, -1},
+    {11, 1, 2, 11, 7, 1, 7, 5, 1, -1, -1, -1, -1, -1, -1, -1},
+    {0, 8, 3, 1, 2, 7, 1, 7, 5, 7, 2, 11, -1, -1, -1, -1},
+    {9, 7, 5, 9, 2, 7, 9, 0, 2, 2, 11, 7, -1, -1, -1, -1},
+    {7, 5, 2, 7, 2, 11, 5, 9, 2, 3, 2, 8, 9, 8, 2, -1},
+    {2, 5, 10, 2, 3, 5, 3, 7, 5, -1, -1, -1, -1, -1, -1, -1},
+    {8, 2, 0, 8, 5, 2, 8, 7, 5, 10, 2, 5, -1, -1, -1, -1},
+    {9, 0, 1, 5, 10, 3, 5, 3, 7, 3, 10, 2, -1, -1, -1, -1},
+    {9, 8, 2, 9, 2, 1, 8, 7, 2, 10, 2, 5, 7, 5, 2, -1},
+    {1, 3, 5, 3, 7, 5, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1},
+    {0, 8, 7, 0, 7, 1, 1, 7, 5, -1, -1, -1, -1, -1, -1, -1},
+    {9, 0, 3, 9, 3, 5, 5, 3, 7, -1, -1, -1, -1, -1, -1, -1},
+    {9, 8, 7, 5, 9, 7, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1},
+    {5, 8, 4, 5, 10, 8, 10, 11, 8, -1, -1, -1, -1, -1, -1, -1},
+    {5, 0, 4, 5, 11, 0, 5, 10, 11, 11, 3, 0, -1, -1, -1, -1},
+    {0, 1, 9, 8, 4, 10, 8, 10, 11, 10, 4, 5, -1, -1, -1, -1},
+    {10, 11, 4, 10, 4, 5, 11, 3, 4, 9, 4, 1, 3, 1, 4, -1},
+    {2, 5, 1, 2, 8, 5, 2, 11, 8, 4, 5, 8, -1, -1, -1, -1},
+    {0, 4, 11, 0, 11, 3, 4, 5, 11, 2, 11, 1, 5, 1, 11, -1},
+    {0, 2, 5, 0, 5, 9, 2, 11, 5, 4, 5, 8, 11, 8, 5, -1},
+    {9, 4, 5, 2, 11, 3, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1},
+    {2, 5, 10, 3, 5, 2, 3, 4, 5, 3, 8, 4, -1, -1, -1, -1},
+    {5, 10, 2, 5, 2, 4, 4, 2, 0, -1, -1, -1, -1, -1, -1, -1},
+    {3, 10, 2, 3, 5, 10, 3, 8, 5, 4, 5, 8, 0, 1, 9, -1},
+    {5, 10, 2, 5, 2, 4, 1, 9, 2, 9, 4, 2, -1, -1, -1, -1},
+    {8, 4, 5, 8, 5, 3, 3, 5, 1, -1, -1, -1, -1, -1, -1, -1},
+    {0, 4, 5, 1, 0, 5, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1},
+    {8, 4, 5, 8, 5, 3, 9, 0, 5, 0, 3, 5, -1, -1, -1, -1},
+    {9, 4, 5, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1},
+    {4, 11, 7, 4, 9, 11, 9, 10, 11, -1, -1, -1, -1, -1, -1, -1},
+    {0, 8, 3, 4, 9, 7, 9, 11, 7, 9, 10, 11, -1, -1, -1, -1},
+    {1, 10, 11, 1, 11, 4, 1, 4, 0, 7, 4, 11, -1, -1, -1, -1},
+    {3, 1, 4, 3, 4, 8, 1, 10, 4, 7, 4, 11, 10, 11, 4, -1},
+    {4, 11, 7, 9, 11, 4, 9, 2, 11, 9, 1, 2, -1, -1, -1, -1},
+    {9, 7, 4, 9, 11, 7, 9, 1, 11, 2, 11, 1, 0, 8, 3, -1},
+    {11, 7, 4, 11, 4, 2, 2, 4, 0, -1, -1, -1, -1, -1, -1, -1},
+    {11, 7, 4, 11, 4, 2, 8, 3, 4, 3, 2, 4, -1, -1, -1, -1},
+    {2, 9, 10, 2, 7, 9, 2, 3, 7, 7, 4, 9, -1, -1, -1, -1},
+    {9, 10, 7, 9, 7, 4, 10, 2, 7, 8, 7, 0, 2, 0, 7, -1},
+    {3, 7, 10, 3, 10, 2, 7, 4, 10, 1, 10, 0, 4, 0, 10, -1},
+    {1, 10, 2, 8, 7, 4, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1},
+    {4, 9, 1, 4, 1, 7, 7, 1, 3, -1, -1, -1, -1, -1, -1, -1},
+    {4, 9, 1, 4, 1, 7, 0, 8, 1, 8, 7, 1, -1, -1, -1, -1},
+    {4, 0, 3, 7, 4, 3, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1},
+    {4, 8, 7, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1},
+    {9, 10, 8, 10, 11, 8, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1},
+    {3, 0, 9, 3, 9, 11, 11, 9, 10, -1, -1, -1, -1, -1, -1, -1},
+    {0, 1, 10, 0, 10, 8, 8, 10, 11, -1, -1, -1, -1, -1, -1, -1},
+    {3, 1, 10, 11, 3, 10, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1},
+    {1, 2, 11, 1, 11, 9, 9, 11, 8, -1, -1, -1, -1, -1, -1, -1},
+    {3, 0, 9, 3, 9, 11, 1, 2, 9, 2, 11, 9, -1, -1, -1, -1},
+    {0, 2, 11, 8, 0, 11, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1},
+    {3, 2, 11, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1},
+    {2, 3, 8, 2, 8, 10, 10, 8, 9, -1, -1, -1, -1, -1, -1, -1},
+    {9, 10, 2, 0, 9, 2, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1},
+    {2, 3, 8, 2, 8, 10, 0, 1, 8, 1, 10, 8, -1, -1, -1, -1},
+    {1, 10, 2, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1},
+    {1, 3, 8, 9, 1, 8, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1},
+    {0, 9, 1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1},
+    {0, 3, 8, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1},
+    {-1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1}
+};
+
+namespace private_
+{
+
+double mc_isovalue_interpolation(double isovalue, double f1, double f2,
+                                double x1, double x2)
+{
+    if(f2==f1)
+        return (x2+x1)/2;
+
+    return (x2-x1)*(isovalue-f1)/(f2-f1) + x1;
+}
+
+size_t mc_add_vertex(double x1, double y1, double z1, double c2,
+    int axis, double f1, double f2, double isovalue, std::vector<double>* vertices)
+{
+    size_t vertex_index = vertices->size() / 3;
+    if(axis == 0)
+    {
+        double x = mc_isovalue_interpolation(isovalue, f1, f2, x1, c2);
+        vertices->push_back(x);
+        vertices->push_back(y1);
+        vertices->push_back(z1);
+        return vertex_index;
+    }
+    if(axis == 1)
+    {
+        double y = mc_isovalue_interpolation(isovalue, f1, f2, y1, c2);
+        vertices->push_back(x1);
+        vertices->push_back(y);
+        vertices->push_back(z1);
+        return vertex_index;
+    }
+    if(axis == 2)
+    {
+        double z = mc_isovalue_interpolation(isovalue, f1, f2, z1, c2);
+        vertices->push_back(x1);
+        vertices->push_back(y1);
+        vertices->push_back(z);
+        return vertex_index;
+    }
+
+    // This should not happen.
+    return -1;
+}
+
+}
+
+}
+```
+
+### mcubes/src/marchingcubes.h
+```
+#ifndef _MARCHING_CUBES_H
+#define _MARCHING_CUBES_H
+
+#include <stddef.h>
+#include <array>
+#include <vector>
+
+namespace mc
+{
+
+extern int edge_table[256];
+extern int triangle_table[256][16];
+
+namespace private_
+{
+
+double mc_isovalue_interpolation(double isovalue, double f1, double f2,
+    double x1, double x2);
+size_t mc_add_vertex(double x1, double y1, double z1, double c2,
+    int axis, double f1, double f2, double isovalue, std::vector<double>* vertices);
+}
+
+template<typename vector3, typename formula>
+void marching_cubes(const vector3& lower, const vector3& upper,
+    int numx, int numy, int numz, formula f, double isovalue,
+    std::vector<double>& vertices, std::vector<typename vector3::size_type>& polygons)
+{
+    using coord_type = typename vector3::value_type;
+    using size_type = typename vector3::size_type;
+    using namespace private_;
+
+    // Some initial checks
+    if(numx < 2 || numy < 2 || numz < 2)
+        return;
+
+    if(!std::equal(std::begin(lower), std::end(lower), std::begin(upper),
+                   [](double a, double b)->bool {return a <= b;}))
+        return;
+
+    // numx, numy and numz are the numbers of evaluations in each direction
+    --numx; --numy; --numz;
+
+    coord_type dx = (upper[0] - lower[0]) / static_cast<coord_type>(numx);
+    coord_type dy = (upper[1] - lower[1]) / static_cast<coord_type>(numy);
+    coord_type dz = (upper[2] - lower[2]) / static_cast<coord_type>(numz);
+
+    const int num_shared_indices = 2 * (numy + 1) * (numz + 1);
+    std::vector<size_type> shared_indices_x(num_shared_indices);
+    std::vector<size_type> shared_indices_y(num_shared_indices);
+    std::vector<size_type> shared_indices_z(num_shared_indices);
+    auto _offset = [&](size_t i, size_t j, size_t k){return i*(numy+1)*(numz+1) + j*(numz+1) + k;};
+
+    for(int i=0; i<numx; ++i)
+    {
+        coord_type x = lower[0] + dx*i;
+        coord_type x_dx = lower[0] + dx*(i+1);
+        const int i_mod_2 = i % 2;
+        const int i_mod_2_inv = (i_mod_2 ? 0 : 1);
+
+        for(int j=0; j<numy; ++j)
+        {
+            coord_type y = lower[1] + dy*j;
+            coord_type y_dy = lower[1] + dy*(j+1);
+
+            double v[8];
+            v[4] = f(x, y, lower[2]); v[5] = f(x_dx, y, lower[2]);
+            v[6] = f(x_dx, y_dy, lower[2]); v[7] = f(x, y_dy, lower[2]);
+
+            for(int k=0; k<numz; ++k)
+            {
+                coord_type z = lower[2] + dz*k;
+                coord_type z_dz = lower[2] + dz*(k+1);
+
+                v[0] = v[4]; v[1] = v[5];
+                v[2] = v[6]; v[3] = v[7];
+                v[4] = f(x, y, z_dz); v[5] = f(x_dx, y, z_dz);
+                v[6] = f(x_dx, y_dy, z_dz); v[7] = f(x, y_dy, z_dz);
+
+                unsigned int cubeindex = 0;
+                for(int m=0; m<8; ++m)
+                    if(v[m] <= isovalue)
+                        cubeindex |= 1<<m;
+
+                // Generate vertices AVOIDING DUPLICATES.
+
+                int edges = edge_table[cubeindex];
+                std::array<size_type, 12> indices;
+                if(edges & 0x040)
+                {
+                    size_t index = mc_add_vertex(x_dx, y_dy, z_dz, x, 0, v[6], v[7], isovalue, &vertices);
+                    indices[6] = index;
+                    shared_indices_x[_offset(i_mod_2_inv, j+1, k+1)] = index;
+                }
+                if(edges & 0x020)
+                {
+                    size_t index = mc_add_vertex(x_dx, y, z_dz, y_dy, 1, v[5], v[6], isovalue, &vertices);
+                    indices[5] = index;
+                    shared_indices_y[_offset(i_mod_2_inv, j+1, k+1)] = index;
+                }
+                if(edges & 0x400)
+                {
+                    size_t index = mc_add_vertex(x_dx, y_dy, z, z_dz, 2, v[2], v[6], isovalue, &vertices);
+                    indices[10] = index;
+                    shared_indices_z[_offset(i_mod_2_inv, j+1, k+1)] = index;
+                }
+
+                if(edges & 0x001)
+                {
+                    if(j == 0 && k == 0)
+                    {
+                        size_t index = mc_add_vertex(x, y, z, x_dx, 0, v[0], v[1], isovalue, &vertices);
+                        indices[0] = index;
+                    }
+                    else
+                        indices[0] = shared_indices_x[_offset(i_mod_2_inv, j, k)];
+                }
+                if(edges & 0x002)
+                {
+                    if(k == 0)
+                    {
+                        size_t index = mc_add_vertex(x_dx, y, z, y_dy, 1, v[1], v[2], isovalue, &vertices);
+                        indices[1] = index;
+                        shared_indices_y[_offset(i_mod_2_inv, j+1, k)] = index;
+                    }
+                    else
+                        indices[1] = shared_indices_y[_offset(i_mod_2_inv, j+1, k)];
+                }
+                if(edges & 0x004)
+                {
+                    if(k == 0)
+                    {
+                        size_t index = mc_add_vertex(x_dx, y_dy, z, x, 0, v[2], v[3], isovalue, &vertices);
+                        indices[2] = index;
+                        shared_indices_x[_offset(i_mod_2_inv, j+1, k)] = index;
+                    }
+                    else
+                        indices[2] = shared_indices_x[_offset(i_mod_2_inv, j+1, k)];
+                }
+                if(edges & 0x008)
+                {
+                    if(i == 0 && k == 0)
+                    {
+                        size_t index = mc_add_vertex(x, y_dy, z, y, 1, v[3], v[0], isovalue, &vertices);
+                        indices[3] = index;
+                    }
+                    else
+                        indices[3] = shared_indices_y[_offset(i_mod_2, j+1, k)];
+                }
+                if(edges & 0x010)
+                {
+                    if(j == 0)
+                    {
+                        size_t index = mc_add_vertex(x, y, z_dz, x_dx, 0, v[4], v[5], isovalue, &vertices);
+                        indices[4] = index;
+                        shared_indices_x[_offset(i_mod_2_inv, j, k+1)] = index;
+                    }
+                    else
+                        indices[4] = shared_indices_x[_offset(i_mod_2_inv, j, k+1)];
+                }
+                if(edges & 0x080)
+                {
+                    if(i == 0)
+                    {
+                        size_t index = mc_add_vertex(x, y_dy, z_dz, y, 1, v[7], v[4], isovalue, &vertices);
+                        indices[7] = index;
+                        shared_indices_y[_offset(i_mod_2, j+1, k+1)] = index;
+                    }
+                    else
+                        indices[7] = shared_indices_y[_offset(i_mod_2, j+1, k+1)];
+                }
+                if(edges & 0x100)
+                {
+                    if(i == 0 && j == 0)
+                    {
+                        size_t index = mc_add_vertex(x, y, z, z_dz, 2, v[0], v[4], isovalue, &vertices);
+                        indices[8] = index;
+                    }
+                    else
+                        indices[8] = shared_indices_z[_offset(i_mod_2, j, k+1)];
+                }
+                if(edges & 0x200)
+                {
+                    if(j == 0)
+                    {
+                        size_t index = mc_add_vertex(x_dx, y, z, z_dz, 2, v[1], v[5], isovalue, &vertices);
+                        indices[9] = index;
+                        shared_indices_z[_offset(i_mod_2_inv, j, k+1)] = index;
+                    }
+                    else
+                        indices[9] = shared_indices_z[_offset(i_mod_2_inv, j, k+1)];
+                }
+                if(edges & 0x800)
+                {
+                    if(i == 0)
+                    {
+                        size_t index = mc_add_vertex(x, y_dy, z, z_dz, 2, v[3], v[7], isovalue, &vertices);
+                        indices[11] = index;
+                        shared_indices_z[_offset(i_mod_2, j+1, k+1)] = index;
+                    }
+                    else
+                        indices[11] = shared_indices_z[_offset(i_mod_2, j+1, k+1)];
+                }
+
+                int tri;
+                int* triangle_table_ptr = triangle_table[cubeindex];
+                for(int m=0; tri = triangle_table_ptr[m], tri != -1; ++m)
+                    polygons.push_back(indices[tri]);
+            }
+        }
+    }
+
+}
+
+}
+
+#endif // _MARCHING_CUBES_H
+```
+
+### mcubes/src/pyarray_symbol.h
+```
+#define PY_ARRAY_UNIQUE_SYMBOL mcubes_PyArray_API
+```
+
+### mcubes/src/pyarraymodule.h
+```
+#ifndef _EXTMODULE_H
+#define _EXTMODULE_H
+
+#include <Python.h>
+#include <stdexcept>
+
+// #define NPY_NO_DEPRECATED_API NPY_1_7_API_VERSION
+#define PY_ARRAY_UNIQUE_SYMBOL mcubes_PyArray_API
+#define NO_IMPORT_ARRAY
+#include "numpy/arrayobject.h"
+
+#include <complex>
+
+template<class T>
+struct numpy_typemap;
+
+#define define_numpy_type(ctype, dtype) \
+    template<> \
+    struct numpy_typemap<ctype> \
+    {static const int type = dtype;};
+
+define_numpy_type(bool, NPY_BOOL);
+define_numpy_type(char, NPY_BYTE);
+define_numpy_type(short, NPY_SHORT);
+define_numpy_type(int, NPY_INT);
+define_numpy_type(long, NPY_LONG);
+define_numpy_type(long long, NPY_LONGLONG);
+define_numpy_type(unsigned char, NPY_UBYTE);
+define_numpy_type(unsigned short, NPY_USHORT);
+define_numpy_type(unsigned int, NPY_UINT);
+define_numpy_type(unsigned long, NPY_ULONG);
+define_numpy_type(unsigned long long, NPY_ULONGLONG);
+define_numpy_type(float, NPY_FLOAT);
+define_numpy_type(double, NPY_DOUBLE);
+define_numpy_type(long double, NPY_LONGDOUBLE);
+define_numpy_type(std::complex<float>, NPY_CFLOAT);
+define_numpy_type(std::complex<double>, NPY_CDOUBLE);
+define_numpy_type(std::complex<long double>, NPY_CLONGDOUBLE);
+
+template<typename T>
+T PyArray_SafeGet(const PyArrayObject* aobj, const npy_intp* indaux)
+{
+    // HORROR.
+    npy_intp* ind = const_cast<npy_intp*>(indaux);
+    void* ptr = PyArray_GetPtr(const_cast<PyArrayObject*>(aobj), ind);
+    switch(PyArray_TYPE(aobj))
+    {
+    case NPY_BOOL:
+        return static_cast<T>(*reinterpret_cast<bool*>(ptr));
+    case NPY_BYTE:
+        return static_cast<T>(*reinterpret_cast<char*>(ptr));
+    case NPY_SHORT:
+        return static_cast<T>(*reinterpret_cast<short*>(ptr));
+    case NPY_INT:
+        return static_cast<T>(*reinterpret_cast<int*>(ptr));
+    case NPY_LONG:
+        return static_cast<T>(*reinterpret_cast<long*>(ptr));
+    case NPY_LONGLONG:
+        return static_cast<T>(*reinterpret_cast<long long*>(ptr));
+    case NPY_UBYTE:
+        return static_cast<T>(*reinterpret_cast<unsigned char*>(ptr));
+    case NPY_USHORT:
+        return static_cast<T>(*reinterpret_cast<unsigned short*>(ptr));
+    case NPY_UINT:
+        return static_cast<T>(*reinterpret_cast<unsigned int*>(ptr));
+    case NPY_ULONG:
+        return static_cast<T>(*reinterpret_cast<unsigned long*>(ptr));
+    case NPY_ULONGLONG:
+        return static_cast<T>(*reinterpret_cast<unsigned long long*>(ptr));
+    case NPY_FLOAT:
+        return static_cast<T>(*reinterpret_cast<float*>(ptr));
+    case NPY_DOUBLE:
+        return static_cast<T>(*reinterpret_cast<double*>(ptr));
+    case NPY_LONGDOUBLE:
+        return static_cast<T>(*reinterpret_cast<long double*>(ptr));
+    default:
+        throw std::runtime_error("data type not supported");
+    }
+}
+
+template<typename T>
+T PyArray_SafeSet(PyArrayObject* aobj, const npy_intp* indaux, const T& value)
+{
+    // HORROR.
+    npy_intp* ind = const_cast<npy_intp*>(indaux);
+    void* ptr = PyArray_GetPtr(aobj, ind);
+    switch(PyArray_TYPE(aobj))
+    {
+    case NPY_BOOL:
+        *reinterpret_cast<bool*>(ptr) = static_cast<bool>(value);
+        break;
+    case NPY_BYTE:
+        *reinterpret_cast<char*>(ptr) = static_cast<char>(value);
+        break;
+    case NPY_SHORT:
+        *reinterpret_cast<short*>(ptr) = static_cast<short>(value);
+        break;
+    case NPY_INT:
+        *reinterpret_cast<int*>(ptr) = static_cast<int>(value);
+        break;
+    case NPY_LONG:
+        *reinterpret_cast<long*>(ptr) = static_cast<long>(value);
+        break;
+    case NPY_LONGLONG:
+        *reinterpret_cast<long long*>(ptr) = static_cast<long long>(value);
+        break;
+    case NPY_UBYTE:
+        *reinterpret_cast<unsigned char*>(ptr) = static_cast<unsigned char>(value);
+        break;
+    case NPY_USHORT:
+        *reinterpret_cast<unsigned short*>(ptr) = static_cast<unsigned short>(value);
+        break;
+    case NPY_UINT:
+        *reinterpret_cast<unsigned int*>(ptr) = static_cast<unsigned int>(value);
+        break;
+    case NPY_ULONG:
+        *reinterpret_cast<unsigned long*>(ptr) = static_cast<unsigned long>(value);
+        break;
+    case NPY_ULONGLONG:
+        *reinterpret_cast<unsigned long long*>(ptr) = static_cast<unsigned long long>(value);
+        break;
+    case NPY_FLOAT:
+        *reinterpret_cast<float*>(ptr) = static_cast<float>(value);
+        break;
+    case NPY_DOUBLE:
+        *reinterpret_cast<double*>(ptr) = static_cast<double>(value);
+        break;
+    case NPY_LONGDOUBLE:
+        *reinterpret_cast<long double*>(ptr) = static_cast<long double>(value);
+        break;
+    default:
+        throw std::runtime_error("data type not supported");
+    }
+}
+
+#endif
+```
+
+### mcubes/src/pywrapper.cpp
+```
+#include "pywrapper.h"
+
+#include "marchingcubes.h"
+
+#include <stdexcept>
+#include <array>
+
+
+PyObject* marching_cubes_func(PyObject* lower, PyObject* upper,
+    int numx, int numy, int numz, PyObject* pyfunc, double isovalue)
+{
+    std::vector<double> vertices;
+    std::vector<size_t> polygons;
+
+    // Copy the lower and upper coordinates to a C array.
+    std::array<double,3> lower_;
+    std::array<double,3> upper_;
+    for(int i=0; i<3; ++i)
+    {
+        PyObject* l = PySequence_GetItem(lower, i);
+        if(l == NULL)
+            throw std::runtime_error("len(lower) < 3");
+        PyObject* u = PySequence_GetItem(upper, i);
+        if(u == NULL)
+        {
+            Py_DECREF(l);
+            throw std::runtime_error("len(upper) < 3");
+        }
+
+        lower_[i] = PyFloat_AsDouble(l);
+        upper_[i] = PyFloat_AsDouble(u);
+
+        Py_DECREF(l);
+        Py_DECREF(u);
+        if(lower_[i]==-1.0 || upper_[i]==-1.0)
+        {
+            if(PyErr_Occurred())
+                throw std::runtime_error("unknown error");
+        }
+    }
+
+    auto pyfunc_to_cfunc = [&](double x, double y, double z) -> double {
+        PyObject* res = PyObject_CallFunction(pyfunc, "(d,d,d)", x, y, z);
+        if(res == NULL)
+            return 0.0;
+
+        double result = PyFloat_AsDouble(res);
+        Py_DECREF(res);
+        return result;
+    };
+
+    // Marching cubes.
+    mc::marching_cubes(lower_, upper_, numx, numy, numz, pyfunc_to_cfunc, isovalue, vertices, polygons);
+
+    // Copy the result to two Python ndarrays.
+    npy_intp size_vertices = vertices.size();
+    npy_intp size_polygons = polygons.size();
+    PyArrayObject* verticesarr = reinterpret_cast<PyArrayObject*>(PyArray_SimpleNew(1, &size_vertices, NPY_DOUBLE));
+    PyArrayObject* polygonsarr = reinterpret_cast<PyArrayObject*>(PyArray_SimpleNew(1, &size_polygons, NPY_ULONG));
+
+    std::vector<double>::const_iterator it = vertices.begin();
+    for(int i=0; it!=vertices.end(); ++i, ++it)
+        *reinterpret_cast<double*>(PyArray_GETPTR1(verticesarr, i)) = *it;
+    std::vector<size_t>::const_iterator it2 = polygons.begin();
+    for(int i=0; it2!=polygons.end(); ++i, ++it2)
+        *reinterpret_cast<unsigned long*>(PyArray_GETPTR1(polygonsarr, i)) = *it2;
+
+    PyObject* res = Py_BuildValue("(O,O)", verticesarr, polygonsarr);
+    Py_XDECREF(verticesarr);
+    Py_XDECREF(polygonsarr);
+    return res;
+}
+
+
+PyObject* marching_cubes(PyArrayObject* arr, double isovalue)
+{
+    if(PyArray_NDIM(arr) != 3)
+        throw std::runtime_error("Only three-dimensional arrays are supported.");
+
+    // Prepare data.
+    npy_intp* shape = PyArray_DIMS(arr);
+    std::array<long, 3> lower{0, 0, 0};
+    std::array<long, 3> upper{shape[0]-1, shape[1]-1, shape[2]-1};
+    long numx = upper[0] - lower[0] + 1;
+    long numy = upper[1] - lower[1] + 1;
+    long numz = upper[2] - lower[2] + 1;
+    std::vector<double> vertices;
+    std::vector<size_t> polygons;
+
+    auto pyarray_to_cfunc = [&](long x, long y, long z) -> double {
+        const npy_intp c[3] = {x, y, z};
+        return PyArray_SafeGet<double>(arr, c);
+    };
+
+    // Marching cubes.
+    mc::marching_cubes(lower, upper, numx, numy, numz, pyarray_to_cfunc, isovalue,
+                        vertices, polygons);
+
+    // Copy the result to two Python ndarrays.
+    npy_intp size_vertices = vertices.size();
+    npy_intp size_polygons = polygons.size();
+    PyArrayObject* verticesarr = reinterpret_cast<PyArrayObject*>(PyArray_SimpleNew(1, &size_vertices, NPY_DOUBLE));
+    PyArrayObject* polygonsarr = reinterpret_cast<PyArrayObject*>(PyArray_SimpleNew(1, &size_polygons, NPY_ULONG));
+
+    std::vector<double>::const_iterator it = vertices.begin();
+    for(int i=0; it!=vertices.end(); ++i, ++it)
+        *reinterpret_cast<double*>(PyArray_GETPTR1(verticesarr, i)) = *it;
+    std::vector<size_t>::const_iterator it2 = polygons.begin();
+    for(int i=0; it2!=polygons.end(); ++i, ++it2)
+        *reinterpret_cast<unsigned long*>(PyArray_GETPTR1(polygonsarr, i)) = *it2;
+
+    PyObject* res = Py_BuildValue("(O,O)", verticesarr, polygonsarr);
+    Py_XDECREF(verticesarr);
+    Py_XDECREF(polygonsarr);
+
+    return res;
+}
+```
+
+### mcubes/src/pywrapper.h
+```
+#ifndef _PYWRAPPER_H
+#define _PYWRAPPER_H
+
+#include <Python.h>
+#include "pyarraymodule.h"
+
+#include <vector>
+
+PyObject* marching_cubes(PyArrayObject* arr, double isovalue);
+PyObject* marching_cubes_func(PyObject* lower, PyObject* upper,
+    int numx, int numy, int numz, PyObject* f, double isovalue);
+
+#endif // _PYWRAPPER_H
+```

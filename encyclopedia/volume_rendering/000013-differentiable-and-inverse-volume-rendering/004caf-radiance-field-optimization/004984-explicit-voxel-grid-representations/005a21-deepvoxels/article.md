@@ -1,0 +1,236 @@
+# DeepVoxels
+
+Also called: 3D-structured neural scene representation, persistent 3D feature embedding
+
+## Overview
+DeepVoxels is a learned representation that encodes the view-dependent appearance of a 3D scene using a persistent, viewpoint-invariant Cartesian 3D grid of feature embeddings [S1]. It solves the problem of novel view synthesis by condensing posed input images into a latent 3D structure without explicitly modeling geometry or requiring 3D ground truth [S1]. Unlike 2D-to-2D translation approaches that struggle with 3D transformations, DeepVoxels enforces perspective and multi-view geometry constraints by performing reasoning directly in 3D space, enabling explicit occlusion reasoning and robust generalization to unseen viewpoints [S1].
+
+## How it works
+**Inputs and Outputs:**
+*   **Inputs:** A set of $N$ registered multi-view images with known intrinsic ($K$) and extrinsic ($R, t$) camera parameters [S1].
+*   **Outputs:** A novel view image (and optionally a depth map) from a target camera pose [S1].
+*   **Persistent State:** A 3D voxel grid $H$ storing feature vectors [S1].
+
+**Data Structures:**
+1.  **Persistent Voxel Grid ($H$):** A uniform 3D grid of size $W \times H \times D$ [S1].
+    *   **Layout:** Each voxel stores a feature vector of size $f$ channels [S1].
+    *   **Default Size:** $32^3$ voxels with $f=8$ channels for synthetic scenes; $64^3$ voxels with $f=8$ channels for real captures [S1].
+    *   **Memory:** Dense storage. A $64^3$ grid with 8 channels requires significant GPU memory (e.g., ~12GB) [S1].
+2.  **Canonical View Volume:** A temporary 3D volume aligned with the target camera's coordinate system, used for projection and rendering [S1].
+
+**Parameters:**
+*   **Voxel Resolution:** $32^3$ (default) or $64^3$ [S1].
+*   **Feature Channels:** 8 [S1].
+*   **Optimizer:** ADAM [S1].
+*   **Learning Rate:** $4 \times 10^{-4}$ [S1].
+*   **Loss Weights:** L1 loss weight 200, Adversarial loss weight 1 [S1].
+*   **Model Size:** 170 million parameters [S1].
+
+**Numbered Steps:**
+
+1.  **Training Corpus Construction:**
+    For each training step, select a source view $S_i$ and two target views $T_{i0}, T_{i1}$ from the $N$ registered images [S1]. Randomly select $S_i$ from the top-5 nearest neighbors in view direction angle to $T_{i0}$ to ensure visibility [S1].
+
+2.  **Feature Extraction:**
+    Extract 2D feature maps from source view $S_i$ using a 2D feature extraction network [S1]. Downsample by stride-2 convolutions until resolution $64 \times 64$, then use a 2D U-Net to extract a $64 \times 64$ feature map [S1].
+
+3.  **Lifting 2D to 3D:**
+    Position a temporary 3D feature volume in world space centered on the scene's center of gravity [S1]. For each voxel in this temporary volume, project its world space center $x$ to the source view's image space using the canonical camera mapping:
+    $$
+    u = \frac{K(Rx + t)}{d}
+    $$
+    where $u = [u, v, 1]^T$ is the pixel position, $d$ is depth, $K$ is the intrinsic matrix, $R$ is rotation, $t$ is translation, and $x$ is the 3D world position [S1]. Extract a feature vector via bilinear sampling from the 2D feature map and store it in the voxel's code vector $X_t$ [S1].
+
+4.  **Integration via GRU:**
+    Integrate the lifted features $X_t$ into the persistent DeepVoxels grid $H$ using a Gated Recurrent Unit (GRU) [S1]. The hidden state $H$ is persistent across all training steps and never reset [S1]. One GRU is used per voxel, updating all $f$ feature channels jointly [S1]. The update equations are:
+    $$
+    Z_t = \sigma(W_z X_t + U_z H_{t-1} + B_z)
+    $$
+    $$
+    R_t = \sigma(W_r X_t + U_r H_{t-1} + B_r)
+    $$
+    $$
+    S_t = \text{ReLU}(W_s X_t + U_s (R_t \circ H_{t-1}) + B_s)
+    $$
+    $$
+    H_t = (1 - Z_t) \circ H_{t-1} + Z_t \circ S_t
+    $$
+    where $Z_t$ is the update gate, $R_t$ is the reset gate, $S_t$ is the new candidate state, $H_{t-1}$ is the previous hidden state, $W_\bullet$ and $U_\bullet$ are 3D convolution weights, $B_\bullet$ are biases, $\sigma$ is the sigmoid function, and $\circ$ is element-wise product [S1].
+
+5.  **Inpainting:**
+    Apply a 3D inpainting U-Net to fill holes in the feature representation after GRU integration [S1].
+
+6.  **Projection to Canonical View:**
+    Map 3D code vectors to the canonical coordinate system of the target view [S1]. For each voxel in the canonical view volume, compute its corresponding position in the persistent world space grid [S1]. Extract an interpolated code vector via trilinear interpolation and store it in the canonical view volume [S1].
+
+7.  **Occlusion Reasoning:**
+    For each pixel in the target view, consider the column of voxels in the canonical view volume [S1]. Concatenate this column with a feature column encoding the distance of each voxel to the camera [S1]. Compress the voxel feature vector to dimension 4 via a 3D convolutional layer [S1]. Input this to a 3D U-Net to predict scalar per-voxel visibility weights using a softmax activation [S1].
+
+8.  **Flattening:**
+    Flatten the canonical view volume along the depth dimension using a weighted average of voxels based on the predicted visibility weights [S1]. This yields the final occlusion-aware 2D view feature map [S1].
+
+9.  **Rendering:**
+    Pass the flattened canonical view volume to a 2D rendering network (a mirrored feature extraction network with higher capacity) [S1]. A 2D U-Net reasons across the full image, followed by transposed convolutions to regress pixel values of the novel view [S1].
+
+10. **Training Loss:**
+    Optimize the model end-to-end using a combined L1 loss and adversarial cross-entropy loss [S1]. The L1 loss is averaged over all pixels [S1]. The adversarial discriminator is a fully convolutional patch-based discriminator [S1]. Optimization uses ADAM [S1].
+
+**Pseudocode:**
+
+> **Unverified code.** The code below did not pass a test run against a reference implementation, or no test fits it, so it may contain errors.
+
+```python
+import torch
+import torch.nn as nn
+import torch.nn.functional as F
+
+class DeepVoxels:
+    def __init__(self, grid_size=32, feature_channels=8):
+        self.grid_size = grid_size
+        self.feature_channels = feature_channels
+        
+        # Persistent hidden state H, initialized to zeros
+        self.H = torch.zeros(1, feature_channels, grid_size, grid_size, grid_size)
+        
+        # GRU components (3D Convolutions)
+        self.W_z = nn.Conv3d(feature_channels, feature_channels, kernel_size=3, padding=1)
+        self.U_z = nn.Conv3d(feature_channels, feature_channels, kernel_size=3, padding=1)
+        self.B_z = nn.Parameter(torch.zeros(1, feature_channels, grid_size, grid_size, grid_size))
+        
+        self.W_r = nn.Conv3d(feature_channels, feature_channels, kernel_size=3, padding=1)
+        self.U_r = nn.Conv3d(feature_channels, feature_channels, kernel_size=3, padding=1)
+        self.B_r = nn.Parameter(torch.zeros(1, feature_channels, grid_size, grid_size, grid_size))
+        
+        self.W_s = nn.Conv3d(feature_channels, feature_channels, kernel_size=3, padding=1)
+        self.U_s = nn.Conv3d(feature_channels, feature_channels, kernel_size=3, padding=1)
+        self.B_s = nn.Parameter(torch.zeros(1, feature_channels, grid_size, grid_size, grid_size))
+        
+        # Inpainting U-Net (simplified structure)
+        self.inpainting_net = nn.Sequential(
+            nn.Conv3d(feature_channels, feature_channels, 3, padding=1),
+            nn.ReLU(),
+            nn.Conv3d(feature_channels, feature_channels, 3, padding=1)
+        )
+        
+        # Occlusion Network
+        self.occlusion_compress = nn.Conv3d(feature_channels, 4, kernel_size=1)
+        self.occlusion_net = nn.Sequential(
+            nn.Conv3d(5, 4, 3, padding=1), # 4 features + 1 distance channel
+            nn.ReLU(),
+            nn.Conv3d(4, 1, 3, padding=1)
+        )
+        
+        # Rendering Network (Mirrored Feature Extraction)
+        self.rendering_net = nn.Sequential(
+            nn.Conv2d(feature_channels, feature_channels, 3, padding=1),
+            nn.ReLU(),
+            nn.ConvTranspose2d(feature_channels, 3, 4, stride=2, padding=1)
+        )
+        
+        # Adversarial Discriminator (Patch-based)
+        self.discriminator = nn.Sequential(
+            nn.Conv2d(3, 64, 4, stride=2, padding=1),
+            nn.LeakyReLU(0.2, inplace=True),
+            nn.Conv2d(64, 128, 4, stride=2, padding=1),
+            nn.LeakyReLU(0.2, inplace=True),
+            nn.Conv2d(128, 1, 4, padding=1)
+        )
+
+    def train_step(self, source_image, source_pose, target_image):
+        # 1. Feature Extraction
+        source_features = self.extract_2d_features(source_image)
+        
+        # 2. Lifting 2D to 3D
+        lifted_volume = self.lift_2d_to_3d(source_features, source_pose)
+        
+        # 3. Integration via GRU
+        self.H = self.gru_update(lifted_volume, self.H)
+        
+        # 4. Inpainting
+        self.H = self.inpainting_net(self.H)
+        
+        # 5. Projection to Canonical View (Target View)
+        canonical_volume = self.project_to_canonical(self.H, source_pose)
+        
+        # 6. Occlusion Reasoning
+        distances = self.compute_voxel_distances(canonical_volume, source_pose)
+        occlusion_input = torch.cat([canonical_volume, distances], dim=1)
+        compressed = self.occlusion_compress(occlusion_input)
+        visibility_weights = torch.softmax(self.occlusion_net(compressed), dim=1)
+        
+        # 7. Flattening
+        flattened_features = torch.sum(canonical_volume * visibility_weights, dim=1, keepdim=True)
+        
+        # 8. Rendering
+        rendered_image = self.rendering_net(flattened_features.squeeze(1))
+        
+        # 9. Loss Calculation
+        l1_loss = torch.mean(torch.abs(rendered_image - target_image))
+        adv_loss = self.compute_adversarial_loss(rendered_image, target_image)
+        total_loss = 200 * l1_loss + 1 * adv_loss
+        return total_loss
+
+    def render(self, target_pose):
+        # Inference: only persistent H is used; lifting and GRU are discarded
+        canonical_volume = self.project_to_canonical(self.H, target_pose)
+        distances = self.compute_voxel_distances(canonical_volume, target_pose)
+        occlusion_input = torch.cat([canonical_volume, distances], dim=1)
+        compressed = self.occlusion_compress(occlusion_input)
+        visibility_weights = torch.softmax(self.occlusion_net(compressed), dim=1)
+        flattened_features = torch.sum(canonical_volume * visibility_weights, dim=1, keepdim=True)
+        rendered_image = self.rendering_net(flattened_features.squeeze(1))
+        return rendered_image, visibility_weights
+
+    def extract_2d_features(self, image):
+        # Downsample by stride-2 convolutions until 64x64
+        x = image
+        for _ in range(4):
+            x = F.avg_pool2d(x, 2)
+        # 2D U-Net extraction
+        x = self.unet_2d(x)
+        return x
+
+    def lift_2d_to_3d(self, source_features, source_pose):
+        # Create temporary 3D volume in world space centered on scene center
+        # Project voxel centers x to image space u = K(Rx + t) / d
+        # Bilinear sampling from source_features
+        return F.grid_sample(source_features, self.voxel_grid_3d, mode='bilinear', align_corners=False)
+
+    def gru_update(self, X_t, H_prev):
+        Z_t = torch.sigmoid(self.W_z(X_t) + self.U_z(H_prev) + self.B_z)
+        R_t = torch.sigmoid(self.W_r(X_t) + self.U_r(H_prev) + self.B_r)
+        S_t = torch.relu(self.W_s(X_t) + self.U_s(R_t * H_prev) + self.B_s)
+        H_t = (1 - Z_t) * H_prev + Z_t * S_t
+        return H_t
+
+    def project_to_canonical(self, H, target_pose):
+        # Map 3D code vectors to canonical coordinate system of target view
+        # For each voxel in canonical volume, compute position in persistent world space
+        # Trilinear interpolation
+        return F.grid_sample(H, self.canonical_grid_3d, mode='trilinear', align_corners=False)
+
+    def compute_voxel_distances(self, canonical_volume, target_pose):
+        # Compute distance of each voxel in canonical volume to camera
+        return torch.norm(self.voxel_centers_canonical, dim=1, keepdim=True)
+
+    def compute_adversarial_loss(self, rendered_image, target_image):
+        # Fully convolutional patch-based discriminator
+        pred_real = self.discriminator(target_image)
+        pred_fake = self.discriminator(rendered_image.detach())
+        real_loss = torch.mean((pred_real - 1)**2)
+        fake_loss = torch.mean(pred_fake**2)
+        return real_loss + fake_loss
+```
+
+## Operating characteristics
+*   **Time Complexity:** Inference time is dominated by the projection and rendering steps [S1]. Rendering a single frame takes approximately 71ms at test time [S1].
+*   **Memory Complexity:** The method uses a dense 3D volume, which is memory inefficient [S1]. A $64^3$ resolution with 8 channels fills a 12GB GPU [S1]. The parameter count is independent of the voxel grid size due to the use of 3D convolutions, resulting in 170 million parameters for the default configuration [S1].
+*   **Performance:** On synthetic scenes (Vase, Pedestal, Chair, Cube), it achieves a Mean PSNR of 30.55 and SSIM of 0.97, outperforming baselines by an average of 7dB [S1].
+*   **Strengths:** Explicit occlusion reasoning, robust generalization to novel viewpoints, parameter efficiency compared to fully connected latent spaces [S1].
+*   **Limitations:** High memory consumption, performance deterioration when viewing scenes from poses significantly different from the training set (though 3D structure is preserved) [S1]. Not suitable for scenes with strong specular highlights or view-dependent effects, as it assumes Lambertian scenes [S1].
+
+## Background
+DeepVoxels was introduced by Vincent Sitzmann, Michael Zollhöfer, and Gordon Wetzstein in 2019 [S1]. It addresses the lack of 3D understanding in generative neural networks by introducing a persistent 3D feature embedding for view synthesis [S1]. The work combines insights from 3D geometric computer vision with advances in learning image-to-image mappings based on adversarial loss functions [S1]. It is used for novel view synthesis on synthetic 3D scans and real captures [S1].
+
+## Sources
+[S1] DeepVoxels: Learning Persistent 3D Feature Embeddings, https://doi.org/10.1109/CVPR.2019.00254, fetched 2026-10-26

@@ -1,0 +1,294 @@
+--- v008.md
++++ v009.md
+@@ -4,175 +4,180 @@
+ 
+ ## Overview
+-Ray Marching and Discretization is the fundamental iterative algorithm for solving the volume rendering equation in image-order rendering by approximating the continuous integral along a camera ray with discrete samples [S1][S6, unofficial]. It solves the problem of synthesizing images from volumetric data (textures, implicit fields, or procedural functions) by advancing a ray through the volume, querying scalar values at regular or adaptive intervals, and compositing color and opacity using front-to-back alpha blending [S2, S5, unofficial]. It sets itself apart from [Ray Traversal Schemes](8341-ray-traversal-and-integration-schemes.md) by focusing on the integration loop and compositing logic rather than just voxel traversal optimization, and from [Monte Carlo Path Tracing for Volume Rendering](4980-monte-carlo-path-tracing-for-volume-rendering.md) by using deterministic quadrature instead of stochastic sampling [S4][S6, unofficial].
++Ray marching is an iterative numerical algorithm that approximates the volume rendering integral by casting rays from the camera, taking discrete steps along the ray, querying volumetric properties (density, color), and accumulating these samples using alpha compositing [S6, unofficial]. It solves the problem of rendering 3D volumes with real-time performance by avoiding complex geometric intersection tests, instead relying on uniform or adaptive sampling within a defined domain [S1, S3]. Unlike [Discrete Ray Tracing](3020-discrete-ray-tracing.md) which traverses voxel grids for binary objects, or [Fixed Step Ray Marching](3136-fixed-step-ray-marching.md) which strictly integrates density, this core method provides the fundamental loop structure for direct volume rendering, often implemented in fragment shaders on the GPU [S2, S5, unofficial].
+ 
+ ## How it works
+ **Inputs and Outputs:**
+-*   **Input:** A 3D volume texture (or procedural function) $V(\mathbf{p})$, camera parameters (origin $\mathbf{o}$, direction $\mathbf{d}$), and rendering uniforms (step count, transfer function, clipping bounds).
+-*   **Output:** A final pixel color $C_{out}$ and accumulated alpha $A_{out}$.
++*   **Inputs:** Camera position $\mathbf{o}$, ray direction $\mathbf{d}$ (normalized), volume data (3D texture or procedural function), transfer function (colormap), and rendering parameters (step size, bounds).
++*   **Outputs:** Final pixel color $C_{out}$ and accumulated alpha $A_{out}$.
+ 
+ **Data Structures:**
+-*   **Volume Texture:** A 3D texture array or atlas storing scalar density values. Layout is typically $W \times H \times D$ voxels, accessed via normalized coordinates $[0, 1]$ or $[-1, 1]$ [S9][S5, unofficial].
+-*   **Ray State:** Current position $\mathbf{p}$, accumulated color $C_{acc}$, and accumulated alpha $A_{acc}$ (transmittance $T = 1 - A_{acc}$) [S5, unofficial][S9].
++*   **Volume Texture:** A 3D texture (`volume`) storing scalar values (density/extinction). Layout is typically $W \times H \times D$ voxels, accessed via normalized coordinates $[0, 1]$ or $[-1, 1]$ [S9].
++*   **Colormap:** A 1D or 2D texture (`colormap`) mapping scalar values to RGBA colors [S9].
++*   **Accumulators:** Two variables, $C_{accum}$ (color, initialized to 0) and $A_{accum}$ (alpha, initialized to 0), stored in the fragment output [S9].
+ 
+ **Numbered Steps:**
+-1.  **Ray Initialization:** Compute the ray origin and direction in the volume's local coordinate system. Intersect the ray with the volume's bounding box (or slice planes) to determine the entry parameter $t_{near}$ and exit parameter $t_{far}$ [S5, unofficial][S9]. If no intersection, return background color [S5, unofficial].
+-2.  **Step Calculation:** Determine the step size $\Delta s$. In fixed-step marching, $\Delta s = \frac{t_{far} - t_{near}}{N}$, where $N$ is the total number of steps (e.g., 64–300) [S5, S2, unofficial]. In adaptive marching, $\Delta s$ is determined by a distance estimator $f(\mathbf{p})$ [S3].
+-3.  **Marching Loop:** Iterate $i$ from $0$ to $N-1$:
+-    a.  **Position Query:** Calculate the sample position $\mathbf{p}_i = \mathbf{o} + (t_{near} + i \cdot \Delta s) \mathbf{d}$ [S9].
+-    b.  **Sampling:** Query the volume value $v = V(\mathbf{p}_i)$ [S9].
+-    c.  **Transfer Function:** Map $v$ to color $c_i$ and opacity $\alpha_i$. Commonly, $\alpha_i = 1 - e^{-\sigma_e \Delta s}$ where $\sigma_e$ is derived from $v$ (extinction coefficient) [S5, unofficial]. Or, for low albedo, $\alpha_i \approx \sigma_a \Delta s$ [S11].
+-    d.  **Compositing:** Update accumulated color and alpha using front-to-back blending:
++
++1.  **Ray Initialization:**
++    Calculate the ray origin $\mathbf{o}$ and direction $\mathbf{d}$ in the volume's local coordinate system.
++    *   Origin: Transform camera position to model space: $\mathbf{o} = M^{-1} \cdot [\mathbf{c}_{pos}, 1]^T$ [S9].
++    *   Direction: Compute direction from camera to the current pixel's position on the far plane, then transform to model space and normalize [S5, unofficial][S9].
++    *   Bounds: Determine the entry ($t_{near}$) and exit ($t_{far}$) distances of the ray intersecting the volume bounding box (or slice box) [S5, unofficial][S9]. If no intersection, discard the fragment [S5, unofficial].
++
++2.  **Step Calculation:**
++    Determine the step size $\Delta s$.
++    *   Fixed Step: $\Delta s = \frac{\text{intersectionLength}}{N_{steps}}$, where $N_{steps}$ is a uniform constant (e.g., 64 or 300) [S5, S2, unofficial].
++    *   Adaptive Step: $\Delta s = \max(\Delta s_{min}, f(\mathbf{p}))$, where $f(\mathbf{p})$ estimates distance to the next feature (e.g., SDF value) [S3].
++    *   Calculate step vector: $\mathbf{v}_{step} = \Delta s \cdot \mathbf{d}$ [S9].
++
++3.  **Marching Loop:**
++    Initialize current position $\mathbf{p} = \mathbf{o} + t_{near} \cdot \mathbf{d}$ and remaining distance $t_{rem} = t_{far} - t_{near}$ [S9].
++    While $t_{rem} > 0$:
++    a.  **Sample:** Query the volume at $\mathbf{p}$ to get scalar value $v = \text{Texture}(\mathbf{p})$ [S9].
++    b.  **Transfer Function:** Map $v$ to color $c$ and opacity $\alpha$.
++        *   Color: $c = \text{Colormap}(v)$ [S9].
++        *   Opacity: $\alpha$ is derived from $v$. Common models include:
++            *   Linear: $\alpha = v \cdot \alpha_{scale}$ [S9].
++            *   Exponential (Beer-Lambert): $\alpha = 1 - e^{-\sigma_e \cdot \Delta s}$, where $\sigma_e$ is the extinction coefficient derived from $v$ [S5, unofficial].
++    c.  **Composite:** Update accumulators using front-to-back blending [S8, unofficial]:
+         $$
+-        C_{acc} \leftarrow C_{acc} + c_i \cdot \alpha_i \cdot (1 - A_{acc})
++        C_{accum} = C_{accum} + c \cdot \alpha \cdot (1 - A_{accum})
+         $$
+         $$
+-        A_{acc} \leftarrow A_{acc} + \alpha_i \cdot (1 - A_{acc})
++        A_{accum} = A_{accum} + \alpha \cdot (1 - A_{accum})
+         $$
+-    e.  **Early Termination:** If $A_{acc} \geq \tau_{term}$ (e.g., 0.95 or 0.99), break the loop [S2, unofficial][S9].
+-4.  **Final Output:** The final pixel color is $C_{acc}$ [S5, unofficial].
++    d.  **Advance:** $\mathbf{p} = \mathbf{p} + \mathbf{v}_{step}$ and $t_{rem} = t_{rem} - \Delta s$ [S9].
++    e.  **Early Termination:** If $A_{accum} \geq \tau_{term}$ (e.g., 0.95 or 0.99), break the loop [S2, unofficial][S9]. This optimization does not significantly affect final appearance [S1].
+ 
+-**Formulas:**
+-*   **Ray Equation:** $\mathbf{p}(t) = \mathbf{o} + t \mathbf{d}$ [S5, unofficial].
+-*   **Alpha Calculation (Exponential):** $\alpha = 1 - e^{-\sigma_e \Delta s}$ [S5, unofficial].
+-*   **Front-to-Back Blending:** $C_{out} = \sum_{i=0}^{n} c_i \alpha_i \prod_{j=0}^{i-1} (1 - \alpha_j)$ [S8, unofficial].
+-*   **Low Albedo Approximation:** $C = \sum_{i=0}^{N-1} c_i \alpha_i \prod_{j=i+1}^{N-1} (1 - \alpha_j)$ [S11].
+-
+-**Parameters:**
+-*   **RAY_STEPS / N:** Integer constant for step count. Typical values: 32–64 for real-time, 300 for high quality [S2, S5, unofficial].
+-*   **stepLength / $\Delta s$:** Physical step size. Often derived from resolution (e.g., $1/256$) [S9].
+-*   **stepAlpha / $\sigma_e$:** Base opacity or extinction coefficient per unit length [S9][S5, unofficial].
+-*   **tMin / tMax:** Transfer function range; values outside are skipped [S9].
+-*   **clipMin / clipMax:** World-space clipping planes [S5, unofficial].
+-
+-**Edge Cases and Pitfalls:**
+-*   **Early Termination Bias:** Breaking the loop when $A_{acc} > 0.95$ saves performance but may miss subtle transparent details [S9]. However, it does not significantly affect final appearance in opaque regions [S1].
+-*   **Boundary Checks:** Rays starting outside the box must be discarded if $t_{near} > t_{far}$ or $t_{far} < 0$ [S5, unofficial].
+-*   **Coordinate Mapping:** Incorrect mapping of world-space coordinates to texture space $[0,1]$ causes artifacts. Ensure `texMin` and `texMax` match the actual texture bounds (e.g., $[0,1]$ not $[-1,1]$) [S2, unofficial].
+-*   **Slice Plane Intersection:** If the ray does not intersect the active slice box, return black immediately [S9].
++4.  **Output:**
++    Write $C_{accum}$ and $A_{accum}$ to the framebuffer [S9].
+ 
+ **Pseudocode:**
+ ```python
+-def ray_march(volume_texture, colormap, ray_origin, ray_direction, step_length, step_alpha, t_min, t_max, multiplied_alpha, early_term_threshold=0.95):
+-    """
+-    Core ray marching loop for volume rendering.
+-    """
+-    # 1. Initialize output
+-    frag_color = vec4(0.0)
++def ray_march(camera_pos, camera_dir, volume_texture, colormap, step_length, t_min, t_max):
++    # 1. Ray Initialization
++    # Transform to model space (simplified)
++    ray_origin = transform_to_model(camera_pos)
++    ray_direction = normalize(transform_to_model(camera_dir))
+     
+-    # 2. Calculate ray bounds in normalized volume space [0,1]
+-    # Assuming volume bounds are defined by 'top' and 'bottom' vectors in normalized space
+-    # For simplicity, assume ray_box_intersection returns t0, t1 in normalized space
+-    t0, t1 = ray_box_intersection(ray_origin, ray_direction, volume_bounds_min, volume_bounds_max)
+-    
+-    if t0 > t1:
++    # Calculate intersection with volume bounds (boxMin, boxMax)
++    t_near, t_far = ray_box_intersection(ray_origin, ray_direction, boxMin, boxMax)
++    if t_near > t_far or t_far < 0:
+         return vec4(0.0) # No intersection
+ 
+-    # 3. Initialize marching state
+-    ray_length = t1 - t0
+-    position = ray_origin + ray_direction * t0
++    # 2. Step Calculation
++    intersection_length = t_far - t_near
++    # step_length is provided as uniform or calculated from resolution
++    
++    # 3. Marching Loop
++    position = ray_origin + ray_direction * t_near
++    accumulated_color = vec4(0.0)
+     accumulated_alpha = 0.0
+     
+-    # 4. Marching Loop
+-    while ray_length > 0:
+-        # Advance position
+-        position += ray_direction * step_length
+-        ray_length -= step_length
++    # Pre-calculate step vector
++    step_vector = ray_direction * step_length
++    
++    while accumulated_alpha < 0.95: # Early termination threshold
++        # Sample volume
++        # Note: position must be normalized to [0,1] or [-1,1] depending on texture setup
++        normalized_pos = normalize_coordinates(position, volume_bounds)
++        scalar_value = textureLod(volume_texture, normalized_pos, 0).r
+         
+-        # Sample volume
+-        val = texture(volume_texture, position).r
+-        
+-        # Check transfer function range
+-        if val < t_min or val > t_max or val == 0:
++        # Skip if outside transfer function range or empty
++        if scalar_value < t_min or scalar_value > t_max or scalar_value == 0:
++            position += step_vector
+             continue
+             
+-        # Calculate opacity
+-        if multiplied_alpha:
+-            alpha = val * step_alpha
+-        else:
+-            alpha = step_alpha
+-            
+-        # Map to color
+-        color = texture(colormap, vec2(val, 0.5)).rgb
++        # Transfer Function
++        # Example: Linear alpha mapping
++        alpha = scalar_value * 0.2 # stepAlpha uniform
+         
+-        # Apply opacity correction (optional, e.g., power curve)
+-        alpha = 1.0 - pow(max(0.0, 1.0 - alpha), 1.0)
++        # Color mapping
++        color = textureLod(colormap, vec2(scalar_value, 0.5), 0).rgb
+         
+-        # Composite
++        # Front-to-Back Compositing
+         # C_out = C_in + c * alpha * (1 - A_in)
+         # A_out = A_in + alpha * (1 - A_in)
+-        frag_color.rgb += (1.0 - accumulated_alpha) * alpha * color
+-        accumulated_alpha += (1.0 - accumulated_alpha) * alpha
++        contribution = color * alpha * (1.0 - accumulated_alpha)
++        accumulated_color += contribution
++        accumulated_alpha += alpha * (1.0 - accumulated_alpha)
+         
+-        # Early termination
+-        if accumulated_alpha >= early_term_threshold:
+-            break
+-            
+-    return frag_color
++        # Advance
++        position += step_vector
++        
++    return vec4(accumulated_color, accumulated_alpha)
+ ```
++
++**Parameters:**
++*   `stepLength`: Controls ray march step size. Default often calculated as $1 / \text{maxSide}$ or fixed (e.g., 0.00391) [S9].
++*   `stepAlpha`: Base alpha multiplier per step (default 0.2) [S9].
++*   `tMin`/`tMax`: Transfer function range. Values outside are skipped [S9].
++*   `MAX_SAMPLES`: Maximum iterations per ray (e.g., 300) [S2, unofficial].
++
++**Edge Cases and Pitfalls:**
++*   **Early Termination:** Breaking the loop when alpha is high (e.g., >0.95) saves computation but may miss subtle transparent details [S9].
++*   **Boundary Checks:** Incorrect texture coordinate normalization (e.g., assuming [-1,1] when data is [0,1]) causes artifacts [S2, unofficial].
++*   **No Intersection:** Rays missing the volume box must be handled to avoid sampling out-of-bounds memory [S5, unofficial].
+ 
+ ## Subtopics
+ 
+ ### [Exponential Approximation Method](2079-exponential-approximation-method.md)
+-Approximates transmittance using an exponential model with step-size correction, allowing larger steps for performance.
++The Exponential Approximation Method (EAM) approximates the continuous light attenuation integral using discrete steps and an exponential transmittance model. It differs from standard linear alpha compositing by scaling sampled alpha values by a step-size-dependent correction factor, allowing larger steps while approximating exponential decay. It is typically chosen when performance is prioritized over exact physical accuracy, or when the volume data is sparse enough that early ray termination provides significant speedup.
+ 
+ ### [Ray Marching Volume Rendering with Henyey-Greenstein Scattering](2545-ray-marching-volume-rendering-with-henyey-greenstein-scatter.md)
+-Adds anisotropic scattering and shadow rays for physically accurate light transport.
++This method renders a 3D volume defined by a density texture by accumulating scattered light along a ray, utilizing the Henyey-Greenstein phase function to model anisotropic scattering and shadow rays for self-shadowing. It distinguishes itself from standard front-to-back volume rendering by explicitly incorporating directional light transport through the Henyey-Greenstein phase function, allowing for the visualization of forward or backward scattering effects in participating media.
+ 
+ ### [Ray Tracing (Binary Objects)](3002-ray-tracing-binary-objects.md)
+-Focuses on first-hit detection for opaque surfaces in binary volumes, ignoring transmittance accumulation.
++Ray Tracing (Binary Objects) is an image-order rendering technique for visualizing surfaces contained within binary volumetric data by determining only the first intersection points with a surface. It solves the problem of displaying opaque surfaces in binary volumes without requiring explicit boundary detection or hidden-surface removal algorithms. Unlike methods that composite translucent data or require gradient estimation from multi-valued volumes, this method treats the volume as a set of opaque objects where light stops at the first surface hit. It is distinguished from its siblings, such as [Discrete Ray Tracing](3020-discrete-ray-tracing.md) which uses voxel connectivity, and [Fixed Step Ray Marching](3136-fixed-step-ray-marching.md) which integrates density, by its exclusive focus on the binary "first-hit" condition using zero-order interpolation.
+ 
+ ### [Discrete Ray Tracing](3020-discrete-ray-tracing.md)
+-Uses 3D DDA for exact voxel traversal order, guaranteeing closest intersection without geometric tests.
++Discrete Ray Tracing is a volume rendering technique that traverses a voxel grid along a ray using a three-dimensional form of Digital Differential Analysis (DDA). It solves the problem of efficiently sampling scalar data in a regular grid without requiring complex geometric intersection tests or acceleration structures. Unlike [Exponential Approximation Method](2079-exponential-approximation-method.md) which approximates transmittance, or [Fixed Step Ray Marching](3136-fixed-step-ray-marching.md) which uses uniform steps, Discrete Ray Tracing guarantees that the first intersection found is the closest by traversing voxels in the exact order the ray intersects them, limiting intersection tests to Pythagorean complexity rather than cubic.
+ 
+ ### [Fixed Step Ray Marching](3136-fixed-step-ray-marching.md)
+-Uses constant step sizes with Beer-Lambert transmittance, simpler but less efficient than adaptive methods.
++Fixed Step Ray Marching is a direct volume rendering technique that integrates the volume rendering equation along camera rays using a constant step size, applying exponential absorption and gradient-based shading to fog-like participating media. It differs from adaptive traversal methods by uniformly sampling the ray, which simplifies implementation but requires careful tuning of step size to balance visual quality and performance. Unlike [Exponential Approximation Method](2079-exponential-approximation-method.md), which may use analytical approximations for transmittance, this method explicitly computes transmittance per step using the Beer-Lambert law.
+ 
+ ### [Per-primitive Ray Sampling](3560-per-primitive-ray-sampling.md)
+-Organizes computation around ellipsoids, updating only intersected ray segments.
++Per-primitive ray sampling is a rendering strategy where each geometric primitive (specifically ellipsoids) independently updates only the ray segments it intersects, avoiding redundant parameter loads and enabling accurate Transfer Function (TF) mapping by accumulating contributions in 3D space. It sets itself apart from sibling methods like [Fixed Step Ray Marching](3136-fixed-step-ray-marching.md) and [Volume Ray Casting](3161-volume-ray-casting.md) by organizing computation around primitives rather than rays, which eliminates the need for explicit per-tile sorting required in 2D rasterization because contributions accumulate in depth order as each ray segment corresponds to a discrete depth interval.
+ 
+ ### [Directional Derivative Diffuse Lighting](4113-directional-derivative-diffuse-lighting.md)
+-Approximates diffuse lighting using two density samples, avoiding normal calculation.
++Directional Derivative Diffuse Lighting is an approximation for diffuse lighting in volumetric raymarching that estimates light scattering by comparing density at the current point and an offset point in the light direction, avoiding the need for normal calculation. It sets itself apart from standard surface raymarching normals by requiring only two density samples instead of multiple gradient estimates, making it significantly cheaper for the resource-intensive volumetric loop.
+ 
+ ### [Specific Material and Geometry Rendering](4395-specific-material-and-geometry-rendering.md)
+-Handles the configuration of transfer functions and shading logic decoupled from traversal.
++Specific Material and Geometry Rendering encompasses the techniques for defining optical properties (density, scattering, emission) and geometric boundaries for participating media, and the specific integration strategies used to render them. It solves the problem of mapping raw spatial data (voxels, procedural noise, or neural features) to physically plausible light interaction and efficiently integrating the radiative transfer equation along camera rays. It is distinguished from general ray marching by its focus on the **material definition layer** (how data maps to $\sigma_a, \sigma_s, \sigma_e$) and **specialized geometry constraints** (spherical shells, binary objects, or neural grids) that dictate the sampling domain and integration limits.
+ 
+ ### [DOSRender](5119-dosrender.md)
+-Depth-ordered, slice-based rendering with semantic instance tracking.
++DOSRender is a depth-ordered, slice-based volume rendering technique that accumulates color and occlusion along a ray while simultaneously tracking semantic instance and group IDs for segmentation. It distinguishes itself from standard front-to-back ray casting by integrating precomputed occlusion samples and hierarchical group membership buffers directly into the accumulation pass, allowing for efficient occlusion-aware rendering and semantic data extraction in a single pass.
+ 
+ ### [Light Transmittance Marching](5400-light-transmittance-marching.md)
+-Casts secondary rays to lights for accurate volumetric occlusion.
++Light Transmittance Marching is a technique to compute physically accurate lighting in a volume by casting a secondary raymarch from each sample point on the primary view ray towards the light source to calculate absorbed light (transmittance). It solves the problem of volumetric occlusion, where light passing through the volume before reaching a sample point is attenuated by the medium itself. Unlike [Front-to-Back Volume Rendering](2350-front-to-back-volume-rendering.md), which typically assumes uniform or pre-computed lighting, this method dynamically computes the light energy arriving at each sample point by accounting for the density along the path to the light.
+ 
+ ### [Ray Casting with Slice-Based Sampling and Gradient Shading](12619-ray-casting-with-slice-based-sampling-and-gradient-shading.md)
+-Uses 2D texture atlases and finite difference normals for shading.
++This method performs direct volume ray casting by sampling a 3D volume stored in a 2D texture atlas, computing surface normals via finite differences of sampled densities, and applying diffuse shading. It stops sampling when a high-density threshold is reached or the ray exits the bounding box. It is distinguished from standard ray marching by its specific use of a 2D texture atlas for 3D data storage and the explicit calculation of gradients for lighting, rather than relying solely on transmittance accumulation or pre-computed normals.
+ 
+ ### [Sphere-Guided Volume Rendering](15265-sphere-guided-volume-rendering.md)
+-Uses trainable spheres to guide sampling for neural implicit surfaces.
++Sphere-Guided Volume Rendering is a sampling strategy for neural implicit surface reconstruction that uses a trainable cloud of spheres to filter ray-marching samples. It solves the problem of inefficient sample distribution in standard volume rendering, where samples are often wasted in empty space or fail to capture thin geometry. Unlike fixed-step ray marching or methods relying on greedy optimization, this approach guides sampling by intersecting rays with a coarse surface approximation, ensuring samples are concentrated near the estimated surface. This improves sample efficiency and helps the implicit function converge to a better optimum.
+ 
+ ### Low Albedo Discrete VRE (Alpha Blending Form)
+-A discrete VRE form derived by approximating transmittance using the first two terms of its Taylor series expansion and assuming low albedo ($\sigma_t \approx \sigma_a, \sigma_s \approx 0$) [S11]. The opacity is approximated as $\alpha_i \approx \sigma_a(\mathbf{p}_i, \omega) \Delta s$ [S11]. The final color is computed as $C = \sum_{i=0}^{N-1} c_i \alpha_i \prod_{j=i+1}^{N-1} (1 - \alpha_j)$, where $c_i$ is the emission $L_e(\mathbf{p}_i, \omega)$ [S11]. This differs from standard discrete VRE by applying low albedo and Taylor approximations, interpreting the result as alpha blending [S11].
++A discrete VRE form derived by approximating transmittance using the first two terms of its Taylor series expansion and assuming low albedo ($\sigma_t \approx \sigma_a, \sigma_s \approx 0$) [S11]. The opacity is approximated as $\alpha_i \approx \sigma_a(\mathbf{p}_i, \omega)\Delta s$ [S11]. The final color is computed as $C = \sum_{i=0}^{N-1} [ C_i \alpha_i \prod_{j=0}^{i-1} t_j ]$, where $C_i$ refers to emission $L_e(\mathbf{p}_i, \omega)$ [S11]. This differs from standard discrete VRE by applying low albedo and Taylor series approximations, interpreting the result as alpha blending [S11].
+ 
+ ### Beam Pre-pass
+-A coarse pre-pass that computes first-hit distances at low resolution (e.g., 1/8) to fast-forward the main raymarch pass [S12, S12, unofficial]. It runs one ray per 8x8 pixel block, walking the world at tile granularity to write the first-hit distance to an `r32float` texture [S12, S12, unofficial]. The main pass then fast-forwards each ray to that depth minus a 16-voxel safety margin [S12, S12, unofficial].
+-
+-### ROVER Volume Rendering Pipeline
+-A distributed ray casting method that initializes rays with a fixed direction $(1.0, 1.0, 1.0)$ and delegates marching to a VTK-m proxy tracer [S13, S13, unofficial]. It computes a uniform sample distance from domain bounds: $\text{sample\_distance} = \frac{\|\text{domain\_extent}\|}{\text{num\_samples}}$ [S13, S13, unofficial]. The ray channel buffer stores 4 floats per ray (directions in indices 0-2, initial alpha in index 3) [S13, S13, unofficial]. Pitfalls include runtime errors if `partial_trace` is called without a valid dataset or primary field [S13, S13, unofficial].
++A coarse pre-pass that computes first-hit distances at low resolution to fast-forward the main raymarch pass [S12, unofficial]. It runs at 1/8 resolution, launching one ray per 8×8 pixel block. Each ray walks the world at tile granularity and writes the first-hit distance to an `r32float` texture. The main pass fast-forwards each ray to that depth minus a 16-voxel safety margin [S12, unofficial].
+ 
+ ### Parallel Analytic Marching
+-A parallelization strategy where multiple initial points are solved simultaneously to march towards all unsolved analytic cells in the active set [S14, S14]. It initializes multiple points $\mathbf{x}$ in $\mathbb{Z}$ in parallel, marching towards analytic faces in set $S$ [S14, S14]. This achieves an efficiency improvement of order 10 on Nvidia GPUs compared to sequential execution [S14, S14].
++A parallelization strategy where multiple initial points are solved simultaneously to march towards all unsolved analytic cells in the active set [S13]. It initializes multiple points $\mathbf{x}$ in $Z$ in parallel by solving Eq 17, instead of a single point, and simultaneously marches towards all analytic cells in the active set $S$ that are unsolved to compute their respective analytic faces [S13]. This provides an efficiency improvement of order 10 on Nvidia GPUs compared to sequential execution [S13].
+ 
+ ### Interpolated Shading
+-A technique that uses linear interpolation to shade entire patches of up to 10x10 pixels, allowing for fewer than one sample per pixel [S15, S15, unofficial]. It queries ahead of the current position, checks if all four corners of the current quad are inside the object, and compares normals to ensure alignment [S15, S15, unofficial]. This approximation is most effective for flat-shaded objects and can render simple SDF objects at up to 100 FPS on a single CPU core [S15, S15, unofficial].
++A technique that uses linear interpolation to shade entire patches of up to 10x10 pixels, allowing for fewer than one sample per pixel [S14, unofficial]. When hitting an object, it queries ahead of the current position, checks if all four corners of the current quad are inside the object, and compares normals at every corner to ensure they are relatively aligned [S14, unofficial]. It then uses linear interpolation to shade the patch [S14, unofficial]. This is an approximation that likely only makes sense for flat-shaded objects [S14, unofficial]. On a single CPU core of a MacBook Air M1, it renders a simple SDF object at up to 100 FPS [S14, unofficial].
+ 
+ ## Operating characteristics
+-*   **Time Complexity:** $O(N \cdot P)$, where $N$ is the number of pixels and $P$ is the number of steps per ray [S5, unofficial]. Performance scales linearly with step count [S5, unofficial].
+-*   **Memory Complexity:** $O(V)$ for the volume texture, where $V$ is the number of voxels [S5, unofficial].
+-*   **Performance:** Fixed-step marching offers predictable performance but may waste samples in empty space [S5, unofficial]. Adaptive marching (e.g., sphere tracing) reduces samples by 5-15 times in sparse volumes [S3]. Early termination significantly speeds up rendering of opaque regions [S1].
+-*   **Strengths:** Simple to implement, GPU-friendly (parallelizable per pixel), handles implicit and procedural volumes naturally [S5, S6, unofficial].
+-*   **Limitations:** Biased estimates if using standard quadrature without delta tracking [S4]. Fixed steps can cause aliasing or missing thin structures if step size is too large [S5, unofficial]. Early termination can miss subtle transparency [S9].
+-*   **When to Use:** Real-time volume rendering, NeRF visualization, implicit surface rendering [S6, unofficial][S1].
+-*   **When Not to Use:** When physically accurate light transport (multiple scattering) is required without approximation [S4], or when exact surface boundaries in binary volumes are needed without compositing .
++*   **Time Complexity:** $O(N \cdot P)$, where $N$ is the number of pixels and $P$ is the number of steps per ray [S5, unofficial]. Performance scales linearly with the number of steps [S5, unofficial].
++*   **Memory Complexity:** $O(V)$ for the volume texture, where $V$ is the number of voxels [S9].
++*   **Performance:** Fixed-step ray marching offers predictable performance and is well-suited for GPU fragment shaders [S5, unofficial]. Adaptive methods (like sphere tracing) can be faster for sparse data but require distance estimators [S3].
++*   **Strengths:** Simple implementation, real-time capable, handles implicit and procedural volumes easily [S1][S5, unofficial].
++*   **Limitations:** Biased estimates if step size is too large; inefficient in empty space without early termination or adaptive steps [S4, S1].
++*   **When to Use:** Real-time visualization of dense or procedural volumes; when hardware acceleration (GPU) is available [S2, S5, unofficial].
++*   **When Not to Use:** When exact physical accuracy is required for heterogeneous media with high variance in density (consider delta tracking) [S4]; or when the volume is extremely sparse and acceleration structures (like [Discrete Ray Tracing](3020-discrete-ray-tracing.md)) would be more efficient [S3].
+ 
+ ## Background
+-Ray marching was introduced as an efficient method for volume rendering, extending ray casting to handle continuous volumetric data [S1, S3]. It became a core technique in GPU-based rendering, enabling real-time visualization of medical imaging (MRI, CT) and procedural effects (smoke, clouds) [S2, S5, unofficial]. The method is foundational for modern neural graphics, including Neural Radiance Fields (NeRF) and Signed Distance Function (SDF) rendering [S6, unofficial]. Variants like sphere tracing were developed for antialiased implicit surfaces [S3]. The technique is widely used in libraries like Jrender and frameworks like Three.js [S1][S5, unofficial].
++Ray marching was introduced as a technique to solve the volume rendering equation with real-time performance by querying and accumulating contributions from sample points [S1]. It is widely used in GPU-based volume rendering, often implemented in fragment shaders [S2, S5, unofficial]. The method is foundational for rendering Neural Radiance Fields (NeRF) and Signed Distance Functions (SDFs) [S6, unofficial]. Variants like sphere tracing were extended for antialiased rendering of height fields and general implicit volumes [S3]. It is used in libraries like Jrender for differentiable rendering [S1] and in WebGL frameworks like Three.js for volumetric visualization [S5, unofficial].
+ 
+ ## Sources
+@@ -189,5 +194,4 @@
+ [S11] 14 Rendering Volume and Subsurface Scattering - Foundations of Visual ..., https://learnvisualcomputing.github.io/rendering-rte.html, fetched 2026-10-27
+ [S12] mstampfli/voxelG, https://github.com/mstampfli/voxelG, fetched 2026-10-24 (unofficial)
+-[S13] llnl/rover, https://github.com/llnl/rover, fetched 2026-10-26 (unofficial)
+-[S14] Learning and Meshing From Deep Implicit Surface Networks Using an Efficient Implementation of Analytic Marching, https://doi.org/10.1109/tpami.2021.3135007, fetched 2026-10-26
+-[S15] A Recursive Algorithm to Render Signed Distance Fields, https://pointersgonewild.com/2026-03-06-a-recursive-algorithm-to-render-signed-distance-fields/, fetched 2026-10-29 (unofficial)+[S13] Learning and Meshing From Deep Implicit Surface Networks Using an Efficient Implementation of Analytic Marching, https://doi.org/10.1109/tpami.2021.3135007, fetched 2026-10-26
++[S14] A Recursive Algorithm to Render Signed Distance Fields, https://pointersgonewild.com/2026-03-06-a-recursive-algorithm-to-render-signed-distance-fields/, fetched 2026-10-29 (unofficial)

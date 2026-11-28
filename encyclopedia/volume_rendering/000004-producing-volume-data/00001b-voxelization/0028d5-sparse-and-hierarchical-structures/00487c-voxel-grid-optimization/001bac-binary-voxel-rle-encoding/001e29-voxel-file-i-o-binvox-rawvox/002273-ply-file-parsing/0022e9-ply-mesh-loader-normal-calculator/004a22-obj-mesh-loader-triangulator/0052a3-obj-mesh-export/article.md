@@ -1,0 +1,204 @@
+# OBJ Mesh Export
+
+Also called: OBJ mesh export with vertex colors, OBJ writer, SVO Mesh Export, mesh file export
+
+## Overview
+Writes a 3D mesh to an OBJ file, supporting optional per-vertex RGB colors [S1, S2, unofficial]. It converts internal mesh representations (vertices and triangles) into the standard Wavefront OBJ text format. Unlike [PLY File Parsing](12665-ply-file-parsing.md) which handles binary/ASCII PLY, this method specifically targets the simpler OBJ structure. It differs from [PLY Mesh Loader & Normal Calculator](12666-ply-mesh-loader-normal-calculator.md) by being an exporter rather than a loader, and from [OBJ Mesh Loader & Triangulator](12664-obj-mesh-loader-triangulator.md) by writing rather than reading.
+
+## How it works
+**Inputs:**
+- `vertices`: List of 3D coordinates, each a tuple or array `(x, y, z)` of floats [S1, unofficial].
+- `triangles`: List of faces, each a tuple of 3 integers representing indices into `vertices` (0-indexed) [S1, unofficial].
+- `vert_rgb`: Optional list of RGB colors corresponding to `vertices`. If `None`, colors are omitted [S1, unofficial].
+- `base_filename`: String for the output file path [S2, unofficial].
+- `treeDepth`: Integer indicating the depth of the Sparse Voxel Octree (SVO) structure, used for naming in SVO-specific exports [S2, unofficial].
+- `svoNodeArray`: List of SVO nodes, each containing `origin` (3D vector) and `width` (float) [S2, unofficial].
+- `voxelArray`: List of Morton codes representing occupied voxels [S2, unofficial].
+- `modelBBox`: Bounding box of the model, containing `min` (3D vector) [S2, unofficial].
+- `width`: Voxel width used for coordinate calculation [S2, unofficial].
+
+**Outputs:**
+- An OBJ file written to disk.
+
+**Data Structures:**
+- OBJ format lines:
+  - Vertex: `v x y z` or `v x y z r g b` [S1, unofficial].
+  - Face: `f i j k` where `i, j, k` are 1-indexed vertex indices [S1, unofficial].
+
+**Steps:**
+
+1. **Determine Output Path:**
+   - If exporting SVO nodes: Construct filename as `base_filename + "_" + str(treeDepth) + "_tree.obj"` [S2, unofficial].
+   - If exporting SVO voxels: Construct filename as `base_filename + "_" + str(treeDepth) + "_voxel.obj"` [S2, unofficial].
+   - If exporting generic mesh: Use `base_filename` or provided path [S1, unofficial].
+
+2. **Open File:**
+   - Open the constructed filename for writing [S1, S2, unofficial].
+
+3. **Write Vertices:**
+   - If `vert_rgb` is provided:
+     - For each vertex `v` with color `c`:
+       - Write line: `v x y z r g b\n` where `x,y,z` are from `v` and `r,g,b` are from `c` [S1, unofficial].
+   - If `vert_rgb` is `None`:
+     - For each vertex `v`:
+       - Write line: `v x y z\n` [S1, unofficial].
+
+4. **Write Faces (Generic Mesh):**
+   - For each triangle face `f` in `triangles`:
+     - Let `f_plus` be `f` with each index incremented by 1 (converting 0-indexed to 1-indexed) [S1, unofficial].
+     - Write line: `f i j k\n` where `i, j, k` are the elements of `f_plus` [S1, unofficial].
+
+5. **Write Faces (SVO Nodes):**
+   - Iterate over `svoNodeArray` [S2, unofficial].
+   - For each node with `origin` and `width`:
+     - Call `write_cube(origin, width)` to generate the 8 vertices and 12 triangles of the cube [S2, unofficial].
+     - Write the corresponding `v` and `f` lines for the cube geometry [S2, unofficial].
+
+6. **Write Faces (SVO Voxels):**
+   - Iterate over `voxelArray` containing Morton codes [S2, unofficial].
+   - For each `morton` code:
+     - Decode the Morton code to 3D coordinates `(x, y, z)` using `morton3D_32_decode(morton & D_MORTON_32_FLAG, x, y, z)` [S2, unofficial].
+     - Compute node origin: `nodeOrigin = modelBBox.min + width * (x, y, z)` [S2, unofficial].
+     - Call `write_cube(nodeOrigin, width)` to generate cube geometry [S2, unofficial].
+     - Write the corresponding `v` and `f` lines [S2, unofficial].
+
+7. **Close File:**
+   - Close the file handle [S1, S2, unofficial].
+
+**Pseudocode:**
+
+> **Unverified code.** The code below did not pass a test run against a reference implementation, or no test fits it, so it may contain errors.
+
+```python
+def write_obj(vertices, triangles, vert_rgb=None, filename="output.obj"):
+    """
+    Writes a generic mesh to an OBJ file.
+    
+    Args:
+        vertices: List of (x, y, z) tuples.
+        triangles: List of (i, j, k) tuples of 0-indexed vertex indices.
+        vert_rgb: Optional list of (r, g, b) tuples.
+        filename: Output file path.
+    """
+    with open(filename, 'w') as f:
+        # Write vertices
+        for i, v in enumerate(vertices):
+            if vert_rgb:
+                r, g, b = vert_rgb[i]
+                f.write("v %.4f %.4f %.4f %.4f %.4f %.4f\n" % (v[0], v[1], v[2], r, g, b))
+            else:
+                f.write("v %.4f %.4f %.4f\n" % (v[0], v[1], v[2]))
+        
+        # Write faces
+        for tri in triangles:
+            # Convert 0-indexed to 1-indexed
+            i1, i2, i3 = tri[0] + 1, tri[1] + 1, tri[2] + 1
+            f.write("f %d %d %d\n" % (i1, i2, i3))
+
+def write_svo_nodes(svo_nodes, base_filename, tree_depth, filename_suffix="_tree.obj"):
+    """
+    Writes SVO nodes as cubes to an OBJ file.
+    """
+    filename = base_filename + "_" + str(tree_depth) + filename_suffix
+    with open(filename, 'w') as f:
+        for node in svo_nodes:
+            origin = node.origin
+            width = node.width
+            write_cube_to_file(f, origin, width)
+
+def write_svo_voxels(voxel_array, model_bbox_min, width, base_filename, tree_depth, filename_suffix="_voxel.obj"):
+    """
+    Writes SVO voxels as cubes to an OBJ file.
+    """
+    filename = base_filename + "_" + str(tree_depth) + filename_suffix
+    with open(filename, 'w') as f:
+        for morton in voxel_array:
+            # Decode Morton code to 3D grid coordinates
+            x, y, z = morton3D_32_decode(morton & D_MORTON_32_FLAG)
+            # Compute world origin
+            node_origin = model_bbox_min + width * (x, y, z)
+            write_cube_to_file(f, node_origin, width)
+
+def write_cube_to_file(f, origin, width):
+    """
+    Writes a cube defined by origin and width to the file object f.
+    Assumes a standard cube centered at origin with side length width.
+    """
+    # Define 8 vertices of the cube relative to origin
+    # Assuming origin is the minimum corner (min, min, min)
+    # Vertices:
+    # 0: (0,0,0), 1: (1,0,0), 2: (0,1,0), 3: (1,1,0)
+    # 4: (0,0,1), 5: (1,0,1), 6: (0,1,1), 7: (1,1,1)
+    # Note: Exact vertex ordering and face winding must match the source's write_cube implementation.
+    # Since write_cube is not fully detailed, we assume a standard cube generation.
+    
+    # Generate vertices
+    verts = [
+        (origin[0], origin[1], origin[2]),
+        (origin[0] + width, origin[1], origin[2]),
+        (origin[0], origin[1] + width, origin[2]),
+        (origin[0] + width, origin[1] + width, origin[2]),
+        (origin[0], origin[1], origin[2] + width),
+        (origin[0] + width, origin[1], origin[2] + width),
+        (origin[0], origin[1] + width, origin[2] + width),
+        (origin[0] + width, origin[1] + width, origin[2] + width)
+    ]
+    
+    # Write vertices
+    for v in verts:
+        f.write("v %.4f %.4f %.4f\n" % (v[0], v[1], v[2]))
+    
+    # Write faces (12 triangles for 6 faces)
+    # Standard cube face winding (counter-clockwise when viewed from outside)
+    faces = [
+        (0, 1, 3), (0, 3, 2),  # Front (z=0)
+        (4, 6, 7), (4, 7, 5),  # Back (z=1)
+        (0, 2, 6), (0, 6, 4),  # Left (x=0)
+        (1, 5, 7), (1, 7, 3),  # Right (x=1)
+        (2, 3, 7), (2, 7, 6),  # Top (y=1)
+        (0, 4, 5), (0, 5, 1)   # Bottom (y=0)
+    ]
+    
+    for face in faces:
+        # Convert 0-indexed to 1-indexed
+        i1, i2, i3 = face[0] + 1, face[1] + 1, face[2] + 1
+        f.write("f %d %d %d\n" % (i1, i2, i3))
+
+def morton3D_32_decode(morton_code):
+    """
+    Decodes a 32-bit Morton code into 3D coordinates (x, y, z).
+    This is a placeholder for the actual bit-interleaving inverse operation.
+    """
+    # Implementation details for Morton decoding are not provided in sources.
+    # Standard algorithm involves extracting bits at positions 0, 1, 2, 3...
+    # x = bits 0, 3, 6, ...
+    # y = bits 1, 4, 7, ...
+    # z = bits 2, 5, 8, ...
+    # This function must be implemented according to the specific Morton encoding used.
+    # [G] Placeholder for Morton decoding logic.
+    return 0, 0, 0
+```
+
+**Parameters:**
+- `treeDepth`: Integer, typical values depend on the SVO depth [S2, unofficial].
+- `width`: Float, voxel size [S2, unofficial].
+
+**Edge Cases and Pitfalls:**
+- **Indexing:** OBJ uses 1-based indexing for faces, while internal data often uses 0-based. Failure to increment indices by 1 results in invalid OBJ files [S1, unofficial].
+- **Color Format:** If `vert_rgb` is provided, it must have the same length as `vertices` [S1, unofficial].
+- **Morton Decoding:** The `morton3D_32_decode` function must correctly handle the `D_MORTON_32_FLAG` mask [S2, unofficial].
+- **Cube Geometry:** The `write_cube` function must consistently generate vertices and faces that form a valid watertight cube [S2, unofficial].
+
+## Operating characteristics
+- **Time Complexity:** Linear with respect to the number of vertices and faces $O(V + F)$ [S1, S2, unofficial].
+- **Memory Complexity:** Linear with respect to the number of vertices and faces for buffering [S1, S2, unofficial].
+- **Performance:** Fast I/O operation, limited by disk write speed [S1, S2, unofficial].
+- **Strengths:** Simple, human-readable format, widely supported [S1, unofficial].
+- **Limitations:** No support for normals, UVs, or materials in the basic implementation [S1, unofficial]. Text format can be large for high-resolution meshes [S1, unofficial].
+
+## Background
+The OBJ format was developed by Wavefront Technologies for their Advanced Visualizer animation package [S1, S2, unofficial]. It has become a standard interchange format for 3D models. The specific implementation in [S1, unofficial] is part of the Pixel-NeRF project, while [S2, unofficial] is part of the GPU-SVO project for exporting sparse voxel octrees.
+
+## Sources
+[S1] sxyu/pixel-nerf, https://github.com/sxyu/pixel-nerf, fetched 2026-10-26 (unofficial)
+[S2] GitHub - Alan-Leo-Wong/GPU-SVO, https://github.com/Alan-Leo-Wong/GPU-SVO, fetched 2026-10-29 (unofficial)

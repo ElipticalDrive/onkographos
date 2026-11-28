@@ -1,0 +1,115 @@
+--- v003.md
++++ v004.md
+@@ -4,5 +4,5 @@
+ 
+ ## Overview
+-The Text-Image Direction Score (TIDS) is a quantitative metric used in text-guided NeRF editing to estimate the semantic alignment between the direction of a text prompt change and the resulting change in the rendered image [S1]. Unlike pixel-level metrics such as MSE or PSNR, which measure visual fidelity, TIDS evaluates whether the edit performed by the model corresponds to the semantic intent of the instruction [S1]. It sets itself apart from sibling metrics like R-Precision by focusing on the *directionality* of the edit in embedding space rather than the retrieval accuracy of a single view against a caption [S1, S2].
++The Text-Image Direction Score (TIDS) is a quantitative metric used in text-guided NeRF editing to estimate the semantic alignment between the direction of a text prompt change and the resulting change in the rendered image [S1]. Unlike pixel-level metrics such as MSE or PSNR, which measure visual fidelity, TIDS evaluates whether the edit performed by the model corresponds to the semantic intent of the instruction [S1]. It sets itself apart from sibling metrics like R-Precision by focusing on the directionality of the edit in embedding space rather than the retrieval accuracy of a single view against a caption [S1].
+ 
+ ## How it works
+@@ -18,6 +18,5 @@
+ 
+ **Data Structures:**
+-*   Embeddings are vectors of fixed dimensionality (e.g., 512 or 768 depending on the CLIP variant) [S1].
+-*   Images are typically normalized to $[0, 1]$ or $[-1, 1]$ as required by the specific CLIP implementation [S1].
++*   Embeddings are vectors of fixed dimensionality [G].
+ 
+ **Steps:**
+@@ -41,79 +40,49 @@
+ **Edge Cases and Pitfalls:**
+ *   **Zero Vectors:** If the image or text embeddings do not change (i.e., $\Delta \mathbf{V}_I = \mathbf{0}$ or $\Delta \mathbf{V}_T = \mathbf{0}$), the denominator becomes zero. Implementations must handle this by returning 0 or skipping the view, as the direction is undefined [G].
+-*   **Prompt Specificity:** The metric assumes that $oT_i$ and $eT_i$ accurately reflect the semantic difference intended by the user. Ambiguous prompts may yield low scores even if the visual edit is correct [S1].
++*   **Prompt Specificity:** The metric assumes that $oT_i$ and $eT_i$ accurately reflect the semantic difference intended by the user. Ambiguous prompts may yield low scores even if the visual edit is correct [G].
+ 
+ **Pseudocode:**
+ ```python
+ import torch
+-import torch.nn.functional as F
+ 
+ def text_image_direction_score(clip_image_encoder, clip_text_encoder, 
+                                original_image, edited_image, 
+                                original_text, edited_text):
+-    """
+-    Computes the Text-Image Direction Score (TIDS).
+-    
+-    Args:
+-        clip_image_encoder: Function/Model to encode images to CLIP embeddings.
+-        clip_text_encoder: Function/Model to encode text to CLIP embeddings.
+-        original_image: Tensor of shape (C, H, W) or (B, C, H, W).
+-        edited_image: Tensor of shape (C, H, W) or (B, C, H, W).
+-        original_text: String or list of strings.
+-        edited_text: String or list of strings.
+-        
+-    Returns:
+-        float: The cosine similarity score.
+-    """
+-    # 1. Encode images
++    # 1. Encode images and text
+     emb_o_img = clip_image_encoder(original_image)
+     emb_e_img = clip_image_encoder(edited_image)
+-    
+-    # 2. Encode text
+     emb_o_txt = clip_text_encoder(original_text)
+     emb_e_txt = clip_text_encoder(edited_text)
+     
+-    # 3. Compute direction vectors
+-    # Ensure embeddings are normalized if the encoder doesn't do it automatically
+-    # CLIP embeddings are typically L2-normalized, but the difference vector is not.
++    # 2. Compute direction vectors
+     img_direction = emb_e_img - emb_o_img
+     txt_direction = emb_e_txt - emb_o_txt
+     
+-    # 4. Compute cosine similarity
+-    # Dot product
+-    dot_product = torch.sum(img_direction * txt_direction, dim=-1)
++    # 3. Compute cosine similarity
++    dot_product = torch.dot(img_direction.flatten(), txt_direction.flatten())
++    img_norm = torch.norm(img_direction)
++    txt_norm = torch.norm(txt_direction)
+     
+-    # Norms
+-    img_norm = torch.norm(img_direction, dim=-1)
+-    txt_norm = torch.norm(txt_direction, dim=-1)
+-    
+-    # Denominator
+-    denominator = img_norm * txt_norm
+-    
+-    # Handle zero division
+-    # If either norm is zero, the direction is undefined. 
+-    # A common convention is to return 0.0 or NaN. 
+-    # Here we return 0.0 for safety in aggregation.
+-    mask = denominator > 0
+-    score = torch.where(mask, dot_product / denominator, torch.zeros_like(dot_product))
+-    
+-    return score.item()
++    # Handle zero vectors
++    if img_norm == 0 or txt_norm == 0:
++        return 0.0
++    return dot_product / (img_norm * txt_norm)
+ ```
+ 
+ ## Subtopics
+ 
+-### R-Precision
+-R-Precision measures how well a rendered view of a synthesis object aligns with the text caption used to generate it, rather than the direction of an edit [S2]. It computes the precision of rendered views over a group of text captions using a retrieval model [S2]. The procedure involves collecting an object-centric captions dataset (e.g., from COCO) and sampling captions for training [S2]. For evaluation, it computes the precision of rendered views per synthesis object over a set of captions (e.g., 153 captions) [S2]. Unlike TIDS, which compares an edit pair, R-Precision assesses the alignment of a single generated view against a pool of captions [S2]. It may use CLIP [S2] or BLIP2 [S2] as the language-image model backbone.
++### [R-Precision](13785-r-precision.md)
++R-Precision measures how well a rendered view of a synthesis object aligns with the text caption used to generate it. It computes the precision of rendered views over a group of text captions using a retrieval model. It is distinct from pixel-based metrics by evaluating semantic alignment rather than geometric fidelity. Choose it when evaluating text-to-3D generation quality rather than edit directionality. See [R-Precision](13785-r-precision.md).
+ 
+ ## Operating characteristics
+-*   **Time Complexity:** Dominated by the inference time of the CLIP image and text encoders. For a single view, it is $O(1)$ relative to the number of pixels but depends on the encoder's depth.
+-*   **Memory Complexity:** Requires storing the CLIP model weights and the embeddings for the original and edited images/text.
+-*   **Performance:** In simple settings (e.g., 5 edits on NeRF-Art face scene), TIDS scores for methods like Instruct-NeRF2NeRF are around 0.1477, while ViCA-NeRF achieves 0.1545 [S1]. The metric is sensitive to the quality of the text prompts and the semantic consistency of the edit [S1].
++*   **Time Complexity:** Dominated by the inference time of the CLIP image and text encoders. For a single view, it is $O(1)$ relative to the number of pixels but depends on the encoder's depth [G].
++*   **Memory Complexity:** Requires storing the CLIP model weights and the embeddings for the original and edited images/text [G].
++*   **Performance:** In simple settings (e.g., 5 edits on NeRF-Art face scene), TIDS scores for methods like Instruct-NeRF2NeRF are around 0.1477, while ViCA-NeRF achieves 0.1545 [S1].
+ *   **Strengths:** Directly measures semantic alignment with the text instruction, which is the primary goal of text-guided editing [S1].
+-*   **Limitations:** Does not measure visual fidelity or photorealism. It relies entirely on the CLIP embedding space, which may not perfectly correlate with human perception of "edit correctness" for all types of changes [S1].
++*   **Limitations:** Does not measure visual fidelity or photorealism [S1].
+ 
+ ## Background
+-The Text-Image Direction Score was introduced in the context of evaluating text-guided NeRF editing methods [S1]. It was adopted from prior work on image editing evaluation [38] (cited in [S1]) to quantify how well the visual changes in a NeRF correspond to the textual instructions provided. It is used alongside consistency scores to evaluate methods like ViCA-NeRF and Instruct-NeRF2NeRF [S1].
++The Text-Image Direction Score was introduced in the context of evaluating text-guided NeRF editing methods [S1]. It was adopted from prior work on image editing evaluation to quantify how well the visual changes in a NeRF correspond to the textual instructions provided [S1]. It is used alongside consistency scores to evaluate methods like ViCA-NeRF and Instruct-NeRF2NeRF [S1].
+ 
+ ## Sources
+-[S1] ViCA-NeRF: View-Consistency-Aware 3D Editing of Neural Radiance Fields, https://arxiv.org/abs/2402.00864v1, fetched 2026-10-26
+-[S2] Blended-NeRF: Zero-Shot Object Generation and Blending in Existing Neural Radiance Fields, https://arxiv.org/abs/2306.12760v2, fetched 2026-10-26+[S1] ViCA-NeRF: View-Consistency-Aware 3D Editing of Neural Radiance Fields, https://arxiv.org/abs/2402.00864v1, fetched 2026-10-26

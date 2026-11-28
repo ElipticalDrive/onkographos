@@ -1,0 +1,104 @@
+# VGG Loss for Image Patches
+
+Also called: Content Loss, Feature Distance Loss, Feature Loss, Perceptual Loss (L_feat), VGG Loss, VGG feature distance
+
+## Overview
+A differentiable loss function that measures perceptual similarity by comparing high-level features of rendered and reference image patches [S1, S2]. It truncates a pre-trained VGG network to compute the Euclidean distance between extracted features, preserving high-level global details but suffering from loss-induced bias when rendered images contain noise [S2, S4].
+
+## How it works
+**Inputs and Outputs:**
+- **Inputs:** Real image patches $I_i$, rendered (fake) image patches $\hat{I}_i$, a pre-trained VGG network (typically VGG-19), and a loss multiplier parameter [S1, S2][S3, unofficial].
+- **Outputs:** A scalar loss value representing the perceptual distance between the patches [S2].
+
+**Data Structures:**
+- **Patches:** 2D image arrays of shape $(H, W, C)$ or $(B, C, H, W)$ for batches [S2][S3, unofficial].
+- **VGG Features:** Activation maps from a specific truncated layer of the VGG network [S2, S5]. The parent method [High-Frequency Aware Loss](7589-high-frequency-aware-loss.md) specifies using only the first block of VGG-19 (before max-pooling) to preserve high-frequency details [S1, S2].
+
+**Steps:**
+1. Extract real and fake patches from the training batch [S3, unofficial].
+2. Slice the batch to include only the first `num_patches` if processing a subset [S3, unofficial].
+3. Pass both real and fake patches through the truncated VGG network to obtain high-level feature representations $\Phi(I_i)$ and $\Phi(\hat{I}_i)$ [S2, S5].
+4. Compute the squared Euclidean distance between the feature maps [S2, S4].
+5. Average the distances over the number of patches $N$ and multiply by the loss multiplier [S2][S3, unofficial].
+
+**Formula:**
+Let $N$ be the number of patches, $\Phi(\cdot)$ be the feature extractor from the truncated VGG network, $\hat{I}_i$ be the rendered patch, and $I_i$ be the reference patch. The VGG loss $L_{feat}$ is:
+
+$$ L_{feat} = \frac{1}{N} \sum_{i=1}^{N} \| \Phi(\hat{I}_i) - \Phi(I_i) \|_2^2 $$
+
+The final loss term added to the optimization objective is:
+
+$$ L_{final} = \text{vgg\_loss\_mult} \times L_{feat} $$
+
+**Parameters:**
+- `vgg_loss_mult`: The multiplier for the VGG loss in the total loss computation [S3, unofficial]. Value not given in the sources.
+- $\lambda_p$: Hyperparameter scaling the perceptual loss, typically set to 0.01 [S8].
+
+**Edge Cases and Pitfalls:**
+- **Noise Sensitivity:** High-level feature propagation amplifies rendering noise, making the loss highly sensitive to it and causing loss-induced bias that impedes optimization [S1, S4]. This bias can push the optimizer toward suboptimal solutions when rendered images contain Monte Carlo noise [S4].
+
+**Pseudocode:**
+> **Unverified code.** The code below did not pass a test run against a reference implementation, or no test fits it, so it may contain errors.
+
+```python
+def compute_vgg_loss(real_patches, fake_patches, vgg_model, vgg_loss_mult):
+    """
+    Computes the VGG perceptual loss for a batch of image patches.
+    
+    Args:
+        real_patches: List or array of real image patches.
+        fake_patches: List or array of generated image patches.
+        vgg_model: A pre-trained VGG-19 model, truncated to the first block (before max-pooling).
+        vgg_loss_mult: Scalar multiplier for the loss.
+        
+    Returns:
+        Scalar loss value.
+    """
+    # 1. Extract features from real and fake patches using the truncated VGG network
+    features_real = vgg_model(real_patches)
+    features_fake = vgg_model(fake_patches)
+    
+    # 2. Compute the squared Euclidean distance between feature maps
+    diff = features_real - features_fake
+    squared_diff = diff * diff
+    loss_per_patch = sum(val ** 2 for val in squared_diff.flatten())
+    
+    # 3. Average over the batch and apply multiplier
+    num_patches = len(real_patches)
+    avg_loss = loss_per_patch / num_patches
+    final_loss = vgg_loss_mult * avg_loss
+    
+    return final_loss
+```
+
+## Subtopics
+
+### LPIPS Patch Supervision
+A variant that uses the LPIPS metric for patch supervision. In each training step, it randomly renders a 300 × 300 image patch and compares it with the ground-truth patch to compute the LPIPS loss [S6, unofficial]. The total training loss is $L = L_{reg} + \lambda_{LPIPS} L_{LPIPS}$, where $L_{reg} = \lambda_{color} L_{color} + \lambda_{density} L_{density}$ is the regularization loss [S6, unofficial]. The weight $\lambda_{LPIPS}$ is set to 0.025 [S6, unofficial]. Unlike NeRF, which requires multiple network evaluations per ray or small 32×32 patches, this method renders a large 300×300 patch in a single step, enabling efficient large-patch LPIPS supervision [S6, unofficial]. On the light change dataset, ProLiF with large-patch LPIPS achieves higher SSIM and lower LPIPS than NeRF with 32×32 patch supervision or 256×256 up-sampled patch supervision [S6, unofficial].
+
+### VGG Loss with Random Augmentations
+A variant that uses VGG perceptual loss with random geometric image-space augmentations to reduce gradient variance during inversion refinement [S7]. In each step, both the predicted and target images are randomly augmented with geometric transformations, and the losses from 16 augmentations are averaged [S7]. The number of augmentations is set to 16 [S7].
+
+### HrSRG Optimization with Perceptual Loss
+A variant that optimizes the HrSRG representation by treating voxel values $\{(c, \sigma, v)\}$ as learnable parameters alongside a tiny MLP weights $\Phi$, using perceptual loss to improve texture crispness and tolerate camera pose misalignment [S8]. It renders a 384×384 image patch per iteration, considers the first three convolution blocks of VGG-19, and sets the hyperparameter $\lambda_p$ to 0.01 [S8]. The perceptual loss is computed as $L_p = \frac{\lambda_p}{H_j W_j} \sum_{h,w} \|\phi_j(\hat{I}) - \phi_j(I)\|$, where $H_j$ and $W_j$ are spatial dimensions of the feature maps, and $\phi_j$ is the output of the $j$-th convolution block [S8]. It takes about 80 seconds to optimize HrSRG for 100 iterations (or 2.0×10^7 rays) on a single V100 GPU [S8]. Unlike SNeRG, which only fine-tunes its tiny MLP after obtaining the sparse radiance grid, HrSRG optimizes the voxel values directly as parameters [S8].
+
+## Operating characteristics
+- **Time Complexity:** Proportional to the number of patches and the inference time of the truncated VGG network [S2].
+- **Memory Complexity:** Proportional to the patch size and batch size, as feature maps must be stored for the distance computation [G].
+- **Strengths:** Preserves high-level global features and high-frequency details when using shallow VGG blocks, effectively preventing smoothing of textures [S1, S2, S5].
+- **Limitations:** Highly sensitive to rendering noise due to deep feature propagation, which can cause loss-induced bias and impede optimization [S1, S4]. Not compatible with PSNR in varying light conditions [S6, unofficial].
+- **When to use:** When perceptual quality and high-frequency detail preservation are prioritized over strict pixel-wise accuracy [S2, S5].
+- **When not to use:** When rendered images contain significant noise that would bias the optimization toward suboptimal solutions [S4].
+
+## Background
+VGG loss was introduced by Johnson et al. [2016] as a differentiable proxy for perceptual similarity by truncating the VGG-19 network [Simonyan and Zisserman 2015] and computing the Euclidean distance between high-level features [S2, S4]. It has been widely adopted in image synthesis and optimization tasks to align semantic content and style across views [S2]. In volume rendering, it is applied as a regularization loss to improve perceptual quality and prevent overly smooth textures [S1, S5, S8]. Specific applications to large-scale rendering and patch-based supervision are explored in methods like ProLiF [S6, unofficial] and HrSRG [S8].
+
+## Sources
+[S1] Recursive Control Variates for Inverse Rendering, https://doi.org/10.1145/3592139, fetched 2026-10-27
+[S2] Semantically-aware Neural Radiance Fields for Visual Scene Understanding: A Comprehensive Review, https://link.springer.com/article/10.1007/s11263-025-02663-5, fetched 2026-10-27
+[S3] barbararoessle/ganerf, https://github.com/barbararoessle/ganerf, fetched 2026-10-27 (unofficial)
+[S4] Recursive Control Variates for Inverse Rendering, https://research.nvidia.com/labs/rtr/publication/nicolet2023recursive/, fetched 2026-11-08
+[S5] READ: Large-Scale Neural Scene Rendering for Autonomous Driving, https://doi.org/10.1609/aaai.v37i2.25238, fetched 2026-10-29
+[S6] Progressively-connected Light Field Network for Efficient View Synthesis, https://doi.org/10.48550/arxiv.2207.04465, fetched 2026-10-27 (unofficial)
+[S7] Shape, Pose, and Appearance from a Single Image via Bootstrapped Radiance Field Inversion, https://doi.org/10.1109/cvpr52729.2023.00427, fetched 2026-10-26
+[S8] Digging into Radiance Grid for Real-Time View Synthesis with Detail Preservation, https://doi.org/10.1007/978-3-031-19784-0_42, fetched 2026-10-26

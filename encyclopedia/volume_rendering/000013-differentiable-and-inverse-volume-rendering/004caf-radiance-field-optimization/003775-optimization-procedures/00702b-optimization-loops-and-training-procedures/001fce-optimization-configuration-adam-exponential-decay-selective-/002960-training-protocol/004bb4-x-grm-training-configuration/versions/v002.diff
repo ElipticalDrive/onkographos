@@ -1,0 +1,157 @@
+--- v001.md
++++ v002.md
+@@ -11,5 +11,5 @@
+ *   **Output:** Reconstructed 3D volumetric data (CT volume) [S1, unofficial].
+ 
+-**Data Structures and Model Architecture**
++**Data Structures and Model Architecture** [S1, unofficial]
+ The model consists of two Vision Transformer (ViT) components [S1, unofficial]:
+ 1.  **Encoder ViT ($F_{enc}$):** Uses ViT-B/16 architecture. Initialized from DINO pre-trained weights [S1, unofficial].
+@@ -33,5 +33,5 @@
+ 3.  **View Sampling:** Evenly sample $N$ perspectives from the 50 available projections [S1, unofficial].
+ 4.  **Forward Pass:** Process the selected views through the Encoder ViT and Fusion ViT to generate the reconstruction [S1, unofficial].
+-5.  **Loss Computation:** Calculate the loss based on the reconstructed volume and the ground truth [S1, unofficial].
++5.  **Loss Computation:** The specific loss function is not given in the sources [G].
+ 6.  **Backward Pass:** Compute gradients using bFloat16 precision with gradient checkpointing to reduce memory usage [S1, unofficial].
+ 7.  **Update:** Update model parameters using the AdamW optimizer with the current learning rate determined by the cosine annealing schedule [S1, unofficial].
+@@ -40,77 +40,84 @@
+ **Pseudocode**
+ ```python
+-# X-GRM Training Configuration
+-# Based on [S1, unofficial]
++import math
++import random
++
++def evenly_sample_indices(total_views, num_views):
++    step = total_views / num_views
++    return [int(i * step) for i in range(num_views)]
++
++def cosine_annealing_lr(initial_lr, final_lr, current_step, total_steps):
++    return final_lr + 0.5 * (initial_lr - final_lr) * (1 + math.cos(math.pi * current_step / total_steps))
++
++class ViT_B_16:
++    def __init__(self, weights='DINO_PRETRAINED', patch_size=16, layers=12, heads=12, embed_dim=768, mlp_ratio=4.0, init='scratch'):
++        self.weights = weights
++        self.patch_size = patch_size
++        self.layers = layers
++        self.heads = heads
++        self.embed_dim = embed_dim
++        self.mlp_ratio = mlp_ratio
++        self.init = init
++    def parameters(self):
++        return []
++    def __call__(self, x):
++        return x
++
++class AdamW:
++    def __init__(self, params, lr, betas):
++        self.params = list(params)
++        self.lr = lr
++        self.betas = betas
++        self.state = {}
++        self.step_count = 0
++    def step(self):
++        self.step_count += 1
++        for p in self.params:
++            if p.grad is None: continue
++            if id(p) not in self.state:
++                self.state[id(p)] = {'m': 0.0, 'v': 0.0}
++            s = self.state[id(p)]
++            beta1, beta2 = self.betas
++            s['m'] = beta1 * s['m'] + (1 - beta1) * p.grad
++            s['v'] = beta2 * s['v'] + (1 - beta2) * p.grad**2
++            m_hat = s['m'] / (1 - beta1**self.step_count)
++            v_hat = s['v'] / (1 - beta2**self.step_count)
++            p.data -= self.lr * m_hat / (math.sqrt(v_hat) + 1e-8)
++    def zero_grad(self):
++        for p in self.params:
++            if p.grad is not None: p.grad.zero_()
+ 
+ def train_xgrm():
+-    # Hyperparameters
+     num_epochs = 100
+     batch_size = 8
+     initial_lr = 1e-4
+     final_lr = 1e-6
+-    beta1 = 0.9
+-    beta2 = 0.95
+-    available_views = 50  # Total available projections
++    beta1, beta2 = 0.9, 0.95
++    available_views = 50
+     view_options = [6, 8, 10]
+-    
+-    # Model Initialization
++
+     encoder_vit = ViT_B_16(weights='DINO_PRETRAINED')
+-    fusion_vit = ViT_B_16(
+-        patch_size=16,
+-        layers=12,
+-        heads=12,
+-        embed_dim=768,
+-        mlp_ratio=4.0,
+-        init='scratch'
+-    )
+-    
+-    # Optimizer
+-    optimizer = AdamW(
+-        params=chain(encoder_vit.parameters(), fusion_vit.parameters()),
+-        lr=initial_lr,
+-        betas=(beta1, beta2)
+-    )
+-    
+-    # Learning Rate Scheduler (Cosine Annealing)
+-    scheduler = CosineAnnealingLR(
+-        optimizer=optimizer,
+-        T_max=num_epochs,
+-        eta_min=final_lr
+-    )
+-    
+-    # Training Loop
++    fusion_vit = ViT_B_16(patch_size=16, layers=12, heads=12, embed_dim=768, mlp_ratio=4.0, init='scratch')
++
++    optimizer = AdamW(params=encoder_vit.parameters() + fusion_vit.parameters(), lr=initial_lr, betas=(beta1, beta2))
++    step_count = 0
++
+     for epoch in range(num_epochs):
+         for batch in data_loader:
+-            # Variable-view learning strategy
+             num_views = random.choice(view_options)
+-            
+-            # Evenly sample views from the 50 available projections
+-            # Note: Implementation detail for 'evenly sampled' is not explicitly 
+-            # defined in sources, assumed to be deterministic spacing or 
+-            # pre-defined subsets [G].
+             selected_indices = evenly_sample_indices(available_views, num_views)
+             input_views = batch['projections'][:, selected_indices, :, :]
+-            
+-            # Forward pass
+-            # encoder_vit and fusion_vit process input_views
+-            reconstructed_volume = forward_pass(
+-                input_views, 
+-                encoder_vit, 
+-                fusion_vit
+-            )
+-            
+-            # Compute loss (e.g., L1/L2 or perceptual loss in 3D space)
+-            # Source mentions PSNR calculated in 3D volumetric space [S1, unofficial]
++
++            reconstructed_volume = forward_pass(input_views, encoder_vit, fusion_vit)
+             loss = compute_loss(reconstructed_volume, batch['ground_truth'])
+-            
+-            # Backward pass with gradient checkpointing
++
+             loss.backward()
+-            
+-            # Optimizer step
+             optimizer.step()
+             optimizer.zero_grad()
+-            
+-            # Update learning rate
+-            scheduler.step()
++
++            step_count += 1
++            current_lr = cosine_annealing_lr(initial_lr, final_lr, step_count, num_epochs * len(data_loader))
++            for param_group in optimizer.param_groups:
++                param_group['lr'] = current_lr
+ ```
+ 

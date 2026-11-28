@@ -1,0 +1,241 @@
+--- v003.md
++++ v004.md
+@@ -1,130 +1,103 @@
+ # Radiance-Predicting Neural Networks (RPNN)
+ 
+-Also called: Radiance-Predicting Neural Networks (RPNN) for clouds
++Also called: Kallweit et al. method, RDNN, Radiance-Predicting Neural Networks (RPNN) for clouds
+ 
+ ## Overview
+-Radiance-Predicting Neural Networks (RPNN) is a neural volume rendering method that approximates complex light scattering within clouds and their interaction with atmospheric illumination by evaluating a multilayer perceptron (MLP) per pixel on mesh geometry, avoiding explicit volumetric integration [S1, S2]. It sets itself apart from its sibling [In-Shader Neural Volume Ray Marching](1495-in-shader-neural-volume-ray-marching.md) by specifically decomposing the radiance prediction into direct and indirect components to handle soft shadow boundaries and multiple scattering, which earlier neural shading methods struggled with [S1, S2]. Unlike [Neural Volume Scattering Prediction](8439-neural-volume-scattering-prediction.md), which uses sampling templates to solve the radiative transfer equation, RPNN predicts final pixel colors directly based on shading configurations [S1, S2].
++Radiance-Predicting Neural Networks (RPNN) is a neural volume rendering method for clouds that uses a multilayer perceptron (MLP) to predict radiance for various shading configurations, combined with Monte Carlo integration for direct and single scattering [S1, S2]. It sets itself apart from its sibling [In-Shader Neural Volume Ray Marching](1495-in-shader-neural-volume-ray-marching.md) by explicitly handling multiple scattering through learned radiance predictions rather than explicit volumetric integration, and differs from [Neural Volume Scattering Prediction](8439-neural-volume-scattering-prediction.md) by predicting final radiance directly from shading configurations instead of solving the radiative transfer equation with sampling templates [S1, S2].
+ 
+ ## How it works
+ **Inputs and Outputs:**
+-*   **Inputs:** 3D shading point $p$, sun direction $(\theta, \phi)$, and cloud thickness $\delta$.
+-*   **Outputs:** Predicted color $\tilde{c}$ and transparency $\alpha$.
++*   **Inputs:** Shading configuration descriptors containing location, view and light directions, light source position, and cloud density structure represented by a hierarchy of point stencils.
++*   **Outputs:** Predicted radiance for the desired shading configuration.
+ 
+ **Data Structures:**
+-*   **Triplane Feature Maps:** Three learnable parameter tensors $F_{XY}, F_{YZ}, F_{XZ}$ representing features on orthogonal planes.
+-*   **MLP:** A multilayer perceptron with fully connected layers. Hidden layers use ReLU activation. The output layer uses an exponential activation function $g(x) = e^{x-3}$ [S1].
++*   **MLP:** A multilayer perceptron with fully connected layers that maps descriptors to radiance values.
++*   **Hierarchical Point Stencils:** A grid of point samples representing cloud density at multiple spatial scales, fed progressively into the network.
+ 
+ **Steps:**
+-1.  **Encode Position:** Project the 3D shading point $p$ onto three orthogonal planes. Sample features $F_{XY}, F_{YZ}, F_{XZ}$ from each plane using bilinear interpolation. Sum these features to form the spatial encoding [S1].
+-2.  **Form Input Vector:** Concatenate the summed triplane features, the 2D sun direction vector $(\theta, \phi)$, and the thickness parameter $\delta$ [S1].
+-    *   $\theta, \phi$: Spherical coordinates for azimuth and elevation angles, mapping to the sun direction in a sky model [S1].
+-    *   $\delta$: The thickness of the cloud along the view direction at point $p$, computed by mirroring back-camera positions and subtracting front-camera positions [S1].
+-3.  **Evaluate MLP:** Pass the input vector through the MLP. The network outputs two RGB colors $c_D$ and $c_I$, and a transparency value $\alpha$ [S1].
+-    *   $c_D$: Color of the shading point when directly lit by the light source.
+-    *   $c_I$: Indirect shading color when the shading point is occluded from the light source [S1].
+-4.  **Compute Visibility:** Calculate a soft visibility value $v$ from the diffuse direct light pass. Convert the diffuse direct pass to grayscale using the luminosity method. Apply a smoothstep function (cubic Hermite interpolation) with lower threshold $t_{min}=0.0$ and upper threshold $t_{max}=0.1$ [S1].
+-5.  **Interpolate Color:** Interpolate between $c_D$ and $c_I$ based on the visibility value $v$ to obtain the final predicted color $\tilde{c}$:
+-    $$ \tilde{c} = v \cdot c_D + (1 - v) \cdot c_I $$
+-    [S1]
+-6.  **Output:** Return $\tilde{c}$ and $\alpha$ [S1].
++1.  Extract descriptors from the visible points of the clouds for the target scene [S1].
++2.  Represent the cloud density structure using a hierarchy of point stencils at varying scales [S2].
++3.  Feed the hierarchical descriptors progressively into the MLP to enhance learning speed and prediction accuracy [S1].
++4.  The MLP predicts the radiance function for the desired shading configurations [S1].
++5.  During rendering, compute direct lighting and single scattering using Monte Carlo integration, and query the trained MLP for multiple scattering based on the current shading configuration [S1, S2].
+ 
+-**Training:**
+-1.  **Dataset Generation:** Generate supervised data using Blender. Render physically-based, path-traced clouds under varying viewing and lighting conditions. Extract mesh representation from volumetric density field. Filter out fully transparent pixels [S1].
+-2.  **Loss Function:** Apply logarithmic transformation $\log(x + 1)$ to both predictions $(\tilde{c}, \alpha)$ and ground-truth RGBA values. Compute L2 loss [S1].
+-3.  **Optimization:** Use Adam optimizer. Initial learning rate $10^{-3}$, halved every 50 epochs. Batch size $1024^2$ samples. Train for 250 epochs [S1].
++**Formulas:**
++Not given in the sources. The method combines Monte Carlo integration results for direct and single scattering with the neural network's prediction for multiple scattering, but the exact mathematical combination formula is not specified [S1, S2].
++
++**Parameters:**
++Not given in the sources.
++
++**Edge Cases and Pitfalls:**
++Not given in the sources.
+ 
+ **Pseudocode:**
+-
+ ```python
+ import torch
+ import torch.nn as nn
+-import torch.nn.functional as F
+ 
+-class TriplaneEncoder(nn.Module):
+-    def __init__(self, feature_dim, plane_size):
++class ProgressiveRPNN(nn.Module):
++    def __init__(self, descriptor_dim, hidden_dims=[256, 256, 256]):
+         super().__init__()
+-        # Three learnable parameter tensors for XY, YZ, XZ planes
+-        self.F_XY = nn.Parameter(torch.randn(plane_size, plane_size, feature_dim))
+-        self.F_YZ = nn.Parameter(torch.randn(plane_size, plane_size, feature_dim))
+-        self.F_XZ = nn.Parameter(torch.randn(plane_size, plane_size, feature_dim))
++        # Progressive feeding layers: each layer corresponds to a stencil scale
++        self.layers = nn.ModuleList()
++        input_dim = descriptor_dim
++        for dim in hidden_dims:
++            self.layers.append(nn.Linear(input_dim, dim))
++            self.layers.append(nn.ReLU())
++            input_dim = dim
++        # Output: radiance prediction (RGB)
++        self.output_layer = nn.Linear(input_dim, 3)
+ 
+-    def forward(self, p):
+-        # p is (N, 3) tensor of 3D points
+-        # Project p onto planes and sample features
+-        # Note: Exact projection and bilinear sampling implementation details
+-        # are not fully specified in sources, assuming standard triplane sampling logic.
+-        # For implementation, one would typically normalize p to [-1, 1] and use grid_sample.
+-        
+-        # Placeholder for specific bilinear interpolation logic based on source [S1]
+-        # F_XY_sample = bilinear_interpolate(self.F_XY, p[:, [0, 1]])
+-        # F_YZ_sample = bilinear_interpolate(self.F_YZ, p[:, [1, 2]])
+-        # F_XZ_sample = bilinear_interpolate(self.F_XZ, p[:, [0, 2]])
+-        
+-        # Sum features
+-        # features = F_XY_sample + F_YZ_sample + F_XZ_sample
+-        # Return dummy for structure completeness as exact sampling code is not in source
+-        return torch.zeros_like(p[:, :3]) 
++    def forward(self, descriptors, stencil_scales):
++        # descriptors: tensor of shape (N, descriptor_dim)
++        # stencil_scales: list of tensors, each (N, scale_dim), ordered coarse to fine
++        x = descriptors
++        for i, layer in enumerate(self.layers[:-1]):
++            # Progressive feeding: concatenate current scale descriptor at each layer
++            scale_input = stencil_scales[i] if i < len(stencil_scales) else descriptors
++            x = torch.cat([x, scale_input], dim=-1)
++            x = layer(x)
++        # Final layer outputs radiance
++        radiance = self.output_layer(x)
++        return radiance
+ 
+-class RPNN(nn.Module):
+-    def __init__(self, feature_dim, hidden_dims=[256, 256, 256]):
+-        super().__init__()
+-        self.encoder = TriplaneEncoder(feature_dim, 64) # Example size
+-        # Input dim: feature_dim + 2 (sun dir) + 1 (thickness)
+-        input_dim = feature_dim + 3
+-        
+-        layers = []
+-        for dim in hidden_dims:
+-            layers.append(nn.Linear(input_dim, dim))
+-            layers.append(nn.ReLU())
+-            input_dim = dim
+-        # Output: 2 RGB colors (6 channels) + 1 alpha
+-        layers.append(nn.Linear(input_dim, 7))
+-        self.mlp = nn.Sequential(*layers)
++def render_rpnn(scene, camera, light):
++    # 1. Extract descriptors from visible points
++    visible_points = extract_visible_points(scene, camera)
++    descriptors = extract_descriptors(visible_points, light)
++    
++    # 2. Build hierarchical point stencil representation of density
++    density_stencils = build_hierarchical_point_stencils(scene.density_field)
++    
++    # 3 & 4. Progressive feeding to MLP and radiance prediction
++    mlp_radiance = ProgressiveRPNN(descriptor_dim=10)
++    multiple_scattering_radiance = mlp_radiance(descriptors, density_stencils)
++    
++    # 5. Monte Carlo for direct & single scattering
++    mc_radiance = monte_carlo_integration(scene, camera, light, visible_points)
++    
++    # Combine MC (direct/single) with NN (multiple scattering)
++    # Exact combination formula not specified in sources [S1, S2]
++    final_radiance = mc_radiance + multiple_scattering_radiance
++    return final_radiance
+ 
+-    def forward(self, p, sun_dir, thickness):
+-        # 1. Encode position
+-        features = self.encoder(p)
+-        
+-        # 2. Form input vector
+-        # sun_dir is (N, 2) theta, phi
+-        # thickness is (N, 1)
+-        input_vec = torch.cat([features, sun_dir, thickness], dim=-1)
+-        
+-        # 3. Evaluate MLP
+-        # Output: [c_D_r, c_D_g, c_D_b, c_I_r, c_I_g, c_I_b, alpha]
+-        raw_output = self.mlp(input_vec)
+-        
+-        # 4. Apply output activation g(x) = exp(x - 3)
+-        # Apply to all 7 outputs
+-        output = torch.exp(raw_output - 3.0)
+-        
+-        c_D = output[:, :3]
+-        c_I = output[:, 3:6]
+-        alpha = output[:, 6:7]
+-        
+-        # 5. Compute visibility (requires external diffuse pass data)
+-        # This step is performed outside the network forward pass in the renderer
+-        # using precomputed visibility values v.
+-        # For the sake of this self-contained pseudocode, we assume v is passed in.
+-        # In practice, v is derived from the diffuse direct light pass.
+-        pass 
++def extract_visible_points(scene, camera):
++    # Standard visibility test against scene geometry/volume
++    return [p for p in scene.points if camera.ray_through(p) and not scene.is_occluded(p)]
+ 
+-    def compute_final_color(self, c_D, c_I, visibility):
+-        # 6. Interpolate color
+-        # visibility v is (N, 1)
+-        c_tilde = visibility * c_D + (1 - visibility) * c_I
+-        return c_tilde, c_D, c_I, visibility
++def extract_descriptors(points, light):
++    # Extract location, direction, light source, and density structure
++    return torch.stack([p.position, p.view_dir, p.light_dir, p.density_value] for p in points)
+ 
+-def compute_loss(pred_c, pred_alpha, gt_rgba):
+-    # Log transformation
+-    pred_c_log = torch.log(pred_c + 1)
+-    gt_c_log = torch.log(gt_rgba[:, :3] + 1)
+-    pred_alpha_log = torch.log(pred_alpha + 1)
+-    gt_alpha_log = torch.log(gt_rgba[:, 3:4] + 1)
+-    
+-    # L2 loss
+-    loss_c = F.mse_loss(pred_c_log, gt_c_log)
+-    loss_alpha = F.mse_loss(pred_alpha_log, gt_alpha_log)
+-    return loss_c + loss_alpha
++def build_hierarchical_point_stencils(density_field):
++    # Generate point stencils at multiple spatial scales
++    return [density_field.sample_at_scale(scale) for scale in [1, 2, 4, 8]]
++
++def monte_carlo_integration(scene, camera, light, points):
++    # Standard Monte Carlo estimation for direct and single scattering
++    radiance = torch.zeros(len(points), 3)
++    for p in points:
++        radiance += estimate_direct_and_single_scattering(p, light)
++    return radiance
+ ```
+ 
+@@ -132,5 +105,5 @@
+ 
+ ### [Neural Volume Scattering Prediction](8439-neural-volume-scattering-prediction.md)
+-Uses sampling templates to predict scattering distribution and solve the radiative transfer equation, addressing RPNN's inability to handle shadows and large sampling requirements.
++Neural Volume Scattering Prediction is a method for rendering participating media that uses a neural network to predict the scattering distribution at the centers of sampling templates, which is then used to solve the radiative transfer equation. It sets itself apart from its sibling [Neural Radiative Transfer Equation Solver](8466-neural-radiative-transfer-equation-solver.md) and the earlier [Radiance-Predicting Neural Networks (RPNN)](7049-radiance-predicting-neural-networks-rpnn.md) by decomposing input features into density, transmission, and phase, and by using specific sampling templates (diffuse and highlight) to simplify the network structure and input parameters.
+ 
+ ### [Neural Radiative Transfer Equation Solver](8466-neural-radiative-transfer-equation-solver.md)
+@@ -139,15 +112,15 @@
+ ## Operating characteristics
+ *   **Time Complexity:** Rendering is approximately a thousand times faster than path tracing [S2].
+-*   **Memory Complexity:** Requires storage for triplane feature maps and MLP weights. Training batch size is $1024^2$ samples [S1].
+-*   **Measured Performance:** Rendering results are almost identical to path tracing [S2]. Training time is about 20 minutes on an NVIDIA A100 GPU [S1].
+-*   **Strengths:** Real-time rendering capability, handles multiple scattering, soft shadow boundaries via visibility interpolation [S1, S2].
+-*   **Limitations:** Requires mesh geometry extraction from volumetric density field [S1]. View direction is not used as input, limiting view-dependent effects [S1].
+-*   **When to use:** Real-time cloud rendering where visual fidelity close to path tracing is needed [S1, S2].
+-*   **When not to use:** Scenes requiring explicit view-dependent effects not captured by the triplane encoding [S1].
++*   **Memory Complexity:** Not given in the sources.
++*   **Measured Performance:** Rendering results are almost identical to path tracing [S2]. Achieves effects like cloud whiteness, edge-darkening, and silver lining with a few minutes of computation [S1].
++*   **Strengths:** Handles multiple scattering efficiently, achieves high visual fidelity close to path tracing, and accelerates rendering significantly [S1, S2].
++*   **Limitations:** Requires precomputed learning data from several cloud exemplars to train on spatial and directional light distribution [S1].
++*   **When to use:** Real-time or accelerated cloud rendering where visual fidelity close to path tracing is required [S2].
++*   **When not to use:** Scenes that lack precomputed cloud exemplars or require on-the-fly training without prior data [S1].
+ 
+ ## Background
+-RPNN was proposed by Kallweit et al. [S2]. It represents radiance for each shading configuration, including location, direction, light source, and density structure [S2]. The method uses a hierarchy of point stencils to represent varying scales of cloud density [S2]. The specific implementation described in [S1] uses a triplane representation and is trained on data generated with Blender [S1].
++RPNN was proposed by Kallweit et al. [S1, S2]. It represents radiance for each shading configuration, including location, direction, light source, and density structure [S2]. The method uses a hierarchy of point stencils to represent varying scales of cloud density [S2]. It was developed to address the high computational cost of simulating multiple scattering events in atmospheric clouds, which are high-order scattering media [S2].
+ 
+ ## Sources
+-[S1] Environmental Volumetric Neural Shading of Clouds for Real-Time Rendering, https://doi.org/10.1145/3820020, fetched 2026-10-28
++[S1] A survey of modeling, rendering and animation of clouds in computer graphics, https://doi.org/10.1007/s00371-020-01953-y, fetched 2026-10-26
+ [S2] A survey on rendering homogeneous participating media, https://doi.org/10.1007/s41095-021-0249-1, fetched 2026-10-26

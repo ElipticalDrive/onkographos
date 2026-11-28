@@ -1,0 +1,199 @@
+--- v003.md
++++ v004.md
+@@ -4,102 +4,118 @@
+ 
+ ## Overview
+-This method defines the procedure for ingesting raw binary volume data (typically from CT scanners or specific model formats) into memory, applying domain-specific quantization to reduce precision, and preparing the data for GPU transfer or further processing [S1, S2, unofficial]. It solves the problem of converting high-precision raw sensor data (e.g., 12-bit Hounsfield units) into a format suitable for real-time raycasting or sparse voxel octree construction, often involving thresholding and bit-depth reduction [S1, S2, unofficial]. It differs from generic loaders by embedding specific quantization logic (scaling and thresholding) directly into the loading pipeline rather than treating data as opaque bytes [S1, unofficial][S3].
++This method defines the procedure for loading raw binary volume data (typically from CT scanners) into memory and quantizing the high-precision values into a format suitable for efficient GPU consumption and rendering [S1, S2, unofficial][S3]. It solves the problem of transferring large, high-bit-depth medical imaging datasets into the graphics pipeline by reducing memory bandwidth requirements and aligning data with the precision limits of display hardware [S2, unofficial]. It differs from structured metadata parsers like [HDF5 JSON (H5J) File Parsing](2922-hdf5-json-h5j-file-parsing.md) by operating directly on raw binary slices, and serves as the foundation for further bit-depth reduction steps like [16-bit to 8-bit Data Conversion](4882-16-bit-to-8-bit-data-conversion.md) [S1, unofficial].
+ 
+ ## How it works
+-The method consists of three primary variants found in the literature: a specific implementation for the Stanford Bunny/CT data (S1, S2), a general VolPack interface (S3), plus a specific 16-to-8-bit conversion for VDB data (S4) [S1, S2, unofficial][S3][S4, unofficial].
++**Inputs and Outputs:**
++*   **Input:** Raw binary files containing 2D slices of measurement data (e.g., 512x512 pixels per slice) [S2, unofficial].
++*   **Output:** A 3D array of quantized voxel values, typically stored as 16-bit unsigned integers (`uint16_t`) or converted to 8-bit formats for GPU consumption [S1, S2, unofficial].
+ 
+-### Inputs and Outputs
+-*   **Input:** Raw binary files (e.g., `.zaz` slices) or a memory pointer to a voxel array. Data types are typically 16-bit integers (`uint16_t` or `short`) [S2, unofficial].
+-*   **Output:** A 3D array or GPU buffer containing quantized values (8-bit or reduced 16-bit), ready for raycasting or sparse storage [S1, S2, unofficial].
++**Data Structures:**
++*   **Voxel Data:** Stored in a 3D array. The specific layout depends on the loading strategy. For raw binary slice loading, data is often read into a 2D array per slice and then mapped to 3D coordinates [S1, unofficial].
++*   **VolPack Context:** If using VolPack, a context object is created, and voxel data is specified via strides [S3].
+ 
+-### Data Structures
+-1.  **Raw Slice Array:** A 2D array of `uint16_t` representing a single slice (e.g., 512x512) [S1, unofficial].
+-2.  **Volume Array:** A 3D array or linear buffer. For the Stanford Bunny, dimensions are $512 \times 512 \times 360$ [S2, unofficial].
+-3.  **VolPack Voxel Structure:** Defined by strides. The caller allocates memory; VolPack only stores pointers and stride values [S3].
+-4.  **VDB Header/Data:**
+-    *   Header: 16-bit resolution at offsets 0, 2, 4; 32-bit node count at offset 12 [S4, unofficial].
+-    *   Coordinates: Int32 array starting at offset 32 [S4, unofficial].
+-    *   Node Data: Uint16 array following coordinates [S4, unofficial].
++**Steps:**
++1.  **File Reading:** Read binary files for each slice into a 2D array of `uint16_t` [S1, unofficial]. The file extension may be specified (e.g., ".zaz") [S1, unofficial].
++2.  **3D Array Construction:** Map the 2D slices into a 3D volume. The value at position $(x, y, z)$ is retrieved or stored using the formula:
++    $$ \text{value} = \text{data}[y][z \times \text{depth} + x] $$
++    where `depth` is the number of slices [S1, unofficial].
++3.  **Quantization:** Apply quantization to reduce the dynamic range. The standard quantization formula is:
++    $$ v_{out} = \begin{cases} 0 & \text{if } v_{in} < 160 \\ \lfloor \frac{v_{in}}{4096} \rfloor \cdot 16 & \text{otherwise} \end{cases} $$
++    This can be implemented as:
++    ```python
++    if value < 0xa0: # 0xa0 is 160 in decimal
++        value = 0
++    else:
++        value = (value // (256 * 16)) * 16 # Equivalent to floor(value / 4096) * 16
++    ```
++    [S1, unofficial]
++4.  **Thresholding:** Values below the threshold (160) are set to 0 [S1, unofficial].
++5.  **GPU Transfer:** Transfer the loaded 3D array to GPU memory using APIs such as OpenCL [S2, unofficial].
++6.  **VolPack Setup (Alternative):** If using VolPack, specify the volume data array, size, and strides using `vpSetRawVoxels` [S3].
+ 
+-### Steps and Formulas
++**Parameters:**
++*   **Threshold:** 160 (0xa0) [S1, unofficial].
++*   **Quantization Step:** 16 [S1, unofficial].
++*   **File Extension:** ".zaz" [S1, unofficial].
++*   **Input Resolution:** 512x512 per slice [S2, unofficial].
++*   **Volume Dimensions:** 512x512x360 for the Stanford Bunny dataset [S2, unofficial].
+ 
+-#### Variant A: Stanford Bunny / CT Scan Loading (S1, S2)
+-1.  **Read Slices:** Load each binary slice file into a 2D `uint16_t` array. The file extension is typically `.zaz` [S1, unofficial].
+-2.  **Assemble Volume:** Stack slices along the Z-axis. The value at position $(x, y, z)$ is accessed linearly in the buffer using `data[pos.y][pos.z * depth + pos.x]` [S1, unofficial].
+-3.  **Quantize and Threshold:** Apply the following transformation to each voxel value $v_{in}$:
+-    $$
+-    v_{out} = \begin{cases} 
+-    0 & \text{if } v_{in} < 160 \\
+-    \lfloor \frac{v_{in}}{4096} \rfloor \cdot 16 & \text{otherwise}
+-    \end{cases}
+-    $$
+-    *   **Threshold:** Values below 160 (approx. `0xa0`) are set to 0 [S1, unofficial].
+-    *   **Quantization:** The value is divided by 4096 (equivalent to right-shifting by 12 bits, retaining the top 4 bits of the 12-bit data), then multiplied by 16 (left-shifting by 4 bits) to align with 8-bit or 16-bit integer ranges [S1, unofficial]. The source code describes this as `value /= 256 * 16; value *= 16;`, which mathematically simplifies to dividing by 4096 then multiplying by 16, matching the formula exactly [S1, unofficial].
+-4.  **Transfer:** Copy the resulting 3D array to GPU memory via OpenCL or similar API [S2, unofficial].
++**Edge Cases and Pitfalls:**
++*   **Precision:** The original 16-bit data contains 12-bit data based on the Hounsfield scale, which is sufficient for CT imaging [S2, unofficial]. Quantization reduces this further.
++*   **Memory Management:** When using VolPack, the caller is responsible for freeing the voxel array; VolPack does not free it upon context destruction [S3].
++*   **Data Modification:** The voxel array data may be initialized or modified at any time, before or after calling `vpSetRawVoxels` [S3].
+ 
+-#### Variant B: VolPack Raw Voxel Setup (S3)
+-1.  **Allocate Memory:** Allocate a contiguous block of memory for the voxel data [S3].
+-2.  **Define Strides:** Calculate byte strides for X, Y, and Z dimensions.
+-    *   $xstride$: Bytes between adjacent voxels along X.
+-    *   $ystride$: Bytes between adjacent voxels along Y.
+-    *   $zstride$: Bytes between adjacent voxels along Z.
+-3.  **Register Data:** Call `vpSetRawVoxels(vpc, voxels, size, xstride, ystride, zstride)` [S3].
+-    *   `voxels`: Pointer to the data.
+-    *   `size`: Total size in bytes.
+-    *   Strides determine access patterns. Z-major order ($xstride < ystride < zstride$) is faster for some routines but not required [S3].
+-4.  **Memory Management:** The caller is responsible for freeing the `voxels` memory. VolPack does not free it upon context destruction [S3].
+-
+-#### Variant C: 16-bit to 8-bit VDB Conversion (S4)
+-1.  **Parse Header:**
+-    *   Read resolution from offsets 0, 2, 4 as `Uint16` [S4, unofficial].
+-    *   Round each dimension to the nearest multiple of 8: $R' = 8 \cdot \lceil R / 8 \rceil$. This aligns with 8x8x8 voxel tiles [S4, unofficial].
+-    *   Read node count from offset 12 as `Uint32` [S4, unofficial].
+-2.  **Parse Coordinates:** Read coordinates from offset 32 as `Int32Array`. Cast to `Uint16Array` for storage [S4, unofficial].
+-    *   *Pitfall:* If coordinate values exceed 65535, they wrap around or clamp, corrupting sparse coordinate data [S4, unofficial].
+-3.  **Parse Node Data:** Read node data following coordinates as `Uint16Array` [S4, unofficial].
+-4.  **Compress Data:** Allocate a `Uint8Array` (`compressedData`) of the same length as `nodeData` [S4, unofficial].
+-5.  **Quantize Loop:** For each index $i$:
+-    $$
+-    compressedData[i] = \begin{cases} 
+-    0 & \text{if } nodeData[i] == 0 \\
+-    \lfloor 255 \cdot \frac{nodeData[i]}{65535} \rfloor & \text{otherwise}
+-    \end{cases}
+-    $$
+-    This maps the full 16-bit range $[0, 65535]$ to 8-bit $[0, 255]$ [S4, unofficial].
+-
+-### Parameters
+-*   **Threshold:** 160 (for S1/S2) [S1, unofficial].
+-*   **Quantization Divisor:** 4096 (for S1/S2) [S1, unofficial].
+-*   **Tile Alignment:** 8 (for S4) [S4, unofficial].
+-*   **File Extension:** ".zaz" (for S1) [S1, unofficial].
+-
+-### Edge Cases and Pitfalls
+-*   **Coordinate Overflow:** In Variant C, casting 32-bit coordinates to 16-bit storage causes data corruption for large volumes [S4, unofficial].
+-*   **Memory Leaks:** In Variant B, failing to free the voxel array manually leads to leaks, as VolPack does not manage this memory [S3].
+-*   **Precision Loss:** Variant A discards the lower 8 bits of the 12-bit Hounsfield data [S1, unofficial].
++**Pseudocode:**
++```python
++def load_and_quantize_volume(slice_files, depth, height, width):
++    """
++    Loads raw binary slices and quantizes the volume data.
++    
++    Args:
++        slice_files: List of binary file paths for each slice.
++        depth: Number of slices (Z dimension).
++        height: Height of each slice (Y dimension).
++        width: Width of each slice (X dimension).
++        
++    Returns:
++        A 3D numpy array of quantized uint16_t values.
++    """
++    import numpy as np
++    
++    # Initialize 3D array
++    volume = np.zeros((depth, height, width), dtype=np.uint16)
++    
++    for z in range(depth):
++        # Read binary file for slice z
++        # Assuming each file contains height * width uint16_t values
++        with open(slice_files[z], 'rb') as f:
++            raw_data = np.frombuffer(f.read(), dtype=np.uint16)
++        
++        # Reshape to 2D (y, x)
++        slice_2d = raw_data.reshape((height, width))
++        
++        # Store in 3D array
++        volume[z, :, :] = slice_2d
++        
++    # Quantize
++    quantized_volume = np.zeros_like(volume)
++    for z in range(depth):
++        for y in range(height):
++            for x in range(width):
++                v_in = volume[z, y, x]
++                if v_in < 160:
++                    v_out = 0
++                else:
++                    v_out = (v_in // 4096) * 16
++                quantized_volume[z, y, x] = v_out
++                
++    return quantized_volume
++```
+ 
+ ## Subtopics
+ 
+ ### [HDF5 JSON (H5J) File Parsing](2922-hdf5-json-h5j-file-parsing.md)
+-Parses HDF5 JSON (H5J) file attributes to extract volume size, voxel size, and channel specifications. It applies word alignment to volume dimensions. Unlike the raw binary loaders, this method handles structured metadata extraction from a hierarchical format.
++Parses HDF5 JSON (H5J) file attributes to extract volume size, voxel size, and channel specifications, applying word alignment to volume dimensions. It differs from raw binary readers by interpreting the JSON metadata structure to construct the `volSize`, `voxSize`, and `chanSpecs` objects required for subsequent voxel loading and quantization.
++
++### [16-bit to 8-bit Data Conversion](4882-16-bit-to-8-bit-data-conversion.md)
++Converts 16-bit VDB volume data to 8-bit format for efficient GPU consumption by rounding resolution to multiples of 8 and compressing coordinate and density values. It differs from sibling methods like [HDF5 JSON (H5J) File Parsing](2922-hdf5-json-h5j-file-parsing.md) by performing direct binary quantization and layout transformation rather than parsing structured metadata, and builds on [Voxel data loading and quantization](2478-voxel-data-loading-and-quantization.md) by handling the specific bit-depth reduction step.
+ 
+ ### VolPack Raw Voxel Data Setup
+-A procedure to specify volume data array, size, and strides for each dimension in bytes using `vpSetRawVoxels` [S3]. It differs from direct array loading by using a library context and stride-based access [S3]. It is chosen when using the VolPack library for rendering or processing [S3].
+-
+-### 16-bit to 8-bit Data Conversion
+-Converts 16-bit VDB data to 8-bit format for GPU consumption [S4, unofficial]. It rounds resolution to multiples of 8 and compresses coordinates and density [S4, unofficial]. It is chosen when preparing sparse VDB data for WebGL or other 8-bit constrained renderers [S4, unofficial].
++A procedure to specify the volume data array, its size, and the strides for each dimension (x, y, z) in bytes [S3]. It involves calling `vpSetRawVoxels(vpc, voxels, size, xstride, ystride, zstride)` where `voxels` is a pointer to the voxel data, `size` is the number of bytes, and strides are byte offsets between voxels along each axis [S3]. Storing volume in z-major order (xstride < ystride < zstride) makes some VolPack routines faster, but is not strictly necessary [S3]. Pitfalls include the caller's responsibility to free dynamically allocated storage, as VolPack does not free the voxel array when a context is destroyed, and the data may be initialized or modified at any time [S3].
+ 
+ ## Operating characteristics
+-*   **Time Complexity:** Linear $O(N)$ with respect to the number of voxels for loading and quantization [S1, S4, unofficial].
+-*   **Memory Complexity:** $O(N)$ for storing the raw data [S3][S4, unofficial].
+-*   **Performance:** Z-major storage (Variant B) offers faster access for certain VolPack routines [S3].
+-*   **Limitations:** Variant A is specific to 12-bit Hounsfield data. Variant C is limited by 16-bit coordinate storage [S4, unofficial].
++*   **Time Complexity:** Linear with respect to the number of voxels for loading and quantization.
++*   **Memory Complexity:** Linear with respect to the number of voxels. The original 16-bit data is stored in memory before quantization.
++*   **Performance:** Quantization reduces the data size by half (if converting to 8-bit) or reduces the precision, leading to lower memory bandwidth requirements during rendering [S1, S2, unofficial].
++*   **Strengths:** Efficiently handles large medical imaging datasets; reduces memory footprint; aligns with GPU precision limits.
++*   **Limitations:** Loss of precision due to quantization; requires careful memory management (especially with VolPack).
++*   **When to Use:** When loading raw binary CT scan data for volume rendering; when memory bandwidth is a bottleneck.
++*   **When Not to Use:** When high precision is required; when data is already in a structured format like HDF5 (use [HDF5 JSON (H5J) File Parsing](2922-hdf5-json-h5j-file-parsing.md) instead).
+ 
+ ## Background
+-The method originates from implementations of volume raycasting, specifically for the Stanford Bunny dataset and CT scans [S1, S2, unofficial]. The Stanford Bunny loader (S1, S2) was developed to visualize 12-bit Hounsfield data from CT scanners using OpenCL [S1, S2, unofficial]. VolPack (S3) is a standard library for volume rendering, providing a generic interface for raw voxel data [S3]. The VDB conversion (S4) is part of modern web-based volume rendering pipelines (e.g., volumetrics) to optimize data transfer to GPUs [S4, unofficial].
++The method originates from the need to load and render large medical imaging datasets, such as CT scans, using GPU-based volume rendering techniques [S2, unofficial]. The Stanford Bunny dataset, a common benchmark in computer graphics, uses this loading and quantization method to prepare 16-bit CT scan data for rendering [S2, unofficial]. The VolPack library provides a standardized way to handle raw voxel data in volume rendering applications [S3].
+ 
+ ## Sources
+ [S1] gabrielmuller/zazen, https://github.com/gabrielmuller/zazen, fetched 2026-10-26 (unofficial)
+ [S2] Volume Raycasting mit OpenCL, https://arxiv.org/abs/1609.01317v1, fetched 2026-10-26 (unofficial)
+-[S3] VolPack User's Guide, http://www-graphics.stanford.edu/software/volpack/vp_userguide.html, fetched 2026-10-28
+-[S4] al-ro/volumetrics, https://github.com/al-ro/volumetrics, fetched 2026-10-27 (unofficial)+[S3] VolPack User's Guide, http://www-graphics.stanford.edu/software/volpack/vp_userguide.html, fetched 2026-10-28

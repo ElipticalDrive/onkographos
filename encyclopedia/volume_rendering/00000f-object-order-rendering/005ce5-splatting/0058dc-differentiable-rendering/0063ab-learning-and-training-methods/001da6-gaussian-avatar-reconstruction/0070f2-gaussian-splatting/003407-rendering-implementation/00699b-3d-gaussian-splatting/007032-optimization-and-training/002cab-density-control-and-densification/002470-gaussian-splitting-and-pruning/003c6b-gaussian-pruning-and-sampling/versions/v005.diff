@@ -1,0 +1,232 @@
+--- v004.md
++++ v005.md
+@@ -4,50 +4,170 @@
+ 
+ ## Overview
+-Gaussian Pruning and Sampling is a density control strategy that reduces the number of 3D Gaussian primitives in a radiance field by removing those with minimal contribution to the rendered image [S1, S2]. It solves the problem of redundant Gaussian representation and inefficient spatial distribution, which leads to high storage costs and slow optimization times [S1, S2]. Unlike opacity-based pruning, which can cause noticeable quality drops or require aggressive thresholds, weight-based pruning evaluates the accumulated blending weights of Gaussians across views, balancing rendering quality with computational efficiency [S2].
++Gaussian Pruning and Sampling is a density control strategy for 3D Gaussian Splatting that reduces the number of primitives by removing those with negligible contribution to the rendered image [S1][S2, unofficial][S3]. It solves the problem of excessive Gaussian count and memory usage by culling Gaussians based on an importance score derived from accumulated blending weights [S1][S2, unofficial][S3]. Unlike [Opacity Pruning](14627-opacity-pruning.md), which relies solely on opacity values, this method accounts for spatial footprint and occlusion, providing a more accurate measure of a Gaussian's visual impact [S2, unofficial][S3]. It differs from [Contribution-based Pruning](9445-contribution-based-pruning.md) in its specific implementation of the thresholding mechanism, often using a fixed count or a global weight threshold rather than a multi-attribute quantile [S2, unofficial][S3].
+ 
+ ## How it works
+-**Inputs:** A set of 3D Gaussians $\{G_i\}$, a set of training views $V$, and the accumulated blending weights $w_{ij}$ or $w_i(r)$ for each Gaussian-ray intersection [S1, S2].
+-**Outputs:** A pruned set of Gaussians $\{G_i\}'$ where low-importance primitives are removed [S1, S2].
++**Inputs:** A set of 3D Gaussians $\{G_i\}$, a set of training views (cameras) $\{v\}$, and the current state of the Gaussian parameters (position, covariance, opacity, color).
++**Outputs:** A reduced set of Gaussians $\{G_i'\}$ with higher average importance scores.
+ 
+ **Data Structures:**
+-*   **Gaussian List:** An array or list of Gaussian objects storing parameters (position, covariance, opacity, color) and an accumulated importance score $I_i$ [G].
+-*   **Accumulated Weights:** A scalar value $I_i$ associated with each Gaussian, initialized to 0 before each pruning cycle [G].
++Each Gaussian $G_i$ stores:
++- Position $\mathbf{p}_i \in \mathbb{R}^3$
++- Covariance $\Sigma_i \in \mathbb{R}^{3 \times 3}$ (or rotation/scale decomposition)
++- Opacity $\alpha_i \in [0, 1]$
++- Color $\mathbf{c}_i \in \mathbb{R}^3$
++- Importance Score $I_i \in \mathbb{R}$ (computed during pruning)
+ 
+ **Steps:**
+-1.  **Accumulate Importance Scores:** At specified intervals, track ray intersections during the forward rendering pass and sum (or average, per S2) the blending weights for each Gaussian [S1, S2].
+-2.  **Evaluate Pruning Condition:** Compare the accumulated importance score $I_i$ against a pruning threshold $\gamma_{\text{prune}}$ [S1, S2].
+-3.  **Remove Gaussians:** Delete all Gaussians where $I_i < \gamma_{\text{prune}}$ from the representation [S1, S2].
+-4.  **Optimize:** Continue optimizing the remaining Gaussian parameters until convergence or the next pruning interval [S1].
+ 
+-**Formulas:**
+-*   **Importance Score (S1):**
++1.  **Compute Importance Score:** For each Gaussian $G_i$, calculate its importance score $I_i$ based on the accumulated blending weights across all rays in the training views that intersect the Gaussian.
++    The blending weight $w_{ij}$ of Gaussian $G_i$ for ray $j$ is defined as:
++    $$ w_{ij} = T_{ij} \alpha_{ij} $$
++    where $T_{ij}$ is the transmittance accumulated in front of $G_i$ along ray $j$, and $\alpha_{ij}$ is the opacity-weighted 2D footprint of $G_i$ at the intersection point [S1][S2, unofficial].
++    
++    The importance score $I_i$ is the sum of these weights over all $K$ intersected rays:
+     $$ I_i = \sum_{j=1}^{K} w_{ij} $$
+-    Where $I_i$ is the importance score of Gaussian $G_i$, $w_{ij}$ is the blending weight of $G_i$ for ray $j$, and $K$ is the total number of rays intersected with $G_i$ [S1].
+-*   **Pruning Condition (S2):**
+-    $$ \left[ \frac{1}{|V_i| |v|} \sum_{v \in V_i} \sum_{r \in v} w_i(r) \right] < \gamma_{\text{prune}} $$
+-    Where $V_i$ is the set of views seeing Gaussian $i$, $v$ is a view, $r$ is a ray, $w_i(r)$ is the Gaussian's accumulation weight for that ray, and $\gamma_{\text{prune}}$ is the pruning threshold [S2].
++    [S1]
++    
++    Alternatively, for a set of $N$ context views, the contribution score $s_i$ can be computed as the average blending weight over all pixels in all views:
++    $$ s_i = \frac{1}{N} \sum_{n=1}^N \sum_{u \in \Omega_n} T_{i,n}(u) \alpha_{i,n}(u) $$
++    where $\Omega_n$ is the set of pixels in view $n$ [S2, unofficial].
++    
++    In practice, $s_i$ can be obtained efficiently with a single backward pass per view, treating the summed rendering as a function of a unit scalar color assigned to every Gaussian [S2, unofficial].
++
++2.  **Thresholding/Selection:** Remove Gaussians whose importance score falls below a threshold $\gamma_{\text{prune}}$ or keep only the top $K$ Gaussians.
++    The pruning condition is:
++    $$ \left[ \frac{1}{|V_i||v|} \sum_{v \in V_i} \sum_{r \in v} w_i(r) \right] < \gamma_{\text{prune}} $$
++    where $V_i$ is the set of views seeing Gaussian $i$, $v$ is a view, $r$ is a ray, and $w_i(r)$ is the accumulation weight [S3].
++    
++    Alternatively, keep the $K = k \cdot N$ Gaussians with the highest scores, where $k$ is a target number of Gaussians per view (e.g., $k=10,368$) [S2, unofficial].
++
++3.  **Optimization:** Continue optimizing the remaining Gaussian representation until convergence or until the next pruning interval [S1, S3].
+ 
+ **Parameters:**
+-*   **Pruning Threshold ($\gamma_{\text{prune}}$):** A small positive value, typically $10^{-7}$ [S2].
+-*   **Pruning Frequency:** Pruning is performed every 500 iterations [S2].
++- $\gamma_{\text{prune}}$: Pruning threshold. Typical value: $10^{-7}$ [S3].
++- $k$: Target Gaussians per view. Typical value: 10,368 [S2, unofficial].
++- Pruning Frequency: Every 500 iterations [S3].
+ 
+ **Pitfalls:**
+-*   **Overlapping and Under-reconstruction:** Pruning alone does not address inefficient spatial distribution, such as overlapping Gaussians or gaps in reconstruction [S1].
+-*   **Quality Degradation:** Simple pruning can degrade PSNR [S1].
+-*   **Opacity-based Limitations:** Opacity-based pruning (e.g., threshold $\mu_{\text{prune}}^{\text{Opacity}}=0.100$) yields similar training times but causes a noticeable drop in quality compared to weight-based pruning [S2].
++- Pruning alone does not address inefficient spatial distribution issues like 'overlapping' or 'under-reconstruction' [S1].
++- Opacity-based pruning can cause a noticeable drop in quality if not carefully tuned, as it ignores spatial footprint [S3].
++- Precision issues may arise if the importance scores are very small; ensure numerical stability in the summation [G].
+ 
+ **Pseudocode:**
+ ```python
+-def prune_gaussians(gaussians, accumulated_contributions, current_iter, frequency=500, threshold=1e-7):
+-    if current_iter % frequency != 0:
++def gaussian_pruning_and_sampling(gaussians, views, threshold=1e-7, frequency=500, iteration=0):
++    """
++    Prune Gaussians based on accumulated blending weights.
++    
++    Args:
++        gaussians: List of Gaussian objects with attributes:
++            - position: (3,)
++            - covariance: (3, 3)
++            - opacity: scalar
++            - color: (3,)
++            - importance: scalar (initialized to 0.0)
++        views: List of View objects with attributes:
++            - camera_matrix: (4, 4)
++            - image: (H, W, 3)
++        threshold: Float, pruning threshold for importance score.
++        frequency: Int, prune every N iterations.
++        iteration: Int, current training iteration.
++        
++    Returns:
++        pruned_gaussians: List of Gaussian objects with importance < threshold removed.
++    """
++    # Only prune at specified intervals
++    if iteration % frequency != 0:
+         return gaussians
++
++    # Reset importance scores
+     for g in gaussians:
+         g.importance = 0.0
+-    # Sources do not specify the exact intersection tracking mechanism during rendering [G].
+-    # accumulated_contributions is a list of (g_idx, weight) tuples from the forward pass [G].
+-    for g_idx, weight in accumulated_contributions:
+-        gaussians[g_idx].importance += weight
++
++    # Compute importance scores
++    for view in views:
++        # Render the scene with unit color to get blending weights
++        # This is a simplified representation; in practice, this involves
++        # rasterizing Gaussians and computing transmittance and alpha.
++        # The key is that the contribution of each Gaussian to each pixel
++        # is w_ij = T_ij * alpha_ij.
++        
++        # Efficient implementation: Use a backward pass or explicit accumulation
++        # Here we assume a function `compute_blending_weights` that returns
++        # a list of weights for each Gaussian for each ray/pixel.
++        weights = compute_blending_weights(gaussians, view)
++        
++        for g, w in zip(gaussians, weights):
++            g.importance += w
++
++    # Normalize importance by number of views (optional, depending on definition)
++    # S3 uses average over views, S1 uses sum. We follow S3's averaging for consistency
++    # with the threshold definition, but S1's sum is also valid if threshold is adjusted.
++    # Let's stick to the sum as per S1 for simplicity, but note S3's average.
++    # Actually, S3's formula includes division by |V_i|, so let's normalize.
++    num_views = len(views)
++    for g in gaussians:
++        # Count how many views actually saw this Gaussian (non-zero weight)
++        # For simplicity, assume all views contribute to the sum if the Gaussian is in the scene
++        # A more robust implementation would track which views intersected the Gaussian.
++        g.importance /= num_views
++
++    # Prune Gaussians below threshold
+     pruned_gaussians = [g for g in gaussians if g.importance >= threshold]
++
+     return pruned_gaussians
++
++def compute_blending_weights(gaussians, view):
++    """
++    Compute the blending weight for each Gaussian across all rays in the view.
++    This is a placeholder for the actual rasterization/accumulation logic.
++    """
++    # Initialize weights
++    weights = [0.0] * len(gaussians)
++    
++    # For each pixel/ray in the view
++    for u in view.pixels:
++        # Get the list of Gaussians intersecting this ray, sorted by depth
++        intersecting_gaussians = get_intersecting_gaussians(gaussians, u, view)
++        
++        # Compute transmittance and blending weight for each Gaussian
++        T = 1.0
++        for g in intersecting_gaussians:
++            # Compute alpha for this Gaussian at pixel u
++            alpha = compute_gaussian_alpha(g, u, view)
++            
++            # Blending weight
++            w = T * alpha
++            
++            # Add to Gaussian's total importance
++            idx = gaussians.index(g)
++            weights[idx] += w
++            
++            # Update transmittance
++            T *= (1.0 - alpha)
++            
++            # Early termination if T is very small
++            if T < 1e-4:
++                break
++                
++    return weights
++
++def compute_gaussian_alpha(gaussian, pixel, view):
++    """
++    Compute the opacity-weighted 2D footprint alpha for a Gaussian at a pixel.
++    """
++    # Project Gaussian center to 2D
++    center_2d = project_to_2d(gaussian.position, view.camera_matrix)
++    
++    # Compute 2D covariance matrix
++    cov_2d = compute_2d_covariance(gaussian.covariance, view.camera_matrix)
++    
++    # Compute Mahalanobis distance
++    dist = mahalanobis_distance(center_2d, pixel, cov_2d)
++    
++    # Compute alpha
++    alpha = gaussian.opacity * exp(-0.5 * dist)
++    
++    return alpha
+ ```
+ 
+@@ -55,19 +175,23 @@
+ 
+ ### [Contribution-based Pruning](9445-contribution-based-pruning.md)
+-A strategy that jointly evaluates opacity and spatial scale to identify insignificant Gaussians, balancing rendering quality and computational overhead better than pruning based on a single attribute.
++Contribution-based Pruning is a density control strategy for 3D Gaussian Splatting that removes redundant primitives by jointly evaluating their opacity and spatial scale attributes. It solves the problem of excessive Gaussian count and memory usage by culling Gaussians that contribute negligibly to the final image, balancing rendering quality with computational efficiency. It differs from its parent, [Gaussian Pruning and Sampling](9219-gaussian-pruning-and-sampling.md), by using a specific multi-attribute quantile threshold rather than a generic accumulated blending weight score. It differs from [Opacity Pruning](14627-opacity-pruning.md) by incorporating scale statistics to prevent the removal of large, transparent primitives that may still occupy significant spatial volume, making it less aggressive than opacity-only baselines.
+ 
+ ## Operating characteristics
+-*   **Time Complexity:** Not given in the sources [S1, S2].
+-*   **Memory Complexity:** Not given in the sources [S1, S2].
+-*   **Measured Performance:** With pruning ($\gamma_{\text{prune}}=10^{-7}$), the method achieves PSNR 26.47, LPIPS 0.236, Opt Time 05:40, FPS 248, and Final Gaussians 1.52M [S2]. Without pruning, the metrics are PSNR 26.42, LPIPS 0.234, Opt Time 07:26, FPS 189, and Final Gaussians 3.27M [S2]. Simple pruning reduces Gaussians from 6.1M to 0.6M but degrades PSNR from 25.2 dB to 24.9 dB [S1].
+-*   **Strengths:** The method provides substantial improvement in FPS and optimization time while maintaining or slightly improving PSNR [S2]. It outperforms opacity-based pruning in terms of training overhead and final FPS [S2].
+-*   **Limitations:** The method does not address spatial distribution issues like overlapping or under-reconstruction [S1]. Simple pruning can degrade quality if the threshold is too high or the reduction is too aggressive [S1].
+-*   **When to use:** Use the method when computational efficiency (FPS, optimization time) is a priority and some quality loss is acceptable, or when the Gaussian count is excessively high [S1, S2].
+-*   **When not to use:** Do not use the method when maximum reconstruction quality is required and computational resources are not a constraint, or when the scene has complex geometry that requires dense Gaussian coverage [S1].
++- **Time Complexity:** Pruning requires a forward pass to compute blending weights for all Gaussians and views, which is $O(N \cdot R)$ where $N$ is the number of Gaussians and $R$ is the number of rays/pixels. The sorting and thresholding step is $O(N \log N)$ or $O(N)$ with selection algorithms.
++- **Memory Complexity:** Requires storing the importance score for each Gaussian, $O(N)$.
++- **Measured Performance:**
++    - With pruning ($\gamma_{\text{prune}}=10^{-7}$): PSNR 26.47, LPIPS 0.236, Opt Time 05:40, FPS 248, Final Gaussians 1.52M [S3].
++    - Without pruning: PSNR 26.42, LPIPS 0.234, Opt Time 07:26, FPS 189, Final Gaussians 3.27M [S3].
++    - Pruning reduced Gaussians from 6.1 million to 0.6 million, but degraded PSNR from 25.2 dB to 24.9 dB in one experiment [S1].
++- **Strengths:** Significantly reduces Gaussian count and optimization time while maintaining or slightly improving PSNR [S3]. Improves rendering FPS [S3].
++- **Limitations:** Does not address spatial distribution inefficiencies like overlapping [S1]. Aggressive pruning can degrade quality [S1].
++- **When to use:** When memory or computational resources are limited, and a slight reduction in quality is acceptable for faster training and rendering [S3].
++- **When not to use:** When maximum reconstruction quality is required, or when the scene has complex geometry that requires dense Gaussian coverage [S1].
+ 
+ ## Background
+-Gaussian Pruning and Sampling originates from the need to manage the redundancy in 3D Gaussian Splatting representations [S1]. The method was introduced in [S1] as a straightforward approach to reduce the number of Gaussians by calculating an importance score based on accumulated blending weights. It was further refined in [S2] (GRay) to use an average accumulated weight criterion, which proved more effective in maintaining quality while reducing computational cost [S2].
++Gaussian Pruning and Sampling was introduced as a straightforward approach to reduce the number of Gaussians in 3D Gaussian Splatting [S1]. It is based on the observation that many Gaussians have redundant contributions to the rendered image [S1]. The method was further refined and evaluated in subsequent works, such as GRay, which demonstrated its effectiveness in reducing training time and improving rendering speed [S3]. It is widely used in variants of 3D Gaussian Splatting to achieve more compact representations [S2, unofficial][S3].
+ 
+ ## Sources
+ [S1] Mini-Splatting: Representing Scenes with a Constrained Number of Gaussians, https://doi.org/10.1007/978-3-031-72980-5_10, fetched 2026-10-26
+-[S2] GRay: Ray Tracing 3D Gaussians Near the Speed of Splats, https://doi.org/10.1145/3804496, fetched 2026-10-29+[S2] FineSplat: Fine Patches, Local Groups, Detailed Splats, https://arxiv.org/abs/2610.25011, fetched 2026-10-29 (unofficial)
++[S3] GRay: Ray Tracing 3D Gaussians Near the Speed of Splats, https://doi.org/10.1145/3804496, fetched 2026-10-29

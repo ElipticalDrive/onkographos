@@ -1,0 +1,132 @@
+--- v001.md
++++ v002.md
+@@ -3,87 +3,85 @@
+ 
+ ## Overview
+-Modified Straight-Through Estimator (mSTE) is a gradient extension technique for differentiable volume rendering that addresses the zero-gradient problem in the backward pass by rescaling the detached codec-induced perturbation using its standard deviation. Unlike the parent method, Straight-Through Estimator (STE) for Gradient Extension, which uses a simple identity surrogate to copy gradients directly to the pre-codec feature plane, mSTE modulates the backward signal based on the observed scale of quantization errors. This approach aims to provide a more informative gradient signal than vanilla STE in high-bitrate regimes, though it is less robust than vanilla STE under strong codec distortion.
++Modified Straight-Through Estimator (mSTE) is a gradient extension technique for differentiable volume rendering that addresses the zero-gradient problem in the backward pass by rescaling the detached codec-induced perturbation using its standard deviation [S1]. Unlike the parent method, Straight-Through Estimator (STE) for Gradient Extension, which uses a simple identity surrogate to copy gradients directly to the pre-codec feature plane, mSTE modulates the backward signal based on the observed scale of quantization errors [S1]. This approach aims to provide a more informative gradient signal than vanilla STE in high-bitrate regimes, though it is less robust than vanilla STE under strong codec distortion [S1].
+ 
+ ## How it works
+ **Inputs and Outputs**
+-- **Input**: Pre-codec feature plane $\mathbf{P}$, decoded feature plane $\hat{\mathbf{P}}$ (output of the differentiable codec).
+-- **Output**: Modified feature plane $\widetilde{\mathbf{P}}$ used for gradient computation in the backward pass.
++- **Input**: Pre-codec feature plane $\mathbf{P}$, decoded feature plane $\hat{\mathbf{P}}$ (output of the differentiable codec) [S1].
++- **Output**: Modified feature plane $\widetilde{\mathbf{P}}$ used for gradient computation in the backward pass [S1].
+ 
+ **Data Structures**
+-- $\mathbf{P}$: Tensor of shape $(C, H, W)$ representing the pre-quantization features.
+-- $\hat{\mathbf{P}}$: Tensor of shape $(C, H, W)$ representing the post-quantization features.
+-- $\epsilon$: Tensor of shape $(C, H, W)$ representing the perturbation.
+-- $\sigma(\epsilon)$: Scalar or tensor representing the standard deviation of the perturbation.
++- $\mathbf{P}$: Tensor of shape $(C, H, W)$ representing the pre-quantization features [S1].
++- $\hat{\mathbf{P}}$: Tensor of shape $(C, H, W)$ representing the post-quantization features [S1].
++- $\epsilon$: Tensor of shape $(C, H, W)$ representing the perturbation [S1].
++- $\sigma(\epsilon)$: Scalar or tensor representing the standard deviation of the perturbation [S1].
+ 
+ **Steps**
+ 1. Compute the codec-induced perturbation $\epsilon$ as the difference between the decoded feature plane and the pre-codec feature plane:
+    $$ \epsilon = \hat{\mathbf{P}} - \mathbf{P} $$
+-2. Compute the standard deviation $\sigma(\epsilon)$ of the perturbation tensor $\epsilon$. This is typically calculated over the spatial dimensions and channels, resulting in a scalar value or a per-channel scalar depending on implementation.
++2. Compute the standard deviation $\sigma(\epsilon)$ of the perturbation tensor $\epsilon$ [S1].
+ 3. In the backward pass, compute the modified feature plane $\widetilde{\mathbf{P}}$ using the following formula:
+    $$ \widetilde{\mathbf{P}} = \mathbf{P} + \operatorname{sg}(\epsilon) \cdot \frac{\sigma(\epsilon)}{\operatorname{sg}(\sigma(\epsilon))} $$
+-   where $\operatorname{sg}(\cdot)$ is the stop-gradient operator, which prevents gradients from flowing through its argument.
++   where $\operatorname{sg}(\cdot)$ is the stop-gradient operator, which prevents gradients from flowing through its argument [S1].
+ 
+ **Pseudocode**
+ ```python
+-import torch
+-import torch.nn.functional as F
++import numpy as np
++
++def sg(x):
++    """Stop-gradient operator: returns x but blocks gradient flow."""
++    return x.detach() if hasattr(x, 'detach') else x
+ 
+ def mSTE_forward(P, codec_function):
+-    """
+-    Forward pass: quantize P using codec_function.
+-    """
++    """Forward pass: quantize P using codec_function."""
+     P_hat = codec_function(P)
+     return P_hat
+ 
+ def mSTE_backward(P, P_hat):
+-    """
+-    Backward pass: compute modified gradient signal.
+-    """
++    """Backward pass: compute modified gradient signal."""
+     # Step 1: Compute perturbation
+     epsilon = P_hat - P
+-    
++
+     # Step 2: Compute standard deviation of perturbation
+-    # Calculate std over all dimensions except batch, if applicable.
+-    # Here we assume P is (C, H, W) or (B, C, H, W).
+-    # We compute std over spatial and channel dimensions.
+-    # Using unbiased=False to match typical population std for stability.
+-    sigma_epsilon = torch.std(epsilon, dim=(1, 2, 3), keepdim=True) if epsilon.dim() == 4 else torch.std(epsilon, dim=(1, 2), keepdim=True)
+-    
++    # Calculate std over spatial and channel dimensions.
++    # Using ddof=0 for population standard deviation.
++    if epsilon.ndim == 4:
++        sigma_epsilon = np.std(epsilon, axis=(1, 2, 3), keepdims=True, ddof=0)
++    else:
++        sigma_epsilon = np.std(epsilon, axis=(1, 2), keepdims=True, ddof=0)
++
+     # Step 3: Compute modified feature plane
+     # Apply stop-gradient to epsilon and sigma_epsilon
+-    sg_epsilon = torch.stop_gradient(epsilon)
+-    sg_sigma = torch.stop_gradient(sigma_epsilon)
+-    
++    sg_epsilon = sg(epsilon)
++    sg_sigma = sg(sigma_epsilon)
++
+     # Avoid division by zero
+-    sg_sigma = torch.clamp(sg_sigma, min=1e-8)
+-    
++    sg_sigma = np.maximum(sg_sigma, 1e-8)
++
+     # Rescale the detached error
+     rescaled_error = sg_epsilon * (sigma_epsilon / sg_sigma)
+-    
++
+     # Add to original P
+     P_modified = P + rescaled_error
+-    
++
+     return P_modified
+ ```
+ 
+ **Parameters**
+-- Standard deviation calculation: Typically computed over the entire tensor or per-channel. Not given in the sources.
++- Standard deviation calculation: Computed over the perturbation tensor [S1].
+ - Epsilon for numerical stability: $10^{-8}$ [G].
+ 
+ **Edge Cases and Pitfalls**
+ - **Division by Zero**: If $\sigma(\epsilon)$ is zero (e.g., no quantization error), the ratio becomes undefined. A small epsilon value should be added to the denominator [G].
+-- **Low Bitrate Degradation**: At low bitrates, the perturbation $\epsilon$ reflects non-linear artifacts rather than small local quantization residuals. In this regime, standard-deviation reweighting becomes a poor proxy for true local sensitivity, leading to less stable and less effective optimization compared to vanilla STE [S1].
++- **Low Bitrate Degradation**: At low bitrates, the perturbation $\epsilon$ reflects non-linear artifacts rather than small local quantization residuals [S1]. In this regime, standard-deviation reweighting becomes a poor proxy for true local sensitivity, leading to less stable and less effective optimization compared to vanilla STE [S1].
+ 
+ ## Subtopics
+ 
+ ### [Standard-Codec-in-the-Loop (SCL)](17889-standard-codec-in-the-loop-scl.md)
+-A method that integrates codec constraints directly into the loop. Choose when codec artifacts need to be minimized during training.
++A method that integrates codec constraints directly into the loop [G]. Choose when codec artifacts need to be minimized during training [G].
+ 
+ ## Operating characteristics
+ - **Time Complexity**: Not given in the sources.
+ - **Memory Complexity**: Not given in the sources.
+-- **Measured Performance**:
+-  - High-rate: PSNR 33.62, SSIM 0.968, LPIPS 0.195, training time 1h 25m [S1].
+-  - Low-rate: PSNR 30.96, SSIM 0.948, LPIPS 0.368, training time 1h 28m [S1].
++- **Measured Performance**: High-rate: PSNR 33.62, SSIM 0.968, LPIPS 0.195, training time 1h 25m [S1]. Low-rate: PSNR 30.96, SSIM 0.948, LPIPS 0.368, training time 1h 28m [S1].
+ - **Scaling**: Not given in the sources.
+ - **Strengths**: Performs competitively at high bitrate [S1].
+@@ -93,5 +91,5 @@
+ 
+ ## Background
+-Modified Straight-Through Estimator (mSTE) was introduced in the context of Codec-Adaptive TriPlane Radiance Fields for Volumetric Content Delivery. It is a variant of the Straight-Through Estimator (STE) designed to improve gradient estimation by incorporating information about the scale of quantization errors. The method was proposed to address the limitations of vanilla STE, which uses a simple identity surrogate in the backward pass. While vanilla STE is robust, mSTE aims to provide a more informative gradient signal in high-bitrate regimes by rescaling the detached codec error using the standard deviation of the quantization error [S1].
++Modified Straight-Through Estimator (mSTE) was introduced in the context of Codec-Adaptive TriPlane Radiance Fields for Volumetric Content Delivery [S1]. It is a variant of the Straight-Through Estimator (STE) designed to improve gradient estimation by incorporating information about the scale of quantization errors [S1]. The method was proposed to address the limitations of vanilla STE, which uses a simple identity surrogate in the backward pass [S1]. While vanilla STE is robust, mSTE aims to provide a more informative gradient signal in high-bitrate regimes by rescaling the detached codec error using the standard deviation of the quantization error [S1].
+ 
+ ## Sources

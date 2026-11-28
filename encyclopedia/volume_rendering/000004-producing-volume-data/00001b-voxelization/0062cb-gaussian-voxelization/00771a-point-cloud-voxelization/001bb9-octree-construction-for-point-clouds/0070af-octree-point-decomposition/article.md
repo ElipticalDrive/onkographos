@@ -1,0 +1,177 @@
+# Octree Point Decomposition
+Also called: Point Cloud Octree Building, Recursive Point Octree Construction
+## Overview
+Octree Point Decomposition is a recursive spatial partitioning algorithm that organizes an unstructured array of 3D points into a hierarchical octree structure [S1]. It solves the problem of spatial indexing for point clouds by recursively subdividing the bounding volume into eight octants until specific termination criteria are met [S1]. Unlike static octree constructions, this method dynamically determines leaf nodes based on point density and geometric constraints, making it suitable for applications like color quantization and adaptive point cloud rendering [S1]. It builds on the general principles of [Octree Construction for Point Clouds](1070-octree-construction-for-point-clouds.md) by providing a specific recursive implementation strategy.
+
+## How it works
+### Inputs and Outputs
+**Inputs:**
+- `points`: An $N \times 3$ array of 3D coordinates.
+- `value`: A scalar threshold used for exit conditions (representing minimum points, minimum edge length, or maximum depth depending on context) [S1].
+
+**Outputs:**
+- `binDepths`: Array where `binDepths[i]` is the depth of bin `i`.
+- `binParents`: Array where `binParents[i]` is the index of the parent bin of `i`.
+- `binCorners`: Array where `binCorners[i]` contains the minimum and maximum corners of bin `i` (size $M \times 6$, where $M$ is the number of bins).
+- `pointBins`: Array of size $N$ where `pointBins[j]` is the index of the bin containing point `j` [S1].
+
+### Data Structures
+The algorithm uses four parallel arrays to represent the tree implicitly:
+1.  **`binDepths`**: Stores the recursion depth of each bin. Initialized with `[0]` for the root [S1].
+2.  **`binParents`**: Stores the parent index. Initialized with `[0]` for the root (indicating no parent) [S1].
+3.  **`binCorners`**: Stores bounding box coordinates. Each row `i` is `[min_x, min_y, min_z, max_x, max_y, max_z]`. Initialized with the global bounds of the input points [S1].
+4.  **`pointBins`**: Maps each input point to its current bin index. Initialized to `1` for all points [S1].
+
+### Algorithm Steps
+1.  **Initialization**:
+    -   Set `binDepths = [0]`.
+    -   Set `binParents = [0]`.
+    -   Compute global bounds: `min_pt = min(points)` and `max_pt = max(points)`.
+    -   Set `binCorners[1] = [min_pt, max_pt]`.
+    -   Set `pointBins[:] = 1`.
+    -   Call `divide(1)` [S1].
+
+2.  **Recursive Division (`divide(binNo)`)**:
+    -   **Count Points**: Calculate `binPointCount` as the number of points currently assigned to `binNo` [S1].
+    -   **Calculate Geometry**:
+        -   `binEdgeLengths = binCorners(binNo, 1:3) - binCorners(binNo, 4:6)` [S1]. Note: This formula implies `binCorners` stores `[min, max]` and the subtraction yields negative lengths if not absolute, or the source assumes `min` is at indices 1:3 and `max` at 4:6, requiring absolute value or swap for positive length. Standard interpretation: `max - min`.
+        -   `binDepth = binDepths(binNo)` [S1].
+    -   **Check Exit Conditions**: Recursion stops if any of the following are true [S1]:
+        -   `binPointCount < value`
+        -   `min(binEdgeLengths) < value`
+        -   `binDepth > value`
+    -   **Subdivision**:
+        -   Calculate midpoint: `newDiv = (binCorners(binNo, 1:3) + binCorners(binNo, 4:6)) / 2` [S1].
+        -   Iterate `i` from 1 to 8 to create children:
+            -   Assign new bin index: `newBinNo = length(binDepths) + 1`.
+            -   Set depth: `binDepths[newBinNo] = binDepths(binNo) + 1`.
+            -   Set parent: `binParents[newBinNo] = binNo`.
+            -   Define corners: `binCorners[newBinNo]` is formed by pairing `newDiv` with the appropriate min/max corner of the parent for the specific octant [S1].
+            -   Reassign points: Identify points currently in `binNo` (`oldBinMask = pointBins == binNo`). Update their assignment to `newBinNo` based on their spatial position relative to `newDiv` [S1].
+            -   Recurse: Call `divide(newBinNo)` [S1].
+
+### Pseudocode
+> **Unverified code.** The code below did not pass a test run against a reference implementation, or no test fits it, so it may contain errors.
+
+```python
+def octree_point_decomposition(points, value):
+    """
+    Decomposes points into an octree structure.
+    
+    Args:
+        points: List of [x, y, z] coordinates.
+        value: Threshold for exit conditions.
+        
+    Returns:
+        binDepths, binParents, binCorners, pointBins
+    """
+    # Initialization
+    binDepths = [0]
+    binParents = [0]
+    
+    # Compute global bounds
+    min_pts = [min(p[i] for p in points) for i in range(3)]
+    max_pts = [max(p[i] for p in points) for i in range(3)]
+    
+    # binCorners stores [min_x, min_y, min_z, max_x, max_y, max_z]
+    binCorners = [min_pts + max_pts] 
+    
+    # pointBins maps point index to bin index (1-based in source, 0-based here for implementation)
+    # Source uses 1-based indexing for bins. We will use 0-based for Python list access, 
+    # but keep logic consistent. Source: pointBins(:) = 1.
+    pointBins = [0] * len(points) 
+    
+    # Helper to count points in a bin
+    def count_points_in_bin(bin_idx):
+        return sum(1 for p in pointBins if p == bin_idx)
+
+    # Helper to get edge lengths
+    def get_edge_lengths(bin_idx):
+        corners = binCorners[bin_idx]
+        # Source: binCorners(binNo, 1:3) - binCorners(binNo, 4:6)
+        # Assuming corners are [min_x, min_y, min_z, max_x, max_y, max_z]
+        # Lengths should be max - min. Source formula might imply absolute or specific ordering.
+        # We use absolute difference to ensure positive lengths.
+        return [abs(corners[i] - corners[i+3]) for i in range(3)]
+
+    def divide(bin_idx):
+        # Check exit conditions
+        bin_point_count = count_points_in_bin(bin_idx)
+        bin_edge_lengths = get_edge_lengths(bin_idx)
+        bin_depth = binDepths[bin_idx]
+        
+        # Exit if points < value OR min edge length < value OR depth > value
+        if bin_point_count < value or min(bin_edge_lengths) < value or bin_depth > value:
+            return
+
+        # Calculate division point (midpoint)
+        corners = binCorners[bin_idx]
+        min_corner = corners[0:3]
+        max_corner = corners[3:6]
+        new_div = [(min_corner[i] + max_corner[i]) / 2.0 for i in range(3)]
+
+        # Create 8 children
+        for i in range(8):
+            new_bin_idx = len(binDepths)
+            
+            # Update arrays
+            binDepths.append(binDepths[bin_idx] + 1)
+            binParents.append(bin_idx)
+            
+            # Define new corners based on octant i
+            # Octant mapping: bit 0=x, bit 1=y, bit 2=z
+            # If bit is 0, use min_corner; if 1, use new_div
+            new_min = []
+            new_max = []
+            for k in range(3):
+                if (i >> k) & 1:
+                    new_min.append(new_div[k])
+                    new_max.append(max_corner[k])
+                else:
+                    new_min.append(min_corner[k])
+                    new_max.append(new_div[k])
+            
+            binCorners.append(new_min + new_max)
+            
+            # Reassign points
+            # Identify points currently in bin_idx
+            points_to_move = [j for j, p in enumerate(pointBins) if p == bin_idx]
+            
+            # Determine which of these points fall into the new octant
+            for p_idx in points_to_move:
+                p = points[p_idx]
+                # Check if point is in the new octant defined by new_min and new_max
+                in_x = (p[0] >= new_min[0]) and (p[0] < new_max[0])
+                in_y = (p[1] >= new_min[1]) and (p[1] < new_max[1])
+                in_z = (p[2] >= new_min[2]) and (p[2] < new_max[2])
+                
+                # Note: Boundary handling for max edge is implementation detail [G]
+                # Standard octree includes max edge in last octant or uses <=
+                if in_x and in_y and in_z:
+                    pointBins[p_idx] = new_bin_idx
+            
+            # Recurse
+            divide(new_bin_idx)
+
+    # Start recursion on root bin (index 0)
+    divide(0)
+    
+    return binDepths, binParents, binCorners, pointBins
+```
+
+### Parameters and Edge Cases
+-   **`value`**: The source uses a single scalar `value` for three distinct conditions: minimum point count, minimum edge length, and maximum depth [S1]. This is a simplification; in practice, these thresholds are often distinct parameters.
+-   **Precision**: Floating-point comparisons for point inclusion (`pointBins` reassignment) may suffer from precision errors at bin boundaries. The source does not specify boundary inclusion rules (e.g., `<=` vs `<` for max coordinates) [S1].
+-   **Empty Bins**: The algorithm does not explicitly handle the creation of empty bins if no points fall into a sub-octant, but the recursion ensures only bins with points are processed if the point reassignment logic is strict. However, the source code structure creates all 8 children and recurses, potentially creating empty bins if not filtered [S1].
+
+## Operating characteristics
+-   **Time Complexity**: $O(N \cdot D)$ in the worst case, where $N$ is the number of points and $D$ is the depth of the tree, due to point reassignment at each level [S1].
+-   **Memory Complexity**: $O(M)$, where $M$ is the number of nodes in the octree. The arrays `binDepths`, `binParents`, and `binCorners` grow with each subdivision [S1].
+-   **Strengths**: Simple to implement; adaptive to point density; effective for color quantization and spatial indexing [S1].
+-   **Limitations**: Single scalar threshold limits flexibility; potential for unbalanced trees if point distribution is highly skewed; recursive nature may cause stack overflow for very deep trees [S1].
+
+## Background
+The method is described in the context of MATLAB's `OcTree` function implementation for point decomposition [S1]. It is historically associated with color quantization algorithms where RGB colors are treated as 3D points in a color space [S1]. The recursive subdivision strategy is a standard approach in spatial data structures, originating from the general definition of octrees [S1].
+
+## Sources
+[S1] Octree, https://en.wikipedia.org/wiki/Octree, fetched 2026-10-26

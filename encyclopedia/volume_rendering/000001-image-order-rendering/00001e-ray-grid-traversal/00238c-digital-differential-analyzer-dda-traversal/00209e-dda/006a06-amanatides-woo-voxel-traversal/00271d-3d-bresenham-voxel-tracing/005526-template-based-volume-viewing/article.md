@@ -1,0 +1,121 @@
+# Template-Based Volume Viewing
+
+Also called: Template-Based Ray Tracing, Parallel Projection Template Method
+
+## Overview
+Template-Based Volume Viewing is a ray-grid traversal technique for parallel projection that exploits inter-ray coherence by precomputing a single sequence of voxel increments (a template) and reusing it for all rays, thereby avoiding per-ray line algorithm activation [S1]. It solves the discretization errors and performance overhead inherent in naive per-ray traversal, where varying initial positions cause voxels to be skipped or visited multiple times [S1]. Unlike siblings that recompute traversal logic per ray, this method ensures all rays share the same form regardless of length, distributing discretization error uniformly [S1].
+
+## How it works
+**Inputs and Outputs**
+*   **Input:** Volume data (typically binary for the discrete line approach [S1]), camera parameters defining a parallel projection, and the volume bounding box.
+*   **Output:** A rendered image where each pixel corresponds to a ray traversing the volume using the precomputed template.
+
+**Data Structures**
+*   **Ray Template:** A fixed sequence of integer increments $(\Delta x, \Delta y, \Delta z)$ representing the path through the voxel grid. The size of the template is determined by the maximum extent of the volume in the chosen traversal direction.
+*   **Base Plane:** A 2D grid parallel to one of the volume faces, used to map screen pixels to the template indices.
+
+**Algorithm Steps**
+1.  **Determine the Base Plane:** Select a plane parallel to one of the volume faces (e.g., $z=0$ or $z=Z_{max}$) to serve as the template placement surface. This guarantees a complete and uniform tessellation of the volume [S1].
+2.  **Compute Projection Extent:** Calculate the size of the projection plane required to cover the volume from the parallel projection viewpoint. This determines the dimensions of the base plane grid [S1].
+3.  **Compute Parallel Ray Template:** Generate a single 3D line-voxelization path using either a 6-line or 26-line algorithm.
+    *   The 6-line algorithm visits more voxels (up to twice as many as the 26-line maximum) [S1].
+    *   The 26-line algorithm visits fewer voxels and uniformly samples the space [S1].
+    *   Store the sequence of voxel increments $(\Delta x, \Delta y, \Delta z)$ for this path. This step is performed once [S1].
+4.  **Ray Casting (Trace the Rays):** For each pixel on the screen:
+    *   Map the pixel coordinate to the corresponding position on the Base Plane.
+    *   Retrieve the precomputed Ray Template.
+    *   Traverse the volume by applying the template increments sequentially to the current voxel index.
+    *   Accumulate color/opacity along the path.
+5.  **2D Mapping:** Map the results from the Base Plane coordinates to the final screen plane coordinates [S1].
+
+**Formulas and Parameters**
+*   **Discrete vs. Continuous Line:** The method supports discrete line tracing (constant interpolation) and continuous line tracing (multiple samples per voxel, higher-order interpolation) [S1].
+*   **Data Type Constraint:** The discrete line approach is valid only for binary data. Using synthetic object voxelization with the continuous approach may yield incorrect results [S1].
+*   **Round Error Handling:** A critical pitfall is that the entry point to the volume is calculated in floating point, but the discrete line algorithm is activated from the initial integer point of the grid [S1]. The template-based approach mitigates this by ensuring all rays follow the same integer-based increment sequence, eliminating the need to reactivate the line algorithm for every ray [S1].
+
+**Pseudocode**
+> **Unverified code.** The code below did not pass a test run against a reference implementation, or no test fits it, so it may contain errors.
+
+```python
+def template_based_volume_rendering(volume, camera_params):
+    # 1. Determine Base Plane
+    # Select a face parallel to the projection direction.
+    # Let the base plane be a 2D grid of size (W, H) corresponding to the image.
+    base_plane = create_base_plane(camera_params.image_width, camera_params.image_height)
+    
+    # 2. Compute Projection Extent
+    # Determine the bounding box of the volume in the base plane's coordinate system.
+    projection_extent = compute_projection_extent(volume.bounding_box, camera_params)
+    
+    # 3. Compute Parallel Ray Template
+    # Choose between 6-line or 26-line algorithm.
+    # 26-line is preferred for fewer voxel visits and uniform sampling.
+    traversal_algorithm = "26-line" 
+    template = compute_line_voxelization(volume.bounding_box, traversal_algorithm)
+    # template is a list of (dx, dy, dz) increments
+    
+    # 4. Ray Casting
+    image = empty_image(camera_params.image_width, camera_params.image_height)
+    
+    for y in range(camera_params.image_height):
+        for x in range(camera_params.image_width):
+            # Map pixel to base plane
+            base_pos = map_pixel_to_base_plane(x, y, base_plane, projection_extent)
+            
+            # Initialize ray state
+            current_voxel = base_pos
+            accumulated_color = (0, 0, 0, 0)
+            
+            # Trace using precomputed template
+            for dx, dy, dz in template:
+                # Apply increment
+                current_voxel = (current_voxel.x + dx, 
+                                 current_voxel.y + dy, 
+                                 current_voxel.z + dz)
+                
+                # Check if voxel is within volume bounds
+                if not is_inside_volume(current_voxel, volume.bounding_box):
+                    break
+                
+                # Sample volume data
+                density = volume.sample(current_voxel)
+                
+                # Accumulate (simplified constant interpolation for discrete case)
+                accumulated_color = accumulate_color(accumulated_color, density)
+            
+            image.set_pixel(x, y, accumulated_color)
+            
+    return image
+```
+
+## Subtopics
+
+### Integer-based Amanatides and Woo Voxel Traversal
+Uses integer arithmetic to avoid floating-point division per step but still computes traversal per ray. Choose when per-ray precision is needed without template overhead. [Link](4246-integer-based-amanatides-and-woo-voxel-traversal.md)
+
+### Voxel Traversal with Rounding Error Correction
+Addresses precision issues in standard DDA. Choose when floating-point errors in entry points are critical. [Link](6207-voxel-traversal-with-rounding-error-correction.md)
+
+### Liu Extension of Bresenham
+An extension of Bresenham's algorithm for 3D. Choose for specific line-drawing optimizations. [Link](12811-liu-extension-of-bresenham.md)
+
+### Zalik et al. Algorithm
+Optimized voxel traversal. Choose for general-purpose high-performance traversal. [Link](12816-zalik-et-al-algorithm.md)
+
+### BCC/FCC Ray Tracing
+Uses Body-Centered Cubic or Face-Centered Cubic lattices. Choose for better isotropic sampling. [Link](13311-bcc-fcc-ray-tracing.md)
+
+## Operating characteristics
+*   **Time Complexity:** $O(N \cdot L)$, where $N$ is the number of rays (pixels) and $L$ is the length of the ray template (volume depth). The per-ray cost is reduced to simple addition and lookup.
+*   **Memory Complexity:** $O(L)$ for storing the ray template. The base plane requires $O(W \cdot H)$ memory.
+*   **Performance:** On average, this method is 2 times faster than using a standard 26-line algorithm. The performance gain grows with the number of rays traced [S1].
+*   **Strengths:** Eliminates per-ray algorithm activation overhead; ensures uniform discretization error distribution; avoids skipping or double-visiting voxels caused by naive per-ray traversal [S1].
+*   **Limitations:** Only applicable to parallel projection; discrete line approach is restricted to binary data [S1]; requires precomputation of the template.
+*   **When to Use:** Parallel projection volume rendering with large images where inter-ray coherence is high.
+*   **When Not to Use:** Perspective projection (rays are not parallel); non-binary data requiring continuous interpolation with the discrete line method (may yield wrong results) [S1].
+
+## Background
+Template-Based Volume Viewing was developed by A. Kaeli et al. (noted as YaKa in source) and presented in 1998 as part of research on inter-ray coherency in volume rendering [S1]. It addresses the inefficiencies of naive ray casting by leveraging the redundancy in parallel ray paths. The method is a foundational technique in image-order rendering for parallel projections, preceding more advanced fast volume rendering techniques [S1].
+
+## Sources
+[S1] Template-Based Volume Viewing [#YaKa##1#], https://cg.tuwien.ac.at/studentwork/VisFoSe98/ak/FoSe_Notes/node45.html, fetched 2026-10-24

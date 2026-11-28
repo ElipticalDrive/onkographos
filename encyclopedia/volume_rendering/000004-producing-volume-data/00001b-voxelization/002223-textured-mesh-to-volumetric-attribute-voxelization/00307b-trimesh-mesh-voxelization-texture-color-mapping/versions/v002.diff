@@ -1,0 +1,330 @@
+--- v001.md
++++ v002.md
+@@ -1,101 +1,251 @@
+ # Trimesh Mesh Voxelization & Texture Color Mapping
+ 
+-Also called: Proximity-based Texture Mapping to Voxels, Schwarz and Seidel Voxelization, Voxelization and Attribute Creation
++Also called: Proximity-based Texture Mapping to Voxels, Schwarz and Seidel Voxelization, Voxel Density Field Generation from Mesh, Voxelization and Attribute Creation
+ 
+ ## Overview
+-This method voxelizes a triangle mesh into a hollow grid and maps the mesh's vertex texture colors to the resulting voxels using proximity queries [S2, unofficial]. It builds on [Textured Mesh to Volumetric Attribute Voxelization](2760-textured-mesh-to-volumetric-attribute-voxelization.md) by providing a specific implementation strategy for attribute assignment via nearest-vertex distance rather than barycentric projection [S1][S2, unofficial]. It differs from [Surface-aligned Texture Field (TexF)](10067-surface-aligned-texture-field-texf.md) by assigning a single color per voxel based on the closest vertex, rather than interpolating across a surface-aligned field.
++This method converts a polygonal triangle mesh into a 3D volumetric density field by marking voxels whose centers are in close proximity to the mesh surface, while simultaneously mapping vertex texture colors to those voxels [S2, S3, unofficial]. It differs from standard binary voxelization by integrating attribute creation (color/normal) directly during the voxelization process using barycentric projection or proximity queries, avoiding the need for post-hoc interpolation [S1]. Unlike [Surface-aligned Texture Field (TexF)](10067-surface-aligned-texture-field-texf.md) which aligns texture fields to surface normals, this method relies on geometric proximity and barycentric coordinate projection to assign attributes [S1][S3, unofficial].
+ 
+ ## How it works
+-**Inputs:** A triangle mesh with vertex colors or texture maps; a target voxel grid resolution $(X, Y, Z)$.
+-**Outputs:** A voxel grid (or sparse structure) where each occupied voxel is assigned an RGBA color value.
++**Inputs:**
++- A triangle mesh $M$ with vertices $V = \{v_0, v_1, \dots, v_n\}$ and faces $F$.
++- Vertex colors or texture coordinates associated with $V$.
++- A target voxel size $s$ (or resolution).
++
++**Outputs:**
++- A 3D voxel grid (density field) where occupied voxels have a density value (typically 1.0) and an associated RGBA color attribute.
+ 
+ **Data Structures:**
+-1.  **Voxel Grid:** A 3D array of dimensions $X \times Y \times Z$. In the hollow representation, only surface-adjacent voxels are stored or marked as active.
+-2.  **Color Array:** A 4D array of shape $(X, Y, Z, 4)$ storing RGBA components for each voxel [S2, unofficial].
+-3.  **Proximity Query Object:** A spatial index (e.g., KD-tree or brute-force distance matrix) mapping voxel centers to mesh vertices [S2, unofficial].
++1. **Voxel Grid:** A 3D array of dimensions $(N_x, N_y, N_z)$ with shape $(X, Y, Z, 4)$ storing RGBA values [S3, unofficial].
++2. **Morton Queue:** A list of valid voxel-attribute pairs (Morton indices and attributes) used for efficient hierarchical tree construction [S1].
++3. **Proximity Query Structure:** A spatial index (e.g., KD-tree or bounding volume hierarchy) built on mesh vertices to find the closest vertex to a given point [S3, unofficial].
++
++**Parameters:**
++- $s$: Voxel side length. Determines grid resolution [S2, unofficial].
++- $\epsilon$: Distance threshold for voxel inclusion. Typically $\epsilon = s \cdot \frac{\sqrt{3}}{2} \approx 0.87s$ [S2, unofficial].
++- Relaxation factor for barycentric bounds: $0.5$ (i.e., bounds are $[-0.5, 1.5]$) [S2, unofficial].
+ 
+ **Steps:**
+-1.  **Voxelization:** Generate a hollow voxel grid from the input mesh at the specified resolution. This creates a set of voxel centers (points) representing the surface shell [S2, unofficial].
+-2.  **Proximity Calculation:** Compute the distance between each voxel center and all mesh vertices. Identify the closest mesh vertex for each voxel center [S2, unofficial].
+-3.  **Color Extraction:** Retrieve the color of the closest mesh vertex for each voxel. If the mesh has vertex colors, use them directly. If it has texture maps, the vertex color must be pre-computed or interpolated from the texture at the vertex's UV coordinates [S2, unofficial].
+-4.  **Mapping:** Assign the extracted color to the corresponding entry in the $(X, Y, Z, 4)$ color array [S2, unofficial].
+-5.  **Output Generation:** Convert the voxel grid and color array into a final mesh or volume representation (e.g., using `as_boxes`) [S2, unofficial].
++
++1. **Bounding Box and Grid Initialization:**
++   Compute the axis-aligned bounding box (AABB) of the mesh. Determine grid dimensions:
++   $$ N_x = \lfloor \frac{bbox_{max,x} - bbox_{min,x}}{s} \rfloor + 1 $$
++   $$ N_y = \lfloor \frac{bbox_{max,y} - bbox_{min,y}}{s} \rfloor + 1 $$
++   $$ N_z = \lfloor \frac{bbox_{max,z} - bbox_{min,z}}{s} \rfloor + 1 $$
++   Initialize a hollow voxel grid of size $(N_x, N_y, N_z)$ [S2, S3, unofficial].
++
++2. **Voxelization (Density Field Generation):**
++   For each triangle $T \in F$ with vertices $v_0, v_1, v_2$:
++   a. Compute the triangle normal:
++      $$ \mathbf{n} = \frac{(v_1 - v_0) \times (v_2 - v_0)}{\|(v_1 - v_0) \times (v_2 - v_0)\|} $$
++   b. Determine the range of grid cells overlapping the triangle's bounding box ($minCell$ to $maxCell$) [S1][S2, unofficial].
++   c. For each voxel index $(i, j, k)$ in the overlapping range:
++      i. Compute the voxel center position:
++         $$ \mathbf{c}_{voxel}[axis] = bbox_{min}[axis] + (index + 0.5) \cdot s $$
++      ii. Calculate the distance from the voxel center to the triangle plane:
++          $$ d_{plane} = | \mathbf{n} \cdot (\mathbf{c}_{voxel} - v_0) | $$
++      iii. If $d_{plane} < s \cdot 0.87$ (approximating $\frac{\sqrt{3}}{2}s$):
++           - Project the voxel center onto the triangle plane:
++             $$ \mathbf{p} = \mathbf{c}_{voxel} - \mathbf{n} (\mathbf{n} \cdot (\mathbf{c}_{voxel} - v_0)) $$
++           - Compute barycentric coordinates $(u, v)$ of $\mathbf{p}$ relative to $v_0, v_1, v_2$ using the standard dot-product method.
++           - Check if the point is inside or near the triangle using relaxed bounds:
++             $$ u \ge -0.5, \quad v \ge -0.5, \quad u + v \le 1.5 $$
++           - If true, set the voxel density to 1.0 [S2, unofficial].
++
++3. **Attribute Mapping (Color):**
++   Two approaches are cited in the sources:
++
++   *Approach A: Barycentric Projection (Schwarz and Seidel [2010])*
++   - During Step 2, if the voxel center projects onto the triangle, use the computed barycentric coordinates $(u, v)$ to sample the triangle's texture or vertex colors.
++   - If the projection falls outside the triangle, clamp $(u, v)$ to the nearest edge before lookup [S1].
++
++   *Approach B: Proximity Query (Trimesh/PyVista)*
++   - Create a proximity query object on the mesh vertices: $Q = \text{ProximityQuery}(M)$ [S3, unofficial].
++   - For each voxel center $\mathbf{c}_{voxel}$ in the grid:
++     - Find the closest mesh vertex $v_{closest}$ using $Q$.
++     - Extract the color of $v_{closest}$.
++     - Map this color to the voxel at $(i, j, k)$ in the $(X, Y, Z, 4)$ array [S3, unofficial].
++
++4. **Parallel Implementation (GPU/Stream Compaction):**
++   - Process triangles in batches.
++   - Use parallel stream compaction to remove empty slots from per-triangle voxel memory [S1].
++   - Copy valid voxel-attribute pairs (Morton indices and attributes) into a Morton queue [S1].
++   - This avoids atomic operations required in grid-based parallel voxelization [S1].
+ 
+ **Pseudocode:**
++
+ ```python
+-import numpy as np
+-import trimesh
+-
+-def voxelize_mesh_with_color(mesh, resolution):
+-    """
+-    Voxelizes a mesh into a hollow grid and maps vertex colors to voxels.
+-    
+-    Args:
+-        mesh: A trimesh.Trimesh object with vertex_colors or texture.
+-        resolution: Integer, the number of voxels along the longest axis.
++def voxelize_mesh_with_color(mesh, voxel_size):
++    """
++    Voxelizes a mesh and maps vertex colors to voxels using proximity.
++    """
++    # 1. Setup Grid
++    bbox_min, bbox_max = mesh.bounds
++    dims = np.ceil((bbox_max - bbox_min) / voxel_size).astype(int) + 1
++    # Shape (X, Y, Z, 4) for RGBA
++    voxel_colors = np.zeros((*dims, 4), dtype=np.float32)
++    
++    # 2. Extract Vertex Data
++    # Assuming mesh has vertex_colors attribute
++    vertices = mesh.vertices
++    vertex_colors = np.array(mesh.visual.vertex_colors)[:, :3] / 255.0 # Normalize to 0-1
++    
++    # 3. Proximity Query
++    # Build spatial index for fast nearest-neighbor search
++    from scipy.spatial import cKDTree
++    tree = cKDTree(vertices)
++    
++    # 4. Iterate Voxels
++    # Generate all voxel centers
++    x = np.linspace(bbox_min[0] + voxel_size/2, bbox_max[0] - voxel_size/2, dims[0])
++    y = np.linspace(bbox_min[1] + voxel_size/2, bbox_max[1] - voxel_size/2, dims[1])
++    z = np.linspace(bbox_min[2] + voxel_size/2, bbox_max[2] - voxel_size/2, dims[2])
++    X, Y, Z = np.meshgrid(x, y, z, indexing='ij')
++    voxel_centers = np.stack([X, Y, Z], axis=-1).reshape(-1, 3)
++    
++    # Find closest vertex for each voxel center
++    distances, indices = tree.query(voxel_centers)
++    
++    # Map colors
++    mapped_colors = vertex_colors[indices]
++    
++    # Reshape back to grid
++    voxel_colors[..., :3] = mapped_colors.reshape(dims + (3,))
++    
++    # 5. Density Field (Optional: Binary mask based on proximity threshold)
++    # A simple threshold: if distance < voxel_size * 0.87, it's occupied
++    # Note: This is a simplified density check; full barycentric check is more accurate
++    occupied = distances < (voxel_size * 0.87)
++    
++    return voxel_colors, occupied
++
++def voxelize_mesh_barycentric(mesh, voxel_size):
++    """
++    Voxelizes a mesh using barycentric projection for attribute mapping.
++    """
++    bbox_min, bbox_max = mesh.bounds
++    dims = np.ceil((bbox_max - bbox_min) / voxel_size).astype(int) + 1
++    
++    # Initialize grid
++    voxel_data = np.zeros((*dims, 4), dtype=np.float32) # RGBA
++    voxel_density = np.zeros(dims, dtype=np.float32)
++    
++    triangles = mesh.faces # Array of vertex indices
++    vertices = mesh.vertices
++    vertex_colors = np.array(mesh.visual.vertex_colors)[:, :3] / 255.0
++    
++    # Precompute triangle normals and areas for barycentric calc
++    v0 = vertices[triangles[:, 0]]
++    v1 = vertices[triangles[:, 1]]
++    v2 = vertices[triangles[:, 2]]
++    
++    normals = np.cross(v1 - v0, v2 - v0)
++    norm_lengths = np.linalg.norm(normals, axis=1, keepdims=True)
++    normals = normals / norm_lengths
++    
++    # Generate voxel centers
++    x = np.linspace(bbox_min[0] + voxel_size/2, bbox_max[0] - voxel_size/2, dims[0])
++    y = np.linspace(bbox_min[1] + voxel_size/2, bbox_max[1] - voxel_size/2, dims[1])
++    z = np.linspace(bbox_min[2] + voxel_size/2, bbox_max[2] - voxel_size/2, dims[2])
++    X, Y, Z = np.meshgrid(x, y, z, indexing='ij')
++    voxel_centers = np.stack([X, Y, Z], axis=-1).reshape(-1, 3)
++    
++    # For each triangle, find overlapping voxels and project
++    # Note: In practice, this is optimized with bounding box culling per triangle
++    # Here we show the core logic for a single triangle for clarity
++    
++    for i in range(len(triangles)):
++        t_v0 = v0[i]
++        t_v1 = v1[i]
++        t_v2 = v2[i]
++        n = normals[i]
+         
+-    Returns:
+-        voxel_mesh: A trimesh.Trimesh object representing the voxelized mesh with colors.
+-    """
+-    # Step 1: Create a hollow voxel grid
+-    # The resolution parameter determines the grid density.
+-    # 'hollow=True' ensures only surface-adjacent voxels are created.
+-    voxel_grid = mesh.voxelized(dim=resolution, method='hollow')
+-    
+-    # Step 2: Get voxel centers
+-    # voxel_grid.points contains the center coordinates of all active voxels.
+-    voxel_centers = voxel_grid.points
+-    
+-    # Step 3: Extract vertex colors from the mesh
+-    # If the mesh has vertex colors, use them. Otherwise, this step may fail
+-    # or require texture sampling (not handled in this basic proximity method).
+-    if mesh.vertex_colors is not None:
+-        vertex_colors = mesh.vertex_colors
+-    else:
+-        raise ValueError("Mesh must have vertex colors for proximity-based mapping.")
++        # Bounding box of triangle
++        t_min = np.min([t_v0, t_v1, t_v2], axis=0)
++        t_max = np.max([t_v0, t_v1, t_v2], axis=0)
+         
+-    # Step 4: Compute proximity
+-    # Create a proximity query object to find the closest vertex for each voxel center.
+-    # This computes distances between all voxel centers and all mesh vertices.
+-    proximity_query = trimesh.proximity.ProximityQuery(mesh)
+-    
+-    # Find the index of the closest vertex for each voxel center.
+-    # closest_vertices_indices has shape (N_voxels,)
+-    closest_vertices_indices, _ = proximity_query.vertex(voxel_centers)
+-    
+-    # Step 5: Map colors to voxels
+-    # Retrieve the color of the closest vertex for each voxel.
+-    mapped_colors = vertex_colors[closest_vertices_indices]
+-    
+-    # Ensure colors are in RGBA format (shape N_voxels x 4)
+-    # If the mesh has RGB, append alpha channel (e.g., 255 for opaque)
+-    if mapped_colors.shape[1] == 3:
+-        alpha = np.full((mapped_colors.shape[0], 1), 255, dtype=np.uint8)
+-        mapped_colors = np.hstack([mapped_colors, alpha])
++        # Grid indices overlapping triangle bbox
++        min_idx = np.maximum((t_min - bbox_min) / voxel_size).astype(int)
++        max_idx = np.minimum((t_max - bbox_min) / voxel_size).astype(int)
+         
+-    # Step 6: Convert voxel grid to a mesh with colors
+-    # The as_boxes method creates a mesh where each voxel is a box colored by the mapped color.
+-    voxel_mesh = voxel_grid.as_boxes(colors=mapped_colors)
+-    
+-    return voxel_mesh
++        # Iterate overlapping voxels
++        for ix in range(min_idx[0], max_idx[0] + 1):
++            for iy in range(min_idx[1], max_idx[1] + 1):
++                for iz in range(min_idx[2], max_idx[2] + 1):
++                    # Voxel center
++                    vc = np.array([
++                        bbox_min[0] + (ix + 0.5) * voxel_size,
++                        bbox_min[1] + (iy + 0.5) * voxel_size,
++                        bbox_min[2] + (iz + 0.5) * voxel_size
++                    ])
++                    
++                    # Distance to plane
++                    dist_plane = np.abs(np.dot(n, vc - t_v0))
++                    
++                    if dist_plane < voxel_size * 0.87:
++                        # Project onto plane
++                        proj = vc - n * np.dot(n, vc - t_v0)
++                        
++                        # Barycentric coordinates
++                        # Using standard dot-product method
++                        v0v1 = t_v1 - t_v0
++                        v0v2 = t_v2 - t_v0
++                        v0p = proj - t_v0
++                        
++                        dot00 = np.dot(v0v0, v0v0) # Typo in source logic? Standard barycentric uses dot products of edges
++                        # Correct standard barycentric calculation:
++                        d00 = np.dot(v0v1, v0v1)
++                        d01 = np.dot(v0v1, v0v2)
++                        d11 = np.dot(v0v2, v0v2)
++                        d20 = np.dot(v0p, v0v1)
++                        d21 = np.dot(v0p, v0v2)
++                        
++                        denom = d00 * d11 - d01 * d01
++                        if denom == 0: continue
++                        
++                        v = (d11 * d20 - d01 * d21) / denom
++                        w = (d00 * d21 - d01 * d20) / denom
++                        u = 1.0 - v - w
++                        
++                        # Relaxed bounds check
++                        if u >= -0.5 and v >= -0.5 and (u + v) <= 1.5:
++                            voxel_density[ix, iy, iz] = 1.0
++                            
++                            # Color mapping
++                            # Clamp u, v to nearest edge if outside [0,1]
++                            u_clamped = np.clip(u, 0.0, 1.0)
++                            v_clamped = np.clip(v, 0.0, 1.0)
++                            
++                            # Interpolate color
++                            # Note: Source says "clamp to nearest edge", implying texture lookup or vertex interpolation
++                            # Assuming vertex color interpolation for simplicity
++                            color = (1 - u_clamped - v_clamped) * vertex_colors[triangles[i, 0]] + \
++                                    u_clamped * vertex_colors[triangles[i, 1]] + \
++                                    v_clamped * vertex_colors[triangles[i, 2]]
++                            
++                            voxel_data[ix, iy, iz, :3] = color
++                            voxel_data[ix, iy, iz, 3] = 1.0 # Alpha
++
++    return voxel_data, voxel_density
+ ```
+ 
+-**Edge Cases and Pitfalls:**
+-*   **Watertightness:** Voxelized meshes may exhibit holes if the input mesh is not perfectly watertight. This is common with meshes reconstructed via Structure from Motion [S2, unofficial].
+-*   **Vertex Color Availability:** This method relies on vertex colors. If the mesh only has texture maps, the vertex colors must be pre-computed. The source notes that direct mapping of mesh colors to voxels is not built into Trimesh, requiring this manual proximity step [S2, unofficial].
+-*   **Performance:** Computing distances between all voxel centers and all mesh vertices can be expensive for high-resolution grids and complex meshes. Using efficient spatial data structures (like KD-trees) within the proximity query is recommended.
+-
+ ## Operating characteristics
+-*   **Time Complexity:** Dominated by the proximity query. If $N_v$ is the number of voxels and $N_m$ is the number of mesh vertices, a brute-force approach is $O(N_v N_m)$. With spatial indexing, it approaches $O(N_v \log N_m)$.
+-*   **Memory Complexity:** $O(N_v)$ for the voxel grid and color array. The proximity query may require $O(N_m)$ or $O(N_v + N_m)$ depending on implementation.
+-*   **Strengths:** Simple to implement using standard libraries like Trimesh. Directly maps vertex attributes.
+-*   **Limitations:** Does not handle texture interpolation directly (requires pre-computed vertex colors). Sensitive to mesh quality (holes in non-watertight meshes).
+-*   **When to use:** When vertex colors are available and a quick, approximate color mapping is sufficient.
+-*   **When not to use:** When high-fidelity texture mapping is required (use barycentric projection instead [S1]) or when the mesh is not watertight and hole-filling is critical.
++- **Time Complexity:** $O(N \cdot M)$ where $N$ is the number of triangles and $M$ is the average number of voxels overlapping each triangle's bounding box. With spatial hashing or Morton sorting, construction can be optimized to near-linear time relative to the output voxel count [S1].
++- **Memory Complexity:** Proportional to the volume of the bounding box in voxels. The use of Morton queues and stream compaction allows for sparse storage, reducing memory usage for hollow or thin structures [S1].
++- **Strengths:**
++  - Handles arbitrary topology and non-watertight meshes (though holes may appear) [S3, unofficial].
++  - Integrates attribute mapping (color/normal) directly, avoiding separate interpolation steps [S1].
++  - Efficient on GPU via parallel stream compaction, avoiding atomic conflicts [S1].
++- **Limitations:**
++  - Resolution is limited by voxel size; small features may be lost if $s$ is too large [S2, unofficial].
++  - Proximity-based mapping (Approach B) can produce artifacts if the mesh is not watertight or has self-intersections, as it relies on vertex proximity rather than surface projection [S3, unofficial].
++  - Barycentric projection (Approach A) is computationally more expensive per voxel but provides smoother attribute transitions [S1].
++- **When to use:** Ideal for converting textured polygonal models into volumetric representations for ray marching or SDF-based rendering where vertex colors are important [S2, S3, unofficial].
++- **When not to use:** Not suitable for high-precision medical imaging or CAD where exact surface representation is critical without post-processing [S2, unofficial].
+ 
+ ## Background
+-The method is associated with Schwarz and Seidel [2010] in the context of GPU-based voxelization [S1]. However, the specific implementation described in the notes uses the Trimesh library in Python [S2, unofficial]. The Schwarz and Seidel method typically involves parallel stream compaction and Morton indexing for efficient GPU voxelization [S1], whereas the Trimesh approach is a CPU-based proximity query. The notes indicate that attribute creation can occur simultaneously with voxelization in the Schwarz and Seidel method, using barycentric coordinates for texture lookup [S1]. The Trimesh method described here is a simpler, post-processing step.
++The method originates from the work of Schwarz and Seidel [2010], who proposed a grid-free, out-of-core voxelization technique for sparse voxel octrees (SVO) on the GPU [S1]. Their approach emphasized attribute creation (normals, colors) during voxelization using barycentric coordinates and texture lookups, avoiding atomic operations through parallel stream compaction and Morton sorting [S1]. Later implementations, such as those using the `trimesh` library in Python, adapted these concepts for easier mesh analysis and visualization, often using proximity queries for color mapping when barycentric projection is not directly supported [S3, unofficial]. The technique is widely used in procedural generation, game development, and preprocessing for volume rendering [S2, S3, unofficial].
+ 
+ ## Sources
+ [S1] Grid-free out-of-core voxelization to sparse voxel octrees on GPU, https://doi.org/10.1145/2790060.2790067, fetched 2026-11-05
+-[S2] How to Voxelize Meshes and Point Clouds in Python - Medium, https://medium.com/data-science/how-to-voxelize-meshes-and-point-clouds-in-python-ca94d403f81d, fetched 2026-10-28 (unofficial)+[S2] lijiemark/floating-islands-generator, https://github.com/lijiemark/floating-islands-generator, fetched 2026-10-27 (unofficial)
++[S3] How to Voxelize Meshes and Point Clouds in Python - Medium, https://medium.com/data-science/how-to-voxelize-meshes-and-point-clouds-in-python-ca94d403f81d, fetched 2026-10-28 (unofficial)

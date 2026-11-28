@@ -1,0 +1,193 @@
+--- v004.md
++++ v005.md
+@@ -4,26 +4,22 @@
+ 
+ ## Overview
+-Palette Texture Volume Rendering is an acceleration technique for 2D slicing volume visualization on mobile devices, designed to overcome the limited memory and processing power of low-end hardware [S1, unofficial]. It solves the problem of slow interactive rendering by combining adaptive screen-resolution rendering, compressed palette textures, and basic graphics hardware functionality such as rasterization and 2D texture mapping [S1, unofficial]. Unlike standard volume rendering methods that apply transfer functions explicitly on the CPU or use high-resolution full-screen rendering, this approach maps an 8-bit indexed image to RGBA values via a palette, effectively embedding the transfer function into the texture format itself [S1, unofficial]. It sets itself apart from its siblings by prioritizing memory efficiency and fast texture updates through compression, accepting lower visual fidelity (blurred boundaries) in exchange for interactivity on devices like PDAs [S1, unofficial].
++Palette Texture Volume Rendering accelerates 2D slicing volume visualization on mobile devices by combining adaptive screen-resolution rendering, compressed palette textures, and basic graphics hardware functionality [S1, unofficial]. It solves the problem of slow interactive rendering on low-end hardware by embedding the transfer function directly into a compressed 8-bit indexed texture format, avoiding explicit CPU-side transfer function application [S1, unofficial]. It sets itself apart from siblings by prioritizing memory efficiency and fast texture updates through compression, accepting lower visual fidelity (blurred boundaries after upscaling) in exchange for interactivity on constrained devices like PDAs [S1, unofficial].
+ 
+ ## How it works
+ **Inputs and Outputs:**
+-*   **Input:** A 3D volume dataset (stored in main memory), a transfer function (implicit in the palette), and camera parameters.
+-*   **Output:** A 2D image rendered at the device's native display resolution.
++*   **Input:** A 3D volume dataset (copied to device memory), a transfer function (encoded in the palette), and camera parameters [S1, unofficial].
++*   **Output:** A 2D image rendered at the device's native display resolution [S1, unofficial].
+ 
+ **Data Structures:**
+-*   **Volume Dataset:** Stored as a single copy in main memory. Due to strict memory limits (e.g., 30 MB available for application software on the target hardware), the entire dataset is copied to the device for rendering [S1, unofficial].
+-*   **Palette Texture:** A compressed texture format where each texel is an 8-bit index. The palette itself maps these indices to 32-bit RGBA values [S1, unofficial]. This reduces the texture size to approximately one-fourth of a standard RGBA texture [S1, unofficial].
+-*   **Rendering Buffers:**
+-    *   **Pbuffer (Pixel Buffer):** Used for off-screen rendering in OpenGL. However, due to hardware limitations (OpenGL ES 1.0), pbuffers may not be supported, requiring an alternative [S1, unofficial].
+-    *   **Alternative Buffer:** A texture created from a read-back of the framebuffer or a portion of the framebuffer to store the low-resolution intermediate image [S1, unofficial].
+-    *   **Alpha/Opacity Buffer:** A buffer with an alpha channel (if supported) or a luminance-based approximation to store opacity information [S1, unofficial].
++*   **Volume Dataset:** Stored as a single copy in main memory to respect tight memory limits (e.g., 30 MB available for application software) [S1, unofficial].
++*   **Palette Texture:** A compressed texture format where each texel is an 8-bit index mapping to RGBA values, reducing the texture size to approximately one-fourth of a standard RGBA texture [S1, unofficial].
++*   **Rendering Buffers:** A pbuffer for off-screen rendering, or an alternative texture created from a framebuffer read-back if pbuffers are unsupported by the hardware [S1, unofficial].
+ 
+ **Numbered Steps:**
+-
+-1.  **Data Management:** Copy the whole volume dataset into the mobile device's memory. Keep only one copy of the original dataset in main memory to save space [S1, unofficial].
+-2.  **Texture Update Strategy:** When the transfer function changes, use the original dataset to update the textures. To manage memory, allocate enough memory for only one single texture at a time. Upload this texture to graphics memory, render the corresponding slice, and then proceed to the next slice texture [S1, unofficial].
+-3.  **Palette Texture Creation:** Employ compressed palette textures for volume slices. This format allows fast texture updates because the textures are uncompressed during the upload process [S1, unofficial]. Note that creating these compressed textures is time-consuming because only one texture can be created at a time due to memory size limits [S1, unofficial].
+-4.  **Low-Resolution Rendering:** Render the volume at a lower resolution to reduce the number of fragments and render time. This low-resolution image is rendered in a buffer (pbuffer or alternative) for off-screen rendering [S1, unofficial].
+-5.  **Opacity Estimation (Alternative to Double Rendering):**
++1.  **Data Management:** Copy the entire volume dataset into the mobile device's memory, keeping only one copy in main memory [S1, unofficial].
++2.  **Texture Update Strategy:** When the transfer function changes, use the original dataset to update the textures. Allocate memory for only one single texture at a time, upload it to graphics memory, render the corresponding slice, and proceed to the next slice texture [S1, unofficial].
++3.  **Palette Texture Creation:** Employ compressed palette textures for volume slices. This format enables fast texture updates because textures are uncompressed during upload, though creating them is time-consuming since only one texture can be created at a time due to memory limits [S1, unofficial].
++4.  **Low-Resolution Rendering:** Render the volume at a lower resolution to reduce the number of fragments and render time. Render this low-resolution image in a pbuffer or alternative buffer for off-screen rendering [S1, unofficial].
++5.  **Opacity Estimation:**
+     *   *Standard Approach (if Pbuffer/Alpha supported):* Render the volume with its regular 2D texture slices twice in a pbuffer. First, render with a black background. Second, render with a white background. The difference between these two images provides a measure for transparency, weighted by the transparency of the in-between volume [S1, unofficial]. Alternatively, use a buffer with an alpha channel to determine the low-resolution opacity image, then use this image to attenuate RGB values of back lines using alpha blending [S1, unofficial].
+     *   *Hardware-Limited Approach (OpenGL ES 1.0):* Since hardware and OpenGL ES 1.0 do not support pbuffers or alpha channels, estimate the opacity of the volume based on the luminance of the low-resolution image to avoid rendering the volume twice [S1, unofficial].
+@@ -32,90 +28,80 @@
+         where $R, G, B$ are the red, green, and blue components of the pixel [S1, unofficial].
+     *   **Heuristic:** Assume that a pixel with high luminance also has large opacity. Calculate opacity based on this luminance value [S1, unofficial].
+-6.  **Upscaling:** Scale the low-resolution image up to the full native display resolution using fast 2D image rendering (bilinear or nearest-neighbor interpolation) [S1, unofficial].
+-7.  **Context Management:** Use a separate OpenGL context to share OpenGL state and texture data. This avoids a second representation of data in memory, which is critical given the tight memory constraints [S1, unofficial].
++6.  **Upscaling:** Scale the low-resolution image up to the full native display resolution using fast 2D image rendering [S1, unofficial].
++7.  **Context Management:** Use a separate OpenGL context to share OpenGL state and texture data, avoiding a second representation of data in memory [S1, unofficial].
+ 
+ **Pseudocode:**
+-
+ ```python
+-def render_volume_palette_texture(volume_data, transfer_function, camera, display_resolution, low_res_factor):
++def render_palette_volume(volume_data, palette, camera, display_res, low_res_factor):
+     """
+     Renders a volume using palette textures and adaptive screen resolution.
+-    Assumes OpenGL ES 1.0 constraints (no pbuffer, no alpha channel support).
++    Implements the luminance-based opacity estimation for hardware without alpha/pbuffer support.
+     """
+-    # 1. Data Management
+-    # volume_data is already copied to device memory.
+-    # Only one copy exists in main memory.
+-    
+-    # 2. Setup Palette Texture
+-    # Create a palette texture from the transfer function.
+-    # The palette maps 8-bit indices to RGBA.
+-    palette_texture = create_palette_texture(transfer_function)
+-    
+-    # 3. Determine Rendering Resolution
+-    low_res_width = display_resolution.width // low_res_factor
+-    low_res_height = display_resolution.height // low_res_factor
+-    
+-    # 4. Create Low-Resolution Buffer
+-    # Since pbuffers are not supported, use a texture read-back or framebuffer portion.
+-    # Let's assume we render to a texture 'low_res_tex' of size (low_res_width, low_res_height).
+-    low_res_tex = create_texture(low_res_width, low_res_height)
+-    
+-    # 5. Render Low-Resolution Volume
+-    bind_texture(low_res_tex)
+-    set_viewport(low_res_width, low_res_height)
+-    
+-    # Render slices using the palette texture
+-    # For each slice in the volume:
+-    for slice_index in range(volume_data.depth):
+-        # Extract slice data
+-        slice_data = volume_data.get_slice(slice_index)
+-        
+-        # Update palette texture if transfer function changed (handled externally)
+-        # Upload slice data to a temporary buffer or directly to the slice texture
+-        # Since only one texture can be created at a time, reuse a single slice texture object
+-        update_slice_texture(slice_texture, slice_data)
+-        
+-        # Render the slice quad
+-        render_slice_quad(slice_texture, camera, slice_index)
+-        
+-    # 6. Estimate Opacity from Luminance
+-    # Read back the low-res image or access it in memory
+-    low_res_image = read_texture(low_res_tex)
+-    
+-    opacity_image = zeros_like(low_res_image)
+-    
+-    for y in range(low_res_height):
+-        for x in range(low_res_width):
+-            r, g, b = low_res_image[y, x]
+-            # Calculate luminance
++    # 1. Determine low-resolution dimensions
++    low_w = display_res.width // low_res_factor
++    low_h = display_res.height // low_res_factor
++
++    # 2. Initialize low-resolution buffers
++    # Color buffer stores accumulated RGBA per pixel
++    color_buffer = [[(0, 0, 0, 0) for _ in range(low_w)] for _ in range(low_h)]
++    # Opacity buffer will store estimated opacity per pixel
++    opacity_buffer = [[0.0 for _ in range(low_w)] for _ in range(low_h)]
++
++    # 3. Render slices at low resolution
++    # [G] Standard 2D texture mapping: project each slice to the low-res viewport,
++    # sample volume values, lookup RGBA from palette, and accumulate into color_buffer.
++    for z in range(volume_data.depth):
++        render_slice_to_buffer(volume_data, palette, camera, z, low_w, low_h, color_buffer)
++
++    # 4. Estimate opacity from luminance (hardware-limited approach)
++    for y in range(low_h):
++        for x in range(low_w):
++            r, g, b, a = color_buffer[y][x]
++            # Calculate luminance using perception-oriented weights
+             luminance = 0.3 * r + 0.9 * g + 0.11 * b
+-            # Heuristic: High luminance implies high opacity
+-            # Normalize luminance to [0, 1] or map to opacity range
+-            # Note: The source does not specify the exact mapping function,
+-            # only the luminance calculation and the heuristic.
+-            # [G] Assuming a linear mapping or threshold for implementation completeness.
+-            opacity = clamp(luminance / 255.0, 0.0, 1.0)
+-            opacity_image[y, x] = opacity
+-            
+-    # 7. Upscale and Composite
+-    # Scale the low-res image to full resolution
+-    full_res_image = upscale(low_res_image, display_resolution)
+-    full_res_opacity = upscale(opacity_image, display_resolution)
+-    
+-    # Apply opacity to attenuate RGB values if necessary, 
+-    # though the source suggests the opacity is used for back lines.
+-    # For a simple final image:
+-    final_image = full_res_image * full_res_opacity
+-    
++            # Heuristic: high luminance implies high opacity
++            # [G] Normalize 8-bit luminance to [0, 1] range
++            opacity_buffer[y][x] = min(luminance / 255.0, 1.0)
++
++    # 5. Upscale to native resolution
++    full_color = upscale_2d_image(color_buffer, display_res.width, display_res.height)
++    full_opacity = upscale_2d_image(opacity_buffer, display_res.width, display_res.height)
++
++    # 6. Composite final image
++    final_image = []
++    for y in range(display_res.height):
++        row = []
++        for x in range(display_res.width):
++            r, g, b, a = full_color[y][x]
++            alpha = full_opacity[y][x]
++            # Attenuate RGB by estimated opacity
++            row.append((r * alpha, g * alpha, b * alpha, alpha))
++        final_image.append(row)
+     return final_image
++
++def render_slice_to_buffer(volume_data, palette, camera, slice_z, width, height, buffer):
++    # [G] Standard rasterization step: map 3D slice coordinates to 2D screen,
++    # iterate over pixels, sample volume, index palette for RGBA, and blend into buffer.
++    # Exact implementation depends on the specific graphics pipeline.
++    pass
++
++def upscale_2d_image(image_2d, target_w, target_h):
++    # [G] Bilinear interpolation to scale 2D image to target resolution
++    scaled = [[(0, 0, 0, 0) for _ in range(target_w)] for _ in range(target_h)]
++    for y in range(target_h):
++        for x in range(target_w):
++            src_y = int(y * (len(image_2d) / target_h))
++            src_x = int(x * (len(image_2d[0]) / target_w))
++            scaled[y][x] = image_2d[src_y][src_x]
++    return scaled
+ ```
+ 
+ **Parameters:**
+-*   **Low-Resolution Factor:** Determines the reduction in resolution. Typical values are not explicitly given, but the goal is to reduce fragment count significantly [S1, unofficial].
++*   **Low-Resolution Factor:** Determines the reduction in resolution. Not given in the sources.
+ *   **Luminance Weights:** Fixed at $0.3$ for R, $0.9$ for G, and $0.11$ for B [S1, unofficial].
+ 
+ **Edge Cases and Pitfalls:**
+-*   **Hardware Limitations:** OpenGL ES 1.0 and many mobile GPUs do not support pbuffers or alpha channels. This forces the use of luminance-based opacity estimation instead of accurate alpha blending [S1, unofficial].
+-*   **Blurring:** The scaled image of the bounding box and coordinate axes contains blurred portions due to the intrinsic low-resolution image [S1, unofficial]. This can cause partial occlusion and loss of perceptual depth cues [S1, unofficial].
++*   **Hardware Limitations:** OpenGL ES 1.0 and many mobile GPUs do not support pbuffers or alpha channels, forcing the use of luminance-based opacity estimation instead of accurate alpha blending [S1, unofficial].
++*   **Blurring:** The scaled image of the bounding box and coordinate axes contains blurred portions due to the intrinsic low-resolution image, which can cause partial occlusion and loss of perceptual depth cues [S1, unofficial].
+ *   **Memory Limits:** The application is totally native in the PDA, imposing a limit on the size of models that can be treated. Only one texture can be created at a time due to memory size limits, making texture creation time-consuming [S1, unofficial].
+ *   **Texture Atlas:** Using a texture atlas has nearly no effect on rendering time (difference of 0.01 fps) but requires more main memory during texture creation. However, it allows handling of non-power-of-two slices without wasting too much memory [S1, unofficial].

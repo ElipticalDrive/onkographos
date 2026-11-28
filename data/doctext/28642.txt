@@ -1,0 +1,961 @@
+# C++ Path Tracer
+
+## The Project
+This is a Path Tracer written entirely in C++17 built from the ground up. I started this project using Peter Shirley's *Ray Tracing in One Weekend* as a foundation, but my goal goes beyond just making pretty images. I designed the architecture to evolve into a Self Made Scientific Visualization Tool for medical imaging data.
+
+I wanted to bridge the gap between the math theory I learned in university and low-level implementation.
+
+## Motivation & Learning Goals
+Coming from a background where we heavily used Python, I wanted to challenge myself with C++ to understand what happens "under the hood".
+
+* **Transition from Python to C++ : ** Instead of relying on high-level libraries, I’m implementing the core logic in C++
+* **Mathematical Modeling :** Implemented vector calculus, linear algebra, and geometric intersections from the ground up
+* **Monte Carlo & Markov Chains :** I’ve studied Monte Carlo integration and Markov Chains in theory; this project is my way of applying those stochastic processes to a concrete rendering problem, rather than just calling a function in a Python script
+  
+## Features
+The engine is currently a pure C++ implementation with no external graphics dependencies.
+* **Primitives :** Mathematical sphere intersections
+* **Materials :** Implemented Lambertian (Matte), Metal (Reflective), and Dielectric (Glass with Schlick approximation)
+* **Camera :** Positionable camera with simulated Defocus Blur (Depth of Field)
+* **Quality :** MSAA (Multi-Sample Anti-Aliasing) and Gamma Correction
+
+## Roadmap: The Pivot to Medical
+This repository logs my progression from standard surface rendering to volumetric simulation.
+
+- [x] **Phase 1: The Foundation** (Current)
+    - Getting the Monte Carlo Ray Tracer running
+    - Setting up a clean OOP architecture (Materials, Hittables, Camera)
+    
+- [ ] **Phase 2: Performance Engineering**
+    - The current complexity is $O(N)$. I plan to implement BVH (Bounding Volume Hierarchies) to drop this to $O(\log N)$
+    - Parallelizing the render loop using OpenMP
+    - Profiling and benchmarking the gains
+
+- [ ] **Phase 3: Medical Application (The Goal)**
+    - Transitioning from rendering spheres to **Volumetric Ray Casting**
+    - Reading and visualizing raw 3D Scalar Fields (CT Scans / MRI Data)
+    - Using SIMD Vectorization to process voxels efficiently
+
+## 🛠 Build & Run
+
+### Prerequisites
+* C++17 Compiler (GCC, Clang, or MSVC)
+* CMake 3.14+
+
+### Compilation
+```bash
+mkdir build
+cd build
+cmake ..
+cmake --build . --config Release
+
+### include/camera.hpp
+```
+#ifndef CAMERA_H
+#define CAMERA_H
+
+#include "rtweekend.hpp"
+#include "vec3.hpp"
+#include "ray.hpp"
+
+// This class represent a virtual camera
+// It handles the projection of the 3D world onto the 2D image plane (Sensor)
+// It supports various things like :
+// Positionable orientation (lookfrom, lookat)
+// Adjustable Field of View (vfov)
+// Depth of Field (Defocus Blur) simulating a real physical lens with an aperture
+
+class camera {
+    private:
+        point3 origin;
+        point3 lower_left_corner;
+        vec3 horizontal;
+        vec3 vertical;
+        vec3 u, v, w;       // Camera frame orthonormal basis
+        double lens_radius;
+
+    public:
+        camera(
+            point3 lookfrom, // Camera position
+            point3 lookat, // Where the camera is pointing
+            vec3 vup, // The up direction for the camera (0,1,0)
+            double vfov, // Vertical Field of View in degrees
+            double aspect_ratio, // Width by Height
+            double aperture, // Diameter of the virtual lens (0 = perfect focus)
+            double focus_dist // Distance to the plane of perfect focus
+        ) 
+        {
+            auto theta = degrees_to_radians(vfov);
+            auto h = tan(theta/2);
+            auto viewport_height = 2.0 * h;
+            auto viewport_width = aspect_ratio * viewport_height;
+
+            // Calculate the orthonormal basis for the camera orientation
+            w = unit_vector(lookfrom - lookat); // Vector pointing opposite to view direction
+            u = unit_vector(cross(vup, w));     // Vector pointing to the right
+            v = cross(w, u);                    // Vector pointing up relative to camera
+
+            origin = lookfrom;
+            horizontal = focus_dist * viewport_width * u;
+            vertical = focus_dist * viewport_height * v;
+            lower_left_corner = origin - horizontal/2 - vertical/2 - focus_dist*w;
+
+            lens_radius = aperture / 2;
+        }
+
+        // Generate a ray from the camera through pixel coordinates (s, t)
+        // If aperture > 0 we originate the ray from a random point on the lens disk
+        // instead of the exact center, this creates the depth of field effect
+        
+        ray get_ray(double s, double t) const
+        {
+            vec3 rd = lens_radius * random_in_unit_disk();
+            vec3 offset = u * rd.x() + v * rd.y();
+
+            return ray(
+                origin + offset,
+                lower_left_corner + s*horizontal + t*vertical - origin - offset
+            );
+        }
+};
+
+#endif
+```
+
+### include/hittable.hpp
+```
+#ifndef HITTABLE_H
+#define HITTABLE_H
+
+#include "ray.hpp"
+#include "rtweekend.hpp" // shared_ptr and utility functions
+
+class material; // to avoid dependency with material.hpp
+
+// Structure to store all relevant data about a ray-object intersection
+// p : The exact intersection point in 3D space
+// normal : The vector perpendicular to the surface at point p
+// t : The distance along the ray 
+// mat_ptr: Pointer to the material properties of the object hit
+// front_face: Boolean to track if the ray hit the object from the outside or inside
+
+struct hit_record {
+    point3 p;
+    vec3 normal;
+    shared_ptr<material> mat_ptr;
+    double t;
+    bool front_face;
+
+    // If the ray hits from outside the normal points outward
+    // If the ray hits from inside (with a glass material) the normal points inward
+    inline void set_face_normal(const ray& r, const vec3& outward_normal)
+    {
+        front_face = dot(r.direction(), outward_normal) < 0;
+        normal = front_face ? outward_normal : -outward_normal;
+    }
+};
+
+// Abstract Base Class for any object that can be hit by a ray
+// Every bubble, square, box and so on must implement the hit function
+
+class hittable {
+    public:
+        // For abstract classes to ensure proper cleanup
+        virtual ~hittable() = default;
+
+        // Ray r hit you between t_min and t_max ?
+        // If yes we fill the rec structure with details and return true
+        virtual bool hit(const ray& r, double t_min, double t_max, hit_record& rec) const = 0;
+};
+
+#endif
+```
+
+### include/hittable_list.hpp
+```
+#ifndef HITTABLE_LIST_H
+#define HITTABLE_LIST_H
+
+#include "hittable.hpp"
+
+#include <memory>
+#include <vector>
+
+using std::shared_ptr;
+using std::make_shared;
+
+// It representing a list of hittable objects 
+// It inherits from hittable itself meaning a list of objects is functionally treated 
+// like a single object. It's a powerful Composite Design Pattern
+
+class hittable_list : public hittable {
+    public:
+        // The container storing our objects (spheres, etc.)
+        std::vector<shared_ptr<hittable>> objects;
+
+    public:
+        // Constructors
+        hittable_list() {}
+        hittable_list(shared_ptr<hittable> object) { add(object); }
+
+        void clear() { objects.clear(); }
+        void add(shared_ptr<hittable> object) { objects.push_back(object); }
+
+        // We iterate through all objects in the list to see if the ray hits any of them
+        // And we must keep track of the closest hit noted closest_so_far,
+        // because we only see the object in front, not the ones hidden behind
+        
+        virtual bool hit(const ray& r, double t_min, double t_max, hit_record& rec) const override
+        {
+            hit_record temp_rec;
+            bool hit_anything = false;
+            auto closest_so_far = t_max;
+
+            for (const auto& object : objects)
+            {
+                // We check hit against closest_so_far and effectively shrinking the search range every time we find a closer object
+                if (object->hit(r, t_min, closest_so_far, temp_rec))
+                {
+                    hit_anything = true;
+                    closest_so_far = temp_rec.t;
+                    rec = temp_rec;
+                }
+            }
+
+            return hit_anything;
+        }
+};
+
+#endif
+```
+
+### include/material.hpp
+```
+#ifndef MATERIAL_H
+#define MATERIAL_H
+
+#include "rtweekend.hpp"
+#include "hittable.hpp" // Required because materials need to know hit_record
+
+struct hit_record;
+
+// Abstract Base Class for Materials
+// scatter: decides how an incoming ray reflects off a surface
+// If the ray is absorbed scatter returns false
+// If it reflects/refracts it returns true and populates the scattered ray and attenuation color
+
+class material {
+    public:
+        virtual bool scatter(
+            const ray& r_in, const hit_record& rec, color& attenuation, ray& scattered
+        ) const = 0;
+};
+
+// Lambertian Material simulates matte surfaces like chalk and paper
+// Light that hits the surface is scattered in a random direction but with a distribution
+// closer to the normal (Lambert's Cosine Law approximation)
+
+class lambertian : public material {
+    public:
+        color albedo; // The base color of the material
+
+        lambertian(const color& a) : albedo(a) {}
+
+        virtual bool scatter(
+            const ray& r_in, const hit_record& rec, color& attenuation, ray& scattered
+        ) const override
+        {
+            // We pick a random point on the unit sphere tangent to the hit point
+            // This creates the diffuse scattering effect
+
+            auto scatter_direction = rec.normal + random_unit_vector();
+
+            // Catch degenerate scatter direction
+            // If the random vector is exactly opposite to the normal the sum equals zero
+            // leading to NaNs/Infinite recursion later. We handle this by resetting to normal
+
+            if (scatter_direction.near_zero())
+                scatter_direction = rec.normal;
+
+            scattered = ray(rec.p, scatter_direction);
+            attenuation = albedo;
+            return true;
+        }
+};
+
+// Metal Material simulates shiny surfaces like mirror, it's a reflective material
+// It uses perfect reflection logic e.g. Angle of Incidence = Angle of Reflection
+// Fuzz parameter allows simulating brushed metals or imperfect mirrors by slightly randomizing the reflected ray direction.
+
+class metal : public material {
+    public:
+        color albedo;
+        double fuzz;
+
+        metal(const color& a, double f) : albedo(a), fuzz(f < 1 ? f : 1) {}
+
+        virtual bool scatter(
+            const ray& r_in, const hit_record& rec, color& attenuation, ray& scattered
+        ) const override
+        {
+            // Calculate perfect reflection vector
+
+            vec3 reflected = reflect(unit_vector(r_in.direction()), rec.normal);
+            
+            // Add randomness fuzz inside a small sphere at the tip of the reflected ray
+
+            scattered = ray(rec.p, reflected + fuzz*random_in_unit_sphere());
+            attenuation = albedo;
+            
+            // Only scatter if the ray is not going into the object (reflecting outward)
+
+            return (dot(scattered.direction(), rec.normal) > 0);
+        }
+};
+
+// Dielectric Material handles Refraction (light bending) and Reflection like water
+// It uses Snell's Law to calculate the bending angle based on the refractive index ir
+// It also implements Schlick's Approximation to handle the fact that glass becomes 
+// mirror-like at a total internal reflection
+
+class dielectric : public material {
+    public:
+        double ir; // Index of Refraction (1.5 for glass, 1.33 for water, 2.4 for diamond)
+
+        dielectric(double index_of_refraction) : ir(index_of_refraction) {}
+
+        virtual bool scatter(
+            const ray& r_in, const hit_record& rec, color& attenuation, ray& scattered
+        ) const override
+        {
+            attenuation = color(1.0, 1.0, 1.0); // Glass absorbs little light (white)
+            double refraction_ratio = rec.front_face ? (1.0/ir) : ir;
+
+            vec3 unit_direction = unit_vector(r_in.direction());
+            double cos_theta = fmin(dot(-unit_direction, rec.normal), 1.0);
+            double sin_theta = sqrt(1.0 - cos_theta*cos_theta);
+
+            bool cannot_refract = refraction_ratio * sin_theta > 1.0;
+            vec3 direction;
+
+            // If we cannot refract, there is a total internal reflection, OR if Schlick's approximation 
+            // says the reflection probability is high (grazing angle) we reflect
+
+            if (cannot_refract || reflectance(cos_theta, refraction_ratio) > random_double())
+            {
+                direction = reflect(unit_direction, rec.normal);
+            }
+            else
+            {
+                direction = refract(unit_direction, rec.normal, refraction_ratio);
+            }
+
+            scattered = ray(rec.p, direction);
+            return true;
+        }
+
+    private:
+        // Schlick's approximation for reflectance
+        static double reflectance(double cosine, double ref_idx)
+        {
+            auto r0 = (1-ref_idx) / (1+ref_idx);
+            r0 = r0*r0;
+            return r0 + (1-r0)*pow((1 - cosine), 5);
+        }
+};
+
+#endif
+```
+
+### include/ray.hpp
+```
+#ifndef RAY_H
+#define RAY_H
+
+#include "vec3.hpp"
+
+// This class representing a ray in 3D space
+// Mathematically, a ray is a function P(t) = A + t*b where :
+// A is the ray origin
+// b is the ray direction
+// t is a scalar parameter. By changing this parameter we move the point P(t) along the ray
+// Naturally a positive scalar t means in front of the origin and negative t is behind
+
+class ray {
+    public:
+        point3 orig;
+        vec3 dir;
+
+    public:
+        // Constructors
+        ray() {}
+        ray(const point3& origin, const vec3& direction)
+            : orig(origin), dir(direction)
+        {}
+
+        // Accessors
+        point3 origin() const  { return orig; }
+        vec3 direction() const { return dir; }
+
+        // Returns the point at parameter t
+        // P(t) = origin + t * direction
+        point3 at(double t) const
+        {
+            return orig + t*dir;
+        }
+};
+
+#endif
+```
+
+### include/rtweekend.hpp
+```
+#ifndef RTWEEKEND_H
+#define RTWEEKEND_H
+
+#include <cmath>
+#include <limits>
+#include <memory>
+#include <cstdlib>
+
+// We pull common types into the global namespace to make the code less verbose
+// This allows us to write "shared_ptr" instead of "std::shared_ptr" for example
+
+using std::shared_ptr;
+using std::make_shared;
+using std::sqrt;
+
+
+// Define mathematical constants used for geometry and rendering limits
+
+const double infinity = std::numeric_limits<double>::infinity();
+const double pi = 3.1415926535897932385;
+
+// Converts degrees to radians because C++ trigo functions expect radians but we think in degrees
+
+inline double degrees_to_radians(double degrees)
+{
+    return degrees * pi / 180.0;
+}
+
+// Returns a random real number in [0, 1[, used for Monte Carlo 
+
+inline double random_double()
+{
+    return rand() / (RAND_MAX + 1.0);
+}
+
+// Returns a random real number in [min, max[
+
+inline double random_double(double min, double max)
+{
+    return min + (max-min)*random_double();
+}
+
+// Clamps the value x to the range [min, max]
+// Essential for color processing to ensure we don't write values > 255 or < 0
+
+inline double clamp(double x, double min, double max)
+{
+    if (x < min) return min;
+    if (x > max) return max;
+    return x;
+}
+
+#endif
+```
+
+### include/sphere.hpp
+```
+#ifndef SPHERE_H
+#define SPHERE_H
+
+#include "hittable.hpp"
+#include "vec3.hpp"
+
+// There is a class representing a 3D Sphere defined by a center point and a radius
+// It inherits from "hittable" because it must implement the "hit" function used by the ray tracer
+// Ideally we store a pointer to a material so the sphere knows how it interacts with light
+
+class sphere : public hittable {
+    public:
+        point3 center;
+        double radius;
+        shared_ptr<material> mat_ptr;
+
+    public:
+        // Constructors
+        sphere() {}
+        sphere(point3 cen, double r, shared_ptr<material> m)
+            : center(cen), radius(r), mat_ptr(m) {};
+
+        // We substitute the ray equation P(t) = A + tb into the sphere equation (P-C).(P-C) = r^2
+        // This gives us a quadratic equation: t^2(b.b) + 2t(b.(A-C)) + ((A-C).(A-C) - r^2) = 0
+        // We solve for t to find intersection points
+        
+        virtual bool hit(const ray& r, double t_min, double t_max, hit_record& rec) const override
+        {
+            vec3 oc = r.origin() - center;
+            
+            // Calculating coefficients for the quadratic formula ax^2 + bx + c = 0
+            // We use half_b to remove the factor of 2 by doing this we simplify the formula 
+
+            auto a = r.direction().length_squared();
+            auto half_b = dot(oc, r.direction());
+            auto c = oc.length_squared() - radius*radius;
+
+            auto discriminant = half_b*half_b - a*c;
+            if (discriminant < 0)
+            {
+                return false;
+            }
+            auto sqrtd = sqrt(discriminant);
+
+            // Find the nearest root that lies in [t_min, t_max]
+
+            auto root = (-half_b - sqrtd) / a;
+            if (root < t_min || root > t_max)
+            {
+                root = (-half_b + sqrtd) / a;
+                if (root < t_min || root > t_max)
+                {
+                    return false;
+                }
+                
+            }
+
+            // If we are here the ray hit the sphere
+
+            rec.t = root;
+            rec.p = r.at(rec.t);
+            
+            // Calculate the vector perpendicular to surface pointing out i.e. the normal outward
+            // (Point - Center) / Radius gives a unit vector
+
+            vec3 outward_normal = (rec.p - center) / radius;
+            
+            // Determine if the ray hit the outside or inside face
+
+            rec.set_face_normal(r, outward_normal);
+            rec.mat_ptr = mat_ptr;
+
+            return true;
+        }
+};
+
+#endif
+```
+
+### include/vec3.hpp
+```
+#ifndef VEC3_H
+#define VEC3_H
+
+#include <cmath>
+#include <iostream>
+
+using std::sqrt;
+
+// Declaration of utility functions found in rtweekend.hpp
+// We need these for the random vector generation methods inside the class
+
+double random_double();
+double random_double(double min, double max);
+
+
+// This class is the principal element of the renderer. It represents:
+// 3D Geometric points (x, y, z)
+// 3D Directions/Vectors (x, y, z)
+// RGB Colors (r, g, b)
+
+// Nota Bene : We can, idealy, separate Point, Vector, and Color into different types for type-safety,
+// but for this tutorial, aliasing them to the same class is more convenient.
+
+class vec3 {
+    public:
+        double e[3];
+
+        // Constructors
+        vec3() : e{0,0,0} {}
+        vec3(double e0, double e1, double e2) : e{e0, e1, e2} {}
+
+        // Accessors (x, y, z)
+        double x() const { return e[0]; }
+        double y() const { return e[1]; }
+        double z() const { return e[2]; }
+
+        // Operator overloading for vector arithmetic
+        vec3 operator-() const { return vec3(-e[0], -e[1], -e[2]); }
+        double operator[](int i) const { return e[i]; }
+        double& operator[](int i) { return e[i]; }
+
+        vec3& operator+=(const vec3 &v)
+        {
+            e[0] += v.e[0];
+            e[1] += v.e[1];
+            e[2] += v.e[2];
+            return *this;
+        }
+
+        vec3& operator*=(const double t)
+        {
+            e[0] *= t;
+            e[1] *= t;
+            e[2] *= t;
+            return *this;
+        }
+
+        vec3& operator/=(const double t)
+        {
+            return *this *= 1/t;
+        }
+
+        // Geometric utility methods
+        double length() const
+        {
+            return sqrt(length_squared());
+        }
+
+        double length_squared() const
+        {
+            return e[0]*e[0] + e[1]*e[1] + e[2]*e[2];
+        }
+
+        // Random Number Generation methods (Used for Materials/Monte Carlo)
+        // Requires random_double() to be defined/linked in rtweekend.hp
+
+        inline static vec3 random()
+        {
+            return vec3(random_double(), random_double(), random_double());
+        }
+
+        inline static vec3 random(double min, double max)
+        {
+            return vec3(random_double(min,max), random_double(min,max), random_double(min,max));
+        }
+
+        // Returns a random vector inside the unit sphere by Rejection Method
+        // Used for Lambertian diffuse reflection
+        bool near_zero() const
+        {
+            // Return true if the vector is close to zero in all dimensions.
+            const auto s = 1e-8;
+            return (std::abs(e[0]) < s) && (std::abs(e[1]) < s) && (std::abs(e[2]) < s);
+        }
+};
+
+// Type Aliases for code clarity
+
+using point3 = vec3;   // 3D Point
+using color = vec3;    // RGB Color
+
+// Utility Functions (Non-member)
+// These allow writing "v1 + v2" or "cout << v1"
+
+inline std::ostream& operator<<(std::ostream &out, const vec3 &v) 
+{
+    return out << v.e[0] << ' ' << v.e[1] << ' ' << v.e[2];
+}
+
+inline vec3 operator+(const vec3 &u, const vec3 &v)
+{
+    return vec3(u.e[0] + v.e[0], u.e[1] + v.e[1], u.e[2] + v.e[2]);
+}
+
+inline vec3 operator-(const vec3 &u, const vec3 &v)
+{
+    return vec3(u.e[0] - v.e[0], u.e[1] - v.e[1], u.e[2] - v.e[2]);
+}
+
+inline vec3 operator*(const vec3 &u, const vec3 &v)
+{
+    return vec3(u.e[0] * v.e[0], u.e[1] * v.e[1], u.e[2] * v.e[2]);
+}
+
+inline vec3 operator*(double t, const vec3 &v)
+{
+    return vec3(t*v.e[0], t*v.e[1], t*v.e[2]);
+}
+
+inline vec3 operator*(const vec3 &v, double t)
+{
+    return t * v;
+}
+
+inline vec3 operator/(vec3 v, double t)
+{
+    return (1/t) * v;
+}
+
+// Dot Product
+// Crucial for lighting calculations like angle between vectors
+
+inline double dot(const vec3 &u, const vec3 &v)
+{
+    return u.e[0] * v.e[0]
+         + u.e[1] * v.e[1]
+         + u.e[2] * v.e[2];
+}
+
+// Cross Product 
+// Returns a vector perpendicular to both input vectors
+
+inline vec3 cross(const vec3 &u, const vec3 &v)
+{
+    return vec3(u.e[1] * v.e[2] - u.e[2] * v.e[1],
+                u.e[2] * v.e[0] - u.e[0] * v.e[2],
+                u.e[0] * v.e[1] - u.e[1] * v.e[0]);
+}
+
+inline vec3 unit_vector(vec3 v)
+{
+    return v / v.length();
+}
+
+
+// Generate a random point inside a unit sphere
+// We pick a random point in a unit cube and reject it if it's outside the sphere
+// This method is also used to approch pi, it looks like a Monte Carlo Method
+
+inline vec3 random_in_unit_sphere()
+{
+    while (true) {
+        auto p = vec3::random(-1,1);
+        if (p.length_squared() >= 1) continue;
+        return p;
+    }
+}
+
+// Generate a random unit vector i.e. a normalized vector
+// Used for Lambertian distribution (True Lambertian)
+
+inline vec3 random_unit_vector()
+{
+    return unit_vector(random_in_unit_sphere());
+}
+
+// Generate a random vector in the unit disk
+// Used for Defocus Blur (Depth of Field)
+
+inline vec3 random_in_unit_disk()
+{
+    while (true) {
+        auto p = vec3(random_double(-1,1), random_double(-1,1), 0);
+        if (p.length_squared() >= 1) continue;
+        return p;
+    }
+}
+
+// Reflect vector v around normal n
+
+inline vec3 reflect(const vec3& v, const vec3& n)
+{
+    return v - 2*dot(v,n)*n;
+}
+
+// Refract vector uv through normal n with ratio etai_over_etat
+// Uses Snell's Law
+
+inline vec3 refract(const vec3& uv, const vec3& n, double etai_over_etat)
+{
+    auto cos_theta = fmin(dot(-uv, n), 1.0);
+    vec3 r_out_perp =  etai_over_etat * (uv + cos_theta*n);
+    vec3 r_out_parallel = -sqrt(fabs(1.0 - r_out_perp.length_squared())) * n;
+    return r_out_perp + r_out_parallel;
+}
+
+#endif
+```
+
+### src/main.cpp
+```
+#include "rtweekend.hpp"
+
+#include "camera.hpp"
+#include "hittable_list.hpp"
+#include "material.hpp"
+#include "sphere.hpp"
+
+#include <iostream>
+#include <chrono> 
+
+// Recursive function to calculate the color of a ray
+// First of all we have to check if the bounce limit has been exceeded, if so black is returned (there isn't light)
+// Then we look intersection with the world (set at 0.001 to avoid "Shadow Acne", we can create a variable double eps also)
+// Finally if the material scatters the ray we continue recursively until it disperses
+
+color ray_color(const ray& r, const hittable& world, int depth) {
+    hit_record rec;
+
+    if (depth <= 0)
+    {
+        return color(0,0,0);
+    }
+
+    if (world.hit(r, 0.001, infinity, rec))
+    {
+        ray scattered;
+        color attenuation;
+
+        // Check if material scatters the light
+
+        if (rec.mat_ptr->scatter(r, rec, attenuation, scattered))
+        {
+            return attenuation * ray_color(scattered, world, depth-1);
+        }
+
+        // If it hits but doesn't scatter (absorbed) it return black
+
+        return color(0,0,0);
+    }
+
+    // We set a blue sky but you can set other colors if you want
+    
+    vec3 unit_direction = unit_vector(r.direction());
+    auto t = 0.5*(unit_direction.y() + 1.0);
+    return (1.0-t)*color(1.0, 1.0, 1.0) + t*color(0.5, 0.7, 1.0);
+}
+
+// There is a function to generate the random scene used for the final render (like the Book Cover of the tutorial)
+// We create the ground which is represented by a giant sphere
+// Then we generate a grid of small random spheres choosing their material (different materials like Diffuse, Metal, Glass) based on probabilities
+// For the esthetic and good code conduct we ensure these small spheres don't intersect with the fixed large ones (we can't handle it for now)
+// Finally we add the three main distinctive spheres and return the hittable list
+
+hittable_list random_scene() {
+    hittable_list world;
+
+    auto ground_material = make_shared<lambertian>(color(0.5, 0.5, 0.5));
+    world.add(make_shared<sphere>(point3(0,-1000,0), 1000, ground_material));
+
+    for(int a = -11; a < 11; a++) 
+    {
+        for(int b = -11; b < 11; b++) 
+        {
+            auto choose_mat = random_double();
+            point3 center(a + 0.9*random_double(), 0.2, b + 0.9*random_double());
+
+            // We check distance to avoid overlapping with the big sphere at (4, 0.2, 0)
+            if ((center - point3(4, 0.2, 0)).length() > 0.9) 
+            {
+                shared_ptr<material> sphere_material;
+
+                if (choose_mat < 0.8)
+                {
+                    // Diffuse : albedo * albedo minimizes the probability of light colors (it's gamma approximation)
+                    // Reminder : albedo is portion of solar radiation that is reflected back into the atmosphere
+                    auto albedo = color::random() * color::random();
+                    sphere_material = make_shared<lambertian>(albedo);
+                    world.add(make_shared<sphere>(center, 0.2, sphere_material));
+
+                } 
+                
+                else if (choose_mat < 0.95)
+                {
+                    // Metal
+                    auto albedo = color::random(0.5, 1);
+                    auto fuzz = random_double(0, 0.5);
+                    sphere_material = make_shared<metal>(albedo, fuzz);
+                    world.add(make_shared<sphere>(center, 0.2, sphere_material));
+                } 
+                
+                else
+                {
+                    // Glass
+                    sphere_material = make_shared<dielectric>(1.5);
+                    world.add(make_shared<sphere>(center, 0.2, sphere_material));
+                }
+            }
+        }
+    }
+
+    // The 3 main large spheres
+    auto material1 = make_shared<dielectric>(1.5);
+    world.add(make_shared<sphere>(point3(0, 1, 0), 1.0, material1));
+
+    auto material2 = make_shared<lambertian>(color(0.4, 0.2, 0.1));
+    world.add(make_shared<sphere>(point3(-4, 1, 0), 1.0, material2));
+
+    auto material3 = make_shared<metal>(color(0.7, 0.6, 0.5), 0.0);
+    world.add(make_shared<sphere>(point3(4, 1, 0), 1.0, material3));
+
+    return world;
+}
+
+int main() {
+    // We define image Settings, first the resolution and quality parameters here
+    // We use a small width (400) for quick debugging/testing
+    // But for the final render we increase to 1200+ and samples_per_pixel to 100+
+    // We don't forget to initialise max_depth limits the recursion stack to prevent infinite bounces
+
+    const auto aspect_ratio = 16.0 / 9.0;
+    const int image_width = 400; 
+    const int image_height = static_cast<int>(image_width / aspect_ratio);
+    const int samples_per_pixel = 10;
+    const int max_depth = 50;
+
+    // Then we're taking care of world and camera setup 
+    // We generate the random scene and setup the camera positioning
+    // Aperture controls the size of the lens (Defocus Blur / Depth of Field)
+    // dist_to_focus determines the plane of perfect focus
+
+    auto world = random_scene();
+    point3 lookfrom(13,2,3);
+    point3 lookat(0,0,0);
+    vec3 vup(0,1,0);
+    auto dist_to_focus = 10.0;
+    auto aperture = 0.1;
+
+    camera cam(lookfrom, lookat, vup, 20, aspect_ratio, aperture, dist_to_focus);
+
+    // Without forgetting the render loop
+    // First we write the PPM Header (P3 format)
+    // Then we iterate over each pixel, using a high_resolution_clock to benchmark performance
+    // For each pixel, we perform multi-sampling (MSAA) to reduce aliasing and noise
+    // Finally we apply gamma correction and write the color values to stdout
+
+    std::cout << "P3\n" << image_width << ' ' << image_height << "\n255\n";
+
+    auto start = std::chrono::high_resolution_clock::now();
+
+    for (int j = image_height-1; j >= 0; --j)
+    {
+        std::cerr << "\rScanlines remaining: " << j << ' ' << std::flush;
+        
+        // This is where we will add OpenMP parallelism with pragma omp parallel for
+        for (int i = 0; i < image_width; ++i)
+        {
+            color pixel_color(0, 0, 0);
+
+            // A Monte Carlo accumulation for antialiasing (We saw it also in MCMC Lectures in my master)
+            for (int s = 0; s < samples_per_pixel; ++s)
+            {
+                auto u = (i + random_double()) / (image_width-1);
+                auto v = (j + random_double()) / (image_height-1);
+                ray r = cam.get_ray(u, v);
+                pixel_color += ray_color(r, world, max_depth);
+            }
+
+            // We apply a color processing here, we normalize samples and apply Gamma Correction (gamma=2.0)
+            auto r = pixel_color.x();
+            auto g = pixel_color.y();
+            auto b = pixel_color.z();
+
+            auto scale = 1.0 / samples_per_pixel;
+            r = sqrt(scale * r);
+            g = sqrt(scale * g);
+            b = sqrt(scale * b);
+
+            std::cout << static_cast<int>(256 * clamp(r, 0.0, 0.999)) << ' '
+                      << static_cast<int>(256 * clamp(g, 0.0, 0.999)) << ' '
+                      << static_cast<int>(256 * clamp(b, 0.0, 0.999)) << '\n';
+        }
+    }
+
+    // The chrono stop
+    auto stop = std::chrono::high_resolution_clock::now();
+    auto duration = std::chrono::duration_cast<std::chrono::milliseconds>(stop - start);
+
+    std::cerr << "\nDone in " << duration.count() << "ms.\n";
+}
+```

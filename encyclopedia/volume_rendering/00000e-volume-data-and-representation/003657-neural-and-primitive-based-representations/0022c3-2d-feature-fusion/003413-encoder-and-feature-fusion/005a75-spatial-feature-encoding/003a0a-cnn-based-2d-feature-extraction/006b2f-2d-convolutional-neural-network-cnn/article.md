@@ -1,0 +1,188 @@
+# 2D Convolutional Neural Network (CNN)
+
+Also called: MNIST CNN, TensorFlow CNN Estimator
+
+## Overview
+A standard 2D Convolutional Neural Network (CNN) architecture designed for image classification, implemented as a reference model for TensorFlow Estimators [S1, unofficial]. It extracts spatial features from 2D input grids (specifically 28x28 grayscale images) through hierarchical convolution and pooling operations [S1, unofficial]. Unlike its sibling [ResUNet Image Encoder](11286-resunet-image-encoder.md), which utilizes skip connections and upsampling for dense prediction, this architecture uses a feed-forward structure ending in a fully connected classifier [S1, unofficial]. It serves as a baseline template for understanding feature extraction [S1, unofficial].
+
+## How it works
+**Inputs and Outputs:**
+*   **Input:** A batch of 2D images. For the reference implementation, inputs are 28x28 grayscale images with 1 channel, reshaped into a 4-D tensor of shape `[batch_size, 28, 28, 1]` [S1, unofficial].
+*   **Output:** A vector of logits of shape `[batch_size, 10]` representing unnormalized scores for 10 classes, and class predictions via `argmax` [S1, unofficial].
+
+**Data Structures:**
+The model maintains weights and biases for each layer [G].
+*   **Convolutional Layers:** Weights are 4-D tensors `[kernel_height, kernel_width, input_channels, output_channels]` [G]. Biases are 1-D vectors of size `output_channels` [G].
+*   **Dense Layers:** Weights are 2-D matrices `[input_units, output_units]` [G]. Biases are 1-D vectors of size `output_units` [G].
+
+**Numbered Steps:**
+1.  **Input Reshaping:** Reshape the input feature tensor `x` from a flattened representation to `[batch_size, 28, 28, 1]` [S1, unofficial].
+2.  **Convolutional Layer #1:** Apply 32 filters of size 5x5 with 'same' padding and ReLU activation [S1, unofficial].
+    *   Input shape: `[batch_size, 28, 28, 1]` [S1, unofficial].
+    *   Output shape: `[batch_size, 28, 28, 32]` [S1, unofficial].
+3.  **Pooling Layer #1:** Apply max pooling with a 2x2 filter and stride of 2 [S1, unofficial].
+    *   Input shape: `[batch_size, 28, 28, 32]` [S1, unofficial].
+    *   Output shape: `[batch_size, 14, 14, 32]` [S1, unofficial].
+4.  **Convolutional Layer #2:** Apply 64 filters of size 5x5 with 'same' padding and ReLU activation [S1, unofficial].
+    *   Input shape: `[batch_size, 14, 14, 32]` [S1, unofficial].
+    *   Output shape: `[batch_size, 14, 14, 64]` [S1, unofficial].
+5.  **Pooling Layer #2:** Apply max pooling with a 2x2 filter and stride of 2 [S1, unofficial].
+    *   Input shape: `[batch_size, 14, 14, 64]` [S1, unofficial].
+    *   Output shape: `[batch_size, 7, 7, 64]` [S1, unofficial].
+6.  **Flatten Layer:** Reshape the output of the second pooling layer into a 1-D vector [S1, unofficial].
+    *   Input shape: `[batch_size, 7, 7, 64]` [S1, unofficial].
+    *   Output shape: `[batch_size, 3136]` (calculated as $7 \times 7 \times 64$) [S1, unofficial].
+7.  **Dense Layer:** Fully connected layer with 1024 neurons and ReLU activation [S1, unofficial].
+    *   Input shape: `[batch_size, 3136]` [S1, unofficial].
+    *   Output shape: `[batch_size, 1024]` [S1, unofficial].
+8.  **Dropout Layer:** Apply dropout with a rate of 0.4 (keeping 60% of neurons) during training mode [S1, unofficial].
+    *   Input shape: `[batch_size, 1024]` [S1, unofficial].
+    *   Output shape: `[batch_size, 1024]` [S1, unofficial].
+9.  **Logits Layer:** Fully connected layer with 10 output units (for 10 classes) [S1, unofficial].
+    *   Input shape: `[batch_size, 1024]` [S1, unofficial].
+    *   Output shape: `[batch_size, 10]` [S1, unofficial].
+10. **Loss Calculation:** Compute sparse softmax cross-entropy loss between labels and logits [S1, unofficial].
+11. **Training Op:** Configure Gradient Descent optimizer with a learning rate of 0.001 to minimize the loss [S1, unofficial].
+
+**Formulas:**
+*   **Convolution:** $y_{i,j,k} = \text{ReLU}\left( \sum_{m,n,c} x_{i+m-1, j+n-1, c} \cdot w_{m,n,c,k} + b_k \right)$ where $w$ are kernel weights, $b$ is bias, and padding ensures output spatial dimensions match input for 'same' padding [G].
+*   **Max Pooling:** $y_{i,j,k} = \max_{m,n \in \text{window}} x_{2i+m, 2j+n, k}$ for a 2x2 window and stride 2 [G].
+*   **Loss:** $L = -\frac{1}{N} \sum_{i=1}^{N} \log \left( \frac{e^{z_{i, y_i}}}{\sum_{j=1}^{K} e^{z_{i, j}}} \right)$ where $z$ are logits, $y_i$ is the true class label, and $K=10$ [G].
+
+**Parameters:**
+*   `kernel_size`: [5, 5] for both convolutional layers [S1, unofficial].
+*   `pool_size`: [2, 2] for both pooling layers [S1, unofficial].
+*   `learning_rate`: 0.001 for the Gradient Descent optimizer [S1, unofficial].
+*   `batch_size`: 100 samples per gradient update [S1, unofficial].
+*   `dropout_rate`: 0.4 (keep probability 0.6) [S1, unofficial].
+
+**Edge Cases and Pitfalls:**
+*   **Precision:** The implementation uses standard floating-point arithmetic [S1, unofficial].
+*   **Boundaries:** 'Same' padding is used in convolutional layers to preserve spatial dimensions before pooling [S1, unofficial].
+*   **Degenerate Input:** The model expects inputs of shape `[batch_size, 28, 28, 1]` [S1, unofficial].
+
+**Pseudocode:**
+> **Unverified code.** The code below did not pass a test run against a reference implementation, or no test fits it, so it may contain errors.
+
+```python
+import numpy as np
+
+def relu(x):
+    return np.maximum(0, x)
+
+def max_pool_2d(x, pool_size=2, stride=2):
+    b, h, w, c = x.shape
+    out_h = h // stride
+    out_w = w // stride
+    output = np.zeros((b, out_h, out_w, c))
+    for i in range(out_h):
+        for j in range(out_w):
+            y_start, y_end = i * stride, (i + 1) * stride
+            x_start, x_end = j * stride, (j + 1) * stride
+            output[:, i, j, :] = np.max(x[:, y_start:y_end, x_start:x_end, :], axis=(1, 2))
+    return output
+
+def conv2d_same_padding(x, filters, kernel_size, weights, biases):
+    kh, kw = kernel_size
+    b, h, w, c = x.shape
+    # 'Same' padding for stride 1: total padding = kernel_size - 1
+    pad_h = max(kh - 1, 0)
+    pad_w = max(kw - 1, 0)
+    pad_top = pad_h // 2
+    pad_bottom = pad_h - pad_top
+    pad_left = pad_w // 2
+    pad_right = pad_w - pad_left
+    x_padded = np.pad(x, ((0, 0), (pad_top, pad_bottom), (pad_left, pad_right), (0, 0)), mode='constant')
+
+    out_h = x_padded.shape[1] - kh + 1
+    out_w = x_padded.shape[2] - kw + 1
+    output = np.zeros((b, out_h, out_w, filters))
+
+    for f in range(filters):
+        for i in range(out_h):
+            for j in range(out_w):
+                region = x_padded[:, i:i+kh, j:j+kw, :]
+                output[:, i, j, f] = np.sum(region * weights[:, :, :, f], axis=(1, 2, 3)) + biases[f]
+    return output
+
+def dense_layer(x, units, weights, biases):
+    return np.dot(x, weights) + biases
+
+def cnn_model_fn(features, labels, mode, weights_conv1, biases_conv1, weights_conv2, biases_conv2, weights_dense, biases_dense, weights_logits, biases_logits):
+    # Input Layer: Reshape features["x"] to [batch_size, 28, 28, 1]
+    input_layer = features["x"].reshape(-1, 28, 28, 1)
+
+    # Convolutional Layer #1: 32 filters, 5x5, same padding, ReLU
+    conv1 = relu(conv2d_same_padding(input_layer, 32, [5, 5], weights_conv1, biases_conv1))
+
+    # Pooling Layer #1: 2x2 filter, stride 2
+    pool1 = max_pool_2d(conv1, pool_size=2, stride=2)
+
+    # Convolutional Layer #2: 64 filters, 5x5, same padding, ReLU
+    conv2 = relu(conv2d_same_padding(pool1, 64, [5, 5], weights_conv2, biases_conv2))
+
+    # Pooling Layer #2: 2x2 filter, stride 2
+    pool2 = max_pool_2d(conv2, pool_size=2, stride=2)
+
+    # Flatten Layer: [batch_size, 7, 7, 64] -> [batch_size, 3136]
+    pool2_flat = pool2.reshape(pool2.shape[0], -1)
+
+    # Dense Layer: 1024 neurons, ReLU
+    dense = relu(dense_layer(pool2_flat, 1024, weights_dense, biases_dense))
+
+    # Dropout Layer: rate 0.4 (keep 60%) during training
+    if mode == 'TRAIN':
+        mask = (np.random.rand(*dense.shape) > 0.4).astype(float)
+        dropout = dense * mask / 0.6
+    else:
+        dropout = dense
+
+    # Logits Layer: 10 output units
+    logits = dense_layer(dropout, 10, weights_logits, biases_logits)
+
+    # Predictions
+    classes = np.argmax(logits, axis=1)
+    exp_logits = np.exp(logits - np.max(logits, axis=1, keepdims=True))
+    probabilities = exp_logits / np.sum(exp_logits, axis=1, keepdims=True)
+
+    predictions = {"classes": classes, "probabilities": probabilities}
+
+    if mode == 'PREDICT':
+        return predictions
+
+    # Loss Calculation: sparse softmax cross entropy
+    one_hot_labels = np.zeros((logits.shape[0], 10))
+    one_hot_labels[np.arange(logits.shape[0]), labels] = 1
+    loss = -np.mean(np.sum(one_hot_labels * np.log(probabilities + 1e-9), axis=1))
+
+    if mode == 'TRAIN':
+        # Training Op: Gradient Descent optimizer with learning rate 0.001
+        # Backpropagation and weight updates are handled by the framework
+        pass
+
+    return predictions, loss
+```
+
+## Subtopics
+
+### ResUNet Image Encoder
+A U-Net based encoder with residual connections, designed for dense feature extraction and upsampling, unlike the feed-forward classification structure of this CNN [S1, unofficial].
+
+### 3D CNN
+A convolutional neural network operating on 3D voxel grids, extending the 2D feature extraction concept to volumetric data, which is the ultimate goal of the parent module [S1, unofficial].
+
+## Operating characteristics
+*   **Time Complexity:** Not given in the sources [S1, unofficial].
+*   **Memory Complexity:** Not given in the sources [S1, unofficial].
+*   **Measured Performance:** The model was trained on the MNIST dataset for 20,000 steps with a batch size of 100 [S1, unofficial].
+*   **Scaling:** The architecture is fixed for 28x28 inputs [S1, unofficial].
+*   **Strengths:** Simple, standard architecture suitable for baseline classification tasks [S1, unofficial].
+*   **Limitations:** Not designed for 3D data or dense prediction tasks [S1, unofficial].
+*   **When to use:** When a simple 2D image classifier is needed or as a template for understanding CNN layers [S1, unofficial].
+*   **When not:** For 3D volume rendering feature extraction, a 3D CNN or the sibling ResUNet is more appropriate [S1, unofficial].
+
+## Background
+The architecture is a standard 2D CNN example provided in TensorFlow's official tutorials, specifically implemented as a model function for TensorFlow Estimators [S1, unofficial]. It was originally designed for the MNIST handwritten digit classification task [S1, unofficial]. In the context of the provided source, it serves as an example template for point cloud labeling projects, where the 2D architecture is contrasted with the intended 3D CNN for voxelized point clouds [S1, unofficial].
+
+## Sources
+[S1] Samwisee/Point_Cloud_Labeler, https://github.com/Samwisee/Point_Cloud_Labeler, fetched 2026-10-27 (unofficial)

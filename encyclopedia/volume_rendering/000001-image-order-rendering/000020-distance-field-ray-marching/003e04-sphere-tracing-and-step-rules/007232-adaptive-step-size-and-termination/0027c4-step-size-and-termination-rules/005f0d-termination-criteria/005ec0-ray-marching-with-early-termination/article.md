@@ -1,0 +1,83 @@
+# Ray Marching with Early Termination
+
+Also called: Early Termination in Ray Marching, Ray Marching Loop Termination, Ray Marching Termination, SDF Ray Marching Break Conditions, Standard Ray Marching Termination
+
+## Overview
+Ray marching with early termination adds explicit break conditions to the iterative ray marching loop to prevent unnecessary computation when the ray intersects a surface or exceeds a maximum travel distance [S1, unofficial]. It solves the problem of infinite loops and wasted cycles in unbounded or sparse scenes by halting the march as soon as geometric or volumetric feedback indicates further steps will not contribute to the final pixel [S1, unofficial].
+
+## How it works
+**Inputs and Outputs:**
+*   **Inputs:** Ray origin $\mathbf{o}$, normalized ray direction $\mathbf{d}$, scene intersection function returning distance $t$, maximum iteration count $N_{\max}=8$ [S2, unofficial], maximum march distance $t_{\max}=2048.0$ [S1, unofficial], and intersection epsilon $\epsilon=0.0001$ [S1, unofficial].
+*   **Outputs:** Accumulated color, final transmission $T$, and hit status.
+
+**Data Structures:**
+*   `bounces`: Integer iteration counter.
+*   `ray_t`: Floating-point accumulator for total distance traveled along the ray.
+*   `T`: Floating-point transmission value, initialized to $1.0$.
+*   `cumColor`: Accumulated color buffer, initialized to $0$.
+*   `rayOrigin`: Current ray origin position.
+
+**Numbered Steps:**
+1.  Initialize `bounces = 0`, `ray_t = 0.0`, `T = 1.0`, and `cumColor = 0` [S2, unofficial].
+2.  Iterate while `bounces < 8` and `ray_t < 2048.0` [S1, unofficial][S2, unofficial].
+3.  Perform scene intersection to find distance $t$ [S2, unofficial].
+4.  If $t$ is `INFINITY` or `ray_t > 2048.0`, break the loop [S1, unofficial][S2, unofficial].
+5.  If $t < 0.0001$, break the loop to indicate surface intersection [S1, unofficial].
+6.  Accumulate color: `cumColor += T * hitOpacity * hitColor` [S2, unofficial].
+7.  Update transmission: `T *= (1.0 - hitOpacity)` [S2, unofficial].
+8.  Advance ray origin: `rayOrigin += (t + 1e-6) * rayDirection` [S2, unofficial].
+9.  Increment `bounces` by $1$.
+
+**Pseudocode:**
+> **Unverified code.** The code below did not pass a test run against a reference implementation, or no test fits it, so it may contain errors.
+
+```python
+def ray_march_early_term(ray_origin, ray_direction, scene_func, max_dist, max_bounces, epsilon):
+    bounces = 0
+    ray_t = 0.0
+    T = 1.0
+    cum_color = 0.0
+
+    while bounces < max_bounces and ray_t < max_dist:
+        t = scene_func(ray_origin, ray_direction)
+        if t == float('inf') or ray_t > max_dist:
+            break
+        if t < epsilon:
+            break
+
+        hit_opacity = compute_opacity_from_step(t)  # [G] standard density-to-opacity mapping
+        hit_color = fetch_color_at_step(t)          # [G] scene-dependent color retrieval
+
+        cum_color += T * hit_opacity * hit_color
+        T *= (1.0 - hit_opacity)
+
+        ray_origin += (t + 1e-6) * ray_direction
+        ray_t += t
+        bounces += 1
+
+    return cum_color, T, ray_t
+```
+
+**Parameters:**
+*   $t_{\max}$: Maximum march distance. Cited value is $2048.0$ [S1, unofficial].
+*   $\epsilon$: Intersection threshold. Cited value is $0.0001$ [S1, unofficial].
+*   $N_{\max}$: Maximum iteration count. Cited value is $8$ [S2, unofficial].
+
+**Edge Cases and Pitfalls:**
+*   **Infinite Distance:** If the scene function returns `INFINITY`, the loop must break immediately to prevent infinite computation [S2, unofficial].
+*   **Self-Intersection:** Adding $10^{-6}$ to the step size prevents the ray from re-intersecting the same surface in the next iteration [S2, unofficial].
+*   **Precision:** The epsilon threshold must be small enough to avoid premature termination but large enough to handle floating-point noise [S1, unofficial].
+
+## Operating characteristics
+*   **Time Complexity:** $O(k)$ where $k$ is the number of steps until termination, with $k \le N_{\max}$ [G].
+*   **Memory Complexity:** $O(1)$ auxiliary space [G].
+*   **Strengths:** Prevents wasted computation on empty space or behind opaque volumes; avoids infinite loops in unbounded scenes [S1, unofficial].
+*   **Limitations:** Not given in the sources.
+*   **Scaling:** Not given in the sources.
+
+## Background
+This technique is a standard control flow addition to ray marching loops to halt computation upon surface intersection or distance limits [S1, unofficial]. It is used in real-time SDF rendering and splatting-based volume rendering pipelines [S2, unofficial].
+
+## Sources
+[S1] How to avoid curvature artifact in raytracer?, https://computergraphics.stackexchange.com/questions/11072/how-to-avoid-curvature-artifact-in-raytracer, fetched 2026-10-27 (unofficial)
+[S2] notlasandu/spirulae-splat, https://github.com/notlasandu/spirulae-splat, fetched 2026-10-27 (unofficial)

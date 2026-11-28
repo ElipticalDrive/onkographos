@@ -1,0 +1,158 @@
+# Two-Pass Voxel Shading Pipeline
+
+Also called: Voxel-shader rendering pipeline
+
+## Overview
+The Two-Pass Voxel Shading Pipeline is a rendering technique for voxel meshes that separates solid (opaque) geometry from porous (translucent) geometry to handle alpha blending correctly [S1, unofficial]. It builds on [Voxel Rendering Pipeline](16079-voxel-rendering-pipeline.md) by explicitly dividing the draw calls into two distinct phases: one for opaque surfaces using an ambient occlusion (AO) shader, and a second for translucent surfaces using a custom model shader with blending enabled [S1, unofficial]. This approach distinguishes itself from single-pass voxel renderers by ensuring that translucent blocks do not incorrectly occlude or blend with opaque blocks behind them due to depth buffer ordering issues [S1, unofficial].
+
+## How it works
+**Inputs and Outputs:**
+*   **Inputs:** A voxel mesh data structure containing `vertexArrayObjects` for both `surface` (solid) and `porous` (translucent) triangles; a camera providing `view` and `projection` matrices; optional texture maps (`tileMap` or `texture`).
+*   **Outputs:** A rendered frame on the GPU framebuffer.
+
+**Data Structures:**
+*   `meshes`: An object or array of mesh chunks. Each mesh contains:
+    *   `vertexArrayObjects`: An object with keys `surface` and `porous`.
+    *   `surface`: An array of triangle indices or VAO references for opaque geometry.
+    *   `porous`: An array of triangle indices or VAO references for translucent geometry.
+    *   `modelMatrix`: A 4x4 transformation matrix for the mesh.
+*   `shader`: The AO shader program for solid blocks.
+*   `shader2`: The custom model shader for porous blocks.
+
+**Parameters:**
+*   `cameraNear`: Near clipping plane, default 0.1 [S1, unofficial].
+*   `cameraFar`: Far clipping plane, default 200.0 [S1, unofficial].
+*   `cameraFOV`: Field of view in degrees, default 45.0 [S1, unofficial].
+*   `perspectiveResize`: Boolean, default true. If true, updates the projection matrix on window resize [S1, unofficial].
+
+**Steps:**
+1.  **Initialization (`gl-init`):**
+    *   Create the AO shader (`this.shader`) and the custom model shader (`this.shader2`) [S1, unofficial].
+    *   Initialize the projection matrix using `mat4.perspective` with `cameraFOV`, aspect ratio, `cameraNear`, and `cameraFar` [S1, unofficial].
+    *   Listen for `gl-render` events to start the render loop [S1, unofficial].
+
+2.  **Render Loop:**
+    *   Enable face culling and depth testing: `gl.enable(gl.CULL_FACE)` and `gl.enable(gl.DEPTH_TEST)` [S1, unofficial].
+    *   Update the view matrix from the camera [S1, unofficial].
+
+    **Pass 1: Solid Blocks**
+    *   Disable blending: `gl.disable(gl.BLEND)` [S1, unofficial].
+    *   Bind the AO shader (`this.shader`) [S1, unofficial].
+    *   Set uniforms: `projection`, `view`, `tileCount`, and optionally `tileMap` if a texture exists [S1, unofficial].
+    *   Iterate over all meshes in `this.meshes`.
+    *   For each mesh, if `mesh.vertexArrayObjects.surface` exists and is non-empty:
+        *   Set the `model` uniform to `mesh.modelMatrix` [S1, unofficial].
+        *   Bind the surface VAO.
+        *   Draw triangles: `gl.drawArrays(gl.TRIANGLES, 0, triangleVAO.length)` [S1, unofficial].
+
+    **Pass 2: Porous Blocks**
+    *   Set blend function to `gl.blendFunc(gl.ONE, gl.ONE_MINUS_SRC_ALPHA)` [S1, unofficial].
+    *   Enable blending: `gl.enable(gl.BLEND)` [S1, unofficial].
+    *   Bind the custom model shader (`this.shader2`) [S1, unofficial].
+    *   Set uniforms: `view`, `projection`, and optionally `texture` if a texture exists [S1, unofficial].
+    *   Iterate over all meshes in `this.meshes`.
+    *   For each mesh, if `mesh.vertexArrayObjects.porous` exists and is non-empty:
+        *   Set the `model` uniform [S1, unofficial].
+        *   Bind the porous VAO.
+        *   Draw triangles: `gl.drawArrays(gl.TRIANGLES, 0, blockMesh.length)` [S1, unofficial].
+
+**Pseudocode:**
+> **Unverified code.** The code below did not pass a test run against a reference implementation, or no test fits it, so it may contain errors.
+
+```python
+def init():
+    # Create shaders
+    shader = create_ao_shader()
+    shader2 = create_custom_model_shader()
+    
+    # Initialize projection matrix
+    aspect = width / height
+    fov_rad = camera_fov * pi / 180
+    projection_matrix = mat4.perspective(fov_rad, aspect, camera_near, camera_far)
+    
+    # Listen for events
+    on('gl-init', lambda: (shader.bind(), shader2.bind(), update_projection_matrix()))
+    on('gl-render', render)
+    if perspective_resize:
+        on('gl-resize', update_projection_matrix)
+
+def update_projection_matrix():
+    aspect = width / height
+    fov_rad = camera_fov * pi / 180
+    mat4.perspective(projection_matrix, fov_rad, aspect, camera_near, camera_far)
+    emit('updateProjectionMatrix', projection_matrix)
+
+def render():
+    gl = get_gl_context()
+    gl.enable(gl.CULL_FACE)
+    gl.enable(gl.DEPTH_TEST)
+    
+    # Get view matrix
+    view_matrix = camera.get_view_matrix()
+    
+    # Pass 1: Solid blocks
+    gl.disable(gl.BLEND)
+    shader.bind()
+    shader.set_uniform('projection', projection_matrix)
+    shader.set_uniform('view', view_matrix)
+    shader.set_uniform('tileCount', stitcher.tile_count)
+    if texture_exists:
+        shader.set_uniform('tileMap', texture.bind())
+        
+    for mesh in meshes:
+        surface_vaos = mesh.vertex_array_objects.get('surface')
+        if surface_vaos and len(surface_vaos) > 0:
+            shader.set_uniform('model', mesh.model_matrix)
+            for vao in surface_vaos:
+                vao.bind()
+                gl.draw_arrays(gl.TRIANGLES, 0, vao.length)
+                vao.unbind()
+                
+    # Pass 2: Porous blocks
+    gl.blend_func(gl.ONE, gl.ONE_MINUS_SRC_ALPHA) # TODO: premult alpha?
+    gl.enable(gl.BLEND)
+    shader2.bind()
+    shader2.set_uniform('view', view_matrix)
+    shader2.set_uniform('projection', projection_matrix)
+    if texture_exists:
+        shader2.set_uniform('texture', texture.bind())
+        
+    for mesh in meshes:
+        porous_vaos = mesh.vertex_array_objects.get('porous')
+        if porous_vaos and len(porous_vaos) > 0:
+            shader2.set_uniform('model', mesh.model_matrix)
+            for vao in porous_vaos:
+                vao.bind()
+                gl.draw_arrays(gl.TRIANGLES, 0, vao.length)
+                vao.unbind()
+```
+
+**Edge Cases and Pitfalls:**
+*   **Premultiplied Alpha:** The implementation uses `gl.ONE` and `gl.ONE_MINUS_SRC_ALPHA` blending, which assumes non-premultiplied alpha. Premultiplied alpha is not handled, which may lead to incorrect blending results for translucent blocks [S1, unofficial].
+*   **Shader Initialization:** Rendering fails if `render()` is called before `gl-init` has bound the shaders [S1, unofficial].
+*   **Camera Dependency:** The pipeline requires a camera plugin that provides a valid view matrix; otherwise, it throws an error [S1, unofficial].
+
+## Operating characteristics
+**Time and Memory Complexity:**
+*   Time complexity is linear with respect to the number of meshes and triangles, as each mesh is iterated twice (once for solid, once for porous) [S1, unofficial].
+*   Memory complexity depends on the storage of `vertexArrayObjects` for both surface and porous geometry per mesh [S1, unofficial].
+
+**Measured Performance:**
+*   Not given in the sources.
+
+**Scaling:**
+*   Scales with the number of meshes and the density of solid vs. porous blocks. The separation allows for optimized shading (AO for solid, simpler texture lookup for porous) [S1, unofficial].
+
+**Strengths and Limitations:**
+*   **Strengths:** Correctly handles alpha blending for translucent voxel blocks by rendering opaque geometry first, preventing depth buffer artifacts [S1, unofficial]. Allows different shading logic for opaque vs. translucent geometry [S1, unofficial].
+*   **Limitations:** Does not handle premultiplied alpha, which may cause visual artifacts with certain textures [S1, unofficial]. Requires two draw passes per mesh, potentially increasing overhead compared to a single-pass approach if blending is not needed [S1, unofficial].
+
+**When to use it and when not:**
+*   Use when rendering voxel meshes with both opaque and translucent blocks that require correct alpha blending [S1, unofficial].
+*   Do not use if all blocks are opaque, as the second pass is unnecessary overhead [S1, unofficial].
+
+## Background
+The Two-Pass Voxel Shading Pipeline was developed by Mikola Lysenko (2013) and deathcap (2014) as part of the `voxel-shader` plugin for the Voxel.js ecosystem [S1, unofficial]. It is designed to work with the `voxel-stitch` and `game-shell-fps-camera` plugins, leveraging their meshing and camera systems [S1, unofficial]. The technique addresses the common issue in voxel rendering where translucent blocks (like glass or water) incorrectly interact with opaque blocks due to depth sorting and blending order [S1, unofficial].
+
+## Sources
+[S1] voxel/voxel-shader, https://github.com/voxel/voxel-shader, fetched 2026-10-27 (unofficial)

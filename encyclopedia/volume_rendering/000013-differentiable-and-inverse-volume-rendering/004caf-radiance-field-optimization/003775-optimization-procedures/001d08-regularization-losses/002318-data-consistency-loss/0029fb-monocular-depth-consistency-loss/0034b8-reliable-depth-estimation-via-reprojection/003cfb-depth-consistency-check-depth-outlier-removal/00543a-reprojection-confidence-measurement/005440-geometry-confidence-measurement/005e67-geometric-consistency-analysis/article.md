@@ -1,0 +1,115 @@
+# Geometric Consistency Analysis
+
+Also called: Opacity and Geometric Consistency Evaluation
+
+## Overview
+Geometric Consistency Analysis is a method for evaluating the reliability of predicted depth and opacity in multi-view reconstruction by assigning geometric labels to points based on their agreement with ground-truth (GT) data across multiple views [S1, unofficial]. It solves the problem of distinguishing between accurate surface predictions, free-space errors, and uncertain regions, thereby identifying outliers that violate observed geometry [S1, unofficial]. It sets itself apart from sibling methods like [Depth-free motion evidence (Epipolar Residual)](20194-depth-free-motion-evidence-epipolar-residual.md) by relying on explicit ground-truth depth comparisons rather than motion or epipolar constraints [S1, unofficial].
+
+## How it works
+**Inputs and Outputs:**
+- **Inputs:** Predicted depth values for a set of 3D points (or samples) across $N$ views; Ground-truth (GT) depth maps for the same views; Camera poses for all views.
+- **Outputs:** A geometric label for each point: `inconsistent`, `surface-consistent`, or `uncertain`.
+
+**Data Structures:**
+- A list or array of points, where each point is associated with a set of depth predictions $d_i^v$ from view $v$ and a GT depth $d_{gt}^v$.
+- A boolean mask for depth-edge samples to be excluded.
+
+**Parameters:**
+- **Depth tolerance threshold ($\tau$):** $\tau = \max(0.03 \text{ m}, 0.01 \cdot d)$, where $d$ is the depth value [S1, unofficial].
+- **View count threshold ($k$):** 2 views [S1, unofficial].
+
+**Steps:**
+1. **Exclude Depth Edges:** Identify samples located at depth edges in the GT depth maps and exclude them from the analysis [S1, unofficial].
+2. **Initialize Labels:** For each remaining point, initialize its status as `uncertain`.
+3. **Check Free-Space Violations:** For each view $v$:
+   - Let $d_{pred}^v$ be the predicted depth and $d_{gt}^v$ be the GT depth.
+   - If $|d_{pred}^v - d_{gt}^v| > \tau$, the point violates the GT-observed free space in view $v$.
+4. **Check Surface Agreement:** For each view $v$:
+   - If $|d_{pred}^v - d_{gt}^v| \le \tau$, the point agrees with the observed surface depth in view $v$.
+5. **Assign Labels:**
+   - **Inconsistent:** If the point violates GT-observed free space in at least $k$ views (i.e., count of violations $\ge 2$) AND agrees with no observed surface depth in any view (count of agreements $= 0$) [S1, unofficial].
+   - **Surface-Consistent:** If the point agrees with at least $k$ views (i.e., count of agreements $\ge 2$) AND has no free-space violations (count of violations $= 0$) [S1, unofficial].
+   - **Uncertain:** All remaining points that do not meet the criteria for `inconsistent` or `surface-consistent` [S1, unofficial].
+
+**Pseudocode:**
+> **Unverified code.** The code below did not pass a test run against a reference implementation, or no test fits it, so it may contain errors.
+
+```python
+def assign_geometric_labels(points, gt_depths, pred_depths, camera_poses, tolerance_func):
+    """
+    Assigns geometric labels to points based on multi-view consistency with GT depth.
+    
+    Args:
+        points: List of 3D points or indices.
+        gt_depths: Dict mapping view_id to GT depth map.
+        pred_depths: Dict mapping view_id to predicted depth map (or list of depths per point).
+        camera_poses: Dict mapping view_id to camera pose.
+        tolerance_func: Function that takes depth value d and returns tolerance tau.
+        
+    Returns:
+        labels: Dict mapping point_id to label ('inconsistent', 'surface_consistent', 'uncertain').
+    """
+    labels = {}
+    k = 2  # Minimum number of views for consistency
+    
+    for point_id in points:
+        violations = 0
+        agreements = 0
+        is_edge = False
+        
+        # Step 1: Check if point is at a depth edge (implementation detail omitted as per source)
+        # [G] In practice, this involves checking the gradient or variance of GT depth around the projected pixel.
+        # If is_edge: continue to next point
+        
+        for view_id in camera_poses:
+            # Get GT depth at the projected pixel location for this point
+            gt_d = get_depth_at_pixel(gt_depths[view_id], project_point(point_id, camera_poses[view_id]))
+            pred_d = get_depth_at_pixel(pred_depths[view_id], project_point(point_id, camera_poses[view_id]))
+            
+            if gt_d is None or pred_d is None:
+                continue
+                
+            tau = tolerance_func(gt_d)
+            
+            # Step 3 & 4: Check violations and agreements
+            if abs(pred_d - gt_d) > tau:
+                violations += 1
+            else:
+                agreements += 1
+        
+        # Step 5: Assign labels
+        if violations >= k and agreements == 0:
+            labels[point_id] = 'inconsistent'
+        elif agreements >= k and violations == 0:
+            labels[point_id] = 'surface_consistent'
+        else:
+            labels[point_id] = 'uncertain'
+            
+    return labels
+```
+
+**Edge Cases and Pitfalls:**
+- **Depth Edges:** Samples at depth edges must be excluded to avoid ambiguous labeling due to partial volume effects or occlusion boundaries [S1, unofficial].
+- **Tolerance Scaling:** The tolerance scales with depth ($0.01d$), so deeper points require larger absolute errors to be considered inconsistent [S1, unofficial].
+- **Missing GT:** If GT depth is unavailable for a view, that view cannot contribute to the consistency check [S1, unofficial].
+
+## Subtopics
+
+### Cycle Reprojection Error
+A metric to evaluate geometric consistency across views by measuring the Euclidean distance between original and reprojected pixel locations after a round-trip projection [S2, unofficial]. It is used to evaluate geometric consistency during training and to compare depth-rendering methods [S2, unofficial]. Steps: 1. Render depth maps for a reference view. 2. Back-project pixels from the reference view depth map into 3D space. 3. Project the 3D points into a neighboring view to sample the corresponding depth value. 4. Back-project the sampled depth into the neighboring view, then reproject back to the reference view. 5. Compute the Euclidean distance between the original pixel location and the reprojected pixel location to obtain the cycle error [S2, unofficial].
+
+## Operating characteristics
+- **Time Complexity:** Linear in the number of points and views, as each point is checked against all views [S1, unofficial].
+- **Memory Complexity:** Linear in the number of points to store labels and intermediate counts [S1, unofficial].
+- **Measured Performance:** On held-out Hypersim validation scenes, this procedure identifies 36,125 inconsistent points [S1, unofficial].
+- **Strengths:** Provides a clear, interpretable classification of prediction reliability based on ground truth [S1, unofficial].
+- **Limitations:** Requires ground-truth depth, limiting its use to supervised settings or validation [S1, unofficial]. Excludes depth edges, potentially missing errors in complex geometry [S1, unofficial].
+- **When to use:** When evaluating the accuracy of feed-forward depth/opacity predictions against known ground truth [S1, unofficial].
+- **When not to use:** In unsupervised settings where GT depth is unavailable [S1, unofficial].
+
+## Background
+Originated in the analysis of feed-forward 3D Gaussian Splatting methods, specifically in the context of InfiniSplat v2 [S1, unofficial]. It was developed to analyze and improve the reliability of opacity and depth predictions by explicitly labeling geometric consistency [S1, unofficial]. The method is used in the evaluation of multi-view reconstruction accuracy, particularly in scenes from the Hypersim dataset [S1, unofficial].
+
+## Sources
+[S1] InfiniSplat v2: Analyzing and Improving Feed-Forward 3DGS from Any Views, https://arxiv.org/abs/2610.20341, fetched 2026-10-29 (unofficial)
+[S2] Geometry-Grounded Gaussian Splatting, https://arxiv.org/abs/2601.17835v2, fetched 2026-10-26 (unofficial)

@@ -1,0 +1,1218 @@
+arXiv:2111.13112v1 [cs.CV] 25 Nov 2021
+VaxNeRF: Revisiting the Classic for Voxel-Accelerated Neural Radiance Field
+Naruya Kondo
+University of Tsukuba
+Yuya Ikeda
+University of Tokyo
+n-kondo@digitalnature.slis.tsukuba.ac.jp
+y-ikeda0124@g.ecc.u-tokyo.ac.jp
+Andrea Tagliasacchi
+Google Brain, University of Toronto
+Yutaka Matsuo
+University of Tokyo
+atagliasacchi@google.com
+matsuo@weblab.t.u-tokyo.ac.jp
+Yoichi Ochiai
+University of Tsukuba
+Shixiang Shane Gu
+Google Brain
+wizard@slis.tsukuba.ac.jp
+shanegu@google.com
+Abstract
+Neural Radiance Field (NeRF) is a popular method in
+data-driven 3D reconstruction. Given its simplicity and
+high quality rendering, many NeRF applications are being developed. However, NeRF’s big limitation is its slow
+speed. Many attempts are made to speeding up NeRF
+training and inference, including intricate code-level optimization and caching, use of sophisticated data structures, and amortization through multi-task and meta learning. In this work, we revisit the basic building blocks of
+NeRF through the lens of classic techniques before NeRF.
+We propose Voxel-Accelearated NeRF (VaxNeRF), integrating NeRF with visual hull, a classic 3D reconstruction technique only requiring binary foreground-background pixel
+labels per image. Visual hull, which can be optimized in
+about 10 seconds, can provide coarse in-out field separation to omit substantial amounts of network evaluations in
+NeRF. We provide a clean fully-pythonic, JAX-based implementation on the popular JaxNeRF codebase, consisting of
+only about 30 lines of code changes and a modular visual
+hull subroutine, and achieve about 2-8x faster learning on
+top of the highly-performative JaxNeRF baseline with zero
+degradation in rendering quality. With sufficient compute,
+this effectively brings down full NeRF training from hours
+to 30 minutes. We hope VaxNeRF – a careful combination
+of a classic technique with a deep method (that arguably
+replaced it) – can empower and accelerate new NeRF extensions and applications, with its simplicity, portability,
+and reliable performance gains. Codes are available at
+https://github.com/naruya/VaxNeRF.
+(a) NeRF
+(b) VaxNeRF
+Figure 1. NeRF (a) uses hierarchical sampling, i.e., a mixture of
+coarse (pink) and fine (light blue) sampling, to estimate the color
+from a specified viewpoint. Instead, VaxNeRF (b) samples only
+the inside of the bounding volume uniformly and densely. The
+orange circle shows the area bounded by the minimum and maximum distances of the rays, and the black shade in (b) shows the
+automatically obtained bounding volume.
+1. Introduction
+Neural radiance field (NeRF) [41] has revolutionized
+high-resolution 3D reconstruction from images. Many extensions and applications quickly ensued, including dynamic scene rendering [16, 31, 47, 50, 51, 67], controllable
+relighting [3, 61, 77, 87], latent appearance and shape priors [6, 57, 68], scene composition [21, 45, 49, 79], and pose
+estimation [24, 32, 38, 62, 82].
+These works have potential to make substantial impacts
+not only in computer vision and computer graphics, but also
+in robotics [1,30], virtual reality (VR) systems [4,23,42,72],
+and medical imaging [71].
+Despite NeRF’s high quality 3D renderings, a key bottleneck has been slow training and inference speeds where
+1
+the original implementation took days to render an object
+and tens of seconds to render a view angle [41]. Given
+this, follow up work looked to accelerate NeRF, including caching with special data structures [18, 22, 84], amortization through meta learning and multi-task learning [2,
+66], or re-implementation optimized for parallel computing [12,54], where most approaches focus on inference time
+speedups [18, 22, 34, 54, 84]. Notably, many of these approaches take NeRF as given and add extra complexities to
+enhance its performances, rather than fundamentally changing its design details, except a few [34, 35, 86].
+Importantly, prior to NeRF there were many kinds of
+classic 3D reconstruction techniques [28,55,56,76]. Instead
+of taking NeRF for granted and training end-to-end models, we revisit the basic building blocks of NeRF and ask:
+can classic techniques be combined with NeRF in meaningful ways? In this work, we focus on the points sampling
+in ray-color integration, which is a fundamental bottleneck
+to NeRF’s speed and is generally addressed through hierarchical sampling with coarse and fine models [41]. Visual hull [28], a classic 3D reconstruction technique, can
+obtain an approximate bounding volume, with only a binary foreground-background segmentation mask per image,
+which is easily obtainable through thresholding or recent
+off-the-shelf segmentation models [19, 33, 64]. Visual hull
+can be fitted for 100 images in about 10 seconds, using
+our JAX-based implementation, and using this coarse voxel
+model, we can eliminate most of the expensive point evaluations that are not inside the object. We term our method
+Voxel-Accelerated NeRF (VaxNeRF), which can eliminate
+the need for an extra coarse model, and can provide a consistent 2-8x faster training speedup on top of the highlyperformative JaxNeRF [12] with a portable JAX-based visual hull file and only around 30 lines of modification to the
+main code.
+We perform extensive evaluations using NeRF-Synthetic
+datasets, along with more difficult datasets of NSVF [35],
+to ensure that our observed speedups are consistent across
+various scenes without degradation in the final rendering
+quality (measured with PSNR and SSIM). We emphasize
+those scenes with non-convexities or transparencies, where
+visual hull alone certainly cannot provide ground-truth inout volumes, but still observe that VaxNeRF provides similar degrees of speedups. On average VaxNeRF speeds up
+(Jax)NeRF training by 2-8x, with the same and sometimes
+higher final rendering accuracy. To our surprise, VaxNeRF,
+despite being a much simpler method to implement on top
+of NeRF or NeRF-based algorithms, also outperforms recent NSVF [35], as well as PlenOctrees [84] with respect
+to PSNRs, while providing better or comparable training
+speeds.
+We hope that VaxNeRF, with its simplicity, portability, and reliable performance gains, can accelerate and em-
+power many future NeRF extensions and applications. Extrapolating on the 256-TPU performance reported on JaxNeRF [12], VaxNeRF brings down full NeRF training from
+2.5 hours to 30 minutes, only requiring additional binary
+foreground-background pixel labels. Our method, which
+simply combines a classic technique with a recent end-toend technique, demonstrates the importance of revisiting
+core building blocks of popular deep learning models as
+well as classical techniques prior to them, as sometimes,
+the best of both worlds is a careful combination of the two.
+2. Related Works
+2.1. Novel View Synthesis
+The task of synthesizing novel views of a scene given
+multiple images has been well studied for a long time, with
+various methods that divide into two categories: 3D reconstruction methods and viewpoint interpolation methods.
+3D Reconstruction The voxel-based methods [27,28,59]
+are very primitive methods for 3D reconstruction, which infer the occupancy or color of each point in grid space using the silhouette of the image or the viewpoint invariances
+of the color. Along with voxel representation, meshes are
+another commonly used representation [5, 10, 39, 78] since
+they are easy to use and can store information efficiently,
+but it is difficult to capture or optimize detailed geometry
+and topologies. MVS [25, 70] is an example of practical
+applications of 3D reconstruction form images, and is commonly used in 3D modeling work today. Recently, several deep learning-based approaches are proposed to continuously represent the 3D space [37, 41, 68, 80]. Neural
+Volumes [37] performs 3D reconstruction by 3D deconvolution from accumulated image features, and then synthesize image from novel views by ray marching. Similarly,
+NeRF [41] uses ray marching, but instead of using 3D deconvolution, it learns a model that infers color and density
+given the coordinates and viewing direction along the camera ray. NSVF [35] is akin to a combination of NeRF and
+Neural Volumes, and speeds up the inference of NeRF by
+allowing features to be stored in a voxel grid. And lastly,
+there are other methods of 3D reconstruction using implicit
+functions such as the signed distance function [68, 80].
+Viewpoint Interpolation Multi plane images [69,88] and
+light field interpolation [9, 20, 29, 40] are image-based approaches for novel view synthesis without 3D reconstruction. When the postures of novel viewpoints can be limited, such as forward-facing scenes, these representations
+are very light-weight, accurate and effective, but otherwise,
+their use case is limited. Additionally, there are novel view
+synthesis methods use convolution-based deep generative
+2
+models [14, 44]. While these are good at generating photorealistic images at a reasonable speed, they have a problem
+that the geometry are prone to collapsing.
+on obtaining significant speed-ups. NeLF [63] is an intricate, highly-customized method for portrait view synthesis
+that combines NeRF and NeuralVolumes. NeLF uses visual hull to reduce the number of sampling points on a ray,
+but does not study how effective it is alone or in the most
+basic form of NeRF. NeuRays [36] is an image-based rendering method that utilizes the surface information of objects obtained by Colmap [55, 56]. DoNeRF [43] and DSNeRF [13] use depth images to reduce the number of required observation images and speed up training, but our
+method achieves faster training without such depth oracle.
+2.2. NeRF Accelerations
+NeRF is attractive because of its ability to learn and represent precise shapes and complex reflections. However,
+NeRF’s training and inference (rendering) speed are very
+slow [41]1 . Many researchers have proposed methodologies
+to overcome this problem. [18,22,53,54,84] are great methods for speeding up the NeRF inference. While the original
+NeRF took about 30 seconds to render one image, these
+methods achieve real-time rendering by pre-computing and
+storing colors and densities in scene space, or by dividing the NeRF model into smaller models for better parallel inference. Another way to speeding up NeRF on a new
+scene is to incorporate priors learned from a dataset of similar scenes, which can be accomplished by conditioning on
+predicted images features [7, 68, 74, 85] or meta-learning
+[66]. While these methods are effective for simple scenes
+or rough 3D reconstructions, these are not yet able to be
+used to generate complex scenes in the NeRF paper to the
+same quality. TermiNeRF [52] is a more direct way to speed
+up NeRF, where along with the usual NeRF model, it simultaneously trains a sampling network that predicts the
+locations of points to be sampled on a ray. Although it is
+claimed to speed up fine-tuning to a scene with the same
+shape but different look and lighting that has been learned
+once, it does not mention speeding up training itself. AutoInt [34] modifies the architecture of the NeRF to be able to
+calculate color and density by definite integration, however,
+the learning speedup is limited to 1.8x. Another approach
+for speeding up is to focus only on the object surfaces for
+3D reconstruction and rendering [48, 48, 73, 81, 83], but it
+is extremely difficult to correctly estimate the shapes for
+objects with transparent parts or fuzzy objects whose surface is difficult to estimate. Our method, on the other hand,
+achieves faster training without narrowing down applicable
+domains or sacrificing rendering quality.
+3. Preliminaries
+Our work builds on the most basic NeRF model with
+minimal changes. We go over the NeRF basics and introduce visual hull in this section. For more in-depth summaries of NeRFs and extensions, please refer to [11].
+3.1. Neural Radiance Fields
+Neural radiance fields (NeRF) [41] are 3D representations that can be rendered from arbitrary viewpoints, capturing continuous geometry and view-dependent appearances.
+The expected color of a camera ray r(t) = o + td can be
+estimated by a finite-sample approximation Ĉ(r):
+Ĉ(r) =
+N
+−1
+X
+wi c(r(ti )) ,
+(1)
+i=0
+
+where wi = Ti 1 − exp(−σ(r(ti ))δi )
+
+
+i−1
+X
+Ti = exp −
+σ(r(tj ))δj  ,
+(2)
+(3)
+j=0
+where ti indicates the position of the point to be sampled
+from the ray, and δi = tt+1 − ti are the distances between
+point samples.
+In NeRF, an MLP parameterizes c(·) and σ(·) jointly
+and is trained to minimize the loss between the ground-truth
+pixel colors C(r) in the images and the predicted colors Ĉ
+for a batch of rays R:
+X
+2
+LRGB =
+C(r) − Ĉ(r) 2
+(4)
+2.3. NeRF and 3D Geometry Integration
+There are several work that expand NeRF using geometry data inferred from images or given as a supervised information. [46, 75] use a rough bounding volume obtained
+from visual hull [28] to measure occupancy loss to get a
+clear estimate of the object surface, but they do not focus
+r∈R
+Hierarchical Sampling The NeRF paper [41] proposes
+hierarchical sampling to efficiently determine the points ti
+to be evaluated for each ray in Eq. 1. Two NeRF models with the same network structure are trained jointly: a
+coarse model and a fine model. For the coarse model the
+points ti are sampled uniformly, while for the fine model
+ti are sampled from an importance-weighted distribution
+based on their contributions wi to the final pixel value Ĉ,
+evaluated using the coarse model. Figure 1a visually shows
+1 DVGO [8] is a concurrent paper to ours, which proposes a method of
+storing features in voxels (similar to NSVF) and achieves 49-183x faster
+learning than NeRF. However, their implementation is completely different
+from NeRF and therefore difficult to combine with existing NeRF research.
+Additionally, DVGO requires a larger memory footprint, where the model
+size totals 650M, compared to 6M in NeRF and 12M in our method (6M
+for model, 6M for binary voxels).
+3
+NeRF [41]
+KiloNeRF [54]
+SNeRG [22]
+FastNeRF [18]
+PlenOctrees [84]
+NSVF [35]
+AutoInt [34]
+TermiNeRF [52]
+MetaNLR [2]
+DoNeRF [43]
+DS-NeRF [13]
+VaxNeRF (Ours)
+fast rendering
+fast training
+quality
+transparency
+depth
+representation
+code
+modification
+(≈ 0.05fps)
+≈ 1000x
+≈ 1600x
+≈ 4000x
+≈ 3000x
+≈ 10x
+≈ 10x
+≈ 14x
+≈ 20x
+15-78x
+N/A
+N/A4
+—
+N/A
+N/A
+N/A
+≈ 4x
+N/A
+≈ 1.8x
+N/A2
+≈ 8x
+≈ 6x3
+2-6x
+2-8x
+Good
+∼ Good
+∼ Good
+∼ Good
+∼ Good
+Good
+Lower
+Good
+∼ Good
+Good
+∼ Good
+Good
+Yes
+Yes
+Yes
+Yes
+Yes
+Yes
+Yes
+Yes
+No
+Yes
+Yes
+Yes
+No
+No
+No
+No
+No
+No
+No
+No
+No
+Required
+Required
+No
+NR
+NR
+NR + Cache
+Cache
+SH
+NR
+NR
+NR
+NR
+NR
+NR
+NR
+—
+1000s+
+1000s+
+1000s+
+≈ 1000s
+1000s+
+1000s+
+unknown
+unknown
+1000s+
+1000s+
+≈ 30
+Table 1. A comparison of efficient NeRF-based methods. fast rendering and fast training: How many times faster the rendering / training
+are compared to NeRF. “No” does not mean no speedup at all, but indicates that it is not specifically mentioned in the paper. quality:
+Rough quality comparison with NeRF as “Good”. The “ Good” indicates that the quality depends on parameters such as compression ratio.
+transparency: Whether the method can handle objects that cannot be successfully reconstructed by simply estimating the object’s surface
+(e.g. objects with transparency). depth: Whether a depth image is required. representation: The representation of the model that will
+eventually be created by each method. “NR” denotes neural representation, “cache” denotes the precomputed values of color and density,
+and “SH” denotes the coefficient of spherical harmonics. code modification: How many lines have been changed/add from the original
+NeRF implementation. If the code has not been published, displayed as “unknown”.
+how the fine model can better allocate samples to important
+regions, leading to much lower PSNR.
+While visual hull is a method for estimating shapes and
+not colors, it can be easily colored by shooting rays from the
+foreground of the given image to the output voxels of the
+visual hull. For visualization, we present a colored output
+of the visual hull in Figure 3, but we did not use this color
+information in our method.
+3.2. Visual Hull
+Visual hull [28] (or shape-from-silhouette) is a classical
+method for 3D reconstruction based on a set of images and
+their camera location information. It assumes that pixels
+in each captured image can be divided into foreground and
+background.
+The foreground region of an image is created by
+the projection of a three-dimensional object onto a twodimensional plane. Therefore, we know that there is absolutely no object on the ray of the camera corresponding
+to a pixel in the background region, and conversely, there
+is always an object somewhere on the ray corresponding to
+a pixel in the foreground region. Therefore, we can narrow
+down the area where an object may be present using a set of
+images from multiple angles, and the product of the possible areas where an object is present in each image forms an
+approximate bounding volume of (a region that completely
+contains) the object.
+Visual hull is a primitive method, and has problems such
+as inability to correctly restore (carve off) some dented parts
+of non-convex shapes, but unlike other methods [7, 15, 17,
+27, 58–60], it has the advantage of being able to obtain
+a bounding volume that contains 100% of the object and
+therefore has been applied in many ways in classic 3D reconstructions [20, 26, 65].
+4. Method
+An obvious yet significant compute inefficiency in NeRF
+training is its MLP evaluations at the points in space where
+they have no object and contribute 0 to Ĉ(r). While NeRF
+addresses this by training a separate coarse model for point
+selections, we propose a simpler solution: we modify Eq. 1
+to only evaluate the points inside of the voxels V created by
+visual hull,
+X
+Ĉ(r) =
+wi c(r(ti )).
+(5)
+i:r(ti )∈V
+We term it Voxel-Accelerated NeRF (VaxNeRF). While
+this is arguably a trivial and intuitive modification to NeRF,
+VaxNeRF has the following advantages over standard NeRF
+or other accelerated-NeRF variants:
+2 TermiNeRF claims to be able to do fast finetuning for different looking
+scenes with the same geometry, but it does not mention how much faster
+normal training will be.
+3 Compared to NSVF [35]
+4 We haven’t measured properly, but it’s a little faster than original
+NeRF.
+4
+cut dents in objects), but never overcuts. This property is
+critical in VaxNeRF, since as long as all object parts are inside V, it will converge to the same performance as a full
+NeRF. In Colmap [55, 56] and photogrammetry [76], on the
+other hand, the object surface is estimated using color information that is vulnerable to reflections and other noise,
+and the estimated surface contains noise and is not suited to
+be a reliable bounding volume, unlike in visual hull where
+the estimated volume is 100% reliable up to the resolution
+of voxels. We therefore chose visual hull to derive V used
+in VaxNeRF.
+Removing fine model As illustrated in Figure 1, V in
+VaxNeRF decides point locations based on a binary bounding volume, and the fine model in NeRF decides based on a
+more direct measure of contribution to the ray color Ĉ(r),
+i.e. wi , evaluated through the coarse model. Visually it appears that using the fine model of NeRF on top of VaxNeRF
+could lead to even more speedups; however, through our extensive experiments we found that VaxNeRF performs the
+best using only a single “coarse” model with (dense) uniformly sampling (e.g. Figure 4). This removes the need for
+fine model and substantially simplifies NeRF training.
+Figure 2.
+The full code modification to convert from
+(Jax)NeRF [12, 41] to VaxNeRF, visualized with “git diff”. This is
+not for readability (for algorithmic differences, see Algorithm 1),
+but mainly for highlighting how it only takes about 30 lines of
+change to implement VaxNeRF and achieve the speedups, besides
+a modular visual hull code.
+Dilating voxels NeRF usually uses 64 and 128 points for
+coarse and fine sampling respectively [41], while our visual hull constructs 400x400x400 voxels. This means that
+if there is a substructure in the scene that is smaller than
+1/64 of the scene size, the ray may ignore that part of the
+scene even if visual hull was able to reconstruct it. In order
+to avoid this problem, we dilate, i.e. max-pool, the voxel
+by the amount of cells equal to the scene size divided by
+the number of point samples, when the sample size is small,
+e.g. 64.
+• It is implementable on top of JaxNeRF [12] in about
+30 lines, fully pythonic and JAX-based (Figure 2)
+• It trains 2-8x faster than JaxNeRF
+• It trains without loss of rendering quality measured in
+PSNR and SSIM
+5. Experiments
+• It trains only one network for best performance, as opposed to two in NeRF
+5.1. Experimental Setup
+We detail the datasets and basic setups used in our experiments. More experimental setup details are included in
+Supplementary Materials.
+where the only additional assumption is the access to binary
+foreground-background masks, which are easily obtainable
+in most cases as discussed in Section 5.1. We show how this
+simple combination of a well-known classical technique
+and NeRF leads to these impressive empirical performances
+in Section 5.2 (Figure 3, Figure 4, Table 2, Table 3).
+Datasets For our experiments, we use the NeRFSynthetic dataset [41] and NSVF-Synthetic dataset [35].
+The NeRF-Synthetic dataset and the NSVF-Synthetic
+dataset each consist of 8 scenes where each scene has a central object with 100 inward facing cameras distributed randomly on the upper hemisphere. All scenes exhibit complicated geometry and realistic non-Lambertian materials, but
+the NSVF-Synthetic dataset has more complex geometry,
+lighting effects and transparent parts, as shown in Figure 5.
+The images are 800 x 800 in resolution with ground-truth
+camera poses.
+4.1. Design Choices
+Despite the simplicity and generality of the core VaxNeRF idea, there were a number of key design decisions in
+VaxNeRF implementation to achieve the best performances.
+Choosing visual hull As noted briefly in Section 3.2, visual hull is reliable: it only undercuts spaces (e.g. fail to
+5
+Synthetic NeRF Dataset
+Method
+c64f64
+c64f128
+vax c64f64
+vax c64f128
+vax c400
+vax c600
+vax c800
+nsvf
+plenoctrees
+0.5h
+PSNR SSIM
+PSNR
+SSIM
+PSNR
+SSIM
+PSNR
+SSIM
+12h
+PSNR SSIM
+36h
+PSNR SSIM
+27.07
+26.66
+29.33
+28.82
+30.04
+30.0
+29.8
+24.96
+28.69
+28.64
+28.36
+30.07
+29.78
+30.73
+30.8
+30.69
+26.04
+29.81
+0.926
+0.923
+0.939
+0.937
+0.945
+0.945
+0.944
+0.893
+0.944
+29.98
+29.96
+31.1
+31.03
+31.35
+31.72
+31.78
+26.91
+31.28
+0.939
+0.939
+0.948
+0.947
+0.95
+0.952
+0.953
+0.908
+0.955
+30.73
+30.75
+31.38
+31.53
+31.43
+31.92
+32.1
+27.52
+31.47
+0.946
+0.946
+0.95
+0.951
+0.951
+0.954
+0.955
+0.92
+0.957
+31.22
+31.4
+31.43
+31.71
+31.44
+31.95
+32.17
+28.04
+31.55
+31.39
+31.73
+31.43
+31.73
+31.44
+31.95
+32.18
+28.17
+31.53
+0.908
+0.903
+0.932
+0.927
+0.939
+0.938
+0.936
+0.875
+0.933
+1h
+best second-best third-best
+3h
+6h
+0.949
+0.951
+0.951
+0.953
+0.951
+0.955
+0.956
+0.93
+0.957
+0.951
+0.953
+0.951
+0.953
+0.951
+0.955
+0.956
+0.934
+0.958
+Table 2. Quantitative results on NeRF-Synthetic dataset. Each value is the average of the eight scenes. VaxNeRF has a higher score than
+the original NeRF at all times, and the final performance is also better than the original.
+Visual Hull
+0.5min
+1min
+5min
+15min
+30min
+Figure 3. Top row is (Jax)NeRF (c64f128) results, bottom row is VaxNeRF (vax c600) results. The elapsed time of VaxNeRF includes the
+time taken by Visual Hull. (Ten seconds, though.) Thanks to the visual hull, VaxNeRF is able to acquire the shape very fast. For example,
+VaxNeRF can already start learning the smallest holes in the caterpillar in 5 minutes, while the original NeRF can only do so after about
+30 minutes. Please see Supplementary Materials for more visualizations, including zoomed comparisons along longer time scales. Note
+that, the colors (textures) shown in the “Visual Hull” are not used for VaxNeRF training.
+Baselines The main baseline in our experiments is
+NeRF’s JAX re-implementation JaxNeRF [12]. It is slightly
+faster (much faster with parallel machines) to learn and inference, and easier to extend than the original implementation [41]. NeRF has a large number of fine sampling points
+by default (128) that may be unfair in speed comparisons,
+so we run it with different numbers of fine sampling points:
+16, 64, and 128. In Figure 4 and Table 2, each NeRF result is denoted as cXfY using the number of coarse samples
+(X) and fine samples (Y). We also compare to two recent
+papers introducing NeRF accelerations: neural sparse voxel
+fields (NSVF) and PlenOctrees. Each experiment is run on
+a single NVIDIA A100 GPU.
+VaxNeRF Implementation Like NeRF, VaxNeRF is denoted as vax cXfY using the number of coarse samples (X)
+and fine samples (Y) in Figure 4 and Table 2. Besides a
+modular visual hull function, we brought down the implementation to about 30 lines of change on top of JaxNeRF, as
+shown in Figure 2. Specifically, the only changes are to read
+in the voxels computed by our visual hull, add the voxels as
+an argument to the function, and then enter only the points
+inside the bounding volume into the MLP, and set values of
+zero for all other points. Unlike in NeRF where the number of points is fixed for all rays (N in Eq. 1), in VaxNeRF
+it varies per ray due to rejecting points outside the bounding volume (Eq. 5). Since JAX does not efficiently handle
+variable-length inputs at the moment, in our current implementation we run the full NeRF model without rejection for
+6
+Figure 4. Comparison of training speed. Both VaxNeRF and NeRF trained 1 million iterations. The training of VaxNeRF was 2-8xtimes
+faster than the original NeRF, and furthermore, vax c600 and vax c800 had better accuracy than the original NeRF in most scenes. Note
+that PlenOctrees are converted to from the weights stored at some intervals during the training of NeRF-SH and then fine-tuned. Because
+the time required for fine tuning varies, the graph does not show a simple upward trend.
+30 seconds, record the maximum number of points inside
+the volume across all rays, and compiles our code with the
+input sizes as “len inpc” and “len inpf” for coarse and (optional) fine models respectively5 .
+Visual Hull Implementation We use 400x400x400 resolution of voxels for visual hull. In addition, we need a binary mask separating the foreground from the background
+in each image. In the scenes where the alpha channel is
+given, we use it to directly derive the mask, but in some
+scenes of the NSVF-Synthetic dataset where it is not given,
+we use OpenCV to separate the background (white) from
+the foreground. In a real environment, one could use a green
+background, or apply an off-the-shelf segmentation model
+for separating objects of interest from the rest after capturing.
+Figure 5. Qualitative results of VaxNeRF (vax c600) on NSVFSynthetic datasets, after 1 million training iterations, averaging 5.6
+hours (this takes 33 hours on NeRF). VaxNeRF also performs well
+on objects with transparency and finer shapes.
+5.2. Experimental Results
+We provide extensive evaluations on benchmark datasets
+against a series of strong baselines. More results are included in Supplementary Materials.
+Qualitative Comparisons In Figure 3, we show how
+NeRF and VaxNeRF visually compare in the first 30 minutes of training. We can observe substantial details emerge
+even with only 15-30 minutes of training on a single GPU.
+We also include the colored visualization of visual hull for
+reference, even though our method did not use this color information. This visual hull is optimized in the first 10 seconds, and yet it clearly captures intricate geometric details
+at 400x400x400 voxel resolution.
+Additionally, we show the final rendering quality of
+5 This may not be necessary in the future, as JAX improves compilation
+caching.
+7
+Method
+number of samples
+rays / sec
+c64f128
+c64f64
+c64f16
+vax c64f128
+vax c64f64
+vax c64f16
+vax c800
+vax c600
+vax c400
+802,816
+524,288
+327,680
+363,625
+211,625
+97,875
+184,500
+138,500
+92,125
+34,424
+45,153
+58,610
+89,151
+141,086
+240,489
+148,812
+192,489
+275,824
+number of points evaluated by NeRF, which in turn allows
+it to proceed with learning at a higher rays/sec. Our c 600
+and c 800 VaxNeRF achieve training speed-ups of 5.35x
+and 4.11x per iteration respectively on average over a total
+of 16 scenes on the NeRF-Synthetic and NSVF-Synthetic
+datasets with little or no deterioration, or even slight improvements, in quality.
+6. Discussion
+While our empirical experiments conclusively demonstrate the speed-ups of VaxNeRF over NeRF, in this section
+we discuss possible explanations for such substantial gains,
+specifically:
+Table 3. Training Speed Comparison on NeRF Synthesic Dataset.
+Measured on a single NVIDIA A100 GPU. Although vax 400,
+vax 600, and vax 800 sample the points on the ray quite finely
+in the voxel, the overall number of points to be sampled is dramatically reduced, and the training proceeds at a high ray/sec.
+• Effective Resolution for Point Selection: Both NeRF
+and VaxNeRF use heuristics to better allocate points
+for integral estimation along each ray (Eq. 1). Given
+that NeRF uses 64 samples for coarse model evaluations and VaxNeRF fits 400x400x400 visual hull, these
+correspond to effective resolutions of 1/64 and 1/400
+respectively for selecting important regions along the
+ray. Despite NeRF using more direct estimate of contribution (wi instead of 0/1 masking) and visual hull’s
+imperfect boundary volume carving, this large effective resolution gap could explain VaxNeRF’s superior
+performance.
+VaxNeRF on complex NSVF-Synthetic dataset [35]. As
+our quantitative metrics below and these visualizations illustrate, VaxNeRF does not degrade quality even on those
+scenes with complex geometry, lighting effects and transparent parts, unlike many other prior acceleration works
+in Table 1. This is because visual hull’s property and VaxNeRF’s design ensure that it converges to the same result as a
+full NeRF, as discussed in Section 4.1.
+Quantitative Comparisons Figure 4 plots PSNR over
+training time, where all results are performances on a single NVIDIA A100 GPU. We can cleanly observe that all
+VaxNeRF variants (“vax X”) have fast convergence with
+high asymptotic accuracy. With sufficient point samples
+(vax c600, vax c800 and vax c64f128), our VaxNeRF performs on par with NeRF in final rendering quality while
+speeding up the training by 2-8x, and sometimes even outperforms NeRF on final accuracy (vax c600). Our results
+also compare favorably with results of NSVF and PlenOctrees reproduced from their official open-source implementations. NVSF, a popular model optimized for fast inference, appears slower in training since it gradually refines voxel resolutions during training. More surprisingly,
+compared to PlenOctrees which is substantially more complex and highly-optimized for both training and inference,
+VaxNeRF performs comparatively in terms of both speed
+and final rendering quality in all cases (except e.g. “ship”),
+slightly outperforming in PSNR and little under-performing
+in SSIM. Table 2 summarizes these results comprehensively, where VaxNeRF, along with PlenOctrees, being the
+most performant across all time windows of training.
+Notably, Figure 4 and Table 2 show that the most performant VaxNeRF only needs a single coarse model with dense
+point sampling (e.g. vax 600 and vax 800), a strong advantage of VaxNeRF over NeRF discussed in Section 4.1. Table 3 summarizes how our method dramatically reduces the
+• Zero-Region Predictions: In NeRF, the 3D space regions where no object is present are constantly evaluated and optimized throughout the training for both
+coarse and fine models, while in VaxNeRF they are directly set to 0 without ever running MLP evaluations.
+This substantially could reduce the predictive burden
+on MLPs in VaxNeRF, leading to faster training.
+We speculate that the overall speed-up arises from a combination of these design effects, and hope more future works
+probe into the fundamental building blocks of NeRF.
+7. Conclusion
+We present VaxNeRF, combining the classic visual hull
+technique with NeRF. Our implementation only takes about
+30 lines of main code changes from JaxNeRF, and yet provides reliable 2-8x speed-ups compared to this strong baseline with no loss in rendering quality. We hope our results
+could encourage more works asking fundamental questions
+about algorithmic designs of the popular end-to-end methods, and revisiting classic approaches (that are supposedly
+replaced by these methods) within these methods.
+Limitations and Future Work The limitations of the
+current work are: (1) visual hull requires binary foregroundbackground masks, and (2) all results are on synthetic
+8
+datasets. Evaluating VaxNeRF on real-world datasets are
+the next challenge, where we plan to curate and open-source
+such a dataset with ground-truth masks from green screen or
+an off-the-shelf segmentation model.
+[15] Simon Fuhrmann, Fabian Langguth, and Michael Goesele.
+Mve-a multi-view reconstruction environment. In GCH,
+pages 11–18. Citeseer, 2014. 4
+[16] Guy Gafni, Justus Thies, Michael Zollhöfer, and Matthias
+Nießner. Dynamic neural radiance fields for monocular 4d
+facial avatar reconstruction. In Proceedings of the IEEE/CVF
+Conference on Computer Vision and Pattern Recognition
+(CVPR), pages 8649–8658, June 2021. 1
+[17] Silvano Galliani, Katrin Lasinger, and Konrad Schindler.
+Massively parallel multiview stereopsis by surface normal
+diffusion. In Proceedings of the IEEE International Conference on Computer Vision, pages 873–881, 2015. 4
+[18] Stephan J Garbin, Marek Kowalski, Matthew Johnson, Jamie
+Shotton, and Julien Valentin. Fastnerf: High-fidelity neural
+rendering at 200fps. arXiv preprint arXiv:2103.10380, 2021.
+2, 3, 4
+[19] Thomas Germer, Tobias Uelwer, Stefan Conrad, and Stefan
+Harmeling. Pymatting: A python library for alpha matting.
+Journal of Open Source Software, 5(54):2481, 2020. 2
+[20] Steven J Gortler, Radek Grzeszczuk, Richard Szeliski, and
+Michael F Cohen. The lumigraph. In Proceedings of the
+23rd annual conference on Computer graphics and interactive techniques, pages 43–54, 1996. 2, 4
+[21] Michelle Guo, Alireza Fathi, Jiajun Wu, and Thomas
+Funkhouser. Object-centric neural scene rendering. arXiv
+preprint arXiv:2012.08503, 2020. 1
+[22] Peter Hedman, Pratul P. Srinivasan, Ben Mildenhall,
+Jonathan T. Barron, and Paul Debevec. Baking neural radiance fields for real-time view synthesis. ICCV, 2021. 2, 3,
+4
+[23] Michitaka Hirose. Virtual reality technology and museum
+exhibit. In International Conference on Virtual Storytelling,
+pages 3–11. Springer, 2005. 1
+[24] Yoonwoo Jeong, Seokjun Ahn, Christopher Choy, Anima
+Anandkumar, Minsu Cho, and Jaesik Park. Self-calibrating
+neural radiance fields. In Proceedings of the IEEE/CVF International Conference on Computer Vision, pages 5846–
+5854, 2021. 1
+[25] Abhishek Kar, Christian Häne, and Jitendra Malik.
+Learning a multi-view stereo machine. arXiv preprint
+arXiv:1708.05375, 2017. 2
+[26] Kiriakos N Kutulakos. Shape from the light field boundary. In Proceedings of IEEE Computer Society Conference
+on Computer Vision and Pattern Recognition, pages 53–59.
+IEEE, 1997. 4
+[27] Kiriakos N Kutulakos and Steven M Seitz. A theory of shape
+by space carving. International journal of computer vision,
+38(3):199–218, 2000. 2, 4
+[28] Aldo Laurentini. The visual hull concept for silhouette-based
+image understanding. IEEE Transactions on pattern analysis
+and machine intelligence, 16(2):150–162, 1994. 2, 3, 4
+[29] Marc Levoy and Pat Hanrahan. Light field rendering. In Proceedings of the 23rd annual conference on Computer graphics and interactive techniques, pages 31–42, 1996. 2
+[30] Yunzhu Li, Shuang Li, Vincent Sitzmann, Pulkit Agrawal,
+and Antonio Torralba. 3d neural scene representations for
+visuomotor control. arXiv preprint arXiv:2107.04004, 2021.
+1
+References
+[1] Michal Adamkiewicz, Timothy Chen, Adam Caccavale,
+Rachel Gardner, Preston Culbertson, Jeannette Bohg, and
+Mac Schwager. Vision-only robot navigation in a neural radiance world. arXiv preprint arXiv:2110.00168, 2021. 1
+[2] Alexander W. Bergman, Petr Kellnhofer, and Gordon Wetzstein. Fast training of neural lumigraph representations using meta learning. In NeurIPS, 2021. 2, 4
+[3] Mark Boss, Raphael Braun, Varun Jampani, Jonathan T. Barron, Ce Liu, and Hendrik P.A. Lensch. Nerd: Neural reflectance decomposition from image collections. In IEEE
+International Conference on Computer Vision (ICCV), 2021.
+1
+[4] Fabio Bruno, Stefano Bruno, Giovanna De Sensi, MariaLaura Luchi, Stefania Mancuso, and Maurizio Muzzupappa.
+From 3d reconstruction to virtual reality: A complete
+methodology for digital archaeological exhibition. Journal
+of Cultural Heritage, 11(1):42–49, 2010. 1
+[5] Chris Buehler, Michael Bosse, Leonard McMillan, Steven
+Gortler, and Michael Cohen. Unstructured lumigraph rendering. SIGGRAPH, 2001. 2
+[6] Eric Chan, Marco Monteiro, Petr Kellnhofer, Jiajun Wu, and
+Gordon Wetzstein. pi-gan: Periodic implicit generative adversarial networks for 3d-aware image synthesis. In arXiv,
+2020. 1
+[7] Anpei Chen, Zexiang Xu, Fuqiang Zhao, Xiaoshuai Zhang,
+Fanbo Xiang, Jingyi Yu, and Hao Su. Mvsnerf: Fast generalizable radiance field reconstruction from multi-view stereo.
+arXiv preprint arXiv:2103.15595, 2021. 3, 4
+[8] Sun Cheng, Sun Min, and Chen Hwann-Tzong. Direct voxel
+grid optimization: Super-fast convergence for radiance fields
+reconstruction. arXiv preprint arXiv:2111.11215, 2021. 3
+[9] Abe Davis, Marc Levoy, and Fredo Durand. Unstructured
+light fields. In Computer Graphics Forum, volume 31, pages
+305–314. Wiley Online Library, 2012. 2
+[10] Paul Debevec, C. J. Taylor, and Jitendra Malik. Modeling and rendering architecture from photographs: a hybrid
+geometry- and image-based approach. SIGGRAPH, 1992. 2
+[11] Frank Dellaert and Lin Yen-Chen. Neural volume rendering:
+Nerf and beyond. arXiv preprint arXiv:2101.05204, 2020. 3
+[12] Boyang Deng, Jonathan T. Barron, and Pratul P. Srinivasan.
+JaxNeRF: an efficient JAX implementation of NeRF, 2020.
+2, 5, 6
+[13] Kangle Deng, Andrew Liu, Jun-Yan Zhu, and Deva Ramanan. Depth-supervised nerf: Fewer views and faster training for free. arXiv preprint arXiv:2107.02791, 2021. 3, 4
+[14] SM Ali Eslami, Danilo Jimenez Rezende, Frederic Besse,
+Fabio Viola, Ari S Morcos, Marta Garnelo, Avraham Ruderman, Andrei A Rusu, Ivo Danihelka, Karol Gregor,
+et al. Neural scene representation and rendering. Science,
+360(6394):1204–1210, 2018. 3
+9
+In Proc. IEEE Conf. on Computer Vision and Pattern Recognition (CVPR), 2021. 1
+[46] Michael Niemeyer, Lars Mescheder, Michael Oechsle, and
+Andreas Geiger. Differentiable volumetric rendering: Learning implicit 3d representations without 3d supervision. In
+Proceedings of the IEEE/CVF Conference on Computer Vision and Pattern Recognition, pages 3504–3515, 2020. 3
+[47] Atsuhiro Noguchi, Xiao Sun, Stephen Lin, and Tatsuya
+Harada. Neural articulated radiance field. In International
+Conference on Computer Vision, 2021. 1
+[48] Michael Oechsle, Songyou Peng, and Andreas Geiger.
+Unisurf: Unifying neural implicit surfaces and radiance
+fields for multi-view reconstruction. In International Conference on Computer Vision (ICCV), 2021. 3
+[49] Julian Ost, Fahim Mannan, Nils Thuerey, Julian Knodt, and
+Felix Heide. Neural scene graphs for dynamic scenes. In
+Proceedings of the IEEE/CVF Conference on Computer Vision and Pattern Recognition (CVPR), pages 2856–2865,
+June 2021. 1
+[50] Keunhong Park, Utkarsh Sinha, Peter Hedman, Jonathan T.
+Barron, Sofien Bouaziz, Dan B Goldman, Ricardo MartinBrualla, and Steven M. Seitz. Hypernerf: A higherdimensional representation for topologically varying neural
+radiance fields. arXiv preprint arXiv:2106.13228, 2021. 1
+[51] Sida Peng, Junting Dong, Qianqian Wang, Shangzhan
+Zhang, Qing Shuai, Xiaowei Zhou, and Hujun Bao. Animatable neural radiance fields for modeling dynamic human
+bodies. In ICCV, 2021. 1
+[52] Martin Piala and Ronald Clark. Terminerf: Ray termination prediction for efficient neural rendering. arXiv preprint
+arXiv:2111.03643, 2021. 3, 4
+[53] Daniel Rebain, Wei Jiang, Soroosh Yazdani, Ke Li,
+Kwang Moo Yi, and Andrea Tagliasacchi. Derf: Decomposed radiance fields. In Proceedings of the IEEE/CVF Conference on Computer Vision and Pattern Recognition, pages
+14153–14161, 2021. 3
+[54] Christian Reiser, Songyou Peng, Yiyi Liao, and Andreas
+Geiger. Kilonerf: Speeding up neural radiance fields with
+thousands of tiny mlps. arXiv, 2021. 2, 3, 4
+[55] Johannes Lutz Schönberger and Jan-Michael Frahm.
+Structure-from-motion revisited. In Conference on Computer Vision and Pattern Recognition (CVPR), 2016. 2, 3,
+5
+[56] Johannes Lutz Schönberger, Enliang Zheng, Marc Pollefeys,
+and Jan-Michael Frahm. Pixelwise view selection for unstructured multi-view stereo. In European Conference on
+Computer Vision (ECCV), 2016. 2, 3, 5
+[57] Katja Schwarz, Yiyi Liao, Michael Niemeyer, and Andreas
+Geiger. Graf: Generative radiance fields for 3d-aware image
+synthesis. In Advances in Neural Information Processing
+Systems (NeurIPS), 2020. 1
+[58] Steven M Seitz, Brian Curless, James Diebel, Daniel
+Scharstein, and Richard Szeliski. A comparison and evaluation of multi-view stereo reconstruction algorithms. In 2006
+IEEE computer society conference on computer vision and
+pattern recognition (CVPR’06), volume 1, pages 519–528.
+IEEE, 2006. 4
+[31] Zhengqi Li, Simon Niklaus, Noah Snavely, and Oliver Wang.
+Neural scene flow fields for space-time view synthesis of dynamic scenes. https://arxiv.org/abs/2011.13084, 2020. 1
+[32] Chen-Hsuan Lin, Wei-Chiu Ma, Antonio Torralba, and Simon Lucey. Barf: Bundle-adjusting neural radiance fields. In
+IEEE International Conference on Computer Vision (ICCV),
+2021. 1
+[33] Shanchuan Lin, Andrey Ryabtsev, Soumyadip Sengupta, Brian Curless, Steve Seitz, and Ira KemelmacherShlizerman. Real-time high-resolution background matting.
+arXiv, pages arXiv–2012, 2020. 2
+[34] D. B.* Lindell, J. N. P.* Martel, and G. Wetzstein. Autoint:
+Automatic integration for fast neural volume rendering. In
+Proc. CVPR, 2021. 2, 3, 4
+[35] Lingjie Liu, Jiatao Gu, Kyaw Zaw Lin, Tat-Seng Chua, and
+Christian Theobalt. Neural sparse voxel fields. NeurIPS,
+2020. 2, 4, 5, 8
+[36] Yuan Liu, Sida Peng, Lingjie Liu, Qianqian Wang, Peng
+Wang, Theobalt Christian, Xiaowei Zhou, and Wenping
+Wang. Neural rays for occlusion-aware image-based rendering. arXiv preprint arXiv:2107.13421, 2021. 3
+[37] Stephen Lombardi, Tomas Simon, Jason Saragih, Gabriel
+Schwartz, Andreas Lehrmann, and Yaser Sheikh. Neural volumes: Learning dynamic renderable volumes from images.
+ACM Trans. Graph., 38(4):65:1–65:14, July 2019. 2
+[38] Quan Meng, Anpei Chen, Haimin Luo, Minye Wu, Hao Su,
+Lan Xu, Xuming He, and Jingyi Yu. GNeRF: GAN-based
+Neural Radiance Field without Posed Camera. In Proceedings of the IEEE/CVF International Conference on Computer Vision (ICCV), 2021. 1
+[39] Michael Goesele Michael Waechter, Nils Moehrle. Let
+there be color! Large-scale texturing of 3D reconstructions.
+ECCV, 2014. 2
+[40] Ben Mildenhall, Pratul P. Srinivasan, Rodrigo Ortiz-Cayon,
+Nima Khademi Kalantari, Ravi Ramamoorthi, Ren Ng, and
+Abhishek Kar. Local light field fusion: Practical view synthesis with prescriptive sampling guidelines. ACM Transactions on Graphics (TOG), 2019. 2
+[41] Ben Mildenhall, Pratul P. Srinivasan, Matthew Tancik,
+Jonathan T. Barron, Ravi Ramamoorthi, and Ren Ng. Nerf:
+Representing scenes as neural radiance fields for view synthesis. In ECCV, 2020. 1, 2, 3, 4, 5, 6
+[42] Anand Nayyar, Bandana Mahapatra, D Le, and G Suseendran. Virtual reality (vr) & augmented reality (ar) technologies for tourism and hospitality industry. International journal of engineering & technology, 7(2.21):156–160, 2018. 1
+[43] T. Neff, P. Stadlbauer, M. Parger, A. Kurz, J. H. Mueller,
+C. R. A. Chaitanya, A. Kaplanyan, and M. Steinberger. Donerf: Towards real-time rendering of compact neural radiance
+fields using depth oracle networks. Computer Graphics Forum, 40(4):45–59, 2021. 3, 4
+[44] Thu Nguyen-Phuoc, Chuan Li, Lucas Theis, Christian
+Richardt, and Yong-Liang Yang. Hologan: Unsupervised
+learning of 3d representations from natural images. In The
+IEEE International Conference on Computer Vision (ICCV),
+Nov 2019. 3
+[45] Michael Niemeyer and Andreas Geiger. Giraffe: Representing scenes as compositional generative neural feature fields.
+10
+Learning multi-view image-based rendering. In CVPR, 2021.
+3
+[75] ZiYun Wang, Liao Wang, Fuqiang Zhao, Minye Wu, Lan
+Xu, and Jingyi Yu. Mirrornerf: One-shot neural portrait radiance field from multi-mirror catadioptric imaging. 2021
+IEEE International Conference on Computational Photography (ICCP), pages 1–12, 2021. 3
+[76] Matthew J Westoby, James Brasington, Niel F Glasser,
+Michael J Hambrey, and Jennifer M Reynolds. ‘structurefrom-motion’photogrammetry: A low-cost, effective tool
+for geoscience applications. Geomorphology, 179:300–314,
+2012. 2, 5
+[77] Suttisak Wizadwongsa, Pakkapon Phongthawee, Jiraphon
+Yenphraphai, and Supasorn Suwajanakorn. Nex: Real-time
+view synthesis with neural basis expansion. In IEEE Conference on Computer Vision and Pattern Recognition (CVPR),
+2021. 1
+[78] Daniel Wood, Daniel Azuma, Wyvern Aldinger, Brian Curless, Tom Duchamp, David Salesin, and Werner Stuetzle.
+Surface light fields for 3D photography. SIGGRAPH, 2000.
+2
+[79] Bangbang Yang, Yinda Zhang, Yinghao Xu, Yijin Li, Han
+Zhou, Hujun Bao, Guofeng Zhang, and Zhaopeng Cui.
+Learning object-compositional neural radiance field for editable scene rendering. In International Conference on Computer Vision (ICCV), October 2021. 1
+[80] Lior Yariv, Jiatao Gu, Yoni Kasten, and Yaron Lipman.
+Volume rendering of neural implicit surfaces.
+CoRR,
+abs/2106.12052, 2021. 2
+[81] Lior Yariv, Jiatao Gu, Yoni Kasten, and Yaron Lipman.
+Volume rendering of neural implicit surfaces.
+CoRR,
+abs/2106.12052, 2021. 3
+[82] Lin Yen-Chen, Pete Florence, Jonathan T. Barron, Alberto
+Rodriguez, Phillip Isola, and Tsung-Yi Lin. iNeRF: Inverting neural radiance fields for pose estimation. In IEEE/RSJ
+International Conference on Intelligent Robots and Systems
+(IROS), 2021. 1
+[83] Wang Yifan, Shihao Wu, Cengiz Oztireli, and Olga SorkineHornung. Iso-points: Optimizing neural implicit surfaces
+with hybrid representations. In CVPR, 2020. 3
+[84] Alex Yu, Ruilong Li, Matthew Tancik, Hao Li, Ren Ng, and
+Angjoo Kanazawa. PlenOctrees for real-time rendering of
+neural radiance fields. In ICCV, 2021. 2, 3, 4
+[85] Alex Yu, Vickie Ye, Matthew Tancik, and Angjoo Kanazawa.
+pixelNeRF: Neural radiance fields from one or few images.
+In CVPR, 2021. 3
+[86] Kai Zhang, Gernot Riegler, Noah Snavely, and Vladlen
+Koltun. Nerf++: Analyzing and improving neural radiance
+fields. arXiv:2010.07492, 2020. 2
+[87] Xiuming Zhang, Pratul P Srinivasan, Boyang Deng, Paul Debevec, William T Freeman, and Jonathan T Barron. NeRFactor: Neural Factorization of Shape and Reflectance Under an
+Unknown Illumination. arXiv preprint arXiv:2106.01970,
+2021. 1
+[88] Tinghui Zhou, Richard Tucker, John Flynn, Graham Fyffe,
+and Noah Snavely.
+Stereo magnification: Learning
+view synthesis using multiplane images. arXiv preprint
+arXiv:1805.09817, 2018. 2
+[59] Steven M Seitz and Charles R Dyer. Photorealistic scene
+reconstruction by voxel coloring. International Journal of
+Computer Vision, 35(2):151–173, 1999. 2, 4
+[60] Ben Semerjian. A new variational framework for multiview
+surface reconstruction. In European Conference on Computer Vision, pages 719–734. Springer, 2014. 4
+[61] Pratul P. Srinivasan, Boyang Deng, Xiuming Zhang,
+Matthew Tancik, Ben Mildenhall, and Jonathan T. Barron.
+Nerv: Neural reflectance and visibility fields for relighting
+and view synthesis. In CVPR, 2021. 1
+[62] Edgar Sucar, Shikun Liu, Joseph Ortiz, and Andrew Davison. iMAP: Implicit mapping and positioning in real-time.
+In Proceedings of the International Conference on Computer
+Vision (ICCV), 2021. 1
+[63] Tiancheng Sun, Kai-En Lin, Sai Bi, Zexiang Xu, and Ravi
+Ramamoorthi. Nelf: Neural light-transport field for portrait
+view synthesis and relighting. In Eurographics Symposium
+on Rendering, 2021. 3
+[64] Yanan Sun, Chi-Keung Tang, and Yu-Wing Tai. Semantic
+image matting. In Proceedings of the IEEE Conference on
+Computer Vision and Pattern Recognition, 2021. 2
+[65] Richard Szeliski. Rapid octree construction from image sequences. CVGIP: Image understanding, 58(1):23–32, 1993.
+4
+[66] Matthew Tancik, Ben Mildenhall, Terrance Wang, Divi
+Schmidt, Pratul P. Srinivasan, Jonathan T. Barron, and Ren
+Ng. Learned initializations for optimizing coordinate-based
+neural representations. In CVPR, 2021. 2, 3
+[67] Edgar Tretschk, Ayush Tewari, Vladislav Golyanik, Michael
+Zollhöfer, Christoph Lassner, and Christian Theobalt. Nonrigid neural radiance fields: Reconstruction and novel view
+synthesis of a dynamic scene from monocular video. In IEEE
+International Conference on Computer Vision (ICCV). IEEE,
+2021. 1
+[68] Alex Trevithick and Bo Yang. GRF: Learning a general radiance field for 3d scene representation and rendering. arXiv,
+2021. 1, 2, 3
+[69] Richard Tucker and Noah Snavely. Single-view view synthesis with multiplane images. In The IEEE Conference
+on Computer Vision and Pattern Recognition (CVPR), June
+2020. 2
+[70] Shubham Tulsiani, Tinghui Zhou, Alexei A Efros, and Jitendra Malik. Multi-view supervision for single-view reconstruction via differentiable ray consistency. In Proceedings of the IEEE conference on computer vision and pattern
+recognition, pages 2626–2634, 2017. 2
+[71] Jayaram K Udupa and Gabor T Herman. 3D imaging in
+medicine. CRC press, 1999. 1
+[72] Krzysztof Walczak, Wojciech Cellary, and Martin White.
+Virtual museum exbibitions. Computer, 39(3):93–95, 2006.
+1
+[73] Peng Wang, Lingjie Liu, Yuan Liu, Christian Theobalt, Taku
+Komura, and Wenping Wang. Neus: Learning neural implicit
+surfaces by volume rendering for multi-view reconstruction.
+NeurIPS, 2021. 3
+[74] Qianqian Wang, Zhicheng Wang, Kyle Genova, Pratul Srinivasan, Howard Zhou, Jonathan T. Barron, Ricardo MartinBrualla, Noah Snavely, and Thomas Funkhouser. Ibrnet:
+11
+A. Additional Experimental Setups
+This table shows hyper-parameters we used for experiments. For NSVF and PlenOctrees, we ran the official implementation as is.
+Method
+batch size
+max iteration
+emb dim
+(Jax)NeRF
+VaxNeRF
+NSVF
+PlenOctrees
+4,096
+4,096
+4,096
+1,024
+1,000,000
+1,000,000
+150,000
+2,000,000
+10
+10
+10
+10
+Table 4. Hyper-parameters of each method.
+B. Additional Experimental Results
+12
+Algorithm 1 NeRF and VaxNeRF (w/o hierarchical sampling). Added codes to NeRF and removed codes from NeRF
+Require: dataset of rays and corresponding color D
+1: while not done do
+2:
+Sample batch of rays and color {{oi , di }, Ci } ∼ D
+(c)
+3:
+Coarse sampling points along the ray xi ⇐ coarse sample(oi , di )
+(c)
+(c)
+(c)
+4:
+Evaluate color and density at each point ci , σi = MLPθc (xi , di )
+
+(c)
+(c)
+(c)
+MLPθc (xi , di ) (xi ∈ V)
+5:
+Evaluate color and density at each point ci , σi ⇐
+0
+(xi ∈
+/ V)
+(c)
+(c)
+(c)
+(c)
+Compute pixel value using ray marching Ĉi ⇐ ray marching(xi , ci , σi )
+(f )
+7:
+fine sampling points along the ray xi ⇐ fine sample(oi , di )
+(f )
+(f )
+(f )
+8:
+Evaluate color and density at each point ci , σi ⇐ MLPθf (xi , di )
+(f )
+(f ) (f )
+(f )
+9:
+Compute pixel value using ray marching Ĉi ⇐ ray marching(xi , ci , σi )
+P
+P
+(c) 2
+(f ) 2
+10:
+Compute loss for each pixel Lc =
+Ci − Ĉi 2 , Lf =
+Ci − Ĉi 2
+11:
+Update parameters θc , θf using gradient descent
+12: end while
+6:
+Figure 6. SSIM comparison on NeRF-Synthetic dataset
+13
+Synthetic NSVF Dataset
+Method
+c64f64
+c64f128
+vax c64f64
+vax c64f128
+vax c400
+vax c600
+vax c800
+nsvf
+0.5h
+PSNR SSIM
+PSNR
+SSIM
+PSNR
+SSIM
+PSNR
+SSIM
+12h
+PSNR SSIM
+36h
+PSNR SSIM
+28.05
+27.3
+30.61
+30.21
+31.22
+31.33
+31.19
+26.68
+29.32
+29.06
+31.58
+31.36
+32.16
+32.33
+32.28
+28.41
+0.936
+0.933
+0.955
+0.953
+0.957
+0.959
+0.959
+0.923
+31.03
+31.16
+32.8
+32.89
+32.95
+33.56
+33.71
+29.82
+0.952
+0.953
+0.964
+0.964
+0.963
+0.967
+0.968
+0.939
+32.06
+32.17
+33.05
+33.42
+33.02
+33.77
+34.08
+31.03
+0.959
+0.96
+0.966
+0.967
+0.964
+0.968
+0.97
+0.952
+32.74
+33.03
+33.07
+33.57
+33.02
+33.79
+34.15
+31.92
+32.98
+33.52
+33.07
+33.58
+33.02
+33.79
+34.15
+32.68
+0.922
+0.916
+0.947
+0.943
+0.951
+0.952
+0.95
+0.902
+1h
+best second-best third-best
+3h
+6h
+0.964
+0.965
+0.966
+0.968
+0.964
+0.969
+0.971
+0.962
+Table 5. Quantitative results on NSVF-Synthetic dataset. Each value is the average of the eight scenes.
+Figure 7. PSNR comparison on NSVF-Synthetic dataset
+14
+0.965
+0.968
+0.966
+0.968
+0.964
+0.969
+0.971
+0.97
+Figure 8. SSIM comparison on NSVF-Synthetic dataset
+15

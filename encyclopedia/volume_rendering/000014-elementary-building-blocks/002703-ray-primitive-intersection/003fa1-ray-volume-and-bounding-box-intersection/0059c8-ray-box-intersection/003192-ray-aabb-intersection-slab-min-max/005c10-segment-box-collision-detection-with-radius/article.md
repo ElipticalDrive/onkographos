@@ -1,0 +1,139 @@
+# Segment-Box Collision Detection with Radius
+
+
+## Overview
+Determines if a line segment defined by endpoints $a$ and $b$ intersects an axis-aligned box defined by lower corner $lo$ and upper corner $hi$, considering a spherical radius $r$ around the segment [G]. It sets itself apart from standard ray-box intersection by treating the segment as a capsule (cylinder with hemispherical caps) rather than an infinitely thin line, allowing for collision detection with thickness [G].
+
+## How it works
+**Inputs:**
+- Segment endpoints: $a, b \in \mathbb{R}^3$ [G]
+- Box bounds: $lo, hi \in \mathbb{R}^3$ (where $lo_i \le hi_i$ for all axes $i$) [G]
+- Radius: $r \in \mathbb{R}$ [G]
+
+**Outputs:**
+- Boolean: `true` if the segment-box collision occurs, `false` otherwise.
+
+**Data Structures:**
+- `times`: Array of 8 floats, initialized with $\{0, 1, 0, 0, 0, 0, 0, 0\}$.
+- `count`: Integer, initialized to 2.
+
+**Steps:**
+1. **Delta Calculation:** Compute $\delta = b - a$.
+2. **Quick Rejection:** Compute the separation vector $s = \max(lo - \max(a, b), \min(a, b) - hi, 0)$. If $\|s\|^2 \ge r^2$, return `false`. Here, $\max(a, b)$ and $\min(a, b)$ are component-wise maximum and minimum operations.
+3. **Plane Intersection Times:** For each axis $i \in \{0, 1, 2\}$:
+   - If $|\delta_i| > 10^{-12}$, calculate intersection times with planes $lo_i$ and $hi_i$:
+     $$t_{lo} = \frac{lo_i - a_i}{\delta_i}, \quad t_{hi} = \frac{hi_i - a_i}{\delta_i}$$
+   - If $0 < t < 1$, append $t$ to `times` and increment `count`.
+4. **Sorting:** Sort the first `count` elements of the `times` array in ascending order.
+5. **Interval Checking:** Iterate $i$ from 1 to `count` - 1:
+   - Let $t_{left} = \text{times}[i-1]$ and $t_{right} = \text{times}[i]$.
+   - Calculate midpoint parameter $t_{mid} = (t_{left} + t_{right}) \times 0.5$.
+   - Calculate midpoint point $p_{mid} = a + \delta \times t_{mid}$.
+   - Calculate clamped point $p_{bound} = \text{clamp}(p_{mid}, lo, hi)$ (component-wise clamp).
+   - Calculate slope vector $v = \delta \times \text{notEqual}(p_{mid}, p_{bound})$.
+   - Calculate numerator $N = v \cdot (a - p_{bound})$ and denominator $D = v \cdot v$.
+   - If $D > 0$, calculate $t_{opt} = \text{clamp}(-N / D, t_{left}, t_{right})$. Else, $t_{opt} = t_{mid}$.
+   - Calculate candidate point $p_{cand} = a + \delta \times t_{opt}$.
+   - Calculate distance vector $d = p_{cand} - \text{clamp}(p_{cand}, lo, hi)$.
+   - If $\|d\|^2 < r^2$, return `true`.
+6. **Final Result:** If the loop completes without returning `true`, return `false`.
+
+**Pitfalls:**
+- Division by zero is avoided by skipping plane intersection calculation if $|\delta_i| \le 10^{-12}$.
+- If the denominator $D$ is zero or negative in the optimization step, the midpoint $t_{mid}$ is used as the fallback $t$ value.
+
+> **Unverified code.** The code below did not pass a test run against a reference implementation, or no test fits it, so it may contain errors.
+
+```python
+def segment_box_collision_radius(a, b, lo, hi, r):
+    """
+    Determines if segment a-b intersects box lo-hi with radius r.
+    a, b, lo, hi are tuples/lists of 3 floats.
+    """
+    # 1. Delta
+    delta = [b[i] - a[i] for i in range(3)]
+    
+    # 2. Quick Rejection
+    max_ab = [max(a[i], b[i]) for i in range(3)]
+    min_ab = [min(a[i], b[i]) for i in range(3)]
+    
+    separation = []
+    for i in range(3):
+        val1 = lo[i] - max_ab[i]
+        val2 = min_ab[i] - hi[i]
+        separation.append(max(val1, val2, 0.0))
+        
+    dot_sep = sum(s * s for s in separation)
+    if dot_sep >= r * r:
+        return False
+        
+    # 3. Plane Intersection Times
+    times = [0.0, 1.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0]
+    count = 2
+    epsilon = 1e-12
+    
+    for i in range(3):
+        if abs(delta[i]) > epsilon:
+            t_lo = (lo[i] - a[i]) / delta[i]
+            if 0 < t_lo < 1:
+                times[count] = t_lo
+                count += 1
+            t_hi = (hi[i] - a[i]) / delta[i]
+            if 0 < t_hi < 1:
+                times[count] = t_hi
+                count += 1
+                
+    # 4. Sort first count elements
+    times[:count] = sorted(times[:count])
+    
+    # 5. Interval Checking
+    for i in range(1, count):
+        t_left = times[i-1]
+        t_right = times[i]
+        t_mid = (t_left + t_right) * 0.5
+        
+        p_mid = [a[j] + delta[j] * t_mid for j in range(3)]
+        p_bound = [max(lo[j], min(p_mid[j], hi[j])) for j in range(3)]
+        
+        slope = []
+        for j in range(3):
+            if p_mid[j] != p_bound[j]:
+                slope.append(delta[j])
+            else:
+                slope.append(0.0)
+                
+        a_minus_p_bound = [a[j] - p_bound[j] for j in range(3)]
+        numerator = sum(slope[j] * a_minus_p_bound[j] for j in range(3))
+        denominator = sum(s * s for s in slope)
+        
+        if denominator > 0:
+            t_val = -numerator / denominator
+            t_opt = max(t_left, min(t_val, t_right))
+        else:
+            t_opt = t_mid
+            
+        p_cand = [a[j] + delta[j] * t_opt for j in range(3)]
+        p_cand_clamped = [max(lo[j], min(p_cand[j], hi[j])) for j in range(3)]
+        distance = [p_cand[j] - p_cand_clamped[j] for j in range(3)]
+        
+        dist_sq = sum(d * d for d in distance)
+        if dist_sq < r * r:
+            return True
+            
+    return False
+```
+
+## Subtopics
+
+### Ray Corridor Tracing
+A method to verify if a straight-line path between two points is clear for an agent of a given radius. It uses a central ray and four corner rays offset by the agent radius to form a corridor [S2, unofficial]. It retrieves volume navigation data from the segment's chunk actor; if null, returns false [S2, unofficial]. It traces the center ray from `Segment.SegmentStart` to `Segment.SegmentEnd`; if blocked, returns false [S2, unofficial]. It calculates basis vectors for the corridor: `Direction = (Segment.SegmentEnd - Segment.SegmentStart).GetSafeNormal()`, `Right = CrossProduct(Direction, UpVector).GetSafeNormal()`, `Up = CrossProduct(Direction, Right).GetSafeNormal()` [S2, unofficial]. It defines 4 corner offsets as normalized vector sums of `Right` and `Up` (with signs +/−), scaled by `AgentRadius`: `(Right+Up)`, `(Right-Up)`, `(-Right+Up)`, `(-Right-Up)` [S2, unofficial]. It iterates through the 4 corner offsets, tracing a ray from `(Segment.SegmentStart + Offset)` to `(Segment.SegmentEnd + Offset)` for each; if any corner ray is blocked, returns false [S2, unofficial]. If all 5 rays (1 center + 4 corners) are clear, returns true [S2, unofficial].
+
+## Operating characteristics
+Not given in the sources.
+
+## Background
+Not given in the sources.
+
+## Sources
+[S1] MrNeRF/LichtFeld-Studio, https://github.com/MrNeRF/LichtFeld-Studio, fetched 2026-10-27 (unofficial)
+[S2] darbycostello/Nav3D, https://github.com/darbycostello/Nav3D, fetched 2026-10-26 (unofficial)

@@ -1,0 +1,220 @@
+# FeCoSplat
+
+Also called: Feedback-Guided Compression for Feed-Forward 3D Gaussian Splatting
+
+## Overview
+FeCoSplat is a two-stage feature compression framework for feed-forward 3D Gaussian Splatting (3DGS) that decouples compression into multi-view feature coding and reconstruction-conditioned feedback coding [S1, unofficial]. It allows the receiver to decode directly in the compact feature-state domain without reconstructing intermediate Gaussians, thereby avoiding the heavy computational overhead of image compression and the irregularity challenges of explicit Gaussian compression [S1, unofficial]. Unlike [CodecSplat](19101-feed-forward-3dgs-compression.md) which uses a single coding stage, FeCoSplat uses rendered reconstruction feedback to guide a second-stage refinement, maintaining an implicit Gaussian state for lightweight receiver-side decoding [S1, unofficial].
+
+## How it works
+**Inputs and Outputs:**
+*   **Inputs:** $N$ posed images $I = \{I_i\}_{i=1}^N$ and their camera poses $P = \{P_i\}_{i=1}^N$.
+*   **Outputs:** Three bitstreams: $B_1$ (first-stage features), $B_2$ (second-stage feedback features), and $B_{cam}$ (lossless camera parameters) [S1, unofficial].
+
+**Data Structures:**
+*   **Multi-view Features ($F_1, F_2$):** Tensors of shape $\mathbb{R}^{N \times C \times \frac{H}{4} \times \frac{W}{4}}$, where $N$ is the number of views, $C$ is channels, and $H, W$ are input image dimensions [S1, unofficial].
+*   **Implicit Gaussian State ($S$):** Learnable tensor. Initial state $S_0 \in \mathbb{R}^{1 \times C \times 1 \times 1}$, broadcast to match spatial/view dimensions of $F$ during concatenation [S1, unofficial].
+*   **Latents ($y, \hat{y}$):** Compact latent representations resulting from the transformation of features and state [S1, unofficial].
+*   **Hyper-latents ($\hat{z}$):** Side information for entropy modeling [S1, unofficial].
+
+**Modules:**
+*   **$E_{mv}$ (Multi-view Feature Extractor):** Consists of a monocular transformer, multi-view transformer, and cross-view U-Net [S1, unofficial].
+*   **$E_{fb}$ (Feedback Feature Extractor):** Applies PixelUnshuffle and extracts low-resolution features from concatenated original and rendered images [S1, unofficial].
+*   **$g_a$ (Analysis Transform):** Transforms concatenated features and state into compact latents [S1, unofficial].
+*   **$g_s$ (Synthesis Transform):** Transforms decoded latents back to feature space [S1, unofficial].
+*   **$U$ (State Update Module):** Updates the implicit Gaussian state using decoded latents [S1, unofficial].
+*   **$P$ (Gaussian Predictor):** Maps the implicit state to explicit 3D Gaussian primitives [S1, unofficial].
+*   **$\phi$ (Modulation Network):** Predicts AdaLN parameters from the rate-distortion trade-off parameter $\lambda$ [S1, unofficial].
+
+**Numbered Steps:**
+
+1.  **Stage 1: Multi-view Feature Coding**
+    1.  Extract multi-view features $F_1$ from input images $I$ and poses $P$ using $E_{mv}$:
+        $$F_1 = E_{mv}(I, P)$$
+    2.  Concatenate $F_1$ with the initial implicit Gaussian state $S_0$ (broadcasted to match $F_1$'s dimensions) and transform into compact latent $y_1$:
+        $$y_1 = g_a(\text{concat}(F_1, S_0))$$
+    3.  **Quantization:** During training, perturb $y_1$ with additive uniform noise to approximate quantization, yielding $\hat{y}_1$. During inference, replace noise with a `Round` operation [S1, unofficial].
+    4.  **Entropy Modeling:** Model the hyper-latent $\hat{z}_1$ with a factorized prior. Use a quadtree entropy model to predict Gaussian distribution parameters over $\hat{y}_1$ conditioned on $\hat{z}_1$. Calculate the rate:
+        $$R_1 = R(\hat{y}_1) + R(\hat{z}_1)$$
+    5.  Encode quantized latents into the first-stage bitstream $B_1$. At the receiver, recover $\hat{y}_1$ by entropy decoding $B_1$ [S1, unofficial].
+    6.  **State Update:** Transform $\hat{y}_1$ via synthesis transform $g_s$ and incorporate into $S_0$ using state update module $U$:
+        $$S_1 = U(\text{concat}(S_0, g_s(\hat{y}_1)))$$
+    7.  **Intermediate Gaussian Prediction:** Predict intermediate Gaussians $G_1$ from $S_1$ using Gaussian predictor $P$:
+        $$G_1 = P(S_1)$$
+        *   $P$ operates on a low-resolution 2D feature grid. It predicts per-view depth maps from $S_1$, back-projects features to 3D, uses KNN attention for geometry-aware aggregation, estimates attributes, and rearranges via PixelShuffle to produce pixel-aligned 3D Gaussians at half input resolution (one Gaussian per $2 \times 2$ region) [S1, unofficial].
+
+2.  **Stage 2: Feedback-Guided Feature Coding**
+    1.  **Feedback Generation (Sender Only):** Render $G_1$ back to input viewpoints using camera parameters $P$ to get rendered observations $\hat{I}_1$:
+        $$\hat{I}_1 = \text{Render}(G_1, P)$$
+    2.  Extract feedback features $F_2$ using $E_{fb}$ by concatenating original images $I$ and rendered observations $\hat{I}_1$:
+        $$F_2 = E_{fb}(\text{concat}(I, \hat{I}_1))$$
+        *   $E_{fb}$ applies PixelUnshuffle and extracts low-resolution features [S1, unofficial].
+    3.  Transform $F_2$ and current state $S_1$ into latent $y_2$:
+        $$y_2 = g_a(\text{concat}(F_2, S_1))$$
+    4.  **Quantization and Entropy Modeling:** Quantize and model $y_2$ and hyper-latent $\hat{z}_2$ using the same scheme as Stage 1 to obtain rate $R_2$. Encode into second-stage bitstream $B_2$ [S1, unofficial].
+    5.  **Receiver Decoding:** Decode $\hat{y}_2$ from $B_2$. Integrate into $S_1$ using shared state update module $U$:
+        $$S_2 = U(\text{concat}(S_1, g_s(\hat{y}_2)))$$
+    6.  **Final Gaussian Prediction:** Predict final Gaussians $G_2$ from $S_2$ using shared Gaussian predictor $P$:
+        $$G_2 = P(S_2)$$
+
+3.  **Variable-Rate Coding**
+    *   Condition each 2D block on the rate-distortion trade-off parameter $\lambda$ using Adaptive Layer Normalization (AdaLN) [S1, unofficial].
+    *   Predict modulation parameters $\gamma$ and $\beta$ from $\lambda$ using lightweight network $\phi$:
+        $$(\gamma, \beta) = \phi(\log \lambda)$$
+    *   Modulate normalized feature $X$:
+        $$\text{AdaLN}(X, \lambda) = \gamma \odot \text{LN}(X) + \beta$$
+    *   $\lambda$ is sampled from a log-uniform distribution during training: $[10^{-5}, 10^{-2}]$ for RealEstate10K and $[10^{-5}, 10^{-3}]$ for DL3DV [S1, unofficial].
+
+**Pseudocode:**
+
+> **Unverified code.** The code below did not pass a test run against a reference implementation, or no test fits it, so it may contain errors.
+
+```python
+import torch
+import torch.nn as nn
+import torch.nn.functional as F
+
+class FeCoSplat:
+    def __init__(self, num_views, channels, height, width):
+        self.num_views = num_views
+        self.channels = channels
+        self.height = height
+        self.width = width
+        
+        # Modules
+        self.Emv = MultiViewFeatureExtractor() # Monocular + Multi-view Transformer + Cross-view U-Net
+        self.Efb = FeedbackFeatureExtractor()  # PixelUnshuffle + Feature Extraction
+        self.ga = AnalysisTransform()          # Transforms concat(F, S) -> y
+        self.gs = SynthesisTransform()         # Transforms y -> feature space
+        self.U = StateUpdateModule()           # Updates S
+        self.P = GaussianPredictor()           # Maps S -> G
+        self.phi = ModulationNetwork()         # lambda -> (gamma, beta)
+        
+        # Initial implicit Gaussian state
+        self.S0 = nn.Parameter(torch.randn(1, channels, 1, 1))
+        
+        # Loss weight
+        self.beta_lpipss = 0.05
+
+    def stage1_encode(self, I, P, lambda_val):
+        # 1. Extract features
+        F1 = self.Emv(I, P) # Shape: [N, C, H/4, W/4]
+        
+        # 2. Transform to latent
+        S0_broadcast = self.S0.expand_as(F1)
+        y1 = self.ga(torch.cat([F1, S0_broadcast], dim=1))
+        
+        # 3. Quantization (Training: noise, Inference: Round)
+        if self.training:
+            y1_noisy = y1 + torch.rand_like(y1) * (1/255.0) # Approximation
+            y1_quant = y1_noisy
+        else:
+            y1_quant = torch.round(y1)
+            
+        # 4. Entropy Coding (Simplified representation)
+        # In practice, this involves quadtree entropy model and hyperprior
+        # Returns bitstream B1 and rate R1
+        B1, R1 = self.entropy_encode(y1_quant)
+        
+        # 5. Decode for State Update (Receiver side would just decode B1)
+        y1_decoded = y1_quant # During training, use quantized value; Inference, decode from B1
+        
+        # 6. Update State
+        y1_synthesized = self.gs(y1_decoded)
+        S1 = self.U(torch.cat([self.S0.expand_as(y1_synthesized), y1_synthesized], dim=1))
+        
+        # 7. Predict Intermediate Gaussians
+        G1 = self.P(S1)
+        
+        return G1, S1, B1, R1
+
+    def stage2_encode(self, I, P, G1, S1, lambda_val):
+        # 1. Render Feedback (Sender Only)
+        I_hat1 = self.render(G1, P)
+        
+        # 2. Extract Feedback Features
+        F2 = self.Efb(torch.cat([I, I_hat1], dim=1)) # Shape: [N, C, H/4, W/4]
+        
+        # 3. Transform to Latent
+        y2 = self.ga(torch.cat([F2, S1], dim=1))
+        
+        # 4. Quantization
+        if self.training:
+            y2_noisy = y2 + torch.rand_like(y2) * (1/255.0)
+            y2_quant = y2_noisy
+        else:
+            y2_quant = torch.round(y2)
+            
+        # 5. Entropy Coding
+        B2, R2 = self.entropy_encode(y2_quant)
+        
+        # 6. Decode for State Update
+        y2_decoded = y2_quant
+        
+        # 7. Update State
+        y2_synthesized = self.gs(y2_decoded)
+        S2 = self.U(torch.cat([S1, y2_synthesized, unofficial], dim=1))
+        
+        # 8. Predict Final Gaussians
+        G2 = self.P(S2)
+        
+        return G2, S2, B2, R2
+
+    def decode(self, B1, B2, P):
+        # Receiver Side: No rendering or feedback extraction needed
+        
+        # 1. Decode Stage 1
+        y1_decoded = self.entropy_decode(B1)
+        y1_synthesized = self.gs(y1_decoded)
+        S1 = self.U(torch.cat([self.S0.expand_as(y1_synthesized), y1_synthesized], dim=1))
+        
+        # 2. Decode Stage 2
+        y2_decoded = self.entropy_decode(B2)
+        y2_synthesized = self.gs(y2_decoded)
+        S2 = self.U(torch.cat([S1, y2_synthesized, unofficial], dim=1))
+        
+        # 3. Predict Final Gaussians
+        G2 = self.P(S2)
+        
+        return G2
+
+    def render(self, G, P):
+        # Differentiable rasterization of 3D Gaussians G with poses P
+        pass
+
+    def compute_loss(self, I_tgt, G, lambda_val):
+        # Variable-rate loss
+        # ... (Implementation details of AdaLN modulation in forward pass)
+        
+        # Rendering Loss
+        I_hat = self.render(G, P_tgt)
+        loss_mse = torch.mean((I_tgt - I_hat) ** 2)
+        loss_lpips = self.lpips_loss(I_tgt, I_hat)
+        
+        total_loss = loss_mse + self.beta_lpipss * loss_lpips
+        return total_loss
+```
+
+**Parameters:**
+*   $\beta$ (LPIPS weight): 0.05 [S1, unofficial].
+*   $\lambda$ (Rate-distortion trade-off): Sampled from log-uniform distribution. RealEstate10K: $[10^{-5}, 10^{-2}]$. DL3DV: $[10^{-5}, 10^{-3}]$ [S1, unofficial].
+*   Receiver Parameters: 3.45M [S1, unofficial].
+
+**Edge Cases and Pitfalls:**
+*   **Receiver Efficiency:** The receiver does not need to reconstruct $G_1$ or render $\hat{I}_1$. Decoding is causal and efficient, relying only on bitstreams $B_1, B_2$ and $B_{cam}$ [S1, unofficial].
+*   **Precision:** Quantization-aware training uses additive uniform noise to approximate quantization. During inference, this is replaced by `Round` [S1, unofficial].
+*   **Resolution:** The Gaussian predictor produces Gaussians at half the input resolution (one Gaussian per $2 \times 2$ region) [S1, unofficial].
+
+## Operating characteristics
+*   **Time Complexity:** Sender-side computation is heavy, involving multi-view feature extraction, two-stage coding, and intermediate rendering. Receiver-side complexity is low, requiring only progressive state updates and a final lightweight conversion [S1, unofficial].
+*   **Memory Complexity:** Peak GPU memory (Sender): 1.316 GiB. Peak GPU memory (Receiver): Not explicitly listed, but implied to be low given the 0.117s latency and 3.45M parameters [S1, unofficial].
+*   **Performance:** Receiver latency: 0.117s [S1, unofficial]. FeCoSplat achieves favorable rate-distortion performance, particularly at low bitrates, compared to baselines like CodecSplat (Sender: 181.73s, Receiver: 0.189s, Sender Mem: 2.065 GiB) [S1, unofficial].
+*   **Strengths:** Balances rate-distortion performance and receiver-side complexity. Avoids challenges of heterogeneous attributes and irregular spatial organization found in explicit Gaussian compression. Avoids execution of the entire feed-forward 3DGS pipeline at the receiver, preventing compression distortion propagation [S1, unofficial].
+*   **Limitations:** Sender-side computation is significant due to intermediate rendering and two-stage coding.
+*   **When to Use:** Compression of feed-forward 3DGS representations (e.g., from MVSplat, LGM) where low receiver-side complexity and good low-bitrate performance are required [S1, unofficial].
+*   **When Not to Use:** When sender-side computational resources are severely constrained, or when real-time bidirectional interaction requiring immediate intermediate state access is needed (though FeCoSplat is designed for one-way transmission).
+
+## Background
+FeCoSplat was proposed to address the limitations of existing feed-forward 3DGS compression methods. Image compression incurs high receiver-side computation and error propagation, while Gaussian compression is challenged by heterogeneous attributes and irregular primitives [S1, unofficial]. Feature compression, as seen in [CodecSplat](19101-feed-forward-3dgs-compression.md), offers a middle ground but lacks reconstruction-aware refinement [S1, unofficial]. FeCoSplat introduces a feedback-guided two-stage coding strategy to improve rate-distortion performance, particularly at low bitrates, while maintaining a lightweight receiver [S1, unofficial]. The method builds on [Feed-Forward 3DGS Compression](19101-feed-forward-3dgs-compression.md) by applying FCGS to compress 3DGS generated by feed-forward models without retraining [S1, unofficial].
+
+## Sources
+[S1] FeCoSplat: Feedback-Guided Compression for Feed-Forward 3D Gaussian Splatting, https://arxiv.org/abs/2609.33330, fetched 2026-10-29 (unofficial)

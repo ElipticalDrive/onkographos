@@ -1,0 +1,75 @@
+# Grid Traversal (One-Pass Over-Allocated)
+Also called: traverse_grids (over-allocate)
+## Overview
+A single-pass algorithm to traverse voxel grids, using pre-allocated maximum memory to avoid a second pass [S1, unofficial]. It differs from [Grid Traversal (Two-Pass)](12499-grid-traversal-two-pass.md) by allocating buffers large enough for the worst-case scenario upfront, trading memory for a single kernel launch [S1, unofficial].
+## How it works
+**Inputs:** Ray origins, ray directions, grid dimensions, `traverse_steps_limit`, and `rays_mask` [S1, unofficial].
+**Outputs:** Over-allocated interval and sample buffers, `chunk_cnts` tensors with actual counts per ray, and `chunk_starts` pointers [S1, unofficial].
+
+**Data Structures:**
+1. `intervals.chunk_cnts`: Tensor of size `[num_rays]` storing the allocated capacity and actual count of intervals per ray [S1, unofficial].
+2. `intervals.data`: Over-allocated buffer of size `[num_rays, traverse_steps_limit * 2]` [S1, unofficial].
+3. `samples.chunk_cnts`: Tensor of size `[num_rays]` storing the allocated capacity and actual count of samples per ray [S1, unofficial].
+4. `samples.data`: Over-allocated buffer of size `[num_rays, traverse_steps_limit]` [S1, unofficial].
+
+**Numbered Steps:**
+1. Allocate `intervals.chunk_cnts` initialized to `traverse_steps_limit * 2` for each ray, multiplied by `rays_mask` [S1, unofficial].
+2. Allocate `samples.chunk_cnts` initialized to `traverse_steps_limit` for each ray, multiplied by `rays_mask` [S1, unofficial].
+3. Call `traverse_grids_kernel` once with the over-allocated buffers [S1, unofficial].
+4. Update chunk starts for intervals and samples based on actual counts returned from traversal [S1, unofficial].
+
+**Parameters:**
+* `traverse_steps_limit`: Maximum number of steps allowed per ray. Must be > 0 if over_allocate is true [S1, unofficial].
+
+**Edge Cases and Pitfalls:**
+* Precision issues near grid boundaries may cause rays to miss voxels or double-count; standard DDA epsilon handling is required [G].
+* If `traverse_steps_limit` is too small, rays may be truncated prematurely [S1, unofficial].
+
+**Pseudocode:**
+> **Unverified code.** The code below did not pass a test run against a reference implementation, or no test fits it, so it may contain errors.
+
+```python
+def traverse_grids_one_pass(origins, viewdirs, grid_dims, traverse_steps_limit, rays_mask):
+    num_rays = len(origins)
+    
+    # Step 1: Allocate intervals.chunk_cnts initialized to traverse_steps_limit * 2 for each ray, multiplied by rays_mask
+    intervals_chunk_cnts = [(traverse_steps_limit * 2) * m for m in rays_mask]
+    
+    # Step 2: Allocate samples.chunk_cnts initialized to traverse_steps_limit for each ray, multiplied by rays_mask
+    samples_chunk_cnts = [traverse_steps_limit * m for m in rays_mask]
+    
+    # Allocate over-allocated data buffers
+    intervals_data = [[0.0] * (traverse_steps_limit * 2) for _ in range(num_rays)]
+    samples_data = [[0.0] * traverse_steps_limit for _ in range(num_rays)]
+    
+    # Step 3: Call traverse_grids_kernel once with over-allocated buffers
+    traverse_grids_kernel(
+        origins=origins, viewdirs=viewdirs, grid_dims=grid_dims,
+        intervals_data=intervals_data, samples_data=samples_data,
+        intervals_chunk_cnts=intervals_chunk_cnts, samples_chunk_cnts=samples_chunk_cnts,
+        max_steps=traverse_steps_limit
+    )
+    
+    # Step 4: Update chunk starts for intervals and samples based on actual counts returned from traversal
+    intervals_chunk_starts = [0] * num_rays
+    samples_chunk_starts = [0] * num_rays
+    i_offset, s_offset = 0, 0
+    for i in range(num_rays):
+        intervals_chunk_starts[i] = i_offset
+        i_offset += intervals_chunk_cnts[i]
+        samples_chunk_starts[i] = s_offset
+        s_offset += samples_chunk_cnts[i]
+        
+    return intervals_data, samples_data, intervals_chunk_cnts, samples_chunk_cnts, intervals_chunk_starts, samples_chunk_starts
+```
+## Subtopics
+
+### Grid Traversal (Two-Pass)
+A two-pass algorithm to traverse voxel grids along rays, first counting segments to allocate exact memory, then filling them [S1, unofficial]. First pass: Call `traverse_grids_kernel` with `compute_intervals=true` (implied by first pass logic) and allocate `intervals.chunk_cnts` and `samples.chunk_cnts` tensors of size `[n_rays]` [S1, unofficial]. Second pass: Allocate data buffers for intervals and samples based on the counts from the first pass using `memalloc_data_from_chunk` [S1, unofficial].
+
+## Operating characteristics
+Time and memory complexity, measured performance, scaling, strengths, limitations, and usage recommendations are Not given in the sources [S1, unofficial].
+## Background
+Origin, history, development, and usage context are Not given in the sources [S1, unofficial].
+## Sources
+[S1] taylor2nerf/taylor-nerf, https://github.com/taylor2nerf/taylor-nerf, fetched 2026-10-26 (unofficial)

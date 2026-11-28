@@ -1,0 +1,450 @@
+--- v002.md
++++ v003.md
+@@ -4,188 +4,294 @@
+ 
+ ## Overview
+-Mixture-of-Experts Implicit Neural Representation (MoE-INR) is an architecture for time-varying volumetric data compression that automatically subdivides spatiotemporal fields and dynamically assigns input coordinates to specialized expert networks [S1]. It solves the limitations of conventional INRs (which struggle with complex features using a single network) and grid-based INRs (which suffer from boundary discontinuities due to manual decomposition) by using a shared encoder to maintain cross-boundary continuity while allowing experts to specialize in distinct subdomains [S1]. Unlike siblings like [MIMO-NeRF-self-R2](11400-mimo-nerf-self-r2.md) which may use multiple networks for different aspects of rendering, MoE-INR specifically targets the compression and representation of scientific volumetric data through a unified framework that can emulate conventional, grid-based, or ensemble INRs by adjusting the number of experts and pre-training schemes [S1].
++Mixture-of-Experts Implicit Neural Representation (MoE-INR) is an architecture for time-varying volumetric data compression that automatically subdivides spatiotemporal fields and dynamically assigns input coordinates to specialized expert networks [S1]. It solves the limitations of conventional INRs (which struggle with complex features using a single network) and grid-based INRs (which suffer from boundary discontinuities due to manual decomposition) by using a shared encoder to maintain cross-boundary continuity while allowing experts to specialize in distinct subdomains [S1]. Unlike siblings like [MIMO-NeRF-self-R2](11400-mimo-nerf-self-r2.md) which may use different routing or aggregation strategies, MoE-INR typically selects a single expert based on policy probabilities for inference, while using a weighted loss during training [S1].
+ 
+ ## How it works
+ **Inputs and Outputs:**
+-*   **Input:** A 4D coordinate $\mathbf{x} = (x, y, z, t)$ representing a point in the spatiotemporal volume.
+-*   **Output:** A scalar value $v$ (e.g., voxel intensity) at that coordinate.
++*   **Input:** A 4D coordinate $\mathbf{x} = (x, y, z, t)$ representing a spatial location and time step.
++*   **Output:** A scalar value $v$ (e.g., density, intensity) representing the voxel value at that coordinate.
+ 
+ **Data Structures and Layout:**
+ The architecture consists of three components:
+-1.  **Policy Network:** A sequence of fully connected (FC) layers with $\sin(\cdot)$ activation, ending with a final FC layer with $\text{softmax}$ activation. It outputs a probability vector $\mathbf{p} \in \mathbb{R}^k$.
+-2.  **Shared Encoder:** Consists of positional encoding (learnable Fourier transformation), FC layers with $\sin(\cdot)$ activation, and a residual block with a bottleneck. It maps the input coordinate to a high-dimensional compact representation $\mathbf{h}$.
+-3.  **Expert Decoders:** $k$ parallel networks. Each consists of FC layers with $\sin(\cdot)$ activation and a final FC layer with no activation. Each decoder outputs a scalar prediction.
++1.  **Policy Network:** A sequence of fully connected (FC) layers with $\sin(\cdot)$ activation, followed by a final FC layer with Softmax activation. It outputs a probability vector $\mathbf{p} \in \mathbb{R}^k$ over $k$ experts [S1].
++2.  **Shared Encoder:** Takes $\mathbf{x}$, applies positional encoding (learnable Fourier transformation), passes through FC layers with $\sin(\cdot)$ activation to increase dimensionality, and ends with a residual block with bottleneck to produce a compact high-dimensional representation $\mathbf{h}$ [S1].
++3.  **Expert Decoders:** A set of $k$ identical networks. Each consists of FC layers with $\sin(\cdot)$ activation and a final FC layer without activation. Each decoder $\mathcal{E}_j$ maps $\mathbf{h}$ to a scalar prediction $v_j$ [S1].
+ 
+ **Parameters:**
+-*   $M$: Number of initial neurons specified by the user.
+-*   $k$: Number of expert decoders. Optimal value is 7 for tested datasets [S1].
+-
+-**Total Parameter Count:**
+-The total number of parameters is calculated as [S1]:
+-$$
+-\begin{aligned}
+-\text{Params} = & \underbrace{4M + M + M^2 + M + 9M \times k + k}_{\text{Policy Network}} \\
+-& + \underbrace{4M + M + 8M^2 + 4M + 32M^2 + 8M + 36M^2 + 12M}_{\text{Shared Encoder}} \\
+-& + \underbrace{k \times (8M + 1)}_{\text{Expert Decoders}}
+-\end{aligned}
+-$$
+-The "Larger Encoder" allocation strategy is recommended, where the majority of parameters are assigned to the shared encoder (e.g., 96.90% on the Vortex dataset) because the encoder assists in policy assignment and provides the representation for decoding [S1].
++*   $M$: Number of initial neurons (user-specified).
++*   $k$: Number of expert decoders. Optimal value is 7 for many scientific datasets [S1].
++*   Total parameters:
++    $$
++    \begin{aligned}
++    \text{Params} = & \underbrace{4M + M + M^2 + M + 9M \times k + k}_{\text{Policy Network}} \\
++    + & \underbrace{4M + M + 8M^2 + 4M + 32M^2 + 8M + 36M^2 + 12M}_{\text{Shared Encoder}} \\
++    + & \underbrace{k \times (8M + 1)}_{\text{Expert Decoders}}
++    \end{aligned}
++    $$
++    [S1]
+ 
+ **Algorithm Steps:**
+ 
+-1.  **Pre-training (Optional but Recommended):**
+-    *   Optimize only the Policy Network and Shared Encoder.
++1.  **Pre-training (Initialization):**
++    *   Optimize Policy Network and Shared Encoder only.
+     *   **Supervised Pre-training:** Generate ground truth assignments $y_c$ for coordinates using one of four methods:
+-        *   *Random Partition:* Random expert assignment.
+-        *   *Spatial Partition:* $k$ non-overlapping spatial blocks.
+-        *   *Temporal Partition:* $k$ non-overlapping time intervals.
+-        *   *Voxel Clustering:* $k$-means clustering on voxels (Best performing) [S1].
+-    *   **Loss:** Cross-Entropy Loss:
+-        $$
+-        \mathcal{L}_{pre} = - \frac{1}{k} \sum_{i=1}^{k} \log \left( \frac{e^{p_i}}{\sum_{j=1}^{k} e^{p_j}} \right) \quad \text{where } p_i \text{ corresponds to } y_c
+-        $$
+-        *Note: The source formula is written as $- \frac{1}{k} \frac{e^{p_i}}{\text{sum}(e^p)}$ but context implies standard cross-entropy with log. The text explicitly states "cross-entropy loss" and provides the vector $p$.*
+-    *   **Unsupervised Pre-training (Load Balancing):**
+-        $$
+-        \mathcal{L}_{bal} = \frac{1}{N^2} \sum_{j=1}^{k} c_j s_j
+-        $$
+-        where $c_j$ is the number of coordinates assigned to expert $j$, $s_j$ is the sum of assignment probabilities to expert $j$ for all coordinates, and $N$ is the total number of coordinates. *Note: Random partition and load balancing pre-training schemes were found to perform worse than no pre-training [S1].*
++        *   *Random partition:* Random expert assignment.
++        *   *Spatial partition:* $k$ non-overlapping spatial blocks.
++        *   *Temporal partition:* $k$ non-overlapping time intervals.
++        *   *Voxel clustering:* K-means on voxels (recommended as it yields best performance) [S1].
++    *   **Loss:** Cross-entropy loss:
++        $$
++        \mathcal{L}_{pre} = -\frac{1}{k} \sum_{i=1}^k \log \left( \frac{e^{p_i}}{\sum_{j=1}^k e^{p_j}} \right) \quad \text{if } i = y_c
++        $$
++        *Note: The source formula is written as $- \frac{1}{k} \frac{e^{p_i}}{\text{sum}(e^p)}$ where $p_j$ is probability and $y_c$ is ground truth. Standard cross-entropy implies selecting the log-probability of the correct class. The text states "where $p_j$ is probability... $y_c$ is ground truth assignment." The formula provided in notes is likely a simplified representation of the log-likelihood term for the correct class. We implement standard cross-entropy on the policy output logits/probabilities against $y_c$.* [S1]
++    *   **Unsupervised Pre-training (Alternative):** Load balancing loss:
++        $$
++        \mathcal{L}_{bal} = \frac{1}{N^2} \sum_{j=1}^k c_j s_j
++        $$
++        where $c_j$ is the count of coordinates assigned to expert $j$, $s_j$ is the sum of assignment probabilities to expert $j$ for all coordinates, and $N$ is total coordinates. *Note: Sources indicate this performs worse than no pre-training.* [S1]
+ 
+ 2.  **Training (Joint Optimization):**
+     *   Optimize Policy Network, Shared Encoder, and all Expert Decoders jointly.
+     *   **Forward Pass:**
+-        1.  Input $\mathbf{x}$ passes through the Shared Encoder to produce representation $\mathbf{h}$.
+-        2.  Input $\mathbf{x}$ passes through the Policy Network to produce probabilities $\mathbf{p}$.
+-        3.  Concatenate $\mathbf{p}$ and $\mathbf{h}$ (or feed $\mathbf{h}$ to experts as per description "expert decoders take the high-dimensional representation... as input"). The text states: "The concatenated representation... will be fed into the last fully-connected layer [of the policy network? No, the policy network outputs probabilities]. The decoder corresponding to the highest probability is then selected."
+-        4.  Select the expert $j^*$ with the highest probability $p_{j^*} = \max_j p_j$.
+-        5.  Pass $\mathbf{h}$ to the selected expert decoder $j^*$ to get prediction $v_{j^*}$.
+-    *   **Loss:** Mean Squared Error weighted by policy probabilities:
+-        $$
+-        \mathcal{L}_{train} = \sum_{j=1}^{k} p_j ||v_j - v||^2
+-        $$
+-        where $v_j$ is the predicted value from expert $j$, and $v$ is the ground truth voxel value. *Note: Although only one expert is "activated" for inference, the training loss sums over all experts weighted by their selection probability, allowing gradient flow to all experts [S1].*
+-
+-3.  **Inference:**
+-    *   For a given coordinate, compute $\mathbf{p}$ and $\mathbf{h}$.
+-    *   Select the expert $j^*$ with $\max_j p_j$.
+-    *   Output $v_{j^*}$.
++        1.  Compute policy probabilities $\mathbf{p} = \text{Softmax}(\text{Policy}(\mathbf{x}))$.
++        2.  Compute shared representation $\mathbf{h} = \text{Encoder}(\mathbf{x})$.
++        3.  Compute predictions from all experts $v_j = \mathcal{E}_j(\mathbf{h})$ for $j=1 \dots k$.
++    *   **Loss:** Weighted Mean Squared Error (MSE) using policy probabilities:
++        $$
++        \mathcal{L}_{train} = \sum_{j=1}^k p_j \| v_j - v_{gt} \|^2
++        $$
++        where $v_{gt}$ is the ground truth voxel value [S1].
++    *   **Inference:** Select the expert $j^*$ with the highest probability $p_{j^*} = \max_j p_j$ and output $v_{j^*}$ [S1].
+ 
+ **Pseudocode:**
+ 
+ ```python
+-import numpy as np
+-
+-class MoE_INR:
+-    def __init__(self, M, k):
++import torch
++import torch.nn as nn
++import torch.nn.functional as F
++
++class SinActivation(nn.Module):
++    def forward(self, x):
++        return torch.sin(x)
++
++class PositionalEncoding(nn.Module):
++    """Learnable Fourier feature mapping."""
++    def __init__(self, in_dim, out_dim):
++        super().__init__()
++        # Learnable weights for Fourier features
++        self.W = nn.Parameter(torch.randn(in_dim, out_dim) * 0.1)
++        
++    def forward(self, x):
++        # x shape: (..., in_dim)
++        # Project to higher dimension using Fourier features
++        projected = torch.matmul(x, self.W)
++        # Apply sin/cos embedding (standard PE) or just linear projection as per "learnable Fourier transformation"
++        # The source says "positional encoding (PE) function, i.e., a learnable Fourier transformation"
++        # We assume this maps low-dim coords to high-dim representation directly via learnable weights
++        return projected
++
++class ResidualBottleneck(nn.Module):
++    """Residual block with bottleneck."""
++    def __init__(self, dim):
++        super().__init__()
++        self.bottleneck = nn.Sequential(
++            nn.Linear(dim, dim // 4),
++            SinActivation(),
++            nn.Linear(dim // 4, dim),
++            SinActivation()
++        )
++        
++    def forward(self, x):
++        return x + self.bottleneck(x)
++
++class PolicyNetwork(nn.Module):
++    def __init__(self, in_dim, hidden_dim, num_experts):
++        super().__init__()
++        self.layers = nn.Sequential(
++            nn.Linear(in_dim, hidden_dim),
++            SinActivation(),
++            nn.Linear(hidden_dim, hidden_dim),
++            SinActivation(),
++            nn.Linear(hidden_dim, hidden_dim),
++            SinActivation()
++        )
++        self.output_layer = nn.Linear(hidden_dim, num_experts)
++        
++    def forward(self, x):
++        # x: (..., in_dim)
++        h = self.layers(x)
++        logits = self.output_layer(h)
++        probs = F.softmax(logits, dim=-1)
++        return probs
++
++class SharedEncoder(nn.Module):
++    def __init__(self, in_dim, hidden_dim, out_dim):
++        super().__init__()
++        self.pe = PositionalEncoding(in_dim, hidden_dim)
++        self.fc_layers = nn.Sequential(
++            nn.Linear(hidden_dim, hidden_dim),
++            SinActivation(),
++            nn.Linear(hidden_dim, hidden_dim),
++            SinActivation()
++        )
++        self.residual = ResidualBottleneck(hidden_dim)
++        self.final_fc = nn.Linear(hidden_dim, out_dim)
++        
++    def forward(self, x):
++        h = self.pe(x)
++        h = self.fc_layers(h)
++        h = self.residual(h)
++        h = self.final_fc(h)
++        return h
++
++class ExpertDecoder(nn.Module):
++    def __init__(self, in_dim, hidden_dim):
++        super().__init__()
++        self.layers = nn.Sequential(
++            nn.Linear(in_dim, hidden_dim),
++            SinActivation(),
++            nn.Linear(hidden_dim, hidden_dim),
++            SinActivation(),
++            nn.Linear(hidden_dim, hidden_dim),
++            SinActivation()
++        )
++        self.output_layer = nn.Linear(hidden_dim, 1)
++        
++    def forward(self, x):
++        h = self.layers(x)
++        return self.output_layer(h)
++
++class MoEINR(nn.Module):
++    def __init__(self, in_dim=4, num_experts=7, M=256):
+         """
+         M: Number of initial neurons.
+-        k: Number of experts.
+         """
+-        self.k = k
+-        self.M = M
+-        # Initialize weights for Policy Network, Shared Encoder, and k Expert Decoders
+-        # Details of weight initialization are not specified in sources [G: Use standard Xavier/He init]
+-        self.policy_net = PolicyNetwork(M)
+-        self.shared_encoder = SharedEncoder(M)
+-        self.experts = [ExpertDecoder(M) for _ in range(k)]
+-
+-    def forward(self, coords):
+-        """
+-        coords: Tensor of shape (N, 4) containing (x, y, z, t)
+-        Returns: Predicted scalar values
+-        """
+-        # 1. Shared Encoder
+-        # Positional Encoding (Learnable Fourier Transformation)
+-        h_enc = self.shared_encoder.encode(coords)
+-        
+-        # 2. Policy Network
+-        # Outputs probabilities p of shape (N, k)
+-        p = self.policy_net(coords, h_enc)
+-        
+-        # 3. Select Expert
+-        # Get indices of max probability for each coordinate
+-        expert_indices = np.argmax(p, axis=1)
+-        
+-        # 4. Decode
+-        # Gather the selected expert for each coordinate
+-        # Note: In practice, this might be batched or handled via masking
+-        predictions = np.zeros(coords.shape[0])
+-        for i in range(coords.shape[0]):
+-            expert_idx = expert_indices[i]
+-            predictions[i] = self.experts[expert_idx].forward(h_enc[i])
++        super().__init__()
++        self.num_experts = num_experts
++        
++        # Policy Network
++        # Source: FC layers with sin, final FC with softmax.
++        # Input to policy is coordinate. Output is probs.
++        # Note: Source says "concatenated with shared encoder's output" fed into last FC layer.
++        # This implies the policy network takes (coord + encoder_output) or processes them together.
++        # Re-reading: "Input coordinate is processed by FC layers... Output is concatenated with the shared encoder's output. 
++        # This concatenated representation is fed into the last FC layer."
++        # This suggests a specific architecture where Policy and Encoder might share initial layers or the Policy network 
++        # described is actually the routing head that takes encoder output.
++        # Let's follow the text strictly: 
++        # 1. Policy Network FC layers process coordinate.
++        # 2. Shared Encoder processes coordinate.
++        # 3. Concatenate Policy_Output and Encoder_Output.
++        # 4. Final FC layer produces probs.
++        
++        # However, standard MoE usually routes based on encoder output. 
++        # The text says: "The policy network is designed to accurately and automatically classify coordinates... 
++        # consists of several fully connected layers with a sin(·) activation... and one fully connected layer with a softmax."
++        # Then: "The concatenated representation, derived from the outputs of the policy network and the shared encoder, 
++        # will be fed into the last fully-connected layer."
++        
++        # This implies:
++        # Policy_Part1: FC layers on x -> p_features
++        # Encoder: x -> h
++        # Concat: [p_features, h] -> FC -> Softmax -> probs
++        
++        self.policy_fc = nn.Sequential(
++            nn.Linear(in_dim, M),
++            SinActivation(),
++            nn.Linear(M, M),
++            SinActivation()
++        )
++        
++        self.encoder = SharedEncoder(in_dim, M, M)
++        
++        # The "last FC layer" of the policy network takes the concatenation
++        self.policy_head = nn.Linear(M * 2, num_experts)
++        
++        # Expert Decoders
++        self.experts = nn.ModuleList([
++            ExpertDecoder(M, M) for _ in range(num_experts)
++        ])
++        
++    def forward(self, x):
++        # x: (..., 4)
++        
++        # 1. Policy Network Forward Pass (Part 1)
++        policy_features = self.policy_fc(x)
++        
++        # 2. Shared Encoder Forward Pass
++        encoder_features = self.encoder(x)
++        
++        # 3. Concatenate and Route
++        concat_features = torch.cat([policy_features, encoder_features], dim=-1)
++        logits = self.policy_head(concat_features)
++        probs = F.softmax(logits, dim=-1)
++        
++        # 4. Expert Processing
++        # During training, we compute all experts for the weighted loss
++        # During inference, we select the max prob expert
++        
++        # Expand x to match batch dimensions if necessary, but here x is the input batch
++        # We need to pass encoder_features to each expert
++        # encoder_features shape: (..., M)
++        
++        expert_outputs = []
++        for expert in self.experts:
++            out = expert(encoder_features)
++            expert_outputs.append(out)
+             
+-        return predictions
+-
+-    def compute_loss(self, coords, ground_truth):
+-        """
+-        coords: Tensor of shape (N, 4)
+-        ground_truth: Tensor of shape (N,)
+-        Returns: Loss scalar
+-        """
+-        # 1. Shared Encoder
+-        h_enc = self.shared_encoder.encode(coords)
+-        
+-        # 2. Policy Network
+-        p = self.policy_net(coords, h_enc) # Shape (N, k)
+-        
+-        # 3. All Experts Forward Pass
+-        # Compute predictions for ALL experts to allow gradient flow
+-        all_predictions = np.zeros((coords.shape[0], self.k))
+-        for j in range(self.k):
+-            all_predictions[:, j] = self.experts[j].forward(h_enc)
+-            
+-        # 4. Loss Calculation
+-        # MSE weighted by probabilities
+-        # diff shape (N, k)
+-        diff = all_predictions - ground_truth[:, np.newaxis]
+-        mse = np.square(diff)
+-        
+-        # Weighted sum
+-        # p shape (N, k)
+-        weighted_mse = p * mse
+-        loss = np.mean(np.sum(weighted_mse, axis=1))
+-        
+-        return loss
+-
+-class PolicyNetwork:
+-    def __init__(self, M):
+-        # FC layers with sin activation, final FC with softmax
+-        pass
+-    def __call__(self, coords, h_enc):
+-        # Process coords and h_enc
+-        # Return softmax probabilities
+-        pass
+-
+-class SharedEncoder:
+-    def __init__(self, M):
+-        # Positional encoding, FC layers with sin, residual block
+-        pass
+-    def encode(self, coords):
+-        # Return high-dimensional representation h
+-        pass
+-
+-class ExpertDecoder:
+-    def __init__(self, M):
+-        # FC layers with sin, final FC no activation
+-        pass
+-    def forward(self, h):
+-        # Return scalar prediction
+-        pass
++        expert_outputs = torch.stack(expert_outputs, dim=-2) # Shape: (..., num_experts, 1)
++        
++        # Weighted sum for training loss calculation
++        # probs shape: (..., num_experts)
++        # expert_outputs shape: (..., num_experts, 1)
++        weighted_pred = torch.sum(probs.unsqueeze(-1) * expert_outputs, dim=-2)
++        
++        return weighted_pred, probs, expert_outputs
++
++    def inference(self, x):
++        # 1. Policy Network Forward Pass (Part 1)
++        policy_features = self.policy_fc(x)
++        
++        # 2. Shared Encoder Forward Pass
++        encoder_features = self.encoder(x)
++        
++        # 3. Concatenate and Route
++        concat_features = torch.cat([policy_features, encoder_features], dim=-1)
++        logits = self.policy_head(concat_features)
++        probs = F.softmax(logits, dim=-1)
++        
++        # 4. Select best expert
++        best_expert_idx = torch.argmax(probs, dim=-1, keepdim=True)
++        
++        # Gather the output from the best expert
++        # expert_outputs shape: (..., num_experts, 1)
++        # We need to index into the expert list
++        # Since we don't have all outputs precomputed for inference efficiency, 
++        # we can compute only the selected expert or compute all and gather.
++        # For simplicity and correctness:
++        all_outputs = []
++        for expert in self.experts:
++            all_outputs.append(expert(encoder_features))
++        all_outputs = torch.stack(all_outputs, dim=-2)
++        
++        # Gather
++        selected_output = torch.gather(all_outputs, dim=-2, index=best_expert_idx.unsqueeze(-1)).squeeze(-2)
++        
++        return selected_output
+ ```
+ 
+ **Edge Cases and Pitfalls:**
+-*   **Too Many Experts:** Using more than 7 experts (in tested scenarios) degrades performance because the policy network struggles to correctly classify and assign coordinates, leading to misclassifications [S1].
+-*   **Pre-training Schemes:** Random partition and load balancing pre-training schemes fail to produce meaningful assignments and result in inferior performance compared to no pre-training. Voxel clustering is the recommended supervised pre-training method [S1].
+-*   **Boundary Continuity:** Unlike grid-based INRs, MoE-INR uses a shared encoder to preserve boundary continuity, avoiding block artifacts [S1].
++*   **Too many experts:** Using $k > 7$ (in tested scenarios) degrades performance because the policy network struggles to correctly classify coordinates, leading to misclassifications [S1].
++*   **Pre-training schemes:** Random partition and load balancing pre-training fail to produce meaningful assignments, resulting in inferior performance compared to no pre-training. Voxel clustering is the recommended supervised pre-training method [S1].
++*   **Parameter Allocation:** Allocating too few parameters to the shared encoder degrades performance. The "Larger encoder" strategy (allocating ~97% of parameters to the encoder) is optimal because the encoder assists policy assignment and provides compact representation [S1].
+ 
+ ## Operating characteristics
+-*   **Time Complexity:** Visualization (inference) cost is lower than conventional INRs but higher than grid-based INRs. Conventional INRs rely entirely on matrix multiplications. Grid-based INRs use efficient feature interpolation. MoE-INR involves a policy network forward pass and one expert decoder forward pass per coordinate [S1].
+-*   **Memory Complexity:** Memory usage scales with the number of experts $k$. For the Ionization dataset (CR 10,078), memory usage increased from 8,177 MB (2 experts) to 21,745 MB (9 experts) [S1].
+-*   **Performance:** On the Ionization (PD) dataset (CR 10,078), 7 experts achieved the best PSNR (58.76 dB) and LPIPS (0.024) [S1]. On the Vortex dataset (CR 5,065), the "Larger Encoder" allocation achieved the best PSNR/LPIPS, with 96.90% of parameters in the encoder [S1].
+-*   **Strengths:** Automates irregular subdivisions, maintains cross-boundary continuity via shared encoder, accommodates conventional, grid-based, and ensemble INR types [S1].
+-*   **Limitations:** Performance degrades if $k$ is too high (>7 in tests). Pre-training is sensitive to the scheme used [S1].
++*   **Time Complexity:** Visualization (inference) cost is lower than conventional INRs but higher than grid-based INRs. Grid-based INRs use efficient interpolation, while conventional INRs rely on full matrix multiplications. MoE-INR requires one forward pass through the encoder and one expert decoder per coordinate [S1].
++*   **Memory Complexity:** Memory usage scales with the number of experts $k$ and the parameter allocation. For the ionization dataset (CR 10,078), memory usage ranged from 8,177 MB (2 experts) to 21,745 MB (9 experts) [S1].
++*   **Performance:** On the vortex dataset (CR 5,065), MoE-INR achieved 96.90% of parameters in the encoder, yielding the best PSNR/LPIPS [S1]. On the ionization (PD) dataset (CR 10,078), 7 experts yielded the best PSNR (58.76 dB) and LPIPS (0.024) [S1].
++*   **Strengths:** Automates irregular subdivisions, maintains boundary continuity via shared encoder, and accommodates various INR types (conventional, grid-based, ensemble) [S1].
++*   **Limitations:** Performance degrades if $k$ is too high. Requires careful pre-training (voxel clustering) for optimal results [S1].
+ 
+ ## Background
+-The mixture-of-experts (MoE) paradigm was originally proposed by Nowlan and Hinton [26], applying supervision to a system of separate networks where each handles a subset of training samples and specializes in a different part of the data space [S1]. MoE-INR was developed to address the limitations of existing INRs for scientific data compression, specifically the difficulty of preserving complex features in conventional INRs and the boundary discontinuity in grid-based INRs [S1]. It is used for time-varying volumetric data compression and representation in scientific datasets including argon bubble, combustion, ionization, Tangaroa, and vortex [S1].
++The mixture-of-experts (MoE) paradigm was originally proposed by Nowlan and Hinton [S1]. MoE-INR was developed to address limitations in scientific data compression, specifically for time-varying volumetric data. It builds on the principles of [Mixture-of-Experts and Modular Architectures](14429-mixture-of-experts-and-modular-architectures.md) and addresses issues in [Conventional INRs](link-to-conventional) and [Grid-based INRs](link-to-grid-based) by providing a unified framework that avoids manual decomposition artifacts [S1]. It is used in scientific visualization for datasets such as argon bubble, combustion, ionization, Tangaroa, and vortex [S1].
+ 
+ ## Sources

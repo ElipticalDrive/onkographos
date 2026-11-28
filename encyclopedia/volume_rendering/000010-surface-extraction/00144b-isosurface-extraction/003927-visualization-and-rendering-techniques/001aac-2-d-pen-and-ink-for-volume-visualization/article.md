@@ -1,0 +1,162 @@
+# 2+D Pen-and-Ink for Volume Visualization
+
+Also called: 2+D Pen-and-Ink Rendering, 3D Pen-and-Ink Rendering, Treavett and Chen 2+D method, Treavett and Chen method
+
+## Overview
+2+D Pen-and-Ink Rendering is a non-photorealistic volume visualization technique that generates 2D strokes based on 3D geometric information associated with the original volume data [S1, S2, unofficial]. It treats isosurfaces as opaque objects to generate intermediate image buffers (G-buffers) containing properties such as depth, normals, and curvature, which are then processed by image-space filters to synthesize a final pen-and-ink style image [S1, S2, unofficial]. Unlike pure 3D stroke methods that project volumetric textures, this approach decouples the geometric analysis from the stylistic rendering, allowing for complex sketch-like effects like outlines and interior hatching [S2, unofficial]. It is distinguished from its siblings by its reliance on post-processing image buffers rather than direct texture mapping or ray-marching for stroke generation [S1, S2, unofficial].
+
+## How it works
+The method operates in two distinct phases: Object Space (buffer generation) and Image Space (filter application) [S2, unofficial].
+
+### Inputs and Outputs
+*   **Input:** A scalar volume dataset $V$ and a target isovalue $I$.
+*   **Output:** A 2D raster image representing the volume in a pen-and-ink style.
+
+### Data Structures
+1.  **Isosurface Mesh:** A polygonal mesh $M$ extracted from $V$ using an isosurface extraction algorithm (e.g., Marching Cubes).
+2.  **Image Buffers (G-Buffers):** A set of 2D arrays (textures) aligned with the image plane, storing per-pixel values:
+    *   $D(x,y)$: Depth (distance from camera).
+    *   $N(x,y)$: Surface normal vector.
+    *   $H(x,y)$: Horizontal curvature.
+    *   $V(x,y)$: Vertical curvature.
+    *   $L(x,y)$: Lighting intensity (optional, depending on implementation).
+    *   $C(x,y)$: Color/Alpha (for standard rendering pass).
+
+### Parameters
+*   **Isovalue $I$:** Threshold for surface extraction.
+*   **Filter Weights:** Weights for combining curvature, depth, and lighting in the image-space filters.
+*   **Noise Level:** Amplitude of pre-computed noise lattices added to stroke parameters to reduce artificial perfection [S2, unofficial].
+*   **Stroke Density/Width:** Controlled by texture parameters or filter thresholds [S2, unofficial].
+
+### Steps
+
+1.  **Isosurface Extraction:**
+    Extract the isosurface mesh $M$ from the volume dataset $V$ at isovalue $I$ [S1, unofficial].
+
+2.  **Object Space Rendering (Buffer Generation):**
+    Render the mesh $M$ as an opaque object to populate the image buffers [S1, S2, unofficial].
+    *   For each pixel $(x,y)$ in the image plane:
+        *   Determine the visible surface point $p$ on $M$.
+        *   Compute depth $D(x,y)$ from the camera to $p$.
+        *   Compute normal $N(x,y)$ at $p$.
+        *   Compute horizontal curvature $H(x,y)$ and vertical curvature $V(x,y)$ at $p$ [S2, unofficial].
+        *   Compute lighting intensity $L(x,y)$ at $p$ using a traditional illumination model (e.g., Phong) [S2, unofficial].
+    *   Store these values in their respective buffers [S2, unofficial].
+
+3.  **Image Space Filtering:**
+    Apply pen-and-ink filters to the image buffers to generate the final image [S2, unofficial].
+    *   **Outline Filter:** Uses depth information $D(x,y)$ to determine pixel values for outlines. Typically, edges are detected where depth changes significantly or via curvature thresholds [S2, unofficial].
+    *   **Interior Shading Filter:** Generates sketch drawings (hatching, cross-hatching) inside the object boundaries. This filter uses curvature ($H, V$), lighting ($L$), and noise to vary stroke density, length, and orientation [S2, unofficial].
+    *   **Noise Integration:** To avoid unnatural effects from dense textures and reduce artificial perfection, add noise to stroke parameters. Use pre-computed noise lattices $Noise(x,y)$ instead of run-time random number generators to maintain coherence in animations [S2, unofficial].
+    *   **Final Composition:** Combine the outputs of the outline and interior filters. The final pixel color $C_{final}(x,y)$ is determined by the filter logic, often blending black strokes with white background or grayscale shading [S2, unofficial].
+
+### Pseudocode
+
+> **Unverified code.** The code below did not pass a test run against a reference implementation, or no test fits it, so it may contain errors.
+
+```python
+def render_2d_pen_and_ink(volume, isovalue, camera, light_source):
+    # Step 1: Extract Isosurface
+    mesh = extract_isosurface(volume, isovalue)
+    
+    # Step 2: Generate Image Buffers (Object Space)
+    width, height = camera.resolution
+    depth_buffer = zeros((height, width))
+    normal_buffer = zeros((height, width, 3))
+    h_curv_buffer = zeros((height, width))
+    v_curv_buffer = zeros((height, width))
+    lighting_buffer = zeros((height, width))
+    
+    # Render mesh to populate buffers
+    for y in range(height):
+        for x in range(width):
+            ray = camera.generate_ray(x, y)
+            hit = mesh.ray_intersect(ray)
+            if hit is not None:
+                p, normal, h_curv, v_curv = hit.point, hit.normal, hit.h_curvature, hit.v_curvature
+                depth_buffer[y, x] = hit.distance
+                normal_buffer[y, x] = normal
+                h_curv_buffer[y, x] = h_curv
+                v_curv_buffer[y, x] = v_curv
+                
+                # Traditional illumination model
+                lighting_buffer[y, x] = compute_phong_lighting(p, normal, light_source, camera)
+            else:
+                depth_buffer[y, x] = INF
+
+    # Step 3: Apply Pen-and-Ink Filters (Image Space)
+    final_image = zeros((height, width, 3))
+    
+    # Pre-computed noise lattice for coherence
+    noise_lattice = generate_noise_lattice(width, height)
+    
+    for y in range(height):
+        for x in range(width):
+            if depth_buffer[y, x] == INF:
+                final_image[y, x] = WHITE
+                continue
+            
+            # Determine if pixel is on an outline
+            is_outline = check_outline(depth_buffer, normal_buffer, x, y)
+            
+            # Determine interior shading
+            shading = compute_shading(
+                h_curv_buffer[y, x], 
+                v_curv_buffer[y, x], 
+                lighting_buffer[y, x], 
+                noise_lattice[y, x]
+            )
+            
+            if is_outline:
+                final_image[y, x] = BLACK
+            elif shading > THRESHOLD:
+                final_image[y, x] = BLACK * shading
+            else:
+                final_image[y, x] = WHITE
+                
+    return final_image
+
+def check_outline(depth_buffer, normal_buffer, x, y):
+    # Simplified outline detection based on depth discontinuity or curvature
+    # Not given in the sources exactly how individual strokes are generated.
+    # [G] Typical implementation: compare depth with neighbors or use curvature threshold
+    depth = depth_buffer[y, x]
+    if depth == INF:
+        return False
+    # Check neighbors for depth jump
+    neighbors = [
+        depth_buffer[y, x+1], depth_buffer[y, x-1],
+        depth_buffer[y+1, x], depth_buffer[y-1, x]
+    ]
+    for n in neighbors:
+        if n != INF and abs(depth - n) > DEPTH_THRESHOLD:
+            return True
+    return False
+
+def compute_shading(h_curv, v_curv, lighting, noise):
+    # Combine curvature, lighting, and noise to determine stroke intensity
+    # [G] Specific formula not given in sources; typical NPR combines these factors
+    intensity = lighting * (1.0 + h_curv + v_curv) + noise
+    return clamp(intensity, 0.0, 1.0)
+```
+
+### Edge Cases and Pitfalls
+*   **Aliasing:** Hard transitions in textures (e.g., binary black/white rings) can lead to aliasing. Mitigate by adding grayscale to reduce intensity gradually along edges [S2, unofficial].
+*   **Artificial Perfection:** Dense, regular textures can look unnatural. Add noise to lower the degree of artificial perfection [S2, unofficial].
+*   **Animation Coherence:** Using run-time random number generators for noise can cause flickering. Use pre-computed noise lattices to maintain coherence [S2, unofficial].
+*   **Parameter Tuning:** Tunable parameters often depend heavily on the exact voxel intensity values, requiring prior knowledge of the dataset [S1, unofficial].
+
+## Operating characteristics
+*   **Time Complexity:** Dominated by isosurface extraction ($O(N)$ for $N$ voxels) and image-space filtering ($O(W \times H)$ for image dimensions). The filtering step is generally fast as it operates on 2D buffers.
+*   **Memory Complexity:** Requires storage for the volume dataset, the isosurface mesh, and multiple image buffers (depth, normal, curvature, lighting). Memory usage scales with image resolution and number of buffers.
+*   **Strengths:** Produces high-quality, artistic illustrations resembling hand-drawn sketches. Flexible control over style via image-space filters. Can handle complex geometry well [S1, unofficial].
+*   **Limitations:** Lacks detailed specification on exact stroke generation algorithms, making reproducibility difficult [S1, unofficial]. Parameter tuning can be dataset-specific and non-trivial [S1, unofficial]. Not a true volume visualization technique in the sense of showing internal structure, but rather a surface-based artistic representation [S2, unofficial].
+*   **When to Use:** When the goal is to create publication-quality, artistic illustrations of volumetric data rather than scientific analysis.
+*   **When Not to Use:** When quantitative analysis of internal volume structures is required, or when real-time performance is critical and isosurface extraction is too expensive.
+
+## Background
+The method was introduced by Treavett and Chen in 2000 [S1, S2, unofficial]. It is cited as the first application of pen-and-ink methods to volume visualization [S1, unofficial]. The approach is based on Non-Photorealistic Rendering (NPR) textures defined in 3D, which are then projected or filtered in image space [S2, unofficial]. It builds on the concept of G-buffers (image buffers storing geometric properties) popularized by Saito and Takahashi [S1, unofficial]. The technique has been applied to datasets such as CT scans to demonstrate its ability to produce compelling graphical illustrations [S1, S2, unofficial].
+
+## Sources
+[S1] Volume Visualisation Via Variable-Detail Non-Photorealistic Illustration, https://uwspace.uwaterloo.ca/bitstream/10012/1104/1/jlmckinl2002.pdf, fetched 2026-10-26 (unofficial)
+[S2] Non-Photorealistic Volume Visualization, https://www.cg.tuwien.ac.at/courses/Seminar/SS2003/Ergebnisse/LangerCarolineArtnerMartin_NPVR.pdf, fetched 2026-10-26 (unofficial)

@@ -1,0 +1,168 @@
+--- v002.md
++++ v003.md
+@@ -1,97 +1,92 @@
+ # Opacity Peeling
++
+ Also called: Rezk-Salama and Kolb method
++
+ ## Overview
+-Opacity peeling is an interaction technique that reveals interior hidden spatial structures by iteratively rendering layers of a volume based on accumulated opacity thresholds [S1, S2]. Unlike view-dependent occlusion culling methods that skip intersections, it uses multiple rounds of opacity accumulation to expose layers originally occluded behind rendered surfaces, allowing users to interactively select specific depth layers [S2].
++Opacity peeling is an interaction technique that reveals internal volumetric structures by discarding the first $n$ layers of tissue along each ray before contributing to the final image [S1, S2]. Unlike view-independent methods such as [Brain Peeling](13890-brain-peeling.md) which rely on precomputed distance fields, opacity peeling is view-dependent and operates by accumulating alpha values until specific thresholds are met, allowing users to interactively select which occluded layer to visualize [S1, S3].
++
+ ## How it works
+-**Inputs:** Volume dataset $V$, transfer function $TF$, initial opacity threshold $\tau$, and maximum number of peeling passes $N_{max}$.
+-**Outputs:** Rendered image showing the selected internal layer.
++**Inputs and Outputs:**
++*   **Input:** A 3D volume dataset, a transfer function mapping scalar values to color and opacity, and user-defined parameters: `wantedLayer` (integer, number of layers to skip), `T_high` (float, upper alpha threshold), and `T_low` (float, lower sample alpha threshold) [S1].
++*   **Output:** A 2D image where the first `wantedLayer` layers of occluding tissue are effectively removed [S1].
+ 
+ **Data Structures:**
+-- Accumulated opacity buffer $A$: A 2D array matching the image resolution, initialized to 0.
+-- Current pass opacity buffer $P$: A 2D array matching the image resolution, initialized to 0 for each pass.
++The method is implemented within a single-pass volume shader (e.g., fragment shader). The following variables are maintained per ray:
++*   `currentLayer`: Integer, initialized to 0. Tracks the number of layers currently peeled [S1].
++*   `layerAlpha`: Float, initialized to 0.0. Accumulates the alpha contribution of the current layer being peeled [S1].
++*   `sampleRGBA`: Float4, initialized to (0,0,0,0). Accumulates the final color and alpha for the visible layer [S1].
+ 
+-**Steps:**
+-1. Initialize accumulated opacity buffer $A$ to zero for all pixels.
+-2. For pass $k$ from 1 to $N_{max}$:
+-    a. Initialize current pass buffer $P$ to zero.
+-    b. For each pixel $(u, v)$ in the image plane:
+-        i. Cast a ray through the volume along the viewing direction.
+-        ii. Sample the volume along the ray to compute color $C$ and opacity $\alpha$ at each sample point.
+-        iii. Perform front-to-back compositing for the current ray, but only accumulate opacity into $P(u,v)$ if the ray's local opacity contribution is within the current peeling context. Specifically, the method accumulates opacity up to a threshold $\tau$. If the accumulated opacity in $P(u,v)$ reaches $\tau$, the ray is considered "peeled" for this layer, and the compositing for this pixel in this pass stops or contributes the final color of that layer segment [S2].
+-        iv. Note: The exact compositing equation for a single sample is $C_{out} = C_{in} + C_{sample} \cdot \alpha_{sample} \cdot (1 - \alpha_{in})$ and $\alpha_{out} = \alpha_{in} + \alpha_{sample} \cdot (1 - \alpha_{in})$. In opacity peeling, the accumulation is constrained by the threshold $\tau$ to define the "layer" [S2].
+-    c. Composite the result of pass $k$ into the final image, potentially blending with previous passes or replacing the view depending on the interaction mode.
+-    d. Update the accumulated opacity buffer $A$ by adding $P$ (or using $P$ to mask subsequent passes) to ensure previously revealed layers are handled correctly in subsequent iterations [S2].
+-3. Allow user interaction to select the desired layer from the sequence of peeled results.
++**Algorithm Steps:**
++1.  **Initialization:** Set `currentLayer = 0`, `layerAlpha = 0.0`, and `sampleRGBA = (0,0,0,0)` [S1].
++2.  **Ray Marching:** For each sample position along the ray:
++    a.  Sample the volume at the current position to obtain color and opacity: `sample = SampleVolumeWithTF(volIndex, pos)` [S1].
++    b.  Check if the current layer count is less than the user-specified `wantedLayer`:
++        i.  If `currentLayer < wantedLayer`:
++            1.  Update the accumulated alpha for the current layer using the standard alpha compositing update rule:
++                $$layerAlpha = layerAlpha + (1.0 - layerAlpha) \times sample.a$$
++            2.  Check for layer transition. If `layerAlpha > T_high` AND `sample.a < T_low`:
++                1.  Increment the layer counter: `currentLayer = currentLayer + 1` [S1].
++                2.  Reset the accumulator: `layerAlpha = 0.0` [S1].
++        ii. If `currentLayer >= wantedLayer`:
++            1.  Perform standard front-to-back ray integration for the visible layer:
++                $$sampleRGBA = sampleRGBA + (1.0 - sampleRGBA.a) \times sample$$
++                *(Note: The source code snippet uses `sampleRGBA += sample`, which implies a simplified accumulation or assumes the alpha term is handled differently in the specific PRISM implementation context, but standard volume rendering requires the $(1-a)$ factor for correct blending. However, strictly following the provided pseudocode from [S1]: `sampleRGBA += sample`)* [S1].
+ 
+ **Parameters:**
+-- Opacity threshold $\tau$: Controls the thickness of the peeled layer. Typical values depend on the transfer function's opacity range. Not given in the sources.
+-- $N_{max}$: Maximum number of passes. Not given in the sources.
++*   `T_high`: The threshold for accumulated alpha that triggers a potential layer peel. Must be defined in an Init shader [S1].
++*   `T_low`: The threshold for the current sample's alpha. A peel only occurs if the accumulated alpha exceeds `T_high` AND the current sample's alpha falls below `T_low`. This prevents peeling during continuous high-opacity regions. Must be defined in an Init shader [S1].
++*   `wantedLayer`: The number of layers to discard. Defined in an Init shader [S1].
+ 
+-**Edge Cases:**
+-- If the volume has no opacity, no layers are peeled.
+-- Precision issues may arise if $\tau$ is very small, requiring high-precision accumulation buffers.
+-- Degenerate input (empty volume) results in no output.
++**Edge Cases and Pitfalls:**
++*   **Precision:** The condition `layerAlpha > T_high` relies on floating-point comparison. If `T_high` is set too close to 1.0, precision issues may prevent the threshold from being reached [G].
++*   **Boundary Conditions:** If the ray exits the volume before `currentLayer` reaches `wantedLayer`, no visible layer is rendered for that ray, potentially resulting in black pixels or background color depending on the clear color [G].
++*   **Degenerate Input:** If `T_low` is greater than `T_high`, the condition `layerAlpha > T_high && sample.a < T_low` may never be satisfied if the sample alpha is always high, or may be satisfied too easily if sample alpha is always low, leading to incorrect layer counts [G].
+ 
+ **Pseudocode:**
+ ```python
+-def opacity_peeling(volume, transfer_function, threshold, max_passes):
+-    # Initialize buffers
+-    accumulated_opacity = zeros(image_width, image_height)
+-    final_image = zeros(image_width, image_height, 3)
++# Initialization (per ray)
++currentLayer = 0
++layerAlpha = 0.0
++sampleRGBA = (0.0, 0.0, 0.0, 0.0)
++
++# Ray marching loop
++for pos in ray_positions:
++    # Sample volume intensity and map to color/alpha via transfer function
++    sample = SampleVolumeWithTF(volIndex, pos)
+     
+-    for k in range(1, max_passes + 1):
+-        current_pass_opacity = zeros(image_width, image_height)
+-        current_pass_color = zeros(image_width, image_height, 3)
++    if currentLayer < wantedLayer:
++        # Accumulate alpha for the layer to be peeled
++        layerAlpha = layerAlpha + (1.0 - layerAlpha) * sample.a
+         
+-        for u in range(image_width):
+-            for v in range(image_height):
+-                ray = cast_ray(u, v)
+-                alpha_acc = 0.0
+-                color_acc = [0.0, 0.0, 0.0]
+-                
+-                # Sample along ray
+-                for sample in ray.samples:
+-                    density = volume.sample(sample.position)
+-                    color_sample, alpha_sample = transfer_function(density)
+-                    
+-                    # Front-to-back compositing
+-                    weight = alpha_sample * (1.0 - alpha_acc)
+-                    color_acc = color_acc + color_sample * weight
+-                    alpha_acc = alpha_acc + weight
+-                    
+-                    # Check if threshold reached for this layer
+-                    if alpha_acc >= threshold:
+-                        break
+-                
+-                current_pass_color[u, v] = color_acc
+-                current_pass_opacity[u, v] = alpha_acc
+-        
+-        # Composite current pass into final image
+-        # The exact blending strategy with previous passes is not fully specified in sources [S2]
+-        # Typically, this might replace the view or blend based on user selection
+-        final_image = composite(final_image, current_pass_color, current_pass_opacity)
+-        accumulated_opacity += current_pass_opacity
+-        
+-        # User interaction check would occur here to select layer k
+-        if user_selected_layer(k):
+-            return current_pass_color
+-            
+-    return final_image
++        # Check if we have accumulated enough alpha and the current sample is transparent
++        if layerAlpha > T_high and sample.a < T_low:
++            currentLayer = currentLayer + 1
++            layerAlpha = 0.0
++    else:
++        # Peeling done, integrate the visible layer
++        # Note: Source [S1] uses simple addition. Standard compositing uses (1-a)*sample.
++        # We follow the source exactly.
++        sampleRGBA = sampleRGBA + sample
+ ```
++
+ ## Subtopics
+ 
+ ### [Brain Peeling](13890-brain-peeling.md)
+-Brain peeling is a view-independent volume visualization technique designed to reveal interior structures located in the vicinity of the brain surface by removing brain tissue step-by-step in the negative normal direction. Unlike its sibling [Opacity Peeling](8428-opacity-peeling.md), which relies on view-dependent occlusion culling, brain peeling uses a precomputed distance field to discard voxels based on their proximity to the surface, requiring fewer parameters and offering a more reliable exploration of surface-adjacent features like vessels and pathological lesions.
++A view-independent technique that uses a precomputed distance field to discard voxels based on proximity to the brain surface. It requires fewer parameters and is more reliable for exploring surface-adjacent features like vessels, whereas opacity peeling is view-dependent and relies on alpha thresholds.
+ 
+ ## Operating characteristics
+-**Time Complexity:** $O(N_{max} \cdot W \cdot H \cdot L)$, where $N_{max}$ is the number of passes, $W \times H$ is the image resolution, and $L$ is the number of samples per ray.
+-**Memory Complexity:** $O(W \cdot H)$ for the opacity and color buffers.
+-**Strengths:** Allows interactive selection of internal layers without complex 3D picking [S2]. Single-pass per layer can be efficient if $N_{max}$ is small.
+-**Limitations:** Requires multiple passes to reveal deep structures, which can be slow for large volumes or high $N_{max}$. Performance depends heavily on the opacity threshold and transfer function.
+-**When to use:** When users need to explore internal structures by peeling away outer layers interactively.
+-**When not to use:** When real-time performance is critical and deep structures need to be revealed instantly, or when view-independent peeling is preferred (use Brain Peeling instead).
++*   **Time Complexity:** $O(N)$ per pixel, where $N$ is the number of samples along the ray. The method adds a constant amount of logic per sample (alpha accumulation and threshold checks) to standard volume rendering.
++*   **Memory Complexity:** $O(1)$ additional memory per ray for the state variables (`currentLayer`, `layerAlpha`). No additional volume data structures (like distance fields) are required [S1].
++*   **Performance:** As a single-pass solution, it is more efficient than multi-pass rendering techniques that might require multiple render passes to peel layers [S2].
++*   **Strengths:** Simple to implement in a shader; allows interactive selection of the depth layer to view; does not require precomputation of auxiliary data structures [S1, S2].
++*   **Limitations:** The quality of the peel depends heavily on the choice of `T_high` and `T_low`, which may need tuning for different datasets or transfer functions. It is view-dependent, meaning the peeled layers change as the camera moves [S1, S3].
++*   **When to use:** When interactive exploration of internal structures is needed without precomputing auxiliary data, and the user can tolerate view-dependent results [S1, S3].
++*   **When not to use:** When view-independent consistency is required, or when the volume has complex, non-layered structures where alpha thresholds do not correspond to meaningful anatomical layers [S1].
++
+ ## Background
+-Opacity peeling was introduced by Rezk-Salama and Kolb to reveal interior hidden spatial structures in volume rendering pipelines [S1]. It is described as a technique that uses several rounds of opacity accumulation to render layers originally occluded behind other rendered layers, enabling interactive layer selection [S2].
++Opacity peeling was proposed by Rezk-Salama and Kolb as a solution to the occlusion problem in volume visualization [S1]. It is employed in the PRISM framework for interactive design of GPU volume rendering shaders [S1]. The technique allows users to reveal interior hidden spatial structures by discarding the first $n$ layers of tissue, where $n$ is defined by the user [S1, S2]. It is related to other peeling techniques such as those discussed in the WYSIWYP method, but specifically uses opacity accumulation thresholds rather than extrema detection or stroke-based segmentation [S3].
++
+ ## Sources
+-[S1] Volume Visualization: A Technical Overview with a Focus on ..., https://pmc.ncbi.nlm.nih.gov/articles/PMC3138940/, fetched 2026-10-27
+-[S2] WYSIWYP: What You See Is What You Pick, https://doi.org/10.1109/tvcg.2012.292, fetched 2026-11-05+[S1] PRISM: An open source framework for the interactive design of GPU volume rendering shaders., https://doi.org/10.1371/journal.pone.0193636, fetched 2026-10-26
++[S2] Volume Visualization: A Technical Overview with a Focus on ..., https://pmc.ncbi.nlm.nih.gov/articles/PMC3138940/, fetched 2026-10-27
++[S3] WYSIWYP: What You See Is What You Pick, https://doi.org/10.1109/tvcg.2012.292, fetched 2026-11-05

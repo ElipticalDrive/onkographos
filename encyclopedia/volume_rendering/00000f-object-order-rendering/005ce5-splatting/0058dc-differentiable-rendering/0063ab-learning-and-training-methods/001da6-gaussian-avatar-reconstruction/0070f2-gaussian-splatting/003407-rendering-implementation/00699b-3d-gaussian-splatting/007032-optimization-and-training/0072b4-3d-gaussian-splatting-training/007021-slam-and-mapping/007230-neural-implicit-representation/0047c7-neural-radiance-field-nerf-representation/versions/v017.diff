@@ -1,0 +1,288 @@
+--- v016.md
++++ v017.md
+@@ -4,115 +4,201 @@
+ 
+ ## Overview
+-Neural Radiance Field (NeRF) representation is a method for encoding 3D scenes as continuous volumetric functions using neural networks, enabling high-quality novel view synthesis from sparse 2D images [S1]. While standard NeRF implicitly maps position and view direction to color and density via a Multi-Layer Perceptron (MLP), variants like Photon Field Networks extend this to model indirect global illumination by mapping position, view direction, and phase function coefficients to radiance [S1]. In the context of the parent tree (Gaussian Splatting), the term "NeRF Representation" often refers to the implicit baseline against which explicit Gaussian representations are compared, or specifically to the INGP architecture used in SLAM systems for efficient neural mapping [S3].
++Neural Radiance Field (NeRF) representation is a method for modeling 3D scenes using continuous volumetric functions, typically implemented via two distinct but related approaches: implicit neural fields (mapping coordinates to radiance) and explicit differentiable splatting (using 3D Gaussians). Implicit NeRFs solve the problem of novel view synthesis by learning a 6D function that maps spatial position and viewing direction to color and density, enabling photorealistic rendering from sparse inputs [S1][S2, unofficial]. Explicit NeRF representations, specifically 3D Gaussian Splatting, solve the computational bottleneck of implicit methods by representing the scene as millions of semi-transparent 3D Gaussian blobs, allowing real-time rendering speeds (>100 FPS) and significantly faster training times compared to traditional neural field evaluation [S2, unofficial]. While implicit NeRFs store the scene inside a neural network with low memory footprint, explicit Gaussian Splatting stores it as a set of geometric primitives with higher memory usage but superior rendering performance [S2, unofficial].
+ 
+ ## How it works
+-The implementation of NeRF representation varies significantly between the implicit MLP-based approach (standard NeRF/INGP) and the photon-field-based approach (Photon Field Networks). The following details cover the standard implicit NeRF/INGP architecture, which is the foundational method for SLAM and mapping contexts, alongside the specific Photon Field Network variant cited in the sources.
+-
+-### Inputs and Outputs
+-*   **Inputs:** A set of $N$ calibrated images with known camera poses $T_i$, intrinsics, and optionally depth maps or semantic labels.
+-*   **Outputs:** A neural network (or set of networks) that, given a 3D point $x$ and view direction $\vec{\omega}$, outputs color $C$ and volume density $\sigma$. For Photon Fields, the output is indirect radiance $L_i$ conditioned on a phase coefficient $g$.
+-
+-### Data Structures
+-1.  **Neural Network (MLP):**
+-    *   **Structure:** A Multi-Layer Perceptron. Standard INGP uses a hashgrid encoding followed by an MLP [S1, S3].
+-    *   **Encoding:** Hashgrid encoding for positions (3D) and directions (2D). Typical configuration: 16 grid levels, 8 features per level, 2x scaling factor between levels, hash table size $2^{19}$ [S1].
+-    *   **Network Layers:** 5-layer perceptron, 64 neurons per layer, ReLU activations between hidden layers, no output activation [S1].
+-    *   **Parameters:** The network weights are the primary learnable parameters.
+-
+-2.  **3D Gaussian Splatting Representation (Explicit Alternative):**
+-    *   **Structure:** A set of $M$ 3D Gaussians $\mathcal{G}$.
+-    *   **Layout:** Each Gaussian stores ~59 learnable numbers:
+-        *   Position: 3 floats (center in 3D space).
+-        *   Scale: 3 floats.
+-        *   Rotation: 4 floats (quaternion).
+-        *   Opacity: 1 float.
+-        *   Color: Spherical Harmonics coefficients (view-dependent color).
+-    *   **Covariance:** Constructed as $R S S^T R^T$ to ensure positive semi-definiteness, where $R$ is the rotation matrix and $S$ is the scale matrix [S2, unofficial].
+-
+-### Numbered Steps (Implicit NeRF/INGP)
+-1.  **Initialization:** Initialize the neural network weights. For SLAM applications, initialize the network with a coarse estimate or random weights [S3].
+-2.  **Ray Sampling:** For a target pixel, cast a ray from the camera origin through the pixel. Sample $K$ points along the ray within the scene bounds.
+-3.  **Encoding:** Encode the 3D position $x$ and view direction $\vec{\omega}$ using the hashgrid encoder.
+-4.  **Network Inference:** Pass encoded inputs through the MLP to predict density $\sigma$ and color $C$.
+-    *   *Note:* For Photon Fields, the input also includes a phase coefficient $g$, and the output is indirect radiance $L_i$ [S1].
+-5.  **Volume Rendering:** Compute the pixel color $C$ using alpha compositing:
+-    $$ C = \sum_{i=1}^K T_i \left( 1 - e^{-\sigma_i \delta_i} \right) C_i $$
+-    where $T_i = e^{-\sum_{j=1}^{i-1} \sigma_j \delta_j}$ is the accumulated transmittance, and $\delta_i$ is the distance between samples [S1].
+-6.  **Loss Computation:** Compare the rendered image with the ground truth image using an L1 loss combined with a Structural Similarity (SSIM) term [S2, unofficial].
+-7.  **Optimization:** Backpropagate the error to update the network weights (and potentially camera poses in SLAM) via gradient descent [S3].
+-
+-### Numbered Steps (Photon Field Networks Variant)
+-1.  **Photon Tracing:** Generate a photon map by tracing photons from light sources. Store photons past their first interaction with the medium. Assign each photon a phase coefficient $g$ from a discrete set $G = \{-0.75, 0.0, 0.75\}$ [S1].
+-2.  **KD-Tree Construction:** Construct a GPU-based KD-tree on the photon map for fast spatial queries [S1].
+-3.  **Sample Generation:** Generate training batches of size $2^{16}$. Each batch contains uniformly sampled grid coordinates $x \in [0,1]$, random uniform directions $\vec{\omega}$, and phase coefficients $g$ [S1].
+-4.  **Ground Truth Estimation:** For each sample, compute ground truth radiance using a KNN query ($K=1024$) on the photon map:
+-    $$ L_i(x, \vec{\omega}) \approx \sum_{n=1}^K p_g(x, \vec{\omega}, \vec{\omega}_n) \frac{\Phi_n}{4\pi r^3} $$
+-    where $r$ is the distance to the farthest photon, $\Phi_n$ is photon intensity, and $p_g$ is the Henyey-Greenstein phase function [S1].
+-5.  **Target Encoding:** Normalize radiance values logarithmically:
+-    $$ L_i'(x, \vec{\omega}) = \begin{cases} -\frac{\log_{10}(L_i(x, \vec{\omega}))}{\psi} & \text{if } L_i(x, \vec{\omega}) > \frac{1}{10^{\psi}} \\ 1 & \text{otherwise} \end{cases} $$
+-    where $\psi \in [4, 6]$ is the precision parameter [S1].
+-6.  **Network Training:** Train the 5-layer MLP to predict $L_i'$. Decode output using $L_i(x, \vec{\omega}) = 10^{-L_i'(x, \vec{\omega})} \cdot \Psi$ [S1].
+-
+-### Formulas
+-*   **Photon Field Mapping:**
+-    $$ P_{\theta}(x, g, \vec{\omega}) = (R, G, B) $$
+-    where $x \in [0,1]^3$, $g \in [-1,1]$, $\vec{\omega}$ is view direction [S1].
+-*   **Indirect Radiance Approximation:**
+-    $$ P_{\theta}(x, g, \vec{\omega}) \approx L_i(x, \vec{\omega}) = \int_{\Omega_{4\pi}} p_g(x, \vec{\omega}, \vec{\omega}_i) L(x, \vec{\omega}_i) d\omega_i $$
+-    [S1].
+-*   **Gaussian Covariance:**
+-    $$ \Sigma = R S S^T R^T $$
+-    [S2, unofficial].
+-
+-### Parameters
+-*   **Batch Size:** $2^{16}$ for Photon Fields [S1].
+-*   **KNN Neighbors:** $K=1024$ [S1].
+-*   **Precision Parameter ($\psi$):** 4 to 6 [S1].
+-*   **Phase Coefficients ($G$):** $\{-0.75, 0.0, 0.75\}$ [S1].
+-*   **Tile Size:** 16x16 pixels for Gaussian Splatting rasterization [S2, unofficial].
+-
+-### Edge Cases and Pitfalls
+-*   **Floating Artifacts:** Gaussian Splatting can produce floating artifacts and needle-like Gaussians in regions seen by few cameras [S2, unofficial].
+-*   **Aliasing:** Zooming in or out can cause aliasing in Gaussian Splatting [S2, unofficial].
+-*   **Mesh Extraction:** Neither standard NeRF nor Gaussian Splatting directly provides a clean surface or mesh [S2, unofficial].
+-*   **High-Frequency Renderings:** In NeRF-based SLAM, high-frequency renderings can hinder image alignment; addressed by KL regularization over ray termination distribution in SLAIM [S3].
++The term "NeRF Representation" in the context of modern SLAM and mapping encompasses two primary implementation strategies: the original implicit Neural Radiance Field and the explicit 3D Gaussian Splatting (often referred to as INGP or Instant Neural Graphics Primitives in SLAM contexts).
++
++### Implicit Neural Radiance Field (Photon Field / Standard NeRF)
++This approach models the scene as a continuous function approximating the volume rendering equation.
++
++**Inputs and Outputs:**
++*   **Input:** 3D position $x \in [0,1]^3$, view direction $\vec{\omega}$ (normalized spherical coordinates), and optionally a phase function coefficient $g \in [-1,1]$ for photon fields [S1].
++*   **Output:** Color $(R, G, B)$ and volume density $\sigma$ (or indirect radiance $L_i$) [S1][S2, unofficial].
++
++**Data Structures:**
++*   **Hashgrid Encoding:** Positions and directions are encoded using a hashgrid with 16 levels, 8 features per level, a 2x scaling factor between levels, and a hash table size of $2^{19}$ [S1]. The phase coefficient $g$ is left unencoded [S1].
++*   **Neural Network:** A 5-layer Multi-Layer Perceptron (MLP) with 64 neurons per layer, ReLU activations for hidden layers, and no output activation [S1].
++*   **Photon Map (for Photon Fields):** A GPU-based kd-tree constructed from multi-phase photon maps to enable fast spatial queries [S1].
++
++**Numbered Steps:**
++1.  **Initialization:** For standard NeRF, initialize the network weights. For Photon Fields, generate training batches of size $2^{16}$ containing uniformly sampled grid coordinates $x$, random uniform directions $\vec{\omega}$, and phase coefficients $g$ [S1]. For Gaussian Splatting, initialize a sparse cloud of 3D points from Structure from Motion (e.g., COLMAP) [S2, unofficial].
++2.  **Sampling/Ray Casting:** Cast rays from the camera through each pixel. Sample points along the ray within the scene bounds [S2, unofficial]. For Photon Fields, perform KNN queries on the photon map to estimate ground truth radiance [S1].
++3.  **Network Evaluation:**
++    *   Encode the sampled position and direction using the hashgrid [S1].
++    *   Feed encoded features into the MLP to predict log-encoded radiance $L_i'$ or density/color [S1][S2, unofficial].
++    *   For Photon Fields, decode the output using the inverse logarithmic transformation: $L_i(x, \vec{\omega}) = 10^{-L_i'(x, \vec{\omega})} \cdot \Psi$ [S1].
++4.  **Rendering (Alpha Compositing):** Compute the final pixel color $C$ by integrating along the ray:
++    $$ C = \sum_{i=1}^N T_i \alpha_i c_i $$
++    where $\alpha_i = 1 - \exp(-\sigma_i \delta_i)$, $T_i = \exp(-\sum_{j=1}^{i-1} \sigma_j \delta_j)$, and $c_i$ is the color [S2, unofficial].
++5.  **Training Loss:** Compare the rendered image with the ground truth image using an L1 loss combined with a Structural Similarity (SSIM) term [S2, unofficial].
++6.  **Optimization:** Backpropagate the error to update network weights (for implicit NeRF) or Gaussian parameters (for explicit Splatting) via gradient descent [S2, unofficial].
++
++**Formulas:**
++*   **Photon Field Mapping:** $P_{\phi}(x, g, \vec{\omega}) \approx L_i(x, \vec{\omega}) = \int_{\Omega_{4\pi}} p_g(x, \vec{\omega}, \vec{\omega}_i) L(x, \vec{\omega}_i) d\omega_i$ [S1].
++*   **Radiance Estimation (Photon Fields):** $L_i(x, \vec{\omega}) \approx \sum_{n=1}^K p_g(x, \vec{\omega}, \vec{\omega}_n) \frac{\Phi_n}{4\pi r^3}$, where $K=1024$ and $r$ is the distance to the farthest photon [S1].
++*   **Target Encoding:** $L_i'(x, \vec{\omega}) = \begin{cases} -\frac{\log_{10}(L_i(x, \vec{\omega}))}{\psi} & \text{if } L_i(x, \vec{\omega}) > \frac{1}{10^{\psi}} \\ 1 & \text{otherwise} \end{cases}$, with $\psi \in [4, 6]$ [S1].
++*   **Gaussian Covariance:** Constructed as $R S S^T R^T$ to ensure positive semi-definiteness, where $R$ is rotation and $S$ is scale [S2, unofficial].
++
++**Parameters:**
++*   $\psi$: Precision parameter for logarithmic encoding, typically 4-6 [S1].
++*   $G$: Discrete phase coefficients, typically $\{-0.75, 0.0, 0.75\}$ [S1].
++*   Batch Size: $2^{16}$ for Photon Fields [S1].
++
++**Pseudocode (Implicit NeRF Training Step):**
++```python
++def train_step_implicit_neRF(camera_pose, gt_image, nerf_model, optimizer):
++    # 1. Cast rays
++    rays = generate_rays(camera_pose, gt_image.shape)
++    
++    # 2. Sample points along rays
++    points = sample_points_along_rays(rays, num_samples=256)
++    
++    # 3. Encode inputs
++    encoded_pos = hashgrid_encode(points.position)
++    encoded_dir = hashgrid_encode(points.direction)
++    
++    # 4. Network forward pass
++    # Concatenate encoded position and direction
++    features = concatenate(encoded_pos, encoded_dir)
++    # Pass through 5-layer MLP
++    log_radiance = nerf_model.forward(features)
++    
++    # 5. Decode radiance (if using Photon Field encoding)
++    psi = 4.0
++    radiance = 10**(-log_radiance) * psi
++    
++    # 6. Volume Rendering (Alpha Compositing)
++    rendered_color = volume_render(radiance, points.density, points.depth)
++    
++    # 7. Compute Loss
++    l1_loss = abs(rendered_color - gt_image)
++    ssim_loss = compute_ssim(rendered_color, gt_image)
++    loss = l1_loss + 0.2 * ssim_loss
++    
++    # 8. Backpropagation
++    optimizer.zero_grad()
++    loss.backward()
++    optimizer.step()
++    
++    return loss
++```
++
++### Explicit 3D Gaussian Splatting (INGP)
++This approach represents the scene explicitly as a set of 3D Gaussians.
++
++**Inputs and Outputs:**
++*   **Input:** Sparse point cloud from SfM (e.g., COLMAP), camera poses, and training images [S2, unofficial].
++*   **Output:** Rendered image, updated Gaussian parameters (position, scale, rotation, opacity, color) [S2, unofficial].
++
++**Data Structures:**
++*   **Gaussian Blob:** Each Gaussian stores ~59 learnable numbers: position (3D), scale (3D), rotation (quaternion/4D), opacity (1D), and spherical harmonics coefficients for color (view-dependent) [S2, unofficial].
++*   **Tiling:** Screen divided into 16x16 pixel tiles [S2, unofficial].
++
++**Numbered Steps:**
++1.  **Initialization:** Generate a sparse cloud of 3D points from SfM. Each point becomes the center of one 3D Gaussian [S2, unofficial].
++2.  **Projection:** Project each 3D Gaussian onto the 2D image plane. The 2D covariance is computed using the camera transformation and a local linear approximation [S2, unofficial].
++3.  **Tiling:** Assign each Gaussian to the 16x16 tiles it overlaps [S2, unofficial].
++4.  **Sorting:** Sort Gaussians within each tile by depth (front-to-back) using a fast GPU sort [S2, unofficial].
++5.  **Rasterization/Blending:** For each pixel, blend colors front-to-back using alpha compositing:
++    $$ C_i = \sum_{j \in \mathcal{O}_i} \alpha_{ij} \prod_{k=1}^{j-1} (1 - \alpha_{ik}) C_{ij} $$
++    where $\alpha_{ij}$ is the opacity and $C_{ij}$ is the color evaluated via spherical harmonics [Parent](3761-3d-gaussian-splatting-training.md).
++6.  **Loss Computation:** Calculate L1 loss and SSIM between rendered and ground truth images [S2, unofficial].
++7.  **Optimization:** Backpropagate to update Gaussian attributes [S2, unofficial].
++8.  **Adaptive Density Control:**
++    *   **Cloning:** Clone small Gaussians in under-reconstructed regions [S2, unofficial].
++    *   **Splitting:** Split large Gaussians covering too much detail into two smaller ones [S2, unofficial].
++    *   **Pruning:** Remove Gaussians that become nearly transparent [S2, unofficial].
++
++**Pseudocode (Gaussian Splatting Rasterization):**
++```python
++def rasterize_gaussians(gaussians, camera, image_width, image_height):
++    tiles = create_tiles(16, 16, image_width, image_height)
++    rendered_image = zeros_like(image)
++    
++    for tile in tiles:
++        # 1. Find overlapping Gaussians
++        overlapping_gaussians = find_overlapping_gaussians(gaussians, tile)
++        
++        # 2. Sort by depth
++        sorted_gaussians = sort_by_depth(overlapping_gaussians)
++        
++        # 3. Rasterize
++        for pixel in tile.pixels:
++            accumulated_alpha = 0.0
++            accumulated_color = zeros(3)
++            
++            for gaussian in sorted_gaussians:
++                # Project 3D Gaussian to 2D
++                mu_2d, sigma_2d = project_gaussian(gaussian, camera)
++                
++                # Check if pixel is within Gaussian support
++                if is_inside_support(pixel, mu_2d, sigma_2d):
++                    # Compute 2D Gaussian value
++                    alpha = compute_alpha(pixel, mu_2d, sigma_2d, gaussian.opacity)
++                    
++                    # Compute color from SH
++                    color = evaluate_sh(gaussian.sh_coeffs, gaussian.position, camera.direction)
++                    
++                    # Alpha compositing
++                    weight = alpha * (1 - accumulated_alpha)
++                    accumulated_color += weight * color
++                    accumulated_alpha += weight
++                    
++                    if accumulated_alpha > 0.99:
++                        break
++            
++            rendered_image[pixel] = accumulated_color
++            
++    return rendered_image
++```
+ 
+ ## Subtopics
+ 
+ ### [Scene NeRF](12484-scene-nerf.md)
+-Isolates static background by training exclusively on background pixels, excluding dynamic foreground.
++Isolates static background by training exclusively on background pixels, excluding dynamic foregrounds.
+ 
+ ### [NeRF-OSR](14477-nerf-osr.md)
+-Outdoor scene relighting, decomposing scene into albedo, geometry, and lighting for physical relighting.
++Outdoor scene relighting that decomposes scene into geometry, albedo, and lighting for physical relighting.
+ 
+ ### [Explicit Volumetric Rendering with Multiple View Aggregation](15335-explicit-volumetric-rendering-with-multiple-view-aggregation.md)
+-Uses explicit RGB$\alpha$ volume for real-time rendering, amortizing computation across views.
++Uses an explicit RGB$\alpha$ volume to amortize rendering across views, enabling real-time rendering and SSIM losses.
+ 
+ ### [Dynamic Neural Radiance Fields](16398-dynamic-neural-radiance-fields.md)
+-Models dynamic human faces using morphable model parameters and per-frame latent codes.
++Models facial dynamics using a neural scene representation conditioned on morphable model expression parameters.
+ 
+ ### [Neural Network Pruning for NeRF](17703-neural-network-pruning-for-nerf.md)
+ Compresses NeRF by pruning MLP weights with smallest magnitudes.
+ 
++### [Scene Auto-Encoder](17789-scene-auto-encoder.md)
++Encodes RGB images into 3D neural fields (density/feature voxel grids) via 2D CNN encoder and frustum lifting.
++
+ ### SLAIM
+-A SLAM method introducing a coarse-to-fine tracking pipeline and improving photometric bundle adjustment for NeRF-based mapping. It maintains NeRF’s volume density formulation but adds KL regularization over ray termination distribution to address high-frequency rendering issues hindering image alignment [S3].
++A SLAM method introducing a coarse-to-fine tracking pipeline and improving photometric bundle adjustment for NeRF-based mapping. It maintains NeRF’s original volume density formulation while introducing KL regularization over the ray termination distribution to address high-frequency rendering hindrances in image alignment [S3].
+ 
+ ### SNI-SLAM
+-A dense NeRF-based RGB-D SLAM system for real-time 3D semantic mapping. It uses hierarchical semantic encoding and cross-attention to reinforce appearance, geometry, and semantics, with a one-way decoder to prevent reverse interference [S3].
++A dense NeRF-based RGB-D SLAM system for accurate real-time 3D semantic mapping. It introduces hierarchical semantic encoding and cross-attention mechanisms for mutual reinforcement between appearance, geometry, and semantics, using a novel one-way decoder design [S3].
+ 
+ ### KN-SLAM
+-A NeRF-based SLAM method integrating local feature correspondences for coarse pose initialization and joint optimization. It uses global image features and local matches for loop detection, followed by pose graph optimization [S3].
++A NeRF-based SLAM method integrating local feature correspondences for coarse pose initialization and joint optimization. It uses global image features and local matches for explicit loop detection, followed by pose graph optimization and global refinement [S3].
+ 
+ ### VI-NeRF-SLAM
+-Merges traditional SLAM with NeRF mapping for immediate, dense 3D reconstruction without prior training. It estimates depth and pose via feature reprojection constraints, refines scenes with ray integration, and includes dynamic IMU error correction and closed-loop management. It outperforms benchmarks on Euroc and Replica datasets, especially in grayscale scenarios [S4].
++Merges traditional SLAM benefits with NeRF mapping for immediate, dense 3D scene reconstruction online without prior training. It estimates pixel depth and pose based on feature point reprojection constraints, refines 3D scenes via ray integration, and includes dynamic IMU error correction and closed-loop management [S4].
+ 
+ ## Operating characteristics
+-*   **Time Complexity:** Standard NeRF training is slow (hours to days) due to per-ray MLP evaluations [S2, unofficial]. Gaussian Splatting reduces training to tens of minutes and rendering to >100 FPS [S2, unofficial]. Photon Fields replace costly scattering path evaluations with constant-time neural inference [S1].
+-*   **Memory Complexity:** Standard NeRF uses a few megabytes for the network [S2, unofficial]. Gaussian Splatting requires hundreds of megabytes for millions of Gaussians [S2, unofficial]. Photon Fields require storage for the photon map and KD-tree [S1].
+-*   **Strengths:** High-quality novel view synthesis, support for complex lighting (Photon Fields), real-time rendering (Gaussian Splatting), semantic integration (SNI-SLAM) [S1][S2, unofficial][S3].
+-*   **Limitations:** No direct mesh extraction, potential artifacts (floating, aliasing), high memory usage for explicit methods [S2, unofficial].
++*   **Implicit NeRF:**
++    *   **Time Complexity:** Training is slow, taking many hours to days due to per-ray neural network evaluations [S2, unofficial]. Rendering is also slow (seconds per image) [S2, unofficial].
++    *   **Memory Complexity:** Low memory footprint (a few megabytes) as the scene is stored in the network weights [S2, unofficial].
++    *   **Strengths:** High-quality novel view synthesis, compact storage, handles complex lighting and shadows implicitly [S1][S2, unofficial].
++    *   **Limitations:** Slow training and rendering, difficulty in extracting clean meshes, potential for floating artifacts [S2, unofficial].
++*   **Explicit Gaussian Splatting (INGP):**
++    *   **Time Complexity:** Training is fast (tens of minutes) [S2, unofficial]. Rendering is real-time (>100 FPS) [S2, unofficial].
++    *   **Memory Complexity:** High memory usage (hundreds of megabytes) due to storing millions of Gaussian parameters [S2, unofficial].
++    *   **Strengths:** Real-time rendering, fast training, differentiable rasterization allows direct optimization of geometry [S2, unofficial].
++    *   **Limitations:** Floating artifacts, needle-like Gaussians in sparse-view regions, aliasing when zooming, no direct mesh extraction [S2, unofficial].
+ 
+ ## Background
+-NeRF was introduced by Mildenhall et al. in 2020, representing scenes as continuous volumetric functions [S1][S2, unofficial]. Gaussian Splatting was introduced by Kerbl et al. at SIGGRAPH 2023 as an explicit alternative [S2, unofficial]. Photon Field Networks were introduced to handle dynamic real-time volumetric global illumination [S1]. NeRF-based SLAM methods (SLAIM, SNI-SLAM, KN-SLAM, VI-NeRF-SLAM) have been developed from 2023 to 2024 to integrate neural representations into simultaneous localization and mapping [S3, S4].
++*   **Implicit NeRF:** Introduced by Mildenhall et al. in 2020, NeRF revolutionized novel view synthesis by using a fully connected neural network to represent 3D scenes as continuous volumetric functions [S1][S2, unofficial]. Photon Field Networks, a variant, were introduced to accelerate global illumination computation by replacing expensive photon tracing with neural network inference [S1].
++*   **Explicit Gaussian Splatting (INGP):** Introduced by Kerbl et al. at SIGGRAPH 2023, 3D Gaussian Splatting (often referred to as INGP in SLAM literature) represents scenes explicitly as 3D Gaussians, enabling real-time rendering and rapid training [S2, unofficial]. It has been widely adopted in virtual reality, film, robotics, and digital humans [S2, unofficial].
++*   **SLAM Integration:** Recent works like SLAIM, SNI-SLAM, KN-SLAM, and VI-NeRF-SLAM have integrated NeRF representations into SLAM systems to provide dense, photorealistic 3D maps, often combining neural fields with traditional geometric constraints [S3, S4].
+ 
+ ## Sources

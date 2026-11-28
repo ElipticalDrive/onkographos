@@ -1,0 +1,306 @@
+--- v001.md
++++ v002.md
+@@ -4,186 +4,96 @@
+ 
+ ## Overview
+-Hierarchical Traversal is a ray-intersection method that accelerates volume rendering by traversing a spatial hierarchy (such as an Octree or Sparse Voxel Octree) to skip empty space and coarsely approximate occupied regions [S1, S2, unofficial]. It solves the memory and performance bottlenecks of single-resolution discrete ray-tracing by allowing larger steps through empty areas [S1, S2, unofficial]. Unlike single-step discrete ray-tracing which requires a high-resolution 3D grid limited by memory, this method uses a hierarchy to represent the scene at multiple resolutions, bypassing memory limits and optimizing traversal time [S2, unofficial]. It is distinct from sibling methods like [Sparse Voxel Octree Ray Traversal](933-sparse-voxel-octree-ray-traversal.md) in its general applicability to any hierarchical grid structure, whereas SVO traversal specifically targets the sparse voxel data layout.
++Hierarchical Traversal is a ray-intersection method that accelerates volume rendering by traversing a spatial hierarchy (such as an Octree, Sparse Voxel Octree, or BVH) to skip empty space and coarsely approximate occupied regions [S1, S4, unofficial]. It solves the performance bottleneck of single-resolution discrete ray-tracing by allowing larger steps through empty areas [S1, unofficial]. Unlike sibling methods like [Sparse Voxel Octree Ray Traversal](933-sparse-voxel-octree-ray-traversal.md) which target specific sparse voxel layouts, this method provides a general framework for any hierarchical grid structure [G].
+ 
+ ## How it works
+ **Inputs and Outputs:**
+-*   **Input:** A ray defined by origin $O$ and direction $D$; a hierarchical data structure (e.g., Octree, BVH, SVO) representing the volume.
+-*   **Output:** A sequence of visited nodes/voxels in front-to-back order, or a boolean indicating if an intersection exists within a threshold.
++*   **Input:** Ray origin $O$, direction $D$, and a hierarchical data structure (Octree, SVO, or BVH) representing the volume [S2, S4, unofficial].
++*   **Output:** A sequence of visited nodes/voxels in front-to-back order, or a boolean indicating if an intersection exists within a threshold [S2, unofficial].
+ 
+ **Data Structures:**
+-The specific layout depends on the hierarchy type:
+-1.  **Octree/SVO:** Nodes are typically stored in arrays. An Octree node contains pointers to 8 children [S2, unofficial]. In SVO implementations, nodes may be packed into 32-bit integers where the high bit indicates emptiness or leaf status [S3, unofficial].
+-2.  **BVH (Bounding Volume Hierarchy):** Nodes are stored in a buffer. A `BVHNode` struct contains:
+-    *   `center`: `vec4` (or `f32[4]`) representing the bounding volume center [S3, unofficial].
+-    *   `radius`: `f32` representing the bounding sphere radius [S3, unofficial].
+-    *   `left_child`: `u32` index to the left child [S3, unofficial].
+-    *   `right_child`: `u32` index to the right child [S3, unofficial].
+-    *   Alignment: Packed in 16-byte alignment [S3, unofficial].
+-    *   Leaf nodes are identified by setting the high bit (0x80000000) of the child indices [S3, unofficial]. If a leaf is the last element and has no sibling, `right_child` is set to an empty node index (0) [S3, unofficial].
+-    *   `BVHLeaf` struct contains:
+-        *   `inv_model`: `mat4` (inverse model matrix) [S3, unofficial].
+-        *   `address`: `u32` pointing to the root of the SVO or target data [S3, unofficial].
++The layout depends on the hierarchy type:
++1.  **Octree/SVO:** Nodes store pointers to 8 children or an activity flag. Level $k$ cells cover a $2^k \times 2^k$ area of level 0 [S1, unofficial].
++2.  **BVH:** Nodes are stored in a buffer. A `BVHNode` struct contains: `center` (`f32[4]`), `radius` (`f32`), `left_child` (`u32`), `right_child` (`u32`), packed in 16-byte alignment [S2, unofficial]. Leaf nodes are identified by setting the high bit (`0x80000000`) of the child indices. If a leaf is the last element and has no sibling, `right_child` is set to `0` [S2, unofficial].
+ 
+ **Algorithm Steps:**
+-The general traversal follows a stack-based or recursive descent approach. Below is a unified pseudocode for a BVH-style hierarchical traversal, which is representative of the logic described in [S3, unofficial] and [S5, unofficial].
++The traversal uses a stack-based descent. At each node, the ray is tested against the bounding volume. If it intersects, the algorithm checks if the node is a leaf. If not, it computes intersection distances to both children, pushes the farther child onto the stack first, and descends into the closer child. This ensures front-to-back processing.
+ 
+ ```python
+-# Constants
+-BVH_STACK_SIZE = 64
+-EPSILON = 1e-4
+-MAX_T = 10000.0
+-
+-def traverse_hierarchy(ray_origin, ray_direction, bvh_nodes, bvh_leaves):
+-    # Initialize stack
+-    stack = [0] * BVH_STACK_SIZE
++def traverse_hierarchy(ray_origin, ray_direction, hierarchy, max_t):
++    stack = [0]
+     stack_ptr = 0
++    visited = []
+     
+-    # Push root node index (0)
+-    stack[stack_ptr] = 0
+-    stack_ptr += 1
+-    
+-    min_t = MAX_T
+-    hit_found = False
+-    
+-    while stack_ptr > 0:
++    while stack_ptr >= 0:
++        node_idx = stack[stack_ptr]
+         stack_ptr -= 1
+-        node_idx = stack[stack_ptr]
++        node = hierarchy.nodes[node_idx]
+         
+-        # Retrieve node data
+-        node = bvh_nodes[node_idx]
+-        
+-        # Check intersection with bounding volume (Sphere)
+-        # Simplified ray-sphere intersection logic
+-        oc = ray_origin - node.center[:3]
+-        a = dot(ray_direction, ray_direction)
+-        b = 2.0 * dot(oc, ray_direction)
+-        c = dot(oc, oc) - node.radius * node.radius
+-        discriminant = b * b - 4 * a * c
+-        
+-        if discriminant < 0:
+-            continue # No intersection with this BVH node
+-            
+-        sqrt_disc = sqrt(discriminant)
+-        t_near = (-b - sqrt_disc) / (2.0 * a)
+-        t_far = (-b + sqrt_disc) / (2.0 * a)
+-        
+-        # If the bounding volume is behind the ray or too far, skip
+-        if t_far < 0 or t_near > min_t:
++        if not ray_box_intersect(node.bv_min, node.bv_max, ray_origin, ray_direction, max_t):
+             continue
+             
+-        # Check if leaf
+-        is_leaf_left = (node.left_child & 0x80000000) != 0
+-        is_leaf_right = (node.right_child & 0x80000000) != 0
++        if node.is_leaf:
++            visited.append(node_idx)
++            continue
++            
++        left_t = ray_box_intersect(node.left_child.bv_min, node.left_child.bv_max, ray_origin, ray_direction, max_t)
++        right_t = ray_box_intersect(node.right_child.bv_min, node.right_child.bv_max, ray_origin, ray_direction, max_t)
+         
+-        if is_leaf_left or is_leaf_right:
+-            # Process leaves
+-            # If left is leaf, extract actual index by XORing flag
+-            if is_leaf_left:
+-                left_idx = node.left_child ^ 0x80000000
+-                # Call leaf tracer (e.g., SVO marcher or mesh intersection)
+-                hit_t, hit_color, hit_normal = bvh_trace_leaf(bvh_leaves[left_idx], ray_origin, ray_direction)
+-                if hit_t < min_t:
+-                    min_t = hit_t
+-                    hit_found = True
+-                    # Store hit data in output buffers o_t, o_color, o_normal
++        if left_t < max_t and right_t < max_t:
++            if left_t < right_t:
++                stack_ptr += 1; stack[stack_ptr] = node.right_child
++                stack_ptr += 1; stack[stack_ptr] = node.left_child
++            else:
++                stack_ptr += 1; stack[stack_ptr] = node.left_child
++                stack_ptr += 1; stack[stack_ptr] = node.right_child
++        elif left_t < max_t:
++            stack_ptr += 1; stack[stack_ptr] = node.left_child
++        elif right_t < max_t:
++            stack_ptr += 1; stack[stack_ptr] = node.right_child
+             
+-            if is_leaf_right:
+-                right_idx = node.right_child ^ 0x80000000
+-                # If right child is empty (last element), skip
+-                if right_idx != 0:
+-                    hit_t, hit_color, hit_normal = bvh_trace_leaf(bvh_leaves[right_idx], ray_origin, ray_direction)
+-                    if hit_t < min_t:
+-                        min_t = hit_t
+-                        hit_found = True
+-                        # Store hit data
++    return visited
++
++def ray_box_intersect(bv_min, bv_max, ray_origin, ray_direction, max_t):
++    t_min = -float('inf')
++    t_max = float('inf')
++    for i in range(3):
++        if ray_direction[i] == 0.0:
++            if ray_origin[i] < bv_min[i] or ray_origin[i] > bv_max[i]:
++                return float('inf')
+         else:
+-            # Internal node: Descend into children
+-            left_idx = node.left_child
+-            right_idx = node.right_child
+-            
+-            # Perform ray-sphere intersection for children to determine descent
+-            # This step is implicit in the logic: we descend if the ray intersects the child's BV
+-            # To optimize, we check which child is closer
+-            
+-            left_descend = False
+-            right_descend = False
+-            
+-            # Re-evaluate intersection for children if needed, 
+-            # or assume the parent check was a proxy and children need individual checks.
+-            # In many implementations, the parent BVH node bounds the union of children.
+-            # We must check children individually to know which to push.
+-            
+-            # For the sake of this generic implementation, we assume we push both 
+-            # if they intersect, ordered by distance.
+-            
+-            # Note: In a full implementation, one would compute t for left and right children
+-            # and push the farther one first.
+-            
+-            # Simplified: Push both if they are within range
+-            # In practice, one calculates t for left and right bounds.
+-            
+-            # Let's assume we push the closer child first, then the farther.
+-            # If only one intersects, push only that one.
+-            
+-            # Placeholder for specific child BVH intersection logic
+-            # left_t, right_t = compute_child_intersection(node, ray)
+-            
+-            # For generic hierarchical traversal, we push the children that intersect
+-            # Order matters for front-to-back: push farther child first
+-            
+-            # If both intersect:
+-            #   if left_t < right_t:
+-            #       push right
+-            #       push left
+-            #   else:
+-            #       push left
+-            #       push right
+-            # If one intersects:
+-            #   push that one
+-            # If neither:
+-            #   pop (already done by loop condition)
+-            
+-            # Since we don't have child BVH data in this snippet, we assume 
+-            # the caller handles the specific child intersection test before pushing.
+-            # Here we just demonstrate the stack logic.
+-            pass
+-
+-    return hit_found, min_t
+-
+-def bvh_trace_leaf(leaf, ray_origin, ray_direction):
+-    # Apply inverse model matrix to ray
+-    # Intersect with target geometry (SVO or Mesh)
+-    # Return t, color, normal
+-    return 0.0, [0,0,0], [0,0,0]
++            t1 = (bv_min[i] - ray_origin[i]) / ray_direction[i]
++            t2 = (bv_max[i] - ray_origin[i]) / ray_direction[i]
++            t_min = max(t_min, min(t1, t2))
++            t_max = min(t_max, max(t1, t2))
++    return t_min if t_min < max_t and t_max > 0.0 else float('inf')
+ ```
+ 
+ **Parameters:**
+-*   **Resolution:** In two-step methods, the first step uses a coarse resolution (upper octree levels) and the second step uses a finer resolution (lower levels) [S2, unofficial]. The transition is calculated in floating-point arithmetic, requiring high precision [S2, unofficial].
+-*   **Stopping Depth:** In two-pass hierarchy traversal, the first step stops at a specific depth relative to the leaves (e.g., depth=3) [S9].
++*   **Stopping Depth:** In two-pass hierarchy traversal, the first step stops at a specific depth relative to the leaves (e.g., depth=3) [S8].
+ 
+ **Edge Cases and Pitfalls:**
+-*   **Precision:** The transition between resolution levels in two-step methods is calculated in floating-point arithmetic, which requires high precision for correctness [S2, unofficial].
+-*   **Leaf Identification:** Leaf nodes are identified by the high bit (0x80000000) of child indices. If a leaf is the last element and has no sibling, `right_child` is set to 0 [S3, unofficial].
+-*   **Empty Nodes:** If a node is null, the activity check returns false [S6, unofficial].
++*   **Precision:** Zero direction components must be handled with an epsilon guard to avoid division by zero [G].
++*   **Leaf Identification:** Leaf nodes are identified by the high bit (`0x80000000`) of child indices. If a leaf is the last element and has no sibling, `right_child` is set to `0` [S2, unofficial].
++*   **Boundary Voxels:** When a ray exits the grid bounds, `step_mask` logic must be applied to clamp traversal or return false [S2, unofficial].
+ 
+ ## Subtopics
+ 
+ ### [Leaf Collection](899-leaf-collection.md)
+-A feedback mechanism that collects indices of visited nodes to maintain data coherence between GPU and CPU, targeting streaming/caching decisions based on rendering status.
++Leaf Collection extracts terminal nodes from a hierarchical spatial structure into a linear list for batch processing [G]. It decouples traversal from ray-casting, differing from methods like [Hierarchical Digital Differential Analyzer (HDDA)](1122-hierarchical-digital-differential-analyzer-hdda.md) that integrate traversal into rasterization [G].
+ 
+ ### [Point Plane Test Traversal](982-point-plane-test-traversal.md)
+-A traversal algorithm for TET-AMR refinement trees that identifies the child tetrahedron containing a sample point by performing plane tests against midpoints of parent edges.
++A traversal algorithm for TET-AMR refinement trees that identifies the child tetrahedron containing a sample point by performing plane tests against the midpoints of the parent tetrahedron's edges [G].
+ 
+ ### [Mesh BVH](1062-mesh-bvh.md)
+-A GPU-accelerated BVH for triangle meshes, serving as a geometric backend for SDFs, enabling fast distance queries for high-frequency surface details.
++Mesh BVH is a GPU-accelerated bounding volume hierarchy designed for triangle meshes to perform efficient distance queries, serving as the geometric backend for signed distance field (SDF) representations in volume rendering pipelines. It enables fast evaluation of point-to-mesh distance, closest point location, and topological properties (sign, winding number) required for ray-marching or grid-based rendering. Unlike hierarchical voxel traversals that operate on implicit grid structures, this method operates directly on explicit triangle geometry, making it suitable for high-frequency surface details that would be prohibitive to store in a dense or even sparse voxel grid.
+ 
+ ### [Hierarchical Digital Differential Analyzer (HDDA)](1122-hierarchical-digital-differential-analyzer-hdda.md)
+-A specialized traversal for Sparse Voxel Octrees (OpenVDB) that uses multi-resolution leapfrogging and DDA at each node level to skip non-intersected nodes.
++The Hierarchical Digital Differential Analyzer (HDDA) is a specialized ray-traversal algorithm for sparse voxel grids (specifically OpenVDB) that performs multi-resolution leapfrogging to efficiently determine voxels or tiles intersected by a ray. It leverages the compile-time fixed tree configuration of VDB to inline and collapse the hierarchical traversal, reducing the overhead of vertical tree navigation. Unlike generic BVH or KD-tree traversals, HDDA is tightly coupled to the B+tree structure of VDB, using DDA at each node level (InternalNode2, InternalNode1, Leaf) to skip non-intersected nodes and return leaf intersections in front-to-back order.
+ 
+ ### [Multi-Resolution Rendering with K-D Tree](1942-multi-resolution-rendering-with-k-d-tree.md)
+-Uses k-d tree nodes to store data approximations with error terms; draws if error is below threshold, otherwise continues traversal.
++A rendering technique using k-d tree nodes to store approximations of data (nodal models) with associated error terms. If the error is below a user-specified threshold, the nodal region is drawn using the approximation; otherwise, traversal continues [G].
+ 
+ ### [VolumeHDDA](2353-volumehdda.md)
+-A class for volume traversal using a hierarchical DDA approach, specialized for leaf nodes.
++A class for volume traversal using a hierarchical DDA approach, specialized for leaf nodes [G].
+ 
+ ### [Coarse Mesh Traversal](3062-coarse-mesh-traversal.md)
+@@ -191,42 +101,41 @@
+ 
+ ### [Node Omission in Ray-Tree Traversal](3305-node-omission-in-ray-tree-traversal.md)
+-An optimization that prevents adding nodes to the traversal stack if they are known not to intersect the ray.
++An optimization that prevents adding nodes to the traversal stack if it is known they will not intersect the ray, reducing the number of intersection tests [G].
+ 
+ ### [Adaptive Out-of-Core Single-Pass GPU Raycasting](3440-adaptive-out-of-core-single-pass-gpu-raycasting.md)
+-Decomposes volumes into cubical bricks in an octree; uses a compact indexing structure in a texture for stackless raycasting, with an adaptive CPU loader for out-of-core data.
++An adaptive out-of-core technique for rendering massive scalar volumes employing single pass GPU raycasting. It decomposes a volumetric dataset into small cubical bricks organized into an octree structure maintained out-of-core. The octree contains original data at leaves and filtered representations of children at inner nodes. An adaptive loader on the CPU updates a view- and transfer function-dependent working set of bricks on GPU memory by asynchronously fetching data. A compact indexing structure spatially organizes the working set into an octree hierarchy encoded in a small texture, exploited by a stackless raycasting algorithm [G].
+ 
+ ### [Octree Traversal](3859-octree-traversal.md)
+-The base hierarchical indexing mechanism using 2x2x2 subdivisions.
++The base hierarchical indexing mechanism using 2x2x2 subdivisions [G].
+ 
+ ### Surface Descendant Check
+-A recursive function to determine if a node or any of its descendants are marked as active or contain a surface. If the cell is a Leaf, it returns whether it has a sign change. If it is a Branch, it recursively checks if any of its children have a surface descendant. If it is Empty or Full, it returns false [S4, unofficial].
++A recursive function to determine if a node or any of its descendants are marked as active or contain a surface [S3, unofficial]. If the cell is a Leaf, it returns whether it has a sign change. If it is a Branch, it recursively checks if any of its children have a surface descendant. If it is Empty or Full, it returns false [S3, unofficial].
+ 
+ ### Coarse Mesh Traversal via BVH
+-Uses a Bounding Volume Hierarchy (BVH) built over the coarse tetrahedral mesh to efficiently locate the coarse element containing a sample point [S7, unofficial]. The BVH is built by inserting four triangular faces facing outside for every coarse element. Rays are traced using hit/miss functions; the hit function returns the hit point and coarse tetrahedron ID. Unlike element marching, this allows skipping coarse elements and varying refinement levels [S7, unofficial].
++Uses a Bounding Volume Hierarchy (BVH) built over the coarse tetrahedral mesh to efficiently locate the coarse element containing a sample point [S6, unofficial]. The BVH is built by inserting four triangular faces facing outside for every coarse element. Rays are traced using hit/miss functions; the hit function returns the hit point and coarse tetrahedron ID. Unlike element marching, this allows skipping coarse elements and varying refinement levels [S6, unofficial].
+ 
+ ### Perspective-Correct AMR Patch Traversal
+-A hybrid CPU-GPU strategy where the CPU traverses a KD-tree of AMR patches back-to-front, and the GPU traverses cells within a patch. Sub-patches are generated to ensure perspective-correct sorting of cells relative to the observer. The vertex shader modifies indices based on the observer position to ensure proper cell ordering [S8].
++A hybrid CPU-GPU strategy where the CPU traverses a KD-tree of AMR patches back-to-front, and the GPU traverses cells within a patch. Sub-patches are generated to ensure perspective-correct sorting of cells relative to the observer. The vertex shader modifies indices based on the observer position to ensure proper cell ordering [S7].
+ 
+ ### Two-Pass Hierarchy Traversal
+-An optimization that splits traversal into two steps with a stopping depth in the first step. Step 1 traverses down to a specific depth relative to the leaves (e.g., depth=3). Step 2 traverses the remaining lower part for nodes identified in Step 1. At optimal stopping depth (3), it reduces time by 15% alone, and up to 30% with tile sharing. If stopping depth is 0, performance equals the direct implementation [S9].
++An optimization that splits traversal into two steps with a stopping depth in the first step. Step 1 traverses down to a specific depth relative to the leaves (e.g., depth=3). Step 2 traverses the remaining lower part for nodes identified in Step 1. At optimal stopping depth (3), it reduces time by 15% alone, and up to 30% with tile sharing. If stopping depth is 0, performance equals the direct implementation [S8].
+ 
+ ## Operating characteristics
+-*   **Time Complexity:** Generally $O(\log N)$ for balanced hierarchies, where $N$ is the number of voxels/objects, compared to $O(N)$ for linear traversal.
+-*   **Memory Complexity:** Depends on the hierarchy. Octrees require storing node pointers. SVOs store only non-empty nodes, reducing memory usage significantly for sparse data [S1, S2, unofficial].
+-*   **Performance:** Results show a five-fold reduction in time compared to single-step implementations [S2, unofficial]. Hierarchical SVO traversal took 5 steps to intersect an occupied voxel compared to 11 steps for non-hierarchical traversal in example grids [S1, unofficial].
+-*   **Strengths:** Efficiently skips empty space; handles large datasets that exceed memory limits for dense grids; supports multi-resolution rendering [S1, S2, unofficial].
+-*   **Limitations:** Requires high precision for floating-point transitions between resolution levels [S2, unofficial]; overhead of tree traversal for very dense or small scenes may negate benefits.
++*   **Time Complexity:** Generally $O(\log N)$ for balanced hierarchies, where $N$ is the number of voxels/objects, compared to $O(N)$ for linear traversal [G].
++*   **Memory Complexity:** Depends on the hierarchy. Octrees require storing node pointers. SVOs store only non-empty nodes, reducing memory usage significantly for sparse data [S1, unofficial].
++*   **Performance:** Hierarchical SVO traversal took 5 steps to intersect an occupied voxel compared to 11 steps for non-hierarchical traversal in example grids [S1, unofficial].
++*   **Strengths:** Efficiently skips empty space; supports multi-resolution rendering [S1, unofficial].
++*   **Limitations:** Traversal overhead for very dense or small scenes may negate benefits [G].
+ 
+ ## Background
+-Hierarchical traversal was introduced by Kay and Kajiya in 1986 as a method for speeding up ray-object intersection calculations using a hierarchy of extents [S5, unofficial]. It has since been adapted for volume rendering, particularly with Sparse Voxel Octrees (SVO) and Octrees, to handle huge voxel spaces that would otherwise be impractical due to memory constraints [S1, S2, unofficial]. The two-step approach was developed to optimize performance by leveraging the octree's ability to represent scenes at multiple resolutions [S2, unofficial].
++Hierarchical traversal was introduced by Kay and Kajiya in 1986 as a method for speeding up ray-object intersection calculations using a hierarchy of extents [S4, unofficial]. It has since been adapted for volume rendering, particularly with Sparse Voxel Octrees (SVO) and Octrees, to take larger steps through empty space and speed up the process [S1, unofficial].
+ 
+ ## Sources
+ [S1] versal algorithm for ray tracing Hur man gör en hierarkisk ..., https://kth.diva-portal.org/smash/get/diva2:2069409/FULLTEXT01.pdf, fetched 2026-10-25 (unofficial)
+-[S2] Discrete Ray-Tracing of Huge Voxel Spaces - doczz.net, https://doczz.net/doc/7276913/discrete-ray-tracing-of-huge-voxel-spaces, fetched 2026-10-25 (unofficial)
+-[S3] mxbrt/svo, https://github.com/mxbrt/svo, fetched 2026-10-26 (unofficial)
+-[S4] narnia-ai-mason/isomesh, https://github.com/narnia-ai-mason/isomesh, fetched 2026-10-27 (unofficial)
+-[S5] (PDF) Axis‐Normalized Ray‐Box Intersection - ResearchGate, https://www.researchgate.net/publication/390921688_Axis-Normalized_Ray-Box_Intersection, fetched 2026-10-30 (unofficial)
+-[S6] GitHub - saurlax/model_voxelizer: A 3D model voxelization tool that ..., https://github.com/saurlax/model_voxelizer, fetched 2026-10-30 (unofficial)
+-[S7] Direct volume rendering of tree-based tetrahedral adaptive mesh refinement data, https://repository.bilkent.edu.tr/items/fcbc592a-2646-49af-8b84-67308b6fd3e9, fetched 2026-10-27 (unofficial)
+-[S8] High-Quality, Semi-Analytical Volume Rendering for AMR ..., https://people.freedesktop.org/~marcheu/vis09-amr.pdf, fetched 2026-10-26
+-[S9] Point-Based Rendering for Homogeneous Participating Media with Refractive Boundaries, https://doi.org/10.1109/TVCG.2017.2768525, fetched 2026-10-26+[S2] mxbrt/svo, https://github.com/mxbrt/svo, fetched 2026-10-26 (unofficial)
++[S3] narnia-ai-mason/isomesh, https://github.com/narnia-ai-mason/isomesh, fetched 2026-10-27 (unofficial)
++[S4] (PDF) Axis‐Normalized Ray‐Box Intersection - ResearchGate, https://www.researchgate.net/publication/390921688_Axis-Normalized_Ray-Box_Intersection, fetched 2026-10-30 (unofficial)
++[S5] GitHub - saurlax/model_voxelizer: A 3D model voxelization tool that ..., https://github.com/saurlax/model_voxelizer, fetched 2026-10-30 (unofficial)
++[S6] Direct volume rendering of tree-based tetrahedral adaptive mesh refinement data, https://repository.bilkent.edu.tr/items/fcbc592a-2646-49af-8b84-67308b6fd3e9, fetched 2026-10-27 (unofficial)
++[S7] High-Quality, Semi-Analytical Volume Rendering for AMR ..., https://people.freedesktop.org/~marcheu/vis09-amr.pdf, fetched 2026-10-26
++[S8] Point-Based Rendering for Homogeneous Participating Media with Refractive Boundaries, https://doi.org/10.1109/TVCG.2017.2768525, fetched 2026-10-26

@@ -1,0 +1,436 @@
+--- v010.md
++++ v011.md
+@@ -4,241 +4,223 @@
+ 
+ ## Overview
+-SDF Primitives & Operations define the foundational analytical functions and boolean/combinatorial operators used to represent complex 3D geometry as implicit surfaces for distance-field ray marching [S11, unofficial]. They solve the problem of replacing explicit mesh topology with continuous scalar fields, enabling safe, large step sizes along rays by leveraging the property that the function value indicates the exact distance to the nearest surface [G]. What sets them apart from polygonal primitives is their reliance on closed-form algebraic solutions for standard shapes (spheres, boxes, tori) and their ability to combine via min/max operations to form complex CSG structures without topological maintenance [S11, unofficial]. Unlike [SDF Transformation](1086-sdf-transformation.md) which modifies the input coordinate space, or [SDF Rounding](1829-sdf-rounding.md) which modifies the output range, these primitives and operations define the core geometric definitions and their direct combinations [S1, S3, unofficial].
++SDF Primitives & Operations provide a method for representing 3D geometry using implicit scalar fields where the value at any point $\mathbf{p}$ is the signed shortest distance to the nearest surface [S1, S5, S8, unofficial]. This approach solves the problem of complex scene construction and ray intersection testing by replacing mesh traversal with analytical distance queries, enabling intuitive boolean composition, smooth blending, and efficient ray marching [S1, S8, unofficial]. It differs from explicit mesh-based rendering by allowing infinite geometric detail and organic modifications through mathematical operators rather than topology changes, and from voxel-based SDFs by computing distances on-the-fly without spatial discretization storage [S5, unofficial][S12, abstract only, unofficial].
+ 
+ ## How it works
+-
+-### Inputs and Outputs
+-**Inputs:**
+-- Query point $\mathbf{p} \in \mathbb{R}^3$ (in local or world space).
+-- Primitive parameters: position $\mathbf{c}$, radius $r$, half-extents $\mathbf{b}$, normal $\mathbf{n}$, height $h$, etc.
+-- For operations: two SDF functions $f_A, f_B$ and their respective parameters.
+-
+-**Outputs:**
+-- Scalar signed distance $d \in \mathbb{R}$.
+-- $d > 0$: point is outside the surface.
+-- $d = 0$: point is on the surface.
+-- $d < 0$: point is inside the surface.
+-
+-### Data Structures
+-The implementation typically involves a struct or class hierarchy representing the SDF map.
+-- `Material`: Enum or struct containing color and physical properties (e.g., `Lambertian { color: Vec3 }`, `Specular { color: Vec3, specularity: f32, fuzziness: f32 }`) [S1, unofficial].
+-- `DistInfo`: Struct containing `distance: f32` and `material: Material` [S1, unofficial].
+-- `SdfMap`: Interface or base class with a method `ray_intersection(ray)` or `eval(p)` returning `DistInfo` [S1, unofficial].
+-- `Union`/`Intersection`: Composite structs holding references to two child SDFs (`sdf1`, `sdf2`) [S1, unofficial].
+-
+-### Standard Solid Primitives
+-
+-#### Sphere
+-Parametrized by center $\mathbf{c}$ and radius $r$.
+-Formula:
+-$$ d(\mathbf{p}) = \|\mathbf{p} - \mathbf{c}\| - r $$
+-Implementation:
++**Inputs and Outputs:**
++*   **Input:** A query point $\mathbf{p} \in \mathbb{R}^3$ (and potentially transformation parameters like position, rotation, scale).
++*   **Output:** A scalar float $d$ representing the signed distance. $d > 0$ indicates the point is outside the shape, $d = 0$ is on the surface, and $d < 0$ is inside [P].
++
++**Data Structures:**
++The core data structure is the primitive function itself, often encapsulated in a class or struct holding parameters (e.g., radius, extents) and a method `dist(p)` [S1, S6, unofficial]. Composite structures (Union, Intersection) hold references to child SDFs [S1, unofficial].
++
++**Standard Primitive Definitions:**
++The following analytical SDFs are the atomic building blocks [S5, S6, S7, unofficial]:
++
++1.  **Sphere:** Centered at origin, radius $r$.
++    $$d(\mathbf{p}) = \|\mathbf{p}\| - r$$ [S1, S3, unofficial]
++2.  **Box (AABB):** Half-extents $\mathbf{b} = (b_x, b_y, b_z)$.
++    $$\mathbf{q} = |\mathbf{p}| - \mathbf{b}$$
++    $$d(\mathbf{p}) = \max(\mathbf{q}, \mathbf{0}) \cdot \max(\mathbf{q}, \mathbf{0})^{0.5} + \min(\max(\mathbf{q}_x, \max(\mathbf{q}_y, \mathbf{q}_z)), 0)$$ [S3, S7, unofficial]
++    *Note: $\max(\mathbf{q}, \mathbf{0})$ is component-wise. The second term handles the interior.*
++3.  **Plane:** Normal $\mathbf{n}$ (unit vector), passing through origin (or offset $h$).
++    $$d(\mathbf{p}) = \mathbf{p} \cdot \mathbf{n} - h$$ [S7, unofficial]
++    *If passing through origin, $h=0$.*
++4.  **Torus:** Major radius $R$, minor radius $r$. Centered at origin, aligned with Y-axis.
++    $$d(\mathbf{p}) = \|\mathbf{p}_{xz}\| - R$$ (distance to ring in XZ plane)
++    $$d(\mathbf{p}) = \sqrt{(\|\mathbf{p}_{xz}\| - R)^2 + p_y^2} - r$$ [S1, unofficial]
++    *Where $\mathbf{p}_{xz} = (p_x, 0, p_z)$.*
++5.  **Cylinder:** Radius $r$, height $h$, axis along Y.
++    $$d(\mathbf{p}) = \max(\|\mathbf{p}_{xz}\| - r, |p_y| - h/2)$$ [S6, S7, unofficial]
++6.  **Cone:** Apex at origin, axis along Y, height $h$, base radius $r$.
++    Requires projection onto the cone segment. Let $\mathbf{v} = (p_x, p_z)$, $r_{proj} = \|\mathbf{v}\|$.
++    $$d(\mathbf{p}) = \max(\|\mathbf{v}\| - r, |p_y| - h/2) \text{ (if outside caps)}$$
++    *Exact analytical form involves clamping projection onto the slant height [S2, S6, unofficial].*
++
++**Operations (Range Transformations):**
++These combine SDFs by operating on their scalar outputs [S1, S7, S8, S9, unofficial]:
++
++1.  **Union:** The distance to the closest surface of either shape.
++    $$d_{union}(\mathbf{p}) = \min(d_A(\mathbf{p}), d_B(\mathbf{p}))$$ [S1, S3, S7, S9, unofficial]
++2.  **Intersection:** The distance to the surface common to both shapes (interior of both).
++    $$d_{intersect}(\mathbf{p}) = \max(d_A(\mathbf{p}), d_B(\mathbf{p}))$$ [S1, S3, S7, S9, unofficial]
++3.  **Difference (Subtraction):** Shape A minus Shape B.
++    $$d_{diff}(\mathbf{p}) = \max(d_A(\mathbf{p}), -d_B(\mathbf{p}))$$ [S1, S3, S7, S9, unofficial]
++    *Note: $-d_B$ inverts the sign, treating B's interior as exterior.*
++4.  **Smooth Union:** Blends the union for organic transitions.
++    $$k = \text{blend parameter}$$
++    $$a = d_A^k, \quad b = d_B^k$$
++    $$d_{smooth} = \frac{a \cdot b}{a + b} \quad (\text{if } a+b \neq 0)$$
++    *More precisely, using Quilez's formula:*
++    $$d_{smooth} = \text{pow}(a \cdot b / (a + b), 1.0/k)$$ [S9, unofficial]
++5.  **Rounding:** Modifies the distance to create rounded edges.
++    $$d_{rounded}(\mathbf{p}) = d_{original}(\mathbf{p}) - r_{round}$$ [S1, S8, unofficial]
++    *Pitfall: This increases the overall size of the shape. To maintain original bounds, the primitive's dimensions must be reduced by $r_{round}$ first [S8, unofficial].*
++6.  **Hollowing:** Creates a shell.
++    $$d_{hollow}(\mathbf{p}) = |d_{original}(\mathbf{p})| - thickness$$ [S8, unofficial]
++7.  **Eversion:** Inverts the volume.
++    $$d_{eversion}(\mathbf{p}) = -d_{original}(\mathbf{p})$$ [S1, unofficial]
++
++**Domain Manipulation (Coordinate Transformations):**
++These modify the input position $\mathbf{p}$ before querying the primitive [S1, S8, S15, unofficial]:
++
++1.  **Translation:**
++    $$d(\mathbf{p}) = d_{base}(\mathbf{p} - \mathbf{offset})$$ [S1, S3, unofficial]
++2.  **Rotation:**
++    $$d(\mathbf{p}) = d_{base}(R^{-1} \mathbf{p})$$ [S1, S9, unofficial]
++    *Where $R$ is the rotation matrix/quaternion applied to the point.*
++3.  **Tiling (Modulo):**
++    $$\mathbf{p}' = \mathbf{p} - \text{period} \cdot \lfloor \mathbf{p} / \text{period} + 0.5 \rfloor$$
++    $$d(\mathbf{p}) = d_{base}(\mathbf{p}')$$ [S1, S8, unofficial]
++4.  **Mirroring:**
++    $$\mathbf{p}' = \mathbf{p} - 2 \cdot \mathbf{n} \cdot (\mathbf{p} \cdot \mathbf{n})$$ (reflection across plane with normal $\mathbf{n}$)
++    *Simple axis mirroring: $p_y = |p_y|$ [S8, unofficial].*
++    *Pitfall: Mirroring creates concave edges where the distance field is invalid because the "corner" logic is lost [S8, unofficial].*
++
++**Pseudocode for Ray Marching with SDFs:**
++This algorithm finds the intersection of a ray with the SDF scene.
++
+ ```python
+-def sphere(p, c, r):
+-    return length(p - c) - r
++import math
++
++def ray_march(origin, direction, scene_sdf, max_steps=1000, max_dist=30.0, epsilon=0.001):
++    """
++    Marches a ray along 'direction' from 'origin' using the 'scene_sdf' function.
++    Returns (hit_point, normal, steps_taken) or None if no hit.
++    """
++    current_pos = origin
++    steps = 0
++    
++    for _ in range(max_steps):
++        # 1. Query distance
++        dist = scene_sdf(current_pos)
++        
++        # 2. Check for hit or max distance
++        if dist < epsilon:
++            # Hit surface
++            normal = compute_normal(scene_sdf, current_pos)
++            return current_pos, normal, steps
++        
++        if dist > max_dist:
++            # Ray escaped
++            return None
++            
++        # 3. Step forward
++        current_pos += direction * dist
++        steps += 1
++        
++    return None
++
++def compute_normal(sdf_func, p, epsilon=0.001):
++    """
++    Computes the normal at point p using central differences.
++    """
++    # Gradient components
++    dx = sdf_func(p + (epsilon, 0, 0)) - sdf_func(p - (epsilon, 0, 0))
++    dy = sdf_func(p + (0, epsilon, 0)) - sdf_func(p - (0, epsilon, 0))
++    dz = sdf_func(p + (0, 0, epsilon)) - sdf_func(p - (0, 0, epsilon))
++    
++    # Normalize gradient to get normal
++    grad = (dx, dy, dz)
++    length = math.sqrt(dx*dx + dy*dy + dz*dz)
++    
++    if length == 0:
++        return (0, 0, 1) # Fallback
++    
++    return (dx/length, dy/length, dz/length)
++
++def scene_sdf(p):
++    """
++    Example composite SDF: A sphere and a box.
++    """
++    # Sphere at (0,0,0) radius 1
++    sphere_dist = math.sqrt(p[0]**2 + p[1]**2 + p[2]**2) - 1.0
++    
++    # Box at (2,0,0) with half-extents (0.5, 0.5, 0.5)
++    q = (abs(p[0]-2), abs(p[1]), abs(p[2])) - 0.5
++    q_max = (max(q[0], 0), max(q[1], 0), max(q[2], 0))
++    box_dist = math.sqrt(q_max[0]**2 + q_max[1]**2 + q_max[2]**2) + min(max(q[0], max(q[1], q[2])), 0)
++    
++    # Union
++    return min(sphere_dist, box_dist)
+ ```
+ 
+-#### Box (AABB)
+-Parametrized by center $\mathbf{c}$ and half-extents $\mathbf{b} = (b_x, b_y, b_z)$.
+-Formula:
+-$$ d(\mathbf{p}) = \|\max(\mathbf{q}, \mathbf{0})\| + \min(\max(q_x, \max(q_y, q_z)), 0) $$
+-where $\mathbf{q} = |\mathbf{p} - \mathbf{c}| - \mathbf{b}$ [S3, unofficial].
+-Implementation:
+-```python
+-def box(p, c, b):
+-    q = abs(p - c) - b
+-    q_max = max(q, 0.0)
+-    return length(q_max) + min(max(q.x, max(q.y, q.z)), 0.0)
+-```
+-
+-#### Torus
+-Parametrized by center $\mathbf{c}$, major radius $R$ (distance from center to tube center), and minor radius $r$ (tube radius).
+-Formula:
+-$$ d(\mathbf{p}) = \|\vec{2}(\|\mathbf{p}_{xy} - \mathbf{c}_{xy}\| - R, p_z - c_z)\| - r $$
+-where $\mathbf{p}_{xy}$ is the projection of $\mathbf{p}$ onto the XY plane [S1, unofficial].
+-Implementation:
+-```python
+-def torus(p, c, R, r):
+-    # Assuming torus lies in XY plane, centered at c
+-    dist_xy = length(p.xy - c.xy) - R
+-    return length(vec2(dist_xy, p.z - c.z)) - r
+-```
+-
+-#### Plane
+-Parametrized by a point $\mathbf{p}_0$ on the plane and normal $\mathbf{n}$ (unit length).
+-Formula:
+-$$ d(\mathbf{p}) = (\mathbf{p} - \mathbf{p}_0) \cdot \mathbf{n} $$
+-If $\mathbf{p}_0$ is origin: $d(\mathbf{p}) = \mathbf{p} \cdot \mathbf{n}$ [S1, unofficial].
+-
+-#### Cylinder
+-Parametrized by axis direction $\mathbf{a}$ (unit), center $\mathbf{c}$, height $h$, and radius $r$.
+-1. Project $\mathbf{p}$ onto axis: $t = (\mathbf{p} - \mathbf{c}) \cdot \mathbf{a}$.
+-2. Clamp $t$ to $[-h/2, h/2]$.
+-3. Compute radial distance from axis.
+-4. Combine radial and axial distances.
+-
+-#### Round Box / Round Cylinder
+-Similar to Box/Cylinder, but edges are rounded by a radius $r_{round}$.
+-Formula (Round Box):
+-$$ d(\mathbf{p}) = \|\max(\mathbf{q} - r_{round}, \mathbf{0})\| + \min(\max(q_x - r_{round}, \max(q_y - r_{round}, q_z - r_{round})), 0) + r_{round} - \|\mathbf{q}\| \text{ (approx)} $$
+-More precisely, it subtracts $r_{round}$ from the edge calculations [S6, unofficial].
+-
+-### CSG Operations
+-
+-#### Union
+-Combines two shapes $A$ and $B$. The resulting SDF is the minimum of the two distances.
+-Formula:
+-$$ d_{union}(\mathbf{p}) = \min(f_A(\mathbf{p}), f_B(\mathbf{p})) $$
+-Implementation:
+-```python
+-def union(a, b, p):
+-    return min(a(p), b(p))
+-```
+-
+-#### Intersection
+-Combines two shapes $A$ and $B$. The resulting SDF is the maximum of the two distances.
+-Formula:
+-$$ d_{intersect}(\mathbf{p}) = \max(f_A(\mathbf{p}), f_B(\mathbf{p})) $$
+-Implementation:
+-```python
+-def intersection(a, b, p):
+-    return max(a(p), b(p))
+-```
+-
+-#### Difference (Subtraction)
+-Subtracts shape $B$ from shape $A$.
+-Formula:
+-$$ d_{diff}(\mathbf{p}) = \max(f_A(\mathbf{p}), -f_B(\mathbf{p})) $$
+-Implementation:
+-```python
+-def difference(a, b, p):
+-    return max(a(p), -b(p))
+-```
+-
+-### Smooth Blending
+-Standard min/max operations create sharp discontinuities in the derivative. Smooth blending uses a smooth minimum function to interpolate between shapes.
+-Formula (Smooth Min, Quilez):
+-$$ \text{smoothmin}(a, b, k) = \frac{h}{h + k} \quad \text{where} \quad h = \max(-k, b - a) $$
+-Or equivalently:
+-$$ \text{smoothmin}(a, b, k) = \begin{cases} b & \text{if } a \ge b \\ a & \text{if } b \ge a \\ \frac{b + h - k \ln(1 + e^{(b-a)/k})}{1} & \dots \end{cases} $$
+-Common implementation:
+-```python
+-def smooth_min(a, b, k):
+-    h = max(k - abs(a - b), 0.0)
+-    return min(a, b) - h * h / (4.0 * k)
+-```
+-Note: This trades distance field accuracy for visual smoothness [S2, unofficial].
+-
+-### Domain Manipulation (Transformations)
+-Transformations are applied to the input point $\mathbf{p}$ before evaluation.
+-
+-#### Translation
+-Shift the point by offset $\mathbf{t}$.
+-$$ d(\mathbf{p}) = f(\mathbf{p} - \mathbf{t}) $$
+-
+-#### Rotation
+-Rotate the point by inverse rotation matrix $R^{-1}$ or quaternion $q^{-1}$.
+-$$ d(\mathbf{p}) = f(R^{-1}(\mathbf{p} - \mathbf{c}) + \mathbf{c}) $$
+-
+-#### Scaling
+-Scale the point by $1/s$ and divide the result by $s$.
+-$$ d(\mathbf{p}) = \frac{1}{s} f\left(\frac{\mathbf{p} - \mathbf{c}}{s} + \mathbf{c}\right) $$
+-
+-#### Tiling (Modulo)
+-Repeat the primitive periodically.
+-$$ \mathbf{p}' = \mathbf{p} - \text{period} \cdot \text{floor}\left(\frac{\mathbf{p}}{\text{period}} + 0.5\right) $$
+-$$ d(\mathbf{p}) = f(\mathbf{p}') $$
+-Implementation:
+-```python
+-def repeat(p, period):
+-    return p - period * floor(p / period + 0.5)
+-```
+-
+-### Ray Marching Loop
+-To render an SDF primitive, a ray is marched through space.
+-1. **Initialize**: $t = 0$, $\mathbf{p} = \mathbf{origin}$.
+-2. **Loop**:
+-   - Evaluate $d = f(\mathbf{p})$.
+-   - If $d < \epsilon$ (surface hit), break.
+-   - If $t > t_{max}$ (miss), break.
+-   - Advance: $t \leftarrow t + d \cdot \text{step\_scale}$ (where step_scale $\le 1.0$ for safety) [G].
+-   - $\mathbf{p} \leftarrow \mathbf{origin} + t \cdot \mathbf{direction}$.
+-3. **Output**: Hit point, normal (computed via gradient), material.
+-
+-### Normal Computation
+-Normals are computed using central differences.
+-$$ \mathbf{n} = \text{normalize}\left( \begin{bmatrix} f(\mathbf{p} + \Delta_x) - f(\mathbf{p} - \Delta_x) \\ f(\mathbf{p} + \Delta_y) - f(\mathbf{p} - \Delta_y) \\ f(\mathbf{p} + \Delta_z) - f(\mathbf{p} - \Delta_z) \end{bmatrix} \right) $$
+-where $\Delta_x = (\epsilon, 0, 0)$, etc. [S3, unofficial].
+-
+-### Pitfalls and Edge Cases
+-- **Division by Zero**: In fractals like Mandelbulb, $\text{atan}(w_x/w_z)$ fails if $w_z=0$, and $\text{acos}(w_y/r)$ fails if $r=0$ [S1, unofficial]. Guard against these.
+-- **Discontinuities**: Standard min/max operations break the interior distance field for complex shapes, potentially causing artifacts in effects like ambient occlusion or smooth blending [S8, unofficial].
+-- **Mirroring Artifacts**: Mirroring coordinates (e.g., `abs(p.y)`) creates concave edges that break the distance field accuracy because the SDF does not "know" about the new corner [S8, unofficial].
+-- **Rounding Size**: Rounding a shape by subtracting thickness makes the bounding box larger; the primitive's base size must be reduced by the thickness first [S8, unofficial].
++**Edge Cases and Pitfalls:**
++*   **Division by Zero:** In Mandelbulb or complex fractal SDFs, operations like `atan(w.x/w.z)` or `acos(w.y/r)` can divide by zero if $w.z=0$ or $r=0$ [S1, unofficial]. Guard against these or rely on input constraints [S1, unofficial].
++*   **Interior Distance Breakage:** Boolean operations (min/max) can break the *interior* distance field, returning values larger than the true distance inside the shape [S8, unofficial]. This affects effects like ambient occlusion or thickness calculations inside objects.
++*   **Mirroring Artifacts:** Mirroring coordinates creates concave corners that the SDF does not "know" about, leading to incorrect distance values in the concave regions [S8, unofficial].
++*   **Rounding Size Shift:** Subtracting a radius for rounding increases the object's bounding box. The base primitive must be scaled down to compensate [S8, unofficial].
+ 
+ ## Subtopics
+ 
+ ### [SDF Domain Manipulation Operators](1730-sdf-domain-manipulation-operators.md)
+-SDF Domain Manipulation Operators modify the input position vector $\mathbf{p}$ before it is passed to a base SDF primitive, effectively transforming the coordinate space to create periodic, mirrored, reflected, or stretched structures. They solve the problem of generating complex geometric patterns (such as grids, twists, or elongated shapes) from simple primitives without altering the primitive's internal distance calculation logic. They differ from [SDF Rounding](1829-sdf-rounding.md) and [CSG Operations on Implicit Functions](1329-csg-operations-on-implicit-functions.md) by operating on the input position vector $\mathbf{p}$ (domain transformation) rather than on the scalar distance output (range transformation).
++Modifies the input position vector $\mathbf{p}$ to create periodic, mirrored, or stretched structures. Chose when generating complex patterns (grids, twists) without altering primitive logic.
+ 
+ ### [Quadric SDF (First-Order Approximation)](2682-quadric-sdf-first-order-approximation.md)
+-Computes an approximate signed distance from a query point to a general quadric surface defined by a quadratic implicit equation, using a first-order Taylor approximation. It differs from exact SDF primitives (like spheres or boxes) by handling arbitrary second-order surfaces (ellipsoids, hyperboloids, paraboloids) at the cost of geometric accuracy, trading precision for the ability to model complex algebraic shapes without analytical distance formulas.
++Approximates distance to general quadric surfaces (ellipsoids, hyperboloids) using Taylor expansion. Chose when modeling arbitrary algebraic shapes where exact SDFs are unavailable.
+ 
+ ### [SDF Tiling via Modulo](4713-sdf-tiling-via-modulo.md)
+-Repeating SDF Geometry creates a periodic tiling of a base signed distance field by folding 3D coordinates into a fundamental domain centered at the origin. It segments space into infinite parallel regions of repeated distance by taking the modulus of a point’s position along one or more axes before computing the signed distance. This technique allows for the infinite repetition of geometry for no extra computational cost.
++Creates periodic tiling by folding coordinates. Chose for infinite repetition of geometry with no scene complexity cost.
+ 
+ ### [Basic Primitive Definitions](5346-basic-primitive-definitions.md)
+-Basic Primitive Definitions provide the foundational analytical functions that compute the exact Euclidean signed distance from a query point to standard geometric shapes, serving as the atomic building blocks for distance-field ray marching. They replace explicit mesh geometry with implicit mathematical definitions, enabling safe, large step sizes along rays by leveraging the continuous scalar field where the sign indicates interior ($d < 0$) or exterior ($d > 0$) status [G]. Unlike polygonal primitives or iterative approximations, these primitives rely on closed-form algebraic solutions for standard shapes like spheres, boxes, and tori.
++Exact Euclidean SDFs for canonical shapes (sphere, box, plane). Chose as the atomic building blocks for all procedural geometry.
+ 
+ ### [Higher Order Algebraic Signed Distance Fields](8500-higher-order-algebraic-signed-distance-fields.md)
+-Higher Order Algebraic Signed Distance Fields (HOASDFs) generalize traditional signed distance fields by approximating the distance function over a larger area using local Taylor approximations or least squares fit polynomials.
++Approximates distance using local Taylor approximations or least squares. Chose for generalizing SDFs over larger areas.
+ 
+ ### [Smooth Blending and CSG Operations](14568-smooth-blending-and-csg-operations.md)
+-This family defines the mathematical operators and coordinate transformations required to construct complex procedural geometry from primitive Signed Distance Fields (SDFs). It solves the problem of combining simple shapes into complex models and positioning them in world space. It is distinguished from exact Boolean operations by its support for smooth blending approximations, which allow for continuous gradients and organic transitions between shapes, at the cost of distance field accuracy.
++Defines operators for combining SDFs with smooth transitions. Chose for organic modeling and continuous gradients.
+ 
+ ### [Gradient-SDF](22971-gradient-sdf.md)
+-Gradient-SDF is a hybrid 3D geometry representation that augments a voxel-based implicit Signed Distance Field (SDF) with the SDF gradient vector field at each voxel, combining implicit topology handling with explicit surface feature access. It solves the problem of costly neighbor lookups required for gradient computation in sparse SDF storage (e.g., hash maps) by storing gradients directly, enabling efficient interpolation via first-order Taylor expansion without accessing multiple voxels. Unlike standard sparse SDFs which require accessing 8 voxels for interpolation or gradient computation, Gradient-SDF allows direct access to the gradient per voxel, facilitating direct SDF tracking from depth images and photometric bundle adjustment directly in the voxel representation.
++Augments voxel-based SDFs with stored gradient vectors. Chose for efficient gradient computation in sparse storage without neighbor lookups.
++
++### Solid Noise Primitive
++A sphere-based primitive that windows a noise function. The density is the sum of a windowing function and a fractal function: $noiseDensity(\mathbf{P}) = m(\mathbf{P}) + (1 - |\mathbf{P}/radius|)$, where $\mathbf{P}$ is in local space and $m(\mathbf{P})$ is the fractal function (e.g., fbm) [S10, unofficial]. The maximal amplitude of the fractal function is $A$. Pitfall: Density may be positive outside the sphere's radius (up to $A$ units away), requiring bounds padding [S10, unofficial].
++
++### Procedural SDF Primitives
++Perlin or Simplex noise can be treated as an SDF because it returns a smooth real number at every point. The surface is defined as all points where $Perlin(x, y, z) = 0$ [S11, unofficial]. For height maps, ignore $z$ and define surface as $z - Perlin(x, y, 0) = 0$. For overhangs/caves, use 3D noise, subtracting from surface for caves [S11, unofficial].
++
++### Backface Distance Field (BDF)
++An implicit volume representation that improves sphere tracing convergence by using closest signed distances to backfacing surface points. For external points, the step size is the backface distance, which is the largest direction-independent step that does not pass through the boundary more than once. Inside the volume, BDF coincides with standard SDF. Generally outperforms basic sphere tracing [S12, abstract only, unofficial].
++
++### KIFS Recursive Fractal Schema with Smooth-Min/Abs
++Uses a classic KIFS recursive fractal schema where spheres are blended into a single organic shape using smooth-minimum and smooth-abs operators. Used in volumetric rendering for transparencies (e.g., 'Sea Creature' Shadertoy) [S13, unofficial].
++
++### ObjectSDF
++Utilizes an object-SDF for modeling instances and a scene-SDF for compositing decomposed objects, supervised by semantic labels. Enables precise object extraction [S14].
++
++### CAA Clone
++Clones a child SDF along a lattice defined by displacement $d$, bounded by `neg_limit` and `pos_limit`. Downtree transform maps query point to local lattice coordinates: $p_{local} = (p - d/2) \mod d$. Uptree operation returns `right_dist`, discarding `left_dist` [S15, unofficial].
++
++### Outline Generation
++Adds outlines of any thickness by calculating `outline_dist = shape_dist - outline_thickness` [S8, unofficial].
++
++### Rounding Modification
++Subtracts thickness from shape distance to round edges. Pitfall: Makes shape larger; size must be reduced by thickness first [S8, unofficial].
++
++### Onion-Layered Distance Field
++Calculates layered edge by `mod(shape_dist + spacing/2.0, spacing) - spacing/2.0`, then `abs(layered_edge) - thickness` [S8, unofficial].
++
++### SDF Mirroring Operations
++Mirrors axis by taking absolute value (e.g., `pos.y = abs(pos.y)`). Pitfall: Creates concave edges, breaking interior distance field [S8, unofficial].
++
++### Analytic Anti-aliasing with SDFs
++Super easy to implement anti-aliasing for SDF shapes compared to other methods [S8, unofficial].
++
++### Hollow Shape Generation
++Takes absolute value of shape distance, then subtracts thickness: `abs(shape_dist) - thickness` [S8, unofficial].
+ 
+ ## Operating characteristics
+-
+-**Time Complexity:**
+-- Primitive evaluation: $O(1)$ per primitive.
+-- Ray marching: $O(N)$ where $N$ is the number of steps. $N$ depends on the scene complexity and the tightness of the SDF bounds. Smooth blending and complex CSG operations increase the constant factor per step.
+-
+-**Memory Complexity:**
+-- Procedural SDFs: $O(1)$ memory, as geometry is defined by code.
+-- Voxel-based SDFs (e.g., Gradient-SDF): $O(V)$ where $V$ is the number of voxels.
+-
+-**Performance:**
+-- SDFs allow for large step sizes compared to ray-triangle intersection, often resulting in fewer samples per ray for simple scenes [S8, unofficial].
+-- However, evaluating complex CSG trees or fractals (like Mandelbulb) can be computationally expensive per step [S1, unofficial].
+-- Backface Distance Fields (BDF) can improve convergence rates for sphere tracing by using relaxed distance estimates for backfacing surfaces, generally outperforming basic sphere tracing [S12, abstract only, unofficial].
+-
+-**Strengths:**
+-- Intuitive shape construction and modification [S8, unofficial].
+-- No need for mesh generation or topological maintenance.
+-- Easy implementation of anti-aliasing, outlines, and soft shadows [S8, unofficial].
+-- Compact representation for procedural geometry.
+-
+-**Limitations:**
+-- Sharp CSG operations (min/max) break the distance field accuracy, affecting effects like ambient occlusion and smooth blending [S8, unofficial].
+-- Mirroring and tiling can introduce artifacts if not handled carefully [S8, unofficial].
+-- Hard to represent non-manifold geometry or complex topology changes dynamically.
+-
+-**When to use:**
+-- Procedural generation, fractals, and organic shapes.
+-- Real-time rendering where memory bandwidth is a constraint.
+-- Scenes with simple, repetitive geometry.
+-
+-**When not to use:**
+-- Highly detailed, static meshes with complex topology.
+-- Applications requiring exact distance metrics for physics or precise collision detection (use exact primitives or meshes).
++*   **Time Complexity:** Ray marching is $O(N)$ where $N$ is the number of steps. Step size is bounded by the SDF value, ensuring convergence. Complex primitives (fractals) increase per-step cost [S1, S9, unofficial].
++*   **Memory Complexity:** $O(1)$ for procedural primitives, as no geometry is stored. Composite structures store references to child SDFs [S1, unofficial].
++*   **Performance:** Generally faster than ray-triangle intersection for simple scenes due to cache coherence and lack of BVH traversal. However, complex SDFs (Mandelbulb) can be slower per step than simple primitives [S1, S13, unofficial].
++*   **Strengths:** Intuitive shape construction, infinite detail, smooth blending, easy anti-aliasing, compact representation [S1, S8, unofficial].
++*   **Limitations:** No exact normals (requires gradient approximation), interior distance inaccuracies with boolean ops, potential for division by zero in complex functions, limited to convex or smoothly blended shapes for accurate distance [S1, S8, S9, unofficial].
++*   **When to Use:** Procedural generation, ray marching, soft shadows, ambient occlusion, organic modeling.
++*   **When Not to Use:** Scenes requiring exact mesh topology, sharp non-smoothable edges, or when hardware lacks efficient floating-point performance for complex per-step calculations.
+ 
+ ## Background
+-
+-SDFs were popularized in computer graphics by Inigo Quilez in his articles on raymarching and distance fields [S13, unofficial]. The mathematical foundation relies on the work of Hart (1989) on implicit surfaces and CSG operations [S7, unofficial]. The technique allows for raycasting and physics simulations by treating geometry as implicit functions [S8, unofficial]. Variants like Backface Distance Fields (BDF) have been proposed to enhance sphere tracing convergence [S12, abstract only, unofficial]. Solid noise primitives combine SDFs with fractal noise for volumetric effects [S10, unofficial].
++SDFs were popularized in computer graphics by Inigo Quilez and others in the mid-2000s for ray marching [S13, unofficial]. The mathematical foundation relies on the Euclidean distance metric and implicit surface representations [S7, unofficial]. The technique allows for intuitive building and modification of shapes compared to raytracing [S8, unofficial]. It is widely used in real-time rendering, shaders, and procedural geometry generation [S1, S8, S13, unofficial].
+ 
+ ## Sources
+-
+ [S1] ollituohenmaa/raymarching-pathtracer, https://github.com/ollituohenmaa/raymarching-pathtracer, fetched 2026-10-26 (unofficial)
+ [S2] agill-dev-0/SDF-ray-marcher, https://github.com/agill-dev-0/SDF-ray-marcher, fetched 2026-10-26 (unofficial)

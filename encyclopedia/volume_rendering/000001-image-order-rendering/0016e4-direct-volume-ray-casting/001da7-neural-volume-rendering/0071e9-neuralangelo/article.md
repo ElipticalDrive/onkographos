@@ -1,0 +1,163 @@
+# Neuralangelo
+
+Also called: Neuralangelo reconstruction
+
+## Overview
+Neuralangelo is a framework for high-fidelity 3D surface reconstruction from multi-view RGB images using neural volume rendering, specifically designed to recover dense, detailed 3D surface structures without auxiliary data such as depth or segmentation [S2]. It distinguishes itself from sibling methods like [NeRF Volumetric Rendering (Coarse/Fine Sampling)](979-nerf-volumetric-rendering-coarse-fine-sampling.md) by combining multi-resolution 3D hash grids (Instant NGP-style) with neural surface rendering based on Signed Distance Fields (SDF) [S2]. Unlike concurrent approaches that use displacement networks to correct shape, Neuralangelo controls detail levels through hierarchical hash grids and utilizes numerical gradients to compute higher-order derivatives as a smoothing operation [S2].
+
+## How it works
+**Inputs and Outputs:**
+*   **Inputs:** A set of posed RGB images $\{I_k\}$ of a static scene.
+*   **Outputs:** A reconstructed 3D mesh extracted from the learned neural SDF, and a neural representation (hash grids + MLPs) capable of rendering novel views.
+
+**Data Structures:**
+1.  **Multi-resolution Hash Grids:** A set of $L$ hash grids, where each grid $l \in \{1, \dots, L\}$ has a resolution $T_l$ (number of entries). Each entry stores a feature vector $\mathbf{f} \in \mathbb{R}^D$ (typically $D=4$). The hash function maps a 3D coordinate $\mathbf{x}$ to a grid index and a local position within the cell [S2][S4, unofficial].
+2.  **SDF MLP:** A Multi-Layer Perceptron that takes the aggregated hash features and outputs a scalar Signed Distance Field value $\tilde{s}$ and a raw color $\tilde{\mathbf{c}}$ [S2].
+3.  **Color MLP:** A separate Multi-Layer Perceptron (or part of the same network) that outputs the view-dependent color $\mathbf{c}$ given the hash features and viewing direction $\mathbf{d}$ [S2].
+
+**Numbered Steps:**
+
+1.  **Sampling:** For each pixel in the training images, cast a ray $\mathbf{r}(t) = \mathbf{o} + t\mathbf{d}$. Sample $N$ points $\{t_i\}_{i=1}^N$ along the ray within the scene bounds [S2].
+2.  **Hash Encoding:** For each sampled point $\mathbf{x}_i$, query all $L$ hash grids. Interpolate the feature vectors from the grid cells surrounding $\mathbf{x}_i$ and concatenate them to form the input feature vector $\mathbf{h}_i$ [S2].
+3.  **Neural Prediction:**
+    *   Feed $\mathbf{h}_i$ into the SDF MLP to predict the raw signed distance $\tilde{s}_i$ [S2].
+    *   Feed $\mathbf{h}_i$ and the viewing direction $\mathbf{d}$ into the Color MLP to predict the raw color $\tilde{\mathbf{c}}_i$ [S2].
+4.  **SDF-based Volume Rendering:** Convert the raw SDF $\tilde{s}_i$ to density $\sigma_i$ and opacity $\alpha_i$ using a softplus activation and a scaling factor $\beta$ (temperature) [S2]:
+    $$
+    \sigma_i = \text{softplus}(-\beta \tilde{s}_i)
+    $$
+    $$
+    \alpha_i = 1 - \exp(-\sigma_i \Delta t_i)
+    $$
+    where $\Delta t_i$ is the distance between adjacent samples. The final color is computed using the standard front-to-back volume rendering equation (see [Direct volume ray casting](19-direct-volume-ray-casting.md)) [S2].
+5.  **Loss Computation:** Minimize the photometric loss between rendered and ground truth images, and a surface regularization loss based on the mean curvature of the SDF level sets [S3].
+6.  **Optimization with Numerical Gradients:**
+    *   Instead of using analytical gradients (backpropagation through the hash grid lookups) for the hash grid features, Neuralangelo uses **numerical gradients** to update the hash grid parameters [S4, unofficial].
+    *   Compute the gradient of the loss with respect to the hash grid features $\mathbf{f}$ using finite differences with a step size $\epsilon$:
+        $$
+        \nabla_{\mathbf{f}} \mathcal{L} \approx \frac{\mathcal{L}(\mathbf{f} + \epsilon \mathbf{u}) - \mathcal{L}(\mathbf{f} - \epsilon \mathbf{u})}{2\epsilon} \mathbf{u}
+        $$
+        where $\mathbf{u}$ is a random direction vector [S4, unofficial].
+    *   **Coarse-to-Fine Strategy:** Start with a large step size $\epsilon$ (larger than the hash grid cell size) to encourage communication between neighboring grid cells and smooth the geometry [S4, unofficial]. Progressively decrease $\epsilon$ during training to refine fine details [S2][S4, unofficial].
+
+**Pseudocode:**
+
+> **Unverified code.** The code below did not pass a test run against a reference implementation, or no test fits it, so it may contain errors.
+
+```python
+import numpy as np
+
+def neuralangelo_forward(ray_o, ray_d, hash_grids, sdf_mlp, color_mlp, num_samples, beta):
+    """
+    Forward pass for Neuralangelo rendering.
+    ray_o: Camera origin (3,)
+    ray_d: Camera direction (3,)
+    hash_grids: List of L hash grids, each is a dict mapping hash_index -> feature_vector
+    sdf_mlp: Function taking features -> (sdf, color_raw)
+    color_mlp: Function taking features, view_dir -> color
+    num_samples: Number of points along the ray
+    beta: Temperature for SDF to density conversion
+    """
+    # 1. Sample points along the ray
+    t_vals = np.linspace(t_near, t_far, num_samples)
+    points = ray_o + t_vals[:, None] * ray_d  # Shape: (num_samples, 3)
+    
+    # 2. Hash Encoding
+    features_list = []
+    for grid in hash_grids:
+        # Query hash grid for all points
+        # This involves hashing coordinates, finding neighbors, and trilinear interpolation
+        # Simplified: assume get_features returns (num_samples, D)
+        feats = query_hash_grid(points, grid)
+        features_list.append(feats)
+    
+    # Concatenate features from all resolutions
+    h = np.concatenate(features_list, axis=-1)  # Shape: (num_samples, D_total)
+    
+    # 3. Neural Prediction
+    # SDF MLP predicts signed distance
+    sdf_raw = sdf_mlp(h)  # Shape: (num_samples,)
+    
+    # Color MLP predicts color
+    # Note: In some implementations, color is predicted from the same features
+    color_raw = color_mlp(h, ray_d)  # Shape: (num_samples, 3)
+    
+    # 4. SDF to Density and Opacity
+    # sigma = softplus(-beta * sdf)
+    sigma = np.maximum(0, -beta * sdf_raw) # Softplus approximation or explicit softplus
+    # alpha = 1 - exp(-sigma * delta_t)
+    delta_t = np.diff(t_vals, append=t_far)
+    alpha = 1.0 - np.exp(-sigma * delta_t)
+    
+    # 5. Volume Rendering
+    # T_i = product(1 - alpha_j) for j < i
+    transmittance = np.cumprod(1.0 - alpha)
+    transmittance = np.concatenate([[1.0], transmittance[:-1]])
+    
+    weights = alpha * transmittance
+    color_out = np.sum(weights[:, None] * color_raw, axis=0)
+    
+    return color_out, sdf_raw, alpha
+
+def update_hash_grids_numerical(hash_grids, loss_fn, points, ray_d, sdf_mlp, color_mlp, step_size):
+    """
+    Update hash grid features using numerical gradients.
+    """
+    # For each grid, compute numerical gradient
+    for grid in hash_grids:
+        # Get current features
+        current_feats = get_features_from_grid(grid)
+        
+        # Compute loss with current features
+        loss_current = loss_fn(points, ray_d, hash_grids, sdf_mlp, color_mlp)
+        
+        # Perturb features in a random direction
+        direction = np.random.randn(*current_feats.shape)
+        
+        # Add perturbation
+        perturbed_feats = current_feats + step_size * direction
+        set_features_to_grid(grid, perturbed_feats)
+        
+        # Compute loss with perturbed features
+        loss_perturbed = loss_fn(points, ray_d, hash_grids, sdf_mlp, color_mlp)
+        
+        # Compute numerical gradient
+        grad = (loss_perturbed - loss_current) / (2 * step_size) * direction
+        
+        # Update features
+        new_feats = current_feats - learning_rate * grad
+        set_features_to_grid(grid, new_feats)
+```
+
+**Parameters:**
+*   **Step Size ($\epsilon$):** Controls the magnitude of numerical gradient updates. Large steps ($> \text{grid size}$) enable cross-cell communication; small steps ($< \text{grid size}$) approximate analytical gradients [S4, unofficial].
+*   **Beta ($\beta$):** Temperature parameter for SDF-to-density conversion. Not given in the sources.
+*   **Hash Grid Resolutions:** Typically 14 levels, with resolutions ranging from $2^{16}$ to $2^{20}$ entries per grid. Not given in the sources.
+
+**Edge Cases and Pitfalls:**
+*   **Highly Reflective Scenes:** Neuralangelo struggles with highly reflective surfaces, potentially missing structures like buttons or eyes [S4, unofficial].
+*   **Step Size Selection:** Using a step size too small initially may fail to smooth the geometry; using one too large may introduce noise. The coarse-to-fine schedule mitigates this [S4, unofficial].
+
+## Subtopics
+
+### Hash Grid Encoding
+A sparse feature representation that maps 3D coordinates to multi-resolution feature vectors using hash functions. It enables efficient training and rendering by reducing memory footprint and computation compared to dense grids. Choose this when memory efficiency and training speed are critical [S2].
+
+### SDF-based Volume Rendering
+A rendering technique that uses Signed Distance Fields to define geometry. It provides more stable surface extraction and better regularization than density-based NeRFs. Choose this when high-fidelity mesh extraction is required [S2].
+
+## Operating characteristics
+*   **Time Complexity:** Training time is significantly reduced compared to standard NeRFs due to the use of hash grids, but numerical gradient computation adds overhead per step. Rendering time is fast due to the efficient hash lookups. Not given in the sources.
+*   **Memory Complexity:** Memory usage is proportional to the total number of hash grid entries. It is much more memory-efficient than dense voxel grids. Not given in the sources.
+*   **Measured Performance:** Neuralangelo achieves state-of-the-art results in both view synthesis and geometry reconstruction on datasets like DTU and Tanks and Temples [S3].
+*   **Strengths:** High-fidelity surface reconstruction, ability to handle large-scale scenes, no need for auxiliary data (depth/segmentation) [S2].
+*   **Limitations:** Struggles with highly reflective scenes [S4, unofficial]. Numerical gradients may be slower to converge than analytical gradients if not scheduled properly [S4, unofficial].
+
+## Background
+Neuralangelo was introduced by Li et al. at CVPR 2023 by NVIDIA researchers [S4, unofficial]. It builds upon the Instant NGP hash grid encoding and the neural surface rendering framework (like NeuS) to address the limitations of previous methods in recovering detailed structures from real-world scenes [S2]. The method was developed to enable high-fidelity 3D asset generation for augmented/virtual/mixed reality applications [S2].
+
+## Sources
+[S1] A Critical Analysis of NeRF-Based 3D Reconstruction, https://doi.org/10.3390/rs15143585, fetched 2026-10-26
+[S2] Neuralangelo: High-Fidelity Neural Surface Reconstruction, https://doi.org/10.1109/cvpr52729.2023.00817, fetched 2026-10-26
+[S3] Geometric implicit neural representations for signed distance functions, https://doi.org/10.1016/j.cag.2024.104085, fetched 2026-10-26
+[S4] The Best Image-to-3D AI to date: Neuralangelo | What's AI, https://www.louisbouchard.ai/neuralangelo/, fetched 2026-10-29 (unofficial)

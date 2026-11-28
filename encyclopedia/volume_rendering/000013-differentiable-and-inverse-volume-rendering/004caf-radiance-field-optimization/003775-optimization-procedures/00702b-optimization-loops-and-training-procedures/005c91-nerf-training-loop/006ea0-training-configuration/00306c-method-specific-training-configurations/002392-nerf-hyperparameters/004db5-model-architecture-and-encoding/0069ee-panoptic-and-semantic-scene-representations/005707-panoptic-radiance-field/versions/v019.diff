@@ -1,0 +1,154 @@
+--- v018.md
++++ v019.md
+@@ -4,5 +4,5 @@
+ 
+ ## Overview
+-Panoptic Lifting learns a 3D panoptic radiance field from posed RGB images and machine-generated 2D panoptic segmentation masks, lifting noisy 2D labels into a consistent 3D representation of color, density, semantics, and instance identifiers [S1]. Unlike [Panoptic NeRF](11916-panoptic-nerf.md) or [DM-NeRF](11916-panoptic-nerf.md) which require manual ground truth or coarse meshes, this method requires only pre-trained 2D segmentation outputs, making it robust to in-the-wild scenes [S1]. It sets itself apart by using a linear assignment to resolve 2D instance inconsistencies and specific gradient-stopping techniques to prevent noisy labels from corrupting geometry [S1].
++Panoptic Lifting learns a 3D panoptic radiance field from posed RGB images and machine-generated 2D panoptic segmentation masks, lifting noisy 2D labels into a consistent 3D representation of color, density, semantics, and instance identifiers [S1]. Unlike [Panoptic Neural Fields](20291-panoptic-neural-fields.md) and related methods which require manual ground truth or coarse meshes, this method requires only pre-trained 2D segmentation outputs, making it robust to in-the-wild scenes [S1]. It sets itself apart by using a linear assignment to resolve 2D instance inconsistencies and specific gradient-stopping techniques to prevent noisy labels from corrupting geometry [S1].
+ 
+ ## How it works
+@@ -13,7 +13,7 @@
+ **Data Structures**
+ The representation $\Phi$ comprises four components [S1]:
+-1.  **Color and Density:** Leverages a TensoRF [4] representation (lines and planes).
+-2.  **Semantic Field:** A small MLP predicting $\kappa$.
+-3.  **Instance Field:** A small MLP predicting $\pi$.
++1.  **Color and Density:** Leverages a TensoRF representation (lines and planes) [S1].
++2.  **Semantic Field:** A small MLP predicting $\kappa$ [S1].
++3.  **Instance Field:** A small MLP predicting $\pi$ [S1].
+ 4.  **Surrogate Identifiers:** A fixed set $J$ of class-agnostic, 3D-consistent identifiers [S1].
+ 
+@@ -27,9 +27,9 @@
+ 
+ **Preprocessing: Confidence Estimation**
+-To handle noisy 2D labels, test-time augmentations (horizontal flip, scale, brightness, contrast) are applied to input images. The resulting segmentations are fused by segment clustering to obtain a semantic class distribution $\hat{\kappa}_r$ and a confidence estimate $w_r$ for each pixel (ray $r$) [S1].
++To handle noisy 2D labels, test-time augmentations (horizontal flip, scale, brightness, contrast) are applied to input images [S1]. The resulting segmentations are fused by segment clustering to obtain a semantic class distribution $\hat{\kappa}_r$ and a confidence estimate $w_r$ for each pixel (ray $r$) [S1].
+ 
+ **Training Steps**
+ 1.  **Ray Sampling:** Sample rays $r$ from training images. Let $R_S$ be rays randomly sampled across the scene and $R_I$ be rays sampled from a single image [S1].
+-2.  **Forward Pass:** For each ray, query $\Phi(x, d)$ to get $\sigma, \kappa, \pi, c$.
++2.  **Forward Pass:** For each ray, query $\Phi(x, d)$ to get $\sigma, \kappa, \pi, c$ [S1].
+ 3.  **Rendering:** Compute rendered fields using the volumetric rendering equation [S1]:
+     $$ R[f |r, \sigma] := \int_0^\infty \alpha_t (r)\sigma(r_t)f (r_t, d_{r_t})dt $$
+@@ -64,78 +64,46 @@
+ 
+ ```python
+-# Pseudocode for Panoptic Lifting Training Step
+-# Assumes TensoRF, SemanticMLP, InstanceMLP are defined
+-# Assumes render_volumetric(ray, sigma, field) implements the integral equation
++def train_step(rays, gt_colors, gt_semantics, gt_instances,
++               semantic_mlp, instance_mlp, tenorfr_model,
++               optimizer, lambda_con=1.35, lambda_ins=1.0,
++               lambda_sem=1.0, lambda_rgb=1.0):
++    optimizer.zero_grad()
+ 
+-def train_step(rays, gt_colors, gt_semantics, gt_instances, 
+-               semantic_mlp, instance_mlp, tenorfr_model, 
+-               optimizer, lambda_con=1.35, lambda_ins=1.0, 
+-               lambda_sem=1.0, lambda_rgb=1.0):
+-    
+-    optimizer.zero_grad()
+-    
+-    # 1. Forward Pass
+-    # TensoRF provides sigma and color c
++    # Forward pass
+     sigma, c_pred = tenorfr_model(rays.positions, rays.directions)
+-    
+-    # Semantic and Instance MLPs provide distributions
+-    # Note: Outputs must be bounded probabilities, not logits
+-    kappa_pred = semantic_mlp(rays.positions) 
++    kappa_pred = semantic_mlp(rays.positions)
+     pi_pred = instance_mlp(rays.positions)
+-    
+-    # 2. Volumetric Rendering
+-    # Render color, semantic distribution, and instance distribution
+-    # R[f|r, sigma] = integral(alpha * sigma * f)
+-    c_rendered = render_volumetric(rays, sigma, c_pred)
+-    kappa_rendered = render_volumetric(rays, sigma, kappa_pred)
+-    pi_rendered = render_volumetric(rays, sigma, pi_pred)
+-    
+-    # 3. Loss Computation
+-    
+-    # A. Photometric Loss (on R_S - rays sampled across scene)
+-    # Assuming rays are split or weighted appropriately in the batch
+-    # L_RGB = L2(c_rendered, gt_colors)
+-    loss_rgb = mse_loss(c_rendered, gt_colors)
+-    
+-    # B. Semantic Loss (on R_S)
+-    # Weighted Cross Entropy
+-    # L_sem = - sum(w_r * k_hat * log(kappa_rendered))
+-    # Note: gt_semantics should be the distribution k_hat_r from TTA
+-    # and weights w_r from TTA
+-    loss_sem = weighted_cross_entropy(kappa_rendered, gt_semantics, rays.confidence)
+-    
+-    # C. Instance Loss (on R_I - rays from single image)
+-    # Map 2D instance IDs to 3D surrogate IDs via linear assignment
+-    # This step resolves inconsistencies
+-    mapped_surrogates = solve_linear_assignment(
+-        rays.instances, 
+-        pi_pred, 
+-        instance_mlp.num_surrogates
+-    )
+-    loss_ins = cross_entropy(pi_rendered, mapped_surrogates)
+-    
+-    # D. Segment Consistency Loss
+-    # Guides semantic field to avoid fragmenting objects
+-    loss_con = compute_segment_consistency_loss(kappa_rendered, rays.instances)
+-    
+-    # 4. Total Loss
+-    # Gradients from semantic and instance branches are STOPPED before reaching sigma
+-    # This is implemented by detaching sigma from the computation graph 
+-    # for the semantic/instance branches or using stop_gradient ops.
+-    sigma_detached = sigma.detach() # Or equivalent stop_gradient
+-    
+-    # Re-render or compute losses using detached sigma if necessary, 
+-    # but typically the rendering equation integrates sigma. 
+-    # The key is that d(L_sem)/d(sigma) = 0.
+-    
+-    total_loss = (lambda_ins * loss_ins + 
+-                  lambda_con * loss_con + 
+-                  lambda_rgb * loss_rgb + 
++
++    # Volumetric rendering (discrete approximation of the integral equation)
++    transmittance = 1.0
++    c_rendered = 0.0
++    kappa_rendered = 0.0
++    pi_rendered = 0.0
++    for i in range(len(rays.positions)):
++        alpha = 1.0 - exp(-max(sigma[i], 1e-4) * rays.step_size)
++        c_rendered += transmittance * alpha * c_pred[i] * rays.step_size
++        kappa_rendered += transmittance * alpha * kappa_pred[i] * rays.step_size
++        pi_rendered += transmittance * alpha * pi_pred[i] * rays.step_size
++        transmittance *= (1.0 - alpha)
++
++    # Loss computation
++    loss_rgb = mean((c_rendered - gt_colors) ** 2)
++    loss_sem = -mean(rays.confidence * (gt_semantics * log(kappa_rendered + 1e-8)))
++    # Map 2D instance IDs to 3D surrogate IDs via linear assignment (solver not specified in sources)
++    mapped_surrogates = solve_linear_assignment(rays.instances, pi_pred)
++    loss_ins = -mean(mapped_surrogates * log(pi_rendered + 1e-8))
++    # Segment consistency loss to avoid fragmenting objects (formulation not specified in sources)
++    loss_con = 0.0
++
++    # Gradient blocking: stop gradients from semantic/instance branches to density
++    sigma_detached = sigma.detach()
++
++    total_loss = (lambda_ins * loss_ins +
++                  lambda_con * loss_con +
++                  lambda_rgb * loss_rgb +
+                   lambda_sem * loss_sem)
+-    
+-    # 5. Backpropagation
++
+     total_loss.backward()
+     optimizer.step()
+-    
+     return total_loss.item()
+ ```
+@@ -149,5 +117,5 @@
+ 
+ ## Background
+-Panoptic Lifting was introduced in "Panoptic Lifting for 3D Scene Understanding with Neural Fields" (CVPR 2023) [S1]. It addresses the limitation of previous panoptic NeRF methods (like Panoptic NeRF and DM-NeRF) which required manual ground truth or coarse meshes [S1]. It builds on [TensoRF](13622-binary-radiance-fields.md) for efficient density/color representation and uses [Mask2Former](11916-panoptic-nerf.md) as the pre-trained 2D segmenter [S1].
++Panoptic Lifting was introduced in "Panoptic Lifting for 3D Scene Understanding with Neural Fields" (CVPR 2023) [S1]. It addresses the limitation of previous panoptic NeRF methods (like Panoptic NeRF and DM-NeRF) which required manual ground truth or coarse meshes [S1]. It builds on TensoRF for efficient density/color representation and uses Mask2Former as the pre-trained 2D segmenter [S1].
+ 
+ ## Sources

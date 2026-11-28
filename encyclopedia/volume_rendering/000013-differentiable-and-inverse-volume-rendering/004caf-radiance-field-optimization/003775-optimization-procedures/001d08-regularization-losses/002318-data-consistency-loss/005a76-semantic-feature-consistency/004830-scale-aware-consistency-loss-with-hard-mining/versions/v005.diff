@@ -1,0 +1,102 @@
+--- v004.md
++++ v005.md
+@@ -8,15 +8,15 @@
+ ## How it works
+ **Inputs and Outputs**
+-*   **Inputs:** Rendered semantic features $F \in \mathbb{R}^{C \times H \times W}$, binary masks $M_k \in \{0,1\}^{H_k \times W_k}$ for $k=1\dots K$ scales, and sampled ray indices $I \in \mathbb{Z}^N$.
+-*   **Outputs:** A scalar loss value representing the semantic inconsistency.
++*   **Inputs:** Rendered semantic features $F \in \mathbb{R}^{C \times H \times W}$, binary masks $M_k \in \{0,1\}^{H_k \times W_k}$ for $k=1\dots K$ scales, and sampled ray indices $I \in \mathbb{Z}^N$ [S1, unofficial].
++*   **Outputs:** A scalar loss value representing the semantic inconsistency [S1, unofficial].
+ 
+ **Data Structures**
+-*   **Features:** Multi-channel feature maps normalized to unit length along the channel dimension.
+-*   **Masks:** Binary tensors indicating valid pixels at each scale, projected to a common resolution for overlap computation.
+-*   **Correlation Matrix:** An $N \times N$ tensor storing pairwise cosine similarities between sampled feature vectors.
++*   **Features:** Multi-channel feature maps normalized to unit length along the channel dimension [S1, unofficial].
++*   **Masks:** Binary tensors indicating valid pixels at each scale, projected to a common resolution for overlap computation [S1, unofficial].
++*   **Correlation Matrix:** An $N \times N$ tensor storing pairwise cosine similarities between sampled feature vectors [S1, unofficial].
+ 
+ **Steps**
+ 
+-1.  **Feature Normalization and Regularization:** Compute the $L_2$ norm of the rendered features across the channel dimension and average it over spatial dimensions: $n = \frac{1}{HW} \sum_{c,h,w} \|F[c,h,w]\|_2$. Apply a regularization loss to encourage the feature magnitude to be close to 1: $L_{\text{norm}} = (1 - n)^2$ [S1, unofficial].
++1.  **Feature Normalization and Regularization:** Compute the $L_2$ norm of the rendered features across the channel dimension and average it over spatial dimensions: $n = \frac{1}{HW} \sum_{c,h,w} \|F[c,h,w]\|_2$ [S1, unofficial]. Apply a regularization loss to encourage the feature magnitude to be close to 1: $L_{\text{norm}} = (1 - n)^2$ [S1, unofficial].
+ 2.  **Scale Interpolation:** Interpolate the rendered features to the resolution of the masks using bilinear interpolation [S1, unofficial].
+ 3.  **Scale Gating:** Apply scale-aware semantic feature gating to modulate features based on scale information [S1, unofficial]. (The exact gating mechanism is not detailed in the sources [G].)
+@@ -24,5 +24,5 @@
+ 5.  **Sample Normalization:** Normalize the sampled features to unit length along the channel dimension: $\hat{F} = \text{normalize}(F_{\text{sampled}}, \text{dim}=-1, p=2)$ [S1, unofficial].
+ 6.  **Correlation Computation:** Compute the cosine similarity between all pairs of sampled rays, yielding an $N \times N$ matrix $C$ [S1, unofficial].
+-7.  **Pair Classification:** Determine the relationship between every pair of pixels $(i, j)$ based on their mask coverage across all scales. Let $S_{ij}$ be the sum of mask intersections for the pair across all $K$ scales. Classify pairs as:
++7.  **Pair Classification:** Determine the relationship between every pair of pixels $(i, j)$ based on their mask coverage across all scales [S1, unofficial]. Let $S_{ij}$ be the sum of mask intersections for the pair across all $K$ scales [S1, unofficial]. Classify pairs as:
+     *   **Consistent Negative:** $S_{ij} = 0$ (no common mask coverage) [S1, unofficial].
+     *   **Consistent Positive:** $S_{ij} = K$ (common mask coverage across all scales) [S1, unofficial].
+@@ -74,40 +74,39 @@
+     
+     # 6. Compute cosine similarity between all pairs
+-    # Matches source einsum 'nhc,njc->nhj' adapted for (N, C) -> 'nc,mc->nm'
+     corr = torch.einsum('nc,mc->nm', scale_conditioned_features_sam, scale_conditioned_features_sam)
+     
+     # 7. Compute mask overlap sum across scales for each sampled ray
+-    mask_sum = torch.zeros(corr.shape[0], corr.shape[0], device=corr.device)
++    gt_corrs = torch.zeros(corr.shape[0], corr.shape[0], device=corr.device)
+     for m in masks:
+         m_resized = F.interpolate(m, size=(target_h, target_w), mode='nearest').squeeze(0)
+         m_flat = m_resized.view(-1)  # (H*W,)
+-        mask_sum += torch.outer(m_flat, m_flat)
++        gt_corrs += torch.outer(m_flat, m_flat)
+         
+     # 8. Classify pairs
+-    consistent_negative = (mask_sum == 0)
+-    consistent_positive = (mask_sum == num_scales)
+-    inconsistent = ~(consistent_negative | consistent_positive)
++    consistent_negative = (gt_corrs == 0)
++    consistent_positive = (gt_corrs == num_scales)
++    inconsistent = torch.logical_not(torch.logical_or(consistent_negative, consistent_positive))
+     
+     # 9. Hard mining selection
+     inconsistent_num = inconsistent.sum().item()
+-    sampled_num = inconsistent_num // 2
++    sampled_num = inconsistent_num / 2
+     
+-    pos_count = consistent_positive.sum().item()
++    pos_count = consistent_positive.count_nonzero()
+     if pos_count > 0:
+-        prob_pos = sampled_num / pos_count
+-        sampled_positive = consistent_positive & (torch.rand_like(consistent_positive.float()) < prob_pos)
++        rand_pos = torch.rand_like(consistent_positive.float())
++        sampled_positive = torch.logical_and(consistent_positive, rand_pos < sampled_num / pos_count)
+     else:
+         sampled_positive = torch.zeros_like(consistent_positive, dtype=torch.bool)
+         
+-    neg_count = consistent_negative.sum().item()
++    neg_count = consistent_negative.count_nonzero()
+     if neg_count > 0:
+-        prob_neg = sampled_num / neg_count
+-        sampled_negative = consistent_negative & (torch.rand_like(consistent_negative.float()) < prob_neg)
++        rand_neg = torch.rand_like(consistent_negative.float())
++        sampled_negative = torch.logical_and(consistent_negative, rand_neg < sampled_num / neg_count)
+     else:
+         sampled_negative = torch.zeros_like(consistent_negative, dtype=torch.bool)
+         
+     # 10. Add hard samples
+-    hard_pos_mask = (corr < 0.75) & consistent_positive
+-    hard_neg_mask = (corr > 0.5) & consistent_negative
++    hard_pos_mask = torch.any(torch.logical_and(corr < 0.75, gt_corrs == 1), dim=0)
++    hard_neg_mask = torch.any(torch.logical_and(corr > 0.5, gt_corrs == 0), dim=0)
+     
+     # 11. Compute loss on mined pairs
+@@ -134,11 +133,11 @@
+ 
+ **Edge Cases and Pitfalls**
+-*   **Degenerate Masks:** If no pairs satisfy the consistent positive or negative criteria, the mining step yields no samples. The loss falls back to the norm regularization [S1, unofficial].
++*   **Degenerate Masks:** If no pairs satisfy the consistent positive or negative criteria, the mining step yields no samples [S1, unofficial].
+ *   **Precision:** Cosine similarity calculations depend on feature magnitude. Features are normalized to unit length before similarity computation [S1, unofficial].
+-*   **Mask Resolution:** Interpolation artifacts can affect mask consistency checks. Bilinear interpolation is used for features, while nearest-neighbor interpolation is used for mask projection to preserve binary validity [G].
++*   **Mask Resolution:** Interpolation artifacts can affect mask consistency checks [S1, unofficial].
+ 
+ ## Operating characteristics
+-*   **Time Complexity:** Dominated by the correlation matrix computation $O(N^2)$ and the mask overlap summation $O(N^2 \cdot K)$, where $N$ is the number of sampled rays and $K$ is the number of scales.
+-*   **Memory Complexity:** $O(N^2)$ for storing the correlation matrix and mask consistency matrix.
++*   **Time Complexity:** Dominated by the correlation matrix computation $O(N^2)$ and the mask overlap summation $O(N^2 \cdot K)$, where $N$ is the number of sampled rays and $K$ is the number of scales [S1, unofficial].
++*   **Memory Complexity:** $O(N^2)$ for storing the correlation matrix and mask consistency matrix [S1, unofficial].
+ *   **Strengths:** Focuses optimization on difficult samples where semantic similarity contradicts geometric ground truth, improving convergence in complex scenes [S1, unofficial].
+ *   **Limitations:** High memory usage for large $N$ due to the $N \times N$ pairwise matrix. Performance depends on accurate mask alignment across scales [G].

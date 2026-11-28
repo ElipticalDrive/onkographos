@@ -1,0 +1,87 @@
+# CLIP Similarity Loss
+
+Also called: CLIP Loss, Image-Text CLIP Loss
+
+## Overview
+A loss function that quantifies the similarity between a rendered image $I$ and a text prompt $T$ in the CLIP embedding space [S1].
+
+## How it works
+**Inputs and outputs:**
+- Input: Rendered image $I$ and text prompt $T$ [S1].
+- Output: Scalar loss value $L_{CLIP}$ [S1].
+
+**Data structures:**
+- $E_{img}$: Pre-trained CLIP image encoder [S1].
+- $E_{txt}$: Pre-trained CLIP text encoder [S1].
+- Embeddings: Feature vectors in $\mathbb{R}^d$ output by the encoders [S1].
+
+**Steps:**
+1. Encode the rendered image $I$ using $E_{img}$ [S1].
+2. Encode the text prompt $T$ using $E_{txt}$ [S1].
+3. Compute the cosine similarity between the resulting feature vectors [S1].
+4. Compute the loss as one minus the similarity [S1].
+
+**Formula:**
+$$L_{CLIP}(I, T) = 1 - \text{sim}(E_{img}(I), E_{txt}(T))$$
+Where:
+- $E_{img}$ and $E_{txt}$ are the pre-trained CLIP image and text encoders, respectively [S1].
+- $\text{sim}(A, B)$ is the cosine similarity between two feature vectors $A$ and $B$, defined as $\text{sim}(A, B) = \frac{A \cdot B}{\|A\| \|B\|}$ [S1].
+- $I$ is the rendered image [S1].
+- $T$ is the text prompt [S1].
+
+**Parameters:**
+- CLIP model variant: Not given in the sources.
+- Image preprocessing: Standard CLIP normalization (resize to 224x224, normalize) [G].
+
+**Edge cases and pitfalls:**
+- Resolution sensitivity: CLIP encoders expect fixed input sizes; resizing rendered images may introduce artifacts [G].
+- Semantic ambiguity: Text prompts may be ambiguous, leading to suboptimal semantic alignments [G].
+
+**Pseudocode:**
+> **Unverified code.** The code below did not pass a test run against a reference implementation, or no test fits it, so it may contain errors.
+
+```python
+def clip_similarity_loss(rendered_image: Tensor, text_prompt: str, 
+                         clip_img_encoder: Module, clip_txt_encoder: Module) -> Tensor:
+    """
+    Compute CLIP similarity loss between a rendered image and a text prompt.
+    
+    Args:
+        rendered_image: Tensor of shape (C, H, W) or (B, C, H, W), normalized to [-1, 1].
+        text_prompt: String text prompt.
+        clip_img_encoder: Pre-trained CLIP image encoder.
+        clip_txt_encoder: Pre-trained CLIP text encoder.
+        
+    Returns:
+        Scalar loss tensor.
+    """
+    # Encode image and text
+    img_embedding = clip_img_encoder(rendered_image)
+    txt_embedding = clip_txt_encoder(text_prompt)
+    
+    # Normalize embeddings to unit length for cosine similarity
+    img_embedding = img_embedding / img_embedding.norm(dim=-1, keepdim=True)
+    txt_embedding = txt_embedding / txt_embedding.norm(dim=-1, keepdim=True)
+    
+    # Compute cosine similarity
+    similarity = (img_embedding * txt_embedding).sum(dim=-1)
+    
+    # Compute loss as one minus similarity
+    loss = 1.0 - similarity
+    
+    return loss.mean()
+```
+
+## Subtopics
+
+### [Text-guided Scene Style Editing](17225-text-guided-scene-style-editing.md)
+Uses CLIP semantic distance to control the appearance of a 3D scene via text prompts while maintaining multi-view consistency. It builds on CLIP Similarity Loss by introducing appearance embeddings and specific network architecture modifications to ProLiF.
+
+## Operating characteristics
+Not given in the sources.
+
+## Background
+Originated from the CLIP model, which trains image and text encoders using contrastive learning [S1]. It was adapted for 3D editing in methods like CLIP-NeRF, which introduced disentangled conditional NeRFs for text-guided editing [S1].
+
+## Sources
+[S1] A survey on 3D editing based on NeRF and 3DGS, https://link.springer.com/article/10.1007/s11704-025-41176-9, fetched 2026-10-28

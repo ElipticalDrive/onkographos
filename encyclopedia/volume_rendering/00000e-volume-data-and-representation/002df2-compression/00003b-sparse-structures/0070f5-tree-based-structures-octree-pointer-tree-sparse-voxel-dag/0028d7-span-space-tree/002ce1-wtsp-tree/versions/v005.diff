@@ -1,0 +1,292 @@
+--- v004.md
++++ v005.md
+@@ -7,7 +7,7 @@
+ 
+ ## How it works
+-**Inputs:** Time-varying volume data consisting of $T$ time steps, each with spatial dimensions $N \times N \times N$. User-specified spatial error tolerance ($\epsilon_s$) and temporal error tolerance ($\epsilon_t$). Block size $n$ (number of voxels per initial subvolume).
+-
+-**Outputs:** A unified spatio-temporal hierarchical data structure (WTSP tree) containing compressed wavelet coefficients and low-pass filtered subblocks, along with hierarchical error metrics for each node.
++**Inputs:** Time-varying volume data consisting of $T$ time steps, each with spatial dimensions $N \times N \times N$ [S1, S2]. User-specified spatial error tolerance ($\epsilon_s$) and temporal error tolerance ($\epsilon_t$) [S1, S2]. Block size $n$ (number of voxels per initial subvolume) [S1].
++
++**Outputs:** A unified spatio-temporal hierarchical data structure (WTSP tree) containing compressed wavelet coefficients and low-pass filtered subblocks, along with hierarchical error metrics for each node [S1].
+ 
+ **Data Structures:**
+@@ -44,5 +44,5 @@
+     b.  **1D Wavelet Transform:** Apply 1D wavelet transforms along the time dimension to the wavelet coefficients associated with these aligned nodes [S1, S2].
+         *   *Optimization:* If the wavelet coefficients of corresponding octree nodes in the time sequence are all zero, skip the 1D transform process [S1].
+-        *   Use Haar wavelets for the temporal transform [S1, S2]. This produces a binary time tree similar to the error tree algorithm [MVW98].
++        *   Use Haar wavelets for the temporal transform [S1, S2]. This produces a binary time tree similar to the error tree algorithm [MVW98] [S1].
+     c.  **Root Handling:** For the root nodes of the octrees, build the temporal hierarchy from the low-resolution data blocks rather than wavelet coefficients [S1].
+     d.  **Compression:** Compress the 1D wavelet transform coefficients using run-length encoding combined with a fixed Huffman encoder [S1]. This scheme is fast to decompress and effective when many consecutive zero subsequences are present [S1].
+@@ -59,174 +59,113 @@
+ 
+ ```python
++class SpatialNode:
++    def __init__(self, low_pass, wavelet_coeffs, children=None, spatial_error=0.0):
++        self.low_pass = low_pass
++        self.wavelet_coeffs = wavelet_coeffs
++        self.children = children
++        self.spatial_error = spatial_error
++        self.temporal_tree = None
++
++class TemporalNode:
++    def __init__(self, value, left_child=None, right_child=None, temporal_error=0.0, compressed_data=None):
++        self.value = value
++        self.left_child = left_child
++        self.right_child = right_child
++        self.temporal_error = temporal_error
++        self.compressed_data = compressed_data
++
+ def build_wtsp_tree(volume_data, block_size_n, spatial_threshold, spatial_tol, temporal_tol):
+-    """
+-    volume_data: List of 3D arrays, one per time step.
+-    block_size_n: Number of voxels in the initial spatial block.
+-    spatial_threshold: Threshold for clamping spatial wavelet coefficients.
+-    spatial_tol, temporal_tol: User-defined error tolerances.
+-    """
+     num_time_steps = len(volume_data)
+-    
+-    # Stage 1: Build spatial octrees for each time step
+     spatial_octrees = []
+     for t in range(num_time_steps):
+         octree = build_spatial_octree(volume_data[t], block_size_n, spatial_threshold)
+         spatial_octrees.append(octree)
+-        
+-    # Stage 2: Merge into WTSP tree
+-    # The root of the WTSP tree is the root of the first spatial octree
+-    # Each node in the spatial octree will have a temporal tree attached
+     wtsp_root = spatial_octrees[0]
+-    
+-    # Traverse the spatial octree to build temporal hierarchies
+-    # We assume the spatial structure is identical across time steps for alignment
+-    build_temporal_hierarchies(spatial_octrees, wtsp_root)
+-    
+-    # Calculate error metrics
+-    calculate_error_metrics(wtsp_root, spatial_tol, temporal_tol)
+-    
++    build_temporal_hierarchies(spatial_octrees, wtsp_root, path=[])
++    calculate_error_metrics(wtsp_root)
+     return wtsp_root
+ 
+ def build_spatial_octree(volume, block_size_n, threshold):
+-    """
+-    Recursively builds a spatial octree using 3D wavelet transform.
+-    """
+-    # Base case: if volume size equals block_size_n, it's a leaf in the initial subdivision
+-    # However, the algorithm describes grouping 8 subvolumes of size n/8 into a parent of size n.
+-    # We assume the input volume is a power of 2 in each dimension and divisible by block_size_n.
+-    
+-    if volume.shape[0] == block_size_n: # Assuming cubic volume for simplicity
+-        # Perform 3D wavelet transform
++    if volume.shape[0] == block_size_n:
++        if is_uniform(volume):
++            uniform_val = volume[0, 0, 0]
++            low_pass = [uniform_val] * (block_size_n ** 3)
++            coeffs = [0.0] * (7 * block_size_n ** 3 // 8)
++            return SpatialNode(low_pass=low_pass, wavelet_coeffs=coeffs)
++        # Standard 3D wavelet transform produces low_pass (size n/8) and coeffs (size 7n/8)
+         low_pass, coeffs = perform_3d_wavelet_transform(volume)
+-        
+-        # Thresholding
+         coeffs = clamp_coeffs(coeffs, threshold)
+-        
+-        # Check for uniformity optimization
+-        if is_uniform(volume):
+-            low_pass = volume[0,0,0] # Uniform value
+-            coeffs = zeros_like(coeffs)
+-            
+-        return SpatialNode(low_pass=low_pass, wavelet_coeffs=coeffs, children=None)
+-    
+-    # Recursive step: Subdivide
+-    subvolumes = divide_into_8_subvolumes(volume)
++        return SpatialNode(low_pass=low_pass, wavelet_coeffs=coeffs)
++    subvolumes = [volume[i:i+block_size_n//2, j:j+block_size_n//2, k:k+block_size_n//2] 
++                  for i in range(0, block_size_n, block_size_n//2) 
++                  for j in range(0, block_size_n, block_size_n//2) 
++                  for k in range(0, block_size_n, block_size_n//2)]
+     children = [build_spatial_octree(sub, block_size_n, threshold) for sub in subvolumes]
+-    
+-    # The parent node's low_pass is derived from the children's low_pass blocks
+-    # The algorithm states: "low-pass filtered subblocks from eight neighboring subvolumes are collected 
+-    # and grouped into a single block of n voxels, which becomes the parent node"
+-    parent_low_pass = group_low_pass_blocks([child.low_pass for child in children])
+-    
++    parent_low_pass = []
++    for child in children:
++        parent_low_pass.extend(child.low_pass)
+     return SpatialNode(low_pass=parent_low_pass, wavelet_coeffs=None, children=children)
+ 
+-def build_temporal_hierarchies(spatial_octrees, current_spatial_node):
+-    """
+-    Builds the temporal binary tree for a given spatial node across all time steps.
+-    """
+-    if current_spatial_node.children is None:
+-        # Leaf spatial node (or root if only one level)
+-        # Collect coefficients/low_pass from all time steps for this spatial location
+-        values_at_time = []
+-        for t in range(len(spatial_octrees)):
+-            # Navigate to the corresponding spatial node in the t-th octree
+-            # Assuming identical structure, we can use a helper to get node by path
+-            node_t = get_spatial_node_at_path(spatial_octrees[t], current_spatial_node.path)
+-            if node_t is root_of_octree:
+-                values_at_time.append(node_t.low_pass) # Root uses low_pass blocks
+-            else:
+-                values_at_time.append(node_t.wavelet_coeffs)
+-        
+-        # Build temporal tree
+-        temporal_tree = build_temporal_tree(values_at_time)
+-        current_spatial_node.temporal_tree = temporal_tree
+-    else:
+-        # Internal spatial node
+-        # Build temporal tree for this node
+-        values_at_time = []
+-        for t in range(len(spatial_octrees)):
+-            node_t = get_spatial_node_at_path(spatial_octrees[t], current_spatial_node.path)
+-            if node_t is root_of_octree:
+-                values_at_time.append(node_t.low_pass)
+-            else:
+-                values_at_time.append(node_t.wavelet_coeffs)
+-        
+-        temporal_tree = build_temporal_tree(values_at_time)
+-        current_spatial_node.temporal_tree = temporal_tree
+-        
+-        # Recurse for children
+-        for child in current_spatial_node.children:
+-            build_temporal_hierarchies(spatial_octrees, child)
++def build_temporal_hierarchies(spatial_octrees, current_spatial_node, path):
++    values_at_time = []
++    for t in range(len(spatial_octrees)):
++        node_t = get_node_at_path(spatial_octrees[t], path)
++        if len(path) == 0:
++            values_at_time.append(node_t.low_pass)
++        else:
++            values_at_time.append(node_t.wavelet_coeffs)
++    if all(v == 0.0 for val in values_at_time for v in (val if isinstance(val, list) else [val])):
++        current_spatial_node.temporal_tree = TemporalNode(value=0)
++        return
++    temporal_tree = build_temporal_tree(values_at_time)
++    current_spatial_node.temporal_tree = temporal_tree
++    if current_spatial_node.children is not None:
++        for i, child in enumerate(current_spatial_node.children):
++            build_temporal_hierarchies(spatial_octrees, child, path + [i])
+ 
+ def build_temporal_tree(values_list):
+-    """
+-    Builds a binary time tree using Haar wavelets.
+-    values_list: List of arrays (coefficients or low_pass blocks) for each time step.
+-    """
+     if len(values_list) == 1:
+-        return TemporalNode(value=values_list[0], left=None, right=None)
+-    
+-    # Haar wavelet: split into averages and differences
+-    # For a binary tree, we typically split the time sequence in half
++        return TemporalNode(value=values_list[0])
+     mid = len(values_list) // 2
+-    first_half = values_list[:mid]
+-    second_half = values_list[mid:]
+-    
+-    # Recursively build left and right children
+-    left_child = build_temporal_tree(first_half)
+-    right_child = build_temporal_tree(second_half)
+-    
+-    # The current node stores the wavelet coefficient (average/difference)
+-    # In Haar, the average is (first + second) / 2, difference is (first - second) / 2
+-    # However, the structure implies a binary tree where nodes store coefficients.
+-    # The source says "binary time tree similar to the error tree algorithm".
+-    # We store the transformed value.
+-    
+-    # Optimization: if all coefficients are zero, skip transform?
+-    # The source says: "if the wavelet coefficients ... are all zero, skip the 1D wavelet transform process."
+-    # This likely means if the input values are all zero, the output is zero.
+-    
+-    avg = (first_half[0] + second_half[0]) / 2 # Simplified for single value
+-    diff = (first_half[0] - second_half[0]) / 2
+-    
+-    # Note: The actual implementation would handle arrays of coefficients
+-    # The source mentions "A[t1, t2] and D[t1, t2] represent averages and differences"
+-    
+-    return TemporalNode(value=avg, left=left_child, right=right_child, diff=diff)
++    left_child = build_temporal_tree(values_list[:mid])
++    right_child = build_temporal_tree(values_list[mid:])
++    # Haar wavelet: average and difference
++    avg = (values_list[0] + values_list[1]) / 2.0
++    diff = (values_list[0] - values_list[1]) / 2.0
++    # Compress using run-length encoding combined with a fixed Huffman encoder
++    compressed = compress_with_rle_huffman(avg)
++    return TemporalNode(value=avg, left_child=left_child, right_child=right_child, compressed_data=compressed)
+ 
+ def clamp_coeffs(coeffs, threshold):
+-    return [c if abs(c) > threshold else 0 for c in coeffs]
++    return [c if abs(c) > threshold else 0.0 for c in coeffs]
+ 
+ def is_uniform(volume):
+-    return all(v == volume[0,0,0] for v in volume.flatten())
+-
+-def group_low_pass_blocks(low_pass_blocks):
+-    # Concatenate 8 blocks of size n/8 into one block of size n
+-    # Implementation depends on memory layout
++    return all(v == volume[0, 0, 0] for v in volume.flatten())
++
++def get_node_at_path(octree, path):
++    node = octree
++    for idx in path:
++        node = node.children[idx]
++    return node
++
++def compress_with_rle_huffman(data):
++    # Not given in the sources. Standard RLE and Huffman encoding applied to bitstream.
+     pass
+ 
+-def calculate_error_metrics(node, spatial_tol, temporal_tol):
++def calculate_error_metrics(node):
+     # Bottom-up calculation
+-    if node.children is None:
+-        # Leaf spatial node
+-        # s_e(T) = sum(MSE(T, Ti)) + max(s_e(Ti))
+-        # Since Ti are children, we need to access them
+-        # This requires a post-order traversal
+-        pass
+-    else:
++    if node.children is not None:
+         for child in node.children:
+-            calculate_error_metrics(child, spatial_tol, temporal_tol)
+-        
+-        # Calculate spatial error for this node
+-        # MSE between current node's data and children's data
+-        # This requires accessing the actual data or reconstructed values
+-        pass
++            calculate_error_metrics(child)
++        # Spatial error formula: sum(MSE(T, Ti)) + max(se(Ti))
++        # Requires accessing actual data or reconstructed values
++        pass # Not given in the sources.
+ ```
+ 
+ **Parameters:**
+-*   **Block Size ($n$):** Size of the initial spatial subvolume in voxels. Not given in the sources.
+-*   **Spatial Threshold:** User-specified threshold for clamping spatial wavelet coefficients. Not given in the sources.
+-*   **Spatial Error Tolerance ($\epsilon_s$):** User-specified tolerance for spatial approximation error. Not given in the sources.
+-*   **Temporal Error Tolerance ($\epsilon_t$):** User-specified tolerance for temporal approximation error. Not given in the sources.
++*   **Block Size ($n$):** Size of the initial spatial subvolume in voxels [S1].
++*   **Spatial Threshold:** User-specified threshold for clamping spatial wavelet coefficients [S1].
++*   **Spatial Error Tolerance ($\epsilon_s$):** User-specified tolerance for spatial approximation error [S1, S2].
++*   **Temporal Error Tolerance ($\epsilon_t$):** User-specified tolerance for temporal approximation error [S1, S2].
+ *   **Wavelet Type (Spatial):** 3D spatial wavelets. Not limited to Haar; higher-order wavelets can be used for better image quality [S1].
+ *   **Wavelet Type (Temporal):** Haar wavelets [S1, S2].
+@@ -250,12 +189,12 @@
+ 
+ ## Operating characteristics
+-**Time Complexity:** Not given in the sources.
+-**Memory Complexity:** Not given in the sources.
+-**Measured Performance:** Not given in the sources.
+-**Scaling:** Not given in the sources.
++**Time Complexity:** Not given in the sources [S1, S2].
++**Memory Complexity:** Not given in the sources [S1, S2].
++**Measured Performance:** Not given in the sources [S1, S2].
++**Scaling:** Not given in the sources [S1, S2].
+ **Strengths:** Exploits spatial and temporal locality and coherence to allow flexible spatio-temporal level-of-detail data selection and retrieval [S1, S2]. The bit-level run-length encoding scheme exhibits good compression ratio if many consecutive zero subsequences are present and is very fast to decompress [S1].
+ **Limitations:** Higher-order wavelets for spatial transforms increase reconstruction cost at run time [S1].
+ **When to Use:** Large-scale time-varying data visualization where spatio-temporal coherence can be exploited [S1, S2].
+-**When Not to Use:** Not given in the sources.
++**When Not to Use:** Not given in the sources [S1, S2].
+ 
+ ## Background

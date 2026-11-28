@@ -1,0 +1,249 @@
+# 3D Gaussian Splatting (3DGS) Preliminaries
+
+Also called: 3D Gaussian Splatting (3D-GS), 3D Gaussian Splatting Representation, Kerbl et al. 2023, Standard 3DGS
+
+## Overview
+3D Gaussian Splatting (3DGS) is an explicit scene representation method that models a 3D scene as a collection of anisotropic 3D Gaussian primitives, replacing the implicit neural fields of NeRF with discrete, differentiable volumetric splats [S1, S2, S4, S5, S10, S12, S16, S20][S25, S27, S28, unofficial][S31][S32][S42, unofficial]. It solves the trade-off between the high visual quality of neural radiance fields and the real-time rendering speeds of traditional rasterization by projecting these 3D Gaussians onto the image plane as 2D ellipses and compositing them via alpha blending [S1, S2, S4, S10, S12, S16, S20][S25, S28, unofficial][S31][S32][S42, unofficial]. Unlike NeRF, which requires expensive ray marching and network queries, 3DGS enables real-time rendering through GPU-friendly tile-based rasterization [S1, S2, S4, S10, S12, S16, S20][S25, S28, unofficial][S31][S32][S42, unofficial]. It sets apart from its siblings by using explicit Gaussian ellipsoids parameterized by mean, covariance, opacity, and spherical harmonics, optimized end-to-end from sparse Structure-from-Motion (SfM) point clouds [S1, S2, S4, S5, S12, S20][S27, unofficial][S31][S37][S42, unofficial].
+
+## How it works
+**Inputs:** A set of calibrated RGB images $\{I_m\}_{m=1}^M$ with known camera poses (extrinsics $W_m$ and intrinsics $K_m$), and an initial sparse 3D point cloud estimated via Structure-from-Motion (SfM) [S1, S5, S12][S27, unofficial][S30, unofficial][S37][S42, unofficial].
+**Outputs:** A rendered RGB image $\hat{C}$ for a target camera view, and optimized Gaussian parameters (mean, rotation, scale, opacity, spherical harmonics coefficients) [S1, S2, S5, S12][S28, unofficial][S32][S42, unofficial].
+
+**Data Structures:**
+The scene is represented as a set of $N$ 3D Gaussian primitives $G = \{g_i\}_{i=1}^N$ [S51, unofficial]. Each primitive $g_i$ is defined by the following attributes [S1, S2, S4, S5][S7, unofficial][S12, S19, S20][S27, unofficial][S37][S42, unofficial]:
+1.  **Mean Position:** $\mu_i \in \mathbb{R}^3$, representing the center of the Gaussian [S1, S2, S4, S5][S7, unofficial][S12, S19, S20][S27, unofficial][S37][S42, unofficial].
+2.  **Covariance Matrix:** $\Sigma_i \in \mathbb{R}^{3 \times 3}$, defining the shape and orientation [S1, S2, S4, S5][S7, unofficial][S12, S19, S20][S27, unofficial][S37][S42, unofficial]. To ensure positive semi-definiteness and facilitate optimization, $\Sigma_i$ is parameterized by a rotation quaternion $q_i \in \mathbb{R}^4$ (normalized to unit length) and a scale vector $s_i \in \mathbb{R}^3$ (typically stored in logarithmic space to ensure positivity) [S2, S5][S7, unofficial][S12, S18][S28, unofficial][S31][S37][S43, unofficial]:
+    $$ \Sigma_i = R_i S_i S_i^\top R_i^\top $$
+    where $R_i \in \mathbb{R}^{3 \times 3}$ is the rotation matrix derived from $q_i$, and $S_i = \text{diag}(s_{i,x}, s_{i,y}, s_{i,z})$ is the diagonal scaling matrix [S2, S5][S7, unofficial][S12, S18][S28, unofficial][S31][S37][S43, unofficial].
+3.  **Opacity:** $\alpha_i \in [0, 1]$, representing the learnable scalar transparency of the primitive [S2, S5][S7, unofficial][S12, S19, S20][S27, unofficial][S37][S42, unofficial].
+4.  **Color:** View-dependent color $c_i(d)$ parameterized by spherical harmonics (SH) coefficients $C_i \in \mathbb{R}^{3 \times (d+1)^2}$, where $d$ is the degree of the SH basis [S2, S4, S5][S7, unofficial][S11, S12, S19, S20][S27, unofficial][S37][S42, unofficial]. The color for a viewing direction $d$ is computed as $c_i(d) = \text{SH}(d, C_i)$ [S2, S11, S12][S42, unofficial].
+
+**Rendering Pipeline:**
+For a given camera view with extrinsic matrix $W$ and intrinsic matrix $K$:
+
+1.  **Projection to Camera Space:**
+    Transform the 3D mean $\mu_i$ to camera coordinates:
+    $$ \mu'_i = W \mu_i $$
+    (Note: Some sources use homogeneous coordinates $[\mu_i, 1]^\top$ and apply $KW$ [S5, S44]. The standard 3DGS approach typically transforms to camera space first, then projects [S5, S16, S31].)
+
+2.  **2D Splatting (Projection to Image Plane):**
+    Project the 3D Gaussian onto the 2D image plane. The projected mean $\hat{\mu}_i \in \mathbb{R}^2$ is obtained via perspective projection:
+    $$ \hat{\mu}_i = \pi(K, W \mu_i) $$
+    where $\pi$ denotes the perspective projection function [S16, S31, S44].
+    
+    The projected 2D covariance matrix $\Sigma'_i \in \mathbb{R}^{2 \times 2}$ is approximated using a first-order Taylor expansion (affine approximation) of the perspective projection at $\mu_i$ [S2, S5, S10][S27, S34, S41, unofficial][S44][S46, unofficial]:
+    $$ \Sigma'_i = J W_{\text{rot}} \Sigma_i W_{\text{rot}}^\top J^\top $$
+    where $W_{\text{rot}} \in \mathbb{R}^{3 \times 3}$ is the rotation part of the world-to-camera transformation matrix, and $J \in \mathbb{R}^{2 \times 3}$ is the Jacobian of the perspective projection transformation evaluated at $\mu_i$ [S2, S5, S10][S27, S34, S41, unofficial][S44][S46, unofficial]. Specifically, if $P = KW$ is the projection matrix, and $u = P \mu_i$, the Jacobian $J$ relates small changes in 3D space to changes in 2D image coordinates [S2, S5, S10][S27, S34, S41, unofficial][S44][S46, unofficial].
+
+3.  **Rasterization and Sorting:**
+    The 2D Gaussians are rasterized onto the image. To handle overlaps, the contributing Gaussians for each pixel (or tile) are sorted in front-to-back order based on their depth (distance from the camera) [S2, S9, S10][S15, unofficial][S16, S19][S28, unofficial][S30, unofficial][S32][S38, S42, unofficial]. This is typically implemented using a tile-based rasterizer where tiles (e.g., 16x16 pixels) are processed in parallel [S15, S27, S28, unofficial][S30, unofficial][S41, unofficial].
+
+4.  **Alpha Compositing:**
+    For each pixel $p$, the final color $\hat{C}(p)$ is computed by accumulating the contributions of the sorted Gaussians $i=1 \dots N$ using front-to-back alpha blending [S2, S9][S15, unofficial][S19][S32][S33, S38, unofficial][S39, unofficial][S42, unofficial]:
+    $$ \hat{C}(p) = \sum_{i=1}^{N} c_i(d_p) \cdot \alpha_i(p) \cdot \prod_{j=1}^{i-1} (1 - \alpha_j(p)) $$
+    where:
+    *   $c_i(d_p)$ is the view-dependent color of the $i$-th Gaussian for the viewing direction $d_p$ from the camera center to pixel $p$ [S2, S9][S15, unofficial][S19][S32][S33, S38, unofficial][S39, unofficial][S42, unofficial].
+    *   $\alpha_i(p)$ is the effective opacity of the $i$-th Gaussian at pixel $p$, calculated as:
+        $$ \alpha_i(p) = \alpha_i \cdot \exp\left(-\frac{1}{2} (p - \hat{\mu}_i)^\top (\Sigma'_i)^{-1} (p - \hat{\mu}_i)\right) $$
+        where $\alpha_i$ is the learned scalar opacity, and the exponential term is the Gaussian density at pixel $p$ [S2, S5, S9][S15, unofficial][S31][S33, S42, unofficial].
+    *   The product term $\prod_{j=1}^{i-1} (1 - \alpha_j(p))$ represents the accumulated transmittance $T_i(p)$, i.e., the probability that the ray has not been blocked by previous Gaussians [S2, S9][S15, unofficial][S19][S32][S33, S38, unofficial][S39, unofficial][S42, unofficial].
+
+**Training and Optimization:**
+The parameters $\{\mu_i, q_i, s_i, \alpha_i, C_i\}$ are optimized using gradient descent (typically Adam) to minimize a loss function between the rendered image $\hat{C}$ and the ground truth image $I$ [S1, S12][S28, S38, S42, unofficial]. The loss is a weighted combination of L1 loss and D-SSIM (Differentiable Structural Similarity) [S12][S38, S46, unofficial]:
+$$ \mathcal{L} = (1 - \lambda) \mathcal{L}_1 + \lambda \mathcal{L}_{D-SSIM} $$
+where $\lambda$ is a hyperparameter (typically 0.2) [S12][S38, unofficial].
+
+**Adaptive Density Control:**
+During training, the number of Gaussians is not fixed [S1, S9, S12][S27, S28, unofficial][S37][S42, unofficial]. Adaptive density control is applied periodically (e.g., every $K$ iterations) to manage complexity and detail [S1, S9, S12][S27, S28, unofficial][S37][S42, unofficial]:
+1.  **Densification:** Gaussians with high view-space positional gradients (indicating under-reconstruction) are either cloned (if small) or split into two smaller Gaussians (if large) [S1, S9, S12][S27, S28, unofficial][S37][S42, unofficial].
+2.  **Pruning:** Gaussians with opacity below a threshold $\epsilon_\alpha$ (e.g., 0.005) or excessively large scales are removed [S12][S27, S28, unofficial][S37][S42, unofficial].
+3.  **Opacity Reset:** Opacity values are periodically reset to prevent saturation and aid convergence [S1, S12][S27, S42, unofficial].
+
+**Pseudocode:**
+
+> **Unverified code.** The code below did not pass a test run against a reference implementation, or no test fits it, so it may contain errors.
+
+```python
+import numpy as np
+
+def compute_covariance(q, s):
+    """
+    Compute 3D covariance matrix from quaternion q and scale s.
+    q: (4,) unit quaternion [w, x, y, z]
+    s: (3,) scale vector
+    Returns: (3, 3) covariance matrix Sigma
+    """
+    w, x, y, z = q[0], q[1], q[2], q[3]
+    R = np.array([
+        [1 - 2*(y**2 + z**2), 2*(x*y - w*z),     2*(x*z + w*y)],
+        [2*(x*y + w*z),       1 - 2*(x**2 + z**2), 2*(y*z - w*x)],
+        [2*(x*z - w*y),       2*(y*z + w*x),     1 - 2*(x**2 + y**2)]
+    ])
+    S = np.diag(s)
+    Sigma = R @ (S @ S.T) @ R.T
+    return Sigma
+
+def project_gaussian(mu_3d, W, K, Sigma_3d):
+    """
+    Project 3D Gaussian to 2D image plane.
+    mu_3d: (3,) mean in world coordinates
+    W: (4, 4) world-to-camera transformation matrix
+    K: (3, 3) camera intrinsic matrix
+    Sigma_3d: (3, 3) 3D covariance matrix
+    Returns: mu_2d (2,), Sigma_2d (2, 2)
+    """
+    P = K @ W
+    mu_homogeneous = np.append(mu_3d, 1.0)
+    mu_proj_homogeneous = P @ mu_homogeneous
+    mu_2d = mu_proj_homogeneous[:2] / mu_proj_homogeneous[2]
+    
+    # Camera space coordinates for Jacobian
+    mu_cam = W[:3, :3] @ mu_3d + W[:3, 3]
+    z = W[2, :3] @ mu_3d + W[2, 3]
+    
+    # Jacobian of perspective projection in camera coordinates
+    J = np.array([
+        [K[0,0]/z, 0, -K[0,0]*mu_cam[0]/z**2],
+        [0, K[1,1]/z, -K[1,1]*mu_cam[1]/z**2]
+    ])
+    
+    W_rot = W[:3, :3]
+    Sigma_2d = J @ W_rot @ Sigma_3d @ W_rot.T @ J.T
+    
+    return mu_2d, Sigma_2d
+
+def evaluate_sh(view_dir, coeffs):
+    """
+    Evaluate view-dependent color using spherical harmonics [G].
+    view_dir: (3,) normalized viewing direction
+    coeffs: (3, (d+1)^2) SH coefficients
+    Returns: (3,) color
+    """
+    # Standard SH evaluation implementation omitted for brevity; 
+    # this step is a standard mathematical operation [G].
+    return np.array([1.0, 1.0, 1.0]) # Placeholder for actual SH evaluation
+
+def render_gaussians(gaussians, camera_params, image_shape):
+    """
+    Render a set of 3D Gaussians to an image.
+    gaussians: List of dicts with keys 'mu', 'q', 's', 'alpha', 'SH_coeffs'
+    camera_params: Dict with 'W' (4x4), 'K' (3x3)
+    image_shape: (H, W)
+    Returns: Rendered image (H, W, 3)
+    """
+    H, W = image_shape
+    image = np.zeros((H, W, 3))
+    
+    projected = []
+    for g in gaussians:
+        Sigma_3d = compute_covariance(g['q'], g['s'])
+        mu_2d, Sigma_2d = project_gaussian(g['mu'], camera_params['W'], camera_params['K'], Sigma_3d)
+        
+        mu_cam = camera_params['W'][:3, :3] @ g['mu'] + camera_params['W'][:3, 3]
+        if mu_cam[2] <= 0:
+            continue
+            
+        projected.append({
+            'mu_2d': mu_2d,
+            'Sigma_2d': Sigma_2d,
+            'alpha': g['alpha'],
+            'SH_coeffs': g['SH_coeffs'],
+            'depth': mu_cam[2],
+            'mu_3d': g['mu']
+        })
+    
+    projected.sort(key=lambda x: x['depth'])
+    
+    for y in range(H):
+        for x in range(W):
+            p = np.array([x, y])
+            transmittance = 1.0
+            color = np.zeros(3)
+            
+            for proj_g in projected:
+                mu_2d = proj_g['mu_2d']
+                Sigma_2d = proj_g['Sigma_2d']
+                alpha = proj_g['alpha']
+                SH_coeffs = proj_g['SH_coeffs']
+                
+                diff = p - mu_2d
+                try:
+                    inv_Sigma = np.linalg.inv(Sigma_2d)
+                    dist_sq = diff @ inv_Sigma @ diff
+                except np.linalg.LinAlgError:
+                    continue
+                
+                density = np.exp(-0.5 * dist_sq)
+                effective_alpha = alpha * density
+                
+                # Compute view direction from camera center to 3D Gaussian position
+                cam_center = np.linalg.inv(camera_params['W'])[:3, 3]
+                view_dir = proj_g['mu_3d'] - cam_center
+                view_dir = view_dir / np.linalg.norm(view_dir)
+                
+                c = evaluate_sh(view_dir, SH_coeffs)
+                
+                color += c * effective_alpha * transmittance
+                transmittance *= (1 - effective_alpha)
+                
+                if transmittance < 1e-4:
+                    break
+            
+            image[y, x] = color
+            
+    return image
+```
+
+**Edge Cases and Pitfalls:**
+*   **Singular Covariance:** If the projected 2D covariance matrix $\Sigma'_i$ is singular (e.g., due to degenerate Gaussians or numerical instability), the inverse cannot be computed. Guard against this by checking the determinant or using a pseudo-inverse [S2, S5, S10][S27, S34, S41, unofficial][S44][S46, unofficial].
+*   **Precision:** Floating-point precision issues can arise during the accumulation of transmittance, especially for deep scenes. Use double precision for intermediate calculations if necessary [S5].
+*   **Visibility Culling:** Visibility processing selects Gaussians for the current view to save computation [S41, unofficial].
+*   **Initialization:** The method initializes from a sparse SfM point cloud, setting Gaussian positions to point positions, scales to average neighbor distances, and opacities to 0.5 [S28, S38, unofficial].
+
+## Subtopics
+
+### [3D Gaussian Splatting Optimization Parameters](3460-3d-gaussian-splatting-optimization-parameters.md)
+Defines the hyperparameters and procedural rules for optimizing a set of 3D Gaussians to reconstruct a scene from images. It sets apart from static rendering by introducing adaptive density control (clone, split, prune, opacity reset) and periodic opacity resets, which are critical for converging to a high-fidelity radiance field.
+
+## Operating characteristics
+*   **Time Complexity:** Training time is significantly faster than NeRF, typically converging in 30-60 minutes on a single GPU, compared to hours for NeRF [S1][S13, unofficial][S19][S28, S35, unofficial]. Rendering time is real-time, achieving >30 FPS at 1080p on modern GPUs [S1][S13, unofficial][S19][S28, S35, unofficial].
+*   **Memory Complexity:** Memory usage scales linearly with the number of Gaussians $N$ [S1][S13, unofficial][S19][S28, S35, unofficial]. Each Gaussian stores $\mu$ (3), $q$ (4), $s$ (3), $\alpha$ (1), and SH coefficients ($3 \times (d+1)^2$) [S34, unofficial]. For $d=3$, this is $3 \times 16 = 48$ floats per Gaussian [S34, unofficial]. Typical scenes use millions of Gaussians, requiring several GBs of VRAM [S1][S13, unofficial][S19][S28, S35, unofficial].
+*   **Measured Performance:** On the NeRF Synthetic (Blender) dataset, 3DGS achieves PSNR = 33.2 ± 0.4 dB, comparable to Mip-NeRF 360 (32.4 ± 0.4 dB) and better than Instant-NGP (32.6 ± 0.4 dB) and NeRF (31.0 ± 0.6 dB) [S1]. Rendering speed is 68.4 ± 4.2 FPS at 1080p on an A100 GPU [S1].
+*   **Scaling:** Performance scales well with GPU parallelism due to tile-based rasterization. However, the number of Gaussians can grow large, leading to memory bottlenecks [S1][S13, unofficial][S19][S28, S35, unofficial].
+*   **Strengths:** Real-time rendering, high visual quality, differentiable optimization, explicit representation allows for easy editing and manipulation [S1, S2, S4, S10, S12, S16, S20][S25, S28, unofficial][S31][S32, S37][S42, unofficial].
+*   **Limitations:** Can produce redundant Gaussians, leading to inefficient memory usage. SH representation may fail to capture complex lighting interactions or high-frequency textures, resulting in color bleeding or artifacts [S4]. Not specifically designed for volumetric media, which may limit its applicability in certain domains [S8].
+
+## Background
+3D Gaussian Splatting was introduced by Kerbl et al. in 2023 as a novel approach to novel-view synthesis [S1, S2, S4, S5, S10, S12, S16, S20][S25, S27, S28, unofficial][S31][S32][S42, unofficial]. It builds on the idea of using explicit 3D primitives for rendering, moving away from the implicit neural fields of NeRF [S1, S2, S4, S10, S12, S16, S20][S25, S28, unofficial][S31][S32][S42, unofficial]. The method was developed to address the slow training and rendering speeds of NeRF while maintaining high visual quality [S1, S2, S4, S10, S12, S16, S20][S25, S28, unofficial][S31][S32][S42, unofficial].
+
+## Sources
+[S1] Neural Rendering Techniques, https://doi.org/10.5281/zenodo.19614729, fetched 2026-10-26
+[S2] iVR-GS: Inverse Volume Rendering for Explorable Visualization via Editable 3D Gaussian Splatting., https://doi.org/10.1109/tvcg.2025.3567121, fetched 2026-10-26
+[S4] Optimization of 3D Gaussian Splatting for Accurate Image Reconstruction, https://doi.org/10.59232/dst-v4i2p101, fetched 2026-10-26
+[S5] GS-IR: 3D Gaussian Splatting for Inverse Rendering, https://doi.org/10.1109/cvpr52733.2024.02045, fetched 2026-10-26
+[S10] Gaussian Splatting for Efficient Satellite Image Photogrammetry, https://doi.org/10.1109/cvpr52734.2025.00559, fetched 2026-10-26
+[S12] Practical Evaluation of Standard 3D Gaussian Splatting for Real-World Scene Reconstruction., https://doi.org/10.3390/s26185754, fetched 2026-10-26
+[S13] 3D Gaussian Splatting | The Future of Real-Time Neural Rendering, https://www.youtube.com/watch?v=iKJd9K7cCxs, fetched 2026-10-27 (unofficial)
+[S15] ESVR: 3D Ellipsoid-based Sparse Volume Rendering via Structure-aware Primitive Learning and Per-primitive Ray Sampling, https://arxiv.org/abs/2608.05564v1, fetched 2026-10-26 (unofficial)
+[S16] Gaussian Splatting for real-time scene reconstruction: Methods, systems, and trade-offs, https://doi.org/10.1016/j.patcog.2026.115120, fetched 2026-10-26
+[S18] DiffGS: Functional Gaussian Splatting Diffusion, https://arxiv.org/abs/2410.19657v2, fetched 2026-10-26
+[S19] RaDe-GS: Rasterizing Depth in Gaussian Splatting, https://arxiv.org/abs/2406.01467v2, fetched 2026-10-26
+[S20] A Brief Review on Differentiable Rendering: Recent Advances and Challenges, https://doi.org/10.3390/electronics13173546, fetched 2026-10-26
+[S25] X-GRM: Large Gaussian Reconstruction Model for Sparse-view X-rays to Computed Tomography, https://doi.org/10.48550/arXiv.2505.15235, fetched 2026-10-27 (unofficial)
+[S27] YDJ民科一句话读论文(2)： GaussianSplatting & DSS &  DPRF, https://github.com/graphdeco-inria/gaussian-splatting/issues/454, fetched 2026-10-27 (unofficial)
+[S28] 3D Gaussian SplattingはNeRFをこえるかトレンドになるか？複数視点の画像から3D空間を再現する最新手法論文解説！, https://qiita.com/RyeWiskey/items/9ccc862db91e38e8bbc9, fetched 2026-10-27 (unofficial)
+[S30] Gaussian Splatting SLAM, https://arxiv.org/abs/2312.06741, fetched 2026-10-27 (unofficial)
+[S31] SplatCo: Structure-View Collaborative Gaussian Splatting for Detail-Preserving Rendering of Large-Scale Unbounded Scenes, https://doi.org/10.48550/arXiv.2505.17951, fetched 2026-10-27
+[S32] Spacetime Gaussian Feature Splatting for Real-Time Dynamic View Synthesis, https://huggingface.co/papers/2312.16812, fetched 2026-10-30
+[S33] EndoGaussian: Real-time Gaussian Splatting for Dynamic Endoscopic Scene Reconstruction, https://huggingface.co/papers/2401.12561, fetched 2026-10-30 (unofficial)
+[S34] A LoD of Gaussians: Unified Training and Rendering for Ultra-Large Scale Reconstruction with External Memory, https://doi.org/10.48550/arXiv.2507.01110, fetched 2026-10-28 (unofficial)
+[S35] A Mixed-Primitive-based Gaussian Splatting Method for Surface Reconstruction, https://core.ac.uk/works/308836756, fetched 2026-10-30 (unofficial)
+[S37] A LoD of Gaussians: Unified Training and Rendering for Ultra-Large Scale Reconstruction with External Memory, https://doi.org/10.48550/arXiv.2507.01110, fetched 2026-10-28
+[S38] AtomGS: Atomizing Gaussian Splatting for High-Fidelity Radiance Field, https://core.ac.uk/works/391753628, fetched 2026-10-30 (unofficial)
+[S39] SplatFormer: Point Transformer for Robust 3D Gaussian Splatting, https://doi.org/10.48550/arXiv.2411.06360, fetched 2026-10-29 (unofficial)
+[S41] Dynamic Scene Reconstruction: Recent Advance in Real-time Rendering and Streaming, https://doi.org/10.48550/arXiv.2503.08166, fetched 2026-10-29 (unofficial)
+[S42] From Splats to Silicon: Rethinking Computational Efficiency of 3DGS, https://arxiv.org/abs/2609.06157, fetched 2026-10-29 (unofficial)
+[S43] BlitzGS: City-Scale Gaussian Splatting at Lightning Speed, https://doi.org/10.48550/arXiv.2605.13794, fetched 2026-10-29 (unofficial)
+[S44] VCR-GauS: View Consistent Depth-Normal Regularizer for Gaussian Surface Reconstruction, https://doi.org/10.52202/079017-4434, fetched 2026-10-29
+[S46] Mesh2GS: White-Box 3DGS Construction via Plenoptic Sampling, https://doi.org/10.48550/arXiv.2606.21898, fetched 2026-10-30 (unofficial)
+[S51] On the Geometric Accuracy of Implicit and Primitive-based Representations Derived from View Rendering Constraints, https://doi.org/10.48550/arXiv.2509.1041, fetched 2026-10-30 (unofficial)

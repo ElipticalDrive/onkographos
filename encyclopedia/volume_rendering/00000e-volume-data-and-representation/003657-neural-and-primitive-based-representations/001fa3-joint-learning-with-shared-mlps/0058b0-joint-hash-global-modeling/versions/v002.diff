@@ -1,0 +1,106 @@
+--- v001.md
++++ v002.md
+@@ -8,10 +8,10 @@
+ ## How it works
+ **Inputs and Outputs:**
+-*   **Inputs:** A set of 3D Gaussian primitives $\mathcal{G}$, each defined by mean position $\mu$, covariance, base spherical harmonic (SH) coefficients, and base opacity. A viewing direction $d$ for each pixel.
++*   **Inputs:** A set of 3D Gaussian primitives $\mathcal{G}$, each defined by mean position $\mu$, covariance, base spherical harmonic (SH) coefficients, and base opacity [S1]. A viewing direction $d$ for each pixel [S1].
+ *   **Outputs:** Refined color $c_{final}(d)$ and opacity $\alpha_{final}(d)$ for rasterization [S1].
+ 
+ **Data Structures:**
+-1.  **Spatial Hash Grid:** Encodes Gaussian mean positions $\mu$.
+-2.  **Directional Hash Grid:** Encodes viewing directions $d$.
++1.  **Spatial Hash Grid:** Encodes Gaussian mean positions $\mu$ [S1].
++2.  **Directional Hash Grid:** Encodes viewing directions $d$ [S1].
+ 3.  **Shared VQC Parameters ($\theta$):** A global set of trainable rotation angles for the quantum ansatz [S1].
+ 4.  **Shared MLP Weights ($W_{MLP}$):** Global weights for the classical decoding network [S1].
+@@ -20,7 +20,7 @@
+ 1.  **Hash Encoding:** Compute the hash encoding for the scene's Gaussian positions, denoted as $hash_{mean}(\mu)$, and for the viewing directions, denoted as $hash_{vdir}(d)$ [S1].
+ 2.  **Feature Concatenation:** Concatenate the spatial and directional hash features to form the conditioning vector for the quantum circuit [S1].
+-3.  **VQC Processing:** Condition the shared VQC on the concatenated hash features. The VQC acts as a scene-wide light field approximator. The circuit applies parameterized rotations to a 3-qubit register. For the $j$-th qubit ($j=0,1,2$), the rotation is defined as:
++3.  **VQC Processing:** Condition the shared VQC on the concatenated hash features [S1]. The VQC acts as a scene-wide light field approximator [S1]. The circuit applies parameterized rotations to a 3-qubit register [S1]. For the $j$-th qubit ($j=0,1,2$), the rotation is defined as:
+     $$ R_j(\theta_{j,\ell}, \phi_{j,\ell}) = R_z^{(j)}(\phi_{j,\ell}) R_y^{(j)}(\theta_{j,\ell}) $$
+-    where $\theta_{j,\ell}$ and $\phi_{j,\ell}$ are drawn from the global parameters $\theta$ [S1].
++    where $\theta_{j,\ell}$ and $\phi_{j,\ell}$ are components of the shared global parameters $\theta$ [S1].
+ 4.  **MLP Decoding:** Process the output of the VQC through a shared Multi-Layer Perceptron (MLP) with global weights $W_{MLP}$ [S1].
+ 5.  **Attribute Refinement:** The MLP output generates multiplicative updates ($\Delta c(d)$ and $\Delta \alpha(d)$) applied to the base SH color and base opacity [S1]. The final attributes are computed as:
+@@ -36,4 +36,37 @@
+ **Pseudocode:**
+ ```python
++import numpy as np
++
++def concatenate_features(a, b):
++    """Standard concatenation along the feature dimension."""
++    return np.concatenate((a, b), axis=-1)
++
++def simulate_vqc(features, theta):
++    """Applies the 3-qubit rotation sequence using global parameters theta."""
++    # theta contains [theta_0, phi_0, theta_1, phi_1, theta_2, phi_2]
++    # Applies R_j(phi_j) * R_j(theta_j) to the 3-qubit state
++    state = np.zeros((3,)) # Placeholder for quantum state vector
++    for j in range(3):
++        theta_j = theta[2*j]
++        phi_j = theta[2*j + 1]
++        # Rotation matrices R_z and R_y applied sequentially per qubit
++        # State transformation follows standard quantum circuit simulation
++        state = apply_rotation(state, j, theta_j, phi_j)
++    return state
++
++def apply_mlp(vqc_output, w_mlp):
++    """Standard MLP forward pass with global weights."""
++    return np.dot(vqc_output, w_mlp)
++
++def split_modulation(modulation_factors):
++    """Splits the MLP output into color and opacity delta channels."""
++    mid = modulation_factors.shape[-1] // 2
++    return modulation_factors[..., :mid], modulation_factors[..., mid:]
++
++def rasterize_primitives(gaussians, final_colors, final_opacities):
++    """Feeds refined attributes into a differentiable Gaussian rasterizer [G]."""
++    # Standard differentiable rasterization step
++    return final_colors, final_opacities
++
+ def joint_hash_global_modeling(gaussians, view_directions, hash_grid_pos, hash_grid_dir, theta, w_mlp):
+     """
+@@ -53,37 +86,25 @@
+     """
+     # Step 1: Compute hash encodings
+-    # hash_mean(mu) encodes the spatial position of the Gaussian
+-    # hash_vdir(d) encodes the viewing direction
+     hash_pos = hash_grid_pos(gaussians.mu)
+     hash_dir = hash_grid_dir(view_directions)
+     
+     # Step 2: Concatenate features
+-    # The VQC is conditioned on the combined spatial and directional information
+-    combined_features = concatenate(hash_pos, hash_dir)
++    combined_features = concatenate_features(hash_pos, hash_dir)
+     
+     # Step 3: Process through Shared VQC
+-    # The VQC applies rotations based on global theta
+-    # For a 3-qubit register, the circuit applies R_j(theta_j, phi_j)
+-    # This step simulates the quantum ansatz U(theta; L)
+-    vqc_output = apply_vqc(combined_features, theta)
++    vqc_output = simulate_vqc(combined_features, theta)
+     
+     # Step 4: Process through Shared MLP
+-    # Decode the quantum output using global MLP weights
+     modulation_factors = apply_mlp(vqc_output, w_mlp)
+     
+     # Step 5: Refine attributes
+-    # Apply multiplicative updates to base SH color and opacity
+-    # c_final(d) = c(d) * Delta_c(d)
+-    # alpha_final(d) = alpha(d) * Delta_alpha(d)
+     delta_c, delta_alpha = split_modulation(modulation_factors)
+-    
+     final_colors = gaussians.base_c * delta_c
+     final_opacities = gaussians.base_alpha * delta_alpha
+     
+     # Step 6: Rasterize
+-    # Feed refined attributes into differentiable Gaussian rasterizer
+-    rendered_image = rasterize(gaussians, final_colors, final_opacities)
++    rendered_colors, rendered_opacities = rasterize_primitives(gaussians, final_colors, final_opacities)
+     
+-    return rendered_image
++    return rendered_colors, rendered_opacities
+ ```
+ 

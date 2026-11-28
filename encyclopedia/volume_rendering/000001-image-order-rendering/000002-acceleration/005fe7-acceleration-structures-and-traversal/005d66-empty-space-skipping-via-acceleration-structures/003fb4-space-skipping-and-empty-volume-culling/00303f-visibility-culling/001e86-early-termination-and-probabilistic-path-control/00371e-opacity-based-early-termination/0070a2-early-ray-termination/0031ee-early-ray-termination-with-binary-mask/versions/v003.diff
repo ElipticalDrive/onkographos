@@ -1,0 +1,228 @@
+--- v002.md
++++ v003.md
+@@ -4,61 +4,88 @@
+ 
+ ## Overview
+-Early Ray Termination with Binary Mask is an acceleration technique for alpha-blending volume rendering that combines front-to-back compositing with a binary mask to skip fully transparent regions [S1, unofficial]. It terminates the ray evaluation when the accumulated transmittance drops below a predefined threshold, thereby ignoring the ray tail [S1, unofficial]. It is distinguished from sibling methods by its use of a pre-computed binary mask to jump directly to opaque voxels, avoiding the evaluation of empty space entirely, whereas siblings like [Empty-space skipping](1002-empty-space-skipping.md) may rely on hierarchical structures or [Conservative Early Ray Termination](1949-conservative-early-ray-termination.md) may use different termination criteria.
++An acceleration technique for alpha-blending that uses a binary volume to skip fully transparent cells and terminates the front-to-back evaluation when accumulated transparency falls below a threshold [S1, unofficial]. It sets itself apart from standard early ray termination by explicitly encoding the presence of opaque voxels into a bit-mask structure, allowing the renderer to jump directly to non-empty regions rather than sampling every voxel along the ray [S1, unofficial].
+ 
+ ## How it works
+ **Inputs:**
+-- Volume data `volume[z][y][x]` containing color and opacity for each voxel.
+-- Binary mask `mask[i][y][x]` where `i` indexes 32-voxel blocks along the Z-axis.
+-- Image coordinates `x`, `y`.
+-- Termination threshold `threshold` (transmittance value).
++- Volume data: A 3D array of voxels, where each voxel contains a color and an opacity value.
++- Binary mask: A 3D array of 32-bit integers, `mask[i][y][x]`, where `i` represents a block of 32 depth slices, and `y, x` are pixel coordinates. Each bit in the integer corresponds to a voxel in that block; a set bit indicates the voxel is opaque (or non-transparent), and a cleared bit indicates it is transparent.
++- Threshold: A pre-defined double value for accumulated transparency below which the ray terminates.
+ 
+ **Outputs:**
+-- Final pixel color `rgb`.
++- A single RGB color value for the pixel at `(x, y)`.
+ 
+ **Data Structures:**
+-- `volume`: Array of voxels. Each voxel `v` has fields `v.color` (RGB) and `v.opacity` (scalar).
+-- `mask`: 3D array of integers. `mask[i][y][x]` is a 32-bit integer where the $z$-th bit (0-indexed) is set if the voxel at $z = 32i + z$ has at least one opaque corner (is non-transparent).
+-- `Depth(segment)`: A helper function that returns the index of the least significant bit set to 1 in `segment`. If `segment` is 0, it returns 0 or indicates no bits remain.
+-
+-**Parameters:**
+-- `threshold`: A pre-defined value for accumulated transparency. If `trans < threshold`, the ray evaluation terminates. Typical values are not specified in the source, but standard early termination thresholds (e.g., 0.95 or 1.0 for opacity, or corresponding low values for transmittance) are implied by the context of early ray termination [S1, unofficial].
++- `mask`: Layout is `[Z/32][Height][Width]` (integer). Each integer stores 32 bits. Bit 0 corresponds to the first slice in the block, bit 31 to the last.
++- `volume`: Layout is `[Z][Height][Width]` (voxel).
++- `trans`: Accumulated transparency, initialized to 1.0.
++- `color`: Accumulated color, initialized to BLACK.
+ 
+ **Algorithm Steps:**
+-1. Initialize `trans = 1.0` (accumulated transmittance) and `color = BLACK`.
+-2. Calculate `i_max = (Z + 31) / 32`, where `Z` is the total depth of the volume in voxels.
+-3. Loop `i` from `0` to `i_max - 1`:
+-    a. Retrieve `segment = mask[i][y][x]`.
++1. Calculate the number of 32-slice blocks: $i_{max} = \lceil Z / 32 \rceil$.
++2. Initialize `trans = 1.0` and `color = BLACK`.
++3. Loop `i` from 0 to $i_{max} - 1$:
++    a. Retrieve the segment integer: `segment = mask[i][y][x]`.
+     b. While `segment` is non-zero:
+-        i. Find the position of the next non-zero bit: `z = Depth(segment)`.
+-        ii. Calculate the absolute Z-coordinate: `z_abs = 32 * i + z`.
+-        iii. Retrieve the voxel: `v = volume[z_abs][y][x]`.
+-        iv. Update transmittance: `trans = trans * (1.0 - v.opacity)`.
+-        v. Check termination: If `trans < threshold`, return `color`.
+-        vi. Update color using front-to-back compositing: `color = color + v.color * v.opacity * trans`.
+-        vii. Remove the processed bit from the segment: `segment = segment & ~(0x80000000 >> z)`.
+-4. Return `color`.
++        i. Find the position of the least significant set bit (or the next relevant bit depending on implementation convention, but the source implies finding the next non-zero bit to process). Let this bit offset be `z`. The source code uses `Depth(segment)` to find this.
++        ii. Calculate the absolute depth index: $z_{abs} = 32 \times i + z$.
++        iii. Sample the voxel: $v = \text{volume}[z_{abs}][y][x]$.
++        iv. Update accumulated transparency: $\text{trans} = \text{trans} \times (1.0 - v.\text{opacity})$.
++        v. Check termination: If $\text{trans} < \text{threshold}$, return `color`.
++        vi. Update accumulated color: $\text{color} = \text{color} + v.\text{color} \times v.\text{opacity} \times \text{trans}$.
++        vii. Clear the processed bit in the segment: `segment = segment & ~(0x80000000 >> z)`. Note: The source code uses `0x80000000 >> z`. This implies bit 31 is the most significant bit. If `z` is the bit index (0-31), `0x80000000` is $2^{31}$. Shifting it right by `z` creates a mask with a 1 at bit position $31-z$. This suggests the source might be treating bit 0 as the MSB or using a specific bit ordering. However, standard bit manipulation usually uses `1 << z`. The source explicitly writes `segment &= ~(0x80000000 >> z)`. We must follow the source's explicit formula.
++        viii. Call `Depth(segment)` again to find the next non-zero bit.
+ 
+ **Pseudocode:**
+ ```python
+-def alpha_blending_binary_mask(x: int, y: int, volume: List[Voxel], mask: List[List[int]], threshold: float) -> RGB:
++def alpha_blending_binary_mask(x, y, volume, mask, threshold, Z):
++    """
++    Renders a pixel using early ray termination with a binary mask.
++    
++    Args:
++        x, y: Pixel coordinates.
++        volume: 3D array of voxels [Z][Y][X], each with .color and .opacity.
++        mask: 3D array of integers [Z//32][Y][X].
++        threshold: Transparency threshold for early termination.
++        Z: Total depth of the volume.
++        
++    Returns:
++        RGB color.
++    """
++    color = (0.0, 0.0, 0.0)  # BLACK
+     trans = 1.0
+-    color = RGB(0, 0, 0)
+-    Z = volume.depth  # Total depth in voxels
+     i_max = (Z + 31) // 32
+     
+     for i in range(i_max):
+         segment = mask[i][y][x]
++        
+         while segment != 0:
+-            # Find the index of the least significant bit set to 1
+-            z = depth_of_first_bit(segment)
++            # Find the position of the next non-zero bit.
++            # The source uses a routine Depth(segment).
++            # We assume Depth returns the bit index z (0-31) of the next set bit.
++            # Note: The exact bit ordering (LSB vs MSB) depends on the implementation
++            # of Depth and the mask construction. The source code uses 0x80000000 >> z,
++            # implying z=0 corresponds to the MSB (bit 31) if we interpret the shift
++            # as creating a mask for the MSB. However, standard "find first set bit"
++            # usually returns the LSB index.
++            # To remain faithful to the source's arithmetic:
++            # segment &= ~(0x80000000 >> z)
++            # If z=0, mask is ~0x80000000 (clears bit 31).
++            # If z=31, mask is ~0x00000001 (clears bit 0).
++            # This implies z=0 is the MSB (depth 31 in block) and z=31 is LSB (depth 0 in block).
++            # Or, more likely, the source's Depth function returns the index such that
++            # 0x80000000 >> z targets the correct bit.
++            # Let's assume Depth returns an index z in [0, 31].
++            
++            z = depth_of_next_set_bit(segment)
+             
+             # Calculate absolute z-coordinate
++            # The source states: z-coordinate of the voxel is calculated as 32 * i + z
+             z_abs = 32 * i + z
+             
+-            # Retrieve voxel data
++            # Sample voxel
+             v = volume[z_abs][y][x]
+             
+-            # Update accumulated transmittance
+-            trans *= (1.0 - v.opacity)
++            # Update transparency
++            trans = trans * (1.0 - v.opacity)
+             
+             # Early termination check
+@@ -66,67 +93,53 @@
+                 return color
+             
+-            # Front-to-back compositing
+-            color += v.color * v.opacity * trans
++            # Update color
++            # color += v.color * v.opacity * trans
++            color = (
++                color[0] + v.color[0] * v.opacity * trans,
++                color[1] + v.color[1] * v.opacity * trans,
++                color[2] + v.color[2] * v.opacity * trans
++            )
+             
+             # Clear the processed bit
+-            # 0x80000000 is 1 << 31. Shifting right by z gives a mask for bit z.
+-            # Inverting and ANDing clears the bit.
+-            segment &= ~(0x80000000 >> z)
++            # Source: segment &= ~(0x80000000 >> z)
++            # 0x80000000 is 2^31.
++            mask_bit = 0x80000000 >> z
++            segment = segment & (~mask_bit)
+             
+     return color
+ 
+-def depth_of_first_bit(segment: int) -> int:
+-    """Returns the index of the least significant bit set to 1."""
+-    # Implementation depends on hardware/OS. 
+-    # In Python, this can be done via bit manipulation or log2.
+-    # For a pure Python implementation without builtins:
+-    if segment == 0:
+-        return 0
+-    z = 0
+-    while (segment & 1) == 0:
+-        segment >>= 1
+-        z += 1
+-    return z
++def depth_of_next_set_bit(segment):
++    """
++    Finds the bit index z such that 0x80000000 >> z targets the next set bit.
++    This is a helper to implement the source's specific bit manipulation logic.
++    If the source implies standard LSB-first processing, this function would
++    need to map the LSB index to the MSB-shifted mask.
++    However, without a definition of Depth, we note this as a required helper.
++    [G] Standard bit scanning instructions (e.g., __builtin_ctz) return LSB index.
++    If Depth returns LSB index k, then z = 31 - k to match the source's mask shift.
++    """
++    # Implementation detail: The source code is the primary reference.
++    # We assume Depth is available.
++    raise NotImplementedError("Depth routine must be implemented to find bit position")
+ ```
+ 
++**Parameters:**
++- `threshold`: A pre-defined value for accumulated transparency. If `trans < threshold`, the ray evaluation terminates [S1, unofficial]. Typical values are not given in the sources.
++
+ **Edge Cases and Pitfalls:**
+-- **Precision:** Floating-point precision in `trans` accumulation may affect termination timing.
+-- **Boundary Conditions:** The calculation of `i_max` must correctly handle volumes where `Z` is not a multiple of 32. The mask should be padded or handled such that out-of-bounds accesses do not occur.
+-- **Degenerate Input:** If the mask is all zeros, the loop terminates immediately, returning black. If `threshold` is set too high (close to 1.0 for transmittance, i.e., low opacity threshold), premature termination may occur, causing visual artifacts.
+-
+-## Subtopics
+-
+-### [Empty-space skipping](1002-empty-space-skipping.md)
+-Uses hierarchical structures to skip empty regions. Choose when memory bandwidth is the bottleneck and hierarchical data is available.
+-
+-### [Bounding Volume Culling](1239-bounding-volume-culling.md)
+-Uses bounding volumes to reject entire objects. Choose when objects are sparse and well-separated.
+-
+-### [Russian Roulette](1371-russian-roulette.md)
+-Probabilistic termination. Choose when unbiased results are required despite early termination.
+-
+-### [Early Stop](1790-early-stop.md)
+-General early termination based on opacity. Choose for simple implementations.
+-
+-### [Conservative Early Ray Termination](1949-conservative-early-ray-termination.md)
+-Uses conservative estimates to avoid artifacts. Choose when visual fidelity is critical.
+-
+-### [Ray Marching with Dithering and Early Termination](3565-ray-marching-with-dithering-and-early-termination.md)
+-Combines dithering with early termination. Choose for anti-aliasing.
+-
+-### [Opacity-based Early Termination](7920-opacity-based-early-termination.md)
+-Terminates based on accumulated opacity. Choose for standard alpha-blending.
++- **Bit Ordering:** The source code uses `0x80000000 >> z`. This is non-standard for LSB-first bit scanning. The implementer must ensure the `Depth` function and the mask construction are consistent with this shift direction. If `Depth` returns the index of the least significant bit (0), the mask `0x80000000 >> 0` is `0x80000000` (bit 31). This suggests the source treats bit 0 of the integer as the MSB or the `Depth` function returns an index relative to the MSB.
++- **Precision:** Floating-point multiplication for `trans` and `color` accumulation can suffer from precision loss over long rays.
++- **Empty Rays:** If the mask is 0 for a pixel, the loop is skipped, and BLACK is returned.
+ 
+ ## Operating characteristics
+-- **Time Complexity:** Proportional to the number of non-transparent voxels along the ray, up to the termination point. The binary mask allows skipping transparent voxels in $O(1)$ per 32-voxel block, reducing the number of memory accesses and compositing operations.
+-- **Memory Complexity:** Requires storage for the binary mask, which is $Z \times Y \times X / 32$ bits.
+-- **Performance:** Significantly faster than naive ray marching in sparse volumes. Performance gain depends on the sparsity of the volume and the threshold.
+-- **Strengths:** Efficiently skips empty space; simple implementation; low memory overhead for the mask.
+-- **Limitations:** Requires pre-computation of the binary mask; termination bias if threshold is not set carefully; not suitable for transparent surfaces where the tail contributes significantly to color.
+-- **When to use:** Sparse volumes with large empty regions; real-time rendering where performance is critical.
+-- **When not to use:** Dense volumes where most voxels are opaque; applications requiring unbiased results.
++- **Time Complexity:** Proportional to the number of opaque voxels along the ray, rather than the total depth $Z$. In sparse volumes, this is significantly faster than full ray casting.
++- **Memory Complexity:** Requires an additional binary mask array of size $Z/32 \times Y \times X$ integers.
++- **Strengths:** Efficiently skips large transparent regions. Simple to implement alongside standard alpha blending.
++- **Limitations:** Requires pre-computation of the binary mask. Performance degrades if the volume is dense (many opaque voxels), as the mask provides little skipping benefit.
++- **When to use:** Sparse volumes where large transparent regions exist.
++- **When not to use:** Dense volumes or when memory bandwidth is the primary bottleneck (due to mask access).
+ 
+ ## Background
+-This technique is described in the context of interactive volume rendering for medical data visualization [S1, unofficial]. It builds on the standard alpha-blending algorithm and incorporates early ray termination principles [S1, unofficial]. The use of binary masks for efficient traversal is a known optimization in volume rendering literature [S1, unofficial].
++This technique is described in the context of lookup-table based volume rendering for medical data visualization [S1, unofficial]. It is noted as a well-known acceleration technique in volume rendering literature, specifically referred to as early ray termination [S1, unofficial]. The specific use of a binary mask to skip cells is attributed to the work presented in the source [S1, unofficial].
+ 
+ ## Sources

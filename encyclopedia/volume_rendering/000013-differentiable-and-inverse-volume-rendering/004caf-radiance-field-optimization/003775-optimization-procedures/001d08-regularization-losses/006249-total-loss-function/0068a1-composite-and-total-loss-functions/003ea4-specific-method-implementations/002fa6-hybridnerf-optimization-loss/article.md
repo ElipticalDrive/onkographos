@@ -1,0 +1,97 @@
+# HybridNeRF Optimization Loss
+Also called: HybridNeRF Loss
+
+## Overview
+The HybridNeRF optimization loss is a composite objective function for training neural radiance fields that utilize adaptive volumetric surfaces [S1]. It balances photometric reconstruction accuracy with geometric regularization and proposal network consistency [S1]. It sets itself apart from sibling methods like [CF Loss](10573-cf-loss.md) by explicitly weighting an Eikonal regularization term and an interlevel proposal loss to stabilize training, rather than relying solely on multi-view consistency or photometric errors [S1].
+
+## How it works
+**Inputs and Outputs:**
+*   **Inputs:** Rendered pixel color $\hat{C}(\mathbf{r})$, ground truth pixel color $C^*(\mathbf{r})$, SDF gradient norm $|\nabla \phi|$, proposal network outputs, and the Eikonal weight $\lambda_{\text{Eik}}$ [G].
+*   **Outputs:** Scalar total loss $\mathcal{L}(\mathbf{r})$ [G].
+
+**Data Structures:**
+*   $\mathbf{r}$: Ray parameterization containing origin and direction [G].
+*   $\phi$: Signed Distance Field (SDF) or density field predicted by the neural network [G].
+
+**Formulas:**
+The total loss for a ray $\mathbf{r}$ is defined as the sum of three components [S1]:
+$$
+\mathcal{L}(\mathbf{r}) := \mathcal{L}_{\text{photo}}(\mathbf{r}) + \lambda_{\text{Eik}} \mathcal{L}_{\text{Eik}}(\mathbf{r}) + \mathcal{L}_{\text{prop}}(\mathbf{r})
+$$
+Where:
+*   $\mathcal{L}_{\text{photo}}(\mathbf{r})$ is the photometric reconstruction error between rendered and ground truth colors [G].
+*   $\mathcal{L}_{\text{Eik}}(\mathbf{r})$ is the Eikonal regularization term that enforces the SDF gradient magnitude to equal one ($|\nabla \phi| \approx 1$) [G].
+*   $\mathcal{L}_{\text{prop}}(\mathbf{r})$ is the interlevel proposal loss used to train the hierarchical proposal network [S1].
+
+**Parameters:**
+*   $\lambda_{\text{Eik}} = 0.01$ [S1].
+
+**Steps:**
+1.  Render the pixel color $\hat{C}(\mathbf{r})$ using the current network state and ray sampling [G].
+2.  Compute the photometric loss $\mathcal{L}_{\text{photo}}(\mathbf{r})$ between $\hat{C}(\mathbf{r})$ and the ground truth $C^*(\mathbf{r})$ [G].
+3.  Compute the gradient of the SDF field $\nabla \phi$ with respect to spatial coordinates along the ray [G].
+4.  Compute the Eikonal loss $\mathcal{L}_{\text{Eik}}(\mathbf{r})$ based on the deviation of $|\nabla \phi|$ from $1.0$ [G].
+5.  Compute the interlevel proposal loss $\mathcal{L}_{\text{prop}}(\mathbf{r})$ based on consistency between proposal levels [S1].
+6.  Combine the terms using the weighted sum formula [S1].
+
+**Edge Cases and Pitfalls:**
+*   **Surfaceness Threshold:** The method uses spatially adaptive surfaceness $\beta(\mathbf{x})$ stored in a $512^3$ voxel grid [S1]. If surfaceness is too high, rendering quality degrades near fine-grained and transparent structures, so the implementation must stop increasing surfaceness in regions that cross a given threshold [S1].
+*   **Precision:** Standard floating-point precision is assumed for gradient computations [G].
+
+**Pseudocode:**
+> **Unverified code.** The code below did not pass a test run against a reference implementation, or no test fits it, so it may contain errors.
+
+```python
+def mean(values):
+    """Standard arithmetic mean operation [G]."""
+    return sum(values) / len(values)
+
+def hybrid_nerf_loss(rendered_color, gt_color, sdf_gradient_norm, proposal_loss, lambda_eik=0.01):
+    """
+    Computes the HybridNeRF optimization loss.
+    
+    Args:
+        rendered_color (list of float): Rendered pixel color components.
+        gt_color (list of float): Ground truth pixel color components.
+        sdf_gradient_norm (list of float): Norm of the SDF gradient |grad(phi)|.
+        proposal_loss (float): Interlevel proposal loss scalar.
+        lambda_eik (float): Weight for the Eikonal loss.
+        
+    Returns:
+        float: Total loss scalar.
+    """
+    # 1. Photometric Loss: L1 reconstruction error [G]
+    l_photo = mean([abs(rendered_color[i] - gt_color[i]) for i in range(len(rendered_color))])
+    
+    # 2. Eikonal Loss: Mean squared error of gradient norm from 1.0 [G]
+    eikonal_errors = [(sdf_gradient_norm[i] - 1.0) ** 2 for i in range(len(sdf_gradient_norm))]
+    l_eik = mean(eikonal_errors)
+    
+    # 3. Total Loss: Weighted sum [S1]
+    total_loss = l_photo + lambda_eik * l_eik + proposal_loss
+    
+    return total_loss
+```
+
+## Subtopics
+
+### SCNeRF Projected Ray Distance Loss
+Integrates ray distance re-projection loss from SCNeRF into the code base [S2]. It uses PDC-Net correspondences for fairness, employing the same matches used in SPARF's multi-view correspondence loss [S2]. The weight $\lambda$ for this loss is $10^{-4}$ for LLFF datasets, increased to $10^{-1}$ for DTU and Replica datasets to improve results [S2].
+
+### NeRF-based Pose Regression Loss
+A composite loss function balancing real-world pose estimation error and synthetic image rendering quality [S3]. It uses scale factors to equalize expected errors and balance data sources [S3]. The loss is defined as $L = L_{\text{real}} + \beta L_{\text{syn}}$, where $L_{\text{real}} = \|\hat{x}_{\text{real}} - x_{\text{real}}\|^2 + \gamma \|\hat{q}_{\text{real}} - q_{\text{real}}\|^2$ and $L_{\text{syn}} = \|\hat{x}_{\text{syn}} - x_{\text{syn}}\|^2 + \gamma \|\hat{q}_{\text{syn}} - q_{\text{syn}}\|^2$ [S3]. Here, $x$ is the position vector and $q$ is the orientation quaternion/vector [S3]. Typical values are $\gamma = 250$ to keep position and orientation error expected values equal, and $\beta = 0.8$ to balance real and synthetic image quality [S3].
+
+## Operating characteristics
+*   **Time Complexity:** Not given in the sources.
+*   **Memory Complexity:** Not given in the sources.
+*   **Scaling:** The use of adaptive surfaceness via a $512^3$ voxel grid allows for spatially varying density, which reduces the required number of samples per ray in freespace areas [S1].
+*   **Strengths:** Explicitly regularizes geometry via the Eikonal loss and stabilizes training with proposal losses [S1].
+*   **Limitations:** Uniformly increasing surfaceness degrades rendering quality near fine-grained structures, necessitating spatially adaptive approaches [S1].
+
+## Background
+The HybridNeRF optimization loss originates from the HybridNeRF paper, which proposes efficient neural rendering via adaptive volumetric surfaces [S1]. The method integrates concepts from hierarchical proposal networks and Eikonal regularization to improve training stability and rendering quality [S1].
+
+## Sources
+[S1] HybridNeRF: Efficient Neural Rendering via Adaptive Volumetric Surfaces, https://doi.org/10.1109/cvpr52733.2024.01858, fetched 2026-10-26
+[S2] SPARF: Neural Radiance Fields from Sparse and Noisy Poses, https://doi.org/10.1109/cvpr52729.2023.00408, fetched 2026-10-26
+[S3] LATITUDE: Robotic Global Localization with Truncated Dynamic Low-pass Filter in City-scale NeRF, https://doi.org/10.1109/icra48891.2023.10161570, fetched 2026-10-29

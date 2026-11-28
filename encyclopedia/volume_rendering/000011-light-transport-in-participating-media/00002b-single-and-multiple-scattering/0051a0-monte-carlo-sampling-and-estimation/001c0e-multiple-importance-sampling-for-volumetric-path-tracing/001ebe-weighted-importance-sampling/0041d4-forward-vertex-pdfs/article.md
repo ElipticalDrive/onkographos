@@ -1,0 +1,135 @@
+# Forward Vertex PDFs
+
+Also called: Forward PDF, Unidirectional Path Segment PDF
+
+## Overview
+Forward Vertex PDFs define the probability density function (PDF) for a unidirectional path segment sampled in the same direction as the random walk [S1]. They are used to assign weights when combining multiple sampling strategies in volumetric path tracing [S1]. This method differs from Reverse Vertex PDFs, which sample in the opposite direction, by establishing the likelihood of a path sequence generated from the camera or light source outward [S1].
+
+## How it works
+**Inputs and Outputs**
+*   **Input**: A subpath $\bar{\mathbf{y}}$ consisting of $s$ vertices $\mathbf{y}_0, \dots, \mathbf{y}_{s-1}$ [S1].
+*   **Output**: The forward vertex PDF $p_i^{\rightarrow}(\bar{\mathbf{y}})$ for each vertex index $i \in [0, s-1]$ [S1].
+
+**Data Structures**
+The path is represented as an ordered list of 3D positions $\mathbf{y}_i \in \mathbb{R}^3$ [S1].
+
+**Definitions**
+*   $p(\cdot)$: Unconditional PDF with respect to Euclidean volume on $\mathbb{R}^3$ [S1].
+*   $p_{\omega}(\cdot)$: Directional PDF with respect to solid angle measure [S1].
+*   $p_{\tau}(\cdot)$: Distance PDF with respect to Euclidean length on $\mathbb{R}^1$ [S1].
+*   $G(\mathbf{a}, \mathbf{b})$: Geometry factor converting the solid angle $\times$ length product measure to a volume measure [S1].
+
+**Formulas**
+The forward vertex PDF for vertex $i$ is defined as [S1]:
+
+$$
+p_i^{\rightarrow}(\bar{\mathbf{y}}) = \begin{cases} 
+p(\mathbf{y}_0) & \text{if } i = 0, \\ 
+p_{\omega,i}^{\rightarrow}(\bar{\mathbf{y}})g_i^{\rightarrow}(\bar{\mathbf{y}})p_{\tau,i}^{\rightarrow}(\bar{\mathbf{y}}) & \text{otherwise.} 
+\end{cases}
+$$
+
+The directional component $p_{\omega,i}^{\rightarrow}$ depends on the vertex index [S1]:
+
+$$
+p_{\omega,i}^{\rightarrow}(\bar{\mathbf{y}}) = \begin{cases} 
+p_{\omega}(\mathbf{y}_0 \rightarrow \mathbf{y}_1) & \text{if } i = 1, \\ 
+p_{\omega}(\mathbf{y}_{i-2} \rightarrow \mathbf{y}_{i-1} \rightarrow \mathbf{y}_i) & \text{if } i > 1. 
+\end{cases}
+$$
+
+The geometry factor and distance PDF are defined as [S1]:
+
+$$
+g_i^{\rightarrow}(\bar{\mathbf{y}}) = G(\mathbf{y}_{i-1}, \mathbf{y}_i)
+$$
+
+$$
+p_{\tau,i}^{\rightarrow}(\bar{\mathbf{y}}) = p_{\tau}(\mathbf{y}_{i-1} \rightarrow \mathbf{y}_i)
+$$
+
+The total PDF of a subpath $\bar{\mathbf{y}}$ with $s$ vertices is the product of its forward vertex PDFs [S1]:
+
+$$
+p_s(\bar{\mathbf{y}}) = \prod_{i=0}^{s-1} p_i^{\rightarrow}(\bar{\mathbf{y}})
+$$
+
+**Pseudocode**
+> **Unverified code.** The code below did not pass a test run against a reference implementation, or no test fits it, so it may contain errors.
+
+```python
+def compute_forward_vertex_pdf(vertices, s):
+    """
+    Computes the forward vertex PDFs for a path segment.
+    
+    Args:
+        vertices: List of 3D positions [y_0, y_1, ..., y_{s-1}]
+        s: Number of vertices in the path
+        
+    Returns:
+        List of forward vertex PDF values [p_0, p_1, ..., p_{s-1}]
+    """
+    pdfs = []
+    
+    for i in range(s):
+        if i == 0:
+            # p(y_0): unconditional PDF w.r.t Euclidean volume.
+            # Implementation depends on camera/light emission model. Not given in the sources. [G]
+            p_i = compute_unconditional_pdf(vertices[0])
+        else:
+            if i == 1:
+                # p_omega(y_0 -> y_1)
+                p_omega = compute_directional_pdf(vertices[0], vertices[1])
+            else:
+                # p_omega(y_{i-2} -> y_{i-1} -> y_i)
+                p_omega = compute_directional_pdf(vertices[i-2], vertices[i-1], vertices[i])
+            g = compute_geometry_factor(vertices[i-1], vertices[i])
+            p_tau = compute_distance_pdf(vertices[i-1], vertices[i])
+            p_i = p_omega * g * p_tau
+        pdfs.append(p_i)
+        
+    return pdfs
+
+def compute_unconditional_pdf(y0):
+    # Not given in the sources. [G]
+    return 1.0
+
+def compute_directional_pdf(y_prev, y_curr, y_prev_prev=None):
+    # Not given in the sources. [G]
+    return 1.0
+
+def compute_geometry_factor(y_prev, y_curr):
+    # Standard geometry factor: cos(theta) / r^2 or similar.
+    # Not given in the sources. [G]
+    return 1.0
+
+def compute_distance_pdf(y_prev, y_curr):
+    # Not given in the sources. [G]
+    return 1.0
+```
+
+**Edge Cases and Pitfalls**
+*   **Precision**: The product of multiple PDFs can lead to underflow for long paths. Log-space arithmetic may be required. [G]
+*   **Boundaries**: The geometry factor $G$ involves division by distance squared. If vertices are coincident ($\mathbf{y}_{i-1} = \mathbf{y}_i$), the value is undefined. [G]
+*   **Degenerate Input**: Paths with $s < 2$ vertices do not have $i > 1$ cases. [G]
+
+## Subtopics
+
+### Reverse Vertex PDFs
+Reverse Vertex PDFs define the PDF for a path sampled in the opposite direction of the random walk [S1]. They are needed to assign weights when combining multiple sampling strategies [S1]. The directional component $p_{\omega,i}^{\leftarrow}$ is defined as [S1]:
+$$
+p_{\omega,i}^{\leftarrow}(\bar{\mathbf{y}}) = \begin{cases} 
+p_{\omega}(\mathbf{y}_{k-1} \leftarrow \mathbf{y}_k) & \text{if } i = k-1, \\ 
+p_{\omega}(\mathbf{y}_i \leftarrow \mathbf{y}_{i+1} \leftarrow \mathbf{y}_{i+2}) & \text{if } i < k-1, 
+\end{cases}
+$$
+where $k$ is the total number of vertices in the path [S1]. The full reverse vertex PDF follows the same structure as the forward PDF but uses reverse directional and geometry terms [S1].
+
+## Operating characteristics
+Not given in the sources.
+
+## Background
+Forward Vertex PDFs are part of the theoretical framework for unidirectional sampling in volumetric light transport simulation [S1].
+
+## Sources
+[S1] Efficient Hardware Acceleration of Robust Volumetric Light Transport Simulation, https://doi.org/10.1111/cgf.14802, fetched 2026-10-27

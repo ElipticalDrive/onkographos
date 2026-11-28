@@ -1,0 +1,202 @@
+--- v004.md
++++ v005.md
+@@ -1,134 +1,115 @@
+ # Octree Child Index Computation
+ 
+-Also called: Octant Index Computation, Child Octant Offset Calculation
++Also called: Octant Offset Computation, Child Index Derivation
+ 
+ ## Overview
+-Octree Child Index Computation determines the 0–7 octant offset (and thus the linear child index) of a specific child node within an octree parent, given the parent's depth and the target coordinates. It solves the problem of efficiently mapping spatial coordinates to a specific child node during traversal without performing expensive arbitrary bit shifts. It sets itself apart from generic tree traversal by relying on precomputed bitmasks and constant-time bitwise operations to derive the index, optimizing for the regular 2x2x2 subdivision structure of octrees.
++Octree Child Index Computation determines the 0–7 linear index of a specific child node within a parent’s 2x2x2 subdivision, given a target coordinate and the current traversal depth. It solves the problem of efficiently mapping a 3D spatial position to a specific octant without using expensive arbitrary bit shifts or floating-point division. It sets itself apart from generic tree traversal by relying on precomputed constant bit-depth masks and bitwise operations to achieve constant-time index derivation, which is critical for performance in interactive ray tracing [S1, unofficial].
+ 
+ ## How it works
+ **Inputs:**
+-- `depth`: The current depth level of the parent node in the octree.
++- `origin`: The ray origin or starting node coordinate (3D vector).
++- `destination`: The target coordinate within the parent node’s space (3D vector).
++- `depth`: The current depth level of the octree node being traversed.
+ - `max_depth`: The maximum depth of the octree.
+-- `origin`: The 3D coordinate vector of the ray origin or traversal start point.
+-- `destination`: The 3D coordinate vector of the target point or ray direction endpoint.
+ 
+ **Outputs:**
+-- `child_index`: An integer in the range [0, 7] representing the octant index of the child node containing the destination relative to the parent.
++- `child_index`: An integer in the range [0, 7] representing the octant offset of the child node containing the destination.
+ 
+ **Data Structures:**
+-- `child_bit_depth`: A precomputed array where `child_bit_depth[d] = 1 << (max_depth - d - 1)`. This array maps each depth level `d` to a bitmask representing the spatial resolution at that level.
++- `child_bit_depth`: A precomputed array where `child_bit_depth[d] = 1 << (max_depth - d - 1)`. This array stores the bit mask corresponding to the spatial resolution at each depth level $d$.
+ 
+ **Steps:**
+-1.  **Precompute Bitmasks:** Calculate `child_bit_depth[d]` for all relevant depths $d \in [0, \text{max\_depth}]$. This avoids runtime arbitrary shifts.
+-2.  **Mask Coordinates:** Apply the bitmask for the current depth to both `origin` and `destination` coordinates. This effectively quantizes the coordinates to the grid resolution of the current node.
+-3.  **Compute Octant Offset:** Determine which octant the `destination` falls into relative to the `origin` (or the parent's center) using binary AND (`&`) and integer inequality comparisons.
+-4.  **Extract Components:** Bit-shift the result by constants corresponding to the X, Y, and Z components to isolate the individual bit flags for each axis.
+-5.  **Combine:** Sum the shifted components to produce the final 0–7 index.
+-6.  **Leaf Handling:** If the current node is a leaf (or cap node), return the scalar value or voxel index instead of a child index.
+-
+-**Formulas:**
+-Let $B_d$ be the bitmask for depth $d$:
+-$$ B_d = 1 \ll (\text{max\_depth} - d - 1) $$
+-
+-Let $O_x, O_y, O_z$ be the origin coordinates and $D_x, D_y, D_z$ be the destination coordinates.
+-
+-The masked coordinates are:
+-$$ O'_x = O_x \ \& \ B_d, \quad O'_y = O_y \ \& \ B_d, \quad O'_z = O_z \ \& \ B_d $$
+-$$ D'_x = D_x \ \& \ B_d, \quad D'_y = D_y \ \& \ B_d, \quad D'_z = D_z \ \& \ B_d $$
+-
+-The octant bits are determined by comparing the masked destination to the masked origin (or parent bounds). Typically, the bit is set if the destination is greater than the origin/center in that dimension:
+-$$ b_x = (D'_x > O'_x) ? 1 : 0 $$
+-$$ b_y = (D'_y > O'_y) ? 1 : 0 $$
+-$$ b_z = (D'_z > O'_z) ? 1 : 0 $$
+-
+-The final index is:
+-$$ \text{child\_index} = b_x + 2 \cdot b_y + 4 \cdot b_z $$
+-
+-**Parameters:**
+-- `max_depth`: Typically determined by the voxel resolution and scene bounds. Not given in the sources.
+-
+-**Edge Cases and Pitfalls:**
+-- **Precision:** Integer operations require coordinates to be scaled appropriately to avoid precision loss during masking.
+-- **Boundary Conditions:** Coordinates exactly on the boundary between octants must be handled consistently (e.g., using strict inequality or inclusive bounds) to ensure unique indexing.
+-- **Leaf Nodes:** The method returns a scalar or voxel index for leaves, not a child index. The caller must check for leaf status before invoking this computation.
++1.  **Precompute Bit Masks:** Calculate `child_bit_depth[d]` for all relevant depths $d$ from 0 to `max_depth`. The value represents the size of the voxel or node at that depth in the Morton code space.
++2.  **Scale Coordinates:** Apply the bit mask for the current depth to both the `origin` and `destination` coordinates. This effectively scales the coordinates to the integer grid resolution of the current node level.
++3.  **Compute Octant Offset:**
++    -   Determine the relative position of the destination with respect to the origin (or the node center, depending on implementation specifics, but typically relative to the node's local coordinate system).
++    -   Use binary AND (`&`) and integer inequality comparisons to isolate the X, Y, and Z components of the offset.
++    -   Specifically, mask the destination coordinates with the precomputed bit depth value.
++    -   Bit-shift the resulting components by constants corresponding to the X, Y, and Z axes to pack them into a single integer.
++    -   The standard packing order is typically: $Index = (Z \ll 2) | (Y \ll 1) | X$, where $X, Y, Z \in \{0, 1\}$.
++4.  **Return Index:** Return the computed scalar value. If the destination lies within a leaf node, this index identifies the specific voxel or scalar value to return.
+ 
+ **Pseudocode:**
+ ```python
+-def compute_octree_child_index(depth, max_depth, origin, destination):
++def compute_child_index(origin, destination, depth, max_depth, child_bit_depth):
+     """
+-    Computes the 0-7 octant index of the child node containing the destination
+-    relative to the parent node at the given depth.
++    Computes the 0-7 octant index of the child node containing the destination.
+     
+     Args:
+-        depth (int): Current depth of the parent node.
+-        max_depth (int): Maximum depth of the octree.
+-        origin (tuple): (ox, oy, oz) coordinates of the parent origin or ray start.
+-        destination (tuple): (dx, dy, dz) coordinates of the target point.
+-        
++        origin: 3D vector, the starting point (e.g., ray origin or node min).
++        destination: 3D vector, the target point (e.g., ray destination or node max).
++        depth: int, current octree depth.
++        max_depth: int, maximum octree depth.
++        child_bit_depth: list, precomputed array where child_bit_depth[d] = 1 << (max_depth - d - 1).
++    
+     Returns:
+         int: The child index (0-7).
+     """
+-    # Precomputed bitmask for the current depth
+-    # child_bit_depth[d] = 1 << (max_depth - d - 1)
+-    mask = 1 << (max_depth - depth - 1)
++    # Step 1: Get the bit mask for the current depth
++    mask = child_bit_depth[depth]
+     
+-    # Apply mask to coordinates
+-    ox, oy, oz = origin
+-    dx, dy, dz = destination
++    # Step 2: Scale destination coordinates by the mask
++    # This maps the continuous coordinate to the discrete grid at this depth
++    dest_x = destination.x & mask
++    dest_y = destination.y & mask
++    dest_z = destination.z & mask
+     
+-    # Masked coordinates
+-    mx_ox = ox & mask
+-    mx_oy = oy & mask
+-    mx_oz = oz & mask
++    # Step 3: Determine the octant bits
++    # Assuming the origin is at (0,0,0) in local space or the mask handles the offset.
++    # If origin is not zero, we typically compare destination against the origin.
++    # However, the source implies direct masking of destination coordinates relative to the node's
++    # local coordinate system where the node spans [0, 1] or similar normalized space.
++    # The "integer inequality operations" mentioned in [S1, unofficial] likely refer to checking if the
++    # masked coordinate is non-zero (i.e., in the upper half).
+     
+-    mx_dx = dx & mask
+-    mx_dy = dy & mask
+-    mx_dz = dz & mask
++    bit_x = 1 if dest_x != 0 else 0
++    bit_y = 1 if dest_y != 0 else 0
++    bit_z = 1 if dest_z != 0 else 0
+     
+-    # Determine octant bits using integer inequality
+-    # Bit 0: X component
+-    bit_x = 1 if mx_dx > mx_ox else 0
+-    
+-    # Bit 1: Y component
+-    bit_y = 1 if mx_dy > mx_oy else 0
+-    
+-    # Bit 2: Z component
+-    bit_z = 1 if mx_dz > mx_oz else 0
+-    
+-    # Combine bits to form index
+-    child_index = bit_x + (bit_y << 1) + (bit_z << 2)
++    # Step 4: Pack into 0-7 index
++    # Standard Morton order: Z is most significant, then Y, then X
++    child_index = (bit_z << 2) | (bit_y << 1) | bit_x
+     
+     return child_index
+ ```
+ 
++**Parameters:**
++- `max_depth`: Typically determined by the resolution of the volume data.
++- `child_bit_depth`: Precomputed for all depths to avoid runtime shift calculations.
++
++**Edge Cases and Pitfalls:**
++-   **Precision:** Floating-point coordinates must be carefully scaled to avoid precision errors when applying bitwise operations. Integer arithmetic is preferred after scaling.
++-   **Boundaries:** If the destination lies exactly on a boundary, the inequality check (`!= 0`) determines the octant. Consistency with the coordinate system (e.g., half-open intervals) is crucial.
++-   **Leaf Nodes:** If the current node is a leaf, the index may directly point to a voxel or scalar value rather than a child node.
++
+ ## Subtopics
+ 
+ ### [Point Location](2076-point-location.md)
+-Point Location maps a continuous 3D coordinate vector to a specific leaf node or voxel within a canonical octree. It solves the problem of efficiently retrieving data associated with a spatial position by traversing the tree from a given starting node to the target leaf. What sets this method apart from generic tree traversal is its reliance on precomputed bit masks to determine child indices using constant-time bitwise operations, avoiding the computational cost of arbitrary bit shifts. It builds on [Octree Child Index Computation](1807-octree-child-index-computation.md) to derive the 0-7 octant offset.
++Point Location maps a continuous 3D coordinate vector to a specific leaf node or voxel within a canonical octree. It solves the problem of efficiently retrieving data associated with a spatial position by traversing the tree from a given starting node to the target leaf. What sets this method apart from generic tree traversal is its reliance on precomputed bit masks to determine child indices using constant-time bitwise operations, avoiding the computational cost of arbitrary bit shifts. It builds on Octree Child Index Computation to derive the 0-7 octant offset.
+ 
+ ### [Fast Projection for Octree Nodes](2178-fast-projection-for-octree-nodes.md)
+-Fast Projection for Octree Nodes accelerates the mapping of 3D octree geometry to 2D screen space by computing the projected center of child nodes from their parents using precomputed 2D translation vectors. It solves the bottleneck of repeated full projection matrix multiplications during hierarchical traversal. Unlike [Point Location](2076-point-location.md) which finds spatial coordinates, or [Voxel Child Address Calculation](2495-voxel-child-address-calculation.md) which handles linear memory offsets, this method specifically optimizes the screen-space footprint calculation for occlusion and depth cueing in object-order ray casting.
++Fast Projection for Octree Nodes computes the projected center of an octree node from its parent's projected center using a simple 2D translation. It preprocesses eight constant 2D translation vectors for every octree level to quickly determine subdivisions, affected pixels, and recursively update occlusion maps (HOMs). The same translation approach is used to compute the depth component for fast depth cueing.
+ 
+ ### [Voxel Child Address Calculation](2495-voxel-child-address-calculation.md)
+-Calculates the linear index (address) of a specific child octant within a compact block of valid children, based on a validity bitmask. It maps a logical octant index (0–7) to its physical position in a dense array that only stores active children.
++Voxel Child Address Calculation computes the linear index of a specific child octant within a compact payload array, given its logical octant index and a bitmask of active children. It solves the problem of mapping sparse octree children to a dense, contiguous memory block, allowing traversal to skip empty octants without allocating storage for them. Unlike Octree Child Index Computation, which yields the 0-7 octant offset, this method translates that offset into the actual storage position based on the validity mask.
+ 
+ ### [Direction-dependent Morton Order Mapping](2662-direction-dependent-morton-order-mapping.md)
+-Direction-dependent Morton Order Mapping is a remapping function that converts a standard Octree Morton code into a sorting key aligned with the near-to-far rendering order for a specific ray direction. It solves the problem of correct occlusion culling and blending order in sparse voxel rasterization by ensuring that voxels are processed from closest to furthest relative to the camera, regardless of the viewing angle. Unlike [Point Location](2076-point-location.md) which determines spatial containment, or [Fast Projection for Octree Nodes](2178-fast-projection-for-octree-nodes.md) which estimates bounding volumes, this method specifically addresses the topological sorting requirement for volume rendering by adapting the Morton space-filling curve to the ray's sign vector.
++Direction-dependent Morton Order Mapping is a remapping function that converts a standard Octree Morton code into a sorting key aligned with the near-to-far rendering order for a specific ray direction. It solves the problem of correct occlusion culling and blending order in sparse voxel rasterization by ensuring that voxels are processed from closest to furthest relative to the camera, regardless of the viewing angle. Unlike Point Location which determines spatial containment, or Fast Projection for Octree Nodes which estimates bounding volumes, this method specifically addresses the topological sorting requirement for volume rendering by adapting the Morton space-filling curve to the ray's sign vector.
+ 
+ ### [Ordered Child Traversal](3008-ordered-child-traversal.md)
+-Ordered Child Traversal determines the visitation sequence of a node's eight children during ray traversal, ensuring they are processed in front-to-back order relative to the ray origin. This ordering is critical for correct alpha blending in volume rendering and for maintaining visibility order in rasterization-based approaches. It differs from [Point Location](2076-point-location.md) by focusing on traversal order rather than spatial indexing, and from [Fast Projection for Octree Nodes](2178-fast-projection-for-octree-nodes.md) by explicitly handling the depth-sorting logic required for correct compositing.
++Ordered Child Traversal determines the visitation sequence of a node's eight children during ray traversal, ensuring they are processed in front-to-back order relative to the ray origin. This ordering is critical for correct alpha blending in volume rendering and for maintaining visibility order in rasterization-based approaches. It differs from Point Location by focusing on traversal order rather than spatial indexing, and from Fast Projection for Octree Nodes by explicitly handling the depth-sorting logic required for correct compositing.
+ 
+ ### Octree Child Bounding Box Computation
+-Computes the AABB of a child node given its parent bounds and child index (0-7 for octree, 0-63 for wide) [S2, unofficial]. Uses Morton/Z-order bit packing for child indexing [S2, unofficial]. Compute mid = (min + max) * 0.5. Extract bits from child_index: high_x = (child_index & 1) != 0, high_y = (child_index & 2) != 0, high_z = (child_index & 4) != 0. Child min = (high_x ? mid.x : min.x, high_y ? mid.y : min.y, high_z ? mid.z : min.z). Child max = (high_x ? max.x : mid.x, high_y ? max.y : mid.y, high_z ? max.z : mid.z) [S2, unofficial]. Child index bit packing: bit 0 = x, bit 1 = y, bit 2 = z. Supports standard 8-way octree (indices 0-7) and extends to 4x4x4 wide nodes (indices 0-63) by reusing the same bit logic for the first 3 dimensions [S2, unofficial].
++Octree Child Bounding Box Computation computes the Axis-Aligned Bounding Box (AABB) of a child node given its parent bounds and child index (0-7 for octree, 0-63 for wide). It uses Morton/Z-order bit packing for child indexing. The child index bit packing maps bit 0 to x, bit 1 to y, and bit 2 to z. It supports standard 8-way octree (indices 0-7) and extends to 4x4x4 wide nodes (indices 0-63) by reusing the same bit logic for the first 3 dimensions. The child min is computed as `(high_x ? mid.x : min.x, high_y ? mid.y : min.y, high_z ? mid.z : min.z)` and child max as `(high_x ? max.x : mid.x, high_y ? max.y : mid.y, high_z ? max.z : mid.z)`, where `mid = (min + max) * 0.5` and `high_x = (child_index & 1) != 0`, etc. [S2, unofficial]
+ 
+ ## Operating characteristics
+-- **Time Complexity:** $O(1)$ per node visit, assuming precomputed bitmasks.
+-- **Memory Complexity:** $O(\text{max\_depth})$ for storing the `child_bit_depth` array.
+-- **Performance:** Significantly faster than arbitrary bit shifts due to the use of precomputed constants and simple bitwise operations [S1, unofficial].
+-- **Strengths:** Efficient for regular octrees; minimal computational overhead per traversal step.
+-- **Limitations:** Requires precomputation; less flexible for non-standard tree structures or variable child counts without modification.
++-   **Time Complexity:** $O(1)$ per node visit for index computation, assuming precomputed bit masks.
++-   **Memory Complexity:** $O(D)$ for precomputed bit masks, where $D$ is the maximum depth.
++-   **Performance:** Significantly faster than arbitrary bit shifts or floating-point division, as noted in [S1, unofficial].
++-   **Strengths:** Constant-time operation, low memory overhead, suitable for GPU and CPU implementations.
++-   **Limitations:** Requires precomputation of bit masks; relies on consistent coordinate system and bit-packing conventions.
+ 
+ ## Background
+-Originated in the context of interactive isosurface ray tracing of large octree volumes [S1, unofficial]. The method was developed to address the performance bottleneck of arbitrary bit shifts during tree traversal, replacing them with precomputed bitmasks and bitwise operations [S1, unofficial]. It is a fundamental component of hierarchical grid traversal in volume rendering, enabling efficient occlusion and empty space skipping.
++The method originates from interactive isosurface ray tracing of large octree volumes, where efficient traversal is critical for performance. The specific optimization of precomputing bit depths to avoid expensive arbitrary shifts was introduced to improve runtime efficiency in this context. [S1, unofficial]
+ 
+ ## Sources

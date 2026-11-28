@@ -1,0 +1,174 @@
+Official Vulkanstorm viewer source repository. Contribute to anne-skydancer/vulkanstorm development by creating an account on GitHub.
+
+Selectable PPLL and depth-peeling order-independent alpha sorting by anne-skydancer · Pull Request #28 · anne-skydancer/vulkanstorm · GitHub
+Skip to content
+You signed in with another tab or window. Reload to refresh your session.
+You signed out in another tab or window. Reload to refresh your session.
+You switched accounts on another tab or window. Reload to refresh your session.
+Dismiss alert
+Conversation
+anne-skydancer
+commented
+Sep 4, 2026
+Copy link
+Copy Markdown
+Owner
+Ports the PPLL (per-pixel linked list) + bounded depth-peeling order-independent transparency runtime from the archive onto the interleaved-alpha baseline. GL-only for now; the host-side GL plumbing is confined to named methods so it can be swapped for a Vulkan backend later.
+What this adds
+Two selectable alpha-sorting methods (in addition to the existing legacy/interleaved path), chosen via RenderAlphaSortMethod (Preferences → Graphics → Rendering 2):
+0 — Legacy sorted (default; unchanged — the interleaved path stays byte-identical)
+1 — PPLL: per-pixel linked lists. R32UI per-pixel head image + std430 SSBO node pool (packed half-float RG/BA + depth + next) + atomic counter. GL 4.4+ (Windows/Linux). Order-correct alpha independent of CPU sort order.
+2 — Depth peeling: bounded multi-pass, GL 4.1+, with a per-frame CPU submission budget and a legacy-sorted tail so nothing disappears.
+Both are restricted to the main post-water world view; mirrors/hero probes, cube snapshots, HUDs, impostors, and pre-water alpha keep the legacy path. Unsupported methods fall back to legacy without changing the saved setting.
+Implementation
+pipeline.cpp/h: OIT buffer management (allocateAlphaOITBuffers/beginAlphaOITCapture/compositeAlphaOIT, depth-peel target ping-pong), hooked into allocateScreenBufferInternal/releaseScreenBuffers. All direct-GL calls are isolated in the named OIT methods.
+lldrawpoolalpha.cpp/h: EAlphaOITPhase layered orthogonally onto the existing EAlphaStream model — forwardRender(stream, oit_phase); renderPostDeferred dispatches PPLL → depth-peel → interleaved → legacy. Residual/particle filtering and glow preservation in the residual pass.
+Shaders: ALPHA_OIT/ALPHA_DEPTH_PEEL defines gated on GL version in llshadermgr; new deferred/alphaOITResolveF.glsl resolve pass; capture blocks in fullbrightF/alphaF/pbralphaF/materialF.
+Settings: 9 new RenderAlpha* settings (PPLL/depth-peel params + availability flags + stats debug).
+UI: Preferences → Graphics split into "Rendering 1" / "Rendering 2"; Rendering 2 carries the alpha-sort radio + PPLL/depth-peel parameter controls (en + it).
+Also fixed (uncovered during validation — NOT caused by PPLL)
+viewer_manifest.py failed to stage each theme's textures.xml (the name→file map at textures/ root) for both build-tree and packaged runs. Texture-mapping themes (e.g. firestorm/ctrlaltstudio) therefore couldn't resolve custom textures/link colors → magenta chat/toast/name-tag backgrounds and unskinned hyperlinks. Fixed for both paths. This same bug exists on master and should be offered upstream separately.
+Validation
+Builds clean: 0 errors / 0 warnings (ReleaseFS_open).
+In-world: legacy, PPLL, and depth-peel all render the 3D scene and UI correctly.
+anne-skydancer
+added 8 commits
+September 4, 2026 20:55
+PPLL/depth-peel alpha OIT: settings, shader registration, and shaders
+…
+24debc0
+```
+Foundation for selectable order-independent alpha (port from archive,
+Vulkanstorm runtime layer only -- no GHI harness):
+
+- settings.xml: RenderAlphaSortMethod (0 legacy/1 PPLL/2 depth-peel),
+  PPLL node/memory/layer budgets, depth-peel layers/time budget,
+  runtime capability flags, debug stats toggle
+- llshadermgr: ALPHA_PEEL_DEPTH reserved uniform; compile-time gates
+  ALPHA_OIT (GL 4.4+ SSBO/image/atomic) and ALPHA_DEPTH_PEEL (GL 4.1+)
+  injected into fragment shaders by GL version
+- llviewershadermgr: gAlphaOITResolveProgram (GL 4.4-gated load)
+- New alphaOITResolveF.glsl: per-pixel linked-list walk, depth sort,
+  weighted tail collapse, occlusion reject vs opaque depth
+- Capture shaders fullbrightF/alphaF/pbralphaF/materialF: oit_append
+  (PPLL node write) + alpha_depth_peel (peel select/replay/tail via
+  oit_mode 2/3/4), guarded per-shader by ALPHA_OIT/ALPHA_DEPTH_PEEL
+  (fullbrightF additionally gated on IS_ALPHA)
+
+Ported from archived VulkanStorm (ead3aeb / bd49ebc). Backend-neutral
+algorithm (SSBO/storage-image/atomic map to core Vulkan); host-side GL
+plumbing kept isolated for a future Vulkan backend.
+```
+PPLL/depth-peel alpha OIT: pipeline orchestration, alpha-pool integra…
+…
+276f901
+```
+…tion, UI, packaging
+
+Ports the runtime PPLL + bounded depth-peeling layer onto the interleaved-alpha
+baseline, layering EAlphaOITPhase orthogonally onto the EAlphaStream model:
+
+- pipeline: OIT buffer management (R32UI head image, std430 SSBO node pool,
+  atomic counter), capture/composite passes, depth-peel target ping-pong, and
+  the allocate/release hooks in allocate/releaseScreenBuffers. Host-side GL
+  plumbing is confined to the named OIT methods for a future Vulkan backend.
+- lldrawpoolalpha: OIT dispatch in renderPostDeferred (PPLL -> depth-peel ->
+  interleaved -> legacy), setOITMode, drawGLTFScene, residual/particle
+  filtering, peel-depth sampler rebinds, and glow preservation in the residual
+  pass. RenderAlphaSortMethod=0 leaves the interleaved path byte-identical.
+- UI: "Rendering II" panel with the alpha-sort radio + PPLL/depth-peel
+  parameter controls (en + it).
+- CMakeLists/viewer_manifest: register shader/XUI files and sync
+  app_settings/shaders/skins into build-tree runs, not only installer packages.
+```
+Fix unpackaged-build skin texture staging; drop invalid radio_group p…
+…
+7f9cdf6
+```
+…aram
+
+- viewer_manifest: the build-tree skin sync must also stage the widget/icon
+  and theme images (textures/, themes/), not just XUI. Without them an
+  unpackaged exe renders its UI with every button/slider/radio texture
+  missing.
+- graphics1 panel: draw_border is not a valid radio_group param (archive
+  artifact); removes the LLInitParam parse warning.
+```
+Stage app_settings content subdirs for unpackaged builds
+…
+9ac0f52
+```
+The build-tree app_settings sync only copied top-level files + shaders;
+"*.xml" is non-recursive, so windlight/, filters/, beams/, beamsColors/,
+camera/, poses/, and fs_static_assets/ were dropped from unpackaged runs.
+Adds them explicitly. (Duplicate copies under is_packaging_viewer() are
+idempotent.)
+```
+Stage skin root configs + html for unpackaged builds
+…
+d1e31a8
+```
+The magenta missing-asset placeholder in chat history and the pie menu was
+the theme not applying: skins.xml, each skin's colors.xml/settings.xml/
+toolbars.xml, default_languages.xml, and the html loading pages were never
+copied for build-tree runs.  Adds them to the non-packaging skins sync.
+```
+Use arabic numerals for Rendering 1 / Rendering 2 tab labels
+de581a6
+Fix magenta UI: stage theme textures.xml (name->file map)
+…
+a821118
+```
+A theme\'s textures.xml (e.g. firestorm/themes/ctrlaltstudio/textures/
+textures.xml) maps the theme\'s named textures to files. It was dropped from
+both the packaging and the build-tree skins sync, so the theme\'s custom
+textures and link colors never resolved -> magenta chat/toast/name-tag
+backgrounds and unskinned hyperlinks, in packaged AND unpackaged builds.
+Adds the missing "*.xml" inside the */themes/*/textures prefix.
+```
+Also stage theme textures.xml at textures/ root in the packaging path
+fd1aa4a
+github-actions
+Bot
+added
+cmake
+c/cpp
+llrender
+python
+labels
+Sep 4, 2026
+Hide details
+View details
+anne-skydancer
+merged commit 63936f1
+into
+master
+Sep 4, 2026
+3 of 5 checks passed
+Uh oh!
+There was an error while loading. Please reload this page.
+anne-skydancer
+mentioned this pull request
+Sep 5, 2026
+Fix PBR alpha OIT variant placement to match the validated archive
+#29
+Merged
+anne-skydancer
+deleted the
+ppll-alpha
+branch
+September 7, 2026 08:00
+Sign up for free
+to join this conversation on GitHub.
+Already have an account?
+Sign in to comment
+Uh oh!
+There was an error while loading. Please reload this page.
+Labels
+c/cpp
+cmake
+llrender
+python
+1 participant
+Add this suggestion to a batch that can be applied as a single commit.This suggestion is invalid because no changes were made to the code.Suggestions cannot be applied while the pull request is closed.Suggestions cannot be applied while viewing a subset of changes.Only one suggestion per line can be applied in a batch.Add this suggestion to a batch that can be applied as a single commit.Applying suggestions on deleted lines is not supported.You must change the existing code in this line in order to create a valid suggestion.Outdated suggestions cannot be applied.This suggestion has been applied or marked resolved.Suggestions cannot be applied from pending reviews.Suggestions cannot be applied on multi-line comments.Suggestions cannot be applied while the pull request is queued to merge.Suggestion cannot be applied right now. Please check back later.
+You can’t perform that action at this time.

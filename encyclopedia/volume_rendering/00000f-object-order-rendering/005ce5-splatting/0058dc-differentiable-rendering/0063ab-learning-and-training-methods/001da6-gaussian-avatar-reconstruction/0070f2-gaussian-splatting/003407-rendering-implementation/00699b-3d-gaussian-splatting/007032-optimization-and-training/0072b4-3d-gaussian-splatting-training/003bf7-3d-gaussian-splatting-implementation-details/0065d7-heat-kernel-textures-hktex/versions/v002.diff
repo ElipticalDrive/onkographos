@@ -1,0 +1,318 @@
+--- v001.md
++++ v002.md
+@@ -66,5 +66,5 @@
+         *   Compute predicted linear RGB $\hat{\mathbf{c}}_i = \frac{1}{N_{\text{spp}}} \sum_{s=1}^{N_{\text{spp}}} \mathbf{L}_{i,s}$ [S1].
+         *   Clip prediction and target to $[0, 1]$ and convert to gamma space (unless HDR) [S1].
+-        *   Compute per-ray L1 loss averaged across the mini-batch [S1].
++        *   Optimise a per-ray photometric loss (L1 loss averaged across the mini-batch) [S1].
+     *   **Update & Projection:**
+         *   Perform gradient descent step [S1].
+@@ -97,200 +97,170 @@
+ 
+ ```python
++import math
++import random
++
+ def initialize_hktex(mesh, num_kernels, mode='multi_view'):
+-    """
+-    Initialize HKTex parameters on a mesh.
+-    mode: 'multi_view' or 'uv_texture'
+-    """
+     kernels = []
+-    for s in range(num_kernels):
+-        u = random_uniform()
+-        
+-        # Position
++    for _ in range(num_kernels):
++        u = random.uniform(0.0, 1.0)
+         if mode == 'multi_view':
+             p_star = sample_uniform_on_surface(mesh)
+-            c = random_uniform_color()
+-        else: # uv_texture
+-            if s < num_kernels / 2:
++            c = [random.uniform(-1.0, 1.0) for _ in range(3)]
++        else:
++            if _ < num_kernels // 2:
+                 p_star = sample_uniform_on_surface(mesh)
+-                c = random_uniform_color()
++                c = [random.uniform(-1.0, 1.0) for _ in range(3)]
+             else:
+-                # Sample based on UV texture gradients
+                 uv_point = sample_uv_gradient(mesh.uv_map)
+                 p_star = uv_to_surface_point(mesh, uv_point)
+                 c = sample_uv_color(mesh.uv_map, uv_point)
+-        
+-        # Parameters
+-        theta = u * pi
++        theta = u * math.pi
+         eta = 1.0 + 99.0 * u
+-        varsigma = 10 + 40 * (u ** 0.5)
+-        
+-        if mode == 'uv_texture':
+-            tau_min = 0.7
+-        else:
+-            tau_min = 0.9
+-            
++        varsigma = 10.0 + 40.0 * (u ** 0.5)
++        tau_min = 0.7 if mode == 'uv_texture' else 0.9
+         tau = tau_min + (1.0 - tau_min - 1e-8) * (u ** 0.7)
+-        
+         kernels.append({
+-            'p_star': p_star,
+-            'theta': theta,
+-            'eta': eta,
+-            'tau': tau,
+-            'varsigma': varsigma,
+-            'c': c,
+-            'optimizer_state': None # Placeholder for momentum/variance
++            'p_star': p_star, 'theta': theta, 'eta': eta,
++            'tau': tau, 'varsigma': varsigma, 'c': c,
++            'momentum': [0.0, 0.0, 0.0], 'variance': [0.0, 0.0, 0.0]
+         })
+     return kernels
+ 
+ def compute_masses(kernels, mesh):
+-    """
+-    Compute masses for kernels using KDE on biharmonic distances.
+-    """
+-    # Compute pairwise biharmonic distances D
+-    D = compute_biharmonic_distances([k['p_star'] for k in kernels])
+-    
+-    # Adaptive bandwidth
+-    nonzero_dists = [d for d in D.flatten() if d > 0]
+-    sigma_m = median(nonzero_dists)
+-    
+-    # Local density
++    D = compute_pairwise_biharmonic_distances([k['p_star'] for k in kernels])
++    nonzero_dists = [d for row in D for d in row if d > 0]
++    nonzero_dists.sort()
++    sigma_m = nonzero_dists[len(nonzero_dists) // 2]
+     densities = []
+     for s in range(len(kernels)):
+-        # Sum exp(-D_i_s^2 / sigma_m^2)
+-        dists_to_s = D[:, s]
+-        density = sum(exp(-(d ** 2) / (sigma_m ** 2)) for d in dists_to_s)
++        density = sum(math.exp(-(D[i][s] ** 2) / (sigma_m ** 2)) for i in range(len(kernels)))
+         densities.append(density)
+-        
+-    # Inverse density
+     masses = [1.0 / d for d in densities]
+-    
+-    # Normalize to surface area
+     total_area = mesh.total_surface_area()
+     current_sum = sum(masses)
+     masses = [m * (total_area / current_sum) for m in masses]
+-    
+     return masses
+ 
+ def optimize_hktex(mesh, kernels, masses, num_steps, num_kernels):
+-    """
+-    Main optimization loop.
+-    """
+-    # Pre-sample pool for importance sampling
+     pool = sample_uniform_points_on_surface(mesh, count=10_000_000)
+-    epsilon = zeros(len(pool)) # Sampling weights
+-    
++    epsilon = [0.0] * len(pool)
++    gamma_ema = 0.99
++    B = 1024
++    N_spp = 8
++
+     for step in range(num_steps):
+-        # 1. Sampling
+         if step < 250:
+-            # Uniform sampling from pool
+-            ray_indices = random_sample(pool, size=1024)
++            ray_indices = random.sample(range(len(pool)), B)
+         else:
+-            # Importance sampling based on epsilon
+-            ray_indices = weighted_sample(pool, weights=epsilon, size=1024)
+-            # Update epsilon
+-            # Note: L(p) must be computed during rendering
+-            pass 
+-            
+-        # 2. Camera/Ray Generation (Multi-view specific)
++            ray_indices = weighted_sample(pool, epsilon, B)
++            for idx in ray_indices:
++                # L(p) is computed during rendering
++                pass
++
+         rays = []
+-        for _ in range(1024):
++        for _ in range(B):
+             cam = sample_random_camera()
+-            ray = generate_ray_from_camera(cam, pixel=random_pixel())
++            ray = generate_ray_from_camera(cam, random_pixel())
+             while not ray_intersects_mesh(ray, mesh):
+                 cam = sample_random_camera()
+-                ray = generate_ray_from_camera(cam, pixel=random_pixel())
++                ray = generate_ray_from_camera(cam, random_pixel())
+             rays.append(ray)
+-            
+-        # 3. Rendering and Loss
+-        loss = 0.0
++
++        total_loss = 0.0
+         for i, ray in enumerate(rays):
+-            # Evaluate HKTex at ray intersection
+-            # This involves dynamic evaluation of heat kernels, not splatting
+-            # N_spp = 8 gradient samples
+             samples = []
+-            for _ in range(8):
+-                # Evaluate kernel contribution at intersection point
+-                # Using spectral heat kernel solution or continuous manifold formulation
++            for _ in range(N_spp):
+                 color = evaluate_hktex_at_point(mesh, kernels, masses, ray.intersection_point)
+                 samples.append(color)
+-                
+-            predicted_color = mean(samples)
+-            
+-            # Get target color (from GT image or UV texture)
++            predicted_color = [sum(s) / N_spp for s in zip(*samples)]
+             target_color = get_target_color(ray)
+-            
+-            # Preprocessing
+-            pred_clipped = clip(predicted_color, 0, 1)
+-            target_clipped = clip(target_color, 0, 1)
+-            pred_gamma = linear_to_gamma(pred_clipped)
+-            target_gamma = linear_to_gamma(target_clipped)
+-            
+-            # L1 Loss
+-            loss += l1_loss(pred_gamma, target_gamma)
+-            
+-            # Update importance sampling weights for the intersection point
+-            # (Simplified: assume we track loss per pool point)
+-            # epsilon[pool_index] = gamma * epsilon[pool_index] + (1-gamma) * loss
+-            
+-        loss /= len(rays)
+-        
+-        # 4. Backpropagation and Update
+-        gradients = compute_gradients(loss, kernels)
+-        update_optimizer(kernels, gradients)
+-        
+-        # 5. Projected Gradient Descent (Clamping)
++
++            pred_clipped = [max(0.0, min(1.0, c)) for c in predicted_color]
++            target_clipped = [max(0.0, min(1.0, c)) for c in target_color]
++            pred_gamma = [c ** (1.0/2.2) for c in pred_clipped]
++            target_gamma = [c ** (1.0/2.2) for c in target_clipped]
++
++            loss_i = sum(abs(p - t) for p, t in zip(pred_gamma, target_gamma)) / 3.0
++            total_loss += loss_i
++
++        avg_loss = total_loss / B
++
++        # gradients = compute_gradients(avg_loss, kernels)
++        # for k in kernels: apply_optimizer_step(k, gradients)
++
+         for k in kernels:
+-            k['theta'] = clamp(k['theta'], 0, pi)
+-            k['varsigma'] = clamp(k['varsigma'], 10, 200)
+-            k['tau'] = clamp(k['tau'], 0.3, 1.0 - 1e-8)
+-            k['eta'] = clamp(k['eta'], 1, 200)
+-            k['c'] = clamp(k['c'], -1, 1)
+-            
+-        # 6. Adaptive Density Control (Splitting)
+-        # Check if splitting is needed based on density/loss criteria
+-        # If split:
+-        #   interpolate principal direction v_hat_M
+-        #   compute new axis d_hat
+-        #   create new kernels at Exp(p_old, +/- d_hat * (1-tau) * r_base)
+-        #   set new tau = 1.0 - 1.0^(-tau_old/1.6)
+-        #   zero optimizer states for new kernels
+-        pass
++            k['theta'] = max(0.0, min(math.pi, k['theta']))
++            k['varsigma'] = max(10.0, min(200.0, k['varsigma']))
++            k['tau'] = max(0.3, min(1.0 - 1e-8, k['tau']))
++            k['eta'] = max(1.0, min(200.0, k['eta']))
++            k['c'] = [max(-1.0, min(1.0, c)) for c in k['c']]
++
++        for k in kernels:
++            if needs_split(k):
++                v_hat_M = barycentric_interpolate(mesh.vertices, k['p_star'])
++                d_hat = [v_hat_M[0]*math.cos(k['theta']+math.pi/2) - v_hat_M[1]*math.sin(k['theta']+math.pi/2),
++                         v_hat_M[1]*math.cos(k['theta']+math.pi/2) + v_hat_M[0]*math.sin(k['theta']+math.pi/2),
++                         0.0]
++                p_new_plus = exponential_map(k['p_star'], d_hat, (1 - k['tau']) * r_base)
++                p_new_minus = exponential_map(k['p_star'], [-x for x in d_hat], (1 - k['tau']) * r_base)
++                tau_new = 1.0 - (1.0 ** (-k['tau'] / 1.6))
++                replace_kernel(k, p_new_plus, p_new_minus, tau_new)
++                k['momentum'] = [0.0, 0.0, 0.0]
++                k['variance'] = [0.0, 0.0, 0.0]
+ 
+ def evaluate_hktex_at_point(mesh, kernels, masses, point):
+-    """
+-    Dynamically evaluate the texture color at a point on the mesh.
+-    """
+-    # Find contributing kernels (e.g., within a certain geodesic distance)
+     contributing = []
+     for k in kernels:
+-        # Compute geodesic distance from point to k['p_star']
+         dist = geodesic_distance(mesh, point, k['p_star'])
+-        # Check if within effective radius based on tau and eta
+         if dist < effective_radius(k['tau'], k['eta']):
+             contributing.append(k)
+-            
+     if not contributing:
+         return [0.0, 0.0, 0.0]
+-        
+-    # Compute heat kernel value for each contributing kernel
+-    # This uses the spectral or continuous manifold formulation
+     total_color = [0.0, 0.0, 0.0]
+     total_weight = 0.0
+-    
+     for k in contributing:
+-        # Evaluate heat kernel Phi(x, p_star, t)
+-        # t is related to tau and varsigma
+-        # Anisotropy is handled by the shear matrix H_eta,theta in the LBO
+         value = evaluate_heat_kernel(mesh, k['p_star'], point, k['eta'], k['theta'], k['varsigma'])
+-        
+-        # Weight by mass
+-        weight = value * k['mass'] # mass is precomputed or passed
+-        total_color += weight * k['c']
++        weight = value * k['mass']
++        total_color = [total_color[j] + weight * k['c'][j] for j in range(3)]
+         total_weight += weight
+-        
+     if total_weight == 0:
+         return [0.0, 0.0, 0.0]
+-        
+     return [c / total_weight for c in total_color]
++
++def sample_uniform_on_surface(mesh):
++    return mesh.random_point_on_surface()
++
++def uv_to_surface_point(mesh, uv_point):
++    return mesh.barycentric_uv_to_xyz(uv_point)
++
++def sample_uv_color(mesh, uv_point):
++    return mesh.uv_texture.sample(uv_point)
++
++def compute_pairwise_biharmonic_distances(points):
++    return mesh.compute_biharmonic_distance_matrix(points)
++
++def weighted_sample(pool, weights, k):
++    return random.choices(pool, weights=weights, k=k)
++
++def sample_random_camera():
++    return Camera(azimuth=random.uniform(0, 2*math.pi), elevation=random.uniform(0, math.pi), distance=random.uniform(1, 5))
++
++def generate_ray_from_camera(cam, pixel):
++    return cam.generate_primary_ray(pixel)
++
++def ray_intersects_mesh(ray, mesh):
++    return mesh.ray_intersect(ray) is not None
++
++def get_target_color(ray):
++    return ray.target_image.sample(ray.pixel)
++
++def needs_split(k):
++    return k['density'] > threshold
++
++def replace_kernel(old_k, p1, p2, tau_new):
++    old_k['p_star'] = p1
++    old_k['tau'] = tau_new
++    new_k = {**old_k, 'p_star': p2, 'momentum': [0.0, 0.0, 0.0], 'variance': [0.0, 0.0, 0.0]}
++    return new_k
+ ```
+ 

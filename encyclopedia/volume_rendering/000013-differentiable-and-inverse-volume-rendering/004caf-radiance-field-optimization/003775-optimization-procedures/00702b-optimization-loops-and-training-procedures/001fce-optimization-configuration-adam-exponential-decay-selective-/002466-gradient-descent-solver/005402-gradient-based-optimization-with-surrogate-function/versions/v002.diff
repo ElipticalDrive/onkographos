@@ -1,0 +1,226 @@
+--- v001.md
++++ v002.md
+@@ -8,13 +8,13 @@
+ ## How it works
+ **Inputs and Outputs:**
+-- **Inputs:** Measured images $\{i_{c,\mu}^{measured}\}$ for views $c=1 \dots N_{views}$ and channels $\mu \in \{R, G, B\}$; camera parameters; physical constants ($\sigma_{\mu}^{aerosol}, \beta_{\mu}^{air}$); regularization weight $\eta$; step size $\Delta$; number of gradient steps per surrogate update $NGD$.
+-- **Outputs:** Estimated aerosol extinction field $\hat{\beta}^{aerosol}$.
++- **Inputs:** Measured images $\{i_{c,\mu}^{measured}\}$ for views $c=1 \dots N_{views}$ and channels $\mu \in \{R, G, B\}$; camera parameters; physical constants ($\sigma_{\mu}^{aerosol}, \beta_{\mu}^{air}$); regularization weight $\eta$; step size $\Delta$; number of gradient steps per surrogate update $NGD$ [S1, unofficial].
++- **Outputs:** Estimated aerosol extinction field $\hat{\beta}^{aerosol}$ [S1, unofficial].
+ 
+ **Data Structures:**
+-- $\beta^{(q)}$: 3D grid of aerosol extinction coefficients at iteration $q$.
+-- $j_{all}^{(q)}$: Field of radiance values $\{j_{c,\mu}^{(q)}\}$ computed via Forward Monte Carlo (FMC) at iteration $q$.
++- $\beta^{(q)}$: 3D grid of aerosol extinction coefficients at iteration $q$ [S1, unofficial].
++- $j_{all}^{(q)}$: Field of radiance values $\{j_{c,\mu}^{(q)}\}$ computed via Forward Monte Carlo (FMC) at iteration $q$ [S1, unofficial].
+ - $Q_c$: Diagonal weighting matrix for view $c$, where element $(k,k)$ is $R_{c,p}^{(q)}$, the number of rays passing through voxel $k$ in view $c$ [S1, unofficial].
+-- $L$: 3D Laplacian matrix.
+-- $W$: Diagonal altitude-dependent weight matrix.
++- $L$: 3D Laplacian matrix [S1, unofficial].
++- $W$: Diagonal altitude-dependent weight matrix [S1, unofficial].
+ - $M_c$: Sun-mask binary matrix for view $c$ [S1, unofficial].
+ 
+@@ -29,10 +29,10 @@
+ 
+ 3.  **Regularization Term:**
+-    $$ \Psi(\beta_{G}^{aerosol}) = \| W_L \beta_{G}^{aerosol} \|^2 $$
++    $$ \Psi(\beta_{G}^{aerosol}) = \| W \beta_{G}^{aerosol} \|^2 $$
+     Gradient: $2 L^T W^T W \beta_{G}^{aerosol}$ [S1, unofficial].
+ 
+ 4.  **Gradient of Cost Function:**
+     $$ \frac{\partial E}{\partial \beta} = 2 \sum_{c=1}^{N_{views}} \sum_{\mu=R,G,B} \tilde{\sigma}_{\mu} Q_c M_c J_c(\beta_{\mu}) M_c \left[ i_c(\beta_{\mu}) - i_{c,\mu}^{measured} \right] + \eta \frac{\partial \Psi}{\partial \beta} $$
+-    Note: When $j_{all}$ is fixed, the Jacobian $J_c$ degenerates to a simpler calculation based on the surrogate field [S1, unofficial].
++    When $j_{all}$ is fixed, the Jacobian $J_c$ degenerates to a simple calculation based on the surrogate field [S1, unofficial].
+ 
+ 5.  **Surrogate Update:**
+@@ -46,5 +46,5 @@
+ 7.  **Camera Noise Simulation (for input preparation):**
+     $$ i_{c,\mu}^{measured} \leftarrow \left( i_{c,\mu}^{measured} + o_{noise} \right) \cdot \frac{2^{10}}{\max(\{M_c \cdot i_{c,\mu}^{measured}\})} $$
+-    Clipped to $[0, 1024]$ and rounded. $o_{noise}$ is white noise with std dev 0.4 [S1, unofficial].
++    Clipped to $[0, 1024]$ and rounded. $o_{noise}$ is white noise with standard deviation 0.4 [S1, unofficial].
+ 
+ **Parameters:**
+@@ -60,15 +60,16 @@
+     Estimates aerosol extinction beta using surrogate function optimization.
+     """
+-    # Initialize beta (e.g., null initialization)
+-    beta = initialize_beta_null() 
+-    
+     # Precompute physical constants
+-    sigma_tilde = compute_sigma_tilde(physical_constants)
++    sigma_tilde = {mu: physical_constants['sigma_aerosol'][mu] / physical_constants['sigma_aerosol']['G'] 
++                   for mu in ['R', 'G', 'B']}
+     
+     # Precompute masks and weighting matrices
+-    sun_masks = compute_sun_masks(camera_params)
+-    weighting_matrices = compute_weighting_matrices(camera_params)
++    sun_masks = {c: compute_sun_masks(camera_params[c]) for c in range(len(camera_params))}
++    weighting_matrices = {c: compute_weighting_matrices(camera_params[c]) for c in range(len(camera_params))}
+     laplacian_matrix = compute_3d_laplacian()
+     altitude_weights = compute_altitude_weights()
++    
++    # Initialize beta (e.g., null initialization)
++    beta = zeros_like(beta_grid)
+     
+     q = 0
+@@ -76,10 +77,9 @@
+         # 1. Forward Model Rendering (FMC) to compute surrogate field
+         # This is not an inverse problem; complexity does not increase with N_voxels
+-        j_all = forward_model_rendering(beta, camera_params, physical_constants)
++        j_all = fmc_trace(beta, camera_params, physical_constants)
+         
+         # 2. Gradient Descent Block
+         for d in range(ngd):
+             # Compute gradient using fixed surrogate field j_all
+-            # Note: Jacobian J_c degenerates when j_all is fixed
+             gradient = compute_gradient_surrogate(
+                 beta=beta, 
+@@ -110,13 +110,12 @@
+     
+     # Regularization gradient: 2 * L^T * W^T * W * beta
+-    reg_gradient = 2.0 * laplacian_matrix.T @ (altitude_weights.T @ (altitude_weights @ beta))
+-    
+-    for c in range(num_views):
+-        for mu in channels:
++    reg_gradient = 2.0 * mat_vec_mul(laplacian_matrix.T, mat_vec_mul(altitude_weights.T, mat_vec_mul(altitude_weights, beta)))
++    
++    for c in range(len(measured_images)):
++        for mu in ['R', 'G', 'B']:
+             # Access surrogate field j_all[c][mu]
+             j_c_mu = j_all[c][mu]
+             
+             # Compute modeled intensity i_c from j_all (simplified mapping)
+-            # In the surrogate context, i_c is derived directly from the fixed radiance field
+             i_c_modeled = map_radiance_to_intensity(j_c_mu)
+             
+@@ -125,5 +124,5 @@
+             
+             # Masking
+-            masked_residual = sun_masks[c] * residual
++            masked_residual = elementwise_mul(sun_masks[c], residual)
+             
+             # Weighting
+@@ -132,26 +131,11 @@
+             # Jacobian term degenerates when j_all is fixed
+             # J_c(beta | j_c_mu) is a simple calculation based on the fixed field
+-            # Specifically, it relates the change in intensity to change in beta
+-            # given the fixed radiance path.
+-            # Implementation detail: This typically involves ray-voxel intersection counts
+-            # or similar geometric factors derived from the FMC step.
+-            # For the purpose of this pseudocode, we assume a helper function exists
+-            # that computes this degenerate Jacobian-vector product.
+             jacobian_term = compute_degenerate_jacobian_term(beta, j_c_mu, Q_c, sun_masks[c])
+             
+             # Accumulate gradient
+             # Term: 2 * sigma_tilde * Q_c * M_c * J_c * M_c * residual
+-            # Note: The source formula has Q_c and M_c on both sides of J_c in the general case,
+-            # but with fixed j_all, the structure simplifies.
+-            # We follow the structure: 2 * sigma_tilde * (Q_c * M_c * (J_c * (M_c * residual)))
+-            
+-            # Apply mask to residual
+-            masked_res = sun_masks[c] * residual
+-            
+-            # Apply Jacobian (degenerate form)
+-            jac_res = jacobian_term @ masked_res
+-            
+-            # Apply weighting and mask again (as per Eq 32 structure)
+-            weighted_jac = Q_c * (sun_masks[c] * jac_res)
++            masked_res = elementwise_mul(sun_masks[c], residual)
++            jac_res = mat_vec_mul(jacobian_term, masked_res)
++            weighted_jac = elementwise_mul(Q_c, elementwise_mul(sun_masks[c], jac_res))
+             
+             gradient += 2.0 * sigma_tilde[mu] * weighted_jac
+@@ -162,22 +146,75 @@
+     return gradient
+ 
+-def forward_model_rendering(beta, camera_params, physical_constants):
++def fmc_trace(beta, camera_params, physical_constants):
+     """
+     Computes radiance field j_all using Forward Monte Carlo (FMC).
+     """
+     j_all = {}
+-    for c in range(num_views):
++    for c in range(len(camera_params)):
+         j_all[c] = {}
+-        for mu in channels:
+-            # Compute radiance for channel mu in view c
+-            # This involves tracing rays through the medium defined by beta
+-            j_all[c][mu] = fmc_trace(beta, camera_params[c], physical_constants[mu])
++        for mu in ['R', 'G', 'B']:
++            j_all[c][mu] = trace_rays_through_medium(beta, camera_params[c], physical_constants[mu])
+     return j_all
+ 
+-def initialize_beta_null():
+-    """
+-    Initialize beta to zero or single scattering approximation.
+-    """
+-    return zeros_like(beta_grid)
++def compute_sun_masks(camera):
++    """Returns binary mask M_c for pixels around the Sun."""
++    return create_binary_mask(camera.sun_position, camera.lens_flare_radius)
++
++def compute_weighting_matrices(camera):
++    """Returns diagonal matrix Q_c where Q_c[k,k] = number of rays through voxel k."""
++    ray_counts = count_ray_voxel_intersections(camera, beta)
++    return create_diagonal_matrix(ray_counts)
++
++def compute_3d_laplacian():
++    """Returns 3D Laplacian matrix L."""
++    return build_laplacian_matrix(grid_shape)
++
++def compute_altitude_weights():
++    """Returns diagonal matrix W with altitude-dependent weights."""
++    altitudes = get_voxel_altitudes()
++    return create_diagonal_matrix(altitude_function(altitudes))
++
++def zeros_like(array):
++    """Returns an array of zeros with the same shape as array."""
++    return [0.0] * len(array)
++
++def elementwise_mul(a, b):
++    """Element-wise multiplication of two arrays."""
++    return [a[i] * b[i] for i in range(len(a))]
++
++def mat_vec_mul(matrix, vector):
++    """Matrix-vector multiplication."""
++    result = [0.0] * len(matrix)
++    for i in range(len(matrix)):
++        for j in range(len(vector)):
++            result[i] += matrix[i][j] * vector[j]
++    return result
++
++def map_radiance_to_intensity(radiance_field):
++    """Converts radiance field to intensity values."""
++    return scale_and_clip(radiance_field, min_val=0.0, max_val=1.0)
++
++def compute_degenerate_jacobian_term(beta, j_c_mu, Q_c, M_c):
++    """
++    Computes the degenerate Jacobian-vector product when j_all is fixed.
++    The exact degenerate form is derived from the fixed radiance field geometry.
++    """
++    # Implementation detail: This typically involves ray-voxel intersection counts
++    # or similar geometric factors derived from the FMC step.
++    return geometric_weighting_from_radiance(j_c_mu, Q_c, M_c)
++
++def preprocess_measurements(measured_images, sun_masks):
++    """Applies camera noise simulation to input images."""
++    o_noise_std = 0.4
++    processed = {}
++    for c in range(len(measured_images)):
++        processed[c] = {}
++        for mu in ['R', 'G', 'B']:
++            img = measured_images[c][mu]
++            masked_max = max(elementwise_mul(sun_masks[c], img))
++            noise = [random.gauss(0, o_noise_std) for _ in img]
++            scaled = elementwise_mul([x + y for x, y in zip(img, noise)], 1024.0 / masked_max)
++            processed[c][mu] = [max(0.0, min(1024.0, round(x))) for x in scaled]
++    return processed
+ ```
+ 
+@@ -195,5 +232,5 @@
+ 
+ ## Background
+-This method was developed for in-situ multi-scattering tomography, specifically for recovering aerosol distributions from multi-view images [S1, unofficial]. It builds on the concept of surrogate functions to avoid the computational burden of direct Jacobian computation in heterogeneous media [S1, unofficial]. The approach was compared against a single scattering approximation method [S1, unofficial].
++This method was developed for in-situ multi-scattering tomography, specifically for recovering aerosol distributions from multi-view images [S1, unofficial]. It builds on the concept of surrogate functions to avoid the computational burden of direct Jacobian computation in heterogeneous media [S1, unofficial]. The method was compared against a baseline reconstruction using a single scattering approximation [S1, unofficial].
+ 
+ ## Sources

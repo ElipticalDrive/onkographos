@@ -1,0 +1,132 @@
+# Shallow MLP Decoder
+
+Also called: Color Decoder, Decoder Architectures, Density Decoder, Density and Color Decoders, Implicit MLP, Volume Density and Color Decoder
+
+## Overview
+The Shallow MLP Decoder is a neural network component that transforms a concatenated feature embedding vector into volume density and per-point color values [S2, unofficial]. It serves as the final stage in explicit neural feature volume pipelines, acting as a regularizer to improve reconstruction quality in difficult conditions [S1, 2301-decoder-network.md]. It is distinguished from deeper implicit MLPs by its shallow depth and reliance on pre-computed feature embeddings rather than raw coordinates, offering a trade-off between performance and resource utilization [S2, unofficial].
+
+## How it works
+The decoder takes a feature vector $F$ as input and outputs a scalar density $\sigma$ and a color vector $c$ [S2, unofficial].
+
+**Inputs and Outputs:**
+*   **Input:** Feature vector $F$ of size $L \cdot F$, where $L$ is the number of resolution levels and $F$ is the feature dimension per level [S2, unofficial]. For example, with 16 levels and 4 dimensions, $F$ has size 64 [S2, unofficial].
+*   **Output:** Scalar density $\sigma$ and vector color $c$ (typically 3 channels) [S2, unofficial].
+
+**Data Structures and Layout:**
+The architecture varies between a combined shallow MLP and split decoders depending on the implementation [S1][S2, unofficial].
+
+1.  **Combined Shallow MLP (SCALAR-NeRF default):**
+    *   **Architecture:** 5 layers (depth), 128 neurons per layer (width) [S2, unofficial].
+    *   **Activation:** Not specified in the sources [S2, unofficial].
+    *   **Input:** Concatenated hash features $F \in \mathbb{R}^{L \cdot F}$ [S2, unofficial].
+    *   **Output:** $\sigma$ and $c$ [S2, unofficial].
+
+2.  **Density Decoder (NeRFLight):**
+    *   **Architecture:** Input layer $\rightarrow$ Hidden layer (32 neurons) $\rightarrow$ Output layer (33 neurons) [S1].
+    *   **Activation:** ReLU for hidden layers; no activation for output [S1].
+    *   **Input:** 32-dimensional feature vector [S1].
+    *   **Output:** 33-dimensional vector containing density $\sigma$ and intermediate representation $h$ [S1].
+
+3.  **Color Decoder (NeRFLight):**
+    *   **Architecture:** Input layer (32 neurons) $\rightarrow$ Output layer (3 neurons) [S1].
+    *   **Activation:** ReLU for input layer; sigmoid for output layer [S1].
+    *   **Input:** Concatenation of intermediate representation $h$ and direction positional encoding (4 frequencies) [S1].
+    *   **Output:** 3-dimensional color vector [S1].
+
+4.  **Implicit MLP (NeRFLight):**
+    *   **Architecture:** 1 input layer, 8 hidden layers (512 neurons each), 1 output layer (32 neurons) [S1].
+    *   **Activation:** ReLU for hidden layers; no activation for output [S1].
+    *   **Input:** Vertex coordinates with positional encoding concatenated to the output of the fourth hidden layer [S1].
+    *   **Output:** 32-dimensional feature vector [S1].
+
+**Formulas:**
+The decoding operation is defined as:
+$$ \sigma, c = \text{Decoder}(F) $$
+[S2, unofficial]
+
+**Pseudocode:**
+The following implements the default SCALAR-NeRF combined decoder [S2, unofficial]. All linear algebra operations are defined to ensure self-containment.
+
+> **Unverified code.** The code below did not pass a test run against a reference implementation, or no test fits it, so it may contain errors.
+
+```python
+def dot(a, b):
+    return sum(x * y for x, y in zip(a, b))
+
+def matmul(x, W):
+    return [dot(x, w) for w in W]
+
+def add_bias(x, b):
+    return [x_i + b_i for x_i, b_i in zip(x, b)]
+
+def relu(x):
+    return [max(0.0, v) for v in x]
+
+def shallow_mlp_decoder(features, W, b, W_out, b_out):
+    """
+    Decodes feature embedding into density and color.
+    
+    Args:
+        features: Input feature vector F of size L*F.
+        W: List of weight matrices for hidden layers.
+        b: List of bias vectors for hidden layers.
+        W_out: Weight matrix for final projection to density and color.
+        b_out: Bias vector for final projection.
+        
+    Returns:
+        sigma: Scalar density.
+        color: Vector color (3 channels).
+    """
+    x = features
+    for i in range(len(W)):
+        x = matmul(x, W[i])
+        x = add_bias(x, b[i])
+        if i < len(W) - 1:
+            x = relu(x)
+    final = matmul(x, W_out)
+    final = add_bias(final, b_out)
+    sigma = final[0]
+    color = final[1:4]
+    return sigma, color
+```
+
+**Parameters:**
+*   **Depth:** Default 5 layers [S2, unofficial].
+*   **Width:** Default 128 neurons per layer [S2, unofficial].
+*   **Hash Table Size:** Default $2^{19}$ for coarse global and local models [S2, unofficial].
+*   **Levels:** 16 levels of resolution [S2, unofficial].
+*   **Feature Dimension:** 4 per level [S2, unofficial].
+
+**Edge Cases and Pitfalls:**
+*   **Unbounded Scenes:** For unbounded scenes, the 3D point $x$ must be contracted before encoding to ensure features are sampled correctly [S2, unofficial]. The contraction method from Mip-NeRF360 is used [S2, unofficial]:
+    $$ \text{contract}(x) = \begin{cases} x, & \|x\| \le 1 \\ \frac{x}{2 - \frac{1}{\|x\|}}, & \|x\| > 1 \end{cases} $$
+    [S2, unofficial]
+*   **Precision:** The hash table size and feature dimensions significantly impact memory and performance [S2, unofficial].
+
+## Subtopics
+
+### Density Decoder
+A specialized decoder outputting only density (or density + auxiliary data) [S1]. Used when color is handled separately or not needed [G].
+
+### Color Decoder
+A specialized decoder outputting only color [S1]. Often paired with a density decoder [G]. Uses sigmoid activation for color bounds [S1].
+
+### Implicit MLP
+A deeper MLP (8 layers, 512 neurons) that takes raw coordinates with positional encoding [S1]. Used when higher fidelity is required at the cost of increased computation [G].
+
+## Operating characteristics
+*   **Time Complexity:** Linear with respect to the number of layers and width [G]. The decoding step is fast compared to the hash table lookup and interpolation [G].
+*   **Memory Complexity:** Depends on the number of parameters in the MLP ($L_{layers} \times W_{width}^2$) [G]. With default settings (5 layers, 128 width), this is manageable [S2, unofficial].
+*   **Performance:** Provides a good trade-off between performance and resource utilization [S2, unofficial]. Tested on an NVIDIA A5000 GPU with 24GB memory [S2, unofficial].
+*   **Strengths:** Efficient for large-scale scenes; allows for shared decoders across multiple local models [S2, unofficial].
+*   **Limitations:** Less flexible than deeper implicit MLPs for complex geometry [S1].
+*   **When to use:** Large-scale scene reconstruction where memory and speed are critical [S2, unofficial].
+*   **When not to use:** When high-frequency detail requires deeper networks or raw coordinate encoding [S1].
+
+## Background
+The shallow MLP decoder is used in SCALAR-NeRF for scalable large-scale neural radiance fields [S2, unofficial]. Variants like the split density/color decoders and the implicit MLP were explored in NeRFLight for fast and light neural radiance fields [S1]. It builds on the concept of hash feature embeddings [S2, unofficial].
+
+## Sources
+[S1] NeRFLight: Fast and Light Neural Radiance Fields using a Shared Feature Grid, https://doi.org/10.1109/cvpr52729.2023.01195, fetched 2026-10-26
+[S2] SCALAR-NeRF: SCAlable LARge-scale Neural Radiance Fields for Scene Reconstruction, https://arxiv.org/abs/2311.16657v1, fetched 2026-10-26 (unofficial)
+[S3] NeRFLight: Fast and Light Neural Radiance Fields using a Shared Feature Grid, https://openaccess.thecvf.com/content/CVPR2023/html/Rivas-Manzaneque_NeRFLight_Fast_and_Light_Neural_Radiance_Fields_Using_a_Shared_CVPR_2023_paper.html, fetched 2026-10-27

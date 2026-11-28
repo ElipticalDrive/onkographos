@@ -1,0 +1,94 @@
+# NeRF Rendering Pipeline
+
+Also called: NeRF Rendering Path
+
+## Overview
+The NeRF Rendering Pipeline generates novel views from a trained neural radiance field by iterating over a sequence of camera poses, invoking the volume rendering primitive for each, and assembling the outputs [S2, unofficial]. It handles resolution scaling, metric computation, and image I/O, differing from the core [NeRF Rendering (Alpha Compositing)](5124-nerf-rendering-alpha-compositing.md) method by managing the external pose traversal loop rather than the per-ray integration itself [S2, unofficial].
+
+## How it works
+**Inputs:**
+- `render_poses`: Array of camera-to-world matrices.
+- `H`, `W`: Integer height and width of the target image.
+- `focal`: Scalar focal length in pixels.
+- `render_kwargs`: Dictionary containing the model and rendering configuration passed to the volume renderer.
+- `render_factor`: Integer downsampling factor (default 0, meaning no downsampling) [S2, unofficial].
+- `chunk`: Integer number of rays to process in parallel (default 32768) [S2, unofficial].
+- `gt_imgs`: Optional array of ground truth images for PSNR calculation.
+- `savedir`: Optional directory path to save rendered images.
+
+**Outputs:**
+- `rgbs`: List or array of rendered RGB images.
+- `disps`: List or array of rendered depth/disparity maps.
+
+**Data Structures:**
+- `rgbs`: List of numpy arrays, each shape $(H', W', 3)$, where $H' = H/render\_factor$ and $W' = W/render\_factor$ [S2, unofficial].
+- `disps`: List of numpy arrays, each shape $(H', W')$ [S2, unofficial].
+
+**Steps:**
+1. **Initialize Output Containers**: Create empty lists `rgbs` and `disps` [S2, unofficial].
+2. **Iterate Poses**: For each camera pose `c2w` in `render_poses`:
+    a. **Downsample Resolution**: If `render_factor != 0`, downsample `H`, `W`, and `focal` by dividing by `render_factor` before rendering [S2, unofficial].
+    b. **Render**: Call the volume rendering function with arguments $(H, W, focal, chunk, c2w, \text{render\_kwargs})$ to get `rgb` and `disp` [S2, unofficial].
+    c. **Store Results**: Append `rgb.numpy()` to `rgbs` and `disp.numpy()` to `disps` [S2, unofficial].
+    d. **Compute PSNR (Optional)**: If `gt_imgs` is not None and `render_factor == 0`, compute $PSNR = -10 \log_{10}(\text{MSE})$ where $\text{MSE} = \frac{1}{N}\sum (rgb - gt\_img)^2$ [S2, unofficial].
+    e. **Save Image (Optional)**: If `savedir` is not None, convert `rgb` to 8-bit with `to8b()`, save as `'{:03d}.png'` using `imageio.imwrite` [S2, unofficial].
+3. **Return**: Stack `rgbs` and `disps` along axis 0 and return them [S2, unofficial].
+
+**Formulas:**
+- **Rendered Color**: $\hat{C}(p) = \sum_i T_i (1 - e^{-\sigma_i \delta_i}) c_i$, where $T_i = e^{-\sum_j \delta_j}$, $\delta_i$ is the interval between neighboring sampling points (often constant) [S1].
+- **PSNR**: $PSNR = -10 \log_{10}(\text{MSE})$ [S2, unofficial].
+
+**Parameters:**
+- `render_factor`: Controls rendering speed vs. resolution. Typical values: 4 or 8 for previews. Default: 0 [S2, unofficial].
+- `chunk`: Controls memory usage during rendering. Default: 32768. Decrease if out-of-memory errors occur [S2, unofficial].
+- **MLP Structure**: The underlying INR typically uses a large MLP (8 × 256 network structure) with 10 Fourier bases in the Positional Encoding (PE) [S1].
+
+**Edge Cases:**
+- **Memory Limits**: If `chunk` is too large for the GPU, the rendering call may fail; reduce `chunk` size [S2, unofficial].
+- **Resolution Mismatch**: PSNR computation is skipped if `render_factor != 0` to avoid resolution mismatch with ground truth [S2, unofficial].
+
+> **Unverified code.** The code below did not pass a test run against a reference implementation, or no test fits it, so it may contain errors.
+
+```python
+def render_pipeline(render_poses, H, W, focal, render_kwargs, render_factor=0, chunk=32768, gt_imgs=None, savedir=None):
+    rgbs = []
+    disps = []
+    for i, c2w in enumerate(render_poses):
+        h, w, f = H, W, focal
+        if render_factor != 0:
+            h = h // render_factor
+            w = w // render_factor
+            f = f / render_factor
+        rgb, disp = render(h, w, f, chunk=chunk, c2w=c2w[:3, :4], **render_kwargs)
+        rgbs.append(rgb.numpy())
+        disps.append(disp.numpy())
+        if gt_imgs is not None and render_factor == 0:
+            mse = np.mean(np.square(rgb - gt_imgs[i]))
+            psnr = -10.0 * np.log10(mse)
+        if savedir is not None:
+            imageio.imwrite(f'{savedir}/{i:03d}.png', to8b(rgb))
+    return np.stack(rgbs, axis=0), np.stack(disps, axis=0)
+```
+
+## Subtopics
+
+### [ViiNeuS Hybrid Volume Rendering](17427-viineus-hybrid-volume-rendering.md)
+ViiNeuS Hybrid Volume Rendering is a progressive training strategy for implicit neural surface reconstruction that transitions from pure volumetric density representation to signed distance field (SDF) representation during the optimization loop. It solves the initialization instability and slow convergence of pure SDF methods in complex scenes by initially leveraging a robust volumetric estimator, then gradually introducing SDF-based alpha compositing. Unlike standard NeRF rendering which uses only density-based alpha, or pure NeuS which uses only SDF-based alpha, this method dynamically assigns each sample's alpha value to either $\alpha^{iv}$ or $\alpha^{if}$ based on training stage and sample density, ensuring stable surface extraction.
+
+### Sample and Blend Rendering
+Sample and Blend Rendering generates a ray's final color by querying $N$ nearby local MLPs (nerflets) and blending their outputs using spatial influence weights [S3]. For a ray sample $k$ at $(pos, dir)$, it queries $N$ nerflet MLPs $f_i$ to get density $\sigma_{k,i}$ and color $c_{k,i}$, then computes nerflet influence activation $w(x) = \text{SoftMax}([\sigma_1 g_1(x), \dots, \sigma_N g_N(x)])$ to determine dominant nerflet contribution [S3]. The final ray color is $\hat{C}(r) = \sum_{k=1}^K T_k \alpha_k c_k$, where $T_k = \prod_{j=1}^{k-1} (1-\alpha_j)$ [S3]. Semantic images are generated by averaging per-nerflet semantic logit vectors in the same weighted manner, while instance labels are assigned via $\text{argmax}_i w(r)$ or $\text{argmax}_i W(r)$ (accumulated influence map) [S3].
+
+## Operating characteristics
+- **Time Complexity**: Scales linearly with the number of poses, image resolution, and samples per ray [S2, unofficial]. The underlying INR uses an 8×256 MLP with 10 Fourier bases, resulting in long training and rendering times [S1].
+- **Memory Complexity**: Scales with `chunk` size and resolution; the default `chunk=32768` balances VRAM usage and throughput [S2, unofficial].
+- **Performance**: Rendering speed is directly proportional to the number of rays processed. Downsampling by `render_factor` reduces the ray count by $render\_factor^2$, significantly accelerating preview generation [S2, unofficial].
+- **Strengths**: Modular pipeline that cleanly separates pose traversal, I/O, and metric computation from the per-ray volume integration primitive [S2, unofficial].
+- **Limitations**: Not optimized for real-time inference; relies on batched ray processing and large MLPs that constrain throughput [S1][S2, unofficial].
+
+## Background
+The pipeline structure follows the evaluation and novel view synthesis workflow of the original NeRF implementation [S2, unofficial]. The underlying volume rendering primitive models the attributes of a light ray in 3D space as an implicit neural representation (INR), taking ray position and direction as input to output color and density, which are then integrated via ray marching [S1].
+
+## Sources
+[S1] Disorder-Invariant Implicit Neural Representation, https://doi.org/10.1109/tpami.2024.3366237, fetched 2026-10-26
+[S2] bmild/nerf, https://github.com/bmild/nerf, fetched 2026-10-26 (unofficial)
+[S3] Nerflets: Local Radiance Fields for Efficient Structure-Aware 3D Scene Representation from 2D Supervision, https://doi.org/10.1109/cvpr52729.2023.00800, fetched 2026-10-26

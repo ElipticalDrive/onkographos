@@ -1,0 +1,237 @@
+function toggleInfoBox(id) { $("#" + id + "-body").toggle(); }      A 512x512 cloud render upsampled to a 2048x2048 target with nearly no loss of detail.
+ Overview The Problem with Waves Upsampling is the Solution  How to Upsample How to Upsample and Have It Not Look Bad Introducing Jitter   Looking Back  Overview    My first attempt at generating raymarched volumetric clouds occured six years ago in an unpublished ShaderToy.
+
+Upsampling to Improve Volumetric Cloud Render Performance · Vertex Fragment
+A 512x512 cloud render upsampled to a 2048x2048 target with nearly no loss of detail.
+Overview
+The Problem with Waves
+Upsampling is the Solution
+How to Upsample
+How to Upsample and Have It Not Look Bad
+Introducing Jitter
+Looking Back
+Overview
+My first attempt at generating raymarched volumetric clouds occured six years ago in an unpublished ShaderToy. It wasn’t made public because the performance was never good enough for me to be comfortable releasing it to a general audience. Runtime performance is crucial to me, and the balance of visual fidelity and rendering it 60+ times a second was the defining challenge that attracted me to real-time rendering over offline rendering.
+Last year marked my second attempt at clouds. Overall it was more successful than my first, however there were still performance issues when trying to render in real-time. A workaround for the low framerate was made by instead rendering every 0.25 seconds and then interpolating between the last render and the current, which improved the performance enough for it to be usable but there were noticeable spikes on ticks that performed the rendering.
+Like many modern raymarched clouds, both implementations used the presentation “The Real-Time Volumetric Cloudscapes of Horizon Zero Dawn” as inspiration. Within that presentation is a section on optimizations in which it is briefly mentioned that only 1/16 of all pixels are updated each frame. Looking back at it now, the solution is obvious but at the time it wasn’t clear to me how they achieved being able to render only a portion of pixels at a time. And it wasn’t just me who had trouble implementing this optimization.
+The Problem with Waves
+My first inclination was to logically break the fragment shader operations into 4x4 groups, and each frame only operate on a single fragment in each group. The other 15 fragments would be skipped. Makes sense, right?
+```
+uint2 coordSS = uint2(input.uv * _ScreenParams.xy);
+
+uint fm = _FrameCount % 16;
+uint fx = _FrameCount % 4;
+uint fy = (_FrameCount / 4) % 4;
+
+uint cx = coordSS.x % 4;
+uint cy = coordSS.y % 4;
+
+[branch]
+if ((cx == fx) && (cy == fy))
+{
+    // ... 
+}
+```
+The above code selectively renders a single fragment of each 4x4 group every frame. This combined with updating my custom cloud render pass to double-buffer the results allowed me to do exactly the optimization described in the presentation: only 1/16 of all pixels were drawn each frame.
+Every frame I would draw a portion of the fragments to the back buffer, and then that new image would be mixed in with the ongoing render being carried over each frame. Something like:
+```
+float4 prevFrame = _PrevFrameColor.Sample(sampler_PrevFrameColor, uv);
+float4 currFrame = _CurrFrameColor.Sample(sampler_CurrFrameColor, uv);
+float4 color = lerp(prevFrame, currFrame, ceil(currFrame.a));
+```
+However, there were no improvements to the performance. What was going on?
+The issue with this approach is that fragments are drawn in a batch of threads, known as waves or wavefronts or warps. Each wave can be processing 16, 32, 64 or some other number of fragments, depending on the underlying hardware. The wave itself does not complete until the last fragment thread completes. So when we selectively render only one fragment, the 15 other threads are stalled waiting for it to finish.
+If your hardware executes waves of 16, you could try to render out only 1/64 fragments each frame, or some other arbitrary number greater than the wave size. This would improve performance but then each fragment is updating at most only once a second which can lead to shearing and other artifacts. And it wouldn’t necessarily work on your friends machine which uses a different GPU.
+Upsampling is the Solution
+While researching a different topic I came upon the presentation entitled “Temporal Reprojection Anti-Aliasing in INSIDE” (associated GitHub repository). After reading it, I continued looking for other writings on the topic of temporal reprojection which led me to “Optimizations for Real-Time Volumetric Cloudscapes” which states in the abstract:
+Previous approaches render the clouds to an offscreen buffer at one quarter resolution and update a fraction of the pixels per frame, drawing the remaining pixels by temporal reprojection.
+And then it clicked.
+The optimization mentioned in the original presentation, of drawing 1/16 pixels, doesn’t mean: draw 1 pixel, skip 15, draw 1, skip 15, and on. It means draw only a sixteenth of all pixels which is achieved by rendering to a buffer a quarter of the size. If your render target resolution is 2048x2048 then a quarter buffer of 512x512 is a sixteenth of the total pixels: 4,194,304 → 262,144 pixels.
+You then upsample this quarter buffer up to a full resolution render target. In total you need three different buffers:
+Quarter resolution buffer containing the raymarch render for the current frame.
+Full resolution buffer containing the upsample and mixed render from the previous frame.
+Full resolution buffer which will contain the upsample and mixed render for the current frame.
+Buffers 2 and 3 represent a single double buffer which is swapped each frame.
+This excerpt from my VolumetricCloudPass, which implements a ScriptableRenderPass, shows the general logic:
+```
+private void RenderProjectedClouds(CommandBuffer commandBuffer)
+{
+    RenderQuarterSizeClouds(commandBuffer);
+    UpsampleAndMixClouds(commandBuffer);
+}
+
+private void RenderQuarterSizeClouds(CommandBuffer commandBuffer)
+{
+    ProjectedCloudColorRenderTarget.Clear(commandBuffer);
+    ProjectedCloudDepthRenderTarget.Clear(commandBuffer);
+
+    RasterizeColorAndDepthToTarget(commandBuffer, ProjectedCloudColorRenderTarget.Handle, ProjectedCloudDepthRenderTarget.Handle, ProjectedCloudMaterialInstance, BlitGeometry.Quad, 0, CloudRenderProperties);
+}
+
+private void UpsampleAndMixClouds(CommandBuffer commandBuffer)
+{
+    ToggleUpsamplePrewarm();
+
+    UpsampleMaterial.SetVector(ShaderIds.FrameJitter, FrameJitters[FrameCount % 16]);
+    UpsampleMaterial.SetTexture(ShaderIds.CurrFrameColor, ProjectedCloudColorRenderTarget.Handle, RenderTextureSubElement.Color);
+    UpsampleMaterial.SetTexture(ShaderIds.CurrFrameDepth, ProjectedCloudDepthRenderTarget.Handle, RenderTextureSubElement.Depth);
+    UpsampleMaterial.SetTexture(ShaderIds.PrevFrameColor, CloudDoubleBuffer.Front, RenderTextureSubElement.Color);
+    UpsampleMaterial.SetTexture(ShaderIds.PrevFrameDepth, CloudDoubleBuffer.Front, RenderTextureSubElement.Depth);
+    UpsampleMaterial.SetFloat(ShaderIds.Resolution, QualitySettings.Resolution);
+
+    Blit(commandBuffer, CloudDoubleBuffer.Front, CloudDoubleBuffer.Back, UpsampleMaterial);
+
+    CloudDoubleBuffer.Swap();
+}
+```
+Where is the clear?
+Typically when working with a double buffer it is standard to swap the back and front buffers and then clear the back buffer. However I intentionally do not call CloudDoubleBuffer.Clear(). This is because the render texture is fed as input to multiple sources which use it at different times in a single frame, some of which is out of my control. This includes:
+Rendering the clouds onto a hemisphere mesh.
+Capturing clouds in the cascaded shadow map.
+Capturing clouds in reflection probes.
+Clearing the back buffer here can cause one of these to sample the cleared texture instead of the current render. Timing is a lot of fun, especially when you can’t control it!
+How to Upsample
+The easiest way to upsample from a low resolution texture to a higher one is using basic bilinear interpolation. Which can conveniently be done for you in an appropriately configured texture sampler.
+```
+float4 highResolutionColor = _LowResolutionColor.Sample(sampler_LowResolutionColor, uv);
+```
+That was easy. The performance of your clouds should now have increased by a large margin. However …
+How to Upsample and Have It Not Look Bad
+Now if you want the upsampled result to look good, especially when in motion, we need to make use of that double buffer and the words “temporal” and “reprojection” that I tossed around earlier. And also add in “jitter” to that list. That one is pretty important.
+The reason the standard bilinear interpolation upsample doesn’t look good is because it is effectively just stretching the image up to a larger size. It is taking 1/16 of the information and smoothly filling out the remaining 15/16 pixels. By adding in a jitter to our cloud render, and then counteracting it in the upsample, we are able to fill in those missing gaps. This allows us to in truth render 1/16 pixels each frame while rendering each pixel over the span of 16 frames, keeping much of the detail that would be present in a straight-to-full-resolution render.
+On the left is standard bilinear upsampling with pixelated artifacts along cloud borders. On the right uses jitter and temporal reprojection.
+Introducing Jitter
+The goal of adding a jitter to the cloud render is so that each pixel in a 4x4 block is rendered at some point over 16 frames. Without a jitter the same pixel would be rendered every frame and there would be no additional information to add. The jitter itself is represented as an offset and should be staggered so that neighboring pixels are not rendered sequentially, which helps hide the effect in real-time.
+Rendering over 16 frames with and without a jitter into a 4x4 region. Jittering provides additional information to upsample with.
+Each frame we select a pre-computed offset with which we perform our cloud render. This offset is applied to the UV coordinates used to determine the direction of our ray. Assuming you are rendering to a polar texture this would resemble:
+```
+float3 SphericalRayDirectionFromUV(float2 uv)
+{
+    float2 uvJitter = _FrameJitter / _Resolution;
+    float2 longitude = (uv + uvJitter) - 0.5f;
+
+    float l = length(longitude);
+    float a = l * PI;
+
+    float sin1 = sin(a);
+    float sin2 = longitude.y / l;
+
+    float cos1 = cos(a);
+    float cos2 = longitude.x / l;
+
+    return normalize(float3(sin1 * cos2, cos1, sin1 * sin2));
+}
+```
+Where,
+_FrameJitter is the selected jitter for the entire frame.
+_Resolution is the resolution of the full-size render target, and not the quarter buffer.
+_FrameJitter can be any random set of 2D offsets that visit each pixel. For example:
+```
+private static readonly Vector2[] FrameJitters = new Vector2[16]
+{
+    new Vector2(0, 2), new Vector2(0, 1), new Vector2(3, 1), new Vector2(1, 2),
+    new Vector2(0, 3), new Vector2(1, 0), new Vector2(1, 3), new Vector2(1, 1),
+    new Vector2(2, 0), new Vector2(2, 1), new Vector2(3, 2), new Vector2(0, 0),
+    new Vector2(2, 3), new Vector2(3, 0), new Vector2(2, 2), new Vector2(3, 3)
+};
+```
+And for _Resolution we specify the full-size target because again we are jittering to fill in the “missing” gaps in the upsample. This will make more sense shortly, but for now if you were to modify your ray direction with the jitter you would see your clouds begin to bounce as if they were, well, jittering. To resolve this, we have to also update the upsample to account for the jitter so that it can sample from the approriate UV to counteract the effect.
+```
+float jitterCorrection = JitterCorrection(uv);
+
+float4 currColor = _CurrFrameColor.Sample(sampler_CurrFrameColor, uv);      // Quarter resolution render
+float4 prevColor = _PrevFrameColor.Sample(sampler_PrevFrameColor, uv);      // Ongoing full-size upsample
+
+float4 jitteredColor = lerp(currColor, prevColor, jitterCorrection);
+```
+Where,
+```
+float JitterCorrection(float2 uv)
+{
+    float2 localIndex = floor(fmod(uv * _Resolution, 4.0f));
+    localIndex = abs(localIndex - _FrameJitter);
+
+    return saturate(localIndex.x + localIndex.y);
+}
+```
+Here localIndex is the x/y index in our local 4x4 group that is being rendered this frame. We then offset it by our _FrameJitter, essentially counteracting the “movement” being done in the cloud render. A value is returned on the range [0, 1] which determines if the current full-resolution pixel “matches” the low-resolution one rendered this frame.
+As an example, if the current _FrameJitter is (2, 1) we would see the following jitterCorrection values:
+localIndex
+jitterCorrection
+localIndex
+jitterCorrection
+(0, 0)
+1
+(2, 0)
+1
+(0, 1)
+1
+(2, 1)
+0
+(0, 2)
+1
+(2, 2)
+1
+(0, 3)
+1
+(2, 3)
+1
+(1, 0)
+1
+(3, 0)
+1
+(1, 1)
+1
+(3, 1)
+1
+(1, 2)
+1
+(3, 2)
+1
+(1, 3)
+1
+(3, 3)
+1
+In this way only the jittered pixel is sampled, and the rest are passed through from previous frames.
+An additional convergence speed is often also factored in which controls the rate at which a pixel is overwritten. Typically overhead clouds, at the zenith, are nearer to the camera than those at the horizon and should converge at a faster rate.
+```
+// Move UV (0, 0) to the center and get the distance from the zenith
+float2 normalizedUV = (uv * 2.0f) - 1.0f;                           
+float distanceFromZenith01 = saturate(length(uvNormalized));
+
+// Arbitrary convergence speeds. Find what works for you.
+float convergenceSpeedZenith = 0.75f;                               
+float convergenceSpeedHorizon = 0.5f;
+float convergenceSpeed = lerp(convergenceSpeedZenith, convergenceSpeedHorizon, distanceFromZenith01);
+
+float4 finalColor = lerp(prevColor, jitteredColor, convergenceSpeed);
+```
+What about depth?
+Not all cloud renders care about depth if they are just being plastered onto a skydome. However, if you are like me you want your clouds to interact with other objects and so you have a depth buffer tagging along. In that case the upsampling for the depth texture is exactly the same as the color texture and can be done alongside it in the upsample shader.
+For example, my upsample shader resembles:
+```
+struct ForwardFragmentOutput
+{
+    float4 Color : SV_Target;
+    float  Depth : SV_Depth;
+};
+
+ForwardFragmentOutput FragMain(VertOutput input)
+{
+    ForwardFragmentOutput output = (ForwardFragmentOutput)0;
+
+    // ... all the stuff ...
+
+    output.Color = lerp(prevColor, jitteredColor, convergenceSpeed);
+    output.Depth = lerp(prevDepth, jitteredDepth, convergenceSpeed);
+
+    return output;
+}
+```
+Additionally, if you have the depth values you can use those to influence convergenceSpeed instead of zenith distance.
+Looking Back
+When writing this ramble I went back and looked at those original Horizon Zero Dawn slides. In my head for those 6 years the optimization advice was simply “we render only 1/16 pixels” and that was it. Turns out it is actually:
+Every frame we could use a quarter res buffer to update 1 out of 16 pixels for each 4x4 block within our final image.
+We reproject the previous frame to ensure we have something persistent.
+I suppose past me completely missed, or didn’t understand, the instruction to use the quarter resolution buffer. Oops.
+But everything always seems clearer in hindsight, and hopefully this extra explanation can provide clarification for anyone else who may be struggling. And in my defense, they don’t mention jitter anywhere in that entire presentation.

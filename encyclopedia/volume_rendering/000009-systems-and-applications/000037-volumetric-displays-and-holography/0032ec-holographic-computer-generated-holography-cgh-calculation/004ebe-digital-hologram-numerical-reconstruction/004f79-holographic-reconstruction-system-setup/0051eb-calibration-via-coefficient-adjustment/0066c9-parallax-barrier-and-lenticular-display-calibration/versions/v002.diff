@@ -1,0 +1,184 @@
+--- v001.md
++++ v002.md
+@@ -50,86 +50,111 @@
+ ```python
+ def calibrate_parallax_barrier(projectors, camera, barrier_slit_count=16):
+-    """
+-    Calibrate parallax barrier position relative to projectors.
+-    """
+     homographies = {}
+-    
+-    # Step 1: Compute Homographies
++    # Step 1: Homography Computation
+     for projector in projectors:
+-        # Display checkerboard on projector
+         projector.display_checkerboard()
+-        
+-        # Capture image
+         camera_image = camera.capture()
+-        
+-        # Detect lines
+-        horizontal_lines = fit_lines(camera_image, orientation='horizontal')
+-        vertical_lines = fit_lines(camera_image, orientation='vertical')
+-        
+-        # Compute corners
++        h_lines = fit_lines_to_edges(camera_image, 'horizontal')
++        v_lines = fit_lines_to_edges(camera_image, 'vertical')
+         corners = []
+-        for h_line in horizontal_lines:
+-            for v_line in vertical_lines:
+-                corner = intersect(h_line, v_line)
+-                corners.append(corner)
+-        
+-        # Compute homography H mapping display points to camera pixels
+-        # Note: Display points are known from checkerboard pattern definition
++        for h in h_lines:
++            for v in v_lines:
++                corners.append(intersect_lines(h, v))
+         display_points = get_checkerboard_pattern_points()
+         H = compute_homography(display_points, corners)
+         homographies[projector.id] = H
+ 
+-    # Step 2: Detect Slits in Camera Space
+-    # Project white image
++    # Step 2: Slit Detection in Camera Space
+     for projector in projectors:
+         projector.display_white()
+-    
+-    # Capture single image
+     white_image = camera.capture()
+-    
+-    # Edge detection and thresholding
+-    edges = laplacian_edge_detector(white_image)
+-    thresholded = threshold(edges, value=0) # Threshold to isolate slits
+-    
+-    # Flood fill to group slit pixels
+-    slit_groups = flood_fill(thresholded)
+-    
+-    # Linear regression for slit lines
++    edges = apply_laplacian(white_image)
++    slit_mask = threshold(edges, 0)
++    slit_groups = flood_fill(slit_mask)
+     slit_lines_camera = []
+     for group in slit_groups:
+-        line = linear_regression(group) # Returns ax + by + c = 0
+-        slit_lines_camera.append(line)
+-    
+-    # Step 3: Transform Slits to Projector Space
++        slit_lines_camera.append(linear_regression_line(group))
++
++    # Step 3: Mapping to Projector Space
+     slit_lines_projector = {}
+     for proj_id, H in homographies.items():
+-        # Inverse homography to map from camera to projector
+-        H_inv = inverse(H)
++        H_inv = matrix_inverse(H)
+         lines_proj = []
+         for line_cam in slit_lines_camera:
+-            # Transform line equation from camera space to projector space
+-            line_proj = transform_line(line_cam, H_inv)
+-            lines_proj.append(line_proj)
++            lines_proj.append(transform_line_coefficients(line_cam, H_inv))
+         slit_lines_projector[proj_id] = lines_proj
+ 
+-    # Step 4: Interpolation and Rasterization
++    # Step 4: Interpolation and View Assignment
+     view_maps = {}
+     for proj_id, lines_proj in slit_lines_projector.items():
+-        # Interpolate lines for all 16 views
+-        # Assuming lines_proj contains the primary visible slits
+-        all_lines = interpolate_lines(lines_proj, count=barrier_slit_count)
+-        
+-        # Rasterize and assign views
++        all_lines = interpolate_line_equations(lines_proj, barrier_slit_count)
+         width, height = projector.resolution
+-        view_map = empty_array(width, height, dtype=int)
+-        
++        view_map = zeros((height, width), dtype=int)
+         for view_idx, line in enumerate(all_lines):
+-            # Rasterize line and fill regions between lines with view_idx
+-            # This step assigns each sub-pixel a view
+-            assign_view_to_pixels(view_map, line, view_idx, all_lines)
+-        
++            rasterize_and_assign_view(view_map, line, view_idx, all_lines)
+         view_maps[proj_id] = view_map
+ 
+     return homographies, view_maps
++
++def fit_lines_to_edges(image, orientation):
++    edges = find_edges(image)
++    lines = []
++    for group in cluster_by_orientation(edges, orientation):
++        lines.append(least_squares_line_fit(group))
++    return lines
++
++def intersect_lines(l1, l2):
++    det = l1[0]*l2[1] - l1[1]*l2[0]
++    if abs(det) < 1e-6: return None
++    x = (l1[1]*l2[2] - l1[2]*l2[1]) / det
++    y = (l1[2]*l2[0] - l1[0]*l2[2]) / det
++    return (x, y)
++
++def compute_homography(src_pts, dst_pts):
++    A = build_homography_matrix(src_pts, dst_pts)
++    _, _, Vt = svd(A)
++    h = Vt[-1]
++    return h.reshape(3, 3)
++
++def apply_laplacian(image):
++    kernel = [[0, 1, 0], [1, -4, 1], [0, 1, 0]]
++    return convolve(image, kernel)
++
++def threshold(image, value=0):
++    return (abs(image) > value).astype(float)
++
++def flood_fill(mask):
++    labels = connected_components(mask)
++    return [mask[labels == k] for k in range(1, labels.max() + 1)]
++
++def linear_regression_line(points):
++    X = points[:, 0]
++    Y = points[:, 1]
++    A = column_stack((X, Y, ones_like(X)))
++    _, _, Vt = svd(A)
++    coeffs = Vt[-1]
++    return coeffs / norm(coeffs[:2])
++
++def transform_line_coefficients(line_cam, H_inv):
++    return H_inv.T @ line_cam
++
++def interpolate_line_equations(lines, count):
++    interpolated = []
++    for i in range(count - 1):
++        t = i / (count - 1)
++        l = (1 - t) * lines[i] + t * lines[i+1]
++        interpolated.append(l)
++    interpolated.append(lines[-1])
++    return interpolated
++
++def rasterize_and_assign_view(view_map, line, view_idx, all_lines):
++    for y in range(view_map.shape[0]):
++        for x in range(view_map.shape[1]):
++            if sign(line[0]*x + line[1]*y + line[2]) > 0:
++                view_map[y, x] = view_idx
++
++def get_checkerboard_pattern_points():
++    # Returns known grid coordinates for the displayed checkerboard [G]
++    return [(i, j) for i in range(8) for j in range(6)]
+ ```
+ 
+@@ -146,8 +171,10 @@
+ 
+ ## Operating characteristics
+-- **Time Complexity:** Dominated by line fitting and homography computation per projector. Linear in the number of pixels for edge detection and flood fill.
+-- **Memory Complexity:** Proportional to the camera and projector resolution for storing images and view maps.
+-- **Strengths:** Automated, high precision due to high-resolution camera and analytical line fitting [S1].
+-- **Limitations:** Requires precise camera placement and high-resolution imaging [S1].
++- Time and memory complexity: Not given in the sources.
++- Measured performance: Not given in the sources.
++- Strengths: Automated calibration, high precision from high-resolution camera and analytical fitting [S1].
++- Limitations: Requires precise camera placement (~3 m) and sufficient camera resolution to detect 1-pixel slits [S1].
++- When to use: Multiview parallax displays with rear-projection and physical barriers [S1].
++- When not: Not given in the sources.
+ 
+ ## Background

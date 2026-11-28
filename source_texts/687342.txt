@@ -1,0 +1,448 @@
+A game engine based on Hazel. Contribute to drsnuggles8/OloEngineBase development by creating an account on GitHub.
+
+Frustum & Occlusion Culling · Issue #138 · drsnuggles8/OloEngineBase · GitHub
+Skip to content
+You signed in with another tab or window. Reload to refresh your session.
+You signed out in another tab or window. Reload to refresh your session.
+You switched accounts on another tab or window. Reload to refresh your session.
+Dismiss alert
+Frustum & Occlusion Culling #138
+New issue
+Copy link
+New issue
+Copy link
+Closed
+Closed
+Frustum & Occlusion Culling#138
+Copy link
+Labels
+featureNew feature or requestNew feature or request
+Description
+drsnuggles8
+opened on Mar 2, 2026
+Issue body actions
+No description provided.
+👀React with 👀1Reacted by coderabbitai
+Activity
+drsnuggles8
+added
+featureNew feature or requestNew feature or request
+and removed
+featureNew feature or requestNew feature or request
+on Mar 2, 2026
+coderabbitai commented on Mar 5, 2026
+coderabbitaiBot
+on Mar 5, 2026 – with coderabbitai
+Contributor
+More actions
+Coding Plan
+Summary
+Fix three frustum culling gaps (foliage, particles, instanced meshes) by adding proper bounding volume tests before draw submission
+Build GPU occlusion query infrastructure following the existing GPUTimerQueryPool pattern, with double-buffered queries to avoid stalls
+Add an optional depth prepass to accelerate occlusion query completion
+Implement temporal occlusion culling that uses frame N-1 results for frame N decisions, with conditional rendering as a fallback for unpredictable objects
+Design Choices
+Design Choice 1: Which occlusion culling approach should be implemented?
+Options Considered:
+Hardware Occlusion Queries (HOQ) - Use GL_ANY_SAMPLES_PASSED queries with bounding box proxy geometry and temporal reuse of results
+Hierarchical-Z (Hi-Z) Culling - Generate a depth pyramid and perform GPU-side visibility tests via compute shader
+Chosen Option: 1
+Rationale: Hardware occlusion queries with temporal coherence provide a simpler initial implementation that integrates cleanly with the existing command bucket system, while the infrastructure can later support Hi-Z as an optimization.
+💡 User Tips
+Regenerate the plan with different choices with @coderabbitai <feedback>.
+Implementation Steps
+Phase 1: Frustum Culling Gap Fixes
+Address the three identified gaps where frustum culling is missing or incomplete: foliage rendering, particle systems, and instanced mesh draws.
+Task 1: Enable Foliage Frustum Culling
+Implement frustum culling in the foliage renderer, which already accepts but ignores a Frustum parameter.
+Extend FoliageLayer in OloEngine/src/OloEngine/Terrain/Foliage/FoliageRenderer.h to store a precomputed BoundingBox covering all instances in that layer
+In FoliageRenderer::Render(), test each layer's bounding box against the frustum parameter before issuing draw calls
+Skip DrawIndexedInstanced entirely for layers that fail the frustum test
+Update m_VisibleInstances counter to reflect actual visible count rather than total count
+Task 2: Add Particle Emitter Bounding Volumes and Culling
+Compute bounding volumes for particle emitters and integrate frustum testing into the particle render path.
+Add BoundingSphere member to ParticleSystem in OloEngine/src/OloEngine/Particle/ParticleSystem.h, computed as emitter position with radius derived from LODMaxDistance plus a velocity-based expansion factor
+Update ParticleSystem::Update() to recompute the bounding sphere when emitter position changes
+Modify the particle render callback registration (in ParticleRenderPass) to accept and test the emitter's bounding sphere against the view frustum before invoking the batch renderer
+Track culled emitter count in renderer statistics
+Task 3: Fix Per-Instance Culling for DrawMeshInstanced
+Replace the single-instance frustum test with per-instance filtering to avoid drawing invisible instances.
+In Renderer3D::DrawMeshInstanced(), iterate the transforms array and test each instance's transformed bounding sphere against the frustum
+Build a filtered transforms array containing only visible instances before upload
+Update transformCount in the command packet to reflect actual visible instance count
+Skip the draw call entirely if all instances are culled
+Add a visibility count to stats alongside the existing culled mesh count
+🤖 Prompt for AI agents
+```
+Implement Phase 1 to fix the three frustum culling gaps across foliage,
+particles, and instanced mesh rendering. The goal is to ensure all major
+rendering subsystems respect frustum culling before draw submission.
+
+**Task 1.1 – Foliage Frustum Culling (`FoliageRenderer.h` /
+`FoliageRenderer.cpp`)**
+- Extend the `FoliageLayer` struct to include a precomputed `BoundingBox` that
+encompasses all instances in the layer
+- In `FoliageRenderer::Render()`, for each layer, call the frustum's box
+visibility test against the layer's `BoundingBox`
+- If the test fails, skip the `DrawIndexedInstanced` call for that layer
+entirely
+- Update the `m_VisibleInstances` counter to only count layers/instances that
+pass the frustum test
+
+**Task 1.2 – Particle Emitter Bounding Volumes (`ParticleSystem.h` /
+`ParticleSystem.cpp`, `ParticleRenderPass`)**
+- Add a `BoundingSphere` member to `ParticleSystem` in
+`OloEngine/src/OloEngine/Particle/ParticleSystem.h`
+- Sphere center = emitter position; radius = `LODMaxDistance` + velocity-based
+expansion factor
+- In `ParticleSystem::Update()`, recompute the bounding sphere whenever the
+emitter position changes
+- In the particle render callback registration (in `ParticleRenderPass`), test
+the emitter's `BoundingSphere` against the view frustum before invoking the
+batch renderer
+- Add a culled emitter count to the renderer statistics
+
+**Task 1.3 – Per-Instance Culling for DrawMeshInstanced (`Renderer3D.cpp`)**
+- In `Renderer3D::DrawMeshInstanced()`, replace the existing single-instance
+frustum test with a loop over all entries in the transforms array
+- For each instance, test its transformed bounding sphere against the frustum
+- Build a filtered transforms array of only the instances that pass the test
+- Set `transformCount` in the command packet to the count of visible instances
+- If zero instances are visible, skip the draw call entirely
+- Track the visible vs. total instance count in renderer statistics alongside
+the existing culled mesh count
+```
+Phase 2: Occlusion Culling Infrastructure
+Build the foundational GPU query and depth prepass systems required for occlusion culling.
+Task 1: Create GPU Occlusion Query Pool
+Implement a query pool following the pattern established by GPUTimerQueryPool.
+Create OcclusionQueryPool class in OloEngine/src/OloEngine/Renderer/Debug/ (or a new OloEngine/src/OloEngine/Renderer/Occlusion/ directory)
+Use GL_ANY_SAMPLES_PASSED query type for binary visibility results with minimal GPU overhead
+Implement double-buffered query arrays to allow frame N-1 results to be read while frame N queries are in flight
+Provide BeginQuery(objectID), EndQuery(objectID), and GetResult(objectID) methods
+Handle query pool growth and recycling for variable object counts
+Task 2: Extend RendererAPI with Occlusion Query Methods
+Add the abstract interface and OpenGL implementation for occlusion query operations.
+Add pure virtual methods to OloEngine/src/OloEngine/Renderer/RendererAPI.h: BeginOcclusionQuery(u32 queryID), EndOcclusionQuery(), GetOcclusionQueryResult(u32 queryID, bool wait), and BeginConditionalRender(u32 queryID)/EndConditionalRender()
+Implement these in Platform/OpenGL/OpenGLRendererAPI.cpp using glBeginQuery, glEndQuery, glGetQueryObjectuiv, and glBeginConditionalRender/glEndConditionalRender
+Add static forwarding methods to OloEngine/src/OloEngine/Renderer/RenderCommand.h
+Task 3: Add Depth Prepass Option to Scene Rendering
+Implement an optional depth-only prepass to populate the depth buffer early, enabling faster occlusion query completion.
+Add EnableDepthPrepass flag to Renderer3DData in OloEngine/src/OloEngine/Renderer/Renderer3D.h
+Create a minimal depth-only shader (vertex transform only, no fragment output) in the shader library
+In SceneRenderPass::Execute(), when depth prepass is enabled, first iterate the command bucket with depth-write-only state and the depth shader, then proceed with the normal color pass with depth test but no depth write
+Use the existing DrawKey sort order to ensure front-to-back rendering in the prepass for early-z efficiency
+🤖 Prompt for AI agents
+```
+Implement Phase 2 to build the foundational GPU query and depth prepass
+infrastructure required for occlusion culling. The goal is to establish all the
+low-level systems before any culling logic is wired in.
+
+**Task 2.1 – GPU Occlusion Query Pool**
+- Create the `OcclusionQueryPool` class in
+`OloEngine/src/OloEngine/Renderer/Debug/` or a new
+`OloEngine/src/OloEngine/Renderer/Occlusion/` directory, following the pattern
+of the existing `GPUTimerQueryPool`
+- Use `GL_ANY_SAMPLES_PASSED` as the query type for binary visibility results
+- Implement double-buffered query arrays: one set for the current frame's
+in-flight queries, one set for reading frame N-1 results
+- Expose three public methods: `BeginQuery(objectID)`, `EndQuery(objectID)`,
+`GetResult(objectID)`
+- Support dynamic pool growth and recycling to handle varying object counts per
+frame
+
+**Task 2.2 – Extend RendererAPI with Occlusion Query Methods (`RendererAPI.h`,
+`OpenGLRendererAPI.cpp`, `RenderCommand.h`)**
+- Add the following pure virtual methods to `RendererAPI.h`:
+  - `BeginOcclusionQuery(u32 queryID)`
+  - `EndOcclusionQuery()`
+  - `GetOcclusionQueryResult(u32 queryID, bool wait)`
+  - `BeginConditionalRender(u32 queryID)`
+  - `EndConditionalRender()`
+- Implement each method in `Platform/OpenGL/OpenGLRendererAPI.cpp` using the
+corresponding OpenGL calls: `glBeginQuery`, `glEndQuery`, `glGetQueryObjectuiv`,
+`glBeginConditionalRender`, `glEndConditionalRender`
+- Add static forwarding methods for all new API methods in `RenderCommand.h`
+
+**Task 2.3 – Depth Prepass Option (`Renderer3D.h`, `SceneRenderPass`, shader
+library)**
+- Add an `EnableDepthPrepass` boolean flag to `Renderer3DData` in `Renderer3D.h`
+- Create a minimal depth-only shader in the shader library: vertex stage
+performs the standard MVP transform; no fragment output
+- In `SceneRenderPass::Execute()`, when `EnableDepthPrepass` is true:
+1. First pass: iterate the command bucket with depth-write-only state using the
+depth-only shader
+2. Second pass: normal color rendering with depth test enabled but depth write
+disabled
+- Rely on the existing `DrawKey` sort order for front-to-back ordering in the
+prepass to maximize early-z efficiency
+```
+Phase 3: Occlusion Culling Integration
+Integrate the query infrastructure with the rendering pipeline using temporal coherence to avoid GPU stalls.
+Task 1: Add Per-Object Visibility State Tracking
+Track visibility state per renderable object to enable temporal occlusion culling.
+Add OcclusionState struct to OloEngine/src/OloEngine/Renderer/Renderer3D.h containing: queryID, wasVisibleLastFrame, framesSinceVisible, and pendingQuery flag
+Create a map from entity ID (or mesh pointer) to OcclusionState in Renderer3DData
+Initialize new objects as visible to avoid popping artifacts
+Clean up stale entries for destroyed entities at frame boundaries
+Task 2: Implement Bounding Box Query Submission
+Render bounding box proxies with occlusion queries after the depth prepass.
+Create a simple box mesh in Renderer3D::Init() for use as the occlusion proxy geometry
+After the depth prepass completes, iterate objects marked for occlusion testing and render their world-space bounding boxes with queries active
+Use the OcclusionQueryPool to manage query allocation and submission
+Apply conservative bounding box expansion (similar to the 1.3× factor used for frustum culling) to handle animation and transform imprecision
+Task 3: Implement Temporal Occlusion Culling
+Use previous frame query results to cull objects in the current frame, avoiding GPU readback stalls.
+In Renderer3D::DrawMesh() / DrawMeshParallel(), check the object's OcclusionState.wasVisibleLastFrame before submitting draw commands
+Objects invisible last frame skip rendering but still submit a bounding box query to detect re-visibility
+Objects visible last frame render normally; their query results update wasVisibleLastFrame for the next frame
+Implement a "grace period" (2-3 frames) where recently-invisible objects continue rendering to handle fast-moving cameras and prevent popping
+Add occlusion culling enable/disable flag (EnableOcclusionCulling) and expose via Renderer3D API alongside existing EnableFrustumCulling
+Task 4: Integrate Conditional Rendering for Dynamic Objects
+Use OpenGL conditional rendering to let the GPU skip draws without CPU readback.
+For dynamic objects where temporal prediction is unreliable, wrap draw commands in BeginConditionalRender/EndConditionalRender using the previous frame's query
+Add UseConditionalRender flag to DrawMeshCommand and DrawAnimatedMeshCommand POD structs in OloEngine/src/OloEngine/Renderer/Commands/RenderCommand.h
+Update CommandDispatch.cpp to check this flag and wrap the draw call in conditional render state when set
+Default to conditional rendering for animated meshes (which have the 2.0× bounding sphere expansion already)
+🤖 Prompt for AI agents
+```
+Implement Phase 3 to wire the occlusion query infrastructure from Phase 2 into
+the rendering pipeline using temporal coherence, avoiding GPU stalls. The goal
+is a complete, functional temporal occlusion culling system with conditional
+rendering support for dynamic objects.
+
+**Task 3.1 – Per-Object Visibility State Tracking (`Renderer3D.h`,
+`Renderer3D.cpp`)**
+- Define an `OcclusionState` struct in `Renderer3D.h` with fields: `queryID`,
+`wasVisibleLastFrame`, `framesSinceVisible`, and `pendingQuery` (bool)
+- Add a map from entity ID (or mesh pointer) to `OcclusionState` inside
+`Renderer3DData`
+- Initialize all new entries as visible (`wasVisibleLastFrame = true`) to avoid
+popping artifacts on first appearance
+- At frame boundaries, remove stale `OcclusionState` entries for entities that
+no longer exist
+
+**Task 3.2 – Bounding Box Query Submission (`Renderer3D.cpp`)**
+- In `Renderer3D::Init()`, create a simple unit box mesh to serve as the
+occlusion proxy geometry
+- After the depth prepass completes each frame, iterate all objects marked for
+occlusion testing
+- For each object, transform the proxy box to the object's world-space bounding
+box and render it with an active query from `OcclusionQueryPool`
+- Apply a conservative bounding box expansion factor (~1.3×, consistent with the
+frustum culling approach) to account for animation and transform imprecision
+
+**Task 3.3 – Temporal Occlusion Culling (`Renderer3D.cpp`)**
+- In `Renderer3D::DrawMesh()` and `DrawMeshParallel()`, before submitting draw
+commands, check the object's `OcclusionState.wasVisibleLastFrame`
+- If the object was **invisible** last frame: skip the draw call but still
+submit a bounding box query (via the proxy and `OcclusionQueryPool`) so
+re-visibility can be detected
+- If the object was **visible** last frame: render normally and update
+`wasVisibleLastFrame` from this frame's query result at the end of the frame
+- Implement a grace period of 2–3 frames via `framesSinceVisible`:
+recently-invisible objects continue rendering during the grace period to prevent
+popping with fast-moving cameras
+- Add an `EnableOcclusionCulling` flag to `Renderer3DData` and expose it through
+the `Renderer3D` public API, analogous to the existing `EnableFrustumCulling`
+flag
+
+**Task 3.4 – Conditional Rendering for Dynamic Objects (`RenderCommand.h`,
+`CommandDispatch.cpp`)**
+- Add a `UseConditionalRender` boolean field to the `DrawMeshCommand` and
+`DrawAnimatedMeshCommand` POD structs in
+`OloEngine/src/OloEngine/Renderer/Commands/RenderCommand.h`
+- In `CommandDispatch.cpp`, when dispatching a draw command with
+`UseConditionalRender = true`, wrap the draw call between
+`RenderCommand::BeginConditionalRender(queryID)` and
+`RenderCommand::EndConditionalRender()`
+- Default `UseConditionalRender` to `true` for animated meshes (which already
+use a 2.0× bounding sphere expansion) since temporal prediction is less reliable
+for them
+- For static meshes, default to the temporal path (Task 3.3) rather than
+conditional rendering
+```
+Research
+The engine uses an EnTT-based ECS with a command bucket rendering system. Frustum culling exists via a Frustum class with Gribb-Hartmann plane extraction and sphere/box visibility tests, integrated into Renderer3D::DrawMesh(). However, several subsystems bypass or incompletely implement frustum culling: foliage accepts a Frustum parameter but ignores it, particles have no spatial bounds, and instanced mesh draws only test the first instance. No GPU occlusion culling infrastructure exists—there are no occlusion queries, Hi-Z buffers, or depth prepasses. The RendererAPI abstraction layer provides the extension point for adding new GPU query capabilities.
+🚀 Next Steps
+🤖 All AI agent prompts combined
+```
+Task: 1
+
+Implement Phase 1 to fix the three frustum culling gaps across foliage,
+particles, and instanced mesh rendering. The goal is to ensure all major
+rendering subsystems respect frustum culling before draw submission.
+
+**Task 1.1 – Foliage Frustum Culling (`FoliageRenderer.h` /
+`FoliageRenderer.cpp`)**
+- Extend the `FoliageLayer` struct to include a precomputed `BoundingBox` that
+encompasses all instances in the layer
+- In `FoliageRenderer::Render()`, for each layer, call the frustum's box
+visibility test against the layer's `BoundingBox`
+- If the test fails, skip the `DrawIndexedInstanced` call for that layer
+entirely
+- Update the `m_VisibleInstances` counter to only count layers/instances that
+pass the frustum test
+
+**Task 1.2 – Particle Emitter Bounding Volumes (`ParticleSystem.h` /
+`ParticleSystem.cpp`, `ParticleRenderPass`)**
+- Add a `BoundingSphere` member to `ParticleSystem` in
+`OloEngine/src/OloEngine/Particle/ParticleSystem.h`
+- Sphere center = emitter position; radius = `LODMaxDistance` + velocity-based
+expansion factor
+- In `ParticleSystem::Update()`, recompute the bounding sphere whenever the
+emitter position changes
+- In the particle render callback registration (in `ParticleRenderPass`), test
+the emitter's `BoundingSphere` against the view frustum before invoking the
+batch renderer
+- Add a culled emitter count to the renderer statistics
+
+**Task 1.3 – Per-Instance Culling for DrawMeshInstanced (`Renderer3D.cpp`)**
+- In `Renderer3D::DrawMeshInstanced()`, replace the existing single-instance
+frustum test with a loop over all entries in the transforms array
+- For each instance, test its transformed bounding sphere against the frustum
+- Build a filtered transforms array of only the instances that pass the test
+- Set `transformCount` in the command packet to the count of visible instances
+- If zero instances are visible, skip the draw call entirely
+- Track the visible vs. total instance count in renderer statistics alongside
+the existing culled mesh count
+===============================================================================
+
+Task: 2
+
+Implement Phase 2 to build the foundational GPU query and depth prepass
+infrastructure required for occlusion culling. The goal is to establish all the
+low-level systems before any culling logic is wired in.
+
+**Task 2.1 – GPU Occlusion Query Pool**
+- Create the `OcclusionQueryPool` class in
+`OloEngine/src/OloEngine/Renderer/Debug/` or a new
+`OloEngine/src/OloEngine/Renderer/Occlusion/` directory, following the pattern
+of the existing `GPUTimerQueryPool`
+- Use `GL_ANY_SAMPLES_PASSED` as the query type for binary visibility results
+- Implement double-buffered query arrays: one set for the current frame's
+in-flight queries, one set for reading frame N-1 results
+- Expose three public methods: `BeginQuery(objectID)`, `EndQuery(objectID)`,
+`GetResult(objectID)`
+- Support dynamic pool growth and recycling to handle varying object counts per
+frame
+
+**Task 2.2 – Extend RendererAPI with Occlusion Query Methods (`RendererAPI.h`,
+`OpenGLRendererAPI.cpp`, `RenderCommand.h`)**
+- Add the following pure virtual methods to `RendererAPI.h`:
+  - `BeginOcclusionQuery(u32 queryID)`
+  - `EndOcclusionQuery()`
+  - `GetOcclusionQueryResult(u32 queryID, bool wait)`
+  - `BeginConditionalRender(u32 queryID)`
+  - `EndConditionalRender()`
+- Implement each method in `Platform/OpenGL/OpenGLRendererAPI.cpp` using the
+corresponding OpenGL calls: `glBeginQuery`, `glEndQuery`, `glGetQueryObjectuiv`,
+`glBeginConditionalRender`, `glEndConditionalRender`
+- Add static forwarding methods for all new API methods in `RenderCommand.h`
+
+**Task 2.3 – Depth Prepass Option (`Renderer3D.h`, `SceneRenderPass`, shader
+library)**
+- Add an `EnableDepthPrepass` boolean flag to `Renderer3DData` in `Renderer3D.h`
+- Create a minimal depth-only shader in the shader library: vertex stage
+performs the standard MVP transform; no fragment output
+- In `SceneRenderPass::Execute()`, when `EnableDepthPrepass` is true:
+1. First pass: iterate the command bucket with depth-write-only state using the
+depth-only shader
+2. Second pass: normal color rendering with depth test enabled but depth write
+disabled
+- Rely on the existing `DrawKey` sort order for front-to-back ordering in the
+prepass to maximize early-z efficiency
+===============================================================================
+
+Task: 3
+
+Implement Phase 3 to wire the occlusion query infrastructure from Phase 2 into
+the rendering pipeline using temporal coherence, avoiding GPU stalls. The goal
+is a complete, functional temporal occlusion culling system with conditional
+rendering support for dynamic objects.
+
+**Task 3.1 – Per-Object Visibility State Tracking (`Renderer3D.h`,
+`Renderer3D.cpp`)**
+- Define an `OcclusionState` struct in `Renderer3D.h` with fields: `queryID`,
+`wasVisibleLastFrame`, `framesSinceVisible`, and `pendingQuery` (bool)
+- Add a map from entity ID (or mesh pointer) to `OcclusionState` inside
+`Renderer3DData`
+- Initialize all new entries as visible (`wasVisibleLastFrame = true`) to avoid
+popping artifacts on first appearance
+- At frame boundaries, remove stale `OcclusionState` entries for entities that
+no longer exist
+
+**Task 3.2 – Bounding Box Query Submission (`Renderer3D.cpp`)**
+- In `Renderer3D::Init()`, create a simple unit box mesh to serve as the
+occlusion proxy geometry
+- After the depth prepass completes each frame, iterate all objects marked for
+occlusion testing
+- For each object, transform the proxy box to the object's world-space bounding
+box and render it with an active query from `OcclusionQueryPool`
+- Apply a conservative bounding box expansion factor (~1.3×, consistent with the
+frustum culling approach) to account for animation and transform imprecision
+
+**Task 3.3 – Temporal Occlusion Culling (`Renderer3D.cpp`)**
+- In `Renderer3D::DrawMesh()` and `DrawMeshParallel()`, before submitting draw
+commands, check the object's `OcclusionState.wasVisibleLastFrame`
+- If the object was **invisible** last frame: skip the draw call but still
+submit a bounding box query (via the proxy and `OcclusionQueryPool`) so
+re-visibility can be detected
+- If the object was **visible** last frame: render normally and update
+`wasVisibleLastFrame` from this frame's query result at the end of the frame
+- Implement a grace period of 2–3 frames via `framesSinceVisible`:
+recently-invisible objects continue rendering during the grace period to prevent
+popping with fast-moving cameras
+- Add an `EnableOcclusionCulling` flag to `Renderer3DData` and expose it through
+the `Renderer3D` public API, analogous to the existing `EnableFrustumCulling`
+flag
+
+**Task 3.4 – Conditional Rendering for Dynamic Objects (`RenderCommand.h`,
+`CommandDispatch.cpp`)**
+- Add a `UseConditionalRender` boolean field to the `DrawMeshCommand` and
+`DrawAnimatedMeshCommand` POD structs in
+`OloEngine/src/OloEngine/Renderer/Commands/RenderCommand.h`
+- In `CommandDispatch.cpp`, when dispatching a draw command with
+`UseConditionalRender = true`, wrap the draw call between
+`RenderCommand::BeginConditionalRender(queryID)` and
+`RenderCommand::EndConditionalRender()`
+- Default `UseConditionalRender` to `true` for animated meshes (which already
+use a 2.0× bounding sphere expansion) since temporal prediction is less reliable
+for them
+- For static meshes, default to the temporal path (Task 3.3) rather than
+conditional rendering
+```
+💡 Iterate on the plan with:
+@coderabbitai <feedback>
+```
+Example Feedback
+- `@coderabbitai` You can skip phase 3. Add a simple unit test case for phase 2.
+- `@coderabbitai` For design choice 1 go ahead with option 3 and replan.
+```
+💬 Have feedback or questions? Drop into our discord!
+drsnuggles8 commented on Mar 6, 2026
+drsnuggles8
+on Mar 6, 2026
+OwnerAuthor
+More actions
+closed with pull request #155
+drsnuggles8
+closed this as completedon Mar 6, 2026
+Sign up for free to join this conversation on GitHub. Already have an account? Sign in to comment
+Metadata
+Metadata
+Assignees
+No one assigned
+Labels
+featureNew feature or requestNew feature or request
+Projects
+No projects
+Milestone
+No milestone
+Relationships
+None yet
+Development
+No branches or pull requests
+Issue actions
+Open in GitHub Copilot app
+You can’t perform that action at this time.

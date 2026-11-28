@@ -1,0 +1,870 @@
+# Calculate signed distance fields for arbitrary meshes
+
+This project calculates approximate SDFs for triangle meshes.
+It works for **non-watertight** meshes (meshes with holes), **self-intersecting** meshes, meshes with **non-manifold geometry** and meshes with **inconsistently oriented faces**.
+
+## Install
+
+```
+pip3 install mesh-to-sdf
+```
+
+If you're using Windows or Mac, you need to work around a bug in pyrender.
+Check the FAQs below.
+
+## Examples
+
+### Voxelize a mesh
+
+The `mesh_to_voxels` function creates an N ✕ N ✕ N array of SDF values.
+In this example, a mesh is reconstructed using Marching Cubes and then rendered.
+
+```python
+from mesh_to_sdf import mesh_to_voxels
+
+import trimesh
+import skimage
+
+mesh = trimesh.load('chair.obj')
+
+voxels = mesh_to_voxels(mesh, 64, pad=True)
+
+vertices, faces, normals, _ = skimage.measure.marching_cubes(voxels, level=0)
+mesh = trimesh.Trimesh(vertices=vertices, faces=faces, vertex_normals=normals)
+mesh.show()
+```
+![Example of a mesh and a reconstructed SDF voxel volume](https://raw.githubusercontent.com/marian42/mesh_to_sdf/master/example/voxel.png)
+
+### Sample SDF points non-uniformly near the surface
+
+This example creates 250,000 points, where most of the points are close to the surface and some are sampled uniformly.
+This is the method that is proposed and used in the [DeepSDF paper](https://arxiv.org/abs/1901.05103).
+In this example, the resulting points are rendered in red where the SDF is positive and in blue where it is negative.
+
+```python
+from mesh_to_sdf import sample_sdf_near_surface
+
+import trimesh
+import pyrender
+import numpy as np
+
+mesh = trimesh.load('chair.obj')
+
+points, sdf = sample_sdf_near_surface(mesh, number_of_points=250000)
+
+colors = np.zeros(points.shape)
+colors[sdf < 0, 2] = 1
+colors[sdf > 0, 0] = 1
+cloud = pyrender.Mesh.from_points(points, colors=colors)
+scene = pyrender.Scene()
+scene.add(cloud)
+viewer = pyrender.Viewer(scene, use_raymond_lighting=True, point_size=2)
+```
+
+![Example of a mesh and a point cloud of non-uniformly sampled SDF points](https://raw.githubusercontent.com/marian42/mesh_to_sdf/master/example/non-uniform.png)
+
+## How it works
+
+The general pipeline for calculating SDF in this project is as follows:
+
+1. Create 100 virtual laser scans of the shape from multiple angles.
+These each consist of a normal buffer and a depth buffer.
+2. Use the inverse MVP matrix and depth buffer of each scan to calculate a world-space surface point cloud
+3. Determine the value of the SDF for each query point by finding the closest surface point using a kd-tree
+4. Determine the sign of the SDF using either the normal of the closest surface point or by checking it against the depth buffers of the scans.
+When using normals, the sign is determined with a dot product.
+When using the depth buffer method, the point is projected in the frame of each render.
+By comparing the depth element of the depth buffer and depth of the query point, we determine if the query point is seen by the camera.
+The sign of the point is positive if it is seen by any of the cameras.
+
+This repository contains an implementation of the procedure proposed in the [DeepSDF paper](https://arxiv.org/abs/1901.05103), as well as some alternatives.
+
+## FAQ
+
+__Q: I'm getting this error: `module 'pyglet.gl' has no attribute 'xlib'`__
+
+This is due to a [bug](https://github.com/mmatl/pyrender/issues/117) in pyrender.
+Possible workarounds:
+- use `pyrender 0.1.30` and `pyglet 1.4.0b1` (check [this issue](https://github.com/marian42/mesh_to_sdf/issues/8#issuecomment-635024214) for more details)
+- manually edit `site-packages/pyrender/platforms/pyglet_platfform.py` and surround the content of `make_uncurrent` with a try-catch block
+- use Linux instead of Windows or Mac. This problem appears because pyrender tries to use a library that is only available on Linux.
+
+__Q: I want to run this on a computer without a screen (ie. via SSH)__
+
+Add this to your script before importing `mesh_to_sdf`:
+
+    import os
+    os.environ['PYOPENGL_PLATFORM'] = 'egl'
+
+__Q: There are cone shaped artifacts in the SDF volume when using `sign_method='normal'`__
+
+This is a known issue.
+To mitigate this, the signs are determined by checking a number of surface points and using a majority vote.
+This problem can't be avoided entirely and increasing the number of points (`normal_sample_count`) even further doesn't seem to help.
+In some cases, this problem appears when the mesh contains tiny triangles that face in a different direction than their surrounding area.
+Smoothing the mesh doesn't seem to help.
+
+The `sign_method='depth'` approach doesn't have this problem.
+But it doesn't work with meshes that have holes.
+
+__Q: There are ray shaped artifacts in the SDF volume when using `sign_method='depth'`__
+
+This happens when the mesh has holes and a camera can see "inside" the mesh.
+Use `sign_method='normal'` instead.
+
+
+__Q: This doesn't work!__
+
+This repository contains two approximate methods and in some cases they don't provide usable results.
+When one of the methods fails, try the other one.
+This can be automated by using the built-in ways to check if the result is plausible.
+For the voxelizing methods, use `check_result=True`.
+This checks if the difference in SDF is smaller than the difference in distance between any two points.
+In `sample_sdf_near_surface`, you can add a volume check (`min_size`).
+If these checks fail, a `BadMeshException` is thrown.
+
+This method can process about 60% of the meshes in the [ShapeNet](https://www.shapenet.org/) dataset.
+
+
+# Documentation
+
+## mesh_to_sdf
+
+Calculate signed distance values for an array of given query points
+
+```python
+mesh_to_sdf.mesh_to_sdf(mesh, query_points, surface_point_method='scan', sign_method='normal', bounding_radius=None, scan_count=100, scan_resolution=400, sample_point_count=10000000, normal_sample_count=11)
+```
+
+Parameters
+- `mesh`: a [trimesh](https://trimsh.org/trimesh.html) mesh
+- `query_points`: an N ✕ 3 numpy array, containing the points for which the signed distance function should be calculated.
+- See *common parameters* for the remaining parameters
+
+Returns
+- a numpy array with N elemenents, containing the SDF for each query point
+
+## mesh_to_voxels
+
+Calculate an N ✕ N ✕ N voxel volume of signed distance values for a given mesh.
+The mesh is first transformed to fit inside a cube ranging from -1 to 1.
+
+```python
+mesh_to_sdf.mesh_to_voxels(mesh, voxel_resolution=64, surface_point_method='scan', sign_method='normal', scan_count=100, scan_resolution=400, sample_point_count=10000000, normal_sample_count=11, pad=False, check_result=False, return_gradients=False)
+```
+
+Parameters
+- `mesh`: a [trimesh](https://trimsh.org/trimesh.html) mesh
+- `voxel_resolution`: the resolution N of the resulting voxel volume
+- `pad`: if `True`, the resulting array is padded with ones, ensuring a mesh without holes when reconstructing with Marching Cubes
+- `check_result`: if `True`, the result is checked for continuity.
+If the voxel volume is not a plausible signed distance field, an exception is thrown.
+- See *common parameters* for the remaining parameters
+
+Returns
+- a numpy array of shape (N, N, N) or (N + 2, N + 2, N + 2) when using padding
+
+Returns additionally if `return_gradients` is `True`:
+- gradients in a numpy array of shape (N, N, N, 3) or (N + 2, N + 2, N + 2, 3) when using padding
+
+## sample_sdf_near_surface
+
+Sample some points uniformly and some points near the shape surface and calculate SDFs for these points.
+This follows the procedure proposed in the [DeepSDF paper](https://arxiv.org/abs/1901.05103).
+The mesh is first transformed to fit inside the unit sphere.
+
+```python
+mesh_to_sdf.sample_sdf_near_surface(mesh, number_of_points = 500000, surface_point_method='scan', sign_method='normal', scan_count=100, scan_resolution=400, sample_point_count=10000000, normal_sample_count=11, min_size=0, return_gradients=False)
+```
+
+Parameters
+- `mesh`: a [trimesh](https://trimsh.org/trimesh.html) mesh
+- `number_of_points`: the number N of points to be sampled, including surface points and uniform points
+- `min_size`: The fraction of uniformly sampled that should be inside the shape.
+If this is 0.015 and less than 1.5% of uniformly sampled points have negative SDFs, an exception is thrown.
+This can be used to detect bad meshes.
+- See *common parameters* for the remaining parameters
+
+Returns
+- an (N, 3) numpy array containing the sample points
+- a numpy array of size N with the corresponding SDF values
+
+Returns additionally if `return_gradients` is `True`:
+- an (N, 3) numpy array containing the gradients
+
+## get_surface_point_cloud
+
+Returns an intermediate data structure containing a surface point cloud, scans and a kd-tree of the point cloud.
+This can be used if SDFs will be calculated multiple times for the same mesh or for debugging.
+
+```python
+mesh_to_sdf.get_surface_point_cloud(mesh, surface_point_method='scan', bounding_radius=1, scan_count=100, scan_resolution=400, sample_point_count=10000000, calculate_normals=True)
+```
+
+Parameters
+- `mesh`: a [trimesh](https://trimsh.org/trimesh.html) mesh
+- See *common parameters* for the remaining parameters
+
+Returns
+- an instance of `SurfacePointCloud`
+
+## Common parameters
+- `surface_point_method`:
+The method to generate a surface point cloud.
+Either `'scan'` or `'sample'`.
+The scanning method creates virtual scans while the sampling method uses the triangles to sample surface points.
+The sampling method only works with watertight meshes with correct face normals, but avoids some of the artifacts that the scanning method creates.
+
+- `sign_method`:
+The method to determine the signs of the SDF values.
+Either `'normal'` or `'depth'`.
+The normal method uses normals of the point cloud.
+It works better for meshes with holes, but sometimes results in "bubble" artifacts.
+The depth method avoids the bubble artifacts but is less accurate.
+
+- `bounding_radius`:
+The radius of a sphere that contains all mesh vertices.
+If `None`, this value is calculated using the mesh.
+
+- `scan_count`:
+Number of scans when using the scanning method
+
+- `scan_resolution`:
+Resolution for the scans in pixels.
+
+- `sample_point_count`:
+Number of points to sample when using `surface_point_method='sample'`
+
+- `normal_sample_count`:
+Number of nearby surface points to check when using `sign_method='normal'`.
+The sign of the resulting SDF is determined by majority vote.
+
+### setup.py
+```
+import setuptools
+
+with open("README.md", "r") as fh:
+    long_description = fh.read()
+
+setuptools.setup(
+    name="mesh-to-sdf",
+    version="0.0.15",
+    author="Marian Kleineberg",
+    author_email="mail@marian42.de",
+    description="Calculate signed distance fields for arbitrary meshes",
+    long_description=long_description,
+    long_description_content_type="text/markdown",
+    url="https://github.com/marian42/mesh_to_sdf",
+    packages=setuptools.find_packages(),
+    classifiers=[
+        "Programming Language :: Python :: 3",
+        "License :: OSI Approved :: MIT License",
+        "Operating System :: OS Independent",
+    ],
+    python_requires='>=3.5',
+    data_files=[('shaders', ['mesh_to_sdf/shaders/mesh.frag', 'mesh_to_sdf/shaders/mesh.vert'])],
+    include_package_data = True,
+    install_requires=[
+        'pyopengl',
+        'pyrender',
+        'scikit-image',
+        'scikit-learn',
+    ]
+)
+```
+
+### example/voxelize_chair.py
+```
+import numpy as np
+from mesh_to_sdf import get_surface_point_cloud, scale_to_unit_sphere
+import trimesh
+import skimage, skimage.measure
+import os
+
+mesh = trimesh.load('example/chair.obj')
+mesh = scale_to_unit_sphere(mesh)
+
+print("Scanning...")
+cloud = get_surface_point_cloud(mesh, surface_point_method='scan', scan_count=20, scan_resolution=400)
+
+cloud.show()
+
+os.makedirs("test", exist_ok=True)
+for i, scan in enumerate(cloud.scans):
+    scan.save("test/scan_{:d}.png".format(i))
+
+print("Voxelizing...")
+voxels = cloud.get_voxels(128, use_depth_buffer=True)
+
+print("Creating a mesh using Marching Cubes...")
+vertices, faces, normals, _ = skimage.measure.marching_cubes(voxels, level=0)
+mesh = trimesh.Trimesh(vertices=vertices, faces=faces, vertex_normals=normals)
+mesh.show()
+```
+
+### mesh_to_sdf/__init__.py
+```
+import numpy as np
+from . import surface_point_cloud
+from .surface_point_cloud import BadMeshException
+from .utils import scale_to_unit_cube, scale_to_unit_sphere, get_raster_points, check_voxels
+import trimesh
+
+def get_surface_point_cloud(mesh, surface_point_method='scan', bounding_radius=None, scan_count=100, scan_resolution=400, sample_point_count=10000000, calculate_normals=True):
+    if isinstance(mesh, trimesh.Scene):
+        mesh = mesh.dump().sum()
+    if not isinstance(mesh, trimesh.Trimesh):
+        raise TypeError("The mesh parameter must be a trimesh mesh.")
+
+    if bounding_radius is None:
+        bounding_radius = np.max(np.linalg.norm(mesh.vertices, axis=1)) * 1.1
+        
+    if surface_point_method == 'scan':
+        return surface_point_cloud.create_from_scans(mesh, bounding_radius=bounding_radius, scan_count=scan_count, scan_resolution=scan_resolution, calculate_normals=calculate_normals)
+    elif surface_point_method == 'sample':
+        return surface_point_cloud.sample_from_mesh(mesh, sample_point_count=sample_point_count, calculate_normals=calculate_normals)        
+    else:
+        raise ValueError('Unknown surface point sampling method: {:s}'.format(surface_point_method))
+
+
+def mesh_to_sdf(mesh, query_points, surface_point_method='scan', sign_method='normal', bounding_radius=None, scan_count=100, scan_resolution=400, sample_point_count=10000000, normal_sample_count=11):
+    if not isinstance(query_points, np.ndarray):
+        raise TypeError('query_points must be a numpy array.')
+    if len(query_points.shape) != 2 or query_points.shape[1] != 3:
+        raise ValueError('query_points must be of shape N ✕ 3.')
+    
+    if surface_point_method == 'sample' and sign_method == 'depth':
+        print("Incompatible methods for sampling points and determining sign, using sign_method='normal' instead.")
+        sign_method = 'normal'
+
+    point_cloud = get_surface_point_cloud(mesh, surface_point_method, bounding_radius, scan_count, scan_resolution, sample_point_count, calculate_normals=sign_method=='normal')
+
+    if sign_method == 'normal':
+        return point_cloud.get_sdf_in_batches(query_points, use_depth_buffer=False)
+    elif sign_method == 'depth':
+        return point_cloud.get_sdf_in_batches(query_points, use_depth_buffer=True, sample_count=sample_point_count)
+    else:
+        raise ValueError('Unknown sign determination method: {:s}'.format(sign_method))
+
+
+def mesh_to_voxels(mesh, voxel_resolution=64, surface_point_method='scan', sign_method='normal', scan_count=100, scan_resolution=400, sample_point_count=10000000, normal_sample_count=11, pad=False, check_result=False, return_gradients=False):
+    mesh = scale_to_unit_cube(mesh)
+
+    surface_point_cloud = get_surface_point_cloud(mesh, surface_point_method, 3**0.5, scan_count, scan_resolution, sample_point_count, sign_method=='normal')
+
+    return surface_point_cloud.get_voxels(voxel_resolution, sign_method=='depth', normal_sample_count, pad, check_result, return_gradients)
+
+# Sample some uniform points and some normally distributed around the surface as proposed in the DeepSDF paper
+def sample_sdf_near_surface(mesh, number_of_points = 500000, surface_point_method='scan', sign_method='normal', scan_count=100, scan_resolution=400, sample_point_count=10000000, normal_sample_count=11, min_size=0, return_gradients=False):
+    mesh = scale_to_unit_sphere(mesh)
+    
+    if surface_point_method == 'sample' and sign_method == 'depth':
+        print("Incompatible methods for sampling points and determining sign, using sign_method='normal' instead.")
+        sign_method = 'normal'
+
+    surface_point_cloud = get_surface_point_cloud(mesh, surface_point_method, 1, scan_count, scan_resolution, sample_point_count, calculate_normals=sign_method=='normal' or return_gradients)
+
+    return surface_point_cloud.sample_sdf_near_surface(number_of_points, surface_point_method=='scan', sign_method, normal_sample_count, min_size, return_gradients)
+```
+
+### mesh_to_sdf/pyrender_wrapper.py
+```
+### Wrapper around the pyrender library that allows to
+### 1. disable antialiasing
+### 2. render a normal buffer
+### This needs to be imported before pyrender or OpenGL is imported anywhere
+
+import os
+import sys
+if 'pyrender' in sys.modules:
+    raise ImportError('The mesh_to_sdf package must be imported before pyrender is imported.')
+if 'OpenGL' in sys.modules:
+    raise ImportError('The mesh_to_sdf package must be imported before OpenGL is imported.')
+
+# Disable antialiasing:
+import OpenGL.GL
+
+suppress_multisampling = False
+old_gl_enable = OpenGL.GL.glEnable
+
+def new_gl_enable(value):
+    if suppress_multisampling and value == OpenGL.GL.GL_MULTISAMPLE:
+        OpenGL.GL.glDisable(value)
+    else:
+        old_gl_enable(value)
+
+OpenGL.GL.glEnable = new_gl_enable
+
+old_glRenderbufferStorageMultisample = OpenGL.GL.glRenderbufferStorageMultisample
+
+def new_glRenderbufferStorageMultisample(target, samples, internalformat, width, height):
+    if suppress_multisampling:
+        OpenGL.GL.glRenderbufferStorage(target, internalformat, width, height)
+    else:
+        old_glRenderbufferStorageMultisample(target, samples, internalformat, width, height)
+
+OpenGL.GL.glRenderbufferStorageMultisample = new_glRenderbufferStorageMultisample
+
+import pyrender
+
+# Render a normal buffer instead of a color buffer
+class CustomShaderCache():
+    def __init__(self):
+        self.program = None
+
+    def get_program(self, vertex_shader, fragment_shader, geometry_shader=None, defines=None):
+        if self.program is None:
+            shaders_directory = os.path.join(os.path.dirname(__file__), 'shaders')
+            self.program = pyrender.shader_program.ShaderProgram(os.path.join(shaders_directory, 'mesh.vert'), os.path.join(shaders_directory, 'mesh.frag'), defines=defines)
+        return self.program
+
+
+def render_normal_and_depth_buffers(mesh, camera, camera_transform, resolution):
+    global suppress_multisampling
+    suppress_multisampling = True
+    scene = pyrender.Scene()
+    scene.add(pyrender.Mesh.from_trimesh(mesh, smooth = False))
+    scene.add(camera, pose=camera_transform)
+
+    renderer = pyrender.OffscreenRenderer(resolution, resolution)
+    renderer._renderer._program_cache = CustomShaderCache()
+
+    color, depth = renderer.render(scene, flags=pyrender.RenderFlags.SKIP_CULL_FACES)
+    suppress_multisampling = False
+    return color, depth
+```
+
+### mesh_to_sdf/scan.py
+```
+import numpy as np
+from .pyrender_wrapper import render_normal_and_depth_buffers
+import pyrender
+from scipy.spatial.transform import Rotation
+from skimage import io
+
+def get_rotation_matrix(angle, axis='y'):
+    matrix = np.identity(4)
+    if hasattr(Rotation, "as_matrix"): # scipy>=1.4.0
+        matrix[:3, :3] = Rotation.from_euler(axis, angle).as_matrix()
+    else: # scipy<1.4.0
+        matrix[:3, :3] = Rotation.from_euler(axis, angle).as_dcm()
+    return matrix
+
+def get_camera_transform_looking_at_origin(rotation_y, rotation_x, camera_distance=2):
+    camera_transform = np.identity(4)
+    camera_transform[2, 3] = camera_distance
+    camera_transform = np.matmul(get_rotation_matrix(rotation_x, axis='x'), camera_transform)
+    camera_transform = np.matmul(get_rotation_matrix(rotation_y, axis='y'), camera_transform)
+    return camera_transform
+
+# Camera transform from position and look direction
+def get_camera_transform(position, look_direction):
+    camera_forward = -look_direction / np.linalg.norm(look_direction)
+    camera_right = np.cross(camera_forward, np.array((0, 0, -1)))
+
+    if np.linalg.norm(camera_right) < 0.5:
+        camera_right = np.array((0, 1, 0), dtype=np.float32)
+
+    camera_right /= np.linalg.norm(camera_right)
+    camera_up = np.cross(camera_forward, camera_right)
+    camera_up /= np.linalg.norm(camera_up)
+
+    rotation = np.identity(4)
+    rotation[:3, 0] = camera_right
+    rotation[:3, 1] = camera_up
+    rotation[:3, 2] = camera_forward
+
+    translation = np.identity(4)
+    translation[:3, 3] = position
+
+    return np.matmul(translation, rotation)
+
+'''
+A virtual laser scan of an object from one point in space.
+This renders a normal and depth buffer and reprojects it into a point cloud.
+The resulting point cloud contains a point for every pixel in the buffer that hit the model.
+'''
+class Scan():
+    def __init__(self, mesh, camera_transform, resolution=400, calculate_normals=True, fov=1, z_near=0.1, z_far=10):
+        self.camera_transform = camera_transform
+        self.camera_position = np.matmul(self.camera_transform, np.array([0, 0, 0, 1]))[:3]
+        self.resolution = resolution
+        
+        camera = pyrender.PerspectiveCamera(yfov=fov, aspectRatio=1.0, znear = z_near, zfar = z_far)
+        self.projection_matrix = camera.get_projection_matrix()
+
+        color, depth = render_normal_and_depth_buffers(mesh, camera, self.camera_transform, resolution)
+
+        self.normal_buffer = color if calculate_normals else None
+        self.depth_buffer = depth.copy()
+        
+        indices = np.argwhere(depth != 0)
+        depth[depth == 0] = float('inf')
+
+        # This reverts the processing that pyrender does and calculates the original depth buffer in clipping space
+        self.depth = (z_far + z_near - (2.0 * z_near * z_far) / depth) / (z_far - z_near)
+        
+        points = np.ones((indices.shape[0], 4))
+        points[:, [1, 0]] = indices.astype(float) / (resolution -1) * 2 - 1
+        points[:, 1] *= -1
+        points[:, 2] = self.depth[indices[:, 0], indices[:, 1]]
+        
+        clipping_to_world = np.matmul(self.camera_transform, np.linalg.inv(self.projection_matrix))
+
+        points = np.matmul(points, clipping_to_world.transpose())
+        points /= points[:, 3][:, np.newaxis]
+        self.points = points[:, :3]
+
+        if calculate_normals:
+            normals = color[indices[:, 0], indices[:, 1]] / 255 * 2 - 1
+            camera_to_points = self.camera_position - self.points
+            normal_orientation = np.einsum('ij,ij->i', camera_to_points, normals)
+            normals[normal_orientation < 0] *= -1
+            self.normals = normals
+        else:
+            self.normals = None
+
+    def convert_world_space_to_viewport(self, points):
+        half_viewport_size = 0.5 * self.resolution
+        clipping_to_viewport = np.array([
+            [half_viewport_size, 0.0, 0.0, half_viewport_size],
+            [0.0, -half_viewport_size, 0.0, half_viewport_size],
+            [0.0, 0.0, 1.0, 0.0],
+            [0, 0, 0.0, 1.0]
+        ])
+
+        world_to_clipping = np.matmul(self.projection_matrix, np.linalg.inv(self.camera_transform))
+        world_to_viewport = np.matmul(clipping_to_viewport, world_to_clipping)
+        
+        world_space_points = np.concatenate([points, np.ones((points.shape[0], 1))], axis=1)
+        viewport_points = np.matmul(world_space_points, world_to_viewport.transpose())
+        viewport_points /= viewport_points[:, 3][:, np.newaxis]
+        return viewport_points
+
+    def is_visible(self, points):
+        viewport_points = self.convert_world_space_to_viewport(points)
+        pixels = viewport_points[:, :2].astype(int)
+
+        # This only has an effect if the camera is inside the model
+        in_viewport = (pixels[:, 0] >= 0) & (pixels[:, 1] >= 0) & (pixels[:, 0] < self.resolution) & (pixels[:, 1] < self.resolution) & (viewport_points[:, 2] > -1)
+
+        result = np.zeros(points.shape[0], dtype=bool)
+        result[in_viewport] = viewport_points[in_viewport, 2] < self.depth[pixels[in_viewport, 1], pixels[in_viewport, 0]]
+
+        return result
+
+    def show(self):
+        scene = pyrender.Scene()
+        scene.add(pyrender.Mesh.from_points(self.points, normals=self.normals))
+        pyrender.Viewer(scene, use_raymond_lighting=True, point_size=2)
+
+    def save(self, filename_depth, filename_normals=None):
+        if filename_normals is None and self.normal_buffer is not None:
+            items = filename_depth.split('.')
+            filename_normals = '.'.join(items[:-1]) + "_normals." + items[-1]
+        
+        depth = self.depth_buffer / np.max(self.depth_buffer) * 255
+
+        io.imsave(filename_depth, depth.astype(np.uint8))
+        if self.normal_buffer is not None:
+            io.imsave(filename_normals, self.normal_buffer.astype(np.uint8))
+```
+
+### mesh_to_sdf/surface_point_cloud.py
+```
+from .scan import Scan, get_camera_transform_looking_at_origin
+from .utils import sample_uniform_points_in_unit_sphere
+from .utils import get_raster_points, check_voxels
+
+import trimesh
+import logging
+logging.getLogger("trimesh").setLevel(9000)
+import numpy as np
+from sklearn.neighbors import KDTree
+import math
+import pyrender
+
+class BadMeshException(Exception):
+    pass
+
+class SurfacePointCloud:
+    def __init__(self, mesh, points, normals=None, scans=None):
+        self.mesh = mesh
+        self.points = points
+        self.normals = normals
+        self.scans = scans
+
+        self.kd_tree = KDTree(points)
+
+    def get_random_surface_points(self, count, use_scans=True):
+        if use_scans:
+            indices = np.random.choice(self.points.shape[0], count)
+            return self.points[indices, :]
+        else:
+            return self.mesh.sample(count)
+
+    def get_sdf(self, query_points, use_depth_buffer=False, sample_count=11, return_gradients=False):
+        if use_depth_buffer:
+            distances, indices = self.kd_tree.query(query_points)
+            distances = distances.astype(np.float32).reshape(-1)
+            inside = ~self.is_outside(query_points)
+            distances[inside] *= -1
+
+            if return_gradients:
+                gradients = query_points - self.points[indices[:, 0]]
+                gradients[inside] *= -1
+
+        else:
+            distances, indices = self.kd_tree.query(query_points, k=sample_count)
+            distances = distances.astype(np.float32)
+
+            closest_points = self.points[indices]
+            direction_from_surface = query_points[:, np.newaxis, :] - closest_points
+            inside = np.einsum('ijk,ijk->ij', direction_from_surface, self.normals[indices]) < 0
+            inside = np.sum(inside, axis=1) > sample_count * 0.5
+            distances = distances[:, 0]
+            distances[inside] *= -1
+
+            if return_gradients:
+                gradients = direction_from_surface[:, 0]
+                gradients[inside] *= -1
+
+        if return_gradients:
+            near_surface = np.abs(distances) < math.sqrt(0.0025**2 * 3) * 3 # 3D 2-norm stdev * 3
+            gradients = np.where(near_surface[:, np.newaxis], self.normals[indices[:, 0]], gradients)
+            gradients /= np.linalg.norm(gradients, axis=1)[:, np.newaxis]
+            return distances, gradients
+        else:
+            return distances
+
+    def get_sdf_in_batches(self, query_points, use_depth_buffer=False, sample_count=11, batch_size=1000000, return_gradients=False):
+        if query_points.shape[0] <= batch_size:
+            return self.get_sdf(query_points, use_depth_buffer=use_depth_buffer, sample_count=sample_count, return_gradients=return_gradients)
+
+        n_batches = int(math.ceil(query_points.shape[0] / batch_size))
+        batches = [
+            self.get_sdf(points, use_depth_buffer=use_depth_buffer, sample_count=sample_count, return_gradients=return_gradients)
+            for points in np.array_split(query_points, n_batches)
+        ]
+        if return_gradients:
+            distances = np.concatenate([batch[0] for batch in batches])
+            gradients = np.concatenate([batch[1] for batch in batches])
+            return distances, gradients
+        else:
+            return np.concatenate(batches) # distances
+
+    def get_voxels(self, voxel_resolution, use_depth_buffer=False, sample_count=11, pad=False, check_result=False, return_gradients=False):
+        result = self.get_sdf_in_batches(get_raster_points(voxel_resolution), use_depth_buffer, sample_count, return_gradients=return_gradients)
+        if not return_gradients:
+            sdf = result
+        else:
+            sdf, gradients = result
+            voxel_gradients = np.reshape(gradients, (voxel_resolution, voxel_resolution, voxel_resolution, 3))
+        
+        voxels = sdf.reshape((voxel_resolution, voxel_resolution, voxel_resolution))
+
+        if check_result and not check_voxels(voxels):
+            raise BadMeshException()
+
+        if pad:
+            voxels = np.pad(voxels, 1, mode='constant', constant_values=1)
+            if return_gradients:
+                voxel_gradients = np.pad(voxel_gradients, ((1, 1), (1, 1), (1, 1), (0, 0)), mode='edge')
+
+        if return_gradients:
+            return voxels, voxel_gradients
+        else:
+            return voxels
+
+    def sample_sdf_near_surface(self, number_of_points=500000, use_scans=True, sign_method='normal', normal_sample_count=11, min_size=0, return_gradients=False):
+        query_points = []
+        surface_sample_count = int(number_of_points * 47 / 50) // 2
+        surface_points = self.get_random_surface_points(surface_sample_count, use_scans=use_scans)
+        query_points.append(surface_points + np.random.normal(scale=0.0025, size=(surface_sample_count, 3)))
+        query_points.append(surface_points + np.random.normal(scale=0.00025, size=(surface_sample_count, 3)))
+        
+        unit_sphere_sample_count = number_of_points - surface_points.shape[0] * 2
+        unit_sphere_points = sample_uniform_points_in_unit_sphere(unit_sphere_sample_count)
+        query_points.append(unit_sphere_points)
+        query_points = np.concatenate(query_points).astype(np.float32)
+
+        if sign_method == 'normal':
+            sdf = self.get_sdf_in_batches(query_points, use_depth_buffer=False, sample_count=normal_sample_count, return_gradients=return_gradients)
+        elif sign_method == 'depth':
+            sdf = self.get_sdf_in_batches(query_points, use_depth_buffer=True, return_gradients=return_gradients)
+        else:
+            raise ValueError('Unknown sign determination method: {:s}'.format(sign_method))
+        if return_gradients:
+            sdf, gradients = sdf
+
+        if min_size > 0:
+            model_size = np.count_nonzero(sdf[-unit_sphere_sample_count:] < 0) / unit_sphere_sample_count
+            if model_size < min_size:
+                raise BadMeshException()
+
+        if return_gradients:
+            return query_points, sdf, gradients
+        else:
+            return query_points, sdf
+
+    def show(self):
+        scene = pyrender.Scene()
+        scene.add(pyrender.Mesh.from_points(self.points, normals=self.normals))
+        pyrender.Viewer(scene, use_raymond_lighting=True, point_size=2)
+        
+    def is_outside(self, points):
+        result = None
+        for scan in self.scans:
+            if result is None:
+                result = scan.is_visible(points)
+            else:
+                result = np.logical_or(result, scan.is_visible(points))
+        return result
+
+def get_equidistant_camera_angles(count):
+    increment = math.pi * (3 - math.sqrt(5))
+    for i in range(count):
+        theta = math.asin(-1 + 2 * i / (count - 1))
+        phi = ((i + 1) * increment) % (2 * math.pi)
+        yield phi, theta
+
+def create_from_scans(mesh, bounding_radius=1, scan_count=100, scan_resolution=400, calculate_normals=True):
+    scans = []
+
+    for phi, theta in get_equidistant_camera_angles(scan_count):
+        camera_transform = get_camera_transform_looking_at_origin(phi, theta, camera_distance=2 * bounding_radius)
+        scans.append(Scan(mesh,
+            camera_transform=camera_transform,
+            resolution=scan_resolution,
+            calculate_normals=calculate_normals,
+            fov=1.0472,
+            z_near=bounding_radius * 1,
+            z_far=bounding_radius * 3
+        ))
+
+    return SurfacePointCloud(mesh, 
+        points=np.concatenate([scan.points for scan in scans], axis=0),
+        normals=np.concatenate([scan.normals for scan in scans], axis=0) if calculate_normals else None,
+        scans=scans
+    )
+
+def sample_from_mesh(mesh, sample_point_count=10000000, calculate_normals=True):
+    if calculate_normals:
+        points, face_indices = mesh.sample(sample_point_count, return_index=True)
+        normals = mesh.face_normals[face_indices]
+    else:
+        points = mesh.sample(sample_point_count, return_index=False)
+
+    return SurfacePointCloud(mesh, 
+        points=points,
+        normals=normals if calculate_normals else None,
+        scans=None
+    )
+```
+
+### mesh_to_sdf/utils.py
+```
+import functools
+import trimesh
+import numpy as np
+
+def scale_to_unit_sphere(mesh):
+    if isinstance(mesh, trimesh.Scene):
+        mesh = mesh.dump().sum()
+
+    vertices = mesh.vertices - mesh.bounding_box.centroid
+    distances = np.linalg.norm(vertices, axis=1)
+    vertices /= np.max(distances)
+
+    return trimesh.Trimesh(vertices=vertices, faces=mesh.faces)
+
+def scale_to_unit_cube(mesh):
+    if isinstance(mesh, trimesh.Scene):
+        mesh = mesh.dump().sum()
+
+    vertices = mesh.vertices - mesh.bounding_box.centroid
+    vertices *= 2 / np.max(mesh.bounding_box.extents)
+
+    return trimesh.Trimesh(vertices=vertices, faces=mesh.faces)
+
+# Use get_raster_points.cache_clear() to clear the cache
+@functools.lru_cache(maxsize=4)
+def get_raster_points(voxel_resolution):
+    points = np.meshgrid(
+        np.linspace(-1, 1, voxel_resolution),
+        np.linspace(-1, 1, voxel_resolution),
+        np.linspace(-1, 1, voxel_resolution)
+    )
+    points = np.stack(points)
+    points = np.swapaxes(points, 1, 2)
+    points = points.reshape(3, -1).transpose().astype(np.float32)
+    return points
+
+def check_voxels(voxels):
+    block = voxels[:-1, :-1, :-1]
+    d1 = (block - voxels[1:, :-1, :-1]).reshape(-1)
+    d2 = (block - voxels[:-1, 1:, :-1]).reshape(-1)
+    d3 = (block - voxels[:-1, :-1, 1:]).reshape(-1)
+
+    max_distance = max(np.max(d1), np.max(d2), np.max(d3))
+    return max_distance < 2.0 / voxels.shape[0] * 3**0.5 * 1.1
+
+def sample_uniform_points_in_unit_sphere(amount):
+    unit_sphere_points = np.random.uniform(-1, 1, size=(amount * 2 + 20, 3))
+    unit_sphere_points = unit_sphere_points[np.linalg.norm(unit_sphere_points, axis=1) < 1]
+
+    points_available = unit_sphere_points.shape[0]
+    if points_available < amount:
+        # This is a fallback for the rare case that too few points are inside the unit sphere
+        result = np.zeros((amount, 3))
+        result[:points_available, :] = unit_sphere_points
+        result[points_available:, :] = sample_uniform_points_in_unit_sphere(amount - points_available)
+        return result
+    else:
+        return unit_sphere_points[:amount, :]
+```
+
+### mesh_to_sdf/shaders/mesh.frag
+```
+#version 330 core
+
+in vec3 frag_position;
+in vec3 frag_normal;
+
+out vec4 frag_color;
+
+void main()
+{
+    vec3 normal = normalize(frag_normal);
+
+    frag_color = vec4(normal * 0.5 + 0.5, 1.0);
+}
+```
+
+### mesh_to_sdf/shaders/mesh.vert
+```
+#version 330 core
+
+// Vertex Attributes
+layout(location = 0) in vec3 position;
+layout(location = NORMAL_LOC) in vec3 normal;
+layout(location = INST_M_LOC) in mat4 inst_m;
+
+// Uniforms
+uniform mat4 M;
+uniform mat4 V;
+uniform mat4 P;
+
+// Outputs
+out vec3 frag_position;
+out vec3 frag_normal;
+
+void main()
+{
+    gl_Position = P * V * M * inst_m * vec4(position, 1);
+    frag_position = vec3(M * inst_m * vec4(position, 1.0));
+
+    mat4 N = transpose(inverse(M * inst_m));
+    frag_normal = normalize(vec3(N * vec4(normal, 0.0)));
+}
+```

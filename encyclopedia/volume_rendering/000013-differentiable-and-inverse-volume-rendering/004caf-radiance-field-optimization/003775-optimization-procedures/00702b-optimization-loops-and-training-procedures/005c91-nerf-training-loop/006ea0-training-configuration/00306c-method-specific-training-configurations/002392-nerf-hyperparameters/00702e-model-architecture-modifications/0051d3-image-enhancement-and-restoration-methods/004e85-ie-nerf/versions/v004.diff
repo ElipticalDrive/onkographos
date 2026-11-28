@@ -1,0 +1,377 @@
+--- v003.md
++++ v004.md
+@@ -4,52 +4,78 @@
+ 
+ ## Overview
+-IE-NeRF is a neural radiance field method that enhances novel view synthesis in uncontrolled "in-the-wild" environments by separating static scene rendering from transient occlusions (e.g., pedestrians, vehicles) using an image-dependent feature encoding and a pre-trained inpainting module, rather than learning a 3D transient field [S1]. Unlike siblings such as [DeblurNeRF](11964-deblurnerf.md) or [Sharp-NeRF](14270-sharp-nerf.md) which address blur or sharpness, IE-NeRF specifically targets transient artifacts. It differs from [NeRF-W](11964-deblurnerf.md) by using a single MLP to predict both static properties and a 2D transient mask, which guides an external inpainting network to generate supervision signals, avoiding the complexity of dual NeRF pipelines or prior-assisted semantic segmentation [S1].
++IE-NeRF is a Neural Radiance Field (NeRF) variant designed to enhance novel view synthesis in uncontrolled, "in-the-wild" environments by separating static scene rendering from transient occlusions (e.g., moving people, vehicles) using an image-dependent inpainting module [S1]. Unlike sibling methods such as [DeblurNeRF](11964-deblurnerf.md) or [Sharp-NeRF](14270-sharp-nerf.md) which focus on blur or sharpness, or NeRF-W which uses a 3D transient field, IE-NeRF predicts a 2D transient mask per image via its MLPs and uses a pre-trained inpainting network (LaMa) to generate a "clean" static supervision signal, avoiding the need for dual NeRF pipelines or external semantic segmentation priors [S1].
+ 
+ ## How it works
+ **Inputs and Outputs:**
+-*   **Inputs:** A set of uncontrolled images $\{I_i\}$ with corresponding camera poses (origin $o$ and direction $d$).
+-*   **Outputs:** A static radiance field capable of rendering novel views of the static scene, free from transient occlusions.
++*   **Inputs:** A set of uncontrolled images $I_i$ with known camera poses (position $o$ and direction $d$).
++*   **Outputs:** A static radiance field representation (density $\sigma$ and image-dependent color $c$) and novel views of the static scene free from transient occlusions.
+ 
+ **Data Structures and Layout:**
+-The model consists of three main modules [S1]:
+ 1.  **CNN Encoder ($E_E$):** Encodes input image $I_i$ into a feature latent vector $\ell_i \in \mathbb{R}^k$.
+ 2.  **NeRF MLPs:**
+-    *   **MLP$_{\theta_1}$:** 8 fully connected layers, 256 hidden units. Input: Positional encoded position $\gamma_x(r(t))$. Output: Static density $\sigma(t)$ and intermediate feature $z_i(t)$.
+-    *   **MLP$_{\theta_2}$:** 8 fully connected layers, 256 hidden units. Input: Concatenation of $\ell_i$, $\gamma_d(d)$, $z_i(t)$, and original position $(x,y,z)$. Output: Image-dependent radiance $c_i(t)$ and transient mask embedding $\ell_t$.
+-    *   **Transient Mask Head:** A fully connected layer with 128 channels and Sigmoid activation. Input: $\ell_t$ and 2D pixel location $l_{ij}=(u,v)$. Output: Transient mask probability $M_{ij}$.
++    *   **MLP$_{\theta_1}$:** 8 fully connected layers, 256 hidden units. Input: Positional encoded ray position $\gamma_x(r(t))$. Output: Density $\sigma(t)$ and intermediate feature $z_i(t)$.
++    *   **MLP$_{\theta_2}$:** Input: Directional encoding $\gamma_d(d)$, intermediate feature $z_i(t)$, and original position $(x,y,z)$. Output: Image-dependent radiance $c_i(t)$ and transient mask embedding $\ell_t$.
++    *   **Transient Mask Head:** A fully connected layer with 128 channels and Sigmoid activation. Input: Transient embedding $\ell_t$ and 2D pixel location $l_{ij}=(u,v)$. Output: Transient mask probability $M_{ij}$.
+     *   **Static Color Head:** A fully connected layer with 128 channels and Sigmoid activation. Input: Output of MLP$_{\theta_2}$. Output: Static RGB color $c$.
+-3.  **Inpainting Module ($G_\Delta$):** Pre-trained LaMa model. Input: Four-channel tensor $x' = \text{stack}(x \odot m, m)$, where $x$ is the masked image and $m$ is the binary mask. Output: Restored static image $\hat{I}_r$ and repaired depth map $\hat{D}_r$.
++3.  **Inpainting Module ($G_\Delta$):** Uses the LaMa model. Input: Concatenated tensor $x' = \text{stack}(I_i \odot M_{ij}, M_{ij})$ (4 channels). Output: Restored static image $I_{ri}$ and repaired depth map $D_{ri}$.
+ 
+ **Numbered Steps:**
+-
+ 1.  **Image Encoding:** Encode each input image $I_i$ into a feature latent vector $\ell_i$ using the CNN encoder $E_E$ [S1].
+-2.  **Ray Sampling:** For a camera ray $r(t) = o + td$, sample $K$ points $t_k$ along the ray.
+-3.  **Static Feature Prediction:** Process the pose position $r(t)$ through MLP$_{\theta_1}$ with integrated positional encoding $\gamma_x$ to output density $\sigma(t)$ and intermediate feature $z_i(t)$ [S1]:
++2.  **Ray Sampling:** For a camera ray $r(t) = o + td$, sample points $t_k$ along the ray. Apply Integrated Positional Encoding (IPE) to positions and directions [S1].
++3.  **Static Feature Prediction:** Pass the positional encoding $\gamma_x(r(t))$ through MLP$_{\theta_1}$ to obtain density $\sigma(t)$ and intermediate feature $z_i(t)$:
+     $$ [\sigma(t), z_i(t)] = \text{MLP}_{\theta_1}[\gamma_x(r(t))] $$
+-4.  **Radiance and Mask Embedding:** Feed the directional vector $d$ (with encoding $\gamma_d$), the intermediate feature $z_i(t)$, the original position $(x,y,z)$, and the image embedding $\ell_i$ into MLP$_{\theta_2}$ to predict image-dependent radiance $c_i(t)$ and transient mask embedding $\ell_t$ [S1]:
++    [S1]
++4.  **Radiance and Mask Embedding:** Pass the viewing direction $\gamma_d(d)$, intermediate feature $z_i(t)$, and original position into MLP$_{\theta_2}$ to predict image-dependent radiance $c_i(t)$ and transient mask embedding $\ell_t$:
+     $$ c_i(t) = \text{MLP}_{\theta_2}[\gamma_d(d), z_i(t)] $$
+-5.  **Transient Mask Generation:** Generate a 2D pixel-wise transient mask probability $M_{ij}$ by mapping the 2D pixel location $l_{ij}$ and transient embedding $\ell_t$ through linear layers $E_\phi$ [S1]:
++    [S1]
++5.  **Transient Mask Generation:** Map the 2D pixel location $l_{ij}$ and the transient embedding $\ell_t$ through linear layers $E_\phi$ to generate a 2D pixel-wise transient mask probability $M_{ij}$:
+     $$ M_{ij} = E_\phi(l_{ij}, \ell_t) $$
+-    The mask is thresholded to create a binary mask $m_{ij}$ for the inpainting module [S1].
+-6.  **Volumetric Rendering:** Compute the approximated pixel color $\hat{C}_i(r)$ using the static density $\sigma(t)$ and image-dependent radiance $c_i(t)$ [S1]:
++    [S1]
++6.  **Volumetric Rendering (Static):** Compute the approximated pixel color $\hat{C}_i(r)$ using the static density $\sigma(t)$ and image-dependent radiance $c_i(t)$:
+     $$ \hat{C}_i(r) = \sum_{k=1}^{K} T(t_k) \cdot \alpha(\sigma(t_k)\delta_k) \cdot c_i(t_k) $$
+-    where $T(t_k) = \exp\left(-\sum_{k'=1}^{k-1} \sigma(t_{k'}) \cdot \delta_{k'}\right)$ is the transmittance.
++    where $T(t_k) = \exp\left(-\sum_{k'=1}^{k-1} \sigma(t_{k'}) \cdot \delta_{k'}\right)$ is the accumulated transmittance [S1].
+ 7.  **Inpainting Supervision Generation:**
+-    *   Apply the thresholded transient mask $m_{ij}$ to the original image $I_i$ to create a masked image.
+-    *   Feed the masked image and mask into the pre-trained LaMa inpainting network $G_\Delta$ to produce the restored static image $\hat{I}_r$ [S1].
+-    *   Render depth maps $\hat{D}_s$ from the static NeRF and inpaint them using LaMa guided by the transient mask to produce restored depth maps $\hat{D}_r$ for geometry supervision [S1].
+-8.  **Optimization:** Optimize the model by minimizing the total loss function $L$ [S1]:
+-    $$ L = \alpha \sum_{ij} L_s + \beta \sum_{ij} L_t + \gamma \sum_i L_{\text{LPIPS}} + \rho \sum_i L_{\text{depth}} $$
+-    *   **Static Loss ($L_s$):** Mean squared error between rendered static color $\hat{C}_s$ and ground truth $C$ outside the transient mask, plus LPIPS loss inside the mask [S1].
+-    *   **Transient Loss ($L_t$):** Balances occlusion and reconstruction errors [S1]:
+-        $$ L_t = \sum_{ij} (1 - M_{ij}) \| C(r_{ij}) - \hat{C}_s(r_{ij}) \|^2 + \lambda M_{ij} \| C_s(r_{ij}) - \hat{C}_s(r_{ij}) \|^2 $$
+-        where $\lambda$ balances static/transient components. The first term handles occlusion error (comparing rendered static to original image outside mask), and the second term handles reconstruction error (comparing rendered static to repaired ground truth inside mask) [S1].
+-    *   **Depth Loss ($L_{\text{depth}}$):** $\ell_2$ distance between rendered static depth $\hat{D}_s$ and inpainted depth $\hat{D}_r$ [S1].
++    *   Threshold $M_{ij}$ to create a binary mask.
++    *   Apply the mask to the original image $I_i$ to create a masked image.
++    *   Feed the masked image and mask into the pre-trained LaMa inpainting network $G_\Delta$ to produce the restored static image $I_{ri}$ [S1].
++    *   Render depth maps $D_{si}$ from the static NeRF.
++    *   Inpaint the rendered depth maps using LaMa guided by the transient mask to produce restored depth maps $D_{ri}$ [S1].
++8.  **Optimization:** Minimize the total loss function $L$ combining static photometric loss, transient loss, perceptual loss (LPIPS), and depth loss [S1].
++
++**Formulas:**
++*   **Static Photometric Loss ($L_s$):**
++    $$ L_s = \sum_{ij} ||C(r_{ij}) - \hat{C}_s(r_{ij})||^2 $$
++    where $C(r_{ij})$ is the observed color outside the transient mask, and $\hat{C}_s$ is the rendered static color [S1].
++*   **Transient Loss ($L_t$):**
++    $$ L_t = \sum_{ij} (1-M_{ij})||C(r_{ij}) - \hat{C}_s(r_{ij})||^2 + \lambda M_{ij} ||C_s(r_{ij}) - \hat{C}_s(r_{ij})||^2 $$
++    The first term handles occlusion error (comparing rendered static to original where no transient exists). The second term handles reconstruction error inside the mask, comparing rendered static to the inpainted static color $C_s$ (derived from $I_{ri}$), weighted by $\lambda$ [S1].
++*   **Perceptual Loss ($L_{LPIPS}$):** Calculated between the rendered static image and the inpainted static image $I_{ri}$ within the masked region [S1].
++*   **Depth Loss ($L_{depth}$):**
++    $$ L_{depth} = \frac{1}{|R|} \sum_{r \in R} ||\hat{D}_{si}(r) - D_{ri}(r)||^2 $$
++    where $\hat{D}_{si}$ is the rendered static depth and $D_{ri}$ is the inpainted depth [S1].
++*   **Total Loss:**
++    $$ L = \alpha \sum_{ij} L_s + \beta \sum_{ij} L_t + \gamma \sum_i L_{LPIPS} + \rho \sum_i L_{depth} $$
++    where $\alpha, \beta, \gamma, \rho$ are weights [S1].
++*   **Frequency Regularization (RegFre-IPE):**
++    $$ \gamma'_L(t, T; x) = \gamma_L(x) \odot \omega(t, T, L) $$
++    where $\omega$ is a linearly increasing frequency mask based on current iteration $t$, max iteration $T$, and max frequency $L$. The $i$-th bit $\omega_i$ is defined as:
++    $$ \omega_i(t, T, L) = \begin{cases} 1 & \text{if } i \le \lfloor \frac{t \cdot L}{T} \rfloor \\ 0 & \text{if } i > \lfloor \frac{t \cdot L}{T} \rfloor + 6 \end{cases} $$
++    (Note: The source provides a piecewise function involving $r$, the transient mask factor, but the core mechanism is the gradual introduction of high frequencies) [S1].
+ 
+ **Parameters:**
+-*   $\lambda$: Parameter adjusting the balance between transient and static components in $L_t$ [S1].
+-*   $\alpha, \beta, \gamma, \rho$: Weights for static loss, transient loss, perceptual loss, and depth loss respectively [S1].
+-*   $L$: Hyperparameter determining the maximum encoded frequency in the positional encoding [S1].
+-*   $r$: Transient mask factor, defined as the ratio of transient pixels to the total image area [S1].
++*   **MLP Architecture:** 8 layers, 256 hidden units for density; 128 hidden units for color/mask heads [S1].
++*   **Activation:** ReLU for density $\sigma$; Sigmoid for transient mask $M_{ij}$ and static color $c$ [S1].
++*   **LaMa Input:** 4-channel tensor $\text{stack}(I_i \odot M_{ij}, M_{ij})$ [S1].
++*   **$\lambda$:** Balances static/transient components in transient loss [S1].
++*   **$\alpha, \beta, \gamma, \rho$:** Weights for static, transient, perceptual, and depth losses [S1].
++*   **$L$:** Maximum encoded frequency in positional encoding [S1].
++*   **$r$:** Transient mask factor (ratio of transient pixels to total image area) [S1].
++*   **Training Data:** 2x downsampled images [S1].
++*   **Pre-filtering:** Discards images with NIMA score < 3 or transient objects > 80% of frame [S1].
++
++**Edge Cases and Pitfalls:**
++*   **Small Datasets/Sparse Inputs:** The method struggles when the transient mask lacks sufficient information to guide inpainting reliably [S1].
++*   **Inpainting Artifacts:** LaMa may produce blurry results or view inconsistencies. Mitigated by LPIPS loss inside the mask and depth supervision [S1].
++*   **High-Frequency Instability:** High-frequency signals cause instability in transient separation. Mitigated by RegFre-IPE, starting training without positional encoding and incrementally boosting frequency [S1].
+ 
+ **Pseudocode:**
+@@ -61,147 +87,132 @@
+ 
+ class IENeRF:
+-    def __init__(self, num_layers=8, hidden_dim=256, mask_head_dim=128):
+-        # MLP_theta1: Density and Intermediate Feature
+-        self.mlp_theta1 = nn.Sequential()
+-        for _ in range(num_layers):
+-            self.mlp_theta1.append(nn.Linear(hidden_dim, hidden_dim))
+-            self.mlp_theta1.append(nn.ReLU())
+-        
+-        # MLP_theta2: Radiance and Mask Embedding
+-        self.mlp_theta2 = nn.Sequential()
+-        for _ in in range(num_layers):
+-            self.mlp_theta2.append(nn.Linear(hidden_dim, hidden_dim))
+-            self.mlp_theta2.append(nn.ReLU())
++    def __init__(self, num_layers=8, hidden_dim=256, mask_head_dim=128, color_head_dim=128):
++        # MLP for density and intermediate features
++        self.mlp_density = nn.ModuleList([
++            nn.Linear(hidden_dim, hidden_dim) for _ in range(num_layers)
++        ])
++        # MLP for radiance and mask embedding
++        self.mlp_radiance = nn.ModuleList([
++            nn.Linear(hidden_dim, hidden_dim) for _ in range(num_layers)
++        ])
++        # Transient mask head
++        self.mask_head = nn.Linear(hidden_dim, 1) # Output 1 channel for probability
++        # Static color head
++        self.color_head = nn.Linear(hidden_dim, 3) # Output RGB
++        
++        # CNN Encoder for image features (simplified placeholder for E_E)
++        self.image_encoder = nn.Conv2d(3, 256, kernel_size=3, padding=1)
++        
++        # LaMa Inpainting Module (Pre-trained, frozen during NeRF training)
++        self.inpainting_module = LaMaModel()
++
++    def forward(self, rays_o, rays_d, image_features, pixel_coords, t_vals):
++        """
++        rays_o: (N, 3) origin
++        rays_d: (N, 3) direction
++        image_features: (N, H, W, C) or latent vector l_i
++        pixel_coords: (N, 2) 2D pixel location (u, v)
++        t_vals: (N, K) sample distances along ray
++        """
++        # 1. Ray points
++        pts = rays_o.unsqueeze(1) + rays_d.unsqueeze(1) * t_vals.unsqueeze(2) # (N, K, 3)
++        
++        # 2. Encode positions and directions (IPE)
++        # Note: IPE implementation details depend on mip-NeRF library, 
++        # but conceptually maps 3D points to higher-dimensional space.
++        pos_enc = integrated_pos_encoding(pts)
++        dir_enc = integrated_pos_encoding(rays_d)
++        
++        # 3. Predict density and intermediate feature z_i
++        x = pos_enc
++        for layer in self.mlp_density:
++            x = F.relu(layer(x))
++        sigma = x[..., :1] # Density
++        z_i = x[..., 1:]   # Intermediate feature
++        
++        # 4. Predict radiance c_i and transient mask embedding l_t
++        # Concatenate dir_enc, z_i, and original position if required by specific variant
++        # Source says: "Feed the directional vector d..., intermediate feature z_i(t), 
++        # and the original position (x,y,z) into MLP_theta2"
++        x_radiance = torch.cat([dir_enc, z_i, pts], dim=-1)
++        for layer in self.mlp_radiance:
++            x_radiance = F.relu(layer(x_radiance))
+             
+-        # Transient Mask Head
+-        self.mask_head = nn.Linear(hidden_dim, 1) # Outputs scalar probability per pixel after processing location
+-        
+-        # Static Color Head
+-        self.color_head = nn.Sequential(
+-            nn.Linear(hidden_dim, mask_head_dim),
+-            nn.Sigmoid()
+-        )
+-        
+-        # CNN Encoder for Image Embedding
+-        self.encoder = nn.Conv2d(3, 256, kernel_size=3, padding=1) # Simplified CNN structure
+-        
+-        # LaMa Inpainting Module (Pre-trained, assumed available as G_delta)
+-        self.inpainting_module = get_lama_model()
+-
+-    def forward(self, rays_o, rays_d, image_embeddings, pixel_coords, t_vals):
+-        """
+-        rays_o: (N, 3) ray origins
+-        rays_d: (N, 3) ray directions
+-        image_embeddings: (N, K_emb) image-specific embeddings l_i
+-        pixel_coords: (N, 2) 2D pixel locations (u, v) for mask generation
+-        t_vals: (N, K) sampled depths along rays
+-        """
+-        # 1. Compute 3D positions
+-        pts = rays_o.unsqueeze(1) + rays_d.unsqueeze(1) * t_vals.unsqueeze(2) # (N, K, 3)
+-        pts_flat = pts.reshape(-1, 3)
+-        
+-        # 2. Positional Encoding (Integrated PE)
+-        # Note: IPE is a specific encoding function. Here we assume a standard PE for brevity,
+-        # but in implementation, use mip-NeRF cone casting integration.
+-        pos_enc = positional_encoding(pts_flat, L=10)
+-        
+-        # 3. MLP_theta1: Density and Intermediate Feature
+-        # Input: pos_enc
+-        z_flat = self.mlp_theta1(pos_enc) # (N*K, hidden_dim)
+-        sigma_flat = z_flat[..., :1] # Density
+-        z_i_flat = z_flat[..., 1:] # Intermediate feature
+-        
+-        # 4. Prepare inputs for MLP_theta2
+-        # Concatenate: image_embedding (broadcasted), direction enc, z_i, original pos
+-        # Note: image_embedding is per-image, so it needs to be broadcast to rays belonging to that image.
+-        # For simplicity, assuming batch is organized by image or embedding is passed correctly.
+-        dir_enc = positional_encoding(rays_d, L=10)
+-        
+-        # Reshape for concatenation
+-        # z_i_flat: (N*K, hidden_dim)
+-        # dir_enc: (N, 3) -> need to expand to N*K
+-        # pos_enc: (N*K, hidden_dim)
+-        
+-        # Construct input for MLP_theta2
+-        # The paper states: "Feed the directional vector d (with encoding gamma_d), 
+-        # the intermediate feature zi(t), and the original position (x,y,z) into MLP_theta2"
+-        # Also "image-dependent radiance ci(t)" implies image embedding is part of the conditioning.
+-        
+-        # Re-reading Eq 7: ci(t) = MLP_theta2[gamma_d(d), zi(t)]
+-        # And text: "l_i and zi(t) combined with the original position (x,y,z) and directional d are fed into the second network"
+-        # This implies the input to MLP_theta2 is [gamma_d(d), zi(t), x, y, z, l_i]
+-        
+-        input_theta2 = torch.cat([dir_enc, z_i_flat, pts_flat, image_embeddings], dim=-1)
+-        
+-        c_i_flat = self.mlp_theta2(input_theta2) # (N*K, hidden_dim)
+-        
+-        # 5. Static Color
+-        static_color = self.color_head(c_i_flat) # (N*K, 3)
+-        
+-        # 6. Transient Mask Embedding and Generation
+-        # The text says: "The second part of the output of MLP_theta2 is the transient mask embedding l_t"
+-        # However, Eq 7 shows c_i(t) as the output. The notes say "MLP_theta2 ... predict image-dependent radiance ci(t) and transient mask embedding lt".
+-        # Let's assume MLP_theta2 outputs [c_i, l_t] or l_t is derived from c_i/z_i.
+-        # Notes: "transient mask embedding l_t ... processed by additional linear layers E_phi ... M_ij = E_phi(l_ij, l_t)"
+-        
+-        # Assuming l_t is extracted from the hidden representation or a separate head.
+-        # Based on "The second part of the output... is l_t", let's assume MLP_theta2 outputs 2*hidden_dim or similar.
+-        # For this pseudocode, we assume l_t is available from the network state or a split output.
+-        # Let's assume l_t is the second half of the output of a modified MLP_theta2 or derived.
+-        # To be safe and self-contained, we define a mask embedding head.
+-        l_t = c_i_flat # Placeholder: In reality, l_t is a specific latent vector. 
+-                       # The notes say "l_t ... processed by ... linear layers E_phi".
+-                       # Let's assume l_t is a feature vector of size H.
+-        
+-        # Generate Mask M_ij
+-        # M_ij = E_phi(l_ij, l_t)
+-        # l_ij is 2D pixel location. l_t is the embedding.
++        l_t = x_radiance[..., :1] # Transient mask embedding (simplified dimension)
++        c_i = x_radiance[..., 1:] # Radiance features
++        
++        # 5. Generate Transient Mask M_ij
++        # Map 2D pixel location l_ij and transient embedding l_t
++        # Source: M_ij = E_phi(l_ij, l_t)
++        # Assuming l_t is broadcasted or aggregated per pixel
+         mask_input = torch.cat([pixel_coords, l_t], dim=-1)
+-        M_flat = torch.sigmoid(self.mask_head(mask_input)) # (N*K, 1)
+-        
+-        # 7. Volumetric Rendering
+-        # Compute alpha and transmittance
+-        delta = t_vals[:, 1:] - t_vals[:, :-1]
+-        alpha = 1.0 - torch.exp(-sigma_flat * delta.unsqueeze(1)) # (N, K)
+-        T = torch.cumprod(1.0 - alpha + 1e-10, dim=1) # (N, K)
+-        
+-        # Render Color
+-        weights = T * alpha.unsqueeze(-1) # (N, K, 1)
+-        rendered_color = torch.sum(weights * static_color.reshape(-1, 3).unsqueeze(0), dim=1) # (N, 3)
+-        
+-        return rendered_color, M_flat, sigma_flat
+-
+-    def compute_loss(self, rendered_color, M_flat, original_images, inpainted_images, rendered_depth, inpainted_depth):
+-        # Static Loss: MSE outside mask, LPIPS inside mask
+-        # This requires pixel-wise masking logic which is complex to write fully without helper functions.
+-        # We outline the components.
+-        
+-        # L_s: Photometric loss
+-        # Outside mask: || C - C_hat ||^2
+-        # Inside mask: LPIPS(C, C_hat)
+-        
+-        # Transient Loss L_t
+-        # L_t = sum( (1-M) * ||C - C_s||^2 + lambda * M * ||C_s - C_hat_s||^2 )
+-        # Note: C_s is ground truth static color (approximated by inpainted image I_r)
++        M_ij = torch.sigmoid(self.mask_head(mask_input))
++        
++        # 6. Generate Static Color c
++        c_static = torch.sigmoid(self.color_head(c_i))
++        
++        # 7. Volumetric Rendering for Static Scene
++        # T(t_k) = exp(-sum(sigma * delta))
++        deltas = t_vals[:, 1:] - t_vals[:, :-1]
++        deltas = torch.cat([deltas, torch.ones_like(deltas[:, :1])], dim=-1)
++        
++        alpha = 1.0 - torch.exp(-F.relu(sigma) * deltas)
++        transmittance = torch.cumprod(torch.exp(-F.relu(sigma) * deltas), dim=1)
++        transmittance = torch.cat([torch.ones_like(transmittance[:, :1]), transmittance[:, :-1]], dim=1)
++        
++        weights = alpha * transmittance
++        C_rendered = torch.sum(weights.unsqueeze(-1) * c_static, dim=1)
++        
++        # Render Depth
++        D_rendered = torch.sum(weights * t_vals, dim=1)
++        
++        return C_rendered, D_rendered, M_ij, c_static
++
++    def compute_loss(self, C_rendered, D_rendered, M_ij, I_original, I_restored, D_restored):
++        """
++        C_rendered: Rendered static color
++        D_rendered: Rendered static depth
++        M_ij: Transient mask probability
++        I_original: Original input image
++        I_restored: Inpainted static image (from LaMa)
++        D_restored: Inpainted depth (from LaMa)
++        """
++        # Static Photometric Loss (outside mask)
++        # Masked out transient regions
++        static_mask = 1.0 - M_ij
++        L_s = torch.mean(static_mask * (C_rendered - I_original)**2)
++        
++        # Transient Loss
++        # Term 1: Occlusion error (outside mask)
++        # Term 2: Reconstruction error (inside mask) comparing rendered static to inpainted static
++        # Note: Source uses C_s(rij) which is the color from I_restored
++        L_t_occlusion = torch.mean((1 - M_ij) * (C_rendered - I_original)**2)
++        L_t_recon = torch.mean(M_ij * (C_rendered - I_restored)**2)
++        lambda_param = 1.0 # Example weight
++        L_t = L_t_occlusion + lambda_param * L_t_recon
++        
++        # Perceptual Loss (LPIPS) inside mask
++        # Implemented via external LPIPS metric between C_rendered and I_restored masked
++        L_lpips = compute_lpips(C_rendered * M_ij, I_restored * M_ij)
+         
+         # Depth Loss
+-        L_depth = torch.mean((rendered_depth - inpainted_depth)**2)
+-        
+-        return L_depth
++        L_depth = torch.mean((D_rendered - D_restored)**2)
++        
++        # Total Loss
++        alpha, beta, gamma, rho = 1.0, 1.0, 1.0, 1.0 # Weights
++        L_total = alpha * L_s + beta * L_t + gamma * L_lpips + rho * L_depth
++        
++        return L_total
+ ```
+ 
+-**Subtopics:**
+-*   **IE-NeRF(IM):** Uses an independent network without spatial constraints to generate the transient mask, lacking prior supervision and leading to artifacts [S1].
+-*   **IE-NeRF(SM):** Leverages a pre-trained semantic model (MaskDINO) to generate the transient mask, predefining transient objects (people, cars, etc.). It struggles with smaller occluders and shadows [S1].
+-
+ ## Operating characteristics
+-*   **Time and Memory Complexity:** The method uses a single NeRF pipeline (8 layers, 256 units) plus a CNN encoder and a LaMa inpainting module. LaMa is a ResNet-like architecture with 3 downsampling, 12 FFC residual, and 3 upsampling blocks. This adds significant inference time for the inpainting step during training supervision generation, but the NeRF itself is standard size.
++*   **Time and Memory Complexity:** The method uses a standard NeRF MLP architecture (8 layers, 256 units) plus a CNN encoder and a LaMa inpainting network. The LaMa model is pre-trained and frozen, adding inference time for the inpainting step but not training memory for the NeRF weights. The dual-network (coarse/fine) strategy from NeRF can be applied for sampling efficiency [S1].
+ *   **Measured Performance:** On the Phototourism dataset (Brandenburg Gate), IE-NeRF achieved PSNR 25.33, SSIM 0.898, and LPIPS 0.158, outperforming NeRF (18.90/0.816/0.232), NeRF-W (24.17/0.891/0.167), and Ha-NeRF (24.04/0.877/0.139) [S1].
+-*   **Scaling:** The method is evaluated on 2x downsampled images. It struggles with small datasets and sparse inputs because the transient mask lacks sufficient information to infer and guarantee the inpainting process [S1].
+-*   **Strengths:** Effectively separates transient components in uncontrolled environments without needing 3D transient fields or semantic priors. Uses frequency regularization (RegFre-IPE) to stabilize training [S1].
+-*   **Limitations:** Inpainting modules may produce blurry results and inconsistencies across views. High-frequency signals cause instability in transient separation. Requires pre-filtering of low-quality images (NIMA < 3) and images with >80% transient occupancy [S1].
++*   **Scaling:** Performance degrades on small datasets and sparse inputs because the transient mask lacks sufficient information for reliable inpainting [S1].
++*   **Strengths:** Effectively removes transient objects without requiring 3D transient fields or external semantic segmentation models. The frequency regularization strategy (RegFre-IPE) stabilizes training and improves early convergence [S1].
++*   **Limitations:** Inpainting modules may produce blurry results or view inconsistencies. The method relies on the accuracy of the transient mask generated by the MLPs; if the mask is inaccurate, the inpainting supervision is flawed [S1].
+ 
+ ## Background
+-IE-NeRF was proposed by Wang et al. from Sun Yat-sen University and Pengcheng Laboratory, published in *Neurocomputing* in 2024 (arXiv:2407.10695) [S1]. It addresses the limitations of standard NeRF and NeRF-W in "in-the-wild" scenarios where transient objects (pedestrians, vehicles) and varying illumination degrade novel view synthesis. Unlike NeRF-W which uses a 3D transient field, IE-NeRF introduces an image-dependent 2D mask map and an inpainting module to restore the static scene [S1].
++IE-NeRF was proposed by Wang et al. from Sun Yat-sen University and Pengcheng Laboratory, published in *Neurocomputing* in 2024 (arXiv:2407.10695v2) [S1]. It addresses the limitations of standard NeRF and NeRF-W in uncontrolled "in-the-wild" settings where transient objects (people, cars) and varying illumination degrade novel view synthesis. Unlike NeRF-W which uses a 3D transient field, IE-NeRF introduces an image-dependent 2D mask map and leverages the expertise of image inpainting (specifically the LaMa model) to restore static scene content [S1].
+ 
+ ## Sources

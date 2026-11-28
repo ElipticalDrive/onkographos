@@ -1,0 +1,282 @@
+--- v001.md
++++ v002.md
+@@ -1,5 +1,4 @@
+ # QuickSplat
+ 
+-Also called: QuickSplat: Fast 3D Surface Reconstruction via Learned Gaussian Initialization
+ 
+ ## Overview
+@@ -8,12 +7,12 @@
+ ## How it works
+ **Inputs and Outputs:**
+-*   **Input:** Posed multi-view images and a Structure-from-Motion (SfM) point cloud.
++*   **Input:** Posed multi-view images and a Structure-from-Motion (SfM) point cloud [S1].
+ *   **Output:** A set of 2D Gaussian primitives $G$ representing the scene, from which a mesh surface is extracted via TSDF fusion of rendered depth maps [S1].
+ 
+ **Data Structures:**
+-The scene is discretized into a sparse set of 3D voxels of size $v_d$. Each voxel is assigned a latent feature vector $f \in \mathbb{R}^{64}$ [S1].
+-*   **Voxel Grid:** Sparse 3D grid.
+-*   **Latent Feature:** $\mathbb{R}^{64}$ per voxel.
+-*   **Gaussian Primitives:** Decoded from voxel features. Each voxel predicts $v_g$ Gaussians [S1].
++The scene is discretized into a sparse set of 3D voxels of size $v_d$ [S1]. Each voxel is assigned a latent feature vector $f \in \mathbb{R}^{64}$ [S1].
++*   **Voxel Grid:** Sparse 3D grid [S1].
++*   **Latent Feature:** $\mathbb{R}^{64}$ per voxel [S1].
++*   **Gaussian Primitives:** Decoded from voxel features using a small MLP, with $v_g$ Gaussians predicted per voxel [S1].
+ 
+ **Parameters:**
+@@ -37,5 +36,5 @@
+ **Network Architectures:**
+ 1.  **Initializer Network ($\theta_I$):** Takes SfM points as input. Uses sparse 3D convolutions in an encoder-decoder architecture. Dense CNN blocks are used in the bottleneck followed by upsampling layers to increase voxel density. An occupancy head acts as a threshold to determine if a voxel should be allocated in the next higher resolution [S1].
+-2.  **Densifier Network ($\theta_D$):** Predicts additional voxel features in free space. Uses an encoder-decoder architecture similar to the initializer but with **no** dense blocks in the bottleneck to constrain growth to neighbors [S1]. Inputs include current Gaussians $G_t$, gradients $\nabla G_t$, and timestep $t$.
++2.  **Densifier Network ($\theta_D$):** Predicts additional voxel features in free space. Uses an encoder-decoder architecture similar to the initializer but with **no** dense blocks in the bottleneck to constrain growth to neighbors [S1]. Inputs include current Gaussians $G_t$, gradients $\nabla G_t$, and timestep $t$ [S1].
+ 3.  **Optimizer Network ($\theta_O$):** Uses a sparse 3D UNet architecture. Inputs are latent voxel features $G_t$ and their gradients $\nabla G_t$. It predicts an update vector $\Delta G_t$ normalized to $[-1, 1]$ [S1].
+ 
+@@ -43,7 +42,7 @@
+ 
+ 1.  **Initialization:**
+-    *   Discretize scene into sparse 3D voxels of size $v_d$.
+-    *   Assign latent feature $f \in \mathbb{R}^{64}$ to each voxel.
+-    *   Run Initializer Network $\theta_I$ on SfM points to predict initial voxel features.
++    *   Discretize scene into sparse 3D voxels of size $v_d$ [S1].
++    *   Assign latent feature $f \in \mathbb{R}^{64}$ to each voxel [S1].
++    *   Run Initializer Network $\theta_I$ on SfM points to predict initial voxel features [S1].
+     *   Decode voxel features into initial Gaussians $G_0$ [S1].
+ 
+@@ -55,5 +54,5 @@
+             $$n(t) = s / 2^t$$
+             where $s=20\text{K}$ [S1].
+-        *   Let $\bar{G}_t = G_t \cup \hat{G}_t$ be the concatenated set of existing and novel voxel features.
++        *   Let $\bar{G}_t = G_t \cup \hat{G}_t$ be the concatenated set of existing and novel voxel features [S1].
+         *   Initialize the gradient of novel voxels to zeros to obtain $\nabla \bar{G}_t$ [S1].
+     *   **Optimization:**
+@@ -65,5 +64,5 @@
+ 
+ 4.  **Surface Extraction:**
+-    *   Render depth maps from all training views using the final Gaussians.
++    *   Render depth maps from all training views using the final Gaussians [S1].
+     *   Run TSDF fusion on these depth maps to extract the mesh surface [S1].
+ 
+@@ -88,124 +87,108 @@
+ 
+ ```python
+-def quicksplat_rendering_loss(rendered_color, observed_color):
+-    """
+-    Computes the combined L1 and SSIM rendering loss.
+-    """
+-    l1_loss = 0.8 * torch.mean(torch.abs(rendered_color - observed_color))
+-    ssim_loss = 0.2 * (1 - ssim(rendered_color, observed_color))
+-    return l1_loss + ssim_loss
+-
+-def quicksplat_alpha_blending(gaussians, rays):
+-    """
+-    Renders color using alpha blending.
+-    """
+-    # Sort gaussians by depth along rays
+-    sorted_gaussians = sort_by_depth(gaussians, rays)
+-    accumulated_transmittance = 1.0
+-    rendered_color = 0.0
+-    for g in sorted_gaussians:
+-        # Alpha is opacity * 2D Gaussian value at intersection
+-        alpha = g.opacity * g.gaussian_2d_value(rays)
+-        color = g.color
+-        rendered_color += color * alpha * accumulated_transmittance
+-        accumulated_transmittance *= (1 - alpha)
+-    return rendered_color
+-
+-def quicksplat_initializer(sfm_points, voxel_size):
+-    """
+-    Initializes voxel features from SfM points.
+-    """
+-    # Discretize scene into sparse voxels
+-    voxels = discretize_scene(sfm_points, voxel_size)
+-    # Assign latent features
+-    voxel_features = assign_latent_features(voxels)
+-    # Run Initializer Network
+-    # Encoder-decoder with sparse 3D convs, dense bottleneck, upsampling
+-    voxel_features = initializer_network(voxel_features)
+-    return voxel_features
+-
+-def quicksplat_decode_gaussians(voxel_features, voxel_size):
+-    """
+-    Decodes voxel features into Gaussian primitives.
+-    """
+-    gaussians = []
+-    for voxel in voxel_features:
+-        # Predict v_g Gaussians per voxel
+-        for _ in range(v_g):
+-            # Position: relative to voxel center
+-            pos_offset = 2 * sigmoid(mlp_position_output) - 1
+-            position = voxel.center + (4 * voxel_size) * pos_offset
+-            
+-            # Opacity: from occupancy head
+-            opacity = sigmoid(occupancy_head_output)
+-            
+-            # Scale: softplus
+-            scale = softplus(mlp_scale_output)
+-            
+-            # Color: sigmoid
+-            color = sigmoid(mlp_color_output)
+-            
+-            # Rotation: normalized quaternion
+-            rotation = normalize_quaternion(mlp_rotation_output)
+-            
+-            gaussians.append(Gaussian(position, opacity, scale, color, rotation))
+-    return gaussians
+-
+-def quicksplat_densifier(voxel_features, gradients, timestep):
+-    """
+-    Predicts additional voxel features for densification.
+-    """
+-    # Encoder-decoder similar to initializer but NO dense blocks in bottleneck
+-    new_voxel_features = densifier_network(voxel_features, gradients, timestep)
+-    
+-    # Importance Sampling
+-    # Weight by occupancy predictions (interpreted as opacity)
+-    # Number of voxels n(t) = s / 2^t
+-    n_t = s / (2 ** timestep)
+-    selected_voxels = importance_sample(new_voxel_features, n_t)
+-    return selected_voxels
+-
+-def quicksplat_optimizer(voxel_features, gradients, timestep):
+-    """
+-    Predicts update vector for voxel features.
+-    """
+-    # Sparse 3D UNet
+-    update = optimizer_network(voxel_features, gradients, timestep)
+-    # Normalize to [-1, 1]
+-    update = torch.clamp(update, -1, 1)
+-    return update
+-
+-def quicksplat_optimize(sfm_points, images, voxel_size):
+-    """
+-    Main optimization loop.
+-    """
+-    # 1. Initialize
+-    voxel_features = quicksplat_initializer(sfm_points, voxel_size)
+-    
+-    # 2. Iterative Loop
++# Constants from evidence
++V_D = 0.04      # Voxel size in meters (4cm)
++V_G = 2         # Gaussians per voxel
++S = 20000       # Scaling factor for importance sampling
++T = 5           # Number of timesteps
++LR = 1e-4       # Learning rate
++
++def discretize_scene(sfm_points, voxel_size):
++    """Maps SfM points to a sparse 3D voxel grid."""
++    voxels = {}
++    for p in sfm_points:
++        idx = tuple(int(floor(coord / voxel_size)) for coord in p)
++        if idx not in voxels:
++            voxels[idx] = {'center': [coord * voxel_size for coord in idx], 'feature': [0.0] * 64}
++    return voxels
++
++def assign_latent_features(voxels):
++    """Initializes latent features for each voxel."""
++    for v in voxels.values():
++        v['feature'] = [0.0] * 64
++    return voxels
++
++def sort_by_depth(gaussians, rays):
++    """Sorts Gaussians by their intersection depth along each ray."""
++    sorted_list = []
++    for ray in rays:
++        ray_gaussians = [g for g in gaussians if intersects(g, ray)]
++        ray_gaussians.sort(key=lambda g: g.depth_along(ray))
++        sorted_list.extend(ray_gaussians)
++    return sorted_list
++
++def initializer_network(voxel_features):
++    """Encoder-decoder with sparse 3D convs, dense bottleneck, upsampling, and occupancy head."""
++    features = voxel_features
++    for layer in encoder_layers:
++        features = sparse_conv(features, layer)
++    features = dense_bottleneck(features)
++    for layer in decoder_layers:
++        features = upsample_conv(features, layer)
++    return features
++
++def densifier_network(voxel_features, gradients, timestep):
++    """Predicts additional voxel features using encoder-decoder without dense bottleneck."""
++    features = voxel_features
++    for layer in encoder_layers:
++        features = sparse_conv(features, layer)
++    # No dense bottleneck to constrain growth to neighbors
++    for layer in decoder_layers:
++        features = upsample_conv(features, layer)
++    return features
++
++def optimizer_network(voxel_features, gradients, timestep):
++    """Sparse 3D UNet predicting update vector."""
++    update = sparse_unet(voxel_features, gradients, timestep)
++    return clamp(update, -1.0, 1.0)
++
++def importance_sample(voxel_features, n_t):
++    """Selects top n_t voxels weighted by occupancy (opacity)."""
++    scores = [v['occupancy'] for v in voxel_features.values()]
++    indices = argsort(scores, descending=True)[:n_t]
++    return {k: v for i, k in enumerate(voxel_features.keys()) if i in indices}
++
++def render_depth_maps(gaussians, images):
++    """Renders depth maps from all training views."""
++    depth_maps = []
++    for img in images:
++        depth = render_depth(gaussians, img.camera)
++        depth_maps.append(depth)
++    return depth_maps
++
++def tsdf_fusion(depth_maps):
++    """Fuses depth maps into a mesh using TSDF."""
++    return mesh_from_tsdf(depth_maps)
++
++def quicksplat_optimize(sfm_points, images):
++    # 1. Initialization
++    voxels = discretize_scene(sfm_points, V_D)
++    voxels = assign_latent_features(voxels)
++    voxels = initializer_network(voxels)
++
++    # 2. Iterative Densification-Optimization Loop
+     for t in range(T):
+-        # Decode to Gaussians
+-        gaussians = quicksplat_decode_gaussians(voxel_features, voxel_size)
+-        
+-        # Render and Compute Gradients
+-        # Accumulate gradients from 100 training images
+-        gradients = compute_gradients(gaussians, images, num_images=100)
+-        
++        gaussians = decode_gaussians(voxels, V_D, V_G)
++
++        # Render and compute gradients accumulated over 100 images
++        gradients = accumulate_gradients(gaussians, images[:100])
++
+         # Densification
+-        new_voxels = quicksplat_densifier(voxel_features, gradients, t)
+-        combined_voxels = voxel_features + new_voxels
+-        # Initialize gradient of novel voxels to zeros
+-        combined_gradients = gradients + zeros_like(new_voxels)
+-        
++        new_voxels = densifier_network(voxels, gradients, t)
++        n_t = S / (2 ** t)
++        selected_new = importance_sample(new_voxels, n_t)
++        combined_voxels = merge(voxels, selected_new)
++        combined_gradients = merge(gradients, zeros_like(selected_new))
++
+         # Optimization
+-        update = quicksplat_optimizer(combined_voxels, combined_gradients, t)
+-        voxel_features = combined_voxels + update
+-        
+-        # Detach gradients for subsequent timesteps (end-to-end training logic)
+-        # Losses are calculated and backpropagated, then detached
+-        
++        update = optimizer_network(combined_voxels, combined_gradients, t)
++        voxels = merge(combined_voxels, update)
++
++        # Detach gradients for subsequent timesteps
++        detach_gradients()
++
+     # 3. Post-Training (Optional)
+     # Run 2000 steps of gradient descent without adaptive density control
+-    
++
+     # 4. Surface Extraction
+     depth_maps = render_depth_maps(gaussians, images)

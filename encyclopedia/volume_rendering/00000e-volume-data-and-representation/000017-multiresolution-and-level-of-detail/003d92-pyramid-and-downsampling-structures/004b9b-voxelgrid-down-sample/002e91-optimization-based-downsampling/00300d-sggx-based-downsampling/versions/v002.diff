@@ -1,0 +1,172 @@
+--- v001.md
++++ v002.md
+@@ -3,48 +3,139 @@
+ 
+ ## Overview
+-SGGX-based Downsampling is a method for reducing the resolution of microflake normal distributions in volume data [S1]. It addresses the loss of visual fidelity that occurs when averaging anisotropic distributions, by preserving the statistical properties of the microflake orientations [S1]. It differs from naive averaging by maintaining the directional coherence of the material, which is critical for accurate appearance in subsequent rendering stages [S1].
++SGGX-based Downsampling is a method for reducing the resolution of microflakes normal distributions in volume data by approximating a set of fine-scale Scalable Generalized Gaussian eXtension (SGGX) distributions with a coarser set [S1]. It solves the problem of geometric aliasing and loss of anisotropic detail when aggregating microgeometry, distinguishing itself from naive averaging by preserving the directional coherence of surface normals [S1]. This approach serves as the foundational geometric simplification step for higher-level optimization-based downsampling [HDCD15].
+ 
+ ## How it works
+-The method downsamples microflake normal distributions by aggregating them into larger blocks while preserving their statistical moments [S1].
+-
+-**Inputs:**
+-- A set of microflake normal distributions $N_i$ within a target block.
+-- Each distribution is represented by its normal vector $\mathbf{n}_i$ and potentially a spread parameter $\sigma_i$ [S1].
+-
+-**Outputs:**
+-- A single representative microflake normal distribution $N_{out}$ for the block [S1].
++**Inputs and Outputs:**
++*   **Input:** A set of $N$ SGGX distributions $\{D_i\}_{i=1}^N$, where each distribution $D_i$ is defined by a mean direction (tangent) $\mathbf{t}_i$, a spread parameter $\sigma_i$, and a weight $w_i$.
++*   **Output:** A reduced set of $M$ SGGX distributions $\{D'_j\}_{j=1}^M$ ($M < N$) that approximate the scattering properties of the input set.
+ 
+ **Data Structures:**
+-- The SGGX (Spherical Gaussian Geometry) distribution is defined by a mean direction $\mathbf{m}$ and a covariance matrix $\mathbf{C}$ [S1].
+-- For a set of normals $\{\mathbf{n}_i\}$, the aggregated mean $\mathbf{m}$ is the normalized sum of the normals:
+-  $$ \mathbf{m} = \frac{\sum_i \mathbf{n}_i}{\|\sum_i \mathbf{n}_i\|} $$
+-- The aggregated covariance $\mathbf{C}$ is computed from the scatter of the normals around the mean [S1]:
+-  $$ \mathbf{C} = \frac{1}{N} \sum_i (\mathbf{n}_i - \mathbf{m})(\mathbf{n}_i - \mathbf{m})^T $$
+-  where $N$ is the number of normals in the block [S1].
++Each SGGX distribution is represented by:
++*   $\mathbf{t}$: Unit vector representing the mean normal direction (3 floats).
++*   $\sigma$: Scalar spread parameter controlling the width of the Gaussian distribution (1 float).
++*   $w$: Weight representing the volume fraction or importance of the distribution (1 float).
+ 
+-**Steps:**
+-1. Collect all microflake normals $\mathbf{n}_i$ in the target voxel block [S1].
+-2. Compute the sum of normals $\mathbf{S} = \sum_i \mathbf{n}_i$ [S1].
+-3. Normalize $\mathbf{S}$ to obtain the mean direction $\mathbf{m}$ [S1].
+-4. Compute the covariance matrix $\mathbf{C}$ using the formula above [S1].
+-5. Construct the output SGGX distribution using $\mathbf{m}$ and $\mathbf{C}$ [S1].
++**Method Steps:**
++1.  **Initialization:** Start with the full set of $N$ distributions.
++2.  **Similarity Evaluation:** Compute a similarity metric between all pairs of distributions. The metric must account for both directional proximity (dot product of tangents) and spread compatibility. Distributions with similar tangents and compatible spreads are candidates for merging [S1].
++3.  **Hierarchical Merging:** Iteratively merge the most similar pair of distributions into a single representative distribution. This is treated as a hierarchical clustering problem [S1].
++    *   When merging $D_a$ and $D_b$ into $D'$, the new tangent $\mathbf{t}'$ is computed as a weighted average of the input tangents, normalized to unit length.
++    *   The new spread $\sigma'$ and weight $w'$ are computed to preserve the second-order moments of the combined distribution.
++    *   *Note:* The sources indicate that naive averaging of tangents can collapse them into perpendicular directions, losing accuracy. The method avoids this by evaluating samples of multiple distributions without simple averaging [S1].
++4.  **Termination:** Repeat step 3 until the number of distributions reaches the target count $M$.
++
++**Formulas:**
++Let $D_a = (\mathbf{t}_a, \sigma_a, w_a)$ and $D_b = (\mathbf{t}_b, \sigma_b, w_b)$.
++The merged weight is:
++$$ w' = w_a + w_b $$
++The merged tangent is:
++$$ \mathbf{t}' = \frac{w_a \mathbf{t}_a + w_b \mathbf{t}_b}{\| w_a \mathbf{t}_a + w_b \mathbf{t}_b \|} $$
++The spread $\sigma'$ is determined by preserving the variance of the combined distribution, ensuring the resulting SGGX accurately reflects the angular spread of the merged components [S1].
+ 
+ **Parameters:**
+-- Block size: Not given in the sources.
+-- Number of normals per block: Not given in the sources.
++*   Target number of distributions $M$: Determined by the desired Level of Detail (LoD) resolution. Not given in the sources.
++*   Similarity threshold: Controls when merging occurs. Not given in the sources.
+ 
+-**Edge cases:**
+-- If $\|\sum_i \mathbf{n}_i\| \approx 0$, the mean direction is undefined. This occurs when normals are uniformly distributed. In this case, the distribution is isotropic, and $\mathbf{C}$ should reflect uniform spread [G].
++**Edge Cases and Pitfalls:**
++*   **Degenerate Tangents:** If the weighted sum of tangents is near zero, normalization fails. A guard is required to handle this case [G].
++*   **Anisotropy Loss:** Naive averaging of tangents without considering the spread can lead to incorrect normal directions, particularly for highly anisotropic distributions [S1].
++
++**Pseudocode:**
++```python
++def sggx_downsample(distributions, target_count):
++    """
++    Downsample a list of SGGX distributions to a target count.
++    distributions: List of dicts with keys 't' (vec3), 'sigma' (float), 'w' (float).
++    target_count: Integer, the desired number of output distributions.
++    """
++    current_distributions = list(distributions)
++    
++    while len(current_distributions) > target_count:
++        best_pair = None
++        best_similarity = -1.0
++        
++        # Find the most similar pair
++        for i in range(len(current_distributions)):
++            for j in range(i + 1, len(current_distributions)):
++                d1 = current_distributions[i]
++                d2 = current_distributions[j]
++                similarity = compute_similarity(d1, d2)
++                if similarity > best_similarity:
++                    best_similarity = similarity
++                    best_pair = (i, j)
++        
++        if best_pair is None:
++            break
++            
++        i, j = best_pair
++        d1 = current_distributions[i]
++        d2 = current_distributions[j]
++        
++        # Merge d1 and d2
++        new_w = d1['w'] + d2['w']
++        weighted_t = d1['w'] * d1['t'] + d2['w'] * d2['t']
++        norm = vector_length(weighted_t)
++        
++        if norm < 1e-6:
++            # Handle degenerate case: average tangents directly
++            new_t = normalize(d1['t'] + d2['t'])
++        else:
++            new_t = weighted_t / norm
++            
++        # Compute new sigma preserving variance
++        # This step requires specific moment-matching formulas not fully detailed in sources
++        # Placeholder for exact variance preservation logic [G]
++        new_sigma = compute_new_sigma(d1, d2, new_w)
++        
++        new_dist = {
++            't': new_t,
++            'sigma': new_sigma,
++            'w': new_w
++        }
++        
++        # Remove the two merged distributions and add the new one
++        # Remove higher index first to avoid shifting
++        current_distributions.pop(j)
++        current_distributions.pop(i)
++        current_distributions.append(new_dist)
++        
++    return current_distributions
++
++def compute_similarity(d1, d2):
++    # Similarity based on tangent dot product and spread compatibility
++    # Higher similarity means easier to merge
++    dot_product = dot(d1['t'], d2['t'])
++    # Simple similarity metric; actual implementation may be more complex
++    return dot_product
++
++def vector_length(v):
++    return sqrt(v[0]**2 + v[1]**2 + v[2]**2)
++
++def normalize(v):
++    l = vector_length(v)
++    if l == 0:
++        return [0, 0, 1] # Default up vector
++    return [v[0]/l, v[1]/l, v[2]/l]
++
++def compute_new_sigma(d1, d2, new_w):
++    # Placeholder for exact variance preservation formula
++    # The sources state that spread is preserved to match second-order moments
++    # Specific formula not provided in the source text [G]
++    return (d1['sigma'] + d2['sigma']) / 2
++```
+ 
+ ## Subtopics
+ 
++### [Hierarchical SGGX Aggregation](7833-hierarchical-sggx-aggregation.md)
++A variant that treats distribution reduction as a hierarchical clustering problem, evaluating samples of multiple distributions without averaging them to preserve anisotropy better than naive aggregation.
++
+ ## Operating characteristics
+-- Time complexity: Linear in the number of normals in the block, $O(N)$, due to the summation and covariance calculation [S1].
+-- Memory complexity: $O(1)$ per block, storing only the mean and covariance [S1].
+-- Strengths: Preserves anisotropy better than simple averaging [S1].
+-- Limitations: Does not account for shadowing effects, which are addressed in subsequent optimization-based methods [S1].
++*   **Time Complexity:** $O(N^2 \cdot K)$ where $N$ is the number of distributions and $K$ is the number of merge steps, due to pairwise similarity evaluation. Not given in the sources.
++*   **Memory Complexity:** $O(N)$ to store the distributions.
++*   **Strengths:** Preserves high-frequency orientation details and anisotropy better than naive averaging. Produces accurate LoDs for complex multi-fiber fabrics [S1].
++*   **Limitations:** The optimization-based extension requires enormous amounts of parameters, making it intractable without low-resolution volumes. Not given in the sources.
+ 
+ ## Background
+-The method was introduced by Heitz et al. in 2015 [S1]. It serves as a foundational step for more advanced downsampling techniques that incorporate shadowing [S1].
++The method was introduced by Heitz et al. in [HDCD15] as a solution for downsampling microflakes normal distributions. It was later built upon by Zhao, Wu et al. [ZWDR16] for downsampling microflakes volumes taking into account shadowing effects. The approach has proven effective for challenging datasets including complex multi-fiber fabrics [S1].
+ 
+ ## Sources

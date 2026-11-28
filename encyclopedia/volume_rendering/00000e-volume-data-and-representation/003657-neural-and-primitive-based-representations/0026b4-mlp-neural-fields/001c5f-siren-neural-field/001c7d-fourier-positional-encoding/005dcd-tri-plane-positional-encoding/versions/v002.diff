@@ -1,0 +1,234 @@
+--- v001.md
++++ v002.md
+@@ -4,5 +4,5 @@
+ 
+ ## Overview
+-Tri-Plane Positional Encoding (PET) is a method for neural surface reconstruction that integrates frequency inductive biases into tri-plane representations to suppress high-frequency noise caused by the discrete nature of grid-based features [S1]. Unlike standard tri-planes which lack positional constraints, PET expands the 3D implicit function into a sum of trigonometric terms multiplied by 2D plane features, allowing an MLP to learn the coefficients directly [S1]. It sets itself apart from siblings like [Fourier Feature Networks](2765-fourier-feature-networks.md) by operating on 2D planar projections rather than 3D coordinates, and from [Off-Axis Positional Encoding](3503-off-axis-positional-encoding.md) by using orthogonal projections with specific windowed convolutions to avoid depth bleeding.
++Tri-Plane Positional Encoding (PET) is a neural surface reconstruction method that integrates frequency inductive biases into tri-plane representations to suppress high-frequency noise caused by the discrete nature of grid-based features [S1]. Unlike standard tri-planes which lack positional constraints, PET expands the 3D implicit function into a sum of trigonometric terms multiplied by 2D plane features, allowing an MLP to learn the coefficients directly [S1]. It sets itself apart from siblings like [Fourier Feature Networks](2765-fourier-feature-networks.md) by operating on 2D planar projections rather than 3D coordinates, and from [Off-Axis Positional Encoding](3503-off-axis-positional-encoding.md) by using orthogonal projections with specific windowed convolutions to avoid depth bleeding [S1].
+ 
+ ## How it works
+@@ -26,5 +26,5 @@
+ \Theta_{vt} = \begin{cases} \cos(tv) & t > 0 \\ 1 & t=0 \\ \sin(tv) & t < 0 \end{cases}
+ $$
+-The expansion is grouped into terms involving $\cos(mx)$, $\sin(mx)$, and residual terms. By defining 2D plane features as coefficients of these trigonometric functions, the 3D function is rewritten as [S1]:
++The expansion is grouped into terms involving $\cos(mx)$, $\sin(mx)$, and residual terms [S1]. By defining 2D plane features as coefficients of these trigonometric functions, the 3D function is rewritten as [S1]:
+ $$
+ f(x, y, z) = \text{MLP}(\text{flatten}([g_m(y,z)\cos(mx), g'_m(y,z)\sin(mx), h_n(x,z)\cos(ny), h'_n(x,z)\sin(ny), w_k(x,y)\cos(kz), w'_k(x,y)\sin(kz)]))
+@@ -56,6 +56,35 @@
+ import torch.nn.functional as F
+ 
+-class TriPlanePositionalEncoding:
++class WindowSelfAttention(nn.Module):
++    """Windowed self-attention convolution applied to non-overlapping patches [G]."""
++    def __init__(self, channels, window_size):
++        super().__init__()
++        self.window_size = window_size
++        self.dim = channels
++        self.qkv = nn.Linear(channels, channels * 3)
++        self.proj = nn.Linear(channels, channels)
++        
++    def forward(self, x):
++        # x: (B, C, H, W)
++        B, C, H, W = x.shape
++        # Split into non-overlapping patches
++        x = x.unfold(2, self.window_size, self.window_size).unfold(3, self.window_size, self.window_size)
++        x = x.reshape(B, C, -1, self.window_size * self.window_size)
++        x = x.permute(0, 2, 3, 1).reshape(-1, self.window_size * self.window_size, C)
++        
++        # Self-attention
++        q, k, v = self.qkv(x).chunk(3, dim=-1)
++        attn = (q @ k.transpose(-2, -1)) / (self.dim ** 0.5)
++        attn = attn.softmax(dim=-1)
++        out = self.proj(attn @ v)
++        
++        # Reshape back
++        out = out.reshape(B, -1, self.window_size, self.window_size, C)
++        out = out.permute(0, 4, 1, 2, 3).reshape(B, C, H, W)
++        return self.proj(out)
++
++class TriPlanePositionalEncoding(nn.Module):
+     def __init__(self, R=512, n_f=24, M=8, N=8, K=8, window_sizes=[4, 8, 16]):
++        super().__init__()
+         self.R = R
+         self.n_f = n_f
+@@ -71,12 +100,12 @@
+         
+         # Self-Attention Convolution layers for different window sizes
+-        # Note: SAC implementation details are abstracted here as per source [S1]
+         self.sac_layers = nn.ModuleList([
+-            SelfAttentionConv(n_f, window_size) for window_size in window_sizes
++            WindowSelfAttention(n_f, ws) for ws in window_sizes
+         ])
+         
+-        # MLP for SDF and Color
++        # MLP for SDF and Color (3 layers as per source [S1])
++        num_input_features = 6 * (M + N + K) * (len(window_sizes) + 1) * n_f
+         self.mlp = nn.Sequential(
+-            nn.Linear(6 * (M + N + K) * (len(window_sizes) + 1) * n_f, 256),
++            nn.Linear(num_input_features, 256),
+             nn.ReLU(),
+             nn.Linear(256, 256),
+@@ -92,63 +121,35 @@
+         
+         # 1. Generate multi-frequency features using SAC
+-        # T_base is the concatenation of original and SAC features
+-        T_base_xy = self.T_xy
+-        T_base_yz = self.T_yz
+-        T_base_xz = self.T_xz
+-        
+-        T_all_xy = [T_base_xy]
+-        T_all_yz = [T_base_yz]
+-        T_all_xz = [T_base_xz]
++        T_all_xy = [self.T_xy]
++        T_all_yz = [self.T_yz]
++        T_all_xz = [self.T_xz]
+         
+         for sac_layer in self.sac_layers:
+-            T_all_xy.append(sac_layer(T_base_xy))
+-            T_all_yz.append(sac_layer(T_base_yz))
+-            T_all_xz.append(sac_layer(T_base_xz))
++            T_all_xy.append(sac_layer(self.T_xy))
++            T_all_yz.append(sac_layer(self.T_yz))
++            T_all_xz.append(sac_layer(self.T_xz))
+             
+         # Concatenate along channel dimension
+-        # Shape: (1, n_f * (1 + len(window_sizes)), R, R)
+         T_xy_final = torch.cat(T_all_xy, dim=1)
+         T_yz_final = torch.cat(T_all_yz, dim=1)
+         T_xz_final = torch.cat(T_all_xz, dim=1)
+         
+-        # 2. Sample features at query points
+-        # Bilinear interpolation
+-        # xy coordinates for T_xy are (x, y)
+-        # yz coordinates for T_yz are (y, z)
+-        # xz coordinates for T_xz are (x, z)
+-        
+-        # Normalize coordinates to [-1, 1] for grid_sample if not already
+-        # Assuming xyz is already in [-1, 1] or normalized appropriately
+-        
+-        # Sample T_xy at (x, y)
+-        # grid_sample expects (N, C, H, W) and grid of (N, H_out, W_out, 2)
+-        # We need to reshape xyz for sampling
+-        xy_grid = torch.stack([x, y], dim=-1).unsqueeze(0).unsqueeze(0) # (1, 1, N, 2)
+-        features_xy = F.grid_sample(T_xy_final, xy_grid, align_corners=True).squeeze() # (C, N)
++        # 2. Sample features at query points using bilinear interpolation
++        # Normalize coordinates to [-1, 1] for grid_sample
++        xy_grid = torch.stack([x, y], dim=-1).unsqueeze(0).unsqueeze(0)
++        features_xy = F.grid_sample(T_xy_final, xy_grid, align_corners=True).squeeze(-1).squeeze(-1).permute(1, 0)
+         
+         yz_grid = torch.stack([y, z], dim=-1).unsqueeze(0).unsqueeze(0)
+-        features_yz = F.grid_sample(T_yz_final, yz_grid, align_corners=True).squeeze()
++        features_yz = F.grid_sample(T_yz_final, yz_grid, align_corners=True).squeeze(-1).squeeze(-1).permute(1, 0)
+         
+         xz_grid = torch.stack([x, z], dim=-1).unsqueeze(0).unsqueeze(0)
+-        features_xz = F.grid_sample(T_xz_final, xz_grid, align_corners=True).squeeze()
+-        
+-        # 3. Modulate with positional encoding
+-        # Flatten features to (N, C)
+-        features_xy = features_xy.permute(1, 0) # (N, C)
+-        features_yz = features_yz.permute(1, 0)
+-        features_xz = features_xz.permute(1, 0)
+-        
+-        C = features_xy.shape[1]
++        features_xz = F.grid_sample(T_xz_final, xz_grid, align_corners=True).squeeze(-1).squeeze(-1).permute(1, 0)
++        
++        # 3. Modulate with positional encoding and flatten
++        input_vector = []
+         num_windows = len(self.window_sizes) + 1
+         n_f_per_window = self.n_f
+         
+-        input_vector = []
+-        
+-        # X-axis terms: cos(mx), sin(mx) modulated by T_yz and T_xz features
+-        # The source indicates g_m(y,z) and h_n(x,z) etc.
+-        # We iterate over m, n, k and window indices
+-        
+         for w_idx in range(num_windows):
+-            # Features for this window
+             feat_xy_w = features_xy[:, w_idx*n_f_per_window : (w_idx+1)*n_f_per_window]
+             feat_yz_w = features_yz[:, w_idx*n_f_per_window : (w_idx+1)*n_f_per_window]
+@@ -156,32 +157,21 @@
+             
+             for m in range(1, self.M + 1):
+-                cos_mx = torch.cos(m * x)
+-                sin_mx = torch.sin(m * x)
+-                # Modulate yz and xz features with x-frequency terms
+-                # g_m(y,z) corresponds to features on yz plane
+-                # h_n(x,z) corresponds to features on xz plane
+-                # The source formula groups them. We flatten the modulation.
+-                term_g_cos = feat_yz_w * cos_mx.unsqueeze(1)
+-                term_g_sin = feat_yz_w * sin_mx.unsqueeze(1)
+-                input_vector.append(term_g_cos.flatten(1))
+-                input_vector.append(term_g_sin.flatten(1))
++                cos_mx = torch.cos(m * x).unsqueeze(1)
++                sin_mx = torch.sin(m * x).unsqueeze(1)
++                input_vector.append((feat_yz_w * cos_mx).flatten(1))
++                input_vector.append((feat_yz_w * sin_mx).flatten(1))
+                 
+             for n in range(1, self.N + 1):
+-                cos_ny = torch.cos(n * y)
+-                sin_ny = torch.sin(n * y)
+-                term_h_cos = feat_xz_w * cos_ny.unsqueeze(1)
+-                term_h_sin = feat_xz_w * sin_ny.unsqueeze(1)
+-                input_vector.append(term_h_cos.flatten(1))
+-                input_vector.append(term_h_sin.flatten(1))
++                cos_ny = torch.cos(n * y).unsqueeze(1)
++                sin_ny = torch.sin(n * y).unsqueeze(1)
++                input_vector.append((feat_xz_w * cos_ny).flatten(1))
++                input_vector.append((feat_xz_w * sin_ny).flatten(1))
+                 
+             for k in range(1, self.K + 1):
+-                cos_kz = torch.cos(k * z)
+-                sin_kz = torch.sin(k * z)
+-                term_w_cos = feat_xy_w * cos_kz.unsqueeze(1)
+-                term_w_sin = feat_xy_w * sin_kz.unsqueeze(1)
+-                input_vector.append(term_w_cos.flatten(1))
+-                input_vector.append(term_w_sin.flatten(1))
++                cos_kz = torch.cos(k * z).unsqueeze(1)
++                sin_kz = torch.sin(k * z).unsqueeze(1)
++                input_vector.append((feat_xy_w * cos_kz).flatten(1))
++                input_vector.append((feat_xy_w * sin_kz).flatten(1))
+                 
+-        # Concatenate all terms
+         final_input = torch.cat(input_vector, dim=1)
+         
+@@ -189,23 +179,4 @@
+         output = self.mlp(final_input)
+         return output
+-
+-class SelfAttentionConv(nn.Module):
+-    def __init__(self, channels, window_size):
+-        super().__init__()
+-        self.window_size = window_size
+-        # Simplified SAC: Just a placeholder for the operation described in [S1]
+-        # In practice, this involves dividing the plane into non-overlapping patches
+-        # and applying self-attention within each patch.
+-        self.conv = nn.Conv2d(channels, channels, kernel_size=1)
+-        
+-    def forward(self, x):
+-        # x: (1, C, R, R)
+-        # Apply self-attention convolution with window_size
+-        # This is a complex operation not fully detailed in pseudocode form in source
+-        # We assume a standard convolution as a proxy for the feature mixing
+-        # [G] The source specifies non-overlapping patches and self-attention.
+-        # A full implementation requires patching and attention mechanism.
+-        # Here we use a simple conv to represent the feature transformation.
+-        return self.conv(x)
+ ```
+ 
+@@ -216,6 +187,6 @@
+ ## Operating characteristics
+ - **Time Complexity:** Training time on DTU dataset is 9 hours on a single NVIDIA TITAN V100 [S1]. This is faster than VolSDF (12h), NeuS (16h), and HF-NeuS (20h) [S1].
+-- **Memory Complexity:** Not given in the sources.
+-- **Measured Performance:** Mesh extraction time is 20 seconds for 512 grid resolution. Rendering time is ~100 seconds for a 1600x1200 resolution image [S1].
++- **Memory Complexity:** Not given in the sources [S1].
++- **Measured Performance:** Mesh extraction time is 20 seconds for 512 grid resolution [S1]. Rendering time is ~100 seconds for a 1600x1200 resolution image [S1].
+ - **Strengths:** Faster training than competitors; suppresses high-frequency noise in grid-based features; avoids depth bleeding associated with Gaussian smoothing [S1].
+ - **Limitations:** Requires careful tuning of window sizes for SAC; relies on MLP capacity to approximate the error caused by finite truncation of Fourier series [S1].
+@@ -224,5 +195,5 @@
+ 
+ ## Background
+-Tri-Plane Positional Encoding was introduced in the paper "PET-NeuS: Positional Encoding Tri-Planes for Neural Surfaces" [S1]. It builds on the concept of tri-plane representations and integrates positional encoding to provide frequency inductive biases. The method was developed to address the issue of high-frequency noise in discrete grid-based features and the depth bleeding caused by simple smoothing techniques [S1].
++Tri-Plane Positional Encoding was introduced in the paper "PET-NeuS: Positional Encoding Tri-Planes for Neural Surfaces" [S1]. It builds on the concept of tri-plane representations and integrates positional encoding to provide frequency inductive biases [S1]. The method was developed to address the issue of high-frequency noise in discrete grid-based features and the depth bleeding caused by simple smoothing techniques [S1].
+ 
+ ## Sources

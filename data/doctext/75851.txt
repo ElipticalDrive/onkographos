@@ -1,0 +1,232 @@
+I've always wanted to make a colony simulator like Dwarf Fortress or Rimworld. So I've been spending the last few months learning Unreal Engine 4 in order to do so, and I've learned quite a bit. I think it's about time to start on this colony simulator. I want it to be tiled based and…
+
+UE4 Voxel: Instancing vs Chunking | Zades Dev Blog
+Skip to content
+I’ve always wanted to make a colony simulator like Dwarf Fortress or Rimworld. So I’ve been spending the last few months learning Unreal Engine 4 in order to do so, and I’ve learned quite a bit. I think it’s about time to start on this colony simulator.
+I want it to be tiled based and I want it to be 3d, so the first time to do is to generate a voxel world. The first time that comes to mind of a voxel world is obviously Minecraft.
+From one of Minecraft’s patch notes
+One of the things to consider is how to generate the voxel world. Minecraft uses a method called chunking. Using chunking, Minecraft would group a bunch of blocks into a chunk and then calculate which faces that players can see and then only render those faces as one giant mesh. This is a pretty performant approach as you only need to render one mesh per chunk instead of a lot of blocks. The downside of this is that if you want to change a block inside a chunk you will need to redo the entire chunk.
+The other way is to use instancing. Instancing allows you to only have one copy of an object and tell the GPU to draw it many many multiples of times in different locations. The advantage of this over chunking is that you can easier add/remove an instance. The disadvantage of this is that you are still drawing a lot of detail that the player will not see.
+Instancing
+First in UE4 I will need to get a noise generator in order to get the procedural heightmap of the world. This plugin on the marketplace is free and does a damn good job: https://www.unrealengine.com/marketplace/en-US/product/fast-noise-generator/questions
+For the instances, luckily UE4 comes built in with Hierarchical Instance Static Meshes to do this out of the box. HISMs also does LODs out of the box too!
+Here is a bit of the code snippet on how it’s running, all it’s doing right now is going through a 2d grid and getting a point of data from the noise generator and determining the height of the ground at that point. It then places a cube at that point using Hierarchical Instance Static Meshes.
+I only draw the cube at the surface for performance. There is no point actually drawing every cube in the world if you are not going to see them.
+```
+AHISMVoxelWorld::AHISMVoxelWorld()
+{
+ 	// Set this actor to call Tick() every frame.  You can turn this off to improve performance if you don't need it.
+	PrimaryActorTick.bCanEverTick = true;
+
+	NoiseWrapper = GenerateNoise();
+	
+	RootComp = CreateDefaultSubobject<USceneComponent>(TEXT("Root"));
+	RootComponent = RootComp;
+
+	VoxelsHISM = CreateDefaultSubobject<UHierarchicalInstancedStaticMeshComponent>(TEXT("VoxelsHISM"));
+	VoxelsHISM->SetupAttachment(RootComp);
+	
+	ConstructorHelpers::FObjectFinder<UStaticMesh> CubeMesh(TEXT("StaticMesh'/Engine/BasicShapes/Cube.Cube'"));
+
+	if(CubeMesh.Succeeded())
+	{
+		VoxelsHISM->SetStaticMesh(CubeMesh.Object);
+	}
+}
+
+void AHISMVoxelWorld::OnConstruction(const FTransform& Transform)
+{
+	Super::OnConstruction(Transform);
+	
+	GenerateGrid();
+	
+}
+void AHISMVoxelWorld::GenerateGrid()
+{
+	float CubeSize = 100;
+
+	VoxelsHISM->ClearInstances();
+
+	NoiseWrapper->SetupFastNoise(EFastNoise_NoiseType::Perlin, 1337, 0.1f, EFastNoise_Interp::Quintic, EFastNoise_FractalType::FBM, 3, 2.0, 0.5, 0.45, EFastNoise_CellularDistanceFunction::Euclidean, EFastNoise_CellularReturnType::CellValue );
+
+	for(int64 x = 0; x < XMax; x++)
+	{
+		for(int64 y = 0; y < YMax; y++)
+		{
+			float CurX = x*1.0f;//1.0f/XMax * x;
+			float CurY = y*1.0f;//1.0f/YMax * y;
+				
+			float NoiseValue = NoiseWrapper->GetNoise2D(CurX, CurY);
+
+			UE_LOG(LogTemp, Log, TEXT("Noise Value: %f, %f :%f"), CurX, CurY, NoiseValue);
+			
+			// Shift noise output range from -1,1 to 0,1
+			NoiseValue = (NoiseValue +1) / 2.0f;
+			
+			NoiseValue = round(ZMax * NoiseValue);
+
+			
+			if(NoiseValue > 0.0f)
+			{
+				const FVector CubeLocation = FVector(x * CubeSize, y * CubeSize, NoiseValue * CubeSize);
+				const FTransform T = FTransform(FRotator(0), CubeLocation, FVector(CubeSize * 0.01));
+				VoxelsHISM->AddInstance(T);
+			}
+			
+		}
+
+		UE_LOG(LogTemp, Log, TEXT("X: %d"), x);
+	}
+
+	VoxelsHISM->bAutoRebuildTreeOnInstanceChanges = true;
+	VoxelsHISM->BuildTreeIfOutdated(true, true);
+}
+```
+16x16x16 block
+Triangle Count
+It actually looks quite nice. There is a few issues such as holes since my logic for placing a block is rather simple.
+32x32x16 world
+Procedural Mesh and Chunking
+Minecraft stores it’s cubes in a 16x16x16 chunk for a reason. Minecraft procedurally renders a chunk as an entire mesh, and only those faces that face outwards (towards ‘air’ blocks), this allows it draw a lot of cubes without actually drawing any cubes.
+In order to do this in UE4 we can use the Runtime Mesh Component from the marketplace: https://www.unrealengine.com/marketplace/en-US/product/runtime-mesh-component
+After following the the example I got a triangle to generate.
+Now let’s do some chunking logic. Basically each cube face is 2 triangles and we test if we need to make the face by checking adjacent cubes and seeing if it’s an different type than the current cube. Right now we only have 1 cube type, so we just check if there is a cube or not in adjacent tiles. If a cube exists and a adjacent cube does not, that means we make a cube face.
+To prevent double checking (ex. cube A checks against cube B and then cube B checks against cube A again), we will only check in one direction, so cubes will only check against their positive x,y,z cubes. This may create some issues as border cubes of the chunk will have faces that won’t be checked but we can fix that later.
+One of the earlier attempts
+After some tweaking I managed to get it working.
+Working test I did on a 32x32x16 chunk
+There is still a lot of optimizations and fixes that can be added. Currently there is a lot of overlap vertices since I didn’t keep track of previously used ones. Greedy meshing algorithm can also be implemented to further boost performance.
+There isn’t that noticeable increase in performance, but it should scale better with a lot of blocks.
+Though looking at it now I can already see it being more annoying to work with. Changing individual blocks will need to have code that regenerate the entire chunk. Things that can be easily applied to pre-made meshes such as materials will need to have custom code to deal with it with chunks.
+Here is the code snippet for chunking. It’s messy don’t kill me.
+```
+URuntimeMeshProviderStatic* StaticProvider = NewObject<URuntimeMeshProviderStatic>(this, TEXT("RuntimeMeshProvider-Static"));
+	if(StaticProvider)
+	{
+		RuntimeMeshComponent->Initialize(StaticProvider);
+		TArray<FVector> Positions = TArray<FVector>();
+		TArray<FColor> Colors = TArray<FColor>();
+		TArray<int32> Triangles = TArray<int32>();
+		TArray<FVector> EmptyNormals;
+		TArray<FVector2D> EmptyTexCoords;
+		TArray<FRuntimeMeshTangent> EmptyTangents;
+
+		for(auto x = 0; x < 15; x++)
+		{
+			for(auto y = 0; y < 15; y++)
+			{
+				for(auto z = 0; z < 15; z++)
+				{
+					//const FVector CubeLocation = FVector(x * CubeSize, y * CubeSize, NoiseValue * CubeSize);
+					int64 Xdelta = chunk[x][y][z] - chunk[x + 1][y][z];
+					int64 Ydelta = chunk[x][y][z] - chunk[x][y + 1][z];
+					int64 Zdelta = chunk[x][y][z] - chunk[x][y][z + 1];
+
+					if(Xdelta == 0 && Ydelta == 0 && Zdelta == 0)
+					{
+						continue;
+					}
+					
+					FVector PosXYZ = FVector(x * CubeSize, y * CubeSize, z * CubeSize);
+
+					if (Xdelta != 0 )
+					{
+						FVector MinusY = FVector(x * CubeSize, (y-1) * CubeSize, z * CubeSize);
+						FVector MinusZ = FVector(x * CubeSize, y * CubeSize, (z-1) * CubeSize);
+						FVector MinusYZ = FVector(x * CubeSize, (y-1) * CubeSize, (z-1) * CubeSize);
+
+						int32 PosXYZIndex = Positions.Add(PosXYZ);
+						int32 MinusYIndex = Positions.Add(MinusY);
+						int32 MinusZIndex = Positions.Add(MinusZ);
+						int32 MinusYZIndex = Positions.Add(MinusYZ);
+						
+						if(Xdelta < 0)
+						{
+							Triangles.Append({PosXYZIndex, MinusYIndex, MinusYZIndex});
+							Triangles.Append({PosXYZIndex, MinusYZIndex, MinusZIndex});
+						}
+						else
+						{
+							Triangles.Append({MinusYZIndex, MinusYIndex, PosXYZIndex});
+							Triangles.Append({MinusZIndex, MinusYZIndex, PosXYZIndex});
+						}
+					}
+					
+					if (Ydelta != 0 )
+					{
+						FVector MinusX = FVector((x-1) * CubeSize, y * CubeSize, z * CubeSize);
+						FVector MinusZ = FVector(x * CubeSize, y * CubeSize, (z-1) * CubeSize);
+						FVector MinusXZ = FVector((x-1) * CubeSize, y * CubeSize, (z-1) * CubeSize);
+
+						int32 PosXYZIndex = Positions.Add(PosXYZ);
+						int32 MinusXIndex = Positions.Add(MinusX);
+						int32 MinusZIndex = Positions.Add(MinusZ);
+						int32 MinusXZIndex = Positions.Add(MinusXZ);
+						
+						if(Ydelta < 0)
+						{
+							Triangles.Append({PosXYZIndex, MinusZIndex, MinusXZIndex});
+							Triangles.Append({PosXYZIndex, MinusXZIndex, MinusXIndex});
+						}
+						else
+						{
+							Triangles.Append({MinusXZIndex, MinusZIndex, PosXYZIndex});
+							Triangles.Append({MinusXIndex, MinusXZIndex, PosXYZIndex});
+						}
+					}
+
+					if (Zdelta != 0 )
+					{
+						FVector MinusX = FVector((x-1) * CubeSize, y * CubeSize, z * CubeSize);
+						FVector MinusY = FVector(x * CubeSize, (y-1) * CubeSize, z * CubeSize);
+						FVector MinusXY = FVector((x-1) * CubeSize, (y-1) * CubeSize, z * CubeSize);
+
+						int32 PosXYZIndex = Positions.Add(PosXYZ);
+						int32 MinusXIndex = Positions.Add(MinusX);
+						int32 MinusYIndex = Positions.Add(MinusY);
+						int32 MinusXYIndex = Positions.Add(MinusXY);
+						
+						if(Zdelta < 0)
+						{
+							Triangles.Append({MinusXYIndex, MinusYIndex, PosXYZIndex});
+							Triangles.Append({MinusXIndex, MinusXYIndex, PosXYZIndex});
+						}
+						else
+						{
+							Triangles.Append({PosXYZIndex, MinusYIndex, MinusXYIndex});
+							Triangles.Append({PosXYZIndex, MinusXYIndex, MinusXIndex});
+						}
+					}
+				}	
+			}	
+		}
+		StaticProvider->CreateSectionFromComponents(0, 0, 0, Positions, Triangles, EmptyNormals, EmptyTexCoords, Colors, EmptyTangents, ERuntimeMeshUpdateFrequency::Infrequent, true);
+	}
+```
+Scaling
+From some simple tests chunking initializes a lot better at large scales. I’ve tested with large sizes at about 1024x1024x32 blocks total, if you chunk them at 32x32x32 chunks the map gets generated within a few seconds. The same map done with HISMs with freeze the game. I think there is some overhead with adding a lot of HISM instances at once. Trying it at smaller scales, after the initial freeze for spawning the map, HISM runs just as smooth as the chunking method.
+Conclusion
+I think both methods are pretty good and depending on what you are going for both methods can be used. The chunking method is definitely better in performance but it sacrifices usability, not to mention with UE4, HISMs are built in and easy to use out of the box while chunking is not. But the long initial start up for HISMs, especially at large sizes will become a problem later down the line, and as a result I would prefer using chunking methods.
+64x64x32 world done from 32x32x32 chunks using chunking
+Share this:
+Share on X (Opens in new window)
+X
+Share on Facebook (Opens in new window)
+Facebook
+Like Loading...
+Related
+Leave a Reply Cancel reply
+Comment
+Reblog
+Subscribe
+Subscribed
+Zades Dev Blog
+Have a WordPress.com account? Log in now.
+Zades Dev Blog
+Copy shortlinkView post in Reader
+Manage subscriptionsSign upLog in
+Report this content
+Collapse this bar
+%d
+Create your own website, free on WordPress.com.Create your own website.
+Start free

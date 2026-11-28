@@ -1,0 +1,99 @@
+# Tile and Slide Framework
+
+Also called: Snake-NeRF
+
+## Overview
+The Tile and Slide Framework (Snake-NeRF) is an out-of-core method that scales Neural Radiance Fields (NeRFs) to large-scale Earth observation scenes (e.g., 10km × 10km) by partitioning the volume into non-overlapping 3D tiles, each trained with its own independent NeRF [S1]. Unlike sibling methods that require multi-GPU dispatch or pre-training distillation, it operates on a single GPU by using a 2×2 sliding window of tiles and a segmented ray sampler to prevent catastrophic forgetting and ensure seamless rendering across tile boundaries [S1].
+
+## How it works
+**Inputs and Outputs:**
+*   **Input:** A set of $N_{im}$ satellite images covering a Region of Interest (ROI) with surface area $A_{ROI}$ and spatial resolution $SR$ (pix/m). The total input size is $N = N_{im} \times A_{ROI} \times SR^2$ pixels [S1].
+*   **Output:** A set of non-overlapping NeRF models, one per 3D tile, capable of rendering the scene with quality comparable to a single monolithic NeRF [S1].
+
+**Data Structures:**
+1.  **Tiling Grid:** A square grid aligned with East/North directions (UTM coordinates) [S1].
+2.  **Tile NeRFs:** Each tile contains a separate NeRF instance. The framework uses multi-resolution hash tables for geometry encoding and a global color network, similar to NeRF-XL [S1].
+3.  **Image Crops:** Images are cropped with overlap to ensure each tile NeRF receives all necessary pixels for its domain [S1].
+
+**Algorithm Steps:**
+1.  **Scene Partitioning:** Divide the ROI into non-overlapping 3D tiles aligned with UTM coordinates [S1].
+2.  **Image Cropping:** Crop input images with overlap so that every tile NeRF is trained with all pixels relevant to its spatial domain [S1].
+3.  **Sliding Window Progression:** Implement a 2×2 3D tile progression strategy (sliding window) [S1]. This ensures that during training, each ray is used at least once in a batch with all necessary NeRFs currently loaded in memory [S1].
+4.  **Segmented Sampling:** Use a segmented sampler that samples per-bounding box rather than on the entire ray [S1]. This guarantees seamless rendering along rays intersecting multiple bounding boxes [S1].
+5.  **Ray Computation:** Compute ray origins and directions on-the-fly using the Rational Polynomial Coefficients (RPCs) of each image, avoiding the storage of large ray datasets [S1].
+6.  **Training:** Train each tile NeRF independently. Because tiles are non-overlapping and persistent, information learned by a trained NeRF is not lost when training subsequent tiles [S1].
+
+**Pseudocode:**
+> **Unverified code.** The code below did not pass a test run against a reference implementation, or no test fits it, so it may contain errors.
+
+```python
+# Define tiling grid aligned with UTM coordinates
+tiles = create_square_grid(roi_area, tile_size)
+
+# Load image metadata (RPCs)
+images = load_satellite_images()
+
+# Initialize empty set of trained NeRFs
+trained_neRFs = {}
+
+# 2x2 Sliding Window Progression
+for tile_batch in sliding_window(tiles, window_size=2x2):
+    # Load only the NeRFs for the current window into GPU memory
+    current_neRFs = {tile: trained_neRFs.get(tile, init_neRF()) for tile in tile_batch}
+    
+    # For each tile in the current window
+    for tile in tile_batch:
+        # Get cropped images with overlap for this tile
+        cropped_images = crop_images_with_overlap(images, tile.bounding_box)
+        
+        # Initialize segmented sampler for this tile
+        sampler = SegmentedSampler(tile.bounding_box)
+        
+        # Training loop for this tile
+        while not converged(current_neRFs[tile]):
+            # Sample rays using segmented sampler (per-bounding box)
+            rays = sampler.sample(cropped_images)
+            
+            # Compute ray origins/directions on-the-fly from RPCs
+            for ray in rays:
+                ray.origin, ray.direction = compute_ray_from_rpc(ray, images)
+            
+            # Render and compute loss
+            colors = current_neRFs[tile].render(rays)
+            loss = compute_loss(colors, ray.pixel_values)
+            
+            # Update NeRF weights
+            current_neRFs[tile].update(loss)
+        
+        # Save trained NeRF to persistent storage
+        trained_neRFs[tile] = current_neRFs[tile]
+
+# All tiles trained; framework complete
+```
+
+**Parameters:**
+*   **Tile Size:** Not explicitly given in sources, but determined by the 2×2 sliding window constraint and GPU memory budget [S1].
+*   **Scene Scale:** Typical example is 10km × 10km at 30cm Ground Sample Distance, covered by 20 satellite images [S1].
+
+**Edge Cases and Pitfalls:**
+*   **Catastrophic Forgetting:** Training a single NeRF sequentially on subsets of rays causes loss of information on previously seen domains [S1]. The framework avoids this by using non-overlapping NeRFs [S1].
+*   **Memory Budget:** The framework must ensure runtime memory never exceeds a fixed budget [S1]. For a 10km × 10km scene, image data weighs ~200GB, NeRF weights ~600GB, and ray vectors ~1.4TB, which exceeds single GPU capacity [S1].
+*   **Boundary Artifacts:** Rays intersecting multiple bounding boxes must be handled seamlessly. The segmented sampler prevents 3D reconstruction errors along tile edges [S1].
+
+## Operating characteristics
+*   **Time Complexity:** Linear with respect to input size $N$ (number of pixels), i.e., $O(N)$ [S1].
+*   **Memory Complexity:** Constant with respect to input size, i.e., $O(1)$, as it never loads all images or networks simultaneously [S1].
+*   **Hardware:** Operates on a single GPU device [S1].
+*   **Quality:** Produces results similar to a reference untiled algorithm, $A_s(x) \approx A(x)$ [S1].
+*   **Strengths:** Eliminates the need for multi-GPU setups; prevents catastrophic forgetting; handles large-scale Earth observation data (e.g., 10km × 10km) [S1].
+*   **Limitations:** Requires careful tiling and cropping; relies on RPCs for ray computation; not suitable for scenes with high Z-variation (though adapted for low Z-variation Earth observation) [S1].
+*   **When to Use:** Large-scale satellite/airborne imagery where single-GPU memory is a constraint and seamless multi-tile rendering is required [S1].
+*   **When Not to Use:** Small scenes where a single NeRF fits in memory; scenes requiring complex loss functions that modify the original NeRF rendering equation (as this framework preserves the original equation) [S1].
+
+## Background
+*   **Origin:** Introduced in "Tile and Slide: A New Framework for Scaling NeRF from Local to Global 3D Earth Observation" (Snake-NeRF) [S1].
+*   **History:** Addresses the limitation of state-of-the-art NeRF methods being constrained to small scenes due to memory footprint [S1]. Previous work (e.g., Kilo-NeRF, NeRF-XL) palliated this by dividing scenes into NeRFs, but often required pre-training or multi-GPU setups [S1]. Snake-NeRF introduces an out-of-core method for single-GPU operation [S1].
+*   **Usage:** Used with multi-resolution hash tables to encode geometry combined with a global color network, as in NeRF-XL [S1]. Applied to Very High Spatial Resolution (VHRS) multi-view satellite imagery [S1].
+
+## Sources
+[S1] Tile and Slide : A New Framework for Scaling NeRF from Local to Global 3D Earth Observation, https://arxiv.org/abs/2507.01631v2, fetched 2026-10-26

@@ -1,0 +1,119 @@
+--- v013.md
++++ v014.md
+@@ -4,49 +4,60 @@
+ 
+ ## Overview
+-Step Size Optimization encompasses techniques that dynamically determine the distance $\Delta t$ to advance a ray during volume rendering or implicit surface marching, replacing fixed-step methods to balance computational cost and visual fidelity. It solves the inefficiency of uniform sampling in empty space and the aliasing/penetration artifacts of steps that are too large for local geometry. Unlike [Standard Constant Step Ray Marching](1080-standard-constant-step-ray-marching.md), which uses a uniform $\Delta t$, this family adapts the step length based on local scene properties such as Signed Distance Field (SDF) values, density gradients, or geometric gaps. It differs from [Sphere Tracing](1674-sphere-tracing.md) in that while sphere tracing strictly uses the SDF value as a lower bound for the step (often with a relaxation factor), step size optimization includes broader strategies like error estimation, gap limiting, and integration-based adaptive stepping that may not rely solely on the geometric distance bound.
++Step Size Optimization encompasses techniques that dynamically determine the distance $\Delta t$ to advance a ray during volume rendering or implicit surface marching, replacing fixed-step methods to balance computational cost and visual fidelity [G]. It solves the inefficiency of uniform sampling in empty space and the aliasing/penetration artifacts of steps that are too large for local geometry [G]. Unlike [Standard Constant Step Ray Marching](1080-standard-constant-step-ray-marching.md), which uses a uniform $\Delta t$, this family adapts the step length based on local scene properties such as Signed Distance Field (SDF) values, density gradients, or geometric gaps. It differs from [Sphere Tracing](1674-sphere-tracing.md) in that while sphere tracing strictly uses the SDF value as a lower bound for the step (often with a relaxation factor), step size optimization includes broader strategies like error estimation, gap limiting, and integration-based adaptive stepping that may not rely solely on the geometric distance bound.
+ 
+ ## Shared principles
+-All methods in this family operate on a ray defined by origin $\mathbf{o}$ and normalized direction $\mathbf{d}$, parameterized by distance $t$. The core loop evaluates a scene function (SDF, density field, or volume texture) at the current position $\mathbf{p} = \mathbf{o} + t\mathbf{d}$ to determine the next step size $\Delta t$ and check for termination.
++All methods in this family operate on a ray defined by origin $\mathbf{o}$ and normalized direction $\mathbf{d}$, parameterized by distance $t$ [G]. The core loop evaluates a scene function (SDF, density field, or volume texture) at the current position $\mathbf{p} = \mathbf{o} + t\mathbf{d}$ to determine the next step size $\Delta t$ and check for termination [G].
+ 
+ **Termination Conditions:**
+-1.  **Surface Hit:** The ray has intersected the target geometry. For SDFs, this is typically $|f(\mathbf{p})| < \epsilon$ or $f(\mathbf{p}) \le 0$. For volumes, this may be a density threshold or opacity accumulation [S1, unofficial].
+-2.  **Escape/Miss:** The ray has traveled beyond a maximum distance $t_{max}$ or exceeded a maximum iteration count $N_{max}$.
+-3.  **Early Termination (Volumes):** Accumulated opacity $\alpha_{acc}$ exceeds a threshold (e.g., $1 - \epsilon$), or accumulated transmission falls below a minimum threshold, allowing the ray to stop early as further contributions are negligible [S1, unofficial].
++1.  **Surface Hit:** The ray has intersected the target geometry [G]. For SDFs, this is typically $|f(\mathbf{p})| < \epsilon$ or $f(\mathbf{p}) \le 0$ [G]. For volumes, this may be a density threshold or opacity accumulation [G].
++2.  **Escape/Miss:** The ray has traveled beyond a maximum distance $t_{max}$ or exceeded a maximum iteration count $N_{max}$ [G].
++3.  **Early Termination (Volumes):** Accumulated opacity $\alpha_{acc}$ exceeds a threshold (e.g., $1 - \epsilon$), or accumulated transmission falls below a minimum threshold, allowing the ray to stop early as further contributions are negligible [G].
+ 
+ **Step Size Determination:**
+ The step size $\Delta t$ is computed based on the local scene properties:
+-*   **SDF-based:** $\Delta t$ is often derived from the SDF value $f(\mathbf{p})$, potentially scaled by a relaxation factor or Lipschitz constant $\lambda$ [S2].
+-*   **Volume-based:** $\Delta t$ may be fixed, adaptive based on density gradients, or constrained by minimum/maximum bounds to prevent aliasing or excessive computation [S2].
+-*   **Safety:** Steps must be chosen to ensure the ray does not penetrate the surface or skip over significant volumetric features, often requiring conservative clamping .
++*   **SDF-based:** $\Delta t$ is often derived from the SDF value $f(\mathbf{p})$, potentially scaled by a relaxation factor or Lipschitz constant $\lambda$ [G].
++*   **Volume-based:** $\Delta t$ may be fixed, adaptive based on density gradients, or constrained by minimum/maximum bounds to prevent aliasing or excessive computation [G].
++*   **Safety:** Steps must be chosen to ensure the ray does not penetrate the surface or skip over significant volumetric features, often requiring conservative clamping [G].
+ 
+ **Pseudocode Structure:**
+ ```python
+-def ray_march_loop(ray_origin, ray_direction, scene_func, max_dist, max_steps, epsilon):
++def ray_march_loop(ray_origin, ray_direction, scene_func, max_dist, max_steps, epsilon, min_step=1e-4, max_step=1.0):
++    """
++    Generic adaptive ray marching loop implementing shared principles.
++    scene_func(p) returns (val, alpha) where val is SDF/density and alpha is opacity.
++    """
+     t = 0.0
++    alpha_acc = 0.0
++    
+     for i in range(max_steps):
+-        if t > max_dist:
+-            return False, t
++        # Escape/Miss check
++        if t >= max_dist:
++            return False, t, alpha_acc
+         
++        # Evaluate scene
+         p = ray_origin + ray_direction * t
+-        val = scene_func(p)
++        val, alpha = scene_func(p)
+         
+-        # Termination: Hit
+-        if is_hit(val, epsilon):
+-            return True, t
++        # Surface Hit check (SDF)
++        if abs(val) < epsilon:
++            return True, t, alpha_acc
++            
++        # Early Exit check (Volume)
++        if alpha_acc >= 1.0 - epsilon:
++            return False, t, alpha_acc
++            
++        # Adaptive Step Calculation
++        # Use SDF/density magnitude as base step, fallback to max_step if negative/zero
++        step = abs(val) if val > 0 else max_step
++        step = max(min_step, min(step, max_step))
+         
+-        # Termination: Early Exit (Volume specific)
+-        if is_early_exit(val, t):
+-            return False, t # Or handle partial contribution
++        # Guard against zero/negative steps to prevent infinite loops
++        if step <= 0:
++            step = min_step
+             
+-        # Step Size Calculation
+-        step = compute_step_size(val, t, i)
++        t += step
++        alpha_acc += alpha * (1.0 - alpha_acc)
+         
+-        # Safety Clamp
+-        step = max(step, min_step)
+-        step = min(step, max_step)
+-        
+-        t += step
+-        
+-    return False, t
++    return False, t, alpha_acc
+ ```
+ 
+@@ -77,18 +88,17 @@
+ 
+ ### FBM Performance Optimization
+-Fractal Brownian Motion (FBM) performance optimization involves reducing the computational cost of noise evaluation during ray marching [S3]. Key techniques include:
+-1.  **Reducing Octave Count:** Use fewer octaves for distant objects based on distance $t$ or time, e.g., `int oct = 5 - int(log2(1.0 + t * 0.5))` [S3].
+-2.  **Multi-level LOD:** Assign different octave counts to different resolutions (e.g., 3, 9, 16 octaves) [S3].
+-3.  **Texture Sampling:** Use texture sampling instead of mathematical hash functions for noise generation to leverage hardware acceleration [S3].
+-4.  **Loop Unrolling:** Manually unroll small loops and slightly vary lacunarity to improve instruction pipelining [S3].
+-5.  **Adaptive Step Size:** Use distance-based adaptive stepping, e.g., `float dt = max(0.05, 0.02 * t)` [S3].
+-6.  **Directional Derivative:** Compute normals using a directional derivative instead of a full gradient, reducing sample count from 3 to 1 [S3].
+-7.  **Early Termination:** Break the FBM summation loop if the accumulated amplitude exceeds a threshold (e.g., 0.99) [S3].
++Fractal Brownian Motion (FBM) performance optimization involves reducing the computational cost of noise evaluation during ray marching . Key techniques include:
++1.  **Reducing Octave Count:** Use fewer octaves for distant objects based on distance $t$ or time, e.g., `int oct = 5 - int(log2(1.0 + t * 0.5))` .
++2.  **Multi-level LOD:** Assign different octave counts to different resolutions (e.g., 3, 9, 16 octaves) .
++3.  **Texture Sampling:** Use texture sampling instead of mathematical hash functions for noise generation to leverage hardware acceleration .
++4.  **Loop Unrolling:** Manually unroll small loops and slightly vary lacunarity to improve instruction pipelining .
++5.  **Adaptive Step Size:** Use distance-based adaptive stepping, e.g., `float dt = max(0.05, 0.02 * t)` .
++6.  **Directional Derivative:** Compute normals using a directional derivative instead of a full gradient, reducing sample count from 3 to 1 .
++7.  **Early Termination:** Break the FBM summation loop if the accumulated amplitude exceeds a threshold (e.g., 0.99) .
+ 
+ ## Background
+-Step size optimization evolved from the limitations of fixed-step ray marching, which either wasted samples in empty space or missed details with large steps. Early sphere tracing methods established the use of SDF values for step sizing [S2]. The specific use of L1 norms for volume slice stepping was identified to fix overlap artifacts in oblique views, leading to implementation requirements in libraries like Cornerstone3D [S1, unofficial]. Convexity enhancements were introduced to accelerate convergence for convex primitives, providing quadratic convergence rates [S2]. FBM optimizations address the high cost of procedural noise in ray marching, particularly for terrain and ocean rendering [S3]. Adaptive integration methods for volume rendering further refined step control by treating the rendering equation as a numerical integration problem [S1, unofficial].
++Step size optimization evolved from the limitations of fixed-step ray marching, which either wasted samples in empty space or missed details with large steps [G]. The specific use of L1 norms for volume slice stepping was identified to fix overlap artifacts in oblique views, leading to implementation requirements in libraries like Cornerstone3D [S1]. Convexity enhancements were introduced to accelerate convergence for convex primitives, providing quadratic convergence rates [S2]. FBM optimizations address the high cost of procedural noise in ray marching, particularly for terrain and ocean rendering . Adaptive integration methods for volume rendering further refined step control by treating the rendering equation as a numerical integration problem [S1].
+ 
+ ## Sources
+-[S1] A volume viewport steps an oblique slice by the L2 spacing, and shows the same voxels on two slices, https://github.com/cornerstonejs/cornerstone3D/issues/2912, fetched 2026-10-27 (unofficial)
+-[S2] (PDF) Sphere Tracing: A Geometric Method for the Antialiased Ray ..., https://www.researchgate.net/publication/2792108_Sphere_Tracing_A_Geometric_Method_for_the_Antialiased_Ray_Tracing_of_Implicit_Surfaces, fetched 2026-10-27
+-[S3] skills/skills/shader-dev/techniques/procedural-noise.md at main ..., https://github.com/MiniMax-AI/skills/blob/main/skills/shader-dev/techniques/procedural-noise.md, fetched 2026-10-27+[S1] A volume viewport steps an oblique slice by the L2 spacing, and shows the same voxels on two slices, https://github.com/cornerstonejs/cornerstone3D/issues/2912, fetched 2026-10-27
++[S2] (PDF) Sphere Tracing: A Geometric Method for the Antialiased Ray ..., https://www.researchgate.net/publication/2792108_Sphere_Tracing_A_Geometric_Method_for_the_Antialiased_Ray_Tracing_of_Implicit_Surfaces, fetched 2026-10-27

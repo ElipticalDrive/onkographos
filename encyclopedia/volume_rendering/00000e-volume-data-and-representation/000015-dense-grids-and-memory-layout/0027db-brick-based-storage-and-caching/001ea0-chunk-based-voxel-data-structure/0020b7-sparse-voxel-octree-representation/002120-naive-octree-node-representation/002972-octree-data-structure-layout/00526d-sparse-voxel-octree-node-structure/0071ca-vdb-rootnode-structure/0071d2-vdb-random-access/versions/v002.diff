@@ -1,0 +1,163 @@
+--- v001.md
++++ v002.md
+@@ -4,70 +4,114 @@
+ 
+ ## Overview
+-VDB Random Access is the algorithm for accessing arbitrary voxels in a Sparse Voxel Octree by traversing the tree from the `RootNode` [S1, unofficial]. It solves the problem of retrieving data values at specific $(x, y, z)$ coordinates in a sparse, unbounded domain. It is distinguished from sequential access methods by its ability to jump directly to any coordinate, and from hash-grid methods by its hierarchical structure which supports efficient pruning and tile values [S1, unofficial]. It builds on [VDB RootNode Structure](22350-vdb-rootnode-structure.md).
++VDB Random Access is the algorithm for accessing arbitrary voxels in a Vector Displacement Buffer (VDB) sparse voxel octree by traversing the tree from the `RootNode` [S1, unofficial]. It solves the problem of retrieving voxel values or tile values from an unbounded, dynamically resizable sparse grid without requiring sequential or stencil-based access patterns [S1, unofficial]. It differs from [VDB Random Insert](22375-vdb-random-insert.md) by strictly traversing existing structures rather than dynamically allocating child nodes during the operation, ensuring that the memory footprint remains low for sparse data while avoiding the overhead of allocation [S1, unofficial].
+ 
+ ## How it works
+-**Inputs and Outputs:**
+-*   Input: Integer coordinates $(x, y, z)$ of the target voxel.
+-*   Output: The value stored at that location, or the background value if the location is empty.
++**Inputs:**
++- Target voxel coordinates $(x, y, z)$.
++- The `RootNode` structure, which contains `mRootMap` (a map of child nodes) and `mBackground` (the default value for empty space).
++- The constant `Child::sLog2X`, `Child::sLog2Y`, `Child::sLog2Z` defining the logarithmic width of child nodes along each axis.
++
++**Outputs:**
++- The value associated with the voxel at $(x, y, z)$, or `mBackground` if the path terminates in an empty tile.
+ 
+ **Data Structures:**
+-*   `RootNode`: Contains `mRootMap` (a map of child pointers) and `mBackground` (default value).
+-*   `mRootMap`: Maps `rootKey` (tuple of integers) to child node pointers or tile values. Implemented as `std::map` or `google::dense_hash_map`.
+-*   `Child::sLog2X`, `Child::sLog2Y`, `Child::sLog2Z`: Static constants defining the logarithm of the child node's spatial extent along each axis.
+-*   `Log2N`: Static constant for hash map size estimation.
++- `mRootMap`: A map storing `RootData` (pointers to child nodes or tile values). It can be implemented as `std::map` (lexicographic order) or `google::dense_hash_map` (hash-based) [S1, unofficial].
++- `rootKey`: An array of three integers representing the signed origin of the child node containing the target coordinates [S1, unofficial].
+ 
+ **Steps:**
+-1.  **Compute Perfect Key:** Calculate the `rootKey` for the root map lookup. This key represents the origin of the child node containing $(x, y, z)$, ensuring no hash collisions for the root map [S1, unofficial].
+-    $$ \text{rootKey}[i] = x \ \& \ \sim((1 \ll \text{Child::sLog2X}) - 1) $$
+-    (Repeat for $y$ and $z$ using respective log constants). Note: Bitwise operations are performed on unsigned integers to handle signed coordinate representation correctly [S1, unofficial].
++1. **Compute Root Key:** Calculate the `rootKey` for the target coordinates $(x, y, z)$ by masking out the lower bits that correspond to the index space within a child node. This ensures a unique "perfect key" for each child node origin, avoiding collisions [S1, unofficial].
++   $$ \text{rootKey}[i] = x \ \& \ \sim((1 \ll \text{Child::sLog2X}) - 1) $$
++   (Repeat for $y$ and $z$ axes using respective log2 constants).
+ 
+-2.  **Root Map Lookup:**
+-    *   If using `std::map`: Lookup `rootKey` in `mRootMap`.
+-    *   If using `google::dense_hash_map`: Compute hash using Teschner et al.'s function [S1, unofficial]:
+-        $$ \text{rootHash} = ((1 \ll \text{Log2N}) - 1) \ \& \ (\text{rootKey}[0] \times 73856093 \ \oplus \ \text{rootKey}[1] \times 19349663 \ \oplus \ \text{rootKey}[2] \times 83492791) $$
+-        Lookup using `rootHash`.
+-    *   **Case A (No Entry):** Return `mBackground`. Terminate.
+-    *   **Case B (Tile Value):** If the map entry stores a tile value (indicating the entire child node has the same value), return that value. Terminate.
+-    *   **Case C (Child Node):** If the map entry stores a pointer to a child node, proceed to step 3.
++2. **Root Map Lookup:** Perform a lookup into `mRootMap` using the `rootKey`.
++   - If using `std::map`, the lookup uses the `rootKey` directly in lexicographic order [S1, unofficial].
++   - If using `google::dense_hash_map`, compute a hash value from the `rootKey` using the Teschner et al. hash function to generate uniformly distributed indices [S1, unofficial].
++     $$ \text{rootHash} = ((1 \ll \text{Log2N}) - 1) \ \& \ (\text{rootKey}[0] \times 73856093 \oplus \text{rootKey}[1] \times 19349663 \oplus \text{rootKey}[2] \times 83492791) $$
++     Where $\oplus$ is the bitwise XOR operator, $\&$ is bitwise AND, $\ll$ is bitwise left shift, and `Log2N` is a static constant estimating $\log_2$ of the size of `mRootMap` [S1, unofficial].
+ 
+-3.  **Recursive Traversal:**
+-    *   Determine the local coordinates within the child node:
+-        $$ \text{local}_i = x \ \& \ ((1 \ll \text{Child::sLog2X}) - 1) $$
+-        (Repeat for $y, z$).
+-    *   Traverse the child node (which may be an `InternalNode` or `LeafNode`) using its specific lookup logic (direct access tables) with `local` coordinates.
+-    *   If a tile value is encountered at any intermediate `InternalNode`, return it and terminate.
+-    *   If a `LeafNode` is reached, return the value at the leaf index.
++3. **Termination Check:**
++   - If no entry is found in `mRootMap`, return `mBackground` [S1, unofficial].
++   - If an entry is found and it represents a **tile value** (a value stored at a higher level of the octree), return that tile value immediately [S1, unofficial].
++   - In either case, terminate traversal [S1, unofficial].
++
++4. **Recursive Traversal:**
++   - If an entry is found and it represents a **child node**, retrieve the child node pointer.
++   - Recursively apply the random access algorithm to the child node, adjusting the coordinates $(x, y, z)$ by subtracting the `rootKey` offsets to obtain local coordinates within the child node's domain [S1, unofficial].
++   - Continue until a tile value is encountered or a `LeafNode` is reached. `LeafNode` access uses direct indexing into its value array [S1, unofficial].
+ 
+ **Parameters:**
+-*   `Child::sLog2X/Y/Z`: Typically 5 for $32^3$ nodes or 4 for $16^3$ nodes [S1, unofficial].
+-*   `Log2N`: Estimated base-2 logarithm of `mRootMap` size [S1, unofficial].
++- `Log2N`: Estimated base-2 logarithm of the number of entries in `mRootMap`, used for hash map sizing [S1, unofficial].
++- `Child::sLog2X/Y/Z`: Typically 12 for $4096^3$ domains or 14 for $16384^3$ domains, depending on the specific VDB configuration [S1, unofficial].
+ 
+ **Edge Cases and Pitfalls:**
+-*   **Signed Integers:** The `rootKey` computation must handle signed coordinates carefully. The source specifies using bitwise AND with unsigned integers to avoid undefined behavior with negative numbers in shift operations [S1, unofficial].
+-*   **Hash Collisions:** While the `rootKey` is "perfect" for `std::map`, hash maps require a good hash function to distribute keys uniformly. The Teschner hash is used to mitigate collisions in `google::dense_hash_map` [S1, unofficial].
+-*   **Empty Domain:** If the tree is empty, the root map lookup fails, and the background value is returned immediately [S1, unofficial].
++- **Precision:** The algorithm relies on bitwise operations on signed integers. Modern hardware two's complement representation is assumed; negative coordinates are handled correctly by the masking operation [S1, unofficial].
++- **Hash Collisions:** When using `google::dense_hash_map`, hash collisions are possible. The hash function combines the perfect key with Teschner's hash to minimize collisions, but worst-case complexity degrades to $O(n)$ if many keys collide [S1, unofficial].
++- **Empty Domains:** If the target coordinate is outside the allocated domain, the traversal will eventually hit a missing child or tile, returning `mBackground` [S1, unofficial].
++
++```python
++def vdb_random_access(root_node, x, y, z):
++    # Step 1: Compute rootKey
++    # Assuming Child::sLog2X, sLog2Y, sLog2Z are constants
++    mask_x = ~((1 << Child.sLog2X) - 1)
++    mask_y = ~((1 << Child.sLog2Y) - 1)
++    mask_z = ~((1 << Child.sLog2Z) - 1)
++    
++    root_key = [
++        x & mask_x,
++        y & mask_y,
++        z & mask_z
++    ]
++    
++    # Step 2: Lookup in mRootMap
++    # Check if using hash map or std::map
++    if root_node.is_hash_map:
++        # Compute hash using Teschner et al. function
++        log2n = root_node.Log2N
++        hash_val = ((1 << log2n) - 1) & (
++            (root_key[0] * 73856093) ^ 
++            (root_key[1] * 19349663) ^ 
++            (root_key[2] * 83492791)
++        )
++        entry = root_node.mRootMap.get_by_hash(root_key, hash_val)
++    else:
++        entry = root_node.mRootMap.get_by_key(root_key)
++        
++    # Step 3: Termination Check
++    if entry is None:
++        return root_node.mBackground
++    
++    if entry.is_tile_value:
++        return entry.value
++    
++    # Step 4: Recursive Traversal
++    child_node = entry.child_node
++    # Adjust coordinates to local space of the child node
++    local_x = x - root_key[0]
++    local_y = y - root_key[1]
++    local_z = z - root_key[2]
++    
++    return child_node.random_access(local_x, local_y, local_z)
++```
+ 
+ ## Subtopics
+ 
+ ### VDB Random Access Complexity
+-*   **Definition:** Analysis of worst-case time complexity for random lookups in VDB, considering `RootNode` implementation and node types [S1, unofficial].
+-*   **Complexity:**
+-    *   If `RootNode` is an `InternalNode` (fixed resolution $64^3$), worst-case complexity is $O(1)$ [S1, unofficial].
+-    *   If `RootNode` uses `std::map`, complexity is $O(\log n)$, where $n$ is the number of entries in `mRootMap` [S1, unofficial].
+-    *   If `RootNode` uses `google::dense_hash_map`, average complexity is $O(1)$, worst-case $O(n)$ [S1, unofficial].
+-*   **Comparison:** VDB supports constant-time random access (lookup, insertion, deletion) on average, independent of topology/resolution. In contrast, DT-Grid and H-RLE do not support random insertion/deletion and have logarithmic random lookup complexity [S1, unofficial].
++- **Definition:** Analysis of the worst-case time complexity for random lookups in VDB, considering the `RootNode` implementation (`std::map` vs. hash map) and node types (`InternalNode` vs. `LeafNode`) [S1, unofficial].
++- **Complexity:**
++  - If `InternalNode` is used at the top level, the worst-case random lookup complexity is $O(1)$ [S1, unofficial].
++  - If `RootNode` uses `std::map`, the complexity is $\log(n)$, where $n$ is the number of entries in `mRootMap` [S1, unofficial].
++  - If `RootNode` uses an optimized hash map (e.g., `google::dense_hash_map`), the average complexity is $O(1)$, but the worst-case time is $O(n)$ due to potential hash collisions [S1, unofficial].
++- **Comparison:** VDB supports constant-time random access (lookup, insertion, deletion) on average, independent of topology or resolution. In contrast, DT-Grid and H-RLE do not support random insertion/deletion and have logarithmic random lookup complexity relative to the local topology of the dataset [S1, unofficial].
+ 
+ ## Operating characteristics
+-*   **Time Complexity:** $O(1)$ average case with hash map, $O(\log n)$ with `std::map`, or $O(1)$ worst-case with fixed `InternalNode` root [S1, unofficial].
+-*   **Memory Complexity:** Depends on the sparsity and the number of active nodes. The root map size $n$ is typically small due to large child node sizes [S1, unofficial].
+-*   **Strengths:** Supports extreme resolutions, hierarchical adaptive structure, and efficient sequential access alongside random access [S1, unofficial].
+-*   **Limitations:** Truly uniform random access should be avoided in practice due to spatial coherence in grid operations; sequential access patterns are more efficient [S1, unofficial].
+-*   **When to Use:** When dynamic topology, unbounded domains, or frequent insertions/deletions are required.
+-*   **When Not to Use:** When memory overhead of map structures is prohibitive or when access patterns are strictly sequential (use linearized grids instead).
++- **Time Complexity:** Average $O(1)$ for hash-based `RootNode`, $O(\log n)$ for `std::map`-based `RootNode`, and $O(1)$ for `InternalNode`-based `RootNode` [S1, unofficial].
++- **Memory Complexity:** Depends on the sparsity of the data and the number of active child nodes in `mRootMap`. The hash map implementation may use more memory due to hash table overhead but offers faster average access [S1, unofficial].
++- **Strengths:** Supports extreme resolutions, hierarchical and adaptive data structures, and fast random access independent of dataset topology [S1, unofficial].
++- **Limitations:** Truly uniform random access should be avoided in practice due to spatial coherence in grid operations; sequential or stencil-based access is more efficient [S1, unofficial]. Worst-case hash map performance can degrade to $O(n)$ [S1, unofficial].
++- **When to Use:** When dynamic topology changes are required, or when random access to arbitrary voxels is needed in a sparse, high-resolution volume.
++- **When Not to Use:** When memory is extremely constrained and sparsity is low, or when access patterns are highly sequential (where linear scans or specialized structures like DT-Grid might be more efficient).
+ 
+ ## Background
+-*   **Origin:** Introduced by Ken Museth in "VDB: High-Resolution Sparse Volumes with Dynamic Topology" (TOG 2013) [S1, unofficial].
+-*   **History:** Developed to address the limitations of dense grids and earlier sparse representations like DT-Grid and H-RLE, which lacked efficient random insertion/deletion and dynamic topology support [S1, unofficial].
+-*   **Usage:** Widely used in visual effects and scientific visualization for large-scale volumetric data, such as fluid simulations and terrain data [S1, unofficial].
++The VDB (Vector Displacement Buffer) structure was introduced by Ken Museth in the paper "VDB: High-Resolution Sparse Volumes with Dynamic Topology" (ACM Transactions on Graphics, 2013) [S1, unofficial]. The algorithm for random access is a fundamental operation within this structure, designed to support dynamic topology changes and extreme resolutions while maintaining efficient access times. The use of perfect keys for the root map and the combination with Teschner et al.'s hash function for hash-based implementations are key innovations described in the original work [S1, unofficial].
+ 
+ ## Sources

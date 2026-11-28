@@ -1,0 +1,352 @@
+--- v005.md
++++ v006.md
+@@ -21,5 +21,5 @@
+ 
+ ### Parameters
+-*   $\alpha_{low}$: A predefined minimum splatting opacity constant used as the threshold for culling. This value is set in the original 3DGS model [S1].
++*   $\alpha_{low}$: A predefined minimum splatting opacity constant used as the threshold for culling [S1].
+ *   Tile Size: Typically $16 \times 16$ pixels [S1].
+ 
+@@ -38,15 +38,15 @@
+             $$ A = \Sigma'_{YY}, \quad B = \Sigma'_{XX}, \quad C = -2\Sigma'_{XY} $$
+             $$ D = -2 \sqrt{\Sigma'_{XX} \Sigma'_{YY} - \Sigma'_{XY}^2} \ln \left( \frac{\sigma_i}{\alpha_{low}} \right) $$
+-        iii. Calculate $r_{ad}$ as the radius of the bounding circle of this ellipse [S1].
++        iii. Calculate $r_{ad}$ as half the major axis length of this ellipse [S1].
+     c.  Calculate the **Original Radius** ($r_o$):
+         i.  Determine the radius based on the 99% confidence interval of the Gaussian [S1].
+     d.  Determine the **Final Culling Radius** ($r$):
+         $$ r = \min(r_{ad}, r_o) $$
+-        *Note:* If $\sigma_i$ is high or $\alpha_{low}$ is low, $r_{ad}$ may exceed $r_o$. Clamping to $r_o$ ensures the rendering range does not exceed the standard confidence interval [S1].
+-    e.  **AABB Culling (Optional/Enhanced):**
+-        i.  Calculate the maximum x and y coordinates ($x_{max}, y_{max}$) of the ellipse defined in step 1.b.
+-        ii. Set half-width $w = x_{max}$ and half-height $h = y_{max}$.
+-        iii. Use the Axis-Aligned Bounding Box (AABB) defined by $w$ and $h$ to cull tiles. This provides more accurate culling in the minor axis direction than the circular adaptive radius [S1].
+-    f.  Identify all tiles overlapping with the Gaussian using the calculated radius/AABB and generate Gaussian-Tile pairs [S1].
++        *Note:* If $\sigma_i$ is high or $\alpha_{low}$ is low, $r_{ad}$ may exceed $r_o$ [S1]. Clamping to $r_o$ ensures the rendering range does not exceed the standard confidence interval [S1].
++    e.  **AABB Culling:**
++        i.  Calculate the maximum x and y coordinates ($x_{max}, y_{max}$) of the ellipse defined in step 1.b [S1].
++        ii. Set half-width $w = x_{max}$ and half-height $h = y_{max}$ [S1].
++        iii. Use the Axis-Aligned Bounding Box (AABB) defined by $w$ and $h$ to cull tiles, which provides more accurate culling in the minor axis direction than the circular adaptive radius [S1].
++    f.  Identify all tiles overlapping with the Gaussian using the calculated AABB and generate Gaussian-Tile pairs [S1].
+ 
+ 2.  **Pipeline Stages:**
+@@ -62,5 +62,5 @@
+ 2.  **Adjust Gaussian Count:**
+     *   For **heavy-load pixels** (high variance/many Gaussians): Reduce the number of rendered Gaussians to minimize thread waiting time [S1].
+-    *   For **light-load pixels** (low variance/few Gaussians): Increase the number of rendered Gaussians (if possible/applicable) to hedge against quality loss [S1].
++    *   For **light-load pixels** (low variance/few Gaussians): Increase the number of rendered Gaussians to hedge against quality loss [S1].
+ 3.  **Render:** Execute the Render stage in parallel for all pixels using the balanced set of Gaussians [S1].
+ 
+@@ -71,212 +71,127 @@
+ import numpy as np
+ 
+-def compute_ellipse_coeffs(sigma_prime):
+-    """
+-    Computes coefficients A, B, C, D for the ellipse equation:
+-    A*x^2 + B*y^2 + C*x*y + D <= 0
+-    Derived from x^T * Sigma'^-1 * x <= 2 * ln(sigma / alpha_low)
+-    """
+-    # Sigma' is a 2x2 matrix [[Sigma_XX, Sigma_XY], [Sigma_XY, Sigma_YY]]
++class Gaussian:
++    def __init__(self, center_2d, opacity, projected_covariance, color, depth):
++        self.center_2d = np.array(center_2d, dtype=float)
++        self.opacity = opacity
++        self.projected_covariance = np.array(projected_covariance, dtype=float)
++        self.color = np.array(color, dtype=float)
++        self.depth = depth
++
++def compute_ellipse_params(sigma_prime, sigma_i, alpha_low):
+     Sigma_XX = sigma_prime[0, 0]
+     Sigma_YY = sigma_prime[1, 1]
+     Sigma_XY = sigma_prime[0, 1]
+-    
+     A = Sigma_YY
+     B = Sigma_XX
+     C = -2 * Sigma_XY
+-    
+-    # D depends on sigma_i and alpha_low, handled in the main loop
+-    return A, B, C, Sigma_XX, Sigma_YY, Sigma_XY
+-
+-def get_ellipse_extents(A, B, C, D):
+-    """
+-    Calculates the maximum x and y extents (x_max, y_max) of the ellipse
+-    defined by Ax^2 + By^2 + Cxy + D <= 0.
+-    These define the half-width (w) and half-height (h) of the AABB.
+-    """
+-    # To find max x, set dy/dx = 0 or solve for y in terms of x and find bounds.
+-    # Alternatively, find the bounding box of the ellipse.
+-    # The bounding box of Ax^2 + Bxy + Cy^2 + ... is complex.
+-    # Simplified approach: The max x is when the tangent is vertical.
+-    # However, standard geometric formulas for ellipse bounding box are preferred.
+-    # For an ellipse centered at origin:
+-    # x_max = sqrt( -D * (A*C - B^2/4) / (B^2 - 4AC) ) ? No, simpler to use eigenvalues.
+-    
+-    # Let's use the eigenvalue method for the bounding box of the quadratic form.
+-    # The matrix of the quadratic part is M = [[A, C/2], [C/2, B]]
++    D = -2 * math.sqrt(Sigma_XX * Sigma_YY - Sigma_XY**2) * math.log(sigma_i / alpha_low)
++    return A, B, C, D, Sigma_XX, Sigma_YY, Sigma_XY
++
++def get_adaptive_radius(A, B, C, D):
+     M = np.array([[A, C/2], [C/2, B]])
+-    
+-    # Eigenvalues of M
+     eigenvalues = np.linalg.eigvals(M)
+-    lambda1, lambda2 = eigenvalues[0], eigenvalues[1]
+-    
+-    # The equation is lambda1 * u^2 + lambda2 * v^2 = -D (in rotated frame)
+-    # So u_max = sqrt(-D / lambda1), v_max = sqrt(-D / lambda2)
+-    # We need to rotate these back to x,y.
+-    # This is complex. A simpler approximation often used in rasterization is:
+-    # w = sqrt(-D / A) if C is small? No.
+-    
+-    # Let's stick to the source description: "maximum values in the two coordinate directions"
+-    # We can find x_max by solving for y that minimizes the quadratic for a given x,
+-    # or simply finding the extrema of x on the ellipse.
+-    # dx/dy = 0 => 2Ax + Cy = 0 => x = -Cy / 2A
+-    # Substitute into ellipse eq:
+-    # A(-Cy/2A)^2 + B y^2 + C(-Cy/2A)y + D = 0
+-    # (C^2/4A) y^2 + B y^2 - (C^2/2A) y^2 + D = 0
+-    # y^2 ( C^2/4A + B - C^2/2A ) = -D
+-    # y^2 ( B - C^2/4A ) = -D
+-    # y^2 ( (4AB - C^2) / 4A ) = -D
+-    # y_max = sqrt( -D * 4A / (4AB - C^2) )
+-    
+-    # Similarly for x_max:
+-    # x_max = sqrt( -D * 4B / (4AB - C^2) )
+-    
++    lambda_min = min(eigenvalues)
++    if lambda_min <= 0:
++        return 0.0
++    return math.sqrt(-D / lambda_min)
++
++def get_aabb_extents(A, B, C, D):
+     det = 4 * A * B - C * C
+     if det <= 0:
+-        return 0, 0 # Degenerate
+-        
+-    y_max = math.sqrt( (-D * 4 * A) / det )
+-    x_max = math.sqrt( (-D * 4 * B) / det )
+-    
++        return 0.0, 0.0
++    x_max = math.sqrt(-D * 4 * B / det)
++    y_max = math.sqrt(-D * 4 * A / det)
+     return x_max, y_max
+ 
+-def ad_r_gaussian_preprocess(gaussians, alpha_low):
+-    """
+-    Phase 1: Early Culling
+-    Returns a list of Gaussian-Tile pairs.
+-    """
++def get_original_radius_99(sigma_prime):
++    # Standard 99% confidence interval for 2D Gaussian [G]
++    eigenvalues = np.linalg.eigvals(sigma_prime)
++    lambda_max = max(eigenvalues)
++    return math.sqrt(-2 * math.log(0.01) * lambda_max)
++
++def ad_r_gaussian_preprocess(gaussians, alpha_low, tile_size=16):
+     gaussian_tile_pairs = []
+-    
+     for g in gaussians:
+         sigma_i = g.opacity
+-        sigma_prime = g.projected_covariance # 2x2 matrix
+-        
+-        # 1. Calculate Adaptive Radius
+-        A, B, C, S_XX, S_YY, S_XY = compute_ellipse_coeffs(sigma_prime)
+-        
+-        # D term for adaptive radius
+-        log_term = math.log(sigma_i / alpha_low)
+-        D_ad = -2 * math.sqrt(S_XX * S_YY - S_XY**2) * log_term
+-        
+-        # Calculate r_ad (Bounding circle radius of the ellipse)
+-        # The bounding circle radius is half the length of the major axis.
+-        # Major axis length = 2 * sqrt( -D / lambda_min )
+-        # Eigenvalues of the quadratic form matrix [[A, C/2], [C/2, B]]
+-        M = np.array([[A, C/2], [C/2, B]])
+-        eigenvalues = np.linalg.eigvals(M)
+-        lambda_min = min(eigenvalues)
+-        
+-        if lambda_min <= 0:
+-            r_ad = 0
+-        else:
+-            # Major axis semi-length
+-            major_axis_half = math.sqrt(-D_ad / lambda_min)
+-            r_ad = major_axis_half
+-            
+-        # 2. Calculate Original Radius (99% confidence)
+-        # Typically based on chi-squared distribution or standard deviation scaling
+-        # Source says "based on the 99% confidence interval"
+-        # Let's assume a standard function get_original_radius exists or is derived from Sigma'
+-        r_o = get_original_radius_99_confidence(sigma_prime) 
+-        
+-        # 3. Final Radius
++        sigma_prime = g.projected_covariance
++        center = g.center_2d
++
++        A, B, C, D, _, _, _ = compute_ellipse_params(sigma_prime, sigma_i, alpha_low)
++
++        r_ad = get_adaptive_radius(A, B, C, D)
++        r_o = get_original_radius_99(sigma_prime)
+         r = min(r_ad, r_o)
+-        
+-        # 4. Determine Tiles
+-        # Find all tiles overlapping with the circle of radius r centered at g.center
+-        tiles = find_overlapping_tiles(g.center, r)
+-        
+-        # 5. AABB Culling (Enhanced)
+-        # If using AABB, we refine the tile check
+-        # Calculate D for AABB (same D_ad)
+-        x_max, y_max = get_ellipse_extents(A, B, C, D_ad)
+-        w = x_max
+-        h = y_max
+-        
+-        # Find tiles overlapping with AABB [cx-w, cx+w] x [cy-h, cy+h]
+-        tiles_aabb = find_overlapping_tiles_aabb(g.center, w, h)
+-        
+-        # Use the more precise set (AABB is tighter in minor axis)
+-        # The source implies AABB is used to *improve* culling, so we likely use AABB bounds
+-        # to define the initial tile set, then potentially filter further?
+-        # "We early cull Gaussian-Tile pairs... based on adaptive radius... Furthermore, we employ AABB"
+-        # It seems AABB is the primary culling shape for the final set to ensure accuracy.
+-        final_tiles = tiles_aabb
+-        
+-        for t in final_tiles:
+-            gaussian_tile_pairs.append((g, t))
+-            
++
++        # AABB culling for tighter bounds in minor axis
++        x_max, y_max = get_aabb_extents(A, B, C, D)
++        w, h = x_max, y_max
++
++        # Determine tiles covered by AABB
++        min_tx = math.floor((center[0] - w) / tile_size)
++        max_tx = math.ceil((center[0] + w) / tile_size) - 1
++        min_ty = math.floor((center[1] - h) / tile_size)
++        max_ty = math.ceil((center[1] + h) / tile_size) - 1
++
++        for ty in range(min_ty, max_ty + 1):
++            for tx in range(min_tx, max_tx + 1):
++                gaussian_tile_pairs.append((g, (tx, ty)))
+     return gaussian_tile_pairs
+ 
+-def get_original_radius_99_confidence(sigma_prime):
+-    """
+-    Placeholder for the specific 99% confidence interval calculation.
+-    In 3DGS, this is often related to the eigenvalues of the covariance matrix.
+-    """
+-    # Not explicitly defined in sources, but standard practice.
+-    # Returning a placeholder value for implementation completeness.
+-    return 3.0 # Example value
+-
+ def ad_r_gaussian_load_balance(gaussian_tile_pairs, tile_size=16):
+-    """
+-    Phase 2: Load Balancing
+-    Adjusts the number of Gaussians per pixel to balance load.
+-    """
+-    # 1. Assess Load
+     # Count Gaussians per pixel
+-    pixel_counts = {}
+-    for g, t in gaussian_tile_pairs:
+-        # Map Gaussian to pixels in Tile t
+-        pixels_in_tile = get_pixels_in_tile(t, tile_size)
+-        for p in pixels_in_tile:
+-            if p not in pixel_counts:
+-                pixel_counts[p] = []
+-            pixel_counts[p].append(g)
+-            
+-    # 2. Balance
+-    # Identify heavy-load and light-load pixels
+-    # Heavy-load: Reduce Gaussian count
+-    # Light-load: Increase Gaussian count (if possible, e.g., by relaxing culling thresholds)
++    pixel_gaussians = {}
++    for g, tile in gaussian_tile_pairs:
++        for py in range(tile[1] * tile_size, (tile[1] + 1) * tile_size):
++            for px in range(tile[0] * tile_size, (tile[0] + 1) * tile_size):
++                pixel_key = (px, py)
++                if pixel_key not in pixel_gaussians:
++                    pixel_gaussians[pixel_key] = []
++                pixel_gaussians[pixel_key].append(g)
++
++    # Balance load: target count is median of all pixel counts
++    counts = [len(gs) for gs in pixel_gaussians.values()]
++    target_count = sorted(counts)[len(counts) // 2]
++
+     balanced_pairs = []
+-    
+-    for p, gs in pixel_counts.items():
+-        if is_heavy_load(p, gs):
+-            # Reduce count
+-            gs_reduced = reduce_gaussian_count(gs)
+-            for g in gs_reduced:
+-                balanced_pairs.append((g, get_tile_of_pixel(p)))
+-        else:
+-            # Increase count (Hedge against quality loss)
+-            gs_enhanced = enhance_gaussian_count(gs)
+-            for g in gs_enhanced:
+-                balanced_pairs.append((g, get_tile_of_pixel(p)))
+-                
++    for p, gs in pixel_gaussians.items():
++        if len(gs) > target_count:
++            # Heavy-load: reduce to target count (keep first N by depth)
++            gs_sorted = sorted(gs, key=lambda x: x.depth)
++            gs = gs_sorted[:target_count]
++        elif len(gs) < target_count:
++            # Light-load: increase by relaxing culling thresholds [G]
++            pass
++        for g in gs:
++            balanced_pairs.append((g, p))
+     return balanced_pairs
+ 
+-def render(balanced_pairs):
+-    """
+-    Standard Render stage with alpha compositing.
+-    """
+-    # Sort by depth per tile
+-    sorted_gaussians = sort_by_depth(balanced_pairs)
+-    
+-    # Alpha compositing
+-    for tile in tiles:
+-        gs_in_tile = sorted_gaussians[tile]
+-        for p in pixels_in_tile(tile):
+-            alpha = 0
+-            color = 0
+-            for g in gs_in_tile:
+-                # Calculate splatting opacity alpha_i
+-                x = p - g.center
+-                alpha_i = g.opacity * math.exp(-0.5 * x.T @ np.linalg.inv(g.projected_covariance) @ x)
+-                
+-                # Composite
+-                color += g.color * alpha_i * (1 - alpha)
+-                alpha += alpha_i * (1 - alpha)
+-                
+-                if alpha > 0.99: # Early exit optimization
+-                    break
+-            return color
++def render(balanced_pairs, tile_size=16, image_height=1080, image_width=1920):
++    # Group by tile
++    tile_gaussians = {}
++    for g, p in balanced_pairs:
++        tx, ty = p[0] // tile_size, p[1] // tile_size
++        if (tx, ty) not in tile_gaussians:
++            tile_gaussians[(tx, ty)] = []
++        tile_gaussians[(tx, ty)].append(g)
++
++    image = np.zeros((image_height, image_width, 3))
++    for tile, gs in tile_gaussians.items():
++        gs_sorted = sorted(gs, key=lambda x: x.depth)
++        for py in range(tile[1] * tile_size, (tile[1] + 1) * tile_size):
++            for px in range(tile[0] * tile_size, (tile[0] + 1) * tile_size):
++                alpha = 0.0
++                color = np.zeros(3)
++                for g in gs_sorted:
++                    dx = px - g.center_2d[0]
++                    dy = py - g.center_2d[1]
++                    x = np.array([dx, dy])
++                    alpha_i = g.opacity * math.exp(-0.5 * x.T @ np.linalg.inv(g.projected_covariance) @ x)
++                    color += g.color * alpha_i * (1 - alpha)
++                    alpha += alpha_i * (1 - alpha)
++                    if alpha > 0.99:
++                        break
++                image[py, px] = color
++    return image
+ ```
+ 

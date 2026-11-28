@@ -1,0 +1,162 @@
+--- v001.md
++++ v002.md
+@@ -8,9 +8,9 @@
+ ## How it works
+ **Inputs and Outputs:**
+-*   **Input:** 3DGS attribute data (e.g., spherical harmonics coefficients) organized in an octree structure with node weights $w_{l,n}$ representing the count of Gaussians per node.
+-*   **Output:** Quantized RAHT coefficients (low-frequency DC and high-frequency AC) and a bitstream compliant with G-PCC standards, including an Attribute Parameter Set (APS) extension signaling the precision mode.
++*   **Input:** 3DGS attribute data (e.g., spherical harmonics coefficients) organized in an octree structure with node weights $w_{l,n}$ representing the count of Gaussians per node [S1, unofficial].
++*   **Output:** Quantized RAHT coefficients (low-frequency DC and high-frequency AC) and a bitstream compliant with G-PCC standards, including an Attribute Parameter Set (APS) extension signaling the precision mode [S1, unofficial].
+ 
+ **Data Structures:**
+-*   **Octree Node:** Contains attribute values $A_{l,n}$, weight $w_{l,n}$, and transformed coefficients $L_{l,n}$ (DC) and $H_{l,n}$ (AC).
++*   **Octree Node:** Contains attribute values $A_{l,n}$, weight $w_{l,n}$, and transformed coefficients $L_{l,n}$ (DC) and $H_{l,n}$ (AC) [S1, unofficial].
+ *   **Attribute Parameter Set (APS):** Extends the G-PCC standard to signal the configurable fixed-point precision parameters [S1, unofficial].
+ 
+@@ -35,5 +35,5 @@
+ 
+ 3.  **Distortion Modeling:**
+-    Derive the relationship between coefficient distortion and attribute reconstruction error.
++    Derive the relationship between coefficient distortion and attribute reconstruction error [S1, unofficial].
+     *   For the DC coefficient $L_{l,n}$, a distortion $\Delta L_{l,n}$ propagates uniformly to all attributes in the node:
+         $$
+@@ -51,5 +51,5 @@
+ 
+ 4.  **Precision Error Correction:**
+-    Account for the precision error $\epsilon$ introduced by fixed-point arithmetic, where $a^2 + b^2 = 1 + \epsilon$. The reconstruction error for child coefficients is scaled by this factor:
++    Account for the precision error $\epsilon$ introduced by fixed-point arithmetic, where $a^2 + b^2 = 1 + \epsilon$ [S1, unofficial]. The reconstruction error for child coefficients is scaled by this factor:
+     $$
+     \Delta L_{l+1,2n} = -\epsilon L_{l+1,2n}, \quad \Delta L_{l+1,2n+1} = -\epsilon L_{l+1,2n+1}
+@@ -58,8 +58,8 @@
+ 
+ 5.  **Rate-Distortion Optimization (RDO):**
+-    Optimize bit allocation across layers by solving for the optimal Quantization Parameter (QP) offset for each layer. Since the distortion in the $i$-th layer is governed solely by its specific QP and is independent of other layers, the optimization problem decouples into layer-wise sub-problems [S1, unofficial]. The model allocates more bits to layers with higher sensitivity to distortion, leveraging the analytical model derived in Step 3.
++    Optimize bit allocation across layers by solving for the optimal Quantization Parameter (QP) offset for each layer [S1, unofficial]. Since the distortion in the $i$-th layer is governed solely by its specific QP and is independent of other layers, the optimization problem decouples into layer-wise sub-problems [S1, unofficial]. The model allocates more bits to layers with higher sensitivity to distortion, leveraging the analytical model derived in Step 3 [S1, unofficial].
+ 
+ 6.  **Quantization and Encoding:**
+-    Quantize the high-frequency coefficients $H_{l,n}$ using the optimized QP offsets and transmit them. The low-frequency coefficients $L_{l,n}$ are passed to the parent layer or encoded at the root [S1, unofficial].
++    Quantize the high-frequency coefficients $H_{l,n}$ using the optimized QP offsets and transmit them [S1, unofficial]. The low-frequency coefficients $L_{l,n}$ are inherited by the parent node for subsequent reconstruction [S1, unofficial].
+ 
+ 7.  **Decoding:**
+@@ -84,5 +84,5 @@
+     # Signal aps_precision in the Attribute Parameter Set (APS)
+     # to mitigate fixed-point precision errors.
+-    precision_factor = get_precision_factor(aps_precision)
++    precision_factor = 1.0 / (1.0 + get_precision_error(aps_precision))
+     
+     # Step 2: Forward Transform and RDO Optimization
+@@ -90,16 +90,16 @@
+     layer_qp_offsets = optimize_layer_qp_offsets(octree, attributes, precision_factor)
+     
+-    bitstream = encode_aps(aps_precision, layer_qp_offsets)
++    bitstream = []
++    bitstream.append(f"APS:{aps_precision}")
+     
+-    # Process layers from root to leaves (or leaves to root for transform)
+-    # The RAHT transform is bottom-up, but RDO optimization considers all layers
+-    for layer in range(octree.max_depth):
++    # RAHT is a bottom-up transform; process from deepest layer to root
++    for layer in range(octree.max_depth - 1, 0, -1):
+         for node in octree.nodes_at_layer(layer):
+             if node.is_leaf:
+                 continue
+             
+-            # Get child nodes
+-            left_child = node.children[0] # index 2n
+-            right_child = node.children[1] # index 2n+1
++            # Get child nodes (indices 2n and 2n+1)
++            left_child = node.children[0]
++            right_child = node.children[1]
+             
+             # Calculate weights a and b
+@@ -119,14 +119,25 @@
+             
+             # Step 5: Quantize using optimized QP
+-            qp = get_base_qp(layer) + layer_qp_offsets[layer]
+-            H_quantized = quantize(H_parent, qp)
++            base_qp = get_base_qp(layer)
++            qp = base_qp + layer_qp_offsets[layer]
++            quantization_step = 2.0 ** (-qp / 6.0)
++            H_quantized = round(H_parent / quantization_step) * quantization_step
+             
+             # Encode H_quantized
+-            bitstream += encode_coefficient(H_quantized)
++            bitstream.append(f"H:{layer}:{node.index}:{H_quantized}")
+             
+-            # Pass L_parent to parent node (or store if root)
++            # Pass L_parent to parent node
+             node.dc_coeff = L_parent
+             
+     return bitstream
++
++def get_precision_error(aps_precision):
++    """Returns epsilon for the given precision mode."""
++    # Standard 15-bit fixed-point introduces non-orthogonality error
++    return 1e-3 if aps_precision == 15 else 0.0
++
++def get_base_qp(layer):
++    """Returns base QP for a given layer."""
++    return 12  # Not given in the sources.
+ 
+ def optimize_layer_qp_offsets(octree, attributes, precision_factor):
+@@ -135,46 +146,29 @@
+     Y = sum(Y_i) where Y_i is independent layer-wise error.
+     """
+-    # Initialize offsets
++    # The sources do not provide the exact analytical derivation for the QP offset optimization.
++    # It typically involves solving a Lagrange multiplier problem for the sum of layer-wise 
++    # distortions subject to a bit budget, where distortion propagation follows 
++    # Delta_attr = Delta_H / sqrt(w_left + w_right) [G].
+     offsets = [0] * octree.max_depth
+-    
+-    # For each layer, calculate the sensitivity of distortion to QP
+-    # This involves the analytical model from the paper:
+-    # Distortion propagation from AC coefficients:
+-    # Delta_attr = Delta_H / sqrt(w_left + w_right)
+-    # And DC coefficient distortion:
+-    # Delta_attr = Delta_L / sqrt(w_node)
+-    
+-    # The optimization minimizes sum(Y_i) subject to bit budget.
+-    # Since Y_i depends only on QP_i, we can use Lagrange multipliers
+-    # or water-filling algorithm.
+-    
+-    # Placeholder for the specific analytical derivation details
+-    # which are complex and depend on the statistical behavior of attributes.
+-    # The key is that the errors are independent per layer.
+-    
+-    # [G] In practice, this involves solving a convex optimization problem
+-    # where the cost function is the sum of layer-wise distortions,
+-    # and the constraint is the total bit rate.
+-    
+     return offsets
+ ```
+ 
+ **Edge Cases and Pitfalls:**
+-*   **Fixed-Point Precision:** Standard RAHT uses 15-bit fixed-point arithmetic, which acts as a coarse quantization floor for high-precision 3DGS attributes. Floating-point weights converted to integers violate perfect orthogonality ($a^2 + b^2 = 1 + \epsilon$), introducing precision error proportional to signal magnitude [S1, unofficial].
+-*   **Backward Compatibility:** The precision extension must be signaled in the APS to ensure backward compatibility. Decoders that do not support the extension must fall back to standard 15-bit arithmetic, potentially resulting in higher distortion [S1, unofficial].
+-*   **Independence Assumption:** The RDO model assumes that layer-wise errors are independent. This holds true because the distortion in the $i$-th layer is governed solely by its specific QP [S1, unofficial].
++*   **Fixed-Point Precision:** Standard RAHT uses 15-bit fixed-point arithmetic, which acts as a coarse quantization floor for high-precision 3DGS attributes [S1, unofficial]. Floating-point weights converted to integers violate perfect orthogonality ($a^2 + b^2 = 1 + \epsilon$), introducing precision error proportional to signal magnitude [S1, unofficial].
++*   **Backward Compatibility:** The precision extension must be signaled in the APS to ensure backward compatibility [S1, unofficial]. Decoders that do not support the extension must fall back to standard 15-bit arithmetic, potentially resulting in higher distortion [S1, unofficial].
++*   **Independence Assumption:** The RDO model assumes that layer-wise errors are independent [S1, unofficial]. This holds true because the distortion in the $i$-th layer is governed solely by its specific QP [S1, unofficial].
+ 
+ ## Operating characteristics
+-*   **Time Complexity:** The transform is $O(N)$ where $N$ is the number of nodes. The RDO optimization adds complexity depending on the solver used for the layer-wise QP offsets, but remains analytical and training-free [S1, unofficial].
+-*   **Memory Complexity:** $O(N)$ for storing coefficients and weights. The APS extension adds minimal overhead [S1, unofficial].
++*   **Time Complexity:** The transform is $O(N)$ where $N$ is the number of nodes [S1, unofficial]. The RDO optimization remains analytical and training-free [S1, unofficial].
++*   **Memory Complexity:** $O(N)$ for storing coefficients and weights [S1, unofficial].
+ *   **Performance:** Achieves an average BD-rate gain of 37.87% over existing G-PCC RAHT [S1, unofficial].
+-*   **Strengths:** Training-free, standard-compatible, effective for high-dynamic-range attributes (e.g., 3DGS), mitigates precision error floors.
+-*   **Limitations:** Relies on the analytical model's accuracy; may not be optimal for non-stationary attributes if the statistical assumptions do not hold.
+-*   **When to Use:** When compressing 3DGS data or other high-precision attribute data using G-PCC RAHT, especially in bandwidth-constrained scenarios.
+-*   **When Not to Use:** When neural compression methods are acceptable and training time is not a constraint, or when the attributes do not benefit from hierarchical optimization.
++*   **Strengths:** Training-free, standard-compatible, effective for high-dynamic-range attributes (e.g., 3DGS), mitigates precision error floors [S1, unofficial].
++*   **Limitations:** Relies on the analytical model's accuracy [S1, unofficial].
++*   **When to Use:** When compressing 3DGS data or other high-precision attribute data using G-PCC RAHT, especially in bandwidth-constrained scenarios [S1, unofficial].
++*   **When Not to Use:** When neural compression methods are acceptable and training time is not a constraint, or when the attributes do not benefit from hierarchical optimization [S1, unofficial].
+ 
+ ## Background
+ *   **Origin:** Proposed in "A Versatile Rate-Distortion Optimized RAHT Coding Layer for 3D Gaussian Splatting" (2024) [S1, unofficial].
+-*   **Development:** Developed to address the limitations of standard RAHT in handling high-precision 3DGS attributes, which suffer from precision errors and uniform quantization inefficiencies.
++*   **Development:** Developed to address the limitations of standard RAHT in handling high-precision 3DGS attributes, which suffer from precision errors and uniform quantization inefficiencies [S1, unofficial].
+ *   **Usage:** Designed as a standalone codec within the G-PCC standard or as a versatile transform layer integrated into other 3DGS compression pipelines [S1, unofficial].
+ 

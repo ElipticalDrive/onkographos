@@ -1,0 +1,147 @@
+# Delaunay Triangulation for Tetrahedral Representation
+
+Also called: 3D Delaunay Triangulation, gDel3D-based Tetrahedralization
+
+## Overview
+3D Delaunay Triangulation constructs a tetrahedral mesh from arbitrarily distributed 3D points, characterized by the property that no point lies within the circumsphere of any tetrahedron [S2]. It adapts the mesh to the distribution of input sites rather than projecting pre-defined grid cells [S2]. In differentiable rendering pipelines, it is used to obtain a tetrahedral representation of Voronoi sites [S1].
+
+## How it works
+**Inputs:** A set of 3D points (Voronoi sites) $P = \{p_1, p_2, ..., p_n\}$ representing the volumetric data or surface samples [S1].
+**Outputs:** A tetrahedral mesh $T$ where each tetrahedron $t \in T$ satisfies the empty circumsphere property [S2].
+
+**Data Structures:**
+*   **Points:** Array of 3D coordinates $(x, y, z)$ [G].
+*   **Tetrahedra:** List of vertex index tuples $(v_1, v_2, v_3, v_4)$ referencing the points array [G].
+*   **Circumsphere:** For each tetrahedron, the center $(c_x, c_y, c_z)$ and squared radius $r^2$ of the unique sphere passing through its four vertices [G].
+
+**Algorithm Steps:**
+1.  **Initialization:** Create a "super tetrahedron" that encloses all input points $P$ [S2].
+2.  **Triangulation:** Construct the initial Delaunay triangulation of the points [S1]. In GPU-accelerated implementations, libraries such as gDel3D are used to accelerate this computation [S1].
+3.  **Empty Circumsphere Check:** For each tetrahedron $t$ in the mesh, calculate its circumsphere [S2]. Check if any point $p \in P$ lies strictly inside this circumsphere [S2]. The condition for a point $p$ being inside the circumsphere of tetrahedron $t$ with vertices $v_1, v_2, v_3, v_4$ is determined by the determinant:
+    $$
+    \det \begin{pmatrix}
+    x_p & y_p & z_p & x_p^2 + y_p^2 + z_p^2 & 1 \\
+    x_1 & y_1 & z_1 & x_1^2 + y_1^2 + z_1^2 & 1 \\
+    x_2 & y_2 & z_2 & x_2^2 + y_2^2 + z_2^2 & 1 \\
+    x_3 & y_3 & z_3 & x_3^2 + y_3^2 + z_3^2 & 1 \\
+    x_4 & y_4 & z_4 & x_4^2 + y_4^2 + z_4^2 & 1
+    \end{pmatrix} > 0
+    $$
+    (Assuming a right-handed coordinate system and counter-clockwise vertex ordering) [G].
+4.  **Subdivision:** If a point is found within a tetrahedron's circumsphere, subdivide the tetrahedron without changing the shape of the super tetrahedron [S2].
+5.  **Iteration:** Repeat steps 3 and 4 until no tetrahedron contains a point in its circumsphere [G]. In differentiable rendering contexts, the triangulation is recomputed from scratch at every iteration [S1].
+
+**Parameters:**
+*   **Super Tetrahedron Size:** Must be large enough to enclose all input points [S2]. Exact size is not given in the sources.
+*   **Iteration Count:** In DCCVT experiments, a fixed 1k iterations are used [S1].
+
+**Edge Cases and Pitfalls:**
+*   **Constrained Delaunay Triangulation (CDT):** Standard DT cannot tetrahedralize some special polyhedra (e.g., twisted prisms) without additional points or surface modification [S2]. The problem of determining whether a given polyhedron can be tetrahedralized is NP-complete [S2].
+*   **Precision:** Floating-point errors in determinant calculations can lead to incorrect circumsphere tests [G].
+*   **Degenerate Input:** Collinear or coplanar points can cause degenerate tetrahedra [G].
+
+**Pseudocode:**
+> **Unverified code.** The code below did not pass a test run against a reference implementation, or no test fits it, so it may contain errors.
+
+```python
+def delaunay_tetrahedralization(points):
+    # Step 1: Initialization [S2]
+    min_pt = min(points, key=lambda p: (p.x, p.y, p.z))
+    max_pt = max(points, key=lambda p: (p.x, p.y, p.z))
+    offset = max(max_pt.x - min_pt.x, max_pt.y - min_pt.y, max_pt.z - min_pt.z) * 10
+    super_tetra = Tetrahedron([
+        [min_pt.x - offset, min_pt.y - offset, min_pt.z - offset],
+        [max_pt.x + offset, min_pt.y - offset, min_pt.z - offset],
+        [min_pt.x - offset, max_pt.y + offset, min_pt.z - offset],
+        [min_pt.x - offset, min_pt.y - offset, max_pt.z + offset]
+    ], is_super=True)
+    tetrahedra = [super_tetra]
+
+    # Step 2 & 3: Triangulation & Empty Circumsphere Check
+    for p in points:
+        affected = []
+        for t in tetrahedra:
+            if is_point_in_circumsphere(p, t):
+                affected.append(t)
+        tetrahedra = [t for t in tetrahedra if t not in affected]
+        new_tets = create_new_tetrahedra(p, affected)
+        tetrahedra.extend(new_tets)
+
+    # Step 4 & 5: Subdivision & Iteration context [S1]
+    tetrahedra = [t for t in tetrahedra if not t.is_super]
+    return tetrahedra
+
+def is_point_in_circumsphere(p, t):
+    v1, v2, v3, v4 = t.vertices
+    det = compute_circumsphere_determinant(p, v1, v2, v3, v4)
+    return det > 0
+
+def compute_circumsphere_determinant(p, v1, v2, v3, v4):
+    M = [
+        [p.x, p.y, p.z, p.x**2 + p.y**2 + p.z**2, 1],
+        [v1.x, v1.y, v1.z, v1.x**2 + v1.y**2 + v1.z**2, 1],
+        [v2.x, v2.y, v2.z, v2.x**2 + v2.y**2 + v2.z**2, 1],
+        [v3.x, v3.y, v3.z, v3.x**2 + v3.y**2 + v3.z**2, 1],
+        [v4.x, v4.y, v4.z, v4.x**2 + v4.y**2 + v4.z**2, 1]
+    ]
+    return compute_determinant(M)
+
+def compute_determinant(M):
+    if len(M) == 1: return M[0][0]
+    if len(M) == 2: return M[0][0]*M[1][1] - M[0][1]*M[1][0]
+    det = 0
+    for c in range(len(M)):
+        minor = [row[:c] + row[c+1:] for row in M[1:]]
+        det += ((-1)**c) * M[0][c] * compute_determinant(minor)
+    return det
+
+def create_new_tetrahedra(p, affected):
+    new_tets = []
+    boundary_faces = set()
+    for t in affected:
+        for face in t.faces:
+            face_tuple = tuple(map(tuple, face))
+            if face_tuple in boundary_faces:
+                boundary_faces.remove(face_tuple)
+            else:
+                boundary_faces.add(face_tuple)
+    for face in boundary_faces:
+        new_tets.append(Tetrahedron(list(face) + [p]))
+    return new_tets
+
+class Tetrahedron:
+    def __init__(self, vertices, is_super=False):
+        self.vertices = vertices
+        self.is_super = is_super
+        self.faces = [
+            [vertices[0], vertices[1], vertices[2]],
+            [vertices[0], vertices[1], vertices[3]],
+            [vertices[0], vertices[2], vertices[3]],
+            [vertices[1], vertices[2], vertices[3]]
+        ]
+```
+
+## Subtopics
+
+### [Local Convex Hull (LCH)](11862-local-convex-hull-lch.md)
+Local Convex Hull (LCH) constructs triangular patches from volumetric data by estimating surfaces from local convexities, assuming piecewise convex objects and tightly connected surfaces. It is distinguished from Delaunay Triangulation by using a convex hull algorithm rather than Delaunay triangulation for local surface construction. Choose LCH when enforcing strict connectivity and continuity is prioritized over processing speed.
+
+### [Parallel Voxel Carving for Multi-view Stereo](14743-parallel-voxel-carving-for-multi-view-stereo.md)
+Parallel Voxel Carving is a scalable volumetric reconstruction algorithm for multi-view stereo that utilizes a GPU to simultaneously execute threads performing voxel carving to integrate depth maps with multi-view images. It is distinguished from direct mesh integration by outputting surface voxels with normals and connectivity, avoiding triangle intersection issues in parallel environments. Choose this method when reconstructing large-scale outdoor scenes that require scalable, high-resolution grid streaming.
+
+## Operating characteristics
+*   **Time Complexity:** Not given in the sources.
+*   **Memory Complexity:** Proportional to the number of input points and resulting tetrahedra [S2].
+*   **Measured Performance:** In DCCVT, gDel3D is used to accelerate computation on the GPU [S1]. Experiments are executed for a fixed 1k iterations [S1].
+*   **Strengths:** Produces high-quality tetrahedral meshes with good geometric properties (empty circumsphere) and handles arbitrarily distributed points [S2].
+*   **Limitations:** Cannot handle constrained boundaries easily without additional modifications; determining tetrahedralizability for general polyhedra is NP-complete [S2]. Computing the tetrahedral mesh at each up-sampling level using a CPU-based library (e.g., Open3D) is computationally expensive for millions of points, creating a bottleneck [S3, unofficial].
+*   **When to use:** When high-quality tetrahedralization of arbitrary point clouds is required and constraints are not a primary concern [S2].
+*   **When not to use:** When constrained boundaries are essential and the geometry is complex (e.g., twisted prisms) [S2].
+
+## Background
+The 3D Delaunay Triangulation (DT) constructs a surface by defining tetrahedrons from arbitrarily distributed 3D points [S2]. The Constrained Delaunay Triangulation (CDT) was evolved to include a predescribed boundary [S2]. Although variations like conforming constrained DT have been proposed, they assume initial boundary information is given [S2]. The problem of determining whether a given polyhedron can be tetrahedralized is NP-complete [S2]. In recent differentiable rendering applications, such as DCCVT, DT is used to obtain a tetrahedral representation of Voronoi sites, accelerated by gDel3D on the GPU [S1].
+
+## Sources
+[S1] DCCVT: Differentiable Clipped Centroidal Voronoi Tessellation, https://arxiv.org/abs/2601.13603v1, fetched 2026-10-26
+[S2] Local hull-based surface construction of volumetric data from silhouettes, https://doi.org/10.1109/tip.2008.926149, fetched 2026-10-30
+[S3] WACV 2025 Open Access Repository, https://openaccess.thecvf.com/content/WACV2025/html/Thomas_VortSDF_3D_Modeling_with_Centroidal_Voronoi_Tesselation_on_Signed_Distance_WACV_2025_paper.html, fetched 2026-10-30 (unofficial)

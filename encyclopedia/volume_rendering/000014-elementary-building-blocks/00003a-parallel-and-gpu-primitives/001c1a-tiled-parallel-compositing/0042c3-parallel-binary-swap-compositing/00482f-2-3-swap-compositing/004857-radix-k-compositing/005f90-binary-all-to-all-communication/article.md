@@ -1,0 +1,109 @@
+# Binary All-to-All Communication
+
+Also called: Binary swap algorithm, Recursive doubling allgather
+
+## Overview
+Binary All-to-All Communication is an optimized distributed communication algorithm used to maintain an up-to-date image of the entire cluster memory state (an array of keys) on each rendering node, replacing pre-determined page positions [S1]. It sets itself apart from the classical logical ring approach by reducing the number of communication steps from $P-1$ to $\log(P)$, thereby improving scalability and reducing sensitivity to communication latency [S1].
+
+## How it works
+**Inputs and Outputs:**
+*   **Input:** An array of keys stored in the local buffer of each node [S1].
+*   **Output:** An array containing all keys stored in the memory of the entire cluster, present on every node [S1].
+
+**Data Structures:**
+*   Each node maintains a local buffer (array) of keys [S1].
+*   The size of the buffer exchanged grows exponentially with each step [S1].
+
+**Parameters:**
+*   $P$: Total number of nodes in the cluster [S1].
+*   $size$: Size of the data chunk transferred per step [S1].
+*   $latency$: Network latency per message [S1].
+*   $bandwidth$: Network bandwidth [S1].
+
+**Numbered Steps:**
+1.  **Initialization:** Each node $i$ starts with an array containing the keys stored in its local buffer [S1].
+2.  **Iterative Exchange:** The algorithm proceeds in $\log_2(P)$ steps [S1]. In step $k$ (where $k$ ranges from $0$ to $\log_2(P)-1$):
+    *   Each node $i$ identifies its partner node $j$ by XORing the node index with $2^k$: $j = i \oplus 2^k$ [G].
+    *   Node $i$ and Node $j$ exchange their current accumulated buffers [S1].
+    *   Each node merges the received buffer with its own, effectively doubling the amount of unique data known to each node [S1].
+3.  **Completion:** After $\log_2(P)$ steps, each node holds an array containing all keys stored in the memory of the cluster [S1].
+
+**Formulas:**
+The execution time for the binary all-to-all communication is given by [S1]:
+
+$$ T_{binary} = \frac{(P - 1) \cdot size}{bandwidth} + \log(P) \cdot latency $$
+
+Where $size$ is the total size of the data to be gathered, $latency$ is the network latency, $bandwidth$ is the network bandwidth, and $\log$ is the logarithm to base 10 as specified in the source [S1].
+
+For comparison, the logical ring approach has complexity $O(P-1)$ and execution time [S1]:
+
+$$ T_{logical\_ring} = \frac{(P - 1) \cdot size}{bandwidth} + (P - 1) \cdot latency $$
+
+**Pseudocode:**
+> **Unverified code.** The code below did not pass a test run against a reference implementation, or no test fits it, so it may contain errors.
+
+```python
+def binary_all_to_all(local_keys, my_id, num_nodes):
+    """
+    Performs binary all-to-all communication to gather all keys from all nodes.
+    
+    Args:
+        local_keys: List of keys initially stored on this node.
+        my_id: Integer ID of this node (0 to num_nodes - 1).
+        num_nodes: Total number of nodes (P).
+        
+    Returns:
+        List of all keys from all nodes.
+    """
+    buffer = list(local_keys)
+    steps = num_nodes.bit_length() - 1
+    for k in range(steps):
+        partner_id = my_id ^ (1 << k)
+        # [G] Synchronous point-to-point network exchange with partner_id
+        received_buffer = network_exchange(buffer, partner_id)
+        buffer = list(set(buffer + received_buffer))
+    return buffer
+
+def network_exchange(local_buf, partner_id):
+    # [G] Placeholder for actual network I/O (e.g., MPI_Sendrecv); 
+    # returns the partner's current buffer state.
+    pass
+```
+
+**Edge Cases and Pitfalls:**
+*   **Latency Sensitivity:** The algorithm is sensitive to communication latency, as more communication steps increase sensitivity [S1].
+*   **Boundary Conditions:** The standard binary swap pairing assumes a power-of-two number of nodes; non-power-of-two clusters require dummy nodes or adjusted pairing logic [G].
+*   **Precision:** Not given in the sources [S1].
+
+## Subtopics
+
+### Binary-Swap Termination Detection
+A scalable distributed protocol to detect when a frame is complete, avoiding the linear time and host coordination of straightforward approaches [S2, unofficial]. Because each processor knows exactly how many ray segments it has sent to each of the other processors, a binary-swap summing process results in the total number of ray segments each processor should eventually receive [S2, unofficial]. At the end of this globally synchronous process, each processor holds exactly the number of segments it needs [S2, unofficial]. If this number equals the number of segments the processor has actually received, the processor can stop receiving [S2, unofficial]. The algorithm runs in logarithmic time and does not involve the host, making it more efficient and scalable to a larger number of processors [S2, unofficial]. Compared to a designated node coordinating termination by collecting local messages and broadcasting a global signal (which prolongs termination on large systems), this binary-swap approach is more scalable [S2, unofficial].
+
+## Operating characteristics
+**Time and Memory Complexity:**
+*   **Time Complexity:** $O(\log(P))$ communication steps, compared to $O(P-1)$ for the logical ring [S1].
+*   **Memory Complexity:** Each node must store the entire cluster's key array, so memory usage per node is $O(P \cdot size)$ [S1].
+
+**Measured Performance:**
+*   The binary all-to-all communication reduces the latency term in the execution time from $(P-1) \cdot latency$ to $\log(P) \cdot latency$ [S1].
+*   The main advantage is scalability thanks to the $\log(P)$ complexity [S1].
+
+**Strengths and Limitations:**
+*   **Strengths:** Better scalability than logical ring; fully overlapped with rendering in some implementations [S1].
+*   **Limitations:** More sensitive to communication latency than methods with fewer steps; requires all nodes to participate synchronously in the exchange steps [G].
+
+**When to Use:**
+*   Use when maintaining an up-to-date image of the entire cluster memory state is required and scalability is a concern [S1].
+*   Use when the number of nodes $P$ is large, making the $O(P-1)$ ring approach too slow due to latency [S1].
+
+**When Not to Use:**
+*   Avoid when the cluster size is very small and latency is negligible compared to bandwidth [G].
+*   Avoid when a centralized host coordination is acceptable and simpler to implement [G].
+
+## Background
+Binary All-to-All Communication is inspired by the binary swap algorithm [S1]. It is used in the context of distributed shared memory for roaming large volumes [S1]. The algorithm is used in parallel volume rendering systems to replace pre-determined page positions with a dynamic memory buffer [S1]. It is similar in spirit to the recursive doubling allgather operation used in many implementations [S1].
+
+## Sources
+[S1] Distributed Shared Memory for Roaming Large Volumes, https://doi.org/10.1109/tvcg.2006.135, fetched 2026-10-26
+[S2] Parallel Software Rendering for Large-Scale Volume Visualization, https://escholarship.org/uc/item/489126f2, fetched 2026-10-27 (unofficial)

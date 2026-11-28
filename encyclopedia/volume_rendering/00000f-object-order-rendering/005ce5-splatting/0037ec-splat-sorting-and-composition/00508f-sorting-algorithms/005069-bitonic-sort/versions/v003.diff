@@ -1,0 +1,209 @@
+--- v002.md
++++ v003.md
+@@ -4,128 +4,106 @@
+ 
+ ## Overview
+-Bitonic Sort is a data-independent network sorting algorithm used on the GPU to achieve exact ordering of splatted voxels or particles at each frame [S1, unofficial]. It is chosen over data-driven algorithms like Quicksort, which are unsuitable for GPU stream processors, and over Odd-Even Merge Sort, which only provides partial ordering [S1, unofficial]. While Adaptive Bitonic Sort (ABisort) offers optimal complexity, Govindaraju et al.'s implementation is often preferred for its accessibility and ease of adaptation [S1, unofficial].
++Bitonic Sort is a data-independent network sorting algorithm used on the GPU to achieve exact depth ordering of splatted voxels for every frame [S1, unofficial]. It is chosen over partial-ordering methods like Odd-Even Merge Sort because volume rendering requires strict front-to-back or back-to-front ordering per frame to correctly composite transparency [S1, unofficial]. It is preferred over Adaptive Bitonic Sort (ABisort) in some implementations due to library accessibility and ease of adaptation, despite ABisort having potentially better theoretical complexity [S1, unofficial].
+ 
+ ## How it works
+ **Inputs and Outputs:**
+-*   **Input:** An array of `<key, value>` pairs. In the context of volume splatting, the key is the depth voxel value $b$, and the value is the voxel index [S1, unofficial]. The data is assumed to be already transformed into view space on the GPU [S1, unofficial].
+-*   **Output:** A depth-sorted array of voxels/particles.
++*   **Input:** An array of view-transformed voxels already resident in GPU memory, typically stored in a texture (View Transformed Voxels Texture). Each voxel is represented as a `<key, value>` pair, where the key is the depth value $b$ and the value is the voxel index [S1, unofficial].
++*   **Output:** A sorted array of voxels stored in a texture (Depth-Sorted Voxels Texture), ordered by depth [S1, unofficial].
+ 
+ **Data Structures:**
+-The algorithm uses the Multiple Render Target (MRT) extension to store keys and values in separate textures with a one-to-one correspondence [S1, unofficial]. This allows packing four `<key, value>` instances into a single RGBA texel [S1, unofficial]. Ping-pong buffering is used between two render targets (textures) to swap read/write roles between passes [S1, unofficial].
++The algorithm uses the Multiple Render Target (MRT) extension to store keys and values in separate render targets [S1, unofficial]. A one-to-one correspondence exists between the key texture and the value texture [S1, unofficial]. To optimize memory, four `<key, value>` instances can be packed into a single RGBA texel [S1, unofficial].
+ 
+ **Parameters:**
++*   $uPass$: Current pass number in the sort algorithm [S2, unofficial].
++*   $uStage$: Current stage number within the pass [S2, unofficial].
+ *   $uHalfVector$: The half-angle vector used for sorting particles [S2, unofficial].
+-*   $uPass$: The current pass number in the sort algorithm [S2, unofficial].
+-*   $uStage$: The current stage number in the sort algorithm [S2, unofficial].
+-*   $N$: The number of elements to sort (must be a power of 2).
++*   $N$: Total number of particles/voxels to sort.
+ 
+ **Algorithm Steps:**
+-1.  **Initialization:** If the input is on the CPU, a fragment shader fills the initial render targets with the depth value $b$ as the key and the voxel index as the value [S1, unofficial].
+-2.  **Sorting Passes:** The sort consists of $\log_2 N$ passes. Each pass consists of $\log_2 N$ stages.
+-3.  **Comparison Logic:** For each element at index $i$, determine the comparison direction and partner.
+-4.  **Swap Decision:** Compare the element with its partner. If the order is incorrect, swap them.
+-5.  **Finalization:** After sorting, a fragment shader fills the final Depth-Sorted Voxels Texture from the sorted render targets [S1, unofficial].
++1.  **Initialization:** If the sorting direction needs to be reversed (e.g., due to camera movement), reset pass and stage counters [S2, unofficial].
++2.  **Ping-Pong Buffering:** Use two framebuffers (current and previous) to swap read/write roles between passes [S1, unofficial].
++3.  **Comparison Logic:** For each element at index $i$, determine the comparison direction and partner index based on the current pass and stage [S2, unofficial].
++4.  **Fetch and Compare:** Fetch the partner data and perform a comparison using the depth key and the half-vector [S2, unofficial].
++5.  **Write Result:** Write the sorted result to the appropriate render target [S1, unofficial].
++6.  **Finalization:** After all passes, a fragment shader fills the final Depth-Sorted Voxels Texture from the sorted render targets [S1, unofficial].
+ 
+ **Pseudocode:**
+-The following pseudocode implements the core comparison logic for a single element within a fragment shader, assuming the data is stored in textures and accessed via texture coordinates.
++The following pseudocode describes the fragment shader logic for a single comparison step in the Bitonic Sort network [S2, unofficial].
+ 
+ ```python
+-def bitonic_sort_step(key_self, value_self, key_partner, value_partner, 
+-                      compare_direction, u_half_vector, self_pos, partner_pos):
+-    """
+-    Determines if a swap is needed between two elements based on the bitonic sort logic.
++# Inputs:
++#   i: Global particle index derived from texture coordinates
++#   uPass: Current pass number
++#   uStage: Current stage number
++#   uHalfVector: Half-angle vector for sorting direction
++#   prevPositions: Texture containing previous sort state (key=value, value=index)
++
++def bitonic_sort_step(i, uPass, uStage, uHalfVector, prevPositions):
++    # 1. Determine comparison direction and partner offset
++    # The direction depends on the stage and pass in the bitonic network
++    compare = determine_compare_direction(uPass, uStage, i)
+     
+-    Args:
+-        key_self: The sorting key (e.g., depth b) of the current element.
+-        value_self: The value (e.g., voxel index) of the current element.
+-        key_partner: The sorting key of the partner element.
+-        value_partner: The value of the partner element.
+-        compare_direction: +1 or -1, determining the sort order (ascending/descending).
+-        u_half_vector: The half-angle vector used for projection/comparison.
+-        self_pos: Position vector of the current element.
+-        partner_pos: Position vector of the partner element.
++    # 2. Calculate partner address
++    # uPass represents the distance to the partner in the bitonic sequence
++    adr = i + compare * uPass
++    
++    # 3. Fetch data from previous render target
++    # Fetch key (depth) and value (index) for self and partner
++    self_data = prevPositions.sample(i)
++    partner_data = prevPositions.sample(adr)
++    
++    self_key = self_data.key      # Depth value b
++    self_val = self_data.value    # Voxel index
++    partner_key = partner_data.key
++    partner_val = partner_data.value
++    
++    # 4. Perform comparison using dot product with half vector
++    # This logic implements the bitonic merge step
++    # If selfProjectedLength * compare < partnerProjectedLength * compare, keep self
++    # Note: 'compare' acts as a sign multiplier for the direction
++    lhs = self_key * compare
++    rhs = partner_key * compare
++    
++    if lhs < rhs:
++        # Self is "smaller" (or in correct order relative to direction)
++        output_key = self_key
++        output_val = self_val
++    else:
++        # Partner is "smaller"
++        output_key = partner_key
++        output_val = partner_val
+         
+-    Returns:
+-        tuple: (new_key, new_value) for the current position after potential swap.
+-    """
+-    # Calculate projected lengths for comparison if required by the specific variant
+-    # Note: Standard Bitonic Sort compares keys directly. 
+-    # The source [S2, unofficial] mentions using dot product with half vector.
+-    # We implement the key comparison primarily, as per [S1, unofficial].
+-    
+-    # Determine if swap is needed
+-    # If compare_direction is 1 (ascending): swap if self > partner
+-    # If compare_direction is -1 (descending): swap if self < partner
+-    
+-    should_swap = False
+-    if compare_direction == 1:
+-        if key_self > key_partner:
+-            should_swap = True
+-    elif compare_direction == -1:
+-        if key_self < key_partner:
+-            should_swap = True
+-            
+-    # Alternative comparison logic mentioned in [S2, unofficial] involving half vector
+-    # selfProjectedLength * compare < partnerProjectedLength * compare
+-    # This is implemented below if the key-based comparison is not sufficient 
+-    # or if the specific application requires geometric sorting.
+-    # However, standard Bitonic Sort relies on keys. We prioritize the key comparison 
+-    # as the primary mechanism [S1, unofficial].
+-    
+-    if should_swap:
+-        return (key_partner, value_partner)
++    return output_key, output_val
++
++def determine_compare_direction(uPass, uStage, i):
++    # Standard Bitonic Sort logic for determining swap direction
++    # This is a placeholder for the specific bitonic network index logic
++    # which depends on the binary representation of i relative to stage/pass
++    # In standard bitonic sort, direction is determined by the bit at position uStage
++    # within the block defined by uPass.
++    # [G] Standard bitonic sort uses the bit at index uStage of i to determine direction.
++    # If the bit is 0, compare with lower; if 1, compare with higher.
++    # The 'compare' variable here likely represents +1 or -1.
++    if (i >> uStage) & 1:
++        return -1  # Compare with higher index
+     else:
+-        return (key_self, value_self)
+-
+-def bitonic_sort_network(num_elements, keys, values):
+-    """
+-    Simulates the Bitonic Sort network structure.
+-    Note: This is a high-level representation. On GPU, this is executed in parallel 
+-    by fragment shaders for each element.
+-    """
+-    n = num_elements
+-    # n must be a power of 2
+-    assert (n & (n - 1)) == 0
+-    
+-    # Initialize arrays
+-    # keys and values are assumed to be arrays of size n
+-    
+-    # Passes
+-    for pass_num in range(int(math.log2(n))):
+-        # Stages
+-        for stage_num in range(int(math.log2(n)) - 1, -1, -1):
+-            # Distance between elements to compare
+-            distance = 1 << (stage_num + pass_num) # This logic varies by implementation
+-            
+-            # In GPU implementation, each shader invocation handles one element i
+-            # The partner index j is determined by i, pass_num, and stage_num
+-            # The direction (compare) is also determined by these parameters
+-            
+-            # Example logic for determining partner and direction:
+-            # This part is highly dependent on the specific bitonic sequence generation
+-            # For a standard bitonic sort:
+-            # For pass p and stage s:
+-            # Compare element i with element i ^ (1 << (s + p))
+-            # Direction depends on the bit at position (s + p) in i
+-            
+-            pass # Parallel execution handles the rest
++        return 1   # Compare with lower index
+ ```
+ 
+ **Edge Cases and Pitfalls:**
+-*   **Power of 2:** The number of elements must be a power of 2. If not, padding is required [G].
+-*   **Precision:** Floating-point comparisons for depth values may suffer from precision issues near boundaries [G].
+-*   **Memory Access:** Cache-efficient memory accesses are crucial for performance, as highlighted by Govindaraju et al. [S1, unofficial].
++*   **Data Independence:** Unlike Quicksort, Bitonic Sort does not branch on data values, making it suitable for GPU SIMD/SIMT architectures but potentially slower for small datasets due to fixed work [S1, unofficial].
++*   **Exact Ordering:** Requires all passes to complete for exact ordering; partial results are insufficient for correct compositing [S1, unofficial].
++*   **Memory Packing:** Packing four values per texel requires careful handling of texture coordinates and swizzling to ensure correct key/value alignment [S1, unofficial].
+ 
+ ## Operating characteristics
+-*   **Time Complexity:** $O(N \log^2 N)$ comparisons [S1, unofficial]. Adaptive Bitonic Sort (ABisort) achieves $O((N \log N) / P)$ where $P$ is the number of stream processors [S1, unofficial].
+-*   **Memory Complexity:** $O(N)$ for storing keys and values [S1, unofficial].
+-*   **Performance:** On an NVIDIA GeForce 7800, Govindaraju's Bitonic Sort is approximately twice as fast as the best CPU QuickSort implementation [S1, unofficial].
+-*   **Strengths:** Provides exact ordering at each frame, which is critical for splatting [S1, unofficial]. Highly parallelizable on GPU [S1, unofficial].
+-*   **Limitations:** Data-independent, so it performs the same number of operations regardless of input order [S1, unofficial]. Not suitable for variable-sized datasets without padding [G].
+-*   **When to Use:** When exact ordering is required per frame and GPU performance is prioritized over CPU-based sorting [S1, unofficial].
+-*   **When Not to Use:** When partial ordering is sufficient (use Odd-Even Merge Sort) or when data is highly structured and CPU-based sorts are preferred [S1, unofficial].
++*   **Time Complexity:** $O(N \log^2 N)$ comparisons and swaps [S1, unofficial]. Adaptive Bitonic Sort (ABisort) claims $O((N \log N)/P)$ complexity, where $P$ is the number of stream processors [S1, unofficial].
++*   **Performance:** On an NVIDIA GeForce 7800, Govindaraju's Bitonic Sort was approximately twice as fast as the best CPU QuickSort implementation at the time of the source [S1, unofficial].
++*   **Strengths:** Provides exact ordering every frame; highly parallelizable; cache-efficient memory access patterns in optimized implementations [S1, unofficial].
++*   **Limitations:** Fixed number of operations regardless of data distribution; not suitable for dynamic datasets where partial ordering is acceptable (Odd-Even Merge Sort is preferred there) [S1, unofficial].
++*   **When to Use:** When exact depth sorting is required for every frame in volume splatting [S1, unofficial].
++*   **When Not to Use:** When partial ordering is sufficient (e.g., particle systems spread over multiple frames) or when adaptive sorting performance is critical and library access permits [S1, unofficial].
+ 
+ ## Background
+-Bitonic Sort was originally developed for network sorting architectures [S1, unofficial]. It was adapted for GPGPU by researchers such as Govindaraju et al. [GRHM05] and Kim et al. [KW05], who improved cache efficiency [S1, unofficial]. It has been adapted for sorting large databases [GGKM06]. Adaptive Bitonic Sort (ABisort) was later designed by Gress and Zachmann [GZ06] to optimize complexity [S1, unofficial]. In volume rendering, it is used for splat sorting to ensure correct depth ordering of voxels [S1, unofficial].
++Bitonic Sort was originally developed as a network sorting algorithm. In the context of GPU volume rendering, Govindaraju et al. [GRHM05] improved early implementations [KW05] by introducing cache-efficient memory accesses, leading to high performance on GPUs like the NVIDIA GeForce 7800 [S1, unofficial]. Gress and Zachmann [GZ06] later designed Adaptive Bitonic Sort (ABisort) with optimal complexity [S1, unofficial]. In the specific implementation described in the sources, Govindaraju's method was chosen over ABisort due to the accessibility and adaptability of the library [S1, unofficial].
+ 
+ ## Sources

@@ -1,0 +1,2327 @@
+# WebGL Signed Distance Function Mesher
+
+Extract an STL from a glsl distance function
+
+http://tdhooper.github.io/glsl-marching-cubes/
+
+## Limitations
+
+* Large meshes will be saved in parts, you can re-combine them with [MeshLab](http://www.meshlab.net)
+* You might get some missing triangles (holes) in the mesh
+
+If you have a Mac, check out [F3](http://www.syedrezaali.com/f3-mac-app/) which does this a LOT better.
+
+## Tools used
+
+* [three.js](http://threejs.org/)
+* [stack.gl](http://stack.gl/)
+* [TWGL](http://twgljs.org/)
+* [FileSaver.js](https://github.com/eligrey/FileSaver.js/)
+* [Ractive.js](http://www.ractivejs.org/)
+
+## How does it work?
+
+It follows the basic marching cubes algorithm, except distances for each cube vertex are extracted from the shader first<sup>1</sup>, to reduce the number of GPU/CPU round trips.
+
+The volume to be marched is subdivided into blocks small enough to fit the maximum texture size. As distances are extracted first, any blocks which are entirely inside (negative) or outside (positive) the surface are skipped, saving some time for models with a lot of empty space.
+
+I tried running the entire marching cubes algorithm on the GPU, but the cost and difficulty of getting data back onto the CPU made it far too slow.
+
+The JavaScript marching cubes implementation this is based on<sup>2</sup> runs much faster for simple models. I haven’t compared them for more complex models.
+
+* 1 https://github.com/mikolalysenko/glsl-read-float
+* 2 https://github.com/mikolalysenko/isosurface
+
+### src/cubemarch.js
+```
+"use strict";
+
+var twgl = require("twgl.js");
+var glslify = require("glslify");
+var Scene = require('./scene');
+var WorkerPool = require('./worker-pool');
+var unpackFloat = require("glsl-read-float");
+var splitVolume = require("./split-volume");
+
+var CubeMarch = function() {
+    this.scene = new Scene(1, 1);
+
+    this.shaderVert = glslify('./shaders/shader.vert');
+    this.calcPotentialsFrag = glslify('./shaders/calc-potentials.frag');
+
+    this.startTime = new Date().getTime();
+    this.numWorkers = 4;
+    this.workerPool = new WorkerPool('build/workers/march.js', this.numWorkers);
+};
+
+CubeMarch.prototype.setVolume = function(dims, bounds) {
+    var scene = this.scene;
+
+    var vertexCount = (dims[0] + 1) * (dims[1] + 1) * (dims[2] + 1);
+    var size = Math.ceil(Math.sqrt(vertexCount));
+    scene.resize(size, size);
+    var maxSize = scene.gl.drawingBufferWidth;
+    maxSize = Math.min(maxSize, 4096); // Even though GPUs can go over this, things get weird
+    // maxSize /= 2;
+    // maxSize = 60;
+
+    var volume = { dims: dims, bounds: bounds };
+    this.volumes = splitVolume(volume, maxSize);
+
+    var newSize = this.volumes.reduce(function(max, volume) {
+        return Math.max(max, volume.size);
+    }, 0);
+    scene.resize(newSize, newSize);
+
+    this.totalCubes = dims[0] * dims[1] * dims[2];
+}
+
+CubeMarch.prototype.sizeBuckets = function(pixels, maxSize) {
+    return Math.ceil(pixels / Math.max(pixels / maxSize));
+};
+
+CubeMarch.prototype.calcPotentials = function(volumeIndex, pixels, uniforms) {
+    var volume = this.volumes[volumeIndex];
+    var potentialsBuffer;
+    var potentials;
+    var blockPotentialBuffers = [];
+    var blockPotentials = [];
+
+    for (var i = 0; i < this.numWorkers; i++) {
+        potentialsBuffer = new ArrayBuffer(volume.vertexCount * 4);
+        potentials = new Float32Array(potentialsBuffer);
+        blockPotentialBuffers.push(potentialsBuffer);
+        blockPotentials.push(potentials);
+    }
+
+    var r, g, b, a;
+    var value;
+    var i;
+    var bl;
+    var gl = this.scene.gl;
+
+    uniforms.boundsA = volume.bounds[0];
+    uniforms.boundsB = volume.bounds[1];
+    uniforms.dims = volume.dims;
+
+    this.scene.draw({
+        program: this.potentialsProg,
+        uniforms: uniforms
+    });
+
+    gl.readPixels(
+        0, 0,
+        gl.drawingBufferWidth, gl.drawingBufferHeight,
+        gl.RGBA, gl.UNSIGNED_BYTE,
+        pixels
+    );
+
+    var previousValue;
+    var containsGeometry = false;
+
+    for (i = 0; i < volume.vertexCount; i++) {
+        r = pixels[i * 4 + 0];
+        g = pixels[i * 4 + 1];
+        b = pixels[i * 4 + 2];
+        a = pixels[i * 4 + 3];
+        value = unpackFloat(r, g, b, a);
+        if ( ! containsGeometry && previousValue && (value > 0) !== (previousValue > 0)) {
+            containsGeometry = true;
+        }
+        previousValue = value;
+        for (bl = 0; bl < this.numWorkers; bl++) {
+            blockPotentials[bl][i] = value;
+        }
+    }
+
+    if ( ! containsGeometry) {
+        return;
+    }
+
+    return blockPotentialBuffers;
+}
+
+CubeMarch.prototype.marchVolume = function(config) {
+    var volume = this.volumes[config.volumeIndex];
+    var initialSpecs = [];
+    var marchSpecs = [];
+
+    for (var i = 0; i < this.numWorkers; i++) {
+        initialSpecs.push({
+            transferable: config.blockPotentialBuffers[i]
+        });
+    }
+
+    this.workerPool.each('init', initialSpecs);
+
+    var blocks = 256;
+    var start;
+    var end = 0;
+    var cubes = volume.dims[0] * volume.dims[1] * volume.dims[2];
+    while (blocks--) {
+        start = end;
+        end = start + Math.floor((cubes - start) / (blocks + 1));
+        marchSpecs.push({
+            json: {
+                start: start,
+                end: end,
+                dims: volume.dims,
+                bounds: volume.bounds
+            }
+        });
+    }
+
+    var update = function(data, configIndex) {
+        var spec = marchSpecs[configIndex].json;
+        this.cubesMarched += spec.end - spec.start;
+        config.onSection(data);
+        config.onProgress(this.cubesMarched, this.totalCubes);
+    };
+
+    this.workerPool.each('march', marchSpecs, update.bind(this), config.onDone);
+};
+
+CubeMarch.prototype.abort = function() {
+    this.aborting = true;
+    this.workerPool.abort();
+};
+
+CubeMarch.prototype.march = function(config) {
+
+    this.aborting = false;
+    this.cubesMarched = 0;
+    var gl = this.scene.gl;
+
+    this.potentialsProg = this.scene.createProgramInfo(
+        this.shaderVert,
+        this.calcPotentialsFrag.replace('INSERT_MAP_DISTANCE', config.mapDistance)
+    );
+
+    var uniforms = {
+        time: new Date().getTime() - this.startTime
+    };
+
+    var pixelCount = gl.drawingBufferWidth * gl.drawingBufferHeight;
+    var pixels = new Uint8Array(pixelCount * 4);
+
+    var blockPotentialBuffers;
+    var volumeIndex = 0;
+
+    var nextVolume = function() {
+        if (this.aborting) {
+            return;
+        }
+
+        if (volumeIndex >= this.volumes.length) {
+            config.hasOwnProperty('onDone') && config.onDone();
+            return;
+        }
+
+        blockPotentialBuffers = this.calcPotentials(volumeIndex, pixels, uniforms);
+        if ( ! blockPotentialBuffers) {
+            var volume = this.volumes[volumeIndex];
+            var cubes = volume.dims[0] * volume.dims[1] * volume.dims[2];
+            this.cubesMarched += cubes;
+            config.onProgress(this.cubesMarched, this.totalCubes);
+            volumeIndex += 1;
+            setTimeout(nextVolume.bind(this), 100);
+            return;
+        }
+
+        this.marchVolume({
+            volumeIndex: volumeIndex,
+            blockPotentialBuffers: blockPotentialBuffers,
+            onSection: config.onSection,
+            onProgress: config.onProgress,
+            onDone: nextVolume.bind(this)
+        });
+
+        volumeIndex += 1;
+    };
+
+    nextVolume.bind(this)();
+};
+
+module.exports = CubeMarch;
+```
+
+### src/index.js
+```
+"use strict";
+
+var CubeMarch = require("./cubemarch");
+var STLExporter = require("./stl-exporter");
+var Renderer = require("./renderer");
+var Ractive = require('ractive');
+var PreviewControls = require('./controls/preview-controls.js');
+var DownloadControls = require('./controls/download-controls.js');
+var BoundingControls = require('./controls/bounding-controls.js');
+var EditorControls = require('./controls/editor-controls.js');
+var Editor = require('glsl-editor');
+var fs = require('fs');
+
+
+// Core
+
+var cubeMarch = new CubeMarch();
+var exporter = new STLExporter();
+var renderer = new Renderer(document.getElementById('scene'));
+
+// UI
+
+var state = {
+    progress: 'Ready',
+    preview: {
+        proportional: true,
+        resolution: {
+            x: 50,
+            y: 50,
+            z: 50
+        },
+        wireframe: false
+    },
+    download: {
+        proportional: true,
+        resolution: {
+            x: 500,
+            y: 500,
+            z: 500
+        }
+    },
+    bounding: {
+        position: {
+            x: 0,
+            y: 0,
+            z: 0
+        },
+        size: {
+            width: 2,
+            height: 2,
+            depth: 2
+        },
+        visible: true
+    },
+    examples: {
+        selected: 0,
+        list: [{
+            name: 'Sphere',
+            source: fs.readFileSync(__dirname + '/shaders/examples/sphere.glsl', 'utf8')
+        },{
+            name: 'Box',
+            source: fs.readFileSync(__dirname + '/shaders/examples/box.glsl', 'utf8')
+        },{
+            name: 'Sine Waves',
+            source: fs.readFileSync(__dirname + '/shaders/examples/sine-waves.glsl', 'utf8')
+        },{
+            name: 'Torus',
+            source: fs.readFileSync(__dirname + '/shaders/examples/torus.glsl', 'utf8')
+        },{
+            name: 'Radiolarian',
+            source: fs.readFileSync(__dirname + '/shaders/examples/radiolarian.glsl', 'utf8')
+        }]
+    }
+};
+
+var template = fs.readFileSync(__dirname + '/templates/controls.html', 'utf8');
+var ractive = new Ractive({
+    el: document.getElementById('main'),
+    append: true,
+    template: template,
+    data: state,
+    computed: {
+        bounds: function() {
+            var position = this.get('bounding.position');
+            var size = this.get('bounding.size');
+            var w2 = size.width / 2;
+            var h2 = size.height / 2;
+            var d2 = size.depth / 2;
+            var bounds = [
+                [position.x - w2, position.y - h2, position.z - d2],
+                [position.x + w2, position.y + h2, position.z + d2]
+            ];
+            return bounds;
+        }
+    }
+});
+
+
+// Editor
+
+var config = {
+    container: ractive.nodes['edit-pane'],
+    value: ''
+};
+
+var editor = Editor(config);
+editor.wrap.setAttribute('class', 'editor');
+
+// inline CSS styles into bundle:
+// both are optional.
+require('glsl-editor/css');
+require('glsl-editor/theme');
+
+window.addEventListener('resize', editor.resize.bind(editor), false);
+
+// Controls
+
+var previewControls = new PreviewControls(cubeMarch, renderer, editor, ractive);
+var downloadControls = new DownloadControls(cubeMarch, exporter, editor, ractive);
+var boundingControls = new BoundingControls(renderer, ractive);
+var editorControls = new EditorControls(editor, ractive);
+
+previewControls.init();
+downloadControls.init();
+boundingControls.init();
+editorControls.init();
+```
+
+### src/renderer.js
+```
+"use strict";
+
+var THREE = require('three');
+THREE.TrackballControls = require('three.trackball');
+
+var Renderer = function(el) {
+
+    var width = el.offsetWidth;
+    var height = el.offsetHeight;
+
+    var camera = new THREE.PerspectiveCamera(45, width / height, 0.001, 1000);
+    camera.position.z = 5;
+
+    var renderer = new THREE.WebGLRenderer({
+        alpha: true,
+        antialias: true
+    });
+    renderer.setSize(width, height);
+    el.appendChild( renderer.domElement );
+
+    var controls = new THREE.TrackballControls(camera, renderer.domElement);
+
+    var scene = new THREE.Scene();
+
+    scene.add(camera);
+
+    var axisHelper = new THREE.AxisHelper( 1 );
+    scene.add( axisHelper );
+
+    var light = new THREE.PointLight( 0xffffff, 1, 200 );
+    light.position.set( 20, 30, 40 );
+    camera.add( light );
+
+    var light = new THREE.AmbientLight( 0x404040 ); // soft white light
+    camera.add( light );
+
+    this.materialColor = 0xaaaaaa;
+    this.wireframeColor = 0xffffff;
+    this.material = new THREE.MeshLambertMaterial({
+        color: this.materialColor,
+        side: THREE.DoubleSide
+    });
+
+    var boundsMaterial = new THREE.MeshBasicMaterial({
+        color: '#ff0',
+        wireframe: true
+    });
+
+    var boundsGeometry = new THREE.BoxGeometry(1, 1, 1, 5, 5, 5);
+    var bounds = new THREE.Mesh(boundsGeometry, boundsMaterial);
+    scene.add(bounds);
+
+    function render() {
+        renderer.render(scene, camera);
+    }
+
+    function animate() {
+        render();
+        controls.update();
+        requestAnimationFrame(animate);
+    }
+
+    function onWindowResize() {
+        width = el.offsetWidth;
+        height = el.offsetHeight;
+        camera.aspect = width / height;
+        camera.updateProjectionMatrix();
+        renderer.setSize(width, height);
+    }
+
+    controls.addEventListener('change', function() {
+        render();
+    });
+
+    window.addEventListener('resize', onWindowResize, false);
+    animate();
+
+    this.sections = [];
+    this.scene = scene;
+    this.bounds = bounds;
+};
+
+Renderer.prototype = {
+
+    startModel: function() {
+        this.sections.forEach(function(section) {
+            this.scene.remove(section);
+        }, this);
+    },
+
+    addSection: function(vertices, faces) {
+        var geometry = new THREE.BufferGeometry();
+        var positions = new Float32Array( faces.length * 3 * 3 );
+        var faceNormal = {};
+        var normals = new Float32Array( faces.length * 3 * 3 );
+        var f, v1, v2, v3;
+
+        for (var i = 0; i < faces.length; ++i) {
+            f = faces[i];
+            v1 = vertices[ f[0] ];
+            v2 = vertices[ f[1] ];
+            v3 = vertices[ f[2] ];
+
+            faceNormal.x = (v2[1] - v1[1]) * (v3[2] - v1[2]) - (v2[2] - v1[2]) * (v3[1] - v1[1]);
+            faceNormal.y = (v2[2] - v1[2]) * (v3[0] - v1[0]) - (v2[0] - v1[0]) * (v3[2] - v1[2]);
+            faceNormal.z = (v2[0] - v1[0]) * (v3[1] - v1[1]) - (v2[1] - v1[1]) * (v3[0] - v1[0]);
+
+            normals[ (i * 9) + 0 ] = faceNormal.x;
+            normals[ (i * 9) + 1 ] = faceNormal.y;
+            normals[ (i * 9) + 2 ] = faceNormal.z;
+            normals[ (i * 9) + 3 ] = faceNormal.x;
+            normals[ (i * 9) + 4 ] = faceNormal.y;
+            normals[ (i * 9) + 5 ] = faceNormal.z;
+            normals[ (i * 9) + 6 ] = faceNormal.x;
+            normals[ (i * 9) + 7 ] = faceNormal.y;
+            normals[ (i * 9) + 8 ] = faceNormal.z;
+
+            positions[ (i * 9) + 0 ] = v1[0];
+            positions[ (i * 9) + 1 ] = v1[1];
+            positions[ (i * 9) + 2 ] = v1[2];
+            positions[ (i * 9) + 3 ] = v2[0];
+            positions[ (i * 9) + 4 ] = v2[1];
+            positions[ (i * 9) + 5 ] = v2[2];
+            positions[ (i * 9) + 6 ] = v3[0];
+            positions[ (i * 9) + 7 ] = v3[1];
+            positions[ (i * 9) + 8 ] = v3[2];
+        }
+
+        var positionBuffer = new THREE.BufferAttribute( positions, 3 );
+        var normalBuffer = new THREE.BufferAttribute( normals, 3 );
+        geometry.addAttribute( 'position', positionBuffer );
+        geometry.addAttribute( 'normal', normalBuffer );
+        var obj = new THREE.Mesh(geometry, this.material);
+        this.sections.push(obj);
+        this.scene.add(obj);
+    },
+
+    setBoundingBox: function(x, y, z, width, height, depth) {
+        this.bounds.position.set(x, y, z);
+        this.bounds.scale.set(width, height, depth);
+    },
+
+    toggleBoundingBox: function(visible) {
+        this.bounds.visible = visible;
+    },
+
+    toggleWireframe: function(visible) {
+        this.material.wireframe = visible;
+        this.material.color.setHex(visible ? this.wireframeColor : this.materialColor);
+        this.material.emissive.setHex(visible ? this.wireframeColor : 0x000000);
+        this.material.needsUpdate = true;
+    }
+};
+
+module.exports = Renderer;
+```
+
+### src/scene.js
+```
+"use strict";
+
+var twgl = require("twgl.js");
+
+var Scene = function(width, height) {
+    this.canvas = document.createElement('canvas');
+
+    this.gl = twgl.getWebGLContext(this.canvas);
+
+    var arrays = {
+        position: [-1, -1, 0, 1, -1, 0, -1, 1, 0, -1, 1, 0, 1, -1, 0, 1, 1, 0],
+    };
+    this.bufferInfo = twgl.createBufferInfoFromArrays(this.gl, arrays);
+    
+    this.resize(width, height);
+}
+
+Scene.prototype.resize = function(width, height) {
+    this.width = width;
+    this.height = height;
+    this.gl.canvas.width = this.width;
+    this.gl.canvas.height = this.height;
+    this.gl.viewport(0, 0, this.width, this.height);
+}
+
+Scene.prototype.createBuffer = function(width, height) {
+    width = width || this.width;
+    height = height || this.height;
+    var attachments = [
+        {
+            format: this.gl.RGBA,
+            type: this.gl.UNSIGNED_BYTE,
+            min: this.gl.NEAREST,
+            mag: this.gl.NEAREST,
+            wrap: this.gl.REPEAT
+        }
+    ];
+    var fbi = twgl.createFramebufferInfo(
+        this.gl,
+        attachments,
+        width,
+        height
+    )
+    fbi.width = width;
+    fbi.height = height;
+    return fbi;
+};
+
+Scene.prototype.createProgramInfo = function(vs, fs) {
+    return twgl.createProgramInfo(this.gl, [vs, fs]);
+};
+
+Scene.prototype.drawLastBuffer = function() {
+    this.gl.bindFramebuffer(this.gl.FRAMEBUFFER, null);
+    twgl.drawBufferInfo(this.gl, this.gl.TRIANGLES, this.bufferInfo);
+}
+
+Scene.prototype.draw = function(spec) {
+
+    this.gl.useProgram(spec.program.program);
+    
+    var uniforms = {};
+
+    if (spec.uniforms) {
+        Object.assign(uniforms, spec.uniforms);
+    }
+
+    if (spec.inputs) {
+        var inputs = {};
+        Object.keys(spec.inputs).map(function(key, index) {
+            inputs[key] = spec.inputs[key].attachments[0];
+        });
+        Object.assign(uniforms, inputs);
+    }
+
+    var resolution = [this.width, this.height];
+
+    if (spec.output) {
+        var resolution = [spec.output.width, spec.output.height];
+    }
+
+    Object.assign(uniforms, {
+        resolution: resolution,
+    });
+
+    twgl.setUniforms(spec.program, uniforms);
+
+    if (spec.output) {
+        this.gl.bindFramebuffer(this.gl.FRAMEBUFFER, spec.output.framebuffer);
+    } else {
+        this.gl.bindFramebuffer(this.gl.FRAMEBUFFER, null);
+    }
+
+    twgl.setBuffersAndAttributes(this.gl, spec.program, this.bufferInfo);
+    twgl.drawBufferInfo(this.gl, this.gl.TRIANGLES, this.bufferInfo);
+}
+
+module.exports = Scene;
+```
+
+### src/split-volume.js
+```
+var maxDimension = function(dims) {
+    if (dims[0] > dims[1]) {
+        if (dims[0] > dims[2]) {
+            return 0;
+        }
+    } else if (dims[1] > dims[2]) {
+        return 1;
+    }
+    return 2;
+};
+
+var subVectors = function(a, b) {
+    var c = [];
+    c[0] = a[0] - b[0];
+    c[1] = a[1] - b[1];
+    c[2] = a[2] - b[2];
+    return c;
+};
+
+var addVectors = function(a, b) {
+    var c = [];
+    c[0] = a[0] + b[0];
+    c[1] = a[1] + b[1];
+    c[2] = a[2] + b[2];
+    return c;
+};
+
+var multiplyVectors = function(a, b) {
+    var c = [];
+    c[0] = a[0] * b[0];
+    c[1] = a[1] * b[1];
+    c[2] = a[2] * b[2];
+    return c;
+};
+
+var ceilVector = function(a) {
+    var c = [];
+    c[0] = Math.ceil(a[0]);
+    c[1] = Math.ceil(a[1]);
+    c[2] = Math.ceil(a[2]);
+    return c;
+};
+
+var volumeFits = function(volume, maxSize) {
+    var vertexDims = addVectors(volume.dims, [1, 1, 1]);
+    var vertexCount = vertexDims[0] * vertexDims[1] * vertexDims[2];
+    var maxVerts = Math.pow(maxSize, 2);
+    return vertexCount < maxVerts;
+}
+
+var splitVolume = function(volume, maxSize) {
+    var volumes = [];
+    var bounds = volume.bounds;
+    var dims = volume.dims;
+
+    if ( ! volumeFits(volume, maxSize)) {
+        var size = subVectors(bounds[1], bounds[0]);
+        var slice = [1, 1, 1];
+        slice[maxDimension(dims)] = 0.5;
+        size = multiplyVectors(size, slice);
+
+        volumes.push({
+            bounds: [
+                bounds[0],
+                addVectors(bounds[0], size)
+            ],
+            dims: ceilVector(multiplyVectors(dims, slice))
+        });
+        volumes.push({
+            bounds: [
+                subVectors(bounds[1], size),
+                bounds[1]
+            ],
+            dims: ceilVector(multiplyVectors(dims, slice))
+        });
+    } else {
+        volumes.push({
+            bounds: bounds,
+            dims: dims
+        });
+    }
+
+    volumes = volumes.reduce(function(vs, volume) {
+        if (volumeFits(volume, maxSize)) {
+            return vs.concat(volume);
+        }
+        return vs.concat(splitVolume(volume, maxSize));
+    }, []);
+
+    volumes = volumes.map(function(volume) {
+        volume.vertexDims = addVectors(volume.dims, [1, 1, 1]);
+        volume.vertexCount = volume.vertexDims[0] * volume.vertexDims[1] * volume.vertexDims[2];
+        volume.size = Math.ceil(Math.sqrt(volume.vertexCount));
+        return volume;
+    });
+
+    return volumes;
+}
+
+module.exports = splitVolume;
+```
+
+### src/stl-exporter.js
+```
+"use strict";
+
+var STLWriter = require("./stl-writer");
+
+var STLExporter = function() {
+    this.writer = new STLWriter();
+}
+
+STLExporter.prototype = {
+
+    maxVerts: 6000000,
+
+    startModel: function(filename) {
+        this.part = -1;
+        this.filename = filename;
+        this.nextPart();
+    },
+
+    nextPart: function() {
+        this.part += 1;
+        this.vertIndex = -1;
+        this.numVerts = 0;
+        this.numFaces = 0;
+        this.faces = new Float32Array(this.maxVerts);
+    },
+
+    addSection: function(vertices, faces) {
+        var f, v1, v2, v3;
+        for (var i = 0; i < faces.length; ++i) {
+            f = faces[i];
+            v1 = vertices[ f[0] ];
+            v2 = vertices[ f[1] ];
+            v3 = vertices[ f[2] ];
+            this.addFace(v1, v2, v3);
+        }
+    },
+
+    addFace: function(v1, v2, v3) {
+        if (this.numVerts + 9 > this.maxVerts) {
+            this.save();
+            this.nextPart();
+        }
+
+        this.faces[++this.vertIndex] = v1[0];
+        this.faces[++this.vertIndex] = v1[1];
+        this.faces[++this.vertIndex] = v1[2];
+        this.faces[++this.vertIndex] = v2[0];
+        this.faces[++this.vertIndex] = v2[1];
+        this.faces[++this.vertIndex] = v2[2];
+        this.faces[++this.vertIndex] = v3[0];
+        this.faces[++this.vertIndex] = v3[1];
+        this.faces[++this.vertIndex] = v3[2];
+
+        this.numVerts += 9;
+        this.numFaces += 1;
+    },
+
+    finishModel: function() {
+        this.save();
+        delete this.faces;
+    },
+
+    save: function() {
+        var filename = [this.filename, 'part', this.part].join('-') + '.stl';
+        this.writer.save(this.faces, this.numFaces, filename);
+    }
+};
+
+module.exports = STLExporter;
+```
+
+### src/stl-writer.js
+```
+// Cribbed from http://buildaweso.me/project/2014/10/26/writing-binary-stl-files-from-threejs-objects
+
+var FileSaver = require("filesaver.js");
+
+var STLWriter = function() {}
+
+STLWriter.prototype = {
+
+    writeVector: function(dataview, offset, vector, isLittleEndian) {
+        offset = this.writeFloat(dataview, offset, vector[0], isLittleEndian);
+        offset = this.writeFloat(dataview, offset, vector[1], isLittleEndian);
+        return this.writeFloat(dataview, offset, vector[2], isLittleEndian);
+    },
+
+    writeFloat: function(dataview, offset, float, isLittleEndian) {
+        dataview.setFloat32(offset, float, isLittleEndian);
+        return offset + 4;
+    },
+
+    calcNormal: function(face) {
+        var a = face[0];
+        var b = face[1];
+        var c = face[2];
+        var normal = [];
+        normal[0] = (b[1] - a[1]) * (c[2] - a[2]) - (b[2] - a[2]) * (c[1] - a[1]);
+        normal[1] = (b[2] - a[2]) * (c[0] - a[0]) - (b[0] - a[0]) * (c[2] - a[2]);
+        normal[2] = (b[0] - a[0]) * (c[1] - a[1]) - (b[1] - a[1]) * (c[0] - a[0]);
+        return normal;
+    },
+
+    geometryToDataView: function(faces, len) {
+        var isLittleEndian = true; // STL files assume little endian, see wikipedia page
+        
+        var bufferSize = 84 + (50 * len);
+        var buffer = new ArrayBuffer(bufferSize);
+        var dv = new DataView(buffer);
+        var offset = 0;
+
+        offset += 80; // Header is empty
+
+        dv.setUint32(offset, len, isLittleEndian);
+        offset += 4;
+        var face = [];
+
+        for(var n = 0; n < len; n++) {
+            face[0] = [
+                faces[n * 9 + 0],
+                faces[n * 9 + 1],
+                faces[n * 9 + 2]
+            ];
+            face[1] = [
+                faces[n * 9 + 3],
+                faces[n * 9 + 4],
+                faces[n * 9 + 5]
+            ];
+            face[2] = [
+                faces[n * 9 + 6],
+                faces[n * 9 + 7],
+                faces[n * 9 + 8]
+            ];
+            offset = this.writeVector(dv, offset, this.calcNormal(face), isLittleEndian);
+            offset = this.writeVector(dv, offset, face[0], isLittleEndian);
+            offset = this.writeVector(dv, offset, face[1], isLittleEndian);
+            offset = this.writeVector(dv, offset, face[2], isLittleEndian);
+            offset += 2; // unused 'attribute byte count' is a Uint16
+        }
+
+        return dv;
+    },
+
+    save: function(faces, len, filename) {
+        var dv = this.geometryToDataView(faces, len);
+        var blob = new Blob([dv], {type: 'application/octet-binary'});
+        FileSaver.saveAs(blob, filename);
+    }
+};
+
+module.exports = STLWriter;
+```
+
+### src/worker-pool.js
+```
+var WorkerPool = function(filename, n) {
+    this.queue = [];
+    this.workers = [];
+    while (n--) {
+        this.workers.push(
+            Promise.resolve(new Worker(filename))
+        );
+    }
+    this.eachPromise = Promise.resolve();
+}
+
+WorkerPool.prototype.abort = function() {
+    this.queue = [];
+    this.aborting = true;
+    var that = this;
+    this.eachPromise.then(function() {
+        that.aborting = false;
+        return Promise.resolve();
+    });
+}
+
+WorkerPool.prototype.each = function(action, configs, update, done) {
+    var that = this;
+    update = update || function() {};
+    done = done || function() {};
+    this.eachPromise = this.eachPromise.then(function() {
+        if (that.aborting) {
+            return Promise.resolve();
+        }
+        that.queue = configs.map(function(config, index) {
+            return {
+                action: action,
+                config: config,
+                index: index
+            };
+        });
+        return Promise.all(that.workers.map(function(workerPromise) {
+            return workerPromise.then(this.nextJob.bind(this, update));
+        }, that)).then(function() {
+            if ( ! that.aborting) {
+                done();
+            }
+        });
+    });
+};
+
+WorkerPool.prototype.nextJob = function(update, worker) {
+    var job = this.queue.shift();
+    if (job) {
+        return this.process(worker, job, update).then(this.nextJob.bind(this, update));
+    } else {
+        return Promise.resolve();
+    }
+};
+
+WorkerPool.prototype.process = function(worker, job, done) {
+    var that = this;
+    var config = job.config;
+
+    return new Promise(function(resolve) {
+
+        worker.onmessage = function(evt) {
+            if ( ! that.aborting) {
+                done(evt.data, job.index);
+            };
+            resolve(worker);
+        }
+
+        if (config.hasOwnProperty('json')) {
+            worker.postMessage({
+                action: job.action,
+                data: config.json
+            });
+        }
+
+        if (config.hasOwnProperty('transferable')) {
+            worker.postMessage({
+                action: job.action,
+                data: config.transferable
+            }, [config.transferable]);
+        }
+    });
+};
+
+module.exports = WorkerPool;
+```
+
+### src/controls/bounding-controls.js
+```
+var ControlSection = require('./control-section.js').ControlSection;
+
+var BoundingControls = function(renderer, ractive) {
+    ControlSection.call(this, ractive);
+    this.renderer = renderer;
+};
+
+BoundingControls.prototype = Object.create(ControlSection.prototype);
+BoundingControls.prototype.constructor = BoundingControls;
+BoundingControls.prototype.namespace = 'bounding';
+
+BoundingControls.prototype.init = function() {
+    ControlSection.prototype.init.call(this);
+    this.ractive.observe(this.ns('size'), this.onUpdate.bind(this));
+    this.ractive.observe(this.ns('position'), this.onUpdate.bind(this));
+    this.ractive.observe(this.ns('visible'), this.toggleVisibilty.bind(this));
+    this.ractive.on('source.bounding', this.onSourceUpdate.bind(this));
+};
+
+BoundingControls.prototype.onUpdate = function() {
+    var bounding = this.ractive.get(this.namespace);
+    this.renderer.setBoundingBox(
+        bounding.position.x,
+        bounding.position.y,
+        bounding.position.z,
+        bounding.size.width,
+        bounding.size.height,
+        bounding.size.depth
+    );
+};
+
+BoundingControls.prototype.onSourceUpdate = function(value) {
+    if (value.position) {
+        this.ractive.set(this.ns('position.x'), value.position.x);
+        this.ractive.set(this.ns('position.y'), value.position.y);
+        this.ractive.set(this.ns('position.z'), value.position.z);
+    }
+    if (value.size) {
+        this.ractive.set(this.ns('size.width'), value.size.width);
+        this.ractive.set(this.ns('size.height'), value.size.height);
+        this.ractive.set(this.ns('size.depth'), value.size.depth);
+    }
+};
+
+BoundingControls.prototype.toggleVisibilty = function(visible) {
+    this.renderer.toggleBoundingBox(visible);
+};
+
+module.exports = BoundingControls;
+```
+
+### src/controls/control-section.js
+```
+var ControlSection = function(ractive) {
+    this.ractive = ractive;
+};
+
+ControlSection.prototype = {
+
+    init: function() {
+        this.ractive.on('busy', this.busyHandler.bind(this));
+        this.ractive.on('ready', this.readyHandler.bind(this));
+    },
+
+    ns: function(key) {
+        return [this.namespace, key].join('.');
+    },
+
+    busyHandler: function(control) {
+        this.ractive.set(this.ns('disable'), true);
+    },
+
+    readyHandler: function() {
+        this.ractive.set(this.ns('disable'), false);
+    }
+};
+
+
+var ProcessControls = function(ractive) {
+    ControlSection.call(this, ractive);
+};
+
+ProcessControls.prototype = Object.create(ControlSection.prototype);
+ProcessControls.prototype.constructor = ProcessControls;
+
+ProcessControls.prototype.init = function() {
+    ControlSection.prototype.init.call(this);
+    this.ractive.on(this.ns('start'), this.start.bind(this));
+    this.ractive.on(this.ns('cancel'), this.cancel.bind(this));
+    this.ractive.observe(this.ns('resolution.*'), this.onResolutionUpdate.bind(this));
+    this.ractive.observe(this.ns('proportional'), this.onProportionalUpdate.bind(this));
+    this.ractive.observe('bounding.size.*', this.onBoundingUpdate.bind(this));
+};
+
+ProcessControls.prototype.onResolutionUpdate = function(value, old, keypath) {
+    if (value == undefined) {
+        return;
+    }
+    if (this.ractive.get(this.ns('proportional'))) {
+        var component = keypath.split('.').pop();
+        this.setProportionalResolution(value, component);
+    }
+};
+
+ProcessControls.prototype.onProportionalUpdate = function(value) {
+    if (value) {
+        this.forceProportions('x');
+    }
+};
+
+ProcessControls.prototype.onBoundingUpdate = function(value, old, keypath) {
+    if (value == undefined) {
+        return;
+    }
+    if (this.ractive.get(this.ns('proportional'))) {
+        var bound = keypath.split('.').pop();
+        var nonCorrespondingComponent = {'height': 'x', 'depth': 'y', 'width': 'z'}[bound];
+        this.forceProportions(nonCorrespondingComponent);
+    }
+};
+
+ProcessControls.prototype.forceProportions = function(component) {
+    var value = this.ractive.get(this.ns('resolution.' + component));
+    this.setProportionalResolution(value, component);
+};
+
+ProcessControls.prototype.setProportionalResolution = function(value, component) {
+    var base = this.boundForComp(component);
+    var x = this.boundForComp('x');
+    var y = this.boundForComp('y');
+    var z = this.boundForComp('z');
+    if (x == undefined || y == undefined || z == undefined) {
+        return;
+    }
+    this.ractive.set(this.ns('resolution.x'), Math.round((x / base) * value));
+    this.ractive.set(this.ns('resolution.y'), Math.round((y / base) * value));
+    this.ractive.set(this.ns('resolution.z'), Math.round((z / base) * value));
+};
+
+ProcessControls.prototype.boundForComp = function(component) {
+    var bound = {'x': 'width', 'y': 'height', 'z': 'depth'}[component]
+    return this.ractive.get('bounding.size.' + bound);
+};
+
+ProcessControls.prototype.done = function() {
+    this.ractive.set('progress', this.doneMessage());
+    this.ractive.set(this.ns('showCancel'), false);
+    this.ractive.fire('ready');
+};
+
+ProcessControls.prototype.start = function() {
+    this.startTime = new Date().getTime();
+    this.ractive.set(this.ns('showCancel'), true);
+    this.ractive.fire('busy', this);
+};
+
+ProcessControls.prototype.cancel = function() {
+    this.ractive.set('progress', 'Ready');
+    this.ractive.set(this.ns('showCancel'), false);
+    this.ractive.fire('ready');
+};
+
+ProcessControls.prototype.progress = function(cubesMarched, totalCubes) {
+    this.ractive.set('progress', this.progressMessage(cubesMarched, totalCubes));
+};
+
+ProcessControls.prototype.progressMessage = function(cubesMarched, totalCubes) {
+    var duration = this.formatDuration(this.startTime, new Date().getTime());
+    return [
+        '<strong>',
+        ((cubesMarched / totalCubes) * 100).toFixed(2),
+        '%</strong> complete, running for ',
+        duration
+    ].join('');
+};
+
+ProcessControls.prototype.doneMessage = function() {
+    var duration = this.formatDuration(this.startTime, new Date().getTime());
+    return 'completed in ' + duration;
+};
+
+ProcessControls.prototype.formatDuration = function(start, end) {
+    var d = new Date(end - start);
+    var values = [
+        d.getHours(),
+        d.getMinutes(),
+        d.getSeconds(),
+        d.getMilliseconds()
+    ]
+    values = values.reduce(function(prev, current, index, arr) {
+        return prev.length ? prev : current ? arr.slice(index) : [];
+    });
+    values = values.reverse().map(function(value, index) {
+        var unit = ['ms', 's', 'm', 'h'];
+        return '<strong>' + value + '</strong>' + unit[index]
+    }).reverse();
+    return values.join(' ');
+};
+
+module.exports.ControlSection = ControlSection;
+module.exports.ProcessControls = ProcessControls;
+```
+
+### src/controls/download-controls.js
+```
+var ProcessControls = require('./control-section.js').ProcessControls;
+
+var DownloadControls = function(cubeMarch, exporter, editor, ractive) {
+    ProcessControls.call(this, ractive);
+    this.exporter = exporter;
+    this.cubeMarch = cubeMarch;
+    this.editor = editor;
+};
+
+DownloadControls.prototype = Object.create(ProcessControls.prototype);
+DownloadControls.prototype.constructor = DownloadControls;
+DownloadControls.prototype.namespace = 'download';
+
+DownloadControls.prototype.update = function(data) {
+    if ( ! data) {
+        return;
+    }
+    this.exporter.addSection(data.vertices, data.faces);
+};
+
+DownloadControls.prototype.done = function() {
+    ProcessControls.prototype.done.call(this);
+    this.exporter.finishModel();
+};
+
+DownloadControls.prototype.start = function() {
+    ProcessControls.prototype.start.call(this);
+
+    this.cubeMarch.abort();
+    var res = this.ractive.get(this.ns('resolution'));
+    var dims = [
+        parseInt(res.x, 10),
+        parseInt(res.y, 10),
+        parseInt(res.z, 10)
+    ];
+    var bounds = this.ractive.get('bounds');
+    this.cubeMarch.setVolume(dims, bounds);
+    var filename = [
+        'marched',
+        new Date().getTime(),
+        dims[0] + 'x' + dims[1] + 'x' + dims[2]
+    ].join('-');
+    this.exporter.startModel(filename);
+
+    this.cubeMarch.march({
+        onSection: this.update.bind(this),
+        onProgress: this.progress.bind(this),
+        onDone: this.done.bind(this),
+        mapDistance: this.editor.getValue()
+    });
+};
+
+DownloadControls.prototype.cancel =function() {
+    ProcessControls.prototype.cancel.call(this);
+    this.cubeMarch.abort();
+};
+
+DownloadControls.prototype.progressMessage = function(cubesMarched, totalCubes) {
+    var message = ProcessControls.prototype.progressMessage.call(this, cubesMarched, totalCubes);
+    return 'Generating STL: ' + message;
+};
+
+DownloadControls.prototype.doneMessage = function() {
+    var message = ProcessControls.prototype.doneMessage.call(this);
+    return 'STL generation ' + message;
+};
+
+module.exports = DownloadControls;
+```
+
+### src/controls/editor-controls.js
+```
+var isEqual = require('lodash.isequal');
+
+var EditorControls = function(editor, ractive) {
+    this.editor = editor;
+    this.ractive = ractive;
+};
+
+EditorControls.prototype = {
+
+    init: function() {
+        this.load();
+        this.ractive.on('examples.load', this.load.bind(this));
+        this.editor.editor.on('change', this.onUpdate.bind(this));
+        this.ractive.observe('bounding.size', this.onBoundingUpdate.bind(this));
+        this.ractive.observe('bounding.position', this.onBoundingUpdate.bind(this));
+    },
+
+    onUpdate: function() {
+        var source = this.editor.getValue(source);
+        this.ractive.fire('source.bounding', this.getBoundingProperties(source));
+    },
+
+    onBoundingUpdate: function() {
+        var bounding = this.ractive.get('bounding');
+        var source = this.editor.getValue();
+        var props = this.getBoundingProperties(source);
+        if (
+            isEqual(bounding.position, props.position)
+            && isEqual(bounding.size, props.size)
+        ) {
+            return;
+        }
+        source = this.setBoundingProperties(source, bounding);
+        if (source) {
+            this.editor.setValue(source);
+        }
+    },
+
+    load: function() {
+        var index = this.ractive.get('examples.selected');
+        var source = this.ractive.get('examples.list')[index].source;
+        this.editor.setValue(source);
+    },
+
+    getBoundingProperties: function(source) {
+        return {
+            position: this.getBoundingPosition(source),
+            size: this.getBoundingSize(source)
+        };
+    },
+
+    setBoundingProperties: function(source, props) {
+        source = this.setBoundingPosition(source, props.position);
+        if (source) {
+            source = this.setBoundingSize(source, props.size);
+        }
+        return source;
+    },
+
+    getBoundingPosition: function(source) {
+        var values = this.getBoundingValue('BOUNDING_BOX_POSITION', source);
+        if (values) {
+            return {
+                x: values[0],
+                y: values[1],
+                z: values[2]
+            }
+        };
+    },
+
+    getBoundingSize: function(source) {
+        var values = this.getBoundingValue('BOUNDING_BOX_SIZE', source);
+        if (values) {
+            return {
+                width: values[0],
+                height: values[1],
+                depth: values[2]
+            }
+        };
+    },
+
+    setBoundingPosition: function(source, position) {
+        return this.setBoundingValue(
+            'BOUNDING_BOX_POSITION',
+            source,
+            [
+                position.x,
+                position.y,
+                position.z
+            ]
+        );
+    },
+
+    setBoundingSize: function(source, size) {
+        return this.setBoundingValue(
+            'BOUNDING_BOX_SIZE',
+            source,
+            [
+                size.width,
+                size.height,
+                size.depth
+            ]
+        );
+    },
+
+    getBoundingValue: function(name, source) {
+        var re = new RegExp(name + '\\s+([-\\d\\.]+)\\s+([-\\d\\.]+)\\s+([-\\d\\.]+)');
+        var matches = re.exec(source);
+        if (matches && matches.length == 4) {
+            return [
+                Number(matches[1]),
+                Number(matches[2]),
+                Number(matches[3])
+            ]
+        }
+    },
+
+    setBoundingValue: function(name, source, values) {
+        if (values[0] == undefined || values[1] == undefined || values[2] == undefined) {
+            return;
+        }
+        var re = new RegExp('(' + name + '\\s+)[-\\d\\.]+(\\s+)[-\\d\\.]+(\\s+)[-\\d\\.]+');
+        return source.replace(re, '$1'+values[0]+'$2'+values[1]+'$3'+values[2]);
+    }
+};
+
+module.exports = EditorControls;
+```
+
+### src/controls/preview-controls.js
+```
+var ProcessControls = require('./control-section.js').ProcessControls;
+
+var PreviewControls = function(cubeMarch, renderer, editor, ractive) {
+    ProcessControls.call(this, ractive);
+    this.renderer = renderer;
+    this.cubeMarch = cubeMarch;
+    this.editor = editor;
+};
+
+PreviewControls.prototype = Object.create(ProcessControls.prototype);
+PreviewControls.prototype.constructor = PreviewControls;
+PreviewControls.prototype.namespace = 'preview';
+
+PreviewControls.prototype.init = function() {
+    ProcessControls.prototype.init.call(this);
+    this.ractive.observe(this.ns('wireframe'), this.toggleWireframe.bind(this));
+};
+
+PreviewControls.prototype.update = function(data) {
+    if ( ! data) {
+        return;
+    }
+    this.renderer.addSection(data.vertices, data.faces);
+};
+
+PreviewControls.prototype.start = function() {
+    ProcessControls.prototype.start.call(this);
+    this.cubeMarch.abort();
+    var res = this.ractive.get(this.ns('resolution'));
+    var dims = [
+        parseInt(res.x, 10),
+        parseInt(res.y, 10),
+        parseInt(res.z, 10)
+    ];
+    var bounds = this.ractive.get('bounds');
+    this.cubeMarch.setVolume(dims, bounds);
+    this.renderer.startModel();
+
+    this.cubeMarch.march({
+        onSection: this.update.bind(this),
+        onProgress: this.progress.bind(this),
+        onDone: this.done.bind(this),
+        mapDistance: this.editor.getValue()
+    });
+};
+
+PreviewControls.prototype.cancel =function() {
+    ProcessControls.prototype.cancel.call(this);
+    this.cubeMarch.abort();
+};
+
+PreviewControls.prototype.progressMessage = function(cubesMarched, totalCubes) {
+    var message = ProcessControls.prototype.progressMessage.call(this, cubesMarched, totalCubes);
+    return 'Rendering preview: ' + message;
+};
+
+PreviewControls.prototype.doneMessage = function() {
+    var message = ProcessControls.prototype.doneMessage.call(this);
+    return 'Render ' + message;
+};
+
+PreviewControls.prototype.toggleWireframe = function(value) {
+    this.renderer.toggleWireframe(value);
+};
+
+module.exports = PreviewControls;
+```
+
+### src/shaders/calc-potentials.frag
+```
+precision mediump float;
+
+#pragma glslify: coordToIndex = require(./components/coord-to-index)
+#pragma glslify: packFloat = require(glsl-read-float)
+
+uniform vec2 resolution;
+
+uniform vec3 boundsA;
+uniform vec3 boundsB;
+uniform vec3 dims;
+uniform float time;
+
+vec3 vertDims = dims + vec3(1);
+vec3 scale = (boundsB - boundsA) / dims;
+vec3 shift = boundsA;
+
+INSERT_MAP_DISTANCE
+
+vec3 vertFromIndex(float index) {
+    vec3 vert = vec3(0);
+    vert.x = mod(index, vertDims.x);
+    vert.y = mod(floor(index / vertDims.x), vertDims.y);
+    vert.z = mod(floor(index / (vertDims.y * vertDims.x)), vertDims.z);
+    return scale * vert + shift; 
+}
+
+void main() {
+
+    float vertIndex = float(coordToIndex(gl_FragCoord.xy, resolution.xy));
+
+    if (vertIndex >= vertDims.x * vertDims.y * vertDims.z) {
+        gl_FragColor = vec4(1);
+        return;
+    }
+
+    vec3 vert = vertFromIndex(vertIndex);
+    float potential = mapDistance(vert);
+    gl_FragColor = packFloat(potential);
+}
+```
+
+### src/shaders/shader.vert
+```
+attribute vec3 position;
+
+void main() {
+    gl_Position = vec4(position, 1.0);
+}
+```
+
+### src/workers/march.js
+```
+// Cribbed from https://github.com/mikolalysenko/isosurface
+
+var edgeTable= new Uint32Array([
+      0x0  , 0x109, 0x203, 0x30a, 0x406, 0x50f, 0x605, 0x70c,
+      0x80c, 0x905, 0xa0f, 0xb06, 0xc0a, 0xd03, 0xe09, 0xf00,
+      0x190, 0x99 , 0x393, 0x29a, 0x596, 0x49f, 0x795, 0x69c,
+      0x99c, 0x895, 0xb9f, 0xa96, 0xd9a, 0xc93, 0xf99, 0xe90,
+      0x230, 0x339, 0x33 , 0x13a, 0x636, 0x73f, 0x435, 0x53c,
+      0xa3c, 0xb35, 0x83f, 0x936, 0xe3a, 0xf33, 0xc39, 0xd30,
+      0x3a0, 0x2a9, 0x1a3, 0xaa , 0x7a6, 0x6af, 0x5a5, 0x4ac,
+      0xbac, 0xaa5, 0x9af, 0x8a6, 0xfaa, 0xea3, 0xda9, 0xca0,
+      0x460, 0x569, 0x663, 0x76a, 0x66 , 0x16f, 0x265, 0x36c,
+      0xc6c, 0xd65, 0xe6f, 0xf66, 0x86a, 0x963, 0xa69, 0xb60,
+      0x5f0, 0x4f9, 0x7f3, 0x6fa, 0x1f6, 0xff , 0x3f5, 0x2fc,
+      0xdfc, 0xcf5, 0xfff, 0xef6, 0x9fa, 0x8f3, 0xbf9, 0xaf0,
+      0x650, 0x759, 0x453, 0x55a, 0x256, 0x35f, 0x55 , 0x15c,
+      0xe5c, 0xf55, 0xc5f, 0xd56, 0xa5a, 0xb53, 0x859, 0x950,
+      0x7c0, 0x6c9, 0x5c3, 0x4ca, 0x3c6, 0x2cf, 0x1c5, 0xcc ,
+      0xfcc, 0xec5, 0xdcf, 0xcc6, 0xbca, 0xac3, 0x9c9, 0x8c0,
+      0x8c0, 0x9c9, 0xac3, 0xbca, 0xcc6, 0xdcf, 0xec5, 0xfcc,
+      0xcc , 0x1c5, 0x2cf, 0x3c6, 0x4ca, 0x5c3, 0x6c9, 0x7c0,
+      0x950, 0x859, 0xb53, 0xa5a, 0xd56, 0xc5f, 0xf55, 0xe5c,
+      0x15c, 0x55 , 0x35f, 0x256, 0x55a, 0x453, 0x759, 0x650,
+      0xaf0, 0xbf9, 0x8f3, 0x9fa, 0xef6, 0xfff, 0xcf5, 0xdfc,
+      0x2fc, 0x3f5, 0xff , 0x1f6, 0x6fa, 0x7f3, 0x4f9, 0x5f0,
+      0xb60, 0xa69, 0x963, 0x86a, 0xf66, 0xe6f, 0xd65, 0xc6c,
+      0x36c, 0x265, 0x16f, 0x66 , 0x76a, 0x663, 0x569, 0x460,
+      0xca0, 0xda9, 0xea3, 0xfaa, 0x8a6, 0x9af, 0xaa5, 0xbac,
+      0x4ac, 0x5a5, 0x6af, 0x7a6, 0xaa , 0x1a3, 0x2a9, 0x3a0,
+      0xd30, 0xc39, 0xf33, 0xe3a, 0x936, 0x83f, 0xb35, 0xa3c,
+      0x53c, 0x435, 0x73f, 0x636, 0x13a, 0x33 , 0x339, 0x230,
+      0xe90, 0xf99, 0xc93, 0xd9a, 0xa96, 0xb9f, 0x895, 0x99c,
+      0x69c, 0x795, 0x49f, 0x596, 0x29a, 0x393, 0x99 , 0x190,
+      0xf00, 0xe09, 0xd03, 0xc0a, 0xb06, 0xa0f, 0x905, 0x80c,
+      0x70c, 0x605, 0x50f, 0x406, 0x30a, 0x203, 0x109, 0x0   ])
+  , triTable = [
+      [],
+      [0, 8, 3],
+      [0, 1, 9],
+      [1, 8, 3, 9, 8, 1],
+      [1, 2, 10],
+      [0, 8, 3, 1, 2, 10],
+      [9, 2, 10, 0, 2, 9],
+      [2, 8, 3, 2, 10, 8, 10, 9, 8],
+      [3, 11, 2],
+      [0, 11, 2, 8, 11, 0],
+      [1, 9, 0, 2, 3, 11],
+      [1, 11, 2, 1, 9, 11, 9, 8, 11],
+      [3, 10, 1, 11, 10, 3],
+      [0, 10, 1, 0, 8, 10, 8, 11, 10],
+      [3, 9, 0, 3, 11, 9, 11, 10, 9],
+      [9, 8, 10, 10, 8, 11],
+      [4, 7, 8],
+      [4, 3, 0, 7, 3, 4],
+      [0, 1, 9, 8, 4, 7],
+      [4, 1, 9, 4, 7, 1, 7, 3, 1],
+      [1, 2, 10, 8, 4, 7],
+      [3, 4, 7, 3, 0, 4, 1, 2, 10],
+      [9, 2, 10, 9, 0, 2, 8, 4, 7],
+      [2, 10, 9, 2, 9, 7, 2, 7, 3, 7, 9, 4],
+      [8, 4, 7, 3, 11, 2],
+      [11, 4, 7, 11, 2, 4, 2, 0, 4],
+      [9, 0, 1, 8, 4, 7, 2, 3, 11],
+      [4, 7, 11, 9, 4, 11, 9, 11, 2, 9, 2, 1],
+      [3, 10, 1, 3, 11, 10, 7, 8, 4],
+      [1, 11, 10, 1, 4, 11, 1, 0, 4, 7, 11, 4],
+      [4, 7, 8, 9, 0, 11, 9, 11, 10, 11, 0, 3],
+      [4, 7, 11, 4, 11, 9, 9, 11, 10],
+      [9, 5, 4],
+      [9, 5, 4, 0, 8, 3],
+      [0, 5, 4, 1, 5, 0],
+      [8, 5, 4, 8, 3, 5, 3, 1, 5],
+      [1, 2, 10, 9, 5, 4],
+      [3, 0, 8, 1, 2, 10, 4, 9, 5],
+      [5, 2, 10, 5, 4, 2, 4, 0, 2],
+      [2, 10, 5, 3, 2, 5, 3, 5, 4, 3, 4, 8],
+      [9, 5, 4, 2, 3, 11],
+      [0, 11, 2, 0, 8, 11, 4, 9, 5],
+      [0, 5, 4, 0, 1, 5, 2, 3, 11],
+      [2, 1, 5, 2, 5, 8, 2, 8, 11, 4, 8, 5],
+      [10, 3, 11, 10, 1, 3, 9, 5, 4],
+      [4, 9, 5, 0, 8, 1, 8, 10, 1, 8, 11, 10],
+      [5, 4, 0, 5, 0, 11, 5, 11, 10, 11, 0, 3],
+      [5, 4, 8, 5, 8, 10, 10, 8, 11],
+      [9, 7, 8, 5, 7, 9],
+      [9, 3, 0, 9, 5, 3, 5, 7, 3],
+      [0, 7, 8, 0, 1, 7, 1, 5, 7],
+      [1, 5, 3, 3, 5, 7],
+      [9, 7, 8, 9, 5, 7, 10, 1, 2],
+      [10, 1, 2, 9, 5, 0, 5, 3, 0, 5, 7, 3],
+      [8, 0, 2, 8, 2, 5, 8, 5, 7, 10, 5, 2],
+      [2, 10, 5, 2, 5, 3, 3, 5, 7],
+      [7, 9, 5, 7, 8, 9, 3, 11, 2],
+      [9, 5, 7, 9, 7, 2, 9, 2, 0, 2, 7, 11],
+      [2, 3, 11, 0, 1, 8, 1, 7, 8, 1, 5, 7],
+      [11, 2, 1, 11, 1, 7, 7, 1, 5],
+      [9, 5, 8, 8, 5, 7, 10, 1, 3, 10, 3, 11],
+      [5, 7, 0, 5, 0, 9, 7, 11, 0, 1, 0, 10, 11, 10, 0],
+      [11, 10, 0, 11, 0, 3, 10, 5, 0, 8, 0, 7, 5, 7, 0],
+      [11, 10, 5, 7, 11, 5],
+      [10, 6, 5],
+      [0, 8, 3, 5, 10, 6],
+      [9, 0, 1, 5, 10, 6],
+      [1, 8, 3, 1, 9, 8, 5, 10, 6],
+      [1, 6, 5, 2, 6, 1],
+      [1, 6, 5, 1, 2, 6, 3, 0, 8],
+      [9, 6, 5, 9, 0, 6, 0, 2, 6],
+      [5, 9, 8, 5, 8, 2, 5, 2, 6, 3, 2, 8],
+      [2, 3, 11, 10, 6, 5],
+      [11, 0, 8, 11, 2, 0, 10, 6, 5],
+      [0, 1, 9, 2, 3, 11, 5, 10, 6],
+      [5, 10, 6, 1, 9, 2, 9, 11, 2, 9, 8, 11],
+      [6, 3, 11, 6, 5, 3, 5, 1, 3],
+      [0, 8, 11, 0, 11, 5, 0, 5, 1, 5, 11, 6],
+      [3, 11, 6, 0, 3, 6, 0, 6, 5, 0, 5, 9],
+      [6, 5, 9, 6, 9, 11, 11, 9, 8],
+      [5, 10, 6, 4, 7, 8],
+      [4, 3, 0, 4, 7, 3, 6, 5, 10],
+      [1, 9, 0, 5, 10, 6, 8, 4, 7],
+      [10, 6, 5, 1, 9, 7, 1, 7, 3, 7, 9, 4],
+      [6, 1, 2, 6, 5, 1, 4, 7, 8],
+      [1, 2, 5, 5, 2, 6, 3, 0, 4, 3, 4, 7],
+      [8, 4, 7, 9, 0, 5, 0, 6, 5, 0, 2, 6],
+      [7, 3, 9, 7, 9, 4, 3, 2, 9, 5, 9, 6, 2, 6, 9],
+      [3, 11, 2, 7, 8, 4, 10, 6, 5],
+      [5, 10, 6, 4, 7, 2, 4, 2, 0, 2, 7, 11],
+      [0, 1, 9, 4, 7, 8, 2, 3, 11, 5, 10, 6],
+      [9, 2, 1, 9, 11, 2, 9, 4, 11, 7, 11, 4, 5, 10, 6],
+      [8, 4, 7, 3, 11, 5, 3, 5, 1, 5, 11, 6],
+      [5, 1, 11, 5, 11, 6, 1, 0, 11, 7, 11, 4, 0, 4, 11],
+      [0, 5, 9, 0, 6, 5, 0, 3, 6, 11, 6, 3, 8, 4, 7],
+      [6, 5, 9, 6, 9, 11, 4, 7, 9, 7, 11, 9],
+      [10, 4, 9, 6, 4, 10],
+      [4, 10, 6, 4, 9, 10, 0, 8, 3],
+      [10, 0, 1, 10, 6, 0, 6, 4, 0],
+      [8, 3, 1, 8, 1, 6, 8, 6, 4, 6, 1, 10],
+      [1, 4, 9, 1, 2, 4, 2, 6, 4],
+      [3, 0, 8, 1, 2, 9, 2, 4, 9, 2, 6, 4],
+      [0, 2, 4, 4, 2, 6],
+      [8, 3, 2, 8, 2, 4, 4, 2, 6],
+      [10, 4, 9, 10, 6, 4, 11, 2, 3],
+      [0, 8, 2, 2, 8, 11, 4, 9, 10, 4, 10, 6],
+      [3, 11, 2, 0, 1, 6, 0, 6, 4, 6, 1, 10],
+      [6, 4, 1, 6, 1, 10, 4, 8, 1, 2, 1, 11, 8, 11, 1],
+      [9, 6, 4, 9, 3, 6, 9, 1, 3, 11, 6, 3],
+      [8, 11, 1, 8, 1, 0, 11, 6, 1, 9, 1, 4, 6, 4, 1],
+      [3, 11, 6, 3, 6, 0, 0, 6, 4],
+      [6, 4, 8, 11, 6, 8],
+      [7, 10, 6, 7, 8, 10, 8, 9, 10],
+      [0, 7, 3, 0, 10, 7, 0, 9, 10, 6, 7, 10],
+      [10, 6, 7, 1, 10, 7, 1, 7, 8, 1, 8, 0],
+      [10, 6, 7, 10, 7, 1, 1, 7, 3],
+      [1, 2, 6, 1, 6, 8, 1, 8, 9, 8, 6, 7],
+      [2, 6, 9, 2, 9, 1, 6, 7, 9, 0, 9, 3, 7, 3, 9],
+      [7, 8, 0, 7, 0, 6, 6, 0, 2],
+      [7, 3, 2, 6, 7, 2],
+      [2, 3, 11, 10, 6, 8, 10, 8, 9, 8, 6, 7],
+      [2, 0, 7, 2, 7, 11, 0, 9, 7, 6, 7, 10, 9, 10, 7],
+      [1, 8, 0, 1, 7, 8, 1, 10, 7, 6, 7, 10, 2, 3, 11],
+      [11, 2, 1, 11, 1, 7, 10, 6, 1, 6, 7, 1],
+      [8, 9, 6, 8, 6, 7, 9, 1, 6, 11, 6, 3, 1, 3, 6],
+      [0, 9, 1, 11, 6, 7],
+      [7, 8, 0, 7, 0, 6, 3, 11, 0, 11, 6, 0],
+      [7, 11, 6],
+      [7, 6, 11],
+      [3, 0, 8, 11, 7, 6],
+      [0, 1, 9, 11, 7, 6],
+      [8, 1, 9, 8, 3, 1, 11, 7, 6],
+      [10, 1, 2, 6, 11, 7],
+      [1, 2, 10, 3, 0, 8, 6, 11, 7],
+      [2, 9, 0, 2, 10, 9, 6, 11, 7],
+      [6, 11, 7, 2, 10, 3, 10, 8, 3, 10, 9, 8],
+      [7, 2, 3, 6, 2, 7],
+      [7, 0, 8, 7, 6, 0, 6, 2, 0],
+      [2, 7, 6, 2, 3, 7, 0, 1, 9],
+      [1, 6, 2, 1, 8, 6, 1, 9, 8, 8, 7, 6],
+      [10, 7, 6, 10, 1, 7, 1, 3, 7],
+      [10, 7, 6, 1, 7, 10, 1, 8, 7, 1, 0, 8],
+      [0, 3, 7, 0, 7, 10, 0, 10, 9, 6, 10, 7],
+      [7, 6, 10, 7, 10, 8, 8, 10, 9],
+      [6, 8, 4, 11, 8, 6],
+      [3, 6, 11, 3, 0, 6, 0, 4, 6],
+      [8, 6, 11, 8, 4, 6, 9, 0, 1],
+      [9, 4, 6, 9, 6, 3, 9, 3, 1, 11, 3, 6],
+      [6, 8, 4, 6, 11, 8, 2, 10, 1],
+      [1, 2, 10, 3, 0, 11, 0, 6, 11, 0, 4, 6],
+      [4, 11, 8, 4, 6, 11, 0, 2, 9, 2, 10, 9],
+      [10, 9, 3, 10, 3, 2, 9, 4, 3, 11, 3, 6, 4, 6, 3],
+      [8, 2, 3, 8, 4, 2, 4, 6, 2],
+      [0, 4, 2, 4, 6, 2],
+      [1, 9, 0, 2, 3, 4, 2, 4, 6, 4, 3, 8],
+      [1, 9, 4, 1, 4, 2, 2, 4, 6],
+      [8, 1, 3, 8, 6, 1, 8, 4, 6, 6, 10, 1],
+      [10, 1, 0, 10, 0, 6, 6, 0, 4],
+      [4, 6, 3, 4, 3, 8, 6, 10, 3, 0, 3, 9, 10, 9, 3],
+      [10, 9, 4, 6, 10, 4],
+      [4, 9, 5, 7, 6, 11],
+      [0, 8, 3, 4, 9, 5, 11, 7, 6],
+      [5, 0, 1, 5, 4, 0, 7, 6, 11],
+      [11, 7, 6, 8, 3, 4, 3, 5, 4, 3, 1, 5],
+      [9, 5, 4, 10, 1, 2, 7, 6, 11],
+      [6, 11, 7, 1, 2, 10, 0, 8, 3, 4, 9, 5],
+      [7, 6, 11, 5, 4, 10, 4, 2, 10, 4, 0, 2],
+      [3, 4, 8, 3, 5, 4, 3, 2, 5, 10, 5, 2, 11, 7, 6],
+      [7, 2, 3, 7, 6, 2, 5, 4, 9],
+      [9, 5, 4, 0, 8, 6, 0, 6, 2, 6, 8, 7],
+      [3, 6, 2, 3, 7, 6, 1, 5, 0, 5, 4, 0],
+      [6, 2, 8, 6, 8, 7, 2, 1, 8, 4, 8, 5, 1, 5, 8],
+      [9, 5, 4, 10, 1, 6, 1, 7, 6, 1, 3, 7],
+      [1, 6, 10, 1, 7, 6, 1, 0, 7, 8, 7, 0, 9, 5, 4],
+      [4, 0, 10, 4, 10, 5, 0, 3, 10, 6, 10, 7, 3, 7, 10],
+      [7, 6, 10, 7, 10, 8, 5, 4, 10, 4, 8, 10],
+      [6, 9, 5, 6, 11, 9, 11, 8, 9],
+      [3, 6, 11, 0, 6, 3, 0, 5, 6, 0, 9, 5],
+      [0, 11, 8, 0, 5, 11, 0, 1, 5, 5, 6, 11],
+      [6, 11, 3, 6, 3, 5, 5, 3, 1],
+      [1, 2, 10, 9, 5, 11, 9, 11, 8, 11, 5, 6],
+      [0, 11, 3, 0, 6, 11, 0, 9, 6, 5, 6, 9, 1, 2, 10],
+      [11, 8, 5, 11, 5, 6, 8, 0, 5, 10, 5, 2, 0, 2, 5],
+      [6, 11, 3, 6, 3, 5, 2, 10, 3, 10, 5, 3],
+      [5, 8, 9, 5, 2, 8, 5, 6, 2, 3, 8, 2],
+      [9, 5, 6, 9, 6, 0, 0, 6, 2],
+      [1, 5, 8, 1, 8, 0, 5, 6, 8, 3, 8, 2, 6, 2, 8],
+      [1, 5, 6, 2, 1, 6],
+      [1, 3, 6, 1, 6, 10, 3, 8, 6, 5, 6, 9, 8, 9, 6],
+      [10, 1, 0, 10, 0, 6, 9, 5, 0, 5, 6, 0],
+      [0, 3, 8, 5, 6, 10],
+      [10, 5, 6],
+      [11, 5, 10, 7, 5, 11],
+      [11, 5, 10, 11, 7, 5, 8, 3, 0],
+      [5, 11, 7, 5, 10, 11, 1, 9, 0],
+      [10, 7, 5, 10, 11, 7, 9, 8, 1, 8, 3, 1],
+      [11, 1, 2, 11, 7, 1, 7, 5, 1],
+      [0, 8, 3, 1, 2, 7, 1, 7, 5, 7, 2, 11],
+      [9, 7, 5, 9, 2, 7, 9, 0, 2, 2, 11, 7],
+      [7, 5, 2, 7, 2, 11, 5, 9, 2, 3, 2, 8, 9, 8, 2],
+      [2, 5, 10, 2, 3, 5, 3, 7, 5],
+      [8, 2, 0, 8, 5, 2, 8, 7, 5, 10, 2, 5],
+      [9, 0, 1, 5, 10, 3, 5, 3, 7, 3, 10, 2],
+      [9, 8, 2, 9, 2, 1, 8, 7, 2, 10, 2, 5, 7, 5, 2],
+      [1, 3, 5, 3, 7, 5],
+      [0, 8, 7, 0, 7, 1, 1, 7, 5],
+      [9, 0, 3, 9, 3, 5, 5, 3, 7],
+      [9, 8, 7, 5, 9, 7],
+      [5, 8, 4, 5, 10, 8, 10, 11, 8],
+      [5, 0, 4, 5, 11, 0, 5, 10, 11, 11, 3, 0],
+      [0, 1, 9, 8, 4, 10, 8, 10, 11, 10, 4, 5],
+      [10, 11, 4, 10, 4, 5, 11, 3, 4, 9, 4, 1, 3, 1, 4],
+      [2, 5, 1, 2, 8, 5, 2, 11, 8, 4, 5, 8],
+      [0, 4, 11, 0, 11, 3, 4, 5, 11, 2, 11, 1, 5, 1, 11],
+      [0, 2, 5, 0, 5, 9, 2, 11, 5, 4, 5, 8, 11, 8, 5],
+      [9, 4, 5, 2, 11, 3],
+      [2, 5, 10, 3, 5, 2, 3, 4, 5, 3, 8, 4],
+      [5, 10, 2, 5, 2, 4, 4, 2, 0],
+      [3, 10, 2, 3, 5, 10, 3, 8, 5, 4, 5, 8, 0, 1, 9],
+      [5, 10, 2, 5, 2, 4, 1, 9, 2, 9, 4, 2],
+      [8, 4, 5, 8, 5, 3, 3, 5, 1],
+      [0, 4, 5, 1, 0, 5],
+      [8, 4, 5, 8, 5, 3, 9, 0, 5, 0, 3, 5],
+      [9, 4, 5],
+      [4, 11, 7, 4, 9, 11, 9, 10, 11],
+      [0, 8, 3, 4, 9, 7, 9, 11, 7, 9, 10, 11],
+      [1, 10, 11, 1, 11, 4, 1, 4, 0, 7, 4, 11],
+      [3, 1, 4, 3, 4, 8, 1, 10, 4, 7, 4, 11, 10, 11, 4],
+      [4, 11, 7, 9, 11, 4, 9, 2, 11, 9, 1, 2],
+      [9, 7, 4, 9, 11, 7, 9, 1, 11, 2, 11, 1, 0, 8, 3],
+      [11, 7, 4, 11, 4, 2, 2, 4, 0],
+      [11, 7, 4, 11, 4, 2, 8, 3, 4, 3, 2, 4],
+      [2, 9, 10, 2, 7, 9, 2, 3, 7, 7, 4, 9],
+      [9, 10, 7, 9, 7, 4, 10, 2, 7, 8, 7, 0, 2, 0, 7],
+      [3, 7, 10, 3, 10, 2, 7, 4, 10, 1, 10, 0, 4, 0, 10],
+      [1, 10, 2, 8, 7, 4],
+      [4, 9, 1, 4, 1, 7, 7, 1, 3],
+      [4, 9, 1, 4, 1, 7, 0, 8, 1, 8, 7, 1],
+      [4, 0, 3, 7, 4, 3],
+      [4, 8, 7],
+      [9, 10, 8, 10, 11, 8],
+      [3, 0, 9, 3, 9, 11, 11, 9, 10],
+      [0, 1, 10, 0, 10, 8, 8, 10, 11],
+      [3, 1, 10, 11, 3, 10],
+      [1, 2, 11, 1, 11, 9, 9, 11, 8],
+      [3, 0, 9, 3, 9, 11, 1, 2, 9, 2, 11, 9],
+      [0, 2, 11, 8, 0, 11],
+      [3, 2, 11],
+      [2, 3, 8, 2, 8, 10, 10, 8, 9],
+      [9, 10, 2, 0, 9, 2],
+      [2, 3, 8, 2, 8, 10, 0, 1, 8, 1, 10, 8],
+      [1, 10, 2],
+      [1, 3, 8, 9, 1, 8],
+      [0, 9, 1],
+      [0, 3, 8],
+      []]
+  , cubeVerts = [
+     [0,0,0]
+    ,[1,0,0]
+    ,[1,1,0]
+    ,[0,1,0]
+    ,[0,0,1]
+    ,[1,0,1]
+    ,[1,1,1]
+    ,[0,1,1]]
+  , edgeIndex = [ [0,1],[1,2],[2,3],[3,0],[4,5],[5,6],[6,7],[7,4],[0,4],[1,5],[2,6],[3,7] ];
+
+var cubeFromIndex = function(index, dims) {
+    var cube = [];
+    cube[0] = index % dims[0];
+    cube[1] = Math.floor(index / dims[0]) % dims[1];
+    cube[2] = Math.floor(index / (dims[1] * dims[0])) % dims[2];
+    return cube;
+}
+
+var indexFromCube = function(cube, dims) {
+    var index = 0;
+    index += cube[0];
+    index += dims[0] * cube[1];
+    index += (dims[1] * dims[0]) * cube[2];
+    return index;
+}
+
+var vertIndexFromCubeVert = function(cube, vert, dims) {
+    var vertCube = cubeVerts[vert];
+    var cubeVertCube = [
+        cube[0] + vertCube[0],
+        cube[1] + vertCube[1],
+        cube[2] + vertCube[2]
+    ];
+    var dims2 = [
+        dims[0] + 1,
+        dims[1] + 1,
+        dims[2] + 1,
+    ];
+    return indexFromCube(cubeVertCube, dims2);
+}
+
+var potential = function(cube, vert, dims, potentials) {
+    var index = vertIndexFromCubeVert(cube, vert, dims);
+    var p = potentials[index];
+    return p;
+};
+
+var marchCubes = function(start, end, dims, bounds, potentials) {
+
+    var scale     = [0,0,0];
+    var shift     = [0,0,0];
+    for(var i=0; i<3; ++i) {
+        scale[i] = (bounds[1][i] - bounds[0][i]) / dims[i];
+        shift[i] = bounds[0][i];
+    }
+
+    var x = [];
+    var vertices = []
+        , faces = []
+        , grid = new Array(8)
+        , edges = new Array(12);
+
+    for (var index = start; index < end; index++) {
+      
+      x[0] = index % dims[0];
+      x[1] = Math.floor(index / dims[0]) % dims[1];
+      x[2] = Math.floor(index / (dims[1] * dims[0])) % dims[2];
+
+     //For each cell, compute cube mask
+      var cube_index = 0;
+      for(var i=0; i<8; ++i) {
+          var s = potential(x, i, dims, potentials);
+          grid[i] = s;
+          cube_index |= (s > 0) ? 1 << i : 0;
+      }
+
+      //Compute vertices
+      var edge_mask = edgeTable[cube_index];
+
+      if(edge_mask === 0) {
+          continue;
+      }
+
+      for(var i=0; i<12; ++i) {
+          if((edge_mask & (1<<i)) === 0) {
+              continue;
+          }
+          edges[i] = vertices.length;
+          var nv = [0,0,0];
+          var e = edgeIndex[i];
+          var p0 = cubeVerts[e[0]];
+          var p1 = cubeVerts[e[1]];
+          var a = grid[e[0]];
+          var b = grid[e[1]];
+          var d = a - b;
+          var t = 0;
+
+          if(Math.abs(d) > 1e-6) {
+              t = a / d;
+          }
+          for(var j=0; j<3; ++j) {
+              nv[j] = scale[j] * ((x[j] + p0[j]) + t * (p1[j] - p0[j])) + shift[j];
+          }
+          vertices.push(nv);
+      }
+      //Add faces
+      var f = triTable[cube_index];
+      for(var i=0; i<f.length; i += 3) {
+          faces.push([edges[f[i]], edges[f[i+1]], edges[f[i+2]]]);
+      }
+    }
+
+    return { vertices: vertices, faces: faces };
+}
+
+var potentials;
+
+onmessage = function(e) {
+    var message = e.data;
+
+    if (message.action == 'init') {
+
+        potentials = new Float32Array(message.data);
+        postMessage(true);
+
+    } else if (message.action == 'march') {
+
+        var start = message.data.start;
+        var end = message.data.end;
+        var dims = message.data.dims;
+        var bounds = message.data.bounds;
+
+        var result = marchCubes(start, end, dims, bounds, potentials);
+        postMessage(result);
+    }
+};
+```
+
+### src/shaders/components/coord-to-index.glsl
+```
+int coordToIndex(vec2 coord, vec2 size) {
+    return int(
+        floor(coord.x) + (floor(coord.y) * size.x)
+    );
+}
+
+#pragma glslify: export(coordToIndex)
+```
+
+### src/shaders/examples/box.glsl
+```
+// BOUNDING_BOX_POSITION 0 0 0
+// BOUNDING_BOX_SIZE 2.5 2.1 2.2
+
+float vmax(vec3 v) {
+  return max(max(v.x, v.y), v.z);
+}
+
+float fBox(vec3 p, vec3 b) {
+  vec3 d = abs(p) - b;
+  return length(max(d, vec3(0))) + vmax(min(d, vec3(0)));
+}
+
+void pR(inout vec2 p, float a) {
+  p = cos(a)*p + sin(a)*vec2(p.y, -p.x);
+}
+
+// Your glsl signed distance function:
+
+float mapDistance(vec3 p) {
+  pR(p.xy, 0.2);
+  pR(p.xz, 0.4);
+  return fBox(p, vec3(.8, .8, .8));
+}
+```
+
+### src/shaders/examples/radiolarian.glsl
+```
+#define PHI (sqrt(5.)*0.5 + 0.5)
+#define PI 3.14159265
+
+float fOpIntersectionRound(float a, float b, float r) {
+    float m = max(a, b);
+    if ((-a < r) && (-b < r)) {
+        return max(m, -(r - sqrt((r+a)*(r+a) + (r+b)*(r+b))));
+    } else {
+        return m;
+    }
+}
+
+
+// Cone with correct distances to tip and base circle. Y is up, 0 is in the middle of the base.
+float fCone(vec3 p, float radius, float height) {
+    vec2 q = vec2(length(p.xz), p.y);
+    vec2 tip = q - vec2(0, height);
+    vec2 mantleDir = normalize(vec2(height, radius));
+    float mantle = dot(tip, mantleDir);
+    float d = max(mantle, -q.y);
+    float projected = dot(tip, vec2(mantleDir.y, -mantleDir.x));
+    
+    // distance to tip
+    if ((q.y > height) && (projected < 0.)) {
+        d = max(d, length(tip));
+    }
+    
+    // distance to base ring
+    if ((q.x > radius) && (projected > length(vec2(height, radius)))) {
+        d = max(d, length(q - vec2(radius, 0)));
+    }
+    return d;
+}
+
+// Reflect space at a plane
+float pReflect(inout vec3 p, vec3 planeNormal, float offset) {
+    float t = dot(p, planeNormal)+offset;
+    if (t < 0.) {
+        p = p - (2.*t)*planeNormal;
+    }
+    return sign(t);
+}
+
+// Rotate around a coordinate axis (i.e. in a plane perpendicular to that axis) by angle <a>.
+// Read like this: R(p.xz, a) rotates "x towards z".
+// This is fast if <a> is a compile-time constant and slower (but still practical) if not.
+void pR(inout vec2 p, float a) {
+    p = cos(a)*p + sin(a)*vec2(p.y, -p.x);
+}
+
+// The "Round" variant uses a quarter-circle to join the two objects smoothly:
+float fOpUnionRound(float a, float b, float r) {
+    float m = min(a, b);
+    if ((a < r) && (b < r) ) {
+        return min(m, r - sqrt((r-a)*(r-a) + (r-b)*(r-b)));
+    } else {
+     return m;
+    }
+}
+
+// Repeat around the origin by a fixed angle.
+// For easier use, num of repetitions is use to specify the angle.
+float pModPolar(inout vec2 p, float repetitions) {
+    float angle = 2.*PI/repetitions;
+    float a = atan(p.y, p.x) + angle/2.;
+    float r = length(p);
+    float c = floor(a/angle);
+    a = mod(a,angle) - angle/2.;
+    p = vec2(cos(a), sin(a))*r;
+    // For an odd number of repetitions, fix cell index of the cell in -x direction
+    // (cell index would be e.g. -5 and 5 in the two halves of the cell):
+    if (abs(c) >= (repetitions/2.)) c = abs(c);
+    return c;
+}
+
+
+vec3 pModDodecahedron(inout vec3 p) {
+    vec3 v1 = normalize(vec3(0., PHI, 1.));
+    vec3 v2 = normalize(vec3(PHI, 1., 0.));
+
+    float sides = 5.;
+    float dihedral = acos(dot(v1, v2));
+    float halfDdihedral = dihedral / 2.;
+    float faceAngle = 2. * PI / sides;
+    
+    p.z = abs(p.z);
+    
+    pR(p.xz, -halfDdihedral);
+    pR(p.xy, faceAngle / 4.);
+    
+    p.x = -abs(p.x);
+    
+    pR(p.zy, halfDdihedral);
+    p.y = -abs(p.y);
+    pR(p.zy, -halfDdihedral);
+
+    pR(p.xy, faceAngle);
+    
+    pR(p.zy, halfDdihedral);
+    p.y = -abs(p.y);
+    pR(p.zy, -halfDdihedral);
+
+    pR(p.xy, faceAngle);
+    
+    pR(p.zy, halfDdihedral);
+    p.y = -abs(p.y);
+    pR(p.zy, -halfDdihedral);
+
+    pR(p.xy, faceAngle);
+    
+    pR(p.zy, halfDdihedral);
+    p.y = -abs(p.y);
+    pR(p.zy, -halfDdihedral);
+
+    p.z = -p.z;
+    pModPolar(p.yx, sides);
+    pReflect(p, vec3(-1, 0, 0), 0.);
+    
+    return p;
+}
+
+vec3 pModIcosahedron(inout vec3 p) {
+
+    vec3 v1 = normalize(vec3(1, 1, 1 ));
+    vec3 v2 = normalize(vec3(0, 1, PHI+1.));
+
+    float sides = 3.;
+    float dihedral = acos(dot(v1, v2));
+    float halfDdihedral = dihedral / 2.;
+    float faceAngle = 2. * PI / sides;
+    
+
+    p.z = abs(p.z);    
+    pR(p.yz, halfDdihedral);
+    
+    p.x = -abs(p.x);
+    
+    pR(p.zy, halfDdihedral);
+    p.y = -abs(p.y);
+    pR(p.zy, -halfDdihedral);
+
+    pR(p.xy, faceAngle);
+    
+    pR(p.zy, halfDdihedral);
+    p.y = -abs(p.y);
+    pR(p.zy, -halfDdihedral);
+
+    pR(p.xy, faceAngle);
+     
+    pR(p.zy, halfDdihedral);
+    p.y = -abs(p.y);
+    pR(p.zy, -halfDdihedral);
+
+    pR(p.xy, faceAngle);
+  
+    pR(p.zy, halfDdihedral);
+    p.y = -abs(p.y);
+    pR(p.zy, -halfDdihedral);
+
+    p.z = -p.z;
+    pModPolar(p.yx, sides);
+    pReflect(p, vec3(-1, 0, 0), 0.);
+
+    return p;
+}
+
+float spikeModel(vec3 p) {
+    pR(p.zy, PI/2.);
+    return fCone(p, 0.25, 3.);
+}
+
+float spikesModel(vec3 p) {
+    float smooth = 0.6;
+    
+    pModDodecahedron(p);
+    
+    vec3 v1 = normalize(vec3(0., PHI, 1.));
+    vec3 v2 = normalize(vec3(PHI, 1., 0.));
+
+    float sides = 5.;
+    float dihedral = acos(dot(v1, v2));
+    float halfDdihedral = dihedral / 2.;
+    float faceAngle = 2. * PI / sides;
+    
+    float spikeA = spikeModel(p);
+    
+    pR(p.zy, -dihedral);
+
+    float spikeB = spikeModel(p);
+
+    pR(p.xy, -faceAngle);
+    pR(p.zy, dihedral);
+    
+    float spikeC = spikeModel(p);
+    
+    return fOpUnionRound(
+        spikeC,
+        fOpUnionRound(
+            spikeA,
+            spikeB,
+            smooth
+        ),
+        smooth
+    );
+}
+
+float coreModel(vec3 p) {
+    float outer = length(p) - .9;
+    float spikes = spikesModel(p);
+    outer = fOpUnionRound(outer, spikes, 0.4);
+    return outer;
+}
+
+float exoSpikeModel(vec3 p) {
+    pR(p.zy, PI/2.);
+    p.y -= 1.;
+    return fCone(p, 0.5, 1.);
+}
+
+float exoSpikesModel(vec3 p) {
+    pModIcosahedron(p);
+
+    vec3 v1 = normalize(vec3(1, 1, 1 ));
+    vec3 v2 = normalize(vec3(0, 1, PHI+1.));
+
+    float dihedral = acos(dot(v1, v2));
+
+    float spikeA = exoSpikeModel(p);
+    
+    pR(p.zy, -dihedral);
+
+    float spikeB = exoSpikeModel(p);
+
+    return fOpUnionRound(spikeA, spikeB, 0.5);
+}
+
+float exoHolesModel(vec3 p) {
+    float len = 3.;
+    pModDodecahedron(p);
+    p.z += 1.5;
+    return length(p) - .65;
+}
+
+float exoModel(vec3 p) {    
+    float thickness = 0.18;
+    float outer = length(p) - 1.5;
+    float inner = outer + thickness;
+
+    float spikes = exoSpikesModel(p);
+    outer = fOpUnionRound(outer, spikes, 0.3);
+    
+    float shell = max(-inner, outer);
+
+    float holes = exoHolesModel(p);
+    shell = fOpIntersectionRound(-holes, shell, thickness/2.);
+    
+    return shell;
+}
+
+float doExo(vec3 p) {
+    //return length(p + vec3(0,0,-2)) - 3.;
+    //float disp = (sin(length(p) * 5. - t * 8.)) * 0.03;
+    return exoModel(p);
+}
+
+float doCore(vec3 p) {
+    //return length(p + vec3(0,0,2)) - 3.;
+    return coreModel(p);
+}
+
+
+// checks to see which intersection is closer
+// and makes the y of the vec2 be the proper id
+vec2 opU( vec2 d1, vec2 d2 ){
+    
+    return (d1.x<d2.x) ? d1 : d2;
+    
+}
+
+float map( vec3 p ){  
+    p *= 3.;
+    vec2 res = vec2(doExo(p) ,1.); 
+    res = opU(res, vec2(doCore(p) ,2.));
+    
+    return res.x;
+}
+
+
+// BOUNDING_BOX_POSITION 0 0 0
+// BOUNDING_BOX_SIZE 1.8 1.8 1.8
+
+// Your glsl signed distance function:
+
+float mapDistance(vec3 p) {
+    return map(p);
+}
+```
+
+### src/shaders/examples/sine-waves.glsl
+```
+// BOUNDING_BOX_POSITION 0 0 0
+// BOUNDING_BOX_SIZE 3 3 3
+
+// Your glsl signed distance function:
+
+float mapDistance(vec3 p) {
+  p *= 5.;
+  return sin(p.x) + sin(p.y) + sin(p.z);
+}
+```
+
+### src/shaders/examples/sphere.glsl
+```
+// BOUNDING_BOX_POSITION 0 0 0
+// BOUNDING_BOX_SIZE 2 2 2
+
+// Your glsl signed distance function:
+
+float mapDistance(vec3 p) {
+  return length(p) - .8;
+}
+```
+
+### src/shaders/examples/torus.glsl
+```
+// BOUNDING_BOX_POSITION 0 0 0
+// BOUNDING_BOX_SIZE 1.6 0.6 1.6
+
+float fTorus(vec3 p, float smallRadius, float largeRadius) {
+    return length(vec2(length(p.xz) - largeRadius, p.y)) - smallRadius;
+}
+
+// Your glsl signed distance function:
+
+float mapDistance(vec3 p) {
+    return fTorus(p, 0.25, 0.5);
+}
+```

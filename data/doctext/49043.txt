@@ -1,0 +1,1604 @@
+# sdf-editor
+
+A visual node-based editor for ray-marched Signed Distance Field scenes
+
+## About
+
+This project is meant for pedagogical purposes and to play around with Signed Distance Fields. Any modern browser should be good to run it, but beware that touchscreen interaction is not great.
+
+More information about the project can be seen in the [slides](./Slides.pdf). A live version is available in [sdf.shaie.ar](https://sdf.shaie.ar/).
+
+Some sample scenes are provided in the [Sample Scenes](./Sample%20Scenes/) folder. Import them from the frontend to see! (Click on the file selector on the lower-left corner, and then update on the lower-right).
+
+## Running the project
+
+Make sure `code-gen.wasm` is present in the `public/` directory of the frontend (this is provided in this repo). Otherwise, use `go` to build from the [code gen](./code-gen/) module. 
+
+To run the frontend:
+- `yarn install` the dependencies in the `frontend/` folder
+- `yarn dev` to run the development server
+
+
+Alternatively, build the frontend with `yarn install` and `yarn build`, and open `frontend/dist/` on a static server allowing CORS (otherwise the cubemaps won't be able to be loaded from the iframe). A simple way to do this is using the VS Code live server. **NOTE: Open VS Code on the dist/ folder for serving! otherwise the browser will block the requests.**
+
+## Acknowledgements
+
+This was made as my final project for COSC077 - Computer Graphics at Dartmouth College. I want to thank Professor Yu-Wing Tai for this course and assistance.
+
+The frontend makes extensive use of the [DrawFlow](https://github.com/jerosoler/Drawflow) library, and uses the GLSL template from the [Shader Toy VSCode extension](https://marketplace.visualstudio.com/items?itemName=stevensona.shader-toy) to bootstrap GLSL in a brower.
+
+### code-gen/main.go
+```
+package main
+
+import (
+	"fmt"
+	"os"
+	"strconv"
+	"strings"
+)
+
+// Identifiers
+type Identifier string
+
+// Every piece of code that can be converted to GLSL
+type Serializable interface {
+	serialize() Serialization
+}
+
+// The output of the serialization process
+type Serialization struct {
+	code        Source
+	outputIdent []Identifier // The name of the exported variables
+}
+
+// Vec3
+type vec3 struct {
+	id string
+	x  float32
+	y  float32
+	z  float32
+}
+
+// Float
+type Float struct {
+	id    string
+	value float32
+}
+
+// Either a literal Vec3 or something which outputs a vec3
+type Coordinate interface {
+	toVec3() Identifier
+	Serializable
+}
+
+// Source code
+type Source = string
+
+// A SDF Invocation
+type SDF struct {
+	id    string
+	fn    Identifier
+	input Coordinate
+	args  []Serializable // other params, such as radius for a sphere
+}
+
+// A transform invocation
+type Transform struct {
+	id    string
+	fn    Identifier
+	input Coordinate
+	args  []Serializable // other params, such as the axis and angle for rotation
+}
+
+// A boolean operation invocation
+type Boolean struct {
+	id   string
+	fn   Identifier
+	Obj1 ObjectLike
+	Obj2 ObjectLike
+	args []Serializable // other params, such as smoothing factor
+}
+
+// Material
+type Material struct {
+	id          string
+	Color       Coordinate
+	Diffuse     float32
+	Specular    float32
+	Reflectance float32
+}
+
+// Object
+type Object struct {
+	id       string
+	SDF      SDF
+	Material Material
+}
+
+// An object or Boolean
+type ObjectLike interface {
+	Serializable
+	toObj() Identifier
+}
+
+// The rendered scene, entrypoint
+type Scene struct {
+	object ObjectLike
+}
+
+var shown map[string]bool
+var codeAll []Source
+
+func (f Float) serialize() Serialization {
+	outName := fmt.Sprintf("%s_out", f.id)
+
+	code := Source(fmt.Sprintf("float %s = %f;", outName, f.value))
+
+	if !shown[f.id] {
+		shown[f.id] = true
+		codeAll = append(codeAll, code)
+	}
+
+	return Serialization{
+		code:        code,
+		outputIdent: []Identifier{Identifier(outName)},
+	}
+}
+
+func (s SDF) serialize() Serialization {
+	inpIdent := s.input.serialize().outputIdent[0]
+	outName := fmt.Sprintf("%s_out", s.id)
+
+	codeBuild := fmt.Sprintf("float %s = %s(%s", outName, s.fn, inpIdent)
+	for _, arg := range s.args {
+		argIdent := arg.serialize().outputIdent[0]
+		codeBuild += fmt.Sprintf(", %s", argIdent)
+	}
+
+	codeBuild += ");"
+	code := Source(codeBuild)
+
+	if !shown[s.id] {
+		shown[s.id] = true
+		codeAll = append(codeAll, code)
+	}
+
+	return Serialization{
+		code:        code,
+		outputIdent: []Identifier{Identifier(outName)},
+	}
+}
+
+func (m Material) serialize() Serialization {
+	colorIdent := m.Color.serialize().outputIdent[0]
+	outName := fmt.Sprintf("%s_out", m.id)
+
+	code := Source(fmt.Sprintf("material %s = material(%s, %f, %f, %f);", outName, colorIdent, m.Diffuse, m.Specular, m.Reflectance))
+
+	if !shown[m.id] {
+		shown[m.id] = true
+		codeAll = append(codeAll, code)
+	}
+
+	return Serialization{
+		code:        code,
+		outputIdent: []Identifier{Identifier(outName)},
+	}
+}
+
+func (o Object) serialize() Serialization {
+	sdfSerialize := o.SDF.serialize()
+	materialSerialize := o.Material.serialize()
+
+	sdfOut := sdfSerialize.outputIdent[0]
+	matOut := materialSerialize.outputIdent[0]
+
+	outName := fmt.Sprintf("%s_out", o.id)
+
+	code := Source(fmt.Sprintf("point_record %s = point_record(%s, %s, p);", outName, sdfOut, matOut))
+
+	if !shown[o.id] {
+		shown[o.id] = true
+		codeAll = append(codeAll, code)
+	}
+
+	return Serialization{
+		code:        code,
+		outputIdent: []Identifier{Identifier(outName)},
+	}
+
+}
+
+func (o Object) toObj() Identifier {
+	return o.serialize().outputIdent[0]
+}
+
+func (v vec3) serialize() Serialization {
+	if v.id == "p" {
+		return Serialization{outputIdent: []Identifier{"p"}}
+	}
+
+	outName := fmt.Sprintf("%s_out", v.id)
+	code := Source(fmt.Sprintf("vec3 %s = vec3(%f, %f, %f);", outName, v.x, v.y, v.z))
+
+	if !shown[v.id] {
+		shown[v.id] = true
+		codeAll = append(codeAll, code)
+	}
+
+	return Serialization{
+		code:        code,
+		outputIdent: []Identifier{Identifier(outName)},
+	}
+}
+
+func (v vec3) toVec3() Identifier {
+	return v.serialize().outputIdent[0]
+}
+
+func (t Transform) serialize() Serialization {
+	outName := fmt.Sprintf("%s_out", t.id)
+	inpIdent := t.input.serialize().outputIdent[0]
+
+	codeBuild := fmt.Sprintf("vec3 %s = %s(%s", outName, t.fn, inpIdent)
+	for _, arg := range t.args {
+		argIdent := arg.serialize().outputIdent[0]
+		codeBuild += fmt.Sprintf(", %s", argIdent)
+	}
+
+	codeBuild += ");"
+	code := Source(codeBuild)
+
+	if !shown[t.id] {
+		shown[t.id] = true
+		codeAll = append(codeAll, code)
+	}
+
+	return Serialization{
+		code:        code,
+		outputIdent: []Identifier{Identifier(outName)},
+	}
+}
+
+func (t Transform) toVec3() Identifier {
+	return t.serialize().outputIdent[0]
+}
+
+func (b Boolean) serialize() Serialization {
+	obj1Ident := b.Obj1.serialize().outputIdent[0]
+	obj2Ident := b.Obj2.serialize().outputIdent[0]
+
+	outName := fmt.Sprintf("%s_out", b.id)
+
+	codeBuild := fmt.Sprintf("point_record %s = %s(%s, %s", outName, b.fn, obj1Ident, obj2Ident)
+	for _, arg := range b.args {
+		argIdent := arg.serialize().outputIdent[0]
+		codeBuild += fmt.Sprintf(", %s", argIdent)
+	}
+
+	codeBuild += ");"
+	code := Source(codeBuild)
+
+	if !shown[b.id] {
+		shown[b.id] = true
+		codeAll = append(codeAll, code)
+	}
+
+	return Serialization{
+		code:        code,
+		outputIdent: []Identifier{Identifier(outName)},
+	}
+}
+
+func (b Boolean) toObj() Identifier {
+	return b.serialize().outputIdent[0]
+}
+
+func (s Scene) serialize() Serialization {
+	objIdent := s.object.serialize().outputIdent[0]
+
+	code := Source(fmt.Sprintf("return %s;", objIdent))
+
+	if !shown["scene"] {
+		shown["scene"] = true
+		codeAll = append(codeAll, code)
+	}
+
+	return Serialization{
+		code:        code,
+		outputIdent: []Identifier{Identifier("scene")},
+	}
+}
+
+var SceneGraph map[string]Serializable
+
+/*
+Parses the input file and detects any errors
+*/
+func parseScene(scene string) {
+	SceneGraph = make(map[string]Serializable)
+	SceneGraph["p"] = vec3{id: "p", x: 0, y: 0, z: 0}
+	lines := strings.Split(scene, "\n")
+
+	for i, line := range lines {
+		vals := strings.Split(line, " ")
+
+		if len(vals) < 2 {
+			continue
+		}
+
+		switch vals[0] {
+		case "Vec3":
+			id := vals[1]
+			x, err := strconv.ParseFloat(vals[2], 32)
+
+			if err != nil {
+				fmt.Printf("error in line %d\n", i+1)
+				fmt.Print(err.Error())
+				os.Exit(1)
+			}
+
+			y, err := strconv.ParseFloat(vals[3], 32)
+
+			if err != nil {
+				fmt.Printf("error in line %d\n", i+1)
+				fmt.Print(err.Error())
+				os.Exit(1)
+			}
+
+			z, err := strconv.ParseFloat(vals[4], 32)
+
+			if err != nil {
+				fmt.Printf("error in line %d\n", i+1)
+				fmt.Print(err.Error())
+				os.Exit(1)
+			}
+
+			SceneGraph[id] = vec3{id, float32(x), float32(y), float32(z)}
+
+		case "Material":
+			id := vals[1]
+			color, ex := SceneGraph[vals[2]].(Coordinate)
+			diff, err := strconv.ParseFloat(vals[3], 32)
+
+			if err != nil {
+				fmt.Printf("error in line %d\n", i+1)
+				fmt.Print(err.Error())
+				os.Exit(1)
+			}
+
+			spec, err := strconv.ParseFloat(vals[4], 32)
+
+			if err != nil {
+				fmt.Printf("error in line %d\n", i+1)
+				fmt.Print(err.Error())
+				os.Exit(1)
+			}
+
+			refl, err := strconv.ParseFloat(vals[5], 32)
+
+			if err != nil {
+				fmt.Printf("error in line %d\n", i+1)
+				fmt.Print(err.Error())
+				os.Exit(1)
+			}
+
+			if !ex {
+				fmt.Printf("error in line %d\n", i+1)
+				fmt.Println("undefined vec3 " + vals[2])
+				os.Exit(1)
+			}
+
+			SceneGraph[id] = Material{id: id, Color: color, Diffuse: float32(diff), Specular: float32(spec), Reflectance: float32(refl)}
+		case "Object":
+			id := vals[1]
+			sdf, ex := SceneGraph[vals[2]].(SDF)
+			mat, ex2 := SceneGraph[vals[3]].(Material)
+
+			if !ex {
+				fmt.Printf("error in line %d\n", i+1)
+				fmt.Println("undefined sdf " + vals[2])
+				os.Exit(1)
+			}
+
+			if !ex2 {
+				fmt.Printf("error in line %d\n", i+1)
+				fmt.Println("undefined sdf " + vals[2])
+				os.Exit(1)
+			}
+
+			SceneGraph[id] = Object{id: id, SDF: sdf, Material: mat}
+		case "Float":
+			id := vals[1]
+			f, err := strconv.ParseFloat(vals[2], 32)
+
+			if err != nil {
+				fmt.Printf("error in line %d\n", i+1)
+				fmt.Print(err.Error())
+				os.Exit(1)
+			}
+
+			SceneGraph[id] = Float{id: id, value: float32(f)}
+		case "Scene":
+			obj, ex := SceneGraph[vals[1]].(ObjectLike)
+
+			if !ex {
+				fmt.Printf("error in line %d\n", i+1)
+				fmt.Println("undefined object or boolean " + vals[1])
+				os.Exit(1)
+			}
+
+			SceneGraph["scene"] = Scene{object: obj}
+		case "SDF":
+			id := vals[1]
+			fn := vals[2]
+			inp, ex := SceneGraph[vals[3]].(Coordinate)
+
+			if !ex {
+				fmt.Printf("error in line %d\n", i+1)
+				fmt.Println("undefined input " + vals[3])
+				os.Exit(1)
+			}
+
+			args := []Serializable{}
+
+			for argN := 4; argN < len(vals); argN++ {
+				a, ex := SceneGraph[vals[argN]]
+
+				if !ex {
+					fmt.Printf("error in line %d\n", i+1)
+					fmt.Println("undefined argument " + vals[argN])
+					os.Exit(1)
+				}
+
+				args = append(args, a)
+			}
+
+			SceneGraph[id] = SDF{id: id, fn: Identifier(fn), input: inp, args: args}
+		case "Transform":
+			id := vals[1]
+			fn := vals[2]
+			inp, ex := SceneGraph[vals[3]].(Coordinate)
+
+			if !ex {
+				fmt.Printf("error in line %d\n", i+1)
+				fmt.Println("undefined input " + vals[3])
+				os.Exit(1)
+			}
+
+			args := []Serializable{}
+
+			for argN := 4; argN < len(vals); argN++ {
+				a, ex := SceneGraph[vals[argN]]
+
+				if !ex {
+					fmt.Printf("error in line %d\n", i+1)
+					fmt.Println("undefined argument " + vals[argN])
+					os.Exit(1)
+				}
+
+				args = append(args, a)
+			}
+
+			SceneGraph[id] = Transform{id: id, fn: Identifier(fn), input: inp, args: args}
+		case "Boolean":
+			id := vals[1]
+			fn := vals[2]
+			obj1, ex := SceneGraph[vals[3]].(ObjectLike)
+
+			if !ex {
+				fmt.Printf("error in line %d\n", i+1)
+				fmt.Println("undefined input " + vals[3])
+				os.Exit(1)
+			}
+
+			obj2, ex := SceneGraph[vals[4]].(ObjectLike)
+
+			if !ex {
+				fmt.Printf("error in line %d\n", i+1)
+				fmt.Println("undefined input " + vals[4])
+				os.Exit(1)
+			}
+
+			args := []Serializable{}
+
+			for argN := 5; argN < len(vals); argN++ {
+				a, ex := SceneGraph[vals[argN]]
+
+				if !ex {
+					fmt.Printf("error in line %d\n", i+1)
+					fmt.Println("undefined argument " + vals[argN])
+					os.Exit(1)
+				}
+
+				args = append(args, a)
+			}
+
+			SceneGraph[id] = Boolean{id: id, fn: Identifier(fn), Obj1: obj1, Obj2: obj2, args: args}
+		default:
+			fmt.Printf("error in line %d\n", i+1)
+			fmt.Println("undefined identifier " + vals[0])
+			os.Exit(1)
+		}
+	}
+}
+
+/*
+Generates the GLSL code
+*/
+func generateCode() string {
+	shown = map[string]bool{}
+	SceneGraph["scene"].serialize()
+
+	out := `` //`#include "sdf.glsl"`
+	out += "\npoint_record scene(vec3 p) {\n"
+
+	for _, s := range codeAll {
+		out += "    " + s
+		out += "\n"
+	}
+
+	out += `}`
+
+	return out
+}
+
+func main() {
+	scene, err := os.ReadFile("input.scn")
+
+	if err != nil {
+		fmt.Println("Err")
+	}
+
+	parseScene(string(scene))
+
+	fmt.Println(generateCode())
+}
+```
+
+### frontend/main.js
+```
+import { WASI, WASIWorkerHost } from "@runno/wasi";
+
+var id = document.getElementById("drawflow");
+const editor = new Drawflow(id);
+
+editor.reroute = true;
+
+editor.start(); // starts the actual graph editor
+
+/////////////////////////////////////////////////////////////////////////
+/*
+Defines the different modules for the editor.
+
+Each type represents the output type
+Serialize defines the Semantic Representation output
+*/
+const buttons = [
+  {
+    id: "world_pos",
+    name: "World Position",
+    type: "vec3",
+    inputs: 0,
+    inputTypes: [],
+    outputs: 1,
+    serialize: (node) => ``,
+  },
+  {
+    id: "scene",
+    name: "Scene",
+    type: "scene",
+    inputs: 1,
+    inputTypes: ["object"],
+    outputs: 0,
+    serialize: (node, children) => `Scene ${ident(children[0])}`,
+  },
+  {
+    id: "object",
+    name: "Object",
+    type: "object",
+    inputs: 2,
+    inputTypes: ["sdf", "material"],
+    outputs: 1,
+    serialize: (node, children) =>
+      `Object ${ident(node)} ${ident(children[0])} ${ident(children[1])}`,
+  },
+  {
+    id: "sdf_sphere",
+    name: "Sphere",
+    type: "sdf",
+    inputs: 1,
+    inputTypes: ["vec3"],
+    outputs: 1,
+    fields: ["radius"],
+    serialize: (node, children, self) =>
+      `Float ${ident(node)}_radius ${self.radius}\nSDF ${ident(
+        node
+      )} sdSphere ${ident(children[0])} ${ident(node)}_radius`,
+  },
+  {
+    id: "sdf_box",
+    name: "Box",
+    type: "sdf",
+    inputs: 1,
+    inputTypes: ["vec3"],
+    outputs: 1,
+    fields: ["w", "h", "d"],
+    serialize: (node, children, self) =>
+      `Vec3 ${ident(node)}_half ${self.w / 2} ${self.h / 2} ${
+        self.d / 2
+      }\nSDF ${ident(node)} sdBox ${ident(children[0])} ${ident(node)}_half`,
+  },
+  {
+    id: "sdf_cylinder",
+    name: "Cylinder",
+    type: "sdf",
+    inputs: 1,
+    inputTypes: ["vec3"],
+    outputs: 1,
+    fields: ["h", "r"],
+    serialize: (node, children, self) =>
+      `Vec3 ${ident(node)}_a 0 ${-self.h / 2} 0\n` +
+      `Vec3 ${ident(node)}_b 0 ${self.h / 2} 0\n` +
+      `Float ${ident(node)}_r ${self.r}\n` +
+      `SDF ${ident(node)} sdCylinder ${ident(children[0])} ${ident(
+        node
+      )}_a ${ident(node)}_b ${ident(node)}_r`,
+  },
+  {
+    id: "sdf_cone",
+    name: "Cone",
+    type: "sdf",
+    inputs: 1,
+    inputTypes: ["vec3"],
+    outputs: 1,
+    fields: ["h", "ra", "rb"],
+    serialize: (node, children, self) =>
+      `Vec3 ${ident(node)}_a 0 ${-self.h / 2} 0\n` +
+      `Vec3 ${ident(node)}_b 0 ${self.h / 2} 0\n` +
+      `Float ${ident(node)}_ra ${self.ra}\n` +
+      `Float ${ident(node)}_rb ${self.rb}\n` +
+      `SDF ${ident(node)} sdCone ${ident(children[0])} ${ident(node)}_a ${ident(
+        node
+      )}_b ${ident(node)}_ra ${ident(node)}_rb`,
+  },
+  {
+    id: "sdf_terrain",
+    name: "Terrain",
+    type: "sdf",
+    inputs: 1,
+    inputTypes: ["vec3"],
+    outputs: 1,
+    fields: ["amp"],
+    serialize: (node, children, self) =>
+      `Float ${ident(node)}_amp ${self.amp}\n` +
+      `SDF ${ident(node)} sdTerrain ${ident(children[0])} ${ident(node)}_amp`,
+  },
+  {
+    id: "union",
+    name: "Union",
+    type: "object",
+    inputs: 2,
+    inputTypes: ["object", "object"],
+    outputs: 1,
+    serialize: (node, children) =>
+      `Boolean ${ident(node)} opUnion ${ident(children[0])} ${ident(
+        children[1]
+      )}`,
+  },
+  {
+    id: "smooth_union",
+    name: "Smooth Union",
+    type: "object",
+    inputs: 2,
+    inputTypes: ["object", "object"],
+    outputs: 1,
+    fields: ["k"],
+    serialize: (node, children, self) =>
+      `Float ${ident(node)}_f ${self.k == 0 ? 0.1 : self.k}\nBoolean ${ident(
+        node
+      )} opSmoothUnion ${ident(children[0])} ${ident(children[1])} ${ident(
+        node
+      )}_f`,
+  },
+  {
+    id: "intersection",
+    name: "Intersection",
+    type: "object",
+    inputs: 2,
+    inputTypes: ["object", "object"],
+    outputs: 1,
+    serialize: (node, children, self) =>
+      `Boolean ${ident(node)} opIntersection ${ident(children[0])} ${ident(
+        children[1]
+      )}`,
+  },
+  {
+    id: "smooth_intersection",
+    name: "Smooth Intersection",
+    type: "object",
+    inputs: 2,
+    inputTypes: ["object", "object"],
+    outputs: 1,
+    fields: ["k"],
+    serialize: (node, children, self) =>
+      `Float ${ident(node)}_f ${self.k == 0 ? 0.1 : self.k}\nBoolean ${ident(
+        node
+      )} opSmoothIntersection ${ident(children[0])} ${ident(
+        children[1]
+      )} ${ident(node)}_f`,
+  },
+  {
+    id: "subtraction",
+    name: "Subtraction",
+    type: "object",
+    inputs: 2,
+    inputTypes: ["object", "object"],
+    outputs: 1,
+    serialize: (node, children, self) =>
+      `Boolean ${ident(node)} opSubtraction ${ident(children[0])} ${ident(
+        children[1]
+      )}`,
+  },
+  {
+    id: "smooth_subtraction",
+    name: "Smooth Subtraction",
+    type: "object",
+    inputs: 2,
+    inputTypes: ["object", "object"],
+    outputs: 1,
+    fields: ["k"],
+    serialize: (node, children, self) =>
+      `Float ${ident(node)}_f ${self.k == 0 ? 0.1 : self.k}\nBoolean ${ident(
+        node
+      )} opSmoothSubtraction ${ident(children[0])} ${ident(
+        children[1]
+      )} ${ident(node)}_f`,
+  },
+  {
+    id: "material",
+    name: "Material",
+    type: "material",
+    inputs: 1,
+    inputTypes: ["vec3"],
+    outputs: 1,
+    fields: ["diff", "spec", "refl"],
+    serialize: (node, children, self) =>
+      `Material ${ident(node)} ${ident(children[0])} ${self.diff} ${
+        self.spec
+      } ${self.refl}`,
+  },
+  {
+    id: "translate",
+    name: "Translate",
+    type: "vec3",
+    inputs: 1,
+    inputTypes: ["vec3"],
+    outputs: 1,
+    fields: ["x", "y", "z"],
+    serialize: (node, children, self) =>
+      `Vec3 ${ident(node)}_offset ${self.x} ${self.y} ${
+        self.z
+      }\nTransform ${ident(node)} translate ${ident(children[0])} ${ident(
+        node
+      )}_offset`,
+  },
+  {
+    id: "rotate",
+    name: "Rotate (point, axis, angle)",
+    type: "vec3",
+    inputs: 2,
+    inputTypes: ["vec3", "vec3"],
+    outputs: 1,
+    fields: ["angle"],
+    serialize: (node, children, self) =>
+      `Float ${ident(node)}_a ${self.angle}\n` +
+      `Transform ${ident(node)} rotate ${ident(children[0])} ${ident(
+        children[1]
+      )} ${ident(node)}_a`,
+  },
+  {
+    id: "float",
+    name: "Number",
+    type: "float",
+    inputs: 0,
+    inputTypes: [],
+    outputs: 1,
+    fields: ["n"],
+    serialize: (node, children, self) => `Float ${ident(node)} ${self.n}`,
+  },
+  {
+    id: "color",
+    name: "Color",
+    type: "vec3",
+    inputs: 0,
+    inputTypes: [],
+    outputs: 1,
+    fields: ["r", "g", "b"],
+    serialize: (node, children, self) =>
+      `Vec3 ${ident(node)} ${self.r} ${self.g} ${self.b}`,
+  },
+  {
+    id: "vec3",
+    name: "Vector",
+    type: "vec3",
+    inputs: 0,
+    inputTypes: [],
+    outputs: 1,
+    fields: ["x", "y", "z"],
+    serialize: (node, children, self) =>
+      `Vec3 ${ident(node)} ${self.x} ${self.y} ${self.z}`,
+  },
+];
+
+// Helper dictionary for the serialize function given an id
+const serializeId = {};
+buttons.forEach((b) => {
+  serializeId[b.id] = b.serialize;
+});
+
+/////////////////////////////////////////////////////////////////////////
+
+/*
+When a button is clicked, create a graph node with the necessary inputs and class
+*/
+const buttonClick = (btn) => {
+  console.log(btn);
+
+  let html = `<div>${btn.name}</div>`;
+
+  if (btn.fields) {
+    btn.fields.forEach((f) => {
+      html += `<div>${f} <input type="number" value=0 df-${f}> </div>`;
+    });
+  }
+
+  editor.addNode(
+    btn.name,
+    btn.inputs,
+    btn.outputs,
+    200,
+    200,
+    btn.type + " " + btn.id,
+    { ...btn },
+    html
+  );
+};
+
+
+/////////////////////////////////////////////////////////////////////////
+
+// This part adds each button to the node selector.
+
+// Creates custom styling so each input's color corresponds to its type
+const styleInputs = document.createElement("style");
+
+/*
+Given a button as defined above, add to UI
+*/
+const addButton = (btn) => {
+  btn.inputTypes.forEach((t, i) => {
+    styleInputs.innerText += `
+      .${btn.id} .input_${i + 1} {
+        background-color: var(--${t}-col) !important;
+      }
+    `;
+  });
+  window[btn.id] = () => buttonClick(btn);
+  const html = `<button class="${btn.type}" onclick="window.${btn.id}()">${btn.name}</button>`;
+  document.querySelector("#buttons").innerHTML += html;
+};
+
+// add all buttons
+buttons.forEach((b) => addButton(b));
+document.head.append(styleInputs);
+
+
+
+/////////////////////////////////////////////////////////////////////////
+/*
+This part performs important checks in the graph
+- Verifies that each input only has one connection
+- Verifies each connection is according to the types
+- Verifies there is only one scene node
+*/
+const verifyNodes = () => {
+  const names = buttons.map((b) => b.name);
+
+  names.forEach((name) => {
+    const nodesIds = editor.getNodesFromName(name);
+
+    nodesIds.forEach((nodeId) => {
+      const node = editor.getNodeFromId(nodeId);
+
+      if (node.inputs)
+        Object.entries(node.inputs).forEach((data) => {
+          const inpClass = data[0];
+          const inpObj = data[1];
+
+          inpObj.connections.forEach((conn, i) => {
+            if (i != 0) {
+              editor.removeSingleConnection(
+                conn.node,
+                nodeId,
+                conn.input,
+                inpClass
+              );
+            } else {
+              const from = editor.getNodeFromId(conn.node);
+              const inpNum = parseInt(inpClass.split("_")[1]) - 1;
+              if (node.data.inputTypes[inpNum] != from.data.type) {
+                editor.removeSingleConnection(
+                  conn.node,
+                  nodeId,
+                  conn.input,
+                  inpClass
+                );
+              }
+            }
+          });
+        });
+    });
+  });
+
+  const scenes = editor.getNodesFromName("Scene");
+  if (scenes.length > 1) {
+    scenes.slice(1).forEach((s) => editor.removeNodeId(`node-${s}`));
+  }
+
+  // stores current scene in local storage
+  window.localStorage.setItem("scene", JSON.stringify(editor.export()));
+};
+
+// verifies node when a node or connection is created or a node is deleted
+editor.on("nodeCreated", verifyNodes);
+editor.on("connectionCreated", verifyNodes);
+editor.on("nodeRemoved", verifyNodes);
+
+/////////////////////////////////////////////////////////////////////////
+// This part generates the Semantic Representation given the graph
+
+let ir = ``;
+let shown = {};
+
+/*
+Compiles the whole graph to Semantic Representation
+*/
+const compileToIR = () => {
+  ir = "";
+  shown = {};
+  refreshLocalStorage();
+  const sceneId = editor.getNodesFromName("Scene")[0];
+  const scene = editor.getNodeFromId(sceneId);
+
+  recursiveSerialize(scene);
+  return ir;
+};
+
+/*
+Gets the children (inputs) from a node
+*/
+const children = (node) => {
+  return Object.values(node.inputs)
+    .map((i) => i.connections[0].node)
+    .map((i) => editor.getNodeFromId(i));
+};
+
+
+/*
+Performs DFS to serialize all nodes with the correct dependency (topological) ordering
+*/
+const recursiveSerialize = (node) => {
+  if (shown[node.id]) return;
+  shown[node.id] = true;
+
+  const childrenNode = children(node);
+  childrenNode.forEach(recursiveSerialize);
+
+  ir += serialize(node, childrenNode).replace(/undefined/g, "0") + `\n`;
+};
+
+
+/*
+Generates a unique identifier for every node
+*/
+const ident = (node) => {
+  if (node.data.id == "world_pos") return `p`;
+  return node.data.id + `_` + node.id;
+};
+
+/*
+Serializes a node according to its function
+*/
+const serialize = (node, childrenNode) => {
+  return serializeId[node.data.id](node, childrenNode, node.data);
+};
+
+/////////////////////////////////////////////////////////////////////////
+// This part handles calling the code generation module to convert Semantic Representation => GLSL => HTML
+
+/*
+Handles the Semantic Representation => GLSL with the WASM Golang module
+*/
+const compileIR = (ir) => {
+  return new Promise((res, thr) => {
+    console.log(ir);
+    if (!ir) {
+      thr("invalid id");
+      return;
+    }
+    WASI.start(fetch("/code-gen.wasm"), {
+      stdout: (out) => res(out),
+      stderr: (err) => thr(err),
+      fs: {
+        "/input.scn": {
+          path: "/input.scn",
+          timestamps: {
+            access: new Date(),
+            change: new Date(),
+            modification: new Date(),
+          },
+          mode: "string",
+          content: ir,
+        },
+      },
+    });
+  });
+};
+
+// loads the HTML template
+const templateRes = await fetch("template.html");
+const template = await templateRes.text();
+
+/*
+Generates the HTML template from the GLSL
+*/
+const generateTemplate = (code) => {
+  const rotateCamera = document.querySelector("#rotate").checked;
+  const cubeMap = document.querySelector("#cubemap").value;
+  let focalLength = document.querySelector("#focal_length").value;
+  if (!focalLength.includes(".")) focalLength += ".0";
+
+  // replaces the function code, cubemap, URL, camera rotation, and focal length
+  let rep = template.replace(/%SCENE%/g, code);
+  rep = rep.replace(/%MAP%/g, cubeMap);
+  rep = rep.replace(/%URL%/g, window.location.href);
+  rep = rep.replace(/%ROTATE%/g, rotateCamera ? "1.0" : "0.0");
+  rep = rep.replace(/%FOCAL_LENGTH%/g, focalLength);
+
+  return rep;
+};
+
+/*
+Handles the whole Graph => Semantic Representation => GLSL => HTML pipeline, and displays result
+*/
+const updateShader = async () => {
+  refreshLocalStorage();
+
+  const ir = compileToIR();
+  const res = await compileIR(ir);
+  if (res.slice(1, 13) == "point_record") {
+    const t = generateTemplate(res);
+    document.querySelector("iframe").src =
+      "data:text/html;charset=utf-8," + escape(t);
+  }
+};
+
+// CTRL + c to update shader
+document.onkeyup = (e) => {
+  if (e.ctrlKey && (e.key == "c" || e.key == "C")) updateShader();
+};
+
+/////////////////////////////////////////////////////////////////////////
+// This part handles saving and loading the scene
+
+/*
+Refreshes local storage to avoid losses on page refresh
+*/
+const refreshLocalStorage = () => {
+  window.localStorage.setItem("scene", JSON.stringify(editor.export()));
+  const imp = window.localStorage.getItem("scene");
+  editor.clear();
+  if (JSON.parse(imp)) editor.import(JSON.parse(imp));
+};
+
+//setInterval(refreshLocalStorage, 2000);
+
+
+/*
+Saves scene to file
+*/
+const saveScene = () => {
+  const text = JSON.stringify(editor.export());
+  refreshLocalStorage();
+
+  const element = document.createElement("a");
+  element.setAttribute(
+    "href",
+    "data:text/plain;charset=utf-8," + encodeURIComponent(text)
+  );
+  element.setAttribute("download", "scene.json");
+
+  element.style.display = "none";
+  document.body.appendChild(element);
+
+  element.click();
+
+  document.body.removeChild(element);
+};
+
+/*
+Loads scene from file
+*/
+const loadScene = () => {
+  const inp = document.querySelector("#load-scene");
+  const fileReader = new FileReader();
+
+  fileReader.readAsText(inp.files[0]);
+  fileReader.onload = () => {
+    editor.import(JSON.parse(fileReader.result));
+  };
+};
+
+
+// loads scene when the page is opened
+const imp = window.localStorage.getItem("scene");
+if (JSON.parse(imp)) editor.import(JSON.parse(imp));
+
+// Expose functions for debugging button onclick
+window.children = children;
+window.editor = editor;
+window.compileToIR = compileToIR;
+window.compileIR = compileIR;
+window.verifyNodes = verifyNodes;
+window.refresh = refreshLocalStorage;
+window.updateShader = updateShader;
+window.saveScene = saveScene;
+window.loadScene = loadScene;
+```
+
+### frontend/vite.config.js
+```
+import { defineConfig } from 'vite'
+
+export default defineConfig({
+  esbuild: {
+    supported: {
+      'top-level-await': true
+    },
+  },
+});
+```
+
+### glsl_template/convert_template.py
+```
+import re
+t = open("template.html").read()
+
+# This presuposes the project is in a subdirectory of /home, modify if otherwise
+p = re.compile(r"\/home\/([^\"\n'])*\/glsl_template\/")
+t = re.sub(p, "", t)
+t = t.replace("point_record scene(vec3 p) {}", "%SCENE%")
+t = t.replace("ROTATE 1.0", "ROTATE %ROTATE%")
+t = t.replace("FOCAL_LENGTH 1.0", "FOCAL_LENGTH %FOCAL_LENGTH%")
+
+
+e = re.compile(r"^.*buffers\[0\]\.Shader\.uniforms\.iChannel0.*$", re.MULTILINE)
+loader = re.findall(e, t)
+l = loader[0]
+print(l)
+selectedMap = re.finditer(r"\/([^\_])+\_", loader[0])
+mapName = next(selectedMap).group(0)[1:-1]
+loader = loader[0].replace(mapName, "%MAP%")
+loader = loader.replace("CubeTextureLoader()", 'CubeTextureLoader().setPath("%URL%")')
+print(loader)
+t = t.replace(l, loader)
+open("template2.html", "w").write(t)
+open("../frontend/template.html", "w").write(t)
+```
+
+### glsl_template/scene.glsl
+```
+// This file contains the boilerplate that will load the user scene
+
+#include "sdf.glsl"
+
+point_record scene(vec3 p) {}
+```
+
+### glsl_template/sdf.glsl
+```
+#ifndef SDF_H
+#define SDF_H
+
+#define opApply(func, p, mat) point_record(func(p), mat, p); 
+
+// Basic types:
+
+struct ray {
+    vec3 origin;
+    vec3 direction;
+};
+
+struct camera {
+    vec3 center;
+    vec3 u, v, w;
+    float focal_length;
+};
+
+struct material {
+    vec3 albedo;
+    float diffuse;
+    float specular;
+    float reflectance;
+};
+
+struct point_record {
+    float dist;
+    material mat;
+    vec3 position;
+};
+
+// Primitive SDF functions
+
+float sdSphere(vec3 p, float r) {
+    return length(p) - r;
+}
+
+float sdBox(vec3 p, vec3 half_bounds) {
+
+    vec3 pt = abs(p);
+
+    // project to planes
+    // clamp to box
+    vec3 pxy = vec3(clamp(pt.x, 0., half_bounds.x), clamp(pt.y, 0., half_bounds.y), half_bounds.z);
+    vec3 pxz = vec3(clamp(pt.x, 0., half_bounds.x), half_bounds.y, clamp(pt.z, 0., half_bounds.z));
+    vec3 pyz = vec3(half_bounds.x, clamp(pt.y, 0., half_bounds.y), clamp(pt.z, 0., half_bounds.z));
+
+    // check if inside box
+    float insideMult = (pt.x < half_bounds.x && pt.y < half_bounds.y && pt.z < half_bounds.z) ? -1. : 1.;
+    return insideMult * min(length(pt - pxy), min(length(pt - pxz), length(pt - pyz)));
+}
+
+// by https://iquilezles.org/articles/distfunctions/
+float sdCylinder(vec3 p, vec3 a, vec3 b, float r) {
+    // project to axis
+    vec3 ba = b - a;
+    vec3 pa = p - a;
+    float baba = dot(ba, ba);
+    float paba = dot(pa, ba);
+    float x = length(pa * baba - ba * paba) - r * baba;
+    float y = abs(paba - baba * 0.5) - baba * 0.5;
+    float x2 = x * x;
+    float y2 = y * y * baba;
+    float d = (max(x, y) < 0.0) ? -min(x2, y2) : (((x > 0.0) ? x2 : 0.0) + ((y > 0.0) ? y2 : 0.0));
+    return sign(d) * sqrt(abs(d)) / baba;
+
+}
+
+float sdCone(vec3 p, vec3 a, vec3 b, float ra, float rb) {
+    // project to axis
+    vec3 s = b - a;
+    vec3 pv = p - a;
+
+    float proj = dot(pv, s) / (length(s));
+    vec3 pr = a + normalize(s) * proj;
+
+    vec3 pj_a = p + (a - pr);
+    vec3 e_a = a + normalize(pj_a - a) * ra;
+
+    vec3 pj_b = p + (b - pr);
+    vec3 e_b = b + normalize(pj_b - b) * rb;
+
+    vec3 side_vec = e_b - e_a;
+    vec3 side_pv = p - e_a;
+
+    // proj to side
+    float proj_side = dot(side_pv, side_vec) / (length(side_vec));
+    vec3 pr_side = e_a + normalize(side_vec) * proj_side;
+
+    vec3 cap_a = a + normalize(pj_a - a) * min(ra, length(pj_a - a));
+    vec3 cap_b = b + normalize(pj_b - b) * min(rb, length(pj_b - b));
+
+    float cap_dis = min(length(p - cap_a), length(p - cap_b));
+
+    float is_inside = length(p - pr) < mix(ra, rb, proj / length(s)) && 0. < proj && proj < length(s) ? -1. : 1.;
+    // if closer to side
+    if(0.0 < proj_side && proj_side < length(side_vec)) {
+        return min(cap_dis, length(p - pr_side)) * is_inside;
+    }
+
+    // else
+    return cap_dis;
+
+}
+
+// Basic terrain with low ondulations
+float sdTerrain(vec3 p, float amp) {
+    float samp = (sin(p.x * 0.25) + sin(p.z * 0.20)) * 0.5;
+    samp += sin(p.x * 0.1) + sin(p.z * 0.15);
+    samp += pow(sin(p.x * 0.05) + sin(p.z * 0.2), 2.0) * 1.2;
+
+    return p.y - samp * amp;
+}
+
+// Boolean functions
+
+float smoothUnion(float d1, float d2, float k) {
+    float h = max(k - abs(d1 - d2), 0.);
+    return min(d1, d2) - (h * h) / (4. * k);
+}
+
+float smoothIntersection(float d1, float d2, float k) {
+    float h = max(k - abs(d1 - d2), 0.);
+    return max(d1, d2) + (h * h) / (4. * k);
+
+}
+
+float smoothSubtraction(float d1, float d2, float k) {
+    return smoothIntersection(-d1, d2, k);
+}
+
+float sdfRound(float d, float iso) {
+    return d - iso;
+}
+
+// Variations accepting point_record 
+// Linearly interpolates material at boundry 
+
+point_record opSmoothUnion(point_record p1, point_record p2, float k) {
+    float smoothUn = smoothUnion(p1.dist, p2.dist, k);
+
+    float r = clamp(abs(smoothUn - p1.dist), 0., 1.);
+
+    return point_record(smoothUn, material(mix(p1.mat.albedo, p2.mat.albedo, r), mix(p1.mat.diffuse, p2.mat.diffuse, r), mix(p1.mat.specular, p2.mat.specular, r), mix(p1.mat.reflectance, p2.mat.reflectance, r)), p1.position);
+}
+
+point_record opUnion(point_record p1, point_record p2) {
+    if(p1.dist < p2.dist) {
+        return p1;
+    } else {
+        return p2;
+    }
+}
+
+point_record opSmoothIntersection(point_record p1, point_record p2, float k) {
+    float smoothIntersec = smoothIntersection(p1.dist, p2.dist, k);
+
+    float r = clamp(abs(smoothIntersec - p1.dist), 0., 1.);
+
+    return point_record(smoothIntersec, material(mix(p1.mat.albedo, p2.mat.albedo, r), mix(p1.mat.diffuse, p2.mat.diffuse, r), mix(p1.mat.specular, p2.mat.specular, r), mix(p1.mat.reflectance, p2.mat.reflectance, r)), p1.position);
+}
+
+point_record opIntersection(point_record p1, point_record p2) {
+    if(p1.dist > p2.dist) {
+        return p1;
+    } else {
+        return p2;
+    }
+}
+
+point_record opSmoothSubtraction(point_record p1, point_record p2, float k) {
+    float smoothSubtract = smoothSubtraction(p2.dist, p1.dist, k);
+
+    return point_record(smoothSubtract, p1.mat, p1.position);
+}
+
+point_record opSubtraction(point_record p1, point_record p2) {
+    if(p1.dist > -p2.dist) {
+        return p1;
+    } else {
+        return point_record(-p2.dist, p1.mat, p1.position);
+    }
+}
+
+// Basic transformations
+
+vec3 translate(vec3 p, vec3 t) {
+    return p + t;
+}
+
+// by https://www.neilmendoza.com/glsl-rotation-about-an-arbitrary-axis/
+mat4 rotationMatrix(vec3 axis, float angle) {
+    axis = normalize(axis);
+    float s = sin(angle);
+    float c = cos(angle);
+    float oc = 1.0 - c;
+
+    return mat4(oc * axis.x * axis.x + c, oc * axis.x * axis.y - axis.z * s, oc * axis.z * axis.x + axis.y * s, 0.0, oc * axis.x * axis.y + axis.z * s, oc * axis.y * axis.y + c, oc * axis.y * axis.z - axis.x * s, 0.0, oc * axis.z * axis.x - axis.y * s, oc * axis.y * axis.z + axis.x * s, oc * axis.z * axis.z + c, 0.0, 0.0, 0.0, 0.0, 1.0);
+}
+
+vec3 rotate(vec3 p, vec3 axis, float angle) {
+    mat4 m = rotationMatrix(axis, angle);
+
+    return (m * vec4(p, 0)).xyz;
+}
+
+#endif
+```
+
+### glsl_template/template.glsl
+```
+// Contains the main logic for the engine
+
+#include "scene.glsl"
+#include "sdf.glsl"
+
+#iChannel0 "file://environment_maps/sky_{}.png"
+#iChannel0::Type "CubeMap"
+
+#define MAX_ITERS 1000
+#define EPSILON 1e-2    
+#define PI 3.141592653
+
+#define MAX_DEPTH 2
+
+#define MAX_DIST 1000.f
+
+#define CUBE_MAP 1
+#define ROTATE 1.0
+#define FOCAL_LENGTH 1.0
+
+/*
+Computes the ray from the camera and screen position
+*/
+ray computeRay(camera cam, vec2 uv) {
+    vec3 ray_origin = cam.center;
+    vec3 ray_direction = normalize(-cam.focal_length * cam.w + uv.x * cam.u + uv.y * cam.v);
+
+    return ray(ray_origin, ray_direction);
+}
+
+/*
+Helper function to map a point according to the scene SDF
+*/
+float map(vec3 p) {
+    point_record pr = scene(p);
+    float d = pr.dist;
+
+    return d;
+}
+
+/*
+Computes the normal at a point
+*/
+vec3 computeNormal(vec3 p) {
+    float d = map(p);
+
+    return normalize(vec3((map(p + vec3(EPSILON, 0, 0)) - d), (map(p + vec3(0, EPSILON, 0)) - d), (map(p + vec3(0, 0, EPSILON)) - d)));
+}
+
+/*
+Computes the background
+If cubemap is enabled, display that
+Otherwise, display sky color
+*/
+vec3 background(ray r) {
+    if (CUBE_MAP == 1)
+        return texture(iChannel0, normalize(r.direction)).rgb;
+    vec3 unit_dir = normalize(r.direction);
+    float a = 0.8 * (unit_dir.y + 1.0);
+    return (1.0 - a) * vec3(1, 1, 1) + a * vec3(0.5, 0.7, 1.0);
+}
+
+/*
+Helper function to create the camera
+*/
+camera create_camera_with_fov(vec3 look_from, vec3 look_at, vec3 up, float focal_length) {
+    vec3 w = normalize(look_from - look_at);
+    vec3 u = normalize(cross(up, w));
+    vec3 v = cross(w, u);
+
+    return camera(look_from, u, v, w, focal_length);
+}
+
+/*
+Performs the actual sphere marching
+*/
+bool ray_march(ray r, out point_record pr_out, out int iters, out float min_dist) {
+    vec3 p = r.origin;
+    while(iters < MAX_ITERS && length(p - r.origin) < MAX_DIST) {
+        point_record pr = scene(p);
+        p += r.direction * pr.dist;
+
+        if(pr.dist < EPSILON) {
+            pr_out = pr;
+            return true;
+        }
+
+        min_dist = min(min_dist, pr.dist);
+
+        iters++;
+    }
+
+    return false;
+}
+
+/*
+Computes shading information for a point
+*/
+vec3 point_color(ray r, point_record hit) {
+    vec3 normal = computeNormal(hit.position);
+
+    // Static global directional lighting
+    vec3 light_dir = normalize(vec3(0, 3., 2));
+    vec3 light_color = vec3(0.85, 0.94, 1.0); // color
+    float light_intensity = 1.0;
+    vec3 surface_color = hit.mat.albedo;
+    vec3 surface_ambient = hit.mat.albedo / 40.;
+
+    point_record pr;
+    int iters = 0;
+    float min_dist = 100.0;
+
+    // Checks for shadow    
+    float shadow = 0.0;
+    bool hit_sh = ray_march(ray(hit.position + light_dir * 0.5, light_dir), pr, iters, min_dist);
+    if(!hit_sh) {
+        shadow = 1.0;
+    } 
+
+    // Computes specular value
+    vec3 halfDir = normalize(light_dir + r.direction);
+    float specAngle = max(dot(halfDir, normal), 0.0);
+    float specular = pow(specAngle, hit.mat.specular);
+
+    // Computes reflection
+    vec3 ref = reflect(normalize(r.direction), normal);
+    vec3 ref_text;
+
+    if (CUBE_MAP == 1) {
+        ref_text = texture(iChannel0, ref).rgb;
+    } else {
+        ref_text = background(ray(hit.position, ref));
+    }
+
+    // Variation of Phong model
+    vec3 col = surface_ambient + shadow * (light_intensity * light_color * dot(normal, light_dir) * surface_color * hit.mat.diffuse + light_intensity * light_color * specular * surface_color * clamp(hit.mat.specular, 0.0, 1.0 ));
+
+    // Blends with reflectance
+    col = hit.mat.reflectance * ref_text  + (1.0 - hit.mat.reflectance) * col;
+    
+    return col;
+}
+/*
+Sphere marches and computes color for ray
+*/
+vec3 ray_color(ray r) {
+    point_record hit;
+    vec3 col;
+    int iters = 0;
+    float min_dist = 1e10;
+
+    if(ray_march(r, hit, iters, min_dist)) {
+        col = point_color(r, hit);
+    } else {
+        col = background(r);
+    }
+
+
+    return col;
+}
+
+void main() {
+    // Camera rotation
+    float theta = iTime / 3.0 * ROTATE;
+    vec3 look_from = vec3(sin(theta) * 30.0, 10, cos(theta) * 30.0);
+
+    camera cam = create_camera_with_fov(look_from, vec3(0, 0, 0), vec3(0, 1, 0), FOCAL_LENGTH);
+
+    float aspect = iResolution.x / iResolution.y;
+    vec2 uv = gl_FragCoord.xy / iResolution.xy - 0.5;
+
+    uv.x *= aspect;
+
+    ray r = computeRay(cam, uv);
+    vec3 col = ray_color(r);
+
+    // Gamma correction
+    col = pow(col, vec3(1.0 / 1.5));
+    gl_FragColor = vec4(col, 1.0);
+
+}
+```

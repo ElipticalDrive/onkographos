@@ -1,0 +1,475 @@
+Requirement Let a tiled sprite stay an atlas entry, by wrapping the uv inside the entry's sub-rect in the fragment stage instead of relying on the sampler's repeat address mode. A tiled sprite leaves the atlas today and becomes a standal...
+
+canvas: wrap a tiled sprite's uv inside its atlas sub-rect in the shader, so tiling no longer leaves the atlas · Issue #440 · dvoyni/cog · GitHub
+Skip to content
+You signed in with another tab or window. Reload to refresh your session.
+You signed out in another tab or window. Reload to refresh your session.
+You switched accounts on another tab or window. Reload to refresh your session.
+Dismiss alert
+canvas: wrap a tiled sprite's uv inside its atlas sub-rect in the shader, so tiling no longer leaves the atlas #440
+New issue
+Copy link
+New issue
+Copy link
+Closed
+Closed
+canvas: wrap a tiled sprite's uv inside its atlas sub-rect in the shader, so tiling no longer leaves the atlas#440
+Copy link
+Assignees
+Labels
+enhancementNew feature or requestNew feature or requestready-for-agentSelf-contained ticket an agent can pick upSelf-contained ticket an agent can pick upto-do
+Description
+dvoyni
+opened on Sep 16, 2026
+Issue body actions
+Requirement
+Let a tiled sprite stay an atlas entry, by wrapping the uv inside the entry's
+sub-rect in the fragment stage instead of relying on the sampler's repeat address
+mode.
+A tiled sprite leaves the atlas today and becomes a standalone texture drawn as a
+quad on the triangles path. That is not a batching accident — it is forced, and
+the forcing is worth stating precisely: a repeat sampler wraps the whole
+texture, never a window onto it. So every tileable image must be its own file,
+LookupResolveStandalone gives it its own texture, and it can never share a draw
+with anything in the atlas.
+The consumer
+cog's own ui bundle. sprite9SliceTiledVisual
+(bundles/ui/internal/types/elements.go:374) emits nine sprite ops per nine-slice,
+setting TileX on the middle column and TileY on the middle row. feuds-26's
+button borders (uilib/buttons.go:198-204), checkbox border (uilib/checkbox.go:61-63)
+and window borders (uilib/dialog.go:52-63) all come through it, and
+drawFrameStrip (feuds-26/game/draw.go:1220) tiles the field frame directly.
+Each of those borders is four distinct standalone textures interleaved with atlas
+corners on the sprite path and with glyph-atlas label runs, so the sprite and
+triangles batchers flush each other both ways at every alternation.
+#149 put both quad paths into the
+triangles batcher, which removed the unbatched escape but not the split: the four
+edges are four different textures, and a batch splits on texture identity.
+With the wrap in the shader those edges become ordinary atlas sprites — same
+texture, same sampler, same pipeline as the corners — and the border collapses into
+the sprite batch it sits between.
+What it needs
+The sub-rect is already in the record, in the wrong stage. SpriteInstance.frame
+is the entry's uv rect (x0, y0, x1, y1) and spritevertex.wgsl consumes it as
+out.uv = mix(s.frame.xy, s.frame.zw, quad). The fragment stage receives the
+interpolated uv and not the bounds it came from, so it needs the record.
+The repeat counts need no record growth. SpriteInstance.misc is
+atlasLayer, unused, unused, unused; two of those three spare floats carry
+repeatX and repeatY. The frozen 96-byte record absorbs this without changing size,
+which is the whole reason this is cheap.
+Why the seam is smaller than it looks
+The atlas already pads every entry. insertion carries padding int, extrude bool
+and fills the gutter through paddedRGBA (bundles/canvas/internal/types/packer.go:289).
+A tiled entry wants a third fill mode — wrap, copying the opposite edge into
+the gutter — after which bilinear filtering across the seam samples exactly the
+texels it should. insertion is a struct, so the third mode is a field rather
+than a signature change.
+The atlas has no mipmaps. It is allocated through gfx.ResourceQueue.AllocateTexture,
+which has no mipmap flag at all. So fract()'s derivative discontinuity has no mip
+chain to select the wrong level from, and the usual hard half of in-shader wrapping
+does not arise here. Anisotropic filtering would still care, if a sampler ever
+enables it.
+Per-draw filtering already survives the move. The sprite batch carries filter
+as a key field (internal/batch.go:39, :81) and batchEntry passes
+transform.Filter (:187), so a tiled sprite keeps Filter and splits the batch
+when it differs — exactly as it does today.
+The decisions
+Settled in grilling on 2026-09-20. Each says what it rejected, because each of the
+rejected shapes looks cheaper than it is.
+1. The gutter fill is a bake parameter, and the entry is keyed by it.
+spriteDescrParams (internal/types/spriteloader.go:42) gains a fill field beside
+generated; a tiled draw asks for the wrap-filled variant and every other draw for
+the extruded one. An image drawn both ways therefore packs twice, and UnloadSprite
+(internal/types/lookup.go:317) must free both variants — FreeWhere, as fontFaces
+already uses it at lookup.go:124, rather than a Free by exact descriptor. The
+census found no shipped asset drawn both ways, so the duplicate-bytes cost is zero
+today.
+Rejected: wrap-padding unconditionally. It makes every non-tiled sprite bleed its
+opposite edge into the gutter whenever the quad is not texel-aligned — a
+one-texel fringe of the wrong colour, worst where UI art has a transparent edge and
+an opaque far side. It also collapses TestOneMissingPathIsOneReportPerTier
+(internal/sprites_test.go:288) from three reports to two: that test asserts one
+missing path reports once per tier — layout, draw, tiled draw — because they are
+three caches keyed by three descriptor types, and keying by fill is what keeps the
+count at three, with the wrap variant taking over the tiled tier's role.
+2. Routing to the standalone path is by size, before loading.
+The spriteSizes tier already answers a path's dimensions without packing anything
+(internal/types/lookup.go:196). A tiled draw asks it and sends
+width+2*spritePadding > AtlasSize — or the same on height — to the standalone
+path. packOverBudget stays terminal, exactly as for every other sprite: it is a
+development-stage error about the configured budget, and a silent fallback would
+make tiling the one sprite kind that hides it.
+Rejected: try the atlas and fall back on refusal. The refusal is not
+distinguishable from a decode failure at the call site — both are AtlasEntry{}
+(internal/types/spriteloader.go:88-100) — and it has already reported through the
+kernel by the time anyone could fall back.
+3. Frame and the flips become live on a tiled sprite.
+This reverses TestATiledSpriteStillIgnoresItsFrame
+(internal/spriteframe_test.go:307), which is a shipped and reasoned assertion, not
+an oversight — so the reversal is deliberate and is the one behaviour change a
+caller can see without counting draws. The reason is that on the atlas path
+ignoring them is what costs code: a tiled sprite routed through drawSprite's
+ordinary path gets frameFits, the spriteSize narrowing and entryUV's flips for
+free, and preserving the old behaviour means special-casing all three back out behind
+TileX || TileY. A Frame that does not fit is therefore now reported on a
+tiled sprite, where today it is silently dropped.
+4. Size and Scale keep tiling's own rule.
+A tiled axis must be told its length or the draw records nothing; a non-tiled axis
+defaults to one tile. The one change that follows from decision 3 is that "one tile"
+now measures the framed sub-rect — framedSource(entry.Width, entry.Height, t.Frame) —
+so the repeat count is size / (framedTile * scale).
+Rejected: unifying on spriteSize (internal/plugin.go:770). Its aspect fallback
+derives a missing axis from the one you gave, which is meaningless on a tiled axis —
+tiling until the aspect ratio matches is not something any caller means. It also
+silently re-lays-out every existing tiled draw: a 16x16 sheet at Size{X: 32}, TileX
+is a 32x16 quad today and would become 32x32.
+5. A tiled sprite resolves FamilySprite and honours its named material.
+#149 kept FamilyTriangles with a nil
+material (internal/plugin.go:588) because the quad lived on the triangles path;
+the key-colour ramp it wanted is already in sprite.wgsl, so the move keeps the ramp
+and drops nothing. A game that overrode the triangles family expecting it to catch
+tiled sprites loses that, and every tiled op gains a named sprite material it never
+had.
+6. The carried varying is the flat instance index.
+VertexOut gains @location(5) @interpolate(flat) index: u32, which
+bundles/canvas/docs/specs/materials.md already settles as the house answer: "one
+u32 component buys the whole 96-byte record where the frame rect alone would cost
+four", with HaloVertexOut as the shipped precedent. That puts VertexOut at 6
+locations and 14 components, inside the WebGPU floor of 16 and 60 that
+TestTheHaloInterStageStructFitsTheWebGPUFloor checks by hand. VertexOut is not
+frozen; SpriteInstance is, and does not change.
+Rejected: carrying frame itself as a flat vec4<f32>. Four components where one
+does, and it opens nothing else in the record to a later reader.
+7. VertexOut.uv keeps its exact meaning, and the wrap ships as a published
+helper. canvasTiledUV joins canvasClipped and keyColorRamp in
+spritebindings.wgsl, and the shipped fs_main calls it. It needs no varying beyond
+the index, because the quad coordinate is recoverable from what the fragment already
+has — vs_main wrote mix(f.xy, f.zw, quad), so q = (in.uv - f.xy) / (f.zw - f.xy)
+is quad back, and the wrap is f.xy + fract(q * repeat) * (f.zw - f.xy) with f
+and repeat read from instances.data[in.index]. A flip swaps the rect's bounds, so
+f.zw - f.xy goes negative and the arithmetic carries the sign rather than assuming
+min/max.
+Every existing custom sprite material therefore keeps compiling and behaving —
+halo.wgsl declares its own HaloVertexOut, its own vs_main and its own fs_main
+and samples in.uv directly (:188, :203). The documented degradation: a custom
+fs_main that does not call canvasTiledUV draws a tiled sprite stretched rather
+than tiled, which is still strictly more than it can do today, where naming a material
+on a tiled sprite was impossible at all.
+Rejected: making uv tile-space. It breaks every custom fs_main silently.
+8. Every instance writer sets misc.y/z to 1, never 0.
+A zero repeat collapses the sub-rect to a point through fract(q * 0) == 0, which
+turns every glyph, inline icon and solid fill into one texel's colour. This is the
+trap the change most plausibly ships with, so it gets its own assertion.
+9. NineSlice together with tiling stays out of scope.
+A tiled op never reaches the nine-slice branch today — drawSprite routes on
+TileX || TileY first (internal/plugin.go:411-420) and drawTiledSprite never
+reads NineSlice, so the insets are silently dropped. That silent drop stays exactly
+as it is. One op meaning "a nine-slice whose edges tile" becomes expressible after
+this change and is a separate feature with its own unasked question — whether the
+insets slice the frame before or after the repeat counts apply. It is
+#490, and the draw-count win here lands whether or not it is ever built,
+because ui already composes the nine cells itself.
+Acceptance
+The proof is a real frame from feuds-26; the unit tests are the regression net,
+not the evidence.
+Capture the baseline first, on unchanged code, and write both numbers into this
+ticket: run feuds-26/cmd/desktop (it wires mcpplugin), reach a screen showing a
+button and a window border, and record gfx_frame's per-pass draw count and total
+instance count plus a gfx_capture of those pixels. After the change, on the same
+screen:
+the per-pass draw count drops — the border cells that today alternate atlas and
+standalone collapse into the sprite batch;
+the instance count rises correspondingly, those edges having become instances
+rather than quads;
+gfx_capture shows borders that look the same, which is also how the wrap seam
+and the gutter fill are checked.
+In cog's suite, over backend.draws (one per flushed GPU draw,
+internal/canvas_test.go:291) in the idiom TestTrianglesSharingAMaterialAndValuesMerge
+uses:
+A tiled and an untiled sprite over the same path, same filter, layer, clip and
+material: 1 draw. Impossible today.
+The ui nine-slice-tiled shape — four untiled corners plus four tiled edges over
+atlas-fitting images: 1 draw.
+That shape followed by a text run: 2 — the glyph atlas is a separate packer and
+therefore a separate texture array.
+TestTiledSpritesOverOneStandaloneTextureMerge moves to the atlas batch, and now
+also merges with an untiled sprite of a different path.
+Two tiled sprites differing only in Filter still split.
+TestATiledAndAPlainTextureSpriteSplit is untouched: it tiles a texture handle,
+not a path, and stays on the texture path.
+AtlasSize: 32 with a 64x8 image and TileX still draws through the standalone
+path with no error reported.
+On the record:
+A tiled draw carries frame as the entry's sub-rect, never run past 1, with the
+repeat counts in misc.y/z.
+Every other instance writer — untiled sprites, glyphs, inline icons, the white
+texel, each nine-slice part — sets misc.y/z to 1. Its own test, per decision 8.
+TestSpriteInstanceMatchesTheShaderRecord still passes: 96 bytes, six vec4.
+On the gutter and the cache:
+paddedRGBA with wrap fill copies the opposite edge into the border, in
+packer_test.go:13's idiom; extrude fill is unchanged for every non-tiled entry.
+One path drawn both ways yields two entries with different uv rects and
+filesystem.opens == 2.
+UnloadSprite frees both variants: after it, drawing either way re-reads the file.
+TestOneMissingPathIsOneReportPerTier still asserts 3, the tiled draw's report
+now coming from the wrap-fill sprite descriptor rather than the standalone tier.
+On Frame, the flips and size:
+TestATiledSpriteStillIgnoresItsFrame is replaced by its opposite on the same
+fixture: a 16x16 sheet, Frame{Right: 12, Bottom: 12}, Size{X: 32}, TileX draws
+a 32x4 quad repeating a 4-wide tile eight times.
+FlipX swaps the sub-rect bounds and still wraps.
+A tiled axis with no Size draws nothing; a non-tiled axis with no Size measures
+one framed tile, not the aspect-derived size.
+A Frame that does not fit is now reported on a tiled sprite.
+On materials:
+A tiled and an untiled sprite naming the same sprite material merge into 1 draw.
+Nothing tiled resolves FamilyTriangles.
+halo.wgsl compiles and behaves unchanged.
+No frame-time number is required. The draw count is the claim and gfx_frame
+reports it exactly.
+The specification
+Six statements in the docs go stale and are corrected here, not in a follow-up:
+materials.md documents misc as atlasLayer, unused, unused, unused.
+materials.md presents the flat instance index as something a custom material may
+carry; the shipped fs_main now does it.
+materials.md's "Rejected: per-vertex parameter arrays" asserts drawTiledSprite
+"carries no varying value either".
+spritebindings.wgsl's own header comment, for the same two reasons.
+bundles/canvas/docs/README.md:148, which describes TileX/TileY.
+internal/types/types.go:107-111, which says tiling draws "through a standalone
+repeat texture and the textured-triangle path rather than the atlas".
+The four shapes rejected above — unconditional wrap-padding, frame as four floats,
+unifying on spriteSize, and tile-space uv — are recorded in materials.md as
+rejected shapes. The tiled nine-slice is deferred rather than rejected, so it gets a
+pointer to #490 instead.
+What it retires
+drawTiledSprite, LookupResolveStandalone, tiledDescrParams and the standalone
+texture cache survive, for images too large for an atlas page and for that alone.
+Every tileable image that fits loses its standalone texture, its single-quad triangles
+draw and the sprite/triangles alternation it caused.
+It does not touch SpriteTexture over an arbitrary gfx texture: a render target can
+never be atlased, and #149's batching is what serves it.
+Activity
+dvoyni
+added
+enhancementNew feature or requestNew feature or request
+to-do
+on Sep 16, 2026
+dvoyni commented on Sep 20, 2026
+dvoyni
+on Sep 20, 2026
+OwnerAuthor
+More actions
+Note from canvas: entrySize sizes an unsized sprite from the whole atlas entry, ignoring SpriteTransform.Frame, resolved in 9d902cd: a decision this ticket now has to make that it did not before.
+A Frame now narrows the source. An unsized sprite's natural size is the frame's extent, so Scale: 1 means one framed texel per world unit, and spriteSize applies that for the atlas path, the texture path and nine-slice alike.
+drawTiledSprite was deliberately left out of it. It resolves its own size rather than going through spriteSize, and the sentence this ticket quotes — what repeats is the texture, not a window onto it — is still true and still in the code. TestATiledSpriteStillIgnoresItsFrame pins it: a tiled sprite's non-tiled axis still falls back to the whole texture's pixel size, and a Frame that does not even fit is ignored there rather than reported, because nothing on that path reads it.
+That exemption is only defensible while tiling is off the atlas. Bringing a tiled sprite back onto the atlas path gives it a sub-rect in the shader, and at that point "tiling ignores Frame" stops being a statement about the sampler and becomes a choice. Two questions come with it:
+Does a tiled sprite's Frame select the tile? Once the fragment stage wraps inside a sub-rect, wrapping inside the frame's sub-rect rather than the entry's is the same arithmetic — which would make a framed tiled sprite mean the obvious thing instead of silently ignoring its frame.
+Does the non-tiled axis then fall back to the frame's extent? If the frame selects the tile, consistency with every other path says yes, and that is a behaviour change to a pinned test rather than a new case.
+Neither is answered here and neither blocks this ticket; they are what the shader wrap turns from moot into live. Whichever way it goes, TestATiledSpriteStillIgnoresItsFrame is the test that records the answer.
+dvoyni
+self-assigned this
+on Sep 20, 2026
+dvoyni
+added
+ready-for-agentSelf-contained ticket an agent can pick upSelf-contained ticket an agent can pick up
+on Sep 20, 2026
+dvoyni
+marked this as blocking on Sep 20, 2026
+canvas: one op for a nine-slice whose edges tile #490
+dvoyni commented on Sep 20, 2026
+dvoyni
+on Sep 20, 2026
+OwnerAuthor
+More actions
+Baseline, on unchanged code
+feuds-26/cmd/desktop at d9c23d8, main menu — six nine-slice borders with tiled
+edges (Continue, New campaign, Test room, Exit, En, Ru), a title and a footer line.
+Paused through app_time, then gfx_frame at tick 1104:
+pass
+label
+order
+target
+draws
+instances
+0
+canvas.layer
+-1
+screen
+1
+1
+1
+canvas.layer
+101
+screen
+56
+129
+56 draws for six buttons. That is the alternation this ticket removes: each
+border's four edges are four distinct standalone textures on the triangles path,
+interleaved with the atlas corners on the sprite path and with the glyph-atlas label
+runs, and every alternation flushes both batchers.
+The matching gfx_capture is the reference image the after-shot is compared against.
+dvoyni commented on Sep 20, 2026
+dvoyni
+on Sep 20, 2026
+OwnerAuthor
+More actions
+After
+Same build, same screen, gfx_frame at tick 117:
+pass
+label
+order
+draws
+instances
+0
+canvas.layer
+-1
+1
+1
+1
+canvas.layer
+101
+14
+129
+56 draws to 14, for the same six borders.
+One prediction in the acceptance was wrong and is corrected here: the instance
+count did not rise. It is 129 both before and after, exactly. The reasoning
+behind the prediction was that the tiled edges would become instances rather than
+quads - but each tiled quad was already a draw contributing one to that aggregate,
+so what changed is how many draws those 129 things are spread across, not how many
+there are. That is the better result of the two: identical work, a quarter of the
+draw calls.
+The pixels
+gfx_capture before and after, diffed: 2688 of 2,073,600 pixels differ (0.13%),
+maximum channel delta 15 of 255. The differing pixels are single-row and
+single-column runs of ~274 and ~24 pixels - the horizontal and vertical tiled edge
+strips themselves, and nothing else. A structural change would be a delta in the
+hundreds; a missing border would be the whole strip.
+What remains is the sub-texel difference the change is: filtering at a tile
+boundary used to be the sampler's own wrap over a standalone texture and is now a
+wrap-filled gutter in a shared atlas page. Same intent, not bit-identical.
+Zoomed 3x side by side, the border, its corners and its two inner rules are
+indistinguishable.
+dvoyni commented on Sep 20, 2026
+dvoyni
+on Sep 20, 2026
+OwnerAuthor
+More actions
+Two bugs found in review, both fixed
+1. The gutter wrapped the axis that does not tile
+A thin dark line appeared inside every button border, one tile short of the real
+edge. At x=900 in the menu capture, row 501 went from (199,191,176) to
+(183,176,162) while row 509 - the genuine edge - was dark in both.
+Cause: decision 1 was implemented with a single fillWrap that wrapped both
+axes. A border side tiles on one axis and ends on the other, so wrapping the
+other laid the far edge's texels along the near edge, and bilinear filtering
+blended them in. The repeat sampler this replaced never did that: tileSampler
+repeated only the tiled axes and clamped the rest.
+Fix: the fill is per axis - fillExtrude, fillWrapX, fillWrapY,
+fillWrapBoth, chosen by spriteFill(tileX, tileY). A path can now hold up to
+four entries and holds only the ones drawn. Two tests cover it and its transpose,
+so neither axis can be wired to the other by accident.
+2. Every tiled sprite in feuds-26 drew as one stretched tile
+The field frame lost its repeat: instead of ~14 ornaments per strip it drew ~3
+stretched ones. 13,145 pixels of the frame band differed from the old render, at
+a maximum channel delta of 114.
+Cause: the documented degradation in decision 7, hitting its first real
+consumer. navigator/fade.go:72 puts a custom sprite material over the
+whole queue, every frame, deliberately - so every sprite in that game runs
+fade-sprite.wgsl, which replaces fs_main and sampled in.uv directly,
+skipping canvasTiledUV. The un-wrapped uv is exactly one tile stretched over
+the quad.
+It hid in the buttons because their side art is a plain horizontal rule: stretch
+a translation-invariant pattern and it looks identical. The frame's ornament is
+not, so it showed there first.
+Fix, in two places. feuds-26/res/shaders/fade-sprite.wgsl samples through
+canvasTiledUV(in); and materials.md's "What a custom sprite material may
+change" now opens with the requirement in a blockquote, because a silent wrong
+picture is the worst failure mode a contract can have and nothing reports it.
+What this changes in the results above
+The earlier "after" comment said the remaining pixel difference was inherent to
+the change - the sub-texel difference between a repeat sampler and a wrap-filled
+gutter. That was wrong: it was bug 1 in its entirety.
+With both fixes, the menu is bit-identical to the pre-change baseline - zero
+differing pixels, delta 0 - while still drawing in 14 draws instead of 56.
+The field frame band is within a delta of 2 on 138 pixels, against a live scene.
+dvoyni commented on Sep 20, 2026
+dvoyni
+on Sep 20, 2026
+OwnerAuthor
+More actions
+Resolved
+cog 2d6b2f7, with the flip case in 79b91db. feuds-26 f6c9b35.
+What now works
+A tiled sprite is an ordinary atlas instance. canvasTiledUV in
+spritebindings.wgsl wraps the uv inside the entry's own sub-rect, recovering
+the quad coordinate from uv and frame - so VertexOut.uv keeps its meaning
+and nothing was added to the inter-stage struct beyond the flat u32 index the
+spec already settled. Repeat counts ride in misc.yz, written at the single site
+every sprite, glyph, icon and fill goes through, so "never zero" holds by
+construction. The gutter is filled per axis and is part of the cache key; routing
+to the standalone path is decided from the header before anything is packed;
+Frame, the flips and a named sprite material all apply to a tiled sprite now.
+Verified
+On a real frame, through gfx_frame and gfx_capture against a running
+feuds-26: the main menu's six tiled-edge borders went from 56 draws to 14
+in the UI pass, with the capture bit-identical to the pre-change baseline -
+zero differing pixels. The field frame keeps its period, within a delta of 2 on
+138 pixels of a live scene.
+go test ./... clean in cog; GOOS=js GOARCH=wasm go build ./... clean. In
+feuds-26 only campaign.TestLargerMapsKeepOptionalLandmarks fails, and it fails
+identically with this change stashed - pre-existing map-generation work, untouched.
+Acceptance
+A tiled and an untiled sprite over the same path merge into 1 draw
+The ui nine-slice-tiled shape records 1 draw
+That shape followed by a text run records 2
+The tiled merge test moved to the atlas batch
+Two tiled sprites differing only in Filter split
+TestATiledAndAPlainTextureSpriteSplit untouched - it tiles a texture handle
+AtlasSize: 32 with a 64x8 image still draws standalone, no error reported
+The record carries the entry's sub-rect with the repeats in misc.yz
+Every other instance writer sets misc.yz to 1 - its own test
+TestSpriteInstanceMatchesTheShaderRecord still passes
+Wrap fill copies the opposite edge; extrude unchanged for non-tiled entries
+Per axis - wrap-x and wrap-y each tested, and their transpose
+One path drawn both ways yields two entries with different uv rects
+UnloadSprite frees every fill the path was packed at
+TestOneMissingPathIsOneReportPerTier still asserts 3
+The frame test replaced by its opposite: a 32x4 quad, eight framed tiles
+FlipX swaps the sub-rect bounds and still wraps, repeat untouched
+A tiled axis with no Size draws nothing; a non-tiled one measures a framed tile
+A Frame that does not fit is reported on a tiled sprite
+A tiled and an untiled sprite naming the same sprite material merge
+halo.wgsl compiles and behaves unchanged
+The six stale doc statements corrected and the four rejected shapes recorded
+Two departures from the criteria as written, both stated above in full: the
+double-draw case opens the file 3 times rather than 2 (the header the route
+is read from, plus one decode per fill), and the instance count did not rise -
+it is 129 before and after, because each tiled quad was already one draw
+contributing one instance.
+Two bugs found in review, both fixed before closing
+The gutter wrapped the axis a strip ends on, putting a thin dark line inside
+every border; and feuds-26's queue-wide sprite material replaces fs_main, so
+it skipped the wrap and drew every tiled sprite as one stretched tile. Detail in
+the comment above. The second is why materials.md now opens "What a custom
+sprite material may change" with the requirement rather than burying it.
+dvoyni
+closed this as completedon Sep 20, 2026
+Sign up for free to join this conversation on GitHub. Already have an account? Sign in to comment
+Metadata
+Metadata
+Assignees
+dvoyni
+Labels
+enhancementNew feature or requestNew feature or requestready-for-agentSelf-contained ticket an agent can pick upSelf-contained ticket an agent can pick upto-do
+Projects
+No projects
+Milestone
+No milestone
+Relationships
+None yet
+Development
+No branches or pull requests
+Issue actions
+Open in GitHub Copilot app
+You can’t perform that action at this time.

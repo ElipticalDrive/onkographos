@@ -1,0 +1,111 @@
+--- v002.md
++++ v003.md
+@@ -4,34 +4,34 @@
+ 
+ ## Overview
+-Run-length and palette-compressed bricks are a hybrid compression technique for voxel data that combines run-length encoding (RLE) with palette-based index compression to reduce memory footprint for material-heavy volumes. It solves the problem of storing redundant material identifiers in large, homogeneous regions by mapping voxel values to a small palette and storing only indices. It sets itself apart from pure RLE methods by supporting arbitrary 3D edits and GPU random access, whereas pure RLE is noted as unsuitable for these access patterns [S1].
++Run-length and palette-compressed bricks compress voxel material data by storing a local palette and bit-packed indices for fixed-size sections [S1]. This reduces memory footprint compared to storing raw material IDs [G]. It sets itself apart from pure RLE methods because pure RLE does not suit GPU random access or arbitrary 3D edits [S1].
+ 
+ ## How it works
+ **Inputs and Outputs:**
+-- Input: A 3D voxel grid where each voxel holds a material ID (typically uint8 or uint16).
+-- Output: A compressed representation consisting of a palette array and a bit-packed index array for each brick/section.
++- Input: A 3D voxel grid where each voxel holds a material ID.
++- Output: A list of compressed bricks, each containing a palette array and a bit-packed index array (or `None` for single-material bricks).
+ 
+ **Data Structures:**
+-1.  **Palette:** An array of material definitions. The size is determined by the number of unique materials in the brick.
+-2.  **Index Array:** A bit-packed array storing indices into the palette. The bit-depth per index is determined by the palette size (e.g., $\lceil \log_2(\text{palette\_size}) \rceil$ bits).
++1. **Palette:** An array of unique material IDs present in the brick [S1].
++2. **Index Array:** A bit-packed byte array storing indices into the palette. Each index uses at least 4 bits, up to 12 bits [S1].
+ 
+ **Steps:**
+-1.  **Partitioning:** Divide the voxel volume into fixed-size bricks or sections (e.g., $16 \times 16 \times 16$ as in Minecraft [S1]).
+-2.  **Palette Extraction:** For each brick, identify all unique material IDs present. Construct the palette from these unique IDs.
+-3.  **Index Mapping:** Replace each voxel's material ID with its index in the local palette.
+-4.  **Bit-Packing:** Pack the indices into a contiguous bit stream. If the palette has $N$ entries, use $k = \lceil \log_2 N \rceil$ bits per index.
+-5.  **Optimization:** If a brick contains only one unique material, store no index array and use a single palette entry [S1].
++1. **Partitioning:** Divide the voxel volume into fixed-size cubic bricks (e.g., $16 \times 16 \times 16$) [S1].
++2. **Palette Extraction:** For each brick, collect all voxel material IDs and build a sorted list of unique values [G].
++3. **Index Mapping:** Replace each voxel's material ID with its position in the local palette [G].
++4. **Bit-Packing:** Pack the indices into a contiguous byte stream using the calculated bit-depth per index [G].
++5. **Optimization:** If a brick contains only one unique material, store the palette and set the index array to `None` [S1].
+ 
+ **Formulas:**
+-- Bits per index: $k = \lceil \log_2(\text{num\_unique\_materials}) \rceil$
+-- Total bits for indices: $B = \text{voxel\_count} \times k$
++- Bits per index: $k = \max(4, \lceil \log_2(\text{num\_unique\_materials}) \rceil)$ [S1, G]
++- Total bytes for indices: $B = \lceil (\text{voxel\_count} \times k) / 8 \rceil$ [G]
+ 
+ **Parameters:**
+-- Brick size: $16 \times 16 \times 16$ is a common standard (Minecraft) [S1].
+-- Minimum bits per index: 4 bits (supporting up to 16 materials) [S1].
++- Brick size: $16 \times 16 \times 16$ [S1].
++- Minimum bits per index: 4 bits [S1].
+ 
+ **Edge Cases and Pitfalls:**
+-- **Single Material:** If a brick has only one material type, the index array is omitted entirely to save space [S1].
+-- **GPU Access:** Pure RLE is not suitable for GPU random access or arbitrary 3D edits [S1]. Palette compression mitigates this by allowing direct index lookup, though cache locality depends on index distribution.
+-- **Precision:** Ensure bit-packing handles non-byte-aligned boundaries correctly.
++- **Single Material:** Omit the index array entirely to save space [S1].
++- **GPU Access:** RLE components do not suit GPU random access or arbitrary 3D edits [S1]. Palette compression mitigates this by allowing direct index lookup, though cache locality depends on index distribution [G].
++- **Precision:** Bit-packing must handle non-byte-aligned boundaries correctly by shifting and masking [G].
+ 
+ **Pseudocode:**
+@@ -71,17 +71,23 @@
+                 indices = [material_to_index[m] for m in brick_materials]
+                 
+-                # Determine bit depth
++                # Determine bit depth (at least 4 bits per [S1])
+                 num_unique = len(palette)
+-                if num_unique <= 1:
+-                    bits_per_index = 0
+-                else:
+-                    bits_per_index = (num_unique - 1).bit_length()
++                bits_per_index = max(4, (num_unique - 1).bit_length())
+                 
+-                # Pack indices into bits
+-                packed_bits = 0
++                # Pack indices into bytes
++                packed = bytearray()
++                current_byte = 0
++                current_bit = 0
+                 for idx in indices:
+-                    packed_bits = (packed_bits << bits_per_index) | idx
++                    current_byte |= (idx << current_bit)
++                    current_bit += bits_per_index
++                    if current_bit >= 8:
++                        packed.append(current_byte & 0xFF)
++                        current_byte = 0
++                        current_bit = 0
++                if current_bit > 0:
++                    packed.append(current_byte & 0xFF)
+                 
+-                compressed_bricks.append((palette, (packed_bits, bits_per_index)))
++                compressed_bricks.append((palette, packed))
+     
+     return compressed_bricks
+@@ -91,14 +97,15 @@
+ 
+ ### [Palette Encoding](13874-palette-encoding.md)
+-A sub-method for decoding texel values within a compressed block using a deterministic pattern lookup to select between two encoded values. Choose this when memory bandwidth is critical and the palette size is very small (e.g., 2 colors).
++A sub-method for decoding texel values within a compressed block using a deterministic pattern lookup to select between two encoded values. Choose this when memory bandwidth is critical and the palette size is very small (e.g., 2 colors) [G].
+ 
+ ## Operating characteristics
+-- **Time Complexity:** Compression is $O(N)$ where $N$ is the number of voxels, dominated by palette extraction and bit-packing. Decompression is $O(N)$ for bit-unpacking.
+-- **Memory Complexity:** Storage is proportional to $N \times \lceil \log_2(\text{unique\_materials}) \rceil$ bits plus palette overhead. Significantly better than raw storage when material diversity is low.
+-- **Performance:** Standard and easy to implement for material compression [S1].
+-- **Strengths:** High compression ratios for homogeneous regions; supports arbitrary edits better than pure RLE.
+-- **Limitations:** Not suitable for GPU random access if the index array is not structured for cache coherence; RLE components (if used for spatial runs) do not suit GPU random access [S1].
+-- **When to use:** Terrain, building blocks, and volumes with discrete, repeating materials.
+-- **When not to use:** Volumes with high material entropy or requiring fine-grained per-voxel color variation without palette limits.
++- **Time Complexity:** Compression is $O(N)$ where $N$ is the number of voxels, dominated by palette extraction and bit-packing [G]. Decompression is $O(N)$ for bit-unpacking [G].
++- **Memory Complexity:** Storage is proportional to $N \times k$ bits plus palette overhead [G].
++- **Measured Performance:** Not given in the sources.
++- **Scaling:** Not given in the sources.
++- **Strengths:** High compression ratios for homogeneous regions; supports arbitrary edits better than pure RLE [G].
++- **Limitations:** Not suitable for GPU random access if the index array is not structured for cache coherence; RLE components do not suit GPU random access [S1].
++- **When to use:** Terrain, building blocks, and volumes with discrete, repeating materials [G].
++- **When not to use:** Volumes with high material entropy or requiring fine-grained per-voxel color variation without palette limits [G].
+ 
+ ## Background

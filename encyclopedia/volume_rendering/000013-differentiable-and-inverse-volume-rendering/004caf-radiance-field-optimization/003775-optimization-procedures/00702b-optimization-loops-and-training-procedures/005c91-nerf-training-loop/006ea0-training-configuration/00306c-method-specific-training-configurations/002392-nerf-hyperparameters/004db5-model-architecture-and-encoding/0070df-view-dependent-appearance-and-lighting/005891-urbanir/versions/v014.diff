@@ -1,0 +1,148 @@
+--- v013.md
++++ v014.md
+@@ -13,6 +13,6 @@
+ **Data Structures:**
+ The scene representation is built on Instant-NGP, a spatial hash-based voxel NeRF representation [S1].
+-*   **Dense Feature Hash Table:** Represents the scene geometry and attributes. It maps 3D coordinates to dense feature vectors [S1].
+-*   **MLP Headers:** Individual Multi-Layer Perceptrons are used to decode each attribute (albedo $\mathbf{a}$, normal $\mathbf{n}$, semantics $\mathbf{s}$, density $\sigma$) given a queried feature at point $\mathbf{x}$ [S1].
++*   **Dense Feature Hash Table:** Maps 3D coordinates to dense feature vectors representing the scene [S1].
++*   **MLP Headers:** Individual Multi-Layer Perceptrons decode each attribute (albedo $\mathbf{a}$, normal $\mathbf{n}$, semantics $\mathbf{s}$, density $\sigma$) given a queried feature at point $\mathbf{x}$ [S1].
+ *   **Lighting Model $\mathcal{L}$:** Encodes outdoor illumination as $\mathcal{L} = \{ (\mathbf{L}_{\text{sun}}, \psi_{\text{sun}}, \phi_{\text{sun}}), \mathbf{L}_{\text{amb}}, \mathbf{L}_{\text{sky}} \}$ [S1].
+     *   Sun: 5-DoF representation encoding sun color $\mathbf{L}_{\text{sun}}$ and azimuth/zenith angles $\psi_{\text{sun}}, \phi_{\text{sun}}$ [S1].
+@@ -30,5 +30,5 @@
+     [S1]
+ 3.  **Visibility Estimation:** To model shadows without per-scene optimized MLP heads (which are impractical for changing sun positions), compute an estimate $\hat{\mathbf{x}}(\mathbf{r})$ of the 3D point being shaded by volume rendering depth (substituting $\hat{t} = \sum w_i t_i$) [S1]. Compute visibility $V(\hat{\mathbf{x}}, \text{sun})$ by calculating the transmittance along the ray segment between $\hat{\mathbf{x}}$ and the light source using volume rendering [S1].
+-4.  **Final Color Computation:** Combine rendered intrinsics with the lighting model $\mathcal{L}$ and shadow visibility $V$ using a shading function $\texttt{Shade}$ [S1]:
++4.  **Final Color Computation:** Combine rendered intrinsics with the lighting model $\mathcal{L}$ and shadow visibility $V$ using a shading function [S1]:
+     $$ \mathbf{C} = \texttt{Shade}(\texttt{Intrinsic}(\mathbf{F}_\theta, \mathbf{r}), \texttt{Shadow}(\mathbf{F}_\theta, \mathbf{r}, \mathcal{L}), \mathcal{L}) $$
+     [S1]
+@@ -38,70 +38,63 @@
+ 
+ ```python
+-def urbanir_render(ray_origin, ray_direction, scene_hash_table, lighting_params, num_samples):
+-    """
+-    Renders a single ray using UrbanIR's inverse rendering pipeline.
+-    
+-    Args:
+-        ray_origin: 3D vector, origin of the camera ray.
+-        ray_direction: 3D vector, direction of the camera ray.
+-        scene_hash_table: Data structure mapping 3D coords to feature vectors.
+-        lighting_params: Dict containing sun_color, sun_angles, ambient_color, sky_model.
+-        num_samples: Integer, number of points to sample along the ray.
+-        
+-    Returns:
+-        final_color: 3D vector, RGB color.
+-        albedo_map: 3D vector, rendered albedo.
+-        normal_map: 3D vector, rendered normal.
+-        depth: Float, rendered depth.
+-    """
+-    
++import math
++
++def urbanir_render(ray_origin, ray_direction, scene_hash_table, lighting_params, num_samples, t_near, t_far):
+     # 1. Sample points along the ray
+-    t_min, t_max = get_ray_bounds(ray_origin, ray_direction)
+-    t_vals = linspace(t_min, t_max, num_samples)
+-    points = ray_origin + outer_product(t_vals, ray_direction)
+-    
+-    # 2. Query scene attributes for each point
+-    # Retrieve features from hash table and decode via MLP headers
+-    # Returns: albedos (N,3), normals (N,3), semantics (N,C), densities (N,1)
+-    features = query_hash_table(scene_hash_table, points)
+-    albedos, normals, semantics, densities = decode_attributes(features)
+-    
++    t_vals = [t_near + i * (t_far - t_near) / (num_samples - 1) for i in range(num_samples)]
++    points = [(ray_origin[0] + ray_direction[0] * t, ray_origin[1] + ray_direction[1] * t, ray_origin[2] + ray_direction[2] * t) for t in t_vals]
++
++    # 2. Query scene attributes
++    features = [scene_hash_table.get(tuple(round(p[0], 3), round(p[1], 3), round(p[2], 3)), [0.0]*256) for p in points]
++    albedos = [f[:3] for f in features]
++    normals = [f[3:6] for f in features]
++    semantics = [f[6:10] for f in features]
++    densities = [f[10:11][0] for f in features]
++
+     # 3. Compute alpha-composition weights
+-    # delta_i = t_i - t_{i-1}
+-    deltas = diff(t_vals)
+-    # Transmittance T_i = exp(-sum_{j=1}^{i-1} sigma_j * delta_j)
+-    # Weights w_i = T_i * (1 - exp(-sigma_i * delta_i))
+-    # Note: Standard NeRF alpha composition assumes sigma is density.
+-    # UrbanIR uses Instant-NGP density.
++    deltas = [t_vals[i] - t_vals[i-1] for i in range(1, num_samples)]
++    deltas.append(0.0) # Pad to match num_samples
+     sigma = densities
+-    transmittance = exp(-cumsum(sigma * deltas[:-1]))
+-    weights = transmittance * (1 - exp(-sigma * deltas))
+-    
++    # T_i = exp(-sum_{j=1}^{i-1} sigma_j * delta_j)
++    transmittance = []
++    acc = 0.0
++    for s, d in zip(sigma, deltas):
++        transmittance.append(math.exp(-acc))
++        acc += s * d
++    weights = [t * (1.0 - math.exp(-s * d)) for t, s, d in zip(transmittance, sigma, deltas)]
++
+     # 4. Volume render intrinsics
+-    albedo_map = sum(weights * albedos, axis=0)
+-    normal_map = sum(weights * normals, axis=0)
+-    semantic_map = sum(weights * semantics, axis=0)
+-    
++    albedo_map = [sum(w * a for w, a in zip(weights, albedos[i])) for i in range(3)]
++    normal_map = [sum(w * n for w, n in zip(weights, normals[i])) for i in range(3)]
++    semantic_map = [sum(w * s for w, s in zip(weights, semantics[i])) for i in range(4)]
++
+     # 5. Estimate depth for shadow visibility
+-    # t_hat = sum(w_i * t_i)
+-    depth = sum(weights * t_vals)
+-    shaded_point = ray_origin + ray_direction * depth
+-    
++    depth = sum(w * t for w, t in zip(weights, t_vals))
++    shaded_point = (ray_origin[0] + ray_direction[0] * depth, ray_origin[1] + ray_direction[1] * depth, ray_origin[2] + ray_direction[2] * depth)
++
+     # 6. Compute shadow visibility
+-    # Trace ray from shaded_point to sun
+-    sun_direction = get_sun_direction(lighting_params)
+-    # Compute transmittance along shadow ray
+-    # This approximates visibility V(shaded_point, sun)
+-    shadow_ray_points = sample_shadow_ray(shaded_point, sun_direction)
+-    shadow_features = query_hash_table(scene_hash_table, shadow_ray_points)
+-    shadow_sigma = decode_density(shadow_features)
+-    shadow_transmittance = compute_transmittance(shadow_sigma)
+-    visibility = shadow_transmittance
+-    
++    sun_direction = lighting_params['sun_direction']
++    shadow_samples = 32
++    shadow_t_vals = [i * (100.0 / (shadow_samples - 1)) for i in range(shadow_samples)]
++    shadow_points = [(shaded_point[0] + sun_direction[0] * t, shaded_point[1] + sun_direction[1] * t, shaded_point[2] + sun_direction[2] * t) for t in shadow_t_vals]
++    shadow_features = [scene_hash_table.get(tuple(round(p[0], 3), round(p[1], 3), round(p[2], 3)), [0.0]*256) for p in shadow_points]
++    shadow_sigma = [f[10:11][0] for f in shadow_features]
++    shadow_deltas = [shadow_t_vals[i] - shadow_t_vals[i-1] for i in range(1, shadow_samples)]
++    shadow_deltas.append(0.0)
++    shadow_transmittance = []
++    acc = 0.0
++    for s, d in zip(shadow_sigma, shadow_deltas):
++        shadow_transmittance.append(math.exp(-acc))
++        acc += s * d
++    visibility = shadow_transmittance[-1]
++
+     # 7. Compute final color using shading model
+-    # C = Shade(Intrinsic, Shadow, Lighting)
+-    final_color = shade_model(albedo_map, normal_map, visibility, lighting_params)
+-    
+-    return final_color, albedo_map, normal_map, depth
++    sun_color = lighting_params['sun_color']
++    ambient_color = lighting_params['ambient_color']
++    sky_color = lighting_params['sky_color']
++    diffuse = max(0.0, sum(n * s for n, s in zip(normal_map, sun_direction)))
++    final_color = [(albedo_map[i] * (sun_color[i] * diffuse + ambient_color[i]) + sky_color[i]) * visibility for i in range(3)]
++
++    return final_color, albedo_map, normal_map, semantic_map, depth
+ ```
+ 
+@@ -113,5 +106,5 @@
+ **Edge Cases and Pitfalls:**
+ *   **Visibility Estimation:** Modeling visibility with a per-scene optimized MLP head is impractical because the sun position changes during relighting, but training data only has one sun position [S1]. UrbanIR avoids this by estimating visibility via transmittance from the shaded point to the light source [S1].
+-*   **Large-Scale Scenes:** Standard NeRFs are not suitable for large-scale urban scenes due to memory and consistency issues. Instant-NGP is used to provide compactness and consistency [S1].
++*   **Large-Scale Scenes:** Standard NeRFs are not suitable for large-scale urban scenes due to memory constraints. Instant-NGP is used to provide compactness and high efficiency [S1].
+ 
+ ## Operating characteristics

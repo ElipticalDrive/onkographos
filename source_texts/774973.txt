@@ -1,0 +1,326 @@
+Turn a folder of RAW photos into consistently graded exports — decode, normalise, grade, export. CPU-light, YAML-driven, agent-friendly. - feat(grade): lut operation (.cube reader, tetrahedral interpolation) by eddiemg10 · Pull Request #134 · eddiemg10/picturesq
+
+feat(grade): lut operation (.cube reader, tetrahedral interpolation) by eddiemg10 · Pull Request #134 · eddiemg10/picturesq · GitHub
+Skip to content
+You signed in with another tab or window. Reload to refresh your session.
+You signed out in another tab or window. Reload to refresh your session.
+You switched accounts on another tab or window. Reload to refresh your session.
+Dismiss alert
+Conversation
+eddiemg10
+commented
+Oct 18, 2026
+•
+edited
+Loading
+Uh oh!
+There was an error while loading. Please reload this page.
+Copy link
+Copy Markdown
+Owner
+Why this exists (plain version)
+A .cube LUT is a 3D colour lookup table: for a grid of input colours it stores what each should become, and colours in between are interpolated. It's how film emulations and colourists' grades are shared, so it gives looks a breadth that hand-written operations can't. Two things matter:
+The colour space. A LUT built for sRGB values gives nonsense on anything else, so every lut operation says what it expects.
+How in-between colours are blended. We use tetrahedral interpolation, which keeps greys grey (see the learning note).
+Per plan D8 it's our own numpy code. colour-science is only the test oracle.
+Stacked on #133. Nothing renders differently: no built-in look uses a LUT yet.
+Closes #119.
+Summary
+picturesq.colour.lut (pure):
+parse_cube reads TITLE, LUT_1D_SIZE / LUT_3D_SIZE (3D at most 65), DOMAIN_MIN / MAX, LUT_*_INPUT_RANGE, comments and entries with red changing fastest. Errors name the line.
+apply_lut_3d: tetrahedral interpolation. Sorting the fractions in each grid cell picks the tetrahedron, so all six cases are one formula. Inputs outside the domain are clamped.
+apply_lut_1d: per-channel linear interpolation.
+lut operation (display-referred):
+file is relative to the look file, with no . / .. parts, and must end in .cube.
+input_space is srgb (default) or rec709 (BT.1886 gamma 2.4, new bt1886_encode / decode).
+amount (default 1) blends the result with the input, and intensity scales it. The result is clipped to 0–1.
+Loading: load_look_file reads and parses each LUT a look uses, so a missing or broken file fails when the look loads. The look's sha256 now covers the look file and its LUT bytes, so the sidecar detects a changed LUT. Look.resolve attaches the tables; an operation applied without its table raises LutNotLoadedError.
+Docs: #### lut (display) reference; regenerated look schema; learning-log entry on 3D LUTs and tetrahedral interpolation.
+Test plan
+ruff, pyright: clean. uv run pytest: 858 passed.
+New tests/unit/test_lut.py (29 tests):
+Parsing 3D, and 1D with a domain; eight malformed files, each with its message.
+The identity LUT is the identity at sizes 2, 17 and 33.
+colour-science oracle (LUT3D.apply, table_interpolation_tetrahedral) at sizes 2, 9 and 17, and with a non-unit domain: within 1e-5 (measured 9e-8). Clamping outside the domain.
+With a neutral grey diagonal, random greys stay grey (spread < 1e-6).
+The operation: identity in both spaces; a LUT that halves sRGB values halves the encoded value; amount and intensity blends (0.5 × amount, 0.5 × intensity, 150 %); unloaded tables; paths outside the folder rejected.
+Look files: the LUT loads and is part of the hash; missing and invalid LUT errors.
+Learning note
+What a 3D LUT is, and why tetrahedral interpolation. A demo cell: mid grey through trilinear comes out (0.5, 0.5, 0.54), through tetrahedral exactly (0.5, 0.5, 0.5).
+Preview
+dji-fc4382.dng (CC0) · 7f06bba · panels: camera JPEG, decode (via display transform), normalise (via display transform), grade (via display transform), export (web), export, exposure-matched (+0.19 EV), clipping (magenta); scene-linear stages are viewed through the current display transform; magenta = clipped
+Panel
+Median luminance
+Clipped
+Size
+camera JPEG
+0.054
+0.16 %
+960x720
+decode (via display transform)
+0.007
+0.00 %
+500x375
+normalise (via display transform)
+0.043
+0.00 %
+500x375
+grade (via display transform)
+0.044
+0.00 %
+500x375
+export (web)
+0.042
+0.00 %
+2048x1535
+export, exposure-matched (+0.19 EV)
+0.054
+0.00 %
+500x375
+clipping (magenta)
+0.042
+0.00 %
+2048x1535
+BaselineExposure: +1.32 EV · decode: 1.7 s · luminance is Rec.709 Y of the display-linear values (0 to 1)
+Exposure offset to match camera JPEG: +0.19 EV
+eddiemg10
+added 8 commits
+October 18, 2026 22:00
+feat(grade): operation framework, intensity and the first operations
+…
+d55e16d
+```
+Operations are pydantic models whose strength values declare a neutral
+value; intensity scales them toward it, and an operation left neutral is
+skipped, so intensity 0 is bit-identical. First operations: exposure,
+white_balance (mired warmth, tint), contrast (log space, luminance) and
+saturation (Oklab chroma). ADR-0019 records the intensity rule and the
+grade order.
+
+Closes #113
+```
+feat(grade): tone_curve and fade operations
+…
+125e134
+```
+tone_curve: monotone cubic (PCHIP) through [input, output] EV points on
+luminance, slope 1 beyond the points, colour ratios kept; intensity moves
+each output toward its input. fade: a display-referred lift on sRGB
+values.
+
+Closes #114
+```
+feat(grade): vibrance, hsl and split_tone operations
+…
+c0ba401
+```
+All in Oklab, lightness kept: vibrance scales muted colours' chroma more;
+hsl changes hue, chroma and brightness (EV) per hue band, blended
+seamlessly and faded in from grey; split_tone tints shadows and
+highlights by tone, in proportion to lightness.
+
+Closes #115
+```
+docs: fix the HSL desaturation example's baseline
+80d7495
+feat(grade): channel_mixer, vignette and grain operations
+…
+e1f2477
+```
+channel_mixer blends toward a normalised mix of R, G and B (black and
+white, grey kept). vignette eases to amount EV at the corners, the same
+at any resolution. grain is display-referred, seeded per photo, sampled
+from one field per aspect ratio so every size shows the same pattern, and
+normalised so its strength doesn't depend on the output size.
+
+Closes #116
+```
+feat(config): look files, parameter references and the look library
+…
+8b578e9
+```
+LookFile model: metadata, parameters (sliders) and operations whose
+numbers may be $parameter references; validated with every parameter at
+its default, min and max, and again on resolve. load_look_file /
+load_looks / look_library / find_look; built-in looks are package data in
+grade/looks/<category>/. picturesq schema look and the committed
+docs/schema/look.schema.json; the look file reference in
+docs/configuration.md.
+
+Closes #117
+```
+feat(grade): project look, intensity, adjustments and per-photo overr…
+…
+66963f4
+```
+…ides
+
+grade.look picks a look at an intensity with parameter values;
+grade.adjustments sit on top of every look; photos.<name>.grade
+overrides both. The pipeline resolves each photo's look into its
+context (grade stays pure); display operations run per output after
+the display transform. Unknown looks fail at config load (exit 2);
+sidecar v3 records the resolved look and its file hash. No look and
+intensity 0 export byte-identical JPEGs.
+
+Closes #118
+```
+feat(grade): lut operation (.cube reader, tetrahedral interpolation)
+…
+7f06bba
+```
+colour/lut.py parses .cube (1D and 3D, domains, errors with line numbers)
+and applies 3D LUTs by tetrahedral interpolation in numpy, checked against
+colour-science. The lut operation is display-referred, encodes into its
+input space (srgb or rec709 gamma 2.4) and back, and blends by amount.
+LUT files load with their look file and are part of its hash.
+
+Closes #119
+```
+eddiemg10
+added a commit
+that referenced
+this pull request
+Oct 18, 2026
+chore(previews): stage sheet for #134 at 7f06bba
+87df230
+eddiemg10
+mentioned this pull request
+Oct 18, 2026
+feat(cli): picturesq looks
+#135
+Merged
+eddiemg10
+added 2 commits
+October 18, 2026 22:56
+fix(preview): the normalise sheet stays the neutral render with a pro…
+…
+42f0ee4
+```
+…ject look
+
+render_panel_pixels runs local contrast only: a project look or
+adjustments neither change the sheet nor need a resolved look (grade()
+raised LookNotResolvedError for them).
+```
+Merge branch 'feat/look-wiring' into feat/lut-operation
+fb77de4
+eddiemg10
+mentioned this pull request
+Oct 18, 2026
+feat(grade): project look, intensity, adjustments and per-photo overrides
+#133
+Merged
+eddiemg10
+added 17 commits
+October 18, 2026 23:03
+fix(grade): grain averages out on images smaller than its field
+…
+0f6b8df
+```
+A render with fewer pixels than grain cells (a preview, a small output)
+box-averages the field to its size, so it shows the grain a shrunk
+full-size export would, not full-strength noise in every pixel.
+```
+Merge branch 'feat/mixer-vignette-grain' into feat/look-files
+84cb98c
+Merge branch 'feat/look-files' into feat/look-wiring
+c8dab47
+Merge branch 'feat/look-wiring' into feat/lut-operation
+883e63f
+fix(grade): tone curves continue straight at their end slopes
+…
+d8c5fc8
+```
+A curve that softens highlights kept steepening back to slope 1 past its
+last point (visible in the M3 primer's figure). The tails now continue
+at the end secants: monotone, no kink, and softened highlights stay
+soft.
+```
+Merge branch 'feat/tone-operations' into feat/colour-operations
+55ad362
+Merge branch 'feat/colour-operations' into feat/mixer-vignette-grain
+dd3c14d
+Merge branch 'feat/mixer-vignette-grain' into feat/look-files
+b208046
+Merge branch 'feat/look-files' into feat/look-wiring
+bd1a6cf
+Merge branch 'feat/look-wiring' into feat/lut-operation
+e23ad88
+docs: tone_curve tails continue at the end slope
+6b427c4
+Merge branch 'feat/look-files' into feat/look-wiring
+648356d
+Merge branch 'feat/look-wiring' into feat/lut-operation
+576ec89
+fix(config): regenerate the look schema after the tone_curve docstrin…
+…
+92cb24b
+```
+…g change
+```
+Merge branch 'feat/look-files' into feat/look-wiring
+aa9d811
+Merge branch 'feat/look-wiring' into feat/lut-operation
+da9ee2a
+test(lut): hash the LUT file's bytes, not the string written (CRLF on…
+…
+54f483a
+```
+… Windows)
+```
+Base automatically changed from
+feat/look-wiring
+to
+main
+October 27, 2026 19:57
+Merge main (already contained: feat(grade): project look, intensity, …
+…
+354ffc7
+```
+…adjustments and per-photo overrides (#133))
+```
+Hide details
+View details
+eddiemg10
+merged commit e5df7c9
+into
+main
+Oct 27, 2026
+6 checks passed
+Uh oh!
+There was an error while loading. Please reload this page.
+eddiemg10
+deleted the
+feat/lut-operation
+branch
+October 27, 2026 19:59
+eddiemg10
+added a commit
+that referenced
+this pull request
+Oct 27, 2026
+Merge main (already contained: feat(grade): lut operation (.cube read…
+…
+89f2692
+```
+…er, tetrahedral interpolation) (#134))
+```
+eddiemg10
+mentioned this pull request
+Oct 27, 2026
+Infra: keep look and LUT bytes identical on Windows checkouts (.gitattributes)
+#156
+Open
+2 tasks
+Sign up for free
+to join this conversation on GitHub.
+Already have an account?
+Sign in to comment
+Uh oh!
+There was an error while loading. Please reload this page.
+Labels
+None yet
+1 participant
+Add this suggestion to a batch that can be applied as a single commit.This suggestion is invalid because no changes were made to the code.Suggestions cannot be applied while the pull request is closed.Suggestions cannot be applied while viewing a subset of changes.Only one suggestion per line can be applied in a batch.Add this suggestion to a batch that can be applied as a single commit.Applying suggestions on deleted lines is not supported.You must change the existing code in this line in order to create a valid suggestion.Outdated suggestions cannot be applied.This suggestion has been applied or marked resolved.Suggestions cannot be applied from pending reviews.Suggestions cannot be applied on multi-line comments.Suggestions cannot be applied while the pull request is queued to merge.Suggestion cannot be applied right now. Please check back later.
+You can’t perform that action at this time.

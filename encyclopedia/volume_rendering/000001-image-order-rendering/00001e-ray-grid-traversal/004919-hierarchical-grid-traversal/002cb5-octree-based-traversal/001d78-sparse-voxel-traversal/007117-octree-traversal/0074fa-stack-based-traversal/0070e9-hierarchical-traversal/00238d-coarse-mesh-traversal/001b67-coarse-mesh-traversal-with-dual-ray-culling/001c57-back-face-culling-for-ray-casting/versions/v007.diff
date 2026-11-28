@@ -1,0 +1,103 @@
+--- v006.md
++++ v007.md
+@@ -4,22 +4,22 @@
+ 
+ ## Overview
+-Back-face culling for ray casting is an optimization technique that determines the entry and exit points of rays into a volume by rendering the back faces of the volume's bounding box to a texture, thereby avoiding the need to compute ray-cube intersections analytically in the raycasting shader [S1, unofficial][S2, unofficial][S3, unofficial][S4, unofficial]. It builds on [Coarse Mesh Traversal with Dual-Ray Culling](987-coarse-mesh-traversal-with-dual-ray-culling.md) by applying the principle of using front/back face distinction to a simple bounding box primitive, offloading geometry processing to the GPU rasterizer [S1, unofficial][S2, unofficial]. Unlike single-pass methods that compute intersections in the fragment shader, this approach uses a two-pass rendering pipeline: the first pass captures the back-face depth/position, and the second pass uses this data to initialize the ray march, skipping empty space outside the volume [S2, unofficial][S4, unofficial].
++Back-face culling for ray casting is an optimization technique that determines the entry and exit points of rays into a volume by rendering the back faces of the volume's bounding box to a texture, thereby avoiding the need to compute ray-cube intersections analytically in the raycasting shader [S1, unofficial][S2, unofficial][S3, unofficial][S4, unofficial]. It builds on [Coarse Mesh Traversal with Dual-Ray Culling](987-coarse-mesh-traversal-with-dual-ray-culling.md) by applying the principle of using front/back face distinction to a simple bounding box primitive, offloading geometry processing to the GPU rasterizer [S1, unofficial][S2, unofficial]. Unlike single-pass methods that compute intersections in the fragment shader, this approach uses a two-pass rendering pipeline: the first pass captures the back-face depth and position, and the second pass uses this data to initialize the ray march, skipping empty space outside the volume [S2, unofficial][S4, unofficial].
+ 
+ ## How it works
+ **Inputs and Outputs:**
+-*   **Inputs:** Volume density data (3D texture) [S3, unofficial], transfer function (2D texture) [S3, unofficial], camera view and projection matrices [S4, unofficial], and bounding box geometry (cube) [S1, unofficial].
+-*   **Outputs:** Final composited image (color buffer) [S3, unofficial].
++*   **Inputs:** Volume density data stored in a 3D texture [S3, unofficial], a transfer function stored in a 2D texture [S3, unofficial], camera view and projection matrices [S4, unofficial], and bounding box geometry [S1, unofficial].
++*   **Outputs:** Final composited image in the default color buffer [S3, unofficial].
+ 
+ **Data Structures:**
+-1.  **Bounding Box Geometry:** A cube defined by 8 vertices and 12 triangles [S1, unofficial]. Each vertex contains:
++1.  **Bounding Box Geometry:** A cube defined by 8 vertices and an indices array defining 12 triangles (two per face) [S1, unofficial]. Each vertex contains:
+     *   `VerPos` (vec3): Position in object space.
+     *   `VerClr` (vec3): Color, used to pass the 3D position of the vertex to the fragment shader [S2, unofficial].
+-2.  **Back-Face Texture (`g_bfTexObj` / `texBackFaces`):** A 2D texture (RGBA) storing the 3D entry point coordinates for each pixel [S2, unofficial][S4, unofficial].
+-    *   Dimensions: Width × Height (screen resolution) [S4, unofficial].
++2.  **Back-Face Texture (`g_bfTexObj` / `texBackFaces`):** A 2D RGBA color texture storing the 3D entry point coordinates for each pixel [S2, unofficial].
++    *   Dimensions: Width × Height (screen resolution) [S2, unofficial].
+     *   Initialization: Zeros [S4, unofficial].
+     *   Filters: `LINEAR` for MIN/MAG, `CLAMP_TO_EDGE` for S/T [S4, unofficial].
+-3.  **Volume Texture (`g_volTexObj` / `uVolData`):** A 3D texture (`sampler3D`) storing density values [S2, unofficial][S3, unofficial][S4, unofficial]. Requires the `OES_texture_float` extension in WebGL for floating-point data [S4, unofficial].
++3.  **Volume Texture (`g_volTexObj` / `uVolData`):** A 3D texture (`sampler3D`) storing density values [S2, unofficial][S3, unofficial]. Requires the `OES_texture_float` extension in WebGL for floating-point data [S4, unofficial].
+ 4.  **Transfer Function Texture (`trfunc_texture`):** A 2D texture (`sampler2D`) mapping density to color [S3, unofficial].
+-5.  **Frame Buffer:** A framebuffer object containing a `DEPTH_COMPONENT16` renderbuffer [S4, unofficial] and a 2D color texture attachment [S4, unofficial].
++5.  **Frame Buffer:** A framebuffer object containing a `DEPTH_COMPONENT16` renderbuffer [S4, unofficial] and a 2D RGBA color texture attachment [S4, unofficial].
+ 
+ **Numbered Steps:**
+@@ -54,12 +54,13 @@
+             6.  Initialize accumulators: `col_acc = vec4(0,0,0,0)`, `alpha_acc = 0.0`, `length_acc = 0.0`, `ray_pos = EntryPoint` [S3, unofficial].
+             7.  Loop for `NUM_RAY_STEPS` iterations:
+-                1.  Sample density: `density = texture(uVolData, ray_pos).x` [S3, unofficial].
++                1.  Sample density: `density = texture(uVolData, ray_pos).x` [S2, unofficial].
+                 2.  Map to color: `color_sample = texture(trfunc_texture, vec2(density, 0.5))` [S3, unofficial].
+                 3.  Calculate sample alpha: `alpha_sample = density * StepSize` [S3, unofficial].
+                 4.  Front-to-back blending: `col_acc += (1.0 - alpha_acc) * color_sample * alpha_sample * 40.0` [S3, unofficial].
+                 5.  Update alpha: `alpha_acc += alpha_sample` [S3, unofficial].
+-                6.  Update length: `length_acc += length(deltaDir)` [S3, unofficial].
+-                7.  Advance ray: `ray_pos += deltaDir` [S3, unofficial].
+-                8.  Termination Conditions:
++                6.  Calculate step length: `delta_dir_len = length(deltaDir)` [S3, unofficial].
++                7.  Update length: `length_acc += delta_dir_len` [S3, unofficial].
++                8.  Advance ray: `ray_pos += deltaDir` [S3, unofficial].
++                9.  Termination Conditions:
+                     *   If `length_acc >= len`, composite background (white, alpha 0) and break [S2, unofficial].
+                     *   If `alpha_acc > 1.0`, clamp to 1.0 and break [S2, unofficial].
+@@ -91,5 +92,6 @@
+     #       uv = gl_FragCoord.xy / vec2(screen_width, screen_height)
+     #       exit_point = texture(back_face_texture, uv).xyz
+-    #       if EntryPoint == exit_point: discard
++    #       if EntryPoint == exit_point:
++    #           return  # discard fragment
+     #       dir = exit_point - EntryPoint
+     #       ray_len = length(dir)
+@@ -107,5 +109,6 @@
+     #           length_acc += length(delta_dir)
+     #           ray_pos += delta_dir
+-    #           if length_acc >= ray_len or alpha_acc > 1.0: break
++    #           if length_acc >= ray_len or alpha_acc > 1.0:
++    #               break
+     #       FragColor = col_acc
+ ```
+@@ -115,9 +118,9 @@
+ *   `NUM_RAY_STEPS`: Maximum iterations per ray. Source [S3, unofficial] uses 512. Source [S2, unofficial] uses 1600.
+ *   `ScreenSize`: Resolution of the screen (width, height) [S2, unofficial].
+-*   `uBackCoord`: Sampler uniform for the back-face texture [S4, unofficial].
++*   `uBackCoord`: Sampler uniform for the back-face depth/position texture [S4, unofficial].
+ *   `uVolData`: Sampler uniform for the volume data texture [S4, unofficial].
+ 
+ **Edge Cases and Pitfalls:**
+-*   **Coordinate System Mismatch:** `ExitPointCoord` in the vertex shader is in clip-space [S2, unofficial]. Sampling the texture using `gl_FragCoord` (window coordinates) works because the rasterizer maps clip-space to window-space, and the texture was written during rasterization [S2, unofficial].
++*   **Coordinate System Mismatch:** `ExitPointCoord` in the vertex shader is in clip-space, not normalized device coordinates (NDC) [S2, unofficial]. Sampling the texture using `gl_FragCoord` (window coordinates) works because the rasterizer maps clip-space to window-space, and the texture was written during rasterization [S2, unofficial].
+ *   **AMD Debugging Issue:** The `VerClr` input variable must be used in the shader; otherwise, debugging may fail on AMD hardware [S2, unofficial].
+ *   **Floating-Point Textures:** WebGL implementations require the `OES_texture_float` extension to support floating-point textures for volume data [S4, unofficial].
+@@ -129,13 +132,10 @@
+ Volume Raycasting with MRT Endpoints is a two-pass GPU technique that determines ray entry and exit points by rendering the volume's bounding box to multiple render targets (MRT), explicitly separating front-face and back-face coordinates into distinct textures to avoid analytical ray-cube intersection calculations. It builds on [Back-Face Culling for Ray Casting](1236-back-face-culling-for-ray-casting.md) by using MRT to store both entry and exit points simultaneously in the first pass, rather than relying on depth buffering and a single pass for back-faces. Unlike single-pass methods that compute intersections in the fragment shader, this approach offloads geometry processing to the rasterizer, simplifying the raycasting shader at the cost of an additional rendering pass and texture lookups.
+ 
+-### Raycasting Phase
+-In the raycasting phase, the two auxiliary buffers are bound to distinct texture units and a viewport-filling quadrilateral is projected [S5]. For each pixel, the main fragment shader fetches back-facing texture coordinates; if invalid, the fragment is discarded, otherwise front-facing coordinates are retrieved to compute the step vector along the ray according to a predefined step length $d$ and the total number of iterations [S5]. Each slab of thickness $2d$ is defined by three successive samples $(s_f, s_m, s_b)$, with the next slab indexed by $(s_f, s_m, s_b)$ [S5].
+-
+ ## Operating characteristics
+-*   Time and memory complexity: Not given in the sources [G].
+-*   Measured performance: Not given in the sources [G].
+-*   Scaling: Not given in the sources [G].
+-*   Strengths and limitations: Not given in the sources [G].
+-*   When to use and when not: Not given in the sources [G].
++*   Time and memory complexity: Not given in the sources.
++*   Measured performance: Not given in the sources.
++*   Scaling: Not given in the sources.
++*   Strengths and limitations: Not given in the sources.
++*   When to use and when not: Not given in the sources.
+ 
+ ## Background
+@@ -146,4 +146,3 @@
+ [S2] Volume_Rendering_Using_GLSL, https://github.com/toolchainX/Volume_Rendering_Using_GLSL, fetched 2026-10-26 (unofficial)
+ [S3] 1vx-437312114/webgl_volume_renderer, https://github.com/1vx-437312114/webgl_volume_renderer, fetched 2026-10-27 (unofficial)
+-[S4] kapadia/volumetric.js, https://github.com/kapadia/volumetric.js, fetched 2026-10-27 (unofficial)
+-[S5] Second Order Pre-Integrated Volume Rendering, https://people.freedesktop.org/~marcheu/pacificvis08.pdf, fetched 2026-10-29+[S4] kapadia/volumetric.js, https://github.com/kapadia/volumetric.js, fetched 2026-10-27 (unofficial)

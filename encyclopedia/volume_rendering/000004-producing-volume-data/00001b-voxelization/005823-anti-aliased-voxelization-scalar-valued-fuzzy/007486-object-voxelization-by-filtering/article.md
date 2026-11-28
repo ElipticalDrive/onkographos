@@ -1,0 +1,194 @@
+# Object Voxelization by Filtering
+
+Also called: Filter-based voxelization, Volume graphics voxelization
+
+## Overview
+Object Voxelization by Filtering treats 3D scan conversion as a sampling process that applies low-pass filtering to suppress aliasing before discretizing the continuous object signal into a voxel raster [S1]. It differs from binary voxelization by producing scalar-valued, fuzzy voxels that represent spatial occupancy, thereby avoiding the surface normal estimation errors and aliasing artifacts inherent in hard-edged approaches [S1].
+
+## How it works
+**Inputs and Outputs**
+*   **Input:** A continuous object representation $O(\mathbf{p})$ (e.g., a parametric surface or implicit function) and a sampling step $a$ defining the voxel grid resolution.
+*   **Output:** A discrete 3D volume data set where each voxel at integer coordinates $(i, j, k)$ contains a scalar value representing the filtered occupancy.
+
+**Data Structures**
+The output is a 3D array of floating-point values. The spatial layout corresponds to a regular grid with spacing $a$. The value at index $(i, j, k)$ represents the convolution result at position $\mathbf{p}_{ijk} = (ai, aj, ak)$ [S1].
+
+**Method Steps**
+1.  **Filter Design:** Select a blurring filter function $f(\mathbf{p})$. Common choices include the Gaussian filter or the Bartlett (cone-shaped) function [S1].
+2.  **Convolution:** Convolve the continuous object signal $O(\mathbf{p})$ with the filter $f(\mathbf{p})$ to produce the filtered object signal $f(\mathbf{p})$ [S1].
+    $$ f(\mathbf{p}) = f(\mathbf{p}) * O(\mathbf{p}) $$
+3.  **Sampling:** Sample the filtered result at discrete locations $\mathbf{p}_{ijk} = (ai, aj, ak)$, where $a$ is the sampling step and $(i, j, k)$ are integer coordinates [S1].
+
+**Formulas**
+
+*Gaussian Filter*
+The Gaussian filter is defined as [S1]:
+$$ f_G(\mathbf{p}, \mathbf{p}_f) = k_G e^{-\frac{\|\mathbf{p} - \mathbf{p}_f\|^2}{2\sigma^2}} $$
+where:
+*   $\mathbf{p}_f$ is the filter center position.
+*   $\|\mathbf{p} - \mathbf{p}_f\|$ is the Euclidean distance from the arbitrary point $\mathbf{p}$ to the center.
+*   $\sigma$ (or $u$) defines the width of the Gaussian.
+*   $k_G$ is a normalization constant.
+
+*Bartlett (Cone) Filter*
+The Bartlett function is defined as [S1]:
+$$ f_B(\mathbf{p}, \mathbf{p}_f) = k_B \left( 1 - \frac{\|\mathbf{p} - \mathbf{p}_f\|}{r_f} \right) \quad \text{if } \|\mathbf{p} - \mathbf{p}_f\| < r_f, \text{ otherwise } 0 $$
+where:
+*   $\mathbf{p}_f$ is the filter center position.
+*   $r_f$ is the diameter of the spherical support.
+*   $k_B$ is a normalization constant.
+
+*Normal Estimation and Error Analysis*
+To estimate surface normals from the voxel data, central differences are used. Let $h(d)$ be the density profile depending on the distance $d$ from the surface. For a point $V$ with distance $d_v$ from the surface, the distances to neighbors are [S1]:
+$$ d_A = d_v - d_x, \quad d_B = d_v + d_x $$
+$$ d_C = d_v - d_y, \quad d_D = d_v + d_y $$
+The gradient components are estimated as [S1]:
+$$ g_x = \frac{h(d_B) - h(d_A)}{2d_x}, \quad g_y = \frac{h(d_D) - h(d_C)}{2d_y} $$
+Using a Taylor series expansion of $h(d)$ around $d_v$, the estimated normal vector $(g_x, g_y)$ is parallel to the true normal vector $(\cos\theta, \sin\theta)$ if and only if the density profile $h(d)$ is linear with distance $d$ [S1]. This requires the symmetric coefficients $k_i$ (for $i=2,4,\dots$) in the Taylor expansion to be zero [S1].
+
+**Parameters**
+*   **Sampling step $a$:** The distance between discrete sample locations in the voxel grid [S1].
+*   **Sigma ($\sigma$):** Defines the width of the Gaussian filter [S1].
+*   **Transient Region Thickness:** The optimal thickness of the transition region between inside and outside is estimated to be about 3 voxel units to avoid systematic error in normal estimation [S1].
+
+**Pitfalls and Edge Cases**
+*   **Normal Estimation Error:** Using a Gaussian filter introduces an error in normal estimation because the resulting density profile $h(d)$ is not linear. The maximum amplitude of this error is approximately 43 degrees (0.07 radians) [S1]. This exceeds the empirically estimated visually indistinguishable angular difference of 0.01 radians [S1]. While this deviation is nearly invisible in static images due to smooth distribution, it causes disturbing artifacts in animation sequences [S1].
+*   **Computational Complexity:** Numerical evaluation of the convolution has a computational complexity of $O(m^3 n^3)$, where $m$ is the resolution of the voxelized data and $n$ is the resolution of the filter [S1].
+
+**Pseudocode**
+> **Unverified code.** The code below did not pass a test run against a reference implementation, or no test fits it, so it may contain errors.
+
+```python
+def object_voxelization_by_filtering(object_surface, sampling_step, filter_type, sigma, filter_radius):
+    """
+    Voxelizes a continuous object by filtering.
+    
+    Args:
+        object_surface: Function or implicit representation O(p) returning distance or occupancy.
+        sampling_step: Float 'a', distance between voxel centers.
+        filter_type: String, 'gaussian' or 'bartlett'.
+        sigma: Float, width of Gaussian filter (ignored if filter_type is 'bartlett').
+        filter_radius: Float, radius of support for Bartlett filter (ignored if 'gaussian').
+        
+    Returns:
+        volume_data: 3D numpy array of voxel values.
+    """
+    # Determine grid bounds based on object extent and sampling step
+    # [G] Implementation detail: Bounds must be determined from object_surface extent.
+    # Let min_coord, max_coord be the bounding box of the object.
+    # num_voxels = ceil((max_coord - min_coord) / sampling_step)
+    
+    volume_data = empty_3d_array(num_voxels)
+    
+    for i in range(num_voxels[0]):
+        for j in range(num_voxels[1]):
+            for k in range(num_voxels[2]):
+                # Calculate continuous position
+                p = (i * sampling_step, j * sampling_step, k * sampling_step)
+                
+                # Convolve object with filter
+                # [G] The source notes state convolution is O(m^3 n^3). 
+                # A naive implementation iterates over filter support.
+                # For efficiency, lookup tables or hierarchical subdivision are suggested [S1],
+                # but the core definition is the convolution integral.
+                
+                filtered_value = 0.0
+                
+                # Define filter support region
+                if filter_type == 'gaussian':
+                    # Gaussian filter support is theoretically infinite, but truncated in practice.
+                    # [G] Standard practice truncates at 3-4 sigma.
+                    support_radius = 4 * sigma 
+                    filter_resolution = int(2 * support_radius / sampling_step)
+                    
+                    for fi in range(-filter_resolution, filter_resolution + 1):
+                        for fj in range(-filter_resolution, filter_resolution + 1):
+                            for fk in range(-filter_resolution, filter_resolution + 1):
+                                filter_center = (fi * sampling_step, fj * sampling_step, fk * sampling_step)
+                                dist_sq = sum((p_coord - fc_coord)**2 for p_coord, fc_coord in zip(p, filter_center))
+                                
+                                # Gaussian kernel value
+                                # k_G is normalization constant
+                                kernel_val = exp(-dist_sq / (2 * sigma**2))
+                                
+                                # Convolve: sum of O(p - filter_offset) * kernel
+                                # [G] Assuming O(p) is occupancy (1 inside, 0 outside) or signed distance.
+                                # The source implies convolution of O(p) with f(p).
+                                # We approximate the integral by summation over the filter support.
+                                # Note: The source notes simplify this to sampling the result of convolution.
+                                # A precise implementation requires integrating O(p) over the filter kernel support.
+                                # For a binary object, this is the volume of intersection of the kernel and the object.
+                                
+                                # Simplified approximation for pseudocode completeness:
+                                # Evaluate object at filter center relative to p
+                                # [G] This is a simplification. The true convolution is integral.
+                                # However, for fuzzy voxelization, the value is often the integral of the kernel 
+                                # over the object volume.
+                                
+                                # Let's implement the integral approximation:
+                                # Value = Integral( O(q) * f(p-q) dq )
+                                # Discretized: Sum( O(q_sample) * f(p-q_sample) * vol_sample )
+                                
+                                # To keep it self-contained and based on notes:
+                                # The notes describe the result as sampling the convolution.
+                                # We will compute the convolution sum.
+                                
+                                # Offset from p to filter center
+                                offset = (filter_center[0] - p[0], filter_center[1] - p[1], filter_center[2] - p[2])
+                                
+                                # Evaluate object at the point shifted by the filter center? 
+                                # No, convolution is f(p) * O(p).
+                                # f(p) = Integral( f(q) * O(p-q) dq )
+                                # Let q be the filter center. Then we evaluate O at p-q.
+                                
+                                point_to_eval = (p[0] - filter_center[0], p[1] - filter_center[1], p[2] - filter_center[2])
+                                
+                                # [G] Object function call
+                                occupancy = object_surface(point_to_eval)
+                                
+                                filtered_value += occupancy * kernel_val
+                                
+                elif filter_type == 'bartlett':
+                    # Bartlett filter support is spherical with radius r_f
+                    support_radius = filter_radius
+                    filter_resolution = int(2 * support_radius / sampling_step)
+                    
+                    for fi in range(-filter_resolution, filter_resolution + 1):
+                        for fj in range(-filter_resolution, filter_resolution + 1):
+                            for fk in range(-filter_resolution, filter_resolution + 1):
+                                filter_center = (fi * sampling_step, fj * sampling_step, fk * sampling_step)
+                                dist = sum((p_coord - fc_coord)**2 for p_coord, fc_coord in zip(p, filter_center))**0.5
+                                
+                                if dist < support_radius:
+                                    # Bartlett kernel value
+                                    # k_B is normalization constant
+                                    kernel_val = 1 - (dist / support_radius)
+                                    
+                                    point_to_eval = (p[0] - filter_center[0], p[1] - filter_center[1], p[2] - filter_center[2])
+                                    occupancy = object_surface(point_to_eval)
+                                    
+                                    filtered_value += occupancy * kernel_val
+                                    
+                # Normalize by filter integral (approximated by sum of kernel values * voxel_vol)
+                # [G] The source mentions k_G and k_B as normalization constants.
+                # In discrete implementation, we divide by the sum of kernel weights if O is binary.
+                # For simplicity, we assume the kernel is normalized or the result is scaled.
+                
+                volume_data[i, j, k] = filtered_value
+                
+    return volume_data
+```
+
+## Operating characteristics
+*   **Complexity:** The computational complexity of evaluating the convolution numerically is $O(m^3 n^3)$, where $m$ is the resolution of the voxelized data and $n$ is the resolution of the filter [S1].
+*   **Performance:** The high complexity necessitates speedup techniques such as precomputed lookup tables indexed by distance to the object surface or approximating the convolution of a half-space object with the Gaussian kernel [S1].
+*   **Strengths:** It avoids object-space and image-space aliasing by treating voxelization as a sampling process with low-pass filtering [S1]. It allows for Boolean, block, and CSG operations [S1].
+*   **Limitations:** The Gaussian filter introduces a systematic error in normal estimation (up to 43 degrees), which can cause artifacts in animation [S1]. The uniform approach (neglecting object shape) uses first-degree blurring and normal estimation filters, which may be less precise for complex shapes compared to object-specific lookup tables using higher-order blurring filters, though it offers more precise reconstruction of derivatives for uniform treatment [S1].
+
+## Background
+*   **Origin:** This technique was developed by researchers at the Center for Visual Computing (CVC) and the Department of Computer Science, State University of New York at Stony Brook [S1].
+*   **History:** It emerged as a response to the aliasing problems in early binary voxelization algorithms, which ignored sampling theory [S1]. It is part of the "Volume Graphics" research paradigm [S1].
+*   **Usage:** It is used in Volume Graphics research for modeling and rendering, particularly where smooth surface representation and normal estimation are critical [S1].
+
+## Sources
+[S1] Object voxeliztion by filtering, https://doi.org/10.1145/288126.288178, fetched 2026-11-03

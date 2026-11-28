@@ -1,0 +1,115 @@
+--- v003.md
++++ v004.md
+@@ -44,24 +44,9 @@
+ ### Numbered steps
+ 1.  **Geometry Setup**: Initialize `ParallelGeometry` or `ConeBeam` with experimental parameters. For cone-beam, calculate magnification $M = (z_{12} + z_{01}) / z_{01}$ and effective Fresnel number [S1, unofficial].
+-2.  **Ray Sampling**:
+-    *   Compute normalized t-values along the ray.
+-    *   Interpolate between near and far bounds to get z-values.
+-    *   Compute 3D points: `pts = rays_o + rays_d * z_vals`.
+-    *   Clamp points to `[-bound, bound]` [S1, unofficial].
+-3.  **Network Evaluation**:
+-    *   Split rays into batches of size `netchunk`.
+-    *   Pass points to the INR model.
+-    *   Sum the output over the z-dimension (`dim=-2`).
+-    *   Concatenate results along the ray dimension [S1, unofficial].
+-4.  **Fresnel Propagation** (if applicable): Apply Fresnel propagator to simulate near-field diffraction effects between object and detector [S1, unofficial].
+-5.  **Segment Distance Weighting**:
+-    *   Compute segment distances: `dists = (z_vals[..., 1:] - z_vals[..., :-1]) * ||rays_d||`.
+-    *   Append `1e-10` to the last segment to prevent zero-length division.
+-    *   Compute accumulation: `acc = sum(raw * dists, dim=-2)` [S1, unofficial].
+-6.  **Regularization**: Compute Isotropic Total Variation (TV) regularization:
+-    $$
+-    \text{TV} = \text{mean}(\sqrt{dx^2 + dy^2 + dz^2 + 10^{-6}})
+-    $$
+-    where $dx, dy, dz$ are finite differences along the x, y, and z axes respectively [S1, unofficial].
++2.  **Ray Sampling**: Compute normalized t-values along the ray, interpolate between near and far bounds to get z-values, then compute 3D points as `pts = rays_o + rays_d * z_vals`. Clamp points to `[-bound, bound]` [S1, unofficial].
++3.  **Network Evaluation**: Split rays into batches of size `netchunk`. For each chunk, pass points to the INR model, sum the output over the z-dimension (`dim=-2`), and concatenate results along the ray dimension [S1, unofficial].
++4.  **Fresnel Propagation**: Apply Fresnel propagator to simulate near-field diffraction effects between object and detector [S1, unofficial].
++5.  **Segment Distance Weighting**: Compute segment distances: `dists = (z_vals[..., 1:] - z_vals[..., :-1]) * ||rays_d||`. Append `1e-10` to the last segment to prevent zero-length division. Compute accumulation: `acc = sum(raw * dists, dim=-2)` [S1, unofficial].
++6.  **Regularization**: Compute Isotropic Total Variation (TV) regularization: `TV = mean(sqrt(dx^2 + dy^2 + dz^2 + 1e-6))`, where `dx`, `dy`, `dz` are finite differences along the x, y, and z axes respectively [S1, unofficial].
+ 7.  **Optimization**: Minimize loss using Adam or SGD, updating INR weights. Use `downsampling` factor (4 or 8) to reduce computation during optimization [S1, unofficial].
+ 
+@@ -108,5 +93,4 @@
+ import torch
+ import torch.nn as nn
+-import numpy as np
+ 
+ class HoloINRModel(nn.Module):
+@@ -124,5 +108,5 @@
+             else:
+                 self.layers.append(nn.Linear(hidden_dim, hidden_dim))
+-        self.layers.append(nn.Linear(hidden_dim, 1)) # out_dim=1 for scalar field
++        self.layers.append(nn.Linear(hidden_dim, 1))
+         
+         self.activations = nn.ModuleList([nn.LeakyReLU() for _ in range(num_layers - 1)])
+@@ -148,12 +132,8 @@
+ 
+ def render_rays(rays_o, rays_d, z_vals, model, netchunk=1024, bound=1.0):
+-    """
+-    Render rays through the INR volume.
+-    """
+     # Clamp points to bound
+-    pts = rays_o + rays_d.unsqueeze(-1) * z_vals.unsqueeze(-1)
++    pts = rays_o.unsqueeze(1) + rays_d.unsqueeze(1) * z_vals.unsqueeze(2)
+     pts = torch.clamp(pts, -bound, bound)
+     
+-    # Chunked evaluation
+     num_rays = rays_o.shape[0]
+     all_raw = []
+@@ -161,21 +141,17 @@
+     for i in range(0, num_rays, netchunk):
+         chunk_pts = pts[i:i+netchunk]
+-        # Flatten for network input if needed, assuming model handles batch dim
+-        raw = model(chunk_pts) # Shape: [netchunk, num_samples, 1]
++        raw = model(chunk_pts)
+         all_raw.append(raw)
+         
+-    raw = torch.cat(all_raw, dim=0) # Shape: [num_rays, num_samples, 1]
++    raw = torch.cat(all_raw, dim=0)
+     
+     # Segment distance weighting
+     dists = z_vals[..., 1:] - z_vals[..., :-1]
+-    dists = dists * torch.norm(rays_d, dim=-1, keepdim=True)
+-    # Append small value to last segment
++    dists = dists * torch.norm(rays_d, dim=-1, keepdim=True).unsqueeze(1)
+     last_dist = torch.ones_like(dists[..., :1]) * 1e-10
+     dists = torch.cat([dists, last_dist], dim=-1)
+     
+-    # Accumulate
+-    acc = torch.sum(raw * dists, dim=-2)
++    acc = torch.sum(raw * dists.unsqueeze(2), dim=-2)
+     
+-    # Check for NaN/Inf
+     if torch.isnan(acc).any() or torch.isinf(acc).any():
+         print("Warning: NaN or Inf detected in accumulation")
+@@ -184,7 +160,4 @@
+ 
+ def compute_tv_loss(volume_grid):
+-    """
+-    Compute isotropic Total Variation regularization.
+-    """
+     dx = volume_grid[..., 1:, :, :] - volume_grid[..., :-1, :, :]
+     dy = volume_grid[..., :, 1:, :] - volume_grid[..., :, :-1, :]
+@@ -207,14 +180,14 @@
+ 
+ ## Operating characteristics
+-*   **Time Complexity**: Depends on the number of rays, samples per ray, and network depth. Chunked evaluation (`netchunk`) limits memory but increases overhead.
+-*   **Memory Complexity**: Proportional to `netchunk` and `num_grad_samples`. High-resolution volumes require careful tuning of these parameters to avoid VRAM overflow [S1, unofficial].
+-*   **Performance**: Tested on Nvidia H100/H200 GPUs. Performance is significantly slower on older GPUs [S1, unofficial].
+-*   **Strengths**: Handles near-field holographic data; integrates wave optics; differentiable end-to-end.
++*   **Time Complexity**: Not given in the sources.
++*   **Memory Complexity**: Not given in the sources.
++*   **Performance**: Tested on Nvidia H100/H200 GPUs; significantly slower on older GPUs [S1, unofficial].
++*   **Strengths**: Handles near-field holographic data; integrates wave optics; differentiable end-to-end [S1, unofficial].
+ *   **Limitations**: Computationally expensive; sensitive to VRAM limits; requires careful tuning of `netchunk` and `downsampling` [S1, unofficial].
+-*   **When to use**: Near-field holotomography with holographic measurements.
+-*   **When not to use**: Far-field tomography with simple projection data (use standard NeRF or algebraic methods).
++*   **When to use**: Near-field holotomography with holographic measurements [S1, unofficial].
++*   **When not to use**: Far-field tomography with simple projection data (use standard NeRF or algebraic methods) [G].
+ 
+ ## Background
+-HoloINR was introduced by Johannes Gruen et al. in 2026 at ICASSP 2026 [S1, unofficial]. It addresses the limitations of traditional tomography in near-field setups where Fresnel diffraction effects are significant. The method leverages Implicit Neural Representations to provide a continuous, differentiable volume representation suitable for gradient-based optimization [S1, unofficial].
++HoloINR was introduced by Johannes Gruen et al. in 2026 at ICASSP 2026 [S1, unofficial]. It addresses the limitations of traditional tomography in near-field setups where Fresnel diffraction effects are significant [S1, unofficial]. The method leverages Implicit Neural Representations to provide a continuous, differentiable volume representation suitable for gradient-based optimization [S1, unofficial].
+ 
+ ## Sources

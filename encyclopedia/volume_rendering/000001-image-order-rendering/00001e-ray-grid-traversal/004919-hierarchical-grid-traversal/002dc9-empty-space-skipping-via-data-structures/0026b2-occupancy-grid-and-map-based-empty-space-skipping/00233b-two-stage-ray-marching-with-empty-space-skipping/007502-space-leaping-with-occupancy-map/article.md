@@ -1,0 +1,236 @@
+# Space Leaping with Occupancy Map
+
+Also called: Classification-Dependent Space Leaping, Occupancy Map Space Leaping, Skip Calculator, Space-Leap-Volume
+
+## Overview
+Space Leaping with Occupancy Map is a hardware-efficient acceleration technique for volume ray casting that skips empty or non-contributing sub-cubes using a compact occupancy map stored in on-chip SRAM [S1]. Unlike distance volume approaches which require significant memory and latency, this method uses a single bit per sub-cube (or an 8-bit hierarchical entry) to determine if sampling is necessary, allowing for classification-dependent skipping where voxels are marked based on transfer function criteria rather than just zero-value emptiness [S1]. It sets itself apart from sibling methods by prioritizing low-latency SRAM lookup and minimal logic overhead (less than 1% of FPGA logic) over the complexity of full distance fields, enabling high clock frequencies (>100 MHz) [S1].
+
+## How it works
+**Inputs:**
+*   Volume dataset $V$ of size $N_x \times N_y \times N_z$.
+*   Ray parameters: origin $P_0$, direction vector $\vec{d}$, and increment vector $\vec{V} = (V_x, V_y, V_z)$ representing the step size per sample.
+*   Sub-cube dimensions $S_x, S_y, S_z$ (typically $16^3$ for large datasets).
+*   Occupancy Map $\mathcal{M}$: A binary (or hierarchical) map indicating occupied/empty status for each sub-cube.
+*   Transfer function (optional): Used to classify voxels as contributing or non-contributing.
+
+**Outputs:**
+*   Updated ray position and accumulated color/opacity after traversal.
+
+**Data Structures:**
+1.  **Occupancy Map ($\mathcal{M}$):**
+    *   **Layout:** Stored in on-chip SRAM.
+    *   **Basic Level:** One bit per sub-cube. For a $256^3$ volume with $16^3$ sub-cubes, the grid is $16 \times 16 \times 16$, requiring $16^3 = 4096$ bits (4 Kbits) [S1].
+    *   **Hierarchical Level (Optional):** Groups eight neighboring $2 \times 2 \times 2$ sub-cubes into a single 8-bit entry. If all 8 bits are zero, the entire group is skipped [S1].
+    *   **Addressing:** The bit for a sample at position $P$ is accessed using the upper address bits of $P$, corresponding to the sub-cube index [S1].
+
+2.  **Ray Queue:** Stores active rays. To handle pipeline latency, multiple rays (e.g., 8) are processed simultaneously [S1].
+
+**Numbered Steps:**
+
+1.  **Pre-computation (Occupancy Map Generation):**
+    *   Scan the volume dataset.
+    *   For each sub-cube, determine if it contains any data requiring sampling.
+    *   *Standard Mode:* Mark as occupied if any voxel value $\neq 0$.
+    *   *Classification Mode:* Mark as occupied if any voxel value satisfies the current transfer function criteria. This allows skipping non-zero but non-contributing voxels (e.g., noise) [S1].
+    *   Store the result in $\mathcal{M}$. This can be done during volume download or updated interactively (e.g., 50 times/second) if memory bandwidth permits [S1].
+
+2.  **Ray Initialization:**
+    *   Initialize ray position $P = P_0$.
+    *   Calculate increment vector $\vec{V}$ based on ray direction and desired sampling rate. Ensure $\vec{V}$ has at least 8-bit precision to avoid artifacts [S1].
+
+3.  **Per-Sample Traversal Loop:**
+    *   **Step 3.1: Sub-cube Lookup.**
+        *   Calculate the sub-cube index for current position $P$.
+        *   Look up the corresponding bit/byte in $\mathcal{M}$ [S1].
+    *   **Step 3.2: Decision.**
+        *   If the sub-cube is **occupied**:
+            *   Perform standard volume sampling (interpolation, classification, shading, compositing) at $P$.
+            *   Update $P \leftarrow P + \vec{V}$.
+            *   Continue to next sample.
+        *   If the sub-cube is **empty**:
+            *   Proceed to **Step 3.3 (Skip Calculation)**.
+    *   **Step 3.3: Skip Calculation.**
+        *   Determine the distance to the next sub-cube boundary along each axis $i \in \{x, y, z\}$. Let $D_i$ be the integer distance from the current position to the next boundary in direction $i$. For a sub-cube size $S$, if the current coordinate is $C_i$, $D_i = S - (C_i \mod S)$ [S1]. (Note: Sources describe this as a subtraction, e.g., 4-bit subtraction for $16^3$ sub-cubes) [S1].
+        *   Calculate the number of steps $n_s^i$ required to reach the boundary along axis $i$:
+            $$
+            n_s^i = \begin{cases} 
+            1 & \text{if } V_i = 0 \\
+            \left\lceil \frac{D_i}{V_i} \right\rceil & \text{otherwise}
+            \end{cases}
+            $$
+            *Implementation Note:* To avoid expensive division, pre-calculate the inverse of the increment components ($1/V_i$) once per ray. Compute $n_s^i \approx \lfloor D_i \times (1/V_i) \rfloor$. The source states that rounding down to the nearest integer is acceptable for the comparison step, potentially resulting in a slightly shorter step but reducing multiplier latency [S1].
+        *   Determine the minimum steps to skip:
+            $$
+            n_s = \min(n_s^x, n_s^y, n_s^z)
+            $$
+            *Note:* The source formula shows $n_s = \min(1, n_s^i)$ in one instance, but the context of "minimum relative distance" and "minimum number of steps" implies taking the minimum across axes. The value $n_s$ represents the number of increments to jump [S1].
+        *   Calculate the skip increment vector: $\vec{V}_{skip} = n_s \times \vec{V}$.
+        *   Update position: $P \leftarrow P + \vec{V}_{skip}$.
+        *   *Hierarchical Optimization:* If using the 8-bit hierarchical map and the byte is zero, a larger skip distance can be calculated for the entire $2 \times 2 \times 2$ group of sub-cubes, skipping more samples in one cycle [S1].
+    *   **Step 3.4: Pipeline Handling.**
+        *   The calculation of $n_s$ introduces latency (approx. 8 cycles). The architecture processes multiple rays (e.g., 8) in parallel to hide this latency. A multiplexer selects either the original increment $\vec{V}$ or the calculated skip increment $\vec{V}_{skip}$ to send to the Ray Queue based on the occupancy map lookup [S1].
+
+**Pseudocode:**
+
+> **Unverified code.** The code below did not pass a test run against a reference implementation, or no test fits it, so it may contain errors.
+
+```python
+def space_leap_ray_casting(ray_origin, ray_direction, volume, occupancy_map, sub_cube_size, transfer_func):
+    """
+    ray_origin: (x, y, z)
+    ray_direction: (dx, dy, dz)
+    volume: 3D array of voxel values
+    occupancy_map: 3D array of bits (or bytes for hierarchy)
+    sub_cube_size: int, e.g., 16
+    transfer_func: function(value) -> bool
+    """
+    
+    # 1. Pre-compute occupancy map if not provided
+    # This is typically done offline or during download.
+    # Here we assume it is pre-computed.
+    # occupancy_map[sub_x, sub_y, sub_z] = 1 if occupied, 0 if empty
+    
+    # 2. Initialize Ray
+    # Calculate increment vector V. 
+    # Precision must be >= 8 bits to avoid artifacts [S1].
+    # For simplicity, assume unit step or pre-calculated V
+    V_x, V_y, V_z = calculate_increment(ray_direction) 
+    
+    # Pre-calculate inverses for division avoidance [S1]
+    inv_V_x = 1.0 / V_x if V_x != 0 else 0
+    inv_V_y = 1.0 / V_y if V_y != 0 else 0
+    inv_V_z = 1.0 / V_z if V_z != 0 else 0
+    
+    # Current position P
+    P_x, P_y, P_z = ray_origin
+    
+    # Accumulators for compositing
+    color = (0, 0, 0, 0)
+    opacity = 0
+    
+    # Max samples to prevent infinite loops
+    max_samples = 10000 
+    samples = 0
+    
+    while samples < max_samples:
+        # 3.1 Sub-cube Lookup
+        # Calculate sub-cube indices
+        sub_x = int(P_x // sub_cube_size)
+        sub_y = int(P_y // sub_cube_size)
+        sub_z = int(P_z // sub_cube_size)
+        
+        # Check occupancy
+        # Assuming basic 1-bit map. For hierarchical, check byte.
+        is_occupied = occupancy_map[sub_x, sub_y, sub_z]
+        
+        if is_occupied:
+            # 3.2 Sample normally
+            # Interpolate voxel value at P
+            voxel_val = interpolate_volume(volume, P_x, P_y, P_z)
+            
+            # Classify
+            if transfer_func(voxel_val):
+                # Shade and composite
+                alpha, rgb = shade(voxel_val)
+                color = composite(color, rgb, alpha)
+                opacity += alpha * (1 - opacity)
+                
+                if opacity >= 1.0:
+                    break # Early Ray Termination (optional, separate from space leap)
+            
+            # Advance by standard increment
+            P_x += V_x
+            P_y += V_y
+            P_z += V_z
+            
+        else:
+            # 3.3 Skip Empty Sub-cube
+            # Calculate distance to next boundary D_i
+            # D_i = sub_cube_size - (P_i % sub_cube_size)
+            # Note: If P_i is exactly on boundary, D_i is 0, but we are in empty space,
+            # so we need to move at least to the next boundary.
+            # The source uses subtraction logic.
+            
+            rem_x = P_x % sub_cube_size
+            rem_y = P_y % sub_cube_size
+            rem_z = P_z % sub_cube_size
+            
+            D_x = sub_cube_size - rem_x if rem_x != 0 else 0
+            D_y = sub_cube_size - rem_y if rem_y != 0 else 0
+            D_z = sub_cube_size - rem_z if rem_z != 0 else 0
+            
+            # Calculate steps n_s^i using pre-calculated inverses
+            # Round down to nearest integer to reduce multiplier size/latency [S1]
+            if V_x != 0:
+                n_s_x = int(D_x * inv_V_x)
+            else:
+                n_s_x = 1 # Avoid division by zero, though V_x=0 case handled in formula as 1
+            
+            if V_y != 0:
+                n_s_y = int(D_y * inv_V_y)
+            else:
+                n_s_y = 1
+                
+            if V_z != 0:
+                n_s_z = int(D_z * inv_V_z)
+            else:
+                n_s_z = 1
+                
+            # Minimum steps to reach the nearest boundary
+            n_s = min(n_s_x, n_s_y, n_s_z)
+            
+            # Ensure we move at least one step if n_s is 0 (edge case)
+            if n_s < 1:
+                n_s = 1
+                
+            # Calculate skip increment
+            skip_x = n_s * V_x
+            skip_y = n_s * V_y
+            skip_z = n_s * V_z
+            
+            # Advance position
+            P_x += skip_x
+            P_y += skip_y
+            P_z += skip_z
+            
+        samples += 1
+        
+    return color, opacity
+```
+
+**Parameters:**
+*   **Sub-cube Size:** $16^3$ is recommended for $256^3$ datasets; $8^3$ for $64^3$ datasets [S1].
+*   **Increment Precision:** At least 8-bit precision required. 6-bit precision causes visible artifacts [S1].
+*   **SRAM Size:** 4 Kbits for $256^3$ volume with $16^3$ sub-cubes [S1].
+
+**Edge Cases and Pitfalls:**
+*   **Precision Artifacts:** Using increment values with less than 8-bit precision results in visible image artifacts [S1].
+*   **Small Sub-cubes:** While smaller sub-cubes (e.g., $2^3$) have a higher percentage of empty sub-cubes, the overhead of checking the map and processing each sub-cube may outweigh the benefit if the structure is not compact. The minimum sample per sub-cube check adds latency [S1].
+*   **High Occupancy Datasets:** For datasets with high occupied voxel percentages (e.g., 'skull' at 88%), classification-independent space leaping yields near-zero gains. Classification-dependent leaping is required to achieve significant speedups [S1].
+*   **Concentric Structures:** For datasets like 'fuel' where the object is concentric, large sub-cubes ($32^3$) may contain occupied voxels even if the center is empty, reducing skip efficiency [S1].
+
+## Subtopics
+
+### Classification-Dependent Leaping
+Extends basic empty-space skipping by using transfer functions to mark non-contributing voxels (noise, background) as empty. This significantly increases skip rates for datasets with high noise or complex material distributions. Choose when transfer functions can effectively isolate relevant data. [Link to sibling: [PDF Light Weight Space Leaping](5848-pdf-light-weight-space-leaping.md)]
+
+### Hierarchical Occupancy Map
+Uses a two-level hierarchy (grouping $2 \times 2 \times 2$ sub-cubes into 8-bit entries) to skip larger volumes of empty space in a single cycle. Choose when memory bandwidth allows for larger map entries and when empty space is clustered. [Link to sibling: [Volume Occupancy Map Skip](5991-volume-occupancy-map-skip.md)]
+
+## Operating characteristics
+*   **Time Complexity:** $O(N)$ where $N$ is the number of samples, but with a reduced constant factor due to skipping. The skip calculation is $O(1)$ per empty sub-cube.
+*   **Memory Complexity:** $O((N/S)^3)$ for the occupancy map, where $S$ is sub-cube size. For $256^3$ with $S=16$, this is 4 Kbits [S1].
+*   **Performance:** Achieves frame rates well above 15 fps for $256^3$ datasets on the VIZARD II architecture [S1].
+    *   'Fuel' dataset ($64^3$, 5.24% occupied): 47.3 fps with classification and $16^3$ sub-cubes, compared to 16.1 fps without acceleration [S1].
+    *   'Skull' dataset ($256^3$, 88.42% occupied): 17.3 fps with classification, compared to 4.3 fps without [S1].
+    *   'Vessel' dataset: 375% performance gain with classification [S1].
+*   **Hardware Cost:** Requires 124 CLB slices (approx. 1% of Xilinx Virtex XCV1000 FPGA) excluding memory [S1].
+*   **Latency:** The skip calculator adds 8 cycles of latency. This is mitigated by processing 8 rays in parallel [S1].
+*   **Strengths:** Very low memory footprint (SRAM vs. full distance volume), low logic overhead, supports real-time classification updates.
+*   **Limitations:** Performance gain is limited to empty/non-contributing regions. For highly dense or noisy volumes, gains are minimal. Smaller sub-cubes increase overhead.
+
+## Background
+This method was presented in the paper "Efficient Space Leaping for Ray casting Architectures" by Michael Doggett et al. (2001) [S1]. It was developed for the VIZARD II volume rendering accelerator, an FPGA-based architecture. The work addresses the limitations of previous space leaping techniques that required large distance volumes or complex logic unsuitable for high-frequency hardware designs. It builds on the concept of occupancy maps but introduces classification-dependence and a hardware-optimized skip calculator [S1].
+
+## Sources
+[S1] Efficient Space Leaping for Ray casting Architectures, https://fileadmin.cs.lth.se/cs/Personal/Michael_Doggett/pubs/volumeGraphcs01_SpaceLeaping.pdf, fetched 2026-10-28

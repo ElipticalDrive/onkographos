@@ -1,0 +1,60 @@
+# Transfer Function and Color Mapping
+
+Also called: Transfer Functions, Color Mapping, Multivariate Transfer Functions
+
+## Overview
+Transfer Function and Color Mapping defines the mechanism by which scalar, vector, or multivariate data values at sample points are mapped to visual attributes such as color, opacity, and brightness for volume rendering. It solves the problem of perceptual encoding, allowing users to distinguish specific data features (e.g., high-velocity regions, conserved genomic sequences, or complex phases) that would otherwise be indistinguishable in raw data. This family is distinct from sibling methods like [Stream Lines](4796-stream-lines.md) or [Glyph-based Vector/Tensor Visualization](10535-glyph-based-vector-tensor-visualization.md) because it operates directly on the volumetric data density, mapping values to optical properties for ray-casting or texture-based rendering rather than extracting geometric primitives or topological features.
+
+## Shared principles
+All methods in this family evaluate a mapping function $M(\mathbf{x})$ at sample points $\mathbf{x}$ within the volume to produce visual attributes [G]. The core mechanism involves sampling the multi-component data field at $\mathbf{x}$, decomposing or normalizing the value (e.g., extracting magnitude, direction, eigenvalues, or phase), and applying a transfer function or geometric construction to map these features to rendering parameters such as color, opacity, or primitive geometry [G].
+
+## Subtopics
+
+### [Frequency Distribution-based Transfer Function](814-frequency-distribution-based-transfer-function.md)
+This method designs transfer functions by analyzing the statistical frequency distribution of the volume's scalar field to map voxel values to colors and opacities. It specifically addresses the difficulty of visualizing subtle spatial differences in data with narrow distribution ranges, such as lake water quality models, where conventional methods fail to distinguish fine variations. It builds on [Probabilistic and Statistical Modeling](5932-probabilistic-and-statistical-modeling.md).
+
+### [Domain Colouring](1833-domain-colouring.md)
+Domain Colouring maps complex numbers to colors using a cyclic colormap scaled by a degree parameter and brightness, allowing the phase (angle) and magnitude (brightness) of a complex field to be read orthogonally in a single image. It is distinct from standard scalar transfer functions by exploiting the two-dimensional nature of the complex plane, mapping the angular component to hue and the radial component to intensity.
+
+### [Vector Field Polar Coordinate Mapping](8392-vector-field-polar-coordinate-mapping.md)
+Vector Field Polar Coordinate Mapping is a transfer function technique that visualizes vector fields by decomposing each vector into magnitude, azimuth, and elevation relative to a reference axis, then mapping these components to opacity, hue, and saturation respectively. It distinguishes itself from scalar-only transfer functions by explicitly encoding directional deviation from a free-stream flow into color properties, allowing the visualization of perturbation structures and shock waves in fluid dynamics.
+
+### [Multi-Channel Similarity Volume Visualization](20358-multi-channel-similarity-volume-visualization.md)
+Multi-Channel Similarity Volume Visualization maps multiple 1D similarity plots of genomic alignments to the Red, Green, and Blue color channels of a 3D volume, allowing the simultaneous visual comparison of conservation patterns across different species groups. It solves the problem of manually aligning and comparing multiple 1D plots by eye, where peaks must be visually correlated across separate displays. Unlike [Frequency Distribution-based Transfer Function](814-frequency-distribution-based-transfer-function.md) which maps scalar density to color, this method maps distinct semantic similarity metrics to distinct color channels, enabling users to identify specific conservation patterns (e.g., primate-specific vs. universal) through color mixing.
+
+#### Magnitude Color Gradient
+**Definition:** A linear blue-green-red gradient stored in a 1D CUDA texture to visualize vector magnitude (velocity), where blue is lowest and red is highest [S1, unofficial].
+**Step:** Store gradient values in a 1D texture on GPU. Query interpolated color: `float4 color = tex1D(vectorMangitudeCtfTex, vector.w);` [S1, unofficial].
+
+#### Radial Colormap Visualization
+**Definition:** A direct multivariate volume rendering technique where voxels are mapped to a radial colormap based on the values of their multiple channels, allowing visualization of cross-channel interactions and phase/composite identification [S2].
+**Step:** Map each voxel to the radial colormap according to the values of its channels: a voxel high in channel A appears close to the node for A; a voxel high in channel B appears close to the node for B; a voxel containing a mixture of channels appears in between the respective nodes [S2]. Plot a subsampled distribution of voxels within the display to provide a general idea of the voxel distribution relative to the radial colormap [S2].
+**Parameter:** The radial colormap has distinct nodes corresponding to each channel (e.g., Ce, Gd) in the multivariate dataset [S2].
+**Usage:** Used in the RadVolViz research application and the MultivariateView prototype for visualizing multivariate volume datasets such as the MIEC dataset and medical datasets (knee sarcoma) [S2].
+
+#### Artifact-based Transfer Functions
+**Definition:** Volume-renders a 3D grid of voxel data using artifact-based colormaps as a transfer function [S3].
+
+#### Color Wash for Scalar Fields
+**Definition:** A technique to display additional scalar variables over a 3D flow represented by volume LIC by varying the color definition across a predefined 3D texture [S4, unofficial].
+**Step:** Map values from an accompanying scalar field to color definitions in a predefined 3D texture, applied over the volume LIC flow representation [S4, unofficial].
+**Comparison:** Color is preferred over line width for nonintrusively conveying additional information over a flow [S4, unofficial].
+
+#### Multi-Channel Color Mapping for Genomic Features
+**Definition:** A method to visualize three different similarity plots simultaneously by mapping each plot to a separate RGB color channel, allowing users to identify conserved features (white), primate-specific features (blue), and rodent-specific features (green) [S5, unofficial].
+**Step:** 1. Calculate three similarity plots: (a) all four species, (b) primates (human/chimp), (c) rodents (mouse/rat). 2. Map plot (a) to the Red channel. 3. Map plot (b) to the Green channel. 4. Map plot (c) to the Blue channel. 5. Render the volume using these RGB values [S5, unofficial].
+**Parameter:** White color indicates regions conserved among all species (combination of all channels) [S5, unofficial].
+
+## Background
+The concept of transfer functions in volume rendering was pioneered by William Lorensen and Harvey Cline in their 1987 paper "Marching Cubes: A High Resolution 3D Surface Construction Algorithm," which introduced the 3D marching cubes algorithm and the use of transfer functions to map scalar values to opacity and color [S3]. This foundational work allowed for the visualization of internal structures in volumetric data, such as medical CT scans.
+
+The specific techniques detailed in this family have evolved to address multivariate and complex data types. Domain Colouring, adapted from complex analysis visualization, has been applied to complex-valued volume data to reveal phase and magnitude information simultaneously [S1, unofficial][S2]. Vector Field Polar Coordinate Mapping was developed to address the limitations of scalar magnitude visualization in fluid dynamics, allowing for the explicit encoding of flow directionality relative to a free stream [S1, unofficial].
+
+In the domain of genomics, Multi-Channel Similarity Volume Visualization was introduced to handle the complexity of multiple sequence alignments, enabling the simultaneous comparison of conservation patterns across different species groups by mapping similarity scores to RGB channels [S5, unofficial]. Radial Colormap Visualization emerged from the need to explore multivariate datasets (e.g., chemical compositions) where traditional scalar transfer functions fail to capture cross-channel interactions, leading to tools like RadVolViz and MultivariateView [S2]. Artifact-based Transfer Functions extend these concepts to artistic and non-photorealistic rendering, using colormaps to create specific visual effects in 3D grids [S3]. Color Wash techniques were developed in the context of Line Integral Convolution (LIC) to overlay scalar field information onto flow visualizations without obscuring the flow structure [S4, unofficial].
+
+## Sources
+[S1] Realtime visualization of 3D vector fields using CUDA | Marek's blog, https://marekfiser.com/projects/realtime-visualization-of-3D-vector-fields-using-CUDA/, fetched 2026-10-28 (unofficial)
+[S2] Multivariate Volume Data: Advances in Visualization and Analysis Techniques, https://doi.org/10.1093/mam/ozaf048.1150, fetched 2026-10-26
+[S3] Artifact-Based Rendering: Harnessing Natural and Traditional Visual Media for More Expressive and Engaging 3D Visualizations, https://doi.org/10.1109/tvcg.2019.2934260, fetched 2026-10-26
+[S4] Visualizing 3D Flow - College of Science and Engineering, https://www-users.cse.umn.edu/~interran/papers/cga98.pdf, fetched 2026-10-29 (unofficial)
+[S5] Volume visualization of multiple alignment of genomic DNA, https://digital.library.unt.edu/ark:/67531/metadc780327/?q=multiresolution volume rendering, fetched 2026-10-28 (unofficial)

@@ -1,0 +1,112 @@
+--- v002.md
++++ v003.md
+@@ -22,5 +22,5 @@
+ 2.  **Ray-Primitive Intersection:** Use the OptiX API to perform ray tracing against the proxy geometry, offloading intersection logic to dedicated RT cores [S1]. Solve the intersection equations for a ray traversing an oriented ellipsoid to determine precise interaction points [S1].
+ 3.  **Sample Generation:** Generate a sorted sequence of intersection points (samples) $\{x_k\}$ only where density contribution is guaranteed to be significant, skipping empty space [S1].
+-4.  **Ray-Coherent Aggregation (RCA):** For each sample point $x_k$, define a symmetric neighborhood window $W_k$ of size $2K+1$ indices centered at $k$: $\{k-K, \dots, k, \dots, k+K\}$ [S1]. (Note: $K$ denotes the window half-width parameter, distinct from the total anchor count $N$).
++4.  **Ray-Coherent Aggregation (RCA):** For each sample point $x_k$, define a symmetric neighborhood window $W_k$ of size $2K+1$ indices centered at $k$: $\{k-K, \dots, k, \dots, k+K\}$ [S1].
+ 5.  **Validity Masking:** Apply a binary validity mask $M_{kj}$ to enforce spatial locality [S1]. A neighbor $j \in W_k$ is valid only if it belongs to the same ray index and the Euclidean distance $\|\mathbf{x}_k - \boldsymbol{\mu}_j\|_2$ is below a fixed threshold $\tau_{\text{dist}}$ [S1].
+ 6.  **Feature Aggregation:** For every valid neighbor $j$, compute the unnormalized logit $l_{kj}$ based on the Mahalanobis distance $\Delta^2(\mathbf{x}_k, \boldsymbol{\mu}_j, \boldsymbol{\Sigma}_j) = (\mathbf{x}_k - \boldsymbol{\mu}_j)^\top \boldsymbol{\Sigma}_j^{-1} (\mathbf{x}_k - \boldsymbol{\mu}_j)$ [S1]. Normalize these logits to obtain aggregation weights $w_{kj}$ [G]. Synthesize a continuous latent vector $\mathbf{z}_k$ by weighting the latent features $\mathbf{f}_j$ of valid neighbors:
+@@ -43,25 +43,8 @@
+     """
+     RIS: Analytically determines precise intersection points between camera rays and 3D Gaussians.
+-    
+-    Args:
+-        anchors: List of N Neural Anchors. Each anchor is a dict with keys:
+-                 'mu': (3,) list, mean position.
+-                 'Sigma_inv': (3,3) list of lists, inverse covariance matrix.
+-                 'omega': float, logit opacity.
+-                 'f': (D,) list, latent feature vector.
+-        ray_origin: (3,) list, camera ray origin.
+-        ray_direction: (3,) list, camera ray direction (normalized).
+-        tau_dist: float, Euclidean distance threshold for validity mask.
+-        window_half_width: int, half-width K of the RCA sliding window.
+-        
+-    Returns:
+-        samples: List of dicts, each containing:
+-                 'x': (3,) list, intersection point.
+-                 'sigma': float, decoded density.
+-                 'color': (3,) list, decoded color.
+-                 'opacity': float, modulated opacity.
+     """
+-    # Step 1 & 2: Ray-Primitive Intersection (simulating OptiX RT core offload)
+-    # Computes analytical ray-ellipsoid intersections against proxy icosahedrons
++    # Step 1 & 2: Ray-Primitive Intersection
++    # Gaussians are bounded by affine-transformed icosahedrons for OptiX RT core offload [S1].
++    # Here we compute analytical ray-ellipsoid intersections as the mathematical basis.
+     t_values = []
+     for anchor in anchors:
+@@ -86,5 +69,5 @@
+         x_k = [ray_origin[i] + t * ray_direction[i] for i in range(3)]
+ 
+-        # Step 4: Define window bounds
++        # Step 4: Define window bounds W = 2*K + 1
+         start_idx = max(0, k - window_half_width)
+         end_idx = min(len(t_values), k + window_half_width + 1)
+@@ -95,14 +78,13 @@
+         # Step 5 & 6: Validity masking and aggregation
+         for j in range(start_idx, end_idx):
+-            if j == k: continue
+             mu_j = anchors[j]['mu']
+-            # Validity mask: same ray (implicit in single-ray trace) and distance threshold
+             diff = [x_k[i] - mu_j[i] for i in range(3)]
+             dist_sq = dot(diff, diff)
++            # Step 5: Validity mask M_kj: same ray and Euclidean distance < tau_dist [S1]
+             if dist_sq < tau_dist**2:
+-                Sigma_inv = anchors[j]['Sigma_inv']
+-                # Mahalanobis distance squared
+-                mahal_sq = dot(diff, mat_vec(Sigma_inv, diff))
+-                # Unnormalized logit
++                Sigma_inv_j = anchors[j]['Sigma_inv']
++                # Mahalanobis distance squared: (x_k - mu_j)^T Sigma_j^{-1} (x_k - mu_j) [S1]
++                mahal_sq = dot(diff, mat_vec(Sigma_inv_j, diff))
++                # Unnormalized logit l_kj [S1]
+                 l_kj = math.exp(-0.5 * mahal_sq)
+                 valid_indices.append(j)
+@@ -121,7 +103,6 @@
+ 
+         # Step 7: Neural decoding [G]
+-        # Shallow MLP approximation for density
++        # Shallow MLP decodes z_k into view-dependent color and density sigma [S1]
+         sigma = max(0.0, dot(z_k, [1.0, 0.0, 0.0]))
+-        # Shallow MLP approximation for color
+         color = [max(0.0, min(1.0, dot(z_k, [0.0, 1.0, 0.0])))] * 3
+ 
+@@ -129,4 +110,5 @@
+         omega_k = anchors[k]['omega']
+         modulated_sigma = sigma * math.exp(omega_k)
++        opacity = math.exp(omega_k) / (1 + math.exp(omega_k))
+ 
+         samples.append({
+@@ -134,5 +116,5 @@
+             'sigma': modulated_sigma,
+             'color': color,
+-            'opacity': math.exp(omega_k) / (1 + math.exp(omega_k))
++            'opacity': opacity
+         })
+     return samples
+@@ -140,13 +122,14 @@
+ 
+ **Parameters**
+-*   $\tau_{\text{dist}}$: A fixed Euclidean distance threshold used in the validity mask to ensure spatial locality between samples. Value not given in the sources [S1].
++*   $\tau_{\text{dist}}$: A fixed Euclidean distance threshold used in the validity mask to ensure spatial locality between samples [S1]. Value not given in the sources.
++*   $K$: Window half-width parameter for the RCA sliding window. Value not given in the sources.
+ 
+ **Edge Cases and Pitfalls**
+-*   **Empty Space Processing:** Standard volumetric sampling queries empty space, wasting computation. RIS handles this by only evaluating structurally meaningful intersection points [S1].
++*   **Empty Space Processing:** Standard volumetric sampling queries empty space, wasting computation. IRIS handles this by only evaluating structurally meaningful intersection points [S1].
+ *   **Geometric Discontinuity:** Naive index-based aggregation along the sorted ray list risks blending geometrically disjoint objects (e.g., foreground and background) that are adjacent in the list but distant in 3D space. This is mitigated by the validity mask $M_{kj}$ [S1].
+ *   **Precision:** The method relies on analytical intersection equations. Precision depends on the accuracy of the ray-triangle intersection within the OptiX API and the numerical stability of the covariance matrix inversion for Mahalanobis distance [S1].
+ 
+ ## Operating characteristics
+-*   **Time Complexity:** RIS operates in a single pass, linearly scaling with the number of primitives and rays. It avoids the $O(N \log N)$ or $O(N^2)$ costs of KNN searches and the overhead of auxiliary network queries [S1].
++*   **Time Complexity:** RIS operates in a single pass, demonstrating linear scalability with batch size and primitives [S1]. It avoids the computational overhead of 3D KNN lookups and auxiliary network queries [S1].
+ *   **Memory Complexity:** Requires storage for $N$ Neural Anchors and their proxy geometries. No auxiliary voxel grids or occupancy grids are needed [S1].
+ *   **Measured Performance:** On the NeRF Synthetic dataset, IRIS achieves 6.038 FPS, approximately 30x higher than EKS (0.183 FPS) [S1]. Training time is reduced to 51 minutes compared to EKS's 26 hours [S1].
+@@ -154,5 +137,5 @@
+ *   **Limitations:** Requires GPU RT cores for optimal performance (OptiX); relies on the accuracy of the proxy geometry bounds [S1].
+ *   **When to Use:** When high rendering throughput is required and the scene is represented by explicit Gaussian primitives. Suitable for interactive editing and physics simulation [S1].
+-*   **When Not to Use:** When hardware lacks dedicated RT cores; when the scene representation is purely implicit without explicit primitives [S1].
++*   **When Not to Use:** Not given in the sources.
+ 
+ ## Background

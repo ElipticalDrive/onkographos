@@ -1,0 +1,113 @@
+# Sparse Voxel Octree Layer Construction
+
+Also called: Octree Level Up, SVO Builder Layer Generation
+
+## Overview
+Sparse Voxel Octree Layer Construction constructs the next hierarchical level of a sparse voxel octree by grouping eight child nodes from the current layer into a single parent node [S1, unofficial]. It differs from sibling methods like [Octree Insertion with Growth](2387-octree-insertion-with-growth.md) by operating on bulk layers rather than individual dynamic insertions, and from [Voxel Placement in Octree](3097-voxel-placement-in-octree.md) by handling the structural promotion of existing nodes rather than initial placement. This method is essential for building the tree structure from leaf nodes upward.
+
+## How it works
+**Inputs and Outputs**
+- **Inputs**: `layers`: a mutable reference to a vector of layer vectors (`Vec<Vec<SparseVoxelOctreeNode>>`), where each inner vector represents a specific depth level of the octree; `current_node_size`: the side length of the nodes in the layer being processed (u32); `size`: the target maximum node size for the root or highest level (u32).
+- **Outputs**: A tuple containing the `next_node_size` (u32) and the `next_layer` (vector of nodes).
+
+**Data Structures**
+- **SparseVoxelOctreeNode**: Contains `position` (UVec3), `size` (u32), and `first_child` (Option<SparseVoxelOctreeLink>).
+- **SparseVoxelOctreeLink**: Stores `layer_index` (usize), `node_index` (usize), and `child_data` (Option<...>). It is constructed via `new(next_layer_index - 1, i, None)`.
+
+**Steps**
+1. Calculate `next_layer_index` as the current length of the `layers` vector.
+2. Calculate `next_node_size` as `current_node_size * 2`.
+3. Retrieve `last_layer` from `layers`.
+4. Assert that the length of `last_layer` is a multiple of 8. If not, the assertion fails and panics, as all 8 children of a parent node must be present before promotion [S1, unofficial].
+5. Initialize an empty `layer` vector for the new level.
+6. Iterate through `last_layer` with index `i` from 0 to `last_layer.len()` stepping by 8:
+    a. Extract `position` from `last_layer[i]`.
+    b. Create a new `SparseVoxelOctreeNode` with `position` and `next_node_size`.
+    c. Set `node.first_child` to `Some(SparseVoxelOctreeLink::new(next_layer_index - 1, i, None))`. This link points to the layer index of the children (which is `next_layer_index - 1` because `next_layer_index` is the index of the *new* layer being built, so the previous layer is `next_layer_index - 1`), the node index `i` within that layer, and no additional child data.
+    d. Push the node to `layer`.
+7. If `next_node_size < size`, fill empty children spots:
+    a. Loop `i` from 0.
+    b. Check if the node exists at the expected position.
+    c. Insert missing nodes using `fill_node_if_it_doesnt_exist` with `OFFSETS_IN_MORTON_CODE_ORDER`.
+8. Return `(next_node_size, layer)`.
+
+**Pseudocode**
+> **Unverified code.** The code below did not pass a test run against a reference implementation, or no test fits it, so it may contain errors.
+
+```python
+def sparse_voxel_octree_layer_construction(layers, current_node_size, size):
+    """
+    Constructs the next level of a sparse voxel octree from the current layer.
+    
+    Args:
+        layers: List of lists of SparseVoxelOctreeNode, representing the current tree levels.
+        current_node_size: Size of nodes in the current layer (u32).
+        size: Target maximum node size for the octree (u32).
+        
+    Returns:
+        Tuple of (next_node_size, next_layer).
+    """
+    next_layer_index = len(layers)
+    next_node_size = current_node_size * 2
+    last_layer = layers[-1]
+    
+    # Assert all children are present (multiple of 8)
+    assert len(last_layer) % 8 == 0, "Not all 8 children of a parent node are present"
+    
+    layer = []
+    
+    # Group 8 children into 1 parent
+    for i in range(0, len(last_layer), 8):
+        position = last_layer[i].position
+        node = SparseVoxelOctreeNode(position, next_node_size)
+        # Link points to the layer of children (next_layer_index - 1)
+        node.first_child = SparseVoxelOctreeLink(next_layer_index - 1, i, None)
+        layer.append(node)
+        
+    # Fill empty children spots if not at max size
+    if next_node_size < size:
+        # Implementation detail: fill_node_if_it_doesnt_exist with OFFSETS_IN_MORTON_CODE_ORDER
+        # This step handles cases where the octree is sparse and not all 8^k nodes exist
+        # at the current level, ensuring structural integrity for the next level.
+        # [G] Specific implementation of fill_node_if_it_doesnt_exist is not provided in sources.
+        pass
+        
+    return next_node_size, layer
+```
+
+**Parameters**
+- `current_node_size`: u32, size of nodes in the current layer.
+- `size`: u32, target maximum node size.
+- `layers`: Vec<Vec<SparseVoxelOctreeNode>>, mutable reference to layer vectors.
+
+**Edge Cases and Pitfalls**
+- If not all 8 children of a parent node are present in the current layer, the assertion fails and panics [S1, unofficial]. The code explicitly validates this before creating the parent.
+- Precision issues may arise if `current_node_size` is not a power of 2, though this is implied by the octree structure.
+
+## Subtopics
+
+### [Octree-based Mesh Voxelization](3071-octree-based-mesh-voxelization.md)
+Converts mesh geometry into voxel data. Choose when starting from polygonal models.
+
+### [Voxel Placement in Octree](3097-voxel-placement-in-octree.md)
+Places individual voxels into the octree structure. Choose for initial data insertion.
+
+### [Dynamic Sparse Voxel Octree with Morton Codes](4099-dynamic-sparse-voxel-octree-with-morton-codes.md)
+Uses Morton codes for efficient spatial indexing. Choose for dynamic updates and cache-friendly traversal.
+
+### [Octree Node Insertion and Parent Finding](12106-octree-node-insertion-and-parent-finding.md)
+Finds the parent node for a given child. Choose when navigating the tree structure.
+
+## Operating characteristics
+- **Time Complexity**: O(N) where N is the number of nodes in the current layer, as each group of 8 nodes is processed once.
+- **Memory Complexity**: O(N/8) for the new layer, plus overhead for links.
+- **Strengths**: Efficient bulk construction of tree levels; ensures structural integrity by validating child presence.
+- **Limitations**: Requires all 8 children to be present; panics if not. Not suitable for incremental updates without rebuilding layers.
+- **When to use**: When building the octree structure from leaf nodes upward, or when consolidating levels.
+- **When not to use**: For dynamic, single-node insertions; use [Octree Insertion with Growth](2387-octree-insertion-with-growth.md) instead.
+
+## Background
+Sparse Voxel Octree Layer Construction is a method for building sparse voxel octrees, commonly used in volume rendering and real-time graphics for efficient storage and traversal of volumetric data. The method is implemented in the `svo-rs` project by mkmarek [S1, unofficial].
+
+## Sources
+[S1] mkmarek/svo-rs, https://github.com/mkmarek/svo-rs, fetched 2026-10-26 (unofficial)

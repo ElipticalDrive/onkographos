@@ -1,0 +1,834 @@
+# procedural-terrain-generation
+3D procedural terrain generation in OpenGL. It features camera movement and biomes.
+The terrain height and biome is determined using a perlin noise algorithm.
+
+![example](https://user-images.githubusercontent.com/38300176/185486889-d1ca82e6-643e-46b7-918d-cd6edeaaefdb.png)
+
+## Built with
+This project uses the following software:
+- OpenGL
+- freeglut
+- GLEW
+- libGLU
+- cglm
+
+## How to Use
+To clone and run this application, you'll need Git, a C compiler, Make and all the above libraries.
+When everything is installed, you can run it from the command line:
+```bash
+# Clone this repository
+$ git clone https://github.com/vittoboa/procedural-terrain-generation.git
+
+# Go into the repository
+$ cd procedural-terrain-generation
+
+# Compile the app
+$ make
+
+# Run the simulation
+$ ./start
+```
+
+### fragmentShader.glsl
+```
+#version 460 core
+
+in  vec4 color;
+out vec4 color_out;
+
+void main(void)
+{
+    color_out = color;
+}
+```
+
+### light.h
+```
+#ifndef PROCEDURAL_TERRAIN_GENERATION_LIGHT_H
+#define PROCEDURAL_TERRAIN_GENERATION_LIGHT_H
+
+#include <cglm/cglm.h>
+
+typedef struct Light
+{
+   const vec4 ambient_colors;
+   const vec4 diffuse_colors;
+   const vec4 specular_colors;
+   const vec4 coords;
+} Light;
+
+#endif //PROCEDURAL_TERRAIN_GENERATION_LIGHT_H
+```
+
+### main.c
+```
+// standard includes
+#include <GL/glew.h>
+#include <GL/freeglut.h>
+#include <cglm/cglm.h>
+#include <stdbool.h>
+#include <time.h>
+
+// application specific includes
+#include "terrain.h"
+#include "shader.h"
+#include "light.h"
+
+// globals
+#define CAMERA_HEIGHT      15  // how much higher the camera is compared to the maximum height of the mountains
+#define UPDATE_THRESHOLD   5   // distance between terrain updates
+#define MOVEMENT_SPEED     2   // how quickly the player can move
+static float angle_rad_y = 0.0;  // angle to rotate scene
+vec3s position = {0.0, -TERRAIN_MAX_HEIGHT - CAMERA_HEIGHT, 0.0};  // player current position
+
+// terrain data
+static Vertex terrain_vertices[TERRAIN_NUM_VERTICES_SIDE * TERRAIN_NUM_VERTICES_SIDE];
+static unsigned int terrain_indices[TERRAIN_NUM_VERTICES_SIDE - 1][TERRAIN_NUM_INDICES_X];
+static int terrain_counts[TERRAIN_NUM_VERTICES_SIDE - 1];
+static void* terrain_offsets[TERRAIN_NUM_VERTICES_SIDE - 1];
+
+static mat4 model_view_matrix = GLM_MAT4_IDENTITY_INIT;
+static mat4 projection_matrix = GLM_MAT4_IDENTITY_INIT;
+static mat3 normal_matrix     = GLM_MAT3_IDENTITY_INIT;
+
+// OpenGL global variables
+int seed;
+static GLsizei window_width = 1280, window_height = 720;
+static GLint model_view_matrix_location, normal_matrix_location;
+
+// OpenGL window resize routine
+void resize(int new_width, int new_height)
+{
+    glViewport(0, 0, new_width, new_height);
+    window_width  = new_width;
+    window_height = new_height;
+}
+
+void display(void)
+{
+    glClear(GL_COLOR_BUFFER_BIT | GL_DEPTH_BUFFER_BIT);
+
+    // generate new model view matrix
+    glm_mat4_identity(model_view_matrix);
+    // rotate around the center at the player angle
+    glm_rotate_y(model_view_matrix, angle_rad_y, model_view_matrix);
+    // move to the player position
+    glm_translate(model_view_matrix, position.raw);
+    // update model view matrix
+    glUniformMatrix4fv(model_view_matrix_location, 1, GL_FALSE, (GLfloat *)model_view_matrix);
+
+    /* Update normal matrix */
+    mat3 TMP;
+    glm_mat4_pick3(model_view_matrix, TMP);
+    glm_mat3_inv(TMP, normal_matrix);
+    glm_mat3_transpose(normal_matrix);
+    glUniformMatrix3fv(normal_matrix_location, 1, GL_FALSE, (GLfloat *)normal_matrix);
+
+    /* Draw terrain */
+    glMultiDrawElements(GL_TRIANGLE_STRIP, terrain_counts, GL_UNSIGNED_INT, (const void **)terrain_offsets, TERRAIN_NUM_VERTICES_SIDE - 1);
+
+    /* Update terrain */
+    static enum update_steps { POSITION, VERTICES, NORMALS, VBO } step;
+    static vec3s position_last_update;  // player position at the time of the last terrain update
+    const bool should_update_x = abs((int)(position.x - position_last_update.x)) >= UPDATE_THRESHOLD;
+    const bool should_update_z = abs((int)(position.z - position_last_update.z)) >= UPDATE_THRESHOLD;
+
+    if (step || should_update_x || should_update_z) {
+        static ivec3s num_chunks;  // number of chunks to update
+
+        switch (step) {
+            case POSITION: {
+                // determine number of chunks to generate on the x and z axis
+                num_chunks = (ivec3s) { .x = round(((position.x - position_last_update.x) / TERRAIN_CHUNK_SIZE)),
+                                        .z = round(((position_last_update.z - position.z) / TERRAIN_CHUNK_SIZE)) };
+
+                // update variable to track user position at the time of the last update
+                glm_vec3_copy(position.raw, position_last_update.raw);
+
+                ++step;
+                break;
+            }
+            case VERTICES: {
+                // update the new terrain at the current location
+                update_terrain_vertices(num_chunks, terrain_vertices);
+
+                ++step;
+                break;
+            }
+            case NORMALS: {
+                // update the vertices normals
+                update_terrain_normals(num_chunks, terrain_indices, terrain_vertices);
+
+                ++step;
+                break;
+            }
+            case VBO: {
+                // update the vertices in the vbo
+                glBufferSubData(GL_ARRAY_BUFFER, 0, sizeof(terrain_vertices), terrain_vertices);
+
+                step = 0;
+                break;
+            }
+            default: {
+                break;
+            }
+        }
+    }
+
+    // swap frame buffers
+    glutSwapBuffers();
+}
+
+void init(void)
+{
+    // VBO ids
+    enum buffer {TERRAIN_VERTICES, TERRAIN_INDICES};
+
+    // light properties
+    const Light light0 =
+    {
+        {0.1, 0.1, 0.1, 1.0},
+        {0.9, 0.9, 0.9, 1.0},
+        {0.5, 0.5, 0.5, 1.0},
+        {10.0, 40.0, 10.0, 1.0}
+    };
+
+    // global ambient light
+    const vec4 global_ambient = {0.2, 0.2, 0.2, 1.0};
+
+    // set background color
+    glClearColor(0.53, 0.81, 0.92, 1.0f);
+
+    // allow removal of hidden faces
+    glEnable(GL_CULL_FACE);
+
+    // add depth
+    glEnable(GL_DEPTH_TEST);
+
+    // create shader program executable
+    const GLuint program_id = glCreateProgram();
+    const GLuint vertex_shader_id   = setShader("vertex",   "vertexShader.glsl");
+    const GLuint fragment_shader_id = setShader("fragment", "fragmentShader.glsl");
+    glAttachShader(program_id, vertex_shader_id);
+    glAttachShader(program_id, fragment_shader_id);
+    glLinkProgram(program_id);
+    glUseProgram(program_id);
+
+    // initialize terrain
+    init_terrain(terrain_vertices, terrain_indices, terrain_counts, terrain_offsets);
+
+    // create VAO and VBOs
+    GLuint buffer[2], vao;
+    glGenVertexArrays(1, &vao);
+    glGenBuffers(2, buffer);
+
+    // bind terrain data with vertex shader
+    glBindVertexArray(vao);
+    glBindBuffer(GL_ARRAY_BUFFER, buffer[TERRAIN_VERTICES]);
+    glBufferData(GL_ARRAY_BUFFER, sizeof(terrain_vertices), terrain_vertices, GL_DYNAMIC_DRAW);
+    glBindBuffer(GL_ELEMENT_ARRAY_BUFFER, buffer[TERRAIN_INDICES]);
+    glBufferData(GL_ELEMENT_ARRAY_BUFFER, sizeof(terrain_indices), terrain_indices, GL_STATIC_DRAW);
+    // add coordinates
+    glVertexAttribPointer(0, 3, GL_FLOAT, GL_FALSE, sizeof(terrain_vertices[0]), 0);
+    glEnableVertexAttribArray(0);
+    // add color
+    glVertexAttribPointer(1, 3, GL_FLOAT, GL_FALSE, sizeof(terrain_vertices[0]), (void*)(sizeof(terrain_vertices[0].coords)));
+    glEnableVertexAttribArray(1);
+    // add normal
+    glVertexAttribPointer(2, 3, GL_FLOAT, GL_FALSE, sizeof(terrain_vertices[0]), (void*)(sizeof(terrain_vertices[0].coords)+sizeof(terrain_vertices[0].color)));
+    glEnableVertexAttribArray(2);
+    // add shininess
+    glVertexAttribPointer(3, 1, GL_FLOAT, GL_FALSE, sizeof(terrain_vertices[0]), (void*)(sizeof(terrain_vertices[0].coords)+sizeof(terrain_vertices[0].color)+sizeof(terrain_vertices[0].normal)));
+    glEnableVertexAttribArray(3);
+
+    glm_perspective(glm_rad(50.0f), (float)window_width / window_height, 1.0f, 600.0f, projection_matrix);
+
+    // obtain matrices locations
+    const GLint projection_matrix_location = glGetUniformLocation(program_id, "projection_matrix");
+    model_view_matrix_location = glGetUniformLocation(program_id, "model_view_matrix");
+    normal_matrix_location     = glGetUniformLocation(program_id, "normal_matrix");
+
+    // obtain uniform locations and set values
+    glUniformMatrix4fv(projection_matrix_location, 1, GL_FALSE, (GLfloat *) projection_matrix);
+
+    // obtain light property uniform locations and set values
+    glUniform4fv(glGetUniformLocation(program_id, "light0.ambient_colors"),  1, &light0.ambient_colors[0]);
+    glUniform4fv(glGetUniformLocation(program_id, "light0.diffuse_colors"),  1, &light0.diffuse_colors[0]);
+    glUniform4fv(glGetUniformLocation(program_id, "light0.specular_colors"), 1, &light0.specular_colors[0]);
+    glUniform4fv(glGetUniformLocation(program_id, "light0.coords"),          1, &light0.coords[0]);
+
+    // obtain global ambient uniform location and set value
+    glUniform4fv(glGetUniformLocation(program_id, "global_ambient"), 1, &global_ambient[0]);
+}
+
+// keyboard input processing routine
+void keyInput(unsigned char key, int x, int y)
+{
+    switch(key) {
+        case 27:
+            exit(0);
+        case 'W':  // move forward
+        case 'w': {
+            position.z += MOVEMENT_SPEED * sin(angle_rad_y + GLM_PI_2);
+            position.x += MOVEMENT_SPEED * cos(angle_rad_y + GLM_PI_2);
+            glutPostRedisplay();
+            break;
+        }
+        case 'S':  // move backward
+        case 's': {
+            position.z -= MOVEMENT_SPEED * sin(angle_rad_y + GLM_PI_2);
+            position.x -= MOVEMENT_SPEED * cos(angle_rad_y + GLM_PI_2);
+            glutPostRedisplay();
+            break;
+        }
+        case 'A':  // rotate left
+        case 'a': {
+            angle_rad_y -= glm_rad(1);
+            glutPostRedisplay();
+            break;
+        }
+        case 'D':  // rotate right
+        case 'd': {
+            angle_rad_y += glm_rad(1);
+            glutPostRedisplay();
+            break;
+        }
+        default: {
+             break;
+        }
+    }
+}
+
+int main(int argc, char* argv[])
+{
+    glutInit(&argc, argv);
+
+    // set OpenGL version
+    glutInitContextVersion(4, 6);
+    // remove deprecated functions to make sure the program is compatible with future versions of OpenGL
+    glutInitContextProfile(GLUT_CORE_PROFILE);
+    glutInitContextFlags(GLUT_FORWARD_COMPATIBLE);
+
+    // create window
+    glutInitDisplayMode(GLUT_DOUBLE | GLUT_RGBA | GLUT_DEPTH);
+    glutInitWindowSize(window_width, window_height);
+    glutInitWindowPosition(0, 0);
+    glutCreateWindow("Infinite Procedural Terrain Generator");
+    glutReshapeFunc(resize);
+    glutDisplayFunc(display);
+    glutKeyboardFunc(keyInput);
+
+    glewInit();
+
+    // set the seed which determines the map to generate
+    srand(time(NULL));
+    const int num_different_maps = 5000;
+    seed = rand() % num_different_maps;
+
+    init();
+    glutMainLoop();
+
+    return 0;
+}
+```
+
+### perlin.c
+```
+#include <cglm/cglm.h>
+#include <math.h>
+
+#include "perlin.h"
+
+static const unsigned char permutations[] = {
+    151,160,137,91,90,15,131,13,201,95,96,53,194,233,7,225,140,36,103,30,69,142,
+    8,99,37,240,21,10,23,190,6,148,247,120,234,75,0,26,197,62,94,252,219,203,117,
+    35,11,32,57,177,33,88,237,149,56,87,174,20,125,136,171,168,68,175,74,165,71,
+    134,139,48,27,166,77,146,158,231,83,111,229,122,60,211,133,230,220,105,92,41,
+    55,46,245,40,244,102,143,54,65,25,63,161,1,216,80,73,209,76,132,187,208,89,
+    18,169,200,196,135,130,116,188,159,86,164,100,109,198,173,186,3,64,52,217,226,
+    250,124,123,5,202,38,147,118,126,255,82,85,212,207,206,59,227,47,16,58,17,182,
+    189,28,42,223,183,170,213,119,248,152,2,44,154,163,70,221,153,101,155,167,43,
+    172,9,129,22,39,253,19,98,108,110,79,113,224,232,178,185,112,104,218,246,97,
+    228,251,34,242,193,238,210,144,12,191,179,162,241,81,51,145,235,249,14,239,107,
+    49,192,214,31,181,199,106,157,184,84,204,176,115,121,50,45,127,4,150,254,
+    138,236,205,93,222,114,67,29,24,72,243,141,128,195,78,66,215,61,156,180
+};
+
+// get gradient from integer coordinates
+static inline unsigned char gradient(const int x, const int y)
+{
+    // determine the permutations index based on the y coordinate
+    unsigned char index_y = (y + seed) % 256;
+    if (index_y < 0) {
+        index_y += 256;
+    }
+
+    // determine the permutations index based on the x coordinate
+    unsigned char index_x = (permutations[index_y] + x) % 256;
+    if (index_x < 0) {
+        index_x += 256;
+    }
+
+    // get gradient
+    return permutations[index_x];
+}
+
+// compute 2-dimensional perlin noise at coordinates x, y
+static float perlin_noise(const float x, const float y)
+{
+    // determine point cell coordinates
+    const int x_int = floor(x);
+    const int y_int = floor(y);
+
+    // get gradients from grid cell coordinates
+    const unsigned char top_left     = gradient(x_int    , y_int);      // (0, 0)
+    const unsigned char top_right    = gradient(x_int + 1, y_int);      // (1, 0)
+    const unsigned char bottom_left  = gradient(x_int    , y_int + 1);  // (0 ,1)
+    const unsigned char bottom_right = gradient(x_int + 1, y_int + 1);  // (1, 1)
+
+    // determine interpolation weights
+    const float x_dec = x - x_int;
+    const float y_dec = y - y_int;
+
+    // interpolate between grid point gradients
+    const float top    = glm_smoothinterp(top_left, top_right, x_dec);
+    const float bottom = glm_smoothinterp(bottom_left, bottom_right, x_dec);
+
+    return glm_smoothinterp(top, bottom, y_dec);
+}
+
+// compute a fractal pattern as a sum of noise layers
+float fractal_noise(const float x, const float y, float freq, const int octaves)
+{
+    const float lacunarity = 2.0;
+    const float gain = 0.5;
+    float fractal = 0.0;
+    float amp = gain;
+
+    // sum noise layers
+    for (int i = 0; i < octaves; ++i) {
+        fractal += perlin_noise(x * freq, y * freq) * amp;
+
+        // increase the frequency for more details
+        freq *= lacunarity;
+
+        // diminish the influence of new details in the overall result
+        amp *= gain;
+    }
+
+    return fractal / 256;
+}
+```
+
+### perlin.h
+```
+#ifndef PROCEDURAL_TERRAIN_GENERATION_PERLIN_H
+#define PROCEDURAL_TERRAIN_GENERATION_PERLIN_H
+
+extern int seed;  // seed generated at the beginning of the execution, used to generate the same output given the same input
+
+float fractal_noise(const float x, const float y, float freq, const int octaves);
+
+#endif //PROCEDURAL_TERRAIN_GENERATION_PERLIN_H
+```
+
+### shader.c
+```
+#include <GL/glew.h>
+#include <GL/freeglut.h>
+#include <stdio.h>
+#include <string.h>
+
+// function to read text file
+static char* readTextFile(char* aTextFile)
+{
+    FILE* filePointer = fopen(aTextFile, "rb");
+    char* content;
+    long numVal;
+
+    fseek(filePointer, 0L, SEEK_END);
+    numVal = ftell(filePointer);
+    fseek(filePointer, 0L, SEEK_SET);
+    content = (char*) malloc((numVal+1) * sizeof(char));
+    fread(content, 1, numVal, filePointer);
+    content[numVal] = '\0';
+    fclose(filePointer);
+
+    return content;
+}
+
+// function to initialize shaders
+int setShader(char* shaderType, char* shaderFile)
+{
+    int shaderId;
+    char* shader = readTextFile(shaderFile);
+
+    // set shaderId based on the shader type
+    if (strcmp(shaderType, "tessEvaluation") == 0) shaderId = glCreateShader(GL_TESS_EVALUATION_SHADER);
+    if (strcmp(shaderType, "tessControl"   ) == 0) shaderId = glCreateShader(GL_TESS_CONTROL_SHADER);
+    if (strcmp(shaderType, "geometry"      ) == 0) shaderId = glCreateShader(GL_GEOMETRY_SHADER);
+    if (strcmp(shaderType, "fragment"      ) == 0) shaderId = glCreateShader(GL_FRAGMENT_SHADER);
+    if (strcmp(shaderType, "vertex"        ) == 0) shaderId = glCreateShader(GL_VERTEX_SHADER);
+
+    glShaderSource(shaderId, 1, (const char**) &shader, NULL);
+    glCompileShader(shaderId);
+
+    return shaderId;
+}
+```
+
+### shader.h
+```
+#ifndef PROCEDURAL_TERRAIN_GENERATION_SHADER_H
+#define PROCEDURAL_TERRAIN_GENERATION_SHADER_H
+
+int setShader(char* shaderType, char* shaderFile);
+
+#endif //PROCEDURAL_TERRAIN_GENERATION_SHADER_H
+```
+
+### terrain.c
+```
+#include <cglm/cglm.h>
+#include <GL/glew.h>
+
+#include "terrain.h"
+#include "perlin.h"
+
+// array to store different terrain types
+static const TerrainType terrain_types[TERRAIN_NUM_TYPES] = {
+        {.color = (vec3s){0.20, 0.40, 0.75}, .shininess = 150.0f, .height = TERRAIN_SEA_LEVEL},         // blue - water
+        {.color = (vec3s){1.00, 1.00, 0.60}, .shininess = 50.00f, .height = TERRAIN_MAX_HEIGHT * 0.1},  // yellow - sand
+        {.color = (vec3s){0.35, 0.65, 0.10}, .shininess = 10.00f, .height = TERRAIN_MAX_HEIGHT * 0.2},  // light green - thin grass
+        {.color = (vec3s){0.30, 0.60, 0.10}, .shininess = 10.00f, .height = TERRAIN_MAX_HEIGHT * 0.3},  // green - grass
+        {.color = (vec3s){0.25, 0.55, 0.10}, .shininess = 10.00f, .height = TERRAIN_MAX_HEIGHT * 0.4},  // dark green - thick grass
+        {.color = (vec3s){0.35, 0.25, 0.25}, .shininess = 25.00f, .height = TERRAIN_MAX_HEIGHT * 0.7},  // grey - rock
+        {.color = (vec3s){1.00, 1.00, 1.00}, .shininess = 25.00f, .height = TERRAIN_MAX_HEIGHT},        // white - snow
+};
+
+// initialize a single vertex values given x and z coordinates
+static Vertex generate_vertex(const ivec3s pos)
+{
+    // generate a height value between -TERRAIN_MAX_HEIGHT and TERRAIN_MAX_HEIGHT, with perlin noise
+    const float height = ((fractal_noise(pos.x / TERRAIN_SCALE, pos.z / TERRAIN_SCALE, 1, 5) * 2) - 1) * TERRAIN_MAX_HEIGHT;
+
+    // determine vertex color and shininess by the vertex height
+    size_t terrain_type_i = 0;
+    for (; terrain_type_i < TERRAIN_NUM_TYPES; ++terrain_type_i) {
+        if (height <= terrain_types[terrain_type_i].height) {
+            break;
+        }
+    }
+
+    // set vertex data
+    const Vertex vertex = {
+        .coords = {
+            pos.x,
+            glm_max(height, TERRAIN_SEA_LEVEL),  // if the height is below sea level set it equals to it
+            pos.z,
+        },
+
+        .normal = {0, 0, 0},
+
+        .color     = terrain_types[terrain_type_i].color,
+        .shininess = terrain_types[terrain_type_i].shininess
+    };
+
+    return vertex;
+}
+
+// fill the terrain array of vertices
+static void fill_terrain_vertices(const ivec3s matrix_start, const ivec3s matrix_end,
+                                  Vertex terrain_vertices[TERRAIN_NUM_VERTICES_SIDE * TERRAIN_NUM_VERTICES_SIDE])
+{
+    const ivec3s world_start = { .x = position.x + (TERRAIN_SIZE / 2), .z = position.z - (TERRAIN_SIZE / 2) };
+
+    for (size_t j = matrix_start.z; j < matrix_end.z; ++j) {
+        for (size_t i = matrix_start.x; i < matrix_end.x; ++i) {
+            const ivec3s world_pos = { .x = - world_start.x + (i * TERRAIN_CHUNK_SIZE),
+                                       .z = - world_start.z - (j * TERRAIN_CHUNK_SIZE) };
+
+            terrain_vertices[(j * TERRAIN_NUM_VERTICES_SIDE) + i] = generate_vertex(world_pos);
+       }
+    }
+}
+
+// update terrain vertices
+void update_terrain_vertices(const ivec3s num_chunks, Vertex terrain_vertices[TERRAIN_NUM_VERTICES_SIDE * TERRAIN_NUM_VERTICES_SIDE])
+{
+    const ivec3s sign = { .x = glm_sign(num_chunks.x), .z = glm_sign(num_chunks.z) };
+    const ivec3s diff_shift = { .x = TERRAIN_NUM_VERTICES_SIDE - abs(num_chunks.x), .z = TERRAIN_NUM_VERTICES_SIDE - abs(num_chunks.z)};
+    ivec3s start, end;
+
+    // determine variables values to shift on x
+    start.x = (num_chunks.x >= 0) ? (diff_shift.x - 1) : abs(num_chunks.x);
+    end.x   = start.x - (diff_shift.x * sign.x);
+
+    // determine variables values to shift on z
+    start.z = (num_chunks.z >= 0) ? (diff_shift.z - 1) : abs(num_chunks.z);
+    end.z   = start.z - (diff_shift.z * sign.z);
+
+    // shift columns
+    for (size_t j = start.z; j != end.z; j -= sign.z) {
+        for (size_t i = 0; i < TERRAIN_NUM_VERTICES_SIDE; ++i) {
+            const size_t pos_current = (j * TERRAIN_NUM_VERTICES_SIDE) + i;
+            const size_t pos_new     = pos_current + (TERRAIN_NUM_VERTICES_SIDE * num_chunks.z);
+
+            terrain_vertices[pos_new] = terrain_vertices[pos_current];
+        }
+    }
+    // shift rows
+    for (size_t j = 0; j < TERRAIN_NUM_VERTICES_SIDE; ++j) {
+        for (size_t i = start.x; i != end.x; i -= sign.x) {
+            const size_t pos_current = (j * TERRAIN_NUM_VERTICES_SIDE) + i;
+            const size_t pos_new     = pos_current + num_chunks.x;
+
+            terrain_vertices[pos_new] = terrain_vertices[pos_current];
+        }
+    }
+
+    // generate new vertices on z
+    start.x = 0;
+    end.x   = TERRAIN_NUM_VERTICES_SIDE;
+    start.z = (num_chunks.z >= 0) ? 0 : TERRAIN_NUM_VERTICES_SIDE + num_chunks.z;
+    end.z   = start.z + abs(num_chunks.z);
+    fill_terrain_vertices(start, end, terrain_vertices);
+
+    // generate new vertices on x
+    start.x = (num_chunks.x >= 0) ? 0 : TERRAIN_NUM_VERTICES_SIDE + num_chunks.x;
+    end.x   = start.x + abs(num_chunks.x);
+    start.z = end.z % TERRAIN_NUM_VERTICES_SIDE;
+    end.z   = start.z + diff_shift.z;
+    fill_terrain_vertices(start, end, terrain_vertices);
+}
+
+// fill the terrain array of indices
+static void fill_terrain_indices(unsigned int terrain_indices[TERRAIN_NUM_VERTICES_SIDE - 1][TERRAIN_NUM_INDICES_X])
+{
+    for (size_t j = 0; j < TERRAIN_NUM_VERTICES_SIDE - 1; ++j) {
+        int current_pos = j * TERRAIN_NUM_VERTICES_SIDE;
+
+        // compute the indices of all vertices, two triangles at the time
+        for (size_t i = 0; i < TERRAIN_NUM_INDICES_X; i += 6) {
+            // bottom left triangle face
+            terrain_indices[j][i    ] = current_pos + TERRAIN_NUM_VERTICES_SIDE;      // vertex below
+            terrain_indices[j][i + 1] = current_pos;                                  // vertex
+            terrain_indices[j][i + 2] = current_pos + TERRAIN_NUM_VERTICES_SIDE + 1;  // vertex below to the right
+
+            // top right triangle face
+            terrain_indices[j][i + 3] = current_pos;                                  // vertex
+            terrain_indices[j][i + 4] = current_pos + 1;                              // vertex to the right
+            terrain_indices[j][i + 5] = current_pos + TERRAIN_NUM_VERTICES_SIDE + 1;  // vertex below to the right
+
+            ++current_pos;  // new current starting position every two triangles
+        }
+    }
+}
+
+// fill the terrain array of normals
+static void fill_terrain_normals(const ivec3s matrix_start, const ivec3s matrix_end,
+                                 unsigned int terrain_indices[TERRAIN_NUM_VERTICES_SIDE - 1][TERRAIN_NUM_INDICES_X],
+                                 Vertex terrain_vertices[TERRAIN_NUM_VERTICES_SIDE * TERRAIN_NUM_VERTICES_SIDE])
+{
+    // convert from number of squares to number of indices
+    const size_t matrix_start_x_indices = matrix_start.x * NUM_TRIANGLES_IN_SQUARE * NUM_VERTICES_IN_TRIANGLE;
+    const size_t matrix_end_x_indices   = matrix_end.x   * NUM_TRIANGLES_IN_SQUARE * NUM_VERTICES_IN_TRIANGLE;
+
+    // compute the normals of all vertices, one triangle at the time
+    for (size_t j = matrix_start.z; j < matrix_end.z - 1; ++j) {
+        for (size_t i = matrix_start_x_indices; i < matrix_end_x_indices; ++i) {
+            vec3 edge1, edge2, normal;
+
+            // get the indices of the triangle
+            const size_t v1_index = terrain_indices[j][i    ];
+            const size_t v2_index = terrain_indices[j][i + 1];
+            const size_t v3_index = terrain_indices[j][i + 2];
+
+            // get the vertices of the triangle
+            Vertex v1 = terrain_vertices[v1_index];
+            Vertex v2 = terrain_vertices[v2_index];
+            Vertex v3 = terrain_vertices[v3_index];
+
+            // get the vectors of two edges of the triangle
+            glm_vec3_sub(v2.coords, v1.coords, edge1);
+            glm_vec3_sub(v3.coords, v1.coords, edge2);
+
+            // compute the normal
+            glm_vec3_cross(edge1, edge2, normal);
+
+            // update the normal for all vertices
+            glm_vec3_add(normal, v1.normal, terrain_vertices[v1_index].normal);
+            glm_vec3_add(normal, v2.normal, terrain_vertices[v2_index].normal);
+            glm_vec3_add(normal, v3.normal, terrain_vertices[v3_index].normal);
+        }
+    }
+
+    // normalize the vertices normals
+    for (size_t j = matrix_start.z; j < matrix_end.z; ++j) {
+        for (size_t i = matrix_start.x; i < matrix_end.x; ++i) {
+            glm_normalize(terrain_vertices[(j * TERRAIN_NUM_VERTICES_SIDE) + i].normal);
+        }
+    }
+}
+
+// update the normals for the updated terrain
+void update_terrain_normals(const ivec3s num_chunks,
+                            unsigned int terrain_indices[TERRAIN_NUM_VERTICES_SIDE - 1][TERRAIN_NUM_INDICES_X],
+                            Vertex terrain_vertices[TERRAIN_NUM_VERTICES_SIDE * TERRAIN_NUM_VERTICES_SIDE])
+{
+    ivec3s start, end;
+
+    // update normals on z
+    start.x = 0;
+    end.x   = TERRAIN_NUM_VERTICES_SIDE;
+    start.z = (num_chunks.z >= 0) ? 0 : TERRAIN_NUM_VERTICES_SIDE + num_chunks.z;
+    end.z   = start.z + abs(num_chunks.z);
+    fill_terrain_normals(start, end, terrain_indices, terrain_vertices);
+
+    // update normals on x
+    start.x = (num_chunks.x >= 0) ? 0 : TERRAIN_NUM_VERTICES_SIDE + num_chunks.x;
+    end.x   = start.x + abs(num_chunks.x);
+    start.z = end.z % TERRAIN_NUM_VERTICES_SIDE;
+    end.z   = start.z + (TERRAIN_NUM_VERTICES_SIDE - abs(num_chunks.z));
+    fill_terrain_normals(start, end, terrain_indices, terrain_vertices);
+}
+
+// fill the terrain array of counts
+static void fill_terrain_counts(int terrain_counts[TERRAIN_NUM_VERTICES_SIDE - 1])
+{
+    for (size_t i = 0; i < TERRAIN_NUM_VERTICES_SIDE - 1; ++i) {
+        terrain_counts[i] = TERRAIN_NUM_INDICES_X;
+    }
+}
+
+// fill the terrain array of offsets
+static void fill_terrain_offsets(void* terrain_offsets[TERRAIN_NUM_VERTICES_SIDE - 1])
+{
+    for (size_t i = 0; i < TERRAIN_NUM_VERTICES_SIDE - 1; ++i) {
+        terrain_offsets[i] = (GLvoid *) (TERRAIN_NUM_INDICES_X * i * sizeof(unsigned int));
+    }
+}
+
+// procedurally generate terrain
+void init_terrain(Vertex terrain_vertices[TERRAIN_NUM_VERTICES_SIDE * TERRAIN_NUM_VERTICES_SIDE],
+                  unsigned int terrain_indices[TERRAIN_NUM_VERTICES_SIDE - 1][TERRAIN_NUM_INDICES_X],
+                  int terrain_counts[TERRAIN_NUM_VERTICES_SIDE - 1],
+                  void* terrain_offsets[TERRAIN_NUM_VERTICES_SIDE - 1])
+{
+    fill_terrain_vertices((ivec3s) {0, 0, 0},
+                          (ivec3s) {TERRAIN_NUM_VERTICES_SIDE, TERRAIN_NUM_VERTICES_SIDE, TERRAIN_NUM_VERTICES_SIDE},
+                          terrain_vertices);
+    fill_terrain_indices(terrain_indices);
+    fill_terrain_normals((ivec3s) {0, 0, 0},
+                         (ivec3s) {TERRAIN_NUM_VERTICES_SIDE, TERRAIN_NUM_VERTICES_SIDE, TERRAIN_NUM_VERTICES_SIDE},
+                         terrain_indices, terrain_vertices); // needs to always be after filling terrain vertices and indices
+    fill_terrain_counts(terrain_counts);
+    fill_terrain_offsets(terrain_offsets);
+}
+```
+
+### terrain.h
+```
+#ifndef PROCEDURAL_TERRAIN_GENERATION_TERRAIN_H
+#define PROCEDURAL_TERRAIN_GENERATION_TERRAIN_H
+
+#include "vertex.h"
+
+#define NUM_VERTICES_IN_TRIANGLE  3    // number of vertices in a triangle
+#define NUM_TRIANGLES_IN_SQUARE   2    // number of triangles to make a square
+#define TERRAIN_MAX_HEIGHT 30
+#define TERRAIN_SEA_LEVEL  0
+#define TERRAIN_SCALE      65.5
+#define TERRAIN_NUM_TYPES  7    // number of different types of terrains
+#define TERRAIN_NUM_VERTICES_SIDE 650  // number of terrain's vertices in each axis
+#define TERRAIN_NUM_INDICES_X (NUM_VERTICES_IN_TRIANGLE * NUM_TRIANGLES_IN_SQUARE * (TERRAIN_NUM_VERTICES_SIDE - 1))
+#define TERRAIN_CHUNK_SIZE        2    // the size of each chunk, the distance between two vertices in the same axis
+#define TERRAIN_SIZE (TERRAIN_NUM_VERTICES_SIDE * TERRAIN_CHUNK_SIZE)  // total size of terrain grid
+
+extern vec3s position;  // current player position
+
+typedef struct {
+    const vec3s color;
+    const float shininess;
+    const float height;
+} TerrainType;
+
+void init_terrain(Vertex terrain_vertices[TERRAIN_NUM_VERTICES_SIDE * TERRAIN_NUM_VERTICES_SIDE],
+                  unsigned int terrain_indices[TERRAIN_NUM_VERTICES_SIDE - 1][TERRAIN_NUM_INDICES_X],
+                  int terrain_counts[TERRAIN_NUM_VERTICES_SIDE - 1],
+                  void* terrain_offsets[TERRAIN_NUM_VERTICES_SIDE - 1]);
+
+void update_terrain_vertices(const ivec3s num_chunks, Vertex terrain_vertices[TERRAIN_NUM_VERTICES_SIDE * TERRAIN_NUM_VERTICES_SIDE]);
+
+void update_terrain_normals(const ivec3s num_chunks,
+                            unsigned int terrain_indices[TERRAIN_NUM_VERTICES_SIDE - 1][TERRAIN_NUM_INDICES_X],
+                            Vertex terrain_vertices[TERRAIN_NUM_VERTICES_SIDE * TERRAIN_NUM_VERTICES_SIDE]);
+
+#endif //PROCEDURAL_TERRAIN_GENERATION_TERRAIN_H
+```
+
+### vertex.h
+```
+#ifndef PROCEDURAL_TERRAIN_GENERATION_VERTEX_H
+#define PROCEDURAL_TERRAIN_GENERATION_VERTEX_H
+
+#include <cglm/types-struct.h>
+
+typedef struct Vertex {
+    vec3 coords;
+    vec3s color;
+    vec3 normal;
+    float shininess;
+} Vertex;
+
+#endif //PROCEDURAL_TERRAIN_GENERATION_VERTEX_H
+```
+
+### vertexShader.glsl
+```
+#version 460 core
+
+layout(location=0) in vec4 terrain_coordinates;
+layout(location=1) in vec4 terrain_color;
+layout(location=2) in vec3 terrain_normal;
+layout(location=3) in float terrain_shininess;
+
+uniform mat4 projection_matrix;
+uniform mat4 model_view_matrix;
+uniform mat3 normal_matrix;
+
+out vec4 color;
+
+struct Light
+{
+   vec4 ambient_colors;
+   vec4 diffuse_colors;
+   vec4 specular_colors;
+   vec4 coords;
+};
+uniform Light light0;
+
+uniform vec4 global_ambient;
+
+void main(void)
+{
+   // object normal
+   vec3 normal = normalize(normal_matrix * terrain_normal);
+   // light direction
+   vec3 light_direction = normalize(vec3(light0.coords));
+   // view direction
+   vec3 eye_direction  = -1.0f * normalize(vec3(model_view_matrix * terrain_coordinates));
+   vec3 view_direction = light_direction + eye_direction;
+   vec3 halfway = (length(view_direction) == 0.0f) ? vec3(0.0) : ((view_direction) / length(view_direction));
+
+   // lighting components
+   vec4 ambient  = global_ambient + light0.ambient_colors;
+   vec4 diffuse  = max(dot(normal, light_direction), 0.0f) * light0.diffuse_colors;
+   vec4 specular = pow(max(dot(normal, halfway), 0.0f), terrain_shininess) * light0.specular_colors;
+
+   // determine final color
+   color = (ambient + diffuse + specular) * terrain_color;
+
+   gl_Position = projection_matrix * model_view_matrix * terrain_coordinates;
+}
+```

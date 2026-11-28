@@ -1,0 +1,233 @@
+--- v004.md
++++ v005.md
+@@ -4,59 +4,47 @@
+ 
+ ## Overview
+-The Extended Tandem Algorithm is a parallel, bloc-wise extension of the Tandem Algorithm [3675-tandem-algorithm.md] designed to extract and simplify isosurfaces from very large volumetric datasets while minimizing memory consumption. It solves the scalability bottleneck of the sequential Tandem Algorithm, where queue updates and simplification steps become too memory-intensive for high-resolution data (e.g., generating millions of triangles per layer) [S1, S2]. Unlike its parent, which processes the entire volume in a single pass, this method splits the dataset into blocks, distributes extraction across computing nodes, and introduces a component dumping mechanism to persist finalized surface components to disk, allowing the process to continue on remaining sub-parts without exhausting main memory [S1, S2].
++The Extended Tandem Algorithm is a parallel, bloc-wise extension of the Tandem Algorithm [3675-tandem-algorithm.md] designed to extract and simplify isosurfaces from very large volumetric datasets while minimizing memory consumption. It solves the scalability bottleneck of the sequential Tandem Algorithm, where queue updates and simplification steps become too memory-intensive for high-resolution data (e.g., generating millions of triangles per layer) [S1, S2]. Unlike the parent method, which processes the entire volume in a single pass, this method splits the dataset into blocks, distributes them across computing nodes, and employs a component dumping mechanism to persist finalized surface components to disk [S1, S2]. This allows the extraction process to continue on sub-parts of the dataset without losing previously computed geometry, making it suitable for geophysical datasets with numerous small, disconnected components [S1, S2].
+ 
+ ## How it works
+-The algorithm operates using a worker-manager architecture. The dataset is split into blocks (see Subtopics for splitting strategies) and distributed to computing nodes. Each node extracts a local isosurface, semi-simplifies it, and merges it with adjacent semi-simplified surfaces from other nodes. Completed components are dumped to disk.
+-
+-### Inputs and Outputs
+-- **Input**: A volumetric dataset $V$, an isovalue $iso$, and a maximum shape error threshold $E_0$.
+-- **Output**: A simplified isosurface mesh, potentially stored as multiple components on disk with associated metadata.
++The algorithm operates using a worker-manager architecture. The dataset is split into blocks and distributed to computing nodes (workers). Each worker extracts and semi-simplifies a local isosurface, then merges it with adjacent semi-simplified isosurfaces received from other workers. The core simplification logic relies on the Tandem Algorithm's edge collapse strategy with a "time lag" mechanism to prevent artifacts near the advancing front [S1, S2].
+ 
+ ### Data Structures
+-1.  **Priority Queue Q**: Stores edge candidates for collapse, ordered by their global cost $\epsilon_\alpha(c)$.
+-2.  **Priority Queue W**: Stores blocked edges, ordered by their reach value. Used to delay collapses near the advancing front.
+-3.  **Task Structure**: Composed of a `task_type` and a `worker_id`.
+-    -   `EXTRACT`: Extract surface from a sub-block.
+-    -   `SEND`: Send mesh to a target worker.
+-    -   `MERGE`: Merge received mesh with current surface.
+-    -   `FINISHED`: Stop worker execution.
++*   **Priority Queue Q**: Stores edge candidates for collapse, ordered by their global cost $\varepsilon_\alpha(c)$.
++*   **Priority Queue W**: Stores blocked edges, ordered by their reach value. Used to delay collapses near the advancing front [S1].
++*   **Task Structure**: Composed of a task type and a worker ID. Task types are:
++    *   `EXTRACT`: Extract surface from a sub-block.
++    *   `SEND`: Send mesh to a target worker.
++    *   `MERGE`: Merge received mesh with current surface.
++    *   `FINISHED`: Stop worker [S2].
+ 
+-### Core Formulas
+-The edge collapse cost $\epsilon_\alpha(c)$ balances shape measure and mesh isotropy:
+-$$ \epsilon_\alpha(c) = c^T \left[ (1 - \alpha) \frac{H_c}{W_c} + \alpha \frac{G_c}{W} \right] c $$
++### Simplification Metrics
++The edge collapse cost $\varepsilon_\alpha(c)$ balances shape measure and mesh isotropy [S1, S2]:
++
++$$ \varepsilon_\alpha(c) = c^T \left[ (1 - \alpha) \frac{H_c}{W_c} + \alpha \frac{G_c}{W} \right] c $$
++
+ Where:
+--   $c$ is the candidate vertex position.
+--   $\alpha$ is the isotropy parameter (typically 0.4).
+--   $H_c$ is the positive definite matrix for the shape measure.
+--   $W_c$ is the sum of areas of the patch $U_c$ of neighboring triangles.
+--   $G_c$ is the matrix for the mesh isotropy criterion.
+--   $W$ is a normalization factor.
++*   $\alpha$ is the isotropy parameter (typically 0.4) [S1, S2].
++*   $H_c$ is a positive definite matrix related to the shape measure.
++*   $W_c$ is the sum of areas of neighboring triangles $U_c$.
++*   $G_c$ is a matrix related to the mesh isotropy criterion.
++*   $W$ is a normalization factor [S1].
+ 
+-**Shape Measure Criterion $h_c(x)$**:
++The **shape measure** $h_c(x)$ for a point $x$ is:
+ $$ h_c(x) = \frac{1}{W_c} \sum_{t \in U_c} w_t d^2(x, P_t) = \frac{1}{2} x^T H_c x $$
+-Where $P_t$ is the plane of triangle $t$, $w_t$ is its area, and $U_c$ is the patch of neighboring triangles.
++where $P_t$ is the plane of triangle $t$, $w_t$ is its area, and $U_c$ is the patch of neighboring triangles [S1].
+ 
+-**Mesh Isotropy Criterion $g_c(x)$**:
++The **mesh isotropy** criterion $g_c(x)$ is:
+ $$ g_c(x) = \sum_{t \in S_{ab}} w_t (\|x - \hat{t}\|^2 + \text{avg}(t)) = x^T G_c x $$
+-Where $S_{ab}$ is the set of triangles containing vertices $a, b$ or both, $\hat{t}$ is the barycenter of triangle $t$, and $\text{avg}(t) = \frac{1}{2}(\|p\|^2 + \|q\|^2 + \|r\|^2)$ with $p, q, r$ vectors from $\hat{t}$ to vertices.
++where $S_{ab}$ is the set of triangles containing vertices $a, b$ or both, $\hat{t}$ is the barycenter of triangle $t$, and $\text{avg}(t) = \frac{1}{2}(\|p\|^2 + \|q\|^2 + \|r\|^2)$ with $p, q, r$ vectors from $\hat{t}$ to vertices [S1].
+ 
+-**Aspect Ratio $\rho(t)$**:
+-$$ \rho(t) = \sqrt{\frac{\lambda_2}{\lambda_1}} $$
+-Where $\lambda_1 \ge \lambda_2$ are the greatest eigenvalues of the inertia matrix $M_t$. $\rho(t)=1$ for equilateral triangles, $0$ for flat triangles.
+-
+-**Anisotropy of Triangulation $K$**:
+-$$ \text{anisotropy}(K) = 1 - \frac{1}{n} \sum_{t} \rho(t) $$
++A candidate edge collapse is rejected if its shape measure $\varepsilon_0(c)$ exceeds the maximum shape error threshold $E_0$ [S1, S2].
+ 
+ ### Time Lag and Reach
+-To prevent artifacts near the advancing front, edge collapses are delayed based on the "reach" value.
+--   $\text{rank}(u)$: Coordinate along the extraction direction.
+--   $\text{height}(c) = (\text{rank}(a) + \text{rank}(b))/2$.
+--   $\text{rad}(c) = (\|a - b\| + \text{rad}(a) + \text{rad}(b))/2$.
+--   $\text{reach}(c) = \text{height}(c) + \text{rad}(c)$.
++To prevent artifacts, the algorithm uses a time lag mechanism. The **reach** of an edge collapse $c$ is defined as:
++$$ \text{reach}(c) = \text{height}(c) + \text{rad}(c) $$
++where $\text{height}(c) = (\text{height}(a) + \text{height}(b))/2$ and $\text{rad}(c) = (\|a - b\| + \text{rad}(a) + \text{rad}(b))/2$. For new vertices, $\text{rad}=1$. An edge is prevented from collapsing if $\text{reach}(c) \ge \text{rank}(\text{front})$, where $\text{rank}(\text{front})$ is the maximum rank (coordinate along extraction direction) of the extracted layers [S1]. Blocked edges are stored in queue $W$ and moved to $Q$ via the `activate` function when their reach is less than the current front rank [S1].
+ 
+-An edge collapse is prevented if $\text{reach}(c) \ge \text{rank}(\text{front})$. Blocked edges are stored in $W$.
+-
+-### Worker Algorithm
+-Workers run an infinite loop requesting tasks from the manager.
++### Worker Loop
++Workers run an infinite loop requesting tasks from the worker manager until a `FINISHED` task is received [S2].
+ 
+ ```python
+@@ -66,90 +54,91 @@
+         task = get_task()
+         if task.type == EXTRACT:
+-            # Extract local isosurface from sub-block using tandem logic
+-            # Sub-block boundaries prevent edge collapse in neighborhood via time lag
++            # Extract surface from sub-block using tandem algorithm
++            # Sub-block boundaries prevent edge collapse in neighborhood using time lag
+             tandem(E0)
+-            # Append extracted surface to worker's current surface
++            # Appended to worker's current surface
+         elif task.type == SEND:
+             # Send current mesh to target worker
+             send_surface(task.target)
+-            # Empty current surface
++            # Worker's current surface is emptied
+         elif task.type == MERGE:
+-            # Merge current surface with mesh from another worker
++            # Merge received mesh with current surface
+             merge_surface(get_surface(), E0)
+             # Simplify new current surface
+-            # Detect termination of components and dump to disk
++            # Dump finished components to disk
+         elif task.type == FINISHED:
+-            # Merge any remaining surface and dump
++            # Merge any remaining surface
+             merge_surface(get_surface(), E0)
+             finished = True
+ ```
+ 
+-### Worker Manager Algorithm
+-The manager dispatches tasks based on the state of workers and the hierarchical block structure.
++### Worker Manager Loop
++The manager iterates as long as the global surface is not totally extracted. For each worker request, it checks conditions in order [S2]:
+ 
+ ```python
+ def worker_manager():
+-    while not global_extraction_finished:
++    while not finished:
+         id = get_task_request_id()
+         if has_waiting_surface(id):
+-            # Worker has a waiting surface from another worker
+-            send_task(id, MERGE)
++            # Worker has a waiting surface sent by other workers
++            send_task_to_worker(id, MERGE)
+         elif has_neighbor_worker(id):
+-            # Worker has a neighbor fulfilling restricted adjacency requirements
+-            target_id = get_neighbor_id(id)
+-            send_task(id, SEND, target_id)
++            # Worker has a neighbor worker with restricted adjacency
++            target_id = get_neighbor_worker_id(id)
++            send_task_to_worker(id, SEND, target_id)
+         elif has_unprocessed_block(id):
+-            # Find best next block (prioritizing adjacency to current aggregate)
++            # Find best next block fulfilling restricted adjacency
+             block_id = get_unprocessed_block(id)
+-            send_task(id, EXTRACT, block_id)
++            send_task_to_worker(id, EXTRACT, block_id)
+         else:
+-            send_task(id, FINISHED)
++            send_task_to_worker(id, FINISHED)
+ ```
+ 
+-### Tandem Loop (Inside EXTRACT)
+-The local extraction follows the Tandem Algorithm loop [3675-tandem-algorithm.md]:
+-1.  Iterate $k$ from 1 to $N-1$ (cross-sections):
+-    -   `extract(k)`: Add layer (vertices, edges, triangles) to current triangulation.
+-    -   `delay(k)`: Add all edges of layer $k$ to blocked queue $W$, ordered by reach.
+-    -   `activate(k)`: Move edges from $W$ to $Q$ if $\text{reach}(edge) < k$.
+-    -   `simplify(E0)`: Empty $Q$ by applying edge collapses. Reject if shape measure $\epsilon_0(c) > E_0$.
+-    -   `dumping()`: Check for completed components and dump to disk.
+-2.  `activate(∞)`: Move all remaining edges from $W$ to $Q$.
+-3.  `simplify(E0)`: Final simplification.
+-4.  `dumping()`: Final dump.
++Helper functions:
++*   `has_waiting_surface(id)`: Returns true if worker `id` has a waiting surface, else false [S2].
++*   `has_neighbor_worker(id)`: Returns the ID of a worker dealing with a node fulfilling restricted adjacency requirements with the querying worker's aggregate surfaces, else false [S2].
++*   `has_unprocessed_block(id)`: Finds the best next block. Prioritizes unprocessed blocks fulfilling restricted adjacency with the querying worker's current aggregate. If none, returns any unprocessed block. If none, returns false [S2].
+ 
+-### Merging and Simplification
+-When merging two semi-simplified surfaces:
+-1.  Combine the meshes.
+-2.  Apply simplification with **relaxed edge constraints** at the common interface to remove seams.
+-3.  Check for component termination. A component is terminated when its extraction and simplification are complete.
++### Tandem Core Steps
++The local extraction on each block follows the Tandem Algorithm structure [S1, S2]:
++1.  Iterate $k$ from 1 to number of cross-sections - 1:
++    *   `extract(k)`: Adds layer $k$ (vertices, edges, triangles from marching cubes between cross-sections $k-1$ and $k$) to current triangulation.
++    *   `delay(k)`: Adds all edges of layer $k$ to blocked queue $W$, ordered by reach value.
++    *   `activate(k)`: Moves edges from $W$ to $Q$ if their reach value is less than rank of advancing front $k$.
++    *   `simplify(E0)`: Empties queue $Q$ by applying consecutive edge collapses.
++2.  After loop:
++    *   `activate(∞)`: Processes remaining delayed edges.
++    *   `simplify(E0)`: Final simplification.
++
++### Merging and Dumping
++When merging two semi-simplified isosurfaces, a simplification stage with relaxed edge constraints is applied at the common interface to remove seams [S1, S2]. The algorithm detects the termination of a surface component (when extraction and simplification are complete) and dumps the finalized surface to disk along with a meta-data index (oriented bounding box, volume, etc.) [S1, S2]. This frees memory for further processing [S1].
+ 
+ ### Parameters
+--   **$E_0$**: Maximum shape error threshold. Positive constant. Candidates exceeding this are rejected.
+--   **$\alpha$**: Isotropy parameter. Balances shape measure vs. anisotropy. Recommended value: **0.4**. Values $> 0.9$ ignore shape measure, leading to degenerate cases rejected by $E_0$ [S1, S2].
++*   $E_0$: Maximum shape error threshold (positive constant). Typical values depend on dataset noise [S1, S2].
++*   $\alpha$: Isotropy parameter. Recommended value is 0.4 [S1, S2].
+ 
+ ### Edge Cases and Pitfalls
+--   **High Isotropy Parameter**: If $\alpha > 0.9$, the shape criterion is ignored. Collapses are based only on triangle shape quality, proposing points far from the original surface. These are rejected by $E_0$, increasing anisotropy [S2].
+--   **Blocked Edges**: Edges near the advancing front must not be collapsed immediately. The time lag mechanism prevents contraction if $\text{reach}(c) \ge \text{rank}(\text{front})$. If vertices $a, b$ are in the last layer, $\text{height}(c) = \text{rank}(\text{front})$, and since $\text{rad}(c) > 0$, $\text{reach}(c) > \text{rank}(\text{front})$, preventing seams [S1].
+--   **Memory Exhaustion**: Without dumping, queue updates and simplification for large layers (e.g., 1.25 million triangles) exhaust memory [S2].
++*   **High Isotropy Parameter**: If $\alpha > 0.9$, the shape criterion is ignored, leading to collapsed points far from the original surface. These are rejected by $E_0$, increasing anisotropy. Solution: Use $\alpha = 0.4$ [S1, S2].
++*   **Blocked Edges**: Edges near the advancing front can introduce artifacts if collapsed immediately. The time lag mechanism prevents this [S1].
++*   **Memory Bottlenecks**: On noisy datasets (e.g., $1626 \times 7028 \times 2000$), each extraction on advancing fronts generates 1,250,000 triangles, making queue updates and simplification too memory consuming for the sequential Tandem Algorithm. The Extended version mitigates this via dumping [S1, S2].
+ 
+ ## Subtopics
+ 
+-### Hierarchical Binary Partitioning
+-A hierarchical scheme where the dataset is split recursively into sub-blocks to allow parallel extraction and merging. The dataset is split recursively in two parts perpendicularly to its longest direction as long as the sub-block size is greater than a given threshold. Isosurface extraction is performed on the leaf nodes using the Extended Tandem Algorithm, and surfaces are recursively merged to recompose the global surface. The threshold value is not specified in the sources [S1].
++### [Extended Tandem Algorithm with Dumping](4618-extended-tandem-algorithm-with-dumping.md)
++The Extended Tandem Algorithm with Dumping is a parallel, bloc-wise extension of the Tandem algorithm designed to increase scalability for very large datasets by dumping extracted surface components to disk. It prevents memory exhaustion during queue updates and simplification steps, which are the primary bottlenecks in the standard Tandem algorithm for high-resolution data. Unlike its parent, it introduces a mechanism to persist finalized components to storage, allowing the extraction process to continue on sub-parts of the dataset without losing previously computed geometry.
+ 
+-### Parallel Tandem Algorithm with Time Lag
+-A parallel processing method based on dataset splitting and the time lag extension. It ensures that parallel extraction generates a mesh with equivalent quality to the sequential approach. The key parameter is the isotropy parameter $\alpha$, recommended at 0.4 to prevent degenerated cases by ensuring the shape measure is always considered. Using $\alpha > 0.9$ causes the shape criterion to be ignored, leading to collapsed points far from the original surface [S1].
++### [Hierarchical Binary Partitioning](8559-hierarchical-binary-partitioning.md)
++Hierarchical Binary Partitioning is a parallel isosurface extraction method that recursively subdivides a volumetric dataset into sub-blocks to enable independent surface extraction and simplified merging. It distinguishes itself from sibling methods by using a recursive binary tree structure based on the dataset's longest dimension, rather than a fixed regular grid, to balance workload and facilitate the aggregation of semi-simplified surfaces.
+ 
+ ## Operating characteristics
+--   **Time Complexity**: Significantly faster than sequential Tandem. On a seismic dataset ($1626 \times 7028 \times 2000$, 40 GB), extraction took 5 minutes with 56 processors, compared to over 3 hours for the sequential algorithm [S2].
+--   **Memory Complexity**: Minimizes memory by extracting and simplifying in one pass per block and dumping completed components. Prevents the memory exhaustion seen in brute-force approaches or the sequential Tandem on very large datasets [S1, S2].
+--   **Scalability**: Scales well with the number of processors and block splitting. The hierarchical splitting allows efficient load balancing [S2].
+--   **Mesh Quality**: Produces meshes with equivalent anisotropy to the sequential Tandem when $\alpha=0.4$ and time lag is correctly applied. Anisotropy ranges from 0 (equilateral) to 1 (flat) [S2].
+--   **Strengths**: Handles very large geophysics datasets; reduces triangle count drastically compared to classical marching cubes; enables interactive exploration via component-based file organization [S1, S2].
+--   **Limitations**: Requires a master-worker infrastructure; complex task scheduling logic; dependent on efficient I/O for dumping [S1, S2].
++*   **Time Complexity**: The parallel algorithm significantly reduces extraction time compared to the sequential Tandem Algorithm. On a seismic dataset ($1626 \times 7028 \times 2000$, 40 GB), extraction takes 5 minutes with 56 processors, compared to more than three hours for the sequential algorithm [S2].
++*   **Memory Complexity**: The method minimizes memory consumption by processing blocks independently and dumping completed components. It avoids storing the full mesh before simplification, unlike brute-force approaches [S1, S2].
++*   **Performance**: On the seismic dataset, the mesh quality is high, with 328 components kept out of 18,111 in the unfiltered version after sorting by geometrical criteria [S2].
++*   **Scalability**: The parallel algorithm with time lag produces a mesh with equivalent quality (anisotropy variation is similar) to the sequential tandem algorithm [S2].
++*   **Strengths**: Suitable for very large geophysics datasets with numerous small, disconnected components. Reduces memory footprint drastically.
++*   **Limitations**: Requires a worker-manager architecture and network communication for merging. Complexity increases with the number of workers and blocks.
+ 
+ ## Background
+-The Tandem Algorithm was introduced by Attali et al. in 2005 to reduce memory consumption by alternating extraction and simplification [S1]. The Extended Tandem Algorithm was developed to address the limited scalability of the Tandem Algorithm on very large, noisy datasets (e.g., $1626 \times 7028 \times 2000$), where queue updates became too memory-intensive [S1, S2]. It was proposed for use in geophysics, specifically for seismic cubes used in hydrocarbon exploration, where datasets are large and contain numerous small disconnected components [S1, S2]. The work was supported by Total company [S1].
++The Tandem Algorithm was introduced by Attali et al. in 2005 to reduce memory requirements by combining isosurface extraction and simplification in one pass [S1, S2]. The Extended Tandem Algorithm was developed to address the limited scalability of the original algorithm for very large datasets, particularly in geophysics [S1, S2]. It was supported by Total company and applied to datasets of size $7000 \times 1600 \times 2000$ [S1, S2].
+ 
+ ## Sources

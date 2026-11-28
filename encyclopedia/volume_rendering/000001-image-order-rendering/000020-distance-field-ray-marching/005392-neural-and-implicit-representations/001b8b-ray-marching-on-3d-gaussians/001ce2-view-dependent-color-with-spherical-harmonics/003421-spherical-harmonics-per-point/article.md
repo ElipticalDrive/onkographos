@@ -1,0 +1,144 @@
+# Spherical Harmonics Per Point
+
+Also called: Point-based SH Representation, SH Per Point
+
+## Overview
+Spherical Harmonics Per Point is a technique for modeling view-dependent appearance in point-based radiance field representations, where each point carries spherical harmonics (SH) coefficients to define directional color, rather than storing a single static RGB value [S1]. It sets itself apart from directionally invariant point representations by significantly improving rendering quality and view synthesis fidelity, as evidenced by higher PSNR and SSIM scores on standard datasets [S1].
+
+## How it works
+**Inputs and Outputs**
+*   **Input:** A set of 3D points $\{P_i\}$, each with position $\mathbf{p}_i$, opacity $\alpha_i$, and a set of spherical harmonics coefficients $\mathbf{c}_i$.
+*   **Output:** A rendered image pixel color $C$ for a given camera ray.
+
+**Data Structures**
+Each point $i$ stores:
+*   Position: $\mathbf{p}_i \in \mathbb{R}^3$
+*   Opacity: $\alpha_i \in [0, 1]$
+*   SH Coefficients: $\mathbf{c}_i$. The dimension depends on the degree $L$ of the spherical harmonics used. For degree $L$, there are $(L+1)^2$ coefficients per color channel (R, G, B). [G] The coefficients are typically stored as a flat array or a tensor of shape $[(L+1)^2, 3]$.
+
+**Method Steps**
+1.  **Ray-Point Intersection:** For a camera ray, identify the set of points $\mathcal{P}$ that contribute to the pixel. In point-based splatting, this often involves projecting points to screen space and determining coverage, or using a spatial acceleration structure (e.g., voxel grid) to find nearby points [S1].
+2.  **View Direction Calculation:** For each contributing point $i$, compute the view direction $\mathbf{v}_i$ from the camera center to the point position $\mathbf{p}_i$. Normalize $\mathbf{v}_i$.
+3.  **SH Evaluation:** Evaluate the spherical harmonics basis functions $\mathbf{Y}(\mathbf{v}_i)$ at the view direction $\mathbf{v}_i$. The basis functions depend on the chosen degree $L$.
+4.  **Color Computation:** Compute the view-dependent color $\mathbf{C}_i$ for point $i$ by taking the dot product of the SH coefficients and the basis functions:
+    $$ \mathbf{C}_i = \sum_{l=0}^{L} \sum_{m=-l}^{l} c_{i, l, m} \cdot Y_{l, m}(\mathbf{v}_i) $$
+    where $c_{i, l, m}$ are the SH coefficients for point $i$ at degree $l$ and order $m$, and $Y_{l, m}$ are the real spherical harmonics basis functions. This is performed for each color channel (R, G, B) [S1].
+5.  **Compositing:** Composite the colors $\mathbf{C}_i$ and opacities $\alpha_i$ of all contributing points along the ray using standard alpha compositing to produce the final pixel color.
+
+**Parameters**
+*   **SH Degree ($L$):** Determines the complexity of the view-dependent appearance. Higher $L$ allows for more detailed reflections but increases memory and computation. [G] Common values are $L=0$ (constant color), $L=1$ (linear), or $L=2$ (quadratic). The sources do not specify the exact degree used in the ablation study, but the improvement from "w/o sh" implies $L \ge 1$.
+
+**Edge Cases and Pitfalls**
+*   **Precision:** SH evaluation involves trigonometric functions and polynomial evaluations. Numerical stability should be maintained, especially for higher degrees.
+*   **Boundary Conditions:** The SH basis is defined on the unit sphere. Ensure view directions are normalized.
+*   **Degenerate Input:** If a point has zero opacity, its SH coefficients do not contribute to the final color.
+
+**Pseudocode**
+> **Unverified code.** The code below did not pass a test run against a reference implementation, or no test fits it, so it may contain errors.
+
+```python
+import numpy as np
+
+def evaluate_sh_basis(v, degree):
+    """
+    Evaluates real spherical harmonics basis functions for a given view direction v and degree.
+    v: numpy array of shape (3,), normalized view direction.
+    degree: integer, the degree L of the spherical harmonics.
+    Returns: numpy array of shape ((degree+1)**2,), the basis values.
+    """
+    # Implementation of real spherical harmonics basis functions
+    # This is a standard mathematical function, not a library call
+    # For degree 0: [1]
+    # For degree 1: [z, x, y] (normalized appropriately)
+    # For degree 2: [sqrt(3)*xy, sqrt(3)*yz, sqrt(3)*(2z^2-x^2-y^2), sqrt(3)*xz, sqrt(3)*yz] ...
+    # Note: Exact normalization factors depend on the specific SH convention used.
+    # A common convention uses real solid harmonics.
+    # Placeholder for actual SH basis evaluation logic
+    # [G] The exact formula for real SH basis functions is required here.
+    # For example, for L=1:
+    # Y_0^0 = 1/(2*sqrt(pi))
+    # Y_1^-1 = sqrt(3/(4*pi)) * y
+    # Y_1^0 = sqrt(3/(4*pi)) * z
+    # Y_1^1 = sqrt(3/(4*pi)) * x
+    # The coefficients c_{l,m} are scaled accordingly.
+    # For simplicity, assume a precomputed basis function evaluator exists or is implemented.
+    # Here we return a dummy array for structure.
+    num_coeffs = (degree + 1) ** 2
+    return np.ones(num_coeffs)
+
+def compute_point_color(p, v, sh_coeffs, degree):
+    """
+    Computes the view-dependent color for a single point.
+    p: point position (unused in color computation, but part of point struct)
+    v: view direction (normalized)
+    sh_coeffs: numpy array of shape ((degree+1)**2, 3) for R, G, B
+    degree: integer, SH degree
+    Returns: numpy array of shape (3,), the RGB color
+    """
+    basis = evaluate_sh_basis(v, degree)
+    # Dot product between coefficients and basis for each channel
+    color = np.dot(basis, sh_coeffs)
+    return color
+
+def render_point_cloud(points, ray_origin, ray_direction, degree):
+    """
+    Renders a point cloud using spherical harmonics per point.
+    points: list of dicts with keys 'pos', 'opacity', 'sh_coeffs'
+    ray_origin: numpy array (3,)
+    ray_direction: numpy array (3,)
+    degree: integer, SH degree
+    Returns: numpy array (3,), final pixel color
+    """
+    # 1. Find contributing points (simplified: all points for this example)
+    # In practice, use a spatial index or screen-space projection
+    contributing_points = points 
+    
+    # 2. Initialize accumulated color and opacity
+    acc_color = np.zeros(3)
+    acc_opacity = 0.0
+    
+    # 3. Sort points by distance to camera (back-to-front for alpha compositing)
+    # [G] Sorting is crucial for correct alpha compositing
+    distances = [np.linalg.norm(p['pos'] - ray_origin) for p in contributing_points]
+    sorted_indices = np.argsort(distances)
+    
+    for idx in sorted_indices:
+        p = contributing_points[idx]
+        
+        # 4. Compute view direction
+        v = p['pos'] - ray_origin
+        v = v / np.linalg.norm(v)
+        
+        # 5. Compute view-dependent color
+        c = compute_point_color(p['pos'], v, p['sh_coeffs'], degree)
+        
+        # 6. Alpha compositing
+        alpha = p['opacity']
+        acc_color = acc_color + c * alpha * (1.0 - acc_opacity)
+        acc_opacity = acc_opacity + alpha * (1.0 - acc_opacity)
+        
+        if acc_opacity > 0.99: # Early ray termination
+            break
+            
+    return acc_color
+```
+
+## Subtopics
+
+### [Octahedral Surface Texture](23219-octahedral-surface-texture.md)
+Octahedral Surface Texture is a per-cell appearance representation that replaces spherical harmonics with an $8 \times 8$ RGB texture projected onto a Voronoi cell's surface. It solves the problem of limited spatial appearance variation within a single primitive by allowing color to vary across the cell's image footprint, enabling larger cells to represent spatial detail that would otherwise require additional primitives. It sets itself apart from its parent [Spherical Harmonics Per Point](7172-spherical-harmonics-per-point.md) by halving the appearance values required for each cell evaluation while providing continuous, singularity-free directional mapping.
+
+## Operating characteristics
+*   **Time Complexity:** Rendering time depends on the number of contributing points per pixel and the degree of the spherical harmonics. Evaluating SH basis functions is $O(L^2)$ per point.
+*   **Memory Complexity:** Memory usage is proportional to the number of points times the number of SH coefficients per point. For degree $L$, this is $O(N \cdot (L+1)^2 \cdot 3)$ floats, where $N$ is the number of points.
+*   **Measured Performance:** On the Blender dataset, using spherical harmonics yields a PSNR of 30.3 dB, SSIM of 0.945, and LPIPS of 0.078 [S1]. Removing spherical harmonics ('w/o sh') reduces PSNR to 27.1 dB, SSIM to 0.932, and increases LPIPS to 0.155 [S1].
+*   **Strengths:** Significantly improves rendering quality over directionally invariant RGB values [S1]. Allows for compact representation of view-dependent effects like reflections.
+*   **Limitations:** Higher degrees increase memory and computation. May struggle with very high-frequency view-dependent details if the degree is low.
+*   **When to use:** When view-dependent appearance is important and a point-based representation is preferred over volumetric or neural field representations.
+*   **When not to use:** When memory is extremely constrained and low-degree SH is insufficient for the desired visual quality, or when the scene has very complex, high-frequency view-dependent effects that require higher degrees than feasible.
+
+## Background
+Spherical Harmonics Per Point is part of the broader field of differentiable point-based radiance fields for efficient view synthesis [S1]. It departs from volumetric representations and coordinate-network representations, which require ray-marching with hundreds of network evaluations per ray [S1]. The method was introduced in the paper "Differentiable Point-Based Radiance Fields for Efficient View Synthesis" [S1]. The authors investigated an alternate radiance field representation based on points without giving up end-to-end differentiability [S1]. The use of spherical harmonics for view-dependent color in point-based representations has been validated through ablation experiments, showing that it jointly achieves the best view synthesis performance when combined with other components like a coarse-to-fine strategy and a consistency filter function [S1].
+
+## Sources
+[S1] Differentiable Point-Based Radiance Fields for Efficient View Synthesis, https://doi.org/10.1145/3550469.3555413, fetched 2026-10-26

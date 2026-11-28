@@ -1,0 +1,90 @@
+--- v001.md
++++ v002.md
+@@ -4,10 +4,10 @@
+ 
+ ## Overview
+-A conditional discriminator architecture designed for progressive growing in StyleGAN2-based training pipelines. It solves the stability issues associated with training high-resolution generative models by integrating conditional inputs and skip connections that inject downsampled input images into every layer. It differs from standard StyleGAN2 discriminators by explicitly supporting the progressive growing mechanism via these skip connections, and from alternative progressive methods like Progressive Up-sampling by requiring linear fading of new layers rather than inserting upsample operations [S1][S2, unofficial].
++A conditional discriminator based on StyleGAN2 that uses skip connections for progressive growing [S1]. It integrates conditional inputs and adds a downsampled version of the input image to the input of each layer [S1]. It differs from alternative progressive methods like Progressive Up-sampling by requiring linear fading of newly added layers rather than inserting upsample operations [S2, unofficial].
+ 
+ ## How it works
+ **Inputs and Outputs:**
+-- Input: A batch of images (conditioning data) and potentially latent codes if used in a GAN context, though the discriminator primarily evaluates the image quality.
+-- Output: A scalar score or probability distribution indicating real vs. fake.
++- Input: A batch of images with conditional inputs [S1].
++- Output: A scalar score indicating real vs. fake [G].
+ 
+ **Data Structures:**
+@@ -19,5 +19,5 @@
+ 2. **Skip Connection Injection:** At the input of *each* layer in the discriminator, the downsampled input image is added to the feature map [S1].
+ 3. **Conditional Processing:** The discriminator processes the combined features using the standard StyleGAN2 convolutional blocks [S1].
+-4. **Progressive Growing Integration:** As the training resolution increases, new layers are added. These new layers are linearly interpolated (faded in) with the previous low-resolution output to stabilize training [S2, unofficial].
++4. **Progressive Growing Integration:** As the training resolution increases, new layers are added and linearly interpolated (faded in) with the previous low-resolution output [S2, unofficial].
+ 5. **Final Classification:** The output passes through a minibatch standard deviation layer and a final classification layer [S1].
+ 
+@@ -26,5 +26,4 @@
+ - Background learning rate ($\eta_{bg}$): 0.1 for all datasets [S1].
+ - Consistency loss weights ($\lambda_{fcvg}$, $\lambda_{bg}$): 0.1 for all datasets [S1].
+-- Early stopping threshold for volume rendering (if applicable in the broader context): $T_i < 10^{-7}$ [S1].
+ 
+ **Edge Cases and Pitfalls:**
+@@ -34,22 +33,22 @@
+ **Pseudocode:**
+ ```python
+-def discriminator_forward(image, current_resolution, total_resolutions):
+-    # Downsample input image to current resolution
+-    # This is done once and reused for all layers
+-    downsampled_image = downsample(image, current_resolution)
+-    
++def discriminator_forward(image, layers):
++    # Downsample input image to match current training resolution [G]
++    downsampled_image = average_pool(image, target_size=image.shape[-1] // 2)
++
+     features = image
+-    for layer in discriminator_layers:
+-        # Add skip connection: downsampled input to each layer
++    for layer in layers:
++        # Add skip connection: downsampled input to each layer [S1]
+         features = features + downsampled_image
+-        
+-        # Standard StyleGAN2 layer processing
++        # Standard StyleGAN2 convolutional block processing [S1]
+         features = layer(features)
+-        
+-    # Minibatch standard deviation layer at the end
+-    features = minibatch_std_dev(features)
+-    
+-    # Final classification
+-    output = final_layer(features)
++
++    # Minibatch standard deviation layer at the end [S1]
++    batch_std = features.std(dim=0, keepdim=True)
++    features = concatenate([features, batch_std], dim=1)
++
++    # Final classification layer projecting to a scalar score [G]
++    output = sum(features)
++
+     return output
+ ```
+@@ -60,9 +59,15 @@
+ An alternative progressive training method that inserts upsample operations during training instead of growing new layers [S2, unofficial]. Unlike progressive growing, this method does not require linearly fading in layers [S2, unofficial]. It was found to work similarly in visual quality to progressive growing, but progressive growing offers better speed advantages for low-resolution images [S2, unofficial].
+ 
++### Conditional Discriminator with Relative Pose Conditioning
++A GAN training setup where the discriminator is conditioned on relative human pose to handle view-biased 2D generator outputs and ensure consistent texture generation [S3]. During training, the input image from the 2D generator is calibrated with PyMAF to obtain the relative human root transformation $M_{\text{human}}$ and skeleton pose [S3]. For a sampled camera view $v$ from the dataset, the actual rendering view is computed as $v_r = M_{\text{human}}^{-1} v$ [S3].
++
++### Conditional Discriminator with Gradient Regularization
++A discriminator $D$ conditioned on camera pose $\xi$ and motion feature $m$, using a non-saturating adversarial loss with gradient regularization [S4]. During training, a training image is randomly sampled with its corresponding estimated motion feature and pose to control image synthesis [S4]. The adversarial loss is defined as $L_{\text{adv}} = \mathbb{E}_{I_0 \sim p_{\text{syn}}, m \sim p_m, \xi \sim p_\xi}[f(D(I_0, \xi, m))] + \mathbb{E}_{I \sim p_{\text{real}}}[f(-D(I)) + \lambda \|\nabla_D(I)\|_2]$, where $f(u) = -\log(1 + \exp(-u))$ [S4]. The gradient regularization weight $\lambda$ is a coefficient for the penalty term $\|\nabla_D(I)\|_2$, though its exact value is not explicitly stated in the text [S4].
++
+ ## Operating characteristics
+ - **Time Complexity:** Not given in the sources.
+ - **Memory Complexity:** Not given in the sources.
+ - **Performance:** Progressive growing achieves better speed advantages for low-resolution images compared to Progressive Up-sampling [S2, unofficial].
+-- **Strengths:** Stabilizes training during resolution increases via skip connections and linear fading [S1][S2, unofficial].
++- **Strengths:** Supports progressive resolution increases via skip connections and linear layer fading [S1][S2, unofficial].
+ - **Limitations:** Requires careful tuning of learning rates for datasets with small object fractions (e.g., Carla) [S1].
+ 
+@@ -72,3 +77,5 @@
+ ## Sources
+ [S1] VoxGRAF: Fast 3D-Aware Image Synthesis with Sparse Voxel Grids, https://doi.org/10.52202/068431-2464, fetched 2026-10-26
+-[S2] StyleNeRF: A Style-based 3D-Aware Generator for High-resolution Image Synthesis, https://doi.org/10.48550/arxiv.2110.08985, fetched 2026-10-26 (unofficial)+[S2] StyleNeRF: A Style-based 3D-Aware Generator for High-resolution Image Synthesis, https://doi.org/10.48550/arxiv.2110.08985, fetched 2026-10-26 (unofficial)
++[S3] HumanGen: Generating Human Radiance Fields with Explicit Priors, https://doi.org/10.1109/cvpr52729.2023.01207, fetched 2026-10-29
++[S4] Controllable Radiance Fields for Dynamic Face Synthesis, https://doi.org/10.1109/3dv57658.2022.00075, fetched 2026-10-29

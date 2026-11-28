@@ -1,0 +1,222 @@
+--- v002.md
++++ v003.md
+@@ -4,116 +4,133 @@
+ 
+ ## Overview
+-This method sorts face centroids on the CPU using an out-of-place algorithm that achieves linear time complexity at the expense of auxiliary memory [S1, unofficial]. It converts IEEE 754 floating-point numbers to 32-bit unsigned integers and performs a Least Significant Digit (LSD) radix sort using counting sort on 8-bit blocks [S1, unofficial]. It is chosen over general-purpose sorts or re-sorting-optimized algorithms like mergesort because viewing direction changes significantly alter the ordering, making frequent full re-sorting more efficient than adaptive re-sorting overhead [S1, unofficial].
++An out-of-place sorting algorithm used on the CPU to sort face centroids for volume rendering splatting, achieving linear time complexity at the expense of auxiliary memory [S1, unofficial]. It differs from its sibling [Logarithmic Distance Bucket Sort](14468-logarithmic-distance-bucket-sort.md) by using exact integer comparison rather than distance-based bucketing, making it suitable for general-purpose sorting where precise ordering is required without depth-peeling assumptions.
+ 
+ ## How it works
+-**Inputs and Outputs:**
+-- Input: An array of $N$ face centroids, represented as IEEE 754 single-precision (32-bit) floating-point numbers [S1, unofficial].
+-- Output: The array sorted in ascending order, using an auxiliary array of size $N$ for intermediate storage [S1, unofficial].
++**Inputs:** Array of $N$ face centroids (floating-point values, typically distances).
++**Outputs:** Array of $N$ sorted face centroids (ascending order).
++**Auxiliary Data:** An auxiliary array of size $N$ and a count array of size 256.
+ 
+ **Data Structures:**
+-- `float* input`: Pointer to the array of floating-point centroids [S1, unofficial].
+-- `float* output`: Pointer to the auxiliary array of the same size [S1, unofficial].
+-- `unsigned int counts[256]`: A lookup table to store frequency counts for each 8-bit block [S1, unofficial].
++1.  `input`: Array of $N$ 32-bit IEEE 754 floating-point numbers.
++2.  `output`: Array of $N$ 32-bit unsigned integers (sorted keys).
++3.  `counts`: Array of 256 unsigned integers (histogram for counting sort).
+ 
+-**Transformation:**
+-Floating-point numbers must be converted to unsigned integers for integer-based radix sorting [S1, unofficial]. The transformation preserves the ordering of IEEE 754 floats (excluding NaN values) by treating the sign bit appropriately [S1, unofficial]. The conversion function is:
+-$$ \text{fint}(f) = f \oplus ((-(f \gg 31)) \mid 0x80000000) $$
+-Where $f$ is the bit-cast of the float to an unsigned 32-bit integer [S1, unofficial]. This maps negative floats to large unsigned integers and positive floats to small unsigned integers, maintaining correct numerical order [S1, unofficial].
++**Steps:**
++1.  **Transformation:** Convert each floating-point number in `input` to a 32-bit unsigned integer representation that preserves numerical order. This handles the sign bit inversion required for negative numbers in IEEE 754.
++2.  **Pass 1 (LSD):** Perform a counting sort on bits 0–7 of the transformed integers.
++    *   Initialize `counts` to zero.
++    *   Iterate through `input`, extract the lower 8 bits of each transformed value, and increment the corresponding index in `counts`.
++    *   Compute prefix sums (cumulative counts) in `counts` to determine output positions.
++    *   Distribute elements from `input` to `output` based on the computed positions.
++3.  **Pass 2:** Perform a counting sort on bits 8–15. Use `output` from Pass 1 as input and write to `input` (or a second auxiliary buffer, swapping roles).
++4.  **Pass 3:** Perform a counting sort on bits 16–23.
++5.  **Pass 4:** Perform a counting sort on bits 24–31 (MSD).
++6.  **Final Output:** The result is in the array written by Pass 4.
+ 
+-**Algorithm Steps:**
+-The sort operates on four 8-bit blocks (bytes) of the 32-bit integer representation [S1, unofficial]. It performs five passes total: one initial pass to prepare counts, followed by four sorting passes [S1, unofficial].
+-1. **Initialize Counts:** For the current block (starting with bits 0-7), iterate through the input array [S1, unofficial]. For each element, extract the relevant 8-bit byte [S1, unofficial]. Increment the corresponding index in the `counts` array [S1, unofficial].
+-2. **Compute Prefix Sums:** Transform the `counts` array into prefix sums [S1, unofficial]. This determines the starting position for each value in the output array [S1, unofficial].
+-3. **Distribute:** Iterate through the input array again [S1, unofficial]. For each element, extract the byte, look up its position in the prefix sum array, place the element in the `output` array at that position, and increment the position counter [S1, unofficial].
+-4. **Swap Buffers:** If this is not the final pass (bits 24-31), swap the roles of `input` and `output` [S1, unofficial]. The `output` from this pass becomes the `input` for the next pass [S1, unofficial].
+-5. **Repeat:** Repeat steps 1-4 for the next byte (bits 8-15, then 16-23, then 24-31) [S1, unofficial].
++**Formulas:**
++*   **Float to Int Transformation:**
++    $$ f_{int} = f \oplus ((-(f \gg 31)) \mid 0x80000000) $$
++    Where $f$ is the bit-cast of the 32-bit float to an unsigned integer. This transformation ensures that negative floats sort before positive floats and maintain relative order [S1, unofficial].
++*   **Bit Extraction:**
++    For block $k$ (where $k \in \{0, 1, 2, 3\}$), the key for counting sort is:
++    $$ key = (f_{int} \gg (8 \times k)) \ \& \ 0xFF $$
+ 
+ **Pseudocode:**
+ ```python
+-def cpu_radix_sort_face_centroids(input_array, n):
+-    # Convert floats to unsigned 32-bit integers via IEEE 754 bit-cast [G]
+-    int_array = [float_to_uint32(x) for x in input_array]
+-    output_array = [0] * n
++def float_to_uint32(f_bits):
++    """Convert IEEE 754 float bits to signed-magnitude-like uint32 for sorting."""
++    # f_bits is the raw 32-bit integer representation of the float
++    sign_mask = -(f_bits >> 31)  # 0xFFFFFFFF if negative, 0x00000000 if positive
++    return f_bits ^ (sign_mask | 0x80000000)
++
++def cpu_radix_sort_face_centroids(centroids_float):
++    """
++    Sorts an array of floating-point face centroids using LSD Radix Sort.
++    centroids_float: List of floats.
++    Returns: List of sorted floats.
++    """
++    n = len(centroids_float)
++    if n == 0:
++        return []
++
++    # Step 1: Convert floats to sortable integers
++    ints = [float_to_uint32(float_to_bits(c)) for c in centroids_float]
++    
++    # Auxiliary arrays
++    output = [0] * n
+     counts = [0] * 256
++    
++    # Current data source and destination
++    src = ints
++    dst = output
+ 
+-    # Pass 1: Count occurrences for all four 8-bit blocks in a single pass
+-    for i in range(n):
+-        val = int_array[i]
+-        for b in range(4):
+-            byte_val = (val >> (b * 8)) & 0xFF
+-            counts[byte_val] += 1
++    # Step 2-5: Four passes for 8-bit blocks
++    for k in range(4):
++        # Reset counts
++        for i in range(256):
++            counts[i] = 0
++            
++        # Count occurrences
++        for i in range(n):
++            key = (src[i] >> (8 * k)) & 0xFF
++            counts[key] += 1
++            
++        # Compute prefix sums (cumulative counts)
++        # counts[i] will store the starting index for key i in the output
++        total = 0
++        for i in range(256):
++            temp = counts[i]
++            counts[i] = total
++            total += temp
++            
++        # Distribute elements to dst
++        for i in range(n):
++            key = (src[i] >> (8 * k)) & 0xFF
++            pos = counts[key]
++            dst[pos] = src[i]
++            counts[key] += 1
++            
++        # Swap src and dst for next pass
++        src, dst = dst, src
+ 
+-    # Pass 2: Sort bits 0-7 (LSD)
+-    _counting_sort_pass(int_array, output_array, counts, n, 0)
+-    int_array, output_array = output_array, int_array
++    # Convert back to floats
++    sorted_floats = [bits_to_float(d) for d in src]
++    return sorted_floats
+ 
+-    # Pass 3: Sort bits 8-15
+-    _counting_sort_pass(int_array, output_array, counts, n, 8)
+-    int_array, output_array = output_array, int_array
++def float_to_bits(f):
++    import struct
++    return struct.unpack('I', struct.pack('f', f))[0]
+ 
+-    # Pass 4: Sort bits 16-23
+-    _counting_sort_pass(int_array, output_array, counts, n, 16)
+-    int_array, output_array = output_array, int_array
+-
+-    # Pass 5: Sort bits 24-31
+-    _counting_sort_pass(int_array, output_array, counts, n, 24)
+-    # Final result is in output_array
+-    return [uint32_to_float(x) for x in output_array]
+-
+-def _counting_sort_pass(src, dst, counts, n, shift):
+-    # Reset counts
+-    for i in range(256): counts[i] = 0
+-    # Count
+-    for i in range(n):
+-        byte_val = (src[i] >> shift) & 0xFF
+-        counts[byte_val] += 1
+-    # Prefix sum
+-    total = 0
+-    for i in range(256):
+-        temp = counts[i]
+-        counts[i] = total
+-        total += temp
+-    # Distribute
+-    for i in range(n):
+-        byte_val = (src[i] >> shift) & 0xFF
+-        pos = counts[byte_val]
+-        dst[pos] = src[i]
+-        counts[byte_val] += 1
+-
+-def float_to_uint32(f):
+-    # Standard IEEE 754 bit-cast [G]
+-    return int.from_bytes(f.to_bytes(4, 'little'), 'unsigned')
+-
+-def uint32_to_float(u):
+-    # Standard IEEE 754 bit-cast [G]
+-    return float.from_bytes(u.to_bytes(4, 'little'), 'little')
++def bits_to_float(i):
++    import struct
++    return struct.unpack('f', struct.pack('I', i))[0]
+ ```
+ 
+ **Parameters:**
+-- Block size: 8 bits [S1, unofficial].
+-- Bucket size: 256 entries [S1, unofficial].
+-- Passes: 4 sorting passes after the initial counting pass [S1, unofficial].
++*   Block size: 8 bits (4 passes total) [S1, unofficial].
++*   Count array size: 256 [S1, unofficial].
+ 
+ **Edge Cases and Pitfalls:**
+-- **NaN Values:** The transformation does not correctly order NaN values [S1, unofficial]. NaNs should be handled separately or filtered out before sorting [S1, unofficial].
+-- **Precision:** The method relies on the specific bit layout of IEEE 754 [S1, unofficial]. It is not portable to non-IEEE floating-point formats without modification [S1, unofficial].
+-- **Memory:** The algorithm is out-of-place, requiring auxiliary memory equal to the size of the input array [S1, unofficial].
++*   **NaN Values:** The transformation assumes standard IEEE 754 numbers excluding NaNs. NaNs may not sort correctly or consistently [S1, unofficial].
++*   **Precision:** The transformation relies on the specific bit layout of IEEE 754. Non-compliant floating-point representations will fail [S1, unofficial].
++*   **Memory:** The algorithm is out-of-place, requiring $O(N)$ auxiliary memory [S1, unofficial].
+ 
+ ## Subtopics
+ 
+-### LSD Block Sorting (Radix Sort)
+-This variant sorts bits 0-7, 8-15, 16-23, and 24-31 sequentially using counting sort [S1, unofficial]. It requires five passes through the array (one to count, four to sort) and establishes linear complexity [S1, unofficial]. It is chosen for its ability to sort upwards of 15 million faces per second on the tested hardware [S1, unofficial].
++### [LSD Block Sorting (Radix Sort)](6217-lsd-block-sorting-radix-sort.md)
++LSD Block Sorting is a CPU-based radix sort algorithm that sorts 32-bit integers by processing them in 8-bit blocks from least significant to most significant. It solves the problem of ordering face centroids for volume rendering splatting by achieving linear time complexity through five sequential counting sort passes. It differs from its sibling [Logarithmic Distance Bucket Sort](14468-logarithmic-distance-bucket-sort.md) by using exact integer comparison rather than distance-based bucketing, making it suitable for general-purpose sorting where precise ordering is required without depth-peeling assumptions.
+ 
+ ## Operating characteristics
+-- **Time Complexity:** Linear $O(N)$, where $N$ is the number of faces [S1, unofficial].
+-- **Memory Complexity:** $O(N)$ auxiliary space for the output array and $O(1)$ for the count array (size 256) [S1, unofficial].
+-- **Performance:** On the test hardware, this method sorts one million floating-point numbers in 64 ms [S1, unofficial]. This is significantly faster than shellsort (584 ms), heapsort (507 ms), and quicksort (281 ms) [S1, unofficial]. The implementation can sort upwards of 15 million faces per second [S1, unofficial].
+-- **Strengths:** High throughput for large datasets and predictable performance [S1, unofficial].
+-- **Limitations:** Requires auxiliary memory and is not suitable for in-place constraints [S1, unofficial].
+-- **When to use:** When GPU sorting is unavailable and high throughput is required for dynamic scenes where viewing direction changes frequently [S1, unofficial].
+-- **When not to use:** When memory is extremely constrained or when NaN handling is critical without pre-filtering [S1, unofficial].
++*   **Time Complexity:** Linear $O(N)$, where $N$ is the number of faces. The constant factor is small due to the fixed number of passes (4) and small radix (256) [S1, unofficial].
++*   **Memory Complexity:** $O(N)$ auxiliary space for the output array and $O(1)$ for the count array (size 256) [S1, unofficial].
++*   **Performance:** Sorts upwards of 15 million faces per second on the tested hardware [S1, unofficial].
++*   **Comparison:** Significantly faster than shellsort (584 ms), heapsort (507 ms), and quicksort (281 ms) for sorting one million floating-point numbers (radixsort took 64 ms) [S1, unofficial].
++*   **Strengths:** Predictable performance independent of data distribution; much faster than comparison-based sorts for large $N$ [S1, unofficial].
++*   **Limitations:** Requires auxiliary memory; not in-place; assumes IEEE 754 format [S1, unofficial].
++*   **When to use:** When sorting large numbers of face centroids on the CPU where GPU sorting is unavailable or disabled [S1, unofficial].
++*   **When not to use:** When memory is extremely constrained (due to auxiliary array requirement) or when the data is already nearly sorted and a specialized adaptive sort might be preferred (though the source notes that re-sorting is generally more efficient than adaptive sorts for this use case due to viewing direction changes) [S1, unofficial].
+ 
+ ## Background
+-This method originates from the "K-Buffer and Its Applications to Volume Rendering" thesis by Steve Callahan (2006) [S1, unofficial]. It was developed as a CPU fallback for volume splatting rendering, where face centroids need to be sorted for correct depth ordering [S1, unofficial]. The choice of LSD radix sort over other algorithms was based on extensive testing showing its superior performance for the specific workload of sorting face centroids in interactive volume rendering [S1, unofficial].
++Originated in the context of the K-Buffer and its applications to volume rendering [S1, unofficial]. The method was selected over other common sorting algorithms (shellsort, heapsort, quicksort, mergesort) because re-sorting face centroids with a fast sort is more efficient in practice than using an algorithm optimized for re-sorting previously sorted sequences, as the ordering can change significantly from frame to frame due to viewing direction changes [S1, unofficial]. The specific float-to-int transformation is based on established techniques for sorting IEEE 754 floats as integers [S1, unofficial].
+ 
+ ## Sources

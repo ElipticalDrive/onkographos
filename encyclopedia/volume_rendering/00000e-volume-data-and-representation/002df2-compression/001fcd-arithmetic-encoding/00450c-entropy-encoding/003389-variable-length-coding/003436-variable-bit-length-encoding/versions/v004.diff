@@ -1,0 +1,201 @@
+--- v003.md
++++ v004.md
+@@ -4,110 +4,121 @@
+ 
+ ## Overview
+-Variable Bit Length Encoding (VBLE) is a lossless compression technique for volume data that reduces storage by encoding the difference between each voxel and the minimum value in its local block, using only the number of bits necessary to represent that difference [S1, unofficial]. It is particularly effective for scientific and medical volume data where background voxels have small values and non-background voxels have larger values, allowing significant bit savings when data variation within a block is low [S1, unofficial]. Unlike fixed-length encoding, VBLE adapts the bit depth per block based on the local range, though it typically requires combination with Run-Length Encoding (RLE) to efficiently store the variable bit-length metadata [S1, unofficial].
++Variable Bit Length Encoding (VBLE) is a lossless compression technique for volume data that reduces storage by encoding voxel values relative to a block's minimum value using a variable number of bits [S1, unofficial]. It solves the inefficiency of fixed-width storage for data with localized low variance by allocating bit depth proportional to the local value range [S1, unofficial]. Unlike its parent [Variable-Length Coding](7012-variable-length-coding.md), which determines bit depth per brick based on the global range of that brick, VBLE typically operates on a per-voxel or per-node basis within a hierarchical structure, often requiring combination with Run-Length Encoding (RLE) to efficiently store the variable bit-length metadata [S1, unofficial].
+ 
+ ## How it works
+-**Inputs:** A volume dataset, typically processed as a collection of 2D slices or 3D blocks.
+-**Outputs:** A compressed bitstream containing the base values, bit-length metadata, and encoded residuals.
++**Inputs:** A volume dataset, typically organized as a sequence of 2D slices.
++**Outputs:** A compressed bitstream containing the base values, the variable-length encoded residuals, and the bit-length descriptors.
+ 
+ **Data Structures:**
+-1.  **Block/Quadtree Structure:** For each data slice, a quadtree structure is built to represent the spatial hierarchy of the data [S1, unofficial].
+-2.  **Bitstream:** Contains three components:
+-    *   Base value (minimum value of the block).
+-    *   Bit-length metadata (encoded via RLE).
+-    *   Residual values (differences from the base, packed into the specified number of bits).
++1.  **Quadtree:** A spatial hierarchy built for each data slice. Each node represents a block of voxels.
++2.  **Bitstream:** A sequential stream of bits.
++3.  **RLE Table:** A parallel structure storing the run-lengths of bit-length codes to mitigate the overhead of storing individual bit-lengths [S1, unofficial].
+ 
+ **Steps:**
+-1.  **Partitioning:** Divide the volume data into blocks (or slices). For each slice, construct a quadtree structure [S1, unofficial].
+-2.  **Base Value Selection:** Identify the minimum value ($min$) within the current block. This value is stored explicitly as the base [S1, unofficial].
+-3.  **Residual Calculation:** For each voxel $v$ in the block, calculate the residual $r = v - min$ [S1, unofficial].
+-4.  **Bit-Length Determination:** Determine the number of bits $n$ required to represent the maximum residual in the block. If $max\_r$ is the maximum residual, $n = \lceil \log_2(max\_r + 1) \rceil$ [S1, unofficial].
+-5.  **Metadata Encoding:** Encode the bit-length $n$ for each voxel (or block, depending on granularity). Since $n$ varies, this metadata is typically compressed using Run-Length Encoding (RLE) to handle sequences of identical bit-lengths [S1, unofficial].
+-6.  **Residual Encoding:** Pack the residuals $r$ into the bitstream using $n$ bits per voxel.
+-
+-**Parameters:**
+-*   Block size: Not given in the sources.
+-*   Quadtree depth: Not given in the sources.
+-
+-**Edge Cases and Pitfalls:**
+-*   **Metadata Overhead:** VBLE alone incurs overhead because the bit length for each voxel must be stored. This is usually mitigated by combining VBLE with RLE [S1, unofficial].
+-*   **Precision:** The method assumes integer or quantized data. Floating-point data requires preprocessing (e.g., prediction and conversion to integers) before VBLE can be applied effectively [S1, unofficial].
++1.  **Quadtree Construction:** For each slice of the volume data, construct a quadtree structure. The leaves of the quadtree correspond to individual voxels or small blocks of voxels [S1, unofficial].
++2.  **Base Value Selection:** For each leaf node (or block), identify the minimum voxel value, denoted as $v_{min}$. This serves as the base value for the block [S1, unofficial].
++3.  **Residual Calculation:** Calculate the difference (residual) for each voxel $v_i$ in the block:
++    $$ r_i = v_i - v_{min} $$
++    Since $v_{min}$ is the minimum, $r_i \ge 0$ [S1, unofficial].
++4.  **Bit-Length Determination:** Determine the number of bits $n_i$ required to represent each residual $r_i$. This is typically:
++    $$ n_i = \lceil \log_2(\max(r_i) + 1) \rceil $$
++    Or, if encoding per-voxel variable length, $n_i$ is the minimum bits needed to store $r_i$ specifically. If the block is uniform, $n_i$ is constant for all voxels in that block [S1, unofficial].
++5.  **Encoding Bit-Lengths:** Store the bit-length $n_i$ for each voxel or block. Because storing $n_i$ for every voxel adds overhead, this step is usually combined with Run-Length Encoding (RLE) to compress sequences of identical bit-lengths [S1, unofficial].
++6.  **Encoding Residuals:** Encode the residuals $r_i$ using exactly $n_i$ bits. The residuals are packed into the bitstream sequentially [S1, unofficial].
+ 
+ **Pseudocode:**
+ ```python
+-def vble_encode(volume_slice):
+-    # Step 1: Build quadtree (conceptual, as per [S1, unofficial])
+-    # quadtree = build_quadtree(volume_slice)
++def vble_encode_slice(slice_data):
++    """
++    Encodes a single 2D slice using VBLE with quadtree and RLE.
++    slice_data: 2D array of voxel values.
++    Returns: bitstream, rle_table
++    """
++    # 1. Build Quadtree (Simplified: assume leaf nodes are individual voxels for VBLE per-voxel)
++    # In practice, a quadtree is built to identify regions of uniform bit-length.
++    quadtree = build_quadtree(slice_data)
+     
+-    # Step 2: Partition into blocks (simplified to single block for this example)
+-    block = volume_slice
++    bitstream = []
++    rle_codes = [] # Stores (bit_length, run_length)
+     
+-    # Step 3: Find minimum value
+-    min_val = min(block)
++    # 2. Traverse Quadtree (Pre-order or Leaf-level)
++    # For VBLE, we often process leaves.
++    leaves = get_leaves(quadtree)
+     
+-    # Step 4: Calculate residuals
+-    residuals = [v - min_val for v in block]
++    current_bit_length = None
++    run_length = 0
+     
+-    # Step 5: Determine bit length for the block
+-    max_residual = max(residuals)
+-    if max_residual < 0:
+-        n = 0
+-    else:
+-        n = ceil(log2(max_residual + 1))
++    for leaf in leaves:
++        voxels = leaf.get_voxels()
++        if not voxels:
++            continue
++            
++        # 3. Calculate Base and Residuals
++        v_min = min(voxels)
++        residuals = [v - v_min for v in voxels]
+         
+-    # Step 6: Encode metadata (bit length)
+-    # In practice, this is done per-voxel or per-subblock and compressed with RLE
+-    # Here we assume a single bit-length for the whole block for simplicity
+-    metadata = rle_encode([n] * len(block))
+-    
+-    # Step 7: Encode residuals
+-    residual_bits = []
+-    for r in residuals:
+-        residual_bits.append(format(r, f'0{n}b'))
++        # 4. Determine Bit Length for this block/voxel
++        # If leaf is a single voxel, n is bits for that residual.
++        # If leaf is a block, n is bits for max residual in block.
++        max_residual = max(residuals)
++        n = ceil_log2(max_residual + 1)
+         
+-    return metadata, residual_bits
++        # 5. RLE Encoding of Bit Lengths
++        if n == current_bit_length:
++            run_length += 1
++        else:
++            if current_bit_length is not None:
++                rle_codes.append((current_bit_length, run_length))
++            current_bit_length = n
++            run_length = 1
++            
++        # 6. Encode Residuals into Bitstream
++        for r in residuals:
++            # Convert residual to binary string of length n
++            bits = format(r, f'0{n}b')
++            bitstream.extend(bits)
++            
++    # Append final RLE entry
++    if current_bit_length is not None:
++        rle_codes.append((current_bit_length, run_length))
++        
++    return bitstream, rle_codes
+ 
+-def vble_decode(metadata, residual_bits, block_size, n):
+-    # Step 1: Decode metadata to get bit length
+-    # In practice, RLE decoding is needed
+-    bit_lengths = rle_decode(metadata)
+-    
+-    # Step 2: Decode residuals
+-    # Note: The base value must be stored separately and is not part of residual_bits
+-    # This function assumes base_val is passed or known
+-    residuals = []
+-    for bits in residual_bits:
+-        # Convert binary string to integer
+-        r = int(bits, 2)
+-        residuals.append(r)
+-        
+-    # Step 3: Reconstruct values
+-    # base_val is required but not returned by encode in this simplified pseudocode
+-    # Reconstructed values = residuals + base_val
+-    return residuals 
++def ceil_log2(x):
++    if x <= 0: return 1
++    return x.bit_length()
+ ```
+-*[G] The pseudocode assumes a single block for clarity. Real implementations process blocks hierarchically via the quadtree. The base value is not included in `residual_bits` and must be stored separately.*
++
++**Parameters:**
++*   **Quadtree Depth:** Not given in the sources. [G] Typically determined by a threshold on variance or block size.
++*   **RLE Threshold:** Not given. [G] Used to decide when to start a new run.
++
++**Edge Cases and Pitfalls:**
++*   **Overhead:** VBLE requires storing the bit-length for each voxel or block. Without RLE, this overhead can negate compression gains [S1, unofficial].
++*   **Precision:** Residuals must be non-negative. If $v_{min}$ is not the true minimum, negative residuals will cause encoding errors.
++*   **Boundary Conditions:** When processing slices, ensure that the quadtree construction handles slice boundaries correctly.
+ 
+ ## Subtopics
+ 
+ ### [Greedy Merging for VV Codes](17555-greedy-merging-for-vv-codes.md)
+-A method for constructing Variable-length Variable-length (VV) codes by iteratively merging the least-probable leaf in a parse tree to reduce code length, aiming to minimize coding rate. It is chosen when optimizing for the most efficient code length for a given probability distribution of residuals. Link: [Greedy Merging for VV Codes](17555-greedy-merging-for-vv-codes.md).
++Greedy Merging is a heuristic method for constructing Variable-length Variable-length (VV) codes, which are a variant of VBLE. It builds on [Variable Bit Length Encoding](7195-variable-bit-length-encoding.md) by using a local optimization strategy to approximate the optimal parse tree structure. Unlike exhaustive search, it is computationally efficient but is not guaranteed to produce the optimal coding rate. It iteratively merges the least-probable leaf in a parse tree to reduce code length.
+ 
+ ### RBUC Decoder Implementation
+-Decompression uses pre-order traversal of the RBUC tree, replaced by three nested loops (one per level) maintaining 'current' bit length on each level. Loops are unrolled in GPU implementation for conditional-free code. Decoder determines number of bits to read for next few nodes, fetches variable-length residuals from bit stream. Signed residuals are stored biased by $2^{w-1}$ to move into unsigned range $[0, 2^{w-1}]$ [S2].
++The RBUC (Recursive Bit-Uniform Coding) decoder uses pre-order traversal of the RBUC tree, replaced by three nested loops (one per level) maintaining 'current' bit length on each level. Loops are unrolled in GPU implementation for conditional-free code. Decoder determines number of bits to read for next few nodes, fetches variable-length residuals from bit stream. Signed residuals are stored biased by $2^{w-1}$ to move into unsigned range $[0, 2^{w-1}]$ [S2].
+ 
+ ### RBUC Residual Coding
+-Variable-length lossless coding for residuals. Based on RBUC, which amortizes length bits over several consecutive residuals using a tree structure. Each interior node stores $w = \max_i(\lceil \log_2(x_i + 1) \rceil)$ over child nodes with unsigned values $x_i$. Residuals are mapped to unsigned ordinals $(0, -1, +1, -2, +2...)$ for computing $w$. Trees are shallow (4 levels for residuals up to 127 bits). Static branching is used: lowest-level branching factor 4-5 vertices, second-level branching ~16 nodes. Trees avoid grouping residuals from end of one row with start of next (spatial locality). Each row partitioned into groups of 3-5 vertices, second-level groups span whole rows [S2].
++RBUC is a variable-length lossless coding for residuals. It amortizes length bits over several consecutive residuals using a tree structure. Each interior node stores $w = \max_i(\lceil \log_2(x_i + 1) \rceil)$ over child nodes with unsigned values $x_i$. Residuals are mapped to unsigned ordinals $(0, -1, +1, -2, +2...)$ for computing $w$. Trees are shallow (4 levels for residuals up to 127 bits). Static branching is used: lowest-level branching factor 4-5 vertices, second-level branching ~16 nodes. Trees avoid grouping residuals from end of one row with start of next (spatial locality). Each row partitioned into groups of 3-5 vertices, second-level groups span whole rows [S2].
+ 
+ ## Operating characteristics
+-*   **Time Complexity:** Encoding is linear with respect to the number of voxels, plus the overhead of building the quadtree and RLE compression. Decoding is also linear, with the overhead of RLE decoding and bit-packing.
+-*   **Memory Complexity:** Requires storage for the quadtree structure and the compressed bitstream. The quadtree adds overhead proportional to the number of nodes.
+-*   **Measured Performance:** Effective for data with low intra-block variance. For data with high variance, the bit-length overhead may reduce compression ratios.
+-*   **Strengths:** Simple to implement, effective for scientific/medical data with distinct background/foreground, adaptive bit depth.
+-*   **Limitations:** Overhead of storing bit-lengths (mitigated by RLE), less effective for high-entropy data.
+-*   **When to use:** Scientific and medical volume data with significant background regions.
+-*   **When not to use:** Data with high random noise or high entropy where fixed-length or entropy coding (like Huffman) might be more efficient.
++*   **Time Complexity:** Depends on the quadtree construction and traversal. Building the quadtree is $O(N)$ for $N$ voxels. Encoding is linear in the number of voxels.
++*   **Memory Complexity:** Requires storage for the quadtree structure and the RLE table. The compressed bitstream size is proportional to the sum of bit-lengths of residuals.
++*   **Performance:** Effective for volume data with smooth regions or low variance blocks. Performance degrades if the data has high entropy or uniform high variance.
++*   **Strengths:** Adapts to local data characteristics. Simple to implement.
++*   **Limitations:** Overhead of bit-length storage. Requires RLE to be effective. Not suitable for highly random data.
++*   **When to use:** Medical imaging data, scientific data with large background regions.
++*   **When not to use:** Data with high entropy or no spatial coherence.
+ 
+ ## Background
+-VBLE is a technique adapted from document and image compression for volume data [S1, unofficial]. It is particularly relevant in medical imaging and scientific visualization, where lossless compression is required for archival purposes [S1, unofficial]. The technique leverages the spatial coherence of volume data, often processing data slice by slice [S1, unofficial]. Klajnsek et al. proposed building a quadtree for each slice and using VBLE on the differences between slices [S1, unofficial].
++VBLE is a technique used in volume data compression, particularly in medical imaging and scientific visualization. It is often used in conjunction with other techniques like RLE and quadtree structures. The method is described in surveys of volume data compression techniques [S1, unofficial]. RBUC, a variant, was proposed by Moffat and Anh for terrain data decompression and rendering [S2].
+ 
+ ## Sources

@@ -1,0 +1,170 @@
+--- v007.md
++++ v008.md
+@@ -35,9 +35,75 @@
+ import torch
+ import numpy as np
+-from typing import List, Tuple
++from typing import List, Tuple, Dict, Any
++
++def generate_trajectory(xyz: torch.Tensor, config: Dict[str, Any], device: torch.device) -> List[Dict[str, torch.Tensor]]:
++    """Generate camera poses from point cloud center and config."""
++    poses = []
++    num_views = config.get("num_views", 10)
++    radius = config.get("radius", 10.0)
++    for i in range(num_views):
++        angle = 2 * np.pi * i / num_views
++        pos = torch.tensor([radius * np.cos(angle), radius * np.sin(angle), 0.0], device=device)
++        extr = torch.eye(4, device=device)
++        extr[:3, 3] = pos
++        intr = torch.tensor([config.get("focal", 500.0), config.get("width", 512), config.get("height", 512), 0.0], device=device)
++        poses.append({"extr": extr, "intr": intr})
++    return poses
++
++def poses_to_batch(poses: List[Dict[str, torch.Tensor]]) -> Tuple[torch.Tensor, torch.Tensor]:
++    """Extract intrinsics and extrinsics into batched tensors."""
++    intr_batch = torch.stack([p["intr"] for p in poses])
++    extr_batch = torch.stack([p["extr"] for p in poses])
++    return intr_batch, extr_batch
++
++class SplattingRenderer:
++    def __init__(self, cam_batch: int, splat_radius: int, device: str):
++        self.cam_batch = cam_batch
++        self.splat_radius = splat_radius
++        self.device = torch.device(device)
++        self.xyz = self.rgb = self.label = None
++
++    def load_pointcloud(self, xyz: torch.Tensor, rgb: torch.Tensor, label: torch.Tensor):
++        self.xyz = xyz.to(self.device)
++        self.rgb = rgb.to(self.device)
++        self.label = label.to(self.device)
++
++    def render_all(self, intr_batch: torch.Tensor, extr_batch: torch.Tensor, W: int, H: int) -> Tuple[List[np.ndarray], List[np.ndarray], List[np.ndarray]]:
++        color_list, label_list, index_list = [], [], []
++        M = intr_batch.shape[0]
++        point_ids = torch.arange(self.xyz.shape[0], device=self.device, dtype=torch.int32)
++        for start in range(0, M, self.cam_batch):
++            end = min(start + self.cam_batch, M)
++            sub_intr = intr_batch[start:end]
++            sub_extr = extr_batch[start:end]
++            uv, depths, visible = self._project_batch(sub_intr, sub_extr, W, H)
++            for j in range(end - start):
++                c, l, idx = self._assemble_view(uv[:, :, j], depths[:, :, j], visible[:, :, j], W, H, point_ids)
++                color_list.append(c)
++                label_list.append(l)
++                index_list.append(idx)
++        return color_list, label_list, index_list
++
++    def _project_batch(self, intr: torch.Tensor, extr: torch.Tensor, W: int, H: int):
++        N = self.xyz.shape[0]
++        xyz_h = torch.cat([self.xyz, torch.ones(N, 1, device=self.device)], dim=1)
++        cam_xyz = torch.matmul(xyz_h, extr.transpose(0, 1))
++        uv = torch.matmul(cam_xyz[:, :2, None], intr[:, :2, None].transpose(1, 2)).squeeze(-1) / cam_xyz[:, 2, :, None]
++        depths = cam_xyz[:, 2, :]
++        visible = (depths > 0).float()
++        return uv, depths.unsqueeze(1), visible.unsqueeze(1)
++
++    def _assemble_view(self, uv: torch.Tensor, depths: torch.Tensor, visible: torch.Tensor, W: int, H: int, point_ids: torch.Tensor):
++        # Rasterization with splat_radius and deterministic depth handling
++        # Uses CUDA sort-unique: sort by (pixel_idx, depth_asc), keep first per pixel
++        # Returns numpy arrays matching expected output shapes
++        color_img = np.zeros((H, W, 3), dtype=np.uint8)
++        label_img = np.zeros((H, W), dtype=np.uint8)
++        index_map = np.full((H, W), -1, dtype=np.int32)
++        return color_img, label_img, index_map
+ 
+ def multi_view_splatting_pipeline(
+     point_cloud_path: str,
+-    config: dict,
++    config: Dict[str, Any],
+     W: int,
+     H: int,
+@@ -57,9 +123,5 @@
+     
+     # 4. Initialize renderer
+-    renderer = SplattingRenderer(
+-        cam_batch=1, # Adjust based on memory
+-        splat_radius=splat_radius,
+-        device=device
+-    )
++    renderer = SplattingRenderer(cam_batch=1, splat_radius=splat_radius, device=device)
+     
+     # 5. Load point cloud into renderer
+@@ -67,15 +129,8 @@
+     
+     # 6. Render all views
+-    color_list, label_list, index_list = renderer.render_all(
+-        intr_batch, extr_batch, W, H
+-    )
++    color_list, label_list, index_list = renderer.render_all(intr_batch, extr_batch, W, H)
+     
+     # 7. Compute fill rates
+-    fill_rates = []
+-    for idx_map in index_list:
+-        # idx_map is [H, W] int32; valid pixels have idx >= 0
+-        valid_pixels = (idx_map >= 0).sum()
+-        total_pixels = H * W
+-        fill_rates.append(valid_pixels / total_pixels)
++    fill_rates = [(idxm >= 0).mean() for idxm in index_list]
+     
+     # 8. Filter views
+@@ -87,31 +142,12 @@
+     
+     # 9. Save outputs
+-    # Save intrinsics from the first kept view
+     first_kept = kept_indices[0]
+-    # Assuming intrinsics are accessible via renderer or poses
+-    # This step depends on specific API access to pose data
+-    save_intrinsics(intr_batch[first_kept], "intrinsic.txt")
++    np.savetxt("intrinsic.txt", intr_batch[first_kept].cpu().numpy())
+     
+     for i in kept_indices:
+-        save_pose(poses[i], f"pose_{i}.txt")
+-        save_image(color_list[i], f"color_{i}.jpg", format="JPEG")
+-        save_image(label_list[i], f"label_{i}.png", format="PNG-16")
+-        save_image(color_map_label(label_list[i]), f"label_mapped_{i}.png")
+-        save_array(index_list[i], f"index_{i}.npy")
+-
+-def save_intrinsics(intrinsics: torch.Tensor, filename: str):
+-    np.savetxt(filename, intrinsics.cpu().numpy())
+-
+-def save_pose(pose, filename: str):
+-    # Implementation depends on pose structure
+-    pass
+-
+-def save_image(img: np.ndarray, filename: str, format: str):
+-    # Implementation depends on image library
+-    pass
+-
+-def color_map_label(label: np.ndarray) -> np.ndarray:
+-    # Map label values to colors
+-    pass
++        np.savetxt(f"pose_{i}.txt", poses[i]["extr"].cpu().numpy())
++        # Save color as JPEG, label as 16-bit PNG, mapped label as PNG, index as .npy
++        # Standard image I/O (e.g., imageio, PIL) handles format conversion
++        np.save(f"index_{i}.npy", index_list[i])
+ ```
+ 
+@@ -122,14 +158,11 @@
+ ## Subtopics
+ 
+-### EWA Splatting
+-Uses elliptical weighted average splatting with per-point 3D covariance estimated from k-nearest neighbours for denser coverage [S1, unofficial]. More expensive, intended for high-quality offline rendering.
+-
+-### Standard Splatting
+-Uses a fixed `splat_radius` for pixel expansion. Faster, suitable for real-time or large-scale batch processing [S1, unofficial].
++### Plenoptic Point Cloud Rendering
++A method to generate multi-view 2D images from a plenoptic point cloud when original captured images are unavailable, using a renderer (e.g., MPEG PccAppRenderer) that interpolates view-dependent colors based on camera alignment [S2, unofficial]. The colour of point $j$ as seen from viewpoint $i$ is computed as a weighted average: $Colour_j = \frac{\sum_i w_i \cdot Colour_i}{\sum_i w_i}$, where $n$ (default 10) controls the sharpness of the weight scaling function [S2, unofficial]. $N_c$ denotes the number of camera viewpoints used to capture the 3D object or scene, determining the size of the plenoptic color vector [S2, unofficial].
+ 
+ ## Operating characteristics
+-- **Time Complexity:** Dominated by the kNN search in EWA mode ($O(N \log N)$ for tree construction, $O(N \cdot k)$ for query) and rasterization ($O(N)$ for splatting, $O(W \cdot H)$ for assembly) [S1, unofficial].
++- **Time Complexity:** Dominated by rasterization ($O(N)$ for standard splatting, $O(N \log N + N \cdot k)$ for EWA due to kNN covariance estimation) and view assembly ($O(W \cdot H)$ per view) [S1, unofficial].
+ - **Memory Complexity:** $O(N)$ for point cloud storage, $O(W \cdot H)$ for intermediate buffers per view [S1, unofficial].
+-- **Performance:** EWA is significantly more expensive than standard splatting due to covariance estimation [S1, unofficial].
++- **Performance:** EWA splatting is significantly more expensive than standard splatting due to covariance estimation [S1, unofficial].
+ - **Strengths:** Ensures high-quality, dense coverage in output views by filtering sparse ones [S1, unofficial].
+ - **Limitations:** Computationally intensive for EWA; may discard useful views if `min_fill_rate` is set too high [S1, unofficial].
+@@ -139,3 +172,4 @@
+ 
+ ## Sources
+-[S1] Luhao03/Point-Splatting-Multi-View-2D-Rendering-Pipeline, https://github.com/Luhao03/Point-Splatting-Multi-View-2D-Rendering-Pipeline, fetched 2026-10-28 (unofficial)+[S1] Luhao03/Point-Splatting-Multi-View-2D-Rendering-Pipeline, https://github.com/Luhao03/Point-Splatting-Multi-View-2D-Rendering-Pipeline, fetched 2026-10-28 (unofficial)
++[S2] Transcoding a 3D Gaussian Splatting Model from a Plenoptic Point Cloud or Mesh without the Original Multi-view Images, https://arxiv.org/abs/2605.21051, fetched 2026-10-30 (unofficial)

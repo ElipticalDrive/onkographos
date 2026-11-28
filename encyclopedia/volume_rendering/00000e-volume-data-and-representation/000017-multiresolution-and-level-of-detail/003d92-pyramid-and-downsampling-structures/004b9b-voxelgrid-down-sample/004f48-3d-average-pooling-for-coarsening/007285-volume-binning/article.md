@@ -1,0 +1,92 @@
+# Volume Binning
+
+Also called: Grid Binning, NxNxN Average Pooling
+
+## Overview
+Volume Binning is a coarsening method that partitions a 3D voxel grid into uniform $N \times N \times N$ blocks and replaces each block with the arithmetic mean of its constituent values [S1]. It serves as a specific implementation of 3D average pooling for multiresolution level-of-detail generation, distinct from general adaptive downsampling by enforcing strict spatial uniformity in the bin structure [S1]. Unlike [Image Slicing & Downsampling](19590-image-slicing-downsampling.md), which may operate on 2D projections or variable strides, Volume Binning operates natively in 3D data space [S1].
+
+## How it works
+**Inputs:**
+- Original volume data map with dimensions $D_x \times D_y \times D_z$ [S1].
+- Binning size specification: either a single integer $N$ (default 2) or a tuple $(N_x, N_y, N_z)$ [S1].
+
+**Outputs:**
+- Coarsened volume data map with dimensions $\lfloor D_x/N_x \rfloor \times \lfloor D_y/N_y \rfloor \times \lfloor D_z/N_z \rfloor$ [S1].
+
+**Data Structures:**
+- Input and output maps are stored as contiguous 3D arrays of scalar values [G].
+
+**Steps:**
+1. Determine bin dimensions $(N_x, N_y, N_z)$. If a single integer $N$ is provided, set $N_x = N_y = N_z = N$ [S1].
+2. Initialize the output map with dimensions $W \times H \times D$, where $W = \lfloor D_x/N_x \rfloor$, $H = \lfloor D_y/N_y \rfloor$, $D = \lfloor D_z/N_z \rfloor$ [S1].
+3. For each output voxel $(i, j, k)$ where $0 \le i < W$, $0 \le j < H$, $0 \le k < D$:
+   a. Define the input region $R_{i,j,k}$ as the set of input coordinates $(x, y, z)$ such that:
+      $$ i \cdot N_x \le x < (i+1) \cdot N_x $$
+      $$ j \cdot N_y \le y < (j+1) \cdot N_y $$
+      $$ k \cdot N_z \le z < (k+1) \cdot N_z $$
+   b. Compute the sum of values in $R_{i,j,k}$:
+      $$ S_{i,j,k} = \sum_{x,y,z \in R_{i,j,k}} V_{in}[x, y, z] $$
+   c. Compute the count of voxels in the bin:
+      $$ C_{i,j,k} = N_x \cdot N_y \cdot N_z $$
+   d. Set the output value:
+      $$ V_{out}[i, j, k] = \frac{S_{i,j,k}}{C_{i,j,k}} $$
+4. Return the output map [S1].
+
+**Parameters:**
+- $N$: Default 2 [S1].
+- $N_x, N_y, N_z$: Positive integers specifying grid points per bin dimension [S1].
+
+**Edge Cases and Pitfalls:**
+- **Memory Constraints:** The entire new map must fit in memory; the command may fail if insufficient memory is available [S1].
+- **Boundary Handling:** The method implicitly truncates the input volume if dimensions are not perfectly divisible by the bin sizes, reducing the point count by a factor of $1/N$ per dimension [S1].
+- **Precision:** Not given in the sources.
+
+**Pseudocode:**
+> **Unverified code.** The code below did not pass a test run against a reference implementation, or no test fits it, so it may contain errors.
+
+```python
+def volume_binning(volume_in, bin_spec):
+    if isinstance(bin_spec, int):
+        Nx, Ny, Nz = bin_spec, bin_spec, bin_spec
+    else:
+        Nx, Ny, Nz = bin_spec
+
+    Dx, Dy, Dz = len(volume_in), len(volume_in[0]), len(volume_in[0][0])
+    W, H, D = Dx // Nx, Dy // Ny, Dz // Nz
+
+    volume_out = [[[0.0 for _ in range(D)] for _ in range(H)] for _ in range(W)]
+
+    for i in range(W):
+        for j in range(H):
+            for k in range(D):
+                total = 0.0
+                count = 0
+                for x in range(i * Nx, (i + 1) * Nx):
+                    for y in range(j * Ny, (j + 1) * Ny):
+                        for z in range(k * Nz, (k + 1) * Nz):
+                            total += volume_in[x][y][z]
+                            count += 1
+                volume_out[i][j][k] = total / count
+    return volume_out
+```
+
+## Subtopics
+
+### Iso-Dist Binning
+Iso-Dist Binning is a variant where volume data values are evenly distributed into bins based on their statistical frequency rather than spatial position, creating as many bins as graphics hardware distinguishes (e.g., 256 for 8-bit voxels) [S2, unofficial]. Each bin is assigned a specific color and opacity [S2, unofficial]. Unlike linear spatial binning, Iso-Dist bins are non-uniform in data space, often leading to high color and opacity gradients in regions of high data density and low gradients elsewhere [S2, unofficial]. This approach transforms linear color and opacity transfer functions into non-linear bin space, compressing color maps in high-density areas and stretching them in low-density areas [S2, unofficial]. It is chosen when the goal is to enhance visual contrast in high-dynamic-range data by ensuring equal visual weight per bin, rather than preserving spatial resolution [S2, unofficial].
+
+## Operating characteristics
+- **Time Complexity:** Not given in the sources.
+- **Memory Complexity:** Not given in the sources.
+- **Performance:** The command may fail for lack of memory, as the whole new map must fit in memory [S1].
+- **Strengths:** Not given in the sources.
+- **Limitations:** Not given in the sources.
+- **When to use:** Not given in the sources.
+- **When not to use:** Not given in the sources.
+
+## Background
+Volume Binning is implemented in software such as UCSF ChimeraX as a command-line tool for volume data manipulation [S1]. It is part of the broader family of multiresolution structures used in volume rendering to manage memory and rendering performance [S1]. The Iso-Dist variant was developed to address user interface challenges in designing transfer functions for high-dynamic-range data, specifically in the context of the Enzo simulation framework and TeraShake earthquake simulations [S2, unofficial].
+
+## Sources
+[S1] Command: volume, https://www.rbvi.ucsf.edu/chimerax/docs/user/commands/volume.html, fetched 2026-10-27
+[S2] A User Interface for High Dynamic Range Transfer ..., https://cseweb.ucsd.edu/~jschulze/publications/Schulze2006-poster.pdf, fetched 2026-10-29 (unofficial)

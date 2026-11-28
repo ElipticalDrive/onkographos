@@ -1,0 +1,231 @@
+--- v001.md
++++ v002.md
+@@ -4,107 +4,147 @@
+ 
+ ## Overview
+-This method identifies visible voxels in an octree by traversing the hierarchy against the camera's view frustum, automatically selecting the Level of Detail (LOD) based on screen projection size [S1, unofficial]. It differs from ray-casting methods by treating the volume as a set of discrete, rasterizable cubes rather than a continuous scalar field, relying on hardware instancing for final rendering [S1, unofficial].
++This method identifies a set of visible voxels from an octree hierarchy by traversing the tree and culling octants that do not intersect the camera's view frustum or whose projected screen area is smaller than a single pixel [S1, unofficial]. It differs from sibling methods by combining visibility culling with automatic Level-of-Detail (LOD) selection based on screen-space size, outputting a buffer of voxel instances for subsequent hardware-accelerated rasterization [S1, unofficial].
+ 
+ ## How it works
+-**Inputs:** Camera view frustum parameters, octree structure (implicit or explicit), bounding box of the entire octree.
+-**Outputs:** A buffer of voxel instances (position and size) ready for rasterization.
++**Inputs:** Camera view frustum parameters; Octree structure (implicit or explicit) with a known Axis-Aligned Bounding Box (AABB) enclosing the entire volume.
++**Outputs:** A buffer of voxel instances, where each instance contains position and size attributes.
+ 
+ **Data Structures:**
+-*   **Octree:** Stored in breadth-first order. Each node uses a single 8-bit mask to indicate occupied children [S1, unofficial].
+-*   **Voxel Instance Buffer:** A dynamic array storing tuples of $(\mathbf{p}, s)$, where $\mathbf{p}$ is the voxel center and $s$ is the half-extent (size).
+-*   **Canonical Voxel Template:** A unit cube defined by extreme vertices $\mathbf{c}_{min} = (-1, -1, -1)$ and $\mathbf{c}_{max} = (1, 1, 1)$ [S1, unofficial].
++*   **Octree:** Stored in breadth-first order. Each node is represented by an 8-bit mask indicating the occupancy of its 8 child octants [S1, unofficial].
++*   **Voxel Instance Buffer:** A list of structures containing `position` (center of the voxel) and `size` (side length of the voxel cube).
+ 
+-**Algorithm:**
+-1.  **Initialization:** Start traversal at the root octant. Calculate the bounding box of the current node based on the global AABB and the node's depth/position in the hierarchy.
+-2.  **Frustum Intersection Test:** Determine if the current octant intersects the view frustum. To optimize, approximate the octant as a sphere with diameter equal to the octant's diagonal [S1, unofficial].
+-3.  **Traversal Decision:**
+-    *   If the octant does **not** intersect the frustum, prune this branch.
+-    *   If the octant **does** intersect, check termination conditions:
+-        a.  **Leaf Node:** No further subdivisions exist.
+-        b.  **Screen Size Threshold:** The projected area of the octant on the screen is less than the area of a single pixel.
+-    *   If either termination condition is met, record the voxel's position and size in the instance buffer and stop descending this branch [S1, unofficial].
+-    *   If neither condition is met, descend to the children indicated by the 8-bit occupancy mask.
+-4.  **Buffer Population:** For every halted node (leaf or screen-sized), compute its world-space position and size implicitly from the traversal state and append to the buffer [S1, unofficial].
+-5.  **Rasterization:** Pass the instance buffer to a hardware instancing pipeline (e.g., Geometry Shader, Uniform Buffer, or Vertex Buffer) to render the voxels using the canonical template [S1, unofficial].
++**Canonical Voxel Template:**
++The geometric primitive for a voxel is a cube defined by extreme vertices $c_{min} = (-1, -1, -1)$ and $c_{max} = (+1, +1, +1)$ [S1, unofficial].
++
++**Algorithm Steps:**
++
++1.  **Initialize Traversal:** Start at the root octant of the octree.
++2.  **Frustum-Sphere Intersection Test:** For the current octant, compute a bounding sphere. The diameter of this sphere is equal to the diagonal length of the octant's AABB [S1, unofficial]. Test if this sphere intersects the view frustum [S1, unofficial].
++    *   If the sphere does **not** intersect the frustum, prune this branch (do not traverse children).
++    *   If the sphere **does** intersect, proceed to step 3.
++3.  **Screen-Projection Size Test:** Calculate the projected area of the current octant on the screen.
++    *   If the projected area is less than the area of a single pixel, halt traversal for this branch.
++    *   If the projected area is greater than or equal to a pixel, proceed to step 4.
++4.  **Leaf/LOD Decision:**
++    *   If the current octant is a leaf node (no more subdivisions) OR the projected area is less than a pixel (LOD stop criterion), append the voxel instance to the buffer. The position and size are derived from the octant's AABB, which is known implicitly from the root AABB and the traversal path [S1, unofficial].
++    *   If the octant is not a leaf and the projected area is sufficient, traverse to the next level (process all 8 children indicated by the occupancy mask) [S1, unofficial].
++5.  **Rasterization:** Once traversal is complete, use hardware instancing (e.g., Geometry Shader, Uniform Buffer, Texture Buffer, or Vertex Buffer) to rasterize the voxels defined by the canonical template, transformed by the instance position and size [S1, unofficial].
+ 
+ **Pseudocode:**
++
+ ```python
+-def frustum_cull_octree(root_node, frustum, global_aabb, pixel_area_threshold):
++def frustum_octree_traversal(root_octant, frustum, buffer):
+     """
+-    Traverses an octree to find visible voxels for rasterization.
++    Traverses the octree to collect visible voxel instances.
+     
+     Args:
+-        root_node: The root of the octree hierarchy.
+-        frustum: Camera view frustum object with method intersects_sphere(center, radius).
+-        global_aabb: Axis-aligned bounding box of the entire octree.
+-        pixel_area_threshold: Minimum projected area (in pixels^2) to continue subdivision.
++        root_octant: The root node of the octree.
++        frustum: The camera view frustum object.
++        buffer: List to store voxel instances (position, size).
++    """
++    # Start traversal from root
++    traverse_node(root_octant, frustum, buffer)
++
++def traverse_node(node, frustum, buffer):
++    """
++    Recursively traverses an octree node.
++    
++    Args:
++        node: Current octree node.
++        frustum: The camera view frustum.
++        buffer: List to store voxel instances.
++    """
++    # 1. Get AABB of the current octant
++    aabb = get_aabb(node)
++    
++    # 2. Compute bounding sphere for the octant
++    # Diameter = diagonal of the AABB
++    center = aabb.center()
++    radius = aabb.diagonal_length() / 2.0
++    
++    # 3. Frustum-Sphere Intersection Test
++    if not frustum.intersects_sphere(center, radius):
++        return # Prune branch
++    
++    # 4. Screen-Projection Size Test
++    projected_area = compute_projected_area(node, frustum)
++    pixel_area = get_pixel_area(frustum) # Not given in sources, assumed available
++    
++    # 5. LOD/Leaf Decision
++    is_leaf = node.is_leaf()
++    
++    if is_leaf or projected_area < pixel_area:
++        # Halt traversal: append voxel instance
++        voxel = VoxelInstance(
++            position=center,
++            size=aabb.side_length()
++        )
++        buffer.append(voxel)
++    else:
++        # Traverse children
++        # The octree is stored with an 8-bit mask per node
++        occupancy_mask = node.get_occupancy_mask()
++        children = node.get_children()
+         
+-    Returns:
+-        list of tuples: [(center_x, center_y, center_z, half_extent), ...]
+-    """
+-    visible_voxels = []
+-    # Stack stores (node, node_center, node_half_extent)
+-    # Initial call assumes root covers global_aabb
+-    stack = [(root_node, global_aabb.center, global_aabb.half_extent)]
+-    
+-    while stack:
+-        node, center, half_extent = stack.pop()
+-        
+-        # Approximate octant as sphere for frustum culling
+-        # Diameter = diagonal of cube = 2 * sqrt(3) * half_extent
+-        # Radius = sqrt(3) * half_extent
+-        radius = half_extent * (3 ** 0.5)
+-        
+-        if not frustum.intersects_sphere(center, radius):
+-            continue
+-            
+-        # Check if leaf or screen size is too small
+-        is_leaf = node.is_leaf()
+-        projected_area = estimate_projected_area(center, half_extent, frustum)
+-        
+-        if is_leaf or projected_area < pixel_area_threshold:
+-            # Record voxel instance
+-            visible_voxels.append((center.x, center.y, center.z, half_extent))
+-            continue
+-            
+-        # Descend to children
+-        children = node.get_occupied_children() # Returns list of child indices based on 8-bit mask
+-        
+-        for child_idx in children:
+-            child_center, child_half_extent = compute_child_bounds(center, half_extent, child_idx)
+-            stack.append((node.get_child(child_idx), child_center, child_half_extent))
+-            
+-    return visible_voxels
++        for i in range(8):
++            if (occupancy_mask >> i) & 1:
++                traverse_node(children[i], frustum, buffer)
+ 
+-def estimate_projected_area(center, half_extent, frustum):
+-    """
+-    Estimates the screen space area of the voxel.
+-    Note: Exact implementation depends on projection matrix.
+-    This is a placeholder for the logic described in [S1, unofficial].
+-    """
+-    # Simplified approximation: project corners or use depth-based scaling
+-    # In practice, this compares the bounding box of the projected octant 
+-    # against the pixel grid.
+-    return 0.0 # Placeholder: Logic not fully specified in source beyond "projected area < pixel area"
++def get_aabb(node):
++    """Returns the Axis-Aligned Bounding Box for the node."""
++    # Implicitly determined from root AABB and traversal path
++    # [G] Implementation depends on specific octree storage format.
++    # For breadth-first storage with implicit coordinates:
++    # The AABB can be computed from the node's depth and index.
++    pass
++
++def compute_projected_area(node, frustum):
++    """Computes the projected area of the octant on the screen."""
++    # [G] Requires projection matrix and viewport dimensions.
++    # Project the 8 corners of the AABB to screen space.
++    # Compute the bounding box of the projected points.
++    # Return width * height.
++    pass
++
++def get_pixel_area(frustum):
++    """Returns the area of a single pixel in screen space."""
++    # [G] Typically viewport_width * viewport_height / (num_pixels_x * num_pixels_y)
++    pass
+ ```
+ 
++**Parameters and Typical Values:**
++*   **LOD Stop Criterion:** The traversal stops when the projected area is less than the area of a pixel [S1, unofficial].
++*   **Octree Depth:** In the source profile, depth 10 was used for the 'basketball' dataset [S1, unofficial].
++*   **Storage:** Breadth-first storage using a single 8-bit mask per node [S1, unofficial].
++
+ **Edge Cases and Pitfalls:**
+-*   **Numeric Precision:** At extreme subdivision levels, numeric precision issues may arise. However, LOD traversal typically halts at coarser levels based on screen size before precision becomes critical [S1, unofficial].
+-*   **Over-subdivision:** Allocating nodes for extremely deep levels is inefficient if they are never rendered due to the screen-size criterion. The traversal should respect a maximum depth limit to avoid unnecessary memory allocation [S1, unofficial].
+-*   **Empty Space:** The 8-bit mask efficiently skips empty branches, but the frustum test must be applied before checking the mask to ensure correct culling [S1, unofficial].
++*   **Numeric Precision:** At high subdivision levels, numeric precision can become a problem [S1, unofficial].
++*   **Over-allocation:** Too many nodes may be allocated to hold a low number of actual leaf octants at deep levels [S1, unofficial].
++*   **Unnecessary Subdivision:** Rendering may not benefit from extreme subdivisions because LOD traversal halts at coarser levels based on screen-projection size [S1, unofficial].
+ 
+ ## Operating characteristics
+-*   **Time Complexity:** Linear with respect to the number of visible voxels and the depth of the octree. The frustum-sphere intersection is $O(1)$ per node.
+-*   **Memory Complexity:** $O(N)$ where $N$ is the number of visible voxels, for the instance buffer. The octree storage is compact (1 byte per node in breadth-first order) [S1, unofficial].
+-*   **Performance:** Profiled on Intel Core i5-2540M and NVIDIA Quadro 3000M at 1920x1280 resolution. Voxel rendering times for the 'basketball' dataset (depth 10) were:
++**Time and Memory Complexity:**
++*   **CPU:** Octree build and traversal require CPU cycles. Performance is based on single-threaded execution [S1, unofficial]. Multi-threaded execution is possible but not considered in the source [S1, unofficial].
++*   **GPU:** Rendering performance depends on the hardware instancing method used.
++
++**Measured Performance:**
++Profiled on Intel Core i5-2540M, NVIDIA Quadro 3000M, Windows 7, OpenGL/GLSL 4.2, at 1920x1280 resolution with 25% to 85% pixel coverage [S1, unofficial].
++*   **Voxel Rendering Times (ms) for 'basketball' dataset at octree depth 10:**
+     *   Geometry Shader: 3.454 ms
+-    *   Uniform Buffer: 2.549 ms (Fastest)
++    *   Uniform Buffer: 2.549 ms
+     *   Hardware Texture Buffer: 2.773 ms
+-    *   Instancing Vertex Buffer: 5.599 ms (Slowest) [S1, unofficial]
+-*   **Strengths:** Automatic LOD selection; efficient culling of non-visible regions; compact octree storage.
+-*   **Limitations:** Rasterization overhead depends on the chosen instancing method; Geometry Shaders are slower for voxels than for surfels due to geometric complexity [S1, unofficial].
++    *   Instancing Vertex Buffer: 5.599 ms [S1, unofficial]
++
++**Strengths and Limitations:**
++*   **Strengths:** Automatic LOD selection; compact storage (1 byte per node for offline construction); efficient culling via frustum-sphere intersection [S1, unofficial].
++*   **Limitations:** Geometry Shader is the slowest method for voxel rasterization (unlike surfel rendering); regular vertex buffers are the slowest among instancing methods; Uniform buffers are the fastest [S1, unofficial].
++
++**When to Use:**
++*   Use when automatic LOD selection based on screen size is desired.
++*   Use Uniform Buffer instancing for best performance among the tested methods.
++*   Avoid Geometry Shader for voxel cubes if performance is critical.
+ 
+ ## Background
+-This method was introduced in the context of hardware-accelerated rendering of scanned 4D media, combining octree-based LOD selection with geometry instancing [S1, unofficial]. It addresses the need for efficient visualization of large, sparse volumetric datasets by treating voxels as discrete geometric primitives rather than continuous data.
++This method is described in the paper "Hardware-accelerated geometry instancing for surfel and voxel rendering of scanned 4d media" [S1, unofficial]. It is part of a framework for rendering scanned 4D media, utilizing octrees for spatial organization and hardware instancing for efficient rasterization.
+ 
+ ## Sources

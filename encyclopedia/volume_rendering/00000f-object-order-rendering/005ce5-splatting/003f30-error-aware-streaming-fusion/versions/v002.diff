@@ -1,0 +1,205 @@
+--- v001.md
++++ v002.md
+@@ -1,5 +1,4 @@
+ # Error-aware Streaming Fusion
+ 
+-Also called: Adaptive Fusion Weighting, Error-based Splat Fusion
+ 
+ ## Overview
+@@ -12,88 +11,62 @@
+ 
+ **Data Structures:**
+-*   **Splat:** Defined by position $\mathbf{p}$, covariance $\Sigma$ (or scale/rotation), opacity $\alpha$, and color $c$ [S1, implied by Gaussian Splatting context].
+ *   **Keyframe Buffer:** Maintains primitives from a set of past keyframes. In practice, two keyframes are maintained, placed 5 frames apart, each lasting 10 frames [S1].
++*   **Splat Attributes:** Position, covariance/scale, rotation, opacity, and color follow the parent article [Splatting](23-splatting.md).
+ 
+ **Steps:**
+-1.  **Render Current Frame:** Render the current frame splats $\mathcal{S}_t$ to the input views to obtain a reference depth map $D_{ref}$ and color image $I_{ref}$ [S1].
++1.  **Render Current Frame:** Render the current frame splats $\mathcal{S}_t$ to the input views to obtain a reference depth map $D_{\text{ref}}$ and color image $I_{\text{ref}}$ [S1].
+ 2.  **Project Historical Splats:** For each historical splat $s_h \in \mathcal{S}_{t-1}$, project it onto the input views [S1].
+-3.  **Error Assessment:** For each historical splat $s_h$:
+-    *   Render $s_h$ individually or in a batch to the input views to obtain a rendered image $I_{hist}$ and depth $D_{hist}$ [S1].
+-    *   Calculate the per-pixel error between $I_{hist}$ and $I_{ref}$ (and potentially depth consistency) [S1].
+-    *   Determine if $s_h$ appears in front of the rendered depth of the current frame splats ($D_{hist} < D_{ref}$) [S1].
+-4.  **Weight Adjustment (Historical):**
+-    *   Count the number of input views where $s_h$ results in increased rendering error compared to the baseline [S1].
+-    *   If the error increases in more than half of the input views, set the fusion weight of $s_h$ to zero ($w_h = 0$) [S1].
+-    *   Otherwise, retain its contribution [S1].
+-5.  **Weight Adjustment (Current):**
+-    *   Evaluate current frame splats $s_c \in \mathcal{S}_t$ predicted by the transformer [S1].
+-    *   If a current splat $s_c$ increases rendering error (compared to a baseline or expected consistency), assign it zero weight ($w_c = 0$) [S1].
+-6.  **Static Area Identification:**
+-    *   During the Splat-to-voxel transfer process, identify static areas [S1].
+-    *   Historical splats undergoing deformation mark their neighboring voxels as regions of motion [S1].
+-    *   Voxels not marked as motion are considered static [S1].
+-7.  **Temporal Blending:**
+-    *   In static areas, blend the current frame splats with historical splats [S1].
+-    *   Retain 50% of the voxel attributes from the past keyframe to enhance temporal continuity [S1].
+-    *   The fusion is smooth as older keyframes are replaced by newer ones [S1].
++3.  **Render Historical Splats:** Render each historical splat $s_h$ to the input views to obtain $I_{\text{hist}}$ and $D_{\text{hist}}$ [S1].
++4.  **Error & Depth Assessment:** For each input view, compute the per-pixel error between $I_{\text{hist}}$ and $I_{\text{ref}}$, and check if $D_{\text{hist}} < D_{\text{ref}}$ (historical splat appears in front) [S1].
++5.  **Count Unreliable Views:** Count the number of input views where $s_h$ produces increased rendering error and appears in front of the current frame depth [S1].
++6.  **Weight Historical Splats:** If the error increases in more than half of the input views, set the fusion weight of $s_h$ to zero ($w_h = 0$) [S1].
++7.  **Weight Current Splats:** Evaluate current frame splats $s_c \in \mathcal{S}_t$ predicted by the transformer; if a current splat increases rendering error, assign it zero weight ($w_c = 0$) [S1].
++8.  **Identify Static Areas:** During the Splat-to-voxel transfer process, identify static areas [S1].
++9.  **Mark Motion Regions:** Historical splats undergoing deformation mark their neighboring voxels as regions of motion [S1].
++10. **Blend Static Attributes:** In static areas, retain 50% of the voxel attributes from the past keyframe to enhance temporal continuity [S1].
++11. **Smooth Transition:** Smoothly adjust contributions as older keyframes are replaced by newer ones to ensure seamless temporal transitions [S1].
+ 
+ **Pseudocode:**
+ ```python
+-def error_aware_streaming_fusion(current_splats, historical_splats, camera_params, views):
++def error_aware_streaming_fusion(current_splats, historical_splats, camera_params, views, error_threshold=0.0):
+     """
+-    Fuses current and historical splats based on rendering error.
+-    
+-    Args:
+-        current_splats: List of splats for the current frame t.
+-        historical_splats: List of splats from past keyframes (t-1).
+-        camera_params: Camera intrinsics and extrinsics for input views.
+-        views: List of input view indices or IDs.
+-        
+-    Returns:
+-        fused_splats: List of splats with adjusted weights.
++    Fuses current and historical splats based on per-pixel rendering error.
++    error_threshold: Per-pixel error threshold. Not given in the sources. [G]
+     """
+     fused_splats = []
+     
+     # Step 1: Render current frame to get reference
+-    # Note: Implementation detail for rendering is assumed from parent [Splatting]
+-    ref_color, ref_depth = render_splats(current_splats, camera_params, views)
++    ref_color, ref_depth = project_and_rasterize(current_splats, camera_params, views)
+     
+-    # Step 2 & 3: Assess historical splats
++    # Step 2-6: Assess and weight historical splats
+     for s_h in historical_splats:
+-        # Project historical splat to views
+-        hist_color, hist_depth = render_splats([s_h], camera_params, views)
++        hist_color, hist_depth = project_and_rasterize([s_h], camera_params, views)
+         
+-        # Calculate error and check depth
+-        error_count = 0
++        error_view_count = 0
+         for view in views:
+-            # Per-pixel error calculation (e.g., L1 or L2 norm)
+-            pixel_error = calculate_error(hist_color[view], ref_color[view])
++            # Per-pixel error calculation (L2 norm of color difference)
++            pixel_error = sum((c1 - c2)**2 for c1, c2 in zip(hist_color[view], ref_color[view]))
+             
+             # Check if historical splat is in front of current depth
+-            # Note: Depth comparison logic depends on specific depth buffer implementation
+-            is_in_front = check_depth_consistency(hist_depth[view], ref_depth[view])
++            is_in_front = all(h < r for h, r in zip(hist_depth[view], ref_depth[view]))
+             
+-            # If error is high AND it is in front (occluding current), it's unreliable
+-            # The source says "increased error in more than half of the input views"
+-            # and "appears in front of the rendered depth"
+-            if pixel_error > threshold and is_in_front:
+-                error_count += 1
++            # If error exceeds threshold AND it occludes current frame, count it
++            if pixel_error > error_threshold and is_in_front:
++                error_view_count += 1
+         
+-        # Step 4: Weight Adjustment
+-        if error_count > len(views) / 2:
++        # Step 6: Weight Adjustment
++        if error_view_count > len(views) / 2:
+             s_h.weight = 0.0
+         else:
+-            s_h.weight = 1.0 # Or retain original weight, source implies binary suppression
++            s_h.weight = 1.0
+             
+         fused_splats.append(s_h)
+ 
+-    # Step 5: Weight Adjustment for Current Splats
++    # Step 7: Weight Adjustment for Current Splats
+     for s_c in current_splats:
+-        # Evaluate if current splat increases error
+-        # This requires a baseline or consistency check against the scene
+-        # Source: "current frame splats predicted... that increase rendering error are assigned zero weight"
+-        current_error = evaluate_current_splat_error(s_c, ref_color, ref_depth)
++        # Evaluate if current splat increases error against reference
++        current_error = sum((s_c.color - ref_color[view]).norm() for view in views)
+         
+-        if current_error > threshold:
++        if current_error > error_threshold:
+             s_c.weight = 0.0
+         else:
+@@ -102,6 +75,5 @@
+         fused_splats.append(s_c)
+ 
+-    # Step 6 & 7: Static Area Blending
+-    # Identify static areas from Splat-to-voxel transfer
++    # Step 8-10: Static Area Identification and Blending
+     static_voxels = identify_static_voxels(historical_splats, current_splats)
+     
+@@ -109,35 +81,43 @@
+         if s.position in static_voxels:
+             # Retain 50% of voxel attributes from past keyframe
+-            # Note: This implies a blending of attributes, not just weight
+-            # Implementation: s.attributes = 0.5 * s.attributes + 0.5 * past_attributes
+-            blend_static_attributes(s)
++            past_attrs = get_past_keyframe_attributes(s.position)
++            if past_attrs is not None:
++                s.attributes = 0.5 * s.attributes + 0.5 * past_attrs
+             
+     return fused_splats
+ 
+-def calculate_error(img1, img2):
+-    # Placeholder for specific error metric (e.g., MSE, SSIM)
+-    # Not given in the sources. [G]
+-    return mean_squared_error(img1, img2)
+-
+-def check_depth_consistency(depth1, depth2):
+-    # Placeholder for depth comparison logic
+-    # Not given in the sources. [G]
+-    return depth1 < depth2
+-
+-def evaluate_current_splat_error(splat, ref_color, ref_depth):
+-    # Placeholder for error evaluation of a single splat
+-    # Not given in the sources. [G]
+-    return 0.0
++def project_and_rasterize(splats, camera_params, views):
++    """Projects splats to screen space and rasterizes to color/depth buffers. [G]"""
++    # Follows standard MVP transformation and rasterization from [Splatting](23-splatting.md)
++    colors = {v: [] for v in views}
++    depths = {v: [] for v in views}
++    for s in splats:
++        screen_pos = transform_to_screen(s.position, camera_params)
++        for v in views:
++            colors[v].append(s.color)
++            depths[v].append(s.depth)
++    return colors, depths
+ 
+ def identify_static_voxels(historical_splats, current_splats):
+-    # Identify static areas: historical splats undergoing deformation mark neighbors as motion
+-    # Voxels not marked as motion are static
+-    # Not given in the sources. [G]
+-    return set()
++    """Identifies static voxels by marking neighbors of deforming historical splats as motion. [S1]"""
++    motion_voxels = set()
++    for s_h in historical_splats:
++        if has_deformed(s_h):
++            for neighbor in get_voxel_neighbors(s_h.position):
++                motion_voxels.add(neighbor)
++    all_voxels = {s.position for s in current_splats} | {s.position for s in historical_splats}
++    return all_voxels - motion_voxels
+ 
+-def blend_static_attributes(splat):
+-    # Retain 50% of voxel attributes from the past keyframe
+-    # Not given in the sources. [G]
+-    pass
++def has_deformed(splat):
++    """Checks if a splat has undergone deformation. [G]"""
++    return splat.scale_change > 0.0 or splat.rotation_change > 0.0
++
++def get_voxel_neighbors(position):
++    """Returns adjacent voxel coordinates. [G]"""
++    return [(position.x + dx, position.y + dy, position.z + dz) for dx in (-1, 0, 1) for dy in (-1, 0, 1) for dz in (-1, 0, 1) if not (dx == 0 and dy == 0 and dz == 0)]
++
++def get_past_keyframe_attributes(position):
++    """Retrieves stored attributes from the past keyframe buffer. [G]"""
++    return cached_attributes.get(position, None)
+ ```
+ 

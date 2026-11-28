@@ -1,0 +1,135 @@
+# Functional Gaussian Splatting Representation
+
+Also called: DiffGS Representation, Functional Gaussian Splatting, GauCF, GauPF, GauTF, Gaussian Splatting Functions
+
+## Overview
+Functional Gaussian Splatting (DiffGS Representation) solves the problem of representing discrete, unstructured 3D Gaussian Splatting (3DGS) primitives as continuous, differentiable functions to enable generative modeling [S1]. It disentangles the 3DGS representation into three specific functions: Gaussian Probability Function (GauPF) for geometry, Gaussian Color Function (GauCF) for appearance, and Gaussian Transform Function (GauTF) for structural attributes [S1]. Unlike sibling methods that modify the primitive shape or storage structure, this representation maps the discrete set of Gaussians to continuous fields, allowing the use of standard generative frameworks like Variational Autoencoders (VAEs) and Latent Diffusion Models (LDMs) [S1].
+
+## How it works
+**Inputs and Outputs**
+*   **Input:** A fitted set of $N$ discrete 3D Gaussians $G = \{g_i\}_{i=1}^N$, where each Gaussian $g_i$ is defined by its center $\sigma_i$, rotation $r_i$, scale $s_i$, opacity $o_i$, and color $c_i$ [S1].
+*   **Output:** Three continuous functions: GauPF, GauCF, and GauTF [S1].
+
+**Data Structures**
+The representation relies on a **Feature Triplane** $t$ to encode the global latent features of the Gaussian set [S1].
+*   **Layout:** $t \in \mathbb{R}^{H \times W \times C \times 3}$ [S1].
+*   **Components:** Three orthogonal feature planes $\{t_{XY}, t_{XZ}, t_{YZ}\}$ aligned with the coordinate axes [S1].
+*   **Feature Extraction:** For any 3D query location $q_j$, the corresponding feature vector $f_j$ is obtained by projecting $q_j$ onto the three orthogonal planes and concatenating the interpolated features from each plane [S1].
+
+**Mathematical Formulation**
+The geometry of the $i$-th Gaussian is parameterized by center $\sigma_i$ and covariance $\Sigma_i$ [S1]:
+$$
+g_i(x) = \exp \left( -\frac{1}{2} (x - \sigma_i)^T \Sigma_i^{-1} (x - \sigma_i) \right)
+$$
+where the covariance matrix $\Sigma_i$ is factorized into rotation $r_i$ and scale $s_i$ as:
+$$
+\Sigma_i = r_i s_i s_i^T r_i^T
+$$
+Here, $r_i \in \mathbb{R}^4$ (quaternion) and $s_i \in \mathbb{R}$ (scale parameters) [S1]. The appearance is controlled by opacity $o_i \in \mathbb{R}$ and color $c_i \in \mathbb{R}^3$ [S1].
+
+**The Three Functions**
+1.  **Gaussian Probability Function (GauPF):** Models the geometry by predicting the probability that a sampled 3D location $q_j$ is a Gaussian center [S1]. The ground truth probability $p_j$ for a query $q_j$ is defined based on the distance to the nearest Gaussian center:
+    $$
+    p_j = \text{GauPF}(q_j) = \tau \left( \lambda \left( \min_{i \in [1,N]} ||q_j - \sigma_i||^2 \right) \right)
+    $$
+    where $\lambda$ is a truncation function that filters extremely large distances, and $\tau$ is a continuous function mapping distances to the range $[0,1]$ [S1].
+2.  **Gaussian Color Function (GauCF):** Predicts the color attribute $c_i$ given the Gaussian center $\sigma_i$ [S1]:
+    $$
+    \{c_i\} = \text{GauCF}(\sigma_i)
+    $$
+3.  **Gaussian Transform Function (GauTF):** Predicts the rotation $r_i$, scale $s_i$, and opacity $o_i$ given the Gaussian center $\sigma_i$ [S1]:
+    $$
+    \{r_i, s_i, o_i\} = \text{GauTF}(\sigma_i)
+    $$
+
+**Prediction via Neural Predictors**
+Given the feature triplane $t$ and a query location $q_j$, the system first extracts features $f_j = \text{interp}(t, q_j)$ [S1]. Then, neural predictors $\psi_{pf}, \psi_{cf}, \psi_{tf}$ predict the attributes:
+$$
+\{\hat{p}_i\} = \psi_{pf}(f_j), \quad \{\hat{c}_i\} = \psi_{cf}(f_j), \quad \{\hat{r}_i, \hat{s}_i, \hat{o}_i\} = \psi_{tf}(f_j)
+$$
+where $\hat{p}_i, \hat{c}_i, \hat{r}_i, \hat{s}_i, \hat{o}_i$ are the predicted probability, color, rotation, scale, and opacity, respectively [S1].
+
+**Training Objectives**
+The representation is typically trained within a Gaussian VAE framework [S1].
+1.  **VAE Loss:** Combines an L1 reconstruction loss and a KL-divergence regularization term [S1]:
+    $$
+    L_{VAE} = ||\{\hat{p}, \hat{c}, \hat{r}, \hat{s}, \hat{o}\} - \{p, c, r, s, o\}||_1 + \beta (D_{KL}(Q_\phi(z|G) || P(z)))
+    $$
+    where $Q_\phi(z|G)$ is the inferred posterior distribution of the latent vector $z$, and $P(z) = \mathcal{N}(0, I)$ is the standard normal prior [S1].
+2.  **LDM Loss:** If a Latent Diffusion Model is used for generation, the loss follows the standard denoising objective [S1]:
+    $$
+    L_{LDM} = \mathbb{E}_{z_0, t, \epsilon \sim \mathcal{N}(0,I)} ||\epsilon - \epsilon_\sigma(z_t, \delta(y), t)||^2
+    $$
+    where $\epsilon_\sigma$ is the noise predictor conditioned on time step $t$ and condition embedding $\delta(y)$ via cross-attention [S1].
+
+**Pseudocode: Feature Triplane Query and Attribute Prediction**
+> **Unverified code.** The code below did not pass a test run against a reference implementation, or no test fits it, so it may contain errors.
+
+```python
+def get_triplane_feature(triplane_t, query_point_q):
+    """
+    Extracts features from the triplane for a 3D query point.
+    triplane_t: List of 3 tensors [t_XY, t_XZ, t_YZ], each shape (H, W, C)
+    query_point_q: Tuple (x, y, z)
+    Returns: Feature vector f_j
+    """
+    x, y, z = query_point_q
+    # Project onto XY, XZ, YZ planes. Coordinates assumed normalized to [0, 1].
+    f_xy = interpolate_bilinear(triplane_t[0], x, y)
+    f_xz = interpolate_bilinear(triplane_t[1], x, z)
+    f_yz = interpolate_bilinear(triplane_t[2], y, z)
+    return concatenate_channels([f_xy, f_xz, f_yz])
+
+def interpolate_bilinear(plane, u, v):
+    """Bilinear interpolation on a 2D feature plane of shape (H, W, C)."""
+    H, W, C = plane.shape
+    u_idx = u * (W - 1)
+    v_idx = v * (H - 1)
+    u0, v0 = int(floor(u_idx)), int(floor(v_idx))
+    u1, v1 = min(u0 + 1, W - 1), min(v0 + 1, H - 1)
+    du, dv = u_idx - u0, v_idx - v0
+    c00 = plane[v0, u0, :]
+    c01 = plane[v0, u1, :]
+    c10 = plane[v1, u0, :]
+    c11 = plane[v1, u1, :]
+    top = c00 * (1 - du) + c01 * du
+    bottom = c10 * (1 - du) + c11 * du
+    return top * (1 - dv) + bottom * dv
+
+def concatenate_channels(features):
+    """Concatenate a list of 1D feature vectors along the channel dimension."""
+    result = []
+    for f in features:
+        result.extend(f)
+    return result
+
+def predict_gaussian_attributes(f_j):
+    """
+    Predicts Gaussian attributes from the extracted feature vector.
+    f_j: Feature vector
+    Returns: Predicted probability, color, rotation, scale, opacity
+    """
+    # Neural predictors psi_pf, psi_cf, psi_tf.
+    # Exact network architecture is not specified in the sources [G].
+    # Represented here as standard function calls.
+    p_hat = psi_pf(f_j)
+    c_hat = psi_cf(f_j)
+    r_hat, s_hat, o_hat = psi_tf(f_j)
+    return p_hat, c_hat, r_hat, s_hat, o_hat
+```
+
+**Edge Cases and Pitfalls**
+*   **Truncation:** The GauPF relies on a truncation function $\lambda$ to handle points far from any Gaussian center; failure to truncate can lead to numerical instability or incorrect probability mapping [S1].
+*   **Discretization:** While the representation is continuous, the final output requires extracting discrete Gaussians [S1]. The source notes an "octree-guided sampling and optimization" algorithm for this extraction, implying that naive sampling from the continuous functions may not yield optimal discrete primitives without this post-processing step [S1].
+
+## Operating characteristics
+*   **Complexity:** The representation itself is a continuous function evaluation, which is computationally lightweight during inference compared to managing large discrete lists [S1]. However, training requires encoding the entire Gaussian set into a latent vector and decoding to a triplane, adding overhead [S1].
+*   **Strengths:** Enables the use of powerful generative models (VAEs, LDMs) on 3DGS data by solving the discreteness and unstructured nature of raw Gaussians [S1]. Allows for conditional generation (e.g., from text) and unconditional generation of Gaussians at arbitrary numbers [S1].
+*   **Limitations:** Requires a discretization/extraction algorithm to convert the continuous functions back into renderable 3DGS primitives, which adds complexity to the pipeline [S1].
+*   **When to use:** When the goal is to generate 3D Gaussian Splatting representations using diffusion models or to compress 3DGS into a latent space for efficient storage/transmission [S1].
+
+## Background
+Functional Gaussian Splatting was introduced in the paper "DiffGS: Functional Gaussian Splatting Diffusion" [S1]. The method addresses the challenge that the discrete and unstructured nature of 3DGS prevents the direct application of well-studied generative frameworks [S1]. By disentangling the representation into GauPF, GauCF, and GauTF, the authors enable the training of a Gaussian VAE and a Latent Diffusion Model (based on the DALLE-2 architecture) to generate high-fidelity 3DGS [S1].
+
+## Sources
+[S1] DiffGS: Functional Gaussian Splatting Diffusion, https://arxiv.org/abs/2410.19657v2, fetched 2026-10-26

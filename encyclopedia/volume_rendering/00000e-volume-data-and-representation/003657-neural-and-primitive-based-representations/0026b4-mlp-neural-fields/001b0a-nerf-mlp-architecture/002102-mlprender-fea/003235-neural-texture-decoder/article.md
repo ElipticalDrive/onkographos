@@ -1,0 +1,107 @@
+# Neural Texture Decoder
+
+Also called: Neural Volume Decoder, Texture Decoder
+
+## Overview
+The Neural Texture Decoder is a convolutional neural network that generates a 3D volumetric feature map from a latent input vector, serving as the final synthesis step in neural texture-based rendering pipelines [S1, unofficial]. It differs from MLP-based decoders by operating on 3D voxel grids to preserve volumetric structure [S1, unofficial]. It builds on [MLPRender_Fea](2414-mlprender-fea.md).
+
+## How it works
+The decoder transforms a low-dimensional latent vector into a high-resolution 3D volumetric feature map using a fully-connected layer followed by a series of 3D convolutions [S1, unofficial].
+
+**Inputs and Outputs:**
+*   **Input:** A 199-dimensional vector $v \in \mathbb{R}^{199}$ [S1, unofficial].
+*   **Output:** A 4-channel tensor $T \in \mathbb{R}^{64 \times 64 \times 64 \times 4}$ [S1, unofficial].
+
+**Data Structures:**
+The internal representation is a 4D tensor [S1, unofficial]. The initial fully-connected layer maps the input to a flattened vector of size $32 \times 32 \times 32 \times 4 = 131,072$ [S1, unofficial]. This vector is reshaped into a tensor of shape $(32, 32, 32, 4)$ [S1, unofficial].
+
+**Steps:**
+1.  **Fully-Connected Mapping:** Apply a linear transformation to the input vector $v$ to produce a vector $u$ of size 131,072 [S1, unofficial].
+    $$ u = W_{fc} v + b_{fc} $$
+    where $W_{fc} \in \mathbb{R}^{131072 \times 199}$ and $b_{fc} \in \mathbb{R}^{131072}$ [S1, unofficial].
+2.  **Reshape:** Reshape $u$ into a 4D tensor $T_{in}$ with dimensions $(32, 32, 32, 4)$ [S1, unofficial].
+3.  **3D Convolutions:** Apply three sequential 3D convolutions with channels $\{4, 8, 4\}$, kernel sizes $\{4, 4, 4\}$, and strides $\{1, 2, 1\}$ respectively [S1, unofficial].
+
+**Pseudocode:**
+> **Unverified code.** The code below did not pass a test run against a reference implementation, or no test fits it, so it may contain errors.
+
+```python
+def neural_texture_decoder(v, W_fc, b_fc, W1, b1, W2, b2, W3, b3):
+    """
+    Decodes a 199-dim latent vector into a 64x64x64x4 tensor.
+    
+    Args:
+        v: numpy array of shape (199,)
+        W_fc: weight matrix of shape (131072, 199)
+        b_fc: bias vector of shape (131072,)
+        W1, b1: weights/bias for conv layer 1 (out_ch=8, k=4, s=1)
+        W2, b2: weights/bias for conv layer 2 (out_ch=4, k=4, s=2)
+        W3, b3: weights/bias for conv layer 3 (out_ch=4, k=4, s=1)
+        
+    Returns:
+        output_tensor: numpy array of shape (64, 64, 64, 4)
+    """
+    # Step 1: Fully-Connected Mapping
+    u = v @ W_fc.T + b_fc  # Shape: (131072,)
+    
+    # Step 2: Reshape
+    T_in = u.reshape(32, 32, 32, 4)  # Shape: (32, 32, 32, 4)
+    
+    # Step 3: 3D Convolutions
+    # Layer 1: Channels 4->8, Kernel 4, Stride 1
+    T1 = apply_conv3d(T_in, W1, b1, stride=1, kernel_size=4)
+    
+    # Layer 2: Channels 8->4, Kernel 4, Stride 2
+    T2 = apply_conv3d(T1, W2, b2, stride=2, kernel_size=4)
+    
+    # Layer 3: Channels 4->4, Kernel 4, Stride 1
+    T3 = apply_conv3d(T2, W3, b3, stride=1, kernel_size=4)
+    
+    # Note: Standard 3D convolutions with strides {1, 2, 1} on a 32^3 input
+    # would yield 16^3, but the source explicitly states the output is 64^3 [S1, unofficial].
+    return T3
+
+def apply_conv3d(x, W, b, stride, kernel_size):
+    """Standard 3D convolution operation."""
+    # Padding is not specified in the source; assumed to handle spatial dimensions correctly.
+    # Returns tensor with output channels matching W.shape[0].
+    # Implementation depends on the target framework.
+    pass  # [G] Framework-specific convolution call; padding unspecified in source.
+```
+
+**Parameters:**
+*   Input vector dimension: 199 [S1, unofficial].
+*   Intermediate tensor shape: $32 \times 32 \times 32 \times 4$ [S1, unofficial].
+*   Convolution 1: Channels 4 to 8, Kernel 4, Stride 1 [S1, unofficial].
+*   Convolution 2: Channels 8 to 4, Kernel 4, Stride 2 [S1, unofficial].
+*   Convolution 3: Channels 4 to 4, Kernel 4, Stride 1 [S1, unofficial].
+*   Output tensor shape: $64 \times 64 \times 64 \times 4$ [S1, unofficial].
+
+**Edge Cases and Pitfalls:**
+*   **Precision:** Training with mean squared error loss tends to create blurry results, particularly in shaders like Ambient Occlusion [S1, unofficial].
+*   **Boundaries:** The method is sensitive to input voxel grid resolution [S1, unofficial]. This is mitigated by training on smaller, cropped voxel grids and running inference on larger grids, leveraging the fully convolutional nature of the decoder [S1, unofficial].
+*   **Degenerate Input:** The input must be exactly 199-dimensional [S1, unofficial].
+
+## Subtopics
+
+### [CNN Decoder](17754-cnn-decoder.md)
+The CNN Decoder is a convolutional neural network that generates spatial neural texture stacks (NTS) or stylized feature maps from latent inputs, serving as the final synthesis step in neural texture-based rendering pipelines. It differs from MLP-based decoders by operating on spatial grids to preserve local geometric coherence, making it suitable for generating high-resolution texture maps for UV unwrapping or style transfer. It builds on [Neural Texture Decoder](6704-neural-texture-decoder.md).
+
+### Texture and Blending Weight Field
+A two-layer MLP that decodes color $c(X)$ and blending weight $b(X)$ from tri-plane features and PIFuHD features to enable geometry-aware texture generation [S2]. It models the decoder as $f_{\text{decoder}}: (E(f_{xy}, f_{xz}, f_{yz}), f) \mapsto (c, b)$, where $E$ denotes the mean operation [S2].
+
+## Operating characteristics
+*   **Time Complexity:** Not given in the sources.
+*   **Memory Complexity:** The intermediate tensor size is $32 \times 32 \times 32 \times 4$ elements, and the output is $64 \times 64 \times 64 \times 4$ elements [S1, unofficial]. The memory footprint is dominated by these tensor allocations and the weights of the fully connected and convolutional layers.
+*   **Measured Performance:** Not given in the sources.
+*   **Strengths:** Generates volumetric features from compact latent codes [S1, unofficial].
+*   **Limitations:** Tends to create blurry results when trained with mean squared error loss, especially for certain shaders like Ambient Occlusion [S1, unofficial]. Sensitive to input voxel grid resolution, though mitigated by training on cropped grids [S1, unofficial].
+*   **When to use:** When generating volumetric feature maps from latent codes in neural texture-based rendering pipelines [S1, unofficial].
+*   **When not:** When sharp details are required without adversarial training, or when the input resolution is fixed and large without cropping strategies [S1, unofficial].
+
+## Background
+The Neural Texture Decoder is part of the RenderNet architecture, introduced in the paper "RenderNet: A deep convolutional network for differentiable rendering from 3D shapes" [S1, unofficial]. The paper was published on arXiv in 2018 [S1, unofficial]. The decoder is used to generate texture maps from 3D shape representations [S1, unofficial].
+
+## Sources
+[S1] RenderNet: A deep convolutional network for differentiable rendering from 3D shapes, https://doi.org/10.48550/arxiv.1806.06575, fetched 2026-10-26 (unofficial)
+[S2] HumanGen: Generating Human Radiance Fields with Explicit Priors, https://doi.org/10.1109/cvpr52729.2023.01207, fetched 2026-10-29

@@ -1,0 +1,324 @@
+8.15.13. 13 - Mesh Shaders: GPU Cluster Culling — Daslang documentation 0.6.5 documentation
+Hide navigation
+Daslang 0.6.5 Reference Manual
+8. Tutorials
+8.15.13. 13 - Mesh Shaders: GPU Cluster Culling
+View page source
+8.15.13. 13 - Mesh Shaders: GPU Cluster Culling
+Tutorials 1-12 fed the GPU geometry from vertex + index buffers. This one
+removes them entirely. VK_EXT_mesh_shader replaces the whole vertex-input
+stage with a two-stage, compute-like pipeline that amplifies geometry on the
+GPU: a task shader decides what to draw, and a mesh shader generates the
+vertices and primitives for it – no vertex buffer, no index buffer, no
+draw-call geometry at all.
+The headline rails:
+No geometry input. cmd_draw_mesh_tasks_e_x_t(1, 1, 1) dispatches a
+single task workgroup; everything downstream is GPU-generated. There is no
+vertex shader, no VkPipelineVertexInputState, and no bound vertex or
+index buffer.
+Task shader = cluster cull. One workgroup decides which of
+MAX_MESHLETS = 8 “meshlets” survive and writes the survivor count +
+indices into a @task_payload struct. EmitMeshTasksEXT(count, 1, 1)
+then dispatches exactly count mesh workgroups and carries the payload to
+them. The cull here is a deterministic stand-in – it drops meshlets 3 and 4
+to carve a visible gap in the grid – so the pixel-oracle can prove the task
+stage actually removed geometry on the GPU.
+Mesh shader = geometry generation. One workgroup per surviving meshlet
+reads its meshlet index from the payload (keyed by gl_WorkGroupID, a
+workgroup-grid builtin valid in mesh shaders), calls SetMeshOutputsEXT(4,
+2) to declare four vertices + two triangles, and emits one colored quad at
+that meshlet’s grid cell through gl_MeshVerticesEXT.
+Payload handoff. The MeshletPayload struct – a count plus a
+fixed survivors array – is the task-to-mesh contract, declared
+@task_payload in daslang (the shared task/mesh payload storage).
+Every line of every shader is daslang, lowered to SPIR-V at compile time by
+dasSpirv (no glslang).
+The figure above is the offscreen render: a 2x4 grid where meshlet i sits
+at cell (i % 4, i / 4). Meshlets 3 (top-right) and 4 (bottom-left) are
+missing – the task shader culled them, and the gap is the GPU-side proof. The
+[test] pixel-oracle keys on exactly that: cells 3 and 4 must read the
+background colour, every surviving cell must read its meshlet colour. To see it
+live on your own GPU, run the windowed viewer (see See it live below).
+Note
+Mesh shaders require VK_EXT_mesh_shader. The tutorial soft-skips on
+devices without it (lavapipe in CI lacks the extension, so the test passes
+as skipped) – the figure here is from a mesh-shader-capable GPU.
+8.15.13.1. The shaders
+No vertex shader – just task, mesh, and fragment. The task stage culls; the
+mesh stage amplifies one quad per survivor; the fragment stage outputs the
+interpolated meshlet colour.
+```
+module mesh_tut_shaders public
+
+require vulkan/vulkan_boost public  // Device + DeviceMemory used by the generated bind helpers
+require vulkan/spirv_vulkan_shader public
+require spirv/spirv_builtins public
+
+let MAX_MESHLETS = 8
+
+// ===== task -> mesh payload =====
+
+//! Surviving-meshlet list handed from the task workgroup to the mesh workgroups it dispatches.
+struct MeshletPayload {
+    count     : uint            // how many meshlets survived (== the mesh-workgroup dispatch count)
+    survivors : uint[8]         // their grid indices, packed [0 .. count)
+}
+var @task_payload payload : MeshletPayload
+
+// ===== mesh -> fragment varyings =====
+
+var @out @location = 0 mo_color : array<float3>   // per-vertex smooth color
+
+// ===== TASK: cluster cull =====
+
+[vulkan_task_shader(local_size_x=1, name="mesh_tut_task_spv")]
+def mesh_tut_task {
+    // Deterministic stand-in cull: keep every meshlet except 3 and 4 (a gap in the middle of row 0/1).
+    var n = 0u
+    for (i in range(MAX_MESHLETS)) {
+        if (i != 3 && i != 4) {
+            payload.survivors[n] = uint(i)
+            n ++
+        }
+    }
+    payload.count = n
+    EmitMeshTasksEXT(n, 1u, 1u)         // dispatch `n` mesh workgroups, carry the payload
+}
+
+// ===== MESH: one colored quad per surviving meshlet =====
+
+[vulkan_mesh_shader(local_size_x=1, max_vertices=4, max_primitives=2, name="mesh_tut_mesh_spv")]
+def mesh_tut_mesh {
+    SetMeshOutputsEXT(4u, 2u)
+    let mid = payload.survivors[gl_WorkGroupID.x]   // which meshlet this workgroup draws
+    let col = float(mid % 4u)
+    let row = float(mid / 4u)
+    // cell center in NDC: 4 columns across [-1,1], 2 rows down [-1,1]
+    let cx = -1.0 + (col + 0.5) * 0.5
+    let cy = -1.0 + (row + 0.5) * 1.0
+    let hw = 0.18
+    let hh = 0.36
+    gl_MeshVerticesEXT[0].gl_Position = float4(cx - hw, cy - hh, 0.0, 1.0)
+    gl_MeshVerticesEXT[1].gl_Position = float4(cx + hw, cy - hh, 0.0, 1.0)
+    gl_MeshVerticesEXT[2].gl_Position = float4(cx + hw, cy + hh, 0.0, 1.0)
+    gl_MeshVerticesEXT[3].gl_Position = float4(cx - hw, cy + hh, 0.0, 1.0)
+    let color = float3((col + 1.0) / 4.0, (row + 1.0) / 2.0, 0.6)
+    mo_color[0] = color
+    mo_color[1] = color
+    mo_color[2] = color
+    mo_color[3] = color
+    gl_PrimitiveTriangleIndicesEXT[0] = uint3(0u, 1u, 2u)
+    gl_PrimitiveTriangleIndicesEXT[1] = uint3(0u, 2u, 3u)
+    gl_MeshPrimitivesEXT[0].gl_PrimitiveID = int(mid)
+    gl_MeshPrimitivesEXT[1].gl_PrimitiveID = int(mid)
+}
+
+// ===== FRAGMENT =====
+
+var @in @location = 0 fi_color : float3
+var @out @location = 0 fo_color : float4
+
+[vulkan_fragment_shader(name="mesh_tut_frag_spv")]
+def mesh_tut_frag {
+    fo_color = float4(fi_color, 1.0)
+}
+```
+8.15.13.2. The render (headless)
+render_mesh builds the offscreen colour target and the mesh-shader
+pipeline, records a single cmd_draw_mesh_tasks_e_x_t, and reads the result
+back through an sRGB intermediate so the readback bytes are gamma-encoded
+(matching the windowed view).
+```
+def public render_mesh() : array<uint8> {
+    if (volkInitialize() != 0) {
+        panic("no Vulkan loader")
+    }
+    var pixels : array<uint8>
+    var inscope instance <- create_instance("dasVulkan tutorial 13", make_api_version(1u, 3u, 0u))
+    volkLoadInstance(boost_value_to_vk(instance))
+    let phys = select_physical_device(instance)
+    let gfx = select_graphics_queue_family(phys)
+    var inscope device <- create_device_mesh_shader(phys, gfx)
+    volkLoadDevice(boost_value_to_vk(device))
+    let queue = get_device_queue(device, gfx, 0u)
+    let fmt = VkFormat.R8G8B8A8_SRGB   // sRGB: gamma-encode the linear output on write (recording readback + window blit match)
+
+    var inscope target <- build_offscreen_target(device, phys, MESH_W, MESH_H, fmt)
+
+    var inscope task <- create_shader_module(device, mesh_tut_task_spv)
+    var inscope mesh <- create_shader_module(device, mesh_tut_mesh_spv)
+    var inscope frag <- create_shader_module(device, mesh_tut_frag_spv)
+    var inscope layout <- create_pipeline_layout(device)
+    // color-only mesh pipeline for `fmt`; no depth attachment, no render pass
+    var inscope pipeline <- create_mesh_pipeline(device, fmt, VkFormat.UNDEFINED, layout, task, mesh, frag, MESH_W, MESH_H)
+
+    let buf_size = uint64(MESH_W * MESH_H * 4)
+    var inscope readback <- create_host_buffer(device, phys, buf_size)
+    var poolci : CommandPoolCreateInfo
+    poolci.queueFamilyIndex = gfx
+    var inscope pool <- create_command_pool(device, poolci)
+
+    run_cmd_sync(device, pool, queue) $(cmd) {
+        transition_image2(cmd, target.image, VkImageLayout.UNDEFINED, VkImageLayout.COLOR_ATTACHMENT_OPTIMAL,
+            PIPELINE_STAGE_2_NONE, ACCESS_2_NONE,
+            VkPipelineStageFlags2.color_attachment_output, VkAccessFlags2.color_attachment_write)
+        record_rendering(cmd, target.view, full_area(MESH_W, MESH_H), clear_color(0.05f, 0.05f, 0.08f, 1.0f)) {
+            cmd_bind_pipeline(cmd, pipeline)
+            cmd_draw_mesh_tasks_e_x_t(cmd, 1u, 1u, 1u)   // one task workgroup -> cull -> dispatch mesh workgroups
+        }
+        transition_image2(cmd, target.image, VkImageLayout.COLOR_ATTACHMENT_OPTIMAL, VkImageLayout.TRANSFER_SRC_OPTIMAL,
+            VkPipelineStageFlags2.color_attachment_output, VkAccessFlags2.color_attachment_write,
+            VkPipelineStageFlags2.copy, VkAccessFlags2.transfer_read)
+        copy_image_to_buffer(cmd, target.image, readback, MESH_W, MESH_H)
+    }
+    map_memory_to_array(device, readback.memory, buf_size) $(m) {
+        pixels := m
+    }
+    return <- pixels
+}
+```
+8.15.13.3. Self-verifying
+The pixel-oracle (the CI regression gate) renders one frame and asserts the
+cull happened: cells 3 and 4 show the background colour, while the other six
+show their distinct meshlet colours. On a device without VK_EXT_mesh_shader
+it skips cleanly.
+```
+[test]
+def test_mesh_cull(t : T?) {
+    if (!mesh_shader_available()) {
+        feint("VK_EXT_mesh_shader not advertised by this device; skipping (CI lavapipe may predate 24.1)\n")
+        return
+    }
+    var p <- render_mesh()
+    // survivors: meshlet 0 (col0,row0) and meshlet 5 (col1,row1) are lit with their grid color.
+    let m0 = px(p, 32, 64)
+    let m5 = px(p, 96, 192)
+    t |> success(!is_background(m0), "meshlet 0 (survivor) is lit, not background ({m0})")
+    t |> success(m0.y > m0.x + 30, "meshlet 0 color is green-dominant per the grid palette ({m0})")
+    t |> success(!is_background(m5), "meshlet 5 (survivor) is lit, not background ({m5})")
+    t |> success(m5.y > m5.z + 40, "meshlet 5 is brighter green (row 1) than meshlet 0 ({m5})")
+    // culled: meshlet 3 (col3,row0) and meshlet 4 (col0,row1) must be background -- the task removed them.
+    let m3 = px(p, 224, 64)
+    let m4 = px(p, 32, 192)
+    t |> success(is_background(m3), "meshlet 3 was culled by the task shader -> background ({m3})")
+    t |> success(is_background(m4), "meshlet 4 was culled by the task shader -> background ({m4})")
+    delete p
+}
+```
+8.15.13.4. See it live
+window/show_mesh.das opens a GLFW window with a Vulkan swapchain and runs
+the same single cmd_draw_mesh_tasks_e_x_t per frame. The grid is static –
+the visual story is the GPU-generated geometry and the culled gap, not motion.
+```
+require glfw/glfw_boost
+require vulkan
+require vulkan/vulkan_boost
+require vulkan/vulkan_window
+require ../mesh_tut_shaders.das
+require daslib/defer
+
+let W = 800
+let H = 600
+
+[export]
+def main {   // nolint:STYLE038 - flat viewer lifecycle scaffold
+    if (volkInitialize() != 0) {
+        panic("no vulkan loader")
+    }
+    glfwInitVulkanLoader(vk_get_instance_proc_addr())   // must precede glfwInit (macOS loader discovery)
+    if (glfwInit() == 0) {
+        panic("can't init glfw")
+    }
+    defer() { glfwTerminate() }
+    if (glfwVulkanSupported() == 0) {
+        panic("glfw reports no vulkan support")
+    }
+    glfwWindowHint(int(GLFW_CLIENT_API), GLFW_NO_API)
+    glfwWindowHint(int(GLFW_RESIZABLE), GLFW_TRUE)
+    var window = glfwCreateWindow(W, H, "dasVulkan tutorial 13 - mesh shaders", null, null)
+    if (window == null) {
+        panic("can't create window")
+    }
+    defer() { glfwDestroyWindow(window) }
+
+    var ext_count = 0u
+    let glfw_exts = glfwGetRequiredInstanceExtensions(unsafe(addr(ext_count)))
+    var inst_exts : array<string>
+    inst_exts |> reserve(int(ext_count))
+    for (i in range(int(ext_count))) {
+        inst_exts |> push(unsafe(glfw_exts[i]))
+    }
+    var inscope instance <- create_instance("dasVulkan tutorial 13", make_api_version(1u, 3u, 0u), inst_exts)
+    volkLoadInstance(boost_value_to_vk(instance))
+
+    var inscope surface <- create_surface(instance, glfwGetNativeWindow(window), glfwGetNativeDisplay())
+
+    let phys = select_physical_device(instance)
+    let gfx = select_graphics_queue_family(phys)
+    if (!queue_family_supports_present(phys, gfx, surface)) {
+        panic("graphics queue family does not support presentation")
+    }
+    if (!mesh_shader_supported(phys)) {
+        panic("this device does not support VK_EXT_mesh_shader (meshShader+taskShader); cannot run tutorial 13")
+    }
+    // device with the swapchain extension AND the mesh-shader extension + features (general overload)
+    var mf : VkPhysicalDeviceMeshShaderFeaturesEXT
+    mf.meshShader = 1u
+    mf.taskShader = 1u
+    var inscope device <- create_device(phys, gfx, ["VK_KHR_swapchain", "VK_EXT_mesh_shader"], mf)
+    volkLoadDevice(boost_value_to_vk(device))
+    let queue = get_device_queue(device, gfx, 0u)
+
+    var inscope swap <- create_swapchain(device, phys, surface, W, H)
+
+    // task / mesh / fragment SPIR-V emitted by dasSpirv from mesh_tut_shaders.das
+    var inscope task <- create_shader_module(device, mesh_tut_task_spv)
+    var inscope mesh <- create_shader_module(device, mesh_tut_mesh_spv)
+    var inscope frag <- create_shader_module(device, mesh_tut_frag_spv)
+    var inscope layout <- create_pipeline_layout(device)
+    // built for the swapchain's color format; dynamic viewport/scissor so the one pipeline survives every resize
+    var inscope pipeline <- create_mesh_pipeline(device, swap.format, VkFormat.UNDEFINED, layout, task, mesh, frag, swap.width, swap.height, true)
+
+    var poolci : CommandPoolCreateInfo
+    poolci.queueFamilyIndex = gfx
+    var inscope pool <- create_command_pool(device, poolci)
+    var inscope sync <- create_frame_sync(device)
+
+    let clear = clear_color(0.05f, 0.05f, 0.08f, 1.0f)
+    var frames = 0
+    while (glfwWindowShouldClose(window) == 0) {
+        glfwPollEvents()
+        var fbw = 0
+        var fbh = 0
+        glfwGetFramebufferSize(window, fbw, fbh)
+        if (fbw == 0 || fbh == 0) {
+            glfwWaitEvents()
+            continue
+        }
+        if (fbw != swap.width || fbh != swap.height) {
+            recreate_swapchain(swap, device, phys, surface, fbw, fbh)
+        }
+        let ok = draw_frame(device, queue, swap, pool, sync, clear, true) $(cmd) {
+            cmd_bind_pipeline(cmd, pipeline)
+            cmd_draw_mesh_tasks_e_x_t(cmd, 1u, 1u, 1u)   // one task workgroup -> cull -> mesh workgroups
+        }
+        if (!ok) {
+            recreate_swapchain(swap, device, phys, surface, fbw, fbh)
+        }
+        frames ++
+    }
+    vkDeviceWaitIdle(boost_value_to_vk(device))
+    print("window closed after {frames} frames\n")
+}
+```
+8.15.13.5. Running it
+```
+# the CI pixel-oracle gate (skips cleanly without VK_EXT_mesh_shader)
+daslang.exe dastest/dastest.das -- --test modules/dasVulkan/tutorials/13_mesh
+
+# watch it live in a window (needs the glfw module + a mesh-shader GPU)
+daslang.exe modules/dasVulkan/tutorials/13_mesh/window/show_mesh.das
+```
+Terms of Service ·
+Privacy Policy ·
+BSD 3-Clause License

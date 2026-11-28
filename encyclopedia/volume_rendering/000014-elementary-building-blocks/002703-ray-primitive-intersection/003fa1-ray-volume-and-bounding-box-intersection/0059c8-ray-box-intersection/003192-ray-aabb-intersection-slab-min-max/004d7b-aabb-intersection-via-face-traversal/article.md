@@ -1,0 +1,238 @@
+# AABB Intersection via Face Traversal
+
+Also called: Ray-AABB Intersection (Face-by-Face), Ray::intersectAABB, Ray::intersectAABBFaces, aabbIntersectBack, aabbIntersectFront
+
+## Overview
+AABB Intersection via Face Traversal is a method to determine the entry (front) and exit (back) points of a ray intersecting an Axis-Aligned Bounding Box (AABB) by explicitly testing the ray against each of the six faces of the box [S1, unofficial][S2, unofficial]. Unlike the standard slab method which computes intersection intervals along axes, this approach decomposes the AABB into six planar faces and performs individual ray-face intersection tests [S1, unofficial][S2, unofficial]. It is distinguished from its siblings by its explicit geometric decomposition into faces and triangles, making it computationally more expensive than the slab method [S1, unofficial].
+
+## How it works
+### Inputs and Outputs
+**Inputs:**
+*   Ray: Defined by origin $O$ and direction $D$. The direction is assumed to be normalized [S2, unofficial].
+*   AABB: Defined by its minimum corner $B_{min}$ and maximum corner $B_{max}$, or equivalently by its 8 vertices [S1, unofficial][S2, unofficial].
+
+**Outputs:**
+*   Front intersection: The closest intersection point (minimum $t$) and the corresponding surface normal [S1, unofficial][S2, unofficial].
+*   Back intersection: The furthest intersection point (maximum $t$) and the corresponding surface normal [S1, unofficial][S2, unofficial].
+*   Boolean status indicating whether an intersection occurred [S1, unofficial][S2, unofficial].
+
+### Data Structures
+The implementation relies on specific structures to represent the geometry and the ray [S1, unofficial][S2, unofficial]:
+
+1.  **Ray**:
+    *   `origin`: A 3D vector ($rayvec3$) representing the ray's starting point [S2, unofficial].
+    *   `dir`: A 3D vector ($rayvec3$) representing the ray's direction. It must be normalized [S2, unofficial].
+
+2.  **Face Representation**:
+    *   **Method 1 (Vertex-based)**: A `Face` struct contains 4 vertices ($v_0, v_1, v_2, v_3$) representing the corners of the quad face [S1, unofficial]. Each face is treated as two triangles: $(v_0, v_1, v_2)$ and $(v_2, v_1, v_3)$ [S1, unofficial].
+    *   **Method 2 (Corner-based)**: An `AABBFaces` structure stores an array of 6 pairs [S2, unofficial]. Each pair consists of:
+        *   `faceMin`: A 3D vector ($rayvec3$) representing the minimum corner of the face [S2, unofficial].
+        *   `faceOpposite`: A 2D vector ($rayvec2$) representing the opposite corner's coordinates along the two axes parallel to the face plane [S2, unofficial].
+
+3.  **Parameters**:
+    *   `maxDist`: An optional early-exit threshold. If the closest intersection distance exceeds this value, the ray is considered non-intersecting for practical purposes [S2, unofficial].
+
+### Algorithm Steps
+
+#### 1. Face Construction
+Construct the 6 faces of the AABB from its dimensions or vertices [S1, unofficial].
+*   If using vertices, define the 8 vertices of the AABB based on dimensions $XDIM, YDIM, ZDIM$ [S1, unofficial].
+*   Create 6 `Face` objects, each representing one of the 6 planes of the AABB [S1, unofficial].
+*   Alternatively, populate the `AABBFaces` array with the min and opposite corners for each of the 6 faces [S2, unofficial].
+
+#### 2. Ray-Face Intersection Test
+For a given face, determine if the ray intersects it [S1, unofficial][S2, unofficial].
+
+**Parallelism Check**:
+Check if the ray is parallel to the face's normal axis [S2, unofficial]. Let $axis$ be the normal direction of the face (e.g., $x, y,$ or $z$) [S2, unofficial].
+$$ parallel = |D_{axis}| < \epsilon $$
+where $\epsilon = 1.0 \times 10^{-8}$ [S2, unofficial].
+If parallel, the function returns `RayRelation::Parallel` [S2, unofficial].
+
+**Intersection Parameter Calculation**:
+Compute the parameter $t$ (rayCoef) along the ray where it intersects the plane of the face [S2, unofficial]:
+$$ t = \frac{B_{min, axis} - O_{axis}}{D_{axis}} $$
+where $B_{min, axis}$ is the coordinate of the face along the normal axis [S2, unofficial].
+
+**Early Exit**:
+If $t < 0$, the intersection is behind the ray origin [S2, unofficial]. Return `None` or false [S2, unofficial].
+
+**Point Verification**:
+Calculate the intersection point $P$ [S2, unofficial]:
+$$ P_{axis} = B_{min, axis} $$
+$$ P_{other} = O_{other} + t \cdot D_{other} $$
+where $other$ refers to the two axes parallel to the face plane [S2, unofficial].
+
+Check if $P$ lies within the bounds of the face [S2, unofficial]:
+$$ faceMin_{other} \le P_{other} \le faceOpposite_{other} $$
+If this condition holds for both parallel axes, the ray intersects the face [S2, unofficial].
+
+**Triangle Decomposition (Alternative)**:
+If using the vertex-based `Face` struct, split the quad face into two triangles: $(v_0, v_1, v_2)$ and $(v_2, v_1, v_3)$ [S1, unofficial]. Use a standard ray-triangle intersection algorithm (e.g., Möller–Trumbore) for each triangle [S1, unofficial].
+
+#### 3. Front Intersection (Entry Point)
+Find the closest intersection [S1, unofficial][S2, unofficial].
+
+1.  Initialize $t_{min} = \infty$ (or `FLT_MAX`) and $hit = false$ [S1, unofficial].
+2.  Iterate through all 6 faces [S1, unofficial].
+3.  For each face, perform the Ray-Face Intersection Test [S1, unofficial][S2, unofficial].
+4.  If an intersection exists at parameter $t_m$:
+    *   Update $t_{min} = \min(t_{min}, t_m)$ [S1, unofficial].
+    *   Set $hit = true$ [S1, unofficial].
+5.  If $hit$ is true, the front intersection is at $t = t_{min}$ [S1, unofficial].
+6.  (Optional) If $t_{min} > maxDist$, return false [S2, unofficial].
+
+#### 4. Back Intersection (Exit Point)
+Find the furthest intersection [S1, unofficial][S2, unofficial].
+
+1.  Initialize $t_{max} = -\infty$ (or `FLT_MIN`) and $hit = false$ [S1, unofficial].
+2.  Iterate through all 6 faces [S1, unofficial].
+3.  For each face, perform the Ray-Face Intersection Test [S1, unofficial][S2, unofficial].
+4.  If an intersection exists at parameter $t_m$:
+    *   Update $t_{max} = \max(t_{max}, t_m)$ [S1, unofficial].
+    *   Set $hit = true$ [S1, unofficial].
+5.  If $hit$ is true, the back intersection is at $t = t_{max}$ [S1, unofficial].
+
+### Pseudocode
+
+> **Unverified code.** The code below did not pass a test run against a reference implementation, or no test fits it, so it may contain errors.
+
+```python
+import math
+
+def ray_face_intersect(ray_origin, ray_dir, face_min, face_opposite_2d, axis_index):
+    """
+    Tests intersection of a ray with a single AABB face.
+    
+    Args:
+        ray_origin: (x, y, z) tuple
+        ray_dir: (x, y, z) tuple, assumed normalized
+        face_min: (x, y, z) tuple, the corner of the face on the normal axis
+        face_opposite_2d: (u, v) tuple, the opposite corner's coordinates on the other two axes
+        axis_index: 0 for X, 1 for Y, 2 for Z. The index of the normal axis.
+        
+    Returns:
+        t: distance to intersection if valid, else None
+    """
+    # Extract components
+    ox, oy, oz = ray_origin
+    dx, dy, dz = ray_dir
+    
+    # Get the axis value for origin and direction
+    origin_val = [ox, oy, oz][axis_index]
+    dir_val = [dx, dy, dz][axis_index]
+    
+    # Parallelism check
+    if abs(dir_val) < 1.0e-8:
+        return None
+        
+    # Calculate t
+    face_val = face_min[axis_index]
+    t = (face_val - origin_val) / dir_val
+    
+    # Check if behind ray
+    if t < 0:
+        return None
+        
+    # Calculate intersection point on the other two axes
+    other_axes = [i for i in range(3) if i != axis_index]
+    
+    p_other = []
+    for i, axis in enumerate(other_axes):
+        p_val = ray_origin[axis] + t * ray_dir[axis]
+        p_other.append(p_val)
+        
+    # Check bounds
+    for i, axis in enumerate(other_axes):
+        min_bound = face_min[axis]
+        max_bound = face_opposite_2d[i]
+        
+        if not (min_bound <= p_other[i] <= max_bound):
+            return None
+            
+    return t
+
+def intersect_aabb_faces(ray_origin, ray_dir, bbox_min, bbox_max, max_dist=None):
+    """
+    Finds front and back intersections of a ray with an AABB by testing 6 faces.
+    
+    Args:
+        ray_origin: (x, y, z) tuple
+        ray_dir: (x, y, z) tuple, assumed normalized
+        bbox_min: (x, y, z) tuple
+        bbox_max: (x, y, z) tuple
+        max_dist: Optional float threshold for early exit
+        
+    Returns:
+        (front_t, back_t) or (None, None) if no intersection
+    """
+    
+    # Define the 6 faces
+    faces = []
+    
+    # X faces
+    faces.append({'axis': 0, 'min': (bbox_min[0], bbox_min[1], bbox_min[2]), 'opp_2d': (bbox_max[1], bbox_max[2])})
+    faces.append({'axis': 0, 'min': (bbox_max[0], bbox_min[1], bbox_min[2]), 'opp_2d': (bbox_max[1], bbox_max[2])})
+    
+    # Y faces
+    faces.append({'axis': 1, 'min': (bbox_min[0], bbox_min[1], bbox_min[2]), 'opp_2d': (bbox_max[0], bbox_max[2])})
+    faces.append({'axis': 1, 'min': (bbox_min[0], bbox_max[1], bbox_min[2]), 'opp_2d': (bbox_max[0], bbox_max[2])})
+    
+    # Z faces
+    faces.append({'axis': 2, 'min': (bbox_min[0], bbox_min[1], bbox_min[2]), 'opp_2d': (bbox_max[0], bbox_max[1])})
+    faces.append({'axis': 2, 'min': (bbox_min[0], bbox_min[1], bbox_max[2]), 'opp_2d': (bbox_max[0], bbox_max[1])})
+    
+    # Front Intersection
+    t_min = float('inf')
+    hit_front = False
+    started_inside = False
+    
+    for face in faces:
+        t = ray_face_intersect(ray_origin, ray_dir, face['min'], face['opp_2d'], face['axis'])
+        if t is not None:
+            if t <= 0:
+                started_inside = True
+            if t < t_min:
+                t_min = t
+                hit_front = True
+            if max_dist is not None and t_min > max_dist:
+                return None, None
+                
+    # Back Intersection
+    t_max = float('-inf')
+    hit_back = False
+    
+    for face in faces:
+        t = ray_face_intersect(ray_origin, ray_dir, face['min'], face['opp_2d'], face['axis'])
+        if t is not None:
+            if t > t_max:
+                t_max = t
+                hit_back = True
+                
+    if hit_front:
+        # If ray starts inside the box, the entry point is exactly at the origin
+        if started_inside:
+            t_min = 0.0
+        return t_min, t_max
+    else:
+        return None, None
+```
+
+### Edge Cases and Pitfalls
+*   **Parallel Rays**: If the ray direction is parallel to a face's normal axis, division by zero occurs in the $t$ calculation. This is handled by checking if $|D_{axis}| < \epsilon$ (where $\epsilon = 1.0 \times 10^{-8}$) [S2, unofficial]. If parallel, the function returns `RayRelation::Parallel` [S2, unofficial].
+*   **Efficiency**: This method is less efficient than the standard slab method because it performs 6 separate intersection tests (or 12 triangle tests if decomposed) instead of 3 interval calculations [S1, unofficial]. It is explicitly noted as a current limitation in some implementations where "ray to axis aligned rectangle" is used instead of optimized ray-AABB [S1, unofficial].
+*   **Normalization**: The parameter $t$ represents distance only if the ray direction is normalized. The code assumes normalization [S2, unofficial].
+
+## Operating characteristics
+*   **Time Complexity**: $O(1)$, specifically 6 face intersection tests [G]. Each test involves a constant number of arithmetic operations [G].
+*   **Memory Complexity**: $O(1)$, requiring storage for a few vectors and scalars [G].
+*   **Performance**: Slower than the slab method due to the higher number of operations and potential branching [S1, unofficial]. The explicit face traversal avoids the branchless optimizations possible in slab methods but is more robust to non-standard bounding box representations [S1, unofficial][S2, unofficial].
+*   **Strengths**: Conceptually simple; easily extensible to non-axis-aligned boxes (OBB) by transforming the ray or faces; useful when face normals are explicitly needed [S1, unofficial][S2, unofficial].
+*   **Limitations**: Computationally expensive compared to slab methods; sensitive to parallel rays; requires careful handling of floating-point precision [S1, unofficial][S2, unofficial].
+
+## Background
+This method is derived from basic ray-triangle intersection principles applied to the faces of an AABB [S1, unofficial][S2, unofficial]. It is commonly found in educational graphics implementations and early-stage voxel engines where simplicity and explicit geometric handling are prioritized over raw performance [S1, unofficial][S2, unofficial]. The specific implementation details, such as the use of `glm` vectors and the `AABBFaces` structure, are seen in the VoxelCore engine [S2, unofficial]. The approach is also referenced in academic projects like the CSE-333 Computer Graphics Volume Ray Casting project [S1, unofficial].
+
+## Sources
+[S1] CSE-333-Computer-Graphics-2020/VolumeRayCasting, https://github.com/CSE-333-Computer-Graphics-2020/VolumeRayCasting, fetched 2026-10-26 (unofficial)
+[S2] MihailRis/voxelcore, https://github.com/MihailRis/voxelcore, fetched 2026-10-26 (unofficial)

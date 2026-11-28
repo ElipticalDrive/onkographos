@@ -1,0 +1,109 @@
+# Simulated Schlieren
+
+Also called: Computational Schlieren, Schlieren Rendering
+
+## Overview
+Simulated Schlieren is a computational technique used to visualize refractive index gradients in volumetric data, such as water vapor clouds or heat plumes, by mimicking the optical effects of Schlieren photography [S1, unofficial]. It differs from standard volumetric rendering by highlighting boundaries and density variations through opacity modulation rather than direct absorption, and is distinct from [Simulated Shadowgraph](1388-simulated-shadowgraph.md) which typically relies on integrated path length [S1, unofficial].
+
+## How it works
+**Inputs and Outputs:**
+*   **Input:** A volumetric data field $f(x,y,z)$ (e.g., density, temperature, or refractive index) defined on a 3D grid.
+*   **Output:** A rendered image where intensity variations correspond to the second derivative (gradient of the gradient) of the input field, simulating light deflection.
+
+**Data Structures:**
+*   The input is stored as a 3D array of floating-point values.
+*   The output is a 2D image buffer.
+
+**Method:**
+The core mechanism involves computing the spatial derivatives of the input field to approximate the light deflection angle, then mapping these values to opacity or color.
+
+1.  **Compute Gradient:** Calculate the gradient $\nabla f$ of the input field $f$. This represents the refractive index gradient.
+2.  **Compute Divergence (Optional for Schlieren):** In classical Schlieren, the intensity is proportional to the divergence of the deflection angle, which relates to the Laplacian $\nabla^2 f$ (second derivative) [S1, unofficial]. However, many implementations approximate this by using the magnitude of the gradient $|\nabla f|$ or the gradient itself to highlight edges.
+3.  **Modulate Opacity:** Apply a transfer function $T$ to the computed derivative values to determine voxel opacity $\alpha$.
+    $$ \alpha = T(\nabla f) $$
+    To generate soft tangent-lines or smooth contour effects, a periodic function can be used to modulate opacity [S1, unofficial]:
+    $$ \alpha = \sin(f)^k $$
+    where $f$ is the displayed data field and $k$ is a control parameter.
+4.  **Volume Rendering:** Perform standard volume rendering (e.g., ray casting) using the computed opacity $\alpha$ and a base color. The final pixel color $C$ is computed via front-to-back compositing:
+    $$ C = \sum_{i=1}^{N} c_i \alpha_i \prod_{j=1}^{i-1} (1 - \alpha_j) $$
+    where $c_i$ is the color of the $i$-th sample and $\alpha_i$ is its opacity.
+
+**Parameters:**
+*   $k$: Exponent for periodic opacity modulation. Not given in the sources.
+*   Transfer Function $T$: Maps gradient magnitude to opacity. Not given in the sources.
+
+**Edge Cases and Pitfalls:**
+*   **Noise:** Numerical noise in derivative calculations can create artifacts. Smoothing filters may be required [G].
+*   **Boundary Conditions:** Derivatives at domain boundaries require careful handling (e.g., zero-padding or reflection) to avoid edge artifacts [G].
+
+**Pseudocode:**
+> **Unverified code.** The code below did not pass a test run against a reference implementation, or no test fits it, so it may contain errors.
+
+```python
+def simulate_schlieren(field: Array3D, k: float) -> Image2D:
+    """
+    Simulates Schlieren effect on a 3D field.
+    field: 3D array of input data (e.g., density)
+    k: exponent for periodic opacity modulation
+    """
+    # 1. Compute gradient magnitude
+    # Using central differences for internal points
+    grad_x = np.gradient(field, axis=0)
+    grad_y = np.gradient(field, axis=1)
+    grad_z = np.gradient(field, axis=2)
+    
+    # Gradient magnitude
+    grad_mag = np.sqrt(grad_x**2 + grad_y**2 + grad_z**2)
+    
+    # 2. Modulate opacity using periodic function for soft contours
+    # Note: The source mentions sin(f)^k where f is the displayed data field.
+    # This implies using the original field or the gradient magnitude.
+    # We assume f refers to the normalized field value for stability.
+    normalized_field = (field - field.min()) / (field.max() - field.min() + 1e-8)
+    opacity = np.abs(np.sin(normalized_field)) ** k
+    
+    # 3. Volume Rendering (Ray Casting)
+    # Simplified ray casting for demonstration
+    image = np.zeros((field.shape[1], field.shape[2], 3))
+    
+    for y in range(field.shape[1]):
+        for z in range(field.shape[2]):
+            color = np.array([0.0, 0.0, 0.0])
+            alpha_accum = 0.0
+            
+            for x in range(field.shape[0]):
+                # Sample opacity and assume a base color (e.g., white)
+                alpha = opacity[x, y, z]
+                base_color = np.array([1.0, 1.0, 1.0])
+                
+                # Front-to-back compositing
+                weight = alpha * (1.0 - alpha_accum)
+                color += weight * base_color
+                alpha_accum += weight
+                
+                if alpha_accum > 0.99:
+                    break
+            
+            image[y, z] = color
+            
+    return image
+```
+
+## Subtopics
+
+### Simulated Shadowgraph
+A computational technique to simulate shadowgraph photographic techniques, typically used for visualizing tornadoes or large-scale density variations [S1, unofficial]. It differs from Schlieren by often relying on the integrated path length or first derivative of the field rather than the second derivative, resulting in a different contrast mechanism [S1, unofficial]. It is chosen when the goal is to visualize the overall shape and displacement of refractive index changes rather than sharp gradients.
+
+## Operating characteristics
+*   **Time Complexity:** $O(N)$ for gradient computation and $O(R \cdot N_{samples})$ for volume rendering, where $N$ is the number of voxels and $R$ is the number of rays.
+*   **Memory Complexity:** $O(N)$ for storing the field and intermediate gradient arrays.
+*   **Strengths:** Effectively visualizes transparent, refractive phenomena like heat haze or vapor clouds.
+*   **Limitations:** Sensitive to noise in derivative calculations; requires careful tuning of transfer functions.
+*   **When to use:** When visualizing refractive index gradients in fluids or gases.
+*   **When not to use:** When direct absorption or emission is the primary visual cue.
+
+## Background
+Simulated Schlieren was developed as part of a generalized framework for illustrative visualization of time-varying data on unstructured meshes [S1, unofficial]. Svakhine et al. introduced computational techniques to simulate Schlieren effects, specifically demonstrating the visualization of water vapor clouds [S1, unofficial]. The method is motivated by the need to make invisible physical phenomena, such as air density changes, visible in computer graphics.
+
+## Sources
+[S1] Generalized Framework and Algorithms for Illustrative Visualization of Time-Varying Data on Unstructured Meshes, https://digital.library.unt.edu/ark:/67531/metadc838861/?q=illustrative volume rendering, fetched 2026-10-28 (unofficial)

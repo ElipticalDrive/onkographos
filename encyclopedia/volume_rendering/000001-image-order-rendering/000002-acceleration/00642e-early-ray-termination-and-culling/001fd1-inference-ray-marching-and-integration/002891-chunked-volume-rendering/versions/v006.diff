@@ -1,0 +1,122 @@
+--- v005.md
++++ v006.md
+@@ -4,9 +4,9 @@
+ 
+ ## Overview
+-Chunked Volume Rendering is a memory-efficient inference technique that integrates color and density along rays by processing sampled points in fixed-size batches (chunks) [S1, S3, unofficial]. It solves the GPU memory bottleneck associated with rendering large scenes or high-resolution implicit fields by allowing a trade-off between memory usage and computational throughput [S3, unofficial]. It differs from its parent [Inference Ray Marching and Integration](2148-inference-ray-marching-and-integration.md) by explicitly batching the forward pass to constrain VRAM, and from its sibling [Inference Ray Compositing](3790-inference-ray-compositing.md) by focusing on the chunked accumulation of radiance rather than just the compositing logic.
++Chunked Volume Rendering is a memory-efficient inference technique that integrates color and density along rays by processing sampled points in fixed-size batches (chunks) [S1, S3, unofficial]. It solves the GPU memory bottleneck associated with rendering large scenes or high-resolution implicit fields by allowing a trade-off between memory usage and computational throughput [S3, unofficial]. It differs from its parent [Inference Ray Marching and Integration](2148-inference-ray-marching-and-integration.md) by explicitly batching the forward pass to constrain VRAM [S3, unofficial], and from its sibling [Inference Ray Compositing](3790-inference-ray-compositing.md) by focusing on the chunked accumulation of radiance rather than just the compositing logic [S1, unofficial].
+ 
+ ## How it works
+ **Inputs and Outputs:**
+-*   **Input:** A `ray_bundle` containing origins, directions, and pre-sampled points (shape `[B, N_pts, 3]`); an implicit function `implicit_fn` to query density and features; a `sampler` to generate points; and configuration parameters (`chunk_size`, `raymarching_tolerance`, `white_background`) [S1, S3, unofficial].
++*   **Input:** A `ray_bundle` containing origins `[B, 3]`, directions `[B, 3]`, and pre-sampled 3D points `[B, N, 3]`; an implicit function `implicit_fn` to query density and features; a `sampler` to generate points; and configuration parameters (`chunk_size`, `raymarching_tolerance`, `white_background`) [S1, S3, unofficial].
+ *   **Output:** A dictionary containing `feature` (rendered color, shape `[B, 3]`) and `depth` (rendered depth, shape `[B, 1]`) [S1, unofficial].
+ 
+@@ -17,5 +17,5 @@
+ 
+ **Parameters:**
+-*   `chunk_size`: Number of rays (or samples) processed per iteration. Default is 65,536 (1024 * 64) for training, or `chunk_size // 1024` for inference [S3, unofficial].
++*   `chunk_size`: Number of rays processed per iteration. Default is 65,536 (1024 * 64) for training, or `chunk_size // 1024` for inference [S3, unofficial].
+ *   `raymarching_tolerance`: Threshold for early stopping. If > 0, rays terminate when accumulated free energy exceeds `-log(tolerance)` [S3, unofficial].
+ *   `white_background`: Boolean. If True, background is white; otherwise black [S1, unofficial].
+@@ -40,14 +40,14 @@
+ 
+ **Algorithm:**
+-1.  Initialize `accumulated_free_energy` to zeros, `chunk_features` and `chunk_depths` to empty lists.
+-2.  Determine total rays $N$. Iterate `chunk_start` from 0 to $N$ with step `chunk_size`.
+-3.  Slice `ray_bundle` for the current chunk: `cur_ray_bundle = ray_bundle[chunk_start : chunk_start + chunk_size]`.
+-4.  Call the parent forward method (or `forward_once`) with `cur_ray_bundle` to get `cur_feature` and `cur_depth`.
+-    *   *Note:* If the implementation uses explicit accumulation within the chunk loop (as in [S3, unofficial]), iterate through sample indices $i$. Compute weights $w_t = \text{probs}_t$. Update `accumulated_free_energy`. If `accumulated_free_energy > -log(raymarching_tolerance)`, mask out subsequent hits for those rays.
+-5.  Append `cur_feature` to `chunk_features` and `cur_depth` to `chunk_depths`.
++1.  Initialize `accumulated_free_energy` to zeros, `chunk_features` and `chunk_depths` to empty lists [S4, unofficial].
++2.  Determine total rays $N$. Iterate `chunk_start` from 0 to $N$ with step `chunk_size` [S4, unofficial].
++3.  Slice `ray_bundle` for the current chunk: `cur_ray_bundle = ray_bundle[chunk_start : chunk_start + chunk_size]` [S4, unofficial].
++4.  Call the parent forward method (or `forward_once`) with `cur_ray_bundle` to get `cur_feature` and `cur_depth` [S4, unofficial].
++    *   *Note:* If the implementation uses explicit accumulation within the chunk loop (as in [S3, unofficial]), iterate through sample indices $i$. Compute weights $w_t = \text{probs}_t$. Update `accumulated_free_energy`. If `accumulated_free_energy > -log(raymarching_tolerance)`, mask out subsequent hits for those rays [S3, unofficial].
++5.  Append `cur_feature` to `chunk_features` and `cur_depth` to `chunk_depths` [S4, unofficial].
+ 6.  Concatenate all chunks:
+     $$ \text{feature} = \text{cat}(chunk\_features, \text{dim}=0) $$
+     $$ \text{depth} = \text{cat}(chunk\_depths, \text{dim}=0) $$
+-7.  If `white_background` is True, add `(1 - missed) * 1.0` to color.
++7.  If `white_background` is True, add `(1 - missed) * 1.0` to color [S1, unofficial].
+ 8.  Return `feature` and `depth`.
+ 
+@@ -64,5 +64,5 @@
+     # Handle edge case: no rays
+     if B == 0:
+-        return torch.zeros((0, 3)), torch.zeros((0, 1))
++        return zeros((0, 3)), zeros((0, 1))
+ 
+     for chunk_start in range(0, B, chunk_size):
+@@ -78,5 +78,5 @@
+         # Assuming sampler returns points [B_chunk, N, 3] and deltas [B_chunk, N]
+         points = sampler(cur_ray_bundle)
+-        deltas = compute_deltas(points) # [B_chunk, N]
++        deltas = compute_deltas(points, cur_ray_bundle['origins']) # [B_chunk, N]
+         
+         # Query implicit function for density and color
+@@ -90,22 +90,22 @@
+         # Shifted free energy for transmittance
+         # b_t = exp(-cumsum(shifted_free_energy))
+-        shifted_free_energy = torch.cat([torch.zeros_like(free_energy[:, :1]), free_energy[:, :-1]], dim=1)
+-        transmittance = torch.exp(-torch.cumsum(shifted_free_energy, dim=1))
++        shifted_free_energy = concatenate([zeros_like(free_energy[:, :1]), free_energy[:, :-1]], dim=1)
++        transmittance = exp(-cumsum(shifted_free_energy, dim=1))
+         
+         # Alpha and weights
+-        alpha = 1.0 - torch.exp(-free_energy)
++        alpha = 1.0 - exp(-free_energy)
+         weights = alpha * transmittance
+         
+         # Render Color and Depth
+         # color = sum(weights * color)
+-        rendered_color = torch.sum(weights.unsqueeze(-1) * color, dim=1)
++        rendered_color = sum(weights.unsqueeze(-1) * color, dim=1)
+         
+         # depth = sum(weights * depth_samples)
+         # depth_samples are distances of points from origin
+-        depth_samples = torch.norm(points - cur_ray_bundle['origins'].unsqueeze(1), dim=-1) # [B_chunk, N]
+-        rendered_depth = torch.sum(weights * depth_samples, dim=1)
++        depth_samples = norm(points - cur_ray_bundle['origins'].unsqueeze(1), dim=-1) # [B_chunk, N]
++        rendered_depth = sum(weights * depth_samples, dim=1)
+         
+         # Missed probability
+-        missed = 1.0 - torch.sum(weights, dim=1)
++        missed = 1.0 - sum(weights, dim=1)
+         
+         # Apply background
+@@ -119,17 +119,19 @@
+         
+     # Concatenate results
+-    final_feature = torch.cat(chunk_features, dim=0)
+-    final_depth = torch.cat(chunk_depths, dim=0)
++    final_feature = concatenate(chunk_features, dim=0)
++    final_depth = concatenate(chunk_depths, dim=0)
+     
+     return final_feature, final_depth
+ 
+-def compute_deltas(points):
+-    # points [B, N, 3]
++def compute_deltas(points, origins):
++    # points [B, N, 3], origins [B, 3]
+     # deltas [B, N]
+-    diffs = points[:, 1:] - points[:, :-1]
+-    deltas = torch.norm(diffs, dim=-1)
++    # Compute distances from origin
++    dists = norm(points - origins.unsqueeze(1), dim=-1) # [B, N]
++    # Compute deltas as differences between consecutive distances
++    diffs = dists[:, 1:] - dists[:, :-1] # [B, N-1]
+     # Append large value for last segment
+-    large_delta = torch.ones_like(deltas[:, :1]) * 1e10
+-    return torch.cat([deltas, large_delta], dim=1)
++    large_delta = ones_like(diffs[:, :1]) * 1e10
++    return concatenate([diffs, large_delta], dim=1)
+ ```
+ [G] The pseudocode above implements the standard NeRF-style integration [S1, S3, unofficial]. The source [S3, unofficial] mentions an `accumulated_free_energy` variable used for early stopping within a loop over samples. The logic for early stopping is: if `raymarching_tolerance > 0`, maintain a running sum of `free_energy`. If the sum exceeds `-log(raymarching_tolerance)`, set `alpha` to 0 for all subsequent steps for that ray. This is omitted in the clean vectorized pseudocode for brevity but is a critical pitfall for memory-constrained implementations [S3, unofficial].
+@@ -138,5 +140,5 @@
+ 
+ ### [Chunked Volume Rendering with Occupancy Grid Estimator](4652-chunked-volume-rendering-with-occupancy-grid-estimator.md)
+-This method accelerates volume rendering by combining chunked ray batching with an occupancy grid estimator to skip empty space. It solves the performance bottleneck of uniform ray marching in sparse or large scenes by only sampling regions where the radiance field has non-zero density. It differs from its parent [Chunked Volume Rendering](4310-chunked-volume-rendering.md) by integrating a specific hierarchical occupancy grid for adaptive sampling, and from its sibling [Block-based Volume Rendering Strategy](13140-block-based-volume-rendering-strategy.md) by using a continuous grid-based estimator rather than discrete block structures.
++This method accelerates volume rendering by combining chunked ray batching with an occupancy grid estimator to skip empty space. It solves the performance bottleneck of uniform ray marching in sparse or large scenes by only sampling regions where the radiance field has non-zero density. It differs from its parent [Chunked Volume Rendering](4310-chunked-volume-rendering.md) by integrating a specific hierarchical occupancy grid for adaptive sampling, and from its sibling [Block-based Volume Rendering Strategy](13140-block-based-volume-rendering-strategy.md) by using a continuous grid-based estimator rather than discrete block structures [G].
+ 
+ ### [Partitioned Volume Rendering Derivation](10384-partitioned-volume-rendering-derivation.md)

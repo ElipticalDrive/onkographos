@@ -1,0 +1,191 @@
+--- v005.md
++++ v006.md
+@@ -4,91 +4,117 @@
+ 
+ ## Overview
+-EmissivityRenderer is a differentiable volume renderer designed for multi-line neural tomography, specifically recovering 3-D coronal electron density ($n_e$) and temperature ($T_e$) from multiview, multiline spectral-intensity images [S1, unofficial]. It performs ray marching and Line-of-Sight (LOS) integration of emissivity coefficients derived from neural network models [S1, unofficial]. It is distinguished from its siblings by its specific application to solar coronal physics, utilizing a density-temperature benchmark and CHIANTI atomic data for emissivity calculation, whereas [Differential Rendering for CT Reconstruction](6462-differential-rendering-for-ct-reconstruction.md) focuses on general differential CT and [DiffVox](10071-diffvox.md) on voxel-based differentiable rendering [S1, unofficial].
++EmissivityRenderer is a differentiable volume renderer designed for multi-line neural tomography, specifically to recover 3-D coronal electron density ($n_e$) and temperature ($T_e$) from multiview, multiline spectral-intensity images [S1, unofficial]. It differs from its siblings by explicitly modeling the Line-of-Sight (LOS) integration of emissivity coefficients derived from physical plasma models (via CHIANTI/PyCELP) rather than relying solely on implicit neural radiance fields or differential surface rendering [S1, unofficial]. It builds on the [Differentiable CT Execution Model](3066-differentiable-ct-execution-model.md) to provide per-view geometry and matched adjoints.
+ 
+ ## How it works
+-**Inputs and Outputs:**
+-*   **Inputs:** Ray origins and directions, occupancy grid parameters, neural network weights for density and temperature prediction, and physical constants/ion data for emissivity lookup [S1, unofficial].
+-*   **Outputs:** Differentiable LOS-integrated intensity images for multiple spectral lines, and gradients with respect to network weights and input parameters [S1, unofficial].
++**Inputs:**
++- Multiview spectral-intensity images.
++- Camera poses and intrinsics.
++- A precomputed Look-Up Table (LUT) of emissivity coefficients ($c_{coef}$) as a function of electron density ($n_e$), temperature ($T_e$), and radial distance ($r$) [S1, unofficial].
++
++**Outputs:**
++- Reconstructed 3-D volumes of electron density ($n_e$) and temperature ($T_e$).
++- Differentiable loss gradients with respect to the neural network parameters.
+ 
+ **Data Structures:**
+-*   **Occupancy Grid:** A hash grid of resolution `occ_res` (default 128) storing occupancy probabilities, updated via atomic operations during training [S1, unofficial].
+-*   **DensityMLP:** A neural network mapping spatial coordinates to electron density $n_e$ [S1, unofficial].
+-*   **Temperature Model:** A neural network or function mapping spatial coordinates to temperature $T_e$ [S1, unofficial].
+-*   **Emissivity Coefficient:** Computed from $n_e$, $T_e$, and radial distance $r$ using CHIANTI atomic data via the `pycelp` library [S1, unofficial].
++- **Occupancy Grid:** A hash grid storing occupancy probabilities for sparse voxel traversal. Resolution is defined by `occ_res` (default 128) [S1, unofficial].
++- **DensityMLP:** A neural network mapping spatial coordinates to electron density $n_e$ [S1, unofficial].
++- **Temperature Field:** A neural network or field mapping spatial coordinates to temperature $T_e$ [S1, unofficial].
++- **Emissivity LUT:** A 3D grid (or tensor) storing $c_{coef}(n_e, T_e, r)$ computed via atomic physics codes [S1, unofficial].
+ 
+ **Parameters:**
+-*   `occ_warmup`: Number of warmup steps for occupancy grid training. Default: 256 [S1, unofficial].
+-*   `occ_res`: Resolution of the occupancy grid. Default: 128 [S1, unofficial].
+-*   `step_size`: Step size for ray marching. Default: 1/256 [S1, unofficial].
+-*   `occ_decay`: Decay rate for occupancy grid updates. Range: $(0, 1)$. Default: 0.01 [S1, unofficial].
+-*   `occ_alpha`: Alpha parameter for occupancy grid updates. Range: $[1, 2]$. Default: 1.5 [S1, unofficial].
+-*   `sigma_scale`: Scale factor for $\sigma$ proportional to $n_e^\alpha$ for importance sampling. Initialized as a learnable parameter [S1, unofficial].
+-*   `occ_eval_fn_ne_width`: Width parameter for the occupancy evaluation function related to electron density. Default: 0.25 [S1, unofficial].
+-*   `occ_eval_fn_ne_mid`: Midpoint parameter for the occupancy evaluation function related to electron density. Default: 7.25 [S1, unofficial].
+-*   `min_samples_per_ray`: Minimum number of samples per ray. Default: 64 [S1, unofficial].
+-*   `fallback_when_samples`: Threshold for triggering fallback when sample count is low. Default: 8 [S1, unofficial].
++- `occ_warmup`: Number of warmup steps for occupancy grid training. Default: 256 [S1, unofficial].
++- `occ_res`: Resolution of the occupancy grid. Default: 128 [S1, unofficial].
++- `step_size`: Step size for ray marching. Default: $1/256$ [S1, unofficial].
++- `occ_decay`: Decay rate for occupancy grid updates. Range: $(0, 1)$. Default: 0.01 [S1, unofficial].
++- `occ_alpha`: Alpha parameter for occupancy grid updates. Range: $[1, 2]$. Default: 1.5 [S1, unofficial].
++- `sigma_scale`: Scale factor for importance sampling, proportional to $n_e^{\alpha}$. Initialized as a learnable parameter [S1, unofficial].
++- `occ_eval_fn_ne_width`: Width parameter for the occupancy evaluation function related to electron density. Default: 0.25 [S1, unofficial].
++- `occ_eval_fn_ne_mid`: Midpoint parameter for the occupancy evaluation function related to electron density. Default: 7.25 [S1, unofficial].
++- `min_samples_per_ray`: Minimum number of samples per ray. Default: 64 [S1, unofficial].
++- `fallback_when_samples`: Threshold for triggering fallback when sample count is low. Default: 8 [S1, unofficial].
+ 
+-**Algorithm Steps:**
+-For each ray, the renderer executes the following sequence [S1, unofficial]:
+-1.  **Sampling:** Sample points $x_i$ along the ray within the axis-aligned bounding box ($x_{AABB}$) [S1, unofficial]. The number of samples is determined by `step_size` and `min_samples_per_ray` [S1, unofficial]. Importance sampling may be used based on $\sigma \propto n_e^\alpha$ scaled by `sigma_scale` [S1, unofficial].
+-2.  **Temperature Estimation:** Compute the temperature $T(x_i)$ at each sample point using the temperature model [S1, unofficial].
+-3.  **Radial Distance:** Compute the radial distance $r_{xyz}$ from the center of the volume for each sample point $x_i$ [S1, unofficial].
+-4.  **Density Estimation:** Compute the electron density $n_e$ at each sample point using the `DensityMLP` model [S1, unofficial].
+-5.  **Emissivity Coefficient:** Compute the emissivity coefficient $c_{\text{coef}}(n_e, T, r)$ using the precomputed LUT or analytical function based on CHIANTI data for the specific ion species and wavelengths [S1, unofficial].
+-6.  **LOS Integration:** Perform the Line-of-Sight integral of $c_{\text{coef}}$ along the ray to obtain the final intensity [S1, unofficial]. This is computed as $I = \sum_{i} c_{\text{coef}}(i) \cdot \Delta s_i$, where $\Delta s_i$ is the step size [S1, unofficial]. Gradients are backpropagated through this sum [S1, unofficial].
++**Algorithm:**
++For each ray in the view:
++1.  **Ray Casting:** Generate ray origin and direction from camera parameters.
++2.  **Bounding Box Intersection:** Compute intersection with the axis-aligned bounding box ($x_{AABB}$) of the volume [S1, unofficial].
++3.  **Ray Marching:** Sample points along the ray within $x_{AABB}$ using `step_size`.
++4.  **Occupancy Check:** Query the occupancy grid to skip empty regions. If the grid is empty, skip sampling [S1, unofficial].
++5.  **Temperature Estimation:** Compute temperature $T(x)$ at the current sample point $x$ using the temperature field [S1, unofficial].
++6.  **Radial Distance:** Compute radial distance $r$ from the center of the sun/corona to $x$ [S1, unofficial].
++7.  **Density Estimation:** Compute electron density $n_e$ at $x$ using the `DensityMLP` [S1, unofficial].
++8.  **Emissivity Coefficient Lookup:** Compute or lookup the emissivity coefficient $c_{coef}(n_e, T, r)$ using the precomputed LUT or analytical approximation [S1, unofficial].
++9.  **LOS Integration:** Accumulate the emissivity along the ray:
++    $$ I = \int_{t_{near}}^{t_{far}} c_{coef}(n_e(t), T(t), r(t)) \, dt $$
++    Discretized as:
++    $$ I \approx \sum_{i=1}^{N} c_{coef}(n_e(x_i), T(x_i), r(x_i)) \cdot \Delta t_i $$
++    where $N$ is the number of samples [S1, unofficial].
++10. **Gradient Backpropagation:** Compute gradients of the loss with respect to $n_e$ and $T$ via automatic differentiation through the MLPs and the integration step [S1, unofficial].
+ 
+ **Pseudocode:**
+ ```python
+-import math
+-
+-def render_ray(ray_origin, ray_direction, density_mlp, temp_model, params, aabb_min, aabb_max):
+-    # 1. Sample points in AABB
+-    t_min = -math.inf
+-    t_max = math.inf
+-    for i in range(3):
+-        if ray_direction[i] != 0:
+-            t1 = (aabb_min[i] - ray_origin[i]) / ray_direction[i]
+-            t2 = (aabb_max[i] - ray_origin[i]) / ray_direction[i]
+-            t_min = max(t_min, min(t1, t2))
+-            t_max = min(t_max, max(t1, t2))
+-        elif not (aabb_min[i] <= ray_origin[i] <= aabb_max[i]):
+-            return 0.0
+-    if t_min > t_max:
+-        return 0.0
+-    num_samples = params['min_samples_per_ray']
+-    t_values = [t_min + i * params['step_size'] for i in range(num_samples)]
+-    points = [[ray_origin[i] + t * ray_direction[i] for i in range(3)] for t in t_values]
+-
+-    # 2. Compute Temperature
+-    temperatures = [temp_model(p) for p in points]
+-
+-    # 3. Compute Radial Distance
+-    radial_distances = [math.sqrt(sum(p_i**2 for p_i in p)) for p in points]
+-
+-    # 4. Compute Electron Density
+-    densities = [density_mlp(p) for p in points]
+-
+-    # 5. Compute Emissivity Coefficient
+-    # Exact formula for ccoef(ne, T, r) is not provided in the sources [G]
+-    emissivities = [ne * T * r for ne, T, r in zip(densities, temperatures, radial_distances)]
+-
+-    # 6. LOS Integral
+-    step_size = params['step_size']
+-    intensity = sum(e * step_size for e in emissivities)
+-    return intensity
++def render_ray(ray_origin, ray_direction, step_size, occ_grid, density_mlp, temp_field, emissivity_lut):
++    # 1. Compute AABB intersection
++    t_min, t_max = compute_aabb_intersection(ray_origin, ray_direction)
++    
++    # 2. Initialize accumulation
++    total_intensity = 0.0
++    num_samples = 0
++    
++    # 3. Ray marching
++    t = t_min
++    while t < t_max:
++        # Sample point in 3D space
++        x = ray_origin + t * ray_direction
++        
++        # 4. Occupancy check
++        if not occ_grid.query(x):
++            t += step_size
++            continue
++            
++        # 5. Compute temperature
++        T = temp_field(x)
++        
++        # 6. Compute radial distance from center (assuming center at origin for simplicity)
++        r = norm(x)
++        
++        # 7. Compute electron density
++        n_e = density_mlp(x)
++        
++        # 8. Compute emissivity coefficient
++        # Lookup in LUT or compute via physical model
++        c_coef = emissivity_lut.lookup(n_e, T, r)
++        
++        # 9. Accumulate
++        total_intensity += c_coef * step_size
++        num_samples += 1
++        
++        t += step_size
++        
++    # 10. Handle fallback if too few samples
++    if num_samples < fallback_when_samples:
++        # Fallback logic, e.g., zero intensity or error flag
++        pass
++        
++    return total_intensity
+ ```
+ 
+-**Pitfalls:**
+-*   GPU hash-grid training is not bitwise-deterministic due to atomic scatter in the hash backward pass and LOS accumulation; fixed seeds yield statistically equivalent, not identical, runs [S1, unofficial].
++**Edge Cases and Pitfalls:**
++- **Non-determinism:** GPU hash-grid training is not bitwise-deterministic due to atomic scatter in the hash backward and LOS accumulation. Fixed seeds yield statistically equivalent, not identical, runs [S1, unofficial].
++- **Low Sample Count:** If the number of samples per ray falls below `fallback_when_samples` (default 8), the result may be unreliable [S1, unofficial].
++
++## Subtopics
++
++### [Differential Infrared Thermography (DIT)](16234-differential-infrared-thermography-dit.md)
++A technique to estimate transmittance and local attenuation coefficient by comparing measurements with two different radiating backgrounds, serving as a preprocessing step for RTE solving. It avoids resolving the internal line-of-sight distribution, unlike the full volumetric tomography performed by EmissivityRenderer.
+ 
+ ## Operating characteristics
+-*   **Time Complexity:** Linear with respect to the number of samples per ray and the number of rays [S1, unofficial]. The neural network evaluations dominate the per-sample cost [S1, unofficial].
+-*   **Memory Complexity:** Dominated by the occupancy grid and the neural network weights [S1, unofficial]. The occupancy grid size is $2^{\text{occ\_res} \times 3}$ entries in the worst case, but hash grids are sparse [S1, unofficial].
+-*   **Performance:** Performance depends on the resolution of the occupancy grid and the complexity of the neural networks [S1, unofficial]. GPU acceleration is used for hash grid updates and neural network inference [S1, unofficial].
+-*   **Strengths:** Differentiable end-to-end, allowing for gradient-based optimization of the 3D density and temperature fields from 2D images [S1, unofficial]. Specific to solar coronal physics, leveraging accurate atomic data [S1, unofficial].
+-*   **Limitations:** Not bitwise-deterministic due to atomic scatter in hash grid updates and LOS accumulation on the GPU [S1, unofficial]. Requires careful tuning of occupancy grid parameters [S1, unofficial].
++- **Time Complexity:** Linear with respect to the number of rays and samples per ray. The lookup of emissivity coefficients is $O(1)$ if using a LUT, or $O(1)$ with a neural network approximation.
++- **Memory Complexity:** Dominated by the occupancy grid ($O(occ\_res^3)$) and the neural network parameters. The LUT size depends on the resolution of $n_e$, $T$, and $r$ grids [S1, unofficial].
++- **Performance:** Performance is heavily dependent on the occupancy grid efficiency. Sparse volumes benefit significantly from the hash grid [S1, unofficial].
++- **Strengths:** Physically grounded emissivity model allows for accurate reconstruction of coronal plasma properties. Differentiable nature enables end-to-end training [S1, unofficial].
++- **Limitations:** Non-deterministic training results. Requires precomputed LUTs or complex physical models for emissivity [S1, unofficial].
+ 
+ ## Background
+-EmissivityRenderer is part of the CoroNeRF project, which applies neural radiance fields (NeRF) to solar coronal tomography [S1, unofficial]. It was developed to address the challenge of reconstructing 3D coronal structures from limited multiview observations [S1, unofficial].
++EmissivityRenderer is part of the CoroNeRF project, which focuses on neural radiance fields for solar corona tomography [S1, unofficial]. It was developed to address the challenges of reconstructing 3-D plasma parameters from limited, noisy, and multi-line spectral observations [S1, unofficial]. The method leverages the Differentiable CT Execution Model for efficient ray casting and gradient computation [S1, unofficial].
+ 
+ ## Sources

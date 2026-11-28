@@ -1,0 +1,185 @@
+# Physics-based Pseudo Label Generation
+
+Also called: Post-processing of Stage 1, Pseudo reflectance generation, Pseudo shading generation
+
+## Overview
+This method generates high-fidelity pseudo reflectance and shading labels from a trained multi-light NeRF model to guide intrinsic decomposition training in Stage 2 [S1]. Unlike previous statistical priors, this physics-based pipeline provides a more reliable basis for disentanglement by leveraging explicit geometric and illumination models [S1]. It serves as the bridge between the implicit representation learned in Stage 1 and the intrinsic-aware NeRF in Stage 2 [S1].
+
+## How it works
+**Inputs:**
+- Trained SDF network and RGB MLP from Stage 1 [S1].
+- Camera poses and light positions for multiple lighting conditions [S1].
+- Rendered RGB images $I$ for each light condition [S1].
+
+**Outputs:**
+- Pseudo shading image $S$ [S1].
+- Pseudo reflectance image $R$ [S1].
+- Weight maps $W_R$ and $W_S$ for reliability estimation [S1].
+
+**Data Structures:**
+- **Points:** 3D coordinates $(x, y, z)$ sampled along camera rays [S1].
+- **Normals:** Surface normal vectors $\vec{N}$ derived from SDF gradients [S1].
+- **Light Visibility:** Binary or continuous mask $V$ indicating if a point is illuminated by a specific light source [S1].
+- **Images:** 2D arrays of RGB values for $I$, $S$, and $R$ [S1].
+
+**Steps:**
+
+1.  **Obtain Normal and Light Visibility:**
+    Use the trained SDF network from Stage 1 to perform sphere tracing and volume rendering to get normals and light visibility for each point [S1]. For each point along the camera ray, compute the surface normal $\vec{N}$ via the gradient of the SDF [S1]. Determine light visibility $V$ by checking if the point is occluded from the light source [S1].
+
+2.  **Generate Pseudo Shading:**
+    Compute the dot product of the normal $\vec{N}$ and the light ray direction $\vec{L}$ [S1]. Apply gamma correction to adapt the pseudo-shading to the nonlinear representation of digital images, mimicking sensor response [S1].
+    
+    The shading $S$ is calculated as:
+    $$ S = (\max(\vec{N} \cdot \vec{L}, 0) \otimes V)^\gamma $$
+    where:
+    - $\vec{N}$ is the normal ray [S1].
+    - $\vec{L}$ is the light ray direction [S1].
+    - $V$ is the light visibility mask [S1].
+    - $\gamma$ is the gamma value (Not given in the sources.) [G].
+    - $\otimes$ denotes pixel-wise product [S1].
+    - $(\cdot)^\gamma$ represents gamma correction [S1].
+
+3.  **Generate Pseudo Reflectance:**
+    Calculate initial reflectance for each light condition using pixel-wise division, ignoring the residual component (specular and indirect light) [S1]:
+    $$ R = I \oslash S $$
+    where $\oslash$ denotes pixel-wise division [S1].
+    
+    To handle multiple light conditions, use K-means clustering at the pixel level [S1]. Incorporate weights of each pseudo shading to select the most probable pseudo reflectance, creating a merged reflectance image [S1].
+
+4.  **Hole Filling:**
+    Identify regions in the merged reflectance that appear as holes due to the absence of direct illumination in all lighting conditions [S1]. Compute a weighted distance between hole pixels and non-hole pixels based on spatial distance in the image, angular difference of their normals, and RGB color difference [S1]. Assign the color of the nearest non-hole pixel (based on weighted distance) to the hole pixel [S1]. This is a rough supplementary approach with minimal impact on overall results, as hole regions are typically small under multi-light settings [S1].
+
+5.  **Compute Weight Maps:**
+    Compute weight maps $W_R$ and $W_S$ for pseudo reflectance and shading respectively [S1]. Weights are based on edges of pseudo shading and visibility [S1]. Areas with higher pseudo shading values or further from visibility edges have greater credibility [S1]. Areas closer to visibility edges or with lower pseudo shading values are deemed less reliable [S1].
+
+**Pseudocode:**
+
+> **Unverified code.** The code below did not pass a test run against a reference implementation, or no test fits it, so it may contain errors.
+
+```python
+import math
+import numpy as np
+
+def generate_pseudo_labels(sdf_network, rgb_mlp, camera_poses, light_positions, gamma=2.2):
+    pseudo_shadings = []
+    pseudo_reflectances = []
+    all_normals = []
+    all_visibilities = []
+
+    for pose, light_pos in zip(camera_poses, light_positions):
+        # Step A: Obtain Normal and Light Visibility
+        points, normals, visibilities = sphere_trace_and_render(
+            sdf_network, camera_poses=pose, light_positions=light_pos
+        )
+        all_normals.append(normals)
+        all_visibilities.append(visibilities)
+
+        # Compute light ray direction
+        light_ray = normalize(light_pos - points)
+
+        # Step B: Generate Pseudo Shading
+        dot_product = np.maximum(np.sum(normals * light_ray, axis=-1), 0) * visibilities
+        shading = dot_product ** gamma
+        pseudo_shadings.append(shading)
+
+        # Render RGB image for this light condition
+        rgb_image = render_rgb(rgb_mlp, points)
+
+        # Step C: Generate Pseudo Reflectance (Initial)
+        safe_shading = np.maximum(shading, 1e-6)
+        initial_reflectance = rgb_image / safe_shading[:, np.newaxis]
+        pseudo_reflectances.append(initial_reflectance)
+
+    # Merge reflectances using K-means clustering with weights
+    merged_reflectance = kmeans_merge(pseudo_reflectances, pseudo_shadings)
+
+    # Step D: Hole Filling
+    hole_mask = is_hole(merged_reflectance, pseudo_shadings)
+    filled_reflectance = fill_holes(merged_reflectance, hole_mask, all_normals[0])
+
+    # Compute Weight Maps
+    weight_shading = compute_shading_weight(pseudo_shadings)
+    weight_reflectance = compute_reflectance_weight(filled_reflectance, weight_shading)
+
+    return filled_reflectance, pseudo_shadings[0], weight_reflectance, weight_shading
+
+def sphere_trace_and_render(sdf_network, camera_poses, light_positions):
+    # Sources do not specify the exact sphere tracing implementation.
+    # Standard routine iterates along rays, queries SDF, computes normals via gradient,
+    # and checks visibility. Returns arrays of shape (H, W, 3) and (H, W).
+    return np.zeros((100, 100, 3)), np.zeros((100, 100, 3)), np.zeros((100, 100))
+
+def render_rgb(rgb_mlp, points):
+    # Standard MLP forward pass to predict RGB from points and features
+    return np.random.rand(points.shape[0], 3)
+
+def normalize(v):
+    return v / (np.linalg.norm(v, axis=-1, keepdims=True) + 1e-8)
+
+def kmeans_merge(reflectances, shadings, k=3, max_iter=10):
+    # Weighted K-means clustering at pixel level across light conditions
+    n_pixels = reflectances[0].shape[0]
+    n_lights = len(reflectances)
+    flat_ref = np.vstack([r.flatten() for r in reflectances])
+    flat_shad = np.vstack([s.flatten() for s in shadings])
+    weights = flat_shad / (np.max(flat_shad) + 1e-6)
+    
+    centroids = flat_ref[:k]
+    for _ in range(max_iter):
+        dists = np.linalg.norm(flat_ref[:, np.newaxis] - centroids[np.newaxis, :], axis=2)
+        labels = np.argmin(dists, axis=1)
+        new_centroids = np.zeros_like(centroids)
+        for i in range(k):
+            mask = labels == i
+            if np.sum(mask) > 0:
+                new_centroids[i] = np.average(flat_ref[mask], weights=weights[mask], axis=0)
+        centroids = new_centroids
+    merged = centroids[labels].reshape(reflectances[0].shape)
+    return merged
+
+def is_hole(reflectance, shadings):
+    # Identify regions where shading was near zero for all lights
+    min_shading = np.min(np.stack(shadings, axis=0), axis=0)
+    return min_shading < 1e-3
+
+def fill_holes(reflectance, hole_mask, normals):
+    filled = reflectance.copy()
+    hole_indices = np.argwhere(hole_mask)
+    non_hole_indices = np.argwhere(~hole_mask)
+    
+    for hole in hole_indices:
+        min_dist = float('inf')
+        best_pixel = None
+        for non_hole in non_hole_indices:
+            d_spatial = np.linalg.norm(hole - non_hole)
+            d_angle = 1.0 - np.abs(np.dot(normals[hole[0], hole[1]], normals[non_hole[0], non_hole[1]]))
+            d_color = np.linalg.norm(reflectance[hole[0], hole[1]] - reflectance[non_hole[0], non_hole[1]])
+            dist = d_spatial + d_angle + d_color
+            if dist < min_dist:
+                min_dist = dist
+                best_pixel = non_hole
+        if best_pixel is not None:
+            filled[hole[0], hole[1]] = reflectance[best_pixel[0], best_pixel[1]]
+    return filled
+
+def compute_shading_weight(shadings):
+    # Weights based on edges of pseudo shading and visibility
+    avg_shading = np.mean(np.stack(shadings, axis=0), axis=0)
+    edges = np.abs(np.gradient(avg_shading))
+    weight = avg_shading / (edges + 1e-6)
+    return weight
+
+def compute_reflectance_weight(reflectance, shading_weight):
+    # Reflectance weight inherits shading reliability
+    return shading_weight
+```
+
+## Operating characteristics
+Exact time and memory complexity bounds are Not given in the sources. [G] Qualitatively, time complexity depends on the number of light conditions and pixels, with K-means clustering adding per-pixel overhead across light conditions. [G] Memory complexity requires storing normals, visibilities, and intermediate images for all light conditions. [G] The method provides a physically grounded basis for intrinsic decomposition, reducing reliance on statistical priors. [S1] It handles multi-light scenarios effectively. [S1] The method relies on the accuracy of Stage 1 SDF and RGB networks. [S1] Hole filling is a heuristic and may introduce artifacts in complex scenes, though impact is minimal. [S1] Accuracy of visibility estimation affects shading quality. [S1] It is used when training an intrinsic-aware NeRF (Stage 2) and high-fidelity pseudo labels are needed for supervision. [S1] It is not recommended if computational resources are extremely limited, as it requires additional post-processing steps. [G] If the scene has significant specular or indirect lighting that cannot be ignored in the residual component, the simplified $R = I \oslash S$ may be inaccurate. [S1]
+
+## Background
+Originated in the MLI-NeRF paper (2024) [S1]. It addresses the need for reliable supervision signals for intrinsic decomposition in neural radiance fields, moving away from statistical priors used in earlier methods. The method leverages the physics of light transport (Lambert's cosine law) and sensor characteristics (gamma correction) to generate pseudo labels. [S1]
+
+## Sources
+[S1] MLI-NeRF: Multi-Light Intrinsic-Aware Neural Radiance Fields, https://arxiv.org/abs/2411.17235v1, fetched 2026-10-26

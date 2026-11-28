@@ -1,0 +1,5019 @@
+https://user-images.githubusercontent.com/11965324/131001408-63d36fde-0c7a-4d63-8e8c-82461c02af72.mp4
+
+# Voxels
+
+GPU-based implementation of [Dual Contouring](https://www.cs.rice.edu/~jwarren/papers/dualcontour.pdf) in Unity for destructible voxel terrain.
+
+The core features are:
+- Infinite procedural world
+- Seamless chunked level of detail
+- Multiple materials with smooth material transitions
+- Graph-based terrain generation using [XNode](https://github.com/Siccity/xNode)
+
+**Note:** Sharp voxel terrain features are preserved, not by solving the [QEF](https://en.wikipedia.org/wiki/Mean_squared_error) as described in the paper above, but by using the [Schmitz Particle method](https://www.inf.ufrgs.br/~comba/papers/thesis/diss-leonardo.pdf#page=42) instead, which is much easier to implement and supposedly faster.
+
+**Note:** The Unity version used is 2021.1.16f1.
+
+**Note:** This repository uses [Git Large File Storage](https://github.com/git-lfs/git-lfs/wiki/Tutorial). If you want to clone this repository, make sure you have Git Large File Storage installed on your PC.
+
+## Materials
+The voxel terrain can be made up of a practically infinite amount of different materials. Materials are defined via a simple enumeration called [```MaterialIndex```](/Assets/Scripts/Voxels/Materials/MaterialIndex.cs). Since the implementation is leveraging the GPU for generating the mesh, some structures have been defined multiple times, once in C# and once in HLSL. This is also
+the case for the material index. The HLSL implementation can be found [here](/Assets/Compute/Voxels/Include/Material.hlsl).
+
+Each material can be assigned a different texture through a [ScriptableObject](/Assets/Scripts/Voxels/Materials/MaterialConfig.cs):
+
+![Material_Config](https://user-images.githubusercontent.com/11965324/131109618-e9016c6b-f9aa-46a3-8cba-f50279ddb899.png)
+
+The material index of a voxel is encoded as an unsigned integer and is used later on (as a custom vertex attribute) to render the generated mesh with the correct textures. The material index can be queried from [scripting](https://github.com/Tuntenfisch/Voxels/blob/release/Assets/Scripts/World/WorldManager.cs#L128), as well.
+
+## Texturing
+
+Texturing of the voxel terrain is done with a [custom URP PBR shader](/Assets/Shaders/Voxels/Voxel.shader) and supports:
+- Albedo mapping
+- Normal mapping
+- Metallic mapping
+- Occlusion mapping
+- Height mapping
+- Smoothness/roughness mapping
+
+Since the procedurally generated terrain doesn't have any UV coordinates, [Triplanar mapping](https://catlikecoding.com/unity/tutorials/advanced-rendering/triplanar-mapping/) is used to apply the various textures.
+
+**Note:** I'm using a custom shader because Unity's shader graph doesn't support a geometry pass, which I need to enable smooth transitions between different voxel materials.  
+
+**Note:** Textures are taken from https://ambientcg.com/ and fall under the [Creative Commons CC0 1.0 Universal License](https://creativecommons.org/publicdomain/zero/1.0/).
+
+## Smooth Material Transitions
+
+One challenged I faced was getting different material textures to smoothly blend between each other. One approach would be to use something like a splat map to support multiple materials.
+
+**Note:** [Catlike Coding's "Rendering 3"](https://catlikecoding.com/unity/tutorials/rendering/part-3/) provides an introduction into those if you don't know what they are.
+
+But there are a number of issues with splat maps:
+- Only supports up to 5 different textures. Either I limit the voxel terrain to only 5 different materials (way too few) or I somehow ensure that each terrain chunk doesn't have more than 5 different materials in it and do some sort of on the fly texture switching to render the correct material textures for each chunk?!
+- Can't exactly use a 2D texture as a splat map for voxel terrain. So maybe something like a 3D texture could work?
+
+To be honest, just the first bullet point above was enough for me to not further pursue this approach. I wanted something that supported a theoretically unlimited amount of materials in a single chunk. 
+
+### Hard Transitions
+
+Achieving hard material transitions is pretty easy: Each of my vertices has a material index. To ensure that any given triangle, which consists of 3 vertices each, has only one specific material index associated with it. I simply need to duplicate certain vertices on material boundaries while generating the mesh with dual contouring. Here's an example:
+
+![image](https://user-images.githubusercontent.com/11965324/131113079-7668de4f-f014-4b4a-a850-d203475eb16d.png)
+
+Essentially, the red and blue triangles represent two materials which are part of the same mesh. The green vertices are on the boundary between both materials and need to be duplicated with the vertex attribute for the material index assigned once to the red and once to the blue material. Detecting these boundaries is fairly easy, during triangulation of a triangle (which is done on a per cell basis) check if the triangle's neighbouring vertices have the same material index as the current cell vertex you're working on. If they don't, just duplicate the neigbhouring vertices, assign the same material index to the duplicates, and make up the triangle of your current cell's vertex and the neighbouring duplicates.
+
+During shading, you use the vertex's material index as a lookup into a [```2DTextureArray```](https://docs.unity3d.com/ScriptReference/Texture2DArray.html) - which you populated with the corresponding textures for each material, beforehand - and apply whichever texture you've got out of the lookup to the triangle. This approach can be implemented in Unity's shader graph, too.
+
+### Smooth Transitions
+
+But to get smooth transitions between textures of different materials you need two things for each fragment/pixel you want to shade:
+- The three (potentially different) material indices of the triangle.
+- Three weights that (for each pixel of the triangle) give you the amount each vertice's material is active. This weight should then smoothly blend between the triangles vertices based on the fragment/pixel you're working on.
+
+This is where the geometry shader stage comes into play (and also why I can't use Unity's shader graph). The geometry shader stage runs after the vertex shader stage and before the fragment/pixel shader stage. It let's me work, not on individual vertices, but on (in my case) triangles as a whole, i.e. a set of 3 vertices. 
+
+**Note:** If you're unfamiliar with the geometry shader stage you can get an introduction [here](https://gamedevbill.com/unity-vertex-shader-and-geometry-shader-tutorial/). One important thing to know tho, is that for each triangle the geometry shader stage works on the original vertices from the vertex shader stage, meaning modifying one vertex in the geometry shader stage doesn't affect any neigbhouring triangles which also share that vertex. It's like having a mesh where each triangle has it's own vertices, i.e. a flat shaded mesh.
+
+My geometry shader stage is largely a passthrough stage, meaning I have 3 vertices as an input and I output 3 vertices, too. The inputs are the 3 vertices making up a triangle. Each of these vertices has a material index associated with it. 
+
+For each triangle passed into the geometry shader stage, I gather the 3 material indices of the triangle's vertices and construct a ```uint3``` where the first material index is assigned to the first entry of the vector, the second to the second entry and so on. Each vertex I output gets this ```uint3``` assigned. 
+
+This alone doesn't enable smooth transitions yet, tho. Additionally each vertex I output gets a ```half3``` called ```materialWeights``` assigned as follows:
+
+* The first vertex gets the vector ```(1, 0, 0)``` assigned.
+* The second vertex gets the vector ```(0, 1, 0)``` assigned.
+* The third vertex gets the vector ```(0, 0, 1)``` assigned.
+
+Between the geometry shader stage and the final fragment/pixel shader stage these material weights will get interpolated based on the position of the current fragment/pixel inside the triangle. 
+
+In addition with the material indices, which are also provided by my geometry shader stage (as explained), I can then sample a ```TEXTURE2D_ARRAY``` 3 times (using each material index as the index into the array once) and add those texture samples together using the material weights to arrive at the final color.
+
+**Note:** The material indices are not interpolated between the geometry and fragment/pixel stage!
+
+## Terrain Generation
+
+Terrain generation can be configured through a graph-based editor:
+
+![Generation_Graph](https://user-images.githubusercontent.com/11965324/131109547-9a2bf3f9-ce7a-4aa5-9e97-18fbd69ffbf0.png)
+
+Features include:
+- [Fractional Brownian Motion](https://iquilezles.org/www/articles/fbm/fbm.htm) nodes
+- [Domain Warping](https://iquilezles.org/www/articles/warp/warp.htm) nodes
+- [CSG](https://en.wikipedia.org/wiki/Constructive_solid_geometry)  primitive nodes, namely a cuboid and a sphere primitive node.
+- Material nodes.
+- CSG operation nodes to combine FBM noises and CSG primitives.
+- Transform nodes to translate, scale, rotate FBM noises and CSG primitives.
+
+**Note:** [Keijiro's Noise Shader Library](https://github.com/keijiro/NoiseShader) is used to generate simplex noise on the GPU.
+
+**Note:** See this [question](https://gamedev.stackexchange.com/questions/193938/how-to-evaluate-a-binary-expression-tree-in-hlsl-without-recursion-or-a-stack) for more insight on how I evaluate the graph to generate the terrain on the GPU.
+
+## Level of Detail
+
+![LOD](https://user-images.githubusercontent.com/11965324/131109509-18c113d0-4fba-4c01-9ab5-d058440f7812.png)
+
+The implementation for LOD is inspired by [Sebastian Lague's video "Procedural Landmass Generation (E21: fixing gaps)"](https://www.youtube.com/watch?v=c2BUgXdjZkg). Just like in the video, the skirts of a chunk are always generated at the highest level of detail, ensuring that there are no gaps between different level of details.
+The actual implementation obviously differs quite a lot since I'm not dealing with heightmap terrain.
+
+## Why publish it for free?
+
+I spent quite some time on implementing various voxel terrain algorithms (Marching Cubes, Cubical Marching Squares, Dual Contouring) and noticed during the process that although there are implementations online, they often lack features like level of detail or multiple material support.
+
+Furthermore, getting voxel terrain to be performant can be quite hard although I'm sure my implementation can be improved, too.
+That being said, my whole GPU-based approach might be suboptimal in the first place since I have to read back the mesh to the CPU.
+
+In the end I kind of lost motivation to continue working on this project and decided to move on. The project is nowhere near feature-complete to be released as an asset. Besides, I do not want to deal with providing customer support. Releasing it for free was basically the easiest way of getting it out to the public.
+
+I hope - by making this publicly available - I can help some people who are interested in voxel terrain.
+
+### Assets/Compute/Include/Enumeration.hlsl
+```
+#ifndef TUNTENFISCH_ENUMERATION
+#define TUNTENFISCH_ENUMERATION
+
+#define ENUM class
+
+#endif
+```
+
+### Assets/Compute/Include/Packing.hlsl
+```
+#ifndef TUNTENFISCH_PACKING
+#define TUNTENFISCH_PACKING
+
+#include "Packages/com.unity.render-pipelines.core/ShaderLibrary/Common.hlsl"
+#include "Packages/com.unity.render-pipelines.core/ShaderLibrary/Packing.hlsl"
+
+uint PackFloats(float2 unpackedFloats)
+{
+    uint packedFloats = f32tof16(unpackedFloats.x) | f32tof16(unpackedFloats.y) << 16;
+
+    return packedFloats;
+}
+
+float2 UnpackFloats(uint packedFloats)
+{
+    float2 unpackedFloats = float2
+    (
+        f16tof32(packedFloats),
+        f16tof32(packedFloats >> 16)
+    );
+
+    return unpackedFloats;
+}
+
+#endif
+```
+
+### Assets/Compute/Voxels/DualContouring.compute
+```
+#pragma kernel GenerateInnerCellVertices
+#pragma kernel ApplyLevelOfDetail
+#pragma kernel GenerateOuterCellVertices
+#pragma kernel GenerateTriangles
+
+#include "Assets/Compute/Voxels/Include/Cell.hlsl"
+#include "Assets/Compute/Voxels/Include/Vertex.hlsl"
+#include "Assets/Compute/Voxels/Include/Voxel.hlsl"
+#include "Assets/Compute/Voxels/Include/VoxelVolume.hlsl"
+
+static const uint nullVertexIndex = -1;
+static const uint maxNumberOfIntersections = 6;
+
+struct CellVertexInfo
+{
+    uint index;
+
+    static CellVertexInfo Create()
+    {
+        CellVertexInfo cellVertexInfo;
+        cellVertexInfo.index = nullVertexIndex;
+
+        return cellVertexInfo;
+    }
+};
+
+struct Intersection
+{
+    float3 position;
+    float3 normal;
+    uint materialIndex;
+
+    static Intersection Create(float3 position = 0.0f, float3 normal = 0.0f, uint materialIndex = 0)
+    {
+        Intersection intersection;
+        intersection.position = position;
+        intersection.normal = normal;
+        intersection.materialIndex = materialIndex;
+
+        return intersection;
+    }
+};
+
+uint cellStride;
+uint schmitzParticleIterations;
+float schmitzParticleStepSize;
+
+RWStructuredBuffer<CellVertexInfo> cellVertexInfoLookupTable;
+RWStructuredBuffer<Vertex> generatedVertices0;
+RWStructuredBuffer<Vertex> generatedVertices1;
+RWByteAddressBuffer generatedTriangles;
+
+// Theoretically we can declare below arrays locally and pass them around functions with the "out" or "inout" modifier but that will
+// result in more temporary registers being used by the compiler for some reason. See the following link for more information:
+// https://gamedev.stackexchange.com/questions/190131/splitting-up-hlsl-code-into-separate-functions-causes-the-number-of-needed-tempo.
+static uint numberOfIntersections;
+static Intersection intersections[maxNumberOfIntersections];
+static uint numberOfMaterialIndices;
+static uint materialIndices[numberOfCellCorners];
+static float3 forces[numberOfCellCorners];
+static CellVertexInfo neighbourCellVertexInfos[3];
+
+bool IsOuterVoxel(uint3 coordinate)
+{
+    return any(coordinate == 0 || coordinate == numberOfVoxels - 2);
+}
+
+uint CalculateCellVertexInfoLookupTableIndex(uint3 coordinate, uint stride = 1)
+{
+    coordinate = IsOuterVoxel(coordinate) ? coordinate : (coordinate - 1) / stride * stride + 1;
+
+    return dot(coordinate, uint3(1, numberOfVoxels.x - 1, (numberOfVoxels.x - 1) * (numberOfVoxels.y - 1)));
+}
+
+float3 CalculateCombinedForce(float3 center)
+{
+    float alpha = center.x;
+
+    float3 force03 = alpha * forces[3] + (1.0f - alpha) * forces[0];
+    float3 force47 = alpha * forces[7] + (1.0f - alpha) * forces[4];
+    float3 force12 = alpha * forces[2] + (1.0f - alpha) * forces[1];
+    float3 force56 = alpha * forces[6] + (1.0f - alpha) * forces[5];
+
+    float beta = center.z;
+
+    float3 force0347 = beta * force47 + (1.0f - beta) * force03;
+    float3 force1256 = beta * force56 + (1.0f - beta) * force12;
+
+    float gamma = center.y;
+
+    return gamma * force1256 + (1.0f - gamma) * force0347;
+}
+
+float3 CalculateForce(float3 corner)
+{
+    float3 force = 0.0f;
+
+    [unroll(maxNumberOfIntersections)]
+    for (uint intersectionIndex = 0; intersectionIndex < numberOfIntersections; intersectionIndex++)
+    {
+        float3 position = intersections[intersectionIndex].position;
+        float3 normal = intersections[intersectionIndex].normal;
+        float distance = dot(normal, corner - position);
+        float3 voxelCornerToPlaneVector = -distance * normal;
+
+        force += voxelCornerToPlaneVector;
+    }
+
+    return force;
+}
+
+uint GetDominantMaterialIndex()
+{
+    const uint4x4 uint4x4Identity = uint4x4
+    (
+        1, 0, 0, 0,
+        0, 1, 0, 0,
+        0, 0, 1, 0,
+        0, 0, 0, 1
+    );
+
+    const uint length = (numberOfMaterials + 3) / 4;
+
+    // We store the counts in an uint4 array so we use up less temporary registers.
+    uint4 materialIndexOccurenceCounts[length];
+
+    [unroll]
+    for (uint iterator = 0; iterator < length; iterator++)
+    {
+        materialIndexOccurenceCounts[iterator] = 0;
+    }
+
+    [unroll(numberOfCellCorners)]
+    for (uint index = 0; index < numberOfMaterialIndices; index++)
+    {
+        uint materialIndex = materialIndices[index];
+        materialIndexOccurenceCounts[materialIndex >> 2] += uint4x4Identity[materialIndex & 3];
+    }
+
+    uint2 dominantMaterialIndexWithCorrespondingOccurenceCount = uint2(materialIndices[0], 0);
+
+    for (index = 0; index < numberOfMaterialIndices; index++)
+    {
+        uint materialIndex = materialIndices[index];
+        uint materialIndexOccurenceCount = materialIndexOccurenceCounts[materialIndex >> 2][materialIndex & 3];
+
+        if (materialIndexOccurenceCount > dominantMaterialIndexWithCorrespondingOccurenceCount.y)
+        {
+            dominantMaterialIndexWithCorrespondingOccurenceCount = uint2(materialIndex, materialIndexOccurenceCount);
+        }
+    }
+
+    return dominantMaterialIndexWithCorrespondingOccurenceCount.x;
+}
+
+Vertex CalculateCenterVertex()
+{
+    Vertex vertex = Vertex::Create();
+
+    numberOfMaterialIndices = 0;
+
+    [unroll(maxNumberOfIntersections)]
+    for (uint intersectionIndex = 0; intersectionIndex < numberOfIntersections; intersectionIndex++)
+    {
+        Intersection intersection = intersections[intersectionIndex];
+
+        vertex.SetPosition(vertex.GetPosition() + intersection.position);
+        vertex.SetNormal(vertex.GetNormal() + intersection.normal);
+        materialIndices[numberOfMaterialIndices++] = intersection.materialIndex;
+    }
+    vertex.SetPosition(vertex.GetPosition() / numberOfIntersections);
+    vertex.SetNormal(normalize(vertex.GetNormal()));
+    vertex.SetMaterialIndex(GetDominantMaterialIndex());
+
+    return vertex;
+}
+
+Vertex CalculateCellVertex(uint3 coordinate)
+{
+    Vertex vertex = CalculateCenterVertex();
+
+    for (uint cornerIndex = 0; cornerIndex < numberOfCellCorners; cornerIndex++)
+    {
+        forces[cornerIndex] = CalculateForce(cellCorners[cornerIndex]);
+    }
+
+    for (uint schmitzParticleIteration = 0; schmitzParticleIteration < schmitzParticleIterations; schmitzParticleIteration++)
+    {
+        vertex.SetPosition(vertex.GetPosition() + schmitzParticleStepSize * CalculateCombinedForce(vertex.GetPosition()));
+    }
+    vertex.SetPosition(VoxelToVoxelVolumeSpace(coordinate, vertex.GetPosition()));
+
+    return vertex;
+}
+
+void CalculatePositionsAndNormals(uint3 coordinate)
+{
+    numberOfIntersections = 0;
+
+    for (uint cellEdgeIndex = 0; cellEdgeIndex < numberOfCellEdges; cellEdgeIndex++)
+    {
+        CellEdge cellEdge = cellEdges[cellEdgeIndex];
+
+        uint3 cellCornerA = cellCorners[cellEdge.GetCornerStartIndex()];
+        uint3 cellCornerB = cellCorners[cellEdge.GetCornerEndIndex()];
+
+        Voxel sampleA = GetVoxel(coordinate + cellCornerA);
+        Voxel sampleB = GetVoxel(coordinate + cellCornerB);
+
+        if (sampleA.IsSolid() == sampleB.IsSolid())
+        {
+            continue;
+        }
+
+        float interpolant = -sampleA.GetValue() / (sampleB.GetValue() - sampleA.GetValue());
+
+        intersections[numberOfIntersections++] = Intersection::Create
+        (
+            lerp(cellCornerA, cellCornerB, interpolant),
+            normalize(lerp(sampleA.GetGradient(), sampleB.GetGradient(), interpolant)),
+            !sampleA.IsSolid() ? sampleA.materialIndex : sampleB.materialIndex
+        );
+    }
+}
+
+[numthreads(4, 4, 4)]
+void GenerateInnerCellVertices(uint3 id : SV_DispatchThreadID)
+{
+    uint3 cellID = id + 1;
+
+    if (any(cellID > numberOfVoxels - 3))
+    {
+        return;
+    }
+
+    CellVertexInfo cellVertexInfo = CellVertexInfo::Create();
+
+    CalculatePositionsAndNormals(cellID);
+
+    if (numberOfIntersections > 0)
+    {
+        cellVertexInfo.index = generatedVertices0.IncrementCounter();
+        generatedVertices0[cellVertexInfo.index] = CalculateCellVertex(cellID);
+    }
+    cellVertexInfoLookupTable[CalculateCellVertexInfoLookupTableIndex(cellID)] = cellVertexInfo;
+}
+
+[numthreads(4, 4, 4)]
+void ApplyLevelOfDetail(uint3 id : SV_DispatchThreadID)
+{
+    uint3 cellID = id * cellStride + 1;
+
+    if (any(cellID > numberOfVoxels - 3))
+    {
+        return;
+    }
+
+    uint numberOfChildCellVertices = 0;
+    CellVertexInfo parentCellVertexInfo = CellVertexInfo::Create();
+    Vertex parentCellVertex = Vertex::Create();
+
+    for (uint cornerIndex = 0; cornerIndex < numberOfCellCorners; cornerIndex++)
+    {
+        uint3 coordinate = cellID + cellStride / 2 * cellCorners[cornerIndex];
+        CellVertexInfo childCellVertexInfo = cellVertexInfoLookupTable[CalculateCellVertexInfoLookupTableIndex(coordinate, cellStride / 2)];
+
+        if (childCellVertexInfo.index != nullVertexIndex)
+        {
+            Vertex childCellVertex = generatedVertices0[childCellVertexInfo.index];
+
+            parentCellVertex.SetPosition(parentCellVertex.GetPosition() + childCellVertex.GetPosition());
+            parentCellVertex.SetNormal(parentCellVertex.GetNormal() + childCellVertex.GetNormal());
+            materialIndices[numberOfMaterialIndices] = childCellVertex.materialIndex;
+
+            numberOfMaterialIndices++;
+            numberOfChildCellVertices++;
+        }
+    }
+
+    if (numberOfChildCellVertices > 0)
+    {
+        parentCellVertex.SetPosition(parentCellVertex.GetPosition() / numberOfChildCellVertices);
+        parentCellVertex.SetNormal(normalize(parentCellVertex.GetNormal()));
+        parentCellVertex.SetMaterialIndex(GetDominantMaterialIndex());
+
+        parentCellVertexInfo.index = generatedVertices1.IncrementCounter();
+        generatedVertices1[parentCellVertexInfo.index] = parentCellVertex;
+    }
+    cellVertexInfoLookupTable[CalculateCellVertexInfoLookupTableIndex(cellID, cellStride)] = parentCellVertexInfo;
+}
+
+[numthreads(4, 4, 4)]
+void GenerateOuterCellVertices(uint3 cellID : SV_DispatchThreadID)
+{
+    if (any(cellID > numberOfVoxels - 2) || !IsOuterVoxel(cellID))
+    {
+        return;
+    }
+
+    CellVertexInfo cellVertexInfo = CellVertexInfo::Create();
+
+    CalculatePositionsAndNormals(cellID);
+
+    if (numberOfIntersections > 0)
+    {
+        cellVertexInfo.index = generatedVertices0.IncrementCounter();
+        generatedVertices0[cellVertexInfo.index] = CalculateCellVertex(cellID);
+    }
+    cellVertexInfoLookupTable[CalculateCellVertexInfoLookupTableIndex(cellID)] = cellVertexInfo;
+}
+
+bool ArePairwiseDistinct(uint3 indices)
+{
+    return indices.x != indices.y && indices.x != indices.z && indices.y != indices.z;
+}
+
+void GenerateTriangle(CellVertexInfo cellVertexInfo, CellVertexInfo firstNeighbourCellVertexInfo, CellVertexInfo secondNeighbourCellVertexInfo)
+{
+    uint3 indices = uint3(cellVertexInfo.index, firstNeighbourCellVertexInfo.index, secondNeighbourCellVertexInfo.index);
+
+    if (!ArePairwiseDistinct(indices))
+    {
+        return;
+    }
+
+    // The first 8 bytes of the generated triangles buffer will be used to store the number of vertices/triangles
+    // generated and therefore need to stay empty.
+    generatedTriangles.Store3(8 + 12 * cellVertexInfoLookupTable.IncrementCounter(), indices);
+}
+
+void GetNeighbourCellsVertexInfos(uint3 coordinate, uint index)
+{
+    const uint3 cellCornerIndices[3] =
+    {
+        uint3(1, 2, 3),
+        uint3(4, 5, 1),
+        uint3(3, 7, 4)
+    };
+
+    uint3 vertexIndices;
+
+    [unroll]
+    for (uint iterator = 0; iterator < 3; iterator++)
+    {
+        neighbourCellVertexInfos[iterator] = cellVertexInfoLookupTable[CalculateCellVertexInfoLookupTableIndex(coordinate + cellCorners[cellCornerIndices[index][iterator]], cellStride)];
+    }
+}
+
+CellEdge GetCellEdge(uint index)
+{
+    const uint3 edgeIndices = uint3(5, 6, 10);
+
+    return cellEdges[edgeIndices[index]];
+}
+
+[numthreads(4, 4, 4)]
+void GenerateTriangles(uint3 cellID : SV_DispatchThreadID)
+{
+    if (any(cellID > numberOfVoxels - 3))
+    {
+        return;
+    }
+
+    CellVertexInfo cellVertexInfo = cellVertexInfoLookupTable[CalculateCellVertexInfoLookupTableIndex(cellID, cellStride)];
+
+    for (uint index = 0; index < 3; index++)
+    {
+        CellEdge cellEdge = GetCellEdge(index);
+
+        Voxel sampleA = GetVoxel(cellID + cellCorners[cellEdge.GetCornerStartIndex()]);
+        Voxel sampleB = GetVoxel(cellID + cellCorners[cellEdge.GetCornerEndIndex()]);
+
+        if (sampleA.IsSolid() == sampleB.IsSolid())
+        {
+            continue;
+        }
+
+        GetNeighbourCellsVertexInfos(cellID, index);
+
+        for (uint triangleIndex = 0; triangleIndex < 2; triangleIndex++)
+        {
+            CellVertexInfo firstNeighbourCellVertexInfo = neighbourCellVertexInfos[sampleB.GetValue() < 0.0f ? triangleIndex : triangleIndex + 1];
+            CellVertexInfo secondNeighbourCellVertexInfo = neighbourCellVertexInfos[sampleB.GetValue() < 0.0f ? triangleIndex + 1 : triangleIndex];
+            GenerateTriangle(cellVertexInfo, firstNeighbourCellVertexInfo, secondNeighbourCellVertexInfo);
+        }
+    }
+}
+```
+
+### Assets/Compute/Voxels/VoxelVolume.compute
+```
+#pragma kernel GenerateVoxelVolume
+#pragma kernel ApplyVoxelVolumeCSGOperations
+
+#include "Assets/Compute/Voxels/Include/GenerationGraph.hlsl"
+#include "Assets/Compute/Voxels/Include/VoxelVolume.hlsl"
+
+struct VoxelVolumeCSGOperation
+{
+    CSGOperator csgOperator;
+    CSGPrimitive csgPrimitive;
+    uint materialIndex;
+    float4x4 transformMatrix;
+};
+
+StructuredBuffer<VoxelVolumeCSGOperation> voxelVolumeCSGOperations;
+
+uint numberOfVoxelVolumeCSGOperations;
+
+[numthreads(4, 4, 4)]
+void GenerateVoxelVolume(uint3 voxelID : SV_DispatchThreadID)
+{
+    if (IsOutOfVoxelVolumeBounds(voxelID))
+    {
+        return;
+    }
+
+    float3 worldPosition = VoxelVolumeToWorldSpace(VoxelToVoxelVolumeSpace(voxelID));
+    Voxel voxel = EvaluateGenerationGraph(worldPosition);
+
+    SetVoxel(voxelID, voxel);
+}
+
+[numthreads(4, 4, 4)]
+void ApplyVoxelVolumeCSGOperations(uint3 voxelID : SV_DispatchThreadID)
+{
+    if (IsOutOfVoxelVolumeBounds(voxelID))
+    {
+        return;
+    }
+
+    float3 worldPosition = VoxelVolumeToWorldSpace(VoxelToVoxelVolumeSpace(voxelID));
+    Voxel voxel = GetVoxel(voxelID);
+
+    for (uint index = 0; index < numberOfVoxelVolumeCSGOperations; index++)
+    {
+        VoxelVolumeCSGOperation voxelVolumeCSGOperation = voxelVolumeCSGOperations[index];
+        float3 position = mul(voxelVolumeCSGOperation.transformMatrix, float4(worldPosition, 1.0f)).xyz;
+        float4 evaluatedPrimitive = EvaluateCSGPrimitive(position, voxelVolumeCSGOperation.csgPrimitive);
+        Voxel primitiveVoxel = Voxel::Create(evaluatedPrimitive, voxelVolumeCSGOperation.materialIndex);
+        voxel = ApplyCSGOperator(voxel, primitiveVoxel, voxelVolumeCSGOperation.csgOperator);
+    }
+    SetVoxel(voxelID, voxel);
+}
+```
+
+### Assets/Scripts/Attributes/InlineFieldAttribute.cs
+```
+﻿using UnityEngine;
+
+namespace Tuntenfisch.Attributes
+{
+    public class InlineFieldAttribute : PropertyAttribute { }
+}
+```
+
+### Assets/Scripts/Editor/BaseEditor.cs
+```
+using UnityEditor;
+using UnityEngine;
+
+namespace Tuntenfisch.Editor
+{
+    public class BaseEditor : UnityEditor.Editor
+    {
+        protected void DisplayScriptHeader()
+        {
+            MonoScript script = null;
+
+            if (serializedObject.targetObject is MonoBehaviour monoBehaviour)
+            {
+                script = MonoScript.FromMonoBehaviour(monoBehaviour);
+            }
+            else if (serializedObject.targetObject is ScriptableObject scriptableObject)
+            {
+                script = MonoScript.FromScriptableObject(scriptableObject);
+            }
+
+            EditorGUI.BeginDisabledGroup(true);
+            EditorGUILayout.ObjectField("Script", script, serializedObject.targetObject.GetType(), false);
+            EditorGUI.EndDisabledGroup();
+        }
+    }
+}
+```
+
+### Assets/Scripts/Editor/InlineFieldPropertyDrawer.cs
+```
+﻿using Tuntenfisch.Attributes;
+using UnityEditor;
+using UnityEngine;
+
+namespace Tuntenfisch.Editor
+{
+    [CustomPropertyDrawer(typeof(InlineFieldAttribute))]
+    public class InlineFieldPropertyDrawer : PropertyDrawer
+    {
+        public override void OnGUI(Rect position, SerializedProperty property, GUIContent label)
+        {
+            if (property.hasVisibleChildren)
+            {
+                property.NextVisible(true);
+
+                do
+                {
+                    position.height = EditorGUI.GetPropertyHeight(property);
+                    EditorGUI.PropertyField(position, property, true);
+                    position.y += position.height + EditorGUIUtility.standardVerticalSpacing;
+                }
+                while (property.NextVisible(false));
+            }
+            else
+            {
+                EditorGUI.PropertyField(position, property, label, true);
+            }
+        }
+
+        public override float GetPropertyHeight(SerializedProperty property, GUIContent label)
+        {
+            if (property.hasVisibleChildren)
+            {
+                float propertyHeight = 0.0f;
+
+                property.NextVisible(true);
+
+                do
+                {
+                    propertyHeight += EditorGUI.GetPropertyHeight(property) + EditorGUIUtility.standardVerticalSpacing;
+                }
+                while (property.NextVisible(false));
+
+                return propertyHeight - EditorGUIUtility.standardVerticalSpacing;
+            }
+            else
+            {
+                return EditorGUI.GetPropertyHeight(property, true);
+            }
+        }
+    }
+}
+```
+
+### Assets/Scripts/Editor/TextureCombiner.cs
+```
+using System.IO;
+using System.Linq;
+using Unity.Mathematics;
+using UnityEditor;
+using UnityEngine;
+
+namespace Tuntenfisch.Editor
+{
+    public class TextureCombiner : AssetPostprocessor
+    {
+        private const string c_metallic_suffix = "_metallic";
+        private const string c_occlusion_suffix = "_occlusion";
+        private const string c_height_suffix = "_height";
+        private const string c_smoothness_suffix = "_smoothness";
+        private const string c_roughness_suffix = "_roughness";
+
+        private readonly string[] suffixes = new string[] { c_metallic_suffix, c_occlusion_suffix, c_height_suffix, c_smoothness_suffix, c_roughness_suffix };
+
+        void OnPreprocessTexture()
+        {
+            string textureAssetFilename = Path.GetFileNameWithoutExtension(assetPath);
+
+            if (suffixes.All(suffix => !textureAssetFilename.EndsWith(suffix)))
+            {
+                return;
+            }
+
+            // Sets some required import values for reading the texture's pixels for combining.
+            TextureImporter textureImporter = (TextureImporter)assetImporter;
+            textureImporter.isReadable = true;
+        }
+
+        private void OnPostprocessTexture(Texture2D assetTexture)
+        {
+            string textureAssetFilename = Path.GetFileNameWithoutExtension(assetPath);
+
+            if (suffixes.All(suffix => !textureAssetFilename.EndsWith(suffix)))
+            {
+                return;
+            }
+
+            string textureAssetBaseFilename = textureAssetFilename.Substring(0, textureAssetFilename.LastIndexOf('_'));
+            string textureAssetDirectory = Path.GetDirectoryName(assetPath);
+
+            Texture2D[] textures = new Texture2D[suffixes.Length];
+
+            for (int index = 0; index < textures.Length; index++)
+            {
+                string suffix = suffixes[index];
+                string textureFilePath = Path.Combine(textureAssetDirectory, textureAssetBaseFilename + suffix + ".png");
+
+                if (File.Exists(textureFilePath))
+                {
+                    Texture2D texture = AssetDatabase.LoadAssetAtPath<Texture2D>(textureFilePath);
+                    // Load asset returns null for the texture that triggered this postprocessor.
+                    if (texture == null)
+                    {
+                        textures[index] = assetTexture;
+                    }
+                    else if (texture.width != assetTexture.width || texture.height != assetTexture.height)
+                    {
+                        if (Debug.isDebugBuild)
+                        {
+                            Debug.LogError($"Texture dimensions for combining aren't all of equal size. Aborting.");
+                        }
+
+                        return;
+                    }
+                    else
+                    {
+                        textures[index] = texture;
+                    }
+                }
+            }
+
+            if (textures.Count((texture) => texture != null) < 2)
+            {
+                return;
+            }
+
+            // If we found both a smoothness and roughness texture we will use the roughness texture but display a warning that both exist.
+            if (textures[3] != null && textures[4] != null)
+            {
+                if (Debug.isDebugBuild)
+                {
+                    Debug.LogWarning($"Found {AssetDatabase.GetAssetPath(textures[3])} and {AssetDatabase.GetAssetPath(textures[4])} texture. Using roughness for combining.");
+                }
+            }
+
+            Texture2D combinedTexture = new Texture2D(assetTexture.width, assetTexture.height, TextureFormat.ARGB32, true);
+
+            for (int x = 0; x < combinedTexture.width; x++)
+            {
+                for (int y = 0; y < combinedTexture.height; y++)
+                {
+                    // default value for each property (metallic, occlusion, height, smoothness) if not present.
+                    Color combinedPixel = new Color(0.0f, 1.0f, 0.0f, 0.0f);
+
+                    for (int index = 0; index < textures.Length; index++)
+                    {
+                        // The last two textures (smoothness and roughness) go into the same color channel.
+                        int channel = math.min(index, 3);
+                        // If the texture doesn't exist, use the default value of the combined pixel.
+                        float value = textures[index] != null ? textures[index].GetPixel(x, y).r : combinedPixel[channel];
+                        // We need to invert the roughness texture's value to convert it to a smoothness value.
+                        value = textures[index] != null && suffixes[index] == c_roughness_suffix ? 1.0f - value : value;
+                        combinedPixel[channel] = value;
+                    }
+                    combinedTexture.SetPixel(x, y, combinedPixel);
+                }
+            }
+            string combinedTextureAssetFilename = textureAssetBaseFilename + "_MOHS";
+            string combinedTextureAssetPath = Path.Combine(textureAssetDirectory, combinedTextureAssetFilename + ".png");
+            File.WriteAllBytes(combinedTextureAssetPath, combinedTexture.EncodeToPNG());
+            AssetDatabase.ImportAsset(combinedTextureAssetPath);
+        }
+    }
+}
+```
+
+### Assets/Scripts/Extensions/ComputeShaderExtensions.cs
+```
+﻿using Unity.Mathematics;
+using UnityEngine;
+
+namespace Tuntenfisch.Extensions
+{
+    public static class ComputeShaderExtensions
+    {
+        public static void Dispatch(this ComputeShader computeShader, int kernelID, int3 numberOfInvocations)
+        {
+            uint3 threadGroupSize = new uint3();
+            computeShader.GetKernelThreadGroupSizes(kernelID, out threadGroupSize.x, out threadGroupSize.y, out threadGroupSize.z);
+            int3 threadGroups = (int3)math.ceil(numberOfInvocations / (float3)threadGroupSize);
+
+            computeShader.Dispatch(kernelID, threadGroups.x, threadGroups.y, threadGroups.z);
+        }
+    }
+}
+```
+
+### Assets/Scripts/Generics/AsyncComputeBuffer.cs
+```
+﻿using System;
+using Unity.Collections;
+using UnityEngine;
+using UnityEngine.Rendering;
+
+namespace Tuntenfisch.Generics
+{
+    public class AsyncComputeBuffer
+    {
+        public static implicit operator ComputeBuffer(AsyncComputeBuffer buffer) => buffer.m_buffer;
+
+        public int Count => m_buffer.count;
+        public int Stride => m_buffer.stride;
+        public bool HasError => m_request.hasError;
+        public bool ReadbackInProgress => (m_flags & AsyncComputeBufferFlags.ReadbackInProgress) == AsyncComputeBufferFlags.ReadbackInProgress;
+
+        private readonly ComputeBuffer m_buffer;
+        private AsyncGPUReadbackRequest m_request;
+        private int m_requestedCount;
+        private AsyncComputeBufferFlags m_flags;
+
+        public AsyncComputeBuffer(int count, int stride, ComputeBufferType type = ComputeBufferType.Default) => m_buffer = new ComputeBuffer(count, stride, type);
+
+        public void StartReadback() => StartReadback(m_buffer.count);
+
+        public void StartReadback(int count)
+        {
+            ValidateCountAndStateForDataRequest(count);
+            m_requestedCount = count;
+            m_request = AsyncGPUReadback.Request(m_buffer, count * m_buffer.stride, 0);
+            m_flags |= AsyncComputeBufferFlags.ReadbackInProgress;
+        }
+
+        public void StartReadbackNonAlloc<T>(ref NativeArray<T> array) where T : struct => StartReadbackNonAlloc(ref array, m_buffer.count);
+
+        public void StartReadbackNonAlloc<T>(ref NativeArray<T> array, int count) where T : struct
+        {
+            ValidateCountAndStateForDataRequest(count);
+
+            if (!array.IsCreated)
+            {
+                throw new ObjectDisposedException($"Parameter {nameof(array)} is disposed.");
+            }
+
+            if (count > array.Length)
+            {
+                throw new ArgumentException($"Length of parameter {nameof(array)} is too small to store the readback.");
+            }
+
+            m_requestedCount = count;
+            m_request = AsyncGPUReadback.RequestIntoNativeArray(ref array, m_buffer, count * m_buffer.stride, 0);
+            m_flags |= AsyncComputeBufferFlags.ReadbackInProgress;
+        }
+
+        public bool IsDataAvailable()
+        {
+            if ((m_flags & AsyncComputeBufferFlags.ReadbackInProgress) != AsyncComputeBufferFlags.ReadbackInProgress)
+            {
+                return false;
+            }
+
+            return m_request.done;
+        }
+
+        public int EndReadback()
+        {
+            if ((m_flags & AsyncComputeBufferFlags.ReadbackInProgress) != AsyncComputeBufferFlags.ReadbackInProgress)
+            {
+                throw new InvalidOperationException($"No readback is currently in progress. Did you forget to start one?");
+            }
+
+            m_request.WaitForCompletion();
+            m_flags &= ~AsyncComputeBufferFlags.ReadbackInProgress;
+
+            return m_requestedCount;
+        }
+
+        public NativeArray<T> GetData<T>() where T : struct
+        {
+            if (HasError)
+            {
+                throw new InvalidOperationException("An error was encountered during readback. Retrieving the data is not possible.");
+            }
+
+            return m_request.GetData<T>();
+        }
+
+        public void SetCounterValue(uint counterValue) => m_buffer.SetCounterValue(counterValue);
+
+        public void Release() => m_buffer.Release();
+
+        private void ValidateCountAndStateForDataRequest(int count)
+        {
+            if ((m_flags & AsyncComputeBufferFlags.ReadbackInProgress) == AsyncComputeBufferFlags.ReadbackInProgress)
+            {
+                throw new InvalidOperationException($"A readback is already in progress. Did you forget to call {nameof(EndReadback)}?");
+            }
+
+            if (count > m_buffer.count)
+            {
+                throw new ArgumentOutOfRangeException(nameof(count), count, $"Parameter {nameof(count)} is larger than the buffer's total number of elements.");
+            }
+        }
+
+        [Flags]
+        private enum AsyncComputeBufferFlags
+        {
+            ReadbackInProgress = 1
+        }
+    }
+}
+```
+
+### Assets/Scripts/Generics/BakeJob.cs
+```
+﻿using Unity.Burst;
+using Unity.Jobs;
+using UnityEngine;
+
+namespace Tuntenfisch.Generics
+{
+    [BurstCompile]
+    public struct BakeJob : IJob
+    {
+        private readonly int m_meshID;
+        private readonly bool m_convex;
+
+        public BakeJob(int meshID, bool convex = false)
+        {
+            m_meshID = meshID;
+            m_convex = convex;
+        }
+
+        public void Execute()
+        {
+            Physics.BakeMesh(m_meshID, m_convex);
+        }
+    }
+}
+```
+
+### Assets/Scripts/Generics/IRequest.cs
+```
+﻿namespace Tuntenfisch.Generics
+{
+    public interface IRequest
+    {
+        public void Cancel();
+    }
+}
+```
+
+### Assets/Scripts/Generics/ManagedScriptableObject.cs
+```
+﻿#if UNITY_EDITOR
+using UnityEditor;
+#endif
+using UnityEngine;
+
+namespace Tuntenfisch.Generics
+{
+    public abstract class ManagedScriptableObject : ScriptableObject
+    {
+        abstract protected void OnScriptableObjectAwake();
+        abstract protected void OnScriptableObjectDestroy();
+
+        protected void Awake()
+        {
+            OnScriptableObjectAwake();
+        }
+
+        protected void OnDestroy()
+        {
+            OnScriptableObjectDestroy();
+        }
+
+#if UNITY_EDITOR
+        protected void OnEnable()
+        {
+            EditorApplication.playModeStateChanged += PlayStateChanged;
+        }
+
+        protected void OnDisable()
+        {
+            EditorApplication.playModeStateChanged -= PlayStateChanged;
+        }
+
+        private void PlayStateChanged(PlayModeStateChange stateChange)
+        {
+            switch (stateChange)
+            {
+                case PlayModeStateChange.EnteredPlayMode:
+                    OnScriptableObjectAwake();
+                    break;
+
+                case PlayModeStateChange.ExitingPlayMode:
+                    OnScriptableObjectDestroy();
+                    break;
+            }
+        }
+#endif
+    }
+}
+```
+
+### Assets/Scripts/Generics/SingletonComponent.cs
+```
+﻿using System;
+using UnityEngine;
+
+namespace Tuntenfisch.Generics
+{
+    public abstract class SingletonComponent<T> : MonoBehaviour where T : MonoBehaviour
+    {
+        public static T Instance
+        {
+            get
+            {
+                if (s_instance == null)
+                {
+                    s_instance = FindObjectOfType<T>();
+
+                    if (s_instance == null)
+                    {
+                        throw new ArgumentNullException(nameof(s_instance));
+                    }
+                }
+
+                return s_instance;
+            }
+        }
+
+        private static T s_instance = default;
+    }
+}
+```
+
+### Assets/Scripts/Player/PlayerController.cs
+```
+using Tuntenfisch.Voxels.CSG;
+using Tuntenfisch.Voxels.Materials;
+using Tuntenfisch.World;
+using Unity.Mathematics;
+using UnityEngine;
+using UnityEngine.InputSystem;
+
+namespace Tuntenfisch.Player
+{
+    [RequireComponent(typeof(CharacterController), typeof(PlayerInput))]
+    public class PlayerController : MonoBehaviour
+    {
+        private float Gravity => Physics.gravity.y;
+
+        private const float c_minDownwardVelocity = -2.0f;
+
+        [Header("Movement")]
+        [Min(1.0f)]
+        [SerializeField]
+        private float m_movementSpeed = 5.0f;
+        [Min(1.0f)]
+        [SerializeField]
+        private float m_jumpHeight = 1.5f;
+
+        [Header("Look")]
+        [Range(0.0f, 1.0f)]
+        [SerializeField]
+        private float m_lookSensitivity = 0.05f;
+        [SerializeField]
+        private Camera m_camera;
+
+        private CharacterController m_controller;
+        private int m_playerLayerMask;
+
+        private float2 m_moveDelta;
+        private bool m_wantsToJump;
+        private float2 m_lookDelta;
+        private float2 m_rotation;
+        private float3 m_velocity;
+        private bool m_primaryDown;
+        private bool m_secondaryDown;
+
+        private void Start()
+        {
+            m_controller = GetComponent<CharacterController>();
+            m_playerLayerMask = LayerMask.GetMask("Player");
+            Cursor.lockState = CursorLockMode.Locked;
+        }
+
+        private void Update()
+        {
+            ApplyMovement();
+            ApplyLook();
+            HandleWorldInteraction();
+        }
+
+        public void OnMove(InputValue value) => m_moveDelta = value.Get<Vector2>();
+
+        public void OnJump() => m_wantsToJump = m_controller.isGrounded;
+
+        public void OnLook(InputValue value) => m_lookDelta = value.Get<Vector2>();
+
+        public void OnPrimary(InputValue value) => m_primaryDown = value.isPressed;
+
+        public void OnSecondary(InputValue value) => m_secondaryDown = value.isPressed;
+
+        private void ApplyMovement()
+        {
+            if (m_controller.isGrounded)
+            {
+                m_velocity.y = m_wantsToJump ? math.sqrt(-2.0f * Gravity * m_jumpHeight) : c_minDownwardVelocity;
+                m_wantsToJump = false;
+            }
+            else
+            {
+                m_velocity.y += Gravity * Time.deltaTime;
+            }
+
+            m_velocity.xz = (((float3)transform.right).xz * m_moveDelta.x + ((float3)transform.forward).xz * m_moveDelta.y) * m_movementSpeed;
+            m_controller.Move(m_velocity * Time.deltaTime);
+        }
+
+        private void ApplyLook()
+        {
+            m_rotation.y += m_lookDelta.x * m_lookSensitivity;
+            m_rotation.x -= m_lookDelta.y * m_lookSensitivity;
+            m_rotation.x = math.clamp(m_rotation.x, -90.0f, 90.0f);
+
+            m_camera.transform.localRotation = Quaternion.Euler(m_rotation.x, 0.0f, 0.0f);
+            transform.localRotation = Quaternion.Euler(0.0f, m_rotation.y, 0.0f);
+
+            m_lookDelta = 0.0f;
+        }
+
+        private void HandleWorldInteraction()
+        {
+            Ray ray = new Ray(m_camera.transform.position, m_camera.transform.forward);
+
+            if (Physics.Raycast(ray, out RaycastHit hit, Mathf.Infinity, ~m_playerLayerMask))
+            {
+                GPUCSGPrimitive primitive = new GPUCSGPrimitive(CSGPrimitiveType.Sphere);
+                float3 scale = 4.0f;
+
+                WorldManager.Instance.DrawCSGPrimitiveHologram(primitive.PrimitiveType, hit.point, scale);
+
+                if (m_primaryDown)
+                {
+                    WorldManager.Instance.ApplyCSGOperation(new GPUCSGOperator(CSGOperatorIndex.Union), primitive, MaterialIndex.Dirt, hit.point, scale);
+                }
+
+                if (m_secondaryDown)
+                {
+                    WorldManager.Instance.ApplyCSGOperation(new GPUCSGOperator(CSGOperatorIndex.Difference), primitive, default, hit.point, scale);
+                }
+            }
+        }
+    }
+}
+```
+
+### Assets/Scripts/Voxels/ComputeShaderProperties.cs
+```
+﻿using UnityEngine;
+
+namespace Tuntenfisch.Voxels
+{
+    public static class ComputeShaderProperties
+    {
+        public static readonly int CellStride = Shader.PropertyToID("cellStride");
+        public static readonly int CellVertexInfoLookupTable = Shader.PropertyToID("cellVertexInfoLookupTable");
+        public static readonly int GeneratedTriangles = Shader.PropertyToID("generatedTriangles");
+        public static readonly int GeneratedVertices0 = Shader.PropertyToID("generatedVertices0");
+        public static readonly int GeneratedVertices1 = Shader.PropertyToID("generatedVertices1");
+        public static readonly int GenerationGraphNodes = Shader.PropertyToID("generationGraphNodes");
+        public static readonly int NumberOfGenerationGraphNodes = Shader.PropertyToID("numberOfGenerationGraphNodes");
+        public static readonly int NumberOfVoxels = Shader.PropertyToID("numberOfVoxels");
+        public static readonly int NumberOfVoxelVolumeCSGOperations = Shader.PropertyToID("numberOfVoxelVolumeCSGOperations");
+        public static readonly int SchmitzParticleIterations = Shader.PropertyToID("schmitzParticleIterations");
+        public static readonly int SchmitzParticleStepSize = Shader.PropertyToID("schmitzParticleStepSize");
+        public static readonly int SubSampledCellVolumeFaces = Shader.PropertyToID("subSampledCellVolumeFaces");
+        public static readonly int VoxelSpacing = Shader.PropertyToID("voxelSpacing");
+        public static readonly int VoxelVolume = Shader.PropertyToID("voxelVolume");
+        public static readonly int VoxelVolumeCSGOperations = Shader.PropertyToID("voxelVolumeCSGOperations");
+        public static readonly int VoxelVolumeToWorldSpaceOffset = Shader.PropertyToID("voxelVolumeToWorldSpaceOffset");
+    }
+}
+```
+
+### Assets/Scripts/Voxels/ShaderProperties.cs
+```
+﻿using UnityEngine;
+
+namespace Tuntenfisch.Voxels
+{
+    public static class ShaderProperties
+    {
+        public static readonly int CosOfHalfSharpFeatureAngle = Shader.PropertyToID("cosOfHalfSharpFeatureAngle");
+        public static readonly int MaterialAlbedoTextures = Shader.PropertyToID("materialAlbedoTextures");
+        public static readonly int MaterialMOHSTextures = Shader.PropertyToID("materialMOHSTextures");
+        public static readonly int MaterialNormalTextures = Shader.PropertyToID("materialNormalTextures");
+    }
+}
+```
+
+### Assets/Scripts/Voxels/VoxelConfig.cs
+```
+﻿using Tuntenfisch.Voxels.DC;
+using Tuntenfisch.Voxels.Materials;
+using Tuntenfisch.Voxels.Procedural;
+using Tuntenfisch.Voxels.Volume;
+using Unity.Mathematics;
+using UnityEngine;
+using UnityEngine.Assertions;
+
+namespace Tuntenfisch.Voxels
+{
+    public class VoxelConfig : MonoBehaviour
+    {
+        public VoxelVolumeConfig VoxelVolumeConfig => m_voxelVolumeConfig;
+        public MaterialConfig MaterialConfig => m_materialConfig;
+        public DualContouringConfig DualContouringConfig => m_dualContouringConfig;
+        public GenerationGraph GenerationGraph => m_generationGraph;
+
+        [SerializeField]
+        private VoxelVolumeConfig m_voxelVolumeConfig;
+        [SerializeField]
+        private MaterialConfig m_materialConfig;
+        [SerializeField]
+        private DualContouringConfig m_dualContouringConfig;
+        [SerializeField]
+        private GenerationGraph m_generationGraph;
+
+        private void Awake()
+        {
+            Assert.IsNotNull(m_voxelVolumeConfig);
+            Assert.IsNotNull(m_materialConfig);
+            Assert.IsNotNull(m_dualContouringConfig);
+            Assert.IsNotNull(m_generationGraph);
+
+            VoxelVolumeConfig.OnDirtied += ApplyVoxelVolumeConfig;
+            DualContouringConfig.OnDirtied += ApplyDualContouringConfig;
+
+            ApplyVoxelVolumeConfig();
+            ApplyDualContouringConfig();
+        }
+
+        private void OnDestroy()
+        {
+            VoxelVolumeConfig.OnDirtied -= ApplyVoxelVolumeConfig;
+            DualContouringConfig.OnDirtied -= ApplyDualContouringConfig;
+        }
+
+        private void ApplyVoxelVolumeConfig()
+        {
+            VoxelVolumeConfig.Compute.SetInts(ComputeShaderProperties.NumberOfVoxels, VoxelVolumeConfig.NumberOfVoxels.x, VoxelVolumeConfig.NumberOfVoxels.y, VoxelVolumeConfig.NumberOfVoxels.z);
+            VoxelVolumeConfig.Compute.SetFloat(ComputeShaderProperties.VoxelSpacing, VoxelVolumeConfig.VoxelSpacing);
+
+            int3 numberOfVoxels = VoxelVolumeConfig.NumberOfVoxels;
+            DualContouringConfig.Compute.SetInts(ComputeShaderProperties.NumberOfVoxels, numberOfVoxels.x, numberOfVoxels.y, numberOfVoxels.z);
+            DualContouringConfig.Compute.SetFloat(ComputeShaderProperties.VoxelSpacing, VoxelVolumeConfig.VoxelSpacing);
+        }
+
+        private void ApplyDualContouringConfig()
+        {
+            float cosOfHalfSharpFeatureAngle = math.cos(math.radians(0.5f * DualContouringConfig.SharpFeatureAngle));
+            Shader.SetGlobalFloat(ShaderProperties.CosOfHalfSharpFeatureAngle, cosOfHalfSharpFeatureAngle);
+
+            DualContouringConfig.Compute.SetInt(ComputeShaderProperties.SchmitzParticleIterations, DualContouringConfig.SchmitzParticleIterations);
+            DualContouringConfig.Compute.SetFloat(ComputeShaderProperties.SchmitzParticleStepSize, DualContouringConfig.SchmitzParticleStepSize);
+        }
+    }
+}
+```
+
+### Assets/Scripts/World/Chunk.cs
+```
+﻿using System;
+using System.Collections.Generic;
+using Tuntenfisch.Generics;
+using Tuntenfisch.Generics.Pool;
+using Tuntenfisch.Voxels.CSG;
+using Tuntenfisch.Voxels.DC;
+using Tuntenfisch.Voxels.Materials;
+using Tuntenfisch.Voxels.Volume;
+using Unity.Collections;
+using Unity.Jobs;
+using Unity.Mathematics;
+using UnityEngine;
+using UnityEngine.Rendering;
+
+namespace Tuntenfisch.World
+{
+    [RequireComponent(typeof(MeshFilter), typeof(MeshRenderer), typeof(MeshCollider))]
+    public class Chunk : MonoBehaviour, IPoolable
+    {
+        private int m_currentLOD;
+        private int m_targetLOD;
+        private int m_vertexCount;
+        private int m_triangleCount;
+
+        private Mesh m_mesh;
+        private MeshFilter m_meshFilter;
+        private MeshRenderer m_meshRenderer;
+        private MeshCollider m_meshCollider;
+        private OnMeshGenerated m_onMeshGeneratedDelegate;
+
+        private ComputeBuffer m_voxelVolumeBuffer;
+        private IRequest m_request;
+        private JobHandle m_bakeJobHandle;
+        private List<GPUVoxelVolumeCSGOperation> m_voxelVolumeCSGOperations;
+        private ChunkFlags m_flags;
+
+        private void Awake()
+        {
+            WorldManager.VoxelConfig.MaterialConfig.OnDirtied += ApplyRenderMaterial;
+            InitializeMeshComponents();
+            ApplyRenderMaterial();
+            m_voxelVolumeCSGOperations = new List<GPUVoxelVolumeCSGOperation>();
+        }
+
+        private void Update()
+        {
+            if (m_flags == 0)
+            {
+                return;
+            }
+
+            if ((m_flags & ChunkFlags.VoxelVolumeRegenerationRequested) == ChunkFlags.VoxelVolumeRegenerationRequested)
+            {
+                m_flags &= ~ChunkFlags.VoxelVolumeRegenerationRequested;
+                WorldManager.VoxelVolume.GenerateVoxelVolume(m_voxelVolumeBuffer, transform.position);
+            }
+
+            if ((m_flags & ChunkFlags.CSGOperationPerformed) == ChunkFlags.CSGOperationPerformed)
+            {
+                m_flags &= ~ChunkFlags.CSGOperationPerformed;
+                WorldManager.VoxelVolume.ApplyVoxelVolumeCSGOperations(m_voxelVolumeBuffer, transform.position, m_voxelVolumeCSGOperations);
+                m_voxelVolumeCSGOperations.Clear();
+            }
+
+            if ((m_flags & ChunkFlags.MeshRegenerationRequested) == ChunkFlags.MeshRegenerationRequested && (m_flags & ChunkFlags.IsBakingMesh) != ChunkFlags.IsBakingMesh && m_request == null)
+            {
+                m_flags &= ~ChunkFlags.MeshRegenerationRequested;
+                m_request = WorldManager.DualContouring.RequestMeshAsync
+                (
+                    m_voxelVolumeBuffer,
+                    m_currentLOD,
+                    m_targetLOD,
+                    m_vertexCount,
+                    m_triangleCount,
+                    transform.position,
+                    m_onMeshGeneratedDelegate
+                );
+            }
+
+            if ((m_flags & ChunkFlags.IsBakingMesh) == ChunkFlags.IsBakingMesh && m_bakeJobHandle.IsCompleted)
+            {
+                m_flags &= ~ChunkFlags.IsBakingMesh;
+                m_meshCollider.sharedMesh = null;
+                m_meshCollider.sharedMesh = m_mesh;
+            }
+        }
+
+        private void OnDestroy()
+        {
+            WorldManager.VoxelConfig.MaterialConfig.OnDirtied -= ApplyRenderMaterial;
+            ReleaseBuffers();
+        }
+
+        private void OnDrawGizmosSelected()
+        {
+            Gizmos.color = Color.green;
+            Gizmos.DrawWireCube(transform.position, WorldManager.VoxelConfig.VoxelVolumeConfig.VoxelVolumeDimensions);
+        }
+
+        public void OnAcquire()
+        {
+            m_currentLOD = m_targetLOD = m_vertexCount = m_triangleCount = -1;
+            CreateBuffers();
+            gameObject.SetActive(true);
+        }
+
+        public void OnRelease()
+        {
+            m_meshFilter.sharedMesh = null;
+            m_meshCollider.sharedMesh = null;
+            m_request?.Cancel();
+            m_request = null;
+            m_voxelVolumeCSGOperations.Clear();
+            m_flags = 0;
+            gameObject.SetActive(false);
+        }
+
+        public bool GetMaterialFromRaycastHit(RaycastHit hit, out MaterialIndex materialIndex)
+        {
+            materialIndex = default;
+
+            if (hit.triangleIndex >= m_triangleCount)
+            {
+                return false;
+            }
+
+            using Mesh.MeshDataArray meshDataArray = Mesh.AcquireReadOnlyMeshData(m_mesh);
+            {
+                Mesh.MeshData meshData = meshDataArray[0];
+                NativeArray<int> triangles = meshData.GetIndexData<int>();
+                NativeArray<GPUVertex> vertices = meshData.GetVertexData<GPUVertex>();
+
+                float shortestDistanceSquared = float.MaxValue;
+
+                for (int index = 0; index < 3; index++)
+                {
+                    GPUVertex vertex = vertices[triangles[3 * hit.triangleIndex + index]];
+                    float distanceSquared = math.lengthsq(hit.transform.TransformPoint(vertex.Position) - hit.point);
+
+                    if (distanceSquared < shortestDistanceSquared)
+                    {
+                        shortestDistanceSquared = distanceSquared;
+                        materialIndex = vertex.MaterialIndex;
+                    }
+                }
+            }
+
+            return true;
+        }
+
+        private void CreateBuffers()
+        {
+            if (m_voxelVolumeBuffer?.count != WorldManager.VoxelConfig.VoxelVolumeConfig.VoxelCount)
+            {
+                m_voxelVolumeBuffer?.Release();
+                m_voxelVolumeBuffer = new ComputeBuffer(WorldManager.VoxelConfig.VoxelVolumeConfig.VoxelCount, 2 * sizeof(uint));
+            }
+        }
+
+        private void ReleaseBuffers()
+        {
+            if (m_voxelVolumeBuffer != null)
+            {
+                m_voxelVolumeBuffer.Release();
+                m_voxelVolumeBuffer = null;
+            }
+        }
+
+        public void RegenerateVoxelVolume() => m_flags |= ChunkFlags.VoxelVolumeRegenerationRequested;
+
+        public void RegenerateMesh(int lod = -1)
+        {
+            if (lod != -1 && lod != m_targetLOD)
+            {
+                m_targetLOD = lod;
+                m_flags |= ChunkFlags.MeshRegenerationRequested;
+            }
+            else if (lod == -1)
+            {
+                m_flags |= ChunkFlags.MeshRegenerationRequested;
+            }
+        }
+
+        public void ApplyCSGPrimitiveOperation(GPUCSGOperator csgOperator, GPUCSGPrimitive csgPrimitive, MaterialIndex materialIndex, Matrix4x4 worldToObjectMatrix)
+        {
+            m_voxelVolumeCSGOperations.Add(new GPUVoxelVolumeCSGOperation(csgOperator, csgPrimitive, materialIndex, worldToObjectMatrix));
+            m_flags |= ChunkFlags.CSGOperationPerformed | ChunkFlags.MeshRegenerationRequested;
+        }
+
+        private void OnMeshGenerated(NativeArray<GPUVertex> vertices, int vertexCount, int vertexStartIndex, NativeArray<int> triangles, int triangleCount, int triangleStartIndex)
+        {
+            m_request = null;
+            m_currentLOD = m_targetLOD;
+            m_vertexCount = vertexCount;
+            m_triangleCount = triangleCount;
+
+            if (vertexCount == 0 || triangleCount == 0)
+            {
+                m_meshFilter.sharedMesh = null;
+                m_meshCollider.sharedMesh = null;
+
+                return;
+            }
+
+            m_mesh.SetVertexBufferParams(vertexCount, GPUVertex.Attributes);
+            m_mesh.SetIndexBufferParams(triangleCount, IndexFormat.UInt32);
+#if !UNITY_EDITOR
+            MeshUpdateFlags flags = MeshUpdateFlags.DontNotifyMeshUsers | MeshUpdateFlags.DontRecalculateBounds | MeshUpdateFlags.DontResetBoneBounds | MeshUpdateFlags.DontValidateIndices;
+            m_mesh.SetVertexBufferData(vertices, vertexStartIndex, 0, vertexCount, 0, flags);
+            m_mesh.SetIndexBufferData(triangles, triangleStartIndex, 0, triangleCount, flags);
+            m_mesh.SetSubMesh(0, new SubMeshDescriptor(0, triangleCount), flags);
+            m_mesh.RecalculateBounds(flags);
+#else
+            m_mesh.SetVertexBufferData(vertices, vertexStartIndex, 0, vertexCount);
+            m_mesh.SetIndexBufferData(triangles, triangleStartIndex, 0, triangleCount);
+            m_mesh.SetSubMesh(0, new SubMeshDescriptor(0, triangleCount));
+            m_mesh.RecalculateBounds(MeshUpdateFlags.DontValidateIndices);
+#endif
+            m_meshFilter.sharedMesh = null;
+            m_meshFilter.sharedMesh = m_mesh;
+
+            m_bakeJobHandle = new BakeJob(m_mesh.GetInstanceID()).Schedule();
+            m_flags |= ChunkFlags.IsBakingMesh;
+        }
+
+        private void InitializeMeshComponents()
+        {
+            m_mesh = new Mesh();
+            m_mesh.MarkDynamic();
+            m_meshFilter = GetComponent<MeshFilter>();
+            m_meshRenderer = GetComponent<MeshRenderer>();
+            m_meshCollider = GetComponent<MeshCollider>();
+            m_onMeshGeneratedDelegate = OnMeshGenerated;
+        }
+
+        private void ApplyRenderMaterial() => m_meshRenderer.material = WorldManager.VoxelConfig.MaterialConfig.RenderMaterial;
+
+        [Flags]
+        private enum ChunkFlags
+        {
+            VoxelVolumeRegenerationRequested = 1,
+            CSGOperationPerformed = 2,
+            MeshRegenerationRequested = 4,
+            IsBakingMesh = 8
+        }
+    }
+}
+```
+
+### Assets/Scripts/World/WorldManager.cs
+```
+﻿using System;
+using System.Collections.Generic;
+using Tuntenfisch.Generics;
+using Tuntenfisch.Generics.Pool;
+using Tuntenfisch.Voxels;
+using Tuntenfisch.Voxels.CSG;
+using Tuntenfisch.Voxels.DC;
+using Tuntenfisch.Voxels.Materials;
+using Tuntenfisch.Voxels.Volume;
+using Unity.Mathematics;
+using UnityEngine;
+using UnityEngine.Assertions;
+
+namespace Tuntenfisch.World
+{
+    [RequireComponent(typeof(VoxelConfig), typeof(VoxelVolume), typeof(DualContouring))]
+    [RequireComponent(typeof(CSGUtility))]
+    public class WorldManager : SingletonComponent<WorldManager>
+    {
+        public static VoxelConfig VoxelConfig => Instance.m_voxelConfig;
+        public static VoxelVolume VoxelVolume => Instance.m_voxelVolume;
+        public static DualContouring DualContouring => Instance.m_dualContouring;
+
+        private float ViewDistanceSquared => m_lodDistancesSquared[m_lodDistancesSquared.Length - 1];
+
+        [SerializeField]
+        private Transform m_viewer;
+        [SerializeField]
+        private float m_updateInterval = 20.0f;
+        [SerializeField]
+        private GameObject m_chunkPrefab;
+        [SerializeField]
+        private int m_initialChunkPoolPopulation = 0;
+        [SerializeField]
+        private float[] m_lodDistances;
+
+        private VoxelConfig m_voxelConfig;
+        private VoxelVolume m_voxelVolume;
+        private DualContouring m_dualContouring;
+        private CSGUtility m_csgUtility;
+        private ObjectPool<Chunk> m_chunkPool;
+        private Dictionary<int3, Chunk> m_chunks;
+        private List<int3> m_chunksOutsideOfViewDistance;
+        private Queue<(int3, float3, int)> m_chunksToProcess;
+        private HashSet<int3> m_processedChunkCoordinates;
+        private float3 m_chunkDimensions;
+
+        // We don't want to update the world every frame.
+        private float3 m_lastViewerPosition;
+        private float m_updateIntervalSquared;
+        private float[] m_lodDistancesSquared;
+
+        private void Start()
+        {
+            Assert.IsFalse(m_chunkPrefab.activeSelf);
+
+            m_voxelConfig = GetComponent<VoxelConfig>();
+            m_voxelConfig.VoxelVolumeConfig.OnLateDirtied += ApplyVoxelVolumeConfig;
+            m_voxelConfig.DualContouringConfig.OnLateDirtied += ApplyDualContouringConfig;
+            m_voxelConfig.GenerationGraph.OnLateDirtied += ApplyGenerationGraph;
+
+            m_voxelVolume = GetComponent<VoxelVolume>();
+            m_dualContouring = GetComponent<DualContouring>();
+            m_csgUtility = GetComponent<CSGUtility>();
+
+            m_chunkPool = new ObjectPool<Chunk>(() => { return Instantiate(m_chunkPrefab, transform).GetComponent<Chunk>(); }, m_initialChunkPoolPopulation);
+            m_chunks = new Dictionary<int3, Chunk>();
+            m_chunksOutsideOfViewDistance = new List<int3>();
+            m_chunksToProcess = new Queue<(int3, float3, int)>();
+            m_processedChunkCoordinates = new HashSet<int3>();
+            m_chunkDimensions = CalculateChunkDimensions();
+
+            m_lastViewerPosition = m_viewer.position;
+            m_updateIntervalSquared = math.pow(m_updateInterval, 2.0f);
+            m_lodDistancesSquared = CalculateLodDistancesSquared();
+
+            UpdateWorld(m_viewer.position);
+        }
+
+        private void Update()
+        {
+            if (math.lengthsq((float3)m_viewer.position - m_lastViewerPosition) >= m_updateIntervalSquared)
+            {
+                m_lastViewerPosition = m_viewer.position;
+                UpdateWorld(m_viewer.position);
+            }
+        }
+
+        private void OnDestroy()
+        {
+            m_voxelConfig.VoxelVolumeConfig.OnLateDirtied -= ApplyVoxelVolumeConfig;
+            m_voxelConfig.DualContouringConfig.OnLateDirtied -= ApplyDualContouringConfig;
+            m_voxelConfig.GenerationGraph.OnLateDirtied -= ApplyGenerationGraph;
+        }
+
+        private void OnValidate() => ApplySettings();
+
+        public void DrawCSGPrimitiveHologram(CSGPrimitiveType primitiveType, float3 position, float3 scale)
+        {
+            m_csgUtility.DrawCSGPrimitiveHologram(primitiveType, Matrix4x4.TRS(position, quaternion.identity, scale));
+        }
+
+        public void ApplyCSGOperation(GPUCSGOperator csgOperator, GPUCSGPrimitive csgPrimitive, MaterialIndex materialIndex, float3 position, float3 scale)
+        {
+            const float scaleInflationFactor = 1.5f;
+
+            Matrix4x4 worldToObjectMatrix = Matrix4x4.TRS(position, quaternion.identity, scale).inverse;
+
+            // Inflate the scale a bit to ensure CSG operations near the boundary of chunks are processed by all nearby chunks.
+            int3 minChunkCoordinate = CalculateChunkCoordinate(position - 0.5f * scaleInflationFactor * scale);
+            int3 maxChunkCoordinate = CalculateChunkCoordinate(position + 0.5f * scaleInflationFactor * scale);
+
+            for (int3 chunkCoordinate = minChunkCoordinate; chunkCoordinate.z <= maxChunkCoordinate.z; chunkCoordinate.z++)
+            {
+                for (chunkCoordinate.y = minChunkCoordinate.y; chunkCoordinate.y <= maxChunkCoordinate.y; chunkCoordinate.y++)
+                {
+                    for (chunkCoordinate.x = minChunkCoordinate.x; chunkCoordinate.x <= maxChunkCoordinate.x; chunkCoordinate.x++)
+                    {
+                        if (m_chunks.TryGetValue(chunkCoordinate, out Chunk chunk))
+                        {
+                            chunk.ApplyCSGPrimitiveOperation(csgOperator, csgPrimitive, materialIndex, worldToObjectMatrix);
+                        }
+                    }
+                }
+            }
+        }
+
+        public bool GetMaterialFromRaycastHit(RaycastHit hit, out MaterialIndex materialIndex)
+        {
+            materialIndex = default;
+
+            if (!(hit.collider is MeshCollider))
+            {
+                return false;
+            }
+
+            int3 chunkCoordinate = CalculateChunkCoordinate(hit.point);
+
+            if (m_chunks.TryGetValue(chunkCoordinate, out Chunk chunk) && chunk.GetMaterialFromRaycastHit(hit, out materialIndex))
+            {
+                return true;
+            }
+
+            return false;
+        }
+
+        private void UpdateWorld(float3 viewerPosition)
+        {
+            DestroyChunksOutsideViewDistance(viewerPosition);
+            CreateChunksWithinViewDistance(viewerPosition);
+        }
+
+        private void DestroyChunksOutsideViewDistance(float3 viewerPosition)
+        {
+            foreach (KeyValuePair<int3, Chunk> pair in m_chunks)
+            {
+                float viewerToChunkDistanceSquared = math.lengthsq((float3)pair.Value.transform.position - viewerPosition);
+
+                if (viewerToChunkDistanceSquared > ViewDistanceSquared)
+                {
+                    m_chunksOutsideOfViewDistance.Add(pair.Key);
+                }
+            }
+
+            foreach (int3 chunkCoordinate in m_chunksOutsideOfViewDistance)
+            {
+                m_chunkPool.Release(m_chunks[chunkCoordinate]);
+                m_chunks.Remove(chunkCoordinate);
+            }
+            m_chunksOutsideOfViewDistance.Clear();
+        }
+
+        private void CreateChunksWithinViewDistance(float3 viewerPosition)
+        {
+            int3 chunkCoordinate = CalculateChunkCoordinate(viewerPosition);
+            float3 chunkPosition = chunkCoordinate * m_chunkDimensions;
+            float viewerToChunkDistanceSquared = math.lengthsq(chunkPosition - viewerPosition);
+            int lod = CalculateChunkLod(viewerToChunkDistanceSquared);
+
+            m_processedChunkCoordinates.Clear();
+            m_chunksToProcess.Clear();
+
+            EnqueueChunk(chunkCoordinate, viewerPosition);
+
+            while (m_chunksToProcess.Count > 0)
+            {
+                (chunkCoordinate, chunkPosition, lod) = m_chunksToProcess.Dequeue();
+
+                if (m_chunks.TryGetValue(chunkCoordinate, out Chunk chunk))
+                {
+                    chunk.RegenerateMesh(lod);
+                }
+                else
+                {
+                    // Create new chunk.
+                    chunk = m_chunkPool.Acquire();
+                    chunk.transform.position = chunkPosition;
+                    chunk.RegenerateVoxelVolume();
+                    chunk.RegenerateMesh(lod);
+                    m_chunks[chunkCoordinate] = chunk;
+                }
+
+                EnqueueChunk(chunkCoordinate + new int3(1, 0, 0), viewerPosition);
+                EnqueueChunk(chunkCoordinate - new int3(1, 0, 0), viewerPosition);
+                EnqueueChunk(chunkCoordinate + new int3(0, 0, 1), viewerPosition);
+                EnqueueChunk(chunkCoordinate - new int3(0, 0, 1), viewerPosition);
+            }
+        }
+
+        private void EnqueueChunk(int3 neighbourChunkCoordinate, float3 viewerPosition)
+        {
+            if (!m_processedChunkCoordinates.Contains(neighbourChunkCoordinate))
+            {
+                float3 neighbourChunkPosition = neighbourChunkCoordinate * m_chunkDimensions;
+                float viewerToNeighbourChunkDistanceSquared = math.lengthsq(neighbourChunkPosition - viewerPosition);
+
+                if (viewerToNeighbourChunkDistanceSquared <= ViewDistanceSquared)
+                {
+                    m_chunksToProcess.Enqueue((neighbourChunkCoordinate, neighbourChunkPosition, CalculateChunkLod(viewerToNeighbourChunkDistanceSquared)));
+                }
+            }
+            m_processedChunkCoordinates.Add(neighbourChunkCoordinate);
+        }
+
+        private float3 CalculateChunkDimensions()
+        {
+            const int voxelOverlap = 1;
+
+            float inflationFactor = 1.0f + (float)voxelOverlap / (VoxelConfig.VoxelVolumeConfig.NumberOfCellsAlongAxis - voxelOverlap);
+
+            return VoxelConfig.VoxelVolumeConfig.VoxelVolumeDimensions / inflationFactor;
+        }
+
+        private int3 CalculateChunkCoordinate(float3 position) => new int3((int)math.round(position.x / m_chunkDimensions.x), 0, (int)math.round(position.z / m_chunkDimensions.z));
+
+        private float[] CalculateLodDistancesSquared()
+        {
+            float[] lodDistancesSquared = new float[m_lodDistances.Length];
+
+            for (int index = 0; index < lodDistancesSquared.Length; index++)
+            {
+                lodDistancesSquared[index] = math.pow(m_lodDistances[index], 2.0f);
+            }
+
+            return lodDistancesSquared;
+        }
+
+        private int CalculateChunkLod(float viewerToChunkDistanceSquared)
+        {
+            int lod = Array.BinarySearch(m_lodDistancesSquared, viewerToChunkDistanceSquared);
+
+            if (lod < 0)
+            {
+                lod = ~lod;
+            }
+
+            if (lod == m_lodDistancesSquared.Length)
+            {
+                lod = 0;
+            }
+
+            return lod;
+        }
+
+        private void ApplySettings()
+        {
+            if (!Application.isPlaying || !gameObject.activeSelf || m_voxelConfig == null)
+            {
+                return;
+            }
+
+            m_updateIntervalSquared = math.pow(m_updateInterval, 2.0f);
+            m_lodDistancesSquared = CalculateLodDistancesSquared();
+            m_chunkDimensions = CalculateChunkDimensions();
+
+            foreach (Chunk chunk in m_chunks.Values)
+            {
+                m_chunkPool.Release(chunk);
+            }
+            m_chunks.Clear();
+
+            UpdateWorld(m_viewer.position);
+        }
+
+        private void ApplyVoxelVolumeConfig() => ApplySettings();
+
+        private void ApplyDualContouringConfig()
+        {
+            foreach (Chunk chunk in m_chunks.Values)
+            {
+                chunk.RegenerateMesh();
+            }
+        }
+
+        private void ApplyGenerationGraph()
+        {
+            foreach (Chunk chunk in m_chunks.Values)
+            {
+                chunk.RegenerateVoxelVolume();
+                chunk.RegenerateMesh();
+            }
+        }
+    }
+}
+```
+
+### Assets/Shaders/Voxels/Voxel.shader
+```
+Shader "Voxels/Voxel"
+{
+    Properties
+    {
+        _CoordinateScaling ("Coordinate Scaling", Float) = 0.15
+        _BlendOffset ("Blend Offset", Range(0, 0.33)) = 0.2
+        _BlendExponent ("Blend Exponent", Range(0.0, 8.0)) = 2.0
+        _BlendHeightStrength ("Blend Height Strength", Range(0.01, 0.99)) = 0.5
+    }
+    SubShader
+    {
+        Tags { "RenderPipeline" = "UniversalPipeline" "RenderType" = "Opaque" "Queue" = "Geometry" }
+
+        HLSLINCLUDE
+
+        #include "Packages/com.unity.render-pipelines.universal/ShaderLibrary/Core.hlsl"
+
+        CBUFFER_START(UnityPerMaterial)
+        half _CoordinateScaling;
+        half _BlendOffset;
+        half _BlendExponent;
+        half _BlendHeightStrength;
+        CBUFFER_END
+
+        ENDHLSL
+
+        Pass
+        {
+
+            Name "ForwardLit"
+            Tags { "LightMode" = "UniversalForward" }
+
+            HLSLPROGRAM
+
+            #pragma require geometry
+
+            // Material Keywords
+            #pragma shader_feature_local_fragment _SPECULAR_SETUP
+
+            // URP Keywords
+            #pragma multi_compile _ _MAIN_LIGHT_SHADOWS _MAIN_LIGHT_SHADOWS_CASCADE _MAIN_LIGHT_SHADOWS_SCREEN
+            #pragma multi_compile _ _ADDITIONAL_LIGHTS_VERTEX _ADDITIONAL_LIGHTS
+            #pragma multi_compile_fragment _ _ADDITIONAL_LIGHT_SHADOWS
+            #pragma multi_compile_fragment _ _SHADOWS_SOFT
+            #pragma multi_compile_fragment _ _SCREEN_SPACE_OCCLUSION
+            #pragma multi_compile _ LIGHTMAP_SHADOW_MIXING
+            #pragma multi_compile _ SHADOWS_SHADOWMASK
+
+            // Unity Keywords
+            #pragma multi_compile _ DIRLIGHTMAP_COMBINED
+            #pragma multi_compile _ LIGHTMAP_ON
+            #pragma multi_compile_fog
+
+            #pragma vertex LitPassVertex
+            #pragma geometry LitPassGeometry
+            #pragma fragment LitPassFragment
+
+            #include "Packages/com.unity.render-pipelines.universal/ShaderLibrary/Lighting.hlsl"
+
+            struct VertexPassInput
+            {
+                float4 positionOS : POSITION;
+                float4 normalOS : NORMAL;
+                uint materialIndex : TEXCOORD0;
+                float2 lightmapUV : TEXCOORD1;
+            };
+
+            struct GeometryPassInput
+            {
+                float4 positionCS : SV_POSITION;
+                float3 positionWS : TEXCOORD0;
+                half3 normalWS : TEXCOORD1;
+                uint materialIndex : TEXCOORD2;
+                DECLARE_LIGHTMAP_OR_SH(lightmapUV, vertexSH, 3);
+
+                #if defined(_ADDITIONAL_LIGHTS_VERTEX)
+                    half4 fogFactorAndVertexLight : TEXCOORD4;
+                #else
+                    half fogFactor : TEXCOORD4;
+                #endif
+
+                #if defined(REQUIRES_VERTEX_SHADOW_COORD_INTERPOLATOR)
+                    float4 shadowCoord : TEXCOORD5;
+                #endif
+            };
+
+            struct FragmentPassInput
+            {
+                float4 positionCS : SV_POSITION;
+                float3 positionWS : TEXCOORD0;
+                half3 normalWS : TEXCOORD1;
+                uint3 materialIndices : TEXCOORD2;
+                half3 materialWeights : TEXCOORD3;
+                DECLARE_LIGHTMAP_OR_SH(lightmapUV, vertexSH, 4);
+
+                #if defined(_ADDITIONAL_LIGHTS_VERTEX)
+                    half4 fogFactorAndVertexLight : TEXCOORD5;
+                #else
+                    half fogFactor : TEXCOORD5;
+                #endif
+
+                #if defined(REQUIRES_VERTEX_SHADOW_COORD_INTERPOLATOR)
+                    float4 shadowCoord : TEXCOORD6;
+                #endif
+            };
+
+            float cosOfHalfSharpFeatureAngle;
+            TEXTURE2D_ARRAY(materialAlbedoTextures);
+            TEXTURE2D_ARRAY(materialNormalTextures);
+            TEXTURE2D_ARRAY(materialMOHSTextures);
+            SAMPLER(sampler_linear_repeat);
+
+            #include "Assets/Shaders/Voxels/Include/Triplanar.hlsl"
+
+            GeometryPassInput LitPassVertex(VertexPassInput input)
+            {
+                GeometryPassInput output;
+
+                VertexPositionInputs positionInputs = GetVertexPositionInputs(input.positionOS.xyz);
+                VertexNormalInputs normalInputs = GetVertexNormalInputs(input.normalOS.xyz);
+
+                output.positionCS = positionInputs.positionCS;
+                output.positionWS = positionInputs.positionWS;
+
+                half3 vertexLight = VertexLighting(positionInputs.positionWS, normalInputs.normalWS);
+                half fogFactor = ComputeFogFactor(positionInputs.positionCS.z);
+
+                output.normalWS = NormalizeNormalPerVertex(normalInputs.normalWS);
+                output.materialIndex = input.materialIndex;
+
+                OUTPUT_LIGHTMAP_UV(input.lightmapUV, unity_LightmapST, output.lightmapUV);
+                OUTPUT_SH(output.normalWS.xyz, output.vertexSH);
+
+                #if defined(_ADDITIONAL_LIGHTS_VERTEX)
+                    output.fogFactorAndVertexLight = half4(fogFactor, vertexLight);
+                #else
+                    output.fogFactor = fogFactor;
+                #endif
+
+                #if defined(REQUIRES_VERTEX_SHADOW_COORD_INTERPOLATOR)
+                    output.shadowCoord = GetShadowCoord(positionInputs);
+                #endif
+
+                return output;
+            }
+
+            [maxvertexcount(3)]
+            void LitPassGeometry(triangle GeometryPassInput inputs[3], inout TriangleStream<FragmentPassInput> outputStream)
+            {
+                const half3x3 half3x3Identity = half3x3
+                (
+                    1.0h, 0.0h, 0.0h,
+                    0.0h, 1.0h, 0.0h,
+                    0.0h, 0.0h, 1.0h
+                );
+
+                uint3 materialIndices = float3(inputs[0].materialIndex, inputs[1].materialIndex, inputs[2].materialIndex);
+                float3 faceNormalWS = normalize(cross(inputs[1].positionWS - inputs[0].positionWS, inputs[2].positionWS - inputs[0].positionWS));
+
+                for (uint index = 0; index < 3; index++)
+                {
+                    GeometryPassInput input = inputs[index];
+                    input.normalWS = dot(input.normalWS, faceNormalWS) <= cosOfHalfSharpFeatureAngle ? faceNormalWS : input.normalWS;
+
+                    FragmentPassInput output;
+                    output.positionCS = input.positionCS;
+                    output.positionWS = input.positionWS;
+                    output.normalWS = input.normalWS;
+                    output.materialIndices = materialIndices;
+                    output.materialWeights = half3x3Identity[index];
+
+                    #if defined(LIGHTMAP_ON)
+                        output.lightmapUV = input.lightmapUV;
+                    #else
+                        output.vertexSH = input.vertexSH;
+                    #endif
+
+                    #if defined(_ADDITIONAL_LIGHTS_VERTEX)
+                        output.fogFactorAndVertexLight = input.fogFactorAndVertexLight;
+                    #else
+                        output.fogFactor = input.fogFactor;
+                    #endif
+
+                    #if defined(REQUIRES_VERTEX_SHADOW_COORD_INTERPOLATOR)
+                        output.shadowCoord = input.shadowCoord;
+                    #endif
+
+                    outputStream.Append(output);
+                }
+                outputStream.RestartStrip();
+            }
+
+            float3 GetMaterialBlendWeights(FragmentPassInput input, half3 heights)
+            {
+                float3 materialWeights = abs(input.materialWeights);
+                materialWeights = saturate(materialWeights - _BlendOffset);
+                materialWeights *= abs(lerp(1.0h, heights, _BlendHeightStrength));
+                materialWeights = pow(materialWeights, _BlendExponent);
+                materialWeights /= dot(materialWeights, 1.0h);
+
+                return materialWeights;
+            }
+
+            SurfaceData CreateSurfaceData(FragmentPassInput input)
+            {
+                SurfaceData surfaceData = (SurfaceData)0;
+                TriplanarData triplanarDatas[3];
+
+                for (uint index = 0; index < 3; index++)
+                {
+                    triplanarDatas[index] = ApplyTriplanarTexturing
+                    (
+                        input.positionWS,
+                        input.normalWS,
+                        materialAlbedoTextures,
+                        materialNormalTextures,
+                        materialMOHSTextures,
+                        sampler_linear_repeat,
+                        input.materialIndices[index]
+                    );
+                }
+
+                half3 heights = half3(triplanarDatas[0].height, triplanarDatas[1].height, triplanarDatas[2].height);
+                float3 materialWeights = GetMaterialBlendWeights(input, heights);
+
+                for (index = 0; index < 3; index++)
+                {
+                    surfaceData.albedo += materialWeights[index] * triplanarDatas[index].albedo.rgb;
+                    surfaceData.alpha += materialWeights[index] * triplanarDatas[index].albedo.a;
+                    // Use SurfaceData's normalTS field to store our normalWS.
+                    surfaceData.normalTS += materialWeights[index] * triplanarDatas[index].normalWS;
+                    surfaceData.metallic += materialWeights[index] * triplanarDatas[index].metallic;
+                    surfaceData.occlusion += materialWeights[index] * triplanarDatas[index].occlusion;
+                    surfaceData.smoothness += materialWeights[index] * triplanarDatas[index].smoothness;
+                }
+
+                return surfaceData;
+            }
+
+            InputData CreateInputData(FragmentPassInput input, half3 normalWS)
+            {
+                InputData inputData = (InputData)0;
+                inputData.positionWS = input.positionWS;
+                inputData.normalWS = NormalizeNormalPerPixel(normalWS);
+                inputData.viewDirectionWS = SafeNormalize(GetWorldSpaceNormalizeViewDir(inputData.positionWS));
+
+                #if defined(REQUIRES_VERTEX_SHADOW_COORD_INTERPOLATOR)
+                    inputData.shadowCoord = input.shadowCoord;
+                #elif defined(MAIN_LIGHT_CALCULATE_SHADOWS)
+                    inputData.shadowCoord = TransformWorldToShadowCoord(inputData.positionWS);
+                #else
+                    inputData.shadowCoord = float4(0.0f, 0.0f, 0.0f, 0.0f);
+                #endif
+
+                #if defined(_ADDITIONAL_LIGHTS_VERTEX)
+                    inputData.fogCoord = input.fogFactorAndVertexLight.x;
+                    inputData.vertexLighting = input.fogFactorAndVertexLight.yzw;
+                #else
+                    inputData.fogCoord = input.fogFactor;
+                    inputData.vertexLighting = half3(0.0h, 0.0h, 0.0h);
+                #endif
+
+                inputData.bakedGI = SAMPLE_GI(input.lightmapUV, input.vertexSH, inputData.normalWS);
+                inputData.normalizedScreenSpaceUV = GetNormalizedScreenSpaceUV(input.positionCS);
+                inputData.shadowMask = SAMPLE_SHADOWMASK(input.lightmapUV);
+
+                return inputData;
+            }
+
+            half4 LitPassFragment(FragmentPassInput input) : SV_Target
+            {
+                SurfaceData surfaceData = CreateSurfaceData(input);
+                InputData inputData = CreateInputData(input, surfaceData.normalTS);
+
+                half4 color = UniversalFragmentPBR(inputData, surfaceData);
+                color.rgb = MixFog(color.rgb, inputData.fogCoord);
+
+                return color;
+            }
+
+            ENDHLSL
+
+        }
+
+        Pass
+        {
+
+            Name "ShadowCaster"
+            Tags { "LightMode" = "ShadowCaster" }
+
+            HLSLPROGRAM
+
+            #pragma vertex ShadowPassVertex
+            #pragma fragment ShadowPassFragment
+
+            #include "Assets/Shaders/Voxels/Include/ShadowCasterPass.hlsl"
+
+            ENDHLSL
+
+        }
+
+        Pass
+        {
+
+            Name "DepthOnly"
+            Tags { "LightMode" = "DepthOnly" }
+
+            HLSLPROGRAM
+
+            #pragma vertex DepthOnlyVertex
+            #pragma fragment DepthOnlyFragment
+
+            #include "Assets/Shaders/Voxels/Include/DepthOnlyPass.hlsl"
+
+            ENDHLSL
+
+        }
+
+        Pass
+        {
+
+            Name "DepthNormals"
+            Tags { "LightMode" = "DepthNormals" }
+
+            HLSLPROGRAM
+
+            #pragma vertex DepthNormalsVertex
+            #pragma fragment DepthNormalsFragment
+
+            #include "Assets/Shaders/Voxels/Include/DepthNormalsPass.hlsl"
+            
+            ENDHLSL
+
+        }
+    }
+}
+```
+
+### Assets/Compute/Voxels/Include/CSG.hlsl
+```
+#ifndef TUNTENFISCH_VOXELS_CSG
+#define TUNTENFISCH_VOXELS_CSG
+
+// Parts below are based on articles by Inigo Quilez (https://www.iquilezles.org/).
+#include "Assets/Compute/Include/Enumeration.hlsl"
+#include "Assets/Compute/Voxels/Include/Voxel.hlsl"
+
+ENUM CSGOperatorIndex
+{
+    static const uint Union = 0;
+    static const uint Intersection = 1;
+    static const uint Difference = 2;
+    static const uint SmoothUnion = 3;
+    static const uint SmoothIntersection = 4;
+    static const uint SmoothDifference = 5;
+};
+
+ENUM CSGPrimitiveType
+{
+    static const uint Sphere = 0;
+    static const uint Cuboid = 1;
+};
+
+Voxel Union(Voxel lhs, Voxel rhs)
+{
+    Voxel voxel = Voxel::Create();
+    voxel.valueAndGradient = lhs.GetValue() < rhs.GetValue() ? lhs.valueAndGradient : rhs.valueAndGradient;
+    voxel.materialIndex = lhs.GetValue() < rhs.GetValue() ? lhs.materialIndex : rhs.materialIndex;
+
+    return voxel;
+}
+
+Voxel Intersection(Voxel lhs, Voxel rhs)
+{
+    lhs.valueAndGradient *= -1.0f;
+    rhs.valueAndGradient *= -1.0f;
+
+    Voxel voxel = Union(lhs, rhs);
+    voxel.valueAndGradient *= -1.0f;
+
+    return voxel;
+}
+
+Voxel Difference(Voxel lhs, Voxel rhs)
+{
+    rhs.materialIndex = lhs.materialIndex;
+    rhs.valueAndGradient *= -1.0f;
+
+    return Intersection(lhs, rhs);
+}
+
+Voxel SmoothUnion(Voxel lhs, Voxel rhs, float smoothing)
+{
+    float h = max(smoothing - abs(lhs.GetValue() - rhs.GetValue()), 0.0f);
+    float m = 0.25f * h * h / smoothing;
+    float n = 0.50f * h / smoothing;
+
+    Voxel voxel = Voxel::Create();
+    voxel.valueAndGradient = float4(min(lhs.GetValue(), rhs.GetValue()) - m, lerp(lhs.GetGradient(), rhs.GetGradient(), lhs.GetValue() < rhs.GetValue() ? n : 1.0f - n));
+    voxel.materialIndex = lhs.GetValue() < rhs.GetValue() ? lhs.materialIndex : rhs.materialIndex;
+
+    return voxel;
+}
+
+Voxel SmoothIntersection(Voxel lhs, Voxel rhs, float smoothing)
+{
+    lhs.valueAndGradient *= -1.0f;
+    rhs.valueAndGradient *= -1.0f;
+
+    Voxel voxel = SmoothUnion(lhs, rhs, smoothing);
+    voxel.valueAndGradient *= -1.0f;
+
+    return voxel;
+}
+
+Voxel SmoothDifference(Voxel lhs, Voxel rhs, float smoothing)
+{
+    rhs.materialIndex = lhs.materialIndex;
+    rhs.valueAndGradient *= -1.0f;
+    
+    return SmoothIntersection(lhs, rhs, smoothing);
+}
+
+struct CSGOperator
+{
+    uint operatorIndex;
+    float smoothing;
+};
+
+Voxel ApplyCSGOperator(Voxel lhs, Voxel rhs, CSGOperator csgOperator)
+{
+    [branch]
+    switch(csgOperator.operatorIndex)
+    {
+        case CSGOperatorIndex::Union:
+            return Union(lhs, rhs);
+
+        case CSGOperatorIndex::Intersection:
+            return Intersection(lhs, rhs);
+
+        case CSGOperatorIndex::Difference:
+            return Difference(lhs, rhs);
+
+        case CSGOperatorIndex::SmoothUnion:
+            return SmoothUnion(lhs, rhs, csgOperator.smoothing);
+
+        case CSGOperatorIndex::SmoothIntersection:
+            return SmoothIntersection(lhs, rhs, csgOperator.smoothing);
+
+        default:
+            return SmoothDifference(lhs, rhs, csgOperator.smoothing);
+    }
+}
+
+// When combining a primitive (effectively an SDF) with other SDFs, the primitive
+// will perturb the shape of nearby SDFs and hence alter the generated mesh's 
+// geometry. But the mesh's geometry is even affected when the the isosurface the 
+// primitive is describing isn't intersecting any of the other isosurfaces at all.
+//
+// This is due to small values, i.e. values close to 0, near the primitive's isosurface
+// "winning" when the primitive is combined with other SDFs. Multiplying the
+// value of the primitive by a "large" factor effectively narrows the interval
+// of small values the primitive's SDFs has and therefore limits the region in which
+// it affects other SDFs when combined. The isosurface, which is generated at the 0
+// transition of the SDF isn't affect.
+//
+// At least that's my theory behind it...
+static const float csgPrimitiveValueMultiplier = 7.5f;
+
+struct CSGPrimitive
+{
+    uint primitiveType;
+};
+
+float4 EvaluateCSGSphere(float3 position)
+{
+    float4 valueAndGradient;
+    valueAndGradient.x = length(position) - 0.5f;
+    valueAndGradient.x *= csgPrimitiveValueMultiplier;
+    valueAndGradient.yzw = position;
+
+    return valueAndGradient;
+}
+
+float4 EvaluateCSGCuboid(float3 position)
+{
+    float4 valueAndGradient;
+    float3 d = abs(position) - 0.5f;
+    float3 smoothing = sign(position);
+    float g = max(d.x, max(d.y, d.z));
+    
+    valueAndGradient.x = length(max(d, 0.0f)) + min(max(d.x, max(d.y, d.z)), 0.0f);
+    valueAndGradient.x *= csgPrimitiveValueMultiplier;
+    valueAndGradient.yzw = smoothing * (g > 0.0f ? normalize(max(d, 0.0f)) : step(d.yzx, d.xyz) * step(d.zxy, d.xyz));
+
+    return valueAndGradient;
+}
+
+float4 EvaluateCSGPrimitive(float3 position, CSGPrimitive primitive)
+{
+    [branch]
+    switch(primitive.primitiveType)
+    {
+        case CSGPrimitiveType::Sphere:
+            return EvaluateCSGSphere(position);
+
+        default:
+            return EvaluateCSGCuboid(position);
+    }
+}
+
+#endif
+```
+
+### Assets/Compute/Voxels/Include/Cell.hlsl
+```
+#ifndef TUNTENFISCH_VOXELS_CELL
+#define TUNTENFISCH_VOXELS_CELL
+
+static const uint numberOfCellCorners = 8;
+
+//     5---------6
+//    /|        /|
+//   / |       / |
+//  /  |      /  |
+// 1---------2
+// |   |     |   |
+// |   4-----|---7
+// |  /      |  /
+// | /       | /
+// |/        |/
+// 0---------3
+static const uint3 cellCorners[numberOfCellCorners] =
+{
+    uint3(0, 0, 0),
+    uint3(0, 1, 0),
+    uint3(1, 1, 0),
+    uint3(1, 0, 0),
+    uint3(0, 0, 1),
+    uint3(0, 1, 1),
+    uint3(1, 1, 1),
+    uint3(1, 0, 1)
+};
+
+static const uint numberOfCellEdges = 12;
+
+struct CellEdge
+{
+    uint2 cornerIndices;
+
+    uint GetCornerStartIndex()
+    {
+        return cornerIndices.x;
+    }
+    
+    uint GetCornerEndIndex()
+    {
+        return cornerIndices.y;
+    }
+
+    static CellEdge Create(uint cornerStartIndex, uint cornerEndIndex)
+    {
+        CellEdge cellEdge;
+        cellEdge.cornerIndices.x = cornerStartIndex;
+        cellEdge.cornerIndices.y = cornerEndIndex;
+        
+        return cellEdge;
+    }
+};
+
+//     +----6----+
+//    /|        /|
+//   7 |       5 |
+//  /  11     / 10
+// +----4----+   |
+// |   |     |   |
+// |   +----2|---+
+// 8  /      9  /
+// | 3       | 1
+// |/        |/
+// +----0----+
+static const CellEdge cellEdges[numberOfCellEdges] =
+{
+    CellEdge::Create(0, 3),
+    CellEdge::Create(3, 7),
+    CellEdge::Create(7, 4),
+    CellEdge::Create(4, 0),
+    CellEdge::Create(1, 2),
+    CellEdge::Create(2, 6),
+    CellEdge::Create(5, 6),
+    CellEdge::Create(5, 1),
+    CellEdge::Create(0, 1),
+    CellEdge::Create(3, 2),
+    CellEdge::Create(7, 6),
+    CellEdge::Create(4, 5)
+};
+
+#endif
+```
+
+### Assets/Compute/Voxels/Include/GenerationGraph.hlsl
+```
+#ifndef TUNTENFISCH_VOXELS_GENERATION_GRAPH
+#define TUNTENFISCH_VOXELS_GENERATION_GRAPH
+
+#include "Assets/Compute/Include/Enumeration.hlsl"
+#include "Assets/Compute/Voxels/Include/Noise.hlsl"
+#include "Assets/Compute/Voxels/Include/Voxel.hlsl"
+
+ENUM NodeType
+{
+    static const uint Position = 0;
+    static const uint Transform = 1;
+    static const uint DomainWarp = 2;
+    static const uint Noise = 3;
+    static const uint CSGPrimitive = 4;
+    static const uint Material = 5;
+    static const uint CSGOperation = 6;
+    static const uint Output = 7;
+};
+
+struct GenerationGraphNode
+{
+    uint nodeType;
+    // Below data is populated depending on the type of node.
+    float4x4 transformMatrix;
+    NoiseParameters noiseParameters;
+    CSGPrimitive csgPrimitive;
+    uint materialIndex;
+    CSGOperator csgOperator;
+};
+
+StructuredBuffer<GenerationGraphNode> generationGraphNodes;
+
+uint numberOfGenerationGraphNodes;
+
+struct GenerationGraphStack
+{
+    Voxel buffer[2];
+    uint count;
+
+    void PushVoxel(Voxel voxel)
+    {
+        [branch]
+        switch(count++)
+        {
+            case 0:
+                buffer[0] = voxel;
+                break;
+
+            default:
+                buffer[1] = voxel;
+                break;
+        }
+    }
+
+    void PushValueAndGradient(float4 valueAndGradient)
+    {
+        PushVoxel(Voxel::Create(valueAndGradient, 0));
+    }
+
+    void PushPosition(float3 position)
+    {
+        PushVoxel(Voxel::Create(float4(0.0f, position), 0));
+    }
+
+    Voxel PopVoxel()
+    {
+        return buffer[--count];
+    }
+
+    float4 PopValueAndGradient()
+    {
+        return PopVoxel().valueAndGradient;
+    }
+
+    float3 PopPosition()
+    {
+        return PopVoxel().GetGradient();
+    }
+
+    static GenerationGraphStack Create()
+    {
+        GenerationGraphStack stack;
+        stack.count = 0;
+
+        return stack;
+    }
+};
+
+Voxel EvaluateGenerationGraph(float3 position)
+{
+    Voxel voxel;
+    GenerationGraphStack stack = GenerationGraphStack::Create();
+
+    for (uint nodeIndex = 0; nodeIndex < numberOfGenerationGraphNodes; nodeIndex++)
+    {
+        GenerationGraphNode node = generationGraphNodes[nodeIndex];
+
+        [branch]
+        switch(node.nodeType)
+        {
+            case NodeType::Position:
+                stack.PushPosition(position);
+                break;
+
+            case NodeType::Transform:
+                stack.PushPosition(mul(node.transformMatrix, float4(stack.PopPosition(), 1.0f)).xyz);
+                break;
+
+            case NodeType::DomainWarp:
+                stack.PushPosition(WarpDomain(stack.PopPosition(), node.noiseParameters));
+                break;
+
+            case NodeType::Noise:
+                stack.PushValueAndGradient(GenerateFBMNoise(stack.PopPosition(), node.noiseParameters));
+                break;
+
+            case NodeType::CSGPrimitive:
+                stack.PushValueAndGradient(EvaluateCSGPrimitive(stack.PopPosition(), node.csgPrimitive));
+                break;
+
+            case NodeType::Material:
+                stack.PushVoxel(Voxel::Create(stack.PopValueAndGradient(), node.materialIndex));
+                break;
+
+            case NodeType::CSGOperation:
+                Voxel rhs = stack.PopVoxel();
+                Voxel lhs = stack.PopVoxel();
+                stack.PushVoxel(ApplyCSGOperator(lhs, rhs, node.csgOperator));
+                break;
+
+            case NodeType::Output:
+                voxel = stack.PopVoxel();
+                break;
+        }
+    }
+
+    return voxel;
+}
+
+#endif
+```
+
+### Assets/Compute/Voxels/Include/Material.hlsl
+```
+﻿#ifndef TUNTENFISCH_VOXELS_MATERIAL
+#define TUNTENFISCH_VOXELS_MATERIAL
+
+#include "Assets/Compute/Include/Enumeration.hlsl"
+
+ENUM MaterialIndex
+{
+    static const uint Dirt = 0;
+    static const uint Rock = 1;
+    static const uint Sand = 2;
+    static const uint Grass = 3;
+};
+
+static const uint numberOfMaterials = 4;
+
+#endif
+```
+
+### Assets/Compute/Voxels/Include/Noise.hlsl
+```
+#ifndef TUNTENFISCH_VOXELS_NOISE
+#define TUNTENFISCH_VOXELS_NOISE
+
+#include "Packages/com.unity.render-pipelines.core/ShaderLibrary/Macros.hlsl"
+#include "Packages/com.unity.render-pipelines.core/ShaderLibrary/Random.hlsl"
+#include "Packages/jp.keijiro.noiseshader/Shader/SimplexNoise3D.hlsl"
+
+#include "Assets/Compute/Include/Enumeration.hlsl"
+#include "Assets/Compute/Voxels/Include/CSG.hlsl"
+
+ENUM NoiseAxes
+{
+    static const uint XZ = 0;
+    static const uint XYZ = 1;
+};
+
+ENUM NoiseType
+{
+    static const uint Default = 0;
+    static const uint Billow = 1;
+    static const uint Ridge = 2;
+};
+
+struct NoiseParameters
+{
+    // General Parameters.
+    uint seed;
+    uint noiseAxes;
+    uint noiseType;
+
+    // FBM noiseParameters.
+    uint numberOfOctaves;
+    float initialAmplitude;
+    float3 initialFrequency;
+    float persistence;
+    float3 lacunarity;
+
+    static NoiseParameters Create(uint seed, uint noiseAxes, uint noiseType, uint numberOfOctaves, float initialAmplitude, float3 initialFrequency, float persistence, float3 lacunarity)
+    {
+        NoiseParameters noiseParameters;
+        noiseParameters.seed = seed;
+        noiseParameters.noiseAxes = noiseAxes;
+        noiseParameters.noiseType = noiseType;
+        noiseParameters.numberOfOctaves = numberOfOctaves;
+        noiseParameters.initialAmplitude = initialAmplitude;
+        noiseParameters.initialFrequency = initialFrequency;
+        noiseParameters.persistence = persistence;
+        noiseParameters.lacunarity = lacunarity;
+
+        return noiseParameters;
+    }
+};
+
+float3 CalculateOctaveOffset(uint seed, uint octave)
+{
+    return GenerateHashedRandomFloat(uint2(seed, octave)) * 10000.0f;
+}
+
+float4 GenerateNoise(float3 position, uint noiseAxes)
+{
+    // For some reasons the noise functions generate spike-like artifacts at positions that are a multiple of 100.
+    // Adding a random offset will ensure that we don't sample at those positions in the first place.
+    position += 0.100594f;
+
+    [branch]
+    switch(noiseAxes)
+    {
+        case NoiseAxes::XZ:
+            float4 valueAndGradient = SimplexNoiseGrad(float3(position.x, 0.0f, position.z)).wxyz;
+
+            return float4(valueAndGradient.x, float3(valueAndGradient.y, 0.0f, valueAndGradient.w));
+        default:
+            return SimplexNoiseGrad(position).wxyz;
+    }
+}
+
+// Based on https://www.iquilezles.org/www/articles/morenoise/morenoise.htm.
+float4 GenerateDefaultFBMNoise(float3 position, NoiseParameters noiseParameters)
+{
+    float4 fbmValueAndFBMGradient = 0.0f;
+    float3 sumOfGradients = 0.0f;
+    float amplitude = noiseParameters.initialAmplitude;
+    float3 frequency = noiseParameters.initialFrequency;
+
+    for (uint octave = 0; octave < noiseParameters.numberOfOctaves; octave++)
+    {
+        // We need to multiply the derivative by frequency because of the chain rule:
+        // d / dp * n(f * p) = f * n'(f * p)
+        float4 valueAndGradient = GenerateNoise(frequency * (position + CalculateOctaveOffset(noiseParameters.seed, octave)), noiseParameters.noiseAxes);
+
+        valueAndGradient.yzw *= frequency;
+        sumOfGradients += valueAndGradient.yzw;
+        valueAndGradient *= amplitude / (1.0f + dot(sumOfGradients, sumOfGradients));
+        fbmValueAndFBMGradient += valueAndGradient;
+
+        amplitude *= noiseParameters.persistence;
+        frequency *= noiseParameters.lacunarity;
+    }
+
+    return fbmValueAndFBMGradient;
+}
+
+float4 GenerateFBMBillowNoise(float3 position, NoiseParameters noiseParameters)
+{
+    float4 valueAndGradient = GenerateDefaultFBMNoise(position, noiseParameters);
+    valueAndGradient.yzw = valueAndGradient.x * valueAndGradient.yzw / abs(valueAndGradient.x);
+    valueAndGradient.x = abs(valueAndGradient.x) - 0.25f;
+
+    return valueAndGradient;
+}
+
+float4 GenerateFBMRidgeNoise(float3 position, NoiseParameters noiseParameters)
+{
+    float4 valueAndGradient = GenerateFBMBillowNoise(position, noiseParameters);
+    valueAndGradient *= -1.0f;
+
+    // Square ridge noise for more pronounced ridges.
+    valueAndGradient.yzw = 2.0f * valueAndGradient.x * valueAndGradient.yzw;
+    valueAndGradient.x = valueAndGradient.x * valueAndGradient.x - 0.0625f;
+
+    return valueAndGradient;
+}
+
+float4 GenerateFBMNoise(float3 position, NoiseParameters noiseParameters)
+{
+    float4 valueAndGradient = 0.0f;
+
+    [branch]
+    switch(noiseParameters.noiseType)
+    {
+        case NoiseType::Ridge:
+            valueAndGradient = GenerateFBMRidgeNoise(position, noiseParameters);
+            break;
+
+        case NoiseType::Billow:
+            valueAndGradient = GenerateFBMBillowNoise(position, noiseParameters);
+            break;
+
+        default:
+            valueAndGradient = GenerateDefaultFBMNoise(position, noiseParameters);
+            break;
+    }
+
+    if (noiseParameters.noiseAxes == NoiseAxes::XZ)
+    {
+        valueAndGradient *= -1.0f;
+        valueAndGradient.x += position.y;
+        valueAndGradient.z += 1.0f;
+    }
+
+    return valueAndGradient;
+}
+
+float3 WarpDomain(float3 position, NoiseParameters noiseParameters)
+{
+    const float3 offset = float3(500.0f, 1000.0f, 1500.0f);
+
+    float3 value = 0.0f;
+
+    // Add a random offset to the position so the values for x, y and z aren't all the same.
+    value.x = GenerateFBMNoise(position + offset, noiseParameters).x;
+
+    if (noiseParameters.noiseAxes != NoiseAxes::XZ)
+    {
+        value.y = GenerateFBMNoise(position, noiseParameters).x;
+    }
+    value.z = GenerateFBMNoise(position - offset, noiseParameters).x;
+
+    return position + value;
+}
+
+#endif
+```
+
+### Assets/Compute/Voxels/Include/Vertex.hlsl
+```
+﻿#ifndef TUNTENFISCH_VOXELS_VERTEX
+#define TUNTENFISCH_VOXELS_VERTEX
+
+#include "Assets/Compute/Include/Packing.hlsl"
+
+struct Vertex
+{
+    float3 position;
+    uint2 halfPrecisionNormal;
+    uint materialIndex;
+
+    float3 GetPosition()
+    {
+        return position;
+    }
+
+    void SetPosition(float3 newPosition)
+    {
+        position = newPosition;
+    }
+
+    float3 GetNormal()
+    {
+        return float3(UnpackFloats(halfPrecisionNormal.x), UnpackFloats(halfPrecisionNormal.y).x);
+    }
+
+    void SetNormal(float3 newNormal)
+    {
+        halfPrecisionNormal = uint2(PackFloats(newNormal.xy), PackFloats(float2(newNormal.z, 0.0f)));
+    }
+
+    uint GetMaterialIndex()
+    {
+        return materialIndex;
+    }
+
+    void SetMaterialIndex(uint newMaterialIndex)
+    {
+        materialIndex = newMaterialIndex;
+    }
+
+    static Vertex Create(float3 position = 0.0f, float3 normal = 0.0f, uint materialIndex = 0)
+    {
+        Vertex vertex;
+        vertex.position = position;
+        vertex. halfPrecisionNormal = uint2(PackFloats(normal.xy), PackFloats(float2(normal.z, 0.0f)));
+        vertex.materialIndex = materialIndex;
+
+        return vertex;
+    }
+};
+
+#endif
+```
+
+### Assets/Compute/Voxels/Include/Voxel.hlsl
+```
+#ifndef TUNTENFISCH_VOXELS_VOXEL
+#define TUNTENFISCH_VOXELS_VOXEL
+
+#include "Assets/Compute/Include/Packing.hlsl"
+#include "Assets/Compute/Voxels/Include/Material.hlsl"
+
+struct Voxel
+{
+    float4 valueAndGradient;
+    uint materialIndex;
+
+    float GetValue()
+    {
+        return valueAndGradient.x;
+    }
+
+    void SetValue(float newValue)
+    {
+        valueAndGradient.x = newValue;
+    }
+    
+    float3 GetGradient()
+    {
+        return valueAndGradient.yzw;
+    }
+
+    void SetGradient(float3 newGradient)
+    {
+        valueAndGradient.yzw = newGradient;
+    }
+
+    uint IsSolid()
+    {
+        return valueAndGradient.x >= 0.0;
+    }
+
+    static Voxel Create(float4 valueAndGradient = 0.0f, uint materialIndex = 0)
+    {
+        Voxel voxel;
+        voxel.valueAndGradient = valueAndGradient;
+        voxel.materialIndex = materialIndex;
+
+        return voxel;
+    }
+};
+
+struct PackedVoxel
+{
+    uint packedValueAndMaterialIndex;
+    uint packedGradient;
+
+    static PackedVoxel Create(uint packedValueAndMaterialIndex, uint packedGradient)
+    {
+        PackedVoxel packedVoxel;
+        packedVoxel.packedValueAndMaterialIndex = packedValueAndMaterialIndex;
+        packedVoxel.packedGradient = packedGradient;
+
+        return packedVoxel;
+    }
+};
+
+PackedVoxel PackVoxel(Voxel voxel)
+{
+    // Technically value can be any arbitrarily large float so using only 16 bits for
+    // precision wouldn't be great. But since we only actually do something with a
+    // voxel's value if it's close to 0 (that means the voxel is near the isosurface)
+    // it shouldn't pose a problem.
+    uint packedValueAndMaterialIndex = f32tof16(voxel.GetValue()) | voxel.materialIndex << 16;
+    uint packedGradient = PackFloats(PackNormalOctQuadEncode(normalize(voxel.GetGradient())));
+
+    return PackedVoxel::Create(packedValueAndMaterialIndex, packedGradient);
+}
+
+Voxel UnpackVoxel(PackedVoxel voxel)
+{
+    float value = f16tof32(voxel.packedValueAndMaterialIndex);
+    float3 gradient = UnpackNormalOctQuadEncode(UnpackFloats(voxel.packedGradient));
+    uint materialIndex = voxel.packedValueAndMaterialIndex >> 16;
+
+    return Voxel::Create(float4(value, gradient), materialIndex);
+}
+
+#endif
+```
+
+### Assets/Compute/Voxels/Include/VoxelVolume.hlsl
+```
+#ifndef TUNTENFISCH_VOXELS_VOXEL_VOLUME
+#define TUNTENFISCH_VOXELS_VOXEL_VOLUME
+
+RWStructuredBuffer<PackedVoxel> voxelVolume;
+
+uint3 numberOfVoxels;
+float voxelSpacing;
+float3 voxelVolumeToWorldSpaceOffset;
+
+bool IsOutOfVoxelVolumeBounds(uint3 coordinate)
+{
+    return any(coordinate > numberOfVoxels - 1);
+}
+
+uint CalculateVoxelVolumeIndex(uint3 coordinate)
+{
+    return dot(coordinate, uint3(1, numberOfVoxels.x, numberOfVoxels.x * numberOfVoxels.y));
+}
+
+Voxel GetVoxel(uint3 coordinate)
+{
+    return UnpackVoxel(voxelVolume[CalculateVoxelVolumeIndex(coordinate)]);
+}
+
+void SetVoxel(uint3 coordinate, Voxel voxel)
+{
+    voxelVolume[CalculateVoxelVolumeIndex(coordinate)] = PackVoxel(voxel);
+}
+
+float3 VoxelToVoxelVolumeSpace(uint3 coordinate, float3 position = 0.0f)
+{
+    return voxelSpacing * (position + coordinate - 0.5f * (numberOfVoxels - 1.0f));
+}
+
+float3 VoxelVolumeToVoxelSpace(uint3 coordinate, float3 position = 0.0f)
+{
+    return position / voxelSpacing - coordinate + 0.5f * (numberOfVoxels - 1.0f);
+}
+
+float3 VoxelVolumeToWorldSpace(float3 position)
+{
+    return position + voxelVolumeToWorldSpaceOffset;
+}
+
+float3 WorldToVoxelVolumeSpace(float3 position)
+{
+    return position - voxelVolumeToWorldSpaceOffset;
+}
+
+#endif
+```
+
+### Assets/Scripts/Generics/Pool/IPoolable.cs
+```
+﻿namespace Tuntenfisch.Generics.Pool
+{
+    public interface IPoolable
+    {
+        public void OnAcquire();
+
+        public void OnRelease();
+    }
+}
+```
+
+### Assets/Scripts/Generics/Pool/ObjectPool.cs
+```
+﻿using System;
+using System.Collections.Generic;
+
+namespace Tuntenfisch.Generics.Pool
+{
+    public class ObjectPool<T> where T : IPoolable
+    {
+        private readonly Stack<T> m_available;
+        private readonly Func<T> m_generator;
+
+        public ObjectPool(Func<T> generator, int initialPopulation = 0)
+        {
+            m_available = new Stack<T>(initialPopulation);
+            m_generator = generator;
+            Populate(initialPopulation);
+        }
+
+        public T Acquire()
+        {
+            T obj;
+
+            if (m_available.Count == 0)
+            {
+                Populate(1);
+            }
+            obj = m_available.Pop();
+            obj.OnAcquire();
+
+            return obj;
+        }
+
+        public void Release(T obj)
+        {
+            if (obj == null)
+            {
+                throw new ArgumentNullException(nameof(obj));
+            }
+
+            obj.OnRelease();
+            m_available.Push(obj);
+        }
+
+        public void Populate(int count)
+        {
+            for (int index = 0; index < count; index++)
+            {
+                m_available.Push(m_generator());
+            }
+        }
+    }
+}
+```
+
+### Assets/Scripts/Voxels/CSG/CSGOperatorIndex.cs
+```
+﻿namespace Tuntenfisch.Voxels.CSG
+{
+    public enum CSGOperatorIndex
+    {
+        Union = 0,
+        Intersection = 1,
+        Difference = 2,
+        SmoothUnion = 3,
+        SmoothIntersection = 4,
+        SmoothDifference = 5
+    }
+}
+```
+
+### Assets/Scripts/Voxels/CSG/CSGPrimitiveType.cs
+```
+﻿namespace Tuntenfisch.Voxels.CSG
+{
+    public enum CSGPrimitiveType
+    {
+        Sphere = 0,
+        Cuboid = 1
+    }
+}
+```
+
+### Assets/Scripts/Voxels/CSG/CSGUtility.cs
+```
+﻿using System.Collections.Generic;
+using UnityEngine;
+
+namespace Tuntenfisch.Voxels.CSG
+{
+    public class CSGUtility : MonoBehaviour
+    {
+        [SerializeField]
+        private Material m_hologramMaterial;
+
+        private Dictionary<CSGPrimitiveType, Mesh> m_csgPrimitiveMeshes;
+
+        private void Awake()
+        {
+            m_csgPrimitiveMeshes = new Dictionary<CSGPrimitiveType, Mesh>
+            {
+                [CSGPrimitiveType.Sphere] = Resources.GetBuiltinResource<Mesh>("Sphere.fbx"),
+                [CSGPrimitiveType.Cuboid] = Resources.GetBuiltinResource<Mesh>("Cube.fbx")
+            };
+        }
+
+        public void DrawCSGPrimitiveHologram(CSGPrimitiveType primitiveType, Matrix4x4 objectToWorldMatrix)
+        {
+            Mesh mesh = m_csgPrimitiveMeshes[primitiveType];
+            Graphics.DrawMesh(mesh, objectToWorldMatrix, m_hologramMaterial, 0, null, 0, null, false);
+        }
+    }
+}
+```
+
+### Assets/Scripts/Voxels/CSG/GPUCSGOperator.cs
+```
+﻿using System;
+using System.Runtime.InteropServices;
+using UnityEngine;
+
+namespace Tuntenfisch.Voxels.CSG
+{
+    [Serializable]
+    [StructLayout(LayoutKind.Sequential)]
+    public struct GPUCSGOperator
+    {
+        public static int SizeInBytes => s_sizeInBytes;
+
+        public CSGOperatorIndex OperatorIndex { get => m_operatorIndex; set => m_operatorIndex = value; }
+        public float Smoothing { get => m_smoothing; set => m_smoothing = value; }
+
+        private readonly static int s_sizeInBytes = Marshal.SizeOf<GPUCSGOperator>();
+
+        [SerializeField]
+        private CSGOperatorIndex m_operatorIndex;
+        [SerializeField]
+        private float m_smoothing;
+
+        public GPUCSGOperator(CSGOperatorIndex operatorIndex, float smoothing = 0.0f)
+        {
+            m_operatorIndex = operatorIndex;
+            m_smoothing = smoothing;
+        }
+    }
+}
+```
+
+### Assets/Scripts/Voxels/CSG/GPUCSGPrimitive.cs
+```
+﻿using System;
+using System.Runtime.InteropServices;
+using UnityEngine;
+
+namespace Tuntenfisch.Voxels.CSG
+{
+    [Serializable]
+    [StructLayout(LayoutKind.Sequential)]
+    public struct GPUCSGPrimitive
+    {
+        public static int SizeInBytes => s_sizeInBytes;
+
+        public CSGPrimitiveType PrimitiveType => m_primitiveType;
+
+        private readonly static int s_sizeInBytes = Marshal.SizeOf<GPUCSGPrimitive>();
+
+        [SerializeField]
+        private CSGPrimitiveType m_primitiveType;
+
+        public GPUCSGPrimitive(CSGPrimitiveType primitiveType)
+        {
+            m_primitiveType = primitiveType;
+        }
+    }
+}
+```
+
+### Assets/Scripts/Voxels/DC/DualContouring.cs
+```
+﻿using Cysharp.Threading.Tasks;
+using System;
+using System.Collections.Generic;
+using System.Linq;
+using Tuntenfisch.Extensions;
+using Tuntenfisch.Generics;
+using Tuntenfisch.Generics.Pool;
+using Unity.Collections;
+using Unity.Mathematics;
+using UnityEngine;
+
+namespace Tuntenfisch.Voxels.DC
+{
+    [RequireComponent(typeof(VoxelConfig))]
+    public class DualContouring : MonoBehaviour
+    {
+        private event Action OnDestroyed;
+
+        [Range(1, 16)]
+        [SerializeField]
+        private int m_numberOfWorkers = 4;
+        [Min(0)]
+        [SerializeField]
+        private int m_initialTaskPoolPopulation = 0;
+        [Range(1.0f, 2.0f)]
+        [SerializeField]
+        private float m_readbackInflationFactor = 1.25f;
+
+        private VoxelConfig m_voxelConfig;
+        private Queue<Worker.Task> m_tasks;
+        private Stack<Worker> m_availableWorkers;
+        private ObjectPool<Worker.Task> m_taskPool;
+
+        private void Awake()
+        {
+            m_voxelConfig = GetComponent<VoxelConfig>();
+            m_tasks = new Queue<Worker.Task>();
+            m_availableWorkers = new Stack<Worker>(Enumerable.Range(0, m_numberOfWorkers).Select(index => new Worker(this)));
+            m_taskPool = new ObjectPool<Worker.Task>(() => { return new Worker.Task(); }, m_initialTaskPoolPopulation);
+        }
+
+        private void LateUpdate()
+        {
+            while (m_tasks.Count > 0 && m_availableWorkers.Count > 0)
+            {
+                DispatchWorker(m_tasks.Dequeue());
+            }
+        }
+
+        private void OnDestroy() => OnDestroyed?.Invoke();
+
+        private void OnValidate()
+        {
+            if (m_availableWorkers == null)
+            {
+                return;
+            }
+
+            foreach (Worker worker in m_availableWorkers)
+            {
+                worker.Dispose();
+            }
+            m_availableWorkers = new Stack<Worker>(Enumerable.Range(0, m_numberOfWorkers).Select(index => new Worker(this)));
+        }
+
+        public IRequest RequestMeshAsync
+        (
+            ComputeBuffer voxelVolumeBuffer,
+            int currentLOD,
+            int targetLOD,
+            int currentVertexCount,
+            int currentTriangleCount,
+            float3 worldPosition,
+            OnMeshGenerated callback
+        )
+        {
+            Worker.Task task = m_taskPool.Acquire();
+            task.VoxelVolumeBuffer = voxelVolumeBuffer ?? throw new ArgumentNullException(nameof(voxelVolumeBuffer));
+            task.CurrentLOD = currentLOD;
+            task.TargetLOD = targetLOD;
+            task.CurrentVertexCount = currentVertexCount;
+            task.CurrentTriangleCount = currentTriangleCount;
+            task.VoxelVolumeToWorldSpaceOffset = worldPosition;
+            task.Callback = callback ?? throw new ArgumentNullException(nameof(callback));
+
+            // If a worker is available, directly dispatch the task.
+            if (m_availableWorkers.Count > 0)
+            {
+                DispatchWorker(task);
+            }
+            else
+            {
+                m_tasks.Enqueue(task);
+            }
+
+            return task;
+        }
+
+        private void DispatchWorker(Worker.Task task)
+        {
+            if (task.Canceled)
+            {
+                m_taskPool.Release(task);
+
+                return;
+            }
+
+           DispatchWorkerUniTask(task).Forget();
+        }
+
+        private async UniTaskVoid DispatchWorkerUniTask(Worker.Task task)
+        {
+            Worker worker = m_availableWorkers.Pop();
+            worker.GenerateMeshAsync(task);
+
+            do
+            {
+                await UniTask.NextFrame(this.GetCancellationTokenOnDestroy());
+            }
+            while (worker.Process() == Worker.Status.WaitingForGPUReadback);
+
+            // Only call the callback if the task hasn't been canceled.
+            if (!task.Canceled)
+            {
+                task.Callback(worker.Vertices, worker.VertexCount, 0, worker.Triangles, worker.TriangleCount, 2);
+            }
+            m_taskPool.Release(task);
+
+            if (m_availableWorkers.Count < m_numberOfWorkers)
+            {
+                m_availableWorkers.Push(worker);
+            }
+            else
+            {
+                worker.Dispose();
+            }
+        }
+
+        private class Worker : IDisposable
+        {
+            public int VertexCount { get; private set; }
+            public int TriangleCount { get; private set; }
+            public NativeArray<GPUVertex> Vertices => m_generatedVertices;
+            // In addition to the triangles, this native array also reads back the number of triangles and the number of vertices generated, i.e.
+            // two additional integers.
+            public NativeArray<int> Triangles => m_generatedTriangles;
+
+            private DualContouring m_parent;
+
+            private NativeArray<GPUVertex> m_generatedVertices;
+            private NativeArray<int> m_generatedTriangles;
+
+            private AsyncComputeBuffer m_cellVertexInfoLookupTableBuffer;
+            private AsyncComputeBuffer m_generatedVerticesBuffer0;
+            private AsyncComputeBuffer m_generatedVerticesBuffer1;
+            private AsyncComputeBuffer m_generatedTrianglesBuffer;
+
+            public Worker(DualContouring parent)
+            {
+                m_parent = parent;
+                m_parent.m_voxelConfig.VoxelVolumeConfig.OnDirtied += CreateBuffers;
+                m_parent.OnDestroyed += Dispose;
+                CreateBuffers();
+            }
+
+            public void Dispose()
+            {
+                ReleaseBuffers();
+                m_parent.m_voxelConfig.VoxelVolumeConfig.OnDirtied -= CreateBuffers;
+                m_parent.OnDestroyed -= Dispose;
+                m_parent = null;
+            }
+
+            public Status Process()
+            {
+                if (m_generatedVerticesBuffer0.IsDataAvailable() && m_generatedTrianglesBuffer.IsDataAvailable())
+                {
+                    int requestedVertexCount = m_generatedVerticesBuffer0.EndReadback();
+                    int requestedTriangleCount = m_generatedTrianglesBuffer.EndReadback();
+
+                    VertexCount = m_generatedTriangles[0];
+                    TriangleCount = 3 * m_generatedTriangles[1];
+
+                    if (requestedVertexCount < VertexCount || requestedTriangleCount < TriangleCount || m_generatedVerticesBuffer0.HasError || m_generatedTrianglesBuffer.HasError)
+                    {
+                        if (Debug.isDebugBuild && (m_generatedVerticesBuffer0.HasError || m_generatedTrianglesBuffer.HasError))
+                        {
+                            Debug.LogWarning("GPU readback error detected.");
+                        }
+                        // If we retrieved too few vertices/triangles, we need to start another readback to retrieve the correct count.
+                        m_generatedVerticesBuffer0.StartReadbackNonAlloc(ref m_generatedVertices, VertexCount);
+                        m_generatedTrianglesBuffer.StartReadbackNonAlloc(ref m_generatedTriangles, TriangleCount + 2);
+
+                        return Status.WaitingForGPUReadback;
+                    }
+
+                    return Status.Done;
+                }
+
+                return Status.WaitingForGPUReadback;
+            }
+
+            public void GenerateMeshAsync(Task task)
+            {
+                m_cellVertexInfoLookupTableBuffer.SetCounterValue(0);
+                m_generatedVerticesBuffer0.SetCounterValue(0);
+
+                m_parent.m_voxelConfig.DualContouringConfig.Compute.SetVector(ComputeShaderProperties.VoxelVolumeToWorldSpaceOffset, (Vector3)task.VoxelVolumeToWorldSpaceOffset);
+                m_parent.m_voxelConfig.DualContouringConfig.Compute.SetInt(ComputeShaderProperties.CellStride, 1);
+
+                // First we generate the inner cell vertices, i.e. all vertices which's cells do not reside on the surface of the voxel volume of this chunk.
+                m_parent.m_voxelConfig.DualContouringConfig.Compute.SetBuffer(0, ComputeShaderProperties.VoxelVolume, task.VoxelVolumeBuffer);
+                m_parent.m_voxelConfig.DualContouringConfig.Compute.SetBuffer(0, ComputeShaderProperties.CellVertexInfoLookupTable, m_cellVertexInfoLookupTableBuffer);
+                m_parent.m_voxelConfig.DualContouringConfig.Compute.SetBuffer(0, ComputeShaderProperties.GeneratedVertices0, m_generatedVerticesBuffer0);
+                m_parent.m_voxelConfig.DualContouringConfig.Compute.Dispatch(0, m_parent.m_voxelConfig.VoxelVolumeConfig.NumberOfCells - 2);
+
+                // Next we generate the desired level of detail for the previously generated vertices of this chunk.
+                // The safest way to go about level of detail is to first generate the mesh vertices at the highest lod (above dispatch call) and then merge those vertices
+                // to create a lower lod. In order to leverage the GPU's parallelism we do this iteratively, similarly to how parallel reduction works.
+                m_parent.m_voxelConfig.DualContouringConfig.Compute.SetBuffer(1, ComputeShaderProperties.CellVertexInfoLookupTable, m_cellVertexInfoLookupTableBuffer);
+
+                for (int cellStride = 2; cellStride <= (1 << task.TargetLOD); cellStride <<= 1)
+                {
+                    m_generatedVerticesBuffer1.SetCounterValue(0);
+
+                    m_parent.m_voxelConfig.DualContouringConfig.Compute.SetInt(ComputeShaderProperties.CellStride, cellStride);
+                    // We need two buffers to merge the vertices. The first buffer acts as the source and the second as the destination.
+                    m_parent.m_voxelConfig.DualContouringConfig.Compute.SetBuffer(1, ComputeShaderProperties.GeneratedVertices0, m_generatedVerticesBuffer0);
+                    m_parent.m_voxelConfig.DualContouringConfig.Compute.SetBuffer(1, ComputeShaderProperties.GeneratedVertices1, m_generatedVerticesBuffer1);
+                    m_parent.m_voxelConfig.DualContouringConfig.Compute.Dispatch(1, m_parent.m_voxelConfig.VoxelVolumeConfig.NumberOfCells / cellStride);
+
+                    // Swap the buffers, so during the next iteration the source buffer will be the previous iteration's destination buffer.
+                    (m_generatedVerticesBuffer0, m_generatedVerticesBuffer1) = (m_generatedVerticesBuffer1, m_generatedVerticesBuffer0);
+                }
+
+                // After the desired lod has been generated, we populate the outermost cells with vertices at the highest level of detail. This will ensure that no
+                // seams will be visible, resulting in a watertight mesh.
+                m_parent.m_voxelConfig.DualContouringConfig.Compute.SetBuffer(2, ComputeShaderProperties.VoxelVolume, task.VoxelVolumeBuffer);
+                m_parent.m_voxelConfig.DualContouringConfig.Compute.SetBuffer(2, ComputeShaderProperties.CellVertexInfoLookupTable, m_cellVertexInfoLookupTableBuffer);
+                m_parent.m_voxelConfig.DualContouringConfig.Compute.SetBuffer(2, ComputeShaderProperties.GeneratedVertices0, m_generatedVerticesBuffer0);
+                m_parent.m_voxelConfig.DualContouringConfig.Compute.Dispatch(2, m_parent.m_voxelConfig.VoxelVolumeConfig.NumberOfCells);
+
+                // Finally, we triangulate the vertices to form the mesh.
+                m_parent.m_voxelConfig.DualContouringConfig.Compute.SetBuffer(3, ComputeShaderProperties.VoxelVolume, task.VoxelVolumeBuffer);
+                m_parent.m_voxelConfig.DualContouringConfig.Compute.SetBuffer(3, ComputeShaderProperties.CellVertexInfoLookupTable, m_cellVertexInfoLookupTableBuffer);
+                m_parent.m_voxelConfig.DualContouringConfig.Compute.SetBuffer(3, ComputeShaderProperties.GeneratedVertices0, m_generatedVerticesBuffer0);
+                m_parent.m_voxelConfig.DualContouringConfig.Compute.SetBuffer(3, ComputeShaderProperties.GeneratedTriangles, m_generatedTrianglesBuffer);
+                m_parent.m_voxelConfig.DualContouringConfig.Compute.Dispatch(3, m_parent.m_voxelConfig.VoxelVolumeConfig.NumberOfCells - 1);
+
+                // Normally, in order to retrieve the vertices/triangles generated, you would first read the counter values of
+                // the respective compute buffers and then, in an additional readback, retrieve the vertices/triangles themselves.
+                //
+                // But this would require two readbacks and delay the updating of the mesh longer than acceptable.
+                // Instead, we copy the counter values into the beginning of the triangles buffer and then, by estimating the
+                // number of vertices/triangles we expect the compute shader to generate, retrieve the vertices/triangles.
+                // 
+                // Later on, once we receive the data from the readback, we can compare the actual number of vertices/triangles
+                // to the number of vertices/triangles we initially read based on our estimate. Two possible scenarios can occur:
+                //
+                //     1. We correctly estimated the vertex/triangle counts and got all vertices/triangles during the first readback.
+                //        Note: We don't really care if we retrieved more vertices/triangles than generated, as long as we don't
+                //              retrieve unnecessarily many too often.
+                //
+                //     2. We retrieved too few vertices/triangles. Using the actual vertex/triangle counts we need to retrieve 
+                //        the vertices/triangles again using the correct counts.
+                //
+                // So, best case equals one readback, worst case equals two readbacks, i.e. the worst case is as bad as the best case
+                // before and the best case is twice as good.
+                (int estimatedVertexCount, int estimatedTriangleCount) = EstimateVertexAndTriangleCounts(task);
+
+                // Copy the number of vertices/triangles generated into the start of the triangles buffer.
+                ComputeBuffer.CopyCount(m_generatedVerticesBuffer0, m_generatedTrianglesBuffer, 0);
+                ComputeBuffer.CopyCount(m_cellVertexInfoLookupTableBuffer, m_generatedTrianglesBuffer, sizeof(uint));
+                // Retrieve both the vertices and triangles buffer.
+                m_generatedVerticesBuffer0.StartReadbackNonAlloc(ref m_generatedVertices, estimatedVertexCount);
+                // We're adding 2 because the vertex and triangle counts are stored in the buffer as well.
+                m_generatedTrianglesBuffer.StartReadbackNonAlloc(ref m_generatedTriangles, estimatedTriangleCount + 2);
+            }
+
+            private (int, int) EstimateVertexAndTriangleCounts(Task task)
+            {
+                float factor = m_parent.m_readbackInflationFactor * math.pow(2.0f, task.TargetLOD - task.CurrentLOD);
+
+                int estimatedVertexCount = (int)math.round(factor * task.CurrentVertexCount);
+                estimatedVertexCount = math.clamp(1, estimatedVertexCount, m_generatedVertices.Length);
+
+                int estimatedTriangleCount = (int)math.round(factor * task.CurrentTriangleCount);
+                estimatedTriangleCount = math.clamp(1, estimatedTriangleCount, m_generatedTriangles.Length - 2);
+
+                return (estimatedVertexCount, estimatedTriangleCount);
+            }
+
+            private void CreateBuffers()
+            {
+                // Create CPU buffers.
+                int maxNumberOfVertices = m_parent.m_voxelConfig.VoxelVolumeConfig.CellCount;
+                int generatedVerticesCapacity = maxNumberOfVertices;
+
+                if (!m_generatedVertices.IsCreated || m_generatedVertices.Length != generatedVerticesCapacity)
+                {
+                    if (m_generatedVertices.IsCreated)
+                    {
+                        m_generatedVertices.Dispose();
+                    }
+                    m_generatedVertices = new NativeArray<GPUVertex>(generatedVerticesCapacity, Allocator.Persistent);
+                }
+
+                int maxNumberOfTriangles = 3 * 6 * (int)math.round(math.pow(m_parent.m_voxelConfig.VoxelVolumeConfig.NumberOfCellsAlongAxis - 1, 3));
+                // As mentioned, in addition to storing the triangles, this buffer will also store the number of vertices and triangles generated, i.e.
+                // two additional integers.
+                int generatedTrianglesCapacity = maxNumberOfTriangles + 2;
+
+                if (!m_generatedTriangles.IsCreated || m_generatedTriangles.Length != generatedTrianglesCapacity)
+                {
+                    if (m_generatedTriangles.IsCreated)
+                    {
+                        m_generatedTriangles.Dispose();
+                    }
+                    m_generatedTriangles = new NativeArray<int>(generatedTrianglesCapacity, Allocator.Persistent);
+                }
+
+                // Create GPU buffers.
+                if (m_cellVertexInfoLookupTableBuffer?.Count != m_parent.m_voxelConfig.VoxelVolumeConfig.CellCount)
+                {
+                    m_cellVertexInfoLookupTableBuffer?.Release();
+                    // Since we cannot declare the triangles buffer of compute buffer type "counter", we use this buffer to keep track of the number of triangles generated.
+                    m_cellVertexInfoLookupTableBuffer = new AsyncComputeBuffer(m_parent.m_voxelConfig.VoxelVolumeConfig.CellCount, sizeof(uint), ComputeBufferType.Counter);
+                }
+
+                if (m_generatedVerticesBuffer0?.Count != m_generatedVertices.Length)
+                {
+                    m_generatedVerticesBuffer0?.Release();
+                    // The counter attached to this compute buffer stores the number of vertices generated by dual contouring.
+                    m_generatedVerticesBuffer0 = new AsyncComputeBuffer(m_generatedVertices.Length, GPUVertex.SizeInBytes, ComputeBufferType.Counter);
+                }
+
+                if (m_generatedVerticesBuffer1?.Count != m_generatedVertices.Length)
+                {
+                    m_generatedVerticesBuffer1?.Release();
+                    // The counter attached to this compute buffer stores the number of vertices generated by dual contouring.
+                    m_generatedVerticesBuffer1 = new AsyncComputeBuffer(m_generatedVertices.Length, GPUVertex.SizeInBytes, ComputeBufferType.Counter);
+                }
+
+                if (m_generatedTrianglesBuffer?.Count != m_generatedTriangles.Length)
+                {
+                    m_generatedTrianglesBuffer?.Release();
+                    // To copy the counter values into the triangles buffer it needs to be of type "raw".
+                    m_generatedTrianglesBuffer = new AsyncComputeBuffer(m_generatedTriangles.Length, sizeof(uint), ComputeBufferType.Raw);
+                }
+            }
+
+            private void ReleaseBuffers()
+            {
+                // Dispose CPU buffers.
+                if (m_generatedVertices.IsCreated)
+                {
+                    if (m_generatedVerticesBuffer0.ReadbackInProgress)
+                    {
+                        m_generatedVerticesBuffer0.EndReadback();
+                    }
+                    m_generatedVertices.Dispose();
+                }
+
+                if (m_generatedTriangles.IsCreated)
+                {
+                    if (m_generatedTrianglesBuffer.ReadbackInProgress)
+                    {
+                        m_generatedTrianglesBuffer.EndReadback();
+                    }
+                    m_generatedTriangles.Dispose();
+                }
+
+                // Release GPU buffers.
+                if (m_cellVertexInfoLookupTableBuffer != null)
+                {
+                    m_cellVertexInfoLookupTableBuffer.Release();
+                    m_cellVertexInfoLookupTableBuffer = null;
+                }
+
+                if (m_generatedVerticesBuffer0 != null)
+                {
+                    m_generatedVerticesBuffer0.Release();
+                    m_generatedVerticesBuffer0 = null;
+                }
+
+                if (m_generatedVerticesBuffer1 != null)
+                {
+                    m_generatedVerticesBuffer1.Release();
+                    m_generatedVerticesBuffer1 = null;
+                }
+
+                if (m_generatedTrianglesBuffer != null)
+                {
+                    m_generatedTrianglesBuffer.Release();
+                    m_generatedTrianglesBuffer = null;
+                }
+            }
+
+            public enum Status
+            {
+                WaitingForGPUReadback,
+                Done
+            }
+
+            public class Task : IPoolable, IRequest
+            {
+                public bool Canceled { get; private set; }
+                public ComputeBuffer VoxelVolumeBuffer { get; set; }
+                public int CurrentLOD { get; set; }
+                public int TargetLOD { get; set; }
+                public int CurrentVertexCount { get; set; }
+                public int CurrentTriangleCount { get; set; }
+                public float3 VoxelVolumeToWorldSpaceOffset { get; set; }
+                public OnMeshGenerated Callback { get; set; }
+
+                public void OnAcquire() { }
+
+                public void OnRelease()
+                {
+                    VoxelVolumeBuffer = null;
+                    Callback = null;
+                    Canceled = false;
+                }
+
+                public void Cancel() => Canceled = true;
+            }
+        }
+    }
+}
+```
+
+### Assets/Scripts/Voxels/DC/DualContouringConfig.cs
+```
+﻿using System;
+using UnityEngine;
+
+namespace Tuntenfisch.Voxels.DC
+{
+    [CreateAssetMenu(fileName = "Dual Contouring Config", menuName = "Voxels/Dual Contouring Config")]
+    public class DualContouringConfig : ScriptableObject
+    {
+        public event Action OnDirtied;
+        public event Action OnLateDirtied;
+
+        // Dual contouring properties.
+        public ComputeShader Compute => m_compute;
+        public int SchmitzParticleIterations => m_schmitzParticleIterations;
+        public float SchmitzParticleStepSize => m_schmitzParticleStepSize;
+        public float SharpFeatureAngle => m_sharpFeatureAngle;
+
+        [SerializeField]
+        private ComputeShader m_compute;
+        [Range(0, 50)]
+        [SerializeField]
+        private int m_schmitzParticleIterations = 20;
+        [Range(0.0f, 0.4f)]
+        [SerializeField]
+        private float m_schmitzParticleStepSize = 0.2f;
+        [Range(0.0f, 180.0f)]
+        [SerializeField]
+        private float m_sharpFeatureAngle = 30.0f;
+
+        private void OnValidate()
+        {
+            OnDirtied?.Invoke();
+            OnLateDirtied?.Invoke();
+        }
+    }
+}
+```
+
+### Assets/Scripts/Voxels/DC/GPUVertex.cs
+```
+﻿using System.Runtime.InteropServices;
+using Tuntenfisch.Voxels.Materials;
+using Unity.Mathematics;
+using UnityEngine.Rendering;
+
+namespace Tuntenfisch.Voxels.DC
+{
+    [StructLayout(LayoutKind.Sequential)]
+    public struct GPUVertex
+    {
+        public static int SizeInBytes => s_sizeInBytes;
+        public static VertexAttributeDescriptor[] Attributes => s_attributes;
+
+        private static readonly int s_sizeInBytes = Marshal.SizeOf<GPUVertex>();
+        private static readonly VertexAttributeDescriptor[] s_attributes =
+        {
+            new VertexAttributeDescriptor(VertexAttribute.Position, VertexAttributeFormat.Float32, 3),
+            new VertexAttributeDescriptor(VertexAttribute.Normal, VertexAttributeFormat.Float16, 4),
+            new VertexAttributeDescriptor(VertexAttribute.TexCoord0, VertexAttributeFormat.UInt32, 1)
+        };
+
+        public float3 Position => m_position;
+        public half4 Normal => m_normal;
+        public MaterialIndex MaterialIndex => m_materialIndex;
+
+        private float3 m_position;
+        private half4 m_normal;
+        private readonly MaterialIndex m_materialIndex;
+    }
+}
+```
+
+### Assets/Scripts/Voxels/DC/OnMeshGenerated.cs
+```
+﻿using Unity.Collections;
+
+namespace Tuntenfisch.Voxels.DC
+{
+    public delegate void OnMeshGenerated(NativeArray<GPUVertex> vertices, int vertexCount, int vertexStartIndex, NativeArray<int> triangles, int triangleCount, int triangleStartIndex);
+}
+```
+
+### Assets/Scripts/Voxels/Materials/MaterialConfig.cs
+```
+﻿using System;
+using System.Collections.Generic;
+using System.Linq;
+using Tuntenfisch.Generics;
+#if UNITY_EDITOR
+using UnityEditor;
+#endif
+using UnityEngine;
+
+namespace Tuntenfisch.Voxels.Materials
+{
+    [CreateAssetMenu(fileName = "Material Config", menuName = "Voxels/Material Config")]
+    public class MaterialConfig : ManagedScriptableObject
+    {
+        public event Action OnDirtied;
+        public event Action OnLateDirtied;
+
+        public Material RenderMaterial => m_renderMaterial;
+        public List<MaterialInfo> MaterialInfos => m_materialInfos;
+
+        [SerializeField]
+        private Material m_renderMaterial;
+        [SerializeField]
+        private List<MaterialInfo> m_materialInfos;
+
+        private void OnValidate()
+        {
+            if (!Application.isPlaying)
+            {
+                return;
+            }
+
+            ApplyMaterialConfig();
+
+            OnDirtied?.Invoke();
+            OnLateDirtied?.Invoke();
+        }
+
+        protected override void OnScriptableObjectAwake() => ApplyMaterialConfig();
+
+        protected override void OnScriptableObjectDestroy() { }
+
+        private void ApplyMaterialConfig()
+        {
+            Shader.SetGlobalTexture(ShaderProperties.MaterialAlbedoTextures, CreateTexture2DArray(MaterialInfos.Select((MaterialInfo materialInfo) => materialInfo.AlbedoTexture)));
+            Shader.SetGlobalTexture(ShaderProperties.MaterialNormalTextures, CreateTexture2DArray(MaterialInfos.Select((MaterialInfo materialInfo) => materialInfo.NormalTexture)));
+            Shader.SetGlobalTexture(ShaderProperties.MaterialMOHSTextures, CreateTexture2DArray(MaterialInfos.Select((MaterialInfo materialInfo) => materialInfo.MOHSTexture)));
+        }
+
+        private Texture2DArray CreateTexture2DArray(IEnumerable<Texture2D> textures)
+        {
+            // The dimensions should be the same across all types of textures.
+            Texture2DArray textureArray = new Texture2DArray(textures.First().width, textures.First().height, MaterialInfos.Count, textures.First().format, true);
+
+            foreach ((Texture2D texture, int index) iterator in textures.Select((texture, index) => (texture, index)))
+            {
+#if UNITY_EDITOR
+                if (!iterator.texture.isReadable)
+                {
+                    Debug.LogWarning($"Please enable read/write for \"{AssetDatabase.GetAssetPath(iterator.texture)}\"! Otherwise material visuals won't display properly in standalone build.");
+                }
+#endif
+                Graphics.CopyTexture(iterator.texture, 0, textureArray, iterator.index);
+            }
+            textureArray.Apply(false);
+
+            return textureArray;
+        }
+    }
+}
+```
+
+### Assets/Scripts/Voxels/Materials/MaterialIndex.cs
+```
+﻿namespace Tuntenfisch.Voxels.Materials
+{
+    public enum MaterialIndex
+    {
+        Dirt = 0,
+        Rock = 1,
+        Sand = 2,
+        Grass = 3
+    }
+}
+```
+
+### Assets/Scripts/Voxels/Materials/MaterialInfo.cs
+```
+﻿using System;
+using UnityEngine;
+
+namespace Tuntenfisch.Voxels.Materials
+{
+    [Serializable]
+    public class MaterialInfo
+    {
+        public Texture2D AlbedoTexture => m_albedoTexture;
+        public Texture2D NormalTexture => m_normalTexture;
+        public Texture2D MOHSTexture => m_mohsTexture;
+
+        [SerializeField]
+        private Texture2D m_albedoTexture;
+        [SerializeField]
+        private Texture2D m_normalTexture;
+        [SerializeField]
+        private Texture2D m_mohsTexture;
+    }
+}
+```
+
+### Assets/Scripts/Voxels/Noise/GPUNoiseParameters.cs
+```
+﻿using System;
+using System.Runtime.InteropServices;
+using Unity.Mathematics;
+using UnityEngine;
+
+namespace Tuntenfisch.Voxels.Procedural
+{
+    [Serializable]
+    [StructLayout(LayoutKind.Sequential)]
+    public struct GPUNoiseParameters
+    {
+        public static int SizeInBytes => s_sizeInBytes;
+
+        private static readonly int s_sizeInBytes = Marshal.SizeOf<GPUNoiseParameters>();
+
+        [Header("General")]
+        [SerializeField]
+        private int m_seed;
+        [SerializeField]
+        private NoiseAxes m_noiseAxes;
+        [SerializeField]
+        private NoiseType m_noiseType;
+
+        [Header("Fractional Brownian Motion")]
+        [Range(1, 32)]
+        [SerializeField]
+        private int m_numberOfOctaves;
+        [Min(1.0f)]
+        [SerializeField]
+        private float m_initialAmplitude;
+        [SerializeField]
+        private float3 m_initialFrequency;
+        [Range(0.0f, 2.0f)]
+        [SerializeField]
+        private float m_persistence;
+        [SerializeField]
+        private float3 m_lacunarity;
+    }
+}
+```
+
+### Assets/Scripts/Voxels/Noise/NoiseAxes.cs
+```
+﻿namespace Tuntenfisch.Voxels.Procedural
+{
+    public enum NoiseAxes
+    {
+        XZ = 0,
+        XYZ = 1
+    }
+}
+```
+
+### Assets/Scripts/Voxels/Noise/NoiseType.cs
+```
+﻿namespace Tuntenfisch.Voxels.Procedural
+{
+    public enum NoiseType
+    {
+        Default = 0,
+        Billow = 1,
+        Ridge = 2
+    }
+}
+```
+
+### Assets/Scripts/Voxels/Procedural/CSGOperationNode.cs
+```
+﻿using Tuntenfisch.Voxels.CSG;
+using Unity.Mathematics;
+using UnityEngine;
+using Tuntenfisch.Attributes;
+
+namespace Tuntenfisch.Voxels.Procedural
+{
+    [CreateNodeMenu("Generation Nodes/CSG Operation", order = (int)NodeType.CSGOperation)]
+    [NodeTint(c_internalNodeColor)]
+    public class CSGOperationNode : GenerationGraphNode
+    {
+        public GPUCSGOperator CSGOperator => m_csgOperator;
+
+        [Input(backingValue = ShowBackingValue.Never, connectionType = ConnectionType.Override, typeConstraint = TypeConstraint.Strict)]
+        [SerializeField]
+        private float3 m_voxelA;
+
+        [Input(backingValue = ShowBackingValue.Never, connectionType = ConnectionType.Override, typeConstraint = TypeConstraint.Strict)]
+        [SerializeField]
+        private float3 m_voxelB;
+
+        [Output(backingValue = ShowBackingValue.Never, connectionType = ConnectionType.Override, typeConstraint = TypeConstraint.Strict)]
+        [SerializeField]
+        private float3 m_voxel;
+
+        [InlineField]
+        [SerializeField]
+        private GPUCSGOperator m_csgOperator;
+
+        public override NodeType GetNodeType() => NodeType.CSGOperation;
+    }
+}
+```
+
+### Assets/Scripts/Voxels/Procedural/CSGPrimitiveNode.cs
+```
+﻿using Tuntenfisch.Attributes;
+using Tuntenfisch.Voxels.CSG;
+using Unity.Mathematics;
+using UnityEngine;
+
+namespace Tuntenfisch.Voxels.Procedural
+{
+    [CreateNodeMenu("Generation Nodes/CSG Primitive", order = (int)NodeType.CSGPrimitive)]
+    [NodeTint(c_internalNodeColor)]
+    public class CSGPrimitiveNode : GenerationGraphNode
+    {
+        public GPUCSGPrimitive CSGPrimitive => m_csgPrimitive;
+
+        [Input(backingValue = ShowBackingValue.Never, connectionType = ConnectionType.Override, typeConstraint = TypeConstraint.Strict)]
+        [SerializeField]
+        private float m_position;
+
+        [Output(backingValue = ShowBackingValue.Never, connectionType = ConnectionType.Override, typeConstraint = TypeConstraint.Strict)]
+        [SerializeField]
+        private float2 m_voxel;
+
+        [InlineField]
+        [SerializeField]
+        private GPUCSGPrimitive m_csgPrimitive;
+
+        public override NodeType GetNodeType() => NodeType.CSGPrimitive;
+    }
+}
+```
+
+### Assets/Scripts/Voxels/Procedural/DomainWarpNode.cs
+```
+﻿using Tuntenfisch.Attributes;
+using UnityEngine;
+
+namespace Tuntenfisch.Voxels.Procedural
+{
+    [CreateNodeMenu("Generation Nodes/Domain Warp", order = (int)NodeType.DomainWarp)]
+    [NodeWidth(272)]
+    [NodeTint(c_internalNodeColor)]
+    public class DomainWarpNode : GenerationGraphNode
+    {
+        public GPUNoiseParameters NoiseParameters => m_noiseParameters;
+
+        [Input(backingValue = ShowBackingValue.Never, connectionType = ConnectionType.Override, typeConstraint = TypeConstraint.Strict)]
+        [SerializeField]
+        private float m_position;
+
+        [Output(backingValue = ShowBackingValue.Never, connectionType = ConnectionType.Override, typeConstraint = TypeConstraint.Strict)]
+        [SerializeField]
+        private float m_warpedPosition;
+
+        [InlineField]
+        [SerializeField]
+        private GPUNoiseParameters m_noiseParameters;
+
+        public override NodeType GetNodeType() => NodeType.DomainWarp;
+    }
+}
+```
+
+### Assets/Scripts/Voxels/Procedural/GPUGenerationGraphNode.cs
+```
+﻿using System;
+using System.Runtime.InteropServices;
+using Tuntenfisch.Voxels.CSG;
+using Tuntenfisch.Voxels.Materials;
+using UnityEngine;
+
+namespace Tuntenfisch.Voxels.Procedural
+{
+    [Serializable]
+    [StructLayout(LayoutKind.Sequential)]
+    public struct GPUGenerationGraphNode
+    {
+        public static int SizeInBytes => s_sizeInBytes;
+
+        public NodeType NodeType => m_nodeType;
+        public Matrix4x4 TransformMatrix => m_transformMatrix;
+        public GPUNoiseParameters NoiseParameters => m_noiseParameters;
+        public GPUCSGPrimitive CSGPrimitive => m_csgPrimitive;
+        public GPUCSGOperator CSGOperator => m_csgOperator;
+
+        private readonly static int s_sizeInBytes = Marshal.SizeOf<GPUGenerationGraphNode>();
+
+        [SerializeField]
+        private NodeType m_nodeType;
+        [SerializeField]
+        private Matrix4x4 m_transformMatrix;
+        [SerializeField]
+        private GPUNoiseParameters m_noiseParameters;
+        [SerializeField]
+        private GPUCSGPrimitive m_csgPrimitive;
+        [SerializeField]
+        private MaterialIndex m_materialIndex;
+        [SerializeField]
+        private GPUCSGOperator m_csgOperator;
+
+        public GPUGenerationGraphNode(NodeType nodeType, Matrix4x4 transformMatrix, GPUNoiseParameters noiseParameters, GPUCSGPrimitive csgPrimitive, MaterialIndex materialIndex, GPUCSGOperator csgOperator)
+        {
+            m_nodeType = nodeType;
+            m_transformMatrix = transformMatrix;
+            m_noiseParameters = noiseParameters;
+            m_csgPrimitive = csgPrimitive;
+            m_materialIndex = materialIndex;
+            m_csgOperator = csgOperator;
+        }
+    }
+}
+```
+
+### Assets/Scripts/Voxels/Procedural/GenerationGraph.cs
+```
+﻿using System;
+using System.Collections.Generic;
+using System.Linq;
+using Tuntenfisch.Voxels.CSG;
+using Tuntenfisch.Voxels.Materials;
+using UnityEngine;
+using UnityEngine.Assertions;
+using XNode;
+
+namespace Tuntenfisch.Voxels.Procedural
+{
+    [CreateAssetMenu(fileName = "Generation Graph", menuName = "Voxels/Generation Graph")]
+    public class GenerationGraph : NodeGraph
+    {
+        public event Action OnDirtied;
+        public event Action OnLateDirtied;
+
+        public List<GPUGenerationGraphNode> Nodes => m_nodes;
+
+        [SerializeField]
+        private List<GPUGenerationGraphNode> m_nodes;
+
+        public void Rebuild()
+        {
+            int outputNodeIndex = GetOutputNodeIndex();
+
+            Assert.IsTrue(outputNodeIndex != -1, "Invalid noise graph: Output node is missing.");
+
+            m_nodes ??= new List<GPUGenerationGraphNode>();
+            m_nodes.Clear();
+
+            foreach (GenerationGraphNode node in IterateOverGraphInPreorder((GenerationGraphNode)nodes[outputNodeIndex]))
+            {
+                Matrix4x4 transformMatrix = Matrix4x4.identity;
+                GPUNoiseParameters noiseParameters = new GPUNoiseParameters();
+                GPUCSGPrimitive csgPrimitive = new GPUCSGPrimitive();
+                MaterialIndex materialIndex = default;
+                GPUCSGOperator csgOperator = new GPUCSGOperator();
+
+                switch (node.GetNodeType())
+                {
+                    case NodeType.Transform:
+                        TransformNode transformNode = (TransformNode)node;
+                        transformMatrix = transformNode.TransformMatrix;
+                        break;
+
+                    case NodeType.DomainWarp:
+                        DomainWarpNode domainWarpNode = (DomainWarpNode)node;
+                        noiseParameters = domainWarpNode.NoiseParameters;
+                        break;
+
+                    case NodeType.Noise:
+                        NoiseNode noiseNode = (NoiseNode)node;
+                        noiseParameters = noiseNode.NoiseParameters;
+                        break;
+
+                    case NodeType.CSGPrimitive:
+                        CSGPrimitiveNode csgPrimitiveNode = (CSGPrimitiveNode)node;
+                        csgPrimitive = csgPrimitiveNode.CSGPrimitive;
+                        break;
+
+                    case NodeType.Material:
+                        MaterialNode materialNode = (MaterialNode)node;
+                        materialIndex = materialNode.MaterialIndex;
+                        break;
+
+                    case NodeType.CSGOperation:
+                        CSGOperationNode csgOperationNode = (CSGOperationNode)node;
+                        csgOperator = csgOperationNode.CSGOperator;
+                        break;
+                }
+                m_nodes.Add(new GPUGenerationGraphNode(node.GetNodeType(), transformMatrix, noiseParameters, csgPrimitive, materialIndex, csgOperator));
+            }
+            OnDirtied?.Invoke();
+            OnLateDirtied?.Invoke();
+        }
+
+        private IEnumerable<GenerationGraphNode> IterateOverGraphInPreorder(GenerationGraphNode node)
+        {
+            if (node.GetNodeType() == NodeType.Position)
+            {
+                return Enumerable.Repeat(node, 1);
+            }
+            else
+            {
+                NodePort[] inputs = node.Inputs.ToArray();
+
+                IEnumerable<GenerationGraphNode> leftNodes = Enumerable.Empty<GenerationGraphNode>();
+                IEnumerable<GenerationGraphNode> rightNodes = Enumerable.Empty<GenerationGraphNode>();
+
+                if (inputs.Length > 0)
+                {
+                    leftNodes = IterateOverGraphInPreorder((GenerationGraphNode)inputs[0].Connection.node);
+                }
+
+                if (inputs.Length > 1)
+                {
+                    rightNodes = IterateOverGraphInPreorder((GenerationGraphNode)inputs[1].Connection.node);
+                }
+
+                return Enumerable.Concat(Enumerable.Concat(leftNodes, rightNodes), Enumerable.Repeat(node, 1));
+            }
+        }
+
+        private int GetOutputNodeIndex() => nodes.FindIndex((node) => ((GenerationGraphNode)node).GetNodeType() == NodeType.Output);
+    }
+}
+```
+
+### Assets/Scripts/Voxels/Procedural/GenerationGraphNode.cs
+```
+﻿using XNode;
+
+namespace Tuntenfisch.Voxels.Procedural
+{
+    public abstract class GenerationGraphNode : Node
+    {
+        protected const string c_leafNodeColor = "#B84747";
+        protected const string c_internalNodeColor = "#474747";
+        protected const string c_rootNodeColor = "#478C47";
+
+        public override object GetValue(NodePort port)
+        {
+            return null;
+        }
+
+        public abstract NodeType GetNodeType();
+    }
+}
+```
+
+### Assets/Scripts/Voxels/Procedural/MaterialNode.cs
+```
+﻿using Tuntenfisch.Voxels.Materials;
+using Unity.Mathematics;
+using UnityEngine;
+
+namespace Tuntenfisch.Voxels.Procedural
+{
+    [CreateNodeMenu("Generation Nodes/Material", order = (int)NodeType.Material)]
+    [NodeTint(c_internalNodeColor)]
+    public class MaterialNode : GenerationGraphNode
+    {
+        public MaterialIndex MaterialIndex => m_materialIndex;
+
+        [Input(backingValue = ShowBackingValue.Never, connectionType = ConnectionType.Override, typeConstraint = TypeConstraint.Strict)]
+        [SerializeField]
+        private float2 m_valueAndGradient;
+
+        [Output(backingValue = ShowBackingValue.Never, connectionType = ConnectionType.Override, typeConstraint = TypeConstraint.Strict)]
+        [SerializeField]
+        private float3 m_voxel;
+
+        [SerializeField]
+        private MaterialIndex m_materialIndex;
+
+        public override NodeType GetNodeType() => NodeType.Material;
+    }
+}
+```
+
+### Assets/Scripts/Voxels/Procedural/NodeType.cs
+```
+﻿namespace Tuntenfisch.Voxels.Procedural
+{
+
+    public enum NodeType
+    {
+        Position = 0,
+        Transform = 1,
+        DomainWarp = 2,
+        Noise = 3,
+        CSGPrimitive = 4,
+        Material = 5,
+        CSGOperation = 6,
+        Output = 7
+    }
+}
+```
+
+### Assets/Scripts/Voxels/Procedural/NoiseNode.cs
+```
+﻿using Tuntenfisch.Attributes;
+using Unity.Mathematics;
+using UnityEngine;
+
+namespace Tuntenfisch.Voxels.Procedural
+{
+    [CreateNodeMenu("Generation Nodes/Noise", order = (int)NodeType.Noise)]
+    [NodeWidth(272)]
+    [NodeTint(c_internalNodeColor)]
+    public class NoiseNode : GenerationGraphNode
+    {
+        public GPUNoiseParameters NoiseParameters => m_noiseParameters;
+
+        [Input(backingValue = ShowBackingValue.Never, connectionType = ConnectionType.Override, typeConstraint = TypeConstraint.Strict)]
+        [SerializeField]
+        private float m_position;
+
+        [Output(backingValue = ShowBackingValue.Never, connectionType = ConnectionType.Override, typeConstraint = TypeConstraint.Strict)]
+        [SerializeField]
+        private float2 m_valueAndGradient;
+
+        [InlineField]
+        [SerializeField]
+        private GPUNoiseParameters m_noiseParameters;
+
+        public override NodeType GetNodeType() => NodeType.Noise;
+    }
+}
+```
+
+### Assets/Scripts/Voxels/Procedural/OutputNode.cs
+```
+﻿using Unity.Mathematics;
+using UnityEngine;
+
+namespace Tuntenfisch.Voxels.Procedural
+{
+    [CreateNodeMenu("Generation Nodes/Output", order = (int)NodeType.Output)]
+    [DisallowMultipleNodes]
+    [NodeTint(c_rootNodeColor)]
+    public class OutputNode : GenerationGraphNode
+    {
+        [Input(backingValue = ShowBackingValue.Never, connectionType = ConnectionType.Override, typeConstraint = TypeConstraint.Strict)]
+        [SerializeField]
+        private float3 m_voxel;
+
+        public override NodeType GetNodeType() => NodeType.Output;
+    }
+}
+```
+
+### Assets/Scripts/Voxels/Procedural/PositionNode.cs
+```
+﻿using UnityEngine;
+
+namespace Tuntenfisch.Voxels.Procedural
+{
+    [CreateNodeMenu("Generation Nodes/Position", order = (int)NodeType.Position)]
+    [NodeTint(c_leafNodeColor)]
+    public class PositionNode : GenerationGraphNode
+    {
+        [Output(backingValue = ShowBackingValue.Never, connectionType = ConnectionType.Override, typeConstraint = TypeConstraint.Strict)]
+        [SerializeField]
+        private float m_position;
+
+        public override NodeType GetNodeType() => NodeType.Position;
+    }
+}
+```
+
+### Assets/Scripts/Voxels/Procedural/TransformNode.cs
+```
+﻿using Unity.Mathematics;
+using UnityEngine;
+
+namespace Tuntenfisch.Voxels.Procedural
+{
+    [CreateNodeMenu("Generation Nodes/Transform", order = (int)NodeType.Transform)]
+    [NodeTint(c_internalNodeColor)]
+    public class TransformNode : GenerationGraphNode
+    {
+        public Matrix4x4 TransformMatrix
+        {
+            get
+            {
+                Matrix4x4 matrix = Matrix4x4.TRS(m_translation, Quaternion.Euler(m_rotation.x, m_rotation.y, m_rotation.z), m_scale);
+
+                return m_invert ? matrix.inverse : matrix;
+            }
+        }
+
+        [Input(backingValue = ShowBackingValue.Never, connectionType = ConnectionType.Override, typeConstraint = TypeConstraint.Strict)]
+        [SerializeField]
+        private float m_position;
+
+        [Output(backingValue = ShowBackingValue.Never, connectionType = ConnectionType.Override, typeConstraint = TypeConstraint.Strict)]
+        [SerializeField]
+        private float m_transformedPosition;
+
+        [SerializeField]
+        private float3 m_translation;
+        [SerializeField]
+        private float3 m_rotation;
+        [SerializeField]
+        private float3 m_scale;
+        [SerializeField]
+        private bool m_invert;
+
+        public override NodeType GetNodeType() => NodeType.Transform;
+    }
+}
+```
+
+### Assets/Scripts/Voxels/Volume/GPUVoxelVolumeCSGOperation.cs
+```
+﻿using System;
+using System.Runtime.InteropServices;
+using Tuntenfisch.Voxels.CSG;
+using Tuntenfisch.Voxels.Materials;
+using UnityEngine;
+
+namespace Tuntenfisch.Voxels.Volume
+{
+    [Serializable]
+    [StructLayout(LayoutKind.Sequential)]
+    public struct GPUVoxelVolumeCSGOperation
+    {
+        public static int SizeInBytes => s_sizeInBytes;
+
+        public GPUCSGOperator CSGOperator => m_csgOperator;
+        public GPUCSGPrimitive CSGPrimitive => m_csgPrimitive;
+        public MaterialIndex MaterialIndex => m_materialIndex;
+        public Matrix4x4 TransformMatrix => m_transformMatrix;
+
+        private readonly static int s_sizeInBytes = Marshal.SizeOf<GPUVoxelVolumeCSGOperation>();
+
+        [SerializeField]
+        private GPUCSGOperator m_csgOperator;
+        [SerializeField]
+        private GPUCSGPrimitive m_csgPrimitive;
+        [SerializeField]
+        private readonly MaterialIndex m_materialIndex;
+        [SerializeField]
+        private Matrix4x4 m_transformMatrix;
+
+
+        public GPUVoxelVolumeCSGOperation(GPUCSGOperator csgOperator, GPUCSGPrimitive csgPrimitive, MaterialIndex materialIndex, Matrix4x4 transformMatrix)
+        {
+            m_csgOperator = csgOperator;
+            m_csgPrimitive = csgPrimitive;
+            m_materialIndex = materialIndex;
+            m_transformMatrix = transformMatrix;
+        }
+    }
+}
+```
+
+### Assets/Scripts/Voxels/Volume/VoxelVolume.cs
+```
+﻿using System;
+using System.Collections.Generic;
+using Tuntenfisch.Extensions;
+using Tuntenfisch.Voxels.Procedural;
+using Unity.Mathematics;
+using UnityEngine;
+
+namespace Tuntenfisch.Voxels.Volume
+{
+    [RequireComponent(typeof(VoxelConfig))]
+    public class VoxelVolume : MonoBehaviour
+    {
+        [SerializeField]
+        private int m_voxelVolumeCSGOperationsBufferCapacity = 10;
+
+        private VoxelConfig m_voxelConfig;
+        private ComputeBuffer m_generationGraphNodesBuffer;
+        private ComputeBuffer m_voxelVolumeCSGOperationsBuffer;
+
+        private void Awake()
+        {
+            m_voxelConfig = GetComponent<VoxelConfig>();
+            m_voxelConfig.GenerationGraph.OnDirtied += ApplyGenerationGraph;
+            ApplyGenerationGraph();
+        }
+
+        private void OnDestroy()
+        {
+            m_voxelConfig.GenerationGraph.OnDirtied -= ApplyGenerationGraph;
+            ReleaseBuffers();
+        }
+
+        private void OnValidate()
+        {
+            if (Application.isPlaying && gameObject.activeSelf && m_voxelConfig != null)
+            {
+                CreateBuffers();
+            }
+        }
+
+        public void GenerateVoxelVolume(ComputeBuffer voxelVolumeBuffer, float3 worldPosition)
+        {
+            if (voxelVolumeBuffer == null)
+            {
+                throw new ArgumentNullException(nameof(voxelVolumeBuffer));
+            }
+
+            m_voxelConfig.VoxelVolumeConfig.Compute.SetVector(ComputeShaderProperties.VoxelVolumeToWorldSpaceOffset, (Vector3)worldPosition);
+            m_voxelConfig.VoxelVolumeConfig.Compute.SetBuffer(0, ComputeShaderProperties.VoxelVolume, voxelVolumeBuffer);
+            m_voxelConfig.VoxelVolumeConfig.Compute.Dispatch(0, m_voxelConfig.VoxelVolumeConfig.NumberOfVoxels);
+        }
+
+        public void ApplyVoxelVolumeCSGOperations(ComputeBuffer voxelVolumeBuffer, float3 worldPosition, List<GPUVoxelVolumeCSGOperation> voxelVolumeCSGOperations)
+        {
+            if (voxelVolumeBuffer == null)
+            {
+                throw new ArgumentNullException(nameof(voxelVolumeBuffer));
+            }
+
+            if (voxelVolumeCSGOperations == null)
+            {
+                throw new ArgumentNullException(nameof(voxelVolumeCSGOperations));
+            }
+
+            m_voxelConfig.VoxelVolumeConfig.Compute.SetVector(ComputeShaderProperties.VoxelVolumeToWorldSpaceOffset, (Vector3)worldPosition);
+            m_voxelConfig.VoxelVolumeConfig.Compute.SetBuffer(1, ComputeShaderProperties.VoxelVolume, voxelVolumeBuffer);
+
+            for (int index = 0; index < voxelVolumeCSGOperations.Count;)
+            {
+                int stride = math.min(m_voxelVolumeCSGOperationsBuffer.count, voxelVolumeCSGOperations.Count - index);
+
+                m_voxelVolumeCSGOperationsBuffer.SetData(voxelVolumeCSGOperations, index, 0, stride);
+                m_voxelConfig.VoxelVolumeConfig.Compute.SetInt(ComputeShaderProperties.NumberOfVoxelVolumeCSGOperations, stride);
+                m_voxelConfig.VoxelVolumeConfig.Compute.SetBuffer(1, ComputeShaderProperties.VoxelVolumeCSGOperations, m_voxelVolumeCSGOperationsBuffer);
+                m_voxelConfig.VoxelVolumeConfig.Compute.Dispatch(1, m_voxelConfig.VoxelVolumeConfig.NumberOfVoxels);
+
+                index += stride; 
+            }
+        }
+
+        private void CreateBuffers()
+        {
+            if (m_generationGraphNodesBuffer == null || m_generationGraphNodesBuffer.count != m_voxelConfig.GenerationGraph.Nodes.Count)
+            {
+                m_generationGraphNodesBuffer?.Release();
+                m_generationGraphNodesBuffer = new ComputeBuffer(math.max(m_voxelConfig.GenerationGraph.Nodes.Count, 1), GPUGenerationGraphNode.SizeInBytes);
+            }
+
+            if (m_voxelVolumeCSGOperationsBuffer == null || m_voxelVolumeCSGOperationsBuffer.count != m_voxelVolumeCSGOperationsBufferCapacity)
+            {
+                m_voxelVolumeCSGOperationsBuffer?.Release();
+                m_voxelVolumeCSGOperationsBuffer = new ComputeBuffer(m_voxelVolumeCSGOperationsBufferCapacity, GPUVoxelVolumeCSGOperation.SizeInBytes);
+            }
+        }
+
+        private void ReleaseBuffers()
+        {
+            if (m_generationGraphNodesBuffer != null)
+            {
+                m_generationGraphNodesBuffer.Release();
+                m_generationGraphNodesBuffer = null;
+            }
+
+            if (m_voxelVolumeCSGOperationsBuffer != null)
+            {
+                m_voxelVolumeCSGOperationsBuffer.Release();
+                m_voxelVolumeCSGOperationsBuffer = null;
+            }
+        }
+
+        private void ApplyGenerationGraph()
+        {
+            CreateBuffers();
+
+            m_generationGraphNodesBuffer.SetData(m_voxelConfig.GenerationGraph.Nodes);
+            m_voxelConfig.VoxelVolumeConfig.Compute.SetInt(ComputeShaderProperties.NumberOfGenerationGraphNodes, m_voxelConfig.GenerationGraph.Nodes.Count);
+            m_voxelConfig.VoxelVolumeConfig.Compute.SetBuffer(0, ComputeShaderProperties.GenerationGraphNodes, m_generationGraphNodesBuffer);
+        }
+    }
+}
+```
+
+### Assets/Scripts/Voxels/Volume/VoxelVolumeConfig.cs
+```
+﻿using System;
+using Unity.Mathematics;
+using UnityEngine;
+
+namespace Tuntenfisch.Voxels.Volume
+{
+    [CreateAssetMenu(fileName = "Voxel Volume Config", menuName = "Voxels/Voxel Volume Config")]
+    public class VoxelVolumeConfig : ScriptableObject
+    {
+        public event Action OnDirtied;
+        public event Action OnLateDirtied;
+
+        // Voxel volume properties.
+        public ComputeShader Compute => m_compute;
+        public int NumberOfVoxelsAlongAxis => m_numberOfVoxelsAlongAxis;
+        public int NumberOfCellsAlongAxis => NumberOfVoxelsAlongAxis - 1;
+        public int VoxelCount => NumberOfVoxelsAlongAxis * NumberOfVoxelsAlongAxis * NumberOfVoxelsAlongAxis;
+        public int CellCount => NumberOfCellsAlongAxis * NumberOfCellsAlongAxis * NumberOfCellsAlongAxis;
+        public int3 NumberOfVoxels => new int3(NumberOfVoxelsAlongAxis, NumberOfVoxelsAlongAxis, NumberOfVoxelsAlongAxis);
+        public int3 NumberOfCells => new int3(NumberOfCellsAlongAxis, NumberOfCellsAlongAxis, NumberOfCellsAlongAxis);
+        public float3 VoxelVolumeDimensions => VoxelSpacing * (float3)NumberOfCells;
+        public float VoxelSpacing => m_voxelSpacing;
+
+        [SerializeField]
+        private ComputeShader m_compute;
+        [Range(67, 131)]
+        [SerializeField]
+        private int m_numberOfVoxelsAlongAxis = 67;
+        [Min(0.25f)]
+        [SerializeField]
+        private float m_voxelSpacing = 1.0f;
+
+        private void OnValidate()
+        {
+            m_numberOfVoxelsAlongAxis = Mathf.ClosestPowerOfTwo(m_numberOfVoxelsAlongAxis) + 3;
+
+            OnDirtied?.Invoke();
+            OnLateDirtied?.Invoke();
+        }
+    }
+}
+```
+
+### Assets/Scripts/World/Editor/WorldManagerEditor.cs
+```
+using Tuntenfisch.Editor;
+using Unity.Mathematics;
+using UnityEditor;
+
+namespace Tuntenfisch.World.Editor
+{
+    [CanEditMultipleObjects]
+    [CustomEditor(typeof(WorldManager))]
+    public class WorldManagerEditor : BaseEditor
+    {
+        private static int MaxNumberOfLods => 5;
+
+        private static bool s_showWorldOptions = true;
+        private static bool s_showChunkOptions = true;
+        private static bool s_showLevelOfDetailOptions = true;
+
+        private SerializedProperty m_viewer;
+        private SerializedProperty m_updateInterval;
+        private SerializedProperty m_chunkPrefab;
+        private SerializedProperty m_initialChunkPoolPopulation;
+        private SerializedProperty m_lodDistances;
+
+        private void OnEnable()
+        {
+            m_viewer = serializedObject.FindProperty(nameof(m_viewer));
+            m_updateInterval = serializedObject.FindProperty(nameof(m_updateInterval));
+            m_chunkPrefab = serializedObject.FindProperty(nameof(m_chunkPrefab));
+            m_initialChunkPoolPopulation = serializedObject.FindProperty(nameof(m_initialChunkPoolPopulation));
+            m_lodDistances = serializedObject.FindProperty(nameof(m_lodDistances));
+        }
+
+        public override void OnInspectorGUI()
+        {
+            serializedObject.Update();
+
+            DisplayScriptHeader();
+
+            if (s_showWorldOptions = EditorGUILayout.BeginFoldoutHeaderGroup(s_showWorldOptions, "World"))
+            {
+
+                EditorGUILayout.ObjectField(m_viewer);
+                m_updateInterval.floatValue = math.max(EditorGUILayout.FloatField(ObjectNames.NicifyVariableName(nameof(m_updateInterval)), m_updateInterval.floatValue), 0.0f);
+            }
+            EditorGUILayout.EndFoldoutHeaderGroup();
+
+            if (s_showChunkOptions = EditorGUILayout.BeginFoldoutHeaderGroup(s_showChunkOptions, "Chunk"))
+            {
+                EditorGUILayout.ObjectField(m_chunkPrefab);
+                m_initialChunkPoolPopulation.intValue = math.max(EditorGUILayout.IntField(ObjectNames.NicifyVariableName(nameof(m_initialChunkPoolPopulation)), m_initialChunkPoolPopulation.intValue), 0);
+            }
+            EditorGUILayout.EndFoldoutHeaderGroup();
+
+            if (s_showLevelOfDetailOptions = EditorGUILayout.BeginFoldoutHeaderGroup(s_showLevelOfDetailOptions, "Level Of Detail"))
+            {
+                int lods = EditorGUILayout.IntSlider("Levels Of Detail", m_lodDistances.arraySize, 1, MaxNumberOfLods);
+
+                if (m_lodDistances.arraySize != lods)
+                {
+                    m_lodDistances.arraySize = lods;
+                }
+
+                EditorGUILayout.BeginVertical(EditorStyles.helpBox);
+                EditorGUILayout.LabelField("Distances", EditorStyles.boldLabel);
+                SerializedProperty lodDistance;
+                float minValue = 0.0f;
+                float maxValue;
+
+                for (int index = 0; index < lods - 1; index++)
+                {
+                    maxValue = m_lodDistances.GetArrayElementAtIndex(index + 1).floatValue;
+                    lodDistance = m_lodDistances.GetArrayElementAtIndex(index);
+                    lodDistance.floatValue = EditorGUILayout.Slider($"Level Of Detail {index}", lodDistance.floatValue, 0.0f, m_lodDistances.GetArrayElementAtIndex(lods - 1).floatValue);
+                    lodDistance.floatValue = math.clamp(lodDistance.floatValue, minValue, maxValue);
+                    minValue = lodDistance.floatValue;
+                }
+                lodDistance = m_lodDistances.GetArrayElementAtIndex(lods - 1);
+                lodDistance.floatValue = math.max(EditorGUILayout.FloatField($"Level Of Detail {lods - 1}", lodDistance.floatValue), minValue);
+                EditorGUILayout.EndVertical();
+            }
+            EditorGUILayout.EndFoldoutHeaderGroup();
+
+            serializedObject.ApplyModifiedProperties();
+        }
+    }
+}
+```
+
+### Assets/Shaders/Voxels/Include/DepthNormalsPass.hlsl
+```
+#ifndef TUNTENFISCH_VOXELS_DEPTH_ONLY_PASS
+#define TUNTENFISCH_VOXELS_DEPTH_ONLY_PASS
+
+#include "Packages/com.unity.render-pipelines.universal/ShaderLibrary/Core.hlsl"
+
+struct VertexPassInput
+{
+    float4 positionOS : POSITION;
+    float3 normal : NORMAL;
+};
+
+struct FragmentPassInput
+{
+    float4 positionCS : SV_POSITION;
+    float3 normalWS : TEXCOORD2;
+};
+
+FragmentPassInput DepthNormalsVertex(VertexPassInput input)
+{
+    FragmentPassInput output;
+    output.positionCS = TransformObjectToHClip(input.positionOS.xyz);
+    VertexNormalInputs normalInput = GetVertexNormalInputs(input.normal);
+    output.normalWS = NormalizeNormalPerVertex(normalInput.normalWS);
+
+    return output;
+}
+
+float4 DepthNormalsFragment(FragmentPassInput input) : SV_TARGET
+{
+    return float4(PackNormalOctRectEncode(TransformWorldToViewDir(input.normalWS, true)), 0.0f, 0.0f);
+}
+
+#endif
+```
+
+### Assets/Shaders/Voxels/Include/DepthOnlyPass.hlsl
+```
+#ifndef TUNTENFISCH_VOXELS_DEPTH_ONLY_PASS
+#define TUNTENFISCH_VOXELS_DEPTH_ONLY_PASS
+
+#include "Packages/com.unity.render-pipelines.universal/ShaderLibrary/Core.hlsl"
+
+struct VertexPassInput
+{
+    float4 position : POSITION;
+};
+
+struct FragmentPassInput
+{
+    float4 positionCS : SV_POSITION;
+};
+
+FragmentPassInput DepthOnlyVertex(VertexPassInput input)
+{
+    FragmentPassInput output;
+    output.positionCS = TransformObjectToHClip(input.position.xyz);
+
+    return output;
+}
+
+half4 DepthOnlyFragment(FragmentPassInput input) : SV_TARGET
+{
+    return 0;
+}
+
+#endif
+```
+
+### Assets/Shaders/Voxels/Include/ShadowCasterPass.hlsl
+```
+#ifndef TUNTENFISCH_VOXELS_SHADOW_CASTER_PASS
+#define TUNTENFISCH_VOXELS_SHADOW_CASTER_PASS
+
+#include "Packages/com.unity.render-pipelines.core/ShaderLibrary/CommonMaterial.hlsl"
+#include "Packages/com.unity.render-pipelines.universal/ShaderLibrary/Shadows.hlsl"
+
+float3 _LightDirection;
+float3 _LightPosition;
+
+struct VertexPassInput
+{
+    float4 positionOS : POSITION;
+    float3 normalOS : NORMAL;
+};
+
+struct FragmentPassInput
+{
+    float4 positionCS : SV_POSITION;
+};
+
+float4 GetShadowPositionHClip(VertexPassInput input)
+{
+    float3 positionWS = TransformObjectToWorld(input.positionOS.xyz);
+    float3 normalWS = TransformObjectToWorldNormal(input.normalOS);
+
+    #if defined(_CASTING_PUNCTUAL_LIGHT_SHADOW)
+        float3 lightDirectionWS = normalize(_LightPosition - positionWS);
+    #else
+        float3 lightDirectionWS = _LightDirection;
+    #endif
+
+    float4 positionCS = TransformWorldToHClip(ApplyShadowBias(positionWS, normalWS, lightDirectionWS));
+
+    #if defined(UNITY_REVERSED_Z)
+        positionCS.z = min(positionCS.z, UNITY_NEAR_CLIP_VALUE);
+    #else
+        positionCS.z = max(positionCS.z, UNITY_NEAR_CLIP_VALUE);
+    #endif
+
+    return positionCS;
+}
+
+FragmentPassInput ShadowPassVertex(VertexPassInput input)
+{
+    FragmentPassInput output;
+    output.positionCS = GetShadowPositionHClip(input);
+
+    return output;
+}
+
+half4 ShadowPassFragment(FragmentPassInput input) : SV_TARGET
+{
+    return 0.0h;
+}
+
+#endif
+```
+
+### Assets/Shaders/Voxels/Include/Triplanar.hlsl
+```
+#ifndef TUNTENFISCH_VOXELS_TRIPLANAR
+#define TUNTENFISCH_VOXELS_TRIPLANAR
+
+#include "Packages/com.unity.render-pipelines.universal/ShaderLibrary/Core.hlsl"
+
+struct TriplanarData
+{
+    half4 albedo;
+    half3 normalWS;
+    half metallic;
+    half occlusion;
+    half height;
+    half smoothness;
+};
+
+struct TriplanarUVs
+{
+    float2 x;
+    float2 y;
+    float2 z;
+};
+
+TriplanarUVs GetTriplanarUVs(float3 positionWS, half3 normalWS)
+{
+    TriplanarUVs uvs;
+
+    positionWS *= _CoordinateScaling;
+
+    uvs.x = positionWS.zy;
+    uvs.y = positionWS.xz;
+    uvs.z = positionWS.xy;
+
+    half3 signs = sign(normalWS);
+
+    // Account for mirrored mapping.
+    uvs.x.x *= signs.x;
+    uvs.y.x *= signs.y;
+    uvs.z.x *= -signs.z;
+
+    // Offset coordinates to prevent sudden repetitions.
+    uvs.x.y += 0.5h;
+    uvs.z.x += 0.5h;
+
+    return uvs;
+}
+
+half3 GetTriplanarWeights(half3 normalWS, half3 heights)
+{
+    half3 triplanarWeights = abs(normalWS);
+    triplanarWeights = saturate(triplanarWeights - _BlendOffset);
+    triplanarWeights *= abs(lerp(1.0h, heights, _BlendHeightStrength));
+    triplanarWeights = pow(triplanarWeights, _BlendExponent);
+    triplanarWeights /= dot(triplanarWeights, 1.0h);
+
+    return triplanarWeights;
+}
+
+half3 BlendTriplanarNormal(half3 normalTS, half3 normalWS)
+{
+    return half3(normalTS.xy + normalWS.xy, normalTS.z * normalWS.z);
+}
+
+TriplanarData ApplyTriplanarTexturing
+(
+    float3 positionWS,
+    half3 normalWS,
+    TEXTURE2D_ARRAY(albedoTextures),
+    TEXTURE2D_ARRAY(normalTextures),
+    TEXTURE2D_ARRAY(mohsTextures),
+    SAMPLER(samplerName),
+    uint index
+)
+{
+    TriplanarData triplanarData = (TriplanarData)0;
+    TriplanarUVs uvs = GetTriplanarUVs(positionWS, normalWS);
+
+    // Sample MOHS first to get the height information.
+    half4 mohsX = SAMPLE_TEXTURE2D_ARRAY(mohsTextures, samplerName, uvs.x, index);
+    half4 mohsY = SAMPLE_TEXTURE2D_ARRAY(mohsTextures, samplerName, uvs.y, index);
+    half4 mohsZ = SAMPLE_TEXTURE2D_ARRAY(mohsTextures, samplerName, uvs.z, index);
+
+    // Now that we have the height information we can get the triplanar weights
+    // for combining the three projections.
+    half3 triplanarWeights = GetTriplanarWeights(normalWS, half3(mohsX.z, mohsY.z, mohsZ.z));
+
+    half4 mohs = triplanarWeights.x * mohsX + triplanarWeights.y * mohsY + triplanarWeights.z * mohsZ;
+
+    triplanarData.metallic = mohs.x;
+    triplanarData.occlusion = mohs.y;
+    triplanarData.height = mohs.z;
+    triplanarData.smoothness = mohs.w;
+
+    // Sample normals.
+    half3 normalXTS = UnpackNormal(SAMPLE_TEXTURE2D_ARRAY(normalTextures, samplerName, uvs.x, index));
+    half3 normalYTS = UnpackNormal(SAMPLE_TEXTURE2D_ARRAY(normalTextures, samplerName, uvs.y, index));
+    half3 normalZTS = UnpackNormal(SAMPLE_TEXTURE2D_ARRAY(normalTextures, samplerName, uvs.z, index));
+
+    half3 signs = sign(normalWS);
+
+    // Account for mirrored mapping.
+    normalXTS.x *= signs.x;
+    normalYTS.x *= signs.y;
+    normalZTS.x *= -signs.z;
+
+    half3 normalXWS = BlendTriplanarNormal(normalXTS, normalWS.zyx).zyx;
+    half3 normalYWS = BlendTriplanarNormal(normalYTS, normalWS.xzy).xzy;
+    half3 normalZWS = BlendTriplanarNormal(normalZTS, normalWS);
+
+    triplanarData.normalWS = triplanarWeights.x * normalXWS + triplanarWeights.y * normalYWS + triplanarWeights.z * normalZWS;
+    
+    // Sample albedo.
+    half4 albedoX = SAMPLE_TEXTURE2D_ARRAY(albedoTextures, samplerName, uvs.x, index);
+    half4 albedoY = SAMPLE_TEXTURE2D_ARRAY(albedoTextures, samplerName, uvs.y, index);
+    half4 alebdoZ = SAMPLE_TEXTURE2D_ARRAY(albedoTextures, samplerName, uvs.z, index);
+
+    triplanarData.albedo = triplanarWeights.x * albedoX + triplanarWeights.y * albedoY + triplanarWeights.z * alebdoZ;
+
+    return triplanarData;
+}
+
+#endif
+```
+
+### Assets/Scripts/Voxels/Materials/Editor/MaterialConfigEditor.cs
+```
+using System;
+using Tuntenfisch.Editor;
+using UnityEditor;
+using UnityEngine;
+
+namespace Tuntenfisch.Voxels.Materials.Editor
+{
+    [CustomEditor(typeof(MaterialConfig))]
+    public class MaterialConfigEditor : BaseEditor
+    {
+        private static bool m_materialFoldout = true;
+
+        private SerializedProperty m_renderMaterial;
+        private SerializedProperty m_materialInfos;
+
+        private void OnEnable()
+        {
+            m_renderMaterial = serializedObject.FindProperty(nameof(m_renderMaterial));
+            m_materialInfos = serializedObject.FindProperty(nameof(m_materialInfos));
+        }
+
+        public override void OnInspectorGUI()
+        {
+            serializedObject.Update();
+
+            DisplayScriptHeader();
+
+            EditorGUILayout.PropertyField(m_renderMaterial);
+
+            if (m_materialFoldout = EditorGUILayout.BeginFoldoutHeaderGroup(m_materialFoldout, ObjectNames.NicifyVariableName(nameof(m_materialInfos))))
+            {
+                EditorGUI.indentLevel++;
+                int materialCount = Enum.GetNames(typeof(MaterialIndex)).Length;
+
+                if (m_materialInfos.arraySize != materialCount)
+                {
+                    m_materialInfos.arraySize = materialCount;
+                }
+
+                for (int index = 0; index < m_materialInfos.arraySize; index++)
+                {
+                    EditorGUILayout.PropertyField(m_materialInfos.GetArrayElementAtIndex(index), new GUIContent($"{(MaterialIndex)index}"));
+                }
+                EditorGUI.indentLevel--;
+            }
+            EditorGUILayout.EndFoldoutHeaderGroup();
+
+            serializedObject.ApplyModifiedProperties();
+        }
+    }
+}
+```
+
+### Assets/Scripts/Voxels/Procedural/Editor/GenerationGraphEditor.cs
+```
+﻿using Tuntenfisch.Editor;
+using UnityEditor;
+using UnityEngine;
+using XNodeEditor;
+
+namespace Tuntenfisch.Voxels.Procedural.Editor
+{
+    [CanEditMultipleObjects]
+    [CustomEditor(typeof(GenerationGraph))]
+    public class GenerationGraphEditor : BaseEditor
+    {
+        private GenerationGraph NoiseGraph => (GenerationGraph)serializedObject.targetObject;
+
+        private SerializedProperty m_nodes;
+
+        private void OnEnable()
+        {
+            m_nodes = serializedObject.FindProperty(nameof(m_nodes));
+        }
+
+        public override void OnInspectorGUI()
+        {
+            serializedObject.Update();
+
+            DisplayScriptHeader();
+
+            if (GUILayout.Button("Edit"))
+            {
+                NodeEditorWindow.Open(NoiseGraph);
+            }
+
+            if (GUILayout.Button("Rebuild"))
+            {
+                NoiseGraph.Rebuild();
+                EditorUtility.SetDirty(NoiseGraph);
+            }
+
+            EditorGUILayout.PropertyField(m_nodes);
+
+            serializedObject.ApplyModifiedProperties();
+        }
+    }
+}
+```

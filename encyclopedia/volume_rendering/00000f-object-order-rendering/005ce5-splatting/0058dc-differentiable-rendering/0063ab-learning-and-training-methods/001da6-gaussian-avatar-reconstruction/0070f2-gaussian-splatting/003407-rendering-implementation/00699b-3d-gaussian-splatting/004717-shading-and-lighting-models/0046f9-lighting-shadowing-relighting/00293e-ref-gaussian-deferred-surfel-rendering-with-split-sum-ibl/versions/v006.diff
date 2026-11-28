@@ -1,0 +1,237 @@
+--- v005.md
++++ v006.md
+@@ -1,8 +1,8 @@
+ # Ref-Gaussian Deferred Surfel Rendering with Split-Sum IBL
+ 
+-Also called: MetalGaussianSplatRelighting, Ref-Gaussian, Ref-Gaussian on iOS
++Also called: Ref-Gaussian, Ref-Gaussian on iOS
+ 
+ ## Overview
+-Ref-Gaussian is a physically based rendering (PBR) method for novel view synthesis and relighting of reflective objects using 2D Gaussian primitives [S1, S2, unofficial]. It solves the problem of blurred reflective details and inaccurate material representation in standard Gaussian Splatting by decomposing splats into PBR material attributes (albedo, normal, roughness, reflectance) and computing lighting via a deferred shading pipeline with split-sum environment map integration [S1, S2, unofficial]. It is distinguished from its sibling [3D Gaussian Splatting Self-Shadowing (T_light)](4487-3d-gaussian-splatting-self-shadowing-t-light.md) by its focus on material-aware deferred shading and split-sum IBL rather than light-space rasterization for self-shadowing, and from [Light Space Rasterization for T_light](4489-light-space-rasterization-for-t-light.md) by its use of a deferred surfel buffer for cache-locality sorting rather than a dedicated light-space depth buffer [S1, S2, unofficial].
++Ref-Gaussian is a physically based rendering (PBR) method for novel view synthesis and relighting of reflective objects using 2D Gaussian primitives [S1, unofficial][S2, unofficial]. It solves the problem of blurred reflective details and inaccurate material representation in standard Gaussian Splatting by decomposing splats into PBR material attributes (albedo, normal, roughness, reflectance) and computing lighting via a deferred shading pipeline with split-sum environment map integration [S1, unofficial][S2, unofficial]. It is distinguished from its sibling [3D Gaussian Splatting Self-Shadowing (T_light)](4487-3d-gaussian-splatting-self-shadowing-t-light.md) by its focus on material-aware deferred shading and split-sum IBL rather than light-space rasterization for self-shadowing, and from [Light Space Rasterization for T_light](4489-light-space-rasterization-for-t-light.md) by its use of a deferred surfel buffer for cache-locality sorting rather than a dedicated light-space depth buffer [S1, unofficial][S2, unofficial].
+ 
+ ## How it works
+@@ -10,16 +10,15 @@
+ ### Inputs and Outputs
+ **Inputs:**
+-*   A `.ply` file containing 2D Gaussian primitives with per-splat attributes: position, covariance (geometry), normal, roughness, reflectance (specular strength), and albedo (diffuse color) [S1, S2, unofficial].
++*   A `.ply` file containing 2D Gaussian primitives with per-splat attributes: position, covariance (geometry), normal, roughness, reflectance (specular strength), and albedo (diffuse color) [S1, unofficial][S2, unofficial].
+ *   An HDR environment map (equirectangular or cubemap) representing the lighting [S2, unofficial].
+-*   Camera parameters (view and projection matrices) [S1, S2, unofficial].
++*   Camera parameters (view and projection matrices) [S1, unofficial][S2, unofficial].
+ 
+ **Outputs:**
+-*   A final color image with physically based reflections and diffuse lighting [S1, S2, unofficial].
++*   A final color image with physically based reflections and diffuse lighting [S1, unofficial][S2, unofficial].
+ 
+ ### Data Structures
+-
+ **Splat Buffer:**
+ *   Layout: Array of structs, sorted by Morton code for cache locality [S2, unofficial].
+-*   Fields: `position` (vec3), `covariance` (mat3 or 6 floats), `normal` (vec3), `roughness` (float), `reflectance` (float), `albedo` (vec3).
++*   Fields: `position` (vec3), `covariance` (mat3 or 6 floats), `normal` (vec3), `roughness` (float), `reflectance` (float), `albedo` (vec3) [S1, unofficial][S2, unofficial].
+ *   Note: The material buffer (containing normal, roughness, reflectance, albedo) must be sorted in parallel with the position/covariance buffer using the same sort indices to prevent desynchronization and rainbow noise [S2, unofficial].
+ 
+@@ -38,117 +37,16 @@
+ 
+ ### Numbered Steps
++1.  **Loading and Initialization:** Load the `.ply` file to extract per-splat materials: normal, roughness, reflectance, and albedo [S2, unofficial]. If training, reset all color and material attributes, retaining only the geometry of Gaussians before the deferred rendering stage [S1, unofficial].
++2.  **IBL Pre-computation:** Generate a prefiltered environment map for specular reflections (mipmapped by roughness) [S2, unofficial]. Generate an irradiance map for diffuse reflections [S2, unofficial]. Generate a BRDF LUT [S2, unofficial].
++3.  **Sorting:** Sort splats using spatial locality algorithms like Morton codes to optimize cache usage during rendering [S2, unofficial]. Apply the exact same sort indices to the Material Buffer to ensure normals and other attributes remain aligned with positions [S2, unofficial].
++4.  **Rasterization (G-Buffer Pass):** Project 2D Gaussians to screen space [S1, unofficial][S2, unofficial]. Rasterize splats into the G-Buffer, accumulating color, normal, and depth information [S2, unofficial]. During training, material-aware normal propagation is conducted for Gaussians with metallic >= 0.02 and roughness <= 0.1 to capture accurate geometry [S1, unofficial].
++5.  **Shading (Split-Sum IBL Pass):** For each pixel, retrieve surfel data from the G-Buffer [S2, unofficial]. Compute the base specular reflectivity $F_0$ (see Formulas). Compute the specular term using the prefiltered environment map and BRDF LUT (see Formulas). Compute the final color (see Formulas). Do not multiply albedo by the irradiance map for diffuse color; Ref-Gaussian uses `base_color` directly for diffuse [S2, unofficial].
++6.  **Post-processing:** Composite the shaded result with the skybox/environment map if necessary [S2, unofficial].
+ 
+-1.  **Loading and Initialization:**
+-    *   Load the `.ply` file to extract per-splat materials: normal, roughness, reflectance, and albedo [S2, unofficial].
+-    *   If training, reset all color and material attributes, retaining only the geometry of Gaussians before the deferred rendering stage [S1, unofficial].
+-
+-2.  **IBL Pre-computation:**
+-    *   Generate a prefiltered environment map for specular reflections (mipmapped by roughness) [S2, unofficial].
+-    *   Generate an irradiance map for diffuse reflections [S2, unofficial].
+-    *   Generate a BRDF LUT [S2, unofficial].
+-
+-3.  **Sorting:**
+-    *   Sort splats using spatial locality algorithms like Morton codes to optimize cache usage during rendering [S2, unofficial].
+-    *   Apply the exact same sort indices to the Material Buffer to ensure normals and other attributes remain aligned with positions [S2, unofficial].
+-
+-4.  **Rasterization (G-Buffer Pass):**
+-    *   Project 2D Gaussians to screen space.
+-    *   Rasterize splats into the G-Buffer, accumulating color, normal, and depth information [S2, unofficial].
+-    *   Note: During training, material-aware normal propagation is conducted for Gaussians with metallic >= 0.02 and roughness <= 0.1 to capture accurate geometry [S1, unofficial].
+-
+-5.  **Shading (Split-Sum IBL Pass):**
+-    *   For each pixel, retrieve surfel data from the G-Buffer.
+-    *   Compute the base specular reflectivity $F_0$:
+-        $$ F_0 = 0.04 \times (1 - \text{reflectance}) + \text{albedo} \times \text{reflectance} $$
+-        where $F_0$ is the base specular reflectivity, reflectance is the learned specular strength, and albedo is the diffuse color [S2, unofficial].
+-    *   Compute the specular term using the prefiltered environment map and BRDF LUT:
+-        $$ \text{specular} = \text{prefiltered}(\text{reflect}(V, N), \text{roughness}) \times (F_0 \cdot fg.x + fg.y) $$
+-        where $V$ is the view direction, $N$ is the normal, and $fg$ is the result from the BRDF LUT [S2, unofficial].
+-    *   Compute the final color:
+-        $$ \text{final} = (1 - \text{reflectance}) \times \text{base\_color} + \text{specular} $$
+-        where `base_color` is the albedo used directly for diffuse lighting without irradiance multiplication [S2, unofficial].
+-    *   Note: Do not multiply albedo by the irradiance map for diffuse color; Ref-Gaussian uses `base_color` directly for diffuse [S2, unofficial].
+-
+-6.  **Post-processing:**
+-    *   Composite the shaded result with the skybox/environment map if necessary [S2, unofficial].
+-
+-### Pseudocode
+-
+-```python
+-def compute_ref_gaussian_shading(splat, environment_map, brdf_lut, view_direction):
+-    """
+-    Computes the final color for a single surfel using split-sum IBL.
+-    
+-    Args:
+-        splat: Object containing position, normal, roughness, reflectance, albedo.
+-        environment_map: Object with prefiltered_env_map and irradiance_map.
+-        brdf_lut: 2D texture for BRDF integration.
+-        view_direction: Normalized vector from camera to splat.
+-        
+-    Returns:
+-        final_color: vec3
+-    """
+-    # Extract material attributes
+-    N = normalize(splat.normal)
+-    roughness = splat.roughness
+-    reflectance = splat.reflectance
+-    albedo = splat.albedo
+-    
+-    # Compute F0 (Base Specular Reflectivity)
+-    # F0 = 0.04 * (1 - reflectance) + albedo * reflectance
+-    F0 = 0.04 * (1.0 - reflectance) + albedo * reflectance
+-    
+-    # Compute specular term
+-    # 1. Reflect view direction around normal
+-    R = reflect(-view_direction, N)
+-    
+-    # 2. Sample prefiltered environment map based on roughness
+-    # The prefiltered map is mipmapped by roughness.
+-    # roughness maps to a mip level.
+-    mip_level = roughness_to_mip_level(roughness)
+-    prefiltered_color = sample_texture(environment_map.prefiltered_env_map, R, mip_level)
+-    
+-    # 3. Sample BRDF LUT
+-    # LUT input: (roughness, dot(N, V))
+-    # Output: (F0_scale, F_scale) or similar parameters for the Schlick-GGX approximation
+-    dot_NV = max(dot(N, view_direction), 0.0)
+-    fg = sample_texture(brdf_lut, vec2(roughness, dot_NV))
+-    
+-    # Specular = Prefiltered Env * (F0 * fg.x + fg.y)
+-    specular = prefiltered_color * (F0 * fg.x + fg.y)
+-    
+-    # Compute diffuse term
+-    # Ref-Gaussian uses base_color directly for diffuse, not albedo * irradiance
+-    diffuse = albedo
+-    
+-    # Final color
+-    # final = (1 - reflectance) * base_color + specular
+-    final_color = (1.0 - reflectance) * diffuse + specular
+-    
+-    return final_color
+-
+-def sort_splats_for_cache(splats, materials):
+-    """
+-    Sorts splats and materials in parallel using Morton codes.
+-    
+-    Args:
+-        splats: List of splat objects.
+-        materials: List of material objects aligned with splats.
+-        
+-    Returns:
+-        sorted_splats, sorted_materials
+-    """
+-    # Compute Morton codes for splat positions
+-    morton_codes = [compute_morton_code(s.position) for s in splats]
+-    
+-    # Sort indices based on Morton codes
+-    indices = sorted(range(len(morton_codes)), key=lambda k: morton_codes[k])
+-    
+-    # Apply same indices to both buffers
+-    sorted_splats = [splats[i] for i in indices]
+-    sorted_materials = [materials[i] for i in indices]
+-    
+-    return sorted_splats, sorted_materials
+-```
++### Formulas
++*   **Base Specular Reflectivity:** $F_0 = 0.04 \times (1 - \text{reflectance}) + \text{albedo} \times \text{reflectance}$, where $F_0$ is the base specular reflectivity, reflectance is the learned specular strength, and albedo is the diffuse color [S2, unofficial].
++*   **Specular Term:** $\text{specular} = \text{prefiltered}(\text{reflect}(V, N), \text{roughness}) \times (F_0 \cdot fg.x + fg.y)$, where $V$ is the view direction, $N$ is the normal, and $fg$ is the result from the BRDF LUT [S2, unofficial].
++*   **Final Color:** $\text{final} = (1 - \text{reflectance}) \times \text{base\_color} + \text{specular}$, where `base_color` is the albedo used directly for diffuse lighting without irradiance multiplication [S2, unofficial].
++*   **Training Loss:** $L = L_c + \lambda_n L_n + \lambda_{smooth} L_{smooth}$, where $L_c = (1 - \lambda)L_1 + \lambda L_{D-SSIM}$ is the RGB reconstruction loss, $L_n = 1 - \tilde{N}^T N$ is the normal consistency loss (aligning rendered normal $N$ with depth-derived surface normal $\tilde{N}$), and $L_{smooth} = \|\nabla N\| \exp(-\|\nabla C_{gt}\|)$ is the edge-aware normal smoothness loss [S1, unofficial].
+ 
+ ### Parameters
+@@ -171,9 +69,57 @@
+ *   **Blurred Reflective Details:** Per-Gaussian rendering causes reflective details to become noticeably more blurred; deferred rendering is used to mitigate this [S1, unofficial].
+ 
++### Pseudocode
++```python
++def compute_morton_code(pos):
++    """Compute 3D Morton code for spatial sorting."""
++    x, y, z = pos
++    m = 0
++    for i in range(10):
++        m |= (x & (1 << i)) << (2 * i)
++        m |= (y & (1 << i)) << (2 * i + 1)
++        m |= (z & (1 << i)) << (2 * i + 2)
++    return m
++
++def texture_lookup(tex, uv, mip_level=0):
++    """Standard texture sampling with mipmapping."""
++    return tex.sample(uv, mip_level)
++
++def compute_ref_gaussian_shading(splat, env_map, brdf_lut, view_dir):
++    """Computes the final color for a single surfel using split-sum IBL."""
++    N = splat.normal / norm(splat.normal)
++    roughness = splat.roughness
++    reflectance = splat.reflectance
++    albedo = splat.albedo
++
++    # Base specular reflectivity
++    F0 = 0.04 * (1.0 - reflectance) + albedo * reflectance
++
++    # Specular term
++    R = reflect(-view_dir, N)
++    mip_level = int(clamp(roughness * (env_map.max_mip - 1), 0, env_map.max_mip - 1))
++    prefiltered = texture_lookup(env_map.prefiltered, R, mip_level)
++
++    dot_NV = max(dot(N, view_dir), 0.0)
++    fg = texture_lookup(brdf_lut, vec2(roughness, dot_NV))
++
++    specular = prefiltered * (F0 * fg.x + fg.y)
++
++    # Final color: diffuse uses base_color directly, no irradiance multiplication
++    final = (1.0 - reflectance) * albedo + specular
++    return final
++
++def sort_splats_for_cache(splats, materials):
++    """Sorts splats and materials in parallel using Morton codes."""
++    morton_codes = [compute_morton_code(s.position) for s in splats]
++    indices = sorted(range(len(morton_codes)), key=lambda k: morton_codes[k])
++    return [splats[i] for i in indices], [materials[i] for i in indices]
++```
++
+ ## Operating characteristics
+ 
+ **Time and Memory Complexity:**
++*   Not given in the sources.
+ *   Training consists of two stages: (1) per-Gaussian rendering for 18,000 steps; (2) deferred rendering stage training for about 40,000 steps [S1, unofficial].
+-*   The deferred rendering pipeline adds overhead for G-Buffer accumulation but improves cache locality and rendering quality [S1, S2, unofficial].
++*   The deferred rendering pipeline adds overhead for G-Buffer accumulation but improves cache locality and rendering quality [S1, unofficial][S2, unofficial].
+ 
+ **Measured Performance:**
+@@ -187,5 +133,5 @@
+ 
+ **Strengths and Limitations:**
+-*   **Strengths:** Physically based rendering with spherical harmonics for diffuse lighting; precise geometric representation using 2D Gaussian primitives; real-time relighting capability [S1, S2, unofficial].
++*   **Strengths:** Physically based rendering with spherical harmonics for diffuse lighting; precise geometric representation using 2D Gaussian primitives; real-time relighting capability [S1, unofficial][S2, unofficial].
+ *   **Limitations:** Per-Gaussian shading initialization can cause blurred reflective details if deferred rendering is not used; smooth surfaces are prone to geometric collapse without material-aware normal propagation [S1, unofficial].
+ 
+@@ -195,6 +141,5 @@
+ 
+ **When Not to Use:**
+-*   Not suitable for non-reflective or matte surfaces where PBR is not necessary, as it adds complexity [S1, unofficial].
+-*   Not suitable if coordinate system mismatches are not handled, leading to visual artifacts [S2, unofficial].
++*   Avoid when coordinate system mismatches are unhandled, as Z-up vs Y-up discrepancies cause 90° rotation artifacts [S2, unofficial].
+ 
+ ## Background

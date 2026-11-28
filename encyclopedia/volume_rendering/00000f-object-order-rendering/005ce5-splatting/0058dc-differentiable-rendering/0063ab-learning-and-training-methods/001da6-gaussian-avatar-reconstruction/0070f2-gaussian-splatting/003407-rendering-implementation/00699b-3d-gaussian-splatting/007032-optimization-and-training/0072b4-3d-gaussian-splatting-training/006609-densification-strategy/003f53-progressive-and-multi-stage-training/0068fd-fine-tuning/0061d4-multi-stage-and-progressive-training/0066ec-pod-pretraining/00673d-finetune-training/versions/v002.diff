@@ -1,0 +1,112 @@
+--- v001.md
++++ v002.md
+@@ -8,12 +8,12 @@
+ ## How it works
+ **Inputs and Outputs:**
+-*   **Input:** A multi-stage feed-forward predictor $P$ initialized by POD pretraining, which predicts Gaussian increments $\Delta G_i$ at each stage $i$ based on residual features $E_{i-1}$.
+-*   **Output:** An optimized predictor $P'$ with parameters adjusted to minimize image-space rendering loss.
++*   **Input:** A multi-stage feed-forward predictor $P$ initialized by POD pretraining, which predicts Gaussian increments $\Delta G_i$ at each stage $i$ based on residual features $E_{i-1}$ [S1, unofficial].
++*   **Output:** An optimized predictor $P'$ with parameters adjusted to minimize image-space rendering loss [S1, unofficial].
+ 
+ **Data Structures:**
+-The predictor maintains a sequence of accumulated Gaussian sets $G_i$ and their corresponding rendered images $I_i$.
+-*   $G_i = G_{i-1} \cup \Delta G_i$, where $G_0 = \emptyset$.
+-*   $I_i = \mathcal{R}(G_i)$, where $\mathcal{R}$ is the differentiable volume rendering operator.
+-*   The loss is computed for every intermediate stage $i \in \{1, \dots, N\}$.
++The predictor maintains a sequence of accumulated Gaussian sets $G_i$ and their corresponding rendered images $I_i$ [S1, unofficial].
++*   $G_i = G_{i-1} \cup \Delta G_i$, where $G_0 = \emptyset$ [S1, unofficial].
++*   $I_i = \mathcal{R}(G_i)$, where $\mathcal{R}$ is the differentiable volume rendering operator [S1, unofficial].
++*   The loss is computed for every intermediate stage $i \in \{1, \dots, N\}$ [S1, unofficial].
+ 
+ **Parameters:**
+@@ -24,15 +24,15 @@
+ 
+ **Steps:**
+-1.  **Remove Short-Horizon Optimization:** Disable the local Gaussian refinement optimizer used during POD pretraining. The model no longer generates pseudo-labels via iterative Gaussian splatting [S1, unofficial].
+-2.  **Forward Pass:** For each training batch, pass the input through the multi-stage predictor. At each stage $i$, compute the accumulated Gaussian set $G_i$ and render the image $I_i = \mathcal{R}(G_i)$ [S1, unofficial].
+-3.  **Compute Loss:** Calculate the rendering loss $L_{render}(I_i, I_{gt})$ for every intermediate stage $i$. The total loss is the sum of losses across all active stages:
++1.  **Remove Short-Horizon Optimization:** Disable the local Gaussian refinement optimizer used during POD pretraining, eliminating the costly iterative refinement loop [S1, unofficial].
++2.  **Forward Pass:** For each training batch, pass the input through the multi-stage predictor [S1, unofficial]. At each stage $i$, compute the accumulated Gaussian set $G_i$ and render the image $I_i = \mathcal{R}(G_i)$ [S1, unofficial].
++3.  **Compute Loss:** Calculate the rendering loss $L_{render}(I_i, I_{gt})$ for every intermediate stage $i$ [S1, unofficial]. The total loss is the sum of losses across all active stages:
+     $$ L_{total} = \sum_{i=1}^{N} \lambda_i L_{render}(I_i, I_{gt}) $$
+     With $\lambda_i = 1$ for all $i$ [S1, unofficial].
+-4.  **Backpropagation:** Compute gradients of $L_{total}$ with respect to the predictor parameters. Because $I_i$ depends on all preceding increments $\Delta G_1, \dots, \Delta G_i$, gradients propagate back to earlier stages, enabling joint optimization [S1, unofficial].
++4.  **Backpropagation:** Compute gradients of $L_{total}$ with respect to the predictor parameters [S1, unofficial]. Because $I_i$ depends on all preceding increments $\Delta G_1, \dots, \Delta G_i$, gradients propagate back to earlier stages, enabling joint optimization [S1, unofficial].
+ 5.  **Update:** Update predictor parameters using an optimizer (e.g., AdamW) [S1, unofficial].
+ 
+ **Pseudocode:**
+ ```python
+-def finetune_step(predictor, image_gt, optimizer):
++def finetune_step(predictor, image_gt, optimizer, num_stages):
+     """
+     One step of Finetune Training.
+@@ -40,28 +40,24 @@
+     image_gt: Ground truth image.
+     optimizer: Optimizer instance (e.g., AdamW).
++    num_stages: Total number of prediction stages.
+     """
+     optimizer.zero_grad()
++    total_loss = 0.0
++    current_gaussians = []  # G_0 = empty set
+     
+-    total_loss = 0.0
+-    accumulated_gaussians = [] # List of Gaussian sets G_i
+-    
+-    # Stage-wise prediction and rendering
+-    current_gaussians = []
+     for i in range(num_stages):
+         # Predict increment from residual features
+-        # Note: Residual features E_{i-1} are derived from previous stages' outputs
+         delta_g = predictor.predict_stage(i, current_gaussians)
+         
+-        # Accumulate Gaussians
+-        current_gaussians = union(current_gaussians, delta_g)
+-        accumulated_gaussians.append(current_gaussians)
++        # Accumulate Gaussians: G_i = G_{i-1} U delta_g
++        current_gaussians.extend(delta_g)
+         
+-        # Render intermediate result
+-        rendered_image = render(current_gaussians)
++        # Render intermediate result: I_i = R(G_i)
++        rendered_image = render_gaussians(current_gaussians)
+         
+-        # Compute loss for this stage
+-        # L_render = 0.7 * L1 + 0.3 * (1 - SSIM)
+-        stage_loss = 0.7 * l1_loss(rendered_image, image_gt) + \
+-                     0.3 * (1.0 - ssim(rendered_image, image_gt))
++        # Compute loss for this stage: L_render = 0.7 * L1 + 0.3 * (1 - SSIM)
++        l1_dist = mean_absolute_error(rendered_image, image_gt)
++        ssim_val = structural_similarity(rendered_image, image_gt)
++        stage_loss = 0.7 * l1_dist + 0.3 * (1.0 - ssim_val)
+         
+         total_loss += stage_loss
+@@ -72,9 +68,21 @@
+     
+     return total_loss.item()
++
++def render_gaussians(gaussians):
++    """[G] Standard differentiable volume rendering via alpha-compositing."""
++    return alpha_composite(gaussians)
++
++def mean_absolute_error(img1, img2):
++    """[G] Standard L1 distance computation."""
++    return sum(abs(img1 - img2)) / len(img1)
++
++def structural_similarity(img1, img2):
++    """[G] Standard SSIM computation."""
++    return compute_ssim_metric(img1, img2)
+ ```
+ 
+ **Edge Cases and Pitfalls:**
+ *   **Gradient Scale:** In POD, distillation loss is scaled by 100 to match gradient scales [S1, unofficial]. In finetuning, the coefficient is 1, so the learning rate must be adjusted accordingly to avoid instability [S1, unofficial].
+-*   **Early Stage Degradation:** Early stages (Stage 1, 2) may show lower PSNR compared to "Only POD" because they sacrifice standalone accuracy to provide a better basis for later residual correction [S1, unofficial]. This is expected and indicates successful cross-stage coordination.
++*   **Early Stage Degradation:** Early stages (Stage 1, 2) may show lower PSNR compared to "Only POD" because they sacrifice standalone accuracy to provide a better basis for later residual correction [S1, unofficial]. This is expected and indicates successful cross-stage coordination [S1, unofficial].
+ 
+ ## Subtopics
+@@ -85,5 +93,5 @@
+ ## Operating characteristics
+ **Time and Memory Complexity:**
+-*   **Time:** Per-iteration cost is significantly reduced compared to POD because the short-horizon local optimization loop is removed [S1, unofficial]. However, it requires rendering at every intermediate stage, which adds overhead compared to single-stage methods.
++*   **Time:** Per-iteration cost is significantly reduced compared to POD because the short-horizon local optimization loop is removed [S1, unofficial]. However, it requires rendering at every intermediate stage, which adds overhead compared to single-stage methods [S1, unofficial].
+ *   **Memory:** Requires storing intermediate Gaussian sets $G_i$ and rendered images $I_i$ for backpropagation through all stages [S1, unofficial].
+ 

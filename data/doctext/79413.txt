@@ -1,0 +1,2462 @@
+### src/app/main-gpu.cpp
+```
+#include <random>
+#include <vector>
+
+#include <glm/glm.hpp>
+#include <glm/gtc/color_space.hpp>
+#include <stb/stb_image_write.h>
+
+#include <core/camera.h>
+#include <core/framerate.h>
+#include <core/mesh.h>
+#include <core/stream.h>
+#include <core/texture.h>
+#include <core/volume.h>
+#include <core/window.h>
+#include <gpu/cuda_camera.h>
+
+template<typename F>
+void with_imgui_window(const char *name, bool *is_open, ImGuiWindowFlags flags, F &&f) {
+    ImGui::Begin(name, is_open, flags);
+    f();
+    ImGui::End();
+}
+
+int main(int argc, char *argv[]) {
+
+    auto model_path = argc > 1u
+                          ? std::filesystem::canonical(argv[1])
+                          : std::filesystem::canonical(PROJECT_BASE_DIR) / "data" / "bunny.obj";
+    auto mesh = Mesh::load(model_path);
+
+    Stream stream;
+
+    static constexpr auto resolution = 512;
+
+    static constexpr auto rand = [] {
+        static thread_local std::mt19937 random{std::random_device{}()};
+        return std::uniform_real_distribution<float>{0.0f, 1.0f}(random);
+    };
+
+    Window window{"Solid Voxelization"};
+    Texture<glm::u8vec4> mesh_display_buffer{resolution, resolution};
+    Texture<glm::u8vec4> volume_display_buffer{resolution, resolution};
+    std::vector<glm::vec3> mesh_accum_buffer(resolution * resolution);
+    std::vector<glm::vec3> volume_accum_buffer(resolution * resolution);
+
+    auto rays = CUDABuffer<Ray>::create(resolution * resolution);
+    auto hits = CUDABuffer<Hit>::create(resolution * resolution);
+    std::vector<Hit> host_hits(resolution * resolution);
+
+    glm::vec3 light_position{-3.0f, 2.0f, 5.0f};
+    glm::vec3 light_emission{20.0f};
+    glm::vec3 albedo{1.0f, 1.0f, 1.0f};
+
+    auto voxelization_level = 7u;
+
+    float camera_fov = 35.0f;
+    float camera_distance = 3.0f;
+    Camera camera{glm::uvec2{resolution}, camera_fov, camera_distance};
+    const auto initial_camera = camera;
+
+    glm::mat4 world_to_object{1.0f};
+    glm::mat4 object_to_world{1.0f};
+
+    auto generate_volume = [&] {
+        auto vox_res = 1u << voxelization_level;
+        auto volume = Volume::from(*mesh, vox_res, camera.rotation_to_world());
+        auto rot = glm::mat4{camera.rotation_to_world()};
+        object_to_world = rot * glm::translate(glm::vec3{-1.0f}) * glm::scale(glm::vec3{2.0f / vox_res});
+        world_to_object = glm::scale(glm::vec3{vox_res * 0.5f}) * glm::translate(glm::vec3{1.0f}) * glm::inverse(rot);
+        return volume;
+    };
+
+    auto volume = generate_volume();
+    auto octree = volume->cuda();
+
+    Framerate framerate;
+    window.run([&] {
+        auto ray_origin = camera.position();
+
+        cuda_camera_generate_rays(camera, world_to_object, rays->data(), resolution, resolution, static_cast<uint32_t>(framerate.count()));
+        octree->trace_closest(rays->data(), hits->data(), resolution, resolution);
+        hits->download(host_hits.data());
+
+        // render mesh
+        stream.dispatch_2d({resolution, resolution}, [&](glm::uvec2 xy) noexcept {
+            auto x = xy.x;
+            auto y = xy.y;
+            auto dx = rand();
+            auto dy = rand();
+            EmbreeRayHit r{};
+            r.ray.o = ray_origin;
+            r.ray.t_min = 0.0f;
+            r.ray.t_max = std::numeric_limits<float>::infinity();
+            r.ray.d = camera.direction(glm::vec2{xy} + glm::vec2{dx, dy});
+            r.hit.geom_id = EmbreeHit::invalid;
+            mesh->trace_closest(&r);
+            auto radiance = [&, hit = r.hit, vb = mesh->vertices(), ib = mesh->indices()] {
+                if (hit.geom_id == EmbreeHit::invalid) { return glm::vec3{0.2f, 0.6f, 1.0f}; }
+                auto ng = normalize(hit.ng);
+                auto tri = ib[hit.prim_id];
+                auto p0 = vb[tri.x];
+                auto p1 = vb[tri.y];
+                auto p2 = vb[tri.z];
+                auto p = (1.0f - hit.uv.x - hit.uv.y) * p0 + hit.uv.x * p1 + hit.uv.y * p2;
+                auto L = light_position - p;
+                auto inv_dd = 1.0f / glm::dot(L, L);
+                L = glm::normalize(L);
+                EmbreeRay ray{};
+                ray.o = p + 1e-4f * ng;
+                ray.d = L;
+                ray.t_min = 0.0f;
+                ray.t_max = std::numeric_limits<float>::max();
+                mesh->trace_any(&ray);
+                auto radiance = ray.t_max < 0.0f
+                                    ? glm::vec3{}
+                                    : glm::max(glm::dot(L, ng), 0.0f) * light_emission * inv_dd * albedo;
+                return radiance + 0.003f * albedo;
+            }();
+            auto index = y * resolution + x;
+            auto &&accum = mesh_accum_buffer[index];
+            auto t = 1.0f / static_cast<float>(framerate.count() + 1u);
+            accum = glm::mix(accum, radiance, t);
+        });
+
+        mesh_display_buffer.with_pixels_uploading([&](auto pixels) noexcept {
+            stream.dispatch_1d(resolution * resolution, [&](auto tid) noexcept {
+                pixels[tid] = {glm::clamp(glm::convertLinearToSRGB(mesh_accum_buffer[tid]) * 255.0f, 0.0f, 255.0f), 255};
+            });
+        });
+
+        // render volume: part 2
+        cudaStreamSynchronize(nullptr);
+        stream.dispatch_1d(resolution * resolution, [&](uint32_t tid) noexcept {
+            auto hit = host_hits[tid];
+            auto radiance = [&] {
+                if (!hit.valid) { return glm::vec3{0.2f, 0.6f, 1.0f}; }
+                auto ng = glm::normalize(glm::mat3{object_to_world} * hit.ng);
+                auto p = glm::vec3{object_to_world * glm::vec4{hit.p, 1.0f}};
+                auto L = light_position - p;
+                auto inv_dd = 1.0f / glm::dot(L, L);
+                L = glm::normalize(L);
+                Ray shadow_ray{p + 1e-4f * ng, 0.0f, L, std::numeric_limits<float>::max()};
+                auto occluded = volume->trace_any(shadow_ray);
+                auto radiance = occluded
+                                    ? glm::vec3{}
+                                    : glm::max(glm::dot(L, ng), 0.0f) * light_emission * inv_dd * albedo;
+                return radiance + 0.003f * albedo;
+            }();
+            auto &&accum = volume_accum_buffer[tid];
+            auto t = 1.0f / static_cast<float>(framerate.count() + 1u);
+            accum = glm::mix(accum, radiance, t);
+        });
+
+        volume_display_buffer.with_pixels_uploading([&](auto pixels) noexcept {
+            stream.dispatch_1d(resolution * resolution, [&](auto tid) noexcept {
+                pixels[tid] = {glm::clamp(glm::convertLinearToSRGB(volume_accum_buffer[tid]) * 255.0f, 0.0f, 255.0f), 255};
+            });
+        });
+
+        auto dt = framerate.tick();
+        auto fps = framerate.fps();
+        auto spp = framerate.count();
+
+        with_imgui_window("Console", nullptr, ImGuiWindowFlags_NoResize | ImGuiWindowFlags_AlwaysAutoResize, [&] {
+            ImGui::Text("Samples: %llu", spp);
+            ImGui::SameLine();
+            ImGui::Spacing();
+            ImGui::SameLine();
+            ImGui::Text("Time: %.2lf ms", dt);
+            ImGui::SameLine();
+            ImGui::Spacing();
+            ImGui::SameLine();
+            ImGui::Text("FPS: %.2lf", fps);
+            ImGui::Text("Camera Distance: %.2f", camera_distance);
+            ImGui::SameLine();
+            ImGui::Spacing();
+            ImGui::SameLine();
+            ImGui::Text("FoV: %.2f", camera_fov);
+            if (ImGui::SliderFloat3("Light Position", &light_position.x, -10.0f, 10.0f, "%.1f")) { framerate.clear(); }
+            if (ImGui::SliderFloat3("Light Emission", &light_emission.x, 0.0f, 100.0f, "%.1f")) { framerate.clear(); }
+            if (ImGui::ColorEdit3("Albedo", &albedo.x, ImGuiColorEditFlags_Float)) { framerate.clear(); }
+            ImGui::SliderInt("Voxelization Level", reinterpret_cast<int *>(&voxelization_level), 1, 12, "%d", ImGuiSliderFlags_AlwaysClamp | ImGuiSliderFlags_ClampOnInput);
+            if (ImGui::Button("Generate") || glfwGetKey(window.handle(), GLFW_KEY_SPACE) == GLFW_PRESS) {
+                volume = nullptr;
+                octree = nullptr;
+                volume = generate_volume();
+                octree = volume->cuda();
+                framerate.clear();
+            }
+            ImGui::SameLine();
+            if (ImGui::Button("Capture")) {
+                mesh_display_buffer.with_pixels_downloaded([](auto pixels) noexcept {
+                    stbi_write_png("mesh.png", resolution, resolution, 4, pixels.data(), 0);
+                });
+                if (volume != nullptr) {
+                    volume_display_buffer.with_pixels_downloaded([](auto pixels) noexcept {
+                        stbi_write_png("volume.png", resolution, resolution, 4, pixels.data(), 0);
+                    });
+                }
+            }
+            ImGui::SameLine();
+            if (ImGui::Button("Reset Camera") || glfwGetKey(window.handle(), GLFW_KEY_R) == GLFW_PRESS) {
+                camera = initial_camera;
+                framerate.clear();
+            }
+            ImGui::SameLine();
+            if (ImGui::Button("Dump Volume")) { volume->dump("volume.obj"); }
+        });
+
+        with_imgui_window("Mesh", nullptr, ImGuiWindowFlags_AlwaysAutoResize | ImGuiWindowFlags_NoResize, [&] {
+            ImGui::Image(reinterpret_cast<void *>(mesh_display_buffer.handle()), {resolution, resolution});
+        });
+
+        if (volume != nullptr) {
+            with_imgui_window("Volume", nullptr, ImGuiWindowFlags_AlwaysAutoResize | ImGuiWindowFlags_NoResize, [&] {
+                ImGui::Image(reinterpret_cast<void *>(volume_display_buffer.handle()), {resolution, resolution});
+            });
+        }
+
+        if (glfwGetKey(window.handle(), GLFW_KEY_ESCAPE) == GLFW_PRESS) { window.notify_close(); }
+
+        // process keys...
+        if (glfwGetKey(window.handle(), GLFW_KEY_A) == GLFW_PRESS) {
+            camera.rotate_y(-3.0f);
+            framerate.clear();
+        }
+        if (glfwGetKey(window.handle(), GLFW_KEY_D) == GLFW_PRESS) {
+            camera.rotate_y(3.0f);
+            framerate.clear();
+        }
+        if (glfwGetKey(window.handle(), GLFW_KEY_W) == GLFW_PRESS) {
+            camera.rotate_x(-3.0f);
+            framerate.clear();
+        }
+        if (glfwGetKey(window.handle(), GLFW_KEY_S) == GLFW_PRESS) {
+            camera.rotate_x(3.0f);
+            framerate.clear();
+        }
+        if (glfwGetKey(window.handle(), GLFW_KEY_Q) == GLFW_PRESS) {
+            camera.rotate_z(-3.0f);
+            framerate.clear();
+        }
+        if (glfwGetKey(window.handle(), GLFW_KEY_E) == GLFW_PRESS) {
+            camera.rotate_z(3.0f);
+            framerate.clear();
+        }
+        if (glfwGetKey(window.handle(), GLFW_KEY_Z) == GLFW_PRESS) {
+            camera_distance = std::max(camera_distance / 1.02f, 1.0f);
+            camera.set_distance(camera_distance);
+            framerate.clear();
+        }
+        if (glfwGetKey(window.handle(), GLFW_KEY_X) == GLFW_PRESS) {
+            camera_distance = camera_distance * 1.02f;
+            camera.set_distance(camera_distance);
+            framerate.clear();
+        }
+        if (glfwGetKey(window.handle(), GLFW_KEY_EQUAL) == GLFW_PRESS) {
+            camera_fov = std::max(camera_fov / 1.05f, 1.0f);
+            camera.set_fov(camera_fov);
+            framerate.clear();
+        }
+        if (glfwGetKey(window.handle(), GLFW_KEY_MINUS) == GLFW_PRESS) {
+            camera_fov = std::min(camera_fov * 1.05f, 150.0f);
+            camera.set_fov(camera_fov);
+            framerate.clear();
+        }
+    });
+}
+```
+
+### src/app/main.cpp
+```
+#include <random>
+#include <vector>
+
+#include <glm/glm.hpp>
+#include <glm/gtc/color_space.hpp>
+#include <stb/stb_image_write.h>
+
+#include <core/camera.h>
+#include <core/framerate.h>
+#include <core/mesh.h>
+#include <core/stream.h>
+#include <core/texture.h>
+#include <core/volume.h>
+#include <core/window.h>
+
+template<typename F>
+void with_imgui_window(const char *name, bool *is_open, ImGuiWindowFlags flags, F &&f) {
+    ImGui::Begin(name, is_open, flags);
+    f();
+    ImGui::End();
+}
+
+int main(int argc, char *argv[]) {
+    
+    glm::mat2 m;
+    glm::inverse(m);
+
+    auto model_path = argc > 1u
+                          ? std::filesystem::canonical(argv[1])
+                          : std::filesystem::canonical(PROJECT_BASE_DIR) / "data" / "bunny.obj";
+    auto mesh = Mesh::load(model_path);
+    std::unique_ptr<Volume> volume{nullptr};
+
+    Stream stream;
+
+    static constexpr auto resolution = 512;
+
+    static constexpr auto rand = [] {
+        static thread_local std::mt19937 random{std::random_device{}()};
+        return std::uniform_real_distribution<float>{0.0f, 1.0f}(random);
+    };
+
+    Window window{"Solid Voxelization"};
+    Texture<glm::u8vec4> mesh_display_buffer{resolution, resolution};
+    Texture<glm::u8vec4> volume_display_buffer{resolution, resolution};
+    std::vector<glm::vec3> mesh_accum_buffer(resolution * resolution);
+    std::vector<glm::vec3> volume_accum_buffer(resolution * resolution);
+
+    glm::vec3 light_position{-3.0f, 2.0f, 5.0f};
+    glm::vec3 light_emission{20.0f};
+    glm::vec3 albedo{1.0f, 1.0f, 1.0f};
+
+    auto voxelization_level = 7u;
+
+    float camera_fov = 35.0f;
+    float camera_distance = 3.0f;
+    Camera camera{glm::uvec2{resolution}, camera_fov, camera_distance};
+    const auto initial_camera = camera;
+
+    glm::mat4 world_to_object{1.0f};
+    glm::mat4 object_to_world{1.0f};
+
+    Framerate framerate;
+    window.run([&] {
+        auto ray_origin = camera.position();
+
+        // render mesh
+        stream.dispatch_2d({resolution, resolution}, [&](glm::uvec2 xy) noexcept {
+            auto x = xy.x;
+            auto y = xy.y;
+            auto dx = rand();
+            auto dy = rand();
+            EmbreeRayHit r{};
+            r.ray.o = ray_origin;
+            r.ray.t_min = 0.0f;
+            r.ray.t_max = std::numeric_limits<float>::infinity();
+            r.ray.d = camera.direction(glm::vec2{xy} + glm::vec2{dx, dy});
+            r.hit.geom_id = EmbreeHit::invalid;
+            mesh->trace_closest(&r);
+            auto radiance = [&, hit = r.hit, vb = mesh->vertices(), ib = mesh->indices()] {
+                if (hit.geom_id == EmbreeHit::invalid) { return glm::vec3{0.2f, 0.6f, 1.0f}; }
+                auto ng = normalize(hit.ng);
+                auto tri = ib[hit.prim_id];
+                auto p0 = vb[tri.x];
+                auto p1 = vb[tri.y];
+                auto p2 = vb[tri.z];
+                auto p = (1.0f - hit.uv.x - hit.uv.y) * p0 + hit.uv.x * p1 + hit.uv.y * p2;
+                auto L = light_position - p;
+                auto inv_dd = 1.0f / glm::dot(L, L);
+                L = glm::normalize(L);
+                EmbreeRay ray{};
+                ray.o = p + 1e-4f * ng;
+                ray.d = L;
+                ray.t_min = 0.0f;
+                ray.t_max = std::numeric_limits<float>::max();
+                mesh->trace_any(&ray);
+                auto radiance = ray.t_max < 0.0f
+                                    ? glm::vec3{}
+                                    : glm::max(glm::dot(L, ng), 0.0f) * light_emission * inv_dd * albedo;
+                return radiance + 0.003f * albedo;
+            }();
+            auto index = y * resolution + x;
+            auto &&accum = mesh_accum_buffer[index];
+            auto t = 1.0f / static_cast<float>(framerate.count() + 1u);
+            accum = glm::mix(accum, radiance, t);
+        });
+
+        mesh_display_buffer.with_pixels_uploading([&](auto pixels) noexcept {
+            stream.dispatch_1d(resolution * resolution, [&](auto tid) noexcept {
+                pixels[tid] = {glm::clamp(glm::convertLinearToSRGB(mesh_accum_buffer[tid]) * 255.0f, 0.0f, 255.0f), 255};
+            });
+        });
+
+        // render volume
+        if (volume != nullptr) {
+            stream.dispatch_2d({resolution, resolution}, [&](glm::uvec2 xy) noexcept {
+                auto x = xy.x;
+                auto y = xy.y;
+                auto dx = rand();
+                auto dy = rand();
+                Ray ray{};
+                ray.o = glm::vec3{world_to_object * glm::vec4{ray_origin, 1.0f}};
+                ray.t_min = 0.0f;
+                ray.d = glm::normalize(glm::mat3{world_to_object} * camera.direction(glm::vec2{xy} + glm::vec2{dx, dy}));
+                ray.t_max = std::numeric_limits<float>::infinity();
+                auto hit = volume->trace_closest(ray);
+                auto radiance = [&] {
+                    if (!hit.valid) { return glm::vec3{0.2f, 0.6f, 1.0f}; }
+                    auto ng = glm::normalize(glm::mat3{object_to_world} * hit.ng);
+                    auto p = glm::vec3{object_to_world * glm::vec4{hit.p, 1.0f}};
+                    auto L = light_position - p;
+                    auto inv_dd = 1.0f / glm::dot(L, L);
+                    L = glm::normalize(L);
+                    Ray shadow_ray{p + 1e-4f * ng, 0.0f, L, std::numeric_limits<float>::max()};
+                    auto occluded = volume->trace_any(shadow_ray);
+                    auto radiance = occluded
+                                        ? glm::vec3{}
+                                        : glm::max(glm::dot(L, ng), 0.0f) * light_emission * inv_dd * albedo;
+                    return radiance + 0.003f * albedo;
+                }();
+                auto index = y * resolution + x;
+                auto &&accum = volume_accum_buffer[index];
+                auto t = 1.0f / static_cast<float>(framerate.count() + 1u);
+                accum = glm::mix(accum, radiance, t);
+            });
+
+            volume_display_buffer.with_pixels_uploading([&](auto pixels) noexcept {
+                stream.dispatch_1d(resolution * resolution, [&](auto tid) noexcept {
+                    pixels[tid] = {glm::clamp(glm::convertLinearToSRGB(volume_accum_buffer[tid]) * 255.0f, 0.0f, 255.0f), 255};
+                });
+            });
+        }
+
+        auto dt = framerate.tick();
+        auto fps = framerate.fps();
+        auto spp = framerate.count();
+
+        with_imgui_window("Console", nullptr, ImGuiWindowFlags_NoResize | ImGuiWindowFlags_AlwaysAutoResize, [&] {
+            ImGui::Text("Samples: %llu", spp);
+            ImGui::SameLine();
+            ImGui::Spacing();
+            ImGui::SameLine();
+            ImGui::Text("Time: %.2lf ms", dt);
+            ImGui::SameLine();
+            ImGui::Spacing();
+            ImGui::SameLine();
+            ImGui::Text("FPS: %.2lf", fps);
+            ImGui::Text("Camera Distance: %.2f", camera_distance);
+            ImGui::SameLine();
+            ImGui::Spacing();
+            ImGui::SameLine();
+            ImGui::Text("FoV: %.2f", camera_fov);
+            if (ImGui::SliderFloat3("Light Position", &light_position.x, -10.0f, 10.0f, "%.1f")) { framerate.clear(); }
+            if (ImGui::SliderFloat3("Light Emission", &light_emission.x, 0.0f, 100.0f, "%.1f")) { framerate.clear(); }
+            if (ImGui::ColorEdit3("Albedo", &albedo.x, ImGuiColorEditFlags_Float)) { framerate.clear(); }
+            ImGui::SliderInt("Voxelization Level", reinterpret_cast<int *>(&voxelization_level), 1, 12, "%d", ImGuiSliderFlags_AlwaysClamp | ImGuiSliderFlags_ClampOnInput);
+            if (ImGui::Button("Generate") || glfwGetKey(window.handle(), GLFW_KEY_SPACE) == GLFW_PRESS) {
+                auto vox_res = 1u << voxelization_level;
+                volume = Volume::from(*mesh, vox_res, camera.rotation_to_world());// TODO...
+                auto rot = glm::mat4{camera.rotation_to_world()};
+                object_to_world = rot * glm::translate(glm::vec3{-1.0f}) * glm::scale(glm::vec3{2.0f / vox_res});
+                world_to_object = glm::scale(glm::vec3{vox_res * 0.5f}) * glm::translate(glm::vec3{1.0f}) * glm::inverse(rot);
+                framerate.clear();
+            }
+            ImGui::SameLine();
+            if (ImGui::Button("Capture")) {
+                mesh_display_buffer.with_pixels_downloaded([](auto pixels) noexcept {
+                    stbi_write_png("mesh.png", resolution, resolution, 4, pixels.data(), 0);
+                });
+                if (volume != nullptr) {
+                    volume_display_buffer.with_pixels_downloaded([](auto pixels) noexcept {
+                        stbi_write_png("volume.png", resolution, resolution, 4, pixels.data(), 0);
+                    });
+                }
+            }
+            ImGui::SameLine();
+            if (ImGui::Button("Reset Camera") || glfwGetKey(window.handle(), GLFW_KEY_R) == GLFW_PRESS) {
+                camera = initial_camera;
+                framerate.clear();
+            }
+            ImGui::SameLine();
+            if (volume != nullptr && ImGui::Button("Dump Volume")) { volume->dump("volume.obj"); }
+        });
+
+        with_imgui_window("Mesh", nullptr, ImGuiWindowFlags_AlwaysAutoResize | ImGuiWindowFlags_NoResize, [&] {
+            ImGui::Image(reinterpret_cast<void *>(mesh_display_buffer.handle()), {resolution, resolution});
+        });
+
+        if (volume != nullptr) {
+            with_imgui_window("Volume", nullptr, ImGuiWindowFlags_AlwaysAutoResize | ImGuiWindowFlags_NoResize, [&] {
+                ImGui::Image(reinterpret_cast<void *>(volume_display_buffer.handle()), {resolution, resolution});
+            });
+        }
+
+        if (glfwGetKey(window.handle(), GLFW_KEY_ESCAPE) == GLFW_PRESS) { window.notify_close(); }
+
+        // process keys...
+        if (glfwGetKey(window.handle(), GLFW_KEY_A) == GLFW_PRESS) {
+            camera.rotate_y(-3.0f);
+            framerate.clear();
+        }
+        if (glfwGetKey(window.handle(), GLFW_KEY_D) == GLFW_PRESS) {
+            camera.rotate_y(3.0f);
+            framerate.clear();
+        }
+        if (glfwGetKey(window.handle(), GLFW_KEY_W) == GLFW_PRESS) {
+            camera.rotate_x(-3.0f);
+            framerate.clear();
+        }
+        if (glfwGetKey(window.handle(), GLFW_KEY_S) == GLFW_PRESS) {
+            camera.rotate_x(3.0f);
+            framerate.clear();
+        }
+        if (glfwGetKey(window.handle(), GLFW_KEY_Q) == GLFW_PRESS) {
+            camera.rotate_z(-3.0f);
+            framerate.clear();
+        }
+        if (glfwGetKey(window.handle(), GLFW_KEY_E) == GLFW_PRESS) {
+            camera.rotate_z(3.0f);
+            framerate.clear();
+        }
+        if (glfwGetKey(window.handle(), GLFW_KEY_Z) == GLFW_PRESS) {
+            camera_distance = std::max(camera_distance / 1.02f, 1.0f);
+            camera.set_distance(camera_distance);
+            framerate.clear();
+        }
+        if (glfwGetKey(window.handle(), GLFW_KEY_X) == GLFW_PRESS) {
+            camera_distance = camera_distance * 1.02f;
+            camera.set_distance(camera_distance);
+            framerate.clear();
+        }
+        if (glfwGetKey(window.handle(), GLFW_KEY_EQUAL) == GLFW_PRESS) {
+            camera_fov = std::max(camera_fov / 1.05f, 1.0f);
+            camera.set_fov(camera_fov);
+            framerate.clear();
+        }
+        if (glfwGetKey(window.handle(), GLFW_KEY_MINUS) == GLFW_PRESS) {
+            camera_fov = std::min(camera_fov * 1.05f, 150.0f);
+            camera.set_fov(camera_fov);
+            framerate.clear();
+        }
+    });
+}
+```
+
+### src/core/bbox.h
+```
+//
+// Created by Mike Smith on 2021/6/12.
+//
+
+#pragma once
+
+#include <span>
+#include <glm/glm.hpp>
+#include <glm/gtx/transform.hpp>
+
+struct BoundingBox {
+    
+    glm::vec3 min;
+    glm::vec3 max;
+    
+    BoundingBox(glm::vec3 min, glm::vec3 max) noexcept
+        : min{min}, max{max} {}
+    
+    [[nodiscard]] auto valid() const noexcept { return glm::all(glm::lessThanEqual(min, max)); }
+    
+    void update(glm::vec3 p) noexcept {
+        min = glm::min(min, p);
+        max = glm::max(max, p);
+    }
+    
+    [[nodiscard]] auto centroid() const noexcept { return 0.5f * (min + max); }
+    [[nodiscard]] auto extent() const noexcept { return max - min; }
+    [[nodiscard]] auto diagonal() const noexcept { return glm::length(extent()); }
+    [[nodiscard]] auto radius() const noexcept { return 0.5f * diagonal(); }
+    
+    [[nodiscard]] static auto of(std::span<const glm::vec3> vertices) noexcept {
+        BoundingBox bbox{vertices.front(), vertices.front()};
+        for (auto v : vertices.subspan(1)) { bbox.update(v); }
+        return bbox;
+    }
+};
+```
+
+### src/core/camera.cpp
+```
+//
+// Created by Mike Smith on 2021/6/13.
+//
+
+#include <core/camera.h>
+
+glm::vec3 Camera::direction(glm::vec2 pixel) const noexcept {
+    glm::vec3 w{pixel.x * _pixel_scale - 1.0f, 1.0f - pixel.y * _pixel_scale, -_z_plane};
+    return glm::normalize(_rotation_to_world * w);
+}
+
+Camera::Camera(glm::uvec2 resolution, float fov, float distance) noexcept {
+    set_resolution(resolution);
+    set_fov(fov);
+    set_distance(distance);
+}
+
+glm::vec3 Camera::position() const noexcept {
+    return _rotation_to_world * glm::vec3{0.0f, 0.0f, _distance};
+}
+
+void Camera::set_resolution(glm::uvec2 res) noexcept {
+    _pixel_scale = 2.0f / static_cast<float>(res.y);
+}
+
+void Camera::set_fov(float fov) noexcept {
+    _z_plane = 1.0f / std::tan(0.5f * glm::radians(fov));
+}
+
+void Camera::set_distance(float d) noexcept { _distance = d; }
+
+void Camera::rotate_x(float angle) noexcept {
+    _rotation_to_world = glm::mat3{glm::rotate(glm::mat4{_rotation_to_world}, glm::radians(angle), glm::vec3{1.0f, 0.0f, 0.0f})};
+}
+
+void Camera::rotate_y(float angle) noexcept {
+    _rotation_to_world = glm::mat3{glm::rotate(glm::mat4{_rotation_to_world}, glm::radians(angle), glm::vec3{0.0f, 1.0f, 0.0f})};
+}
+
+void Camera::rotate_z(float angle) noexcept {
+    _rotation_to_world = glm::mat3{glm::rotate(glm::mat4{_rotation_to_world}, glm::radians(angle), glm::vec3{0.0f, 0.0f, 1.0f})};
+}
+```
+
+### src/core/camera.h
+```
+//
+// Created by Mike Smith on 2021/6/13.
+//
+
+#pragma once
+
+#include <cmath>
+#include <glm/glm.hpp>
+#include <glm/gtx/transform.hpp>
+
+class Camera {
+
+private:
+    glm::mat3 _rotation_to_world{1.0f};
+    float _distance{1.0f};
+    float _pixel_scale{1.0f};
+    float _z_plane{1.0f};
+    
+public:
+    explicit Camera(glm::uvec2 resolution, float fov = 35.0f, float distance = 3.0f) noexcept;
+    [[nodiscard]] glm::vec3 direction(glm::vec2 pixel) const noexcept;
+    [[nodiscard]] glm::vec3 position() const noexcept;
+    void set_resolution(glm::uvec2 res) noexcept;
+    void set_fov(float fov) noexcept;
+    void set_distance(float d) noexcept;
+    void rotate_x(float angle) noexcept;
+    void rotate_y(float angle) noexcept;
+    void rotate_z(float angle) noexcept;
+    [[nodiscard]] auto rotation_to_world() const noexcept { return _rotation_to_world; }
+    [[nodiscard]] auto pixel_scale() const noexcept { return _pixel_scale; }
+    [[nodiscard]] auto z_plane() const noexcept { return _z_plane; }
+};
+```
+
+### src/core/framerate.cpp
+```
+//
+// Created by Mike Smith on 2021/6/13.
+//
+
+#include <core/framerate.h>
+
+Framerate::Framerate(double smoothness) noexcept
+    : _last{Clock::now()},
+      _alpha{smoothness},
+      _dt{0.0f},
+      _count{0u} {}
+
+double Framerate::tick() noexcept {
+    using namespace std::chrono_literals;
+    auto last = _last;
+    _last = Clock::now();
+    _count++;
+    auto dt = static_cast<double>((_last - last) / 1ns) * 1e-6;
+    _dt = _count == 0u ? dt : (_alpha * _dt + (1.0f - _alpha) * dt);
+    return dt;
+}
+
+double Framerate::fps() const noexcept {
+    return _count == 0u ? 0.0 : 1000.0 / _dt;
+}
+
+void Framerate::clear() noexcept {
+    _last = Clock::now();
+    _dt = 0.0;
+    _count = 0u;
+}
+```
+
+### src/core/framerate.h
+```
+//
+// Created by Mike Smith on 2021/6/13.
+//
+
+#pragma once
+
+#include <chrono>
+
+class Framerate {
+    
+    using Clock = std::chrono::high_resolution_clock;
+    using Tick = std::chrono::high_resolution_clock::time_point;
+
+private:
+    Tick _last;
+    double _alpha;
+    double _dt;
+    uint64_t _count;
+
+public:
+    explicit Framerate(double smoothness = 0.5) noexcept;
+    void clear() noexcept;
+    double tick() noexcept;
+    [[nodiscard]] auto count() const noexcept { return _count; }
+    [[nodiscard]] double fps() const noexcept;
+};
+```
+
+### src/core/mesh.cpp
+```
+//
+// Created by Mike Smith on 2021/6/12.
+//
+
+#include <iostream>
+#include <memory>
+#include <numeric>
+#include <vector>
+
+#include <assimp/Importer.hpp>
+#include <assimp/postprocess.h>
+#include <assimp/scene.h>
+#include <embree3/rtcore.h>
+
+#include <core/mesh.h>
+
+class Accel {
+
+private:
+    RTCDevice _device{nullptr};
+    RTCScene _scene{nullptr};
+    std::span<const glm::vec3> _vertices;
+    std::span<const glm::uvec3> _indices;
+
+private:
+    Accel(std::span<const glm::vec3> vertices, std::span<const glm::uvec3> indices) noexcept {
+
+        _device = rtcNewDevice(nullptr);
+        _scene = rtcNewScene(_device);
+        rtcSetSceneBuildQuality(_scene, RTC_BUILD_QUALITY_HIGH);
+
+        auto geometry = rtcNewGeometry(_device, RTC_GEOMETRY_TYPE_TRIANGLE);
+        auto vb = static_cast<glm::vec3 *>(rtcSetNewGeometryBuffer(
+            geometry, RTC_BUFFER_TYPE_VERTEX, 0,
+            RTC_FORMAT_FLOAT3, sizeof(glm::vec3), vertices.size()));
+        std::copy_n(vertices.data(), vertices.size(), vb);
+        _vertices = {vb, vertices.size()};
+        
+        auto ib = static_cast<glm::uvec3 *>(rtcSetNewGeometryBuffer(
+            geometry, RTC_BUFFER_TYPE_INDEX, 0,
+            RTC_FORMAT_UINT3, sizeof(glm::uvec3), indices.size()));
+        std::copy_n(indices.data(), indices.size(), ib);
+        _indices = {ib, indices.size()};
+
+        auto t0 = std::chrono::high_resolution_clock::now();
+        rtcCommitGeometry(geometry);
+        rtcAttachGeometry(_scene, geometry);
+        rtcReleaseGeometry(geometry);
+        rtcCommitScene(_scene);
+        auto t1 = std::chrono::high_resolution_clock::now();
+
+        using namespace std::chrono_literals;
+        std::cout << "Build acceleration structure for "
+                  << vertices.size() << " vertices and "
+                  << indices.size() << " faces in "
+                  << (t1 - t0) / 1ns * 1e-6 << "ms"
+                  << std::endl;
+    }
+
+    [[nodiscard]] static auto _trace_context(bool coherent) noexcept {
+        static thread_local auto coherent_ctx = [] {
+            RTCIntersectContext ctx{};
+            rtcInitIntersectContext(&ctx);
+            ctx.flags = RTC_INTERSECT_CONTEXT_FLAG_COHERENT;
+            return ctx;
+        }();
+        static thread_local auto incoherent_ctx = [] {
+            RTCIntersectContext ctx{};
+            rtcInitIntersectContext(&ctx);
+            ctx.flags = RTC_INTERSECT_CONTEXT_FLAG_COHERENT;
+            return ctx;
+        }();
+        return coherent ? &coherent_ctx : &incoherent_ctx;
+    }
+
+public:
+    [[nodiscard]] static auto build(std::span<const glm::vec3> vertices, std::span<const glm::uvec3> indices) noexcept {
+        return std::unique_ptr<Accel>{new Accel{vertices, indices}};
+    }
+
+    ~Accel() noexcept {
+        rtcReleaseScene(_scene);
+        rtcReleaseDevice(_device);
+    }
+
+    [[nodiscard]] auto vertices() const noexcept { return _vertices; }
+    [[nodiscard]] auto indices() const noexcept { return _indices; }
+
+    void trace_closest(EmbreeRayHit &ray_hit) const noexcept {
+        rtcIntersect1(_scene, _trace_context(true), reinterpret_cast<RTCRayHit *>(&ray_hit));
+    }
+
+    void trace_any(EmbreeRay &ray) const noexcept {
+        rtcOccluded1(_scene, _trace_context(true), reinterpret_cast<RTCRay *>(&ray));
+    }
+
+    void trace_closest(std::span<EmbreeRayHit> rays, bool coherent) const noexcept {
+        rtcIntersect1M(_scene, _trace_context(coherent), reinterpret_cast<RTCRayHit *>(rays.data()), rays.size(), sizeof(EmbreeRayHit));
+    }
+
+    void trace_any(std::span<EmbreeRay> rays, bool coherent) const noexcept {
+        rtcOccluded1M(_scene, _trace_context(coherent), reinterpret_cast<RTCRay *>(rays.data()), rays.size(), sizeof(EmbreeRay));
+    }
+};
+
+std::unique_ptr<Mesh> Mesh::load(const std::filesystem::path &path) noexcept {
+
+    auto absolute_path = std::filesystem::canonical(path).string();
+
+    Assimp::Importer importer;
+    importer.SetPropertyInteger(AI_CONFIG_PP_RVC_FLAGS,
+                                aiComponent_ANIMATIONS
+                                    | aiComponent_BONEWEIGHTS
+                                    | aiComponent_CAMERAS
+                                    | aiComponent_COLORS
+                                    | aiComponent_LIGHTS
+                                    | aiComponent_MATERIALS
+                                    | aiComponent_NORMALS
+                                    | aiComponent_TANGENTS_AND_BITANGENTS
+                                    | aiComponent_TEXCOORDS
+                                    | aiComponent_TEXTURES);
+    auto model = importer.ReadFile(absolute_path.c_str(),
+                                   aiProcess_Triangulate
+                                       | aiProcess_JoinIdenticalVertices
+                                       | aiProcess_RemoveComponent
+                                       | aiProcess_ImproveCacheLocality
+                                       | aiProcess_OptimizeMeshes
+                                       | aiProcess_OptimizeGraph
+                                       | aiProcess_DropNormals);
+
+    if (model == nullptr
+        || (model->mFlags & AI_SCENE_FLAGS_INCOMPLETE)
+        || model->mRootNode == nullptr
+        || model->mRootNode->mNumMeshes == 0) {
+        std::cerr << "Failed to load scene." << std::endl;
+        exit(-1);
+    }
+
+    auto mesh = model->mMeshes[0];
+    std::vector<glm::vec3> vertices(mesh->mNumVertices);
+    std::memcpy(vertices.data(), mesh->mVertices, vertices.size() * sizeof(glm::vec3));
+
+    // normalize vertices coordinates
+    auto bbox = BoundingBox::of(vertices);
+    auto centroid = bbox.centroid();
+    auto radius = std::accumulate(vertices.cbegin(), vertices.cend(), 0.0f, [centroid](auto r, auto p) noexcept {
+        return std::max(r, glm::distance(p, centroid));
+    });
+    auto scale = 1.0f / radius;
+    for (auto &&v : vertices) { v = (v - centroid) * scale; }
+
+    std::vector<glm::uvec3> indices(mesh->mNumFaces);
+    std::transform(mesh->mFaces, mesh->mFaces + mesh->mNumFaces, indices.begin(), [](auto &&face) noexcept {
+        auto tri = face.mIndices;
+        return glm::uvec3{tri[0], tri[1], tri[2]};
+    });
+
+    return std::unique_ptr<Mesh>{new Mesh{Accel::build(vertices, indices)}};
+}
+
+Mesh::Mesh(std::unique_ptr<Accel> accel) noexcept : _accel{std::move(accel)} {}
+Mesh::~Mesh() noexcept = default;
+
+std::span<const glm::vec3> Mesh::vertices() const noexcept { return _accel->vertices(); }
+std::span<const glm::uvec3> Mesh::indices() const noexcept { return _accel->indices(); }
+
+void Mesh::trace_closest(EmbreeRayHit *ray) const noexcept { _accel->trace_closest(*ray); }
+void Mesh::trace_any(EmbreeRay *ray) const noexcept { _accel->trace_any(*ray); }
+void Mesh::trace_closest(std::span<EmbreeRayHit> rays, bool coherent) const noexcept { _accel->trace_closest(rays, coherent); }
+void Mesh::trace_any(std::span<EmbreeRay> rays, bool coherent) const noexcept { _accel->trace_any(rays, coherent); }
+
+std::unique_ptr<Mesh> Mesh::build(std::span<const glm::vec3> vertices, std::span<const glm::uvec3> indices) noexcept {
+    return std::unique_ptr<Mesh>{new Mesh{Accel::build(vertices, indices)}};
+}
+```
+
+### src/core/mesh.h
+```
+//
+// Created by Mike Smith on 2021/6/12.
+//
+
+#pragma once
+
+#include <filesystem>
+#include <memory>
+
+#include <core/bbox.h>
+#include <core/ray.h>
+
+class Accel;
+
+class Mesh {
+
+private:
+    std::unique_ptr<Accel> _accel;
+    explicit Mesh(std::unique_ptr<Accel> accel) noexcept;
+
+public:
+    ~Mesh() noexcept;
+    [[nodiscard]] static std::unique_ptr<Mesh> load(const std::filesystem::path &path) noexcept;
+    [[nodiscard]] static std::unique_ptr<Mesh> build(std::span<const glm::vec3> vertices, std::span<const glm::uvec3> indices) noexcept;
+    [[nodiscard]] std::span<const glm::vec3> vertices() const noexcept;
+    [[nodiscard]] std::span<const glm::uvec3> indices() const noexcept;
+    void trace_closest(EmbreeRayHit *ray) const noexcept;
+    void trace_any(EmbreeRay *ray) const noexcept;
+    void trace_closest(std::span<EmbreeRayHit> rays, bool coherent = true) const noexcept;
+    void trace_any(std::span<EmbreeRay> rays, bool coherent = true) const noexcept;
+};
+```
+
+### src/core/ray.h
+```
+//
+// Created by Mike Smith on 2021/6/12.
+//
+
+#pragma once
+
+#include <limits>
+#include <glm/glm.hpp>
+
+struct alignas(16) EmbreeRay {
+    glm::vec3 o;
+    float t_min;
+    glm::vec3 d;
+    float time;
+    float t_max;
+    unsigned int mask;
+    unsigned int id;
+    unsigned int flags;
+};
+
+struct alignas(16) EmbreeHit {
+    
+    static constexpr auto invalid = std::numeric_limits<uint32_t>::max();
+
+    glm::vec3 ng;
+    glm::vec2 uv;
+    unsigned int prim_id;
+    unsigned int geom_id;
+    unsigned int inst_id;
+};
+
+struct EmbreeRayHit {
+    EmbreeRay ray;
+    EmbreeHit hit;
+};
+
+struct alignas(16) Ray {
+    glm::vec3 o;
+    float t_min;
+    glm::vec3 d;
+    float t_max;
+};
+
+struct alignas(16) Hit {
+    glm::vec3 p;
+    float t;
+    glm::vec3 ng;
+    int valid;
+};
+```
+
+### src/core/segment.h
+```
+//
+// Created by Mike Smith on 2021/6/12.
+//
+
+#pragma once
+
+#include <cstdint>
+
+struct alignas(8) Segment {
+    uint16_t x;
+    uint16_t y;
+    uint16_t z_min;
+    uint16_t z_max;
+};
+```
+
+### src/core/stream.cpp
+```
+//
+// Created by Mike Smith on 2021/6/12.
+//
+
+#include <mutex>
+#include <thread>
+
+#include <core/stream.h>
+
+class ThreadPool {
+
+    enum struct Token {
+        WORK_1D,
+        WORK_2D,
+        EXIT
+    };
+
+private:
+    std::vector<std::thread> _workers;
+    glm::uvec2 _dispatch_size{};
+    glm::uvec2 _grid_size{};
+    glm::uvec2 _block_size{};
+    Stream::Task1D _work_1d;
+    Stream::Task2D _work_2d;
+    std::mutex _dispatch_mutex;
+    std::mutex _finish_mutex;
+    std::condition_variable _dispatch_cv;
+    std::condition_variable _finish_cv;
+    uint32_t _dispatch_count{0u};
+    uint32_t _finish_count{0u};
+    uint64_t _dispatch_fence{0ul};
+    Token _token{};
+    std::atomic_uint _curr_block{0u};
+
+private:
+    void _notify_finish() noexcept {
+        {
+            std::scoped_lock lock{_finish_mutex};
+            _finish_count++;
+        }
+        _finish_cv.notify_one();
+    }
+
+    void _process_work_1d() noexcept {
+        for (auto block = _curr_block++; block < _grid_size.x; block = _curr_block++) {
+            for (auto i = 0u; i < _block_size.x; i++) {
+                auto thread_id = block * _block_size.x + i;
+                if (thread_id >= _dispatch_size.x) { break; }
+                _work_1d(thread_id);
+            }
+        }
+    }
+
+    void _process_work_2d() noexcept {
+        auto block_count = _grid_size.x * _grid_size.y;
+        for (auto block = _curr_block++; block < block_count; block = _curr_block++) {
+            auto block_x = block % _grid_size.x;
+            auto block_y = block / _grid_size.x;
+            for (auto y = 0u; y < _block_size.y; y++) {
+                auto thread_y = block_y * _block_size.y + y;
+                if (thread_y >= _dispatch_size.y) { break; }
+                for (auto x = 0u; x < _block_size.x; x++) {
+                    auto thread_x = block_x * _block_size.x + x;
+                    if (thread_x >= _dispatch_size.x) { break; }
+                    _work_2d(glm::uvec2(thread_x, thread_y));
+                }
+            }
+        }
+    }
+
+    [[nodiscard]] auto _all_dispatched() noexcept {
+        std::scoped_lock lock{_dispatch_mutex};
+        return _dispatch_count == _workers.size();
+    }
+
+    void _synchronize() noexcept {
+        std::unique_lock lock{_finish_mutex};
+        _finish_cv.wait(lock, [this] { return _finish_count == _workers.size(); });
+    }
+
+    void _dispatch() noexcept {
+        _dispatch_count = 0u;
+        _finish_count = 0u;
+        _dispatch_fence++;
+        _curr_block = 0u;
+        _grid_size = (_dispatch_size + _block_size - 1u) / _block_size;
+        do {
+            _dispatch_cv.notify_one();
+        } while (!_all_dispatched());
+    }
+
+public:
+    explicit ThreadPool(size_t num_workers) noexcept {
+        _workers.reserve(num_workers);
+        for (auto i = 0u; i < num_workers; i++) {
+            _workers.emplace_back([this] {
+                for (auto fence = 0ull;; fence++) {
+
+                    // wait for work
+                    std::unique_lock lock{_dispatch_mutex};
+                    _dispatch_cv.wait(lock, [this, fence] { return _dispatch_fence > fence; });
+                    _dispatch_count++;
+                    lock.unlock();
+
+                    // process work
+                    switch (_token) {
+                        case Token::WORK_1D:
+                            _process_work_1d();
+                            _notify_finish();
+                            break;
+                        case Token::WORK_2D:
+                            _process_work_2d();
+                            _notify_finish();
+                            break;
+                        case Token::EXIT:
+                            return;
+                    }
+                }
+            });
+        }
+    }
+
+    ~ThreadPool() noexcept {
+        _token = Token::EXIT;
+        _dispatch();
+        for (auto &&w : _workers) { w.join(); }
+    }
+
+    void dispatch(Stream::Task1D task, uint32_t dispatch_size, uint32_t block_size) noexcept {
+        _token = Token::WORK_1D;
+        _work_1d = std::move(task);
+        _dispatch_size = glm::max(glm::uvec2{dispatch_size, 1u}, glm::uvec2{1u});
+        _block_size = glm::max(glm::uvec2{block_size, 1u}, glm::uvec2{1u});
+        _dispatch();
+        _synchronize();
+        _work_1d = {};
+    }
+
+    void dispatch(Stream::Task2D task, glm::uvec2 dispatch_size, glm::uvec2 block_size) noexcept {
+        _token = Token::WORK_2D;
+        _work_2d = std::move(task);
+        _dispatch_size = glm::max(dispatch_size, glm::uvec2{1u});
+        _block_size = glm::max(block_size, glm::uvec2{1u});
+        _dispatch();
+        _synchronize();
+        _work_2d = {};
+    }
+};
+
+Stream::Stream(size_t num_workers) noexcept
+    : _thread_pool{std::make_unique<ThreadPool>(
+        num_workers == 0u
+            ? std::thread::hardware_concurrency()
+            : num_workers)} {}
+
+Stream::~Stream() noexcept = default;
+
+void Stream::dispatch_1d(uint32_t dispatch_size, uint32_t block_size, Task1D task) noexcept {
+    _thread_pool->dispatch(std::move(task), dispatch_size, block_size);
+}
+
+void Stream::dispatch_2d(glm::uvec2 dispatch_size, glm::uvec2 block_size, Task2D task) noexcept {
+    _thread_pool->dispatch(std::move(task), dispatch_size, block_size);
+}
+```
+
+### src/core/stream.h
+```
+//
+// Created by Mike Smith on 2021/6/12.
+//
+
+#pragma once
+
+#include <thread>
+#include <vector>
+#include <queue>
+#include <memory>
+#include <functional>
+
+#include <glm/glm.hpp>
+
+class ThreadPool;
+
+class Stream {
+
+public:
+    using Task1D = std::function<void(uint32_t)>;
+    using Task2D = std::function<void(glm::uvec2)>;
+
+private:
+    std::unique_ptr<ThreadPool> _thread_pool;
+
+public:
+    explicit Stream(size_t num_workers = 0u) noexcept;
+    ~Stream() noexcept;
+    void dispatch_1d(uint32_t dispatch_size, uint32_t block_size, Task1D task) noexcept;
+    void dispatch_2d(glm::uvec2 dispatch_size, glm::uvec2 block_size, Task2D task) noexcept;
+    void dispatch_1d(uint32_t dispatch_size, Task1D task) noexcept { dispatch_1d(dispatch_size, 256u, std::move(task)); }
+    void dispatch_2d(glm::uvec2 dispatch_size, Task2D task) noexcept { dispatch_2d(dispatch_size, {16u, 16u}, std::move(task)); }
+};
+```
+
+### src/core/texture.h
+```
+//
+// Created by Mike Smith on 2021/6/13.
+//
+
+#pragma once
+
+#include <iostream>
+#include <memory>
+#include <span>
+#include <type_traits>
+
+#include <glad/glad.h>
+#include <glm/glm.hpp>
+
+template<typename T>
+struct always_false : std::false_type {};
+
+template<typename T>
+constexpr auto always_false_v = always_false<T>::value;
+
+template<typename T>
+class Texture {
+
+public:
+    static constexpr auto pixel_format = []() -> uint32_t {
+        if constexpr (std::is_same_v<T, uint8_t> || std::is_same_v<T, float>) {
+            return GL_RED;
+        } else if constexpr (std::is_same_v<T, glm::u8vec2> || std::is_same_v<T, glm::vec2>) {
+            return GL_RG;
+        } else if constexpr (std::is_same_v<T, glm::u8vec3> || std::is_same_v<T, glm::vec3>) {
+            return GL_RGB;
+        } else if constexpr (std::is_same_v<T, glm::u8vec4> || std::is_same_v<T, glm::vec4>) {
+            return GL_RGBA;
+        } else {
+            static_assert(always_false_v<T>);
+        }
+    }();
+
+    static constexpr auto data_format = []() -> uint32_t {
+        if constexpr (std::is_same_v<T, uint8_t> || std::is_same_v<T, glm::u8vec2> || std::is_same_v<T, glm::u8vec3> || std::is_same_v<T, glm::u8vec4>) {
+            return GL_UNSIGNED_BYTE;
+        } else if constexpr (std::is_same_v<T, float> || std::is_same_v<T, glm::vec2> || std::is_same_v<T, glm::vec3> || std::is_same_v<T, glm::vec4>) {
+            return GL_FLOAT;
+        } else {
+            static_assert(always_false_v<T>);
+        }
+    }();
+
+private:
+    glm::uvec2 _size;
+    uint32_t _handle{0u};
+    mutable std::unique_ptr<T[]> _pixels;
+
+private:
+    [[nodiscard]] auto _pixel_cache() const noexcept {
+        if (_pixels == nullptr) { _pixels = std::make_unique<T[]>(pixel_count()); }
+        return std::span{_pixels.get(), pixel_count()};
+    }
+
+public:
+    explicit Texture(glm::uvec2 size) noexcept : _size{size} {
+        glGenTextures(1, &_handle);
+        glBindTexture(GL_TEXTURE_2D, _handle);
+        glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MIN_FILTER, GL_LINEAR);
+        glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MAG_FILTER, GL_LINEAR);
+        glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_S, GL_CLAMP_TO_EDGE);
+        glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_T, GL_CLAMP_TO_EDGE);
+        glTexImage2D(GL_TEXTURE_2D, 0, pixel_format, _size.x, _size.y, 0, pixel_format, data_format, nullptr);
+    }
+
+    explicit Texture(uint32_t width, uint32_t height) noexcept : Texture{glm::uvec2{width, height}} {}
+
+    ~Texture() noexcept {
+        if (_handle != 0u) { glDeleteTextures(1, &_handle); }
+    }
+
+    [[nodiscard]] auto size() const noexcept { return _size; }
+    [[nodiscard]] auto handle() const noexcept { return _handle; }
+    [[nodiscard]] auto pixel_count() const noexcept { return static_cast<size_t>(_size.x * _size.y); }
+
+    void upload(std::span<const T> pixels) noexcept {
+        if (pixels.size() < _size.x * _size.y) {
+            std::cerr << "Invalid pixel count " << pixels.size() << std::endl;
+            exit(-1);
+        }
+        glBindTexture(GL_TEXTURE_2D, _handle);
+        glTexSubImage2D(GL_TEXTURE_2D, 0, 0, 0, _size.x, _size.y, pixel_format, data_format, pixels.data());
+    }
+
+    void download(std::span<T> pixels) const noexcept {
+        if (pixels.size() < _size.x * _size.y) {
+            std::cerr << "Invalid pixel count " << pixels.size() << std::endl;
+            exit(-1);
+        }
+        glBindTexture(GL_TEXTURE_2D, _handle);
+        glGetTexImage(GL_TEXTURE_2D, 0, pixel_format, data_format, pixels.data());
+    }
+
+    template<typename Update, std::enable_if_t<std::is_invocable_v<Update, std::span<T>>, int> = 0>
+    void with_pixels_uploading(Update &&update) {
+        update(_pixel_cache());
+        upload(_pixel_cache());
+    }
+
+    template<typename Update, std::enable_if_t<std::is_invocable_v<Update, std::span<const T>>, int> = 0>
+    void with_pixels_downloaded(Update &&update) const {
+        download(_pixel_cache());
+        update(_pixel_cache());
+    }
+};
+```
+
+### src/core/volume.cpp
+```
+//
+// Created by Mike Smith on 2021/6/12.
+//
+
+#include <array>
+#include <bitset>
+#include <core/volume.h>
+#include <fstream>
+#include <glm/gtx/component_wise.hpp>
+#include <iomanip>
+#include <iostream>
+#include <mutex>
+#include <thread>
+#include <vector>
+
+[[nodiscard]] inline auto is_power_of_two(uint64_t x) noexcept {
+    return x != 0u && (x & (x - 1u)) == 0u;
+}
+
+void check_resolution(uint32_t resolution) noexcept {
+    if (resolution < 2 || resolution > 4096u || !is_power_of_two(resolution)) {
+        std::cerr << "Invalid volume resolution: " << resolution << "." << std::endl;
+        exit(-1);
+    }
+}
+
+static const std::array cube_vertices{
+    glm::vec3{0.0f, 0.0f, 0.0f},
+    glm::vec3{1.0f, 0.0f, 0.0f},
+    glm::vec3{1.0f, 1.0f, 0.0f},
+    glm::vec3{0.0f, 1.0f, 0.0f},
+    glm::vec3{0.0f, 1.0f, 1.0f},
+    glm::vec3{1.0f, 1.0f, 1.0f},
+    glm::vec3{1.0f, 0.0f, 1.0f},
+    glm::vec3{0.0f, 0.0f, 1.0f}};
+
+static const std::array cube_indices{
+    glm::uvec3{0u, 2u, 1u},
+    glm::uvec3{0u, 3u, 2u},
+    glm::uvec3{0u, 1u, 6u},
+    glm::uvec3{0u, 6u, 7u},
+    glm::uvec3{1u, 2u, 5u},
+    glm::uvec3{1u, 5u, 6u},
+    glm::uvec3{3u, 4u, 5u},
+    glm::uvec3{3u, 5u, 2u},
+    glm::uvec3{0u, 4u, 3u},
+    glm::uvec3{0u, 7u, 4u},
+    glm::uvec3{4u, 7u, 6u},
+    glm::uvec3{4u, 6u, 5u}};
+
+class Octree {
+
+    class alignas(8) Node {
+
+    public:
+        static constexpr auto m000 = 0b00000001u;
+        static constexpr auto m001 = 0b00000010u;
+        static constexpr auto m011 = 0b00000100u;
+        static constexpr auto m010 = 0b00001000u;
+        static constexpr auto m110 = 0b00010000u;
+        static constexpr auto m111 = 0b00100000u;
+        static constexpr auto m101 = 0b01000000u;
+        static constexpr auto m100 = 0b10000000u;
+
+        inline static const glm::uvec3 d000{0u, 0u, 0u};
+        inline static const glm::uvec3 d001{0u, 0u, 1u};
+        inline static const glm::uvec3 d010{0u, 1u, 0u};
+        inline static const glm::uvec3 d011{0u, 1u, 1u};
+        inline static const glm::uvec3 d100{1u, 0u, 0u};
+        inline static const glm::uvec3 d101{1u, 0u, 1u};
+        inline static const glm::uvec3 d110{1u, 1u, 0u};
+        inline static const glm::uvec3 d111{1u, 1u, 1u};
+
+        static constexpr std::array m{m000, m001, m011, m010, m110, m111, m101, m100};
+        inline static const std::array d{d000, d001, d011, d010, d110, d111, d101, d100};
+
+    private:
+        uint32_t _child_offset{};
+        uint8_t _child_masks{};
+        bool _full{};
+
+    public:
+        Node() noexcept = default;
+        Node(bool full, uint32_t child_offset, uint8_t child_masks) noexcept
+            : _full{full}, _child_offset{child_offset}, _child_masks{child_masks} {}
+        [[nodiscard]] auto child_masks() const noexcept { return _child_masks; }
+        [[nodiscard]] auto child_offset() const noexcept { return _child_offset; }
+        [[nodiscard]] auto empty() const noexcept { return child_masks() == 0u; }
+        [[nodiscard]] auto full() const noexcept { return _full; }
+    };
+
+private:
+    std::vector<Node> _nodes;
+    uint32_t _resolution;
+
+private:
+    explicit Octree(uint32_t resolution) noexcept
+        : _resolution{resolution} { _nodes.reserve(65536u); }
+
+    [[nodiscard]] auto _allocate_children() noexcept {
+        auto index = static_cast<uint32_t>(_nodes.size());
+        _nodes.emplace_back();
+        return index;
+    }
+
+    [[nodiscard]] std::pair<bool, bool> /* (empty, full) */ _build(uint32_t node_index, std::span<Segment> segments, glm::uvec3 origin, uint32_t res) noexcept {
+
+        // empty node
+        if (segments.empty()) { return std::make_pair(true, false); }
+
+        auto half_res = res / 2u;
+        auto mid = origin + half_res;
+
+        // split
+        auto split_x = std::partition(segments.data(), segments.data() + segments.size(), [m = mid.x](auto s) noexcept { return s.x < m; });
+        auto split_0y = std::partition(segments.data(), split_x, [m = mid.y](auto s) noexcept { return s.y < m; });
+        auto split_1y = std::partition(split_x, segments.data() + segments.size(), [m = mid.y](auto s) noexcept { return s.y < m; });
+        std::span<Segment> s00{segments.data(), split_0y};
+        std::span<Segment> s01{split_0y, split_x};
+        std::span<Segment> s10{split_x, split_1y};
+        std::span<Segment> s11{split_1y, segments.data() + segments.size()};
+
+        // leaf
+        if (res == 2) {
+            auto masks = 0u;
+            auto p0 = [z = origin.z](auto s) noexcept { return std::any_of(s.begin(), s.end(), [z](auto s) { return z >= s.z_min && z <= s.z_max; }); };
+            auto p1 = [z = origin.z + 1u](auto s) noexcept { return std::any_of(s.begin(), s.end(), [z](auto s) { return z >= s.z_min && z <= s.z_max; }); };
+            if (p0(s00)) { masks |= Node::m000; }
+            if (p1(s00)) { masks |= Node::m001; }
+            if (p0(s01)) { masks |= Node::m010; }
+            if (p1(s01)) { masks |= Node::m011; }
+            if (p0(s10)) { masks |= Node::m100; }
+            if (p1(s10)) { masks |= Node::m101; }
+            if (p0(s11)) { masks |= Node::m110; }
+            if (p1(s11)) { masks |= Node::m111; }
+            auto full = masks == 0xffu;
+            _nodes[node_index] = {full, 0u, static_cast<uint8_t>(masks)};
+            return std::make_pair(false, full);
+        }
+
+        // inner node, index encoded in xyz order
+        auto n000 = _allocate_children();
+        auto n001 = _allocate_children();
+        auto n011 = _allocate_children();
+        auto n010 = _allocate_children();
+        auto n110 = _allocate_children();
+        auto n111 = _allocate_children();
+        auto n101 = _allocate_children();
+        auto n100 = _allocate_children();
+
+        auto masks = 0u;
+        auto full = true;
+
+        auto p0 = [m = mid.z](auto s) noexcept {
+            auto split = std::partition(s.data(), s.data() + s.size(), [m](auto s) noexcept { return s.z_min < m; });
+            return std::span{s.data(), split};
+        };
+
+        auto p1 = [m = mid.z](auto s) noexcept {
+            auto split = std::partition(s.data(), s.data() + s.size(), [m](auto s) noexcept { return s.z_max < m; });
+            return std::span{split, s.data() + s.size()};
+        };
+
+        auto empty_full_000 = _build(n000, p0(s00), origin + Node::d000 * half_res, half_res);
+        if (!empty_full_000.first) { masks |= Node::m000; }
+        full &= empty_full_000.second;
+        auto empty_full_001 = _build(n001, p1(s00), origin + Node::d001 * half_res, half_res);
+        if (!empty_full_001.first) { masks |= Node::m001; }
+        full &= empty_full_001.second;
+        auto empty_full_011 = _build(n011, p1(s01), origin + Node::d011 * half_res, half_res);
+        if (!empty_full_011.first) { masks |= Node::m011; }
+        full &= empty_full_011.second;
+        auto empty_full_010 = _build(n010, p0(s01), origin + Node::d010 * half_res, half_res);
+        if (!empty_full_010.first) { masks |= Node::m010; }
+        full &= empty_full_010.second;
+        auto empty_full_110 = _build(n110, p0(s11), origin + Node::d110 * half_res, half_res);
+        if (!empty_full_110.first) { masks |= Node::m110; }
+        full &= empty_full_110.second;
+        auto empty_full_111 = _build(n111, p1(s11), origin + Node::d111 * half_res, half_res);
+        if (!empty_full_111.first) { masks |= Node::m111; }
+        full &= empty_full_111.second;
+        auto empty_full_101 = _build(n101, p1(s10), origin + Node::d101 * half_res, half_res);
+        if (!empty_full_101.first) { masks |= Node::m101; }
+        full &= empty_full_101.second;
+        auto empty_full_100 = _build(n100, p0(s10), origin + Node::d100 * half_res, half_res);
+        if (!empty_full_100.first) { masks |= Node::m100; }
+        full &= empty_full_100.second;
+        _nodes[node_index] = {full, n000 - node_index, static_cast<uint8_t>(masks)};
+        return std::make_pair(masks == 0u, full);
+    }
+
+    void _to_mesh(uint32_t node_index, std::vector<glm::vec3> &vertices, std::vector<glm::uvec3> &indices, glm::uvec3 origin, uint32_t res) const noexcept {
+
+        auto add_cube = [&vertices, &indices](glm::uvec3 origin, uint32_t res) noexcept {
+            auto base_index = static_cast<uint32_t>(vertices.size());
+            for (auto v : cube_vertices) { vertices.emplace_back(v * static_cast<float>(res) + glm::vec3{origin}); }
+            for (auto i : cube_indices) { indices.emplace_back(i + base_index); }
+        };
+
+        auto node = _nodes[node_index];
+        if (node.full()) { return add_cube(origin, res); }
+
+        // leaf
+        if (res == 2u) {
+            for (auto i = 0u; i < 8u; i++) {
+                if (node.child_masks() & Node::m[i]) { add_cube(origin + Node::d[i], 1u); }
+            }
+            return;
+        }
+        // inner nodes
+        auto half_res = res / 2u;
+        for (auto i = 0u; i < 8u; i++) {
+            if (node.child_masks() & Node::m[i]) {
+                _to_mesh(node_index + node.child_offset() + i, vertices, indices, origin + Node::d[i] * half_res, half_res);
+            }
+        }
+    }
+
+    [[nodiscard]] static auto _inside(glm::vec3 bbox_origin, float res, glm::vec3 p) noexcept {
+        return glm::all(glm::greaterThanEqual(p, bbox_origin))
+               && glm::all(glm::lessThanEqual(p, bbox_origin + res));
+    }
+
+    [[nodiscard]] static auto _intersect_box_akari(Ray ray, glm::vec3 p1, float r) {
+        auto p2 = p1 + r;
+        ray.o = ray.o + ray.t_min * ray.d;
+        ray.t_max -= ray.t_min;
+        auto t0 = (p1 - ray.o) / ray.d;
+        auto t1 = (p2 - ray.o) / ray.d;
+        auto tmin = min(t0, t1);
+        auto tmax = max(t0, t1);
+        float t = glm::compMax(tmin);
+        Hit hit{};
+        hit.t = std::numeric_limits<float>::max();
+        hit.valid = false;
+        auto fleq = [](auto lhs, auto rhs) noexcept { return std::abs(lhs - rhs) < 1e-5f; };
+        if (t < compMin(tmax)) {
+            t = glm::max(t, 0.0f);
+            if (t > glm::compMin(tmax)) { return hit; }
+            auto p = ray.o + t * ray.d;
+            if (fleq(p1.x, p.x)) {
+                hit.ng = {-1.0f, 0.0f, 0.0f};
+            } else if (fleq(p2.x, p.x)) {
+                hit.ng = {1.0f, 0.0f, 0.0f};
+            } else if (fleq(p1.y, p.y)) {
+                hit.ng = {0.0f, -1.0f, 0.0f};
+            } else if (fleq(p2.y, p.y)) {
+                hit.ng = {0.0f, 1.0f, 0.0f};
+            } else if (fleq(p1.z, p.z)) {
+                hit.ng = {0.0f, 0.0f, -1.0f};
+            } else {
+                hit.ng = {0.0f, 0.0f, 1.0f};
+            }
+            hit.t = t + ray.t_min;
+            hit.p = p;
+            hit.valid = hit.t <= ray.t_max;
+        }
+        return hit;
+    }
+
+    [[nodiscard]] static auto _intersect_box(const Ray &ray, const glm::vec3 &bbox_min, float bbox_r) noexcept {
+        auto bbox_max = bbox_min + bbox_r;
+        auto t_min = (bbox_min - ray.o) / ray.d;
+        auto t_max = (bbox_max - ray.o) / ray.d;
+        auto o_mat = glm::mat3{ray.o, ray.o, ray.o};
+        std::array p_min = {ray.o + t_min.x * ray.d, ray.o + t_min.y * ray.d, ray.o + t_min.z * ray.d};
+        std::array p_max = {ray.o + t_max.x * ray.d, ray.o + t_max.y * ray.d, ray.o + t_max.z * ray.d};
+        auto valid = [ray, bbox_min, bbox_max](auto t, auto p) noexcept {
+            return glm::not_(glm::isnan(t))
+                   && glm::greaterThanEqual(t, glm::vec3{ray.t_min})
+                   && glm::lessThanEqual(t, glm::vec3{ray.t_max})
+                   && glm::bvec3{p[0].y >= bbox_min.y && p[0].y <= bbox_max.y
+                                     && p[0].z >= bbox_min.z && p[0].z <= bbox_max.z,
+                                 p[1].z >= bbox_min.z && p[1].z <= bbox_max.z
+                                     && p[1].x >= bbox_min.x && p[1].x <= bbox_max.x,
+                                 p[2].x >= bbox_min.x && p[2].x <= bbox_max.x
+                                     && p[2].y >= bbox_min.y && p[2].y <= bbox_max.y};
+        };
+        auto t_invalid = glm::vec3{std::numeric_limits<float>::max()};
+        auto valid_min = valid(t_min, p_min);
+        auto valid_max = valid(t_max, p_max);
+        t_min = glm::mix(t_invalid, t_min, valid_min);
+        t_max = glm::mix(t_invalid, t_max, valid_max);
+        auto t = glm::min(t_min, t_max);
+        auto is_min = glm::lessThanEqual(t_min, t_max);
+        Hit hit{};
+        hit.t = std::numeric_limits<float>::max();
+        hit.valid = false;
+        if (t.x < hit.t) {
+            hit.p = is_min.x ? p_min[0] : p_max[0];
+            hit.t = t.x;
+            hit.ng = {is_min.x ? -1.0f : 1.0f, 0.0f, 0.0f};
+            hit.valid = valid_min.x || valid_max.x;
+        }
+        if (t.y < hit.t) {
+            hit.p = is_min.y ? p_min[1] : p_max[1];
+            hit.t = t.y;
+            hit.ng = {0.0f, is_min.y ? -1.0f : 1.0f, 0.0f};
+            hit.valid = valid_min.y || valid_max.y;
+        }
+        if (t.z < hit.t) {
+            hit.p = is_min.z ? p_min[2] : p_max[2];
+            hit.t = t.z;
+            hit.ng = {0.0f, 0.0f, is_min.z ? -1.0f : 1.0f};
+            hit.valid = valid_min.z || valid_max.z;
+        }
+        return hit;
+    }
+
+    [[nodiscard]] auto _trace_closest(Ray ray) const noexcept {
+
+        struct alignas(16) TraceContext {
+            glm::vec3 o;
+            float r;
+            uint32_t index;
+            float t;
+        };
+
+        static constexpr auto stack_size = 64u;
+        static thread_local std::array<TraceContext, stack_size> stack{};
+        auto sp = 0u;
+
+        Hit closest{.t = std::numeric_limits<float>::max(), .valid = false};
+        if (_nodes.front().empty()) { return closest; }
+
+        auto add_node = [&sp, ray, &closest, this](auto index, auto o, auto r) noexcept {
+            if (auto hit = _intersect_box_akari(ray, o, r); hit.valid && hit.t < closest.t) {
+                auto node = _nodes[index];
+                if (node.full()) {
+                    closest = hit;
+                } else if (r == 2.0f) {
+                    for (auto i = 0u; i < 8u; i++) {
+                        if ((node.child_masks() & Node::m[i])) {
+                            if (auto child_hit = _intersect_box_akari(ray, o + glm::vec3{Node::d[i]}, 1.0f);
+                                child_hit.valid && child_hit.t < closest.t) {
+                                closest = child_hit;
+                            }
+                        }
+                    }
+                } else {
+                    stack[sp++] = {o, r, index, hit.t};
+                }
+            }
+        };
+
+        add_node(0u, glm::vec3{}, static_cast<float>(_resolution));
+        while (sp != 0u) {
+            auto ctx = stack[--sp];
+            if (ctx.t >= closest.t) { continue; }
+            auto node = _nodes[ctx.index];
+            auto half_r = ctx.r * 0.5f;
+            for (auto i = 0u; i < 8u; i++) {
+                if (node.child_masks() & Node::m[i]) {
+                    add_node(ctx.index + node.child_offset() + i, ctx.o + glm::vec3{Node::d[i]} * half_r, half_r);
+                }
+            }
+        }
+        return closest;
+    }
+
+    void _trace_closest(uint32_t node_index, glm::vec3 bbox_origin, float bbox_r, Ray ray, Hit &closest) const noexcept {
+
+        ray.t_max = closest.t;
+        auto hit = _intersect_box_akari(ray, bbox_origin, bbox_r);
+
+        // not intersecting the entire box, or
+        // the min possible t is greater than known min
+        if (!hit.valid || hit.t >= closest.t) { return; }
+
+        auto node = _nodes[node_index];
+
+        // intersecting the full box, update the closest hit
+        if (node.full()) {
+            closest = hit;
+            return;
+        }
+
+        // leaf
+        if (bbox_r == 2.0f) {
+            for (auto i = 0u; i < 8u; i++) {
+                if ((node.child_masks() & Node::m[i])) {
+                    if (auto child_hit = _intersect_box_akari(ray, bbox_origin + glm::vec3{Node::d[i]}, 1.0f);
+                        child_hit.valid && child_hit.t < closest.t) { closest = child_hit; }
+                }
+            }
+            return;
+        }
+
+        // inner node
+        auto half_r = bbox_r * 0.5f;
+        for (auto i = 0u; i < 8u; i++) {
+            if (node.child_masks() & Node::m[i]) {
+                _trace_closest(node_index + node.child_offset() + i, bbox_origin + glm::vec3{Node::d[i]} * half_r, half_r, ray, closest);
+            }
+        }
+    }
+
+    [[nodiscard]] auto _trace_any(uint32_t node_index, glm::vec3 bbox_origin, float bbox_r, Ray ray) const noexcept {
+
+        auto hit = _intersect_box_akari(ray, bbox_origin, bbox_r);
+
+        // not intersecting the entire box
+        if (!hit.valid) { return false; }
+
+        auto node = _nodes[node_index];
+
+        // intersecting the full box
+        if (node.full()) { return true; }
+
+        // leaf
+        if (bbox_r == 2.0f) {
+            for (auto i = 0u; i < 8u; i++) {
+                if ((node.child_masks() & Node::m[i])
+                    && _intersect_box_akari(ray, bbox_origin + glm::vec3{Node::d[i]}, 1.0f).valid) {
+                    return true;
+                }
+            }
+            return false;
+        }
+
+        // inner node
+        auto half_r = 0.5f * bbox_r;
+        for (auto i = 0u; i < 8u; i++) {
+            if ((node.child_masks() & Node::m[i])
+                && _trace_any(node_index + node.child_offset() + i,
+                              bbox_origin + glm::vec3{Node::d[i]} * half_r, half_r, ray)) {
+                return true;
+            }
+        }
+        return false;
+    }
+
+public:
+    [[nodiscard]] static auto build(std::vector<Segment> segments, uint32_t resolution) noexcept {
+        check_resolution(resolution);
+        std::unique_ptr<Octree> tree{new Octree{resolution}};
+        auto root = tree->_allocate_children();
+        auto t0 = std::chrono::high_resolution_clock::now();
+        static_cast<void>(tree->_build(root, segments, glm::uvec3{}, resolution));
+        auto t1 = std::chrono::high_resolution_clock::now();
+        auto fill_count = std::count_if(tree->_nodes.cbegin(), tree->_nodes.cend(), [](auto n) noexcept { return !n.empty(); });
+        using namespace std::chrono_literals;
+        std::cout << "Build octree with " << tree->_nodes.size() << " nodes "
+                  << "(" << static_cast<double>(fill_count) / static_cast<double>(tree->_nodes.size()) * 100.0 << "% filled) "
+                  << "in " << (t1 - t0) / 1ns * 1e-6 << " ms" << std::endl;
+        return tree;
+    }
+
+    [[nodiscard]] auto dump(const std::filesystem::path &path) const noexcept {
+        if (auto root = _nodes.front(); !root.empty()) {
+            auto path_str = std::filesystem::absolute(path).string();
+            if (!path.has_extension() || path.extension() != ".obj") { path_str.append(".obj"); }
+            std::vector<glm::vec3> vertices;
+            std::vector<glm::uvec3> indices;
+            _to_mesh(0u, vertices, indices, glm::uvec3{}, _resolution);
+            std::ofstream file{path_str};
+            std::cout << "Dumped volume into a cube mesh with "
+                      << vertices.size() << " vertices and "
+                      << indices.size() << " faces" << std::endl;
+            auto scale = 2.0f / static_cast<float>(_resolution);
+            for (auto v : vertices) {
+                auto p = (v + 0.5f) * scale - 1.0f;
+                file << "v " << p.x << " " << p.y << " " << p.z << "\n";
+            }
+            for (auto i : indices) {
+                auto f = i + 1u;
+                file << "f " << f.x << " " << f.y << " " << f.z << "\n";
+            }
+        }
+    }
+
+    [[nodiscard]] auto to_mesh() const noexcept {
+        std::vector<glm::vec3> vertices;
+        std::vector<glm::uvec3> indices;
+        if (auto root = _nodes.front(); !root.empty()) {
+            _to_mesh(0u, vertices, indices, glm::uvec3{}, _resolution);
+        }
+        return Mesh::build(vertices, indices);
+    }
+
+    [[nodiscard]] Hit trace_closest(Ray ray) const noexcept {
+        return _trace_closest(ray);
+    }
+
+    [[nodiscard]] auto trace_any(Ray ray) const noexcept {
+        if (auto root = _nodes.front(); root.empty()) { return false; }
+        return _trace_any(0u, glm::vec3{}, static_cast<float>(_resolution), ray);
+    }
+
+    [[nodiscard]] auto nodes() const noexcept { return std::span{_nodes}; }
+
+};
+
+[[nodiscard]] auto compute_segments(const Mesh &mesh, glm::mat4 M, uint32_t res) noexcept {
+
+    std::vector<Segment> segments;
+    segments.reserve(std::min(1024u * 1024u, res * res * 4u));
+
+    std::mutex mutex;
+    std::atomic_uint curr_block{0u};
+    auto num_workers = std::thread::hardware_concurrency();
+    std::vector<std::thread> workers;
+    workers.reserve(num_workers);
+    for (auto i = 0u; i < num_workers; i++) {
+        workers.emplace_back([&mesh, M, res, &mutex, &curr_block, &segments] {
+            auto ray_dir = glm::mat3{M} * glm::vec3{0.0f, 0.0f, -1.0f};
+            auto res_f = static_cast<float>(res);
+            auto scale = 2.0f / res_f;
+            auto eps = std::max(scale / 64.0f, 1e-5f);
+
+            auto block_size = std::min(res, 16u);
+            auto blocks_per_edge = (res + block_size - 1u) / block_size;
+            auto num_blocks = blocks_per_edge * blocks_per_edge;
+
+            std::vector<Segment> segment_cache;
+            segment_cache.reserve(block_size * block_size * 16u);
+            for (auto block = curr_block++; block < num_blocks; block = curr_block++) {
+                segment_cache.clear();
+                auto x_offset = block % blocks_per_edge * block_size;
+                auto y_offset = block / blocks_per_edge * block_size;
+                for (auto y = y_offset; y < y_offset + block_size; y++) {
+                    for (auto x = x_offset; x < x_offset + block_size; x++) {
+                        EmbreeRayHit ray_hit{};
+                        auto dx = (static_cast<float>(x) + 0.5f) * scale - 1.0f;
+                        auto dy = (static_cast<float>(y) + 0.5f) * scale - 1.0f;
+                        auto dz = 2.0f;
+                        ray_hit.ray.o = glm::vec3{M * glm::vec4{dx, dy, dz, 1.0f}};
+                        ray_hit.ray.d = ray_dir;
+
+                        // find hits along the ray...
+                        float t_start;
+                        auto counter = 0;
+                        for (;;) {
+                            ray_hit.ray.t_min = ray_hit.ray.t_max + eps;
+                            ray_hit.ray.t_max = std::numeric_limits<float>::infinity();
+                            ray_hit.hit.geom_id = EmbreeHit::invalid;
+                            mesh.trace_closest(&ray_hit);
+                            // ray exits the scene
+                            if (ray_hit.hit.geom_id == EmbreeHit::invalid) {
+                                if (counter > 0) {// bad case, add surface hit & exit
+                                    auto z = glm::clamp((1.5f - t_start * 0.5f) * res_f - 0.5f, 0.0f, res_f - 1.0f);
+                                    Segment segment{static_cast<uint16_t>(x),
+                                                    static_cast<uint16_t>(y),
+                                                    static_cast<uint16_t>(z),
+                                                    static_cast<uint16_t>(z)};
+                                    segment_cache.emplace_back(segment);
+                                }
+                                break;
+                            }
+                            // process the segment
+                            if (auto c = glm::dot(ray_dir, ray_hit.hit.ng); c < 0.0f) {// front face
+                                if (++counter == 1) { t_start = ray_hit.ray.t_max; }
+                            } else if (c > 0.0f) {   // back face
+                                if (--counter == 0) {// found segment
+                                    auto z_range = (1.5f - glm::vec2{ray_hit.ray.t_max, t_start} * 0.5f) * res_f;
+                                    if (auto z = glm::uvec2{glm::clamp(z_range + glm::vec2{0.5f, -0.5f}, 0.0f, res_f - 1.0f)}; z.x <= z.y) {
+                                        Segment segment{static_cast<uint16_t>(x),
+                                                        static_cast<uint16_t>(y),
+                                                        static_cast<uint16_t>(z.x),
+                                                        static_cast<uint16_t>(z.y)};
+                                        segment_cache.emplace_back(segment);
+                                    }
+                                } else if (counter < 0) {// bad case, add surface voxel & reset
+                                    auto z = glm::clamp((1.5f - ray_hit.ray.t_max * 0.5f) * res_f + 0.5f, 0.0f, res_f - 1.0f);
+                                    Segment segment{static_cast<uint16_t>(x),
+                                                    static_cast<uint16_t>(y),
+                                                    static_cast<uint16_t>(z),
+                                                    static_cast<uint16_t>(z)};
+                                    segment_cache.emplace_back(segment);
+                                    counter = 0;
+                                }
+                            }
+                        }
+                    }
+                }
+
+                // flush...
+                if (!segment_cache.empty()) {
+                    std::scoped_lock lock{mutex};
+                    std::copy(segment_cache.cbegin(), segment_cache.cend(), std::back_inserter(segments));
+                }
+            }
+        });
+    }
+    for (auto &&w : workers) { w.join(); }
+    return segments;
+}
+
+std::unique_ptr<Volume> Volume::from(const Mesh &mesh, size_t resolution, glm::mat4 camera_to_world) noexcept {
+    check_resolution(resolution);
+    auto t0 = std::chrono::high_resolution_clock::now();
+    auto segments = compute_segments(mesh, camera_to_world, resolution);
+    auto t1 = std::chrono::high_resolution_clock::now();
+    using namespace std::chrono_literals;
+    std::cout << "Found " << segments.size() << " segments in " << (t1 - t0) / 1ns * 1e-6 << " ms" << std::endl;
+    return std::unique_ptr<Volume>{new Volume{Octree::build(segments, resolution), resolution}};
+}
+
+Volume::Volume(std::unique_ptr<Octree> octree, size_t resolution) noexcept
+    : _octree{std::move(octree)}, _resolution{resolution} {}
+
+bool Volume::trace_any(Ray ray) const noexcept { return _octree->trace_any(ray); }
+Hit Volume::trace_closest(Ray ray) const noexcept { return _octree->trace_closest(ray); }
+void Volume::dump(const std::filesystem::path &path) const noexcept { _octree->dump(path); }
+
+Volume::~Volume() noexcept = default;
+
+#ifdef SV_CUDA_AVAILABLE
+std::unique_ptr<CUDAOctree> Volume::cuda() const noexcept {
+    return CUDAOctree::create(_octree->nodes().data(), _octree->nodes().size(), _resolution);
+}
+#endif
+```
+
+### src/core/volume.h
+```
+//
+// Created by Mike Smith on 2021/6/12.
+//
+
+#pragma once
+
+#include <memory>
+#include <core/mesh.h>
+#include <core/segment.h>
+
+#ifdef SV_CUDA_AVAILABLE
+#include <gpu/cuda_octree.h>
+#endif
+
+class Octree;
+
+class Volume {
+
+private:
+    std::unique_ptr<Octree> _octree;
+    std::unique_ptr<Mesh> _mesh;
+    size_t _resolution;
+
+private:
+    Volume(std::unique_ptr<Octree> octree, size_t resolution) noexcept;
+
+public:
+    ~Volume() noexcept;
+    [[nodiscard]] static std::unique_ptr<Volume> from(
+        const Mesh &mesh, size_t resolution,
+        glm::mat4 camera_to_world = glm::identity<glm::mat4>()) noexcept;
+    [[nodiscard]] auto resolution() const noexcept { return _resolution; }
+    [[nodiscard]] bool trace_any(Ray ray) const noexcept;
+    [[nodiscard]] Hit trace_closest(Ray ray) const noexcept;
+    void dump(const std::filesystem::path &path) const noexcept;
+
+#ifdef SV_CUDA_AVAILABLE
+    [[nodiscard]] std::unique_ptr<CUDAOctree> cuda() const noexcept;
+#endif
+
+};
+```
+
+### src/core/window.cpp
+```
+//
+// Created by Mike Smith on 2021/6/13.
+//
+
+#include <iostream>
+
+#include <glad/glad.h>
+#include <imgui/backends/imgui_impl_glfw.h>
+#include <imgui/backends/imgui_impl_opengl3.h>
+
+#include <core/window.h>
+
+static void glfw_error_callback(int error, const char *description) {
+    std::cerr << "Glfw Error " << error << ": " << description << std::endl;
+}
+
+Window::Window(const char *title, uint32_t width, uint32_t height) noexcept {
+
+    glfwSetErrorCallback(glfw_error_callback);
+    if (!glfwInit()) {
+        std::cerr << "Failed to initialize GLFW" << std::endl;
+        exit(-1);
+    }
+
+    glfwWindowHint(GLFW_CONTEXT_VERSION_MAJOR, 4);
+    glfwWindowHint(GLFW_CONTEXT_VERSION_MINOR, 1);
+    glfwWindowHint(GLFW_OPENGL_PROFILE, GLFW_OPENGL_CORE_PROFILE);
+    glfwWindowHint(GLFW_OPENGL_FORWARD_COMPAT, GL_TRUE);
+
+    if (_handle = glfwCreateWindow(static_cast<int>(width), static_cast<int>(height), title, nullptr, nullptr); _handle == nullptr) {
+        std::cerr << "Failed to create window" << std::endl;
+        exit(-1);
+    }
+    glfwMakeContextCurrent(_handle);
+    glfwSwapInterval(0);
+
+    if (gladLoadGLLoader(reinterpret_cast<GLADloadproc>(glfwGetProcAddress)) == 0) {
+        std::cerr << "Failed to initialize OpenGL loader" << std::endl;
+        exit(-1);
+    }
+
+    // Setup Dear ImGui context
+    IMGUI_CHECKVERSION();
+    ImGui::CreateContext();
+    ImGui::StyleColorsLight();
+    ImGui_ImplGlfw_InitForOpenGL(_handle, true);
+    ImGui_ImplOpenGL3_Init("#version 150");
+}
+
+void Window::_begin_frame(Window::Handle) noexcept {
+    glfwPollEvents();
+    ImGui_ImplOpenGL3_NewFrame();
+    ImGui_ImplGlfw_NewFrame();
+    ImGui::NewFrame();
+}
+
+void Window::_end_frame(Window::Handle handle) noexcept {
+    ImGui::Render();
+    int display_w, display_h;
+    glfwGetFramebufferSize(handle, &display_w, &display_h);
+    glViewport(0, 0, display_w, display_h);
+    glClearColor(0.45f, 0.55f, 0.60f, 1.00f);
+    glClear(GL_COLOR_BUFFER_BIT);
+    ImGui_ImplOpenGL3_RenderDrawData(ImGui::GetDrawData());
+    glfwSwapBuffers(handle);
+}
+
+Window::~Window() noexcept {
+    ImGui_ImplOpenGL3_Shutdown();
+    ImGui_ImplGlfw_Shutdown();
+    ImGui::DestroyContext();
+    glfwDestroyWindow(_handle);
+    glfwTerminate();
+}
+
+bool Window::should_close() const noexcept { return glfwWindowShouldClose(_handle); }
+void Window::notify_close() noexcept { glfwSetWindowShouldClose(_handle, true); }
+```
+
+### src/core/window.h
+```
+//
+// Created by Mike Smith on 2021/6/13.
+//
+
+#pragma once
+
+#include <type_traits>
+
+#include <glm/glm.hpp>
+#include <glad/glad.h>
+#include <glfw/glfw3.h>
+#include <imgui/imgui.h>
+
+class Window {
+
+public:
+    using Handle = GLFWwindow *;
+
+private:
+    Handle _handle{nullptr};
+
+private:
+    static void _begin_frame(Handle) noexcept;
+    static void _end_frame(Handle) noexcept;
+
+public:
+    Window(const char *title, uint32_t width, uint32_t height) noexcept;
+    Window(const char *title, glm::uvec2 size = {1280, 720}) noexcept : Window{title, size.x, size.y} {}
+    ~Window() noexcept;
+
+    [[nodiscard]] auto handle() const noexcept { return _handle; }
+    [[nodiscard]] bool should_close() const noexcept;
+    
+    void notify_close() noexcept;
+    
+    template<typename Frame, std::enable_if_t<std::is_invocable_v<Frame>, int> = 0>
+    void with_frame(Frame &&frame) {
+        _begin_frame(_handle);
+        frame();
+        _end_frame(_handle);
+    }
+
+    template<typename Frame, std::enable_if_t<std::is_invocable_v<Frame>, int> = 0>
+    void run(Frame &&frame) {
+        while (!should_close()) { with_frame(std::forward<Frame>(frame)); }
+    }
+};
+```
+
+### src/gpu/common.h
+```
+#pragma once
+
+#include <cstddef>
+#include <cstdint>
+#include <cstdio>
+#include <cstdlib>
+#include <memory>
+
+#include <cuda_runtime.h>
+#include <core/ray.h>
+
+#ifdef __CUDACC__
+#define SV_GPU_CODE
+#endif
+
+#ifdef SV_GPU_CODE
+#define SV_XPU __host__ __device__
+#else
+#define SV_XPU
+#endif
+
+namespace detail {
+    inline void check_cuda(cudaError_t error, const char *file, int line) noexcept {
+        if (error != cudaSuccess) {
+            fprintf(stderr, "CUDA Error: %s [%s:$d]", cudaGetErrorString(error), file, line);
+            exit(-1);
+        }
+    }
+}
+
+#define CHECK_CUDA(...) detail::check_cuda(__VA_ARGS__, __FILE__, __LINE__)
+
+template<typename T>
+class CUDABuffer {
+
+private:
+    T *_data{nullptr};
+    size_t _size;
+
+    explicit CUDABuffer(size_t size) noexcept
+        : _size{size} { CHECK_CUDA(cudaMalloc(&_data, sizeof(T) * size)); }
+
+public:
+    CUDABuffer(CUDABuffer &&) noexcept = delete;
+    CUDABuffer(const CUDABuffer &) noexcept = delete;
+    CUDABuffer &operator=(CUDABuffer &&) noexcept = delete;
+    CUDABuffer &operator=(const CUDABuffer &) noexcept = delete;
+
+    ~CUDABuffer() noexcept { cudaFree(_data); }
+    [[nodiscard]] static auto create(size_t size) noexcept { return std::unique_ptr<CUDABuffer>{new CUDABuffer{size}}; }
+    [[nodiscard]] auto size() const noexcept { return _size; }
+    [[nodiscard]] auto size_bytes() const noexcept { return _size * sizeof(T); }
+    [[nodiscard]] auto data() noexcept { return _data; }
+    [[nodiscard]] auto data() const noexcept { return const_cast<const T *>(_data); }
+    void upload(const T *data) noexcept { CHECK_CUDA(cudaMemcpyAsync(_data, data, size_bytes(), cudaMemcpyHostToDevice)); }
+    void download(T *data) noexcept { CHECK_CUDA(cudaMemcpyAsync(data, _data, size_bytes(), cudaMemcpyDeviceToHost)); }
+};
+```
+
+### src/gpu/cuda_camera.cu
+```
+#include <gpu/cuda_camera.h>
+
+template<uint32_t times>
+[[nodiscard]] SV_XPU auto tea(glm::uvec2 xy) noexcept {
+    auto v0 = xy.x;
+    auto v1 = xy.y;
+    auto s0 = 0u;
+    for (auto n = 0u; n < times; n++) {
+        s0 += 0x9e3779b9u;
+        v0 += ((v1 << 4u) + 0xa341316cu) ^ (v1 + s0) ^ ((v1 >> 5u) + 0xc8013ea4u);
+        v1 += ((v0 << 4u) + 0xad90777du) ^ (v0 + s0) ^ ((v0 >> 5u) + 0x7e95761eu);
+    }
+    return v0;
+};
+
+template<uint32_t base>
+[[nodiscard]] SV_XPU auto halton(uint32_t i) noexcept {
+    auto f = 1.0f;
+    auto inv_base = 1.0f / base;
+    auto r = 0.0f;
+    while (i > 0u) {
+        f = f * inv_base;
+        r = r + f * (i % base);
+        i /= base;
+    }
+    return r;
+}
+
+[[nodiscard]] SV_XPU auto pixel_sample(glm::uvec2 p, uint32_t frame) noexcept {
+    auto index = tea<4u>(p) + frame;
+    auto x = halton<2>(index);
+    auto y = halton<3>(index);
+    return glm::vec2{x, y};
+}
+
+__global__ void generate_rays(Ray *rays, uint32_t w, uint32_t h, uint32_t frame, glm::vec3 o, glm::mat3 m, float pixel_scale, float z_plane) {
+    auto x = threadIdx.x + blockIdx.x * blockDim.x;
+    auto y = threadIdx.y + blockIdx.y * blockDim.y;
+    if (x >= w || y >= h) { return; }
+    auto tid = y * w + x;
+    auto xy = glm::uvec2{x, y};
+    auto p = pixel_sample(xy, frame) + glm::vec2{xy};
+    auto d = glm::normalize(m * glm::vec3{p.x * pixel_scale - 1.0f, 1.0f - p.y * pixel_scale, -z_plane});
+    rays[tid] = {o, 0.0f, d, std::numeric_limits<float>::max()};
+}
+
+void cuda_camera_generate_rays(
+    Camera cam, glm::mat4 world_to_object,
+    Ray *rays, uint32_t w, uint32_t h, uint32_t frame) noexcept {
+    auto o = glm::vec3{world_to_object * glm::vec4{cam.position(), 1.0f}};
+    auto m = glm::mat3{world_to_object} * cam.rotation_to_world();
+    auto pixel_scale = cam.pixel_scale();
+    auto z_plane = cam.z_plane();
+    static constexpr auto block_size = 16u;
+    auto bx = (w + block_size - 1u) / block_size;
+    auto by = (h + block_size - 1u) / block_size;
+    generate_rays<<<dim3(bx, by), dim3(block_size, block_size)>>>(rays, w, h, frame, o, m, pixel_scale, z_plane);
+}
+```
+
+### src/gpu/cuda_camera.h
+```
+#pragma once
+
+#include <gpu/common.h>
+#include <core/ray.h>
+#include <core/camera.h>
+
+void cuda_camera_generate_rays(
+    Camera cam, glm::mat4 world_to_object,
+    Ray *rays, uint32_t w, uint32_t h, uint32_t frame) noexcept;
+```
+
+### src/gpu/cuda_octree.cu
+```
+//
+// Created by Mike on 6/16/2021.
+//
+
+#include <glm/gtx/component_wise.hpp>
+#include <gpu/cuda_octree.h>
+
+[[nodiscard]] SV_XPU inline auto _intersect_box(Ray ray, glm::vec3 bbox_min, float bbox_r) noexcept {
+    auto bbox_max = bbox_min + bbox_r;
+    auto t_min = (bbox_min - ray.o) / ray.d;
+    auto t_max = (bbox_max - ray.o) / ray.d;
+    auto o_mat = glm::mat3{ray.o, ray.o, ray.o};
+    glm::vec3 p_min[]{ray.o + t_min.x * ray.d, ray.o + t_min.y * ray.d, ray.o + t_min.z * ray.d};
+    glm::vec3 p_max[]{ray.o + t_max.x * ray.d, ray.o + t_max.y * ray.d, ray.o + t_max.z * ray.d};
+    auto valid = [ray, bbox_min, bbox_max](auto t, auto p) noexcept {
+        return glm::not_(glm::isnan(t))
+               && glm::greaterThanEqual(t, glm::vec3{ray.t_min})
+               && glm::lessThanEqual(t, glm::vec3{ray.t_max})
+               && glm::bvec3{p[0].y >= bbox_min.y && p[0].y <= bbox_max.y
+                                 && p[0].z >= bbox_min.z && p[0].z <= bbox_max.z,
+                             p[1].z >= bbox_min.z && p[1].z <= bbox_max.z
+                                 && p[1].x >= bbox_min.x && p[1].x <= bbox_max.x,
+                             p[2].x >= bbox_min.x && p[2].x <= bbox_max.x
+                                 && p[2].y >= bbox_min.y && p[2].y <= bbox_max.y};
+    };
+    auto t_invalid = glm::vec3{std::numeric_limits<float>::max()};
+    auto valid_min = valid(t_min, p_min);
+    auto valid_max = valid(t_max, p_max);
+    t_min = glm::mix(t_invalid, t_min, valid_min);
+    t_max = glm::mix(t_invalid, t_max, valid_max);
+    auto t = glm::min(t_min, t_max);
+    auto is_min = glm::lessThanEqual(t_min, t_max);
+    Hit hit{};
+    hit.t = std::numeric_limits<float>::max();
+    hit.valid = false;
+    if (t.x < hit.t) {
+        hit.p = is_min.x ? p_min[0] : p_max[0];
+        hit.t = t.x;
+        hit.ng = {is_min.x ? -1.0f : 1.0f, 0.0f, 0.0f};
+        hit.valid = valid_min.x || valid_max.x;
+    }
+    if (t.y < hit.t) {
+        hit.p = is_min.y ? p_min[1] : p_max[1];
+        hit.t = t.y;
+        hit.ng = {0.0f, is_min.y ? -1.0f : 1.0f, 0.0f};
+        hit.valid = valid_min.y || valid_max.y;
+    }
+    if (t.z < hit.t) {
+        hit.p = is_min.z ? p_min[2] : p_max[2];
+        hit.t = t.z;
+        hit.ng = {0.0f, 0.0f, is_min.z ? -1.0f : 1.0f};
+        hit.valid = valid_min.z || valid_max.z;
+    }
+    return hit;
+}
+
+static constexpr auto m000 = 0b00000001u;
+static constexpr auto m001 = 0b00000010u;
+static constexpr auto m011 = 0b00000100u;
+static constexpr auto m010 = 0b00001000u;
+static constexpr auto m110 = 0b00010000u;
+static constexpr auto m111 = 0b00100000u;
+static constexpr auto m101 = 0b01000000u;
+static constexpr auto m100 = 0b10000000u;
+__constant__ uint32_t _node_m[]{m000, m001, m011, m010, m110, m111, m101, m100};
+
+static constexpr auto d000 = float3{0.0f, 0.0f, 0.0f};
+static constexpr auto d001 = float3{0.0f, 0.0f, 1.0f};
+static constexpr auto d010 = float3{0.0f, 1.0f, 0.0f};
+static constexpr auto d011 = float3{0.0f, 1.0f, 1.0f};
+static constexpr auto d100 = float3{1.0f, 0.0f, 0.0f};
+static constexpr auto d101 = float3{1.0f, 0.0f, 1.0f};
+static constexpr auto d110 = float3{1.0f, 1.0f, 0.0f};
+static constexpr auto d111 = float3{1.0f, 1.0f, 1.0f};
+__constant__ float3 _node_d[]{d000, d001, d011, d010, d110, d111, d101, d100};
+
+__global__ void octree_trace_closest(const CUDAOctree::Node *nodes, uint32_t resolution, const Ray *rays, Hit *hits, uint32_t w, uint32_t h) {
+
+    auto x = threadIdx.x + blockIdx.x * blockDim.x;
+    auto y = threadIdx.y + blockIdx.y * blockDim.y;
+    if (x >= w || y >= h) { return; }
+
+    auto tid = x + y * w;
+
+    Hit closest{};
+    closest.t = std::numeric_limits<float>::max();
+    closest.valid = false;
+    if (nodes[0].empty()) {
+        hits[tid] = closest;
+        return;
+    }
+    
+    struct alignas(16) TraceContext {
+        glm::vec3 o;
+        float r;
+        uint32_t index;
+        float t;
+    };
+
+    static constexpr auto stack_size = 32u;
+    TraceContext stack[stack_size];
+    auto sp = 0u;
+
+    auto ray = rays[tid];
+
+    auto add_node = [&sp, ray, &stack, &closest, nodes](auto index, auto o, auto r) noexcept {
+        if (auto hit = _intersect_box(ray, o, r); hit.valid && hit.t < closest.t) {
+            auto node = nodes[index];
+            if (node.full()) {
+                closest = hit;
+            } else if (r == 2.0f) {
+                #pragma unroll
+                for (auto i = 0u; i < 8u; i++) {
+                    if ((node.child_masks() & _node_m[i])) {
+                        auto d = _node_d[i];
+                        if (auto child_hit = _intersect_box(ray, o + glm::vec3{d.x, d.y, d.z}, 1.0f);
+                            child_hit.valid && child_hit.t < closest.t) {
+                            closest = child_hit;
+                        }
+                    }
+                }
+            } else {
+                if (sp == stack_size) { printf("warning: stack overflows\n"); }
+                stack[sp++] = {o, r, index, hit.t};
+            }
+        }
+    };
+
+    add_node(0u, glm::vec3{}, static_cast<float>(resolution));
+    while (sp != 0u) {
+        auto ctx = stack[--sp];
+        if (ctx.t >= closest.t) { continue; }
+        auto node = nodes[ctx.index];
+        auto half_r = ctx.r * 0.5f;
+        #pragma unroll
+        for (auto i = 0u; i < 8u; i++) {
+            if (node.child_masks() & _node_m[i]) {
+                auto d = _node_d[i];
+                add_node(ctx.index + node.child_offset() + i, ctx.o + glm::vec3{d.x, d.y, d.z} * half_r, half_r);
+            }
+        }
+    }
+
+    hits[tid] = closest;
+}
+
+void CUDAOctree::trace_closest(const Ray *rays, Hit *hits, uint32_t width, uint32_t height) const noexcept {
+    static constexpr auto block_size = 16u;
+    auto blocks_x = (width + block_size - 1u) / block_size;
+    auto blocks_y = (height + block_size - 1u) / block_size;
+    octree_trace_closest<<<dim3(blocks_x, blocks_y), dim3(block_size, block_size)>>>(_nodes->data(), _resolution, rays, hits, width, height);
+}
+```
+
+### src/gpu/cuda_octree.h
+```
+//
+// Created by Mike on 6/16/2021.
+//
+
+#pragma once
+
+#include <memory>
+#include <gpu/common.h>
+
+class Volume;
+
+class CUDAOctree {
+
+    friend class Volume;
+
+public:
+    class alignas(8) Node {
+
+    private:
+        uint32_t _child_offset{};
+        uint8_t _child_masks{};
+        bool _full{};
+
+    public:
+        [[nodiscard]] SV_XPU auto child_masks() const noexcept { return _child_masks; }
+        [[nodiscard]] SV_XPU auto child_offset() const noexcept { return _child_offset; }
+        [[nodiscard]] SV_XPU auto empty() const noexcept { return child_masks() == 0u; }
+        [[nodiscard]] SV_XPU auto full() const noexcept { return _full; }
+    };
+
+private:
+    std::unique_ptr<CUDABuffer<Node>> _nodes{nullptr};
+    uint32_t _resolution{0u};
+
+    [[nodiscard]] static auto create(const void *nodes, size_t count, uint32_t res) noexcept {
+        auto tree = std::make_unique<CUDAOctree>();
+        tree->_nodes = CUDABuffer<Node>::create(count);
+        tree->_nodes->upload(reinterpret_cast<const Node *>(nodes));
+        tree->_resolution = res;
+        return tree;
+    }
+
+public:
+    void trace_closest(const Ray *rays, Hit *hits, uint32_t w, uint32_t h) const noexcept;
+};
+```

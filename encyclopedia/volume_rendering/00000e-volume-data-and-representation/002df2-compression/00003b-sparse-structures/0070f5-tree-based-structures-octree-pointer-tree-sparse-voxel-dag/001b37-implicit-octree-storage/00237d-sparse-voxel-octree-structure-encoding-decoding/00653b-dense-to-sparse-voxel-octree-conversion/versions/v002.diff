@@ -1,0 +1,256 @@
+--- v001.md
++++ v002.md
+@@ -1,12 +1,11 @@
+ # Dense-to-Sparse Voxel Octree Conversion
+ 
+-Also called: Sparse Voxel Octree Construction, Octree Deduplication
+ 
+ ## Overview
+-This method converts a fixed-size dense 3D voxel grid into a memory-efficient sparse octree structure by recursively hashing child nodes to detect and merge identical subtrees [S1, unofficial]. It sets itself apart from sibling methods like [Tolerance-based Voxel Fusion](5866-tolerance-based-voxel-fusion.md) by performing exact structural deduplication rather than geometric approximation, and from [Sparse Voxel DAG](5984-sparse-voxel-dag.md) by using a hash-based grouping phase rather than explicit pointer sharing during construction [S1, unofficial].
++This method converts a fixed-size dense 3D voxel grid into a sparse octree structure by recursively hashing child nodes to detect and merge identical subtrees [S1, unofficial].
+ 
+ ## How it works
+-**Inputs:** A dense voxel grid (`DenseVoxelData`) of depth $d$.
+-**Outputs:** A sparse octree (`VoxelTree`) with merged identical subtrees.
++**Inputs:** A dense voxel grid (`DenseVoxelData`) of depth $d$ [S1, unofficial].
++**Outputs:** A sparse octree (`VoxelTree`) with merged identical subtrees [S1, unofficial].
+ 
+ **Data Structures:**
+@@ -32,5 +31,5 @@
+ 1.  **Initialize Dense Grid:** Set `size` to $2^d$. Allocate `data` vector of size $2^{3d}$ containing empty `VoxelNode` instances [S1, unofficial].
+ 2.  **Pre-calculate Capacity:** Estimate initial sparse tree capacity for memory pre-allocation. Calculate the sum of $2^{3i}$ for $i$ from 1 to $depth$, multiply by 10 (bytes per node) plus 1, then multiply by 4 (bytes per u32) [S1, unofficial].
+-3.  **Initialize Level Buckets:** Create a `levels` vector where `levels[0]` is reserved for the root node, and `levels[x]` is reserved for $8^{x+1}$ nodes [S1, unofficial].
++3.  **Initialize Level Buckets:** Create a `levels` vector where `levels[0]` is reserved for 1 node, and `levels[x]` is reserved for $8^{x+1}$ nodes [S1, unofficial].
+ 4.  **Recursive Traversal and Hashing (`do_child`):**
+     *   Traverse the dense grid recursively.
+@@ -53,120 +52,110 @@
+ 
+ ```python
+-# Data Structures
+ class VoxelNode:
+-    childmask: u8
+-    flags: u8
+-    colour: [u8; 3]
+-    emission: u8
+-    metalness: u8
+-    roughness: u8
++    def __init__(self):
++        self.childmask = 0
++        self.flags = 0
++        self.colour = [0, 0, 0]
++        self.emission = 0
++        self.metalness = 0
++        self.roughness = 0
+ 
+-class DenseVoxelData:
+-    size: usize
+-    depth: usize
+-    data: Vec[VoxelNode]
++class SparseNode:
++    def __init__(self, data, childmask, children_hashes=None):
++        self.data = data
++        self.childmask = childmask
++        self.children_hashes = children_hashes or []
++        self.ptr = None
+ 
+-class VoxelTree:
+-    base: *u32
+-    allocator: *u32
+-    layout: Layout
++class HashEntry:
++    def __init__(self, hash_val, node):
++        self.hash = hash_val
++        self.node = node
+ 
+-# Step 1: Initialize
+-def init_dense(depth: usize) -> DenseVoxelData:
++def compute_hash(node_id, child_hashes):
++    return hash((node_id,) + tuple(child_hashes))
++
++def octant_coords(octant, level, base_x, base_y, base_z, size):
++    # Standard Morton/Z-order offset calculation [G]
++    x, y, z = base_x, base_y, base_z
++    step = size >> (level + 1)
++    if octant & 1: x += step
++    if octant & 2: y += step
++    if octant & 4: z += step
++    return x, y, z
++
++def do_child(x, y, z, level, max_depth, dense_data, levels, node_counter):
++    node_id = next(node_counter)
++    if level == max_depth:
++        idx = (x * dense_data.size**2 + y * dense_data.size + z)
++        node_data = dense_data.data[idx]
++        sparse_node = SparseNode(data=node_data, childmask=0)
++        h = compute_hash(node_id, [0] * 8)
++        levels[level].append(HashEntry(h, sparse_node))
++        return h
++
++    child_hashes = []
++    for i in range(8):
++        cx, cy, cz = octant_coords(i, level, x, y, z, dense_data.size)
++        child_hashes.append(do_child(cx, cy, cz, level + 1, max_depth, dense_data, levels, node_counter))
++
++    sparse_node = SparseNode(data=None, childmask=0xFF, children_hashes=child_hashes)
++    h = compute_hash(node_id, child_hashes)
++    levels[level].append(HashEntry(h, sparse_node))
++    return h
++
++def convert_dense_to_sparse(depth):
+     size = 1 << depth
+-    data = [VoxelNode() for _ in range(size ** 3)]
+-    return DenseVoxelData(size=size, depth=depth + 1, data=data)
++    dense_data = DenseVoxelData(size=size, depth=depth + 1, data=[VoxelNode()] * (size ** 3))
+ 
+-# Step 4: Recursive Hashing
+-def do_child(node: VoxelNode, level: usize, max_depth: usize, levels: List[List[HashEntry]]) -> HashEntry:
+-    if level == max_depth:
+-        # Leaf level
+-        sparse_node = SparseNode(data=node, childmask=0)
+-        hash_val = compute_hash(sparse_node.id, [0]*8) # No children
+-        levels[level].append(HashEntry(hash=hash_val, node=sparse_node))
+-        return HashEntry(hash=hash_val, node=sparse_node)
+-    
+-    # Internal node
+-    children_hashes = []
+-    for i in range(8):
+-        # Recursively process children based on octant index
+-        child_entry = do_child_recursive_child(i, level + 1, max_depth, levels)
+-        children_hashes.append(child_entry.hash)
+-    
+-    # Compute hash of current node based on children hashes
+-    current_hash = compute_hash(node.id, children_hashes)
+-    
+-    # Create sparse node with children hashes
+-    sparse_node = SparseNode(data=node, childmask=0xFF, children_hashes=children_hashes)
+-    levels[level].append(HashEntry(hash=current_hash, node=sparse_node))
+-    
+-    return HashEntry(hash=current_hash, node=sparse_node)
++    # Pre-calculate capacity
++    capacity = (sum(2**(3*i) for i in range(1, depth + 1)) * 10 + 1) * 4
+ 
+-# Step 5: Sort
+-def sort_levels(levels: List[List[HashEntry]]):
+-    for level in levels:
+-        level.sort(key=lambda x: x.hash)
++    # Initialize levels
++    levels = [[] for _ in range(depth + 1)]
++    levels[0].append(HashEntry(0, SparseNode(data=None, childmask=0)))
+ 
+-# Step 6: Deduplication
+-def deduplicate_levels(levels: List[List[HashEntry]]) -> VoxelTree:
+-    tree = VoxelTree()
+-    hash_map = HashMap<u64, NodePtr>
+-    
+-    for level in range(1, len(levels)):
++    node_counter = iter(range(1, 10**9))
++    do_child(0, 0, 0, 0, depth, dense_data, levels, node_counter)
++
++    # Sort for deduplication
++    for l in range(1, len(levels)):
++        levels[l].sort(key=lambda e: e.hash)
++
++    # Iterative deduplication
++    tree2 = VoxelTree()
++    hash_map = {}
++    for l in range(1, len(levels)):
+         prev_entry = None
+-        for entry in levels[level]:
++        for entry in levels[l]:
+             if entry.hash == prev_entry.hash:
+-                # Deduplicate: point to previous node
+                 entry.node.ptr = prev_entry.node.ptr
+             else:
+-                # Allocate new node
+-                new_ptr = tree.allocate(entry.node)
+-                hash_map[entry.hash] = new_ptr
+-                entry.node.ptr = new_ptr
++                entry.node.ptr = tree2.allocate(entry.node)
++                hash_map[entry.hash] = entry.node.ptr
+             prev_entry = entry
+-            
+-    return tree
+ 
+-# Step 8: Rebuild
+-def look_node(node: SparseNode, hash_map: HashMap[u64, NodePtr], tree: VoxelTree) -> NodePtr:
+-    if node.hash in hash_map:
+-        return hash_map[node.hash]
+-    
+-    new_ptr = tree.allocate(node)
+-    hash_map[node.hash] = new_ptr
+-    
+-    # Recursively process children
+-    for child_hash in node.children_hashes:
+-        # Find corresponding child node in previous level or intermediate structure
+-        # This step assumes access to the intermediate structure built in do_child
+-        child_node = find_node_by_hash(child_hash)
+-        look_node(child_node, hash_map, tree)
+-        
+-    return new_ptr
++    # Remove empty children (flagged during hash computation)
++    # Implementation detail: traverse and clear childmask bits for empty subtrees
+ 
+-# Main Execution
+-def convert_dense_to_sparse(dense_data: DenseVoxelData) -> VoxelTree:
+-    levels = [[] for _ in range(dense_data.depth)]
+-    levels[0].append(HashEntry(hash=0, node=RootNode())) # Reserve root
+-    
+-    # Traverse and hash
+-    do_child(dense_data.data[0], 0, dense_data.depth - 1, levels)
+-    
+-    # Sort and deduplicate
+-    sort_levels(levels)
+-    tree = deduplicate_levels(levels)
+-    
+-    # Remove empty children (implementation detail omitted, see Step 7)
+-    remove_empty_children(tree)
+-    
+-    # Rebuild final tree with exact sizing
++    # Rebuild final tree using look_node
+     final_tree = VoxelTree()
+-    hash_map = HashMap[u64, NodePtr]()
+-    look_node(levels[0][0].node, hash_map, final_tree)
+-    
+-    # Free intermediate structures and reallocate
+-    free_intermediate()
++    final_map = {}
++    def look_node(node, parent_map, target_tree):
++        if node.hash in parent_map:
++            return parent_map[node.hash]
++        new_ptr = target_tree.allocate(node)
++        parent_map[node.hash] = new_ptr
++        if node.children_hashes:
++            for ch_hash in node.children_hashes:
++                child_node = next(n for e in levels if e.hash == ch_hash for n in [e.node])
++                look_node(child_node, parent_map, target_tree)
++        return new_ptr
++
++    look_node(levels[0][0].node, final_map, final_tree)
++
++    # Free original and reallocate
++    del dense_data
+     final_tree.reallocate_exact()
+-    
+     return final_tree
+ ```
+@@ -176,15 +165,15 @@
+ 
+ **Pitfalls:**
+-*   **Hash Collisions:** Using a default hasher (e.g., `DefaultHasher`) may result in collisions where two different subtrees produce the same hash, leading to incorrect merging. A robust implementation should use a stronger hash function or verify equality on hash match [S1, unofficial].
++*   **Hash Collisions:** Using a default hasher (e.g., `DefaultHasher`) may result in collisions where two different subtrees produce the same hash, leading to incorrect merging [S1, unofficial].
+ 
+ ## Operating characteristics
+ *   **Time Complexity:** $O(N)$ for the initial traversal where $N$ is the number of dense voxels, plus $O(M \log M)$ for sorting where $M$ is the number of sparse nodes, plus $O(M)$ for rebuilding the tree [S1, unofficial].
+ *   **Memory Complexity:** Proportional to the number of unique subtrees $M$. The method pre-allocates based on a theoretical maximum capacity before reallocating to exact size [S1, unofficial].
+-*   **Strengths:** Significantly reduces memory usage for scenes with repetitive structures (e.g., natural terrain, repeated objects) by merging identical subtrees.
+-*   **Limitations:** The sorting step ($O(M \log M)$) can be a bottleneck for very large, diverse scenes with few identical subtrees. Hash collisions can corrupt the structure if not handled [S1, unofficial].
+-*   **When to use:** Ideal for static scenes with high redundancy. Not suitable for highly dynamic or unique data where deduplication gains are minimal.
++*   **Strengths:** Not given in the sources.
++*   **Limitations:** Not given in the sources.
++*   **When to use:** Not given in the sources.
+ 
+ ## Background
+-This method originates from the implementation details of the `svdag` project by Sam H. Smith, which explores sparse voxel octree and DAG structures for volume rendering [S1, unofficial]. It is part of a broader effort to optimize memory usage in real-time volume rendering by leveraging structural redundancy.
++This method originates from the implementation details of the `svdag` project [S1, unofficial].
+ 
+ ## Sources

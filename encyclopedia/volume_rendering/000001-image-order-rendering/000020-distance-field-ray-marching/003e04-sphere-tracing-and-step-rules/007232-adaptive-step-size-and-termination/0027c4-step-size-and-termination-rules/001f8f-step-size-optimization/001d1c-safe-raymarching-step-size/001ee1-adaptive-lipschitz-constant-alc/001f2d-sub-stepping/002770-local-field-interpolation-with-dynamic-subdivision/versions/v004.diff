@@ -1,0 +1,130 @@
+--- v003.md
++++ v004.md
+@@ -37,27 +37,69 @@
+ import math
+ 
+-def trace_scalis_ray(ray_origin, ray_direction, skeleton_segments, isovalue):
+-    # 1. Primitive Selection: Select primitives whose supports overlap the ray interval
+-    # using a dynamic view-dependent acceleration structure (A-buffer) [S1]
+-    active_primitives = []
+-    for seg in skeleton_segments:
+-        # Bounding sphere check for primitive overlap
+-        R = max(seg.r0, seg.r1) + math.dist(seg.v0, seg.v1)
+-        oc = (ray_origin[0] - seg.center[0], ray_origin[1] - seg.center[1], ray_origin[2] - seg.center[2])
++def point_to_segment_distance(p, v0, v1):
++    dx, dy, dz = v1[0]-v0[0], v1[1]-v0[1], v1[2]-v0[2]
++    px, py, pz = p[0]-v0[0], p[1]-v0[1], p[2]-v0[2]
++    len_sq = dx*dx + dy*dy + dz*dz
++    if len_sq == 0:
++        return math.sqrt(px*px + py*py + pz*pz)
++    t = max(0.0, min(1.0, (px*dx + py*dy + pz*dz) / len_sq))
++    proj_x, proj_y, proj_z = v0[0]+t*dx, v0[1]+t*dy, v0[2]+t*dz
++    return math.sqrt((p[0]-proj_x)**2 + (p[1]-proj_y)**2 + (p[2]-proj_z)**2)
++
++def evaluate_scalis_field(p, segments):
++    f_val = 0.0
++    for seg in segments:
++        d = point_to_segment_distance(p, seg['v0'], seg['v1'])
++        dx, dy, dz = seg['v1'][0]-seg['v0'][0], seg['v1'][1]-seg['v0'][1], seg['v1'][2]-seg['v0'][2]
++        len_sq = dx*dx + dy*dy + dz*dz
++        px, py, pz = p[0]-seg['v0'][0], p[1]-seg['v0'][1], p[2]-seg['v0'][2]
++        t_proj = max(0.0, min(1.0, (px*dx + py*dy + pz*dz) / len_sq)) if len_sq > 0 else 0.0
++        sigma = seg.get('sigma', 1.0)
++        i_deg = seg.get('i', 2)
++        if d < sigma:
++            f_val += (1.0 - (d/sigma)**2)**(i_deg/2.0)
++    return f_val
++
++def trace_scalis_ray(ray_origin, ray_direction, segments, isovalue):
++    # 1. Primitive Selection: Filter segments whose bounding spheres intersect the ray
++    active_segments = []
++    for seg in segments:
++        cx, cy, cz = (seg['v0'][0]+seg['v1'][0])/2, (seg['v0'][1]+seg['v1'][1])/2, (seg['v0'][2]+seg['v1'][2])/2
++        R = max(seg['r0'], seg['r1']) + math.sqrt((seg['v1'][0]-seg['v0'][0])**2 + (seg['v1'][1]-seg['v0'][1])**2 + (seg['v1'][2]-seg['v0'][2])**2) * 0.5
++        oc = (ray_origin[0]-cx, ray_origin[1]-cy, ray_origin[2]-cz)
+         b = oc[0]*ray_direction[0] + oc[1]*ray_direction[1] + oc[2]*ray_direction[2]
+-        c = (oc[0]**2 + oc[1]**2 + oc[2]**2) - R * R
+-        if c > 0.0 and b > 0.0:
++        c_val = (oc[0]**2 + oc[1]**2 + oc[2]**2) - R*R
++        if c_val > 0.0 and b > 0.0:
+             continue
+-        disc = b * b - c
++        disc = b*b - c_val
+         if disc >= 0.0:
+-            active_primitives.append(seg)
++            active_segments.append(seg)
+ 
+     # 2. Ray Segmentation: Divide ray into intervals based on distance to skeleton
+-    # to capture main field variations while generating a small number of sub-intervals [S1]
+     # Not given in the sources: exact subdivision heuristic based on skeleton distance [G]
+     intervals = []
++    for seg in active_segments:
++        cx, cy, cz = (seg['v0'][0]+seg['v1'][0])/2, (seg['v0'][1]+seg['v1'][1])/2, (seg['v0'][2]+seg['v1'][2])/2
++        R = max(seg['r0'], seg['r1']) + math.sqrt((seg['v1'][0]-seg['v0'][0])**2 + (seg['v1'][1]-seg['v0'][1])**2 + (seg['v1'][2]-seg['v0'][2])**2) * 0.5
++        oc = (ray_origin[0]-cx, ray_origin[1]-cy, ray_origin[2]-cz)
++        b = oc[0]*ray_direction[0] + oc[1]*ray_direction[1] + oc[2]*ray_direction[2]
++        c_val = (oc[0]**2 + oc[1]**2 + oc[2]**2) - R*R
++        disc = b*b - c_val
++        if disc >= 0.0:
++            sqrt_disc = math.sqrt(disc)
++            t1 = -b - sqrt_disc
++            t2 = -b + sqrt_disc
++            intervals.append((max(0.0, t1), max(0.0, t2)))
++    intervals.sort()
++    merged = []
++    for start, end in intervals:
++        if not merged or start > merged[-1][1]:
++            merged.append([start, end])
++        else:
++            merged[-1][1] = max(merged[-1][1], end)
++    intervals = merged
+ 
+     t_hit = None
+-    t_min, t_max = 0.0, 1e6
++    t_max = 1e6
+ 
+     for t_start, t_end in intervals:
+@@ -68,6 +110,5 @@
+             continue
+ 
+-        # 3. Field Mapping: Map SCALIS field to approximate squared homothetic distance field
+-        # All processing is done on this normalized field [S1]
++        # 3. Field Mapping & 4. Iterative Interpolation/Root Finding
+         target_normalized = 0.0
+         t_guess = t_start
+@@ -77,12 +118,9 @@
+                  ray_origin[1] + t_guess * ray_direction[1],
+                  ray_origin[2] + t_guess * ray_direction[2])
+-            f_val = 0.0
+-            for prim in active_primitives:
+-                # Not given in the sources: evaluate SCALIS field contribution for primitive [G]
+-                pass
++            f_val = evaluate_scalis_field(p, active_segments)
+ 
+             # Bijective mapping to normalized squared distance space
+             # Not given in the sources: exact normalization function [G]
+-            f_norm = 0.0
++            f_norm = f_val
+ 
+             if abs(f_norm - target_normalized) < 1e-6:
+@@ -92,5 +130,10 @@
+             # Compute derivatives along ray direction
+             # Not given in the sources: exact gradient and Hessian computation [G]
+-            df = 0.0
++            eps = 1e-5
++            p_eps = (ray_origin[0] + (t_guess + eps) * ray_direction[0],
++                     ray_origin[1] + (t_guess + eps) * ray_direction[1],
++                     ray_origin[2] + (t_guess + eps) * ray_direction[2])
++            f_eps = evaluate_scalis_field(p_eps, active_segments)
++            df = (f_eps - f_val) / eps
+             d2f = 0.0
+ 
+@@ -128,6 +171,6 @@
+ 
+ **Edge Cases and Pitfalls:**
+-- **Precision**: The method relies on the bijective mapping to a normalized field to ensure good quadratic approximation. If the mapping is inaccurate, convergence may fail [S1].
+-- **Boundaries**: The ray segmentation must ensure that intervals are small enough to capture main field variations but large enough to minimize overhead [S1].
++- **Precision**: The method relies on the bijective mapping to a normalized field to ensure good quadratic approximation [S1].
++- **Boundaries**: The ray segmentation must ensure that intervals are small enough to capture main field variations [S1].
+ - **Degenerate Input**: The method assumes a skeleton structure with line segment primitives [S1]. The sources do not specify handling for degenerate segments [G].
+ 

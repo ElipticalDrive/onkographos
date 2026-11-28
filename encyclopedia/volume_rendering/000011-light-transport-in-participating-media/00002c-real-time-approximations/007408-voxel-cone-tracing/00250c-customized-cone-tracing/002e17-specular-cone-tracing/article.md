@@ -1,0 +1,105 @@
+# Specular Cone Tracing
+
+Also called: Roughness-Based Cone Tracing
+
+## Overview
+Specular Cone Tracing is a real-time approximation method for calculating indirect specular light in participating media or voxel-based rendering. It solves the problem of efficiently estimating environment reflections and indirect lighting by casting cones whose aperture is dynamically scaled by the surface roughness parameter from Physically Based Rendering (PBR) materials [S1, S2, unofficial]. It differs from standard cone tracing by explicitly linking cone width to microfacet roughness, ensuring smooth surfaces use narrow cones for sharp reflections and rough surfaces use wide cones for diffuse-like scattering [S1, S2, unofficial].
+
+## How it works
+**Inputs:** Surface position, surface normal ($N$), incoming camera direction ($I$), and surface roughness ($\alpha$).
+**Outputs:** Indirect specular radiance contribution.
+
+**Data Structures:**
+*   **Cone:** Defined by origin (surface position), direction (reflected view vector), and aperture angle ($\theta$).
+*   **Voxel Grid:** 3D texture storing light transport information.
+
+**Steps:**
+1.  **Calculate Reflected Direction:** Compute the reflection vector $R$ based on the surface normal $N$ and incoming direction $I$.
+    $$ R = \text{reflect}(I, N) $$
+    [S1, unofficial]
+
+2.  **Determine Cone Aperture:** Calculate the cone aperture angle $\theta$ based on the surface roughness $\alpha$.
+    *   For a completely smooth surface ($\alpha \approx 0$), the cone diameter is approximately $1^\circ$ of the hemisphere [S1, unofficial].
+    *   For a completely rough surface ($\alpha \approx 1$), the cone diameter increases up to a maximum of $180^\circ$ coverage of the hemisphere [S1, unofficial].
+    *   The relationship is monotonic: higher roughness results in a higher aperture [S2, unofficial].
+    *   *Note:* The exact interpolation function between $1^\circ$ and $180^\circ$ is not specified in the sources [G]. A linear or power-based interpolation of the roughness parameter is implied by the PBR context.
+
+3.  **Cast Cone:** Cast a cone originating from the surface position in the direction $R$ with aperture $\theta$ into the voxel grid [S2, unofficial].
+
+4.  **Trace and Accumulate:** Perform cone marching through the voxel grid to sample indirect light. The accumulated radiance is the indirect specular radiance [S1, unofficial].
+    $$ \text{Indirect Specular Radiance} = \text{cone trace}(\text{cone Width}, \text{surfacePosition}, R) $$
+    [S1, unofficial]
+
+**Pseudocode:**
+> **Unverified code.** The code below did not pass a test run against a reference implementation, or no test fits it, so it may contain errors.
+
+```python
+def specular_cone_tracing(surface_pos, normal, view_dir, roughness, voxel_grid):
+    # 1. Calculate reflected direction
+    # reflect(I, N) = I - 2 * dot(I, N) * N
+    # Assuming view_dir is the direction from surface to camera (outgoing),
+    # and we want reflection of the incoming light. 
+    # Standard PBR reflection vector R reflects the view vector about the normal.
+    # Note: In many cone tracing implementations, the cone is cast in the 
+    # reflection of the view vector to sample the environment.
+    dot_val = dot(view_dir, normal)
+    reflected_dir = view_dir - 2.0 * dot_val * normal
+    
+    # 2. Determine cone aperture based on roughness
+    # Smooth (roughness ~ 0) -> ~1 degree
+    # Rough (roughness ~ 1) -> 180 degrees
+    # Exact mapping not specified in sources [G]
+    min_aperture_deg = 1.0
+    max_aperture_deg = 180.0
+    
+    # Linear interpolation as a plausible default for [G]
+    # Note: PBR roughness is often squared, but sources do not specify.
+    aperture_deg = min_aperture_deg + roughness * (max_aperture_deg - min_aperture_deg)
+    
+    # 3. Cast cone and trace
+    # cone_trace function handles marching through voxel_grid
+    # using the defined cone geometry
+    indirect_radiance = cone_trace(aperture_deg, surface_pos, reflected_dir, voxel_grid)
+    
+    return indirect_radiance
+```
+
+**Edge Cases and Pitfalls:**
+*   **Smooth Surfaces:** Small apertures require more marching steps to cover the same volume or reach the same distance, increasing computational cost [S2, unofficial].
+*   **Rough Surfaces:** Large apertures may sample too much of the environment, potentially causing blurring or loss of detail if the voxel resolution is insufficient.
+*   **Degenerate Input:** If the normal or view direction are not normalized, the reflection vector will be incorrect.
+
+## Subtopics
+
+### [Two-Bounce Indirect Illumination](4558-two-bounce-indirect-illumination.md)
+Extends single-bounce cone tracing to multiple bounces using temporal accumulation.
+
+### [Multi-Cone Shading](5176-multi-cone-shading.md)
+Uses multiple cones per pixel to reduce noise and improve accuracy.
+
+### [Diffuse Cone Distribution](5677-diffuse-cone-distribution.md)
+Applies cone tracing to diffuse lighting, often with random rotation to reduce blockiness.
+
+### [Ambient Occlusion via Cone Tracing](6042-ambient-occlusion-via-cone-tracing.md)
+Uses cone tracing to estimate occlusion factors.
+
+### [CVCT Cascade Light Sampling & Blending](13876-cvct-cascade-light-sampling-blending.md)
+Combines cone tracing with cascade techniques for varying resolutions.
+
+### [Indirect Diffuse Light and Ambient Occlusion Calculation](22793-indirect-diffuse-light-and-ambient-occlusion-calculation.md)
+General method for combining indirect diffuse and AO.
+
+## Operating characteristics
+*   **Time Complexity:** Depends on the number of marching steps. Smooth surfaces (small cones) require more steps to traverse the same distance or volume, making them more expensive to calculate [S2, unofficial]. Rough surfaces (large cones) may require fewer steps but sample a larger area.
+*   **Memory Complexity:** Depends on the voxel grid resolution and the number of bounces.
+*   **Strengths:** Efficiently approximates indirect specular lighting in real-time; integrates naturally with PBR roughness parameters.
+*   **Limitations:** Can be noisy with few cones; smooth surfaces are computationally expensive; accuracy depends on voxel resolution.
+*   **When to Use:** Real-time rendering where indirect specular lighting is desired and performance constraints allow for variable cost based on roughness.
+*   **When Not to Use:** Offline rendering requiring high accuracy; scenes with extremely smooth surfaces where the cost of small cones is prohibitive.
+
+## Background
+Specular Cone Tracing is part of the Voxel Cone Tracing (VCT) technique, which was developed for real-time global illumination. The specific application of roughness-based cone aperture for specular lighting is described in evaluations of VCT for real-time applications [S1, unofficial] and in reports on VCT implementations [S2, unofficial]. It builds on the standard VCT framework by adapting the cone tracing step to handle specular reflections differently from diffuse lighting.
+
+## Sources
+[S1] PDF Voxel Cone Tracing Evaluation for Real-Time Applications, https://kth.diva-portal.org/smash/get/diva2:1886204/FULLTEXT01.pdf, fetched 2026-10-27 (unofficial)
+[S2] Voxel Cone Tracing - GitHub, https://raw.githubusercontent.com/righier/gidemo/master/report.pdf, fetched 2026-10-27 (unofficial)

@@ -1,0 +1,169 @@
+# Delta Tracking with DDA Iteration (Macrocell-based)
+
+Also called: DDAIter-based Delta Tracking, SpacePartition_SingleMC Delta Tracking
+
+## Overview
+A ray-marching technique for volume rendering that combines a Discrete Differential Analyzer (DDA) for traversing a coarse spatial partition (macrocells) with Delta Tracking (Russian Roulette) for sampling absorption and scattering events within those cells [S1, unofficial]. It handles sparse or heterogeneous media by skipping empty macrocells and using a majorant density [S1, unofficial]. It sets itself apart from standard DDA by replacing uniform step sizes with probabilistic free-flight distances derived from the majorant, allowing it to skip non-interacting regions within a macrocell more efficiently than fixed-step marching, while avoiding the overhead of full per-voxel traversal [G]. It builds on [Macrocell Grid Traversal with Majorant Densities](1528-macrocell-grid-traversal-with-majorant-densities.md) [G].
+
+## How it works
+**Inputs and Outputs**
+- **Inputs**: Ray origin `ray_org`, ray direction `ray_dir`, ray near/far bounds `ray_tnear`, `ray_tfar`, macrocell grid dimensions `dims`, spatial inverse scale `spac_rcp`, majorant density accessor `access_majorant`, density scale constant, total extinction coefficient `sigma_t`, and an initial optical depth budget `tau` [S1, unofficial].
+- **Outputs**: Boolean `found_hit` indicating if an interaction occurred, and the hit distance `rayt` [S1, unofficial].
+
+**Data Structures**
+- **Macrocell Iterator (`DDAIter`)**: A stateful iterator that computes the sequence of macrocells intersected by a ray [G]. It maintains current cell coordinates and exit distances [G].
+- **Spatial Parameters (`sp`)**: Contains `spac_rcp` (reciprocal of spatial scale) for normalizing coordinates to grid space [S1, unofficial].
+
+**Numbered Steps**
+1. **Initialize Macrocell Iterator**: Convert ray origin and direction to macrocell grid space [S1, unofficial].
+   - Compute normalized origin: $m_{org} = ray_{org} \times sp.spac\_rcp$ [S1, unofficial].
+   - Compute normalized direction: $m_{dir} = ray_{dir} \times sp.spac\_rcp$ [S1, unofficial].
+   - Call `DDAIter::init(m_org, m_dir, ray_tnear, ray_tfar, dims)` to set up the traversal state [S1, unofficial].
+2. **Initialize Loop State**: Set `found_hit = false` [S1, unofficial]. Determine the starting $t$ for the first cell segment: $t = next\_cell\_begin + ray_{tnear}$ [S1, unofficial]. Initialize `tau` (optical depth budget) externally [S1, unofficial].
+3. **Loop over Macrocells**: While `DDAIter::next()` returns a valid cell $c$ with entry $t_0$ and exit $t_1$: [S1, unofficial]
+   a. **Retrieve Majorant**: Get the majorant density for cell $c$: $majorant = sp.access\_majorant(c) \times density\_scale$ [S1, unofficial].
+   b. **Skip Empty Cells**: If $|majorant| \le \epsilon$ (where $\epsilon$ is a small float epsilon), the cell is empty. Return `true` from the current lambda/function to advance to the next macrocell without processing interaction logic [S1, unofficial].
+   c. **Update Optical Depth Budget**: Subtract the optical thickness of the current cell segment from `tau`. The segment length is $(t_1 - t)$. The optical thickness is $(t_1 - t) \times (majorant \times \sigma_t)$ [S1, unofficial].
+      $$ \tau \leftarrow \tau - (t_1 - t) \times (majorant \times \sigma_t) $$
+   d. **Check for Event**: If $\tau > 0.f$, an interaction (scattering or absorption) occurred within the previous segment or the budget was exhausted. Return `true` to advance to the next macrocell [S1, unofficial].
+   e. **Calculate Hit Position**: If $\tau \le 0.f$, the interaction occurs within the current cell segment. Calculate the exact hit position $t_{hit}$:
+      $$ t_{hit} = t + \frac{\tau}{majorant \times \sigma_t} $$
+      *Warning*: This division can cause a division by zero error if `majorant` is zero but passed the epsilon check, or if `sigma_t` is zero [S1, unofficial].
+   f. **Record Hit**: Set `found_hit = true` [S1, unofficial]. Update `next_cell_begin = t_{hit} - ray_{tnear}` [S1, unofficial]. Set output `rayt = t_{hit}` [S1, unofficial]. Return `false` to terminate the loop [S1, unofficial].
+4. **Return Result**: After the loop completes (ray exits all macrocells or `tau` budget remains positive without hitting), return `found_hit` [S1, unofficial].
+
+**Pseudocode**
+> **Unverified code.** The code below did not pass a test run against a reference implementation, or no test fits it, so it may contain errors.
+
+```python
+def delta_tracking_dda_iter(ray_org, ray_dir, ray_tnear, ray_tfar, dims, spac_rcp, access_majorant, density_scale, sigma_t, tau):
+    # Step 1: Initialize Macrocell Iterator
+    m_org = [ray_org[i] * spac_rcp for i in range(3)]
+    m_dir = [ray_dir[i] * spac_rcp for i in range(3)]
+    dda = DDAIter(m_org, m_dir, ray_tnear, ray_tfar, dims)
+
+    # Step 2: Initialize Loop State
+    found_hit = False
+    next_cell_begin = 0.0
+    t = next_cell_begin + ray_tnear
+
+    # Step 3: Loop over Macrocells
+    while dda.next():
+        c = dda.current_cell
+        t0 = dda.entry_t
+        t1 = dda.exit_t
+
+        # Retrieve majorant density
+        majorant = access_majorant(c) * density_scale
+
+        # Skip empty cells
+        if abs(majorant) <= 1e-6: # float_epsilon
+            t = t1
+            next_cell_begin = t1 - ray_tnear
+            continue
+
+        # Update optical depth budget
+        tau -= (t1 - t) * (majorant * sigma_t)
+
+        # Check for scattering/absorption event
+        if tau > 0.0:
+            t = t1
+            next_cell_begin = t1 - ray_tnear
+            continue
+
+        # Calculate exact hit position within the current cell
+        # Warning: Division by zero if majorant * sigma_t is zero
+        t = t + tau / (majorant * sigma_t)
+
+        # Record hit
+        found_hit = True
+        next_cell_begin = t - ray_tnear
+        rayt = t
+        return found_hit, rayt
+
+    return found_hit, None
+
+class DDAIter:
+    """Standard 3D DDA iterator for macrocell traversal [G]."""
+    def __init__(self, org, dir, tnear, tfar, dims):
+        self.org = org
+        self.dir = dir
+        self.tnear = tnear
+        self.tfar = tfar
+        self.dims = dims
+        self.t = tnear
+        self.cell = [0, 0, 0]
+        self.step = [0, 0, 0]
+        self.t_max = [0.0, 0.0, 0.0]
+        self._init_dda()
+
+    def _init_dda(self):
+        for i in range(3):
+            if self.dir[i] > 0:
+                self.step[i] = 1
+                self.t_max[i] = (self.cell[i] + 1 - self.org[i]) / self.dir[i]
+            elif self.dir[i] < 0:
+                self.step[i] = -1
+                self.t_max[i] = (self.cell[i] - self.org[i]) / self.dir[i]
+            else:
+                self.step[i] = 0
+                self.t_max[i] = float('inf')
+
+    def next(self):
+        if self.t > self.tfar:
+            return False
+        # entry_t is the current t (start of this cell segment)
+        self.entry_t = self.t
+        # Find the next boundary
+        self.t = min(self.t_max[0], self.t_max[1], self.t_max[2])
+        if self.t > self.tfar:
+            self.t = self.tfar
+        self.exit_t = self.t
+        # Advance to next cell
+        if self.t_max[0] <= self.t_max[1] and self.t_max[0] <= self.t_max[2]:
+            self.cell[0] += self.step[0]
+            self.t_max[0] += self.step[0] / self.dir[0]
+        elif self.t_max[1] <= self.t_max[2]:
+            self.cell[1] += self.step[1]
+            self.t_max[1] += self.step[1] / self.dir[1]
+        else:
+            self.cell[2] += self.step[2]
+            self.t_max[2] += self.step[2] / self.dir[2]
+        return True
+
+    @property
+    def current_cell(self):
+        return tuple(self.cell)
+
+    @property
+    def entry_t(self):
+        return self.entry_t
+
+    @property
+    def exit_t(self):
+        return self.exit_t
+```
+
+**Parameters**
+- `density_scale`: Constant multiplier for the majorant density. Typically hardcoded to `1.0` [S1, unofficial].
+- `sigma_t`: Total extinction coefficient. Typically hardcoded to `1.0` [S1, unofficial].
+
+**Edge Cases and Pitfalls**
+- **Division by Zero**: The calculation `tau / (majorant * sigma_t)` is performed after checking `fabsf(majorant) <= float_epsilon`. If `majorant` is exactly zero but passes the epsilon check (or if epsilon is too large), division by zero occurs. The source code explicitly warns: `// can have division by zero error` [S1, unofficial].
+- **Epsilon Sensitivity**: The choice of `float_epsilon` for skipping empty cells must be small enough to avoid skipping cells with very low but non-zero density, but large enough to handle numerical noise [G].
+
+## Operating characteristics
+- **Time Complexity**: $O(N_{cells})$ in the worst case, where $N_{cells}$ is the number of macrocells intersected by the ray [G]. However, empty cells are skipped in $O(1)$, making it efficient for sparse media [G].
+- **Memory Complexity**: $O(1)$ additional memory per ray, assuming the macrocell grid is pre-computed and accessible [G].
+- **Measured Performance**: Not given in the sources.
+- **Scaling**: Scales linearly with the number of macrocells intersected. Performance improves with larger macrocells (fewer cells to traverse) but may lose precision in heterogeneous media [G].
+- **Strengths**: Efficiently skips empty space; handles heterogeneous media via majorants; simple implementation [G].
+- **Limitations**: Potential for division by zero; requires pre-computed majorants; may overshoot interactions if majorant is loose [G].
+- **When to use**: Sparse or heterogeneous volumetric data where empty space skipping is beneficial [G].
+- **When not to use**: Dense, homogeneous media where fixed-step marching might be simpler and faster [G].
+
+## Background
+This method is part of the Open Volume Renderer project by VIDILabs [S1, unofficial]. It is an implementation detail within a larger modular volume rendering framework [S1, unofficial]. The specific implementation is found in the `ovr/renderer_macro.h` and related source files [S1, unofficial].
+
+## Sources
+[S1] GitHub - VIDILabs/open-volume-renderer: Open source modular multi ..., https://github.com/VIDILabs/open-volume-renderer, fetched 2026-10-29 (unofficial)

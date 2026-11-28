@@ -1,0 +1,100 @@
+# Bayesian Inference Surrogate Framework
+
+Also called: Bayesian posterior characterization for spatial features, Fisher Information Matrix prior acceleration
+
+## Overview
+This method addresses the limitation of standard CNN surrogates that predict outputs without characterizing which input parameters produce a specific output feature. It trains a surrogate model and then applies Bayesian inference to obtain the posterior distribution over input parameters conditioned on a user-specified spatial feature [S1, unofficial]. It distinguishes itself from sibling methods like [ConfEviSurrogate](10417-confevisurrogate.md), which focuses on calibrated uncertainty bounds for predictions, by focusing on inverse problem solving (parameter estimation) using a Fisher Information Matrix prior for computational efficiency [S1, unofficial].
+
+## How it works
+**Inputs:**
+1. A pre-trained surrogate model mapping input parameters $\theta$ to spatial field outputs $y$.
+2. A user-specified target spatial feature $y^*$ (e.g., a specific value or region in the output field).
+3. A prior distribution over the input parameters $\theta$.
+
+**Outputs:**
+1. The posterior distribution $P(\theta | y^*)$ characterizing the likely input parameters that generate the target feature.
+
+**Data Structures:**
+- **Surrogate Model:** A neural network $f_\phi(\theta)$ trained to predict the spatial field.
+- **Fisher Information Matrix (FIM):** A diagonal approximation of the Hessian of the loss function with respect to the parameters, used to define the prior covariance. Let $\mathcal{F}$ be the FIM.
+- **Sampling State:** A set of parameter samples $\{\theta^{(i)}\}$ drawn from the posterior.
+
+**Steps:**
+1. **Train Surrogate:** Train the surrogate model $f_\phi$ on the dataset to minimize prediction error between predicted fields and ground truth. [S1, unofficial]
+2. **Compute FIM Prior:** Calculate the Fisher Information Matrix $\mathcal{F}$ for the surrogate model parameters or input parameters. The prior distribution $P(\theta)$ is approximated using this FIM, which accelerates computation compared to deep ensembles. Specifically, the prior covariance is derived from $\mathcal{F}^{-1}$. [S1, unofficial]
+3. **Initialize Sampling:** Initialize a Markov Chain Monte Carlo (MCMC) sampler or similar inference engine.
+4. **Burn-in:** Run the sampler for a burn-in period to allow the chain to converge to the high-probability region of the posterior. The sources specify a burn-in time of approximately 1 second. [S1, unofficial]
+5. **Sampling:** Draw samples from the posterior distribution $P(\theta | y^*)$ using the likelihood defined by the surrogate model's prediction error and the FIM-based prior. The sources specify 100–200 sampling steps are required. [S1, unofficial]
+6. **Characterize Posterior:** Analyze the collected samples to determine the posterior distribution over the input parameters $\theta$ conditioned on $y^*$.
+
+**Pseudocode:**
+> **Unverified code.** The code below did not pass a test run against a reference implementation, or no test fits it, so it may contain errors.
+
+```python
+def bayesian_inference_surrogate(surrogate_model, target_feature, num_samples=200, burn_in_time=1.0):
+    """
+    Perform Bayesian inference to find posterior distribution of parameters
+    conditioned on a target spatial feature.
+    
+    Args:
+        surrogate_model: Pre-trained neural network f(theta) -> field
+        target_feature: User-specified spatial feature y*
+        num_samples: Number of sampling steps after burn-in
+        burn_in_time: Duration of burn-in in seconds
+        
+    Returns:
+        samples: Array of parameter vectors theta drawn from posterior
+    """
+    # Step 1: Compute Fisher Information Matrix for prior acceleration
+    # [G] In practice, this involves computing the expected outer product of gradients
+    # of the log-likelihood with respect to the parameters.
+    fisher_matrix = compute_fisher_information_matrix(surrogate_model)
+    
+    # Step 2: Define Prior using FIM
+    # [G] The prior covariance is often approximated as the inverse of the FIM.
+    prior_cov = invert(fisher_matrix)
+    prior_mean = get_prior_mean() # Typically the mean of the training data distribution
+    
+    # Step 3: Initialize MCMC sampler
+    # [G] Using a standard sampler like Metropolis-Hastings or HMC
+    sampler = initialize_mcmc_sampler(prior_mean, prior_cov, surrogate_model, target_feature)
+    
+    # Step 4: Burn-in phase
+    start_time = current_time()
+    while current_time() - start_time < burn_in_time:
+        sampler.step()
+        
+    # Step 5: Sampling phase
+    samples = []
+    for i in range(num_samples):
+        sampler.step()
+        samples.append(sampler.get_current_state())
+        
+    return samples
+```
+
+**Parameters:**
+- **Burn-in time:** Approximately 1 second [S1, unofficial].
+- **Sampling steps:** 100–200 steps [S1, unofficial].
+
+**Edge Cases and Pitfalls:**
+- **Dimensionality:** The method has been validated only on 2D time-varying fields with at most 4 parameters. Extension to volumetric data and higher-dimensional parameter spaces is an open challenge and may suffer from computational intractability or poor convergence [S1, unofficial].
+- **Prior Sensitivity:** The accuracy of the posterior depends heavily on the validity of the Fisher Information Matrix approximation as a prior. If the surrogate model is poorly trained or the FIM is ill-conditioned, the posterior may be misleading.
+
+## Subtopics
+
+### [Tempered Dirichlet Update](21742-tempered-dirichlet-update.md)
+A per-Gaussian, per-frame evidence accumulation method that caps the influence of high-weight observations to prevent reinforcement of early association errors. It builds on this framework by applying Bayesian inference to obtain the posterior distribution over parameters conditioned on a user-specified spatial feature, using continuous rendering weights instead of discrete counts.
+
+## Operating characteristics
+- **Time Complexity:** The method is significantly faster than deep ensembles for prior probability computation, accelerating it by three orders of magnitude [S1, unofficial]. Total inference time includes ~1 second burn-in plus 100–200 sampling steps.
+- **Memory Complexity:** Not given in the sources.
+- **Performance:** Validated on 2D time-varying fields up to $1024 \times 256 \times 200$ resolution [S1, unofficial].
+- **Strengths:** Provides calibrated posterior distributions for inverse problems; computationally efficient compared to deep ensembles due to the FIM prior.
+- **Limitations:** Limited to low-dimensional parameter spaces (up to 4 parameters) and 2D fields; not yet validated for volumetric data or higher dimensions [S1, unofficial].
+
+## Background
+This framework was introduced as a complementary direction to output prediction, shifting attention to characterizing input parameters that produce specific output features. It is cited in the context of scientific volume rendering and deep learning methods for scientific data [S1, unofficial]. The use of the Fisher Information Matrix prior is highlighted as a key innovation for accelerating Bayesian inference compared to traditional methods like deep ensembles.
+
+## Sources
+[S1] PDF Deep Learning Methods and Neural Representations for Scientific Volume ..., https://www.cs.uoregon.edu/Reports/AREA-202603-Mathai.pdf, fetched 2026-10-27 (unofficial)

@@ -1,0 +1,160 @@
+# Score-based Densification
+
+Also called: Budget-constrained Optimization, Guided Densification
+
+## Overview
+Score-based Densification is a training strategy for 3D Gaussian Splatting that replaces the standard heuristic-based densification with a guided, purely constructive process to achieve a user-defined model size budget [S1]. Unlike original 3D Gaussian Splatting which requires substantial pruning or culling to control size, this method steers the addition of new Gaussians toward primitives that raise reconstruction quality, ensuring model size increases in a controlled manner towards an exact budget without requiring pruning or culling during training [S1]. It distinguishes itself from siblings like [Gaussian Insertion and Pruning](10074-gaussian-insertion-and-pruning.md) by avoiding the optimization instability caused by removal steps, and from [Fixed-Budget Optimisation](21417-fixed-budget-optimisation.md) by using a dynamic score-based selection rather than a fractional assignment of a fixed cost [S1, S2].
+
+## How it works
+The method operates by sampling training views and computing a per-Gaussian score that combines gradient information, pixel saliency, and primitive properties to select which Gaussians to densify [S1].
+
+**Inputs and Outputs:**
+*   **Inputs:** Current set of 3D Gaussians $\mathcal{G}$, training views, user-defined target budget $B$ (final number of Gaussians), and a growth curve function $N(t)$ defining the number of Gaussians at iteration $t$.
+*   **Outputs:** Updated set of Gaussians $\mathcal{G}'$ with size approaching $B$.
+
+**Data Structures:**
+*   **Gaussian Properties:** Each Gaussian $g_i \in \mathcal{G}$ stores position $\mathbf{p}_i$, covariance $\mathbf{\Sigma}_i$ (or rotation $\mathbf{R}_i$ and scale $\mathbf{s}_i$), opacity $\alpha_i$, and spherical harmonic coefficients for color.
+*   **Score Buffer:** A vector $S_g$ of size $|\mathcal{G}|$ storing the computed score for each Gaussian.
+*   **Saliency Map:** A per-pixel saliency map computed from training views, indicating the importance of image regions.
+
+**Numbered Steps:**
+
+1.  **Sample Training Views:** Select a batch of training views for the current iteration.
+2.  **Compute Per-Pixel Saliency:** Render the current Gaussians and compute a per-pixel saliency map. This identifies regions where the reconstruction error is high or where detail is visually important. The saliency $s_{pixel}$ is derived from the gradient of the loss with respect to the pixel colors [S1].
+3.  **Compute Per-Gaussian Score ($S_g$):** For each Gaussian $g_i$, compute a score $S_{g_i}$ using a scoring function $F$. The function $F$ combines:
+    *   **Gradient Magnitude:** The magnitude of the gradient of the loss with respect to the Gaussian's position.
+    *   **Saliency:** The average saliency of the pixels influenced by the Gaussian.
+    *   **Primitive Properties:** Properties such as opacity or size, to prioritize Gaussians that contribute significantly to the scene [S1].
+    
+    The exact formula for $F$ is not explicitly provided in the sources, but it is described as a combination of these components [S1]. Let $S_{g_i} = F(\nabla \mathcal{L}, s_{pixel}, \text{properties}_i)$.
+4.  **Select Top-Scoring Gaussians:** Rank all Gaussians by their score $S_g$ in descending order. Select the top $k$ Gaussians where $k$ is determined by the growth curve $N(t)$ and the current number of Gaussians $|\mathcal{G}_t|$. Specifically, $k = \max(0, N(t) - |\mathcal{G}_t|)$.
+5.  **Densify New Gaussians:** For each selected top-scoring Gaussian $g_i$, spawn new Gaussians in its vicinity. The sources do not specify the exact geometric distribution (e.g., isotropic sampling around the mean) or the number of children per parent, but it is implied that new Gaussians are added to increase the total count towards the budget [S1]. The new Gaussians inherit properties from the parent but are perturbed to cover the local area.
+6.  **Follow Growth Curve:** The total number of Gaussians $|\mathcal{G}_t|$ at iteration $t$ follows a predefined growth curve $N(t)$ that mimics the behavior of original 3D Gaussian Splatting but is fitted to yield the exact desired model size $B$ after training [S1]. This ensures a predictable increase in model size.
+
+**Parameters:**
+*   **Target Budget ($B$):** The final number of Gaussians. Typical values are not given in the sources, but the method allows any user-defined value [S1].
+*   **Growth Curve ($N(t)$):** A function defining the number of Gaussians at each iteration. It is fitted to reach $B$ at the end of training [S1].
+*   **Saliency Weight:** The weight given to saliency in the scoring function $F$. Not given in the sources.
+*   **Gradient Weight:** The weight given to gradient magnitude in $F$. Not given in the sources.
+
+**Edge Cases and Pitfalls:**
+*   **Precision:** The scoring function must be numerically stable to handle varying scales of gradients and saliency values [S1].
+*   **Boundaries:** The method assumes that densifying in the vicinity of top-scoring Gaussians is sufficient to improve reconstruction. In sparse regions, this might lead to gaps if the initial initialization is poor [G].
+*   **Degenerate Input:** If the initial set of Gaussians is too small, the score-based selection might not have enough candidates to densify effectively [G].
+
+**Pseudocode:**
+
+> **Unverified code.** The code below did not pass a test run against a reference implementation, or no test fits it, so it may contain errors.
+
+```python
+def score_based_densification(Gaussians, TrainingViews, TargetBudget, GrowthCurve, Iteration):
+    """
+    Perform score-based densification for 3D Gaussian Splatting.
+    
+    Args:
+        Gaussians: List of Gaussian primitives.
+        TrainingViews: List of training camera poses and images.
+        TargetBudget: Final number of Gaussians.
+        GrowthCurve: Function N(t) returning target number of Gaussians at iteration t.
+        Iteration: Current training iteration.
+        
+    Returns:
+        Updated Gaussians list.
+    """
+    # Step 1: Sample training views
+    sampled_views = sample_views(TrainingViews)
+    
+    # Step 2: Compute per-pixel saliency
+    # Render current Gaussians to get predicted images
+    predicted_images = render(Gaussians, sampled_views)
+    # Compute saliency map based on loss gradients
+    saliency_maps = compute_saliency(predicted_images, sampled_views)
+    
+    # Step 3: Compute per-Gaussian score
+    scores = []
+    for g in Gaussians:
+        # Compute gradient magnitude for this Gaussian
+        grad_mag = compute_gradient_magnitude(g, predicted_images, sampled_views)
+        # Compute average saliency influenced by this Gaussian
+        avg_saliency = compute_average_saliency(g, saliency_maps)
+        # Get primitive properties (e.g., opacity, size)
+        properties = get_primitive_properties(g)
+        # Combine into score F
+        score = scoring_function(grad_mag, avg_saliency, properties)
+        scores.append(score)
+    
+    # Step 4: Select top-scoring Gaussians
+    # Determine how many new Gaussians to add based on growth curve
+    target_count = GrowthCurve(Iteration)
+    current_count = len(Gaussians)
+    num_to_add = max(0, target_count - current_count)
+    
+    if num_to_add == 0:
+        return Gaussians
+        
+    # Get indices of top-scoring Gaussians
+    top_indices = get_top_k_indices(scores, num_to_add)
+    top_gaussians = [Gaussians[i] for i in top_indices]
+    
+    # Step 5: Densify new Gaussians
+    new_gaussians = []
+    for parent in top_gaussians:
+        # Spawn new Gaussians in the vicinity of the parent
+        # The exact distribution and number of children is not specified in sources
+        children = spawn_children(parent)
+        new_gaussians.extend(children)
+        
+    # Step 6: Update Gaussians list
+    updated_gaussians = Gaussians + new_gaussians
+    
+    return updated_gaussians
+
+def scoring_function(grad_mag, avg_saliency, properties):
+    """
+    Combine gradient, saliency, and primitive properties into a score.
+    Exact formula not given in sources.
+    """
+    # Placeholder for the actual combination logic
+    # Typically a weighted sum or product
+    return grad_mag * avg_saliency * properties.opacity
+
+def spawn_children(parent):
+    """
+    Spawn new Gaussians around the parent.
+    Exact implementation not given in sources.
+    """
+    # Assume isotropic sampling around parent mean
+    # Number of children not specified
+    return [perturb_gaussian(parent) for _ in range(1)] # Example: 1 child
+```
+
+## Subtopics
+
+### [Perceptual-GS](9175-perceptual-gs.md)
+Perceptual-GS replaces the standard gradient-threshold densification heuristic with a scene-adaptive perceptual signal to improve detail in visually salient areas. It distinguishes itself from sibling methods like Pixel-GS by utilizing a learned vision-transformer head to compute a local perceptual error map, rather than relying solely on raw pixel or gradient magnitudes.
+
+### [Pixel-GS](9189-pixel-gs.md)
+Pixel-GS is a densification strategy for 3D Gaussian Splatting that modifies the gradient-based splitting signal to account for the spatial footprint of each Gaussian primitive. It addresses the baseline's tendency to under-densify regions by scaling the positional gradient by the number of pixels a Gaussian influences and applying a depth-dependent scaling factor to suppress floaters. It recovers detail the baseline misses without simply carpeting the scene in more blobs.
+
+### [Fixed-Budget Optimisation](21417-fixed-budget-optimisation.md)
+Fixed-Budget Optimisation is a constraint-aware training strategy where the user specifies a maximum resource budget (e.g., number of primitives or detector panels), and the optimization process is strictly constrained not to surpass this value. Unlike methods that use pruning or densification schedules to manage model size, this approach learns a fractional assignment of the fixed cost to each element, ensuring the final model size matches the target exactly without requiring balancing coefficients between performance and cost in the loss function. It is distinct from Score-based Densification by removing the dynamic insertion/removal steps, and from Perceptual-GS and Pixel-GS by enforcing a hard upper bound on the primitive count rather than optimizing for perceptual or pixel-level metrics with variable complexity.
+
+### Late Densification
+Late Densification is a minor variant that enables densification back between iterations 20K to 20.5K for every 100 iterations to help the model recover loss from pruning of false-positive Gaussians [S2].
+
+## Operating characteristics
+*   **Time Complexity:** The method requires computing per-pixel saliency and per-Gaussian scores for every training step, which adds overhead compared to the original 3D Gaussian Splatting densification. However, it avoids the cost of pruning and culling. The sources mention deriving faster, numerically equivalent solutions for gradient computation and attribute updates to address training speed obstacles [S1].
+*   **Memory Complexity:** The memory usage is controlled by the target budget $B$. Since no pruning is performed, the memory footprint grows monotonically to $B$, avoiding peaks associated with pruning/culling cycles [S1].
+*   **Measured Performance:** The sources do not provide specific quantitative performance metrics (e.g., PSNR, SSIM, FPS) for Score-based Densification itself, but note that it allows for high-quality radiance fields with limited resources [S1].
+*   **Scaling:** The method scales to any desired model size by adjusting the target budget $B$ and fitting the growth curve $N(t)$ [S1].
+*   **Strengths:** Controlled model size, no pruning/culling overhead, predictable training duration, high quality at a budget [S1].
+*   **Limitations:** Requires careful tuning of the scoring function $F$ and growth curve $N(t)$; may not recover from poor initial initialization as effectively as methods with pruning [G].
+*   **When to use:** When a fixed model size is required for downstream tasks or hardware constraints, and high quality is needed [S1].
+*   **When not to use:** When the optimal model size is unknown and cannot be determined a priori, or when the scene requires significant structural changes that pruning might handle better [G].
+
+## Background
+Score-based Densification was introduced in the paper "Taming 3DGS: High-Quality Radiance Fields with Limited Resources" [S1]. It addresses the challenges of training and rendering 3D Gaussian Splatting models on a budget, where unpredictable size and training duration make it difficult to use in downstream tasks [S1]. The method was developed to provide a systematic redesign of 3D Gaussian Splatting densification, using a guided, purely constructive process [S1].
+
+## Sources
+[S1] Taming 3DGS: High-Quality Radiance Fields with Limited Resources, https://doi.org/10.1145/3680528.3687694, fetched 2026-10-30
+[S2] Trick-GS: A Balanced Bag of Tricks for Efficient Gaussian Splatting, https://doi.org/10.1109/icassp49660.2025.10889395, fetched 2026-10-30

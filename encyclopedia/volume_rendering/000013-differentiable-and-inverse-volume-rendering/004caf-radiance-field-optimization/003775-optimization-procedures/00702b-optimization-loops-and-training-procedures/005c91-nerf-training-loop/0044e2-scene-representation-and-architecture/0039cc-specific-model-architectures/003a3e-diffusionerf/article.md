@@ -1,0 +1,53 @@
+# DiffusioNeRF
+
+
+## Overview
+DiffusioNeRF is a method that integrates a denoising diffusion model (DDM) as an initial learning factor to standardize the training of Neural Radiance Fields (NeRF) [S1]. It utilizes the DDM to learn priors for scene geometry and color, normalizing these fields to achieve higher quality reconstruction, particularly under sparse input views [S2]. Unlike standard NeRF which relies solely on photometric consistency, DiffusioNeRF steers the optimization by backpropagating gradients derived from the diffusion model's likelihood estimates [S1, S2].
+
+## How it works
+**Inputs and Outputs:**
+*   **Inputs:** Multi-view RGB images, camera poses, and a pre-trained denoising diffusion model trained on synthetic RGBD data (e.g., Hypersim) [S1, S2].
+*   **Outputs:** Optimized NeRF parameters and rendered novel views [S1, S2].
+
+**Data Structures:**
+The method builds on the standard NeRF architecture [Specific Model Architectures](8585-specific-model-architectures.md) [G].
+1.  **NeRF MLPs:** Two coupled Multi-Layer Perceptrons ($F_\sigma$ for density, $F_c$ for color) taking positional encoding $\gamma(\mathbf{x})$ and viewing direction $\mathbf{d}$ as input [G].
+2.  **Diffusion Model:** A denoising network $D_\theta$ trained on synthetic RGBD patches to predict noise and estimate gradients of the log-likelihood of the joint probability distribution of color and depth [S2].
+
+**Algorithm Steps:**
+1.  **Diffusion Prior Training:** Train the DDM on a large synthetic dataset (e.g., Hypersim) consisting of RGBD patches [S2]. The model learns the joint distribution $P(\text{RGB}, \text{Depth})$ [S2].
+2.  **Ray Sampling:** During NeRF training, sample points $\mathbf{x}_i$ along rays $\mathbf{r}$ using standard stratified sampling [G].
+3.  **NeRF Prediction:** Query the NeRF MLPs to obtain density $\sigma_i$ and color $\mathbf{c}_i$ for each sample point [G].
+4.  **Patch Rendering:** Render random RGBD patches from the current NeRF state by aggregating the sampled $\sigma_i$ and $\mathbf{c}_i$ into a depth map and color image [S2].
+5.  **Gradient Estimation:** Compute the estimated gradients of the log-likelihood of the rendered RGBD patches with respect to the NeRF parameters using the pre-trained DDM [S2]. Specifically, the DDM provides the gradient of the log-prior $\nabla_{\text{NeRF}} \log P_{\text{diff}}(\text{RGBD}_{\text{rendered}})$ [S2].
+6.  **Backpropagation:** Backpropagate these estimated gradients to the NeRF's color and density fields to normalize the geometry and color of the scene [S2].
+7.  **Optimization Update:** Update NeRF parameters using an optimizer (e.g., Adam) with the combined loss:
+    $$ \mathcal{L} = \mathcal{L}_{\text{photometric}} + \lambda \mathcal{L}_{\text{diffusion}} $$
+    where $\mathcal{L}_{\text{photometric}}$ is the standard photometric reconstruction loss, $\lambda$ is the diffusion prior weight, and $\mathcal{L}_{\text{diffusion}}$ is derived from the diffusion model's gradient guidance [S1, S2].
+
+**Parameters:**
+*   $\lambda$: Weight for the diffusion prior loss. Not given in the sources.
+*   Patch Size: Size of the RGBD patches rendered for diffusion guidance. Not given in the sources.
+
+**Edge Cases and Pitfalls:**
+*   **Sparse Views:** The method is specifically designed to handle sparse views (e.g., 3 views) where standard NeRF fails due to ambiguity [S2].
+*   **Synthetic Bias:** The diffusion prior is trained on synthetic data (Hypersim), which may cause a domain gap when applied to real-world scenes [S2].
+
+## Subtopics
+
+### [SSDNeRF](11954-ssdnerf.md)
+SSDNeRF is a unified framework that jointly optimizes a NeRF auto-decoder and a latent diffusion model in a single training stage to learn generalizable 3D priors from multi-view images. Unlike two-stage approaches that pretrain auto-decoders without diffusion models, SSDNeRF blends generative and rendering biases coherently, enabling robust training on sparse-view data (as few as three views) and avoiding the noisy latent manifolds induced by inverse rendering uncertainty. It supports flexible test-time sampling for both unconditional 3D generation and reconstruction from arbitrary view counts.
+
+## Operating characteristics
+*   **Time Complexity:** Training time is increased due to the additional gradient computation from the diffusion model and the need to render RGBD patches for prior evaluation [S2].
+*   **Memory Complexity:** Requires storing the NeRF parameters and the diffusion model parameters. Not given in the sources.
+*   **Performance:** On the LLFF dataset, DiffusioNeRF achieves PSNR improvements of 1-2 points over SOTA methods for 3, 6, and 9 input views [S2]. Specifically, with 3 input views, it is nearly 1 point higher than ViP-NeRF [S2]. It outperforms current methods on the DTU dataset as well [S1].
+*   **Strengths:** Improved geometry and color quality in sparse-view scenarios; reduced artifacts in stratified scenes [S1, S2].
+*   **Limitations:** Reliance on synthetic data for prior training; potential domain gap; increased training complexity [S2].
+
+## Background
+DiffusioNeRF was introduced in 2023 [S1]. It addresses the limitations of NeRF in handling sparse input views and complex geometries by incorporating generative priors from diffusion models [S1, S2]. The method leverages the ability of diffusion models to capture complex data distributions, using them to guide the NeRF optimization process [S2]. It has been evaluated on the LLFF and DTU datasets [S1].
+
+## Sources
+[S1] Neural Radiance Field-based Visual Rendering: a Comprehensive Review, https://ieeexplore.ieee.org/abstract/document/11455380, fetched 2026-10-30
+[S2] Methods and Strategies for Improving the Novel View Synthesis Quality of Neural Radiation Field, https://doi.org/10.1109/access.2024.3382997, fetched 2026-10-30

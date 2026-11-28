@@ -1,0 +1,239 @@
+--- v001.md
++++ v002.md
+@@ -4,135 +4,146 @@
+ 
+ ## Overview
+-Hardware-Z Cull Depth Peeling is an order-independent transparency (OIT) technique designed for rendering semi-transparent layers on animated surfaces, such as volumetric textures encoded in shell geometry [S1]. It solves the problem of expensive fragment shader discard operations and high wave divergence inherent in standard depth peeling by utilizing the hardware z-buffer for culling [S1]. Unlike standard depth peeling, which re-renders all geometry and performs conditional shading within the same draw call, this method separates depth finding from shading and uses hardware depth tests to skip invisible pixels, significantly reducing GPU work [S1]. It is specifically chosen when the first $K$ semi-transparent layers must be found for stable quality, making linked-list or stochastic OIT methods inappropriate [S1].
++Hardware-Z Cull Depth Peeling is an Order-Independent Transparency (OIT) technique designed to render semi-transparent layers on animated volumetric surfaces by modifying standard depth peeling to utilize the hardware z-buffer for culling [S1]. It solves the problem of expensive fragment shader invocations and high wave divergence inherent in standard depth peeling, where culling and lighting are performed conditionally within the same draw call [S1]. Unlike its siblings, which may rely on linked lists, transmittance approximation, or stochastic methods, this approach explicitly isolates the first $K$ semi-transparent layers to ensure stable visual quality, using hardware depth tests to avoid unnecessary GPU work [S1].
+ 
+ ## How it works
+-The method renders transparent layers sequentially, one per pass, up to a user-defined maximum number of layers. Each pass consists of four distinct steps. The algorithm assumes a pre-existing depth buffer representing the opaque background or previously rendered opaque geometry.
++The method renders transparent layers sequentially until the last layer is reached or a user-defined maximum number of layers is exceeded [S1]. Each rendering pass consists of four distinct steps, utilizing the hardware z-buffer to cull fragments that are behind previously rendered layers or fully occluded by accumulated opacity [S1].
+ 
+ ### Inputs and Outputs
+ *   **Inputs:**
+-    *   Current accumulated color buffer (initially empty or containing opaque background).
+-    *   Current accumulated opacity buffer (initially 0).
+-    *   Current hardware z-buffer (initially containing the depth of the opaque background).
+-    *   Geometry of the current transparent layer (e.g., prisms or tetrahedrons from a volumetric shell).
+-    *   Surface intersection data (encoded in a texture or computed on-the-fly) to determine if a fragment belongs to the current layer.
++    *   Encoded surface texture defining the volumetric shell [S1].
++    *   Previous layer's depth buffer (read-only) [S1].
++    *   Accumulated color and opacity from previous passes [S1].
++    *   Parameters: Maximum layers ($N_{max}$), Opacity threshold ($T_{op}$) [S1].
+ *   **Outputs:**
+-    *   Updated color buffer with the new layer composited.
+-    *   Updated opacity buffer.
+-    *   Updated hardware z-buffer reflecting the depth of the newly rendered layer and culling planes.
++    *   Updated frame buffer with blended layer color [S1].
++    *   Updated hardware z-buffer [S1].
+ 
+ ### Data Structures
+-*   **Color Buffer:** Standard RGBA framebuffer.
+-*   **Opacity Buffer:** Standard single-channel (R8 or similar) framebuffer to track accumulated opacity.
+-*   **Z-Buffer:** Hardware depth buffer.
+-*   **Layer Geometry:** Defined by the shell mapping or volumetric representation. The specific geometry construction (e.g., shell mapping) is handled by the parent method [Parent](3611-order-independent-transparency-approaches.md).
++*   **Z-Buffer:** Hardware depth buffer storing depth values.
++*   **Color Buffer:** Accumulates the final blended color.
++*   **Opacity Accumulator:** Implicitly tracked via alpha blending or explicitly if required by the specific implementation of the "accumulated opaqueness" check [S1]. The source describes checking accumulated opaqueness in Step 4, implying an access to the current accumulated alpha value [S1].
+ 
+ ### Parameters
+-*   **Maximum Layers ($N_{max}$):** User-defined limit on the number of transparency passes. Typical value: 4 [S1].
+-*   **Opacity Threshold ($T_{op}$):** Threshold for accumulated opacity. If accumulated opacity exceeds this, subsequent layers are culled. Typical value: 0.95 [S1].
+-*   **Far Culling Plane ($z_{max}$):** A depth value representing the far plane, used to mark culled fragments.
++*   **Maximum Layers ($N_{max}$):** User-defined limit on passes. Typical value: 4 [S1].
++*   **Opacity Threshold ($T_{op}$):** Threshold for accumulated opacity. If exceeded, subsequent layers are culled. Typical value: 0.95 [S1].
++*   **Far Culling Plane ($z_{max}$):** A depth value representing the far plane, used to mark culled fragments [S1].
+ 
+ ### Steps
+-Each pass $i$ (from 1 to $N_{max}$) performs the following:
++Each pass $i$ (from 1 to $N_{max}$) executes the following sequence:
+ 
+ 1.  **Layer Depth Finding:**
+-    *   Set the hardware z-buffer to read-only mode, initialized with the depth of the previous layer (or background for the first pass).
+-    *   Render the current layer's geometry.
+-    *   In the fragment shader, check for intersection with the encoded surface. If no intersection, discard the fragment [S1].
+-    *   If an intersection exists, compute the depth $d_i$ of the fragment.
+-    *   Write $d_i$ to the color buffer using a 'min' blending function. This effectively finds the nearest depth of the current layer at each pixel [S1].
++    *   Set the z-buffer to read-only mode, initialized with the depth of the previous layer (or 0 for the first pass) [S1].
++    *   Render the geometry (or shell) with a fragment shader that computes the intersection depth with the encoded surface [S1].
++    *   **Crucial Check:** The shader must verify if the fragment intersects the encoded surface. If no intersection exists, the fragment is discarded [S1]. Without this check, transparent parts would incorrectly occupy layers, requiring more passes [S1].
++    *   Write the nearest intersection depth to the output color buffer using a 'min' blending function [S1]. This effectively finds the depth of the current layer at each pixel [S1].
+ 
+ 2.  **Depth Conversion #1:**
+-    *   Perform a full-screen pass (quad rendering) using the color buffer from Step 1 as input.
+-    *   For each pixel, read the found depth $d_i$.
+-    *   Compare $d_i$ with the current hardware z-buffer value $z_{prev}$ (which contains the depth of the previous layer/background).
+-    *   If $d_i > z_{prev}$, the current layer is behind the previous layer. Write $z_{max}$ to the z-buffer to cull this fragment and all subsequent layers behind it.
+-    *   If $d_i \le z_{prev}$, write $d_i$ to the z-buffer. This updates the hardware z-buffer with the new layer's depth [S1].
++    *   Perform a full-screen pass (or a pass covering the relevant geometry) to update the hardware z-buffer [S1].
++    *   Read the depth found in Step 1.
++    *   Compare the new layer's depth ($d_{new}$) with the previous scene's depth ($d_{prev}$) stored in the z-buffer [S1].
++    *   If $d_{new} > d_{prev}$, the fragment is behind the previous layer. Cull it by writing $z_{max}$ to the z-buffer [S1].
++    *   Otherwise, write $d_{new}$ to the z-buffer [S1]. This step converts the color-buffer depth into the hardware z-buffer format [S1].
+ 
+ 3.  **Layer Shading:**
+-    *   Render the current layer's geometry again.
+-    *   Set the z-function to 'equal'. This ensures that lighting computations are performed only for pixels where the depth matches the newly written z-buffer (i.e., visible pixels) [S1].
+-    *   Compute the color $C_i$ and opacity $\alpha_i$ of the fragment.
+-    *   Use hardware alpha-blending to composite the new fragment into the color buffer. The blending equation uses the standard 'over' operator, but since the z-buffer ensures only the closest visible fragment is shaded, the order is implicitly correct for this layer [S1].
+-    *   Update the opacity buffer by adding $\alpha_i$ to the accumulated opacity.
++    *   Render the geometry again for the current layer [S1].
++    *   Set the z-function to 'equal' [S1]. This ensures lighting computations are performed *only* for pixels where the current layer's depth matches the depth established in Step 2, eliminating overdraw [S1].
++    *   Perform standard lighting calculations for the fragment [S1].
++    *   Use hardware alpha-blending to blend the newly shaded color and opacity with the previously rendered layers in the color buffer [S1].
+ 
+ 4.  **Depth Conversion #2:**
+-    *   Perform another full-screen pass.
+-    *   Read the accumulated opacity from the opacity buffer.
+-    *   If accumulated opacity $> T_{op}$, write $z_{max}$ to the z-buffer. This culls all subsequent layers for this pixel, as the surface is effectively opaque [S1].
+-    *   Otherwise, preserve the current z-buffer value.
++    *   Perform another full-screen pass similar to Step 2 [S1].
++    *   Check the accumulated opaqueness (alpha) of the current pixel in the color buffer [S1].
++    *   If accumulated opacity $> T_{op}$ (e.g., 0.95), write $z_{max}$ to the z-buffer [S1]. This culls all subsequent layers for this pixel as they are treated as invisible [S1].
++    *   Otherwise, ensure the z-buffer reflects the current layer's depth to allow subsequent passes to proceed correctly [S1].
+ 
+ ### Pseudocode
+ 
+ ```python
+-# Global parameters
+-N_MAX = 4
+-T_OP = 0.95
+-Z_MAX = 1000.0  # Far culling plane value
++# Constants
++Z_MAX = 1.0  # Far culling plane value
++OPACITY_THRESHOLD = 0.95
++MAX_LAYERS = 4
+ 
+-# Initialization
+-color_buffer = empty_framebuffer()
+-opacity_buffer = zero_framebuffer()
+-z_buffer = get_opaque_background_depth()
++# State
++current_z_buffer = initialize_z_buffer() # Depth of previous layer, or 0 for first pass
++accumulated_color = vec4(0.0)
++accumulated_alpha = 0.0
+ 
+-for layer_index in range(1, N_MAX + 1):
++for layer_index in range(1, MAX_LAYERS + 1):
++    
+     # Step 1: Layer Depth Finding
+-    # Render layer geometry with z-buffer read-only set to z_buffer
+-    # Fragment shader:
+-    #   if not surface_intersection(): discard
+-    #   depth = compute_depth()
+-    #   output_color = min(depth, current_output_color) # 'min' blend
++    # Render geometry to find intersection depth. 
++    # Output is written to a temporary color buffer (layer_depth_color) using MIN blend.
++    # Shader logic:
++    #   if intersects_encoded_surface():
++    #       write intersection_depth to layer_depth_color
++    #   else:
++    #       discard
+     
+-    found_depth_texture = read_color_buffer() # Contains nearest depth of current layer
++    layer_depth_color = render_geometry_with_min_blend(current_z_buffer, mode='read_only')
+     
+     # Step 2: Depth Conversion #1
+-    # Full-screen pass to update z-buffer
+-    # Fragment shader reads found_depth_texture and z_buffer
+-    #   d_i = found_depth_texture[pixel]
+-    #   z_prev = z_buffer[pixel]
+-    #   if d_i > z_prev:
+-    #       z_buffer[pixel] = Z_MAX
+-    #   else:
+-    #       z_buffer[pixel] = d_i
++    # Update hardware z-buffer based on layer_depth_color
++    # Full-screen pass or geometry pass to update Z-buffer
++    for each pixel p:
++        d_new = layer_depth_color[p].r # Depth found in Step 1
++        d_prev = current_z_buffer[p]   # Depth from previous scene/layer
+         
++        if d_new > d_prev:
++            # Fragment is behind previous layer, cull it
++            current_z_buffer[p] = Z_MAX
++        else:
++            # Fragment is the new nearest layer, update z-buffer
++            current_z_buffer[p] = d_new
++            
+     # Step 3: Layer Shading
+-    # Render layer geometry with z-function set to 'equal'
+-    # Fragment shader:
+-    #   color = compute_lighting()
+-    #   alpha = compute_opacity()
+-    #   color_buffer[pixel] = blend_over(color_buffer[pixel], color, alpha)
+-    #   opacity_buffer[pixel] += alpha
++    # Render geometry again with Z-test = EQUAL
++    # This ensures shading only happens for visible pixels of the current layer
++    shaded_color, shaded_alpha = render_geometry_with_shading(z_test='equal')
++    
++    # Blend with accumulated result
++    # Standard Source Over blending
++    new_alpha = shaded_alpha + accumulated_alpha * (1.0 - shaded_alpha)
++    if new_alpha > 0.0:
++        blended_color = (shaded_color * shaded_alpha + accumulated_color * accumulated_alpha * (1.0 - shaded_alpha)) / new_alpha
++    else:
++        blended_color = vec4(0.0)
++        
++    accumulated_color = blended_color
++    accumulated_alpha = new_alpha
+     
+     # Step 4: Depth Conversion #2
+-    # Full-screen pass to check opacity threshold
+-    # Fragment shader reads opacity_buffer and z_buffer
+-    #   if opacity_buffer[pixel] > T_OP:
+-    #       z_buffer[pixel] = Z_MAX
+-    #   else:
+-    #       keep z_buffer[pixel]
++    # Check accumulated opacity and update Z-buffer for future culling
++    for each pixel p:
++        if accumulated_alpha[p] > OPACITY_THRESHOLD:
++            # Accumulated opacity is high enough, treat subsequent layers as invisible
++            current_z_buffer[p] = Z_MAX
++        else:
++            # Keep the depth from Step 2 (already written) or re-verify
++            # Note: Step 2 already wrote d_new. If we didn't cull in Step 2, 
++            # we keep d_new unless opacity threshold triggers culling.
++            pass # Z-buffer already holds d_new from Step 2
++            
++    # Prepare for next iteration
++    # current_z_buffer is now updated for the next pass's Step 1
+ ```
+ 
+ ### Edge Cases and Pitfalls
+-*   **Wave Divergence:** Standard depth peeling suffers from high wave divergence because lighting and depth finding are combined, leading to shader discards. This method avoids this by separating depth finding (Step 1) from shading (Step 3) [S1].
+-*   **Surface Intersection Check:** In Step 1, it is critical to check for intersection with the encoded surface. Without this, transparent parts would occupy each layer, requiring more passes for a correct image [S1].
+-*   **Performance Scaling:** Empirical results show that 3-4 passes are often sufficient. After the second pass, there are almost no changes in the resulting image [S1].
+-*   **Resolution Impact:** Performance is better at smaller resolutions due to cache utilization. At larger resolutions, cache hit rates decrease, but the method still outperforms basic shell mapping without LODs [S1].
++*   **Wave Divergence:** Standard depth peeling suffers from high wave divergence because lighting and depth finding are combined, leading to shader discards. This method separates them, minimizing divergence [S1].
++*   **Surface Intersection Check:** In Step 1, it is mandatory to check for intersection with the encoded surface. Failure to do so results in transparent parts occupying every layer, significantly increasing the number of required passes [S1].
++*   **Performance Scaling:** Empirical results indicate that 3-4 passes are sufficient in many cases. After the second pass, there are almost no changes in the resulting image, and rendering time reduces with each subsequent pass [S1].
++*   **Hardware Restrictions:** The method cannot simply copy a texture into the hardware z-buffer; it requires a shader pass to convert the depth, due to hardware restrictions [S1].
+ 
+ ## Operating characteristics
+-*   **Time Complexity:** $O(N \cdot P)$, where $N$ is the number of passes (layers) and $P$ is the number of pixels. Each pass involves rendering the geometry once for depth finding, a full-screen pass for depth conversion, rendering the geometry again for shading, and another full-screen pass for opacity culling. Thus, 4 draw calls per layer.
+-*   **Memory Complexity:** $O(P)$ for the color buffer, opacity buffer, and z-buffer. The geometry storage is independent of the OIT method.
+-*   **Measured Performance:** Tested on an NVIDIA GeForce RTX 2080 GPU at resolutions 800x800 and 2560x1600. The method is faster than basic shell mapping at larger resolutions due to reduced overdraw [S1].
+-*   **Strengths:**
+-    *   Reduces fragment shader invocations by using hardware z-buffer culling.
+-    *   Minimizes wave divergence by separating depth finding and shading.
+-    *   Provides stable quality for the first $K$ layers.
+-*   **Limitations:**
+-    *   Requires multiple passes (4 per layer).
+-    *   May suffer from color altering if the number of layers is insufficient (e.g., darkening where many prisms meet) [S1].
+-    *   Not suitable for scenes requiring infinite transparency layers.
+-*   **When to Use:** When rendering semi-transparent layers on animated surfaces where the first few layers are critical for visual quality, and hardware performance is a concern.
+-*   **When Not to Use:** When infinite transparency layers are required, or when the scene is too simple to warrant the overhead of multiple passes.
++*   **Time Complexity:** The method performs $N$ passes, where $N$ is the number of layers (typically 3-4) [S1]. Each pass involves rendering geometry and full-screen depth conversion passes. The cost per pass decreases as more layers are culled [S1].
++*   **Memory Complexity:** Requires storage for the z-buffer, color buffer, and potentially temporary buffers for depth conversion [S1].
++*   **Measured Performance:** Tested on an NVIDIA GeForce RTX 2080 GPU at resolutions 800x800 and 2560x1600 [S1]. The method outperforms basic shell mapping on larger texture sizes due to better cache utilization and reduced overdraw [S1].
++*   **Strengths:** Utilizes hardware depth test for culling, avoiding expensive shader-based discard operations. Reduces wave divergence by separating depth finding from shading.
++*   **Limitations:** Requires a user-defined maximum number of layers. May exhibit color altering on parts where the surface is nearly perpendicular to the view projection plane due to not handling all layers [S1].
++*   **When to Use:** Suitable for real-time rendering of small-scale volumetric structures on animated surfaces where the first $K$ semi-transparent layers are critical for visual quality [S1].
++*   **When Not to Use:** Not appropriate for cases requiring linked list construction, transmittance approximation, or stochastic transparency, as these do not guarantee the stable quality of the first $K$ layers [S1].
+ 
+ ## Background
+-The method was introduced in the paper "Real-time Rendering of Small-scale Volumetric Structure on Animated Surfaces" [S1]. It addresses the limitations of standard depth peeling, which was introduced in [15] and has advanced variants [19, 20]. The key innovation is the use of hardware z-buffer for culling instead of shader-based discard operations, which were identified as a major bottleneck in previous approaches [S1]. The method is particularly relevant for volumetric textures on animated surfaces, where sorting tetrahedrons is too expensive [S1].
++The method was introduced in the paper "Real-time Rendering of Small-scale Volumetric Structure on Animated Surfaces" [S1]. It addresses the limitations of standard depth peeling, which performs culling within shaders using discard operations dependent on texture reads, making each pass expensive and requiring re-rendering of all geometry [S1]. The technique is a modification of depth peeling, leveraging hardware z-buffer capabilities to optimize performance for animated volumetric shells [S1].
+ 
+ ## Sources

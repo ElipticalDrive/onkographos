@@ -1,0 +1,140 @@
+--- v009.md
++++ v010.md
+@@ -1,110 +1,62 @@
+ # SLAM and Mapping
+ 
+-Also called: Neural SLAM, Gaussian SLAM, 3DGS-SLAM
++Also called: Neural SLAM, 3DGS SLAM, Gaussian Splatting SLAM
+ 
+ ## Overview
+-SLAM and Mapping in the context of 3D Gaussian Splatting (3DGS) solves the problem of simultaneously estimating camera poses and reconstructing a high-fidelity 3D scene representation from a stream of images or video. It sets itself apart from offline reconstruction methods by operating incrementally or in real-time, tightly coupling the geometric tracking (odometry/loop closure) with the radiance-field optimization. Unlike traditional NeRF-based SLAM, which suffers from slow training and rendering, 3DGS-based SLAM leverages the explicit, differentiable nature of Gaussian blobs to enable real-time rendering and faster convergence, though it introduces challenges regarding Gaussian degeneracy and memory management [S1][S2, unofficial].
++SLAM and Mapping in the context of 3D Gaussian Splatting (3DGS) refers to the simultaneous estimation of camera poses and the construction of a 3D scene representation using Gaussian primitives or hybrid neural fields, enabling real-time novel view synthesis and localization [S1][S2, unofficial]. Unlike traditional SLAM systems that rely on sparse feature points or dense depth maps, 3DGS-based methods leverage the differentiable rendering of Gaussians to optimize geometry and appearance jointly [S1]. This family is distinguished from sibling methods like [Base 3DGS Optimization](7549-base-3d-gaussian-splatting.md) by its integration of tracking loops, loop closure, and incremental mapping strategies required for continuous operation, rather than offline batch training.
+ 
+ ## Shared principles
+-The core mechanism of 3DGS SLAM involves a coupled loop of tracking and mapping.
++The core mechanism of 3DGS SLAM involves a coupled optimization loop where camera poses and Gaussian parameters (position, covariance, opacity, spherical harmonics coefficients) are updated simultaneously or alternately.
+ 
+-1.  **Tracking (Pose Estimation):** Given a current image frame $I_t$ and a current scene representation $\mathcal{G}$ (the set of Gaussians), the system estimates the camera pose $T_t$. This is typically done by rendering a predicted image $\hat{I}_t$ from $\mathcal{G}$ using the current pose estimate and minimizing a photometric or geometric loss between $I_t$ and $\hat{I}_t$.
+-2.  **Mapping (Scene Update):** Once the pose $T_t$ is estimated, the new frame is used to update the scene representation $\mathcal{G}$. This involves:
+-    *   **Initialization:** Adding new Gaussians derived from the new frame's depth or feature points.
+-    *   **Optimization:** Adjusting the parameters (position $\mu$, covariance $\Sigma$, opacity $\alpha$, spherical harmonics coefficients $c$) of existing and new Gaussians to minimize the reconstruction error.
+-    *   **Densification/Pruning:** Managing the density of Gaussians to maintain detail without excessive memory usage, often using criteria based on gradient magnitude or opacity thresholds [S2, unofficial].
+-
+-**Mathematical Formulation:**
+-The scene is represented as a set of 3D Gaussians $\mathcal{G} = \{g_i\}_{i=1}^N$. Each Gaussian $g_i$ is defined by:
+-*   Mean position: $\mu_i \in \mathbb{R}^3$
+-*   Covariance matrix: $\Sigma_i \in \mathbb{R}^{3 \times 3}$, parameterized as $\Sigma_i = R_i S_i S_i^T R_i^T$ where $R_i$ is a rotation matrix and $S_i$ is a scaling matrix [S2, unofficial].
+-*   Opacity: $\alpha_i \in [0, 1]$
+-*   Color: Represented by spherical harmonics coefficients $c_{i,lm}$ [S2, unofficial].
+-
+-The rendering process projects these 3D Gaussians to 2D screen space, resulting in 2D Gaussians with covariance $\Sigma'_i$. The color $C$ of a pixel is computed via alpha compositing of the sorted Gaussians:
+-$$ C = \sum_{i \in \mathcal{O}} c_i \alpha_i \prod_{j=1}^{i-1} (1 - \alpha_j) $$
+-where $\mathcal{O}$ is the set of overlapping Gaussians sorted by depth [S2, unofficial].
+-
+-The tracking loss $L_{track}$ and mapping loss $L_{map}$ are minimized. A common tracking loss combines color and depth terms:
+-$$ L_{tracking} = \lambda_{color} |\rho(\hat{C}) - \rho(C)| + \lambda_{depth} |\hat{D} - D| $$
+-where $\rho$ converts RGB to LAB space (discarding the L channel to handle lighting changes), $C$ is the input image, $\hat{C}$ is the rendered image, $D$ is the input depth, and $\hat{D}$ is the rendered depth [S5].
++1.  **Representation:** The scene is represented as a set of 3D Gaussians $\mathcal{G} = \{g_i\}$. Each Gaussian $g_i$ is defined by a mean position $\mu_i$, a covariance matrix $\Sigma_i$ (parameterized by a rotation matrix $R_i$ and a scaling vector $s_i$), an opacity $\alpha_i$, and spherical harmonics coefficients $\mathbf{c}_i$ for view-dependent color [S1].
++2.  **Rendering:** The image is rendered via differentiable rasterization. For each pixel, the Gaussians are sorted by depth, and alpha compositing is applied:
++    $$ C = \sum_{i \in \mathcal{N}} c_i \alpha_i \prod_{j=1}^{i-1} (1 - \alpha_j) $$
++    where $\mathcal{N}$ is the set of Gaussians projected onto the pixel [S1].
++3.  **Optimization:** The system minimizes a loss function $\mathcal{L}$ between the rendered image $\hat{I}$ and the ground truth image $I_{gt}$:
++    $$ \mathcal{L} = \mathcal{L}_{rec}(\hat{I}, I_{gt}) + \mathcal{L}_{reg} $$
++    where $\mathcal{L}_{rec}$ is typically a combination of L1 loss and SSIM [S2, unofficial]. Gradients are backpropagated to update both the Gaussian parameters and the camera pose $T$ [S1].
++4.  **Densification:** To maintain detail, new Gaussians are spawned from existing ones based on gradient magnitude or depth uncertainty, and redundant Gaussians are pruned [S1]. This process is adapted for SLAM to handle dynamic scenes and incremental updates.
+ 
+ ## Subtopics
+ 
+ ### [Mapping Strategies](9321-mapping-strategies.md)
+-Mapping strategies define the correspondence mechanism used to align pixels or features between two distinct scenes or views for the purpose of alignment, editing, or fusion. In the context of radiance-field optimization, these strategies solve the problem of establishing reliable spatial matching when direct geometric priors are insufficient or when transferring attributes between scenes. This method sets itself apart from sibling optimization techniques by focusing specifically on the *correspondence* phase rather than the gradient-based parameter update, serving as a prerequisite for resampling and fusion.
+-*   **Identity Mapping**: Assumes direct pixel-to-pixel correspondence based on camera pose or grid alignment. Fails under significant misalignment or viewpoint shifts [9321-mapping-strategies.md].
+-*   **Semantic Correspondence-based Mapping**: Uses Vision Transformers (ViT) and DINO to generate feature embeddings, finding nearest neighbors in feature space. Robust to appearance changes but struggles in textureless regions [9321-mapping-strategies.md].
+-*   **Co-segmentation-based Mapping**: Refines alignment by segmenting images into semantically meaningful parts using DINO clustering, enforcing consistency within boundaries [9321-mapping-strategies.md].
++Mapping strategies define the correspondence mechanism used to align pixels or features between two distinct scene representations, typically for tasks such as 3D editing, style transfer, or multi-scene fusion. Unlike standard SLAM mapping which updates a single scene's geometry and appearance, these strategies solve the problem of transferring visual attributes (density, radiance, color) from a source scene to a target scene while maintaining structural fidelity. They are distinguished from sibling methods like [Semantic-aware mapping](12053-semantic-aware-mapping.md) by their focus on explicit pixel-to-pixel or region-to-region correspondence algorithms rather than high-level semantic label propagation. See [Mapping Strategies](9321-mapping-strategies.md).
+ 
+ ### [Semantic-aware mapping](12053-semantic-aware-mapping.md)
+-Not given in the sources.
++See [Semantic-aware mapping](12053-semantic-aware-mapping.md).
+ 
+ ### [Neural Radiance Field (NeRF) Representation](12096-neural-radiance-field-nerf-representation.md)
+-Neural Radiance Field (NeRF) representation is a method for implicitly modeling 3D scenes using neural networks to enable novel view synthesis. It solves the problem of reconstructing a continuous volumetric appearance field from a sparse set of 2D images by optimizing a network to predict color and density at any 3D point and viewing direction. Unlike explicit representations such as [3D Gaussian Splatting](12052-3d-gaussian-splatting.md) which store millions of discrete blobs, NeRF stores the scene implicitly within a neural network, resulting in lower memory usage but significantly slower rendering and training times.
++Neural Radiance Field (NeRF) representation is a method for implicitly encoding a 3D scene as a continuous volumetric function using a neural network, enabling high-fidelity novel view synthesis by differentiating through the volume rendering equation. It differs from explicit representations like 3D Gaussian Splatting by storing scene geometry and appearance within a compact network weight set rather than millions of discrete primitives, trading higher memory usage for implicit smoothness and avoiding the floating artifacts associated with sparse point clouds. See [Neural Radiance Field (NeRF) Representation](12096-neural-radiance-field-nerf-representation.md).
+ 
+ ### CG-SLAM
+-*   **Definition**: A method that greatly improves reconstruction quality by introducing an uncertainty map into the training process based on the rendered depth [S1].
+-*   **Step**: Introduce an uncertainty map into the training process based on the rendered depth [S1].
++CG-SLAM improves reconstruction quality by introducing an uncertainty map into the training process based on the rendered depth [S1]. This uncertainty guides the densification and optimization steps, allowing the system to focus resources on areas with high geometric ambiguity.
+ 
+ ### Combined ORB-SLAM + 3DGS
+-*   **Definition**: Combines an existing frame-based tracking system (ORB-SLAM) with 3DGS mapping. ORB-SLAM recovers poses, and 3DGS is trained with poses and sensor depth of keyframes, equivalent to offline splatting [S2, unofficial].
+-*   **Performance**: On EuRoC Machine Hall (Stereo Depth), ATE RMSE (m): ORB-SLAM3 0.052, Ours 3.190. Point-SLAM fails on all sequences [S2, unofficial].
+-*   **Comparison**: ORB-SLAM achieves best ATE, but combined approach shows no significant difference in rendering metrics compared to unified 3DGS SLAM. Unified approach is preferred for exploring 3DGS throughout the entire algorithm [S2, unofficial].
++This approach combines an existing frame-based tracking system (ORB-SLAM) with 3DGS mapping. ORB-SLAM recovers camera poses, and 3DGS is trained using these poses and sensor depth from keyframes, effectively performing offline splatting [S2, unofficial]. On the EuRoC Machine Hall dataset with stereo depth, the combined approach achieved an ATE RMSE of 3.190 m, compared to 0.052 m for ORB-SLAM3. While ORB-SLAM provides superior tracking accuracy, the rendering metrics (PSNR, SSIM, LPIPS) show no significant difference compared to unified 3DGS SLAM methods. However, the unified approach is preferred for exploring the full capabilities of 3DGS within the algorithm [S2, unofficial].
+ 
+ ### CP-SLAM
+-*   **Definition**: A neural point-based hybrid neural field SLAM system enabling multi-agent cooperative localization and mapping with loop closure [S3].
+-*   **Steps**:
+-    *   Uses a keyframe-associated neural point representation inspired by PointNeRF, allowing per-point features to be adjusted during pose graph optimization [S3].
+-    *   Employs a two-stage distributed-to-centralized training scheme: initial decoders are trained separately for each agent, then fused and fine-tuned jointly [S3].
+-    *   Integrates odometry, loop detection, sub-map fusion, and global refinement into a unified framework [S3].
++CP-SLAM is a neural point-based hybrid neural field SLAM system that enables multi-agent cooperative localization and mapping with loop closure [S3]. It uses a keyframe-associated neural point representation inspired by PointNeRF, allowing per-point features to be adjusted during pose graph optimization. It employs a two-stage distributed-to-centralized training scheme: initial decoders are trained separately for each agent, then fused and fine-tuned jointly. The system integrates odometry, loop detection, sub-map fusion, and global refinement into a unified framework [S3].
+ 
+ ### MNE-SLAM
+-*   **Definition**: The first fully distributed multi-agent neural SLAM framework enabling accurate collaborative mapping and robust camera tracking without centralized training or raw data exchange [S3].
+-*   **Steps**:
+-    *   Uses a triplane+MLP hybrid neural field representation as a mapping module [S3].
+-    *   Introduces an intra-to-inter loop closure strategy to reduce pose drift and align submaps across agents through peer-to-peer feature sharing and global consistency loss [S3].
++MNE-SLAM is the first fully distributed multi-agent neural SLAM framework enabling accurate collaborative mapping and robust camera tracking without centralized training or raw data exchange [S3]. It uses a triplane+MLP hybrid neural field representation as a mapping module. It introduces an intra-to-inter loop closure strategy to reduce pose drift and align submaps across agents through peer-to-peer feature sharing and global consistency loss. It also introduces the INS dataset for benchmarking [S3].
+ 
+ ### HERO-SLAM
+-*   **Definition**: A SLAM method employing a novel multiscale patch-based loss that aligns feature points, maps, and RGB-D pixels through warpings [S3].
+-*   **Steps**: Uses an INGP-like multiresolution hybrid feature grid+MLP representation for neural SDF learning [S3].
++HERO-SLAM employs a novel multiscale patch-based loss that aligns feature points, maps, and RGB-D pixels through warpings [S3]. It uses an INGP-like multiresolution hybrid feature grid+MLP representation for neural SDF learning. It demonstrates superior performance and robustness over prior implicit field-based SLAM methods, especially under challenging conditions [S3].
+ 
+ ### PIN-SLAM
+-*   **Definition**: A globally consistent SLAM system using a point-based implicit neural (PIN) representation [S3].
+-*   **Steps**:
+-    *   Replaces grid structures with neural feature points, offering spatial flexibility and elastic correction during loop closure [S3].
+-    *   Mapping alternates with odometry [S3].
+-    *   Mapping step is based on a hybrid neural SDF representation with explicit neural points and implicit MLP decoders [S3].
+-    *   Odometry is performed correspondence-free via second-order scan-to-map optimization [S3].
+-    *   A sliding window replay buffer ensures stable incremental updates [S3].
+-    *   Loop closures trigger pose graph optimization and elastic deformation of neural points, enabling consistent large-scale mapping [S3].
++PIN-SLAM is a globally consistent SLAM system using a point-based implicit neural (PIN) representation [S3]. It replaces grid structures with neural feature points, offering spatial flexibility and elastic correction during loop closure. Mapping alternates with odometry. The mapping step is based on a hybrid neural SDF representation with explicit neural points and implicit MLP decoders. Odometry is performed correspondence-free via second-order scan-to-map optimization. A sliding window replay buffer ensures stable incremental updates. Loop closures trigger pose graph optimization and elastic deformation of neural points, enabling consistent large-scale mapping [S3].
+ 
+ ### Active 3D Reconstruction Algorithm
+-*   **Steps**:
+-    *   **Initialization**: Initialize 3D bounding box, uniformly sample goal-state candidates $S_g$ from view space, initialize DVGO coarse model $M^{(c)}$ and agent state $s_0$, append initial image to database $\{I\}$ [S4, unofficial].
+-    *   **Global Policy**: Select next-best-view $s^*_g$ from goal candidates $S_g$ using criterion: $s^*_g = \arg\min_{s_g \in S_g} (\lambda_{cp} l_{cp}(x_{s_g}) - \lambda_{ig} E_s(s_g))$, where $x_{s_g}$ is 3D location of $s_g$ [S4, unofficial].
+-    *   **Local Policy**: Execute planning optimization to obtain optimized trajectory $S^*$ and local next-best view $s^*$ [S4, unofficial].
+-    *   **Action**: Move agent to $s^*$ [S4, unofficial].
+-    *   **Observation**: Obtain new image observation $I_t$ [S4, unofficial].
+-    *   **Update Database**: Add new observation to database $\{I\}_{i=0}^{t+1}$ [S4, unofficial].
+-    *   **Mapping Optimization**: Optimize DVGO model $M_t$ to $M_{t+1}$ by sampling pixels from database, including synchronizing entropy volume $V(E,c)$ [S4, unofficial].
+-    *   **Stop Check**: Stop if (1) change in entropy volume is below threshold, or (2) maximum information gain of feasible goal candidates is below threshold [S4, unofficial].
+-    *   **Fine Stage**: After exploration, initialize DVGO fine model $M^{(f)}$ with trained coarse model $M_T^{(c)}$. Perform stochastic training by sampling pixels from database $\{I\}_{i=0}^T$ for $N$ iterations, optimizing every $m$ iterations [S4, unofficial].
++This algorithm enables autonomous 3D reconstruction by actively selecting next-best views. It initializes a 3D bounding box and samples goal-state candidates. A global policy selects the next-best view $s^*_g$ using the criterion:
++$$ s^*_g = \arg\min_{s_g \in S_g} (\lambda_{cp} l_{cp}(x_{s_g}) - \lambda_{ig} E_s(s_g)) $$
++where $x_{s_g}$ is the 3D location of the candidate [S4, unofficial]. A local policy optimizes the trajectory. The agent moves, observes, and updates the database. The mapping module (DVGO model) is optimized by sampling pixels from the database, synchronizing the entropy volume. Exploration stops if the change in entropy volume or the maximum information gain falls below a threshold. A fine stage then refines the model using stochastic training [S4, unofficial].
+ 
+ ### Lightness-Decoupled Camera Tracking
+-*   **Definition**: A camera tracking method that decouples lightness from the image to handle lighting changes, by converting images to LAB space and discarding the L (lightness) channel during comparison [S5].
+-*   **Steps**:
+-    1.  Parameterize camera pose as $T = (t, q)$ with 3D translation $t$ and rotation quaternion $q$ [S5].
+-    2.  Initialize camera pose assuming constant camera velocity [S5].
+-    3.  Convert input image $C$ and rendered image $\hat{C}$ to LAB space using $\rho$ [S5].
+-    4.  Discard the L channel [S5].
+-    5.  Minimize $L_{tracking}$ using color (A/B channels) and depth differences [S5].
+-*   **Formula**: $L_{tracking} = \lambda_{color} |\rho(\hat{C}) - \rho(C)| + \lambda_{depth} |\hat{D} - D|$, where $\rho$ is the operation of converting the image from RGB to LAB space, $C$ is the input image, $\hat{C}$ is the rendered image, $D$ is the input depth, and $\hat{D}$ is the rendered depth [S5].
+-*   **Parameters**:
+-    *   $\lambda_{color} = 0.5$, weight for the color term in the tracking loss [S5].
+-    *   $\lambda_{depth} = 1.0$, weight for the depth term in the tracking loss [S5].
++This method decouples lightness from the image to handle lighting changes by converting images to LAB space and discarding the L (lightness) channel during comparison [S5]. Camera pose is parameterized as $T = (t, q)$ with 3D translation $t$ and rotation quaternion $q$. The tracking loss is:
++$$ L_{tracking} = \lambda_{color} |\rho(\hat{C}) - \rho(C)| + \lambda_{depth} |\hat{D} - D| $$
++where $\rho$ converts RGB to LAB, $C$ and $\hat{C}$ are input and rendered images, and $D$ and $\hat{D}$ are input and rendered depths. The weights are $\lambda_{color} = 0.5$ and $\lambda_{depth} = 1.0$ [S5].
+ 
+ ## Background
+-The integration of SLAM with 3D Gaussian Splatting emerged as a response to the limitations of NeRF-based SLAM systems, which are computationally expensive and slow to render. Traditional SLAM methods (e.g., ORB-SLAM) provide robust pose estimation but lack high-fidelity appearance modeling. NeRF-based SLAM (e.g., NICE-SLAM, ESLAM) offers high-quality rendering but suffers from slow training and rendering speeds [S3]. 3DGS SLAM leverages the explicit, differentiable nature of Gaussian splats to achieve real-time rendering and faster convergence [S1][S2, unofficial]. Early works like CG-SLAM introduced uncertainty maps to improve reconstruction quality [S1]. Combined approaches like ORB-SLAM + 3DGS separate tracking and mapping, while unified approaches like SplaTAM and GS-SLAM integrate them [S2, unofficial]. Recent advancements include multi-agent systems (CP-SLAM, MNE-SLAM) and distributed frameworks (MNE-SLAM) [S3], as well as methods handling lighting changes (Lightness-Decoupled Tracking) [S5] and active reconstruction (ActiveRMAP) [S4, unofficial].
++3D Gaussian Splatting was introduced as a real-time explicit scene representation method [S1]. Its application to SLAM emerged as a natural extension, leveraging the differentiable nature of Gaussian splatting for joint pose and map optimization. Early works combined traditional SLAM backends with 3DGS renderers, while later approaches developed unified frameworks that integrate tracking, mapping, and loop closure directly within the Gaussian optimization loop [S2, unofficial]. Hybrid neural field approaches (NeRF-based SLAM) also evolved in parallel, offering implicit representations that complement explicit Gaussian methods [S3]. The field has expanded to include multi-agent systems, active reconstruction, and robust tracking under varying lighting conditions [S3][S4, unofficial][S5].
+ 
+ ## Sources

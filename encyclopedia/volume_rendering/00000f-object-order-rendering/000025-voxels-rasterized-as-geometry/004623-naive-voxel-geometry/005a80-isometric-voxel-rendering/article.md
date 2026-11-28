@@ -1,0 +1,302 @@
+# Isometric Voxel Rendering
+
+Also called: Isometric
+
+## Overview
+Isometric Voxel Rendering is an algorithm that renders a voxel model into an isometric projection by iterating over a 2D pixel grid and determining which voxels contribute to each pixel's visible surface, using a tiling system to draw triangles for exposed faces [S1, unofficial]. It builds on [Naive Voxel Geometry](11683-naive-voxel-geometry.md) by converting scalar field data into geometric primitives submitted to the graphics pipeline [G].
+
+## How it works
+### Inputs and Outputs
+**Inputs:**
+*   `model`: A voxel data structure accessed via an interface providing dimensions `SizeX`, `SizeY`, `SizeZ` and indexing `model[x, y, z]` [S1, unofficial].
+*   `renderer`: An interface `ITriangleRenderer` with a method `Tri(x, y, right, index, visibleFace)` for drawing triangles [S1, unofficial].
+
+**Outputs:**
+*   Triangles for exposed faces drawn via the renderer interface [S1, unofficial].
+
+### Data Structures
+*   **`tiles`**: A boolean array of length 4, indexed 0–3, representing the four sub-triangles of a 2x2 pixel tile block. Used to prevent over-drawing within a single pixel block [S1, unofficial].
+*   **`VisibleFace`**: An enum indicating the orientation of the face being drawn (`Left`, `Right`, `Top`) [S1, unofficial].
+
+### Formulas
+The screen-space coordinates are derived from voxel coordinates $(voxelX, voxelY, voxelZ)$ using the following formulas [S1, unofficial]:
+
+$$
+IsoWidth(model) = 2 \times (model.SizeX + model.SizeY)
+$$
+
+$$
+IsoHeight(model) = 2 \times (model.SizeX + model.SizeY) + 4 \times model.SizeZ - 1
+$$
+
+$$
+pixelX = 2 \times (model.SizeY + voxelX - voxelY)
+$$
+
+$$
+pixelY = IsoHeight(model) - 2 \times (voxelX + voxelY) - 4 \times voxelZ - 1
+$$
+
+### Parameters
+*   `modelSizeX2 = model.SizeX * 2`
+*   `modelSizeY2 = model.SizeY * 2`
+*   `modelSizeZ4 = model.SizeZ * 4`
+*   `pixelWidth = modelSizeX2 + modelSizeY2`
+*   `pixelHeight = pixelWidth + modelSizeZ4`
+*   `evenSizeX = model.SizeX % 2 == 0`
+*   `evenSizeY = model.SizeY % 2 == 0`
+
+### Algorithm Steps
+1.  **Initialize Dimensions**: Calculate `pixelWidth` and `pixelHeight` based on model dimensions. Determine parity flags `evenSizeX` and `evenSizeY` [S1, unofficial].
+2.  **Iterate Pixel Grid**: Loop over `pixelY` from 0 to `pixelHeight - 2` with a step of 4 [S1, unofficial].
+3.  **Determine Horizontal Bounds**: For each `pixelY`, calculate `pixelStartX` and `pixelStopX` to define the horizontal bounds of the isometric diamond shape [S1, unofficial].
+4.  **Iterate Pixel Blocks**: Loop over `pixelX` from `pixelStartX` to `pixelStopX` with a step of 4 [S1, unofficial].
+5.  **Determine Tile Orientation**:
+    *   Calculate `right = ((pixelX >> 1) + (pixelY >> 1) & 1) == (evenSizeX ? 0 : 1)` [S1, unofficial].
+    *   Determine `startAtTop` and `startAtLeft` flags based on the current `pixelX` and `pixelY` relative to model dimensions [S1, unofficial].
+6.  **Calculate Initial Voxel Coordinates**: Determine the starting voxel coordinates $(startX, startY, startZ)$ for the ray cast corresponding to the current pixel block. This is based on `startAtTop`, `startAtLeft`, or default diagonal traversal logic [S1, unofficial].
+7.  **Clear Tiles**: Initialize the `tiles` boolean array to `false` for the new pixel block [S1, unofficial].
+8.  **Voxel Traversal Loop**: Loop over voxels starting from $(startX, startY, startZ)$, incrementing `voxelX` and `voxelY`, and decrementing `voxelZ`, until bounds are exceeded or all 4 tiles are filled [S1, unofficial].
+9.  **Check Neighbors and Draw**:
+    *   Check neighbor $(voxelX-1, voxelY, voxelZ+1)$: If non-zero, draw tiles 0 and 1 with `VisibleFace.Right` if not already drawn [S1, unofficial].
+    *   Check neighbor $(voxelX, voxelY-1, voxelZ+1)$: If non-zero, draw tiles 2 and 3 with `VisibleFace.Left` if not already drawn [S1, unofficial].
+    *   Check neighbor $(voxelX, voxelY, voxelZ+1)$: If non-zero, draw tile 1 with `VisibleFace.Left` and tile 2 with `VisibleFace.Right` if not already drawn [S1, unofficial].
+    *   Check neighbor $(voxelX-1, voxelY, voxelZ)$: If non-zero, draw tile 0 with `VisibleFace.Top` if not already drawn [S1, unofficial].
+    *   Check neighbor $(voxelX, voxelY-1, voxelZ)$: If non-zero, draw tile 3 with `VisibleFace.Top` if not already drawn [S1, unofficial].
+    *   Check current voxel $(voxelX, voxelY, voxelZ)$: If non-zero, draw all 4 tiles (0:Left, 1:Top, 2:Top, 3:Right) and break the voxel loop [S1, unofficial].
+    *   Check neighbor $(voxelX, voxelY+1, voxelZ)$: If non-zero, draw tiles 0 and 1 with `VisibleFace.Right` if not already drawn [S1, unofficial].
+    *   Check neighbor $(voxelX+1, voxelY, voxelZ)$: If non-zero, draw tiles 2 and 3 with `VisibleFace.Left` if not already drawn [S1, unofficial].
+    *   Check neighbor $(voxelX+1, voxelY+1, voxelZ)$: If non-zero, draw tile 1 with `VisibleFace.Left` and tile 2 with `VisibleFace.Right` if not already drawn [S1, unofficial].
+    *   Check neighbor $(voxelX, voxelY+1, voxelZ-1)$: If non-zero, draw tile 0 with `VisibleFace.Top` if not already drawn [S1, unofficial].
+    *   Check neighbor $(voxelX+1, voxelY, voxelZ-1)$: If non-zero, draw tile 3 with `VisibleFace.Top` if not already drawn [S1, unofficial].
+10. **Render Top Left Edge**: Loop `pixelX` and `pixelY` with step 4, calculating `voxelX`, and draw a triangle with `VisibleFace.Top` if the voxel at $(voxelX, SizeY-1, SizeZ-1)$ is non-zero [S1, unofficial].
+11. **Render Top Right Edge**: Loop `pixelX` and `pixelY` with step 4, calculating `voxelY`, and draw a triangle with `VisibleFace.Top` if the voxel at $(SizeX-1, voxelY, SizeZ-1)$ is non-zero [S1, unofficial].
+12. **Render Bottom Left Edge**: Loop `pixelX` and `pixelY` with step 4, calculating `voxelY`:
+    *   Draw two triangles (Left and Right faces) if the voxel at $(0, voxelY+1, 0)$ is non-zero [S1, unofficial].
+    *   Draw a triangle (Right face) if the voxel at $(0, voxelY, 0)$ is non-zero [S1, unofficial].
+
+### Pseudocode
+> **Unverified code.** The code below did not pass a test run against a reference implementation, or no test fits it, so it may contain errors.
+
+```python
+from enum import Enum
+
+class VisibleFace(Enum):
+    Left = 0
+    Right = 1
+    Top = 2
+
+def render_isometric(model, renderer):
+    # Derived dimensions
+    model_size_x2 = model.SizeX * 2
+    model_size_y2 = model.SizeY * 2
+    model_size_z4 = model.SizeZ * 4
+    pixel_width = model_size_x2 + model_size_y2
+    pixel_height = pixel_width + model_size_z4
+    
+    even_size_x = model.SizeX % 2 == 0
+    even_size_y = model.SizeY % 2 == 0
+    
+    # Helper to draw a tile
+    def draw_tile(tile, x, y, voxel, visible_face):
+        tx = x + (2 if tile >= 2 else 0)
+        ty = y + (2 if tile == 0 or tile == 3 else 0)
+        right = tile % 2 == 0
+        renderer.Tri(x=tx, y=ty, right=right, index=voxel, visible_face=visible_face)
+
+    # Main pixel grid loop
+    for pixel_y in range(0, pixel_height - 2, 4):
+        # Calculate horizontal bounds for the isometric diamond
+        # Not given in the sources.
+        pixel_start_x = 0
+        pixel_stop_x = pixel_width
+        
+        for pixel_x in range(pixel_start_x, pixel_stop_x, 4):
+            # Determine tile orientation
+            right_flag = ((pixel_x >> 1) + (pixel_y >> 1) & 1) == (0 if even_size_x else 1)
+            
+            # Determine start conditions
+            # Not given in the sources.
+            start_at_top = False
+            start_at_left = False
+            
+            # Calculate initial voxel coordinates
+            # Not given in the sources.
+            start_x, start_y, start_z = 0, 0, 0
+            
+            # Clear tiles for this block
+            tiles = [False, False, False, False]
+            
+            # Voxel traversal
+            voxel_x, voxel_y, voxel_z = start_x, start_y, start_z
+            while voxel_x >= 0 and voxel_x < model.SizeX and \
+                  voxel_y >= 0 and voxel_y < model.SizeY and \
+                  voxel_z >= 0 and voxel_z < model.SizeZ and \
+                  not all(tiles):
+                
+                # Check neighbors and draw tiles
+                # Neighbor: (voxelX-1, voxelY, voxelZ+1)
+                if voxel_x - 1 >= 0 and voxel_z + 1 < model.SizeZ:
+                    v = model[voxel_x - 1, voxel_y, voxel_z + 1]
+                    if v != 0:
+                        if not tiles[0]:
+                            draw_tile(0, pixel_x, pixel_y, v, VisibleFace.Right)
+                            tiles[0] = True
+                        if not tiles[1]:
+                            draw_tile(1, pixel_x, pixel_y, v, VisibleFace.Right)
+                            tiles[1] = True
+                
+                # Neighbor: (voxelX, voxelY-1, voxelZ+1)
+                if voxel_y - 1 >= 0 and voxel_z + 1 < model.SizeZ:
+                    v = model[voxel_x, voxel_y - 1, voxel_z + 1]
+                    if v != 0:
+                        if not tiles[2]:
+                            draw_tile(2, pixel_x, pixel_y, v, VisibleFace.Left)
+                            tiles[2] = True
+                        if not tiles[3]:
+                            draw_tile(3, pixel_x, pixel_y, v, VisibleFace.Left)
+                            tiles[3] = True
+
+                # Neighbor: (voxelX, voxelY, voxelZ+1)
+                if voxel_z + 1 < model.SizeZ:
+                    v = model[voxel_x, voxel_y, voxel_z + 1]
+                    if v != 0:
+                        if not tiles[1]:
+                            draw_tile(1, pixel_x, pixel_y, v, VisibleFace.Left)
+                            tiles[1] = True
+                        if not tiles[2]:
+                            draw_tile(2, pixel_x, pixel_y, v, VisibleFace.Right)
+                            tiles[2] = True
+
+                # Neighbor: (voxelX-1, voxelY, voxelZ)
+                if voxel_x - 1 >= 0:
+                    v = model[voxel_x - 1, voxel_y, voxel_z]
+                    if v != 0:
+                        if not tiles[0]:
+                            draw_tile(0, pixel_x, pixel_y, v, VisibleFace.Top)
+                            tiles[0] = True
+
+                # Neighbor: (voxelX, voxelY-1, voxelZ)
+                if voxel_y - 1 >= 0:
+                    v = model[voxel_x, voxel_y - 1, voxel_z]
+                    if v != 0:
+                        if not tiles[3]:
+                            draw_tile(3, pixel_x, pixel_y, v, VisibleFace.Top)
+                            tiles[3] = True
+
+                # Current voxel
+                v = model[voxel_x, voxel_y, voxel_z]
+                if v != 0:
+                    draw_tile(0, pixel_x, pixel_y, v, VisibleFace.Left)
+                    tiles[0] = True
+                    draw_tile(1, pixel_x, pixel_y, v, VisibleFace.Top)
+                    tiles[1] = True
+                    draw_tile(2, pixel_x, pixel_y, v, VisibleFace.Top)
+                    tiles[2] = True
+                    draw_tile(3, pixel_x, pixel_y, v, VisibleFace.Right)
+                    tiles[3] = True
+                    break # Found the front-most voxel for this pixel block
+                
+                # Neighbor: (voxelX, voxelY+1, voxelZ)
+                if voxel_y + 1 < model.SizeY:
+                    v = model[voxel_x, voxel_y + 1, voxel_z]
+                    if v != 0:
+                        if not tiles[0]:
+                            draw_tile(0, pixel_x, pixel_y, v, VisibleFace.Right)
+                            tiles[0] = True
+                        if not tiles[1]:
+                            draw_tile(1, pixel_x, pixel_y, v, VisibleFace.Right)
+                            tiles[1] = True
+
+                # Neighbor: (voxelX+1, voxelY, voxelZ)
+                if voxel_x + 1 < model.SizeX:
+                    v = model[voxel_x + 1, voxel_y, voxel_z]
+                    if v != 0:
+                        if not tiles[2]:
+                            draw_tile(2, pixel_x, pixel_y, v, VisibleFace.Left)
+                            tiles[2] = True
+                        if not tiles[3]:
+                            draw_tile(3, pixel_x, pixel_y, v, VisibleFace.Left)
+                            tiles[3] = True
+
+                # Neighbor: (voxelX+1, voxelY+1, voxelZ)
+                if voxel_x + 1 < model.SizeX and voxel_y + 1 < model.SizeY:
+                    v = model[voxel_x + 1, voxel_y + 1, voxel_z]
+                    if v != 0:
+                        if not tiles[1]:
+                            draw_tile(1, pixel_x, pixel_y, v, VisibleFace.Left)
+                            tiles[1] = True
+                        if not tiles[2]:
+                            draw_tile(2, pixel_x, pixel_y, v, VisibleFace.Right)
+                            tiles[2] = True
+
+                # Neighbor: (voxelX, voxelY+1, voxelZ-1)
+                if voxel_y + 1 < model.SizeY and voxel_z - 1 >= 0:
+                    v = model[voxel_x, voxel_y + 1, voxel_z - 1]
+                    if v != 0:
+                        if not tiles[0]:
+                            draw_tile(0, pixel_x, pixel_y, v, VisibleFace.Top)
+                            tiles[0] = True
+
+                # Neighbor: (voxelX+1, voxelY, voxelZ-1)
+                if voxel_x + 1 < model.SizeX and voxel_z - 1 >= 0:
+                    v = model[voxel_x + 1, voxel_y, voxel_z - 1]
+                    if v != 0:
+                        if not tiles[3]:
+                            draw_tile(3, pixel_x, pixel_y, v, VisibleFace.Top)
+                            tiles[3] = True
+
+                # Increment/Decrement for next voxel in traversal
+                voxel_x += 1
+                voxel_y += 1
+                voxel_z -= 1
+
+    # Render Top Left Edge
+    # Not given in the sources.
+    for pixel_x in range(0, pixel_width, 4):
+        for pixel_y in range(0, pixel_height, 4):
+            voxel_x = 0
+            if voxel_x >= 0 and voxel_x < model.SizeX:
+                if model[voxel_x, model.SizeY - 1, model.SizeZ - 1] != 0:
+                    draw_tile(0, pixel_x, pixel_y, model[voxel_x, model.SizeY - 1, model.SizeZ - 1], VisibleFace.Top)
+
+    # Render Top Right Edge
+    # Not given in the sources.
+    for pixel_x in range(0, pixel_width, 4):
+        for pixel_y in range(0, pixel_height, 4):
+            voxel_y = 0
+            if voxel_y >= 0 and voxel_y < model.SizeY:
+                if model[model.SizeX - 1, voxel_y, model.SizeZ - 1] != 0:
+                    draw_tile(0, pixel_x, pixel_y, model[model.SizeX - 1, voxel_y, model.SizeZ - 1], VisibleFace.Top)
+
+    # Render Bottom Left Edge
+    # Not given in the sources.
+    for pixel_x in range(0, pixel_width, 4):
+        for pixel_y in range(0, pixel_height, 4):
+            voxel_y = 0
+            if voxel_y >= 0 and voxel_y < model.SizeY:
+                if model[0, voxel_y + 1, 0] != 0:
+                    draw_tile(0, pixel_x, pixel_y, model[0, voxel_y + 1, 0], VisibleFace.Left)
+                    draw_tile(1, pixel_x, pixel_y, model[0, voxel_y + 1, 0], VisibleFace.Right)
+                if model[0, voxel_y, 0] != 0:
+                    draw_tile(0, pixel_x, pixel_y, model[0, voxel_y, 0], VisibleFace.Right)
+```
+
+### Edge Cases and Pitfalls
+*   **Precision**: The algorithm uses integer arithmetic for pixel coordinates and voxel indices. Ensure that intermediate calculations for `pixelX` and `pixelY` do not overflow if model dimensions are large [S1, unofficial].
+*   **Boundaries**: Neighbor checks must explicitly verify bounds (e.g., `voxel_x - 1 >= 0`) to avoid out-of-bounds array access [G].
+*   **Degenerate Input**: Empty models (all zeros) will result in no triangles being drawn, which is correct behavior [S1, unofficial].
+
+## Operating characteristics
+*   **Time Complexity**: Not given in the sources.
+*   **Memory Complexity**: Not given in the sources.
+*   **Strengths**: Simple implementation, no need for complex sorting or depth buffers, deterministic output [S1, unofficial].
+*   **Limitations**: Fixed isometric view, not suitable for dynamic camera rotation or perspective projection [S1, unofficial].
+*   **When to use**: Not given in the sources.
+*   **When not to use**: Not given in the sources.
+
+## Background
+Isometric Voxel Rendering is described in the Voxel2Pixel graphics library by Ben McLean [S1, unofficial]. The algorithm iterates over a 2D pixel grid to determine visible surfaces and uses a tiling system to draw triangles for exposed faces [S1, unofficial].
+
+## Sources
+[S1] GitHub - BenMcLean/Voxel2Pixel: Graphics library for rendering voxel ..., https://github.com/BenMcLean/Voxel2Pixel, fetched 2026-10-29 (unofficial)

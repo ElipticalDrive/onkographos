@@ -1,0 +1,1632 @@
+# Volume Ray Caster
+
+![Perlin Noise Cube](imgs/PerlinCube.gif)
+
+## About
+
+This is a project I created to learn about [Volume Ray Casting](https://en.wikipedia.org/wiki/Volume_ray_casting).
+
+### plots/plots.py
+```
+import matplotlib.pyplot as plt
+import numpy as np
+import argparse
+
+def speedup(processors, sample_points, counts):
+    fig, ax = plt.subplots(1, 2)
+    minimum = np.min(counts)
+    for i, name in enumerate(processors):
+        ax[0].plot(sample_points, counts[i] / np.min(counts[1]))
+        ax[0].set_xticks([64, 128, 256, 512])
+    for i, name in enumerate(processors):
+        ax[1].plot(sample_points, counts[i] / np.min(counts[i]))
+        ax[0].set_xticks([64, 128, 256, 512])
+
+def bars(processors, sample_points, counts):
+    fig, ax = plt.subplots()
+    colors = ["tab:red", "tab:orange", "tab:blue", "tab:green"]
+    multiplier = 0
+    width = 0.2
+    x = np.arange(len(sample_points))
+    for i, name in enumerate(processors):
+        offset = width * multiplier
+        rects = ax.bar(x + offset, counts[i], width, label=name)
+        ax.bar_label(rects, padding=4)
+        multiplier += 1
+    ax.set_ylim(.001, 1000.0)
+    ax.set_ylabel("Mean FPS")
+    ax.set_xticks(x + width + 0.1, sample_points)
+    ax.set_xlabel("Sample Points Per Ray")
+    ax.set_title("Mean FPS of All Implementations")
+    ax.set_yscale("log")
+    ax.legend()
+
+if __name__ == "__main__":
+    parser = argparse.ArgumentParser()
+    parser.add_argument("-n", "--names", type=str, nargs='+')
+    parser.add_argument("-c", "--counts", type=float, nargs='+')
+    parser.add_argument("-s", "--samples", type=int, nargs='+', default=[256])
+    args = parser.parse_args()
+
+    # Sort the information
+    # sorted_names = [name for _, name in sorted(zip(args.counts, args.names))]
+    # sorted_counts = sorted(args.counts)
+
+    # bars(sorted_names, sorted_counts)
+    names = np.array(["gpu", "cpuO3", "cpuO2", "cpu"])
+    names = np.flip(names)
+    speedup_counts = np.array([[49.1862, 89.6334, 164.545, 279.168],\
+                               [0.652227, 1.37443, 2.63114, 5.16624],\
+                               [0.300938, 0.597095, 1.21082, 2.4019],\
+                               [0.0426892, 0.0863052, 0.173265, 0.341076]])
+    speedup_counts = np.flip(speedup_counts)
+    sample_points = np.array([64, 128, 256, 512])
+    bars(names, sample_points, speedup_counts)
+    plt.show()
+```
+
+### src/Main.cpp
+```
+// g++ *.cpp -lGL -lGLEW -lGLU -ldl -lglut
+
+#include <fstream>
+#include <sstream>
+
+#include <glm/gtc/type_ptr.hpp>
+#include <unistd.h>
+#include <chrono>
+
+
+// Globals
+static constexpr auto CANVAS_WIDTH = 400;
+static constexpr auto CANVAS_HEIGHT = 400;
+static constexpr auto CENTER_X = CANVAS_WIDTH / 2;
+static constexpr auto CENTER_Y = CANVAS_HEIGHT / 2;
+static constexpr auto FPS = 60.0;
+static constexpr auto UPDATE_RATE = 1000.0 / FPS;
+static constexpr auto CUBE_SIZE = 60;
+static constexpr auto CAMERA_SCALE = 0.25;
+static constexpr auto BACK_PLANE = 128;
+static constexpr auto SAMPLE_PERIOD = 2.0f;
+
+using namespace glm;
+ 
+#ifdef CPU_BASED
+#include "VolumeRendererCPU.h"
+static Volume<CUBE_SIZE> perlin = create_perlin_volume<CUBE_SIZE>();
+static VolumeRendererCPU<CUBE_SIZE> renderer = VolumeRendererCPU<CUBE_SIZE>();
+#else
+#include "VolumeRenderer.h"
+static VolumeRenderer<CUBE_SIZE> renderer;
+#endif
+
+static ViewingPlane viewing_plane = ViewingPlane(CANVAS_WIDTH, CANVAS_HEIGHT, BACK_PLANE, SAMPLE_PERIOD);
+#include "OpenGL445Setup.h"
+#include "Timer.h"
+
+static float time_elapsed = 0.0f;
+static float rotation_x = 0.0f;
+static float rotation_y = 0.0f;
+static float rotation_z = 0.0f;
+static vec3 light_pos = vec3(0);
+static int frame_number = 0;
+static Timer timer;
+
+void clear_screen() {
+	glClearColor(0.0f, 0.0f, 0.0f, 1.0f);
+	//glClear(GL_COLOR_BUFFER_BIT);
+}
+
+void display_func() {
+	clear_screen();
+	light_pos = glm::vec3(
+		cos(radians(time_elapsed * 100.0)) * 100.0 + 32,
+		64,
+		sin(radians(time_elapsed * 100.0)) * 100.0 + 32
+	);
+	
+	renderer.set_light_pos(&light_pos);
+	renderer.set_view(&viewing_plane);
+	renderer.render();
+	glFinish();
+}
+
+void update(int ID) {	
+	if (frame_number++ < 60) {
+		timer.start();
+		display_func();
+		timer.end();
+		glutTimerFunc(UPDATE_RATE, update, 0);
+		time_elapsed += UPDATE_RATE / 1000.0;
+	}
+	else {
+		timer.output_results();
+		exit(0);
+	}
+}
+
+// void performance_test() {
+// 	display_func();
+// 	display_func();
+// 	glutPostRedisplay();
+// 	auto timer = Timer();
+// 	timer.start();
+// 	for (int i = 0; i < 60; i++) {
+// 		display_func();
+// 	}
+// 	double duration = timer.end();
+// 	std::cout << "Duration: " << duration << std::endl;
+// 	timer.output_results();
+// }
+
+int main(int argc, char ** argv) {
+	if (argc > 1) {
+		std::cout << argv[1] << " ";
+	}
+
+	// Initial setup
+	glutInit(&argc, argv);
+	my_setup(CANVAS_WIDTH, CANVAS_HEIGHT, "Fog");
+	
+	// Set up the callbacks
+	glutDisplayFunc(display_func);
+	glutTimerFunc(UPDATE_RATE, update, 0);
+
+#ifndef CPU_BASED
+	auto perlin = create_perlin_volume<CUBE_SIZE>();
+	renderer = VolumeRenderer<CUBE_SIZE>(viewing_plane);
+#endif
+	renderer.set_volume(&perlin);
+	viewing_plane.set_orientation(
+		glm::vec3(-3, 50, -3),
+		glm::vec3(20, 45, 0),
+		glm::vec3(CANVAS_WIDTH / 2.0f * CAMERA_SCALE, CANVAS_HEIGHT / 2.0f * CAMERA_SCALE, 1.0f)
+	);
+	display_func();
+	display_func();
+	// Start the main loop
+	glutMainLoop();
+	return 0;
+}
+```
+
+### src/OpenGL445Setup.h
+```
+// setup code for compilation in Visual Studio 2017. Copyright Timothy Newman, 2021-2023.
+// Re-usable, with or without modification, only for CS 445/545 Fall '23 Code Examples, with all re-use documenting the original source in code comments.
+// If modified, nature of modification must be documented. No further use/re-use is authorized without written permission of T. Newman
+
+/***********************************************************
+ OpenGL445Setup.h
+
+   This header file contains initialization function calls and set-ups
+for basic 3D CS 445/545 Open GL (Mesa) programs that use the GLUT/freeglut.
+The initializations involve defining a callback handler (my_reshape_function)
+that sets viewing parameters for orthographic 3D display.
+
+   TSN 2022 and 2023 version - for OpenGL 4.3 w/legacy compatibility
+
+ ************************************************************/
+
+
+/* reshape callback handler - defines viewing parameters (projection) */
+
+#pragma once
+
+void my_3d_projection(int width, int height)
+{
+	GLfloat width_bound, height_bound;
+	width_bound = (GLfloat)width; height_bound = (GLfloat)height;
+	glViewport(0, 0, width, height);
+	glMatrixMode(GL_PROJECTION);
+	glLoadIdentity();
+	glOrtho(0.0, (double)width, 0.0, (double)height, 0.0, 1000.0);
+	glMatrixMode(GL_MODELVIEW);
+}
+
+// upper left corner of canvas, in GLUT (not OpenGL!) coordinates
+
+#define STRT_X_POS 25
+#define STRT_Y_POS 25
+
+/* initialization routine */
+
+void my_setup(int width, int height, char *window_name_str)
+{
+	// Allow for current OpenGL4.3 but backwards compatibility to legacy GL 2.1
+	glutInitContextVersion(4, 3);
+	glutInitContextProfile(GLUT_COMPATIBILITY_PROFILE);
+	// To get double buffering, uncomment the following line
+	//glutInitDisplayMode(GLUT_DOUBLE | GLUT_RGB); 
+	// below DisplayMode code line does single buffering - if above line is uncommented,
+	// this single buffering line will have to be commented out
+	glutInitDisplayMode(GLUT_SINGLE | GLUT_RGB);
+	glutInitWindowSize(width, height);
+	glutInitWindowPosition(STRT_X_POS, STRT_Y_POS);
+
+	glutCreateWindow(window_name_str);   // Note: this ultimately results in GLUT generating a display event
+	glewExperimental = GL_TRUE;
+	glewInit();
+
+	glutReshapeFunc(my_3d_projection);
+}
+```
+
+### src/PerlinNoise.h
+```
+//----------------------------------------------------------------------------------------
+//
+//	siv::PerlinNoise
+//	Perlin noise library for modern C++
+//
+//	Copyright (C) 2013-2021 Ryo Suzuki <reputeless@gmail.com>
+//
+//	Permission is hereby granted, free of charge, to any person obtaining a copy
+//	of this software and associated documentation files(the "Software"), to deal
+//	in the Software without restriction, including without limitation the rights
+//	to use, copy, modify, merge, publish, distribute, sublicense, and / or sell
+//	copies of the Software, and to permit persons to whom the Software is
+//	furnished to do so, subject to the following conditions :
+//	
+//	The above copyright notice and this permission notice shall be included in
+//	all copies or substantial portions of the Software.
+//	
+//	THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR
+//	IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY,
+//	FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT.IN NO EVENT SHALL THE
+//	AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER
+//	LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM,
+//	OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN
+//	THE SOFTWARE.
+//
+//----------------------------------------------------------------------------------------
+
+# pragma once
+# include <cstdint>
+# include <algorithm>
+# include <array>
+# include <iterator>
+# include <numeric>
+# include <random>
+# include <type_traits>
+
+# if __has_include(<concepts>) && defined(__cpp_concepts)
+#	include <concepts>
+# endif
+
+
+// Library major version
+# define SIVPERLIN_VERSION_MAJOR			3
+
+// Library minor version
+# define SIVPERLIN_VERSION_MINOR			0
+
+// Library revision version
+# define SIVPERLIN_VERSION_REVISION			0
+
+// Library version
+# define SIVPERLIN_VERSION			((SIVPERLIN_VERSION_MAJOR * 100 * 100) + (SIVPERLIN_VERSION_MINOR * 100) + (SIVPERLIN_VERSION_REVISION))
+
+
+// [[nodiscard]] for constructors
+# if (201907L <= __has_cpp_attribute(nodiscard))
+#	define SIVPERLIN_NODISCARD_CXX20 [[nodiscard]]
+# else
+#	define SIVPERLIN_NODISCARD_CXX20
+# endif
+
+
+// std::uniform_random_bit_generator concept
+# if __cpp_lib_concepts
+#	define SIVPERLIN_CONCEPT_URBG  template <std::uniform_random_bit_generator URBG>
+#	define SIVPERLIN_CONCEPT_URBG_ template <std::uniform_random_bit_generator URBG>
+# else
+#	define SIVPERLIN_CONCEPT_URBG  template <class URBG, std::enable_if_t<std::conjunction_v<std::is_invocable<URBG&>, std::is_unsigned<std::invoke_result_t<URBG&>>>>* = nullptr>
+#	define SIVPERLIN_CONCEPT_URBG_ template <class URBG, std::enable_if_t<std::conjunction_v<std::is_invocable<URBG&>, std::is_unsigned<std::invoke_result_t<URBG&>>>>*>
+# endif
+
+
+// arbitrary value for increasing entropy
+# ifndef SIVPERLIN_DEFAULT_Y
+#	define SIVPERLIN_DEFAULT_Y (0.12345)
+# endif
+
+// arbitrary value for increasing entropy
+# ifndef SIVPERLIN_DEFAULT_Z
+#	define SIVPERLIN_DEFAULT_Z (0.34567)
+# endif
+
+
+namespace siv
+{
+	template <class Float>
+	class BasicPerlinNoise
+	{
+	public:
+
+		static_assert(std::is_floating_point_v<Float>);
+
+		///////////////////////////////////////
+		//
+		//	Typedefs
+		//
+
+		using state_type = std::array<std::uint8_t, 256>;
+
+		using value_type = Float;
+
+		using default_random_engine = std::mt19937;
+
+		using seed_type = typename default_random_engine::result_type;
+
+		///////////////////////////////////////
+		//
+		//	Constructors
+		//
+
+		SIVPERLIN_NODISCARD_CXX20
+		constexpr BasicPerlinNoise() noexcept;
+
+		SIVPERLIN_NODISCARD_CXX20
+		explicit BasicPerlinNoise(seed_type seed);
+
+		SIVPERLIN_CONCEPT_URBG
+		SIVPERLIN_NODISCARD_CXX20
+		explicit BasicPerlinNoise(URBG&& urbg);
+
+		///////////////////////////////////////
+		//
+		//	Reseed
+		//
+
+		void reseed(seed_type seed);
+
+		SIVPERLIN_CONCEPT_URBG
+		void reseed(URBG&& urbg);
+
+		///////////////////////////////////////
+		//
+		//	Serialization
+		//
+
+		[[nodiscard]]
+		constexpr const state_type& serialize() const noexcept;
+
+		constexpr void deserialize(const state_type& state) noexcept;
+
+		///////////////////////////////////////
+		//
+		//	Noise (The result is in the range [-1, 1])
+		//
+
+		[[nodiscard]]
+		value_type noise1D(value_type x) const noexcept;
+
+		[[nodiscard]]
+		value_type noise2D(value_type x, value_type y) const noexcept;
+
+		[[nodiscard]]
+		value_type noise3D(value_type x, value_type y, value_type z) const noexcept;
+
+		///////////////////////////////////////
+		//
+		//	Noise (The result is remapped to the range [0, 1])
+		//
+
+		[[nodiscard]]
+		value_type noise1D_01(value_type x) const noexcept;
+
+		[[nodiscard]]
+		value_type noise2D_01(value_type x, value_type y) const noexcept;
+
+		[[nodiscard]]
+		value_type noise3D_01(value_type x, value_type y, value_type z) const noexcept;
+
+		///////////////////////////////////////
+		//
+		//	Octave noise (The result can be out of the range [-1, 1])
+		//
+
+		[[nodiscard]]
+		value_type octave1D(value_type x, std::int32_t octaves, value_type persistence = value_type(0.5)) const noexcept;
+
+		[[nodiscard]]
+		value_type octave2D(value_type x, value_type y, std::int32_t octaves, value_type persistence = value_type(0.5)) const noexcept;
+
+		[[nodiscard]]
+		value_type octave3D(value_type x, value_type y, value_type z, std::int32_t octaves, value_type persistence = value_type(0.5)) const noexcept;
+
+		///////////////////////////////////////
+		//
+		//	Octave noise (The result is clamped to the range [-1, 1])
+		//
+
+		[[nodiscard]]
+		value_type octave1D_11(value_type x, std::int32_t octaves, value_type persistence = value_type(0.5)) const noexcept;
+
+		[[nodiscard]]
+		value_type octave2D_11(value_type x, value_type y, std::int32_t octaves, value_type persistence = value_type(0.5)) const noexcept;
+
+		[[nodiscard]]
+		value_type octave3D_11(value_type x, value_type y, value_type z, std::int32_t octaves, value_type persistence = value_type(0.5)) const noexcept;
+
+		///////////////////////////////////////
+		//
+		//	Octave noise (The result is clamped and remapped to the range [0, 1])
+		//
+
+		[[nodiscard]]
+		value_type octave1D_01(value_type x, std::int32_t octaves, value_type persistence = value_type(0.5)) const noexcept;
+
+		[[nodiscard]]
+		value_type octave2D_01(value_type x, value_type y, std::int32_t octaves, value_type persistence = value_type(0.5)) const noexcept;
+
+		[[nodiscard]]
+		value_type octave3D_01(value_type x, value_type y, value_type z, std::int32_t octaves, value_type persistence = value_type(0.5)) const noexcept;
+
+		///////////////////////////////////////
+		//
+		//	Octave noise (The result is normalized to the range [-1, 1])
+		//
+
+		[[nodiscard]]
+		value_type normalizedOctave1D(value_type x, std::int32_t octaves, value_type persistence = value_type(0.5)) const noexcept;
+
+		[[nodiscard]]
+		value_type normalizedOctave2D(value_type x, value_type y, std::int32_t octaves, value_type persistence = value_type(0.5)) const noexcept;
+
+		[[nodiscard]]
+		value_type normalizedOctave3D(value_type x, value_type y, value_type z, std::int32_t octaves, value_type persistence = value_type(0.5)) const noexcept;
+
+		///////////////////////////////////////
+		//
+		//	Octave noise (The result is normalized and remapped to the range [0, 1])
+		//
+
+		[[nodiscard]]
+		value_type normalizedOctave1D_01(value_type x, std::int32_t octaves, value_type persistence = value_type(0.5)) const noexcept;
+
+		[[nodiscard]]
+		value_type normalizedOctave2D_01(value_type x, value_type y, std::int32_t octaves, value_type persistence = value_type(0.5)) const noexcept;
+
+		[[nodiscard]]
+		value_type normalizedOctave3D_01(value_type x, value_type y, value_type z, std::int32_t octaves, value_type persistence = value_type(0.5)) const noexcept;
+
+	private:
+
+		state_type m_permutation;
+	};
+
+	using PerlinNoise = BasicPerlinNoise<double>;
+
+	namespace perlin_detail
+	{
+		////////////////////////////////////////////////
+		//
+		//	These functions are provided for consistency.
+		//	You may get different results from std::shuffle() with different standard library implementations.
+		//
+		SIVPERLIN_CONCEPT_URBG
+		[[nodiscard]]
+		inline std::uint64_t Random(const std::uint64_t max, URBG&& urbg)
+		{
+			return (urbg() % (max + 1));
+		}
+
+		template <class RandomIt, class URBG>
+		inline void Shuffle(RandomIt first, RandomIt last, URBG&& urbg)
+		{
+			if (first == last)
+			{
+				return;
+			}
+
+			using difference_type = typename std::iterator_traits<RandomIt>::difference_type;
+
+			for (RandomIt it = first + 1; it < last; ++it)
+			{
+				const std::uint64_t n = static_cast<std::uint64_t>(it - first);
+				std::iter_swap(it, first + static_cast<difference_type>(Random(n, std::forward<URBG>(urbg))));
+			}
+		}
+		//
+		////////////////////////////////////////////////
+
+		template <class Float>
+		[[nodiscard]]
+		inline constexpr Float Fade(const Float t) noexcept
+		{
+			return t * t * t * (t * (t * 6 - 15) + 10);
+		}
+
+		template <class Float>
+		[[nodiscard]]
+		inline constexpr Float Lerp(const Float a, const Float b, const Float t) noexcept
+		{
+			return (a + (b - a) * t);
+		}
+
+		template <class Float>
+		[[nodiscard]]
+		inline constexpr Float Grad(const std::uint8_t hash, const Float x, const Float y, const Float z) noexcept
+		{
+			const std::uint8_t h = hash & 15;
+			const Float u = h < 8 ? x : y;
+			const Float v = h < 4 ? y : h == 12 || h == 14 ? x : z;
+			return ((h & 1) == 0 ? u : -u) + ((h & 2) == 0 ? v : -v);
+		}
+
+		template <class Float>
+		[[nodiscard]]
+		inline constexpr Float Remap_01(const Float x) noexcept
+		{
+			return (x * Float(0.5) + Float(0.5));
+		}
+
+		template <class Float>
+		[[nodiscard]]
+		inline constexpr Float Clamp_11(const Float x) noexcept
+		{
+			return std::clamp(x, Float(-1.0), Float(1.0));
+		}
+
+		template <class Float>
+		[[nodiscard]]
+		inline constexpr Float RemapClamp_01(const Float x) noexcept
+		{
+			if (x <= Float(-1.0))
+			{
+				return Float(0.0);
+			}
+			else if (Float(1.0) <= x)
+			{
+				return Float(1.0);
+			}
+
+			return (x * Float(0.5) + Float(0.5));
+		}
+
+		template <class Noise, class Float>
+		[[nodiscard]]
+		inline auto Octave1D(const Noise& noise, Float x, const std::int32_t octaves, const Float persistence) noexcept
+		{
+			using value_type = Float;
+			value_type result = 0;
+			value_type amplitude = 1;
+
+			for (std::int32_t i = 0; i < octaves; ++i)
+			{
+				result += (noise.noise1D(x) * amplitude);
+				x *= 2;
+				amplitude *= persistence;
+			}
+
+			return result;
+		}
+
+		template <class Noise, class Float>
+		[[nodiscard]]
+		inline auto Octave2D(const Noise& noise, Float x, Float y, const std::int32_t octaves, const Float persistence) noexcept
+		{
+			using value_type = Float;
+			value_type result = 0;
+			value_type amplitude = 1;
+
+			for (std::int32_t i = 0; i < octaves; ++i)
+			{
+				result += (noise.noise2D(x, y) * amplitude);
+				x *= 2;
+				y *= 2;
+				amplitude *= persistence;
+			}
+
+			return result;
+		}
+
+		template <class Noise, class Float>
+		[[nodiscard]]
+		inline auto Octave3D(const Noise& noise, Float x, Float y, Float z, const std::int32_t octaves, const Float persistence) noexcept
+		{
+			using value_type = Float;
+			value_type result = 0;
+			value_type amplitude = 1;
+
+			for (std::int32_t i = 0; i < octaves; ++i)
+			{
+				result += (noise.noise3D(x, y, z) * amplitude);
+				x *= 2;
+				y *= 2;
+				z *= 2;
+				amplitude *= persistence;
+			}
+
+			return result;
+		}
+
+		template <class Float>
+		[[nodiscard]]
+		inline constexpr Float MaxAmplitude(const std::int32_t octaves, const Float persistence) noexcept
+		{
+			using value_type = Float;
+			value_type result = 0;
+			value_type amplitude = 1;
+
+			for (std::int32_t i = 0; i < octaves; ++i)
+			{
+				result += amplitude;
+				amplitude *= persistence;
+			}
+
+			return result;
+		}
+	}
+
+	///////////////////////////////////////
+
+	template <class Float>
+	inline constexpr BasicPerlinNoise<Float>::BasicPerlinNoise() noexcept
+		: m_permutation{ 151,160,137,91,90,15,
+				131,13,201,95,96,53,194,233,7,225,140,36,103,30,69,142,8,99,37,240,21,10,23,
+				190, 6,148,247,120,234,75,0,26,197,62,94,252,219,203,117,35,11,32,57,177,33,
+				88,237,149,56,87,174,20,125,136,171,168, 68,175,74,165,71,134,139,48,27,166,
+				77,146,158,231,83,111,229,122,60,211,133,230,220,105,92,41,55,46,245,40,244,
+				102,143,54, 65,25,63,161, 1,216,80,73,209,76,132,187,208, 89,18,169,200,196,
+				135,130,116,188,159,86,164,100,109,198,173,186, 3,64,52,217,226,250,124,123,
+				5,202,38,147,118,126,255,82,85,212,207,206,59,227,47,16,58,17,182,189,28,42,
+				223,183,170,213,119,248,152, 2,44,154,163, 70,221,153,101,155,167, 43,172,9,
+				129,22,39,253, 19,98,108,110,79,113,224,232,178,185, 112,104,218,246,97,228,
+				251,34,242,193,238,210,144,12,191,179,162,241, 81,51,145,235,249,14,239,107,
+				49,192,214, 31,181,199,106,157,184, 84,204,176,115,121,50,45,127, 4,150,254,
+				138,236,205,93,222,114,67,29,24,72,243,141,128,195,78,66,215,61,156,180 } {}
+
+	template <class Float>
+	inline BasicPerlinNoise<Float>::BasicPerlinNoise(const seed_type seed)
+	{
+		reseed(seed);
+	}
+
+	template <class Float>
+	SIVPERLIN_CONCEPT_URBG_
+	inline BasicPerlinNoise<Float>::BasicPerlinNoise(URBG&& urbg)
+	{
+		reseed(std::forward<URBG>(urbg));
+	}
+
+	///////////////////////////////////////
+
+	template <class Float>
+	inline void BasicPerlinNoise<Float>::reseed(const seed_type seed)
+	{
+		reseed(default_random_engine{ seed });
+	}
+
+	template <class Float>
+	SIVPERLIN_CONCEPT_URBG_
+	inline void BasicPerlinNoise<Float>::reseed(URBG&& urbg)
+	{
+		std::iota(m_permutation.begin(), m_permutation.end(), uint8_t{ 0 });
+
+		perlin_detail::Shuffle(m_permutation.begin(), m_permutation.end(), std::forward<URBG>(urbg));
+	}
+
+	///////////////////////////////////////
+
+	template <class Float>
+	inline constexpr const typename BasicPerlinNoise<Float>::state_type& BasicPerlinNoise<Float>::serialize() const noexcept
+	{
+		return m_permutation;
+	}
+
+	template <class Float>
+	inline constexpr void BasicPerlinNoise<Float>::deserialize(const state_type& state) noexcept
+	{
+		m_permutation = state;
+	}
+
+	///////////////////////////////////////
+
+	template <class Float>
+	inline typename BasicPerlinNoise<Float>::value_type BasicPerlinNoise<Float>::noise1D(const value_type x) const noexcept
+	{
+		return noise3D(x,
+			static_cast<value_type>(SIVPERLIN_DEFAULT_Y),
+			static_cast<value_type>(SIVPERLIN_DEFAULT_Z));
+	}
+
+	template <class Float>
+	inline typename BasicPerlinNoise<Float>::value_type BasicPerlinNoise<Float>::noise2D(const value_type x, const value_type y) const noexcept
+	{
+		return noise3D(x,
+			y,
+			static_cast<value_type>(SIVPERLIN_DEFAULT_Z));
+	}
+
+	template <class Float>
+	inline typename BasicPerlinNoise<Float>::value_type BasicPerlinNoise<Float>::noise3D(const value_type x, const value_type y, const value_type z) const noexcept
+	{
+		const value_type _x = std::floor(x);
+		const value_type _y = std::floor(y);
+		const value_type _z = std::floor(z);
+
+		const std::int32_t ix = static_cast<std::int32_t>(_x) & 255;
+		const std::int32_t iy = static_cast<std::int32_t>(_y) & 255;
+		const std::int32_t iz = static_cast<std::int32_t>(_z) & 255;
+
+		const value_type fx = (x - _x);
+		const value_type fy = (y - _y);
+		const value_type fz = (z - _z);
+
+		const value_type u = perlin_detail::Fade(fx);
+		const value_type v = perlin_detail::Fade(fy);
+		const value_type w = perlin_detail::Fade(fz);
+
+		const std::uint8_t A = (m_permutation[ix & 255] + iy) & 255;
+		const std::uint8_t B = (m_permutation[(ix + 1) & 255] + iy) & 255;
+
+		const std::uint8_t AA = (m_permutation[A] + iz) & 255;
+		const std::uint8_t AB = (m_permutation[(A + 1) & 255] + iz) & 255;
+
+		const std::uint8_t BA = (m_permutation[B] + iz) & 255;
+		const std::uint8_t BB = (m_permutation[(B + 1) & 255] + iz) & 255;
+
+		const value_type p0 = perlin_detail::Grad(m_permutation[AA], fx, fy, fz);
+		const value_type p1 = perlin_detail::Grad(m_permutation[BA], fx - 1, fy, fz);
+		const value_type p2 = perlin_detail::Grad(m_permutation[AB], fx, fy - 1, fz);
+		const value_type p3 = perlin_detail::Grad(m_permutation[BB], fx - 1, fy - 1, fz);
+		const value_type p4 = perlin_detail::Grad(m_permutation[(AA + 1) & 255], fx, fy, fz - 1);
+		const value_type p5 = perlin_detail::Grad(m_permutation[(BA + 1) & 255], fx - 1, fy, fz - 1);
+		const value_type p6 = perlin_detail::Grad(m_permutation[(AB + 1) & 255], fx, fy - 1, fz - 1);
+		const value_type p7 = perlin_detail::Grad(m_permutation[(BB + 1) & 255], fx - 1, fy - 1, fz - 1);
+
+		const value_type q0 = perlin_detail::Lerp(p0, p1, u);
+		const value_type q1 = perlin_detail::Lerp(p2, p3, u);
+		const value_type q2 = perlin_detail::Lerp(p4, p5, u);
+		const value_type q3 = perlin_detail::Lerp(p6, p7, u);
+
+		const value_type r0 = perlin_detail::Lerp(q0, q1, v);
+		const value_type r1 = perlin_detail::Lerp(q2, q3, v);
+
+		return perlin_detail::Lerp(r0, r1, w);
+	}
+
+	///////////////////////////////////////
+
+	template <class Float>
+	inline typename BasicPerlinNoise<Float>::value_type BasicPerlinNoise<Float>::noise1D_01(const value_type x) const noexcept
+	{
+		return perlin_detail::Remap_01(noise1D(x));
+	}
+
+	template <class Float>
+	inline typename BasicPerlinNoise<Float>::value_type BasicPerlinNoise<Float>::noise2D_01(const value_type x, const value_type y) const noexcept
+	{
+		return perlin_detail::Remap_01(noise2D(x, y));
+	}
+
+	template <class Float>
+	inline typename BasicPerlinNoise<Float>::value_type BasicPerlinNoise<Float>::noise3D_01(const value_type x, const value_type y, const value_type z) const noexcept
+	{
+		return perlin_detail::Remap_01(noise3D(x, y, z));
+	}
+
+	///////////////////////////////////////
+
+	template <class Float>
+	inline typename BasicPerlinNoise<Float>::value_type BasicPerlinNoise<Float>::octave1D(const value_type x, const std::int32_t octaves, const value_type persistence) const noexcept
+	{
+		return perlin_detail::Octave1D(*this, x, octaves, persistence);
+	}
+
+	template <class Float>
+	inline typename BasicPerlinNoise<Float>::value_type BasicPerlinNoise<Float>::octave2D(const value_type x, const value_type y, const std::int32_t octaves, const value_type persistence) const noexcept
+	{
+		return perlin_detail::Octave2D(*this, x, y, octaves, persistence);
+	}
+
+	template <class Float>
+	inline typename BasicPerlinNoise<Float>::value_type BasicPerlinNoise<Float>::octave3D(const value_type x, const value_type y, const value_type z, const std::int32_t octaves, const value_type persistence) const noexcept
+	{
+		return perlin_detail::Octave3D(*this, x, y, z, octaves, persistence);
+	}
+
+	///////////////////////////////////////
+
+	template <class Float>
+	inline typename BasicPerlinNoise<Float>::value_type BasicPerlinNoise<Float>::octave1D_11(const value_type x, const std::int32_t octaves, const value_type persistence) const noexcept
+	{
+		return perlin_detail::Clamp_11(octave1D(x, octaves, persistence));
+	}
+
+	template <class Float>
+	inline typename BasicPerlinNoise<Float>::value_type BasicPerlinNoise<Float>::octave2D_11(const value_type x, const value_type y, const std::int32_t octaves, const value_type persistence) const noexcept
+	{
+		return perlin_detail::Clamp_11(octave2D(x, y, octaves, persistence));
+	}
+
+	template <class Float>
+	inline typename BasicPerlinNoise<Float>::value_type BasicPerlinNoise<Float>::octave3D_11(const value_type x, const value_type y, const value_type z, const std::int32_t octaves, const value_type persistence) const noexcept
+	{
+		return perlin_detail::Clamp_11(octave3D(x, y, z, octaves, persistence));
+	}
+
+	///////////////////////////////////////
+
+	template <class Float>
+	inline typename BasicPerlinNoise<Float>::value_type BasicPerlinNoise<Float>::octave1D_01(const value_type x, const std::int32_t octaves, const value_type persistence) const noexcept
+	{
+		return perlin_detail::RemapClamp_01(octave1D(x, octaves, persistence));
+	}
+
+	template <class Float>
+	inline typename BasicPerlinNoise<Float>::value_type BasicPerlinNoise<Float>::octave2D_01(const value_type x, const value_type y, const std::int32_t octaves, const value_type persistence) const noexcept
+	{
+		return perlin_detail::RemapClamp_01(octave2D(x, y, octaves, persistence));
+	}
+
+	template <class Float>
+	inline typename BasicPerlinNoise<Float>::value_type BasicPerlinNoise<Float>::octave3D_01(const value_type x, const value_type y, const value_type z, const std::int32_t octaves, const value_type persistence) const noexcept
+	{
+		return perlin_detail::RemapClamp_01(octave3D(x, y, z, octaves, persistence));
+	}
+
+	///////////////////////////////////////
+
+	template <class Float>
+	inline typename BasicPerlinNoise<Float>::value_type BasicPerlinNoise<Float>::normalizedOctave1D(const value_type x, const std::int32_t octaves, const value_type persistence) const noexcept
+	{
+		return (octave1D(x, octaves, persistence) / perlin_detail::MaxAmplitude(octaves, persistence));
+	}
+
+	template <class Float>
+	inline typename BasicPerlinNoise<Float>::value_type BasicPerlinNoise<Float>::normalizedOctave2D(const value_type x, const value_type y, const std::int32_t octaves, const value_type persistence) const noexcept
+	{
+		return (octave2D(x, y, octaves, persistence) / perlin_detail::MaxAmplitude(octaves, persistence));
+	}
+
+	template <class Float>
+	inline typename BasicPerlinNoise<Float>::value_type BasicPerlinNoise<Float>::normalizedOctave3D(const value_type x, const value_type y, const value_type z, const std::int32_t octaves, const value_type persistence) const noexcept
+	{
+		return (octave3D(x, y, z, octaves, persistence) / perlin_detail::MaxAmplitude(octaves, persistence));
+	}
+
+	///////////////////////////////////////
+
+	template <class Float>
+	inline typename BasicPerlinNoise<Float>::value_type BasicPerlinNoise<Float>::normalizedOctave1D_01(const value_type x, const std::int32_t octaves, const value_type persistence) const noexcept
+	{
+		return perlin_detail::Remap_01(normalizedOctave1D(x, octaves, persistence));
+	}
+
+	template <class Float>
+	inline typename BasicPerlinNoise<Float>::value_type BasicPerlinNoise<Float>::normalizedOctave2D_01(const value_type x, const value_type y, const std::int32_t octaves, const value_type persistence) const noexcept
+	{
+		return perlin_detail::Remap_01(normalizedOctave2D(x, y, octaves, persistence));
+	}
+
+	template <class Float>
+	inline typename BasicPerlinNoise<Float>::value_type BasicPerlinNoise<Float>::normalizedOctave3D_01(const value_type x, const value_type y, const value_type z, const std::int32_t octaves, const value_type persistence) const noexcept
+	{
+		return perlin_detail::Remap_01(normalizedOctave3D(x, y, z, octaves, persistence));
+	}
+}
+
+# undef SIVPERLIN_NODISCARD_CXX20
+# undef SIVPERLIN_CONCEPT_URBG
+# undef SIVPERLIN_CONCEPT_URBG_
+```
+
+### src/Renderer.h
+```
+#include "ViewingPlane.h"
+#include "Volume.h"
+
+VOLUME_TEMPLATE
+class Renderer {
+public:
+    virtual void render() = 0;
+    virtual void set_volume(const Volume<length> * volume) = 0;
+    virtual void set_view(const ViewingPlane * view) = 0;
+    virtual void set_light_pos(const vec3 * pos) = 0;
+};
+```
+
+### src/ShaderProgram.cpp
+```
+#include "ShaderProgram.h"
+
+void ShaderProgram::initialize(const char *vertex_shader, const char *fragment_shader) {
+    m_vertex_shader = get_file_data(vertex_shader).str();
+	m_fragment_shader = get_file_data(fragment_shader).str();
+    
+    // Initialize vertex shader
+	const char* vertex_shader_data = m_vertex_shader.c_str();
+	unsigned int vertex_shader_id = glCreateShader(GL_VERTEX_SHADER);
+	glShaderSource(vertex_shader_id, 1, &vertex_shader_data, NULL);
+
+	// Initalize fragment shader
+	const char* fragment_shader_data = m_fragment_shader.c_str();
+	unsigned int fragment_shader_id = glCreateShader(GL_FRAGMENT_SHADER);
+	glShaderSource(fragment_shader_id, 1, &fragment_shader_data, NULL);
+
+	// Link and compile shaders
+	glCompileShader(vertex_shader_id);
+	m_print_shader_errors(vertex_shader_id);
+	glCompileShader(fragment_shader_id);
+	m_print_shader_errors(fragment_shader_id);
+	m_shader_id = glCreateProgram();
+	glAttachShader(m_shader_id, vertex_shader_id);
+	glAttachShader(m_shader_id, fragment_shader_id);
+	glLinkProgram(m_shader_id);
+	
+	// Check if linking succeeded
+	GLint success;
+	GLchar info_log[512];
+	glGetProgramiv(m_shader_id, GL_LINK_STATUS, &success);
+	if (!success) {
+		glGetProgramInfoLog(m_shader_id, 512, NULL, info_log);
+		std::cerr << info_log << std::endl;
+	}
+
+	glUseProgram(m_shader_id);
+	glDeleteShader(vertex_shader_id);
+	glDeleteShader(fragment_shader_id);
+}
+
+void ShaderProgram::m_print_shader_errors(unsigned int shader) {
+	GLint success;
+	GLchar info_log[512];
+	glGetShaderiv(shader, GL_COMPILE_STATUS, &success);
+	if (!success) {
+		glGetShaderInfoLog(shader, 512, NULL, info_log);
+		std::cerr << info_log << std::endl;
+	}
+}
+```
+
+### src/ShaderProgram.h
+```
+#pragma once
+
+#include <GL/glew.h>
+#include <iostream>
+#include <GL/freeglut.h>
+#include <cmath>
+
+#include "Util.h"
+
+using namespace glm;
+
+class ShaderProgram {
+public:
+ShaderProgram() {}
+ShaderProgram(const char* vertex_shader, const char* fragment_shader) {
+	initialize(vertex_shader, fragment_shader);
+    
+}
+
+void initialize(const char* vertex_shader, const char* fragment_shader);
+constexpr GLuint get_shader_id() const {
+    return m_shader_id;
+}
+
+private:
+void m_print_shader_errors(unsigned int shader);
+
+// Member variables
+std::string m_vertex_shader;
+std::string m_fragment_shader;
+GLuint m_shader_id;
+};
+```
+
+### src/Timer.h
+```
+#pragma once
+
+#include <iostream>
+#include <chrono>
+#include <vector>
+#include <numeric>
+
+using namespace std::chrono;
+
+class Timer {
+public:
+    inline void start() {
+        m_last = steady_clock::now();
+    }
+
+    inline double end() {
+        double duration = (steady_clock::now() - m_last).count() / (double)std::nano::den;
+        m_times.push_back(duration);
+        return duration;
+    }
+
+    void output_results() const {
+		double total_s = std::accumulate(m_times.begin(), m_times.end(), 0.0);
+        double average_frame_time = total_s / 60.0;//m_times.size();
+		double average_fps = 1.0 / average_frame_time;
+        std::cout << average_fps << "\n";
+    }
+
+private:
+    steady_clock::time_point m_last;
+    std::vector<double> m_times;
+};
+```
+
+### src/Util.h
+```
+#pragma once
+
+#include <iostream>
+#include <ctime>
+#include <fstream>
+#include <sstream>
+#include <iostream>
+
+#include <glm/glm.hpp>
+
+inline void print(glm::vec3 v) {
+    std::cout << v.x << ", " << v.y << ", " << v.z << "\n";
+}
+
+inline void print(glm::mat4 m) {
+    for (int i = 0; i < 4; i++) {
+        std::cout << m[0][i] << ", " << m[1][i] << ", " << m[2][i] << ", " << m[3][i] << "\n";
+    }
+}
+
+inline std::stringstream get_file_data(const char* filename) {
+	auto file = std::ifstream(filename, std::ios::out);
+	if (file.is_open()) {
+        std::stringstream file_data;
+	    file_data << file.rdbuf();
+	    return file_data;
+    }
+    else {
+        std::cerr << "Unable to open file " << filename << std::endl;
+    }
+    return std::stringstream();
+}
+```
+
+### src/ViewingPlane.h
+```
+#pragma once
+
+#include <vector>
+#include <glm/glm.hpp>
+#include <glm/ext/matrix_transform.hpp>
+#include <iostream>
+
+using namespace glm;
+// TODO put these definitions in CPP
+class ViewingPlane {
+public:
+    ViewingPlane(int width, int height, int depth, float sample_period, vec3 position = vec3(0), vec3 rotation = vec3(0), vec3 scaling = vec3(1)): 
+    m_width(width), m_height(height), m_depth(depth), m_sample_period(sample_period), m_mat(mat4(1)) {
+        m_data.resize(m_width * m_height);
+        for (int y = 0; y < m_height; y++) {
+            for (int x = 0; x < m_width; x++) {
+                m_data[y * m_width + x] = vec3(
+                    (float)x / (float)m_width * 2.0f - 1.0f,
+                    (float)y / (float)m_height * 2.0f - 1.0f,
+                    0
+                );
+            }
+        }
+        //std::cout << "Constructed ViewingPlane with " << m_data.size() << std::endl;
+        set_orientation(position, rotation, scaling);
+    }
+
+    void set_orientation(vec3 position, vec3 rotation, vec3 scaling) {
+        // Translation
+        mat4 translation_mat = translate(mat4(1.0), position);
+        // Rotations
+        mat4 rot_x = rotate(mat4(1.0), radians(rotation.x), vec3(1, 0, 0));
+        mat4 rot_y = rotate(mat4(1.0), radians(rotation.y), vec3(0, 1, 0));
+        mat4 rot_z = rotate(mat4(1.0), radians(rotation.z), vec3(0, 0, 1));
+        mat4 rotation_mat = rot_z * rot_y * rot_x;
+        // Scale
+        mat4 scaling_mat = scale(mat4(1.0), scaling);
+        // Final
+        m_mat = translation_mat * rotation_mat * scaling_mat;
+    }
+
+    inline const std::vector<vec3>& get_plane() const {
+        return m_data;
+    }
+
+    inline mat4 get_mat() const {
+        return m_mat;
+    }
+
+    inline ivec3 get_size() const {
+        return ivec3(m_width, m_height, m_depth);
+    }
+
+    inline float get_sample_period() const {
+        return m_sample_period;
+    }
+
+    inline vec3 get_direction() const {
+        auto a = vec3(m_mat * vec4(m_data[0], 1.0f)); // Origin
+        auto b = vec3(m_mat * vec4(m_data[m_width - 1], 1.0f)); // Rightmost point
+        auto c = vec3(m_mat * vec4(m_data[m_width * (m_height - 1)], 1.0f)); // Upmost point
+        return normalize(cross(vec3(b - a), vec3(c - a)));
+    }
+
+private:
+    int m_width, m_height, m_depth;
+    float m_sample_period;
+    std::vector<vec3> m_data;
+    mat4 m_mat;
+};
+```
+
+### src/Volume.h
+```
+#pragma once
+
+#include <algorithm>
+#include <array>
+#include <iostream>
+
+#include <glm/glm.hpp>
+#include <glm/vec3.hpp>
+#include <glm/vec4.hpp>
+#include "PerlinNoise.h"
+
+#include "Util.h"
+
+using namespace glm;
+
+#define VOLUME_TEMPLATE template<size_t length>
+
+constexpr size_t cube(const size_t& x) {
+    return static_cast<size_t>(x * x * x);
+}
+
+union VoxelVertex {
+    vec4 xyzw;
+    vec3 gradient;
+
+    inline constexpr float value() {
+        return xyzw.w;
+    }
+};
+
+inline constexpr size_t cartesian_to_index(ivec3 v, size_t length) {
+    return v.z * length * length + v.y * length + v.x;
+}
+
+VOLUME_TEMPLATE
+class Volume {
+public:
+    Volume(const std::array<float, cube(length)>& values) {
+        // Calculate gradient
+        for (int z = 0; z < length; z++) {
+            for (int y = 0; y < length; y++) {
+                for (int x = 0; x < length; x++) {
+                    ivec3 position = {x, y, z};
+                    vec3 gradient = m_calculate_gradient(values, position);
+                    m_data[cartesian_to_index(position, length)] = {
+                        vec4(gradient, values[cartesian_to_index(position, length)])
+                    };
+                }
+            }
+        }
+    }
+
+    inline const VoxelVertex & get(ivec3 v) const {
+        return (*this)[cartesian_to_index(v, length)];
+    }
+
+    inline const VoxelVertex * get_data() const {
+        return m_data.data();
+    }
+
+    const VoxelVertex & operator[](int i) const {
+        return m_data[i];
+    }
+    //VoxelVertex operator[](ivec3 v) const {return m_data[cartesian_to_index(v, length)];}
+
+private:    
+    inline constexpr float m_safe_get(const std::array<float, cube(length)> & values, ivec3 i) {
+        if (i.x < 0 || i.y < 0 || i.z < 0 ||
+            i.x >= length - 1 || i.y >= length - 1 || i.z >= length - 1) {
+            return 0.0f;
+        }
+        return values[cartesian_to_index(i, length)];
+    }
+
+    constexpr vec3 m_calculate_gradient(const std::array<float, cube(length)> & values, const ivec3& v) {
+        // X-axis
+        float x_before = m_safe_get(values, ivec3(v.x - 1, v.y, v.z));
+        float x_after = m_safe_get(values, ivec3(v.x + 1, v.y, v.z));
+        // Y-axis
+        float y_before = m_safe_get(values, ivec3(v.x, v.y - 1, v.z));
+        float y_after = m_safe_get(values, ivec3(v.x, v.y + 1, v.z));
+        // Z-axis 
+        float z_before = m_safe_get(values, ivec3(v.x, v.y, v.z - 1));
+        float z_after = m_safe_get(values, ivec3(v.x, v.y, v.z + 1));
+        
+        vec3 gradient = {
+            x_before - x_after,
+            y_before - y_after,
+            z_before - z_after
+        };
+        gradient = normalize(gradient);
+        return gradient;
+    }
+
+    std::array<VoxelVertex, cube(length)> m_data;
+};
+
+VOLUME_TEMPLATE
+Volume<length> create_perlin_volume() {
+    const siv::PerlinNoise perlin{ 123456u };
+	auto noise = std::array<float, cube(length)>();
+	for (int z = 0; z < length; z++) {
+		for (int y = 0; y < length; y++) {
+            for (int x = 0; x < length; x++) {
+                noise[cartesian_to_index({x, y, z}, length)] = {
+                    (float)perlin.noise3D_01(0.05 * (double)x, 0.05 * (double)y, 0.05 * (double)z)
+                };
+	        }
+	    }
+	}
+	auto volume = Volume<length>(noise);
+    return volume;
+}
+```
+
+### src/VolumeRenderer.h
+```
+#pragma once
+
+#include <GL/glew.h>
+#include <glm/gtc/type_ptr.hpp>
+
+#include "Renderer.h"
+#include "ShaderProgram.h"
+
+VOLUME_TEMPLATE
+class VolumeRenderer : public Renderer<length> {
+public:
+	VolumeRenderer() {}
+	VolumeRenderer(const ViewingPlane& view) {
+		ShaderProgram shader_program = ShaderProgram("../src/shaders/shader.vert", "../src/shaders/shader.frag");
+		GLuint shader_id = shader_program.get_shader_id();
+
+		glGenVertexArrays(1, &m_vao_id);
+		glGenBuffers(1, &m_volume_id);
+		glGenBuffers(1, &m_canvas_points_id);
+
+		m_direction_location = glGetUniformLocation(shader_id, "direction");
+		m_view_location = glGetUniformLocation(shader_id, "view");
+		m_volume_size_location = glGetUniformLocation(shader_id, "volume_size");
+		m_canvas_size_location = glGetUniformLocation(shader_id, "canvas_size");
+		m_light_pos_location = glGetUniformLocation(shader_id, "light_position");
+		m_depth_location = glGetUniformLocation(shader_id, "depth");
+		m_sample_period_location = glGetUniformLocation(shader_id, "sample_period");
+		buffer_canvas_points(view);
+		m_init_vertex_attributes();
+	}
+
+	void render() override {
+		glBindVertexArray(m_vao_id);
+		glDrawArrays(GL_POINTS, 0, m_num_vertices);
+	}
+
+	void set_volume(const Volume<length> * volume) override {
+		glBindBuffer(GL_SHADER_STORAGE_BUFFER, m_volume_id);
+		constexpr unsigned int volume_size = std::pow(length, 3) * sizeof(VoxelVertex);
+		glBufferData(GL_SHADER_STORAGE_BUFFER, volume_size, volume->get_data(), GL_STATIC_READ);
+		glBindBufferBase(GL_SHADER_STORAGE_BUFFER, 0, m_volume_id);
+		glUniform1ui(m_volume_size_location, (GLuint)length);
+	}
+
+	void set_view(const ViewingPlane * view) override {
+		//const float* view_mat = (const float*);
+		glUniformMatrix4fv(m_view_location, 1, GL_TRUE, value_ptr(view->get_mat()));
+
+		vec3 view_direction = view->get_direction();
+		glUniform3f(m_direction_location, view_direction.x, view_direction.y, view_direction.z);
+
+		int depth = view->get_size().z;
+		glUniform1i(m_depth_location, depth);
+
+		float sample_period = view->get_sample_period();
+		glUniform1f(m_sample_period_location, sample_period);
+	}
+
+	void set_light_pos(const glm::vec3 * pos) override {
+		glUniform3f(m_light_pos_location, pos->x, pos->y, pos->z);
+	}
+
+	void buffer_canvas_points(const ViewingPlane& view) {
+		glDisableVertexAttribArray(0);
+		glBindVertexArray(m_vao_id);
+		std::vector<vec3> plane = view.get_plane();
+		m_num_vertices = plane.size();
+		glBindBuffer(GL_ARRAY_BUFFER, m_canvas_points_id);
+		glBufferData(GL_ARRAY_BUFFER, m_num_vertices * sizeof(vec3), plane.data(), GL_STATIC_DRAW);
+		glEnableVertexAttribArray(0);
+
+		vec2 canvas_size = view.get_size();
+		glUniform2f(m_canvas_size_location, canvas_size.x, canvas_size.y);
+	}
+
+private:
+	void m_init_vertex_attributes() {
+		glVertexAttribPointer(0, 3, GL_FLOAT, GL_FALSE, sizeof(vec3), (void*)0);
+		glEnableVertexAttribArray(0);
+	}
+
+	size_t m_num_vertices;
+	GLuint m_vao_id;
+	GLuint m_volume_id;
+	GLuint m_direction_location;
+	GLuint m_view_location;
+	GLuint m_canvas_points_id;
+	GLuint m_canvas_size_location;
+	GLuint m_volume_size_location;
+	GLuint m_light_pos_location;
+	GLuint m_depth_location;
+	GLuint m_sample_period_location;
+};
+```
+
+### src/VolumeRendererCPU.h
+```
+#include <GL/glew.h>
+#include <iostream>
+#include <GL/freeglut.h>
+#include <cmath>
+
+#include "Renderer.h"
+
+using namespace glm;
+
+VOLUME_TEMPLATE
+class VolumeRendererCPU : public Renderer<length> {
+public:
+    void render() override {
+        //vec3 background_color = normalize(vec3(0, 204, 255));
+        ivec3 canvas_size = m_view->get_size();
+        const std::vector<vec3>& plane = m_view->get_plane();
+        float sample_period = m_view->get_sample_period();
+        vec3 direction = m_view->get_direction();
+        mat4 view_mat = m_view->get_mat();
+
+        glBegin(GL_POINTS);
+        for (int y = 0; y < canvas_size.y; y++) {
+            for (int x = 0; x < canvas_size.x; x++) {
+                auto index = y * canvas_size.x + x;
+                vec4 point = view_mat * vec4(plane[index], 1.0f);
+                float ray_value = calculate_ray(
+                    point,
+                    direction,
+                    canvas_size.z,
+                    sample_period,
+                    *m_light_pos
+                );
+                vec3 color = vec3(ray_value);
+                glColor3f(color.x, color.y, color.z);
+                glVertex2i(x, y);
+            }
+        }
+        glEnd();
+    }
+
+    void set_volume(const Volume<length> * volume) override {
+        m_volume = volume;
+    }
+
+    void set_view(const ViewingPlane * view) override {
+        m_view = view;
+    }
+
+    void set_light_pos(const vec3 * pos) override {
+        m_light_pos = pos;
+    }
+
+private:
+    constexpr void get_barycentric_weights(vec3 pos, ivec3& b, ivec3& c, vec4& weights) {
+        pos -= floor(pos);
+        ivec3 a = ivec3(0);
+        bvec3 cond = bvec3(pos.x > pos.y, pos.y >= pos.z, pos.z >= pos.x);
+        b = ivec3(bvec3(!cond.z, !cond.x, !cond.y));
+        c = ivec3(cond);
+        ivec3 d = ivec3(1);
+        mat3 system = inverse(mat3(a - d, b - d, c - d));
+        vec3 t = system * (pos - (vec3)d);
+        weights = vec4(t, 1.0 - t.x - t.y - t.z);
+    }
+
+    constexpr float calculate_lighting(float value, vec3 gradient, vec3 pos, vec3 viewer_pos, vec3 light_pos) {
+        // Ambient lighting calculation  
+        const float ambient_light = 1.0;
+        const float ambient = value * ambient_light;
+
+        // Diffuse lighting calculation
+        const float diffuse_light = 1.5;
+        const vec3 light_vector = normalize(light_pos - pos);
+        float diffuse = diffuse_light * dot(light_vector, gradient);
+        diffuse = max(0.0f, diffuse);
+
+        // Specular lighting calculation
+        const float specular_light = 2.0;
+        const float shinniness = 5.0;
+        const vec3 viewer_vector = normalize(viewer_pos - pos);
+        const vec3 halfway_vector = normalize((light_vector + viewer_vector) / 2.0f);
+        float specular = specular_light * pow(dot(halfway_vector, gradient), shinniness);
+        specular = max(0.0f, specular);
+
+        // Phong
+        float final = (ambient + diffuse + specular);
+        return final;
+    }
+
+    constexpr VoxelVertex get_nearest_voxel(vec3 pos) {
+        VoxelVertex voxel = {vec4(0)};
+        ivec3 p_floor = ivec3(floor(pos));
+        if (!(p_floor.x < 0 || p_floor.x >= length - 1 ||
+            p_floor.y < 0 || p_floor.y >= length - 1 ||
+            p_floor.z < 0 || p_floor.z >= length - 1)) {
+            // Do barycentric interpolation
+            vec4 weights = vec4(0.0f);
+            ivec3 b = ivec3(0);
+            ivec3 c = ivec3(0);
+            get_barycentric_weights(pos, b, c, weights);
+            vec4 voxel_a = m_volume->get(p_floor).xyzw    * weights.x;
+            vec4 voxel_b = m_volume->get(p_floor + b).xyzw * weights.y;
+            vec4 voxel_c = m_volume->get(p_floor + c).xyzw * weights.z;
+            vec4 voxel_d = m_volume->get(p_floor + ivec3(1)).xyzw * weights.w;
+            voxel = {voxel_a + voxel_b + voxel_c + voxel_d};
+        }
+        return voxel;
+    }
+
+    constexpr float calculate_ray(vec3 start, vec3 dir, float distance, float step_size, vec3 light_position = {0, 0, 0}) {
+        float value = 0.0;
+        vec3 movement = dir * step_size;
+        vec3 current_pos = start;
+        for (float t = 0.0f; t < distance; t += step_size) {
+            VoxelVertex voxel = get_nearest_voxel(current_pos);
+            if (voxel.gradient != vec3(0.0f)) {
+                value += calculate_lighting(voxel.value(), voxel.gradient, current_pos, start, light_position);
+            }
+            current_pos += movement;
+        }
+        float dimming_factor = step_size / 100.0;
+        return clamp(value * dimming_factor, 0.0f, 1.0f);
+    }
+
+    const Volume<length> * m_volume;
+    const ViewingPlane * m_view;
+    const vec3 * m_light_pos;
+};
+```
+
+### src/shaders/shader.frag
+```
+#version 430 core
+
+// Ins
+in vec4 world_pos;
+
+layout(std430, binding = 0) buffer volume {
+    vec4 data[];
+};
+
+uniform uint volume_size; 
+uniform vec3 direction;
+uniform vec3 light_position;
+uniform int depth;
+uniform float sample_period;
+
+// Outs
+out vec4 color;
+
+void get_barycentric_weights(in vec3 pos, out ivec3 b, out ivec3 c, out vec4 weights) {
+    pos -= floor(pos);
+    ivec3 a = ivec3(0);
+    bvec3 cond = bvec3(pos.x > pos.y, pos.y >= pos.z, pos.z >= pos.x);
+    b = ivec3(not(cond.zxy));
+    c = ivec3(cond);
+    ivec3 d = ivec3(1);
+    mat3 system = inverse(mat3(a - d, b - d, c - d));
+    vec3 t = system * (pos - d);
+    weights = vec4(t, 1.0 - t.x - t.y - t.z);
+}
+
+float calculate_lighting(float value, vec3 gradient, vec3 pos, vec3 viewer_pos, vec3 light_pos) {
+    // Ambient lighting calculation  
+    const float ambient_light = 1.0;
+    const float ambient = value * ambient_light;
+
+    // Diffuse lighting calculation
+    const float diffuse_light = 1.5;
+    const vec3 light_vector = normalize(light_pos - pos);
+    float diffuse = diffuse_light * dot(light_vector, gradient);
+    diffuse = max(0.0f, diffuse);
+
+    // Specular lighting calculation
+    const float specular_light = 2.0;
+    const float shinniness = 5.0;
+    const vec3 viewer_vector = normalize(viewer_pos - pos);
+    const vec3 halfway_vector = normalize((light_vector + viewer_vector) / 2.0f);
+    float specular = specular_light * pow(dot(halfway_vector, gradient), shinniness);
+    specular = max(0.0f, specular);
+
+    // Phong
+    float final = (ambient + diffuse + specular);
+    return final;
+}
+
+vec4 get_voxel(ivec3 p) {
+    return data[p.z * volume_size * volume_size + p.y * volume_size + p.x];
+}
+
+vec4 get_nearest_voxel(vec3 pos) {
+    vec4 voxel;
+    ivec3 p_floor = ivec3(floor(pos));
+    if (p_floor.x < 0 || p_floor.x >= volume_size ||
+        p_floor.y < 0 || p_floor.y >= volume_size ||
+        p_floor.z < 0 || p_floor.z >= volume_size) {
+        voxel = vec4(0);
+    }
+    else {
+        // Do barycentric interpolation
+        vec4 weights;
+        ivec3 b;
+        ivec3 c;
+        get_barycentric_weights(pos, b, c, weights);
+        vec4 voxel_a = get_voxel(p_floor) * weights.x;
+        vec4 voxel_b = get_voxel(p_floor + b) * weights.y;
+        vec4 voxel_c = get_voxel(p_floor + c) * weights.z;
+        vec4 voxel_d = get_voxel(p_floor + ivec3(1, 1, 1)) * weights.w;
+        voxel = voxel_a + voxel_b + voxel_c + voxel_d;
+    }
+    return voxel;
+}
+
+float calculate_ray(vec3 start, vec3 dir, float dist, float step_size) {
+    float value = 0.0;
+    vec3 movement = dir * step_size;
+    vec3 current_pos = start;
+    for (float t = 0.0f; t < dist; t += step_size) {
+        vec4 voxel = get_nearest_voxel(current_pos);
+        if (voxel != vec4(0)) {
+            value += calculate_lighting(voxel.w, voxel.xyz, current_pos, world_pos.xyz, light_position);
+        }
+        current_pos += movement;
+    }
+    float dimming_factor = sample_period / 100.0;
+    return clamp(value * dimming_factor, 0.0, 1.0);
+}
+
+void main() {
+    float value = calculate_ray(world_pos.xyz, direction, depth, sample_period);
+    color = vec4(vec3(value), 1.0f);
+}
+```
+
+### src/shaders/shader.vert
+```
+#version 430 core
+layout (location = 0) in vec3 position;
+
+uniform mat4 view;
+uniform vec2 canvas_size;
+
+out vec4 world_pos;
+
+void main() {
+    gl_Position = vec4(position.x, position.y, -0.1f, 1.0f);
+    world_pos = vec4(position, 1.0f) * view;
+}
+```

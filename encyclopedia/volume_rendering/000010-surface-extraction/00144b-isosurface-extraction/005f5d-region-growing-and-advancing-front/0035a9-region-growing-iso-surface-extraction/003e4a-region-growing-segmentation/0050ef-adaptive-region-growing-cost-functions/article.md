@@ -1,0 +1,132 @@
+# Adaptive Region Growing Cost Functions
+## Overview
+Adaptive Region Growing Cost Functions are a set of criteria used to determine voxel membership during region growing, leveraging data values, gradient magnitudes, and their statistical properties to extract features robustly [S1, unofficial]. Unlike methods that rely solely on data intensity or require post-processing adjacency checks to discard thin connections, this approach integrates gradient information directly into the cost function to better capture boundaries and handle noise [S1, unofficial]. It builds on [Region Growing Segmentation](9712-region-growing-segmentation.md) by providing a flexible, adaptive mechanism for defining the "similarity" between a seed and candidate voxels [G].
+
+## How it works
+**Inputs and Outputs:**
+- **Inputs:** A 3D volume dataset, a seed voxel (or set of seeds), a strictness parameter $k$, and a weight parameter $p$ [S1, unofficial].
+- **Outputs:** A binary mask identifying voxels belonging to the region [G].
+
+**Data Structures:**
+- **Seed Statistics:** The algorithm requires the standard deviation of data values ($\sigma_v$) and gradient magnitudes ($\sigma_g$) computed over the 26-neighbors of the seed voxel; in adaptive mode, these are recomputed using all voxels currently in the growing region [S1, unofficial].
+- **Current Region Set:** A collection of voxels accepted into the region [G].
+
+**Formulas:**
+Three cost functions are defined. A voxel is accepted if its cost is less than 1 [S1, unofficial].
+1. **Data Value Cost ($f_{ca}$):**
+   $$ f_{ca} = \frac{|v - v_s|}{k \sigma_v} $$
+   Where:
+   - $v$: Data value of the current candidate voxel.
+   - $v_s$: Data value of the seed voxel.
+   - $\sigma_v$: Standard deviation of data values of the 26 neighboring voxels of the seed (or current region in adaptive mode) [S1, unofficial].
+   - $k$: Strictness constant ($k > 0$) [S1, unofficial].
+2. **Gradient Cost ($f_{cb}$):**
+   $$ f_{cb} = \frac{|g - g_s|}{k \sigma_g} $$
+   Where:
+   - $g$: Gradient magnitude of the current candidate voxel.
+   - $g_s$: Gradient magnitude of the seed voxel.
+   - $\sigma_g$: Standard deviation of gradient magnitudes of the 26 neighboring voxels of the seed (or current region in adaptive mode) [S1, unofficial].
+3. **Combined Cost ($f_{cc}$):**
+   $$ f_{cc}(p) = f_{ca}^p + f_{cb}^{(1-p)} $$
+   Where:
+   - $p$: Weight specified by user or system [S1, unofficial].
+
+**Parameters:**
+- $k$: Controls the strictness of the criterion. Default value is 1. User can limit $k$ for conservative growing [S1, unofficial].
+- $p$: Default $p = \frac{\sigma_v}{\sigma_v + \sigma_g}$ [S1, unofficial].
+
+**Algorithm Steps:**
+1. **Initialization:** Select a seed voxel. Compute initial $\sigma_v$ and $\sigma_g$ from its 26 neighbors. Initialize the region set $R$ with the seed [S1, unofficial].
+2. **Candidate Evaluation:** For each unvisited neighbor of any voxel in $R$: calculate $f_{ca}$, $f_{cb}$, and $f_{cc}(p)$. If $f_{cc}(p) < 1$, add the voxel to $R$ [S1, unofficial].
+3. **Adaptive Update (Optional):** If adaptive mode is enabled, after adding new voxels, recompute $\sigma_v$ and $\sigma_g$ using all voxels in $R$. Recalculate $p$ if it is system-determined [S1, unofficial].
+4. **Iteration:** Repeat Step 2 until no new voxels are added or a stopping condition is met [G].
+5. **Post-processing (Optional):** Remove erroneous thin connections (1-2 voxels wide) caused by noise [S1, unofficial].
+
+**Pseudocode:**
+> **Unverified code.** The code below did not pass a test run against a reference implementation, or no test fits it, so it may contain errors.
+
+```python
+def adaptive_region_growing(volume, gradients, seed, k=1.0, adaptive=True):
+    """
+    volume: 3D array of data values
+    gradients: 3D array of gradient magnitudes
+    seed: (x, y, z) tuple
+    k: strictness parameter
+    adaptive: boolean, whether to recompute stats during growth
+    """
+    region = {seed}
+    queue = [seed]
+    visited = {seed}
+    v_s = volume[seed]
+    g_s = gradients[seed]
+
+    def compute_std(values):
+        if len(values) == 0:
+            return 1.0
+        mean = sum(values) / len(values)
+        variance = sum((x - mean) ** 2 for x in values) / len(values)
+        return variance ** 0.5
+
+    def get_neighbors(pos, shape):
+        neighbors = []
+        for dx in (-1, 0, 1):
+            for dy in (-1, 0, 1):
+                for dz in (-1, 0, 1):
+                    if dx == 0 and dy == 0 and dz == 0:
+                        continue
+                    nx, ny, nz = pos[0] + dx, pos[1] + dy, pos[2] + dz
+                    if 0 <= nx < shape[0] and 0 <= ny < shape[1] and 0 <= nz < shape[2]:
+                        neighbors.append((nx, ny, nz))
+        return neighbors
+
+    seed_neighbors = get_neighbors(seed, volume.shape)
+    sigma_v = compute_std([volume[n] for n in seed_neighbors])
+    sigma_g = compute_std([gradients[n] for n in seed_neighbors])
+    p = sigma_v / (sigma_v + sigma_g) if (sigma_v + sigma_g) != 0 else 0.5
+
+    while queue:
+        current = queue.pop(0)
+        if adaptive:
+            all_v = [volume[v] for v in region]
+            all_g = [gradients[v] for v in region]
+            sigma_v = compute_std(all_v)
+            sigma_g = compute_std(all_g)
+            p = sigma_v / (sigma_v + sigma_g) if (sigma_v + sigma_g) != 0 else 0.5
+
+        for n in get_neighbors(current, volume.shape):
+            if n not in visited:
+                visited.add(n)
+                v_n = volume[n]
+                g_n = gradients[n]
+                f_ca = abs(v_n - v_s) / (k * sigma_v)
+                f_cb = abs(g_n - g_s) / (k * sigma_g)
+                f_cc = f_ca ** p + f_cb ** (1 - p)
+                if f_cc < 1.0:
+                    region.add(n)
+                    queue.append(n)
+    return region
+```
+
+**Edge Cases and Pitfalls:**
+- **Noisy Data:** Noise can cause the region to grow through thin (1- or 2-voxel wide) connections into adjacent regions [S1, unofficial]. A post-processing filtering step is recommended to remove these erroneous connections [S1, unofficial].
+- **Zero Standard Deviation:** If $\sigma_v$ or $\sigma_g$ is zero, division by zero occurs. The pseudocode includes a guard [G].
+- **Boundary Conditions:** Neighbors must be checked against volume bounds [G].
+
+## Subtopics
+
+### [RGVis Region Growing](14368-rgvis-region-growing.md)
+An interactive volume visualization technique that uses region growing to assist in the classification and assessment steps of volume visualization, specifically to locate features of interest and define transfer functions or boundary surfaces.
+
+## Operating characteristics
+- **Time Complexity:** Depends on the number of voxels in the region and the neighborhood size (26). Adaptive mode increases cost per step as statistics must be recomputed over the growing set $R$ [S1, unofficial].
+- **Memory Complexity:** Proportional to the size of the region and the volume for storing visited states [G].
+- **Strengths:** Robust to noise compared to simple thresholding; handles boundaries better than data-value-only methods by incorporating gradients; adaptive nature prevents over-growth into erroneous regions [S1, unofficial].
+- **Limitations:** Computationally more expensive than non-adaptive methods due to statistical recomputation; sensitive to the choice of $k$ and $p$; requires gradient computation [S1, unofficial].
+- **When to Use:** When extracting features with distinct boundaries in noisy data where both intensity and edge information are relevant [S1, unofficial].
+- **When Not to Use:** When real-time performance is critical and adaptive updates are too costly; when the region is perfectly homogeneous with no gradient variation (though $k$ can be tuned) [G].
+
+## Background
+The method originates from the research presented in [S1, unofficial]. It was designed to be more robust than previous methods like those by Modayur et al., which did not consider voxel gradients [S1, unofficial]. The adaptive variant allows the criteria to evolve as the region grows, improving accuracy in complex scenes [S1, unofficial].
+
+## Sources
+[S1] RGVis: Region Growing Based Visualization Techniques for Volume Visualization, https://escholarship.org/uc/item/3td71868, fetched 2026-11-03 (unofficial)

@@ -1,0 +1,57 @@
+# PlaneCutter
+## Overview
+PlaneCutter is a filter that cuts a hypertree grid using arbitrary planes, producing polygonal data sets [S1, unofficial]. It solves the problem of generating conforming mesh outputs suitable for post-processing requiring perfect connectivity, distinguishing itself from its sibling [AxisCut](18858-axiscut.md) by supporting non-axis-aligned cuts and producing polygonal rather than structured 2D AMR outputs [S1, unofficial].
+## How it works
+**Inputs and outputs:**
+- Input: A hypertree grid (e.g., ternary hypertree grid) [S1, unofficial].
+- Output: Polygonal data sets [S1, unofficial].
+
+**Data structures:**
+Not given in the sources.
+
+**Steps:**
+1. Apply plane cuts to the input hypertree grid [S1, unofficial].
+2. Produce polygonal data sets in either primal or dual mode depending on the selected configuration [S1, unofficial].
+
+**Formulas:**
+Not given in the sources.
+
+**Parameters:**
+- Mode: Primal or Dual [S1, unofficial].
+- Plane definition: Not given in the sources.
+
+**Edge cases and pitfalls:**
+Not given in the sources.
+
+**Pseudocode:**
+> **Unverified code.** The code below did not pass a test run against a reference implementation, or no test fits it, so it may contain errors.
+
+```python
+def PlaneCutter(hypertree_grid, planes, mode):
+    """
+    Cuts a hypertree grid using planes.
+    
+    Args:
+        hypertree_grid: The input hypertree grid.
+        planes: List of plane definitions.
+        mode: 'primal' or 'dual'.
+        
+    Returns:
+        Polygonal data sets.
+    """
+    # Apply plane cuts to the input hypertree grid
+    # Produce polygonal data sets in either primal or dual mode
+    # Implementation details not provided in sources [S1, unofficial]
+    pass
+```
+## Subtopics
+
+### [Polygon Splitting by Plane Threshold](23041-polygon-splitting-by-plane-threshold.md)
+Polygon Splitting by Plane Threshold is a geometric primitive that partitions a 2D polygon (typically a triangle) into two sub-polygons based on a 3D plane threshold.
+
+## Operating characteristics
+PlaneCutter produces conforming mesh output suitable for subsequent post-processing requiring perfect connectivity [S1, unofficial]. However, it is considerably slower than [AxisCut](18858-axiscut.md) [S1, unofficial].
+## Background
+PlaneCutter is a native filter used in the visualization of large-scale, tree-based, adaptive mesh refinement simulations with rectilinear geometry [S1, unofficial]. It is part of a suite of filters including Geometry, AxisReflection, AxisCut, ToUnstructured, CellCenters, Contour, Threshold, ExtractSelected, and AxisClip [S1, unofficial].
+## Sources
+[S1] Efficient visualization and analysis of large-scale, tree-based, adaptive mesh refinement simulations with rectilinear geometry, https://cea.hal.science/cea-03501320v1, fetched 2026-10-26 (unofficial)

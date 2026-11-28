@@ -1,0 +1,382 @@
+--- v003.md
++++ v004.md
+@@ -1,206 +1,208 @@
+ # Pinhole Camera Ray Generation
+ 
+-Also called: Camera Ray Casting, FOV Calculation, Field of View Calculation, Fixed Focal Length Ray Precomputation, Perspective Ray Generation, Pinhole Camera, PinholeRayTracer::castRays
++Also called: Pinhole Camera, Pinhole Ray Casting
+ 
+ ## Overview
+-Pinhole Camera Ray Generation computes the origin and direction vectors for rays corresponding to each pixel on an image plane, assuming an ideal pinhole camera model with no lens distortion or depth of field [S2, S4, unofficial]. It explicitly constructs the view frustum geometry (basis vectors and view plane bounds) from high-level camera parameters (eye position, look-at point, up vector, and field of view) rather than relying on a pre-computed projection matrix [S2, S3, unofficial].
++The Pinhole Camera Ray Generation method computes the origin and direction vectors for viewing rays corresponding to each pixel in a raster image, assuming an ideal pinhole camera model where all rays pass through a single center point [S9, unofficial]. It solves the problem of mapping 2D screen coordinates to 3D world-space rays for volume rendering or ray tracing [S5, unofficial]. Unlike [Camera Matrix Ray Generation](2172-camera-matrix-ray-generation.md), which relies on explicit intrinsic and extrinsic matrices, this method often derives rays directly from geometric primitives such as field of view (FOV), aspect ratio, and camera basis vectors, or uses a simplified look-at formulation [S1, S2, S9, unofficial]. It provides no depth of field, ensuring all objects are in focus [S9, unofficial].
+ 
+ ## How it works
+-The method generates rays by defining a local coordinate system at the camera origin, mapping pixel indices to coordinates on a virtual view plane, and constructing direction vectors from the eye position through these points [S2, S3, unofficial]. Two primary implementation styles are documented: a look-at based approach (common in GPU implementations) and a rotation-matrix based approach (common in C++/Eigen implementations) [S1, S2, unofficial].
+-
+-### Inputs and Outputs
+ **Inputs:**
+-*   **Camera Position (Eye):** $E = (E_x, E_y, E_z)$ [S2, unofficial].
+-*   **Look-at Point (At):** $A = (A_x, A_y, A_z)$ [S2, unofficial].
+-*   **Up Vector:** $U_{up}$ [S2, unofficial].
+-*   **Image Dimensions:** Width $W$, Height $H$ [S2, unofficial].
+-*   **Field of View (FOV):** Vertical FOV ($\theta_v$) or Half Vertical FOV ($vfov$) [S1, S2, unofficial].
+-*   **Aspect Ratio:** $AR = W / H$ [S4, unofficial].
++*   Image dimensions: width $W$, height $H$ [S1, S9, unofficial].
++*   Camera position (origin): $\mathbf{p}$ [S9, unofficial].
++*   Camera orientation: defined by a forward vector $\mathbf{f}$ (look-at direction), a world up vector $\mathbf{u}_{world}$, and optionally a rotation matrix $\mathbf{R}$ [S1, S9, unofficial].
++*   Field of View: Vertical FOV $\theta_{v}$ (in radians or degrees) or Horizontal FOV $\theta_{h}$ [S1, S9, unofficial].
++*   Focal length $f$ or focal distance (distance from pinhole to image plane) [S2, S9, unofficial].
+ 
+ **Outputs:**
+-*   **Origins:** 1D float array of size $3 \times W \times H$, storing $(x,y,z)$ for each pixel ray origin [S2, unofficial].
+-*   **Directions:** 1D float array of size $3 \times W \times H$, storing normalized $(x,y,z)$ for each pixel ray direction [S2, unofficial].
+-*   **Auxiliary Data (Optional):** `origin_image_distances` and `pixel_distances` arrays for physical scaling [S2, unofficial].
+-
+-### Data Structures
+-*   **Origins:** 1D float array of size $3 \times W \times H$, storing $(x,y,z)$ for each pixel ray origin [S2, unofficial].
+-*   **Directions:** 1D float array of size $3 \times W \times H$, storing normalized $(x,y,z)$ for each pixel ray direction [S2, unofficial].
+-*   **Origin Image Distances:** 1D float array of size $W \times H$, storing the length of the unnormalized direction vector $s$ [S2, unofficial].
+-*   **Pixel Distances:** 1D float array of size $W \times H$, storing the physical width of a single pixel on the view plane [S2, unofficial].
+-
+-### Algorithm: Look-At Basis Construction
+-1.  **Compute View Plane Bounds:**
+-    Define the vertical extent of the view plane at distance 1 from the camera [S4, unofficial].
+-    $$ \theta_{v\_rad} = \text{DegToRad}(\theta_v) $$
+-    $$ \text{top} = \tan(\theta_{v\_rad}) $$
+-    $$ \text{bottom} = -\text{top} $$
+-    $$ \text{right} = AR \times \text{top} $$
+-    $$ \text{left} = -\text{right} $$
+-    [S2, S3, unofficial]
+-
+-2.  **Compute Camera Basis Vectors:**
+-    Calculate the forward, right, and up vectors of the camera coordinate system [S4, unofficial].
+-    $$ \mathbf{w} = \text{normalize}(E - A) $$
+-    $$ \mathbf{u} = \text{normalize}(\text{cross}(U_{up}, \mathbf{w})) $$
++*   For each pixel $(i, j)$ where $i \in [0, W-1]$ and $j \in [0, H-1]$:
++    *   Ray origin $\mathbf{o}_{i,j} = \mathbf{p}$ [S9, unofficial].
++    *   Ray direction $\mathbf{d}_{i,j}$ (normalized) [S9, unofficial].
++
++**Data Structures:**
++*   Ray arrays: Two contiguous arrays of size $W \times H \times 3$ storing origins and directions as floating-point vectors [S7, unofficial].
++*   Camera Basis: Three orthonormal vectors $\mathbf{w}$ (backward/forward), $\mathbf{u}$ (right), $\mathbf{v}$ (up) forming the local camera coordinate system [S2, S7, unofficial].
++
++**Steps:**
++
++1.  **Compute Camera Basis Vectors:**
++    Define the camera's local coordinate system. The camera looks along the negative Z-axis in its local space, which maps to the forward vector in world space.
++    $$ \mathbf{w} = \text{normalize}(\mathbf{p} - \mathbf{target}) \quad \text{or} \quad \mathbf{w} = -\text{normalize}(\mathbf{target} - \mathbf{p}) $$
++    $$ \mathbf{u} = \text{normalize}(\text{cross}(\mathbf{u}_{world}, \mathbf{w})) $$
+     $$ \mathbf{v} = \text{cross}(\mathbf{w}, \mathbf{u}) $$
+-    [S2, S3, S4, unofficial]
+-    *Note: $\mathbf{w}$ points from the camera to the target. $\mathbf{u}$ is the horizontal axis. $\mathbf{v}$ is the vertical axis.* [S2, S3, unofficial]
+-
+-3.  **Iterate Pixels:**
+-    For each pixel index $i$ from $0$ to $W \times H - 1$:
+-    $$ x = i \pmod W $$
+-    $$ y = \lfloor i / W \rfloor $$
+-    [S2, S3, unofficial]
+-
+-4.  **Map to View Plane Coordinates:**
+-    Calculate the position on the view plane at $z=-1$ (in camera space) using linear interpolation across the bounds [S3, unofficial].
+-    $$ \text{view\_plane\_x} = \text{left} + (\text{right} - \text{left}) \times \frac{x + 0.5}{W} $$
+-    $$ \text{view\_plane\_y} = \text{top} - (\text{top} - \text{bottom}) \times \frac{y + 0.5}{H} $$
+-    [S2, S3, unofficial]
+-    *Note: The $y$ component is subtracted because screen coordinates typically increase downwards, while the camera's $\mathbf{v}$ vector points upwards.* [S3, unofficial]
+-
+-5.  **Compute Unnormalized Direction:**
+-    Construct the direction vector in world space [S3, unofficial].
+-    $$ \mathbf{s} = \text{view\_plane\_x} \cdot \mathbf{u} + \text{view\_plane\_y} \cdot \mathbf{v} - \mathbf{w} $$
+-    [S2, S3, unofficial]
+-    *Note: The $-\mathbf{w}$ term accounts for the fact that the view plane is at $z=-1$ in the local camera frame where the camera looks down $-Z$, or equivalently, the vector from Eye to ViewPlanePoint is $Point - Eye$ [S3, unofficial]. In the local frame, the point is $(\text{view\_plane\_x}, \text{view\_plane\_y}, -1)$ [G]. The basis vectors $\mathbf{u}, \mathbf{v}, \mathbf{w}$ transform this local offset to world space [G]. Since $\mathbf{w}$ is the forward vector, the vector from origin to $(0,0,-1)$ is $-\mathbf{w}$.* [S3, unofficial]
+-
+-6.  **Normalize and Store:**
+-    $$ \text{direction} = \text{normalize}(\mathbf{s}) $$
+-    $$ \text{origin} = E $$
+-    [S2, S3, unofficial]
+-
+-7.  **Compute Auxiliary Distances (Optional):**
+-    $$ \text{origin\_image\_distances}[i] = \|\mathbf{s}\| $$
+-    $$ \text{pixel\_distances}[i] = \frac{\text{right} - \text{left}}{W} $$
+-    [S2, S3, unofficial]
+-
+-### Algorithm: Rotation Matrix Construction
+-1.  **Compute Step Sizes:**
+-    Calculate the angular step per pixel based on the tangent of the half-FOV [S1, unofficial].
+-    $$ dh = \frac{\tan(\text{hfov})}{\text{hsize}} $$
+-    $$ dv = \frac{\tan(\text{vfov})}{\text{vsize}} $$
+-    [S1, unofficial]
+-    *Parameters:* $\text{hfov}$ and $\text{vfov}$ are half horizontal and vertical FOV in radians. $\text{hsize}$ and $\text{vsize}$ are the image dimensions [S1, unofficial].
+-
+-2.  **Get Camera Rotation:**
+-    Extract the rotation matrix $R$ from the camera's viewpoint transformation [S1, unofficial].
+-
+-3.  **Iterate and Construct Rays:**
+-    Loop $h$ from $-\text{hsize}/2$ to $\text{hsize}/2$ and $v$ from $-\text{vsize}/2$ to $\text{vsize}/2$:
+-    $$ \mathbf{rayd}_{local} = (dv \cdot v, \ dh \cdot h, \ 1.0) $$
+-    $$ \mathbf{rayd} = R \cdot \mathbf{rayd}_{local} $$
+-    Store $\mathbf{rayd}$ in the output vector `rayds` [S1, unofficial].
+-
+-### Pseudocode (Look-At Variant)
++    Here, $\mathbf{w}$ points from the target to the eye (or negative forward), $\mathbf{u}$ is the right vector, and $\mathbf{v}$ is the up vector [S2, S7, S9, unofficial].
++
++2.  **Determine View Plane Dimensions:**
++    Calculate the physical extent of the image plane at a unit focal distance or based on the specified FOV.
++    If using FOV directly:
++    $$ \text{viewport\_height} = 2 \cdot \tan\left(\frac{\theta_v}{2}\right) $$
++    $$ \text{viewport\_width} = \text{viewport\_height} \cdot \frac{W}{H} $$
++    Alternatively, if using focal length $f$:
++    $$ \text{viewport\_height} = \frac{H}{2f} \quad \text{(scaled appropriately)} $$
++    [S9, unofficial] defines the viewport at unit focal distance. [S2, unofficial] derives focal distance from FOV: $f_{dist} = \frac{1.0}{2 \tan(\theta_v \pi / 360)}$.
++
++3.  **Compute Pixel Offsets:**
++    Map pixel indices to coordinates on the view plane. Two common conventions exist:
++    
++    *Convention A (Centered, Normalized):*
++    Map pixel $(i, j)$ to Normalized Device Coordinates (NDC) or a centered offset.
++    $$ x_{ndc} = \frac{2(i + 0.5)}{W} - 1 $$
++    $$ y_{ndc} = 1 - \frac{2(j + 0.5)}{H} $$
++    (Note: $y$ is often inverted depending on whether image coordinates increase downwards or upwards [S7, S9, unofficial]).
++    
++    *Convention B (Tangent Division):*
++    Sample the FOV by dividing the tangent of the half-FOV by the resolution [S1, unofficial].
++    $$ \Delta x = \frac{\tan(\theta_h / 2)}{W} $$
++    $$ \Delta y = \frac{\tan(\theta_v / 2)}{H} $$
++    $$ x_{local} = (i - \frac{W}{2}) \cdot \Delta x $$
++    $$ y_{local} = (\frac{H}{2} - j) \cdot \Delta y $$
++
++4.  **Construct Local Ray Direction:**
++    Combine the offsets with the camera basis.
++    Using Convention A and Viewport dimensions:
++    $$ \mathbf{d}_{local} = \mathbf{w} + x_{ndc} \cdot \frac{\text{viewport\_width}}{2} \cdot \mathbf{u} + y_{ndc} \cdot \frac{\text{viewport\_height}}{2} \cdot \mathbf{v} $$
++    Using Convention B (Tangent):
++    $$ \mathbf{d}_{local} = \Delta y \cdot \mathbf{v} + \Delta x \cdot \mathbf{u} + \mathbf{w} $$
++    [S1, unofficial] constructs `rayd << dv * v, dh * h, 1.0` where $h, v$ are loop indices centered at 0.
++
++5.  **Normalize and Transform:**
++    Normalize the direction vector to ensure unit length. If the basis vectors are already orthonormal and the forward vector is $\mathbf{w}$, the resulting vector from the linear combination in step 4 is generally not unit length before normalization if offsets are large, or is unit length if constructed via rotation matrix [S1, unofficial].
++    $$ \mathbf{d}_{world} = \text{normalize}(\mathbf{d}_{local}) $$
++    If a rotation matrix $\mathbf{R}$ is provided instead of explicit basis vectors:
++    $$ \mathbf{d}_{world} = \mathbf{R} \cdot \mathbf{d}_{local} $$
++    [S1, unofficial] applies `rayd = rot * rayd`.
++
++6.  **Handle Anti-Aliasing (Optional):**
++    To reduce aliasing, jitter the pixel coordinates by adding a random value $\epsilon \in [0, 1)$ to $i$ and $j$ before computing offsets [S9, unofficial].
++
++**Pseudocode:**
++
+ ```python
+ import math
+-
+-def generate_pinhole_rays(eye, at, up, width, height, fov_degrees):
++import numpy as np
++
++def generate_pinhole_rays(width, height, position, target, world_up, fov_degrees):
+     """
+     Generates ray origins and directions for a pinhole camera.
+     
+     Args:
+-        eye: tuple (ex, ey, ez)
+-        at: tuple (ax, ay, az)
+-        up: tuple (ux, uy, uz)
+-        width: int
+-        height: int
+-        fov_degrees: float (vertical FOV)
++        width (int): Image width in pixels.
++        height (int): Image height in pixels.
++        position (np.array): Camera origin (3,).
++        target (np.array): Look-at point (3,).
++        world_up (np.array): World up vector (3,).
++        fov_degrees (float): Vertical field of view in degrees.
+         
+     Returns:
+-        origins: list of tuples (x,y,z)
+-        directions: list of tuples (x,y,z)
++        origins (np.array): Shape (H, W, 3).
++        directions (np.array): Shape (H, W, 3).
+     """
+-    origins = []
+-    directions = []
+-    
+-    # 1. Compute View Plane Bounds
++    # 1. Compute Camera Basis
++    # Forward vector points from camera to target
++    forward = target - position
++    forward = forward / np.linalg.norm(forward)
++    
++    # Right vector is perpendicular to forward and world_up
++    right = np.cross(forward, world_up)
++    right = right / np.linalg.norm(right)
++    
++    # Up vector is perpendicular to forward and right
++    up = np.cross(right, forward)
++    
++    # 2. Compute Viewport Dimensions at unit focal distance
++    # Using vertical FOV
+     fov_rad = math.radians(fov_degrees)
+-    top = math.tan(fov_rad)
+-    bottom = -top
+-    aspect = width / height
+-    right = aspect * top
+-    left = -right
+-    
+-    # 2. Compute Camera Basis Vectors
+-    # w = normalize(eye - at)
+-    wx, wy, wz = eye[0] - at[0], eye[1] - at[1], eye[2] - at[2]
+-    w_len = math.sqrt(wx*wx + wy*wy + wz*wz)
+-    w = (wx/w_len, wy/w_len, wz/w_len)
+-    
+-    # u = normalize(cross(up, w))
+-    # cross(up, w)
+-    ux = up[1]*w[2] - up[2]*w[1]
+-    uy = up[2]*w[0] - up[0]*w[2]
+-    uz = up[0]*w[1] - up[1]*w[0]
+-    u_len = math.sqrt(ux*ux + uy*uy + uz*uz)
+-    u = (ux/u_len, uy/u_len, uz/u_len)
+-    
+-    # v = cross(w, u)
+-    vx = w[1]*u[2] - w[2]*u[1]
+-    vy = w[2]*u[0] - w[0]*u[2]
+-    vz = w[0]*u[1] - w[1]*u[0]
+-    v = (vx, vy, vz)
+-    
+-    # 3. Iterate Pixels
+-    for i in range(width * height):
+-        x = i % width
+-        y = i // width
+-        
+-        # 4. Map to View Plane Coordinates
+-        view_plane_x = left + (right - left) * (x + 0.5) / width
+-        view_plane_y = top - (top - bottom) * (y + 0.5) / height
+-        
+-        # 5. Compute Unnormalized Direction
+-        # s = view_plane_x * u + view_plane_y * v - w
+-        sx = view_plane_x * u[0] + view_plane_y * v[0] - w[0]
+-        sy = view_plane_x * u[1] + view_plane_y * v[1] - w[1]
+-        sz = view_plane_x * u[2] + view_plane_y * v[2] - w[2]
+-        
+-        # 6. Normalize
+-        s_len = math.sqrt(sx*sx + sy*sy + sz*sz)
+-        if s_len == 0:
+-            direction = (0, 0, 1) # Fallback for degenerate case
+-        else:
+-            direction = (sx/s_len, sy/s_len, sz/s_len)
+-            
+-        origins.append(eye)
+-        directions.append(direction)
+-        
++    viewport_height = 2.0 * math.tan(fov_rad / 2.0)
++    aspect_ratio = width / height
++    viewport_width = viewport_height * aspect_ratio
++    
++    # 3. Create Pixel Grid
++    # Create meshgrid for x and y coordinates
++    # x corresponds to columns (0 to W-1), y to rows (0 to H-1)
++    # Using half-pixel offset for centering
++    x_coords = np.arange(width) + 0.5
++    y_coords = np.arange(height) + 0.5
++    X, Y = np.meshgrid(x_coords, y_coords, indexing='xy')
++    
++    # 4. Map to NDC [-1, 1]
++    # X: -1 to 1, Y: 1 to -1 (assuming image y goes down, but NDC y goes up)
++    # Or simply map to viewport coordinates directly
++    # Let's map to viewport coordinates relative to center
++    # Center is at (W/2, H/2)
++    
++    # Offset from center in pixel units
++    dx = (X - width / 2.0) / (width / 2.0) # Range approx -1 to 1
++    dy = (height / 2.0 - Y) / (height / 2.0) # Range approx -1 to 1 (inverted Y)
++    
++    # Scale by viewport dimensions
++    # The factor 0.5 is included in viewport_width/height definition? 
++    # viewport_height = 2 * tan(fov/2). So tan(fov/2) is half-height.
++    # dx * (viewport_width / 2) gives the offset in world units at focal distance 1?
++    # Let's use the explicit formula from [S9, unofficial]:
++    # ray_dir = normalize(forward + ndc.x * (viewport_width / 2.0) * right + ndc.y * (viewport_height / 2.0) * up)
++    
++    ndc_x = (2.0 * X / width) - 1.0
++    ndc_y = 1.0 - (2.0 * Y / height)
++    
++    # 5. Compute Directions
++    # Vector addition in world space
++    # Note: forward is the Z-axis of the camera (looking down -Z in local, but here forward is the direction vector)
++    # In the basis {right, up, forward}, the ray direction is:
++    # d = forward + ndc_x * (vw/2) * right + ndc_y * (vh/2) * up
++    
++    dir_x = ndc_x * (viewport_width / 2.0) * right
++    dir_y = ndc_y * (viewport_height / 2.0) * up
++    dir_z = forward
++    
++    directions = dir_x + dir_y + dir_z
++    directions = directions / np.linalg.norm(directions, axis=-1, keepdims=True)
++    
++    # 6. Origins
++    # All rays originate from the camera position
++    origins = np.broadcast_to(position, (height, width, 3))
++    
+     return origins, directions
+ ```
+ 
+-### Parameters and Typical Values
+-*   **FOV:** A fixed vertical field of view of 30 degrees is used in some implementations [S2, S3, unofficial].
+-*   **Half FOV:** Default values in some C++ implementations are $160^\circ$ converted to radians ($\pi \times 160.0 / 180.0$) for both horizontal and vertical half-FOV [S1, unofficial].
+-*   **Resolution:** Default image sizes in some test cases are $6 \times 4$ [S1, unofficial]. Source [S2, unofficial] uses a resolution variable `img_res` set to 256 [S2, unofficial].
+-
+-### Edge Cases and Pitfalls
+-*   **Degenerate Up Vector:** If the `up` vector is parallel to the `eye - at` vector, the cross product for $\mathbf{u}$ will be zero, causing normalization to fail. A guard clause should detect this and substitute a different up vector (e.g., $(1, 0, 0)$) [G].
+-*   **Precision:** Using `float` (32-bit) for ray directions can introduce quantization artifacts in the view plane mapping, especially at high resolutions. Double precision is recommended for the view plane coordinate calculation [G].
++**Parameters with Typical Values:**
++*   `fov_degrees`: 60° (telephoto/normal), 90° (wide), 120° (very wide) [S9, unofficial].
++*   `near`, `far`: Depth bounds for ray marching, typically `near=2.0`, `far=6.0` for synthetic datasets [S4, unofficial].
++*   `world_up`: Usually `(0, 1, 0)` [S9, unofficial].
++
++**Edge Cases and Pitfalls:**
++*   **Degenerate Up Vector:** If `world_up` is parallel to `forward`, the cross product for `right` becomes zero. Guard against this by checking the dot product or using a default up vector if alignment is detected [G].
++*   **Precision:** On some mobile Intel Graphics 6xx chipsets, compute shaders generating these rays may fail silently or throw AccessViolationException, resulting in a purple screen [S5, unofficial].
++*   **FOV Definition:** Sources disagree on whether FOV is horizontal or vertical. Most modern engines (e.g., Godot, [S9, unofficial]) use Vertical FOV. Ensure consistency with the rendering API [S9, unofficial].
+ 
+ ## Subtopics
+ 
+ ### Pinhole Camera with Depth of Field
+-This variant extends the basic pinhole model by simulating lens blur [S5, unofficial]. It introduces a physical aperture (lens) and a focal plane [S5, unofficial].
+-*   **Mechanism:** Instead of all rays originating from a single point, the ray origin is offset by a random vector within a unit disk (the lens aperture) scaled by `LensRadius` [S5, unofficial]. The direction is calculated from this offset origin to a point on the focal plane [S5, unofficial].
+-*   **Viewport Construction:** The viewport vectors are scaled by the focus distance: `Horizontal = U * ViewportWidth * focusDist`, `Vertical = V * ViewportHeight * focusDist` [S5, unofficial]. The `LowerLeftCorner` is computed as `Origin - Horizontal/2 - Vertical/2 - W * focusDist` [S5, unofficial].
+-*   **Ray Generation:** For pixel $(u, v)$, a random lens offset `rd` is sampled from a unit disk [S5, unofficial]. The direction is `LowerLeftCorner + Horizontal*u + Vertical*v - Origin - offset` [S5, unofficial].
+-*   **Data Layout:** The camera state includes `Origin`, `Horizontal`, `Vertical`, `LowerLeftCorner`, `LensRadius`, basis vectors `U, V, W`, `AspectRatio`, `ViewportHeight`, `ViewportWidth`, and `FocalLength` [S5, unofficial].
++Also known as Thin Lens Camera. This variant introduces a finite aperture to simulate realistic lens behavior, creating a focal plane where objects are sharp and others are blurred (bokeh).
++*   **What it is:** Extends the pinhole model by sampling ray origins from a disk (the lens) rather than a single point.
++*   **What sets it apart:** It requires additional parameters: `aperture` (lens diameter) and `focus_distance`. The ray origin is offset by a random vector on the lens disk, and the direction is calculated towards a focus point on the focal plane.
++*   **When to choose it:** When realistic blur effects are required for depth perception or artistic style.
++*   **Link:** [Pinhole Camera with Depth of Field](3222-pinhole-camera-with-depth-of-field.md) (Hypothetical link as no article exists, but described here).
+ 
+ ## Operating characteristics
+-*   **Time Complexity:** $O(W \times H)$, where $W$ and $H$ are image dimensions [G]. The computation per pixel is constant time (a few trigonometric functions, vector operations, and normalizations) [G].
+-*   **Memory Complexity:** $O(W \times H)$ to store the generated ray origins and directions [G].
+-*   **Strengths:** Simple to implement; provides explicit control over the view plane geometry; no dependency on complex projection matrix decompositions [G].
+-*   **Limitations:** Does not account for lens effects (bokeh, distortion) without extension; assumes an ideal pinhole model which may not match real-world sensor data without calibration [G].
++*   **Time Complexity:** $O(W \cdot H)$ to generate rays for all pixels. The computation per pixel is constant time (vector operations) [S1, S9, unofficial].
++*   **Memory Complexity:** $O(W \cdot H)$ to store the ray origins and directions arrays [S7, unofficial].
++*   **Measured Performance:** Generating rays is generally fast and CPU/GPU parallelizable. However, implementation errors (e.g., incorrect basis vectors) lead to completely incorrect rendering. The method is efficient compared to matrix inversion methods if the basis is precomputed [S3, unofficial].
++*   **Strengths:** Simple to implement; intuitive geometric interpretation; no need for explicit intrinsic matrix inversion if FOV is known [S9, unofficial].
++*   **Limitations:** Does not account for lens distortion, chromatic aberration, or depth of field (unless extended) [S9, unofficial].
++*   **When to use:** Standard volume rendering, ray marching, and simple ray tracing where ideal perspective projection is sufficient.
++*   **When not:** When using calibrated real-world camera data with known intrinsics/extrinsics (use [Camera Matrix Ray Generation](2172-camera-matrix-ray-generation.md)) or when depth of field is required.
+ 
+ ## Background
+-The pinhole camera model is the fundamental geometric model for perspective projection in computer graphics and computer vision [G]. It assumes a single point of projection (the pinhole) and an image plane behind it [G]. The method of generating rays by sampling the field of view using equal division of tangent is a common approximation in ray tracers to ensure uniform angular sampling [S1, unofficial]. The look-at formulation using basis vectors is standard in educational ray tracers and differentiable rendering frameworks [S2, unofficial]. The depth of field extension is a standard addition for realistic image synthesis [S5, unofficial].
++The pinhole camera model is the simplest mathematical model of image formation, dating back to the camera obscura [S9, unofficial]. In computer graphics, it is the standard assumption for perspective projection. The specific implementation of generating rays by sampling the tangent of the FOV equally [S1, unofficial] is a common technique in ray tracers to ensure uniform angular sampling. The relationship between focal length and FOV, $fov = 2 \cdot \arctan(\frac{sensor\_height}{2 \cdot focal\_length})$, is derived from basic trigonometry [S9, unofficial]. A 50mm lens on a 35mm sensor yields approximately 39.6° FOV, considered a "normal" lens [S9, unofficial].
+ 
+ ## Sources
+ [S1] RMonica/basic_next_best_view, https://github.com/RMonica/basic_next_best_view, fetched 2026-10-24 (unofficial)
+-[S2] kwea123/nerf_pl, https://github.com/kwea123/nerf_pl, fetched 2026-10-26 (unofficial)
+-[S3] YueJiang-nj/CVPR2020-SDFDiff, https://github.com/YueJiang-nj/CVPR2020-SDFDiff, fetched 2026-10-27 (unofficial)
+-[S4] Camera Model in Path Tracing - Pinhole, Lens, and DOF Guide | Dev ..., https://code-note-vr.vercel.app/pathtracer-learning-camera-model, fetched 2026-10-29 (unofficial)
+-[S5] hexhowells/GoTracer, https://github.com/hexhowells/GoTracer, fetched 2026-10-26 (unofficial)+[S2] CSE-333-Computer-Graphics-2020/VolumeRayCasting, https://github.com/CSE-333-Computer-Graphics-2020/VolumeRayCasting, fetched 2026-10-26 (unofficial)
++[S3] google-research/multinerf, https://github.com/google-research/multinerf, fetched 2026-10-26 (unofficial)
++[S4] kwea123/nerf_pl, https://github.com/kwea123/nerf_pl, fetched 2026-10-26 (unofficial)
++[S5] Gomosuza/ray-marching, https://github.com/Gomosuza/ray-marching, fetched 2026-10-26 (unofficial)
++[S6] AlexSheldrick/density_bounded_ray_weights, https://github.com/AlexSheldrick/density_bounded_ray_weights, fetched 2026-10-27 (unofficial)
++[S7] YueJiang-nj/CVPR2020-SDFDiff, https://github.com/YueJiang-nj/CVPR2020-SDFDiff, fetched 2026-10-27 (unofficial)
++[S8] ziplab/VolSplat, https://github.com/ziplab/VolSplat, fetched 2026-10-27 (unofficial)
++[S9] Camera Model in Path Tracing - Pinhole, Lens, and DOF Guide | Dev ..., https://code-note-vr.vercel.app/pathtracer-learning-camera-model, fetched 2026-10-29 (unofficial)
++[S10] GitHub - apchenstu/TensoRF: [ECCV 2022] Tensorial Radiance Fields, a ..., https://github.com/apchenstu/TensoRF, fetched 2026-10-29 (unofficial)
++[S11] hexhowells/GoTracer, https://github.com/hexhowells/GoTracer, fetched 2026-10-26 (unofficial)

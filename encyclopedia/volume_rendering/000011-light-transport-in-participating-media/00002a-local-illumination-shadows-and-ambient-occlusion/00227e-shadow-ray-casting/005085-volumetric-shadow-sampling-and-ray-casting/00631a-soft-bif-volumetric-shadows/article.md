@@ -1,0 +1,156 @@
+# Soft BiF Volumetric Shadows
+
+Also called: Soft Bilateral Filtering Volumetric Shadows, SoftBiF-VS
+
+## Overview
+Soft BiF Volumetric Shadows (SoftBiF-VS) is a real-time technique for generating high-quality volumetric shadows by combining sparse ray marching with bilateral interpolation [S1]. It solves the problem of excessive computational cost in brute-force volumetric shadowing while maintaining the crispness of shadow boundaries [S1]. Unlike conventional ray marching that evaluates all sample points along a view ray regardless of occlusion, SoftBiF-VS excludes points blocked by obstacles using cube shadow maps and applies bilateral filtering to smooth the transition of shadows along view rays [S1].
+
+## How it works
+**Inputs and Outputs:**
+*   **Inputs:** Scene geometry, volume density field (implicit or explicit), camera position and view direction, light source position (modeled as a volumetric point light source) [S1].
+*   **Outputs:** A rendered image with soft volumetric shadows [S1].
+
+**Data Structures:**
+*   **Cube Shadow Map:** A 3D texture or set of 2D textures storing depth information from the light source's perspective to determine occlusion [S1].
+*   **HDR Buffer:** A High Dynamic Range buffer used to accumulate light scattering values before tone mapping [S1].
+*   **Downsampled Ray Marching Grid:** A reduced set of sample points along the view ray [S1].
+
+**Steps:**
+1.  **Cube Shadow Map Generation:** Render the scene from the light source's perspective to populate a cube shadow map. This map identifies which points in space are blocked from the light source by obstacles [S1].
+2.  **Sparse Ray Marching:** For each pixel, cast a view ray. Instead of evaluating every point, determine a set of downsampled points along the ray. Use the cube shadow map to exclude sample points that are blocked from the light source [S1]. This reduces the number of sample points required to evaluate light scattering [S1].
+3.  **Light Scattering Computation:** Compute the light scattering for the remaining sample points. Store these values in an HDR buffer [S1]. The method simulates a volumetric point light source, focusing on the boundary of the shadow volume where realistic volumetric shadows develop [S1].
+4.  **Bilateral Interpolation:** Apply bilateral interpolation along the view rays to the computed scattering values. This step smooths the transition of volumetric shadows while preserving edges (discontinuous depths) [S1]. The bilateral filter uses both spatial proximity and radiance/depth similarity to weight samples [S1].
+5.  **Tone Mapping:** Perform tone mapping on the HDR buffer to generate the final image with soft volumetric shadows [S1].
+
+**Formulas:**
+The transmittance $T$ along a ray segment is computed based on the extinction coefficient $\sigma_t$ and step size $\Delta s$. However, SoftBiF-VS modifies the standard integration by skipping blocked segments.
+$$ T = \exp\left(-\sum_{i \in \text{visible}} \sigma_t(\mathbf{x}_i) \Delta s_i\right) $$
+where the sum is only over sample points $\mathbf{x}_i$ that are not blocked by the cube shadow map [S1].
+
+The bilateral filter weight $w_{ij}$ for a sample $j$ relative to a center sample $i$ depends on the spatial distance $d_s$ and the range distance $d_r$ (e.g., depth or radiance difference):
+$$ w_{ij} = \exp\left(-\frac{d_s^2}{2\sigma_s^2}\right) \cdot \exp\left(-\frac{d_r^2}{2\sigma_r^2}\right) $$
+The filtered value $I_i$ is:
+$$ I_i = \frac{\sum_{j} w_{ij} I_j}{\sum_{j} w_{ij}} $$
+where $I_j$ is the radiance or scattering value at sample $j$ [S1].
+
+**Parameters:**
+*   **Downsampling Factor:** Determines the number of sample points in ray marching. Not given in the sources.
+*   **Bilateral Filter Standard Deviations ($\sigma_s, \sigma_r$):** Control the smoothing strength and edge preservation. Not given in the sources.
+*   **Cube Shadow Map Resolution:** Not given in the sources.
+
+**Edge Cases and Pitfalls:**
+*   **Precision:** The use of HDR buffers is critical to handle high dynamic range lighting without clipping before tone mapping [S1].
+*   **Boundaries:** The method is specifically designed to preserve the crispness of boundaries, which is a common failure mode for simple blurring techniques [S1].
+*   **Occlusion Artifacts:** Incorrect cube shadow map generation can lead to incorrect exclusion of sample points, causing shadow artifacts [S1].
+
+**Pseudocode:**
+> **Unverified code.** The code below did not pass a test run against a reference implementation, or no test fits it, so it may contain errors.
+
+```python
+def soft_bif_volumetric_shadows(camera, light, scene, volume):
+    """
+    Renders soft volumetric shadows using SoftBiF-VS.
+    """
+    # 1. Generate Cube Shadow Map from light perspective
+    cube_shadow_map = render_cube_shadow_map(light, scene)
+    
+    # 2. Initialize HDR Buffer
+    hdr_buffer = initialize_hdr_buffer(camera.resolution)
+    
+    # 3. Process each pixel
+    for y in range(camera.resolution.height):
+        for x in range(camera.resolution.width):
+            # Cast view ray
+            ray = camera.get_ray(x, y)
+            
+            # Determine downsampled points along the ray
+            # Exclude points blocked by cube shadow map
+            visible_samples = []
+            for t in range(0, ray.max_distance, ray.step_size * downsampling_factor):
+                point = ray.origin + ray.direction * t
+                if not is_blocked(point, cube_shadow_map, light):
+                    # Compute light scattering for this point
+                    scattering = compute_scattering(point, light, volume)
+                    visible_samples.append((point, scattering))
+            
+            # 4. Bilateral Interpolation along the view ray
+            # Interpolate scattering values to smooth shadows while preserving edges
+            final_scattering = bilateral_interpolate_along_ray(visible_samples)
+            
+            # Store in HDR buffer
+            hdr_buffer[x, y] = final_scattering
+            
+    # 5. Tone Mapping
+    final_image = tone_map(hdr_buffer)
+    return final_image
+
+def is_blocked(point, cube_shadow_map, light):
+    """
+    Checks if a point is blocked from the light source using the cube shadow map.
+    """
+    # Project point to light space
+    light_space_pos = point_to_light_space(point, light)
+    # Sample cube shadow map
+    depth = cube_shadow_map.sample(light_space_pos)
+    # Compare with actual distance
+    return light.distance_to(point) > depth + epsilon
+
+def compute_scattering(point, light, volume):
+    """
+    Computes light scattering at a point in the volume.
+    """
+    # Simplified scattering model
+    sigma_t = volume.get_extinction(point)
+    # Assume simple absorption/emission for performance
+    return sigma_t * light.intensity
+
+def bilateral_interpolate_along_ray(samples):
+    """
+    Applies bilateral filter along the ray samples.
+    """
+    if not samples:
+        return 0.0
+    
+    # Center sample is the first visible sample or average
+    center = samples[0]
+    total_weight = 0.0
+    weighted_sum = 0.0
+    
+    for sample in samples:
+        # Spatial distance along ray
+        d_s = abs(sample.position - center.position)
+        # Range distance (scattering value difference)
+        d_r = abs(sample.scattering - center.scattering)
+        
+        # Gaussian weights
+        w_s = math.exp(-(d_s ** 2) / (2 * sigma_s ** 2))
+        w_r = math.exp(-(d_r ** 2) / (2 * sigma_r ** 2))
+        w = w_s * w_r
+        
+        weighted_sum += w * sample.scattering
+        total_weight += w
+        
+    if total_weight == 0:
+        return center.scattering
+    return weighted_sum / total_weight
+```
+
+## Subtopics
+
+### [Image-Based Volumetric Shadows](22513-image-based-volumetric-shadows.md)
+Image-Based Volumetric Shadows is a screen-space technique that approximates volumetric shadowing by leveraging geometric depth information and image-based processing, avoiding the computational cost of full ray marching through participating media. Unlike parent method [Soft BiF Volumetric Shadows](18810-soft-bif-volumetric-shadows.md) which relies on spatial interpolation of sampled radiance, this approach uses epipolar geometry, bilateral filtering, and depth discontinuities to determine shadowing along view rays. It is distinct from geometric-based methods [Geometrical-Based Volumetric Shadows](18811-geometrical-based-volumetric-shadows.md) by replacing explicit polygon casting or depth peeling with image-space operations such as downsampling and rectification.
+
+## Operating characteristics
+*   **Time Complexity:** Reduced compared to brute-force ray marching due to downsampling and exclusion of blocked points [S1]. The complexity is proportional to the number of visible samples per ray, which is significantly lower than the total number of samples [S1].
+*   **Memory Complexity:** Requires storage for the cube shadow map and the HDR buffer [S1].
+*   **Measured Performance:** The method is designed for real-time rendering and interactive applications [S1]. It achieves high performance by reducing the number of sample points [S1].
+*   **Strengths:** High quality soft volumetric shadows, real-time performance, preservation of shadow boundaries [S1].
+*   **Limitations:** Relies on the accuracy of the cube shadow map and the effectiveness of bilateral filtering in preserving complex shadow geometries [S1].
+*   **When to use:** When real-time volumetric shadows are required and computational resources are limited [S1].
+*   **When not to use:** When exact volumetric light transport is required, as this is an approximation [S1].
+
+## Background
+Soft BiF Volumetric Shadows was proposed by Ali et al. in 2017 [S1]. The method is inspired by the appearance of penumbra space at the boundaries of volumetric shadows when there is a blocker in front of a point light source [S1]. It addresses the limitations of conventional ray marching methods, which require extensive time, and the deficiencies of shadow maps, such as aliasing and lack of smooth transitions [S1]. The technique combines downsampling in ray marching with bilateral interpolation to improve volumetric shadows [S1].
+
+## Sources
+[S1] Soft bilateral filtering volumetric shadows using cube shadow maps, https://doi.org/10.1371/journal.pone.0178415, fetched 2026-10-26

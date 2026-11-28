@@ -1,0 +1,333 @@
+--- v002.md
++++ v003.md
+@@ -1,29 +1,74 @@
+ # SnugBox
+ 
++Also called: FastGS Optimizations, Rasterization Optimizations, Speedy-Splat Optimizations
+ 
+ ## Overview
+-SnugBox is a precise algorithm for computing Gaussian-to-tile bounding box intersections in 3D Gaussian Splatting, replacing the overly conservative tile assignment of standard 3D-GS to reduce the number of pixels processed per Gaussian [S1]. It computes an axis-aligned bounding box (AABB) around each Gaussian using its elliptical extent in image space, allowing for tighter identification of intersected tiles compared to the standard method which inscribes a circle within a square [S1].
++SnugBox is a precise algorithm for computing the axis-aligned bounding box (AABB) of a 3D Gaussian in screen space, replacing the overly conservative tile assignment used in standard 3D Gaussian Splatting (3D-GS) [S1]. It solves the problem of overestimating the number of tiles a Gaussian intersects, thereby reducing the number of pixels processed per Gaussian and accelerating rendering [S1][S2, unofficial]. Unlike the standard 3D-GS method which inscribes a circle within a square tile assignment, SnugBox derives a tight bounding box directly from the Gaussian's elliptical extent using its conic equation, providing numerical stability even under edge-on tilts [S1][S3, unofficial]. It serves as a plug-and-play optimization that yields an average inference speed-up of 1.82× without altering the rendered image [S1].
+ 
+ ## How it works
+ **Inputs:**
+-*   3D Gaussian parameters: mean $\mu_i$, scale $s_i$, rotation $r_i$, opacity $\sigma_i$ [S1].
+-*   Camera parameters: viewing transform $W$, perspective projection Jacobian $J$ [S1].
+-*   Image resolution and tile size [G].
++*   3D Gaussian parameters: mean $\mu_i$, scale $s_i$, rotation $r_i$.
++*   Camera parameters: viewing transform $W$, perspective projection.
++*   Image parameters: tile size $T$, image dimensions.
++*   Precomputed values: 2D covariance matrix $\Sigma_{i_{2D}}$, inverse covariance $\Sigma_{i_{2D}}^{-1}$, and the threshold $t$ derived from opacity $\sigma_i$.
+ 
+ **Outputs:**
+-*   Tile indices $[x_{min}, x_{max}] \times [y_{min}, y_{max}]$ representing the tight AABB intersecting the Gaussian's elliptical extent [S1].
++*   Bounding box edges in pixel coordinates: $x_{min}, x_{max}, y_{min}, y_{max}$.
++*   Tile indices: $tile_{x_{min}}, tile_{x_{max}}, tile_{y_{min}}, tile_{y_{max}}$.
+ 
+ **Data Structures:**
+-*   $\Sigma_{i_{3D}}$: 3x3 3D covariance matrix [S1].
+-*   $\Sigma_{i_{2D}}$: 2x2 2D projected covariance matrix [S1].
+-*   $\Sigma_{i_{2D}}^{-1}$: Inverse of the 2D covariance matrix, represented as $\begin{pmatrix} a & b \\ b & c \end{pmatrix}$ [S1].
+-*   $t$: Threshold value derived from opacity [S1].
++*   $\Sigma_{i_{2D}}^{-1}$: A $2 \times 2$ symmetric matrix $\begin{pmatrix} a & b \\ b & c \end{pmatrix}$ [S1].
++*   $t$: Scalar threshold value [S1].
++*   $\mu_{x}, \mu_{y}$: Screen-space mean coordinates [S1].
+ 
+ **Steps:**
+ 
+-1.  **Project Covariance:** Compute the 3D covariance $\Sigma_{i_{3D}} = R_i S_i S_i^T R_i^T$, where $S_i$ and $R_i$ are diagonal scale and rotation matrices derived from $s_i$ and $r_i$ [S1]. Project to 2D via $\hat{\Sigma}_{i_{3D}} = J W \Sigma_{i_{3D}} W^T J^T$, where $J$ is the Jacobian of the first-order approximation of the perspective projection and $W$ is the viewing transform [S1]. Drop the last row and column of $\hat{\Sigma}_{i_{3D}}$ to obtain $\Sigma_{i_{2D}}$ [S1].
+-2.  **Compute Inverse and Threshold:** Compute the inverse of the 2D covariance matrix $\Sigma_{i_{2D}}^{-1} = \begin{pmatrix} a & b \\ b & c \end{pmatrix}$ [S1]. Compute the threshold $t = 2 \log(255 \sigma_i)$ [S1].
+-3.  **Compute Extrema:** The pixel extent satisfies the ellipse equation $t = ax_d^2 + 2bx_dy_d + cy_d^2$, where $x_d = p_x - \mu_x$ and $y_d = p_y - \mu_y$ are coordinates relative to the 2D mean $\mu_{i_{2D}}$ [S1]. Rearrange to solve for $y_d$: $y_d = \frac{-bx_d \pm \sqrt{(b^2 - ac)x_d^2 + tc}}{c}$ [S1]. Find the $x_d$ values ($x_{d_{args}}$) where $\partial y_d / \partial x_d = 0$: $x_{d_{args}} = \pm \sqrt{\frac{-b^2 t}{(b^2 - ac)a}}$ [S1]. Calculate $y_{min}$ and $y_{max}$ by substituting $x_{d_{args}}$ into the rearranged equation and adding $\mu_y$ [S1]. Calculate $x_{min}$ and $x_{max}$ by swapping $y_d$ and $x_d$ and constants $a$ and $c$ in the equations, solving for $y_{d_{args}}$, and adding $\mu_x$ [S1].
+-4.  **Map to Tiles:** Convert bounding box edges to tile indices by dividing by tile size, rounding, and clipping to the image boundary [S1].
++1.  **Compute 2D Covariance:**
++    Calculate the 3D covariance matrix $\Sigma_{i_3D}$ from scale and rotation:
++    $$ \Sigma_{i_3D} = R_i S_i S_i^T R_i^T $$
++    Project it to 2D using the Jacobian $J$ of the perspective projection and the viewing transform $W$:
++    $$ \hat{\Sigma}_{i_3D} = J W \Sigma_{i_3D} W^T J^T $$
++    Drop the last row and column of $\hat{\Sigma}_{i_3D}$ to obtain $\Sigma_{i_2D}$ [S1].
++
++2.  **Compute Inverse Covariance and Threshold:**
++    Compute the inverse of the 2D covariance matrix $\Sigma_{i_2D}^{-1} = \begin{pmatrix} a & b \\ b & c \end{pmatrix}$ [S1].
++    Compute the threshold $t$ based on the Gaussian's opacity $\sigma_i$:
++    $$ t = 2 \log(255 \sigma_i) $$
++    [S1]
++
++3.  **Compute Extrema X-Coordinates ($x_{d_{args}}$):**
++    The ellipse equation for pixel extent is $t = ax_d^2 + 2bx_dy_d + cy_d^2$, where $x_d = p_x - \mu_x$ and $y_d = p_y - \mu_y$ [S1].
++    To find the $x_d$ values where the derivative $\partial y_d / \partial x_d = 0$ (the extrema), solve for $x_{d_{args}}$:
++    $$ x_{d_{args}} = \pm \sqrt{\frac{-b^2 t}{(b^2 - ac)a}} $$
++    [S1]
++    *Note:* If the term under the square root is negative or $a=0$, the Gaussian is degenerate or axis-aligned in a way that requires fallback handling (e.g., standard 3D-GS bounds) [G].
++
++4.  **Compute Y-Extents ($y_{min}, y_{max}$):**
++    Substitute $x_{d_{args}}$ into the rearranged ellipse equation for $y_d$:
++    $$ y_d = \frac{-bx_d \pm \sqrt{(b^2 - ac)x_d^2 + tc}}{c} $$
++    [S1]
++    Calculate the two possible $y_d$ values for each $x_{d_{args}}$. The minimum and maximum of these values (plus $\mu_y$) give $y_{min}$ and $y_{max}$:
++    $$ y_{min} = \mu_y + \min(y_d) $$
++    $$ y_{max} = \mu_y + \max(y_d) $$
++    [S1]
++
++5.  **Compute X-Extents ($x_{min}, x_{max}$):**
++    Due to the symmetry of the ellipse equation, swap $y_d$ and $x_d$ and swap constants $a$ and $c$ in the formulas from Steps 3 and 4 to compute $x_{min}$ and $x_{max}$ [S1].
++    Specifically, solve for $y_{d_{args}}$ using:
++    $$ y_{d_{args}} = \pm \sqrt{\frac{-b^2 t}{(b^2 - ac)c}} $$
++    Then substitute into the equation for $x_d$:
++    $$ x_d = \frac{-by_d \pm \sqrt{(b^2 - ac)y_d^2 + ta}}{a} $$
++    [S1]
++    $$ x_{min} = \mu_x + \min(x_d) $$
++    $$ x_{max} = \mu_x + \max(x_d) $$
++    [S1]
++
++6.  **Convert to Tile Indices:**
++    Divide the bounding box edges by the tile size $T$, round to the nearest integer, and clip to the image boundaries:
++    $$ tile_{x_{min}} = \text{clip}(\lfloor x_{min} / T \rfloor, 0, W_{tiles}-1) $$
++    $$ tile_{x_{max}} = \text{clip}(\lceil x_{max} / T \rceil, 0, W_{tiles}-1) $$
++    $$ tile_{y_{min}} = \text{clip}(\lfloor y_{min} / T \rfloor, 0, H_{tiles}-1) $$
++    $$ tile_{y_{max}} = \text{clip}(\lceil y_{max} / T \rceil, 0, H_{tiles}-1) $$
++    [S1]
+ 
+ **Pseudocode:**
+@@ -32,95 +77,166 @@
+ import math
+ 
+-def compute_snugbox(mu_2d, a, b, c, t, tile_size, img_w, img_h):
++def compute_snug_box(gaussian, tile_size, image_width_tiles, image_height_tiles):
+     """
+-    Computes the tight AABB tile indices for a Gaussian using SnugBox.
++    Computes the tight AABB tile indices for a Gaussian.
+     
+     Args:
+-        mu_2d: (2,) array, 2D mean [x, y]
+-        a, b, c: float, elements of inverse 2D covariance [[a, b], [b, c]]
+-        t: float, threshold 2 * log(255 * opacity)
+-        tile_size: int, pixels per tile
+-        img_w, img_h: int, image dimensions
++        gaussian: Object containing:
++            - mu_x, mu_y: Screen space mean
++            - sigma: Opacity
++            - cov_inv_2d: 2x2 inverse covariance matrix [[a, b], [b, c]]
++        tile_size: Width/height of a tile in pixels
++        image_width_tiles: Number of tiles in X
++        image_height_tiles: Number of tiles in Y
+         
+     Returns:
+-        (x_min, x_max, y_min, y_max): Tile indices
++        (tile_x_min, tile_x_max, tile_y_min, tile_y_max)
+     """
+-    # 1. Compute x_d extrema locations
+-    denom_y_ext = (b**2 - a*c) * a
+-    if denom_y_ext == 0:
+-        return (0, 0, 0, 0) # [G] Guard against division by zero
+-    
+-    radicand_x = (-b**2 * t) / denom_y_ext
+-    if radicand_x < 0: radicand_x = 0
+-    x_d_args = math.sqrt(radicand_x)
+-    
+-    # Evaluate y_d at both + and - x_d_args to find global min/max
+-    y_candidates = []
+-    for x_d in [x_d_args, -x_d_args]:
+-        rad = (b**2 - a*c) * (x_d**2) + t*c
+-        if rad < 0: rad = 0
+-        sq = math.sqrt(rad)
+-        y1 = (-b * x_d + sq) / c
+-        y2 = (-b * x_d - sq) / c
+-        y_candidates.extend([y1, y2])
++    # Extract covariance inverse components
++    a, b, c = gaussian.cov_inv_2d[0][0], gaussian.cov_inv_2d[0][1], gaussian.cov_inv_2d[1][1]
++    
++    # Compute threshold t
++    # Note: sigma is typically in [0, 1]. 255 * sigma ensures the ellipse corresponds to the 
++    # standard 3D-GS cutoff where intensity drops significantly.
++    t = 2.0 * math.log(255.0 * gaussian.sigma)
++    
++    # Helper to compute extrema for one axis given the other's derivative zero-crossings
++    # This function computes min/max of the dependent variable given the independent variable extrema
++    def get_extrema(independent_extrema, mu_dep, mu_ind, a, b, c, t):
++        """
++        independent_extrema: list of [val, mu] pairs for the independent variable (e.g., x_d)
++        mu_dep: mean of dependent variable (e.g., mu_y)
++        mu_ind: mean of independent variable (e.g., mu_x)
++        """
++        deps = []
++        for ind_val, ind_mu in independent_extrema:
++            ind_d = ind_val - ind_mu
++            # Discriminant part of the quadratic solution
++            disc_term = (b**2 - a*c) * (ind_d**2) + t * c
++            
++            if disc_term < 0:
++                # Degenerate case: no real solution for this x_d. 
++                # This implies the ellipse does not extend to this x_d in reality,
++                # or numerical instability. Fallback to mean or minimal extent.
++                deps.append(mu_dep)
++                deps.append(mu_dep)
++            else:
++                sqrt_disc = math.sqrt(disc_term)
++                # Two solutions for dependent variable
++                y1 = (-b * ind_d + sqrt_disc) / c
++                y2 = (-b * ind_d - sqrt_disc) / c
++                deps.append(y1 + mu_dep)
++                deps.append(y2 + mu_dep)
++        return min(deps), max(deps)
++
++    # Step 1: Compute x_d extrema (x_d_args)
++    # Formula: x_d_args = +/- sqrt( (-b^2 * t) / ((b^2 - a*c) * a) )
++    denom_x = (b**2 - a*c) * a
++    if denom_x == 0:
++        # Fallback if a=0 or b^2=ac (degenerate)
++        x_d_args = [0.0]
++    else:
++        radicand_x = (-b**2 * t) / denom_x
++        if radicand_x < 0:
++            x_d_args = [0.0]
++        else:
++            sqrt_rad_x = math.sqrt(radicand_x)
++            x_d_args = [-sqrt_rad_x, sqrt_rad_x]
++            
++    # Step 2: Compute y_min, y_max using x_d_args
++    y_min, y_max = get_extrema(
++        [(x, gaussian.mu_x) for x in x_d_args], 
++        gaussian.mu_y, gaussian.mu_x, a, b, c, t
++    )
++    
++    # Step 3: Compute y_d extrema (y_d_args) for x calculation
++    # Formula: y_d_args = +/- sqrt( (-b^2 * t) / ((b^2 - a*c) * c) )
++    denom_y = (b**2 - a*c) * c
++    if denom_y == 0:
++        y_d_args = [0.0]
++    else:
++        radicand_y = (-b**2 * t) / denom_y
++        if radicand_y < 0:
++            y_d_args = [0.0]
++        else:
++            sqrt_rad_y = math.sqrt(radicand_y)
++            y_d_args = [-sqrt_rad_y, sqrt_rad_y]
++            
++    # Step 4: Compute x_min, x_max using y_d_args
++    # Swap roles: dependent is x, independent is y. 
++    # The formula for x_d given y_d is: x_d = (-b*y_d +/- sqrt((b^2-ac)y_d^2 + t*a)) / a
++    # We reuse get_extrema by swapping parameters appropriately.
++    # Here, 'independent' is y, 'dependent' is x.
++    # a becomes c, c becomes a in the quadratic structure relative to the swap?
++    # Actually, the equation is symmetric. 
++    # Original: t = a*x^2 + 2b*x*y + c*y^2
++    # Solve for x: a*x^2 + (2b*y)*x + (c*y^2 - t) = 0
++    # x = [ -2b*y +/- sqrt(4b^2*y^2 - 4a(c*y^2 - t)) ] / 2a
++    # x = [ -b*y +/- sqrt(b^2*y^2 - a*c*y^2 + a*t) ] / a
++    # x = [ -b*y +/- sqrt((b^2 - a*c)y^2 + a*t) ] / a
++    
++    # Re-implementing get_extrema logic specifically for x given y to avoid confusion
++    x_extrema = []
++    for y_val, y_mu in [(y, gaussian.mu_y) for y in y_d_args]:
++        y_d = y_val - y_mu
++        disc_term_x = (b**2 - a*c) * (y_d**2) + a * t
+         
+-    y_min_px = mu_2d[1] + min(y_candidates)
+-    y_max_px = mu_2d[1] + max(y_candidates)
+-    
+-    # 2. Compute y_d extrema locations (swapped a/c)
+-    denom_x_ext = (b**2 - c*a) * c
+-    if denom_x_ext == 0:
+-        return (0, 0, 0, 0) # [G] Guard against division by zero
+-        
+-    radicand_y = (-b**2 * t) / denom_x_ext
+-    if radicand_y < 0: radicand_y = 0
+-    y_d_args = math.sqrt(radicand_y)
+-    
+-    # Evaluate x_d at both + and - y_d_args
+-    x_candidates = []
+-    for y_d in [y_d_args, -y_d_args]:
+-        rad = (b**2 - c*a) * (y_d**2) + t*a
+-        if rad < 0: rad = 0
+-        sq = math.sqrt(rad)
+-        x1 = (-b * y_d + sq) / a
+-        x2 = (-b * y_d - sq) / a
+-        x_candidates.extend([x1, x2])
+-        
+-    x_min_px = mu_2d[0] + min(x_candidates)
+-    x_max_px = mu_2d[0] + max(x_candidates)
+-    
+-    # 3. Map to Tiles
+-    x_min_tile = int(math.floor(x_min_px / tile_size))
+-    x_max_tile = int(math.ceil(x_max_px / tile_size))
+-    y_min_tile = int(math.floor(y_min_px / tile_size))
+-    y_max_tile = int(math.ceil(y_max_px / tile_size))
+-    
+-    # Clip to image boundary
+-    max_x_tile = img_w // tile_size
+-    max_y_tile = img_h // tile_size
+-    
+-    x_min_tile = max(0, min(x_min_tile, max_x_tile))
+-    x_max_tile = max(0, min(x_max_tile, max_x_tile))
+-    y_min_tile = max(0, min(y_min_tile, max_y_tile))
+-    y_max_tile = max(0, min(y_max_tile, max_y_tile))
+-    
+-    return (x_min_tile, x_max_tile, y_min_tile, y_max_tile)
++        if disc_term_x < 0:
++            x_extrema.append(gaussian.mu_x)
++            x_extrema.append(gaussian.mu_x)
++        else:
++            sqrt_disc_x = math.sqrt(disc_term_x)
++            # Check for a=0 to avoid division by zero
++            if a == 0:
++                # If a=0, the equation is linear in x: 2bxy + cy^2 - t = 0 => x = (t - cy^2) / 2by
++                if b == 0 or y_d == 0:
++                     x_extrema.append(gaussian.mu_x)
++                     x_extrema.append(gaussian.mu_x)
++                else:
++                    x_val = (t - c * (y_d**2)) / (2 * b * y_d)
++                    x_extrema.append(x_val + gaussian.mu_x)
++                    x_extrema.append(x_val + gaussian.mu_x)
++            else:
++                x1 = (-b * y_d + sqrt_disc_x) / a
++                x2 = (-b * y_d - sqrt_disc_x) / a
++                x_extrema.append(x1 + gaussian.mu_x)
++                x_extrema.append(x2 + gaussian.mu_x)
++                
++    x_min = min(x_extrema)
++    x_max = max(x_extrema)
++    
++    # Step 5: Convert to tile indices
++    tile_x_min = int(math.floor(x_min / tile_size))
++    tile_x_max = int(math.ceil(x_max / tile_size))
++    tile_y_min = int(math.floor(y_min / tile_size))
++    tile_y_max = int(math.ceil(y_max / tile_size))
++    
++    # Clip to image boundaries
++    tile_x_min = max(0, min(tile_x_min, image_width_tiles - 1))
++    tile_x_max = max(0, min(tile_x_max, image_width_tiles - 1))
++    tile_y_min = max(0, min(tile_y_min, image_height_tiles - 1))
++    tile_y_max = max(0, min(tile_y_max, image_height_tiles - 1))
++    
++    return tile_x_min, tile_x_max, tile_y_min, tile_y_max
+ ```
+ 
+ **Edge Cases and Pitfalls:**
+-*   **Singular Covariance:** If the determinant of $\Sigma_{i_{2D}}$ is zero (degenerate Gaussian), the inverse is undefined. A guard should handle this, potentially returning a minimal bounding box or skipping the Gaussian [G].
+-*   **Numerical Stability:** The term under the square root in the extrema calculation and the coordinate solving must be non-negative. Numerical errors may cause slight negative values; these should be clamped to zero [G].
+-*   **Division by Zero:** The denominators in the extrema formulas involve $a$ and $c$. If these are zero, the formula breaks. This corresponds to axis-aligned ellipses with infinite extent in one direction, which is physically unlikely for a valid Gaussian but possible in degenerate cases [G].
++*   **Degenerate Covariance:** If $a=0$ or $c=0$ or $b^2-ac=0$, the Gaussian is degenerate (e.g., a line or point in screen space). The square root terms may become negative or undefined. In such cases, fallback to the standard 3D-GS bounding box or a minimal 1-tile assignment [G].
++*   **Numerical Stability:** Under extreme edge-on tilts, the covariance matrix can become ill-conditioned. SnugBox is noted to provide numerical stability in these cases compared to other methods [S3, unofficial].
++*   **Opacity Threshold:** The threshold $t$ depends on $\sigma_i$. If $\sigma_i$ is very small, $t$ becomes large and negative, potentially leading to complex roots if not handled correctly. Ensure $t$ is computed correctly and discriminants are checked for negativity [S1].
+ 
+ ## Operating characteristics
+-*   **Time Complexity:** Constant number of operations per Gaussian [S1]. It is called twice in the rendering pipeline: once during preprocessing to count Gaussians per tile, and once in `duplicateWithKeys` to populate the Gaussian-to-tile arrays [S1].
+-*   **Memory Complexity:** No additional significant memory overhead beyond the computed bounding box indices [S1].
+-*   **Performance:** Produces an average overall inference speed-up of 1.82× on Mip-NeRF 360, Tanks & Temples, and Deep Blending datasets compared to baseline 3D-GS [S1].
+-*   **Strengths:** Significantly tighter bounding boxes than the standard 3D-GS method, reducing the number of tiles processed per Gaussian [S1].
+-*   **Limitations:** More complex than the standard square-inscribing-circle method, though the overhead is small [S1].
++*   **Time Complexity:** Constant time $O(1)$ per Gaussian, involving a fixed number of arithmetic operations (square roots, divisions, multiplications) [S1].
++*   **Memory Complexity:** $O(1)$ additional memory per Gaussian for storing the bounding box [S1].
++*   **Performance:** Produces an average inference speed-up of 1.82× on Mip-NeRF 360, Tanks & Temples, and Deep Blending datasets compared to baseline 3D-GS [S1]. When combined with AccuTile, it contributes to a 2× FPS boost [S2, unofficial].
++*   **Strengths:** Lossless (does not change rendered image), plug-and-play, significantly reduces the number of Gaussians per pixel by avoiding overestimation [S1][S2, unofficial].
++*   **Limitations:** Only applicable during rasterization/tile assignment; does not reduce the total number of Gaussians in the scene (unlike pruning methods) [S1].
+ 
+ ## Background
+-SnugBox was introduced in the "Speedy-Splat" paper (2025) as a plug-and-play optimization for 3D Gaussian Splatting [S1]. It addresses the overly conservative tile assignment of the original 3D-GS algorithm, which assigns a Gaussian to any tile intersecting a square inscribing a circle [S1]. SnugBox replaces this with a tight AABB derived from the Gaussian's elliptical extent [S1].
++SnugBox was introduced in the "Speedy-Splat" paper (Hanson et al., 2025) as part of a suite of optimizations to accelerate 3D Gaussian Splatting rendering [S1][S3, unofficial]. It addresses the inefficiency of the original 3D-GS tile assignment, which uses a conservative square bounding box derived from the largest eigenvalue of the 2D covariance matrix [S1][S2, unofficial]. The method is also referenced in "FastGS" (Ren et al., 2025) and "Bake It Till You Make It" [S3, unofficial].
+ 
+ ## Sources
+-[S1] Speedy-Splat: Fast 3D Gaussian Splatting with Sparse Pixels and Sparse Primitives, https://doi.org/10.1109/cvpr52734.2025.02006, fetched 2026-10-26+
++[S1] Speedy-Splat: Fast 3D Gaussian Splatting with Sparse Pixels and Sparse Primitives, https://doi.org/10.1109/cvpr52734.2025.02006, fetched 2026-10-26
++[S2] Poster Speedy-Splat: Fast 3D Gaussian Splatting with Sparse Pixels and Sparse Primitives, https://speedysplat.github.io/static/files/speedysplat_poster.pdf?v=2026.10.18, fetched 2026-10-29 (unofficial)
++[S3] Bake It Till You Make It: Ultrafast Spatial Texture-Atlas Splatting, https://doi.org/10.48550/arXiv.2607.13808, fetched 2026-10-29 (unofficial)

@@ -1,0 +1,69 @@
+# Object-order parallel volume rendering
+
+Also called: Data-parallel volume rendering, Domain decomposition volume rendering
+
+## Overview
+Object-order parallel volume rendering is a distributed rendering approach that decomposes the computational task by distributing the volume dataset itself across multiple processors, rather than partitioning the screen space. Unlike [Image-order parallel volume rendering](23165-image-order-parallel-volume-rendering.md), which assigns distinct regions of screen space to each processor, this method avoids data duplication across processors, scales better with increasing data size, and is less sensitive to view orientation.
+
+## How it works
+**Inputs:** A 3D volume dataset $V$ and a set of $P$ processors.
+**Outputs:** A single composite 2D image.
+
+**Data Structures:**
+The volume data is partitioned using a domain decomposition strategy. Common strategies include:
+*   **Slab decomposition:** The volume is split into planar slabs along one axis.
+*   **Shaft decomposition:** The volume is split into vertical shafts (columns).
+*   **Block decomposition:** The volume is split into 3D blocks.
+Each processor $p$ holds a subset $V_p \subset V$.
+
+**Algorithm Steps:**
+1.  **Decomposition:** Distribute the volume data $V$ across the $P$ processors using a chosen domain decomposition strategy [S1].
+2.  **Local Rendering:** Each processor $p$ renders its assigned subset $V_p$ independently. This produces an intermediate image $I_p$ for that processor. The rendering process typically involves ray casting or projection through the local data subset [S1].
+3.  **Gathering:** Collect all intermediate images $\{I_0, I_1, ..., I_{P-1}\}$ from the processors. This may involve network communication depending on the architecture [S1].
+4.  **Recombination:** Recombine the gathered intermediate images into a final image $I_{final}$ using alpha blending. This step must occur in a prescribed order (either back-to-front or front-to-back) to ensure correct transparency handling [S1].
+
+**Pitfalls:**
+*   **Screen Space Overlap:** Intermediate images from different processors may overlap in screen space. This necessitates the ordered composition step in the recombination phase, unlike image-order methods where processor images do not overlap [S1].
+*   **Communication Overhead:** Gathering and recombining images requires synchronization and data transfer, which can become a bottleneck if not managed efficiently.
+
+**Pseudocode:**
+> **Unverified code.** The code below did not pass a test run against a reference implementation, or no test fits it, so it may contain errors.
+
+```python
+def object_order_parallel_rendering(volume_data, processors, decomposition_strategy):
+    # Step 1: Decompose volume data
+    # Each processor gets a subset of the volume based on the strategy (Slab, Shaft, Block)
+    local_volumes = decompose(volume_data, processors, decomposition_strategy)
+    
+    # Step 2: Each processor renders its local volume
+    # This produces an intermediate image for each processor
+    intermediate_images = []
+    for p in processors:
+        # Render the local subset to an image
+        # The specific ray-casting or projection method is implementation-dependent
+        img = render_volume(local_volumes[p])
+        intermediate_images.append((p, img))
+        
+    # Step 3: Gather all intermediate images
+    # In a distributed system, this involves collecting images from all nodes
+    gathered_images = collect_all(intermediate_images)
+    
+    # Step 4: Recombine images using alpha blending in prescribed order
+    # Order must be back-to-front or front-to-front relative to the view
+    final_image = recombine_alpha_blend(gathered_images, order="back-to-front")
+    
+    return final_image
+```
+
+## Operating characteristics
+*   **Scaling:** Scales better with data size than image-order methods because it avoids data duplication across processors [S1].
+*   **View Sensitivity:** Less sensitive to view orientation than image-order methods. In image-order methods, certain views may leave some processors with little or no work, and data redistribution may be required as the model moves [S1].
+*   **Complexity:** The recombination step adds complexity due to the need for ordered composition of overlapping intermediate images [S1].
+*   **Strengths:** Efficient for large datasets where data duplication is prohibitive; robust to view changes.
+*   **Limitations:** Requires careful management of overlapping intermediate images during recombination; potential communication overhead in gathering images.
+
+## Background
+The classification of parallel volume rendering algorithms into image-order and object-order categories was established to address the challenges of rendering large datasets. Object-order methods were developed as a solution to the data duplication and view-sensitivity issues inherent in image-order approaches. The term "scene graph" is sometimes associated with the management of displayable data and rendering services in such distributed visualization systems [S1].
+
+## Sources
+[S1] Using High-Speed WANs and Network Data Caches to Enable Remote and Distributed Visualization, https://doi.org/10.5555/370049.370397, fetched 2026-10-26

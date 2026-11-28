@@ -1,0 +1,137 @@
+# Indirect Depth Supervision (KL Loss)
+Also called: DS-NeRF loss, Depth supervision via KL-divergence, KL-Divergence Depth Loss, LiDAR depth loss
+
+## Overview
+Indirect Depth Supervision treats the volume-rendering weights along a ray as a discrete probability distribution and minimizes the Kullback-Leibler (KL) divergence between this rendered distribution and a unimodal target distribution centered at a measured LiDAR range [S1, unofficial][S2]. It differs from direct depth supervision (e.g., [Direct Depth Supervision](11396-direct-depth-supervision.md)) by enforcing geometric consistency through distribution alignment rather than penalizing the difference between expected depth values [S1, unofficial][S2].
+
+## How it works
+**Inputs and Outputs:**
+*   **Inputs:** A set of LiDAR rays $\mathcal{R}_{\text{LiDAR}}$. For each ray $r$, the measured range $d_r^*$ (ground truth depth). The neural network parameters $\theta$ (density $\sigma$ and color $\mathbf{c}$).
+*   **Outputs:** A scalar loss value $\mathcal{L}_{\text{depth}}$ to be minimized.
+
+**Data Structures:**
+*   **Ray Samples:** For each ray $r$, a list of $N$ sample points $t_i$ (depths) and their associated rendering weights $w_i$.
+*   **Rendering Weights:** $w_i = T_i (1 - \exp(-\sigma_i \delta_i))$, where $T_i = \prod_{j=1}^{i-1} (1 - \rho(t_j))$ is the accumulated transmittance, $\rho(t_i) = 1 - \exp(-\sigma(\mathbf{r}(t_i))\delta_i)$ is the opacity, and $\delta_i = t_{i+1} - t_i$ is the distance between samples [S1, unofficial][S2].
+*   **Target Distribution Parameters:**
+    *   $d_r^*$: The measured LiDAR range for ray $r$.
+    *   $v_{s_i}$: The size of the voxel containing sample $i$ [S1, unofficial].
+    *   $\hat{\sigma}$: A variance parameter controlling the spread of the target distribution [S2].
+    *   $\epsilon$: A kernel parameter/bound [S2].
+
+**Numbered Steps:**
+1.  **Render Weights:** For each LiDAR ray $r \in \mathcal{R}_{\text{LiDAR}}$, compute the rendering weights $w_i$ for all sample points $t_i$ along the ray using the current network parameters $\theta$ [S1, unofficial][S2].
+2.  **Construct Target Distribution $q_r(d_i)$:** For each sample $i$ on ray $r$, compute the unnormalized target probability $q_r(d_i)$ based on the distance to the measured range $d_r^*$ [S1, unofficial][S2].
+    *   Using the formulation from [S1, unofficial]:
+        $$ q_r(d_i) \propto \Delta t_i \exp\left(-\frac{(t_i - d_r^*)^2}{2v_{s_i}^2}\right) $$
+        where $\Delta t_i$ is the sample spacing (often $\delta_i$ or a fixed step) and $v_{s_i}$ is the voxel size [S1, unofficial].
+    *   Using the formulation from [S2]:
+        $$ q_r(d_i) \propto \exp\left(-\frac{(t_i - D(r_i))^2}{2\hat{\sigma}^2}\right) $$
+        where $D(r_i)$ is the ground truth depth and $\hat{\sigma}$ is a variance parameter [S2].
+    *   *Note:* The sources provide slightly different normalizations and parameters ($v_{s_i}$ vs $\hat{\sigma}$). [S1, unofficial] explicitly states the target sharpens as the map refines via $v_{s_i}$. [S2] uses a fixed variance $\hat{\sigma}$ and a kernel $\epsilon$. Implementers should choose one formulation or average them if the specific variant is not mandated. The standard DS-NeRF approach [S1, unofficial] is cited as the representative for indirect supervision [S2].
+3.  **Normalize Target Distribution:** Normalize $q_r(d_i)$ such that $\sum_i q_r(d_i) = 1$ [S1, unofficial].
+4.  **Compute KL Divergence:** Calculate the KL divergence between the target distribution $q_r$ and the rendered distribution $p_r$ (where $p_r(d_i) = w_i$) [S1, unofficial]:
+    $$ D_{\text{KL}}(q_r \parallel p_r) = \sum_i q_r(d_i) \log \frac{q_r(d_i)}{p_r(d_i)} = \sum_i q_r(d_i) \log q_r(d_i) - \sum_i q_r(d_i) \log w_i $$
+    Since $\sum_i q_r(d_i) \log q_r(d_i)$ is constant with respect to $\theta$, the loss simplifies to [S1, unofficial]:
+    $$ \mathcal{L}_{\text{depth}} = - \sum_{r \in \mathcal{R}_{\text{LiDAR}}} \sum_i q_r(d_i) \log(w_i) $$
+5.  **Aggregate:** Sum the KL divergence over all LiDAR rays [S1, unofficial].
+
+**Pseudocode:**
+> **Unverified code.** The code below did not pass a test run against a reference implementation, or no test fits it, so it may contain errors.
+
+```python
+def compute_kl_depth_loss(lidar_rays, network, voxel_sizes):
+    """
+    Computes the Indirect Depth Supervision (KL Loss).
+    
+    Args:
+        lidar_rays: List of Ray objects, each containing:
+            - origin: (3,) float array
+            - direction: (3,) float array
+            - measured_range: float (d_r^*)
+            - samples: List of sample depths t_i
+        network: A function or object that returns (sigma, color) for a batch of points.
+        voxel_sizes: A function or lookup that returns v_{s_i} for a sample at depth t_i.
+        
+    Returns:
+        loss: Scalar tensor.
+    """
+    total_loss = 0.0
+    
+    for ray in lidar_rays:
+        # 1. Get sample points along the ray
+        t_samples = ray.samples # List of floats t_i
+        
+        # 2. Query network for density sigma at sample points
+        # Assuming network takes (points, directions) and returns sigma
+        points = ray.origin + t_samples * ray.direction
+        sigmas = network(points, ray.direction) # Shape: (N,)
+        
+        # 3. Compute rendering weights w_i
+        # delta_t is the distance between consecutive samples
+        # For the last sample, delta_t might be 0 or handled via truncation
+        delta_t = np.diff(t_samples, prepend=t_samples[0]) # Shape: (N,)
+        
+        # Opacity alpha_i = 1 - exp(-sigma_i * delta_t_i)
+        alphas = 1.0 - torch.exp(-sigmas * delta_t)
+        
+        # Transmittance T_i = product(1 - alpha_j) for j < i
+        # T_1 = 1.0
+        transmittances = torch.cumprod(1.0 - alphas, dim=0)
+        transmittances = torch.cat([torch.tensor([1.0]), transmittances[:-1]])
+        
+        # Weights w_i = T_i * alpha_i
+        weights = transmittances * alphas
+        
+        # 4. Construct target distribution q_r(d_i)
+        # Using formulation from [S1, unofficial]: q_r(d_i) proportional to delta_t_i * exp(-(t_i - d_r^*)^2 / (2 * v_{s_i}^2))
+        d_star = ray.measured_range
+        
+        # Get voxel sizes for each sample
+        v_s = torch.tensor([voxel_sizes(t) for t in t_samples]) # Shape: (N,)
+        
+        # Exponent term
+        exponent = -((t_samples - d_star) ** 2) / (2.0 * v_s ** 2)
+        
+        # Unnormalized q
+        q_unnorm = delta_t * torch.exp(exponent)
+        
+        # Normalize q
+        q = q_unnorm / q_unnorm.sum()
+        
+        # 5. Compute KL Divergence term: - sum(q_i * log(w_i))
+        # Add epsilon to weights to avoid log(0)
+        weights_clamped = weights + 1e-8
+        
+        loss_ray = -torch.sum(q * torch.log(weights_clamped))
+        total_loss += loss_ray
+        
+    return total_loss
+```
+
+**Parameters with Typical Values:**
+*   $v_{s_i}$: Voxel size, varies by spatial location [S1, unofficial].
+*   $\hat{\sigma}$: Variance parameter, not given in the sources [S2].
+*   $\epsilon$: Kernel parameter, not given in the sources [S2].
+
+**Edge Cases and Pitfalls:**
+*   **Zero Weights:** If $w_i = 0$, $\log(w_i)$ is undefined. Clamp weights with a small epsilon (e.g., $10^{-8}$) before taking the logarithm [G].
+*   **Voxel Size Definition:** The definition of $v_{s_i}$ (voxel size containing sample $i$) requires access to the underlying voxel grid structure [S1, unofficial]. If using a continuous coordinate network without explicit voxels, this parameter may need approximation or substitution with $\hat{\sigma}$ [S2].
+*   **Distribution Normalization:** The target distribution $q_r$ must be normalized to sum to 1. Failure to normalize leads to incorrect KL divergence values [S1, unofficial].
+*   **LiDAR Ray Availability:** This loss only applies to rays that have corresponding LiDAR measurements. Rays without LiDAR data do not contribute to this specific loss term [S1, unofficial].
+
+## Operating characteristics
+*   **Time Complexity:** $O(N \cdot R)$, where $N$ is the number of samples per ray and $R$ is the number of LiDAR rays. The computation involves forward passes for density, weight calculation, and a summation over samples.
+*   **Memory Complexity:** $O(N \cdot R)$ to store intermediate weights and target distributions for all LiDAR rays during the backward pass.
+*   **Strengths:** Enforces geometric consistency by aligning the entire depth distribution with the LiDAR measurement, rather than just the mean [S1, unofficial]. It is robust to noise in the LiDAR data due to the probabilistic nature of the KL divergence [S1, unofficial].
+*   **Limitations:** Requires LiDAR data; cannot be used with image-only supervision [S1, unofficial]. The target distribution's sharpness depends on voxel size, which may require careful tuning as the map refines [S1, unofficial].
+*   **When to Use:** When LiDAR data is available and geometric consistency is critical, such as in outdoor mapping or SLAM applications [S1, unofficial][S2].
+*   **When Not to Use:** When only RGB images are available, or when computational resources are severely limited and the overhead of computing the target distribution is prohibitive.
+
+## Background
+*   **Origin:** The method was introduced in DS-NeRF [S1, unofficial][S2]. It treats rendering weights as a probability distribution and uses KL divergence to align it with LiDAR measurements [S1, unofficial].
+*   **History:** It is part of the broader effort to integrate geometric priors into NeRF training [S2]. The URF loss from Urban-NeRF is another variant of indirect supervision, but it lacks an open-source implementation, making the KL loss the representative for this category [S2].
+*   **Usage:** Commonly used in LiDAR-Visual SLAM and mapping systems where geometric accuracy is paramount [S1, unofficial].
+
+## Sources
+[S1] SpaRV: Sparse Radiance Voxels for Scalable Geometrically Consistent LiDAR-Visual Mapping and Rendering, https://doi.org/10.48550/arxiv.2610.25665, fetched 2026-10-26 (unofficial)
+[S2] Digging into Depth Priors for Outdoor Neural Radiance Fields, https://doi.org/10.1145/3581783.3612306, fetched 2026-10-30

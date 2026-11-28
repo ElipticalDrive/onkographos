@@ -1,0 +1,106 @@
+# Oblivious Lookup Tables
+
+Also called: Wamser et al. approach
+
+## Overview
+Oblivious Lookup Tables (OLT) are a cryptographic mapping technique that allows a function $f: X \to Y$ to be evaluated on encrypted data without revealing the input values $X$ [S1][S2, unofficial]. Unlike standard lookup tables that rely on array indexing (which requires comparison or equality checks incompatible with probabilistic homomorphic encryption), OLTs use linear algebra—specifically dot products—to perform the lookup [S1][S2, unofficial]. This method enables volume rendering transfer functions to operate on encrypted voxel data by replacing array indexing with linear algebra, avoiding comparison operators that are insecure in probabilistic Partially Homomorphic Encryption (PHE) schemes like Paillier [S1][S2, unofficial].
+
+## How it works
+**Inputs and Outputs**
+*   **Input:** A set of domain values $X = \{x_1, x_2, \dots, x_n\}$ and a corresponding set of target values $Y = \{y_1, y_2, \dots, y_n\}$ (e.g., color channel intensities) [S2, unofficial]. The input value $x_i$ may be encrypted.
+*   **Output:** The mapped value $y_i = f(x_i)$, encrypted if the input was encrypted [S2, unofficial].
+*   **Precomputed Data:** A lookup vector $\vec{l}$ of size $n$ [S1][S2, unofficial].
+
+**Data Structures**
+*   **Vandermonde Matrix ($V$):** An $n \times n$ square matrix where the $i$-th row $\vec{v}_i$ is derived from the domain value $x_i$ [S1][S2, unofficial].
+*   **Lookup Vector ($\vec{l}$):** A plaintext vector of size $n$, computed once from unencrypted $X$ and $Y$ [S1][S2, unofficial].
+*   **Evaluation Vector ($\vec{v}_i$):** A vector of size $n$ representing the input $x_i$ [S1][S2, unofficial]. If $x_i$ is encrypted, $\vec{v}_i$ must also be encrypted component-wise [S1][S2, unofficial].
+
+**Formulas**
+The core relationship is defined by the linear system:
+$$ V \cdot \vec{l} = \vec{y} $$
+Where:
+*   $V$ is the Vandermonde matrix with entries $V_{ij} = x_i^{j-1}$ for $i, j \in \{1, \dots, n\}$ [S1][S2, unofficial].
+*   $\vec{y}$ is the column vector of target values $[y_1, y_2, \dots, y_n]^T$ [S2, unofficial].
+*   $\vec{l}$ is the solution vector [S1][S2, unofficial].
+
+The evaluation of the lookup for a specific input $x_i$ is a dot product:
+$$ f(x_i) = \vec{v}_i \cdot \vec{l} = y_i $$
+Where $\vec{v}_i = (1, x_i^1, x_i^2, \dots, x_i^{n-1})$ [S1][S2, unofficial].
+
+**Steps**
+1.  **Define Domain and Range:** Select $n$ distinct domain values $X = \{x_1, \dots, x_n\}$ and their corresponding target outputs $Y = \{y_1, \dots, y_n\}$ [S2, unofficial]. For volume rendering, $n$ is typically $2^8 = 256$ for 8-bit voxels [S1][S2, unofficial].
+2.  **Construct Vandermonde Matrix:** Build the $n \times n$ matrix $V$ where row $i$ is $\vec{v}_i = (1, x_i, x_i^2, \dots, x_i^{n-1})$ [S1][S2, unofficial].
+3.  **Compute Lookup Vector:** Solve the linear system $V \cdot \vec{l} = \vec{y}$ for $\vec{l}$ [S1][S2, unofficial]. This step is performed offline using unencrypted data [S1][S2, unofficial].
+4.  **Encrypt Input Vector:** For an encrypted input $\llbracket x_i \rrbracket$, compute the encrypted evaluation vector $\llbracket \vec{v}_i \rrbracket = (1, \llbracket x_i \rrbracket, \llbracket x_i^2 \rrbracket, \dots, \llbracket x_i^{n-1} \rrbracket)$ [S1][S2, unofficial]. Note: This requires multiplying encrypted numbers, which is **not supported** by Paillier PHE [S1][S2, unofficial].
+5.  **Evaluate Lookup:** Compute the dot product $\llbracket y_i \rrbracket = \llbracket \vec{v}_i \rrbracket \cdot \vec{l}$ [S1][S2, unofficial]. This involves only addition ($\oplus$) and multiplication by a plaintext constant ($\otimes$), which are supported by Paillier [S1][S2, unofficial].
+
+**Pseudocode**
+> **Unverified code.** The code below did not pass a test run against a reference implementation, or no test fits it, so it may contain errors.
+
+```python
+def compute_lookup_vector(domain_values, target_values):
+    n = len(domain_values)
+    # Construct Vandermonde matrix V where V[i][j] = x_i^j [S1][S2, unofficial]
+    V = [[x**j for j in range(n)] for x in domain_values]
+    # Solve V * l = y for l offline using unencrypted data [S1][S2, unofficial]
+    # Standard linear algebra solver (e.g., Gaussian elimination) is used here.
+    l = [0.0] * n
+    # ... (solver implementation omitted as it is a standard linear algebra step) ...
+    return l
+
+def evaluate_olt(encrypted_x, lookup_vector):
+    n = len(lookup_vector)
+    # Construct evaluation vector v = (1, x, x^2, ..., x^(n-1))
+    # Note: Computing powers of encrypted x requires multiplying encrypted numbers,
+    # which is not supported by Paillier PHE [S1][S2, unofficial].
+    # This step assumes v is provided or computed via an alternative method.
+    encrypted_v = [1] + [encrypted_x] * (n - 1)
+
+    # Compute dot product: sum(v_i * l_i) using homomorphic operations [S1][S2, unofficial]
+    def hom_add(a, b):
+        return a + b  # Represents Paillier addition (⊕)
+
+    def hom_mul_const(c, k):
+        return c * k  # Represents Paillier multiplication by constant (⊗)
+
+    result = hom_mul_const(encrypted_v[0], lookup_vector[0])
+    for i in range(1, n):
+        term = hom_mul_const(encrypted_v[i], lookup_vector[i])
+        result = hom_add(result, term)
+    return result
+```
+
+**Parameters and Pitfalls**
+*   **Size ($n$):** Must be large enough to approximate the desired function. For 8-bit voxels, $n=256$ [S1][S2, unofficial].
+*   **Storage Overhead:** Storing the evaluation vector $\vec{v}_i$ for every voxel increases storage by a factor of $n$ [S1]. For a $512^3$ volume with 8-bit voxels, this grows from 128 MB to 16 TB, which is impractical [S1].
+*   **Encryption Limitations:** The method relies on the ability to compute $\vec{v}_i$ from $x_i$ [S1]. In Paillier PHE, computing powers of encrypted $x_i$ (i.e., $x_i^2, x_i^3$) is impossible because it requires multiplying two encrypted numbers [S1]. This is the primary limitation preventing direct application to general encrypted volumes without massive storage overhead [S1].
+
+## Subtopics
+
+### Density Range Emphasizing
+A simplified variant of OLT designed to highlight specific density ranges in encrypted volume rendering without full alpha compositing [S2, unofficial]. It encodes voxel density as a vector, encrypts it, and computes a dot product with a plaintext emphasis vector [S2, unofficial].
+*   **Definition:** Encodes each voxel's density as a vector (e.g., via HSV-to-RGB conversion), encrypts the vector components, and computes the dot product with a plaintext emphasis vector centered on the user-selected density range [S2, unofficial].
+*   **Steps:**
+    1.  Encode density $d$ as a vector $\vec{v}$ of length $dim$ (e.g., 3 or 4) using a scheme like Algorithm 3 in [S2, unofficial].
+    2.  Encrypt each component of $\vec{v}$ using Paillier [S2, unofficial].
+    3.  Define a plaintext emphasis vector $\vec{e}$ corresponding to the target density center [S2, unofficial].
+    4.  Compute the dot product $\vec{v}_{encrypted} \cdot \vec{e}$ [S2, unofficial].
+    5.  Normalize the result to $[0, 1]$ so that the maximum value (1) occurs at the emphasizing density [S2, unofficial].
+*   **Parameters:** $\gamma$ defines the precision for approximating division of an encrypted number by a plaintext number $d$ via multiplication with reciprocal $(1/d \cdot 10^\gamma, -\gamma)$ [S2, unofficial].
+*   **Pitfalls:** Cannot use alpha blending sample compositing because it requires multiplying two encrypted values, which is impossible with Paillier. The method only highlights density ranges rather than performing full compositing [S2, unofficial].
+
+## Operating characteristics
+*   **Time Complexity:** $O(n)$ per lookup evaluation, where $n$ is the size of the lookup table (domain size) [S1][S2, unofficial]. The precomputation of $\vec{l}$ involves solving a linear system and is performed once [S1][S2, unofficial].
+*   **Memory Complexity:** $O(n)$ for the lookup vector $\vec{l}$ [S1][S2, unofficial]. If evaluation vectors $\vec{v}_i$ are stored per voxel, memory increases by a factor of $n$ [S1].
+*   **Strengths:** Compatible with probabilistic PHE (Paillier) for addition and multiplication-by-constant. Enables secure evaluation of transfer functions on encrypted data [S1][S2, unofficial].
+*   **Limitations:** High storage overhead if evaluation vectors are stored per voxel (16 TB for $512^3$ volume) [S1]. Cannot compute powers of encrypted inputs directly in Paillier, limiting general applicability [S1]. Not suitable for full alpha compositing in PHE contexts [S2, unofficial].
+*   **When to Use:** When secure, encrypted volume rendering is required and the user can accept simplified transfer functions (like density emphasis) or has sufficient storage for precomputed vectors [S1][S2, unofficial].
+*   **When Not to Use:** When standard hardware-accelerated lookup tables are sufficient (unencrypted data) or when full alpha compositing is required with Paillier encryption, as Paillier does not support multiplying two encrypted values [S2, unofficial].
+
+## Background
+The Oblivious Lookup Table method was introduced by Wamser et al. in their work on "Oblivious Lookup-Tables" [S1][S2, unofficial]. It was developed to address the challenges of performing volume rendering on encrypted data using Partially Homomorphic Encryption (PHE), specifically the Paillier cryptosystem [S1][S2, unofficial]. Standard array-based lookup tables fail for encrypted data because encryption obfuscates values, making equality checks and indexing insecure or impossible [S2, unofficial]. The OLT approach leverages the linear properties of PHE to perform lookups via dot products, enabling secure visualization of medical and scientific data [S1][S2, unofficial].
+
+## Sources
+[S1] Homomorphic-Encrypted Volume Rendering, https://arxiv.org/abs/2009.02122v2, fetched 2026-10-26
+[S2] Homomorphic-Encrypted Volume Rendering, https://www.computer.org/csdl/journal/tg/2021/02/09222562/1nTqvh6tnr2, fetched 2026-10-27 (unofficial)

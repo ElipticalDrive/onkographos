@@ -1,0 +1,315 @@
+# AutoRF
+
+Also called: AutoDecoder, AutoRF AutoDecoder, Learning 3D Object Radiance Fields from Single View Observations
+
+## Overview
+AutoRF is a method for learning 3D object radiance fields from a single view observation without prior geometry knowledge (e.g., CAD models) [S1]. It disentangles object representation into shape and appearance components using a normalized, object-centric encoding conditioned on 3D bounding boxes and 2D masks [S1]. Unlike multi-view methods like PixelNeRF, AutoRF operates on a single image, using an encoder to generate shape and appearance codes and a decoder to render views via volumetric rendering [S1].
+
+## How it works
+**Inputs and Outputs**
+*   **Input:** A single RGB image $I$ of an object instance.
+*   **Auxiliary Inputs:** A 3D bounding box $\beta$ and an instance mask for the object, obtained via pre-processing [S1].
+*   **Output:** A radiance field representation (density $\sigma$ and color $\xi$) and rendered novel views [S1].
+
+**Data Structures and Layouts**
+*   **Normalized Object Coordinate Space (NOCS) $O$:** A centered unit cube defined as $O := [-1/2, 1/2]^3$ [S1].
+*   **Occupancy Mask $Y$:** A 2D mask where each pixel $u$ has a label $Y_u \in \{+1, 0, -1\}$ [S1]:
+    *   $+1$: Foreground pixels belonging to the object instance mask.
+    *   $-1$: Background pixels (semantic categories not supposed to occlude the object, e.g., sky, road).
+    *   $0$: Unknown pixels (cannot determine occlusion) [S1].
+*   **Shape Code $\phi_S$:** A vector of dimension 128 [S1].
+*   **Appearance Code $\phi_A$:** A vector of dimension 128 [S1].
+
+**Pre-processing**
+1.  Run a pre-trained 3D object detector and panoptic segmentation on image $I$ to extract the 3D bounding box $\beta$ and instance mask [S1].
+2.  Produce a masked 2D image $I$ fitting a fixed input resolution. Rescale the input image to a maximum of 320px in each dimension while preserving the aspect ratio [S1].
+3.  Compute the Occupancy Mask $Y$ based on the instance mask and semantic segmentation [S1].
+4.  Define the Object-Centric Camera $\gamma$: Map pixels $u$ to unit-speed rays $\gamma_u$ in NOCS. This is derived by remapping the camera ray $\rho_u$ from camera space to NOCS using the bounding box $\beta$. $\gamma_u$ is a unit-speed reparametrization of $\beta \circ \rho_u$ [S1].
+
+**Encoding**
+1.  Feed image $I$ into the Shape and Appearance Encoder $\Phi_E$ [S1].
+2.  $\Phi_E$ consists of a ResNet34 backbone with InstanceNorm layers (BatchNorm replaced) [S1].
+    *   The first four layers are shared.
+    *   The following two layers are replicated to form separate heads for shape and appearance encoding [S1].
+3.  For a $3 \times H \times W$ input, the feature map shape for each encoding head is $256 \times H/16 \times W/16$ [S1].
+4.  Apply adaptive max pooling to obtain shape code $\phi_S$ and appearance code $\phi_A$, each of dimension 128 [S1].
+    *   $(\phi_S, \phi_A) := \Phi_E(I)$ [S1].
+
+**Decoding**
+1.  **Shape Decoding:** Feed $\phi_S$ into Shape Decoder $\Psi_S$ to produce occupancy network $\sigma$ [S1].
+    *   $\sigma := \Psi_S(\phi_S)$ [S1].
+    *   $\sigma: O \rightarrow \mathbb{R}^+$ outputs density for a 3D point $x \in O$ [S1].
+    *   Architecture: MLP made of 5 ResNet blocks with hidden dimension 128 [S1].
+    *   At each layer, feed the previous feature map and the positional encoding of the query points [S1].
+    *   Apply a single linear layer to match the dimensionality of the positional encoding with the hidden dimensions of the MLP [S1].
+    *   Aggregate the output with the intermediate feature maps by a simple per-channel mean pooling [S1].
+2.  **Appearance Decoding:** Feed $\phi_A$ and $\phi_S$ into Appearance Decoder $\Psi_A$ to produce appearance network $\xi$ [S1].
+    *   $\xi := \Psi_A(\phi_A, \phi_S)$ [S1].
+    *   $\xi: O \times S^2 \rightarrow \mathbb{R}^3$ outputs RGB color for point $x \in O$ and viewing direction $d \in S^2$ [S1].
+    *   Architecture: MLP of 5 ResNet blocks with hidden dimensionality 128 [S1].
+    *   Aggregate intermediate features with positional encodings by mean pooling [S1].
+    *   On the third layer, pass the output of the corresponding layer of the shape encoder to incorporate estimated shape information [S1].
+    *   On the final two layers, pass the view direction (encoded as a 3-dimensional vector) to account for view-dependent effects [S1].
+
+**Rendering**
+1.  For each pixel $u$ in the target view, compute the object-centric ray $\gamma_u$ [S1].
+2.  Determine the time window $[a_u, b_u]$ where $\gamma_u$ intersects the object space $O$ [S1].
+3.  Sample 64 uniformly spaced points along the segment of $\gamma_u$ within $[a_u, b_u]$ [S1].
+4.  Compute the accumulated transmittance derivative $\dot{\alpha}_t$ and color $C(\gamma_u)$ using the volume rendering formula [S1]:
+    $$ C(\gamma_u) = \int_{a_u}^{b_u} \dot{\alpha}_t(\gamma_u, \sigma) \xi(\gamma_u(t), d_u) dt $$
+    where $d_u \in S^2$ is the unit velocity of $\gamma_u$ [S1].
+5.  The accumulated transmittance $\alpha_t$ is defined as:
+    $$ \alpha_t(\gamma_u, \sigma) := \exp\left(-\int_{a_u}^{t} \sigma(\gamma_u(s)) ds\right) $$
+    and $\dot{\alpha}_t$ is its time derivative [S1].
+
+**Loss Functions**
+1.  **Photometric Loss $L_{RGB}$:** Mean squared error between input image pixel $I_u$ and rendered color $V(\gamma_u|\sigma, \xi)$ for foreground pixels [S1].
+    $$ L_{RGB}(\Theta|\Omega) := \frac{1}{|W_{RGB}|} \sum_{u \in W_{RGB}} \| I_u - V(\gamma_u|\sigma, \xi) \|^2 $$
+    where $W_{RGB} \subset U$ contains only foreground pixels ($Y_u = +1$) whose rays $\gamma_u$ intersect $O$ [S1].
+2.  **Occupancy Loss $L_{OCC}$:** Supervises the accumulated transmittance $\alpha(\gamma_u, \sigma)$ using the occupancy mask $Y$ [S1].
+    $$ L_{OCC}(\Theta|\Omega) := -\frac{1}{|W_{OCC}|} \sum_{u \in W_{OCC}} \left[ \frac{Y_u}{2} \log\left(\frac{1}{2} - \alpha(\gamma_u, \sigma)\right) + \frac{1}{2} \log\left(\frac{1}{2} + \alpha(\gamma_u, \sigma)\right) \right] $$
+    where $W_{OCC} \subset U$ contains only foreground or background pixels ($Y_u \neq 0$) with rays intersecting $O$ [S1].
+    *   Note: The source text contains a typo in the formula representation ('log Yu ( 2 − α...)'), but the context implies a classification loss on $\alpha$ where $Y_u=+1$ encourages $\alpha \to 0$ (foreground) and $Y_u=-1$ encourages $\alpha \to 1$ (background) [S1].
+3.  **Final Loss:**
+    $$ L(\Theta|\Omega) = L_{RGB}(\Theta|\Omega) + \lambda L_{OCC}(\Theta|\Omega) $$
+    where $\lambda \ge 0$ is a hyperparameter [S1].
+
+**Training Optimization**
+1.  Train at a batch size of 1 [S1].
+2.  Use the Adam optimizer with a learning rate of $10^{-5}$ [S1].
+3.  Randomly sample 1024 rays per input image during training [S1].
+4.  Fix the rendering resolution to $80 \times 120$ pixels during training [S1].
+
+**Test-Time Optimization**
+1.  Refine the output by optimizing the loss $L$ with respect to $\phi_S$, $\phi_A$, and the 3D bounding box $\beta$ [S1].
+2.  Initialize with the encoder output and detector box [S1].
+3.  Use the Adam optimizer with learning rates 0.05, 0.02, and 0.02 for $\phi_S$, $\phi_A$, and camera position, respectively [S1].
+4.  Optimize for 32 iterations [S1].
+5.  **Edge Case (Monocular Setting):** Keep the size component of the bounding box fixed to the detector's regression and optimize only pose (rotation and translation) to avoid scale-depth ambiguity [S1].
+
+**Explicit Meshing (Post-processing)**
+1.  Render depth and color from multiple views using AutoRF. Position cameras facing the object center [S1].
+2.  Apply TSDF-fusion on the resulting pairs of depth and color images to create a 3D mesh [S1].
+
+**Pseudocode**
+
+> **Unverified code.** The code below did not pass a test run against a reference implementation, or no test fits it, so it may contain errors.
+
+```python
+import torch
+import torch.nn as nn
+import torch.nn.functional as F
+
+def positional_encoding(x, num_frequencies=6):
+    """Standard NeRF positional encoding [G]."""
+    scales = torch.tensor([2**i for i in range(num_frequencies)], device=x.device)
+    scaled_x = x * scales
+    return torch.cat([torch.sin(scaled_x), torch.cos(scaled_x)], dim=-1)
+
+def compute_occupancy_mask(instance_mask, semantic_map, bg_classes):
+    """Compute occupancy mask Y: +1 foreground, -1 background, 0 unknown [S1]."""
+    y = torch.zeros_like(instance_mask, dtype=torch.float32)
+    y[instance_mask > 0] = 1.0
+    y[(semantic_map in bg_classes) & (instance_mask == 0)] = -1.0
+    return y
+
+def generate_object_centric_rays(h, w, intrinsics, bbox_3d):
+    """Generate rays in NOCS from camera rays remapped by bounding box [S1]."""
+    # NOCS is a unit cube [-0.5, 0.5]^3.
+    # Unproject pixel coordinates to the cube boundaries.
+    u = torch.arange(w).float()
+    v = torch.arange(h).float()
+    uv = torch.stack(torch.meshgrid(u, v, indexing='ij'), dim=-1)
+    # Standard pinhole unprojection adapted to NOCS
+    fx, fy = intrinsics[0,0], intrinsics[1,1]
+    cx, cy = intrinsics[0,2], intrinsics[1,2]
+    z = torch.ones_like(uv[..., 0])
+    x = (uv[..., 0] - cx) / fx
+    y = (uv[..., 1] - cy) / fy
+    origins = torch.stack([x, y, z], dim=-1)
+    directions = F.normalize(origins, dim=-1)
+    return origins, directions
+
+class AutoRF:
+    def __init__(self, lambda_occ=1.0):
+        self.encoder = ShapeAppearanceEncoder()
+        self.shape_decoder = ShapeDecoder()
+        self.color_decoder = ColorDecoder()
+        self.lambda_occ = lambda_occ
+        self.optimizer = None
+
+    def preprocess(self, image, bbox_3d, mask, semantic_map, intrinsics):
+        h, w = image.shape[1], image.shape[2]
+        scale = min(320 / h, 320 / w)
+        new_h, new_w = int(h * scale), int(w * scale)
+        masked_image = F.interpolate(image.unsqueeze(0), size=(new_h, new_w), mode='bilinear', align_corners=False).squeeze(0)
+        occupancy_mask = compute_occupancy_mask(mask, semantic_map, bg_classes={0, 1})
+        ray_origins, ray_directions = generate_object_centric_rays(new_h, new_w, intrinsics, bbox_3d)
+        return masked_image, occupancy_mask, ray_origins, ray_directions
+
+    def encode(self, image):
+        return self.encoder(image)
+
+    def decode(self, phi_S, phi_A, points_3d, directions):
+        sigma = self.shape_decoder(phi_S, points_3d)
+        color = self.color_decoder(phi_S, phi_A, points_3d, directions)
+        return sigma, color
+
+    def render_volume(self, sigma, color, ray_origins, ray_directions, num_samples=64):
+        """Volume rendering along rays intersecting the unit cube O [S1]."""
+        # Ray-cube intersection for unit cube [-0.5, 0.5]^3
+        inv_dir = 1.0 / ray_directions
+        t_min = (-0.5 - ray_origins) * inv_dir
+        t_max = (0.5 - ray_origins) * inv_dir
+        t_enter = torch.max(torch.min(t_min[:, :, 0], torch.min(t_min[:, :, 1], t_min[:, :, 2])),
+                            torch.min(torch.min(t_max[:, :, 0], t_max[:, :, 1]), t_max[:, :, 2]))
+        t_exit = torch.min(torch.max(t_min[:, :, 0], torch.max(t_min[:, :, 1], t_min[:, :, 2])),
+                           torch.max(torch.max(t_max[:, :, 0], t_max[:, :, 1]), t_max[:, :, 2]))
+        t_enter = torch.clamp(t_enter, min=0.0)
+        t_exit = torch.clamp(t_exit, min=0.0)
+        
+        t_vals = torch.linspace(t_enter, t_exit, num_samples)
+        deltas = t_vals[1:] - t_vals[:-1]
+        deltas = torch.cat([deltas, torch.tensor([1e10], device=sigma.device)], dim=-1)
+        
+        exp_neg_sigma_delta = torch.exp(-sigma * deltas)
+        transmittance = torch.cumprod(exp_neg_sigma_delta, dim=-2)
+        transmittance_shifted = torch.cat([torch.ones_like(transmittance[:, :1]), transmittance[:, :-1]], dim=-2)
+        weights = transmittance_shifted * (1.0 - exp_neg_sigma_delta)
+        
+        color_rendered = torch.sum(weights.unsqueeze(-1) * color, dim=-2)
+        final_alpha = transmittance_shifted[:, -1]
+        return color_rendered, final_alpha
+
+    def compute_loss(self, rendered_color, target_image, occupancy_mask, final_alpha):
+        foreground_mask = occupancy_mask == 1.0
+        l_rgb = torch.mean((rendered_color[foreground_mask] - target_image[foreground_mask])**2)
+        
+        occ_mask = occupancy_mask != 0.0
+        y = occupancy_mask[occ_mask]
+        alpha = final_alpha[occ_mask]
+        alpha_clamped = torch.clamp(alpha, min=1e-6, max=1-1e-6)
+        term1 = (y / 2.0) * torch.log(torch.clamp(0.5 - alpha_clamped, min=1e-6))
+        term2 = 0.5 * torch.log(torch.clamp(0.5 + alpha_clamped, min=1e-6))
+        l_occ = -torch.mean(term1 + term2)
+        
+        return l_rgb + self.lambda_occ * l_occ
+
+    def train_step(self, image, bbox_3d, mask, semantic_map, intrinsics):
+        masked_image, occupancy_mask, ray_origins, ray_directions = self.preprocess(image, bbox_3d, mask, semantic_map, intrinsics)
+        phi_S, phi_A = self.encode(masked_image)
+        
+        num_rays = 1024
+        idx = torch.randperm(ray_origins.shape[0] * ray_origins.shape[1])[:num_rays]
+        ray_origins = ray_origins.view(-1, 3)[idx]
+        ray_directions = ray_directions.view(-1, 3)[idx]
+        target_image = masked_image.view(-1, 3)[idx]
+        occ_mask_sample = occupancy_mask.view(-1)[idx]
+        
+        sigma, color = self.decode(phi_S, phi_A, ray_origins, ray_directions)
+        rendered_color, final_alpha = self.render_volume(sigma, color, ray_origins, ray_directions)
+        
+        loss = self.compute_loss(rendered_color, target_image, occ_mask_sample, final_alpha)
+        loss.backward()
+        self.optimizer.step()
+        self.optimizer.zero_grad()
+        return loss
+
+    def test_time_optimize(self, image, bbox_3d, mask, semantic_map, intrinsics, iterations=32):
+        masked_image, occupancy_mask, ray_origins, ray_directions = self.preprocess(image, bbox_3d, mask, semantic_map, intrinsics)
+        phi_S, phi_A = self.encode(masked_image)
+        
+        optimizer = torch.optim.Adam([
+            {'params': phi_S, 'lr': 0.05},
+            {'params': phi_A, 'lr': 0.02},
+            {'params': bbox_3d.pose, 'lr': 0.02}
+        ])
+        
+        for _ in range(iterations):
+            sigma, color = self.decode(phi_S, phi_A, ray_origins, ray_directions)
+            rendered_color, final_alpha = self.render_volume(sigma, color, ray_origins, ray_directions)
+            loss = self.compute_loss(rendered_color, masked_image, occupancy_mask, final_alpha)
+            loss.backward()
+            optimizer.step()
+            optimizer.zero_grad()
+        return phi_S, phi_A, bbox_3d
+
+class ShapeAppearanceEncoder(nn.Module):
+    def __init__(self):
+        super().__init__()
+        self.backbone = nn.Sequential(
+            nn.Conv2d(3, 64, 7, stride=2, padding=3, bias=False),
+            nn.InstanceNorm2d(64),
+            nn.ReLU(inplace=True),
+            nn.MaxPool2d(3, stride=2, padding=1),
+            # ... first 4 layers shared ...
+        )
+        self.shape_head = nn.AdaptiveMaxPool2d(1)
+        self.appearance_head = nn.AdaptiveMaxPool2d(1)
+        
+    def forward(self, x):
+        features = self.backbone(x)
+        phi_S = self.shape_head(features).squeeze(-1).squeeze(-1)
+        phi_A = self.appearance_head(features).squeeze(-1).squeeze(-1)
+        return phi_S, phi_A
+
+class ShapeDecoder(nn.Module):
+    def __init__(self):
+        super().__init__()
+        self.blocks = nn.ModuleList([ResNetBlock(128) for _ in range(5)])
+        self.linear = nn.Linear(128, 128)
+        
+    def forward(self, phi_S, points):
+        pos_enc = positional_encoding(points)
+        pos_enc_proj = self.linear(pos_enc)
+        h = phi_S.unsqueeze(1) + pos_enc_proj
+        for block in self.blocks:
+            h = block(h)
+        return h.mean(dim=-2)
+
+class ColorDecoder(nn.Module):
+    def __init__(self):
+        super().__init__()
+        self.blocks = nn.ModuleList([ResNetBlock(128) for _ in range(5)])
+        
+    def forward(self, phi_S, phi_A, points, directions):
+        pos_enc = positional_encoding(points)
+        h = phi_A.unsqueeze(1) + pos_enc
+        for i, block in enumerate(self.blocks):
+            h = block(h)
+            if i == 2:
+                h = h + phi_S.unsqueeze(1)
+            if i >= 3:
+                h = h + directions.unsqueeze(1)
+        return h.mean(dim=-2)
+
+class ResNetBlock(nn.Module):
+    def __init__(self, dim):
+        super().__init__()
+        self.fc1 = nn.Linear(dim, dim)
+        self.relu = nn.ReLU(inplace=True)
+        self.fc2 = nn.Linear(dim, dim)
+    def forward(self, x):
+        return self.relu(self.fc2(self.relu(self.fc1(x))) + x)
+```
+
+## Operating characteristics
+*   **Time Complexity:** Rendering a $64 \times 64$ image takes approximately 0.23 seconds [S1]. Test-time optimization (32 steps, rendering $32 \times 32$ images) takes approximately 3.3 seconds per object [S1].
+*   **Memory Complexity:** Not given in the sources.
+*   **Scaling:** The method is designed for single-view object reconstruction and does not explicitly discuss scaling to large scenes, though it can be applied to multiple objects in a scene if detected [S1].
+*   **Strengths:**
+    *   Works with a single view observation [S1].
+    *   No prior geometry knowledge (e.g., CAD models) required [S1].
+    *   Encoder provides a good initial estimate, leading to faster convergence compared to auto-decoder variants [S1].
+    *   Produces less fuzzy radiance fields compared to PixelNeRF on SRN-Chairs dataset [S1].
+*   **Limitations:**
+    *   Scale-depth ambiguity in monocular settings requires fixing the bounding box size [S1].
+    *   Performance is lower than multi-view methods like PixelNeRF when multiple views are available (e.g., on nuScenes cars, AutoRF AutoDecoder underperforms AutoRF, and AutoRF is compared against PixelNeRF which uses more views) [S1].
+*   **When to use:** When only a single view of an object is available and no CAD models are present [S1].
+*   **When not:** When multiple views are available (use PixelNeRF or similar) or when high-fidelity multi-view consistency is critical without test-time optimization [S1].
+
+## Background
+AutoRF was introduced by Norman Müller, Andrea Simonelli, Lorenzo Porzi, Samuel Rota Bulò, Matthias Nießner, and Peter Kontschieder in 2022 [S1]. It addresses the challenge of learning 3D object radiance fields from single view observations, a more challenging scenario than methods assuming access to at least a second view [S1]. It is used on datasets such as nuScenes (cars) and SRN-Chairs [S1].
+
+## Sources
+[S1] AutoRF: Learning 3D Object Radiance Fields from Single View Observations, https://doi.org/10.1109/cvpr52688.2022.00394, fetched 2026-10-30

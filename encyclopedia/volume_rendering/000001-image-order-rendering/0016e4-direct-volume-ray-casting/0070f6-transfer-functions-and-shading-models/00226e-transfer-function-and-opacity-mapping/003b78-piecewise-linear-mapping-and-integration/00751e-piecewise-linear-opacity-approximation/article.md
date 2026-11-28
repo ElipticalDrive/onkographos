@@ -1,0 +1,134 @@
+# Piecewise Linear Opacity Approximation
+
+Also called: PL-NeRF opacity, Piecewise Linear Opacity Reformulation
+
+## Overview
+Piecewise Linear Opacity Approximation is a volume rendering technique that reformulates the integration of opacity along a ray using piecewise linear functions rather than the standard piecewise constant assumption. It addresses the instability of quadrature in volume rendering, particularly when handling arbitrarily small opacity values (e.g., $10^{-6}$) [S1]. Unlike its sibling [Piecewise Constant Opacity](19-direct-volume-ray-casting.md), which assumes constant density within intervals, this method approximates the accumulated opacity (tau) linearly between sample points, allowing for more accurate convergence in training metrics like PSNR [S1].
+
+## How it works
+**Inputs and Outputs:**
+*   **Inputs:**
+    *   `raw`: Tensor of shape `[N_rays, N_samples + 2]` containing raw network outputs. The last channel (index 3) is the density $\sigma$ (or $\tau$ derivative).
+    *   `z_vals`: Tensor of sample positions along the ray, shape `[N_rays, N_samples + 2]`.
+    *   `rays_d`: Tensor of ray directions, shape `[N_rays, 3]`.
+    *   `near`, `far`: Scalars defining the ray bounds (used for boundary conditions).
+    *   `noise`: Scalar noise added to density for stability (default 0) [S1].
+    *   `device`: Compute device [S1].
+*   **Outputs:**
+    *   `weights`: Tensor of shape `[N_rays, N_samples + 1]` representing the contribution weight of each interval [S1].
+
+**Data Structures:**
+*   `tau`: Tensor of accumulated opacity values at sample points. Shape `[N_rays, N_samples + 2]`.
+*   `dists`: Tensor of distances between adjacent sample points, adjusted for ray direction norm. Shape `[N_rays, N_samples + 1]`.
+*   `expr`: Tensor of transmittance factors over intervals. Shape `[N_rays, N_samples + 1]`.
+
+**Parameters:**
+*   `epsilon`: Small constant added to ensure positivity, value $10^{-6}$ [S1].
+*   `near_tau`: Small value for near boundary, $10^{-10}$ [S1].
+*   `far_tau`: Large value for far boundary, $10^{10}$ [S1].
+
+**Steps:**
+1.  **Compute Distances:** Calculate the distance between consecutive sample points. Add the norm of the ray direction to account for non-unit length rays.
+    $$ \text{dists}_i = (z_{i+1} - z_i) + \|\mathbf{d}\| $$
+    where $\mathbf{d}$ is the ray direction [S1].
+2.  **Construct Tau Array:** Create the accumulated opacity array `tau`.
+    *   Set the first element (near boundary) to $10^{-10}$.
+    *   Set the middle elements to the raw density values from `raw[..., 3]` plus optional `noise`.
+    *   Set the last element (far boundary) to $10^{10}$.
+    $$ \tau = [\tau_{\text{near}}, \sigma_0 + \text{noise}, \dots, \sigma_{N-1} + \text{noise}, \tau_{\text{far}}] $$
+    [S1].
+3.  **Ensure Positivity:** Apply ReLU to `tau` and add `epsilon` to ensure all values are strictly positive.
+    $$ \tau = \max(0, \tau) + 10^{-6} $$
+    [S1].
+4.  **Calculate Average Tau:** Compute the average opacity over each interval for linear approximation.
+    $$ \bar{\tau}_i = \frac{\tau_{i+1} + \tau_i}{2} $$
+    [S1].
+5.  **Compute Transmittance Factors:** Calculate the transmittance factor for each interval using the average tau and distance.
+    $$ \text{expr}_i = \exp(-\bar{\tau}_i \cdot \text{dists}_i) $$
+    This corresponds to evaluating $\exp\left(-\frac{1}{2}(\tau_{i+1} + \tau_i)(s_{i+1} - s_i)\right)$ [S1].
+6.  **Compute Cumulative Transmittance:** Calculate the total transmittance $T$ up to each sample point by taking the cumulative product of the factors, prepended with 1.
+    $$ T = \text{cumprod}([1, \text{expr}_0, \text{expr}_1, \dots]) $$
+    $T$ has shape `[N_rays, N_samples + 2]`, where $T_0 = 1$ [S1].
+7.  **Compute Weights:** Calculate the weight for each interval by multiplying the factor $(1 - \text{expr}_i)$ by the transmittance up to the start of the interval.
+    $$ w_i = (1 - \text{expr}_i) \cdot T_i $$
+    The result `weights` has shape `[N_rays, N_samples + 1]` [S1].
+
+**Pseudocode:**
+> **Unverified code.** The code below did not pass a test run against a reference implementation, or no test fits it, so it may contain errors.
+
+```python
+import torch
+import torch.nn.functional as F
+
+def compute_weights_piecewise_linear(raw, z_vals, rays_d, noise=0, device='cpu'):
+    """
+    Computes rendering weights using piecewise linear opacity approximation.
+    
+    Args:
+        raw: Tensor of shape [N_rays, N_samples + 2], last channel is density.
+        z_vals: Tensor of shape [N_rays, N_samples + 2], sample positions.
+        rays_d: Tensor of shape [N_rays, 3], ray directions.
+        noise: Scalar, noise added to density.
+        device: String, compute device.
+        
+    Returns:
+        weights: Tensor of shape [N_rays, N_samples + 1].
+    """
+    # Step 1: Compute distances
+    # dists shape: [N_rays, N_samples + 1]
+    dists = z_vals[..., 1:] - z_vals[..., :-1]
+    # Add ray direction norm to handle non-unit length rays
+    dists = dists + torch.norm(rays_d[..., None, :], dim=-1)
+    
+    # Step 2: Construct tau array
+    # tau shape: [N_rays, N_samples + 2]
+    # Near boundary: 1e-10
+    # Middle: raw density + noise
+    # Far boundary: 1e10
+    tau_near = torch.ones((raw.shape[0], 1), device=device) * 1e-10
+    tau_mid = raw[..., 3:4] + noise  # Assuming raw[..., 3] is density
+    tau_far = torch.ones((raw.shape[0], 1), device=device) * 1e10
+    
+    # Concatenate along the last dimension
+    tau = torch.cat([tau_near, tau_mid, tau_far], dim=-1)
+    
+    # Step 3: Ensure positivity
+    tau = F.relu(tau) + 1e-6
+    
+    # Step 4: Calculate average tau over intervals
+    # interval_ave_tau shape: [N_rays, N_samples + 1]
+    interval_ave_tau = 0.5 * (tau[..., 1:] + tau[..., :-1])
+    
+    # Step 5: Compute transmittance factors
+    # expr shape: [N_rays, N_samples + 1]
+    expr = torch.exp(-interval_ave_tau * dists)
+    
+    # Step 6: Compute cumulative transmittance
+    # T shape: [N_rays, N_samples + 2]
+    # Prepend 1s
+    ones = torch.ones((expr.shape[0], 1), device=device)
+    T = torch.cumprod(torch.cat([ones, expr], dim=-1), dim=-1)
+    
+    # Step 7: Compute weights
+    # weights shape: [N_rays, N_samples + 1]
+    factor = 1 - expr
+    weights = factor * T[:, :-1]
+    
+    return weights
+```
+
+**Edge Cases and Pitfalls:**
+*   **Zero Opacity:** The method cannot handle coordinates with exactly zero opacity. This is considered not an issue in practice as atoms absorb light and do not have exactly zero opacity except in a vacuum [S1].
+*   **Precision:** The addition of `epsilon` ($10^{-6}$) is critical to prevent numerical instability when computing the exponential and cumulative product [S1].
+
+## Operating characteristics
+*   **Time Complexity:** Slightly slower than the original piecewise constant approximation due to requiring more FLOPS for importance sampling computation [S1].
+*   **Memory Complexity:** Requires storing the `tau` array and intermediate `expr` and `T` tensors, similar to standard volume rendering but with additional boundary handling [S1].
+*   **Strengths:** Handles arbitrarily small opacity values (e.g., $10^{-6}$) effectively, leading to higher training PSNR convergence compared to vanilla NeRF [S1].
+*   **Limitations:** Assumes piecewise color (does not handle color integration within a bin), which may struggle with difficult scenarios like double-walled colored glass or atmospheric effects such as fog or smoke [S1]. Inherits general NeRF limitations, such as requiring known camera poses [S1].
+
+## Background
+This method was introduced in "NeRF Revisited: Fixing Quadrature Instability in Volume Rendering" [S1]. It reformulates the opacity integration to improve stability and accuracy in neural radiance fields (NeRFs). The approach is part of a broader effort to refine the quadrature rules used in volume rendering to better approximate the continuous integral [S1].
+
+## Sources
+[S1] NeRF Revisited: Fixing Quadrature Instability in Volume Rendering, https://doi.org/10.52202/075280-1139, fetched 2026-10-26

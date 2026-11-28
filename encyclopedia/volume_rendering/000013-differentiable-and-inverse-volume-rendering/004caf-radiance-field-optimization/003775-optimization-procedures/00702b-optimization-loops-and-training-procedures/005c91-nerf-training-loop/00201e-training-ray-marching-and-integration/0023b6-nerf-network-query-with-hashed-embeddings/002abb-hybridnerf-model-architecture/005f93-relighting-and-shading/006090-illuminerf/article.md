@@ -1,0 +1,125 @@
+# IllumiNeRF
+
+Also called: 3D Relighting without Inverse Rendering
+
+## Overview
+IllumiNeRF is a 3D relighting pipeline that reconstructs a relightable 3D representation from posed input images under unknown lighting by generating multiple plausible relit images via a diffusion model and distilling them into a consistent 3D latent NeRF, avoiding inverse rendering [S1]. Unlike inverse rendering which recovers a single point estimate of geometry and materials, IllumiNeRF samples multiple plausible explanations of materials, geometry, and lighting, reconciling them into a single 3D representation that can be rendered from novel viewpoints under a target environment illumination [S1].
+
+## How it works
+**Inputs:** A dataset of $N$ images $I_i$ with corresponding camera poses $\pi_i$, denoted as $D = \{(I_i, \pi_i)\}_{i=1}^N$, and a target environment illumination $L_T$ [S1].
+
+**Outputs:** A trained Latent NeRF model capable of rendering novel views of the object under the target lighting $L_T$ [S1].
+
+**Data Structures:**
+1. **Input Dataset $D$:** A list of tuples containing image tensors and camera pose parameters (extrinsics/intrinsics) [S1].
+2. **Geometry NeRF:** A standard Neural Radiance Field model trained on $D$ to represent the object's 3D geometry and appearance [S1].
+3. **Radiance Cues:** Rendered images representing the object's geometry under target lighting $L_T$ at various roughness levels, used as conditioning inputs for the diffusion model [S1].
+4. **Relighting Diffusion Model:** A pre-trained single-image 2D diffusion model conditioned on radiance cues and target lighting [S1].
+5. **Latent NeRF:** A NeRF model with a latent code per view that is optimized to fit the sampled relit images [S1].
+
+**Steps:**
+1. **Geometry Extraction:** Train a standard NeRF on the input dataset $D$ to extract the 3D geometry of the object [S1].
+2. **Radiance Cue Generation:** For each input view $i$, render the extracted geometry under the target environment illumination $L_T$ at various roughness levels to generate radiance cues [S1].
+3. **Diffusion-Based Relighting:** Independently relight each input image $I_i$ using the Relighting Diffusion Model conditioned on the radiance cues and target lighting $L_T$ [S1].
+4. **Sample Generation:** Sample $S$ plausible relit images for each of the $N$ input views to capture different plausible explanations of materials, geometry, and input lighting [S1]. The total number of samples is $N \times S$ [S1].
+5. **Latent NeRF Optimization:** Optimize a Latent NeRF using the full set of $N \times S$ sampled relit images to distill them into a single consistent 3D representation that can be rendered from novel viewpoints [S1]. The likelihood of the relit data is modeled as:
+   $$ p(D^T | D) = \int p(D^T, Z | D) dZ = \int p(D^T | Z, D) p(Z | D) dZ $$
+   where $Z$ is a latent variable implicitly representing the input images' lighting along with the object's material and geometry parameters [S1]. The Latent NeRF is trained to minimize the reconstruction error between its renders and the sampled relit images [S1].
+
+**Pseudocode:**
+> **Unverified code.** The code below did not pass a test run against a reference implementation, or no test fits it, so it may contain errors.
+
+```python
+def illuminerf_pipeline(input_images, camera_poses, target_lighting, num_samples_per_view, roughness_levels, num_epochs):
+    # Step 1: Train standard NeRF for geometry
+    geometry_nerf = train_standard_nerf(input_images, camera_poses)
+    
+    # Step 2: Generate radiance cues
+    radiance_cues = []
+    for i in range(len(input_images)):
+        cue = render_geometry_with_lighting(geometry_nerf, camera_poses[i], target_lighting, roughness_levels)
+        radiance_cues.append(cue)
+        
+    # Step 3 & 4: Sample relit images using Diffusion Model
+    sampled_relit_images = []
+    for i in range(len(input_images)):
+        for s in range(num_samples_per_view):
+            relit_img = relighting_diffusion_model.sample(
+                conditioning_image=radiance_cues[i],
+                target_lighting=target_lighting
+            )
+            sampled_relit_images.append((relit_img, camera_poses[i]))
+            
+    # Step 5: Optimize Latent NeRF
+    latent_nerf = initialize_latent_nerf()
+    for epoch in range(num_epochs):
+        loss = 0.0
+        for relit_img, pose in sampled_relit_images:
+            rendered_img = latent_nerf.render(pose)
+            loss += mse_loss(rendered_img, relit_img)
+        optimize(latent_nerf, loss)
+        
+    return latent_nerf
+
+def train_standard_nerf(images, poses):
+    # [G] Standard NeRF training loop using differentiable volume rendering
+    nerf = NeRF()
+    for _ in range(1000):
+        for img, pose in zip(images, poses):
+            rays = sample_rays_from_pose(pose)
+            rgb, _ = nerf.forward(rays)
+            loss = mse_loss(rgb, img)
+            optimizer.step(loss)
+    return nerf
+
+def render_geometry_with_lighting(nerf, pose, lighting, roughness_levels):
+    # Renders geometry under target lighting at specified roughness levels
+    cues = []
+    for roughness in roughness_levels:
+        cue = nerf.render_with_lighting(pose, lighting, roughness)
+        cues.append(cue)
+    return cues
+
+def initialize_latent_nerf():
+    # [G] Initializes a NeRF with a latent code per view
+    return LatentNeRF()
+
+def optimize(model, loss):
+    # [G] Standard gradient descent update
+    loss.backward()
+    optimizer.step()
+    optimizer.zero_grad()
+
+def mse_loss(pred, target):
+    return torch.mean((pred - target) ** 2)
+
+class relighting_diffusion_model:
+    # [G] Pre-trained single-image 2D diffusion model
+    @staticmethod
+    def sample(conditioning_image, target_lighting):
+        # Returns a relit image conditioned on cues and lighting
+        pass
+```
+
+**Parameters:**
+* $N$: Number of input images [S1].
+* $S$: Number of diffusion samples per view [S1].
+* Roughness levels: Values used for generating radiance cues [S1].
+
+**Edge Cases and Pitfalls:**
+* **Consistency:** The Latent NeRF must reconcile potentially inconsistent samples from the diffusion model [S1].
+* **Geometry Accuracy:** The quality of the initial geometry NeRF directly impacts the radiance cues [S1].
+* **Lighting Ambiguity:** The method explicitly handles lighting ambiguity by sampling, but the final Latent NeRF represents an average or consensus of these samples, which may not perfectly match any single physical explanation [S1].
+
+## Operating characteristics
+* **Time Complexity:** The method involves training a NeRF, running a diffusion model $N \times S$ times, and training a Latent NeRF on $N \times S$ images [S1].
+* **Memory Complexity:** Requires storing the geometry NeRF, the diffusion model, and the Latent NeRF [S1].
+* **Performance:** Evaluated on the Stanford-ORB dataset and TensoIR benchmarks, achieving state-of-the-art results compared to 3D inverse rendering baselines for relightable view synthesis [S1].
+* **Strengths:** Avoids the brittleness and computational expense of differentiable Monte Carlo rendering used in inverse rendering [S1].
+* **Limitations:** Relies on the quality of the pre-trained diffusion model [S1].
+
+## Background
+IllumiNeRF was proposed as a simpler approach to 3D relighting, replacing 3D inverse rendering with a diffusion-based sampling and distillation strategy [S1]. It addresses the central problem of capturing an object’s appearance for accurate rendering in novel environments, which is crucial for AR/VR, photography, and game development [S1]. The work was presented at the 38th Conference on Neural Information Processing Systems (NeurIPS) [S1].
+
+## Sources
+[S1] IllumiNeRF: 3D Relighting without Inverse Rendering, https://doi.org/10.48550/arXiv.2406.06527, fetched 2026-10-29

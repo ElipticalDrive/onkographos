@@ -1,0 +1,154 @@
+--- v001.md
++++ v002.md
+@@ -4,75 +4,103 @@
+ 
+ ## Overview
+-This method renders point clouds or voxel centers as splats (quads or points) in a vertex shader, applying size attenuation based on perspective projection to ensure the visual size of points corresponds to their world-space radius [S1, unofficial]. It solves the problem of points appearing incorrectly sized (too large or too small) at varying depths, which occurs when using fixed viewport sizes or naive depth scaling [S1, unofficial]. It sets itself apart from siblings like the [Centralized Conics Approach](1243-centralized-conics-approach.md) by operating at the primitive level (vertex/fragment) rather than computing exact geometric intersections, and from [Exact Half-Space Clipping](3395-exact-half-space-clipping.md) by relying on hardware-accelerated point rasterization rather than explicit clipping logic.
++This method renders point clouds as splats (quads or points) in a vertex shader, applying size attenuation based on perspective projection to ensure the visual size of points corresponds to their world-space radius [S1, unofficial]. It differs from its siblings by explicitly calculating the point size in the vertex shader using the projection matrix and depth, rather than relying on hardware extensions or post-hoc footprint evaluation [S1, unofficial][S2, unofficial]. It builds on [Splat Kernels and Footprints](8724-splat-kernels-and-footprints.md).
+ 
+ ## How it works
+-**Inputs and Outputs:**
+-*   **Input:** `in_position` (world-space position of the point), `particle_radius` (world-space radius of the splat), `in_color` (color/opacity attributes).
+-*   **Uniforms:** `view_proj_matrix` (combined view-projection matrix), `fov_y` (vertical field of view in radians), `viewport_size` (viewport dimensions, specifically height).
+-*   **Output:** `gl_Position` (clip-space position), `gl_PointSize` (rasterized point diameter in pixels), `VertOut` (struct passing `particle_radius` and `in_color` to the fragment shader).
++**Inputs:**
++- `in_position`: The world-space position of the point.
++- `particle_radius`: The world-space radius of the point splat.
++- `in_color`: The color of the point.
++- `view_proj_matrix`: The combined view-projection matrix.
++- `fov_y`: The vertical field of view in radians.
++- `viewport_size`: The dimensions of the viewport (specifically height).
++
++**Outputs:**
++- `gl_Position`: Clip-space position.
++- `gl_PointSize`: The size of the point in screen space.
++- `VertOut`: A struct passing `particle_radius` and `in_color` to the fragment shader.
+ 
+ **Data Structures:**
+-*   `VertOut`: A struct containing at least `particle_radius` (float) and `in_color` (vec3 or vec4).
++- `VertOut`:
++  - `float particle_radius`
++  - `vec3 in_color`
+ 
+ **Steps:**
+-1.  Transform the input position `in_position` to clip space using the `view_proj_matrix` and assign the result to `gl_Position` [S1, unofficial].
+-2.  Calculate the perspective-correct point size using the formula:
+-    $$ \text{gl\_PointSize} = \text{viewport\_size}[1] \times \left(\frac{1}{\tan(\text{fov\_y} / 2)}\right) \times \frac{\text{particle\_radius}}{\text{gl\_Position.w}} $$
+-    This scales the point size inversely with depth (`gl_Position.w`) [S1, unofficial].
+-3.  Pass the `particle_radius` and `in_color` to the fragment shader via the `VertOut` struct [S1, unofficial].
++1. Transform the input position `in_position` to clip space using the `view_proj_matrix` and assign the result to `gl_Position` [S1, unofficial].
++2. Calculate `gl_PointSize` using the perspective-correct formula:
++   $$ \text{gl\_PointSize} = \text{viewport\_height} \times \frac{1}{\tan(\text{fov\_y} / 2)} \times \frac{\text{particle\_radius}}{\text{gl\_Position.w}} $$
++   This scales the point size inversely with depth (`gl_Position.w`) [S1, unofficial].
++3. Pass the `particle_radius` and `in_color` to the fragment shader via the output struct `VertOut` [S1, unofficial].
++
++**Parameters:**
++- `fov_y`: The vertical field of view in radians, used to calculate perspective scaling [S1, unofficial].
++- `viewport_size`: The dimensions of the viewport, specifically `viewport_size[1]` (height) is used for scaling [S1, unofficial].
++- `particle_radius`: The world-space radius of the point splat [S1, unofficial].
+ 
+ **Pseudocode:**
+ ```python
+-# Vertex Shader Logic
+-# Inputs: in_position (vec3), particle_radius (float), in_color (vec4)
+-# Uniforms: view_proj_matrix (mat4), fov_y (float), viewport_height (float)
++# Vertex Shader Input
++in_position: vec3
++particle_radius: float
++in_color: vec3
++view_proj_matrix: mat4
++fov_y: float
++viewport_height: float
+ 
+-# Step 1: Transform to clip space
+-gl_Position = view_proj_matrix * vec4(in_position, 1.0)
++# Vertex Shader Output
++struct VertOut {
++    float particle_radius;
++    vec3 in_color;
++};
+ 
+-# Step 2: Calculate perspective-correct point size
+-# viewport_size[1] is the height
+-# fov_y is in radians
+-cot_fov_half = 1.0 / tan(fov_y / 2.0)
+-gl_PointSize = viewport_height * cot_fov_half * (particle_radius / gl_Position.w)
++VertOut main() {
++    // Step 1: Transform to clip space
++    vec4 clip_pos = view_proj_matrix * vec4(in_position, 1.0);
++    gl_Position = clip_pos;
+ 
+-# Step 3: Pass data to fragment shader
+-# Assuming a standard output struct
+-out_particle_radius = particle_radius
+-out_color = in_color
++    // Step 2: Calculate perspective-correct point size
++    #define TAN_HALF_FOV tan(fov_y / 2.0)
++    float point_size = viewport_height * (1.0 / TAN_HALF_FOV) * (particle_radius / clip_pos.w);
++    gl_PointSize = point_size;
++
++    // Step 3: Pass data to fragment shader
++    VertOut out;
++    out.particle_radius = particle_radius;
++    out.in_color = in_color;
++    return out;
++}
+ ```
+ 
+-**Parameters:**
+-*   `fov_y`: The vertical field of view in radians [S1, unofficial].
+-*   `viewport_size`: The dimensions of the viewport; specifically `viewport_size[1]` (height) is used for scaling [S1, unofficial].
+-*   `particle_radius`: The world-space radius of the point splat [S1, unofficial].
+-
+ **Edge Cases and Pitfalls:**
+-*   **Precision:** Division by `gl_Position.w` can lead to precision issues if points are extremely close to the near plane or if `gl_Position.w` is zero or negative (behind the camera). [G] Ensure points are clipped before the near plane to avoid division by zero or negative sizes.
+-*   **Boundaries:** The formula assumes a standard perspective projection matrix. If the projection matrix is orthographic, `gl_Position.w` will be constant (typically 1.0 or -1.0), and the perspective correction will fail to scale with depth. [G] Use orthographic scaling logic if the projection is not perspective.
++- Precision: Division by `gl_Position.w` requires careful handling of near-plane clipping to avoid division by zero or extreme values [S1, unofficial].
++- Boundaries: The formula assumes a standard perspective projection matrix where `gl_Position.w` represents the negative eye-space depth [S1, unofficial].
+ 
+ ## Subtopics
+ 
+ ### Point Scaling via OpenGL Point Parameter
+-A technique to scale points automatically according to distance from the eye point using the OpenGL point parameter extension, overcoming the limitation of standard `glPointSize` which does not support perspective scaling [S2, unofficial]. It uses a conservative lower bound for the z-coordinate to ensure points are never rendered smaller than their true size, preventing visual holes [S2, unofficial].
+-
+-*   **Definition:** Uses `glPointParameter` (available since OpenGL 1.4) to define point size as a function of distance to the eye $d$ [S2, unofficial].
+-*   **Formula:** The OpenGL point size formula is:
+-    $$ D = D_0 \sqrt{\frac{1}{a + b \cdot d + c \cdot d^2}} $$
+-    where $D_0$ is the user-defined diameter, $a, b, c$ are constants, and $d$ is the distance to the eye [S2, unofficial].
+-    To match the derived conservative diameter $D = \frac{H}{2 \sqrt{2} d k \tan(\theta/2)}$, set $D_0 = 1$, $a = 0$, $b = 0$, and $c = \frac{2 k \tan^2(\theta/2)}{H^2}$, where $k = (1 + 2 \tan^2(\theta/2))^{-1}$ and $H$ is the viewport height [S2, unofficial].
+-*   **Pitfall:** The extension scales according to distance $d$, not the z-coordinate. Using a lower bound for $z$ (specifically $z^2 \ge d^2 k$) ensures the point size is never smaller than the true size, preventing holes [S2, unofficial].
++A technique to scale points automatically according to distance from the eye point using the OpenGL point parameter extension, overcoming the limitation of standard `glPointSize` which does not support perspective scaling [S2, unofficial]. It provides a conservative lower bound for point sizing to prevent holes. The formula for the lower bound is $z^2 \ge d^2 \cdot k$, where $d$ is the distance to the eye, and $k = (1 + 2\tan^2(\theta/2))^{-1}$ [S2, unofficial]. The conservative point diameter is $D = \frac{H}{2\sqrt{2} d k \tan(\theta/2)}$ [S2, unofficial]. To match this derived diameter $D$, set $D_0 = 1$, $a = 0$, $b = 0$, and $c = \frac{2 k \tan^2(\theta/2)}{H^2}$ in the OpenGL point size formula $D = D_0 \sqrt{\frac{1}{a + b d + c d^2}}$ [S2, unofficial]. A pitfall is that the point parameter extension scales according to distance $d$, not the z-coordinate; using a lower bound for $z$ ensures the point size is never smaller than the true size, preventing holes [S2, unofficial].
+ 
+ ## Operating characteristics
+-*   **Time Complexity:** $O(1)$ per point for the vertex shader calculation. The cost is dominated by the rasterization of the point primitives.
+-*   **Memory Complexity:** $O(1)$ additional memory per point for the vertex output struct.
+-*   **Performance:** Hardware-accelerated point rendering is often faster than software rendering or complex geometric clipping approaches for large point clouds [S2, unofficial].
+-*   **Strengths:** Simple implementation; leverages GPU hardware for point rasterization; provides visually correct perspective scaling.
+-*   **Limitations:** Limited to point primitives (or quads mapped to points); does not handle complex occlusion or exact geometric intersections like conic approaches; precision issues near the near plane.
+-*   **When to use:** When rendering large point clouds or voxel centers where exact geometric fidelity is less critical than performance and visual correctness of size.
+-*   **When not to use:** When exact half-space clipping or conic intersection is required for high-fidelity volume rendering.
++**Time and Memory Complexity:**
++- Time: $O(1)$ per vertex for the vertex shader calculations.
++- Memory: Minimal, requiring only the vertex attributes and uniforms.
++
++**Measured Performance:**
++- Not given in the sources.
++
++**Scaling:**
++- Scales linearly with the number of points.
++
++**Strengths and Limitations:**
++- Strengths: Provides accurate perspective-correct sizing without relying on hardware extensions.
++- Limitations: Requires explicit calculation in the vertex shader, which may be less flexible than hardware-based solutions.
++
++**When to Use:**
++- Use when precise perspective-correct point sizing is required and hardware extensions are not available or preferred.
++
++**When Not to Use:**
++- Do not use when hardware acceleration for point parameters is available and sufficient for the application.
+ 
+ ## Background
+-The method originates from the need to render point clouds and isosurfaces efficiently on hardware. The specific vertex shader approach is documented in community implementations like `arminkz/PointCloudRendering` [S1, unofficial]. The theoretical basis for perspective-correct point sizing using OpenGL extensions is detailed in "Hardware Accelerated Point Rendering of Isosurfaces" [S2, unofficial], which addresses the limitations of standard `glPointSize` and provides formulas for conservative point sizing to avoid artifacts.
++Originated in the context of hardware-accelerated point rendering of isosurfaces [S2, unofficial]. It addresses the limitations of standard `glPointSize` by providing a method to scale points according to distance from the eye point [S2, unofficial].
+ 
+ ## Sources

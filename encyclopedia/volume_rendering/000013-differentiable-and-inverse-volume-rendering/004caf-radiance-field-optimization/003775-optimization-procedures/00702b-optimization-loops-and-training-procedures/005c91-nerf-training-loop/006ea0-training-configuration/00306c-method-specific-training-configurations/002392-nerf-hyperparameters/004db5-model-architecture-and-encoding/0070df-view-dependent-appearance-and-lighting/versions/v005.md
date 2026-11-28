@@ -1,0 +1,52 @@
+# View-Dependent Appearance and Lighting
+
+
+## Overview
+This family of methods extends the standard NeRF radiance field representation by explicitly modeling how scene appearance varies with the viewing direction, enabling effects such as specular reflections, transparency, and view-dependent lighting. While standard NeRFs often bake shading and shadows into the observed color, making them non-relightable and prone to capturing spurious correlations, these methods separate intrinsic scene properties (albedo, geometry) from extrinsic lighting and view-dependent effects [S1, unofficial]. This separation allows for relighting, novel view synthesis under varying illumination, and accurate modeling of complex materials like glass or metals.
+
+## Shared principles
+The core mechanism involves transforming low-dimensional input coordinates into a high-dimensional feature space using sinusoidal positional encoding, which is then processed by a fully-connected MLP to predict radiance field properties [S1, unofficial].
+
+**Positional Encoding**
+The input coordinates $\mathbf{x} \in \mathbb{R}^3$ (position) and $\mathbf{d} \in \mathbb{R}^3$ (view direction) are mapped to higher dimensions using a hierarchical positional encoding function $\gamma(\cdot)$ [S1, unofficial]. For a scalar input $p$, the encoding is defined as:
+$$ \gamma(p) = (\sin(2^0 \pi p), \cos(2^0 \pi p), \dots, \sin(2^{L-1} \pi p), \cos(2^{L-1} \pi p)) $$
+where $L$ is the number of frequency bands . This function is applied independently to each of the three components of the position vector and the direction vector [S1, unofficial].
+
+**Network Architecture**
+The radiance field is represented by an MLP that takes the encoded position and direction as input. The architecture typically consists of two branches:
+1.  **Density Branch:** Processes the encoded position features to predict volume density $\sigma$.
+2.  **Color Branch:** Processes the encoded direction features concatenated with intermediate features from the density branch to predict RGB color $\mathbf{c}$ [S1, unofficial].
+
+**Ray Sampling**
+Rendering requires sampling points along camera rays. A ray is parameterized as $r(\lambda) = o_{world} + \lambda d_{world}$, where $o_{world}$ is the world-space origin and $d_{world}$ is the world-space direction [S1, unofficial]. The direction is computed from camera intrinsics and extrinsics: $d_{cam} = (\frac{i - c_x}{f_x}, \frac{j - c_y}{f_y}, 1)$, $d_{world} = R d_{cam}$, and $o_{world} = t$ [S1, unofficial]. Position samples $x$ are generated along the ray within a defined near/far range [S1, unofficial].
+
+## Subtopics
+
+### [UrbanIR](16200-urbanir.md)
+UrbanIR is a method for inverse rendering of large-scale urban scenes from a single monocular video under single illumination, inferring shape, albedo, visibility, and sun/sky illumination to enable relighting and night simulation. It differs from standard NeRFs by learning intrinsic attributes (albedo, normal) independent of lighting, solving the problem that standard NeRFs bake shading and shadows into observed color, making them non-relightable. Unlike methods requiring multiple lighting sources (e.g., NeRF-OSR) or LiDAR/multi-camera setups (e.g., FEGR, LightSim), UrbanIR uses only single illumination RGB video.
+
+### [See-NeRF](18115-see-nerf.md)
+See-NeRF is a unified sensor-physics grounded NeRF framework for sharp High Dynamic Range (HDR) novel view synthesis from single-exposure blurry Low Dynamic Range (LDR) images and corresponding event data. It solves the problem of recovering sharp 3D radiance from degraded inputs by explicitly modeling the physical imaging process of both RGB and event sensors, rather than applying tone mapping directly to 3D points. Unlike sibling methods like [REF2-NeRF](18124-ref2-nerf.md) or EvHDR-NeRF which ignore sensor-physics mismatches, See-NeRF bridges the gap between physical scene dynamics and sensor output using differentiable Camera Response Function (CRF) models for both RGB and event streams.
+
+### [REF2-NeRF](18124-ref2-nerf.md)
+REF2-NeRF is a NeRF-based modeling method designed for scenes containing transparent objects, specifically glass cases, where multiple reflection and refraction effects occur. It solves the challenge of accurately modeling such scenes by estimating refraction surfaces and separating direct (view-independent) and reflected (view-dependent) light components using two independent MLPs: a glass network for refraction offsets and a decomposition NeRF for rendering. Unlike methods that assume straight light rays or only handle reflections, REF2-NeRF handles both refraction and reflection in scenes with multiple transparent objects by introducing a view-independent density field and a view-dependent offset field.
+
+### [Unsupervised Decomposition and Enhancement in NeRF](18127-unsupervised-decomposition-and-enhancement-in-nerf.md)
+This method decomposes the view-dependent color output of a NeRF into a view-dependent lighting component $v$ and a view-independent reciprocal color basis $r$, then enhances $v$ using a neural network to produce an enhanced image $I_e$ without ground truth supervision. It differs from 2D Retinex methods by leveraging 3D geometry and multi-view consistency to constrain decomposition, avoiding the need for paired low-light/high-light training data.
+
+### [SAMURAI](18647-samurai.md)
+SAMURAI is a joint optimization framework that estimates 3D shape, BRDF material properties, per-image illumination, camera poses, and camera intrinsics from unconstrained in-the-wild image collections with varying backgrounds and illuminations. It distinguishes itself from sibling methods like [UrbanIR](16200-urbanir.md) and [See-NeRF](18115-see-nerf.md) by explicitly decomposing radiance into reflectance and illumination, allowing for relightable assets and handling extreme pose uncertainty through camera multiplexing, whereas siblings often assume known poses or fixed illumination.
+
+### Late Viewing Direction Conditioning
+A design choice to fuse the viewing direction only in the last layer of the color MLP. This prevents the optimization from bypassing the neural voxel to learn a direct mapping from viewing direction to output sample color, which leads to erroneous camera poses and geometry [S2]. Without late viewing direction conditioning, the optimization can minimize photometric loss by optimizing the MLP directly, leading to erroneous camera poses and geometry estimation [S2].
+
+### NeRFactor
+A method that starts with a pre-trained NeRF model to recover a relightable model by simplifying the pre-trained NeRF’s volumetric geometry into a surface model [S3, unofficial]. It optimizes MLPs to represent light source visibility and surface normals at any point on the surface, and optimizes a representation of the environment lighting and the BRDF at any surface point [S3, unofficial]. Results in a more efficient rendering model because volumetric geometry is simplified into a single surface and light-source visibility at any point can be computed by a single MLP query [S3, unofficial].
+
+## Background
+The original NeRF paper suggested predicting colors with view direction conditioning to model view-dependent effects, a design default in most follow-up works (e.g., Chan et al., 2021; Niemeyer & Geiger, 2021b) [S1, unofficial]. However, this design gives the model additional freedom to capture spurious correlations and dataset bias, especially if only a single-view target is provided [S1, unofficial]. Consequently, some methods remove the view direction in color prediction to improve synthesis consistency [S1, unofficial]. Other approaches, such as NeRFactor, use multi-stage pipelines to recover relightable models from images with significant shadows and self-occlusion, starting from pre-trained NeRFs [S3, unofficial].
+
+## Sources
+[S1] StyleNeRF: A Style-based 3D-Aware Generator for High-resolution Image Synthesis, https://doi.org/10.48550/arxiv.2110.08985, fetched 2026-10-26 (unofficial)
+[S2] Robust Dynamic Radiance Fields, https://doi.org/10.1109/cvpr52729.2023.00010, fetched 2026-10-26
+[S3] Advances in Neural Rendering, https://doi.org/10.48550/arxiv.2111.05849, fetched 2026-10-26 (unofficial)

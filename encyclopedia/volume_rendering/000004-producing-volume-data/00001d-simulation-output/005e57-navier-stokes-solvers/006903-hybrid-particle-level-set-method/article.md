@@ -1,0 +1,116 @@
+# Hybrid Particle-Level Set Method
+
+Also called: Foster and Fedkiw Liquid Animation, Particle Level Set Method, Thickened front tracking
+
+## Overview
+The Hybrid Particle-Level Set Method is a liquid animation technique that combines massless marker particles with a dynamic level set function to track the liquid surface, addressing the mass dissipation issues inherent in semi-Lagrangian solvers like Stam’s method [S1, unofficial]. It distinguishes itself from pure level set or pure particle methods by using symmetrical particles on both the liquid and atmosphere sides to explicitly model the interface, providing high detail and control while maintaining volume conservation [S1, unofficial].
+
+## How it works
+**Inputs and Outputs:**
+*   **Input:** A rectangular voxel grid with side length $\Delta \tau$, initial velocity field $\mathbf{u}$, pressure field $p$, and initial particle positions.
+*   **Output:** Updated velocity field $\mathbf{u}$, pressure field $p$, level set function $\phi$, and particle positions.
+
+**Data Structures:**
+*   **Grid:** Rectangular voxel grid. Each cell has a pressure variable at its center and velocity variables on each shared side. Cells are labeled `empty` (available for liquid) or `full` (impermeable object) [S1, unofficial].
+*   **Level Set:** A scalar field $\phi$ defined on the grid, where $\phi < 0$ inside the liquid, $\phi > 0$ outside, and $\phi = 0$ at the interface [S1, unofficial].
+*   **Particles:** Massless marker particles. Two sets are maintained: liquid particles (inside $\phi < 0$) and atmosphere particles (outside $\phi > 0$) [S1, unofficial].
+
+**Steps:**
+
+1.  **Grid Setup:** Initialize the grid with side length $\Delta \tau$. Assign pressure to cell centers and velocity to cell faces. Label cells as `empty` or `full` [S1, unofficial].
+2.  **Surface Tracking (Particles):** Move massless marker particles by convection using the current velocity field. These particles track the surface movement [S1, unofficial].
+3.  **Surface Smoothing (Particles):** Generate an isocontour from the top part of all surface particles. Smooth this isocontour by setting values outside the liquid to positive and inside to negative. Simplify values to approach zero. Apply a special smoothing equation to yield a better surface representation, reducing awkward folds or kinks [S1, unofficial].
+4.  **Surface Tracking (Level Set):** Maintain a dynamic level set $\phi$ to represent the surface. This provides a smooth, realistic surface but is prone to volume loss near detailed features due to convection changes [S1, unofficial].
+5.  **Hybrid Combination:** Combine particles and level set. Use the level set to influence particle number and density: delete particles that do not affect the surface, and add particles if there are too few [S1, unofficial].
+6.  **Conditional Update:** Determine if the surface is calm or turbulent.
+    *   If **calm**: Use the level set and ignore particles.
+    *   If **turbulent**: Allow particles to influence and update the local values of the isocontour/level set [S1, unofficial].
+7.  **Symmetrical Particles (Atmosphere Modeling):** Add symmetrical particles on the opposite side of the liquid to explicitly model the atmosphere. Extrapolate the velocity field across the liquid's surface into the atmosphere. Use the extrapolated atmospheric velocity to control particles near the surface on the dry side of the liquid [S1, unofficial].
+8.  **Solid Object Interaction:**
+    *   Move liquid particles to be outside solid objects.
+    *   Change liquid velocity to flow in the direction of the object's surface normal to prevent flow into the object. This pushes liquid out of the way while maintaining a realistic free-flowing effect [S1, unofficial].
+9.  **Control Flow:** Use a "fake" object to influence surrounding liquid. Adjust the surface of the liquid as if a moving object were present to change and control the velocity of the liquid [S1, unofficial].
+
+**Pseudocode:**
+
+> **Unverified code.** The code below did not pass a test run against a reference implementation, or no test fits it, so it may contain errors.
+
+```python
+def hybrid_particle_level_set_step(grid, velocity, pressure, particles, dt):
+    """
+    Advances the simulation by one time step dt.
+    grid: Voxel grid with pressure at centers, velocity on faces.
+    velocity: Current velocity field u.
+    pressure: Current pressure field p.
+    particles: List of particle objects with position and type (liquid/atmosphere).
+    dt: Time step size.
+    """
+    
+    # 1. Advect particles by convection
+    for particle in particles:
+        particle.position += velocity_at(particle.position) * dt
+        
+    # 2. Rebuild Level Set from particles (Hybrid Step)
+    # Determine if surface is calm or turbulent
+    surface_state = analyze_surface_turbulence(particles)
+    
+    if surface_state == "calm":
+        # Use level set, ignore particles for surface definition
+        phi = rebuild_level_set_from_particles(particles)
+        # Particles are not used to update phi directly
+    else:
+        # Turbulent: Particles influence local values of isocontour
+        phi = rebuild_level_set_with_particle_influence(particles)
+        
+    # 3. Symmetrical Particles & Velocity Extrapolation
+    # Extrapolate velocity across the liquid's surface into the atmosphere
+    velocity_extrapolated = extrapolate_velocity_across_interface(phi, velocity)
+    
+    # Control particles on the dry side using extrapolated atmospheric velocity
+    for particle in particles:
+        if particle.type == "atmosphere":
+            # Adjust particle motion based on extrapolated velocity
+            particle.position += velocity_extrapolated_at(particle.position) * dt
+            
+    # 4. Solid Object Interaction
+    for particle in particles:
+        if is_inside_solid_object(particle.position):
+            # Move particle outside the object
+            particle.position = project_outside_object(particle.position)
+            # Change velocity to flow along surface normal
+            normal = surface_normal_at(particle.position)
+            velocity_at(particle.position) = project_velocity_along_normal(velocity_at(particle.position), normal)
+            
+    # 5. Navier-Stokes Solve (Standard Steps from Parent)
+    # Advect velocity
+    velocity = advect_velocity(velocity, dt)
+    # Diffuse velocity
+    velocity = diffuse_velocity(velocity, dt)
+    # Project pressure
+    pressure, velocity = project_pressure(velocity, pressure, dt)
+    
+    return velocity, pressure, particles
+```
+
+**Parameters:**
+*   $\Delta \tau$: Grid side length. Not given in the sources.
+*   $dt$: Time step. Not given in the sources.
+
+**Edge Cases and Pitfalls:**
+*   **Smoothness:** Particles alone make it difficult to produce a smooth liquid surface [S1, unofficial].
+*   **Volume Loss:** Level sets suffer from volume loss near detailed surface features due to convection changes [S1, unofficial].
+*   **Particle Density:** Isocontour methods require a large accumulation of particles near the isocontour for a smooth surface, and particles throughout the liquid even if they don't affect the surface [S1, unofficial].
+
+## Operating characteristics
+*   **Time Complexity:** Not given in the sources.
+*   **Memory Complexity:** Not given in the sources.
+*   **Strengths:** Provides realistic, stable liquids; addresses mass dissipation of Stam's method; allows for high detail and control; explicitly models atmosphere interaction [S1, unofficial].
+*   **Limitations:** Requires careful management of particle density; complex to implement due to hybrid nature; potential for volume loss if level set is not properly corrected [S1, unofficial].
+*   **When to use:** When realistic liquid animation with volume conservation and detailed surface features is required.
+*   **When not to use:** When computational resources are extremely limited and simplified smoke or gas simulation is sufficient.
+
+## Background
+The Hybrid Particle-Level Set Method was introduced by Foster and Fedkiw to address the downsides of previous liquid simulation methods, particularly the gradual mass dissipation associated with Stam’s Semi-Lagrangian method [S1, unofficial]. It builds on the advances of previous works to create a liquid animation that is both realistic and more stable. The method was further developed by Fedkiw, Enright, and Marschner, who contributed to surface tracking and velocity extrapolation techniques [S1, unofficial]. It is widely used in computer graphics for physically based liquid simulation.
+
+## Sources
+[S1] Efficient computation and rendering of smoke animation, http://hdl.handle.net/2346/16985, fetched 2026-10-26 (unofficial)

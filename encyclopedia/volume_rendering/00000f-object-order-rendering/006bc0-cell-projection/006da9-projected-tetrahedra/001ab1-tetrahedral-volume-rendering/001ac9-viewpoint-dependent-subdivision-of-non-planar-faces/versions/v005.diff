@@ -1,0 +1,361 @@
+--- v004.md
++++ v005.md
+@@ -1,205 +1,135 @@
+ # Viewpoint-dependent subdivision of non-planar faces
+ 
+-Also called: Cell Projection with Non-Planar Face Subdivision, Cell Projection with Non-Planar Faces Approximation, HIAC system cell projection, Hardware-based cell projection, Non-Planar Face Subdivision Strategy, Shirley and Tuchman method approximation, Viewpoint-dependent tetrahedral subdivision
++Also called: Bow-tie polygon handling, Non-Planar Face Subdivision Strategy, Subdividing Non-Planar Quadrilaterals, Tetrahedral Subdivision for Non-Planar Faces, Tetrahedral subdivision for non-planar quads, Viewpoint-dependent tetrahedral subdivision
+ 
+ ## Overview
+-This method handles non-planar quadrilateral faces in curvilinear or irregular grids by performing view-dependent subdivision of problem faces and cells into triangles and tetrahedra, respectively, to prevent visibility sort failures and bow-tie projections [S1][S3, unofficial]. It approximates ray integration by projecting cells onto the screen, computing integrated opacity and color at vertices, and interpolating these values across screen-space polygons using standard graphics hardware [S2, book]. Unlike methods requiring resampling of curvilinear grids, cell projection works directly on the general grid topology [S3, unofficial].
++This method handles non-planar quadrilateral faces in curvilinear or unstructured grids by subdividing only those faces and cells that cause visibility sorting failures or "bow-tie" projections for a specific viewpoint [S1, S2][S4, S5, unofficial]. It solves the problem where a viewing ray intersects the same non-planar face twice, making back-to-front compositing impossible [S1][S4, unofficial]. Unlike view-independent methods that always subdivide all non-planar faces, this approach is viewpoint-dependent, subdividing only "problem" cells to minimize polygon count and rendering overhead [S1][S4, unofficial]. It builds on [Tetrahedral Volume Rendering](820-tetrahedral-volume-rendering.md) by providing the geometric consistency required for cell projection on general grids.
+ 
+ ## How it works
+ **Inputs:**
+-- A list of vertices with 3D positions and scalar field values $s$ [S1][S3, unofficial].
+-- A list of cells (hexahedra or other topologies) with index pointers to their vertices [S1][S3, unofficial].
+-- A viewpoint $V$ [S1][S3, unofficial].
+-- Transfer functions mapping scalar $s$ to RGB color and differential opacity $\tau$, assumed linear or piecewise linear [S1][S3, unofficial].
++- Grid vertices: Array of 3D positions $\mathbf{P}_i$ and scalar values $s_i$.
++- Cells: List of cells, each defined by an ordered list of vertex indices.
++- Transfer functions: Linear or piecewise linear mappings from scalar $s$ to RGB color and differential opacity $\tau$.
++- Viewpoint: Camera position $\mathbf{V}$ and projection parameters.
+ 
+ **Outputs:**
+-- A rendered image with integrated color and opacity [S2, book][S3, unofficial].
++- A set of polygons (triangles, quads, or tetrahedral projections) ready for rasterization and compositing.
+ 
+ **Data Structures:**
+-- **Vertex List:** Array of vertices, each containing 3D position $(x,y,z)$ and scalar value $s$ [S1][S3, unofficial].
++- **Vertex List:** Stores $\mathbf{P}_i$ and $s_i$.
+ - **Cell Structure:**
+-  - `subdivided`: Boolean flag indicating if the cell is currently subdivided into tetrahedra [S3, unofficial].
+-  - `oldsubdivided`: Char flag tracking subdivision state from the previous frame [S3, unofficial].
+-  - `numbInbound`: Integer count of incoming edges in the directed graph used for sorting [S3, unofficial].
+-  - `type`: Enum or integer identifying the cell topology (e.g., hexahedron, tetrahedron) [S3, unofficial].
+-  - Vertex indices: Pointers to the vertices defining the cell [S1].
+-- **Directed Graph:** For sorting, a graph where nodes are cells and edges represent shared faces, directed towards the cell containing the viewpoint relative to the face plane [S3, unofficial].
++  - `subdivided`: Boolean flag indicating if the cell is currently subdivided into tetrahedra for the current view.
++  - `oldsubdivided`: Boolean flag indicating if the cell was subdivided in the previous frame.
++  - `numbInbound`: Integer count of incoming edges in the visibility graph.
++  - `type`: Enum identifying the cell topology (e.g., hexahedron, tetrahedron).
++  - `vertex_indices`: Array of indices pointing to the Vertex List.
++- **Face Diagonals:** Implicitly defined by the lowest-index vertex rule; no explicit storage needed if recomputed or cached per face.
+ 
+ **Steps:**
+-1. **Identify Problem Faces and Cells:** A problem face is a non-planar quadrilateral where a viewing ray intersects the same face twice, potentially creating a bow-tie projection [S1][S3, unofficial]. A problem cell is a cell intersected by a viewing ray in disjoint segments [S1][S3, unofficial]. Detection tests if a viewing ray can intersect a triangulated cell in more than one segment using plane equations of the triangles and locations of viewpoint $V$ and relevant vertices [S1].
+-2. **Subdivide Problem Faces:** Subdivide any non-planar quadrilateral face into two triangles [S1][S3, unofficial]. The diagonal must start from the quadrilateral vertex with the lowest index in the vertex list to ensure consistency for two cells sharing a face, as the choice depends only on vertex indices [S1][S3, unofficial]. Even if a face is not a problem face for a specific cell, it may need subdivision if it is part of a problem cell or to avoid gaps between adjacent cells [S3, unofficial].
+-3. **Subdivide Problem Cells:** If a cell is a problem cell for the current viewpoint, subdivide it into tetrahedra [S1][S3, unofficial]. Connect the vertex of lowest index in the whole cell to all triangles from faces not sharing this vertex to create a set of tetrahedra with planar faces [S1]. Only problem cells are subdivided; non-problem cells remain intact to preserve performance [S3, unofficial]. Cells containing contour surfaces or scalar breakpoints in piecewise linear transfer functions are also subdivided into tetrahedra and then into slabs [S1].
+-4. **Project and Sort:** Project the cell (or its tetrahedral subdivisions) onto the image plane [S3, unofficial]. The projected edges divide the plane into polygons (triangles and quadrilaterals) [S3, unofficial]. Sort cells using the MPVO algorithm (or variants like MPVONC/SXMPVO) based on the directed graph of shared faces [S3, unofficial]. Handle gaps with exterior face sorting or A-buffer accumulation [S3, unofficial]. For contour slabs, sort polygons and volume slabs back-to-front based on viewpoint position relative to contour planes [S1].
+-5. **Compute Vertex Attributes:** For each polygon, compute vertex attributes (RGB, opacity $\tau$, length $l$) at the front and back endpoints of the viewing ray segment through the cell [S3, unofficial]. Profile vertices are vertices on the silhouette [S2, book]. Set color directly from scalar values $s$ and integrated opacity to zero [S2, book][S3, unofficial]. Thick vertices are internal vertices where the ray passes through the cell interior [S2, book][S3, unofficial]. Compute the back endpoint's $z$, color, and $\tau$ by subdividing the interior face with the diagonal from the lowest index vertex and interpolating linearly in screen space [S2, book][S3, unofficial]. Compute ray segment length $l$ by interpolating depth $z$ across the back face polygon in screen space to find the back endpoint, then reversing the eye-to-screen transformation [S3, unofficial]. Approximate $l$ by computing it at vertices and interpolating linearly across the polygon in screen space [S2, book][S3, unofficial]. For precise color, compute the correct integrated color analytically once per vertex and divide by integrated $\alpha$ to get the polygon color [S2, book]. Alternatively, use the average of front and back colors [S2, book].
+-6. **Interpolate and Composite:** Interpolate integrated opacity $\alpha$, color (R, G, B), and depth $z$ linearly across the polygon in screen space using standard Gouraud shading hardware [S1][S2, book][S3, unofficial]. Composite the interpolated polygons onto the image using the standard alpha blending equation [S2, book][S3, unofficial]. To correct for non-linear opacity integration errors (Mach bands), use texture mapping hardware in orthogonal views [S2, book]. Specify $z$ and $\tau$ as texture coordinates, linearly interpolate them, and extract the correct alpha from a 2D texture map preloaded with values $1 - e^{-\tau}$ [S2, book]. In perspective views, this technique is an approximation [S2, book].
+ 
+-**Formulas:**
+-- Integrated opacity: $\alpha = 1 - e^{-\tau \cdot l}$, where $\tau = (\tau_f + \tau_b)/2$ is the average differential opacity, and $l$ is the ray segment length [S3, unofficial].
+-- Alpha blending: $\text{RGB}_{\text{new}} = (1 - \alpha) \times \text{RGB}_{\text{old}} + \alpha \times \text{RGB}_{\text{polygon}}$ [S2, book].
++1. **Face Triangulation (Consistent Subdivision):**
++   For every quadrilateral face shared by two cells, determine the diagonal. The diagonal must connect the vertex with the lowest index in the face's vertex list to the opposite vertex. This ensures that both adjacent cells agree on the triangulation of the shared face [S1, S2][S4, S5, unofficial].
++   - Let the face vertices be $v_0, v_1, v_2, v_3$ with indices $idx_0, idx_1, idx_2, idx_3$.
++   - Find $v_{min}$ such that $idx_{min} = \min(idx_0, idx_1, idx_2, idx_3)$.
++   - The diagonal connects $v_{min}$ to the vertex opposite it in the quad.
++   - This splits the quad into two triangles.
+ 
+-**Parameters:**
+-- Transfer functions: Map scalar value $s$ to RGB and differential opacity $\tau$ [S3, unofficial]. Assumed linear in $s$ for the basic method, but piecewise linear is supported by slicing cells [S3, unofficial].
++2. **Problem Cell Detection:**
++   A cell is a "problem cell" if a viewing ray can intersect it in more than one disjoint segment. This occurs if the ray intersects multiple triangles of the cell's triangulated boundary in a way that implies entering and exiting the cell multiple times [S1, S2][S4, S5, unofficial].
++   - For each cell, check if the viewpoint $\mathbf{V}$ and the cell's geometry allow for multiple intersections.
++   - This can be tested using the plane equations of the triangulated faces and the relative positions of $\mathbf{V}$ and the cell vertices [S1, S2][S5, unofficial].
++   - If the cell contains contour surfaces (scalar values crossing transfer function breakpoints), it is also marked as a problem cell for subdivision purposes [S1, S2][S5, unofficial].
+ 
+-**Edge Cases and Pitfalls:**
+-- **Precision:** Hardware color interpolation is inconsistent with analytic integration [S3, unofficial]. Condition (d) (color constant per cell, only $\tau$ varies linearly) is required for hardware-based method to be mathematically equivalent to analytic integration [S3, unofficial].
+-- **Boundaries:** Non-planar faces cause visibility cycles where a ray intersects the same face twice, making back-to-front sorting impossible without subdivision [S3, unofficial].
+-- **Degenerate Input:** If a cell is not a problem cell but shares a face with a problem cell, the face must still be subdivided to avoid gaps or overlaps [S3, unofficial].
+-- **Performance:** Subdividing all quadrilaterals increases polygon count (e.g., 7 to 25 polygons) and OpenGL data output, though fragment count remains the same [S3, unofficial].
++3. **Cell Subdivision (if Problem Cell):**
++   If a cell is marked as a problem cell, subdivide it into tetrahedra.
++   - Identify the vertex $v_{cell\_min}$ with the lowest index among all vertices of the cell [S1, S2][S5, unofficial].
++   - For each face of the cell that does *not* contain $v_{cell\_min}$, the face is already triangulated (from Step 1).
++   - Create tetrahedra by connecting $v_{cell\_min}$ to each of these triangles.
++   - This decomposition is consistent with the face triangulation because $v_{cell\_min}$ is also the lowest-index vertex for any face sharing it [S1, S2][S5, unofficial].
++   - If the cell contains contour surfaces or transfer function breakpoints, further subdivide the resulting tetrahedra into slabs based on the contour planes or breakpoint scalar values [S1, S2][S5, unofficial].
++
++4. **Projection and Polygon Generation:**
++   Project the cell (or its tetrahedral subdivisions) onto the image plane.
++   - The projected edges divide the image plane into polygons (triangles and quadrilaterals) [S4, unofficial].
++   - For non-subdivided cells, the projection is of the original polyhedron.
++   - For subdivided cells, the projection is of the constituent tetrahedra.
++
++5. **Attribute Computation:**
++   For each polygon, compute vertex attributes: RGB color, integrated opacity $\alpha$, and ray segment length $l$ (or differential opacity $\tau$) at the front and back endpoints of the viewing ray segment through the cell [S3, book][S4, unofficial].
++   - **Profile Vertices:** Vertices on the silhouette. Set color from scalar $s$, set integrated opacity $\alpha = 0$ [S3, book].
++   - **Thick Vertices:** Internal vertices (e.g., interior to a face).
++     - Compute the back endpoint's $z$, color, and $\tau$ by interpolating across the subdivided face (using the diagonal from Step 1) [S3, book][S4, unofficial].
++     - Compute integrated opacity $\alpha = 1 - e^{-\tau \cdot l}$, where $\tau = (\tau_f + \tau_b)/2$ and $l$ is the ray segment length [S3, book][S4, unofficial].
++     - Compute color: Either as the average of front and back colors [S3, book] or analytically integrated color divided by $\alpha$ [S3, book].
++   - **Length Approximation:** In perspective views, $l$ varies nonlinearly. Approximate by computing $l$ at vertices and interpolating linearly across the polygon in screen space [S3, book][S4, unofficial].
++
++6. **Sorting:**
++   Sort cells (or tetrahedra) back-to-front using the MPVO (Minimum Perpendicular Volume Order) algorithm or variants [S4, unofficial].
++   - Construct a directed graph where edges represent shared faces, directed towards the cell containing the viewpoint relative to the face plane [S4, unofficial].
++   - Handle gaps using exterior face sorting or A-buffer accumulation [S4, unofficial].
++   - For subdivided cells, the BSP-MPVO algorithm may be used, where exterior triangles point to subface structures [S3, book].
++
++7. **Rendering and Compositing:**
++   Render polygons using standard graphics hardware.
++   - Interpolate RGB, $\alpha$, and $z$ linearly across polygons in screen space using Gouraud shading [S3, book][S4, unofficial].
++   - Composite using the standard alpha blending equation:
++     $$ \text{RGB}_{\text{new}} = (1 - \alpha) \times \text{RGB}_{\text{old}} + \alpha \times \text{RGB}_{\text{polygon}} $$
++   - For non-linear opacity integration errors (Mach bands), use texture mapping in orthogonal views: specify $z$ and $\tau$ as texture coordinates, interpolate linearly, and extract $\alpha$ from a preloaded 2D texture map with values $1 - e^{-\tau}$ [S3, book]. In perspective views, this is an approximation [S3, book].
+ 
+ **Pseudocode:**
+ 
+ ```python
+-import math
++def process_cell(cell, viewpoint, grid):
++    # Step 1: Ensure consistent face triangulation
++    for face in cell.faces:
++        if face.is_quad():
++            v_indices = [grid.vertices[idx].index for idx in face.vertex_indices]
++            min_idx = min(v_indices)
++            # Determine diagonal based on min_idx vertex
++            face.diagonal = get_diagonal_for_min_vertex(face, min_idx)
++            face.triangulate()
+ 
+-def render_viewpoint_dependent_subdivision(vertices, cells, viewpoint, transfer_function):
+-    # Step 1: Identify problem faces and cells
+-    problem_faces = set()
+-    problem_cells = []
++    # Step 2: Detect if cell is a problem cell
++    is_problem = False
++    if is_problem_cell_for_viewpoint(cell, viewpoint):
++        is_problem = True
+     
+-    for cell in cells:
+-        cell_is_problem = False
++    # Check for contour/breakpoint crossing
++    if cell.scalar_range_contains_breakpoints():
++        is_problem = True
++
++    # Step 3: Subdivide if necessary
++    if is_problem:
++        # Find lowest index vertex in the whole cell
++        cell_min_vertex_idx = min([grid.vertices[idx].index for idx in cell.vertex_indices])
++        cell_min_vertex = grid.vertices[cell_min_vertex_idx]
++        
++        tetrahedra = []
+         for face in cell.faces:
+-            # Test if viewing ray intersects the face twice using plane equations [G]
+-            if ray_intersects_face_twice(face, viewpoint):
+-                problem_faces.add(face)
+-            # Test if viewing ray intersects the triangulated cell in >1 segment [G]
+-            if ray_intersects_cell_twice(cell, viewpoint):
+-                cell_is_problem = True
+-        if cell_is_problem:
+-            problem_cells.append(cell)
+-            
+-    # Step 2: Subdivide problem faces
+-    for face in problem_faces:
+-        v_indices = [v.index for v in face.vertices]
+-        min_idx = min(v_indices)
+-        min_vertex = face.vertices[v_indices.index(min_idx)]
+-        # Split quadrilateral into two triangles using diagonal from min_vertex [S1][S3, unofficial]
+-        face.split_into_triangles(min_vertex)
++            if cell_min_vertex not in face.vertices:
++                # Face is already triangulated
++                for tri in face.triangles:
++                    tetrahedra.append(Tetrahedron([cell_min_vertex] + tri.vertices))
+         
+-    # Step 3: Subdivide problem cells
+-    for cell in problem_cells:
+-        # Connect lowest index vertex of cell to all triangles from faces not sharing it [S1]
+-        min_cell_vertex = cell.get_lowest_index_vertex()
+-        cell.subdivide_into_tetrahedra(min_cell_vertex)
+-        
+-    # Step 4: Sort cells using MPVO directed graph [S3, unofficial]
+-    sorted_cells = mpvo_sort(cells, viewpoint)
++        # Further subdivide tetrahedra for contours/breakpoints if needed
++        slabs = subdivide_tetrahedra_for_contours(tetrahedra, cell.scalar_field)
++        return slabs
++    else:
++        return [cell]
++
++def render_polygon(polygon, viewpoint, grid):
++    # Step 5: Compute attributes
++    front_endpoint = compute_front_endpoint(polygon, viewpoint)
++    back_endpoint = compute_back_endpoint(polygon, viewpoint, grid)
+     
+-    # Step 5 & 6: Project, Compute Attributes, Interpolate, Composite
+-    for cell in sorted_cells:
+-        projected_polygons = project_and_divide_plane(cell, viewpoint)
+-        
+-        for polygon in projected_polygons:
+-            for vertex in polygon.vertices:
+-                if vertex.is_profile_vertex():
+-                    vertex.color = transfer_function(vertex.scalar)
+-                    vertex.alpha = 0.0
+-                else:
+-                    # Thick vertex: interpolate z across back face polygon [S2, book][S3, unofficial]
+-                    back_z = interpolate_z_across_polygon(polygon, vertex)
+-                    back_endpoint = compute_back_endpoint(vertex, back_z, viewpoint)
+-                    vertex.back_z = back_endpoint.z
+-                    vertex.back_color = back_endpoint.color
+-                    vertex.back_tau = back_endpoint.tau
+-                    
+-                    # Approximate l by computing at vertices and interpolating linearly across the polygon [S2, book][S3, unofficial]
+-                    vertex.l = compute_segment_length(vertex, back_endpoint, viewpoint)
+-                    
+-                    # Compute average differential opacity
+-                    vertex.avg_tau = (vertex.tau + vertex.back_tau) / 2.0
+-                    
+-                    # Compute integrated opacity [S3, unofficial]
+-                    vertex.alpha = 1.0 - math.exp(-vertex.avg_tau * vertex.l)
+-                    
+-                    # Compute polygon color (average of front and back) [S2, book]
+-                    vertex.color = (vertex.color + vertex.back_color) / 2.0
+-            
+-            # Interpolate attributes linearly across polygon in screen space (Gouraud shading) [S1][S2, book][S3, unofficial]
+-            rasterize_polygon_gouraud(polygon)
++    # Interpolate attributes at vertices
++    for vertex in polygon.vertices:
++        vertex.color = interpolate_color(vertex, front_endpoint, back_endpoint)
++        vertex.alpha = 1 - exp(-vertex.tau * vertex.length)
++        vertex.z = interpolate_z(vertex, front_endpoint, back_endpoint)
+ 
+-# Helper definitions
+-def ray_intersects_face_twice(face, viewpoint):
+-    # Standard geometric test for ray-face intersection multiplicity [G]
+-    return False
+-
+-def ray_intersects_cell_twice(cell, viewpoint):
+-    # Standard geometric test for ray-cell intersection multiplicity [G]
+-    return False
+-
+-def mpvo_sort(cells, viewpoint):
+-    # O(n) sort using directed graph of shared faces [S3, unofficial]
+-    graph = build_directed_graph(cells, viewpoint)
+-    queue = [c for c in cells if graph.inbound_count(c) == 0]
+-    sorted_list = []
+-    while queue:
+-        current = queue.pop(0)
+-        sorted_list.append(current)
+-        for neighbor in graph.outgoing(current):
+-            graph.decrement_inbound(neighbor)
+-            if graph.inbound_count(neighbor) == 0:
+-                queue.append(neighbor)
+-    return sorted_list
+-
+-def build_directed_graph(cells, viewpoint):
+-    # Builds adjacency graph where edges point toward the cell containing the viewpoint [S3, unofficial]
+-    graph = {}
+-    for cell in cells:
+-        graph[cell] = {'outgoing': [], 'inbound_count': 0}
+-    for cell_a in cells:
+-        for cell_b in cells:
+-            if cell_a is cell_b: continue
+-            shared_face = find_shared_face(cell_a, cell_b)
+-            if shared_face:
+-                # Determine direction based on viewpoint position relative to face plane [S3, unofficial]
+-                if viewpoint_on_side_of_plane(viewpoint, shared_face, cell_b):
+-                    graph[cell_a]['outgoing'].append(cell_b)
+-                    graph[cell_b]['inbound_count'] += 1
+-    return graph
+-
+-def project_and_divide_plane(cell, viewpoint):
+-    # Projects cell vertices to screen space. Projected edges divide plane into polygons [S3, unofficial]
+-    projected_verts = [project_to_screen(v, viewpoint) for v in cell.vertices]
+-    return divide_screen_by_projected_edges(projected_verts, cell.faces)
+-
+-def divide_screen_by_projected_edges(projected_verts, faces):
+-    # Computes intersections of projected edges to form screen-space polygons [G]
+-    polygons = []
+-    # Standard computational geometry routine to partition 2D plane by line segments [G]
+-    return polygons
+-
+-def interpolate_z_across_polygon(polygon, vertex):
+-    # Interpolates depth z across the back face polygon in screen space [S2, book][S3, unofficial]
+-    return interpolate_linearly_in_screen_space(polygon, 'z', vertex)
+-
+-def interpolate_linearly_in_screen_space(polygon, attribute, vertex):
+-    # Barycentric interpolation of an attribute across a 2D polygon [G]
+-    weights = compute_barycentric_weights(vertex, polygon)
+-    return sum(w * p.attributes[attribute] for w, p in zip(weights, polygon.vertices))
+-
+-def compute_back_endpoint(front_vertex, back_z, viewpoint):
+-    # Reverses eye-to-screen transformation to find 3D back endpoint [S3, unofficial]
+-    back_color = interpolate_color(back_z)
+-    back_tau = interpolate_tau(back_z)
+-    return {'z': back_z, 'color': back_color, 'tau': back_tau}
+-
+-def interpolate_color(z):
+-    # Linear interpolation of color attributes based on depth [G]
+-    return [0.0, 0.0, 0.0]
+-
+-def interpolate_tau(z):
+-    # Linear interpolation of differential opacity based on depth [G]
+-    return 0.0
+-
+-def compute_segment_length(front, back, viewpoint):
+-    # Computes length l of ray segment. Approximated by computing at vertices and interpolating [S2, book][S3, unofficial]
+-    dx = back['z'] - front['z']
+-    dy = back['x'] - front['x']
+-    dz = back['y'] - front['y']
+-    return math.sqrt(dx**2 + dy**2 + dz**2)
+-
+-def rasterize_polygon_gouraud(polygon):
+-    # Interpolates alpha, RGB, and z linearly across polygon in screen space using hardware [S1][S2, book][S3, unofficial]
+-    # Composites using standard alpha blending equation [S2, book][S3, unofficial]
+-    pass
++    # Step 7: Rasterize and Composite
++    rasterize_polygon(polygon)
++    composite(polygon.alpha, polygon.color)
+ ```
+ 
+@@ -207,26 +137,31 @@
+ 
+ ### [Hexahedron Projection for Curvilinear Grids](1111-hexahedron-projection-for-curvilinear-grids.md)
+-A method to classify projections of hexahedra from curvilinear meshes into triangle fans or strips for hardware rendering, avoiding the computational geometry complexity of general line-sweep subdivision by handling specific topological cases.
++Hexahedron Projection is a cell-projection method for direct volume rendering of curvilinear hexahedral grids that classifies the 2D projection of each hexahedron into specific topological cases and renders them as pre-defined triangle fans or strips. It solves the problem of rendering non-planar faces in curvilinear grids without the computational geometry complexity and floating-point robustness issues of general line-sweep subdivision methods. Unlike its sibling [Per-vertex edge classification for view-independent cell projection](1503-per-vertex-edge-classification-for-view-independent-cell-pro.md), which is view-independent, this method is viewpoint-dependent, relying on the specific 2D projection topology to determine the subdivision. It offers a significant speedup over subdividing all cells into tetrahedra by minimizing vertex and fragment operations for the majority of cells.
+ 
+ ### [Per-vertex edge classification for view-independent cell projection](1503-per-vertex-edge-classification-for-view-independent-cell-pro.md)
+-A technique to avoid defects in per-vertex classification during rasterization by ensuring at least one vertex on an edge has the correct classification of the second face sharing the edge, affecting the whole edge during rasterization.
++This method avoids defects in per-vertex classification during rasterization by ensuring that at least one vertex on a shared edge carries the correct visibility classification of the adjacent face. It addresses artifacts caused by per-vertex computations where edge visibility is ambiguous, ensuring the correct classification affects the entire edge during rasterization. Unlike [Viewpoint-dependent subdivision of non-planar faces](835-viewpoint-dependent-subdivision-of-non-planar-faces.md), which subdivides non-planar faces based on the viewpoint, this method relies on vertex attributes to propagate visibility information across shared edges in a view-independent manner.
++
++### [Consistent Tetrahedral Subdivision](6378-consistent-tetrahedral-subdivision.md)
++A method to subdivide nonconvex problem cells (like hexahedra with nonplanar quadrilateral faces) into tetrahedra with consistent diagonals on shared faces, avoiding gaps or overlaps.
++
++### [Problem Cell Subdivision for Curvilinear Grids](6388-problem-cell-subdivision-for-curvilinear-grids.md)
++A strategy to handle non-planar quadrilateral faces in curvilinear grids that cause self-intersection or multiple intersections with a single viewing ray, by temporarily subdividing only the affected 'problem cells' into tetrahedra while leaving other cells as quadrilaterals.
+ 
+ ## Operating characteristics
+-- **Time Complexity:** Sorting is O(n) for MPVO [S3, unofficial]. Subdivision is view-dependent and may increase polygon count [S3, unofficial]. Detection of problem cells requires plane equation tests [S1].
+-- **Memory Complexity:** Increased memory usage for storing subdivided cells and tetrahedra [S3, unofficial]. Data structures must track subdivision state [S3, unofficial].
+-- **Test Case:** Demonstrated on a half-cylindrical shell with 19,000 cells [S3, unofficial].
+-- **Scaling:** Scales with the number of cells and the complexity of the grid topology [S3, unofficial]. View-dependent subdivision adds overhead per frame [S3, unofficial].
+-- **Strengths:** Works directly on general grid topology without resampling [S3, unofficial]. Handles non-planar faces and visibility cycles [S2, book][S3, unofficial]. Compatible with standard graphics hardware [S1][S3, unofficial].
+-- **Limitations:** Approximations in perspective views (linear interpolation of $\tau$ and color) [S2, book]. Inconsistent with analytic integration unless strict conditions are met [S3, unofficial]. Increased polygon count if all quadrilaterals are subdivided [S3, unofficial].
+-- **When to Use:** Curvilinear or irregular grids with non-planar faces where direct ray tracing is difficult [S3, unofficial].
+-- **When Not to Use:** Not given in the sources.
++- **Time Complexity:** Detection of problem cells is $O(1)$ per cell (using plane equations). Subdivision is only performed on problem cells. Sorting is $O(N)$ with MPVO. Rendering is proportional to the number of projected polygons.
++- **Memory Complexity:** Requires storing grid topology and potentially subdivided cells. The BSP-MPVO variant may require additional memory for the BSP tree [S3, book].
++- **Performance:** Faster than subdividing all cells into tetrahedra because only problem cells are subdivided [S1][S4, unofficial]. However, subdividing all quadrilaterals increases polygon count (e.g., 7 to 25 polygons for a hexahedron) and OpenGL data output, though fragment count remains the same [S4, unofficial].
++- **Strengths:** Handles general curvilinear and unstructured grids directly without resampling [S4, unofficial]. Avoids visibility cycles and bow-tie artifacts [S1][S4, unofficial]. Consistent face triangulation prevents gaps/overlaps between adjacent cells [S1][S4, unofficial].
++- **Limitations:** Approximations in perspective views (linear interpolation of $\tau$ and $l$) can introduce errors like Mach bands [S3, book][S4, unofficial]. Hardware color interpolation is not mathematically equivalent to analytic integration unless strict conditions are met (orthogonal view, planar faces, linear scalar, constant color per cell) [S4, unofficial].
++- **When to use:** Curvilinear or unstructured grids with non-planar faces where visibility sorting is critical.
++- **When not to use:** Regular grids (use ray casting or texture-based methods) or when high accuracy in perspective views with non-linear transfer functions is required without hardware approximations [S3, book][S4, unofficial].
+ 
+ ## Background
+-- **Origin:** Developed for volume rendering of curvilinear and unstructured grids [S1][S3, unofficial]. Based on cell projection methods [S3, unofficial].
+-- **History:** Extended from methods assuming planar faces to handle non-planar quadrilateral faces [S3, unofficial]. Uses concepts from the Shirley and Tuchman method [S2, book][S3, unofficial] and BSP-MPVO sorting [S2, book][S3, unofficial].
+-- **Usage:** Used in scientific visualization for data on curvilinear grids, such as fluid dynamics simulations or structural mechanics [S1][S3, unofficial].
++The method was developed to address the limitations of cell projection on curvilinear and unstructured grids, where faces are not necessarily planar [S1][S4, unofficial]. It builds on earlier work by Shirley and Tuchman [S3, book] and the MPVO sorting algorithm [S4, unofficial]. The specific viewpoint-dependent subdivision strategy for non-planar faces was introduced in the context of volume rendering for curvilinear grids [S1, S2][S5, unofficial]. It allows for direct rendering of complex geometries like airplane wings or ship hulls without resampling [S4, unofficial].
+ 
+ ## Sources
+-[S1] Volume Rendering for Curvilinear and Unstructured Grids, https://www.sci.utah.edu/~csilva/papers/cgi2003.pdf, fetched 2026-10-27
+-[S2] Cell projection of meshes with non-planar faces, https://digital.library.unt.edu/ark:/67531/metadc1408947/?q=projected tetrahedra, fetched 2026-10-28 (book)
+-[S3] Cell projection of meshes with nonplanar faces, https://www.sciweavers.org/publications/cell-projection-meshes-non-planar-faces, fetched 2026-10-29 (unofficial)+[S1] Volume rendering for curvilinear and unstructured grids, https://doi.org/10.1109/cgi.2003.1214468, fetched 2026-10-24
++[S2] Volume Rendering for Curvilinear and Unstructured Grids, https://www.sci.utah.edu/~csilva/papers/cgi2003.pdf, fetched 2026-10-27
++[S3] Cell projection of meshes with non-planar faces, https://digital.library.unt.edu/ark:/67531/metadc1408947/?q=projected tetrahedra, fetched 2026-10-28 (book)
++[S4] Cell projection of meshes with nonplanar faces, https://www.sciweavers.org/publications/cell-projection-meshes-non-planar-faces, fetched 2026-10-29 (unofficial)
++[S5] Volume rendering for curvilinear and unstructured grids, https://www.researchgate.net/publication/4023713_Volume_rendering_for_curvilinear_and_unstructured_grids, fetched 2026-10-30 (unofficial)

@@ -1,0 +1,4442 @@
+# Voxel Engine (C++ / OpenGL)
+
+## Overview
+
+This is a C++ voxel engine (Minecraft-like) developed as a personal project to explore:
+
+- real-time rendering
+- procedural generation
+- engine architecture
+- performance optimization (CPU & GPU)
+
+The project uses modern C++ with OpenGL and includes ImGui for debugging tools.
+
+---
+
+## Showcase
+
+![Voxel Engine Biomes](./screenshots/snow_transition.png)
+
+> Voronoi-based biome system with smooth transitions and adaptive terrain generation
+
+---
+
+## Background
+
+This project started after following The Cherno OpenGL series:  
+https://www.youtube.com/watch?v=W3gAzLwfIP0&list=PLlrATfBNZ98foTJPJ_Ev03o2oq3-GGOS2
+
+It evolved from a learning project into a fully custom voxel engine featuring:
+
+- chunk streaming
+- multithreaded mesh generation
+- procedural terrain & biome systems
+- performance-focused architecture
+
+---
+
+## Tech Stack
+
+- C++ (C++17/20)
+- OpenGL
+- GLSL shaders
+- ImGui
+- GLM
+
+---
+
+## Features
+
+### World System
+- Chunk-based world streaming
+- Dynamic loading/unloading around player
+- Seamless chunk borders
+
+### Rendering
+- Separate pipelines:
+  - opaque geometry
+  - transparent geometry
+- Texture atlas
+- Frustum culling
+
+### Voxel System
+- Full 3D voxel grid
+- Face culling (only visible faces generated)
+- Neighbor-aware meshing
+
+### Multithreading
+- Worker thread pool for chunk meshing
+- Thread-safe job system
+- Asynchronous mesh generation
+
+---
+
+## Procedural Generation
+
+### Terrain
+- Perlin noise-based heightmap
+- Tuned frequencies & amplitudes for natural terrain
+
+### Biomes (NEW)
+- Voronoi-based biome distribution
+- Smooth blending between up to 4 biomes
+- Removal of Perlin "value continuity" limitation
+- More natural large-scale biome regions
+
+### Biome Blending
+- Multi-biome weight system
+- Noise-based border perturbation for organic transitions
+
+---
+
+## Architecture
+
+### Main Thread
+- Chunk management (load/unload)
+- Rendering (OpenGL)
+- GPU buffer updates
+
+### Worker Threads
+- Chunk mesh generation
+- Voxel → mesh conversion
+
+### Chunk Rendering
+Each chunk contains:
+- CPU voxel data
+- GPU buffers:
+  - opaque mesh
+  - transparent mesh
+
+→ ~2 draw calls per chunk
+
+---
+
+## Performance
+
+### Current
+- ~70–90 FPS stable
+- ~80 FPS in heavy biome transitions
+
+### Previous
+- ~20 FPS (before optimizations)
+
+### Improvements
+- Frustum culling
+- Multithreaded meshing
+- Controlled mesh generation per frame
+
+---
+
+## Current Bottlenecks
+
+GPU-bound:
+
+- high vertex count per chunk
+- many draw calls
+- no LOD system
+
+---
+
+## Limitations
+
+- No lighting system yet
+- No LOD
+- Greedy meshing not retained (cost > benefit)
+- GPU optimization still in progress
+
+---
+
+## Future Work
+
+- Vegetation system (trees, foliage)
+- Lighting (sun + block light)
+- LOD system
+- GPU optimizations (instancing / vertex pulling)
+- Procedural trees (seed-based generation)
+- Advanced biome system
+
+---
+
+## Design Notes
+
+- Perlin noise is used for terrain (continuous, smooth)
+- Voronoi noise is used for biome partitioning (discrete regions)
+- Engine focus has shifted:
+  
+> CPU optimization → GPU optimization
+
+### include/Atlas.h
+```
+#pragma once
+
+#include "Texture.h"
+
+class Atlas : public Texture
+{
+private:
+    unsigned int m_AtlasWidth;   // Blocks per rows
+    unsigned int m_AtlasHeight;  // Blocks per columns
+
+public:
+    Atlas(const std::string& path, unsigned int AtlasWidth, unsigned int AtlasHeight);
+    ~Atlas();
+
+    glm::vec2 GetUVCoords(const glm::vec2& baseUV, unsigned short blockID, int face) const;
+    int GetTextureID(unsigned short blockID, int face) const;
+
+    inline int GetWidth() const { return m_AtlasWidth; }
+    inline int GetHeight() const { return m_AtlasHeight; }
+};
+```
+
+### include/Camera.h
+```
+#pragma once
+
+#include "glm/glm.hpp"
+#include<iostream>
+
+class Camera
+{
+private:
+    glm::vec3 m_Position;
+
+    float m_Pitch; // rotation up/down
+    float m_Yaw;   // rotation left/right
+
+    float m_Speed;
+    float m_Sensitivity;
+
+public:
+    Camera(glm::vec3 position);
+    ~Camera();
+
+    glm::mat4 GetViewMatrix() const;
+    glm::vec3 GetForward() const;
+    glm::vec3 GetRight() const;
+
+    inline glm::vec3 GetPosition() const { return m_Position; }
+
+    void MoveForward(float deltaTime);
+    void MoveBackward(float deltaTime);
+    void MoveRight(float deltaTime);
+    void MoveLeft(float deltaTime);
+    void MoveUp(float deltaTime);
+    void MoveDown(float deltaTime);
+
+    void AddYaw(float offset);
+    void AddPitch(float offset);
+    
+};
+```
+
+### include/Chunk.h
+```
+#pragma once
+
+#include "Renderer.h"
+
+#include <random>
+#include <cstring>
+
+#include "VertexArray.h"
+#include "VertexBuffer.h"
+#include "IndexBuffer.h"
+#include "VertexBufferLayout.h"
+#include "Vertex.h"
+#include "Atlas.h"
+
+class World;
+
+class Chunk
+{
+public:
+    Chunk(int XWorldPos, int ZWorldPos, World& World);
+    ~Chunk();
+
+    static const int m_XSize = 16;
+    static const int m_YSize = 512;
+    static const int m_ZSize = 16;
+
+    void Generate(World& World);
+    void ApplyGenerate(const std::vector<unsigned short>& blocks, const std::vector<int>& heightTable, const int treeLevel);
+    void ApplyMesh(const std::vector< PackedVertex>& opaqueSSBO,
+        const std::vector<Vertex>& opaqueV, 
+        const std::vector<unsigned int>& opaqueI, 
+        const std::vector<Vertex>& transparentV, 
+        const std::vector<unsigned int>& transparentI);
+
+    unsigned short GetBlockLocal(int x, int y, int z) const;
+    int GetHeight(int x, int z) const;
+
+    inline int GetXWorldPos() const { return m_XWordPos; }
+    inline int GetZWorldPos() const { return m_ZWordPos; }
+
+    inline VertexArray* GetOpaqueEmptyVAO() const { return m_OpaqueEmptyVAO.get(); }
+    inline ShaderStorageBuffer* GetOpaqueSSBO() const { return m_OpaqueSSBO.get(); }
+    inline int GetOpaqueSSBOIndexCount() const { return m_OpaqueSSBOIndexCount; }
+
+    inline VertexArray* GetOpaqueVertexArray() const { return m_OpaqueVertexArray.get(); }
+    inline VertexBuffer* GetOpaqueVertexBuffer() const { return m_OpaqueVertexBuffer.get(); }
+    inline IndexBuffer* GetOpaqueIndexBuffer() const { return m_OpaqueIndexBuffer.get(); }
+
+    inline VertexArray* GetTransparentVertexArray() const { return m_TransparentVertexArray.get(); }
+    inline VertexBuffer* GetTransparentVertexBuffer() const { return m_TransparentVertexBuffer.get(); }
+    inline IndexBuffer* GetTransparentIndexBuffer() const { return m_TransparentIndexBuffer.get(); }
+
+    void SetNeedGeneration(bool state);
+    bool GetNeedGeneration() const;
+
+    void SetNeedRemesh(bool state);
+    bool GetNeedRemesh() const;
+
+    void SetTreeLevel(int level);
+    int GetTreeLevel() const;
+
+    inline bool IsMeshReady() const { return m_Loaded; }
+
+    // Mega SSBO
+    inline uint32_t GetMegaSSBOOffset() const { return m_MegaSSBOOffset; }
+    inline uint32_t GetMegaSSBOFaceCount() const { return m_MegaSSBOFaceCount; }
+    //inline void SetMegaSSBO(uint32_t offset, uint32_t faceCount) { m_MegaSSBOOffset = offset; m_MegaSSBOFaceCount = faceCount; }
+    void SetMegaSSBO(uint32_t offset, uint32_t faceCount);
+
+private:
+    unsigned short m_Blocks[m_XSize * m_YSize * m_ZSize] = { 0 }; // init with air
+    int m_XWordPos, m_ZWordPos;
+
+    // Mega SSBO
+    uint32_t m_MegaSSBOOffset = UINT32_MAX; // UINT32_MAX = not allocated yet
+    uint32_t m_MegaSSBOFaceCount = 0;
+
+    // Pipeline A : opaque classic blocks
+    std::unique_ptr<VertexArray> m_OpaqueEmptyVAO = nullptr;
+    std::unique_ptr<ShaderStorageBuffer> m_OpaqueSSBO = nullptr;
+    int m_OpaqueSSBOIndexCount = 0;
+
+    // Pipeline B : transparent or not classic meshed blocks
+    std::unique_ptr<VertexArray> m_OpaqueVertexArray = nullptr;
+    std::unique_ptr<VertexBuffer> m_OpaqueVertexBuffer = nullptr;
+    std::unique_ptr<IndexBuffer> m_OpaqueIndexBuffer = nullptr;
+
+    std::unique_ptr<VertexArray> m_TransparentVertexArray = nullptr;
+    std::unique_ptr<VertexBuffer> m_TransparentVertexBuffer = nullptr;
+    std::unique_ptr<IndexBuffer> m_TransparentIndexBuffer = nullptr;    
+
+    bool m_Loaded = false;
+    bool m_NeedGeneration = false;
+    bool m_NeedRemesh = false;
+    int m_TreeLevel = 0;
+
+    int m_HeightTable[m_XSize * m_ZSize] = { 0 };
+};
+```
+
+### include/DrawIndirectBuffer.h
+```
+#pragma once
+#include <glad/glad.h>
+
+#include <vector>
+
+struct DrawCommand
+{
+    uint32_t count;         // nbr of vertices (faceCount * 6), correspond to the size of the chunk in the mega SSBO
+    uint32_t instanceCount; // always 1
+    uint32_t first;         // offset in vertices in the mega SSBO (offset in the mega SSBO to get to the chunk)
+    uint32_t baseInstance;  // index of the chunk (to get his world pos)
+};
+
+class DrawIndirectBuffer
+{
+public:
+    DrawIndirectBuffer();
+    ~DrawIndirectBuffer();
+
+    void Clear();
+    void AddCommand(uint32_t faceCount, uint32_t offset, uint32_t chunkIndex);
+    void Upload();
+    void Bind() const;
+
+    inline int GetCommandCount() const { return m_Commands.size(); }
+    inline const std::vector<DrawCommand>& GetCommands() const { return m_Commands; }
+
+private:
+    GLuint m_RendererID;
+    std::vector<DrawCommand> m_Commands;
+};
+```
+
+### include/Frustum.h
+```
+#pragma once
+
+#include <glm/glm.hpp>
+
+class Chunk;
+
+struct Plane {
+    glm::vec3 normal;
+    float distance;
+};
+
+class Frustum
+{
+public:
+    Frustum(const glm::mat4& proj, const glm::mat4& view);
+    ~Frustum();
+
+    bool IsChunkInFrustum(float ChunkWorldX, float ChunkWorldZ);
+private:
+    Plane m_Planes[6]; // left, right, bottom, top, near, far
+};
+```
+
+### include/Generator.h
+```
+#pragma once
+
+#include "TerrainGenerator.h"
+#include "TreeGenerator.h"
+#include "Chunk.h"
+
+class World;
+
+class Generator
+{
+public:
+	Generator(World& world, int ChunkX, int ChunkZ);
+
+	void GenerateFromChunk();
+
+	inline const std::vector<unsigned short>& GetBlocks() const { return m_Blocks; }
+	inline const std::vector<int>& GetHeights() const { return m_HeightTable; }
+
+	inline std::vector<unsigned short>&& MoveBlocks() { return std::move(m_Blocks); }
+	inline std::vector<int>&& MoveHeights() { return std::move(m_HeightTable); }
+	inline const int GetTreeLevel() const { return m_TreeLevel; }
+
+private:
+	Noise::PerlinNoise m_PerlinNoise;
+	Noise::VoronoiNoise m_VoronoiNoise;
+
+	TerrainGenerator m_TerrainGenerator;
+	TreeGenerator m_TreeGenerator;
+
+	int m_ChunkX;
+	int m_ChunkZ;
+
+	std::vector<unsigned short> m_Blocks;
+	std::vector<int> m_HeightTable;
+
+	int m_TreeLevel = 0;
+};
+```
+
+### include/IndexBuffer.h
+```
+#pragma once
+
+#include<iostream>
+
+class IndexBuffer
+{
+private:
+	unsigned int m_RendererID;
+	unsigned int m_Count;
+
+public:
+	IndexBuffer(const unsigned int* data, unsigned int count);
+	~IndexBuffer();
+
+	void Reload(const unsigned int* data, unsigned int count) const;
+
+	void Bind() const;
+	void Unbind() const;
+
+	inline unsigned int GetCount() const { return m_Count; }
+};
+```
+
+### include/MegaSSBO.h
+```
+#pragma once
+
+#include <glad/glad.h>
+
+#include "Vertex.h"
+
+#include <vector>
+#include <list>
+
+class MegaSSBO
+{
+public:
+    // Size of the mega buffer in terme of face nbr
+    static constexpr uint32_t MAX_FACES = 20'000'000;
+
+    MegaSSBO();
+    ~MegaSSBO();
+
+    void Move(uint32_t srcOffset, uint32_t dstOffset, uint32_t faceCount);
+    void ResetFreeList(uint32_t usedFaces);
+
+    // Allocate one bloc for one chunk, return the offset in terme of face nbr
+    uint32_t Allocate(uint32_t faceCount);
+
+    // Free the bloc of a chunk
+    void Free(uint32_t offset, uint32_t faceCount);
+
+    // Upload the faces of a chunk at his offset
+    void Upload(const void* data, uint32_t faceCount, uint32_t offset);
+
+    void Bind(unsigned int bindingPoint) const;
+
+private:
+    void Merge(); // Merge the adjacent free blocks
+
+    struct FreeBlock {
+        uint32_t offset;
+        uint32_t size;
+    };
+
+    GLuint m_RendererID;
+    std::list<FreeBlock> m_FreeList;
+};
+```
+
+### include/Mesh.h
+```
+#pragma once
+
+#include "Vertex.h"
+#include "Chunk.h"
+#include "Atlas.h"
+
+#include "VertexBuffer.h"
+#include "VertexBufferLayout.h"
+
+#include<iostream>
+
+struct BlockInfo
+{
+	bool pipelineA = true;
+	bool pipelineB = false;
+	bool pipelineC = false;
+
+	bool transparent = false;
+	bool blended = false;
+};
+
+class Mesh
+{
+public:
+	Mesh();
+	~Mesh();
+
+	unsigned short GetBlockSafe(int x, int y, int z, const Chunk& center, const Chunk* left, const Chunk* right, const Chunk* front, const Chunk* back) const;
+	unsigned char IsFaceVisible(unsigned short blockID, int x, int y, int z, int face, const Chunk& center, const Chunk* left, const Chunk* right, const Chunk* front, const Chunk* back) const;
+	void AddFaceVerticesAndIndices(const Chunk& chunk, int x, int y, int z, int face, unsigned short blockID, const Atlas* Atlas, bool Blended);
+	void AddPipelineAFaces(const Chunk& chunk, int x, int y, int z, int face, unsigned short blockID, const Atlas* Atlas);
+	void MeshFromChunk(const Atlas* Atlas, const Chunk& center, const Chunk* left, const Chunk* right, const Chunk* front, const Chunk* back);
+
+	inline const std::vector<PackedVertex>& GetOpaqueSSBO() const { return m_OpaqueSSBO; }
+	inline const std::vector<Vertex>& GetOpaqueVertices() const { return m_OpaqueVertices; };
+	inline const std::vector<unsigned int>& GetOpaqueIndices() const { return m_OpaqueIndices; };
+	inline const std::vector<Vertex>& GetTransparentVertices() const { return m_TransparentVertices; };
+	inline const std::vector<unsigned int>& GetTransparentIndices() const { return m_TransparentIndices; };
+
+private:
+
+	//Pipeline A
+	std::vector<PackedVertex> m_OpaqueSSBO;
+
+	//Pipeline B
+	std::vector<Vertex> m_OpaqueVertices;
+	std::vector<unsigned int> m_OpaqueIndices;
+	std::vector<Vertex> m_TransparentVertices;
+	std::vector<unsigned int> m_TransparentIndices;
+
+	BlockInfo m_BlockTable[256];
+};
+```
+
+### include/PerlinNoise.h
+```
+#pragma once
+
+#include <cmath>
+#include <vector>
+#include <algorithm>
+#include <numeric>
+#include <random>
+
+namespace Noise {
+
+	class PerlinNoise
+	{
+	public:
+		PerlinNoise(unsigned int Seed);
+
+		void InitPermutation();
+		float Fade(float t) const;
+		float Lerp(float t, float a, float b) const;
+		float Grad(int hash, float x, float y) const;
+		float Perlin(float x, float y) const;
+
+	private:
+		std::vector<int> m_Permutation;
+		unsigned int m_Seed;
+	};
+}
+```
+
+### include/Renderer.h
+```
+#pragma once
+
+#include <glad/glad.h>
+
+#include "VertexArray.h"
+#include "IndexBuffer.h"
+#include "Shader.h"
+#include "ShaderStorageBuffer.h"
+#include "MegaSSBO.h"
+#include "DrawIndirectBuffer.h"
+
+#define ASSERT(x) if (!(x)) __debugbreak();  // ce sont des c++ macros
+#define GLCall(x) GLClearError();\
+    x;\
+    ASSERT(GLLogCall(#x, __FILE__, __LINE__))
+
+void GLClearError();
+
+bool GLLogCall(const char* function, const char* file, int line);
+
+class Renderer
+{
+public:
+    void Clear() const;
+    void Draw(const VertexArray& va, const IndexBuffer& ib, const Shader& shader) const;
+    void Draw(const VertexArray& va, const ShaderStorageBuffer& ssbo, const Shader& shader, int vertexCount) const;
+    void Draw(const VertexArray& va, const MegaSSBO& ssbo, const Shader& shader, const DrawIndirectBuffer& dib) const;
+};
+```
+
+### include/Shader.h
+```
+#pragma once
+
+#include <string>
+#include <unordered_map>
+
+#include <glm/glm.hpp>
+
+struct ShaderProgramSource
+{
+	std::string VetexSource;
+	std::string FragmentSource;
+};
+
+class Shader
+{
+private:
+	std::string m_FilePath;
+	unsigned int m_RendererID;
+	mutable std::unordered_map<std::string, int> m_UniformLocationCache;
+	// mutable means that it can be modified by a const fct !!!
+public:
+	Shader(const std::string& filepath);
+	~Shader();
+
+	void Bind() const;
+	void Unbind() const;
+
+	// set uniforms
+	void SetUniform1i(const std::string& name, int value);
+	void SetUniform1f(const std::string& name, float value);
+	void SetUniform2f(const std::string& name, float v0, float v1);
+	void SetUniform3f(const std::string& name, float v0, float v1, float v3);
+	void SetUniform4f(const std::string& name, float v0, float v1, float v2, float v3);
+	void SetUniformMat4f(const std::string& name, const glm::mat4& matrix);
+private:
+	ShaderProgramSource ParseShader(const std::string& filepath);
+	unsigned int CompileShader(unsigned int type, const std::string& source);
+	unsigned int CreateShader(const std::string& vertexShader, const std::string& fragmentShader);
+	unsigned int GetUniformLocation(const std::string& name) const;
+};
+```
+
+### include/ShaderStorageBuffer.h
+```
+#pragma once
+
+class ShaderStorageBuffer
+{
+public:
+    ShaderStorageBuffer();
+    ~ShaderStorageBuffer();
+
+    void Bind(unsigned int bindingPoint) const;
+    void Unbind() const;
+
+    void SetData(const void* data, unsigned int size);
+    void UpdateData(const void* data, unsigned int size, unsigned int offset);
+
+    inline unsigned int GetID() const { return m_RendererID; }
+
+private:
+    unsigned int m_RendererID;
+};
+```
+
+### include/TerrainGenerator.h
+```
+#pragma once
+
+#include "PerlinNoise.h"
+#include "VoronoiNoise.h"
+
+#include <cmath>
+#include <algorithm>
+
+struct BiomeProfile
+{
+	float (*heightFunc)(float base);
+
+	int topBlock;
+	int layer1;
+	int layer2;
+
+	int treeLevel = 0;
+};
+
+struct HeightAndBiome
+{
+    float height;
+    BiomeProfile biome;
+};
+
+class TerrainGenerator
+{
+public:
+
+	// Constructor
+	TerrainGenerator(
+		int chunkX,
+		int chunkZ,
+		const Noise::PerlinNoise& noise,
+		const Noise::VoronoiNoise& voronoiNoise,
+		float baseFreq = 0.01f,
+		float detailFreq = 0.05f,
+		float globalBiomeFreq = 0.0005f,
+		float interBiomeFreq = 0.003f,
+		float biomeSharpness = 5.0f,
+		float blendWidth = 100.0f
+	);
+
+	// Init
+	static void InitBiomes();
+
+	// Core
+	float GetHeight(int x, int z);
+	BiomeProfile GetBiomeProfile(int x, int z);
+	HeightAndBiome GetHeightAndBiome(int x, int z);
+
+private:
+
+	// Data
+	int m_ChunkX;
+	int m_ChunkZ;
+
+	const Noise::PerlinNoise& m_Noise;
+	const Noise::VoronoiNoise& m_VoronoiNoise;
+
+	// Config
+	float m_BaseFreq;
+	float m_DetailFreq;
+	float m_GlobalBiomeFreq;
+	float m_InterBiomeFreq;
+	float m_BiomeSharpness;
+	float m_GlobalBlendWidth;
+
+	// Biomes
+	static BiomeProfile m_Biomes[4][4]; // [global][inter]
+
+	// Internal
+	float GetGlobalBiomeNoise(int x, int z);
+
+	float GetInterBiomeNoise(int x, int z);
+
+	void ComputeWeights(float n, float weights[4]);
+};
+```
+
+### include/Texture.h
+```
+#pragma once
+
+#include "Renderer.h"
+class Texture
+{
+private:
+	unsigned int m_RendererID;
+	std::string m_FilePath;
+	unsigned char* m_LocalBuffer;
+	int m_Width, m_Height, m_BPP;
+
+public:
+	Texture(const std::string& path);
+	~Texture();
+
+	void Bind(unsigned int slot = 0) const;
+	void Unbind() const;
+
+	inline int GetWidth() const { return m_Width; }
+	inline int GetHeight() const { return m_Height; }
+};
+```
+
+### include/ThreadSafeQueue.h
+```
+#pragma once
+
+#include <queue>
+#include <mutex>
+#include <optional>
+#include <condition_variable>
+
+template<typename T>
+class ThreadSafeQueue {
+public:
+    void Push(T value) {
+        {
+            std::lock_guard<std::mutex> lock(m_Mutex);
+            m_Queue.push(std::move(value));
+        }
+        m_ConditionVar.notify_one(); // Wake up one worker
+    }
+
+    std::optional<T> TryPop() {
+        std::lock_guard<std::mutex> lock(m_Mutex);
+        if (m_Queue.empty())
+            return std::nullopt;
+        T value = std::move(m_Queue.front());
+        m_Queue.pop();
+        return value;
+    }
+
+    std::optional<T> Pop()
+    {
+        std::unique_lock<std::mutex> lock(m_Mutex);
+
+        m_ConditionVar.wait(lock, [this]()
+            {
+                return !m_Queue.empty() || m_Stopped;
+            });
+
+        if (m_Stopped && m_Queue.empty())
+            return std::nullopt;
+
+        T value = std::move(m_Queue.front());
+        m_Queue.pop();
+        return value;
+    }
+
+    void Stop()
+    {
+        m_Stopped = true;
+        m_ConditionVar.notify_all();
+    }   
+
+    bool Empty() {
+        std::lock_guard<std::mutex> lock(m_Mutex);
+        return m_Queue.empty();
+    }
+
+private:
+    std::queue<T> m_Queue;
+    std::mutex m_Mutex;
+    std::condition_variable m_ConditionVar;
+    std::atomic<bool> m_Stopped = false;
+};
+```
+
+### include/ThreadSafeSet.h
+```
+#pragma once
+
+#include <unordered_set>
+#include <mutex>
+#include <optional>
+
+template<typename T, typename Hash = std::hash<T>>
+class ThreadSafeSet {
+public:
+    void Push(T value) {
+        std::lock_guard<std::mutex> lock(m_Mutex);
+        m_Set.insert(std::move(value)); // Ignore if already present
+    }
+
+    std::optional<T> TryPop() {
+        std::lock_guard<std::mutex> lock(m_Mutex);
+        if (m_Set.empty())
+            return std::nullopt;
+        T value = *m_Set.begin();
+        m_Set.erase(m_Set.begin());
+        return value;
+    }
+
+    bool Empty() {
+        std::lock_guard<std::mutex> lock(m_Mutex);
+        return m_Set.empty();
+    }
+
+private:
+    std::unordered_set<T, Hash> m_Set;
+    std::mutex m_Mutex;
+};
+```
+
+### include/TreeGenerator.h
+```
+#pragma once
+
+#include "glm/glm.hpp"
+
+#include <vector>
+
+#include "Chunk.h"
+#include "TerrainGenerator.h"
+#include "TreeMaker.h"
+
+class World;
+
+class TreeGenerator
+{
+public:
+    TreeGenerator(unsigned int seed, int cellSize = 16);
+
+    //void GenerateChunkTrees(int chunkX, int chunkZ, int treeLevel, std::vector<int>& heightTable);
+    void GenerateChunkTrees(int chunkX, int chunkZ, int* treeLevel, TerrainGenerator& terrainGenerator);
+    /*
+    inline const std::vector<unsigned short>& GetBlocks() const { return m_Blocks; }
+    inline const std::vector<glm::ivec3>& GetOutsideLeaves() const { return m_OutsideLeaves; }
+    */
+    inline const std::vector<unsigned char>& GetNeighorsBlocks() const { return m_NeighborsBlocks; }
+    inline const std::vector<unsigned short>& GetBlocks() const { return m_Blocks; }
+
+private:
+    unsigned int m_Seed;
+    int m_CellSize;
+    TreeMaker m_TreeMaker;
+    /*
+    std::vector<unsigned short> m_Blocks;
+    std::vector<glm::ivec3> m_OutsideLeaves;
+    */
+    std::vector<unsigned char> m_NeighborsBlocks;
+    std::vector<unsigned short> m_Blocks;
+
+private:
+    int Hash(int x, int z, int i) const;
+    int DeriveHash(int h, int salt) const;
+
+    //void PlaceTree(std::vector<int>& heightTable, int worldX, int worldZ, int hash);
+    void PlaceTree(int chunkX, int chunkZ, int localChunkX, int localChunkZ, int chunkQuarter, int hash, TerrainGenerator& terrainGenerator);
+
+    float RandomFloat(int hash) const;
+};
+```
+
+### include/TreeMaker.h
+```
+#pragma once
+
+#include "Chunk.h"
+
+#include <vector>
+
+class TreeMaker
+{
+public:
+	TreeMaker();
+
+	void MakeTree(std::vector<unsigned short>& blocks, int x, int y, int z, int treeType, int hash);
+
+private:
+	int DeriveHash(int h, int salt) const;
+	float RandomFloat(int h) const;
+
+	void PlaceBranch(std::vector<unsigned short>& blocks, int x, int y, int z, int height, int hash);
+	void PlaceLeaves(std::vector<unsigned short>& blocks, int x, int y, int z, int height, int hash);
+	void PlaceSplit(std::vector<unsigned short>& blocks, int x, int y, int z, int segmentLength, int depth, int hash);
+};
+```
+
+### include/Vertex.h
+```
+#pragma once
+
+#include "glm/glm.hpp"
+
+struct Vertex
+{
+    float x, y, z;
+    float u, v;
+};
+
+
+
+// Pipeline A : opaque normal blocks, packed in the SSBO
+// 1 uint32 par vertex, layout :
+// bits  0- 4 : x local   (0-31)
+// bits  5- 9 : z local   (0-31)
+// bits 10-18 : y         (0-511)
+// bits 19-21 : face id   (0-5)
+// bits 22-27 : texture id(0-63)
+// bits 28-29 : AO level  (0-3)
+// bits 30-31 : free
+struct PackedVertex
+{
+    uint32_t data;
+
+    static PackedVertex Pack(int x, int y, int z, int faceId, int textureId, int ao)
+    {
+        PackedVertex v;
+        v.data = (x & 31)
+            | ((z & 31) << 5)
+            | ((y & 511) << 10)
+            | ((faceId & 7) << 19)
+            | ((textureId & 63) << 22)
+            | ((ao & 3) << 28);
+        return v;
+    }
+};
+```
+
+### include/VertexArray.h
+```
+#pragma once
+
+#include<iostream>
+
+#include "VertexBuffer.h"
+
+class VertexBufferLayout;  // equivalent dun include(avec le include du cpp) mais evite une boucle infini dinclude entre VertexBufferLayout et Renderer
+
+class VertexArray
+{
+private:
+	unsigned int m_RendererID;
+
+public:
+	VertexArray();
+	~VertexArray();
+
+	void AddBuffer(const VertexBuffer& vb, const VertexBufferLayout& layout);
+
+	void Bind() const;
+	void Unbind() const;
+};
+```
+
+### include/VertexBuffer.h
+```
+#pragma once
+
+#include<iostream>
+
+class VertexBuffer
+{
+private:
+	unsigned int m_RendererID;
+
+public:
+	VertexBuffer(const void* data, unsigned int size);
+	~VertexBuffer();
+
+	void Reload(const void* data, unsigned int size) const;
+
+	void Bind() const;
+	void Unbind() const;
+};
+```
+
+### include/VertexBufferLayout.h
+```
+#pragma once
+
+#include <vector>
+#include "Renderer.h"
+
+#include "Vertex.h"
+
+struct VertexBufferElement
+{
+	unsigned int type;
+	unsigned int count;
+	unsigned char normalized;
+
+	static unsigned int GetSizeOfType(unsigned int type)
+	{
+		switch (type)
+		{
+			case GL_FLOAT:         return 4;  // sizeof(GLfloat)
+			case GL_UNSIGNED_INT:  return 4;  // sizeof(GLuint)
+			case GL_UNSIGNED_BYTE: return 1;  // sizeof(GLbyte)
+		}
+		ASSERT(false);
+		return 0;
+	}
+};
+
+class VertexBufferLayout
+{
+private:
+	std::vector<VertexBufferElement> m_Elements;
+	unsigned int m_Stride;
+
+public:
+	VertexBufferLayout()
+		: m_Stride(0) {}
+
+	template<typename T>
+	void Push(unsigned int count)
+	{
+		static_assert(false);
+	}
+
+	template<>
+	void Push<float>(unsigned int count)
+	{
+		m_Elements.push_back({ GL_FLOAT, count, GL_FALSE });
+		m_Stride += count * VertexBufferElement::GetSizeOfType(GL_FLOAT);
+	}
+
+	template<>
+	void Push<unsigned int>(unsigned int count)
+	{
+		m_Elements.push_back({ GL_UNSIGNED_INT, count, GL_FALSE });
+		m_Stride += count * VertexBufferElement::GetSizeOfType(GL_UNSIGNED_INT);
+	}
+
+	template<>
+	void Push<unsigned char>(unsigned int count)
+	{
+		m_Elements.push_back({ GL_UNSIGNED_BYTE, count, GL_TRUE });
+		m_Stride += count * VertexBufferElement::GetSizeOfType(GL_UNSIGNED_BYTE);
+	}
+
+	void PushVertex()
+	{
+		static_assert(sizeof(Vertex) == sizeof(float) * 5, "Vertex size is unexpected");
+
+		Push<float>(3); // Position
+		Push<float>(2); // TexCoords
+	}
+
+	inline const std::vector<VertexBufferElement>& GetElements() const { return m_Elements; }
+	inline unsigned int GetStrid() const { return m_Stride;  }
+};
+```
+
+### include/VoronoiNoise.h
+```
+#pragma once
+
+#include <algorithm>   // std::sort
+#include <cmath>       // std::floor, std::sqrt
+#include <cfloat>      // FLT_MAX
+#include <utility>     // std::pair
+
+namespace Noise {
+
+    struct Candidate
+    {
+        float dist;
+        int biomeID;
+    };
+
+    class VoronoiNoise
+    {
+    public:
+        VoronoiNoise(unsigned int seed);
+
+        void GetBiomes(float x, float z, float weights[4]) const;
+
+    private:
+        unsigned int m_Seed;
+
+        int Hash(int x, int z) const;
+        std::pair<float, float> GetCentroid(int cellX, int cellZ) const;
+    };
+}
+```
+
+### include/World.h
+```
+#pragma once
+
+#include <vector>
+#include <functional>
+#include <string>
+#include <iostream>
+#include <algorithm>
+#include <cmath>
+
+#include "Chunk.h"
+#include "Mesh.h"
+#include "Atlas.h"
+#include "TerrainGenerator.h"
+#include "TreeGenerator.h"
+#include "Frustum.h"
+#include "ThreadSafeQueue.h"
+#include "Generator.h"
+#include "MegaSSBO.h"
+#include "DrawIndirectBuffer.h"
+
+#include <thread>
+#include <atomic>
+
+enum JobType{ GenerateJobType, MeshJobType };
+
+struct ChunkPosition
+{
+	int x;
+	int z;
+
+	bool operator==(const ChunkPosition& other) const
+	{
+		return x == other.x && z == other.z;
+	}
+};
+
+struct ChunkPositionHash
+{
+	std::size_t operator()(const ChunkPosition& pos) const
+	{
+		std::size_t h1 = std::hash<int>()(pos.x);
+		std::size_t h2 = std::hash<int>()(pos.z);
+
+		return h1 ^ (h2 << 1); // shift + xor
+	}
+};
+
+struct WorkerJob
+{
+	JobType type;
+
+	ChunkPosition pos;
+
+	// Generate
+
+	// Mesh
+	std::shared_ptr<Chunk> center;
+	std::shared_ptr<Chunk> left;
+	std::shared_ptr<Chunk> right;
+	std::shared_ptr<Chunk> front;
+	std::shared_ptr<Chunk> back;
+};
+
+struct WorkerResult
+{
+	JobType type;
+
+	ChunkPosition pos;
+
+	// Generate
+	std::vector<unsigned short> blocks;
+	std::vector<int> heightTable;
+	int treeLevel;
+
+	// Mesh
+	std::vector<PackedVertex> opaqueSSBO;
+
+	std::vector<Vertex> opaqueVertices;
+	std::vector<unsigned int> opaqueIndices;
+
+	std::vector<Vertex> transparentVertices;
+	std::vector<unsigned int> transparentIndices;
+};
+
+class World
+{
+public:
+	World(int RenderDistance, std::shared_ptr<Atlas> Atlas, unsigned int Seed);
+	~World();
+
+	void Load(const glm::vec3& CameraChunkPosition);
+	void Draw(const glm::vec3& CameraChunkPosition, Shader* shader, Shader* SsboShader, const glm::mat4& View, const glm::mat4& Proj);
+	void WorkerLoop();
+
+	void CompactMegaSSBO();
+	int GetHeight(int x, int z) const;
+
+	inline const unsigned int GetSeed() const { return m_Seed; }
+
+	inline const Noise::PerlinNoise& GetPerlinNoise() const { return m_PerlinNoise; }
+	inline const Noise::VoronoiNoise& GetVoronoiNoise() const { return m_VoronoiNoise; }
+
+private:
+	std::unordered_map<ChunkPosition, std::shared_ptr<Chunk>, ChunkPositionHash> m_Chunks;
+	std::unique_ptr<Renderer> m_Renderer;
+
+	std::shared_ptr<Atlas> m_Texture;
+
+	// Buffers
+	MegaSSBO m_MegaSSBO;
+	DrawIndirectBuffer m_DrawIndirectBuffer;
+	VertexArray m_EmptyVAO;
+
+	int m_RenderDistance;
+	unsigned int m_Seed;
+
+	glm::vec2 m_LastCamChunkPos = { INT_MAX, INT_MAX };
+
+	Noise::PerlinNoise m_PerlinNoise;
+	Noise::VoronoiNoise m_VoronoiNoise;
+
+	std::vector<std::shared_ptr<Chunk>> m_OrderedChunks;
+	//int m_MaxGeneratePerFrame = 2; // 2 generate per frame max  // We dont want this anymore, cause we want the generate part to be a priority
+	int m_MaxRemeshPerFrame = 2; // 2 mesh per frame max
+
+	ThreadSafeQueue<WorkerJob> m_JobQueue;
+	ThreadSafeQueue<WorkerResult> m_ResultQueue;
+
+	std::vector<std::thread> m_Workers;
+	std::atomic<bool> m_Stopped = false;
+};
+```
+
+### src/Atlas.cpp
+```
+#include "Atlas.h"
+
+Atlas::Atlas(const std::string& path, unsigned int atlasWidth, unsigned int atlasHeight)
+    : Texture(path), m_AtlasWidth(atlasWidth), m_AtlasHeight(atlasHeight)
+{
+
+}
+
+Atlas::~Atlas()
+{
+
+}
+
+glm::vec2 Atlas::GetUVCoords(const glm::vec2& baseUV, unsigned short blockID, int face) const
+{
+    int TexIndex=0;
+    switch (blockID)
+    {
+    case 1:  //Grass
+        switch (face)
+        {
+        case 0: case 1: case 4: case 5: // +X, -X, +Z, -Z (side)
+            TexIndex = 1;
+            break;
+        case 2: // +Y (top)
+            TexIndex = 0;
+            break;
+        case 3: // -Y (bottom)
+            TexIndex = 2;
+            break;
+        }
+        break;
+
+    case 2:  //Dirt
+        TexIndex = 2;
+        break;
+
+    case 3:  //Stone
+        TexIndex = 3;
+        break;
+
+    case 4: //Sand
+        TexIndex = 4;
+        break;
+
+    case 5: //Snow
+        switch (face)
+        {
+        case 0: case 1: case 4: case 5: // +X, -X, +Z, -Z (side)
+            TexIndex = 6;
+            break;
+        case 2: // +Y (top)
+            TexIndex = 5;
+            break;
+        case 3: // -Y (bottom)
+            TexIndex = 2;
+            break;
+        }
+        break;
+
+    case 6: //Ice
+        TexIndex = 7;
+        break;
+
+    case 7: //RedSand
+        TexIndex = 8;
+        break;
+        
+    case 8: //RedNetherrack
+        switch (face)
+        {
+        case 0: case 1: case 4: case 5: // +X, -X, +Z, -Z (side)
+            TexIndex = 10;
+            break;
+        case 2: // +Y (top)
+            TexIndex = 9;
+            break;
+        case 3: // -Y (bottom)
+            TexIndex = 11;
+            break;
+        }
+        break;
+
+    case 9: //Podzol
+        switch (face)
+        {
+        case 0: case 1: case 4: case 5: // +X, -X, +Z, -Z (side)
+            TexIndex = 13;
+            break;
+        case 2: // +Y (top)
+            TexIndex = 12;
+            break;
+        case 3: // -Y (bottom)
+            TexIndex = 2;
+            break;
+        }
+        break;
+
+    case 10: //Mycelium
+        switch (face)
+        {
+        case 0: case 1: case 4: case 5: // +X, -X, +Z, -Z (side)
+            TexIndex = 15;
+            break;
+        case 2: // +Y (top)
+            TexIndex = 14;
+            break;
+        case 3: // -Y (bottom)
+            TexIndex = 2;
+            break;
+        }
+        break;
+
+    case 11: //Tree
+        switch (face)
+        {
+        case 0: case 1: case 4: case 5: // +X, -X, +Z, -Z (side)
+            TexIndex = 17;
+            break;
+        case 2: case 3: // +Y, -Y (top and bottom)
+            TexIndex = 16;
+            break;
+        }
+        break;
+
+    case 12: //Leaves
+        TexIndex = 18;
+        break;
+    }
+    float TileWidth = 1.0f / m_AtlasWidth;
+    float TileHeight = 1.0f / m_AtlasHeight;
+
+    unsigned int TexX = TexIndex % m_AtlasWidth;
+    unsigned int TexY = TexIndex / m_AtlasWidth; // si nécessaire, inverser pour OpenGL bottom-left
+
+    glm::vec2 uv;
+    uv.x = baseUV.x * TileWidth + TexX * TileWidth;
+    uv.y = baseUV.y * TileHeight + TexY * TileHeight;
+
+    return uv;
+}
+
+int Atlas::GetTextureID(unsigned short blockID, int face) const
+{
+    int TexIndex = 0;
+    switch (blockID)
+    {
+    case 1:  //Grass
+        switch (face)
+        {
+        case 0: case 1: case 4: case 5: // +X, -X, +Z, -Z (side)
+            TexIndex = 1;
+            break;
+        case 2: // +Y (top)
+            TexIndex = 0;
+            break;
+        case 3: // -Y (bottom)
+            TexIndex = 2;
+            break;
+        }
+        break;
+
+    case 2:  //Dirt
+        TexIndex = 2;
+        break;
+
+    case 3:  //Stone
+        TexIndex = 3;
+        break;
+
+    case 4: //Sand
+        TexIndex = 4;
+        break;
+
+    case 5: //Snow
+        switch (face)
+        {
+        case 0: case 1: case 4: case 5: // +X, -X, +Z, -Z (side)
+            TexIndex = 6;
+            break;
+        case 2: // +Y (top)
+            TexIndex = 5;
+            break;
+        case 3: // -Y (bottom)
+            TexIndex = 2;
+            break;
+        }
+        break;
+
+    case 6: //Ice
+        TexIndex = 7;
+        break;
+
+    case 7: //RedSand
+        TexIndex = 8;
+        break;
+
+    case 8: //RedNetherrack
+        switch (face)
+        {
+        case 0: case 1: case 4: case 5: // +X, -X, +Z, -Z (side)
+            TexIndex = 10;
+            break;
+        case 2: // +Y (top)
+            TexIndex = 9;
+            break;
+        case 3: // -Y (bottom)
+            TexIndex = 11;
+            break;
+        }
+        break;
+
+    case 9: //Podzol
+        switch (face)
+        {
+        case 0: case 1: case 4: case 5: // +X, -X, +Z, -Z (side)
+            TexIndex = 13;
+            break;
+        case 2: // +Y (top)
+            TexIndex = 12;
+            break;
+        case 3: // -Y (bottom)
+            TexIndex = 2;
+            break;
+        }
+        break;
+
+    case 10: //Mycelium
+        switch (face)
+        {
+        case 0: case 1: case 4: case 5: // +X, -X, +Z, -Z (side)
+            TexIndex = 15;
+            break;
+        case 2: // +Y (top)
+            TexIndex = 14;
+            break;
+        case 3: // -Y (bottom)
+            TexIndex = 2;
+            break;
+        }
+        break;
+
+    case 11: //Tree
+        switch (face)
+        {
+        case 0: case 1: case 4: case 5: // +X, -X, +Z, -Z (side)
+            TexIndex = 17;
+            break;
+        case 2: case 3: // +Y, -Y (top and bottom)
+            TexIndex = 16;
+            break;
+        }
+        break;
+
+    case 12: //Leaves
+        TexIndex = 18;
+        break;
+    }
+    
+    return TexIndex;
+}
+```
+
+### src/Camera.cpp
+```
+#include "Camera.h"
+
+#include "glm/gtc/matrix_transform.hpp"
+
+Camera::Camera(glm::vec3 position)
+    : m_Position(position),
+    m_Pitch(0.0f),
+    m_Yaw(-90.0f),
+    m_Speed(45.0f),
+    m_Sensitivity(0.1f)
+{
+
+}
+
+Camera::~Camera()
+{
+
+}
+
+void Camera::MoveForward(float dt)
+{
+    m_Position += GetForward() * m_Speed * dt;
+}
+
+void Camera::MoveBackward(float dt)
+{
+    m_Position -= GetForward() * m_Speed * dt;
+}
+
+void Camera::MoveRight(float dt)
+{
+    m_Position += GetRight() * m_Speed * dt;
+}
+
+void Camera::MoveLeft(float dt)
+{
+    m_Position -= GetRight() * m_Speed * dt;
+}
+
+void Camera::MoveUp(float dt)
+{
+    m_Position += glm::vec3(0, 1, 0) * m_Speed * dt;
+}
+
+void Camera::MoveDown(float dt)
+{
+    m_Position -= glm::vec3(0, 1, 0) * m_Speed * dt;
+}
+
+
+
+void Camera::AddYaw(float offset)
+{
+    m_Yaw += offset * m_Sensitivity;
+}
+
+void Camera::AddPitch(float offset)
+{
+    m_Pitch += offset * m_Sensitivity;
+
+    if (m_Pitch > 89.0f) m_Pitch = 89.0f;
+    if (m_Pitch < -89.0f) m_Pitch = -89.0f;
+}
+
+
+
+glm::vec3 Camera::GetForward() const
+{
+    glm::vec3 Forward;
+
+    Forward.x = cos(glm::radians(m_Yaw)) * cos(glm::radians(m_Pitch));
+    Forward.y = sin(glm::radians(m_Pitch));
+    Forward.z = sin(glm::radians(m_Yaw)) * cos(glm::radians(m_Pitch));
+
+    return glm::normalize(Forward);
+}
+
+glm::vec3 Camera::GetRight() const
+{
+    return glm::normalize(glm::cross(GetForward(), glm::vec3(0, 1, 0)));
+}
+
+glm::mat4 Camera::GetViewMatrix() const
+{
+    return glm::lookAt(m_Position, m_Position + GetForward(), glm::vec3(0, 1, 0));
+}
+```
+
+### src/Chunk.cpp
+```
+#include "Chunk.h"
+
+#include "Mesh.h"
+#include "World.h"
+
+#include "Generator.h"
+
+Chunk::Chunk(int XWorldPos, int ZWorldPos, World& World)
+	: m_XWordPos(XWorldPos), m_ZWordPos(ZWorldPos)
+{
+	//Generate(World);
+}
+
+Chunk::~Chunk()
+{
+
+}
+
+void Chunk::Generate(World& World) // Used before multithreading implementation, useless now
+{
+	Generator generator(World, m_XWordPos, m_ZWordPos);
+	generator.GenerateFromChunk();
+	ApplyGenerate(generator.GetBlocks(), generator.GetHeights(), generator.GetTreeLevel());
+}
+
+void Chunk::ApplyGenerate(const std::vector<unsigned short>& blocks, const std::vector<int>& heightTable, const int treeLevel) // can potentially be optimized
+{
+	memcpy(m_Blocks, blocks.data(), sizeof(unsigned short) * m_XSize * m_YSize * m_ZSize);
+	memcpy(m_HeightTable, heightTable.data(), sizeof(int) * Chunk::m_XSize * Chunk::m_ZSize);
+	m_TreeLevel = treeLevel;
+}
+
+void Chunk::ApplyMesh(const std::vector<PackedVertex>& opaqueSSBO,
+	const std::vector<Vertex>& opaqueV, 
+	const std::vector<unsigned int>& opaqueI, 
+	const std::vector<Vertex>& transparentV, 
+	const std::vector<unsigned int>& transparentI)
+{
+	// Pipeline A 
+	/*
+	m_OpaqueEmptyVAO = std::make_unique<VertexArray>();
+	m_OpaqueSSBO = std::make_unique<ShaderStorageBuffer>();
+	m_OpaqueSSBO->SetData(opaqueSSBO.data(), opaqueSSBO.size() * sizeof(PackedVertex));
+
+	m_OpaqueSSBOIndexCount = opaqueSSBO.size() * 6; // We have 4 vertices for heach faces, and so 6 indices for heach faces, thats why we do faces * 6 = indices count
+	*/
+
+	// Pipeline B and C
+	/*
+	VertexBufferLayout layout;
+	layout.PushVertex();
+
+	// Opaque
+	m_OpaqueVertexArray = std::make_unique<VertexArray>();
+	m_OpaqueVertexBuffer = std::make_unique<VertexBuffer>(opaqueV.data(), opaqueV.size() * sizeof(Vertex));
+	m_OpaqueVertexArray->AddBuffer(*m_OpaqueVertexBuffer, layout);
+	m_OpaqueIndexBuffer = std::make_unique<IndexBuffer>(opaqueI.data(), opaqueI.size());
+
+	// Transparent
+	m_TransparentVertexArray = std::make_unique<VertexArray>();
+	m_TransparentVertexBuffer = std::make_unique<VertexBuffer>(transparentV.data(), transparentV.size() * sizeof(Vertex));
+	m_TransparentVertexArray->AddBuffer(*m_TransparentVertexBuffer, layout);
+	m_TransparentIndexBuffer = std::make_unique<IndexBuffer>(transparentI.data(), transparentI.size());
+	*/
+	m_Loaded = true;
+}
+
+// Getters and setters
+
+unsigned short Chunk::GetBlockLocal(int x, int y, int z) const
+{
+	if (x >= 0 && x < m_XSize &&
+		y >= 0 && y < m_YSize &&
+		z >= 0 && z < m_ZSize)
+	{
+		return m_Blocks[x + m_XSize * (y + m_YSize * z)];
+	}
+
+	return 0; // air
+}
+
+int Chunk::GetHeight(int x, int z) const
+{
+	return m_HeightTable[x + m_XSize * z];
+}
+
+void Chunk::SetNeedGeneration(bool state)
+{
+	m_NeedGeneration = state;
+}
+
+bool Chunk::GetNeedGeneration() const
+{
+	return m_NeedGeneration;
+}
+
+void Chunk::SetNeedRemesh(bool state)
+{
+	m_NeedRemesh = state;
+}
+
+bool Chunk::GetNeedRemesh() const
+{
+	return m_NeedRemesh;
+}
+
+void Chunk::SetTreeLevel(int level)
+{
+	m_TreeLevel = level;
+}
+
+int Chunk::GetTreeLevel() const
+{
+	return m_TreeLevel;
+}
+
+void Chunk::SetMegaSSBO(uint32_t offset, uint32_t faceCount)
+{
+	m_MegaSSBOOffset = offset; 
+	m_MegaSSBOFaceCount = faceCount;
+}
+```
+
+### src/DrawIndirectBuffer.cpp
+```
+#include "DrawIndirectBuffer.h"
+
+DrawIndirectBuffer::DrawIndirectBuffer()
+{
+    glGenBuffers(1, &m_RendererID);
+}
+
+DrawIndirectBuffer::~DrawIndirectBuffer()
+{
+    glDeleteBuffers(1, &m_RendererID);
+}
+
+void DrawIndirectBuffer::Clear()
+{
+    m_Commands.clear();
+}
+
+void DrawIndirectBuffer::AddCommand(uint32_t faceCount, uint32_t offset, uint32_t chunkIndex)
+{
+    DrawCommand cmd;
+    cmd.count = faceCount * 6;  // 6 vertices per face
+    cmd.instanceCount = 1;
+    cmd.first = offset * 6;     // offset in vertices in the mega SSBO
+    cmd.baseInstance = chunkIndex;     // index of the chunk (position of the chunk)
+    m_Commands.push_back(cmd);
+}
+
+void DrawIndirectBuffer::Upload()
+{
+    glBindBuffer(GL_DRAW_INDIRECT_BUFFER, m_RendererID);
+    glBufferData(GL_DRAW_INDIRECT_BUFFER, m_Commands.size() * sizeof(DrawCommand), m_Commands.data(), GL_DYNAMIC_DRAW);
+}
+
+void DrawIndirectBuffer::Bind() const
+{
+    glBindBuffer(GL_DRAW_INDIRECT_BUFFER, m_RendererID);
+}
+```
+
+### src/Frustum.cpp
+```
+#include "Frustum.h"
+
+#include "Chunk.h"
+
+Frustum::Frustum(const glm::mat4& proj, const glm::mat4& view)
+{
+    glm::mat4 vp = proj * view;
+
+    // Left
+    m_Planes[0].normal.x = vp[0][3] + vp[0][0];
+    m_Planes[0].normal.y = vp[1][3] + vp[1][0];
+    m_Planes[0].normal.z = vp[2][3] + vp[2][0];
+    m_Planes[0].distance = vp[3][3] + vp[3][0];
+
+    // Right
+    m_Planes[1].normal.x = vp[0][3] - vp[0][0];
+    m_Planes[1].normal.y = vp[1][3] - vp[1][0];
+    m_Planes[1].normal.z = vp[2][3] - vp[2][0];
+    m_Planes[1].distance = vp[3][3] - vp[3][0];
+
+    // Bottom
+    m_Planes[2].normal.x = vp[0][3] + vp[0][1];
+    m_Planes[2].normal.y = vp[1][3] + vp[1][1];
+    m_Planes[2].normal.z = vp[2][3] + vp[2][1];
+    m_Planes[2].distance = vp[3][3] + vp[3][1];
+
+    // Top
+    m_Planes[3].normal.x = vp[0][3] - vp[0][1];
+    m_Planes[3].normal.y = vp[1][3] - vp[1][1];
+    m_Planes[3].normal.z = vp[2][3] - vp[2][1];
+    m_Planes[3].distance = vp[3][3] - vp[3][1];
+
+    // Near
+    m_Planes[4].normal.x = vp[0][3] + vp[0][2];
+    m_Planes[4].normal.y = vp[1][3] + vp[1][2];
+    m_Planes[4].normal.z = vp[2][3] + vp[2][2];
+    m_Planes[4].distance = vp[3][3] + vp[3][2];
+
+    // Far
+    m_Planes[5].normal.x = vp[0][3] - vp[0][2];
+    m_Planes[5].normal.y = vp[1][3] - vp[1][2];
+    m_Planes[5].normal.z = vp[2][3] - vp[2][2];
+    m_Planes[5].distance = vp[3][3] - vp[3][2];
+
+    // Normalize
+    for (int i = 0; i < 6; i++) {
+        float len = glm::length(m_Planes[i].normal);
+        m_Planes[i].normal /= len;
+        m_Planes[i].distance /= len;
+    }
+}
+
+Frustum::~Frustum()
+{
+
+}
+
+bool Frustum::IsChunkInFrustum(float chunkWorldX, float chunkWorldZ)
+{
+    // Bounding box du chunk
+    glm::vec3 min = { chunkWorldX, 0.0f, chunkWorldZ };
+    glm::vec3 max = { chunkWorldX + Chunk::m_XSize, 256.0f, chunkWorldZ + Chunk::m_ZSize };
+
+    for (int i = 0; i < 6; i++)
+    {
+        const Plane& plane = m_Planes[i];
+
+        // On cherche le coin le plus "positif" dans la direction de la normale
+        glm::vec3 positiveVertex = {
+            plane.normal.x >= 0 ? max.x : min.x,
+            plane.normal.y >= 0 ? max.y : min.y,
+            plane.normal.z >= 0 ? max.z : min.z
+        };
+
+        // Si ce coin est derrière le plan, le chunk est entièrement hors frustum
+        if (glm::dot(plane.normal, positiveVertex) + plane.distance < 0)
+            return false;
+    }
+
+    return true;
+}
+```
+
+### src/Generator.cpp
+```
+#include "Generator.h"
+
+#include "World.h"
+
+#include <iostream>
+
+Generator::Generator(World& world, int chunkX, int chunkZ)
+	: m_PerlinNoise(world.GetPerlinNoise()), m_VoronoiNoise(world.GetVoronoiNoise()), 
+	m_TerrainGenerator(TerrainGenerator(chunkX, chunkZ, m_PerlinNoise, m_VoronoiNoise)), 
+	m_TreeGenerator(TreeGenerator(world.GetSeed())), m_ChunkX(chunkX), m_ChunkZ(chunkZ)
+{
+	m_Blocks.resize(Chunk::m_XSize * Chunk::m_YSize * Chunk::m_ZSize, 0);
+	m_HeightTable.resize(Chunk::m_XSize * Chunk::m_ZSize, 0);
+}
+
+void Generator::GenerateFromChunk()
+
+{
+	for (int z = 0; z < Chunk::m_ZSize; z++)
+		for (int x = 0; x < Chunk::m_XSize; x++)
+		{
+			int globalX = x + m_ChunkX * Chunk::m_XSize;
+			int globalZ = z + m_ChunkZ * Chunk::m_ZSize;
+
+			// Height and biome : 
+			auto [h, biome] = m_TerrainGenerator.GetHeightAndBiome(globalX, globalZ); // optimisation who avoid 2 extra voronoi call
+
+			// Height
+			//float h = m_TerrainGenerator.GetHeight(globalX, globalZ);//////////////////////////////////////////////////////////
+			int height = static_cast<int>(h * Chunk::m_YSize + 70);
+			height = std::clamp(height, 0, Chunk::m_YSize - 1);
+
+			m_HeightTable[x + Chunk::m_XSize * z] = height;
+
+			// Biome
+			//BiomeProfile biome = m_TerrainGenerator.GetBiomeProfile(globalX, globalZ);////////////////////////////////////////////////////////////////
+
+			// Block fill
+			for (int y = height; y >= 0; --y)
+			{
+				int index = x + Chunk::m_XSize * (y + Chunk::m_YSize * z);
+				if (y == height)
+					m_Blocks[index] = biome.topBlock;
+				else if (y >= height - 5)
+					m_Blocks[index] = biome.layer1;
+				else
+					m_Blocks[index] = biome.layer2;
+			}
+		}
+
+	// We take the tree level of the chunks central block as the global tree level of the chunk 
+	m_TreeLevel = m_TerrainGenerator.GetBiomeProfile(8 + m_ChunkX * Chunk::m_XSize, 8 + m_ChunkZ * Chunk::m_ZSize).treeLevel;
+
+	int NeighborsTreeLevel[9];
+	for (int x = 0; x < 3; x++)
+		for (int z = 0; z < 3; z++)
+			NeighborsTreeLevel[z + 3 * x] = m_TerrainGenerator.GetBiomeProfile(8 + (m_ChunkX-1 + x) * Chunk::m_XSize, 8 + (m_ChunkZ - 1 + z) * Chunk::m_ZSize).treeLevel;
+
+	//m_TreeGenerator.GenerateChunkTrees(m_ChunkX, m_ChunkZ, NeighborsTreeLevel[1 + 3 * 1], m_HeightTable);/////////////////////////////////////////////////
+	m_TreeGenerator.GenerateChunkTrees(m_ChunkX, m_ChunkZ, NeighborsTreeLevel, m_TerrainGenerator);
+
+	const std::vector<unsigned short> TreesBlocks = m_TreeGenerator.GetBlocks();
+
+	int size = Chunk::m_XSize * Chunk::m_YSize * Chunk::m_ZSize;
+	for (int i = 0; i < size; i++)
+	{
+		if (TreesBlocks[i] != 0 && m_Blocks[i] == 0)
+			m_Blocks[i] = TreesBlocks[i];
+	}
+}
+```
+
+### src/IndexBuffer.cpp
+```
+#include "IndexBuffer.h"
+
+#include "Renderer.h"
+
+IndexBuffer::IndexBuffer(const unsigned int* data, unsigned int count)
+    : m_Count(count)
+{
+    ASSERT(sizeof(unsigned int) == sizeof(GLuint));
+
+    GLCall(glGenBuffers(1, &m_RendererID));
+    GLCall(glBindBuffer(GL_ELEMENT_ARRAY_BUFFER, m_RendererID));
+    GLCall(glBufferData(GL_ELEMENT_ARRAY_BUFFER, count * sizeof(unsigned int), data, GL_DYNAMIC_DRAW));
+}
+
+IndexBuffer::~IndexBuffer()
+{
+    GLCall(glDeleteBuffers(1, &m_RendererID));
+}
+
+void IndexBuffer::Reload(const unsigned int* data, unsigned int count) const
+{
+    GLCall(glBindBuffer(GL_ELEMENT_ARRAY_BUFFER, m_RendererID));
+    GLCall(glBufferData(GL_ELEMENT_ARRAY_BUFFER, count * sizeof(unsigned int), data, GL_DYNAMIC_DRAW));
+}
+
+void IndexBuffer::Bind() const
+{
+    GLCall(glBindBuffer(GL_ELEMENT_ARRAY_BUFFER, m_RendererID));
+}
+
+void IndexBuffer::Unbind() const
+{
+    GLCall(glBindBuffer(GL_ELEMENT_ARRAY_BUFFER, 0));
+}
+```
+
+### src/MegaSSBO.cpp
+```
+#include "MegaSSBO.h"
+
+#include <iostream>
+
+MegaSSBO::MegaSSBO()
+{
+    glGenBuffers(1, &m_RendererID);
+    glBindBuffer(GL_SHADER_STORAGE_BUFFER, m_RendererID);
+
+    // Preallocate the mega buffer (only size, no data)
+    glBufferData(GL_SHADER_STORAGE_BUFFER, MAX_FACES * sizeof(uint32_t), nullptr, GL_DYNAMIC_DRAW);
+
+    // At the start all the buffer is free
+    m_FreeList.push_back({ 0, MAX_FACES });
+}
+
+MegaSSBO::~MegaSSBO()
+{
+    glDeleteBuffers(1, &m_RendererID);
+}
+
+void MegaSSBO::Move(uint32_t srcOffset, uint32_t dstOffset, uint32_t faceCount)
+{
+    glBindBuffer(GL_COPY_READ_BUFFER, m_RendererID);
+    glBindBuffer(GL_COPY_WRITE_BUFFER, m_RendererID);
+    glCopyBufferSubData(GL_COPY_READ_BUFFER, GL_COPY_WRITE_BUFFER, srcOffset * sizeof(uint32_t), dstOffset * sizeof(uint32_t), faceCount * sizeof(uint32_t)); // Source offset in byte, destination offset in byte, size in byte
+}
+
+void MegaSSBO::ResetFreeList(uint32_t usedFaces)
+{
+    m_FreeList.clear();
+    m_FreeList.push_back({ usedFaces, MAX_FACES - usedFaces });
+}
+
+uint32_t MegaSSBO::Allocate(uint32_t faceCount)
+{
+    // First fit : we take the first bloc big enough
+    for (auto it = m_FreeList.begin(); it != m_FreeList.end(); ++it)
+    {
+        if (it->size >= faceCount)
+        {
+            uint32_t offset = it->offset;
+
+            if (it->size == faceCount)
+            {
+                // If the bloc is exactly the right size, we remove him
+                m_FreeList.erase(it);
+            }
+            else
+            {
+                // If the bloc is bigger, we reduce him
+                it->offset += faceCount;
+                it->size -= faceCount;
+            }
+
+            return offset;
+        }
+    }
+
+    std::cerr << "[MegaSSBO] Plus de place !" << std::endl;
+    return UINT32_MAX; // Error
+}
+
+void MegaSSBO::Free(uint32_t offset, uint32_t faceCount)
+{
+    // We put back the bloc in the free list
+    auto it = m_FreeList.begin();
+    while (it != m_FreeList.end() && it->offset < offset)
+        ++it;
+
+    m_FreeList.insert(it, { offset, faceCount });
+
+    Merge();
+}
+
+void MegaSSBO::Merge()
+{
+    // Merge the adjacents bloc
+    for (auto it = m_FreeList.begin(); it != m_FreeList.end(); )
+    {
+        auto next = std::next(it);
+        if (next == m_FreeList.end())
+            break;
+
+        if (it->offset + it->size == next->offset)
+        {
+            // Merge
+            it->size += next->size;
+            m_FreeList.erase(next);
+            // We stay on it to check if the next is also adjacent
+        }
+        else
+        {
+            ++it;
+        }
+    }
+}
+
+void MegaSSBO::Upload(const void* data, uint32_t faceCount, uint32_t offset)
+{
+    glBindBuffer(GL_SHADER_STORAGE_BUFFER, m_RendererID);
+    glBufferSubData(GL_SHADER_STORAGE_BUFFER, offset * sizeof(uint32_t), faceCount * sizeof(uint32_t), data);
+}
+
+void MegaSSBO::Bind(unsigned int bindingPoint) const
+{
+    glBindBufferBase(GL_SHADER_STORAGE_BUFFER, bindingPoint, m_RendererID);
+}
+```
+
+### src/Mesh.cpp
+```
+#include "Mesh.h"
+
+Mesh::Mesh()
+{
+    m_BlockTable[0].transparent = true;
+    m_BlockTable[12].transparent = true;
+}
+
+Mesh::~Mesh()
+{
+
+}
+
+unsigned short Mesh::GetBlockSafe(int x, int y, int z, const Chunk& center, const Chunk* left, const Chunk* right, const Chunk* front, const Chunk* back) const
+{
+    // bounds Y
+    if (y < 0 || y >= Chunk::m_YSize)
+        return 0;
+
+    // center
+    if (x >= 0 && x < Chunk::m_XSize && z >= 0 && z < Chunk::m_ZSize)
+    {
+        return center.GetBlockLocal(x, y, z);
+    }
+
+    // left
+    if (x == -1)
+        return left ? left->GetBlockLocal(Chunk::m_XSize - 1, y, z) : 0;
+
+    // right
+    if (x == Chunk::m_XSize)
+        return right ? right->GetBlockLocal(0, y, z) : 0;
+
+    // back
+    if (z == -1)
+        return back ? back->GetBlockLocal(x, y, Chunk::m_ZSize - 1) : 0;
+
+    // front
+    if (z == Chunk::m_ZSize)
+        return front ? front->GetBlockLocal(x, y, 0) : 0;
+
+    return 0;
+}
+
+unsigned char Mesh::IsFaceVisible(unsigned short blockID, int x, int y, int z, int face, const Chunk& center, const Chunk* left, const Chunk* right, const Chunk* front, const Chunk* back) const
+{
+    // micro-opt (avoid glm)
+    static const int dx[6] = { 1,-1,0,0,0,0 };
+    static const int dy[6] = { 0,0,1,-1,0,0 };
+    static const int dz[6] = { 0,0,0,0,1,-1 };
+
+    unsigned short neighbor = GetBlockSafe(x + dx[face], y + dy[face], z + dz[face], center, left, right, front, back);
+
+    // safety
+    if (neighbor >= 256)
+        return 1;
+
+    if (m_BlockTable[neighbor].transparent) // If the neighbor's face is transparent then we gonna have to draw the current face
+    {
+        if (m_BlockTable[blockID].pipelineA)
+            return 1;
+        if (m_BlockTable[blockID].pipelineB)
+            return 2;
+        if (m_BlockTable[blockID].pipelineC)
+            return 3;
+    }
+    return 0;
+}
+
+// Add face on the pipeline A (SSBO)
+void Mesh::AddPipelineAFaces(const Chunk& chunk, int x, int y, int z, int face, unsigned short blockID, const Atlas* Atlas)
+{
+    PackedVertex p = PackedVertex::Pack(x, y, z, face, Atlas->GetTextureID(blockID, face), 0);  // No ao for the moment
+
+    m_OpaqueSSBO.push_back(p);
+}
+
+// Add face to the pipeline B or C (VAO/VBO/IBO)
+void Mesh::AddFaceVerticesAndIndices(const Chunk& chunk, int x, int y, int z, int face, unsigned short blockID, const Atlas* Atlas, bool Blended)
+{
+    glm::vec3 basePos = { (float)x, (float)y, (float)z };
+
+    static const glm::vec3 faceVertices[6][4] = {
+        {{1,0,1},{1,1,1},{1,1,0},{1,0,0}}, // +X
+        {{0,0,0},{0,1,0},{0,1,1},{0,0,1}}, // -X
+        {{0,1,0},{1,1,0},{1,1,1},{0,1,1}}, // +Y
+        {{0,0,1},{1,0,1},{1,0,0},{0,0,0}}, // -Y
+        {{0,0,1},{0,1,1},{1,1,1},{1,0,1}}, // +Z
+        {{1,0,0},{1,1,0},{0,1,0},{0,0,0}}  // -Z
+    };
+
+    glm::vec2 uv[4] = { {0,0}, {0,1}, {1,1}, {1,0} };
+
+    glm::vec3 translation = { chunk.GetXWorldPos() * Chunk::m_XSize, 0, chunk.GetZWorldPos() * Chunk::m_ZSize };
+
+    if (!Blended)
+    {
+        unsigned int startIndex = m_OpaqueVertices.size();
+
+        for (int i = 0; i < 4; i++)
+        {
+            glm::vec3 pos = basePos + faceVertices[face][i] + translation;
+            glm::vec2 texpos = Atlas->GetUVCoords(uv[i], blockID, face);
+
+            Vertex v;
+            v.x = pos.x;
+            v.y = pos.y;
+            v.z = pos.z;
+            v.u = texpos.x;
+            v.v = texpos.y;
+
+            m_OpaqueVertices.push_back(v);
+        }
+
+        m_OpaqueIndices.push_back(startIndex + 0);
+        m_OpaqueIndices.push_back(startIndex + 1);
+        m_OpaqueIndices.push_back(startIndex + 2);
+        m_OpaqueIndices.push_back(startIndex + 2);
+        m_OpaqueIndices.push_back(startIndex + 3);
+        m_OpaqueIndices.push_back(startIndex + 0);
+    }
+    else
+    {
+        unsigned int startIndex = m_TransparentVertices.size();
+
+        for (int i = 0; i < 4; i++)
+        {
+            glm::vec3 pos = basePos + faceVertices[face][i] + translation;
+            glm::vec2 texpos = Atlas->GetUVCoords(uv[i], blockID, face);
+
+            Vertex v;
+            v.x = pos.x;
+            v.y = pos.y;
+            v.z = pos.z;
+            v.u = texpos.x;
+            v.v = texpos.y;
+
+            m_TransparentVertices.push_back(v);
+        }
+
+        m_TransparentIndices.push_back(startIndex + 0);
+        m_TransparentIndices.push_back(startIndex + 1);
+        m_TransparentIndices.push_back(startIndex + 2);
+        m_TransparentIndices.push_back(startIndex + 2);
+        m_TransparentIndices.push_back(startIndex + 3);
+        m_TransparentIndices.push_back(startIndex + 0);
+    }
+}
+
+void Mesh::MeshFromChunk(const Atlas* Atlas, const Chunk& center, const Chunk* left, const Chunk* right, const Chunk* front, const Chunk* back)
+{
+    m_OpaqueVertices.clear();
+    m_OpaqueIndices.clear();
+
+    m_TransparentVertices.clear();
+    m_TransparentIndices.clear();
+
+    // Order cache-friendly
+    for (int y = 0; y < Chunk::m_YSize; y++)
+        for (int z = 0; z < Chunk::m_ZSize; z++)
+            for (int x = 0; x < Chunk::m_XSize; x++)
+            {
+                // OPTI : direct acces
+                unsigned short BlockID = center.GetBlockLocal(x, y, z);
+
+                if (BlockID == 0)
+                    continue;
+
+                for (int face = 0; face < 6; face++)
+                {
+                    int pipeline = IsFaceVisible(BlockID, x, y, z, face, center, left, right, front, back);
+                    if (pipeline != 0)
+                    {
+                        if (pipeline == 1)
+                            AddPipelineAFaces(center, x, y, z, face, BlockID, Atlas);
+                        else
+                        {
+                            bool blended = (BlockID < 256) ? m_BlockTable[BlockID].blended : true;
+
+                            AddFaceVerticesAndIndices(center, x, y, z, face, BlockID, Atlas, blended);
+                        }
+                    }
+
+                }
+            }
+}
+```
+
+### src/PerlinNoise.cpp
+```
+#include "PerlinNoise.h"
+
+namespace Noise {
+
+	PerlinNoise::PerlinNoise(unsigned int Seed)
+        : m_Seed(Seed)
+	{
+        InitPermutation();
+	}
+
+
+
+    // TABLE DE PERMUTATION
+    // Cette table sert à générer un "pseudo-random" déterministe basé sur la position
+    // → même entrée → même sortie → bruit cohérent dans l’espace
+    void PerlinNoise::InitPermutation() {
+        // On crée une table de 256 valeurs
+        m_Permutation.resize(256);
+
+        // On remplit avec 0,1,2,...,255
+        // → base avant mélange
+        std::iota(m_Permutation.begin(), m_Permutation.end(), 0);
+
+        // On mélange aléatoirement
+        // → crée une permutation pseudo-aléatoire
+        std::mt19937 gen(m_Seed);
+        std::shuffle(m_Permutation.begin(), m_Permutation.end(), gen);
+
+        // On duplique la table
+        // → permet d’éviter les modulo lors des accès (optimisation classique)
+        m_Permutation.insert(m_Permutation.end(), m_Permutation.begin(), m_Permutation.end());
+    }
+
+
+
+    // FONCTION FADE
+    // Polynôme de degré 5 : 6t^5 - 15t^4 + 10t^3
+    // → garantit continuité des dérivées jusqu’à l’ordre 2 (C²)
+    // → évite les cassures entre les cellules
+    float PerlinNoise::Fade(float t) const {
+        return t * t * t * (t * (t * 6 - 15) + 10);
+    }
+
+
+
+    // INTERPOLATION LINEAIRE (LERP)
+    // Interpolation entre a et b
+    // t = 0 → a
+    // t = 1 → b
+    float PerlinNoise::Lerp(float t, float a, float b) const {
+        return a + t * (b - a);
+    }
+
+
+
+    // GRADIENT
+    // Cette fonction génère un vecteur gradient pseudo-aléatoire
+    // et calcule le produit scalaire avec le vecteur distance, qui sera ici rien d'autre que (x, y)
+    float PerlinNoise::Grad(int hash, float x, float y) const {
+        int h = hash & 7; // 8 directions pour notre gradient pseudo-aléatoire: (1, 1); (-1, 1); (1, -1); (-1, -1); (1, 0); (-1, 0); (0, 1) et (0, -1)
+
+        switch (h)
+        {
+        case 0: return  x + y; // <(1, 1), (x, y)> = x + y
+        case 1: return -x + y;
+        case 2: return  x - y;
+        case 3: return -x - y;
+        case 4: return  x;
+        case 5: return -x;
+        case 6: return  y;
+        case 7: return -y;
+        }
+
+        return 0.0f;
+    }
+
+
+
+    // PERLIN NOISE 2D
+    float PerlinNoise::Perlin(float x, float y) const {
+
+        // ===============================
+        // 1. IDENTIFIER LA CELLULE
+        // ===============================
+
+        // Coordonnées entières de la cellule
+        int X = (int)std::floor(x) & 255;
+        int Y = (int)std::floor(y) & 255;
+
+        // ===============================
+        // 2. POSITION LOCALE DANS LA CELLULE
+        // ===============================
+
+        // On garde uniquement la partie fractionnaire
+        // → position dans [0,1]
+        x -= std::floor(x);
+        y -= std::floor(y);
+
+        // ===============================
+        // 3. POIDS D’INTERPOLATION (FADE)
+        // ===============================
+
+        // On applique la fonction de lissage
+        float u = Fade(x);
+        float v = Fade(y);
+
+        // ===============================
+        // 4. HASH DES COINS
+        // ===============================
+
+        // On récupère des indices pseudo-aléatoires pour chaque coin
+        int A = m_Permutation[X] + Y;
+        int B = m_Permutation[X + 1] + Y;
+
+        // ===============================
+        // 5. CALCUL DES CONTRIBUTIONS
+        // ===============================
+
+        // Chaque appel à grad = g_ij ⋅ d_ij
+        // → produit scalaire entre gradient et vecteur distance
+
+        float bottomLeft = Grad(m_Permutation[A], x, y);
+        float bottomRight = Grad(m_Permutation[B], x - 1, y);
+        float topLeft = Grad(m_Permutation[A + 1], x, y - 1);
+        float topRight = Grad(m_Permutation[B + 1], x - 1, y - 1);
+
+        // ===============================
+        // 6. INTERPOLATION
+        // ===============================
+
+        // Étape 1 : interpolation horizontale (x)
+        float interpBottom = Lerp(u, bottomLeft, bottomRight);
+        float interpTop = Lerp(u, topLeft, topRight);
+
+        // Étape 2 : interpolation verticale (y)
+        float result = Lerp(v, interpBottom, interpTop);
+
+        // ===============================
+        // 7. NORMALISATION
+        // ===============================
+
+        // Résultat initial ∈ [-1,1]
+        // → on le remap en [0,1] comme Unity
+        return (result + 1.0f) / 2.0f;
+    }
+}
+```
+
+### src/Renderer.cpp
+```
+#include "Renderer.h"
+
+#include <iostream>
+
+void GLClearError()
+{
+    while (glGetError() != GL_NO_ERROR);
+}
+
+bool GLLogCall(const char* function, const char* file, int line)
+{
+    while (GLenum error = glGetError())
+    {
+        std::cout << "[OpenGL Error] (" << error << "): " << function <<
+            " " << file << ":" << line << std::endl;
+        return false;
+    }
+    return true;
+}
+
+void Renderer::Clear() const
+{
+    GLCall(glClear(GL_COLOR_BUFFER_BIT));
+}
+
+void Renderer::Draw(const VertexArray& va, const IndexBuffer& ib, const Shader& shader) const
+{
+    shader.Bind();
+    va.Bind();
+    ib.Bind();
+
+    GLCall(glDrawElements(GL_TRIANGLES, ib.GetCount(), GL_UNSIGNED_INT, nullptr));
+}
+
+void Renderer::Draw(const VertexArray& va, const ShaderStorageBuffer& ssbo, const Shader& shader, int vertexCount) const
+{
+    shader.Bind();
+    va.Bind();
+    ssbo.Bind(1);  // binding point 1
+
+    GLCall(glDrawArrays(GL_TRIANGLES, 0, vertexCount));
+}
+
+void Renderer::Draw(const VertexArray& va, const MegaSSBO& ssbo, const Shader& shader, const DrawIndirectBuffer& dib) const
+{
+    shader.Bind();
+    va.Bind();
+    ssbo.Bind(0);
+    dib.Bind();
+
+    //GLCall(glMultiDrawArraysIndirect(GL_TRIANGLES, nullptr, dib.GetCommandCount(), 0));
+    // 
+    // Test : remplace glMultiDrawArraysIndirect par une boucle manuelle
+    const auto& commands = dib.GetCommands();
+    for (const auto& cmd : commands)
+    {
+        GLCall(glDrawArraysInstancedBaseInstance(GL_TRIANGLES, cmd.first, cmd.count, cmd.instanceCount, cmd.baseInstance));
+    }
+}
+```
+
+### src/Shader.cpp
+```
+#include "Shader.h"
+
+#include <iostream>
+#include <fstream>
+#include <string>
+#include <sstream>
+
+#include "Renderer.h"
+
+Shader::Shader(const std::string& filepath)
+	: m_FilePath(filepath), m_RendererID(0)
+{
+    ShaderProgramSource source = ParseShader(filepath);
+    m_RendererID = CreateShader(source.VetexSource, source.FragmentSource);
+}
+
+Shader::~Shader()
+{
+    GLCall(glDeleteProgram(m_RendererID));
+}
+
+ShaderProgramSource Shader::ParseShader(const std::string& filepath)
+{
+    std::ifstream stream(filepath);
+
+    enum class ShaderType
+    {
+        NONE = -1, VERTEX = 0, FRAGMENT = 1
+    };
+
+    std::string line;
+    std::stringstream ss[2];
+    ShaderType type = ShaderType::NONE;
+    while (getline(stream, line))
+    {
+        if (line.find("#shader") != std::string::npos)  /* if it return npos it doesnt find */
+        {
+            if (line.find("vertex") != std::string::npos)
+                type = ShaderType::VERTEX;
+            else if (line.find("fragment") != std::string::npos)
+                type = ShaderType::FRAGMENT;
+        }
+        else
+        {
+            ss[(int)type] << line << '\n';
+        }
+    }
+
+    return { ss[0].str(), ss[1].str() };
+}
+
+unsigned int Shader::CompileShader(unsigned int type, const std::string& source)
+{
+    GLCall(unsigned int id = glCreateShader(type));
+    const char* src = source.c_str();  // equivalent de : &source[0]
+    GLCall(glShaderSource(id, 1, &src, nullptr));
+    GLCall(glCompileShader(id));
+
+    int result;
+    GLCall(glGetShaderiv(id, GL_COMPILE_STATUS, &result));
+    if (result == GL_FALSE)
+    {
+        int length;
+        GLCall(glGetShaderiv(id, GL_INFO_LOG_LENGTH, &length));
+        char* message = (char*)alloca(length * sizeof(char));
+        GLCall(glGetShaderInfoLog(id, length, &length, message));
+        std::cout << "Failed to compile " << (type == GL_VERTEX_SHADER ? "vertex" : "fragment") << " shader!" << std::endl;
+        std::cout << message << std::endl;
+        GLCall(glDeleteShader(id));
+        return 0;
+    }
+
+    return id;
+}
+
+unsigned int Shader::CreateShader(const std::string& vertexShader, const std::string& fragmentShader)
+{
+    GLCall(unsigned int program = glCreateProgram());
+    unsigned int vs = CompileShader(GL_VERTEX_SHADER, vertexShader);
+    unsigned int fs = CompileShader(GL_FRAGMENT_SHADER, fragmentShader);
+
+    GLCall(glAttachShader(program, vs));
+    GLCall(glAttachShader(program, fs));
+    GLCall(glLinkProgram(program));
+    GLCall(glValidateProgram(program));
+
+    GLCall(glDeleteShader(vs));
+    GLCall(glDeleteShader(fs));
+
+    return program;
+}
+
+void Shader::Bind() const
+{
+    GLCall(glUseProgram(m_RendererID));
+}
+
+void Shader::Unbind() const
+{
+    GLCall(glUseProgram(0));
+}
+
+void Shader::SetUniform1i(const std::string& name, int value)
+{
+    GLCall(glUniform1i(GetUniformLocation(name), value));
+}
+
+void Shader::SetUniform1f(const std::string& name, float value)
+{
+    GLCall(glUniform1f(GetUniformLocation(name), value));
+}
+
+void Shader::SetUniform2f(const std::string& name, float v0, float v1)
+{
+    GLCall(glUniform2f(GetUniformLocation(name), v0, v1));
+}
+
+void Shader::SetUniform3f(const std::string& name, float v0, float v1, float v2)
+{
+    GLCall(glUniform3f(GetUniformLocation(name), v0, v1, v2));
+}
+
+void Shader::SetUniform4f(const std::string& name, float v0, float v1, float v2, float v3)
+{
+    GLCall(glUniform4f(GetUniformLocation(name), v0, v1, v2, v3));
+}
+
+void Shader::SetUniformMat4f(const std::string& name, const glm::mat4& matrix)
+{
+    GLCall(glUniformMatrix4fv(GetUniformLocation(name), 1, GL_FALSE, &matrix[0][0]));
+}
+
+unsigned int Shader::GetUniformLocation(const std::string& name) const
+{
+    if (m_UniformLocationCache.find(name) != m_UniformLocationCache.end())
+        return m_UniformLocationCache[name];
+
+    GLCall(int location = glGetUniformLocation(m_RendererID, name.c_str()));
+    if (location == -1)
+        std::cout << "Warning: uniform '" << name << "' doesn't exist!" << std::endl;
+
+    m_UniformLocationCache[name] = location;
+    return location;
+}
+```
+
+### src/ShaderStorageBuffer.cpp
+```
+#include "ShaderStorageBuffer.h"
+
+#include <glad/glad.h>
+
+ShaderStorageBuffer::ShaderStorageBuffer()
+{
+    glGenBuffers(1, &m_RendererID);
+}
+
+ShaderStorageBuffer::~ShaderStorageBuffer()
+{
+    glDeleteBuffers(1, &m_RendererID);
+}
+
+void ShaderStorageBuffer::Bind(unsigned int bindingPoint) const
+{
+    glBindBufferBase(GL_SHADER_STORAGE_BUFFER, bindingPoint, m_RendererID);
+}
+
+void ShaderStorageBuffer::Unbind() const
+{
+    glBindBuffer(GL_SHADER_STORAGE_BUFFER, 0);
+}
+
+void ShaderStorageBuffer::SetData(const void* data, unsigned int size)
+{
+    glBindBuffer(GL_SHADER_STORAGE_BUFFER, m_RendererID);
+    glBufferData(GL_SHADER_STORAGE_BUFFER, size, data, GL_DYNAMIC_DRAW);
+}
+
+void ShaderStorageBuffer::UpdateData(const void* data, unsigned int size, unsigned int offset)
+{
+    glBindBuffer(GL_SHADER_STORAGE_BUFFER, m_RendererID);
+    glBufferSubData(GL_SHADER_STORAGE_BUFFER, offset, size, data);
+}
+```
+
+### src/TerrainGenerator.cpp
+```
+#include "TerrainGenerator.h"
+
+// HEIGHT FUNCTIONS
+
+static float Plains(float base)
+{
+	return base;
+}
+
+static float Hills(float base)
+{
+	return std::pow(base, 0.9f);
+}
+
+static float Mountains(float base)
+{
+	return std::pow(base, 0.7f) * 1.5;
+}
+
+static float Flat(float base)
+{
+	return base * 0.3f;
+}
+
+BiomeProfile TerrainGenerator::m_Biomes[4][4]; // Static biome table
+
+// INIT BIOMES
+
+void TerrainGenerator::InitBiomes()
+{
+	// GLOBAL 0 (plains / forest)
+	m_Biomes[0][0] = { Plains,     1, 2, 3, 5 };
+	m_Biomes[0][1] = { Hills,      9, 2, 3, 1 };
+	m_Biomes[0][2] = { Hills,      9, 2, 3, 1 };
+	m_Biomes[0][3] = { Mountains,  10, 3, 3, 0 };
+
+	// GLOBAL 1 (desert)
+	m_Biomes[1][0] = { Flat,       4, 4, 3, 1 };
+	m_Biomes[1][1] = { Plains,     4, 4, 3, 1 };
+	m_Biomes[1][2] = { Hills,      7, 4, 3, 0 };
+	m_Biomes[1][3] = { Mountains,  8, 3, 3, 0 };
+
+	// GLOBAL 2 (snow)
+	m_Biomes[2][0] = { Plains,     6, 2, 3, 0 };
+	m_Biomes[2][1] = { Hills,      5, 2, 3, 0 };
+	m_Biomes[2][2] = { Mountains,  9, 3, 3, 0 };
+	m_Biomes[2][3] = { Mountains,  10, 3, 3, 0 };
+
+	// GLOBAL 3 (mountain region)
+	m_Biomes[3][0] = { Plains,     3, 2, 3, 0 };
+	m_Biomes[3][1] = { Hills,      3, 2, 3, 0 };
+	m_Biomes[3][2] = { Mountains,  3, 3, 3, 0 };
+	m_Biomes[3][3] = { Mountains,  3, 3, 3, 0 };
+}
+
+TerrainGenerator::TerrainGenerator(int chunkX, int chunkZ,const Noise::PerlinNoise& noise, const Noise::VoronoiNoise& voronoiNoise, float baseFreq, float detailFreq, float globalBiomeFreq, float interBiomeFreq, float biomeSharpness, float blendWidth)
+	: m_ChunkX(chunkX), m_ChunkZ(chunkZ), m_Noise(noise), m_VoronoiNoise(voronoiNoise), m_BaseFreq(baseFreq), m_DetailFreq(detailFreq), 
+	m_GlobalBiomeFreq(globalBiomeFreq), m_InterBiomeFreq(interBiomeFreq), m_BiomeSharpness(biomeSharpness), m_GlobalBlendWidth(blendWidth)
+{
+
+}
+
+// Inter biome noise
+float TerrainGenerator::GetInterBiomeNoise(int x, int z)
+{
+	return m_Noise.Perlin(x * m_InterBiomeFreq, z * m_InterBiomeFreq);
+}
+
+// Global biome noise
+float TerrainGenerator::GetGlobalBiomeNoise(int x, int z)
+{
+	return m_Noise.Perlin(x * m_GlobalBiomeFreq, z * m_GlobalBiomeFreq);
+}
+
+// Compute weights
+
+void TerrainGenerator::ComputeWeights(float n, float weights[4])
+{
+	float centers[4] = { 0.2f, 0.4f, 0.6f, 0.8f };
+
+	float sum = 0.0f;
+
+	for (int i = 0; i < 4; i++)
+	{
+		float d = std::abs(n - centers[i]);
+
+		weights[i] = 1.0f - d * m_BiomeSharpness;
+		weights[i] = std::clamp(weights[i], 0.0f, 1.0f);
+
+		sum += weights[i];
+	}
+
+	if (sum > 0.0f)
+	{
+		for (int i = 0; i < 4; i++)
+			weights[i] /= sum;
+	}
+}
+
+// HEIGHT
+
+float TerrainGenerator::GetHeight(int x, int z)
+{
+	// Base terrain
+	float base =
+		m_Noise.Perlin(x * m_BaseFreq, z * m_BaseFreq);
+
+	float detail =
+		m_Noise.Perlin(x * m_DetailFreq, z * m_DetailFreq);
+
+	base = base * 0.2f + detail * 0.05f; // octave 1 + octave 2
+	base *= 0.5f;
+
+	// Inter biome noise and weights
+	float interWeights[4];
+	m_VoronoiNoise.GetBiomes(x * m_InterBiomeFreq, z * m_InterBiomeFreq, interWeights);
+
+	// Global biome noise and weights
+	float globalWeights[4];
+	m_VoronoiNoise.GetBiomes(x * m_GlobalBiomeFreq, z * m_GlobalBiomeFreq, globalWeights);
+
+	float height = 0.0f;
+
+	// Double blending: global * inter
+	for (int g = 0; g < 4; g++)
+	{
+		for (int i = 0; i < 4; i++)
+		{
+			BiomeProfile& biome = m_Biomes[g][i];
+
+			float h = biome.heightFunc(base);
+
+			height += h * globalWeights[g] * interWeights[i];
+		}
+	}
+
+	return height;
+}
+
+// BIOME PROFILE (for blocks)
+
+BiomeProfile TerrainGenerator::GetBiomeProfile(int x, int z)
+{
+	// Inter biome noise and weights
+	float interWeights[4];
+	m_VoronoiNoise.GetBiomes(x * m_InterBiomeFreq, z * m_InterBiomeFreq, interWeights);
+
+	// Global biome noise and weights
+	float globalWeights[4];
+	m_VoronoiNoise.GetBiomes(x * m_GlobalBiomeFreq, z * m_GlobalBiomeFreq, globalWeights);
+	
+	// ADD the block mixt effect in the borders between two global biomes
+	float maxGlobal = std::max({ globalWeights[0], globalWeights[1], globalWeights[2], globalWeights[3] });
+	float maxInter = std::max({ interWeights[0],  interWeights[1],  interWeights[2],  interWeights[3] });
+
+	// Apply global border noise
+	if (maxGlobal < 0.8f)
+	{
+		for (int g = 0; g < 4; g++)
+		{
+			if (globalWeights[g] > 0.01f)
+			{
+				float GlobalBorderNoise = m_Noise.Perlin((x + 750 + g * 100) * 0.1f, (z + 750 + g * 100) * 0.1f); // *0.1f = frequence
+				GlobalBorderNoise -= 0.5f; // centered noise
+
+				globalWeights[g] += GlobalBorderNoise * 0.05f; // amplitude, so frequence and amplitude will define here the visual transition between txo global biome
+				globalWeights[g] = std::max(globalWeights[g], 0.0f);
+			}
+		}
+		// Normalisation
+		float globalBiomeSum = 0.0f;
+		for (int g = 0; g < 4; g++)
+		{
+			globalBiomeSum += globalWeights[g];
+		}
+
+		if (globalBiomeSum)
+		{
+			for (int g = 0; g < 4; g++)
+				globalWeights[g] /= globalBiomeSum;
+		}
+	}
+
+	// Apply inter border noise
+	if (maxInter < 0.8f)
+	{
+		for (int i = 0; i < 4; i++)
+		{
+			if (interWeights[i] > 0.01f)
+			{
+				float InterBorderNoise = m_Noise.Perlin((x + 750 + i * 100) * 0.15f, (z + 750 + i * 100) * 0.15f); // *0.15f = frequence
+				InterBorderNoise -= 0.5f; // centered noise
+
+				interWeights[i] += InterBorderNoise * 0.4f; //amplitude
+				interWeights[i] = std::max(interWeights[i], 0.0f);
+			}
+		}
+		// Normalisation
+		float interBiomeSum = 0.0f;
+		for (int i = 0; i < 4; i++)
+		{
+			interBiomeSum += interWeights[i];
+		}
+
+		if (interBiomeSum)
+		{
+			for (int i = 0; i < 4; i++)
+				interWeights[i] /= interBiomeSum;
+		}
+	}
+
+	// Find dominant global biome
+	int bestGlobal = 0;
+	float maxG = globalWeights[0];
+
+	for (int g = 1; g < 4; g++)
+	{
+		if (globalWeights[g] > maxG)
+		{
+			maxG = globalWeights[g];
+			bestGlobal = g;
+		}
+	}
+
+	// Find dominant inter biome
+	int bestInter = 0;
+	float maxI = interWeights[0];
+
+	for (int i = 1; i < 4; i++)
+	{
+		if (interWeights[i] > maxI)
+		{
+			maxI = interWeights[i];
+			bestInter = i;
+		}
+	}
+
+	return m_Biomes[bestGlobal][bestInter];
+}
+
+// OPTIMISATION (merge GetHeight and GetBiomeProfil)
+
+HeightAndBiome TerrainGenerator::GetHeightAndBiome(int x, int z)
+{
+	// HEIGHT PART : 
+
+	// Base terrain
+	float base =
+		m_Noise.Perlin(x * m_BaseFreq, z * m_BaseFreq);
+
+	float detail =
+		m_Noise.Perlin(x * m_DetailFreq, z * m_DetailFreq);
+
+	base = base * 0.2f + detail * 0.05f; // octave 1 + octave 2
+	base *= 0.5f;
+
+	// Inter biome noise and weights
+	float interWeights[4];
+	m_VoronoiNoise.GetBiomes(x * m_InterBiomeFreq, z * m_InterBiomeFreq, interWeights);
+
+	// Global biome noise and weights
+	float globalWeights[4];
+	m_VoronoiNoise.GetBiomes(x * m_GlobalBiomeFreq, z * m_GlobalBiomeFreq, globalWeights);
+
+	float height = 0.0f;
+
+	// Double blending: global * inter
+	for (int g = 0; g < 4; g++)
+	{
+		for (int i = 0; i < 4; i++)
+		{
+			BiomeProfile& biome = m_Biomes[g][i];
+
+			float h = biome.heightFunc(base);
+
+			height += h * globalWeights[g] * interWeights[i];
+		}
+	}
+
+	// BIOME PART : 
+
+	// ADD the block mixt effect in the borders between two global biomes
+	float maxGlobal = std::max({ globalWeights[0], globalWeights[1], globalWeights[2], globalWeights[3] });
+	float maxInter = std::max({ interWeights[0],  interWeights[1],  interWeights[2],  interWeights[3] });
+
+	// Apply global border noise
+	if (maxGlobal < 0.8f)
+	{
+		for (int g = 0; g < 4; g++)
+		{
+			if (globalWeights[g] > 0.01f)
+			{
+				float GlobalBorderNoise = m_Noise.Perlin((x + 750 + g * 100) * 0.1f, (z + 750 + g * 100) * 0.1f); // *0.1f = frequence
+				GlobalBorderNoise -= 0.5f; // centered noise
+
+				globalWeights[g] += GlobalBorderNoise * 0.05f; // amplitude, so frequence and amplitude will define here the visual transition between txo global biome
+				globalWeights[g] = std::max(globalWeights[g], 0.0f);
+			}
+		}
+		// Normalisation
+		float globalBiomeSum = 0.0f;
+		for (int g = 0; g < 4; g++)
+		{
+			globalBiomeSum += globalWeights[g];
+		}
+
+		if (globalBiomeSum)
+		{
+			for (int g = 0; g < 4; g++)
+				globalWeights[g] /= globalBiomeSum;
+		}
+	}
+
+	// Apply inter border noise
+	if (maxInter < 0.8f)
+	{
+		for (int i = 0; i < 4; i++)
+		{
+			if (interWeights[i] > 0.01f)
+			{
+				float InterBorderNoise = m_Noise.Perlin((x + 750 + i * 100) * 0.15f, (z + 750 + i * 100) * 0.15f); // *0.15f = frequence
+				InterBorderNoise -= 0.5f; // centered noise
+
+				interWeights[i] += InterBorderNoise * 0.4f; //amplitude
+				interWeights[i] = std::max(interWeights[i], 0.0f);
+			}
+		}
+		// Normalisation
+		float interBiomeSum = 0.0f;
+		for (int i = 0; i < 4; i++)
+		{
+			interBiomeSum += interWeights[i];
+		}
+
+		if (interBiomeSum)
+		{
+			for (int i = 0; i < 4; i++)
+				interWeights[i] /= interBiomeSum;
+		}
+	}
+
+	// Find dominant global biome
+	int bestGlobal = 0;
+	float maxG = globalWeights[0];
+
+	for (int g = 1; g < 4; g++)
+	{
+		if (globalWeights[g] > maxG)
+		{
+			maxG = globalWeights[g];
+			bestGlobal = g;
+		}
+	}
+
+	// Find dominant inter biome
+	int bestInter = 0;
+	float maxI = interWeights[0];
+
+	for (int i = 1; i < 4; i++)
+	{
+		if (interWeights[i] > maxI)
+		{
+			maxI = interWeights[i];
+			bestInter = i;
+		}
+	}
+
+	return { height, m_Biomes[bestGlobal][bestInter] };
+}
+```
+
+### src/Texture.cpp
+```
+#include "Texture.h"
+
+#include "stb_image/stb_image.h"
+
+Texture::Texture(const std::string& path)
+	: m_RendererID(0), m_FilePath(path), m_LocalBuffer(nullptr), 
+	m_Width(0), m_Height(0), m_BPP(0)
+{
+	stbi_set_flip_vertically_on_load(1); // flip limage car opengl prend par le buttomleft dune image et non le topleft
+	m_LocalBuffer = stbi_load(path.c_str(), &m_Width, &m_Height, &m_BPP, 4);
+
+	GLCall(glGenTextures(1, &m_RendererID));
+	GLCall(glBindTexture(GL_TEXTURE_2D, m_RendererID));
+
+	GLCall(glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MIN_FILTER, GL_NEAREST));
+	GLCall(glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MAG_FILTER, GL_NEAREST));
+	GLCall(glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_S, GL_CLAMP_TO_EDGE));
+	GLCall(glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_T, GL_CLAMP_TO_EDGE));
+
+	GLCall(glTexImage2D(GL_TEXTURE_2D, 0, GL_RGBA8, m_Width, m_Height, 0, GL_RGBA, GL_UNSIGNED_BYTE, m_LocalBuffer));
+	GLCall(glBindTexture(GL_TEXTURE_2D, 0));
+
+	if (m_LocalBuffer)
+		stbi_image_free(m_LocalBuffer);
+}
+
+Texture::~Texture()
+{
+	GLCall(glDeleteTextures(1, &m_RendererID));
+}
+
+void Texture::Bind(unsigned int slot) const
+{
+	GLCall(glActiveTexture(GL_TEXTURE0 + slot));
+	GLCall(glBindTexture(GL_TEXTURE_2D, m_RendererID));
+}
+
+void Texture::Unbind() const
+{
+	GLCall(glBindTexture(GL_TEXTURE_2D, 0));
+}
+```
+
+### src/TreeGenerator.cpp
+```
+#include "TreeGenerator.h"
+
+#include "World.h"
+
+#include <iostream>
+
+TreeGenerator::TreeGenerator(unsigned int seed, int cellSize)
+    : m_Seed(seed), m_CellSize(cellSize)
+{
+    m_Blocks.resize(Chunk::m_XSize * Chunk::m_YSize * Chunk::m_ZSize, 0);
+    m_NeighborsBlocks.resize(Chunk::m_XSize * 3 * Chunk::m_YSize * Chunk::m_ZSize * 3, 0);
+
+    m_TreeMaker = TreeMaker();
+}
+
+int TreeGenerator::Hash(int x, int z, int i) const
+{
+    int h =  x * 19349663 + z * 83492791 + i * 73856093 + m_Seed;
+    h = (h ^ (h >> 13)) * 1274126177;
+    return h ^ (h >> 16);
+}
+
+int TreeGenerator::DeriveHash(int h, int salt) const
+{
+    h ^= salt;
+    h *= 0x9e3779b9;
+    h ^= (h >> 16);
+    h *= 0x85ebca6b;
+    h ^= (h >> 13);
+    h *= 0xc2b2ae35;
+    h ^= (h >> 16);
+    return h;
+}
+
+float TreeGenerator::RandomFloat(int h) const  // Between 0 and 1
+{
+    return (h & 0xFFFF) / (float)0xFFFF;
+}
+/*
+void TreeGenerator::GenerateChunkTrees(int chunkX, int chunkZ, int treeLevel, std::vector<int>& heightTable)
+{
+    // We cut the chunk in a 4 by 4 cells grid, then we gonna fill the chunk with pseudo random points and we want to know how mush heach cells have points
+    int CellScore[4 * 4] = { 0 };
+
+    // We fill the grid with our pseudo random points
+    for (int i = 0; i < std::pow(treeLevel, 2); i++) // We add a number of points proportionally to the TreeLevel of the chunk
+    {
+        int hx = Hash(chunkX, chunkZ, i);
+        int hz = Hash(chunkX, chunkZ, i + 1337);
+
+        float pointX = RandomFloat(hx);
+        float pointZ = RandomFloat(hz);
+
+        int cellX = std::min(3, (int)(pointX * 4));
+        int cellZ = std::min(3, (int)(pointZ * 4));
+
+        CellScore[cellX * 4 + cellZ]++;  // std::min(3, (int)(pt * 4)) : [0, 1] -> [0, 3]; points ->cells
+    }
+
+    // Now we place the trees in heach cells according to their points score
+    int h = Hash(chunkX, chunkZ, 0);
+    for(int i = 0; i < 4; i++)
+        for (int j = 0; j < 4; j++)
+        {
+            switch (CellScore[i * 4 + j])
+            {
+            case 0: // if point score is 0 then the cell will not have any tree
+                break;
+            case 1:
+                PlaceTree(heightTable, i * 4 + 1, j * 4 + 1, h); // if it is 1 then we put one normal tree in the middle top left of the cell 
+                break;
+            case 2:
+                PlaceTree(heightTable, i * 4 + 2, j * 4 + 1, h); // middle top right
+                break;
+            case 3:
+                PlaceTree(heightTable, i * 4 + 2, j * 4 + 2, h); // middle bottom right
+                break;
+            case 4:
+                PlaceTree(heightTable, i * 4 + 1, j * 4 + 2, h); // middle bottom left
+                break;
+            default:    // if the score is >= 5 we put a big tree in the middle of the cell
+                PlaceTree(heightTable, i * 4 + 1, j * 4 + 1, h);
+                PlaceTree(heightTable, i * 4 + 2, j * 4 + 1, h);
+                PlaceTree(heightTable, i * 4 + 2, j * 4 + 2, h);
+                PlaceTree(heightTable, i * 4 + 1, j * 4 + 2, h);
+                break;
+            }
+        }
+}
+
+void TreeGenerator::PlaceTree(std::vector<int>& heightTable, int x, int z, int hash)
+{
+    int groundY = heightTable[x + Chunk::m_XSize * z];
+
+    if (groundY <= 0) return;
+
+    int height = 4 + (hash % 3); // 4–6 blocs
+
+    // Leaves (simple cube for start)
+    int radius = 2;
+
+    for (int dx = -radius; dx <= radius; dx++)
+    {
+        for (int dz = -radius; dz <= radius; dz++)
+        {
+            for (int dy = -radius; dy <= radius; dy++)
+            {
+                int dist = dx * dx + dy * dy + dz * dz;
+
+                if (dist <= radius * radius)
+                {
+                    glm::ivec3 pos = { x + dx, groundY + 1 + height + dy, z + dz };
+
+                    if (pos[0] >= Chunk::m_XSize || pos[0] < 0 || pos[2] >= Chunk::m_ZSize || pos[2] < 0) // not in the current chunk
+                        m_OutsideLeaves.emplace_back( x + dx, pos[1], z + dz);
+                    else
+                        m_Blocks[pos[0] + Chunk::m_XSize * (pos[1] + Chunk::m_YSize * pos[2])] = 12;  // Leaves
+                }
+            }
+        }
+    }
+
+    // Trunk
+    for (int y = groundY + 1; y <= groundY + height; y++)
+    {
+        m_Blocks[x + Chunk::m_XSize * (y + Chunk::m_YSize * z)] = 11;  // Wood
+    }
+}
+*/
+
+void TreeGenerator::GenerateChunkTrees(int chunkX, int chunkZ, int* treeLevels, TerrainGenerator& terrainGenerator)
+{
+    for (int z = 0; z < 3; z++)
+        for (int x = 0; x < 3; x++)
+            for (int i = 0; i < 4; i++)
+            {
+                int h = Hash(chunkX - 1 + x, chunkZ - 1 + z, i);
+                float p = RandomFloat(h);
+
+                if (p < treeLevels[z + 3 * x] / 20.0f) // Higher the TreeLevel is, higher the probability of having a tree in this chunk quarter is
+                    PlaceTree(chunkX, chunkZ, x, z, i, h, terrainGenerator);
+            }
+    /*
+    for (int z = 0; z < Chunk::m_ZSize; z++)
+        for (int y = 0; y < Chunk::m_YSize; y ++)
+            for (int x = 0; x < Chunk::m_XSize; x++)
+            {
+                int Y = heightTable[x + Chunk::m_XSize * z] + 1 + y;
+                m_Blocks[x + Chunk::m_XSize * (Y + Chunk::m_YSize * z)] = m_NeighborsBlocks[(1 * Chunk::m_XSize + x) + (Chunk::m_XSize * 3) * (y + 40 * (1 * Chunk::m_ZSize + z))];
+            }
+    */
+}
+
+void TreeGenerator::PlaceTree(int chunkX, int chunkZ, int localChunkX, int localChunkZ, int chunkQuarter, int hash, TerrainGenerator& terrainGenerator) //chunkQuarter 0 = topleft quarter of the (x, z) chunk; 1 = topright; 2 = bottomright; ...
+{
+    // First we determine the position of the tree in the chunk quarter 
+    int positionHash = DeriveHash(hash, 104729);
+    int treePosition = positionHash & 15;  // This way we get 16 possibilities for the center of our tree in the i'th chunk quarter(we give choice only between the 4*4 center blocks of the 8*8 blocks quarter of the chunk)
+    
+    int x = localChunkX * Chunk::m_XSize;  // which column am I according only to the X-axis(considere here as the horizontal axis) chunk position in the 3*3 chunks grid
+    int worldX = (chunkX + localChunkX - 1) * Chunk::m_XSize;
+    if (chunkQuarter == 1 || chunkQuarter == 2)  // 1 or 2 <=> a right quarter
+    {
+        x += 8;  // skip 8 columns to get on the bottoms quarter
+        worldX += 8;
+    }
+    x += 2; // skip 2 to get on the center of a quarter(we want to be in the 4*4 center of a quarter(which is 8*8))
+    worldX += 2;
+    x += treePosition % 4; // here is the real procedural position choice adjustment
+    worldX += treePosition % 4;
+
+    int z = localChunkZ * Chunk::m_ZSize;
+    int worldZ = (chunkZ + localChunkZ - 1) * Chunk::m_ZSize;
+    if (chunkQuarter > 1)  // 2 or 3 <=> a bottom quarter
+    {
+        z += 8;
+        worldZ += 8;
+    }
+    z += 2;
+    worldZ += 2;
+    z += treePosition / 4;
+    worldZ += treePosition / 4;
+
+    float h = terrainGenerator.GetHeight(worldX, worldZ);
+    int baseY = static_cast<int>(h * Chunk::m_YSize + 70);
+    baseY = std::clamp(baseY, 0, Chunk::m_YSize - 1);
+
+    x -= Chunk::m_XSize;
+    int y = baseY - 1;
+    z -= Chunk::m_ZSize;
+
+    m_TreeMaker.MakeTree(m_Blocks, x, y, z, 2, hash);
+
+    /*
+    // Then the size of the tree and of the branches
+    int sizeHash = DeriveHash(hash, 130363);
+    int sizeScore = sizeHash & 3;  // little, normal, big, huge
+
+    int sizeBranchScore = (sizeHash >> 2) & 3;
+
+    int height = sizeScore * 4 + ((sizeHash >> 4) & 3) + 1;  // We determin the height of the tree according to his sizeScore (little = between 1 and 9; normal = 9 and 17; big = 17 and 25; huge = between 25 and 33)
+    
+    // We determine the position and direction of the branches
+    int branchResult = (sizeHash >> 6) & 15;  // Choose who many branch we can have(ex : 0110 means the lowest branch spot will be empty, and the highest also)
+
+    int XAxisBranchesDirection[4] = { (sizeHash >> 10) & 1, (sizeHash >> 11) & 1, (sizeHash >> 12) & 1, (sizeHash >> 13) & 1 };  // XAxisBranchDirection & 1 = 0 means that the 1st branch should be -x oriented, +x if = 1; (X.... >> 1) & 1 for the 2nd branch...
+    int ZAxisBranchesDirection[4] = { (sizeHash >> 14) & 1, (sizeHash >> 15) & 1, (sizeHash >> 16) & 1, (sizeHash >> 17) & 1 };
+
+    // We determine the shape of the tree
+    int shapeHash = DeriveHash(hash, 155921);
+    int shapeScore = shapeHash & 3;  // shapeScore 0 = small amount of leaves around the trunk and branch; 1 = big amount on X axis; 2 = big amount on Z axis; 3 = big amount of leaves on both axis
+
+    float h = terrainGenerator.GetHeight(worldX, worldZ);
+    int baseY = static_cast<int>(h * Chunk::m_YSize + 70);
+    baseY = std::clamp(baseY, 0, Chunk::m_YSize - 1);
+
+    int XAxisTrunkDirection = ((shapeHash >> 2) & 1) * 2 - 1;  // This way we have -1 or 1, which can be manipulate directly for the offset calcul
+    int ZAxisTrunkDirection = ((shapeHash >> 3) & 1) * 2 - 1;
+
+    int maxOffset = std::max(1, height / 3);
+
+    // Here we put the blocks
+    for (int y = 1; y <= height; y++)
+    {
+        int offsetX = 0;
+        int offsetZ = 0;
+        if (y > 1)
+        {
+            float t = (float)y / (float)(height - 1);
+            float curve = 3.0f * t * t - 2.0f * t * t * t;
+            float bend = curve * maxOffset;
+
+            offsetX = (int)std::round(bend * XAxisTrunkDirection);
+            offsetZ = (int)std::round(bend * ZAxisTrunkDirection);
+        }
+
+        int Y = y + baseY - 1;
+        for (int i = -1; i < sizeScore; i++)
+            for (int j = -1; j < sizeScore; j++)
+            {
+                int X = x + offsetX - Chunk::m_XSize + j;
+                int Z = z + offsetZ - Chunk::m_ZSize + i;
+
+                if (X >= 0 && (X < Chunk::m_XSize) && y < 40 && Z >= 0 && (Z < Chunk::m_ZSize))
+                    m_Blocks[X + Chunk::m_XSize * (Y + Chunk::m_YSize * Z)] = 11;
+            }
+    }
+    */
+}
+```
+
+### src/TreeMaker.cpp
+```
+#include "TreeMaker.h"
+
+TreeMaker::TreeMaker()
+{
+
+}
+
+int TreeMaker::DeriveHash(int h, int salt) const
+{
+	h ^= salt;
+	h *= 0x9e3779b9;
+	h ^= (h >> 16);
+	h *= 0x85ebca6b;
+	h ^= (h >> 13);
+	h *= 0xc2b2ae35;
+	h ^= (h >> 16);
+	return h;
+}
+
+float TreeMaker::RandomFloat(int h) const  // Between 0 and 1
+{
+	return (h & 0xFFFF) / (float)0xFFFF;
+}
+
+void TreeMaker::MakeTree(std::vector<unsigned short>& blocks, int x, int y, int z, int treeType, int hash)
+{
+	switch (treeType)
+	{
+	case 0:
+	{
+		// We place the trunk
+		int height = ((hash & 3) + 1) * 2;
+		if (x >= 0 && x < Chunk::m_XSize && z >= 0 && z < Chunk::m_ZSize)
+		{
+			for (int dy = y; dy < y + height; dy++)
+				blocks[x + Chunk::m_XSize * (dy + Chunk::m_YSize * z)] = 11;  // Trunk
+		}
+
+		// We place the leaves
+		PlaceLeaves(blocks, x, y + height, z, height, hash >> 2);
+		break;
+	}
+	case 1:
+	{
+		// We place the trunk
+		int height = ((hash & 3) + 1) * 2 + 5;
+		if (x >= 0 && x < Chunk::m_XSize && z >= 0 && z < Chunk::m_ZSize)
+		{
+			for (int dy = y; dy < y + height; dy++)
+				blocks[x + Chunk::m_XSize * (dy + Chunk::m_YSize * z)] = 11;  // Trunk
+		}
+		if ((x + 1) >= 0 && (x + 1) < Chunk::m_XSize && (z + 1) >= 0 && (z + 1) < Chunk::m_ZSize)
+		{
+			for (int dy = y; dy < y + height; dy++)
+				blocks[x + 1 + Chunk::m_XSize * (dy + Chunk::m_YSize * (z + 1))] = 11;  // Trunk
+		}
+		if ((x + 1) >= 0 && (x + 1) < Chunk::m_XSize && z >= 0 && z < Chunk::m_ZSize)
+		{
+			for (int dy = y; dy < y + height; dy++)
+				blocks[x + 1 + Chunk::m_XSize * (dy + Chunk::m_YSize * z)] = 11;  // Trunk
+		}
+		if (x >= 0 && x < Chunk::m_XSize && (z + 1) >= 0 && (z + 1) < Chunk::m_ZSize)
+		{
+			for (int dy = y; dy < y + height; dy++)
+				blocks[x + Chunk::m_XSize * (dy + Chunk::m_YSize * (z + 1))] = 11;  // Trunk
+		}
+
+		// We place the branches with their leaves
+		//int branchPosY = y + height - (((hash >> 2) & 3) + 1);
+		int branchPosY = y + (2 * height) / 3;
+		PlaceBranch(blocks, x, branchPosY, z, height, hash >> 4);
+
+		// We place the top leaves
+		PlaceLeaves(blocks, x, y + height, z, height, hash >> 4);
+		break;
+	}
+	case 2:
+	{
+		int height = ((hash & 3) + 1) * 3 + 8;
+
+		// We place the trunk which is 2/3 of the total height
+		int trunkHeight = (height) / 3;
+		for (int dy = y; dy <= y + trunkHeight; dy++)
+		{
+			if (x >= 0 && x < Chunk::m_XSize && z >= 0 && z < Chunk::m_ZSize)
+				blocks[x + Chunk::m_XSize * (dy + Chunk::m_YSize * z)] = 11;
+			if ((x + 1) >= 0 && (x + 1) < Chunk::m_XSize && z >= 0 && z < Chunk::m_ZSize)
+				blocks[x + 1 + Chunk::m_XSize * (dy + Chunk::m_YSize * z)] = 11;
+		}
+
+		// Recursive splitting
+		int splitHash = DeriveHash(hash, 224737387);
+		PlaceSplit(blocks, x, y + trunkHeight, z, height / 5, 5, splitHash);
+		break;
+	}
+	case 3:
+		break;
+	default:
+		break;
+	}
+}
+
+void TreeMaker::PlaceBranch(std::vector<unsigned short>& blocks, int x, int y, int z, int height, int hash)
+{
+	int Xdirection = (hash & 1) * 2 - 1;
+	int Ydirection = (hash >> 1) & 1;
+	int Zdirection = ((hash >> 2) & 1) * 2 - 1;
+	int dx = x;
+	int dy = y;
+	int dz = z;
+	int offsetY = 0;
+	for (int i = 0; i < height / 3; i++)
+	{
+		dx += Xdirection;
+		dz += Zdirection;
+
+		offsetY += Ydirection;
+		dy += offsetY / 3;
+
+		if (dx >= 0 && dx < Chunk::m_XSize && dz >= 0 && dz < Chunk::m_ZSize && dy >= 0 && dy < Chunk::m_YSize)
+			blocks[dx + Chunk::m_XSize * (dy + Chunk::m_YSize * dz)] = 11;
+	}
+	PlaceLeaves(blocks, dx, dy, dz, std::max(1, height / 2), hash >> 3);
+}
+
+void TreeMaker::PlaceLeaves(std::vector<unsigned short>& blocks, int x, int y, int z, int height, int hash)
+{
+	float baseRadius = std::max(2.0f, height / 2.5f);
+	int h1 = DeriveHash(hash, 179424673);
+	float rx = baseRadius * (0.85f + ((h1) & 0xFF) / 255.0f * 0.3f);
+	float ry = baseRadius * (0.70f + ((h1 >> 8) & 0xFF) / 255.0f * 0.3f);
+	float rz = baseRadius * (0.85f + ((h1 >> 16) & 0xFF) / 255.0f * 0.3f);
+
+	int leavesCenterX = x; // no offset cause the trunk is straight, so the top x and z are the same as the bottom one
+	int leavesCenterY = y;
+	int leavesCenterZ = z;
+
+	int rCeil = (int)std::ceil(std::max({ rx, ry, rz }));  // Take the higher radius of the 3 to define the size of the 'cube' we gonna scan
+
+	float holeFactor = 0.3f + ((h1 >> 24) & 0xFF) / 255.0f * 0.3f;
+
+	for (int dy = -rCeil; dy <= rCeil; dy++)
+	{
+		for (int dz = -rCeil; dz <= rCeil; dz++)
+			for (int dx = -rCeil; dx <= rCeil; dx++)
+			{
+				float dist = (float)(dx * dx) / (rx * rx) + (float)(dy * dy) / (ry * ry) + (float)(dz * dz) / (rz * rz);
+				if (dist > 1.0f) continue; // Check if the current blocks is in the area of the 'sphere'
+
+				// Natural holes on the surface of the 'sphere'
+				int leafHash = h1 ^ (dx * 29989 + dy * 30497 + dz * 31337);
+				if (RandomFloat(leafHash) > 1.0f - dist * holeFactor) continue;
+
+				int bx = leavesCenterX + dx;
+				int by = leavesCenterY + dy;
+				int bz = leavesCenterZ + dz;
+				int pos = bx + Chunk::m_XSize * (by + Chunk::m_YSize * bz);
+				if (bx >= 0 && bx < Chunk::m_XSize && bz >= 0 && bz < Chunk::m_ZSize && by >= 0 && by < Chunk::m_YSize && blocks[pos] == 0)
+					blocks[pos] = 12;  // Leaves
+			}
+	}
+}
+
+void TreeMaker::PlaceSplit(std::vector<unsigned short>& blocks, int x, int y, int z, int segmentLength, int depth, int hash)
+{
+    if (depth == 0 || segmentLength < 2)
+    {
+        PlaceLeaves(blocks, x, y, z, segmentLength * 2, hash);
+        return;
+    }
+
+    // Direction
+    int dx = ((hash & 1) * 2 - 1);          // -1 or +1 in X
+    int dz = (((hash >> 1) & 1) * 2 - 1);   // -1 or +1 in Z
+    int dyStep = std::max(1, segmentLength / 3);  // mount 1 bloc every iteration of dyStep
+
+    int cx = x, cy = y, cz = z;
+    for (int i = 0; i < segmentLength; i++)
+    {
+		if (i % dyStep == 0)
+		{
+			cy++;
+			if (cx >= 0 && cx < Chunk::m_XSize && cz >= 0 && cz < Chunk::m_ZSize && cy >= 0 && cy < Chunk::m_YSize)
+				blocks[cx + Chunk::m_XSize * (cy + Chunk::m_YSize * cz)] = 11;
+		}
+
+		cx += dx;
+		cz += dz;
+
+        if (cx >= 0 && cx < Chunk::m_XSize && cz >= 0 && cz < Chunk::m_ZSize && cy >= 0 && cy < Chunk::m_YSize)
+            blocks[cx + Chunk::m_XSize * (cy + Chunk::m_YSize * cz)] = 11;
+    }
+
+    // Split into 2 daughter branches from the end of the segment
+    int hash1 = DeriveHash(hash, 104729);
+    int hash2 = DeriveHash(hash, 224737);
+    PlaceSplit(blocks, cx, cy, cz, segmentLength - 1, depth - 1, hash1);
+    PlaceSplit(blocks, cx, cy, cz, segmentLength - 1, depth - 1, hash2);
+}
+```
+
+### src/VertexArray.cpp
+```
+#include "VertexArray.h"
+
+#include "VertexBufferLayout.h"
+#include "Renderer.h"
+
+VertexArray::VertexArray()
+{
+	GLCall(glGenVertexArrays(1, &m_RendererID));
+}
+
+VertexArray::~VertexArray()
+{
+	GLCall(glDeleteVertexArrays(1, &m_RendererID));
+}
+
+void VertexArray::AddBuffer(const VertexBuffer& vb, const VertexBufferLayout& layout)
+{
+	Bind();
+	vb.Bind();
+	const auto& elements = layout.GetElements();
+	unsigned int offset = 0;
+	for (unsigned int i = 0; i < elements.size(); i++)
+	{
+		const auto& element = elements[i];
+		GLCall(glEnableVertexAttribArray(i));
+		GLCall(glVertexAttribPointer(i, element.count, element.type, element.normalized, layout.GetStrid(), (const void*)offset));
+		offset += element.count * VertexBufferElement::GetSizeOfType(element.type);
+	}
+}
+
+void VertexArray::Bind() const
+{
+	GLCall(glBindVertexArray(m_RendererID));
+}
+
+void VertexArray::Unbind() const
+{
+	GLCall(glBindVertexArray(0));
+}
+```
+
+### src/VertexBuffer.cpp
+```
+#include "VertexBuffer.h"
+
+#include "Renderer.h"
+
+VertexBuffer::VertexBuffer(const void* data, unsigned int size)
+{
+    GLCall(glGenBuffers(1, &m_RendererID));
+    GLCall(glBindBuffer(GL_ARRAY_BUFFER, m_RendererID));
+    GLCall(glBufferData(GL_ARRAY_BUFFER, size, data, GL_DYNAMIC_DRAW));
+}
+
+VertexBuffer::~VertexBuffer()
+{
+    GLCall(glDeleteBuffers(1, &m_RendererID));
+}
+
+void VertexBuffer::Reload(const void* data, unsigned int size) const
+{
+    GLCall(glBindBuffer(GL_ARRAY_BUFFER, m_RendererID));
+    GLCall(glBufferData(GL_ARRAY_BUFFER, size, data, GL_DYNAMIC_DRAW));
+}
+
+void VertexBuffer::Bind() const
+{
+    GLCall(glBindBuffer(GL_ARRAY_BUFFER, m_RendererID));
+}
+
+void VertexBuffer::Unbind() const
+{
+    GLCall(glBindBuffer(GL_ARRAY_BUFFER, 0));
+}
+```
+
+### src/VoronoiNoise.cpp
+```
+#include "VoronoiNoise.h"
+
+namespace Noise {
+
+    VoronoiNoise::VoronoiNoise(unsigned int seed)
+        : m_Seed(seed)
+    {
+
+    }
+
+    // Etape 1 : Le Hash
+
+    int VoronoiNoise::Hash(int x, int z) const
+    {
+        int h = x * 374761393 + z * 668265263 + m_Seed * 1442695040888963407ULL; // grands nombres premiers
+        h = (h ^ (h >> 13)) * 1274126177;
+        return h ^ (h >> 16);
+    }
+
+    // Etape 2 : Centroid dans chaque cellule
+
+    std::pair<float, float> VoronoiNoise::GetCentroid(int cellX, int cellZ) const
+    {
+        int h = Hash(cellX, cellZ);
+
+        // Génère 2 floats pseudo random dans [0,1]
+        float offsetX = (h & 0xFFFF) / (float)0xFFFF;
+        float offsetZ = ((h >> 16) & 0xFFFF) / (float)0xFFFF;
+
+        return {
+            cellX + offsetX,
+            cellZ + offsetZ
+        };
+    }
+
+    // Etape 3 : Multi-centroid + biomes + blending
+
+    // A : implementation
+    void VoronoiNoise::GetBiomes(float x, float z, float weights[4]) const
+    {
+        int cellX = (int)std::floor(x);
+        int cellZ = (int)std::floor(z);
+
+        Candidate candidates[9];
+        int index = 0;
+
+        // On check une zone 3x3 (souvent suffisant)
+        for (int dz = -1; dz <= 1; dz++)
+        {
+            for (int dx = -1; dx <= 1; dx++)
+            {
+                int cx = cellX + dx;
+                int cz = cellZ + dz;
+
+                auto [px, pz] = GetCentroid(cx, cz);
+
+                float dxp = px - x;
+                float dzp = pz - z;
+                float dist = dxp * dxp + dzp * dzp;
+
+                int h = Hash(cx, cz);
+                int biome = h & 3; // 4 biomes
+
+                candidates[index++] = { dist, biome };
+            }
+        }
+
+        // B : definir les poids des 4 biomes différents
+        float bestDist[4];
+
+        // init
+        for (int i = 0; i < 4; i++)
+        {
+            bestDist[i] = FLT_MAX;
+            weights[i] = 0.0f;
+        }
+
+        // trouver le meilleur centroid pour chaque biome
+        for (const auto& c : candidates)
+        {
+            if (c.dist < bestDist[c.biomeID])
+            {
+                bestDist[c.biomeID] = c.dist;
+            }
+        }
+
+        // calcule des poids
+        float sum = 0.0f;
+
+        for (int i = 0; i < 4; i++)
+        {
+            if (bestDist[i] < FLT_MAX)
+            {
+                float d = bestDist[i] + 0.0001f;
+                weights[i] = 1.0f / (d * std::sqrt(d));
+
+                sum += weights[i];
+            }
+        }
+
+        // C : normalisation
+        if (sum > 0.0f)
+        {
+            for (int i = 0; i < 4; i++)
+            {
+                weights[i] /= sum;
+            }
+        }
+    }
+}
+```
+
+### src/World.cpp
+```
+#include "World.h"
+
+World::World(int RenderDistance, std::shared_ptr<Atlas> Atlas, unsigned int Seed)
+	: m_RenderDistance(RenderDistance), m_Texture(Atlas), m_PerlinNoise(Seed), m_VoronoiNoise(Seed), m_Seed(Seed)
+{
+    m_Renderer = std::make_unique<Renderer>();
+
+	int threadCount = std::thread::hardware_concurrency();
+	if (threadCount == 0)
+		threadCount = 4; // fallback
+
+	for (int i = 0; i < threadCount; i++)
+	{
+		m_Workers.emplace_back(&World::WorkerLoop, this);
+	}
+
+	TerrainGenerator::InitBiomes();
+}
+
+World::~World()
+{
+	m_Stopped = true;
+
+	m_JobQueue.Stop();     // Wake up workers
+	m_ResultQueue.Stop();
+
+	for (auto& t : m_Workers)
+		if (t.joinable())
+			t.join();
+}
+
+void World::Load(const glm::vec3& CameraChunkPosition)
+{
+	int ChunkX = floor(CameraChunkPosition.x / Chunk::m_XSize);
+	int ChunkZ = floor(CameraChunkPosition.z / Chunk::m_ZSize);
+
+	// Delete far chunks
+	for (auto it = m_Chunks.begin(); it != m_Chunks.end(); )
+	{
+		int dx = it->first.x - ChunkX;
+		int dz = it->first.z - ChunkZ;
+
+		if (dx * dx + dz * dz > m_RenderDistance * m_RenderDistance)
+		{
+			it = m_Chunks.erase(it);
+		}
+		else
+		{
+			++it;
+		}
+	}
+
+	// Create the missing chunks (put them in NeedGenerate state)
+	for (int x = -m_RenderDistance; x <= m_RenderDistance; x++)
+		for (int z = -m_RenderDistance; z <= m_RenderDistance; z++)
+		{
+			if (x * x + z * z > m_RenderDistance * m_RenderDistance) continue; // skip the corners
+
+			ChunkPosition pos = { ChunkX + x, ChunkZ + z };
+
+			if (m_Chunks.find(pos) == m_Chunks.end())
+			{
+				auto newChunk = std::make_shared<Chunk>(pos.x, pos.z, *this);
+				m_Chunks[pos] = newChunk;
+
+				newChunk->SetNeedGeneration(true);
+			}
+		}
+
+	// Push jobs (NeedRemesh -> threads)
+	int jobCount = 0;
+
+	for (auto& [pos, chunk] : m_Chunks)
+	{
+		if (!chunk->GetNeedGeneration() && chunk->GetNeedRemesh() && jobCount < m_MaxRemeshPerFrame)
+		{
+			WorkerJob job;
+			job.type = MeshJobType;
+			job.pos = pos;
+			job.center = chunk;
+
+			// Get neighbors (lambda)
+			auto get = [&](int x, int z) -> std::shared_ptr<Chunk>
+				{
+					ChunkPosition p{ x, z };
+					auto it = m_Chunks.find(p);
+					return (it != m_Chunks.end()) ? it->second : nullptr;
+				};
+
+			job.left = get(pos.x - 1, pos.z);
+			job.right = get(pos.x + 1, pos.z);
+			job.front = get(pos.x, pos.z + 1);
+			job.back = get(pos.x, pos.z - 1);
+
+			m_JobQueue.Push(std::move(job));
+
+			chunk->SetNeedRemesh(false);
+			jobCount++;
+		}
+	}
+
+	// WE PUT THE GENERATE JOBS AFTER THE MESH JOBS BECAUSE OUR QUEUE ARE LI-FO, AND WE WANT THE GENERATE JOBS TO BE ALLWAYS PRIORITY
+	// Push jobs (NeedGenerate -> threads)
+	jobCount = 0;
+
+	for (auto& [pos, chunk] : m_Chunks)
+	{
+		if (chunk->GetNeedGeneration()) // We get read of the m_MaxGeneratePerFrame because we want it to be a priority
+		{
+			WorkerJob job;
+			job.type = GenerateJobType;
+			job.pos = pos;
+
+			m_JobQueue.Push(std::move(job));
+
+			chunk->SetNeedGeneration(false);
+			jobCount++;
+		}
+	}
+}
+
+
+
+void World::Draw(const glm::vec3& CameraChunkPosition, Shader* shader, Shader* SsboShader, const glm::mat4& View, const glm::mat4& Proj)
+{
+	// LOAD PART : 
+
+	Load(CameraChunkPosition);
+
+	// WORKERS RESULTS MANAGING AND UPLOAD GPU/CPU PART : 
+
+	while (auto result = m_ResultQueue.TryPop())
+	{
+		auto it = m_Chunks.find(result->pos);
+		if (it == m_Chunks.end())
+			continue;
+
+		auto& chunk = it->second;
+
+		if (result->type == GenerateJobType)
+		{
+			chunk->ApplyGenerate(result->blocks, result->heightTable, result->treeLevel);
+
+			// Put the existing neighbors in "NeedRemesh" state (lambda)
+			ChunkPosition pos = result->pos;
+			auto markNeighbor = [&](int nx, int nz)
+				{
+					ChunkPosition p{ nx, nz };
+					auto it = m_Chunks.find(p);
+					if (it != m_Chunks.end())
+						it->second->SetNeedRemesh(true);
+				};
+
+			markNeighbor(pos.x - 1, pos.z);
+			markNeighbor(pos.x + 1, pos.z);
+			markNeighbor(pos.x, pos.z + 1);
+			markNeighbor(pos.x, pos.z - 1);
+
+			// Put the current generated chunk in "NeedRemesh" state
+			chunk->SetNeedRemesh(true);
+		}
+		else if (result->type == MeshJobType)
+		{
+			// If the chunk already had an allocation, we free
+			if (chunk->GetMegaSSBOOffset() != UINT32_MAX)
+				m_MegaSSBO.Free(chunk->GetMegaSSBOOffset(), chunk->GetMegaSSBOFaceCount());
+
+			// New allocation
+			uint32_t faceCount = result->opaqueSSBO.size();
+			uint32_t offset = m_MegaSSBO.Allocate(faceCount);
+
+			if (offset == UINT32_MAX) // Here we avoid fragmentation issues in the mega ssbo by stacking all the used data on the start position of the mega ssbo, leaving a single big bloc of place in the other part of the buffer
+			{
+				CompactMegaSSBO();
+				offset = m_MegaSSBO.Allocate(faceCount); // Retry
+			}
+
+			m_MegaSSBO.Upload(result->opaqueSSBO.data(), faceCount, offset);
+			chunk->SetMegaSSBO(offset, faceCount);
+
+			chunk->ApplyMesh(result->opaqueSSBO, result->opaqueVertices, result->opaqueIndices, result->transparentVertices, result->transparentIndices);
+		}
+	}
+
+	// FRUSTUM AND MESHED CHUNKS ORDERING PART : 
+
+	Frustum frustum(Proj, View);
+
+	glm::vec2 CamPos = glm::vec2(floor(CameraChunkPosition.x / Chunk::m_XSize), floor(CameraChunkPosition.z / Chunk::m_ZSize));
+
+	if (CamPos != m_LastCamChunkPos)
+	{
+		m_OrderedChunks.clear();
+
+		for (auto& [Pos, chunk] : m_Chunks)
+		{
+			if (chunk->IsMeshReady())
+			{
+				float wx = chunk->GetXWorldPos() * Chunk::m_XSize;
+				float wz = chunk->GetZWorldPos() * Chunk::m_ZSize;
+
+				if (frustum.IsChunkInFrustum(wx, wz))
+					m_OrderedChunks.push_back(chunk);
+			}
+		}
+
+		std::sort(m_OrderedChunks.begin(), m_OrderedChunks.end(),
+			[&](std::shared_ptr<Chunk> a, std::shared_ptr<Chunk> b)
+			{
+				glm::vec2 dA = glm::vec2(a->GetXWorldPos(), a->GetZWorldPos()) - CamPos;
+				glm::vec2 dB = glm::vec2(b->GetXWorldPos(), b->GetZWorldPos()) - CamPos;
+				return glm::dot(dA, dA) > glm::dot(dB, dB);
+			});
+
+		m_LastCamChunkPos = CamPos;
+	}
+
+	// DRAWING PART : 
+
+	// Opaque - indirect drawing
+	m_DrawIndirectBuffer.Clear();
+
+	for (auto& [Pos, chunk] : m_Chunks)
+	{
+		if (!chunk->IsMeshReady()) continue;
+
+		float wx = chunk->GetXWorldPos() * Chunk::m_XSize;
+		float wz = chunk->GetZWorldPos() * Chunk::m_ZSize;
+
+		if (!frustum.IsChunkInFrustum(wx, wz)) continue;
+		if (chunk->GetMegaSSBOFaceCount() == 0) continue;
+
+		// Encode chunkX and chunkZ in 'baseInstance' (16 firt bits for chunkX, those bits are unsigned so we have to add 32768 to endle that, 16 next bits are for chunZ)
+		uint32_t baseInstance = ((uint32_t)(chunk->GetXWorldPos() + 32768) & 0xFFFF) | (((uint32_t)(chunk->GetZWorldPos() + 32768) & 0xFFFF) << 16);
+
+		m_DrawIndirectBuffer.AddCommand(chunk->GetMegaSSBOFaceCount(), chunk->GetMegaSSBOOffset(), baseInstance);
+	}
+	m_DrawIndirectBuffer.Upload();
+	if (m_DrawIndirectBuffer.GetCommandCount() == 0)
+	{
+		m_DrawIndirectBuffer.Bind();
+		return;
+	}
+
+	m_Renderer->Draw(m_EmptyVAO, m_MegaSSBO, *SsboShader, m_DrawIndirectBuffer);
+
+	/*
+	// Opaque
+	for (auto& [Pos, chunk] : m_Chunks)
+	{
+		if (chunk->IsMeshReady())
+		{
+			float wx = chunk->GetXWorldPos() * Chunk::m_XSize;
+			float wz = chunk->GetZWorldPos() * Chunk::m_ZSize;
+
+			if (frustum.IsChunkInFrustum(wx, wz))
+			{
+				// Pipeline A
+				SsboShader->Bind();
+				SsboShader->SetUniform3f("u_ChunkWorldPos", wx, 0.0f, wz);
+				m_Renderer->Draw(*chunk->GetOpaqueEmptyVAO(), *chunk->GetOpaqueSSBO(), *SsboShader, chunk->GetOpaqueSSBOIndexCount());
+
+				// Pipeline B
+				//m_Renderer->Draw(*chunk->GetOpaqueVertexArray(), *chunk->GetOpaqueIndexBuffer(), *shader);
+			}
+		}
+	}
+	*/
+
+	// Transparent
+	for (auto& chunk : m_OrderedChunks)
+	{
+		//m_Renderer->Draw(*chunk->GetTransparentVertexArray(), *chunk->GetTransparentIndexBuffer(), *shader);
+	}
+}
+
+void World::WorkerLoop()
+{
+	while (true)
+	{
+		auto jobOpt = m_JobQueue.Pop(); // BLOQUANT
+		
+		// securite shutdown (si queue stop)
+		if (!jobOpt)
+			break;
+
+		auto job = std::move(*jobOpt);
+
+		if (job.type == GenerateJobType)
+		{
+			Generator generator(*this, job.pos.x, job.pos.z);
+			generator.GenerateFromChunk();
+
+			WorkerResult result;
+			result.type = GenerateJobType;
+			result.pos = job.pos;
+			result.blocks = generator.MoveBlocks();
+			result.heightTable = generator.MoveHeights();
+			result.treeLevel = generator.GetTreeLevel();
+
+			m_ResultQueue.Push(std::move(result));
+		}
+		else if (job.type == MeshJobType)
+		{
+			Mesh mesh;
+			mesh.MeshFromChunk(m_Texture.get(), *job.center, job.left.get(), job.right.get(), job.front.get(), job.back.get());
+
+			WorkerResult result;
+			result.type = MeshJobType;
+			result.pos = job.pos;
+			result.opaqueSSBO = mesh.GetOpaqueSSBO();
+			result.opaqueVertices = mesh.GetOpaqueVertices();
+			result.opaqueIndices = mesh.GetOpaqueIndices();
+			result.transparentVertices = mesh.GetTransparentVertices();
+			result.transparentIndices = mesh.GetTransparentIndices();
+
+			m_ResultQueue.Push(std::move(result));
+		}
+	}
+}
+
+// Dans World
+void World::CompactMegaSSBO()
+{
+	uint32_t writeOffset = 0;
+
+	for (auto& [pos, chunk] : m_Chunks)
+	{
+		if (chunk->GetMegaSSBOOffset() == UINT32_MAX) continue;
+		if (chunk->GetMegaSSBOFaceCount() == 0) continue;
+
+		uint32_t oldOffset = chunk->GetMegaSSBOOffset();
+		uint32_t faceCount = chunk->GetMegaSSBOFaceCount();
+
+		if (oldOffset != writeOffset)
+			m_MegaSSBO.Move(oldOffset, writeOffset, faceCount); // glCopyBufferSubData
+
+		chunk->SetMegaSSBO(writeOffset, faceCount);
+		writeOffset += faceCount;
+	}
+
+	m_MegaSSBO.ResetFreeList(writeOffset); // put back one single free bloc
+}
+
+int World::GetHeight(int x, int z) const
+{
+	int XChunkPos = (int)std::floor(x / (float)Chunk::m_XSize);
+	int ZChunkPos = (int)std::floor(z / (float)Chunk::m_ZSize);
+
+	ChunkPosition pos = { XChunkPos, ZChunkPos };
+
+	if (m_Chunks.find(pos) != m_Chunks.end())
+	{
+		int localX = (x % Chunk::m_XSize + Chunk::m_XSize) % Chunk::m_XSize;
+		int localZ = (z % Chunk::m_ZSize + Chunk::m_ZSize) % Chunk::m_ZSize;
+
+		auto& chunk = m_Chunks.at(pos);
+
+		return chunk->GetHeight(localX, localZ);
+	}
+	return -1;
+}
+```
+
+### src/main.cpp
+```
+#include <glad/glad.h>
+#include <GLFW/glfw3.h>
+
+#include <iostream>
+#include <fstream>
+#include <string>
+#include <sstream>
+
+#include "Renderer.h"
+
+#include "VertexBuffer.h"
+#include "VertexBufferLayout.h"
+#include "IndexBuffer.h"
+#include "VertexArray.h"
+#include "Shader.h"
+#include "Texture.h"
+
+#include "glm/glm.hpp"
+#include "glm/gtc/matrix_transform.hpp"
+
+#include "imgui/imgui.h"
+#include "imgui/imgui_impl_glfw.h"
+#include "imgui/imgui_impl_opengl3.h"
+
+#include "TestClearColor.h"
+#include "TestTexture2D.h"
+#include "TestCube3D.h"
+
+/* opengl documentation : http://docs.gl */
+
+int main(void)
+{
+    GLFWwindow* window;
+
+    /* Initialize the library */
+    if (!glfwInit())
+        return -1;
+
+    glfwWindowHint(GLFW_CONTEXT_VERSION_MAJOR, 4);
+    glfwWindowHint(GLFW_CONTEXT_VERSION_MINOR, 6);
+    glfwWindowHint(GLFW_OPENGL_PROFILE, GLFW_OPENGL_CORE_PROFILE);
+
+    /* Create a windowed mode window and its OpenGL context */
+    window = glfwCreateWindow(1920, 1080, "Hello World", NULL, NULL);
+    if (!window)
+    {
+        glfwTerminate();
+        return -1;
+    }
+
+    /* Make the window's context current */
+    glfwMakeContextCurrent(window);
+
+    glfwSwapInterval(1); // permet de set la rapiditer de la fenetre avec la valeur par defaut de lecran je crois
+
+    /* Charger les fonctions opengl avec glad et glfw */
+    if (!gladLoadGLLoader((GLADloadproc)glfwGetProcAddress))
+    {
+        std::cout << "Failed to initialize GLAD\n";
+        return -1;
+    }
+
+    std::cout << glGetString(GL_VERSION) << std::endl;
+
+    Renderer renderer;
+
+    ImGui::CreateContext();
+    ImGui_ImplGlfw_InitForOpenGL(window, true);
+    ImGui_ImplOpenGL3_Init("#version 460");
+    ImGui::StyleColorsDark();
+
+    test::Test* currentTest = nullptr;
+    test::TestMenu* testMenu = new test::TestMenu(window, currentTest);
+    currentTest = testMenu;
+
+    testMenu->RegisterTest<test::TestClearColor>("Clear Color");
+    testMenu->RegisterTest<test::TestTexture2D>("2D Texture");
+    testMenu->RegisterTest<test::TestCube3D>("VoxelEngine");
+
+    /* Loop until the user closes the window */
+    while (!glfwWindowShouldClose(window))
+    {
+        GLCall(glClearColor(0.0f, 0.0f, 0.0f, 1.0f));
+        renderer.Clear();
+
+        ImGui_ImplOpenGL3_NewFrame();
+        ImGui_ImplGlfw_NewFrame();
+        ImGui::NewFrame();
+
+        if (currentTest)
+        {
+            currentTest->OnUpdate();
+            currentTest->OnRender();
+            ImGui::Begin("Test");
+            if (currentTest != testMenu && ImGui::Button("<-"))
+            {
+                delete currentTest;
+                currentTest = testMenu;
+            }
+            currentTest->OnImGuiRender();
+            ImGui::End();
+        }
+
+        ImGui::Render();
+        ImGui_ImplOpenGL3_RenderDrawData(ImGui::GetDrawData());
+
+        /* Swap front and back buffers */
+        glfwSwapBuffers(window);
+
+        /* Poll for and process events */
+        glfwPollEvents();
+    }
+
+    delete currentTest;
+    if (currentTest != testMenu)
+        delete testMenu;
+
+    ImGui_ImplOpenGL3_Shutdown();
+    ImGui_ImplGlfw_Shutdown();
+    ImGui::DestroyContext();
+
+    glfwTerminate();
+    
+    return 0;
+}
+```
+
+### res/shaders/Basic.shader
+```
+#shader vertex
+#version 330 core
+        
+layout(location=0) in vec4 position;
+layout(location=1) in vec2 texCoord;
+
+out vec2 v_TexCoord;
+  
+uniform mat4 u_MVP;
+
+void main()
+{
+    gl_Position = u_MVP * position;
+    v_TexCoord = texCoord;
+};
+
+#shader fragment
+#version 330 core
+        
+layout(location=0) out vec4 color;
+
+in vec2 v_TexCoord;
+
+uniform sampler2D u_Texture;
+
+void main()
+{
+    vec4 texColor = texture(u_Texture, v_TexCoord);
+
+    
+    if (texColor.a < 0.5) //allow us to andle alpha correctly
+        discard;
+
+    color = texColor;
+};
+```
+
+### res/shaders/Ssbo.shader
+```
+#shader vertex
+#version 460 core
+        
+// SSBO : 1 uint32 par face
+layout(std430, binding = 0) readonly buffer FaceBuffer {
+    uint faces[];
+};
+
+// Uniforms
+uniform mat4 u_MVP;
+uniform vec2 u_AtlasTileSize;  // (1.0/atlasWidth, 1.0/atlasHeight)
+uniform int  u_AtlasWidth;
+
+// Output vers le fragment shader
+out vec2 v_UV;
+out float v_FaceLight;  // lumière directionnelle selon la face
+
+// Les 4 coins locaux d'une face (dans l'espace bloc 0-1) 
+// et leurs UVs correspondants
+// Order : bottom-left, bottom-right, top-right, top-left
+const vec3 faceCorners[6][4] = vec3[][](
+    // 0 : +X
+    vec3[4](vec3(1,0,1), vec3(1,1,1), vec3(1,1,0), vec3(1,0,0)),
+    // 1 : -X
+    vec3[4](vec3(0,0,0), vec3(0,1,0), vec3(0,1,1), vec3(0,0,1)),
+    // 2 : +Y (top)
+    vec3[4](vec3(0,1,0), vec3(1,1,0), vec3(1,1,1), vec3(0,1,1)),
+    // 3 : -Y (bottom)
+    vec3[4](vec3(0,0,1), vec3(1,0,1), vec3(1,0,0), vec3(0,0,0)),
+    // 4 : +Z
+    vec3[4](vec3(0,0,1), vec3(0,1,1), vec3(1,1,1), vec3(1,0,1)),
+    // 5 : -Z
+    vec3[4](vec3(1,0,0), vec3(1,1,0), vec3(0,1,0), vec3(0,0,0))
+);
+
+// UVs locaux des 4 coins (identiques pour toutes les faces)
+const vec2 cornerUVs[4] = vec2[](
+    vec2(0,0), vec2(0,1), vec2(1,1), vec2(1,0)
+);
+
+// Indices pour les 2 triangles d'un quad (6 vertices → 4 coins)
+const int quadIndices[6] = int[](0, 1, 2, 2, 3, 0);
+
+// Lumière directionnelle par face (simule un soleil)
+const float faceLights[6] = float[](
+    0.6,   // +X
+    0.6,   // -X
+    1.0,   // +Y (top, plein soleil)
+    0.3,   // -Y (bottom, dans l'ombre)
+    0.8,   // +Z
+    0.8    // -Z
+);
+
+void main()
+{
+    // Quel face et quel vertex dans le quad
+    int faceIndex  = gl_VertexID / 6;
+    int localVert  = gl_VertexID % 6;
+    int cornerIndex = quadIndices[localVert];
+
+    // Unpack du uint32
+    uint data = faces[faceIndex];
+    float bx = float( data        & 0x1Fu);
+    float bz = float((data >>  5) & 0x1Fu);
+    float by = float((data >> 10) & 0x1FFu);
+    int faceId    = int((data >> 19) & 0x7u);
+    int texIndex  = int((data >> 22) & 0x3Fu);
+
+    // Position monde du vertex
+    vec3 blockPos  = vec3(bx, by, bz);
+    vec3 corner    = faceCorners[faceId][cornerIndex];
+
+    // Decode chunkX and chunkZ from gl_BaseInstance
+    uint base = uint(gl_BaseInstance);
+    int chunkX = int(base & 0xFFFFu) - 32768;
+    int chunkZ = int((base >> 16u) & 0xFFFFu) - 32768;
+    vec3 chunkWorldPos = vec3(float(chunkX) * 16.0, 0.0, float(chunkZ) * 16.0);
+
+    vec3 worldPos  = chunkWorldPos + blockPos + corner;
+
+    gl_Position = u_MVP * vec4(worldPos, 1.0);
+
+    // UV dans l'atlas
+    float tx = float(texIndex % u_AtlasWidth);
+    float ty = float(texIndex / u_AtlasWidth);
+    vec2 localUV = cornerUVs[cornerIndex];
+    v_UV = (vec2(tx, ty) + localUV) * u_AtlasTileSize;
+
+    // Lumière directionnelle
+    v_FaceLight = faceLights[faceId];
+}
+
+
+
+#shader fragment
+#version 460 core
+        
+in vec2 v_UV;
+in float v_FaceLight;
+
+out vec4 fragColor;
+
+uniform sampler2D u_Texture;
+
+void main()
+{
+    vec4 texColor = texture(u_Texture, v_UV);
+    fragColor = vec4(texColor.rgb * v_FaceLight, texColor.a);
+}
+```

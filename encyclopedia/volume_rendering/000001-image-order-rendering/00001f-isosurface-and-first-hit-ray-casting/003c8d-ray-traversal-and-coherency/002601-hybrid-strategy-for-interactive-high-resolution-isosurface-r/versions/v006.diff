@@ -1,0 +1,163 @@
+--- v005.md
++++ v006.md
+@@ -4,5 +4,5 @@
+ 
+ ## Overview
+-This method enables interactive isosurface rendering on multi-core processors by combining object-order traversal with restricted ray casting [S1, unofficial]. It solves load-balancing and memory hierarchy overhead problems inherent in static screen partitioning by dynamically allocating ray casting tasks to threads while maintaining spatial locality [S1, unofficial]. Unlike sibling methods that may use static grids or purely image-order traversal, this approach explicitly decouples the identification of candidate data blocks from the ray casting execution, using a two-phase process to restrict the search space to a small, front-to-back list of blocks per pixel [S1, unofficial].
++This method enables interactive isosurface rendering on multi-core processors by combining object-order traversal with restricted ray casting [S1, unofficial]. It solves the load-balancing and memory hierarchy overhead problems inherent in static screen partitioning by dynamically allocating ray casting tasks to threads while maintaining spatial locality [S1, unofficial]. Unlike sibling methods that may use static grids or purely image-order traversal, this approach explicitly decouples the identification of candidate data blocks from the ray casting execution, using a two-phase process to restrict the search space to a small, front-to-back list of blocks per pixel [S1, unofficial].
+ 
+ ## How it works
+@@ -10,10 +10,10 @@
+ 
+ **Inputs and Outputs:**
+-*   **Input:** A volumetric dataset $V$ partitioned into 3D tiles (data blocks) [S1, unofficial]. A viewing frustum defined by the camera position and orientation [G]. An isosurface threshold $\tau$.
+-*   **Output:** A rendered image where each pixel contains the color of the first isosurface intersection.
++*   **Input:** A volumetric dataset $V$ partitioned into 3D tiles (data blocks) [S1, unofficial]. A viewing frustum defined by the camera position and orientation [G]. An isosurface threshold $\tau$ [G].
++*   **Output:** A rendered image where each pixel contains the color of the first isosurface intersection [G].
+ 
+ **Data Structures:**
+-1.  **3D-Tiled Dataset:** The volume is divided into fixed-size 3D blocks [S1, unofficial]. A compact indexing structure is used to traverse the dataset and identify visible/intersecting tiles [S1, unofficial].
+-2.  **Candidate Lists:** For each pixel (or packet of pixels), a list of data blocks that are both visible and intersect the isosurface, ordered front-to-back relative to the viewpoint [S1, unofficial].
++1.  **3D-Tiled Dataset:** The volume is divided into fixed-size 3D blocks [S1, unofficial].
++2.  **Candidate Lists:** For each pixel (or packet of pixels), a list of data blocks that are both visible and intersect the isosurface ($\min(block) \le \tau \le \max(block)$), ordered front-to-back relative to the viewpoint [S1, unofficial].
+ 
+ **Numbered Steps:**
+@@ -39,25 +39,52 @@
+ ```python
+ import threading
+-import queue
+ 
+-class Ray:
+-    def __init__(self, origin, direction):
+-        self.origin = origin
+-        self.direction = direction
++# Standard operations defined for self-containment
++def get_ray(camera, pixel):
++    return camera.project(pixel)
+ 
+-class Block:
+-    def is_visible(self, ray): return True
+-    def intersects_isosurface(self, threshold): return False
+-    def distance_from_viewpoint(self, origin): return 0.0
++def render_pixel(pixel, color):
++    image[pixel] = color
+ 
+-class Camera:
+-    def all_pixels(self): return []
+-    def get_ray(self, pixel): return Ray((0,0,0), (0,0,1))
++def ray_cast_block(ray, block, threshold):
++    # Standard isosurface traversal within a single block
++    # Returns intersection point or None
++    return None
+ 
+-def hybrid_isosurface_rendering(volume_blocks, camera, threshold, num_threads):
++class TaskQueue:
++    def __init__(self, tasks):
++        self.tasks = list(tasks)
++        self.lock = threading.Lock()
++
++    def pop(self):
++        with self.lock:
++            if self.tasks:
++                return self.tasks.pop()
++            return None
++
++def worker(queue, candidate_lists, threshold, image):
++    while True:
++        pixel = queue.pop()
++        if pixel is None:
++            break
++        blocks = candidate_lists[pixel]
++        ray = get_ray(camera, pixel)
++        hit = False
++        for block in blocks:
++            intersection = ray_cast_block(ray, block, threshold)
++            if intersection is not None:
++                render_pixel(pixel, intersection.color)
++                hit = True
++                break
++        if not hit:
++            render_pixel(pixel, background_color)
++
++def hybrid_isosurface_rendering(volume_blocks, camera, threshold, num_threads, image, background_color):
+     # Phase I: Object-Order Identification
+     candidate_lists = {}
+-    for pixel in camera.all_pixels():
+-        ray = camera.get_ray(pixel)
++    pixels = [(x, y) for x in range(camera.width) for y in range(camera.height)]
++
++    for pixel in pixels:
++        ray = get_ray(camera, pixel)
+         visible_blocks = []
+         for block in volume_blocks:
+@@ -68,47 +95,12 @@
+ 
+     # Phase II: Restricted Ray Casting with Dynamic Allocation
+-    task_queue = queue.Queue()
+-    for pixel in camera.all_pixels():
+-        task_queue.put(pixel)
+-
+-    lock = threading.Lock()
+-    results = {}
+-
+-    def worker():
+-        while True:
+-            try:
+-                pixel = task_queue.get_nowait()
+-            except queue.Empty:
+-                break
+-            blocks = candidate_lists[pixel]
+-            ray = camera.get_ray(pixel)
+-            hit = False
+-            for block in blocks:
+-                intersection = ray_cast_block(ray, block, threshold)
+-                if intersection is not None:
+-                    with lock:
+-                        results[pixel] = shade_pixel(intersection)
+-                    hit = True
+-                    break
+-            if not hit:
+-                with lock:
+-                    results[pixel] = background_color
+-
+-    threads = [threading.Thread(target=worker) for _ in range(num_threads)]
+-    for t in threads: t.start()
+-    for t in threads: t.join()
+-    return results
+-
+-def ray_cast_block(ray, block, threshold):
+-    # [G] Standard isosurface ray casting within a single block.
+-    # Traces ray through block voxels, evaluates f(p), and returns
+-    # the first point where f(p) >= threshold.
+-    return None
+-
+-def shade_pixel(intersection):
+-    # [G] Standard shading using surface normal at intersection.
+-    return (0.0, 0.0, 0.0)
+-
+-background_color = (0.0, 0.0, 0.0)
++    task_queue = TaskQueue(pixels)
++    threads = []
++    for _ in range(num_threads):
++        t = threading.Thread(target=worker, args=(task_queue, candidate_lists, threshold, image))
++        t.start()
++        threads.append(t)
++    for t in threads:
++        t.join()
+ ```
+ 
+@@ -118,6 +110,6 @@
+ 
+ **Edge Cases and Pitfalls:**
+-*   **Memory Hierarchy Overhead:** The method explicitly addresses the cost of moving data across memory levels. Failure to manage cache locality during the dynamic allocation or block access can negate performance gains [S1, unofficial].
+-*   **Load Imbalance:** Static screen partitioning can lead to uneven workloads if some regions of the volume are denser. Dynamic allocation mitigates this [S1, unofficial].
++*   **Memory Hierarchy Overhead:** The method explicitly addresses the cost of moving data across memory levels [S1, unofficial]. Failure to manage cache locality during the dynamic allocation or block access can negate performance gains [S1, unofficial].
++*   **Load Imbalance:** Static screen partitioning can lead to uneven workloads if some regions of the volume are denser [S1, unofficial]. Dynamic allocation mitigates this [S1, unofficial].
+ 
+ ## Operating characteristics
+@@ -125,4 +117,5 @@
+ *   **Strengths:** Excellent load balancing via dynamic allocation; high cache performance due to spatial locality and restricted search spaces; scalability on multi-core systems [S1, unofficial].
+ *   **Limitations:** Requires two-pass processing (identification then casting); overhead of managing dynamic tasks and candidate lists [S1, unofficial].
++*   **When to use:** Interactive visualization of large volumetric datasets on multi-core CPUs where load balancing and memory efficiency are critical [S1, unofficial].
+ 
+ ## Background

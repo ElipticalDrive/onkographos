@@ -1,0 +1,116 @@
+--- v002.md
++++ v003.md
+@@ -9,5 +9,5 @@
+ **Inputs and Outputs:**
+ - Input: Screen divided into blocks (e.g., 8×8 pixels), volume dataset, and ray origins/directions for each pixel [S1, unofficial].
+-- Output: Rendered color/opacity values for each pixel.
++- Output: Rendered color/opacity values for each pixel [G].
+ 
+ **Data Structures:**
+@@ -18,5 +18,5 @@
+ **Steps:**
+ 1. Divide the image into fixed-size blocks (e.g., 8×8 pixels) [S1, unofficial].
+-2. Generate primary rays for each pixel in the block.
++2. Generate primary rays for each pixel in the block [G].
+ 3. For each ray, check shared memory for a valid traversal state from a previously processed ray in the same block [S1, unofficial].
+ 4. If valid, initialize the current ray's traversal variables ($t_{max}$, current voxel index) using the reused state; otherwise, compute them from the ray origin [S1, unofficial].
+@@ -24,4 +24,5 @@
+ 6. After traversal, store the final voxel index and $t_{max}$ values back into shared memory for potential reuse by subsequent rays in the block [S1, unofficial].
+ 7. Integrate the volume along the ray and store the result [G].
++8. Set the occlusion bit for the current pixel in shared memory to skip it in future passes [S1, unofficial].
+ 
+ **Formulas:**
+@@ -35,14 +36,14 @@
+    \end{cases}
+    $$
+-   If $d_i = 0$, the ray never crosses a boundary in that dimension, and the corresponding distance is treated as infinity .
+-2. **Distance Delta ($\Delta t_i$):** The distance along the ray to traverse one voxel width .
++   If $d_i = 0$, the ray never crosses a boundary in that dimension, and the corresponding distance is treated as infinity [G].
++2. **Distance Delta ($\Delta t_i$):** The distance along the ray to traverse one voxel width [G].
+    $$
+    \Delta t_i = \frac{v}{|d_i|} \cdot \text{step}_i \quad \text{(or } 0.0 \text{ if } d_i = 0\text{)}
+    $$
+-3. **Distance to Next Boundary ($t_{max, i}$):** The distance from the ray origin to the first boundary crossed in axis $i$ .
++3. **Distance to Next Boundary ($t_{max, i}$):** The distance from the ray origin to the first boundary crossed in axis $i$ [G].
+    $$
+    t_{max, i} = \frac{\text{boundary}_i - o_i}{d_i}
+    $$
+-   The initial boundary is determined by the starting voxel index. If the ray starts inside the grid, the initial boundary is the next one in the direction of travel .
++   The initial boundary is determined by the starting voxel index [G]. If the ray starts inside the grid, the initial boundary is the next one in the direction of travel [G].
+ 
+ **Pseudocode:**
+@@ -50,21 +51,26 @@
+ def block_based_ray_tracing(block_size, shared_memory, volume_min, volume_max, voxel_size, rays):
+     # rays: list of (origin, direction, pixel_id) grouped by block
+-    # shared_memory: dict mapping block_id to {'voxel': [x,y,z], 't_max': [tx,ty,tz], 'valid': bool}
++    # shared_memory: dict mapping block_id to {'voxel': [x,y,z], 't_max': [tx,ty,tz], 'step': [sx,sy,sz], 'valid': bool, 'occlusion': int}
+     
+     for block_id, block_rays in enumerate(rays):
+-        prev_state = shared_memory.get(block_id)
+-        
+         for origin, direction, pixel_id in block_rays:
++            # Check occlusion bit for this pixel
++            occlusion_mask = shared_memory.get(block_id, {}).get('occlusion', 0)
++            if occlusion_mask & (1 << pixel_id):
++                continue
++            
++            # Compute step direction unconditionally
++            step = [1 if direction[i] > 0 else (-1 if direction[i] < 0 else 0) for i in range(3)]
++            
+             # Initialize or reuse state
+-            if prev_state and prev_state['valid']:
++            prev_state = shared_memory.get(block_id, {})
++            if prev_state.get('valid', False):
+                 current_voxel = prev_state['voxel'][:]
+                 t_max = prev_state['t_max'][:]
+                 t_entry = 0.0
+             else:
+-                # Compute initial voxel and t_max from scratch
+                 current_voxel = [int(origin[i] // voxel_size) for i in range(3)]
+                 current_voxel = [max(volume_min[i], min(volume_max[i], current_voxel[i])) for i in range(3)]
+                 
+-                step = [1 if direction[i] > 0 else (-1 if direction[i] < 0 else 0) for i in range(3)]
+                 next_boundary = [(current_voxel[i] + step[i]) * voxel_size for i in range(3)]
+                 t_max = [(next_boundary[i] - origin[i]) / direction[i] if direction[i] != 0 else float('inf') for i in range(3)]
+@@ -79,6 +85,9 @@
+                 t_exit = t_max[min_idx]
+                 
+-                # Integrate volume over interval [t_entry, t_exit] [G]
+-                # ... standard volume integration ...
++                # Standard front-to-back volume integration [G]
++                # density = volume[current_voxel[0], current_voxel[1], current_voxel[2]]
++                # alpha = 1.0 - exp(-density * (t_exit - t_entry))
++                # color += (1.0 - accumulated_alpha) * alpha * density
++                # accumulated_alpha += (1.0 - accumulated_alpha) * alpha
+                 
+                 current_voxel[min_idx] += step[min_idx]
+@@ -90,5 +99,7 @@
+                 'voxel': current_voxel,
+                 't_max': t_max,
+-                'valid': True
++                'step': step,
++                'valid': True,
++                'occlusion': occlusion_mask | (1 << pixel_id)
+             }
+ ```
+@@ -97,5 +108,5 @@
+ - **Invalid Reuse:** If the reused state is invalid (e.g., ray started outside the volume), fall back to full initialization [G].
+ - **Precision:** Reusing floating-point $t_{max}$ values may accumulate error; consider re-normalizing or re-computing $t_{max}$ periodically [G].
+-- **Zero Direction Component:** When $d_i = 0$, $\Delta t_i$ is set to $0.0$ and $t_{max, i}$ is set to $\infty$ to prevent division by zero and skip boundary crossing in that axis .
++- **Zero Direction Component:** When $d_i = 0$, $\Delta t_i$ is set to $0.0$ and $t_{max, i}$ is set to $\infty$ to prevent division by zero and skip boundary crossing in that axis [G].
+ 
+ ## Subtopics
+@@ -104,9 +115,12 @@
+ The Perspective Grid is a ray-specialized spatial acceleration structure designed to provide perfect coherence for primary camera rays by treating them as packets. Unlike hierarchical structures like BVH or Kd-trees, it lacks tree-based culling properties but leverages image-space tiling to maximize shared memory reuse on GPUs. It is distinct from uniform grids because it aligns voxel boundaries with the camera's perspective, making it highly efficient for primary rays but unsuitable for secondary rays.
+ 
++### Shared Memory Per-Pixel Occlusion Testing
++Links one bit in shared memory to one pixel on the screen to track occlusion state [S1, unofficial]. Uses the bits for quick occlusion tests during the raycasting pass [S1, unofficial]. Achieves approximately a 25% rendering speedup [S1, unofficial].
++
+ ## Operating characteristics
+ - **Time Complexity:** Depends on the underlying traversal (e.g., DDA is $O(N)$ per ray), with overhead for shared memory synchronization [S1, unofficial].
+ - **Memory Complexity:** Requires 16 KB of shared memory per block plus one bit per pixel for occlusion tracking [S1, unofficial].
+ - **Performance:** Achieves approximately a 25% rendering speedup when using shared memory bits for quick occlusion tests [S1, unofficial].
+-- **Strengths:** High performance for primary rays with strong spatial coherence; reduces redundant memory accesses.
++- **Strengths:** High performance for primary rays with strong spatial coherence; reduces redundant memory accesses [S1, unofficial].
+ - **Limitations:** Less effective for secondary rays (reflections, shadows) which lack coherence; requires careful management of shared memory state [S1, unofficial].
+ 

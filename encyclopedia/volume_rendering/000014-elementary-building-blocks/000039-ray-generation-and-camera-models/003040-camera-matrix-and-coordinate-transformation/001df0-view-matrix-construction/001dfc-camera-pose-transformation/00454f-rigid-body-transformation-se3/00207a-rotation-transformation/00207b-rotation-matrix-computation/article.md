@@ -1,0 +1,84 @@
+# Rotation Matrix Computation
+Also called: Rodrigues' Rotation Formula
+## Overview
+Computes a $3 \times 3$ rotation matrix from an axis and an angle using Rodrigues' rotation formula [S1, unofficial]. It differs from [Quaternion Rotation](2302-quaternion-rotation.md) by operating directly on vector components rather than quaternions, and from [Rotation Alignment Matrix](2699-rotation-alignment-matrix.md) by requiring an explicit axis-angle pair rather than deriving rotation from two vectors.
+## How it works
+**Inputs:** Unit axis vector $\mathbf{n} = (n_x, n_y, n_z)$, rotation angle $\theta$.
+**Output:** $3 \times 3$ rotation matrix $R$.
+**Data Structures:** $R$ is a $3 \times 3$ matrix. $\mathbf{n}$ is a 3D vector.
+**Steps:**
+1. Compute $c = \cos(\theta)$ and $s = \sin(\theta)$ [S1, unofficial].
+2. Compute the outer product term $n_i n_j (1 - c)$ [S1, unofficial].
+3. Compute the skew-symmetric term $\epsilon_{ijk} n_k s$ [S1, unofficial].
+4. Compute the identity term $\delta_{ij} c$ [S1, unofficial].
+5. Sum terms: $R_{ij} = n_i n_j (1 - c) + \epsilon_{ijk} n_k s + \delta_{ij} c$ [S1, unofficial].
+**Parameters:** $\theta$ is the rotation angle in radians. $\mathbf{n}$ must be normalized.
+**Edge Cases:** If $\mathbf{n}$ is not normalized, results are incorrect. If $\theta=0$, $R=I$.
+**Pseudocode:**
+> **Unverified code.** The code below did not pass a test run against a reference implementation, or no test fits it, so it may contain errors.
+
+```python
+import math
+import numpy as np
+
+def rotation_matrix_computation(axis, angle):
+    # axis: numpy array of shape (3,)
+    # angle: float in radians
+    
+    # Normalize axis
+    n = axis / np.linalg.norm(axis)
+    nx, ny, nz = n[0], n[1], n[2]
+    
+    c = math.cos(angle)
+    s = math.sin(angle)
+    t = 1 - c
+    
+    # Rodrigues' formula components
+    # R = I * c + (1-c) * (n n^T) + s * [n]_x
+    # Where [n]_x is the cross-product matrix of n
+    
+    R = np.zeros((3, 3))
+    
+    # Identity term scaled by c
+    R[0, 0] += c
+    R[1, 1] += c
+    R[2, 2] += c
+    
+    # Outer product term (1-c) * n_i * n_j
+    R[0, 0] += t * nx * nx
+    R[0, 1] += t * nx * ny
+    R[0, 2] += t * nx * nz
+    R[1, 0] += t * ny * nx
+    R[1, 1] += t * ny * ny
+    R[1, 2] += t * ny * nz
+    R[2, 0] += t * nz * nx
+    R[2, 1] += t * nz * ny
+    R[2, 2] += t * nz * nz
+    
+    # Skew-symmetric term s * epsilon_ijk * n_k
+    # [n]_x = [[ 0, -nz,  ny],
+    #          [ nz,   0, -nx],
+    #          [-ny,  nx,   0]]
+    R[0, 1] -= s * nz
+    R[0, 2] += s * ny
+    R[1, 0] += s * nz
+    R[1, 2] -= s * nx
+    R[2, 0] -= s * ny
+    R[2, 1] += s * nx
+    
+    return R
+```
+## Subtopics
+
+### [Rotation Alignment Matrix](2699-rotation-alignment-matrix.md)
+Computes a rotation matrix to align two vectors. Handles degenerate cases where vectors are parallel. Use when aligning directions.
+
+### [Combined Rotation Matrix](11630-combined-rotation-matrix.md)
+Composes X, Y, Z rotations in Z-Y-X order. Targets volume rendering ray generation. Use for fixed-axis composition.
+
+## Operating characteristics
+Time complexity: $O(1)$. Memory complexity: $O(1)$. Strengths: Direct, differentiable. Limitations: Requires normalized axis.
+## Background
+Origin: Rodrigues' rotation formula. Used in graphics for camera pose transformation.
+## Sources
+[S1] skmhrk1209/Torch-Sphere-Tracer, https://github.com/skmhrk1209/Torch-Sphere-Tracer, fetched 2026-10-26 (unofficial)

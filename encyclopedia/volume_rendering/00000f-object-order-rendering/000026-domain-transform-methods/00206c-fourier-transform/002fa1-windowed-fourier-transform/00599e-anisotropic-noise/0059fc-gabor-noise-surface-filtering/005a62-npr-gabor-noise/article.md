@@ -1,0 +1,98 @@
+# NPR Gabor Noise
+Also called: Gabor Noise for NPR
+## Overview
+NPR Gabor Noise is a variant of Gabor noise designed for coherent stylization in non-photorealistic rendering (NPR) [S1, S2]. It solves the problem of maintaining visual consistency of noise patterns during camera or object motion by decoupling the noise parameter definition from the point sampling space [S1, S2]. Unlike standard Gabor noise where parameters are often tied to object space, this method defines noise parameters in 2D screen space while defining point distribution in 3D object space, thereby preserving the 2D aspect of the noise and the 3D motion of the scene [S1, S2]. It builds on [Gabor Noise Surface Filtering](16556-gabor-noise-surface-filtering.md).
+## How it works
+**Inputs and Outputs:**
+- Input: 3D point coordinates in object space ($\mathbf{p}$), camera view matrix ($V$), projection matrix ($P$), and noise parameters defined in screen space.
+- Output: A scalar noise value at the given 3D point.
+
+**Data Structures:**
+Not given in the sources.
+
+**Steps:**
+1. Define noise parameters (e.g., frequency, orientation, bandwidth) in 2D screen space [S1, S2].
+2. Define the point distribution in 3D object space [S1, S2].
+3. For a given 3D point $\mathbf{p}$ in object space, transform it to screen space coordinates $(u, v)$ using the camera's view and projection matrices [S1, G].
+4. Evaluate the Gabor noise function using the screen-space coordinates $(u, v)$ and the screen-space noise parameters [S1, G].
+5. Return the resulting noise value [S1, G].
+
+**Formulas:**
+Not given in the sources. The core mechanism is the coordinate transformation from 3D object space to 2D screen space for parameter evaluation, while the point itself remains in 3D object space for distribution [S1, S2].
+
+**Parameters:**
+- Noise parameters: Defined in 2D screen space [S1, S2].
+- Point distribution: Defined in 3D object space [S1, S2].
+Typical values are not given in the sources.
+
+**Edge cases and pitfalls:**
+- Precision: Not given in the sources.
+- Boundaries: Not given in the sources.
+- Degenerate input: Not given in the sources.
+
+**Pseudocode:**
+> **Unverified code.** The code below did not pass a test run against a reference implementation, or no test fits it, so it may contain errors.
+
+```python
+def evaluate_npr_gabor_noise(point_3d, view_matrix, projection_matrix, screen_noise_params):
+    """
+    Evaluates NPR Gabor Noise at a 3D point.
+    
+    Args:
+        point_3d: numpy array [x, y, z] in object space.
+        view_matrix: 4x4 numpy array representing the camera view.
+        projection_matrix: 4x4 numpy array representing the camera projection.
+        screen_noise_params: Dictionary or object containing noise parameters 
+                             defined in 2D screen space (e.g., frequency, orientation).
+                             
+    Returns:
+        float: The noise value.
+    """
+    # Transform 3D object space point to clip space
+    point_4d = np.array([point_3d[0], point_3d[1], point_3d[2], 1.0])
+    clip_space = projection_matrix @ view_matrix @ point_4d
+    
+    # Perspective division to get normalized device coordinates (NDC)
+    if clip_space[3] == 0:
+        return 0.0 # Guard against division by zero [G]
+    ndc_x = clip_space[0] / clip_space[3]
+    ndc_y = clip_space[1] / clip_space[3]
+    
+    # Map NDC [-1, 1] to screen space [0, 1] or [0, width], [0, height]
+    # Assuming standard screen space [0, 1] for simplicity, 
+    # actual implementation may require resolution scaling [G]
+    screen_u = (ndc_x + 1.0) / 2.0
+    screen_v = (ndc_y + 1.0) / 2.0
+    
+    # Evaluate Gabor noise using screen-space coordinates and parameters
+    # The specific Gabor noise evaluation formula is defined in the parent article
+    # [Gabor Noise Surface Filtering](16556-gabor-noise-surface-filtering.md) [G]
+    noise_value = evaluate_gabor_noise(screen_u, screen_v, screen_noise_params)
+    
+    return noise_value
+```
+## Subtopics
+Not given in the sources.
+## Operating characteristics
+**Time and memory complexity:**
+Not given in the sources.
+**Measured performance:**
+Not given in the sources.
+**Scaling:**
+Not given in the sources.
+**Strengths and limitations:**
+- Strengths: Preserves the 2D aspect of the noise and the 3D motion of the scene [S1, S2].
+- Limitations: Not given in the sources.
+**When to use it and when not:**
+- Use for coherent stylization in NPR where screen-space consistency is desired despite 3D motion [S1, S2].
+- When not to use: Not given in the sources.
+## Background
+**Origin:**
+Presented by Benard et al. [BLV∗ 10] [S2].
+**History and development:**
+It is a variant of Gabor noise for coherent stylization in non-photorealistic rendering (NPR) [S1, S2].
+**Where it is used:**
+Non-photorealistic rendering (NPR) [S1, S2].
+## Sources
+[S1] A Survey of Procedural Noise Functions, https://doi.org/10.1111/j.1467-8659.2010.01827.x, fetched 2026-10-27
+[S2] PDF A Survey of Procedural Noise Functions, https://www.cs.umd.edu/~zwicker/publications/SurveyProceduralNoise-CGF10.pdf, fetched 2026-10-27

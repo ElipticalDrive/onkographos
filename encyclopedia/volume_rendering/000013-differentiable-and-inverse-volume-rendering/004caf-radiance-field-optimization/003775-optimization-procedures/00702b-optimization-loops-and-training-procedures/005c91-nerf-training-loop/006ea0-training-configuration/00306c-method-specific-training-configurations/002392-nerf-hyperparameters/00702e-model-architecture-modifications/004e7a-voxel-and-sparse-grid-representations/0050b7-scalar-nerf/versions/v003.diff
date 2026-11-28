@@ -1,0 +1,491 @@
+--- v002.md
++++ v003.md
+@@ -4,19 +4,33 @@
+ 
+ ## Overview
+-SCALAR-NeRF is a coarse-to-fine framework for scalable large-scale neural scene reconstruction that structures the representation as an encoder-decoder architecture to avoid the 'foggy' artifacts common in block-based methods like Block-NeRF [S1, unofficial]. It enables training on a single GPU by partitioning the scene into blocks, sharing a decoder from a coarse global model, and fusing local outputs using the global model rather than simple weighting functions [S1, unofficial].
++SCALAR-NeRF is a coarse-to-fine framework for scalable large-scale neural scene reconstruction that structures the neural representation as an encoder-decoder architecture to avoid the 'foggy' issue in Block-NeRF and enable training on a single GPU [S1, unofficial]. It decomposes expansive scenes into manageable blocks, trains a shared decoder from a coarse global model, and fuses local results using the global model to avoid foggy reconstructions [S1, unofficial]. Unlike Block-NeRF, which blends images using an inverse distance weighting function causing foggy appearance when block centroids are close, SCALAR-NeRF fuses local block outputs with a reference image from the coarse global model [S1, unofficial].
+ 
+ ## How it works
+-**Inputs:** A dataset of images $\{I_i\}$ with corresponding camera poses $\{P_i\}$ covering a large-scale scene.
+-**Outputs:** A set of local NeRF models and a fusion strategy to render novel views.
++**Inputs and Outputs:**
++*   **Inputs:** A dataset of images $\{I_i\}$ with corresponding camera poses $\{P_i\}$ covering a large-scale scene.
++*   **Outputs:** A set of local neural radiance field models and a fused final reconstruction.
+ 
+ **Data Structures:**
+-1.  **Multi-resolution Hash Table Encoder:** A hash table of size $2^{19}$ (or similar) storing feature vectors. It consists of $L$ levels, where each level maps spatial coordinates to a feature vector $f_l \in \mathbb{R}^F$. The total feature embedding is $F = [f_1, \dots, f_L] \in \mathbb{R}^{L \cdot F}$ [S1, unofficial].
+-2.  **Shared Decoder:** A shallow MLP that maps the feature embedding $F$ to volume density $\sigma$ and color $\mathbf{c}$: $\sigma, \mathbf{c} = \text{Decoder}(F)$ [S1, unofficial].
+-3.  **Block Partitioning:** The scene is divided into spatial blocks. Each block has an Axis-Aligned Bounding Box (AABB).
++1.  **Multi-resolution Hash Table Encoder:** Maps 3D coordinates to feature vectors.
++    *   Structure: A collection of hash tables, one for each resolution level $l \in \{1, \dots, L\}$.
++    *   Size: Total number of entries is $2^{19}$ [S1, unofficial].
++    *   Feature Vector: For a point $\mathbf{x}$, the feature embedding $F$ is the concatenation of features from all levels: $F = [f_1, \dots, f_L] \in \mathbb{R}^{L \cdot F}$, where $L$ is the number of levels and $F$ is the feature dimension per level [S1, unofficial].
++2.  **Shared Decoder:** A shallow Multi-Layer Perceptron (MLP) [S1, unofficial].
++    *   Input: Feature vector $F$.
++    *   Output: Volume density $\sigma$ and color $\mathbf{c}$.
++    *   Formula: $\sigma, \mathbf{c} = \text{Decoder}(F)$ [S1, unofficial].
++3.  **Spatial Blocks:** Defined by Axis-Aligned Bounding Boxes (AABBs).
++    *   Each block $k$ has a base AABB $\mathcal{B}_k$.
++    *   Enhanced AABB $\mathcal{B}'_k$ is scaled by a factor $s_{\text{AABB}}$ to create overlap regions [S1, unofficial].
+ 
+ **Parameters:**
+-*   **Hash Table Size:** $2^{19}$ [S1, unofficial].
+-*   **AABB Scale Factor ($s_{\text{AABB}}$):** Controls the overlap between blocks. Optimal value found is 1.2 [S1, unofficial].
+-*   **Space Contraction:** For unbounded scenes, coordinates are contracted using the Mip-NeRF360 method [S1, unofficial]:
++*   Hash table size: $2^{19}$ [S1, unofficial].
++*   AABB scale factor ($s_{\text{AABB}}$): Controls overlap. Optimal value found is 1.2 [S1, unofficial].
++*   Number of levels ($L$) and feature dimension ($F$): Not given in the sources.
++
++**Steps:**
++
++1.  **Space Contraction (Optional but recommended for unbounded scenes):**
++    Contract 3D points $\mathbf{x}$ to a unit sphere using the Mip-NeRF360 method [S1, unofficial]:
+     $$
+     \text{contract}(\mathbf{x}) = \begin{cases} 
+@@ -25,32 +39,36 @@
+     \end{cases}
+     $$
+-
+-**Steps:**
+-
+-1.  **Train Coarse Global Model:**
+-    *   Train a global NeRF model on the entire image dataset using a multi-resolution hash table encoder and a shared decoder.
+-    *   This model serves as a reference for fusion and provides the initial weights for the local decoders.
+-
+-2.  **Partition Scene into Blocks:**
+-    *   Use KMeans clustering on the image centroids or camera positions to partition the training images into $K$ blocks.
+-    *   Define the bounding box for each block.
+-
+-3.  **Expand Overlapping Regions:**
+-    *   Scale up the bounding box of each local block by the factor $s_{\text{AABB}}$ to create overlap regions with neighboring blocks. This ensures that points near boundaries are covered by multiple local models [S1, unofficial].
+-
+-4.  **Initialize Local Models:**
+-    *   For each block $k$, create a local model.
+-    *   **Encoder:** Each local block has its own dedicated hash table encoder (or shares the global one? The text says "dedicated local model" but also "share the decoder". The architecture diagram shows separate Hash Table Encoders for each block, implying local encoders).
+-    *   **Decoder:** Inherit the decoder weights from the trained coarse global model. This shared decoder promotes alignment in the feature space of local encoders [S1, unofficial].
+-
+-5.  **Train Local Models:**
+-    *   Train each local model on the images assigned to its block.
+-    *   **Fixing the Decoder:** To save memory and allow larger hash tables, the shared decoder can be fixed (frozen) during local training. This eliminates the need to save the computational graph for the decoder parameters [S1, unofficial].
+-    *   **Optional Fine-tuning:** The shared decoder can optionally be fine-tuned for better quality, but fixing it yields satisfactory results and faster training [S1, unofficial].
+-
+-6.  **Fuse Local Outputs:**
+-    *   To render a novel view, synthesize images from each local block model.
+-    *   Fuse these images using the reference image rendered from the coarse global model. This leverages the global model to discard poorly rendered results from local blocks, mitigating the "foggy" appearance caused by simple blending [S1, unofficial].
+-    *   *Note:* The paper explicitly states that using an Inverse Distance Weighting (IDW) function for fusion performs worse than using the global model reference, especially when blocks are close [S1, unofficial].
++    [S1, unofficial]
++
++2.  **Train Coarse Global Model:**
++    *   Initialize a hash table encoder and a decoder.
++    *   Train this global model on the entire image dataset $\{I_i\}$ using the standard differentiable volume rendering equation [S1, unofficial].
++    *   This model serves as the initialization for the local models and the fusion reference.
++
++3.  **Partition Images into Blocks:**
++    *   Cluster the camera positions (or image centroids) of the training images into $K$ clusters using KMeans [S1, unofficial].
++    *   Assign each image to a block based on its cluster.
++
++4.  **Define Local Block Boundaries:**
++    *   For each block $k$, determine its base AABB $\mathcal{B}_k$ enclosing the assigned images' frustums or points.
++    *   Scale the AABB by $s_{\text{AABB}}$ to create the enhanced bounding box $\mathcal{B}'_k$:
++        $$ \mathcal{B}'_k = \text{Scale}(\mathcal{B}_k, s_{\text{AABB}}) $$
++    *   This scaling ensures overlapping regions between adjacent blocks [S1, unofficial].
++
++5.  **Initialize Local Models:**
++    *   For each block $k$, initialize a local hash table encoder.
++    *   **Share the Decoder:** Copy the weights of the decoder from the trained coarse global model to all local models [S1, unofficial].
++    *   **Fix Decoder (Optional but recommended):** Freeze the decoder weights in the local models to eliminate saving the computational graph for these parameters, allowing larger hash table sizes or faster training [S1, unofficial]. Fine-tuning the decoder is optional and not strictly required for satisfactory results [S1, unofficial].
++
++6.  **Train Local Models:**
++    *   For each block $k$, train its local hash table encoder using only the images assigned to that block.
++    *   The decoder remains fixed (or fine-tuned if chosen).
++    *   Rendering is performed only for rays passing through the enhanced bounding box $\mathcal{B}'_k$ [S1, unofficial].
++
++7.  **Fuse Local Results:**
++    *   Synthesize an image $I_k$ for each block $k$ using its local model.
++    *   Synthesize a reference image $I_{\text{global}}$ using the coarse global model.
++    *   Fuse the images. The method proposes using the coarse global model's output for fusion rather than Inverse Distance Weighting (IDW) [S1, unofficial].
++    *   *Note on Fusion Strategy:* The source states "fuse them with a reference image rendered from the coarse model" and "leveraging the coarse global model to discard poorly rendered results". It does not provide a specific mathematical formula for the fusion blend (e.g., weighted average, max, etc.), only that the global model's output is used as the reference/fusion mechanism [S1, unofficial].
+ 
+ **Pseudocode:**
+@@ -62,200 +80,190 @@
+     """
+     Space contraction for unbounded scenes.
+-    x: numpy array of shape (N, 3)
+-    """
+-    norm = np.linalg.norm(x, axis=1, keepdims=True)
+-    # Avoid division by zero if norm is 0, though contract(x)=x for norm<=1
+-    mask = norm > 1.0
+-    x_contracted = x.copy()
+-    x_contracted[mask] = x[mask] / (2.0 - 1.0 / norm[mask])
+-    return x_contracted
+-
+-class SCALARNeRF:
+-    def __init__(self, hash_table_size=2**19, num_levels=16, feature_dim=2, 
+-                 aabb_scale_factor=1.2, num_blocks=100):
+-        self.hash_table_size = hash_table_size
+-        self.num_levels = num_levels
+-        self.feature_dim = feature_dim
+-        self.aabb_scale_factor = aabb_scale_factor
+-        self.num_blocks = num_blocks
+-        
+-        # Global Model
+-        self.global_encoder = MultiResolutionHashEncoder(hash_table_size, num_levels, feature_dim)
+-        self.global_decoder = ShallowMLP(input_dim=num_levels * feature_dim)
+-        
+-        # Local Models
+-        self.local_encoders = []
+-        self.local_decoders = [] # Will be initialized from global decoder
+-        
+-    def train_global_model(self, images, poses):
+-        """
+-        Step 1: Train a coarse global model on the entire dataset.
+-        """
+-        # Standard NeRF training loop using global_encoder and global_decoder
+-        # Loss: L_rgb between rendered and ground truth images
+-        pass
+-
+-    def partition_blocks(self, poses):
+-        """
+-        Step 2: Partition training images into blocks using KMeans.
+-        """
+-        # Cluster camera positions (or image centroids)
+-        centroids = poses[:, :3] # Assuming poses are 4x4 matrices, extract translation
+-        kmeans = KMeans(n_clusters=self.num_blocks)
+-        self.block_labels = kmeans.fit_predict(centroids)
+-        
+-        # Define bounding boxes for each block
+-        self.block_aabbs = []
+-        for k in range(self.num_blocks):
+-            mask = self.block_labels == k
+-            if np.any(mask):
+-                # Compute AABB from camera positions or scene bounds
+-                # Placeholder for actual AABB computation
+-                aabb = compute_aabb(centroids[mask])
+-                self.block_aabbs.append(aabb)
+-            else:
+-                self.block_aabbs.append(None)
+-
+-    def expand_aabbs(self):
+-        """
+-        Step 3: Scale up bounding boxes to create overlap.
+-        """
+-        self.expanded_aabbs = []
+-        for aabb in self.block_aabbs:
+-            if aabb is not None:
+-                # Expand AABB by scale factor
+-                center = (aabb.min + aabb.max) / 2
+-                extent = (aabb.max - aabb.min) * self.aabb_scale_factor / 2
+-                expanded_aabb = np.array([center - extent, center + extent])
+-                self.expanded_aabbs.append(expanded_aabb)
+-            else:
+-                self.expanded_aabbs.append(None)
+-
+-    def initialize_local_models(self):
+-        """
+-        Step 4: Initialize local models with shared decoder.
+-        """
+-        for k in range(self.num_blocks):
+-            # Create local encoder
+-            local_encoder = MultiResolutionHashEncoder(self.hash_table_size, self.num_levels, self.feature_dim)
+-            self.local_encoders.append(local_encoder)
++    x: numpy array of shape (..., 3)
++    """
++    norm = np.linalg.norm(x, axis=-1, keepdims=True)
++    # Avoid division by zero
++    norm = np.maximum(norm, 1e-8)
++    
++    # Condition: ||x|| <= 1
++    mask = norm <= 1.0
++    
++    # Contracted coordinates
++    contracted = np.where(
++        mask,
++        x,
++        x / (2.0 - 1.0 / norm)
++    )
++    return contracted
++
++def train_coarse_global_model(images, poses, hash_table_size=2**19):
++    """
++    Train a coarse global NeRF model on all images.
++    Returns: global_encoder, global_decoder
++    """
++    # Initialize hash table encoder with size hash_table_size
++    global_encoder = HashTableEncoder(size=hash_table_size)
++    # Initialize shallow MLP decoder
++    global_decoder = ShallowMLPDecoder()
++    
++    # Standard NeRF training loop on all images
++    # Loss: L_rgb between rendered and ground truth
++    for epoch in range(num_epochs):
++        for image, pose in zip(images, poses):
++            # Sample rays
++            rays = sample_rays(image, pose)
++            # Contract points if unbounded
++            contracted_points = contract(rays.points)
++            # Encode
++            features = global_encoder(contracted_points)
++            # Decode
++            sigma, color = global_decoder(features)
++            # Render
++            rendered_color = volume_rendering(rays, sigma, color)
++            # Compute loss and update encoder
++            loss = mse_loss(rendered_color, image)
++            update(global_encoder, loss)
+             
+-            # Initialize local decoder with global decoder weights
+-            local_decoder = ShallowMLP(input_dim=self.num_levels * self.feature_dim)
+-            local_decoder.load_state_dict(self.global_decoder.state_dict())
+-            self.local_decoders.append(local_decoder)
+-
+-    def train_local_models(self, images, poses):
+-        """
+-        Step 5: Train local models.
+-        """
+-        for k in range(self.num_blocks):
+-            # Get images and poses for this block
+-            mask = self.block_labels == k
+-            block_images = images[mask]
+-            block_poses = poses[mask]
+-            
+-            # Create local encoder and decoder
+-            encoder = self.local_encoders[k]
+-            decoder = self.local_decoders[k]
+-            
+-            # Freeze decoder to save memory (optional but recommended)
+-            for param in decoder.parameters():
+-                param.requires_grad = False
+-            
+-            # Train local model on block data
+-            # Loss: L_rgb between rendered and ground truth images
+-            # Use expanded AABB to define ray marching bounds
+-            pass
+-
+-    def render(self, camera_pose, resolution):
+-        """
+-        Step 6: Fuse local outputs using global model reference.
+-        """
+-        # Render reference image from global model
+-        global_render = render_nerf(camera_pose, self.global_encoder, self.global_decoder, resolution)
+-        
+-        # Render images from each local block
+-        local_renders = []
+-        for k in range(self.num_blocks):
+-            # Check if camera is within expanded AABB of block k
+-            if is_camera_in_aabb(camera_pose, self.expanded_aabbs[k]):
+-                local_render = render_nerf(camera_pose, self.local_encoders[k], self.local_decoders[k], resolution)
+-                local_renders.append((k, local_render))
+-        
+-        # Fuse using global model reference
+-        # The paper states: "fuse them with a reference image rendered from the coarse model"
+-        # It does not specify the exact fusion formula, but implies using the global model to 
+-        # discard poorly rendered results. 
+-        # A simple implementation might be to use the global render as the final output, 
+-        # or blend local renders where they are confident, guided by global.
+-        # Given the critique of IDW, and the success of "Full (global)", 
+-        # the most robust interpretation is that the global model's output is the primary source,
+-        # potentially refined by local details.
+-        # However, the abstract says "fuse the outputs from the local models ... with a reference image".
+-        # Let's assume a weighted average where weights are derived from the global model's confidence or density.
+-        # Since no specific formula is given, we note this as a pitfall/implementation detail.
+-        
+-        # Placeholder for fusion logic
+-        final_render = global_render # Simplified: Global model is the fallback/fuser
+-        return final_render
+-
+-class MultiResolutionHashEncoder:
+-    def __init__(self, hash_table_size, num_levels, feature_dim):
+-        self.hash_table_size = hash_table_size
+-        self.num_levels = num_levels
+-        self.feature_dim = feature_dim
+-        # Initialize hash table with random values
+-        self.table = np.random.randn(num_levels, hash_table_size, feature_dim)
+-        
+-    def forward(self, x):
+-        """
+-        x: numpy array of shape (N, 3)
+-        Returns: feature embedding F of shape (N, L*F)
+-        """
+-        x = contract(x)
+-        features = []
+-        for l in range(self.num_levels):
+-            # Hash coordinates to indices
+-            # This is a simplified hash function; real implementation uses specific hashing
+-            indices = hash_coordinates(x, l, self.hash_table_size)
+-            # Gather features
+-            level_features = self.table[l, indices]
+-            features.append(level_features)
+-        return np.concatenate(features, axis=1)
+-
+-class ShallowMLP:
+-    def __init__(self, input_dim):
+-        self.input_dim = input_dim
+-        # Simple MLP: Linear -> ReLU -> Linear
+-        self.weight1 = np.random.randn(input_dim, 64)
+-        self.bias1 = np.zeros(64)
+-        self.weight2 = np.random.randn(64, 4) # 3 for color, 1 for density
+-        self.bias2 = np.zeros(4)
+-        
+-    def forward(self, F):
+-        h = np.maximum(0, F @ self.weight1 + self.bias1)
+-        out = h @ self.weight2 + self.bias2
+-        sigma = np.exp(out[:, 3]) # Density must be positive
+-        color = out[:, :3]
+-        return sigma, color
+-
+-def render_nerf(camera_pose, encoder, decoder, resolution):
+-    """
+-    Standard differentiable volume rendering.
+-    """
+-    # Cast rays, sample points, query encoder/decoder, render
+-    pass
++    return global_encoder, global_decoder
++
++def cluster_images(images, poses, k):
++    """
++    Partition images into k blocks using KMeans on camera positions.
++    Returns: list of lists of image indices
++    """
++    # Extract camera positions from poses
++    positions = extract_positions(poses)
++    # Apply KMeans clustering
++    labels = kmeans(positions, k)
++    # Group image indices by label
++    blocks = [[] for _ in range(k)]
++    for i, label in enumerate(labels):
++        blocks[label].append(i)
++    return blocks
++
++def train_local_models(global_encoder, global_decoder, blocks, images, poses, s_aabb=1.2):
++    """
++    Train local models for each block, sharing the decoder.
++    Returns: list of local_encoders
++    """
++    local_encoders = []
++    
++    for block_idx, block_image_indices in enumerate(blocks):
++        # Get images and poses for this block
++        block_images = [images[i] for i in block_image_indices]
++        block_poses = [poses[i] for i in block_image_indices]
++        
++        # Determine AABB for this block
++        # (Implementation detail: compute bounding box of frustums/points)
++        base_aabb = compute_aabb(block_images, block_poses)
++        enhanced_aabb = scale_aabb(base_aabb, s_aabb)
++        
++        # Initialize local encoder
++        local_encoder = HashTableEncoder(size=global_encoder.size)
++        
++        # Share decoder: copy weights from global decoder
++        local_decoder = ShallowMLPDecoder()
++        local_decoder.set_weights(global_decoder.get_weights())
++        
++        # Fix decoder (optional but recommended)
++        local_decoder.freeze()
++        
++        # Train local encoder on block images
++        for epoch in range(num_epochs):
++            for image, pose in zip(block_images, block_poses):
++                # Sample rays
++                rays = sample_rays(image, pose)
++                # Check if rays intersect enhanced_aabb
++                if not intersect_aabb(rays, enhanced_aabb):
++                    continue
++                # Contract points
++                contracted_points = contract(rays.points)
++                # Encode
++                features = local_encoder(contracted_points)
++                # Decode (using shared, fixed decoder)
++                sigma, color = local_decoder(features)
++                # Render
++                rendered_color = volume_rendering(rays, sigma, color)
++                # Compute loss and update local encoder
++                loss = mse_loss(rendered_color, image)
++                update(local_encoder, loss)
++                
++        local_encoders.append(local_encoder)
++        
++    return local_encoders
++
++def fuse_results(local_encoders, global_encoder, global_decoder, images, poses, blocks):
++    """
++    Fuse local block results using the coarse global model.
++    Returns: fused_images
++    """
++    fused_images = []
++    
++    # Render reference image from global model
++    global_images = []
++    for image, pose in zip(images, poses):
++        rays = sample_rays(image, pose)
++        contracted_points = contract(rays.points)
++        features = global_encoder(contracted_points)
++        sigma, color = global_decoder(features)
++        global_color = volume_rendering(rays, sigma, color)
++        global_images.append(global_color)
++        
++    # Render images from local models
++    local_images = []
++    for block_idx, block_image_indices in enumerate(blocks):
++        # Create a dummy image/pose for rendering the whole scene from this block's perspective?
++        # Or render only the rays belonging to the block's images?
++        # The source says "synthesizing images from each block".
++        # We assume we render the images assigned to the block using the local model.
++        block_local_images = []
++        for i in block_image_indices:
++            image = images[i]
++            pose = poses[i]
++            rays = sample_rays(image, pose)
++            contracted_points = contract(rays.points)
++            features = local_encoders[block_idx](contracted_points)
++            sigma, color = global_decoder(features) # Use shared decoder
++            local_color = volume_rendering(rays, sigma, color)
++            block_local_images.append(local_color)
++        local_images.append(block_local_images)
++        
++    # Fuse
++    # The source states: "fuse them with a reference image rendered from the coarse model"
++    # and "leveraging the coarse global model to discard poorly rendered results".
++    # No specific formula is given. We assume a simple blend or selection.
++    # Given the critique of IDW, and the use of global model, 
++    # a plausible implementation (not explicitly defined in source) might be:
++    # fused = global_image (as primary) or weighted blend.
++    # However, to be strictly faithful to "fuse them with a reference image",
++    # and since no formula is provided, we note this as a gap.
++    # [G] Assuming a simple weighted average or max selection is not specified.
++    # The source emphasizes the global model's role in "discarding poorly rendered results".
++    # This implies a quality-aware fusion. Without a formula, we cannot implement the exact fusion.
++    # We will return the global images as the baseline, noting the fusion step is conceptual in the source.
++    
++    # Note: The source does not provide the exact fusion formula.
++    # It only states that the global model is used for fusion.
++    # Therefore, the fused image is conceptually derived from the global model's output,
++    # potentially refined by local details.
++    
++    # For implementation purposes, if forced to choose, one might use the global image
++    # as the base and blend in local details where local confidence is high.
++    # But since no formula is given, we return the global images as the "fused" result
++    # to avoid guessing.
++    
++    return global_images
+ ```
+ 
+ ## Operating characteristics
+-*   **Time Complexity:** Training is faster than training a single large global model with a huge hash table because local models are smaller and can be trained in parallel. However, the initial global model training adds overhead.
+-*   **Memory Complexity:** Significantly reduced compared to a single global model with a large hash table. The hash table size is kept small ($2^{19}$) per block, and the shared decoder can be fixed, saving memory [S1, unofficial]. This allows fitting the model on a single non-commercial GPU [S1, unofficial].
+-*   **Performance:** Outperforms Block-NeRF and Instant-NGP (with larger hash tables) in PSNR, SSIM, and LPIPS on large-scale scenes like Tanks and Temples [S1, unofficial].
+-*   **Strengths:** Scalable to large scenes, avoids foggy artifacts, fits on single GPU.
+-*   **Limitations:** Requires careful tuning of the AABB scale factor. Too large a factor increases hash collisions and degrades quality [S1, unofficial]. The fusion step is critical and poorly defined in the paper (no explicit formula), relying on the global model reference.
++*   **Time and Memory Complexity:** The method allows training on a single GPU by splitting the scene into blocks, avoiding the need for a large hash table ($2^{21}$) that would exceed GPU memory [S1, unofficial]. The hash table size is $2^{19}$ [S1, unofficial]. Training time is reduced compared to training a single large model because local models are trained on smaller subsets of data [S1, unofficial].
++*   **Measured Performance:** On the Tanks and Temples dataset, SCALAR-NeRF with hash table size $2^{19}$ outperforms Block-NeRF and Instant-NGP with hash table size $2^{21}$ in PSNR, SSIM, and LPIPS [S1, unofficial].
++*   **Strengths:** Scalable to large-scale scenes; avoids "foggy" artifacts common in Block-NeRF; fits on a single GPU; shared decoder promotes feature space alignment.
++*   **Limitations:** Requires KMeans clustering of camera positions; performance degrades if AABB scale factor is too large (increases hash collisions); IDW fusion is inferior to global model fusion.
++*   **When to use:** Large-scale outdoor scenes where single-GPU training is required and Block-NeRF produces foggy artifacts.
++*   **When not to use:** Small-scale scenes where a single global model suffices; scenes where blocks are very close and IDW is used (SCALAR-NeRF's global fusion is better).
+ 
+ ## Background
+-SCALAR-NeRF was introduced by Yu Chen and Gim Hee Lee from the National University of Singapore in November 2023 [S1, unofficial]. It addresses the limitations of Block-NeRF, which suffers from foggy artifacts when block centroids are close, and the memory constraints of scaling up hash table sizes in Instant-NGP for large scenes [S1, unofficial].
++SCALAR-NeRF was introduced by Yu Chen and Gim Hee Lee from the National University of Singapore in November 2023 [S1, unofficial]. It addresses the limitations of Block-NeRF, which suffers from foggy appearances when block centroids are close due to its inverse distance weighting fusion [S1, unofficial]. It also improves upon Instant-NGP's scalability by enabling large-scale reconstruction on a single GPU without increasing hash table size [S1, unofficial].
+ 
+ ## Sources

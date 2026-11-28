@@ -1,0 +1,148 @@
+# GPU-adaptive Volume Downsampling
+
+Also called: volumeDownsampling
+
+## Overview
+GPU-adaptive Volume Downsampling dynamically adjusts rendering sample distance multipliers based on a one-time GPU performance test to reduce GPU load during volume rendering [S1, unofficial]. It sets apart from sibling methods by decoupling the sampling rate from the scene content or view direction, instead tying it directly to the hardware's measured capability tier [S1, unofficial]. This ensures consistent frame rates across diverse hardware configurations without manual user intervention.
+
+## How it works
+**Inputs and Outputs:**
+*   **Input:** A configuration object defining GPU tiers and thresholds; a GPU performance score (percentage) derived from an initialization benchmark.
+*   **Output:** Two multipliers: `rotateSampleDistanceFactor` (applied during viewport rotation) and `sampleDistanceMultiplier` (applied during static rendering).
+
+**Data Structures:**
+The method relies on a configuration structure nested under `customizationService`. The layout is defined as follows:
+
+> **Unverified code.** The code below did not pass a test run against a reference implementation, or no test fits it, so it may contain errors.
+
+```json
+{
+  "volumeDownsampling": {
+    "highGpu": {
+      "rotateSampleDistanceFactor": <number>,
+      "sampleDistanceMultiplier": <number>
+    },
+    "midGpu": {
+      "rotateSampleDistanceFactor": <number>,
+      "sampleDistanceMultiplier": <number>
+    },
+    "lowGpu": {
+      "rotateSampleDistanceFactor": <number>,
+      "sampleDistanceMultiplier": <number>
+    },
+    "thresholdHighPercent": <number>,
+    "thresholdMidPercent": <number>
+  }
+}
+```
+
+**Numbered Steps:**
+1.  **Initialization:** Run a GPU performance test once at application initialization to determine the hardware's capability score [S1, unofficial].
+2.  **Classification:** Compare the obtained GPU score against the configured thresholds to assign the GPU to a tier:
+    *   **High Tier:** Score $\ge$ `thresholdHighPercent` (typically 100%) [S1, unofficial].
+    *   **Mid Tier:** `thresholdMidPercent` $\le$ Score < `thresholdHighPercent` (typically 90% to <100%) [S1, unofficial].
+    *   **Low Tier:** Score < `thresholdMidPercent` (typically <90%) [S1, unofficial].
+3.  **Configuration Retrieval:** Select the configuration block corresponding to the assigned tier (`highGpu`, `midGpu`, or `lowGpu`) [S1, unofficial].
+4.  **Multiplier Assignment:** Extract `rotateSampleDistanceFactor` and `sampleDistanceMultiplier` from the selected block [S1, unofficial].
+5.  **Application:** Apply `sampleDistanceMultiplier` to the base sample distance during static rendering. Apply `rotateSampleDistanceFactor` to the base sample distance during viewport rotation [S1, unofficial].
+
+**Formulas:**
+Let $S$ be the GPU performance score (0-100).
+Let $T_H$ be `thresholdHighPercent`.
+Let $T_M$ be `thresholdMidPercent`.
+
+$$
+\text{Tier}(S) = 
+\begin{cases} 
+\text{highGpu} & \text{if } S \ge T_H \\
+\text{midGpu} & \text{if } T_M \le S < T_H \\
+\text{lowGpu} & \text{if } S < T_M 
+\end{cases}
+$$
+
+Let $F_{rot}$ be `rotateSampleDistanceFactor` and $M_{static}$ be `sampleDistanceMultiplier` from the configuration block of $\text{Tier}(S)$.
+Let $D_{base}$ be the base sample distance.
+
+$$
+D_{render} = D_{base} \times M_{static} \quad \text{(Static)}
+$$
+$$
+D_{rotate} = D_{base} \times F_{rot} \quad \text{(Rotation)}
+$$
+
+**Parameters:**
+*   `thresholdHighPercent`: Default 100 [S1, unofficial].
+*   `thresholdMidPercent`: Default 90 [S1, unofficial].
+*   `rotateSampleDistanceFactor`:
+    *   High/Mid GPU: 2 [S1, unofficial].
+    *   Low GPU: 3 [S1, unofficial].
+*   `sampleDistanceMultiplier`:
+    *   High GPU: 1 [S1, unofficial].
+    *   Mid/Low GPU: 2 [S1, unofficial].
+
+**Edge Cases and Pitfalls:**
+*   **Precision:** The score comparison is integer-based in the source example (percentages). Ensure the benchmark returns a comparable scale.
+*   **Initialization:** The test runs only once. If the GPU state changes significantly (e.g., thermal throttling, driver updates) after initialization, the multipliers will not update automatically [S1, unofficial].
+*   **Configuration:** If thresholds are misconfigured (e.g., $T_H < T_M$), the classification logic may fail or assign incorrect tiers.
+
+**Pseudocode:**
+
+> **Unverified code.** The code below did not pass a test run against a reference implementation, or no test fits it, so it may contain errors.
+
+```python
+def initialize_gpu_adaptive_downsampling(config):
+    """
+    Runs the one-time GPU test and sets up the multipliers.
+    """
+    # 1. Run GPU performance test
+    # [G] The specific benchmark algorithm is not detailed in the source.
+    # This function returns a score between 0 and 100.
+    gpu_score = run_gpu_performance_test()
+    
+    # 2. Extract thresholds
+    threshold_high = config['volumeDownsampling']['thresholdHighPercent']
+    threshold_mid = config['volumeDownsampling']['thresholdMidPercent']
+    
+    # 3. Classify GPU
+    if gpu_score >= threshold_high:
+        tier_config = config['volumeDownsampling']['highGpu']
+    elif gpu_score >= threshold_mid:
+        tier_config = config['volumeDownsampling']['midGpu']
+    else:
+        tier_config = config['volumeDownsampling']['lowGpu']
+        
+    # 4. Assign multipliers
+    rotate_sample_distance_factor = tier_config['rotateSampleDistanceFactor']
+    sample_distance_multiplier = tier_config['sampleDistanceMultiplier']
+    
+    return {
+        'rotate_sample_distance_factor': rotate_sample_distance_factor,
+        'sample_distance_multiplier': sample_distance_multiplier
+    }
+
+def calculate_sample_distance(base_distance, is_rotating, multipliers):
+    """
+    Calculates the final sample distance based on current state.
+    """
+    if is_rotating:
+        factor = multipliers['rotate_sample_distance_factor']
+    else:
+        factor = multipliers['sample_distance_multiplier']
+        
+    return base_distance * factor
+```
+
+## Operating characteristics
+*   **Time Complexity:** $O(1)$ for multiplier lookup after initialization. The initialization benchmark cost is hardware-dependent and not specified [S1, unofficial].
+*   **Memory Complexity:** $O(1)$, storing only the configuration object and two multiplier values [S1, unofficial].
+*   **Performance:** Reduces GPU load by increasing sample distances (decreasing resolution) on lower-tier hardware [S1, unofficial]. High-tier GPUs maintain full resolution (multiplier 1) [S1, unofficial].
+*   **Strengths:** Automatic adaptation to hardware; simple configuration; effective for maintaining frame rates on low-end devices [S1, unofficial].
+*   **Limitations:** Static adaptation; does not account for scene complexity or view direction; relies on a single initial benchmark which may not reflect real-time thermal or power states [S1, unofficial].
+*   **When to use:** When rendering diverse hardware configurations and consistent frame rates are prioritized over maximum visual fidelity on high-end hardware [S1, unofficial].
+*   **When not to use:** When visual fidelity is critical and hardware is uniform, or when dynamic scene-dependent sampling is required [S1, unofficial].
+
+## Background
+This method originates from the OHIF Viewer project, specifically introduced in the `feat/decimated loading` pull request [S1, unofficial]. It is part of a broader strategy to handle large volume datasets by combining auto-decimation (based on voxel count thresholds) with adaptive sampling based on GPU capability [S1, unofficial]. The approach is used in medical imaging viewers to ensure smooth interaction across a wide range of client hardware [S1, unofficial].
+
+## Sources
+[S1] feat/decimated loading, https://github.com/OHIF/Viewers/pull/6034, fetched 2026-10-27 (unofficial)

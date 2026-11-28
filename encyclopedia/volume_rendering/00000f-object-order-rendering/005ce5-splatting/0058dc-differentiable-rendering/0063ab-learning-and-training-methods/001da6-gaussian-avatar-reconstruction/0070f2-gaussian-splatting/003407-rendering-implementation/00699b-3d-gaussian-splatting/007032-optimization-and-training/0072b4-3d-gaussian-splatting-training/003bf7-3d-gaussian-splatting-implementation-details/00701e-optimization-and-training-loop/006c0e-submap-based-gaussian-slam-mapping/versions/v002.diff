@@ -1,0 +1,308 @@
+--- v001.md
++++ v002.md
+@@ -4,158 +4,194 @@
+ 
+ ## Overview
+-This method manages the incremental construction and optimization of a 3D Gaussian Splatting (3DGS) scene within a Simultaneous Localization and Mapping (SLAM) framework by dividing the trajectory into manageable "submaps" [S1, unofficial]. It solves the problem of unbounded memory growth and optimization instability in long sequences by resetting the Gaussian model periodically while maintaining global consistency through keyframe integration [S1, unofficial]. Unlike global optimization approaches, it limits the active optimization domain to a sliding window of recent frames, enabling real-time or near-real-time mapping [S1, unofficial].
++This method manages the incremental construction of a 3D Gaussian Splatting (3DGS) model within a Simultaneous Localization and Mapping (SLAM) framework by partitioning the scene into localized "submaps" [S1, unofficial]. Unlike global optimization approaches that re-optimize the entire Gaussian set against all historical data, this method restricts optimization to a local subset of Gaussians and keyframes, enabling real-time or near-real-time mapping for large-scale environments [S1, unofficial]. It sets itself apart from standard 3DGS training by integrating depth supervision, camera pose estimation feedback, and dynamic submap lifecycle management (creation, optimization, and checkpointing) [S1, unofficial].
+ 
+ ## How it works
+-The method operates as a loop within the SLAM pipeline, triggered either by a fixed frame interval or a motion heuristic [S1, unofficial].
++The method operates as a loop within a SLAM pipeline, triggered by specific frame intervals or motion heuristics. It relies on a `Mapper` class that processes keyframes, manages the `GaussianModel`, and handles optimization [S1, unofficial].
+ 
+-**Inputs and Outputs:**
+-*   **Inputs:** Current frame ID, ground truth color tensor, ground truth depth tensor, estimated camera-to-world pose ($T_{c2w}$), current 3D Gaussian model, and configuration parameters (e.g., `new_submap_every`, `max_iterations`) [S1, unofficial].
+-*   **Outputs:** Updated 3D Gaussian model, list of keyframes, and optimization statistics (PSNR, loss) [S1, unofficial].
++### Inputs and Outputs
++*   **Inputs:**
++    *   Current frame: Ground truth color tensor, depth tensor, and estimated camera-to-world pose ($T_{c2w}$) [S1, unofficial].
++    *   Dataset intrinsics and dimensions [S1, unofficial].
++    *   Existing Gaussian model $\mathcal{G}$ [S1, unofficial].
++    *   List of existing keyframes [S1, unofficial].
++    *   Configuration parameters: `max_iterations`, `new_submap_every`, `new_submap_iterations`, `iterations` [S1, unofficial].
++*   **Outputs:**
++    *   Updated Gaussian model $\mathcal{G}'$ [S1, unofficial].
++    *   Updated list of keyframes [S1, unofficial].
++    *   Optimization statistics (PSNR, loss, timing) [S1, unofficial].
+ 
+-**Data Structures:**
+-*   **Keyframe Dictionary:** A list of dictionaries, each containing:
+-    *   `color`: Tensor of shape $(H, W, 3)$, normalized to $[0, 1]$, on CUDA [S1, unofficial].
+-    *   `depth`: Tensor of shape $(H, W)$, on CUDA [S1, unofficial].
++### Data Structures
++*   **Keyframe Dictionary:** Contains:
++    *   `color`: Tensor normalized to $[0, 1]$ and moved to CUDA [S1, unofficial].
++    *   `depth`: Tensor moved to CUDA [S1, unofficial].
+     *   `render_settings`: Derived from dataset dimensions, intrinsics, and the world-to-camera matrix ($T_{w2c} = T_{c2w}^{-1}$) [S1, unofficial].
+-*   **Gaussian Model:** Contains positions, covariances (or scale/rotation), opacities, and spherical harmonic coefficients [S1, unofficial].
++*   **Seeding Mask:** A binary mask indicating regions where new Gaussians should be initialized, computed based on the current Gaussian model and the keyframe's depth/color data [S1, unofficial].
+ 
+-**Numbered Steps:**
++### Algorithm Steps
++1.  **Keyframe Construction:** Retrieve the current frame's color, depth, and estimated $T_{c2w}$. Compute $T_{w2c} = T_{c2w}^{-1}$. Construct the keyframe dictionary with normalized color, depth, and render settings [S1, unofficial].
++2.  **Submap Decision:** Determine if a new submap should be started. This occurs if:
++    *   The frame ID matches a predefined interval (`frame_id % new_submap_every == 0` or specific IDs in `new_submap_frame_ids`), OR
++    *   A motion heuristic is enabled and the camera motion from the last submap start exceeds thresholds (rotation $> 50^\circ$, translation $> 0.5$ units) [S1, unofficial].
++3.  **Submap Initialization (if new):** If `should_start_new_submap` is true, call `start_new_submap`. This saves the current submap's checkpoint, resets the Gaussian model for the new submap, and updates the submap count [S1, unofficial].
++4.  **Seeding:** Compute the seeding mask using the current Gaussian model and the keyframe. Call `seed_new_gaussians` with the ground truth color, depth, intrinsics, camera pose, seeding mask, and a `submap` flag to initialize new 3D points (Gaussians) [S1, unofficial].
++5.  **Outlier Filtering:** Determine if statistical outlier filtering is applied. This is enabled if the dataset is `TUM_RGBD` or `ScanNet` AND it is not a new submap [S1, unofficial].
++6.  **Submap Growth:** Integrate new points from the current keyframe into the Gaussian model. This step grows the submap by adding the seeded Gaussians [S1, unofficial].
++7.  **Optimization:** Call `optimize_submap` with the current frame, all existing keyframes, the Gaussian model, and `max_iterations`.
++    *   If `is_new_submap` is true, `max_iterations` = `self.new_submap_iterations`.
++    *   Otherwise, `max_iterations` = `self.iterations` [S1, unofficial].
++    *   The optimization process minimizes the photometric loss (L1 + D-SSIM) and potentially depth loss, using the Adam optimizer [S1, unofficial].
++8.  **Keyframe Update:** Append the current frame and its keyframe dictionary to the list of keyframes [S1, unofficial].
++9.  **Visualization & Logging:** Render the current Gaussian model using the keyframe's render settings to generate visualization color and depth images. Calculate the PSNR between the rendered color image and the ground truth color image. Log mapping iteration statistics (frame ID, new points count, model size, optimization time, loss) [S1, unofficial].
+ 
+-1.  **Pose and Matrix Preparation:** Retrieve the ground truth color $C_{gt}$, depth $D_{gt}$, and estimated camera-to-world pose $T_{c2w}$ for the current frame. Compute the world-to-camera matrix $T_{w2c} = T_{c2w}^{-1}$ [S1, unofficial].
+-2.  **Keyframe Construction:** Construct a keyframe dictionary containing $C_{gt}$, $D_{gt}$, and `render_settings` derived from $T_{w2c}$ and camera intrinsics [S1, unofficial].
+-3.  **Submap Initiation Check:** Determine if a new submap should be started. This occurs if:
+-    *   The frame ID is in a pre-calculated list `submap_frame_ids` (typically every $N$ frames, plus the last frame), OR
+-    *   A motion heuristic is enabled and the motion between the current frame and the last submap start frame exceeds thresholds (e.g., rotation $> 50^\circ$, translation $> 0.5$ units) [S1, unofficial].
+-4.  **Submap Reset (if new submap):** If a new submap is started:
+-    *   Save the checkpoint of the current submap [S1, unofficial].
+-    *   Reset the Gaussian model to an empty state or a minimal initialization [S1, unofficial].
+-    *   Mark the current frame as the start of the new submap [S1, unofficial].
+-5.  **Seeding:** Compute a seeding mask based on the current Gaussian model and the keyframe to identify regions requiring new Gaussians (e.g., unobserved areas or high error regions) [S1, unofficial].
+-6.  **Gaussian Initialization:** Seed new 3D points by calling `seed_new_gaussians` using $C_{gt}$, $D_{gt}$, intrinsics, $T_{c2w}$, the seeding mask, and a `submap` flag [S1, unofficial].
+-7.  **Outlier Filtering:** Determine if statistical outlier filtering is applied. This is enabled if the dataset is TUM_RGBD or ScanNet AND it is not a new submap [S1, unofficial].
+-8.  **Submap Growth:** Grow the submap by integrating the newly seeded points into the Gaussian model. Return the count of added points [S1, unofficial].
+-9.  **Optimization:** Optimize the submap by calling `optimize_submap` with the current frame, all existing keyframes, the Gaussian model, and `max_iterations` [S1, unofficial].
+-    *   **Parameters:** `max_iterations` is set to `self.new_submap_iterations` if a new submap was just started, otherwise `self.iterations` [S1, unofficial].
+-10. **Keyframe Update:** Append the current frame and its keyframe dictionary to the list of keyframes [S1, unofficial].
+-11. **Visualization and Logging:**
+-    *   Render the current Gaussian model using the keyframe's `render_settings` to generate visualization color and depth images [S1, unofficial].
+-    *   Calculate the Peak Signal-to-Noise Ratio (PSNR) between the rendered color image and $C_{gt}$ [S1, unofficial].
+-    *   Log mapping iteration statistics: frame ID, new points count, model size, optimization time, and loss dictionary [S1, unofficial].
+-
+-**Pseudocode:**
++### Pseudocode
+ 
+ ```python
+-def submap_based_slam_mapping_step(frame_id, config, gaussian_model, keyframes, logger):
++def process_frame(frame_id, current_frame, gaussian_model, keyframes, config, tracker):
+     """
+-    Executes one step of the submap-based Gaussian SLAM mapping process.
++    Processes a single frame in the Submap-based Gaussian SLAM mapping loop.
+     
+     Args:
+-        frame_id: Current frame index.
+-        config: Configuration dictionary containing 'mapping' and 'tracking' settings.
+-        gaussian_model: Current 3D Gaussian model instance.
+-        keyframes: List of existing keyframe dictionaries.
+-        logger: Logger instance for statistics.
++        frame_id: int, ID of the current frame.
++        current_frame: dict, containing 'color', 'depth', 'c2w' (camera-to-world pose).
++        gaussian_model: GaussianModel instance.
++        keyframes: list of Keyframe dictionaries.
++        config: dict, configuration parameters.
++        tracker: Tracker instance, provides estimated poses.
+         
+     Returns:
+-        Updated gaussian_model, keyframes, and optimization stats.
++        gaussian_model: Updated GaussianModel.
++        keyframes: Updated list of keyframes.
++        stats: dict, optimization statistics.
+     """
+-    # 1. Retrieve data
+-    # Assume dataset provides these methods
+-    C_gt, D_gt, T_c2w = dataset.get_frame_data(frame_id)
++    # 1. Keyframe Construction
++    c2w = current_frame['c2w']
++    w2c = inverse(c2w)
+     
+-    # Compute world-to-camera matrix
+-    T_w2c = torch.inverse(T_c2w)
++    # Normalize color to [0, 1] and move to CUDA
++    color_tensor = normalize_to_01(current_frame['color']).to('cuda')
++    depth_tensor = current_frame['depth'].to('cuda')
+     
+-    # 2. Construct keyframe dictionary
+-    keyframe_dict = {
+-        'color': C_gt.to('cuda').float(), # Normalized to [0,1] assumed
+-        'depth': D_gt.to('cuda').float(),
+-        'render_settings': get_render_settings(dataset.intrinsics, T_w2c)
++    # Derive render settings from intrinsics and w2c
++    render_settings = derive_render_settings(
++        dataset_dims=config['data']['dims'],
++        intrinsics=config['data']['intrinsics'],
++        w2c=w2c
++    )
++    
++    keyframe = {
++        'color': color_tensor,
++        'depth': depth_tensor,
++        'render_settings': render_settings,
++        'frame_id': frame_id
+     }
+     
+-    # 3. Check for new submap
+-    is_new_submap = should_start_new_submap(frame_id, keyframes, config)
++    # 2. Submap Decision
++    is_new_submap = should_start_new_submap(
++        frame_id=frame_id,
++        new_submap_frame_ids=tracker.new_submap_frame_ids,
++        submap_using_motion_heuristic=config['mapping']['submap_using_motion_heuristic'],
++        estimated_c2ws=tracker.estimated_c2ws,
++        rot_thre=50,
++        trans_thre=0.5
++    )
+     
++    # 3. Submap Initialization (if new)
+     if is_new_submap:
+-        # 4. Reset submap
+-        save_submap_checkpoint(gaussian_model)
+-        gaussian_model.reset()
+-        logger.log_submap_start(frame_id)
++        start_new_submap(
++            frame_id=frame_id,
++            gaussian_model=gaussian_model,
++            config=config
++        )
++        # Note: start_new_submap resets gaussian_model and saves checkpoint
+         
+-    # 5. Seeding
+-    seeding_mask = compute_seeding_mask(gaussian_model, keyframe_dict)
++    # 4. Seeding
++    seeding_mask = compute_seeding_mask(
++        gaussian_model=gaussian_model,
++        keyframe=keyframe
++    )
+     
+-    # 6. Seed new Gaussians
+     new_points_count = seed_new_gaussians(
+-        C_gt, D_gt, dataset.intrinsics, T_c2w, seeding_mask, is_new_submap
++        color=color_tensor,
++        depth=depth_tensor,
++        intrinsics=config['data']['intrinsics'],
++        camera_pose=c2w,
++        seeding_mask=seeding_mask,
++        gaussian_model=gaussian_model,
++        is_new_submap=is_new_submap
+     )
+-    gaussian_model.add_gaussians(new_points_count)
+     
+-    # 7. Outlier filtering
+-    if config['mapping'].get('outlier_filter', False) and not is_new_submap:
+-        if dataset.name in ['TUM_RGBD', 'ScanNet']:
+-            gaussian_model.filter_outliers()
+-            
+-    # 8. Optimize submap
+-    # Determine iteration count
++    # 5. Outlier Filtering
++    apply_outlier_filtering = (
++        config['data']['dataset_type'] in ['TUM_RGBD', 'ScanNet'] and 
++        not is_new_submap
++    )
++    
++    if apply_outlier_filtering:
++        gaussian_model.apply_statistical_outlier_filtering()
++        
++    # 6. Submap Growth
++    # seed_new_gaussians typically integrates points, but explicit growth step is noted
++    gaussian_model.grow_submap(new_points_count)
++    
++    # 7. Optimization
+     if is_new_submap:
+-        max_iter = config['mapping']['new_submap_iterations']
++        max_iterations = config['mapping']['new_submap_iterations']
+     else:
+-        max_iter = config['mapping']['iterations']
++        max_iterations = config['mapping']['iterations']
+         
+     optimize_submap(
+-        current_frame=keyframe_dict,
+-        all_keyframes=keyframes,
++        current_frame=current_frame,
++        keyframes=keyframes,
+         gaussian_model=gaussian_model,
+-        max_iterations=max_iter
++        max_iterations=max_iterations,
++        config=config
+     )
+     
+-    # 9. Update keyframes
+-    keyframes.append(keyframe_dict)
++    # 8. Keyframe Update
++    keyframes.append(keyframe)
+     
+-    # 10. Visualization and Logging
+-    render_color, render_depth = render_gaussians(gaussian_model, keyframe_dict['render_settings'])
+-    
+-    # Calculate PSNR
+-    psnr = calculate_psnr(render_color, C_gt)
+-    
+-    # Log statistics
+-    logger.log_mapping_stats(
+-        frame_id=frame_id,
+-        new_points=new_points_count,
+-        model_size=gaussian_model.size(),
+-        psnr=psnr,
+-        optimization_time=... # Placeholder for actual timing
++    # 9. Visualization & Logging
++    vis_color, vis_depth = render_gaussian_model(
++        gaussian_model=gaussian_model,
++        render_settings=keyframe['render_settings']
+     )
+     
+-    return gaussian_model, keyframes
++    psnr = calculate_psnr(vis_color, current_frame['color'])
++    
++    stats = {
++        'frame_id': frame_id,
++        'new_points_count': new_points_count,
++        'model_size': gaussian_model.num_gaussians,
++        'optimization_time': get_last_optimization_time(),
++        'psnr': psnr,
++        'loss': get_last_loss()
++    }
++    
++    log_mapping_stats(stats)
++    
++    return gaussian_model, keyframes, stats
+ ```
+ 
+-**Edge Cases and Pitfalls:**
+-*   **Motion Heuristic Thresholds:** The rotation threshold ($50^\circ$) and translation threshold ($0.5$ units) are dataset-dependent and may need tuning for fast-moving cameras [S1, unofficial].
+-*   **Outlier Filtering:** Disabled for new submaps to prevent loss of initial structure; enabled for TUM_RGBD and ScanNet datasets [S1, unofficial].
+-*   **Memory Management:** Resetting the Gaussian model in a new submap frees memory but requires careful handling of the checkpointing process to allow for potential future global optimization or loop closure [S1, unofficial].
++### Parameters
++*   `max_iterations`: Number of optimization iterations. Set to `self.new_submap_iterations` if `is_new_submap` is true, otherwise `self.iterations` [S1, unofficial].
++*   `new_submap_every`: Interval (in frames) for potential new submap creation [S1, unofficial].
++*   `rot_thre`: Rotation threshold for motion heuristic ($50^\circ$) [S1, unofficial].
++*   `trans_thre`: Translation threshold for motion heuristic ($0.5$ units) [S1, unofficial].
+ 
+-## Subtopics
+-
+-### Motion Heuristic Submap Triggering
+-Uses camera pose changes (rotation > 50°, translation > 0.5) to decide when to start a new submap, rather than fixed intervals. This adapts to scene complexity and camera speed. [Link](17791-optimization-and-training-loop.md)
+-
+-### Seeding Mask Generation
+-Determines where new Gaussians are needed based on current model coverage and depth consistency. [Link](17791-optimization-and-training-loop.md)
+-
+-### Outlier Filtering
+-Statistical filtering applied to remove spurious Gaussians, specific to certain datasets (TUM_RGBD, ScanNet) and not applied during new submap initialization. [Link](17791-optimization-and-training-loop.md)
++### Edge Cases and Pitfalls
++*   **Motion Heuristic Failure:** If the camera moves slowly, submaps may not be created frequently enough, leading to large, slow-to-optimize submaps. If it moves too fast, excessive submaps may be created, fragmenting the model [S1, unofficial].
++*   **Outlier Filtering:** Applying outlier filtering on new submaps is disabled for TUM_RGBD/ScanNet to avoid removing valid new points during initialization [S1, unofficial].
++*   **Pose Estimation Error:** The method relies on the tracker's estimated $T_{c2w}$. Errors in pose estimation will propagate into the Gaussian positions and submap alignment [S1, unofficial].
+ 
+ ## Operating characteristics
+-*   **Time Complexity:** Linear with respect to the number of keyframes in the current submap window. Optimization is limited to `max_iterations` per step, which is typically lower than global optimization [S1, unofficial].
+-*   **Memory Complexity:** Bounded by the size of the current submap and the number of keyframes, rather than the entire scene history. This allows for long-term mapping without memory overflow [S1, unofficial].
+-*   **Strengths:** Enables real-time or near-real-time SLAM by limiting optimization scope; prevents drift accumulation by resetting the model periodically; scalable to large environments [S1, unofficial].
+-*   **Limitations:** Potential loss of global consistency if submaps are not properly aligned or if loop closure is not implemented; dependent on accurate initial seeding and outlier filtering [S1, unofficial].
+-*   **When to Use:** Long-sequence SLAM applications where memory and computational resources are constrained, and real-time performance is critical [S1, unofficial].
+-*   **When Not to Use:** Offline reconstruction of small, static scenes where global optimization can achieve higher accuracy without memory constraints [S1, unofficial].
++*   **Time Complexity:** Optimization is limited to the current submap and keyframes, reducing the number of Gaussians and views processed per iteration compared to global optimization. However, the overhead of submap management and seeding adds constant cost per frame [S1, unofficial].
++*   **Memory Complexity:** Memory usage is bounded by the size of the current submap and the keyframe buffer, rather than the entire scene. This allows for mapping of larger scenes than global 3DGS [S1, unofficial].
++*   **Strengths:** Enables real-time or near-real-time SLAM by localizing computation. Handles large-scale environments by partitioning the scene.
++*   **Limitations:** Potential for drift if submaps are not aligned correctly. Quality may suffer in areas with high motion or insufficient overlap between submaps.
++*   **When to Use:** Large-scale SLAM applications where global optimization is too slow or memory-intensive.
++*   **When Not to Use:** Small-scale scenes where global optimization is feasible and provides higher accuracy.
+ 
+ ## Background
+-This method is derived from the Gaussian-SLAM framework, which integrates 3D Gaussian Splatting into a SLAM pipeline [S1, unofficial]. The submap-based approach addresses the scalability issues of applying 3DGS to large-scale, dynamic environments by breaking the problem into manageable chunks [S1, unofficial]. It builds on the principles of incremental mapping and periodic optimization [S1, unofficial].
++This method is implemented in the `Gaussian-SLAM` repository by Vladimir Yugay [S1, unofficial]. It adapts the 3D Gaussian Splatting rendering and optimization framework to a SLAM context, introducing submap-based optimization to handle incremental scene construction. The approach builds on the principles of 3DGS training but adds SLAM-specific components like pose estimation, keyframe management, and submap lifecycle control [S1, unofficial].
+ 
+ ## Sources

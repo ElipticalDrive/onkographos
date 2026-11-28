@@ -1,0 +1,169 @@
+--- v001.md
++++ v002.md
+@@ -1,68 +1,122 @@
+ # Image-Parallel Ray Casting via 2D Texture Mapping
+ 
+-Also called: Slice-based Volume Rendering, Texture-Mapped Volume Rendering (2D)
++Also called: 2D Texture Mapping Volume Rendering, Object-space technique, Slice-based Volume Rendering, Texture-Based Volume Rendering, Texture-Mapped Volume Rendering (2D)
+ 
+ ## Overview
+-Image-Parallel Ray Casting via 2D Texture Mapping is a hardware-accelerated direct volume rendering technique that replaces per-ray processing with per-slice processing. It projects parallel slices of the volumetric dataset onto the image plane and composites them using standard graphics blending operations. Unlike standard ray casting which processes pixels independently, this method processes all pixels in a slice in parallel, leveraging 2D texture mapping hardware for resampling and hardware blending for compositing. It is distinct from its parent, the Planes Method, which relies on 3D texture hardware; this method uses only 2D texture units, making it compatible with older graphics architectures while maintaining equivalence to standard ray casting results.
++Image-Parallel Ray Casting via 2D Texture Mapping is an object-space volume rendering technique that accelerates direct volume rendering by projecting parallel slices of volumetric data onto the image plane and compositing them using graphics hardware rasterization and blending [S1, unofficial][S2]. It replaces standard ray casting by treating the volume as a stack of 2D texture-mapped rectangles, leveraging hardware-accelerated texture sampling and alpha blending to achieve rendering speeds dependent only on image size rather than scene complexity [S1, unofficial][S3]. Unlike its sibling [Texture-Mapped Volume Rendering with CPU Shading](3423-texture-mapped-volume-rendering-with-cpu-shading.md), this method performs the compositing entirely within the GPU pipeline using standard blending operators [S2].
+ 
+ ## How it works
+-The method transforms the volume rendering integral into a sequence of 2D texture mapping and blending operations.
++The method approximates the continuous ray casting integral by discretizing the volume into a stack of parallel planes (slices). These slices are treated as proxy geometry, as graphics hardware lacks native volumetric primitives [S1, unofficial]. The core equivalence to standard ray casting holds provided that precision is not lost due to integer arithmetic in the compositing step [S2].
+ 
+ ### Inputs and Outputs
+-- **Input**: A volumetric dataset $V$ (scalar field), a viewing direction $\vec{v}$, and a projection matrix $P$.
+-- **Output**: A 2D image (color and opacity buffer) representing the volume.
++*   **Input:** A volumetric dataset defined on a rectilinear grid.
++*   **Output:** A 2D image (framebuffer) with color and opacity values.
+ 
+ ### Data Structures
+-1.  **Slice Stack**: A list of 2D texture images. Each image represents a planar cross-section of the volume.
+-    -   **Layout**: Each slice is a 2D array of texels. Each texel contains interpolated scalar values from $V$.
+-    -   **Generation**: Slices are either pre-computed orthogonal to a primary axis (static) or generated dynamically orthogonal to $\vec{v}$ (dynamic).
+-2.  **Projection Geometry**:
+-    -   For static slices: A set of projection matrices mapping the fixed slice planes to the image plane.
+-    -   For dynamic slices: A single projection matrix mapping the view-orthogonal slice plane to the image plane.
++The volume is represented as a stack of 2D texture images. Each texture image corresponds to a slice of the volume.
++*   **Slice Geometry:** A polygon (typically a rectangle or complex polygon depending on viewpoint) representing the cross-section of the volume at a specific depth.
++*   **Texture Image:** A 2D array of color and opacity values sampled from the volume data. The resolution of the texture matches the resolution of the slice in the volume grid.
+ 
+ ### Steps
+-1.  **Slice Generation**:
+-    -   Divide the volume into $N$ parallel planes orthogonal to the viewing direction $\vec{v}$.
+-    -   If using static slices (pre-computed), these planes are orthogonal to a primary axis (e.g., $z$-axis). If using dynamic slices, they are orthogonal to $\vec{v}$.
+-    -   For each slice plane, extract the scalar values from $V$ at the intersection points.
+-    -   [G] If the slice geometry is non-rectangular (common in dynamic view-orthogonal slicing), generate a polygon mesh defining the slice boundary.
++1.  **Slice Generation:**
++    *   The volumetric data set is sliced into parallel planes.
++    *   *Pre-computed Slices:* Slices are generated orthogonal to a primary axis (e.g., x, y, or z) of the data volume during a pre-processing step [S2].
++    *   *View-Orthogonal Slices:* Slices are generated orthogonal to the current viewing direction for each frame [S2].
++2.  **Projection:**
++    *   Each slice is projected onto the image plane.
++    *   If using pre-computed slices, a projection matrix maps the object-space slice to the image space [S2].
++    *   If using view-orthogonal slices, the slice geometry is defined directly in view space [S2].
++3.  **Rasterization and Texture Sampling:**
++    *   The projected slice geometry is sent to the graphics pipeline.
++    *   During rasterization, the graphics hardware resamples the color and opacity values from the 2D texture image onto the discrete pixel buffer [S1, unofficial].
++    *   Values are calculated using bi-linear interpolation of the 2D texture image representing the slice [S2].
++    *   *Note:* The sources indicate that using only trilinear interpolation on 3D data results in low image quality; however, this specific method uses 2D texture mapping on pre-sliced data, relying on the 2D bi-linear interpolation of the slice textures [S2, S3].
++4.  **Compositing:**
++    *   All texture-mapped slices are blended onto the image plane.
++    *   The blending order is either front-to-back or back-to-front [S2].
++    *   The standard compositing operator (alpha blending) provided by the graphics library (e.g., OpenGL) is used [S2].
++    *   The result is a semi-transparent view of the volume [S1, unofficial].
+ 
+-2.  **Projection and Texture Mapping**:
+-    -   For each slice $i$ from $1$ to $N$:
+-        -   Project the slice geometry onto the image plane using the appropriate projection matrix.
+-        -   Bind the slice data as a 2D texture.
+-        -   Render the projected slice geometry. During rasterization, for each covered pixel, the hardware performs bi-linear interpolation of the texture coordinates $(s, t)$ to retrieve the scalar value $s_i$.
+-        -   Apply the transfer function to map $s_i$ to color $C_i$ and opacity $\alpha_i$.
++### Pseudocode
++```python
++# Initialization
++# Load volume data into a 3D array or texture
++# Pre-compute slices if using object-aligned approach
++slices = []
++if use_precomputed_slices:
++    for z in range(volume_depth):
++        # Extract 2D slice from volume at index z
++        slice_texture = extract_2d_slice(volume, axis='z', index=z)
++        # Create proxy geometry (rectangle) for this slice
++        geometry = create_rectangle_geometry(axis='z', index=z)
++        slices.append({'texture': slice_texture, 'geometry': geometry, 'order': z})
++else:
++    # View-orthogonal slices must be regenerated per frame
++    pass
+ 
+-3.  **Compositing**:
+-    -   Composite the rendered slices into the final image buffer.
+-    -   Use the standard front-to-back or back-to-front compositing operator provided by the graphics API (e.g., OpenGL blending).
+-    -   For front-to-back compositing, the accumulated color $C_{acc}$ and opacity $\alpha_{acc}$ are updated for each new slice with color $C_i$ and opacity $\alpha_i$:
+-        $$ \alpha_{new} = \alpha_{acc} + (1 - \alpha_{acc}) \alpha_i $$
+-        $$ C_{new} = C_{acc} + (1 - \alpha_{acc}) C_i \alpha_i $$
+-    -   [G] Initialize $C_{acc} = 0$ and $\alpha_{acc} = 0$ before the first slice.
++# Rendering Loop
++for frame in frames:
++    clear_framebuffer()
++    
++    if use_precomputed_slices:
++        # Sort slices by depth relative to camera
++        # Note: Pre-computed slices are object-aligned, so sorting requires 
++        # transforming slice centers to view space
++        sorted_slices = sort_slices_by_view_depth(slices, camera)
++        
++        for slice_data in sorted_slices:
++            # Set up projection matrix to map object-space slice to image space
++            setup_projection_matrix(slice_data.geometry, camera)
++            
++            # Bind the 2D texture representing the slice
++            bind_texture(slice_data.texture)
++            
++            # Rasterize the geometry. Hardware interpolates texture values.
++            # Blending is enabled to composite with existing framebuffer
++            enable_blending()
++            set_blend_function(SRC_ALPHA, ONE_MINUS_SRC_ALPHA) # Standard compositing
++            draw_geometry(slice_data.geometry)
++            
++    else:
++        # View-orthogonal approach
++        # Generate slices orthogonal to viewing direction
++        view_slices = generate_view_orthogonal_slices(volume, camera)
++        
++        # Sort slices front-to-back or back-to-front
++        sorted_slices = sort_slices_by_depth(view_slices, camera)
++        
++        for slice_data in sorted_slices:
++            # Geometry is already in view space or easily projected
++            bind_texture(slice_data.texture)
++            enable_blending()
++            set_blend_function(SRC_ALPHA, ONE_MINUS_SRC_ALPHA)
++            draw_geometry(slice_data.geometry)
++```
+ 
+-### Formulas
+-The method is exactly equivalent to standard ray casting, provided that precision is maintained during the compositing step. The equivalence holds because the set of sample points along all rays is identical to the set of sample points on the parallel slices.
+-
+-### Parameters
+--   **Slice Spacing**: The distance between adjacent slices. Must be small enough to avoid visible gaps (aliasing) along the viewing direction. Typically equal to the voxel size or smaller.
+--   **Interpolation**: Bi-linear interpolation is standard for texture sampling.
++### Parameters and Typical Values
++*   **Slice Spacing:** Determined by the volume resolution. For a $512 \times 512 \times 512$ volume, there are 512 slices [S3].
++*   **Interpolation:** Bi-linear interpolation is used for 2D texture sampling [S2]. Trilinear interpolation is noted as insufficient for high quality if applied directly to 3D data without pre-slicing [S3].
++*   **Blending Function:** Standard alpha blending ($C_{out} = C_{src} \alpha_{src} + C_{dst} (1 - \alpha_{src})$) [S2].
+ 
+ ### Edge Cases and Pitfalls
+--   **View Direction Parallel to Slices**: If pre-computed slices are orthogonal to a primary axis and the view direction is parallel to those slices, the projection degenerates. The slice appears as a line or has zero area, resulting in no image generation or severe distortion [S1].
+--   **Arbitrary Viewpoints with Static Slices**: Using pre-computed slices for arbitrary viewpoints causes geometric distortion because the projection of a planar slice onto the image plane is not a simple affine transformation of the texture coordinates if the view is oblique. This degrades image quality [S1].
+--   **Dynamic Slice Complexity**: Generating slices orthogonal to the viewing direction for each frame ensures optimal image quality but requires regenerating the slice stack every frame. The resulting slice geometry can be complex (triangles to hexagons) rather than rectangular, requiring more complex polygon rendering [S1].
++*   **View Direction Parallel to Slices:** If the view direction is parallel to the primary axes of pre-computed slices, the projection distorts the slice views, degrading image quality. In the extreme case where the view direction is parallel to the slices, no image is generated (the slices appear as lines or points) [S2].
++*   **Complex Slice Shapes:** If slices are generated orthogonal to the viewing direction for each frame, they may have complex shapes (triangles to hexagons) and require regeneration every frame [S2].
++*   **Precision Loss:** The method is exactly equivalent to standard ray casting unless precision is lost due to integer arithmetic in the compositing step [S2].
++*   **Image Quality:** Using only trilinear interpolation on 3D data results in relatively low image quality, even when rendering many texture-mapped slices. Supersampling with a high-quality reconstruction filter in a pre-processing step can improve quality [S3].
+ 
+ ## Operating characteristics
+--   **Time Complexity**: $O(N \cdot W \cdot H)$, where $N$ is the number of slices, and $W \times H$ is the image resolution. The complexity is dominated by the rasterization and blending of $N$ slices.
+--   **Memory Complexity**: $O(N \cdot W_{slice} \cdot H_{slice})$ for storing the slice textures, where $W_{slice}, H_{slice}$ are the dimensions of the slice projections.
+--   **Performance**: Highly efficient on hardware supporting 2D texture mapping and blending. It offloads interpolation and compositing to fixed-function pipeline units.
+--   **Strengths**: Compatible with older graphics hardware lacking 3D texture support. Simple implementation using standard graphics APIs.
+--   **Limitations**: Image quality degrades with static slices at oblique angles. Dynamic slices incur high CPU overhead for slice generation and geometry management.
++*   **Time Complexity:** Rendering speed depends only on image size, not scene complexity [S1, unofficial]. The cost is proportional to the number of slices and the image resolution.
++*   **Memory Complexity:** Requires storing the volume data and potentially a stack of 2D textures. If slices are pre-computed, memory usage increases with the number of slices.
++*   **Performance:** Can render large data sets (e.g., $512 \times 512 \times 512$ voxels) at interactive rates using 3D graphics hardware [S3].
++*   **Strengths:** No complex hand-made geometric models are required [S1, unofficial]. Leverages highly optimized hardware routines for texture mapping and blending [S2].
++*   **Limitations:** Pre-computed slices suffer from distortion at arbitrary viewpoints [S2]. View-orthogonal slices require expensive per-frame regeneration and handling of complex polygon shapes [S2]. Image quality may be lower than software ray casting if interpolation is not carefully managed [S3].
+ 
+ ## Background
+-This method was developed as a way to accelerate volume rendering on graphics hardware that supported 2D texture mapping but not 3D texture mapping. It was described in the context of interactive volume rendering techniques, specifically as a precursor to 3D texture mapping methods. The approach leverages the fact that ray casting samples can be grouped into parallel planes, allowing the use of standard texture mapping hardware for resampling.
++*   **Origin:** The technique is described in the context of texture-based volume rendering, an object-space technique that uses graphics hardware functionality like Rasterization, Texturing, and Blending [S1, unofficial].
++*   **Development:** It is presented as a method to replace standard ray casting by projecting parallel slices of the volumetric data onto the image plane [S2]. The approach is highlighted as a simple accelerated renderer for rectilinear grids [S3].
++*   **Usage:** Used for direct volume rendering of large datasets, such as the "electron density" of a C-60 Buckminsterfullerene molecule [S3].
+ 
+ ## Sources
+-[S1] Interactive Volume Rendering Using 3D Texture-Mapping ..., https://web.cs.ucdavis.edu/~okreylos/PhDStudies/Winter2000/TextureMapping.html, fetched 2026-10-27+[S1] Direct Volume Rendering Techniques, https://www.scribd.com/document/853597780/VIS-Modules-06-Direct-Volume-Rendering, fetched 2026-10-25 (unofficial)
++[S2] Interactive Volume Rendering Using 3D Texture-Mapping ..., https://web.cs.ucdavis.edu/~okreylos/PhDStudies/Winter2000/TextureMapping.html, fetched 2026-10-27
++[S3] Interactive Volume Visualization, https://web.cs.ucdavis.edu/~okreylos/ResDev/VolVis/MainPage.html, fetched 2026-10-28

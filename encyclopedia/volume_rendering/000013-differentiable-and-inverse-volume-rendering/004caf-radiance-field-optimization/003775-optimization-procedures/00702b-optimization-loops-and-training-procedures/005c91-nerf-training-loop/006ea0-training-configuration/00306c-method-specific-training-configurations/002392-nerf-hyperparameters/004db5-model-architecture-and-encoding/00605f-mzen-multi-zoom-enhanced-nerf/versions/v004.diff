@@ -1,0 +1,133 @@
+--- v003.md
++++ v004.md
+@@ -30,5 +30,5 @@
+     *   Output: Coarse NeRF parameters $\Theta^{(A)}$ and globally consistent poses for zoomed-out views [S1].
+ 
+-2.  **Cross-Zoom Pose Registration (Initialization for Phase B)**
++2.  **Cross-Zoom Pose Registration (Initialization for Phase B) [S1]**
+     *   For each zoomed-in image $I_j$ ($j > N_{out}$):
+         *   Find the best matching zoomed-out image $g^*(j)$ from the set of $N_{out}$ images [S1].
+@@ -64,56 +64,63 @@
+     """
+     N = len(images)
+-    
++    lr = 0.01  # [G] Learning rate
++
+     # Phase A: Global Pose Bootstrap
+     zoom_params = [1.0] * N_out + initial_zoom_estimates[N_out:]
+-    theta_A = random_init_nerf()
+-    poses_A = random_init_poses(N_out)
+-    focal_length = random_init_focal_length()
++    theta_A = random_init_nerf()  # [G]
++    poses_A = random_init_poses(N_out)  # [G]
++    focal_length = random_init_focal_length()  # [G]
+     principal_point = [0.0, 0.0]
+-    lr = 0.01  # [G] Learning rate
+-    
+-    # Minimize L_coarse over N_out images
++
+     for _ in range(Phase_A_iterations):
+         loss = 0.0
+         for i in range(N_out):
+-            pi_i = (poses_A[i].R, poses_A[i].t, focal_length, principal_point, zoom_params[i])
+-            rendered_i = volume_renderer(theta_A, pi_i, images[i].shape)
+-            loss += l2_norm(rendered_i - images[i])
+-        theta_A, poses_A, focal_length = update_parameters(theta_A, poses_A, focal_length, loss)
+-        
++            pi_i = (poses_A[i], focal_length, principal_point, zoom_params[i])
++            rendered_i = volume_renderer(theta_A, pi_i, images[i].shape)  # [G]
++            loss += l2_norm(rendered_i, images[i])
++        grad_theta_A, grad_poses_A, grad_focal = compute_gradients(loss, theta_A, poses_A, focal_length)  # [G]
++        theta_A -= lr * grad_theta_A
++        poses_A = [p - lr * g for p, g in zip(poses_A, grad_poses_A)]
++        focal_length -= lr * grad_focal
++
+     theta_star = theta_A
+-    
++
+     # Cross-Zoom Pose Registration
+     poses_B = list(poses_A)
+     zoom_params_B = list(zoom_params)
+-    
++
+     for j in range(N_out, N):
+-        best_match_idx = argmin([l2_norm(images[j] - bilinear_resize(extract_center_crop(images[g], 1.0/initial_zoom_estimates[j]), images[j].shape)) for g in range(N_out)])
++        best_match_idx = argmin([l2_norm(images[j], bilinear_resize(extract_center_crop(images[g], 1.0/initial_zoom_estimates[j]), images[j].shape)) for g in range(N_out)])
+         matched_pose = poses_A[best_match_idx]
+         poses_B.append(matched_pose)
+         zoom_params_B.append(initial_zoom_estimates[j])
+-        
++
+     # Phase B: Zoom-in Pose Registration
+     for _ in range(Phase_B_iterations):
+         loss = 0.0
+         for j in range(N_out, N):
+-            pi_j = (poses_B[j].R, poses_B[j].t, focal_length, principal_point, zoom_params_B[j])
+-            rendered_j = volume_renderer(theta_star, pi_j, images[j].shape)
+-            loss += l2_norm(rendered_j - images[j])
+-        poses_B, zoom_params_B = update_parameters(poses_B, zoom_params_B, loss, freeze_nerf=True)
+-        
++            pi_j = (poses_B[j], focal_length, principal_point, zoom_params_B[j])
++            rendered_j = volume_renderer(theta_star, pi_j, images[j].shape)  # [G]
++            loss += l2_norm(rendered_j, images[j])
++        grad_poses_B, grad_zoom_B = compute_gradients(loss, poses_B, zoom_params_B)  # [G]
++        poses_B = [p - lr * g for p, g in zip(poses_B, grad_poses_B)]
++        zoom_params_B = [z - lr * g for z, g in zip(zoom_params_B, grad_zoom_B)]
++
+     # Phase C: Joint Refinement
+     theta_C = theta_star
+     poses_final = poses_B
+     zoom_final = zoom_params_B
+-    
++
+     for _ in range(Phase_C_iterations):
+         loss = 0.0
+         for k in range(N):
+-            pi_k = (poses_final[k].R, poses_final[k].t, focal_length, principal_point, zoom_final[k])
+-            rendered_k = volume_renderer(theta_C, pi_k, images[k].shape)
+-            loss += l2_norm(rendered_k - images[k])
+-        theta_C, poses_final, zoom_final = update_parameters(theta_C, poses_final, zoom_final, loss, freeze_nerf=False)
+-        
++            pi_k = (poses_final[k], focal_length, principal_point, zoom_final[k])
++            rendered_k = volume_renderer(theta_C, pi_k, images[k].shape)  # [G]
++            loss += l2_norm(rendered_k, images[k])
++        grad_theta_C, grad_poses_final, grad_zoom_final = compute_gradients(loss, theta_C, poses_final, zoom_final)  # [G]
++        theta_C -= lr * grad_theta_C
++        poses_final = [p - lr * g for p, g in zip(poses_final, grad_poses_final)]
++        zoom_final = [z - lr * g for z, g in zip(zoom_final, grad_zoom_final)]
++
+     return theta_C, poses_final, zoom_final
+ 
+@@ -150,18 +157,7 @@
+     return int(np.argmin(values))
+ 
+-def update_parameters(*params, loss, freeze_nerf=False):
+-    """[G] Standard gradient descent update step."""
+-    updated = []
+-    for p in params:
+-        grad = compute_gradient(loss, p)
+-        if freeze_nerf and p is theta_A:
+-            updated.append(p)
+-        else:
+-            updated.append(p - lr * grad)
+-    return tuple(updated) if len(updated) > 1 else updated[0]
+-
+-def compute_gradient(loss, param):
+-    """[G] Standard automatic differentiation or finite difference gradient."""
+-    return np.zeros_like(param)
++def compute_gradients(loss, *params):
++    """[G] Standard automatic differentiation or finite difference gradient computation."""
++    return tuple(np.zeros_like(p) for p in params)
+ ```
+ 
+@@ -177,7 +173,7 @@
+ 
+ ## Operating characteristics
+-*   **Time Complexity:** The method requires three sequential optimization phases. Phase A scales with $N_{out}$, Phase B with $N_{in}$, and Phase C with $N$. Theoretical analysis shows linear convergence rate $e^{(t+1)} \leq (1 - \eta\mu) e^{(t)}$ for Phase B under the PL condition [S1].
+-*   **Memory Complexity:** Not given in the sources.
+-*   **Strengths:** Does not require high-resolution images or external pose initialization (unlike [Mip-NeRF 360 MLP Architecture](14098-mip-nerf-360-mlp-architecture.md) or [CamP](14098-mip-nerf-360-mlp-architecture.md)). Handles non-overlapping zoomed-in and zoomed-out views via cross-zoom registration [S1].
++*   **Time Complexity:** The method requires three sequential optimization phases [S1]. Phase A scales with $N_{out}$, Phase B with $N_{in}$, and Phase C with $N$ [S1]. Theoretical analysis shows linear convergence rate $e^{(t+1)} \leq (1 - \eta\mu) e^{(t)}$ for Phase B under the PL condition [S1].
++*   **Memory Complexity:** Not given in the sources [S1].
++*   **Strengths:** Does not require high-resolution images or external pose initialization (unlike [Mip-NeRF 360 MLP Architecture](14098-mip-nerf-360-mlp-architecture.md) or [CamP](14098-mip-nerf-360-mlp-architecture.md)) [S1]. Handles non-overlapping zoomed-in and zoomed-out views via cross-zoom registration [S1].
+ *   **Limitations:** Requires a rough initial estimate of zoom parameters (e.g., from dial readings) [S1]. Performance degrades if Phase B (cross-zoom matching) is skipped or if wide-field views are absent [S1].
+ *   **When to use:** Industrial imaging systems (microscopes, SEMs) where exact calibration is unavailable and stage movement is minimal [S1].

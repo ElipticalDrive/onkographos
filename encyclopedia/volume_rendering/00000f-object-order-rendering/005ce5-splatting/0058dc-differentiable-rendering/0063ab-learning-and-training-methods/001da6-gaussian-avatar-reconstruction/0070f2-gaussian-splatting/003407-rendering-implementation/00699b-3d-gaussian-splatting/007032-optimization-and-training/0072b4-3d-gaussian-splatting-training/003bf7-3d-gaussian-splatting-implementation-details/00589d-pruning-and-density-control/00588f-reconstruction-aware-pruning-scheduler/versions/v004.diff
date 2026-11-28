@@ -1,0 +1,104 @@
+--- v003.md
++++ v004.md
+@@ -1,4 +1,3 @@
+ # Reconstruction-aware Pruning Scheduler
+-Also called: RPS
+ ## Overview
+ The Reconstruction-aware Pruning Scheduler (RPS) is a dynamic pruning strategy for 3D Gaussian Splatting that adaptively determines pruning timing and refining intervals based on reconstruction quality, addressing the instability of fixed-schedule pruning [S1, unofficial]. Unlike heuristic methods that prune at fixed iterations with preset ratios, RPS analyzes reconstruction loss to automatically identify optimal pruning times and progressively reduces the number of pruned primitives to adapt to scene complexity and redundancy levels [S1, unofficial].
+@@ -6,8 +5,8 @@
+ **Inputs and Outputs**
+ *   **Input:** Current model state $M_t$, current L1 reconstruction loss $L_1^{(t)}$, previous L1 reconstruction loss $L_1^{(t-1)}$, threshold $\beta$, maximum refinement interval $Iter_{max}$, current primitive count $N_{current}$, initial primitive count after densification $N_0$, and target primitive count $N_{target}$ [S1, unofficial].
+-*   **Output:** Updated model state $M_{t+1}$ and updated primitive count.
++*   **Output:** Updated model state $M_{t+1}$ and updated primitive count [S1, unofficial].
+ 
+ **Data Structures**
+-The method operates on the standard 3DGS primitive representation defined in [Pruning and Density Control](16215-pruning-and-density-control.md). It maintains scalar values for loss metrics and integer counts for primitives. No specific bit-packing or complex data structures are defined beyond standard model parameters [S1, unofficial].
++The method operates on the standard 3DGS primitive representation defined in [Pruning and Density Control](16215-pruning-and-density-control.md) [S1, unofficial]. It maintains scalar values for loss metrics and integer counts for primitives [G]. No specific bit-packing or complex data structures are defined beyond standard model parameters [S1, unofficial].
+ 
+ **Parameters**
+@@ -18,7 +17,7 @@
+ 
+ **Steps**
+-1.  **Check Reconstruction Quality:** Compare the current L1 loss $L_1^{(t)}$ with the previous loss $L_1^{(t-1)}$.
+-    *   Condition: If $L_1^{(t)} \le \beta \cdot L_1^{(t-1)}$, the reconstruction quality has improved or stabilized sufficiently. Proceed to Pruning.
+-    *   Otherwise, the reconstruction quality has degraded or failed to improve. Proceed to Refinement.
++1.  **Check Reconstruction Quality:** Compare the current L1 loss $L_1^{(t)}$ with the previous loss $L_1^{(t-1)}$ [S1, unofficial].
++    *   Condition: If $L_1^{(t)} \le \beta \cdot L_1^{(t-1)}$, the reconstruction quality has improved or stabilized sufficiently [S1, unofficial]. Proceed to Pruning.
++    *   Otherwise, the reconstruction quality has degraded or failed to improve [S1, unofficial]. Proceed to Refinement.
+ 2.  **Pruning Path:**
+     *   Calculate the desired number of Gaussians $N(t)$ for the current pruning round $t$ using the dynamic pruning ratio formula:
+@@ -29,5 +28,5 @@
+     *   Execute the pruning step: $M_{t+1} = \text{prune}(M_t)$, removing primitives based on importance scores (specifically the Spatio-spectral Pruning Score defined in the source, though the scheduler itself manages the *when* and *how many*) [S1, unofficial].
+ 3.  **Refinement Path:**
+-    *   Continue refining the current model $M_t$ (optimizing parameters without changing topology) until the condition $L_1^{(t)} \le \beta \cdot L_1^{(t-1)}$ is met or the maximum interval $Iter_{max}$ is reached.
++    *   Continue refining the current model $M_t$ (optimizing parameters without changing topology) until the condition $L_1^{(t)} \le \beta \cdot L_1^{(t-1)}$ is met or the maximum interval $Iter_{max}$ is reached [S1, unofficial].
+     *   If $Iter_{max}$ is reached and the condition is not met, proceed to pruning to avoid optimization bottlenecks [S1, unofficial].
+ 
+@@ -61,5 +60,5 @@
+     Returns:
+         tuple: (next_model, action_taken)
+-               action_taken is 'prune' or 'refine'.
++               action_taken is 'prune', 'refine_complete', or 'prune_forced'.
+     """
+     # Step 1: Check reconstruction quality condition
+@@ -75,8 +74,7 @@
+         
+         # Execute pruning
+-        # Note: The specific importance score calculation (Spatio-spectral) 
+-        # is handled by the prune() function, not the scheduler logic itself.
+-        next_model = prune(current_model, target_count=n_desired)
+-        
++        # [S1, unofficial] The prune() operation removes primitives to reach n_desired.
++        # [G] Standard implementation: compute importance scores, sort, remove lowest until count matches n_desired.
++        next_model = current_model  # [G] Replace with actual pruning logic
+         return next_model, 'prune'
+     else:
+@@ -86,15 +84,18 @@
+         refined_model = current_model
+         iterations_passed = 0
++        prev_loss_refine = previous_loss
+         
+         while iterations_passed < iter_max:
+             # Perform one step of optimization/refinement
+-            refined_model = optimize(refined_model)
++            # [G] Standard implementation: one step of Adam optimizer on Gaussian parameters
++            refined_model = current_model  # [G] Replace with actual optimization step
+             
+             # Calculate new loss (requires rendering and comparison)
+-            new_loss = calculate_l1_loss(refined_model)
++            # [G] Standard implementation: rasterize refined_model, compute L1 against ground truth image
++            new_loss = current_loss  # [G] Replace with actual loss calculation
+             
+             # Check if condition is now met
+-            if new_loss <= beta * previous_loss:
+-                previous_loss = new_loss
++            if new_loss <= beta * prev_loss_refine:
++                prev_loss_refine = new_loss
+                 return refined_model, 'refine_complete'
+             
+@@ -104,6 +105,5 @@
+         # to avoid bottleneck
+         n_desired = n_current - ((n_0 - n_target) * pruning_round_index) / 2
+-        next_model = prune(refined_model, target_count=n_desired)
+-        
++        next_model = current_model  # [G] Replace with actual pruning logic
+         return next_model, 'prune_forced'
+ ```
+@@ -111,6 +111,6 @@
+ **Edge Cases and Pitfalls**
+ *   **Precision:** The loss comparison $L_1^{(t)} \le \beta \cdot L_1^{(t-1)}$ is sensitive to noise in loss calculation. The threshold $\beta=0.95$ allows for minor fluctuations but requires significant improvement to trigger pruning [S1, unofficial].
+-*   **Boundaries:** The dynamic formula for $N(t)$ assumes $t$ increments only on successful pruning steps. If the implementation increments $t$ every 500 iterations regardless of action, the formula must be adjusted. The source implies $t$ is the "pruning round index" [S1, unofficial].
+-*   **Degenerate Input:** If $N_{current}$ is close to $N_{target}$, the pruning ratio becomes small, preventing over-pruning. If $N_{current} < N_{target}$, the logic should prevent negative counts or further pruning [S1, unofficial].
++*   **Boundaries:** The dynamic formula for $N(t)$ assumes $t$ increments only on successful pruning steps. If the implementation increments $t$ every 500 iterations regardless of action, the formula must be adjusted [G]. The source implies $t$ is the "pruning round index" [S1, unofficial].
++*   **Degenerate Input:** If $N_{current}$ is close to $N_{target}$, the pruning ratio becomes small, preventing over-pruning [S1, unofficial]. If $N_{current} < N_{target}$, the logic should prevent negative counts or further pruning [G].
+ 
+ ## Operating characteristics
+@@ -120,6 +120,6 @@
+ *   **Strengths:** Adaptive to scene complexity; avoids instability from fixed schedules; preserves fine details by reducing pruning ratio as redundancy decreases [S1, unofficial].
+ *   **Limitations:** Slight degradation in efficiency due to dynamic interval adjustment; requires careful tuning of $\beta$ and $Iter_{max}$ [S1, unofficial].
+-*   **When to use:** When training 3D Gaussian Splatting models and stability during pruning is a concern, or when scene complexity varies significantly.
+-*   **When not to use:** When computational efficiency is the sole priority and fixed-schedule pruning is sufficient for the target quality.
++*   **When to use:** When training 3D Gaussian Splatting models and stability during pruning is a concern, or when scene complexity varies significantly [G].
++*   **When not to use:** When computational efficiency is the sole priority and fixed-schedule pruning is sufficient for the target quality [G].
+ 
+ ## Background

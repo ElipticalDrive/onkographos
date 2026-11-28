@@ -1,0 +1,84 @@
+# Warm-up stage
+
+Also called: 3D Gaussian Initialization (Warm-up)
+
+## Overview
+The warm-up stage is a training adaptation that establishes a stable baseline of 3D Gaussians before introducing more complex representations, such as 4D Gaussian deformation fields or dynamic scene modeling [S1, S2]. It prevents convergence difficulties in scenarios lacking Structure-from-Motion (SfM) point initialization and suppresses transient distractors by stabilizing the initial geometry [S1, S2]. Unlike [Two-stage Optimization](14857-two-stage-optimization.md) which may decouple static and dynamic parameters, the warm-up stage explicitly optimizes the static 3D Gaussian representation first to provide a robust prior for subsequent deformation learning [S2].
+
+## How it works
+The method partitions the optimization trajectory into a preliminary phase where only 3D Gaussians are optimized, followed by the introduction of deformation networks or dynamic components.
+
+**Inputs and Outputs:**
+*   **Input:** Raw image sequences; optionally, no SfM points (in which case random or heuristic initialization is used [S2]).
+*   **Output:** A set of optimized 3D Gaussians $\Gamma$ with stable positions, scales, and opacities, serving as the initialization for the next stage [S2].
+
+**Data Structures:**
+*   **3D Gaussians $\Gamma$:** A set of $N$ Gaussians. Each Gaussian $i$ is defined by mean position $\mu_i$, covariance matrix $\Sigma_i$ (parameterized by scale $s_i$ and rotation $q_i$), opacity $\alpha_i$, and spherical harmonics coefficients $c_i$ [S2].
+*   **Deformation Network $\Delta$:** Not active during the warm-up stage but initialized for the subsequent phase [S2].
+
+**Steps:**
+1.  **Initialization:** If SfM points are available, initialize 3D Gaussians at these points. If not, initialize 3D Gaussians randomly or via a coarse clustering method to ensure coverage of the scene volume [S2].
+2.  **Static Optimization:** Optimize the parameters of the 3D Gaussians $\Gamma$ (position, scale, rotation, opacity, color) using standard differentiable rendering losses (e.g., L1 loss and D-SSIM) against the input images. The deformation network $\Delta$ is either not present or its gradients are blocked [S2].
+3.  **Stabilization:** Continue optimization until the 3D Gaussians converge to a stable configuration that accurately represents the static geometry or the average appearance of the dynamic scene [S2].
+4.  **Transition:** Use the optimized $\Gamma$ as the initialization for the 4D Gaussian Splatting training, where the deformation network $\Delta$ is activated to model temporal changes [S2].
+
+**Formulas:**
+The rendering process during warm-up is identical to standard 3D Gaussian Splatting. The contribution of Gaussian $i$ to a pixel is determined by its projected covariance and opacity. The loss function $\mathcal{L}$ is:
+$$ \mathcal{L} = (1 - \lambda) \mathcal{L}_1 + \lambda \mathcal{L}_{\text{D-SSIM}} $$
+where $\mathcal{L}_1$ is the L1 reconstruction loss and $\mathcal{L}_{\text{D-SSIM}}$ is the structural similarity loss [S2].
+
+**Parameters:**
+*   **Warm-up Iterations:** Not given in the sources.
+*   **Learning Rate:** Not given in the sources.
+
+**Edge Cases and Pitfalls:**
+*   **Lack of SfM Points:** Directly training 4D-GS without this stage causes convergence difficulty [S2].
+*   **Numeric Errors:** Skipping the warm-up stage can lead to numeric errors in optimizing the Gaussian deformation network $\Delta$ [S2].
+
+**Pseudocode:**
+> **Unverified code.** The code below did not pass a test run against a reference implementation, or no test fits it, so it may contain errors.
+
+```python
+def warm_up_stage(images, num_iterations):
+    """
+    Optimizes 3D Gaussians without deformation networks.
+    """
+    # Initialize Gaussians. If SfM points exist, use them; otherwise, random initialization.
+    gaussians = initialize_gaussians(sfm_points=None) 
+    
+    for step in range(num_iterations):
+        # Sample a random view from the training images
+        image, camera = sample_random_view(images)
+        
+        # Render the image using standard 3DGS rasterization
+        # No deformation network is applied; Gaussians are static in 3D space
+        rendered_image = render_3d_gaussians(gaussians, camera)
+        
+        # Compute loss
+        loss = compute_loss(rendered_image, image)
+        
+        # Backpropagate and update only Gaussian parameters
+        # Deformation network parameters are not updated or do not exist
+        gaussians.update(loss)
+        
+    return gaussians
+```
+
+## Subtopics
+
+### 3D Gaussian Initialization (Warm-up)
+A specific variant used in 4D Gaussian Splatting for dynamic scenes where SfM points are absent [S2]. It keeps some 3D Gaussians in the dynamic part to release the pressure of large deformation learning on 4D Gaussians, learns proper 3D Gaussians $\Gamma$, and suggests deformation fields to pay more attention to the dynamic part [S2]. It avoids numeric errors in optimizing the Gaussian deformation network $\Delta$ and keeps training stable [S2]. Without this coarse stage, performance degrades (e.g., PSNR 31.91 dB, SSIM 0.97, LPIPS 0.03, training time 7.5 mins, 79 FPS, 18 MB storage on synthetic datasets) [S2].
+
+## Operating characteristics
+*   **Time Complexity:** Adds an initial phase of optimization proportional to the number of warm-up iterations and the number of Gaussians.
+*   **Memory Complexity:** Requires memory for the 3D Gaussian representation only; no additional memory for deformation networks during this phase.
+*   **Performance:** Prevents convergence failure in the absence of SfM points [S2].
+*   **Strengths:** Stabilizes training for dynamic scenes; prevents numeric errors in deformation networks [S2].
+*   **Limitations:** Requires additional training time before the main optimization phase begins.
+
+## Background
+The warm-up stage is a technique adapted from general optimization strategies to address specific challenges in 3D Gaussian Splatting, particularly in dynamic scene rendering and distractor suppression [S1, S2]. It was highlighted in the context of 4D Gaussian Splatting to handle cases where initial point clouds are missing [S2].
+
+## Sources
+[S1] SpotLessSplats: Ignoring Distractors in 3D Gaussian Splatting, https://doi.org/10.1145/3727143, fetched 2026-10-27
+[S2] 4D Gaussian Splatting for Real-Time Dynamic Scene Rendering, https://doi.org/10.1109/cvpr52733.2024.01920, fetched 2026-10-26

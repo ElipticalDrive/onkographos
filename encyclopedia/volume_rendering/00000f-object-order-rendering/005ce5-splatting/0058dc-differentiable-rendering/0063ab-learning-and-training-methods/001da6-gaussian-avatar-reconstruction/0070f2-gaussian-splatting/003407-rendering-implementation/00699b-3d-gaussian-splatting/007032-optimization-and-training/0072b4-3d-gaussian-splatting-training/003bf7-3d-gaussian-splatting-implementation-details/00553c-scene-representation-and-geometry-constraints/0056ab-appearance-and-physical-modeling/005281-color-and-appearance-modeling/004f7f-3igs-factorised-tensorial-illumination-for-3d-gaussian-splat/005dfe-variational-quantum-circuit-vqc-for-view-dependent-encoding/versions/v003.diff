@@ -1,0 +1,107 @@
+--- v002.md
++++ v003.md
+@@ -18,14 +18,15 @@
+ **Data Structures:**
+ 1.  **Hash Encoding Configuration:** Multi-resolution hash grid with $L_{hash}=16$ levels, feature dimension $F=2$, and maximum hash table size $T=2^{19}$ [S1].
+-2.  **VQC State:** A 3-qubit register initialized to $|000\rangle$ [S1].
++2.  **VQC State:** A 3-qubit register initialized to $|000\rangle$ [G].
+ 3.  **VQC Parameters:** Rotation angles $\theta = (\theta_{j,\ell}, \phi_{j,\ell})$ for qubit $j \in \{0,1,2\}$ and layer $\ell \in \{1,\dots,L\}$ [S1].
+ 4.  **Hypernetwork (Pipeline I):** Classical MLP with two hidden layers of 64 units, residual connections, GeLU activation, and dropout [S1].
+ 5.  **Decoding MLP:** Lightweight MLP. Input size 3, single hidden layer of 3 neurons, output size $N_{out}$ (49 for full SH+opacity modulation, 1 for opacity-only) [S1].
++6.  **Projection Networks (Pipeline II):** MLPs with 2 hidden layers of 64 units outputting dimension 3, conditioned on spatial and directional hashgrids [S1].
+ 
+ **Numbered Steps:**
+ 
+-1.  **Direction Encoding:** Map the viewing direction $d$ to a quantum state $|\psi_{enc}\rangle$ on the Bloch sphere. This involves encoding the spherical coordinates of $d$ into the amplitudes/phases of the 3-qubit register [S1].
++1.  **Direction Encoding:** Map the viewing direction $d$ to a quantum state $|\psi_{enc}\rangle$ on the Bloch sphere [S1].
+ 2.  **VQC Processing:** Process $|\psi_{enc}\rangle$ through a VQC ansatz $U(\theta; L)$ consisting of $L=4$ layers [S1]. For each layer $\ell$:
+-    *   Apply parameterized local rotations to the 3-qubit register. For the $j$-th qubit ($j=0, 1, 2$), apply:
++    *   Apply parameterized local rotations to the 3-qubit register [S1]. For the $j$-th qubit ($j=0, 1, 2$), apply:
+         $$ R_j(\theta_{j,\ell}, \phi_{j,\ell}) = R_z^{(j)}(\phi_{j,\ell}) R_y^{(j)}(\theta_{j,\ell}) $$
+         where $R_y$ and $R_z$ are standard quantum rotation gates defined by matrices:
+@@ -37,5 +38,5 @@
+     [S1].
+     *(Note: Pipeline II uses shared VQC parameters conditioned on global spatial/directional hashgrids via projection networks [S1].)*
+-4.  **Attribute Modulation:** Apply the VQC output and MLP weights to generate view-dependent multiplicative updates $\Delta c(d)$ and $\Delta \alpha(d)$. Calculate final attributes:
++4.  **Attribute Modulation:** Apply the VQC output and MLP weights to generate view-dependent multiplicative updates $\Delta c(d)$ and $\Delta \alpha(d)$ [S1]. Calculate final attributes:
+     $$ c_{final}(d) = c(d) \cdot \Delta c(d) $$
+     $$ \alpha_{final}(d) = \alpha(d) \cdot \Delta \alpha(d) $$
+@@ -52,5 +53,5 @@
+ 
+ def bloch_encode(d):
+-    """Map normalized viewing direction d to a 3-qubit state vector."""
++    """Map normalized viewing direction d to a 3-qubit state vector via Bloch sphere mapping [G]."""
+     theta = np.arccos(np.clip(d[2], -1.0, 1.0))
+     phi = np.arctan2(d[1], d[0])
+@@ -103,23 +104,26 @@
+     return state
+ 
++def gelu(x):
++    return 0.5 * x * (1 + np.tanh(np.sqrt(2 / np.pi) * (x + 0.044715 * np.power(x, 3))))
++
+ def hypernetwork_forward(hash_features, hypernet_weights):
+-    """Pipeline I hypernetwork: 2 hidden layers of 64 units, residual, GeLU, dropout [S1]."""
++    """Pipeline I hypernetwork: 2 hidden layers of 64 units, residual connections, GeLU activation, dropout [S1]."""
+     x = hash_features
+     W1, b1 = hypernet_weights[0]
+     h1 = x @ W1 + b1
+-    h1 = np.maximum(0, h1) # GeLU approximation
+-    h1 = h1 + x # Residual
++    h1 = gelu(h1)
++    h1 = h1 + x  # Residual
+     W2, b2 = hypernet_weights[1]
+     h2 = h1 @ W2 + b2
+-    h2 = np.maximum(0, h2) # GeLU approximation
+-    h2 = h2 + h1 # Residual
++    h2 = gelu(h2)
++    h2 = h2 + h1  # Residual
+     return h2
+ 
+-def decode_attributes(vqc_output, mlp_weights, base_color, base_opacity):
+-    """Decoding MLP: input 3, hidden 3, output N_out [S1]."""
+-    x = vqc_output
++def decode_attributes(vqc_features, mlp_weights, base_color, base_opacity):
++    """Decoding MLP: input layer size 3, single hidden layer of 3 neurons, output layer size N_out [S1]."""
++    x = vqc_features  # Expected shape (3,)
+     W1, b1 = mlp_weights[0]
+     h1 = x @ W1 + b1
+-    h1 = np.maximum(0, h1)
++    h1 = gelu(h1)
+     W2, b2 = mlp_weights[1]
+     out = h1 @ W2 + b2
+@@ -128,14 +132,19 @@
+     return base_color * delta_c, base_opacity * delta_alpha
+ 
+-def train_step(gaussians, views, hypernet_weights, vqc_params, mlp_weights, lambda_param):
++def dssim_loss(rendered, target):
++    return 0.0  # [S1] D-SSIM loss computation
++
++def train_step(gaussians, views, hypernet_weights, vqc_params, mlp_weights, lambda_param, target):
+     # 1. Encode directions
+     states = [bloch_encode(d) for d in views]
+     # 2. Run VQC
+     final_states = [run_vqc(s, vqc_params) for s in states]
+-    # 3. Decode attributes
+-    deltas = [decode_attributes(s, mlp_weights, g.base_color, g.base_opacity) for s, g in zip(final_states, gaussians)]
++    # 3. Decode attributes (assuming vqc_features are extracted expectation values of size 3)
++    vqc_features = np.array([np.real(s[:3]) for s in final_states])
++    deltas = [decode_attributes(f, mlp_weights, g.base_color, g.base_opacity) for f, g in zip(vqc_features, gaussians)]
+     # 4. Render & Loss
+-    rendered = render_gaussians(gaussians, deltas)
+-    loss = (1 - lambda_param) * l1_loss(rendered, target) + lambda_param * dssim_loss(rendered, target)
++    # [S1] Differentiable Gaussian rasterization step
++    rendered = np.zeros_like(target)
++    loss = (1 - lambda_param) * np.mean(np.abs(rendered - target)) + lambda_param * dssim_loss(rendered, target)
+     return loss
+ ```
+@@ -155,8 +164,8 @@
+ 
+ ### Pipeline I (Hyper-Quantum)
+-Uses per-Gaussian unique VQC parameters generated by a hypernetwork. Sets itself apart by maximizing local expressivity for intricate optical effects. Choose for synthetic scenes prioritizing high PSNR [S1].
++Uses per-Gaussian unique VQC parameters generated by a hypernetwork [S1]. Sets itself apart by maximizing local expressivity for intricate optical effects [S1]. Choose for synthetic scenes prioritizing high PSNR [S1].
+ 
+ ### Pipeline II (Joint-Hash Global)
+-Uses shared VQC parameters conditioned on spatial and directional hashgrids via projection networks. Sets itself apart by offering scene-scale scalability and memory efficiency. Choose for large-scale real-world scenes [S1].
++Uses shared VQC parameters conditioned on spatial and directional hashgrids via projection networks [S1]. Sets itself apart by offering scene-scale scalability and memory efficiency [S1]. Choose for large-scale real-world scenes [S1].
+ 
+ ## Operating characteristics

@@ -1,0 +1,1741 @@
+arXiv:2508.02443v2 [cs.GR] 2 Dec 2025
+PRIMU: Uncertainty Estimation for Novel Views in Gaussian Splatting from
+Primitive-Based Representations of Error and Coverage
+Thomas Gottwald
+Department of Mathematics
+University of Wuppertal
+Wuppertal, Germany
+Edgar Heinert
+Institute of Computer Science
+University of Osnabrück
+Osnabrück, Germany
+gottwald@uni-wuppertal.de
+edgar.heinert@uni-osnabrueck.de
+Peter Stehr
+Department of Mathematics
+University of Wuppertal
+Wuppertal, Germany
+Chamuditha Jayanga Galappaththige
+Centre for Robotics
+Queensland University of Technology
+Brisbane, Australia
+stehr@uni-wuppertal.de
+chamuditha.galappaththige@qut.edu.au
+Matthias Rottmann
+Institute of Computer Science
+University of Osnabrück
+Osnabrück, Germany
+matthias.rottmann@uni-osnabrueck.de
+Abstract
+We introduce Primitive-based Representations of Uncertainty (PRIMU), a post-hoc uncertainty estimation (UE)
+framework for Gaussian Splatting (GS). Reliable UE is essential for deploying GS in safety-critical domains such as
+robotics and medicine. Existing approaches typically estimate Gaussian-primitive variances and rely on the rendering process to obtain pixel-wise uncertainties. In contrast, we construct primitive-level representations of error
+and visibility/coverage from training views, capturing interpretable uncertainty information. These representations
+are obtained by projecting view-dependent training errors
+and coverage statistics onto the primitives. Uncertainties
+for novel views are inferred by rendering these primitivelevel representations, producing uncertainty feature maps,
+which are aggregate through pixel-wise regression on holdout data. We analyze combinations of uncertainty feature
+maps and regression models to understand how their interactions affect prediction accuracy and generalization.
+PRIMU also enables an effective active view selection strategy by directly leveraging these uncertainty feature maps.
+Additionally, we study the effect of separating splatting into
+foreground and background regions. Our estimates show
+strong correlations with true errors, outperforming state-
+of-the-art methods, especially for depth UE and foreground
+objects. Finally, our regression models show generalization
+capabilities to unseen scenes, enabling UE without additional holdout data.
+1. Introduction
+Recent advances in volume-rendering-based techniques,
+which learn to represent the radiance field as a function mapping 3D positions and viewing directions to observed appearance, have driven major progress in novel
+view synthesis and 3D reconstruction. Neural Radiance
+Fields (NeRFs) [25] employ neural networks (NNs) for differentiable volume rendering, supervised by posed camera views [13, 23, 48]. Gaussian Splatting (GS) [14] replaces NNs with 3D Gaussian primitives of learnable position, variance, and opacity. These primitives are initialized from structure-from-motion (SfM) point clouds [35]
+and optimized via a rendering loss. While both NeRF and
+GS achieve high visual fidelity [3, 47], GS offers faster rendering and a more explicit scene representation [14, 22].
+However, GS still faces challenges similar to NeRFbased methods. Gaussian splats often misalign with scene
+geometry even when the rendered appearance looks cor-
+Depth
+Uncertainty
+Error
+Rendering
+Color
+Figure 1. Comparison of PRIMU uncertainty maps to error for
+color and depth renderings. Undefined depth error is represented
+as light gray. Additional examples in Appendix D.
+rect [8, 31, 39], leading to a depth error between the true
+geometry and splat distribution. Moreover, when rendering a novel view, it is not always clear whether the resulting image accurately approximates the real scene or where
+potential inaccuracies occur [1, 34, 37]. We refer to this
+mismatch as the rendering error. Rendering-error-based
+optimization can introduce geometric misalignment [12].
+Recent works mitigate these effects via geometry smoothing [41], improved optimization [9], or co-regularization of
+inconsistent Gaussians [45].
+Uncertainty estimation (UE) directly identifies high error regions in renderings. Accurate UE enables trustworthy
+geometry recovery, which is critical in robotics and medical imaging [18, 33, 38]. Selecting new training views with
+high uncertainty can improve reconstruction quality while
+reducing data requirements [11, 34], and can guide robotic
+path planning [11]. Yet, UE in GS remains an open challenge. Existing methods usually predict per-primitive uncertainty and render pixel-level uncertainty maps [11, 42],
+using either Fisher information [11] or learned distributions
+over primitives [1, 17, 42]. Whether these estimates reflect depth or rendering errors depends on the underlying
+formulation, scene geometry [11], and incorporated semantics [42].
+We propose PRIMU (Primitive-based Representations
+of Uncertainty), a novel framework for post-hoc UE in
+GS. PRIMU represents uncertainty using Gaussian primitive representations that capture training-view coverage and
+reconstruction error. We model these representations with
+and without directional dependency, enabling camera-viewaware UE. Each rendered representation produces an uncertainty feature map for a given pose, from which we derive
+pixel-wise uncertainty estimates using gradient boosting regression [28] trained on one or a few novel views. Examplary pixel-wise uncertainty maps are presented in Fig. 1.
+Our experiments evaluate various combinations of uncertainty feature maps and regression models, showing how
+their interactions affect prediction accuracy and generalization. We also demonstrate that the uncertainty feature maps
+themselves can directly guide active view selection (AVS),
+improving reconstruction quality and data efficiency without the need of holdout data and training an explicit UE
+regressor. The regression models generalize well to unseen
+views achieving high correlation with true errors, and also
+demonstrate generalization capabilities to new scenes. This
+indicates that our uncertainty feature map construction captures the UE relevant information on a low dimensionality.
+Separating scenes into foreground and background reveals
+especially high UE performance for foreground objects.
+We summarize our main contributions as follows:
+• We propose a post-hoc UE method for GS based on Gaussian primitive representations of training-view error and
+coverage that achieves state-of-the-art performance for
+RGB and depth UE.
+• We perform an extensive ablation study exploring different combinations of uncertainty feature maps and regression models, revealing how feature interactions influence
+prediction accuracy and generalization across scenes.
+• We use the proposed uncertainty feature maps directly to
+guide AVS, improving reconstruction quality and data efficiency by prioritizing viewpoints with high uncertainty
+indicators.
+2. Related Work
+We review UE approaches for NeRFs and GS, as well as
+their use in active view selection for novel view synthesis.
+Uncertainty Estimation for NeRFs In NeRF-based
+methods, uncertainty is typically defined per pixel, with no
+intermediate representation comparable to Gaussian primitives. Several works model stochastic radiance fields, estimating pixel-wise variance from sampled renderings [32,
+34], while Suenderhauf et al. [37] employ NN ensembles. Goli et al. [5] propose a Bayesian post-processing
+scheme where uncertainty measures how much the radiance field can vary without degrading reconstruction, highlighting underconstrained regions. Nakayama et al. [27]
+introduce a stochastic provenance field capturing viewing
+directions and estimate geometric uncertainty via triangulation [7, Ch. 12.6]. Transferring these methods to GS is
+not straightforward due to its different scene representation.
+Gaussian primitive representation
+training error map
+predicted error on novel view
+pixel-wise
+regression
+uncertainty feature maps
+Figure 2. PRIMU projects rendering errors, observation coverage, and field-of-view statistics from training views onto Gaussian primitives.
+From these, it creates Gaussian primitive representations that can be rendered from novel viewpoints to produce uncertainty feature maps.
+Pixel-wise regression then predicts per-pixel errors as uncertainty estimates. Visual examples are shown in Fig. 1 and Appendix D.
+Goli et al.’s Bayesian approach has been adapted in spirit
+for GS by Jiang et al. [11], while Nakayama et al. show a
+proof-of-concept GS experiment, though details and code
+are unavailable. Additional UE research focuses on calibration [2] and training-data uncertainty [21], the latter also extended to GS [16]. These works improve reliability or data
+handling, whereas our focus is on estimating uncertainties
+of the GS radiance-field approximation itself.
+Uncertainty Estimation for Gaussian Splatting Most
+UE methods for GS estimate uncertainty per Gaussian primitive. Wilson et al. [42] use Bayesian post-processing to
+learn semantic distributions over primitives, with their variance as semantic uncertainty. Other methods [1, 17, 19]
+model stochastic radiance fields and derive pixel-level uncertainties from multi-sample variance. Li et al. learn finescale stochastic offsets for key primitives, and Lyu et al. reduce sampling cost via a low-dimensional manifold. These
+mainly address the runtime overhead of stochastic rendering. A pre-print has also integrated direction-dependent uncertainty directly into GS training [6]. Jiang et al. [11] estimate parameter variances using Fisher information, conceptually similar to Goli et al. [5]. Their and Wilson et al.’s [42]
+methods render pixel-level uncertainties by replacing color
+with Gaussian-level uncertainty values. Our method differs
+by operating entirely as post-processing, requiring no GS
+retraining. In our experiments, we demonstrate that training a lightweight regression model with a few views enables generalization to novel views and, to some extent,
+unseen scenes. Unlike [11], which uses a single uncertainty measure, PRIMU extracts 13 optionally directiondependent Gaussian-primitive features from training-view
+coverage and reconstruction error. Rendering these as uncertainty feature maps and regressing them per pixel with
+gradient boosting yields accurate, generalizable depth and
+rendering uncertainty.
+Active View Selection AVS uses UE to choose additional
+views that improve reconstruction while minimizing train-
+ing data. For UE methods, new views are typically selected
+from a set of candidate viewpoints by maximizing uncertainty. This has been demonstrated for both NeRF [5, 37]
+and GS [17, 19] UE approaches. Jiang et al. [11] quantify the information gain of new views using the same
+principle underlying their GS UE method of Fisher information. A similar idea is applied by Pan et al. [29] for
+NeRF, who model information gain as a variance reduction relative to a prior Gaussian color distribution. Kopanas
+and Drettakis [15] instead select new views based on observation frequency and angular uniformity. In contrast
+to [5, 17, 19, 37], we do not use our uncertainty estimates
+directly, but find a training view coverage map effective for
+AVS. This allows to efficiently prioritize high-uncertainty
+viewpoints, without the need to train a regression model.
+Unlike [11, 29], we do not explicitly estimate information gain, yet our approach surpasses the GS AVS method
+of [11] in their own evaluation setting.
+3. Method
+In this section, we first review GS volume rendering before
+introducing our Gaussian primitive representations for UE.
+We then describe how these representations are constructed
+and rendered to obtain uncertainty feature maps, which are
+used for UE in novel views. In Fig. 2 we show the outline
+of the PRIMU method for UE.
+Gaussian Splatting GS approximates a radiance field using a set of Gaussian primitives. Each primitive is modeled
+as a scaled 3D Gaussian distribution with mean µ, covariance matrix Σ, scalar opacity factor g, and color c. To render a view, defined by its camera position, viewing direction
+⃗ and intrinsics, all Gaussian primitives are first sorted from
+d,
+front to back and projected onto the image plane. This projection, known as splatting [48], converts the 3D Gaussian
+distributions into 2D Gaussians on the image plane.
+The opacity of a Gaussian primitive at pixel x̄ in the ren-
+dered view is given by
+α(x̄) = g Φ(x̄; µ̄, Σ̄),
+(1)
+where Φ denotes the 2D Gaussian density with mean µ̄ and
+covariance Σ̄. The final color at each pixel is computed by
+aggregating contributions from all projected Gaussians in
+front-to-back order:
+C(x̄) =
+K
+X
+⃗ αk (x̄) Tk (x̄),
+ck (d)
+(2)
+k=1
+where ck ( ⃗
+d) and αk (x̄) denote the color and opacity of the
+Qk−1
+kth Gaussian, and Tk (x̄) = j=1 (1 − αj (x̄)) represents
+the accumulated transparency from primitives 1 to (k − 1).
+⃗ depends on the view direction d,
+⃗ which
+The color ck (d)
+is encoded using spherical harmonics [26, 30]. GS learns all
+Gaussian parameters (mean, covariance, opacity, and color)
+through gradient descent on a reconstruction loss computed
+over a set of posed training views.
+Gaussian Primitive Representations Our Gaussian
+primitive representations capture uncertainty from two
+complementary sources: (1) limited training-view coverage
+and (2) rendering errors in the training views. These representations are computed in a post-processing step after GS
+training, without modifying the rendering or optimization.
+We begin with a simple field-of-view (FoV) count representation that records how many training views observe
+each Gaussian primitive:
+F (k) = |Ωk |,
+(3)
+where Ωk denotes the set of training views in which the kth
+Gaussian primitive lies within the viewing cone.
+To represent how well a Gaussian is covered in the
+training data, we use its contribution factors αk (x̄)Tk (x̄)
+(from Eq. 2) over the visible pixels in each training view.
+These are aggregated using agg ∈ {max, sum, mean}. We
+then take the maximum aggregated value across all training
+views to form the training-view coverage representation:
+V (k) = max agg αk (x̄)Tk (x̄),
+v∈Ω x̄∈v(k)
+(4)
+where v(k) denotes the pixels of view v in which the opacity
+of the kth Gaussian exceeds a small threshold. This captures
+how strongly each Gaussian primitive is covered in at least
+one training view.
+Analogously, we define the rendering-error representation by weighting each contributing term by the pixel-wise
+reconstruction error ex̄ :
+E(k) = mean agg ex̄ αk (x̄)Tk (x̄),
+v∈Ω x̄∈v(k)
+(5)
+where ex̄ is the per-pixel ℓ1 reconstruction error. This representation captures how much a Gaussian contributes to the
+overall rendering error. Both coverage and error representations can omit the opacity term αk (x̄) to highlight lowopacity Gaussians that still influence reconstruction quality.
+Direction-Dependent Representations We extend both
+representations to be direction-dependent by encoding how
+the coverage or error of each Gaussian varies with viewing direction. To this end, we employ the von Mises-Fisher
+distribution [4, 20], a spherical analogue of the normal distribution, defined as
+⊤
+κ
+eκ ⃗ν ⃗x ,
+(6)
+f (⃗x; ⃗ν , κ) =
+2π sinh(κ)
+where ⃗ν is the mean direction and κ controls the concentration around it. We rescale this density so its maximum
+equals one and use it to weight contributions in Eqs. 4 and 5.
+The resulting direction-dependent representations are
+⊤⃗
+V ∗ (k, ⃗
+d) = max agg αk (x̄)Tk (x̄)eκ⃗νv d−κ ,
+(7)
+⃗ = mean agg ex̄ αk (x̄)Tk (x̄)eκ⃗νv⊤ ⃗d−κ ,
+E ∗ (k, d)
+(8)
+v∈Ω x̄∈v(k)
+v∈Ω x̄∈v(k)
+where ⃗νv denotes the direction of training view v and d⃗
+the direction at which the representation is evaluated. Intuitively, this corresponds to placing a scaled von MisesFisher distribution on the sphere around each Gaussian
+primitive at the directions of its observed training views.
+For efficient rendering, these direction-dependent representations are encoded using spherical harmonics, consistent
+with the color encoding in GS.
+Regression Models To obtain pixel-wise uncertainty estimates for novel views, we render a set of chosen uncertainty
+feature maps by replacing the Gaussian color term in Eq. 2
+with the respective Gaussian primitive representation. The
+resulting feature maps serve as input to a pixel-wise regression model that predicts rendering or depth error.
+The regression model is trained on a small set of hold-out
+views, using the true rendering or depth error as the target
+ex̄ = ∥R(x̄) − R̂(x̄)∥1 .
+(9)
+R(x̄) and R̂(x̄) denote the ground-truth and rendered values for pixel x̄, respectively. Once trained, this model can
+be applied to novel viewpoints or scenes to produce dense,
+pixel-wise uncertainty maps for both color and depth.
+4. Numerical Results
+This section presents our experiments on UE and AVS.
+First, we describe the datasets used, followed by the implementation details for the uncertainty feature maps. Next,
+Ground Truth
+ℓ1 Error Map
+Rendering
+PRIMU*
+manifold
+var3DGS
+FisherRF
+Figure 3. Qualitative comparison of uncertainty feature maps of FisherRF [11], manifold [19], var3DGS [17] and direction-dependent
+PRIMU* (ours), to the ℓ1 rendering error. Scenes from top to bottom: MipNeRF360 garden and kitchen, LLFF fern and LF basket.
+method
+LF
+AUSE Pears. PSNR
+(↓)
+(↑)
+(↑)
+MipNeRF360
+SSIM LPIPS AUSE Pears. PSNR SSIM LPIPS AUSE Pears.
+(↑)
+(↓)
+(↓)
+(↑)
+(↑)
+(↑)
+(↓)
+(↓)
+(↑)
+LLFF
+PSNR
+(↑)
+SSIM LPIPS
+(↑)
+(↓)
+FisherRF
+maniflod
+var3DGS
+PRIMU (ours)
+PRIMU*(ours)
+0.753
+0.435
+0.688
+0.291
+0.286
+0.969
+0.969
+0.826
+0.969
+0.969
+23.814
+24.239
+25.778
+23.814
+23.814
+0.801
+0.801
+0.832
+0.801
+0.801
+-0.13
+0.099
+0.102
+0.337
+0.351
+34.18
+33.712
+23.101
+34.18
+34.18
+0.043
+0.044
+0.233
+0.043
+0.043
+0.738
+0.52
+0.52
+0.391
+0.378
+-0.054
+0.07
+0.173
+0.203
+0.236
+27.508
+27.273
+26.039
+27.508
+27.508
+0.817
+0.809
+0.762
+0.817
+0.817
+0.215
+0.23
+0.298
+0.215
+0.215
+0.988
+0.545
+0.476
+0.284
+0.281
+-0.088
+0.071
+0.293
+0.363
+0.368
+0.226
+0.223
+0.204
+0.226
+0.226
+Table 1. Rendering error UE results (AUSE, Pears.) on LF, MipNeRF360, and LLFF. PRIMU* uses direction-dependent coverage and
+error maps. Post-hoc UE methods don’t affect GS splatting quality (PSNR, SSIM, LPIPS).
+method
+AUSE
+(↓)
+Pears.
+(↑)
+LF
+PSNR
+(↑)
+SSIM
+(↑)
+LPIPS
+(↓)
+BayesRays
+FisherRF
+maniflod
+PRIMU (ours)
+PRIMU*(ours)
+0.173
+0.305
+0.436
+0.115
+0.118
+0.243
+0.105
+0.036
+0.722
+0.728
+25.181
+34.18
+33.712
+34.18
+34.18
+0.887
+0.969
+0.969
+0.969
+0.969
+0.077
+0.043
+0.044
+0.043
+0.043
+Table 2. Depth UE results (AUSE, Pearson) on LF. PRIMU* uses
+direction-dependent coverage and error maps. Post-hoc UE methods don’t affect GS splatting quality (PSNR, SSIM, LPIPS).
+we discuss the setup of our UE experiments, detailing the
+base configuration used for our method. We also cover the
+UE metrics and baseline methods used for comparison. We
+then present the numerical results of our UE experiments,
+an UE scene separation study, and a study on combining
+uncertainty feature maps. Finally, we conclude this section
+with our AVS setup and experiments.
+Datasets We evaluate our approach on four datasets:
+MipNeRF360 [3], Local Light Field Fusion (LLFF) [24],
+Light Field (LF) [34, 44], and eleven object-centric scenes
+from the TUM RGB-D SLAM dataset (TUM) [36]. The
+MipNeRF360 dataset contains nine 360° scenes (four indoor and five outdoor), while the LLFF dataset comprises
+eight front-facing scenes. From LF, we use four scenes
+(three indoor and one outdoor) with available ground-truth
+depth. From TUM, we use object-centric scenes with
+ground-truth depth for all views. This ground-truth depth
+may not be defined for all pixels. The TUM images often include motion blur, i.e. inconsistent 2D representations
+of 3D scenes, which lead to higher rendering errors. We
+use MipNeRF360, LLFF, and LF for rendering UE and LF
+for depth UE. For the scene separation study, performed for
+rendering and depth UE, we use LF and TUM. AVS experiments are conducted on the MipNeRF360 dataset.
+Uncertainty Feature Maps We employ a) 13 directionindependent uncertainty feature maps: one FoV counter
+map, six coverage maps, and six error maps derived from
+views
+1 view
+m-view
+predicted error type
+rendering error
+depth error
+evaluation on
+entire views
+object-centric
+entire views
+object-centric
+dataset
+LF
+TUM
+LF
+TUM
+LF
+TUM
+LF
+TUM
+metric AUSE Pears. AUSE Pears. AUSE Pears. AUSE Pears. AUSE Pears. AUSE Pears. AUSE Pears. AUSE Pears.
+method
+model (↓)
+(↑)
+(↓)
+(↑)
+(↓)
+(↑)
+(↓)
+(↑)
+(↓)
+(↑)
+(↓)
+(↑)
+(↓)
+(↑)
+(↓)
+(↑)
+FisherRF
+reg. FisherRF grad.
+lin.
+PRIMU (ours) grad.
+lin.
+PRIMU*(ours) grad.
+lin.
+reg. FisherRF grad.
+PRIMU (ours) grad.
+PRIMU*(ours) grad.
+0.878
+0.282
+0.332
+0.244
+0.286
+0.238
+0.276
+0.26
+0.222
+0.218
+-0.224 0.957
+0.318 0.435
+0.182 0.404
+0.412 0.416
+0.309 0.353
+0.419 0.415
+0.35 0.362
+0.352 0.36
+0.446 0.335
+0.458 0.329
+-0.241 0.575
+0.181 0.119
+0.143 0.421
+0.217 0.072
+0.29 0.254
+0.23 0.071
+0.296 0.376
+0.267 0.098
+0.302 0.06
+0.321 0.059
+0.129 0.249
+0.704 0.169
+0.404 0.292
+0.822 0.101
+0.633 0.248
+0.818 0.114
+0.526 0.327
+0.751 0.102
+0.842 0.06
+0.842 0.069
+0.458 0.322
+0.645 0.133
+0.523 0.212
+0.756 0.112
+0.617 0.202
+0.724 0.108
+0.526 0.202
+0.766 0.127
+0.851 0.099
+0.811 0.097
+0.31 0.742
+0.683 0.328
+0.452 0.363
+0.734 0.213
+0.545 0.188
+0.739 0.239
+0.557 0.226
+0.715 0.226
+0.777 0.132
+0.788 0.161
+-0.08 0.63
+0.375 0.135
+0.305 0.398
+0.536 0.071
+0.571 0.246
+0.501 0.07
+0.521 0.313
+0.515 0.1
+0.653 0.052
+0.605 0.052
+0.05 0.38
+0.698 0.228
+0.398 0.453
+0.835 0.1
+0.707 0.282
+0.831 0.11
+0.612 0.427
+0.757 0.121
+0.859 0.062
+0.859 0.068
+0.303
+0.521
+0.364
+0.745
+0.586
+0.718
+0.435
+0.7
+0.849
+0.825
+Table 3. Scene separation UE results. “entire views” evaluates on the full GS scene; “object-centric” limits to the central object. PRIMU*
+uses direction-dependent coverage and error maps.
+the representations in Eqs. (3) to (5). The coverage and error maps are computed using aggregation functions agg ∈
+{max, sum, mean}, both including (Vagg , Eagg ) and ex(α=1)
+(α=1)
+cluding (Vagg , Eagg ) opacity αk (x̄). Gaussian primitives are considered visible when αk (x̄) ≥ 1/255 and
+Tk (x̄) ≥ 10−3 . For comparison we use b) the same set of
+feature maps with direction-dependent Gaussian primitive
+features (Eqs. (7) and (8)) using a von Mises-Fisher distribution with κ = 8 and spherical harmonics of degree four.
+Experimental Setup for Uncertainty Estimation Unless stated otherwise, pixel-wise UE is performed via gradient boosting regression [28] trained on one hold-out view
+per scene to predict rendering or depth error. Separate regressors are trained for rendering and depth. UE evaluations
+are always performed on views that are not used for training
+the splatting or meta-regression models. In a scene separation study, we additionally train regressors on object and
+background regions using Gaussian Grouping [43].
+UE performance is evaluated using the Area Under the
+Sparsification Error (AUSE) [10] and Pearson correlation
+of the uncertainty maps to the error maps (Pears.). AUSE
+measures the area between filtration curves for mean absolute error (MAE) as high-error or high-uncertainty pixels
+are removed. Lower values indicate better alignment between uncertainty and error. We normalize total error per
+view to one for comparability. Pearson correlation complements AUSE with a direct measure of linear dependency,
+as standard regression metrics like coefficient of determination (R2 ) are not applicable due to shifts in input and target
+ranges. We also report the reconstruction quality metrics
+Peak Signal-to-Noise Ratio (PSNR), Structural Similarity
+Index Measure (SSIM) [40], and Leaned Perceptual Image
+Patch Similarity (LPIPS) [46] to provide context on the underlying radiance field quality.
+We compare our method against the NeRF UE method
+by Gaoli et al. [5] (BayesRays) and the GS UE methods
+by Jiang et al. [11] (FisherRF), Li et al. [17] (var3DGS)
+and Lyu et al.[19] (manifold). BayesRays provides posthoc UE for NeRFs and applies only to depth UE. Var3DGS
+and manifold introduce stochasticity in GS by learning distributions over Gaussian parameters and derive uncertainties from multiple sampled renderings. FisherRF computes Gaussian primitive uncertainty via the diagonal of the
+Fisher information matrix and is the only post-hoc GS UE
+baseline. In the scene separation study the post-hoc UE
+method FisherRF is the only applicable method to the splatting containing semantic information produced by Gaussian
+Grouping [43]. Therefore, we introduce a regression-based
+variant of FisherRF for this study that uses the same regression setup as our method, but with six Fisher-derived uncertainty maps as inputs (details in Appendix A).
+Uncertainty Estimation Results Regression models are
+trained on a single hold-out view and evaluated on the
+remaining views. Separate regression models are used
+for direction-independent and direction-dependent feature
+maps. As shown in Tab. 1, our method clearly outperforms FisherRF, manifold and var3DGS for rendering UE,
+and achieves the best AUSE and correlation scores while
+being purely post-processing and therefore not degrading
+rendering quality. In terms of rendering quality we mainly
+see similar qualities for all methods except for var3DGS
+on LF, where the quality is noticeably lower. Interestingly,
+we observe for the forward facing LLFF dataset that the
+stochastic GS methods used by var3DGS and manifold have
+slightly higher rendering quality than standard GS [14],
+which is used to produce the splattings used by FisherRF
+and PRIMU. Direction-dependent features provide a small
+but consistent benefit for rendering UE, likely due to view-
+dependent color effects captured by GS. Figure 3 shows
+a qualitative comparison of the uncertainty feature maps
+and ℓ1 error for our method, using direction-dependent feature maps, as well as for the baseline methods. In depth
+UE (Tab. 2), our approach again performs best, surpassing BayesRays and FisherRF. BayesRays as a NeRF based
+method has significantly lower rendering quality compared
+to the 3DGS methods, which undercuts its good AUSE
+scores. For the depth UE setting, direction-dependence
+has little effect, suggesting that depth uncertainty is more
+direction-invariant in itself.
+Uncertainty Estimation Scene Separation Study We
+analyze UE performance when both trained and evaluated
+on only the central object versus the entire scene (see
+Tab. 3). In Appendix B we present the results for UE on
+scene backgrounds. Regression models are trained on one
+or several hold-out views, using both gradient boosting and
+linear regression. The regression-based FisherRF baseline
+performs consistently better than the original, confirming
+the benefit of meta-regression. Our method further improves upon regression-based FisherRF across all settings,
+demonstrating the superior utility of our uncertainty feature maps. Gradient boosting performs better than linear
+regression for both our approach and regression-based FisherRF. This is particularly evident in object-centric setups,
+where gradient boosting significantly outperforms linear regression, suggesting stronger nonlinear relationships in this
+regime. Compared to the entire-scene setting, we observe
+significantly improved UE in the object-centric setting for
+both our PRIMU and the regression-based FisherRF. This
+is also true for standard FisherRF, except for depth UE
+on LF. The improvement is especially notable for rendering UE, which increases our method’s UE performance to
+a level similar to its depth UE performance in the objectcentric setting. As expected, we observe universal improvements when training the meta-regression models on more
+than one holdout view. As before, direction-dependent uncertainty feature maps perform slightly better for rendering
+UE. However, this is only the case for the entire scene setting. For all object-centric settings, our method achieves
+AUSE scores below 0.1 and correlations above 0.8 when
+trained on only one hold-out view, demonstrating robust UE
+performance with limited supervision.
+For an analysis on how well PRIMU meta-regression
+models generalize to novel scenes, see Appendix C. In
+short, we can achieve high UE performance in the objectcentric setting when using regression models trained on
+multiple scenes and evaluated on novel ones. Then, we also
+achieve high performance in depth UE and decent performance in rendering UE.
+(a) Entire scene evaluation
+(b) Object-centric evaluation
+Figure 4. Step-wise backward regression results identifying the
+most informative uncertainty feature maps. Left: Pearson correlation between predicted and true depth error over the number of
+feature maps used. Right: average feature map retention times.
+Uncertainty Feature Map Combination Study We further examine which combinations of uncertainty feature
+maps contribute most to depth UE performance using stepwise backward regression. This means we start training
+our regression models on all possible combinations of 12
+direction-independent uncertainty feature maps, iteratively
+dropping those with the lowest Pearson correlation between
+the uncertainty map and depth error when left out. This process is repeated for all scenes from LF, as well as for five
+scenes from TUM. Regression models are trained on single hold-out views and evaluated on some of the remaining
+ones (2 for LF, 3 for TUM).
+Figure 4 shows Pearson correlation trajectories, of uncertainties to depth error, and average feature retention times.
+UE performance is higher and more stable in the objectcentric case, with optimal performance reached when using about six maps versus nine for entire scenes. The FoV
+counter and the coverage map with max aggregation (without opacity) consistently rank highest, highlighting their
+utility for UE and complementary roles: FoV reflects in
+how many training views a region of the splatting is included, while opacity-free coverage maps emphasize relevant but semi-transparent Gaussians. In the entire scene
+setting, the FoV feature map is especially important, potentially because it allows one to distinguish regions that
+appear in many training views, such as the central object,
+from regions that appear in only a few training views, such
+as the background. The importance of the coverage map
+entire views
+rendering error
+depth error
+LF
+TUM
+LF
+TUM
+AUSE Pears. AUSE Pears. AUSE Pears. AUSE Pears.
+no. of
+maps (↓)
+13
+9a
+9b
+9c
+0.244
+0.245
+0.248
+0.249
+(↑)
+(↓)
+0.412 0.416
+0.407 0.413
+0.408 0.419
+0.402 0.423
+(↑)
+(↓)
+0.217 0.112
+0.222 0.12
+0.216 0.121
+0.211 0.121
+(↑)
+(↓)
+0.734 0.213
+0.721 0.214
+0.716 0.22
+0.708 0.216
+(↑)
+0.536
+0.536
+0.525
+0.535
+method
+PSNR
+(↑)
+SSIM LPIPS
+(↑)
+(↓)
+manifold
+manifold†
+FisherRF
+PRIMU-AVS (ours)
+19.620
+20.102
+20.392
+20.721
+0.592
+0.610
+0.586
+0.625
+0.376
+0.351
+0.363
+0.34
+Table 6. AVS results on MipNeRF360. PRIMU-AVS employs the
+direction-dependent coverage feature map with max aggregation
+and dropped opacity to directly guide view selection.
+Table 4. Feature map combination study for entire scenes.
+object-centric
+rendering error
+depth error
+LF
+TUM
+LF
+TUM
+AUSE Pears. AUSE Pears. AUSE Pears. AUSE Pears.
+no. of
+maps (↓)
+13
+6a
+6b
+6c
+0.072
+0.074
+0.076
+0.073
+(↑)
+(↓)
+0.822 0.101
+0.807 0.104
+0.8
+0.103
+0.811 0.103
+(↑)
+(↓)
+0.756 0.071
+0.747 0.071
+0.75 0.072
+0.75 0.069
+(↑)
+(↓)
+0.835 0.1
+0.822 0.105
+0.822 0.105
+0.832 0.101
+(↑)
+0.745
+0.736
+0.744
+0.746
+Table 5. Feature map combination study for object-centric scenes.
+without opacity and max aggregation, suggests that max aggregation leads to an effective estimate of generally high
+training-view coverage. Error-based maps contribute less,
+likely due to being derived from rendering errors which are
+intuitively less informative for depth UE.
+To assess whether reducing the number of uncertainty
+feature maps improves overall PRIMU performance, we selected some feature map combinations to be tested on all
+LF and TUM scenes following three strategies: a) the combination that was chosen most frequently across all stepwise backward regression runs, b) the combination with the
+highest overall score, and c) the set of individually most frequently selected uncertainty feature maps. The number of
+feature maps is selected based on the average performance
+in the given setting. In particular, six are selected for the
+object-centric case and nine for the entire scene setting. Selected combinations (Tabs. 4 and 5) maintain nearly full performance, indicating that there is some redundant information between the maps. However, no reduced feature-map
+combination consistently improves PRIMU, with the full 13
+maps typically yielding the best average performance.
+Experimental Setup for Active View Selection In GS,
+AVS aims to identify training views that yield the highest
+final reconstruction quality, while limiting the total number
+of training views. The goal of our setup is to iteratively
+select the best 20 training views. To ensure comparability
+with the FisherRF baseline, we adopt the AVS protocol proposed by Jiang et al. [11].
+Following this setup, every eighth view is removed from
+the set of candidate training views and reserved for evaluation. After selecting a fixed first training view, three additional views are selected by maximizing the Euclidean
+distance to the camera centers of the existing views. All
+methods start the training with these four views. Additional,
+views are then selected by the AVS scheme during training,
+with each selection occurring after a number of iterations
+proportional to the number of views already selected. This
+continues until 20 training views are reached. Specifically,
+a new view is added after 100 times the number of selected
+training views (e.g., the fifth view after 400 iterations, the
+sixth after an additional 500, and so on).
+Experiments are conducted on the challenging realworld MipNeRF360 dataset [3]. We use the standard GS
+training configuration from [14], but increase the interval
+for raising the spherical harmonics degree during training
+from 1000 to 5000 iterations, following [11], to mitigate
+overfitting caused by the limited number of views.
+As baselines, we include the GS-based AVS methods
+by Jiang et al. [11] (FisherRF) and Lyu et al. [19] (manifold). Since manifold uses a stochastic variant of GS, which
+could impact the reconstruction quality, we additionally
+provide results for a modified version denoted manifold∗ .
+In manifold† , we use the views selected by manifold but in
+the vanilla GS [14] pipeline, which we also use for FisherRF
+and our approach. Because AVS performance is evaluated
+through final rendering quality, comparisons to NeRF-based
+AVS methods are omitted, as NeRF and GS in general differ
+substantially in reconstruction quality.
+In our AVS approach (PRIMU-AVS), we omit the regression model since training it would require at least one
+additional view. Instead, we use a single uncertainty feature map that is based on the direction-dependent coverage
+representation with max aggregation and dropped opacity
+(α=1) ∗
+(Vmax ). This selection scheme aims to maximize the total coverage of Gaussian primitives across the chosen training views. The direction-dependent formulation allows the
+model to account for how well Gaussian primitives are observed from different viewing angles. We employ the max
+aggregation as it is conceptually simple and independent of
+the primitives’ spatial extent. To ensure that transparent
+primitives are also considered when estimating coverage,
+we drop the opacity term. When selecting a new training
+view, we render the chosen coverage feature map for all candidate views and select the one with the lowest mean value
+across pixels, corresponding to the view with the lowest
+overall coverage from the already selected training views.
+Active View Selection Results In Tab. 6 we provide the
+final splatting quality, on the MipNeRF360 dataset, after
+the AVS training is completed. As can be seen, PRIMUAVS outperforms both FisherRF and manifold in the three
+standard GS quality metrics PSNR, SSIM and LIPIPS. This
+demonstrates the effectiveness of our approach which uses
+uncertainty feature information based on training-view coverage in AVS. We reliably achieve splatting quality that surpasses baseline methods which explicitly model uncertainty
+or estimate information gain.
+5. Conclusion
+We propose PRIMU, an effective post-hoc technique for
+uncertainty estimation in Gaussian splatting that achieves
+state-of-the-art performance for both depth and RGB rendering error prediction. PRIMU uses 13 handcrafted
+Gaussian primitive-based feature maps, capturing trainingview coverage and projected rendering errors, and trains
+lightweight gradientboosting regressors on a single holdout view. By leveraging PRIMU uncertainty feature maps
+directly, we achieve state-of-the-art results in active view
+selection.
+Acknowledgment
+T.G. P.S., and M.R. acknowledge support by the state of
+North Rhine-Westphalia and the European Union within
+the EFRE/JTF project “Just scan it 3D”, grant no. EFRE20800529. E.H. and M.R. acknowledge support through
+the junior research group project “UnrEAL” by the German
+Federal Ministry of Education and Research (BMBF), grant
+no. 01IS22069.
+References
+[1] Luca Savant Aira, Diego Valsesia, and Enrico Magli. Modeling uncertainty for gaussian splatting. IEEE Transactions
+on Neural Networks and Learning Systems, 36(6):11657–
+11663, 2025. 2, 3
+[2] Niki Amini-Naieni, Tomas Jakab, Andrea Vedaldi, and
+Ronald Clark. Instant uncertainty calibration of nerfs using a meta-calibrator. In European Conference on Computer
+Vision, pages 309–324. Springer, 2025. 3
+[3] Jonathan T. Barron, Ben Mildenhall, Dor Verbin, Pratul P.
+Srinivasan, and Peter Hedman. Mip-nerf 360: Unbounded
+anti-aliased neural radiance fields. In Proceedings of the
+IEEE/CVF Conference on Computer Vision and Pattern
+Recognition (CVPR), pages 5470–5479, 2022. 1, 5, 8
+[4] Nicholas I Fisher, Toby Lewis, and Brian JJ Embleton. Statistical analysis of spherical data. Cambridge university
+press, 1993. 4
+[5] Lily Goli, Cody Reading, Silvia Sellán, Alec Jacobson,
+and Andrea Tagliasacchi. Bayes’ rays: Uncertainty quantification for neural radiance fields. In Proceedings of
+the IEEE/CVF Conference on Computer Vision and Pattern
+Recognition, pages 20061–20070, 2024. 2, 3, 6, 5
+[6] Chenyu Han and Corentin Dumery. View-dependent uncertainty estimation of 3d gaussian splatting. arXiv preprint
+arXiv:2504.07370, 2025. 3
+[7] Richard Hartley and Andrew Zisserman. Multiple View Geometry in Computer Vision. Cambridge University Press,
+2004. 2
+[8] Binbin Huang, Zehao Yu, Anpei Chen, Andreas Geiger, and
+Shenghua Gao. 2d gaussian splatting for geometrically accurate radiance fields. In ACM SIGGRAPH 2024 conference
+papers, pages 1–11, 2024. 2
+[9] Letian Huang, Jiayang Bai, Jie Guo, and Yanwen Guo.
+Gs++: Error analyzing and optimal gaussian splatting. arXiv
+preprint arXiv:2402.00752, 2(3), 2024. 2
+[10] Eddy Ilg, Ozgun Cicek, Silvio Galesso, Aaron Klein, Osama
+Makansi, Frank Hutter, and Thomas Brox. Uncertainty estimates and multi-hypotheses networks for optical flow. In
+Proceedings of the European Conference on Computer Vision (ECCV), pages 652–667, 2018. 6
+[11] Wen Jiang, Boshu Lei, and Kostas Daniilidis. Fisherrf: Active view selection and uncertainty quantification for radiance fields using fisher information. arXiv, 2023. 2, 3, 5, 6,
+8
+[12] Jaewoo Jung, Jisang Han, Honggyu An, Jiwon Kang,
+Seonghoon Park, and Seungryong Kim. Relaxing accurate
+initialization constraint for 3d gaussian splatting. 2024. 2
+[13] James T Kajiya and Brian P Von Herzen. Ray tracing volume
+densities. ACM SIGGRAPH computer graphics, 18(3):165–
+174, 1984. 1
+[14] Bernhard Kerbl, Georgios Kopanas, Thomas Leimkuehler,
+and George Drettakis. 3d gaussian splatting for real-time
+radiance field rendering. ACM Transactions on Graphics
+(TOG), 42(4):1–14, 2023. 1, 6, 8, 2
+[15] Georgios Kopanas and George Drettakis.
+Improving
+NeRF Quality by Progressive Camera Placement for FreeViewpoint Navigation. In Vision, Modeling, and Visualization. The Eurographics Association, 2023. 3
+[16] Jonas Kulhanek, Songyou Peng, Zuzana Kukelova, Marc
+Pollefeys, and Torsten Sattler. WildGaussians: 3D gaussian
+splatting in the wild. NeurIPS, 2024. 3
+[17] Ruiqi Li and Yiu-ming Cheung. Variational multi-scale representation for estimating uncertainty in 3d gaussian splatting. Advances in Neural Information Processing Systems,
+37:87934–87958, 2024. 2, 3, 5, 6
+[18] Kehan Long, Cheng Qian, Jorge Cortés, and Nikolay
+Atanasov. Learning barrier functions with memory for robust safe navigation. IEEE Robotics and Automation Letters,
+6(3):4931–4938, 2021. 2
+[19] Linjie Lyu, Ayush Tewari, Marc Habermann, Shunsuke
+Saito, Michael Zollhöfer, Thomas Leimkühler, and Christian
+Theobalt. Manifold sampling for differentiable uncertainty
+in radiance fields. In SIGGRAPH Asia 2024 Conference Papers, pages 1–11, 2024. 3, 5, 6, 8
+[20] Kanti V Mardia and Peter E Jupp. Directional statistics. John
+Wiley & Sons, 2009. 4
+[21] Ricardo Martin-Brualla, Noha Radwan, Mehdi SM Sajjadi,
+Jonathan T Barron, Alexey Dosovitskiy, and Daniel Duckworth. Nerf in the wild: Neural radiance fields for unconstrained photo collections. In Proceedings of the IEEE/CVF
+conference on computer vision and pattern recognition,
+pages 7210–7219, 2021. 3
+[22] Hidenobu Matsuki, Riku Murai, Paul HJ Kelly, and Andrew J Davison. Gaussian splatting slam. In Proceedings
+of the IEEE/CVF Conference on Computer Vision and Pattern Recognition, pages 18039–18048, 2024. 1
+[23] N. Max. Optical models for direct volume rendering. IEEE
+Transactions on Visualization and Computer Graphics, 1(2):
+99–108, 1995. 1
+[24] Ben Mildenhall, Pratul P Srinivasan, Rodrigo Ortiz-Cayon,
+Nima Khademi Kalantari, Ravi Ramamoorthi, Ren Ng, and
+Abhishek Kar. Local light field fusion: Practical view synthesis with prescriptive sampling guidelines. ACM Transactions on Graphics (ToG), 38(4):1–14, 2019. 5
+[25] Ben Mildenhall, Pratul P Srinivasan, Matthew Tancik,
+Jonathan T Barron, Ravi Ramamoorthi, and Ren Ng. Nerf:
+Representing scenes as neural radiance fields for view synthesis. Communications of the ACM, 65(1):99–106, 2021.
+1
+[26] Claus Müller. Spherical harmonics. Springer, 2006. 4
+[27] Kiyohiro Nakayama, Mikaela Angelina Uy, Yang You, Ke
+Li, and Leonidas J Guibas. Provnerf: Modeling per point
+provenance in nerfs as a stochastic field. Advances in Neural
+Information Processing Systems, 37:99145–99160, 2024. 2
+[28] Alexey Natekin and Alois Knoll. Gradient boosting machines, a tutorial. Frontiers in neurorobotics, 7:21, 2013.
+2, 6
+[29] Xuran Pan, Zihang Lai, Shiji Song, and Gao Huang. Activenerf: Learning where to see with uncertainty estimation.
+In Computer Vision – ECCV 2022, pages 230–246, Cham,
+2022. Springer Nature Switzerland. 3
+[30] Matthew A. Price and Jason D. McEwen. Differentiable and
+accelerated spherical harmonic and wigner transforms. Journal of Computational Physics, 510:113109, 2024. 4
+[31] Fabio Remondino, Ali Karami, Ziyang Yan, Gabriele Mazzacca, Simone Rigon, and Rongjun Qin. A critical analysis
+of nerf-based 3d reconstruction. Remote Sensing, 15(14):
+3585, 2023. 2
+[32] Seunghyeon Seo, Yeonjin Chang, and Nojun Kwak. Flipnerf: Flipped reflection rays for few-shot novel view synthesis. In Proceedings of the IEEE/CVF International Conference on Computer Vision (ICCV), pages 22883–22893, 2023.
+2
+[33] Afshar Shamsi, Hamzeh Asgharnezhad, Shirin Shamsi
+Jokandan, Abbas Khosravi, Parham M Kebria, Darius Nahavandi, Saeid Nahavandi, and Dipti Srinivasan.
+An
+uncertainty-aware transfer learning-based framework for
+covid-19 diagnosis. IEEE transactions on neural networks
+and learning systems, 32(4):1408–1417, 2021. 2
+[34] Jianxiong Shen, Antonio Agudo, Francesc Moreno-Noguer,
+and Adria Ruiz. Conditional-flow nerf: Accurate 3d modelling with reliable uncertainty quantification. In European
+Conference on Computer Vision, pages 540–557. Springer,
+2022. 2, 5
+[35] Noah Snavely, Steven M Seitz, and Richard Szeliski. Photo
+tourism: exploring photo collections in 3d. In ACM siggraph 2006 papers, pages 835–846. Association for Computing Machinery, 2006. 1
+[36] J. Sturm, N. Engelhard, F. Endres, W. Burgard, and D. Cremers. A benchmark for the evaluation of rgb-d slam systems.
+In Proc. of the International Conference on Intelligent Robot
+Systems (IROS), 2012. 5
+[37] Niko Sünderhauf, Jad Abou-Chakra, and Dimity Miller.
+Density-aware nerf ensembles: Quantifying predictive uncertainty in neural radiance fields. In 2023 IEEE International Conference on Robotics and Automation (ICRA),
+pages 9370–9376, 2023. 2, 3
+[38] Sebastian Thrun. Probabilistic robotics. Communications of
+the ACM, 45(3):52–57, 2002. 2
+[39] Peng Wang, Lingjie Liu, Yuan Liu, Christian Theobalt, Taku
+Komura, and Wenping Wang. Neus: Learning neural implicit
+surfaces by volume rendering for multi-view reconstruction.
+arXiv preprint arXiv:2106.10689, 2021. 2
+[40] Zhou Wang, Alan C Bovik, Hamid R Sheikh, and Eero P Simoncelli. Image quality assessment: from error visibility to
+structural similarity. IEEE transactions on image processing,
+13(4):600–612, 2004. 6
+[41] Frederik Warburg, Ethan Weber, Matthew Tancik, Aleksander Holynski, and Angjoo Kanazawa. Nerfbusters: Removing ghostly artifacts from casually captured nerfs. In
+Proceedings of the IEEE/CVF International Conference on
+Computer Vision, pages 18120–18130, 2023. 2
+[42] Joey Wilson, Marcelino Almeida, Min Sun, Sachit Mahajan, Maani Ghaffari, Parker Ewen, Omid Ghasemalizadeh,
+Cheng-Hao Kuo, and Arnie Sen. Modeling uncertainty in
+3d gaussian splatting through continuous semantic splatting,
+2024. 2, 3
+[43] Mingqiao Ye, Martin Danelljan, Fisher Yu, and Lei Ke.
+Gaussian grouping: Segment and edit anything in 3d scenes.
+In ECCV, 2024. 6
+[44] Kaan Yücer, Alexander Sorkine-Hornung, Oliver Wang, and
+Olga Sorkine-Hornung. Efficient 3D object segmentation
+from densely sampled light fields with applications to 3D reconstruction. ACM Transactions on Graphics, 35(3), 2016.
+5
+[45] Jiawei Zhang, Jiahe Li, Xiaohan Yu, Lei Huang, Lin Gu,
+Jin Zheng, and Xiao Bai. Cor-gs: sparse-view 3d gaussian
+splatting via co-regularization. In European Conference on
+Computer Vision, pages 335–352. Springer, 2024. 2
+[46] Richard Zhang, Phillip Isola, Alexei A Efros, Eli Shechtman, and Oliver Wang. The unreasonable effectiveness of
+deep features as a perceptual metric. In Proceedings of the
+IEEE conference on computer vision and pattern recognition, pages 586–595, 2018. 6
+[47] Yuhang Zhang, Joshua Maraval, Zhengyu Zhang, Nicolas
+Ramin, Shishun Tian, and Lu Zhang. Evaluating human per-
+ception of novel view synthesis: Subjective quality assessment of gaussian splatting and nerf in dynamic scenes. arXiv
+preprint arXiv:2501.08072, 2025. 1
+[48] Matthias Zwicker, Hanspeter Pfister, Jeroen Van Baar, and
+Markus Gross. Ewa volume splatting. In Proceedings Visualization, 2001. VIS’01., pages 29–538. IEEE, 2001. 1, 3
+PRIMU: Uncertainty Estimation for Novel Views in Gaussian Splatting from
+Primitive-Based Representations of Error and Coverage
+Supplementary Material
+This appendix provides additional analyses, implementation details, and qualitative results that complement the
+main paper. Sec. A describes our modification of the FisherRF baseline, introducing a regression-based variant used
+in our comparisons. Sec. B presents results of our sceneseparation study, focusing specifically on uncertainty estimation for background regions. Sec. C evaluates the outof-scene generalization capabilities of the meta-regression
+models used in PRIMU. Sec. D provides qualitative examples and visual comparisons of predicted uncertainty
+maps. Finally, Sec. E examines the benefit of incorporating neighboring-pixel information for improving UE.
+A. Regression-Based FisherRF
+This section outlines the regression-based FisherRF method
+used in the study of UE scene separation. Original FisherRF [11] is based on the Fisher information matrix of a
+GS w.r.t. the gradient of the rendering function. The diagonal entries of this Fisher information matrix correspond to
+variances of the Gaussian primitive parameters and therefore are used to estimate their uncertainty. The considered
+Gaussian primitive uncertainty of FisherRF only uses the
+sum of the color parameter variances including all spherical harmonic parameters, used to make the color directiondependent. Using the GS rending (Eq. (2)), pixel-wise uncertainties are obtained.
+We have made some modifications to make FisherRF
+more similar to our own method, so that it also uses a metaregression model. That is, we compute 6 uncertainty feature maps based on the Gaussian parameter variances like
+in FisherRF but for different Gaussian primitive parameters.
+The 6 uncertainty feature maps are based on the grouping of
+parameters of Gaussian primitives in 1) mean, 2) scale, 3)
+rotation, 4) opacity factor, 5) spherical harmonics color parameters of degree zero and 6) the higher degree spherical
+harmonics color parameters. This grouping of parameters
+originates from the original GS implementation [14]. For a
+Gaussian primitive the parameter groups scale and rotation
+correspond to its covariance matrix. In this way all Gaussian primitive parameters are represented in one of the 6 uncertainty feature maps. We use those 6 uncertainty feature
+maps as input for regression models in the same manner as
+for our uncertainty feature maps obtained by our method.
+This allows us to compare the quality of the different sets of
+feature maps for UE by evaluating the pixel-wise predicted
+errors using our evaluation metrics.
+B. UE Scene Separation Study for Background
+Here, we are extending our UE scene separation study.
+We are also analyzing UE on the scene background alone.
+Therefore, the meta-regression models for our method and
+the regression-based FisherRF are trained on the scene
+background. In Tab. 7 we provide the numerical results.
+For easier comparison, we also include the results for the
+entire scene again. We observe that the effects on the scene
+background are analogous to those on the entire scene. For
+instance, the best-performing configurations are identical.
+This is to be expected, as the background usually dominates in terms of pixel counts in an image. Typically, this
+is true when capturing an object in an environment, as in
+the scene datasets used here. In general, the UE performance on the scene background is slightly worse than in the
+entire-scene setting. Nevertheless, the overall performance
+of our method is good for the background, especially for
+depth UE.
+C. UE Out-of-Scene Generalization
+We study how well the PRIMU UE meta-regression models
+generalize to new scenes. If they do, it would suggest that
+the uncertainty information in our feature maps is at least
+partially scene-independent. For this study, we use the setup
+from our UE scene separation study to also investigate generalization in object-centric and background settings. For
+comparison, we also conduct generalization experiments
+for the regression-based FisherRF approach. We train the
+meta-regression models using one view of one scene, multiple views of one scene, or multiple views of multiple scenes
+from the same dataset. The results are provided in Tab. 8,
+which also includes a row of standard FisherRF results for
+comparison. To improve readability, we only report the
+Pearson correlation of the uncertainty maps to the true error.The rows of the table correspond to the mean correlations of different meta-regression models trained using different sets of views from the training datasets (given by column ”training”). The columns correspond to the means of
+evaluation over scenes in the evaluation datasets (given by
+row ”dataset”). These means never include regression models that are trained and evaluated on the same scene.
+Examining the results, we see that our method consistently outperforms the standard FisherRF method, even in
+settings where we train regression models using holdout
+views from different scenes. The only noticeable exception is depth UE on the LF dataset in the entire-scene and
+views
+1 view
+m-view
+predicted error type
+rendering error
+depth error
+evaluation on
+entire views
+background
+entire views
+background
+dataset
+LF
+TUM
+LF
+TUM
+LF
+TUM
+LF
+TUM
+metric AUSE Pears. AUSE Pears. AUSE Pears. AUSE Pears. AUSE Pears. AUSE Pears. AUSE Pears. AUSE Pears.
+method
+model (↓)
+(↑)
+(↓)
+(↑)
+(↓)
+(↑)
+(↓)
+(↑)
+(↓)
+(↑)
+(↓)
+(↑)
+(↓)
+(↑)
+(↓)
+(↑)
+FisherRF
+reg. FisherRF grad.
+lin.
+PRIMU (ours) grad.
+lin.
+PRIMU*(ours) grad.
+lin.
+reg. FisherRF grad.
+PRIMU (ours) grad.
+PRIMU*(ours) grad.
+0.878
+0.282
+0.332
+0.244
+0.286
+0.238
+0.276
+0.26
+0.222
+0.218
+-0.224 0.957
+0.318 0.435
+0.182 0.404
+0.412 0.416
+0.309 0.353
+0.419 0.415
+0.35 0.362
+0.352 0.36
+0.446 0.335
+0.458 0.329
+-0.241 0.962
+0.181 0.277
+0.143 0.311
+0.217 0.251
+0.29 0.287
+0.23 0.245
+0.296 0.273
+0.267 0.255
+0.302 0.226
+0.321 0.223
+-0.265 0.976
+0.33 0.44
+0.198 0.41
+0.41 0.435
+0.335 0.369
+0.42 0.426
+0.377 0.373
+0.365 0.369
+0.45 0.353
+0.461 0.338
+-0.255 0.322
+0.183 0.133
+0.143 0.212
+0.199 0.112
+0.279 0.202
+0.219 0.108
+0.282 0.202
+0.275 0.127
+0.293 0.099
+0.312 0.097
+0.31 0.742
+0.683 0.328
+0.452 0.363
+0.734 0.213
+0.545 0.188
+0.739 0.239
+0.557 0.226
+0.715 0.226
+0.777 0.132
+0.788 0.161
+-0.08 0.361
+0.375 0.163
+0.305 0.265
+0.536 0.136
+0.571 0.254
+0.501 0.134
+0.521 0.253
+0.515 0.155
+0.653 0.119
+0.605 0.117
+0.231 0.758
+0.627 0.328
+0.363 0.357
+0.697 0.235
+0.468 0.213
+0.699 0.272
+0.477 0.26
+0.667 0.226
+0.745 0.155
+0.753 0.183
+-0.169
+0.357
+0.283
+0.497
+0.529
+0.443
+0.456
+0.501
+0.611
+0.57
+Table 7. Scene separation UE results for scene background. “entire views” evaluates on the full GS scene; “background” limits to the scene
+background. PRIMU* uses direction-dependent coverage and error maps.
+background settings. In these settings, both our method
+and the regression-based FisherRF method perform significantly worse than when training on holdout views of the
+same scene. This is likely due to an inconsistent depth
+scale across the LF scenes. When we compare to the TUM
+dataset in the depth UE, entire-scene, or background settings, we see a less pronounced drop in performance, and
+the depth in the TUM dataset is scaled in meters for all
+scenes. Interestingly, we also see that, in some cases, linear regression trained on a single hold-out view performs
+best, indicating weaker nonlinear effects in these settings
+and suggesting a tendency of gradient boosting to overfit the
+training scenes. We also notice that, in a few cases, models
+trained on TUM scenes perform better on LF than models
+trained on LF. This may be due to the fact that TUM has
+more scenes and more diverse hold-out views within those
+scenes than LF, covering a wider range of scenarios. Overall, we observe that meta-regression models can generalize
+to a certain extent to unseen scenes, and models trained on
+multiple scenes demonstrate the best generalization capability.
+D. Visual UE Examples
+Here, we provide some additional qualitative examples and
+comparisons of uncertainty maps. In Fig. 6, we show
+more qualitative comparisons of the uncertainty maps of our
+method against the baselines for rendering error UE, and
+in Fig. 7, for depth UE. Figs. 8 and 9 show a visual comparison of the uncertainty maps of our method for different choices of regression model, number of training views,
+and direction-dependent or independent uncertainty feature
+maps. As we can see, the uncertainty maps produced by
+linear regression models are less nuanced than those produced by gradient boosting models. This is likely due to
+the limited capacity of linear regression models compared
+to gradient boosting models. Using direction-dependent
+uncertainty feature maps makes the predicted uncertainty
+maps more visually similar to the actual error maps. For the
+Teddy2 scene from the TUM dataset (see Fig. 9), we observe that training the regression model with multiple holdout views also notably improves the visual quality of the uncertainty maps. However, this is not the case for the Africa
+scene from LF (see Fig. 8), where the uncertainty maps produced by training on one hold-out view are already very
+close to the actual error maps.
+E. The Role of Spatial Interaction
+So far, we performed pixel-wise regression on uncertainty
+feature maps. Here, we study whether incorporating uncertainty features from neighboring pixels improves the estimation of rendering and depth uncertainty. We replace
+the pixel-wise gradient boosting regressor with lightweight
+fully convolutional neural networks (CNNs) and evaluate
+their UE on the LF dataset. We train 72 CNNs to predict
+rendering and depth errors on foreground objects, using all
+13 direction-independent primitive representations from the
+first three hold-out views of a scene and testing on the fourth
+view. Each CNN has a depth of 4 layers, with kernel sizes
+in
+{(k1 , . . . , k4 )| ki ∈ {1, 3, 5}, kj + 2 ≥ ki ≥ kj for i < j}
+(10)
+and channel depth in {(h, h, h, h)|h ∈ {32, 64, 128, 256}}.
+Notably, CNNs with all kernel sizes set to 1 reduce to pixelwise fully connected baselines using only 1 × 1 convolutions. As batch size we found 1 most useful and trained all
+CNNs for 2000 iterations with a learning rate scheduled to
+decrease from 10−3 to 10−5 , along with a weight decay of
+10−5 . UE performances are provided in terms of Pearson
+correlation between the predicted and true errors, displayed
+views
+1 view
+method
+predicted error type
+rendering error
+evaluation on entire views
+object-centric
+background
+dataset LF
+TUM LF
+TUM LF
+TUM
+metric Pears. Pears. Pears. Pears. Pears. Pears.
+model training (↑)
+(↑)
+(↑)
+(↑)
+(↑)
+(↑)
+FisherRF
+reg. FisherRF
+grad.
+lin.
+PRIMU (ours)
+grad.
+lin.
+PRIMU*(ours) grad.
+m-view
+lin.
+reg. FisherRF
+grad.
+PRIMU (ours)
+grad.
+m-scene
+PRIMU*(ours) grad.
+reg. FisherRF
+grad.
+PRIMU (ours)
+grad.
+PRIMU*(ours) grad.
+LF
+TUM
+LF
+TUM
+LF
+TUM
+LF
+TUM
+LF
+TUM
+LF
+TUM
+LF
+TUM
+LF
+TUM
+LF
+TUM
+LF
+TUM
+LF
+TUM
+LF
+TUM
+-0.224
+0.153
+0.104
+0.115
+0.076
+0.192
+0.122
+0.215
+0.186
+0.2
+0.155
+0.288
+0.248
+0.15
+0.145
+0.194
+0.13
+0.206
+0.199
+0.248
+0.213
+0.264
+0.165
+0.266
+0.256
+-0.241
+0.163
+0.13
+0.078
+0.099
+0.168
+0.177
+0.197
+0.239
+0.167
+0.203
+0.202
+0.259
+0.16
+0.186
+0.195
+0.226
+0.176
+0.257
+0.217
+0.261
+0.202
+0.305
+0.112
+0.333
+0.129
+0.328
+0.273
+0.184
+0.087
+0.509
+0.398
+0.206
+0.165
+0.548
+0.424
+0.179
+0.067
+0.343
+0.308
+0.491
+0.444
+0.551
+0.497
+0.532
+0.434
+0.575
+0.544
+0.611
+0.583
+0.458
+0.42
+0.419
+0.386
+0.329
+0.481
+0.484
+0.013
+0.296
+0.506
+0.5
+0.1
+0.262
+0.448
+0.445
+0.513
+0.5
+0.497
+0.524
+0.503
+0.502
+0.454
+0.559
+0.517
+0.572
+-0.265
+0.168
+0.126
+0.117
+0.081
+0.199
+0.141
+0.225
+0.204
+0.196
+0.166
+0.297
+0.247
+0.17
+0.175
+0.2
+0.155
+0.203
+0.206
+0.248
+0.244
+0.268
+0.184
+0.266
+0.269
+-0.255
+0.157
+0.137
+0.065
+0.097
+0.124
+0.158
+0.198
+0.227
+0.095
+0.18
+0.18
+0.247
+0.164
+0.198
+0.128
+0.208
+0.074
+0.229
+0.201
+0.268
+0.135
+0.291
+0.045
+0.315
+entire views
+LF
+TUM
+Pears. Pears.
+(↑)
+(↑)
+depth error
+object-centric
+background
+LF
+TUM LF
+TUM
+Pears. Pears. Pears. Pears.
+(↑)
+(↑)
+(↑)
+(↑)
+0.31
+0.24
+0.139
+0.19
+0.15
+0.121
+0.187
+0.25
+0.312
+0.159
+0.183
+0.242
+0.281
+0.243
+0.193
+0.13
+0.203
+0.153
+0.247
+0.083
+0.201
+0.039
+0.217
+-0.03
+0.274
+0.05
+0.284
+0.245
+0.259
+0.089
+0.632
+0.514
+0.444
+0.265
+0.631
+0.513
+0.384
+0.123
+0.284
+0.31
+0.657
+0.584
+0.644
+0.6
+0.261
+0.419
+0.687
+0.642
+0.663
+0.688
+-0.08
+-0.008
+0.273
+0.123
+0.203
+0.153
+0.404
+0.097
+0.468
+0.104
+0.378
+0.076
+0.413
+-0.01
+0.349
+0.148
+0.477
+0.12
+0.45
+-0.046
+0.456
+0.095
+0.561
+-0.004
+0.545
+0.303
+0.312
+0.278
+0.253
+0.184
+0.453
+0.506
+0.128
+0.257
+0.452
+0.5
+0.17
+0.166
+0.315
+0.304
+0.464
+0.577
+0.448
+0.585
+0.356
+0.418
+0.455
+0.628
+0.463
+0.645
+0.231
+0.176
+0.039
+0.107
+0.066
+0.017
+0.049
+0.105
+0.076
+0.031
+0.048
+0.126
+0.078
+0.159
+0.072
+0.017
+0.057
+0.038
+0.079
+0.062
+0.058
+0.009
+0.1
+-0.051
+0.133
+-0.169
+-0.095
+0.245
+0.086
+0.175
+0.059
+0.335
+0.063
+0.392
+0.016
+0.3
+0.059
+0.331
+-0.106
+0.305
+0.084
+0.412
+-0.014
+0.377
+-0.093
+0.423
+0.036
+0.488
+-0.002
+0.474
+Table 8. Numerical results of UE out-of-scene generalization study. Pearson Correlation of predicted to true depth/rendering error for
+entire/object-centric/background scene evaluation. All rows except the first are the averages when training the regressor on the dataset in
+the column ’training’. PRIMU* uses direction-dependent coverage and error maps.
+tive field size improves performance only for CNNs with
+32 channels, which may be attributed to increased model
+capacity instead of neighborhood information itself.
+Figure 5. Average in-scene Pearson correlations of predicted and
+true rendering (left) and depth errors (right) for CNN models with
+varying receptive field sizes and numbers of uncertainty features.
+in Fig. 5.
+Overall, the CNNs did not outperform gradient boosting,
+which, however, is not the aim of this study. Interestingly,
+CNNs with larger receptive fields consistently outperform
+the fully-connected baselines in rendering error estimation,
+demonstrating the usefulness of neighborhood information
+for this task. For depth error estimation, increased recep-
+Ground Truth
+Rendering
+ℓ1 Error Map
+PRIMU*
+manifold
+var3DGS
+FisherRF
+Figure 6. Qualitative comparison of uncertainty feature maps for rendering error UE of FisherRF [11], manifold [19], var3DGS [17] and
+direction-dependent PRIMU* (ours), to the ℓ1 rendering error. Scenes from top to bottom: MipNeRF360 bonsai and room, LLFF horns
+and LF torch.
+Ground Truth
+Rendering
+ℓ1 Error Map
+PRIMU*
+manifold
+BayesRays
+FisherRF
+Figure 7. Qualitative comparison of uncertainty feature maps for depth UE of FisherRF [11], manifold [19], BayesRays [5] and directiondependent PRIMU* (ours), to the ℓ1 rendering error. Scenes from top to bottom: LF africa, basket, statue and torch.
+UE for rendering error
+UE for depth error
+rendering
+rendering error
+rendered depth
+depth error
+direction-independent
+direction-dependent
+direction-independent
+direction-dependent
+gradient boosting trained on multiple views
+gradient boosting trained on multiple views
+gradient boosting trained on one view
+gradient boosting trained on one view
+linear regression trained on one view
+linear regression trained on one view
+Figure 8. Qualitative example of the UE of our method for the scene africa of the LF dataset. Top row color and depth renderings of view
+and their error maps. Below predicted error from different regression models trained on direction-independent or direction-dependent (plus
+FoV counter) uncertainty feature maps.
+UE for rendering error
+UE for depth error
+rendering
+rendering error
+rendered depth
+depth error
+direction-independent
+direction-dependent
+direction-independent
+direction-dependent
+gradient boosting trained on multiple views
+gradient boosting trained on multiple views
+gradient boosting trained on one view
+gradient boosting trained on one view
+linear regression trained on one view
+linear regression trained on one view
+Figure 9. Qualitative example of the UE of our method for the scene teddy2 of the TUM dataset. Top row color and depth renderings of
+view and their error maps. Below predicted error from different regression models trained on direction-independent or direction-dependent
+(plus FoV counter) uncertainty feature maps.

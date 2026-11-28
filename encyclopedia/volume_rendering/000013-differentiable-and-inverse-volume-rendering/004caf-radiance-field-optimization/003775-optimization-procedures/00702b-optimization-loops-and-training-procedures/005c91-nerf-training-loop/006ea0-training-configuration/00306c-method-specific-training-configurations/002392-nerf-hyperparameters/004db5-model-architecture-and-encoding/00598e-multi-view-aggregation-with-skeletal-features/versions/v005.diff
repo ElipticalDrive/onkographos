@@ -1,0 +1,109 @@
+--- v004.md
++++ v005.md
+@@ -12,33 +12,66 @@
+ 
+ **Data Structures:**
+-*   **Skeletal Features ($s^0_{c,t}$):** A dense 3D volume of features $d$-dimensional, defined on the SMPL mesh vertices and interpolated into space [S1, unofficial].
+-*   **Pixel-aligned Features ($p^x_{c,t}$):** A $d$-dimensional feature vector extracted from the image $I_{c,t}$ corresponding to the 2D projection of $x$ [S1, unofficial].
+-*   **Attention Weights ($mv\_att^x$):** A $C \times C$ matrix representing cross-view compatibility [S1, unofficial].
++*   **Skeletal Features ($s^0_{c,t}$):** A $d$-dimensional feature vector retrieved at the query location via trilinear interpolation within a SparseConvNet representation of the SMPL volume [S1, unofficial].
++*   **Pixel-aligned Features ($p^x_{c,t}$):** A $d$-dimensional feature vector extracted from image $I_{c,t}$ at the 2D projection of $x$ [S1, unofficial].
++*   **Attention Weights ($mv\_att^x$):** A $C \times C$ matrix representing cross-view compatibility scores [S1, unofficial].
+ 
+ **Steps:**
+ 
+ 1.  **Retrieve Skeletal Feature:** Map the query point $x$ to the local coordinate space of the SMPL model at time $t$ [S1, unofficial]. Retrieve the skeletal feature $s^0_{c,t}$ at this location using trilinear interpolation within the SparseConvNet representation of the SMPL volume [S1, unofficial]. This feature is time-augmented, encoding geometric deviations of the SMPL vertices [S1, unofficial].
+-
+ 2.  **Sample Pixel-aligned Feature:** Project the query point $x$ onto the 2D image plane of each camera view $c$ to obtain pixel coordinates [S1, unofficial]. Sample the feature $p^x_{c,t}$ from the image $I_{c,t}$ at these coordinates [S1, unofficial]. This feature is time-specific and represents the exact visual appearance at the query location [S1, unofficial].
+-
+-3.  **Construct Multi-view Cross-Attention:** Let $s^0_{1:C,t} = \{s^0_{c,t} \mid c=1,\dots,C\}$ and $p^x_{1:C,t} = \{p^x_{c,t} \mid c=1,\dots,C\}$ be the sets of skeletal and pixel-aligned features across all $C$ views [S1, unofficial]. Compute keys $k(\cdot)$ and values $v(\cdot)$ for both feature types using learned linear layers (independent from temporal transformers) [S1, unofficial]. Calculate the attention weights $mv\_att^x \in \mathbb{R}^{C \times C}$ using the dot product between skeletal keys and pixel-aligned keys, scaled by dimension:
++3.  **Construct Multi-view Cross-Attention:** Let $s^0_{1:C,t} = \{s^0_{c,t} \mid c=1,\dots,C\}$ and $p^x_{1:C,t} = \{p^x_{c,t} \mid c=1,\dots,C\}$ be the sets of skeletal and pixel-aligned features across all $C$ views [S1, unofficial]. Compute keys $k(\cdot)$ and values $v(\cdot)$ for both feature types using learned linear layers independent from temporal transformers [S1, unofficial]. Calculate the attention weights $mv\_att^x \in \mathbb{R}^{C \times C}$ using the dot product between skeletal keys and pixel-aligned keys, scaled by dimension:
+     $$ mv\_att^x = \psi \left( \frac{k(s^0_{1:C,t}) \cdot k(p^x_{1:C,t})^T}{\sqrt{d}} \right) $$
+     where $\psi$ is the softmax operator applied along the second axis (columns) [S1, unofficial]. This highlights confident observations where skeletal and image features are compatible [S1, unofficial].
+-
+ 4.  **Compute View-wise Representation:** Aggregate the values from both feature types using the attention weights:
+     $$ z^x_{1:C,t} = mv\_att^x \cdot v(p^x_{1:C,t}) + v(s^0_{1:C,t}) $$
+     Here, $z^x_{c,t} \in \mathbb{R}^d$ is the view-wise representation for view $c$ [S1, unofficial]. The term $mv\_att^x \cdot v(p^x_{1:C,t})$ re-weights the pixel-aligned features based on skeletal compatibility, while $v(s^0_{1:C,t})$ adds the skeletal value directly [S1, unofficial].
+-
+ 5.  **Compute Meta-time and Meta-view Representation:** Average the view-wise representations across all $C$ views to obtain a single robust feature vector $z^x_t \in \mathbb{R}^d$:
+     $$ z^x_t = \frac{1}{C} \sum_{c=1}^{C} z^x_{c,t} $$
+     This step fuses multi-view information into a meta-representation [S1, unofficial].
+-
+ 6.  **Predict Density:** Pass $z^x_t$ through a Multi-Layer Perceptron $MLP_\sigma$ consisting of four linear layers to predict the volume density:
+     $$ \tilde{\sigma}_t(x) = MLP_\sigma(z^x_t) $$
+     [S1, unofficial].
+-
+ 7.  **Predict Color:** Compute the mean of the pixel-aligned values across views: $\bar{v}_p = \frac{1}{C} \sum_{c=1}^{C} v(p^x_{c,t})$ [S1, unofficial]. Apply positional encoding $\gamma_d(d)$ to the viewing direction $d$ (using $2 \times l$ basis functions as in [28]) [S1, unofficial]. Concatenate the mean pixel-aligned value and the encoded direction, then pass through $MLP_{rgb}$ (two linear layers):
+     $$ \tilde{r}^g_{bt}(x) = MLP_{rgb} \left( [\bar{v}_p; \gamma_d(d)] \right) $$
+     [S1, unofficial].
++
++**Pseudocode:**
++```python
++def multi_view_aggregation(x, C, t, images, cameras, smpl_model, direction_d):
++    # 1. Retrieve skeletal features
++    x_smpl = transform_to_smpl_space(x, smpl_model)
++    s0 = trilinear_interpolate_sparseconvnet(x_smpl, smpl_model.sparse_convnet)  # Shape: (C, d)
++
++    # 2. Sample pixel-aligned features
++    px = []
++    for c in range(C):
++        uv = project_to_image_plane(x, cameras[c])
++        px.append(sample_image_feature(images[c], uv))  # Shape: (C, d)
++    px = torch.stack(px)
++
++    # 3. Construct attention weights
++    k_s = linear_keys(s0)  # Shape: (C, d)
++    k_p = linear_keys(px)  # Shape: (C, d)
++    attn_logits = (k_s @ k_p.T) / math.sqrt(d)
++    mv_att = softmax(attn_logits, dim=1)  # Shape: (C, C)
++
++    # 4. Compute view-wise representation
++    v_s = linear_values(s0)  # Shape: (C, d)
++    v_p = linear_values(px)  # Shape: (C, d)
++    z_view = mv_att @ v_p + v_s  # Shape: (C, d)
++
++    # 5. Compute meta representation
++    z_meta = torch.mean(z_view, dim=0)  # Shape: (d)
++
++    # 6. Predict density
++    sigma = mlp_sigma(z_meta)  # Shape: (1,)
++
++    # 7. Predict color
++    v_p_mean = torch.mean(v_p, dim=0)  # Shape: (d)
++    gamma_d = positional_encoding_direction(direction_d)  # Shape: (6*l,)
++    rgb = mlp_rgb(torch.cat([v_p_mean, gamma_d], dim=-1))  # Shape: (3,)
++
++    return sigma, rgb
++```
+ 
+ **Parameters:**
+@@ -48,7 +81,7 @@
+ 
+ **Edge Cases and Pitfalls:**
+-*   **Occlusion:** If a query point is occluded in some views, the pixel-aligned features $p^x_{c,t}$ may be noisy. The attention mechanism mitigates this by down-weighting incompatible views, but extreme occlusion may require robust skeletal priors [S1, unofficial].
+-*   **SMPL Accuracy:** The skeletal feature retrieval depends on the accuracy of the SMPL pose estimation. Errors in SMPL pose will propagate to $s^0_{c,t}$, potentially misleading the attention weights [S1, unofficial].
+-*   **Trilinear Interpolation:** Sampling from the SparseConvNet volume requires careful handling of boundaries outside the SMPL mesh. [G] Points outside the SMPL volume should be handled with a fallback or clamping to avoid NaNs.
++*   **Occlusion:** If a query point is occluded in some views, the pixel-aligned features $p^x_{c,t}$ may be noisy [S1, unofficial]. The attention mechanism mitigates this by down-weighting incompatible views, but extreme occlusion may require robust skeletal priors [S1, unofficial].
++*   **SMPL Accuracy:** The skeletal feature retrieval depends on the accuracy of the SMPL pose estimation [S1, unofficial]. Errors in SMPL pose will propagate to $s^0_{c,t}$, potentially misleading the attention weights [S1, unofficial].
++*   **Trilinear Interpolation:** Sampling from the SparseConvNet volume requires careful handling of boundaries outside the SMPL mesh [G]. Points outside the SMPL volume should be handled with a fallback or clamping to avoid NaNs [G].
+ 
+ ## Subtopics
+@@ -62,12 +95,12 @@
+ ## Operating characteristics
+ *   **Time Complexity:** Dominated by the multi-view attention mechanism, which is $O(C^2 \cdot d)$ for the attention weights and $O(C \cdot d)$ for the aggregation, plus the MLP inference [G]. The SparseConvNet sampling is efficient due to sparsity [S1, unofficial].
+-*   **Memory Complexity:** Requires storing the SparseConvNet volume for skeletal features and the image features for all views. The attention matrix is $C \times C$.
+-*   **Strengths:** Effectively combines geometric priors (SMPL) with visual details (images). Handles multi-view inconsistencies via attention. Improves rendering quality for articulated humans.
+-*   **Limitations:** Relies on accurate SMPL pose estimation. Computationally more expensive than standard NeRF due to multi-view processing and attention.
+-*   **When to use:** Dynamic human rendering where multi-view consistency and geometric priors are beneficial.
+-*   **When not to use:** Static scenes without articulated subjects, or resource-constrained environments where SMPL inference and multi-view attention are too costly.
++*   **Memory Complexity:** Requires storing the SparseConvNet volume for skeletal features and the image features for all views [S1, unofficial]. The attention matrix is $C \times C$ [S1, unofficial].
++*   **Strengths:** Effectively combines geometric priors (SMPL) with visual details (images) [S1, unofficial]. Handles multi-view inconsistencies via attention [S1, unofficial]. Improves rendering quality for articulated humans [S1, unofficial].
++*   **Limitations:** Relies on accurate SMPL pose estimation [S1, unofficial]. Computationally more expensive than standard NeRF due to multi-view processing and attention [G].
++*   **When to use:** Dynamic human rendering where multi-view consistency and geometric priors are beneficial [G].
++*   **When not to use:** Static scenes without articulated subjects, or resource-constrained environments where SMPL inference and multi-view attention are too costly [G].
+ 
+ ## Background
+-The method originates from the "Neural Human Performer" paper, which introduces a framework for learning generalizable radiance fields for human performance rendering. It builds on the idea of using skeletal priors (SMPL) to regularize the radiance field, extending it with multi-view aggregation to handle dynamic scenes and multiple viewpoints [S1, unofficial]. The multi-view pose refinement variant is described in "A-NeRF," which focuses on articulated neural radiance fields for learning human shape, appearance, and pose, incorporating multi-view constraints for pose refinement [S2, unofficial].
++The method originates from the "Neural Human Performer" paper, which introduces a framework for learning generalizable radiance fields for human performance rendering [S1, unofficial]. It builds on the idea of using skeletal priors (SMPL) to regularize the radiance field, extending it with multi-view aggregation to handle dynamic scenes and multiple viewpoints [S1, unofficial]. The multi-view pose refinement variant is described in "A-NeRF," which focuses on articulated neural radiance fields for learning human shape, appearance, and pose, incorporating multi-view constraints for pose refinement [S2, unofficial].
+ 
+ ## Sources

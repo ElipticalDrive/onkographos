@@ -1,0 +1,204 @@
+--- v001.md
++++ v002.md
+@@ -14,6 +14,6 @@
+ **Data Structures:**
+ 1.  **Logical Brick:** Described by two integer values: the starting frame number and the number of frames in the brick [S1, unofficial].
+-2.  **Ring Buffer:** A pointer structure containing $k$ 3D texture objects. Memory for these $k$ objects is allocated once [S1, unofficial].
+-3.  **Shared Seed List:** An input used by all bricks. It contains a flag for each point indicating whether it is used for constructing geometry for the specific brick [S1, unofficial].
++2.  **Ring Buffer:** A pointer structure containing $k$ 3D texture objects [S1, unofficial].
++3.  **Shared Seed List:** An input used by all bricks [S1, unofficial]. It contains a flag for each point indicating whether it is used for constructing geometry for the specific brick [S1, unofficial].
+ 
+ **Parameters:**
+@@ -26,15 +26,8 @@
+ 
+ **Steps:**
+-1.  **Partitioning:** Divide the video volume $V$ into $K$ bricks. Each brick $B_j$ contains $m$ frames. Bricks are disjoint ($B_j \cap B_l = \emptyset$ for $j \neq l$) [S1, unofficial].
+-2.  **Initialization:** Allocate memory for $k$ 3D texture objects. Fill the first $k$ bricks with their corresponding video frames [S1, unofficial].
+-3.  **Dynamic Update Loop:**
+-    *   Render the current $k$ bricks.
+-    *   Reassign pointers in a cyclic way to form a ring-buffer structure [S1, unofficial].
+-    *   The last texture object in the ring buffer is overwritten with newly entering frames [S1, unofficial].
+-    *   Update the logical brick descriptions (starting frame, frame count) for the next iteration [S1, unofficial].
+-4.  **Rendering (Fragment Program):**
+-    *   For each fragment, transform Cartesian texture coordinates to horseshoe coordinates.
+-    *   Perform a 3D texture lookup.
+-    *   Apply a transfer function to map volume data to color [S1, unofficial].
++1.  **Partitioning:** Divide the video volume $V$ into $K$ bricks [S1, unofficial]. Each brick $B_j$ contains $m$ frames. Bricks are disjoint ($B_j \cap B_l = \emptyset$ for $j \neq l$) [S1, unofficial].
++2.  **Initialization:** Allocate memory for $k$ 3D texture objects [S1, unofficial]. Fill the first $k$ bricks with their corresponding video frames [S1, unofficial].
++3.  **Dynamic Update Loop:** Render the current $k$ bricks [S1, unofficial]. Reassign pointers in a cyclic way to form a ring-buffer structure [S1, unofficial]. The last texture object in the ring buffer is overwritten with newly entering frames [S1, unofficial]. Update the logical brick descriptions (starting frame, frame count) for the next iteration [S1, unofficial].
++4.  **Rendering:** For each fragment, transform Cartesian texture coordinates to horseshoe coordinates [S1, unofficial]. Perform a 3D texture lookup [S1, unofficial]. Apply a transfer function to map volume data to color [S1, unofficial].
+ 
+ **Formulas:**
+@@ -42,5 +35,5 @@
+ 
+ 1.  Scale texture coordinates to $[-1, 1]$:
+-    $$ txCrd.x = ((txCrd.x \cdot 2.0) - 1.0f) \cdot (-1.0f) $$
++    $$ txCrd.x = ((txCrd.x \cdot 2.0) - 1.0) \cdot (-1.0) $$
+     This maps the range to permit cylindrical horseshoe coordinates between $-\pi$ and $\pi$ [S1, unofficial].
+ 
+@@ -62,104 +55,52 @@
+ 
+ **Pseudocode:**
++```python
++import math
+ 
+-```python
+-# Initialization
+-# V: List of N frames
+-# K: Total bricks
+-# k: Active bricks in ring buffer
+-# m: Frames per brick
+-# ring_buffer: Array of k 3D texture objects
+-# current_brick_index: Integer, starts at 0
++# Standard GPU operations defined as [G]
++def allocate_3d_texture(depth): return [None] * depth
++def fill_texture(tex, frames): 
++    for i, f in enumerate(frames): tex[i] = f
++def render_brick(tex, tf): 
++    for v in tex: yield tf(v)
++def tex3D_lookup(u, v, w): return 0.0  # Hardware texture fetch [G]
++def tex1D_lookup(val): return (val, val, val)  # Transfer function lookup [G]
+ 
+-def initialize(V, K, k, m):
+-    n = k * m
+-    if n > len(V):
+-        raise Error("GPU memory insufficient for k bricks")
+-    
+-    # Allocate k texture objects
+-    ring_buffer = [allocate_3d_texture(m, width, height) for _ in range(k)]
+-    
+-    # Fill initial bricks
++def initialize(video_volume, k, m):
++    ring_buffer = [allocate_3d_texture(m) for _ in range(k)]
+     for i in range(k):
+-        start_frame = i * m
+-        end_frame = start_frame + m
+-        fill_texture(ring_buffer[i], V[start_frame:end_frame])
+-        
+-    return ring_buffer, 0
++        start_idx = i * m
++        fill_texture(ring_buffer[i], video_volume[start_idx : start_idx + m])
++    current_window_start = 0
++    return ring_buffer, current_window_start
+ 
+-def render_frame(ring_buffer, current_brick_index, transfer_function):
+-    # Render the current k bricks
+-    for i in range(len(ring_buffer)):
+-        brick_index = (current_brick_index + i) % len(ring_buffer)
+-        render_brick(ring_buffer[brick_index], transfer_function)
++def render_active_bricks(ring_buffer, transfer_function):
++    for tex_obj in ring_buffer:
++        for color in render_brick(tex_obj, transfer_function):
++            pass  # Write to framebuffer [G]
+ 
+-def update_bricks(ring_buffer, current_brick_index, V, m):
+-    # Determine which brick is being overwritten (the last one in the ring)
+-    # In a cyclic ring buffer of size k, the "last" one to be overwritten 
+-    # is typically the one that was filled first if we shift forward, 
+-    # or specifically the one at index (current_brick_index - 1) % k 
+-    # depending on the shift direction. 
+-    # The source states: "the last texture object contains information that can be overwritten"
+-    # and "reassigning the pointers in a cyclic way".
+-    
+-    # Identify the brick to overwrite. 
+-    # If we render bricks 0..k-1, and then shift, the brick that falls off 
+-    # is the one at the "end" of the logical sequence.
+-    # Let's assume the ring buffer represents a window [t, t+m, ..., t+(k-1)m].
+-    # The next window is [t+m, ..., t+km].
+-    # The brick at index 0 (oldest) is discarded, and new data goes to index k-1? 
+-    # Or pointers are reassigned. 
+-    # Source: "reassigning the pointers in a cyclic way... last texture object... overwritten"
+-    
+-    # Implementation of cyclic pointer reassignment:
+-    # We can rotate the array or just update the content of the specific brick.
+-    # Let's update the content of the brick that is about to be replaced.
+-    
+-    # The brick to be overwritten is the one corresponding to the frame that 
+-    # is leaving the window. If the window moves forward by m frames,
+-    # the brick at index 0 (if we consider 0 as the oldest) is replaced.
+-    # However, the source says "last texture object". Let's assume the ring buffer
+-    # is indexed 0 to k-1. The "last" one might be k-1.
+-    # Let's stick to the source's "cyclic way" and "last texture object".
+-    
+-    overwrite_index = (current_brick_index - 1) % len(ring_buffer)
+-    if overwrite_index < 0:
+-        overwrite_index += len(ring_buffer)
+-        
+-    # Calculate new frames for this brick
+-    # The brick contains m frames.
+-    # If we are moving forward, the new brick gets the next m frames.
+-    # We need to track the global frame index.
+-    # Let global_frame_index track the start of the current window.
+-    
+-    # Note: The pseudocode needs to track the global frame index.
+-    # For simplicity, we assume a global counter is maintained externally.
+-    pass
++def update_ring_buffer(ring_buffer, current_window_start, video_volume, k, m):
++    overwrite_idx = (current_window_start // m) % k
++    new_start = current_window_start + k * m
++    new_end = new_start + m
++    if new_end <= len(video_volume):
++        fill_texture(ring_buffer[overwrite_idx], video_volume[new_start : new_end])
++    return (current_window_start + k * m) % len(video_volume)
+ 
+-def fragment_program(txCrd, g_fInRad, g_fOutRad, g_vScaleCrd, VOLsmp, TFsmp):
+-    # Scale texture coordinates to [-1, 1]
+-    txCrd.x = ((txCrd.x * 2.0) - 1.0) * (-1.0)
+-    
+-    # Compute radius and angle
+-    rp_x = sqrt(txCrd.x**2 + txCrd.z**2)
+-    rp_y = atan2(txCrd.z, txCrd.x)
+-    
+-    # Map to local brick coordinates
++def fragment_program(txCrd, g_fInRad, g_fOutRad, g_vScaleCrd):
++    txCrd_x = ((txCrd.x * 2.0) - 1.0) * (-1.0)
++    rp_x = math.sqrt(txCrd_x**2 + txCrd.z**2)
++    rp_y = math.atan2(txCrd.z, txCrd_x)
+     lkup_x = (rp_x - g_fInRad) / (g_fOutRad - g_fInRad)
+     lkup_y = txCrd.y
+-    tmp_z = rp_y / pi
++    tmp_z = rp_y / math.pi
+     lkup_z = (tmp_z - g_vScaleCrd.x) * g_vScaleCrd.y
+-    
+-    # 3D texture lookup
+-    vol_data = tex3D(VOLsmp, (lkup_x, lkup_y, lkup_z))
+-    
+-    # Apply transfer function
+-    output_color = tex1D(TFsmp, vol_data.x)
+-    
++    vol_data = tex3D_lookup(lkup_x, lkup_y, lkup_z)
++    output_color = tex1D_lookup(vol_data)
+     return output_color
+ ```
+ 
+ **Edge Cases and Pitfalls:**
+-*   **Memory Limit:** If $N > k \cdot m$, dynamic bricking is mandatory. If $N \le k \cdot m$, all frames fit in memory, and dynamic bricking is not strictly necessary but may still be used for consistency [S1, unofficial].
++*   **Memory Limit:** If $N > k \cdot m$, dynamic bricking is mandatory [S1, unofficial].
+ *   **Seed Point Consistency:** The shared seed point list must correctly flag points for each brick to ensure flow geometry is constructed accurately across brick boundaries [S1, unofficial].
+ *   **Coordinate Mapping:** The mapping from Cartesian to horseshoe coordinates must handle the discontinuity at the cut of the horseshoe (typically at $\pi$ or $-\pi$) to avoid artifacts [S1, unofficial].
+@@ -168,19 +109,16 @@
+ 
+ ### Dynamic Rebricking
+-A method that adjusts the brick structure dynamically based on view-dependent criteria or memory availability, unlike the fixed temporal partitioning of Scalable Multi-field Bricking. [Link](2823-dynamic-rebricking.md)
++A method that adjusts the brick structure dynamically based on view-dependent criteria or memory availability, unlike the fixed temporal partitioning of Scalable Multi-field Bricking [G]. [Link](2823-dynamic-rebricking.md)
+ 
+ ### Brick-based Volume Rendering with Overlap and LRU Swapping
+-Uses spatial bricking with overlap to reduce artifacts and LRU swapping for memory management, contrasting with the temporal-only partitioning and ring-buffer approach of Scalable Multi-field Bricking. [Link](3782-brick-based-volume-rendering-with-overlap-and-lru-swapping.md)
++Uses spatial bricking with overlap to reduce artifacts and LRU swapping for memory management, contrasting with the temporal-only partitioning and ring-buffer approach of Scalable Multi-field Bricking [G]. [Link](3782-brick-based-volume-rendering-with-overlap-and-lru-swapping.md)
+ 
+ ### Brick-based volume rendering with packed textures
+-Focuses on efficient memory layout of spatial bricks using texture packing, whereas Scalable Multi-field Bricking focuses on temporal partitioning for video data. [Link](7106-brick-based-volume-rendering-with-packed-textures.md)
++Focuses on efficient memory layout of spatial bricks using texture packing, whereas Scalable Multi-field Bricking focuses on temporal partitioning for video data [G]. [Link](7106-brick-based-volume-rendering-with-packed-textures.md)
+ 
+ ## Operating characteristics
+-*   **Time Complexity:** Rendering time is proportional to the number of active bricks $k$ and the resolution of each brick. The dynamic update loop adds overhead for pointer reassignment and texture updates, but this is constant per frame if $k$ and $m$ are fixed [S1, unofficial].
+-*   **Memory Complexity:** Memory usage is $O(k \cdot m \cdot W \cdot H)$, where $W$ and $H$ are the spatial dimensions of the frames. This is independent of the total number of frames $N$, allowing scalability to arbitrarily large video datasets [S1, unofficial].
+-*   **Strengths:** Enables interactive rendering of video volumes that exceed GPU memory. Supports multi-field visualization (volume + flow geometry) within the same bricking framework [S1, unofficial].
+-*   **Limitations:** Limited to temporal partitioning; not suitable for spatially large volumes with few frames. Requires pre-computation of optical flow and seed points [S1, unofficial].
+-*   **When to use:** Ideal for large video datasets (e.g., time-varying scalar fields) where the spatial resolution is manageable but the temporal depth is not. [S1, unofficial]
+-*   **When not to use:** Not suitable for static 3D volumes or datasets where spatial partitioning is more appropriate. [S1, unofficial]
++*   **Strengths:** Enables interactive rendering of video volumes that exceed GPU memory [S1, unofficial]. Supports multi-field visualization (volume + flow geometry) within the same bricking framework [S1, unofficial].
++*   **Limitations:** Limited to temporal partitioning [S1, unofficial]. Requires pre-computation of optical flow and seed points [S1, unofficial].
++*   **When to use:** Ideal for large video datasets (e.g., time-varying scalar fields) where the spatial resolution is manageable but the temporal depth is not [S1, unofficial].
+ 
+ ## Background

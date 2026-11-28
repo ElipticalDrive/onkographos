@@ -1,0 +1,154 @@
+# NeRF Model Setup and Configuration
+Also called: NeRF Initialization, NeRF Scene Setup
+
+## Overview
+This method defines the deterministic initialization of the NeRF model's geometric and textural modules, scene bounding volume, occupancy grids, and sampling parameters. It solves the problem of establishing a valid coordinate space and sampling strategy before the first training iteration. It differs from sibling methods by focusing on the static configuration of the scene representation (AABB vs. unbounded sphere) and the derived sampling constants, rather than the dynamic weight updates or architectural modifications.
+
+## How it works
+**Inputs and Outputs:**
+- **Inputs:** Configuration object `self.config` (containing `learned_background`, `grid_prune`, `num_samples_per_ray`, `radius`), scene bounding box `self.scene_aabb`, and current step `global_step`.
+- **Outputs:** Initialized model state including `occupancy_grid`, `near_plane`, `far_plane`, `cone_angle`, `render_step_size`, and `contraction_type`.
+
+**Data Structures:**
+- `occupancy_grid`: A 3D grid storing occupancy probabilities.
+  - **Fields:** `roi_aabb` (Axis-Aligned Bounding Box), `resolution` (integer, side length of the cubic grid), `contraction_type` (enum).
+  - **Layout:** Not specified in sources. [G] Typically implemented as a dense 3D array or sparse hash map depending on the framework.
+- `ContractionType`: Enum with values `AABB` and `UN_BOUNDED_SPHERE`.
+
+**Parameters:**
+- `occupancy_grid_res`: Integer. 256 if `learned_background` is true; 128 otherwise.
+- `near_plane`: Float or `None`. 0.2 if `learned_background` is true; `None` otherwise.
+- `far_plane`: Float or `None`. $10^4$ if `learned_background` is true; `None` otherwise.
+- `cone_angle`: Float. Calculated as $10^{(\log_{10}(\text{far\_plane}) / \text{num\_samples\_per\_ray})} - 1$ if `learned_background` is true; 0.0 otherwise.
+- `render_step_size`: Float. 0.01 if `learned_background` is true; $1.732 \times 2 \times \text{radius} / \text{num\_samples\_per\_ray}$ otherwise.
+
+**Numbered Steps:**
+1. **Determine Contraction and Bounds:**
+   - If `self.config.learned_background` is true:
+     - Set `contraction_type = ContractionType.UN_BOUNDED_SPHERE`.
+     - Set `near_plane = 0.2`.
+     - Set `far_plane = 10000.0`.
+     - Set `occupancy_grid_res = 256`.
+     - Set `render_step_size = 0.01`.
+     - Calculate `cone_angle = 10 ** (\log_{10}(\text{far\_plane}) / \text{self.config.num\_samples\_per\_ray}) - 1`.
+   - Else (`learned_background` is false):
+     - Set `contraction_type = ContractionType.AABB`.
+     - Set `near_plane = None`.
+     - Set `far_plane = None`.
+     - Set `occupancy_grid_res = 128`.
+     - Set `render_step_size = 1.732 \times 2 \times \text{self.config.radius} / \text{self.config.num\_samples\_per\_ray}`.
+     - Set `cone_angle = 0.0`.
+
+2. **Initialize Occupancy Grid (if pruning enabled):**
+   - If `self.config.grid_prune` is true:
+     - Create `self.occupancy_grid` with:
+       - `roi_aabb = self.scene_aabb`
+       - `resolution = self.occupancy_grid_res`
+       - `contraction_type = self.contraction_type`
+
+3. **Define Occupancy Evaluation Function:**
+   - Define `occ_eval_fn(x)` which returns `density[..., None] * self.render_step_size`.
+   - [G] `density` refers to the raw density output of the NeRF network at query points `x`.
+
+4. **Update Loop (Runtime):**
+   - In the training step `update_step`:
+     - If training and `self.config.grid_prune` is true:
+       - Update `self.occupancy_grid` every `global_step` using `occ_eval_fn`.
+
+**Pseudocode:**
+> **Unverified code.** The code below did not pass a test run against a reference implementation, or no test fits it, so it may contain errors.
+
+```python
+import math
+
+class NeRFSetup:
+    def __init__(self, config, scene_aabb):
+        self.config = config
+        self.scene_aabb = scene_aabb
+        self.occupancy_grid = None
+        self.contraction_type = None
+        self.near_plane = None
+        self.far_plane = None
+        self.cone_angle = None
+        self.render_step_size = None
+        self.occ_eval_fn = None
+        self._setup()
+
+    def _setup(self):
+        # Step 1: Determine Contraction and Bounds
+        if self.config.learned_background:
+            self.contraction_type = "UN_BOUNDED_SPHERE"
+            self.near_plane = 0.2
+            self.far_plane = 1e4
+            self.occupancy_grid_res = 256
+            self.render_step_size = 0.01
+            # Formula: 10**(log10(far_plane) / num_samples_per_ray) - 1
+            self.cone_angle = 10 ** (math.log10(self.far_plane) / self.config.num_samples_per_ray) - 1
+        else:
+            self.contraction_type = "AABB"
+            self.near_plane = None
+            self.far_plane = None
+            self.occupancy_grid_res = 128
+            # Formula: 1.732 * 2 * radius / num_samples_per_ray
+            self.render_step_size = 1.732 * 2 * self.config.radius / self.config.num_samples_per_ray
+            self.cone_angle = 0.0
+
+        # Step 2: Initialize Occupancy Grid
+        if self.config.grid_prune:
+            # [G] Assuming OccupancyGrid class exists with these init args
+            self.occupancy_grid = OccupancyGrid(
+                roi_aabb=self.scene_aabb,
+                resolution=self.occupancy_grid_res,
+                contraction_type=self.contraction_type
+            )
+
+        # Step 3: Define Evaluation Function
+        # Note: This function is a closure or method that accesses the network's density output
+        def occ_eval_fn(density_tensor):
+            # density[..., None] adds a dimension for broadcasting if needed
+            return density_tensor[..., None] * self.render_step_size
+        
+        self.occ_eval_fn = occ_eval_fn
+
+    def update_step(self, global_step, density_tensor):
+        # Step 4: Update Loop
+        if self.config.grid_prune and self.occupancy_grid is not None:
+            # [G] The source says "update ... every global_step". 
+            # This implies a check like `if global_step % update_frequency == 0`.
+            # Since update_frequency is not given, we assume it happens at the step provided.
+            # In practice, this usually involves calling self.occupancy_grid.prune(self.occ_eval_fn)
+            # or similar. The source does not specify the frequency divisor.
+            self.occupancy_grid.update(self.occ_eval_fn(density_tensor))
+
+class OccupancyGrid:
+    def __init__(self, roi_aabb, resolution, contraction_type):
+        self.roi_aabb = roi_aabb
+        self.resolution = resolution
+        self.contraction_type = contraction_type
+        # [G] Initialize grid data structure (e.g., zeros or random)
+        self.data = None 
+
+    def update(self, occupancy_values):
+        # [G] Update internal grid with occupancy_values
+        pass
+```
+
+**Edge Cases and Pitfalls:**
+- **Precision:** The calculation of `cone_angle` involves logarithms and exponentials. Ensure floating-point precision is maintained.
+- **Bounded vs. Unbounded:** Using `AABB` contraction with `learned_background=True` or `UN_BOUNDED_SPHERE` with `learned_background=False` is incorrect per the source logic.
+- **Radius Dependency:** For bounded scenes, `render_step_size` scales linearly with `self.config.radius`. If `radius` is not defined or zero, this will fail.
+
+## Operating characteristics
+- **Time Complexity:** Initialization is $O(1)$ relative to scene complexity, but $O(N^3)$ for occupancy grid allocation where $N = \text{occupancy\_grid\_res}$.
+- **Memory Complexity:** $O(N^3)$ for the occupancy grid.
+- **Measured Performance:** Not given in the sources.
+- **Strengths:** Provides a robust default configuration for both bounded and unbounded scenes.
+- **Limitations:** Static configuration; does not adapt to scene content dynamically without the `grid_prune` update loop.
+- **When to use:** At the start of any NeRF training pipeline.
+- **When not to use:** When using alternative scene representations (e.g., explicit meshes) or non-NeRF methods.
+
+## Background
+This configuration logic originates from the implementation details of the NeRF framework, specifically as documented in the GSDF repository. It addresses the need to map 3D coordinates to a normalized space suitable for neural network training, handling both bounded indoor scenes and unbounded outdoor scenes.
+
+## Sources
+[S1] GSDF, https://github.com/city-super/GSDF, fetched 2026-10-27 (unofficial)

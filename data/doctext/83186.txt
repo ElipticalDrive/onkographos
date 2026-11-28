@@ -1,0 +1,5256 @@
+# Interactive SDF Renderer
+## Interactive Rendering Engine for surfaces defined by singed distance functions
+
+This is the source code for an interactive rendering engine. See it in action on [Youtube](https://youtu.be/aYX5wihe7vQ)
+
+The rendering engine visualised surfaces based on signed distance function (SDF). The engine is was written in C++ and OpenGL from scratch. The code running on the GPU can be generated and compiled on-the-fly. Examples scenes include CSG models, meta-surfaces, and the Mandelbulb fractal.
+
+Made by Csaba Bálint. Supervisor/Tutor: Gábor Valasek.
+
+1. CSABA Bálint, Gábor Valasek. Interactive Rendering Framework for Distance Function Representations. International Conference on Applied Informatics - Annales Mathematicae et Informaticae , 2017, (under review)
+    [Article](http://people.inf.elte.hu/csabix/publications/interactive-rendering.pdf)
+    [Presentation](http://people.inf.elte.hu/csabix/publications/ICAI-SDF-rendering.pdf)
+1. CSABA Bálint, Gábor Valasek. Távolságfüggvényekkel definiált felületek interaktív megjelenítése. Országos Tudományos Diákköri Konferencia, 2016. (II. award)
+    [Document](http://people.inf.elte.hu/csabix/publications/OTDK_doc.pdf)
+    [Presentation](http://people.inf.elte.hu/csabix/publications/OTDK_prezi.pdf)
+
+### 02_Shaders/DebugWindow.h
+```
+#pragma once
+#include <vector>
+#include <set>
+#include <glm/glm.hpp>
+#include <GL/glew.h>
+#include "FunctionChooser.h"
+#include "gCamera.h"
+
+class GPUState; //fwd decl
+class Uniforms; //...
+
+namespace GUI
+{
+	class DebugWindow
+	{
+	public:
+		bool pause = false;
+		bool show_currentstate = true;
+		bool original_size = false;
+
+		struct	//times
+		{
+			bool optimize = true;
+			int num_of_updates = 0;
+
+			struct	//consts
+			{
+				const float fps60ms = 16.0;
+				const float start_value = fps60ms;
+				const int N = 512;					//data exists until this point
+				double target = fps60ms*2;			//node framerate is 30 fps
+				const float learning_rate = 0.2;	//0-1: smaller value means more recent weights more
+			} consts;
+			/// last value holds the average of the rest:		update[min(N-1,i)] ...
+			std::vector<float> update = std::vector<float>(consts.N, consts.start_value*0.8);
+			float render = consts.start_value*0.2;
+			float total = consts.start_value;
+			float sum_of_updates = 0.0;
+			float cpu_measured_time = 16.0;
+			float cpu_gpu_time_err = 0.0;
+		} times;
+
+		int &iternum;
+		Uniforms &uniforms;
+		gCamera &camera;
+
+		struct //ambient
+		{
+			int algorithm = 1;
+			int start_iternum = 15;
+		} ambient;
+
+		struct	//functions
+		{
+			FunctionChooser spheretrace_stepcount = FunctionChooser("Iteration -> Sphere-trace stepcount", glm::vec2(0.f, 20.f), glm::vec2(15.f, 2.f), 1, 0.f);
+			FunctionChooser resolution_multipier = FunctionChooser("Iteration -> Resolution multipier", glm::vec2(0, 0.21f), glm::vec2(12, 1), 1.5f, 0.1f);
+			FunctionChooser shadow_stepcount = FunctionChooser("Iteration -> Shadow stepcount", glm::vec2(0.f, 0.f), glm::vec2(40.f, 2.f), 2.5, -10.f);
+			FunctionChooser user_itercount = FunctionChooser("Iteration -> User Itercount", glm::vec2(0, 7), glm::vec2(35, 16), 1.0f, 1.0f);
+		} functions;
+
+		struct	//gpu_states
+		{
+			GPUState *&source_state;
+			GPUState *&target_state; //** //*& //const
+		} gpu_states;
+
+		struct //view
+		{
+			float fow_mult = 1.0;				//1.0 = 45�
+			GLuint type = 0;					//0 = standard, 1: one screen adjustable, 2: quadrants adjustable
+			GLint samplers[4] = {2, 0, 0, 0};	//0 for depth, 1 for normal 2 for color
+			/*uniform*/ glm::mat4 color_multipiers[4] = {glm::mat4(1), glm::mat4(1) , glm::mat4(1) , glm::mat4(1) };
+			/*uniform*/ glm::vec4 color_offsets[4] = {glm::vec4(0), glm::vec4(0), glm::vec4(0) , glm::vec4(0) };
+			struct //deatil
+			{
+				glm::mat4 channel_map[4] = { glm::mat4(1), glm::mat4(1) , glm::mat4(1) , glm::mat4(1) };
+				glm::vec4 multipiers_diag[4] = { glm::vec4(1), glm::vec4(1) , glm::vec4(1) , glm::vec4(1) };
+				glm::vec4 offsets[4] = { glm::vec4(0), glm::vec4(0), glm::vec4(0) , glm::vec4(0) };
+				int color_mode[4] = {0,2,2,2};
+				int channel_id[4] = { 0,0,2,1 };
+				float ch_multipiers[4] = {1,0.015f,0.01f,4.0};
+				float ch_offsets[4] = { 0,0,0,0 };
+			}detail;
+		}view;
+
+		struct //stats
+		{
+			std::vector<glm::vec4> pixeldata;
+			glm::vec4 max, min, avg, sd;
+			std::vector<float> histograms[4];
+			glm::ivec4 hist_Ns = glm::ivec4(30);
+			std::string latex_hist[4];
+			std::string latex_table[4];
+		}stats;
+
+		DebugWindow(int &iternum, Uniforms &uniforms, GPUState *&source_state, GPUState *&target_state, gCamera &camera);
+
+		void SetSize();
+		void Render();
+		void Resize(int w, int h);
+	public: //private
+		bool turn_pause_to_false = false;
+		bool turn_pause_to_true = false;
+		struct
+		{
+			float full_width = 350;	float full_height = 450;
+			float win_width = 350;	float win_height = 450;
+		} sizes;
+		struct
+		{
+			float scale[2] = { 32.f, 32.f };
+			bool b[2] = { false, false };
+			bool cnd[2][3] = { {false, true, false},{false, false, false} };
+		}stateview;
+		bool p_open = true;
+		const char* this_winname = "Debug Window";
+
+		int tab_sub_wind_id = 0;
+		int radio_visual_gpu_state_show_num = 0;
+
+		void ShowIterationOptions();
+		void ShowFunctionOptions();
+		void ShowSwichOptions();
+		void ShowGPUState(int i, const GPUState & gpu, float m);
+		void ColorMappingSettings(int i);
+		void UpdateHistogramCH(int channel);
+		void DispHistDataCH(int channel);
+		void ShowVisualisationOptions();
+	};
+}
+```
+
+### 02_Shaders/DebugWindow_DataVisual.cpp
+```
+//Data Visualization related functions of Debug Window
+#include "DebugWindow.h"
+#include "imgui\imgui.h"
+#include "GPUState.h"
+#include "Uniforms.h"
+#include "FileIO.h"
+
+void ShowImage(const char* name, const Image2D &img, float scale, float m, ImVec4 multipiers = ImVec4(1,1,1,1))
+{
+	GLuint tex_id = img.get(); GLint tex_w = img.GetW(); GLint tex_h = img.GetH();
+	ImGui::Separator();
+	ImGui::TextUnformatted(name); ImGui::SameLine(); ImGui::Text("%dx%d", tex_w, tex_h);
+
+	float width = glm::max(ImGui::GetContentRegionAvailWidth(), 1.f);
+	float screen_w = width, screen_h = width*tex_h / tex_w;
+	ImGui::Image((ImTextureID)tex_id, ImVec2(screen_w, screen_h), ImVec2(0, m), ImVec2(m, 0), multipiers);
+	if(ImGui::IsItemHovered())
+	{
+		ImVec2 tex_screen_pos = ImGui::GetCursorScreenPos();
+		ImVec2 mouse_screen_pos = ImGui::GetMousePos();
+		ImVec2 uv_mid;
+		uv_mid.x = (mouse_screen_pos.x - tex_screen_pos.x) / screen_w;
+		uv_mid.y = (tex_screen_pos.y - mouse_screen_pos.y) / screen_h;
+
+		ImVec2 uv0 = ImVec2((uv_mid.x - scale / tex_w)*m, (uv_mid.y + scale / tex_h)*m);
+		ImVec2 uv1 = ImVec2((uv_mid.x + scale / tex_w)*m, (uv_mid.y - scale / tex_h)*m);
+		ImGui::PushStyleColor(ImGuiCol_PopupBg, ImVec4(1.f, 0.9f, 0.8f, 0.3f));
+		ImGui::BeginTooltip();
+		ImGui::Image((ImTextureID)tex_id, ImVec2(256, 256), uv0, uv1, multipiers);
+		ImGui::EndTooltip();
+		ImGui::PopStyleColor();
+	}
+}
+
+void GUI::DebugWindow::ShowGPUState(int i, const GPUState & gpu, float m)
+{
+	ImGui::PushID(i);
+	float width = ImGui::GetContentRegionAvailWidth();
+	ImGui::Checkbox("Orig size", &stateview.b[i]);
+	ImGui::PushItemWidth(-275);
+	ImGui::SameLine(); ImGui::DragFloat("Magnifier", &stateview.scale[i], 0.1f, 1.f, 256.f);
+	ImGui::SameLine(); ImGui::Checkbox("Color", stateview.cnd[i] + 0);
+	ImGui::SameLine(); ImGui::Checkbox("Normal", stateview.cnd[i] + 1);
+	ImGui::SameLine(); ImGui::Checkbox("Depth", stateview.cnd[i] + 2);
+
+	if(stateview.b[i]) m = 1.0;
+	if(stateview.cnd[i][0])	ShowImage("Color image", gpu.linear_2, stateview.scale[i], m,  ImVec4(1,1,1, 10));
+	if(stateview.cnd[i][1])	ShowImage("Normal image", gpu.linear_1, stateview.scale[i], m, ImVec4(1,1,1, 10));
+	if(stateview.cnd[i][2])	ShowImage("Depth image", gpu.nearest_0, stateview.scale[i], m, ImVec4(0.02, 2, 0.02, 10));
+	ImGui::PopID();
+}
+
+void GUI::DebugWindow::ColorMappingSettings(int i)
+{
+	ImGui::PushID(2 + i);
+	ImGui::SameLine(); ImGui::RadioButton("Depth", &view.samplers[i], 0);
+	ImGui::SameLine(); ImGui::RadioButton("Normal", &view.samplers[i], 1);
+	ImGui::SameLine(); ImGui::RadioButton("Color", &view.samplers[i], 2);
+	ImGui::PushItemWidth(-80);
+	ImGui::Combo("Color mode", &view.detail.color_mode[i], "Identity\0""3 Channels\0Single Channel\0Advanced\0");
+	switch(view.detail.color_mode[i])
+	{
+	case 0: view.color_multipiers[i] = glm::mat4(1); view.color_offsets[i] = glm::vec4(0);	break;
+	case 1: view.color_multipiers[i] = glm::mat4(1, 0, 0, 0, 0, 1, 0, 0, 0, 0, 1, 0, 0, 0, 0, 0);
+		view.color_offsets[i] = glm::vec4(0, 0, 0, 1);										break;
+	case 2:
+	{
+		ImGui::TextUnformatted("Choose a ch");
+		ImGui::SameLine(); ImGui::RadioButton("R", &view.detail.channel_id[i], 0);
+		ImGui::SameLine(); ImGui::RadioButton("G", &view.detail.channel_id[i], 1);
+		ImGui::SameLine(); ImGui::RadioButton("B", &view.detail.channel_id[i], 2);
+		ImGui::SameLine(); ImGui::RadioButton("A", &view.detail.channel_id[i], 3);
+
+		float width = ImGui::GetContentRegionAvailWidth() / 2.5f - 10.f;
+		ImGui::PushItemWidth(width);
+		ImGui::DragFloat("Mult", &view.detail.ch_multipiers[i], 0.005f);
+		ImGui::PushItemWidth(width);
+		ImGui::SameLine();
+		ImGui::DragFloat("Offset", &view.detail.ch_offsets[i], 0.005f);
+
+		view.color_multipiers[i] = glm::mat4(0);
+		view.color_multipiers[i][view.detail.channel_id[i]] = glm::vec4(view.detail.ch_multipiers[i]);
+		view.color_offsets[i] = glm::vec4(view.detail.ch_offsets[i]);
+	}
+	break;
+	case 3:
+	{
+		glm::mat4 &M = view.detail.channel_map[i];
+		for(int r = 0; r < 4; ++r)
+		{
+			ImGui::PushID(r); ImGui::Text("Channel %d", r);
+			ImGui::SameLine();	M[r][0] = (float)(M[r][0] != (float)ImGui::RadioButton("##1", M[r][0] == 1.f));
+			ImGui::SameLine();	M[r][1] = (float)(M[r][1] != (float)ImGui::RadioButton("##2", M[r][1] == 1.f));
+			ImGui::SameLine();	M[r][2] = (float)(M[r][2] != (float)ImGui::RadioButton("##3", M[r][2] == 1.f));
+			ImGui::SameLine();	M[r][3] = (float)(M[r][3] != (float)ImGui::RadioButton("##4", M[r][3] == 1.f));
+			ImGui::PopID();
+		}
+		//glm::vec4 diag = view.detail.multipiers[i].
+		glm::vec4 &d = view.detail.multipiers_diag[i];
+		ImGui::DragFloat4("Mults", &d.x, 0.005f);
+		ImGui::DragFloat4("Offsets", &view.detail.offsets[i].x, 0.005f);
+
+		view.color_offsets[i] = M * view.detail.offsets[i];
+		glm::mat4 temp = glm::mat4(d.x, 0, 0, 0, 0, d.y, 0, 0, 0, 0, d.z, 0, 0, 0, 0, d.w);
+		view.color_multipiers[i] = M * temp;
+	}
+	break;
+	default:break;
+	}
+	ImGui::PopID();
+}
+
+void GUI::DebugWindow::UpdateHistogramCH(int ch)
+{	//Create histogram and statistical data for channel ch
+	stats.histograms[ch].assign(stats.hist_Ns[ch], 0.f);
+	float multipier = (float) stats.hist_Ns[ch] / (stats.max[ch] - stats.min[ch]);
+	int maxind = (int) stats.hist_Ns[ch] - 1;
+	for(const auto& pix : stats.pixeldata)
+		++stats.histograms[ch][std::min<int>((pix[ch] - stats.min[ch]) * multipier, maxind)];
+	float normalizer = 1.f / (float)stats.pixeldata.size();
+	//normalize histogram and generate latex from histograms
+	auto &hs = stats.histograms[ch];		auto &lh = stats.latex_hist[ch];
+	lh = "\\begin{tikzpicture}\n\\begin{axis}[ybar interval, ymax = 1, ymin = 0]\n\\addplot coordinates { ";
+	for(int j = 0; j < hs.size(); ++j)
+	{
+		hs[j] *= normalizer;	//normalizing
+		lh += "(" + std::to_string(j / multipier + stats.min[ch]) + ", " + std::to_string(hs[j]) + ") ";
+	}
+	lh += "}; \n\\end{axis}\n\\end{tikzpicture}\n%" + std::to_string(stats.min[ch]) + " && "
+		   + std::to_string(stats.max[ch]) + " && " + std::to_string(stats.avg[ch]) + " && " + std::to_string(stats.sd[ch]);
+}
+
+void GUI::DebugWindow::DispHistDataCH(int channel)
+{
+	ImGui::PushID(channel);
+	float width = ImGui::GetContentRegionAvailWidth();
+	ImGui::TextDisabled("Channel %d", channel); ImGui::SameLine();
+	ImGui::PushItemWidth(60);
+	if(ImGui::InputInt("##i", &stats.hist_Ns[channel]))
+		UpdateHistogramCH(channel);
+	if(stats.histograms[channel].size() > 0)
+	{
+		ImGui::SameLine(0, 15);
+		if(ImGui::SmallButton("Copy LaTeX"))
+			ImGui::SetClipboardText(stats.latex_hist[channel].data());
+		ImGui::PlotHistogram("##h", stats.histograms[channel].data(), stats.histograms[channel].size(),
+							 0, nullptr, FLT_MAX, FLT_MAX, ImVec2(width, sizes.win_width*0.33));
+		ImGui::Text("range = %0.2f - %0.2f, avg = %0.2f, sd = %0.2f", stats.min[channel], stats.max[channel], stats.avg[channel], stats.sd[channel]);
+		if(ImGui::BeginChild(channel, ImVec2(width, 92), true, ImGuiWindowFlags_HorizontalScrollbar))
+		{
+			ImGui::TextUnformatted(stats.latex_hist[channel].data(), &stats.latex_hist[channel].back());
+		}
+		ImGui::EndChild();
+	}
+	ImGui::PopID();
+}
+
+void GUI::DebugWindow::ShowVisualisationOptions()
+{
+	if(ImGui::CollapsingHeader("GPU States", nullptr, true, true))
+	{
+		ImGui::TextUnformatted("Current GPU state");
+		ShowGPUState(0, *gpu_states.source_state, uniforms.resolution_multipiers.camera.x);
+		ImGui::Separator();
+		ImGui::TextUnformatted("Previous GPU state");
+		ShowGPUState(1, *gpu_states.target_state, uniforms.resolution_multipiers.texture.x);
+	}
+	if(ImGui::CollapsingHeader("Fullscreen Visualization", nullptr, true, true))
+	{
+		int tmp = view.type;
+		ImGui::PushItemWidth(-80);
+		ImGui::Combo("View type", &tmp, "Standard\0Adjustable\0Quadrants\0");
+		view.type = tmp;
+		if(view.type != 0)
+		{
+			if(view.type == 2) { ImGui::Separator(); ImGui::Columns(2, "First row", true); }
+			ImGui::TextUnformatted((view.type == 1 ? "Channel" : "1st"));
+			ColorMappingSettings(0);
+			if(view.type == 2)
+			{
+				ImGui::NextColumn();
+				ImGui::TextUnformatted("2nd");	ColorMappingSettings(1);
+				ImGui::Columns(1, "Separator only", false);
+				ImGui::Separator();
+				ImGui::Columns(2, "Second row", true);
+				ImGui::TextUnformatted("3rd");	ColorMappingSettings(2);
+				ImGui::NextColumn();
+				ImGui::TextUnformatted("4th");	ColorMappingSettings(3);
+				ImGui::Columns(1, nullptr, false);	ImGui::Separator();
+			}
+			glUniform1iv(0, 4, view.samplers);
+			glUniformMatrix4fv(9, 4, false, &view.color_multipiers[0][0][0]);
+			glUniform4fv(5, 4, &view.color_offsets[0][0]);
+		}
+	}
+	if(ImGui::CollapsingHeader("Histograms", nullptr, true, false))
+	{
+		static int texind = 0;
+		float width = ImGui::GetContentRegionAvailWidth();
+		ImGui::PushItemWidth(width*0.55 + 50);
+		ImGui::Combo("Texture", &texind, "nearest 0\0linear 1\0linear 2\0linear 3\0");
+		ImGui::SameLine(); const int H_N = 30;
+		if(ImGui::Button("Load"))
+		{
+			GLuint texid; GLsizei w, h;
+			const GPUState *gpus = gpu_states.source_state;
+			switch(texind)
+			{
+			case 0: texid = gpu_states.source_state->nearest_0.get(); w = gpus->nearest_0.GetW(); h = gpus->nearest_0.GetH();  break;
+			case 1: texid = gpu_states.source_state->linear_1.get(); w = gpus->linear_1.GetW(); h = gpus->linear_1.GetH();  break;
+			case 2: texid = gpu_states.source_state->linear_2.get(); w = gpus->linear_2.GetW(); h = gpus->linear_2.GetH();  break;
+			case 3: texid = gpu_states.source_state->linear_3.get(); w = gpus->linear_3.GetW(); h = gpus->linear_3.GetH();  break;
+			}
+			stats.pixeldata.resize(w*h);
+			glBindTexture(GL_TEXTURE_2D, texid);
+			glGetTexImage(GL_TEXTURE_2D, 0, GL_RGBA, GL_FLOAT, stats.pixeldata.data());
+
+			stats.min = stats.pixeldata[0]; stats.max = stats.pixeldata[0];
+			for(const auto& pix : stats.pixeldata)
+			{
+				stats.min = glm::min(stats.min, pix);	stats.max = glm::max(stats.max, pix);
+				stats.avg += pix;						stats.sd += pix * pix;
+			}
+			float normalizer = 1.f / (float)stats.pixeldata.size();
+			stats.avg *= normalizer;		stats.sd= glm::sqrt(stats.sd * normalizer - stats.avg * stats.avg);
+			for(int i = 0; i < 4; ++i) UpdateHistogramCH(i);
+		}
+		ImGui::PushFont(ImGui::GetIO().Fonts->Fonts[0]);
+		ImGui::Columns(2, "1", true);		DispHistDataCH(0);
+		ImGui::NextColumn();			DispHistDataCH(1);
+		ImGui::Columns(1, 0, false);	ImGui::Separator();
+		ImGui::Columns(2, "2", true);	DispHistDataCH(2);
+		ImGui::NextColumn();			DispHistDataCH(3);
+		ImGui::Columns(1, 0, false);	ImGui::PopFont();
+
+		static char filename[256] = "R:/stats.txt";
+		ImGui::PushItemWidth(width*0.55 + 50);
+		ImGui::InputText("Filename", filename, 256, ImGuiInputTextFlags_AutoSelectAll);
+		ImGui::PopItemWidth();
+		ImGui::SameLine();
+		if(ImGui::Button("Save"))
+			FileIO::SaveUnformattedData(filename, (char*)&stats.pixeldata[0], stats.pixeldata.size()*sizeof(glm::vec4));
+	}
+	if(ImGui::CollapsingHeader("Iteration times", nullptr, true, true))
+	{
+		ImGui::TextUnformatted("Optimize Rendertimes:"); ImGui::SameLine();
+		if(ImGui::RadioButton("On", times.optimize)) times.optimize = true;
+		ImGui::SameLine();
+		if(ImGui::RadioButton("Off", !times.optimize)) times.optimize = false;
+
+		ImGui::TextUnformatted("Target framerate:"); ImGui::SameLine();
+		if(ImGui::RadioButton("60fps", 1 * times.consts.fps60ms == times.consts.target)) times.consts.target = 1 * times.consts.fps60ms;
+		ImGui::SameLine();
+		if(ImGui::RadioButton("30fps", 2 * times.consts.fps60ms == times.consts.target)) times.consts.target = 2 * times.consts.fps60ms;
+		ImGui::SameLine();
+		if(ImGui::RadioButton("20fps", 3 * times.consts.fps60ms == times.consts.target)) times.consts.target = 3 * times.consts.fps60ms;
+		ImGui::SameLine();
+		if(ImGui::RadioButton("15fps", 4 * times.consts.fps60ms == times.consts.target)) times.consts.target = 4 * times.consts.fps60ms;
+		ImGui::SameLine();
+		if(ImGui::RadioButton("12fps", 5 * times.consts.fps60ms == times.consts.target)) times.consts.target = 5 * times.consts.fps60ms;
+		ImGui::SameLine();
+		if(ImGui::RadioButton("10fps", 6 * times.consts.fps60ms == times.consts.target)) times.consts.target = 6 * times.consts.fps60ms;
+
+		ImGui::TextDisabled("Computation time: %0.1f ms", times.sum_of_updates);
+		ImGui::TextDisabled("Show & UI time: %0.1f ms", times.render);
+		ImGui::TextDisabled("Total GPU time: %0.1f ms", times.total);
+		ImGui::TextDisabled("Total CPU time: %0.1f ms", times.cpu_measured_time);
+		ImGui::TextDisabled("Average FPS: %0.1f ms", 1000.0 / times.cpu_measured_time);
+		ImGui::TextDisabled("Number of  updates: %d", times.num_of_updates);
+		float width = ImGui::GetContentRegionAvailWidth();
+		
+		ImGui::PlotHistogram("##UPDATES",times.update.data(),times.update.size()/8, 0,nullptr,0,times.consts.target,ImVec2(width,10*sqrtf(width)));
+		
+		if(ImGui::BeginChild("Time prediction vector", ImVec2(0, 260)))
+		{
+			ImGui::PushFont(ImGui::GetIO().Fonts->Fonts[0]);
+			ImGui::Separator();
+			for(int i = 0; i < times.consts.N - 1; ++i)
+				ImGui::TextDisabled("%d itaration time : %0.1f ms", i + 1, times.update[i]);
+			ImGui::TextDisabled("Above %d iteration: %0.1f ms", times.consts.N, times.update[times.consts.N - 1]);
+			ImGui::Separator();
+			ImGui::PopFont();
+		}
+		ImGui::EndChild();
+	}
+}
+```
+
+### 02_Shaders/DebugWindow_Iteration_Switches.cpp
+```
+#include "DebugWindow.h"
+#include "imgui\imgui.h"
+#include "Uniforms.h"
+
+
+void GUI::DebugWindow::ShowIterationOptions()
+{
+	if(turn_pause_to_false) pause = false;
+	if(turn_pause_to_true) pause = true;
+	turn_pause_to_false = turn_pause_to_true = false;
+
+	ImVec2 button_size = ImVec2(ImGui::GetContentRegionAvailWidth() / 2 - 5, 30);
+
+	ImGui::PushStyleColor(ImGuiCol_Button, (pause ? ImVec4(0, 1, 0, 0.5f) : ImVec4(1, 0, 0, 0.5f)));
+	ImGui::PushStyleColor(ImGuiCol_ButtonHovered, (pause ? ImVec4(0, 1, 0, 0.75f) : ImVec4(1, 0, 0, 0.75f)));
+	ImGui::PushStyleColor(ImGuiCol_ButtonActive, (pause ? ImVec4(0, 1, 0, 1) : ImVec4(1, 0, 0, 1)));
+	ImGui::PushFont(ImGui::GetIO().Fonts->Fonts[4]);
+	if(ImGui::Button((pause ? "Resume" : "Pause"), button_size)) pause = !pause;
+	ImGui::PopFont();
+	ImGui::PopStyleColor(3);
+	ImGui::SameLine();
+	ImGui::PushFont(ImGui::GetIO().Fonts->Fonts[4]);
+	if(ImGui::Button("Restart", button_size))	iternum = 0;
+	ImGui::PopFont();
+	ImGui::PushFont(ImGui::GetIO().Fonts->Fonts[3]);
+	ImGui::TextUnformatted("Iteration = "); ImGui::SameLine(); ImGui::TextColored(ImVec4(1, 0.5, 0.5, 1), "%d", iternum);
+	ImGui::PopFont();
+	if(pause)
+	{
+		button_size = ImVec2(ImGui::GetContentRegionAvailWidth() / 3 - 5, 19);
+		if(ImGui::Button("Next Frame", button_size))
+		{
+			turn_pause_to_true = true;
+			pause = false;
+		}
+		ImGui::SameLine();
+		ImGui::PushStyleColor(ImGuiCol_Button, (show_currentstate ? ImVec4(1, 1, 0, 0.5) : ImVec4(0, 0, 1, 0.5)));
+		ImGui::PushStyleColor(ImGuiCol_ButtonHovered, (show_currentstate ? ImVec4(1, 1, 0, 0.75f) : ImVec4(0, 0, 1, 0.75f)));
+		ImGui::PushStyleColor(ImGuiCol_ButtonActive, (show_currentstate ? ImVec4(1, 1, 0, 1) : ImVec4(0, 0, 1, 1)));
+		if(ImGui::Button((show_currentstate ? "Show Previous State" : "Show Current State"), button_size))
+			show_currentstate = !show_currentstate;
+		ImGui::PopStyleColor(3);
+	}
+	ImGui::PushStyleColor(ImGuiCol_Button, (original_size ? ImVec4(0, 1, 1, 0.5) : ImVec4(1, 0, 1, 0.5)));
+	ImGui::PushStyleColor(ImGuiCol_ButtonHovered, (original_size ? ImVec4(0, 1, 1, 0.75f) : ImVec4(1, 0, 1, 0.75f)));
+	ImGui::PushStyleColor(ImGuiCol_ButtonActive, (original_size ? ImVec4(0, 1, 1, 1) : ImVec4(1, 0, 1, 1)));
+	if(pause)
+	{
+		ImGui::SameLine();
+		if(ImGui::Button((original_size ? "Show Original Size" : "Show Normal Size"), button_size))
+			original_size = !original_size;
+	}
+	else
+	{
+		ImGui::SameLine(ImGui::GetContentRegionAvailWidth() - (original_size ? 127 : 113));
+		if(ImGui::SmallButton((original_size ? "Show Original Size" : "Show Normal Size")))
+			original_size = !original_size;
+	}
+	ImGui::PopStyleColor(3);
+}
+
+void GUI::DebugWindow::ShowSwichOptions()
+{
+	float width = ImGui::GetContentRegionAvailWidth();
+	int tmpi; float tmpf;
+	ImGui::PushItemWidth(-25.f - width*0.2f);
+
+	if(ImGui::CollapsingHeader("Tracing Options", nullptr, false, false))
+	{
+		ImGui::PushFont(ImGui::GetIO().Fonts->Fonts[2]);
+		ImGui::TextDisabled("Sphere-trace");
+		ImGui::PopFont();
+
+		tmpi = uniforms.algorithms.spheretrace - Uniforms::ST_1;
+		ImGui::Combo("Algorithm", &tmpi, "Basic Algorithm\0Relaxed Sphere-tracing Algorithm\0Tangent Spheres Algorithm\0");
+		uniforms.algorithms.spheretrace = tmpi + Uniforms::ST_1;
+
+		ImGui::Separator();
+		ImGui::PushFont(ImGui::GetIO().Fonts->Fonts[2]);
+		ImGui::TextDisabled("Surface normals");
+		ImGui::PopFont();
+
+		tmpi = uniforms.algorithms.norm - Uniforms::NORM_0;
+		ImGui::Combo("Aproximation method", &tmpi, "Use previous (0 evaluations)\0Tetrahedron (4 evaluations)\0Simmetric difference (6 evaluations)\0");
+		uniforms.algorithms.norm = tmpi + Uniforms::NORM_0;
+
+		ImGui::DragFloat("Normal epszilon multipier", &uniforms.normal.epsz_mult, 0.01f, 0.f, 1000);
+	}
+	if(ImGui::CollapsingHeader("Camera & Lighting", nullptr, false, true))
+	{
+		ImGui::PushFont(ImGui::GetIO().Fonts->Fonts[2]);
+		ImGui::TextDisabled("Camera");
+		ImGui::PopFont();
+		bool l = false;
+		glm::vec3 eye = camera.GetEye();
+		l = l || ImGui::DragFloat3("Eye", &eye.x, 0.1f, 0, 0, "%.4f");
+		glm::vec3 at = camera.GetAt();
+		l = l || ImGui::DragFloat3("At", &at.x, 0.1f, 0, 0, "%.4f");
+		glm::vec3 up = camera.GetUp();
+		l = l || ImGui::DragFloat3("Up", &up.x, 0.1f, 0, 0, "%.4f");
+		if(l) { camera.SetView(eye, at, up); iternum = 0; }
+
+		float speed = camera.GetSpeed();
+		ImGui::PushItemWidth(width*0.4f);
+		ImGui::DragFloat("Speed", &speed, 0.1f, 0, 1000, "%.1f");
+		camera.SetSpeed(speed);
+		ImGui::PopItemWidth();		ImGui::SameLine();
+		ImGui::DragFloat("Fow multipier", &view.fow_mult, 0.01f, 0.02f, 100, "%.2f");
+
+		ImGui::Separator();
+
+		ImGui::PushFont(ImGui::GetIO().Fonts->Fonts[2]);
+		ImGui::TextDisabled("Light");
+		ImGui::PopFont();
+		static bool relative_to_camera = false;
+		static glm::vec3 light_pos = glm::vec3(2);
+
+		ImGui::DragFloat3("Position##Light", (relative_to_camera ? &light_pos.x : &uniforms.shadows.light_pos.x), 0.1f);
+		if(relative_to_camera) uniforms.shadows.light_pos = eye + light_pos;
+
+		ImGui::Checkbox("Relative to camera", &relative_to_camera);
+		ImGui::SameLine();
+		ImGui::DragFloat("Radius##Light", &uniforms.shadows.light_radius, 0.01f, 0.f, 10000, "%.2f");
+		ImGui::PushItemWidth(width*0.4f);
+		ImGui::DragFloat("Decay##Light", &uniforms.material.light_decay, 0.001f, 0, uniforms.material.light_strength, "%.3f");
+		ImGui::PopItemWidth();		ImGui::SameLine();
+		ImGui::DragFloat("Strength##Light", &uniforms.material.light_strength, 0.1f, 0, 10000, "%.2f");
+	}
+	if(ImGui::CollapsingHeader("Occulution Options", nullptr, false, true))
+	{
+		ImGui::PushFont(ImGui::GetIO().Fonts->Fonts[2]);
+		ImGui::TextDisabled("Ambient Occulution");
+		ImGui::PopFont();	ImGui::SameLine(width*0.4f);
+		ImGui::InputInt("Ambient##AO", &ambient.start_iternum);
+		ImGui::Combo("Algorithm##AO", &ambient.algorithm, "No Ambient Occulution\0Progressive AO\0");
+		ImGui::DragFloat("Radius##AO", &uniforms.ambient_occolution.radius, 0.01f, 0, 10000, "%.2f");
+		ImGui::DragFloat("Strength##AO", &uniforms.ambient_occolution.strength, 0.01f, 0, 10000, "%.2f");
+		ImGui::Separator();
+
+		ImGui::PushFont(ImGui::GetIO().Fonts->Fonts[2]);
+		ImGui::TextDisabled("Shadow");
+		ImGui::PopFont();	ImGui::SameLine(width*0.4f);
+		tmpf = (1 - uniforms.shadows.step_multipier) * 100;
+		ImGui::DragFloat("Quality##Shadow", &tmpf, 0.1f, 0, 90, "%.1f%%");
+		uniforms.shadows.step_multipier = 1 - tmpf*0.01f;
+
+		tmpi = uniforms.algorithms.shadow - Uniforms::SHADOW_0;
+		ImGui::Combo("Shadow Type", &tmpi,
+					 "No shadow\0Hard Shadow to light\0Soft Shadow to light\0Hard Shadow from light\0Soft Shadow from light\0");
+		uniforms.algorithms.shadow = tmpi + Uniforms::SHADOW_0;
+
+	}
+	if(ImGui::CollapsingHeader("Material Options", nullptr, false, false))
+	{
+		ImGui::DragFloat("Ambient strength", &uniforms.material.ambient, 0.01f, 0, 1, "%.2f");
+		ImGui::DragFloat("Diffuse strength", &uniforms.material.diffuse, 0.01f, 0, 1, "%.2f");
+		ImGui::DragFloat("Specular strength", &uniforms.material.specular, 0.01f, 0, 1, "%.2f");
+		ImGui::DragFloat("Specular power", &uniforms.material.power, 1, 0, 10000, "%.1f", 1.5);
+		ImGui::DragFloat("Light decay", &uniforms.material.light_decay, 0.001f, 0, uniforms.material.light_strength, "%.3f");
+		ImGui::DragFloat("Light Strength", &uniforms.material.light_strength, 0.1f, 0, 10000, "%.2f");
+	}
+	ImGui::PopItemWidth();
+}
+```
+
+### 02_Shaders/DebugWindow_render.cpp
+```
+#include "DebugWindow.h"
+#include "imgui\imgui.h"
+//#include "Uniforms.h"
+
+void GUI::DebugWindow::SetSize()
+{
+	sizes.win_width = sqrtf((float)sizes.full_width) * 9.5f + 100.f;
+	sizes.win_height = sizes.full_height - 50;
+	ImGui::SetWindowSize(this_winname, ImVec2(sizes.win_width + 30, sizes.full_height));
+	ImGui::SetWindowPos(this_winname, ImVec2(0, 0));
+}
+
+GUI::DebugWindow::DebugWindow(int &iternum, Uniforms & uniforms, GPUState *& source_state, GPUState *& target_state, gCamera &camera)
+	:iternum(iternum), uniforms(uniforms), gpu_states({ source_state, target_state }), camera(camera)
+{}
+
+void GUI::DebugWindow::Render()
+{
+	if(p_open) SetSize();
+	ImGui::PushFont(ImGui::GetIO().Fonts->Fonts[2]);
+	if(!ImGui::Begin(this_winname, &p_open, ImGuiWindowFlags_NoMove | ImGuiWindowFlags_NoResize))
+	{
+		ImGui::End();	ImGui::PopFont(); return;
+	}
+	ImGui::PopFont();	ImGui::PushFont(ImGui::GetIO().Fonts->Fonts[1]);
+	ShowIterationOptions();
+	ImGui::Separator();
+
+	const int N = 3;
+	const char * tmp_selectables[N] = {"Functions", "Swiches", "Data Visualisation"};
+	ImVec2 tab_button_size = ImVec2(ImGui::GetContentRegionAvailWidth() / 3 - 5, 15);
+
+	ImGui::PushFont(ImGui::GetIO().Fonts->Fonts[2]);
+	for(int i = 0; i < N; ++i)
+	{
+		if(ImGui::Selectable(tmp_selectables[i], i == tab_sub_wind_id, 0, tab_button_size))
+			tab_sub_wind_id = i;
+		if(i != N-1) ImGui::SameLine();
+	}ImGui::PopFont();
+
+	switch(tab_sub_wind_id)
+	{
+	case 0:	ShowFunctionOptions();		break;
+	case 1:	ShowSwichOptions();			break;
+	case 2:	ShowVisualisationOptions();	break;
+	default:							break;
+	}
+	ImGui::End();
+	ImGui::PopFont();
+}
+
+void GUI::DebugWindow::Resize(int w, int h)
+{
+	sizes.full_width = (float)w; sizes.full_height = (float)h;
+	SetSize();
+}
+
+void GUI::DebugWindow::ShowFunctionOptions()
+{
+	functions.resolution_multipier.ChangeFunction();
+	functions.spheretrace_stepcount.ChangeFunction();
+	functions.shadow_stepcount.ChangeFunction();
+	functions.user_itercount.ChangeFunction();
+}
+```
+
+### 02_Shaders/FBO.cpp
+```
+#include "FBO.h"
+#include "GLCHECK.h"
+#include <iostream>
+
+GLuint FBO::bound_fbo = 0;
+
+FBO::FBO()
+{
+	glGenFramebuffers(1, &fbo);
+}
+FBO::~FBO()
+{
+	glDeleteFramebuffers(1, &fbo);
+}
+void FBO::addAttachement(const GLuint im)
+{
+	bind();
+	GLenum color_attachment_i = GL_COLOR_ATTACHMENT0 + buffs.size();
+		//glFramebufferTexture2D(GL_DRAW_FRAMEBUFFER, color_attachment_i, GL_TEXTURE_2D, im, 0);
+	glFramebufferTexture(GL_DRAW_FRAMEBUFFER, color_attachment_i, im, 0);
+	buffs.push_back(color_attachment_i);
+}
+void FBO::finalize()
+{
+	glDrawBuffers(buffs.size(), buffs.data());
+}
+void FBO::check() const
+{
+	switch(glCheckFramebufferStatus(GL_FRAMEBUFFER))
+	{
+#define E "Incomplete framebuffer : "
+	case GL_FRAMEBUFFER_COMPLETE: break; //OK
+	case GL_FRAMEBUFFER_INCOMPLETE_ATTACHMENT: std::cout << (E "GL_FRAMEBUFFER_INCOMPLETE_ATTACHMENT\n"); exit(1); break;
+	case GL_FRAMEBUFFER_INCOMPLETE_MISSING_ATTACHMENT: std::cout << (E "GL_FRAMEBUFFER_INCOMPLETE_MISSING_ATTACHMENT\n"); exit(1); break;
+	case GL_FRAMEBUFFER_UNSUPPORTED: std::cout << (E "GL_FRAMEBUFFER_UNSUPPORTED\n"); exit(1); break;
+	default: std::cout << (E "Unknown FBO Error\n"); exit(1); break;
+#undef E
+	}
+}
+```
+
+### 02_Shaders/FBO.h
+```
+#pragma once
+#include <GL/glew.h>
+#include <vector>
+
+class FBO
+{
+protected:
+	std::vector<GLenum> buffs;
+	static GLuint bound_fbo;
+	GLuint fbo = bound_fbo;
+public:
+	FBO();
+	~FBO();
+
+	FBO(const FBO&) = default;
+	FBO& operator = (const FBO&) = default;
+
+	void addAttachement(const GLuint im);
+	inline void clear() { buffs.clear(); }
+	void finalize();
+	void check() const ;
+	inline void bind() const
+	{
+		if(bound_fbo != fbo)
+		{
+			glBindFramebuffer(GL_FRAMEBUFFER, fbo);
+			bound_fbo = fbo;
+		}
+	}
+	static inline void Default()
+	{
+		if(bound_fbo != 0)
+		{
+			glBindFramebuffer(GL_FRAMEBUFFER, 0);
+			bound_fbo = 0;
+		}
+	}
+};
+```
+
+### 02_Shaders/FileIO.cpp
+```
+#include "FileIO.h"
+#include <fstream>
+#include <iostream>
+#include <vector>
+
+typedef std::vector<std::string> FileList;
+
+FileList getBeginShaderProgramFiles()
+{
+	FileList files;
+	files.emplace_back("primitives");
+	files.emplace_back("header");
+	for(auto &file : files)
+		file = "Shaders/" + file + ".frag";
+	return files;
+}
+
+FileList getEndShaderProgramFiles()
+{
+	FileList files;
+	files.emplace_back("shade");
+	files.emplace_back("main");
+
+	files.emplace_back("SphereTrace/spheretrace_1");
+	files.emplace_back("SphereTrace/spheretrace_2");
+	files.emplace_back("SphereTrace/spheretrace_3");
+
+	files.emplace_back("Antialias/antialias_0");
+
+	files.emplace_back("Norm/norm_0");
+	files.emplace_back("Norm/norm_1");
+	files.emplace_back("Norm/norm_2");
+
+	files.emplace_back("Ambient/ambient_0");
+	files.emplace_back("Ambient/ambient_1");
+
+	files.emplace_back("Shadow/shadow_0");
+	files.emplace_back("Shadow/shadow_1");
+	files.emplace_back("Shadow/shadow_2");
+	files.emplace_back("Shadow/shadow_3");
+	files.emplace_back("Shadow/shadow_4");
+	for(auto &file : files)
+		file = "Shaders/" + file + ".frag";
+	return files;
+}
+
+bool FileIO::loadFileIntoString(const std::string &__restrict path, std::string &__restrict code)
+{
+	std::ifstream file(path);
+	if(!file.is_open())
+	{
+		std::cout << "Hiba a " << path << " megnyit�sakor." << std::endl;
+		return false;
+	}
+	std::string line;
+	while(getline(file, line))
+		code += line + '\n';
+	file.close();
+	return true;
+}
+
+void FileIO::loadFilesIntoString(const FileList &__restrict files, std::string &__restrict code)
+{
+	for(auto & path : files)
+	{
+		code += "\n#line 0 \"" + path + "\"\n\n";
+		if(!loadFileIntoString(path, code))
+			code += "\n// Hiba a " + path + " shader f�jl bet�lt�sekor!\n\n";
+	}
+}
+bool FileIO::SaveTo(const char *__restrict path, const char *__restrict text, const size_t length, std::ostream *__restrict log)
+{
+	std::ofstream out(path, std::ofstream::binary);	//Start from end
+	if(!out.is_open())
+	{
+		(log != nullptr ? *log : std::cout) << "Could not Open file : " << path << std::endl;
+		return false;
+	}
+	out.write(text, (length == 0 ? strlen(text) : length));
+	out.close(); return true;
+}
+
+bool FileIO::SaveFormattedData(const char *__restrict path, const float *__restrict values, size_t width, size_t height, size_t stride, std::ostream *__restrict log)
+{
+	std::ofstream out(path); //for use in matlab
+	if(!out.is_open())
+	{
+		(log != nullptr ? *log : std::cout) << "Could not Open file : " << path << std::endl;
+		return false;
+	}
+	out.precision(16);
+	for(int j = 0; j < height; ++j)
+	{
+		for(int i = 0; i < width; ++i)
+		{
+			out << values[width*j + i] << ' ';
+		}
+		out << std::endl;
+	}
+	out.close();
+	return true;
+}
+
+bool FileIO::SaveUnformattedData(const char *__restrict path, const char *__restrict values, size_t size, std::ostream *__restrict log)
+{
+	std::ofstream out(path, std::ofstream::binary);
+	if(!out.is_open())
+	{
+		(log != nullptr ? *log : std::cout) << "Could not Open file : " << path << std::endl;
+		return false;
+	}
+	out.write((char*)(values), size);
+	out.close();
+	return true;
+}
+
+bool FileIO::OpenFrom(const char *__restrict path, std::vector<char> &__restrict text, std::ostream *__restrict log)
+{
+	std::ifstream in(path, std::ifstream::binary | std::ifstream::ate);
+	if(!in.is_open())
+	{
+		(log != nullptr ? *log : std::cout) << "Could not Open file : " << path << std::endl;
+		return false;
+	}
+	std::streamsize length = in.tellg();
+	text.resize((size_t)length,'\0');
+	in.seekg(0, in.beg);
+	in.read(text.data(), length);
+
+	in.close(); return true;
+}
+
+std::string FileIO::getCompFSCodeBegin()
+{
+	std::string code = "#version 450";
+	std::vector<std::string> files = getBeginShaderProgramFiles();
+	loadFilesIntoString(files, code);
+	return code;
+}
+
+std::string FileIO::getCompFSCodeEnd()
+{
+	std::string code;
+	std::vector<std::string> files = getEndShaderProgramFiles();
+	loadFilesIntoString(files, code);
+	return code;
+}
+
+std::string FileIO::getCompVSCode()
+{
+	std::string code = "#version 450\n#line 1 \"Shaders/_Unique/compute.vert\"\n";
+	loadFileIntoString("Shaders/_Unique/compute.vert", code);
+	return code;
+}
+
+std::string FileIO::getShowFSCode()
+{
+	std::string code = "#version 450\n#line 1 \"Shaders/_Unique/main.frag\"\n";
+	loadFileIntoString("Shaders/_Unique/main.frag", code);
+	return code;
+}
+
+std::string FileIO::getShowVSCode()
+{
+	std::string code = "#version 450\n#line 1 \"Shaders/_Unique/show.vert\"\n";
+	loadFileIntoString("Shaders/_Unique/show.vert", code);
+	return code;
+}
+```
+
+### 02_Shaders/FileIO.h
+```
+#pragma once
+#include <string>
+#include <vector>
+typedef std::vector<std::string> FileList;
+
+inline std::string concat(const std::string &s, int i) { return s + std::to_string(i); }
+inline std::string concat(const std::string &s, int i, int j) { return s + std::to_string(i) + std::to_string(j); }
+
+namespace FileIO
+{
+	bool loadFileIntoString(const std::string &__restrict path, std::string &__restrict code);
+	void loadFilesIntoString(const FileList &__restrict files, std::string &__restrict code);
+
+	bool SaveTo(const char *__restrict path, const char* __restrict text, const size_t = 0, std::ostream *__restrict log = nullptr);
+	bool SaveFormattedData(const char *__restrict path, const float*__restrict values, size_t width, size_t height, size_t stride, std::ostream *__restrict log = nullptr);
+	bool SaveUnformattedData(const char * __restrict path, const char * __restrict values, size_t size, std::ostream * __restrict log = nullptr);
+	bool OpenFrom(const char *__restrict path, std::vector<char> &__restrict text, std::ostream *__restrict log = nullptr);
+	/*
+	bool loadFileIntoBufferString(const char *  path, BufferString &text);
+	inline bool loadFileIntoBufferString(const std::string &str, BufferString &text)
+	{
+		loadFileIntoBufferString(str.c_str(), text);
+	}*/
+
+	std::string getCompFSCodeBegin();
+	std::string getCompFSCodeEnd();
+	std::string getCompVSCode();
+	std::string getShowFSCode();
+	std::string getShowVSCode();
+
+};
+```
+
+### 02_Shaders/FunctionChooser.cpp
+```
+#include "FunctionChooser.h"
+#include "imgui\imgui.h"
+
+void GUI::FunctionChooser::ConstantFunctionChooser()
+{
+	ImGui::DragFloat(" = f(x)", &constant_value, 0.01f);
+}
+
+void GUI::FunctionChooser::HermiteFunctionChooser()
+{
+	float width;
+	ImGui::Checkbox("Relative derivatives", &relative_derivatives);
+	ImGui::Columns(2, "Input");
+
+	width = glm::max(ImGui::GetContentRegionAvailWidth(), 1.f);
+	ImGui::TextUnformatted(""); ImGui::SameLine(width / 2 - 30); ImGui::TextUnformatted("First Point");
+	ImGui::PushItemWidth(-10);
+	ImGui::DragFloat("x##1", &p0.x, 0.1f);
+	ImGui::PushItemWidth(-10);
+	ImGui::DragFloat("y##1", &p0.y, 0.1f);
+	ImGui::PushItemWidth(-40);
+	ImGui::DragFloat("dy/dx##1", &d_in.x, 0.01f);
+
+	ImGui::NextColumn();
+
+	width = glm::max(ImGui::GetContentRegionAvailWidth(), 1.f);
+	ImGui::TextUnformatted(""); ImGui::SameLine(width / 2 - 30); ImGui::TextUnformatted("Second Point");
+	ImGui::PushItemWidth(-10);
+	ImGui::DragFloat("x##2", &p1.x, 0.1f);
+	ImGui::PushItemWidth(-10);
+	ImGui::DragFloat("y##2", &p1.y, 0.1f);
+	ImGui::PushItemWidth(-40);
+	ImGui::DragFloat("dy/dx##2", &d_in.y, 0.01f);
+
+	ImGui::Columns(1);
+
+	d_out = d_in * (relative_derivatives ? (p1.y - p0.y) / (p1.x - p0.x) : 1.f);
+	hermite3_coeffs = FUN::hermite3_coeffs(p0, p1, d_out.x, d_out.y);
+}
+
+void GUI::FunctionChooser::ChangeFunction()
+{
+	if(ImGui::CollapsingHeader(header_name))
+	{
+		float width0 = glm::max(ImGui::GetContentRegionAvailWidth(), 1.f), width;
+
+		static const int N = 50;	//no runtime reallocation
+		static float plot[N + 1];	//only one vector
+		float min = p0.y, max = p0.y;
+		for(int i = 0; i <= N; ++i)
+		{
+			float f = function(i / (float)N * (p1.x - p0.x) + p0.x);
+			plot[i] = f;
+			min = glm::min(f, min);
+			max = glm::max(f, max);
+		}
+
+		ImGui::PushID(header_name);
+		const char * items[] = { "Cubic hermite", "Constant" };
+
+		ImGui::Combo("Function type", &current_funtion_type, items, 2);
+		switch(current_funtion_type)
+		{
+		case 0:	HermiteFunctionChooser();	break;
+		case 1:	ConstantFunctionChooser();	break;
+		default:break;
+		}
+
+		ImGui::Separator();
+		ImGui::Columns(2, "Output");
+
+		width = glm::max(ImGui::GetContentRegionAvailWidth(), 1.f);
+		ImGui::PlotLines("", plot, N + 1, 0, nullptr, min, max, ImVec2(width, 4 * sqrt(width0)));
+
+		ImGui::NextColumn();
+		ImGui::SetColumnOffset(-1, width0 - 175);
+
+		width = glm::max(ImGui::GetContentRegionAvailWidth(), 1.f);
+
+
+		ImGui::BeginChild(header_name, ImVec2(width, 4 * sqrt(width0)));
+		ImGui::Checkbox("Integers only", &integers_only);
+		if(!integers_only)
+			for(int i = 0; i <= N; i += 4)
+				ImGui::Text("x = %.2f, y = %.2f", i / (float)N * (p1.x - p0.x) + p0.x, plot[i]);
+		else
+			if(p0.x < p1.x)
+				for(int x = (int)p0.x; x != (int)p1.x + 1; ++x)
+					ImGui::Text("x = %d, y = %.2f", x, function((float)x));
+			else
+				for(int x = (int)p0.x; x != (int)p1.x - 1; --x)
+					ImGui::Text("x = %d, y = %.2f", x, function((float)x));
+		ImGui::EndChild();
+
+		ImGui::Columns(1);
+		ImGui::PopID();
+	}
+}
+
+std::array<float, 4> FUN::hermite3_coeffs(glm::vec2 p0, glm::vec2 p1, float d0, float d1)
+{
+	float a = p0.y;
+	float b = d0;
+
+	float dx = p1.x - p0.x;
+	float v = (p1.y - p0.y) / dx;
+
+	float c = (v - b) / dx;
+	float u = (d1 - v) / dx;
+	float d = (u - c) / dx;
+	float x[2] = { p0.x, p1.x };
+
+	std::array<float, 4> ret;		//from maple...
+	ret[0] = (-d*x[1] + c)*x[0] * x[0] - b*x[0] + a;
+	ret[1] = c * x[0] * x[0] + (2 * d*x[1] - 2 * c)*x[0] + b;
+	ret[2] = (-2 * x[0] - x[1])*d + c;
+	ret[3] = d;
+	return ret;
+}
+```
+
+### 02_Shaders/FunctionChooser.h
+```
+#pragma once
+#include <glm/glm.hpp>
+#include <array>
+
+namespace FUN
+{
+	//inline float to01(float start_time, float arg_min, float arg_max){return glm::clamp<float>((start_time - arg_min) / (arg_max - arg_min), 0, 1);}
+	//inline float from01(float start_time, const float ret_min, const float ret_max){return ret_min + glm::clamp<float>(start_time, 0, 1) * (ret_max - ret_min);}
+	std::array<float, 4> hermite3_coeffs(glm::vec2 p0, glm::vec2 p1, float d0, float d1);
+	inline float eval_poly3(const std::array<float, 4> &p, float t)
+	{
+		return ((p[3]*t + p[2])*t + p[1])*t + p[0]; //3 mad op
+	}
+}
+
+namespace GUI
+{
+	class FunctionChooser
+	{
+		glm::vec2 p0 = glm::vec2(0), p1 = glm::vec2(1), d_in = glm::vec2(1), d_out = glm::vec2(1);
+		std::array<float, 4> hermite3_coeffs = FUN::hermite3_coeffs(glm::vec2(0), glm::vec2(1), 0,0);
+		float constant_value = 1.0;
+		bool change = true, integers_only = true;
+		const char* header_name;
+		int current_funtion_type = 0;
+		bool relative_derivatives = true;
+
+		inline float function(float t) const
+		{
+			switch(current_funtion_type)
+			{
+			case 0:	return FUN::eval_poly3(hermite3_coeffs, t); break;
+			//case 1: return constant_value; break;
+			default: return constant_value; break;
+			}
+		}
+		void ConstantFunctionChooser();
+		void HermiteFunctionChooser();
+	public:
+		FunctionChooser(const char *header_name, glm::vec2 p0 = glm::vec2(0), glm::vec2 p1 = glm::vec2(1),
+						float d0 = 1, float d1 = 1) :
+			header_name(header_name), p0(p0), p1(p1), d_in(d0, d1), current_funtion_type(0)
+		{
+			d_out = (p1.y - p0.y) / (p1.x - p0.x) * glm::vec2(d0, d1);
+			hermite3_coeffs = FUN::hermite3_coeffs(p0, p1, d_out.x, d_out.y);
+		}
+		FunctionChooser(const char *header_name, float constant_value) :
+			header_name(header_name), constant_value(constant_value), current_funtion_type(1)
+		{}
+
+		inline float operator ()(float t) const { return function(glm::clamp<float>(t, p0.x, p1.x)); }
+
+		void ChangeFunction(); //!< For debug view
+	};
+}
+```
+
+### 02_Shaders/GLCHECK.h
+```
+#pragma once
+#ifdef _DEBUG
+#include <iostream>
+#include <GL/glew.h>
+static int GL_CHECK_max_errors = 0;
+#define glcheck(strmsg) gl_checkfun(strmsg, __LINE__, __FILE__)
+#define glmessage(msg) std::cout << msg << std::endl
+#define glassert(expr) if(!(expr)) gl_assertfun(#expr, __LINE__, __FILE__)
+
+static const char* getErrorCode(GLenum error)
+{
+	switch(error)
+	{
+	case GL_INVALID_ENUM: return "GL_INVALID_ENUM"; break;
+	case GL_INVALID_VALUE: return "GL_INVALID_VALUE"; break;
+	case GL_INVALID_OPERATION: return "GL_INVALID_OPERATION"; break;
+	case GL_STACK_OVERFLOW: return "GL_STACK_OVERFLOW"; break;
+	case GL_STACK_UNDERFLOW: return "GL_STACK_UNDERFLOW"; break;
+	case GL_OUT_OF_MEMORY: return "GL_OUT_OF_MEMORY"; break;
+	case GL_INVALID_FRAMEBUFFER_OPERATION: return "GL_INVALID_FRAMEBUFFER_OPERATION"; break;
+		//case GL_CONTEXT_LOST: return "GL_CONTEXT_LOST"; break;
+		//case GL_TABLE_TOO_LARGE1: return "GL_TABLE_TOO_LARGE1"; break;
+	case GL_NO_ERROR: return "No error"; break;
+	default: return "Unknown error"; break;
+	}
+}
+
+inline void gl_checkfun(char * __restrict msg, int line, char * __restrict file)
+{
+	GLenum error = glGetError(); \
+		if(error != GL_NO_ERROR)\
+		{
+			std::cout << "glcheck : " << msg << " : " << getErrorCode(error)
+				<< " (" << error << ") at " << line << ":" << file << std::endl;
+			if(--GL_CHECK_max_errors <= 0)\
+				throw std::exception(msg);
+		}
+}
+inline void gl_assertfun(char * __restrict msg, int line, char * __restrict file)
+{
+	std::cout << "glassert : " << msg << " failed at " << line << " : " << file << std::endl;
+}
+
+#else
+#define glcheck(str)
+#define glassert(expr) (expr)
+#define glmessage(msg)
+#endif
+```
+
+### 02_Shaders/GPUState.cpp
+```
+#include "GPUState.h"
+
+void GPUState::set(GLsizei w, GLsizei h)
+{	//All Image2D has type RGBA32F
+	nearest_0.set(w, h, 4, 32, true);	//nearest
+	linear_1.set(w, h, 4, 32, false);	//linear
+	linear_2.set(w, h, 4, 32, false);	//linear
+	linear_3.set(w, h, 4, 32, false);	//linear
+	fbo.clear();
+	fbo.addAttachement(nearest_0.get());
+	fbo.addAttachement(linear_1.get());
+	fbo.addAttachement(linear_2.get());
+	fbo.addAttachement(linear_3.get());
+	fbo.finalize();
+	fbo.check();
+}
+
+void GPUState::bindTextures()
+{
+	glActiveTexture(GL_TEXTURE0 + 0);
+	glBindTexture(GL_TEXTURE_2D, nearest_0.get());
+	glActiveTexture(GL_TEXTURE0 + 1);
+	glBindTexture(GL_TEXTURE_2D, linear_1.get());
+	glActiveTexture(GL_TEXTURE0 + 2);
+	glBindTexture(GL_TEXTURE_2D, linear_2.get());
+	glActiveTexture(GL_TEXTURE0 + 3);
+	glBindTexture(GL_TEXTURE_2D, linear_3.get());
+}
+```
+
+### 02_Shaders/GPUState.h
+```
+#pragma once
+#include "FBO.h"
+#include "Image2D.h"
+
+class GPUState
+{
+protected:
+	FBO fbo;
+public:
+	Image2D nearest_0, linear_1, linear_2, linear_3;
+	GPUState() {}
+	void set(GLsizei w, GLsizei h);
+	inline void on() const { fbo.bind(); }
+	friend class Uniforms;
+	GPUState(const GPUState&) = delete;
+	GPUState& operator = (const GPUState&) = delete;
+	void bindTextures();
+};
+```
+
+### 02_Shaders/Image2D.cpp
+```
+#include "Image2D.h"
+#include "GLCHECK.h"
+
+void setImageFormats(int channels, int bytesPerChannel, GLuint &i, GLuint &f)
+{
+	switch(channels)
+	{
+	case 1: f = GL_RED;
+		switch(bytesPerChannel)
+		{
+		case 8:  i = GL_R8; break;
+		case 16: i = GL_R16F; break;
+		case 32: i = GL_R32F; break;
+		default: glmessage("Invalid bytes for a one channel image."); break;
+		}
+		break;
+	case 2: f = GL_RG;
+		switch(bytesPerChannel)
+		{
+		case 8:  i = GL_RG8; break;
+		case 16: i = GL_RG16F; break;
+		case 32: i = GL_RG32F; break;
+		default: glmessage("Invalid bytes for a two channel image."); break;
+		}
+		break;
+	case 3: f = GL_RGB;
+		switch(bytesPerChannel)
+		{
+		case 3:  i = GL_R3_G3_B2; break;
+		case 4:  i = GL_RGB4; break;
+		case 5:  i = GL_RGB5; break;
+		case 8:  i = GL_RGB8; break;
+		case 9:  i = GL_RGB9_E5; break;
+		case 10: i = GL_RGB10; break;
+		case 11: i = GL_R11F_G11F_B10F; break;
+		case 12: i = GL_RGB12; break;
+		case 16: i = GL_RGB16F; break;
+		case 32: i = GL_RGB32F; break;
+		default: glmessage("Invalid bytes for a two channel image."); break;
+		}
+		break;
+	case 4: f = GL_RGBA;
+		switch(bytesPerChannel)
+		{
+		case 3:  i = GL_R3_G3_B2; break;
+		case 4:  i = GL_RGBA4; break;
+		case 5:  i = GL_RGB5_A1; break;
+		case 8:  i = GL_RGBA8; break;
+		case 10: i = GL_RGB10_A2; break;
+		case 12: i = GL_RGBA12; break;
+		case 16: i = GL_RGBA16F; break;
+		case 32: i = GL_RGBA32F; break;
+		default: glmessage("Invalid bytes for a two channel image."); break;
+		}
+		break;
+	default: glmessage("Invalid number of channels"); break;
+	}
+}
+
+void Image2D::set(GLsizei wi, GLsizei he, int channels, int bytesPerChannel, bool nearest_filter, const GLvoid * data)
+{
+	w = wi; h = he;
+	if(0 != w && 0 != h)
+	{
+		glDeleteTextures(1, &id);
+		glGenTextures(1, &id);
+	}
+	setImageFormats(channels, bytesPerChannel, i, f);
+	glBindTexture(GL_TEXTURE_2D, id);
+	glTexImage2D(GL_TEXTURE_2D, 0, i, w, h, 0, f, GL_FLOAT, data);
+	filter = (nearest_filter ? GL_NEAREST : GL_LINEAR);
+	glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MAG_FILTER, filter);
+	glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MIN_FILTER, filter);
+	glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_S, GL_CLAMP_TO_EDGE);
+	glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_T, GL_CLAMP_TO_EDGE);
+}
+
+/*void Image2D::update(const GLvoid * data, GLsizei wi, GLsizei hi, GLsizei x, GLsizei y)
+{
+	glTextureSubImage2D(id, 0, x, y, (0 == wi ? w - x : wi), (0 == hi ? h - y : hi), f, GL_FLOAT, data);
+	glcheck("Error updating texture.");
+}*/
+```
+
+### 02_Shaders/Image2D.h
+```
+#pragma once
+#include <GL/glew.h>
+
+class Image2D
+{
+	GLuint id;				//name
+	GLsizei w, h;			//width, height
+	GLuint i, f, filter;	//internalFormat, format
+public:
+	Image2D() : w(0), h(0) { glGenTextures(1, &id); }
+	~Image2D() { glDeleteTextures(1, &id); }
+
+	void set(GLsizei w, GLsizei h, int channels = 4, int bytesPerChannel = 32,
+			bool nearest_filter = false, const GLvoid * data = nullptr);
+	inline GLsizei GetW() const { return w; };
+	inline GLsizei GetH() const { return h; };
+
+	//void update(const GLvoid *data, GLsizei wi = 0, GLsizei hi = 0, GLsizei x = 0, GLsizei y = 0);
+	inline GLuint get() const { return id; }
+
+	Image2D(const Image2D&) = delete;
+	Image2D& operator = (const Image2D&) = delete;
+};
+```
+
+### 02_Shaders/MyApp.cpp
+```
+#include "MyApp.h"
+#include "GLCHECK.h"
+#include "FileIO.h"
+
+CMyApp::CMyApp() : debug(iternum, uniforms, gpu.current, gpu.target, cam), uniforms(debug){}
+
+bool CMyApp::Init()
+{
+	glClearColor(0.125f, 0.25f, 0.5f, 1.0f);
+	glDisable(GL_SCISSOR_TEST);		glDisable(GL_SAMPLE_MASK);
+	glDisable(GL_SAMPLE_COVERAGE);	glDisable(GL_DEPTH_TEST);
+	glDisable(GL_STENCIL_TEST);		glDisable(GL_BLEND);
+	glDisable(GL_DITHER);
+
+	cam = gCamera(glm::vec3(1, 1, 1), glm::vec3(0, 0, 0), glm::vec3(0, 0, 1));
+
+	//gpu.ping.set(1280,720);
+	//gpu.pong.set(1280,720);
+	//editor.Resize(1280,720);
+	Resize(1280, 720);
+		
+	editor.RebuildShowShortcut();
+	editor.Open("Shaders/SDF/mandelbulb_iq.frag");
+	editor.RebuildCompShortcut();
+
+	//const short depth_data = 0x0000;
+	const float init_zeros[4] = {0.f,0.f,0.f,0.f};
+	for(auto &i : init_textures)
+		i.set(1, 1, 4, 32, true, init_zeros);
+
+	vao.on();
+	return true;
+}
+
+void CMyApp::Clean(){}
+
+void CMyApp::Update()
+{
+	editor.compute.On();					//Activating 1st program
+	uniforms.Iteration(iternum);			//Heuristics (needs impoovements) : user defined
+	if(0 == iternum)
+	{
+		for(auto i = 0; i < 4; ++i)
+		{
+			glActiveTexture(GL_TEXTURE0 + i);
+			glBindTexture(GL_TEXTURE_2D, init_textures[i].get());
+		}
+		uniforms << cam;
+
+		gpu.target = &gpu.ping;				//Render to ping first
+		gpu.current = &gpu.pong;			//This will be current
+	}
+	else
+	{
+		gpu.current->bindTextures();		//Read the current state
+	}
+	gpu.target->on();						//Activating FBO
+	editor.compute << uniforms;				//Sending uniforms
+ 	vao.draw();							 	//Draw rectangle
+	
+	std::swap(gpu.current, gpu.target);		//swapping FBO-s
+	++iternum;	//TODO? implement Restart() function : might be slower ?
+}
+
+void CMyApp::Render()
+{
+	this->PrezentationRender();
+	if(!editor.isProgramValid_AND_Reset()) iternum = 0;
+
+	auto ticks = SDL_GetTicks();
+	static Uint32 last_time = ticks;
+	float delta_time = (ticks - last_time) / 1000.0f;
+	if(cam.Update(delta_time)) iternum = 0;
+	last_time = ticks;
+	
+	FBO::Default();								//Default FBO
+	editor.show.On();							//Activating 2nd program
+	uniforms.setShowUniformsToShaderProg(editor.show);
+
+	(debug.show_currentstate ? gpu.current : gpu.target)->bindTextures();
+	vao.draw();									//Drawing
+	if(iternum > 30) Sleep(glm::min<int>((int)(iternum*0.75), 13));
+
+	editor.Render();	debug.Render();			//Renders GUI to VBOs
+}
+
+void CMyApp::KeyboardDown(SDL_KeyboardEvent& key)
+{
+	if(cam.KeyboardDown(key)) iternum = 0;
+	switch(key.keysym.sym)
+	{
+	case SDLK_RIGHT: ++presentation; this->PresentationUpdate(); break;
+	case SDLK_LEFT: --presentation; this->PresentationUpdate(); break;
+	case SDLK_SPACE: case SDLK_PAUSE: debug.pause = !debug.pause; break;
+	case SDLK_RETURN: iternum = 0; break;
+	case SDLK_c: cam = gCamera(glm::vec3(2, 2, 2), glm::vec3(0, 0, 0), glm::vec3(0, 0, 1)); iternum = 0; break;
+	case SDLK_KP_PLUS: cam.SetSpeed(cam.GetSpeed()*2.f); break;
+	case SDLK_KP_MINUS: cam.SetSpeed(cam.GetSpeed()*0.5f); break;
+	}
+	editor.KeyboardDown(key.keysym.sym);
+}
+
+void CMyApp::KeyboardUp(SDL_KeyboardEvent& key)
+{
+	if(cam.KeyboardUp(key)) iternum = 0;
+	editor.KeyboardUp(key.keysym.sym);
+}
+
+void CMyApp::MouseMove(SDL_MouseMotionEvent& mouse)
+{
+	if(cam.MouseMove(mouse)) iternum = 0;
+}
+
+void CMyApp::MouseDown(SDL_MouseButtonEvent& mouse){}
+
+void CMyApp::MouseUp(SDL_MouseButtonEvent& mouse){}
+
+void CMyApp::MouseWheel(SDL_MouseWheelEvent& wheel)
+{
+	if(wheel.y == 1) cam.SetSpeed(cam.GetSpeed()*1.25);
+	else if(wheel.y == -1) cam.SetSpeed(cam.GetSpeed()*0.75);
+}
+
+void CMyApp::Resize(int _w, int _h)
+{
+	iternum = 0;	//reset calculation
+	glViewport(0, 0, _w, _h );
+	gpu.ping.set(_w, _h);
+	gpu.pong.set(_w, _h);
+	uniforms.setWH(_w, _h);
+	editor.Resize((float)_w, (float)_h);
+	debug.Resize(_w, _h);
+}
+
+float start_time = SDL_GetTicks()/1000.f;
+int sub_prez_framecnt = 0;
+
+void CMyApp::PresentationUpdate()
+{
+	start_time = SDL_GetTicks()/1000.f;
+	uniforms.algorithms.shadow = Uniforms::SHADOW_4;
+	switch(presentation)
+	{
+	case 0: case 1:
+		editor.Open("Shaders/SDF/csg.frag");
+		editor.RebuildCompShortcut();
+		uniforms.shadows.step_multipier = 0.5;
+		debug.ambient.start_iternum = 10;
+		uniforms.shadows.light_pos = glm::vec3(0.58, 19.4, 26);
+		uniforms.shadows.light_radius = 3;
+		break;
+	case 2:
+		editor.Open("Shaders/SDF/aprajafalva.frag");
+		editor.RebuildCompShortcut();		
+		uniforms.shadows.step_multipier = 1;
+		uniforms.shadows.light_pos = glm::vec3(18.6f, -0.7f, 3.3f);
+		uniforms.shadows.light_radius = 1;
+		break;
+	case 3:
+		editor.Open("Shaders/SDF/metasdf.frag");
+		editor.RebuildCompShortcut();
+		uniforms.shadows.step_multipier = 0.5;
+		uniforms.shadows.light_radius = 0.5;
+		uniforms.shadows.light_pos = glm::vec3(0.053, 2.149, 1.101);
+		break;
+	case 4: case 5: case 6: case 7:
+		editor.Open("Shaders/SDF/mandelbulb_iq.frag");
+		editor.RebuildCompShortcut();
+		uniforms.shadows.light_pos = glm::vec3(18.6f, -0.7f, 3.3f);
+		cam.LookAt(glm::vec3(0));
+		uniforms.shadows.step_multipier = 1;
+		uniforms.shadows.light_radius = 0.5;
+		break;
+
+	}
+	debug.times.optimize = true;
+	debug.pause = false;
+	debug.turn_pause_to_true = false;
+	sub_prez_framecnt = 0;
+	PrezentationRender();
+}
+
+void CMyApp::PrezentationRender()
+{
+	static float start_0 = 0;
+	switch(presentation)
+	{
+	case 0:
+	{
+		const float F = 4.5;
+		float t = SDL_GetTicks() / 1000.f - start_time;
+		float fi = t* 3.1416f * 2/8.f;
+		glm::vec3 eye = glm::vec3(30*cos(fi), 30*sin(fi), 10);
+		cam.SetView(eye, glm::vec3(0, 0, 7), cam.GetUp());
+		iternum = 0;
+		start_0 = start_time;
+	}
+	break;
+	case 1:
+	{
+		const float F = 4.5;
+		const glm::vec3 camera_1 = glm::vec3(-25.53, 11.28, 28.10);
+		float t = SDL_GetTicks() / 1000.f - start_time;
+		float t2 = SDL_GetTicks() / 1000.f - start_0;
+		if(t < F)
+		{
+			/*float x = glm::smoothstep<float>(0, 1, t / F);
+			float fi = x*3.14f * 2;
+			glm::vec3 eye = glm::vec3((22 + x * 10)*cosf(fi), (20 + x * 10)*sinf(fi), 5 + 20 * x);
+			cam.SetView(eye, glm::vec3(0, 0, 1), cam.GetUp());*/
+			float fi = t2 * 3.1416f * 2 / 8.f;
+			glm::vec3 p = glm::vec3(30 * cos(fi), 30 * sin(fi), 10);
+			float x = glm::smoothstep<float>(0, 1, t / F);
+			//x = glm::smoothstep<float>(0, 1, x);
+			glm::vec3 eye = glm::mix(p, camera_1,glm::vec3(x));
+			cam.SetView(eye, glm::vec3(0, 0, 7), cam.GetUp());
+			iternum = 0;
+		}
+		else
+		{
+			if(sub_prez_framecnt ==0) iternum = 0;
+			++sub_prez_framecnt;
+			uniforms.shadows.step_multipier = 0.1;
+		}
+	}
+		break;
+	case 2:
+	{
+		const float F = 2.5;
+		const float T = 0.3;
+		float t = SDL_GetTicks() / 1000.f - start_time;
+		if(t < F)
+		{
+			glm::vec3 a1 = glm::vec3(9.87, 64.86, 32.37);
+			glm::vec3 a2 = glm::vec3(9.15, 46.31, 19.35);
+			glm::vec3 c1 = glm::vec3(9.15, -8.7, 3.14);
+			glm::vec3 c2 = glm::vec3(24.16, 7.8, -0.97);
+			glm::vec3 b1 = (a1 + c1)*0.5f;
+			glm::vec3 b2 = a2*0.05f + c2*0.95f;
+			float x = glm::smoothstep<float>(0, 1, t / F);
+			glm::vec3 ab1 = a1*(1 - x) + b1*x;
+			glm::vec3 bc1 = b1*(1 - x) + c1*x;
+			glm::vec3 ab2 = a2*(1 - x) + b2*x;
+			glm::vec3 bc2 = b2*(1 - x) + c2*x;
+			glm::vec3 eye = ab1*(1 - x) + bc1*x;
+			glm::vec3 at = ab2*(1 - x) + bc2*x;
+			cam.SetView(eye, at, cam.GetUp());
+			iternum = 0;
+		}
+		else
+		{
+			uniforms.shadows.step_multipier = 0.2;
+			uniforms.algorithms.shadow = Uniforms::SHADOW_2;
+			debug.times.optimize = false;
+			debug.pause = true;
+			if(sub_prez_framecnt % 17 == 0)			debug.pause = false;
+			if(sub_prez_framecnt % (17*35) == 0)	iternum = 0;
+			++sub_prez_framecnt;
+		}
+	}
+	break;
+	case 3:	//metasdf
+	{
+		const float F = 2.0;
+		float t = SDL_GetTicks() / 1000.f - start_time;
+		if(t < F)
+		{
+			float x = glm::smoothstep<float>(0, 1, t / F);
+			glm::vec3 a = glm::vec3(2,2,1.9);
+			glm::vec3 b = glm::vec3(1.5,-1.5,0.3);
+			glm::vec3 eye = a*(1-x)+b*x;
+			cam.SetView(eye, glm::vec3(0), cam.GetUp());
+			iternum = 0;
+		}
+		else
+		{
+			uniforms.shadows.step_multipier = 0.1;
+		}
+	}
+	break;
+	case 4:
+	{
+
+		const float F = 10;
+		float t = SDL_GetTicks() / 1000.f - start_time;
+		if(t < F)
+		{
+			float x = glm::smoothstep<float>(0, 1, t / F);
+			float fi = (float)(x*M_PI * 2 + M_PI / 4.0);
+			glm::vec3 eye = glm::vec3(2.5*cos(fi), 2.5*sin(fi), 2.0);
+			cam.SetView(eye, cam.GetAt(), cam.GetUp());
+			iternum = 0;
+		}
+	}
+	break;
+	case 5:
+	{
+		const float F = 4.5;
+		float t = SDL_GetTicks() / 1000.f - start_time;
+		if(t < F)
+		{
+			float x = glm::smoothstep<float>(0, 1, powf(t / F, 0.2f));
+			float fi = (float)(M_PI / 4.0);
+			glm::vec3 a = glm::vec3(2.5*cos(fi), 2.5*sin(fi), 2.0);
+			glm::vec3 b = glm::vec3(0.41, 0.33, 0.41)*1.05f;
+			glm::vec3 eye = a*(1 - x) + b*x;
+			cam.SetView(eye, cam.GetAt(), cam.GetUp());
+			iternum = 0;
+		}
+	}
+	break;
+	case 6:
+	{
+		const float F = 5.0;
+		float t = SDL_GetTicks() / 1000.f - start_time;
+		if(t < F)
+		{
+			float x;
+			glm::vec3 a = glm::vec3(0.41, 0.33, 0.41)*1.05f;
+			glm::vec3 b = glm::vec3(2.5);
+			glm::vec3 c = glm::vec3(-0.37, 0.14, 1.12)*1.025f;
+			x = glm::smoothstep<float>(0, 1, powf(t / F, 2));
+			glm::vec3 ab = a*(1 - x) + b*x;
+			x = glm::smoothstep<float>(0, 1, powf(t / F, 0.5));
+			glm::vec3 bc = b*(1 - x) + c*x;
+			x = glm::smoothstep<float>(0, 1, powf(t / F, 1));
+			glm::vec3 eye = ab*(1 - x) + bc*x;
+			cam.SetView(eye, cam.GetAt(), cam.GetUp());
+			iternum = 0;
+		}
+		else
+		{
+			uniforms.shadows.step_multipier = 0.5;
+		}
+	}
+	break;
+	case 7:	//mandelbulb
+	{
+		const float F = 8.5;
+		float t = SDL_GetTicks() / 1000.f - start_time;
+		if(t < F)
+		{
+			float x = glm::smoothstep<float>(0, 1, powf(t / F, 0.5))*10-9;
+			glm::vec3 a1 = glm::vec3(0.9440, 0.2072, 0.5348);
+			glm::vec3 b1 = glm::vec3(0.8368, 0.2635, 0.5658);
+			glm::vec3 eye = a1*(1 - x) + b1*x;
+			x = glm::smoothstep<float>(0, 1, powf(t / F, 0.5));
+			glm::vec3 a2 = glm::vec3(0.8528, 0.1251, 0.4643);
+			glm::vec3 b2 = eye + glm::normalize(b1-a1);
+			//glm::vec3 b2 = glm::vec3(0.8343, 0.2648, 0.5665);
+			glm::vec3 c2 = glm::vec3(0.7227, 0.2128, 0.5717);
+			glm::vec3 at = (a2*(1 - x) + b2*x)*(1-x) + (b2*(1 - x) + c2*x)*x;
+			cam.SetView(eye, at, cam.GetUp());
+			iternum = 0;
+		}
+	}
+	break;
+	}
+}
+```
+
+### 02_Shaders/MyApp.h
+```
+#pragma once
+#include <GL/glew.h>
+#include <SDL.h>
+#include <SDL_opengl.h>
+#include <glm/glm.hpp>
+#include "ScreenVAO.h"
+#include "FBO.h"
+#include "Image2D.h"
+#include "ShaderProg.h"
+#include "Uniforms.h"
+#include "DebugWindow.h"
+#include "TextEditor.h"
+
+class CMyApp
+{
+public:
+	CMyApp();
+	~CMyApp() = default;
+	bool Init();
+	void Clean();
+	void Update();
+	void Render();
+
+	void KeyboardDown(SDL_KeyboardEvent&);
+	void KeyboardUp(SDL_KeyboardEvent&);
+	void MouseMove(SDL_MouseMotionEvent&);
+	void MouseDown(SDL_MouseButtonEvent&);
+	void MouseUp(SDL_MouseButtonEvent&);
+	void MouseWheel(SDL_MouseWheelEvent&);
+	void Resize(int, int);
+
+	int presentation = 0;
+	void PresentationUpdate();
+	void PrezentationRender();
+	//constant, dummy, utility objects
+	ScreenVAO vao;
+	Image2D init_textures[4];
+
+	//gpu state holders
+	struct
+	{
+		GPUState ping;
+		GPUState pong;
+		GPUState *current;
+		GPUState *target;
+	}gpu;
+	Uniforms uniforms;
+
+	//user interface
+	gCamera cam;
+	GUI::TextEditor editor;
+	GUI::DebugWindow debug;
+
+	//other state variables
+	int iternum = 0;
+};
+
+//Possible Improovements:
+// - One FBO
+	// - Simply not pinponging - may not work
+	// - Using One program as described below
+// - One Shader program
+	// - Show or Calculate subroutine, supress output from latter
+	// - Image load/store
+	// -
+```
+
+### 02_Shaders/ScreenVAO.cpp
+```
+#include "ScreenVAO.h"
+#include <glm/glm.hpp>
+
+ScreenVAO::ScreenVAO()
+{
+	glm::vec2 vert[] =
+	{
+		glm::vec2(-1, -1),
+		glm::vec2(+1, -1),
+		glm::vec2(-1, +1),
+		glm::vec2(+1, +1),
+	};
+	glGenVertexArrays(1, &vao);
+	glBindVertexArray(vao);
+
+	glGenBuffers(1, &vbo);
+	glBindBuffer(GL_ARRAY_BUFFER, vbo);
+	glBufferData(GL_ARRAY_BUFFER, sizeof(vert), vert, GL_STATIC_DRAW);
+	
+	glEnableVertexAttribArray(0);
+	glVertexAttribPointer((GLuint)0, 2, GL_FLOAT, GL_FALSE, sizeof(glm::vec2), 0);
+
+
+	glBindVertexArray(0);
+	glBindBuffer(GL_ARRAY_BUFFER, 0);
+	glcheck("VAOVBO");
+}
+ScreenVAO::~ScreenVAO()
+{
+	glDeleteBuffers(1, &vbo);
+	glDeleteVertexArrays(1, &vao);
+}
+```
+
+### 02_Shaders/ScreenVAO.h
+```
+#pragma once
+#include <GL/glew.h>
+#include "GLCHECK.h"
+class ScreenVAO
+{
+	GLuint vao;
+	GLuint vbo;
+public:
+	ScreenVAO();
+	~ScreenVAO();
+
+	ScreenVAO(const ScreenVAO&) = delete;
+	ScreenVAO& operator = (const ScreenVAO&) = delete;
+
+	inline void on() { glBindVertexArray(vao); }
+	inline void draw() const
+	{
+		glDrawArrays(GL_TRIANGLE_STRIP, 0, 4);
+	}
+};
+```
+
+### 02_Shaders/ShaderProg.cpp
+```
+#include "ShaderProg.h"
+#include <iostream>
+#include "FileIO.h"
+#include <string>
+#include "GLCHECK.h"
+
+GLuint ShaderProg::used_program = 0;
+
+ShaderProg::ShaderProg(std::ostream &out) : uniform_locations(), out(out)
+{
+	program = glCreateProgram();
+}
+
+ShaderProg::~ShaderProg(void)
+{
+	for(auto &shader : shader_type_names)
+	{
+		if(0 != program && 0 != shader.second)
+			glDetachShader(program, shader.second);
+		if(shader.second != 0)
+			glDeleteShader(shader.second);
+	}
+	if(program != 0)
+		glDeleteProgram(program);
+}
+
+const char* getShaderStringFromCode(GLenum shaderType)
+{
+	switch(shaderType)
+	{
+	case GL_VERTEX_SHADER:			return "vert"; break;
+	case GL_GEOMETRY_SHADER:		return "geom"; break;
+	case GL_TESS_CONTROL_SHADER:	return "tesc"; break;
+	case GL_TESS_EVALUATION_SHADER: return "tese"; break;
+	case GL_FRAGMENT_SHADER:		return "frag"; break;
+	default: return "Not-A-Valid-"; break;
+	}
+}
+
+bool ShaderProg::compileSourceCode(const SourceCode &code, GLuint loadedShader, GLenum shaderType)
+{
+	assert(loadedShader != 0);
+	glShaderSource(loadedShader, code.size(), code.data(), nullptr);
+	glCompileShader(loadedShader);
+	GLint result = GL_FALSE;
+	glGetShaderiv(loadedShader, GL_COMPILE_STATUS, &result);
+	if(GL_FALSE == result)
+	{
+		int infoLogLength;
+		glGetShaderiv(loadedShader, GL_INFO_LOG_LENGTH, &infoLogLength);
+		std::vector<char> shaderErrorMessage(infoLogLength);
+		glGetShaderInfoLog(loadedShader, infoLogLength, NULL, &shaderErrorMessage[0]);
+		std::string sType_str = getShaderStringFromCode(shaderType);
+		out << sType_str << " shader error message:\n" << &shaderErrorMessage[0] << std::endl;
+		std::cout << sType_str << " shader error message:\n" << &shaderErrorMessage[0] << std::endl;
+		for(size_t i = 0; i < code.size(); ++i)
+		{
+			std::string path = "log/error" + std::to_string(loadedShader) + "_part_" + std::to_string(i)  + "." + sType_str;
+			FileIO::SaveTo(path.c_str(), code[i], 0, &out);
+		}
+	}
+	return result == GL_TRUE;
+}
+
+bool ShaderProg::AttachShader(GLenum _shaderType, const SourceCode & code)
+{
+	if(program == 0)
+	{
+		program = glCreateProgram();
+		if(program == 0 && m_verbose)
+		{
+			out << "Hiba a shader program l�trehoz�sakor" << std::endl;
+			std::cout << "Hiba a shader program l�trehoz�sakor" << std::endl;
+			return false;
+		}
+	}
+	if(shader_type_names.count(_shaderType) != 0)
+		glDetachShader(program, shader_type_names[_shaderType]);
+	else
+		shader_type_names[_shaderType] = glCreateShader(_shaderType);
+	if(!compileSourceCode(code, shader_type_names[_shaderType], _shaderType))
+		return false;
+	glAttachShader(program, shader_type_names[_shaderType]);
+	return true;
+}
+
+bool ShaderProg::Link()
+{
+	glLinkProgram(program);
+
+	GLint log_len = 0, result = 0;
+
+	glGetProgramiv(program, GL_LINK_STATUS, &result);
+	glGetProgramiv(program, GL_INFO_LOG_LENGTH, &log_len);
+	if(0 != log_len || GL_FALSE == result)
+	{
+		std::vector<char> msg(log_len);
+		glGetProgramInfoLog(program, log_len, nullptr, &msg[0]);
+		out << "Link Error Message:\n" << msg.data() << std::endl;
+		std::cout << "Link Error Message:\n" << msg.data() << std::endl;
+	}
+	return result == GL_TRUE;
+}
+
+void ShaderProg::BindAttribLoc(int _index, const char* _uniform)
+{
+	glBindAttribLocation(program, _index, _uniform);
+}
+
+void ShaderProg::BindFragDataLoc(int _index, const char* _uniform)
+{
+	glBindFragDataLocation(program, _index, _uniform);
+}
+
+void ShaderProg::SetUniform(const char* _uniform, const glm::vec2& _vec)
+{
+	GLint loc = getLocation(_uniform);
+	glUniform2fv( loc, 1, &_vec[0] );
+}
+
+void ShaderProg::SetUniform(const char* _uniform, const glm::vec3& _vec)
+{
+	GLint loc = getLocation(_uniform);
+	glUniform3fv( loc, 1, &_vec[0] );
+}
+
+void ShaderProg::SetUniform(const char* _uniform, const glm::vec4& _vec)
+{
+	GLint loc = getLocation(_uniform);
+	glUniform4fv(loc, 1, &_vec[0]);
+}
+
+void ShaderProg::SetUniform(const char* _uniform, const glm::mat4& _mat)
+{
+	GLint loc = getLocation(_uniform);
+	glUniformMatrix4fv(loc, 1, GL_FALSE, &(_mat[0][0]));
+}
+
+void ShaderProg::SetUniform(const char* _uniform, int _i)
+{
+	GLint loc = getLocation(_uniform);
+	glUniform1i( loc, _i );
+}
+
+void ShaderProg::SetUniform(const char* _uniform, float _f)
+{
+	GLint loc = getLocation(_uniform);
+	glUniform1f( loc, _f );
+}
+
+void ShaderProg::SetUniform(const char* _uniform, float _a, float _b)
+{
+	GLint loc = getLocation(_uniform);
+	glUniform2f( loc, _a, _b );
+}
+
+void ShaderProg::SetUniform(const char* _uniform, float _a, float _b, float _c)
+{
+	GLint loc = getLocation(_uniform);
+	glUniform3f( loc, _a, _b, _c );
+}
+
+void ShaderProg::SetUniform(const char* _uniform, float _a, float _b, float _c, float _d)
+{
+	GLint loc = getLocation(_uniform);
+	glUniform4f( loc, _a, _b, _c, _d );
+}
+
+void ShaderProg::SetTexture(const char* _uniform, int _sampler, GLuint _textureID)
+{
+	glActiveTexture(GL_TEXTURE0 + _sampler);
+	glBindTexture(GL_TEXTURE_2D, _textureID);
+	SetUniform(_uniform, _sampler);
+}
+
+void ShaderProg::SetCubeTexture(const char* _uniform, int _sampler, GLuint _textureID)
+{
+	glActiveTexture(GL_TEXTURE0 + _sampler);
+	glBindTexture(GL_TEXTURE_CUBE_MAP, _textureID);
+	SetUniform(_uniform, _sampler);
+}
+
+inline GLuint	ShaderProg::getLocation(const char* _uniform)
+{
+	std::map< std::string, int >::iterator loc_it = uniform_locations.find(_uniform);
+	if ( loc_it == uniform_locations.end() )
+	{
+		GLint my_loc = glGetUniformLocation(program, _uniform);
+		uniform_locations[_uniform] = my_loc;
+		return my_loc;
+	}
+	else
+		return loc_it->second;
+}
+```
+
+### 02_Shaders/ShaderProg.h
+```
+#pragma once
+#include <GL/glew.h>
+#include <vector>
+#include <map>
+#include <glm\glm.hpp>
+#include <iostream>
+//typedef std::vector<std::string> SourceCode;
+
+typedef std::vector<const char*> SourceCode;
+
+class ShaderProg
+{
+public:
+	ShaderProg(std::ostream &out = std::cout);
+	~ShaderProg(void);
+
+	ShaderProg(const ShaderProg&) = default;
+	ShaderProg& operator = (const ShaderProg&) = default;
+
+
+	bool AttachShader(GLenum _shaderType, const SourceCode &code);
+	inline bool AttachShader(GLenum _shaderType, const char* code) { return AttachShader(_shaderType, SourceCode({code})); }
+	inline bool AttachShader(GLenum _shaderType, const std::string &code) { return AttachShader(_shaderType, { code.c_str() }); }
+	bool Link();
+
+	void BindAttribLoc(int _index, const char* name);
+	void BindFragDataLoc(int _index, const char* name);
+
+	inline void SetVerbose(bool _val) { m_verbose = _val; }
+	inline void On() const	//optimized for multiple updates :)
+	{
+		if(used_program != program)
+		{
+			glUseProgram(program);
+			used_program = program;
+		}
+	}
+	inline void Off() const { glUseProgram(0); };
+
+	void SetUniform(const char* _uniform, const glm::vec2& _vec);
+	void SetUniform(const char* _uniform, const glm::vec3& _vec);
+	void SetUniform(const char* _uniform, const glm::vec4& _vec);
+	void SetUniform(const char* _uniform, const glm::mat4& _mat);
+	void SetUniform(const char* _uniform, int _i);
+	void SetUniform(const char* _uniform, float _f);
+	void SetUniform(const char* _uniform, float _a, float _b, float _c, float _d);
+	void SetUniform(const char* _uniform, float _a, float _b, float _c);
+	void SetUniform(const char* _uniform, float _a, float _b);
+	void SetTexture(const char* _uniform, int _sampler, GLuint _textureID);
+	void SetCubeTexture(const char* _uniform, int _sampler, GLuint _textureID);
+
+	GLuint program;
+protected:
+	static GLuint used_program;
+	bool compileSourceCode(const SourceCode & code, GLuint loadedShader, GLenum shaderType);
+	GLuint	getLocation(const char* _uniform);
+	std::map<std::string, GLint> uniform_locations;
+	std::map<GLenum, GLuint> shader_type_names;
+	bool m_verbose;
+	std::ostream &out;
+};
+
+//Possible Improovements:
+// - A new class for ShaderStage
+		// ==> Easier creation of ShaderPrograms
+		// ==> Subroutine support
+// - UBO support : UBO class..
+```
+
+### 02_Shaders/TextEditor.cpp
+```
+#include "TextEditor.h"
+#include <map>
+void GUI::TextEditor::Resize(float w, float h)
+{
+	sizes.full_width = w; sizes.full_height = h;
+	SetSize();
+}
+
+GUI::TextEditor::TextEditor() : show(log), compute(log), text(1,' ')
+{
+	for(int i = 0; i < 20; ++i)		//init map
+		algebric.detail.names_to_i[algebric.names[i]] = i;
+}
+
+std::string GUI::TextEditor::GenerateExpr(const std::string &expr)
+{
+	std::stringstream ret;
+	auto &A = algebric;
+	for(std::string::const_iterator l = expr.begin(); l != expr.end(); ++l)
+	{
+		switch(*l)
+		{
+		case 'a':	//TODO: delete zeros altogether
+		{
+			std::string aijk(l, l + 4);
+			float val = A.a[A.detail.names_to_i[aijk]];
+			ret << abs(val);	//abszol�t �rt�k kell!
+			l += 3;	//++l => l+=4 ;)
+		} break;
+		case 'p': case 'v': ret << *l << '.'; break; //add dots
+		case '+': ret << " + "; break;	//readabality
+		default: ret << *l;	break;
+		}
+	}
+	return ret.str();
+}
+
+void GUI::TextEditor::GenerateAlgebricSurface()
+{
+	std::string str = "";
+	str += "vec3 color(in vec3 p, in vec3 v)\n";
+	str += "{\n";
+	{
+		str += "\start_time return vec3(1,1,1);\n";
+	}
+	str += "}\n\n";
+	str += "float sdf(in vec3 p, in vec3 v)\n";
+	str += "{\n";
+	{
+		str += "\start_time float f = " + GenerateExpr(algebric.formulas_3.fp) + ";\n";
+		str += "\start_time vec3 df;\n";
+		str += "\start_time df.x = " + GenerateExpr(algebric.formulas_3.dxfp) + ";\n";
+		str += "\start_time df.y = " + GenerateExpr(algebric.formulas_3.dyfp) + ";\n";
+		str += "\start_time df.z = " + GenerateExpr(algebric.formulas_3.dzfp) + ";\n";
+		//str += "\start_time float ldf = length(df);\n";
+		//str += "\start_time float h = f / ldf;\n";
+		//str += "\start_time float lip = " + GenerateExpr(algebric.formulas_3.lip) + ";\n";
+		str += "\start_time return f / length(df);\n";
+	}
+	str += "}\n";
+
+	text.assign(str.begin(), str.end());
+	text.resize(text.size() + 10);
+	strcpy_s(filenames.current, "Shaders/SDF/generated.frag");
+}
+```
+
+### 02_Shaders/TextEditor.h
+```
+#pragma once
+#include "FileIO.h"
+#include "ShaderProg.h"
+#include <SDL_keycode.h>
+#include <sstream>
+#include <set>
+
+namespace GUI
+{
+	class TextEditor
+	{
+	public:
+		TextEditor();
+		void Open(const char * file);
+		void Save(const char * file);
+		void Render();
+		void Resize(float w, float h);
+
+		ShaderProg compute;
+		ShaderProg show;
+		
+		void KeyboardDown(SDL_Keycode key);
+		void KeyboardUp(SDL_Keycode key);
+
+		inline bool isProgramValid() const { return states.is_valid_program; }
+		inline void resetProrgamValidity() { states.is_valid_program = true; }
+		inline bool isProgramValid_AND_Reset(){	bool ret = states.is_valid_program;	states.is_valid_program = true;	return ret;	}
+		inline std::ostream& Log() { return log; }
+
+		void BuildShortcut();
+		void RebuildCompShortcut();
+		void RebuildShowShortcut();
+
+	public: // private
+		std::vector<char> text;
+		std::stringstream log;
+		struct
+		{
+			std::vector<std::string> examples = { "Shaders/SDF/gombok.frag","Shaders/SDF/aprajafalva.frag" ,
+				"Shaders/SDF/hoember.frag", "Shaders/SDF/metasdf.frag", "Shaders/SDF/mandelbulb.frag", "Shaders/SDF/csg.frag" };
+			std::set<std::string> recents;
+			char current[512];
+			char buffer[512];
+		} filenames;
+		struct
+		{
+			float full_width = 350;	float full_height = 450;
+			float win_width = 350;	float win_height = 450;
+		} sizes;
+		struct
+		{
+			bool fullscreen = false;
+			bool log_copyable = false;
+		} options;
+		struct
+		{
+			char editor[256];
+			const char* open = "Open File";
+			const char* save = "Save File";
+		} winnames;
+		struct
+		{
+			struct
+			{
+				bool p_open = true;
+				bool is_open_openpopup = false;
+				bool is_open_savepopup = false;
+			} window;
+			struct
+			{
+				bool ctrl = false;
+				bool shift = false;
+				bool alt = false;
+			} key;
+			bool is_valid_program = true;
+			int tab_sub_wind_id = 0;
+		} states;
+
+		struct
+		{
+			std::string begin;
+			std::string end;
+		} source_codes;
+
+		struct
+		{
+			//order is defined below
+			float a[20] = {0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0};
+			const char * labels[20] = { " + ", "*x + ", "*y + " , "*z + ",
+				"*x^2 + ", "*y^2 + " , "*z^2 + ", "*x*y + ", "x*z + ", "y*z + ",
+				"*x^3 + ", "*y^3 + ", "*z^3 + ", "*x*y*z + ",
+				"*x^2*y + ", "*x^2*z + " , "*x*y^2 + " , "*x*z^2 + " , "*y^2*z + " , "*y*z^2" };
+			const char *names[20] = { "a000", "a100", "a010", "a001",
+				"a200", "a020", "a002", "a110", "a101", "a011",
+				"a300", "a030", "a003", "a111",
+				"a210", "a201", "a120", "a102", "a021", "a012" };
+			struct
+			{
+				const std::string lip = "(a001+(3*a003*pz+2*a002)*pz+(2*a012*pz+a021*py+a011)*py+(2*a102*pz+a111*py+a201*px+a101)*px)*vz+(a010+(a012*pz+a011)*pz+(2*a021*pz+3*a030*py+2*a020)*py+(a111*pz+2*a120*py+a210*px+a110)*px)*vy+(a100+(a102*pz+a101)*pz+(a111*pz+a120*py+a110)*py+(2*a201*pz+2*a210*py+3*a300*px+2*a200)*px)*vx+((3*a003*pz+a012*py+a102*px+a002)*vz*vz+((2*a012*pz+2*a021*py+a111*px+a011)*vz+(a021*pz+3*a030*py+a120*px+a020)*vy)*vy+((2*a102*pz+a111*py+2*a201*px+a101)*vz+(a111*pz+2*a120*py+2*a210*px+a110)*vy+(a201*pz+a210*py+3*a300*px+a200)*vx)*vx+(a003*vz*vz*vz+(a012*vz*vz+(a021*vz+a030*vy)*vy)*vy+(a102*vz*vz+(a111*vz+a120*vy)*vy+(a201*vz+a210*vy+a300*vx)*vx)*vx)*h)*h";
+				const std::string fp = "a000+(a001+(a003*pz+a002)*pz)*pz+(a010+(a012*pz+a011)*pz+(a021*pz+a030*py+a020)*py)*py+(a100+(a102*pz+a101)*pz+(a111*pz+a120*py+a110)*py+(a201*pz+a210*py+a300*px+a200)*px)*px";
+				const std::string dxfp = "a100+(a102*pz+a101)*pz+(a111*pz+a120*py+a110)*py+(2*a201*pz+2*a210*py+3*a300*px+2*a200)*px";
+				const std::string dyfp = "a010+(a012*pz+a011)*pz+(2*a021*pz+3*a030*py+2*a020)*py+(a111*pz+2*a120*py+a210*px+a110)*px";
+				const std::string dzfp = "a001+(3*a003*pz+2*a002)*pz+(2*a012*pz+a021*py+a011)*py+(2*a102*pz+a111*py+a201*px+a101)*px";
+			} formulas_3;
+			struct
+			{
+				std::map<std::string, int> names_to_i;
+			} detail;
+		} algebric;
+
+		struct CSG_Node;
+		enum CSG_EDGE_T
+		{
+			ID = 0,				IDENTITY = 0,
+			TRANSPOSE = 1,		ROTATE = 2,
+			AFFIN = 3,			PROJECTIVE = 4,
+		};
+		struct CSG_Edge
+		{
+			CSG_Node *node;	CSG_EDGE_T type = ID;
+			glm::vec3 transpose;
+			glm::mat3 rotate;
+			glm::mat4 projective;
+			CSG_Edge();			~CSG_Edge();
+			CSG_Edge(CSG_Edge & edge);
+			GUI::TextEditor::CSG_Edge & operator=(CSG_Edge & edge);
+		};
+
+		enum CSG_PRIMITIVE_T
+		{
+			PLANE = 0,		PLANE_XY = 1,	PLANE_XZ = 2,	PLANE_YZ = 3,
+			SPHERE = 4,		CYLINDER = 5,	TORUS = 6,		BOX = 7,
+		};
+		struct CSG_Primitive
+		{
+			CSG_PRIMITIVE_T type = SPHERE;
+			float R, r;
+			float a, b, c;
+			glm::vec3 normal;
+		};
+
+		enum CSG_NODE_T
+		{
+			PRIMITIVE = 0,
+			UNION = 1, INTERSECTION = 2, DIFFERANCE = 3,
+			SOFT_UNION = 4, SOFT_INTERSECTION = 5, SOFT_DIFFERANCE = 6,
+		};
+		struct CSG_Node
+		{
+			CSG_NODE_T type = PRIMITIVE;
+			std::vector<CSG_Edge> edges;
+			struct{	float soft_ness; };
+			CSG_Primitive primitive;		//the leaf data
+		};
+
+		struct
+		{
+			CSG_Node root;
+		} csg;
+	
+		bool BuildComputeFragShader();
+		bool ReloadFragShaderConstCode();
+		bool BuildComputeVertShader();
+		bool LinkComputeProgram();
+
+		bool BuildShowFragShader();
+		bool BuildShowVertShader();
+		bool LinkShowProgram();
+
+		void OpenPopup();
+		void SavePopup();
+		void MenuBar();
+		void LogWindow(float);
+		void SetSize();
+
+		void SaveShortcut();
+		void SaveAsShortcut();
+		void OpenShortcut();
+		void NewFileShortcut();
+
+		void ShowTab1();
+		void ShowTab2();
+		void DispCSG_Primitive(GUI::TextEditor::CSG_Primitive & prim);
+		void DispCSG_Edge(GUI::TextEditor::CSG_Edge & edge);
+		void DispCSG_Node(GUI::TextEditor::CSG_Node & node);
+		void ShowCSG();
+		void GenerateAlgebricSurface();
+		std::string GenerateExpr(const std::string &);
+	};
+}
+```
+
+### 02_Shaders/TextEditor_CSG.cpp
+```
+#include "TextEditor.h"
+#include "imgui\imgui.h"
+
+void GUI::TextEditor::DispCSG_Primitive(GUI::TextEditor::CSG_Primitive & prim)
+{
+	ImGui::Indent();
+	ImGui::Combo("Primitive type", (int*)&prim.type, "Plane\0Plane XY\0Plane XZ\0PlaneYZ\0Sphere\0Cylinder\0Torus\0Box\0");
+	switch(prim.type)
+	{
+	case PLANE:	if(ImGui::DragFloat3("Normal", &prim.normal.x))
+						prim.normal = glm::normalize(prim.normal);
+	case PLANE_XY: case PLANE_YZ: case PLANE_XZ : break;
+	case TORUS:
+		ImGui::DragFloat("r", &prim.r);
+	case SPHERE: case CYLINDER:
+		ImGui::DragFloat("R", &prim.R);
+		break;
+	case BOX:	ImGui::TextDisabled("Not implemented jet"); break;
+	default: ImGui::TextDisabled("Unknown primitive"); break;
+	}
+	ImGui::Unindent();
+}
+
+void GUI::TextEditor::DispCSG_Edge(GUI::TextEditor::CSG_Edge & edge)
+{
+	ImGui::Combo("Transformation", (int*)&edge.type, "Identity\0Transpose\0Rotate\0Affin\0Projective\0");
+	switch(edge.type)
+	{
+	case IDENTITY: break; case TRANSPOSE: ImGui::DragFloat3("Delta", &edge.transpose.x); break;
+	case ROTATE: case AFFIN: case PROJECTIVE: ImGui::TextDisabled("Not implemented jet"); break;
+	default: ImGui::TextDisabled("Unknown transformation type"); break;
+	}
+	ImGui::Indent();
+	DispCSG_Node(*edge.node);
+	ImGui::Unindent();
+}
+
+
+void GUI::TextEditor::DispCSG_Node(GUI::TextEditor::CSG_Node & node)
+{
+	float width = ImGui::GetContentRegionAvailWidth();
+	ImGui::Combo("Node type", (int*)&node.type, "Primitive\0Union\0Intersection\0Differance\0Soft Union\0Soft Intersection\0Soft Differance\0");
+	switch(node.type)
+	{
+	case PRIMITIVE:	DispCSG_Primitive(node.primitive); node.edges.clear(); break;
+	case SOFT_UNION: case SOFT_INTERSECTION: case SOFT_DIFFERANCE:
+		ImGui::DragFloat("Radius", &node.soft_ness);
+	case UNION: case INTERSECTION: case DIFFERANCE:
+		if(node.edges.size() < 2) node.edges.resize(2);
+		for(int i = 0; i < node.edges.size(); ++i)
+		{
+			std::string label = "Operand " + std::to_string(i);
+			if(ImGui::TreeNode(label.data()))
+			{
+				label = "Delete node ##" + std::to_string(i); ImGui::SameLine(width-80);
+				if(ImGui::SmallButton(label.data())) node.edges.erase(node.edges.begin() + i);
+				else DispCSG_Edge(node.edges[i]);
+				ImGui::TreePop();
+			}
+			else
+			{
+				label = "Delete node ##" + std::to_string(i); ImGui::SameLine(width - 80);
+				if(ImGui::SmallButton(label.data())) node.edges.erase(node.edges.begin() + i);
+			}
+		}
+		if(ImGui::Button("Add another")) { node.edges.push_back(CSG_Edge()); }
+		break;
+	default: ImGui::TextDisabled("Unknown node type"); break;
+	}
+}
+
+void GUI::TextEditor::ShowCSG()
+{
+	//ImGui::Columns(2);
+	//ImGui::PushItemWidth(ImGui::GetContentRegionAvailWidth()*0.6);
+	DispCSG_Node(csg.root);
+	//ImGui::Columns(2);
+}
+
+GUI::TextEditor::CSG_Edge::CSG_Edge() : node(new CSG_Node()){}
+
+GUI::TextEditor::CSG_Edge::~CSG_Edge(){	delete node;}
+
+GUI::TextEditor::CSG_Edge::CSG_Edge(CSG_Edge & edge)
+{
+	node = new CSG_Node();
+	std::swap(edge.node, node);
+	transpose = edge.transpose;
+	rotate = edge.rotate;
+	projective = edge.projective;
+}
+
+GUI::TextEditor::CSG_Edge& GUI::TextEditor::CSG_Edge::operator = (CSG_Edge & edge)
+{
+	std::swap(edge.node, node);
+	transpose = edge.transpose;
+	rotate = edge.rotate;
+	projective = edge.projective;
+	return *this;
+}
+```
+
+### 02_Shaders/TextEditor_build.cpp
+```
+//build related fucntions of Text Editor
+#include "TextEditor.h"
+
+
+bool GUI::TextEditor::BuildComputeFragShader()
+{
+	log.str(std::string());	//log.clear() is inherited form ios for clearing error state !!
+	std::string extra_line = std::string("\n#line 1 \"") + filenames.current + "\"\n";
+	return compute.AttachShader(GL_FRAGMENT_SHADER, { source_codes.begin.c_str(), extra_line.data(), text.data(), source_codes.end.c_str() });
+}
+
+bool GUI::TextEditor::ReloadFragShaderConstCode()
+{
+	source_codes.begin = FileIO::getCompFSCodeBegin();
+	source_codes.end = FileIO::getCompFSCodeEnd();
+	return true;
+}
+
+bool GUI::TextEditor::BuildComputeVertShader()
+{
+	log.str(std::string());	//log.clear() is inherited form ios for clearing error state
+	return compute.AttachShader(GL_VERTEX_SHADER, FileIO::getCompVSCode());
+}
+
+bool GUI::TextEditor::LinkComputeProgram()
+{
+	compute.BindAttribLoc(0, "pos");
+	states.is_valid_program = false;
+	return compute.Link();
+}
+
+bool GUI::TextEditor::BuildShowFragShader()
+{
+	log.str(std::string());	//log.clear() is inherited form ios for clearing error state
+	return show.AttachShader(GL_FRAGMENT_SHADER, FileIO::getShowFSCode());
+}
+
+bool GUI::TextEditor::BuildShowVertShader()
+{
+	log.str(std::string());	//log.clear() is inherited form ios for clearing error state
+	return show.AttachShader(GL_VERTEX_SHADER, FileIO::getShowVSCode());
+}
+
+bool GUI::TextEditor::LinkShowProgram()
+{
+	show.BindAttribLoc(0, "pos");
+	return show.Link();
+}
+
+void GUI::TextEditor::BuildShortcut()
+{
+	if(BuildComputeFragShader())
+		LinkComputeProgram();
+}
+
+void GUI::TextEditor::RebuildCompShortcut()
+{
+	if(ReloadFragShaderConstCode())
+		if(BuildComputeFragShader())
+			if(BuildComputeVertShader())
+				LinkComputeProgram();
+}
+
+void GUI::TextEditor::RebuildShowShortcut()
+{
+	if(BuildShowFragShader())
+		if(BuildShowVertShader())
+			LinkShowProgram();
+}
+```
+
+### 02_Shaders/TextEditor_fileio.cpp
+```
+//file input and output related functions of TextEditor
+#include "TextEditor.h"
+
+void GUI::TextEditor::Open(const char * file)
+{
+	if(FileIO::OpenFrom(file, text, &log))
+	{
+		if(file != filenames.current)
+		{
+			strcpy_s(filenames.current, file);
+			filenames.recents.emplace(file);
+		}
+		text.resize(text.size() + 100);
+		sprintf_s(winnames.editor, "%s     [SDF Editor]##SdfEditor", filenames.current);
+	}
+}
+
+void GUI::TextEditor::Save(const char * file)
+{
+	if(FileIO::SaveTo(file, text.data(), 0, &log))
+	{
+		strcpy_s(filenames.current, file);
+		filenames.recents.emplace(file);
+		sprintf_s(winnames.editor, "%s     [SDF Editor]##SdfEditor", filenames.current);
+	}
+}
+
+void GUI::TextEditor::SaveShortcut()
+{
+	if(0 == strcmp(filenames.current, "untitled.frag"))
+	{
+		strcpy_s(filenames.buffer, filenames.current);
+		states.window.is_open_savepopup = true;
+	}
+	else
+		Save(filenames.current);
+}
+
+void GUI::TextEditor::SaveAsShortcut()
+{
+	strcpy_s(filenames.buffer, filenames.current);
+	states.window.is_open_savepopup = true;
+}
+
+void GUI::TextEditor::OpenShortcut()
+{
+	strcpy_s(filenames.buffer, filenames.current);
+	states.window.is_open_openpopup = true;
+}
+
+void GUI::TextEditor::NewFileShortcut()
+{
+	const char str[] = "vec3 color(in vec3 p, in vec3 v)\n{\n\treturn vec3(1);\n}\n\nfloat sdf(in vec3 p, in vec3 v)\n{\n\treturn min(sphere(p,v,1),planeXY(p, v));\n}\n";
+	text.assign(std::begin(str), std::end(str));
+	text.resize(text.size() + 100);
+	strcpy_s(filenames.current, "untitled.frag");
+}
+```
+
+### 02_Shaders/TextEditor_keymap.cpp
+```
+//Keyboard interraction functions of TextEditor
+#include "TextEditor.h"
+
+void GUI::TextEditor::KeyboardDown(SDL_Keycode key)
+{
+	switch(key)
+	{
+	case SDLK_RCTRL:	case SDLK_LCTRL:	states.key.ctrl = true;		break;
+	case SDLK_RSHIFT:	case SDLK_LSHIFT:	states.key.shift = true;		break;
+	case SDLK_RALT:		case SDLK_LALT:		states.key.alt = true;		break;
+	case SDLK_F11:  Resize(sizes.full_width, sizes.full_height); break;
+	}
+	if(states.key.ctrl && states.window.p_open && !states.window.is_open_openpopup && !states.window.is_open_savepopup)
+	{
+		switch(key)
+		{
+		case SDLK_n: NewFileShortcut(); break;
+		case SDLK_s: (states.key.shift ? SaveAsShortcut() : SaveShortcut()); break;
+		case SDLK_o: (states.key.shift ? OpenShortcut() : Open(filenames.current)); break;
+		case SDLK_b: BuildShortcut(); break;
+		case SDLK_r: (states.key.shift ? RebuildShowShortcut() : RebuildCompShortcut()); break;
+		default:break;
+		}
+	}
+}
+
+void GUI::TextEditor::KeyboardUp(SDL_Keycode key)
+{
+	switch(key)
+	{
+	case SDLK_RCTRL:	case SDLK_LCTRL:	states.key.ctrl = false;		break;
+	case SDLK_RSHIFT:	case SDLK_LSHIFT:	states.key.shift = false;		break;
+	case SDLK_RALT:		case SDLK_LALT:		states.key.alt = false;		break;
+	}
+}
+```
+
+### 02_Shaders/TextEditor_render.cpp
+```
+//Render related functions of TextEditor
+#include "TextEditor.h"
+#include "imgui\imgui.h"
+
+void GUI::TextEditor::Render()
+{
+	if(states.window.p_open) SetSize();
+	ImGui::PushFont(ImGui::GetIO().Fonts->Fonts[options.fullscreen ? 4 : 3]);
+	if(!ImGui::Begin(winnames.editor, &states.window.p_open, ImGuiWindowFlags_MenuBar | ImGuiWindowFlags_NoMove | ImGuiWindowFlags_NoResize))
+	{
+		ImGui::End();
+		ImGui::PopFont(); return;
+	}
+	ImGui::PopFont();	ImGui::PushFont(ImGui::GetIO().Fonts->Fonts[1]);
+	if(strlen(text.data()) + 30 > text.size()) text.resize(text.size(), '\0');		//can be optimized
+	ImGui::PushFont(ImGui::GetIO().Fonts->Fonts[options.fullscreen ? 3 : 2]);
+	MenuBar();		ImGui::PopFont();
+	OpenPopup();	SavePopup();
+
+	const int N = 2;
+	const char * tmp_selectables[N] = { "Source Code", "CSG Editor" };
+	ImVec2 tab_button_size = ImVec2(ImGui::GetContentRegionAvailWidth() / N - 5, 15);
+
+	ImGui::PushFont(ImGui::GetIO().Fonts->Fonts[options.fullscreen ? 3 : 2]);
+	for(int i = 0; i < N; ++i)
+	{
+		if(ImGui::Selectable(tmp_selectables[i], i == states.tab_sub_wind_id, 0, tab_button_size))
+			states.tab_sub_wind_id = i;
+		if(i != N - 1) ImGui::SameLine();
+	}ImGui::PopFont();
+
+	switch(states.tab_sub_wind_id)
+	{
+	case 0:	ShowTab1();		break;
+	case 1:	ShowCSG();		break;
+	default:				break;
+	}
+	ImGui::End();
+	ImGui::PopFont();
+}
+
+void GUI::TextEditor::ShowTab1()
+{
+	float h = atanf((float)log.str().length() / 128.f) / 3.1415f*2.f*sizes.win_height*0.4f;
+	if(h != 0) h += 75.f;
+	ImGui::PushFont(ImGui::GetIO().Fonts->Fonts[options.fullscreen ? 5 : 4]);
+	if(ImGui::Button("BUILD", ImVec2(sizes.win_width*0.5f - 5.f, 30.f)))
+		BuildShortcut();
+	ImGui::SameLine(0, 10);
+	if(ImGui::Button("REBUILD", ImVec2(sizes.win_width*0.5f - 5.f, 30.f)))
+		RebuildCompShortcut();
+	
+	ImGui::PopFont();
+	ImGui::PushFont(ImGui::GetIO().Fonts->Fonts[options.fullscreen ? 2 : 0]);
+
+	static ImVec4 text_bg_color = ImVec4(1, 1, 1, 0.1f);
+	ImGui::PushStyleColor(ImGuiCol_FrameBg, text_bg_color);
+	ImGui::PushStyleColor(ImGuiCol_Text, ImVec4(0, 0, 0, 1));
+	ImGui::InputTextMultiline("##1", text.data(), text.size(), ImVec2(sizes.win_width, sizes.win_height - h - 30), ImGuiInputTextFlags_AllowTabInput);
+	text_bg_color = (ImGui::IsItemActive() ? ImVec4(1, 1, 1, 1) : ImVec4(1, 1, 1, 0.1f));
+	
+	ImGui::PopStyleColor(2);	ImGui::PopFont();
+	if(h > 75.1f) LogWindow(h);
+}
+
+inline float SmallInputFloat(const char *__restrict name, float &__restrict f)
+{
+	int length = ( abs(f) > 1 ? (int)log(abs(f)) : 1 ) + (f > 0 ? 5 : 6) + (abs(f) < 1 ? 1 : 0) + (abs(f) < 100 ? 1 : 0);
+	ImGui::PushItemWidth(length * 5.2f);
+	ImGui::DragFloat(name, &f, 0.1f, 0, 0, (abs(f) < 1 ? "%.2f" : abs(f) < 100 ? "%0.1f" : "%0.f"), 1.01f);
+	ImGui::PopItemWidth();
+	return (length + strlen(name))*7.0f;
+}
+
+void GUI::TextEditor::ShowTab2()
+{
+	ImGui::PushFont(ImGui::GetIO().Fonts->Fonts[options.fullscreen ? 5 : 4]);
+	if(ImGui::Button("GENERATE", ImVec2(sizes.win_width*0.55f - 5.f, 30.f)))
+		GenerateAlgebricSurface();
+	ImGui::SameLine(0, 10);
+	if(ImGui::Button("BUILD", ImVec2(sizes.win_width*0.45f - 5.f, 30.f)))
+		BuildShortcut();
+
+	float width = ImGui::GetContentRegionAvailWidth();
+	ImGui::PopFont();
+
+	float line_width = 0;
+	for(int i = 0; i < 20; ++i)
+	{
+		line_width += SmallInputFloat(algebric.labels[i], algebric.a[i]);
+		if(line_width + 70 < width)	ImGui::SameLine();
+		else line_width = 0;
+	}
+
+}
+
+void GUI::TextEditor::LogWindow(float h)
+{
+	ImGui::Separator();
+	std::string str = log.str();
+	size_t endln0 = str.find('\n', 0);
+	size_t endln1 = str.find('\n', endln0 + 1); //second line end
+	std::string line01 = str.substr(0, endln1);
+
+	ImGui::PushStyleColor(ImGuiCol_Text, ImVec4(1, 0.4f, 0.4f, 1));
+	ImGui::PushFont(ImGui::GetIO().Fonts->Fonts[options.fullscreen ? 3 : 1]);
+	ImGui::TextWrapped(line01.c_str());
+	ImGui::PopFont(); ImGui::PopStyleColor();
+	ImGui::PushFont(ImGui::GetIO().Fonts->Fonts[options.fullscreen ? 2 : 0]);
+	if(options.log_copyable)
+	{
+		ImGui::PushStyleColor(ImGuiCol_FrameBg, ImVec4(0, 0, 0, 0.2f));
+		ImGui::PushStyleColor(ImGuiCol_Text, ImVec4(1, 0.5f, 0.5f, 0.8f));
+		ImGui::PushStyleColor(ImGuiCol_TextSelectedBg, ImVec4(0.4f, 0.4f, 0, 0.5f));
+		ImGui::InputTextMultiline("##2", const_cast<char*>(str.data()), str.length(), ImVec2(sizes.win_width, h - 100.f), ImGuiInputTextFlags_ReadOnly);
+		ImGui::PopStyleColor(3);
+	}
+	else
+	{
+		ImGui::PushStyleColor(ImGuiCol_FrameBg, ImVec4(0, 0, 0, 0.2f));
+		ImGui::PushStyleColor(ImGuiCol_Text, ImVec4(1, 0.5f, 0.5f, 0.7f));
+		ImGui::BeginChildFrame(0, ImVec2(sizes.win_width, h - 100));
+		ImGui::TextUnformatted(str.c_str());
+		ImGui::EndChildFrame();
+		ImGui::PopStyleColor(2);
+	}
+	ImGui::PopFont();
+	ImGui::PushFont(ImGui::GetIO().Fonts->Fonts[options.fullscreen ? 3 : 2]);
+	if(ImGui::SmallButton("Copy All"))
+		ImGui::SetClipboardText(str.c_str());
+	ImGui::SameLine(0, 20);
+	if(ImGui::SmallButton("Copy First Error"))
+		ImGui::SetClipboardText(line01.c_str() + endln0 + 1);
+	ImGui::SameLine(0, 20);
+	if(ImGui::SmallButton("Clear"))
+		log.str(std::string());	//log.clear() is inherited form ios for clearing error state
+	ImGui::PopFont();
+}
+
+void GUI::TextEditor::MenuBar()
+{
+	if(ImGui::BeginMenuBar())
+	{
+		if(ImGui::BeginMenu("File"))
+		{
+			if(ImGui::MenuItem("New", "Ctrl+N"))				NewFileShortcut();
+			if(ImGui::MenuItem("Reopen", "Ctrl+O"))				Open(filenames.current);
+			if(ImGui::MenuItem("Open other", "Ctrl+Shift+O"))	OpenShortcut();
+			if(ImGui::BeginMenu("Open Recent"))
+			{
+				ImGui::MenuItem("Recents", nullptr, nullptr, false);
+				for(auto & r : filenames.recents)
+					if(ImGui::MenuItem(r.c_str()))
+						Open(r.c_str());
+				ImGui::Separator();
+				ImGui::MenuItem("Examples", nullptr, nullptr, false);
+				for(auto & e : filenames.examples)
+					if(ImGui::MenuItem(e.c_str()))
+						Open(e.c_str());
+				ImGui::EndMenu();
+			}
+			ImGui::Separator();
+			if(ImGui::MenuItem("Save", "Ctrl+S"))	SaveShortcut();
+			if(ImGui::MenuItem("Save As..", "Ctrl+Shift+S")) SaveAsShortcut();
+			if(ImGui::MenuItem("Close"))
+				states.window.p_open = false;
+			ImGui::EndMenu();
+		}
+		if(ImGui::BeginMenu("Options"))
+		{
+			if(ImGui::MenuItem("Fullscreen", "F11", &options.fullscreen))	Resize(sizes.full_width, sizes.full_height);
+			ImGui::MenuItem("Selectable log", nullptr, &options.log_copyable, log.str().length() != 0);
+			ImGui::EndMenu();
+		}
+
+		if(ImGui::BeginMenu("Build"))
+		{
+			if(ImGui::MenuItem("Minimal rebuild", "Ctrl+B"))	BuildShortcut();
+			if(ImGui::MenuItem("Rebuild computing shader", "Ctrl+R")) RebuildCompShortcut();
+			if(ImGui::MenuItem("Rebuild visualizing shader", "Ctrl+Shift+R")) RebuildShowShortcut();
+			if(ImGui::BeginMenu("Call Build Function..."))
+			{
+				if(ImGui::MenuItem("ReloadFragShaderConstCode()"))	ReloadFragShaderConstCode();
+				if(ImGui::MenuItem("BuildComputeFragShader()"))	BuildComputeFragShader();
+				if(ImGui::MenuItem("BuildComputeVertShader()"))	BuildComputeVertShader();
+				if(ImGui::MenuItem("LinkComputeProgram()"))	LinkComputeProgram();
+				if(ImGui::MenuItem("BuildShowFragShader()"))	BuildShowFragShader();
+				if(ImGui::MenuItem("BuildShowVertShader()"))	BuildShowVertShader();
+				if(ImGui::MenuItem("LinkShowProgram()"))	LinkShowProgram();
+				ImGui::EndMenu();
+			}
+			ImGui::EndMenu();
+		}
+		ImGui::EndMenuBar();
+	}
+}
+
+void GUI::TextEditor::SetSize()
+{
+	float w0 = sqrtf((float)sizes.full_width) * 9.5f + 100.f;
+	sizes.win_width = (options.fullscreen ? sizes.full_width - w0 - 50: w0);
+	sizes.win_height = sizes.full_height - 50;
+	ImGui::SetWindowSize(winnames.editor, ImVec2(sizes.win_width + 15, sizes.full_height));
+	ImGui::SetWindowPos(winnames.editor, ImVec2(sizes.full_width - sizes.win_width - 15, 0));
+}
+
+const ImVec2 popup_button_size = ImVec2(125, 30);
+const float cancel_button_offset = 335;
+
+void GUI::TextEditor::OpenPopup()
+{
+	if(states.window.is_open_openpopup) ImGui::OpenPopup(winnames.open);
+	if(ImGui::BeginPopupModal(winnames.open, nullptr, ImGuiWindowFlags_AlwaysAutoResize))
+	{
+		ImGui::TextUnformatted("Enter filename: ");
+		ImGui::SameLine();
+		ImGui::InputText("##0", filenames.buffer, 512);
+		ImGui::Separator();
+		if(ImGui::Button("Open##2", popup_button_size))
+		{
+			Open(filenames.buffer);
+			ImGui::CloseCurrentPopup();
+			states.window.is_open_openpopup = false;
+		}
+		ImGui::SameLine(cancel_button_offset - popup_button_size.x);
+		if(ImGui::Button("Cancel##3", popup_button_size))
+		{
+			ImGui::CloseCurrentPopup();
+			states.window.is_open_openpopup = false;
+		}
+		ImGui::EndPopup();
+	}
+}
+
+void GUI::TextEditor::SavePopup()
+{
+	if(states.window.is_open_savepopup) ImGui::OpenPopup(winnames.save);
+	if(ImGui::BeginPopupModal(winnames.save, nullptr, ImGuiWindowFlags_AlwaysAutoResize))
+	{
+		ImGui::TextUnformatted("Enter filename: ");
+		ImGui::SameLine();
+		ImGui::InputText("##0", filenames.buffer, 512);
+		ImGui::Separator();
+		if(ImGui::Button("Save##2", popup_button_size))
+		{
+			Save(filenames.buffer);
+			ImGui::CloseCurrentPopup();
+			states.window.is_open_savepopup = false;
+		}
+		ImGui::SameLine(cancel_button_offset - popup_button_size.x);
+		if(ImGui::Button("Cancel##3", popup_button_size))
+		{
+			ImGui::CloseCurrentPopup();
+			states.window.is_open_savepopup = false;
+		}
+		ImGui::EndPopup();
+	}
+}
+```
+
+### 02_Shaders/Uniforms.cpp
+```
+#include "Uniforms.h"
+#include "GLCHECK.h"
+#include "DebugWindow.h"
+
+ShaderProg & operator<<(ShaderProg & prog, const Uniforms & uniforms)
+{	//TODO: optimize to a few ogl calls (UBO?)
+	prog.SetUniform("st_stepcount", uniforms.sphere_trace.stepcount);
+	prog.SetUniform("st_stepsize" , uniforms.sphere_trace.stepsize);
+	prog.SetUniform("st_stepincr" , uniforms.sphere_trace.stepincr);
+	prog.SetUniform("ao_radius"   , uniforms.ambient_occolution.radius);
+	prog.SetUniform("ao_strength" , uniforms.ambient_occolution.strength);
+
+	prog.SetUniform("ao_mix_coeff", uniforms.ambient_occolution.mix_coeff);
+	prog.SetUniform("sw_mix_coeff", uniforms.shadows.mix_coeff);
+	prog.SetUniform("n_mix_coeff", uniforms.normal.mix_coeff);
+	prog.SetUniform("n_epsz_mult", uniforms.normal.epsz_mult);
+	prog.SetUniform("c_mix_coeff", uniforms.color_mix_coeff);
+
+	prog.SetUniform("cam_eye", uniforms.camera.eye);
+	prog.SetUniform("cam_at", uniforms.camera.at);
+	prog.SetUniform("cam_up", uniforms.camera.up);
+	prog.SetUniform("cam_pixel_growth", uniforms.camera.pixel_growth);
+	prog.SetUniform("cam_normalized_size", uniforms.camera.normalized_size);
+	prog.SetUniform("cam_res_mult", uniforms.resolution_multipiers.camera);
+	prog.SetUniform("tex_res_mult", uniforms.resolution_multipiers.texture);
+
+	prog.SetUniform("sw_stepcount", uniforms.shadows.stepcount);
+	prog.SetUniform("light_pos", uniforms.shadows.light_pos);
+	prog.SetUniform("light_size", uniforms.shadows.light_radius);
+	prog.SetUniform("sw_step_multipier", uniforms.shadows.step_multipier);
+	prog.SetUniform("ao_iternum", uniforms.ambient_occolution.ao_iternum);
+
+	prog.SetUniform("mat_ambient_mult", uniforms.material.ambient);
+	prog.SetUniform("mat_diffuse_mult", uniforms.material.diffuse);
+	prog.SetUniform("mat_specular_mult", uniforms.material.specular);
+	prog.SetUniform("mat_specular_power", uniforms.material.power);
+	prog.SetUniform("mat_light_decay", uniforms.material.light_decay);
+	prog.SetUniform("light_strength", uniforms.material.light_strength);
+	prog.SetUniform("user_itercount", (int)uniforms.user_itercount);
+
+	glUniformSubroutinesuiv(GL_FRAGMENT_SHADER, 5, uniforms.subroutines);
+	return prog;
+}
+
+Uniforms::Uniforms(GUI::DebugWindow & debug) : debug(debug)
+{
+	algorithms.spheretrace = ST_3;
+	algorithms.antialias = ANTIALIAS_0;
+	algorithms.norm = NORM_1;
+	algorithms.ambient = AMBIENT_1;
+	algorithms.shadow = SHADOW_4;
+}
+
+void Uniforms::setShowUniformsToShaderProg(ShaderProg & prog) const
+{
+	if(debug.original_size)
+		prog.SetUniform("cam_res_mult", glm::vec2(1.0));
+	else
+		prog.SetUniform("cam_res_mult", (debug.show_currentstate ? resolution_multipiers.camera : resolution_multipiers.texture));
+	//prog.SetUniform("tex_res_mult", tex_res_mult);
+	prog.On();
+	glUniformSubroutinesuiv(GL_FRAGMENT_SHADER, 1, &debug.view.type);
+}
+
+void Uniforms::Iteration(const int it)
+{
+	resolution_multipiers.texture = resolution_multipiers.camera;	//next texture resoltuion is the last camera resolution
+	const float t = (float) it;
+
+	float m = debug.functions.resolution_multipier(t);
+	camera.pixel_growth = 1.41421356237f / glm::length(glm::vec2(w*m, h*m))*2.f;
+	resolution_multipiers.camera= glm::vec2(m);
+	camera.normalized_size = glm::vec2(w*m, h*m);
+	camera.normalized_size = glm::normalize(camera.normalized_size) * debug.view.fow_mult;
+
+	sphere_trace.stepcount = (int)debug.functions.spheretrace_stepcount(t);
+	shadows.stepcount = (int)debug.functions.shadow_stepcount(t);
+	user_itercount = (int)debug.functions.user_itercount(t);
+
+	ambient_occolution.ao_iternum = it - debug.ambient.start_iternum;
+	algorithms.ambient = (it <= debug.ambient.start_iternum ? Uniforms::AMBIENT_0 : Uniforms::AMBIENT_0 + debug.ambient.algorithm);
+}
+```
+
+### 02_Shaders/Uniforms.h
+```
+#pragma once
+#include <GL/glew.h>
+#include "GPUState.h"
+#include "ShaderProg.h"
+#include "gCamera.h"
+#include <glm/glm.hpp>
+//#include "DebugWindow.h"
+
+namespace GUI{	class DebugWindow;}	//fwd
+
+class Uniforms
+{
+	friend ShaderProg& operator << (ShaderProg& prog, const Uniforms &uniforms);
+	friend class GUI::DebugWindow;
+public:
+	enum ALGORITHM
+	{
+		/*ST_0 = 0,	*/		ST_1 = 1,			ST_2 = 2,			ST_3 = 3,
+		REFINE_0 = 200,		REFINE_1 = 201,		REFINE_2 = 202,		REFINE_3 = 203,
+		ANTIALIAS_0 = 300,
+		NORM_0 = 400,		NORM_1 = 401,		NORM_2 = 402,
+		AMBIENT_0 = 500,	AMBIENT_1 = 501,	AMBIENT_2 = 502,	AMBIENT_3 = 503,
+		SHADOW_0 = 600,	SHADOW_1 = 601,			SHADOW_2 = 602,		SHADOW_3 = 603,		SHADOW_4 = 604,
+	};
+public:
+	GUI::DebugWindow &debug;
+
+	float	color_mix_coeff = 0.f;
+	int user_itercount = 1;
+
+	struct
+	{
+		int		stepcount = 10;
+		float	stepsize	 = 0.1f;
+		float	stepincr  = 0.1f;
+	} sphere_trace;
+	
+	struct
+	{
+		float	radius = 0.1f;
+		float	strength = 0.9f;
+		float	mix_coeff = 0.f;
+		int ao_iternum = 1;
+	} ambient_occolution;
+	
+	struct
+	{
+		float	mix_coeff = 0.f;
+		float	epsz_mult = 0.5f;
+	} normal;
+	struct
+	{
+		glm::vec3 eye = glm::vec3(2.f);
+		glm::vec3 at = glm::vec3(0.f);
+		glm::vec3 up = glm::vec3(0.f, 0.f, 1.f);
+
+		float pixel_growth = 1.41421356237f / glm::length(glm::vec2(1280.f, 720.f));
+		glm::vec2 normalized_size = glm::vec2(1280.f,720.f) / glm::length(glm::vec2(1280.f, 720.f));
+	} camera;
+
+	struct
+	{
+		glm::vec3 light_pos = glm::vec3(18.6f, -0.7f, 3.3f);
+		float light_radius = 0.5f;
+		int stepcount = 10;
+		float step_multipier = 0.6f;
+		float mix_coeff = 0.f;
+	} shadows;
+
+	union
+	{
+		GLuint subroutines[5];
+		struct
+		{
+			GLuint spheretrace;
+			GLuint antialias;
+			GLuint norm;
+			GLuint ambient;
+			GLuint shadow;
+		} algorithms;
+	};
+
+	struct
+	{
+		glm::vec2 camera = glm::vec2(1.0);
+		glm::vec2 texture = glm::vec2(1.0);
+	} resolution_multipiers;
+
+	struct
+	{
+		float ambient = 0.18f;
+		float diffuse = 0.76f;
+		float specular = 0.98f;
+		float power = 200.f;
+		float light_decay = 0.1f;
+		float light_strength = 2.3f;
+	}material;
+
+	int w = 1280, h = 720;
+
+public:
+	Uniforms(GUI::DebugWindow &debug);
+	inline float GetCamResMultX() const { return resolution_multipiers.camera.x; }
+	inline void setWH(int wi, int hi)
+	{
+		w = wi; h = hi;
+		camera.pixel_growth = static_cast<float>(1.41421356237 / glm::length(glm::dvec2(wi,hi)));
+		camera.normalized_size = glm::vec2(wi, hi);
+		camera.normalized_size = glm::normalize(camera.normalized_size);
+	}
+	inline Uniforms& operator << (const gCamera &cam)
+	{
+		camera.eye = cam.GetEye();	camera.at = cam.GetAt();	camera.up = cam.GetUp();
+		return *this;
+	}
+	void setShowUniformsToShaderProg(ShaderProg &prog) const;
+	void Iteration(const int it);
+};
+ShaderProg& operator << (ShaderProg& prog, const Uniforms &uniforms);
+
+
+// Possible improovemenst:
+//	- Implement an abstact version of UBO
+//	- May need multiple UBO-s to update content in different rate (per frame, per iteration)
+```
+
+### 02_Shaders/gCamera.cpp
+```
+#include <iostream>
+#include "gCamera.h"
+#include <glm/gtc/matrix_transform.hpp>
+#include <math.h>
+
+/// <summary>
+/// Initializes a new instance of the <see cref="gCamera"/> class.
+/// </summary>
+gCamera::gCamera(void) : m_eye(10.0f, 10.0f, 10.0f), m_at(0.0f), m_up(0.0f, 0.0f, 1.0f), m_speed(4.0f), m_goFw(0), m_goRight(0), m_slow(false)
+{
+	SetView( glm::vec3(10,10,10), glm::vec3(0,0,0), glm::vec3(0,0,1));
+
+	m_dist = glm::length( m_at - m_eye );	
+}
+
+gCamera::gCamera(glm::vec3 _eye, glm::vec3 _at, glm::vec3 _up) : m_speed(4.0f), m_goFw(0), m_goRight(0), m_dist(10), m_slow(false)
+{
+	SetView(_eye, _at, _up);
+}
+
+gCamera::~gCamera(void)
+{
+}
+
+void gCamera::SetView(glm::vec3 _eye, glm::vec3 _at, glm::vec3 _up)
+{
+	m_eye	= _eye;
+	m_at	= _at;
+	m_up	= _up;
+
+	m_fw  = glm::normalize( m_at - m_eye  );
+	m_st = glm::normalize( glm::cross( m_fw, m_up ) );
+
+	m_dist = glm::length( m_at - m_eye );	
+
+	m_u = atan2f( m_fw.z, m_fw.x );
+	m_v = acosf( m_fw.y );
+}
+
+bool gCamera::Update(float _deltaTime)
+{
+	m_eye += (m_goFw*m_fw + m_goRight*m_st)*m_speed*_deltaTime;
+	m_at  += (m_goFw*m_fw + m_goRight*m_st)*m_speed*_deltaTime;
+	return m_goFw || m_goRight;
+}
+
+void gCamera::UpdateUV(float du, float dv)
+{
+	m_u		+= du;
+	m_v		 = glm::clamp<float>(m_v + dv, 0.1f, 3.1f);
+
+	m_at = m_eye + m_dist*glm::vec3(cosf(m_u)*sinf(m_v),
+									sinf(m_u)*sinf(m_v),
+									cosf(m_v));
+
+	m_fw = glm::normalize( m_at - m_eye );
+	m_st = glm::normalize( glm::cross( m_fw, m_up ) );
+}
+
+bool gCamera::KeyboardDown(SDL_KeyboardEvent& key)
+{
+	switch ( key.keysym.sym )
+	{
+	case SDLK_LSHIFT:
+	case SDLK_RSHIFT:
+		if ( !m_slow )
+		{
+			m_slow = true;
+			m_speed /= 4.0f;
+		}
+		break;
+	case SDLK_w:
+			m_goFw = 1;
+		break;
+	case SDLK_s:
+			m_goFw = -1;
+		break;
+	case SDLK_a:
+			m_goRight = -1;
+		break;
+	case SDLK_d:
+			m_goRight = 1;
+		break;
+	}
+	return (m_goFw != 0) || (m_goRight != 0);
+}
+
+bool gCamera::KeyboardUp(SDL_KeyboardEvent& key)
+{
+	float current_speed = m_speed;
+	switch ( key.keysym.sym )
+	{
+	case SDLK_LSHIFT:
+	case SDLK_RSHIFT:
+		if ( m_slow )
+		{
+			m_slow = false;
+			m_speed *= 4.0f;
+		}
+		break;
+	case SDLK_w:
+	case SDLK_s:
+			m_goFw = 0;
+		break;
+	case SDLK_a:
+	case SDLK_d:
+			m_goRight = 0;
+		break;
+	}
+	return (m_goFw != 0) || (m_goRight != 0);
+}
+
+bool gCamera::MouseMove(SDL_MouseMotionEvent& mouse)
+{
+	if ( mouse.state & SDL_BUTTON_LMASK )
+	{
+		UpdateUV(-mouse.xrel/100.0f, mouse.yrel/100.0f);
+		return true;
+	}
+	return false;
+}
+
+void gCamera::LookAt(glm::vec3 _at)
+{
+	SetView(m_eye, _at, m_up);
+}
+```
+
+### 02_Shaders/gCamera.h
+```
+#pragma once
+
+#include <SDL.h>
+#include <glm/glm.hpp>
+
+class gCamera
+{
+public:
+	gCamera(void);
+	gCamera(glm::vec3 _eye, glm::vec3 _at, glm::vec3 _up);
+	~gCamera(void);
+
+	bool Update(float _deltaTime);
+
+	void SetView(glm::vec3 _eye, glm::vec3 _at, glm::vec3 _up);
+	void LookAt(glm::vec3 _at);
+
+	inline void SetSpeed(float _val){ m_speed = _val; }
+	inline float GetSpeed() const { return m_speed; }
+
+	inline glm::vec3 GetEye()const {	return m_eye; }
+	inline glm::vec3 GetAt() const { return m_at; }
+	inline glm::vec3 GetUp() const {	return m_up; }
+
+	bool KeyboardDown(SDL_KeyboardEvent& key);
+	bool KeyboardUp(SDL_KeyboardEvent& key);
+	bool MouseMove(SDL_MouseMotionEvent& mouse);
+
+private:
+	void UpdateUV(float du, float dv);
+
+	float	m_speed;
+	bool	m_slow;
+
+	glm::vec3	m_eye;
+	glm::vec3	m_up;
+	glm::vec3	m_at;
+
+	float	m_u;
+	float	m_v;
+	float	m_dist;
+
+	glm::vec3	m_fw;
+	glm::vec3	m_st;
+
+	float	m_goFw;
+	float	m_goRight;
+};
+```
+
+### 02_Shaders/gTimer.cpp
+```
+#include "gTimer.h"
+#include "GLCHECK.h"
+
+GPU_Timer::GPU_Timer(void)
+{
+	glGenQueries(2, queries);
+}
+
+GPU_Timer::~GPU_Timer(void)
+{
+	glDeleteQueries(2, queries);
+}
+
+void GPU_Timer::Start()
+{
+	glBeginQuery(GL_TIME_ELAPSED, queries[act]);
+}
+
+void GPU_Timer::Stop()
+{
+	glEndQuery(GL_TIME_ELAPSED);
+	glGetQueryObjectui64v(queries[act], GL_QUERY_RESULT, &last_delta);
+}
+```
+
+### 02_Shaders/gTimer.h
+```
+#pragma once
+
+/*
+	Nanoszekundum pontoss�g� (*) GPU id�z�t�.
+
+	Fontos: nem lehet egym�sba �gyazni a k�l�nb�z� timer-ek k�r�seit sem, am�g
+	az OpenGL specifik�ci� nem enged�lyezi a nested glBegin/EndQuery-ket!
+
+	(*): driver �s GPU f�gg�
+*/
+
+#include <GL\glew.h>
+#include <chrono>
+class GPU_Timer
+{
+public:
+	GPU_Timer(void);
+	~GPU_Timer(void);
+
+	void Start();
+	void Stop();
+	inline void swap() { act = 1 - act; }
+
+	inline GLuint64 GetLastDeltaNano(){	return last_delta;}
+	//inline double GetLastDeltaMicro(){	return last_delta / 1000.0f;}
+	inline double GetLastDeltaMilli(){	return last_delta / 1000000.0f;}
+
+private:
+	GLuint		queries[2];
+	int act = 0;
+	GLuint64	last_delta;
+};
+
+class CPU_Timer
+{
+protected:
+	std::chrono::high_resolution_clock::time_point start, finish;
+public:
+	inline void Start()
+	{
+		start = std::chrono::high_resolution_clock::now();
+	}
+	inline void Finish()
+	{
+		finish = std::chrono::high_resolution_clock::now();
+	}
+	inline double GetSeconds()
+	{
+		return std::chrono::duration_cast<std::chrono::duration<double>>(finish - start).count();
+	}
+};
+```
+
+### 02_Shaders/main.cpp
+```
+#include <GL/glew.h>
+#include <SDL.h>
+#include <SDL_opengl.h>
+#include <iostream>
+#include <sstream>
+#include "imgui\imgui.h"
+#include "imgui\imgui_impl_sdl_gl3.h"
+#include "MyApp.h"
+#include "gTimer.h"
+
+int main( int argc, char* args[] )
+{
+	//atexit([]() { system("pause"); });
+	glassert(SDL_Init(SDL_INIT_VIDEO) != -1);
+
+    SDL_GL_SetAttribute(SDL_GL_CONTEXT_PROFILE_MASK, SDL_GL_CONTEXT_PROFILE_CORE);
+    SDL_GL_SetAttribute(SDL_GL_BUFFER_SIZE,         32);
+    SDL_GL_SetAttribute(SDL_GL_RED_SIZE,            8);
+    SDL_GL_SetAttribute(SDL_GL_GREEN_SIZE,          8);
+    SDL_GL_SetAttribute(SDL_GL_BLUE_SIZE,           8);
+    SDL_GL_SetAttribute(SDL_GL_ALPHA_SIZE,          8);
+	SDL_GL_SetAttribute(SDL_GL_DOUBLEBUFFER,		1);
+    SDL_GL_SetAttribute(SDL_GL_DEPTH_SIZE,          24);
+	
+	SDL_Window *win = SDL_CreateWindow( "Hello SDL&OpenGL!", 100, 100, 1280, 720, SDL_WINDOW_OPENGL | SDL_WINDOW_SHOWN | SDL_WINDOW_RESIZABLE);			// megjelen�t�si tulajdons�gok
+	glassert(win != nullptr);
+
+	ImGui_ImplSdlGL3_Init(win);
+
+	SDL_GLContext	context	= SDL_GL_CreateContext(win);
+	glassert(context != nullptr);
+
+	SDL_GL_SetSwapInterval(-1);
+	
+	glassert(glewInit() == GLEW_OK);
+
+	int glVersion[2] = {-1, -1}; 
+	glGetIntegerv(GL_MAJOR_VERSION, &glVersion[0]); glGetIntegerv(GL_MINOR_VERSION, &glVersion[1]); 
+	std::cout << "Running OpenGL " << glVersion[0] << "." << glVersion[1] << std::endl;
+	glassert(glVersion[0] != -1 || glVersion[1] != -1);
+
+	std::stringstream window_title;
+	window_title << "SDL Renderer (OpenGL " << glVersion[0] << "." << glVersion[1] << ')';
+	SDL_SetWindowTitle(win, window_title.str().c_str());
+	
+	//ImGui::GetIO().Fonts->AddFontDefault();
+	{// app
+		for(int i = 0; i < 8; ++i)
+		{
+			ImGui::GetIO().Fonts->AddFontFromFileTTF("Consolas.ttf", i*2+11);
+		}
+		CMyApp app;						glcheck("Main Error");
+		glassert(app.Init());			glcheck("Init Error");
+		//Test Render (the very first frame)
+		ImGui_ImplSdlGL3_NewFrame(win);	glcheck("ImGui Error");
+		app.Update();					glcheck("Update Error");
+		app.Render();					glcheck("Render Error");
+		ImGui::Render();				glcheck("ImGui Error");
+		SDL_GL_SwapWindow(win);			glcheck("SDL Swap Error");
+		app.PresentationUpdate();
+
+		GPU_Timer gpu_timer;			glcheck("GPU_Timer Error");
+
+		CPU_Timer cpu_timer; cpu_timer.Start();	size_t frame_cnt = 0;
+
+		bool quit = false, pause = false, autopause = false;
+		while(!quit)
+		{
+			SDL_Event ev;
+			while(SDL_PollEvent(&ev))
+			{
+				ImGui_ImplSdlGL3_ProcessEvent(&ev);
+				bool is_mouse_captured = ImGui::GetIO().WantCaptureMouse, is_keyboard_captured = ImGui::GetIO().WantCaptureKeyboard;
+				switch(ev.type)
+				{
+				case SDL_QUIT: quit = true; break;
+				case SDL_KEYDOWN:
+					if(!is_keyboard_captured)
+					{
+						app.KeyboardDown(ev.key); break;
+						quit = ev.key.keysym.sym == SDLK_ESCAPE;
+					}
+					break;
+				case SDL_KEYUP:	if(!is_keyboard_captured)	app.KeyboardUp(ev.key);	break;
+				case SDL_MOUSEBUTTONDOWN:	if(!is_mouse_captured)	app.MouseDown(ev.button);	break;
+				case SDL_MOUSEBUTTONUP:	if(!is_mouse_captured)	app.MouseUp(ev.button);	break;
+				case SDL_MOUSEWHEEL:	if(!is_mouse_captured)	app.MouseWheel(ev.wheel);	break;
+				case SDL_MOUSEMOTION:	if(!is_mouse_captured)	app.MouseMove(ev.motion);	break;
+				case SDL_WINDOWEVENT:	if(ev.window.event == SDL_WINDOWEVENT_SIZE_CHANGED)
+											app.Resize(ev.window.data1, ev.window.data2);	break;
+				}
+			}
+			ImGui_ImplSdlGL3_NewFrame(win);
+
+			auto &times = app.debug.times;
+			if(!app.debug.pause)
+			{
+				gpu_timer.Start(); app.Update(); gpu_timer.Stop();			//UPDATE #1
+
+				float t = gpu_timer.GetLastDeltaMilli();
+				times.sum_of_updates = t;
+				auto &u = times.update[std::min(times.consts.N - 1, app.iternum - 1)];
+				u = glm::mix<float>(t, u, times.consts.learning_rate);			//moving avg
+				times.num_of_updates = 1;
+
+				if(times.optimize)
+				{			//the very first iterations has to keep exactly the render times, later it is OK to be bit late, even 2x slower
+					double remaining_update_time = (app.iternum == 0 ?
+													times.consts.target - 1.7*times.render :
+													times.consts.target - times.render);
+					while(times.update[std::min(times.consts.N - 1, app.iternum - 1)]
+							< remaining_update_time - times.sum_of_updates + times.cpu_gpu_time_err*0.5)
+					{
+						gpu_timer.Start(); app.Update(); gpu_timer.Stop();	//UPDATES
+
+						auto &u = times.update[std::min(times.consts.N - 1, app.iternum - 1)];
+						float t = gpu_timer.GetLastDeltaMilli();
+						u = glm::mix<float>(t, u, times.consts.learning_rate); // moving avg
+						++times.num_of_updates;
+						times.sum_of_updates += t;
+					}
+				}
+			}//end of event processing
+
+			gpu_timer.Start();
+			app.Render();
+			//ImGui::ShowTestWindow();
+			ImGui::Render();
+			SDL_GL_SwapWindow(win);
+
+			gpu_timer.Stop();
+			times.render = glm::mix<float>((float)gpu_timer.GetLastDeltaMilli(), times.render, times.consts.learning_rate);
+			times.total = times.sum_of_updates + times.render;
+
+			const size_t N = 25;
+			if(++frame_cnt % N == 0)
+			{
+				cpu_timer.Finish();
+				float avg_cpu_measured_time = cpu_timer.GetSeconds()*1000.0 / (float) N;
+				cpu_timer.Start();
+				times.cpu_measured_time = glm::mix<float>(avg_cpu_measured_time, times.cpu_measured_time, times.consts.learning_rate / sqrtf(N));
+			}
+			times.cpu_gpu_time_err = glm::mix<float>(times.cpu_measured_time - times.total, times.cpu_gpu_time_err, times.consts.learning_rate);
+		}	//end of rendering loop
+		glcheck("Before Cleanup");
+		app.Clean();
+	}	//app, gpu_timer deletes itself
+	glcheck("Cleanup");
+	ImGui_ImplSdlGL3_Shutdown();
+	glcheck("Cleanup");
+	SDL_GL_DeleteContext(context);
+	//glcheck("Cleanup");
+	SDL_DestroyWindow( win );
+	//glcheck("Cleanup");
+	SDL_Quit();
+	//glcheck("After Cleanup");
+	return 0;
+}
+```
+
+### 02_Shaders/Shaders/header.frag
+```
+//IN OUT
+noperspective in vec2 vs_tex;
+noperspective in vec2 vs_cam_coeffs;
+
+layout(location = 0) out vec4 out_nearest_0;
+layout(location = 1) out vec4 out_linear_1;
+layout(location = 2) out vec4 out_linear_2;
+
+struct Ray{ vec3 v, p; };
+#define RAY(r,t) (r.v*(t)+r.p)	//point on a ray
+
+//SUBROUTINES
+subroutine vec3 SphereTrace(const in Ray r, in float t, in float ft);
+subroutine vec3  Antialias(const in Ray r, const in vec4 depth);
+subroutine vec3  Norm(const in vec3 p, const in vec3 n0, const in float epszilon);
+subroutine float Ambient(const in vec3 p, const in vec3 n, const in float ao);
+//subroutine float Shadow(const in vec3 p, const in vec3 n, const in float sw);
+
+//returns vec2(shadow multipier, travelled distance)
+subroutine vec2 Shadow(const in Ray r, const in vec3 n, const in vec3 depth,
+					   const in vec2 prevstate, const in float pixelsize, const in bool changed);
+
+//UNIFORMS
+layout(binding = 0) uniform sampler2D in_nearest_0; //0
+layout(binding = 1) uniform sampler2D in_linear_1;	//1
+layout(binding = 2) uniform sampler2D in_linear_2;	//2
+
+layout(location = 0) subroutine uniform SphereTrace	spheretrace;	//index 0xy
+layout(location = 1) subroutine uniform Antialias	antialias;  	//index 3xy
+layout(location = 2) subroutine uniform Norm		norm;       	//index 4xy
+layout(location = 3) subroutine uniform Ambient		ambient;    	//index 5xy
+layout(location = 4) subroutine uniform Shadow		shadow;     	//index 6xy
+
+uniform int		st_stepcount	= 10;
+uniform float	st_stepsize 	= 0.01;
+uniform float	st_stepincr 	= 0.01;
+
+uniform float	ao_radius   	= 0.01;
+uniform float	ao_strength 	= 0.01;
+uniform int		ao_iternum		= 1;
+uniform float	ao_mix_coeff	= 0;
+
+uniform float	sw_mix_coeff = 0;
+uniform float	n_mix_coeff = 0;
+uniform float 	n_epsz_mult = 1.0;
+uniform float	c_mix_coeff = 0;
+
+uniform vec3  cam_eye = vec3(2);
+uniform vec3  cam_at  = vec3(0);
+uniform vec3  cam_up  = vec3(0 , 0 , 1);
+uniform float cam_pixel_growth = SQRT2 / length(vec2(640 , 480)) ;
+
+uniform int sw_stepcount = 10;
+uniform vec3 light_pos = vec3(30,30,30);
+uniform float light_size = 1;
+uniform float light_strength = 2.0;
+uniform float sw_step_multipier = 0.65;
+
+uniform float mat_ambient_mult = 0.3;
+uniform float mat_diffuse_mult = 0.7;
+uniform float mat_specular_mult = 0.95;
+uniform float mat_specular_power = 200;
+uniform float mat_light_decay = 10.f;
+```
+
+### 02_Shaders/Shaders/main.frag
+```
+vec3 camera()
+{	//optimized camera
+	vec3 w = normalize(cam_eye - cam_at);
+	vec3 u = normalize(cross(cam_up, w));
+	vec3 ab = vs_cam_coeffs.x * u + vs_cam_coeffs.y * cross(w, u) - w;
+	return normalize(ab);
+}
+
+void main()
+{
+	vec4 in_0 = texture2D(in_nearest_0, vs_tex);
+	vec4 in_1 = texture2D(in_linear_1, vs_tex);
+	vec4 in_2 = texture2D(in_linear_2, vs_tex);
+	
+	//actual data mapping follows
+	float t = in_0.x;	float ft = in_0.y;	float iternum = in_0.z;
+	vec3 n = in_1.xyz;
+	vec2 sw = vec2(1 - in_1.w, in_0.w);
+	float ao = 1 - in_2.w;
+
+	Ray r = Ray(camera(), cam_eye);
+	vec3 depth;
+	
+	float pixel_size = t * cam_pixel_growth;
+
+	if(ft < 1000 && (iternum == 0 || ft > pixel_size || ft < pixel_size*0.5))
+					depth = spheretrace(r, t, ft);
+	else			depth = vec3(t, ft, 0);
+	
+	pixel_size = depth.x * cam_pixel_growth;
+	bool depth_changed = depth.x - t > pixel_size*50;
+			
+	t = depth.x;	ft = depth.y;	iternum += depth.z;
+	
+	r.p += t*r.v;
+	
+	
+	n = norm(r.p, n, pixel_size * n_epsz_mult);
+	sw = shadow(r, n, depth, sw, pixel_size, depth_changed);
+	ao = ambient(r.p, n, ao);	//this is the sum of the ambient occulution
+	
+	vec3 col;
+	if(ft > 1000)	col = skylight(r.p, r.v);
+	else			col = shade(r, n, clamp(1 - ao_strength * ao, 0, 1), sw.x);
+	
+	//reverse data mapping
+	out_nearest_0 = vec4(t, ft, iternum, sw.y);
+	out_linear_1 = vec4(n, 1 - sw.x);
+	out_linear_2 = vec4(col, 1 - ao);
+}
+```
+
+### 02_Shaders/Shaders/primitives.frag
+```
+#define SQRT2 1.4142135623
+#define PI 3.14159265359
+#define EPSZILON 1e-4
+#define no_konvex_opt
+
+//repeat-s
+#define repeat(p,r) (mod(p+r*0.5,r)-r*0.5)
+#define repeatXY(p,r) vec3(repeat((p).xy,r),(p).z)
+#define repeatYZ(p,r) vec3(repeat((p).yz,r),(p).x)
+#define repeatXZ(p,r) vec3(repeat((p).xz,r),(p).y)
+
+//deprected stuff:
+
+float cylinder(const in vec3 p,  float r )
+{
+	return length(p.xy)-r;
+}
+
+float sphere(const in vec3 p, const in float r)
+{
+	return length(p)-r;
+}
+float box(const in vec3 p, const in vec3 size)
+{
+	vec3 d = abs(p) - size;
+	return min(max(d.x,max(d.y,d.z)),0.0) + length(max(d,0.0));
+}
+float cone( vec3 p, vec2 c )
+{    // c must be normalized
+    float q = length(p.xy);
+    return dot(c,vec2(q,p.z));
+}
+
+float torus( vec3 p, vec2 t )
+{
+  vec2 q = vec2(length(p.xy)-t.x, p.z);
+  return length(q)-t.y;
+}
+
+#define konvex_optimize(f, vdf) f	//no optimalization
+//#define konvex_optimize(f, vdf) (abs(vdf) < 0.01 ? f : (vdf < 0 && f > 0 ? 2000 : f/abs(vdf*1.1) ))
+
+//planes
+
+float plane(in vec3 p, in vec3 v, in vec3 n)
+{	//length(n) must be 1
+	float f = dot(p, n);
+	float vf = dot(-v, n);
+	return f;
+	return konvex_optimize(f, vf);
+}
+#define planeYZ(p, v) plane(p,v, vec3(1,0,0))
+#define planeXZ(p, v) plane(p,v, vec3(0,1,0))
+#define planeXY(p, v) plane(p,v, vec3(0,0,1))
+
+//convex stuff:
+
+float sphere(const in vec3 p, const in vec3 v, const in float r)
+{
+	float f = length(p)-r;
+	float vf = dot(v, normalize(p));
+	return konvex_optimize(f, vf);
+}
+float box(const in vec3 p, const in vec3 v, const in vec3 size)
+{
+	vec3 d = abs(p) - size;
+	return min(max(d.x,max(d.y,d.z)),0.0) + length(max(d,0.0));
+}
+float cone( const in vec3 p, const in vec3 v, const in vec2 c )
+{    // c must be normalized
+    float q = length(p.xy);
+    return dot(c,vec2(q,p.z));
+}
+float cylinder(const in vec3 p, const in vec3 v, const in float r )
+{
+	return length(p.xy)-r;
+}
+
+//combinators:
+
+float smin( float a, float b, float k )
+{	// polynomial smooth min (k = 0.1);
+    float h = clamp( 0.5+0.5*(b - a)/k, 0.0, 1.0 );
+    return mix( b, a, h ) - k*h*(1.0-h);
+}
+float smax( float a, float b, float k )
+{	// polynomial smooth min (k = 0.1);
+    float h = clamp( 0.5+0.5*(a - b)/k, 0.0, 1.0 );
+    return mix( b, a, h ) + k*h*(1.0-h);
+}
+float metasdf(const in float dist, const in float r)
+{
+	return smoothstep(r,0,dist)*2.0/3.0;
+}
+
+//user uniforms
+
+layout(location = 26) uniform int user_itercount = 1;
+
+//eof
+```
+
+### 02_Shaders/Shaders/shade.frag
+```
+vec3 light(const in vec3 p)
+{
+	return normalize(light_pos - p);
+}
+
+vec3 skylight(const in vec3 p, const in vec3 v)
+{
+	vec3 sky =  mix(vec3(0.046,0.2,0.047), vec3(0.41,0.51,1.1),v.z*0.5 + 0.5);
+	//float x = dot(v, normalize(light_pos))*0.5+0.5;
+	//vec3 sun = mix(vec3(0.1,0.05,0.05), vec3(1, 0.9, 0.5),  pow(x,1000*light_size));
+	return sky;
+}
+
+vec3 shade(const in Ray r, const in vec3 n, const in float ao, const in float sw)
+{
+	vec3 col = color(r.p, r.v);
+	vec3 l = light(r.p);
+	float lightness = sw * light_strength /(1 + mat_light_decay*distance(r.p, light_pos));
+	float a = clamp(ao * mat_ambient_mult, 0, 1);
+	float d = clamp(dot(l,n)*mat_diffuse_mult*lightness,0,1);
+	float s = clamp(pow(clamp(dot(normalize(l-r.v), n),0,1),mat_specular_power/light_size) * mat_specular_mult*lightness, 0,1);
+	vec3 sky = 0.5 * skylight(r.p, n) + vec3(0.5);
+	return d*col + a * mix(sky * ao , col, 0.5) + vec3(s);
+}
+```
+
+### 02_Shaders/old/ComputeProgram.cpp
+```
+#include "ComputeProgram.h"
+#include "ShaderCodeGenerator.h"
+#include <iostream>
+#include <fstream>
+
+using namespace std;
+
+const char* getShaderStringFromCode(GLenum shaderType)
+{
+	switch(shaderType)
+	{
+	case GL_FRAGMENT_SHADER: return "Fragment shader"; break;
+	case GL_VERTEX_SHADER: return "Vertex shader"; break;
+	case GL_GEOMETRY_SHADER: return "Geometry shader"; break;
+	case GL_TESS_CONTROL_SHADER: return "Tess control shader"; break;
+	case GL_TESS_EVALUATION_SHADER: return "Tess control shader"; break;
+	default: return " - not a valid shader type - "; break;
+	}
+}
+
+template<int N>
+GLuint compileSourceCode(const SourceCode_N<N> &code, GLenum shaderType)
+{
+	GLuint loadedShader = glCreateShader(shaderType);
+	assert(loadedShader != 0);
+	glShaderSource(loadedShader, N, const_cast<const GLchar**>(code.code), code.length);
+	glCompileShader(loadedShader);
+	GLint result = GL_FALSE;
+	glGetShaderiv(loadedShader, GL_COMPILE_STATUS, &result);
+	if(GL_FALSE == result)
+	{
+		int infoLogLength;
+		glGetShaderiv(loadedShader, GL_INFO_LOG_LENGTH, &infoLogLength);
+		std::vector<char> VertexShaderErrorMessage(infoLogLength);
+		glGetShaderInfoLog(loadedShader, infoLogLength, NULL, &VertexShaderErrorMessage[0]);
+		cout << getShaderStringFromCode(shaderType) << " error message:\n" << &VertexShaderErrorMessage[0] << endl;
+		ofstream error("log/error.shader");
+		for(int i = 0; i < N; ++i)
+			error << code.code[i] << endl;
+		error.close();
+	}
+	return loadedShader;
+}
+
+
+void ComputeProgram::init()
+{
+	string vs_code = getVertexComputeShaderSourceCode();
+	SourceCode_N<1> tmp;
+	tmp.code[0] = vs_code.c_str();
+	tmp.length[0] = vs_code.length();
+	vertexShaderID = compileSourceCode(tmp, GL_VERTEX_SHADER);
+	program = glCreateProgram();
+	glAttachShader(program, vertexShaderID);
+	code_generator.setSDF_id(0);
+	code_generator.reloadAll();
+	glBindAttribLocation(program, 0, "pos");
+	link();
+}
+
+void ComputeProgram::link() const
+{
+	const SourceCode &tmp = code_generator.getShaderSourceCode();
+	GLuint fragmentShaderID = compileSourceCode(tmp, GL_FRAGMENT_SHADER);
+	glDetachShader(program, GL_FRAGMENT_SHADER);
+	glAttachShader(program, fragmentShaderID);
+	glLinkProgram(program);
+	int infoLogLength = 0;
+	glGetProgramiv(program, GL_INFO_LOG_LENGTH, &infoLogLength);
+	if(infoLogLength != 0)
+	{
+		std::vector<char> ProgramErrorMessage(infoLogLength);
+		glGetProgramInfoLog(program, infoLogLength, NULL, &ProgramErrorMessage[0]);
+		fprintf(stdout, "%s\n", &ProgramErrorMessage[0]);
+		cout << "Compute Program failed to link:\n" << &ProgramErrorMessage[0] << endl;
+	}
+	glDeleteShader(fragmentShaderID);
+}
+
+void ComputeProgram::render() const
+{
+	glUseProgram(program);
+	//TODO: uniforms
+	glDrawArrays(GL_TRIANGLE_STRIP, 0, 4);
+}
+
+void ComputeProgram::clean()
+{
+	glDeleteShader(vertexShaderID);
+	glDeleteProgram(program);
+}
+```
+
+### 02_Shaders/old/ComputeProgram.h
+```
+#pragma once
+#include <GL/glew.h>
+#include <glm/glm.hpp>
+#include "ShaderCodeGenerator.h"
+
+class ComputeProgram
+{
+	GLuint program = 0;
+	GLuint vertexShaderID = 0;
+public:
+	//ShaderCodeGenerator code_generator;
+	void init();
+	void link() const;
+	void render() const; ///VAO must be set
+	void clean();
+};
+```
+
+### 02_Shaders/Shaders/Ambient/ambient_0.frag
+```
+layout(index = 500 + 0) subroutine(Ambient)
+float ambient_0(const in vec3 p, const in vec3 n, const in float ao)
+{
+	return 0;
+}
+```
+
+### 02_Shaders/Shaders/Ambient/ambient_1.frag
+```
+layout(index = 500 + 1) subroutine(Ambient)
+float ambient_1(const in vec3 p, const in vec3 n, const in float ao)
+{
+	float radius = ao_iternum * ao_radius;
+	return ao + pow(0.5, ao_iternum) * (radius - sdf(p + n*radius, vec3(0)));
+}
+```
+
+### 02_Shaders/Shaders/Antialias/antialias_0.frag
+```
+layout(index = 300 + 0) subroutine(Antialias)
+vec3 antialias_0(const in Ray r, const in vec4 depth)
+{
+	return r.v;
+}
+```
+
+### 02_Shaders/Shaders/Norm/norm_0.frag
+```
+layout(index = 400 + 0) subroutine(Norm)
+vec3 norm_0(const in vec3 p, const in vec3 n0, const in float epszilon)
+{
+	return n0;
+}
+```
+
+### 02_Shaders/Shaders/Norm/norm_1.frag
+```
+layout(index = 400 + 1) subroutine(Norm)
+vec3 norm_1(const in vec3 p, const in vec3 n0, const in float epszilon)
+{
+	const vec3 a = vec3( 1, 1, 1);
+	const vec3 b = vec3( 1,-1,-1);
+	const vec3 c = vec3(-1, 1,-1);
+	const vec3 d = vec3(-1,-1, 1);
+	vec3 n	= a * sdf(a * epszilon + p, vec3(0))
+			+ b * sdf(b * epszilon + p, vec3(0))
+			+ c * sdf(c * epszilon + p, vec3(0))
+			+ d * sdf(d * epszilon + p, vec3(0));
+	//return normalize(n);
+	n = normalize(n);
+	//return mix(n, n0, n_mix_coeff);
+	return ( isnan(n.x) || isnan(n.y) || isnan(n.z) ? n0 : mix(n, n0, n_mix_coeff));
+}
+```
+
+### 02_Shaders/Shaders/Norm/norm_2.frag
+```
+layout(index = 400 + 2) subroutine(Norm)
+vec3 norm_2(const in vec3 p, const in vec3 n0, const in float epszilon)
+{
+	vec3 plus = vec3(sdf(p + vec3(epszilon,0,0), vec3(0)),
+					 sdf(p + vec3(0,epszilon,0), vec3(0)),
+					 sdf(p + vec3(0,0,epszilon), vec3(0)));
+	vec3 mins = vec3(sdf(p - vec3(epszilon,0,0), vec3(0)),
+					 sdf(p - vec3(0,epszilon,0), vec3(0)),
+					 sdf(p - vec3(0,0,epszilon), vec3(0)));
+	vec3 n =  normalize(plus-mins);
+	return ( isnan(n.x) || isnan(n.y) || isnan(n.z) ? n0 : mix(n, n0, n_mix_coeff));
+}
+```
+
+### 02_Shaders/Shaders/SDF/aprajafalva.frag
+```
+vec3 color(in vec3 p, in vec3 v)
+{
+	return vec3(1);
+}
+
+float sdf(in vec3 p, in vec3 v)
+{
+	p.xy = repeat(p.xy, vec2(21,16));
+	float haztest = box(p + vec3(0,0,-2), v, vec3(5,4,2.5));
+	float hazbelso = box(p + vec3(0,0,-2), v, vec3(4,3,2));
+	float ajto = box(p + vec3(4.5,0.5,-2), v, vec3(1,1,2));
+	float ablak1 = box(p + vec3(2,0,-2.8), v, vec3(0.7,10,1));
+	float ablak2 = box(p + vec3(-2,0,-2.8), v, vec3(0.7,10,1));
+	float ablakok = min(ablak1, ablak2);
+	float haz = max(max(max(haztest, -hazbelso), -ajto), -ablakok);
+	vec3 p1 = p + vec3(0,0,-4.5);
+	float teto = max(sphere(p1, v, 6.0), plane(p1, v, vec3(0,0,-1)));
+	return min(min(haz, teto), planeXY(p, v));
+}
+```
+
+### 02_Shaders/Shaders/SDF/csg.frag
+```
+vec3 color(in vec3 p, in vec3 v)
+{
+	return vec3(1);
+}
+
+float gizmo(in vec3 p, vec2 t, float k)
+{
+	float f = 	 torus(p.xyz,t);
+	f = smin(f, torus(p.yzx,t),k);
+	f = smin(f, torus(p.zxy,t),k);
+	return f;
+}
+
+float dice(in vec3 p, in float r)
+{
+	float f = sphere(p, r*SQRT2);
+	f = smax(f, box(p, vec3(r)), 0.035*r);
+	return f;
+}
+
+float plus(in vec3 p, in vec2 r)
+{
+	float f = 	cylinder(p.xyz, r.x);
+	f = smin(f, cylinder(p.yzx, r.x), r.y);
+	f = smin(f, cylinder(p.zxy, r.x), r.y);
+	return f;
+}
+
+float testcube(in vec3 p, in vec3 r)
+{
+	return  smax(dice(p, r.x), -plus(p, r.yz), r.z);
+}
+
+float viviani(in vec3 p, in float r)
+{
+	return max(sphere(p, r), cylinder(p + vec3(r*0.5,0,0), r*0.5)); 
+}
+
+float sdf(in vec3 p, in vec3 v)
+{
+	float pl = planeXY(p, v);
+	float g = gizmo(p - vec3(0,0,8), vec2(8,1.25), 0.75);
+	float cs = testcube(p - vec3(10,10,8), vec3(8,6,0.5));
+	float vi = viviani(p - vec3(-10,-10,8), 8);
+	
+	return min(min(pl,vi),min(g, cs));
+}
+```
+
+### 02_Shaders/Shaders/SDF/gombok.frag
+```
+vec3 color(in vec3 p, in vec3 v)
+{
+	return vec3(1);
+}
+
+float sdf(in vec3 p, in vec3 v)
+{
+	return sphere(repeat(p, vec3(5,5,5)), v, 1);
+	/*float sik = planeXY(p + vec3(0,0,0.7));
+	float gomb1 = sphere(repeatXY(p, vec2(2,5)), 1);
+	float gomb2 = sphere(repeatXY(p, vec2(3,6)) - vec3(0,0,1.5), 0.5);
+	//float gomb3 = sphere(repeatXY(p, vec2(13,11)) - vec3(0,0,14), 3);
+	return min(min(gomb1, gomb2), sik);*/
+}
+```
+
+### 02_Shaders/Shaders/SDF/hoember.frag
+```
+vec3 color(in vec3 p, in vec3 v)
+{
+	return vec3(1);
+}
+
+float sdf(in vec3 p, in vec3 v)
+{	
+	float fej = sphere(p+vec3(0,0,-6),v, 0.9);
+	float szem1 = sphere(p+vec3(0.2,-0.8,-6.3), v,0.1);
+	float szem2 = sphere(p+vec3(-0.2,-0.8,-6.3), v,0.1);
+	float orr = sphere(p+vec3(0,-0.9,-6.0), v, 0.15);
+	float alakzat1 = max(min(fej, orr), -min(szem1, szem2));
+	float alakzat2 = sphere(p+vec3(0,0,-4.2), v, 1.4);
+	float alakzat3 = sphere(p+vec3(0,0,-1.5), v, 2);
+	return min(min(alakzat1, planeXY(p,v)), min(alakzat2, alakzat3));
+}
+```
+
+### 02_Shaders/Shaders/SDF/mandelbulb_iq.frag
+```
+vec3 hsv2rgb(const in vec3 c)
+{
+    const vec4 K = vec4(1.0, 2.0 / 3.0, 1.0 / 3.0, 3.0);
+    vec3 p = abs(fract(c.xxx + K.xyz) * 6.0 - K.www);
+    return c.z * mix(K.xxx, clamp(p - K.xxx, 0.0, 1.0), c.y);
+}
+
+vec3 mandel_iq_col(in vec3 p)
+{
+	vec3 zz = p;
+    float m = dot(zz,zz);
+
+    vec4 trap = vec4(abs(zz.xyz),m);
+	float dz = 1.0;
+    
+    
+	for( int i=0; i<user_itercount; i++ )
+    {
+		if( m > 4.0 ) break;
+#if 1
+        float m2 = m*m;
+        float m4 = m2*m2;
+		dz = 8.0*sqrt(m4*m2*m)*dz + 1.0;
+
+        float x = zz.x; float x2 = x*x; float x4 = x2*x2;
+        float y = zz.y; float y2 = y*y; float y4 = y2*y2;
+        float z = zz.z; float z2 = z*z; float z4 = z2*z2;
+
+        float k3 = x2 + z2;
+        float k2 = inversesqrt( k3*k3*k3*k3*k3*k3*k3 );
+        float k1 = x4 + y4 + z4 - 6.0*y2*z2 - 6.0*x2*y2 + 2.0*z2*x2;
+        float k4 = x2 - y2 + z2;
+
+        zz.x = p.x +  64.0*x*y*z*(x2-z2)*k4*(x4-6.0*x2*z2+z4)*k1*k2;
+        zz.y = p.y + -16.0*y2*k3*k4*k4 + k1*k1;
+        zz.z = p.z +  -8.0*y*k4*(x4*x4 - 28.0*x4*x2*z2 + 70.0*x4*z4 - 28.0*x2*z2*z4 + z4*z4)*k1*k2;
+#else
+		dz = 8.0*pow(m,3.5)*dz + 1.0;
+        
+        float r = length(zz);
+        float b = 8.0*acos( clamp(zz.y/r, -1.0, 1.0));
+        float a = 8.0*atan( zz.x, zz.z );
+        zz = p + pow(r,8.0) * vec3( sin(b)*sin(a), cos(b), sin(b)*cos(a) );
+#endif        
+        
+        trap = min( trap, vec4(abs(zz.xyz),m) );
+        m = dot(zz,zz);
+    }
+    //trap.x = m;
+	vec3 col;
+	vec3 basecol = hsv2rgb(vec3(length(p)*5, 0.3,0.8));
+	col = basecol;
+	col = mix( col, vec3(0.7,0.2,0.2), 2*trap.w );
+	col = mix( col, vec3(1.0,0.5,0.2), sqrt(trap.y) );
+	col = mix( col, vec3(1.0,1.5,1.0)*basecol, trap.z );
+	col = mix( col, vec3(1.0,1.0,1.0), sqrt(trap.x) );
+	//col = mix( col, basecol , sqrt(trap.x));
+    return col;
+}
+
+vec3 color(in vec3 p, in vec3 v)
+{
+	if(p.z < -1 || length(p) > 4) return vec3(0.8);
+	return mandel_iq_col(p.xzy);
+}
+
+float mandel_iq( in vec3 p )
+{
+    vec3 zz = p;
+    float m = dot(zz,zz);
+
+	float dz = 1.0;
+    
+    
+	for( int i=0; i< user_itercount; i++ )
+    {
+	if( m > 4.0 )
+            break;
+#if 1
+        float m2 = m*m;
+        float m4 = m2*m2;
+		dz = 8.0*sqrt(m4*m2*m)*dz + 1.0;
+
+        float x = zz.x; float x2 = x*x; float x4 = x2*x2;
+        float y = zz.y; float y2 = y*y; float y4 = y2*y2;
+        float z = zz.z; float z2 = z*z; float z4 = z2*z2;
+
+        float k3 = x2 + z2;
+        float k2 = inversesqrt( k3*k3*k3*k3*k3*k3*k3 );
+        float k1 = x4 + y4 + z4 - 6.0*y2*z2 - 6.0*x2*y2 + 2.0*z2*x2;
+        float k4 = x2 - y2 + z2;
+
+        zz.x = p.x +  64.0*x*y*z*(x2-z2)*k4*(x4-6.0*x2*z2+z4)*k1*k2;
+        zz.y = p.y + -16.0*y2*k3*k4*k4 + k1*k1;
+        zz.z = p.z +  -8.0*y*k4*(x4*x4 - 28.0*x4*x2*z2 + 70.0*x4*z4 - 28.0*x2*z2*z4 + z4*z4)*k1*k2;
+#else
+		dz = 8.0*pow(m,3.5)*dz + 1.0;
+        
+        float r = length(zz);
+        float b = 8.0*acos( clamp(zz.y/r, -1.0, 1.0));
+        float a = 8.0*atan( zz.x, zz.z );
+        zz = p + pow(r,8.0) * vec3( sin(b)*sin(a), cos(b), sin(b)*cos(a) );
+#endif        
+
+        m = dot(zz,zz);
+    }
+
+    return 0.25*log(m)*sqrt(m)/dz;
+}
+
+float sdf( in vec3 p, vec3 v)
+{
+/*
+    vec3 zz = p.xzy;
+    float m = dot(zz,zz);
+
+	float dz = 1.0;
+    
+	for( int i=0; i<user_itercount; i++ )
+    {
+		if( m > 4.0 )
+            break;
+#if true
+        float m2 = m*m;
+        float m4 = m2*m2;
+		dz = 8.0*sqrt(m4*m2*m)*dz + 1.0;
+
+        float x = zz.x; float x2 = x*x; float x4 = x2*x2;
+        float y = zz.y; float y2 = y*y; float y4 = y2*y2;
+        float z = zz.z; float z2 = z*z; float z4 = z2*z2;
+
+        float k3 = x2 + z2;
+        float k2 = inversesqrt( k3*k3*k3*k3*k3*k3*k3 );
+        float k1 = x4 + y4 + z4 - 6.0*y2*z2 - 6.0*x2*y2 + 2.0*z2*x2;
+        float k4 = x2 - y2 + z2;
+
+        zz.x = p.x +  64.0*x*y*z*(x2-z2)*k4*(x4-6.0*x2*z2+z4)*k1*k2;
+        zz.y = p.z + -16.0*y2*k3*k4*k4 + k1*k1;
+        zz.z = p.y +  -8.0*y*k4*(x4*x4 - 28.0*x4*x2*z2 + 70.0*x4*z4 - 28.0*x2*z2*z4 + z4*z4)*k1*k2;
+#else
+		dz = 8.0*pow(m,3.5)*dz + 1.0;
+		
+        float r = length(zz);
+        float b = 8.0*acos( clamp(zz.y/r, -1.0, 1.0));
+        float a = 8.0*atan( zz.x, zz.z );
+        zz = p.xzy + pow(r,8.0) * vec3( sin(b)*sin(a), cos(b), sin(b)*cos(a) );
+#endif
+		m = dot(zz,zz);
+    }
+    return min(0.25*log(m)*sqrt(m)/dz, planeXY(p + vec3(0,0,1.2), v));*/
+	return min(mandel_iq(p.xzy), planeXY(p + vec3(0,0,1.2), v));
+}
+```
+
+### 02_Shaders/Shaders/SDF/metasdf.frag
+```
+vec3 color(vec3 p, in vec3 v)
+{
+	float a = metasdf(box(p,vec3(0.2,0.2,0.07)), 0.3);
+	float b = metasdf(torus(p + vec3(0.5,0.5,0), vec2(0.5,0.04)), 0.5);
+	float c = metasdf(sphere(p - vec3(0, 1.1, 0),0.01), 1);
+	float d = metasdf(sphere(p - vec3(1, 0.5, 0),0.01), 1);
+	float e = metasdf(p.z+0.4,0.3);
+	float sum = a*a + b*b + c*c + d*d + sqrt(e);
+	return vec3(0,1,0)*(a*a)/sum +
+	       vec3(1,0,1)*(b*b)/sum +
+	       vec3(0,0,1)*(c*c)/sum +
+		   vec3(1,0,0)*(d*d)/sum +
+	       vec3(1,1,1)*(sqrt(e))/sum;
+}
+
+float sdf(in vec3 p, in vec3 v)
+{
+	float m = 0;
+	m += metasdf(box(p, v, vec3(0.2,0.2,0.07)), 0.3);
+	m += metasdf(torus(p + vec3(0.5,0.5,0), vec2(0.5,0.04)), 0.5);
+	m += metasdf(sphere(p - vec3(0, 1.1, 0), v,0.01), 1);
+	m += metasdf(sphere(p - vec3(1, 0.5, 0), v,0.01), 1);
+	return smin((0.5- m)*0.25, planeXY(p + vec3(0,0,0.2), v), 0.1);
+}
+```
+
+### 02_Shaders/Shaders/Shadow/shadow_0.frag
+```
+layout(index = 600 + 0) subroutine(Shadow)
+vec2 shadow_0(const in Ray r, const in vec3 n, const in vec3 depth,
+			  const in vec2 prevstate, const in float pixelsize, const in bool changed)
+{
+	return prevstate;
+}
+```
+
+### 02_Shaders/Shaders/Shadow/shadow_1.frag
+```
+layout(index = 600 + 1) subroutine(Shadow)
+vec2 shadow_1(const in Ray r, const in vec3 n, const in vec3 depth,
+			  const in vec2 prevstate, const in float pixelsize, const in bool changed)
+{	//HARD SHADOW
+	float dist = distance(light_pos, r.p);
+	if (sw_stepcount == 0) return vec2(1,0);
+	if (!changed && (prevstate.y >= dist || prevstate.x < 0.01)) return prevstate;
+	
+	vec3 l = (light_pos - r.p)/dist;	
+	if(dot(l, n) < 0) return vec2(0,dist);
+	
+	float t = (changed ? depth.y : prevstate.y);
+	
+	Ray r2  = {l, r.p + n*pixelsize };
+	for(int i = 0; i < sw_stepcount; ++i)
+	{
+		if(t >= dist)	return vec2(1, t);
+		float ft = sdf(RAY(r2,t), r.v);
+		if(ft < pixelsize) return vec2(0, t);
+		t += ft;
+	}
+	return vec2(1,t);	//0.3 to check wich pixels get to the light_pos
+}
+```
+
+### 02_Shaders/Shaders/Shadow/shadow_2.frag
+```
+layout(index = 600 + 2) subroutine(Shadow)
+vec2 shadow_2(const in Ray r, const in vec3 n, const in vec3 depth,
+			  const in vec2 prevstate, const in float pixelsize, const in bool changed)
+{	//SOFT SHADOW
+	float dist = distance(light_pos, r.p);
+	if (sw_stepcount == 0) return vec2(1,0);
+	if (!changed && (prevstate.y >= dist - light_size || prevstate.x <= 0.01)) return prevstate;
+	
+	vec3 l = normalize(light_pos - r.p);	
+	if(dot(l, n) < 0) return vec2(0, prevstate.y);
+	
+	float t = (changed ? 0 : prevstate.y);
+	float cone = (light_size - pixelsize)/dist;
+	
+	Ray r2  = {l, r.p};
+	float m = (changed ? 1 : prevstate.x);
+	for(int i = 0; i < sw_stepcount; ++i)
+	{
+		if(t >= dist - light_size) return vec2(m, t);
+		float rt = t*cone + pixelsize;
+		float ft = sdf(RAY(r2,t), r2.v) + rt;
+		float newm = smoothstep(0,1,0.5*ft/rt);
+		if(newm < m)
+		{
+			if(newm < 0.01) return vec2(newm,t);
+			m = newm;
+			t -= ft*sw_step_multipier*0.5; //step back to find smaller values
+		}
+		t += ft*sw_step_multipier;
+	}
+	return vec2(m,t);
+}
+```
+
+### 02_Shaders/Shaders/Shadow/shadow_3.frag
+```
+layout(index = 600 + 3) subroutine(Shadow)
+vec2 shadow_3(const in Ray r, const in vec3 n, const in vec3 depth,
+			  const in vec2 prevstate, const in float pixelsize, const in bool changed)
+{	//HARD SHADOW
+	float dist = distance(light_pos, r.p);
+	if (sw_stepcount == 0) return vec2(1,0);
+	if (!changed && (prevstate.y >= dist || prevstate.x < 0.01)) return prevstate;
+	
+	vec3 l = (light_pos - (r.p))/dist;	
+	if(dot(l, n) < 0) return vec2(0,dist);
+	
+	float t = (changed ? 0 : prevstate.y);
+	
+	Ray r2  = {-l, light_pos };
+	for(int i = 0; i < sw_stepcount; ++i)
+	{
+		if(t >= dist)	return vec2(1, t);
+		float ft = sdf(RAY(r2,t), r.v);
+		t += ft;
+		if(ft < 0.01*pixelsize)	return vec2(0, t);
+	}
+	return vec2(1,t);	//0.3 to check wich pixels get to the light_pos
+}
+```
+
+### 02_Shaders/Shaders/Shadow/shadow_4.frag
+```
+layout(index = 600 + 4) subroutine(Shadow)
+vec2 shadow_4(const in Ray r, const in vec3 n, const in vec3 depth,
+			  const in vec2 prevstate, const in float pixelsize, const in bool changed)
+{	//SOFT SHADOW
+	float dist = distance(light_pos, r.p);
+	if (sw_stepcount == 0) return vec2(1,0);
+	if (!changed && (prevstate.y >= dist - light_size || prevstate.x <= 0.01)) return prevstate;
+	
+	vec3 l = normalize(light_pos - r.p);	
+	if(dot(l, n) < 0) return vec2(0, prevstate.y);
+	
+	float t = (changed ? -light_size*0.5 : prevstate.y);
+	float cone = (pixelsize - light_size)/dist;
+	
+	Ray r2  = {-l, light_pos};
+	float m = (changed ? 1 : prevstate.x);
+	for(int i = 0; i < sw_stepcount; ++i)
+	{
+		if(t >= dist - light_size) return vec2(m, t);
+		float rt = t*cone + light_size;
+		float ft = sdf(RAY(r2,t), r2.v) + rt;
+		if(ft < pixelsize*0.01) return vec2(m, t);
+		float newm = smoothstep(0,1,0.5*ft/rt);
+		if(newm < m)
+		{
+			if(newm < 0.01) return vec2(newm,t);
+			m = newm;
+			t -=ft * sw_step_multipier*0.5; //step back to find smaller values
+		}
+		t += ft * sw_step_multipier;
+	}
+	return vec2(m,t);
+}
+```
+
+### 02_Shaders/Shaders/SphereTrace/spheretrace_1.frag
+```
+layout(index = 0 + 1) subroutine(SphereTrace)
+vec3 spheretrace_1(const in Ray r, in float t, float ft)
+{	//pure sphere trace (low step count causes bubbley artifact)
+	for(int i = 0; i < st_stepcount; ++i)
+	{
+		ft = sdf(RAY(r,t), r.v);
+		if(ft < t * cam_pixel_growth) return vec3(t - ft, sdf(RAY(r, t-ft), r.v), float(i));
+		t += ft;
+	}
+	return vec3(t, ft, float(st_stepcount));
+}
+```
+
+### 02_Shaders/Shaders/SphereTrace/spheretrace_2.frag
+```
+#define TRACE_OR 1.6
+
+layout(index = 0 + 2) subroutine(SphereTrace)
+vec3 spheretrace_2(const in Ray r, in float t, float ft)
+{
+	float pft = 0, dt = 0, nft;
+	for(int i = 0; i < st_stepcount; ++i)
+	{
+		dt = ft * TRACE_OR;
+		nft = sdf(RAY(r,t + dt), r.v);
+		if(dt < ft + nft)
+		{
+			ft = nft;
+			t += dt;
+		}
+		else
+		{
+			dt = ft;
+			t += dt;
+			ft = sdf(RAY(r,t), r.v);
+		}
+		if(ft < t * cam_pixel_growth)
+			return vec3(t-dt, sdf(RAY(r, t-dt), r.v), float(i));
+		pft = ft;
+	}
+	return vec3(t, ft, float(st_stepcount));
+}
+```
+
+### 02_Shaders/Shaders/SphereTrace/spheretrace_3.frag
+```
+#define STEP_SIZE_REDUCTION 0.95
+//#define STEP_SIZE_REDUCTION 0.87
+
+//Performs a sphere-step
+// r a ray on wich along the tracing happens
+// c0, c1 are the previous cones
+// the result is the next cone
+// A
+/*
+vec2 sphere_step(const in Ray r, in vec2 c0, in vec2 c1)
+{
+	float dt = c0.y * (1 - STEP_SIZE_REDUCTION * (c1.y - c0.y - (c1.x - c0.x))/(c1.y - c0.y + (c1.x - c0.x)));
+	float ft = sdf(RAY(r, c0.x + dt));
+	if(dt < c0.y + c1.y)
+		return vec2();
+}*/
+
+#define NEXT_R(r_0, r_1, d) STEP_SIZE_REDUCTION*(- r_1 * (r_0 - r_1 - d)/(r_0 - r_1 + d))
+
+layout(index = 0 + 3) subroutine(SphereTrace)
+vec3 spheretrace_3(const in Ray r, in float t, float ft)
+{	//-(r_1 * (d-r_0+r_1))/(-d-r_0+r_1)
+	float pft = 0, dt = 0, nft;
+	for(int i = 0; i < st_stepcount; ++i)
+	{
+		//dt = ft * (1 - STEP_SIZE_REDUCTION * (pft - ft - dt)/(pft - ft + dt));
+		dt = ft + NEXT_R(pft, ft, dt);
+		nft = sdf(RAY(r,t + dt), r.v);
+		if(dt < ft + nft)
+		{
+			ft = nft;
+			t += dt;
+		}
+		else
+		{
+			dt = ft;
+			t += dt;
+			ft = sdf(RAY(r,t), r.v);
+		}
+		if(ft < t * cam_pixel_growth)
+			return vec3(t - dt, sdf(RAY(r, t - dt), r.v), float(i));
+		pft = ft;
+	}
+	return vec3(t, ft, float(st_stepcount));
+}
+```
+
+### 02_Shaders/Shaders/_Old/ambient_2.frag
+```
+layout(index = 500 + 2) subroutine(Ambient)
+float ambient_2(const in vec3 p, const in vec3 n, const in float ao)
+{
+	return 1 - ao_strength * 2 * (ao_radius - sdf(p + n * ao_radius, vec3(0)));
+}
+```
+
+### 02_Shaders/Shaders/_Old/ambient_3.frag
+```
+layout(index = 500 + 3) subroutine(Ambient)
+float ambient_3(const in vec3 p, const in vec3 n, const in float ao)
+{
+	float sum = 0;
+	sum += 2.000 * (1*ao_radius - sdf(p+n*1*ao_radius, vec3(0)));
+	sum += 1.000 * (2*ao_radius - sdf(p+n*2*ao_radius, vec3(0)));
+	sum += 0.500 * (3*ao_radius - sdf(p+n*3*ao_radius, vec3(0)));
+	sum += 0.250 * (4*ao_radius - sdf(p+n*4*ao_radius, vec3(0)));
+	sum += 0.125 * (5*ao_radius - sdf(p+n*5*ao_radius, vec3(0)));
+	return clamp(1 - ao_strength * sum, 0, 1);
+}
+```
+
+### 02_Shaders/Shaders/_Old/spheretrace_00.frag
+```
+layout(index = 0) subroutine(SphereTrace)
+vec3 spheretrace_00(const in Ray r, in float t, in float ft)
+{
+	return vec3(t, ft, 0);
+}
+```
+
+### 02_Shaders/Shaders/_Old/spheretrace_32.frag
+```
+#define STEP_SIZE_REDUCTION 0.87
+
+layout(index = 0 + 3*3+2) subroutine(SphereTrace)
+vec3 spheretrace_32(const in Ray r, float t, float ft)
+{	//-(r_1 * (d-r_0+r_1))/(-d-r_0+r_1)
+	float pft = 0, dt = 0, nft, msp = st_stepsize;
+	for(int i = 0; i < st_stepcount; ++i)
+	{
+		msp += st_stepincr;
+
+		dt = ft * (1 - STEP_SIZE_REDUCTION * (pft - ft - dt) / (pft - ft + dt)) + msp;
+		nft = sdf(RAY(r, t + dt), r.v);
+		if(dt < ft + nft + msp * 1.3)
+		{
+			ft = nft;
+			t += dt;
+		}
+		else
+		{
+			dt = ft + msp;
+			t += dt;
+			ft = sdf(RAY(r,t), r.v);
+		}
+		if(ft < t * cam_pixel_growth) return vec3(t - dt, sdf(RAY(r,t - dt), r.v), i);
+		pft = ft;
+	}
+	return vec3(t, ft, st_stepcount);
+}
+```
+
+### 02_Shaders/Shaders/_Unique/compute.vert
+```
+#define SQRT2 1.4142135623
+
+in vec2 pos;
+noperspective out vec2 vs_tex;
+noperspective out vec2 vs_cam_coeffs;
+
+uniform vec2 cam_res_mult = vec2(1.0);
+uniform vec2 tex_res_mult = vec2(1.0);
+uniform float cam_pixel_growth; //SQRT2 / length(vec2(640 , 480)) ;	
+uniform vec2 cam_normalized_size; // vec2(640,480)/length(vec2(640,480));
+
+void main()
+{
+	vec2 pos01 = (pos * 0.5 + vec2(0.5));
+	gl_Position = vec4(pos * cam_res_mult + vec2(cam_res_mult-1),0,1);
+	vs_cam_coeffs = pos * cam_normalized_size;
+	vs_tex = pos01 * tex_res_mult;
+}
+```
+
+### 02_Shaders/Shaders/_Unique/main.frag
+```
+#define PI 3.14159265359
+//uniform float size_multipier = 1.0;
+noperspective in vec2 vs_tex;
+noperspective in vec2 vs_pos;
+out vec4 fs_out;
+
+subroutine vec4 Colorize();
+layout(location = 0)	subroutine	uniform Colorize colorize;
+
+layout(location = 0, binding = 2)	uniform sampler2D samplers[4];
+
+layout(location = 4) uniform vec2 cam_res_mult			= vec2(1.0);
+layout(location = 5) uniform vec4 color_offset[4]		= {vec4(0),vec4(0),vec4(0),vec4(0)};
+layout(location = 9) uniform mat4 color_multipiers[4]	= {mat4(1),mat4(1),mat4(1),mat4(1)};
+
+layout(index = 0) subroutine(Colorize)
+vec4 colorize_0()
+{
+	return texture2D(samplers[0], vs_tex);
+}
+
+bool isBL() {return vs_pos.x < 0 && vs_pos.y < 0;}
+bool isBR() {return vs_pos.x > 0 && vs_pos.y < 0;}
+bool isTL() {return vs_pos.x < 0 && vs_pos.y > 0;}
+bool isTR() {return vs_pos.x > 0 && vs_pos.y > 0;}
+
+vec2 getCorner()
+{	//TODO inline
+	if (isTL()) return (vs_pos + vec2(1,0))*cam_res_mult;
+	if (isTR()) return (vs_pos + vec2(0,0))*cam_res_mult;
+	if (isBL()) return (vs_pos + vec2(1,1))*cam_res_mult;
+	if (isBR()) return (vs_pos + vec2(0,1))*cam_res_mult;
+}
+
+layout(index = 1) subroutine(Colorize)
+vec4 colorize_1()
+{
+	return color_multipiers[0]*texture2D(samplers[0], vs_tex) + color_offset[0];
+}
+
+layout(index = 2) subroutine(Colorize)
+vec4 colorize_2() //négy részre bontja
+{	//No dynamicly uniform texture lookup! (repeat tel-sem jó, pont az optimalizáció miatt)
+	vec4 col = vec4(0);
+	if (isTL()) col = color_multipiers[0]*texture2D(samplers[0], getCorner()) + color_offset[0];
+	if (isTR()) col = color_multipiers[1]*texture2D(samplers[1], getCorner()) + color_offset[1];
+	if (isBL()) col = color_multipiers[2]*texture2D(samplers[2], getCorner()) + color_offset[2];
+	if (isBR()) col = color_multipiers[3]*texture2D(samplers[3], getCorner()) + color_offset[3];
+	return col;
+}
+
+void main()
+{
+	fs_out = colorize();
+}
+```
+
+### 02_Shaders/Shaders/_Unique/show.vert
+```
+in vec2 pos;
+noperspective out vec2 vs_tex;
+noperspective out vec2 vs_pos;
+
+uniform vec2 cam_res_mult = vec2(1.0);
+
+void main()
+{
+	gl_Position = vec4(pos,0,1);
+	vs_pos = pos;
+	vs_tex = (pos.xy * 0.5 + vec2(0.5)) * cam_res_mult;
+}
+```
+
+### 02_Shaders/Shaders/_Old/Color/main.frag
+```
+out vec3 out_color;	//display color
+out vec4 out_aoswn; //shadow, ambient and comp normal
+out vec3 out_depth; //pixel cone dist, nearest dist, past surface dist
+
+/*
+//Alternative:
+out vec4 out_sw_ao_norm; //shadow, ambient and compressed normal
+vec2 compressNorm(vec3 n)
+{
+	return vec2(atan(n.xy),n.z);
+}
+vec3 expandNorm(vec2 cn)
+{
+	return vec3(cos(n.x), sin(n.y), n.z);
+}
+*/
+
+uniform sampler2D in_color;
+uniform sampler2D in_sw_ao;
+uniform sampler2D in_depth;
+uniform sampler2D in_norm;
+
+subroutine float Refine(Ray r, vec2 range);
+subroutine uniform Refine refine;
+
+subroutine vec2 Antialias(inout Ray r, in const vec3 ranges);
+subroutine uniform Antialias antialias;
+
+subroutine vec3 Norm(Ray r);
+subroutine uniform Norm norm;
+
+subroutine float Ambient(Ray r, vec3 n);
+subroutine uniform Ambient ambient;
+
+subroutine float Shadow(Ray r, vec3 n);
+subroutine uniform Shadow shadow;
+
+void main()
+{
+	vec3 ranges = texture(in_depth, coords());
+	vec2 range = antialias(camera(), ranges);
+	float t = refine(r, range);
+	float ao = 1, sw = 1; vec2 cl;
+	if(t < 0)
+		cl = background(r);
+	else
+	{
+		r.p += r.c*t;
+		vec3 n = norm(r.p);
+		ao = ambient(r, n);
+		sw = shadow(r, n);
+		cl = shade(r, n, a, s);
+	}
+	out_color.xyz = cl;
+	out_sw_ao.xy = vec2(ao, sw);
+}
+```
+
+### 02_Shaders/Shaders/_Old/Depth/main.frag
+```
+//depth main shader
+
+uniform sampler2D in_depth;
+
+subroutine vec3 Raytracer(const in Ray r, const in float stepsize, const in int stepcount);
+subroutine uniform Raytracer raytrace;
+//TODO: update raytrace functions!!
+
+subroutine float GetDepth();
+subroutine uniform GetDepth getDepth;
+
+uniform int stepcount;
+uniform float stepsize;
+
+out vec3 out_depth;
+
+void main()
+{
+	Ray r = camera();
+	r.p += r.v * getDepth();
+	out_depth = raytrace(r, stepsize, stepcount);
+}
+```
+
+### 02_Shaders/Shaders/_Old/Shadow_/shadow_0.frag
+```
+layout(index = 600 + 0) subroutine(Shadow)
+float shadow_0(const in vec3 p, const in vec3 n, const in float sw)
+{
+	return 1;
+}
+```
+
+### 02_Shaders/Shaders/_Old/Shadow_/shadow_1.frag
+```
+layout(index = 600 + 1) subroutine(Shadow)
+float shadow_1(const in vec3 p, const in vec3 n, const in float sw)
+{
+	return sw;
+}
+```
+
+### 02_Shaders/Shaders/_Old/Shadow_/shadow_2.frag
+```
+layout(index = 600 + 2) subroutine(Shadow)
+float shadow_2(const in vec3 p, const in vec3 n, const in float sw)
+{
+	vec3 l = light(p);
+	if(dot(l,n) > 0)
+	{
+		float t = 0.1;
+		Ray r  = {l, p + n*0.1 };
+		for(int i = 0; i < st_stepcount; ++i)
+		{
+			float ft = sdf(RAY(r,t));
+			if(ft < 0.1) return 0;
+			t += ft;
+		}
+		return 1;
+	}
+	return 0;
+}
+```
+
+### 02_Shaders/Shaders/_Old/Shadow_/shadow_3.frag
+```
+layout(index = 600 + 2) subroutine(Shadow)
+float shadow_2(const in vec3 p, const in vec3 n, const in float sw)
+{
+	
+	
+	
+	return 0;
+}
+```
+
+### 02_Shaders/Shaders/_Old/sdf/aprajafalva2.frag
+```
+vec3 color(vec3 p)
+{
+	return vec3(1);
+}
+
+float sdf(in vec3 p)
+{
+	p.xy = repeat(p.xy, vec2(21,16));
+	float haztest = box(p + vec3(0,0,-2), vec3(5,4,2.5));
+	float hazbelso = box(p + vec3(0,0,-2), vec3(4,3,2));
+	float ajto = box(p + vec3(4.5,0.5,-2), vec3(1,1,2));
+	float ablak1 = box(p + vec3(2,0,-2.8), vec3(0.7,10,1));
+	float ablak2 = box(p + vec3(-2,0,-2.8), vec3(0.7,10,1));
+	float ablakok = min(ablak1, ablak2);
+	float haz = max(max(max(haztest, -hazbelso), -ajto), -ablakok);
+	vec3 p1 = p + vec3(0,0,-4.5);
+	float teto = max(sphere(p1, 6), -planeXY(p1));
+	return min(min(haz, teto), planeXY(p));
+}
+```
+
+### 02_Shaders/Shaders/_Old/sdf/mandelbulb.frag
+```
+vec3 hsv2rgb(const in vec3 c)
+{
+    const vec4 K = vec4(1.0, 2.0 / 3.0, 1.0 / 3.0, 3.0);
+    vec3 p = abs(fract(c.xxx + K.xyz) * 6.0 - K.www);
+    return c.z * mix(K.xxx, clamp(p - K.xxx, 0.0, 1.0), c.y);
+}
+
+vec3 color(vec3 p)
+{
+	return hsv2rgb(vec3(length(p)*2, 0.5, 0.5));
+}
+
+float sdf(in vec3 p)
+{	//Mandelbulb from http://blog.hvidtfeldts.net/index.php/2011/09/distance-estimated-3d-fractals-v-the-mandelbulb-different-de-approximations/
+	const float Power = 8.0;
+	vec3 z = p;
+	float dr = 1.0, r = 0.0;
+	for (int i = 0; i < user_itercount ; i++) {
+		r = length(z);
+		if (r>=2) break;
+		float theta = acos(z.z/r), phi = atan(z.y,z.x);
+		dr =  pow( r, Power-1.0)*Power*dr + 1.0;
+		float zr = pow( r, Power);
+		theta = theta*Power;
+		phi = phi*Power;
+		z = zr*vec3(sin(theta)*cos(phi), sin(phi)*sin(theta), cos(theta));
+		z+=p;
+	}
+	return 0.5*log(r)*r/dr;
+}
+```
+
+### 02_Shaders/Shaders/_Old/sdf/mandelbulb_cut.frag
+```
+vec3 hsv2rgb(const in vec3 c)
+{
+    const vec4 K = vec4(1.0, 2.0 / 3.0, 1.0 / 3.0, 3.0);
+    vec3 p = abs(fract(c.xxx + K.xyz) * 6.0 - K.www);
+    return c.z * mix(K.xxx, clamp(p - K.xxx, 0.0, 1.0), c.y);
+}
+
+vec3 color(vec3 p)
+{
+	if(abs(p.y) < 0.01*length(p) || abs(p.z-0.2) < 0.001*length(p)) return vec3(1,1,1);
+	else return hsv2rgb(vec3(length(p)*2, 0.5, 0.5));
+}
+
+float sdf(in vec3 p)
+{	//Mandelbulb from http://blog.hvidtfeldts.net/index.php/2011/09/distance-estimated-3d-fractals-v-the-mandelbulb-different-de-approximations/
+	const float Power = 8.0;
+	vec3 z = p;
+	float dr = 1.0, r = 0.0;
+	for (int i = 0; i < user_itercount ; i++) {
+		r = length(z);
+		if (r>=2) break;
+		float theta = acos(z.z/r), phi = atan(z.y,z.x);
+		dr =  pow( r, Power-1.0)*Power*dr + 1.0;
+		float zr = pow( r, Power);
+		theta = theta*Power;
+		phi = phi*Power;
+		z = zr*vec3(sin(theta)*cos(phi), sin(phi)*sin(theta), cos(theta));
+		z+=p;
+	}
+	return min(0.5*log(r)*r/dr, min(p.z,p.y));
+}
+```
+
+### 02_Shaders/Shaders/_Old/sdf/test.frag
+```
+vec3 color(vec3 p)
+{
+	return vec3(1);
+}
+
+float sdf(in vec3 p)
+{
+	float m = 10000;
+	for (int i=0; i < 10; ++i)
+	{
+		float t = 0.1*i*3.1415*2.0;
+		vec3 d = 7*vec3(cos(t), sin(t), 0);
+		m = min(m, cylinder(p-d, 1));
+	}
+	return smin(planeXY(p), m, 1);
+}
+```
+
+### 02_Shaders/Shaders/_Old/sdf/text.frag
+```
+vec3 color(vec3 p)
+{
+	return vec3(1);
+}
+
+float sdf(in vec3 p)
+{
+	return sphere(repeat(p, vec3(5,5,5)), 1);
+	/*float sik = planeXY(p + vec3(0,0,0.7));
+	float gomb1 = sphere(repeatXY(p, vec2(2,5)), 1);
+	float gomb2 = sphere(repeatXY(p, vec2(3,6)) - vec3(0,0,1.5), 0.5);
+	//float gomb3 = sphere(repeatXY(p, vec2(13,11)) - vec3(0,0,14), 3);
+	return min(min(gomb1, gomb2), sik);*/
+}
+```
+
+### 02_Shaders/Shaders/_Old/Depth/GetDepth/getDepth_0.frag
+```
+subroutine(GetDepth)
+float getDepth_0()
+{
+	return 0;
+}
+```
+
+### 02_Shaders/Shaders/_Old/Depth/GetDepth/getDepth_1.frag
+```
+subroutine(GetDepth)
+float getDepth_1()
+{
+	return texture2D(in_depth, inDepthCoords(vs_out_pos.xy*0.5+vec2(0.5)));
+}
+```
+
+### 02_Shaders/Shaders/_Old/Depth/GetDepth/getDepth_2.frag
+```
+subroutine(GetDepth)
+float getDepth_1()
+{
+	vec2 uv = inDepthCoords();
+	float m = textureOffset(in_depth, )
+}
+```
+
+### 02_Shaders/Shaders/_Old/Depth/Raytracer/raytracer_01.frag
+```
+subroutine(Raytracer)
+vec2 raytracer_01(const in Ray r, const in float stepsize, const in int stepcount)
+{	//pure raymarch
+	float t = 0;
+	for(int i = 0; i < stepcount; ++i)
+	{
+		if(sdf(RAY(r,t)) <= 0) return vec2(t-stepsize,t);
+		t+=stepsize;
+	}
+	return vec2(t-stepsize,t);
+}
+```
+
+### 02_Shaders/Shaders/_Old/Depth/Raytracer/raytracer_02.frag
+```
+subroutine(Raytracer)
+vec2 raytracer_02(const in Ray r, const in float stepsize, const in int stepcount)
+{	//faster raymarch (about same as pure on 1/2 TRACE_STEPSIZE)
+	float t = 0, msp = stepsize;
+	for(int i = 0; i < stepcount; ++i)
+	{
+		msp += TRACE_STEPINCR;
+		if(sdf(RAY(r,t)) <= 0) return vec2(t-msp,t);
+		t += msp;
+	}
+	return vec2(t-msp,t);
+}
+```
+
+### 02_Shaders/Shaders/_Old/Depth/Raytracer/raytracer_10.frag
+```
+subroutine(Raytracer)
+vec2 raytracer_10(const in Ray r, const in float stepsize, const in int stepcount)
+{	//pure sphere trace (if low step count, bubbley artifact)
+	float t = 0;
+	for(int i = 0; i < stepcount; ++i)
+		t += sdf(RAY(r,t));
+	return vec2(t, t+stepsize);
+}
+```
+
+### 02_Shaders/Shaders/_Old/Depth/Raytracer/raytracer_11.frag
+```
+subroutine(Raytracer)
+vec2 raytracer_11(const in Ray r, const in float stepsize, const in int stepcount)
+{	//sphere trace + raymarch
+	float t = 0, ft;
+	for(int i = 0; i < stepcount; ++i)
+	{
+		ft = sdf(RAY(r,t));
+		if (ft <= 0) return vec2(t-stepsize, t);
+		t += ft + stepsize;
+	}
+	return vec2(t-stepsize, t);
+}
+```
+
+### 02_Shaders/Shaders/_Old/Depth/Raytracer/raytracer_12.frag
+```
+subroutine(Raytracer)
+vec2 raytracer_12(const in Ray r, const in float stepsize, const in int stepcount)
+{	//sphere trace + faster raymarch
+	float t = 0, ft, msp = stepsize;
+	for(int i = 0; i < stepcount; ++i)
+	{
+		ft = sdf(RAY(r,t));
+		msp += TRACE_STEPINCR;
+		if (ft <= 0) return vec2(t-msp, t);
+		t += ft + msp;
+	}
+	return vec2(t-msp,t);
+}
+```
+
+### 02_Shaders/Shaders/_Old/Depth/Raytracer/raytracer_20.frag
+```
+subroutine(Raytracer)
+vec2 raytracer_20(const in Ray r, const in float stepsize, const in int stepcount)
+{	//relaxed sphere trace (if low step count glassy artifact instead)
+	float t = 0, ft, pft = 0;
+	const float or = TRACE_OR;
+	for(int i = 0; i < stepcount; ++i)
+	{
+		ft = sdf(RAY(r,t));
+		if(ft < pft*(or-1))
+		{
+			t -= (or-1)*pft;
+			ft = sdf(RAY(r,t));
+		}
+		t += ft*or;
+		pft = ft;
+	}
+	return vec2(t, t + stepsize);
+}
+```
+
+### 02_Shaders/Shaders/_Old/Depth/Raytracer/raytracer_21.frag
+```
+subroutine(Raytracer)
+vec2 raytracer_21(const in Ray r, const in float stepsize, const in int stepcount)
+{	//relaxed sphere trace with raymarch
+	float t = 0, ft, pft = 0;
+	const float or = TRACE_OR;
+	for(int i = 0; i < stepcount; ++i)
+	{
+		ft = sdf(RAY(r,t));
+		if(ft < pft*(or-1))
+		{
+			t -= (or-1)*pft;
+			ft = sdf(RAY(r,t));
+		}
+		if(ft <= 0) return vec2(t - stepsize,t);
+		t += ft*or + stepsize;
+		pft = ft;
+	}
+	return vec2(t -stepsize,t);
+}
+```
+
+### 02_Shaders/Shaders/_Old/Depth/Raytracer/raytracer_22.frag
+```
+subroutine(Raytracer)
+vec2 raytracer_22(const in Ray r, const in float stepsize, const in int stepcount)
+{	//relaxed sphere trace with faster raymarch	
+	float t = 0, ft, pft=0, msp = stepsize;
+	const float or = TRACE_OR;
+	const float orm1 = TRACE_OR-1;
+	for(int i = 0; i < stepcount; ++i)
+	{
+		ft = sdf(RAY(r,t));
+		if(ft < pft*orm1)
+		{
+			t -= orm1*pft;
+			ft = sdf(RAY(r,t));
+		}
+		msp += TRACE_STEPINCR;
+		if (ft <= 0) return vec2(t-msp, t);
+		t += or*ft + msp;
+		pft = ft; //pr�b�ltam optimaliz�lni a ciklusmag 
+	}			  //megk�tszerez�s�vel, de lassabb lett
+	return vec2(t-msp, t);
+}
+```
+
+### 02_Shaders/Shaders/_Old/Depth/Raytracer/raytracer_30.frag
+```
+//#define NEXT_R(r_0, r_1, d) (- r_1 * (d - r_0 + r_1)/(-d - r_0 + r_1))
+//#define NEXT_R(r_0, r_1, d) 0.99*(- r_1 * (r_0 - r_1 - d)/(r_0 - r_1 + d))
+/*vec2 trace_ray_30(const in Ray r, const in float stepsize, const in int stepcount)
+{	//-(r_1 * (d-r_0+r_1))/(-d-r_0+r_1)
+	float t = 0, ft = sdf(RAY(r,t)), pft = 0, dt = 0, nft;
+	for(int i = 0; i < stepcount; ++i)
+	{
+		dt = ft + NEXT_R(pft, ft, dt);
+		nft = sdf(RAY(r,t + dt));
+		if(dt < ft + nft)
+		{
+			ft = nft;
+			t += dt;
+		}
+		else
+		{
+			t += dt = ft;
+			ft = sdf(RAY(r,t));
+		}
+		pft = ft;
+	}
+	return vec2(t, t + stepsize);
+}*/
+#define STEP_SIZE_REDUCTION 0.87
+
+subroutine(Raytracer)
+vec2 raytracer_30(const in Ray r, const in float stepsize, const in int stepcount)
+{	//-(r_1 * (d-r_0+r_1))/(-d-r_0+r_1)
+	float t = 0, ft = sdf(RAY(r,t)), pft = 0, dt = 0, nft;
+	for(int i = 0; i < stepcount; ++i)
+	{
+		dt = ft * (1 - STEP_SIZE_REDUCTION * (pft - ft - dt)/(pft - ft + dt));
+		//dt = ft + NEXT_R(pft, ft, dt);
+		nft = sdf(RAY(r,t + dt));
+		if(dt < ft + nft)
+		{
+			ft = nft;
+			t += dt;
+		}
+		else
+		{
+			t += dt = ft;
+			ft = sdf(RAY(r,t));
+		}
+		pft = ft;
+	}
+	return vec2(t, t + stepsize);
+}
+```
+
+### 02_Shaders/Shaders/_Old/Depth/Raytracer/raytracer_31.frag
+```
+#define STEP_SIZE_REDUCTION 0.87
+
+subroutine(Raytracer)
+vec2 raytracer_31(const in Ray r, const in float stepsize, const in int stepcount)
+{	//-(r_1 * (d-r_0+r_1))/(-d-r_0+r_1)
+	float t = 0, ft = sdf(RAY(r,t)), pft = 0, dt = 0, nft;
+	for(int i = 0; i < stepcount; ++i)
+	{
+		dt = ft * (1 - STEP_SIZE_REDUCTION * (pft - ft - dt)/(pft - ft + dt)) + stepsize;
+		nft = sdf(RAY(r,t + dt));
+		if(dt < ft + nft + stepsize)
+		{
+			ft = nft;
+			t += dt;
+		}
+		else
+		{
+			t += dt = ft + stepsize;
+			ft = sdf(RAY(r,t));
+		}
+		if(ft < 0) return vec2(t - stepsize,t);
+		pft = ft;
+	}
+	return vec2(t - stepsize,t);
+}
+```
+
+### 02_Shaders/Shaders/_Old/Depth/Raytracer/raytracer_32.frag
+```
+#define STEP_SIZE_REDUCTION 0.87
+
+//kb ugyanolyan j� mint a 22
+subroutine(Raytracer)
+vec2 raytracer_32(const in Ray r, const in float stepsize, const in int stepcount)
+{	//-(r_1 * (d-r_0+r_1))/(-d-r_0+r_1)
+	float t = 0, ft = sdf(RAY(r,t)), pft = 0, dt = 0, nft, msp = stepsize;
+	for(int i = 0; i < stepcount; ++i)
+	{
+		msp += TRACE_STEPINCR;
+
+		dt = ft * (1 - STEP_SIZE_REDUCTION * (pft - ft - dt)/(pft - ft + dt)) + msp;
+		nft = sdf(RAY(r,t + dt));
+		if(dt < ft + nft + msp*1.3)
+		{
+			ft = nft;
+			t += dt;
+		}
+		else
+		{
+			t += dt = ft + msp;
+			ft = sdf(RAY(r,t));
+		}
+		if(ft < 0) return vec2(t - msp,t);
+		pft = ft;
+	}
+	return vec2(t - stepsize,t);
+}
+```

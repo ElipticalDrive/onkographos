@@ -1,0 +1,204 @@
+# ClearView Unified Buffer Construction
+
+Also called: ClearView Buffer Construction
+
+## Overview
+ClearView Unified Buffer Construction is a preprocessing technique that converts a hexahedral mesh (positions, connectivity, and scalar values) into four GPU-friendly texture buffers—vertices, edges, faces, and cellScalar—optimized for the ClearView volume rendering pipeline [S1, unofficial].
+
+## How it works
+**Inputs:**
+- Hexahedral mesh with $N_c$ cells, vertex positions, connectivity, and scalar values [S1, unofficial].
+
+**Outputs:**
+Four 2D textures bound to specific formats:
+1. `edgesTex`: `RG32F` (Float32Array) [S1, unofficial].
+2. `facesTex`: `RG32UI` (Uint32Array) [S1, unofficial].
+3. `cellScalarTex`: `R32F` (Float32Array) [S1, unofficial].
+4. `vertexTex`: layout details not provided in sources [S1, unofficial].
+
+**Data Structures and Layouts:**
+
+1. **Edges Texture (`edgesTex`)**
+   - Format: `RG32F` (2 floats per texel: attribute, LOD) [S1, unofficial].
+   - Dimensions: width $W_e$ and height $H_e$ determined by `texDims(edgeCount)` [G].
+   - Total Texels: $N_e = N_c \times 12$ [S1, unofficial].
+   - Linear Index: $L = c \times 12 + e$, where $c \in [0, N_c)$ is cell index, $e \in [0, 11)$ is edge index within cell [S1, unofficial].
+   - Texel Coordinates: $col = L \pmod{W_e}$, $row = \lfloor L / W_e \rfloor$ [S1, unofficial].
+   - Texel Index in array: $ti = (row \times W_e + col) \times 2$ [S1, unofficial].
+   - Values: `edgesTex[ti] = max(scalars[p_ia], scalars[p_ib])` (attribute: max scalar of edge endpoints), `edgesTex[ti+1] = 1 - normScalar` (LOD factor) [S1, unofficial].
+
+2. **Faces Texture (`facesTex`)**
+   - Format: `RG32UI` (4 unsigned ints per texel) [S1, unofficial].
+   - Dimensions: width $W_f = 2$, height $H_f = N_f = N_c \times 6$ [S1, unofficial].
+   - Total Texels: $2 \times N_f$ [S1, unofficial].
+   - Face ID: $faceId = c \times 6 + f$, where $f \in [0, 5)$ is face index within cell [S1, unofficial].
+   - Two texels per face: Texel 0 stores 4 vertex indices, Texel 1 stores 4 edge indices [S1, unofficial].
+   - Linear Texel Index: $t0linear = faceId \times 2 + 0$, $t1linear = faceId \times 2 + 1$ [S1, unofficial].
+   - Texel Coordinates: $col = tlinear \pmod{W_f}$, $row = \lfloor tlinear / W_f \rfloor$ [S1, unofficial].
+   - Texel Index in array: $ti = (row \times W_f + col) \times 4$ [S1, unofficial].
+   - Values: `facesTex[ti+0..3] = c \times 8 + face.corners[0..3]` (vertex indices relative to cell start), `facesTex[ti+4..7] = c \times 12 + face.edges[0..3]` (edge indices relative to cell start) [S1, unofficial].
+
+3. **Cell Scalar Texture (`cellScalarTex`)**
+   - Format: `R32F` (1 float per texel) [S1, unofficial].
+   - Dimensions: width $W_s$ and height $H_s$ determined by `texDims(faceCount)` [G].
+   - Total Texels: $N_f = N_c \times 6$ [S1, unofficial].
+   - Linear Index: $faceId = c \times 6 + f$ [S1, unofficial].
+   - Texel Coordinates: $col = faceId \pmod{W_s}$, $row = \lfloor faceId / W_s \rfloor$ [S1, unofficial].
+   - Value: `cellScalarTex[row * W_s + col] = cellScalarAvg` [S1, unofficial].
+
+**Algorithm Steps:**
+
+1. **Compute Scalar Range:** $s_{min} = \min(mesh.scalars)$, $s_{max} = \max(mesh.scalars)$, $s_{range} = \max(s_{max} - s_{min}, 10^{-9})$ [S1, unofficial].
+2. **Compute Edge LOD:** For each cell $c$, $cellScalarAvg = \frac{\sum_{i=0}^{7} scalars[corner_i]}{8}$, $normScalar = \frac{cellScalarAvg - s_{min}}{s_{range}}$, $edgeLod = 1 - normScalar$ [S1, unofficial].
+3. **Construct Edges Texture:** For each cell $c$ and edge $e$, identify endpoints $p_{ia}, p_{ib}$, calculate linear index $L = c \times 12 + e$, calculate row/col, store $\max(scalars[p_{ia}], scalars[p_{ib}])$ in R channel, store $edgeLod$ in G channel [S1, unofficial].
+4. **Construct Faces Texture:** For each cell $c$ and face $f$, calculate $faceId = c \times 6 + f$, get face geometry (`face.corners` 4 vertex indices relative to cell, `face.edges` 4 edge indices relative to cell), calculate texel indices $t0linear, t1linear$, store $c \times 8 + face.corners[0..3]$ in Texel 0 (RGBA), store $c \times 12 + face.edges[0..3]$ in Texel 1 (RGBA) [S1, unofficial].
+5. **Construct Cell Scalar Texture:** For each cell $c$ and face $f$, calculate $faceId = c \times 6 + f$, calculate row/col based on $W_s, H_s$, store $cellScalarAvg$ at calculated position [S1, unofficial].
+
+**Pseudocode:**
+
+> **Unverified code.** The code below did not pass a test run against a reference implementation, or no test fits it, so it may contain errors.
+
+```python
+def build_clearview_buffers(mesh):
+    """
+    mesh: object with .positions (8*N_c), .scalars (N_c or 8*N_c), .connectivity
+    Returns: buffers dict with 'edges', 'faces', 'cellScalar'
+    """
+    N_c = mesh.num_cells
+    scalars = mesh.scalars
+    
+    # 1. Scalar Range
+    s_min = min(scalars)
+    s_max = max(scalars)
+    s_range = max(s_max - s_min, 1e-9)
+    
+    # 2. Precompute Cell Scalar Avg and LOD
+    cell_scalars_avg = []
+    edge_lods = []
+    for c in range(N_c):
+        # Access 8 corner scalars for cell c [G]
+        corner_scalars = mesh.get_cell_corners_scalars(c)
+        avg = sum(corner_scalars) / 8.0
+        cell_scalars_avg.append(avg)
+        
+        norm_scalar = (avg - s_min) / s_range
+        edge_lods.append(1.0 - norm_scalar)
+
+    # 3. Edges Texture
+    edge_count = N_c * 12
+    edges_data = [0.0] * (edge_count * 2)
+    
+    # Helper for texture dimensions [G]
+    def tex_dims(n):
+        return n, 1
+    
+    width_e, height_e = tex_dims(edge_count)
+    
+    for c in range(N_c):
+        lod = edge_lods[c]
+        for e in range(12):
+            linear_idx = c * 12 + e
+            row = linear_idx // width_e
+            col = linear_idx % width_e
+            ti = (row * width_e + col) * 2
+            
+            # Access edge endpoint vertex indices [G]
+            p_a, p_b = mesh.get_edge_vertices(c, e)
+            scalar_a = scalars[p_a] if len(scalars) > 8*N_c else scalars[c]
+            scalar_b = scalars[p_b] if len(scalars) > 8*N_c else scalars[c]
+            
+            if len(scalars) > 8*N_c:
+                val = max(scalar_a, scalar_b)
+            else:
+                val = scalars[c]
+                
+            edges_data[ti] = val
+            edges_data[ti+1] = lod
+
+    # 4. Faces Texture
+    face_count = N_c * 6
+    faces_data = [0] * (face_count * 2 * 4)
+    
+    width_f = 2
+    height_f = face_count
+    
+    for c in range(N_c):
+        for f in range(6):
+            face_id = c * 6 + f
+            t0_linear = face_id * 2 + 0
+            t1_linear = face_id * 2 + 1
+            
+            row0 = t0_linear // width_f
+            col0 = t0_linear % width_f
+            ti0 = (row0 * width_f + col0) * 4
+            
+            row1 = t1_linear // width_f
+            col1 = t1_linear % width_f
+            ti1 = (row1 * width_f + col1) * 4
+            
+            # Access face corner and edge indices relative to cell [G]
+            corners = mesh.get_face_corners(c, f)
+            edges = mesh.get_face_edges(c, f)
+            
+            faces_data[ti0+0] = c * 8 + corners[0]
+            faces_data[ti0+1] = c * 8 + corners[1]
+            faces_data[ti0+2] = c * 8 + corners[2]
+            faces_data[ti0+3] = c * 8 + corners[3]
+            
+            faces_data[ti1+0] = c * 12 + edges[0]
+            faces_data[ti1+1] = c * 12 + edges[1]
+            faces_data[ti1+2] = c * 12 + edges[2]
+            faces_data[ti1+3] = c * 12 + edges[3]
+
+    # 5. Cell Scalar Texture
+    scalar_tex_count = face_count
+    scalar_tex_data = [0.0] * scalar_tex_count
+    
+    width_s, height_s = tex_dims(scalar_tex_count)
+    
+    for c in range(N_c):
+        for f in range(6):
+            face_id = c * 6 + f
+            row = face_id // width_s
+            col = face_id % width_s
+            scalar_tex_data[row * width_s + col] = cell_scalars_avg[c]
+
+    return {
+        'edges': edges_data,
+        'faces': faces_data,
+        'cellScalar': scalar_tex_data
+    }
+```
+
+**Parameters:**
+- `s_range` minimum: $10^{-9}$ to prevent division by zero [S1, unofficial].
+
+**Edge Cases and Pitfalls:**
+- **Zero Scalar Range:** If $s_{max} == s_{min}$, $s_{range}$ is clamped to $10^{-9}$ [S1, unofficial].
+- **Texture Dimensions:** `texDims` function is not defined in the source; implementers must provide a standard texture dimension calculator [G].
+
+## Subtopics
+
+### Device Volume Snapshot
+Creates immutable snapshots of volume data for thread-safe sharing. Use when data must not change during rendering. [Device Volume Snapshot](2246-device-volume-snapshot.md)
+
+### GPU Data Layout
+Defines general principles for mapping host data to GPU memory. Use for understanding the underlying memory hierarchy. [GPU Data Layout](2469-gpu-data-layout.md)
+
+### Volume Upload via Staging Buffer
+Handles data transfer from host to device. Use when direct mapping is unsupported or staging is required. [Volume Upload via Staging Buffer](15388-volume-upload-via-staging-buffer.md)
+
+## Operating characteristics
+- **Time Complexity:** $O(N_c)$, where $N_c$ is the number of cells. Each cell processes a constant number of edges (12) and faces (6) [S1, unofficial].
+- **Memory Complexity:** $O(N_c)$. Specifically, $24 N_c$ floats for edges, $32 N_c$ unsigned ints for faces, and $6 N_c$ floats for cell scalars [S1, unofficial].
+- **Performance:** Optimized for coalesced memory access in the ClearView rendering pipeline by packing connectivity into 2D textures [S1, unofficial].
+- **Strengths:** Explicitly encodes topology for fragment-based rendering; avoids complex lookups during shading [S1, unofficial].
+- **Limitations:** Requires hexahedral meshes; assumes non-shared or easily expandable connectivity; texture dimensions must be carefully chosen [S1, unofficial].
+- **When to use:** ClearView volume rendering pipeline with hexahedral data [S1, unofficial].
+- **When not to use:** Tetrahedral meshes, non-hexahedral volumes, or when shared topology is critical and not expanded [S1, unofficial].
+
+## Background
+The ClearView Unified Buffer Construction method originates from the `geresim-spike` project, an unofficial implementation of a volume rendering technique focusing on "focus+context" visualization [S1, unofficial]. It was developed to support a specific WebGL2-based rendering pipeline that uses fragment shaders for rendering hexahedral meshes. The technique is part of a broader effort to optimize volume rendering on consumer GPUs by leveraging texture-based data structures for topology and scalar data [S1, unofficial].
+
+## Sources
+[S1] Amory0709/geresim-spike, https://github.com/Amory0709/geresim-spike, fetched 2026-10-27 (unofficial)

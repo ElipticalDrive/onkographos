@@ -1,0 +1,185 @@
+--- v002.md
++++ v003.md
+@@ -3,73 +3,112 @@
+ 
+ ## Overview
+-A parallel volume rendering method that preserves the Adaptive Mesh Refinement (AMR) block structure, distributing leaves of the octree among processors and using raycasting with adaptive sampling [S1, unofficial]. It sets itself apart from its parent method [Parallel Octree Data Reduction](16751-parallel-octree-data-reduction.md) by explicitly maintaining the hierarchical block topology for rendering rather than reducing data for interactive preview, and from its child [VisIt Data Parallel Volume Rendering](17553-visit-data-parallel-volume-rendering.md) by not treating patches as atomic units with ghost-cell filtering, but rather distributing individual octree leaves [S1, unofficial].
++A parallel volume rendering method that preserves the Adaptive Mesh Refinement (AMR) block structure, distributing leaves of the octree among processors and using raycasting with adaptive sampling [S1, unofficial]. It avoids resampling to a uniform grid, instead rendering individual blocks directly while buffering small ray-segments to reduce communication overhead [S1, unofficial].
+ 
+ ## How it works
+-**Inputs:** AMR dataset organized as a hierarchy of grids; number of processors $P$.
+-**Outputs:** Composite volume-rendered image.
++**Inputs:** AMR dataset organized as a hierarchy of grids; number of processors $P$ [S1, unofficial].
++**Outputs:** Composite volume-rendered image [G].
+ 
+ **Data Structures:**
+ The AMR hierarchy is organized as a quadtree (2D) or octree (3D) [S1, unofficial].
+-*   **Inner Nodes:** Indicate regions requiring further refinement.
+-*   **Leaf Nodes:** Specify a grid block with resolution determined by the current hierarchy level.
++*   **Inner Nodes:** Indicate regions requiring further refinement [S1, unofficial].
++*   **Leaf Nodes:** Specify a grid block with resolution determined by the current hierarchy level [S1, unofficial].
+ 
+ **Steps:**
+-1.  **Tree Construction:** Organize the input AMR grids into the quadtree/octree structure. Inner nodes represent refinement regions; leaf nodes represent the finest available grid blocks at that location [S1, unofficial].
++1.  **Tree Construction:** Organize the input AMR grids into the quadtree/octree structure [S1, unofficial].
+ 2.  **Load Balancing:** Distribute individual blocks (leaf nodes of the octree) among the $P$ processors in a round-robin fashion to achieve static load balancing [S1, unofficial].
+-3.  **Communication Buffering:** Render individual blocks using raycasting. The block structure generates many small ray-segments. These segments are buffered into larger messages to decrease communication overhead [S1, unofficial].
+-4.  **Rendering:** Perform raycasting on each block. Two sampling schemes are available:
+-    *   **Simple Approach:** Uses a fixed, constant sample distance for all blocks [S1, unofficial].
+-    *   **Adaptive Approach:** Decreases the sample distance in finer resolution blocks to maintain visual fidelity proportional to the data resolution [S1, unofficial].
++3.  **Communication Buffering:** Buffer small ray-segments resulting from the block structure into larger messages to decrease communication overhead [S1, unofficial].
++4.  **Rendering:** Render individual blocks using raycasting [S1, unofficial]. Two sampling schemes are used: a simple approach with a fixed constant sample distance, and an adaptive approach that decreases sample distance in finer resolution blocks [S1, unofficial].
+ 
+ **Pseudocode:**
+ ```python
+-def amr_structure_preserving_rendering(amr_hierarchy, num_processors):
+-    """
+-    Renders AMR data preserving block structure.
+-    amr_hierarchy: Object containing the octree/quadtree structure.
+-    num_processors: Integer P.
+-    """
+-    # Step 1: Identify leaves
+-    leaves = amr_hierarchy.get_leaves()
++def amr_structure_preserving_rendering(amr_hierarchy, num_processors, adaptive=False, base_distance=1.0):
++    # Step 1: Identify leaf blocks
++    leaves = [node for node in amr_hierarchy.traverse() if node.is_leaf()]
+     
+-    # Step 2: Round-robin distribution
+-    # Assign each leaf to a processor index 0..P-1
+-    processor_assignments = []
++    # Step 2: Round-robin distribution for static load balancing
++    processor_blocks = [[] for _ in range(num_processors)]
+     for i, leaf in enumerate(leaves):
+-        proc_id = i % num_processors
+-        processor_assignments.append((proc_id, leaf))
++        processor_blocks[i % num_processors].append(leaf)
+     
+-    # Group leaves by processor
+-    processor_blocks = {}
+-    for proc_id, leaf in processor_assignments:
+-        if proc_id not in processor_blocks:
+-            processor_blocks[proc_id] = []
+-        processor_blocks[proc_id].append(leaf)
+-    
+-    # Step 3 & 4: Render and Buffer
+-    # Each processor renders its assigned blocks
+-    # Raycasting is performed on each block
+-    # Small ray-segments are buffered into larger messages
+-    
+-    rendered_images = {}
+-    for proc_id, blocks in processor_blocks.items():
+-        local_image = empty_image()
++    # Step 3 & 4: Render blocks, buffer segments, compose
++    processor_images = []
++    for blocks in processor_blocks:
++        # Initialize local image buffer [G]
++        width, height = 100, 100
++        local_image = [[0.0, 0.0, 0.0, 0.0] for _ in range(width * height)]
++        
+         for block in blocks:
+-            # Determine sampling scheme
+-            # If adaptive: sample_distance decreases as block resolution increases
+-            # If simple: sample_distance is constant
+-            sample_distance = get_sample_distance(block, scheme='adaptive')
++            # Determine sampling distance based on scheme
++            sample_distance = base_distance / block.resolution_level if adaptive else base_distance
+             
+-            # Raycast the block
++            # Raycast block
+             block_image = raycast_block(block, sample_distance)
+             
+-            # Compose into local image
+-            local_image = compose(local_image, block_image)
+-        
+-        rendered_images[proc_id] = local_image
++            # Compose block into local image
++            for y in range(height):
++                for x in range(width):
++                    idx = y * width + x
++                    c_b, a_b = block_image[idx][0:3], block_image[idx][3]
++                    c_l, a_l = local_image[idx][0:3], local_image[idx][3]
++                    contrib = (1.0 - a_l) * a_b
++                    local_image[idx] = [
++                        c_l[0] + contrib * c_b[0],
++                        c_l[1] + contrib * c_b[1],
++                        c_l[2] + contrib * c_b[2],
++                        a_l + contrib
++                    ]
++        processor_images.append(local_image)
+     
+-    # Composite results from all processors
+-    final_image = composite_all(rendered_images)
++    # Composite processor images (e.g., binary-swap or direct accumulation)
++    final_image = processor_images[0]
++    for img in processor_images[1:]:
++        final_image = compose_images(final_image, img)
+     return final_image
++
++def raycast_block(block, sample_distance):
++    # Standard front-to-back volume raycasting [G]
++    width, height = block.image_dimensions
++    image = [[0.0, 0.0, 0.0, 0.0] for _ in range(width * height)]
++    for y in range(height):
++        for x in range(width):
++            o = block.camera_origin(x, y)
++            d = block.camera_direction(x, y)
++            # Compute ray-box intersection [G]
++            t_min, t_max = compute_ray_box_intersection(o, d, block.bounds)
++            if t_max < t_min or t_max < 0:
++                continue
++            alpha = 0.0
++            color = [0.0, 0.0, 0.0]
++            t = t_min
++            while t <= t_max:
++                c, a = block.sample(t)
++                contrib = (1.0 - alpha) * a
++                color[0] += contrib * c[0]
++                color[1] += contrib * c[1]
++                color[2] += contrib * c[2]
++                alpha += contrib
++                if alpha >= 1.0:
++                    break
++                t += sample_distance
++            image[y * width + x] = [color[0], color[1], color[2], alpha]
++    return image
++
++def compose_images(img1, img2):
++    # Standard alpha compositing [G]
++    width, height = len(img1[0]), len(img1)
++    result = [[0.0, 0.0, 0.0, 0.0] for _ in range(width * height)]
++    for y in range(height):
++        for x in range(width):
++            idx = y * width + x
++            c1, a1 = img1[idx][0:3], img1[idx][3]
++            c2, a2 = img2[idx][0:3], img2[idx][3]
++            contrib = (1.0 - a1) * a2
++            result[idx] = [
++                c1[0] + contrib * c2[0],
++                c1[1] + contrib * c2[1],
++                c1[2] + contrib * c2[2],
++                a1 + contrib
++            ]
++    return result
+ ```
+ 
+@@ -80,5 +119,4 @@
+ **Edge Cases:**
+ *   **Communication Overhead:** The block structure can lead to many small ray-segments. Buffering is required to mitigate overhead [S1, unofficial].
+-*   **Load Imbalance:** Static round-robin distribution assumes uniform block sizes or computational cost. Uneven block sizes may lead to imbalance [S1, unofficial].
+ 
+ ## Subtopics
+@@ -88,10 +126,10 @@
+ 
+ ## Operating characteristics
+-*   **Time Complexity:** Linear with respect to the number of leaf blocks and rays cast. Communication overhead is reduced by buffering small ray-segments into larger messages [S1, unofficial].
+-*   **Memory Complexity:** Proportional to the number of leaf blocks distributed across processors. Each processor stores only its assigned blocks [S1, unofficial].
++*   **Time Complexity:** Not given in the sources.
++*   **Memory Complexity:** Not given in the sources.
+ *   **Strengths:** Preserves AMR structure; static load balancing via round-robin; reduced communication overhead via buffering [S1, unofficial].
+-*   **Limitations:** Static load balancing may not adapt to dynamic scene complexity; small ray-segments require careful buffering management [S1, unofficial].
++*   **Limitations:** Static load balancing does not adapt to dynamic scene complexity [G].
+ *   **When to Use:** Interactive visualization of large AMR datasets where preserving block structure is beneficial and static load balancing is sufficient [S1, unofficial].
+-*   **When Not to Use:** When dynamic load balancing is required or when ghost-cell handling is critical for boundary accuracy (use [VisIt Data Parallel Volume Rendering](17553-visit-data-parallel-volume-rendering.md) instead) [S1, unofficial].
++*   **When Not to Use:** Not given in the sources.
+ 
+ ## Background

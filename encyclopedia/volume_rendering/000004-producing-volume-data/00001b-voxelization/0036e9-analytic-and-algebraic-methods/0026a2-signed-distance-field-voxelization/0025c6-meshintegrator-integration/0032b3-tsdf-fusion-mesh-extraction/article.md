@@ -1,0 +1,224 @@
+# TSDF Fusion Mesh Extraction
+
+Also called: Bounded TSDF Mesh Extraction, Mesh Extraction and Merge, Multi-view TSDF Fusion, ScalableTSDFVolume Integration, ScalableTSDFVolume Mesh Extraction, TSDF Fusion with Depth Filtering, TSDF Volume Integration from Gaussian Splatting Outputs, depth-normal masking
+
+## Overview
+TSDF Fusion Mesh Extraction reconstructs a 3D triangle mesh by integrating multi-view depth and color observations into a Truncated Signed Distance Function (TSDF) volume and extracting the surface via marching cubes [S2][S4, unofficial]. It differs from direct neural rendering mesh extraction by relying on explicit geometric fusion of depth maps rather than differentiable surface optimization [S1, unofficial]. It builds on [MeshIntegrator Integration](3630-meshintegrator-integration.md) by performing the final integration and mesh extraction steps [S4, unofficial].
+
+## How it works
+**Inputs:**
+- RGB images, depth maps, camera intrinsics, camera extrinsics, voxel size, truncation distance, maximum integration depth, depth scale factor, optional alpha masks [S1, unofficial][S2][S4, unofficial][S5, unofficial].
+
+**Outputs:**
+- A triangle mesh representing the surface [S2][S4, unofficial].
+
+**Data Structures:**
+The method uses a `ScalableTSDFVolume` (sparse voxel grid or octree) storing `tsdf` (float), `weight` (float), and `color` (uint8 RGB) attributes [S1, unofficial][S2]. A hashmap maps 3D block coordinates to buffer indices for efficient sparse access [S1, unofficial]. Voxel coordinates are 3D integer indices $(i, j, k)$ representing positions within a block [S1, unofficial].
+
+**Parameters:**
+- `voxel_size`: Default 0.004 meters [S2][S4, unofficial].
+- `sdf_trunc`: Default 0.02 meters [S2][S4, unofficial].
+- `depth_trunc`: Default 3.0 meters [S2][S4, unofficial].
+- `max_weight`: Saturation limit for fusion weights [S1, unofficial].
+- `alpha_thres`: Default 0.5, used to filter background pixels [S3, unofficial].
+
+**Algorithm Steps:**
+
+1. **Volume Initialization:**
+   Initialize the scalable TSDF volume with `voxel_size`, `sdf_trunc`, and `color_type=RGB8` [S2][S4, unofficial].
+
+2. **Viewpoint Iteration:**
+   For each camera viewpoint $i$:
+   
+   a. **Preprocessing:**
+   - Convert the camera to Open3D format [S4, unofficial].
+   - If background masking is enabled and an alpha mask $M_\alpha$ exists, set depth values to 0 where $M_\alpha < 0.5$ [S2][S4, unofficial].
+   
+   b. **Block Activation (Sparse Access):**
+   - Compute unique frustum block coordinates for the current depth frame using the volume's hashmap, intrinsic, extrinsic, depth scale, and $d_{max}$ [S1, unofficial].
+   - Activate these blocks in the volume hashmap and retrieve buffer indices and volume masks [S1, unofficial].
+   - Retrieve voxel coordinates and flattened indices for the active blocks [S1, unofficial].
+   
+   c. **Voxel Projection and SDF Calculation:**
+   - Transform voxel coordinates from local block space to world space using the extrinsic matrix (converted to `float64`) [S1, unofficial].
+   - Project world-space voxel centers to 2D image coordinates $(u, v)$ and depth $d_{voxel}$ using the intrinsic matrix [S1, unofficial].
+   - Create a projection mask for voxels where $d_{voxel} > 0$ and $0 \le u < W$, $0 \le v < H$ [S1, unofficial].
+   - Retrieve the depth reading $d_{obs}$ from the input depth map at $(u, v)$, converted to world units using $s_{depth}$ [S1, unofficial].
+   - Calculate the Signed Distance Field (SDF) value: $SDF = d_{obs} - d_{voxel}$ [S1, unofficial].
+   - Create an inlier mask where $d_{obs} > 0$, $d_{obs} < d_{max}$, and $SDF \ge -sdf\_trunc$ [S1, unofficial].
+   - Identify valid voxel indices satisfying both projection and inlier masks [S1, unofficial].
+   
+   d. **TSDF Fusion:**
+   - Saturate SDF values at the truncation limit: $SDF_{sat} = \max(-sdf\_trunc, \min(sdf\_trunc, SDF))$ [S1, unofficial].
+   - Normalize the SDF: $SDF_{norm} = SDF_{sat} / sdf\_trunc$ [S1, unofficial].
+   - Retrieve the current weight $w_{old}$ and TSDF value $T_{old}$ from the volume [S1, unofficial].
+   - Retrieve the weight reading $w_{new}$ from the input depth weights map at projected coordinates [S1, unofficial].
+   - Update the TSDF value using a weighted average:
+     $$ T_{new} = \frac{T_{old} \cdot w_{old} + SDF_{norm} \cdot w_{new}}{w_{old} + w_{new}} $$
+   - Update the volume weight attribute:
+     $$ w_{new\_total} = \min(max\_weight, w_{old} + w_{new}) $$
+   - Retrieve color readings from the input color image at projected coordinates [S1, unofficial].
+   - Update the volume color attribute using a weighted average of the existing color and the new color reading [S1, unofficial].
+   
+   e. **Integration:**
+   - Alternatively, if using the high-level API, call `volume.integrate(rgbd, intrinsic=K, extrinsic=T)` which performs the above steps internally [S2][S4, unofficial].
+
+3. **Mesh Extraction:**
+   - Extract the triangle mesh from the volume using `volume.extract_triangle_mesh()` [S2][S4, unofficial].
+   - If **progressive mode** is enabled, call `extract_mesh_progressive` with `init_lv` (default 8) and `final_lv` (default 10) [S3, unofficial].
+   - If **non-progressive mode** is disabled, call `extract_mesh` with `final_lv` [S3, unofficial].
+   - Octree levels strictly greater than `outside_level + final_lv` are clamped [S3, unofficial].
+
+**Pseudocode:**
+
+> **Unverified code.** The code below did not pass a test run against a reference implementation, or no test fits it, so it may contain errors.
+
+```python
+import numpy as np
+
+def tsdf_fusion_mesh_extraction(rgb_images, depth_maps, intrinsics, extrinsics,
+                                voxel_size=0.004, sdf_trunc=0.02, depth_trunc=3.0,
+                                depth_scale=1.0, alpha_thres=0.5, max_weight=np.inf):
+    """
+    Extract mesh from TSDF volume integrated from RGB-D images.
+    
+    Args:
+        rgb_images: List of HxWx3 uint8 arrays (0-255).
+        depth_maps: List of HxW float arrays (raw sensor units).
+        intrinsics: List of 3x3 numpy arrays.
+        extrinsics: List of 4x4 numpy arrays (world to camera).
+        voxel_size: Size of each voxel in meters.
+        sdf_trunc: Truncation distance in meters.
+        depth_trunc: Maximum depth for integration in meters.
+        depth_scale: Scale factor to convert raw depth to meters.
+        alpha_thres: Threshold for background masking.
+        max_weight: Maximum weight for fusion.
+        
+    Returns:
+        o3d.geometry.TriangleMesh
+    """
+    # 1. Initialize Scalable TSDF Volume
+    # Using RGB8 for color storage
+    volume = o3d.pipelines.integration.ScalableTSDFVolume(
+        voxel_length=voxel_size,
+        sdf_trunc=sdf_trunc,
+        color_type=o3d.pipelines.integration.TSDFVolumeColorType.RGB8
+    )
+    
+    # 2. Iterate through viewpoints
+    for i in range(len(rgb_images)):
+        rgb = rgb_images[i]
+        depth = depth_maps[i]
+        K = intrinsics[i]
+        T_cam = extrinsics[i]
+        
+        # 2a. Preprocessing: Background Masking
+        # Apply alpha mask if available
+        if 'alpha_mask' in locals():
+            depth[alpha_mask < alpha_thres] = 0.0
+            
+        # 2b. Create RGBD Image
+        # Clip RGB to [0,1], scale to 255, cast to uint8
+        rgb_uint8 = np.clip(rgb, 0, 255).astype(np.uint8)
+        
+        # Create Open3D RGBDImage
+        # depth_scale=1.0 is passed to the creator, but we scale depth here if needed
+        # The source uses depth_scale=1.0 in create_from_color_and_depth, 
+        # implying depth is already in meters or scaled externally.
+        # We assume depth is in meters for the API call.
+        depth_meters = depth * depth_scale
+        
+        rgbd = o3d.geometry.RGBDImage.create_from_color_and_depth(
+            o3d.geometry.Image(rgb_uint8),
+            o3d.geometry.Image(depth_meters.astype(np.float32)),
+            depth_trunc=depth_trunc,
+            depth_scale=1.0 # Already scaled
+        )
+        
+        # 2c. Convert Camera to Open3D Format
+        cam_o3d = o3d.camera.PinholeCameraIntrinsic()
+        cam_o3d.set_intrinsics(K.shape[1], K.shape[0], K[0,0], K[1,1], K[0,2], K[1,2])
+        
+        # Extrinsic is world-to-camera
+        cam_o3d.extrinsic = T_cam
+        
+        # 2d. Integrate
+        volume.integrate(rgbd, cam_o3d.intrinsic, cam_o3d.extrinsic)
+        
+    # 3. Extract Mesh
+    mesh = volume.extract_triangle_mesh()
+    
+    return mesh
+```
+
+**Edge cases and pitfalls:**
+- Points outside predefined AABB bounds are masked out before integration [S5, unofficial].
+- Depth values exceeding `max_depth` are clamped to zero [S5, unofficial].
+- Angle-based depth filtering masks pixels where the angle between view direction and depth normal exceeds 80 degrees [S5, unofficial].
+- In non-progressive mode, octree levels strictly greater than `outside_level + final_lv` are clamped, indicated by the suffix `>>> Level clamped <<<` [S6, unofficial].
+- In progressive mode, the initial extraction level is marked with `>>> Init level <<<` when `lv == outside_level + args.init_lv` [S6, unofficial].
+
+## Subtopics
+
+### [TSDF Reconstruction from Depth Maps](9982-tsdf-reconstruction-from-depth-maps.md)
+TSDF Reconstruction from Depth Maps is a method to reconstruct a 3D mesh from multi-view depth images by integrating them into a Truncated Signed Distance Function (TSDF) volume and extracting the surface via marching cubes. It converts per-surfel depth outputs into a unified 3D mesh by computing a robust depth value per pixel and fusing the resulting depth maps via TSDF. It differs from direct neural rendering mesh extraction by relying on explicit geometric fusion rather than differentiable surface optimization.
+
+### [TSDF Volume Integration with Uncertainty Weighting](15425-tsdf-volume-integration-with-uncertainty-weighting.md)
+This method fuses depth maps into a Truncated Signed Distance Function (TSDF) volume by weighting each pixel's contribution based on its depth uncertainty (inverse standard deviation), rather than using uniform weights. It solves the problem of noisy depth measurements degrading reconstruction quality in SLAM pipelines by down-weighting unreliable measurements. It differs from standard TSDF fusion (e.g., [TSDF Reconstruction from Depth Maps](9982-tsdf-reconstruction-from-depth-maps.md)) by incorporating per-pixel confidence metrics derived from the depth estimator's covariance, allowing for robust integration in the presence of sensor noise or estimation errors.
+
+### [GPU TSDF Fusion with Voxel Hashing](20834-gpu-tsdf-fusion-with-voxel-hashing.md)
+This method performs Truncated Signed Distance Function (TSDF) fusion using voxel hashing for sparse memory allocation, free-space carving to remove artifacts, and multi-resolution voxel levels based on distance from the camera. It is implemented as the `tsdf` option for `reconstructDenseGpu` in the typeshade/typecv library. It is significantly faster than pixel fusion but yields lower reconstruction accuracy.
+
+### SDF and RGB Fusion (Fuser)
+A variant that fuses SDF and RGB data using specific parameters.
+- **Parameters:**
+  - `xyz`: Input coordinates, set to `voxel_model.grid_pts_xyz` [S6, unofficial].
+  - `bandwidth`: Set to 20 times the minimum voxel size: `voxel_model.vox_size.min().item() * 20` [S6, unofficial].
+  - `use_trunc`: Boolean flag, set to `True` for truncation [S6, unofficial].
+  - `fuse_tsdf`: Boolean flag, set to `True` to fuse Truncated SDF [S6, unofficial].
+- **Pitfall:**
+  - An alternative bandwidth calculation is commented out in the source, which would use the maximum voxel size repeated 8 times per voxel key, multiplied by 3 [S6, unofficial].
+
+### Point Cloud Rendering and VDB Fusion
+- **Steps:**
+  - Initialize VDBVolume with `voxel_size=0.01`, `sdf_trunc=0.04`, `space_carving=False` [S9, unofficial].
+  - Compute invalid mask where `rendered_final_opacity < 0.5`; zero out rendering and depth values at invalid pixels [S9, unofficial].
+  - Convert rendered depth to 3D points in world coordinates: `rendered_pcd_world = camera.depth2point(rendered_depth, coordinate='world')`; filter by `~invalid_mask` [S9, unofficial].
+  - Integrate point cloud into VDB volume using `cam_center` (inverse extrinsics[:3,3]) as extrinsic parameter [S9, unofficial].
+- **Parameters:**
+  - `voxel_size`: VDB voxel resolution, default 0.01 [S9, unofficial].
+  - `sdf_trunc`: SDF truncation distance for VDB integration, default 0.04 [S9, unofficial].
+  - `min_weight`: Minimum weight threshold for mesh extraction, default 5 [S9, unofficial].
+
+### Height-field Initialization and Continuity Refinement
+- **Definition:**
+  - A continuity loss $\mathcal{L}_{\text{trans}}$ coordinates overlapping neighboring charts to prevent cracks or abrupt normal changes by penalizing position/tangent mismatch, preserving TSDF-fitted heights, and suppressing oscillation [S3, unofficial].
+  - $\mathcal{L}_{\text{cont}}$ penalizes world-space position and tangent mismatch at paired overlap samples between neighboring charts [S3, unofficial].
+  - $\mathcal{L}_{\text{pres}}$ retains the TSDF-fitted heights and gradients to prevent drift from the multi-view TSDF [S3, unofficial].
+  - $\mathcal{L}_{\text{curv}}$ suppresses oscillation (ripples) in the fitting of correspondences [S3, unofficial].
+- **Steps:**
+  - Initialize height coefficients by expressing nearby TSDF zero-level samples in the patch's tangent frame and fitting the height coefficients to their signed offsets from the tangent plane [S3, unofficial].
+  - Transfer color and opacity from nearby Stage II Gaussians to the new patch, then discard the volumetric Gaussians [S3, unofficial].
+
+## Operating characteristics
+- **Time Complexity:** Linear with respect to the number of voxels in the active frustum blocks and the number of viewpoints [S1, unofficial].
+- **Memory Complexity:** Proportional to the number of active voxels; `ScalableTSDFVolume` uses a sparse representation (octree/hashmap) to manage memory efficiently [S1, unofficial].
+- **Performance:** Depends heavily on `voxel_size` and scene scale; smaller `voxel_size` increases resolution but significantly increases memory and computation time [S2].
+- **Strengths:** Produces watertight meshes via marching cubes [S2].
+- **Limitations:** Sensitive to `sdf_trunc` and `voxel_size` selection; progressive extraction adds complexity [S3, unofficial].
+- **When to use:** When explicit geometric fusion from RGB-D data is required, especially in SLAM or multi-view reconstruction pipelines [S1, unofficial].
+- **When not to use:** Not given in the sources.
+
+## Background
+The method originates from the integration of Truncated Signed Distance Functions (TSDF) for 3D reconstruction, popularized by methods like KinectFusion and later adapted for sparse voxel representations in modern neural rendering pipelines [S1, unofficial][S2]. It is widely used in SLAM systems and 3D Gaussian Splatting post-processing for mesh extraction [S1, unofficial][S2].
+
+## Sources
+[S1] ToniRV/NeRF-SLAM, https://github.com/ToniRV/NeRF-SLAM, fetched 2026-10-26 (unofficial)
+[S2] Multi-View Reconstruction Using Signed Ray Distance Functions (SRDF), https://doi.org/10.1109/cvpr52729.2023.01602, fetched 2026-10-26
+[S3] H-2DGS: Height-Field Gaussian Splatting for Sharp and Deformable Neurosurgical Surface Reconstruction, https://arxiv.org/abs/2610.30910, fetched 2026-10-26 (unofficial)
+[S4] hbb1/2d-gaussian-splatting, https://github.com/hbb1/2d-gaussian-splatting, fetched 2026-10-27 (unofficial)
+[S5] zju3dv/PGSR, https://github.com/zju3dv/PGSR, fetched 2026-10-27 (unofficial)
+[S6] leonhardrobin/svraster-win10, https://github.com/leonhardrobin/svraster-win10, fetched 2026-10-27 (unofficial)
+[S7] Zhaoyibinn/VGVGGT, https://github.com/Zhaoyibinn/VGVGGT, fetched 2026-10-27 (unofficial)
+[S8] PG-SAG: Parallel Gaussian Splatting for Fine-Grained Large-Scale Urban Buildings Reconstruction via Semantic-Aware Grouping, https://doi.org/10.1007/s41064-025-00343-0, fetched 2026-10-29
+[S9] GAP-LAB-CUHK-SZ/gaustudio, https://github.com/GAP-LAB-CUHK-SZ/gaustudio, fetched 2026-10-26 (unofficial)

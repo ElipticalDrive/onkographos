@@ -1,0 +1,135 @@
+# Training Loss Computation
+
+Also called: Composite Training Loss with Regularization, Total Training Loss
+
+## Overview
+This method computes the scalar training loss $\mathcal{L}$ for differentiable volume rendering by combining a photometric image reconstruction term with auxiliary regularization losses [S2]. It solves the optimization problem by penalizing deviations between the rendered color $\hat{\mathbf{C}}(\mathbf{r})$ and the ground-truth image $\mathbf{C}(\mathbf{r})$, while enforcing smoothness on material properties (albedo/BRDF) and spatial coherence on light sources [S1, unofficial]. It is distinguished from sibling methods by its specific inclusion of Total Variation (TV) penalties for light sources and jitter-based smoothness losses for albedo/BRDF, in addition to the standard composite image loss [S1, 9355-composite-photometric-and-regularization-loss.md, unofficial].
+
+## How it works
+**Inputs:**
+*   Rendered color image $\hat{\mathbf{C}}(\mathbf{r})$ and ground-truth image $\mathbf{C}(\mathbf{r})$ [S2].
+*   Predicted albedo and BRDF fields [S1, unofficial].
+*   Predicted light source field [S1, unofficial].
+*   Hit mask (intersection mask) [S1, unofficial].
+*   Hyperparameters: `albedo_smooth_weight`, `brdf_smooth_weight`, `light_tv_weight`, `light_achro_weight`, `mask_volume_clipped` [S1, unofficial].
+
+**Outputs:**
+*   Scalar total loss $\mathcal{L}$ [S2].
+
+**Data Structures:**
+*   Images and fields are represented as tensors of shape $(H, W, C)$ or $(H, W)$ depending on the channel dimension [S1, unofficial].
+*   The hit mask is a binary or continuous tensor indicating valid rays [S1, unofficial].
+
+**Steps:**
+1.  **Image Reconstruction Loss:** Compute the Mean Squared Error (MSE) between the rendered RGB $\hat{\mathbf{C}}$ and target RGB $\mathbf{C}$, masked by the hit mask [S1, unofficial]. The mask is clamped to $[1e-3, 1-1e-3]$ to prevent exploding gradients when the predicted mask is close to 1 but the ground truth is 0 [S1, unofficial]. Let this term be $\mathcal{L}_{img}$ [S1, unofficial].
+2.  **Albedo/BRDF Smoothness Loss:** If noise is enabled, compute the smoothness loss $\mathcal{L}^s$ (for albedo) and $\mathcal{L}^d$ (for BRDF) using L1 or MSE between the original and jittered versions of the albedo/BRDF fields, weighted by `albedo_smooth_weight` and `brdf_smooth_weight` respectively [S1, unofficial].
+3.  **Light Source Total Variation (TV):** If `light_tv_weight > 0`, compute the spatial TV penalty for the light source. This is the sum of squared differences in the x and y directions [S1, unofficial].
+4.  **Light Source Achromatic TV:** If `light_achro_weight > 0`, compute the cross-channel TV penalty for the light source. This is the sum of squared differences in the channel direction [S1, unofficial].
+5.  **Aggregation:** Average the image loss and apply training loss scale factors to all loss terms to compute the final total loss $\mathcal{L}$ [S1, unofficial].
+
+**Formula:**
+The total training loss is defined as [S2]:
+$$
+\mathcal{L} = \left \| \hat{\mathbf{C}}(\mathbf{r}) - \mathbf{C}(\mathbf{r}) \right \|\_2^2 + \mathcal{L}^s + \mathcal{L}^d
+$$
+Where $\mathcal{L}^s$ and $\mathcal{L}^d$ encompass the smoothness and TV regularization terms described in steps 2-4 [S1, unofficial][S2].
+
+**Pseudocode:**
+> **Unverified code.** The code below did not pass a test run against a reference implementation, or no test fits it, so it may contain errors.
+
+```python
+def compute_training_loss(rendered_color, gt_color, hit_mask, 
+                          albedo, brdf, light_source, 
+                          albedo_smooth_weight, brdf_smooth_weight, 
+                          light_tv_weight, light_achro_weight, 
+                          mask_volume_clipped=1e-3):
+    # Step 1: Image Reconstruction Loss
+    # Clamp mask to prevent exploding gradients
+    clamped_mask = torch.clamp(hit_mask, min=mask_volume_clipped, max=1.0 - mask_volume_clipped)
+    
+    # MSE between rendered and GT, masked
+    # Note: Sources specify MSE [S1, unofficial], but formula uses L2 norm squared [S2]. 
+    # MSE is equivalent to mean of L2 squared.
+    img_loss = torch.mean(clamped_mask * (rendered_color - gt_color)**2)
+    
+    # Step 2: Albedo/BRDF Smoothness Loss
+    # Assuming jittered versions are generated externally or via a helper
+    # If noise is enabled
+    albedo_smooth_loss = 0.0
+    brdf_smooth_loss = 0.0
+    
+    # Placeholder for jittered versions if noise is enabled
+    # In practice, this requires a noise injection step before loss computation
+    if noise_enabled:
+        albedo_jittered = apply_jitter(albedo)
+        brdf_jittered = apply_jitter(brdf)
+        
+        # L1 or MSE between original and jittered
+        albedo_smooth_loss = torch.mean(torch.abs(albedo - albedo_jittered))
+        brdf_smooth_loss = torch.mean(torch.abs(brdf - brdf_jittered))
+        
+    smooth_loss = albedo_smooth_weight * albedo_smooth_loss + brdf_smooth_weight * brdf_smooth_loss
+    
+    # Step 3: Light Source Spatial TV
+    light_tv_loss = 0.0
+    if light_tv_weight > 0:
+        # Sum of squared differences in x and y directions
+        # Assuming light_source is a tensor [H, W, C] or [H, W]
+        dx = light_source[:, 1:, :] - light_source[:, :-1, :]
+        dy = light_source[1:, :, :] - light_source[:-1, :, :]
+        light_tv_loss = torch.mean(dx**2) + torch.mean(dy**2)
+        
+    # Step 4: Light Source Achromatic TV
+    light_achro_loss = 0.0
+    if light_achro_weight > 0:
+        # Sum of squared differences in channel direction
+        # Assuming channels are the last dimension
+        dc = light_source[:, :, 1:] - light_source[:, :, :-1]
+        light_achro_loss = torch.mean(dc**2)
+        
+    # Step 5: Aggregation
+    # Apply scale factors (not specified in sources, assumed to be 1.0 or handled externally)
+    total_loss = img_loss + smooth_loss + light_tv_weight * light_tv_loss + light_achro_weight * light_achro_loss
+    
+    return total_loss
+```
+
+**Parameters:**
+*   `mask_volume_clipped`: Default $1e-3$. Clamps the intersection mask to $[1e-3, 1-1e-3]$ [S1, unofficial].
+*   `albedo_smooth_weight`, `brdf_smooth_weight`: Weights for smoothness losses [S1, unofficial].
+*   `light_tv_weight`: Weight for spatial TV of light source [S1, unofficial].
+*   `light_achro_weight`: Weight for achromatic TV of light source [S1, unofficial].
+
+**Edge Cases and Pitfalls:**
+*   **Exploding Gradients:** If the hit mask is 0 or 1, gradients can explode. The mask must be clamped [S1, unofficial].
+*   **Noise Enablement:** Smoothness losses are only calculated if noise is enabled [S1, unofficial].
+*   **Light Source Dimensions:** TV calculations assume specific tensor layouts (spatial vs channel dimensions). Incorrect axis selection leads to wrong penalties [S1, unofficial].
+
+## Subtopics
+
+### [Composite Image Loss with Visibility Weighting](4262-composite-image-loss-with-visibility-weighting.md)
+Uses visibility weighting for image loss. Choose when visibility estimation is critical.
+
+### [Composite Photometric and Regularization Loss](9355-composite-photometric-and-regularization-loss.md)
+General composite loss with regularization. Choose for standard NeRF-like optimization.
+
+### [Composite RGB and Entropy Loss](9360-composite-rgb-and-entropy-loss.md)
+Includes entropy loss. Choose when diversity or uncertainty modeling is needed.
+
+### [Reconstruction Losses](16245-reconstruction-losses.md)
+Focuses on reconstruction metrics. Choose for evaluation or specific reconstruction tasks.
+
+## Operating characteristics
+*   **Time Complexity:** Dominated by the rendering pass and the element-wise loss computations. TV and smoothness losses are $O(HW)$ [S1, unofficial].
+*   **Memory Complexity:** Requires storing intermediate tensors for gradients and loss terms. The mask clamping adds negligible overhead [S1, unofficial].
+*   **Strengths:** Explicitly regularizes light sources and material properties, which can improve stability in dynamic scenes [S1, unofficial][S2].
+*   **Limitations:** Requires careful tuning of multiple weights (`albedo_smooth_weight`, etc.) [S1, unofficial]. The jitter-based smoothness loss requires noise injection [S1, unofficial].
+*   **When to Use:** When optimizing dynamic radiance fields with explicit light source and material parameterization [S1, unofficial][S2].
+*   **When Not to Use:** For simple static NeRFs without explicit light/material decomposition, simpler losses may suffice.
+
+## Background
+Originated in the context of Robust Dynamic Radiance Fields [S2] and L-Tracing [S1, unofficial]. The method combines photometric fidelity with structural regularization to handle dynamic scenes and explicit light estimation [S1, unofficial][S2]. It is used in differentiable rendering pipelines for dynamic scene reconstruction [S1, unofficial][S2].
+
+## Sources
+[S1] ziyc/L-Tracing, https://github.com/ziyc/L-Tracing, fetched 2026-10-26 (unofficial)
+[S2] Robust Dynamic Radiance Fields, https://doi.org/10.1109/cvpr52729.2023.00010, fetched 2026-10-26

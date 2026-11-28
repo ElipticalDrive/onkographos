@@ -1,0 +1,113 @@
+# Pose-Aware Projection (PAP)
+
+Also called: Pose-Aware Projection at selected voxels
+
+## Overview
+Pose-Aware Projection (PAP) is a feature aggregation technique used in differentiable volume rendering to extract multi-view contextual information for specific 3D locations (voxels or skeletal Gaussians) by projecting their positions onto 2D feature maps from multiple camera views [S1, unofficial]. It solves the problem of ambiguous feature assignment inherent in global backprojection methods, which ignore actual surface geometry and assume features map reliably to voxel centers via camera rays, leading to errors in occluded or background regions [S1, unofficial]. What sets PAP apart from its parent [Epipolar 3D Gaussian Splatting](6070-epipolar-3d-gaussian-splatting.md) is its focus on aggregating features based on camera distance for *selected* skeletal primitives rather than generalizing features via an epipolar transformer for all pixels [S1, unofficial]. It differs from its sibling [Geometry Aware Feature Extraction](10791-geometry-aware-feature-extraction.md) by using explicit inverse-distance weighting of projected features rather than cross-view attention guided by geometric constraints [S1, unofficial].
+
+## How it works
+**Inputs:**
+1. A set of selected skeletal Gaussian positions $\{\mu^{\text{crs}}_{h,w,d} : (h, w, d) \in \mathcal{I}\}$, where $\mathcal{I}$ is the index set of selected voxels/primitives [S1, unofficial].
+2. A set of $N$ pose-aware 2D feature maps $\{f_n : n = 1, \dots, N\}$, obtained from a coarse stage, corresponding to $N$ input camera views [S1, unofficial].
+
+**Outputs:**
+1. A set of PAP-derived feature volumes $\{\bar{v}_{(h,w,d),n} : (h, w, d) \in \mathcal{I}\}$ for each view $n$, containing features sampled at the projected locations [S1, unofficial].
+2. A final aggregated feature volume $\hat{v}_{h,w,d}$ for each selected voxel/primitive [S1, unofficial].
+
+**Data Structures:**
+* $\mu^{\text{crs}}_{h,w,d}$: 3D position vector $(x, y, z)$ of the skeletal Gaussian at voxel indices $(h, w, d)$ [S1, unofficial].
+* $f_n$: 2D feature map for view $n$, a tensor of shape $(H_n, W_n, C)$, where $H_n, W_n$ are height/width and $C$ is channel depth [G].
+* $\bar{v}_{(h,w,d),n}$: Feature vector of size $C$ for voxel $(h,w,d)$ from view $n$ [S1, unofficial].
+* $\hat{v}_{h,w,d}$: Final aggregated feature vector of size $C$ [S1, unofficial].
+
+**Steps:**
+1. **Projection & Sampling:** For each selected skeletal Gaussian position $\mu^{\text{crs}}_{h,w,d}$ and for each view $n \in \{1, \dots, N\}$:
+    a. Project the 3D position $\mu^{\text{crs}}_{h,w,d}$ onto the 2D image plane of view $n$ using standard camera projection [G]. Let the resulting 2D coordinates be $(u_n, v_n)$ [G].
+    b. Sample the feature map $f_n$ at coordinates $(u_n, v_n)$ using bilinear interpolation [G]. Let the sampled feature be $\bar{v}_{(h,w,d),n}$ [G].
+2. **Distance Calculation:** For each selected voxel $(h,w,d)$ and each view $n$, calculate the Euclidean distance $z_{(h,w,d),n}$ between the skeletal Gaussian position $\mu^{\text{crs}}_{h,w,d}$ and the camera position of view $n$ [S1, unofficial].
+3. **Aggregation:** For each selected voxel $(h,w,d)$, aggregate the PAP-derived features $\bar{v}_{(h,w,d),n}$ from all $N$ views using inverse distance weighting:
+    $$
+    \hat{v}_{h,w,d} = \frac{\sum_{n=1}^N z_{(h,w,d),n}^{-1} \cdot \bar{v}_{(h,w,d),n}}{\sum_{n'=1}^N z_{(h,w,d),n'}^{-1}}
+    $$
+    where $z_{(h,w,d),n}$ is the distance between $\mu^{\text{crs}}_{h,w,d}$ and the $n$-th view camera position [S1, unofficial].
+
+**Parameters:**
+* $N$: Number of input camera views used for projection and aggregation [S1, unofficial]. Typical value: Not given in the sources. [G]
+
+**Edge Cases and Pitfalls:**
+* **Out-of-bounds projection:** If the projected 2D coordinates $(u_n, v_n)$ fall outside the image boundaries of $f_n$, sampling is undefined. Implementation must handle this, e.g., by clamping or using a default value [G].
+* **Zero distance:** If $z_{(h,w,d),n} = 0$ (camera at the same position as the Gaussian), the inverse distance becomes undefined. This is unlikely in practice but should be guarded against [G].
+* **Occlusion:** PAP assumes that projecting to the 2D feature map provides relevant context. In occluded regions, the projected feature might come from a different surface, leading to ambiguity. PAP mitigates this by focusing on *selected* voxels likely to belong to the object, but residual errors may persist [G].
+
+**Pseudocode:**
+> **Unverified code.** The code below did not pass a test run against a reference implementation, or no test fits it, so it may contain errors.
+
+```python
+def pose_aware_projection(skeletal_gaussians, feature_maps, camera_positions, N):
+    """
+    skeletal_gaussians: dict mapping (h, w, d) to 3D position tuple (x, y, z)
+    feature_maps: list of N 2D arrays of shape (H_n, W_n, C)
+    camera_positions: list of N 3D position tuples (cx, cy, cz)
+    N: int
+    Returns: dict mapping (h, w, d) to aggregated feature vector
+    """
+    C = feature_maps[0].shape[-1]
+    aggregated = {}
+    for (h, w, d), mu in skeletal_gaussians.items():
+        weighted_sum = [0.0] * C
+        inv_dist_sum = 0.0
+        for n in range(N):
+            u, v = project_2d(mu, feature_maps[n].shape)
+            v_bar = sample_2d(feature_maps[n], u, v)
+            cam = camera_positions[n]
+            dx, dy, dz = mu[0] - cam[0], mu[1] - cam[1], mu[2] - cam[2]
+            z = (dx*dx + dy*dy + dz*dz)**0.5
+            if z == 0.0:
+                continue
+            inv_z = 1.0 / z
+            for c in range(C):
+                weighted_sum[c] += inv_z * v_bar[c]
+            inv_dist_sum += inv_z
+        if inv_dist_sum > 0.0:
+            for c in range(C):
+                weighted_sum[c] /= inv_dist_sum
+        else:
+            weighted_sum = [0.0] * C
+        aggregated[(h, w, d)] = weighted_sum
+    return aggregated
+
+def project_2d(pos, shape):
+    # Standard pinhole projection assumed [G]
+    return pos[0] / pos[2], pos[1] / pos[2]
+
+def sample_2d(map_2d, u, v):
+    # Bilinear interpolation assumed [G]
+    h, w, c = map_2d.shape
+    u = max(0, min(w - 1, u))
+    v = max(0, min(h - 1, v))
+    return map_2d[int(v), int(u)]
+```
+
+## Subtopics
+
+### [Geometry Aware Feature Extraction](10791-geometry-aware-feature-extraction.md)
+Enhances source view features using cross-view attention and geometric constraints (ray projection) to resolve ambiguous feature assignment. It builds on PAP by providing geometrically enhanced features for robust generalization in synthetic-to-real scenarios.
+
+### [3D Alignment via Reprojection](11791-3d-alignment-via-reprojection.md)
+Aligns features from neighboring training views with a novel rendered view by explicitly reprojecting 3D coordinates into the novel view and validating via depth-based visibility testing. It differs from PAP by relying on explicit geometric reprojection rather than implicit geometric awareness via distance weighting.
+
+## Operating characteristics
+**Time Complexity:** Not given in the sources. [G]
+**Memory Complexity:** Not given in the sources. [G]
+**Measured Performance:** Not given in the sources. [G]
+**Scaling:** Not given in the sources. [G]
+**Strengths:** Resolves ambiguous feature assignment from global backprojection by aligning selected 3D skeletal primitives with 2D feature maps from different camera views, allowing association with rich, pose-aligned features for accurate fine-grained rendering [S1, unofficial].
+**Limitations:** Still relies on the assumption that 2D features can be reliably mapped to the selected 3D position via projection, which may be inaccurate in highly occluded or textureless regions [S1, unofficial].
+**When to use:** Not given in the sources. [G]
+**When not to use:** Not given in the sources. [G]
+
+## Background
+Pose-Aware Projection (PAP) was introduced in the paper "VS-Splat: Voxel-Selective feed-forward Gaussian Splatting for end-to-end 3D object reconstruction from sparse-views" [S1, unofficial]. It is part of the fine stage of the VS-Splat method, following the coarse stage and voxel selection [S1, unofficial]. The method was developed to address limitations of global backprojection in voxel-based feature volumes, specifically the discarding of sub-voxel geometric precision and ambiguous feature assignment in occluded regions [S1, unofficial].
+
+## Sources
+[S1] VS-Splat: Voxel-Selective feed-forward Gaussian Splatting for end-to-end 3D object reconstruction from sparse-views, https://doi.org/10.48550/arxiv.2609.12343, fetched 2026-10-26 (unofficial)

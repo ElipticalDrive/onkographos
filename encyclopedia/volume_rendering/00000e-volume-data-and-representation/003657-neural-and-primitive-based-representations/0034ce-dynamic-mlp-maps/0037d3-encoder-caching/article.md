@@ -1,0 +1,115 @@
+# Encoder Caching
+
+Also called: Latent Vector Pre-computation, Encoder Discarding
+
+## Overview
+Encoder Caching is an acceleration strategy for Dynamic MLP Maps where the spatial encoder network is discarded after training, and latent vectors are pre-computed and stored for each frame [S1]. This eliminates the inference time of the encoder during rendering, making the approach significantly faster than methods like DyNeRF that evaluate the encoder at runtime [S1]. It sets itself apart from siblings like [Dynamic MLP Maps with Hash Encoding](7378-dynamic-mlp-maps-with-hash-encoding.md) by relying on pre-computed dense latent codes rather than on-the-fly hash-based feature extraction.
+
+## How it works
+**Inputs and Outputs:**
+*   **Input:** A trained spatial encoder network and a sequence of video frames (or their corresponding 3D positions).
+*   **Output:** A set of pre-computed latent vectors, one per frame, stored in memory.
+
+**Data Structures:**
+*   **Latent Vectors:** A list or array of vectors, one for each frame in the volumetric video. The size depends on the encoder's output dimension. For a 300-frame video, the storage cost for these latent vectors is 300 KB [S1].
+
+**Steps:**
+1.  **Training Phase:** Train the spatial encoder network to map 3D positions to latent features for each frame [S1].
+2.  **Pre-computation:** After training, use the trained encoder to compute the latent vector for each video frame [S1].
+3.  **Storage:** Store the resulting latent vectors in memory [S1].
+4.  **Discarding:** Discard the encoder network from memory [S1].
+5.  **Rendering:** During rendering, retrieve the pre-computed latent vector for the current frame and pass it to the decoder (e.g., the MLP maps decoder) [S1].
+
+**Parameters:**
+*   Not given in the sources.
+
+**Edge Cases and Pitfalls:**
+*   **Memory vs. Speed Trade-off:** Storing latent vectors increases memory usage but reduces rendering time [S1]. The sources note that for 300 frames, the latent vector storage is 300 KB, which is negligible compared to other components like MLP maps (103 MB) and hash tables (131 MB) [S1].
+*   **Encoder Accuracy:** The quality of the pre-computed latent vectors depends on the accuracy of the trained encoder. Any errors in the encoder during training will be permanently stored in the latent vectors [S1].
+
+**Pseudocode:**
+> **Unverified code.** The code below did not pass a test run against a reference implementation, or no test fits it, so it may contain errors.
+
+```python
+# Pseudocode for Encoder Caching
+
+class EncoderCache:
+    def __init__(self, num_frames, encoder):
+        """
+        Initialize the encoder cache.
+        
+        Args:
+            num_frames (int): Number of frames in the volumetric video.
+            encoder (nn.Module): The trained spatial encoder network.
+        """
+        self.num_frames = num_frames
+        self.encoder = encoder
+        self.latent_vectors = [None] * num_frames
+        
+    def pre_compute_latents(self, positions_per_frame):
+        """
+        Pre-compute latent vectors for all frames.
+        
+        Args:
+            positions_per_frame (list of np.ndarray): List of 3D positions for each frame.
+        """
+        self.encoder.eval() # Set encoder to evaluation mode
+        with torch.no_grad():
+            for i, positions in enumerate(positions_per_frame):
+                # Compute latent vector for frame i
+                latent_vector = self.encoder(positions)
+                self.latent_vectors[i] = latent_vector.detach().cpu().numpy()
+        
+    def get_latent_vector(self, frame_index):
+        """
+        Retrieve the pre-computed latent vector for a given frame.
+        
+        Args:
+            frame_index (int): Index of the frame.
+            
+        Returns:
+            np.ndarray: The pre-computed latent vector.
+        """
+        return self.latent_vectors[frame_index]
+
+# Usage example
+# encoder = build_encoder()
+# encoder = train_encoder(encoder, training_data)
+# cache = EncoderCache(num_frames=300, encoder=encoder)
+# cache.pre_compute_latents(positions_per_frame)
+# del encoder # Discard encoder
+# latent = cache.get_latent_vector(frame_index=0)
+```
+
+## Subtopics
+
+### LocalMap Decoder Architecture
+The LocalMap Decoder Architecture is a variant where the decoder MLP is constructed based on the encoder output dimension. The decoder consists of an input linear layer mapping the encoder output dimension to a hidden dimension, followed by ReLU. Then, a loop adds a specified number of hidden layers, each with a linear layer and ReLU [S2, unofficial]. The structural dimension constant is set to 2, and the decoder implementation switch (value 0) selects this standard MLP configuration [S2, unofficial].
+
+## Operating characteristics
+**Time and Memory Complexity:**
+*   **Time:** Rendering time is reduced because the encoder inference is skipped [S1]. The sources state that the approach is "much faster than DyNeRF" [S1].
+*   **Memory:** Storage cost for latent vectors is low (300 KB for 300 frames) [S1]. The encoder network is not stored, saving memory [S1].
+
+**Measured Performance:**
+*   Not given in the sources.
+
+**Scaling:**
+*   Not given in the sources.
+
+**Strengths and Limitations:**
+*   **Strengths:** Significantly faster rendering speed compared to methods that evaluate the encoder at runtime [S1]. Low storage overhead for latent vectors [S1].
+*   **Limitations:** Requires pre-computation step after training [S1]. Memory usage increases with the number of frames, although it is relatively small [S1].
+
+**When to Use:**
+*   Use when rendering speed is critical and the encoder inference time is a bottleneck [S1].
+
+**When Not to Use:**
+*   Use when memory is extremely constrained and pre-computation is not feasible [S1].
+
+## Background
+Encoder Caching was introduced in the paper "Representing Volumetric Videos as Dynamic MLP Maps" [S1]. It is part of the Dynamic MLP Maps framework, which models each frame's radiance field as a set of shallow MLP networks [S1]. The method aims to improve rendering speed by reducing the number of network queries and discarding the encoder after training [S1].
+
+## Sources
+[S1] Representing Volumetric Videos as Dynamic MLP Maps, https://arxiv.org/abs/2304.06717, fetched 2026-10-29
+[S2] hku-mars/GS-SDF, https://github.com/hku-mars/GS-SDF, fetched 2026-10-27 (unofficial)

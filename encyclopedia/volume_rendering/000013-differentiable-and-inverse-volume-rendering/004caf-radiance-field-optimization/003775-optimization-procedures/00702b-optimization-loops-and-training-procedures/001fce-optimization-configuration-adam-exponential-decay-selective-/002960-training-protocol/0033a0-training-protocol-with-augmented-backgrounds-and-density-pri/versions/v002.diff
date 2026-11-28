@@ -1,0 +1,136 @@
+--- v001.md
++++ v002.md
+@@ -4,39 +4,33 @@
+ 
+ ## Overview
+-This protocol defines a specific training schedule for differentiable volume rendering that combines background augmentation with density regularization to suppress floating artifacts and stabilize convergence [S1, S2]. It addresses the instability of immediate background augmentation and the emergence of scene-matching floaters by enforcing a strict temporal sequence: constant-color initialization, followed by augmented backgrounds, and finally density priors [S1, S2]. It differs from standard training by explicitly decoupling the learning of general scene structure from the refinement of density bias and object compactness [S1, S2].
++This protocol defines a training schedule for neural volume rendering that combines background augmentation with density regularization to suppress floating artifacts and stabilize convergence [S1, S2]. It addresses the instability of immediate background augmentation and the emergence of scene-matching floaters by enforcing a strict temporal sequence: constant-color initialization, followed by augmented backgrounds, and finally density priors [S1, S2].
+ 
+ ## How it works
+-The method optimizes a neural radiance field (or similar implicit volume representation) using gradient descent. The core innovation lies in the dynamic switching of loss components and background compositing strategies based on the optimization step count.
+-
+ **Inputs and Outputs:**
+-*   **Input:** Neural network parameters (e.g., density $\sigma$ and color $\mathbf{c}$), camera poses, and target images.
+-*   **Output:** Optimized neural network parameters producing artifact-free volume renders.
++*   **Input:** Neural network parameters (density $\sigma$ and color $\mathbf{c}$), camera poses, target images, and optimization step limit [G].
++*   **Output:** Optimized neural network parameters [G].
+ 
+ **Data Structures:**
+-*   **Optimization State:** Current step counter $t$.
+-*   **Background Buffer:** Stores the current background color $\mathbf{b}$ for compositing.
++*   **Step Counter:** Integer $t$ tracking optimization iterations [G].
++*   **Background Color:** Vector $\mathbf{b}$ used for compositing [G].
+ 
+ **Parameters:**
+ *   $\lambda_1 = 2 \cdot 10^{-5}$: Weight for density regularization [S1].
+ *   $\lambda_2 = 8 \cdot 10^{-4}$: Weight for color regularization [S1].
+-*   $T_{bg\_start} = 25$: Step at which background augmentation begins [S1].
+-*   $T_{prior\_start} = 100$: Step at which density prior begins [S1].
++*   $T_{\text{bg}} = 25$: Step threshold to switch from constant gray to augmented backgrounds [S1].
++*   $T_{\text{prior}} = 100$: Step threshold to begin applying density prior [S1].
+ 
+ **Algorithm Steps:**
+-1.  **Initialize** the network parameters.
+-2.  **Loop** for optimization steps $t = 1, 2, \dots$:
+-    3.  **Select Background $\mathbf{b}$:**
+-        *   If $t < T_{bg\_start}$: Set $\mathbf{b}$ to a random shade of gray [S1].
+-        *   If $t \ge T_{bg\_start}$: Sample $\mathbf{b}$ from the background augmentation distribution (e.g., pure white, pure black, or random noise) [S1, S2].
+-    4.  **Render:** Compute the rendered color $\hat{\mathbf{C}}$ by compositing the network's predicted density and color with the selected background $\mathbf{b}$ using standard volume rendering integration [S1, S2].
+-    5.  **Compute Loss:**
+-        *   **Color Loss:** Calculate the difference between $\hat{\mathbf{C}}$ and the target image color $\mathbf{C}_{target}$ [S1].
+-        *   **Density Prior Loss:** If $t \ge T_{prior\_start}$, compute the density regularization term $\mathcal{L}_{density}$ [S1]. This term encourages the volume material to be less transparent (more opaque) for important structures [S1].
+-        *   **Total Loss:** $\mathcal{L} = \lambda_2 \mathcal{L}_{color} + \lambda_1 \mathcal{L}_{density}$ (if $t \ge T_{prior\_start}$), otherwise $\mathcal{L} = \lambda_2 \mathcal{L}_{color}$ [S1].
+-    6.  **Update:** Perform a gradient descent step on the network parameters using $\mathcal{L}$ [S1].
++1. Initialize network parameters and set $t = 1$ [G].
++2. Select background $\mathbf{b}$: if $t < T_{\text{bg}}$, set $\mathbf{b}$ to a random shade of gray; otherwise, sample $\mathbf{b}$ from a distribution containing pure white, pure black, or random noise [S1, S2].
++3. Render the image $\hat{\mathbf{C}}$ by compositing the network's predicted density and color along camera rays against background $\mathbf{b}$ using standard volume rendering integration [G].
++4. Compute the color reconstruction loss $\mathcal{L}_{\text{color}}$ between $\hat{\mathbf{C}}$ and the target image $\mathbf{C}_{\text{target}}$ [G].
++5. Compute the total loss $\mathcal{L}$: if $t < T_{\text{prior}}$, $\mathcal{L} = \lambda_2 \mathcal{L}_{\text{color}}$; if $t \ge T_{\text{prior}}$, $\mathcal{L} = \lambda_2 \mathcal{L}_{\text{color}} + \lambda_1 \mathcal{L}_{\text{density}}$, where $\mathcal{L}_{\text{density}}$ is a regularization term that encourages the volume material to be less transparent for important structures [S1].
++6. Perform a gradient descent update on the network parameters using $\mathcal{L}$ [G].
++7. Increment $t$ and repeat until the step limit is reached [G].
+ 
+ **Pseudocode:**
+ ```python
+-def train_with_augmented_backgrounds_and_density_prior(network, target_images, camera_poses, num_steps):
++def train_with_augmented_backgrounds_and_density_prior(network_params, target_images, camera_poses, num_steps, learning_rate):
+     # Parameters from [S1]
+     lambda_density = 2e-5
+@@ -44,37 +38,43 @@
+     t_bg_start = 25
+     t_prior_start = 100
+-    
++
+     for t in range(1, num_steps + 1):
+         # 1. Select Background [S1]
+         if t < t_bg_start:
+-            # Random shade of gray for stability in early steps
+-            background = random_gray()
++            # Random shade of gray for stability in early steps [S1]
++            background = [random.uniform(0.0, 1.0) for _ in range(3)]
+         else:
+             # Augmented background (e.g., white, black, or noise) [S1, S2]
+-            background = sample_background_augmentation()
+-            
+-        # 2. Render [S1, S2]
+-        # Composite network output with background
+-        rendered_color = volume_render(network, camera_poses, background)
+-        
+-        # 3. Compute Loss [S1]
+-        # Color regularization term
+-        color_loss = compute_color_loss(rendered_color, target_images)
+-        
++            aug_choice = random.choice(['white', 'black', 'noise'])
++            if aug_choice == 'white':
++                background = [1.0, 1.0, 1.0]
++            elif aug_choice == 'black':
++                background = [0.0, 0.0, 0.0]
++            else:
++                background = [random.uniform(0.0, 1.0) for _ in range(3)]
++
++        # 2. Render [G]
++        rendered_color = standard_volume_render(network_params, camera_poses, background)
++
++        # 3. Compute Loss [G]
++        # Standard L2 color reconstruction loss
++        color_loss = sum((r - t) ** 2 for r, t in zip(rendered_color, target_images)) / len(target_images)
+         total_loss = lambda_color * color_loss
+-        
++
+         # 4. Apply Density Prior if step threshold reached [S1]
+         if t >= t_prior_start:
+-            density_loss = compute_density_prior_loss(network)
++            # Density prior encourages materials to be less transparent [S1]
++            density_loss = sum(network_params.density) / len(network_params.density)  # [G] Simplified density regularization
+             total_loss += lambda_density * density_loss
+-            
+-        # 5. Update Network [S1]
+-        gradients = compute_gradients(total_loss, network)
+-        update_network(network, gradients)
++
++        # 5. Update Network [G]
++        gradients = compute_gradients(total_loss, network_params)
++        for param in network_params:
++            param -= learning_rate * gradients[param]
+ ```
+ 
+ **Edge Cases and Pitfalls:**
+-*   **Instability:** Applying background augmentation immediately causes instability in the first few steps of gradient descent [S1]. The gray initialization phase mitigates this.
+-*   **Floaters:** Simply compositing generated objects with the scene background can introduce artifacts that resemble the background (e.g., green floaters in a grass scene) [S2]. The combination of sparsity loss (in variants) and background augmentation (white/black) makes these floaters apparent and removable [S2].
++*   **Instability:** Applying background augmentation immediately causes instability in the first few steps of gradient descent [S1]. Using a constant gray background for the first 25 steps mitigates this [S1].
++*   **Floaters:** Simply compositing generated objects with the scene background introduces artifacts resembling the background, such as green floaters in a tree/grass scene [S2]. Augmenting the background with pure white or black during training makes these floaters apparent, allowing the optimization to suppress them [S2].
+ 
+ ## Subtopics
+@@ -84,10 +84,9 @@
+ 
+ ## Operating characteristics
+-*   **Time Complexity:** The method adds negligible computational overhead per step, as background selection and density prior computation are lightweight compared to volume rendering [S1, S2].
+-*   **Memory Complexity:** No additional significant memory requirements beyond storing the background samples and loss terms [S1, S2].
+ *   **Strengths:** Stabilizes early training by avoiding aggressive background augmentation [S1]. Effectively reduces floating artifacts and "foggy" opacity patterns by making them visible against high-contrast backgrounds (white/black) [S2]. Refines density bias after the general scene structure is established [S1].
+-*   **Limitations:** Requires careful tuning of step thresholds ($T_{bg\_start}$, $T_{prior\_start}$) and regularization weights ($\lambda_1, \lambda_2$) [S1]. The density prior may over-regularize if applied too early, preventing the scene from being well-represented [S1].
++*   **Limitations:** Requires careful tuning of step thresholds ($T_{\text{bg}}$, $T_{\text{prior}}$) and regularization weights ($\lambda_1, \lambda_2$) [S1]. The density prior may over-regularize if applied too early, preventing the scene from being well-represented [S1].
+ *   **When to Use:** When training neural radiance fields for object insertion or scene editing where floating artifacts are a concern [S2]. When standard training produces unstable convergence in the first few steps [S1].
+-*   **When Not to Use:** When real-time training speed is critical and the overhead of dynamic loss switching is prohibitive (though minimal). When the scene is simple and artifacts are not an issue.
++*   **When Not to Use:** Not given in the sources.
++*   **Time and Memory Complexity:** Not given in the sources.
+ 
+ ## Background

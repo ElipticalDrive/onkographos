@@ -1,0 +1,108 @@
+# Diverse View Selection via Overlap and Distance
+
+Also called: Alg.1, Camera View Selection Algorithm, Iterative Diverse View Sampling
+
+## Overview
+This method selects a diverse subset of $N_v$ camera views from a 3D scene by iteratively sampling candidates and accepting them only if they satisfy thresholds for spatial overlap and geometric distance relative to already selected views [S1].
+
+## How it works
+**Inputs:** A pool of candidate camera poses (extrinsics $[R, t]$); target number of views $N_v$; overlap threshold $T_o$; distance threshold $T_d$ [S1].
+**Outputs:** A list $E$ of $N_v$ selected camera views [S1].
+
+**Data Structures:**
+- $E$: A list of selected camera extrinsics $E_i = [R_i, t_i]$, where $R_i \in \mathbb{R}^{3 \times 3}$ is the rotation matrix and $t_i \in \mathbb{R}^3$ is the translation vector [S1].
+- $n$: Integer counter of selected views, initialized to 0 [S1].
+
+**Formulas:**
+1. **Frustum Overlap ($O$):** The Intersection over Union (IoU) of the viewing frustums $A$ and $B$ of two cameras $E_1$ and $E_2$:
+   $$ O(E_1, E_2) = \frac{|A \cap B|}{|A \cup B|} $$
+   [S1]
+2. **Geometric Distance ($D$):** The sum of Euclidean distance between camera centers and the angular difference between orientations:
+   $$ D(E_1, E_2) = \|t_1 - t_2\|_2 + \arccos\left(\frac{\text{Tr}(R_2^\top R_1) - 1}{2}\right) $$
+   [S1]
+3. **Aggregate Metrics:** For a new candidate view $E_{\text{cand}}$ against the set of existing views $E = \{E_1, \dots, E_n\}$:
+   $$ \text{Overlap}(E_{\text{cand}}, E) = \max_{i=1 \dots n} O(E_{\text{cand}}, E_i) $$
+   $$ \text{Distance}(E_{\text{cand}}, E) = \min_{i=1 \dots n} D(E_{\text{cand}}, E_i) $$
+   [S1]
+
+**Parameters:**
+- $N_v = 200$: Target number of views [S1].
+- $T_o = 0.3$: Overlap threshold [S1].
+- $T_d = 0.2$: Distance threshold [S1].
+
+**Algorithm Steps:**
+1. Initialize $E \leftarrow \emptyset$, $n \leftarrow 0$ [S1].
+2. Set $N_v = 200$, $T_o = 0.3$, $T_d = 0.2$ [S1].
+3. Repeat the following loop:
+   a. Sample a candidate camera view $E_{\text{cand}}$ from the available pool [S1].
+   b. If $n = 0$: Append $E_{\text{cand}}$ to $E$, increment $n \leftarrow n + 1$ [S1].
+   c. Else ($n > 0$): Calculate $O_{\max} = \text{Overlap}(E_{\text{cand}}, E)$ and $D_{\min} = \text{Distance}(E_{\text{cand}}, E)$ [S1]. If $O_{\max} \ge T_o$ and $D_{\min} \ge T_d$: Append $E_{\text{cand}}$ to $E$, increment $n \leftarrow n + 1$ [S1].
+   d. Stop when $n \ge N_v$ [S1].
+4. Output $E$ [S1].
+
+**Pseudocode:**
+> **Unverified code.** The code below did not pass a test run against a reference implementation, or no test fits it, so it may contain errors.
+
+```python
+import math
+
+def select_views(candidate_pool, Nv=200, To=0.3, Td=0.2):
+    E = []
+    n = 0
+    pool_iter = iter(candidate_pool)
+    
+    while n < Nv:
+        try:
+            E_cand = next(pool_iter)
+        except StopIteration:
+            break  # Pool exhausted
+            
+        if n == 0:
+            E.append(E_cand)
+            n += 1
+        else:
+            max_overlap = -1.0
+            min_distance = float('inf')
+            
+            for existing in E:
+                # [G] Frustum IoU implementation not provided in sources; replace with geometric intersection logic.
+                overlap = 0.0 
+                if overlap > max_overlap:
+                    max_overlap = overlap
+                
+                t1, t2 = E_cand.t, existing.t
+                R1, R2 = E_cand.R, existing.R
+                pos_dist = math.sqrt(sum((a - b)**2 for a, b in zip(t1, t2)))
+                trace = sum(R2[i][k] * R1[k][i] for k in range(3) for i in range(3))
+                cos_angle = (trace - 1.0) / 2.0
+                cos_angle = max(-1.0, min(1.0, cos_angle))
+                angle_dist = math.acos(cos_angle)
+                dist = pos_dist + angle_dist
+                if dist < min_distance:
+                    min_distance = dist
+            
+            if max_overlap >= To and min_distance >= Td:
+                E.append(E_cand)
+                n += 1
+    return E
+```
+
+**Edge Cases and Pitfalls:**
+- **Frustum Calculation:** The source defines overlap via frustum IoU but does not provide the geometric algorithm for computing the intersection volume of two arbitrary frustums [S1]. Implementers must define the frustum geometry and compute the intersection [G].
+- **Degenerate Rotation:** If $R_1 = R_2$, the trace term becomes 3, leading to $\arccos(1) = 0$, which is correct [G]. Numerical precision near $\pm 1$ should be handled via clamping [G].
+- **Infinite Loop:** If the candidate pool is exhausted or too small to satisfy the diversity constraints, the loop may not terminate. The source assumes a sufficiently large pool [S1].
+
+## Subtopics
+
+### [Diverse View Selection via Maximum K-Coverage](11482-diverse-view-selection-via-maximum-k-coverage.md)
+This method selects a subset of input cameras to maximize pixel coverage in a novel view, addressing GPU memory limitations in large-scale neural rendering pipelines. It replaces heuristic overlap/distance metrics with a greedy approximation of the Maximum K-Coverage problem from set theory. Unlike simple ULR-style weights or voxel grid approximations, this approach explicitly maximizes the union of visible pixels from the chosen subset. Choose it when explicit pixel coverage maximization is required over geometric separation.
+
+## Operating characteristics
+- Time and memory complexity: Not given in the sources.
+- Strengths and limitations: Not given in the sources.
+
+## Background
+The algorithm is labeled as Algorithm 1 in the source [S1]. It is applied during the training of generalizable neural radiance fields for novel view synthesis [S1].
+
+## Sources
+[S1] ContraNeRF: Generalizable Neural Radiance Fields for Synthetic-to-real Novel View Synthesis via Contrastive Learning, https://doi.org/10.1109/cvpr52729.2023.01584, fetched 2026-10-29

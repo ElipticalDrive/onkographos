@@ -1,0 +1,273 @@
+--- v008.md
++++ v009.md
+@@ -1,213 +1,85 @@
+ # WildGaussians
+ 
+-Also called: Splatting in the Wild images with Appearance-conditioned Gaussians
++Also called: Splatting in the Wild images with Appearance-conditioned Gaussians, SWAG
+ 
+ ## Overview
+-WildGaussians extends 3D Gaussian Splatting (3DGS) to handle "in-the-wild" photo collections characterized by unconstrained illumination, transient occluders (e.g., pedestrians, vehicles), and dynamic objects [S2, S4]. It solves the problem of explicit representations struggling with appearance variations and occlusions by integrating robust DINO features for uncertainty-aware masking and a lightweight appearance modeling module [S1, S2]. Unlike NeRF-based methods that use global per-image embeddings to condition a radiance field MLP, WildGaussians embeds appearance vectors directly within each Gaussian, predicting an affine transformation of the base color [S2]. This preserves real-time rendering speeds and allows the trained appearance to be "baked" back into standard 3DGS parameters [S2].
++WildGaussians extends 3D Gaussian Splatting (3DGS) to handle "in-the-wild" photo collections characterized by varying illumination, occlusions, and transient objects [S2, S4]. It addresses the limitation of standard 3DGS, which lacks shared parameters and struggles with appearance changes, by integrating robust DINO features for uncertainty modeling and a lightweight appearance modeling module [S1, S2]. Unlike NeRF-based methods that use global per-image embeddings to condition an MLP for the entire radiance field, WildGaussians uses per-Gaussian and per-image embeddings to predict an affine transformation of the base color, preserving real-time rendering speeds [S2]. It sets itself apart from siblings like GauHuman and SplattingAvatar by focusing on unconstrained static scene reconstruction with transient occluders rather than dynamic human avatars or mesh-aligned bodies [S2, S4].
+ 
+ ## How it works
+-**Inputs and Outputs:**
+-*   **Inputs:** A set of $N$ uncalibrated or calibrated images $\{I_j\}_{j=1}^N$ with known camera poses (extrinsics and intrinsics).
+-*   **Outputs:** A set of 3D Gaussians $\{G_i\}$ representing the static scene, optimized with appearance and uncertainty modules.
++**Inputs:** A set of $N$ uncalibrated or calibrated images $\{I_j\}_{j=1}^N$ with known camera poses.
++**Outputs:** A set of 3D Gaussians $\{G_i\}$ optimized for static scene reconstruction, with an optional "baked" representation for fast rendering.
+ 
+ **Data Structures:**
+-1.  **Gaussian $G_i$:** Defined by mean $\mu_i$, positive semi-definite covariance matrix $\Sigma_i$, opacity $\alpha_i$, and view-dependent color parametrized by spherical harmonics (SH) coefficients [S2].
+-2.  **Per-Image Embedding $l_I$:** A trainable vector of size $n=24$ for each training image $I$ [S4].
+-3.  **Hash Grid Encoding:** A hash table encoding Gaussian centers.
+-    *   Table size $T = 2^{19}$ [S4].
+-    *   Finest resolution $N_{max} = 2048$ [S4].
+-    *   Coarsest resolution $N_{min} = 16$ [S4].
+-    *   Number of levels $L = 12$ [S4].
+-    *   Output: $emb(x)$, the positional encoding of center $x$ [S4].
+-4.  **Appearance MLP $F_\theta$:** A multi-layer perceptron taking inputs $(c, emb(x), l_I)$ and outputting parameters for color transformation and opacity variation [S2, S4].
+-5.  **Uncertainty Predictor:** A trainable affine transformation taking DINO features as input [S2].
++1.  **3D Gaussian $G_i$:**
++    *   Mean position $\mu_i \in \mathbb{R}^3$.
++    *   Covariance matrix $\Sigma_i \in \mathbb{R}^{3 \times 3}$ (positive semi-definite).
++    *   Opacity $\alpha_i \in [0, 1]$.
++    *   View-dependent color parametrized by spherical harmonics (SH) coefficients $c_i$.
++    *   Per-Gaussian trainable appearance embedding vector $e_i \in \mathbb{R}^d$ [S2].
++2.  **Per-Image Embedding:** A trainable vector $l_j \in \mathbb{R}^n$ for each training image $j$, where $n=24$ [S4].
++3.  **Appearance MLP $F_\theta$:** A multi-layer perceptron taking inputs $(c_i, e_i, l_j)$ and outputting parameters for color transformation [S2].
++4.  **Uncertainty Predictor:** A trainable affine transformation taking DINO features as input [S2].
+ 
+-**Numbered Steps:**
++**Algorithm Steps:**
+ 
+-1.  **Initialization:** Initialize 3D Gaussians $\{G_i\}$ from the input images using standard 3DGS initialization [S2]. Initialize per-image embeddings $l_I$, Hash Grid parameters, and MLP weights $F_\theta$ [S4].
++1.  **Initialization:** Initialize 3D Gaussians using standard 3DGS initialization (e.g., from SfM points) [S2]. Initialize per-image embeddings $l_j$ and per-Gaussian embeddings $e_i$ to zeros or small random values [S2].
+ 
+-2.  **Projection:** For each Gaussian $G_i$ and camera view, project the 3D covariance $\Sigma_i$ to 2D image space $\Sigma'_i$ [S2]:
+-    $$ \Sigma'_i = J_W \Sigma_i W^T J_{1:2,1:2}^T $$
+-    where $W$ is the viewing transformation, $J$ is the Jacobian of the affine approximation of the projection, and $(\cdot)_{1:2,1:2}$ denotes the first two rows and columns [S2].
++2.  **Feature Extraction:** For each training image $I_j$, extract DINO v2 features $D(I_j)$ [S2].
+ 
+-3.  **Appearance Modeling (Training):**
+-    a. Retrieve the Gaussian's base color $c$ from SH coefficients [S4].
+-    b. Retrieve the center embedding $emb(x)$ from the Hash Grid [S4].
+-    c. Retrieve the image embedding $l_I$ for the current view [S4].
+-    d. Pass $(c, emb(x), l_I)$ through $F_\theta$ to obtain image-dependent color $c^I$ and opacity variation parameter $\Delta \alpha^I$ [S4]:
+-    $$ (c^I, \Delta \alpha^I) = F_\theta(c, emb(x), l_I) $$
+-    *Note: WildGaussians [S2] predicts an affine transformation applied to $c$, while SWAG [S4] predicts $c^I$ directly. Both approaches are cited in the sources for this method family.*
++3.  **Rendering and Appearance Modeling:**
++    For each training image $I_j$:
++    a. Project 3D Gaussians to 2D image space. The 2D covariance matrix $\Sigma'_i$ is computed as:
++       $$ \Sigma'_i = J_W \Sigma_i W^T J_{1:2,1:2}^T $$
++       where $J$ is the Jacobian of the affine approximation of the projection, $W$ is the viewing transformation, and $(\cdot)_{1:2,1:2}$ denotes the first two rows and columns [S2].
++    b. Compute the base color $\hat{c}_i$ for each Gaussian using SH coefficients and ray direction [S2].
++    c. Compute the appearance-modulated color $\tilde{c}_i^j$:
++       $$ (\tilde{c}_i^j, \Delta \alpha_i^j) = F_\theta(c_i, e_i, l_j) $$
++       where $F_\theta$ is the appearance MLP [S2]. Note: SWAG variant predicts color directly and uses opacity variation [S4].
++    d. Render the image $\hat{C}_j$ using alpha compositing with the modulated colors [S2].
+ 
+-4.  **Opacity Variation Sampling (Transient Handling):**
+-    a. Sample a random variable $U \sim \text{Uniform}(0,1)$ [S4].
+-    b. Compute the opacity variation $\Delta \tilde{\alpha}^I$ using the Binary Concrete distribution with temperature $T=0.1$ [S4]:
+-    $$ \Delta \tilde{\alpha}^I = \text{sigmoid} \left[ \frac{1}{T} \left( \log(|\Delta \alpha^I|) + \log(U) - \log(1-U) \right) \right] $$
+-    c. Compute the final image-dependent opacity $\alpha^I$:
+-    $$ \alpha^I = \max(\alpha - \Delta \tilde{\alpha}^I, 0) $$
+-    *During evaluation, $U$ is fixed at $0.5$ [S4].*
++4.  **Uncertainty Modeling:**
++    a. Extract DINO features from the rendered image $\hat{C}_j$, denoted $D(\hat{C}_j)$ [S2].
++    b. Pass $D(I_j)$ (GT features) and $D(\hat{C}_j)$ (rendered features) through the uncertainty predictor to obtain a per-pixel uncertainty mask $M_j$ [S2]. The predictor is optimized to maximize cosine similarity between GT and rendered DINO features in static regions [S2].
+ 
+-5.  **Rendering:**
+-    a. Rasterize the 2D Gaussians using alpha-compositing to produce the predicted color $\hat{C}$ [S2].
+-    b. Extract DINO v2 features from the rendered image $\hat{C}$ and the ground truth image $C$ [S2].
++5.  **Loss Computation:**
++    Compute the total loss $L$ for image $I_j$:
++    $$ L = \lambda_{dssim} \text{DSSIM}(\hat{C}_j, C_j) + (1 - \lambda_{dssim}) \| \hat{C}_j - C_j \|_1 $$
++    where $C_j$ is the ground truth image, and the loss is masked by $M_j$ to ignore occluders [S2]. $\lambda_{dssim}$ is a weighting factor [S2].
+ 
+-6.  **Uncertainty Modeling:**
+-    a. Pass DINO features from the ground truth image $C$ through the trainable affine transformation to predict per-pixel uncertainty [S2].
+-    b. Optimize the uncertainty predictor by minimizing the cosine similarity between DINO features of $\hat{C}$ and $C$ [S2].
++6.  **Optimization:**
++    Update 3D Gaussian parameters ($\mu_i, \Sigma_i, \alpha_i, c_i, e_i$), per-image embeddings $l_j$, MLP weights $\theta$, and uncertainty predictor parameters using gradient descent [S2].
+ 
+-7.  **Loss Computation and Optimization:**
+-    a. Compute the uncertainty mask from the predictor [S2].
+-    b. Compute the loss $L_{3DGS}$ masked by the uncertainty, combining D-SSIM and L1 terms [S2, S4]:
+-    $$ L_{3DGS} = \lambda_{dssim} DSSIM(\hat{C}, C) + (1 - \lambda_{dssim}) \|\hat{C} - C\|_1 $$
+-    where $\lambda_{dssim}$ is a weighting factor [S2].
+-    c. Optimize Gaussian parameters, $F_\theta$, Hash Encoder, and $l_I$ by minimizing $L_{3DGS}$ [S4].
++7.  **Baking (Optional):**
++    After training, the appearance embeddings can be "baked" into the standard 3DGS formulation. This involves computing the final color for each Gaussian by applying the learned transformation for a reference appearance or averaging, allowing for fast rendering without the MLP [S2].
+ 
+-8.  **Baking (Post-Training):**
+-    After training, the appearance embeddings and MLP outputs are baked into the standard 3DGS Gaussian parameters (color and opacity) to enable fast, editable rendering without the MLP [S2].
++**Parameters:**
++*   $\lambda_{dssim}$: Weighting factor for DSSIM loss [S2].
++*   $n$: Latent embedding size, set to 24 [S4].
++*   $T$: Temperature for Binary Concrete distribution (if using SWAG variant), set to 0.1 [S4].
+ 
+-9.  **Transient Separation:**
+-    Identify transient Gaussians as those with non-zero variance of $\Delta \tilde{\alpha}^I$ across training images: $\text{Var}(\Delta \tilde{\alpha}^I) \neq 0$ [S4]. Discard these Gaussians to retain only the static scene [S4].
+-
+-**Pseudocode:**
+-
+-```python
+-import torch
+-import torch.nn as nn
+-import torch.nn.functional as F
+-
+-class WildGaussiansRenderer:
+-    def __init__(self, gaussians, hash_grid, appearance_mlp, uncertainty_predictor, n_images):
+-        """
+-        gaussians: List of Gaussian objects with attributes mu, sigma, alpha, sh_coeffs
+-        hash_grid: HashGrid object with method encode(center)
+-        appearance_mlp: MLP F_theta
+-        uncertainty_predictor: Linear/Affine layer
+-        n_images: Number of training images
+-        """
+-        self.gaussians = gaussians
+-        self.hash_grid = hash_grid
+-        self.appearance_mlp = appearance_mlp
+-        self.uncertainty_predictor = uncertainty_predictor
+-        self.image_embeddings = nn.Embedding(n_images, 24) # n=24 [S4]
+-        self.lambda_dssim = 0.2 # Typical value, not explicitly given in notes [S2]
+-        self.temperature = 0.1 # T=0.1 [S4]
+-
+-    def get_gaussian_color(self, gaussian):
+-        # Retrieve base color c from SH coefficients for the view direction
+-        # Implementation detail: [G] Standard SH evaluation
+-        return evaluate_sh(gaussian.sh_coeffs, gaussian.view_direction)
+-
+-    def sample_concrete(self, location_param, temperature):
+-        U = torch.rand_like(location_param)
+-        logit = (torch.log(U) - torch.log(1 - U)) / temperature
+-        return torch.sigmoid((torch.log(torch.abs(location_param)) + logit))
+-
+-    def render(self, image_idx, camera_params):
+-        """
+-        Renders a single view.
+-        image_idx: Index of the training image
+-        camera_params: Extrinsics and Intrinsics
+-        """
+-        # 1. Appearance Modeling
+-        l_I = self.image_embeddings(image_idx) # Per-image embedding [S4]
+-        
+-        rendered_colors = []
+-        rendered_opacities = []
+-        
+-        for G in self.gaussians:
+-            c = self.get_gaussian_color(G)
+-            emb_x = self.hash_grid.encode(G.mu) # Hash encoding of center [S4]
+-            
+-            # MLP outputs color variation and opacity parameter
+-            # Note: Sources differ on output format. 
+-            # WildGaussians [S2]: Affine transform params.
+-            # SWAG [S4]: Direct color c^I and delta_alpha.
+-            # We implement SWAG variant [S4] as it is more detailed in formulas.
+-            c_I, delta_alpha_loc = self.appearance_mlp(torch.cat([c, emb_x, l_I], dim=-1))
+-            
+-            # Sample opacity variation
+-            delta_alpha_tilde = self.sample_concrete(delta_alpha_loc, self.temperature)
+-            
+-            # Final opacity
+-            alpha_I = torch.clamp(G.alpha - delta_alpha_tilde, min=0.0)
+-            
+-            # Project Gaussian to 2D
+-            mu_2d, sigma_2d = project_2d(G.mu, G.sigma, camera_params)
+-            
+-            rendered_colors.append(c_I)
+-            rendered_opacities.append(alpha_I)
+-            
+-        # 2. Rasterization
+-        # [G] Standard 3DGS rasterization: sort, compute coverage, alpha composite
+-        C_hat = rasterize(rendered_colors, rendered_opacities, mu_2d, sigma_2d, camera_params)
+-        
+-        return C_hat
+-
+-    def compute_loss(self, C_hat, C_gt, image_idx):
+-        """
+-        C_hat: Rendered image
+-        C_gt: Ground truth image
+-        """
+-        # 1. Uncertainty Modeling
+-        # Extract DINO features [S2]
+-        # [G] Assuming a DINO extractor function exists
+-        feat_gt = extract_dino(C_gt)
+-        feat_hat = extract_dino(C_hat)
+-        
+-        # Predict uncertainty from GT features [S2]
+-        uncertainty = self.uncertainty_predictor(feat_gt)
+-        # [G] Convert uncertainty to a mask (e.g., sigmoid)
+-        mask = torch.sigmoid(uncertainty)
+-        
+-        # 2. Loss Calculation
+-        # DSSIM and L1 masked by uncertainty [S2]
+-        l1_loss = torch.abs(C_hat - C_gt)
+-        dssim_loss = compute_dssim(C_hat, C_gt)
+-        
+-        # Apply mask: reduce loss contribution from occluders
+-        masked_l1 = l1_loss * mask
+-        masked_dssim = dssim_loss * mask
+-        
+-        loss = self.lambda_dssim * masked_dssim.mean() + \
+-               (1 - self.lambda_dssim) * masked_l1.mean()
+-               
+-        return loss
+-
+-    def identify_transient_gaussians(self, training_opacities_var):
+-        """
+-        training_opacities_var: Tensor of shape (N_gaussians, N_images) containing 
+-        delta_alpha_tilde for each Gaussian across all training images.
+-        """
+-        variance = torch.var(training_opacities_var, dim=1)
+-        # Transient if variance != 0 [S4]
+-        is_transient = variance > 1e-6 # [G] Small epsilon for numerical stability
+-        return is_transient
+-```
++**Edge Cases and Pitfalls:**
++*   **Irreversible Geometry Loss:** Incorrect training signals (e.g., from occluders) can lead to irreversibly removing parts of the geometry due to 3DGS's primitive growth/pruning process [S2].
++*   **Over-construction:** Failure cases include over-construction of static parts, observed as black spots on roads or fountain water [S4].
++*   **Affine Limitations:** Simple affine color transformations cannot model all appearance changes in in-the-wild scenarios; direct color prediction or more complex MLPs are required [S4].
+ 
+ ## Subtopics
+ 
+ ### [Dynamic Appearance Features Modeling](3776-dynamic-appearance-features-modeling.md)
+-Addresses the limitation of global feature embeddings by extracting dynamic appearance features from a reference image and allowing each Gaussian to sample from multiple feature maps, capturing local details like highlights and shadows. It sets itself apart from methods like NeRF-W and Ha-NeRF which use global scene embeddings, and CR-NeRF which integrates features at the 2D level.
++Addresses global embedding limitations by extracting dynamic features from reference images and allowing per-Gaussian sampling from multiple feature maps to capture local highlights/shadows.
++
++### [SWAG Variant](3777-swag-variant.md)
++Uses a Hash Grid encoding for Gaussian centers and predicts opacity variation via Binary Concrete distribution to separate static and transient Gaussians.
+ 
+ ## Operating characteristics
+-**Time and Memory Complexity:**
+-*   **Training:** SWAG achieves one order of magnitude faster training compared to previous implicit methods (NeRF-W, Ha-NeRF, CR-NeRF, RefinedFields) [S4].
+-*   **Rendering:** Matches real-time rendering speeds of standard 3DGS after baking [S2, S4]. During training, the MLP evaluation adds overhead but remains efficient due to the lightweight nature of the appearance module [S2].
+-
+-**Measured Performance:**
+-*   **Phototourism:** SWAG improves 3DGS PSNR by an average margin of 5.01 dB [S4].
+-*   **NeRF-OSR:** SWAG improves 3DGS PSNR by an average margin of 5 dB [S4].
+-*   **Transient Handling:** On the Trevi Fountain scene, transient objects were represented using less than 20% of the Gaussians [S4]. On the Locomotive scene (static), less than 4% of Gaussians were detected as transient [S4].
+-
+-**Strengths and Limitations:**
+-*   **Strengths:** Handles unconstrained photo collections with varying illumination and occlusions [S1, S4]. Preserves real-time rendering speed [S2]. Allows separation of static and transient elements [S4].
+-*   **Limitations:** Failure cases include over-construction of static parts, observed as black spots on roads (Brandenburg Gate) and fountain water (Trevi Fountain) [S2, S4]. Incorrect training signals can lead to irreversibly removing geometry due to 3DGS's pruning process [S2].
+-
+-**When to Use:**
+-*   Use for 3D reconstruction from in-the-wild photo collections where occlusions and appearance changes are present [S2, S4].
+-*   Use when real-time rendering speed is required after training [S2].
+-*   Do not use if the scene is strictly static and well-controlled, as standard 3DGS may suffice and SWAG adds complexity [S4].
++*   **Time Complexity:** Training is one order of magnitude faster than previous implicit methods (NeRF-W, Ha-NeRF) [S4]. Rendering speed matches standard 3DGS (real-time) after baking [S2].
++*   **Memory Complexity:** Requires storage for per-Gaussian embeddings and per-image embeddings. The Hash Grid variant (SWAG) adds memory for the hash table ($2^{19}$ entries) [S4].
++*   **Performance:** Improves 3DGS PSNR by an average margin of 5.01 dB on Phototourism scenes and 5 dB on NeRF-OSR benchmark [S4].
++*   **Strengths:** Handles varying illumination and transient occluders; maintains real-time rendering; robust to unconstrained photo collections [S1, S2].
++*   **Limitations:** May over-construct static geometry in complex scenes; requires careful tuning of uncertainty masking [S4].
++*   **When to use:** Reconstruction of static scenes from in-the-wild photo collections with transient objects and varying lighting [S2].
++*   **When not to use:** Dynamic human avatars (use GauHuman) or mesh-aligned bodies (use SplattingAvatar) [S2].
+ 
+ ## Background
+-WildGaussians was introduced to address the challenges of 3D reconstruction in "in-the-wild" settings, where images contain occlusions, transient objects, and varying illumination [S2, S4]. Traditional 3DGS struggles with these conditions due to its explicit representation and lack of shared parameters, unlike NeRFs which use per-image embeddings [S2]. The method integrates robust DINO features for uncertainty modeling and a lightweight appearance module [S1, S2]. It is evaluated on datasets such as Phototourism (Brandenburg Gate, Sacre Coeur, Trevi Fountain) and NeRF-OSR [S4].
++WildGaussians was introduced to address the challenges of 3D reconstruction from unconstrained "in-the-wild" images, which often contain occlusions, transient objects, and varying illumination [S2]. Standard 3DGS struggles with these conditions due to its explicit representation and lack of shared parameters across views [S2]. The method builds on the 3DGS framework [S2] and integrates concepts from NeRFs, such as per-image embeddings, but adapts them to the explicit Gaussian representation to maintain rendering speed [S2]. It leverages robust DINO features for uncertainty modeling to handle occluders effectively [S2].
+ 
+ ## Sources

@@ -1,0 +1,62 @@
+# Voxel Texture Encoding
+
+Also called: 2D Texture Voxel Encoding, Texel-based Voxel Storage
+
+## Overview
+Voxel Texture Encoding is a method for storing 3D volumetric data within 2D texture resources by embedding spatial coordinates directly into the texture channels. It solves the problem of retrieving voxel position during GPU-based volume rendering without requiring separate geometry buffers or complex index lookups. It differs from standard 3D texture storage [3D Texture Storage](5797-3d-texture-storage.md) by utilizing 2D textures to store 3D data, often enabling specific pipeline techniques like ping-pong recursion via Frame Buffer Objects.
+
+## How it works
+**Inputs:** A 3D voxel grid of dimensions $W \times H \times D$ and a scalar value $v$ for each voxel.
+**Outputs:** A 2D texture resource containing encoded voxel data.
+
+**Data Structures:**
+The primary data structure is a 2D texture using the `FP32RGBA` format. Each texel encodes a single voxel as a tuple $\langle x, y, z, v \rangle$:
+*   **R channel:** 32-bit floating-point $x$ coordinate.
+*   **G channel:** 32-bit floating-point $y$ coordinate.
+*   **B channel:** 32-bit floating-point $z$ coordinate.
+*   **A channel:** 32-bit floating-point voxel value $v$ [S1, unofficial].
+
+**Steps:**
+1.  **Coordinate Generation:** For each voxel at grid indices $(i, j, k)$, compute the physical or normalized coordinates $(x, y, z)$.
+2.  **Encoding:** Pack $(x, y, z, v)$ into a single 4-component vector.
+3.  **Texture Mapping:** Map the 3D grid to a 2D texture. The specific mapping strategy (e.g., row-major flattening) is not detailed in the sources, but the resulting 2D texture must allow retrieval of the full $\langle x, y, z, v \rangle$ tuple for any given texel [S1, unofficial].
+4.  **Rendering Pipeline Integration:** Use the texture in conjunction with Frame Buffer Objects (FBOs). The `FP32RGBA` format allows the coordinates to be read back or used in subsequent shader stages, facilitating recursive processes or splatting where spatial context is required [S1, unofficial].
+
+**Parameters:**
+*   **Format:** `FP32RGBA` (32 bits per channel, 128 bits per texel) [S1, unofficial].
+*   **Precision:** Single-precision floating point for coordinates and values [S1, unofficial].
+
+**Edge Cases:**
+*   **Memory Usage:** Storing coordinates explicitly increases memory bandwidth requirements compared to implicit coordinate generation, as 96 bits of the 128-bit texel are dedicated to position rather than data [S1, unofficial].
+*   **Precision Loss:** If coordinates exceed the representable range of 32-bit floats or if the texture resolution limits the mapping, precision may be lost. The sources specify using `FP32RGBA` to maximize coordinate precision [S1, unofficial].
+
+## Subtopics
+
+### Replicated Data Volume Rendering
+A parallel algorithm variant that replicates the entire dataset at each Graphics Processor (GP) to avoid communication bottlenecks, achieving 15 fps for $128^3$ datasets [S2, unofficial]. It is chosen when interactive frame rates are required on hardware with limited inter-GP communication bandwidth. The data size is limited to $128 \times 128 \times 128$ due to GP memory constraints [S2, unofficial].
+
+**Voxel Encoding Layout:**
+Each voxel is encoded in 32 bits with the following bit allocation [S2, unofficial]:
+*   **8 bits:** Original CT/MRI data.
+*   **13 bits:** Normal encoding.
+*   **8 bits:** Gradient magnitude.
+*   **3 bits:** Unused.
+
+**Normal Encoding:**
+Normals are computed during preprocessing and encoded as a 13-bit number: 6 bits for the X component, 6 bits for the Y component, and 1 bit for the Z component. The Z magnitude is inferred from X and Y because the normal is a unit-length vector [S2, unofficial].
+
+**Shading Optimization:**
+The 13-bit normal serves as an index into a shading table. This table is recomputed at the start of each frame using the current classification function and a Phong shading model. This reduces shading computations from $2^{19}$ (for all voxels) to $2^{13}$ (number of unique normal entries) [S2, unofficial].
+
+## Operating characteristics
+*   **Memory Complexity:** High. The `FP32RGBA` encoding requires 128 bits per voxel, significantly more than raw scalar storage [S1, unofficial]. The Replicated Data variant requires memory proportional to the number of GPs, as the full dataset is replicated [S2, unofficial].
+*   **Performance:** The Replicated Data variant achieves 15 fps for $128^3$ datasets [S2, unofficial]. The use of a shading table reduces computational load from $O(N)$ to $O(1)$ per unique normal direction [S2, unofficial].
+*   **Strengths:** Enables efficient lookup-based shading; facilitates coordinate retrieval in GPU pipelines without auxiliary buffers [S1, unofficial][S2, unofficial].
+*   **Limitations:** Limited to $128^3$ resolution in the Replicated Data variant due to GP memory [S2, unofficial]. High memory bandwidth consumption due to explicit coordinate storage [S1, unofficial].
+
+## Background
+The `FP32RGBA` voxel encoding method was developed for image-space sheet-buffered splatting on the GPU, utilizing 2D textures and Frame Buffer Objects for recursive processing [S1, unofficial]. The Replicated Data Volume Rendering approach was developed to achieve interactive semantic region selection by eliminating communication bottlenecks in parallel volume rendering systems [S2, unofficial].
+
+## Sources
+[S1] Image-space sheet-buffered splatting on the GPU, https://openalex.org/W2419486389, fetched 2026-10-27 (unofficial)
+[S2] DTIC ADA236718: Achieving Direct Volume Visualization with Interactive Semantic Region Selection, https://archive.org/details/DTIC_ADA236718, fetched 2026-10-26 (unofficial)

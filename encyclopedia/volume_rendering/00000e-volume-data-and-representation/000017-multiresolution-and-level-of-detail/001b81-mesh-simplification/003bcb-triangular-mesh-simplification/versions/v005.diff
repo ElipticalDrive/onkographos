@@ -1,0 +1,240 @@
+--- v004.md
++++ v005.md
+@@ -4,27 +4,22 @@
+ 
+ ## Overview
+-Triangular Mesh Simplification reduces the polygon count of a 3D surface mesh to improve rendering performance or storage efficiency while preserving the overall geometric shape [S1]. It solves the trade-off between visual fidelity and computational cost in real-time 3D reconstruction and visualization. This method differs from its siblings by focusing on general mesh decimation techniques, often serving as a preprocessing step for algorithms like Marching Cubes to enhance interactivity [S1].
++Triangular Mesh Simplification reduces the polygon count of a 3D surface mesh to improve rendering performance [S1]. It is applied as a preprocessing step before isosurface extraction to enhance real-time interactivity in 3D reconstruction systems [S1]. This method differs from its siblings by focusing on general mesh decimation techniques to reduce computational load, though aggressive simplification may introduce geometric distortion [S1].
+ 
+ ## How it works
+ **Inputs and Outputs:**
+-- Input: A triangular mesh $M$ defined by vertices $V$, edges $E$, and faces $F$.
+-- Output: A simplified mesh $M'$ with a reduced number of faces, typically specified by a target simplification rate or face count.
++- Input: A triangular mesh $M$ defined by vertices $V$, edges $E$, and faces $F$ [G]. Target simplification rate $r$ (percentage of mesh reduction) [S1].
++- Output: A simplified mesh $M'$ with a reduced number of faces [G].
+ 
+ **Data Structures:**
+-The mesh is represented using standard adjacency structures:
+-- Vertices: Array of 3D coordinates $(x, y, z)$.
+-- Faces: List of triplets of vertex indices.
+-- Edges: List of vertex index pairs, often with a hash map or adjacency list for quick lookup of incident faces.
++The mesh is represented using standard adjacency structures: vertices as arrays of 3D coordinates, faces as lists of vertex index triplets, and edges as index pairs with adjacency lists for quick lookup of incident faces [G].
+ 
+ **Steps:**
+-1. **Error Metric Calculation:** For each edge $e$ in the mesh, calculate a cost metric $C(e)$ that estimates the geometric error introduced by collapsing the edge. Common metrics include quadric error metrics or distance-based approximations [G].
+-2. **Priority Queue Construction:** Insert all edges into a priority queue ordered by their cost $C(e)$, such that the edge with the lowest cost is at the top.
+-3. **Iterative Collapse:**
+-   a. Extract the edge $e = (v_1, v_2)$ with the minimum cost from the queue.
+-   b. Check if the collapse is valid (e.g., does not create non-manifold geometry or self-intersections) [G].
+-   c. If valid, collapse the edge by merging $v_1$ and $v_2$ into a new vertex $v_{new}$. The position of $v_{new}$ is typically determined by minimizing the error metric (e.g., centroid or optimal position based on quadrics).
+-   d. Update the mesh topology: remove $v_1, v_2$, add $v_{new}$, and update incident faces.
+-   e. Recalculate costs for affected edges and update the priority queue.
+-   f. Repeat until the target simplification rate is reached.
++1. Calculate an error metric $C(e)$ for each edge $e$ estimating the geometric error of collapsing it [G].
++2. Insert all edges into a priority queue ordered by $C(e)$ [G].
++3. Iteratively extract the minimum-cost edge, validate the collapse, merge vertices, update topology, recalculate costs for affected edges, and repeat until the target simplification rate is reached [G].
++
++**Formulas:**
++- Simplification rate: $r = \frac{F_{\text{orig}} - F_{\text{new}}}{F_{\text{orig}}} \times 100\%$, where $F_{\text{orig}}$ is the initial face count and $F_{\text{new}}$ is the target face count [G].
++- Edge cost: $C(e)$ estimates the geometric error introduced by collapsing edge $e$ into a single vertex [G].
+ 
+ **Parameters:**
+@@ -32,9 +27,12 @@
+ 
+ **Edge Cases and Pitfalls:**
+-- **Topology Preservation:** Aggressive simplification may break manifold properties. Validity checks are required before each collapse [G].
+-- **Precision:** Floating-point errors in vertex merging can cause visual artifacts. [G]
++- **Topology Preservation:** Aggressive simplification may break manifold properties, requiring validity checks before each collapse [G].
++- **Precision:** Floating-point errors in vertex merging can cause visual artifacts [G].
++- **Distortion:** Higher simplification rates may distort the 3D reconstruction model [S1].
+ 
+ **Pseudocode:**
+ ```python
++import heapq
++
+ def triangular_mesh_simplification(mesh, target_rate):
+     """
+@@ -42,62 +40,92 @@
+     
+     Args:
+-        mesh: Object containing vertices, faces, and edges.
++        mesh: Dict with 'vertices' (list of [x,y,z]), 'faces' (list of [i,j,k]), 'edges' (list of [i,j]).
+         target_rate: Float between 0 and 1, representing the fraction of faces to keep.
+         
+     Returns:
+-        Simplified mesh.
++        Simplified mesh dict.
+     """
+-    # Initialize priority queue with all edges and their costs
+-    edge_queue = PriorityQueue()
+-    for edge in mesh.edges:
+-        cost = calculate_edge_cost(edge, mesh)
+-        edge_queue.push(edge, cost)
++    vertices = mesh['vertices']
++    faces = mesh['faces']
++    edges = mesh['edges']
++    
++    # Build vertex-to-face adjacency for quick updates [G]
++    vertex_faces = {v: [] for v in range(len(vertices))}
++    for f_idx, f in enumerate(faces):
++        for v in f:
++            vertex_faces[v].append(f_idx)
++            
++    pq = []
++    edge_costs = {}
++    for e_idx, (v1, v2) in enumerate(edges):
++        cost = calculate_edge_cost(v1, v2, vertices, faces, vertex_faces)
++        heapq.heappush(pq, (cost, e_idx))
++        edge_costs[e_idx] = cost
+         
+-    target_face_count = int(len(mesh.faces) * target_rate)
++    target_face_count = int(len(faces) * target_rate)
++    collapsed = set()
+     
+-    while len(mesh.faces) > target_face_count and not edge_queue.is_empty():
+-        # Get edge with minimum cost
+-        edge, cost = edge_queue.pop()
+-        
+-        # Check validity of collapse
+-        if not is_collapse_valid(edge, mesh):
++    while len(faces) > target_face_count and pq:
++        cost, e_idx = heapq.heappop(pq)
++        if e_idx in collapsed or edge_costs[e_idx] != cost:
+             continue
+             
+-        # Perform edge collapse
+-        v1, v2 = edge.vertices
+-        v_new = merge_vertices(v1, v2, mesh)
++        v1, v2 = edges[e_idx]
++        if not is_collapse_valid(v1, v2, vertices, faces, vertex_faces):
++            continue
++            
++        # Collapse edge by merging v2 into v1
++        vertices[v1] = merge_vertices(v1, v2, vertices)
+         
+-        # Update mesh topology
+-        update_mesh_after_collapse(mesh, edge, v_new)
++        # Update faces: replace v2 with v1, remove degenerate faces
++        new_faces = []
++        for f_idx, f in enumerate(faces):
++            if e_idx in collapsed:
++                continue
++            new_f = [v1 if v == v2 else v for v in f]
++            if len(set(new_f)) == 3:
++                new_faces.append(new_f)
++        faces = new_faces
+         
+-        # Update costs for affected edges
+-        affected_edges = get_affected_edges(edge, mesh)
+-        for aff_edge in affected_edges:
+-            new_cost = calculate_edge_cost(aff_edge, mesh)
+-            edge_queue.update(aff_edge, new_cost)
+-            
+-    return mesh
++        collapsed.add(e_idx)
++        affected = get_affected_edges(v1, v2, edges, vertex_faces)
++        for aff_e_idx in affected:
++            if aff_e_idx not in collapsed:
++                new_cost = calculate_edge_cost(edges[aff_e_idx][0], edges[aff_e_idx][1], vertices, faces, vertex_faces)
++                edge_costs[aff_e_idx] = new_cost
++                heapq.heappush(pq, (new_cost, aff_e_idx))
++                
++    return {'vertices': vertices, 'faces': faces, 'edges': edges}
+ 
+-def calculate_edge_cost(edge, mesh):
+-    # Placeholder for specific error metric implementation
+-    # Commonly uses quadric error metrics or distance to plane
++def calculate_edge_cost(v1, v2, vertices, faces, vertex_faces):
++    # Computes geometric error of collapsing edge (e.g., quadric error metric) [G]
+     return 0.0 # Not given in the sources.
+ 
+-def is_collapse_valid(edge, mesh):
+-    # Check for manifold consistency and self-intersection
++def is_collapse_valid(v1, v2, vertices, faces, vertex_faces):
++    # Checks manifold consistency and prevents self-intersection [G]
+     return True # Not given in the sources.
+ 
+-def merge_vertices(v1, v2, mesh):
+-    # Determine new vertex position
+-    # Typically centroid or optimal position based on error metric
+-    return (v1.pos + v2.pos) / 2.0 # Not given in the sources.
++def merge_vertices(v1, v2, vertices):
++    # Returns new vertex position, typically centroid or optimal [G]
++    return [(vertices[v1][i] + vertices[v2][i]) / 2.0 for i in range(3)] # Not given in the sources.
+ 
+-def update_mesh_after_collapse(mesh, edge, v_new):
+-    # Remove v1, v2; add v_new; update faces
+-    pass # Not given in the sources.
+-
+-def get_affected_edges(edge, mesh):
+-    # Return edges incident to v1 or v2
+-    return [] # Not given in the sources.
++def get_affected_edges(v1, v2, edges, vertex_faces):
++    # Returns indices of edges incident to v1 or v2 [G]
++    affected = set()
++    for f_idx in vertex_faces.get(v1, []):
++        for v in faces[f_idx]:
++            if v != v1:
++                if [v1, v] in edges:
++                    affected.add(edges.index([v1, v]))
++                else:
++                    affected.add(edges.index([v, v1]))
++    for f_idx in vertex_faces.get(v2, []):
++        for v in faces[f_idx]:
++            if v != v2:
++                if [v2, v] in edges:
++                    affected.add(edges.index([v2, v]))
++                else:
++                    affected.add(edges.index([v, v2]))
++    return affected
+ ```
+ 
+@@ -105,15 +133,27 @@
+ 
+ ### [Terrain Multiresolution Representation](10004-terrain-multiresolution-representation.md)
+-Terrain Multiresolution Representation (TMR) is a method for adaptive, view-dependent level-of-detail (LOD) rendering of regular height field terrain using a Binary Triangle Tree (BTT) hierarchy. It solves the performance-quality trade-off in real-time terrain rendering by dynamically refining the mesh density based on the observer's distance, ensuring high resolution near the viewer and lower resolution at a distance. Unlike Quad-Tree approaches which rely on recursive square subdivisions, BTT is inherently triangle-based, splitting each triangle into two right-triangle children via longest-edge bisection, which provides a more natural fit for triangle-strip rendering and continuous mesh generation.
++Terrain Multiresolution Representation (TMR) is a method for adaptive, view-dependent level-of-detail (LOD) rendering of regular height field terrain using a Binary Triangle Tree (BTT) hierarchy. It solves the performance-quality trade-off in real-time terrain rendering by dynamically refining mesh density based on observer distance, ensuring high resolution near the viewer and lower resolution at a distance. Unlike Quad-Tree approaches which rely on recursive square subdivisions, BTT is inherently triangle-based, splitting each triangle into two right-triangle children via longest-edge bisection, which provides a more natural fit for triangle-strip rendering and continuous mesh generation.
+ 
+ ### [Botsch Remeshing](10794-botsch-remeshing.md)
+-Botsch Remeshing re-meshes a triangular surface to achieve a target edge length, thereby improving mesh uniformity. It differs from standard simplification methods by optimizing vertex positions to fit a desired density rather than merely reducing polygon count. It builds on [Triangular Mesh Simplification](9103-triangular-mesh-simplification.md).
++Botsch Remeshing re-meshes a triangular surface to achieve a target edge length, improving mesh uniformity.
+ 
+ ### [Hoppe's Progressive Mesh Simplification](14926-hoppe-s-progressive-mesh-simplification.md)
+ Hoppe's Progressive Mesh Simplification is an iterative edge-collapse algorithm that generates a hierarchy of coarse meshes from a high-resolution input by preserving topological consistency while removing geometric details. It differs from its siblings by strictly enforcing manifold topology via Hoppe's consistency checks and using a simplified error metric based solely on edge length, prioritizing an even vertex distribution and low computational cost over the preservation of sharp features or optimized vertex positions.
+ 
++### [Conservative Cage Mesh Decimation](18715-conservative-cage-mesh-decimation.md)
++Conservative Cage Mesh Decimation is a mesh simplification technique that reduces the vertex count of a surface mesh while strictly enforcing the inclusion of a target 3D selection volume. Unlike standard edge collapse methods that may shrink the mesh inside the selection boundary, this method adds linear constraints to guarantee that the simplified "cage" always encloses the original region. It is distinguished from [Hoppe's Progressive Mesh Simplification](14926-hoppe's-progressive-mesh-simplification.md) by its hard geometric constraints rather than purely error-based metrics, and from [Mesh Quality Maintenance via Edge Collapse/Split](21387-mesh-quality-maintenance-via-edge-collapse-split.md) by its specific focus on volume preservation for interactive editing.
++
++### [Adaptive Triangle Resampling](20552-adaptive-triangle-resampling.md)
++Adaptive Triangle Resampling is a dynamic mesh optimization technique used in differentiable rendering to maintain a consistent triangle count while avoiding unnecessary geometry. It solves the problem of inefficient triangle distribution by removing transparent primitives and refining dense regions through edge splitting. It is distinct from static simplification methods like [Hoppe's Progressive Mesh Simplification](14926-hoppe-s-progressive-mesh-simplification.md) because it operates iteratively during training to enforce a target budget, and from [Botsch Remeshing](10794-botsch-remeshing.md) by focusing specifically on screen-space coverage and transparency culling rather than geometric error metrics.
++
++### [Mesh Quality Maintenance via Edge Collapse/Split](21387-mesh-quality-maintenance-via-edge-collapse-split.md)
++This method maintains mesh quality during dynamic simulation by dynamically modifying topology via edge collapse and split operations based on edge lengths, preventing excessive stretching or compression of triangular elements. It differs from mechanical criteria-based approaches by using geometric edge length checks for speed, and from static simplification methods by operating iteratively within a time-stepped simulation loop to maintain equilibrium.
++
++### [Surface Subdivision](22545-surface-subdivision.md)
++Surface Subdivision is a mesh refinement technique that increases mesh density by subdividing each triangle into four smaller triangles. It solves the problem of visual jaggedness (aliasing) in triangular mesh representations of surfaces, particularly when rendering volume data or contour surfaces at low resolutions. Unlike [Terrain Multiresolution Representation](10004-terrain-multiresolution-representation.md) which manages LOD for terrain, or [Hoppe's Progressive Mesh Simplification](14926-hoppe-s-progressive-mesh-simplification.md) which reduces detail, this method strictly increases geometric detail. It is often combined with surface smoothing to produce smoother appearances.
++
+ ## Operating characteristics
+ **Time and Memory Complexity:**
+-The complexity depends on the error metric and data structures used. Using a priority queue, each collapse operation takes $O(\log E)$ time, where $E$ is the number of edges. Updating affected edges takes time proportional to the average valence. Total time is roughly $O(N \log E)$ for $N$ collapses. Memory is $O(V + E + F)$ for the mesh representation.
++Not given in the sources.
+ 
+ **Measured Performance:**
+@@ -124,15 +164,9 @@
+ 
+ **Strengths and Limitations:**
+-- Strengths: Reduces rendering load, improves interactivity in real-time applications [S1].
++- Strengths: Reduces rendering load and improves interactivity in real-time applications [S1].
+ - Limitations: May introduce distortion in the 3D reconstruction model if simplification is too aggressive [S1].
+ 
+-**When to Use:**
+-Use when real-time performance is critical and some geometric detail loss is acceptable.
+-
+-**When Not to Use:**
+-Avoid when high-fidelity geometric details are required or when topological integrity is strictly enforced without robust validity checks.
+-
+ ## Background
+-Triangular mesh simplification is a fundamental technique in computer graphics for managing complex 3D models. It is often used in conjunction with isosurface extraction algorithms like Marching Cubes to enhance the interactivity of 3D reconstruction systems [S1]. The method has been developed to address the computational costs associated with rendering high-polygon meshes in real-time applications.
++The method is applied in 3D reconstruction pipelines to reduce polygon counts before isosurface extraction, improving real-time interactivity [S1]. Aggressive simplification may introduce geometric distortion to the reconstruction model [S1].
+ 
+ ## Sources

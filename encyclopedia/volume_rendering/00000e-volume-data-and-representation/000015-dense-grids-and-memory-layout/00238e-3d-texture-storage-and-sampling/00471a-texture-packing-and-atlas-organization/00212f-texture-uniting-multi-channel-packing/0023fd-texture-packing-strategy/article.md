@@ -1,0 +1,77 @@
+# Texture Packing Strategy
+
+Also called: Separate Scalar Textures for Bandwidth Optimization
+
+## Overview
+This method reduces GPU memory bandwidth usage by storing volume attributes in separate scalar textures instead of packing them into a single multi-channel texture [S1, unofficial]. It prevents unnecessary memory transfer when only a subset of attributes is required for a specific computation, such as pressure solving [S1, unofficial]. It differs from [Texture Uniting (Multi-Channel Packing)](2470-texture-uniting-multi-channel-packing.md) by avoiding RGBA aggregation, thereby preventing the transfer of unused channels [S1, unofficial].
+
+## How it works
+**Inputs and Outputs:**
+*   Input: A set of volume attributes (e.g., inside-outside status, velocity, density) derived from a single logical volume dataset [S1, unofficial].
+*   Output: A set of individual 3D scalar textures, one per attribute [S1, unofficial].
+
+**Data Structures:**
+*   Each attribute occupies a distinct 3D texture object [S1, unofficial].
+*   Storage typically uses 16-bit floating point per channel, though arithmetic operations are performed in 32-bit floating point, causing periodic truncation upon write [S1, unofficial].
+*   Layout follows standard 3D texture memory organization [G].
+
+**Steps:**
+1. Identify the volume attributes required for the current rendering or simulation pass [S1, unofficial].
+2. Determine which attributes are accessed frequently versus rarely or never in the current context [S1, unofficial].
+3. Allocate and store frequently accessed attributes (e.g., inside-outside masks for pressure solving) in their own dedicated scalar textures [S1, unofficial].
+4. Do not pack unused attributes (e.g., velocity) into the same texture unit to avoid transferring them [S1, unofficial].
+5. During sampling, access only the relevant scalar textures [S1, unofficial].
+
+**Formulas:**
+*   Packing two attributes into a single RGBA texture increases memory transfer by a factor of 4 if only one attribute is needed [S1, unofficial].
+*   $C_{packed} = 4 \times C_{separate}$ when one channel of a packed texture is unused during sampling [S1, unofficial].
+
+**Parameters:**
+*   Precision: 16-bit storage is used for transfer, but computation runs in 32-bit floating point, leading to truncation on write [S1, unofficial].
+
+**Edge Cases and Pitfalls:**
+*   **Bandwidth Inefficiency:** Packing inside-outside and velocity into one RGBA texture wastes 4x bandwidth when velocity is unused during pressure solving [S1, unofficial].
+*   **Precision Loss:** Using 16-bit storage causes result degradation due to truncation despite 32-bit computation [S1, unofficial].
+
+**Pseudocode:**
+> **Unverified code.** The code below did not pass a test run against a reference implementation, or no test fits it, so it may contain errors.
+
+```python
+def allocate_scalar_textures(attributes, grid_dims):
+    textures = {attr: [0.0] * (grid_dims[0] * grid_dims[1] * grid_dims[2]) for attr in attributes}
+    return textures
+
+def transfer_active_attributes(source_volume, target_textures, active_list):
+    for attr in active_list:
+        if attr in source_volume:
+            target_textures[attr] = source_volume[attr][:]
+
+def sample_active_textures(textures, active_list, voxel_idx):
+    samples = {attr: textures[attr][voxel_idx] for attr in active_list}
+    return samples
+
+# Usage example matching evidence:
+# volume_data = {"inside_outside": [...], "velocity": [...]}
+# textures = allocate_scalar_textures(["inside_outside"], (W, H, D))
+# transfer_active_attributes(volume_data, textures, ["inside_outside"])
+# val = sample_active_textures(textures, ["inside_outside"], idx)
+```
+
+## Subtopics
+
+### [Texture Packing Strategy — Separate Scalar Textures for Bandwidth Optimization](7033-texture-packing-strategy-separate-scalar-textures-for-bandwi.md)
+This variant reduces GPU memory consumption by mapping a single underlying volume dataset to multiple texture units, applying scalar multipliers to adjust lookup values for different physical properties (emission, absorption, reflection) [G]. It avoids storing redundant copies of similar volume attributes by exploiting the fact that they often differ only by scalar factors [G]. Host-to-GPU data transfer is minimized by copying volumes only when modified.
+
+## Operating characteristics
+*   **Time Complexity:** $O(N)$ for data transfer, where $N$ is the number of voxels; transfer time scales linearly with the number of active textures [G].
+*   **Memory Complexity:** $O(N \times A)$, where $A$ is the number of active attributes; unused attributes do not consume bandwidth during sampling [G].
+*   **Strengths:** Minimizes memory bandwidth usage and cache pressure when only a subset of attributes is needed [G].
+*   **Limitations:** Increases the number of texture units required and may raise driver overhead due to multiple bindings [G].
+*   **When to use:** When specific attributes (e.g., inside-outside) are accessed far more frequently than others (e.g., velocity) in the same pass [S1, unofficial].
+*   **When not to use:** When all attributes are accessed equally and frequently, or when texture unit limits are reached [G].
+
+## Background
+Originating from real-time fluid simulation and rendering techniques, this strategy optimizes GPU memory bandwidth for 3D fluids [S1, unofficial]. It is particularly relevant in scenarios like pressure-Poisson equation solving where only specific scalar fields are required [S1, unofficial].
+
+## Sources
+[S1] Real-Time Simulation and Rendering of 3D Fluids, https://wo1fsea.github.io/files/About_NavMesh/P5_GPU_Gems_3_Real-Time_Simulation_and_Rendering_of_3D_Fluids.pdf, fetched 2026-10-27 (unofficial)

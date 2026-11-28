@@ -1,0 +1,320 @@
+Contribute to arbobendik/FlexCudaPT development by creating an account on GitHub.
+
+feat(media): volumes varying from point to point, tracked under a per-instance majorant, with their emission, on OptiX and Vulkan by arbobendik · Pull Request #91 · arbobendik/FlexCudaPT · GitHub
+Skip to content
+You signed in with another tab or window. Reload to refresh your session.
+You signed out in another tab or window. Reload to refresh your session.
+You switched accounts on another tab or window. Reload to refresh your session.
+Dismiss alert
+Conversation
+arbobendik
+commented
+Nov 7, 2026
+•
+edited
+Loading
+Uh oh!
+There was an error while loading. Please reload this page.
+Copy link
+Copy Markdown
+Owner
+Goal 7 (volumes): volumes whose absorption, density, scattering colour or emission vary from point to point, rendered by spectral delta tracking under a per-instance majorant, on OptiX and Vulkan.
+What it does
+Export bounds each varying volume's extinction inside the instance it fills (interval arithmetic over its expression, with point inputs boxed by the instance's bounds), and pipes its texture space and majorant. A volume that no rule bounds is refused with an error naming its material; there is no guessed majorant.
+The renderer tracks a varying medium by spectral delta tracking (Kutz et al. 2017) under that majorant. Shadow rays toward lights, and the camera's own medium up to the first hit, pass through it by ratio tracking (Novák et al. 2014).
+Emission per unit length (Principled Volume emission and blackbody, or an Emission shader), not scaled by density. A blackbody emits a black body's radiance at its temperature, STEFAN_BOLTZMANN T^4 / π, times its Blackbody Intensity at Blender's unit scale of 1e-6 (BLACKBODY_UNIT), and nothing at or below 0 K. Its colour reuses FCPT's existing blackbody(). test.py checks 1500 K at intensity 2 against that derived number, and 0 K against 0. It is gathered at each tentative collision, over the majorant, by the weight reaching it, and added to the pixel as a first hit's emission is, unresampled.
+A medium's material key travels beside Medium (fills(), filling/fillings), so Medium keeps main's 24 bytes.
+Scenes with a varying medium compile from an extended PTX or SPIR-V. Scenes without one compile from a PTX or SPIR-V with that code compiled out, as before (the MEDIUM op bit selects). Both backends compile it out the same way: without EXTENDED, a used() macro makes MEDIUM false at compile time.
+Semantics and limits
+No NEE toward emitting volumes: their light arrives through the tracking above.
+Light sampled inside a varying medium is not shifted by ReSTIR; shifting it read test 3 1.1% dark at 4096 spp.
+Bounds come from the rest mesh, so a deformed mesh can leave its bound.
+The majorant is loose where interval arithmetic is: about 2× the reached extinction on tokyo. It is correct, but costs tentative collisions.
+A primary ray that misses all geometry sees no medium emission.
+A straight-alpha image's bound is loose when its alpha is unread.
+An image read with CLIP extension bounds its texels and the 0 read outside it. An image whose alpha_mode is NONE bounds its alpha as 1, as the renderer reads it.
+Provenance
+The code is our own. None of it is copied from Cycles' svm source (Apache-2.0); the blackbody intensity is derived from the Stefan-Boltzmann law above.
+Evidence (local, NVIDIA; 64 spp 320 px unless stated)
+Rebased onto main 10bad06 at 7342cce (patches unchanged from f2c8655, range-diff all "="). The numbers below were measured on d3a326f over main f36daea; the gates on the rebased tip are in the comment on f2c8655.
+Identity against main f36daea, volume-free scenes: glass, Classroom and the showcase scene are byte-identical on OptiX and Vulkan. Flat Archviz OptiX is byte-identical.
+Flat Archviz Vulkan:
+Main at seed 0 vs seed 1000 gives a floor of RMS 0.0229; branch vs main is RMS 0.0052, mean shift +0.00008 (SE 0.0003).
+Main itself is not run-to-run reproducible here: two builds of main, run back to back at seed 0, differ by RMS 0.0052.
+Tokyo (varying volumes): the final tip is byte-identical on both backends to the pre-fill tip (Medium carrying its key).
+Fidelity was measured on a seeded build of the earlier Medium layout: 1024 spp ReSTIR on and off vs a 4096 spp reference.
+OptiX: mean +0.0003 / −0.0002, block RMS 0.00097 / 0.00051.
+Vulkan: mean −0.0001 / −0.0002, block RMS 0.0011 / 0.0005.
+Not re-run on the final tree.
+Cost, medians of alternating runs with a private filled OptiX cache per build:
+OptiX glass 960×540, 5 runs per arm: main 25.10 ms, branch 25.02 ms (−0.3%).
+Vulkan glass and tokyo: within run-to-run noise of main.
+OptiX tokyo 480×270: +8.8% (51.5 vs 47.35 ms), the cost of tracking its volumes. That was measured before the key moved beside Medium; tokyo renders byte-identically since then, but its time was not re-measured.
+make test on d3a326f: exit 0, 442 renders. It took 17:53 with a warm OptiX cache; two cold-cache runs hit the 2400 s cap at ANISOTROPIC with no failures. Main's cold make test time was not measured.
+Cold load (time to first frame on a fresh private cache, d3a326f vs main f36daea, comment 6706690041):
+Volume-free OptiX: no cost.
+Tokyo: +4.0 s on OptiX and +4.7 s on Vulkan, all of it compile. This is the cold cost of real volumes.
+Vulkan glass: +0.17 s (+2.0%) over 10 rounds, because d3a326f's one SPIR-V carried the MEDIUM path. The volume-free SPIR-V now has it compiled out, as the PTX does (2,487,184 B vs main's 2,483,284 B; the extended SPIR-V is 2,717,864 B). The rebased tip's 10-round cold glass hold is in the gates above.
+Lines: +414/−72 outside src/test.py; src/test.py +200/−3.
+arbobendik
+commented
+Nov 7, 2026
+Copy link
+Copy Markdown
+Owner
+Author
+Cold load, main f36daea vs this PR at d3a326f's tree. Data: .agent/volumes/out/cl1.log (ws3).
+Method:
+Time to the first frame at 480×270 through the viewport path.
+Cold: a fresh private OptiX cache and GL shader disk cache for every run. Warm: the same cache again, right after.
+3 rounds per arm, in ABBA order. OptiX and Vulkan in separate GPU holds.
+GPU power and clocks were logged (out/cl1-power-*.csv): max 165 W / 2805 MHz on OptiX, 139 W / 2662 MHz on Vulkan.
+The compile column is cold minus warm.
+backend
+scene
+cold main → PR
+warm main → PR
+compile main → PR
+OptiX
+glass
+22.85 → 22.83 s (−0.1%)
+1.47 → 1.47
+21.38 → 21.36
+OptiX
+Classroom
+32.96 → 33.19 s (+0.7%)
+11.58 → 11.72
+21.38 → 21.47
+OptiX
+tokyo (varying volumes)
+28.78 → 32.98 s (+14.6%)
+9.40 → 9.60
+19.37 → 23.38 (+4.0 s)
+Vulkan
+glass
+8.45 → 8.70 s (+2.9%)
+0.54 → 0.56
+7.91 → 8.14
+Vulkan
+Classroom
+28.44 → 28.34 s (−0.4%)
+10.56 → 10.69
+17.88 → 17.65
+Vulkan
+tokyo (varying volumes)
+24.11 → 28.91 s (+19.9%)
+7.97 → 8.02
+16.14 → 20.89 (+4.7 s)
+Volume-free scenes:
+No cold-load cost on OptiX: the base PTX has the tracking code compiled out.
+Vulkan glass: +0.25 s (+2.9%). The cold-run spread within an arm is 0.3–0.5 s, and the PR was slower in 2 of the 3 rounds. So a small cost of the SPIR-V carrying the MEDIUM path is not excluded, but it isn't resolved by 3 runs.
+Vulkan Classroom shows none.
+Real volumes (tokyo):
+Cold load costs +4.0 s on OptiX and +4.7 s on Vulkan, all of it compile: the extended PTX, or the pipeline with the tracking path live.
+The load/export part (warm) is +0.2 s / +0.05 s.
+This is the cold-load cost of rendering varying volumes. Main's tokyo doesn't track them.
+arbobendik
+force-pushed
+the
+main
+branch
+from
+75c193a to
+7ef9cda
+Compare
+November 7, 2026 15:55
+arbobendik
+force-pushed
+the
+feat/volumes
+branch
+2 times, most recently
+from
+e79b482 to
+f2c8655
+Compare
+November 7, 2026 18:07
+arbobendik
+commented
+Nov 7, 2026
+Copy link
+Copy Markdown
+Owner
+Author
+Gates on f2c8655 (ws3). The GPU code is identical to e79b482's: f2c8655 changes only src/__init__.py (the Junkshop fix) and src/test.py. So the GPU gates below that ran on e79b482 hold for f2c8655.
+make test (f2c8655, clean tree): exit 0, 442 renders, no errors or asserts.
+Junkshop export (CPU, Blender 5.2.3, under the 16 GiB watchdog):
+e79b482 raised ReferenceError: StructRNA of type Mesh has been removed. The volume bounds read the texture space of an evaluated mesh after to_mesh_clear() had freed it.
+f2c8655 reads it while the mesh is still alive and exports 4.11 GB in 24.8 s, with 1 varying volume.
+The new test (the fog absorber under a Subdivision modifier) raises on e79b482 and passes on f2c8655.
+Must-fail probe (ws1's clip.py, OptiX, 1024 spp, one hold; ratio of the mean to its analytic value):
+case
+d3a326f
+e79b482
+REPEAT
+0.999
+0.999
+CLIP offset 10
+17.63
+1.002
+ALPHA (alpha_mode NONE)
+749.5
+0.999
+CLIP in range
+2.039
+0.997
+The CLIP-in-range expectation counts the clipped three quarters of the view: (0.25·e⁻² + 0.75·e⁻⁴)/π = 0.01514.
+Blackbody: test.py checks 1500 K at intensity 2 against 2·σ·1500⁴·1e-6/π × blackbody(1500), and checks that 0 K gives 0. On CPU, the old export fails the 0 K check (it gives −9.8e-14) and the new one passes.
+OptiX glass at 960×540: 5 alternating rounds per arm, with a private, pre-filled OptiX cache for each build.
+Median frame time: main 35399dc 25.8 ms, branch 26.0 ms (+0.78%; the limit is 1%).
+Branch − main per round: +0.1, +0.2, −0.4, 0.0, +0.9 ms.
+Vulkan cold load, glass: 10 alternating rounds, each on a fresh private cache.
+Branch − main: −0.05 s ± 0.16 SE. The branch was slower in 5 of the 10 rounds; medians 9.11 s (main) and 8.97 s (branch).
+d3a326f had been +0.17 s here. The volume-free SPIR-V is now built the way the volume-free PTX is: the used() macro compiles MEDIUM out on both backends. It is 2,487,184 B, against main's 2,483,284 B.
+Identity at 64 spp and 320 px:
+Byte-identical to main 35399dc: glass on OptiX and Vulkan, Classroom on Vulkan.
+Byte-identical to d3a326f: tokyo on OptiX and Vulkan.
+Flat Archviz on OptiX is not byte-identical, but main does not repeat itself on that scene either. Every run below logged the stand-in ("interim") module for all of its requests:
+main vs main, back to back: RMS 4.2e-7, max 5.4e-5;
+main vs branch: RMS 4.2e-7, max 5.4e-5;
+some runs of main, of the branch, and of their no-FMA builds also land about RMS 0.004 (max 0.28) away from other runs of the same build.
+So the difference from main is within main's own run-to-run variation on this scene. The early-return used() build renders byte-identically to the macro build, so the macro is not the cause. The nondeterminism is on main and is reported separately.
+arbobendik
+commented
+Nov 7, 2026
+•
+edited
+Loading
+Uh oh!
+There was an error while loading. Please reload this page.
+Copy link
+Copy Markdown
+Owner
+Author
+Verification of f2c8655 (on main 35399dc): PASS.
+make test: exit 0. It ran on a cold cache, so the hold was 3600 s.
+Texture-space clip probe (expected value over measured):
+REPEAT 0.999
+CLIP offset 0: 0.997
+CLIP offset 10: 1.0022 ± 0.0036
+alpha NONE: 0.9989 ± 0.006
+d3a326f gave 5.80, 17.63 and 749.5 on the last three.
+Identity:
+glass and Classroom are byte-identical to main on OptiX and on Vulkan.
+tokyo on Vulkan is byte-identical to d3a326f.
+Junkshop export at 16 spp: exits 0 in 120 s. Mean 0.0709, 96% of pixels non-zero. e79b482 failed here.
+Flat scene:
+OptiX against main: RMS 8e-6. Two main runs against each other differ by RMS 0.0083, so the difference is under the noise floor.
+Vulkan against main: RMS 0.00524. Two main runs differ by 0.00609.
+tokyo fidelity at 1024 spp against a 4096 spp reference (mean, p99, block RMS):
+ReSTIR on
+ReSTIR off
+OptiX
+0.0003 / 0.0296 / 0.000973
+-0.00016 / 0.0173 / 0.000514
+Vulkan
+-0.00013 / 0.0298 / 0.001086
+-0.00018 / 0.0174 / 0.000531
+OptiX glass speed (ABBA, 960×540, 1000 redraws, 5 runs each): main 25.60 ms, this branch 25.60 ms. Change +0.00%.
+Vulkan glass cold start with fresh caches (10 runs each): main 8.75 s, this branch 8.89 s. Change +1.5%.
+Commit sizes: b68b728 128, ef282e5 161, 24848ff 25, 18f3659 121, 39c5c68 44, faa0b78 99. All are under 200.
+Note, withdrawn: I had read UPDATE as leaving the majorant stale when a volume whose density is driven by world Position moves. That is not the case. A moved object that holds a varying volume puts it in varying (init.py:1807-1816). Then :1821-1823 re-exports the whole scene, which rebuilds the POSITION box. So UPDATE never carries such a volume.
+arbobendik
+added 9 commits
+November 8, 2026 00:44
+feat(export): bound each volume's extinction inside the instance it f…
+…
+176c9b0
+```
+…ills and pipe its texture space and majorant, 0 unless it varies, a varying one no rule bounds refused by name
+```
+feat(media): track a volume varying from point to point by its volume…
+…
+62e58c2
+```
+… shaded inside, scattering by spectral delta tracking under its majorant, a scene without such volumes compiled as before
+```
+feat(build): compile scenes with varying media from an extended PTX, …
+…
+3eff9c9
+```
+…those without from one their code is compiled out of, as before
+```
+chore(test): render a volume varying from point to point by its densi…
+…
+486861a
+```
+…ty's integral through it, on both backends
+```
+feat(media): pass light through a volume varying from point to point …
+…
+5590b34
+```
+…by ratio tracking under its majorant, toward lights and from a camera inside it
+```
+chore(test): render light through a varying volume to its scattering,…
+…
+016ee18
+```
+… a floor through one clear at a face and a volume of noise under its bound, on both backends
+```
+feat(export): pipe the emission per unit length of a volume, Principl…
+…
+16bedc3
+```
+…ed Volume's, its blackbody's by a black body's radiance at its temperature, or an Emission shader's, unscaled by density, a volume emitting tracked as varying under a majorant of at least four collisions across it
+```
+feat(media): gather a varying volume's emission at each tentative col…
+…
+29858c4
+```
+…lision of its tracking, over its majorant by the weight reaching it, the camera's own medium's on its way to the first hit too, added to the pixel as its first hit's emission is, unresampled
+```
+chore(test): render a volume emitting by its integral along a varying…
+…
+7342cce
+```
+… and a constant density, a camera inside a varying absorber and an emitting volume from its near plane, and a volume reading an image of straight alpha, on both backends
+```
+arbobendik
+force-pushed
+the
+feat/volumes
+branch
+from
+f2c8655 to
+7342cce
+Compare
+November 7, 2026 23:45
+Hide details
+View details
+arbobendik
+merged commit 7342cce
+into
+main
+Nov 7, 2026
+1 check passed
+Uh oh!
+There was an error while loading. Please reload this page.
+arbobendik
+deleted the
+feat/volumes
+branch
+November 7, 2026 23:46
+arbobendik
+mentioned this pull request
+Nov 8, 2026
+fix(renderer): cold load, the stand-in and the scene's module compiled once as callables, steps piped first, headless awaiting its own module
+#95
+Merged
+Sign up for free
+to join this conversation on GitHub.
+Already have an account?
+Sign in to comment
+Uh oh!
+There was an error while loading. Please reload this page.
+Labels
+None yet
+1 participant
+Add this suggestion to a batch that can be applied as a single commit.This suggestion is invalid because no changes were made to the code.Suggestions cannot be applied while the pull request is closed.Suggestions cannot be applied while viewing a subset of changes.Only one suggestion per line can be applied in a batch.Add this suggestion to a batch that can be applied as a single commit.Applying suggestions on deleted lines is not supported.You must change the existing code in this line in order to create a valid suggestion.Outdated suggestions cannot be applied.This suggestion has been applied or marked resolved.Suggestions cannot be applied from pending reviews.Suggestions cannot be applied on multi-line comments.Suggestions cannot be applied while the pull request is queued to merge.Suggestion cannot be applied right now. Please check back later.
+You can’t perform that action at this time.

@@ -1,0 +1,432 @@
+--- v002.md
++++ v003.md
+@@ -1,188 +1,266 @@
+ # DepthSplat
++
++
+ ## Overview
+-DepthSplat is a feed-forward method for 3D Gaussian splatting reconstruction that integrates pre-trained monocular depth features into a multi-view cost volume framework [S1]. It solves the problem of robust depth estimation in challenging scenes (occlusions, low-texture, non-Lambertian surfaces) where standard multi-view stereo fails, and scale ambiguities where monocular estimation fails [S1]. Unlike TranSplat, which refines coarse depth with monocular features (prone to error propagation), DepthSplat combines cost volumes and monocular features early in the pipeline [S1]. Unlike GS-LRM, it relies on explicit feature matching rather than pure data-driven priors, reducing training compute requirements significantly [S1].
++DepthSplat is a feed-forward method that reconstructs 3D Gaussian splatting representations from multi-view images by integrating pre-trained monocular depth features into a multi-view cost volume framework [S1]. It solves the problem of robust depth estimation in challenging scenes (occlusions, low-texture, non-Lambertian surfaces) where standard multi-view stereo fails, and scale ambiguity where monocular estimation fails [S1]. Unlike TranSplat, which uses monocular features to refine coarse depth (vulnerable to error propagation), DepthSplat combines cost volumes and monocular features early in the pipeline [S1]. Unlike GS-LRM, which discards explicit feature matching for data-driven priors, DepthSplat uses explicit feature matching and is significantly cheaper to train (4 GPUs vs 64 A100s) [S1].
++
+ ## How it works
+-**Inputs:** $N$ input images $\{I_i\}_{i=1}^N$ with resolution $H \times W$, and corresponding camera projection matrices $\{P_i\}_{i=1}^N$ (derived from intrinsic and extrinsic parameters) [S1].
+-
+-**Outputs:** A set of 3D Gaussians $\mathcal{G} = \{\mu_j, \alpha_j, \Sigma_j, c_j\}$ for each pixel $j$ in the reference views, where $\mu_j$ is the mean (3D position), $\alpha_j$ is opacity, $\Sigma_j$ is covariance, and $c_j$ is color [S1].
++**Inputs:** $N$ input images $\{I_i\}_{i=1}^N$ with corresponding projection matrices $\{P_i\}_{i=1}^N$. Each image $I_i \in \mathbb{R}^{H \times W \times 3}$.
++**Outputs:** A set of 3D Gaussians $\{(\mu_j, \alpha_j, \Sigma_j, c_j)\}_{j=1}^{H \times W}$ per view, where $\mu_j$ is position, $\alpha_j$ is opacity, $\Sigma_j$ is covariance, and $c_j$ is color. These are rendered to novel views.
+ 
+ **Data Structures:**
+-*   **Monocular Features:** Extracted per-view using a Vision Transformer (ViT) [S1]. Dimensions: $N \times C \times \frac{H}{s} \times \frac{W}{s}$, where $C$ is feature dimension and $s$ is downsampling factor [S1].
+-*   **Cost Volume:** For each view $i$, a 3D tensor $C_i \in \mathbb{R}^{\frac{H}{s} \times \frac{W}{s} \times D}$, where $D$ is the number of depth candidates [S1].
+-*   **Depth Map:** Predicted per-view dense depth $D_i \in \mathbb{R}^{H \times W}$ [S1].
++1.  **Monocular Features:** Extracted per view using a Vision Transformer (ViT).
++2.  **Cost Volume:** $C_i \in \mathbb{R}^{\frac{H}{s} \times \frac{W}{s} \times D}$ for each view $i$.
++3.  **Depth Map:** $D_i \in \mathbb{R}^{H \times W}$.
++4.  **Gaussian Parameters:** Predicted in parallel to depth.
+ 
+ **Parameters:**
+-*   **Downsampling factor ($s$):** Controlled by stride-2 $3 \times 3$ convolutions [S1]. $s=4$ with two convolutions; $s=8$ with three [S1].
+-*   **Depth candidates ($D$):** Uniformly sampled from near/far depth ranges [S1].
+-*   **Multi-view Transformer:** Contains six stacked self- and cross-attention layers [S1].
+-*   **Neighbor Selection:** For $N > 2$, top-2 nearest neighboring views are selected based on camera distance to the reference view [S1].
++*   $N$: Number of input views.
++*   $D$: Number of depth candidates.
++*   $s$: Downsampling factor. $s=4$ if two stride-2 $3 \times 3$ convolutions are used; $s=8$ if three are used [S1].
++*   Multi-view Transformer: Contains six stacked self- and cross-attention layers [S1].
+ 
+ **Steps:**
+-1.  **Monocular Feature Extraction:** For each input image $I_i$, extract features $F_i$ using a pre-trained monocular depth model (ViT-based) [S1].
++
++1.  **Monocular Feature Extraction:**
++    For each view $i$, extract features $F_i$ using a pre-trained monocular depth model (ViT-based) [S1].
++
+ 2.  **Cost Volume Construction (Multi-View Branch):**
+-    a. For each reference view $i$, uniformly sample $D$ depth candidates $\{d_m\}_{m=1}^D$ from the near/far ranges [S1].
+-    b. For each neighbor view $j$ (all views if $N \le 2$; top-2 nearest if $N > 2$), warp the features $F_j$ to view $i$ using $P_i$ and each depth candidate $d_m$ to obtain warped features $F_{j \to i}^m$ [S1].
+-    c. Compute feature correlations using the dot-product between $F_i$ and $F_{j \to i}^m$ [S1].
+-    d. If $N > 2$, average the correlation values from the two selected neighbor views [S1].
+-    e. Stack correlations for all $d_m$ to form cost volume $C_i \in \mathbb{R}^{\frac{H}{s} \times \frac{W}{s} \times D}$ [S1].
+-3.  **Feature Concatenation:** Concatenate the multi-view cost volumes $C_i$ with the extracted monocular features $F_i$ [S1].
+-4.  **Depth Regression:** Pass the concatenated features through a 2D U-Net architecture followed by a softmax layer to predict dense per-pixel depth $D_i$ [S1].
+-5.  **Gaussian Center Unprojection:** Unproject the predicted depth maps $D_i$ to 3D space using camera parameters $P_i$ to obtain Gaussian centers $\mu_j$ [S1].
+-6.  **Remaining Parameter Prediction:** Predict opacity $\alpha_j$, covariance $\Sigma_j$, and color $c_j$ using an additional lightweight network/head operating in parallel with the depth regression [S1].
+-7.  **Rendering:** Render novel views using the splatting operation with the predicted 3D Gaussians [S1].
++    For each reference view $i$:
++    a. Uniformly sample $D$ depth candidates $\{d_m\}_{m=1}^D$ from near/far depth ranges [S1].
++    b. For each neighboring view $j$ (see Step 2c), warp features $F_j$ to view $i$ using $P_i$ and each depth candidate $d_m$ to obtain warped features $\{F_{j \to i}^m\}_{m=1}^D$ [S1].
++    c. **Neighbor Selection:** If $N > 2$, select the top-2 nearest neighboring views based on camera distance to reference view $i$. Compute correlations only for these views [S1].
++    d. Measure feature correlations via dot-product between $F_i$ and warped features $F_{j \to i}^m$ [S1].
++    e. If multiple neighbors are used, combine correlation values with averaging [S1].
++    f. Stack correlations to form cost volume $C_i \in \mathbb{R}^{\frac{H}{s} \times \frac{W}{s} \times D}$ [S1].
++
++3.  **Feature Concatenation:**
++    Concatenate the multi-view cost volumes $C_i$ with the extracted monocular features $F_i$ [S1].
++
++4.  **Depth Regression:**
++    Perform depth regression using a 2D U-Net architecture followed by a softmax layer to predict dense per-pixel depth $D_i$ [S1].
++
++5.  **Gaussian Unprojection and Parameter Prediction:**
++    a. Unproject the predicted depth maps $D_i$ to 3D space using camera parameters $P_i$ to obtain Gaussian centers $\mu_j$ [S1].
++    b. Predict remaining Gaussian parameters (opacity $\alpha_j$, covariance $\Sigma_j$, color $c_j$) using an additional lightweight network/head in parallel with the depth regression [S1].
++
++6.  **Rendering:**
++    Render novel views using the splatting operation with the predicted 3D Gaussians [S1].
+ 
+ **Pseudocode:**
++
+ ```python
+ import torch
++import torch.nn as nn
+ import torch.nn.functional as F
+ 
+-def DepthSplatForward(images, projection_matrices, near, far, D, s):
+-    """
+-    Forward pass for DepthSplat.
+-    images: (N, 3, H, W)
+-    projection_matrices: (N, 3, 4)
+-    near, far: float, depth range bounds
+-    D: int, number of depth candidates
+-    s: int, downsampling factor
+-    Returns: gaussian_centers (N, H, W, 3), gaussian_params (N, 4, H_ds, W_ds)
+-    """
+-    N, _, H, W = images.shape
+-    H_ds, W_ds = H // s, W // s
+-
+-    # Step 1: Monocular Feature Extraction
+-    # Pre-trained ViT encoder extracts features
+-    mono_features = MonocularEncoder(images)  # (N, C, H_ds, W_ds)
+-
+-    # Step 2: Cost Volume Construction
+-    cost_volumes = []
+-    # Select neighbors: all if N<=2, else top-2 by camera distance
+-    neighbors = SelectNeighbors(projection_matrices, N)
+-
+-    for i in range(N):
+-        F_i = mono_features[i]  # (C, H_ds, W_ds)
+-        C_i = torch.zeros((H_ds, W_ds, D), device=images.device)
+-        depth_candidates = torch.linspace(near, far, D, device=images.device)  # (D,)
+-
+-        for j in neighbors[i]:
+-            F_j = mono_features[j]  # (C, H_ds, W_ds)
+-            # Warp F_j to view i using plane-sweep stereo
+-            warped = WarpFeatures(F_j, projection_matrices[i], projection_matrices[j], depth_candidates)
+-            # warped shape: (D, C, H_ds, W_ds)
+-
+-            # Dot-product correlation
+-            F_i_flat = F_i.view(-1, H_ds * W_ds)  # (C, H_ds*W_ds)
+-            warped_flat = warped.view(D, -1, H_ds * W_ds)  # (D, C, H_ds*W_ds)
+-            corr = torch.bmm(warped_flat, F_i_flat.unsqueeze(-1)).squeeze(-1)  # (D, H_ds*W_ds)
+-            corr = corr.view(D, W_ds, H_ds).permute(1, 2, 0)  # (H_ds, W_ds, D)
+-
+-            C_i = C_i + corr
+-
+-        if len(neighbors[i]) > 1:
+-            C_i = C_i / len(neighbors[i])
+-        cost_volumes.append(C_i)
+-
+-    # Step 3: Feature Concatenation
+-    cost_volumes_tensor = torch.stack(cost_volumes, dim=0).permute(0, 3, 1, 2)  # (N, D, H_ds, W_ds)
+-    combined = torch.cat([cost_volumes_tensor, mono_features], dim=1)  # (N, D+C, H_ds, W_ds)
+-
+-    # Step 4: Depth Regression
+-    depth_logits = DepthUNet(combined)  # (N, D, H_ds, W_ds)
+-    depth_probs = F.softmax(depth_logits, dim=1)
+-    depth_map_ds = torch.sum(depth_probs * depth_candidates.view(1, -1, 1, 1), dim=1)  # (N, H_ds, W_ds)
+-    depth_map = F.interpolate(depth_map_ds.unsqueeze(1), size=(H, W), mode='bilinear', align_corners=False).squeeze(1)  # (N, H, W)
+-
+-    # Step 5: Gaussian Center Unprojection
+-    gaussian_centers = []
+-    for i in range(N):
+-        centers = UnprojectDepth(depth_map[i], projection_matrices[i], H, W)  # (H, W, 3)
+-        gaussian_centers.append(centers)
+-
+-    # Step 6: Remaining Parameter Prediction
+-    gaussian_params = GaussianHead(mono_features)  # (N, 4, H_ds, W_ds) -> alpha, scale(3), color(3)
+-
+-    return gaussian_centers, gaussian_params
+-
+-def SelectNeighbors(projection_matrices, N):
+-    """Select top-2 nearest neighbors based on camera distance."""
+-    # Extract camera centers from projection matrices (last column of P)
+-    centers = projection_matrices[:, :, 3]  # (N, 3)
+-    dists = torch.cdist(centers, centers)  # (N, N)
+-    neighbors = []
+-    for i in range(N):
+-        sorted_idx = torch.argsort(dists[i])
+-        # Exclude self (index 0) and take top-2
+-        neighbors.append(sorted_idx[1:3].tolist())
+-    return neighbors
+-
+-def WarpFeatures(F_j, P_ref, P_src, depth_candidates):
+-    """Warp source features to reference view using depth candidates."""
+-    C, H, W = F_j.shape
+-    D = len(depth_candidates)
+-    # Create reference pixel grid
+-    y, x = torch.meshgrid(torch.arange(H), torch.arange(W), indexing='ij')
+-    coords_ref = torch.stack([x, y, torch.ones_like(x)], dim=-1).float()  # (H, W, 3)
+-    coords_ref = coords_ref.view(1, 1, -1, 3).expand(N if 'N' in locals() else 1, 1, -1, 3)
+-    
+-    # Back-project to 3D using P_ref and depth
+-    # X_3d = P_ref^{-1} * [x, y, 1]^T * d_m
+-    # Project to source view using P_src
+-    # u_src, v_src = P_src * X_3d
+-    # Sample F_j at (u_src, v_src)
+-    # Standard plane-sweep warping implementation using grid_sample
+-    # For brevity, using standard coordinate transformation math
+-    warped = torch.zeros((D, C, H, W), device=F_j.device)
+-    for m in range(D):
+-        d = depth_candidates[m]
+-        # Back-project reference pixels to 3D
+-        pts_ref = coords_ref[0, 0].transpose(0, 1).unsqueeze(0)  # (1, 3, H*W)
+-        pts_3d = torch.inverse(P_ref) @ torch.cat([pts_ref, torch.ones(1, 1, H*W, device=pts_ref.device)], dim=1)
+-        pts_3d = pts_3d * d
+-        # Project to source view
+-        pts_src = P_src @ pts_3d
+-        u = pts_src[0] / pts_src[2]
+-        v = pts_src[1] / pts_src[2]
+-        # Normalize to [-1, 1] for grid_sample
+-        u_norm = 2 * u / W - 1
+-        v_norm = 2 * v / H - 1
+-        grid = torch.stack([u_norm, v_norm], dim=-1).view(1, H, W, 2)
+-        warped[m] = F.grid_sample(F_j.unsqueeze(0), grid, align_corners=True).squeeze(0)
+-    return warped
+-
+-def UnprojectDepth(depth_map, P, H, W):
+-    """Unproject depth map to 3D points."""
+-    y, x = torch.meshgrid(torch.arange(H), torch.arange(W), indexing='ij')
+-    coords = torch.stack([x.float(), y.float(), torch.ones_like(x)], dim=-1)  # (H, W, 3)
+-    pts_2d = coords.view(1, 1, -1, 3).transpose(1, 2)  # (1, H*W, 3)
+-    pts_3d = torch.inverse(P) @ torch.cat([pts_2d, torch.ones(1, H*W, 1, device=coords.device)], dim=2)
+-    pts_3d = pts_3d * depth_map.view(1, H*W, 1, 1)
+-    return pts_3d[0].transpose(0, 1).view(H, W, 3)
+-
+-class MonocularEncoder(torch.nn.Module):
+-    def __init__(self): pass
+-    def forward(self, x): return x  # Pre-trained ViT backbone [S1]
+-
+-class DepthUNet(torch.nn.Module):
+-    def __init__(self, in_ch, out_ch): pass
+-    def forward(self, x): return x  # 2D U-Net architecture [S1]
+-
+-class GaussianHead(torch.nn.Module):
+-    def __init__(self, in_ch, out_ch): pass
+-    def forward(self, x): return x  # Lightweight parallel head [S1]
++class DepthSplat:
++    def __init__(self, num_views, num_depth_candidates, downsampling_factor=4):
++        """
++        Initialize DepthSplat.
++        
++        Args:
++            num_views (int): N, number of input views.
++            num_depth_candidates (int): D, number of depth samples.
++            downsampling_factor (int): s, downsampling factor for cost volume.
++        """
++        self.num_views = num_views
++        self.num_depth_candidates = num_depth_candidates
++        self.downsampling_factor = downsampling_factor
++        
++        # Pre-trained monocular depth encoder (ViT)
++        # [G] Initialized with weights from a pre-trained monocular depth model
++        self.monocular_encoder = MonocularViTEncoder()
++        
++        # Multi-view Transformer with 6 stacked self/cross-attention layers
++        # [G] Initialized with standard transformer weights
++        self.multi_view_transformer = MultiViewTransformer(num_layers=6)
++        
++        # 2D U-Net for depth regression
++        # [G] Standard U-Net architecture
++        self.depth_unet = DepthUNet()
++        
++        # Lightweight head for Gaussian parameters (alpha, sigma, color)
++        # [G] Standard MLP or small CNN head
++        self.gaussian_head = GaussianParamHead()
++
++    def forward(self, images, projection_matrices):
++        """
++        Forward pass for feed-forward reconstruction.
++        
++        Args:
++            images (Tensor): [N, 3, H, W] input images.
++            projection_matrices (Tensor): [N, 3, 4] projection matrices P_i.
++            
++        Returns:
++            Gaussians: List of Gaussian parameters for rendering.
++        """
++        N, _, H, W = images.shape
++        
++        # Step 1: Monocular Feature Extraction
++        # Extract features F_i for each view
++        monocular_features = self.monocular_encoder(images) # [N, C, H/s, W/s]
++        
++        # Step 2: Cost Volume Construction
++        cost_volumes = []
++        
++        # Determine neighbors for each view
++        # [G] Assuming projection_matrices contain extrinsic info to compute distances
++        # Select top-2 nearest neighbors for each view i
++        neighbors = self._select_top_2_neighbors(projection_matrices)
++        
++        for i in range(N):
++            ref_feat = monocular_features[i] # [C, H/s, W/s]
++            correlations = []
++            
++            # Get neighbor indices for view i
++            neighbor_indices = neighbors[i]
++            
++            for j in neighbor_indices:
++                # Warp features F_j to view i using P_i and depth candidates
++                # [G] Requires depth candidates d_m and warping function
++                warped_feats = self._warp_features(
++                    monocular_features[j], 
++                    projection_matrices[i], 
++                    projection_matrices[j],
++                    self.num_depth_candidates
++                ) # [D, C, H/s, W/s]
++                
++                # Dot-product correlation between ref_feat and warped_feats
++                # [G] Dot product over feature dimension C
++                corr = self._compute_correlation(ref_feat, warped_feats) # [D, H/s, W/s]
++                correlations.append(corr)
++            
++            # Average correlations if multiple neighbors
++            if len(correlations) > 0:
++                avg_corr = torch.stack(correlations).mean(dim=0) # [D, H/s, W/s]
++            else:
++                avg_corr = torch.zeros(self.num_depth_candidates, H//self.downsampling_factor, W//self.downsampling_factor)
++                
++            cost_volumes.append(avg_corr)
++            
++        cost_volumes = torch.stack(cost_volumes) # [N, D, H/s, W/s]
++        
++        # Step 3: Feature Concatenation
++        # Concatenate cost volumes with monocular features
++        # [G] Ensure spatial dimensions match; monocular features are already downsampled
++        combined_features = torch.cat([monocular_features, cost_volumes], dim=1) # [N, C+D, H/s, W/s]
++        
++        # Step 4: Depth Regression
++        # 2D U-Net followed by softmax
++        depth_logits = self.depth_unet(combined_features) # [N, D, H, W] (upsampled)
++        depth_probs = F.softmax(depth_logits, dim=1) # [N, D, H, W]
++        
++        # [G] Discrete depth regression: sum over depth candidates weighted by probabilities
++        # depth_candidates_tensor = torch.linspace(near, far, self.num_depth_candidates).to(images.device)
++        # depth_maps = torch.sum(depth_probs * depth_candidates_tensor.view(1, -1, 1, 1), dim=1)
++        depth_maps = self._regress_depth(depth_probs) # [N, H, W]
++        
++        # Step 5: Gaussian Unprojection and Parameter Prediction
++        # Unproject depth maps to 3D centers
++        gaussian_centers = self._unproject_depth(depth_maps, projection_matrices) # [N, H, W, 3]
++        
++        # Predict remaining parameters in parallel
++        # [G] Head takes combined features or depth maps as input
++        gaussian_params = self.gaussian_head(combined_features) # [N, H, W, params_dim]
++        
++        # Parse parameters: alpha, sigma, color
++        # [G] Specific layout depends on implementation, assuming standard order
++        alphas = gaussian_params[..., 0]
++        sigmas = gaussian_params[..., 1:4] # e.g., 3 values for covariance
++        colors = gaussian_params[..., 4:7] # e.g., 3 values for RGB
++        
++        return gaussian_centers, alphas, sigmas, colors
++
++    def _select_top_2_neighbors(self, projection_matrices):
++        """
++        Select top-2 nearest neighboring views based on camera distance.
++        """
++        # [G] Compute pairwise distances between camera centers
++        # Extract camera centers from projection matrices
++        # [G] Implementation detail: usually extrinsic part of P_i
++        camera_centers = self._get_camera_centers(projection_matrices)
++        distances = torch.cdist(camera_centers, camera_centers)
++        
++        # Get indices of top-2 nearest neighbors for each view
++        # Exclude self (distance 0)
++        N = distances.shape[0]
++        neighbors = []
++        for i in range(N):
++            dists = distances[i].clone()
++            dists[i] = float('inf') # Exclude self
++            _, top_k_indices = torch.topk(dists, k=2, largest=False)
++            neighbors.append(top_k_indices.tolist())
++        return neighbors
++
++    def _warp_features(self, src_feat, P_ref, P_src, num_depth_candidates):
++        """
++        Warp source features to reference view using depth candidates.
++        """
++        # [G] Standard plane-sweep stereo warping
++        # 1. Unproject depth candidates to 3D rays/points in reference frame
++        # 2. Project 3D points to source view using P_src
++        # 3. Sample src_feat at projected coordinates
++        pass
++
++    def _compute_correlation(self, ref_feat, warped_feats):
++        """
++        Compute dot-product correlation.
++        """
++        # [G] Dot product over feature dimension
++        # ref_feat: [C, H, W]
++        # warped_feats: [D, C, H, W]
++        # Result: [D, H, W]
++        return torch.einsum('chw,dchw->dhw', ref_feat, warped_feats)
++
++    def _regress_depth(self, depth_probs):
++        """
++        Regress continuous depth from probability distribution.
++        """
++        # [G] Weighted sum over depth candidates
++        # depth_probs: [N, D, H, W]
++        # depth_candidates: [D]
++        pass
++
++    def _unproject_depth(self, depth_maps, projection_matrices):
++        """
++        Unproject depth maps to 3D space.
++        """
++        # [G] Use inverse projection matrices to convert 2D pixels + depth to 3D
++        pass
++
++    def _get_camera_centers(self, projection_matrices):
++        """
++        Extract camera centers from projection matrices.
++        """
++        # [G] P = K [R|t], center = -R^T t
++        pass
+ ```
++
+ ## Subtopics
+ 
+ ### [Gaussian Graph Network](18863-gaussian-graph-network.md)
+-A feed-forward method that generates efficient and generalizable 3D Gaussian representations from multi-view images by modeling relations between Gaussian groups from different views using a Gaussian Graph structure, enabling message passing and aggregation at the Gaussian level. Unlike previous methods that simply combine pixel-aligned Gaussians from multiple views without modeling relations, GGN explicitly models these relations via Gaussian Graphs, allowing each Gaussian to benefit from its connected Gaussian groups through feature fusion. This approach mitigates artifacts and extra memory costs associated with naive combination, enabling the model to benefit from increased input views rather than suffering performance degradation. Choose it when explicit Gaussian-level relation modeling is needed to handle multi-view consistency and reduce artifacts. [Gaussian Graph Network](18863-gaussian-graph-network.md)
++Gaussian Graph Network (GGN) is a feed-forward method that generates efficient and generalizable 3D Gaussian representations from multi-view images by modeling relations between Gaussian groups from different views using a Gaussian Graph structure. It solves the problem of artifacts and excessive memory costs caused by previous methods that simply combine pixel-aligned Gaussians from multiple views without capturing their inter-view relations. Unlike sibling methods that treat multi-view Gaussians as independent sets, GGN performs message passing and aggregation at the Gaussian level, allowing each Gaussian to benefit from connected groups in other views.
+ 
+ ## Operating characteristics
+-*   **Time Complexity:** The method is feed-forward, offering fast reconstruction [S1]. Reconstruction speed is 0.6 seconds for 12 input views at 512x960 resolution [S1].
+-*   **Memory Complexity:** Depends on the number of depth candidates $D$ and the cost volume size $\frac{H}{s} \times \frac{W}{s} \times D$ [S1]. The multi-view transformer scales with the number of views, but neighbor selection limits this to top-2 neighbors for $N > 2$ [S1].
+-*   **Training Compute:** Significantly cheaper than data-heavy methods like GS-LRM [S1]. Trained in 2 days with 4 GPUs, compared to 64 A100s for GS-LRM [S1].
+-*   **Strengths:** Robust to occlusions, low-textured areas, and non-Lambertian surfaces by augmenting multi-view matching with monocular features [S1]. Maintains multi-view consistency while leveraging monocular priors [S1].
+-*   **Limitations:** Multi-view depth estimation still fails in extreme occlusions or textureless regions without monocular augmentation [S1]. Monocular features alone suffer from scale ambiguity, which is mitigated but not eliminated by the multi-view constraint [S1].
+-*   **When to Use:** Large-scale scene reconstruction from multiple views where robustness to challenging textures is required, and computational resources for training are limited [S1].
+-*   **When Not to Use:** Single-image reconstruction (monocular depth alone is insufficient) or scenarios where per-scene optimization is acceptable and higher fidelity is needed [S1].
++**Time and Memory Complexity:**
++*   **Training Cost:** Significantly cheaper than data-driven methods like GS-LRM. Trained in 2 days with 4 GPUs, compared to 64 A100 GPUs for 2 days for GS-LRM [S1].
++*   **Inference Speed:** Fast feed-forward reconstruction. Achieves 0.6 seconds for reconstruction from 12 input views at 512x960 resolution [S1].
++*   **Scalability:** For $N > 2$ views, the method selects only the top-2 nearest neighboring views for cost volume computation, making it tractable and scalable to larger numbers of input views [S1].
++
++**Strengths and Limitations:**
++*   **Strengths:** Robust in challenging situations such as low-textured regions and reflective surfaces by augmenting multi-view cost volumes with monocular features [S1]. Maintains multi-view consistency while leveraging monocular priors [S1]. Enables unsupervised pre-training of depth models using Gaussian splatting as a pre-training objective [S1].
++*   **Limitations:** Multi-view depth estimation still fundamentally struggles with occlusions, low-textured areas, and non-Lambertian surfaces, though DepthSplat mitigates this [S1]. Monocular depth estimation inherently suffers from scale ambiguities, which DepthSplat addresses by using monocular features only as an augmentation to multi-view matching [S1].
++
++**When to Use:**
++*   Use when robust multi-view depth prediction is needed for feed-forward 3D Gaussian splatting reconstruction, especially in scenes with low texture or reflections [S1].
++*   Use when computational resources for training are limited compared to methods like GS-LRM [S1].
++
++**When Not to Use:**
++*   Avoid if explicit feature matching is not desired or if the scene has severe occlusions that cannot be handled by the top-2 neighbor selection strategy [S1].
++
+ ## Background
+-DepthSplat was introduced to connect Gaussian splatting and depth estimation, studying their interactions [S1]. It addresses the limitations of traditional multi-view stereo (failure in occlusions/low-texture) and monocular depth estimation (scale ambiguity) [S1]. The method was trained on TartanAir, ScanNet, RealEstate10K, and DL3DV datasets [S1]. It demonstrates that Gaussian splatting can serve as an unsupervised pre-training objective for learning powerful depth models from large-scale multi-view posed datasets [S1].
++DepthSplat was introduced to connect Gaussian splatting and depth estimation, studying their interactions [S1]. It addresses the isolation in which these two techniques are typically studied [S1]. The method leverages pre-trained monocular depth features to augment multi-view feature matching, leading to high-quality feed-forward 3D Gaussian splatting reconstructions [S1]. It also demonstrates that Gaussian splatting can serve as an unsupervised pre-training objective for learning powerful depth models from large-scale multi-view posed datasets [S1]. The method was validated on TartanAir, ScanNet, RealEstate10K, and DL3DV datasets, achieving state-of-the-art performance on ScanNet and RealEstate10K [S1]. It contrasts with TranSplat, which uses monocular features to refine coarse depth, and Flash3D, which targets single-image reconstruction [S1].
++
+ ## Sources
+ [S1] DepthSplat: Connecting Gaussian Splatting and Depth, https://doi.org/10.1109/cvpr52734.2025.01534, fetched 2026-10-26

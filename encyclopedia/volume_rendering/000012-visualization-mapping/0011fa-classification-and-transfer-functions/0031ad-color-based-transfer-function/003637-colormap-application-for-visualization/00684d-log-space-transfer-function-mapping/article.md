@@ -1,0 +1,94 @@
+# Log-Space Transfer Function Mapping
+
+Also called: Log-Scale Mapping for Transfer Functions, Map Control Points to Log Space, Volume Rendering with Custom Transfer Function
+
+## Overview
+Log-Space Transfer Function Mapping applies a logarithmic transformation to the data domain before mapping values to a colormap, preserving relative positions of control points across orders of magnitude [S2]. This method is distinct from linear transfer function mapping by compressing high dynamic range data, making it suitable for visualizing fields like density where values span several powers of ten [S1]. It builds on [Colormap Application for Visualization](7714-colormap-application-for-visualization.md) by modifying the input domain scaling.
+
+## How it works
+**Inputs:**
+- A render source containing a transfer function object.
+- A target colormap identifier (e.g., "RdBu_r").
+- A scale factor controlling the steepness of the transfer function (typical value: 30.0) [S1].
+- Lower and upper bounds of the data range to map, specified as physical values (e.g., density in g/cm³) [S1].
+
+**Outputs:**
+- A transfer function configured with control points mapped in log10 space.
+- A flag indicating whether the transfer function uses log or linear scaling.
+
+**Data Structures:**
+- `transfer_function`: An object managing the mapping from data values to RGBA colors.
+- `RGBPoints`: A flattened list of tuples `(data-value, red, green, blue)` defining the color mapping [S2].
+- `UseLogScale`: A boolean or integer flag (1 for log, 0 for linear) [S2].
+
+**Steps:**
+1. Retrieve the render source from the scene [S1].
+2. Clear any existing transfer function configuration [S1].
+3. Transform the physical lower and upper bounds to log10 space:
+   $$ v_{log} = \log_{10}(v_{physical}) $$
+   where $v_{physical}$ is the data value (e.g., density) [S1].
+4. Map the log-transformed range to the specified colormap using a scale factor. This step internally sets the `RGBPoints` and enables log scaling [S1, S2].
+5. Alternatively, if manual control is required:
+   a. Call `MapControlPointsToLogSpace()` to transform existing control points [S2].
+   b. Set `UseLogScale = 1` to activate log-space interpolation [S2].
+   c. To revert, call `MapControlPointsToLinearSpace()` and set `UseLogScale = 0` [S2].
+
+**Pseudocode:**
+> **Unverified code.** The code below did not pass a test run against a reference implementation, or no test fits it, so it may contain errors.
+
+```python
+import numpy as np
+
+def apply_log_space_transfer_function(render_source, ds, field, lower_phys, upper_phys, scale, colormap):
+    """
+    Applies a log-space transfer function to a render source.
+    
+    Args:
+        render_source: The volume rendering source object.
+        ds: Dataset object (for unit conversion).
+        field: Tuple identifying the field (e.g., ("gas", "density")).
+        lower_phys: Physical lower bound (Quantity).
+        upper_phys: Physical upper bound (Quantity).
+        scale: Float controlling steepness.
+        colormap: String identifier for the colormap.
+    """
+    # Step 1: Clear existing transfer function
+    render_source.transfer_function.clear()
+    
+    # Step 2: Transform bounds to log10 space
+    # Note: ds.quan creates a Quantity object with units
+    lower_log = np.log10(ds.quan(lower_phys, field[1]))
+    upper_log = np.log10(ds.quan(upper_phys, field[1]))
+    
+    # Step 3: Map to colormap in log space
+    # This function handles the internal setting of UseLogScale and RGBPoints
+    render_source.transfer_function.map_to_colormap(
+        lower_log,
+        upper_log,
+        scale=scale,
+        colormap=colormap
+    )
+
+# Example usage:
+# apply_log_space_transfer_function(render_source, ds, ("gas", "density"), 5.0e-31, 1.0e-29, 30.0, "RdBu_r")
+```
+
+**Edge Cases and Pitfalls:**
+- **Zero or Negative Values:** Logarithms are undefined for zero and negative numbers. Ensure the data range excludes non-positive values or handle them separately [S1].
+- **Precision:** Floating-point precision may affect the exact positioning of control points in log space, especially for very small differences in magnitude [S2].
+- **Boundary Handling:** The mapping is typically linear in log space between the specified bounds. Values outside this range may be clamped or extrapolated depending on the implementation [S2].
+
+## Operating characteristics
+- **Time Complexity:** O(1) for setup, as it involves a constant number of log transformations and colormap lookups.
+- **Memory Complexity:** O(N) where N is the number of control points in the transfer function.
+- **Strengths:** Effectively visualizes data with high dynamic range by compressing the scale [S2].
+- **Limitations:** Not suitable for data with zero or negative values without preprocessing [S1].
+- **When to Use:** When visualizing fields like density or pressure that span multiple orders of magnitude [S1].
+- **When Not to Use:** When linear relationships in the data domain are critical for interpretation [S2].
+
+## Background
+This method is commonly used in scientific visualization tools like ParaView and yt to handle volumetric data with large dynamic ranges [S1, S2]. It was introduced to allow users to map control points in a way that preserves relative positions across logarithmic scales, enhancing the visibility of features in both low and high intensity regions [S2].
+
+## Sources
+[S1] Volume Rendering with Points, https://yt-project.org/doc/cookbook/complex_plots.html, fetched 2026-10-29
+[S2] 2. Color maps and transfer functions — ParaView ..., https://cep.tacc.utexas.edu/user-guide/ReferenceManual/colorMapping.html, fetched 2026-10-29

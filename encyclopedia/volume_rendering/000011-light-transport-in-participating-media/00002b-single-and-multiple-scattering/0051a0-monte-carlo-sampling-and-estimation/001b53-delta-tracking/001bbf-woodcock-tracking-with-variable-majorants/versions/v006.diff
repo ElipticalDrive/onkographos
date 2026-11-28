@@ -1,0 +1,171 @@
+--- v005.md
++++ v006.md
+@@ -13,8 +13,8 @@
+ - **Volume:** A data structure supporting point sampling `volume.sample(position)` returning a scalar value [S1, unofficial].
+ - **Transfer Function:** A function `transferFunction.mapColor(scalar)` returning a struct containing `density` (extinction coefficient $\sigma_t$) and other optical properties [S1, unofficial].
+-- **Majorant Grid:** A 3D grid of macrocells. Each cell stores a precomputed maximum density value ($\sigma_{t,max}$) for that region, which is used to calculate the majorant extinction coefficient [S2, unofficial]. The grid size is typically $32 \times 32 \times 32$ [S2, unofficial].
++- **Majorant Grid:** A 3D grid of macrocells [S2, unofficial]. Each cell stores a precomputed maximum density value ($\sigma_{t,max}$) for that region, which is used to calculate the majorant extinction coefficient [S2, unofficial]. The grid size is typically $32 \times 32 \times 32$ [S2, unofficial].
+ 
+ **Steps:**
+-1. **Initialization:** Determine the majorant $\sigma_{maj}$ for the current region containing the ray's origin. If the ray crosses a region boundary, update $\sigma_{maj}$ by calculating the majorant extinction coefficient from the precomputed maximum density of the new region [S2, unofficial].
++1. **Initialization:** Determine the majorant $\sigma_{maj}$ for the current region containing the ray's origin [S2, unofficial]. If the ray crosses a region boundary, update $\sigma_{maj}$ by calculating the majorant extinction coefficient from the precomputed maximum density of the new region [S2, unofficial].
+ 2. **Free Path Sampling:** Sample the distance to the next collision using the exponential distribution with the current majorant:
+    $$ t_{step} = -\frac{\ln(1 - r)}{\sigma_{maj}} $$
+@@ -27,13 +27,13 @@
+    $$ \mathbf{c} = \text{transferFunction.mapColor}(s) $$
+    Let $\sigma_t = \mathbf{c}.density$ [S1, unofficial].
+-6. **Null-Collision Test:** Generate a new random number $r' \in [0, 1)$. If:
++6. **Null-Collision Test:** Generate a new random number $r' \in [0, 1)$ [S1, unofficial]. If:
+    $$ \sigma_t \ge r' \times \sigma_{maj} $$
+    then a real collision has occurred. Return the sample (or continue with scattering logic) [S1, unofficial].
+-7. **Null Collision:** If the test fails, the collision is null. Continue the loop from Step 2 with the same ray position updated by $t_{step}$ [S1, unofficial].
++7. **Null Collision:** If the test fails, the collision is null [S1, unofficial]. Continue the loop from Step 2 with the same ray position updated by $t_{step}$ [S1, unofficial].
+ 8. **Termination:** If the ray exits the volume bounds, return the background color [S1, unofficial].
+ 
+ **Parameters:**
+ - **Majorant ($\sigma_{maj}$):** The extinction coefficient upper bound. In variable majorant tracking, this changes per region [S1, unofficial].
+-- **Grid Resolution:** The subdivision grid size. A $32 \times 32 \times 32$ grid is cited as a compromise between overhead and null-collision reduction [S2, unofficial].
++- **Grid Resolution:** The subdivision grid size [S2, unofficial]. A $32 \times 32 \times 32$ grid is cited as a compromise between overhead and null-collision reduction [S2, unofficial].
+ 
+ **Pitfalls:**
+@@ -44,5 +44,8 @@
+ **Pseudocode:**
+ ```python
+-def woodcock_tracking_variable_majorant(volume, ray, majorant_grid, transfer_function, background_color):
++import math
++import random
++
++def woodcock_tracking_variable_majorant(volume, ray_origin, ray_dir, majorant_grid, transfer_function, background_color):
+     """
+     Simulates light transport using Woodcock tracking with variable majorants.
+@@ -50,7 +53,9 @@
+     Args:
+         volume: Object with method sample(position) -> scalar.
+-        ray: Object with attributes origin, dir, t (current distance, initialized to 0.0).
+-        majorant_grid: 3D grid where get_max_density(region_id) returns sigma_t,max.
+-        transfer_function: Object with method mapColor(scalar) -> {density, ...}.
++        ray_origin: 3D vector (x, y, z).
++        ray_dir: Normalized 3D vector (x, y, z).
++        majorant_grid: Object with attributes bounds (min_x, min_y, min_z, max_x, max_y, max_z),
++                       resolution (nx, ny, nz), and method get_max_density(region_id) -> float.
++        transfer_function: Object with method mapColor(scalar) -> dict with 'density' key.
+         background_color: Color to return if ray exits volume.
+         
+@@ -58,61 +63,52 @@
+         Color contribution from the first real interaction.
+     """
+-    # Standard uniform random number generator [G]
+-    def rand():
+-        import random
+-        return random.random()
++    # Initialize ray distance [G]
++    t = 0.0
++    
++    # Helper to compute grid region index from world coordinates [G]
++    def get_region_id(position):
++        dx = (majorant_grid.bounds[3] - majorant_grid.bounds[0]) / majorant_grid.resolution[0]
++        dy = (majorant_grid.bounds[4] - majorant_grid.bounds[1]) / majorant_grid.resolution[1]
++        dz = (majorant_grid.bounds[5] - majorant_grid.bounds[2]) / majorant_grid.resolution[2]
++        ix = int((position[0] - majorant_grid.bounds[0]) / dx)
++        iy = int((position[1] - majorant_grid.bounds[1]) / dy)
++        iz = int((position[2] - majorant_grid.bounds[2]) / dz)
++        ix = max(0, min(ix, majorant_grid.resolution[0] - 1))
++        iy = max(0, min(iy, majorant_grid.resolution[1] - 1))
++        iz = max(0, min(iz, majorant_grid.resolution[2] - 1))
++        return iz * majorant_grid.resolution[1] * majorant_grid.resolution[0] + iy * majorant_grid.resolution[0] + ix
+ 
+-    # Helper to compute grid region index from world coordinates [G]
+-    def get_region_id(position, grid_bounds, grid_resolution):
+-        # Assumes grid_bounds = (min_x, min_y, min_z, max_x, max_y, max_z)
+-        # and grid_resolution = (nx, ny, nz)
+-        dx = (grid_bounds[3] - grid_bounds[0]) / grid_resolution[0]
+-        dy = (grid_bounds[4] - grid_bounds[1]) / grid_resolution[1]
+-        dz = (grid_bounds[5] - grid_bounds[2]) / grid_resolution[2]
+-        ix = int((position[0] - grid_bounds[0]) / dx)
+-        iy = int((position[1] - grid_bounds[1]) / dy)
+-        iz = int((position[2] - grid_bounds[2]) / dz)
+-        # Clamp to grid bounds to avoid out-of-bounds access
+-        ix = max(0, min(ix, grid_resolution[0] - 1))
+-        iy = max(0, min(iy, grid_resolution[1] - 1))
+-        iz = max(0, min(iz, grid_resolution[2] - 1))
+-        return iz * grid_resolution[1] * grid_resolution[0] + iy * grid_resolution[0] + ix
+-
+-    # Initialize ray distance if not set [G]
+-    if ray.t is None:
+-        ray.t = 0.0
+-        
+-    # Initialize majorant based on starting region
+-    current_region_id = get_region_id(ray.origin, majorant_grid.bounds, majorant_grid.resolution)
++    # Initialize majorant based on starting region [S2, unofficial]
++    current_region_id = get_region_id(ray_origin)
+     sigma_maj = majorant_grid.get_max_density(current_region_id)
+     
+-    while volume.contains(ray.origin + ray.dir * ray.t):
+-        # 1. Sample free path
+-        r = rand()
++    while volume.contains(ray_origin[0] + ray_dir[0] * t, ray_origin[1] + ray_dir[1] * t, ray_origin[2] + ray_dir[2] * t):
++        # 1. Sample free path [S1, unofficial]
++        r = random.random()
+         if r == 1.0: r = 0.999999  # Avoid log(0) [G]
+-        t_step = -log(1 - r) / sigma_maj
++        t_step = -math.log(1 - r) / sigma_maj
+         
+-        # 2. Update ray position
+-        ray.t += t_step
+-        pos = ray.origin + ray.dir * ray.t
++        # 2. Update ray distance [S1, unofficial] (corrected sign from evidence typo)
++        t += t_step
++        pos = (ray_origin[0] + ray_dir[0] * t, ray_origin[1] + ray_dir[1] * t, ray_origin[2] + ray_dir[2] * t)
+         
+-        # 3. Check if ray crossed a region boundary
+-        new_region_id = get_region_id(pos, majorant_grid.bounds, majorant_grid.resolution)
++        # 3. Check if ray crossed a region boundary [S2, unofficial]
++        new_region_id = get_region_id(pos)
+         if new_region_id != current_region_id:
+             current_region_id = new_region_id
+             sigma_maj = majorant_grid.get_max_density(current_region_id)
+             
+-        # 4. Sample volume and map to density
++        # 4. Sample volume and map to density [S1, unofficial]
+         scalar = volume.sample(pos)
+         color_data = transfer_function.mapColor(scalar)
+-        sigma_t = color_data.density
++        sigma_t = color_data['density']
+         
+-        # 5. Null-collision test
+-        r_test = rand()
++        # 5. Null-collision test [S1, unofficial]
++        r_test = random.random()
+         if sigma_t >= r_test * sigma_maj:
+             # Real collision
+-            return color_data # Or further scattering logic
++            return color_data
+             
+-    # Ray exited volume
++    # Ray exited volume [S1, unofficial]
+     return background_color
+ ```
+@@ -121,12 +117,12 @@
+ 
+ ### Region Subdivision
+-A technique to reduce null collisions in sparse volumes by subdividing the volume into smaller regions, each with its own majorant extinction coefficient [S2, unofficial]. It sets itself apart by explicitly managing the majorant update logic at region boundaries, whereas other variants might use continuous functions or hierarchical structures [S2, unofficial]. It is chosen when the volume has large empty spaces or distinct density clusters, such as clouds or the Stanford Bunny model [S2, unofficial]. The grid size of $32 \times 32 \times 32$ is a typical compromise [S2, unofficial].
++A technique to reduce null collisions in sparse volumes by subdividing the volume into smaller regions, each with its own majorant extinction coefficient [S2, unofficial]. For each region, the maximum density value is computed and used to calculate the majorant extinction coefficient for that region [S2, unofficial]. It sets itself apart by explicitly managing the majorant update logic at region boundaries, whereas other variants might use continuous functions or hierarchical structures [S2, unofficial]. It is chosen when the volume has large empty spaces or distinct density clusters, such as clouds or the Stanford Bunny model [S2, unofficial]. The grid size of $32 \times 32 \times 32$ is a typical compromise [S2, unofficial].
+ 
+ ### Weighted Tracking
+-A non-analog estimator variant that allows the combined coefficient to occasionally underestimate the real extinction, requiring reweighting of samples to maintain unbiasedness [S3]. It differs from standard Woodcock tracking by permitting negative null-collision coefficients, which reduces the majorant but introduces statistical weights [S3]. It is used when tighter majorants are difficult to compute or when specific weighting schemes are needed to increase collision rates in measurement regions [S3].
++A non-analog estimator variant that allows the combined coefficient to occasionally underestimate the real extinction, requiring reweighting of samples to maintain unbiasedness [S3]. It differs from standard Woodcock tracking by permitting negative null-collision coefficients, which reduces the majorant but introduces statistical weights [S3]. The method requires reweighting samples that step into regions with negative values of the null-collision coefficient to maintain unbiasedness [S3]. It is used when tighter majorants are difficult to compute or when specific weighting schemes are needed to increase collision rates in measurement regions [S3].
+ 
+ ## Operating characteristics
+-- **Time Complexity:** Proportional to the number of null collisions plus one real collision. The number of null collisions is minimized by tighter local majorants [S1, unofficial].
+-- **Memory Complexity:** $O(N)$ where $N$ is the number of macrocells in the majorant grid. A $32^3$ grid adds negligible overhead compared to the volume data [S2, unofficial].
++- **Time Complexity:** Proportional to the number of null collisions plus one real collision [S1, unofficial]. The number of null collisions is minimized by tighter local majorants [S2, unofficial].
++- **Memory Complexity:** $O(N)$ where $N$ is the number of macrocells in the majorant grid [S2, unofficial]. A $32^3$ grid adds negligible overhead compared to the volume data [S2, unofficial].
+ - **Measured Performance:** In the Stanford Bunny example, region subdivision reduced render time from 216s to 33s [S2, unofficial]. In cloud rendering, it reduced time from 248s to 14s (at 10 samples per pixel) [S2, unofficial].
+ - **Strengths:** Significantly reduces null collisions in sparse volumes; remains unbiased; simple to implement with a coarse grid [S2, unofficial].
+@@ -136,5 +132,5 @@
+ 
+ ## Background
+-Woodcock tracking, also known as delta tracking, was introduced by Woodcock et al. in 1975 for particle transport in heterogeneous media [S3]. The variable majorant approach extends this by using coarse structured grid macrocells to obtain tighter majorants for parts of a volume, a technique cited in recent works on direct volume rendering [S1, unofficial]. The specific implementation details regarding region subdivision and performance benchmarks are documented in unofficial sources on volumetric rendering and path tracing [S1, S2, unofficial].
++Woodcock tracking, also known as delta tracking, was introduced by Woodcock et al. for particle transport in heterogeneous media [S3]. The variable majorant approach extends this by using coarse structured grid macrocells to obtain tighter majorants for parts of a volume, a technique cited in recent works on direct volume rendering [S1, unofficial]. The specific implementation details regarding region subdivision and performance benchmarks are documented in unofficial sources on volumetric rendering and path tracing [S1, S2, unofficial].
+ 
+ ## Sources

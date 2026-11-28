@@ -1,0 +1,88 @@
+--- v009.md
++++ v010.md
+@@ -1,41 +1,71 @@
+ # Representation and Kernel Modifications
+ 
+-Also called: Kernel Design, Primitive Shape Modification, Negative Gaussians, Scaffold-GS, GeoGaussian, DARBF, Grid-based Blur
++Also called: Non-standard Gaussian primitives, Kernel substitutions, Oriented Gaussians
+ 
+ ## Overview
+-This family of methods modifies the fundamental representation or kernel functions of 3D Gaussian Splatting (3DGS) to address limitations in geometric fidelity, memory efficiency, and modeling capacity. While standard 3DGS relies on symmetric, positive-valued Gaussian primitives with closed-form integration shortcuts, these variants introduce negative colors [9152-negative-gaussian-splatting.md], voxel-based latent scaffolds [9186-scaffold-gs.md], tangent-plane densification [9187-geogaussian.md], non-Gaussian radial basis functions [9911-darbf-splatting.md], and spatially-varying blur kernels [14244-grid-based-blur-kernel.md]. They set themselves apart from sibling methods like [Base 3DGS Optimization](7549-base-3dgs-optimization.md) by altering the primitive's mathematical definition or structural initialization rather than just the training schedule or loss functions.
++Representation and Kernel Modifications extend the standard 3D Gaussian Splatting (3DGS) primitive definition and rendering kernel to address limitations in shape expressivity, geometric consistency, and surface reconstruction. While standard 3DGS relies on isotropic/anisotropic positive Gaussians with exponential kernels, this family introduces negative colors for shape cancellation [S1], voxel-based scaffolds for structured priors [S1], tangent-plane densification for geometric smoothness [S1], non-exponential Radial Basis Functions (RBFs) for faster convergence [S1], and oriented half-space primitives for watertight mesh extraction [S2]. These methods solve the issues of high-frequency detail loss, noisy normals, and non-watertight surfaces inherent in the base representation.
+ 
+ ## Shared principles
+-All methods in this family retain the core differentiable rasterization pipeline of 3DGS, where 3D primitives are projected to 2D ellipses and alpha-blended. However, they diverge in how the primitive's contribution to the color buffer is calculated or how its attributes are parameterized.
++The shared principles of this family involve modifying the fundamental attributes of the Gaussian primitive or the kernel function used during rasterization, while maintaining the core differentiable rasterization pipeline of 3DGS.
+ 
+-1.  **Primitive Parameterization:** Standard 3DGS stores mean $\boldsymbol{\mu}$, covariance $\boldsymbol{\Sigma}$, opacity $\alpha$, and color $\mathbf{c}$ directly. Variants may store these indirectly (e.g., via voxel features [9186-scaffold-gs.md]) or modify the sign of $\mathbf{c}$ [9152-negative-gaussian-splatting.md].
+-2.  **Kernel Function:** The standard kernel is the Gaussian PDF. Variants replace this with other functions of the Mahalanobis distance $d_M(\mathbf{x}; \boldsymbol{\mu}, \boldsymbol{\Sigma}) = [(\mathbf{x} - \boldsymbol{\mu})^T \boldsymbol{\Sigma}^{-1} (\mathbf{x} - \boldsymbol{\mu})]^{\frac{1}{2}}$, such as DARBFs [9911-darbf-splatting.md] or oriented half-space models [Gaussian Wrapping].
+-3.  **Integration Shortcut:** Standard 3DGS uses the property that the projection of a 3D Gaussian is a 2D Gaussian, allowing efficient rendering by truncating the covariance matrix. Methods using non-Gaussian kernels (e.g., DARBFs) must approximate this shortcut using correction factors [9911-darbf-splatting.md] or accept higher computational costs.
++1.  **Primitive Attribute Extension**: Standard 3DGS primitives are defined by mean $\boldsymbol{\mu}$, covariance $\boldsymbol{\Sigma}$, opacity $\alpha$, and color $\mathbf{c}$ (typically spherical harmonics). Modifications include:
++    *   Allowing $\mathbf{c}$ to take negative values to enable destructive interference (cancellation) [S1].
++    *   Decoupling attribute storage from direct parameters, using interpolated features from a voxel grid [S1].
++    *   Adding an oriented normal vector $\mathbf{n}$ to define a half-space occupancy model [S2].
++2.  **Kernel Function Substitution**: The standard Gaussian kernel $K(d) = e^{-d^2/2}$ is replaced or augmented:
++    *   With non-exponential Decaying Anisotropic Radial Basis Functions (DARBFs) such as Half-Cosine or Inverse Multiquadric [S1].
++    *   With spatially varying blur kernels indexed by sharpness levels [S1].
++3.  **Geometric Constraints**: Modifications often introduce explicit geometric priors during optimization:
++    *   Tangent-plane constrained densification to enforce planar consistency [S1].
++    *   Consistency losses to enforce normal alignment between neighbors [S1].
++    *   Densification strategies that target geometric gaps in oriented surface models [S2].
+ 
+ ## Subtopics
+ 
+ ### [Negative Gaussian Splatting](9152-negative-gaussian-splatting.md)
+-See [Negative Gaussian Splatting](9152-negative-gaussian-splatting.md).
++Negative Gaussian Splatting (NegGS) extends the 3DGS representation by incorporating "negative Gaussians"—primitives with negative color values—alongside standard positive Gaussians. This solves the limitation of standard Gaussians, which struggle to model complex nonlinear structures (e.g., donut shapes) and high-frequency color transitions due to their unimodal nature. By allowing color cancellation, NegGS achieves greater flexibility with potentially fewer primitives.
++*   **Mechanism**: The method maintains a joint family $G_{NeGS} = G_{GS} \cup G_{-GS}$. A binary mask tracks the sign of each Gaussian. The core theoretical basis is the "Diff-Gaussian" distribution, defined as the ratio of two Gaussian PDFs: $f_{Diff}(x) = \frac{f_{m_0, \Sigma_0}(x)}{f_{m_1, \Sigma_1}(x)}$. The optimal coefficient $c_{opt}$ for this ratio is derived by minimizing the quadratic function $q(x) = x^T A x + 2b^T x$, where $A = \Sigma_1^{-1} - \Sigma_0^{-1}$ and $b = \Sigma_0^{-1} m_0 - \Sigma_1^{-1} m_1$. For diagonal covariances $\Sigma_0 = \text{diag}(\sigma_i^2)$ and $\Sigma_1 = \text{diag}(h_i \sigma_i^2)$ with $h_i \le 1$, the null density vector coordinates are $w_i = \frac{m_{1,i} - h_i m_{0,i}}{1 - h_i}$ if $h_i < 1$.
++*   **Implementation**: Initialization requires a critical hyperparameter: approximately 20% of Gaussians should be negative. The rasterization pipeline is identical to standard 3DGS, except the color buffer supports signed values, allowing negative contributions to cancel positive ones during alpha blending.
++*   **When to choose**: Use when modeling intricate geometries, shadows, or high-frequency color details where standard positive Gaussians require excessive density.
++*   **Link**: [Negative Gaussian Splatting](9152-negative-gaussian-splatting.md)
+ 
+ ### [Scaffold-GS](9186-scaffold-gs.md)
+-See [Scaffold-GS](9186-scaffold-gs.md).
++Scaffold-GS addresses initialization sparsity and attribute representation limitations by replacing direct parameter storage with a voxel-based scaffold. Unlike standard 3DGS, which stores mean, covariance, opacity, and color directly, Scaffold-GS uses a structured grid prior.
++*   **Mechanism**: A 3D voxel grid is initialized covering the scene, with learnable feature vectors attached to each voxel. Gaussian attributes are determined by interpolating these voxel features and passing them through lightweight neural networks. Optimization updates the voxel features and network weights rather than individual Gaussian parameters directly.
++*   **When to choose**: Use when standard initialization leads to sparse or inconsistent coverage, or when a structured prior is beneficial for attribute prediction.
++*   **Link**: [Scaffold-GS](9186-scaffold-gs.md)
+ 
+ ### [GeoGaussian](9187-geogaussian.md)
+-See [GeoGaussian](9187-geogaussian.md).
++GeoGaussian is a training optimization strategy that improves geometric consistency and surface reconstruction quality by enforcing smoothness between neighboring Gaussians. Standard 3DGS treats Gaussians as independent entities, often resulting in noisy normal estimates.
++*   **Mechanism**: During densification, new Gaussians are generated on the tangent plane of the parent Gaussian, defined by the normal vector $\mathbf{n}_i$ (derived from the smallest singular value of $\boldsymbol{\Sigma}_i$) [G]. A geometric smoothness loss $\mathcal{L}_{geo} = \sum_{i} \sum_{j \in \mathcal{N}_i} (1 - |\mathbf{n}_i \cdot \mathbf{n}_j|)$ is added to the optimization objective to penalize angular differences between adjacent normals.
++*   **When to choose**: Use when high-fidelity surface reconstruction and smooth geometric properties are required.
++*   **Link**: [GeoGaussian](9187-geogaussian.md)
+ 
+ ### [DARBF-Splatting](9911-darbf-splatting.md)
+-See [DARBF-Splatting](9911-darbf-splatting.md).
++DARBF-Splatting replaces the standard Gaussian kernel with non-exponential Decaying Anisotropic Radial Basis Functions (DARBFs). Standard 3DGS is restricted to the exponential family, which limits convergence speed and memory efficiency.
++*   **Mechanism**: The method uses kernels such as Half-Cosine ($\cos(d_M^2/\xi)$ for $d_M^2 < \xi \pi/2$) or Inverse Multiquadric. To preserve the computational efficiency of the closed-form integration shortcut in 3DGS, a scalar correction factor $\psi$ is applied to the kernel value. The 2D covariance $\boldsymbol{\Sigma}'$ is approximated by taking the top-left $2 \times 2$ submatrix of the transformed 3D covariance.
++*   **When to choose**: Use when faster training convergence and lower memory usage are prioritized, and when non-exponential decay profiles are desired.
++*   **Link**: [DARBF-Splatting](9911-darbf-splatting.md)
+ 
+ ### [Grid-based Blur Kernel](14244-grid-based-blur-kernel.md)
+-See [Grid-based Blur Kernel](14244-grid-based-blur-kernel.md).
++Grid-based Blur Kernels replace MLP-generated blur kernels with a learnable tensor indexed by sharpness levels to model spatially-varying blurriness. Standard 3DGS assumes sharp primitives, whereas this method explicitly deblurs inputs by convolving a clean image with spatially-adaptive kernels.
++*   **Mechanism**: A sharpness level map $L$ is estimated for each pixel. A blur kernel tensor $\mathcal{B}$ of shape $\mathbb{R}^{N_{img} \times N_k \times K \times K \times C}$ is optimized. For each pixel, the kernel $\mathcal{B}[\text{view}, L[h,w], :, :]$ is selected and convolved with the local image patch. High sharpness groups can be skipped to save computation.
++*   **When to choose**: Use when training data contains significant defocus blur or when modeling spatially varying sharpness is necessary.
++*   **Link**: [Grid-based Blur Kernel](14244-grid-based-blur-kernel.md)
+ 
+ ### Gaussian Wrapping
+-Gaussian Wrapping reinterprets 3D Gaussian primitives as oriented probabilistic surface elements representing geometry only within an oriented half-space, allowing the derivation of closed-form occupancy, vacancy, and normal fields for watertight mesh extraction [S2]. It models surface points with asymmetric primitives where the Gaussian models density decay on the outward-facing side, while the inward-facing side is considered fully occupied [S2]. The method identifies geometric gaps where the oriented surface assumption is violated and densifies the representation to obtain a watertight shell of oriented primitives [S2]. It introduces a learnable oriented normal at each Gaussian element and defines an adapted attenuation formulation to enable closed-form expressions for normal and occupancy fields [S2]. A novel consistency loss and a dedicated densification strategy enforce Gaussians to wrap the entire surface by closing geometric holes [S2]. The differentiable rasterizer is modified to output depth as an isosurface of the continuous model, and Primal Adaptive Meshing is used for Region-of-Interest meshing at arbitrary resolution [S2].
++Gaussian Wrapping reinterprets 3D Gaussian primitives as oriented probabilistic surface elements representing geometry only within an oriented half-space. This allows for the derivation of closed-form occupancy, vacancy, and normal fields for watertight mesh extraction.
++*   **Mechanism**: The Gaussian models density decay on the outward-facing side, while the inward-facing side is considered fully occupied. A learnable oriented normal is introduced, and an adapted attenuation formulation enables closed-form geometric quantities. A consistency loss and dedicated densification strategy enforce Gaussians to wrap the entire surface, closing geometric holes. The rasterizer is modified to output depth as an isosurface, and Primal Adaptive Meshing is used for extraction.
++*   **When to choose**: Use when watertight, high-fidelity mesh extraction is required, particularly for thin structures.
++*   **Link**: [Gaussian Wrapping](9186-scaffold-gs.md) [Note: No dedicated child article exists; details derived from source notes]
+ 
+ ### Gaussian Shell Maps
+-Gaussian Shell Maps (GSMs) combine CNN-based generators with 3DGS to recreate virtual humans with sophisticated details such as clothing and accessories [S1].
++Gaussian Shell Maps (GSMs) combine CNN-based generators with 3DGS to recreate virtual humans with sophisticated details such as clothing and accessories.
++*   **Mechanism**: Uses CNN-based generators to augment the 3DGS representation, focusing on human avatars and dynamic garments.
++*   **When to choose**: Use for animatable human reconstruction with high-fidelity clothing details.
++*   **Link**: [Gaussian Shell Maps](9186-scaffold-gs.md) [Note: No dedicated child article exists; details derived from source notes]
+ 
+ ## Background
+-The standard 3D Gaussian Splatting method [G] introduced a highly efficient differentiable rasterizer for 3D Gaussians. However, subsequent research identified limitations in handling high-frequency details, complex nonlinear structures (like shadows), sparse initialization, and watertight surface reconstruction. Negative Gaussian Splatting [9152-negative-gaussian-splatting.md] was proposed to handle rapid color transitions and complex shapes via cancellation effects. Scaffold-GS [9186-scaffold-gs.md] addressed memory inefficiency in sparse regions by decoupling geometry from primitives. GeoGaussian [9187-geogaussian.md] improved geometric consistency during densification. DARBF-Splatting [9911-darbf-splatting.md] explored non-exponential kernels for potentially faster convergence. Gaussian Wrapping [S2] and Gaussian Shell Maps [S1] extended the representation for specific applications like surface reconstruction and human avatars.
++The standard 3D Gaussian Splatting representation, introduced by Kerbl et al. (2023), uses positive Gaussian ellipsoids with spherical harmonic colors. Subsequent research identified limitations in shape expressivity, geometric smoothness, and surface reconstruction. Negative Gaussian Splatting (NegGS) and DARBF-Splatting address the kernel and color representation limits [S1, S2]. Scaffold-GS and GeoGaussian introduce structural and geometric priors to improve densification and surface quality [S1]. Gaussian Wrapping adapts the primitive to an oriented half-space model for meshing [S2]. Gaussian Shell Maps and Grid-based Blur Kernels extend the representation to specific domains like human avatars and defocused scenes [S1].
+ 
+ ## Sources

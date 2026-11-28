@@ -1,0 +1,133 @@
+--- v009.md
++++ v010.md
+@@ -8,5 +8,5 @@
+ ## How it works
+ **Inputs:**
+-- Ray origin $\mathbf{o}$ and direction $\mathbf{d}$ [S1].
++- Ray origin $\mathbf{o}$ and direction $\mathbf{d}$ [G].
+ - Procedural volume defined by a sum of noise functions $F_n(\mathbf{p}) = \sum_{i=0}^{n} f_i(\mathbf{p})$ [S1].
+ - Isovalue $v$ defining the isosurface [S1].
+@@ -25,11 +25,11 @@
+ 1. **Initialize:** Start sphere tracing from the ray origin $\mathbf{o}$ [G]. Let current position be $\mathbf{p} = \mathbf{o}$ and accumulated distance $t = 0$ [G].
+ 2. **Determine Minimum Index ($i_{min}$):** For the current position $\mathbf{p}$, find the smallest index $i$ such that the upper bound of the BVH at that level is strictly below the isovalue $v$ [S1]. This indicates that the position is outside the bounding volume of $f_i$ [S1].
+-   $$ i_{min} = \min\{i \mid BVH_{i+}(\mathbf{p}) < v\} $$
+-   If searching for the isosurface from inside the volume, this can equivalently be defined using the lower bound: $BVH_{i-}(\mathbf{p}) > v$ [S1].
++   $$ i_{\min} = \min\{i \mid \text{BVH}_{i+}(\mathbf{p}) < v\} $$
++   If searching for the isosurface from inside the volume, this can equivalently be defined using the lower bound: $\text{BVH}_{i-}(\mathbf{p}) > v$ [S1].
+ 3. **Compute Frequencies:** Evaluate the noise functions $f_i(\mathbf{p})$ starting from $i_{min}$ up to $i_{min} + k$ [S1].
+-   - Compute $BVH_{i+}(\mathbf{p})$ for each $i$ as you compute $f_i(\mathbf{p})$ [S1].
+-   - If $BVH_{i+}(\mathbf{p}) < v$, the position is outside the bounding volume for level $i$ [S1].
++   - Compute $\text{BVH}_{i+}(\mathbf{p})$ for each $i$ as you compute $f_i(\mathbf{p})$ [S1].
++   - If $\text{BVH}_{i+}(\mathbf{p}) < v$, the position is outside the bounding volume for level $i$ [S1].
+    - Stop evaluating further $f_i$ functions once $i > i_{min} + k$ [S1].
+-4. **Calculate Step Size:** Use the computed sum $F_{i_{min}+k}(\mathbf{p})$ to determine the step size $\Delta t$ for sphere tracing [S1]. The step size is typically derived from the distance to the isosurface estimate provided by the current frequency sum [G].
++4. **Calculate Step Size:** Use the computed sum $F_{i_{min}+k}(\mathbf{p})$ to determine the step size $\Delta t$ for sphere tracing [G]. The step size is typically derived from the distance to the isosurface estimate provided by the current frequency sum [G].
+ 5. **Advance Ray:** Update position $\mathbf{p} \leftarrow \mathbf{p} + \Delta t \cdot \mathbf{d}$ and accumulate $t \leftarrow t + \Delta t$ [G].
+ 6. **Check Termination:** If the ray has exited the volume or converged to the isosurface within a tolerance, return the result [G]. Otherwise, go to Step 2 [G].
+@@ -41,7 +41,7 @@
+ def early_stop_sphere_trace(ray_origin, ray_dir, isovalue, k, max_steps, max_dist):
+     # Standard sphere tracing initialization [G]
+-    p = ray_origin
++    p = list(ray_origin)
+     t = 0.0
+-    MAX_OCTAVES = 16  # Example maximum BVH depth [G]
++    MAX_OCTAVES = 16  # Maximum BVH depth [G]
+     MIN_STEP = 1e-4   # Prevents infinite loops on flat regions [G]
+     TOLERANCE = 1e-3  # Convergence threshold [G]
+@@ -51,17 +51,24 @@
+         i_min = 0
+         while i_min < MAX_OCTAVES:
+-            if bvh_upper_bound(i_min, p) < isovalue:
++            # Evaluate BVH upper bound for current level [G]
++            if evaluate_bvh_upper_bound(i_min, p) < isovalue:
+                 break
+             i_min += 1
++        if i_min == MAX_OCTAVES:
++            break  # Reached maximum depth without leaving volume
+ 
+         # Step 2: Compute frequencies from i_min to i_min + k
+         current_sum = 0.0
++        grad_mag = 0.0
+         for i in range(i_min, i_min + k + 1):
+-            current_sum += noise_function(i, p)
++            # Evaluate octave and its gradient [G]
++            f_val = evaluate_octave(i, p)
++            grad = evaluate_octave_gradient(i, p)
++            current_sum += f_val
++            grad_mag += sum(abs(g) for g in grad)
+ 
+         # Step 3: Determine step size [G]
+         dist_to_surface = abs(current_sum - isovalue)
+-        # Approximate gradient magnitude for procedural noise [G]
+-        grad_mag = max(1.0, sum(abs(noise_gradient(i, p)) for i in range(i_min, i_min + k + 1)))
++        grad_mag = max(1.0, grad_mag)
+         delta_t = dist_to_surface / grad_mag
+ 
+@@ -73,35 +80,41 @@
+         # Step 4: Advance ray
+         t += delta_t
+-        p = ray_origin + delta_t * ray_dir
++        p = [ray_origin[j] + delta_t * ray_dir[j] for j in range(3)]
+ 
+         # Step 5: Check convergence
+-        if abs(noise_function(MAX_OCTAVES, p) - isovalue) < TOLERANCE:
+-            normal = noise_gradient(MAX_OCTAVES, p)
+-            return t, normal / math.sqrt(normal[0]**2 + normal[1]**2 + normal[2]**2)
++        if dist_to_surface < TOLERANCE:
++            # Compute normal from accumulated gradient [G]
++            normal = [0.0, 0.0, 0.0]
++            for i in range(i_min, i_min + k + 1):
++                normal = [normal[j] + evaluate_octave_gradient(i, p)[j] for j in range(3)]
++            norm_len = math.sqrt(sum(c**2 for c in normal))
++            if norm_len > 0:
++                normal = [c / norm_len for c in normal]
++            return t, normal
+ 
+     return None, None
+ 
+-# Helper definitions to ensure self-contained validity [G]
+-def bvh_upper_bound(level, p):
++# Standard mathematical evaluations [G]
++def evaluate_bvh_upper_bound(level, p):
+     # Returns a conservative upper bound for octave `level` at position `p`
+     # Implementation depends on the specific inclusion function used [G]
+-    return 1.0 - 0.1 * level  # Placeholder logic consistent with bounded noise
++    return 1.0 - 0.1 * level
+ 
+-def noise_function(level, p):
++def evaluate_octave(level, p):
+     # Evaluates the noise octave `level` at position `p`
+     # Typically a fractal Brownian motion component [G]
+-    return math.sin(p[0] * (2**level)) * math.cos(p[1] * (2**level)) * math.sin(p[2] * (2**level)) * (0.5**level)
++    scale = 2.0 ** level
++    return math.sin(p[0] * scale) * math.cos(p[1] * scale) * math.sin(p[2] * scale) * (0.5 ** level)
+ 
+-def noise_gradient(level, p):
++def evaluate_octave_gradient(level, p):
+     # Returns the analytical or numerical gradient of octave `level` at `p`
+     # Used for step size estimation [G]
+     eps = 1e-5
+-    f = noise_function(level, p)
+-    gx = (noise_function(level, (p[0]+eps, p[1], p[2])) - f) / eps
+-    gy = (noise_function(level, (p[0], p[1]+eps, p[2])) - f) / eps
+-    gz = (noise_function(level, (p[0], p[1], p[2]+eps)) - f) / eps
++    f = evaluate_octave(level, p)
++    gx = (evaluate_octave(level, (p[0]+eps, p[1], p[2])) - f) / eps
++    gy = (evaluate_octave(level, (p[0], p[1]+eps, p[2])) - f) / eps
++    gz = (evaluate_octave(level, (p[0], p[1], p[2]+eps)) - f) / eps
+     return (gx, gy, gz)
+ ```
+-*Note: The exact step size calculation and helper functions depend on the specific sphere tracing implementation and the properties of the noise function. The key aspect of Early Stop is limiting the number of `noise_function` calls to $i_{min} + k$ [S1].*
+ 
+ **Parameters:**
+@@ -110,7 +123,7 @@
+ 
+ **Edge Cases and Pitfalls:**
+-- **Early Stop+0 ($k=0$):** Computing only $f_{i_{min}}$ causes slow convergence at every level of the BVH traversal. The ray steps safely to the current outer bounding volume and repeats, massively increasing the total number of steps. This is particularly bad for grazing rays (rays passing close to but not entering a bounding volume) [S1].
+-- **Step Size Reduction:** Stopping early reduces the number of $f_i$ computed, which may result in smaller step sizes. This can increase the total number of steps required to converge, potentially raising the final cost. A trade-off must be found [S1].
+-- **Grazing Rays:** Rays passing very close to a bounding volume without entering it can be significantly slowed down if $k$ is too small. Early Stop+1 mitigates this by considering one extra level of the BVH [S1].
++- **Early Stop+0 ($k=0$):** Computing only $f_{i_{min}}$ causes slow convergence at every level of the BVH traversal [S1]. The ray steps safely to the current outer bounding volume and repeats, massively increasing the total number of steps [S1]. This is particularly bad for grazing rays (rays passing close to but not entering a bounding volume) [S1].
++- **Step Size Reduction:** Stopping early reduces the number of $f_i$ computed, which may result in smaller step sizes [S1]. This can increase the total number of steps required to converge, potentially raising the final cost [S1]. A trade-off must be found [S1].
++- **Grazing Rays:** Rays passing very close to a bounding volume without entering it can be significantly slowed down if $k$ is too small [S1]. Early Stop+1 mitigates this by considering one extra level of the BVH [S1].
+ 
+ ## Subtopics

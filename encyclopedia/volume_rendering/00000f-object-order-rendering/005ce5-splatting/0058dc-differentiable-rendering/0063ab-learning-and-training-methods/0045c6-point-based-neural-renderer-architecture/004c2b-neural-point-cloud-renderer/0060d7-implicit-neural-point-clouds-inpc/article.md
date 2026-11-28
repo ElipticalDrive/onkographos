@@ -1,0 +1,168 @@
+# Implicit Neural Point Clouds (INPC)
+Also called: INPC (Implicit Neural Point Clouds)
+
+## Overview
+Implicit Neural Point Clouds (INPC) is a point-based neural radiance field method that represents the scene as an implicit point cloud structure using a multi-resolution hash grid and a Multi-Layer Perceptron (MLP) for rendering [S1]. Unlike its sibling [Neural Point Cloud Renderer](13165-neural-point-cloud-renderer.md), which typically relies on explicit Gaussian or spherical harmonics features attached to points, INPC uses a hash-encoded MLP to predict appearance and opacity, allowing for denser and more continuous feature representation [S1]. It distinguishes itself from other neural implicit methods by utilizing differentiable bilinear splatting for rasterization, enabling efficient gradient-based optimization of both the point positions and the neural network parameters [S1].
+
+## How it works
+
+### Inputs and Outputs
+**Inputs:**
+*   $C$: Camera model (intrinsics and extrinsics) [S1].
+*   $P$: Set of 3D point positions [S1].
+*   $A$: Set of point opacities [S1].
+*   $F$: Set of point features (initially empty or initialized from SfM) [S1].
+*   $I_{prior}$: Optional prior point cloud to influence initial sampling probabilities [S1].
+
+**Outputs:**
+*   $I$: Rendered image [S1].
+
+### Data Structures
+
+**Point Probability Octree:**
+The scene is represented by an octree structure where leaf nodes define the sampling distribution for points [S1]. Each leaf node stores:
+*   $c_i \in \mathbb{R}^3$: Center of the voxel in world space [S1].
+*   $l_i \in \mathbb{N}_0$: Current subdivision level [S1].
+*   $p_i \in [0, 1]$: Sampling probability [S1].
+*   $q_i \in [0, 1]$: Subdivision probability [S1].
+
+**Hash Grid and MLP (via TCNN):**
+*   **Hash Grid:** Multi-resolution hash grid configuration [S1, Listing 1]:
+    *   `otype`: 'Grid'
+    *   `type`: 'Hash'
+    *   `n_levels`: 10
+    *   `n_features_per_level`: 4
+    *   `log2_hashmap_size`: 23
+    *   `base_resolution`: 16
+    *   `per_level_scale`: 2.0
+    *   `interpolation`: 'Linear'
+*   **Feature MLP:**
+    *   `otype`: 'FullyFusedMLP'
+    *   `activation`: 'ReLU'
+    *   `output_activation`: 'None'
+    *   `n_neurons`: 64
+    *   `n_hidden_layers`: 1
+*   **Background MLP:**
+    *   4 hidden layers, 128 neurons each, ReLU activations [S1].
+    *   Encoding: Normalized viewing direction encoded using spherical harmonics of degree 3 (implemented in TCNN as 'degree': 4 with input directions mapped to $[0, 1]^3$) [S1].
+
+**CNN Post-Processing:**
+*   Standard three-layer U-Net with 64 initial filters [S1].
+*   Activations: GELU [S1].
+*   Downsampling: Average pooling [S1].
+*   Upsampling: Bilinear interpolation followed by point-wise convolution [S1].
+*   Residual Block: One block based on Fast Fourier Convolution (FFC) with $\alpha_{in} = 0.75, \alpha_{out} = 0.75$ [S1].
+
+### Initialization
+
+1.  **Bounding Box:** Define $b_{min}, b_{max} \in \mathbb{R}^3$ as the axis-aligned bounding box of the Structure-from-Motion (SfM) point cloud, enlarged by 10% [S1]. If no SfM cloud is available, use the smallest axis-aligned box enclosing the viewing frusta of all training cameras [S1].
+2.  **Scene Normalization:** Apply a world-space transformation to camera poses and SfM point cloud so they fit inside a cube $[-1, 1]^3$ [S1]. Set near plane to 0.01 and far plane to 100 [S1].
+3.  **Octree Initialization:** Initialize the octree as a regular grid of cube-shaped voxels with resolution $R$ (a power of 2) within the bounding box [S1]. The initial subdivision level for all leaf nodes is $l_i = \log_2(R)$ [S1].
+4.  **Sampling Probability Initialization:** If a prior point cloud $I$ is provided, let $|I_i|$ be the number of points inside the volume of the $i$-th leaf node and $Q$ be the 0.95-quantile of these point counts [S1]. Compute initial probability as $p_i = \text{clip}(|I_Q| / |I_i|, 0.1, 1.0)$ for robustness [S1].
+
+### Rasterization Algorithm
+
+The rendering process uses differentiable bilinear splatting [S1].
+
+**Algorithm 1: GPU Rasterization with Bilinear Splatting and $\alpha$-Blending**
+
+> **Unverified code.** The code below did not pass a test run against a reference implementation, or no test fits it, so it may contain errors.
+
+```python
+def rasterize(camera, points, opacities, features):
+    # 1. Project and Cull
+    # Project points P to image plane using camera C.
+    # Cull points outside the view frustum or behind the near plane.
+    projected_points = project_and_cull(points, camera)
+    
+    # 2. Bilinear Splatting
+    # For each point in projected_points, compute its contribution to pixels.
+    # Returns:
+    #   A_prime: Splat opacities (alpha)
+    #   K: Keys (pixel coordinates or hash keys for sorting)
+    #   N: Counts (number of splats per pixel)
+    A_prime, K, N = bilinear_splatting(projected_points, opacities)
+    
+    # 3. Exclusive Sum
+    # Compute cumulative counts to determine start indices for sorting.
+    L = exclusive_sum(N)
+    
+    # 4. Radix Sort
+    # Sort splats by key K. Use L as offset for stable sorting.
+    # Uses NVIDIA CUB for global radix sorting.
+    sorted_keys, sorted_offsets = radix_sort_pairs(K, L)
+    
+    # 5. Blend Sorted Splats
+    # Perform alpha blending for each pixel using sorted splats.
+    # Stops accumulation when remaining transmittance falls below threshold.
+    image = blend_sorted_splats(A_prime, features, sorted_offsets, N)
+    
+    return image
+```
+
+**Details of Bilinear Splatting:**
+*   Points are projected to the image plane [S1].
+*   Opacity is weighted using bilinear interpolation before blending into each pixel [S1].
+*   The blending kernel is implemented using CUDA warp-level primitives (32 threads per pixel) to optimize global memory access [S1].
+*   Blending weight computation and spherical harmonics computations are fused into this pipeline [S1].
+*   Accumulation stops once the remaining transmittance falls below $10^{-4}$ [S1].
+
+### View-Specific Sampling
+
+To optimize the point cloud density, INPC uses a viewpoint-specific sampling scheme [S1].
+
+1.  **Depth Calculation:** For each leaf node, compute a view-specific depth value $d_i \in [0, 1]$ [S1]:
+    $$ d_i = \max \left( \frac{|z_{view} - \text{near}|}{\text{far}}, \tau_d \right) $$
+    where $z_{view}$ is the view-space depth value (distance of leaf center to image plane), and $\tau_d = 10^{-8}$ is a threshold [S1]. Note that $|z_{view} - \text{near}|$ accounts for cases where $z_{view}$ may be smaller than `near` for partially visible leaves [S1].
+2.  **Frustum Intersection Handling:** If a leaf volume intersects the faces of the viewing frustum, generated samples might lie outside the frustum [S1]. To avoid bias from partial visibility, re-sample the viewpoint-specific probability distribution repeatedly until the desired number of samples is reached and all generated samples are visible [S1]. This step can be omitted during inference due to multisampling [S1].
+
+### Probability Updates
+
+During optimization, the sampling probabilities $p_i$ and subdivision probabilities $q_i$ are updated based on the rendering feedback [S1].
+
+1.  **Gradient Computation:**
+    *   Store bilinear interpolation weights, per-pixel point counts, and sorted key/index buffers during the forward pass [S1].
+    *   Compute per-splat gradients in the same order as the forward pass [S1].
+    *   Obtain per-point gradient by combining its four splat gradients in a weighted sum according to the respective bilinear interpolation weights (the analytical derivative of the bilinear splatting process) [S1].
+2.  **Weighted Sum for Probabilities:**
+    *   Combine per-splat blending weights of each point using a weighted sum according to the respective bilinear interpolation weights [S1].
+    *   This approach outperforms a simple sum because it causes the resulting per-point blending weight to more closely resemble the expected visibility of future samples from the leaf from which the point was sampled [S1].
+
+### Optimization
+
+*   **Optimizer:** Fused ADAM [S1].
+    *   $\beta_1 = 0.9$
+    *   $\beta_2 = 0.99$
+    *   $\epsilon = 10^{-15}$
+    *   Weight decay disabled [S1].
+*   **Precision:** Automatic mixed precision with FP16 gradients scaled by 128 during the backward pass [S1].
+*   **Learning Rate Decay:** Exponential decay for all parameters [S1].
+    *   Hash grid/MLP LR: Decays from $1e-2$ to $3e-4$ [S1].
+    *   CNN LR: Decays from $3e-4$ to $5e-5$ [S1].
+*   **Differentiable Tone Mapping:**
+    *   Only exposure and camera response sub-modules are activated [S1].
+    *   Fixed LR: $5e-4$ (exposure), $1e-3$ (camera response) [S1].
+    *   Warm-up: Cosine-delayed warm-up for the first 5,000 iterations, multiplying LR by a factor between 0.01 and 1 [S1].
+
+### CNN Post-Processing
+
+The raw rendered image is passed through the U-Net CNN [S1].
+*   **Padding:** Target width and height are padded to a multiple of $2^{L-1}$, where $L$ is the number of U-Net layers, to avoid cropping/padding during skip-connection concatenation [S1].
+
+## Operating characteristics
+
+*   **Time Complexity:** Not given in the sources. The implementation uses NVIDIA CUB for sorting and warp-level primitives for blending to accelerate rendering [S1].
+*   **Memory Complexity:** Not given in the sources. The method uses a hash grid with $2^{23}$ entries and stores point data in an octree structure [S1].
+*   **Performance:** The method is implemented in CUDA for accelerated rendering times [S1]. Automatic mixed precision with FP16 gradients scaled by 128 is used to reduce computation time of the CNN [S1].
+*   **Strengths:** Flexibility of the implicit point cloud structure [S1]. High-quality reconstruction due to neural feature representation [S1]. Efficient differentiable rasterization [S1].
+*   **Limitations:** Requires careful tuning of hyperparameters (e.g., hash grid size, learning rates) [S1]. Pre-processing steps (undistortion, normalization) are required for fair comparison with baselines like 3DGS [S1]. Viewpoint-specific sampling requires re-sampling until all generated samples are visible to avoid bias from partial visibility [S1].
+
+## Background
+
+*   **Origin:** INPC was introduced in the paper "INPC: Implicit Neural Point Clouds for Radiance Field Rendering" [S1].
+*   **History:** The method builds upon prior work in point-based rendering [S1, 56, 57] and neural radiance fields [S1, 4]. It integrates techniques from differentiable rendering [S1, 39, 52] and multi-resolution hashing [S1, 5, 43, 74].
+*   **Usage:** Used for novel view synthesis in 3D computer vision, particularly in datasets like Tanks and Temples [S1, 35].
+
+## Sources
+
+[S1] INPC: Implicit Neural Point Clouds for Radiance Field Rendering, https://doi.org/10.1109/3dv66043.2025.00021, fetched 2026-10-26

@@ -1,0 +1,96 @@
+# B-spline Curve Modeling
+
+Also called: B-spline flame spine interpolation, Basis Spline Modeling, Curve-based Spline Modeling, Curve-based Spline Modeling for Flame Spines, Uniform B-Spline Curve Modeling, Uniform b-spline Curve Evaluation, de Boor curve generation
+
+## Overview
+B-spline Curve Modeling is a technique for generating smooth parametric space curves that interpolate a sequence of control points, primarily used to define the spines of volumetric flames [S1][S2, unofficial]. It is chosen over Hermite interpolation because it guarantees second-order continuity ($C^2$), preventing random twisting of the curve space, and possesses affine invariance [S1][S2, unofficial]. It builds on [B-spline Field Interpolation](11066-b-spline-field-interpolation.md) by applying uniform B-spline basis functions to 1D parametric curves rather than 3D scalar fields [G].
+
+## How it works
+**Inputs:**
+- A sequence of $p$ control points $d_i \in \mathbb{R}^3$ for $i = 0, \dots, p-1$ [S2, unofficial]. These points may evolve under physics forces or be manually positioned [S1].
+- A parameter $x$ within a knot interval $[u_l, u_{l+1}]$ [S3, unofficial].
+
+**Outputs:**
+- The curve position $s(x) \in \mathbb{R}^3$ at parameter $x$ [S3, unofficial].
+
+**Data Structures:**
+- Control points: Array of 3D vectors [S2, unofficial].
+- Knots: Uniformly distributed values $u_i$ in the domain $[0, 1]$ [S2, unofficial]. Not given in the sources.
+
+**Formulas:**
+The curve is defined as:
+$$ s(x) = \sum_{i=0}^{p-1} d_i N_i^n(x) $$
+where $n$ is the degree of the spline and $N_i^n(x)$ is the recursive B-spline basis function [S3, unofficial].
+
+The basis functions are defined recursively [S3, unofficial]:
+1. Base case ($n=0$):
+   $$ N_i^0(x) = \begin{cases} 1 & \text{if } u_i \le x < u_{i+1} \\ 0 & \text{otherwise} \end{cases} $$
+2. Recursive step ($n > 0$):
+   $$ N_i^n(x) = \frac{x - u_i}{u_{i+n} - u_i} N_i^{n-1}(x) + \frac{u_{i+n+1} - x}{u_{i+n+1} - u_{i+1}} N_{i+1}^{n-1}(x) $$
+
+Due to the locality property of B-splines, the value $s(x)$ for $x \in [u_l, u_{l+1}]$ is determined only by the $n+1$ control points $d_{l-n}, \dots, d_l$ [S3, unofficial].
+
+**Algorithm (de Boor's Algorithm):**
+The de Boor algorithm (also known as Cox-de Boor algorithm) is used to evaluate the curve efficiently and numerically stably [S3, unofficial]. It is a generalization of de Casteljau's algorithm for Bezier curves [S3, unofficial].
+
+**Pseudocode:**
+> **Unverified code.** The code below did not pass a test run against a reference implementation, or no test fits it, so it may contain errors.
+
+```python
+def de_boor_eval(control_points, knots, degree, x):
+    """
+    Evaluates a uniform B-spline curve at parameter x using de Boor's algorithm.
+    
+    Args:
+        control_points: List of 3D vectors (d_0, ..., d_{p-1})
+        knots: List of knot values (uniformly distributed in [0, 1])
+        degree: Degree of the spline (n)
+        x: Parameter value in [0, 1]
+        
+    Returns:
+        3D vector representing the curve point s(x)
+    """
+    # Find the knot span index l such that u_l <= x < u_{l+1}
+    l = 0
+    for i in range(len(knots) - 1):
+        if knots[i] <= x < knots[i + 1]:
+            l = i
+            break
+    else:
+        # Handle boundary: if x equals the last knot, clamp to the last span
+        l = len(knots) - 2
+        
+    # Initialize d_i with the relevant control points: d_{l-n}, ..., d_l
+    d = [control_points[l - degree + i] for i in range(degree + 1)]
+    
+    # Perform de Boor iterations
+    for r in range(1, degree + 1):
+        for i in range(l, l - degree + r - 1, -1):
+            # Calculate the blending factor matching the basis function recursion
+            alpha = (x - knots[i]) / (knots[i + degree - r + 1] - knots[i])
+            d[i] = (1 - alpha) * d[i - 1] + alpha * d[i]
+            
+    return d[l]
+```
+
+**Parameters:**
+- Degree $n$ [S3, unofficial]. Not given in the sources.
+- Knots uniformly distributed in $[0, 1]$ [S2, unofficial].
+
+**Edge Cases and Pitfalls:**
+- World coordinates are mapped to local texture coordinates using the support of B-splines defined on $[0, 1]$ regardless of arc-length [S3, unofficial].
+- Not given in the sources.
+
+## Operating characteristics
+- Not given in the sources.
+- Strengths: Guarantees $C^2$ continuity (curvature continuity), preventing random twisting of the curve space [S2, unofficial]. Affine invariance ensures the curve behaves correctly under scaling and rotation [S3, unofficial]. Fast and numerically stable [S3, unofficial].
+- Limitations: Not given in the sources.
+- When to use: When smooth, continuous curves are needed for volumetric elements like flame spines, and affine invariance is required [S1][S2, unofficial].
+
+## Background
+The method was developed for real-time volumetric rendering of fire in a production system [S1][S2, unofficial]. It was introduced in the paper "Pseudorandom Noise for Real-Time Volumetric Rendering of Fire in a Production System" (2008) and further detailed in "Realistic Real-Time Rendering of Fire in a Production System" [S1][S2, unofficial]. The de Boor algorithm is attributed to Carl R. de Boor and is also known as the Cox-de Boor algorithm [S3, unofficial]. The approach was chosen over Hermite interpolation for its superior continuity properties [S1].
+
+## Sources
+[S1] Pseudorandom Noise for Real-Time Volumetric Rendering of Fire in a Production System, https://doi.org/10.2312/vg/vg-pbg08/129-136, fetched 2026-10-26
+[S2] Realistic Real-Time Rendering of Fire in a Production System, https://clas.iusb.edu/math-compsci/_prior-proposals/YVanzine_Proposal.pdf, fetched 2026-10-28 (unofficial)
+[S3] Realistic Real-Time Rendering of Fire in a Production System, https://clas.iusb.edu/math-compsci/_prior-proposals/YVanzine_Proposal.pdf, fetched 2026-10-28 (unofficial)

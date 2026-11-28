@@ -1,0 +1,172 @@
+# Gaussian Data Structure
+
+Also called: GaussianList
+
+## Overview
+The Gaussian Data Structure is the primary in-memory container for 3D Gaussian primitives in differentiable rendering pipelines, organizing per-primitive attributes into column-major arrays to enable efficient GPU batch processing and dynamic resizing [S1, S6, unofficial]. It distinguishes itself from sibling methods by explicitly separating the logical primitive definition (position, scale, rotation, opacity, SH coefficients, covariance) from the physical memory layout (SoA arrays), facilitating the dense buffer management required for real-time splatting [S1, S6, unofficial].
+
+## How it works
+**Inputs and Outputs:**
+- Input: A set of $N$ Gaussian primitives with attributes defined in [3D Gaussian Data Layout](2242-3d-gaussian-data-layout.md).
+- Output: A contiguous memory structure (typically GPU global memory) organized as Struct-of-Arrays (SoA) for batched rendering and optimization.
+
+**Data Structures:**
+The structure is implemented as a `GaussianList` (or `GaussianSet`) containing the following fields [S1, S6, unofficial]:
+
+1.  **positions**: `Matrix4xN<f32>` (or `Vector3<f32>[N]`). Stores $(x, y, z)$ for each Gaussian. The 4th component is often unused or reserved for padding to 16-byte alignment.
+2.  **scales**: `Matrix3xN<f32>` (or `Vector3<f32>[N]`). Stores $(s_x, s_y, s_z)$ for each Gaussian.
+3.  **opacities**: `DVector<f32>` (or `f32[N]`). Stores scalar opacity $\alpha_i$ for each Gaussian.
+4.  **rotations**: `Matrix4xN<f32>` (or `Quaternion<f32>[N]`). Stores $(w, x, y, z)$ for each Gaussian.
+5.  **sh**: `Matrix48xN<f32>` (or `f32[48][N]`). Stores Spherical Harmonics coefficients. The layout is flat: $C_{0,R}, C_{0,B}, C_{0,G}, C_{1,R}, \dots$ up to degree 3 (48 coefficients) [S1, unofficial].
+6.  **num_gaussians**: `usize`. The current count of active primitives $N$.
+7.  **cov3d**: `Matrix3xN<f32>` (or `Matrix3<f32>[N]`). Precomputed 3D covariance matrices $\Sigma_i$ for each Gaussian, derived from scale and rotation [S1, unofficial].
+
+**Numbered Steps for Initialization and Update:**
+1.  **Allocation**: Allocate contiguous memory for arrays of size $N_{max}$ (maximum capacity) for each field [S6, unofficial].
+2.  **Population**: For each primitive $i \in [0, N)$:
+    - Set `positions[:, i]` to the 3D position.
+    - Set `scales[:, i]` to the scale vector.
+    - Set `opacities[i]` to the opacity scalar.
+    - Set `rotations[:, i]` to the quaternion.
+    - Set `sh[:, i]` to the SH coefficient vector.
+    - Compute and set `cov3d[:, i]` using the formula from [3D Gaussian Data Layout](2242-3d-gaussian-data-layout.md): $\Sigma_i = R_i S_i S_i^T R_i^T$ [S1, unofficial].
+3.  **Update**: When primitives are added/removed (densification/pruning):
+    - Determine retained and new indices [S6, unofficial].
+    - Create host-side target arrays for parameters, Adam state, and density statistics [S6, unofficial].
+    - Move retained rows in chunks and append new rows [S6, unofficial].
+    - Release old device layout and upload target arrays to GPU [S6, unofficial].
+
+**Formulas:**
+- **Covariance Construction** (from parent):
+  $$ \Sigma_i = R_i S_i S_i^T R_i^T $$
+  Where $R_i$ is the rotation matrix derived from the quaternion, and $S_i$ is the diagonal scale matrix [S1, unofficial].
+- **SH Coefficient Layout**:
+  $$ \text{sh}[k \cdot 3 + c, i] = \text{coeff}_{k,c}^{(i)} $$
+  Where $k \in [0, 15]$ is the SH band/degree index, $c \in \{R, G, B\}$ is the color channel, and $i$ is the Gaussian index [S1, unofficial].
+
+**Parameters:**
+- **SH Degree**: Typically 3, resulting in 48 coefficients per Gaussian [S1, unofficial].
+- **Data Type**: `f32` (32-bit float) for all attributes [S1, unofficial].
+
+**Edge Cases and Pitfalls:**
+- **Precision**: Use `f32` for GPU compatibility; `f64` may be used for CPU-side optimization but requires conversion [S1, unofficial].
+- **Boundaries**: Ensure `num_gaussians` does not exceed allocated array size; handle dynamic resizing via [Dynamic Buffer Management](3753-dynamic-buffer-management.md) [S6, unofficial].
+- **Degenerate Input**: Handle Gaussians with zero scale or invalid quaternions by clamping or reinitializing [G].
+
+**Pseudocode:**
+> **Unverified code.** The code below did not pass a test run against a reference implementation, or no test fits it, so it may contain errors.
+
+```python
+class GaussianList:
+    def __init__(self, max_capacity: int):
+        self.max_capacity = max_capacity
+        self.num_gaussians = 0
+        # Allocate arrays: N x 4 for positions/rotations, N x 3 for scales/cov3d, N for opacities, N x 48 for SH
+        self.positions = [[0.0] * 4 for _ in range(max_capacity)]
+        self.scales = [[0.0] * 3 for _ in range(max_capacity)]
+        self.opacities = [0.0] * max_capacity
+        self.rotations = [[0.0] * 4 for _ in range(max_capacity)]
+        self.sh = [[0.0] * 48 for _ in range(max_capacity)]
+        self.cov3d = [[0.0] * 9 for _ in range(max_capacity)] # Flattened 3x3 matrix
+
+    def add_gaussian(self, pos: list, scale: list, opacity: float, rot: list, sh: list):
+        if self.num_gaussians >= self.max_capacity:
+            raise Exception("GaussianList full")
+        i = self.num_gaussians
+        self.positions[i] = pos + [0.0] # Pad to 4
+        self.scales[i] = scale
+        self.opacities[i] = opacity
+        self.rotations[i] = rot
+        self.sh[i] = sh
+        # Compute cov3d from scale and rotation
+        self.cov3d[i] = self._compute_cov3d(scale, rot)
+        self.num_gaussians += 1
+
+    def _compute_cov3d(self, scale: list, rot: list) -> list:
+        # Simplified covariance computation
+        # In practice, this involves quaternion-to-matrix conversion and matrix multiplication
+        # Placeholder for actual math: R * S * S^T * R^T
+        return [0.0] * 9 # Return placeholder
+
+    def get_batched_arrays(self) -> dict:
+        # Return numpy-like arrays for GPU upload
+        return {
+            "positions": self.positions[:self.num_gaussians],
+            "scales": self.scales[:self.num_gaussians],
+            "opacities": self.opacities[:self.num_gaussians],
+            "rotations": self.rotations[:self.num_gaussians],
+            "sh": self.sh[:self.num_gaussians],
+            "cov3d": self.cov3d[:self.num_gaussians]
+        }
+```
+
+## Subtopics
+
+### [GSPull](2773-gspull.md)
+GSPull leverages neural distance functions (SDFs/UDFs) to recover detailed mesh structures from 3D Gaussian Splatting, addressing the volumetric nature of standard splats by integrating distance-field supervision. It uses dense queries around the zero-level set to refine geometry conservatively, preventing error accumulation from ambiguous pulling directions. Choose this when explicit surface geometry is required from a Gaussian representation. Link: [GSPull](2773-gspull.md).
+
+### [Composite Error Map and Densification/Pruning Scoring](3396-composite-error-map-and-densification-pruning-scoring.md)
+A density control mechanism using a frequency-aware mask and photometric loss to compute densification/pruning scores, reducing redundancy and improving fidelity over vanilla 3DGS. It integrates a frequency-aware mask to filter noise and weights pruning scores with image-level photometric loss, unlike siblings focusing on second-order sensitivity or Hessian approximations. Choose this for high-fidelity reconstruction with efficient primitive management. Link: [Composite Error Map and Densification/Pruning Scoring](3396-composite-error-map-and-densification-pruning-scoring.md).
+
+### [Dynamic Buffer Management](3753-dynamic-buffer-management.md)
+The runtime strategy for resizing GPU memory buffers storing 3D Gaussian primitives during training/inference, solving unpredictable population sizes from densification/pruning. It grows/shrinks buffers on-the-fly, distinguishing it from static allocation and compression techniques by focusing on buffer expansion and data migration mechanics. Choose this for dynamic scenes with varying Gaussian counts. Link: [Dynamic Buffer Management](3753-dynamic-buffer-management.md).
+
+### [GS-W Network Architecture](5927-gs-w-network-architecture.md)
+The component of Gaussian in the Wild (GS-W) predicting per-Gaussian appearance and visibility from reference images, replacing static color with learnable features sampled by viewpoint. It uses a U-Net encoder-decoder and fusion network for view-dependent appearance without explicit SH, unlike standard 3DGS. Choose this for unconstrained image collections with complex lighting. Link: [GS-W Network Architecture](5927-gs-w-network-architecture.md).
+
+### [VastGaussian](6000-vastgaussian.md)
+A large-scale 3DGS method partitioning scenes into spatially-disjoint regions for scalable training/rendering, solving memory/computational bottlenecks of global optimization. It uses visibility-aware iterative training and explicit appearance embeddings for lighting variations, distinguishing it from naive spatial splitting. Choose this for massive urban environments. Link: [VastGaussian](6000-vastgaussian.md).
+
+### [Data Layout and Storage](6235-data-layout-and-storage.md)
+Defines memory organization, serialization, and runtime management of 3DGS attributes for efficient GPU rendering and optimization [G]. It focuses on raw memory layout and buffer management infrastructure, distinct from rendering algorithms, error-based densification, or network architectures [G]. Choose this for cross-platform data transfer and cache-friendly batched processing. Link: [Data Layout and Storage](6235-data-layout-and-storage.md).
+
+### [Spherical Harmonics Representation](10084-spherical-harmonics-representation.md)
+Uses SH basis to represent view-dependent color of each Gaussian primitive, capturing appearance variations static RGB cannot. It adds view-dependent color and analytical Jacobian for gradient propagation, though incorrect SH modeling may worsen trajectory estimates. Choose this for view-dependent appearance modeling. Link: [Spherical Harmonics Representation](10084-spherical-harmonics-representation.md).
+
+### [7D Gaussian Splatting](11462-7d-gaussian-splatting.md)
+A unified framework for real-time rendering of dynamic scenes with complex view-dependent effects, representing elements as 7D Gaussians (3D space, 1D time, 3D view direction). It jointly models spatial, temporal, and view-dependent dimensions in a single framework, using conditional slicing to transform 7D Gaussians into time/view-conditioned 3D Gaussians. Choose this for dynamic scenes with scattering/anisotropic reflections. Link: [7D Gaussian Splatting](11462-7d-gaussian-splatting.md).
+
+### [Deformable Radial Kernel (DRK) Parametrization](13703-deformable-radial-kernel-drk-parametrization.md)
+Defines unconstrained learnable parameters for 3D Gaussian kernel attributes, ensuring valid physical ranges via specific activation functions. It introduces a three-step activation for basis angles to maintain angular separation and monotonicity, and configurable density control thresholds for sparse training. Choose this for constrained optimization of Gaussian attributes. Link: [Deformable Radial Kernel (DRK) Parametrization](13703-deformable-radial-kernel-drk-parametrization.md).
+
+### [GaussianEditor (Local)](14829-gaussianeditor-local.md)
+A method for 3DGS editing leveraging explicit primitives for direct parameter manipulation (position, rotation, scale, color) based on user commands. It enables local editing (3D inpainting, object removal, composition) with real-time fine-grained control, unlike implicit or global optimization methods. Choose this for user experience and real-time editing. Link: [GaussianEditor (Local)](14829-gaussianeditor-local.md).
+
+### [Gaussian Grouping](14893-gaussian-grouping.md)
+Enhances 3DGS by incorporating identity encodings for 3D objects, enabling grouping splats by semantic identity. It solves precise object-level manipulation (removal, inpainting, recomposition) by rebuilding/segmenting objects under 2D mask and 3D consistency constraints. Compared to siblings, it reduces artifacts and avoids blurry backgrounds. Choose this for object-level manipulation. Link: [Gaussian Grouping](14893-gaussian-grouping.md).
+
+### Learnable Scale Modulation for Primitive Compactness
+A technique introducing a learnable per-Gaussian scalar factor $\beta_i$ to reparameterize effective scales, providing an optimization pathway for adapting primitive extent while retaining tile-culling rules. It initializes $\beta_i \in \mathbb{R}$ to zero, optimizes it with Adam, and scales covariance by $\gamma_i^2$ where $\gamma_i = \text{sigmoid}(\beta_i)$. Unlike vanilla 3DGS, it changes overall extent while keeping anisotropic axis ratios from base scales. Choose this for compact representations with improved quality. Link: [Learnable Scale Modulation for Primitive Compactness](3257-gaussian-data-packing.md) (Note: No dedicated article, cited under Subtopics).
+
+### Direct-Unrestricted (DU) Variant
+Replaces $V_{pq} \text{diag}(\Lambda) V_{qq}$ with a free matrix $M \in \mathbb{R}^{3 \times C}$, removing spatial normalization and bounded coupling. It uses a matrix learning rate of $5 \times 10^{-6}$, scaled by median primitive size. Unrestricted direct coordinates alone do not explain quality gains; structured parameterization performs better. Choose this for direct regression experiments. Link: [Direct-Unrestricted (DU) Variant](3257-gaussian-data-packing.md) (Note: No dedicated article, cited under Subtopics).
+
+### DisC-GS 3D Extension
+Stores control points of Bézier curves directly in 3D spatial coordinates using attribute $c_{\text{curve}}^{3D} \in \mathbb{R}^{4M \times 3}$ instead of 2D subspace. It omits the equation to acquire $c_{\text{curve}}^{3D}$ from $c_{\text{curve}}$ during rendering, as $c_{\text{curve}}^{3D}$ is a direct attribute. Choose this for discontinuity-aware rendering with 3D Bézier curves. Link: [DisC-GS 3D Extension](3257-gaussian-data-packing.md) (Note: No dedicated article, cited under Subtopics).
+
+### GaussianCloud Container
+A Python-based container storing points in a list of `GaussianPoint` objects, providing methods to retrieve batched numpy arrays (positions, colors, scales, opacities, rotations). It serializes/deserializes via `to_dict()`/`from_dict()` with keys for positions (N,3), colors (N,3), scales (N,3), opacities (N,), rotations (N,4), num_points (int). Default scale is [0.02, 0.02, 0.02] if None. Choose this for prototyping and compatibility with CloudCompare/MeshLab. Link: [GaussianCloud Container](3257-gaussian-data-packing.md) (Note: No dedicated article, cited under Subtopics).
+
+### Structure Updates and Image Supply
+A density-control event determines retained/new Gaussians, commits structural change in one target layout, and manages image supply. It creates host-side target arrays for parameters, Adam state, and density statistics, moves retained rows in chunks, appends new rows, releases old device layout, and uploads target arrays. Training images remain as compressed JPEG bytes on host, decoded in camera order through a queue of capacity $K=16$. Choose this for memory-efficient training with asynchronous image decoding. Link: [Structure Updates and Image Supply](3257-gaussian-data-packing.md) (Note: No dedicated article, cited under Subtopics).
+
+## Operating characteristics
+- **Time Complexity**: $O(N)$ for rendering and updates, where $N$ is the number of Gaussians [S1, S6, unofficial].
+- **Memory Complexity**: $O(N \cdot D)$, where $D$ is the number of parameters per Gaussian (e.g., 59 for SH3) [S6, unofficial]. For SH3, approximately 0.685 GiB per million Gaussians [S6, unofficial].
+- **Measured Performance**: On Deep Blending and Tanks & Temples, EffGS (using this structure) achieves PSNR 30.01 dB, SSIM 0.910, and LPIPS 0.238 with 0.25M Gaussians, outperforming EDGS and 3DGS-MCMC [S2, unofficial].
+- **Scaling**: Scales linearly with $N$; efficient for large scenes with dynamic buffer management [S6, unofficial].
+- **Strengths**: Efficient batched processing, dynamic resizing, compatibility with GPU rendering [S1, S6, unofficial].
+- **Limitations**: Memory-intensive for high-resolution scenes with many Gaussians; requires careful buffer management [S6, unofficial].
+- **When to Use**: Real-time rendering, dynamic scenes, large-scale environments [S1, S6, unofficial].
+- **When Not to Use**: Memory-constrained environments without dynamic buffer management; static scenes with low $N$ may not benefit from SoA layout [S6, unofficial].
+
+## Background
+Originated in 3D Gaussian Splatting (Kerbl et al., 2023) for real-time differentiable rendering [S1, unofficial]. Developed to address the inefficiencies of point-based rendering and neural radiance fields, enabling high-fidelity reconstruction and real-time visualization [S1, unofficial]. Used in various 3DGS variants and applications, including dynamic scenes, large-scale environments, and editing tools [S1, S2, S3, unofficial][S4][S5, S6, unofficial].
+
+## Sources
+[S1] thomasantony/splat, https://github.com/thomasantony/splat, fetched 2026-10-27 (unofficial)
+[S2] EffGS: Efficient and High-Fidelity Gaussian Splatting, https://arxiv.org/abs/2609.39553, fetched 2026-10-29 (unofficial)
+[S3] Direct Conditional Parameterization for N-Dimensional Splatting, https://arxiv.org/abs/2610.22778, fetched 2026-10-30 (unofficial)
+[S4] DisC-GS: Discontinuity-aware Gaussian Splatting, https://arxiv.org/abs/2405.15196v2, fetched 2026-10-26
+[S5] Laityperfect7/GaussianScan-Recon, https://github.com/Laityperfect7/GaussianScan-Recon, fetched 2026-10-27 (unofficial)
+[S6] BoundedGS: Memory-Efficient High-Resolution Training for 3D Gaussian Splatting, https://arxiv.org/abs/2610.34233v1, fetched 2026-10-26 (unofficial)

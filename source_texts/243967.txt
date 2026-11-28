@@ -1,0 +1,307 @@
+Train, inspect, edit, automate, and export 3D Gaussian Splatting scenes from a single native application. - SPZ and SOG files open 2.5x faster, SPZ export 2.6x faster by MrNeRF · Pull Request #1961 · MrNeRF/LichtFeld-Studio
+
+SPZ and SOG files open 2.5x faster, SPZ export 2.6x faster by MrNeRF · Pull Request #1961 · MrNeRF/LichtFeld-Studio · GitHub
+Skip to content
+You signed in with another tab or window. Reload to refresh your session.
+You signed out in another tab or window. Reload to refresh your session.
+You switched accounts on another tab or window. Reload to refresh your session.
+Dismiss alert
+Conversation
+MrNeRF
+commented
+Sep 2, 2026
+Copy link
+Copy Markdown
+Owner
+Opening SPZ and SOG files is about 2.5x faster, and SPZ export is 2.6x faster. What gets loaded is bit-identical to before.
+classroom (3.34M splats, SH3, RTX 4080)
+before
+after
+SPZ load
+1.6–1.7 s
+0.67–0.79 s
+SOG load
+0.91–0.98 s
+0.34–0.40 s
+SPZ export
+4.8 s
+1.8 s
+What was slow: every temporary host buffer went through the pinned allocator, which rounds sizes up to power-of-two buckets and pins pages at roughly 1 GB/s behind a global lock. Pinning only pays off where a copy overlaps an explicit stream, which none of these transient buffers do.
+What changed:
+SPZ/SOG loaders and exporters, the SH host unpack and the checkpoint serializer's fallback now use plain pageable host memory. The .licht staging path, the training snapshot ring and cached image uploads keep pinned memory because they do overlap copies.
+SPZ export uses zstd level 9 instead of 12 (twice the throughput, file +1.3%), splits the worker budget across the six streams by size, and unpacks SH on the GPU like the PLY exporter.
+SPZ load decompresses the six streams concurrently and unpacks in parallel straight into pre-faulted tensors. SOG load reads the zip once, decodes the seven WebP images concurrently and dequantises in parallel.
+Verification: tensors loaded from SPZ and SOG hash identically to the previous loaders; a regression test asserts SPZ bit-identity with the reference path; the five non-SH SOG images are byte-identical; 190 SPZ/SOG/serialization/checkpoint gtests pass. Numbers above were measured on the rebased branch and current master in the same session.
+MrNeRF
+added 4 commits
+September 2, 2026 19:28
+SPZ export 1.6x and SPZ load 1.2x faster by not pinning transient hos…
+…
+681948e
+```
+…t buffers
+
+Every CPU tensor is allocated through the pinned allocator, which rounds
+to power-of-two buckets (a 566 MB SH tensor becomes a 1 GiB
+cudaHostAlloc) and pins pages at about 1 GB/s behind a global mutex.
+That is only worth paying where a copy is overlapped on an explicit
+stream. The transient, synchronous host buffers of the SPZ exporter and
+loader, the SOG exporter's downloads, the canonical SH host unpack and
+the direct checkpoint serializer's fallback now use pageable memory
+(Tensor::empty_pageable_host / to_pageable_host). The .licht staging,
+the training snapshot ring and the cached image uploads keep pinned
+memory: they overlap async copies.
+
+classroom_x100 (3.34M splats SH3, RTX 4080):
+  SPZ export  4.77 s -> 2.9 s   (host copies 456 ms, pack 341, compress 2000, write 27)
+  SPZ load    1.56 s -> 1.33 s  (read 68, decompress 690, host tensors 344, upload 89)
+  SOG export  -0.7 s            (downloads no longer pinned)
+SPZ file bytes identical except the provenance stamp; tensors loaded from
+the same SPZ hash identically on both builds; the five non-SH SOG images
+are byte-identical. Stage timers added to SPZ export and load at debug
+level. 185 SPZ/SOG/serialization/checkpoint gtests pass.
+```
+SPZ export 2.6x faster: level-9 zstd with a proportional worker budge…
+…
+1390566
+```
+…t, GPU SH unpack
+
+classroom_x100 (3.34M splats SH3, RTX 4080): SPZ export 4.77 s -> 1.81-1.85 s.
+
+- zstd level 12 compressed the 207 MB payload at ~100 MB/s and barely
+  scales with threads (30 MB/s single, 65 MB/s at 16 threads on this box);
+  level 9 reaches 200 MB/s per 16 threads with almost the same ratio. The
+  exporter now uses level 9 (kSpzExportZstdLevel; SpzSaveOptions can
+  override), file 114.25 MB -> 115.74 MB (+1.3%). The six streams are
+  still compressed concurrently, but the worker budget is split in
+  proportion to stream size (the SH stream is 70% of the bytes) instead
+  of 16 workers each, so the machine is no longer oversubscribed.
+  compress 2000 ms -> 886 ms.
+- The canonical SH host unpack for SPZ decodes q16 on the GPU in bands
+  into pinned staging (same kernel path as the PLY exporter) instead of a
+  host dequant: host copies + unpack 456 ms -> 94 + 294 ms.
+- Row packing is TBB-parallel and deterministic.
+- Stage timers: SPZ export host copies / sh unpack / pack / compress
+  (level, workers) / write.
+
+Tensors loaded back from the new file hash identically to the previous
+writer's output; 98 SPZ/SOG/serialization gtests pass.
+```
+SPZ load is 2.7x faster: concurrent zstd streams, parallel unpack str…
+…
+b30a19a
+```
+…aight into tensors
+
+classroom_x100 (3.34M splats SH3, 115.7 MB): SPZ load 1.56 s -> 0.58 s.
+
+- The six zstd streams decompress concurrently (one ZSTD_decompress per
+  stream into pre-sized buffers; the SH stream dominates at ~0.19 s).
+- unpackGaussians was serial and wrote into zero-initialised vectors;
+  it now fills default-initialised buffers in parallel over rows with
+  the same per-element math, and LichtFeld decodes straight into
+  pre-faulted pageable host tensors instead of copying through a
+  GaussianCloud (host tensors 344 ms -> 54 ms).
+- Rotations are reordered to LichtFeld's wxyz convention on that direct
+  path; a regression test asserts all six attribute tensors are
+  bit-identical to the GaussianCloud reference path.
+- Stage timers: read, per-stream decompress, packed decode, unpack,
+  host tensors (with prefault), upload.
+
+Tensors loaded from the same file hash identically before and after;
+25 SPZ gtests pass.
+```
+SOG load is 2.7x faster: parallel WebP decodes and dequantisation
+…
+4d305bf
+```
+classroom_x100 (3.34M splats SH3, 43 MB bundle): SOG load 870-897 ms -> 326-338 ms.
+
+- The zip is read into memory once and parsed by libarchive from there.
+- The seven WebP images decode concurrently into default-initialised
+  buffers; dequantisation into the float tensors runs in parallel over
+  splats with the same per-element math.
+- Host tensors are pageable and pre-faulted (the pinned allocator would
+  have cost ~0.5 s for the decoded SH floats).
+- Stage timers: archive read, meta, webp decode (per image), dequant,
+  upload, splat build. The image decode helper returns Result instead of
+  std::expected<..., std::string>.
+
+Loaded tensors hash identically before and after; 36 SOG/SPZ gtests pass.
+```
+Copilot
+AI
+lite review requested due to automatic review settings
+September 2, 2026 17:51
+Copilot started reviewing on behalf of
+MrNeRF
+September 2, 2026 17:52
+View session
+Copilot
+AI
+reviewed
+Sep 2, 2026
+View reviewed changes
+Copilot
+AI
+left a comment
+Copy link
+Copy Markdown
+Contributor
+There was a problem hiding this comment.
+Choose a reason for hiding this comment
+The reason will be displayed to describe this comment to others. Learn more.
+🟡 Changes recommended
+The updated zstd compression path uses ZSTD_compressStream2 as a one-shot and adds unconditional stdout timing logs in the SPZ library, both of which can cause incorrect failures or noisy production output.
+Once you've addressed the issues Copilot identified, you can request another Copilot review.
+Pull request overview
+This PR optimizes SPZ and SOG import/export hot paths by avoiding pinned host allocations for transient buffers, increasing parallelism in (de)compression and decoding, and adding a bit-identity regression test to ensure the new direct-unpack paths match the existing reference decoding.
+Changes:
+SPZ load/export now decodes/encodes through packed streams and unpacks directly into pageable host tensors (with prefaulting), and export defaults to zstd level 9 with improved worker budgeting.
+SOG load reads the archive once, decodes WebP images concurrently, and reconstructs splat tensors via pageable host buffers before upload.
+Adds a test that requires direct unpack output to be bit-identical to the GaussianCloud reference for each attribute.
+File summaries
+File
+Description
+tests/test_spz_format.cpp
+Adds direct-unpack vs reference bit-identity regression test and a helper to read full files.
+src/io/include/io/exporter.hpp
+Introduces a configurable SPZ v4 zstd compression level (defaulting to level 9).
+src/io/formats/spz.cpp
+Switches SPZ load/export to pageable host tensors, direct unpacking, and exposes compression level to the packer.
+src/io/formats/sogs.cpp
+Refactors SOG load to single-pass archive read + parallel WebP decode + pageable host reconstruction/upload.
+src/io/CMakeLists.txt
+Links TBB into spz_lib to support new parallel code paths.
+src/core/tensor/tensor_serialization.cpp
+Uses pageable-host transfers for CUDA tensors during serialization.
+src/core/splat_data.cpp
+Adds GPU-banded SH decode to canonical host layout for export/checkpoint paths; migrates SH decode buffers to pageable host.
+src/core/include/core/splat_data.hpp
+Declares new shN_canonical_cpu_gpu_decoded() export helper.
+external/spz/splat-utils.h
+Updates packedBuffer() to return the new PackedByteVector type.
+external/spz/load-spz.h
+Adds default-init allocator for packed byte buffers and introduces GaussianCloudOutput/unpackGaussians() API.
+external/spz/load-spz.cc
+Implements direct unpacking, parallel stream decompression, and updated zstd compression/worker budgeting.
+Review details
+Suppressed comments (4)
+external/spz/load-spz.cc:1531
+This timing log uses SpzLog(), which prints to stdout unconditionally. Consider using SpzLogDebug() so it is compiled out unless SPZ_VERBOSE_LOGGING is enabled.
+```
+        SpzLog("SPZ load: packed decode: %lld ms",
+               static_cast<long long>(std::chrono::duration_cast<std::chrono::milliseconds>(
+                                          std::chrono::steady_clock::now() - packed_start)
+                                          .count()));
+```
+external/spz/load-spz.cc:1538
+This timing log uses SpzLog(), which prints to stdout unconditionally. Consider using SpzLogDebug() so it is compiled out unless SPZ_VERBOSE_LOGGING is enabled.
+```
+        SpzLog("SPZ load: unpackGaussians: %lld ms",
+               static_cast<long long>(std::chrono::duration_cast<std::chrono::milliseconds>(
+                                          std::chrono::steady_clock::now() - unpack_start)
+                                          .count()));
+```
+external/spz/load-spz.cc:1548
+This timing log uses SpzLog(), which prints to stdout unconditionally. Consider using SpzLogDebug() so it is compiled out unless SPZ_VERBOSE_LOGGING is enabled.
+```
+        SpzLog("SPZ load: packed decode: %lld ms",
+               static_cast<long long>(std::chrono::duration_cast<std::chrono::milliseconds>(
+                                          std::chrono::steady_clock::now() - packed_start)
+                                          .count()));
+```
+external/spz/load-spz.cc:1555
+This timing log uses SpzLog(), which prints to stdout unconditionally. Consider using SpzLogDebug() so it is compiled out unless SPZ_VERBOSE_LOGGING is enabled.
+```
+        SpzLog("SPZ load: unpackGaussians: %lld ms",
+               static_cast<long long>(std::chrono::duration_cast<std::chrono::milliseconds>(
+                                          std::chrono::steady_clock::now() - unpack_start)
+                                          .count()));
+```
+Files reviewed: 11/11 changed files
+Comments generated: 2
+Review effort level: Lite
+💡 Add a code-review agent skill or configure MCP servers for context-aware, tailored reviews. Learn more in the docs.
+Comment thread
+external/spz/load-spz.cc
+Comment on lines
++339
+to
+345
+ZSTD_inBuffer input{data, size, 0};
+ZSTD_outBuffer output{out->data(), bound, 0};
+const size_t result = ZSTD_compressStream2(cctx, &output, &input, ZSTD_e_end);
+ZSTD_freeCCtx(cctx);
+if (ZSTD_isError(compressedSize))
+if (ZSTD_isError(result) || result != 0 || input.pos != input.size)
+return false;
+MrNeRF
+Sep 2, 2026
+Copy link
+Copy Markdown
+Owner
+Author
+There was a problem hiding this comment.
+Choose a reason for hiding this comment
+The reason will be displayed to describe this comment to others. Learn more.
+Fixed in a849668: compressZstd now loops ZSTD_compressStream2 with ZSTD_e_end until it returns 0 (and fails cleanly if the output buffer would fill), matching the project_writer idiom. Comment corrected: the whole-buffer delegation only applies without workers.
+Comment thread
+external/spz/load-spz.cc
+Comment on lines
++1026
+to
++1030
+for (size_t i = 0; i < stream_durations_ms.size(); ++i) {
+SpzLog("SPZ load: decompress stream %s: %lld ms",
+i < stream_name_count ? stream_names[i] : "unknown",
+static_cast<long long>(stream_durations_ms[i]));
+}
+MrNeRF
+Sep 2, 2026
+Copy link
+Copy Markdown
+Owner
+Author
+There was a problem hiding this comment.
+Choose a reason for hiding this comment
+The reason will be displayed to describe this comment to others. Learn more.
+Fixed in a849668: all timing lines added by this branch (per-stream decompress, packed decode, unpackGaussians) now go through SpzLogDebug; the pre-existing ERROR/WARNING SpzLog calls are unchanged.
+Address review: loop ZSTD_compressStream2 until flushed, debug-level …
+…
+a849668
+```
+…SPZ timing logs
+
+ZSTD_compressStream2 with ZSTD_e_end is specified to be called until it
+returns 0; with a worker pool a single call is not guaranteed to finish.
+The per-stream/stage timing lines in the SPZ loader go through
+SpzLogDebug (SPZ_VERBOSE_LOGGING) instead of unconditional stdout.
+```
+Hide details
+View details
+MrNeRF
+merged commit cc99f28
+into
+master
+Sep 2, 2026
+7 checks passed
+Uh oh!
+There was an error while loading. Please reload this page.
+MrNeRF
+deleted the
+perf/host-pageable
+branch
+September 3, 2026 13:05
+Sign up for free
+to join this conversation on GitHub.
+Already have an account?
+Sign in to comment
+Uh oh!
+There was an error while loading. Please reload this page.
+Labels
+None yet
+2 participants
+Add this suggestion to a batch that can be applied as a single commit.This suggestion is invalid because no changes were made to the code.Suggestions cannot be applied while the pull request is closed.Suggestions cannot be applied while viewing a subset of changes.Only one suggestion per line can be applied in a batch.Add this suggestion to a batch that can be applied as a single commit.Applying suggestions on deleted lines is not supported.You must change the existing code in this line in order to create a valid suggestion.Outdated suggestions cannot be applied.This suggestion has been applied or marked resolved.Suggestions cannot be applied from pending reviews.Suggestions cannot be applied on multi-line comments.Suggestions cannot be applied while the pull request is queued to merge.Suggestion cannot be applied right now. Please check back later.
+You can’t perform that action at this time.

@@ -1,0 +1,200 @@
+# DINER
+
+Also called: DINER (Depth-aware Image-based NEural Radiance fields), Depth-aware Image-based NEural Radiance fields
+
+## Overview
+DINER is a method for novel view synthesis that reconstructs a volumetric scene representation (NeRF) from a sparse set of RGB input views by leveraging predicted dense depth maps [S1]. It solves the problem of high synthesis artifacts and geometric failure when the relative distance between source cameras is large, a scenario where implicit correspondence search fails [S1]. Unlike sibling methods that rely on sparse landmarks or implicit correspondence, DINER uses dense depth priors to guide feature fusion and sampling, allowing for input views with high disparity and improving sampling efficiency [S1].
+
+## How it works
+**Inputs and Outputs:**
+*   **Inputs:** A sparse set of $N$ RGB source images $\{I^{(i)}\}_{i=1}^N$ with known camera intrinsics $K^{(i)}$ and extrinsics $P^{(i)}$ [S1]. Typical value for $N$ is 4 [S1].
+*   **Outputs:** A rendered color $\hat{C}(\mathbf{r})$ for a target ray $\mathbf{r}$ [S1].
+
+**Data Structures:**
+*   **Feature Maps:** $W^{(i)}$ is a 2D feature map for each source view $i$, extracted by encoder $E$ [S1].
+*   **Intermediate Features:** $V^{(i)}$ is an intermediate feature vector for view $i$, output by MLP part $f_1$ [S1].
+*   **Depth Maps:** $\hat{D}^{(i)}$ is the predicted depth map for source view $i$ [S1].
+
+**Method Steps:**
+
+1.  **Depth Estimation:** Estimate depth maps $\hat{D}^{(i)}$ for each source view $I^{(i)}$ using a state-of-the-art monocular depth estimation network [S1].
+2.  **Source Feature Extrapolation:**
+    *   Pad each input image $I^{(i)}$ by 64 pixels by repeating border values [S1].
+    *   Compute positional encoding for normalized pixel coordinates $\mathbf{uv} \in [-1, +1]$ using 4 exponentially increasing frequencies starting with 0.5, resulting in an 18-channel map [S1]. Set this encoding to 0 for unpadded regions [S1].
+    *   Concatenate the padded image and positional encoding, then apply the 2D-convolutional encoder $E$ to extract feature maps: $W^{(i)} = E([I^{(i)}_{\text{pad}}; \text{PE}])$ [S1].
+3.  **Ray Sampling (Depth-Guided):**
+    *   For a target ray $\mathbf{r}(t) = \mathbf{o} + t \cdot \mathbf{d}$, generate 1000 candidate samples along the ray [S1].
+    *   Shortlist 25 samples based on depth guidance [S1].
+    *   Add 15 samples via Gaussian boosting around the shortlisted points [S1].
+    *   Total samples contributing to final color: 40 [S1].
+    *   *Note:* Normal maps for point cloud backface culling are obtained by calculating central differences on $\hat{D}^{(i)}$ using $3 \times 3$ convolutional kernels, filtering out foreground-background edges [S1].
+4.  **Feature Fusion and MLP Processing:**
+    *   For each sample point $\mathbf{x}_j$ and view direction $\mathbf{d}$:
+        *   Transform $\mathbf{x}_j$ and $\mathbf{d}$ into source view coordinates:
+            $$ \mathbf{x}^{(i)} = P^{(i)} \circ \mathbf{x}_j $$
+            $$ \mathbf{d}^{(i)} = R^{(i)} \circ \mathbf{d} $$
+            where $P^{(i)}$ and $R^{(i)}$ are the extrinsic rotation/translation components [S1].
+        *   Project $\mathbf{x}^{(i)}$ onto the feature map $W^{(i)}$ using intrinsics $K^{(i)}$ and bilinear interpolation to get feature vector $\boldsymbol{\omega}^{(i)}$:
+            $$ \boldsymbol{\omega}^{(i)} = W^{(i)}[K^{(i)} \circ \mathbf{x}^{(i)}] $$
+        *   Compute the deviation $\Delta z$ between the sample's z-coordinate in camera space and the predicted depth $\hat{D}^{(i)}$ [S1].
+        *   Condition the NeRF on the positional encoding of $\Delta z$. Use 6 frequency channels with a base frequency of 1 meter, resulting in a 13-dimensional vector [S1].
+        *   Concatenate the 13-dimensional $\Delta z$ encoding with the 512-dimensional feature vector $\boldsymbol{\omega}^{(i)}$ [S1].
+        *   Process $\mathbf{x}^{(i)}$, $\mathbf{d}^{(i)}$, and the concatenated vector through the first MLP part $f_1$ to generate intermediate feature vectors $V^{(i)}$:
+            $$ V^{(i)} = f_1(\mathbf{x}^{(i)}, \mathbf{d}^{(i)}, [\boldsymbol{\omega}^{(i)}; \text{PE}(\Delta z)]) $$
+5.  **Aggregation and Rendering:**
+    *   Average pool the intermediate feature vectors across all $N$ views: $\text{mean}_i V^{(i)}$ [S1].
+    *   Process the averaged features through the second MLP part $f_2$ to regress final color $\mathbf{c}$ and opacity $\sigma$:
+        $$ (\mathbf{c}, \sigma) = f_2(\text{mean}_i V^{(i)}) $$
+    *   Render the final color $\hat{C}(\mathbf{r})$ using standard volumetric rendering integration:
+        $$ \hat{C}(\mathbf{r}) = \sum_{j} T_j (1 - \exp(-\sigma_j \delta_j)) \mathbf{c}_j $$
+        where $T_j = \exp\left(-\sum_{k=1}^{j-1} \sigma_k \delta_k\right)$ and $\delta_j = t_{j+1} - t_j$ [S1].
+
+**Pseudocode:**
+
+> **Unverified code.** The code below did not pass a test run against a reference implementation, or no test fits it, so it may contain errors.
+
+```python
+import numpy as np
+
+def diner_render(source_images, camera_params, depth_estimator, encoder, mlp_f1, mlp_f2, target_ray):
+    """
+    Renders a single ray using the DINER method.
+    
+    Args:
+        source_images: List of N RGB images I^(i).
+        camera_params: List of N tuples (K^(i), P^(i), R^(i)).
+        depth_estimator: Function to predict depth maps.
+        encoder: 2D convolutional network E.
+        mlp_f1: First part of NeRF MLP.
+        mlp_f2: Second part of NeRF MLP.
+        target_ray: Ray tuple (origin o, direction d).
+        
+    Returns:
+        Rendered color c.
+    """
+    N = len(source_images)
+    
+    # Step 1: Depth Estimation
+    depth_maps = [depth_estimator(img) for img in source_images]
+    
+    # Step 2: Source Feature Extrapolation
+    feature_maps = []
+    for i in range(N):
+        # Pad image by 64 pixels repeating border values
+        padded_img = np.pad(source_images[i], ((64, 64), (64, 64), (0, 0)), mode='edge')
+        h, w = padded_img.shape[:2]
+        y, x = np.meshgrid(np.linspace(-1, 1, h), np.linspace(-1, 1, w))
+        uv = np.stack([x, y], axis=-1)
+        
+        # 4 exponentially increasing frequencies starting with 0.5 -> 16 dims + 2 original uv = 18 dims
+        pe = []
+        for k in range(4):
+            freq = 0.5 * (2**k)
+            pe.append(np.sin(freq * uv[..., 0]))
+            pe.append(np.cos(freq * uv[..., 0]))
+            pe.append(np.sin(freq * uv[..., 1]))
+            pe.append(np.cos(freq * uv[..., 1]))
+        pe_map = np.stack(pe, axis=-1)
+        
+        # Set PE to 0 for unpadded regions (simplified mask logic)
+        pe_map[padded_img[:, :, 0] == 0] = 0
+        
+        # Concatenate and encode
+        input_to_encoder = np.concatenate([padded_img, pe_map], axis=-1)
+        feature_maps.append(encoder(input_to_encoder))
+        
+    # Step 3: Depth-Guided Sampling
+    # Generate 1000 candidates, shortlist 25, add 15 Gaussian -> 40 total
+    # Exact shortlisting and boosting logic not given in the sources.
+    sample_points_t = np.linspace(0.0, 10.0, 40)
+    
+    accumulated_transmittance = 1.0
+    accumulated_color = np.zeros(3)
+    
+    for t_j in sample_points_t:
+        x_j = target_ray.origin + t_j * target_ray.direction
+        view_features = []
+        
+        for i in range(N):
+            K_i, P_i, R_i = camera_params[i]
+            
+            # Transform to source view coordinates
+            x_i = P_i @ np.append(x_j, 1)
+            d_i = R_i @ target_ray.direction
+            
+            # Project to feature map
+            uv_i = (K_i @ np.append(x_i, 1))[:2] / (K_i @ np.append(x_i, 1))[2]
+            
+            # Interpolate feature vector w^(i)
+            w_i = bilinear_interpolate(feature_maps[i], uv_i) # [G]
+            
+            # Compute deviation Delta z
+            z_sample = x_i[2]
+            z_depth = bilinear_interpolate(depth_maps[i], uv_i) # [G]
+            delta_z = z_sample - z_depth
+            
+            # Positional encoding of Delta z: 6 freq channels, base 1m -> 13-dim vector
+            pe_delta_z = []
+            for k in range(6):
+                freq = 1.0 * (2**k)
+                pe_delta_z.append(np.sin(freq * delta_z))
+                pe_delta_z.append(np.cos(freq * delta_z))
+            pe_delta_z = np.concatenate([np.array([delta_z]), pe_delta_z])
+            
+            # Concatenate w^(i) (512-dim) and PE(Delta z) (13-dim)
+            input_vec = np.concatenate([w_i, pe_delta_z])
+            
+            # Process through f1
+            V_i = mlp_f1(x_i, d_i, input_vec)
+            view_features.append(V_i)
+            
+        # Average pool across views
+        mean_V = np.mean(view_features, axis=0)
+        
+        # Process through f2 to get c and sigma
+        c, sigma = mlp_f2(mean_V)
+        
+        # Volumetric rendering step
+        delta_t = sample_points_t[1] - sample_points_t[0] if len(sample_points_t) > 1 else 0.0
+        weight = accumulated_transmittance * (1.0 - np.exp(-sigma * delta_t))
+        accumulated_color += weight * c
+        accumulated_transmittance *= np.exp(-sigma * delta_t)
+        
+        # Early termination if transmittance is very low
+        if accumulated_transmittance < 1e-5:
+            break
+            
+    return accumulated_color
+
+def bilinear_interpolate(grid, uv):
+    # [G] Standard bilinear interpolation implementation
+    pass
+```
+
+**Parameters:**
+*   $N$: Number of source images. Typical value: 4 [S1].
+*   $f_1, f_2$: Parts of the NeRF MLP. $f_1$ input dimensions adjusted to accommodate concatenated features and depth encoding [S1].
+*   Loss weights: $w_l = 1.0$, $w_{vgg} = 0.1$, $w_{ab} = 5.0$ (or $1.0$ for DTU dataset) [S1].
+*   Patch size for loss evaluation: $64 \times 64$ pixels (Lab downsamples to $8 \times 8$) [S1].
+
+**Edge Cases and Pitfalls:**
+*   **Extrapolation:** Standard image-based NeRFs suffer from artifacts when rendering outside the source view frustums. DINER handles this by padding input images and using positional encoding [S1].
+*   **Large Disparity:** Implicit correspondence search fails when the distance between source cameras is large. DINER uses dense depth maps instead of sparse landmarks to handle this [S1].
+*   **Depth Accuracy:** Synthesis quality improves with depth accuracy up to a standard deviation of 1mm noise. Higher accuracy yields no further improvement [S1].
+*   **Rendering Speed:** Despite improved sampling, synthesis of a $256 \times 256$ image takes two seconds [S1].
+
+## Operating characteristics
+*   **Time Complexity:** Rendering a $256 \times 256$ image takes approximately two seconds [S1]. This is slower than real-time methods but faster than some previous state-of-the-art generalizable NeRFs due to depth-guided sampling efficiency [S1].
+*   **Memory Complexity:** Not given in the sources [S1].
+*   **Measured Performance:** On the DTU dataset, DINER achieves higher PSNR and SSIM compared to baselines like KeypointNeRF (which is limited to specific classes) and NeuRay [S1].
+*   **Scaling:** The method is designed for sparse inputs (e.g., 4 views) with high relative distance [S1].
+*   **Strengths:** Handles large disparities between source views; dense depth guidance improves geometry estimation and sampling efficiency; reduces median Chamfer distance by 33% and maximum Chamfer distance by a factor of 4 compared to coarse-to-fine sampling with the same number of points [S1].
+*   **Limitations:** Relies on the accuracy of the external depth estimator; synthesis speed is not real-time; limited to scenes where depth can be reasonably estimated [S1].
+*   **When to use:** When input views have high disparity and sparse coverage, and high-quality novel view synthesis is required without per-scene optimization [S1].
+*   **When not to use:** When real-time rendering is required or when depth estimation is unreliable (e.g., textureless regions) [S1].
+
+## Background
+DINER (Depth-aware Image-based NEural Radiance fields) was proposed by Malte Prinzler, Justus Thies, and Otmar Hilliges [S1]. It was published in CVPR 2023 (arXiv:2211.16630) [S1]. The method builds on the pixelNeRF pipeline [S1] and addresses limitations in previous image-based NeRFs that relied on sparse landmarks or implicit correspondence, which failed for large camera disparities or non-specific object classes [S1]. It is used for novel view synthesis of human heads and general objects [S1].
+
+## Sources
+[S1] DINER: Depth-aware Image-based NEural Radiance fields, https://doi.org/10.1109/cvpr52729.2023.01198, fetched 2026-10-29

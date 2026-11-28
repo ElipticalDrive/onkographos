@@ -1,0 +1,604 @@
+--- v002.md
++++ v003.md
+@@ -1,258 +1,379 @@
+ # PngCompression
+ 
+-Also called: PNG-based Gaussian Splat Compression, VKGS Compression
++Also called: SplatAD PNG Compression, SplatAD compression
+ 
+ ## Overview
+-PngCompression is a lossy compression method for 3D Gaussian Splatting (3DGS) data that encodes spatial parameters into PNG image files and spherical harmonic (SH) coefficients into quantized K-means clusters [S1, unofficial]. It differs from generic entropy coding by leveraging the spatial locality of Gaussian means and scales, allowing standard image codecs to handle redundancy, while using vector quantization for high-dimensional SH data [S1, unofficial]. It is specifically designed for the VKGS (Vulkan Gaussian Splatting) pipeline [S1, unofficial].
++PngCompression is a lossy compression technique for 3D Gaussian splats that encodes spatial and scale parameters into PNG image files and uses K-means clustering to compress spherical harmonic coefficients [S1, S2, unofficial]. It differs from sibling methods by mapping 1D Gaussian arrays onto 2D square grids to exploit spatial locality for JPEG/PNG compression efficiency, rather than using generic codecs or pure vector quantization [S1, S2, unofficial].
+ 
+ ## How it works
+-**Inputs:** A dictionary of Gaussian splat parameters: `means` (3D position), `scales` (3D scale), `quats` (4D rotation quaternion), `opacities` (scalar), `sh0` (SH degree 0 coefficients), and `shN` (higher-degree SH coefficients).
+-**Outputs:** A set of PNG files for spatial parameters, an NPZ file for SH coefficients, and a `meta.json` file containing metadata for reconstruction.
+-
+-**Data Structures:**
+-*   **Grid:** A 2D square grid of size $n_{sidelen} \times n_{sidelen}$, where $n_{sidelen} = \lfloor \sqrt{n_{gs}} \rfloor$ and $n_{gs}$ is the number of Gaussians.
+-*   **PNG Files:**
+-    *   8-bit: Single channel or interleaved RGB/RGBA, storing quantized values in `uint8`.
+-    *   16-bit: Split into two 8-bit PNGs (`_l.png` for low byte, `_u.png` for high byte) to store `uint16` values.
+-*   **NPZ File:** Stores `centroids_quant` (uint8) and `labels` (uint16) for K-means compressed SH coefficients.
+-
+-**Parameters:**
+-*   `use_sort` (bool): Whether to sort splats before compression. Default: `True` [S1, unofficial].
+-*   `n_clusters` (int): Number of K-means clusters for SH compression. Default: `65536` [S1, unofficial].
+-*   `quantization` (int): Number of bits for centroid quantization. Default: `6` [S1, unofficial].
+-*   `verbose` (bool): Print progress. Default: `True` [S1, unofficial].
+-
+-**Steps:**
+-
+-1.  **Preprocessing:**
+-    *   Apply a logarithmic transform to `means`: $m' = \log(m + \epsilon)$ [S1, unofficial].
+-    *   Normalize quaternions: $q' = \text{normalize}(q)$ [S1, unofficial].
+-
+-2.  **Grid Preparation:**
+-    *   Calculate side length: $n_{sidelen} = \lfloor \sqrt{n_{gs}} \rfloor$ [S1, unofficial].
+-    *   Calculate crop count: $n_{crop} = n_{gs} - n_{sidelen}^2$ [S1, unofficial].
+-    *   If $n_{crop} > 0$, remove the $n_{crop}$ Gaussians with the lowest opacity [S1, unofficial].
+-
+-3.  **Sorting (Optional):**
+-    *   If `use_sort` is `True`, sort the remaining splats. The specific sorting metric is not detailed in the source, but it is intended to improve compression efficiency by grouping similar values [S1, unofficial].
+-
+-4.  **Compression by Parameter Type:**
+-    *   **Means:** Use 16-bit PNG compression (`_compress_png_16bit`) [S1, unofficial].
+-    *   **Scales, Quats, Opacities, SH0:** Use 8-bit PNG compression (`_compress_png`) [S1, unofficial].
+-    *   **SHN (Higher Degrees):** Use K-means compression (`_compress_kmeans`) [S1, unofficial].
+-    *   **Other:** Save as NPZ (`_compress_npz`) [S1, unofficial].
+-
+-5.  **8-bit PNG Compression (`_compress_png`):**
+-    *   Reshape parameter array to $(n_{sidelen}, n_{sidelen}, -1)$ [S1, unofficial].
+-    *   Compute global minimum ($min$) and maximum ($max$) of the grid [S1, unofficial].
+-    *   Normalize to $[0, 1]$: $v_{norm} = \frac{v - min}{max - min}$ [S1, unofficial].
+-    *   Quantize to `uint8`: $v_{out} = \text{round}(v_{norm} \times 255)$ [S1, unofficial].
+-    *   Save as PNG [S1, unofficial].
+-
+-6.  **16-bit PNG Compression (`_compress_png_16bit`):**
+-    *   Follow steps 5.1–5.3, but quantize to `uint16`: $v_{out} = \text{round}(v_{norm} \times 65535)$ [S1, unofficial].
+-    *   Split into low and high bytes:
+-        *   $low = v_{out} \ \& \ 0xFF$
+-        *   $high = (v_{out} \gg 8) \ \& \ 0xFF$
+-    *   Save $low$ as `_l.png` and $high$ as `_u.png` [S1, unofficial].
+-
+-7.  **K-means Compression (`_compress_kmeans`):**
+-    *   Reshape SH coefficients to $(dim, n_{gs})$ [S1, unofficial].
+-    *   Fit K-means with $n_{clusters}=65536$ and Manhattan distance [S1, unofficial].
+-    *   Assign each Gaussian to the nearest cluster center (label) [S1, unofficial].
+-    *   Quantize cluster centers to `uint8` using `quantization` bits (default 6) [S1, unofficial].
+-    *   Save `centroids_quant` (uint8) and `labels` (uint16) in an NPZ file [S1, unofficial].
+-
+-8.  **Metadata:**
+-    *   Save compression parameters and grid dimensions to `meta.json` [S1, unofficial].
+-
+-**Decompression:**
+-1.  Load `meta.json` [S1, unofficial].
+-2.  Load PNGs and reconstruct 8/16-bit grids. Denormalize using stored min/max [S1, unofficial].
+-3.  Load NPZ and reconstruct SH coefficients from labels and quantized centroids [S1, unofficial].
+-4.  **Postprocessing:** Apply inverse log transform to means [S1, unofficial].
+-
+-**Pseudocode:**
++### Inputs and outputs
++**Inputs:**
++- A dictionary of splat parameters: `means` (3D), `scales` (3D), `quats` (4D), `opacities` (1D), `sh0` (3D), `shN` (N*D).
++- `n_gs`: Total number of Gaussians.
++- `use_sort`: Boolean flag for sorting (default `True`) [S1, S2, unofficial].
++- `n_clusters`: Number of K-means clusters for SH coefficients (default `65536`) [S2, unofficial].
++- `quantization`: Number of bits for centroid quantization (default `6`) [S2, unofficial].
++- `compress_dir`: Output directory [S1, S2, unofficial].
++
++**Outputs:**
++- PNG files for `means`, `scales`, `quats`, `opacities`, `sh0`.
++- Two PNG files (`_l.png`, `_u.png`) for `means` if 16-bit mode is used.
++- NPZ file for `shN` containing labels and quantized centroids.
++- `meta.json` containing metadata for reconstruction [S1, S2, unofficial].
++
++### Data structures
++**Metadata (`meta.json`):**
++- For PNG-compressed parameters:
++  ```json
++  {
++    "param_name": {
++      "shape": [list of integers],
++      "dtype": "string",
++      "mins": [list of floats],
++      "maxs": [list of floats]
++    }
++  }
++  ```
++- For NPZ-compressed parameters:
++  ```json
++  {
++    "param_name": {
++      "shape": [list of integers],
++      "dtype": "string"
++    }
++  }
++  ```
++[S1, S2, unofficial]
++
++### Steps
++1. **Preprocessing:**
++   - Apply `log_transform` to `means` [S1, S2, unofficial].
++   - Normalize quaternions: `quats = F.normalize(quats, dim=-1)` [S2, unofficial].
++
++2. **Grid Preparation:**
++   - Calculate side length: $n_{sidelen} = \lfloor \sqrt{n_{gs}} \rfloor$ [S1, S2, unofficial].
++   - Calculate crop amount: $n_{crop} = n_{gs} - n_{sidelen}^2$ [S1, S2, unofficial].
++   - If $n_{crop} > 0$, remove the $n_{crop}$ splats with the lowest opacity [S1, S2, unofficial].
++     - Sort splats by opacity descending.
++     - Keep indices: `keep_indices = argsort(opacities, descending=True)[:-n_crop]` [S2, unofficial].
++     - Filter all parameter tensors using `keep_indices` [S2, unofficial].
++
++3. **Sorting (Optional):**
++   - If `use_sort` is `True`, sort the splats using `sort_splats(splats)` [S1, S2, unofficial].
++   - [G] `sort_splats` typically sorts by spatial position (e.g., Z-order or Hilbert curve) to maximize spatial coherence in the resulting grid.
++
++4. **Compression:**
++   - For each parameter, select the compression function based on `param_name`:
++     - `means`: `_compress_png_16bit` [S1, S2, unofficial].
++     - `scales`, `quats`, `opacities`, `sh0`: `_compress_png` [S1, S2, unofficial].
++     - `shN`: `_compress_kmeans` [S1, S2, unofficial].
++     - Others: `_compress_npz` [S1, S2, unofficial].
++   - Call the selected function with `compress_dir`, `param_name`, `params`, and `n_sidelen` [S1, S2, unofficial].
++
++5. **Metadata Saving:**
++   - Save metadata for each parameter to `meta.json` [S1, S2, unofficial].
++
++6. **Decompression:**
++   - Load `meta.json` [S1, S2, unofficial].
++   - For each parameter, call the corresponding decompression function [S1, S2, unofficial].
++
++7. **Postprocessing:**
++   - Apply `inverse_log_transform` to `means` [S1, S2, unofficial].
++
++### Compression Functions
++
++#### 8-bit PNG Compression (`_compress_png`)
++Used for `scales`, `quats`, `opacities`, `sh0` [S2, unofficial].
++
++1. Reshape `params` to $(n_{sidelen}, n_{sidelen}, -1)$ [S2, unofficial].
++2. Compute per-channel minimums and maximums:
++   $$ mins = \min(grid, dim=(0, 1)) $$
++   $$ maxs = \max(grid, dim=(0, 1)) $$
++   [S1, S2, unofficial]
++3. Normalize to $[0, 1]$:
++   $$ grid_{norm} = \frac{grid - mins}{maxs - mins} $$
++   [S1, S2, unofficial]
++4. Quantize to uint8:
++   $$ img = \text{round}(grid_{norm} \times (2^8 - 1)) $$
++   [S2, unofficial]
++5. Save as PNG: `imageio.imwrite(path, img)` [S1, S2, unofficial].
++
++#### 16-bit PNG Compression (`_compress_png_16bit`)
++Used for `means` [S1, S2, unofficial].
++
++1. Reshape `params` to $(n_{sidelen}, n_{sidelen}, -1)$ [S1, S2, unofficial].
++2. Compute per-channel minimums and maximums:
++   $$ mins = \min(grid, dim=(0, 1)) $$
++   $$ maxs = \max(grid, dim=(0, 1)) $$
++   [S1, S2, unofficial]
++3. Normalize to $[0, 1]$:
++   $$ grid_{norm} = \frac{grid - mins}{maxs - mins} $$
++   [S1, S2, unofficial]
++4. Quantize to uint16:
++   $$ img = \text{round}(grid_{norm} \times (2^{16} - 1)) $$
++   [S1, S2, unofficial]
++5. Split into low and high bytes:
++   $$ img_l = img \ \& \ 0xFF $$
++   $$ img_u = (img \gg 8) \ \& \ 0xFF $$
++   [S1, S2, unofficial]
++6. Save as two PNGs: `param_l.png` and `param_u.png` [S1, S2, unofficial].
++
++#### K-means Compression (`_compress_kmeans`)
++Used for `shN` [S2, unofficial].
++
++1. Reshape `params` to $(dim, n_{gs})$ [S2, unofficial].
++2. Fit K-means with $n_{clusters}=65536$ and Manhattan distance using TorchPQ [S2, unofficial].
++3. Get labels and centroids [S2, unofficial].
++4. Quantize centroids to uint8 using `quantization` bits (default 6) [S2, unofficial].
++5. Save `centroids_quant` and `labels` (uint16) in NPZ format [S2, unofficial].
++
++### Pseudocode
+ 
+ ```python
+ import torch
+ import numpy as np
++import imageio
++import os
+ import json
+ import math
+ 
+-def compress_png_8bit(grid: torch.Tensor) -> torch.Tensor:
+-    """Compress a 2D grid of floats to uint8 PNG data."""
+-    min_val = grid.min()
+-    max_val = grid.max()
+-    if max_val == min_val:
+-        return torch.zeros_like(grid, dtype=torch.uint8)
+-    normalized = (grid - min_val) / (max_val - min_val)
+-    quantized = (normalized * 255).round().clamp(0, 255).to(torch.uint8)
+-    return quantized, min_val, max_val
+-
+-def compress_png_16bit(grid: torch.Tensor) -> tuple:
+-    """Compress a 2D grid of floats to two uint8 PNG data arrays (low/high bytes)."""
+-    min_val = grid.min()
+-    max_val = grid.max()
+-    if max_val == min_val:
+-        zeros = torch.zeros_like(grid, dtype=torch.uint8)
+-        return zeros, zeros, min_val, max_val
+-    normalized = (grid - min_val) / (max_val - min_val)
+-    quantized_16 = (normalized * 65535).round().clamp(0, 65535).to(torch.uint16)
+-    low_byte = quantized_16 & 0xFF
+-    high_byte = (quantized_16 >> 8) & 0xFF
+-    return low_byte, high_byte, min_val, max_val
+-
+-def compress_kmeans(sh_coeffs: torch.Tensor, n_clusters: int = 65536, quant_bits: int = 6) -> tuple:
+-    """Compress SH coefficients using K-means clustering."""
+-    # Reshape to (dim, n_gs)
+-    dim, n_gs = sh_coeffs.shape
+-    # Fit K-means (using a placeholder for actual K-means implementation)
+-    # In practice, this uses TorchPQ KMeans with Manhattan distance
+-    labels, centroids = fit_kmeans(sh_coeffs.T, n_clusters, distance='manhattan')
++def log_transform(x):
++    """[G] Placeholder for log_transform. Assumes x > 0."""
++    return torch.log(x)
++
++def inverse_log_transform(x):
++    """[G] Placeholder for inverse_log_transform."""
++    return torch.exp(x)
++
++def crop_n_splats(splats, n_crop):
++    """Remove n_crop splats with lowest opacity."""
++    opacities = splats["opacities"]
++    keep_indices = torch.argsort(opacities, descending=True)[:-n_crop]
++    for k, v in splats.items():
++        splats[k] = v[keep_indices]
++    return splats
++
++def compress_png_16bit(compress_dir, param_name, params, n_sidelen):
++    """Compress parameters into two 8-bit PNGs representing 16-bit data."""
++    grid = params.reshape((n_sidelen, n_sidelen, -1))
++    mins = torch.amin(grid, dim=(0, 1))
++    maxs = torch.amax(grid, dim=(0, 1))
++    grid_norm = (grid - mins) / (maxs - mins)
++    img_norm = grid_norm.detach().cpu().numpy()
++    img = (img_norm * (2**16 - 1)).round().astype(np.uint16)
++    img_l = img & 0xFF
++    img_u = (img >> 8) & 0xFF
++    
++    path_l = os.path.join(compress_dir, f"{param_name}_l.png")
++    path_u = os.path.join(compress_dir, f"{param_name}_u.png")
++    imageio.imwrite(path_l, img_l.astype(np.uint8))
++    imageio.imwrite(path_u, img_u.astype(np.uint8))
++    
++    return {
++        "shape": list(params.shape),
++        "dtype": str(params.dtype).split('.')[-1],
++        "mins": mins.tolist(),
++        "maxs": maxs.tolist()
++    }
++
++def decompress_png_16bit(compress_dir, param_name, meta):
++    """Decompress two 8-bit PNGs into 16-bit normalized data."""
++    path_l = os.path.join(compress_dir, f"{param_name}_l.png")
++    path_u = os.path.join(compress_dir, f"{param_name}_u.png")
++    
++    img_l = imageio.imread(path_l)
++    img_u = imageio.imread(path_u).astype(np.uint16)
++    
++    img = (img_u << 8) + img_l
++    img_norm = img / (2**16 - 1)
++    grid_norm = torch.tensor(img_norm)
++    
++    mins = torch.tensor(meta["mins"])
++    maxs = torch.tensor(meta["maxs"])
++    
++    grid = grid_norm * (maxs - mins) + mins
++    params = grid.reshape(meta["shape"])
++    params = params.to(dtype=getattr(torch, meta["dtype"]))
++    return params
++
++def compress_png(compress_dir, param_name, params, n_sidelen):
++    """Compress parameters into a single 8-bit PNG."""
++    grid = params.reshape((n_sidelen, n_sidelen, -1))
++    mins = torch.amin(grid, dim=(0, 1))
++    maxs = torch.amax(grid, dim=(0, 1))
++    grid_norm = (grid - mins) / (maxs - mins)
++    img_norm = grid_norm.detach().cpu().numpy()
++    img = (img_norm * (2**8 - 1)).round().astype(np.uint8)
++    img = img.squeeze()
++    
++    path = os.path.join(compress_dir, f"{param_name}.png")
++    imageio.imwrite(path, img)
++    
++    return {
++        "shape": list(params.shape),
++        "dtype": str(params.dtype).split('.')[-1],
++        "mins": mins.tolist(),
++        "maxs": maxs.tolist()
++    }
++
++def decompress_png(compress_dir, param_name, meta):
++    """Decompress 8-bit PNG into normalized data."""
++    path = os.path.join(compress_dir, f"{param_name}.png")
++    img = imageio.imread(path)
++    img_norm = img / (2**8 - 1)
++    grid_norm = torch.tensor(img_norm)
++    
++    mins = torch.tensor(meta["mins"])
++    maxs = torch.tensor(meta["maxs"])
++    
++    grid = grid_norm * (maxs - mins) + mins
++    params = grid.reshape(meta["shape"])
++    params = params.to(dtype=getattr(torch, meta["dtype"]))
++    return params
++
++def compress_kmeans(params, n_clusters=65536, quantization_bits=6):
++    """Compress SH coefficients using K-means."""
++    # [G] Assuming TorchPQ is available. Reshape to (dim, n_gs)
++    dim, n_gs = params.shape
++    # Fit KMeans
++    kmeans = TorchPQ.KMeans(n_clusters=n_clusters, distance='manhattan')
++    labels, centroids = kmeans.fit(params)
+     
+     # Quantize centroids
+-    min_c = centroids.min()
+-    max_c = centroids.max()
+-    if max_c == min_c:
+-        centroids_quant = torch.zeros_like(centroids, dtype=torch.uint8)
+-    else:
+-        norm_c = (centroids - min_c) / (max_c - min_c)
+-        max_val = (1 << quant_bits) - 1
+-        centroids_quant = (norm_c * max_val).round().clamp(0, max_val).to(torch.uint8)
+-        
++    # [G] Implementation of quantization to uint8 with specific bits
++    centroids_quant = quantize_centroids(centroids, quantization_bits)
++    
+     return centroids_quant, labels
+ 
+-def png_compression(splats: dict, use_sort: bool = True, n_clusters: int = 65536, quant_bits: int = 6) -> dict:
+-    """
+-    Compress Gaussian splats into PNG and NPZ formats.
+-    
+-    Args:
+-        splats: Dictionary with keys 'means', 'scales', 'quats', 'opacities', 'sh0', 'shN'.
+-        use_sort: Whether to sort splats.
+-        n_clusters: Number of K-means clusters.
+-        quant_bits: Quantization bits for centroids.
+-        
+-    Returns:
+-        Dictionary with compressed data and metadata.
+-    """
+-    n_gs = splats['means'].shape[0]
++def decompress_kmeans(centroids_quant, labels, meta):
++    """Decompress K-means data."""
++    # [G] Dequantize centroids
++    centroids = dequantize_centroids(centroids_quant)
++    # [G] Map labels to centroids
++    params = centroids[labels]
++    return params.reshape(meta["shape"])
++
++def quantize_centroids(centroids, bits):
++    """[G] Helper to quantize centroids to uint8 with specified bits."""
++    # Normalize centroids to [0, 1]
++    c_min = centroids.min(dim=0, keepdim=True)[0]
++    c_max = centroids.max(dim=0, keepdim=True)[0]
++    c_norm = (centroids - c_min) / (c_max - c_min)
++    # Quantize
++    max_val = (1 << bits) - 1
++    return (c_norm * max_val).round().to(torch.uint8)
++
++def dequantize_centroids(centroids_quant):
++    """[G] Helper to dequantize centroids."""
++    bits = centroids_quant.dtype.itemsize * 8 # Assuming uint8
++    max_val = (1 << bits) - 1
++    c_norm = centroids_quant / max_val
++    # [G] Requires storing min/max in meta for full reconstruction, 
++    # but sources only mention saving centroids_quant and labels.
++    # This is a gap in the provided notes for full lossless dequantization.
++    return c_norm
++
++def png_compression(splats, compress_dir, use_sort=True, n_clusters=65536, quantization=6):
++    """Main compression pipeline."""
++    os.makedirs(compress_dir, exist_ok=True)
++    
++    n_gs = splats["means"].shape[0]
++    
++    # Preprocessing
++    splats["means"] = log_transform(splats["means"])
++    splats["quats"] = torch.nn.functional.normalize(splats["quats"], dim=-1)
++    
++    # Grid Prep
+     n_sidelen = int(math.isqrt(n_gs))
+-    n_crop = n_gs - n_sidelen ** 2
+-    
+-    # Crop lowest opacity splats if necessary
++    n_crop = n_gs - n_sidelen**2
++    
+     if n_crop > 0:
+-        opacities = splats['opacities']
+-        keep_indices = torch.argsort(opacities, descending=True)[:-n_crop]
+-        for k in splats:
+-            splats[k] = splats[k][keep_indices]
+-        n_gs = n_sidelen ** 2
+-    
+-    # Preprocessing
+-    # Log transform means
+-    splats['means'] = torch.log(splats['means'] + 1e-8)
+-    # Normalize quats
+-    splats['quats'] = torch.nn.functional.normalize(splats['quats'], dim=-1)
+-    
+-    # Sorting (placeholder for specific sorting logic)
++        splats = crop_n_splats(splats, n_crop)
++        n_gs = splats["means"].shape[0] # Update n_gs after crop
++    
++    # Sorting
+     if use_sort:
+-        # Sort splats based on some metric (e.g., position or opacity)
+-        # The source does not specify the exact sorting key, so we assume a placeholder
+-        pass # [G] Sorting logic is not specified in the source.
+-
+-    # Reshape to grid
+-    grid_shape = (n_sidelen, n_sidelen, -1)
+-    
+-    compressed = {}
+-    metadata = {}
++        splats = sort_splats(splats) # [G] Implementation depends on sorting strategy
++        
++    meta = {}
+     
+     # Compress Means (16-bit)
+-    means_grid = splats['means'].reshape(grid_shape)
+-    low, high, min_m, max_m = compress_png_16bit(means_grid)
+-    compressed['means_l'] = low
+-    compressed['means_h'] = high
+-    metadata['means'] = {'min': min_m, 'max': max_m}
+-    
+-    # Compress Scales, Quats, Opacities, SH0 (8-bit)
+-    for param in ['scales', 'quats', 'opacities', 'sh0']:
+-        if param in splats:
+-            data = splats[param]
+-            # Handle multi-channel data by flattening last dim
+-            if data.dim() > 2:
+-                data = data.reshape(n_sidelen, n_sidelen, -1)
+-            quant, min_p, max_p = compress_png_8bit(data)
+-            compressed[param] = quant
+-            metadata[param] = {'min': min_p, 'max': max_p}
+-            
++    meta["means"] = compress_png_16bit(compress_dir, "means", splats["means"], n_sidelen)
++    
++    # Compress others (8-bit)
++    for param in ["scales", "quats", "opacities", "sh0"]:
++        meta[param] = compress_png(compress_dir, param, splats[param], n_sidelen)
++        
+     # Compress SHN (K-means)
+-    if 'shN' in splats:
+-        shN = splats['shN']
+-        # Reshape to (dim, n_gs) for K-means
+-        # Note: Source says reshape to (dim, n_gs), assuming shN is (n_gs, dim)
+-        shN_reshaped = shN.T
+-        centroids, labels = compress_kmeans(shN_reshaped, n_clusters, quant_bits)
+-        compressed['shN_centroids'] = centroids
+-        compressed['shN_labels'] = labels
+-        metadata['shN'] = {'n_clusters': n_clusters, 'quant_bits': quant_bits}
+-        
+-    return compressed, metadata
+-
+-def decompress_png_compression(compressed: dict, metadata: dict) -> dict:
+-    """
+-    Decompress PNG and NPZ data back to Gaussian splats.
+-    """
++    # [G] Reshape shN to (dim, n_gs) for K-means
++    shN = splats["shN"]
++    dim = shN.shape[-1]
++    n_gs_sh = shN.shape[0]
++    shN_reshaped = shN.reshape(n_gs_sh, dim).T # (dim, n_gs)
++    centroids_quant, labels = compress_kmeans(shN_reshaped, n_clusters, quantization)
++    
++    # Save NPZ
++    npz_path = os.path.join(compress_dir, "shN.npz")
++    np.savez(npz_path, centroids=centroids_quant, labels=labels)
++    
++    meta["shN"] = {
++        "shape": list(splats["shN"].shape),
++        "dtype": str(splats["shN"].dtype).split('.')[-1]
++    }
++    
++    # Save Metadata
++    with open(os.path.join(compress_dir, "meta.json"), "w") as f:
++        json.dump(meta, f)
++        
++    return meta
++
++def png_decompression(compress_dir):
++    """Main decompression pipeline."""
++    with open(os.path.join(compress_dir, "meta.json"), "r") as f:
++        meta = json.load(f)
++        
+     splats = {}
+-    n_sidelen = int(math.isqrt(len(compressed['means_l']))) # Assuming square grid
+-    n_gs = n_sidelen ** 2
+     
+     # Decompress Means
+-    low = compressed['means_l']
+-    high = compressed['means_h']
+-    quant_16 = low | (high << 8)
+-    norm = quant_16.float() / 65535.0
+-    min_m = metadata['means']['min']
+-    max_m = metadata['means']['max']
+-    means = norm * (max_m - min_m) + min_m
+-    splats['means'] = torch.log1p(means) # Inverse log transform
+-    
+-    # Decompress 8-bit params
+-    for param in ['scales', 'quats', 'opacities', 'sh0']:
+-        if param in compressed:
+-            quant = compressed[param]
+-            norm = quant.float() / 255.0
+-            min_p = metadata[param]['min']
+-            max_p = metadata[param]['max']
+-            data = norm * (max_p - min_p) + min_p
+-            splats[param] = data
+-            
++    splats["means"] = decompress_png_16bit(compress_dir, "means", meta["means"])
++    
++    # Decompress others
++    for param in ["scales", "quats", "opacities", "sh0"]:
++        splats[param] = decompress_png(compress_dir, param, meta[param])
++        
+     # Decompress SHN
+-    if 'shN_centroids' in compressed:
+-        centroids = compressed['shN_centroids']
+-        labels = compressed['shN_labels']
+-        # Dequantize centroids
+-        quant_bits = metadata['shN']['quant_bits']
+-        max_val = (1 << quant_bits) - 1
+-        centroids_float = centroids.float() / max_val
+-        # Reconstruct SHN from labels
+-        # [G] Exact reconstruction from labels and centroids depends on K-means implementation
+-        # Assuming centroids are stored in order and labels index into them
+-        shN = centroids_float[labels]
+-        splats['shN'] = shN
+-        
++    npz_data = np.load(os.path.join(compress_dir, "shN.npz"))
++    centroids_quant = torch.tensor(npz_data["centroids"])
++    labels = torch.tensor(npz_data["labels"])
++    splats["shN"] = decompress_kmeans(centroids_quant, labels, meta["shN"])
++    
++    # Postprocessing
++    splats["means"] = inverse_log_transform(splats["means"])
++    
+     return splats
+ ```
+ 
++### Parameters
++- `use_sort` (bool): Whether to sort splats before compression. Defaults to `True` [S1, S2, unofficial].
++- `n_clusters` (int): Number of K-means clusters. Default `65536` [S2, unofficial].
++- `verbose` (bool): Whether to print verbose information. Defaults to `True` [S2, unofficial].
++- `quantization` (int): Number of bits in quantization for centroids. Default `6` [S2, unofficial].
++
++### Edge cases and pitfalls
++- **Non-square Gaussian count:** If $n_{gs}$ is not a perfect square, the lowest opacity splats are removed to fit a square grid. The number of removed splats is $n_{crop} = n_{gs} - n_{sidelen}^2$ [S1, S2, unofficial].
++- **Precision:** 16-bit compression splits data into two 8-bit PNGs to preserve precision for `means` [S1, S2, unofficial].
++- **Quantization:** K-means centroids are quantized to uint8 using 6 bits by default, which may introduce loss for high-dimensional SH coefficients [S2, unofficial].
++
+ ## Operating characteristics
+-*   **Time Complexity:** Dominated by K-means clustering for SH coefficients, which is $O(n_{gs} \cdot dim \cdot n_{clusters} \cdot iterations)$ [S1, unofficial]. PNG compression is linear $O(n_{gs})$ [S1, unofficial].
+-*   **Memory Complexity:** Storage is proportional to the number of Gaussians. 8-bit PNGs use 1 byte per value, 16-bit use 2 bytes (split into two 1-byte PNGs) [S1, unofficial]. K-means stores $n_{clusters} \cdot dim$ centroids and $n_{gs}$ labels [S1, unofficial].
+-*   **Performance:** The method is designed for fast decoding, suitable for real-time rendering in the VKGS viewer [S1, unofficial].
+-*   **Strengths:** Leverages highly optimized PNG decoders; simple implementation; good compression for spatial parameters [S1, unofficial].
+-*   **Limitations:** Requires cropping if $n_{gs}$ is not a perfect square, leading to loss of low-opacity Gaussians [S1, unofficial]. K-means quantization introduces error for SH coefficients [S1, unofficial].
+-*   **When to use:** When integrating with VKGS or similar Vulkan-based renderers that support this specific compression format [S1, unofficial].
+-*   **When not to use:** For general-purpose 3DGS storage where standard codecs or other compression methods (e.g., [Splat parameter encoding and codec selection](5019-splat-parameter-encoding-and-codec-selection.md)) are preferred [S1, unofficial].
++- **Time Complexity:** Dominated by K-means clustering for SH coefficients and sorting if enabled [S1, S2, unofficial].
++- **Memory Complexity:** Requires storing the full splat dictionary in memory during preprocessing and compression [S1, S2, unofficial].
++- **Performance:** Not given in the sources.
++- **Strengths:** Efficient storage using standard image formats; spatial locality exploitation via grid mapping [S1, S2, unofficial].
++- **Limitations:** Lossy compression; requires cropping if Gaussian count is not a perfect square [S1, S2, unofficial].
+ 
+ ## Background
+-PngCompression was introduced as part of the CLOD-3DGS project by Meta Research (Milef et al., 2025) [S1, unofficial]. It is designed to support the Vulkan-based Gaussian Splatting (VKGS) renderer, enabling efficient loading and rendering of large-scale 3DGS scenes [S1, unofficial]. The method addresses the need for fast decompression and compatibility with GPU-based rendering pipelines [S1, unofficial].
++PngCompression is part of the SplatAD (Splatting AD) framework [S1, unofficial]. It is also referenced in the context of CLOD-3DGS (Continuous Level of Detail 3D Gaussian Splatting) [S2, unofficial].
+ 
+ ## Sources
+-[S1] facebookresearch/CLOD-3DGS, https://github.com/facebookresearch/CLOD-3DGS, fetched 2026-10-27 (unofficial)+[S1] carlinds/splatad, https://github.com/carlinds/splatad, fetched 2026-10-27 (unofficial)
++[S2] facebookresearch/CLOD-3DGS, https://github.com/facebookresearch/CLOD-3DGS, fetched 2026-10-27 (unofficial)

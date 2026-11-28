@@ -1,0 +1,168 @@
+--- v011.md
++++ v012.md
+@@ -8,5 +8,5 @@
+ ## How it works
+ **Inputs and Outputs:**
+-*   **Input:** Signed distance value $d$ (or $s = -d$) at a point $\mathbf{x}$ along a ray; ray segment length $\Delta t$ (or $\Delta$); learnable or tuned scalar parameters $\alpha$ (scaling) and $\beta$ (falloff/sharpness) [S4][S7, unofficial].
++*   **Input:** Signed distance value $d$ (or $s = -d$) at a point $\mathbf{x}$ along a ray; ray segment length $\Delta t$; learnable or tuned scalar parameters $\alpha$ (scaling) and $\beta$ (falloff/sharpness) [S4][S7, unofficial].
+ *   **Output:** Volumetric density $\sigma$ (or $\rho$) and optionally a color/feature vector $c$ [S4][S7, unofficial].
+ 
+@@ -17,21 +17,14 @@
+ **Steps:**
+ 1.  **Sample SDF:** Evaluate the SDF at the sample points along the ray to obtain signed distances $d_i$ [S7, unofficial].
+-2.  **Compute Segment Lengths:** Calculate the distance between consecutive sample points $\Delta t_i = t_{i+1} - t_i$. Pad the last segment with a large value (e.g., $10^{10}$) to prevent division by zero when the ray exits the sampling volume [S4][S7, unofficial][S11]. [G]
+-3.  **Convert SDF to Intermediate Density:** Map the signed distance to an intermediate density $\rho$ (or $\psi$) using a piecewise exponential function controlled by $\beta$ [S4][S7, unofficial].
+-    *   Let $s = -d$ (so $s > 0$ is interior, $s < 0$ is exterior) [S7, unofficial].
+-    *   Compute $\psi$:
+-        $$ \psi = \begin{cases} 0.5 \cdot \exp(s / \beta) & \text{if } s \le 0 \\ 1 - 0.5 \cdot \exp(-s / \beta) & \text{if } s > 0 \end{cases} $$
+-        [S7, unofficial]
+-    *   Scale by $\alpha$:
+-        $$ \rho = \alpha \cdot \psi $$
+-        [S7, unofficial]
+-    *   *Note:* Some implementations use a direct exponential falloff $\rho = \alpha \exp(-\beta |d|)$ [S5, unofficial].
+-4.  **Compute Final Density:** Convert the intermediate density $\rho$ to volumetric density $\sigma$ by accounting for the segment length $\Delta t$ [S4][S7, unofficial]:
++2.  **Compute Segment Lengths:** Calculate the distance between consecutive sample points $\Delta t_i = t_{i+1} - t_i$. Pad the last segment with a large value (e.g., $10^{10}$) to prevent division by zero when the ray exits the sampling volume [S5, unofficial].
++3.  **Convert SDF to Intermediate Density:** Map the signed distance to an intermediate density $\rho$ using a piecewise exponential function controlled by $\beta$ [S8, unofficial][S5, unofficial]. Let $s = -d$ (so $s > 0$ is interior, $s < 0$ is exterior) [S7, unofficial]. Compute $\psi$:
++    $$ \psi = \begin{cases} 0.5 \cdot \exp(s / \beta) & \text{if } s \le 0 \\ 1 - 0.5 \cdot \exp(-s / \beta) & \text{if } s > 0 \end{cases} $$
++    [S8, unofficial]. Scale by $\alpha$:
++    $$ \rho = \alpha \cdot \psi $$
++    [S8, unofficial].
++4.  **Compute Final Density:** Convert the intermediate density $\rho$ to volumetric density $\sigma$ by accounting for the segment length $\Delta t$ [S5, unofficial][S8, unofficial]:
+     $$ \sigma = -\frac{\ln(1 - \rho)}{\Delta t} $$
+-    [S4][S7, unofficial]
+-    *   *Note:* If $\rho$ is not clamped to $[0, 1)$, $\ln(1-\rho)$ may be undefined. Ensure $\rho < 1$ [S4]. [G]
+-5.  **Compute Color/Feature (Optional):**
+-    *   Compute `base_color`: If `rainbow` mode is enabled, `base_color` is derived from the position relative to the SDF center, clamped to $[0.02, 0.98]$ [S4][S7, unofficial]. Otherwise, `base_color` is $1.0$ [S4][S7, unofficial].
+-    *   Compute final feature: $c = \text{base\_color} \cdot \text{feature\_param}$ [S4][S7, unofficial].
++    [S5, unofficial]. *Note:* If $\rho$ is not clamped to $[0, 1)$, $\ln(1-\rho)$ may be undefined. Ensure $\rho < 1$ [G].
++5.  **Compute Color/Feature (Optional):** Compute `base_color`: If `rainbow` mode is enabled, `base_color` is derived from the position relative to the SDF center, clamped to $[0.02, 0.98]$ [S8, unofficial]. Otherwise, `base_color` is $1.0$ [S8, unofficial]. Compute final feature: $c = \text{base\_color} \cdot \text{feature\_param}$ [S8, unofficial].
+ 
+ **Pseudocode:**
+@@ -40,17 +33,6 @@
+ 
+ def sdf_to_density(signed_distance, alpha, beta):
+-    """
+-    Converts signed distance values to intermediate density.
+-    signed_distance: torch.Tensor of SDF values d.
+-    alpha: float, scaling factor.
+-    beta: float, falloff/sharpness parameter.
+-    Returns: torch.Tensor of intermediate density rho.
+-    """
+-    # s is negative signed distance (positive inside)
++    """Converts signed distance values to intermediate density."""
+     s = -signed_distance
+-    
+-    # Piecewise exponential mapping
+-    # If s <= 0 (outside), use 0.5 * exp(s/beta)
+-    # If s > 0 (inside), use 1 - 0.5 * exp(-s/beta)
+     psi = torch.where(
+         s <= 0.0,
+@@ -58,64 +40,27 @@
+         1 - 0.5 * torch.exp(-s / beta)
+     )
+-    
+-    # Scale by alpha
+-    density = alpha * psi
+-    return density
++    return alpha * psi
+ 
+ def compute_volumetric_density(intermediate_density, delta_t):
+-    """
+-    Converts intermediate density to volumetric density sigma.
+-    intermediate_density: torch.Tensor of rho (must be < 1).
+-    delta_t: torch.Tensor of segment lengths.
+-    Returns: torch.Tensor of volumetric density sigma.
+-    """
+-    # Clamp rho to prevent log(0) or log(negative)
++    """Converts intermediate density to volumetric density sigma."""
+     rho = torch.clamp(intermediate_density, min=0.0, max=0.9999)
+-    
+-    # sigma = -ln(1 - rho) / delta_t
+-    sigma = -torch.log(1.0 - rho) / delta_t
+-    return sigma
++    return -torch.log(1.0 - rho) / delta_t
+ 
+ def render_step(ray_bundle, sdf_fn, alpha, beta, rainbow=False, center=None, feature_param=None):
+-    """
+-    Full rendering step for a ray bundle.
+-    ray_bundle: dict with 'sample_points' (N, 3) and 'depths' (N,).
+-    sdf_fn: function returning SDF values for points.
+-    """
+-    # 1. Extract sample points and depth values
++    """Full rendering step for a ray bundle."""
+     points = ray_bundle['sample_points']
+     depths = ray_bundle['depths']
+-    
+-    # 2. Compute deltas
+     deltas = depths[1:] - depths[:-1]
+-    # Pad last segment to handle ray termination
+-    last_delta = torch.full_like(deltas[:1], 1e10)
+-    deltas = torch.cat([deltas, last_delta])
+-    
+-    # 3. Evaluate SDF
++    deltas = torch.cat([deltas, torch.full_like(deltas[:1], 1e10)])
+     signed_distances = sdf_fn(points)
+-    
+-    # 4. Convert SDF to intermediate density
+     rho = sdf_to_density(signed_distances, alpha, beta)
+-    
+-    # 5. Compute volumetric density
+     sigma = compute_volumetric_density(rho, deltas)
+-    
+-    # 6. Compute base color
+     if rainbow:
+-        # Clamp position-based color
+         if center is None:
+             center = torch.zeros_like(points)
+-        base_color = torch.abs(points - center)
+-        base_color = torch.clamp(base_color, min=0.02, max=0.98)
++        base_color = torch.clamp(torch.abs(points - center), 0.02, 0.98)
+     else:
+-        base_color = torch.ones_like(points[:, :1]) # Assuming 1D feature or scalar
+-        
+-    # 7. Compute final feature
+-    if feature_param is not None:
+-        feature = base_color * feature_param
+-    else:
+-        feature = base_color
+-        
++        base_color = torch.ones_like(points)
++    feature = base_color * feature_param if feature_param is not None else base_color
+     return {'density': sigma, 'feature': feature}
+ ```
+@@ -130,5 +75,5 @@
+ *   **Division by Zero:** The last segment's delta is padded with a large value (e.g., $10^{10}$) to prevent division by zero or undefined behavior when the ray exits the sampling volume [S4][S7, unofficial][S11].
+ *   **Log Domain:** Ensure intermediate density $\rho < 1$ before applying $\ln(1-\rho)$ [S4]. [G]
+-*   **Sign Convention:** The parent article defines the sign convention ($d < 0$ interior, $d > 0$ exterior) [Parent]. The conversion function must handle this correctly (e.g., $s = -d$) [S7, unofficial].
++*   **Sign Convention:** The sign convention follows the parent article: $d < 0$ indicates interior and $d > 0$ indicates exterior [Parent]. The conversion function must handle this correctly (e.g., $s = -d$) [S7, unofficial].
+ 
+ ## Subtopics
+@@ -150,5 +95,5 @@
+ 
+ ### FBM-based Implicit Density Definition
+-Defines an implicit volumetric object where density $\rho$ is derived from an FBM field $f$. Density is zero when $f(\mathbf{p}) < v$, and remapped via function $h$ when $f(\mathbf{p}) \ge v$. The 0-isosurface of $\rho$ corresponds to the v-isosurface of $f$ [S9].
++Defines an implicit volumetric object where density $\rho$ is derived from an FBM field $f$ [S9]. Density is zero when $f(\mathbf{p}) < v$, and remapped via function $h$ when $f(\mathbf{p}) \ge v$ [S9]. The 0-isosurface of $\rho$ corresponds to the v-isosurface of $f$ [S9].
+ Formula:
+ $$ \rho(\mathbf{p}) = \begin{cases} h(f(\mathbf{p})) & \text{when } f(\mathbf{p}) \geq v \\ 0 & \text{otherwise} \end{cases} $$
+@@ -159,8 +104,8 @@
+ DensityRegion extends VolumeRegion by scaling absorption, scattering, extinction, and emission coefficients by a spatially varying density function `density(pt)` [S10, unofficial].
+ Formula:
+-$\sigma_a(\text{pt}) = \text{sig\_a} \cdot \text{density}(\text{pt})$, where $\text{sig\_a}$ is the base absorption spectrum.
+-$\sigma_s(\text{pt}) = \text{sig\_s} \cdot \text{density}(\text{pt})$, where $\text{sig\_s}$ is the base scattering spectrum.
+-$\sigma_t(\text{pt}) = (\text{sig\_a} + \text{sig\_s}) \cdot \text{density}(\text{pt})$, representing extinction.
+-$L_{ve}(\text{pt}) = \text{le} \cdot \text{density}(\text{pt})$, where $\text{le}$ is the base emission spectrum.
++$\sigma_a(\text{pt}) = \text{sig\_a} \cdot \text{density}(\text{pt})$, where $\text{sig\_a}$ is the base absorption spectrum [S10, unofficial].
++$\sigma_s(\text{pt}) = \text{sig\_s} \cdot \text{density}(\text{pt})$, where $\text{sig\_s}$ is the base scattering spectrum [S10, unofficial].
++$\sigma_t(\text{pt}) = (\text{sig\_a} + \text{sig\_s}) \cdot \text{density}(\text{pt})$, representing extinction [S10, unofficial].
++$L_{ve}(\text{pt}) = \text{le} \cdot \text{density}(\text{pt})$, where $\text{le}$ is the base emission spectrum [S10, unofficial].
+ $\text{phase}(\text{pt}, \mathbf{w}, \mathbf{w}') = \text{PhaseHG}(\mathbf{w}, \mathbf{w}', g_{\text{scatter}})$, using Henyey-Greenstein phase function with parameter $g_{\text{scatter}}$ [S10, unofficial].
+ Parameter: $g_{\text{scatter}}$: Henyey-Greenstein anisotropy parameter, passed in constructor as `greenstein` [S10, unofficial].
+@@ -177,6 +122,6 @@
+ A variant of the sigmoid function used in GenDR where the absolute part of the distance is squared before applying the base sigmoid, interpreted as applying a transformed CDF $F_{sq}$ [S12].
+ Step:
+-1. Multiply the absolute distance by the signed distance: $|d(\mathbf{p}, t)| \cdot d(\mathbf{p}, t)$.
+-2. Divide by temperature: $(|d(\mathbf{p}, t)| \cdot d(\mathbf{p}, t)) / \tau$.
++1. Multiply the absolute distance by the signed distance: $|d(\mathbf{p}, t)| \cdot d(\mathbf{p}, t)$ [S12].
++2. Divide by temperature: $(|d(\mathbf{p}, t)| \cdot d(\mathbf{p}, t)) / \tau$ [S12].
+ 3. Apply the base sigmoid function $F$ to the result [S12].
+ Formula: $F_{sq}(d(\mathbf{p}, t)/\tau) := F(|d(\mathbf{p}, t)| \cdot d(\mathbf{p}, t)/\tau)$, where $F$ is the base sigmoid function, $d(\mathbf{p}, t)$ is the distance, and $\tau$ is temperature [S12].

@@ -1,0 +1,256 @@
+# Sparse Voxel Tree (SVO Tree)
+
+Also called: ESVO, Hierarchical Voxel Storage, Sparse Voxel Octree (OpenVDB)
+
+## Overview
+A Sparse Voxel Tree (SVO) is a hierarchical data structure for representing sparse volumetric data, typically using an octree topology where each node partitions 3D space into 8 children [S3, S4, unofficial]. It solves the storage and traversal inefficiency of dense 3D grids by storing samples of occupancy or density fields only in leaf nodes where data exists, allowing ray marching algorithms to skip large empty volumes efficiently [S3, unofficial]. Unlike its sibling [Sparse Voxel DAGs](2791-sparse-voxel-dags.md) which merge identical subtrees to reduce redundancy, the SVO maintains a strict tree topology, though it often employs block-based memory pooling to optimize cache locality and dynamic updates [S2].
+
+## How it works
+**Inputs and Outputs:**
+*   **Input:** A 3D coordinate $(x, y, z)$ and a voxel value (e.g., density $\sigma$, color $c$, or occupancy $\alpha$) [S3, unofficial].
+*   **Output:** Insertion of the voxel into the tree, retrieval of a voxel pointer, or traversal path for rendering [S1, unofficial].
+
+**Data Structures:**
+The implementation relies on a template class `tree<FORMAT_T, BIT_WIDTH, DETAILS>` [S1, unofficial].
+1.  **`node_format`**: Represents an internal tree node, containing `_depth` (`uint32_t`), `_mask` (an 8-bit bitmask for children), and `_block_index` (an index into the memory pool's block array) [S1, unofficial].
+2.  **`mem_pool<T>`**: Manages fixed-size memory blocks, exposing `_blocks` (an array of $T$) and `_free` (a free list), with a block capacity of exactly 8 elements [S1, unofficial].
+3.  **`_root_node`**: The root of the tree, initialized with `_depth=0` and a newly allocated node block [S1, unofficial].
+4.  **`_node_pool`**: Manages memory for internal nodes [S1, unofficial].
+5.  **`_voxel_pool`**: Manages memory for leaf voxels [S1, unofficial].
+
+**Parameters:**
+*   `BIT_WIDTH`: Template parameter determining coordinate precision, typically 16 or 32 [S1, unofficial].
+*   `BOUNDS[3]`: Maximum bounds per axis, defaulting to `ABSOLUTE_AXIS_WIDTH` if `_limit_max_bounds` is 0 [S1, unofficial].
+*   `_discard_overflow`: Boolean flag controlling overflow behavior; `true` silently drops out-of-bounds voxels, while `false` triggers an assertion [S1, unofficial].
+
+**Algorithm: Allocation (`alloc`)**
+1.  **Overflow Check:** Compare `voxel_position` components against `BOUNDS[0..2]`; if any exceed bounds, handle per `_discard_overflow` flag [S1, unofficial].
+2.  **Coordinate Transform:** Shift position left by 1 bit (multiply by 2) to align with even-space grid: `voxel_transformed = voxel_position << 1` [S1, unofficial].
+3.  **Initialization:** Set `node_` to `_root_node` and `node_position` to `{0, 0, 0}` [S1, unofficial].
+4.  **Internal Node Traversal:** Iterate `i` from 0 to `MAX_DEPTH - 2`:
+    *   Compute `depth_ = i` and `node_extent = AXIS_WIDTH >> depth_` [S1, unofficial].
+    *   Determine child index, child bit, existence, and `next_node_position` based on `voxel_transformed` and `node_position` relative to `node_extent` [S1, unofficial].
+    *   Update `node_->_mask |= child_bit` [S1, unofficial].
+    *   Fetch `node_block_` from `_node_pool._blocks[node_->_block_index]` [S1, unofficial].
+    *   If child does not exist (`!exist`): allocate new node block, set `new_node_._depth = depth_ + 1` and `_mask = 0`, set `new_node_._block_index = _node_pool.acquire_next_index()`, store `new_node_` in `node_block_[index]`, allocate new block in `_node_pool`, and update `node_` to `&node_block_[index]` [S1, unofficial].
+    *   Else: update `node_` to `&node_block_[index]` [S1, unofficial].
+    *   Set `node_position = next_node_position` [S1, unofficial].
+5.  **Voxel Octant Allocation:**
+    *   Set `depth_ = MAX_DEPTH - 1` and `node_extent = 4` [S1, unofficial].
+    *   Run child index/position calculation [S1, unofficial].
+    *   If child does not exist: create node with `_depth = MAX_DEPTH - 1` and `_block_index = _voxel_pool.acquire_next_index()`, store in current node's block, allocate voxel block in `_voxel_pool`, and update `node_` [S1, unofficial].
+6.  **Voxel Allocation:**
+    *   Set `node_extent = 2` [S1, unofficial].
+    *   Run child index/position calculation [S1, unofficial].
+    *   Fetch `voxel_block_` from `_voxel_pool._blocks[node_->_block_index]` [S1, unofficial].
+    *   Store `voxel` in `voxel_block_[index]` [S1, unofficial].
+
+**Algorithm: Retrieval (`get`)**
+1.  **Overflow Check:** Same as allocation; return `nullptr` if overflow and `_discard_overflow` is true [S1, unofficial].
+2.  **Coordinate Transform:** Shift position left by 1 bit [S1, unofficial].
+3.  **Traversal:** Iterate `i` from 0 to `MAX_DEPTH - 2`:
+    *   Compute `depth_ = i` and `node_extent = AXIS_WIDTH >> depth_` [S1, unofficial].
+    *   Calculate child index and existence [S1, unofficial].
+    *   If `!exist`, return `nullptr` [S1, unofficial].
+    *   Fetch `node_block_` and update `node_` and `node_position` [S1, unofficial].
+4.  **Voxel Access:**
+    *   Set `node_extent = 2` [S1, unofficial].
+    *   Calculate child index [S1, unofficial].
+    *   If child does not exist, return `nullptr` [S1, unofficial].
+    *   Return pointer to voxel in `_voxel_pool._blocks[node_->_block_index][index]` [S1, unofficial].
+
+**Algorithm: Deallocation (`dealloc`)**
+1.  **Trace Path:** Call `get_traced(voxel_position, &path_[0], &child_bits[0], &depth_)` to retrieve voxel pointer and fill `path_` and `child_bits` arrays up to reached depth; return false if voxel not found [S1, unofficial].
+2.  **Voxel Block Deallocation:**
+    *   Clear child bit from `path_[depth_]->_mask` [S1, unofficial].
+    *   If `mask != 0`, return true [S1, unofficial].
+    *   Else, dealloc voxel block via `_voxel_pool.dealloc(path_[depth_]->_block_index)` [S1, unofficial].
+    *   Clear child bit from `path_[depth_-1]->_mask` and decrement `depth_` [S1, unofficial].
+3.  **Node Block Deallocation:**
+    *   Loop `depth_` from current down to 1 [S1, unofficial].
+    *   If `path_[depth_]->_mask != 0`, break [S1, unofficial].
+    *   Else, dealloc node block via `_node_pool.dealloc(path_[depth_]->_block_index)` [S1, unofficial].
+    *   Clear child bit from `path_[depth_-1]->_mask` and decrement `depth_` [S1, unofficial].
+
+**Pseudocode:**
+> **Unverified code.** The code below did not pass a test run against a reference implementation, or no test fits it, so it may contain errors.
+
+```python
+# Standard definitions required for implementation
+class Vec3:
+    x, y, z: float
+    def __init__(self, x=0.0, y=0.0, z=0.0): self.x, self.y, self.z = x, y, z
+    def __lshift__(self, n): return Vec3(self.x << n, self.y << n, self.z << n)
+
+BOUNDS = [1024, 1024, 1024]
+DISCARD_OVERFLOW = True
+MAX_DEPTH = 10
+AXIS_WIDTH = 1 << MAX_DEPTH
+
+class Node:
+    depth: int
+    mask: int
+    block_index: int
+    def exists(self): return True # Simplified for pseudocode
+
+class Tree:
+    root_node: Node
+    node_pool: MemPool[Node]
+    voxel_pool: MemPool[Voxel]
+
+    def alloc(self, voxel_position: Vec3, voxel: Voxel):
+        # 1. Overflow check
+        if voxel_position.x >= BOUNDS[0] or voxel_position.y >= BOUNDS[1] or voxel_position.z >= BOUNDS[2]:
+            if not DISCARD_OVERFLOW: raise AssertionError("Out of bounds")
+            return
+
+        # 2. Coordinate transform
+        transformed_pos = voxel_position << 1
+        node = self.root_node
+        node_pos = Vec3(0, 0, 0)
+
+        # 3. Internal node traversal loop
+        for i in range(MAX_DEPTH - 2):
+            depth = i
+            node_extent = AXIS_WIDTH >> depth
+            
+            # SVO_NODE_RELATION_MATH_IMPL
+            idx = 0
+            if transformed_pos.x >= node_pos.x + node_extent: idx |= 1
+            if transformed_pos.y >= node_pos.y + node_extent: idx |= 2
+            if transformed_pos.z >= node_pos.z + node_extent: idx |= 4
+            child_bit = 1 << idx
+            next_node_pos = Vec3(0,0,0)
+            if idx & 1: next_node_pos.x += node_extent // 2
+            if idx & 2: next_node_pos.y += node_extent // 2
+            if idx & 4: next_node_pos.z += node_extent // 2
+
+            node.mask |= child_bit
+            node_block = self.node_pool.blocks[node.block_index]
+            child_node = node_block[idx]
+
+            if not child_node.exists():
+                new_node = Node()
+                new_node.depth = depth + 1
+                new_node.mask = 0
+                new_node.block_index = self.node_pool.acquire_next_index()
+                node_block[idx] = new_node
+                self.node_pool.alloc()
+                node = node_block[idx]
+            else:
+                node = node_block[idx]
+            node_pos = next_node_pos
+
+        # 4. Voxel octant allocation
+        depth = MAX_DEPTH - 1
+        node_extent = 4
+        idx = 0
+        if transformed_pos.x >= node_pos.x + node_extent: idx |= 1
+        if transformed_pos.y >= node_pos.y + node_extent: idx |= 2
+        if transformed_pos.z >= node_pos.z + node_extent: idx |= 4
+        node.mask |= (1 << idx)
+        node_block = self.node_pool.blocks[node.block_index]
+        child_node = node_block[idx]
+        if not child_node.exists():
+            new_node = Node()
+            new_node.depth = MAX_DEPTH - 1
+            new_node.mask = 0
+            new_node.block_index = self.voxel_pool.acquire_next_index()
+            node_block[idx] = new_node
+            self.voxel_pool.alloc()
+            node = node_block[idx]
+        else:
+            node = node_block[idx]
+
+        # 5. Voxel allocation
+        node_extent = 2
+        idx = 0
+        if transformed_pos.x >= node_pos.x + node_extent: idx |= 1
+        if transformed_pos.y >= node_pos.y + node_extent: idx |= 2
+        if transformed_pos.z >= node_pos.z + node_extent: idx |= 4
+        voxel_block = self.voxel_pool.blocks[node.block_index]
+        voxel_block[idx] = voxel
+
+    def dealloc(self, voxel_position: Vec3):
+        # Trace path to find voxel and fill path/child_bits arrays
+        path = []
+        child_bits = []
+        depth = 0
+        # get_traced implementation omitted as sources do not provide full traversal logic
+        if not self.get_traced(voxel_position, path, child_bits, depth):
+            return False
+
+        # Voxel block deallocation
+        # Clear child bit from path_[depth_]->_mask
+        path[depth].mask &= ~(child_bits[depth])
+        if path[depth].mask != 0:
+            return True
+        self.voxel_pool.dealloc(path[depth].block_index)
+        # Clear child bit from path_[depth_-1]->_mask
+        path[depth-1].mask &= ~(child_bits[depth-1])
+        depth -= 1
+
+        # Node block deallocation
+        while depth >= 1:
+            if path[depth].mask != 0:
+                break
+            self.node_pool.dealloc(path[depth].block_index)
+            path[depth-1].mask &= ~(child_bits[depth-1])
+            depth -= 1
+```
+
+## Subtopics
+
+### [Sparse Voxel Octree for Indirect Illumination](8483-sparse-voxel-octree-for-indirect-illumination.md)
+This method uses a pre-filtered dynamic sparse voxel octree (SVO) on the GPU to efficiently estimate visibility and integrate incoming indirect energy without involving the actual mesh geometry. It solves the problem of real-time indirect illumination in complex scenes by replacing dense mip-mapped volume grids, which suffer from resolution loss and temporal discontinuities, with a sparse, adaptive hierarchy. Unlike [KD10], which uses nested regular voxel grids and lacks precision, this approach uses sparse storage and ray tracing to maintain high precision and support specular indirect lighting. Unlike path-tracing or photon mapping, it always gives smooth results and does not suffer from noise or temporal discontinuities.
+
+### [Least Squares Surface Simplification](11029-least-squares-surface-simplification.md)
+Least Squares Surface Simplification reduces the resolution of a Sparse Voxel Octree (SVO) by finding the best-fit scalar field values for a coarser voxel level. It solves the data reduction problem by minimizing the energy difference between the prolonged coarse field and the original fine field, formulated as a least squares problem. It sets itself apart from sibling methods like Morton-coded SVOs by explicitly optimizing field values to minimize approximation error rather than relying solely on structural sparsity or hashing.
+
+### [GigaVoxels Data Synthesis](16702-gigavoxels-data-synthesis.md)
+GigaVoxels Data Synthesis is a method for generating 3D environments within a Sparse Voxel Octree (SVO) by leveraging internal branch instancing and recursion via node pointers. It significantly reduces memory consumption by allowing multiple nodes to reference a single voxel brick, a technique particularly effective for fractal structures. It distinguishes itself from standard SVO traversal by treating the data structure as a generative graph where geometry is synthesized through pointer indirection rather than explicit storage at every leaf.
+
+### [Sparse Voxel Tree Data Layout](21134-sparse-voxel-tree-data-layout.md)
+Not given in the sources.
+
+### [SparseVoxelOctree](21324-sparsevoxeloctree.md)
+Not given in the sources.
+
+### SVO Culling and Sorting
+Post-processing steps for the SVO: culling unfilled branches, breadth-sorting for cache locality, and depth-sorting for traversal order [S5, unofficial].
+*   **Cull unfilled:** Recursively traverse from root; if leaf node has color 0, return false (cull); if internal node, recursively cull children, remove culled child bit from parent.occupancy, and return false if parent becomes a leaf, otherwise update parent and return true [S5, unofficial].
+*   **Breadth-sort:** Create new nodes vector, queue root, clone nodes, push children to queue front, update child references to cursor, encode node_ref into color if present, and push to new vector [S5, unofficial].
+*   **Depth-sort:** Create new nodes vector, recursively traverse from root, create new references, clone nodes, recursively update child references, and update nodes in new array [S5, unofficial].
+
+### VOLA (Octree with branching factor 64)
+An efficient file format for storing quantized point cloud data with no attributes other than geometry, using an octree where two layers are combined into one [S6]. It stores voxels as an octree rather than an array [S6]. Combining two layers of the octree creates a tree with a branching factor of 64 [S6].
+
+### Sparse Voxel Octree Traversal
+A sparse voxel octree traversal method as described by Laine & Karras (2010) [S7, unofficial]. It performed well compared to other techniques in complex scenes, speculated due to improved cache coherency from more compact data storage [S7, unofficial].
+
+### Voxel Tree Mipmap Generation
+Initialize a target tree with half dimensions; if source tree contains mesh faces, iterate through each face and return immediately [S8, unofficial]. Iterate over target voxels, compute source block start, initialize `mincnt=3`, scan the 2x2x2 sub-block, check occupancy via bit-packing logic, decrement `mincnt` on hit, set target occupancy bit and copy color bits if `mincnt==0`, otherwise skip [S8, unofficial].
+
+## Operating characteristics
+*   **Time Complexity:** $O(\text{MAX\_DEPTH})$ for allocation, retrieval, and deallocation; since `MAX_DEPTH` is a small constant (3 to 10), operations are effectively $O(1)$ with a small constant factor [S1, unofficial].
+*   **Memory Complexity:** $O(N)$ where $N$ is the number of allocated voxels; each block holds exactly 8 elements (nodes or voxels), with overhead including block metadata and free lists [S1, unofficial].
+*   **Measured Performance:**
+    *   ESVO requires about 5 bytes per voxel with color, normal, and contour, or 6.67 bytes per finest-level sample once the mip hierarchy is counted [S2].
+    *   If only surfaces are encoded, memory usage drops to $O(N^2)$ [S2].
+    *   Octree traversal can be worse than hierarchical-grid methods by as much as 60% [S2].
+    *   MSVC vs Clang performance: The traversal loop causes significant branch/pipeline overhead on MSVC; applying loop unrolling yields ~2x speedup on Clang/Windows (~1.6M ns -> ~800k ns) [S1, unofficial].
+*   **Strengths:** Adapts to the location of scene geometry, storing only leaf nodes where data exists, unlike dense 3D grids which require $4096^3$ cells (~128 GB for rgb$\sigma$) [S3, unofficial]. Block-based memory pooling facilitates dynamic updates and streaming [S2].
+*   **Limitations:** Good only for storage and rendering, and not even great at those according to some assessments [S2]. Bulk allocation estimation is difficult; pre-allocating blocks is avoided because accurate spatial analysis is too expensive and overestimation hurts performance [S1, unofficial].
+
+## Background
+The Sparse Voxel Tree (SVO) is a tree-structure for representing sparse volumetric data, inspired by B+ trees used in databases [S3, unofficial]. It was popularized by OpenVDB [S3, unofficial]. The method builds on the principles of recursive subdivision and sparsity encoding shared by the [Tree-based structures (Octree, Pointer Tree, Sparse Voxel DAG)](4139-tree-based-structures-octree-pointer-tree-sparse-voxel-dag.md) family. Laine & Karras (2010) presented a sparse voxel octree-based technique for representing geometry and shading attributes, which is widely cited in the context of efficient traversal and cache coherency [S7, unofficial][S2].
+
+## Sources
+[S1] SeveriSuominen/rapid-svo, https://github.com/SeveriSuominen/rapid-svo, fetched 2026-10-26 (unofficial)
+[S2] https://github.com/theHimanshuShekhar/bhayanakvoxel/blob/research/voxel-data-structures/docs/research/voxel-data-structures.md, https://github.com/theHimanshuShekhar/bhayanakvoxel/blob/research/voxel-data-structures/docs/research/voxel-data-structures.md, fetched 2026-10-28
+[S3] PDF Lecture 15: Rendering Volumes, Points, and Gaussians, https://gfxcourses.stanford.edu/cs248a/winter25content/media/volumespoints/15_volumespoints.pdf, fetched 2026-10-28 (unofficial)
+[S4] Faster Neural Radiance Fields Inference — Chris Choy, https://chrischoy.org/posts/nerfs/, fetched 2026-10-29 (unofficial)
+[S5] marceline-cramer/svo-cpu, https://github.com/marceline-cramer/svo-cpu, fetched 2026-10-27 (unofficial)
+[S6] Voxel Compression - GitHub Pages, https://eisenwave.github.io/voxel-compression-docs/introduction.html, fetched 2026-10-27
+[S7] PDF Real-time Rendering and Construction of Signed Distance Fields, https://jambuttenshaw.github.io/devportfolio/Dissertation.pdf, fetched 2026-10-28 (unofficial)
+[S8] sp4cerat/Sparse-Voxel-Octree-Raycasting, https://github.com/sp4cerat/Sparse-Voxel-Octree-Raycasting, fetched 2026-10-24 (unofficial)

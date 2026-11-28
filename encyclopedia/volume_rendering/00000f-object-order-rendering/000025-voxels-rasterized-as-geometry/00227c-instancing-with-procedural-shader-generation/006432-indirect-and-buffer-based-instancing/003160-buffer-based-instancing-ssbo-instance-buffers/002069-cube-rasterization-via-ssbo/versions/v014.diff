@@ -1,0 +1,106 @@
+--- v013.md
++++ v014.md
+@@ -1,8 +1,8 @@
+ # Cube Rasterization via SSBO
+ 
+-Also called: GL_DRAW_ELEMENTS instancing, GPU Instancing, Voxel Instance Rendering, glDrawElementsInstanced Voxel Draw
++Also called: GL_DRAW_ELEMENTS instancing, Voxel Instance Rendering, glDrawElementsInstanced Voxel Draw
+ 
+ ## Overview
+-This method renders $N$ voxels as instances of a base unit cube geometry using a single `glDrawElementsInstanced` draw call, where each instance is transformed by an offset and colored via a palette texture lookup [S1, unofficial]. It rasterizes 3 faces of each cube per voxel using a large index buffer and a large SSBO containing voxel data [S2, unofficial]. It is distinguished from point-sprite or ray-traced voxel methods by using explicit triangle geometry for exact cube shapes and procedural face culling based on camera orientation [S2, unofficial].
++This method renders $N$ voxels as instances of a base unit cube geometry using a single draw call, where each instance is transformed by an offset and colored via a palette texture lookup [S1, unofficial]. It rasterizes 3 faces of each cube per voxel using a large index buffer and a large SSBO containing voxel data [S2, unofficial]. It is distinguished from point-sprite or ray-traced voxel methods by using explicit triangle geometry for exact cube shapes and procedural face culling based on camera orientation [S2, unofficial].
+ 
+ ## How it works
+@@ -12,26 +12,11 @@
+ 
+ **Data Structures:**
+-1.  **Base Geometry (VAO):**
+-    *   Contains vertex attributes for a unit cube.
+-    *   Layout per vertex: `aLocalPosition` (vec3, float) and `aNormal` (vec3, float) [S1, unofficial].
+-    *   Stride: `CubeGeometry.FLOATS_PER_VERTEX * 4` bytes [S1, unofficial].
+-2.  **Instance Buffer (SSBO):**
+-    *   Bound as a `std430` buffer at binding point 0 [S2, unofficial].
+-    *   Layout: One `uvec2` per voxel [S2, unofficial].
+-    *   `data.x` (uvec2 component): Packs position. X: 11 bits, Y: 10 bits, Z: 11 bits [S2, unofficial].
+-    *   `data.y` (uvec2 component): Packs material properties. ALBEDO (16 bits, R5G6B5), METAL (4 bits), ROUGH (4 bits), INTENSITY (4 bits), TYPE (4 bits) [S2, unofficial].
+-3.  **Index Buffer (EBO):**
+-    *   A single large static buffer containing indices for all instances [S2, unofficial].
+-    *   Total indices: $N \times 18$ (3 faces $\times$ 2 triangles/face $\times$ 3 vertices/triangle) [S2, unofficial].
+-    *   Indices are pre-computed: `indices[i] = cube_indices[cube_local] + cube * num_cube_vertices`, where `num_cube_vertices = 8` [S2, unofficial].
++1.  **Base Geometry:** A unit cube mesh defining 8 vertices and 3 visible faces (6 triangles) [S2, unofficial].
++2.  **Instance Buffer (SSBO):** A `std430` buffer bound at binding point 0 [S2, unofficial]. Layout consists of one `uvec2` per voxel [S2, unofficial]. `data.x` packs position (X: 11 bits, Y: 10 bits, Z: 11 bits) [S2, unofficial]. `data.y` packs material properties: ALBEDO (16 bits, R5G6B5), METAL (4 bits), ROUGH (4 bits), INTENSITY (4 bits), TYPE (4 bits) [S2, unofficial].
++3.  **Index Buffer (EBO):** A single large static buffer containing indices for all instances [S2, unofficial]. Total indices: $N \times 18$ (3 faces $\times$ 2 triangles/face $\times$ 3 vertices/triangle) [S2, unofficial]. Indices are pre-computed: `indices[i] = cube_indices[cube_local] + cube * num_cube_vertices`, where `num_cube_vertices = 8` [S2, unofficial].
+ 
+ **Algorithm Steps:**
+-1.  **Initialization:**
+-    *   Create the base unit cube VAO with position and normal attributes [S1, unofficial].
+-    *   Create the SSBO and populate it with voxel data packed into `uvec2` arrays [S2, unofficial].
+-    *   Create the large EBO with 18 indices per instance [S2, unofficial].
+-    *   Bind the VAO, EBO, and SSBO [S1, unofficial].
+-2.  **Draw Call:**
+-    *   Issue `glDrawElementsInstanced(GL_TRIANGLES, index_count, GL_UNSIGNED_SHORT, 0, instance_count)` [S1, unofficial].
++1.  **Initialization:** Create the base unit cube geometry [S2, unofficial]. Create the SSBO and populate it with voxel data packed into `uvec2` arrays [S2, unofficial]. Create the large EBO with 18 indices per instance [S2, unofficial]. Bind the EBO and SSBO [S1, unofficial].
++2.  **Draw Call:** Issue `glDrawElementsInstanced(GL_TRIANGLES, index_count, GL_UNSIGNED_SHORT, 0, instance_count)` [S1, unofficial].
+ 3.  **Vertex Shader Execution (Per Vertex):**
+     *   Determine the instance index from `gl_VertexID`: `instance = gl_VertexID >> 3` [S2, unofficial].
+@@ -51,4 +36,41 @@
+         *   `gl_Position = view_projection_matrix * vec4(world_pos, 1.0)` [S2, unofficial].
+     *   Output color (albedo) [S2, unofficial].
++
++**Pseudocode:**
++```python
++def vertex_shader(gl_VertexID, camera_origin, view_projection_matrix, ssbo):
++    # 1. Determine instance index from vertex ID
++    instance = gl_VertexID >> 3
++    
++    # 2. Fetch and unpack voxel data from SSBO
++    data = ssbo[instance]
++    # Unpack position (11/10/11 bits) and albedo (R5G6B5)
++    world_position = unpack_position(data.x)
++    albedo = unpack_albedo(data.y)
++    
++    # 3. Compute local camera position for face culling
++    local_camera_pos = camera_origin - world_position
++    
++    # 4. Determine cube face orientation based on camera direction
++    xyz = vec3(
++        gl_VertexID & 0x1,
++        (gl_VertexID & 0x2) >> 1,
++        (gl_VertexID & 0x4) >> 2
++    )
++    if local_camera_pos.x > 0.0:
++        xyz.x = 1.0 - xyz.x
++    if local_camera_pos.y > 0.0:
++        xyz.y = 1.0 - xyz.y
++    if local_camera_pos.z > 0.0:
++        xyz.z = 1.0 - xyz.z
++        
++    # 5. Transform local vertex to clip space
++    uvw = vec3(xyz)
++    local_pos = uvw * 2.0 - 1.0
++    final_world_pos = local_pos * 0.05 + world_position
++    clip_position = view_projection_matrix * vec4(final_world_pos, 1.0)
++    
++    return clip_position, albedo
++```
+ 
+ **Parameters:**
+@@ -73,5 +95,5 @@
+ 
+ ### [SVO Node Visualization via Instanced Cubes](16506-svo-node-visualization-via-instanced-cubes.md)
+-A compute-to-draw pipeline that converts SVO nodes into instanced cubes for visualization. A compute shader (mVisualCS) populates a VisualPackage buffer and an atomic counter, which is then used to render instanced cubes via indexed draw calls.
++A compute-to-draw pipeline that converts SVO nodes into instanced cubes for visualization. A compute shader populates a VisualPackage buffer and an atomic counter, which is then used to render instanced cubes via indexed draw calls. Differs from Cube Rasterization via SSBO by using a compute shader to explicitly generate instance data from SVO node metadata rather than relying on a pre-populated SSBO of voxel data. This allows efficient visualization of the tree structure itself, including empty nodes, by rendering only active or relevant nodes at a specific level.
+ 
+ ## Operating characteristics
+@@ -79,9 +101,9 @@
+ *   **Memory Complexity:** Requires an SSBO of size $2 \times N \times 4$ bytes (for two `uvec2`s) and an EBO of size $18 \times N \times 2$ bytes (assuming `GL_UNSIGNED_SHORT`) [S2, unofficial].
+ *   **Performance:** On dedicated graphics cards, `MODE_CUBE` is slower than `MODE_QUAD` (point sprite/ray-traced) by approximately a factor of two [S2, unofficial]. On Intel Integrated graphics, performance is similar [S2, unofficial].
+-*   **Strengths:** Provides exact cube geometry and explicit face culling logic, avoiding the artifacts associated with point sprites or ray-traced approximations [S2, unofficial].
++*   **Strengths:** Provides exact cube geometry and explicit face culling logic, avoiding artifacts associated with point sprites or ray-traced approximations [S2, unofficial].
+ *   **Limitations:** Higher memory bandwidth usage due to the large index buffer and instance buffer compared to point-sprite methods [S2, unofficial].
+ 
+ ## Background
+-This method was implemented in an Android OpenGL ES 3.0 voxel visualization project [S1, unofficial]. It was also used in a high-performance voxel renderer experiment by Clay John, where it was compared against a point-sprite/ray-traced mode (`MODE_QUAD`) [S2, unofficial]. The face culling logic references Sebastian Aaltonen's approach [S2, unofficial].
++This method was implemented in an Android OpenGL ES 3.0 voxel visualization project [S1, unofficial]. It was also used in a voxel renderer experiment where it was compared against a point-sprite/ray-traced mode (`MODE_QUAD`) [S2, unofficial]. The face culling logic references Sebastian Aaltonen's approach [S2, unofficial].
+ 
+ ## Sources

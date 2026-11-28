@@ -1,0 +1,140 @@
+# HeadGas
+
+Also called: Animatable 3D Gaussian Splatting for Heads, HeadGaS, HeadGaS w/ $\nabla(\boldsymbol{u}, \boldsymbol{R})$
+
+## Overview
+HeadGaS is a method for real-time animatable 3D head reconstruction and animation that extends 3D Gaussian Splatting (3DGS) with a base of learnable latent features [S1]. It solves the problem of modeling dynamic facial expressions by allowing Gaussians to alter their opacity and color over time, achieving dynamics via over-representation (duplicates of dynamic face areas that become active one at a time) rather than explicit geometric deformation [S1]. It sets itself apart from siblings like [GaussianHead](8051-gaussianhead.md) and [GART](8093-gart.md) by blending latent features with 3DMM expression weights to predict appearance, avoiding the complexity of optimizing 3D motion for every Gaussian [S1].
+
+## How it works
+**Inputs and Outputs:**
+*   **Inputs:** Monocular video frames, pre-computed head poses (camera poses $W_i$), and expression vectors ($e_i$) from a parametric head model (e.g., FLAME or FaceWarehouse) [S1].
+*   **Outputs:** Rendered images $I_r$ for given expression and camera parameters [S1].
+
+**Data Structures:**
+Each Gaussian $G_a$ is defined as a tuple $(\Sigma, \mu, F)$ [S1]:
+*   $\Sigma \in \mathbb{R}^{3 \times 3}$: The 3D covariance matrix [S1].
+*   $\mu \in \mathbb{R}^3$: The center position in canonical space [S1].
+*   $F \in \mathbb{R}^{B \times f_{dim}}$: The latent feature basis. $B$ is the number of expression weights (e.g., 52 for FLAME), and $f_{dim}$ is the feature dimensionality (32) [S1].
+*   Note: Color $c$ and opacity $\alpha$ are not stored explicitly but are predicted by an MLP [S1].
+
+**Parameters:**
+*   $f_{dim} = 32$ [S1].
+*   $B = 52$ for FLAME tracking [S1].
+*   Spherical Harmonics degree $k=3$ [S1].
+*   Rendering resolution: $512^2$ pixels [S1].
+
+**Numbered Steps:**
+
+1.  **Pre-processing:** Acquire head poses and expression weights for each frame. Convert rigid head poses to camera poses to map observations to a canonical head pose. Perform video matting and face parsing to discard background and clothing [S1].
+2.  **Initialization:** Initialize 3D Gaussian centers $\mu$ with 2500 points (subset of 3DMM mesh vertices or random points within near/far bounds). Initialize latent features $F$ with zeros [S1].
+3.  **Feature Blending:** For each frame $i$ with expression vector $e_i \in \mathbb{R}^B$, compute the frame-specific feature vector $f_i \in \mathbb{R}^{f_{dim}}$ for each Gaussian:
+    $$
+    f_i = F^T e_i + f_0
+    $$
+    where $f_0$ is a bias term [S1].
+4.  **Color and Opacity Prediction:** Feed $f_i$ and the Gaussian position $\mu$ into an MLP $\phi$ to predict color $c_i$ and opacity $\alpha_i$:
+    $$
+    c_i, \alpha_i = \phi(f_i, \psi(\mu))
+    $$
+    where $\psi$ denotes sinusoidal positional encoding of $\mu$ [S1]. The MLP $\phi$ consists of two linear layers with LeakyReLU activations, a hidden layer of 64 channels, and two output branches (color and opacity). The opacity branch ends with a sigmoid activation [S1].
+5.  **Projection:** Project Gaussians to image space using camera view $W_i$. Compute the covariance matrix in camera coordinates $\Sigma'$ using the Jacobian $J$ of the affine approximation of the projective transformation:
+    $$
+    \Sigma' = J W \Sigma W^T J^T
+    $$
+    [S1].
+6.  **Rendering:** Render using a tile-based differentiable rasterizer. For pixel $p$, sort overlapping Gaussians $\mathcal{O}_p$ front-to-back and apply alpha-blending:
+    $$
+    V(p) = \sum_{i \in \mathcal{O}_p} c_i \cdot \alpha_i \cdot \prod_{j=1}^{i-1} (1 - \alpha_j)
+    $$
+    [S1].
+7.  **Optimization:** Minimize the total loss $\mathcal{L}_{total}$ using Stochastic Gradient Descent with exponential decay scheduling for positions $\mu$ and the MLP [S1].
+
+**Pseudocode:**
+
+> **Unverified code.** The code below did not pass a test run against a reference implementation, or no test fits it, so it may contain errors.
+
+```python
+import torch
+import torch.nn as nn
+
+class HeadGaSMLP(nn.Module):
+    def __init__(self, f_dim):
+        super().__init__()
+        self.freq_bands = 6
+        self.net = nn.Sequential(
+            nn.Linear(f_dim + 3 * self.freq_bands, 64),
+            nn.LeakyReLU(),
+            nn.Linear(64, 4)
+        )
+
+    def forward(self, f_i, mu):
+        scales = torch.tensor([2**i for i in range(self.freq_bands)], dtype=mu.dtype, device=mu.device)
+        mu_exp = mu.unsqueeze(-1)
+        scales_exp = scales.unsqueeze(0).unsqueeze(0)
+        pos_enc = torch.sin(mu_exp * scales_exp * torch.pi).view(mu.shape[0], -1)
+        out = self.net(torch.cat([f_i, pos_enc], dim=-1))
+        return out[:, :3], torch.sigmoid(out[:, 3:])
+
+def blend_features(F, e_i, f_0):
+    return torch.einsum('nbd,b->nd', F, e_i) + f_0
+
+def compute_camera_covariance(Sigma, W, J):
+    return J @ W[:3, :3] @ Sigma @ W[:3, :3].T @ J.T
+
+def alpha_blend_accumulation(sorted_colors, sorted_opacities):
+    transmittance = torch.ones_like(sorted_opacities)
+    accumulated = torch.zeros_like(sorted_colors)
+    for i in range(len(sorted_opacities)):
+        accumulated += sorted_colors[i] * sorted_opacities[i] * transmittance[i]
+        transmittance[i + 1] = transmittance[i] * (1 - sorted_opacities[i])
+    return accumulated
+
+def render_headgas(gaussians, camera_pose, expression_vector, mlp, f_0):
+    mu, Sigma, F = gaussians['mu'], gaussians['Sigma'], gaussians['F']
+    e_i, W = expression_vector, camera_pose
+    N = mu.shape[0]
+
+    f_i = blend_features(F, e_i, f_0)
+    c_i, alpha_i = mlp(f_i, mu)
+
+    J = torch.eye(3, device=mu.device)
+    Sigma_prime = compute_camera_covariance(Sigma, W, J)
+
+    centers_cam = W[:3, :3] @ mu.T + W[:3, 3:]
+    depths = centers_cam[2, :]
+    sort_idx = torch.argsort(depths)
+
+    sorted_c = c_i[sort_idx]
+    sorted_alpha = alpha_i[sort_idx]
+
+    rendered_image = alpha_blend_accumulation(sorted_c, sorted_alpha)
+    return rendered_image
+```
+
+**Edge Cases and Pitfalls:**
+*   **Initialization:** Initializing latent features $F$ with zeros leads to the most stable solution [S1].
+*   **Over-representation:** Dynamic areas require multiple Gaussians (duplicates) that become active/inactive based on expression [S1].
+*   **Loss Conflict:** Perceptual loss $L_p$ is activated after 10k iterations to avoid conflict with photometric loss at early stages [S1].
+
+## Subtopics
+
+### HeadGaS Ablation (Delta Position and Rotation)
+An ablation variant where Gaussians are transformed using deltas for position ($\mu$) and rotation ($R$) predicted by an MLP $\phi'$ [S1]. The MLP outputs 3 values of position shift and 4 values of rotation (quaternion) [S1]. The static Gaussian position is updated as $\mu' = \mu + \Delta \mu$ and rotation as $R' = R_t R$ [S1]. A regularization term $\lambda_\mu \mathcal{L}_1(\Delta \mu)$ is added to the loss to encourage small position shifts [S1]. This variant requires significantly more Gaussians (234k) than the proposed HeadGaS (28k) because the proposed model's over-representation is more effective and easier to learn [S1]. Performance on INSTA dataset for this variant: 234k Gaussians, 0.019s rendering time, 29.83 PSNR [S1].
+
+## Operating characteristics
+*   **Time Complexity:** Rendering is real-time, over 100 FPS generally, approximately 250 FPS at $512 \times 512$ resolution [S1].
+*   **Memory Complexity:** The method uses over-representation, leading to a higher number of Gaussians than static 3DGS, but fewer than deformation-based variants (28k vs 234k in ablation) [S1].
+*   **Measured Performance:**
+    *   INSTA dataset: PSNR 32.50, SSIM 0.971, LPIPS 0.033, rendering time 0.10s at $512^2$ resolution [S1].
+    *   NBS dataset: PSNR 34.34, SSIM 0.970, LPIPS 0.0311, rendering time 0.10s at $512^2$ resolution [S1].
+    *   PointAvatar dataset: PSNR 36.66, SSIM 0.976, LPIPS 0.0261, rendering time 0.10s at $512^2$ resolution [S1].
+*   **Scaling:** Rendering speed accelerated by over 10x compared to interactive NeRF-based baselines [S1].
+*   **Strengths:** Real-time inference, state-of-the-art results (up to 2 dB PSNR improvement over baselines), simple and effective blending in latent space [S1].
+*   **Limitations:** Requires pre-computed head poses and expression weights [S1].
+
+## Background
+HeadGaS was proposed by H. Dhamo et al. in the paper "HeadGaS: Real-Time Animatable Head Avatars via 3D Gaussian Splatting" [S1]. It extends the explicit 3DGS representation with a base of learnable latent features, inspired by traditional blendshape 3DMMs [S1]. The method allows reconstruction in real-time of animatable heads [S2, unofficial]. It supports various 3DMM representations, including FLAME and FaceWarehouse [S1].
+
+## Sources
+[S1] HeadGaS: Real-Time Animatable Head Avatars via 3D Gaussian Splatting, https://doi.org/10.1007/978-3-031-72627-9_26, fetched 2026-10-27
+[S2] PDF Recent advances in 3D Gaussian splatting - Springer, https://link.springer.com/content/pdf/10.1007/s41095-024-0436-y.pdf, fetched 2026-10-29 (unofficial)

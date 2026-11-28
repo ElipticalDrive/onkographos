@@ -1,0 +1,160 @@
+# Reflectance and Shading Decomposition Priors
+
+Also called: Intrinsic Priors, Mean Reflectance Regularization, Shading Smoothness
+
+## Overview
+Reflectance and Shading Decomposition Priors enforce physical plausibility in neural radiance fields by decoupling the rendered color into material reflectance (intrinsic to the surface) and shading (dependent on illumination and viewpoint) [S1]. This method solves the problem of unstable or physically inconsistent material properties in novel view synthesis, particularly when inserting objects into scenes or handling complex lighting [S1]. It distinguishes itself from standard photometric priors by explicitly regularizing the intermediate decomposition components—reflectance and shading—rather than just the final pixel values, thereby mitigating scale ambiguity and ensuring consistent brightness levels across different scenes or inserted objects [S1].
+
+## How it works
+The method augments the primary photometric reconstruction loss with specific regularization terms targeting the decomposed reflectance $\mathbf{R}$ and shading $\mathbf{S}$ fields [S1].
+
+### Inputs and Outputs
+*   **Inputs:**
+    *   $\mathbf{R}(\mathbf{r})$: Reflectance vector at ray $\mathbf{r}$ (typically RGB) [S1].
+    *   $\mathbf{S}(\mathbf{r})$: Shading scalar or vector at ray $\mathbf{r}$ [S1].
+    *   $\mathbf{n}(\mathbf{r})$: Surface normal at ray $\mathbf{r}$ [S1].
+    *   $\mathbf{p}(\mathbf{r})$: 3D position of the sample point on ray $\mathbf{r}$ [S1].
+    *   $\beta_{avg,r}$: Target mean reflectance hyperparameter [S1].
+*   **Outputs:**
+    *   $\mathcal{L}_{mean,r}$: Mean reflectance regularization loss [S1].
+    *   $\mathcal{L}_s$: Shading smoothness loss [S1].
+    *   $\mathcal{L}_{sn}$: Shading-Normal consistency loss [S1].
+
+### Data Structures
+The network outputs two primary channels per sample point:
+1.  **Reflectance $\mathbf{R}$**: A 3-channel vector (RGB) representing the material albedo [S1].
+2.  **Shading $\mathbf{S}$**: A scalar or 3-channel vector representing the illumination factor [S1]. In the context of the mean reflectance loss, $\mathbf{R}(\mathbf{r}).max$ refers to the maximum value among the three RGB channels of the reflectance vector [S1].
+
+### Formulas and Parameters
+
+**1. Mean Reflectance Regularization ($\mathcal{L}_{mean,r}$)** [S1]
+This term constrains the reflectance magnitude to prevent unreasonable brightness changes, ensuring that inserted objects match the scene's brightness level [S1].
+
+$$
+\mathcal{L}_{mean,r} = \frac{1}{|\mathcal{R}|} \sum_{\mathbf{r} \in \mathcal{R}} \left| (\mathbf{R}(\mathbf{r}).max) - \beta_{avg,r} \right|
+$$
+
+*   $\mathcal{R}$: The set of sampled rays in the current batch [S1].
+*   $\mathbf{R}(\mathbf{r}).max$: The maximum value across the RGB channels of the reflectance vector $\mathbf{R}(\mathbf{r})$ [S1].
+*   $\beta_{avg,r}$: A hyperparameter representing the target average reflectance. The source sets this to $0.6$ for most scenes [S1].
+*   $|\mathcal{R}|$: The number of rays in the batch [S1].
+
+**2. Shading Smoothness Loss ($\mathcal{L}_s$)** [S1]
+This term enforces spatial coherence in the shading field, reducing noise in the estimated illumination [S1].
+
+$$
+\mathcal{L}_s = \text{Var}(\{\mathbf{S}(\mathbf{r}) \mid \mathbf{r} \in \mathcal{R}\})
+$$
+
+*   Defined as the variance of shading values for all pixels (or sampled points) in a single batch [S1].
+
+**3. Shading-Normal Consistency Loss ($\mathcal{L}_{sn}$)** [S1]
+This term leverages the correlation between shading and surface normals to enforce local smoothness, weighted by geometric proximity and orientation [S1].
+
+$$
+\mathcal{L}_{sn} = \frac{1}{|\mathcal{R}|} \sum_{\mathbf{r} \in \mathcal{R}} \omega_n(\mathbf{r}, \mathbf{r}') \cdot |\mathbf{S}(\mathbf{r}) - \mathbf{S}(\mathbf{r}')| \cdot (1 - \tanh(\text{Dis}(\mathbf{r}, \mathbf{r}')))
+$$
+
+*   $\mathbf{r}, \mathbf{r}'$: Rays/samples. The summation iterates over $\mathbf{r} \in \mathcal{R}$ and aggregates contributions from neighboring samples $\mathbf{r}'$ [S1].
+*   $\omega_n(\mathbf{r}, \mathbf{r}')$: A weight measuring the cosine similarity between the surface normals $\mathbf{n}(\mathbf{r})$ and $\mathbf{n}(\mathbf{r}')$ [S1].
+*   $\text{Dis}(\mathbf{r}, \mathbf{r}')$: The Euclidean distance between the 3D points associated with rays $\mathbf{r}$ and $\mathbf{r}'$ [S1].
+*   The term $(1 - \tanh(\text{Dis}(\mathbf{r}, \mathbf{r}')))$ acts as a distance decay factor, giving higher weight to closer points [S1].
+
+**4. Total Training Loss**
+The priors are combined with other intrinsic priors (chromaticity $\mathcal{L}_{chro}$, sparsity $\mathcal{L}_{rs}$, non-local sparsity $\mathcal{L}_{nrs}$) and the base photometric loss $\mathcal{L}$ [S1]:
+
+$$
+\mathcal{L}_{train} = \lambda_0 \mathcal{L} + \lambda_1 \mathcal{L}_d + \lambda_2 \mathcal{L}_{mean,r} + \lambda_3 \mathcal{L}_{chro} + \lambda_4 \mathcal{L}_{rs} + \lambda_5 \mathcal{L}_{nrs} + \lambda_6 \mathcal{L}_s + \lambda_7 \mathcal{L}_{sn}
+$$
+
+*   $\lambda_i$: Adjustable weights for each loss term [S1].
+*   $\mathcal{L}_d$: A decomposition loss term. Not given in the sources.
+
+### Pseudocode
+
+> **Unverified code.** The code below did not pass a test run against a reference implementation, or no test fits it, so it may contain errors.
+
+```python
+import math
+
+def compute_intrinsic_priors(reflectance_batch, shading_batch, normals_batch, positions_batch, beta_avg_r=0.6):
+    """
+    Computes the Reflectance and Shading Decomposition Priors losses.
+    
+    Args:
+        reflectance_batch: list of [r, g, b] floats for N rays.
+        shading_batch: list of floats for N rays.
+        normals_batch: list of [nx, ny, nz] floats for N rays.
+        positions_batch: list of [x, y, z] floats for N rays.
+        beta_avg_r: Float, target mean reflectance (default 0.6) [S1].
+        
+    Returns:
+        dict: Loss values for mean reflectance, shading smoothness, and shading-normal consistency.
+    """
+    N = len(reflectance_batch)
+    
+    # 1. Mean Reflectance Regularization
+    # R(r).max is the max value across the RGB channels for each ray [S1]
+    max_reflectance = [max(rgb) for rgb in reflectance_batch]
+    l_mean_r = sum(abs(m - beta_avg_r) for m in max_reflectance) / N
+    
+    # 2. Shading Smoothness Loss
+    # Variance of shading for all pixels in the batch [S1]
+    mean_s = sum(shading_batch) / N
+    l_s = sum((s - mean_s) ** 2 for s in shading_batch) / N
+    
+    # 3. Shading-Normal Consistency Loss
+    # Sum over rays r in R, comparing with neighbors r' [S1]
+    l_sn = 0.0
+    for i in range(N):
+        r = positions_batch[i]
+        r_norm = normals_batch[i]
+        s_i = shading_batch[i]
+        pair_sum = 0.0
+        for j in range(N):
+            if i == j:
+                continue
+            r_prime = positions_batch[j]
+            r_prime_norm = normals_batch[j]
+            s_j = shading_batch[j]
+            
+            # Dis(r, r') is Euclidean distance [S1]
+            dist = math.sqrt(sum((a - b) ** 2 for a, b in zip(r, r_prime)))
+            
+            # omega_n measures cosine similarity of normals [S1]
+            dot_prod = sum(a * b for a, b in zip(r_norm, r_prime_norm))
+            norm_i = math.sqrt(sum(a ** 2 for a in r_norm))
+            norm_j = math.sqrt(sum(a ** 2 for a in r_prime_norm))
+            cos_sim = dot_prod / (norm_i * norm_j) if (norm_i * norm_j) > 1e-8 else 0.0
+            
+            # Shading difference
+            s_diff = abs(s_i - s_j)
+            
+            # Distance decay factor: (1 - tanh(Dis(r, r'))) [S1]
+            decay = 1.0 - math.tanh(dist)
+            
+            pair_sum += cos_sim * s_diff * decay
+        l_sn += pair_sum
+    l_sn /= N
+    
+    return {
+        "l_mean_r": l_mean_r,
+        "l_s": l_s,
+        "l_sn": l_sn
+    }
+```
+
+### Edge Cases and Pitfalls
+*   **Scale Ambiguity:** There is an inherent scale ambiguity between shading and reflectance; scaling reflectance by $k$ and shading by $1/k$ yields the same observed image [S1]. The mean reflectance regularization helps constrain this by fixing the brightness level of reflectance, ensuring inserted objects match the scene's shading brightness [S1].
+*   **Sampling Sparsity:** In scenes with large backgrounds and small objects, sampling points on objects may be sparse, leading to missing details or artifacts if not handled by specialized sampling strategies (e.g., segmented sampling) [S1].
+*   **Hyperparameter Sensitivity:** The value of $\beta_{avg,r}$ is critical [S1]. The source recommends $0.6$ for most scenes, but this may need adjustment for scenes with significantly different average brightness [S1].
+
+## Operating characteristics
+*   **Strengths:** Produces smoother normal maps and more physically plausible material properties, especially in complex scenes [S1]. Enables consistent object insertion by aligning shading levels [S1].
+*   **Limitations:** Relies on the accuracy of estimated normals and sampling density. Sparse sampling on small objects can degrade performance [S1].
+
+## Background
+This method originates from the work on "Relighting Scenes With Object Insertions in Neural Radiance Fields" [S1]. It adapts traditional intrinsic image decomposition constraints (chromaticity, sparsity, non-local sparsity) into the NeRF backbone to improve the quality of rendered images and enable novel view synthesis with inserted objects [S1].
+
+## Sources
+[S1] Relighting Scenes With Object Insertions in Neural Radiance Fields, https://doi.org/10.1109/TCSVT.2025.3535599, fetched 2026-10-29

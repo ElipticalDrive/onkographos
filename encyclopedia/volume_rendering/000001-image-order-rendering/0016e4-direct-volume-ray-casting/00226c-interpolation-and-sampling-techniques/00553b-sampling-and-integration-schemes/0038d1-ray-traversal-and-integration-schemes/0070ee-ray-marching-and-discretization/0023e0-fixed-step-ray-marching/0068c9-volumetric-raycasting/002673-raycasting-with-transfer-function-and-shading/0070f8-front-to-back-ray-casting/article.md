@@ -1,0 +1,150 @@
+# Front-to-Back Ray Casting
+Also called: RayCastSimple
+## Overview
+Front-to-Back Ray Casting is a direct volume rendering technique that accumulates color and opacity along a ray traversing a 3D texture space, starting from the viewer and moving toward the back of the volume. It solves the problem of compositing semi-transparent volumetric data into a 2D image by applying the standard front-to-back alpha blending equation at each sample step. It is distinguished from its siblings by its explicit use of a fixed iteration count combined with boundary checks, and its specific normalization of raw volume values to a fixed [0, 1] range before blending, rather than relying solely on the transfer function's alpha channel for opacity weighting.
+
+## How it works
+**Inputs and Outputs:**
+*   **Input:** A 3D volume texture (`Volume`), a front-face position texture (`Front`), a back-face position texture (`Back`), and a fragment shader input containing projective texture coordinates.
+*   **Output:** A `float4` color value representing the accumulated ray color and opacity.
+
+**Data Structures:**
+*   `Front` / `Back`: 2D textures storing the 3D world coordinates of the entry and exit points of the ray through the volume bounding box.
+*   `Volume`: 3D texture storing scalar density values.
+*   `dst`: Accumulator buffer, initialized to `(0, 0, 0, 0)`.
+*   `src`: Temporary sample buffer, initialized to `(0, 0, 0, 0)`.
+*   `pos`: Current ray position, initialized to `float4(front, 0)`.
+*   `dir`: Ray direction vector.
+*   `Step`: Step vector calculated as `dir * StepSize`.
+
+**Parameters:**
+*   `Iterations`: Fixed number of steps (e.g., 1500).
+*   `StepSize`: Distance between samples.
+*   `ThresholdMin`: Lower bound for value clamping (40).
+*   `ThresholdMax`: Upper bound for value clamping (60).
+*   `AlphaScale`: Divisor for alpha normalization (`Iterations / 50.0`).
+*   `EarlyTerminationThreshold`: Alpha threshold to stop rendering (0.95).
+
+**Steps:**
+1.  **Compute Ray Geometry:**
+    *   Calculate projective texture coordinates from the vertex shader output:
+        $$ texC.x = 0.5 \times \left(\frac{input.pos.xy.x}{input.pos.w}\right) + 0.5 $$
+        $$ texC.y = -0.5 \times \left(\frac{input.pos.xy.y}{input.pos.w}\right) + 0.5 $$
+    *   Sample the front and back positions:
+        $$ front = Front.Sample(texC).rgb $$
+        $$ back = Back.Sample(texC).rgb $$
+    *   Compute direction and initialize position:
+        $$ dir = normalize(back - front) $$
+        $$ pos = float4(front, 0) $$
+    *   Compute step vector:
+        $$ Step = dir \times StepSize $$
+
+2.  **Ray Marching Loop:**
+    Iterate $i$ from 0 to $Iterations - 1$:
+    *   **Sample Volume:**
+        $$ value = TrilinearSample(pos.xyz) $$
+        [G] `TrilinearSample` performs trilinear interpolation on the 3D volume texture at `pos.xyz`.
+    *   **Clamp and Normalize:**
+        *   Clamp value to $[40, 60]$:
+            $$ value = \max(40, \min(60, value)) $$
+        *   Normalize to $[0, 1]$:
+            $$ value = \frac{value - 40.0}{20.0} $$
+    *   **Prepare Source Color/Alpha:**
+        *   Set source color to normalized value (grayscale):
+            $$ src.rgb = value $$
+        *   Calculate source alpha:
+            $$ src.a = \frac{value}{Iterations / 50.0} $$
+    *   **Front-to-Back Blending:**
+        *   Modulate color by alpha:
+            $$ src.rgb = src.rgb \times src.a $$
+        *   Update destination:
+            $$ dst = (1.0 - dst.a) \times src + dst $$
+    *   **Early Termination:**
+        *   If $dst.a \ge 0.95$, break loop.
+    *   **Advance Ray:**
+        $$ pos.xyz = pos.xyz + Step $$
+    *   **Boundary Check:**
+        *   If any component of $pos.xyz$ is outside $[0.0, 1.0]$, break loop.
+
+3.  **Return Result:**
+    *   Return `dst`.
+
+**Pseudocode:**
+> **Unverified code.** The code below did not pass a test run against a reference implementation, or no test fits it, so it may contain errors.
+
+```python
+def RayCastSimple(input_pos, front_tex, back_tex, volume_tex, iterations=1500, step_size=0.01):
+    # 1. Compute Ray Geometry
+    # Projective texture coordinates
+    tex_c_x = 0.5 * (input_pos.xy.x / input_pos.w) + 0.5
+    tex_c_y = -0.5 * (input_pos.xy.y / input_pos.w) + 0.5
+    
+    front = front_tex.sample(tex_c_x, tex_c_y)
+    back = back_tex.sample(tex_c_x, tex_c_y)
+    
+    dir = normalize(back - front)
+    pos = vec4(front, 0.0)
+    
+    dst = vec4(0.0, 0.0, 0.0, 0.0)
+    src = vec4(0.0, 0.0, 0.0, 0.0)
+    
+    step = dir * step_size
+    
+    # 2. Ray Marching Loop
+    for i in range(iterations):
+        # Sample Volume
+        value = volume_tex.trilinear_sample(pos.xyz)
+        
+        # Clamp and Normalize
+        value = max(40.0, min(60.0, value))
+        value = (value - 40.0) / 20.0
+        
+        # Prepare Source
+        src.rgb = vec3(value)
+        src.a = value / (iterations / 50.0)
+        
+        # Front-to-Back Blending
+        src.rgb *= src.a
+        dst = (1.0 - dst.a) * src + dst
+        
+        # Early Termination
+        if dst.a >= 0.95:
+            break
+            
+        # Advance Ray
+        pos.xyz += step
+        
+        # Boundary Check
+        if any(p < 0.0 or p > 1.0 for p in pos.xyz):
+            break
+            
+    return dst
+```
+
+**Edge Cases and Pitfalls:**
+*   **Precision:** The normalization relies on fixed thresholds (40, 60). If the volume data does not contain values in this range, the output will be uniformly black or white.
+*   **Boundary Exit:** The boundary check `pos.x > 1.0f || ...` assumes the volume texture coordinates are normalized to $[0, 1]$. If the volume is larger or smaller, this check may terminate rays prematurely or allow them to sample outside the texture bounds.
+*   **Alpha Saturation:** The early termination threshold of 0.95 may cause visible artifacts (banding) in transparent regions if the step size is too large, as the ray stops before fully integrating the back of the volume.
+
+## Subtopics
+
+### [Gradient-Based Volume Rendering with Isovalue Lookup](10998-gradient-based-volume-rendering-with-isovalue-lookup.md)
+Uses gradient information to determine isovalue boundaries for rendering, offering sharper edges than simple density-based raycasting.
+
+### [Gradient-Density Raycasting with Transfer Function Blending](13551-gradient-density-raycasting-with-transfer-function-blending.md)
+Combines gradient magnitude and density for transfer function evaluation, providing better material differentiation than density-only methods.
+
+## Operating characteristics
+*   **Time Complexity:** $O(N)$, where $N$ is the number of iterations (steps) per pixel. The complexity is linear with respect to the number of samples taken along the ray.
+*   **Memory Complexity:** $O(1)$ per pixel, as only the current position, direction, and accumulation buffers are stored. The volume texture is accessed via streaming.
+*   **Measured Performance:** Performance depends heavily on the `Iterations` parameter and early termination. With `Iterations = 1500` and early termination at `dst.a >= 0.95`, average steps per pixel may be significantly lower than 1500 in opaque regions, but full 1500 steps in transparent regions.
+*   **Strengths:** Simple to implement; efficient early termination; fixed iteration count ensures consistent performance across frames.
+*   **Limitations:** Fixed step size may lead to aliasing or missing thin structures; normalization thresholds are hardcoded and not adaptive; boundary checks are simplistic.
+*   **When to Use:** Real-time rendering of volumetric data with known density ranges; when computational resources are limited and a simple, fast approximation is acceptable.
+*   **When Not to Use:** High-fidelity scientific visualization requiring adaptive step sizes; volumes with density ranges outside the hardcoded [40, 60] range; scenes requiring accurate transparency blending across large distances.
+
+## Background
+The method originates from a specific implementation discussed in a GameDev Stack Exchange post [S1, unofficial] titled "3D Texture Only interpolates on Y-Axis". The code snippet provided in the source demonstrates a fragment shader (`RayCastSimplePS`) that performs front-to-back raycasting using a fixed number of iterations and specific normalization thresholds. It is part of a broader family of direct volume rendering techniques that map 3D texture coordinates to screen space and accumulate color along rays. The technique is often used in real-time applications where performance is critical, and the volume data has a known, limited range of values.
+
+## Sources
+[S1] 3D Texture Only interpolates on Y-Axis, https://gamedev.stackexchange.com/questions/166205, fetched 2026-10-29 (unofficial)

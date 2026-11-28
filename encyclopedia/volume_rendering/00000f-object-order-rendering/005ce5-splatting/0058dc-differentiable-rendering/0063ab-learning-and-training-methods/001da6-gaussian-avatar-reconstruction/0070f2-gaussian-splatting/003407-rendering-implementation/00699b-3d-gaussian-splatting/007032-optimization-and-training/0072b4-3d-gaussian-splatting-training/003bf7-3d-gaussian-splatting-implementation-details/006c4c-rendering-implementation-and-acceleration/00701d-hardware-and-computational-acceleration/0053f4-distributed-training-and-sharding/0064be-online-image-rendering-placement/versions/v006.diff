@@ -1,0 +1,277 @@
+--- v005.md
++++ v006.md
+@@ -4,173 +4,149 @@
+ 
+ ## Overview
+-Online Image Rendering Placement is a distributed training optimization method that dynamically assigns image patches to GPUs at each training iteration to minimize inter-node communication and balance computational load [S1, unofficial]. It distinguishes itself from static partitioning methods by solving an Integer Linear Programming (ILP) problem online using a fast heuristic solver, allowing it to adapt to the random batch selection inherent in differentiable rendering training [S1, unofficial].
++Online Image Rendering Placement is a per-iteration optimization step in distributed 3D Gaussian Splatting training that assigns image patches to GPUs to minimize inter-node communication and balance computational load [S1, unofficial]. Unlike offline graph partitioning which clusters both points and images for the entire dataset, this method dynamically determines rendering assignments for a small, randomly selected batch of images at each training step [S1, unofficial]. It distinguishes itself by operating at the granularity of image patches rather than whole images, enabling finer-grained load balancing and reduced communication overhead in large-scale multi-GPU setups [S1, unofficial].
+ 
+ ## How it works
+ **Inputs and Outputs:**
+-*   **Inputs:** The current batch of $B$ image patches (derived from training images), the set of $N$ GPUs, the location of 3D Gaussian primitives stored on each GPU, and configuration coefficients $\alpha, \beta, \gamma, \delta$.
+-*   **Outputs:** A placement vector $W$, where $W_j$ is the GPU ID assigned to render image patch $j$.
++- **Inputs:** A batch of $B$ image patches (derived from $B$ training images), the current 3D Gaussian point cloud partitioned across $N$ GPUs, and configuration coefficients $\alpha, \beta, \gamma, \delta$.
++- **Outputs:** A placement vector $W$ where $W_j$ is the GPU ID assigned to render image patch $j$.
+ 
+ **Data Structures:**
+-*   **Access Pattern Matrix $A$:** A $B \times N$ integer matrix where $A_{j,k}$ represents the number of 3D Gaussian primitives required from GPU $k$ to render image patch $j$.
+-*   **Placement Vector $W$:** An array of length $B$ storing GPU indices.
++- **Access Pattern Matrix $A$:** A $B \times N$ matrix where $A_{j,k}$ is the number of 3D Gaussian points required from GPU $k$ to render image patch $j$. This is determined by frustum culling on each GPU.
++- **Placement Vector $W$:** An array of length $B$, where each element is an integer in $\{0, \dots, N-1\}$.
+ 
+ **Steps:**
+-1.  **Image Partitioning:** Divide each training image of size $H \times W$ into $p^2$ patches of size $H_p \times W_p$. Typical values for $p$ are 2–8 [S1, unofficial].
+-2.  **Frustum Culling:** On each GPU $k$, perform frustum culling against the locally stored 3D Gaussian primitives for every image patch $j$ in the batch. Determine the subset of points needed for rendering [S1, unofficial].
+-3.  **Matrix Construction:** Exchange the results of frustum culling across all GPUs to construct the access pattern matrix $A$, where $A_{j,k}$ is the count of points needed from GPU $k$ for patch $j$ [S1, unofficial].
+-4.  **Initial Placement (LSA):** Solve a Linear Sum Assignment (LSA) problem to obtain an initial placement $W_{init}$ that minimizes total communication volume. This is solved using the Hungarian method [S1, unofficial].
+-5.  **Load Balancing (Local Search):** Refine $W_{init}$ using a greedy local search. Iteratively swap the GPU assignments of two image patches to minimize a relaxed objective function involving send, receive, and compute loads. Stop when convergence is reached or a time budget expires [S1, unofficial].
+-6.  **Hierarchical Assignment (Optional):** If operating across multiple machines, first assign patches to machines, then assign a machine's patches to its local GPUs. For intra-node assignment, set $\alpha=0$ to prioritize load balancing over communication [S1, unofficial].
++1. **Frustum Culling:** Each GPU $k$ receives the entire batch of $B$ image patches. It performs frustum culling against its locally stored 3D Gaussians to determine which points are visible for each patch.
++2. **Exchange Access Patterns:** All GPUs exchange their culling results to construct the global access pattern matrix $A$, where $A_{j,k}$ represents the count of points needed from GPU $k$ for patch $j$ [S1, unofficial].
++3. **Initial Placement via Linear Sum Assignment (LSA):** Solve a Linear Sum Assignment problem to minimize total communication volume. The objective is to minimize $\sum_{j=1}^{B} \sum_{k \neq W_j} A_{j,k}$, subject to the constraint that each GPU is assigned exactly $B/N$ patches. This yields an initial placement $W_{init}$ [S1, unofficial].
++4. **Local Search Refinement:** Iteratively refine $W_{init}$ to balance load. In each step, swap the GPU assignments of two image patches if it reduces the relaxed objective function. Continue until convergence or a time budget is exhausted [S1, unofficial].
++5. **Hierarchical Assignment (Optional):** If nodes contain multiple GPUs, first assign patches across machines, then assign a machine's patches among its local GPUs. For intra-node assignment, set $\alpha=0$ to de-prioritize communication [S1, unofficial].
+ 
+ **Formulas:**
+-The optimization aims to minimize the following objective, subject to the constraint that each GPU renders exactly $B/N$ patches:
++The ILP formulation aims to minimize:
++$$ \alpha \cdot \sum_{j=1}^{B} \sum_{k \neq W_j} A_{j,k} + \beta \cdot \max_k (\text{send}_k) + \gamma \cdot \max_k (\text{recv}_k) + \delta \cdot \max_k (\text{comp}_k) $$
++Subject to:
++$$ \sum_{j=1}^{B} [W_j = k] = \frac{B}{N}, \quad \forall k \in \{1, \dots, N\} $$
+ 
+-$$
+-\text{minimize } \alpha \cdot \sum_{j=1}^{B} \sum_{k=1}^{N} A_{j,k} \cdot [W_j \neq k] + \beta \cdot \|\text{send}\|_p + \gamma \cdot \|\text{recv}\|_p + \delta \cdot \|\text{comp}\|_p
+-$$
++Where the loads for GPU $k$ are:
++$$ \text{send}_k = \sum_{j=1}^{B} [W_j \neq k] \cdot A_{j,k} $$
++$$ \text{recv}_k = \sum_{j=1}^{B} [W_j = k] \cdot \left( \sum_{i=1}^{N} A_{j,i} - A_{j,k} \right) $$
++$$ \text{comp}_k = \sum_{j=1}^{B} [W_j = k] \cdot \sum_{i=1}^{N} A_{j,i} $$
+ 
+-Where the loads for GPU $k$ are defined as:
+-
+-$$
+-\text{send}_k = \sum_{j=1}^{B} [W_j \neq k] \cdot A_{j,k}
+-$$
+-
+-$$
+-\text{recv}_k = \sum_{j=1}^{B} [W_j = k] \cdot \left( \sum_{i=1}^{N} A_{j,i} - A_{j,k} \right)
+-$$
+-
+-$$
+-\text{comp}_k = \sum_{j=1}^{B} [W_j = k] \cdot \sum_{i=1}^{N} A_{j,i}
+-$$
+-
+-The relaxed norm is defined as $\|\text{send}\|_p = \left( \sum_{k=1}^{N} \text{send}_k^p \right)^{1/p}$, and similarly for $\text{recv}$ and $\text{comp}$ [S1, unofficial].
++To avoid plateaus in local search, the max terms are replaced with $p$-norms in the relaxed objective:
++$$ \beta \cdot \|\text{send}\|_p + \gamma \cdot \|\text{recv}\|_p + \delta \cdot \|\text{comp}\|_p $$
++where $\|\text{send}\|_p = \left( \sum_{k} \text{send}_k^p \right)^{1/p}$ [S1, unofficial].
+ 
+ **Parameters:**
+-*   $B$: Batch size of training images/patches. Typical value: 16–64 [S1, unofficial].
+-*   $N$: Number of GPUs [S1, unofficial].
+-*   $p$: Power for the $p$-norm in the relaxed objective. Not given in the sources.
+-*   $\alpha, \beta, \gamma, \delta$: Configurable coefficients trading off communication volume, send imbalance, receive imbalance, and compute imbalance [S1, unofficial].
++- $B$: Batch size of training images. Typical value: 16–64 [S1, unofficial].
++- $N$: Number of GPUs.
++- $p$: Power for the $p$-norm relaxation. Not given in the sources.
++- $\alpha, \beta, \gamma, \delta$: Configurable coefficients. $\alpha$ weights communication, $\beta$ send imbalance, $\gamma$ receive imbalance, $\delta$ compute imbalance [S1, unofficial].
++- $p_{grid}$: Grid subdivision factor. Each $H \times W$ image is divided into $p_{grid}^2$ patches. Typical $p_{grid}$: 2–8 [S1, unofficial].
+ 
+ **Pseudocode:**
+-
+ ```python
+-def online_image_rendering_placement(batch_patches, num_gpus, gaussian_points_per_gpu, alpha, beta, gamma, delta, p_norm=2, time_budget=1.0):
++def online_image_rendering_placement(batch_patches, point_clouds, num_gpus, alpha, beta, gamma, delta, p_norm=2, time_budget=1.0):
+     """
+     batch_patches: List of B image patches.
+-    num_gpus: N, total number of GPUs.
+-    gaussian_points_per_gpu: Dict mapping gpu_id -> list of 3D Gaussian primitives.
+-    alpha, beta, gamma, delta: Objective coefficients.
+-    p_norm: Power for relaxed objective norms.
+-    time_budget: Max seconds for local search.
+-    Returns: W, list of GPU assignments for each patch.
++    point_clouds: List of N point clouds, one per GPU.
++    num_gpus: N.
++    Returns: W, list of GPU IDs for each patch.
+     """
+     B = len(batch_patches)
+-    N = num_gpus
+     
+-    # Step 1: Frustum Culling and Matrix Construction
+-    # A[j, k] = number of points needed from GPU k to render patch j
+-    A = [[0] * N for _ in range(B)]
++    # Step 1 & 2: Frustum Culling and Access Matrix Construction
++    # Each GPU k determines which points from its local cloud are needed for each patch
++    # A[j, k] = number of points from GPU k needed for patch j
++    A = zeros((B, num_gpus))
++    for k in range(num_gpus):
++        for j in range(B):
++            # Perform frustum culling for patch j against point_clouds[k]
++            visible_points = frustum_cull(batch_patches[j], point_clouds[k])
++            A[j, k] = len(visible_points)
++            
++    # Step 3: Linear Sum Assignment for initial placement
++    # Minimize total communication: sum over j of sum over k!=W[j] of A[j,k]
++    # Constraint: Each GPU gets exactly B/N patches
++    # This is a standard LSA problem. We construct a cost matrix C where C[j, k] = A[j, k]
++    # But we want to minimize communication, which is sum_{k != W[j]} A[j,k].
++    # Note: sum_{k != W[j]} A[j,k] = (sum_{all k} A[j,k]) - A[j, W[j]]
++    # Minimizing sum_{j} (Total_A[j] - A[j, W[j]]) is equivalent to Maximizing sum_{j} A[j, W[j]]
++    # So we maximize the diagonal elements in the assignment.
+     
+-    for j, patch in enumerate(batch_patches):
+-        for k in range(N):
+-            # Perform frustum culling for patch j against points on GPU k
+-            # [G] Implementation detail: project 3D Gaussians to 2D screen space 
+-            # and count those intersecting the patch bounding box.
+-            points_on_gpu_k = gaussian_points_per_gpu[k]
+-            A[j][k] = count_intersecting_gaussians(patch, points_on_gpu_k)
+-            
+-    # Step 2: Linear Sum Assignment (LSA) for initial placement
+-    # Minimize total communication: sum(A[j, k] for all j,k where W[j] != k)
+-    # This is equivalent to maximizing sum(A[j, W[j]])
+-    # Using Hungarian algorithm for O(B^3) complexity
+-    # [G] Construct cost matrix C where C[j, k] = -A[j, k]
+-    cost_matrix = [[-A[j][k] for k in range(N)] for j in range(B)]
++    # Construct cost matrix for LSA (maximization problem converted to minimization)
++    # Cost[j, k] = -A[j, k]
++    cost_matrix = -A
+     
+-    # [G] The Hungarian method typically requires a square matrix. 
+-    # If B != N, pad with zeros or handle rectangular assignment.
+-    # Assuming B <= N for standard LSA formulation in this context.
+-    # If B > N, the constraint W_j = k = B/N implies B must be divisible by N.
+-    # The source implies B/N is an integer.
++    # Solve LSA using Hungarian algorithm
++    # Returns row_indices, col_indices where col_indices[j] is the GPU assigned to patch j
++    row_indices, col_indices = hungarian_algorithm(cost_matrix)
++    W_init = col_indices
+     
+-    assignment = hungarian_algorithm(cost_matrix)
+-    W = assignment # W[j] is the GPU assigned to patch j
+-    
+-    # Step 3: Local Search for Load Balancing
++    # Step 4: Local Search Refinement
++    W = W_init.copy()
+     start_time = time.time()
+     
+-    # Define objective function
+-    def compute_objective(W_current):
+-        send = [0] * N
+-        recv = [0] * N
+-        comp = [0] * N
+-        
+-        for j in range(B):
+-            gpu = W_current[j]
+-            total_points_for_patch = sum(A[j])
+-            
+-            for k in range(N):
+-                if gpu != k:
+-                    send[k] += A[j][k]
+-                else:
+-                    recv[k] += (total_points_for_patch - A[j][k])
+-                    comp[k] += total_points_for_patch
+-                    
+-        # Relaxed objective
+-        send_norm = (sum(s**p_norm for s in send))**(1/p_norm)
+-        recv_norm = (sum(r**p_norm for r in recv))**(1/p_norm)
+-        comp_norm = (sum(c**p_norm for c in comp))**(1/p_norm)
+-        
+-        return alpha * sum(A[j][W_current[j]] for j in range(B)) + \
+-               beta * send_norm + \
+-               gamma * recv_norm + \
+-               delta * comp_norm
+-
+-    current_obj = compute_objective(W)
+-    
+-    # Greedy steepest-ascent local search
+-    improved = True
+-    while improved and (time.time() - start_time) < time_budget:
++    while time.time() - start_time < time_budget:
+         improved = False
+-        best_swap_obj = current_obj
+-        
+-        # Try all pairs of patches
++        # Try swapping assignments of two patches
+         for i in range(B):
+             for j in range(i + 1, B):
+-                # Swap assignments
++                # Calculate current objective
++                current_obj = compute_relaxed_objective(W, A, num_gpus, beta, gamma, delta, p_norm)
++                
++                # Try swap
+                 W[i], W[j] = W[j], W[i]
++                new_obj = compute_relaxed_objective(W, A, num_gpus, beta, gamma, delta, p_norm)
+                 
+-                new_obj = compute_objective(W)
+-                
+-                # We want to minimize the objective. 
+-                # If new_obj < current_obj, we keep the swap.
+                 if new_obj < current_obj:
+-                    current_obj = new_obj
+                     improved = True
+-                    # Do not revert, keep the swap
++                    # Keep the swap
+                 else:
+                     # Revert swap
+                     W[i], W[j] = W[j], W[i]
+                     
++        if not improved:
++            break
++            
+     return W
+ 
+-def hungarian_algorithm(cost_matrix):
+-    """
+-    Solves the linear sum assignment problem.
+-    Returns an array assignment where assignment[j] is the column index for row j.
+-    """
+-    # [G] Standard implementation of the Hungarian algorithm (Munkres algorithm).
+-    # Returns optimal assignment minimizing sum of costs.
+-    pass
++def compute_relaxed_objective(W, A, num_gpus, beta, gamma, delta, p_norm):
++    B = len(W)
++    send = zeros(num_gpus)
++    recv = zeros(num_gpus)
++    comp = zeros(num_gpus)
++    
++    for k in range(num_gpus):
++        for j in range(B):
++            if W[j] != k:
++                send[k] += A[j, k]
++            if W[j] == k:
++                total_points_for_patch = sum(A[j, :])
++                recv[k] += (total_points_for_patch - A[j, k])
++                comp[k] += total_points_for_patch
++                
++    # Compute p-norms
++    send_norm = (sum(s**p_norm for s in send))**(1/p_norm)
++    recv_norm = (sum(r**p_norm for r in recv))**(1/p_norm)
++    comp_norm = (sum(c**p_norm for c in comp))**(1/p_norm)
++    
++    return beta * send_norm + gamma * recv_norm + delta * comp_norm
+ ```
+ 
++**Edge Cases and Pitfalls:**
++- **ILP Solver Performance:** Standard ILP solvers like Gurobi are too slow and unpredictable for online optimization within a training iteration [S1, unofficial]. The heuristic LSA+local search approach is necessary.
++- **Granularity:** Using whole images for placement severely limits scalability when the number of GPUs is large, as the batch size $B$ is small (16–64). Patching allows finer-grained assignment [S1, unofficial].
++- **Intra-node Communication:** For GPUs within the same node, communication bandwidth is high. Setting $\alpha=0$ for intra-node assignment de-prioritizes communication volume, focusing on load balancing [S1, unofficial].
++
+ ## Operating characteristics
+-*   **Time Complexity:** The Linear Sum Assignment step has a time complexity of $O(B^3)$ using the Hungarian method [S1, unofficial]. The local search step's complexity depends on the number of swaps and the cost of recomputing loads, but is bounded by the time budget [S1, unofficial].
+-*   **Memory Complexity:** Requires storing the access pattern matrix $A$ of size $B \times N$ and the Gaussian primitives on each GPU [S1, unofficial].
+-*   **Strengths:** Adapts to the random batch selection in training, reducing communication overhead compared to static partitioning. Fine-grained patch placement allows better load balancing and co-location of rendering with data [S1, unofficial].
+-*   **Limitations:** Requires communication of frustum culling results at every iteration. ILP solvers like Gurobi are too slow for online use, necessitating the heuristic approach [S1, unofficial].
+-*   **When to use:** Large-scale distributed training of 3D Gaussian Splatting where communication bandwidth is a bottleneck and batch sizes are small (16–64) [S1, unofficial].
++- **Time Complexity:** The LSA step using the Hungarian method has a time complexity of $O(B^3)$ [S1, unofficial]. The local search step's complexity depends on the number of swaps performed and the time budget, but is generally kept small to fit within the training iteration time.
++- **Memory Complexity:** Requires storing the access pattern matrix $A$ of size $B \times N$ and the placement vector $W$ of size $B$. This is negligible compared to the point cloud data.
++- **Strengths:** Reduces inter-node communication by co-locating rendering with data access. Balances computational load across GPUs. Works online, adapting to the random batch selection in each training step.
++- **Limitations:** The heuristic may not find the global optimum. The local search requires a time budget, which adds latency to each training iteration if not carefully tuned.
++- **When to Use:** Large-scale distributed training of 3D Gaussian Splatting with many GPUs and limited inter-node bandwidth.
++- **When Not to Use:** Small-scale setups with few GPUs where communication overhead is minimal, or when the overhead of the placement algorithm exceeds the communication savings.
+ 
+ ## Background
+-Online Image Rendering Placement is part of the Gaian system, which scales point-based differentiable rendering for large-scale reconstruction. It was introduced to address the inefficiencies of static graph partitioning when applied to the dynamic nature of training batches in differentiable rendering [S1, unofficial].
++Online Image Rendering Placement was introduced in the Gaian system for scaling point-based differentiable rendering for large-scale reconstruction [S1, unofficial]. It addresses the limitations of offline graph partitioning, which is static and does not adapt to the dynamic nature of training batches. The method leverages Linear Sum Assignment and local search to provide a fast, effective solution for dynamic resource allocation in distributed rendering.
+ 
+ ## Sources

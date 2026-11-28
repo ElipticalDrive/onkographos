@@ -1,0 +1,86 @@
+# Context-Aware Perception Head
+## Overview
+The Context-Aware Perception Head is a decoder module that takes rendered semantic features and outputs semantic labels for novel views [S1]. It decomposes high-level and low-level features to improve semantic segmentation performance in neural radiance fields [S1]. It differs from sibling methods like [Feature Extraction Network](8151-feature-extraction-network.md) by focusing on the aggregation of semantic features from rendered rays rather than raw image extraction, and from [Attention-based Multi-View Density Prediction](10674-attention-based-multi-view-density-prediction.md) by using a U-Net-like decoder structure for label prediction rather than density estimation [S1].
+
+## How it works
+**Inputs and Outputs:**
+* Input: Rendered semantic features $\boldsymbol{S}^{2D}_{sem}$, which are image-level features stacked from sampled points along rays [S1].
+* Output: Semantic labels $Y_{sem}$ for the novel view [S1].
+
+**Data Structures:**
+The input feature map $\boldsymbol{S}^{2D}_{sem}$ is split into 4 parts: $[s^{2D}_{sem,1}, s^{2D}_{sem,2}, s^{2D}_{sem,3}, s^{2D}_{sem,4}]$ to decompose high-level and low-level features [S1].
+
+**Algorithm:**
+The head adopts the decoder structure of a U-Net [S1]. For each layer $i$ (where $i=1, 2, 3, 4$), the processing is defined as:
+
+$$ s'_i = \text{ReLU} \cdot \text{Conv}(s^{2D}_{sem,i} + \text{Up-Conv}(s'_{i-1})) $$
+
+Where:
+* $s'_{i-1}$ is the upsampled output of the $(i-1)$-th layer [S1]. For $i=1$, $s'_0$ is the initial input feature map [G].
+* $\text{Up-Conv}$ is a $2 \times 2$ convolution used for upsampling [S1].
+* $\text{Conv}$ consists of two $3 \times 3$ convolutions followed by a ReLU activation [S1].
+* The operation concatenates the $i$-th feature map $s^{2D}_{sem,i}$ with the upsampled previous layer's output [S1]. The source formula uses the $+$ symbol to denote this concatenation operation [S1].
+
+**Pseudocode:**
+> **Unverified code.** The code below did not pass a test run against a reference implementation, or no test fits it, so it may contain errors.
+
+```python
+def context_aware_perception_head(rendered_semantic_features):
+    # Split input into 4 parts along the channel dimension
+    parts = [rendered_semantic_features[:, i::4] for i in range(4)]
+    prev_output = rendered_semantic_features
+    for i in range(4):
+        upsampled_prev = conv2d(prev_output, kernel_size=2, stride=2, padding=0)
+        combined = concatenate_along_channels(parts[i], upsampled_prev)
+        x = conv2d(combined, kernel_size=3, stride=1, padding=1)
+        x = conv2d(x, kernel_size=3, stride=1, padding=1)
+        current_output = relu(x)
+        prev_output = current_output
+    semantic_labels = conv2d(prev_output, kernel_size=1, stride=1, padding=0)
+    return semantic_labels
+
+def conv2d(x, kernel_size, stride, padding):
+    # Standard 2D convolution operation
+    return x  # Standard convolution implementation [G]
+
+def concatenate_along_channels(a, b):
+    # Standard concatenation along the channel dimension
+    return a  # Standard concatenation implementation [G]
+
+def relu(x):
+    # Standard ReLU activation
+    return max(x, 0)
+```
+
+**Parameters:**
+* Number of split parts: 4 [S1].
+* Up-Conv kernel size: $2 \times 2$ [S1].
+* Conv kernel size: $3 \times 3$ (two layers) [S1].
+* Activation: ReLU [S1].
+
+**Edge Cases and Pitfalls:**
+* The source formula uses $+$ to denote concatenation, which affects channel dimensions; implementers must concatenate rather than add tensors [S1].
+* The initialization of $s'_0$ is not explicitly defined in the source; it is treated as the initial input feature map [G].
+
+## Subtopics
+
+### Context Fuser
+A module that aggregates contexts from previous $Lc$ levels to assist in encoding/decoding embeddings [S2].
+* Definition: Aggregates contexts from previous $Lc$ levels [S2].
+* Layout: For 3D embeddings, it is a 3-layer MLP with input channel $F \times Lc + 1$, hidden channel 32, output channel $F$, and LeakyReLU activation, where the $+1$ input is for $fG$ [S2]. For 2D embeddings, it is a 1-layer linear module with input channel $F \times Lc + 1 + F$ and output channel $F$, where the $+F$ input is for dimension-wise context [S2].
+* Parameter: Storage optimization: different levels of the same $Lc$ share one Context Fuser instance to save storage space [S2].
+* When to choose: When compressing neural radiance field representations and managing context aggregation for embeddings [S2].
+
+## Operating characteristics
+* Time Complexity: Not given in the sources [S1, S2].
+* Memory Complexity: Not given in the sources [S1, S2].
+* Performance: The method is part of GP-NeRF, which aims for context-aware 3D scene understanding [S1].
+* Strengths: Decomposes high-level and low-level features for better semantic verification [S1].
+* Limitations: Relies on rendered semantic features which depend on the underlying NeRF rendering quality [S1].
+
+## Background
+The Context-Aware Perception Head was introduced in GP-NeRF (Generalized Perception NeRF) [S1]. It builds on the idea of using neural radiance fields for semantic scene understanding by predicting semantic labels from rendered features [S1]. The Context Fuser variant aggregates contexts from previous levels to assist in embedding encoding/decoding [S2].
+
+## Sources
+[S1] GP-NeRF: Generalized Perception NeRF for Context-Aware 3D Scene Understanding, https://doi.org/10.1109/cvpr52733.2024.02051, fetched 2026-10-26
+[S2] How Far can we Compress Instant-NGP-Based NeRF?, https://doi.org/10.1109/cvpr52733.2024.01921, fetched 2026-10-26

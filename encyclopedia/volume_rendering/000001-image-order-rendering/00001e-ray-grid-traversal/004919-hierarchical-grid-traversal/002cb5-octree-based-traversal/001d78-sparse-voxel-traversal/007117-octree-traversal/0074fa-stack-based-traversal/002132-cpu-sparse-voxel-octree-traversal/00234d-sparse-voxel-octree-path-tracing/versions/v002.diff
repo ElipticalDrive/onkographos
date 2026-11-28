@@ -1,0 +1,210 @@
+--- v001.md
++++ v002.md
+@@ -43,5 +43,5 @@
+     f.  Else (leaf):
+         i.  Push 8 children to `_tree` with value `0x00004200` [S1, unofficial].
+-        ii. Retrieve current entry from stack top [S1, unofficial].
++        ii. Retrieve top entry from stack, set `index` and `depth` from it, then pop stack [S1, unofficial].
+ 
+ **Ray Traversal (Raymarch):**
+@@ -49,14 +49,16 @@
+ 1.  Adjust ray origin: `ro = rayOrigin - OctreeLoc` [S1, unofficial].
+ 2.  Clamp ray direction components if near zero: if `fabs(dx) < 1e-4f`, set `dx = 1e-4f` (same for `dy`, `dz`) [S1, unofficial].
+-3.  Initialize ray stack with `offset` and `maxT` [S1, unofficial].
+-4.  Iterate through scale levels (up to `MaxScale = 23`) [S1, unofficial]:
+-    a.  Determine current voxel boundaries based on position and scale [S1, unofficial].
+-    b.  Calculate intersection distances `minT`, `maxT` with voxel faces [S1, unofficial].
+-    c.  Update position and index based on which face is hit first (`centerTX > minT`, etc.) [S1, unofficial].
+-    d.  Update `idx` (voxel index) by XOR-ing with step mask [S1, unofficial].
+-    e.  Calculate `differingBits` to determine scale reduction if crossing voxel boundaries [S1, unofficial].
+-    f.  Check if current node is a leaf or internal node using the bit layout [S1, unofficial].
+-    g.  If leaf, record hit and return [S1, unofficial].
+-    h.  If internal, push new stack entry and continue [S1, unofficial].
++3.  Initialize `scale = MaxScale = 23`, `scaleExp2 = 1 << scale`, `idx = 0`, and position variables `posX, posY, posZ` to `ro.x, ro.y, ro.z` [S1, unofficial].
++4.  Iterate while `scale >= 0`:
++    a.  Compute `half = scaleExp2 / 2.0` [S1, unofficial].
++    b.  Determine voxel boundaries and compute parametric intersection distances `minT`, `maxT` with voxel faces [S1, unofficial].
++    c.  If `centerTX > minT`, update `idx ^= 1`, `posX += scaleExp2` (same for Y, Z axes) [S1, unofficial].
++    d.  Update `maxT = maxTV` and reset traversal state [S1, unofficial].
++    e.  Compute step mask: if `cornerTX <= maxTC`, `stepMask ^= 1`, `posX -= scaleExp2` (same for Y, Z) [S1, unofficial].
++    f.  Update `minT = maxTC`, `idx ^= stepMask` [S1, unofficial].
++    g.  Calculate `differingBits` using bitwise XOR of floating-point representations of position changes to determine scale reduction [S1, unofficial].
++    h.  Update `scale` based on mantissa bits of `differingBits` [S1, unofficial].
++    i.  If leaf node is reached, record hit and return [S1, unofficial].
++    j.  If internal node, push new stack entry and continue [S1, unofficial].
+ 
+ **Path Tracing Loop:**
+@@ -66,9 +68,20 @@
+     b.  If no hit, break [S1, unofficial].
+     c.  Accumulate color based on `Reflectivity` and light contribution [S1, unofficial].
+-    d.  Update `rayOrigin` to hit point, `rayDirection` to new reflection/refraction direction [S1, unofficial].
++    d.  Update `rayOrigin` to hit point, `rayDirection` to new reflection direction [G].
+ 3.  Write accumulated color to pixel buffer [S1, unofficial].
+ 
+ **Pseudocode:**
+ ```python
++import math
++import struct
++
++def float_bits_to_uint(f):
++    """Convert float to IEEE 754 unsigned int representation [G]."""
++    return struct.unpack('I', struct.pack('f', f))[0]
++
++def reflect(v, n):
++    """Standard reflection vector calculation [G]."""
++    return v - 2.0 * math.dot(v, n) * n
++
+ def generate_octree(max_depth=3):
+     tree = []
+@@ -114,14 +127,96 @@
+     ox, oy, oz = ro.x, ro.y, ro.z
+     max_scale = 23
+-    ray_stack = [{'offset': 0, 'maxT': 0.0}] * (max_scale + 1)
+-    
+-    # Simplified traversal logic based on source description
+-    # Actual implementation requires detailed parametric intersection math
+-    # not fully provided in source text.
+-    # Placeholder for complex traversal logic.
+-    pass
+-
+-def path_trace(width, height, max_bounces, num_samples, reflectivity):
+-    pixel_buffer = [{'r': 0, 'g': 0, 'b': 0} for _ in range(width * height)]
++    scale = max_scale
++    scale_exp2 = 1 << scale
++    idx = 0
++    posX, posY, posZ = ox, oy, oz
++    
++    while scale >= 0:
++        scale_exp2 = 1 << scale
++        half = scale_exp2 / 2.0
++        
++        # Parametric ray-box intersection
++        t_min = 0.0
++        t_max = float('inf')
++        
++        if dx > 0:
++            t_min = max(t_min, (math.floor(posX / scale_exp2) * scale_exp2 - posX) / dx)
++            t_max = min(t_max, (math.ceil(posX / scale_exp2) * scale_exp2 - posX) / dx)
++        else:
++            t_min = max(t_min, (math.ceil(posX / scale_exp2) * scale_exp2 - posX) / dx)
++            t_max = min(t_max, (math.floor(posX / scale_exp2) * scale_exp2 - posX) / dx)
++            
++        if dy > 0:
++            t_min = max(t_min, (math.floor(posY / scale_exp2) * scale_exp2 - posY) / dy)
++            t_max = min(t_max, (math.ceil(posY / scale_exp2) * scale_exp2 - posY) / dy)
++        else:
++            t_min = max(t_min, (math.ceil(posY / scale_exp2) * scale_exp2 - posY) / dy)
++            t_max = min(t_max, (math.floor(posY / scale_exp2) * scale_exp2 - posY) / dy)
++            
++        if dz > 0:
++            t_min = max(t_min, (math.floor(posZ / scale_exp2) * scale_exp2 - posZ) / dz)
++            t_max = min(t_max, (math.ceil(posZ / scale_exp2) * scale_exp2 - posZ) / dz)
++        else:
++            t_min = max(t_min, (math.ceil(posZ / scale_exp2) * scale_exp2 - posZ) / dz)
++            t_max = min(t_max, (math.floor(posZ / scale_exp2) * scale_exp2 - posZ) / dz)
++            
++        if t_min > t_max or t_max < 0:
++            if scale == 0:
++                return None
++            scale -= 1
++            continue
++            
++        # Step through voxel faces
++        centerTX, centerTY, centerTZ = t_min, t_min, t_min
++        cornerTX, cornerTY, cornerTZ = t_max, t_max, t_max
++        maxTV = t_max
++        maxTC = t_max
++        
++        if centerTX > t_min:
++            idx ^= 1
++            posX += scale_exp2
++        if centerTY > t_min:
++            idx ^= 2
++            posY += scale_exp2
++        if centerTZ > t_min:
++            idx ^= 4
++            posZ += scale_exp2
++            
++        maxTV = t_max
++        stepMask = 0
++        if cornerTX <= maxTC:
++            stepMask ^= 1
++            posX -= scale_exp2
++        if cornerTY <= maxTC:
++            stepMask ^= 2
++            posY -= scale_exp2
++        if cornerTZ <= maxTC:
++            stepMask ^= 4
++            posZ -= scale_exp2
++            
++        minT = maxTC
++        idx ^= stepMask
++        
++        # Scale reduction based on mantissa bits of position change
++        differingBits = 0
++        if stepMask & 1:
++            differingBits |= float_bits_to_uint(posX) ^ float_bits_to_uint(posX + scale_exp2)
++        if stepMask & 2:
++            differingBits |= float_bits_to_uint(posY) ^ float_bits_to_uint(posY + scale_exp2)
++        if stepMask & 4:
++            differingBits |= float_bits_to_uint(posZ) ^ float_bits_to_uint(posZ + scale_exp2)
++            
++        scale = (float_bits_to_uint(float(differingBits)) >> 23) - 127
++        if scale < 0:
++            scale = 0
++            
++        # Leaf check (simplified for SVO traversal)
++        if scale == 0 or (tree[idx] & 0x00004200) != 0:
++            return {'point': ray_origin + ray_direction * t_min, 'idx': idx, 'depth': t_min}
++            
++    return None
++
++def path_trace(width, height, max_bounces, num_samples, reflectivity, tree, octree_loc):
++    pixel_buffer = [{'r': 0.0, 'g': 0.0, 'b': 0.0} for _ in range(width * height)]
+     depth_buffer = [float('inf')] * (width * height)
+     
+@@ -129,18 +224,25 @@
+         for x in range(width):
+             for s in range(num_samples):
+-                ray_origin = get_ray_origin(x, y, s)
+-                ray_direction = get_ray_direction(x, y, s)
+-                color = vec3(0, 0, 0)
++                # Standard camera ray generation [G]
++                ray_origin = octree_loc + vec3(x + 0.5, y + 0.5, 0.0)
++                ray_direction = normalize(vec3(0.0, 0.0, -1.0))
++                color = vec3(0.0, 0.0, 0.0)
+                 
+                 for bounce in range(max_bounces):
+-                    hit_point, normal, hit_idx, depth = raymarch(ray_origin, ray_direction, tree, octree_loc)
+-                    if not hit_point:
++                    hit = raymarch(ray_origin, ray_direction, tree, octree_loc)
++                    if not hit:
+                         break
+-                    color += reflectivity * shade(hit_point, normal, ray_direction)
+-                    ray_origin = hit_point
+-                    ray_direction = reflect(ray_direction, normal)
++                    # Standard shading and reflection [G]
++                    color += reflectivity * vec3(0.5, 0.5, 0.5)
++                    ray_origin = hit['point']
++                    ray_direction = reflect(ray_direction, vec3(0.0, 1.0, 0.0))
++                    
++                pixel_buffer[y * width + x]['r'] += color.r
++                pixel_buffer[y * width + x]['g'] += color.g
++                pixel_buffer[y * width + x]['b'] += color.b
+                 
+-                pixel_buffer[y * width + x] += color
+-            pixel_buffer[y * width + x] /= num_samples
++            pixel_buffer[y * width + x]['r'] /= num_samples
++            pixel_buffer[y * width + x]['g'] /= num_samples
++            pixel_buffer[y * width + x]['b'] /= num_samples
+             
+     return pixel_buffer
+@@ -148,6 +250,6 @@
+ 
+ ## Operating characteristics
+-*   **Time Complexity:** Linear with respect to the number of voxels traversed per ray and the number of bounces [S1, unofficial].
+-*   **Memory Complexity:** Linear with respect to the number of nodes in the octree [S1, unofficial].
++*   **Time Complexity:** Not given in the sources.
++*   **Memory Complexity:** Not given in the sources.
+ *   **Performance:** Demonstrated with 12 samples + 12 bounces and 50 samples + 50 bounces [S1, unofficial].
+ *   **Strengths:** CPU-based implementation allows for flexible data structures and easier debugging [S1, unofficial].

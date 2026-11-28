@@ -1,0 +1,157 @@
+# Spherical Binoctree
+
+Also called: sphoxel
+
+## Overview
+The Spherical Binoctree is a spatial partitioning structure that represents 3D data within a spherical volume bound by near and far spheres [S1]. It prevents radial sphoxel elongation by using binary subdivision in the radial direction while subdividing polar and azimuthal directions, making it suitable for omnidirectional volume rendering [S1].
+
+## How it works
+**Inputs:** A spherical volume defined by near and far radii; a minimum solid angle threshold $\alpha_{min}$ for leaf nodes; camera poses and depth estimates for initialization [S1].
+**Outputs:** A tree structure where each node (sphoxel) stores its boundary coordinates and index; a list of intersecting sphoxels for a given ray [S1].
+
+**Data Structures:**
+Each sphoxel stores its boundary in spherical coordinates as a tuple: $[r_{min}, r_{max}, \theta_{min}, \theta_{max}, \phi_{min}, \phi_{max}]$ and its unique index [S1].
+
+**Algorithm Steps:**
+
+1.  **Initialization:** Estimate depth for the initial tree construction using a trained model [S1]. Estimate camera poses using Structure from Motion (e.g., OpenVSLAM) [S1]. Extract a dense 3D point cloud using spherical rectification [S1].
+2.  **Tree Construction:** Subdivide the spherical space recursively until all sphoxels reach a minimum solid angle $\alpha_{min}$ [S1].
+3.  **Radial Split:** Use binary subdivision (split into two) in the radial direction to prevent sphoxel elongation as $r$ increases [S1].
+4.  **Angular Split:** Subdivide the polar ($\theta$) and azimuthal ($\phi$) directions [S1].
+5.  **Pole Handling:** If an angular subdivision spans a pole, the binoctree forms a spherical sector (cone and spherical cap) containing the polar axis; divide this sector around the polar axis and approximate the segments as triangle-based frusta [S1].
+6.  **Ray Intersection (Sphoxel Test):** Approximate each sphoxel as a trapezoidal prism (square-based frustum) sharing the same vertices as the curved surfaces [S1]. Perform ray-triangle intersection tests for all triangles comprising the cuboid faces of the approximation [S1]. A ray intersects a sphoxel if intersections are detected with a pair of triangles—one front-facing, one back-facing—that form the faces [S1].
+7.  **Surface Existence Test:** Define the sphoxel center as the mean position of its eight vertices [S1]. Define the sphoxel radius $R$ as the distance from the center to the farthest vertex [S1]. Compute the absolute Signed Distance Function (SDF) value $\|d\|$ at the sphoxel center; a surface exists in the sphoxel if $\|d\| < R$ [S1].
+8.  **Traversal:** Traverse the binoctree in breadth-first order to fetch intersecting sphoxels $V$, relieving bottlenecks caused by unnecessary intersection computations when the number of marked voxels exceeds 10,000 [S1].
+
+**Pseudocode:**
+
+> **Unverified code.** The code below did not pass a test run against a reference implementation, or no test fits it, so it may contain errors.
+
+```python
+import math
+from collections import deque
+
+class Node:
+    def __init__(self, r_min, r_max, theta_min, theta_max, phi_min, phi_max, index=0):
+        self.r_min = r_min
+        self.r_max = r_max
+        self.theta_min = theta_min
+        self.theta_max = theta_max
+        self.phi_min = phi_min
+        self.phi_max = phi_max
+        self.index = index
+        self.children = []
+
+    def solid_angle(self):
+        # Standard spherical sector solid angle approximation [G]
+        return (math.cos(self.theta_min) - math.cos(self.theta_max)) * (self.phi_max - self.phi_min)
+
+    def get_vertices(self):
+        verts = []
+        for r in [self.r_min, self.r_max]:
+            for theta in [self.theta_min, self.theta_max]:
+                for phi in [self.phi_min, self.phi_max]:
+                    verts.append((
+                        r * math.sin(theta) * math.cos(phi),
+                        r * math.sin(theta) * math.sin(phi),
+                        r * math.cos(theta)
+                    ))
+        return verts
+
+def mean(points):
+    return tuple(sum(p[i] for p in points) / len(points) for i in range(3))
+
+def ray_triangle_intersect(origin, direction, v0, v1, v2):
+    # Möller–Trumbore intersection algorithm [G]
+    EPSILON = 1e-8
+    edge1 = (v1[0]-v0[0], v1[1]-v0[1], v1[2]-v0[2])
+    edge2 = (v2[0]-v0[0], v2[1]-v0[1], v2[2]-v0[2])
+    h = (direction[1]*edge2[2]-direction[2]*edge2[1],
+         direction[2]*edge2[0]-direction[0]*edge2[2],
+         direction[0]*edge2[1]-direction[1]*edge2[0])
+    a = -(edge1[0]*h[0] + edge1[1]*h[1] + edge1[2]*h[2])
+    f = 1.0 / (a + EPSILON)
+    s = (origin[0]-v0[0], origin[1]-v0[1], origin[2]-v0[2])
+    u = f * (s[0]*h[0] + s[1]*h[1] + s[2]*h[2])
+    if u < 0.0 or u > 1.0: return False
+    q = (s[1]*edge2[2]-s[2]*edge2[1],
+         s[2]*edge2[0]-s[0]*edge2[2],
+         s[0]*edge2[1]-s[1]*edge2[0])
+    v = f * (direction[0]*q[0] + direction[1]*q[1] + direction[2]*q[2])
+    if v < 0.0 or u + v > 1.0: return False
+    t = f * (edge1[0]*q[0] + edge1[1]*q[1] + edge1[2]*q[2])
+    return t > EPSILON
+
+def build_spherical_binoctree(point_cloud, near_radius, far_radius, alpha_min):
+    root = Node(near_radius, far_radius, 0, math.pi, 0, 2*math.pi)
+    queue = deque([root])
+    while queue:
+        node = queue.popleft()
+        if node.solid_angle() < alpha_min:
+            continue
+        r_mid = (node.r_min + node.r_max) / 2.0
+        theta_mid = (node.theta_min + node.theta_max) / 2.0
+        phi_mid = (node.phi_min + node.phi_max) / 2.0
+        node.children = []
+        for r in [node.r_min, r_mid]:
+            for t in [node.theta_min, theta_mid]:
+                for p in [node.phi_min, phi_mid]:
+                    node.children.append(Node(
+                        r, r_mid if r == node.r_min else r_mid,
+                        t, theta_mid if t == node.theta_min else theta_mid,
+                        p, phi_mid if p == node.phi_min else phi_mid
+                    ))
+        # Source specifies binary radial subdivision and angular subdivision [S1].
+        # This implements a 2x2 angular split to yield 8 children total.
+        queue.extend(node.children)
+    return root
+
+def sphoxel_intersect(ray_origin, ray_direction, sphoxel):
+    vertices = sphoxel.get_vertices()
+    # Generate triangles from cuboid faces of the trapezoidal prism approximation [S1]
+    triangles = [
+        (vertices[0], vertices[1], vertices[4]), (vertices[1], vertices[5], vertices[4]),
+        (vertices[1], vertices[2], vertices[5]), (vertices[2], vertices[6], vertices[5]),
+        (vertices[2], vertices[3], vertices[6]), (vertices[3], vertices[7], vertices[6]),
+        (vertices[3], vertices[0], vertices[7]), (vertices[0], vertices[4], vertices[7]),
+        (vertices[0], vertices[2], vertices[1]), (vertices[0], vertices[3], vertices[2]),
+        (vertices[4], vertices[6], vertices[5]), (vertices[4], vertices[7], vertices[6])
+    ]
+    front_hits = False
+    back_hits = False
+    for tri in triangles:
+        if ray_triangle_intersect(ray_origin, ray_direction, *tri):
+            v0, v1, v2 = tri
+            normal = (
+                (v1[0]-v0[0])*(v2[1]-v0[1]) - (v1[1]-v0[1])*(v2[0]-v0[0]),
+                (v1[1]-v0[1])*(v2[2]-v0[2]) - (v1[2]-v0[2])*(v2[1]-v0[1]),
+                (v1[2]-v0[2])*(v2[0]-v0[0]) - (v1[0]-v0[0])*(v2[2]-v0[2])
+            )
+            dot = normal[0]*ray_direction[0] + normal[1]*ray_direction[1] + normal[2]*ray_direction[2]
+            if dot > 0: front_hits = True
+            else: back_hits = True
+    return front_hits and back_hits
+
+def sphoxel_surface_exists(sphoxel, sdf_value_at_center):
+    center = mean(sphoxel.get_vertices())
+    R = max(math.sqrt((c[0]-v[0])**2 + (c[1]-v[1])**2 + (c[2]-v[2])**2) for v in sphoxel.get_vertices())
+    return abs(sdf_value_at_center) < R
+```
+
+## Subtopics
+
+### Sphoxel Intersection and Surface Existence Test
+A novel intersection and surface existence test for sphoxels, replacing conventional Cartesian grid-based algorithms due to irregular sphoxel shapes [S1]. It approximates each sphoxel as a trapezoidal prism (square-based frustum) sharing the same vertices as the original curved surfaces [S1]. A ray intersects a sphoxel if intersections are detected with a pair of triangles—one front-facing, one back-facing—that form the faces [S1]. Surface existence is determined by comparing the absolute SDF value at the sphoxel center to the sphoxel radius $R$ (distance from center to farthest vertex); a surface exists if $\|d\| < R$ [S1].
+
+## Operating characteristics
+**Time Complexity:** Breadth-first traversal is used to relieve bottlenecks when the number of marked voxels exceeds 10,000 [S1].
+**Memory Complexity:** Stores boundary coordinates $[r_{min}, r_{max}, \theta_{min}, \theta_{max}, \phi_{min}, \phi_{max}]$ and index for each sphoxel [S1].
+**Strengths:** Prevents sphoxel elongation in radial direction; efficient for large spherical spaces; handles omnidirectional data well [S1].
+**Limitations:** Irregular shapes require complex intersection tests (triangle-based) instead of simple AABB checks; pole handling requires special approximation [S1].
+**When to use:** Omnidirectional volume rendering, spherical scene reconstruction [S1].
+
+## Background
+The Spherical Binoctree was introduced in the context of OmniSDF, a method for scene reconstruction using omnidirectional signed distance functions [S1]. It builds on the concept of binoctrees but adapts them for spherical spaces [S1]. The method uses structure from motion (OpenVSLAM) for camera pose estimation and spherical rectification for point cloud extraction [S1].
+
+## Sources
+[S1] OmniSDF: Scene Reconstruction Using Omnidirectional Signed Distance Functions and Adaptive Binoctrees, https://doi.org/10.1109/cvpr52733.2024.01912, fetched 2026-10-26

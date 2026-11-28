@@ -1,0 +1,72 @@
+# Similarity-based Classification
+Similarity-based classification methods determine optical properties by measuring the distance or agreement between a sample's feature vector and a reference set, rather than relying on absolute scalar thresholds [G]. This family solves the problem of segmenting complex, high-dimensional, or semantically rich data where intensity alone is insufficient, by mapping spatial points to the "nearest" exemplar or by evaluating structural alignment [S1, unofficial][S2, unofficial]. Unlike basic intensity-based methods, these techniques leverage geometric, spectral, or learned latent relationships to define classification boundaries [S1, unofficial].
+
+## Shared principles
+All methods in this family evaluate a classification function $C(\mathbf{x})$ for each sample point $\mathbf{x}$ in the volume to produce optical properties [G].
+
+**Input Domain:**
+The input to the classification function is a feature vector $\mathbf{f}(\mathbf{x})$ associated with position $\mathbf{x}$ [G]. While basic methods use scalar intensity $v = f(\mathbf{x})$, this family extends the domain to include derived features such as gradient magnitude $\|\nabla f(\mathbf{x})\|$, curvature, shape descriptors, color components, or topological graph attributes [S1, unofficial][S2, unofficial][S3, unofficial].
+
+**Output Range:**
+The output is a set of optical properties, most commonly:
+*   **Opacity ($\alpha$):** A value in $[0, 1]$ representing the probability of absorption or the inverse of transparency. $\alpha=0$ is fully transparent; $\alpha=1$ is fully opaque [G].
+*   **Color ($C$):** A vector $(r, g, b)$ representing the emitted or reflected light color [S2, unofficial].
+*   **Weight:** In some emission-only models, a weight $w$ is assigned to modulate the contribution of samples during accumulation [G].
+
+**Classification Types:**
+1.  **Binary Classification:** Uses hard thresholds to include or exclude data [6229-binary-and-soft-classification.md]. Values below a threshold are assigned $\alpha=0$, and values above are assigned $\alpha=1$ (or a constant high value) [G].
+2.  **Soft Classification:** Uses smooth transitions (e.g., piecewise linear ramps, Gaussian bumps, or power functions) to assign intermediate opacity values [G].
+
+**Evaluation Order:**
+The timing of classification relative to sampling interpolation defines two main approaches [G]:
+*   **Pre-classification:** The transfer function is applied to scalar values at the grid points (voxels) before sampling. Colors and opacities are interpolated during ray casting. Pre-classification produces blurred images when the image resolution is higher than the volume resolution, but prevents color bleeding if color interpolation is done with opacity-weighted colors [G].
+*   **Post-classification:** Scalar values are interpolated from the volume texture during ray casting, and the transfer function is applied to these continuous sample values. Post-classification produces images with defined edges but is prone to aliasing because high-frequency details may be missed [G].
+
+**Implementation Structures:**
+Transfer functions are commonly implemented as piecewise linear functions defined by user-specified keypoints, lookup tables (LUTs) stored as 1D, 2D, or 3D textures for fast GPU sampling, or shader functions evaluated dynamically during ray casting [G].
+
+## Subtopics
+
+### [Range-Space Segmentation](13745-range-space-segmentation.md)
+Projects high-dimensional function samples into scalar fields based on distance to exemplar functions, preserving spatial layout unlike MDS. Choose when segmenting hyperspectral or time-varying data by functional similarity.
+
+### [Cosine Similarity](14953-cosine-similarity.md)
+Measures angular agreement between feature vectors, factoring out magnitude. Choose when semantic content depends on direction (e.g., gradients) rather than intensity scale.
+
+### [Spearman Correlation](14961-spearman-correlation.md)
+Evaluates monotonic agreement between feature dimensions by computing Pearson correlation on ranks. Choose when data exhibits non-linear but order-preserving relationships.
+
+### [Representational Similarity Analysis (RSA)](14970-representational-similarity-analysis-rsa.md)
+Evaluates the preservation of relational structure (manifold geometry) between latent spaces. Choose when verifying if a learned latent space captures the same representational organization as a reference.
+
+### [CNN-based Image Retrieval](15632-cnn-based-image-retrieval.md)
+Retrieves transfer functions by matching high-level spatial semantics from co-planar images. Choose when differentiating segments with similar intensities but distinct shapes or textures.
+
+### Discrete Classification via Voxel Similarity
+A discrete voxel classification technique for multidimensional signatures where users perform merge or bipartition operations on existing classes and define visual properties [S1, unofficial]. Preprocessing establishes an initial classification based on voxel similarity criteria, which are also respected during rapid bipartition operations [S1, unofficial]. Steps: 1. Preprocessing: Automatically establish initial classification respecting voxel similarity criteria. 2. User performs merge or bipartition operations on classes. 3. User defines visual properties for each class. 4. Bipartition operations are executed rapidly, respecting similarity criteria [S1, unofficial].
+
+### S4
+A self-supervised approach to spatiotemporal similarity learning using a Siamese neural network trained on a binary pretext task to predict spatial-temporal proximity, eliminating the need for labeled data [S2, unofficial]. Steps: 1. Train a Siamese neural network on a binary pretext task: predict if two spatiotemporal patches originate from nearby locations in space and time. 2. Use the resulting latent space for similarity queries. 3. Users supply example patches as a query; S4 ranks the rest of the ensemble by learned similarity [S2, unofficial].
+
+### Trajectory Arrows Clustering
+A clustering algorithm to select a representative subset of particle trajectories to display as arrows, based on similarity of pathlines over three time steps [S3, unofficial]. Steps: Select any pathline not already in a cluster to serve as the reference pathline. Examine all other pathlines not already in a cluster as candidates. If the similarity score between the reference pathline and the candidate pathline is less than a preset threshold, add the candidate to the cluster. After examining all candidates, output the reference pathline as the trajectory arrow for that cluster. Choose the next pathline not in a cluster and repeat the process. Filter out pathlines shorter than a preset threshold. Discard clusters that do not have a preset minimum number of pathlines [S3, unofficial]. Similarity Metric: The sum of squared distances between particle positions at each time step in the three-time-step window [S3, unofficial]. Parameters: Time Window: The number of time steps considered for trajectory similarity. Default: 3. Similarity Threshold: Determines cluster size. It is determined separately for each dataset based on distances between particles and can be changed interactively [S3, unofficial].
+
+### Pearson Correlation
+A linear correlation coefficient across feature dimensions of latent vectors, probing per-dimension structure agreement. It measures stricter equivalence than cosine similarity by detecting poorly coordinated feature dimensions that high cosine similarity might miss [S4, unofficial]. Formula: $\rho_P = \frac{\sum_k (z_{render,k} - \bar{z}_{render})(z_{target,k} - \bar{z}_{target})}{\sqrt{\sum_k (z_{render,k} - \bar{z}_{render})^2} \sqrt{\sum_k (z_{target,k} - \bar{z}_{target})^2}}$ where $z_{render,k}$ and $z_{target,k}$ are the $k$-th feature dimensions of the rendered and target latent vectors, and $\bar{z}$ denotes their mean [S4, unofficial]. Parameter: $z_{render}, z_{target}$: Latent vectors in $\mathbb{R}^d$ [S4, unofficial]. Comparison: Unlike cosine similarity which measures aggregate direction, Pearson correlation measures the coordination of individual feature dimensions. A gap between Pearson ($\rho_P$) and Spearman ($\rho_S$) indicates if mismatch is driven by outlier dimensions (large gap) or systematic non-linear warp (small gap) [S4, unofficial].
+
+### CLIP-based Open-Vocabulary Querying
+A method to identify target objects in a scene by computing cosine similarity between a user query embedding and pre-computed object embeddings [S5]. Steps: Generate a CLIP embedding $E_{query}$ for the user's natural language query. Identify objects corresponding to the highest similarity scores as the target of the user's query [S5]. Formula: $S(E_{query}, E_{object_i}) = \frac{E_{query} \cdot E_{object_i}}{\|E_{query}\| \cdot \|E_{object_i}\|}$, where $S$ is the cosine similarity, $E_{query}$ is the query embedding, and $E_{object_i}$ is the embedding of the $i$-th object [S5].
+
+### DVRI Wheel Positioning via Similarity Weighting
+A method to automatically position a new DVRI in a radial DVRI wheel based on its similarity to $N$ primary DVRIs already positioned on the wheel boundary [S6]. Steps: Users manually choose and position primary DVRIs on the boundary of the DVRI wheel. Compute similarity values $S_1 \dots S_N$ between the new DVRI and each of the $N$ primary DVRIs. Compute the final position $P$ using the weighted average formula based on similarities and primary positions [S6]. Formula: $P = \frac{\sum_{k=1}^N S_k \times P_k}{\sum_{k=1}^N S_k}$, where $P$ is the final position of the DVRI in the wheel, $N$ is the number of primary DVRIs, $P_k$ is the position of primary DVRI $k$, and $S_k$ is the similarity value between the DVRI and primary DVRI $k$ [S6].
+
+## Background
+Similarity-based classification emerged from the need to handle multidimensional and semantically complex volume data where simple intensity thresholds fail. Early work focused on discrete classification of multidimensional signatures using voxel similarity criteria for rapid user interaction [S1, unofficial]. The field expanded with self-supervised learning, such as S4, which uses Siamese networks to learn spatiotemporal proximity without labels [S2, unofficial]. More recently, methods leveraging vision transformers have enabled interactive similarity mapping based on annotated features [S1, unofficial]. In the context of neural rendering and latent space analysis, techniques like Representational Similarity Analysis (RSA) and correlation-based metrics (Pearson, Spearman) are used to decompose and probe latent spaces for editing and verification [S2, unofficial][S4, unofficial].
+
+## Sources
+[S1] Especificação de funções de transferência unidimensionais e multidimensionais para visualização volumétrica direta, http://hdl.handle.net/10183/12077, fetched 2026-10-30 (unofficial)
+[S2] PDF Deep Learning Methods and Neural Representations for Scientific Volume ..., https://www.cs.uoregon.edu/Reports/AREA-202603-Mathai.pdf, fetched 2026-10-27 (unofficial)
+[S3] Illustrative Rendering of Particle Systems, https://doi.org/10.2312/pe.vmv.vmv13.177-185, fetched 2026-10-26 (unofficial)
+[S4] MRD: Using Physically Based Differentiable Rendering to Probe Vision Models for 3D Scene Understanding, https://doi.org/10.48550/arXiv.2512.12307, fetched 2026-10-29 (unofficial)
+[S5] NLI4VolVis: Natural Language Interaction for Volume Visualization via LLM Multi-Agents and Editable 3D Gaussian Splatting., https://doi.org/10.1109/tvcg.2025.3633888, fetched 2026-10-26
+[S6] Palette-Style Volume Visualization, https://doi.org/10.2312/vg/vg07/033-040, fetched 2026-10-26

@@ -1,0 +1,47 @@
+# GPU-Accelerated D2VR
+
+
+## Overview
+A GPU-accelerated implementation of Direct 2D Volume Rendering (D2VR) that incorporates occlusion culling and empty space skipping to achieve interactive or near-interactive rendering speeds [S1, unofficial]. It builds on [Basic GPU D2VR Framework](16533-basic-gpu-d2vr-framework.md) but generalizes it substantially to allow reconstruction of arbitrary oriented volumes and incorporates acceleration techniques to limit reconstruction effort to visible and non-occluded samples [S1, unofficial].
+
+## How it works
+**Inputs and Outputs:**
+*   **Inputs:** 2D projection images and arbitrary image plane orientation parameters [S1, unofficial].
+*   **Outputs:** Rendered 2D volume image [S1, unofficial].
+
+**Data Structures:**
+*   Volume data structure aligned with the arbitrary image plane [S1, unofficial].
+*   Depth correction factors applied during backprojection [S1, unofficial].
+
+**Algorithm Steps:**
+1.  **Filtering:** Filter acquired images along their columns using a ramp filter (e.g., Shepp-Logan, RamLak) in the frequency domain [S1, unofficial].
+2.  **Backprojection:** Backproject filtered data into the volume. For cone-beam geometry, multiply weights $w_{ij}$ by a depth correction factor:
+    $$ w_{ij}(d) = w_{ij} \frac{a^2}{d^2} $$
+    where $a$ is a constant and $d$ is the depth [S1, unofficial].
+3.  **Volume Alignment:** Generate a matrix of samples exactly aligned with the arbitrary image plane, generalizing the CT framework to support arbitrary orientations [S1, unofficial].
+4.  **Ray Casting:** Run the entire ray advancement in a single fragment shader loop [S1, unofficial].
+5.  **Acceleration:** Apply occlusion culling and empty space skipping to limit reconstruction effort to only visible and non-occluded samples [S1, unofficial].
+
+**Parameters:**
+*   Filter type: Shepp-Logan, RamLak [S1, unofficial].
+*   Target framerate: 2 frames/s and more for realistic dataset sizes [S1, unofficial].
+
+**Edge Cases and Pitfalls:**
+*   Arbitrary orientation requires precise alignment of the sample matrix with the image plane [S1, unofficial].
+*   Depth correction factor must be correctly applied for cone-beam geometry [S1, unofficial].
+
+## Subtopics
+
+### [GPU D2VR Acceleration Methods](16656-gpu-d2vr-acceleration-methods.md)
+This family encompasses techniques designed to optimize the Direct Volume Ray Casting (D2VR) pipeline on Graphics Processing Units (GPUs) by leveraging hardware-specific features such as early Z-culling. The primary problem it solves is the computational bottleneck inherent in fragment-based volume rendering, where the high cost of shading often negates the benefits of hardware occlusion culling. What sets this family apart is its focus on the ratio between computational effort per fragment and the potential for early termination; methods are evaluated based on how effectively their shading complexity interacts with early Z-cull mechanisms to achieve interactive or near-interactive rendering speeds.
+
+## Operating characteristics
+*   **Performance:** Enables framerates of 2 frames/s and more for realistic dataset sizes [S1, unofficial].
+*   **Strengths:** Interactive or near-interactive speed; supports arbitrary volume orientations; efficient via occlusion culling and empty space skipping [S1, unofficial].
+*   **Limitations:** Original D2VR method was comparatively slow; this implementation addresses that but performance depends on dataset size and acceleration effectiveness [S1, unofficial].
+
+## Background
+The method builds on the RapidCT framework for GPU-accelerated CT reconstruction [S1, unofficial]. It was proposed to address the slow rendering speed of the original D2VR method, which was a shortcoming for clinical deployment [S1, unofficial].
+
+## Sources
+[S1] GPU-Accelerated D2VR, https://doi.org/10.2312/vg/vg06/023-030, fetched 2026-10-26 (unofficial)

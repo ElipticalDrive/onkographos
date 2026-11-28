@@ -1,0 +1,30 @@
+# Selective and Budgeted Rendering
+
+Also called: Compositing Tree Rendering, Octree-based Entropy Rendering
+
+## Overview
+Selective and Budgeted Rendering accelerates volume rendering by leveraging hierarchical data structures to avoid redundant computation, either by reusing unchanged partial images over time or by skipping low-complexity regions based on error metrics. It differs from standard hierarchical traversal by introducing temporal persistence (compositing trees) or statistical bounds (entropy) to control rendering budget, whereas siblings like [DDA Tree Traversal with Mini-Stack](5244-dda-tree-traversal-with-mini-stack.md) focus on spatial traversal efficiency without temporal or statistical pruning.
+
+## Shared principles
+This family shares the parent's core mechanism of hierarchical descent and ascent [G]. All methods utilize an octree structure where nodes represent spatial subdivisions. The traversal logic relies on the parent's child selection, empty space skipping, leaf handling, and backtracking mechanisms [G]. Specific to this family, nodes may store auxiliary data (partial images or entropy metrics) that influence the traversal path or the final pixel value computation.
+
+## Subtopics
+
+### [Compositing Tree Rendering](5860-compositing-tree-rendering.md)
+A time-varying volume rendering strategy that avoids re-rendering unmodified data by retaining partial images of static subtrees and incrementally compositing them with newly rendered partial images from modified regions. It differs from standard incremental rendering by maintaining a persistent pointer-based octree structure (the compositing tree) that mirrors the data compression structure, allowing for efficient splicing of new branches and recomposition of ancestors, whereas methods like [Octree-based Entropy Rendering](13580-octree-based-entropy-rendering.md) focus on spatial resolution adaptation rather than temporal delta-compositing.
+
+### [Octree-based Entropy Rendering](13580-octree-based-entropy-rendering.md)
+Octree-based Entropy Rendering accelerates volume rendering by traversing a hierarchical octree decomposition where non-leaf nodes store entropy metrics or error measures. It solves the problem of redundant computation in low-entropy occupied space by allowing rays to skip or coarsely sample regions based on these metrics. Unlike sibling methods like [Compositing Tree Rendering](5860-compositing-tree-rendering.md) which may focus on specific compositing structures, this method explicitly uses statistical variance or error bounds to control traversal depth.
+
+### Selective Rendering with Tree Representation
+#### definition
+- [S1, unofficial] A rendering strategy that uses the tree representation to perform selective rendering efficiently, reducing I/O costs and enabling distribution of data and calculations to multiple workstations.
+#### step
+- [S1, unofficial] Examine the encoded data to identify partial images built from subtrees which have not changed.
+- [S1, unofficial] Reuse the identified unchanged partial images in the following time steps.
+
+## Background
+Selective and Budgeted Rendering originated in the context of time-varying volume data visualization, where inter-frame delay and storage space were significant bottlenecks. The approach was developed to leverage hierarchical data structures for both compression and rendering acceleration. Preliminary tests showed reductions of up to 90% in storage space and inter-frame delay [S1, unofficial]. The method is particularly relevant for scientific visualization of dynamic datasets where significant portions of the volume remain constant between time steps.
+
+## Sources
+[S1] DTIC ADA349761: Efficient Encoding and Rendering of Time-Varying Volume Data, https://archive.org/details/DTIC_ADA349761, fetched 2026-10-26 (unofficial)

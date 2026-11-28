@@ -1,0 +1,87 @@
+--- v001.md
++++ v002.md
+@@ -4,45 +4,61 @@
+ 
+ ## Overview
+-3D Gaussian Ray Tracing (3DGRT) is a rendering method that replaces the rasterization-based splatting of 3D Gaussian Splatting with hardware-accelerated ray tracing to evaluate semi-transparent Gaussian primitives. It solves the performance bottleneck of rasterizing millions of small Gaussians by leveraging a Bounding Volume Hierarchy (BVH) to traverse only intersected primitives, thereby offering logarithmic scaling in dense scenes [S2]. Unlike its sibling [3D Gaussian Splatting Rendering (Software)](2805-3d-gaussian-splatting-rendering-software.md), which projects Gaussians to screen space and rasterizes ellipses, 3DGRT evaluates Gaussians along rays using proxy meshes, trading some raw speed for algorithmic efficiency in specific density regimes [S2].
++3D Gaussian Ray Tracing (3DGRT) is a rendering method that replaces the rasterization-based projection of 3D Gaussian Splatting with hardware-accelerated ray tracing to evaluate semi-transparent Gaussian primitives [S1, unofficial]. Unlike sibling methods that rasterize all Gaussians overlapping a screen tile (linear scaling with density), 3DGRT uses a Bounding Volume Hierarchy (BVH) to traverse only intersected Gaussians, enabling logarithmic scaling in dense scenes [S1, unofficial]. It serves as the foundational hardware-accelerated ray tracing approach for 3D Gaussians, upon which later optimizations like GRay [10042-gray.md] and EPBRR [8102-epbrr.md] build.
+ 
+ ## How it works
+-**Inputs:** A set of 3D Gaussians defined by mean position $\mathbf{\mu}$, covariance matrix $\mathbf{\Sigma}$, opacity $\alpha$, and color/shininess attributes.
+-**Outputs:** A 2D image buffer with accumulated color and opacity.
++3DGRT renders a scene by casting rays from the camera through each pixel and accumulating color and opacity contributions from 3D Gaussians intersected by the ray, using a BVH for spatial acceleration [S1, unofficial].
++
++**Inputs and Outputs:**
++- **Input:** A set of $N$ 3D Gaussians, each defined by a mean position $\mu$, a $3 \times 3$ covariance matrix $\Sigma$ (or rotation $R$ and scale $S$), opacity $\alpha$, and color $c$. A camera ray defined by origin $o$ and direction $d$.
++- **Output:** A pixel color $C(p)$ and accumulated opacity.
+ 
+ **Data Structures:**
+-1.  **Gaussian Proxy Mesh:** Each 3D Gaussian is approximated by a bounding triangle mesh. The exact geometric construction of this proxy is not specified in the sources [G: Typically a bounding box or a set of triangles enclosing the Gaussian's extent at a certain sigma level].
+-2.  **BVH (Bounding Volume Hierarchy):** A spatial acceleration structure built over the proxy meshes to enable efficient ray-primitive intersection tests.
+-3.  **Batch Buffer:** A fixed-size group of $N$ Gaussians used for accumulation to manage register usage.
++- **Bounding Volume Hierarchy (BVH):** A tree structure where each node encloses a subset of Gaussians. The leaves contain the proxy meshes for the Gaussians [S2].
++- **Proxy Triangle Mesh:** Each 3D Gaussian is bounded by a proxy triangle mesh (typically a sphere or axis-aligned box approximated by triangles) to facilitate intersection testing with hardware ray tracers [S2].
+ 
+ **Steps:**
+-1.  **Proxy Generation:** Bind each Gaussian with its proxy triangle mesh. This converts the continuous Gaussian distribution into a discrete geometric primitive suitable for ray tracing [S2].
+-2.  **BVH Construction:** Build a BVH over all proxy meshes. This allows the ray tracer to skip non-intersecting Gaussians [S2].
+-3.  **Ray Casting:** For each pixel, cast a ray into the scene.
+-4.  **Traversal and Intersection:** Traverse the BVH to find intersecting proxy meshes. For each hit, evaluate the Gaussian's contribution.
+-5.  **Batched Accumulation:** To avoid register spilling on the GPU, accumulate contributions in fixed-size groups of $N$ Gaussians. This requires repeated BVH traversals for each batch [S2].
+-6.  **Compositing:** Accumulate the color and opacity contributions from the intersected Gaussians along the ray. The sources do not specify the exact compositing formula (e.g., front-to-back alpha blending) used in the original 3DGRT implementation, only that it handles semi-transparent particles [S1, unofficial][S2].
++1. **BVH Construction:** Build a BVH over the proxy triangle meshes of all $N$ Gaussians [S2].
++2. **Ray Casting:** For each pixel, cast a ray from the camera origin through the pixel center [S1, unofficial].
++3. **BVH Traversal:** Traverse the BVH to find all proxy meshes intersected by the ray [S2].
++4. **Gaussian Evaluation:** For each intersected Gaussian, compute its contribution to the ray. The contribution is determined by the Gaussian's density along the ray and its opacity [S1, unofficial].
++5. **Accumulation:** Accumulate the color and opacity contributions of the intersected Gaussians in front-to-back order [S1, unofficial]. To optimize performance and avoid register spilling on GPU hardware, contributions are accumulated in fixed-size groups of $N$ Gaussians, requiring repeated BVH traversals for each group [S2].
++
++**Formulas:**
++The color $C(p)$ at pixel $p$ is computed as a discrete approximation of the continuous integral along the ray $t \in [t_{\min}, t_{\max}]$ [S1, unofficial]:
++
++$$
++C(p) = \int_{t_{\min}}^{t_{\max}} \mathbf{c}(t) \tau(t) dt
++$$
++
++where $\tau(t)$ is the transmittance:
++
++$$
++\tau(t) = \exp\left(-\int_{t_{\min}}^t \sigma(s) ds\right)
++$$
++
++Here, $\mathbf{c}(t)$ is the color at distance $t$, and $\sigma(s)$ is the density of the Gaussian at distance $s$ along the ray [S1, unofficial]. The density $\sigma$ is derived from the 3D Gaussian's probability density function projected onto the ray.
+ 
+ **Parameters:**
+-*   $N$: The fixed-size group of Gaussians for batched evaluation. The exact value is not given in the sources [G: Typically a power of 2, e.g., 32 or 64, to align with warp/wavefront sizes].
++- **Group Size $N$:** The number of Gaussians processed per BVH traversal batch to optimize register usage [S2]. The exact value depends on hardware constraints and is not specified in the sources.
+ 
+ **Edge Cases and Pitfalls:**
+-*   **Register Spilling:** Evaluating too many Gaussians per ray without batching can cause GPU register spilling, significantly degrading performance. The batching strategy is critical [S2].
+-*   **Proxy Approximation Error:** The proxy mesh is an approximation of the Gaussian. If the proxy is too loose, it may cause false positives in BVH traversal; if too tight, it may miss intersections. The exact tightness is not specified [S2].
++- **Register Spilling:** Processing too many Gaussians per traversal can cause GPU register spilling, degrading performance. This is mitigated by batching [S2].
++- **Proxy Mesh Accuracy:** The proxy mesh must tightly bound the Gaussian to avoid false positives in intersection tests, which would waste computation [S2].
++- **Transparency Artifacts:** Naive ray tracing of semi-transparent Gaussians can violate physical absorption-emission models if not handled carefully. 3DGRT relies on the underlying Gaussian definition to provide closed-form transmittance [S1, unofficial].
+ 
+ ## Subtopics
+ 
+ ### [GRay](10042-gray.md)
+-A fast ray tracer for 3D Gaussians designed to close the performance gap between ray tracing and rasterization (3DGS) by leveraging the algorithmic difference where ray tracing evaluates only intersected Gaussians, allowing logarithmic scaling in dense scenes with tiny Gaussians.
++A fast ray-tracing method for 3D Gaussian Splatting designed to close the performance gap between ray tracing and rasterization by leveraging the algorithmic advantage of ray tracing: it evaluates only intersected Gaussians, allowing logarithmic scaling in dense scenes with tiny Gaussians. Unlike 3DGS rasterization which operates on tiles and evaluates all Gaussians overlapping a tile for every pixel (linear scaling), GRay uses a Bounding Volume Hierarchy (BVH) to select and evaluate exactly the set of Gaussians intersecting each pixel. It builds on [3D Gaussian Ray Tracing](8101-3d-gaussian-ray-tracing.md), [EPBRR](8102-epbrr.md), and [EDGS](8103-edgs.md).
+ 
+ ## Operating characteristics
+-*   **Time Complexity:** Theoretical logarithmic scaling with respect to the number of Gaussians due to BVH traversal, unlike the linear scaling of rasterization [S2].
+-*   **Measured Performance:** On the tested hardware, 3DGRT optimizes about 9× slower than a recent version of 3DGS [S2].
+-*   **Strengths:** Efficient in dense scenes with many small Gaussians where rasterization would process many non-visible primitives.
+-*   **Limitations:** Currently slower than optimized rasterization implementations. The overhead of BVH traversal and proxy generation may outweigh benefits in sparse scenes [S2].
+-*   **When to Use:** When rendering very dense scenes with small Gaussians where rasterization performance degrades.
+-*   **When Not to Use:** When maximum frame rate is required and the scene is not extremely dense, as rasterization is currently faster [S2].
++- **Time Complexity:** Logarithmic scaling with respect to the number of Gaussians in dense scenes, as only intersected Gaussians are evaluated [S1, unofficial]. However, the constant factor is high due to BVH traversal overhead.
++- **Memory Complexity:** Linear in the number of Gaussians to store the BVH and proxy meshes [S2].
++- **Performance:** On tested hardware, 3DGRT is approximately 9× slower than a recent version of 3DGS rasterization [S2]. This performance gap is attributed to the overhead of ray tracing and BVH traversal compared to the highly optimized rasterization pipeline of 3DGS [S2].
++- **Strengths:** Efficient handling of dense scenes with many small Gaussians; physically plausible transparency when combined with proper compositing [S1, unofficial].
++- **Limitations:** Significantly slower than rasterization for typical scene densities; sensitive to BVH quality and construction time [S2].
+ 
+ ## Background
+-3D Gaussian Ray Tracing was first studied by Moenne-Loccoz et al. [2024] as an alternative for rendering 3D Gaussians using hardware-accelerated ray tracing via OptiX [S2]. It was proposed to address the limitations of rasterization in handling semi-transparent particles and to leverage the efficiency of ray tracing in dense scenes [S1, unofficial][S2].
++3D Gaussian Ray Tracing was first studied by Moenne-Loccoz et al. in 2024 as an alternative to rasterization for rendering 3D Gaussians, utilizing hardware-accelerated ray tracing via NVIDIA OptiX [S2]. It was introduced to address the limitations of rasterization in dense scenes and to provide a more physically accurate rendering of semi-transparent Gaussian primitives [S1, unofficial]. The method has since served as a baseline for subsequent research in ray-traced 3D Gaussian rendering, such as GRay and EPBRR [S1, unofficial][S2].
+ 
+ ## Sources

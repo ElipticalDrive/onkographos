@@ -1,0 +1,234 @@
+--- v006.md
++++ v007.md
+@@ -1,112 +1,116 @@
+ # Image-to-Voxel Heightmap Generation
+ 
+-Also called: Excavate mode height clipping, Grayscale heightmap extrusion
++Also called: Excavate mode height clipping, Grayscale heightmap extrusion, Heightmap-to-Voxel Conversion, Heightmap-to-Voxlap Conversion
+ 
+ ## Overview
+-This method converts a 2D grayscale image into a 3D voxel structure where pixel intensity determines the height of voxel columns along the Y-axis. It differs from standard rasterization by treating the image as a heightfield rather than a surface mesh, supporting both simple vertical extrusion and an 'excavate' mode that clips columns to the minimum height of their 4-connected neighbors to prevent overhangs [S1, unofficial]. It builds on [Image-based Voxelization](12822-image-based-voxelization.md) by mapping image pixels to X and Z axes while using intensity for Y.
++This method converts a 2D image into a 3D voxel structure where pixel intensity determines voxel height along the Y-axis [S1, S3, unofficial]. It differs from standard rasterization by treating the image as a heightfield rather than a surface mesh, supporting both simple vertical extrusion and an 'excavate' mode that clips voxel columns to the minimum height of their 4-connected neighbors to prevent overhangs [S1, S3, unofficial]. It builds on [Image-based Voxelization](12822-image-based-voxelization.md) by mapping image pixels to X and Z axes while using intensity for Y [S1, S3, unofficial].
+ 
+ ## How it works
+ **Inputs:**
+-- A 2D grayscale or RGB image.
+-- `heightFactor` (float): Multiplier for normalized intensity. Typical value: 1.
+-- `Excavate` (bool): Flag to enable neighbor-aware clipping.
++- A 2D heightmap image (grayscale or RGB) [S1, S3, unofficial].
++- An optional scale/color map image for color lookup [S1, unofficial].
++- `heightFactor` (float): Multiplier applied to normalized pixel intensity to determine voxel height. Typical value: 1 [S3, unofficial].
++- `Excavate` (bool): Flag to enable neighbor-aware height clipping [S3, unofficial].
+ 
+ **Outputs:**
+-- A list of voxel coordinates $(x, y, z)$ and their associated data.
++- A 3D voxel volume (voxlap) with a binary column layout [S1, unofficial].
+ 
+ **Data Structures:**
+-- The voxel grid is implicit or explicit. Each voxel is defined by integer coordinates $(x, y, z)$.
+-- The image is accessed via $(x, z)$ indices, where $x$ corresponds to the image width and $z$ to the image height (or vice versa, depending on coordinate system convention; here we assume $x$ is width, $z$ is height, and $y$ is up).
++- Implicit voxel grid where each column corresponds to an image pixel $(x, z)$ [S1, S3, unofficial].
++- [S1, unofficial] uses a fixed 512×512 grid; [S3, unofficial] supports arbitrary dimensions [S3, unofficial].
++- Each column header is 4 bytes written as `[0, currHeight, currHeight + gap, 0]` [S1, unofficial].
+ 
+ **Steps:**
+-1. **Initialize** an empty list of voxels.
+-2. **Iterate** over each pixel $(x, z)$ in the image.
+-3. **Compute Height:**
+-   - If the image is grayscale, let $I$ be the pixel intensity.
+-   - If the image is RGB, compute the average intensity:
+-     $$ I_{avg} = \frac{I_R + I_G + I_B}{3} $$
+-   - Normalize the intensity to $[0, 1]$:
+-     $$ h_{norm} = \frac{I_{avg}}{65535} $$
+-     (Note: The source formula uses $\min(N_c, 3)$, implying support for other channel counts, but standard RGB uses 3. The divisor 65535 suggests 16-bit integer input, though typical images are 8-bit. If 8-bit, the divisor would be 255. We follow the source formula exactly.)
+-   - Calculate the target height in voxels:
+-     $$ H_{target} = \left\lfloor h_{norm} \times H_{max} \right\rfloor $$
+-     where $H_{max} = \text{heightFactor}$.
+-4. **Determine Clipping Height (if `Excavate` is true):**
+-   - Identify the 4-connected neighbors: $(x-1, z), (x+1, z), (x, z-1), (x, z+1)$.
+-   - For each neighbor within image bounds, retrieve its computed height $H_{neighbor}$.
+-   - Compute $H_{min\_neighbor} = \min(\{H_{neighbor} \mid \text{neighbor is valid}\} \cup \{0\})$.
+-   - If no neighbors are valid (boundary case), $H_{min\_neighbor} = 0$.
+-   - The effective height for this column is $H_{eff} = \min(H_{target}, H_{min\_neighbor})$.
+-   - If `Excavate` is false, $H_{eff} = H_{target}$.
+-5. **Generate Voxels:**
+-   - If $H_{eff} > 0$:
+-     - Place voxels at $(x, y, z)$ for $y$ from $0$ to $H_{eff} - 1$.
+-   - If $H_{eff} \le 0$:
+-     - According to the source, if excavating and $H_{target} \le H_{min\_neighbor}$, place a single voxel at $y = \max(0, H_{target} - 1)$. This implies a minimum height of 1 voxel if the target is positive but clipped, or potentially 0 if target is 0. The source says "places a single voxel at `max(0, height - 1)`". If height is 0, it places at -1? No, `max(0, -1)` is 0. So it places a voxel at $y=0$. If height is 1, it places at $y=0$. This logic seems to ensure a minimum presence if the target was non-zero. Let's refine: The source states: "if the computed height is less than or equal to the neighbor minimum, the algorithm places a single voxel at `max(0, height - 1)`". This is a specific edge case handling for excavation.
+-     - General case (non-excavate or height > neighbor min): Place voxels from $y=0$ to $y=H_{eff}-1$.
+-6. **Handle Boundaries:**
+-   - Pixels on the edge of the image lack neighbors on one or more sides. The implementation checks bounds explicitly: `if (param.X - 1 >= 0 && param.X + 1 < param.GrayscaleImage.Width && param.Y - 1 >= 0 && param.Y + 1 < param.GrayscaleImage.Height)`. If out of bounds, it defaults to adding voxels from 0 to the computed height (treating missing neighbors as having height 0 or ignoring them for the min calculation? The source says "defaults to adding voxels from 0 to the computed height", implying no clipping from missing neighbors, i.e., they are not considered in the min, or considered as infinity? The code snippet implies checking bounds. If a neighbor is out of bounds, it is likely not included in the min set. If the set is empty, min is undefined, so it defaults to no clipping).
++1. **Read Heightmap:** Load the heightmap image [S1, unofficial].
++2. **Compute Target Height:** Calculate $H_{target}$ for each pixel $(x, z)$ [S3, unofficial].
++   - Formula [S3, unofficial]: $H_{target} = \left\lfloor \frac{\sum_{c=0}^{2} I_c}{\min(N_c, 3) \times 65535} \times H_{max} \right\rfloor$, where $I_c$ are channel values, $N_c$ is channel count, and $H_{max} = \text{heightFactor}$ [S3, unofficial].
++   - Alternative [S1, unofficial]: $H_{target} = \lfloor (255 - R) / 4 \rfloor$ for 8-bit grayscale, which reduces precision to 0–63 [S1, unofficial].
++3. **Determine Clipping Height (if `Excavate` is true):**
++   - Identify 4-connected neighbors: $(x-1, z), (x+1, z), (x, z-1), (x, z+1)$ [S1, S3, unofficial].
++   - Boundary handling: [S1, unofficial] wraps coordinates modulo grid width. [S3, unofficial] checks bounds explicitly; out-of-bounds neighbors are ignored, defaulting to no clipping [S3, unofficial].
++   - Compute $H_{min\_neighbor} = \min(\{H_{neighbor} \mid \text{valid}\} \cup \{0\})$ [S3, unofficial].
++   - Calculate gap: initialize `gap = 0`. Iterate neighbors; if $H_{neighbor} > H_{target} + \text{gap} + 1$, set $\text{gap} = H_{neighbor} - H_{target} - 1$ [S1, unofficial].
++   - Set shadow flag: 1 if left neighbor height < $H_{target}$, else 0 [S1, unofficial].
++   - Effective height: $H_{eff} = \min(H_{target}, H_{min\_neighbor})$ [S3, unofficial].
++   - Pitfall: If excavating and $H_{target} \le H_{min\_neighbor}$, place a single voxel at $y = \max(0, H_{target} - 1)$ instead of an empty column [S1, S3, unofficial].
++4. **Generate Voxels:**
++   - If `Excavate` is false, $H_{eff} = H_{target}$ [S1, S3, unofficial].
++   - Write the 4-byte column header [S1, unofficial].
++   - Iterate $k$ from 0 to `gap` (if excavating) or $H_{eff}-1$ (if not) [S1, unofficial].
++   - Lookup color from scale map at $(0, H_{target})$ [S1, unofficial].
++   - Apply noise and shadow: $R, G, B = \text{hmColor} + \text{random}(-2, 2) - 16 \times \text{shadow}$ [S1, unofficial]. Set alpha to 128 [S1, unofficial].
++   - Write RGBA voxel data [S1, unofficial].
++
++**Parameters:**
++- `heightFactor`: 1 [S3, unofficial].
++- Grid dimensions: 512×512 [S1, unofficial].
++
++**Edge Cases and Pitfalls:**
++- Height calculation uses integer division by 4 in [S1, unofficial], reducing 8-bit precision to 6-bit (0–63) [S1, unofficial].
++- Boundary pixels lack neighbors; [S3, unofficial] defaults to no clipping for out-of-bounds checks [S3, unofficial].
++- Shadowing is determined solely by the left neighbor in [S1, unofficial], ignoring other neighbors [S1, unofficial].
++- Color noise is added uniformly to all channels with the same random offset, potentially desaturating colors [S1, unofficial].
++- When excavating, if computed height $\le$ neighbor minimum, the algorithm places a single voxel at `max(0, height - 1)` instead of an empty column [S1, S3, unofficial].
+ 
+ **Pseudocode:**
+ ```python
+-def generate_voxels(image, height_factor, excavate):
++def generate_voxels(heightmap, scale_map, height_factor, excavate, wrap_bounds=True):
+     voxels = []
+-    width = image.width
+-    height = image.height
+-    
+-    # Precompute heights for all pixels
+-    heights = [[0 for _ in range(height)] for _ in range(width)]
+-    
+-    for x in range(width):
+-        for z in range(height):
+-            pixel = image.get_pixel(x, z)
+-            # Assuming 16-bit RGB for formula fidelity, or scale appropriately
+-            # Source formula: floor( (sum(Ic) / (min(Nc, 3) * 65535)) * Hmax )
+-            # For standard 8-bit RGB, divisor is 3 * 255 = 765. 
+-            # We stick to the source's 65535, assuming 16-bit input or normalized float input scaled.
+-            # If input is 0-255, 65535 is wrong. We assume input is 0-65535 or normalized.
+-            # Let's assume normalized float [0,1] for simplicity in implementation, 
+-            # but the formula uses 65535. We will implement the formula as written.
+-            
+-            r, g, b = pixel.r, pixel.g, pixel.b
+-            n_channels = 3
+-            intensity_sum = r + g + b
+-            # Normalize
+-            h_norm = intensity_sum / (n_channels * 65535.0)
+-            h_target = int(h_norm * height_factor)
++    W, H = heightmap.width, heightmap.height
++    heights = [[0] * H for _ in range(W)]
++
++    for x in range(W):
++        for z in range(H):
++            r, g, b = heightmap.get_pixel(x, z)
++            # [S3, unofficial] formula for normalized/16-bit input
++            h_target = int((r + g + b) / (3 * 65535.0) * height_factor)
+             heights[x][z] = h_target
+ 
+-    for x in range(width):
+-        for z in range(height):
+-            h_target = heights[x][z]
+-            
+-            if not excavate:
+-                h_eff = h_target
+-            else:
+-                # Find min neighbor height
++    for x in range(W):
++        for z in range(H):
++            curr_height = heights[x][z]
++            gap = 0
++            shadow = 0
++
++            if excavate:
+                 neighbors = []
+-                if x > 0: neighbors.append(heights[x-1][z])
+-                if x < width - 1: neighbors.append(heights[x+1][z])
+-                if z > 0: neighbors.append(heights[x][z-1])
+-                if z < height - 1: neighbors.append(heights[x][z+1])
+-                
++                offsets = [(-1, 0), (1, 0), (0, -1), (0, 1)]
++                for dx, dz in offsets:
++                    nx, nz = x + dx, z + dz
++                    if wrap_bounds:
++                        nx, nz = nx % W, nz % H
++                    elif not (0 <= nx < W and 0 <= nz < H):
++                        continue
++                    neighbors.append(heights[nx][nz])
++
+                 if neighbors:
+                     h_min_neighbor = min(neighbors)
++                    for adj_h in neighbors:
++                        if adj_h > curr_height + gap + 1:
++                            gap = adj_h - curr_height - 1
++                    if neighbors[0] < curr_height:
++                        shadow = 1
++                    if curr_height <= h_min_neighbor:
++                        y_pos = max(0, curr_height - 1)
++                        voxels.append((x, y_pos, z))
++                        continue
++                    h_eff = min(curr_height, h_min_neighbor)
+                 else:
+-                    # Boundary pixel, no neighbors to clip against
+-                    h_min_neighbor = float('inf') 
+-                
+-                h_eff = min(h_target, h_min_neighbor)
+-            
+-            # Generate voxels
+-            if h_eff > 0:
+-                for y in range(h_eff):
+-                    voxels.append((x, y, z))
+-            elif h_eff <= 0 and excavate and h_target <= h_min_neighbor:
+-                # Specific edge case from source
+-                y_pos = max(0, h_target - 1)
+-                if y_pos >= 0:
+-                    voxels.append((x, y_pos, z))
+-    
++                    h_eff = curr_height
++            else:
++                h_eff = curr_height
++
++            if scale_map:
++                color = scale_map.get_pixel(0, curr_height)
++            else:
++                color = (128, 128, 128)
++
++            limit = gap + 1 if excavate else h_eff
++            for k in range(limit):
++                r_c = color[0] + random(-2, 2) - 16 * shadow
++                g_c = color[1] + random(-2, 2) - 16 * shadow
++                b_c = color[2] + random(-2, 2) - 16 * shadow
++                a_c = 128
++                voxels.append((x, k, z, r_c, g_c, b_c, a_c))
+     return voxels
+ ```
+@@ -115,17 +119,19 @@
+ 
+ ### [Height Curve Activation & Voxel Column Generation](17940-height-curve-activation-voxel-column-generation.md)
+-This method transforms a normalized 2D noise heightmap into a 3D voxel column structure by applying a hyperbolic tangent activation function to smooth terrain features, clamping values to a water line, and stacking voxels from a defined ground offset to the calculated height. It differs from simple linear extrusion by using a non-linear activation curve to compress extreme noise values, providing more natural-looking terrain profiles, and explicitly handles color mapping based on discrete terrain bands.
++This method transforms a normalized 2D noise heightmap into a 3D voxel column structure by applying a hyperbolic tangent activation function, scaling the result to world units, and stacking voxels from a defined ground offset to the calculated height. It differs from linear extrusion by compressing extreme noise values through a non-linear curve and explicitly mapping discrete terrain bands to color indices.
+ 
+ ## Operating characteristics
+-- **Time Complexity:** $O(W \times H)$, where $W$ and $H$ are the image dimensions. Each pixel is processed once, and neighbor checks are constant time (4 neighbors).
+-- **Memory Complexity:** $O(W \times H)$ to store the intermediate height map if precomputed, or $O(V)$ for the output voxel list, where $V$ is the number of voxels.
+-- **Strengths:** Simple to implement; efficient for generating terrain-like structures from heightmaps; excavate mode prevents floating islands.
+-- **Limitations:** Resolution is limited by image resolution; no sub-voxel precision; excavate mode can flatten steep features.
+-- **When to use:** When converting 2D heightmaps (e.g., from noise functions or images) into 3D voxel data for games or simulations.
+-- **When not to use:** When high-resolution smooth surfaces are required (use mesh-based approaches) or when complex 3D geometry is needed beyond heightfields.
++- **Time Complexity:** $O(W \times H \times H_{max})$ where $W, H$ are image dimensions and $H_{max}$ is max height (63), due to nested loops and per-voxel writes [S1, unofficial].
++- **Memory Complexity:** $O(W \times H)$ for the intermediate height map, plus $O(V)$ for the output voxel list where $V$ is total voxels [G].
++- **Strengths:** Simple to implement; efficient for generating terrain-like structures from heightmaps; excavate mode prevents floating islands [G].
++- **Limitations:** Resolution is limited by image resolution; no sub-voxel precision; excavate mode can flatten steep features [G].
++- **When to use:** Converting 2D heightmaps into 3D voxel data for games or simulations [G].
++- **When not to use:** When high-resolution smooth surfaces are required or complex 3D geometry beyond heightfields is needed [G].
+ 
+ ## Background
+-This method is part of the voxelization pipeline in tools like FileToVox, which converts various file formats into voxel data. It is commonly used in Minecraft modding, voxel-based games, and procedural terrain generation. The 'excavate' mode is a specific heuristic to maintain structural integrity in voxel art.
++This method originates from voxel terrain generation pipelines and procedural generation workflows [S2, unofficial]. It is implemented in tools like FileToVox for converting image formats into voxel schematics [S3, unofficial]. The 'excavate' mode serves as a heuristic to maintain structural integrity in voxel art by preventing overhangs [S3, unofficial].
+ 
+ ## Sources
+-[S1] FileToVox, https://github.com/Zarbuz/FileToVox, fetched 2026-10-29 (unofficial)+[S1] VonJagdstrumel/heightmap-to-voxlap, https://github.com/VonJagdstrumel/heightmap-to-voxlap, fetched 2026-10-28 (unofficial)
++[S2] Proper density functions for Voxel-based terrains?, https://stackoverflow.com/questions/9345812/proper-density-functions-for-voxel-based-terrains, fetched 2026-10-28 (unofficial)
++[S3] FileToVox, https://github.com/Zarbuz/FileToVox, fetched 2026-10-29 (unofficial)

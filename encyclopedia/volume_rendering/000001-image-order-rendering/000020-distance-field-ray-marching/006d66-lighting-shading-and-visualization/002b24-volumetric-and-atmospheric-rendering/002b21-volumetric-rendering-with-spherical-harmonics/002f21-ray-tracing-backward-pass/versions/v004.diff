@@ -1,0 +1,213 @@
+--- v003.md
++++ v004.md
+@@ -1,86 +1,48 @@
+ # Ray Tracing Backward Pass
+ 
+-Also called: Plenoxel Ray Tracing (Backward)
++Also called: Backward Ray Tracing with Spherical Harmonics, Plenoxel Ray Tracing (Backward)
+ 
+ ## Overview
+-The Ray Tracing Backward Pass computes the gradients of a differentiable volume rendering loss with respect to the scene representation (spherical harmonic coefficients and density) and auxiliary parameters, given the rendered image and ground truth. It serves as the differentiable counterpart to the forward ray casting pass, enabling end-to-end training of volumetric models like Plenoxels. Unlike the forward pass which accumulates color and transmittance, this method propagates error signals backward through the ray integration, handling RGB normalization and optional regularization losses (beta, sparsity) [S1, unofficial][S2, unofficial].
++The Ray Tracing Backward Pass computes the gradients of a differentiable volume rendering loss with respect to the scene representation (spherical harmonic coefficients and density) and auxiliary parameters, given the rendered image and ground truth [S1, unofficial][S2, unofficial]. It serves as the differentiable counterpart to the forward ray casting pass, enabling end-to-end training of volumetric models like Plenoxels [S2, unofficial]. Unlike the forward pass which accumulates color and transmittance, this method propagates error signals backward through the ray integration, handling RGB normalization and optional regularization losses (beta, sparsity) [S1, unofficial][S2, unofficial].
+ 
+ ## How it works
+ **Inputs:**
+-- `grad_output`: Gradient of the loss with respect to the rendered RGB color (shape: $[N, 3]$ or flattened).
+-- `color_cache`: Cached accumulated color components from the forward pass (shape: $[N, 3]$ or similar structure storing intermediate accumulation terms).
+-- `ray_spec`: Ray origins and directions.
+-- `grid`: Volumetric grid containing density data and spherical harmonic coefficients.
+-- `beta_loss`: Scalar weight for beta distribution sparsity loss.
+-- `sparsity_loss`: Scalar weight for sparsity loss.
+-- `log_transmit_in`: Logarithm of transmittance at the start of the ray segment.
+-- `opt`: Configuration options (e.g., `grad_out_is_rgb`, `basis_dim`, `sh_data_dim`).
++- `grad_output`: Gradient of the loss with respect to the rendered RGB color (shape: $[N, 3]$ or flattened) [S1, unofficial][S2, unofficial].
++- `color_cache`: Cached accumulated color components from the forward pass (shape: $[N, 3]$ or similar structure storing intermediate accumulation terms) [S1, unofficial].
++- `ray_spec`: Ray origins and directions [S2, unofficial].
++- `grid`: Volumetric grid containing density data and spherical harmonic coefficients [S1, unofficial][S2, unofficial].
++- `beta_loss`: Scalar weight for beta distribution sparsity loss [S1, unofficial][S2, unofficial].
++- `sparsity_loss`: Scalar weight for sparsity loss [S1, unofficial][S2, unofficial].
++- `log_transmit_in`: Logarithm of transmittance at the start of the ray segment [S1, unofficial][S2, unofficial].
++- `opt`: Configuration options (e.g., `grad_out_is_rgb`, `basis_dim`, `sh_data_dim`) [S2, unofficial][S3, unofficial].
+ 
+ **Outputs:**
+-- `grads`: Gradients for spherical harmonic coefficients and density.
+-- `accum_out` (optional): Accumulated gradient values.
+-- `log_transmit_out` (optional): Gradient of log transmittance.
++- `grads`: Gradients for spherical harmonic coefficients and density [S1, unofficial][S2, unofficial].
++- `accum_out` (optional): Accumulated gradient values [S1, unofficial].
++- `log_transmit_out` (optional): Gradient of log transmittance [S1, unofficial].
+ 
+ **Data Structures:**
+-- `sphfunc_val`: Shared memory array storing spherical harmonic function values for the current ray.
+-- `grad_sphfunc_val`: Shared memory array storing gradients of SH function values.
+-- `ray_spec`: Struct containing ray origin ($\mathbf{o}$) and direction ($\mathbf{v}$).
+-- `temp_storage`: Warp-level reduction buffer.
++- `sphfunc_val`: Shared memory array storing spherical harmonic function values for the current ray [S2, unofficial][S3, unofficial].
++- `grad_sphfunc_val`: Shared memory array storing gradients of SH function values [S2, unofficial][S3, unofficial].
++- `ray_spec`: Struct containing ray origin ($\mathbf{o}$) and direction ($\mathbf{v}$) [S2, unofficial].
++- `temp_storage`: Warp-level reduction buffer [S2, unofficial][S3, unofficial].
+ 
+ **Steps:**
+-
+-1. **Initialize Accumulation:**
+-   Compute the initial gradient accumulator `accum` from the color cache and output gradient. Assuming `color_cache` and `grad_output` are vectors of size 3 (RGB):
+-   $$ \text{accum} = \sum_{i=0}^{2} \text{color\_cache}[i] \cdot \text{grad\_output}[i] $$
+-   [S1, unofficial]
+-
+-2. **Thread Identification:**
+-   Calculate global thread ID, `ray_id`, `ray_blk_id`, and `lane_id` (warp lane index). If `lane_id >= grid.sh_data_dim`, return early, as this thread does not contribute to SH gradient computation.
+-   [S2, unofficial]
+-
+-3. **Beta Loss Gradient (if applicable):**
+-   If `beta_loss > 0`, compute the transmittance at the input:
+-   $$ t_{\text{in}} = \exp(\log\_transmit\_in) $$
+-   Update the beta loss contribution to the accumulator:
+-   $$ \text{beta\_loss\_grad} = \text{beta\_loss} \cdot \left( 1 - \frac{t_{\text{in}}}{1 - t_{\text{in}} + \epsilon} \right) $$
+-   where $\epsilon = 10^{-3}$ for numerical stability. Add this to `accum`.
+-   [S1, unofficial]
+-
+-4. **Shared Memory and Ray Setup:**
+-   Initialize shared memory arrays `sphfunc_val`, `grad_sphfunc_val`, and `temp_storage`. Set `ray_spec` from origins and directions, extracting the direction vector $\mathbf{v}_{\text{dir}}$.
+-   [S2, unofficial]
+-
+-5. **Degenerate Ray Check:**
+-   If `ray.tmin > ray.tmax`, the ray is invalid. Write `accum` to `*accum_out` (if not null) and `0` to `*log_transmit_out` (if not null), then return.
+-   [S1, unofficial]
+-
+-6. **Gradient Output Normalization:**
+-   If `grad_out_is_rgb` is true, calculate the residual between the cached color and the gradient output:
+-   $$ \text{resid} = \text{color\_cache} - \text{grad\_output} $$
+-   Compute normalization factor:
+-   $$ \text{norm\_factor} = \frac{2.0}{3 \cdot Q} $$
+-   where $Q$ is the number of rays or a scaling factor defined by the implementation. Update `grad_out[i]`:
+-   $$ \text{grad\_out}[i] = \text{resid}[i] \cdot \text{norm\_factor} $$
+-   Otherwise, `grad_out[i] = grad_output[i]`.
+-   [S2, unofficial]
+-
+-7. **Warp Synchronization:**
+-   Synchronize warps within the SH data dimension mask to ensure shared memory consistency.
+-   [S2, unofficial]
+-
+-8. **Core Backward Trace:**
+-   Call `trace_ray_cuvol_backward` with arguments: `grad_out`, `color_cache`, `ray_spec`, `opt`, `lane_id`, `sphfunc_val`, `grad_sphfunc_val`, `temp_storage`, `log_transmit_in`, `beta_loss`, `sparsity_loss`, `grads`, and optional output pointers. This function performs the core integration of gradients along the ray, interpolating density and SH coefficients, and computing gradients for the grid parameters.
+-   [S2, unofficial]
+-
+-9. **SH Gradient Computation:**
+-   Call `calc_sphfunc_backward` to compute the gradients for the spherical harmonic basis coefficients based on the accumulated gradients in `grad_sphfunc_val`.
+-   [S2, unofficial]
++1. Compute the initial gradient accumulator `accum` from the color cache and output gradient: `accum = color_cache[0]*grad_output[0] + color_cache[1]*grad_output[1] + color_cache[2]*grad_output[2]` [S1, unofficial].
++2. Calculate global thread ID and derive `ray_id`, `ray_blk_id`, and `lane_id` (warp lane index) [S2, unofficial][S3, unofficial]. If `lane_id >= grid.sh_data_dim`, return early, as this thread does not contribute to SH gradient computation [S2, unofficial].
++3. If `beta_loss > 0`, compute `transmit_in = exp(log_transmit_in)` and update `beta_loss *= (1 - transmit_in / (1 - transmit_in + 1e-3))`, then add to `accum` [S1, unofficial].
++4. Initialize shared memory arrays `sphfunc_val`, `grad_sphfunc_val`, `ray_spec`, and `temp_storage` for warp reduction [S2, unofficial].
++5. Set `ray_spec` from origins and directions, extracting the direction vector $\mathbf{v}_{\text{dir}}$ [S2, unofficial].
++6. If `ray.tmin > ray.tmax`, the ray is invalid. Write `accum` to `*accum_out` (if not null) and `0` to `*log_transmit_out` (if not null), then return [S1, unofficial].
++7. Compute gradient output: if `grad_out_is_rgb`, calculate `resid = color_cache - grad_output`, then `grad_out[i] = resid * norm_factor` where `norm_factor = 2.f / (3 * Q)`; otherwise `grad_out[i] = grad_output[i]` [S2, unofficial][S3, unofficial].
++8. Synchronize warps within the SH data dimension mask to ensure shared memory consistency [S2, unofficial][S3, unofficial].
++9. Call `trace_ray_cuvol_backward` with `grad_out`, `color_cache`, `ray_spec`, `opt`, `lane_id`, `sphfunc_val`, `grad_sphfunc_val`, `temp_storage`, `log_transmit_in`, `beta_loss`, `sparsity_loss`, `grads`, and optional output pointers [S2, unofficial][S3, unofficial]. This function performs the core integration of gradients along the ray, interpolating density and SH coefficients, and computing gradients for the grid parameters [S1, unofficial].
++10. Call `calc_sphfunc_backward` to compute the gradients for the spherical harmonic basis coefficients based on the accumulated gradients in `grad_sphfunc_val` [S2, unofficial][S3, unofficial].
+ 
+ **Pseudocode:**
+-
+ ```python
+ def render_ray_backward_kernel(
+-    grad_output,      # Tensor [N, 3] or flattened
+-    color_cache,      # Tensor [N, 3] or similar
++    grad_output,      # Tensor [N, 3]
++    color_cache,      # Tensor [N, 3]
+     ray_spec,         # Struct with origin, direction, tmin, tmax
+     grid,             # Object with density_data, sh_coeffs, sh_data_dim, basis_dim
+@@ -98,5 +60,5 @@
+ 
+     # 2. Thread Identification
+-    lane_id = get_lane_id()
++    lane_id = threadIdx.x & 0x1F
+     if lane_id >= grid.sh_data_dim:
+         return
+@@ -109,12 +71,10 @@
+ 
+     # 4. Shared Memory Init
+-    sphfunc_val = shared_mem_array(size=grid.basis_dim)
+-    grad_sphfunc_val = shared_mem_array(size=grid.basis_dim, init=0.0)
+-    temp_storage = warp_reduction_buffer()
++    sphfunc_val = [0.0] * grid.basis_dim
++    grad_sphfunc_val = [0.0] * grid.basis_dim
++    temp_storage = [0.0] * 32  # Warp reduction buffer
+ 
+     # 5. Ray Setup
+     vdir = ray_spec.direction
+-    ray_spec.origin = ray_spec.origin
+-    ray_spec.direction = vdir
+ 
+     # 6. Degenerate Ray Check
+@@ -128,19 +88,18 @@
+     # 7. Gradient Output Normalization
+     if opt.grad_out_is_rgb:
+-        resid = color_cache - grad_output
+-        norm_factor = 2.0 / (3.0 * Q) # Q is implementation-specific scaling factor
+-        grad_out = resid * norm_factor
++        resid = [color_cache[i] - grad_output[i] for i in range(3)]
++        norm_factor = 2.0 / (3.0 * Q)
++        grad_out = [r * norm_factor for r in resid]
+     else:
+         grad_out = grad_output
+ 
+     # 8. Warp Sync
+-    sync_warps()
++    __syncwarp((1 << grid.sh_data_dim) - 1)
+ 
+     # 9. Core Backward Trace
+-    # This step involves trilinear interpolation of density and SH values,
++    # Performs trilinear interpolation of density and SH values,
+     # and accumulation of gradients along the ray.
+-    # The exact implementation of trace_ray_cuvol_backward is complex and
+-    # relies on the forward pass cache.
+     trace_ray_cuvol_backward(
++        grid=grid,
+         grad_out=grad_out,
+         color_cache=color_cache,
+@@ -161,8 +120,22 @@
+     # 10. SH Gradient Computation
+     calc_sphfunc_backward(
++        grid=grid,
++        lane_id=lane_id,
++        ray_id=ray_id,
++        vdir=vdir,
++        sphfunc_val=sphfunc_val,
+         grad_sphfunc_val=grad_sphfunc_val,
+-        sh_coeffs=grid.sh_coeffs,
+-        grads=grid.grads
++        grad_basis_out=grid.grads.grad_basis_out
+     )
++
++def trace_ray_cuvol_backward(grid, grad_out, color_cache, ray_spec, opt, lane_id, sphfunc_val, grad_sphfunc_val, temp_storage, log_transmit_in, beta_loss, sparsity_loss, grads, accum_out, log_transmit_out):
++    # Core integration of gradients along the ray, interpolating density and SH coefficients,
++    # and computing gradients for the grid parameters.
++    pass
++
++def calc_sphfunc_backward(grid, lane_id, ray_id, vdir, sphfunc_val, grad_sphfunc_val, grad_basis_out):
++    # Computes gradients for the spherical harmonic basis coefficients based on
++    # the accumulated gradients in grad_sphfunc_val.
++    pass
+ ```
+ 
+@@ -170,5 +143,5 @@
+ - `beta_loss`: Scalar weight for beta distribution sparsity loss. If $> 0$, gradient contribution is added to `accum` [S1, unofficial][S2, unofficial].
+ - `sparsity_loss`: Scalar weight for sparsity loss. Passed to `trace_ray_cuvol_backward` [S1, unofficial][S2, unofficial].
+-- `Q`: Scaling factor used in RGB normalization. Not explicitly defined in sources, but used in formula [S2, unofficial].
++- `Q`: Scaling factor used in RGB normalization [S2, unofficial][S3, unofficial].
+ 
+ **Edge Cases:**
+@@ -182,6 +155,6 @@
+ 
+ ## Operating characteristics
+-- **Time Complexity:** Linear with respect to the number of samples per ray and the number of rays. The SH evaluation and gradient computation are $O(D)$ per sample, where $D$ is the SH dimension.
+-- **Memory Complexity:** $O(D)$ per thread for shared memory storage of SH function values and gradients.
++- **Time Complexity:** Not given in the sources.
++- **Memory Complexity:** Not given in the sources.
+ - **Performance:** Implemented as a CUDA kernel for GPU acceleration. Performance depends on the number of rays, SH dimension, and grid resolution.
+ - **Strengths:** Enables end-to-end training of volumetric representations. Handles complex lighting via SH.
+@@ -195,3 +168,4 @@
+ ## Sources
+ [S1] kakaobrain/nerf-factory, https://github.com/kakaobrain/nerf-factory, fetched 2026-10-26 (unofficial)
+-[S2] sxyu/svox2, https://github.com/sxyu/svox2, fetched 2026-10-27 (unofficial)+[S2] sxyu/svox2, https://github.com/sxyu/svox2, fetched 2026-10-27 (unofficial)
++[S3] OSHMOS/IPRF, https://github.com/OSHMOS/IPRF, fetched 2026-10-27 (unofficial)

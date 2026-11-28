@@ -1,0 +1,111 @@
+# Super resolution volume rendering
+
+Also called: Gradient-based super resolution, Intermediate difference volume gradient rendering
+
+## Overview
+Super resolution volume rendering is a technique that visualizes sharp surfaces located between voxels by calculating and shading the intermediate difference volume gradient at re-sampling locations, rather than interpolating voxel opacities [S1, unofficial]. It solves the problem of low perceived resolution in standard voxel volume rendering, where classification at voxel locations causes semi-transparent artifacts and limits detail to the voxel size [S1, unofficial]. It sets itself apart from [Voxel Volume Rendering](6488-voxel-volume-rendering.md) by performing classification and shading at arbitrary re-sampling locations on the ray instead of at discrete voxel centers, and from [Simple Shader (3D Texture Mapping)](12431-simple-shader-3d-texture-mapping.md) by explicitly computing volume gradients for shading at these intermediate points [S1, unofficial].
+
+## How it works
+**Inputs and Outputs:**
+*   **Input:** A 3D scalar voxel dataset $V$, an opacity function $T(v)$, a re-sampling distance $d_s$, and a ray defined by origin $\mathbf{o}$ and direction $\mathbf{d}$.
+*   **Output:** A color value $C$ for each pixel.
+
+**Data Structures:**
+*   **Voxel Data:** A 3D array of scalar values.
+*   **Pre-computed Gradients:** A 3D array of 3D vectors $\mathbf{G}_{voxel}$, where each vector is the central difference gradient at a voxel center. If not pre-computed, gradients are calculated on the fly using central differences:
+    $$ \mathbf{G}(x,y,z) = \left( \frac{V(x+1,y,z)-V(x-1,y,z)}{2}, \frac{V(x,y+1,z)-V(x,y-1,z)}{2}, \frac{V(x,y,z+1)-V(x,y,z-1)}{2} \right) $$
+    [G: Assumes voxel spacing is 1.0 in world units for simplicity; if not, scale by voxel dimensions].
+
+**Parameters:**
+*   **Opacity Function $T(v)$:** A step function where $T(v) = 0$ if $v < \text{threshold}$ and $T(v) = 1$ if $v \ge \text{threshold}$ [S1, unofficial].
+*   **Re-sampling Distance $d_s$:** The distance between sample points on the ray. Typically $d_s \le \text{voxel\_size}$, often $d_s = \text{voxel\_size} / 10$ to reduce artifacts [S1, unofficial].
+
+**Steps:**
+1.  **Ray Marching:** For each pixel, cast a ray through the volume.
+2.  **Re-sampling:** Sample the volume at positions $\mathbf{p}$ along the ray with spacing $d_s$.
+3.  **Gradient Interpolation:** At each re-sampling location $\mathbf{p}$, compute the volume gradient vector $\mathbf{G}(\mathbf{p})$ by tri-linearly interpolating the pre-computed voxel gradients $\mathbf{G}_{voxel}$ at the eight surrounding voxel centers [S1, unofficial]. This is a 3D extension of Phong normal interpolation [S1, unofficial].
+4.  **Opacity Classification:** Apply the opacity function $T(V(\mathbf{p}))$ at the re-sampling location $\mathbf{p}$ using the interpolated scalar value $V(\mathbf{p})$ [S1, unofficial].
+5.  **Shading:** If the opacity is non-zero, calculate the shading (color) using the interpolated gradient $\mathbf{G}(\mathbf{p})$ as the surface normal [S1, unofficial].
+6.  **Compositing:** Composite the color and opacity along the ray using standard front-to-back or back-to-front accumulation [G: Standard volume rendering compositing is assumed as the base method is Voxel Volume Rendering].
+
+**Pseudocode:**
+> **Unverified code.** The code below did not pass a test run against a reference implementation, or no test fits it, so it may contain errors.
+
+```python
+def super_resolution_volume_render(ray_origin, ray_direction, volume, voxel_size, threshold, resample_distance):
+    # Pre-compute voxel gradients if not already done
+    # G_voxels[i][j][k] = central_difference_gradient(volume, i, j, k)
+    
+    color = (0.0, 0.0, 0.0)
+    alpha = 0.0
+    
+    # Start ray from near plane
+    t = 0.0
+    max_t = distance_to_far_plane(ray_origin, ray_direction)
+    
+    while t < max_t:
+        # Re-sampling location
+        p = ray_origin + ray_direction * t
+        
+        # 1. Interpolate scalar value at p
+        v_val = trilinear_interpolate(volume, p)
+        
+        # 2. Apply opacity function
+        opacity = 0.0
+        if v_val >= threshold:
+            opacity = 1.0
+        else:
+            opacity = 0.0
+            
+        # 3. Interpolate gradient at p for shading
+        # Only needed if opacity > 0
+        if opacity > 0:
+            g_vec = trilinear_interpolate_gradient(G_voxels, p)
+            
+            # 4. Calculate shading (e.g., Phong lighting)
+            # Assume light direction L and camera direction V are available
+            # N = normalize(g_vec)
+            # diffuse = max(dot(N, L), 0)
+            # specular = pow(max(dot(reflect(-L, N), V), 0), shininess)
+            # pixel_color = base_color * (diffuse + specular)
+            pixel_color = calculate_phong_shading(g_vec, p)
+            
+            # 5. Composite
+            # C_out = C_in + (1 - alpha_in) * alpha_out * C_out
+            # alpha_out = alpha_in + (1 - alpha_in) * opacity
+            # C_out = C_in + (1 - alpha_in) * opacity * pixel_color
+            
+            # Simplified front-to-back compositing
+            contribution = (1.0 - alpha) * opacity
+            color = color + contribution * pixel_color
+            alpha = alpha + contribution * opacity
+            
+            # Optimization: If opaque, break early
+            if alpha >= 1.0:
+                break
+        
+        # Advance ray
+        t += resample_distance
+        
+    return color, alpha
+```
+
+**Edge Cases and Pitfalls:**
+*   **Stack of Slices Artifact:** If the re-sampling distance equals the voxel distance, the rendered object may appear as a stack of 2-D slices [S1, unofficial]. This is caused by gradient discontinuity when neighboring rays find the surface at different discrete depth locations [S1, unofficial].
+*   **Mitigation:** Use a smaller re-sampling distance (e.g., ten times smaller than the voxel distance) to reduce this artifact [S1, unofficial].
+*   **Gradient Calculation Cost:** Gradient calculations are expensive but are only performed at re-sampling locations with non-zero opacity [S1, unofficial].
+
+## Operating characteristics
+*   **Time Complexity:** Gradient calculations scale with image resolution rather than dataset volume. For a $256 \times 256$ image hitting an opaque surface, it requires ~64,000 gradient calculations regardless of dataset size, whereas Levoy’s method requires 16 million for a $256^3$ dataset [S1, unofficial].
+*   **Memory Complexity:** Requires storage for the voxel data and pre-computed voxel gradients (3 vectors per voxel) [S1, unofficial].
+*   **Performance:** Rendering speed is only marginally influenced by gradient calculation when an opaque surface is rendered, because the gradient is calculated only once per ray that hits the surface [S1, unofficial].
+*   **Strengths:** Renders sharp surfaces between voxels, achieving perceived resolution much higher than voxel resolution [S1, unofficial].
+*   **Limitations:** More expensive than simple interpolation methods due to gradient computation [S1, unofficial]. Sensitive to re-sampling distance; poor choice leads to slicing artifacts [S1, unofficial].
+*   **When to Use:** When visualizing sharp surfaces in voxel data and high perceived resolution is required [S1, unofficial].
+*   **When Not to Use:** When performance is critical and voxel-level resolution is acceptable, or when the data does not contain sharp surfaces [S1, unofficial].
+
+## Background
+Super resolution volume rendering was introduced by Bos et al. in 1995 [S1, unofficial]. It was developed to address the low perceived quality of voxel space volume rendering algorithms, which suffer from classification at voxel locations [S1, unofficial]. The method is based on the idea of oversampling data and applying classification functions on higher resolution data [S1, unofficial]. It is a three-dimensional extension to Phong normal interpolation [S1, unofficial].
+
+## Sources
+[S1] Iso-Surface Volume Rendering : speed and accuracy for medical applications, https://doi.org/10.3990/1.9789036513982, fetched 2026-10-26 (unofficial)

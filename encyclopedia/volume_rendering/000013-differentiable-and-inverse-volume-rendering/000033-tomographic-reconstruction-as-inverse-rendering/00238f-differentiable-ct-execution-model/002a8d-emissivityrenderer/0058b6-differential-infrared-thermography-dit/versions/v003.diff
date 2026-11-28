@@ -1,0 +1,164 @@
+--- v002.md
++++ v003.md
+@@ -19,6 +19,6 @@
+ 
+ **Data Structures**
+-*   **Images:** 2D arrays of radiance values.
+-*   **Discretized Spray Cross-Section:** Represented as concentric rings indexed by $j$.
++*   **Images:** 2D arrays of radiance values [S1, unofficial].
++*   **Discretized Spray Cross-Section:** Represented as concentric rings indexed by $j$ [S1, unofficial].
+ *   **Geometric Kernel Matrix $K$:** A matrix where element $K_{ij}$ corresponds to the path length of the $i$-th ray passing through the $j$-th concentric ring [S1, unofficial].
+ *   **Vectors:**
+@@ -34,10 +34,10 @@
+ 
+ Where:
+-*   $I_{meas}$ is observed radiance.
+-*   $I_{bg}$ is background radiance.
+-*   $j(s)$ is the local emission source term.
+-*   $s$ is the coordinate along the ray path of total length $S_{max}$ (background at $s=0$, detector at $s=S_{max}$).
+-*   $\delta(s)$ is the local optical depth (LOD), i.e., cumulative attenuation from position $s$ to the detector.
+-*   $\delta_{max}$ is the total optical depth (TOD) of the medium along the entire line of sight.
++*   $I_{meas}$ is observed radiance [S1, unofficial].
++*   $I_{bg}$ is background radiance [S1, unofficial].
++*   $j(s)$ is the local emission source term [S1, unofficial].
++*   $s$ is the coordinate along the ray path of total length $S_{max}$ (background at $s=0$, detector at $s=S_{max}$) [S1, unofficial].
++*   $\delta(s)$ is the local optical depth (LOD), i.e., cumulative attenuation from position $s$ to the detector [S1, unofficial].
++*   $\delta_{max}$ is the total optical depth (TOD) of the medium along the entire line of sight [S1, unofficial].
+ 
+ Under the thin slab approximation, the integral term reduces, and the measured images are expressed as [S1, unofficial]:
+@@ -74,5 +74,5 @@
+ $$
+ 
+-Where $\Delta$ is the vector of TOD, $A$ is the unknown vector of radial extinction coefficient $\alpha(r)$, and $K$ is the geometric kernel matrix.
++Where $\Delta$ is the vector of TOD, $A$ is the unknown vector of radial extinction coefficient $\alpha(r)$, and $K$ is the geometric kernel matrix [S1, unofficial].
+ 
+ **Steps**
+@@ -89,11 +89,10 @@
+ ```python
+ import numpy as np
+-from scipy.special import erf # Placeholder for Abel inversion solver if not using linear algebra directly
+ 
+ def compute_dit_emissivity(I_meas_1, I_meas_2, I_bg_1, I_bg_2):
+     """
+     Computes the integrated slab emissivity epsilon_DIT from four images.
++    Matches Equation (14).
+     """
+-    # Equation 14
+     epsilon_DIT = (I_meas_2 - I_meas_1) / (I_bg_2 - I_bg_1)
+     return epsilon_DIT
+@@ -102,41 +101,51 @@
+     """
+     Computes the maximum optical depth delta_max from emissivity.
++    Matches Equation (12b).
+     """
+-    # Equation 12b
+-    # Guard against log(0) or log(negative) due to noise
+-    epsilon_clamped = np.clip(epsilon_DIT, 0, 1 - 1e-6)
+-    delta_max = -np.log(1 - epsilon_clamped)
++    # Guard against log(0) or log(negative) due to measurement noise
++    epsilon_clamped = np.clip(epsilon_DIT, 0.0, 1.0 - 1e-6)
++    delta_max = -np.log(1.0 - epsilon_clamped)
+     return delta_max
+ 
+-def abel_inversion_linear(delta_max_vector, geometry):
++def compute_abel_kernel(ray_positions, ring_boundaries):
++    """
++    Constructs the geometric kernel matrix K for concentric rings.
++    K_ij is the path length of the i-th ray (at impact parameter x_i) 
++    passing through the j-th concentric ring (bounded by r_{j-1} and r_j).
++    Matches the geometric definition in the sources [S1, unofficial].
++    """
++    num_rays = len(ray_positions)
++    num_rings = len(ring_boundaries) - 1
++    K = np.zeros((num_rays, num_rings))
++    
++    for i in range(num_rays):
++        x = ray_positions[i]
++        for j in range(num_rings):
++            r_inner = ring_boundaries[j]
++            r_outer = ring_boundaries[j+1]
++            # Path length through a ring for a given impact parameter x
++            # L = 2 * (sqrt(r_outer^2 - x^2) - sqrt(r_inner^2 - x^2))
++            # Only valid if x < r_outer; otherwise path length is 0
++            if x < r_outer:
++                term_outer = np.sqrt(np.maximum(r_outer**2 - x**2, 0.0))
++                term_inner = np.sqrt(np.maximum(r_inner**2 - x**2, 0.0))
++                K[i, j] = 2.0 * (term_outer - term_inner)
++            else:
++                K[i, j] = 0.0
++    return K
++
++def abel_inversion_linear(delta_max_vector, K):
+     """
+     Solves for radial extinction coefficient alpha(r) using the linear algebraic form of the Abel transform.
+-    
+-    Parameters:
+-    delta_max_vector: 1D array of TOD values for each ray position x.
+-    geometry: Object or matrix K containing path lengths.
+-    
+-    Returns:
+-    alpha_vector: 1D array of radial extinction coefficients alpha(r).
++    Solves Delta = K * A for A.
+     """
+-    # Construct geometric kernel matrix K
+-    # K_ij corresponds to the path length of the i-th ray passing through the j-th concentric ring.
+-    # This requires knowledge of the discretization of the spray cross-section into concentric rings.
+-    K = geometry.construct_kernel_matrix()
+-    
+-    # Equation 17: Delta = K * A
+-    # Solve for A (alpha vector)
+-    # Note: This system may be ill-conditioned; regularization might be required in practice.
+-    # Using least squares or pseudo-inverse if K is not square or invertible.
+-    alpha_vector = np.linalg.lstsq(K, delta_max_vector, rcond=None)[0]
+-    
++    # Use least squares to handle potential ill-conditioning or non-square systems
++    alpha_vector, _, _, _ = np.linalg.lstsq(K, delta_max_vector, rcond=None)
+     return alpha_vector
+ 
+-def run_dit(I_meas_1, I_meas_2, I_bg_1, I_bg_2, geometry):
++def run_dit(I_meas_1, I_meas_2, I_bg_1, I_bg_2, ray_positions, ring_boundaries):
+     """
+     Full DIT pipeline.
+     """
+-    # Step 1 & 2: Inputs are already acquired
+-    
+     # Step 3: Calculate emissivity
+     epsilon_DIT = compute_dit_emissivity(I_meas_1, I_meas_2, I_bg_1, I_bg_2)
+@@ -145,6 +154,9 @@
+     delta_max = compute_total_optical_depth(epsilon_DIT)
+     
+-    # Step 5 & 6: Invert Abel transform to get extinction coefficient
+-    alpha_r = abel_inversion_linear(delta_max, geometry)
++    # Step 5: Construct kernel matrix
++    K = compute_abel_kernel(ray_positions, ring_boundaries)
++    
++    # Step 6: Invert Abel transform to get extinction coefficient
++    alpha_r = abel_inversion_linear(delta_max, K)
+     
+     return epsilon_DIT, delta_max, alpha_r
+@@ -156,5 +168,5 @@
+ 
+ **Edge Cases and Pitfalls**
+-*   **Effective Temperature:** DIT temperature does not represent local spray temperature because the 3-D structure is simplified as a thin slab. It represents an effective apparent temperature associated with the region where the Local Optical Depth (LOD) is of the order of unity, based on the Eddington–Barbier approximation [S1, unofficial].
++*   **Effective Temperature:** DIT temperature does not represent local spray temperature because the 3-D structure is simplified as a thin slab [S1, unofficial]. It represents an effective apparent temperature associated with the region where the Local Optical Depth (LOD) is of the order of unity, based on the Eddington–Barbier approximation [S1, unofficial].
+ *   **Optically Thick Cold Vapor:** For optically thick cold vapor sprays in a warm environment, the DIT temperature is an effective temperature associated mainly with the outer spray region where the line-of-sight depth (LOD) is of the order of unity [S1, unofficial].
+ *   **Uncertainty from Drift:** If the spray structure or chamber radiation changes significantly between the two DIT measurements, the estimated emissivity and subsequent reconstruction contain additional uncertainty [S1, unofficial].
+@@ -162,13 +174,13 @@
+ 
+ ## Operating characteristics
+-*   **Time Complexity:** The core DIT calculation (emissivity and TOD) is $O(N)$ where $N$ is the number of pixels. The Abel inversion via linear algebra is $O(M^3)$ or $O(M^2)$ depending on the solver, where $M$ is the number of radial rings.
+-*   **Memory Complexity:** $O(N)$ for images, $O(M^2)$ for the kernel matrix $K$.
+-*   **Strengths:** Avoids direct inversion of the ill-posed integral source term of the RTE. Provides a robust estimate of the extinction coefficient profile which is a prerequisite for solving the full RTE [S1, unofficial].
+-*   **Limitations:** Cannot recover internal radiance or temperature distribution of optically thick sprays on its own. The "temperature" is an effective value, not a local physical temperature. Sensitive to temporal variations in the spray or background between the two acquisitions [S1, unofficial].
++*   **Time Complexity:** Not given in the sources.
++*   **Memory Complexity:** Not given in the sources.
++*   **Strengths:** Avoids direct inversion of the ill-posed integral source term of the RTE [S1, unofficial]. Provides a robust estimate of the extinction coefficient profile which is a prerequisite for solving the full RTE [S1, unofficial].
++*   **Limitations:** Cannot recover internal radiance or temperature distribution of optically thick sprays on its own [S1, unofficial]. The "temperature" is an effective value, not a local physical temperature [S1, unofficial]. Sensitive to temporal variations in the spray or background between the two acquisitions [S1, unofficial].
+ *   **When to use:** When estimating the extinction coefficient profile for axisymmetric sprays to enable subsequent RTE solving, and when the spray is statistically stable over the acquisition time of the two frames [S1, unofficial].
+ *   **When not to use:** When local temperature distribution is required directly, or when the spray is highly dynamic/non-axisymmetric [S1, unofficial].
+ 
+ ## Background
+-Differential Infrared Thermography (DIT) was originally used in spray studies to avoid direct inversion of the ill-posed integral term of the RTE [S1, unofficial]. Key references include Lamanna et al. (2013) and Golzke et al. (2016) [S1, unofficial]. The technique assumes that attenuation is caused exclusively by particles (originally soot, but applied to sprays with micrometer-scale droplets) and relies on the Eddington–Barbier approximation for interpreting the resulting temperature [S1, unofficial]. It is often used as a component of a larger tomographic reconstruction pipeline where the extinction coefficient derived from DIT is used to solve for the local source term [S1, unofficial].
++Differential Infrared Thermography (DIT) was originally used in spray studies to avoid direct inversion of the ill-posed integral term of the RTE [S1, unofficial]. Key references include Lamanna et al. (2013) and Golzke et al. (2016) [S1, unofficial]. Traditional tomographic methods often assume attenuation is caused exclusively by soot particles, but DIT is applied to sprays containing micrometer-scale droplets without relying on that restrictive assumption [S1, unofficial]. The technique relies on the Eddington–Barbier approximation for interpreting the resulting effective temperature [S1, unofficial]. It is often used as a component of a larger tomographic reconstruction pipeline where the extinction coefficient derived from DIT is used to solve for the local source term [S1, unofficial].
+ 
+ ## Sources

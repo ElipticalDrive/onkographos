@@ -1,0 +1,3237 @@
+# Voxel Cone Tracing For Real Time Global Illumination
+Converting mesh data to voxel data and rendering global illumination using cone tracing in OpenGL GLSL.
+Based on the paper "Interactive Indirect Illumination Using Voxel Cone Tracing" by Cyril Crassin.
+
+## Some Screenshots
+
+![](data/screenshots/Screenshot2.png "Screenshot")
+![](data/screenshots/Screenshot3.png "Screenshot")
+![](data/screenshots/Screenshot9.png "Screenshot")
+
+### include/MeshLoader.h
+```
+#ifndef MESH_LOADER
+#define MESH_LOADER
+
+#include <vector>
+#include <glm/glm.hpp>
+
+bool loadMesh_assimp(
+	const char * path,
+	std::vector<unsigned short> & out_indices,
+	std::vector<glm::vec3> & out_vertices, 
+	std::vector<glm::vec2> & out_uvs, 
+	std::vector<glm::vec3> & out_normals);
+
+#endif
+```
+
+### include/MyEngine.h
+```
+#ifndef MY_ENGINE_H
+#define MY_ENGINE_H
+
+#include "SimpleGraphicsEngine.h"
+#include <AntTweakBar.h>
+
+using namespace SGE;
+
+class Planet;
+class Quad;
+class MyObject3D;
+class LightObject3D;
+class CubeTextureFBO;
+
+struct Material
+{
+	glm::vec3 color_diffuse;
+	glm::vec3 color_specular;
+	float reflectance; // [0, 1]
+	float specular_reflectance; // [0, 1], part of reflectance
+	float specular_cone_angle; // [0, 1]
+	float radiosity;
+};
+
+enum RenderMode
+{
+	phong,
+	voxels,
+	global
+};
+
+//! The actual program extending SimpleGraphicsEngine
+/*!
+	Here, all objects can be added to the scene_ and input is handled outside of
+	SimpleGraphicsEngine.
+*/
+class MyEngine : public SimpleGraphicsEngine {
+public:
+	MyEngine();
+	~MyEngine();
+	virtual void update();
+	virtual void render();
+	static void mouseScrollCallback(GLFWwindow * window, double dx, double dy);
+	static void mousePosCallback(GLFWwindow * window, double x, double y);
+	static void mouseButtonCallback(GLFWwindow * window, int button, int action, int mods);
+	static void cursorPosCallback(GLFWwindow * window, double x, double y);
+	static void keyCallback(
+		GLFWwindow * window,
+		int key,
+		int scancode,
+		int action,
+		int mods);
+	void updateCameraController(float dt);
+	template <class T>
+	void Delay(T* input, T end_val, float speed);
+private:
+	void voxelizeScene();
+	void clearVoxels();
+	void renderVolume();
+	void renderGlobal();
+	void renderLocalDiffuse();
+
+	void init3DTexture();
+
+	static void createObjectTweakbar(MyObject3D* obj);
+
+	GLuint tex3D;
+
+	static bool mouse_control_;
+	static float mouse_x_;
+	static float mouse_y_;
+
+
+	static TwBar* tweakbar_;
+	TwBar* global_tweakbar_;
+	static MyObject3D* selected_obj_;
+	
+	// Tweakable variables
+	RenderMode render_mode_;
+
+	// Constants
+	int tex_size = 128;
+	float scene_scale = 1;
+
+
+	// FBO
+	FBO* fbo1_;
+	FBO* fbo2_;
+
+	// Cameras
+	static Object3D* camera_;
+	OrthoCamera* voxelizer_camera_;
+	static PerspectiveCamera* basic_cam_;
+
+	// Objects
+	Quad* quad_;
+	TriangleMesh* cube_;
+	TriangleMesh* icosphere_;
+	TriangleMesh* floor_mesh_;
+	TriangleMesh* bunny_mesh_;
+	TriangleMesh* monkey_mesh_;
+
+	MyObject3D* bunny_;
+	MyObject3D* monkey_;
+	MyObject3D* floor_;
+	MyObject3D* roof_;
+	MyObject3D* l_wall_;
+	MyObject3D* r_wall_;
+	MyObject3D* b_wall_;
+	LightObject3D* light_object_;
+
+	float roll_goal = 0;
+	float pitch_goal = 0;
+	float yaw_goal = 0;
+
+	float roll = 0;
+	float pitch = 0;
+	float yaw = 0;
+
+	glm::vec3 camera_pos; 
+	glm::vec3 camera_pos_goal; 
+	float xmouse = 0;
+	float ymouse = 0;
+
+	float delay_counter_;
+	int frame_counter_;
+
+	// Shaders
+	GLuint shader_phong_;
+	GLuint shader_plaintexture_;
+	GLuint shader_simplevolume_;
+	GLuint shader_worldpositionoutput_;
+	GLuint shader_global_;
+	GLuint shader_voxelization_;
+	GLuint shader_clearvoxels_;
+};
+
+class MyObject3D : public Object3D {
+public:
+	MyObject3D(Material material);
+	~MyObject3D();
+	void render(glm::mat4 M, GLuint program_ID);
+	Material* getMaterialPointer(){return &material_;};
+protected:
+	Material material_;
+};
+
+class Quad : public Object3D {
+public:
+	Quad();
+	~Quad();
+private:
+	TriangleMesh* mesh_;
+};
+
+class LightObject3D : public MyObject3D {
+public:
+	enum RenderMode
+	{
+		shadow_map,
+		normal
+	};
+	LightObject3D(TriangleMesh* mesh, Material material, Object3D* scene = nullptr);
+	~LightObject3D();
+	void setRenderMode(RenderMode mode);
+	void render(glm::mat4 M, GLuint program_ID);
+private:
+	CubeTextureFBO* cube_map;
+	PerspectiveCamera* cube_cameras[6];
+	RenderMode render_mode;
+	bool currently_mapping;
+	Object3D* scene_;
+};
+
+class CubeTextureFBO
+{
+public:
+	CubeTextureFBO(int size);
+	~CubeTextureFBO();
+
+	void bind(GLenum TextureUnit);
+	int getSize(){return size;};
+	int getTextureHandle(){return texture;};
+private:
+	int size;
+	GLuint fbo;
+	GLuint depth_render_buffer;
+	GLuint texture;
+};
+
+#endif
+```
+
+### include/ShaderLoader.h
+```
+#ifndef SHADER_WINDOW_H
+#define SHADER_WINDOW_H
+
+#include <vector>
+#include <string>
+
+#include <GL/glew.h>
+//#include <GLFW/glfw3.h>
+
+//! Load and compile a shader program.
+/*!
+ Function referenced from www.opengl-tutorials.org.
+*/
+class ShaderLoader {
+public:
+  static GLuint loadShaders(
+     const char * vertex_file_path,
+     const char * tesselation_control_file_path,
+     const char * tesselation_eval_file_path,
+     const char * geometry_file_path,
+     const char * fragment_file_path);
+};
+
+#endif
+```
+
+### include/SimpleGraphicsEngine.h
+```
+#ifndef SIMPLE_GRAPHICS_ENGINE_H
+#define SIMPLE_GRAPHICS_ENGINE_H
+
+#include <vector>
+#include <string>
+#include <map>
+
+#define GLM_FORCE_RADIANS
+#include <glm/glm.hpp>
+#include <glm/gtc/matrix_transform.hpp>
+#include <GL/glew.h>
+#include <GLFW/glfw3.h>
+
+namespace SGE {
+  //! ShaderManager
+  class ShaderManager {
+  public:
+    static ShaderManager* instance();
+    ~ShaderManager();
+    void loadShader(
+      std::string name,
+      const char* vs_src,
+      const char* tcs_src,
+      const char* tes_src,
+      const char* gs_src,
+      const char* fs_src);
+    GLuint getShader(std::string name);
+  private:
+    ShaderManager();
+    static ShaderManager* instance_;
+    std::map<std::string, GLuint> shader_program_IDs;
+  };
+  
+  //! Object3D
+  class Object3D {
+  public:
+    Object3D();
+    virtual ~Object3D() {};
+    void addChild(Object3D* child);
+    void removeChild(Object3D* child);
+    virtual void render(glm::mat4 M, GLuint program_ID);
+
+    bool intersects(glm::vec3 point);
+    bool intersects(glm::vec3 origin, glm::vec3 direction, float* t);
+    glm::mat4 getTotalTransform();
+
+    glm::mat4 transform_matrix_;
+
+    std::vector<Object3D*> children;
+  protected:
+    Object3D* parent_;
+  private:
+  };
+
+  class AbstractMesh;
+
+  //! An axis aligned bounding box.
+  class BoundingBox : public Object3D{
+  public:
+    BoundingBox(const AbstractMesh* template_mesh);
+    BoundingBox(const Object3D);
+    BoundingBox();
+    ~BoundingBox();
+    glm::vec3 getMin(){return min;}
+    glm::vec3 getMax(){return max;}
+    bool intersects(glm::vec3 point);
+    bool intersects(glm::vec3 origin, glm::vec3 direction, float* t);
+  private:
+    glm::vec3 max;
+    glm::vec3 min;
+  };
+
+  //! AbstractMesh
+  class AbstractMesh : public Object3D{
+  public:
+    AbstractMesh();
+    ~AbstractMesh();
+    virtual void render(glm::mat4 M, GLuint program_ID) = 0;
+    bool intersects(glm::vec3 point);
+    bool intersects(glm::vec3 origin, glm::vec3 direction, float* t);
+
+    std::vector<glm::vec3> vertices_;
+  protected:
+    virtual void initialize() = 0;
+
+    BoundingBox aabb_;
+    
+    GLuint vertex_array_ID_;
+    GLuint vertex_buffer_;
+  private:
+  };
+  //! TriangleMesh
+  class TriangleMesh : public AbstractMesh{
+  public:
+    TriangleMesh();
+    TriangleMesh(const char* file_path);
+    TriangleMesh(std::vector<glm::vec3> vertices,
+                 std::vector<glm::vec3> normals,
+                 std::vector<unsigned short> elements);
+    ~TriangleMesh();
+    virtual void render(glm::mat4 M, GLuint program_ID);
+  protected:
+    void initialize();
+    std::vector<unsigned short> elements_; // Maximum around 60000 vertices for unsigned short.
+    GLuint element_buffer_;
+    GLuint normal_buffer_;
+    std::vector<glm::vec3> normals_;
+  };
+  
+  //! AbstractCamera
+  class AbstractCamera : public Object3D {
+  public:
+    AbstractCamera();
+    virtual void render(glm::mat4 M, GLuint program_ID) = 0;
+    glm::mat4 projection_transform_matrix_;
+  protected:  
+  };
+  //! PerspectiveCamera
+  class PerspectiveCamera : public AbstractCamera {
+  public:
+    PerspectiveCamera(GLFWwindow* window = nullptr, float fov = 45);
+    virtual void render(glm::mat4 M, GLuint program_ID);
+  private:
+    GLFWwindow* window_;
+  };
+  //! OrthoCamera
+  class OrthoCamera : public AbstractCamera {
+  public:
+    OrthoCamera(GLFWwindow* window = nullptr);
+    virtual void render(
+      glm::mat4 M,
+      GLuint program_ID);
+    virtual void render(
+      glm::mat4 M,
+      GLuint program_ID,
+      float left,
+      float right,
+      float bottom,
+      float top,
+      float near,
+      float far);
+  private:
+    GLFWwindow* window_;
+  };
+
+  //! LightSource
+  class LightSource : public Object3D {
+  public:
+    LightSource();
+    virtual void render(glm::mat4 M, GLuint program_ID);
+    
+    float intensity;
+    glm::vec3 color;
+  private:
+  };
+
+  //! SimpleGraphicsEngine
+  class SimpleGraphicsEngine {
+  public:
+    SimpleGraphicsEngine();
+    virtual ~SimpleGraphicsEngine();
+    
+    void run();
+  protected:
+    virtual void update() = 0;
+    virtual void render() = 0;
+    
+    // Probably should be private...
+    static GLFWwindow* window_;
+    
+    double dt_;
+    
+    static Object3D* scene_;
+    //Object3D* view_space_;
+    //Object3D* background_space_;
+    //static Object3D* camera_;
+    //static Object3D* viewspace_ortho_camera_;
+    
+  private:
+    bool initialize();
+    
+    double time_;
+    
+    //PerspectiveCamera* basic_cam_;
+    //OrthoCamera* background_ortho_cam_;
+  };
+
+  class FBO
+  {
+  public:
+    FBO(int width, int height, int int_method);
+    ~FBO();
+
+    static void useFBO(FBO *out, FBO *in1, FBO *in2);
+    static void CHECK_FRAMEBUFFER_STATUS();
+
+    GLuint texid_;
+    GLuint fb_;
+    GLuint rb_;
+    GLuint depth_;
+    int width_, height_;
+  };
+}
+
+#endif
+```
+
+### shaders/globalrenderer.frag
+```
+#version 450 core
+
+#define M_PI 3.14159
+#define M_SQRT3 1.732
+#define gammacorr(x) pow(x, 1/2.6)
+
+struct Material
+{
+	vec3 color_diffuse;
+	vec3 color_specular;
+	float reflectance; // [0, 1]
+	float specular_reflectance; // [0, 1], part of reflectance
+	float specular_cone_angle; // [0, 1]
+	float radiosity;
+};
+
+struct LightSource
+{
+	float intensity;
+	float radius;
+	vec3 color;
+	vec3 position;
+};
+
+in vec3 normal_viewspace;
+in vec3 vertexPosition_viewspace;
+in vec3 vertexPosition_worldspace;
+in vec3 normal_worldspace;
+in vec3 eyePosition_worldspace;
+
+uniform float time;
+uniform int textureSize;
+uniform float sceneScale;
+uniform sampler3D texUnit3D;
+uniform Material material;
+uniform LightSource light;
+
+
+out vec4 color;
+
+float random(float xx){
+	float x0 = floor(xx);
+	float x1 = x0+1;
+	float v0 = sin( x0*14686 ) * 31718.927 + x0;
+	float v1 = sin( x1*14686 ) * 31718.927 + x1;
+	v0 = v0 - int(v0);
+	v1 = v1 - int(v1);
+	float fracxx = xx - int(xx);
+	return (v0*(1-fracxx)+v1*(fracxx))*2-1*sin(xx);
+}
+
+// Trace cone from position vertexPosition_worldspace and accumulate color
+vec3 coneTrace(vec3 rayDirection, float coneAngle, float multiSample, int steps)
+{
+	//coneAngle = M_PI / 30;
+	vec4 res = vec4(0,0,0,0);
+	float tanTheta2 = tan(coneAngle / 2);
+	float tanAlpha2 = tan(coneAngle / (2*multiSample));
+	float sampleFactor = (1 + tanAlpha2) / (1 - tanAlpha2);
+	float voxelSize = float(1) / textureSize * 2;
+
+	vec3 rayOrigin = vertexPosition_worldspace + voxelSize * sceneScale * M_SQRT3 * normalize(normal_worldspace);
+	float sampleStep = voxelSize / 2;
+	float t = 0;//0.05 * sampleFactor * random(123314 *( 1 + time) *(vertexPosition_viewspace.x + vertexPosition_viewspace.y + vertexPosition_viewspace.z));
+	for (int i=0; i<steps; i++)
+	{
+		// Increment sampleStep
+		sampleStep = sampleStep * sampleFactor;
+		/*if (sampleStep > 0.05)
+		{
+			sampleStep = 0.05;
+		}*/
+		t += sampleStep;
+
+		float d = (tanTheta2 * t * 2); // Sphere diameter
+		float mipLevel = log2(d / voxelSize);
+		/*
+		if (mipLevel > log2(textureSize) - 1)
+			mipLevel = log2(textureSize) - 1;
+		*/
+		/*
+		if (sampleStep * multiSample > textureSize / 2)
+		{
+			break;
+		}*/
+
+		vec3 samplePoint = (rayOrigin + rayDirection * t );
+		if (samplePoint.x < -sceneScale || samplePoint.x > sceneScale || 
+			samplePoint.y < -sceneScale || samplePoint.y > sceneScale ||
+			samplePoint.z < -sceneScale || samplePoint.z > sceneScale)
+		{
+			break;
+		}
+		vec4 texSample = textureLod(texUnit3D, (samplePoint / sceneScale + vec3(1,1,1)) / 2, mipLevel) * sampleStep * 100;
+		
+		/*
+		if (texSample.a > 0)
+		{
+			//texSample.rgb /= texSample.a;
+			// Alpha compositing
+			//res.rgb = res.rgb + (1 - res.a) * texSample.rgb;
+	        //res.a   = res.a   + (1 - res.a) * texSample.a;
+	        res.a = res.a + texSample.a * (1 - res.a);
+	        res.rgb = (res.rgb * res.a + texSample.rgb * texSample.a * (1 - res.a)) / res.a;
+		}
+		if (res.a > 0.9)
+			break;
+			*/
+		
+		
+		if (texSample.a > 0)
+		{
+			texSample.rgb /= texSample.a;
+			// Alpha compositing
+			res.rgb = res.rgb + (1 - res.a) * texSample.a * texSample.rgb;
+	        res.a   = res.a   + (1 - res.a) * texSample.a;
+		}
+		if (res.a > 0.9)
+		{
+			break;
+		}
+
+			
+		/*
+		res += texSample;
+		if (res.r > 0 || res.g > 0 || res.b > 0)
+		{
+			break;
+		}*/
+	}
+	return res.rgb;
+}
+
+vec3 calculateLocalDiffuse()
+{
+	vec3 n = normalize(normal_worldspace);
+	vec3 light_diff = vertexPosition_worldspace - light.position;
+	float light_dist = length(light_diff);
+	vec3 l = normalize(light_diff);
+
+
+	float cosTheta = dot(n,-l);
+	vec3 diffuse =
+		light.color * light.intensity *
+		max(cosTheta, 0) *
+		1 / pow(light_dist, 2);
+
+	return diffuse;
+}
+
+vec3 calculateGlobalDiffuse(vec3 n_worldspace)
+{
+	vec3 n = n_worldspace;
+   	vec3 rayDirection = n;
+   	vec3 res;
+   	float coneAngle = M_PI / 3;
+
+   	// Pick a random vector helper
+   	vec3 helper = vec3(0.12,0.32,0.82);// normalize(vec3(random(int(vertexPosition_worldspace.x * 5226)),random(int(vertexPosition_worldspace.y * 5226)),random(int(vertexPosition_worldspace.z * 5226))));
+   	if (abs(dot(n,helper)) == 1)
+   		// Pick a new helper
+   		helper = vec3(0,1,0);
+
+   	// Find a tangent and a bitangent
+   	vec3 t = normalize(helper - dot(n,helper) * n);
+   	vec3 bt = cross(t, n);
+   	
+   	float multiSample = 4;
+   	/*
+   	// First trace a cone in the normal direction
+   	res += coneTrace(rayDirection, coneAngle, multiSample, 200);
+   	float inclination = M_PI / 4;
+
+   	for (int i = 0; i < 5; ++i)
+   	{
+   		rayDirection = n * cos(inclination) + sin(inclination) * (cos( i * 2 * M_PI / 5) * t + sin(i * 2 * M_PI / 5) * bt);
+   		res += coneTrace(normalize(rayDirection), coneAngle, multiSample, 200);
+   	}
+
+   	return res / 6;
+   	*/
+   	
+   	// First trace a cone in the normal direction
+   	res += coneTrace(rayDirection, coneAngle, multiSample, 200);
+
+   	// Rotate the ray direction 30 degrees around the tangent to achieve the next
+   	// ray direction
+   	rayDirection = 0.7071 * n + 0.7071 * t;
+   	res += coneTrace(rayDirection, coneAngle, multiSample, 200);
+
+   	// Next sample direction
+   	rayDirection = 0.7071 * n + 0.7071 * (0.309 * t + 0.951 * bt);
+   	res += coneTrace(rayDirection, coneAngle, multiSample, 200);
+  	// Next sample direction
+   	rayDirection = 0.7071 * n + 0.7071 * (-0.809 * t + 0.588 * bt);
+   	res += coneTrace(rayDirection, coneAngle, multiSample, 200);
+	// Next sample direction
+   	rayDirection = 0.7071 * n - 0.7071 * (-0.809 * t - 0.588 * bt);
+   	res += coneTrace(rayDirection, coneAngle, multiSample, 200);
+   	// Next sample direction
+   	rayDirection = 0.7071 * n - 0.7071 * (0.309 * t - 0.951 * bt);
+   	res += coneTrace(rayDirection, coneAngle, multiSample, 200);
+
+   	return res / 6;
+}
+
+vec3 calculateLocalSpecular()
+{
+	vec3 n = normalize(normal_worldspace);
+	vec3 v = normalize( vertexPosition_worldspace - eyePosition_worldspace );
+	vec3 r = reflect(v, n);
+
+	vec3 light_diff = vertexPosition_worldspace - light.position;
+	float light_dist = length(light_diff);
+	vec3 l = normalize(light_diff);
+
+	float cos_alpha = dot(r,-l);
+
+
+	vec3 spcular =
+	light.color * light.intensity *
+	pow(max(cos_alpha, 0), (1 / (material.specular_cone_angle + 0.1)) * 20);// *
+	/*1 / pow(light_dist, 2);*/
+
+	return spcular;
+}
+
+vec3 calculateGlobalSpecular()
+{
+	vec3 v = normalize( vertexPosition_worldspace - eyePosition_worldspace );
+	vec3 r = reflect(v, normalize(normal_worldspace));
+	float cone_angle = material.specular_cone_angle;//atan((1 - material.specular_cone_angle) * M_PI / 2);
+	return coneTrace(r, cone_angle, 4, 200);
+}
+
+vec3 calculateGlobalDirectDiffuse()
+{
+	vec3 n = normalize(normal_worldspace);
+	vec3 light_diff = light.position - vertexPosition_worldspace;
+	float light_dist = length(light_diff);
+	vec3 l = normalize(light_diff);
+
+	float cone_angle = atan(light.radius / light_dist) * 2;
+	float cosTheta = dot(n,l);
+
+	vec3 diffuse =
+		coneTrace(l, cone_angle, 8, 200) *
+		max(cosTheta, 0) *
+		1 / pow(light_dist, 2);
+
+	return diffuse / 3;
+}
+
+void main(){
+	color = vec4(0,0,0,1);
+	// Add diffuse
+	if (material.reflectance != 0 && (1 - material.specular_reflectance) != 0)
+	{
+		// Add diffuse
+		//color.rgb = calculateLocalDiffuse() * material.color_diffuse * material.reflectance * (1 - material.specular_reflectance);
+		color.rgb += calculateGlobalDirectDiffuse() * material.color_diffuse * material.reflectance * (1 - material.specular_reflectance);
+		color.rgb += calculateGlobalDiffuse(normalize(normal_worldspace)) * material.color_diffuse * material.reflectance * (1 - material.specular_reflectance);
+	}
+	// Add specular
+	if (material.reflectance != 0 && material.specular_reflectance != 0)
+	{
+		color.rgb += calculateGlobalSpecular() * material.color_specular * material.reflectance * material.specular_reflectance;
+		color.rgb += calculateLocalSpecular() * material.color_specular * material.reflectance * material.specular_reflectance;
+	}
+	color.rgb += material.radiosity * material.color_diffuse;
+
+	color.rgb = vec3(gammacorr(color.r), gammacorr(color.g), gammacorr(color.b));
+}
+```
+
+### shaders/globalrenderer.vert
+```
+#version 410 core
+
+layout(location = 0) in vec3 vertexPosition_modelspace;
+layout(location = 1) in vec3 vertexNormal_modelspace;
+
+out vec3 normal_viewspace;
+out vec3 normal_worldspace;
+out vec3 vertexPosition_viewspace;
+out vec3 vertexPosition_worldspace;
+out vec3 eyePosition_worldspace;
+
+uniform mat4 M;
+uniform mat4 V;
+uniform mat4 P;
+
+void main(){
+	vertexPosition_viewspace = vec3(V * M * vec4(vertexPosition_modelspace,1));
+	vertexPosition_worldspace = vec3(M * vec4(vertexPosition_modelspace,1));
+	normal_viewspace = vec3(V * M * vec4(vertexNormal_modelspace,0));
+	normal_worldspace = vec3(M * vec4(vertexNormal_modelspace,0));
+	eyePosition_worldspace = vec3(inverse(V) * vec4(0,0,0,1));
+	gl_Position = P * V * M * vec4(vertexPosition_modelspace,1);
+}
+```
+
+### shaders/phong.frag
+```
+#version 410 core
+
+#define gammacorr(x) pow(x, 1/2.6)
+
+struct Material
+{
+	vec3 color_diffuse;
+	vec3 color_specular;
+	float reflectance; // [0, 1]
+	float specular_reflectance; // [0, 1], part of reflectance
+	float specular_polish; // [0, 1]
+};
+
+struct LightSource
+{
+	float intensity;
+	vec3 color;
+	vec3 position;
+};
+
+in vec3 normal_viewspace;
+in vec3 normal_worldspace;
+in vec3 vertexPosition_viewspace;
+in vec3 vertexPosition_worldspace;
+
+uniform Material material;
+uniform LightSource light;
+
+out vec4 color;
+
+
+vec3 calculateLocalDiffuse()
+{
+	vec3 res = vec3(0,0,0);
+	vec3 n = normalize(normal_worldspace);
+	vec3 light_diff = vertexPosition_worldspace - light.position;
+	float light_dist = length(light_diff);
+	vec3 l = normalize(light_diff);
+
+
+	float cosTheta = dot(n,-l);
+	vec3 diffuse =
+		light.color * light.intensity *
+		max(cosTheta, 0) *
+		1 / pow(light_dist, 2);
+
+	vec3 ambient = vec3(0.0,0.0,0.0);
+	res = ambient + diffuse;
+	return res;
+}
+
+void main(){
+	color.rgb = calculateLocalDiffuse() * material.color_diffuse * material.reflectance * (1 - material.specular_reflectance);
+    color.a = 1;
+	color.rgb = vec3(gammacorr(color.r), gammacorr(color.g), gammacorr(color.b));
+}
+```
+
+### shaders/phong.vert
+```
+#version 450 core
+
+layout(location = 0) in vec3 vertexPosition_modelspace;
+layout(location = 1) in vec3 vertexNormal_modelspace;
+
+out vec3 normal_viewspace;
+out vec3 normal_worldspace;
+out vec3 vertexPosition_viewspace;
+out vec3 vertexPosition_worldspace;
+
+uniform mat4 M;
+uniform mat4 V;
+uniform mat4 P;
+
+void main(){
+	vertexPosition_viewspace = vec3(V * M * vec4(vertexPosition_modelspace,1));
+	vertexPosition_worldspace = vec3(M * vec4(vertexPosition_modelspace,1));
+	normal_viewspace = vec3(V * M * vec4(vertexNormal_modelspace,0));
+	normal_worldspace = vec3(M * vec4(vertexNormal_modelspace,0));
+	gl_Position = P * V * M * vec4(vertexPosition_modelspace,1);
+}
+```
+
+### shaders/plaintextureshader.frag
+```
+#version 410 core
+
+in vec2 texCoord;
+uniform sampler3D texUnit;
+out vec4 color;
+
+void main(void)
+{
+    color = texture(texUnit, vec3(texCoord.x,texCoord.y,1));
+}
+```
+
+### shaders/plaintextureshader.vert
+```
+#version 410 core
+
+layout(location = 0) in vec3 vertexPosition_modelspace;
+
+out vec2 texCoord;
+
+void main(){
+	texCoord = (vertexPosition_modelspace.xy + vec2(1,1)) / 2;
+
+	gl_Position = vec4(vertexPosition_modelspace, 1);
+}
+```
+
+### shaders/simplevolumerenderer.frag
+```
+#version 450 core
+
+#define gammacorr(x) pow(x, 1/2.6)
+
+in vec2 texCoord;
+in vec3 vertexPosition_screenspace_frag;
+in vec3 cameraPosition_worldspace_frag;
+
+out vec4 color;
+
+uniform mat4 M;
+uniform mat4 V;
+uniform mat4 P;
+
+uniform int textureSize;
+uniform float sceneScale;
+
+uniform sampler3D texUnit3D;
+uniform sampler2D texUnitBackCube;
+uniform sampler2D texUnitFrontCube;
+
+void main(){
+	vec4 res = vec4(0,0,0,0);
+	bool insideCube =
+		cameraPosition_worldspace_frag.x < (sceneScale + 0.1) &&
+		cameraPosition_worldspace_frag.x > -(sceneScale + 0.1) &&
+		cameraPosition_worldspace_frag.y < (sceneScale + 0.1) &&
+		cameraPosition_worldspace_frag.y > -(sceneScale + 0.1) &&
+		cameraPosition_worldspace_frag.z < (sceneScale + 0.1) &&
+		cameraPosition_worldspace_frag.z > -(sceneScale + 0.1);
+	vec3 rayOrigin;
+	if (insideCube)
+		rayOrigin = cameraPosition_worldspace_frag;
+	else
+		rayOrigin = texture(texUnitFrontCube, texCoord).xyz;
+	vec3 rayEnd = texture(texUnitBackCube, texCoord).xyz;
+	vec3 rayDirection = normalize(rayEnd - rayOrigin);
+	float rayStep = 0.002;
+	int nSteps = int(length(rayEnd - rayOrigin) / rayStep);
+
+	for (int i=0; i<nSteps; i++)
+	{
+		float mipLevel = 0;
+		vec3 samplePoint = (rayOrigin + rayDirection * rayStep * i);
+		//samplePoint = vec3(samplePoint.x, samplePoint.y, samplePoint.z);
+		vec4 texSample = textureLod(texUnit3D, (samplePoint / sceneScale + vec3(1,1,1)) / 2, mipLevel);	
+
+
+		if (texSample.a > 0)
+		{
+			texSample.rgb /= texSample.a;
+			// Alpha compositing
+			res.rgb = res.rgb + (1 - res.a) * texSample.a * texSample.rgb;
+	        res.a   = res.a   + (1 - res.a) * texSample.a;
+		}
+		if (res.a > 0.95)
+			break;
+	}
+	color = res;
+	color.rgb = vec3(gammacorr(color.r), gammacorr(color.g), gammacorr(color.b));
+}
+```
+
+### shaders/simplevolumerenderer.vert
+```
+#version 450 core
+#extension GL_ARB_explicit_attrib_location : require
+
+layout(location = 0) in vec3 vertexPosition_modelspace;
+
+uniform mat4 V;
+
+out vec2 texCoord;
+out vec3 vertexPosition_screenspace_frag;
+out vec3 cameraPosition_worldspace_frag;
+
+void main(){
+	// Should do scale and bias on this bad boy
+	texCoord = (vertexPosition_modelspace.xy + vec2(1,1)) / 2;
+	vertexPosition_screenspace_frag = vec3(
+		vertexPosition_modelspace.x,
+		vertexPosition_modelspace.y,
+		vertexPosition_modelspace.z);
+
+	gl_Position = vec4(vertexPosition_modelspace, 1);
+	cameraPosition_worldspace_frag = vec3(inverse(V) * vec4(0,0,0,1));
+}
+```
+
+### shaders/worldpositionoutputshader.frag
+```
+#version 410 core
+
+in vec3 vertexPosition_worldspace;
+
+out vec4 color;
+
+void main(){
+
+	color.rgb = vertexPosition_worldspace;
+    color.a = 1;
+}
+```
+
+### shaders/worldpositionoutputshader.vert
+```
+#version 410 core
+
+layout(location = 0) in vec3 vertexPosition_modelspace;
+out vec3 vertexPosition_worldspace;
+
+uniform mat4 M;
+uniform mat4 V;
+uniform mat4 P;
+
+void main(){
+	vertexPosition_worldspace = vec3(M * vec4(vertexPosition_modelspace,1));
+	gl_Position = P * V * M * vec4(vertexPosition_modelspace,1);
+}
+```
+
+### src/MeshLoader.cpp
+```
+#include "../include/MeshLoader.h"
+
+#include <iostream>
+
+#include <assimp/Importer.hpp>
+#include <assimp/scene.h>
+#include <assimp/postprocess.h>
+
+bool loadMesh_assimp(
+	const char * path,
+	std::vector<unsigned short> & out_indices,
+	std::vector<glm::vec3> & out_vertices, 
+	std::vector<glm::vec2> & out_uvs, 
+	std::vector<glm::vec3> & out_normals)
+{	
+	Assimp::Importer importer;
+
+	const aiScene* scene=importer.ReadFile(
+		path, 
+		aiProcess_GenSmoothNormals | 
+		aiProcess_Triangulate | 
+		aiProcess_CalcTangentSpace | 
+		aiProcess_FlipUVs);
+
+	if(!scene || scene->mFlags==AI_SCENE_FLAGS_INCOMPLETE || !scene->mRootNode)
+	{
+		std::cout << "The file wasn't successfuly opened: " << path << std::endl;
+		return false; 
+	}
+
+	aiMesh* mesh=scene->mMeshes[0];
+
+
+	for(int i=0; i<mesh->mNumVertices; ++i)
+	{
+		glm::vec3 tmpVec;
+		
+		//position
+		tmpVec.x=mesh->mVertices[i].x;
+		tmpVec.y=mesh->mVertices[i].y;
+		tmpVec.z=mesh->mVertices[i].z;
+		out_vertices.push_back(tmpVec);
+		
+		//normals
+		tmpVec.x=mesh->mNormals[i].x;
+		tmpVec.y=mesh->mNormals[i].y;
+		tmpVec.z=mesh->mNormals[i].z;
+		out_normals.push_back(tmpVec);
+	/*
+		//tangent
+		if(mesh->mTangents)
+		{
+			tmpVec.x=mesh->mTangents[i].x;
+			tmpVec.y=mesh->mTangents[i].y;
+			tmpVec.z=mesh->mTangents[i].z;
+		}else{
+			tmpVec.x=1.0;
+			tmpVec.y=tmpVec.z=0;
+		}			
+		
+		//colors
+		if(mesh->mColors[0])
+		{
+			//!= material color
+			tmpVec.x=mesh->mColors[0][i].r;
+			tmpVec.y=mesh->mColors[0][i].g;
+			tmpVec.z=mesh->mColors[0][i].b;				
+		}else{
+			tmpVec=defaultColor;
+		}
+		tmp.color=tmpVec;
+	*/
+		//Textures
+		if(mesh->mTextureCoords[0])
+		{
+			tmpVec.x=mesh->mTextureCoords[0][i].x;
+			tmpVec.y=mesh->mTextureCoords[0][i].y;				
+		}else{
+			tmpVec.x=tmpVec.y=tmpVec.z=0.0;
+		}
+
+		out_uvs.push_back(glm::vec2(tmpVec.x, tmpVec.y));
+	}
+
+	for(int i=0;i<mesh->mNumFaces; ++i)
+	{
+		aiFace face=mesh->mFaces[i];
+		for(int j=0;j<face.mNumIndices;++j) //0..2
+		{
+			out_indices.push_back(face.mIndices[j]);
+		}
+	}
+
+	return true;
+}
+```
+
+### src/MyEngine.cpp
+```
+#include "../include/MyEngine.h"
+
+#include <glm/gtx/transform.hpp>
+
+#include <iostream>
+#include <sstream> 
+#include <sys/timeb.h>
+
+#include <AntTweakBar.h>
+
+Object3D* MyEngine::camera_;
+PerspectiveCamera* MyEngine::basic_cam_;
+bool MyEngine::mouse_control_;
+float MyEngine::mouse_x_;
+float MyEngine::mouse_y_;
+TwBar* MyEngine::tweakbar_;
+MyObject3D* MyEngine::selected_obj_;
+
+MyEngine::MyEngine() : SimpleGraphicsEngine()
+{
+  mouse_control_ = true;
+  render_mode_ = RenderMode::global;
+
+  TwInit(TW_OPENGL_CORE, NULL); // for core profile
+  TwWindowSize(640 * 2, 480 * 2);
+
+  global_tweakbar_ = TwNewBar("GlobalTweakBar");
+/*
+  TwAddVarRW(global_tweakbar_, "diffuseColor", TW_TYPE_COLOR3F, &obj->getMaterialPointer()->color_diffuse.r, " group=material label='Diffuse color' ");
+  TwAddVarRW(global_tweakbar_, "specularColor", TW_TYPE_COLOR3F, &obj->getMaterialPointer()->color_specular.r, " group=material label='Specular color' ");
+  TwAddVarRW(global_tweakbar_, "reflectance", TW_TYPE_FLOAT, &obj->getMaterialPointer()->reflectance, " group=material min=0 max=1 step=0.01 label='reflectance' ");
+  TwAddVarRW(global_tweakbar_, "specularReflectance", TW_TYPE_FLOAT, &obj->getMaterialPointer()->specular_reflectance, " group=material min=0 max=1 step=0.01 label='Specular reflectance' ");
+  TwAddVarRW(global_tweakbar_, "specularPolish", TW_TYPE_FLOAT, &obj->getMaterialPointer()->specular_cone_angle, " group=material min=0 max=1.57 step=0.01 label='Specular cone angle' ");
+  TwAddVarRW(global_tweakbar_, "radiosity", TW_TYPE_FLOAT, &obj->getMaterialPointer()->radiosity, " group=material min=0 max=10 step=0.01 label='Radiosity' ");
+*/
+  TwType render_mode_type = TwDefineEnum("RenderModeType", NULL, 0);
+  TwAddVarRW(global_tweakbar_, "Render mode", render_mode_type, &render_mode_, " enum='0 {Phong}, 1 {Voxels}, 2 {Global}' ");
+
+  // Shaders
+  ShaderManager::instance()->loadShader(
+    "SHADER_PHONG",
+    "../shaders/phong.vert",
+    nullptr,
+    nullptr,
+    nullptr,
+    "../shaders/phong.frag");
+  ShaderManager::instance()->loadShader(
+    "SHADER_PLAINTEXTURE",
+    "../shaders/plaintextureshader.vert",
+    nullptr, 
+    nullptr,
+    nullptr,
+    "../shaders/plaintextureshader.frag");
+  ShaderManager::instance()->loadShader(
+    "SHADER_SIMPLEVOLUME",
+    "../shaders/simplevolumerenderer.vert",
+    nullptr, 
+    nullptr,
+    nullptr,
+    "../shaders/simplevolumerenderer.frag");
+  ShaderManager::instance()->loadShader(
+    "SHADER_WORLDPOSITIONOUTPUT",
+    "../shaders/worldpositionoutputshader.vert",
+    nullptr, 
+    nullptr,
+    nullptr,
+    "../shaders/worldpositionoutputshader.frag");
+  ShaderManager::instance()->loadShader(
+    "SHADER_GLOBALRENDERER",
+    "../shaders/globalrenderer.vert",
+    nullptr, 
+    nullptr,
+    nullptr,
+    "../shaders/globalrenderer.frag");
+  ShaderManager::instance()->loadShader(
+    "SHADER_VOXELIZATION",
+    "../shaders/voxelization/voxelization.vert", // Vertex shader file path
+    nullptr, // Tesselation control shader file path
+    nullptr, // Tesselation evaluation shader file path
+    "../shaders/voxelization/voxelization.geom", // Geometry shader file path
+    "../shaders/voxelization/voxelization.frag"); // Fragment shader file path
+  ShaderManager::instance()->loadShader(
+    "SHADER_CLEARVOXELS",
+    "../shaders/voxelization/voxelization.vert", // Vertex shader file path
+    nullptr, // Tesselation control shader file path
+    nullptr, // Tesselation evaluation shader file path
+    "../shaders/voxelization/voxelization.geom", // Geometry shader file path
+    "../shaders/voxelization/clearvoxels.frag"); // Fragment shader file path
+  
+  shader_phong_ = ShaderManager::instance()->getShader("SHADER_PHONG");
+  shader_plaintexture_ = ShaderManager::instance()->getShader("SHADER_PLAINTEXTURE");
+  shader_simplevolume_ = ShaderManager::instance()->getShader("SHADER_SIMPLEVOLUME");
+  shader_worldpositionoutput_ = ShaderManager::instance()->getShader("SHADER_WORLDPOSITIONOUTPUT");
+  shader_global_ = ShaderManager::instance()->getShader("SHADER_GLOBALRENDERER");
+  shader_voxelization_ = ShaderManager::instance()->getShader("SHADER_VOXELIZATION");
+  shader_clearvoxels_ = ShaderManager::instance()->getShader("SHADER_CLEARVOXELS");
+
+  yaw_goal = pitch_goal = roll_goal = 0;
+  yaw = pitch = roll = 0;
+
+
+  // FBO
+  fbo1_ = new FBO(640, 480, 0);
+  fbo2_ = new FBO(640, 480, 0);
+
+  // Cameras
+  camera_ = new Object3D();
+  basic_cam_ = new PerspectiveCamera(window_);
+  voxelizer_camera_ = new OrthoCamera();
+
+  camera_->addChild(basic_cam_);
+
+  // Materials
+  Material material1;
+  material1.color_diffuse = glm::vec3(1,1,1);
+  material1.color_specular = glm::vec3(1,1,1);
+  material1.reflectance = 1;
+  material1.specular_reflectance = 0.0;
+  material1.specular_cone_angle = 1.57;
+  material1.radiosity = 0.0;
+
+  Material red;
+  red.color_diffuse = glm::vec3(1,0.2,0.2);
+  red.color_specular = glm::vec3(1,1,1);
+  red.reflectance = 1.0;
+  red.specular_reflectance = 0.0;
+  red.specular_cone_angle = 1.57;
+  red.radiosity = 0.0;
+
+  Material green;
+  green.color_diffuse = glm::vec3(0.2,1,0.2);
+  green.color_specular = glm::vec3(1,1,1);
+  green.reflectance = 1.0;
+  green.specular_reflectance = 0.0;
+  green.specular_cone_angle = 1.57;
+  green.radiosity = 0.0;
+
+  Material material2;
+  material2.color_diffuse = glm::vec3(0.8,0.8,1);
+  material2.color_specular = glm::vec3(0.8,0.8,1);
+  material2.reflectance = 1.0;
+  material2.specular_reflectance = 0.0;
+  material2.specular_cone_angle = 1.57;
+  material2.radiosity = 0.0;
+
+  Material material3;
+  material3.color_diffuse = glm::vec3(1,1,1);
+  material3.color_specular = glm::vec3(1,1,1);
+  material3.reflectance = 1.0;
+  material3.specular_reflectance = 0.0;
+  material3.specular_cone_angle = 1.57;
+  material3.radiosity = 0.0;
+
+  Material material_light; 
+  material_light.color_diffuse = glm::vec3(1,0.9,0.8);
+  material_light.color_specular = glm::vec3(0,0,0);
+  material_light.reflectance = 0;
+  material_light.specular_reflectance = 0;
+  material_light.specular_cone_angle = 1.57;
+  material_light.radiosity = 0.2 * 3;
+
+  // Objects
+  //planet_ = new Planet();
+  quad_ = new Quad();
+  cube_ = new TriangleMesh("../data/meshes/cube.obj");
+  icosphere_ = new TriangleMesh("../data/meshes/icosphere.obj");
+  floor_mesh_ = new TriangleMesh("../data/meshes/floor.obj");
+  bunny_mesh_ = new TriangleMesh("../data/meshes/bunny.obj");
+  monkey_mesh_ = new TriangleMesh("../data/meshes/suzanne.obj");
+
+  floor_ = new MyObject3D(material1);
+  roof_ = new MyObject3D(material1);
+  l_wall_ = new MyObject3D(red);
+  r_wall_ = new MyObject3D(green);
+  b_wall_ = new MyObject3D(material3);
+  bunny_ = new MyObject3D(material3);
+  monkey_ = new MyObject3D(material3);
+  light_object_ = new LightObject3D(icosphere_, material_light, scene_);
+
+  //light_ = new LightSource();
+
+  //createObjectTweakbar(bunny_);
+
+  floor_->addChild(floor_mesh_);
+  floor_->transform_matrix_ = glm::scale(glm::mat4(), glm::vec3(2.0,2.0,2.0));
+  floor_->transform_matrix_ = glm::translate(glm::vec3(0.0f,-1.0f,0.0f)) * floor_->transform_matrix_;
+  
+  roof_->addChild(floor_mesh_);
+  roof_->transform_matrix_ = glm::translate(glm::vec3(0.0f,1.0f,0.0f)) * roof_->transform_matrix_;
+  
+  l_wall_->addChild(floor_mesh_);
+  l_wall_->transform_matrix_ = glm::rotate(float(M_PI / 2), glm::vec3(0.0f,0.0f,1.0f)) * l_wall_->transform_matrix_;
+  l_wall_->transform_matrix_ = glm::translate(glm::vec3(-1.0f,0.0f,0.0f)) * l_wall_->transform_matrix_;
+  
+  r_wall_->addChild(floor_mesh_);
+  r_wall_->transform_matrix_ = glm::rotate(float(M_PI / 2), glm::vec3(0.0f,0.0f,1.0f)) * r_wall_->transform_matrix_;
+  r_wall_->transform_matrix_ = glm::translate(glm::vec3(1.0f,0.0f,0.0f)) * r_wall_->transform_matrix_;
+  
+  b_wall_->addChild(floor_mesh_);
+  b_wall_->transform_matrix_ = glm::rotate(float(M_PI / 2), glm::vec3(1.0f,0.0f,0.0f)) * b_wall_->transform_matrix_;
+  b_wall_->transform_matrix_ = glm::translate(glm::vec3(0.0f,0.0f,-1.0f)) * b_wall_->transform_matrix_;
+
+  bunny_->addChild(bunny_mesh_);
+  bunny_->transform_matrix_ = glm::scale(glm::mat4(), glm::vec3(0.2,0.2,0.2));
+  bunny_->transform_matrix_ = glm::translate(glm::vec3(-0.3f,-0.5f,0.0f)) * bunny_->transform_matrix_;
+
+  monkey_->addChild(monkey_mesh_);
+  monkey_->transform_matrix_ = glm::scale(glm::mat4(), glm::vec3(0.2,0.2,0.2));
+  monkey_->transform_matrix_ = glm::translate(glm::vec3(0.5f,0.0f,0.0f)) * monkey_->transform_matrix_;
+
+  light_object_->transform_matrix_ = glm::scale(glm::mat4(), glm::vec3(0.1,0.1,0.1));
+  light_object_->transform_matrix_ = glm::translate(glm::vec3(0.0,0.6f,0.0)) * light_object_->transform_matrix_;
+
+  scene_->addChild(floor_);
+  scene_->addChild(roof_);
+  scene_->addChild(l_wall_);
+  scene_->addChild(r_wall_);
+  scene_->addChild(b_wall_);
+
+  scene_->addChild(bunny_);
+  scene_->addChild(monkey_);
+  scene_->addChild(light_object_);
+
+  // Set callback functions
+  glfwSetCursorPosCallback(window_, mousePosCallback);
+  glfwSetMouseButtonCallback(window_, mouseButtonCallback);
+  glfwSetScrollCallback(window_, mouseScrollCallback);
+  glfwSetKeyCallback(window_, keyCallback);
+
+  glfwSetInputMode(window_, GLFW_CURSOR, GLFW_CURSOR_DISABLED);
+
+  init3DTexture();
+  voxelizeScene();
+}
+
+MyEngine::~MyEngine()
+{
+  delete camera_;
+  delete basic_cam_;
+  delete voxelizer_camera_;
+  //delete planet_;
+  delete quad_;
+  delete cube_;
+  delete icosphere_;
+  delete floor_mesh_;
+  delete bunny_mesh_;
+  delete monkey_mesh_;
+
+  delete floor_;
+  delete roof_;
+  delete l_wall_;
+  delete r_wall_;
+  delete b_wall_;
+  delete bunny_;
+  delete monkey_;
+  delete light_object_;
+
+  delete fbo1_;
+  delete fbo2_;
+
+  if (tweakbar_)
+    TwDeleteBar(tweakbar_);
+  if (global_tweakbar_)
+    TwDeleteBar(global_tweakbar_);
+}
+
+void MyEngine::update()
+{
+  clearVoxels();
+
+  SimpleGraphicsEngine::update();
+
+  updateCameraController(dt_);
+
+  frame_counter_++;
+  delay_counter_ += dt_;
+  
+  if (delay_counter_ >= 1.0) {
+    std::stringstream title;
+    title << frame_counter_ << " FPS";
+    glfwSetWindowTitle(window_, title.str().c_str());
+    frame_counter_ = 0;
+    delay_counter_ = 0;
+  }
+}
+
+void MyEngine::init3DTexture()
+{
+  std::vector<float> data;
+  data.resize(4 * tex_size*tex_size*tex_size);
+  for (int i = 0; i < 4 * tex_size*tex_size*tex_size; ++i)
+  {
+    data[i] = 0.0f;
+  }
+
+  glGenTextures(1, &tex3D);
+  glBindTexture(GL_TEXTURE_3D, tex3D);
+
+  glTexParameteri(GL_TEXTURE_3D, GL_TEXTURE_WRAP_S, GL_CLAMP_TO_BORDER);
+  glTexParameteri(GL_TEXTURE_3D, GL_TEXTURE_WRAP_T, GL_CLAMP_TO_BORDER);
+  glTexParameteri(GL_TEXTURE_3D, GL_TEXTURE_WRAP_R, GL_CLAMP_TO_BORDER);
+
+  glTexParameteri(GL_TEXTURE_3D, GL_TEXTURE_MIN_FILTER, GL_LINEAR);
+  glTexParameteri(GL_TEXTURE_3D, GL_TEXTURE_MAG_FILTER, GL_LINEAR);
+
+  glTexParameteri(GL_TEXTURE_3D, GL_TEXTURE_MAG_FILTER, GL_LINEAR_MIPMAP_LINEAR);
+  glTexParameteri(GL_TEXTURE_3D, GL_TEXTURE_MIN_FILTER, GL_LINEAR_MIPMAP_LINEAR);
+
+  glTexStorage3D(GL_TEXTURE_3D, 10, GL_RGBA8, tex_size, tex_size, tex_size);
+  glTexImage3D(GL_TEXTURE_3D, 0, GL_RGBA8, tex_size, tex_size, tex_size, 0, GL_RGBA, GL_FLOAT, &data[0]);
+
+  glGenerateMipmap(GL_TEXTURE_3D);
+}
+
+void MyEngine::render()
+{
+  //light_object_->setRenderMode(LightObject3D::RenderMode::shadow_map);
+  //light_object_->render(glm::mat4(), shader_phong_);
+
+  if (!render_mode_ == RenderMode::phong)
+    voxelizeScene();
+  if (render_mode_ == RenderMode::global)
+    renderGlobal();
+  else if (render_mode_ == RenderMode::phong)
+    renderLocalDiffuse();
+  else if (render_mode_ == RenderMode::voxels)
+    renderVolume();
+
+  int w, h;
+  glfwGetWindowSize(window_, &w, &h);
+  TwWindowSize(w, h);
+  TwDraw();  // draw the tweak bar(s)
+
+  SimpleGraphicsEngine::render();
+}
+
+void MyEngine::clearVoxels()
+{
+  glViewport(0, 0, tex_size, tex_size);
+  glBindFramebuffer(GL_FRAMEBUFFER, 0);
+
+  glClearColor(0.0, 0.0, 0.0, 1);
+  glClear(GL_COLOR_BUFFER_BIT | GL_DEPTH_BUFFER_BIT);
+  glDisable(GL_CULL_FACE);
+  glDisable(GL_DEPTH_TEST);
+  //glColorMask(GL_FALSE, GL_FALSE, GL_FALSE, GL_FALSE);
+  glBindTexture(GL_TEXTURE_3D, tex3D);
+  glBindImageTexture(0, tex3D, 0, GL_TRUE, 0, GL_WRITE_ONLY, GL_RGBA8);
+  glUseProgram(shader_clearvoxels_);
+  glUniform1i(glGetUniformLocation(shader_clearvoxels_, "voxelImage"), 0);
+  glUniform1f(glGetUniformLocation(shader_clearvoxels_, "sceneScale"), scene_scale);
+
+  voxelizer_camera_->render(
+      glm::mat4(),
+      shader_clearvoxels_, -1, 1, -1, 1, 1, -1);
+  scene_->render(glm::mat4(), shader_clearvoxels_);
+
+  glMemoryBarrier(GL_TEXTURE_FETCH_BARRIER_BIT);
+
+  glGenerateMipmap(GL_TEXTURE_3D);
+}
+
+void MyEngine::voxelizeScene()
+{
+  glViewport(0, 0, tex_size, tex_size);
+  glBindFramebuffer(GL_FRAMEBUFFER, 0);
+
+  glClearColor(0.0, 0.0, 0.0, 1);
+  glClear(GL_COLOR_BUFFER_BIT | GL_DEPTH_BUFFER_BIT);
+  glDisable(GL_CULL_FACE);
+  glDisable(GL_DEPTH_TEST);
+  //glColorMask(GL_FALSE, GL_FALSE, GL_FALSE, GL_FALSE);
+  glBindTexture(GL_TEXTURE_3D, tex3D);
+  glBindImageTexture(0, tex3D, 0, GL_TRUE, 0, GL_WRITE_ONLY, GL_RGBA8);
+  glUseProgram(shader_voxelization_);
+  glUniform1i(glGetUniformLocation(shader_voxelization_, "voxelImage"), 0);
+  glUniform1f(glGetUniformLocation(shader_voxelization_, "sceneScale"), scene_scale);
+  voxelizer_camera_->render(
+      glm::mat4(),
+      shader_voxelization_, -1, 1, -1, 1, 1, -1);
+  scene_->render(glm::mat4(), shader_voxelization_);
+
+  glMemoryBarrier(GL_TEXTURE_FETCH_BARRIER_BIT);
+
+  glGenerateMipmap(GL_TEXTURE_3D);
+}
+
+void MyEngine::renderVolume()
+{
+  // Render back size of cube
+  glBindFramebuffer(GL_FRAMEBUFFER, fbo1_->fb_);
+  glViewport(0, 0, fbo1_->width_, fbo1_->height_);
+
+  glClearColor(0.0, 0.0, 0.0, 1);
+  glClear(GL_COLOR_BUFFER_BIT | GL_DEPTH_BUFFER_BIT);
+  
+  glEnable(GL_CULL_FACE);
+  glCullFace(GL_FRONT);
+  glEnable(GL_DEPTH_TEST);
+
+  camera_->render(
+      glm::mat4(),
+      shader_worldpositionoutput_);
+  cube_->render(glm::mat4(), shader_worldpositionoutput_);
+
+
+  // Render front size of cube
+  glBindFramebuffer(GL_FRAMEBUFFER, fbo2_->fb_);
+  glViewport(0, 0, fbo2_->width_, fbo2_->height_);
+
+  glClearColor(0, 0, 0, 1);
+  glClear(GL_COLOR_BUFFER_BIT | GL_DEPTH_BUFFER_BIT);
+  
+  glEnable(GL_CULL_FACE);
+  glCullFace(GL_BACK);
+  glEnable(GL_DEPTH_TEST);
+
+  camera_->render(
+      glm::mat4(),
+      shader_worldpositionoutput_);
+  cube_->render(glm::mat4(), shader_worldpositionoutput_);
+
+  int w, h;
+  glfwGetWindowSize(window_, &w, &h);
+
+  glActiveTexture(GL_TEXTURE0);
+  glBindTexture(GL_TEXTURE_3D, tex3D);
+
+  glActiveTexture(GL_TEXTURE1);
+  glBindTexture(GL_TEXTURE_2D, fbo1_->texid_);
+
+
+  glActiveTexture(GL_TEXTURE2);
+  glBindTexture(GL_TEXTURE_2D, fbo2_->texid_);
+
+  // Render to screen with volume renderer
+  glBindFramebuffer(GL_FRAMEBUFFER, 0);
+  glViewport(0, 0, w, h);
+
+
+  glClear(GL_COLOR_BUFFER_BIT | GL_DEPTH_BUFFER_BIT);
+  glDisable(GL_DEPTH_TEST);
+  glDisable(GL_CULL_FACE);
+
+
+  glUseProgram(shader_simplevolume_);
+  glUniform1i(glGetUniformLocation(shader_simplevolume_, "textureSize"), tex_size);
+  glUniform1i(glGetUniformLocation(shader_simplevolume_, "texUnit3D"), 0);
+  glUniform1i(glGetUniformLocation(shader_simplevolume_, "texUnitBackCube"), 1);
+  glUniform1i(glGetUniformLocation(shader_simplevolume_, "texUnitFrontCube"), 2);
+  glUniform1f(glGetUniformLocation(shader_simplevolume_, "sceneScale"), scene_scale);
+
+  camera_->render(
+      glm::mat4(),
+      shader_simplevolume_);
+  quad_->render(glm::mat4(), shader_simplevolume_);
+}
+
+void MyEngine::renderGlobal()
+{
+  int w, h;
+  glfwGetWindowSize(window_, &w, &h);
+
+  // Render to screen with global renderer
+  glBindFramebuffer(GL_FRAMEBUFFER, 0);
+  glViewport(0, 0, w, h);
+
+  glClear(GL_COLOR_BUFFER_BIT | GL_DEPTH_BUFFER_BIT);
+  glEnable(GL_DEPTH_TEST);
+  glCullFace(GL_BACK);
+  glEnable(GL_CULL_FACE);
+
+  struct timeb tmb;
+  ftime(&tmb);
+
+  glUseProgram(shader_global_);
+  glUniform1f(glGetUniformLocation(shader_global_, "time"), tmb.millitm);
+  glUniform1i(glGetUniformLocation(shader_global_, "textureSize"), tex_size);
+  glUniform1i(glGetUniformLocation(shader_global_, "texUnit3D"), 0);
+  glUniform1f(glGetUniformLocation(shader_global_, "sceneScale"), scene_scale);
+
+  camera_->render(
+      glm::mat4(),
+      shader_global_);
+  scene_->render(glm::mat4(), shader_global_);
+}
+
+void MyEngine::renderLocalDiffuse()
+{
+  int w, h;
+  glfwGetWindowSize(window_, &w, &h);
+
+  // Render to screen with phong renderer
+  glBindFramebuffer(GL_FRAMEBUFFER, 0);
+  glViewport(0, 0, w, h);
+
+
+  //glClear(GL_COLOR_BUFFER_BIT | GL_DEPTH_BUFFER_BIT);
+  glEnable(GL_DEPTH_TEST);
+  glCullFace(GL_BACK);
+  glEnable(GL_CULL_FACE);
+
+  struct timeb tmb;
+  ftime(&tmb);
+
+  glUseProgram(shader_phong_);
+  camera_->render(
+      glm::mat4(),
+      shader_phong_);
+  scene_->render(glm::mat4(), shader_phong_);
+}
+
+void MyEngine::mousePosCallback(GLFWwindow * window, double x, double y)
+{
+  if (!TwEventMousePosGLFW(x,y))
+  {
+    mouse_x_ = x;
+    mouse_y_ = y;
+  }
+}
+
+void MyEngine::mouseButtonCallback(GLFWwindow * window, int button, int action, int mods)
+{
+  if (!TwEventMouseButtonGLFW(button, action))
+  {
+    int w, h;
+    glfwGetWindowSize(window_, &w, &h);
+    glm::mat4 V = glm::inverse(camera_->transform_matrix_);
+    float aspect = float(w) / h;
+    glm::mat4 P = basic_cam_->projection_transform_matrix_;
+    glm::vec3 from =
+      glm::unProject(
+        glm::vec3(mouse_x_, h - mouse_y_, 0.0f),
+        V,
+        P,
+        glm::vec4(0, 0, w, h));
+    glm::vec3 to =
+      glm::unProject(
+        glm::vec3(mouse_x_, h - mouse_y_, 1.0f),
+        V,
+        P,
+        glm::vec4(0, 0, w, h));
+    glm::vec3 direction = glm::normalize(to - from);
+    
+    float min_t = 10000000;
+    MyObject3D* selected_obj = nullptr;
+    for (int i = 0; i < scene_->children.size(); ++i)
+    {
+      float t;
+      if (scene_->children[i]->intersects(from, direction, &t) && t < min_t)  {
+        MyObject3D* tmp_ptr = dynamic_cast<MyObject3D*>(scene_->children[i]);
+        if (tmp_ptr)
+        {
+          selected_obj = tmp_ptr;
+          min_t = t;
+        }
+      }
+    }
+    if (selected_obj)
+    {
+      createObjectTweakbar(selected_obj);
+      selected_obj_ = selected_obj;
+    }
+  }
+}
+
+void MyEngine::mouseScrollCallback(GLFWwindow * window, double dx, double dy)
+{
+
+}
+
+void MyEngine::keyCallback(
+  GLFWwindow * window,
+  int key,
+  int scancode,
+  int action,
+  int mods)
+{
+  if (!TwEventKeyGLFW(key, action))
+  {
+    if (key == GLFW_KEY_ESCAPE && action == GLFW_PRESS)
+    {
+      //glfwSetWindowShouldClose(window_  , GL_TRUE);
+      int mode = glfwGetInputMode(window_, GLFW_CURSOR);
+      if (mode == GLFW_CURSOR_DISABLED)
+      {
+        glfwSetInputMode(window_, GLFW_CURSOR, GLFW_CURSOR_NORMAL);
+        mouse_control_ = false;
+      }
+      else
+      {
+        glfwSetInputMode(window_, GLFW_CURSOR, GLFW_CURSOR_DISABLED);
+        mouse_control_ = true;
+      }
+    }
+  }
+}
+
+void MyEngine::createObjectTweakbar(MyObject3D* obj)
+{
+  if (tweakbar_)
+  {
+    TwDeleteBar(tweakbar_);
+  }
+  tweakbar_ = TwNewBar("Selected Object");
+  TwAddVarRW(tweakbar_, "diffuseColor", TW_TYPE_COLOR3F, &obj->getMaterialPointer()->color_diffuse.r, " group=material label='Diffuse color' ");
+  TwAddVarRW(tweakbar_, "specularColor", TW_TYPE_COLOR3F, &obj->getMaterialPointer()->color_specular.r, " group=material label='Specular color' ");
+  TwAddVarRW(tweakbar_, "reflectance", TW_TYPE_FLOAT, &obj->getMaterialPointer()->reflectance, " group=material min=0 max=1 step=0.01 label='reflectance' ");
+  TwAddVarRW(tweakbar_, "specularReflectance", TW_TYPE_FLOAT, &obj->getMaterialPointer()->specular_reflectance, " group=material min=0 max=1 step=0.01 label='Specular reflectance' ");
+  TwAddVarRW(tweakbar_, "specularPolish", TW_TYPE_FLOAT, &obj->getMaterialPointer()->specular_cone_angle, " group=material min=0 max=1.57 step=0.01 label='Specular cone angle' ");
+  TwAddVarRW(tweakbar_, "radiosity", TW_TYPE_FLOAT, &obj->getMaterialPointer()->radiosity, " group=material min=0 max=10 step=0.01 label='Radiosity' ");
+}
+
+void MyEngine::updateCameraController(float dt)
+{
+  glm::vec3 camera_pos_diff;
+  if (glfwGetKey(window_, GLFW_KEY_D) == GLFW_PRESS)
+    camera_pos_diff.x = 2 * dt;
+  if (glfwGetKey(window_, GLFW_KEY_A) == GLFW_PRESS)
+    camera_pos_diff.x = -2 * dt;
+  if (glfwGetKey(window_, GLFW_KEY_S) == GLFW_PRESS)
+    camera_pos_diff.z = 2 * dt;
+  if (glfwGetKey(window_, GLFW_KEY_W) == GLFW_PRESS)
+    camera_pos_diff.z = -2 * dt;
+
+
+  double xmouse_current, ymouse_current;
+  glfwGetCursorPos(window_, &xmouse_current, &ymouse_current);
+
+  if (mouse_control_)
+  {
+    float xmouse_diff = xmouse_current - xmouse;
+    float ymouse_diff = ymouse_current - ymouse;
+  
+    xmouse = xmouse_current;
+    ymouse = ymouse_current;
+
+    yaw_goal -= xmouse_diff * 0.002;
+    roll_goal -= ymouse_diff * 0.002;
+  }
+  Delay(&yaw, yaw_goal, 0.4);
+  Delay(&roll, roll_goal, 0.4);
+
+  glm::mat4 R =
+    glm::rotate(glm::mat4(), yaw, glm::vec3(0,1,0)) *
+    glm::rotate(glm::mat4(), roll, glm::vec3(1,0,0));
+  camera_pos_goal += glm::vec3( R * glm::vec4(camera_pos_diff * 0.6f, 1) );
+
+  Delay(&camera_pos, camera_pos_goal, 0.4);
+
+  glm::mat4 T = glm::translate(camera_pos);
+  
+  camera_->transform_matrix_ = T * R;
+
+
+  if (selected_obj_)
+  {
+    if (glfwGetKey(window_, GLFW_KEY_LEFT_SHIFT) == GLFW_PRESS)
+    {
+      if (glfwGetKey(window_, GLFW_KEY_DOWN) == GLFW_PRESS)
+      {
+        selected_obj_->transform_matrix_ =  camera_->transform_matrix_ * glm::translate(dt * glm::vec3(0,0,1)) * glm::inverse(camera_->transform_matrix_) * selected_obj_->transform_matrix_;
+      }
+      if (glfwGetKey(window_, GLFW_KEY_UP) == GLFW_PRESS)
+      {
+        selected_obj_->transform_matrix_ =  camera_->transform_matrix_ * glm::translate(dt * glm::vec3(0,0,-1)) * glm::inverse(camera_->transform_matrix_) * selected_obj_->transform_matrix_;
+      }
+    } else
+    {
+      if (glfwGetKey(window_, GLFW_KEY_DOWN) == GLFW_PRESS)
+      {
+        selected_obj_->transform_matrix_ =  camera_->transform_matrix_ * glm::translate(dt * glm::vec3(0,-1,0)) * glm::inverse(camera_->transform_matrix_) * selected_obj_->transform_matrix_;
+      }
+      if (glfwGetKey(window_, GLFW_KEY_UP) == GLFW_PRESS)
+      {
+        selected_obj_->transform_matrix_ =  camera_->transform_matrix_ * glm::translate(dt * glm::vec3(0,1,0)) * glm::inverse(camera_->transform_matrix_) * selected_obj_->transform_matrix_;
+      }
+    }
+
+    if (glfwGetKey(window_, GLFW_KEY_LEFT) == GLFW_PRESS)
+    {
+      selected_obj_->transform_matrix_ =  camera_->transform_matrix_ * glm::translate(dt * glm::vec3(-1,0,0)) * glm::inverse(camera_->transform_matrix_) * selected_obj_->transform_matrix_;
+    }
+    if (glfwGetKey(window_, GLFW_KEY_RIGHT) == GLFW_PRESS)
+    {
+      selected_obj_->transform_matrix_ =  camera_->transform_matrix_ * glm::translate(dt * glm::vec3(1,0,0)) * glm::inverse(camera_->transform_matrix_) * selected_obj_->transform_matrix_;
+    }
+    if (LightObject3D* l = dynamic_cast<LightObject3D*>(selected_obj_))
+    {
+      if (glfwGetKey(window_, GLFW_KEY_P) == GLFW_PRESS)
+      {
+        selected_obj_->transform_matrix_ = selected_obj_->transform_matrix_ * glm::scale(glm::vec3(1.05,1.05,1.05));
+      }
+      if (glfwGetKey(window_, GLFW_KEY_L) == GLFW_PRESS)
+      {
+        selected_obj_->transform_matrix_ = selected_obj_->transform_matrix_ * glm::scale(glm::vec3(0.95,0.95,0.95));
+      }
+    }
+  }
+}
+
+MyObject3D::MyObject3D(Material material)
+{
+  material_ = material;
+}
+
+MyObject3D::~MyObject3D()
+{
+
+}
+
+void MyObject3D::render(glm::mat4 M, GLuint program_ID)
+{
+  glUniform3f(glGetUniformLocation(program_ID, "material.color_diffuse"), material_.color_diffuse.x, material_.color_diffuse.y, material_.color_diffuse.z);
+  glUniform3f(glGetUniformLocation(program_ID, "material.color_specular"), material_.color_specular.x, material_.color_specular.y, material_.color_specular.z);
+  glUniform1f(glGetUniformLocation(program_ID, "material.reflectance"), material_.reflectance);
+  glUniform1f(glGetUniformLocation(program_ID, "material.specular_reflectance"), material_.specular_reflectance);
+  glUniform1f(glGetUniformLocation(program_ID, "material.specular_cone_angle"), material_.specular_cone_angle);
+  glUniform1f(glGetUniformLocation(program_ID, "material.radiosity"), material_.radiosity);
+
+  Object3D::render(M, program_ID);
+}
+
+Quad::Quad()
+{
+  std::vector<glm::vec3> positions;
+  std::vector<glm::vec3> normals;
+  std::vector<unsigned short> elements;
+
+  positions.push_back(glm::vec3(-1,-1,1));
+  positions.push_back(glm::vec3(1,-1,1));
+  positions.push_back(glm::vec3(1,1,1));
+  positions.push_back(glm::vec3(-1,1,1));  
+
+  normals.push_back(glm::vec3(0,0,1));
+  normals.push_back(glm::vec3(0,0,1));
+  normals.push_back(glm::vec3(0,0,1));
+  normals.push_back(glm::vec3(0,0,1));  
+
+  elements.push_back(0);
+  elements.push_back(1);
+  elements.push_back(2);
+  elements.push_back(0);  
+  elements.push_back(2);
+  elements.push_back(3);
+
+  mesh_ = new TriangleMesh(positions, normals, elements);
+  this->addChild(mesh_);
+}
+
+Quad::~Quad()
+{
+  delete mesh_;
+}
+
+LightObject3D::LightObject3D(TriangleMesh* mesh, Material material, Object3D* scene) :
+  MyObject3D(material), scene_(scene)
+{
+  this->addChild(mesh);
+  cube_map = new CubeTextureFBO(256);
+  render_mode = RenderMode::normal;
+  currently_mapping = false;
+  for (int i = 0; i < 6; ++i)
+  {
+    cube_cameras[i] = new PerspectiveCamera(nullptr, 90);
+    this->addChild(cube_cameras[i]);
+  }
+  cube_cameras[0]->transform_matrix_ = glm::rotate(float(-M_PI / 2), glm::vec3(0.0f,1.0f,0.0f));
+  cube_cameras[1]->transform_matrix_ = glm::rotate(float(M_PI / 2), glm::vec3(0.0f,1.0f,0.0f));
+  cube_cameras[2]->transform_matrix_ = glm::rotate(float(M_PI / 2), glm::vec3(1.0f,0.0f,0.0f));
+  cube_cameras[3]->transform_matrix_ = glm::rotate(float(-M_PI / 2), glm::vec3(1.0f,0.0f,0.0f));
+  cube_cameras[4]->transform_matrix_ = glm::rotate(float(M_PI), glm::vec3(0.0f,1.0f,0.0f));
+  cube_cameras[5]->transform_matrix_ = glm::rotate(float(0), glm::vec3(0.0f,1.0f,0.0f));
+}
+
+LightObject3D::~LightObject3D()
+{
+  delete cube_map;
+  for (int i = 0; i < 6; ++i)
+  {
+    delete cube_cameras[i];
+  }
+}
+
+void LightObject3D::setRenderMode(RenderMode mode)
+{
+  render_mode = mode;
+}
+
+void LightObject3D::render(glm::mat4 M, GLuint program_ID)
+{
+  if (render_mode == RenderMode::normal)
+  {
+    glm::vec4 position_worldspace = M * getTotalTransform() * glm::vec4(0, 0, 0, 1.0f);
+    float radius = glm::length(M * getTotalTransform() * glm::vec4(1, 0, 0, 0.0f));
+
+    glUseProgram(program_ID);
+
+    glUniform1f(glGetUniformLocation(program_ID, "light.intensity"), material_.radiosity);
+    glUniform1f(glGetUniformLocation(program_ID, "light.radius"), radius);  
+    glUniform3f(glGetUniformLocation(program_ID, "light.position"),position_worldspace.x,position_worldspace.y, position_worldspace.z);
+    glUniform3f(glGetUniformLocation(program_ID, "light.color"), material_.color_diffuse.r * material_.radiosity, material_.color_diffuse.g * material_.radiosity, material_.color_diffuse.b * material_.radiosity);
+
+    MyObject3D::render(M, program_ID);
+  }
+  else if (render_mode == RenderMode::shadow_map && !currently_mapping)
+  {
+    currently_mapping = true;
+    glViewport(0,0, cube_map->getSize(), cube_map->getSize());
+    cube_map->bind(GL_TEXTURE0);
+    for(int i=0;i<1;i++)
+    {
+      glFramebufferTexture2D(GL_FRAMEBUFFER, GL_COLOR_ATTACHMENT0, GL_TEXTURE_CUBE_MAP_POSITIVE_X + i, cube_map->getTextureHandle(), 0);
+      cube_cameras[i]->render(this->transform_matrix_, program_ID);
+      scene_->render(glm::mat4(), program_ID);
+
+      //if(cubeCameras[i]) scene->SetCurrentCamera(cubeCameras[i]);
+      //if(scene) scene->Render();
+    }
+    currently_mapping = false;
+  }
+
+  MyObject3D::render(M, program_ID);
+}
+
+template <class T>
+void MyEngine::Delay(T* input, T end_val, float speed) {
+  if (speed < 0.0f && speed > 1.0f) {
+    speed = glm::clamp(speed, 0.0f, 1.0f);
+    std::cout << "WARNING: clamping speed between 0.0 and 1.0" << std::endl;
+  }
+  *input = (end_val - *input) * speed + *input;
+}
+
+CubeTextureFBO::CubeTextureFBO(int size)
+{
+  glGenTextures(1, &texture);
+  glBindTexture(GL_TEXTURE_CUBE_MAP, texture);
+
+  glGenFramebuffers(1, &fbo);
+  glBindFramebuffer(GL_FRAMEBUFFER, fbo);
+
+  for (int i = 0; i < 6; ++i)
+  {
+    glTexImage2D(GL_TEXTURE_CUBE_MAP_POSITIVE_X + i, 0, GL_RGB, size, size, 0, GL_RGBA, GL_UNSIGNED_BYTE, NULL);
+    glTexParameteri(GL_TEXTURE_CUBE_MAP, GL_TEXTURE_MAG_FILTER, GL_LINEAR);
+    glTexParameteri(GL_TEXTURE_CUBE_MAP, GL_TEXTURE_MIN_FILTER, GL_LINEAR);
+    glTexParameteri(GL_TEXTURE_CUBE_MAP, GL_TEXTURE_WRAP_S, GL_CLAMP_TO_EDGE);
+    glTexParameteri(GL_TEXTURE_CUBE_MAP, GL_TEXTURE_WRAP_T, GL_CLAMP_TO_EDGE);
+    glTexParameteri(GL_TEXTURE_CUBE_MAP, GL_TEXTURE_WRAP_R, GL_CLAMP_TO_EDGE);
+    glFramebufferTexture2D(GL_FRAMEBUFFER, GL_COLOR_ATTACHMENT0, GL_TEXTURE_CUBE_MAP_POSITIVE_X + i, texture, 0);
+  }
+
+  // add a depth attachment
+  glGenRenderbuffers(1, &depth_render_buffer);
+  glBindRenderbuffer(GL_RENDERBUFFER, depth_render_buffer); 
+  glRenderbufferStorage(GL_RENDERBUFFER, GL_DEPTH_COMPONENT16, size, size); 
+  glFramebufferRenderbuffer(GL_FRAMEBUFFER, GL_DEPTH_ATTACHMENT, GL_RENDERBUFFER, depth_render_buffer);
+
+  glClear(GL_COLOR_BUFFER_BIT | GL_DEPTH_BUFFER_BIT);
+}
+
+CubeTextureFBO::~CubeTextureFBO()
+{
+
+}
+
+void CubeTextureFBO::bind(GLenum TextureUnit)
+{
+  glBindFramebuffer(GL_FRAMEBUFFER, fbo);
+  glActiveTexture(TextureUnit);
+  glBindTexture(GL_TEXTURE_CUBE_MAP, texture);
+}
+```
+
+### src/ShaderLoader.cpp
+```
+#include "../include/ShaderLoader.h"
+#include <fstream>
+
+#include <GL/glew.h>
+//#include <GLFW/glfw3.h>
+
+
+// https://www.omniref.com/ruby/gems/opengl-bindings/1.3.5/symbols/OpenGL::GL_TESS_CONTROL_SHADER
+
+#ifndef GL_TESS_CONTROL_SHADER
+    #define GL_TESS_CONTROL_SHADER 0x8E88
+#endif
+#ifndef GL_TESS_EVALUATION_SHADER
+    #define GL_TESS_EVALUATION_SHADER 0x8E87
+#endif
+#ifndef GL_GEOMETRY_SHADER
+    #define GL_GEOMETRY_SHADER 0x8DD9
+#endif
+#ifndef GL_PATCHES
+    #define GL_PATCHES 0x000E
+#endif
+
+GLuint ShaderLoader::loadShaders(
+  const char * vertex_file_path,
+  const char * tesselation_control_file_path,
+  const char * tesselation_eval_file_path,
+  const char * geometry_file_path,
+  const char * fragment_file_path)
+{
+  // Create the shaders
+  // Vertex and fragment shader is a must
+  GLuint VertexShaderID = glCreateShader(GL_VERTEX_SHADER);
+  GLuint FragmentShaderID = glCreateShader(GL_FRAGMENT_SHADER);
+  
+  GLuint TesselationControlShaderID;
+  GLuint TesselationEvaluationShaderID;
+  GLuint GeometryShaderID;
+
+  if (tesselation_control_file_path)
+    TesselationControlShaderID = glCreateShader(GL_TESS_CONTROL_SHADER);
+  if (tesselation_eval_file_path)
+    TesselationEvaluationShaderID = glCreateShader(GL_TESS_EVALUATION_SHADER);
+  if (geometry_file_path)
+    GeometryShaderID = glCreateShader(GL_GEOMETRY_SHADER);
+
+  // Read the Vertex Shader code from the file
+  std::string VertexShaderCode;
+  std::ifstream VertexShaderStream(vertex_file_path, std::ios::in);
+  if(VertexShaderStream.is_open())
+  {
+    std::string Line = "";
+    while(getline(VertexShaderStream, Line))
+      VertexShaderCode += "\n" + Line;
+    VertexShaderStream.close();
+  }
+  
+  std::string TesselationControlShaderCode;
+  if (tesselation_control_file_path){
+    // Read the Tesselation Control Shader code from the file
+    std::ifstream TesselationControlShaderStream(tesselation_control_file_path, std::ios::in);
+    if(TesselationControlShaderStream.is_open()){
+      std::string Line = "";
+      while(getline(TesselationControlShaderStream, Line))
+        TesselationControlShaderCode += "\n" + Line;
+      TesselationControlShaderStream.close();
+    }
+  }
+
+  std::string TesselationEvaluationShaderCode;
+  if (tesselation_eval_file_path){
+    // Read the Tesselation Evaluation Shader code from the file
+    std::ifstream TesselationEvalStream(tesselation_eval_file_path, std::ios::in);
+    if(TesselationEvalStream.is_open()){
+      std::string Line = "";
+      while(getline(TesselationEvalStream, Line))
+        TesselationEvaluationShaderCode += "\n" + Line;
+      TesselationEvalStream.close();
+    }
+  }
+
+  std::string GeometryShaderCode;
+  if (geometry_file_path){
+    // Read the Geometry Shader code from the file
+    std::ifstream GeomatryShaderStream(geometry_file_path, std::ios::in);
+    if(GeomatryShaderStream.is_open()){
+      std::string Line = "";
+      while(getline(GeomatryShaderStream, Line))
+        GeometryShaderCode += "\n" + Line;
+      GeomatryShaderStream.close();
+    }
+  }
+
+  // Read the Fragment Shader code from the file
+  std::string FragmentShaderCode;
+  std::ifstream FragmentShaderStream(fragment_file_path, std::ios::in);
+  if(FragmentShaderStream.is_open()){
+    std::string Line = "";
+    while(getline(FragmentShaderStream, Line))
+      FragmentShaderCode += "\n" + Line;
+    FragmentShaderStream.close();
+  }
+  
+  GLint Result = GL_FALSE;
+  int InfoLogLength;
+  
+  // Compile Vertex Shader
+  printf("Compiling shader : %s\n", vertex_file_path);
+  char const * VertexSourcePointer = VertexShaderCode.c_str();
+  glShaderSource(VertexShaderID, 1, &VertexSourcePointer , NULL);
+  glCompileShader(VertexShaderID);
+  
+  // Check Vertex Shader
+  glGetShaderiv(VertexShaderID, GL_COMPILE_STATUS, &Result);
+  glGetShaderiv(VertexShaderID, GL_INFO_LOG_LENGTH, &InfoLogLength);
+  std::vector<char> VertexShaderErrorMessage(InfoLogLength);
+  glGetShaderInfoLog(VertexShaderID, InfoLogLength, NULL, &VertexShaderErrorMessage[0]);
+  fprintf(stdout, "%s\n", &VertexShaderErrorMessage[0]);
+  
+
+
+  if (tesselation_control_file_path){
+    // Compile Tesselation Control Shader
+    printf("Compiling shader : %s\n", tesselation_control_file_path);
+    char const * TesselationControlSourcePointer = TesselationControlShaderCode.c_str();
+    glShaderSource(TesselationControlShaderID, 1, &TesselationControlSourcePointer , NULL);
+    glCompileShader(TesselationControlShaderID);
+    
+    // Check Tesselation Control Shader
+    glGetShaderiv(TesselationControlShaderID, GL_COMPILE_STATUS, &Result);
+    glGetShaderiv(TesselationControlShaderID, GL_INFO_LOG_LENGTH, &InfoLogLength);
+    std::vector<char> TesselationControlShaderErrorMessage(InfoLogLength);
+    glGetShaderInfoLog(TesselationControlShaderID, InfoLogLength, NULL, &TesselationControlShaderErrorMessage[0]);
+    fprintf(stdout, "%s\n", &TesselationControlShaderErrorMessage[0]);
+  }
+
+  if (tesselation_eval_file_path){
+    // Compile Fragment Shader
+    printf("Compiling shader : %s\n", tesselation_eval_file_path);
+    char const * TesselationEvaluationSourcePointer = TesselationEvaluationShaderCode.c_str();
+    glShaderSource(TesselationEvaluationShaderID, 1, &TesselationEvaluationSourcePointer , NULL);
+    glCompileShader(TesselationEvaluationShaderID);
+    
+    // Check TesselationEvaluation Shader
+    glGetShaderiv(TesselationEvaluationShaderID, GL_COMPILE_STATUS, &Result);
+    glGetShaderiv(TesselationEvaluationShaderID, GL_INFO_LOG_LENGTH, &InfoLogLength);
+    std::vector<char> TesselationEvaluationShaderErrorMessage(InfoLogLength);
+    glGetShaderInfoLog(TesselationEvaluationShaderID, InfoLogLength, NULL, &TesselationEvaluationShaderErrorMessage[0]);
+    fprintf(stdout, "%s\n", &TesselationEvaluationShaderErrorMessage[0]);
+  }
+
+  if (geometry_file_path){
+    // Compile Fragment Shader
+    printf("Compiling shader : %s\n", geometry_file_path);
+    char const * GeometrySourcePointer = GeometryShaderCode.c_str();
+    glShaderSource(GeometryShaderID, 1, &GeometrySourcePointer , NULL);
+    glCompileShader(GeometryShaderID);
+    
+    // Check Geometry Shader
+    glGetShaderiv(GeometryShaderID, GL_COMPILE_STATUS, &Result);
+    glGetShaderiv(GeometryShaderID, GL_INFO_LOG_LENGTH, &InfoLogLength);
+    std::vector<char> GeometryShaderErrorMessage(InfoLogLength);
+    glGetShaderInfoLog(GeometryShaderID, InfoLogLength, NULL, &GeometryShaderErrorMessage[0]);
+    fprintf(stdout, "%s\n", &GeometryShaderErrorMessage[0]);
+  }
+
+  // Compile Fragment Shader
+  printf("Compiling shader : %s\n", fragment_file_path);
+  char const * FragmentSourcePointer = FragmentShaderCode.c_str();
+  glShaderSource(FragmentShaderID, 1, &FragmentSourcePointer , NULL);
+  glCompileShader(FragmentShaderID);
+  
+  // Check Fragment Shader
+  glGetShaderiv(FragmentShaderID, GL_COMPILE_STATUS, &Result);
+  glGetShaderiv(FragmentShaderID, GL_INFO_LOG_LENGTH, &InfoLogLength);
+  std::vector<char> FragmentShaderErrorMessage(InfoLogLength);
+  glGetShaderInfoLog(FragmentShaderID, InfoLogLength, NULL, &FragmentShaderErrorMessage[0]);
+  fprintf(stdout, "%s\n", &FragmentShaderErrorMessage[0]);
+  
+  // Link the program
+  fprintf(stdout, "Linking program\n");
+  GLuint ProgramID = glCreateProgram();
+  glAttachShader(ProgramID, VertexShaderID);
+  if (tesselation_control_file_path)
+    glAttachShader(ProgramID, TesselationControlShaderID);
+  if (tesselation_eval_file_path)
+    glAttachShader(ProgramID, TesselationEvaluationShaderID);
+  if (geometry_file_path)
+    glAttachShader(ProgramID, GeometryShaderID);
+  glAttachShader(ProgramID, FragmentShaderID);
+
+  glLinkProgram(ProgramID);
+  
+  // Check the program
+  glGetProgramiv(ProgramID, GL_LINK_STATUS, &Result);
+  glGetProgramiv(ProgramID, GL_INFO_LOG_LENGTH, &InfoLogLength);
+  std::vector<char> ProgramErrorMessage( std::max(InfoLogLength, int(1)) );
+  glGetProgramInfoLog(ProgramID, InfoLogLength, NULL, &ProgramErrorMessage[0]);
+  fprintf(stdout, "%s\n", &ProgramErrorMessage[0]);
+  
+  glDeleteShader(VertexShaderID);
+  if (tesselation_control_file_path)
+    glDeleteShader(TesselationControlShaderID);
+  if (tesselation_eval_file_path)
+    glDeleteShader(TesselationEvaluationShaderID);
+  if (geometry_file_path)
+    glDeleteShader(GeometryShaderID);
+  glDeleteShader(FragmentShaderID);
+
+  return ProgramID;
+}
+```
+
+### src/SimpleGraphicsEngine.cpp
+```
+#include "../include/SimpleGraphicsEngine.h"
+
+#include <iostream>
+#include <vector>
+#include <cmath>
+
+#define GLM_FORCE_RADIANS
+#include <glm/glm.hpp>
+#include <glm/gtc/matrix_transform.hpp>
+#include <GL/glew.h>
+//#include <GLFW/glfw3.h>
+
+#include "../include/ShaderLoader.h"
+#include "../include/MeshLoader.h"
+
+using namespace SGE;
+
+ShaderManager* ShaderManager::instance_;
+
+ShaderManager::ShaderManager()
+{
+}
+
+void ShaderManager::loadShader(
+  std::string name,
+  const char* vs_src,
+  const char* tcs_src,
+  const char* tes_src,
+  const char* gs_src,
+  const char* fs_src)
+{
+  shader_program_IDs.insert(
+    std::pair<std::string,GLuint>(name,
+    ShaderLoader::loadShaders(
+      vs_src, // Vertex shader file path
+      tcs_src, // Tesselation control shader file path
+      tes_src, // Tesselation evaluation shader file path
+      gs_src, // Geometry shader file path
+      fs_src))); // Fragment shader file path
+}
+
+ShaderManager::~ShaderManager()
+{
+  for (std::map<std::string, GLuint>::const_iterator it = shader_program_IDs.begin(); it != shader_program_IDs.end(); it++) {
+    glDeleteProgram(it->second);
+  }
+}
+
+ShaderManager* ShaderManager::instance()
+{
+  if (!instance_) {
+    instance_ = new ShaderManager();
+  }
+  return instance_;
+}
+
+GLuint ShaderManager::getShader(std::string name)
+{
+  GLuint program_ID = shader_program_IDs[name];
+  if (!program_ID)
+  {
+    std::cout << "ERROR : This name, " << name << " is not a valid shader program name!" << std::endl;
+  }
+  return program_ID;
+}
+
+void Object3D::addChild(Object3D *child)
+{
+  children.push_back(child);
+  child->parent_ = this;
+}
+
+void Object3D::removeChild(Object3D *child)
+{
+  /*
+  children.erase(std::remove(children.begin(), children.end(), child), children.end());
+  for (int i=0; i<children.size(); i++) {
+    children[i]->removeChild(child);
+  }
+  */
+}
+
+void Object3D::render(glm::mat4 M, GLuint program_ID)
+{
+  for (std::vector<Object3D*>::const_iterator iter = children.begin(); iter != children.end(); iter++) {
+    (*iter)->render(M * transform_matrix_, program_ID);
+  }
+}
+
+bool Object3D::intersects(glm::vec3 point)
+{
+  for (int i = 0; i < this->children.size(); ++i)
+  {
+    if (AbstractMesh* a = dynamic_cast<AbstractMesh*>(this->children[i]))  {
+      return a->intersects(point);
+    }
+  }
+}
+
+bool Object3D::intersects(glm::vec3 origin, glm::vec3 direction, float* t)
+{
+  float t_min = 10000000;
+  bool intersected = false;
+  for (int i = 0; i < this->children.size(); ++i)
+  {
+    float curr_t;
+    AbstractMesh* a = dynamic_cast<AbstractMesh*>(this->children[i]);
+
+    // Transform to world coordinates
+    origin = glm::vec3(glm::inverse(getTotalTransform()) * glm::vec4(origin, 1));
+    direction = glm::vec3(glm::inverse(getTotalTransform()) * glm::vec4(direction, 0));
+
+    if (a && a->intersects(origin, direction, &curr_t) && curr_t < t_min)  {
+      intersected = true;
+      t_min = curr_t;
+    }
+  }
+  *t = t_min;
+  return intersected;
+}
+
+Object3D::Object3D()
+{
+  parent_ = nullptr;
+}
+
+glm::mat4 Object3D::getTotalTransform()
+{
+  // Base case:
+  if (!parent_)
+  {
+    return glm::mat4(1);
+  }
+  else
+  { // Recursion
+    return parent_->getTotalTransform() * transform_matrix_;
+  }
+}
+
+AbstractMesh::AbstractMesh()
+{
+}
+
+AbstractMesh::~AbstractMesh()
+{
+  // Cleanup VBO
+  glDeleteBuffers(1, &vertex_buffer_);
+  glDeleteVertexArrays(1, &vertex_array_ID_);
+}
+
+void AbstractMesh::initialize()
+{  
+  glGenVertexArrays(1, &vertex_array_ID_);
+  glBindVertexArray(vertex_array_ID_);
+  
+  glGenBuffers(1, &vertex_buffer_);
+  glBindBuffer(GL_ARRAY_BUFFER, vertex_buffer_);
+  glBufferData(GL_ARRAY_BUFFER, vertices_.size() * sizeof(glm::vec3), &vertices_[0], GL_STATIC_DRAW);
+}
+
+bool AbstractMesh::intersects(glm::vec3 point)
+{
+  return aabb_.intersects(point);
+}
+
+bool AbstractMesh::intersects(glm::vec3 origin, glm::vec3 direction, float* t)
+{
+  return aabb_.intersects(origin, direction, t);
+}
+
+TriangleMesh::TriangleMesh() : AbstractMesh()
+{
+  initialize();
+}
+
+TriangleMesh::TriangleMesh(const char* file_path) : AbstractMesh()
+{
+  std::vector<glm::vec2> tmp_uv;
+
+  loadMesh_assimp(
+  file_path,
+  elements_,
+  vertices_, 
+  tmp_uv,
+  normals_);
+
+  initialize();
+}
+
+TriangleMesh::TriangleMesh(
+           std::vector<glm::vec3> vertices,
+           std::vector<glm::vec3> normals,
+           std::vector<unsigned short> elements) : AbstractMesh()
+{
+  vertices_ = vertices;
+  normals_ = normals;
+  elements_ = elements;
+  
+  initialize();
+}
+
+TriangleMesh::~TriangleMesh()
+{
+  glDeleteBuffers(1, &element_buffer_);
+  glDeleteBuffers(1, &normal_buffer_);
+}
+
+void TriangleMesh::initialize()
+{
+  AbstractMesh::initialize();
+
+  aabb_ = BoundingBox(this);
+  this->addChild(&aabb_);
+  
+  glGenBuffers(1, &normal_buffer_);
+  glBindBuffer(GL_ARRAY_BUFFER, normal_buffer_);
+  glBufferData(GL_ARRAY_BUFFER, normals_.size() * sizeof(glm::vec3), &normals_[0], GL_STATIC_DRAW);
+  
+  glGenBuffers(1, &element_buffer_);
+  glBindBuffer(GL_ELEMENT_ARRAY_BUFFER, element_buffer_);
+  glBufferData(GL_ELEMENT_ARRAY_BUFFER, elements_.size() * sizeof(unsigned short), &elements_[0] , GL_STATIC_DRAW);
+}
+
+void TriangleMesh::render(glm::mat4 M, GLuint program_ID)
+{
+  Object3D::render(M, program_ID);
+  //material_->render();
+  
+  glm::mat4 total_transform = M * transform_matrix_;
+
+  // Use our shader
+  glUseProgram(program_ID);
+  
+  glUniformMatrix4fv(glGetUniformLocation(program_ID, "M"), 1, GL_FALSE, &total_transform[0][0]);
+  
+  glBindVertexArray(vertex_array_ID_);
+  
+  // 1rst attribute buffer : vertices
+  glEnableVertexAttribArray(0);
+  glBindBuffer(GL_ARRAY_BUFFER, vertex_buffer_);
+  glVertexAttribPointer(
+                        0,                  // attribute
+                        3,                  // size
+                        GL_FLOAT,           // type
+                        GL_FALSE,           // normalized?
+                        0,                  // stride
+                        (void*)0            // array buffer offset
+                        );
+  
+  // 2nd attribute buffer : normals
+  glEnableVertexAttribArray(1);
+  glBindBuffer(GL_ARRAY_BUFFER, normal_buffer_);
+  glVertexAttribPointer(
+                        1,                  // attribute
+                        3,                  // size
+                        GL_FLOAT,           // type
+                        GL_FALSE,           // normalized?
+                        0,                  // stride
+                        (void*)0            // array buffer offset
+                        );
+  
+  // Index buffer
+  glBindBuffer(GL_ELEMENT_ARRAY_BUFFER, element_buffer_);
+  
+  // Draw the triangles !
+  glDrawElements(
+                 GL_TRIANGLES,      // mode
+                 elements_.size(),    // count
+                 GL_UNSIGNED_SHORT,   // type
+                 (void*)0           // element array buffer offset
+                 );
+  
+  glDisableVertexAttribArray(0);
+  glDisableVertexAttribArray(1);
+}
+
+BoundingBox::BoundingBox(const AbstractMesh* template_mesh)
+{
+  float max_x = template_mesh->vertices_[0].x;
+  float max_y = template_mesh->vertices_[0].y;
+  float max_z = template_mesh->vertices_[0].z;
+  
+  float min_x = template_mesh->vertices_[0].x;
+  float min_y = template_mesh->vertices_[0].y;
+  float min_z = template_mesh->vertices_[0].z;
+  for (int i = 1; i < template_mesh->vertices_.size(); i++)
+  {
+    max_x = glm::max(max_x, template_mesh->vertices_[i].x);
+    max_y = glm::max(max_y, template_mesh->vertices_[i].y);
+    max_z = glm::max(max_z, template_mesh->vertices_[i].z);
+
+    min_x = glm::min(min_x, template_mesh->vertices_[i].x);
+    min_y = glm::min(min_y, template_mesh->vertices_[i].y);
+    min_z = glm::min(min_z, template_mesh->vertices_[i].z);
+  }
+  max = glm::vec3(max_x, max_y, max_z);
+  min = glm::vec3(min_x, min_y, min_z);
+}
+
+BoundingBox::BoundingBox(const Object3D)
+{
+  
+}
+
+BoundingBox::BoundingBox()
+{
+  min = glm::vec3(0,0,0);
+  max = glm::vec3(0,0,0);
+}
+
+BoundingBox::~BoundingBox()
+{
+  
+}
+
+bool BoundingBox::intersects(glm::vec3 point)
+{
+  return (point.x > min.x &&
+          point.y > min.y &&
+          point.z > min.z &&
+          point.x < max.x &&
+          point.y < max.y &&
+          point.z < max.z);
+}
+
+bool BoundingBox::intersects(glm::vec3 origin, glm::vec3 direction, float* t)
+{
+  // r.dir is unit direction vector of ray
+  glm::vec3 dirfrac(1.0f / direction.x, 1.0f / direction.y, 1.0f / direction.z);
+  // lb is the corner of AABB with minimal coordinates - left bottom, 
+  // rt is maximal corner
+  // r.org is the origin of ray
+  float t1 = (min.x - origin.x)*dirfrac.x;
+  float t2 = (max.x - origin.x)*dirfrac.x;
+  float t3 = (min.y - origin.y)*dirfrac.y;
+  float t4 = (max.y - origin.y)*dirfrac.y;
+  float t5 = (min.z - origin.z)*dirfrac.z;
+  float t6 = (max.z - origin.z)*dirfrac.z;
+
+  float tmin = glm::max(
+    glm::max(glm::min(t1, t2), glm::min(t3, t4)),
+    glm::min(t5, t6));
+  float tmax = glm::min(
+    glm::min(glm::max(t1, t2), glm::max(t3, t4)),
+    glm::max(t5, t6));
+
+  // if tmax < 0, ray (line) is intersecting AABB, but whole AABB is behing us
+  if (tmax < 0)
+  {
+      *t = tmax;
+      return false;
+  }
+
+  // if tmin > tmax, ray doesn't intersect AABB
+  if (tmin > tmax)
+  {
+      *t = tmax;
+      return false;
+  }
+
+  *t = tmin;
+  return true;
+  return false;
+}
+
+AbstractCamera::AbstractCamera()
+{
+  transform_matrix_ = glm::lookAt(
+                                glm::vec3(0.0f,0.0f,0.0f),
+                                glm::vec3(0.0f,0.0f,-1.0f),
+                                glm::vec3(0.0f,1.0f,0.0f));
+}
+
+void AbstractCamera::render(glm::mat4 M, GLuint program_ID)
+{
+  Object3D::render(M * transform_matrix_, program_ID);
+
+  glm::mat4 V = glm::inverse(M * transform_matrix_);
+  
+  glUseProgram(program_ID);
+
+  glUniformMatrix4fv(glGetUniformLocation(program_ID, "V"), 1, GL_FALSE, &V[0][0]);
+  glUniformMatrix4fv(glGetUniformLocation(program_ID, "P"), 1, GL_FALSE, &projection_transform_matrix_[0][0]);
+}
+
+PerspectiveCamera::PerspectiveCamera(GLFWwindow* window, float fov) :
+AbstractCamera()
+{
+  window_ = window;
+  
+  float aspect = 1;
+  if (window_)
+  {
+    int width;
+    int height;
+    glfwGetWindowSize(window_, &width, &height);
+    aspect = float(width)/height;
+  } 
+
+  projection_transform_matrix_ = glm::perspective(fov, aspect, 0.1f, 100.0f);
+}
+
+void PerspectiveCamera::render(glm::mat4 M, GLuint program_ID)
+{
+  float aspect = 1;
+  if (window_)
+  {
+    int width;
+    int height;
+    glfwGetWindowSize(window_, &width, &height);
+    aspect = float(width)/height;
+  } 
+
+  projection_transform_matrix_ = glm::perspective(45.0f, aspect, 0.1f, 100.0f);
+  
+  AbstractCamera::render(M, program_ID);
+}
+
+OrthoCamera::OrthoCamera(GLFWwindow* window) :
+  AbstractCamera()
+{
+  window_ = window;
+  
+  float aspect = 1;
+  if (window_)
+  {
+    int width;
+    int height;
+    glfwGetWindowSize(window_, &width, &height);
+    aspect = float(width)/height;
+  } 
+  
+  projection_transform_matrix_ = glm::ortho(-aspect, aspect, -1.0f, 1.0f, -100.0f, 100.0f);
+}
+
+void OrthoCamera::render(glm::mat4 M, GLuint program_ID)
+{
+  
+  float aspect = 1;
+  if (window_)
+  {
+    int width;
+    int height;
+    glfwGetWindowSize(window_, &width, &height);
+    aspect = float(width)/height;
+  } 
+
+
+  projection_transform_matrix_ = glm::ortho(-aspect, aspect, -1.0f, 1.0f, -100.0f, 100.0f);
+  
+  AbstractCamera::render(M, program_ID);
+}
+
+void OrthoCamera::render(
+  glm::mat4 M,
+  GLuint program_ID,
+  float left,
+  float right,
+  float bottom,
+  float top,
+  float near,
+  float far)
+{
+    projection_transform_matrix_ = glm::ortho(left, right, bottom, top, near, far);
+    AbstractCamera::render(M, program_ID);
+}
+
+LightSource::LightSource()
+{
+  intensity = 1;
+  color = glm::vec3(1.0, 1.0, 1.0);
+}
+
+void LightSource::render(glm::mat4 M, GLuint program_ID)
+{
+  Object3D::render(M * transform_matrix_, program_ID);
+  
+  glm::vec4 global_position = M * getTotalTransform() * glm::vec4(0, 0, 0, 1.0f);
+  
+  glUseProgram(program_ID);
+  
+  glUniform3f(glGetUniformLocation(program_ID, "light.position"),global_position.x,global_position.y, global_position.z);
+  glUniform1f(glGetUniformLocation(program_ID, "light.intensity"), intensity);
+  glUniform3f(glGetUniformLocation(program_ID, "light.color"), color.r, color.g, color.b);
+}
+
+//Object3D* SimpleGraphicsEngine::camera_;
+//Object3D* SimpleGraphicsEngine::viewspace_ortho_camera_;
+
+GLFWwindow* SimpleGraphicsEngine::window_;
+Object3D* SimpleGraphicsEngine::scene_;
+
+SimpleGraphicsEngine::SimpleGraphicsEngine()
+{
+  initialize();
+}
+
+SimpleGraphicsEngine::~SimpleGraphicsEngine()
+{
+  glfwTerminate();
+  delete scene_;
+  //delete view_space_;
+  //delete background_space_;
+    
+  //delete camera_;
+  //delete basic_cam_;
+  //delete viewspace_ortho_camera_;
+  //delete background_ortho_cam_;
+}
+
+bool SimpleGraphicsEngine::initialize()
+{
+  time_ = glfwGetTime();
+  // Initialize the library
+  if (!glfwInit())
+    return -1;
+  // Modern OpenGL
+  glfwWindowHint(GLFW_CONTEXT_VERSION_MAJOR, 4);
+  glfwWindowHint(GLFW_CONTEXT_VERSION_MINOR, 5);
+  glfwWindowHint(GLFW_OPENGL_FORWARD_COMPAT, GL_TRUE);
+  glfwWindowHint(GLFW_OPENGL_PROFILE, GLFW_OPENGL_CORE_PROFILE);
+  // Create a windowed mode window and its OpenGL context
+  window_ = glfwCreateWindow(720 * 2, 480 * 2, "", NULL, NULL);
+  if (!window_)
+  {
+    glfwTerminate();
+    return false;
+  }
+  // Make the window's context current
+  glfwMakeContextCurrent(window_);
+  printf("OpenGL version: %s\n", glGetString(GL_VERSION));
+  
+  glewExperimental=true; // Needed in core profile
+  if (glewInit() != GLEW_OK) {
+    fprintf(stderr, "Failed to initialize GLEW\n");
+    return false;
+  }
+  // Enable depth test
+  glEnable(GL_DEPTH_TEST);
+  // Accept fragment if it closer to the camera than the former one
+  glDepthFunc(GL_LESS);
+  // Cull triangles which normal is not towards the camera
+  glEnable(GL_CULL_FACE);
+  // Enable blending
+  glEnable(GL_BLEND);
+  glBlendFunc(GL_SRC_ALPHA, GL_ONE_MINUS_SRC_ALPHA);
+  
+  // Instantiate (needs to be done after creating OpenGL context)
+  ShaderManager::instance();
+
+  scene_ = new Object3D();
+  //view_space_ = new Object3D();
+  //background_space_ = new Object3D();
+  
+  //camera_ = new Object3D();
+  //viewspace_ortho_camera_ = new Object3D();
+  //basic_cam_ = new PerspectiveCamera(window_);
+  //background_ortho_cam_ = new OrthoCamera(ShaderManager::instance()->getShader("SHADER_BACKGROUND"), window_);
+  
+  //camera_->addChild(basic_cam_);
+  //viewspace_ortho_camera_->addChild(background_ortho_cam_);
+  //scene_->addChild(camera_);
+
+  //view_space_->addChild(viewspace_ortho_camera_);
+  return true;
+}
+
+void SimpleGraphicsEngine::run()
+{
+  while (!glfwWindowShouldClose(window_))
+  {
+    
+    update();
+
+    render();
+    
+    glfwSwapBuffers(window_);
+    glfwPollEvents();
+  }
+}
+
+void SimpleGraphicsEngine::update()
+{
+  dt_ = glfwGetTime() - time_;
+  time_ = glfwGetTime();
+  
+  int width;
+  int height;
+  glfwGetWindowSize(window_, &width, &height);
+  glViewport(0,0,width * 2,height * 2);
+}
+
+
+void SimpleGraphicsEngine::render()
+{
+
+}
+
+void FBO::CHECK_FRAMEBUFFER_STATUS()
+{
+  GLenum status;
+  status = glCheckFramebufferStatus(GL_FRAMEBUFFER);
+  if (status != GL_FRAMEBUFFER_COMPLETE)
+    fprintf(stderr, "Framebuffer not complete\n");
+}
+
+FBO::FBO(int width, int height, int int_method)
+{
+  width_ = width;
+  height_ = height;
+
+  // create objects
+  glGenFramebuffers(1, &fb_); // frame buffer id
+  glBindFramebuffer(GL_FRAMEBUFFER, fb_);
+  glGenTextures(1, &texid_);
+  fprintf(stderr, "%i \n", texid_);
+  glBindTexture(GL_TEXTURE_2D, texid_);
+  glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_S, GL_REPEAT);
+  glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_T, GL_REPEAT);
+  if (int_method == 0)
+  {
+    glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MAG_FILTER, GL_NEAREST);
+    glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MIN_FILTER, GL_NEAREST);
+  }
+  else
+  {
+    glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MAG_FILTER, GL_LINEAR);
+    glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MIN_FILTER, GL_LINEAR);
+  }
+  glTexImage2D(GL_TEXTURE_2D, 0, GL_RGBA32F, width, height, 0, GL_RGBA, GL_UNSIGNED_BYTE, NULL);
+  glFramebufferTexture2D(GL_FRAMEBUFFER, GL_COLOR_ATTACHMENT0, GL_TEXTURE_2D, texid_, 0);
+
+  // Renderbuffer
+  // initialize depth renderbuffer
+    glGenRenderbuffers(1, &rb_);
+    glBindRenderbuffer(GL_RENDERBUFFER, rb_);
+    glRenderbufferStorage( GL_RENDERBUFFER, GL_DEPTH_COMPONENT24, width_, height_ );
+    glFramebufferRenderbuffer( GL_FRAMEBUFFER, GL_DEPTH_ATTACHMENT, GL_RENDERBUFFER, rb_ );
+    CHECK_FRAMEBUFFER_STATUS();
+
+  fprintf(stderr, "Framebuffer object %d\n", fb_);
+  glBindFramebuffer(GL_FRAMEBUFFER, 0);
+}
+
+FBO::~FBO()
+{
+   //Delete resources
+   glDeleteTextures(1, &texid_);
+   glDeleteRenderbuffersEXT(1, &rb_);
+   //Bind 0, which means render to back buffer, as a result, fb is unbound
+   glBindFramebufferEXT(GL_FRAMEBUFFER_EXT, 0);
+   glDeleteFramebuffersEXT(1, &fb_);
+}
+
+static int lastw = 0;
+static int lasth = 0;
+
+// Obsolete
+void updateScreenSizeForFBOHandler(int w, int h)
+{
+  lastw = w;
+  lasth = h;
+}
+
+// choose input (textures) and output (FBO)
+void FBO::useFBO(FBO *out, FBO *in1, FBO *in2)
+{
+  GLint curfbo;
+
+// This was supposed to catch changes in viewport size and update lastw/lasth.
+// It worked for me in the past, but now it causes problems to I have to
+// fall back to manual updating.
+  glGetIntegerv(GL_FRAMEBUFFER_BINDING, &curfbo);
+  if (curfbo == 0)
+  {
+    GLint viewport[4] = {0,0,0,0};
+    GLint w, h;
+    glGetIntegerv(GL_VIEWPORT, viewport);
+    w = viewport[2] - viewport[0];
+    h = viewport[3] - viewport[1];
+    if ((w > 0) && (h > 0) && (w < 65536) && (h < 65536)) // I don't believe in 64k pixel wide frame buffers for quite some time
+    {
+      lastw = viewport[2] - viewport[0];
+      lasth = viewport[3] - viewport[1];
+    }
+  }
+  
+  if (out != nullptr)
+    glViewport(0, 0, out->width_, out->height_);
+  else
+    glViewport(0, 0, lastw, lasth);
+
+  if (out != nullptr)
+  {
+    glBindFramebuffer(GL_FRAMEBUFFER, out->fb_);
+    glViewport(0, 0, out->width_, out->height_);
+  }
+  else
+    glBindFramebuffer(GL_FRAMEBUFFER, 0);
+  glActiveTexture(GL_TEXTURE1);
+  if (in2 != nullptr)
+    glBindTexture(GL_TEXTURE_2D, in2->texid_);
+  else
+    glBindTexture(GL_TEXTURE_2D, 0);
+  glActiveTexture(GL_TEXTURE0);
+  if (in1 != nullptr)
+    glBindTexture(GL_TEXTURE_2D, in1->texid_);
+  else
+    glBindTexture(GL_TEXTURE_2D, 0);
+}
+```
+
+### src/main.cpp
+```
+#include <iostream>
+#include <vector>
+
+//#include <GLFW/glfw3.h>
+
+#include "../include/MyEngine.h"
+
+int main(int argc, char const *argv[])
+{
+  MyEngine e;
+  e.run();
+  return 0;
+}
+```
+
+### shaders/voxelization/clearvoxels.frag
+```
+#version 450
+#extension GL_ARB_shader_image_load_store : enable
+
+in vec3 normal_viewspace_f;
+in vec3 normal_worldspace_f;
+in vec3 vertexPosition_viewspace_f;
+in vec3 vertexPosition_worldspace_f;
+in vec3 eyePosition_worldspace_f;
+
+layout(RGBA8) uniform image3D voxelImage;
+uniform float sceneScale;
+
+void main() {
+    ivec3 size = imageSize(voxelImage);
+	ivec3 texCoord = ivec3((vertexPosition_worldspace_f / sceneScale + vec3(1)) / 2 * size);
+    imageStore(voxelImage, ivec3(texCoord), vec4(0,0,0,0));
+}
+```
+
+### shaders/voxelization/voxelization.frag
+```
+#version 450
+#extension GL_ARB_shader_image_load_store : enable
+
+struct Material
+{
+	vec3 color_diffuse;
+	vec3 color_specular;
+	float reflectance; // [0, 1]
+	float specular_reflectance; // [0, 1], part of reflectance
+	float specular_polish; // [0, 1]
+	float radiosity;
+};
+
+struct LightSource
+{
+	float intensity;
+	vec3 color;
+	vec3 position;
+};
+
+in vec3 normal_viewspace_f;
+in vec3 normal_worldspace_f;
+in vec3 vertexPosition_viewspace_f;
+in vec3 vertexPosition_worldspace_f;
+in vec3 eyePosition_worldspace_f;
+
+layout(RGBA8) uniform image3D voxelImage;
+//layout ( r32ui ) coherent volatile uniform uimage3D voxelImage;
+uniform Material material;
+uniform LightSource light;
+uniform float sceneScale;
+
+vec3 calculateLocalDiffuse()
+{
+	vec3 n = normalize(normal_worldspace_f);
+	vec3 light_diff = vertexPosition_worldspace_f - light.position;
+	float light_dist = length(light_diff);
+	vec3 l = normalize(light_diff);
+
+
+	float cosTheta = dot(n,-l);
+	vec3 diffuse =
+		light.color * light.intensity *
+		max(cosTheta, 0) *
+		1 / pow(light_dist, 2);
+
+	return diffuse;
+}
+
+
+void imageAtomicFloatAdd( layout ( r32ui ) coherent volatile uimage3D imgUI , ivec3 coords , float val )
+{
+	uint newVal = floatBitsToUint( val ) ;
+	uint prevVal = 0; uint curVal;
+	// Loop as long as destination value gets changed by other threads
+	while ( ( curVal = imageAtomicCompSwap( imgUI , coords , prevVal , newVal ) ) != prevVal )
+	{
+		prevVal = curVal;
+		newVal = floatBitsToUint(( val + uintBitsToFloat( curVal ) ) );
+	}
+}
+
+vec4 convRGBA8ToVec4( uint val ) {
+	return vec4 ( float (( val & 0x000000FF) ) , float (( val & 0x0000FF00) >> 8U ) , float (( val & 0x00FF0000) >> 16U ) , float (( val & 0xFF000000) >> 24U ) ) ;
+}
+
+uint convVec4ToRGBA8( vec4 val ) {
+	return ( uint ( val.w ) & 0x000000FF) << 24U | ( uint ( val.z ) & 0x000000FF) << 16U | ( uint ( val.y) & 0x000000FF) << 8U | ( uint ( val.x ) & 0x000000FF) ;
+}
+
+void imageAtomicRGBA8Avg( layout ( r32ui ) coherent volatile uimage3D imgUI , ivec3 coords , vec4 val ) {
+	val.rgb *= 255.0f;
+	// Optimise following calculations
+	uint newVal = convVec4ToRGBA8( val );
+	uint prevStoredVal = 0; uint curStoredVal;
+	// Loop as long as destination value gets changed by other threads
+	while ( ( curStoredVal = imageAtomicCompSwap( imgUI , coords , prevStoredVal , newVal ) ) != prevStoredVal)
+	{
+		prevStoredVal = curStoredVal;
+		vec4 rval = convRGBA8ToVec4( curStoredVal );
+		rval.xyz =( rval.xyz * rval.w ); // Denormalize
+		vec4 curValF = rval + val; // Add new value
+		curValF.xyz /= ( curValF.w ); // Renormalize
+		newVal = convVec4ToRGBA8( curValF );
+	}
+}
+
+
+void main() {
+    ivec3 size = imageSize(voxelImage);
+	ivec3 texCoord = ivec3((vertexPosition_worldspace_f / sceneScale  + vec3(1)) / 2 * size);
+
+	vec3 color;
+	if (material.reflectance != 0 && (1 - material.specular_reflectance) != 0)
+	{
+		color = calculateLocalDiffuse() * material.color_diffuse * material.reflectance * (1 - material.specular_reflectance);
+	}
+	color += material.radiosity * material.color_diffuse;
+
+    imageStore(voxelImage, ivec3(texCoord), vec4(color, 1.0f));
+    //imageAtomicRGBA8Avg(voxelImage, texCoord, vec4(color, 1.0f));
+}
+```
+
+### shaders/voxelization/voxelization.geom
+```
+#version 450 core
+
+layout(triangles) in;
+layout(triangle_strip, max_vertices = 3) out;
+
+in vec3 normal_viewspace_g[];
+in vec3 normal_worldspace_g[];
+in vec3 vertexPosition_viewspace_g[];
+in vec3 vertexPosition_worldspace_g[];
+in vec3 eyePosition_worldspace_g[];
+
+out vec3 normal_viewspace_f;
+out vec3 normal_worldspace_f;
+out vec3 vertexPosition_viewspace_f;
+out vec3 vertexPosition_worldspace_f;
+out vec3 eyePosition_worldspace_f;
+
+uniform mat4 M;
+uniform mat4 V;
+uniform mat4 P;
+
+void main() {
+	// Dominant axis projection
+	vec3 normal = normalize(cross(
+		vertexPosition_worldspace_g[1] - vertexPosition_worldspace_g[0],
+		vertexPosition_worldspace_g[2] - vertexPosition_worldspace_g[0]));
+	float proj_x = abs(normal.x);
+	float proj_y = abs(normal.y);
+	float proj_z = abs(normal.z);
+
+	if (proj_x > proj_y && proj_x > proj_z)
+	{ // x axis is dominant, project on x plane
+		vertexPosition_worldspace_f = vertexPosition_worldspace_g[0];
+		normal_viewspace_f = normal_viewspace_g[0];
+		normal_worldspace_f = normal_worldspace_g[0];
+		vertexPosition_viewspace_f = vertexPosition_viewspace_g[0];
+		vertexPosition_worldspace_f = vertexPosition_worldspace_g[0];
+		eyePosition_worldspace_f = eyePosition_worldspace_g[0];
+
+	    gl_Position = vec4(vertexPosition_worldspace_g[0].y, vertexPosition_worldspace_g[0].z, 0, 1);
+	    EmitVertex();
+
+		vertexPosition_worldspace_f = vertexPosition_worldspace_g[1];
+		normal_viewspace_f = normal_viewspace_g[1];
+		normal_worldspace_f = normal_worldspace_g[1];
+		vertexPosition_viewspace_f = vertexPosition_viewspace_g[1];
+		vertexPosition_worldspace_f = vertexPosition_worldspace_g[1];
+		eyePosition_worldspace_f = eyePosition_worldspace_g[1];
+
+	    gl_Position = vec4(vertexPosition_worldspace_g[1].y, vertexPosition_worldspace_g[1].z, 0, 1);
+	    EmitVertex();
+
+		vertexPosition_worldspace_f = vertexPosition_worldspace_g[2];
+		normal_viewspace_f = normal_viewspace_g[2];
+		normal_worldspace_f = normal_worldspace_g[2];
+		vertexPosition_viewspace_f = vertexPosition_viewspace_g[2];
+		vertexPosition_worldspace_f = vertexPosition_worldspace_g[2];
+		eyePosition_worldspace_f = eyePosition_worldspace_g[2];
+
+	    gl_Position = vec4(vertexPosition_worldspace_g[2].y, vertexPosition_worldspace_g[2].z, 0, 1);
+	    EmitVertex();
+	}
+	else if (proj_y > proj_x && proj_y > proj_z)
+	{ // y axis is dominant, project on y plane
+		vertexPosition_worldspace_f = vertexPosition_worldspace_g[0];
+		normal_viewspace_f = normal_viewspace_g[0];
+		normal_worldspace_f = normal_worldspace_g[0];
+		vertexPosition_viewspace_f = vertexPosition_viewspace_g[0];
+		vertexPosition_worldspace_f = vertexPosition_worldspace_g[0];
+		eyePosition_worldspace_f = eyePosition_worldspace_g[0];
+
+	    gl_Position = vec4(vertexPosition_worldspace_g[0].x, vertexPosition_worldspace_g[0].z, 0, 1);
+	    EmitVertex();
+
+		vertexPosition_worldspace_f = vertexPosition_worldspace_g[1];
+		normal_viewspace_f = normal_viewspace_g[1];
+		normal_worldspace_f = normal_worldspace_g[1];
+		vertexPosition_viewspace_f = vertexPosition_viewspace_g[1];
+		vertexPosition_worldspace_f = vertexPosition_worldspace_g[1];
+		eyePosition_worldspace_f = eyePosition_worldspace_g[1];
+
+	    gl_Position = vec4(vertexPosition_worldspace_g[1].x, vertexPosition_worldspace_g[1].z, 0, 1);
+	    EmitVertex();
+
+		vertexPosition_worldspace_f = vertexPosition_worldspace_g[2];
+		normal_viewspace_f = normal_viewspace_g[2];
+		normal_worldspace_f = normal_worldspace_g[2];
+		vertexPosition_viewspace_f = vertexPosition_viewspace_g[2];
+		vertexPosition_worldspace_f = vertexPosition_worldspace_g[2];
+		eyePosition_worldspace_f = eyePosition_worldspace_g[2];
+
+	    gl_Position = vec4(vertexPosition_worldspace_g[2].x, vertexPosition_worldspace_g[2].z, 0, 1);
+	    EmitVertex();
+	}
+	else
+	{ // z axis is dominant, project on z plane
+		vertexPosition_worldspace_f = vertexPosition_worldspace_g[0];
+		normal_viewspace_f = normal_viewspace_g[0];
+		normal_worldspace_f = normal_worldspace_g[0];
+		vertexPosition_viewspace_f = vertexPosition_viewspace_g[0];
+		vertexPosition_worldspace_f = vertexPosition_worldspace_g[0];
+		eyePosition_worldspace_f = eyePosition_worldspace_g[0];
+
+	    gl_Position = vec4(vertexPosition_worldspace_g[0].x, vertexPosition_worldspace_g[0].y, 0, 1);
+	    EmitVertex();
+
+		vertexPosition_worldspace_f = vertexPosition_worldspace_g[1];
+		normal_viewspace_f = normal_viewspace_g[1];
+		normal_worldspace_f = normal_worldspace_g[1];
+		vertexPosition_viewspace_f = vertexPosition_viewspace_g[1];
+		vertexPosition_worldspace_f = vertexPosition_worldspace_g[1];
+		eyePosition_worldspace_f = eyePosition_worldspace_g[1];
+
+	    gl_Position = vec4(vertexPosition_worldspace_g[1].x, vertexPosition_worldspace_g[1].y, 0, 1);
+	    EmitVertex();
+
+		vertexPosition_worldspace_f = vertexPosition_worldspace_g[2];
+		normal_viewspace_f = normal_viewspace_g[2];
+		normal_worldspace_f = normal_worldspace_g[2];
+		vertexPosition_viewspace_f = vertexPosition_viewspace_g[2];
+		vertexPosition_worldspace_f = vertexPosition_worldspace_g[2];
+		eyePosition_worldspace_f = eyePosition_worldspace_g[2];
+
+	    gl_Position = vec4(vertexPosition_worldspace_g[2].x, vertexPosition_worldspace_g[2].y, 0, 1);
+	    EmitVertex();
+		
+	}
+    EndPrimitive();
+}
+```
+
+### shaders/voxelization/voxelization.vert
+```
+/*
+#version 450 core
+
+layout(location = 0) in vec3 vertexPosition_modelspace;
+layout(location = 1) in vec3 vertexNormal_modelspace;
+
+out vec3 vertexPosition_worldspace;
+
+uniform mat4 M;
+uniform mat4 V;
+uniform mat4 P;
+
+void main(){
+	vertexPosition_worldspace = vec3(M * vec4(vertexPosition_modelspace, 1));
+	gl_Position = P * V * M * vec4(vertexPosition_modelspace,1);
+}
+*/
+
+#version 450 core
+#extension GL_ARB_explicit_attrib_location : require
+
+layout(location = 0) in vec3 vertexPosition_modelspace;
+layout(location = 1) in vec3 vertexNormal_modelspace;
+
+out vec2 texCoord;
+out vec3 vertexPosition;
+out vec3 vertexNormal;
+
+out vec3 normal_viewspace_g;
+out vec3 normal_worldspace_g;
+out vec3 vertexPosition_viewspace_g;
+out vec3 vertexPosition_worldspace_g;
+out vec3 eyePosition_worldspace_g;
+
+uniform mat4 M;
+uniform mat4 V;
+uniform mat4 P;
+
+void main(){
+	//texCoord = (vertexPosition_modelspace.xy + vec2(1,1)) / 2;
+	vertexPosition = vec3(M * vec4(vertexPosition_modelspace, 1));
+	vertexNormal = vec3(M * vec4(vertexNormal_modelspace, 0));
+	gl_Position = P * V * M * vec4(vertexPosition_modelspace,1);
+
+	normal_viewspace_g = vec3(V * M * vec4(vertexNormal_modelspace, 0));
+	normal_worldspace_g = vec3(M * vec4(vertexNormal_modelspace, 0));
+	vertexPosition_viewspace_g = vec3(V * M * vec4(vertexPosition_modelspace, 1));
+	vertexPosition_worldspace_g = vec3(M * vec4(vertexPosition_modelspace, 1));
+	eyePosition_worldspace_g = vec3(inverse(V) * vec4(0,0,0,1));
+
+//	gl_Position = vec4(vertexPosition_modelspace, 1);
+}
+```

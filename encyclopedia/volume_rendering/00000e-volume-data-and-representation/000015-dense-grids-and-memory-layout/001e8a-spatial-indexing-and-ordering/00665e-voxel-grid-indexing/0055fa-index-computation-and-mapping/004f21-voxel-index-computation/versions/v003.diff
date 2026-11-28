@@ -1,0 +1,279 @@
+--- v002.md
++++ v003.md
+@@ -4,166 +4,158 @@
+ 
+ ## Overview
+-Voxel Index Computation maps continuous 3D coordinates to discrete integer indices within a voxel grid, serving as the fundamental lookup mechanism for dense volume representations. It differs from sibling methods by supporting both standard batched point-to-grid mapping with configurable bounding boxes and specialized 3-bit texel indexing for compressed texture formats. While [Uniform Grid Indexing](6941-uniform-grid-indexing.md) handles general spatial hashing, this method provides specific implementations for Gaussian Splatting pipelines and BC6H compression contexts.
++Voxel Index Computation maps continuous 3D world coordinates to discrete integer indices within a voxel grid, enabling efficient data lookup in volume rendering and neural rendering pipelines. It differs from its siblings by supporting two distinct modes: batch-aware mapping for Gaussian splatting applications ([Uniform Grid Indexing](6941-uniform-grid-indexing.md)) and compact 3-bit texel indexing for texture compression ([Uniform Grid Adjacent Cell Indexing](2992-uniform-grid-adjacent-cell-indexing.md)).
+ 
+ ## How it works
+-The method operates in two distinct modes based on the input context: general batched voxel indexing for 3D Gaussians and 3-bit texel indexing for block compression.
++The method operates in two distinct variants depending on the application context: Batch Voxel Indexing for point cloud/Gaussian splatting queries, and 3-bit Texel Indexing for block compression.
+ 
+ ### Inputs and Outputs
+-**Mode 1: Batched Voxel Indexing**
+-*   **Inputs**:
+-    *   `points`: Tensor of shape $(N, 3)$ containing 3D coordinates $(x, y, z)$.
+-    *   `bounding_boxes`: Tensor of shape $(B, 2, 3)$ or $(B, 3)$ defining min/max bounds per batch ID.
+-    *   `batch_ids`: Tensor of shape $(N,)$ mapping each point to a bounding box.
+-    *   `voxel_size`: Scalar or Tensor defining the grid resolution.
+-    *   `shift` (bool): If true, applies a half-voxel offset to the bounding box minimum.
+-    *   `cat_batch_ids` (bool): If true, appends the batch ID to the output.
+-*   **Outputs**:
+-    *   `voxel_indices`: Tensor of shape $(N, 3)$ if `cat_batch_ids` is false, or $(N, 4)$ if true.
++**Variant 1: Batch Voxel Indexing**
++- **Inputs**:
++  - `points`: Tensor of shape $(N, 3)$ containing 3D coordinates.
++  - `batch_ids`: Tensor of shape $(N,)$ or $(1,)$ identifying the bounding box for each point.
++  - `bounding_boxes`: Tensor of shape $(B, 2, 3)$ where $B$ is the number of batches. `bounding_boxes[b, 0]` is the minimum corner, `bounding_boxes[b, 1]` is the maximum corner.
++  - `voxel_size`: Scalar or Tensor of shape $(B,)$ or $(B, 3)$ defining the voxel dimensions.
++  - `shift`: Boolean flag. If true, centers the voxel grid relative to the bounding box minimum.
++  - `cat_batch_ids`: Boolean flag. If true, appends the batch ID to the output.
++- **Outputs**:
++  - `voxel_indices`: Tensor of shape $(N, 3)$ if `cat_batch_ids` is false, or $(N, 4)$ if true.
+ 
+-**Mode 2: 3-bit Texel Indexing**
+-*   **Inputs**:
+-    *   `texelPos`: Continuous position relative to block endpoints.
+-    *   `end0`, `end1`: Two endpoints defining the local coordinate space.
+-*   **Outputs**:
+-    *   `index`: Integer in range $[0, 7]$.
++**Variant 2: 3-bit Texel Indexing**
++- **Inputs**:
++  - `texelPos`: Continuous position within a block.
++  - `end0`: Start position of the block.
++  - `end1`: End position of the block.
++- **Outputs**:
++  - `index`: Integer in range $[0, 7]$.
+ 
+ ### Data Structures
+-*   **Voxel Grid**: Implicitly defined by `bounding_boxes` and `voxel_size`. No explicit storage is required for the index computation itself, only for the subsequent data lookup.
+-*   **Index Format**:
+-    *   Standard: 32-bit integer per dimension $(i, j, k)$.
+-    *   3-bit: 3-bit integer representing one of 8 sub-blocks.
++- **Bounding Box**: Axis-aligned, defined by min and max vectors.
++- **Voxel Size**: Can be isotropic (scalar) or anisotropic (vector).
++- **Indices**: Signed or unsigned integers depending on implementation; typically 32-bit integers for batch indexing, 3-bit unsigned for texel indexing.
+ 
+-### Steps and Formulas
++### Steps
+ 
+-#### Mode 1: Batched Voxel Indexing [S1, unofficial]
++#### Variant 1: Batch Voxel Indexing
++1.  **Select Bounding Box Minimums**: Retrieve the minimum corner for each point's batch ID.
++    $$ \mathbf{b}_{min} = \text{bounding\_boxes}[\text{batch\_ids}][:, 0] $$
++2.  **Retrieve Voxel Size**: Get the voxel size for each point. If `voxel_size` is a scalar, it is broadcast. If it is a tensor, it is indexed by `batch_ids`.
++    $$ \mathbf{s} = \text{voxel\_size}[\text{batch\_ids}] \quad \text{if tensor, else scalar} $$
++3.  **Expand Dimensions**: If $\mathbf{s}$ is 1D (shape $(N,)$ or $(B,)$), expand it to 2D (shape $(N, 1)$ or $(B, 1)$) to allow broadcasting with 3D coordinates.
++    $$ \mathbf{s}_{expanded} = \text{unsqueeze}(\mathbf{s}, \text{dim}=-1) $$
++4.  **Apply Shift (Optional)**: If the `shift` flag is true, adjust the bounding box minimums to center the first voxel.
++    $$ \mathbf{b}_{min}' = \mathbf{b}_{min} - 0.5 \times \mathbf{s}_{expanded} $$
++    Otherwise, $\mathbf{b}_{min}' = \mathbf{b}_{min}$.
++5.  **Compute Indices**: Calculate the floating-point coordinates relative to the adjusted minimum, divide by voxel size, and floor the result.
++    $$ \mathbf{c}_{float} = \frac{\text{points} - \mathbf{b}_{min}'}{\mathbf{s}_{expanded}} $$
++    $$ \mathbf{i} = \lfloor \mathbf{c}_{float} \rfloor $$
++    Cast $\mathbf{i}$ to long integers.
++6.  **Concatenate Batch IDs (Optional)**: If `cat_batch_ids` is true, concatenate `batch_ids` to $\mathbf{i}$ along dimension 1.
++    $$ \text{output} = \text{concat}([\mathbf{i}, \text{batch\_ids}], \text{dim}=1) $$
++    Otherwise, return $\mathbf{i}$.
+ 
+-1.  **Select Bounding Box Minimums**:
+-    Retrieve the minimum coordinate for each point's bounding box.
+-    $$ \mathbf{bb}_{min}[n] = \text{bounding\_boxes}[\text{batch\_ids}[n]][0] $$
+-    Where $\mathbf{bb}_{min}$ has shape $(N, 3)$.
++#### Variant 2: 3-bit Texel Indexing
++1.  **Normalize Position**: Compute the relative position of `texelPos` within the block defined by `end0` and `end1`.
++    $$ \text{ratio} = \frac{\text{texelPos} - \text{end0}}{\text{end1} - \text{end0}} $$
++2.  **Scale and Offset**: Apply specific scaling and offset constants to map the ratio to the 0-7 range.
++    $$ \text{val} = \text{ratio} \times 6.98182 + 0.00909 + 0.5 $$
++3.  **Round and Clamp**: Round to the nearest integer and clamp to $[0, 7]$.
++    $$ \text{index} = \text{clamp}(\text{round}(\text{val}), 0, 7) $$
+ 
+-2.  **Retrieve Voxel Size**:
+-    Handle scalar or tensor voxel sizes.
+-    $$ \mathbf{v}_s = \begin{cases} \text{voxel\_size}[\text{batch\_ids}] & \text{if tensor} \\ \text{voxel\_size} & \text{if scalar} \end{cases} $$
+-    If $\mathbf{v}_s$ is 1D (shape $(3,)$), expand to 2D for broadcasting:
+-    $$ \mathbf{v}_s \leftarrow \mathbf{v}_s.unsqueeze(-1) \quad (\text{shape } (N, 3)) $$
++### Formulas
++**Batch Voxel Indexing**:
++$$ i_x = \left\lfloor \frac{p_x - b_{min,x} - \delta_x}{s_x} \right\rfloor $$
++where $\delta_x = 0.5 s_x$ if `shift` is true, else $0$.
+ 
+-3.  **Apply Shift (Optional)**:
+-    If `shift` is true, adjust the bounding box minimums to center the voxel grid.
+-    $$ \mathbf{bb}_{min} \leftarrow \mathbf{bb}_{min} - 0.5 \cdot \mathbf{v}_s $$
++**3-bit Texel Indexing**:
++$$ I = \text{clamp}\left( \text{round}\left( \frac{P - E_0}{E_1 - E_0} \times 6.98182 + 0.50909 \right), 0, 7 \right) $$
+ 
+-4.  **Compute Integer Indices**:
+-    Map continuous points to discrete grid coordinates using floor division.
+-    $$ \mathbf{i} = \lfloor (\mathbf{points} - \mathbf{bb}_{min}) / \mathbf{v}_s \rfloor $$
+-    Cast to long integer type.
++### Parameters
++- **shift**: Boolean. Default false.
++- **cat_batch_ids**: Boolean. Default false.
++- **Constants for 3-bit**: $6.98182$ (scale), $0.00909$ (offset).
+ 
+-5.  **Concatenate Batch IDs (Optional)**:
+-    If `cat_batch_ids` is true, append the batch ID to the index tensor.
+-    $$ \mathbf{output} = \text{concat}(\mathbf{i}, \text{batch\_ids}[:, \text{None}]) $$
+-    Result shape: $(N, 4)$. Otherwise, return $\mathbf{i}$ with shape $(N, 3)$.
+-
+-#### Mode 2: 3-bit Texel Indexing [S2, unofficial]
+-
+-1.  **Normalize Position**:
+-    Compute the relative position of `texelPos` between `end0` and `end1`.
+-    $$ \text{ratio} = \frac{\text{texelPos} - \text{end0}}{\text{end1} - \text{end0}} $$
+-
+-2.  **Scale and Offset**:
+-    Apply specific scaling and bias factors derived for BC6H compression.
+-    $$ \text{scaled} = \text{ratio} \cdot 6.98182 + 0.00909 + 0.5 $$
+-
+-3.  **Round and Clamp**:
+-    Round to nearest integer and clamp to the valid 3-bit range.
+-    $$ \text{index} = \text{clamp}(\text{round}(\text{scaled}), 0, 7) $$
++### Edge Cases and Pitfalls
++- **Out-of-Bounds**: Points outside the bounding box will produce negative indices or indices $\ge N$. The source [S1, unofficial] does not explicitly show clamping to $[0, N-1]$ in the core formula, relying on the bounding box definition. Implementers should clamp indices to valid grid bounds to prevent memory access violations [G].
++- **Division by Zero**: If `end1 == end0` in Variant 2, division by zero occurs. Clamp or handle this case explicitly [G].
++- **Precision**: Floating-point errors in `floor` operations can cause off-by-one errors at exact boundaries. Using `floor` on slightly adjusted values or epsilon checks may be necessary [G].
+ 
+ ### Pseudocode
+ 
+ ```python
+-import torch
+ import math
+ 
+-def compute_voxel_indices(points, bounding_boxes, batch_ids, voxel_size, shift=False, cat_batch_ids=False):
++def compute_voxel_indices_batch(points, batch_ids, bounding_boxes, voxel_size, shift=False, cat_batch_ids=False):
+     """
+-    Computes voxel indices for a batch of 3D points.
+-    
+-    Args:
+-        points: Tensor (N, 3)
+-        bounding_boxes: Tensor (B, 2, 3) or (B, 3)
+-        batch_ids: Tensor (N,)
+-        voxel_size: Scalar or Tensor
+-        shift: Boolean
+-        cat_batch_ids: Boolean
+-        
+-    Returns:
+-        Tensor (N, 3) or (N, 4)
++    Variant 1: Batch Voxel Indexing
++    points: (N, 3)
++    batch_ids: (N,)
++    bounding_boxes: (B, 2, 3)
++    voxel_size: scalar or (B,) or (B, 3)
+     """
+     # Step 1: Select min bounding box
+-    # Assuming bounding_boxes is (B, 2, 3) where dim 1 is [min, max]
+-    if bounding_boxes.dim() == 3:
+-        bb_mins = bounding_boxes[batch_ids][:, 0]
++    # Assuming batch_ids are indices into the first dimension of bounding_boxes
++    bb_mins = bounding_boxes[batch_ids][:, 0]  # (N, 3)
++    
++    # Step 2: Retrieve voxel size
++    if isinstance(voxel_size, (int, float)):
++        voxel_size_b = voxel_size
+     else:
+-        # If (B, 3), treat as min only or handle appropriately [G]
+-        bb_mins = bounding_boxes[batch_ids]
+-
+-    # Step 2: Retrieve voxel size
+-    if isinstance(voxel_size, torch.Tensor):
+-        voxel_size_b = voxel_size[batch_ids]
+-        if voxel_size_b.dim() == 1:
+-            voxel_size_b = voxel_size_b.unsqueeze(-1)
+-    else:
+-        voxel_size_b = voxel_size
+-
+-    # Step 3: Shift
++        voxel_size_b = voxel_size[batch_ids]  # (N,) or (N, 3)
++        
++    # Step 3: Expand dimensions if 1D
++    if hasattr(voxel_size_b, 'dim') and voxel_size_b.dim() == 1:
++        voxel_size_b = voxel_size_b.unsqueeze(-1)  # (N, 1)
++        
++    # Step 4: Apply shift
+     if shift:
+         bb_mins = bb_mins - 0.5 * voxel_size_b
+-
+-    # Step 4: Compute indices
++        
++    # Step 5: Compute indices
++    # Ensure broadcasting works: points (N,3), bb_mins (N,3), voxel_size_b (N,1) or (N,3)
+     voxel_indices = torch.floor((points - bb_mins) / voxel_size_b).long()
+-
+-    # Step 5: Concatenate batch IDs
++    
++    # Step 6: Concatenate batch IDs
+     if cat_batch_ids:
+-        batch_ids_expanded = batch_ids.unsqueeze(-1).long()
+-        output = torch.cat([voxel_indices, batch_ids_expanded], dim=1)
++        # Ensure batch_ids is 2D for concatenation
++        batch_ids_2d = batch_ids.unsqueeze(-1).long()
++        output = torch.cat([voxel_indices, batch_ids_2d], dim=1)
+         return output
+     else:
+         return voxel_indices
+ 
+-def compute_3bit_index(texel_pos, end0, end1):
++def compute_texel_index_3bit(texelPos, end0, end1):
+     """
+-    Computes a 3-bit index for BC6H compression.
+-    
+-    Args:
+-        texel_pos: Float
+-        end0: Float
+-        end1: Float
++    Variant 2: 3-bit Texel Indexing
++    Returns integer 0-7
++    """
++    # Avoid division by zero
++    if end1 == end0:
++        return 0
+         
+-    Returns:
+-        Integer 0-7
+-    """
+-    ratio = (texel_pos - end0) / (end1 - end0)
+-    scaled = ratio * 6.98182 + 0.00909 + 0.5
+-    rounded = round(scaled)
+-    index = max(0, min(7, rounded))
++    ratio = (texelPos - end0) / (end1 - end0)
++    val = ratio * 6.98182 + 0.00909 + 0.5
++    index = round(val)
++    # Clamp to 0-7
++    if index < 0:
++        index = 0
++    elif index > 7:
++        index = 7
+     return index
+ ```
+-
+-### Edge Cases and Pitfalls
+-*   **Division by Zero**: If `end1 == end0` in Mode 2, the ratio is undefined. The source does not specify a guard; implementers should clamp or return a sentinel value [G].
+-*   **Precision**: Floating-point errors in `floor` operations can cause off-by-one errors at exact grid boundaries. Using `torch.floor` is standard, but careful handling of negative coordinates is required as floor behaves differently than truncation [G].
+-*   **Batch ID Mismatch**: If `batch_ids` contains indices out of bounds for `bounding_boxes`, an index error will occur. Input validation is required [G].
+ 
+ ## Subtopics
+ 
+ ### [Lighting Fast Querier](11265-lighting-fast-querier.md)
+-A CUDA-accelerated variant optimized for Neural Radiance Fields (NeRF) and point cloud density queries. It integrates ray generation and jittered sampling, differing from generic indexing by handling super-resolution scaling and specific kernel-based logic for training efficiency.
++A CUDA-accelerated module for neural radiance fields that integrates ray generation, jittered sampling, and specific kernel-based query logic optimized for point cloud density. It differs from generic voxel indexing by handling super-resolution scaling and training-specific jitter.
+ 
+ ## Operating characteristics
+-*   **Time Complexity**: $O(N)$ for batched indexing, where $N$ is the number of points. The 3-bit computation is $O(1)$ per texel.
+-*   **Memory Complexity**: $O(N)$ to store the output indices. No additional memory for the grid structure is required during index computation.
+-*   **Performance**: Highly efficient on GPU due to vectorized tensor operations. The 3-bit method is extremely fast but limited to specific compression contexts.
+-*   **Limitations**: Does not handle non-uniform voxel sizes within a single batch without tensor expansion. Boundary handling is implicit via the bounding box definition; points outside bounds result in negative indices or values > grid size, requiring post-processing [G].
++- **Time Complexity**: $O(N)$ for batch indexing, where $N$ is the number of points. The 3-bit indexing is $O(1)$.
++- **Memory Complexity**: $O(N)$ to store the output indices.
++- **Performance**: Batch indexing is highly parallelizable on GPUs. The 3-bit method is extremely fast but limited to small blocks (2x2x2 texels).
++- **Strengths**: Simple arithmetic, GPU-friendly, supports batched queries.
++- **Limitations**: Does not handle non-axis-aligned grids. Boundary handling requires explicit clamping in implementation.
+ 
+ ## Background
+-The batched voxel indexing method originates from the 2D/3D Gaussian Splatting literature, specifically implemented in the VGVGGT framework for efficient point cloud to grid mapping [S1, unofficial]. The 3-bit indexing method is derived from real-time BC6H texture compression algorithms, where efficient mapping of texel positions to 8 sub-blocks is critical for compression speed [S2, unofficial].
++The batch voxel indexing method is used in 2D/3D Gaussian Splatting frameworks, specifically in the VGVGGT project [S1, unofficial]. The 3-bit indexing method originates from real-time BC6H compression on GPU, used for texture block indexing [S2, unofficial].
+ 
+ ## Sources

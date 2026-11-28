@@ -1,0 +1,123 @@
+--- v007.md
++++ v008.md
+@@ -4,9 +4,9 @@
+ 
+ ## Overview
+-Alpha compositing ray casting evaluates the volume rendering integral by marching along viewing rays and iteratively blending semi-transparent samples from the front of the ray to the back [S1, unofficial][S3, unofficial]. It solves the problem of projecting a 3D density field into a 2D image while preserving internal structure and texture, unlike binary classification methods which suffer from false positives/negatives [S4, unofficial]. It is distinguished from its siblings by its recursive accumulation of color and opacity using the OVER operator, which enables early ray termination when the accumulated opacity reaches unity, a feature not available in back-to-front compositing [S1, unofficial][S3, unofficial].
++Alpha compositing ray casting evaluates the volume rendering integral by marching along viewing rays and iteratively blending semi-transparent samples from the front of the ray to the back [S1, unofficial][S3, unofficial]. It solves the problem of projecting a 3D density field into a 2D image without requiring binary classification, thereby eliminating false positives and false negatives [S4, unofficial]. It is distinguished from its siblings by its recursive accumulation of color and opacity using the OVER operator, which enables early ray termination when the accumulated opacity reaches unity, a feature not available in back-to-front compositing [S1, unofficial][S3, unofficial].
+ 
+ ## How it works
+ **Inputs and Outputs:**
+-*   **Input:** A 3D volume grid (scalar or vector values), a transfer function mapping scalar values to RGBA (color and opacity), a camera position (eye), and a view direction.
++*   **Input:** A 3D volume grid (scalar values), a transfer function mapping scalar values to RGBA (color and opacity), a camera position (eye), a view direction, and a step size [S10, unofficial].
+ *   **Output:** A 2D image where each pixel contains an accumulated RGB color and an accumulated opacity value [S10, unofficial].
+ 
+@@ -20,5 +20,5 @@
+ 1.  **Ray Generation:** For each pixel, construct a ray origin $o$ (eye position) and direction $d$ (normalized view vector) [S10, unofficial].
+ 2.  **Intersection:** Compute the entry ($t_{near}$) and exit ($t_{far}$) distances of the ray with the volume bounding box (typically $[0,1]^3$) [S10, unofficial]. If the ray does not intersect ($t_{near} > t_{far}$), discard the pixel [S10, unofficial]. If the eye is inside the volume, clamp $t_{near}$ to 0.0 to prevent sampling behind the eye [S10, unofficial].
+-3.  **Step Size Calculation:** Determine the step size $\Delta t$. A common approach is to divide the volume extent by the product of volume dimensions and the absolute ray direction components, taking the minimum component to ensure at least one sample per voxel dimension [S10, unofficial]. Alternatively, a fixed number of steps $N$ can be used, where $\Delta t = (t_{far} - t_{near}) / N$ [S3, unofficial].
++3.  **Step Size Calculation:** Determine the step size $\Delta t$. A common approach is to divide the volume extent by the product of volume dimensions and the absolute ray direction components, taking the minimum component to ensure at least one sample per voxel dimension [S10, unofficial]. Alternatively, a fixed step size can be provided [S3, unofficial].
+ 4.  **Initialization:** Initialize accumulated color $C_{acc} = (0, 0, 0)$ and accumulated opacity $\alpha_{acc} = 0.0$ [S12, unofficial][S17, unofficial].
+ 5.  **Ray Marching Loop:** Iterate from $t = t_{near}$ to $t < t_{far}$ with step $\Delta t$:
+@@ -37,10 +37,17 @@
+ 
+ ```python
+-def alpha_compositing_ray_casting(volume, transfer_function, eye, ray_dir, volume_dims):
+-    # 1. Normalize ray
++def alpha_compositing_ray_casting(eye, ray_dir, volume_dims, step_size=0.01):
++    # 1. Normalize ray direction
+     ray_dir = normalize(ray_dir)
+     
+-    # 2. Intersect with unit cube [0,1]^3
+-    inv_dir = 1.0 / ray_dir
++    # 2. Handle zero components to avoid division by zero
++    safe_dir = vec3(
++        1e-10 if abs(ray_dir.x) < 1e-10 else ray_dir.x,
++        1e-10 if abs(ray_dir.y) < 1e-10 else ray_dir.y,
++        1e-10 if abs(ray_dir.z) < 1e-10 else ray_dir.z
++    )
++    
++    # 3. Intersect with unit cube [0,1]^3
++    inv_dir = 1.0 / safe_dir
+     t_min = (vec3(0.0) - eye) * inv_dir
+     t_max = (vec3(1.0) - eye) * inv_dir
+@@ -50,13 +57,8 @@
+     # Discard if no intersection
+     if t_near > t_far:
+-        return vec4(0.0)
++        return vec4(0.0, 0.0, 0.0, 0.0)
+     
+     # Clamp start to eye if inside volume
+     t_near = max(t_near, 0.0)
+-    
+-    # 3. Compute step size
+-    # Ensure at least one sample per voxel dimension
+-    dt_vec = 1.0 / (vec3(volume_dims) * abs(ray_dir))
+-    dt = min(dt_vec.x, min(dt_vec.y, dt_vec.z))
+     
+     # 4. Initialize accumulators
+@@ -75,6 +77,6 @@
+         # Note: Some TFs return RGBA, others use val as alpha directly
+         tf_result = texture(transfer_function, vec2(val, 0.5))
+-        src_color = tf_result.rgb
+-        src_alpha = tf_result.a # or val, depending on TF implementation
++        src_color = tf_result.rgb  # Pre-multiplied RGB per [S6, unofficial]
++        src_alpha = tf_result.a    # or val, depending on TF implementation
+         
+         # 6. Compositing (Front-to-Back)
+@@ -83,5 +85,5 @@
+         
+         # Update color: C_new = C_old + T_old * C_src
+-        acc_color += transmittance * src_color * src_alpha
++        acc_color += transmittance * src_color
+         
+         # Update alpha: A_new = A_old + T_old * A_src
+@@ -93,6 +95,6 @@
+             
+         # Advance
+-        p += ray_dir * dt
+-        t += dt
++        p += ray_dir * step_size
++        t += step_size
+         
+     # 8. Blend with background (e.g., black)
+@@ -115,5 +117,5 @@
+ 
+ ### [Back-to-Front Compositing](2078-back-to-front-compositing.md)
+-Back-to-Front Compositing is a volume rendering technique that iteratively accumulates color and opacity along a viewing ray by processing samples from the farthest intersection with the volume to the nearest. It solves the problem of blending semi-transparent layers into a final image by applying the Over operator, which is the mathematical inverse of the Under operator used in front-to-back rendering. Unlike front-to-back compositing, this method does not require tracking accumulated opacity for the color calculation, but it does not support early ray termination.
++Back-to-Front Compositing is a volume rendering technique that determines the final pixel color by accumulating samples along a viewing ray from the far boundary (back) to the camera (front). It solves the problem of blending semi-transparent layers to produce a coherent image while enabling hardware alpha blending implementation where objects approach the viewer. Unlike its sibling [Front-to-Back Compositing (Over Operator)](3360-front-to-back-compositing-over-operator.md), which tracks accumulated opacity to enable early ray termination, back-to-front compositing does not require tracking accumulated opacity for the color calculation but consequently lacks early termination support.
+ 
+ ### [Subvolume Tracing](2367-subvolume-tracing.md)
+@@ -121,21 +123,20 @@
+ 
+ ### [Maximum Intensity Difference Accumulation](3571-maximum-intensity-difference-accumulation.md)
+-Maximum Intensity Difference Accumulation (MIDA) is a compositing technique for direct volume ray casting that modulates accumulated opacity based on changes in data intensity values, eliminating the need for manual Transfer Function (TF) specification. It combines characteristics of Direct Volume Rendering (DVR) and Maximum Intensity Projection (MIP) by reducing the contribution of previously accumulated color and opacity when a higher-intensity sample is encountered along the ray, allowing prominent high-intensity features to remain visible despite occlusion. Unlike traditional DVR where occluded features are lost behind opaque regions, MIDA allows these features to potentially remain visible by dimming the occluder.
++Maximum Intensity Difference Accumulation (MIDA) is a volume rendering compositing technique that modifies standard Direct Volume Rendering (DVR) to prevent high-intensity structures from being occluded by irrelevant foreground material. Unlike standard DVR, where accumulated opacity grows monotonically and causes "fog" that hides distant features, MIDA modulates previously accumulated color and opacity based on the difference between the current sample's intensity and the current maximum intensity along the ray. This allows MIDA to combine the spatial context and shading compatibility of DVR with the parameterless, high-visibility nature of Maximum Intensity Projection (MIP).
+ 
+ ### [Hardware Alpha Blending Compositing](5697-hardware-alpha-blending-compositing.md)
+-Hardware Alpha Blending Compositing implements the front-to-back alpha compositing equation using the graphics hardware's fixed-function blending pipeline, avoiding the need for manual fragment shader accumulation. It differs from [Back-to-Front Compositing](2078-back-to-front-compositing.md) by relying on the GPU's internal blend state rather than explicit sorting and shader-based accumulation, and from [Subvolume Tracing](2367-subvolume-tracing.md) by operating on a single render node's framebuffer rather than distributed network compositing. It solves the problem of efficiently accumulating semi-transparent volume slices into a final image with minimal CPU intervention.
++Hardware Alpha Blending Compositing is a technique for direct volume ray casting that leverages the fixed-function or programmable pipeline of a GPU to perform the front-to-back (Over) or back-to-front (Under) compositing equations during rasterization[book]. It solves the problem of accumulating transmittance and color along a ray by mapping the scalar volume data to texture alpha channels and rendering proxy geometry (such as slices or splats) with specific blend factors. It differs from software-based accumulation by offloading the per-sample arithmetic to the hardware blend unit, and from [Back-to-Front Compositing](2078-back-to-front-compositing.md) by relying on the GPU's depth buffer and blend state rather than explicit sorting or shader-based accumulation loops[book].
+ 
+ ## Operating characteristics
+ **Time and Memory Complexity:**
+ *   **Time:** $O(L)$ per ray, where $L$ is the number of samples along the ray. Early ray termination reduces the average number of steps, especially in opaque regions [S17, unofficial].
+-*   **Memory:** $O(X \cdot Y)$ for the output image buffers (color and opacity). The volume data itself requires $O(V)$ memory, where $V$ is the number of voxels [S17, unofficial].
++*   **Memory:** $O(X \cdot Y)$ for the output image buffers (color and opacity) [S17, unofficial].
+ 
+ **Performance and Scaling:**
+ *   Performance is heavily dependent on the density of the volume and the chosen transfer function. Highly transparent volumes require full ray traversal, while opaque volumes benefit significantly from early termination [S17, unofficial].
+-*   Scaling to higher resolutions increases the number of rays and potentially the number of samples per ray (if step size is fixed in world units), leading to quadratic or cubic increases in computation depending on the implementation [S4, unofficial].
+ 
+ **Strengths and Limitations:**
+ *   **Strengths:** Produces high-quality images with smooth gradients and internal visibility. It avoids the artifacts associated with binary classification (false positives/negatives) [S4, unofficial]. It supports early ray termination, a significant optimization [S1, unofficial].
+-*   **Limitations:** Computationally expensive compared to projection methods like MIP. The result is order-dependent (front-to-back), requiring careful handling of sample ordering [S8, unofficial]. It requires a transfer function to map data values to optical properties, which can be non-trivial to tune [S2, unofficial].
++*   **Limitations:** Computationally expensive compared to projection methods like MIP. The result is order-dependent (front-to-back), requiring careful handling of sample ordering [S8, unofficial].
+ 
+ **When to Use:**
+@@ -144,5 +145,5 @@
+ 
+ ## Background
+-Alpha compositing ray casting originates from the volume rendering integral formulated in light transport theory [S3, unofficial]. The method was popularized by Drebin, Carpenter, and Hu in their 1988 paper "Volume Rendering" [S4, unofficial], which introduced the use of pre-multiplied color-opacity values and the OVER operator for efficient compositing. The technique is modeled after optical film recorders, simulating the projection of light through a gel-like substance [S6, unofficial]. It has become the standard compositing method for direct volume rendering, forming the basis for many modern GPU-based renderers and differentiable rendering pipelines (e.g., NeRF, 3D Gaussian Splatting) [S9, unofficial][S14, unofficial][S23, unofficial].
++The method integrates samples with optical properties along viewing rays, following the volume rendering integral from light transport theory [S3, unofficial]. The technique was popularized by Drebin, Carpenter, and Hu in their 1988 paper "Volume Rendering" [S4, unofficial], which introduced the use of pre-multiplied color-opacity values and the OVER operator for efficient compositing. The method is modeled after optical film recorders, simulating the projection of light through a gel-like substance [S6, unofficial]. The compositing rule is identical to that used by volumetric radiance fields (NeRF) and 3D Gaussian Splatting [S9, unofficial][S23, unofficial], and is implemented in differentiable rendering pipelines [S14, unofficial].
+ 
+ ## Sources

@@ -1,0 +1,48 @@
+# Adjustable Center Point for Voronoi Partitioning
+
+Also called: Adjusted Barycentric Center, Weighted Center Point Adjustment
+
+## Overview
+This method modifies the standard Voronoi partitioning within a barycentric simplex (triangle or tetrahedron) by shifting the central "Y-point" or centroid to arbitrary locations. It solves the problem of inaccurate material interface representation in cases where the uniform distribution assumption fails, such as T-intersections or specific material distributions [S1]. Unlike standard Soft Voronoi Decomposition which assumes symmetric sector subdivision, this approach allows the center point $c$ to be adjusted to better weigh materials about the junction, ensuring planar separating surfaces remain consistent [S1].
+
+## How it works
+**Inputs and Outputs:**
+*   **Input:** A barycentric simplex (triangle for 3 materials, tetrahedron for 4 materials) containing material fraction data.
+*   **Input:** A target adjustment for the center point $c$ within the simplex.
+*   **Output:** Adjusted intersection edges and vertices defining the material boundaries.
+
+**Data Structures:**
+*   **Barycentric Coordinates:** For an $m$-material case, each vertex of the grid has an associated barycentric coordinate vector $\lambda = (\lambda_1, \lambda_2, \dots, \lambda_m)$ [S1].
+*   **Center Point $c$:** A point within the simplex. In the standard 3-material case, $c = (1/3, 1/3, 1/3)$ [S1].
+
+**Steps:**
+1.  **Identify Material Distribution:** Determine if the material distribution within the simplex deviates from the uniform assumption (e.g., a T-intersection where one material occupies half the volume and others one-quarter each) [S1].
+2.  **Sample Neighborhood:** Sample in a larger neighborhood of the specific cell to understand how to weigh the materials about the "Y point" [S1].
+3.  **Adjust Center Point $c$:** Move the center point $c$ from its default position (e.g., centroid) to an arbitrary location within the barycentric triangle or tetrahedron [S1].
+4.  **Adjust Intersection Edges:** Modify the edges that determine the intersections between material sectors to remain consistent with the new position of $c$ [S1].
+5.  **Adjust Face Centers (4+ materials):** If the simplex is a tetrahedron (4 materials) or higher-dimensional simplex ($m$ materials), adjusting the central center implies that the "center" vertices on the faces must also be adjusted so that the separating surfaces remain planar [S1].
+
+**Formulas:**
+*   Standard 3-material center: $c = (1/3, 1/3, 1/3)$ [S1].
+*   General $m$-material case: The algorithm generalizes Nielson's and Franke's algorithm [S1]. Each vertex has barycentric coordinates $\lambda$. Restricting material fractions such that exactly one $\lambda_i = 1$ yields the case where each vertex is associated with only one material [S1].
+
+**Pitfalls:**
+*   **Planarity Loss:** In the four-material case, adjusting the center of the tetrahedron without adjusting the "center" vertices on the faces causes the separating surfaces to become non-planar [S1].
+*   **Complexity:** The adjustment logic becomes more complex as $m$ increases, requiring similar considerations for the $m$-simplex [S1].
+
+## Subtopics
+
+### Centroid Approximation
+An acceleration technique for computing Voronoi cell centroids by averaging the positions of projected and un-projected vertices associated with the cell, instead of evaluating the exact centroid [S2]. It is chosen when computational speed is prioritized over exact geometric precision, as the exact centroid computation is time-consuming [S2]. In practice, no noticeable difference in final results was observed [S2].
+
+## Operating characteristics
+*   **Accuracy:** Improves material interface representation in non-uniform distributions (e.g., T-intersections) compared to uniform barycentric assumptions [S1].
+*   **Complexity:** Requires neighborhood sampling to determine weights, adding computational overhead compared to static centers [S1].
+*   **Constraints:** Requires careful adjustment of face vertices in 4+ material cases to maintain planar surfaces [S1].
+
+## Background
+The method is a direct generalization of Nielson's and Franke's algorithm [S1]. It addresses limitations in isosurface-type algorithms where material boundaries in tetrahedra cannot be detected if the isosurface enters a tetrahedron but only intersects one edge [S1]. The standard assumption of three distinct sectors subdividing a triangle in a "Y" fashion with equal material distribution is often invalid in complex scenes [S1].
+
+## Sources
+[S1] Constructing Material Interfaces from Data Sets with Volume-Fraction Information, https://digital.library.unt.edu/ark:/67531/metadc739076/?q=marching cubes, fetched 2026-10-28
+[S2] DCCVT: Differentiable Clipped Centroidal Voronoi Tessellation, https://arxiv.org/abs/2601.13603v1, fetched 2026-10-26

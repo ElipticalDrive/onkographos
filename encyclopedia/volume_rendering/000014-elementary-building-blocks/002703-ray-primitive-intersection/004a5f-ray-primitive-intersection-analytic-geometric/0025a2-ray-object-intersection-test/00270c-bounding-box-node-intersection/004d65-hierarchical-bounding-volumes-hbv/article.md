@@ -1,0 +1,128 @@
+# Hierarchical Bounding Volumes (HBV)
+
+Also called: Bounding Volume Hierarchies (BVH)
+
+## Overview
+Hierarchical Bounding Volumes (HBV) is an acceleration structure for ray-primitive intersection that organizes scene primitives into a tree of nested bounding volumes to reduce the number of expensive primitive intersection tests [S1, unofficial][S3][S4, unofficial]. It solves the problem of linear search complexity in brute-force ray tracing by allowing rays to quickly discard large portions of the scene that do not intersect the current bounding volume [S1, unofficial][S3]. Unlike regular 3D grids which partition space uniformly, HBV adapts its structure to the spatial distribution of primitives, typically storing primitives only at leaf nodes and partitioning the primitive set at internal nodes [S1, S2, unofficial].
+
+## How it works
+**Inputs:** A set of primitives $P$ (e.g., triangles, spheres); a ray $r = (o, d)$ where $o$ is the origin and $d$ is the direction [G].
+**Outputs:** A list of intersection hits, sorted by distance from $o$ [G].
+
+**Data Structures:**
+The HBV is a tree where each node $N$ contains:
+1. **Bounding Volume (BV):** A geometric enclosure $B$ that contains all primitives in the subtree rooted at $N$ [S1, unofficial]. Common types include Axis-Aligned Bounding Boxes (AABB), Oriented Bounding Boxes (OBB), or spheres [S1, unofficial].
+2. **Primitives:** A list of primitives $P_N$ associated with the node. In standard implementations, internal nodes do not store primitives; primitives are stored only at leaf nodes [S1, unofficial].
+3. **Children:** Pointers to child nodes (for binary trees) or an array of children (for higher arity) [S1, unofficial].
+
+**Parameters:**
+* **BV Type:** The shape of the bounding volume (e.g., AABB, Sphere, OBB) [S1, unofficial].
+* **Arity:** The number of children per internal node [S1, unofficial].
+* **Stopping Criterion:** The maximum number of primitives allowed in a leaf node (e.g., default $<4$ primitives) [S1, S4, unofficial].
+* **Partitioning Criterion:** The heuristic used to split primitives during construction [S1, unofficial].
+
+**Algorithm Steps:**
+
+1. **Construction (Preprocessing):**
+   * If a model hierarchy exists, derive the tree from it [S2, unofficial].
+   * Otherwise, use automatic clustering [S2, unofficial]. A standard top-down approach computes a tight bounding box around all primitives, splits along the centroid of the longest axis, and recurses until the stopping criterion is met [S4, unofficial].
+   * Other methods include bottom-up clustering or iterative insertion [S1, S2, unofficial].
+
+2. **Traversal (Intersection Test):**
+   The traversal determines which primitives intersect the ray $r$ [S2, unofficial]. The standard recursive depth-first approach is defined as follows [S2, unofficial]:
+
+   ```python
+   def intersect(node, ray, hits):
+       if ray_intersects_bv(node.bound, ray):
+           if node.is_leaf:
+               intersect_primitives(node.prims, ray, hits)
+           else:
+               for child in node.children:
+                   intersect(child, ray, hits)
+
+   def ray_intersects_bv(bv, ray):
+       # Standard slab method for AABB intersection
+       # Returns True if ray intersects bv for t >= 0
+       # [G] Handles d_i = 0 by checking ray origin against bounds
+       t_min = max((bv.min[i] - ray.o[i]) / ray.d[i] if ray.d[i] != 0 else (0.0 if ray.o[i] < bv.min[i] else float('inf')) for i in range(3))
+       t_max = min((bv.max[i] - ray.o[i]) / ray.d[i] if ray.d[i] != 0 else (0.0 if ray.o[i] > bv.max[i] else float('inf')) for i in range(3))
+       return t_min <= t_max and t_max >= 0
+
+   def intersect_primitives(prims, ray, hits):
+       for prim in prims:
+           t = ray_primitive_intersection(ray, prim)
+           if t is not None and t >= 0:
+               hits.append((t, prim))
+       hits.sort(key=lambda x: x[0])
+   ```
+
+   **Priority Queue Traversal (Optimization):**
+   Pure depth-first search (DFS) order depends only on tree topology, not spatial layout [S1, unofficial]. To improve efficiency, a priority queue (heap) can be used to visit nodes in order of their distance to the ray origin [S1, unofficial].
+   1. Initialize a min-heap with the root node [S1, unofficial].
+   2. While the heap is not empty:
+      a. Extract the node $N$ with the smallest distance $t_{BV}$ from the ray origin to its BV intersection [S1, unofficial].
+      b. If $t_{BV}$ is greater than the distance $t_{hit}$ of the closest primitive intersection found so far, discard $N$ and its subtree (pruning) [S1, unofficial].
+      c. Otherwise, if $N$ is a leaf, test its primitives and update $t_{hit}$ if a closer intersection is found [S1, unofficial].
+      d. If $N$ is internal, calculate the intersection distance for each child, and insert valid children into the heap [S1, unofficial].
+      e. A complete ordering among all BVs is not required; only the ability to extract the minimum element is needed, which a heap provides in $O(\log n)$ time per operation [S1, unofficial].
+
+**Formulas:**
+* **Ray-BV Intersection:** For an AABB defined by $[min_x, max_x] \times [min_y, max_y] \times [min_z, max_z]$, the ray $o + t \cdot d$ intersects if:
+  $$ t_{min} = \max \left( \frac{min_x - o_x}{d_x}, \frac{min_y - o_y}{d_y}, \frac{min_z - o_z}{d_z} \right) $$
+  $$ t_{max} = \min \left( \frac{max_x - o_x}{d_x}, \frac{max_y - o_y}{d_y}, \frac{max_z - o_z}{d_z} \right) $$
+  Intersection exists if $t_{min} \le t_{max}$ and $t_{max} \ge 0$ [G].
+* **Heap Complexity:** Insertion and extraction of the minimal element cost $O(\log n)$ [S1, unofficial].
+
+**Edge Cases and Pitfalls:**
+* **False Positives:** A "false positive" occurs when the BV is hit but the object inside is not. This requires further testing of the primitives within the node [S1, unofficial].
+* **Ordering Ambiguity:** The closest ray-BV intersection and the closest ray-primitive intersection can happen in different BVs. The priority queue must handle this correctly by not assuming that the closest BV contains the closest primitive [S1, unofficial].
+* **Precision:** Numerical stability in ray-BV intersection tests can affect pruning efficiency [G].
+
+## Subtopics
+
+### [BVH for Gaussian Surfels](17858-bvh-for-gaussian-surfels.md)
+This method accelerates the computation of physically-based indirect illumination for Gaussian splatting representations by treating Gaussians as ellipsoidal surfels and organizing them into a BVH. It solves the problem of unnatural indirect lighting in unconstrained spherical harmonic (SH) methods by enforcing physical constraints via ray tracing. Unlike standard Gaussian splatting which uses screen-space rasterization, this approach explicitly traces rays through the 3D Gaussian field to calculate visibility and accumulated radiance, enabling true inverse rendering and relighting.
+
+### [Heuristic BVH Construction (Top-Down with Plane-Sweep)](18008-heuristic-bvh-construction-top-down-with-plane-sweep.md)
+This method constructs a BVH using a recursive top-down approach that optimizes a cost function based on surface area and object count, rather than seeking the mathematically optimal partition which is computationally infeasible. It distinguishes itself from iterative bottom-up methods by generally yielding better BVH quality, and from exact optimal partitioning by using a heuristic plane-sweep strategy to find a near-optimal split. It builds on [Hierarchical Bounding Volumes (HBV)](13475-hierarchical-bounding-volumes-hbv.md).
+
+### [Median Cut BVH Construction](18048-median-cut-bvh-construction.md)
+Median Cut BVH Construction is a top-down heuristic method for building a BVH by recursively partitioning a set of primitives based on their spatial centroids [G]. It solves the problem of organizing geometry for efficient ray-primitive intersection by creating a balanced binary tree [G]. It is distinguished from [Heuristic BVH Construction (Top-Down with Plane-Sweep)](18008-heuristic-bvh-construction-top-down-with-plane-sweep.md) by its simplicity and deterministic partitioning via sorting, rather than optimizing surface area or using plane-sweep algorithms [G]. It builds on [Hierarchical Bounding Volumes (HBV)](13475-hierarchical-bounding-volumes-hbv.md).
+
+### Bounding Volumes
+The choice of bounding volume affects the trade-off between construction time, traversal speed, and tightness of fit [S1, unofficial]. Common types include AABBs, Spheres, OBBs, and convex hulls [S1, unofficial].
+
+### Priority Queue BVH Traversal
+A traversal algorithm that uses a priority queue (heap) to visit BV nodes in order of their distance to the ray origin, improving upon pure depth-first search [S1, unofficial]. It calculates the distance between the ray origin and the intersection point of the ray with the currently visited BV [S1, unofficial]. If this distance is greater than the distance to an already found intersection with an object, the BV and its subtree are ignored [S1, unofficial]. Otherwise, it recurses into the children [S1, unofficial]. All remaining BVs are sorted by their distance to the ray origin in a heap, and the closest BV is always selected as the next candidate [S1, unofficial]. The pitfall is that the closest ray-BV intersection and the closest ray-primitive intersection can happen in different BVs, so a complete ordering among BVs is not needed, only the ability to extract the closest one [S1, unofficial].
+
+## Operating characteristics
+**Time Complexity:**
+* **Construction:** Depends on the heuristic [S1, S2, unofficial].
+* **Traversal:** Worst-case $O(n)$ if the tree is unbalanced or the ray passes through all nodes. Average case is significantly better, often $O(\log n)$ for well-balanced trees [S1, unofficial][S3][S4, unofficial]. Priority queue traversal adds $O(\log n)$ overhead per node visit, where $n$ is the number of elements in the heap [S1, unofficial].
+
+**Memory Complexity:**
+* Memory usage scales with the number of nodes and primitives [S1, S2, unofficial].
+
+**Measured Performance:**
+* For a scene with 66,430 spheres, brute-force rendering took 24,891.0 seconds, while a Goldsmith/Salmon BVH took 7.4 seconds on an Athlon XP 1900+ [S1, unofficial]. This demonstrates a significant speedup for large scenes.
+
+**Strengths and Limitations:**
+* **Strengths:** Adapts to scene density; reduces intersection tests significantly for sparse scenes; flexible BV types [S1, unofficial].
+* **Limitations:** False positives still require primitive tests [S1, unofficial].
+
+**When to Use:**
+Not given in the sources.
+
+**When Not to Use:**
+Not given in the sources.
+
+## Background
+The Bounding Volume Hierarchy was introduced as an acceleration data structure for ray tracing to save costs by precomputations on the scene and filtering of rays during run-time [S1, unofficial]. The concept of using bounding volumes to filter rays dates back to early ray tracing research. The specific term "Bounding Volume Hierarchy" and its application to hierarchical scene graphs became prominent in the 1980s and 1990s. Rubin and Whitted pioneered hierarchical bounding volume structures in 1980 [S3]. Goldsmith and Salmon (1987) proposed an iterative insertion method for BVHs [S1, unofficial]. The structure is widely used in modern ray tracers and global illumination engines [S1, S4, unofficial].
+
+## Sources
+[S1] Advanced Computer Graphics, https://cgvr.cs.uni-bremen.de/teaching/cg2_13/folien/03%20-%20Acceleration%20data%20structures.pdf, fetched 2026-10-24 (unofficial)
+[S2] PPT - Ray Tracing 2: Acceleration PowerPoint Presentation, free ..., https://www.slideserve.com/chaim/ray-tracing-2-acceleration, fetched 2026-10-26 (unofficial)
+[S3] ray casting, https://grokipedia.com/page/Ray_casting, fetched 2026-10-26
+[S4] Optimizing Ray-Marching using CUDA for Volumetric Rendering, https://stephenlee129.github.io/volumetric-ray-marching/, fetched 2026-10-29 (unofficial)
+[S5] Decoupling Data Layouts from Bounding Volume Hierarchies, https://arxiv.org/pdf/2511.15028, fetched 2026-10-29
+[S6] State-of-the-Art in GPU-Based Large-Scale Volume Visualization, https://vcg.seas.harvard.edu/publications/20150513-stateof-the-art-in-gpu-based-large-scale-volume-visualization/paper, fetched 2026-10-24

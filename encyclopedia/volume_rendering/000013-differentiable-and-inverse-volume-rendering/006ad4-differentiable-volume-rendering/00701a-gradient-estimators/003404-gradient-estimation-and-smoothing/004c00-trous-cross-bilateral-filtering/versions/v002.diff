@@ -1,0 +1,277 @@
+--- v001.md
++++ v002.md
+@@ -4,184 +4,133 @@
+ 
+ ## Overview
+-À-trous cross-bilateral filtering is a spatial smoothing technique applied to gradients and their associated first and second moment buffers in inverse rendering, implemented as a sequence of dilated filters to enable fast optimization [S1]. It differs from standard bilateral filters by using the underlying parameter values $\theta$ rather than the gradient values themselves for the edge-stopping data term, which prevents over-smoothing across parameter discontinuities while leveraging the lower noise and dynamic range of the parameters [S1]. This method serves as a preconditioner for gradients, ensuring bounded step sizes similar to Adam, but allows for dynamic adjustment of learning rates through spatial filtering [S1].
++À-trous cross-bilateral filtering is a spatial filtering technique applied to gradients and their associated first and second moment buffers in inverse rendering to enable fast, stable optimization [S1]. It differs from standard bilateral filters by using the underlying parameter values $\theta$ rather than the noisy gradient values themselves to determine edge-stopping weights, which prevents over-smoothing across parameter discontinuities [S1]. It builds on [Gradient Estimation and Smoothing](7152-gradient-estimation-and-smoothing.md) by providing a preconditioner that smooths gradients while preserving sharp features in the recovered textures or volumes.
+ 
+ ## How it works
+ **Inputs and Outputs:**
+-*   **Inputs:** Gradient $\nabla_\theta f_t$, first moment buffer $m_t$, second moment buffer $v_t$, parameter grid $\theta$, filter parameters $F, \sigma_s, \sigma_d, \beta_1, \beta_2$.
+-*   **Outputs:** Filtered gradient $\tilde{\nabla}_\theta f_t$, filtered moments $\tilde{m}_t, \tilde{v}_t$.
++*   **Inputs:** The current gradient $\nabla_\theta f_t$, the first moment buffer $m_t$, the second moment buffer $v_t$, the current parameter values $\theta$, and filter parameters $F, \sigma_s, \sigma_d, \beta_1, \beta_2$.
++*   **Outputs:** The filtered gradient $\tilde{\nabla}_\theta f_t$, the filtered first moment $\tilde{m}_t$, and the filtered second moment $\tilde{v}_t$.
+ 
+ **Data Structures:**
+-*   **Gradients/Moments:** Defined on regular 2D or 3D grids. For 2D, a $W \times H$ grid; for 3D, a $W \times H \times D$ grid.
+-*   **Parameters:** $\theta$ is stored on the same grid as the gradients.
+-
+-**Algorithm Steps:**
+-1.  **Temporal Filtering (Optional):** Update the first and second moment buffers using exponential moving averages.
+-    *   $m_t \leftarrow \beta_1 m_{t-1} + (1-\beta_1) \nabla_\theta f_t$
+-    *   $v_t \leftarrow \beta_2 v_{t-1} + (1-\beta_2) (\nabla_\theta f_t)^2$
+-    *   *Note:* $\beta_1$ and $\beta_2$ are typically set such that $1-\beta_1 = 1-\beta_2$ [S1].
+-2.  **Spatial Filtering (À-trous Cross-Bilateral):** Apply a sequence of $F$ à-trous filters to the gradients and the moment buffers.
+-    *   For each step $i$ from $1$ to $F$:
+-        *   Define a dilated kernel. For 2D, use a $3 \times 3$ kernel with dilation factor $2^{i-1}$. For 3D, use a $3 \times 3 \times 3$ kernel with dilation factor $2^{i-1}$ [S1].
+-        *   Apply the cross-bilateral filter to the current gradient/moment field.
+-3.  **Postfiltering:** Apply the same sequence of $F$ à-trous cross-bilateral filters to the updated buffers $m_t$ and $v_t$ [S1].
+-4.  **Update:** Compute the update step using the filtered gradients and moments.
++*   $\theta, \nabla_\theta f_t, m_t, v_t$: Defined on regular 2D or 3D grids [S1].
++*   Buffers $m_t$ and $v_t$ store the exponential moving averages of the gradient and its square, respectively, similar to Adam [S1].
+ 
+ **Formulas:**
+-The cross-bilateral filter $\tilde{h}(x)$ for a function $h$ at spatial location $x$ is defined as [S1]:
+-
++The core cross-bilateral filter operation for a function $h$ is defined as [S1]:
+ $$
+ \tilde{h}(x) = \frac{1}{z(x)} \int_{\Omega} h(y) w_s(x,y) w_d(\theta(y),\theta(x)) dy
+ $$
++where:
++*   $\Omega$ is the spatial domain.
++*   $w_s(x,y) = \exp(-||x-y||/\sigma_s)$ is the spatial isotropic low-pass weight.
++*   $w_d(\theta_x,\theta_y) = \exp(-||\theta_x-\theta_y||/\sigma_d)$ is the data term weight.
++*   $z(x) = \int_{\Omega} w_s(x,y) w_d(\theta(y),\theta(x)) dy$ is the normalization term.
++*   $\sigma_s$ controls the spatial scale.
++*   $\sigma_d$ controls the data term scale.
+ 
+-Where:
+-*   $\Omega$ is the spatial domain.
+-*   $z(x)$ is the normalization term: $z(x) = \int_{\Omega} w_s(x,y) w_d(\theta(y),\theta(x)) dy$.
+-*   $w_s(x,y)$ is the spatial isotropic low-pass weight:
+-    $$
+-    w_s(x,y) = \exp\left(-\frac{||x-y||}{\sigma_s}\right)
+-    $$
+-*   $w_d(\theta_x,\theta_y)$ is the data term weight preventing smoothing across discontinuities:
+-    $$
+-    w_d(\theta_x,\theta_y) = \exp\left(-\frac{||\theta_x-\theta_y||}{\sigma_d}\right)
+-    $$
+-*   $\sigma_s$ controls the scale of the spatial weight.
+-*   $\sigma_d$ controls the scale of the data weight.
+-
+-In the discrete à-trous implementation, the integral is replaced by a sum over the dilated kernel neighbors. The spatial standard deviation $\sigma_s$ is indirectly specified by the number of filters $F$ [S1].
+-
+-**Parameters:**
+-*   **$F$ (Number of filters):** Indirectly specifies $\sigma_s$. Typical values: $F=5$ for texture recovery, $F=3$ for volume recovery and Laplacian smoothing [S1].
+-*   **$\sigma_d$ (Data term scale):** Typical values: $0.1$ for texture recovery, $0.001$ for albedo $\rho$, and $0.2$ for density $\sigma_t$ in volume recovery [S1].
+-*   **$\beta_1$ (Temporal coefficient for $m_t$):** Typical value: $0.2$. Range: $(0.2, 0.5)$. Lower values reduce temporal bias but increase noise [S1].
+-*   **$\beta_2$ (Temporal coefficient for $v_t$):** Set satisfying $1-\beta_1=1-\beta_2$ [S1].
+-*   **$\alpha$ (Learning rate):** Typical values: $0.1$ for non-Adam methods, $0.01$ for Adam in texture recovery; $0.008$ for Adam and $0.02$ for others in volume recovery [S1].
++**Numbered Steps:**
++1.  **Temporal Filtering (Optional):** Update $m_t$ and $v_t$ using exponential moving averages with coefficients $\beta_1$ and $\beta_2$. If $\beta_1 = \beta_2 = 0$, this step is skipped (Purely Spatial Filtering) [S1].
++2.  **Spatial Filtering of Gradients:** Apply a sequence of $F$ à-trous cross-bilateral filters to the gradient $\nabla_\theta f_t$. Each filter step uses a dilated kernel (3x3 for 2D, 3x3x3 for 3D) with increasing dilation rates [S1].
++3.  **Spatial Filtering of Buffers:** Apply the **same** sequence of $F$ à-trous cross-bilateral filters to the buffers $m_t$ and $v_t$ using the **same** parameter values $\theta$ for the data term $w_d$ [S1].
++4.  **Update Parameters:** Use the filtered values to update $\theta$ (e.g., $\theta_{t+1} = \theta_t - \alpha \frac{\tilde{m}_t}{\sqrt{\tilde{v}_t} + \epsilon}$) [S1].
+ 
+ **Pseudocode:**
+ ```python
+-def atrous_cross_bilateral_filter(h, theta, sigma_d, sigma_s, F, kernel_size=3):
++def atrous_cross_bilateral_filter(h, theta, sigma_s, sigma_d, F):
+     """
+-    Applies F steps of à-trous cross-bilateral filtering to h.
+-    h: Input field (gradient or moment)
+-    theta: Parameter field used for data term
+-    sigma_d: Data term scale
+-    sigma_s: Spatial scale (used to compute dilation implicitly via F)
+-    F: Number of filter steps
+-    kernel_size: Size of the base kernel (3 for 2D/3D)
++    Applies a sequence of F à-trous cross-bilateral filters to h.
++    h: array of values to filter (gradient, m_t, or v_t)
++    theta: array of parameter values (used for data term)
++    sigma_s: spatial scale
++    sigma_d: data term scale
++    F: number of filter passes
+     """
+     current_h = h
+-    for i in range(F):
+-        dilation = 2 ** i
+-        # Create dilated kernel weights
+-        # For a 3x3 kernel, indices are -1, 0, 1 multiplied by dilation
+-        kernel_offsets = []
+-        if h.ndim == 2:
+-            for dy in [-1, 0, 1]:
+-                for dx in [-1, 0, 1]:
+-                    kernel_offsets.append((dy * dilation, dx * dilation))
+-        elif h.ndim == 3:
+-            for dz in [-1, 0, 1]:
+-                for dy in [-1, 0, 1]:
+-                    for dx in [-1, 0, 1]:
+-                        kernel_offsets.append((dz * dilation, dy * dilation, dx * dilation))
++    dilation = 1
++    for _ in range(F):
++        # Create kernel weights based on spatial distance and parameter difference
++        # For a dilated 3x3 (2D) or 3x3x3 (3D) kernel centered at x:
++        # w_s depends on ||x - y|| * dilation
++        # w_d depends on ||theta[x] - theta[y]|| / sigma_d
+         
+-        filtered_h = np.zeros_like(h)
+-        normalization = np.zeros_like(h)
++        # Note: In implementation, this is typically done via convolution
++        # with a kernel that varies per pixel due to the data term.
++        # The kernel at pixel x is: K_x[y] = exp(-||x-y||*dilation/sigma_s) * exp(-||theta[x]-theta[y]||/sigma_d)
+         
+-        for dy, dx, *rest in kernel_offsets: # Handle 2D/3D generically
+-            # Shifted coordinates
+-            y_coords = np.roll(np.arange(h.shape[0]), dy) if h.ndim >= 1 else None
+-            # Simplified neighbor access for pseudocode clarity
+-            # In practice, iterate over valid neighbors within bounds
++        filtered_h = zero_like(current_h)
++        normalization = zero_like(current_h)
++        
++        # Iterate over neighbors defined by the dilated kernel support
++        for y in neighbors_with_dilation(current_h.shape, dilation):
++            spatial_weight = exp(-distance(x, y) * dilation / sigma_s)
++            data_weight = exp(-abs(theta[x] - theta[y]) / sigma_d)
++            weight = spatial_weight * data_weight
+             
+-            # Calculate spatial weight
+-            # w_s = exp(-dist / sigma_s)
+-            # Note: sigma_s is implicitly handled by the sequence of F filters
+-            # The source uses a fixed sigma_s for the base kernel, but the 
+-            # effective support grows with dilation.
++            filtered_h[x] += current_h[y] * weight
++            normalization[x] += weight
+             
+-            # Calculate data weight
+-            # w_d = exp(-||theta(x) - theta(y)|| / sigma_d)
+-            theta_diff = np.abs(theta - np.roll(np.roll(theta, dy, axis=0), dx, axis=1)) # Example for 2D
+-            w_d = np.exp(-theta_diff / sigma_d)
+-            
+-            # Spatial weight (isotropic)
+-            # Assuming unit distance for adjacent kernel elements before dilation
+-            # w_s = exp(-dilation / sigma_s) ? 
+-            # Source says ws(x,y) = exp(-||x-y||/sigma_s). 
+-            # In à-trous, ||x-y|| is the Euclidean distance in the dilated grid.
+-            dist = np.sqrt(dy**2 + dx**2) * dilation # Approximate
+-            w_s = np.exp(-dist / sigma_s)
+-            
+-            weight = w_s * w_d
+-            
+-            # Accumulate
+-            # h_neighbor = np.roll(np.roll(h, dy, axis=0), dx, axis=1)
+-            # filtered_h += h_neighbor * weight
+-            # normalization += weight
+-            
+-            # Note: The exact implementation of the sum depends on boundary handling.
+-            # The source mentions "dilated 3x3 filter", implying a sparse convolution.
+-            pass 
+-            
+-        # Normalize
+-        # Avoid division by zero
+-        normalization = np.maximum(normalization, 1e-8)
+         current_h = filtered_h / normalization
++        dilation *= 2 # Increase dilation for next pass
+         
+     return current_h
+ 
+-def update_moments(m_prev, v_prev, grad, beta1, beta2):
+-    m_new = beta1 * m_prev + (1 - beta1) * grad
+-    v_new = beta2 * v_prev + (1 - beta2) * (grad ** 2)
+-    return m_new, v_new
+-
+-def inverse_rendering_step(grad, theta, m_prev, v_prev, params):
+-    # 1. Temporal Filtering
+-    m_new, v_new = update_moments(m_prev, v_prev, grad, params['beta1'], params['beta2'])
++def update_with_atrous_cross_bilateral(theta, grad, m_t, v_t, alpha, beta1, beta2, F, sigma_d):
++    """
++    Main optimization step using à-trous cross-bilateral filtering.
++    """
++    # 1. Temporal Filtering (if beta > 0)
++    if beta1 > 0:
++        m_t = beta1 * m_t + (1 - beta1) * grad
++    if beta2 > 0:
++        v_t = beta2 * v_t + (1 - beta2) * (grad ** 2)
++        
++    # 2. Spatial Filtering
++    # Filter gradient
++    filtered_grad = atrous_cross_bilateral_filter(grad, theta, sigma_s=..., sigma_d=sigma_d, F=F)
+     
+-    # 2. Spatial Filtering (Pre-filtering gradients)
+-    # The source implies filtering the gradient directly as a preconditioner
+-    grad_filtered = atrous_cross_bilateral_filter(grad, theta, params['sigma_d'], params['sigma_s'], params['F'])
++    # Filter buffers using the SAME theta and SAME F, sigma_d
++    # Note: sigma_s is implicitly controlled by F and dilation steps
++    filtered_m = atrous_cross_bilateral_filter(m_t, theta, sigma_s=..., sigma_d=sigma_d, F=F)
++    filtered_v = atrous_cross_bilateral_filter(v_t, theta, sigma_s=..., sigma_d=sigma_d, F=F)
+     
+-    # 3. Post-filtering moments
+-    m_filtered = atrous_cross_bilateral_filter(m_new, theta, params['sigma_d'], params['sigma_s'], params['F'])
+-    v_filtered = atrous_cross_bilateral_filter(v_new, theta, params['sigma_d'], params['sigma_s'], params['F'])
++    # 3. Update
++    # Ensure bounded step size similar to Adam
++    step = filtered_m / (sqrt(filtered_v) + epsilon)
++    theta = theta - alpha * step
+     
+-    # 4. Update parameters
+-    # Step = alpha * grad_filtered / (sqrt(v_filtered) + epsilon)
+-    # Note: The source mentions the method ensures bounded steps like Adam.
+-    # The exact update rule is not fully detailed in the snippets, 
+-    # but standard adaptive methods use filtered moments.
+-    # [G] Assuming standard Adam-like update with filtered values
+-    epsilon = 1e-8
+-    step = params['alpha'] * grad_filtered / (np.sqrt(v_filtered) + epsilon)
+-    
+-    return step, m_filtered, v_filtered
++    return theta, m_t, v_t
+ ```
+ 
++**Parameters and Typical Values:**
++*   $F$: Number of filter passes. $F=5$ for texture recovery; $F=3$ for volume recovery and Laplacian smoothing [S1].
++*   $\sigma_d$: Data term scale. $0.1$ for texture recovery; $0.001$ for albedo $\rho$; $0.2$ for density $\sigma_t$ in volume recovery [S1].
++*   $\beta_1$: Temporal filtering coefficient for $m_t$. Typical value $0.2$. Range $(0.2, 0.5)$ [S1].
++*   $\beta_2$: Temporal filtering coefficient for $v_t$. Set such that $1-\beta_1 = 1-\beta_2$ [S1].
++*   $\alpha$: Learning rate. $0.1$ for non-Adam methods; $0.01$ for Adam in texture recovery; $0.008$ for Adam and $0.02$ for others in volume recovery [S1].
++*   $\sigma_s$: Spatial scale. Indirectly specified by $F$ and the dilation rates [S1].
++
+ **Edge Cases and Pitfalls:**
+-*   **Filtering Only One Buffer:** Filtering only $m_t$ or only $v_t$ violates the bound $|\tilde{m}_t|/\tilde{v}_t < 1$, resulting in much larger step sizes that significantly worsen recovery [S1].
+-*   **Inconsistent Data Term Parameters:** Using different parameters $\theta$ for the data term $w_d$ in different filtering operations violates the constraint that ensures bounded steps, significantly degrading recovery [S1].
+-*   **Temporal Bias:** High values of $\beta_1$ and $\beta_2$ increase temporal bias, slowing down convergence within limited iteration budgets [S1].
++*   Filtering only $m_t$ or only $v_t$ violates the bound $|\tilde{m}_t|/\tilde{v}_t < 1$, leading to instability and significantly worse recovery [S1].
++*   Using different parameter values $\theta$ for the data term $w_d$ in different filtering operations (e.g., filtering $m_t$ with old $\theta$ and $v_t$ with new $\theta$) degrades recovery [S1].
++*   Lower values of $\beta_1, \beta_2$ reduce temporal bias but increase noise; higher values slow convergence within limited iteration budgets [S1].
+ 
+ ## Subtopics
+ 
++### [Grid-based Implementation of Cross-Bilateral Filter](13144-grid-based-implementation-of-cross-bilateral-filter.md)
++This variant implements the spatial filtering of gradients and buffers on regular 2D or 3D grids. It replaces expensive neighbor searches with fixed-support convolution kernels with increasing dilation rates, leveraging real-time denoising techniques. It is chosen when the parameters are defined on a grid structure.
++
+ ### Purely Spatial Filtering
+-A configuration where temporal filtering is turned off by setting $\beta_1 = \beta_2 = 0$, making the optimizer memoryless and eliminating the need to maintain buffers $m_t$ and $v_t$ [S1]. This results in a 2/3rd reduction in memory usage compared to methods maintaining these buffers [S1]. Unlike Adam, which makes constant-sized steps, purely spatial filtering allows postfiltering to dynamically adjust learning rates, resulting in faster convergence [S1].
+-
+-### Grid-based Implementation of Cross-Bilateral Filter
+-The implementation of the cross-bilateral filter as a series of à-trous filters for real-time performance [S1]. This approach uses a dilated 3x3 (2D) or 3x3x3 (3D) filter at each step, with increasing support but a fixed number of non-zero elements, similar to real-time denoising techniques [S1].
++A configuration where temporal filtering is disabled by setting $\beta_1 = \beta_2 = 0$ [S1]. This makes the optimizer memoryless, eliminating the need to maintain $m_t$ and $v_t$ buffers, resulting in a 2/3rd reduction in memory usage [S1]. It is chosen for large-scale inverse optimization where memory is constrained, and allows dynamic learning rate adjustment via spatial filtering unlike Adam [S1].
+ 
+ ## Operating characteristics
+-*   **Time Complexity:** The method introduces little overhead (<4%) for both 2D and 3D filtering compared to standard optimization steps [S1]. The à-trous implementation allows for efficient convolution using sparse kernels.
+-*   **Memory Complexity:** Requires storage for gradients, first moment buffer $m_t$, and second moment buffer $v_t$, same as Adam [S1]. Purely spatial filtering reduces this by 2/3rd [S1].
+-*   **Performance:** Enables higher quality inverse recovery with low sample budgets and fewer iterations for convergence [S1]. Tested on NVIDIA GeForce RTX 3080 GPU using Mitsuba 3 [S1].
+-*   **Strengths:** Prevents over-smoothing across edges by using parameter values for edge stopping; ensures bounded step sizes; fast convergence with low sample counts.
+-*   **Limitations:** Requires careful tuning of $\sigma_d$ for different parameters (e.g., albedo vs. density); sensitive to the choice of $\beta_1$ and $\beta_2$ for temporal bias vs. noise trade-off.
+-*   **When to Use:** Suitable for inverse rendering tasks requiring fast optimization and high-quality recovery of textures and volumes, especially when sample budgets are low.
+-*   **When Not to Use:** When memory is extremely constrained and temporal filtering is not needed (use Purely Spatial Filtering); when the parameter space has very high dynamic range that is not well-captured by the data term scale $\sigma_d$.
++*   **Time Complexity:** The method introduces little overhead (<4%) compared to standard optimizers, as it uses efficient convolution-like operations with fixed kernel sizes [S1].
++*   **Memory Complexity:** Requires storage for $m_t$ and $v_t$ buffers (same as Adam) unless Purely Spatial Filtering is used [S1].
++*   **Performance:** Outperforms Laplacian Smoothing (which oversmooths) and standard bilateral filtering (which is noisier) in texture recovery [S1]. It recovers fine details better than Adam, which suffers from artifacts due to ineffective gradient filtering [S1].
++*   **Strengths:** Prevents over-smoothing across edges by using parameter values for edge stopping; ensures bounded step sizes; fast convergence with low iteration counts [S1].
++*   **Limitations:** Requires careful tuning of $\sigma_d$ and $F$ for different parameters (e.g., albedo vs. density) [S1].
++*   **When to use:** Inverse rendering of textures and volumes where gradients are noisy and parameters have sharp discontinuities [S1].
++*   **When not to use:** When memory is extremely constrained and Purely Spatial Filtering is insufficient, or when the parameter domain is not a regular grid (though mesh variants exist, they are more complex) [S1].
+ 
+ ## Background
+-Originating from the work on spatiotemporal bilateral gradient filtering for inverse rendering [S1], this method builds on the concept of cross-bilateral filters introduced by Eisemann and Durand [2004] and Petschnigg et al. [2004]. It was adapted for inverse rendering to address the challenges of noisy gradients and the need for stable optimization in differentiable rendering [S1]. The method leverages real-time denoising techniques (Dammertz et al. [2010]) to implement the filter efficiently on GPUs [S1].
++The method was introduced in "Spatiotemporal Bilateral Gradient Filtering for Inverse Rendering" [S1]. It builds on the cross-bilateral filter concept from Eisemann and Durand [2004] and Petschnigg et al. [2004], adapting it for gradient preconditioning in inverse rendering. It was implemented and tested using Mitsuba 3 and PyTorch on NVIDIA GeForce RTX 3080 GPUs [S1].
+ 
+ ## Sources

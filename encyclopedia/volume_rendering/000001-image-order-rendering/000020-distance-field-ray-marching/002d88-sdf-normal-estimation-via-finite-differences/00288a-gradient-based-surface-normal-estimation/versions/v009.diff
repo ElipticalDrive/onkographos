@@ -1,0 +1,96 @@
+--- v008.md
++++ v009.md
+@@ -1,5 +1,5 @@
+ # Gradient-Based Surface Normal Estimation
+ 
+-Also called: CalculateSurfaceNormal, Density Computation & Normal Estimation, Density Field Normal Estimation, Gradient Normal Estimation, Gradient-Based Surface Normal Calculation, Gradient-based normal estimation, Local density field, Normals Renderer
++Also called: Gradient-based normal estimation, Gradient Normal Estimation, Finite Difference Normals Approximation
+ 
+ ## Overview
+@@ -8,6 +8,6 @@
+ ## How it works
+ **Inputs:**
+-- A 3D volume grid $V$ of density values. The grid dimensions are typically $W \times H \times D$ (e.g., $256 \times 256 \times 100$ or $512^3$) [S2, S1, unofficial].
+-- A query point $p$ (integer voxel coordinates $(x, y, z)$) or a continuous position for ray marching [S3, unofficial].
++- A 3D volume grid $V$ of density values [S1, S2, unofficial].
++- A query point $p$ in continuous space or integer voxel coordinates [S3, unofficial].
+ 
+ **Outputs:**
+@@ -16,10 +16,10 @@
+ 
+ **Data Structures:**
+-- **Volume Grid:** A 3D array of floating-point or integer density values. In GPU implementations, this may be packed into bitmasks or 32-bit integers for efficient lookup [S1, unofficial].
++- **Volume Grid:** A 3D array of floating-point or integer density values [S1, S2, unofficial]. In GPU implementations, this may be packed into bitmasks or 32-bit integers for efficient lookup [S1, unofficial].
+ - **Normal Texture (Precomputed Path):** A 2D texture of size $W \times H$ (flattened from 3D slices) with format `GL_RGB` and type `GL_UNSIGNED_BYTE` [S2, unofficial]. The memory layout is interleaved RGB: index $3 \times (v \times \text{width} + u) + 0$ is Red, $+1$ is Green, $+2$ is Blue [S2, unofficial].
+ 
+ **Algorithm Steps:**
+ 
+-1.  **Gradient Estimation:** Compute the gradient $\mathbf{G} = (G_x, G_y, G_z)$ using central finite differences. For a voxel at integer coordinates $(x, y, z)$:
++1.  **Gradient Estimation:** Compute the gradient $\mathbf{G} = (G_x, G_y, G_z)$ using central finite differences [S2, S5, unofficial]. For a voxel at integer coordinates $(x, y, z)$:
+     $$
+     G_x = \frac{V(x+1, y, z) - V(x-1, y, z)}{2}
+@@ -33,9 +33,9 @@
+     [S2, unofficial]
+ 
+-2.  **Normalization:** Normalize the gradient vector to obtain the surface normal $\mathbf{N}$. The normal points in the direction of the negative gradient (outward from the surface):
++2.  **Normalization:** Normalize the gradient vector to obtain the surface normal $\mathbf{N}$ [S2, S3, unofficial]. The normal points in the direction of the negative gradient (outward from the surface):
+     $$
+     \mathbf{N} = -\frac{\mathbf{G}}{\|\mathbf{G}\|} = \left( -\frac{G_x}{\sqrt{G_x^2 + G_y^2 + G_z^2}}, -\frac{G_y}{\sqrt{G_x^2 + G_y^2 + G_z^2}}, -\frac{G_z}{\sqrt{G_x^2 + G_y^2 + G_z^2}} \right)
+     $$
+-    [S2, S3, unofficial]
++    [S2, unofficial]
+ 
+ 3.  **Encoding (Optional Precomputation):** Map the normalized components $N_x, N_y, N_z \in [-1, 1]$ to 8-bit unsigned integers $C_R, C_G, C_B \in [0, 255]$ for storage in a texture:
+@@ -51,5 +51,5 @@
+     [S2, unofficial]
+ 
+-4.  **On-the-Fly Evaluation (Alternative):** For ray marching or particle queries, skip precomputation. Sample the density field at the query point $p$ and its neighbors to compute $\mathbf{G}$ and $\mathbf{N}$ directly in the shader or kernel [S1, S3, unofficial].
++4.  **On-the-Fly Evaluation (Alternative):** For ray marching or particle queries, skip precomputation [S1, S3, unofficial]. Sample the density field at the query point $p$ and its neighbors to compute $\mathbf{G}$ and $\mathbf{N}$ directly in the shader or kernel [S3, unofficial].
+ 
+ **Pseudocode:**
+@@ -83,7 +83,8 @@
+     magnitude = math.sqrt(gx * gx + gy * gy + gz * gz)
+ 
+-    # 3. Handle zero gradient (constant region) to avoid division by zero [S2, unofficial]
++    # 3. Handle zero gradient (constant region) to avoid division by zero
++    # Sources do not specify a guard threshold; using a small epsilon to prevent NaN/Inf [G].
+     if magnitude < 1e-9:
+-        return (0.0, 0.0, 0.0) # Or a default normal, e.g., (0,0,-1)
++        return (0.0, 0.0, 0.0)
+ 
+     # 4. Normalize and negate (gradient points inward, normal points outward)
+@@ -107,9 +108,9 @@
+ - **Kernel Size:** The density estimation kernel size is typically $2^3$ (8 voxels) for fast computation, which provides acceptable quality for normal estimation [S1, unofficial].
+ - **Voxel Resolution:** Common resolutions include $256 \times 256 \times 100$ for precomputed textures and $512^3$ for particle system simulations [S1, S2, unofficial].
+-- **Epsilon (Continuous Sampling):** If using continuous coordinates for ray marching, a fixed epsilon (e.g., $0.0001$) may be used for finite differences, though direct gradient sampling calls are preferred to reduce numerical instability [S3, unofficial].
++- **Epsilon (Continuous Sampling):** If using continuous coordinates for ray marching, a fixed epsilon (e.g., $0.0001$) may be used for finite differences, though direct gradient sampling calls are preferred to reduce numerical instability [S3, unofficial]. In SDF brick mode with smooth normals, it is calculated as `exp2f(-float(n_octree_levels)) * (1.f/(m_sdf.brick_res-1))` to use one voxel as the radius [S5, unofficial].
+ 
+ **Edge Cases and Pitfalls:**
+-- **Boundary Conditions:** Voxels at the boundaries (e.g., $x=0$ or $x=255$) request out-of-bounds neighbors. The implementation must clamp coordinates or replicate boundary values, which can cause gradient inaccuracies at the edges [S2, unofficial].
+-- **Zero Gradient:** In constant regions (empty space or solid interior), the gradient magnitude is zero, leading to division by zero and NaN/Inf normals. A guard check for $\|\mathbf{G}\| \approx 0$ is required [S2, unofficial].
++- **Boundary Conditions:** Voxels at the boundaries (e.g., $x=0$ or $x=255$) request out-of-bounds neighbors [S2, unofficial]. The implementation must clamp coordinates or replicate boundary values, which can cause gradient inaccuracies at the edges [S2, unofficial].
++- **Zero Gradient:** In constant regions (empty space or solid interior), the gradient magnitude is zero, leading to division by zero and NaN/Inf normals [S2, unofficial]. A guard check for $\|\mathbf{G}\| \approx 0$ is required [G].
+ - **Precision Loss:** Using a fixed epsilon for continuous sampling that is not aligned with the volume sampling frequency can cause precision loss or aliasing [S3, unofficial].
+ - **Hardware Limits:** On older DX10 hardware, 32-bit integer lookup textures are not supported, requiring bitwise arithmetic or breaking integers into 16-bit parts, which increases lookup counts [S1, unofficial].
+@@ -130,11 +131,11 @@
+ 
+ ### SDF Normal Estimation via Backpropagation
+-Estimates mesh vertex normals by computing the negative gradient of the occupancy output with respect to the vertex positions [S6, unofficial]. The process involves converting vertices to a PyTorch tensor, passing them through a differentiable model to get occupancy logits, summing the output, and calling backward to extract the gradient, which is then normalized as the normal [S6, unofficial].
++Estimates mesh vertex normals by computing the negative gradient of the occupancy output with respect to the vertex positions [S7, unofficial]. The process involves converting vertices to a PyTorch tensor, passing them through a differentiable model to get occupancy logits, summing the output, and calling backward to extract the gradient, which is then normalized as the normal [S7, unofficial].
+ 
+ ### Specular Highlight via Gradient Normal
+-Computes specular highlights by finding the volume surface intersection via ray marching, estimating the surface normal via finite differences of the volume texture, and applying a Blinn-Phong shading model [S7, unofficial]. The ray marcher samples the volume until a threshold is crossed, then computes the normal using central finite differences at the intersection point to calculate the specular intensity [S7, unofficial].
++Computes specular highlights by finding the volume surface intersection via ray marching, estimating the surface normal via finite differences of the volume texture, and applying a Blinn-Phong shading model [S8, unofficial]. The ray marcher samples the volume until a threshold is crossed, then computes the normal using central finite differences at the intersection point to calculate the specular intensity [S8, unofficial].
+ 
+ ## Operating characteristics
+-- **Time Complexity:** $O(1)$ per query for precomputed textures (texture lookup). $O(1)$ per query for on-the-fly evaluation (constant number of volume samples, typically 6-8).
++- **Time Complexity:** Not given in the sources. [G]
+ - **Memory Complexity:** $O(W \times H \times D)$ for the volume grid. $O(W \times H)$ for the precomputed normal texture (if used) [S2, unofficial].
+ - **Measured Performance:** In a particle system collision response test with a $512^3$ voxelgrid, computation times were 0.32 ms for $256^2$ particles, 1.0 ms for $512^2$ particles, and 4.0 ms for $1024^2$ particles [S1, unofficial].
+@@ -145,5 +146,5 @@
+ 
+ ## Background
+-The method originates from single-pass GPU solid voxelization techniques, notably presented in "Single-pass GPU Solid Voxelization and Applications" [S1, unofficial]. It was developed to provide efficient, high-resolution surface normals for dynamic scenes without relying on traditional mesh-based normal data. The approach leverages the fact that a local density field, computed via a small kernel, resembles a signed distance field, allowing gradients to serve as accurate normal estimates [S1, unofficial]. It has been applied in particle system collision detection, solid voxelization of dynamic scenes, and various volume rendering shading pipelines [S1, S2, S3, unofficial].
++The method originates from single-pass GPU solid voxelization techniques, notably presented in "Single-pass GPU Solid Voxelization and Applications" [S1, unofficial]. It was developed to provide efficient, high-resolution surface normals for dynamic scenes without relying on traditional mesh-based normal data [S1, unofficial]. The approach leverages the fact that a local density field, computed via a small kernel, resembles a signed distance field, allowing gradients to serve as accurate normal estimates [S1, unofficial]. It has been applied in particle system collision detection, solid voxelization of dynamic scenes, and various volume rendering shading pipelines [S1, S2, S3, unofficial].
+ 
+ ## Sources

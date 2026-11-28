@@ -1,0 +1,155 @@
+# 3D Gaussian Splatting Cinematic Navigation
+
+This project is a small cinematic navigation pipeline on top of a 3D Gaussian Splatting (3DGS) scene:
+
+- Loads an unpacked 3DGS `.ply` scene.
+- Plans and renders a camera flight along a configurable path.
+- Streams frames through `gsplat` → `ffmpeg` → MP4.
+- Optionally runs YOLO detection and builds a second “revisit” pass where the camera returns to selected objects.
+- Provides analysis tools for the scene (density maps, histograms, orientation stats, camera path plots).
+- Has two main development branches:
+  - **main**: flat XZ path + YOLO + revisit.
+  - **3d-planner**: scene normalization + 3D path along waypoints + local floor sampling.
+ 
+## Project goals & status
+
+- [x] 1. Render a video from inside the scene (no need to be realistic)
+- [x] 2. Detect objects in the rendered video
+- [x] 3. 3D object detection
+- [x] 4. Path planning
+- [x] 5. Obstacle avoidance
+- [x] 6. Rendered video that covers most of the scene/area
+- [ ] 7. Render a 360° video
+- [ ] 8. Interactive demo
+- [ ] 9. Real-time preview of the scene or pipeline
+- [x] 10. Produce artistic / professional / innovative / realistic result videos (high-quality rendering)
+
+
+---
+
+## 1. High-Level Architecture
+
+Core ideas:
+
+1. **Scene as Gaussians**  
+   A 3DGS scene (PLY) is loaded into a `GaussiansNP` structure (NumPy-based) with:
+   - `means` – N×3 Gaussian centers;
+   - `quats` – N×4 rotations (WXYZ);
+   - `scales`, `opacities`, `colors` – splat parameters.
+
+2. **Camera Path Planner**  
+   We generate a list of camera poses:
+   ```python
+   {
+       "eye":    [x, y, z],         # camera position in world
+       "center": [x, y, z],         # look-at point in world
+       "view":   np.ndarray(4, 4),  # world->camera matrix
+   }
+
+Different planners are used in different branches (2D XZ path vs full 3D rail).
+
+3. **Renderer**
+   For each pose:
+
+   * Build intrinsics `K` from FOV and resolution.
+   * Call `gsplat.rendering.rasterization(...)` to get RGB (and optionally depth).
+   * Stream raw frames into `ffmpeg` and encode to MP4.
+
+4. **Detection & Revisit (YOLO)**
+
+   * YOLO runs on rendered RGB frames (first pass).
+   * Optionally back-project bounding boxes into world coordinates using depth.
+   * Select a few objects, compute a “best observation frame” for each.
+   * Build an extra “revisit” path: camera runs the rail again and stops to look at selected objects.
+
+5. **Scene Analysis Tools**
+
+   * Histograms for X/Y/Z distributions.
+   * Top-down density maps.
+   * Y-slices (floor/ceiling inspection).
+   * Orientation histograms from Gaussians’ quaternions.
+   * Camera path overlaid on XZ density.
+
+---
+
+## 2. Repository Structure (logical)
+
+Main modules (names as used in code):
+
+* `src/gsplat_scene.py`
+
+  * `GaussiansNP` dataclass.
+  * `load_gaussians_from_ply(path, max_points=...)`
+  * Camera intrinsics builder: `build_intrinsics(fov_deg, width, height)`.
+  * `look_at(eye, center, up)` to build a 4×4 view matrix.
+  * 2D path planner with per-segment behaviors (2D branch).
+  * 3D path planner with local floor sampling (3D branch).
+
+* `src/render_utils.py`
+
+  * `render_one_frame(...)` – debug single-frame render.
+  * `render_frames_gsplat(...)` + `write_video(...)` – legacy in-memory path.
+  * `render_gsplat_to_video_streaming(...)` – main streaming renderer with:
+
+    * optional YOLO detection;
+    * optional second “revisit” pass;
+    * depth-backed 3D object centers.
+
+* `src/analysis/research_scene.py`
+
+  * Scene exploration utilities (histograms, density maps, Y-slices).
+  * Quaternion → forward direction → (azimuth, elevation) utilities.
+  * `save_camera_path_on_density_xz(...)` – camera path on XZ density map.
+
+* `src/analysis/scene_normalizer.py` (3D branch)
+
+  * Scene normalization:
+
+    * fit floor plane from low Y points;
+    * rotate to align floor with XZ and up with +Y;
+    * optionally align main horizontal direction with X-axis (yaw);
+    * optionally shift floor to Y ≈ 0.
+
+* `src/main.py`
+
+  * All orchestration:
+
+    * load scene;
+    * optionally normalize axes;
+    * build camera path from config;
+    * optionally run analysis plots;
+    * stream video + YOLO + revisit;
+    * write JSON with camera path and detections.
+  * Uses two config dicts:
+
+    * `SCENE_CONFIG_CONF_HALL` – scene + path;
+    * `GLOBAL_CONFIG` – render/detection/analysis settings.
+
+---
+
+## 3. Runtime Environment and Stack
+
+The project assumes:
+
+* Python ≥ 3.10.
+* CUDA-capable GPU.
+* Main libraries:
+
+  * `torch` + CUDA;
+  * `gsplat` (Gaussian splatting);
+  * `ffmpeg-python` (`ffmpeg` CLI in PATH);
+  * `ultralytics` (YOLO);
+  * `opencv-python` (drawing, color conversions);
+  * `matplotlib` + `numpy` (analysis).
+
+Typical usage is inside a **Docker container** with:
+
+* CUDA runtime and drivers mounted (`--gpus all`).
+* All Python dependencies pre-installed.
+* `ffmpeg` available inside the container.
+
+The pipeline will fail early if no CUDA device is visible.
+
+---
+
+## 4. Rendering Pipeline

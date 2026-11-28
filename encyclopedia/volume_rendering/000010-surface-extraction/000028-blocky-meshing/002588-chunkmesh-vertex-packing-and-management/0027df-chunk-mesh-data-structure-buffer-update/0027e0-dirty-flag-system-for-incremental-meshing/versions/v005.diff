@@ -1,0 +1,236 @@
+--- v004.md
++++ v005.md
+@@ -4,91 +4,77 @@
+ 
+ ## Overview
+-The Dirty Flag System is an optimization technique for blocky meshing that avoids redundant surface extraction by tracking which chunks of a voxel world have changed geometry since the last mesh pass [S1, S3, unofficial]. Instead of rebuilding vertex buffers for every chunk every frame or upon every view change, the system marks only chunks containing modified density values as "dirty" and rebuilds them incrementally [S2, S3, unofficial]. This sets it apart from naive approaches that rebuild all geometry or those that trigger rebuilds based on camera movement, which negates the performance benefits of static geometry caching [S2, unofficial].
++The Dirty Flag System is an optimization technique for blocky meshing that avoids redundant surface extraction by tracking which chunks of a voxel world have changed geometry since the last mesh pass [S1, S3, unofficial]. Instead of rebuilding vertex buffers for every chunk every frame, the system marks only chunks containing modified density values as "dirty" and rebuilds them incrementally [S3, unofficial]. This sets it apart from naive approaches that rebuild all geometry or those that trigger rebuilds based on camera movement, which negates the performance benefits of static geometry caching [S2, unofficial].
+ 
+ ## How it works
+-The method manages a grid of chunks, where each chunk maintains a state indicating whether its mesh needs regeneration. The core logic involves marking chunks as dirty when voxel data changes and processing only those dirty chunks during the meshing phase.
++The method manages a grid of chunks, where each chunk maintains a state indicating whether its mesh needs regeneration [S3, unofficial]. The core logic involves marking chunks as dirty when voxel data changes and processing only those dirty chunks during the meshing phase [S3, unofficial].
+ 
+ ### Inputs and Outputs
+-- **Input**: A voxel world represented as a 3D grid of density values. A list or set of modified voxel coordinates (or ranges).
+-- **Output**: Updated GPU vertex buffers (or display lists) for only the dirty chunks.
++- **Input**: A voxel world grid of density values, and a modified voxel range $[minX, maxX] \times [minY, maxY] \times [minZ, maxZ]$ [S3, unofficial].
++- **Output**: Updated GPU vertex buffers (or display lists) for only the dirty chunks [S1, S2, unofficial].
+ 
+ ### Data Structures
+-1.  **Chunk Grid**: A 3D array or map of `Chunk` objects. Each `Chunk` contains:
+-    -   `dirty`: A boolean flag indicating if the chunk's geometry has changed since the last mesh pass [S1, unofficial].
+-    -   `meshData`: Temporary storage for vertex and index data during generation [S1, unofficial].
+-    -   `vertexBuffer`: The GPU resource holding the final mesh geometry [S1, unofficial].
+-2.  **Dirty Chunks Set**: A collection (e.g., `HashSet` or `List`) storing the indices of chunks that require rebuilding [S3, unofficial].
++1. **Chunk Grid**: A 3D array of `Chunk` objects. Each `Chunk` contains:
++    - `dirty`: A boolean flag indicating whether the chunk's geometry has changed since the last mesh pass [S1, unofficial].
++    - `meshData`: Temporary storage for vertex and index data during generation [S1, unofficial].
++2. **Dirty Chunks Set**: A collection (e.g., `HashSet` or `List`) storing the indices of chunks that require rebuilding [S3, unofficial].
+ 
+ ### Numbered Steps
+ 
+-1.  **Initialization**:
+-    -   Allocate the chunk grid. Ensure map dimensions are divisible by the chunk size [S1, unofficial].
+-    -   Initialize all chunk `dirty` flags to `true` (or rebuild all initially) [G].
++1. **Initialization**:
++    - Allocate the chunk grid. Ensure map dimensions are divisible by the chunk size [S1, unofficial].
++    - Initialize all chunk `dirty` flags to `true` to force an initial mesh pass [G].
+ 
+-2.  **Marking Dirty Chunks (On Voxel Modification)**:
+-    -   When a voxel at global coordinates $(x, y, z)$ is modified, determine the affected chunk indices.
+-    -   Because a voxel at index $x$ affects the cell to its left ($x-1$), the minimum chunk index must account for this boundary effect [S3, unofficial].
+-    -   Calculate the range of affected chunk indices:
+-        $$ c_{minX} = \lfloor (x_{min} - 1) / \text{chunkSize} \rfloor $$
+-        $$ c_{maxX} = \lfloor x_{max} / \text{chunkSize} \rfloor $$
+-        (Similarly for $Y$ and $Z$) [S3, unofficial].
+-    -   Iterate through all chunk indices $(c_x, c_y, c_z)$ from $(c_{minX}, c_{minY}, c_{minZ})$ to $(c_{maxX}, c_{maxY}, c_{maxZ})$.
+-    -   For each chunk, set `chunk.dirty = true` and add it to the `dirtyChunks` set [S3, unofficial].
+-    -   *Note*: If a block on a chunk's outer boundary is modified, neighbor chunks must also be flagged to prevent visual seams [S4, unofficial].
++2. **Marking Dirty Chunks (On Voxel Modification)**:
++    - When density is modified in a voxel range, calculate the affected chunk indices [S3, unofficial].
++    - Because a voxel at index $x$ affects the cell to its left ($x-1$), the minimum chunk index is calculated using $\lfloor (minX - 1) / \text{chunkSize} \rfloor$ [S3, unofficial].
++    - Calculate the range of affected chunk indices:
++        $$ c_{minX} = \lfloor (minX - 1) / \text{chunkSize} \rfloor, \quad c_{maxX} = \lfloor maxX / \text{chunkSize} \rfloor $$
++        (Analogous calculations apply for $Y$ and $Z$) [G].
++    - Iterate through all chunk indices $(c_x, c_y, c_z)$ from $(c_{minX}, c_{minY}, c_{minZ})$ to $(c_{maxX}, c_{maxY}, c_{maxZ})$ and add them to the `dirtyChunks` set [S3, unofficial].
++    - If a block on a chunk's outer boundary is modified, flag neighbor chunks for update to prevent visual seams [S4, unofficial].
+ 
+-3.  **Meshing Phase (Pre-Meshing)**:
+-    -   Iterate through each chunk in the `dirtyChunks` set.
+-    -   For each dirty chunk:
+-        -   Assert that `chunk.dirty` is true [S1, unofficial].
+-        -   Call `UnsetDirty()` to clear the flag, preventing double-processing if the chunk is modified again before meshing completes [S1, unofficial].
+-        -   Perform Marching Cubes (or similar) surface extraction on the chunk's voxel data.
+-        -   Store the resulting vertices and indices in `chunk.meshData` [S1, unofficial].
++3. **Meshing Phase (Pre-Meshing)**:
++    - In `LateUpdate`, iterate through `dirtyChunks` and call `Rebuild()` on each [S3, unofficial].
++    - Before meshing, assert the chunk is dirty and call `UnsetDirty()` to clear the flag [S1, unofficial].
++    - Perform surface extraction on the chunk's voxel data and store results in `chunk.meshData` [S1, unofficial].
+ 
+-4.  **Buffer Update (Post-Meshing)**:
+-    -   After meshing a chunk, check if `chunk.meshData.Length > 0` [S1, unofficial].
+-    -   If data exists:
+-        -   Create a new `VoxelVertexBuffer` or update an existing one.
+-        -   Copy the mesh data to the GPU using `BufferData()` [S1, unofficial].
+-    -   Recycle temporary mesh visitor and vertex storage using allocators (e.g., `MeshVisiterAllocator.Recycle`, `TempStorageAllocator<VoxelVertex>.Recycle`) to manage memory efficiently [S1, unofficial].
+-    -   Remove the chunk from the `dirtyChunks` set [S3, unofficial].
+-
+-5.  **Cleanup**:
+-    -   After processing all dirty chunks, the `dirtyChunks` set should be empty [S3, unofficial].
++4. **Buffer Update (Post-Meshing)**:
++    - After meshing, check `chunk.meshData.Length`; if $> 0$, create a new `VoxelVertexBuffer` and copy data via `BufferData()` [S1, unofficial].
++    - Recycle temporary mesh visitor and vertex storage via `MeshVisiterAllocator.Recycle` and `TempStorageAllocator<VoxelVertex>.Recycle` [S1, unofficial].
++    - Clear the `dirtyChunks` list after processing [S3, unofficial].
+ 
+ ### Pseudocode
+ 
+ ```python
+-# Data Structures
+ class Chunk:
+     dirty: bool
+-    meshData: List[VoxelVertex]
+-    vertexBuffer: GPUBuffer
++    meshData: list  # Temporary vertex/index storage
++    vertex_buffer: object  # GPU resource handle
+ 
+ class World:
+-    chunks: Array[Chunk]
+-    dirtyChunks: Set[int] # Indices of dirty chunks
+-    chunkSize: int
++    chunks: list  # Flattened or 3D array of Chunks
++    dirty_chunks: set  # Stores chunk indices
++    chunk_size: int
++    map_size_x: int
++    map_size_y: int
++    map_size_z: int
+ 
+-def mark_chunk_dirty(world: World, voxel_min: Vector3i, voxel_max: Vector3i):
+-    """
+-    Marks chunks containing modified voxels as dirty.
+-    Accounts for boundary effects where a voxel affects adjacent cells.
+-    """
++def mark_chunk_dirty(world: World, voxel_min: tuple, voxel_max: tuple):
+     # Calculate affected chunk ranges
+     # A voxel at x affects x-1, so min chunk is (minX - 1) / chunkSize
+-    c_min_x = (voxel_min.x - 1) // world.chunkSize
+-    c_max_x = voxel_max.x // world.chunkSize
+-    c_min_y = (voxel_min.y - 1) // world.chunkSize
+-    c_max_y = voxel_max.y // world.chunkSize
+-    c_min_z = (voxel_min.z - 1) // world.chunkSize
+-    c_max_z = voxel_max.z // world.chunkSize
++    c_min_x = (voxel_min[0] - 1) // world.chunk_size
++    c_max_x = voxel_max[0] // world.chunk_size
++    c_min_y = (voxel_min[1] - 1) // world.chunk_size
++    c_max_y = voxel_max[1] // world.chunk_size
++    c_min_z = (voxel_min[2] - 1) // world.chunk_size
++    c_max_z = voxel_max[2] // world.chunk_size
+ 
+-    # Clamp to world bounds [G]
++    # Clamp to world bounds
+     c_min_x = max(0, c_min_x)
+-    c_max_x = min(world.ChunkAmountX - 1, c_max_x)
++    c_max_x = min(world.map_size_x // world.chunk_size - 1, c_max_x)
+     c_min_y = max(0, c_min_y)
+-    c_max_y = min(world.ChunkAmountY - 1, c_max_y)
++    c_max_y = min(world.map_size_y // world.chunk_size - 1, c_max_y)
+     c_min_z = max(0, c_min_z)
+-    c_max_z = min(world.ChunkAmountZ - 1, c_max_z)
++    c_max_z = min(world.map_size_z // world.chunk_size - 1, c_max_z)
+ 
+     for cx in range(c_min_x, c_max_x + 1):
+@@ -98,29 +84,23 @@
+                 if not chunk.dirty:
+                     chunk.dirty = True
+-                    world.dirtyChunks.add((cx, cy, cz))
++                    world.dirty_chunks.add((cx, cy, cz))
+ 
+ def process_dirty_chunks(world: World):
+-    """
+-    Rebuilds geometry for all dirty chunks and updates GPU buffers.
+-    """
+-    # Iterate over a copy of the set if chunks can be added during processing [G]
+-    dirty_list = list(world.dirtyChunks)
+-    world.dirtyChunks.clear()
++    dirty_list = list(world.dirty_chunks)
++    world.dirty_chunks.clear()
+ 
+     for (cx, cy, cz) in dirty_list:
+         chunk = world.chunks[cx, cy, cz]
+         
+-        # Assert and clear dirty flag
++        # Pre-meshing: assert dirty and clear flag
+         assert chunk.dirty
+         chunk.dirty = False
+         
+-        # Generate mesh
+-        # PreMeshing() logic: assert dirty, unset dirty
+-        chunk.meshData = generate_mesh(chunk.voxelData)
++        # Surface extraction (e.g., Marching Cubes) [G]
++        chunk.meshData = perform_surface_extraction(chunk.voxel_data)
+         
+-        # PostMeshing() logic
++        # Post-meshing: buffer update
+         if len(chunk.meshData) > 0:
+-            # Create or update vertex buffer
+-            chunk.vertexBuffer = create_gpu_buffer(chunk.meshData)
++            chunk.vertex_buffer = create_gpu_buffer(chunk.meshData)
+         
+         # Recycle temporary memory
+@@ -129,19 +109,29 @@
+ 
+ def late_update(world: World):
+-    """
+-    Called once per frame to process all pending dirty chunks.
+-    """
+-    if len(world.dirtyChunks) > 0:
++    if len(world.dirty_chunks) > 0:
+         process_dirty_chunks(world)
++
++# Helper definitions for standard operations not detailed in sources [G]
++def perform_surface_extraction(voxel_data):
++    return []  # Standard Marching Cubes or similar algorithm
++
++def create_gpu_buffer(data):
++    return None  # Allocate GPU memory and upload data
++
++def recycle_mesh_visitor():
++    pass  # Free temporary mesh visitor allocations
++
++def recycle_temp_storage(data):
++    pass  # Free temporary vertex storage allocations
+ ```
+ 
+ ### Parameters
+--   **Chunk Size**: Typically 16x16x16 or 32x32x32 voxels [S1, S2, unofficial].
+--   **Dirty Flag**: Boolean per chunk [S1, unofficial].
++- **Chunk Size**: Typically 16×16×16 or 32×32×32 voxels [S1, S2, unofficial].
++- **Dirty Flag**: Boolean per chunk [S1, unofficial].
+ 
+ ### Edge Cases and Pitfalls
+--   **View Change Rebuilds**: Modifying display lists or vertex buffers whenever the view changes negates the benefit of caching static geometry [S2, unofficial].
+--   **Boundary Effects**: Failing to account for the fact that a voxel at index $x$ affects the cell to its left ($x-1$) will result in missing geometry at chunk boundaries [S3, unofficial].
+--   **Visual Flicker**: If a chunk is flagged as unmeshed and the old geometry is discarded immediately, the user sees a blank flicker while the CPU rebuilds the model [S4, unofficial].
++- **View Change Rebuilds**: Modifying display lists or vertex buffers whenever the view changes negates the benefit of caching static geometry [S2, unofficial].
++- **Boundary Effects**: Failing to account for the fact that a voxel at index $x$ affects the cell to its left ($x-1$) will result in missing geometry at chunk boundaries [S3, unofficial].
++- **Visual Flicker**: Discarding old geometry immediately when a chunk is flagged as unmeshed causes a jarring blank flicker while the CPU rebuilds the model [S4, unofficial].
+ 
+ ## Subtopics
+@@ -151,12 +141,12 @@
+ 
+ ## Operating characteristics
+--   **Time Complexity**: $O(N_{dirty})$ per frame, where $N_{dirty}$ is the number of modified chunks. This is significantly faster than $O(N_{total})$ for large worlds with sparse changes.
+--   **Memory Complexity**: $O(N_{total})$ for storing chunk data and buffers, plus $O(N_{dirty})$ for temporary meshing storage.
+--   **Performance**: Reduces CPU load by avoiding redundant Marching Cubes calculations. The bottleneck shifts to the GPU buffer updates and the meshing of dirty chunks.
+--   **Strengths**: Efficient for dynamic worlds with frequent small changes.
+--   **Limitations**: Requires careful management of dirty flags and boundary conditions. Double-buffering adds complexity and memory overhead for storing two versions of geometry.
++- **Performance**: Reduces CPU load by avoiding redundant Marching Cubes calculations for unchanged geometry [S1, S3, unofficial].
++- **Strengths**: Efficient for dynamic worlds with frequent small changes [G].
++- **Limitations**: Requires careful management of dirty flags and boundary conditions [G]. Double-buffering adds complexity and memory overhead for storing two versions of geometry [S4, unofficial].
++- **Time Complexity**: Not given in the sources.
++- **Memory Complexity**: Not given in the sources.
+ 
+ ## Background
+-The Dirty Flag System is a standard optimization in voxel-based games and terrain rendering. It was popularized by games like Minecraft, which rebuilds display lists or vertex buffers only when a block is modified in a given chunk [S2, unofficial]. The technique is widely used in chunk-based meshing systems to balance update frequency with rendering performance.
++The Dirty Flag System tracks modified chunks to avoid remeshing unchanged geometry [S1, unofficial]. It is used in chunk-based meshing systems to rebuild display lists or vertex buffers only when a block is modified in a given chunk [S2, unofficial].
+ 
+ ## Sources

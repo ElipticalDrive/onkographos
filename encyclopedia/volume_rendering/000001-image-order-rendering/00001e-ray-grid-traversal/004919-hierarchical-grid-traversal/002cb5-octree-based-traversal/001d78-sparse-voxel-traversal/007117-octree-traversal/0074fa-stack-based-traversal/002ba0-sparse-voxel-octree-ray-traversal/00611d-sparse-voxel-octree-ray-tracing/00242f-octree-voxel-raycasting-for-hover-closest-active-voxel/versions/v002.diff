@@ -1,0 +1,144 @@
+--- v001.md
++++ v002.md
+@@ -4,83 +4,76 @@
+ 
+ ## Overview
+-This method performs raycasting against a Sparse Voxel Octree (SVO) to determine the closest intersection with an active voxel, enabling "hover" interactions in volume rendering. It differs from standard SVO ray tracing [2989-sparse-voxel-octree-ray-tracing.md] by specifically targeting the closest *active* leaf node (hit) while also tracking the closest *empty* space node for fallback or depth information. It serves as a specialized traversal for interaction rather than full volume integration.
++This method traces rays against a GPU-accessible octree to find the closest intersections with active voxels [S1, unofficial]. It tracks both the nearest active leaf node and the nearest empty space node to support hover interactions [S2, unofficial]. It differs from standard SVO ray tracing [2989-sparse-voxel-octree-ray-tracing.md] by prioritizing closest-hit detection and empty-space fallback for interaction rather than full volume integration [G].
+ 
+ ## How it works
+-The method operates in a host-device loop. The host prepares ray data, dispatches a GPU kernel to traverse the octree, and downloads results. The GPU kernel performs the traversal, updating global state for the closest hit and empty space.
+-
+-**Inputs:**
+-- `rays`: A buffer of `Ray` structs, size $W \times H$ (where $W, H$ are resolution dimensions).
+-- `octree`: The Sparse Voxel Octree structure, assumed to be accessible on the GPU.
+-- `resolution`: The width and height of the ray grid.
+-
+-**Outputs:**
+-- `hits`: A buffer of `Hit` structs, size $W \times H$, containing traversal results.
+-- `host_hits`: A host-side `std::vector<Hit>` of size $W \times H$ for downloaded results.
++**Inputs:** `rays` (GPU buffer of `Ray` structs, size `resolution * resolution`), `octree` (GPU-accessible sparse voxel octree), `resolution` (grid width and height) [S1, unofficial].
++**Outputs:** `hits` (GPU buffer of `Hit` structs, size `resolution * resolution`), `host_hits` (host `std::vector<Hit>` of size `resolution * resolution` for downloaded results) [S1, unofficial].
+ 
+ **Data Structures:**
+-1.  **Ray**: Contains origin and direction vectors. Layout is not explicitly defined in sources, but standard ray representation is implied.
+-2.  **Hit**: Contains intersection data. Specific fields are not detailed in the provided sources, but `hitDistance` and `hitPosition`/`normal` are referenced in logic.
+-3.  **OctreeNode** (from [S2, unofficial]):
+-    - `isLeaf`: `bool`
+-    - `isActive`: `bool`
+-    - `position`: `glm::vec3` (Node center)
+-    - `size`: `glm::vec3` (Node dimensions)
+-    - `color`: `glm::vec3`
+-    - `children`: `OctreeNode*` array of size 8.
++- `Ray`: Origin and direction vectors [G].
++- `Hit`: Intersection results including distance, position, and normal [G].
++- `OctreeNode`: `isLeaf` (bool), `isActive` (bool), `position` (vec3), `size` (vec3), `color` (vec3), `children` (array of 8 pointers) [S2, unofficial].
++
++**Pseudocode:**
++```python
++def trace_closest_kernel(rays, hits, octree, resolution, current_depth):
++    for idx in range(resolution * resolution):
++        ray = rays[idx]
++        closest_hit_distance = float('inf')
++        closest_empty_distance = float('inf')
++        found_active_voxel = False
++        hover_info = {"has_hit": False, "node": None, "distance": float('inf'), "position": None, "normal": None}
++
++        node = octree.root
++        depth = 0
++        while node is not None:
++            hit_distance, hit_position, hit_normal = compute_intersection(ray, node)
++            if hit_distance < float('inf'):
++                if node.isActive and node.isLeaf:
++                    if hit_distance < closest_hit_distance:
++                        closest_hit_distance = hit_distance
++                        found_active_voxel = True
++                        hits[idx].distance = closest_hit_distance
++                        hits[idx].position = hit_position
++                        hits[idx].normal = hit_normal
++                elif not found_active_voxel and depth >= current_depth and hit_distance < closest_empty_distance:
++                    closest_empty_distance = hit_distance
++                    hover_info["has_hit"] = True
++                    hover_info["node"] = node
++                    hover_info["distance"] = closest_empty_distance
++                    hover_info["position"] = hit_position
++                    hover_info["normal"] = hit_normal
++            # Advance traversal logic [G]
++            node = get_next_node(node, ray, depth)
++            depth += 1
++
++        hits[idx].hover_info = hover_info
++```
+ 
+ **Algorithm Steps:**
+-
+-1.  **Initialization (Host):**
+-    - Create GPU buffers `rays` and `hits` of size `resolution * resolution` [S1, unofficial].
+-    - Initialize `closestHitDistance` to infinity, `closestEmptyDistance` to infinity, and `foundActiveVoxel` to false [S2, unofficial].
+-    - Reset `hoverInfo.hasHit` to false [S2, unofficial].
+-
+-2.  **Ray Dispatch (Host):**
+-    - Populate the `rays` buffer with ray data for each pixel in the resolution grid [S1, unofficial].
+-    - Dispatch the GPU kernel `octree->trace_closest` with arguments: `rays->data()`, `hits->data()`, `resolution`, `resolution` [S1, unofficial].
+-
+-3.  **GPU Traversal (Kernel):**
+-    - For each ray (thread):
+-        - Traverse the octree from the root.
+-        - If an active leaf node is intersected:
+-            - Compute `hitDistance` (distance from ray origin to intersection).
+-            - Compute `hitPosition` and `normal` [S2, unofficial].
+-            - If `hitDistance < closestHitDistance`:
+-                - Update `closestHitDistance = hitDistance`.
+-                - Update `closestHitPosition = hitPosition`.
+-                - Update `closestHitNormal = normal`.
+-                - Set `foundActiveVoxel = true`.
+-        - If an empty space node (non-active internal node or empty leaf) is intersected:
+-            - Compute `hitDistance` to the node boundary.
+-            - If `!foundActiveVoxel` AND `depth >= currentDepth` AND `hitDistance < closestEmptyDistance`:
+-                - Update `closestEmptyDistance = hitDistance`.
+-                - Update `hoverInfo` to point to this empty space node.
+-                - Set `hoverInfo.hasHit = true` [S2, unofficial].
+-
+-4.  **Result Download (Host):**
+-    - Download `hits` buffer to `host_hits` using `hits->download(host_hits.data())` [S1, unofficial].
+-
+-5.  **Post-Processing (Host):**
+-    - Check `foundActiveVoxel`. If true, the closest active voxel hit is recorded in `hits`. If false, `hoverInfo` may contain the closest empty space hit for fallback [S2, unofficial].
++1. **Initialization:** Reset `closestHitDistance` to infinity, `closestEmptyDistance` to infinity, and `foundActiveVoxel` to false when `depth == 1` [S2, unofficial]. Reset `hoverInfo.hasHit` to false [S2, unofficial].
++2. **Dispatch:** Call `octree->trace_closest(rays->data(), hits->data(), resolution, resolution)` on the GPU [S1, unofficial].
++3. **Traversal:** For each ray, traverse the octree. If an active leaf is intersected, update `closestHitDistance` and record the hit [G]. If an empty/internal node is intersected and `!foundActiveVoxel` and `depth >= currentDepth` and `hitDistance < closestEmptyDistance`, compute position and normal, update `hoverInfo` to point to the empty space node, set `closestEmptyDistance = hitDistance`, and set `hoverInfo.hasHit = true` [S2, unofficial].
++4. **Download:** Transfer `hits` to host memory via `hits->download(host_hits.data())` [S1, unofficial].
+ 
+ **Parameters:**
+-- `resolution`: Width and height of the ray grid. Typical values depend on display resolution (e.g., 1920x1080).
+-- `currentDepth`: The maximum depth of the octree traversal. Not given in the sources.
++- `resolution`: Width and height of the ray grid [S1, unofficial].
++- `currentDepth`: Maximum traversal depth limit [S2, unofficial].
+ 
+ **Edge Cases:**
+-- **No Hit:** If no active voxel is intersected, `foundActiveVoxel` remains false. The method relies on `hoverInfo` for empty space feedback [S2, unofficial].
+-- **Precision:** Floating-point precision in distance comparisons may affect closest-hit determination. Not given in the sources.
+-- **Boundary Conditions:** Ray origins exactly on node boundaries may cause ambiguity. Not given in the sources.
++- **No Hit:** If no active voxel is intersected, `foundActiveVoxel` remains false and `hoverInfo.hasHit` indicates empty-space fallback [S2, unofficial].
++- **Precision:** Floating-point comparisons for distance thresholds may require epsilon guards [G].
++- **Boundaries:** Ray origins exactly on node boundaries require consistent half-open interval handling [G].
+ 
+ ## Operating characteristics
+-- **Time Complexity:** $O(N \cdot D)$, where $N$ is the number of rays ($W \times H$) and $D$ is the average depth of the octree traversal.
+-- **Memory Complexity:** $O(W \times H)$ for ray and hit buffers.
+-- **Strengths:** Efficient for interaction tasks requiring closest hit; leverages GPU parallelism.
+-- **Limitations:** Requires GPU memory for buffers; traversal depth depends on octree structure.
+-- **When to Use:** Hover interactions, picking, or closest-hit queries in SVO-based renderers.
+-- **When Not to Use:** Full volume rendering, ray marching with accumulation, or CPU-only environments.
++- **Time Complexity:** $O(N \cdot D)$, where $N$ is the number of rays ($W \times H$) and $D$ is the average octree traversal depth [G].
++- **Memory Complexity:** $O(W \times H)$ for the `rays` and `hits` GPU buffers [S1, unofficial].
++- **Strengths:** Parallel GPU execution efficiently resolves closest-hit queries for interaction [G].
++- **Limitations:** Requires host-device synchronization for result downloads and GPU memory allocation [S1, unofficial].
++- **When to Use:** Hover interactions, picking, or closest-hit queries in SVO-based renderers [G].
++- **When Not to Use:** Full volume integration, ray marching with accumulation, or CPU-only pipelines [G].
+ 
+ ## Background
+-This method is part of the SolidVoxelization project [S1, unofficial] and model_voxelizer [S2, unofficial], focusing on efficient voxel-based rendering and interaction. It builds on [Sparse Voxel Octree Ray Tracing](2989-sparse-voxel-octree-ray-tracing.md) by specializing the traversal for closest active voxel detection.
++The method originates from GPU-based voxelization pipelines that dispatch ray tracing tasks via a stream and thread pool architecture [S1, unofficial]. It builds on [Sparse Voxel Octree Ray Tracing](2989-sparse-voxel-octree-ray-tracing.md) by specializing the traversal for closest active voxel detection and empty-space hover feedback [S2, unofficial].
+ 
+ ## Sources

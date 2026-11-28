@@ -1,0 +1,177 @@
+# Topologically Correct Marching Cubes
+
+
+## Overview
+Topologically Correct Marching Cubes (TMC) is an extension to the standard Marching Cubes algorithm that guarantees the output mesh is homeomorphic to the trilinear interpolant of the input scalar field within each cell [S1, unofficial][S2]. It solves the problem of topological ambiguity in standard Marching Cubes, where specific vertex sign patterns (such as those forming a tunnel within a single cell) are incorrectly resolved into disconnected sheets [S2]. Unlike standard Marching Cubes, which may produce non-manifold artifacts or incorrect connectivity in these ambiguous cases, TMC inserts additional vertices to resolve complex features, ensuring a 2-manifold and watertight mesh provided the isosurface does not intersect the domain boundaries [S1, unofficial][S2].
+
+## How it works
+**Inputs and Outputs:**
+*   **Input:** A voxel grid (domain) with scalar values at vertices, and an isovalue [S2].
+*   **Output:** A polygon mesh (list of points and polygons) representing the isosurface [S2].
+
+**Data Structures:**
+The algorithm uses the standard Marching Cubes lookup table for the 15 topological cases [G], but augments the vertex generation phase. When an ambiguous configuration is detected, the algorithm allocates additional vertex structures within the cell to represent the internal topology [S2].
+
+**Steps:**
+1.  **Grid Traversal:** Iterate over every voxel in the input domain [G].
+2.  **Case Identification:** Determine the standard Marching Cubes case index based on the signs of the scalar values at the 8 vertices of the voxel relative to the isovalue [G].
+3.  **Ambiguity Detection:** Identify if the current case corresponds to an ambiguous configuration where the standard linear interpolation fails to capture the true topology of the trilinear interpolant (e.g., the "tunnel" case) [S2].
+4.  **Vertex Insertion:** If an ambiguous case is detected:
+    *   Insert additional vertices within the cell [S2].
+    *   Connect these new vertices to the edge intersections to form a triangulation that is homeomorphic to the trilinear surface [S1, unofficial][S2].
+5.  **Mesh Assembly:** Collect all generated polygons and points to form the final mesh [S2].
+
+**Parameters:**
+*   `use_topologically_correct_marching_cubes`: A boolean flag. Set to `true` to enable TMC; `false` for standard Marching Cubes [S2].
+*   `isovalue`: The scalar threshold for surface extraction [S2].
+
+**Edge Cases and Pitfalls:**
+*   **Boundary Intersection:** The guarantee of the mesh being 2-manifold and watertight holds *only* if the isosurface does not intersect the domain boundaries. If the surface touches or crosses the boundary, the topological guarantees may fail [S1, unofficial][S2].
+*   **Sharp Features:** TMC does not guarantee the recovery of sharp features present in the input field; it focuses on topological correctness of the smooth trilinear interpolant [S2].
+*   **Complexity:** The insertion of vertices increases the vertex count per cell compared to standard MC, potentially impacting memory and rendering performance [S2].
+
+**Pseudocode:**
+> **Unverified code.** The code below did not pass a test run against a reference implementation, or no test fits it, so it may contain errors.
+
+```python
+def topologically_correct_marching_cubes(domain, isovalue):
+    """
+    Extracts an isosurface using Topologically Correct Marching Cubes.
+    
+    Args:
+        domain: A structure containing the voxel grid values and geometry.
+        isovalue: The scalar threshold.
+        
+    Returns:
+        points: List of 3D coordinates.
+        polygons: List of polygon indices.
+    """
+    points = []
+    polygons = []
+    vertex_cache = {}
+    
+    # Standard MC ambiguous case indices (saddle/tunnel configurations)
+    AMBIGUOUS_CASES = {23, 26, 29, 30, 34, 37, 40, 43, 46, 49, 52, 55, 58, 61, 64, 67, 70, 73, 76, 79, 82, 85, 88, 91, 94, 97, 100, 103, 106, 109, 112, 115, 118, 121, 124, 127}
+    
+    for cell in domain.cells:
+        vertex_values = [domain.value(v) for v in cell.vertices]
+        
+        # 1. Determine case index
+        case_index = 0
+        for i, val in enumerate(vertex_values):
+            if val < isovalue:
+                case_index |= (1 << i)
+                
+        # 2. Compute edge intersections
+        edge_intersections = compute_edge_intersections(cell, vertex_values, isovalue)
+        
+        # 3. Check for ambiguity
+        is_ambiguous = case_index in AMBIGUOUS_CASES
+        
+        if is_ambiguous:
+            # 4. Resolve ambiguity by inserting vertices
+            center_vertex = compute_center_vertex(cell, vertex_values, isovalue)
+            points.append(center_vertex)
+            center_idx = len(points) - 1
+            
+            # Create topology-correct triangulation using the center vertex
+            triangles = resolve_ambiguous_triangulation(case_index, edge_intersections, center_idx)
+        else:
+            # 5. Standard Marching Cubes processing
+            triangles = standard_marching_cubes_triangulation(case_index, edge_intersections)
+            
+        for tri in triangles:
+            polygons.append(tri)
+            
+    return points, polygons
+
+def compute_edge_intersections(cell, vertex_values, isovalue):
+    """
+    Computes the intersection points of the isosurface with the cell edges
+    using linear interpolation.
+    """
+    intersections = {}
+    edges = [(0,1), (1,3), (3,2), (2,0), (4,5), (5,7), (7,6), (6,4), (0,4), (1,5), (3,7), (2,6)]
+    for i, (v1_idx, v2_idx) in enumerate(edges):
+        v1, v2 = cell.vertices[v1_idx], cell.vertices[v2_idx]
+        val1, val2 = vertex_values[v1_idx], vertex_values[v2_idx]
+        if (val1 - isovalue) * (val2 - isovalue) < 0:
+            t = (isovalue - val1) / (val2 - val1)
+            point = lerp(v1, v2, t)
+            intersections[i] = point
+    return intersections
+
+def compute_center_vertex(cell, vertex_values, isovalue):
+    """
+    Computes a new vertex position within the cell to resolve topology.
+    Uses the geometric center as a topological anchor.
+    """
+    center = lerp(cell.vertices[0], cell.vertices[7], 0.5)
+    return center
+
+def standard_marching_cubes_triangulation(case_index, edge_intersections):
+    """
+    Generates triangles for a standard (non-ambiguous) case using the lookup table.
+    """
+    # Compact representation of the 15 standard MC cases mapping edge indices to triangles
+    cases = {
+        0: [], 255: [],
+        1: [(0,1,2)], 2: [(1,2,3)], 4: [(2,3,0)], 8: [(3,0,1)],
+        16: [(4,5,6)], 32: [(5,6,7)], 64: [(6,7,4)], 128: [(7,4,5)],
+        3: [(0,1,5), (0,5,4)], 5: [(0,1,3), (0,3,2)], 6: [(1,2,3), (1,3,0)],
+        9: [(0,1,5), (0,5,4)], 10: [(1,2,5), (1,5,4)], 12: [(2,3,5), (2,5,4)],
+        17: [(0,1,6), (0,6,4)], 20: [(1,2,6), (1,6,5)], 24: [(2,3,6), (2,6,7)],
+        34: [(0,1,7), (0,7,4)], 40: [(1,2,7), (1,7,5)], 48: [(2,3,7), (2,7,6)],
+        51: [(0,1,7), (0,7,3), (0,3,2)], 57: [(0,1,7), (0,7,5), (0,5,4)],
+        69: [(0,1,7), (0,7,6), (0,6,4)], 78: [(0,1,7), (0,7,6), (0,6,5)],
+        87: [(0,1,7), (0,7,5), (0,5,4)], 93: [(0,1,7), (0,7,3), (0,3,2)],
+        102: [(0,1,7), (0,7,6), (0,6,5)], 111: [(0,1,7), (0,7,5), (0,5,4)],
+        114: [(0,1,7), (0,7,6), (0,6,5)], 120: [(0,1,7), (0,7,3), (0,3,2)],
+        123: [(0,1,7), (0,7,5), (0,5,4)], 126: [(0,1,7), (0,7,6), (0,6,5)],
+        135: [(0,1,7), (0,7,3), (0,3,2)], 141: [(0,1,7), (0,7,5), (0,5,4)],
+        153: [(0,1,7), (0,7,6), (0,6,4)], 162: [(0,1,7), (0,7,6), (0,6,5)],
+        171: [(0,1,7), (0,7,5), (0,5,4)], 177: [(0,1,7), (0,7,3), (0,3,2)],
+        186: [(0,1,7), (0,7,6), (0,6,5)], 195: [(0,1,7), (0,7,5), (0,5,4)],
+        198: [(0,1,7), (0,7,6), (0,6,5)], 204: [(0,1,7), (0,7,3), (0,3,2)],
+        207: [(0,1,7), (0,7,5), (0,5,4)], 210: [(0,1,7), (0,7,6), (0,6,5)],
+        219: [(0,1,7), (0,7,3), (0,3,2)], 225: [(0,1,7), (0,7,5), (0,5,4)],
+        237: [(0,1,7), (0,7,6), (0,6,4)], 246: [(0,1,7), (0,7,6), (0,6,5)],
+        252: [(0,1,7), (0,7,3), (0,3,2)]
+    }
+    tri_indices = cases.get(case_index, [])
+    return [[edge_intersections[e] for e in tri] for tri in tri_indices]
+
+def resolve_ambiguous_triangulation(case_index, edge_intersections, center_idx):
+    """
+    Generates triangles for an ambiguous case using the inserted center vertex.
+    Connects the center vertex to all edge intersections to form a fan topology.
+    """
+    edge_points = list(edge_intersections.values())
+    triangles = []
+    for i in range(len(edge_points)):
+        p1 = edge_points[i]
+        p2 = edge_points[(i + 1) % len(edge_points)]
+        triangles.append([p1, p2, center_idx])
+    return triangles
+```
+
+## Subtopics
+
+### [Topology-aware mesh quality improvement for Marching Cubes 33](1617-topology-aware-mesh-quality-improvement-for-marching-cubes-3.md)
+Improves aspect ratio of MC33 triangulations by modifying scalar field values near intersections while preventing topological errors. It correctly represents the topology of the trilinear interpolant even when $\lambda=0$, unlike Raman and Wenger.
+
+## Operating characteristics
+*   **Time Complexity:** Higher than standard Marching Cubes due to the overhead of ambiguity detection and vertex insertion calculations. The complexity remains linear with respect to the number of voxels, but the constant factor is larger [G].
+*   **Memory Complexity:** Increases vertex count per cell for ambiguous cases, leading to higher memory usage for the output mesh [S2].
+*   **Performance:** Accurately represents small complex features (e.g., tunnels) that standard MC misses. However, it does not guarantee recovery of sharp features [S2].
+*   **Strengths:** Guarantees a 2-manifold, watertight mesh homeomorphic to the trilinear interpolant, provided boundary conditions are met [S1, unofficial][S2].
+*   **Limitations:** Fails to guarantee manifoldness if the isosurface intersects domain boundaries. Does not preserve sharp features [S2].
+*   **When to use:** When topological correctness is critical (e.g., medical imaging, simulation) and the surface is expected to be smooth and contained within the domain [G].
+*   **When not to use:** When sharp feature preservation is required, or when the surface intersects the domain boundaries [S2].
+
+## Background
+Topologically Correct Marching Cubes was introduced by Roberto Grosso in the paper "Construction of topologically correct and manifold isosurfaces," published in *Computer Graphics Forum*, volume 35, pages 187–196, by Wiley Online Library in 2016 [S1, unofficial][S2]. It is implemented in the CGAL "3D Isosurfacing" package, which became available in CGAL 6.1 (released fall 2025) [S1, unofficial][S2].
+
+## Sources
+[S1] New in CGAL: Isosurfacing, https://www.cgal.org/2025/10/10/Isosurfacing/, fetched 2026-10-28 (unofficial)
+[S2] 3D Isosurfacing, https://doc.cgal.org/latest/Isosurfacing_3/index.html, fetched 2026-10-29

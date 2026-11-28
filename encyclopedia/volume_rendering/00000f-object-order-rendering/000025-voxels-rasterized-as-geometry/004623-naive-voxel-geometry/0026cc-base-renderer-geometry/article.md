@@ -1,0 +1,201 @@
+# Base Renderer Geometry
+
+Also called: Cube Indices Layout, DrawVoxel, Square Face Indices Layout, Square Line Indices Layout, VoxelPass
+
+## Overview
+Base Renderer Geometry renders voxel data by converting scalar field values into geometric primitives submitted to the graphics pipeline [S1, S2, unofficial]. It differs from [Naive Voxel Rendering](1103-naive-voxel-rendering.md) by explicitly managing vertex buffers and index layouts for geometric primitives, and from [Cube Geometry for Volume Rendering](10885-cube-geometry-for-volume-rendering.md) by supporting both full cube edge definitions and simplified square face definitions depending on the orientation and culling requirements [S1, S2, unofficial].
+
+## How it works
+**Inputs and Outputs:**
+*   **Inputs:** A list of voxel positions (`Vertices`), associated colors (`Colors`), and optional index buffers (`Indices`) [S1, unofficial]. Transformation matrices (`LocalToWorld`, `Orientation`) and rendering parameters (`transparency`, `CullMode`, `DefaultColor`, `skinning`) control the output [S1, S2, unofficial].
+*   **Outputs:** Rasterized pixels on the screen, with depth buffer updates and optional alpha blending based on the `transparency` flag [S2, unofficial].
+
+**Data Structures:**
+The method defines index layouts for geometric primitives [S1, unofficial]:
+
+1.  **`CUBE_INDICES`**: An integer array of 24 elements defining the 12 edges of a cube: `[0, 1, 1, 2, 2, 3, 3, 0, 4, 5, 5, 6, 6, 7, 7, 4, 0, 4, 1, 5, 2, 6, 3, 7]` [S1, unofficial].
+2.  **`SQUARE_LINE_INDICES`**: An integer array of 8 elements defining the perimeter of a square: `[0, 1, 1, 2, 2, 3, 3, 0]` [S1, unofficial].
+3.  **`SQUARE_FACE_INDICES`**: An integer array of 6 elements defining two triangles for a filled square face: `[0, 1, 2, 0, 2, 3]` [S1, unofficial].
+4.  **Vertex Attributes**:
+    *   **Base Format**: Comprises `Position` (Vector4), `Normal`, `Tangent`, and `Surface` attributes [S2, unofficial]. The `Surface` attribute packs texture coordinates and ambient occlusion into a single 3-component float array (RGB 32-bit float) [S2, unofficial].
+    *   **Skinned Format**: Extends the base format with `JointCombined` for skeletal animation support [S2, unofficial].
+5.  **Renderer State (`DrawVoxel` struct)**:
+    *   `pipeline_basic`: Graphics pipeline for standard rendering.
+    *   `pipeline_skinned`: Graphics pipeline for skinned rendering.
+    *   `static_batches`: A two-level batch structure mapping `MaterialId` to a list of vertex arguments.
+    *   `skinned_batches`: Similar to `static_batches` but for skinned vertex arguments.
+    *   `models`: Dynamic vertex buffer for static mesh data.
+    *   `skinned_models`: Dynamic vertex buffer for skinned mesh data.
+    *   `transparency`: Boolean flag controlling alpha filtering and blend state [S2, unofficial].
+
+**Numbered Steps:**
+
+1.  **Pipeline Construction**:
+    *   Create a layout from descriptor set layouts [S2, unofficial].
+    *   Build a basic graphics pipeline with back-face culling, depth test function set to `Less`, and depth write enabled if `!transparent` [S2, unofficial].
+    *   Enable optional premultiplied alpha blending if `transparent` is true [S2, unofficial].
+    *   If `skinning` is enabled, build a child pipeline with a different vertex descriptor and skinned vertex shader [S2, unofficial].
+2.  **Preparation (Batching)**:
+    *   Fetch `VoxelMesh`, `Atlas`, `Handle<VoxelMesh>`, `Transform`, `JointTransforms`, and `Tint` from the world entities [S2, unofficial].
+    *   Filter meshes by transparency match: only process meshes if their alpha state matches the pass configuration (`transparency`) [S2, unofficial].
+    *   Group filtered meshes by material ID [S2, unofficial].
+    *   Insert grouped meshes into `static_batches` or `skinned_batches` depending on the `skinning` flag [S2, unofficial].
+    *   Write batch data to `models` (static) and `skinned_models` (skinned) dynamic vertex buffers [S2, unofficial].
+3.  **Drawing**:
+    *   Bind the basic graphics pipeline (`pipeline_basic` or `pipeline_skinned`) [S2, unofficial].
+    *   Bind the environment descriptor set [S2, unofficial].
+    *   Iterate over `static_batches` (or `skinned_batches`) [S2, unofficial].
+    *   For each material, bind the material descriptor set [S2, unofficial].
+    *   Iterate over mesh batches within the material and call `mesh.bind_and_draw` with instance ranges to issue draw calls [S2, unofficial].
+
+**Pseudocode:**
+
+> **Unverified code.** The code below did not pass a test run against a reference implementation, or no test fits it, so it may contain errors.
+
+```python
+def render_voxels(voxel_data, camera, config):
+    # Step 1: Pipeline Construction
+    def create_pipeline(cull_mode, depth_test, depth_write, blend):
+        return {"cull_mode": cull_mode, "depth_test": depth_test, "depth_write": depth_write, "blend": blend}
+
+    pipeline = create_pipeline(
+        cull_mode=config.CullMode,
+        depth_test="Less",
+        depth_write=not config.transparency,
+        blend="premultiplied_alpha" if config.transparency else "none"
+    )
+    skinned_pipeline = create_pipeline(vertex_format="skinned") if config.skinning else None
+
+    # Step 2: Preparation & Batching
+    static_batches = {}
+    skinned_batches = {}
+    for voxel in voxel_data:
+        if voxel.alpha != config.transparency:
+            continue
+        mat_id = voxel.material_id
+        if mat_id not in static_batches:
+            static_batches[mat_id] = []
+        
+        # Transform position
+        pos = voxel.position
+        world_pos = [
+            config.LocalToWorld[0][0]*pos[0] + config.LocalToWorld[0][1]*pos[1] + config.LocalToWorld[0][2]*pos[2] + config.LocalToWorld[0][3],
+            config.LocalToWorld[1][0]*pos[0] + config.LocalToWorld[1][1]*pos[1] + config.LocalToWorld[1][2]*pos[2] + config.LocalToWorld[1][3],
+            config.LocalToWorld[2][0]*pos[0] + config.LocalToWorld[2][1]*pos[1] + config.LocalToWorld[2][2]*pos[2] + config.LocalToWorld[2][3]
+        ]
+        
+        # Adjust size for orthographic zoom
+        size = config.Size
+        if camera.orthographic and config.ScaleOnZoom:
+            size *= camera.orthographicSize / 10.0
+        half = size * 0.5
+        
+        # Generate geometry based on orientation
+        if config.Orientation == "XY":
+            verts = [
+                (world_pos[0] + half, world_pos[1] + half, world_pos[2], voxel.color),
+                (world_pos[0] + half, world_pos[1] - half, world_pos[2], voxel.color),
+                (world_pos[0] - half, world_pos[1] - half, world_pos[2], voxel.color),
+                (world_pos[0] - half, world_pos[1] + half, world_pos[2], voxel.color)
+            ]
+        elif config.Orientation == "XZ":
+            verts = [
+                (world_pos[0] + half, world_pos[1], world_pos[2] + half, voxel.color),
+                (world_pos[0] + half, world_pos[1], world_pos[2] - half, voxel.color),
+                (world_pos[0] - half, world_pos[1], world_pos[2] - half, voxel.color),
+                (world_pos[0] - half, world_pos[1], world_pos[2] + half, voxel.color)
+            ]
+        else:
+            verts = generate_cube_vertices(world_pos, voxel.color, size)
+            
+        static_batches[mat_id].append(verts)
+
+    models = [{"material_id": k, "vertices": v} for k, v in static_batches.items()]
+    skinned_models = [] if not config.skinning else [{"material_id": k, "vertices": v} for k, v in skinned_batches.items()]
+
+    # Step 3: Drawing
+    bind_pipeline(pipeline)
+    bind_descriptor_set(config.env_descriptor)
+    for item in models:
+        bind_material_descriptor(item["material_id"], config.materials)
+        for batch in item["vertices"]:
+            bind_vertex_buffer(batch)
+            bind_index_buffer(SQUARE_FACE_INDICES)
+            draw_elements(len(SQUARE_FACE_INDICES), len(batch))
+
+def generate_cube_vertices(pos, color, size):
+    half = size * 0.5
+    return [
+        (pos[0]-half, pos[1]-half, pos[2]-half, color), (pos[0]+half, pos[1]-half, pos[2]-half, color),
+        (pos[0]+half, pos[1]+half, pos[2]-half, color), (pos[0]-half, pos[1]+half, pos[2]-half, color),
+        (pos[0]-half, pos[1]-half, pos[2]+half, color), (pos[0]+half, pos[1]-half, pos[2]+half, color),
+        (pos[0]+half, pos[1]+half, pos[2]+half, color), (pos[0]-half, pos[1]+half, pos[2]+half, color)
+    ]
+```
+
+**Formulas:**
+
+*   **Vertex Position Transformation**:
+    $$ P_{world} = M_{local\_to\_world} \times P_{local} $$
+    Where $M_{local\_to\_world}$ is the `LocalToWorld` matrix and $P_{local}$ is the voxel's local position [S1, unofficial].
+
+*   **Quad Generation (XY Orientation)**:
+    Given a voxel center $(x, y, z)$ and size $s$:
+    $$
+    \begin{aligned}
+    v_0 &= (x + s/2, y + s/2, z) \\
+    v_1 &= (x + s/2, y - s/2, z) \\
+    v_2 &= (x - s/2, y - s/2, z) \\
+    v_3 &= (x - s/2, y + s/2, z)
+    \end{aligned}
+    $$
+    These vertices are connected using `SQUARE_LINE_INDICES` or `SQUARE_FACE_INDICES` [S1, unofficial].
+
+*   **Orthographic Scale Adjustment**:
+    If `ScaleOnZoom` is enabled and the camera is orthographic:
+    $$ s_{effective} = s_{base} \times \frac{camera.orthographicSize}{10.0} $$
+    This ensures voxels maintain visual consistency when zooming [S1, unofficial].
+
+**Parameters:**
+*   `LocalToWorld`: `Matrix4x4` transformation from local to world space. Default: Identity [S1, unofficial].
+*   `Orientation`: Enum `DRAW_ORIENTATION` with values `XY` or `XZ`. Default: `XY` [S1, unofficial].
+*   `DefaultColor`: `Color` for voxels without explicit color. Default: White [S1, unofficial].
+*   `CullMode`: Rendering cull mode. Default: Off [S1, unofficial].
+*   `transparency`: `bool` determines whether the pass handles transparent or opaque voxels. Controls alpha filtering and blend state. Default: False [S2, unofficial].
+*   `skinning`: `bool` enables the construction and use of a secondary pipeline with skinning support. Default: False [S2, unofficial].
+
+**Edge Cases and Pitfalls:**
+*   **Alpha Mismatch**: Meshes are only processed if their alpha state matches the pass configuration. If a mesh has alpha 0.5 but the pass is configured for opaque (`transparency=False`), it will be excluded, preventing incorrect blending or culling [S2, unofficial].
+*   **Precision**: Using `float` for vertex positions and transformations may lead to jittering in large worlds. Consider using double precision or chunk-based coordinate systems for very large scenes [G].
+*   **Degenerate Input**: Empty voxel lists or zero-size voxels should be handled gracefully to avoid division by zero or empty draw calls [G].
+
+## Subtopics
+
+### [OpenGL Client State Array Rendering](11008-opengl-client-state-array-rendering.md)
+Renders pre-generated voxel mesh data using OpenGL client state arrays for vertices, normals, and colors, supporting both indexed and non-indexed drawing. It differs from its siblings by relying on client-side memory pointers passed directly to the driver during draw calls, rather than pre-uploaded Vertex Buffer Objects (VBOs) or procedural geometry generation in shaders.
+
+### [Dynamic VBO with Octree Rendering](13670-dynamic-vbo-with-octree-rendering.md)
+A rendering approach for voxel terrain using an octree data structure where a single dynamic Vertex Buffer Object (VBO) is rebuilt every frame to contain geometry for visible octree nodes, combined with an index buffer. Unlike fixed-chunk approaches where VBOs are recreated only when voxel data changes, this method rebuilds the VBO every frame based on visibility, allowing for dynamic LOD and culling.
+
+### [Geometry Shader Voxel Cube Generation with Face Culling](16232-geometry-shader-voxel-cube-generation-with-face-culling.md)
+This method renders voxel cubes by generating triangle geometry from point primitives within a geometry shader. It solves the problem of rendering large voxel scenes efficiently by using the alpha component of the input vertex color as a bitmask to selectively generate only the six cube faces that are not occluded by adjacent voxels, performing per-voxel face culling on the GPU.
+
+### Face Array Generation
+Gets the projected 2D face array directly for custom renderers or Canvas output [S3, unofficial]. Pass `{ raw: true }` to get all neighbour-exposed 3D faces without camera-dependent culling or projection, keeping their original 3D coordinates [S3, unofficial]. Use `renderTest` for stateless generation from a test function without storing voxels, specifying bounds, a test function, and a style function [S3, unofficial]. Example usage: `const raw = h.getFaces({ raw: true })` and `const faces = h.renderTest({ bounds: [[-10, -10, -10], [10, 10, 10]], test: (x, y, z) => x*x + y*y + z*z <= 100, style: (x, y, z, faceName) => ({ fill: faceName === 'top' ? '#fff' : '#ccc' }) })` [S3, unofficial].
+
+## Operating characteristics
+*   **Time Complexity**: $O(N)$ where $N$ is the number of voxels, as each voxel is processed independently to generate geometry [S2, unofficial].
+*   **Memory Complexity**: $O(N)$ for vertex and index buffers [S2, unofficial].
+*   **Scaling**: Scales linearly with the number of voxels [G].
+*   **Strengths**: Simple to implement, leverages standard graphics pipeline features (depth testing, blending), supports transparency [S2, unofficial].
+*   **Limitations**: High draw call count if not batched, geometry overhead for large cubes, no inherent occlusion culling unless using geometry shaders or octrees [S1, S2, unofficial].
+*   **When to Use**: Small to medium voxel scenes, or when transparency is required and ray-marching is too expensive [G].
+*   **When Not to Use**: Very large voxel worlds without chunking, scenes requiring high-performance occlusion culling, or when memory bandwidth is a bottleneck [G].
+
+## Background
+Base Renderer Geometry originates from early voxel rendering techniques that utilized the graphics pipeline's rasterization capabilities [S1, S2, unofficial]. It is commonly found in voxel engines and tools that prioritize simplicity and compatibility with standard rendering APIs [S1, S2, unofficial]. The method has been adapted in various forms, including immediate mode OpenGL and modern dynamic VBO approaches, to optimize performance and flexibility [S1, S2, unofficial].
+
+## Sources
+[S1] Scrawk/Marching-Cubes, https://github.com/Scrawk/Marching-Cubes, fetched 2026-10-26 (unofficial)
+[S2] Kurble/amethyst_voxel, https://github.com/Kurble/amethyst_voxel, fetched 2026-10-27 (unofficial)
+[S3] meodai/heerich, https://github.com/meodai/heerich, fetched 2026-10-26 (unofficial)

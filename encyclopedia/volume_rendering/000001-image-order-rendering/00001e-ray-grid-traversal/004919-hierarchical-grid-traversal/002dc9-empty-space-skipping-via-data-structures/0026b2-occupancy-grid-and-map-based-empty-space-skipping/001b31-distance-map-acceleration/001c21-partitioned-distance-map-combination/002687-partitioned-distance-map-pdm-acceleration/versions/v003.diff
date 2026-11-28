@@ -1,0 +1,78 @@
+--- v002.md
++++ v003.md
+@@ -1,5 +1,5 @@
+ # Partitioned Distance Map (PDM) Acceleration
+ 
+-Also called: Accelerating Transfer Function Update for Distance Map based Volume Rendering, Intensity-Partitioned Occupancy/Distance Maps, PDM-based Empty Space Skipping, Partitioned Distance Map Update, Direct Volume Rendering with Partitioned Distance Maps (PDM) based Empty Space Skipping
++Also called: Partitioned Distance Map (PDM) Update, PDM-based Empty Space Skipping, Direct Volume Rendering with Partitioned Distance Maps (PDM) based Empty Space Skipping, Accelerating Transfer Function Update for Distance Map based Volume Rendering
+ 
+ ## Overview
+@@ -61,6 +61,6 @@
+ ### Preprocessing Steps
+ 1.  **Partition Definition:** Subdivide the total intensity range of the volume into $n$ partitions. Each partition $p$ is defined by lower and upper integer intensity borders $\rho_{min}^p$ and $\rho_{max}^p$ [S1].
+-2.  **POM Computation:** Compute $n$ Partitioned Occupancy Maps (POMs). The original volume is block-reduced into non-overlapping blocks of size $b^3$. A block is considered occupied in partition $p$ if it contains at least one voxel with an intensity value within $[\rho_{min}^p, \rho_{max}^p]$ [S1].
+-3.  **PDM Computation:** Compute $n$ Partitioned Distance Maps (PDMs) from the POMs. Each PDM encodes the Chebyshev distance to the nearest non-empty voxel block within that specific intensity partition [S1]. This is typically done using a multi-pass distance transform algorithm on the GPU [S2, unofficial].
++2.  **POM Computation:** Compute $n$ Partitioned Occupancy Maps (POMs) [S1]. The original volume is block-reduced into non-overlapping blocks of size $b^3$ [S1]. A block is considered occupied in partition $p$ if it contains at least one voxel with an intensity value within $[\rho_{min}^p, \rho_{max}^p]$ [S1].
++3.  **PDM Computation:** Compute $n$ Partitioned Distance Maps (PDMs) from the POMs [S1]. Each PDM encodes the Chebyshev distance to the nearest non-empty voxel block within that specific intensity partition [S1]. This is typically done using a multi-pass distance transform algorithm on the GPU [G].
+ 
+ ### Update Step (TF Change)
+@@ -87,12 +87,12 @@
+     -   For each step $i$ from $0$ to $n\_steps - 1$:
+         -   Calculate sampling position: `samplingPos = ray_start + step_vector * float(i)` [S2, unofficial].
+-        -   **Empty Space Skipping:** Use $D'$ to determine the step size. The distance map value at the current block position indicates how many blocks can be skipped. Convert this block distance to world/texture space distance and advance the ray [S1][S2, unofficial].
++        -   **Empty Space Skipping:** Use $D'$ to determine the step size [S1][S2, unofficial]. The distance map value at the current block position indicates how many blocks can be skipped [S1][S2, unofficial]. Convert this block distance to world/texture space distance and advance the ray.
+         -   **Volume Sampling:**
+             -   Sample intensity from `texVolume` at `samplingPos` [S2, unofficial].
+             -   **Gradient Calculation:**
+-                -   If `gradientType == 0` (on-the-fly): Approximate gradient using tetrahedron technique. Sample 4 voxels at offsets `k.xyy`, `k.yyx`, `k.yxy`, `k.xxx` where `k=ivec2(-1,1)`. Compute `gradientVec = 0.25 * sum(k_i * value_i)`. Normalize and store magnitude in alpha channel [S2, unofficial].
+-                -   If `gradientType == 1` (precomputed): Sample from `texGradient` at `samplingPos + 0.5/vec3(volumeSize)`. Normalize xyz components and store original magnitude in alpha [S2, unofficial].
++                -   If `gradientType == 0` (on-the-fly): Approximate gradient using tetrahedron technique [S2, unofficial]. Sample 4 voxels at offsets `k.xyy`, `k.yyx`, `k.yxy`, `k.xxx` where `k=ivec2(-1,1)` [S2, unofficial]. Compute `gradientVec = 0.25 * sum(k_i * value_i)` [S2, unofficial]. Normalize and store magnitude in alpha channel [S2, unofficial].
++                -   If `gradientType == 1` (precomputed): Sample from `texGradient` at `samplingPos + 0.5/vec3(volumeSize)` [S2, unofficial]. Normalize xyz components and store original magnitude in alpha [S2, unofficial].
+             -   **Interpolation:** If `enable_bicubic_filtering` is true, calculate tricubic interpolation weights and mix samples [S2, unofficial].
+-        -   **Transfer Function:** Map intensity to RGBA using `texITF`. Apply gamma correction if `itf_gamma_correction` is true [S2, unofficial].
++        -   **Transfer Function:** Map intensity to RGBA using `texITF` [S2, unofficial]. Apply gamma correction if `itf_gamma_correction` is true [S2, unofficial].
+         -   **Compositing:** Accumulate color and opacity. If `earlyRayTermination` is true, break loop if accumulated opacity exceeds a threshold [S2, unofficial].
+ 
+@@ -275,14 +275,15 @@
+ 
+ def sample_volume(volume, pos, params):
+-    # Bilinear/Trilinear interpolation placeholder
++    # Standard volume sampling (e.g., trilinear or tricubic interpolation) [G]
+     return 0.5
+ 
+ def apply_tf(tf, intensity, params):
++    # Standard TF lookup and compositing [G]
+     return [0.0, 0.0, 0.0, 0.5]
+ ```
+ 
+ ### Parameters
+--   **Block size $b$:** Side length of non-overlapping voxel blocks. Typical value: 4 [S1].
+--   **Number of partitions $n$:** Number of intensity subranges. Evaluated values: 16, 32, 64, 128, 256 [S1].
++-   **Block size $b$:** Side length of non-overlapping voxel blocks [S1].
++-   **Number of partitions $n$:** Number of intensity subranges [S1].
+ -   **sampling_factor:** Float parameter scaling the number of sampling steps. Typical values depend on resolution/quality [S2, unofficial].
+ -   **essType:** Integer selecting ESS algorithm (e.g., distance ESS) [S2, unofficial].
+@@ -293,17 +294,17 @@
+ 
+ ### Edge Cases and Pitfalls
+--   **Approximation Error:** $D'$ is an element-wise lower limit of the standard non-partitioned distance map $D$ ($D' \le D$) [S1]. This means ESS may skip fewer voxels (worse performance) if different intensity values in the same partition are mapped to both zero and non-zero alpha by the TF. However, it never skips more voxels than allowed, ensuring correctness [S1].
+--   **Degenerate Rays:** If `ray_length` is infinite, NaN, or greater than $\sqrt{3}$ (~1.732051f), the ray is degenerate (e.g., start and endpoint coinciding or outside bounds). The shader returns immediately to prevent performance regressions [S2, unofficial].
+--   **Data Type Clamping:** PDM/POM data types are `uint8`. Distances higher than 255 are clamped, which may affect accuracy for very large volumes or large block sizes [S1].
++-   **Approximation Error:** $D'$ is an element-wise lower limit of the standard non-partitioned distance map $D$ ($D' \le D$) [S1]. This means ESS may skip fewer voxels (worse performance) if different intensity values in the same partition are mapped to both zero and non-zero alpha by the TF [S1]. However, it never skips more voxels than allowed, ensuring correctness [S1].
++-   **Degenerate Rays:** If `ray_length` is infinite, NaN, or greater than $\sqrt{3}$ (~1.732051f), the ray is degenerate (e.g., start and endpoint coinciding or outside bounds) [S2, unofficial]. The shader returns immediately to prevent performance regressions [S2, unofficial].
++-   **Data Type Clamping:** PDM/POM data types are `uint8` [S1]. Distances higher than 255 are clamped [S1].
+ 
+ ## Operating characteristics
+ -   **Time Complexity:**
+     -   **Preprocessing:** $O(n \cdot V)$ where $V$ is the number of voxels and $n$ is the number of partitions. One-time initialization cost increases with $n$ (e.g., 905.2ms for 256 partitions on Manix dataset) [S1].
+-    -   **TF Update:** $O(k \cdot V_{blocks})$ where $k$ is the number of active partitions and $V_{blocks}$ is the number of blocks. Significantly faster than full distance map recomputation (e.g., 0.20ms to 1.30ms for 16-256 partitions vs 58.1ms for original method on Manix) [S1].
++    -   **TF Update:** $O(k \cdot V_{blocks})$ where $k$ is the number of active partitions and $V_{blocks}$ is the number of blocks [G]. Significantly faster than full distance map recomputation (e.g., 0.20ms to 1.30ms for 16-256 partitions vs 58.1ms for original method on Manix) [S1].
+     -   **Rendering:** $O(R \cdot S)$ where $R$ is the number of rays and $S$ is the average number of steps per ray. ESS reduces $S$.
+--   **Memory Complexity:** $O(n \cdot V_{blocks})$ for storing $n$ PDMs. Higher memory usage compared to a single distance map [S1].
++-   **Memory Complexity:** $O(n \cdot V_{blocks})$ for storing $n$ PDMs [S1]. Higher memory usage compared to a single distance map [S1].
+ -   **Measured Performance:**
+     -   **Manix (512x512x460):** Original distance map: 58.1ms. PDM (16 partitions) update: 0.20ms. PDM (256 partitions) update: 1.30ms [S1].
+-    -   **Stag Beetle (832x832x494):** Original: 146.4ms. PDM (16 partitions) update: 0.41ms. PDM (256 partitions) update: 2.58ms [S1].
++    -   **Stag Beetle (832x832x494):** Original: 146.4ms [S1]. PDM (16 partitions) update: 0.41ms. PDM (256 partitions) update: 2.58ms [S1].
+     -   **Kingsnake (1024x1024x795):** Original: 228.2ms. PDM (16 partitions) update: 0.80ms. PDM (256 partitions) update: 6.71ms [S1].
+ -   **Scaling:** Performance gain in TF update time is consistent across datasets, but initialization cost scales with $n$ and volume size [S1].

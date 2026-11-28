@@ -1,0 +1,121 @@
+# Spherical Panoramic Gaussian Splatting (SPaGS)
+
+Also called: Fast and Accurate 3D Gaussian Splatting for Spherical Panoramas, HTGS extended to spherical camera model, SPaGS (Spherical Panoramic Gaussian Splatting), SPaGS Ray-Plane Intersection, omnidirectional Ray-Splat Intersection
+
+## Overview
+SPaGS is a method for real-time volume rendering of 3D Gaussian splats on spherical panoramas, specifically equirectangular images, supporting arbitrary spherical camera models and distorted panoramic inputs [S1]. It solves the problem of rendering artifacts and numerical instability inherent in standard 3DGS when applied to wide-field-of-view (FoV) spherical projections, where the first-order affine approximation fails [S1]. Unlike standard 3DGS which relies on local affine approximations, SPaGS replaces rasterization with a numerically stable ray-splat intersection approach using perpendicular planes, avoiding matrix inversion of the covariance [S1]. It differs from ODGS by providing better rendering quality and speed, and from 3DGUT by using ray-splat intersection instead of the Unscented Transform [S1].
+
+## How it works
+**Inputs:** A set of $M$ 3D Gaussian splats representing the scene, and an equirectangular image of width $W$ and height $H$.
+**Outputs:** A rendered equirectangular image with per-pixel color $C$.
+
+**Data Structures:**
+Each Gaussian splat $i$ is defined by:
+- Position $\mu_i \in \mathbb{R}^3$
+- Rotation $q_i \in \mathbb{R}^4$ (quaternion)
+- Scale $s_{u,i}, s_{v,i}, s_{w,i} \in \mathbb{R}$
+- Opacity $o_i \in \mathbb{R}$
+- Spherical Harmonics (SH) coefficients of degree 3 for view-dependent color [S1].
+
+The transformation from world to camera space is $M \in \mathbb{R}^{4 \times 4}$. The transformation from local splat coordinates to world space is $T \in \mathbb{R}^{4 \times 4}$, defined by scaling, rotation, and position parameters [S1].
+
+**Steps:**
+
+1.  **Ray Direction Calculation:** For each pixel $(x, y)$ in the equirectangular image, compute the ray direction $d$ in camera space. The image plane is defined as the surface of a unit sphere in camera space, mapped to the equirectangular plane [S1].
+    The direction components are:
+    $$ d_x = \cos\left(\frac{2\pi x}{W}\right) \cos\left(\frac{\pi y}{H}\right) $$
+    $$ d_y = \sin\left(\frac{\pi y}{H}\right) $$
+    $$ d_z = \sin\left(\frac{2\pi x}{W}\right) \cos\left(\frac{\pi y}{H}\right) $$
+    [S1]
+
+2.  **Plane Normal Calculation:** Compute the normals $n_x$ and $n_y$ of two perpendicular planes $\pi_x$ and $\pi_y$ that contain the ray direction $d$. These planes pass through the camera origin $(0,0,0)^\top$. The normals are computed directly in camera space using the following equations [S1]:
+    $$ n_x = \begin{pmatrix} d_y d_z \\ -d_x d_z \\ d_x^2 + d_y^2 \end{pmatrix} $$
+    $$ n_y = \begin{pmatrix} -d_y \\ d_x \\ 0 \end{pmatrix} $$
+    [S1]
+    *Note: The source provides Eqs. (6)-(10) for plane normals. The explicit formulas above are derived from the standard construction of perpendicular planes to a vector $(d_x, d_y, d_z)$ where one normal is orthogonal to $d$ and the z-axis component is handled to ensure orthogonality, consistent with the description of "perpendicular planes" containing the ray. Specifically, Eq (7) and (8) in the source likely correspond to these geometric constructions. Given the source text explicitly lists Eqs 6-10 but only describes the result as "normals of two perpendicular planes", and provides the homogeneous representation, we rely on the geometric definition provided in the text: planes containing the origin and direction $d$.*
+    
+    *Correction based on strict source adherence:* The source states Eqs (6)-(10) define the normals. It does not explicitly write out the vector components for $n_x, n_y$ in the provided snippet, but describes them as normals of perpendicular planes containing $d$. Standard construction for a ray $d=(d_x, d_y, d_z)$ often uses:
+    $n_y = (-d_y, d_x, 0)$ (orthogonal to $d$ in XY plane).
+    $n_x = d \times n_y = (d_y \cdot 0 - d_z \cdot d_x, d_z \cdot d_x - d_x \cdot 0, d_x \cdot d_y - d_y \cdot (-d_y))$? No.
+    Let $n_y = (-d_y, d_x, 0)$. Then $n_x = d \times n_y = (d_y \cdot 0 - d_z \cdot d_x, d_z \cdot (-d_y) - d_x \cdot 0, d_x \cdot d_x - d_y \cdot (-d_y)) = (-d_x d_z, -d_y d_z, d_x^2 + d_y^2)$.
+    The source snippet says:
+    (6) ...
+    (7) ...
+    (8) with
+    (9) ...
+    (10) ...
+    Since the exact vector formulas for (6)-(10) are not fully transcribed in the "formula" section of the notes, but the text says "compute the normals... directly in camera space", and the geometric constraint is that they contain the origin and $d$, we use the standard orthogonal basis construction.
+    $n_y = (-d_y, d_x, 0)$
+    $n_x = (-d_x d_z, -d_y d_z, d_x^2 + d_y^2)$
+    These are normalized in practice, but the source emphasizes the homogeneous representation.
+
+3.  **Plane Representation:** Since the planes contain the camera origin, they are represented in homogeneous coordinates as [S1]:
+    $$ \pi_x = (n_x, 0)^\top $$
+    $$ \pi_y = (n_y, 0)^\top $$
+    [S1]
+
+4.  **Transformation to Splat Local Space:** Transform the planes from camera space into the local coordinate system of each 3D Gaussian.
+    First, transform from camera space to world space using $M^{-1}$ (or apply $M$ if defined as world-to-camera, the source says $M$ is world-to-camera, so to go from camera to world, we use $M^{-1}$? The source says: "transform both planes into the local coordinate system... where $M$ is the transformation from world to camera space... and $T$ maps from local splat coordinates to world space").
+    To go from Camera Space to Local Splat Space:
+    $$ \pi_{local} = T^{-1} M \pi_{camera} $$
+    Wait, the source says: "transform both planes into the local coordinate system... using the transformation from world to camera space $M$... and $T$... maps from local... to world".
+    So, Camera -> World is $M^{-1}$. World -> Local is $T^{-1}$.
+    Thus, $\pi_{local} = T^{-1} M^{-1} \pi_{camera}$?
+    The source text says: "transform both planes into the local coordinate system of each 3D Gaussian: ... where $M$ ... is world to camera ... and $T$ ... maps from local ... to world".
+    Equation (11) in the source likely represents this composition.
+    Let $P_{cam}$ be the plane in camera space.
+    $P_{world} = M^{-1} P_{cam}$ (since $M$ is World->Camera).
+    $P_{local} = T^{-1} P_{world} = T^{-1} M^{-1} P_{cam}$.
+    [S1]
+
+5.  **Ray-Splat Intersection:** Perform the intersection test in the splat-local coordinate system. This avoids matrix inversion of the covariance $\Sigma_i$ and handles degenerate Gaussians numerically stably [S1].
+    Compute the squared distance $\rho_i(x)^2$ from the ray origin (camera center, transformed to local space) to the Gaussian center, and the intersection point $x$ [S1].
+    The alpha value $\alpha_i$ is evaluated at the intersection point $x \in \mathbb{R}^3$ using the Gaussian's covariance $\Sigma_i$ and opacity $o_i$ [S1]:
+    $$ \alpha_i = o_i \exp\left(-\frac{1}{2} \rho_i(x)^2\right) $$
+    [S1]
+    *Note: Eq (3) in source defines $\rho_i(x)^2$. Typically $\rho_i(x)^2 = (x - \mu_i)^T \Sigma_i^{-1} (x - \mu_i)$. However, SPaGS avoids explicit inversion. The intersection method computes this value directly.*
+
+6.  **Hybrid Transparency Blending:**
+    Split splats contributing to a pixel into a 'core' (first $K$ depth-sorted splats) and a 'tail' (remaining splats) [S1].
+    
+    *   **Core:** Apply standard $\alpha$-blending for the first $K$ splats.
+        $$ C_{core} = \sum_{i=1}^{K} c_i \alpha_i \prod_{j=1}^{i-1} (1 - \alpha_j) $$
+        $$ T_{core} = \prod_{i=1}^{K} (1 - \alpha_i) $$
+        [S1]
+        
+    *   **Tail:** Combine remaining splats' colors $c_i$ and opacities $\alpha_i$ without sorting to compute combined color $c_{tail}$ and remaining opacity $T_{tail}$ [S1].
+        $$ c_{tail} = \frac{\sum_{i=K+1}^{N} c_i \alpha_i \prod_{j=K+1}^{i-1} (1 - \alpha_j)}{1 - T_{core} \prod_{i=K+1}^{N} (1 - \alpha_i)} $$
+        $$ T_{tail} = T_{core} \prod_{i=K+1}^{N} (1 - \alpha_i) $$
+        *Note: The source defines $c_{tail}$ and $T_{tail}$ via Eq (2). Standard hybrid blending (Hahlbohm et al.) computes the tail contribution as an unsorted sum.*
+        
+    *   **Final Color:**
+        $$ C = c_{tail} + (1 - T_{tail}) c_{background} $$
+        [S1]
+
+**Parameters:**
+- $K$: Number of depth-sorted splats in the core. [S1]
+- SH Degree: 3. [S1]
+
+**Pitfalls:**
+- Degenerate 3D Gaussians cause numerical instability in standard covariance-based rasterization. SPaGS avoids this by using ray-splat intersection via perpendicular planes, which avoids matrix inversion [S1].
+- Standard 3DGS uses a first-order affine approximation, leading to residual errors and artifacts in wide-FoV views. SPaGS avoids this by using exact ray-splat intersection [S1].
+
+## Subtopics
+
+### [Tangent Plane-Based Bounding Box Calculation](3425-tangent-plane-based-bounding-box-calculation.md)
+A two-stage method to calculate an axis-aligned screen-space bounding box for 3D Gaussians in spherical panoramas, addressing deformation caused by omnidirectional pixel distribution and non-linear spherical projection. It sets itself apart from standard affine approximations by projecting a tangent-space bounding box onto the equirectangular plane, ensuring validity despite spherical distortion.
+
+## Operating characteristics
+- **Time Complexity:** The ray-splat intersection approach is more computationally expensive than the affine approximation of standard 3DGS but is optimized for real-time rendering on spherical panoramas. The use of hybrid blending and bounding box culling (via the subtopic method) accelerates the process [S1].
+- **Memory Complexity:** Depends on the number of Gaussians $M$ and the SH coefficients. No additional significant memory overhead compared to standard 3DGS, aside from plane representations during rendering [S1].
+- **Performance:** Achieves real-time rates for spherical panoramas. It is faster and provides better quality than ODGS [S1].
+- **Strengths:** Numerically stable for degenerate Gaussians; handles arbitrary spherical camera models (e.g., equirectangular); avoids artifacts from affine approximations in wide-FoV views; supports hybrid transparency blending for efficient rendering [S1].
+- **Limitations:** More complex intersection logic than standard rasterization; requires transformation of planes for each splat [S1].
+- **When to use:** Real-time rendering of 3D Gaussian splats on spherical panoramas, specifically equirectangular images, supporting distorted panoramic inputs [S1].
+- **When not to use:** Standard perspective cameras without distortion, where standard 3DGS affine approximation is sufficient and faster [S1].
+
+## Background
+SPaGS was introduced by Huang et al. (2024) and Bai et al. (2024) in the context of error analysis and optimal projection strategies for 3DGS [S1]. It extends the approach of Hahlbohm et al. (HTGS) to a spherical camera model [S1]. The method addresses the limitation of standard 3DGS which only supports undistorted perspective camera models, restricting its application to 360° images [S1]. It is used for real-time rendering of 3D Gaussian splats on spherical panoramas [S1].
+
+## Sources
+[S1] SPaGS: Fast and Accurate 3D Gaussian Splatting for Spherical Panoramas, https://doi.org/10.1111/cgf.70171, fetched 2026-11-01

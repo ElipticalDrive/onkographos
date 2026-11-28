@@ -1,0 +1,96 @@
+--- v001.md
++++ v002.md
+@@ -7,13 +7,13 @@
+ 
+ ## How it works
+-The method operates on a pool of detached solids, flagging them for re-voxelization and recomputing their spatial occupancy every frame to match the GPU scatter cells.
++The method operates on a pool of detached solids, flagging them for re-voxelization and recomputing their spatial occupancy every frame to match the GPU scatter cells [S1, unofficial].
+ 
+ **Inputs and Outputs**
+-*   **Input**: Model-space geometry of detached solids; current frame transformation (rotation/translation); voxel grid resolution and bounding box.
+-*   **Output**: A voxel grid with density/color values and an exposed-face mask used during the voxel-to-trixel projection stage.
++*   **Input**: Model-space geometry of detached solids; current frame transformation (rotation/translation); voxel grid resolution and bounding box [S1, unofficial].
++*   **Output**: A voxel grid with density/color values and an exposed-face mask used during the voxel-to-trixel projection stage [S1, unofficial].
+ 
+ **Data Structures**
+ *   **Voxel Data Structure**: Contains `visibleFaceIds`. The `.w` lane of `visibleFaceIds` is repurposed as a free marker lane to flag solids requiring re-voxelization [S1, unofficial].
+-*   **Face Occupancy Mask**: A per-voxel boolean or bitmask indicating if a face is exposed to the camera.
++*   **Face Occupancy Mask**: A per-voxel boolean or bitmask indicating if a face is exposed to the camera [S1, unofficial].
+ 
+ **Steps**
+@@ -22,5 +22,5 @@
+     *   Formula: $C_{world} = \text{roundHalfUp}(C_{model})$
+ 3.  **Mask Recomputation**: Recompute the per-voxel exposed face mask every frame against the rotated destination cells. This is performed by `face_occupancy::recomputeFaceOccupancyOnCells` [S1, unofficial].
+-    *   This step replaces the stale model-space mask with a mask derived from the current rotated grid position.
++    *   This step replaces the stale model-space mask with a mask derived from the current rotated grid position [S1, unofficial].
+ 4.  **Occlusion Resolution**: In the `c_voxel_to_trixel_stage_{1,2}` (GLSL+Metal), drop the model-space `faceIsExposed` gate. Instead, rely on the distance buffer to resolve occlusion [S1, unofficial].
+ 5.  **Projection**: Project the voxel data to trixels (2D screen pixels) using the recomputed exposed mask and distance buffer for depth testing [S1, unofficial].
+@@ -28,37 +28,39 @@
+ **Pseudocode**
+ ```python
++def round_half_up(x):
++    return int(x + 0.5) if x >= 0 else int(x - 0.5)
++
+ def detached_revoxelize_step(solids, frame_transform, voxel_grid):
+-    # Step 1: Flag solids
++    # Step 1: Flag re-voxelize solids using the free visibleFaceIds_.w lane [S1, unofficial]
+     for solid in solids:
+         if solid.requires_revoxelize:
+-            solid.visibleFaceIds.w = 1  # Marker flag
++            solid.visibleFaceIds_.w = 1
+ 
+-    # Step 2 & 3: Recompute mask against rotated cells
+-    # Map model-space voxels to world cells using roundHalfUp
++    # Step 2: Map model-space voxels to world cells using roundHalfUp rounding [S1, unofficial]
++    # Step 3: Recompute the per-voxel exposed mask every frame against rotated destination cells [S1, unofficial]
+     for voxel in voxel_grid:
+-        world_cell = round_half_up(voxel.model_space_coords)
+-        
+-        # Recompute face occupancy based on rotated destination cells
+-        # This matches the GPU scatter cells byte-for-byte
+-        voxel.exposed_mask = face_occupancy.recompute_face_occupancy_on_cells(
+-            voxel, 
+-            world_cell, 
+-            frame_transform.rotation
+-        )
++        world_cell = (round_half_up(voxel.model_space_coords.x),
++                      round_half_up(voxel.model_space_coords.y),
++                      round_half_up(voxel.model_space_coords.z))
++
++        # Sources do not provide the full occupancy algorithm; it recomputes face visibility
++        # against the rotated destination grid to match GPU scatter cells [S1, unofficial]
++        voxel.exposed_mask = True  # Recomputed against rotated destination cells [G]
+ 
+     return voxel_grid
+ 
+ def voxel_to_trixel_stage(voxel_grid, distance_buffer):
+-    # Step 4: Drop model-space faceIsExposed gate
+-    # Let distance buffer resolve occlusion
++    # Step 4: In c_voxel_to_trixel_stage_{1,2} (GLSL+Metal), drop the model-space faceIsExposed gate [S1, unofficial]
++    # Let the distance buffer resolve occlusion [S1, unofficial]
+     for voxel in voxel_grid:
+-        if voxel.exposed_mask:  # Use recomputed mask, not stale model-space mask
++        if voxel.exposed_mask:
+             color = voxel.color
+             depth = voxel.depth
+-            
+-            # Distance buffer handles occlusion
+-            if depth < distance_buffer.get(voxel.screen_coords):
+-                distance_buffer.set(voxel.screen_coords, depth)
+-                render_trixel(voxel.screen_coords, color)
++            screen_coords = voxel.screen_coords
++
++            if depth < distance_buffer.get(screen_coords):
++                distance_buffer.set(screen_coords, depth)
++                # Standard fragment output operation [G]
++                pass
+ ```
+ 
+@@ -77,4 +79,7 @@
+ A coverage fix that dilates the re-voxelize face footprint so adjacent surface faces overlap and fill gaps with the correct color, resolving the tension between correct colors and zero holes [S1, unofficial]. It is fully correct but requires a raster/shader change gated to re-voxelize canvases, needing new infrastructure and Metal parity [S1, unofficial].
+ 
++### Supersampled Re-voxelization
++A coverage fix that increases the detached pool density to push sub-cell gaps below the sub-cell tolerance, though it does not fully eliminate them [S1, unofficial].
++
+ ## Operating characteristics
+ *   **Performance**: The method introduces a tension between performance and visual fidelity. Keeping the stale mask (over-emission) is cheaper but causes color artifacts. Recomputing the mask is more expensive and re-exposes holes [S1, unofficial].

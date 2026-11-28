@@ -1,0 +1,138 @@
+# Chunk Serialization with RLE
+Also called: Run-Length Encoded chunk serialization
+
+## Overview
+Chunk Serialization with RLE is a memory management and compression strategy for voxel chunks that stores voxel data in a Run-Length Encoded (RLE) format when idle, decompressing it only upon first write access [S2, unofficial]. It distinguishes itself from static RLE storage by integrating lazy loading and automatic memory reclamation: if a decompressed chunk becomes empty, it reverts to a null state to free memory [S2, unofficial]. This method solves the problem of high memory consumption in large voxel worlds by keeping inactive or empty chunks in a compact representation [S1, unofficial].
+
+## How it works
+The method operates on a per-chunk basis, managing the transition between raw voxel arrays and RLE-compressed buffers based on access patterns [S2, unofficial].
+
+### Inputs and Outputs
+*   **Input:** A chunk structure containing voxel data, an RLE buffer, and metadata (count, access time, dirty flags) [S2, unofficial].
+*   **Output:** A chunk in one of three states: `null` (empty, no memory), `voxels` (raw uncompressed data), or `rle` (compressed data) [S2, unofficial].
+
+### Data Structures
+The implementation relies on a `ChunkMD` structure to track the state of each chunk [S2, unofficial].
+
+**ChunkMD Layout:**
+*   `voxels`: Pointer to `Voxel*` (raw voxel array).
+*   `rle`: Pointer to `void*` (RLE compressed data).
+*   `count`: `uint32_t` (number of voxels, typically $root^3$) [S2, unofficial].
+*   `last_access`: `uint32_t` (timestamp for potential eviction).
+*   `dirty`: `uint8_t` (modification flag).
+*   `remesh`: `uint8_t` (mesh update flag).
+*   `mesh_dirty`: `uint8_t` (mesh geometry flag).
+*   `mesh_vbo`: `void*` (Vertex Buffer Object).
+*   `mesh_ibo`: `void*` (Index Buffer Object).
+
+**RLE Format:**
+Not given in the sources. Standard implementations typically store a sequence of `(count, value)` pairs compatible with the parent article's `Uint16Array` layout [G].
+
+### Steps
+The lifecycle of a chunk involves three primary operations [S2, unofficial]:
+
+1.  **Read Access (`chunk_open_ro`):**
+    *   If `voxels` is null and `rle` matches the null chunk signature, point `voxels` to `null_chunk->voxels` (shared empty state) [S2, unofficial].
+    *   Otherwise, if `rle` exists, decompress `rle` into the `voxels` array [S2, unofficial].
+
+2.  **Write Access (`chunk_open_rw`):**
+    *   If the chunk is null, allocate a new voxel array and copy null data [S2, unofficial].
+    *   If both `rle` and `voxels` exist, free the `rle` buffer [S2, unofficial].
+    *   If only `rle` exists, decompress `rle` into `voxels` and free the `rle` buffer [S2, unofficial].
+
+3.  **Idle/Compression (`chunk_compress`):**
+    *   If `voxels` exist and are not null, compress `voxels` into `rle` and free the `voxels` memory [S2, unofficial].
+    *   If the resulting `rle` matches the null chunk's RLE representation, free the `rle` buffer and point the chunk to `null_chunk->rle` [S2, unofficial].
+
+### Pseudocode
+> **Unverified code.** The code below did not pass a test run against a reference implementation, or no test fits it, so it may contain errors.
+
+```python
+def compress_rle(data):
+    """Standard RLE compression: returns list of (count, value) tuples."""
+    if not data:
+        return []
+    rle = []
+    current_val = data[0]
+    count = 1
+    for val in data[1:]:
+        if val == current_val:
+            count += 1
+        else:
+            rle.append((count, current_val))
+            current_val = val
+            count = 1
+    rle.append((count, current_val))
+    return rle
+
+def decompress_rle(rle):
+    """Standard RLE decompression: returns list of values."""
+    data = []
+    for count, val in rle:
+        data.extend([val] * count)
+    return data
+
+NULL_CHUNK_RLE = []  # Sentinel for empty/null chunk RLE
+NULL_VOXELS = None   # Sentinel for shared null voxels
+
+def chunk_open_ro(chunk):
+    """Handle read access to a chunk."""
+    if chunk.voxels is None and chunk.rle == NULL_CHUNK_RLE:
+        chunk.voxels = NULL_VOXELS
+    elif chunk.rle is not None:
+        chunk.voxels = decompress_rle(chunk.rle)
+
+def chunk_open_rw(chunk):
+    """Handle write access to a chunk."""
+    if chunk is None:
+        chunk.voxels = [0] * chunk.count
+    elif chunk.rle is not None and chunk.voxels is not None:
+        chunk.rle = None
+    elif chunk.rle is not None and chunk.voxels is None:
+        chunk.voxels = decompress_rle(chunk.rle)
+        chunk.rle = None
+
+def chunk_compress(chunk):
+    """Compress voxels to RLE if idle."""
+    if chunk.voxels is not None and chunk.voxels is not NULL_VOXELS:
+        new_rle = compress_rle(chunk.voxels)
+        chunk.voxels = None
+        if new_rle == NULL_CHUNK_RLE:
+            chunk.rle = NULL_CHUNK_RLE
+        else:
+            chunk.rle = new_rle
+```
+
+### Parameters
+*   **Chunk Size:** The number of voxels per chunk is defined by $root^3$ [S2, unofficial]. A typical example is $8^3 = 512$ voxels [S2, unofficial].
+*   **Default Chunk Size:** In some implementations, the default chunk dimension is 64, corresponding to a bit width of 6 ($2^6$) [S2, unofficial].
+
+### Edge Cases and Pitfalls
+*   **Null Chunk Handling:** The system must correctly identify and handle the "null chunk" state to avoid allocating memory for empty space [S2, unofficial].
+*   **Memory Leaks:** Failure to free `rle` when decompressing or `voxels` when compressing can lead to memory leaks [S2, unofficial].
+*   **Precision:** RLE count fields must accommodate the maximum chunk size ($root^3$); using 16-bit counters is standard for chunks up to $65535$ voxels [G].
+
+## Subtopics
+
+### Chunk RLE Compression & Lazy Loading
+This variant explicitly manages chunk voxel memory by storing data in RLE format when idle and decompressing on first write access [S2, unofficial]. It is chosen when memory conservation is critical and access patterns are sparse [S2, unofficial]. It differs from static RLE by actively freeing memory if the chunk becomes empty [S2, unofficial]. The implementation tracks `c->count` (typically $root^3$) and uses the `ChunkMD` layout to manage `voxels`, `rle`, and meshing flags [S2, unofficial].
+
+### [Bit-serial Chunk Serialization](14785-bit-serial-chunk-serialization.md)
+This variant extends the parent method by employing bit-level serialization to encode voxel data, allowing for variable-length encoding of chunk identifiers and efficient bit-packing of the underlying voxel states [G]. It is chosen for network-bound scenarios [G]. It differs from memory-based RLE by producing a serialized byte stream optimized for transmission rather than in-memory caching [G].
+
+### [Spatial Hashing for Voxel Storage](22443-spatial-hashing-for-voxel-storage.md)
+Spatial hashing for voxel storage replaces run-length encoding (RLE) to enable $O(1)$ voxel lookup and support dynamic scenes and streaming by storing voxels as bitmasks and a hash table for attributes. It sets itself apart from its parent and sibling by trading linear scan time for constant-time direct access, at the cost of higher memory overhead.
+
+## Operating characteristics
+*   **Compression Ratio:** RLE compression reduces chunk data from 39.06 MB to 0.67 MB, achieving a 58x reduction compared to raw storage [S1, unofficial].
+*   **Memory Usage:** Significantly lower memory footprint for large worlds with many empty or homogeneous chunks due to lazy loading and null chunk optimization [S2, unofficial].
+*   **Performance:** Decompression overhead is incurred only on first write access, minimizing CPU usage for read-only operations [S2, unofficial].
+*   **Scalability:** Effective for large worlds (e.g., 276,889,600 voxels across 4,225 chunks) as tested on an Apple M4 [S1, unofficial].
+*   **Limitations:** Not suitable for highly dynamic scenes with frequent random writes to all chunks, as the overhead of decompression/compression may negate benefits [S2, unofficial].
+
+## Background
+The method originates from implementations in the `voxplat` voxel engine, where efficient memory management is crucial for rendering large voxel worlds [S2, unofficial]. The performance metrics (58x reduction) were benchmarked in the `voxel-engine` project [S1, unofficial].
+
+## Sources
+[S1] DanielWLiu07/voxel-engine, https://github.com/DanielWLiu07/voxel-engine, fetched 2026-10-26 (unofficial)
+[S2] kosshi-net/voxplat, https://github.com/kosshi-net/voxplat, fetched 2026-10-27 (unofficial)

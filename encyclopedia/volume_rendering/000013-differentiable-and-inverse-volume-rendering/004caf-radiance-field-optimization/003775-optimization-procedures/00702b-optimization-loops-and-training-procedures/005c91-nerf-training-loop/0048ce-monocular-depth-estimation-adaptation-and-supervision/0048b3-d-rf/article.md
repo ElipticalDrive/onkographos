@@ -1,0 +1,154 @@
+# DäRF
+
+Also called: Monocular Depth Adaptation for boosting Radiance Fields from Sparse Input Views
+
+## Overview
+DäRF is a framework for robust few-shot NeRF reconstruction that combines Neural Radiance Fields with Monocular Depth Estimation (MDE) through online complementary training [S1, unofficial]. It solves the ambiguity and inconsistency problems inherent in monocular depth priors by jointly optimizing the NeRF and the MDE network at a specific scene, rather than treating MDE as a static prior [S1, unofficial]. Unlike SCADE [50], which applies pretrained MDE only to seen views and uses probabilistic modeling for uncertainty, DäRF distills the monocular depth prior to NeRF at both seen and unseen views and directly removes ambiguity by finetuning the MDE network with canonical geometry captured by NeRF [S1, unofficial].
+
+## How it works
+**Inputs:** A set of input RGB images $S = \{I_i\}$ with ground truth camera poses, and a pretrained MDE network $G_\phi$ [S1, unofficial].
+**Outputs:** Optimized NeRF parameters $\Theta$, adapted MDE parameters $\phi$, and a high-quality 3D radiance field [S1, unofficial].
+
+**Data Structures:**
+*   **NeRF Model $F_\Theta$:** A multi-layer perceptron (MLP) mapping 3D coordinates $\mathbf{x} \in \mathbb{R}^3$ and viewing directions $\mathbf{d} \in \mathbb{R}^3$ to color $\mathbf{c}$ and density $\sigma$ [G].
+*   **MDE Network $G_\phi$:** A pretrained network (e.g., Mannequin Challenge, DiffDP, DPThybrid) mapping RGB images to relative depth maps $D^*$ [S1, unofficial].
+*   **Ray Sampler:** Generates rays $\mathbf{r}$ from camera poses and samples points $\mathbf{x}_t$ along them [G].
+
+**Numbered Steps:**
+
+1.  **Depth Prior Extraction:** For each input image $I_i$, the MDE network $G_\phi$ produces a relative depth map $D^*$ [S1, unofficial].
+2.  **NeRF Depth Rendering:** The NeRF model $F_\Theta$ renders an absolute depth map $\bar{D}$ for the current camera pose by accumulating sample depths weighted by transmittance and density along rays [S1, unofficial].
+3.  **Patch-wise Scale-Shift Alignment:** To overcome the inability of global scale-shift fitting due to poor MDE performance on depth differences between multiple objects, DäRF applies a novel patch-wise scale-shift fitting [S1, unofficial]. For each patch $p$, it computes local scale $w_p$ and shift $q_p$ via least-squares optimization:
+    $$ \min_{w_p, q_p} \sum_{k \in p} \| (w_p \cdot \text{sg}(D^*(k)) + q_p) - \bar{D}(k) \|^2 $$
+    where $\text{sg}(\cdot)$ is the stop-gradient operator to prevent gradients from flowing into the MDE network during NeRF updates [S1, unofficial].
+4.  **Confidence Modeling:** A confidence modeling technique is used to verify accurate depth information, handling ambiguity problems such as relative depths not being multiview-consistent and convexity problems [S1, unofficial]. This generates a confidence mask or weight to filter out unreliable depth predictions [G].
+5.  **Joint Optimization (Complementary Training):** DäRF jointly optimizes NeRF and MDE at a specific scene [S1, unofficial].
+    *   **NeRF Update:** The NeRF is updated using the standard volume rendering loss (e.g., MSE between rendered color and ground truth) and the depth consistency loss $L_{depth}$ between the aligned MDE depth and rendered NeRF depth [S1, unofficial].
+    *   **MDE Adaptation:** The MDE network $G_\phi$ is finetuned using the canonical geometry captured by NeRF [S1, unofficial]. This adapts the MDE network to produce depths aligned accurately with NeRF geometry, directly removing ambiguity present in the initial MDE output [S1, unofficial].
+6.  **Distillation:** The monocular depth prior is distilled to NeRF at both seen and unseen views, enhancing robustness and coherence [S1, unofficial].
+
+**Pseudocode:**
+
+> **Unverified code.** The code below did not pass a test run against a reference implementation, or no test fits it, so it may contain errors.
+
+```python
+import numpy as np
+
+def generate_rays(poses):
+    """Generates rays from camera poses and near/far bounds."""
+    # [G] Standard ray generation from camera extrinsics and intrinsics
+    rays = []
+    for pose in poses:
+        origin = pose[:3, 3]
+        direction = pose[:3, :3] @ np.array([0, 0, -1])
+        rays.append((origin, direction))
+    return rays
+
+def render_nerf(nerf_model, rays, num_samples):
+    """Standard NeRF volume rendering via alpha compositing."""
+    # [G] Standard NeRF forward pass
+    colors = []
+    depths = []
+    for origin, direction in rays:
+        t_vals = np.linspace(0.0, 1.0, num_samples)
+        points = origin + t_vals[:, None] * direction
+        sigmas, rgbs = nerf_model(points)
+        deltas = t_vals[1:] - t_vals[:-1]
+        exp_sigmas = np.exp(-sigmas * deltas)
+        transmittance = np.cumprod(exp_sigmas)
+        weights = (1.0 - exp_sigmas) * np.concatenate([[1.0], transmittance[:-1]])
+        color = np.sum(weights[:, None] * rgbs, axis=0)
+        depth = np.sum(weights * t_vals, axis=0)
+        colors.append(color)
+        depths.append(depth)
+    return np.array(colors), np.array(depths)
+
+def solve_local_affine(depth_src, depth_tgt):
+    """Solves min || w * depth_src + q - depth_tgt ||^2 via least squares."""
+    s = depth_src.flatten()
+    t = depth_tgt.flatten()
+    mean_s = np.mean(s)
+    mean_t = np.mean(t)
+    var_s = np.var(s)
+    if var_s < 1e-8:
+        return 1.0, mean_t - mean_s
+    w = np.cov(s, t)[0, 1] / var_s
+    q = mean_t - w * mean_s
+    return w, q
+
+def compute_confidence(depth_src, depth_aligned):
+    """Computes confidence weights based on alignment error."""
+    # [G] Standard confidence weighting based on residual error
+    error = np.abs(depth_src - depth_aligned)
+    return np.exp(-error)
+
+def step_darf(images, poses, nerf_model, mde_model, optimizer_nerf, optimizer_mde, lambda_depth, patch_size, num_samples):
+    # 1. Extract relative depth from MDE
+    relative_depths = [mde_model(img) for img in images]
+
+    # 2. Render NeRF outputs
+    rays = generate_rays(poses)
+    rendered_colors, rendered_depths = render_nerf(nerf_model, rays, num_samples)
+
+    # 3. Patch-wise Scale-Shift Alignment
+    aligned_depths = np.zeros_like(rendered_depths)
+    confidence_masks = np.ones_like(rendered_depths)
+
+    H, W = rendered_depths.shape
+    for y in range(0, H, patch_size):
+        for x in range(0, W, patch_size):
+            y_end = min(y + patch_size, H)
+            x_end = min(x + patch_size, W)
+            patch = slice(y, y_end), slice(x, x_end)
+
+            # [G] Stop-gradient applied to MDE depth during NeRF update
+            r_patch = relative_depths[0][patch].detach()
+            n_patch = rendered_depths[patch]
+
+            w, q = solve_local_affine(r_patch, n_patch)
+            aligned_patch = w * r_patch + q
+
+            conf = compute_confidence(r_patch, aligned_patch)
+            confidence_masks[patch] = conf
+            aligned_depths[patch] = aligned_patch
+
+    # 4. Compute Losses
+    color_loss = np.mean((rendered_colors - images[0]) ** 2)
+    depth_loss = np.mean((aligned_depths * confidence_masks - rendered_depths * confidence_masks) ** 2)
+    total_loss = color_loss + lambda_depth * depth_loss
+
+    # 5. Update NeRF
+    optimizer_nerf.zero_grad()
+    total_loss.backward(retain_graph=True)
+    optimizer_nerf.step()
+
+    # 6. MDE Adaptation
+    mde_loss = np.mean((relative_depths[0] - aligned_depths.detach()) ** 2)
+    optimizer_mde.zero_grad()
+    mde_loss.backward()
+    optimizer_mde.step()
+```
+
+**Parameters:**
+*   $\lambda_{depth}$: Weight for the depth consistency loss. Not given in the sources. [G]
+*   Patch size: Not given in the sources. [G]
+
+**Edge Cases and Pitfalls:**
+*   **Global vs. Local Scale:** Global scale-shift fitting fails when MDE performs poorly on depth differences between multiple objects. Patch-wise fitting is required [S1, unofficial].
+*   **Ambiguity:** Monocular depths suffer from ambiguity (e.g., convexity problems, lack of multiview consistency). DäRF handles this via confidence modeling and joint adaptation [S1, unofficial].
+*   **Gradient Flow:** Joint optimization requires careful gradient management to balance NeRF and MDE updates without destabilizing training [G].
+
+## Operating characteristics
+*   **Time Complexity:** Not given in the sources. [G]
+*   **Memory Complexity:** Not given in the sources. [G]
+*   **Performance:** Achieves state-of-the-art results quantitatively and qualitatively on real-world indoor and outdoor scene datasets for few-shot NeRF optimization [S1, unofficial].
+*   **Strengths:** Robust geometry reconstruction and artifact removal in both unseen and seen viewpoints. Fully exploits MDE by jointly optimizing it with NeRF [S1, unofficial].
+*   **Limitations:** Relies on the quality of the pretrained MDE network. Not given in the sources. [G]
+*   **When to use:** Few-shot NeRF reconstruction where standard NeRF fails due to sparse views and ambiguity [S1, unofficial].
+*   **When not to use:** Not given in the sources. [G]
+
+## Background
+DäRF was proposed to address the weaknesses of methods that use 3D priors extracted from a few input images only, which prevents guidance from encompassing the entire scene [S1, unofficial]. It builds on the strengths of NeRF [31] and pretrained monocular depth estimation (MDE) networks [39, 38, 5] [S1, unofficial]. Unlike SCADE [50], which distills depths by applying pretrained MDE to NeRF at seen views only, DäRF fully exploits the ability of MDE by jointly optimizing NeRF and MDE at a specific scene [S1, unofficial].
+
+## Sources
+[S1] DaRF: Boosting Radiance Fields from Sparse Inputs with Monocular Depth Adaptation, https://doi.org/10.48550/arxiv.2305.19201, fetched 2026-10-29 (unofficial)

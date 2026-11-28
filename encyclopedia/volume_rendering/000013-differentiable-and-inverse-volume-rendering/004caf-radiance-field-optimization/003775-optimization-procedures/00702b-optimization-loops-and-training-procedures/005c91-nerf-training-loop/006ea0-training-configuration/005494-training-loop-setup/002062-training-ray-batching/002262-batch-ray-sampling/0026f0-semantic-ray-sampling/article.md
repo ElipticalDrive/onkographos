@@ -1,0 +1,134 @@
+# Semantic Ray Sampling
+
+Also called: Semantic Ray Sampler, Semantic-aware ray sampling
+
+## Overview
+Semantic Ray Sampling is a strategy for distinguishing individual elements (deformable and non-deformable) within a scene by tagging 3D points with semantic labels based on 2D semantic masks and distance to 3D skeletons [S1]. It addresses occlusion and dynamic supervision challenges inherent in reconstructing interacting entities [S1]. Unlike standard uniform or depth-based sampling, this method allows for extra sampling of specific semantic classes and masking away of specific instances [S2, unofficial].
+
+## How it works
+**Inputs:**
+*   Input image with associated 2D semantic segmentation mask (`class_seg`) and instance segmentation mask (`instance_seg`) [S1][S2, unofficial].
+*   3D skeleton data for individual entities to compute distances [S1].
+*   Configuration parameters: `num_rays` (total rays to sample), `class_colors` (dictionary mapping class IDs to RGB values), `mask_away_instance` (boolean), `extra_sampling` (boolean), and `class_ratio` (dictionary mapping class IDs to sampling ratios) [S2, unofficial].
+
+**Outputs:**
+*   A batch of rays and corresponding 3D points, tagged with semantic labels for deformable (`{x_dv}`) and non-deformable (`{x_nd}`) objects [S1].
+*   A `kept_mask` indicating valid rays for training [S2, unofficial].
+
+**Data Structures:**
+*   `class_seg`: 2D tensor of shape `(H, W)` containing integer class IDs or RGB-encoded values [S2, unofficial].
+*   `instance_seg`: 2D or 3D tensor of shape `(H, W, C)` containing integer instance IDs [S2, unofficial].
+*   `class_colors`: Dictionary mapping class ID to `[R, G, B]` values [S2, unofficial].
+*   `class_ratio`: Dictionary mapping class ID to float ratio [S2, unofficial].
+
+**Steps:**
+
+1.  **Instance Masking:**
+    If `mask_away_instance` is true, create a `kept_mask` where rays passing through any instance are excluded. The instance sum is computed along axis 3 and checked for zero [S2, unofficial]:
+    $$ \text{kept\_mask} = (\text{instance\_seg}.to(\text{float32}).\text{sum}(\text{axis}=3) == 0).\text{view}(*\text{prefix}, H \times W) $$
+    If `mask_away_instance` is false, set `kept_mask` to all ones [S2, unofficial].
+
+2.  **Semantic Ray Selection:**
+    Leverage the 2D semantic mask to sample rays surrounding interacting objects [S1]. If `extra_sampling` is enabled, iterate over classes defined in `class_ratio` [S2, unofficial].
+
+3.  **Class Mask Creation:**
+    For each class, create a binary mask by matching RGB values from `class_colors` against `class_seg` [S2, unofficial]. Extract `i` and `j` coordinates for the class mask [S2, unofficial].
+
+4.  **Ray Index Allocation:**
+    Calculate the number of extra rays for the current class:
+    $$ \text{ray\_num\_extra} = \text{int}(\text{class\_ratio}[\text{class\_}] \times N_{\text{rays}}) $$
+    Record the ray index range for the class:
+    $$ \text{rays\_cnt}[\text{class\_}] = [N_{\text{rays}} - \text{remain\_rays}, N_{\text{rays}} - \text{remain\_rays} + \text{ray\_num\_extra}] $$
+    Subtract extra rays from the remaining count:
+    $$ \text{remain\_rays} -= \text{ray\_num\_extra} $$
+    *Pitfall:* If `remain_rays` becomes negative, it indicates the sum of sample ratios exceeds 1, and an error is printed [S2, unofficial].
+
+5.  **3D Point Sampling and Encoding:**
+    Sample 3D points along these rays to generate two distinct sets: one for the deformable object `{x_dv}` and one for the non-deformable object `{x_nd}` [S1]. To handle occlusion where rays intersect both entities, encode the 3D points based on their distance from the 3D skeletons of individual entities [S1]. This semantic encoding facilitates the prediction of semantically separable 3D geometry [S1].
+
+6.  **Network Processing:**
+    Process the encoded points through separate networks tailored to each object type (deformable vs. non-deformable) to obtain separate geometry representations [S1]. These are merged at the rendering module for composite rendering [S1].
+
+**Pseudocode:**
+
+> **Unverified code.** The code below did not pass a test run against a reference implementation, or no test fits it, so it may contain errors.
+
+```python
+def semantic_ray_sampling(class_seg, instance_seg, num_rays, class_colors, class_ratio, mask_away_instance, extra_sampling, prefix_shape=(1,), H=100, W=100):
+    # Step 1: Instance Masking
+    if mask_away_instance:
+        # Sum over axis 3 as per source notes
+        instance_sum = [[sum(instance_seg[i][j][k] for k in range(4)) for j in range(W)] for i in range(H)]
+        kept_mask_flat = [1 if instance_sum[i][j] == 0 else 0 for i in range(H) for j in range(W)]
+        # Reshape to [*prefix_shape, H * W]
+        kept_mask = [kept_mask_flat] * prefix_shape[0]
+    else:
+        kept_mask = [[1] * (H * W)] * prefix_shape[0]
+
+    if not extra_sampling:
+        return kept_mask, []
+
+    # Step 2 & 3: Semantic Ray Selection & Class Mask Creation
+    remain_rays = num_rays
+    rays_cnt = {}
+    all_selected_indices = []
+    all_selected_classes = []
+
+    for class_id, ratio in class_ratio.items():
+        # Create class mask by matching RGB values from class_colors against class_seg
+        class_mask_coords = []
+        for i in range(H):
+            for j in range(W):
+                seg_rgb = class_seg[i][j][:3]
+                target_rgb = class_colors[class_id]
+                if seg_rgb == target_rgb:
+                    class_mask_coords.append((i, j))
+
+        # Extract i and j coordinates
+        coords_i = [c[0] for c in class_mask_coords]
+        coords_j = [c[1] for c in class_mask_coords]
+
+        # Step 4: Ray Index Allocation
+        ray_num_extra = int(ratio * num_rays)
+        start_idx = num_rays - remain_rays
+        end_idx = num_rays - remain_rays + ray_num_extra
+        rays_cnt[class_id] = [start_idx, end_idx]
+
+        if remain_rays < ray_num_extra:
+            raise ValueError("remain_rays becomes negative: sum of sample ratios exceeds 1")
+
+        # Sample rays from class_mask_coords
+        # [G] Standard random sampling without replacement
+        if len(class_mask_coords) >= ray_num_extra:
+            import random
+            sampled_coords = random.sample(class_mask_coords, ray_num_extra)
+        else:
+            sampled_coords = class_mask_coords
+
+        for i, j in sampled_coords:
+            all_selected_indices.append(i * W + j)
+            all_selected_classes.append(class_id)
+
+        remain_rays -= ray_num_extra
+
+    return kept_mask, (all_selected_indices, all_selected_classes)
+```
+
+## Subtopics
+
+### [Masked Local-Global Ray Sampling](19683-masked-local-global-ray-sampling.md)
+Masked Local-Global (MLG) ray sampling is a strategy for X-ray volume rendering that extracts contextual and geometric information by segmenting informative foreground regions and sampling rays on specific patches and outside regions. It combines patch-level sampling on foreground regions with pixel-level sampling on the rest of the foreground to capture local semantic information and global contextual representations while avoiding uninformative background rays. Unlike standard uniform sampling, it explicitly partitions the foreground mask into non-overlapping windows to prioritize local structure perception for the Lineformer backbone.
+
+## Operating characteristics
+*   **Complexity:** Not given in the sources.
+*   **Strengths:** Effectively handles occlusion between interacting entities by using semantic labels and skeleton distances [S1]. Allows targeted supervision of specific classes [S2, unofficial].
+*   **Limitations:** Requires accurate 2D semantic segmentation and instance segmentation masks [S1][S2, unofficial]. Requires 3D skeleton data for encoding [S1]. If `mask_away_instance` is used, it may reduce the number of available rays for training [S2, unofficial].
+*   **When to use:** Dynamic scene reconstruction with interacting objects where semantic separation is crucial [S1].
+*   **When not to use:** Not given in the sources.
+
+## Background
+Semantic Ray Sampling was introduced in the context of Template-Free NeRF for Semantic 3D Reconstruction of Dynamic Scenes (TFS-NeRF) [S1]. It addresses the challenges of supervising SDF of individual entities from different frames due to dynamic nature and complex interactions (occlusion) [S1].
+
+## Sources
+[S1] TFS-NeRF: Template-Free NeRF for Semantic 3D Reconstruction of Dynamic Scene, https://arxiv.org/abs/2409.17459v4, fetched 2026-10-26
+[S2] megvii-research/cv-master-ex, https://github.com/megvii-research/cv-master-ex, fetched 2026-10-27 (unofficial)

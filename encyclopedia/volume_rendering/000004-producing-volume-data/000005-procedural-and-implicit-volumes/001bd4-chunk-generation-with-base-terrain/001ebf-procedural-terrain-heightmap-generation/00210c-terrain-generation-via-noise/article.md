@@ -1,0 +1,196 @@
+# Terrain Generation via Noise
+
+Also called: Perlin Noise Terrain Generation, Perlin Noise Heightmap Generation, Perlin Noise for Terrain, Noise Terrain, Heightmap Terrain Generation, Heightmap Terrain
+
+## Overview
+Terrain Generation via Noise generates a 3D voxel volume from a 2D noise heightmap, extruding terrain-like structures into voxel space by filling blocks from a base level up to a calculated height [S2, S5, unofficial]. It solves the problem of creating deterministic, pseudo-random terrain landscapes suitable for voxel engines [S12, unofficial]. It relies on 2D spatial noise functions (typically Perlin or gradient noise) to define surface elevation [G].
+
+## How it works
+**Inputs:**
+*   Chunk dimensions: width $W$, height $H$, depth $D$. [S10, unofficial]
+*   Chunk origin coordinates $(O_x, O_z)$. [S5, unofficial]
+*   Noise parameters: Seed, Frequency ($f$), Octaves ($N$), Lacunarity ($L$), Gain ($G$). [S5, S9, unofficial]
+*   Scaling parameters: Height Multiplier, Sea Level ($S$). [S10, S13, unofficial]
+*   Block type definitions (integer IDs). [S10, S11, unofficial]
+
+**Outputs:**
+*   A 3D array of block IDs with dimensions $W \times H \times D$. [S10, S11, unofficial]
+
+**Data Structures:**
+*   `BlockType`: Integer ID mapping to material (0=Grass, 1=Dirt, 2=Stone, 3=Snow, 255=Air) [S10, S11, unofficial].
+*   `ChunkBuffer`: 3D array of size $W \times H \times D$ [S10, S11, unofficial].
+*   `NoiseState`: Object encapsulating the permutation table and gradient vectors for the noise function [S12, unofficial].
+
+**Algorithm:**
+
+1.  **Initialize Noise:** Create a Perlin noise instance with a fixed seed to ensure deterministic output for the same coordinates [S9, unofficial]. The permutation table typically contains 512 entries, where indices 0-255 are a random permutation of 0-255, repeated to allow tiling [S12, unofficial].
+2.  **Iterate Chunk Grid:** For each local coordinate $(x, z)$ where $x \in [0, W-1]$ and $z \in [0, D-1]$:
+    a.  **Calculate Global Coordinates:**
+        $$gx = O_x + x$$
+        $$gz = O_z + z$$
+    b.  **Sample Noise (Fractal Brownian Motion):**
+        Compute the base height using multiple octaves of 2D noise [S2, unofficial].
+        $$total\_noise = 0$$
+        $$current\_amplitude = 1.0$$
+        $$current\_frequency = f$$
+        
+        For $i$ from 0 to $N-1$:
+        $$n = \text{Perlin2D}(gx \cdot current\_frequency, gz \cdot current\_frequency)$$
+        $$total\_noise += n \cdot current\_amplitude$$
+        $$current\_amplitude = current\_amplitude \cdot G$$
+        $$current\_frequency = current\_frequency \cdot L$$
+    c.  **Normalize and Scale Height:**
+        Normalize the accumulated noise to $[0, 1]$ range:
+        $$normalized = (total\_noise + 1.0) \cdot 0.5$$
+        Apply non-linear shaping if required (e.g., cubic falloff) [S11, unofficial]:
+        $$shaped = \text{pow}(normalized, 3)$$
+        Calculate final terrain height in voxels using the standard scaling formula [S5, unofficial]:
+        $$h = \text{clamp}((shaped \cdot H \cdot 0.6 + H \cdot 0.15), 0, H - 1)$$
+        *(Alternative implementations use $h = \text{RoundToInt}(shaped \cdot \text{HeightMultiplier} + S)$ [S13, unofficial].)*
+    d.  **Apply Island Mask (Optional):**
+        If generating an island, apply a falloff based on distance from center $(C_x, C_z)$:
+        $$dist = \sqrt{(gx - C_x)^2 + (gz - C_z)^2}$$
+        $$mask = \frac{1}{\text{pow}(0.0025 \cdot dist, 20) + 0.0001}$$
+        $$h = \text{RoundToInt}(h \cdot \text{clamp}(mask, 0, 1))$$
+        *(Parameters vary; e.g., $k=0.0025, p=20$ [S3, unofficial].)*
+    e.  **Fill Voxels:**
+        For each $y$ from 0 to $H-1$:
+        i.  If $y < h$:
+            Set block type based on depth layers:
+            -   If $y == 0$: `Bedrock` [S7, S13, unofficial].
+            -   If $y > h - 3$: `Dirt` [S7, S13, unofficial].
+            -   Else: `Stone` [S7, S13, unofficial].
+        ii. If $y == h$:
+            Determine surface type:
+            -   If $y > \text{SnowThreshold} + \text{Variance}$: `Snow` [S10, S11, unofficial].
+            -   Else: `Grass` [S7, S11, unofficial].
+        iii. If $y > h$:
+            Set block type to `Air` (ID 255) [S10, S11, unofficial].
+3.  **Post-Processing:**
+    -   Apply player edits or saved block states [S7, unofficial].
+    -   Generate trees or features if a tree generation pass is integrated [S7, unofficial].
+
+**Pseudocode:**
+
+> **Unverified code.** The code below did not pass a test run against a reference implementation, or no test fits it, so it may contain errors.
+
+```python
+# Block type definitions from evidence
+BLOCK_AIR = 255
+BLOCK_GRASS = 0
+BLOCK_DIRT = 1
+BLOCK_STONE = 2
+BLOCK_SNOW = 3
+BEDROCK = 0  # Reuses grass ID for base layer in some implementations
+
+CHUNK_HEIGHT = 64
+SEA_LEVEL = 4
+SNOW_THRESHOLD = 20
+
+def generate_terrain_chunk(chunk_origin_x, chunk_origin_z, chunk_width, chunk_height, chunk_depth, noise_seed, frequency, octaves, lacunarity, gain):
+    # Initialize noise generator with seed
+    # Note: PerlinNoise implementation details (permutation table, gradient interpolation) are standard [G]
+    noise_gen = PerlinNoise(seed=noise_seed)
+    
+    # 3D array layout: [x][y][z]
+    chunk_data = [[[BLOCK_AIR for _ in range(chunk_depth)] for _ in range(chunk_height)] for _ in range(chunk_width)]
+    
+    for x in range(chunk_width):
+        for z in range(chunk_depth):
+            # Global coordinates
+            gx = chunk_origin_x + x
+            gz = chunk_origin_z + z
+            
+            # Fractal Brownian Motion
+            total_noise = 0.0
+            current_amp = 1.0
+            current_freq = frequency
+            
+            for o in range(octaves):
+                # Sample 2D Perlin noise (returns value in [-1, 1])
+                n = noise_gen.noise2d(gx * current_freq, gz * current_freq)
+                total_noise += n * current_amp
+                current_amp *= gain
+                current_freq *= lacunarity
+                
+            # Normalize to [0, 1]
+            normalized = (total_noise + 1.0) * 0.5
+            
+            # Apply non-linearity (cubic falloff) [S11, unofficial]
+            shaped = pow(normalized, 3)
+            
+            # Calculate height using standard formula [S5, unofficial]
+            h = int(round((shaped * chunk_height * 0.6 + chunk_height * 0.15)))
+            
+            # Clamp height to chunk bounds
+            h = max(0, min(h, chunk_height - 1))
+            
+            # Fill column
+            for y in range(chunk_height):
+                if y < h:
+                    if y == 0:
+                        block = BEDROCK
+                    elif y > h - 3:
+                        block = BLOCK_DIRT
+                    else:
+                        block = BLOCK_STONE
+                elif y == h:
+                    # Surface type
+                    if h > SNOW_THRESHOLD:
+                        block = BLOCK_SNOW
+                    else:
+                        block = BLOCK_GRASS
+                else:
+                    block = BLOCK_AIR
+                
+                chunk_data[x][y][z] = block
+
+    return chunk_data
+```
+
+**Parameters & Typical Values:**
+*   **Seed:** 123 [S9, unofficial].
+*   **Frequency:** 0.05 [S13, unofficial].
+*   **Amplitude:** 10.0 [S13, unofficial].
+*   **Octaves:** 4 [S10, S11, unofficial].
+*   **Lacunarity:** 2.0 [S5, unofficial].
+*   **Gain:** 0.5 [S5, unofficial].
+*   **Height Multiplier:** 70 [S10, S11, unofficial].
+*   **Sea Level:** 4 [S13, unofficial].
+*   **Snow Threshold:** 20 + variance [S10, S11, unofficial].
+
+**Edge Cases & Pitfalls:**
+*   **Repetition:** Without a large permutation table or unique seeds per chunk, terrain may tile visibly [S10, unofficial].
+*   **Variance Consistency:** Using global random number generators for surface details (like snow variance) without seeding per-chunk causes identical patterns across chunks [S11, unofficial].
+*   **Sharp Peaks:** Non-linear functions like `pow(noise, 3)` can create flat plateaus or sharp peaks depending on the noise distribution [S11, unofficial].
+*   **Boundary Conditions:** Ensure height clamping prevents out-of-bounds memory access in the voxel array [S13, unofficial].
+
+## Subtopics
+
+### [Procedural Cave Height and Layer Generation](3202-procedural-cave-height-and-layer-generation.md)
+Modifies voxel density to create a horizontal cave layer with variable height, stalactites, and Perlin noise displacement. It builds on [Terrain Generation via Noise](2412-terrain-generation-via-noise.md) by applying a Z-axis dependent noise profile to carve a specific elevation band [G].
+
+## Operating characteristics
+*   **Time Complexity:** $O(W \cdot D \cdot N)$ for noise sampling and $O(W \cdot H \cdot D)$ for voxel filling, where $N$ is octaves [G].
+*   **Memory Complexity:** $O(W \cdot H \cdot D)$ for the voxel buffer [G].
+*   **Performance:** Fast for simple heightmaps; chunk-based updates triggered by camera movement optimize generation [S8, unofficial]. Caching heightmaps can optimize repeated access [S4, unofficial].
+*   **Strengths:** Deterministic (same input yields same output), preserves terrain data across frames [S12, unofficial].
+*   **Limitations:** Blocky appearance without smoothing; limited geological realism [G].
+*   **When to Use:** Voxel games, Minecraft-like engines [G].
+*   **When Not to Use:** High-fidelity terrain rendering requiring smooth meshes [G].
+
+## Background
+The method uses Perlin noise for procedural terrain generation [S10, unofficial]. The permutation table contains 512 numbers (0-255 repeated) to allow tiling without recognition [S12, unofficial]. Improved noise functions use quintic interpolation for smoother gradients [G]. The method leverages the pseudo-random property to preserve terrain data across frames without change [S12, unofficial].
+
+## Sources
+[S1] Ray-Marched Voxel Simulation, https://www.jorisar.nl/blog/VoxelPlayground/, fetched 2026-10-25 (unofficial)
+[S2] millerc3/Marching-Cubes, https://github.com/millerc3/Marching-Cubes, fetched 2026-10-26 (unofficial)
+[S3] StanislavPetrovV/Minecraft, https://github.com/StanislavPetrovV/Minecraft, fetched 2026-10-26 (unofficial)
+[S4] tonadr1022/vulkan_voxels, https://github.com/tonadr1022/vulkan_voxels, fetched 2026-10-27 (unofficial)
+[S5] scarlyle0/voxel-compare, https://github.com/scarlyle0/voxel-compare, fetched 2026-10-27 (unofficial)
+[S6] trimesh33/sdf, https://github.com/trimesh33/sdf, fetched 2026-10-27 (unofficial)
+[S7] philip2012/voxel-forge, https://github.com/philip2012/voxel-forge, fetched 2026-10-27 (unofficial)
+[S8] Creating a Voxel Engine with OpenGL | Walker McGilvary, https://theslabby.github.io/2023/12/24/start-voxelengine.html, fetched 2026-10-28 (unofficial)
+[S9] GitHub Repo for VoxelEngine, https://github.com/TheSlabby/VoxelEngine, fetched 2026-10-29 (unofficial)
+[S10] Voxel-Based Procedural Terrain Generation | PDF | Voxel | Rendering ..., https://www.scribd.com/document/840779393/Procedural-Terrain-Generation-Using-Voxels, fetched 2026-10-29 (unofficial)
+[S11] GitHub - ernerdgn/voxel-engine: A voxel engine written from scratch in ..., https://github.com/ernerdgn/voxel-engine, fetched 2026-10-29 (unofficial)

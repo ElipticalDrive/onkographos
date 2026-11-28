@@ -1,0 +1,346 @@
+--- v005.md
++++ v006.md
+@@ -4,210 +4,162 @@
+ 
+ ## Overview
+-This method enables real-time, physically-based dynamic relighting of volume clouds using 3D Gaussian Splatting by decoupling geometry/medium parameters from environmental lighting [S1, unofficial]. It solves the problem of arbitrary sun-direction relighting in volumetric media by training a static physical representation in Stage 1 under single-direction illumination, then freezing those parameters to train a global environment network in Stage 2 that adds sky atmospheric scattering [S1, unofficial]. Unlike standard Gaussian Splatting which uses empirical SH colors, this approach parameterizes participating medium physics (extinction, albedo, scattering) and separates direct sun attenuation from additive sky inscattering [S1, unofficial].
++A two-stage rendering pipeline for physically parameterized volume clouds using 3D Gaussians, designed for real-time dynamic relighting with arbitrary sun directions [S1, unofficial]. Unlike standard Gaussian Splatting which learns view-dependent RGB colors, this method separates geometry and physical medium properties (extinction, albedo) from the lighting environment [S1, unofficial]. Stage 1 trains the physical parameters under a single sun direction with a black background, while Stage 2 freezes these parameters and trains a global environment network to add sky atmospheric scattering, enabling arbitrary sun direction relighting [S1, unofficial].
+ 
+ ## How it works
+-The pipeline consists of two distinct training stages. Stage 1 learns the physical properties of the cloud volume using data captured with a black background (sky brightness factor = 0) and a single sun direction. Stage 2 freezes the learned geometry and physical parameters, precomputing geometric visibility, and trains a global neural network to predict sky irradiance and sun transmittance for arbitrary viewing and sun directions.
++The method operates in two distinct phases. Stage 1 establishes the physical representation of the cloud volume. Stage 2 decouples the lighting from the geometry to allow dynamic relighting.
+ 
+ ### Inputs and Outputs
+ **Inputs:**
+-*   **Stage 1:** A dataset of images with pure sun illumination and a black background (UE SkyAtmosphere brightness factor = 0). Camera poses and sun directions are known.
+-*   **Stage 2:** The trained model from Stage 1 (PLY file with physical parameters) and a corresponding "env-on" dataset where the background is black but the cloud is illuminated by the sky atmosphere (UE SkyAtmosphere brightness factor > 0, but background pixels are masked/black).
++*   **Stage 1:** A dataset of images captured under pure sun illumination with a black background (UE SkyAtmosphere brightness factor = 0) [S1, unofficial]. The dataset must cover the hemisphere uniformly to ensure healthy geometric shadow gradients [S1, unofficial].
++*   **Stage 2:** The trained Stage 1 model (geometry and physical parameters) and a corresponding "env-on" dataset where the sky brightness is zero but the atmospheric scattering on the cloud remains [S1, unofficial].
+ 
+ **Outputs:**
+-*   **Stage 1:** 3D Gaussians with physical parameters: position, scale, rotation, extinction coefficient ($\sigma_t$), albedo ($\omega$), Henyey-Greenstein anisotropy factor ($g$), and multiple scattering octave weights ($w_n$).
+-*   **Stage 2:**
+-    *   `env_net.pt`: Weights for the global environment network (MLP).
+-    *   `sky_transfer.npy`: Precomputed sky visibility SH transfer vectors ($V_{lm}$).
+-    *   `env.json`: Configuration parameters.
+-    *   Final rendered image with arbitrary sun direction and sky lighting.
++*   **Stage 1:** A set of 3D Gaussians with physical attributes (position, scale, rotation, extinction $\sigma_t$, albedo $\omega$, HG $g$, multiple scattering weights $w_n$) [S1, unofficial].
++*   **Stage 2:** The same Gaussian set (frozen) plus an environment network (MLP) and precomputed visibility vectors [S1, unofficial].
++*   **Final Render:** Radiance $L$ for any given sun direction [S1, unofficial].
+ 
+ ### Data Structures
+-Each 3D Gaussian $i$ stores the following physical parameters, distinct from standard RGB/opacity representations:
+-*   **Position:** $\mathbf{p}_i$ (3D vector).
+-*   **Scale:** $\mathbf{s}_i$ (3D vector, log-space optimized).
+-*   **Rotation:** $\mathbf{q}_i$ (Quaternion).
+-*   **Extinction Coefficient:** $\sigma_{t,i}$ (Scalar). Optimized via `softplus` and clamped to 5. Represents the volume integral of the extinction coefficient.
+-*   **Albedo:** $\omega_i$ (RGB vector). Optimized via `sigmoid`.
+-*   **Anisotropy Factor:** $g_i$ (Scalar). Optimized via $0.8 \cdot \tanh$.
+-*   **Multiple Scattering Weights:** $w_{n,i}$ for $n=1..6$ (6 Scalars). Optimized via `softplus`. Represents Frostbite/Wrenninge octave energies.
++The Gaussian primitive $\mathcal{G}$ retains the standard 3DGS structure but replaces SH color with physical parameters [S1, unofficial]:
++*   $\mathbf{p}_i \in \mathbb{R}^3$: Position.
++*   $\mathbf{R}_i \in \mathbb{R}^{3 \times 3}$: Rotation.
++*   $\mathbf{S}_i \in \mathbb{R}^{3 \times 3}$: Scale.
++*   $\sigma_{t,i}$: Extinction coefficient (volume integral of cross-section). Activated via `softplus`, clamped to 5 [S1, unofficial].
++*   $\omega_i \in \mathbb{R}^3$: Scattering albedo (RGB). Activated via `sigmoid` [S1, unofficial].
++*   $g_i$: Henyey-Greenstein anisotropy factor. Activated via $0.8 \cdot \tanh$ [S1, unofficial].
++*   $w_{n,i}$: Six octave weights for multiple scattering (Frostbite/Wrenninge approximation). Activated via `softplus` [S1, unofficial].
++
++**Stage 2 Sidecar Files:**
++*   `env_net.pt`: Weights for the global environment network [S1, unofficial].
++*   `sky_transfer.npy`: Precomputed visibility transfer vectors $V_{lm}$ [S1, unofficial].
++*   `env.json`: Configuration parameters [S1, unofficial].
+ 
+ ### Numbered Steps
+ 
+-**Stage 1: Physical Parameter Training**
+-1.  **Initialization:** Initialize 3D Gaussians from the point cloud.
+-2.  **Projection:** Transform Gaussians to camera space. Compute the 2D covariance $\Sigma_{2D}$ using the view matrix $W$ and perspective Jacobian $J$ as defined in the parent article [G].
+-3.  **Rasterization (Analytic Tau):** For each pixel covered by a Gaussian, compute the analytic line-integral optical thickness $\tau$. The alpha value is derived physically: $\alpha = 1 - \exp(-\tau)$ [S1, unofficial]. This replaces heuristic alpha blending.
+-4.  **Lighting Pass (T_light):** Compute the self-shadowing/transmittance $T_{light}$ for each Gaussian along the sun direction $\mathbf{v}_l$. This is done via a secondary rasterization pass using a narrow FOV camera simulating the sun direction. The CUDA kernel `record_front_tau` accumulates the weighted mean of front-facing optical thickness $\tau$ for each Gaussian's footprint [S1, unofficial].
+-5.  **Color Computation:** Compute the radiance $L_i$ for each Gaussian using the physical scattering model:
+-    $$ L_i = \omega_i \cdot L_{sun} \cdot \sum_{n} w_{n,i} \cdot T_{light,i}^{b^n} \cdot P(\mathbf{v}_i, \mathbf{v}_o; g_i \cdot c^n) $$
+-    Where $P$ is the Henyey-Greenstein phase function, $\mathbf{v}_i$ is the incident light direction ($-\mathbf{v}_l$), and $\mathbf{v}_o$ is the view direction. $b^n$ and $c^n$ are constants associated with the $n$-th scattering octave [S1, unofficial].
+-6.  **Compositing:** Composite the Gaussians using front-to-back alpha blending with the physically computed $\alpha$ [G].
+-7.  **Tonemapping:** Apply a fixed Narkowicz ACES tonemapping curve to match the Ground Truth (GT) display space if the GT is filmic-tonemapped LDR. If GT is linear HDR, disable tonemapping [S1, unofficial].
+-8.  **Optimization:** Optimize all physical parameters ($\sigma_t, \omega, g, w_n$) and Gaussian transforms using the difference between the rendered image and the GT image.
++#### Stage 1: Physical Parameter Training
++1.  **Initialize:** Create $M$ 3D Gaussians. Initialize physical parameters $\sigma_t, \omega, g, w_n$ [S1, unofficial].
++2.  **Rasterization Setup:** Use a forked differentiable rasterizer supporting `use_analytic_tau`. This computes per-pixel cumulative optical thickness $\tau$ via line integration, with $\alpha = 1 - \exp(-\tau)$ [S1, unofficial].
++3.  **Compute Self-Shadowing ($T_{light}$):**
++    *   Perform a "light space" rasterization pass using a narrow FOV perspective camera to simulate the sun direction [S1, unofficial].
++    *   For each Gaussian, record the front-facing optical thickness accumulation. This is the energy-weighted mean of $\alpha \cdot T$ over the sun-facing footprint, not just a center-point sample [S1, unofficial].
++    *   Enable full continuous gradients for $\tau$, weights, and projection parameters [S1, unofficial].
++4.  **Compute Radiance:** For each pixel, sum contributions from Gaussians. The radiance contribution of a Gaussian is:
++    $$ L_i = \omega_i \cdot L_{sun} \cdot \sum_{n=0}^{5} w_{n,i} \cdot T_{light,i}^{b^n} \cdot P(\mathbf{v}_i, \mathbf{v}_o; g_i \cdot c^n) $$
++    Where $P$ is the Henyey-Greenstein phase function, $\mathbf{v}_i$ is the incident light direction ($-\mathbf{v}_l$), and $b, c$ are base/exponent constants for the octaves [S1, unofficial].
++5.  **Optimize:** Minimize loss against the ground truth images. Use fixed Narkowicz ACES tonemapping by default to match the display space of the training data (e.g., UE filmic tonemapped LDR) [S1, unofficial]. If the ground truth is linear HDR, disable tonemapping [S1, unofficial].
+ 
+-**Stage 2: Environment Network Training**
+-1.  **Freeze Geometry:** Load the Stage 1 model. Freeze all Gaussian positions, scales, rotations, and physical parameters ($\sigma_t, \omega, g, w_n$).
+-2.  **Precompute Visibility ($V_{lm}$):** For each Gaussian, compute the sky visibility SH transfer vectors $V_{lm}(\mathbf{x})$. This involves scanning the hemisphere in $N$ directions using `compute_T_light_raster` to calculate geometric occlusion. $V_{lm}$ is colorless and purely geometric, computed once on the frozen point set. Default SH order is 2 (9 coefficients) [S1, unofficial].
+-3.  **Initialize Environment Network:** Initialize a small global MLP (the environment network). This network takes the sun direction $\mathbf{v}_l$ and view direction $\mathbf{v}_o$ as input.
+-4.  **Compute Sun Transmittance ($T_{sun}$):** Calculate the multiplicative sun-atmosphere transmittance using a 3-parameter analytic expression:
+-    $$ T_{sun}(\mathbf{v}_l) = \exp(-m(\theta) \cdot \tau_{rgb}) $$
+-    Where $m(\theta)$ is the Kasten-Young air mass (fixed geometry depending on sun elevation $\theta$), and $\tau = (\tau_R, \tau_G, \tau_B)$ are learnable zenith optical thicknesses for RGB channels [S1, unofficial]. Note: $T_{sun} \le 1$.
+-5.  **Compute Sky Irradiance ($E_{lm}$):** The environment network predicts the sky irradiance field $E_{lm}(\mathbf{v}_l)$ represented by low-order Spherical Harmonics.
+-6.  **Final Radiance:** Compute the final radiance $L$ for each pixel/Gaussian contribution:
+-    $$ L = T_{sun}(\mathbf{v}_l) \odot L_{stage1} + \omega \cdot \sum_{lm} E_{lm}(\mathbf{v}_l) \cdot V_{lm}(\mathbf{x}) $$
+-    The first term is the multiplicative sun term (attenuated by atmosphere). The second term is the additive sky inscattering fill, where $\omega$ is the frozen albedo [S1, unofficial].
+-7.  **Optimization:** Train only the environment network parameters (sun transmittance $\tau$ and $E_{lm}$ MLP weights) using the "env-on" dataset. Use a learning rate of $1e-3$ with an independent optimizer, decaying to $0.1\times$ [S1, unofficial].
++#### Stage 2: Environment Network Training
++1.  **Freeze Geometry:** Lock all Gaussian attributes ($\mathbf{p}, \mathbf{R}, \mathbf{S}, \sigma_t, \omega, g, w_n$) from Stage 1 [S1, unofficial].
++2.  **Precompute Visibility ($V_{lm}$):**
++    *   For each Gaussian center $\mathbf{x}$, compute the geometric sky visibility transfer vectors $V_{lm}(\mathbf{x})$.
++    *   Scan the hemisphere in $N$ directions using `compute_T_light_raster` to calculate geometric occlusion [S1, unofficial].
++    *   Represent $V_{lm}$ using Spherical Harmonics (SH) of order 2 (9 coefficients) by default [S1, unofficial].
++    *   This step is colorless and purely geometric; it is computed once on the frozen point set [S1, unofficial].
++3.  **Train Environment Network:**
++    *   Train a small global MLP to predict the sky irradiance field $E_{lm}(\mathbf{v}_l)$ as a function of sun direction $\mathbf{v}_l$ [S1, unofficial].
++    *   Use a learning rate of $10^{-3}$ with an independent optimizer, decaying to $0.1\times$ [S1, unofficial].
++4.  **Compute Final Radiance:**
++    *   Calculate the sun transmittance $T_{sun}(\mathbf{v}_l)$ using the analytic expression:
++        $$ T_{sun}(\mathbf{v}_l) = \exp(-m(\theta) \cdot \tau_{rgb}) $$
++        Where $m(\theta)$ is the Kasten-Young air mass based on sun elevation $\theta$, and $\tau_{rgb} = (\tau_R, \tau_G, \tau_B)$ are learnable zenith optical thicknesses [S1, unofficial].
++    *   Combine Stage 1 sun term and Stage 2 sky term:
++        $$ L = T_{sun}(\mathbf{v}_l) \odot L_{stage1} + \omega \cdot \sum_{lm} E_{lm}(\mathbf{v}_l) \cdot V_{lm}(\mathbf{x}) $$
++        Where $L_{stage1}$ is the direct sun term computed in Stage 1 (using the frozen physical parameters) [S1, unofficial].
++    *   Apply a `smoothstep` gate to extinguish the direct sun term when the sun is below the horizon [S1, unofficial].
+ 
+ ### Pseudocode
+ 
+ ```python
+-def stage1_train(gaussians, dataset_stage1, optimizer_stage1):
+-    """
+-    Stage 1: Train physical parameters with single sun direction and black background.
+-    """
+-    for epoch in range(num_epochs):
+-        for camera, sun_direction, gt_image in dataset_stage1:
+-            # 1. Project Gaussians
+-            projected_gaussians = []
+-            for g in gaussians:
+-                g_cam = transform_to_camera(g, camera.view_matrix)
+-                sigma_2d = compute_2d_covariance(g_cam, camera)
+-                projected_gaussians.append({
+-                    'data': g_cam,
+-                    'sigma_2d': sigma_2d,
+-                    'sigma_t': g.sigma_t, # Extinction
+-                    'omega': g.omega,     # Albedo
+-                    'g': g.g,             # Anisotropy
+-                    'w': g.w,             # Octave weights
+-                    'depth': g_cam.z
+-                })
+-            
+-            # 2. Sort and Rasterize
+-            projected_gaussians.sort(key=lambda x: x['depth'])
+-            rendered_image = zeros_like(gt_image)
+-            
+-            for y, x in pixels:
+-                acc_color = zeros(3)
+-                T = 1.0
+-                for pg in projected_gaussians:
+-                    # Compute analytic optical thickness tau for pixel (x,y)
+-                    tau = compute_analytic_tau(pg['data'], pg['sigma_2d'], pg['sigma_t'])
+-                    alpha = 1.0 - exp(-tau)
+-                    
+-                    if alpha < 1e-4: continue
+-                    
+-                    # Compute Phase Function and Multiple Scattering
+-                    # Note: T_light is precomputed or computed in a separate pass
+-                    # Here we assume T_light is available per gaussian for the current sun direction
+-                    phase_val = heney_greenstein(pg['g'], pg['data'].view_dir, -sun_direction)
+-                    multiple_scattering = sum(pg['w'][n] * (pg['T_light'] ** (2**n)) for n in range(6))
+-                    
+-                    # Radiance contribution
+-                    # L_sun is the incoming solar radiance
+-                    radiance = pg['omega'] * L_sun * multiple_scattering * phase_val
+-                    
+-                    weight = alpha * T
+-                    acc_color += radiance * weight
+-                    T *= (1.0 - alpha)
+-                    if T < 1e-4: break
+-                rendered_image[y, x] = acc_color
+-            
+-            # 3. Tonemapping (if GT is filmic)
+-            if use_tonemap:
+-                rendered_image = apply_aces_tonemap(rendered_image)
+-            
+-            # 4. Loss and Backprop
+-            loss = mse(rendered_image, gt_image)
+-            optimizer_stage1.zero_grad()
+-            loss.backward()
+-            optimizer_stage1.step()
++# Stage 1: Physical Training
++def stage1_train(gaussians, dataset, optimizer):
++    for image, sun_direction in dataset:
++        # 1. Rasterize with analytic tau
++        # Computes per-pixel tau and alpha = 1 - exp(-tau)
++        tau_map, alpha_map = rasterize_analytic(gaussians, camera)
++        
++        # 2. Compute self-shadowing T_light
++        # Light-space rasterization pass
++        T_light = compute_light_space_transmittance(gaussians, sun_direction)
++        
++        # 3. Compute Radiance
++        # L_stage1 is the direct sun contribution
++        L_stage1 = compute_physical_radiance(
++            gaussians, 
++            sun_direction, 
++            T_light, 
++            phase_function='henyey_greenstein'
++        )
++        
++        # 4. Apply Tonemapping (if GT is LDR)
++        L_rendered = apply_aces_tonemap(L_stage1)
++        
++        # 5. Backpropagate loss
++        loss = mse_loss(L_rendered, image)
++        optimizer.zero_grad()
++        loss.backward()
++        optimizer.step()
+ 
+-def stage2_train(gaussians_stage1, env_net, dataset_stage2, optimizer_stage2):
+-    """
+-    Stage 2: Freeze geometry, train environment network for arbitrary relighting.
+-    """
+-    # 1. Precompute Sky Visibility V_lm for each Gaussian
+-    # This is done once on the frozen point set
+-    for g in gaussians_stage1:
+-        g.V_lm = compute_sky_visibility_sh(g.position, gaussians_stage1, sh_order=2)
++# Stage 2: Relighting
++def stage2_relight(gaussians_frozen, env_net, sun_direction):
++    # 1. Get precomputed visibility V_lm (from sky_transfer.npy)
++    V_lm = gaussians_frozen.visibility_vectors # SH order 2
+     
+-    for epoch in range(num_epochs):
+-        for camera, sun_direction, gt_image in dataset_stage2:
+-            # 2. Compute Sun Transmittance T_sun
+-            # m(theta) is Kasten-Young air mass based on sun elevation theta
+-            theta = sun_elevation(sun_direction)
+-            m_theta = kasten_young_air_mass(theta)
+-            tau_rgb = env_net.get_zenith_optical_thickness() # Learnable params
+-            T_sun = exp(-m_theta * tau_rgb)
+-            
+-            # 3. Compute Sky Irradiance E_lm from Environment Network
+-            E_lm = env_net.predict_sky_irradiance(sun_direction, camera.view_dir)
+-            
+-            # 4. Render using Frozen Stage 1 Parameters
+-            rendered_image = zeros_like(gt_image)
+-            
+-            # Re-use Stage 1 rasterization logic but with new lighting
+-            projected_gaussians = get_projected_gaussians(gaussians_stage1, camera)
+-            projected_gaussians.sort(key=lambda x: x['depth'])
+-            
+-            for y, x in pixels:
+-                acc_color = zeros(3)
+-                T = 1.0
+-                for pg in projected_gaussians:
+-                    tau = compute_analytic_tau(pg['data'], pg['sigma_2d'], pg['sigma_t'])
+-                    alpha = 1.0 - exp(-tau)
+-                    
+-                    if alpha < 1e-4: continue
+-                    
+-                    # Stage 1 Sun Term (Multiplicative)
+-                    # Note: T_light from Stage 1 is still valid for geometry occlusion
+-                    phase_val = heney_greenstein(pg['g'], pg['data'].view_dir, -sun_direction)
+-                    multiple_scattering = sum(pg['w'][n] * (pg['T_light'] ** (2**n)) for n in range(6))
+-                    L_sun_term = pg['omega'] * L_sun * multiple_scattering * phase_val
+-                    
+-                    # Apply Sun Transmittance (Atmospheric Attenuation)
+-                    L_sun_term *= T_sun
+-                    
+-                    # Sky Inscattering Term (Additive)
+-                    # V_lm is precomputed, E_lm is from MLP
+-                    L_sky_term = pg['omega'] * dot(E_lm, pg['V_lm'])
+-                    
+-                    # Combine
+-                    radiance = L_sun_term + L_sky_term
+-                    
+-                    weight = alpha * T
+-                    acc_color += radiance * weight
+-                    T *= (1.0 - alpha)
+-                    if T < 1e-4: break
+-                rendered_image[y, x] = acc_color
+-            
+-            # 5. Loss and Backprop
+-            loss = mse(rendered_image, gt_image)
+-            optimizer_stage2.zero_grad()
+-            loss.backward()
+-            optimizer_stage2.step()
++    # 2. Compute Sky Irradiance E_lm from MLP
++    E_lm = env_net(sun_direction)
++    
++    # 3. Compute Sun Transmittance T_sun
++    theta = sun_elevation(sun_direction)
++    m_theta =kasten_young_air_mass(theta)
++    tau_rgb = env_net.zenith_optical_thicknesses
++    T_sun = exp(-m_theta * tau_rgb)
++    
++    # 4. Gate sun if below horizon
++    if sun_below_horizon(sun_direction):
++        T_sun = 0.0
++        
++    # 5. Compute Stage 1 Direct Term (using frozen params)
++    # Note: T_light for the specific sun direction must be recomputed 
++    # or approximated if not precomputed for all directions. 
++    # In this pipeline, T_light is often recomputed per-frame for the new sun dir
++    # or approximated if the geometry is static and T_light was stored.
++    # Based on notes, T_light is computed via rasterization pass.
++    T_light_new = compute_light_space_transmittance(gaussians_frozen, sun_direction)
++    L_stage1_new = compute_physical_radiance(
++        gaussians_frozen, 
++        sun_direction, 
++        T_light_new, 
++        phase_function='henyey_greenstein'
++    )
++    
++    # 6. Combine Terms
++    # Direct Sun Term (Multiplicative)
++    direct_term = T_sun * L_stage1_new
++    
++    # Sky Insattering Term (Additive)
++    # Sum over SH coefficients
++    sky_term = 0.0
++    for l, m in sh_coefficients(order=2):
++        sky_term += E_lm[l, m] * V_lm[l, m]
++    sky_term = gaussians_frozen.albedo * sky_term
++    
++    L_final = direct_term + sky_term
++    
++    return L_final
+ ```
+ 
+-### Parameters
+-*   **SH Order:** Default is 2 (9 coefficients) for both $E_{lm}$ and $V_{lm}$. Configurable via `--env_sh_order` [S1, unofficial].
+-*   **Learning Rate (Stage 2):** $1e-3$ for the environment network, decaying to $0.1\times$ [S1, unofficial].
+-*   **Tonemapping:** Fixed Narkowicz ACES curve is default. Can be disabled with `--no-tonemap_aces` if GT is linear HDR. Can be made learnable with `--tonemap_learnable` [S1, unofficial].
+-*   **Sun Transmittance Gate:** When the sun is below the horizon, a `smoothstep` gate extinguishes the direct sun term [S1, unofficial].
+-
+-### Edge Cases and Pitfalls
+-*   **Sun Attenuation:** The sun term must be multiplicative with $T_{sun}$ ($\le 1$). A purely additive term cannot express the darkening (attenuation) caused by atmospheric path length [S1, unofficial].
+-*   **Data Bias:** Directional uniformity in the training dataset is critical. Biased directions (e.g., lack of vertical sun angles) can cause geometric artifacts (e.g., vertical stretching) because the shadow gradients are not properly supervised [S1, unofficial].
+-*   **Tonemapping Mismatch:** If the Ground Truth is linear HDR but the fixed ACES tonemap is applied, the model will incorrectly learn dynamic range compression. Conversely, if the GT is filmic LDR and tonemapping is disabled, the loss metrics will be invalid [S1, unofficial].
+-*   **T_light Computation:** The default `T_light` computation uses a rasterization pass. An alternative voxel-based path exists (`--tlight_voxel`) but is deprecated for new models [S1, unofficial].
++### Parameters and Edge Cases
++*   **SH Order:** Default is 2 (9 coefficients) for both $E_{lm}$ and $V_{lm}$ [S1, unofficial].
++*   **Tonemapping:** Default is fixed Narkowicz ACES. If ground truth is linear HDR, disable it (`--no-tonemap_aces`) [S1, unofficial].
++*   **Sun Below Horizon:** The direct sun term is extinguished using a `smoothstep` gate [S1, unofficial].
++*   **Precision:** The sun term must be multiplicative ($T_{sun} \le 1$) because an additive term cannot express the darkening/attenuation caused by atmospheric path length [S1, unofficial].
++*   **Data Uniformity:** The training dataset must have uniform sun direction coverage in the hemisphere to prevent geometric shadow gradient bias [S1, unofficial].
+ 
+ ## Operating characteristics
+-*   **Time Complexity:** Stage 1 training is comparable to standard 3DGS but with additional per-pixel analytic tau and per-gaussian $T_{light}$ computation. Stage 2 training is faster as it only optimizes a small global MLP and precomputed $V_{lm}$ is static. Rendering is real-time as it involves simple lookups and SH evaluations.
+-*   **Memory Complexity:** Higher than standard 3DGS due to the storage of physical parameters ($\sigma_t, \omega, g, w_n$) instead of SH colors. Stage 2 adds storage for `env_net.pt` and `sky_transfer.npy` [S1, unofficial].
+-*   **Performance:** Enables real-time rendering and dynamic relighting of volume clouds. Tested on the WDAS Cloud dataset [S1, unofficial].
+-*   **Strengths:** Physically plausible lighting, arbitrary sun direction relighting, real-time performance.
+-*   **Limitations:** Static geometry (time dimension not implemented in the initial release). Requires specific dataset preparation (black background for Stage 1, env-on for Stage 2) [S1, unofficial].
++*   **Time Complexity:** Stage 1 training is comparable to standard 3DGS but with additional light-space rasterization passes for $T_{light}$. Stage 2 inference is real-time, as the environment network is a small MLP and $V_{lm}$ is precomputed [S1, unofficial].
++*   **Memory Complexity:** Requires storing physical parameters instead of SH colors. Stage 2 adds storage for `env_net.pt` and `sky_transfer.npy` [S1, unofficial].
++*   **Strengths:** Enables arbitrary sun direction relighting in real-time. Physically plausible scattering (extinction, albedo, HG phase function) [S1, unofficial].
++*   **Limitations:** Static geometry in the current implementation (time dimension not implemented) [S1, unofficial]. Requires specific dataset generation (UE SkyAtmosphere settings) [S1, unofficial].
+ 
+ ## Background
+-The method is based on 3D Gaussian Splatting (Kerbl et al., 2023) and the 3DGS-Volume-Cloud project. It was developed as an independent 4D implementation workspace, with an initial code baseline at commit `69fea2c8d5a13d6c0e41ac12ca45c80b71bd3403` [S1, unofficial]. It aims to replace ray-marching volume clouds in game engines with physically parameterized 3D Gaussians for real-time rendering and dynamic lighting [S1, unofficial].
++The method is based on 3D Gaussian Splatting (Kerbl et al., 2023) and the 3DGS-Volume-Cloud project [S1, unofficial]. It was developed as an independent 4D implementation workspace, with an initial code baseline at commit `69fea2c8d5a13d6c0e41ac12ca45c80b71bd3403` [S1, unofficial]. It is used in the 4DGS-Volume-Cloud project for real-time rendering and dynamic relighting of volume clouds, based on the WDAS Cloud dataset [S1, unofficial].
+ 
+ ## Sources

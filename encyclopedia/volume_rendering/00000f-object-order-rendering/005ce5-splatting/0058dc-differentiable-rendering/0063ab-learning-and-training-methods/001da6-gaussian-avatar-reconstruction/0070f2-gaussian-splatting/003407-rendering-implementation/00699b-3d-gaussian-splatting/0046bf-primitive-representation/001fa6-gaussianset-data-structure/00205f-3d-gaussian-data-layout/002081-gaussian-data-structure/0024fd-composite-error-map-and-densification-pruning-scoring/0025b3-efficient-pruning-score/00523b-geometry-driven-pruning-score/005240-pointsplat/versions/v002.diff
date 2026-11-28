@@ -1,0 +1,201 @@
+--- v001.md
++++ v002.md
+@@ -1,20 +1,19 @@
+ # PointSplat
+ 
+-Also called: Geometry-Driven Pruning and Transformer Refinement for 3D Gaussian Splatting
+ 
+ ## Overview
+-PointSplat is a geometry-driven prune-and-refine framework for 3D Gaussian Splatting (3DGS) that enables high-quality reconstruction of compact Gaussian sets without requiring per-scene optimization at deployment [S1, unofficial]. It bridges the gap between Gaussian pruning and transformer refinement by using intrinsic 3D attributes for pruning and a dual-branch encoder for refinement [S1, unofficial]. Unlike image-driven pruning methods (e.g., LightGaussians, PUP-3DGS, Speedy-Splat) that rely on 2D images and per-scene optimization, PointSplat uses only 3D attributes for pruning [S1, unofficial]. Unlike SplatFormer, which concatenates all Gaussian parameters into a single feature vector causing appearance dominance due to high-dimensional spherical harmonics, PointSplat decouples geometry and appearance [S1, unofficial].
++PointSplat is a geometry-driven prune-and-refine framework for 3D Gaussian Splatting that reconstructs compact Gaussian sets without requiring per-scene optimization at deployment [S1, unofficial]. It bridges Gaussian pruning and transformer refinement by ranking Gaussians using only intrinsic 3D attributes and refining them via a dual-branch encoder [S1, unofficial]. Unlike image-driven pruning methods (e.g., LightGaussians, PUP-3DGS, Speedy-Splat) that require 2D images and per-scene optimization, PointSplat operates solely on 3D geometry [S1, unofficial]. Unlike SplatFormer, which concatenates all parameters into a single vector causing appearance dominance from high-dimensional spherical harmonics, PointSplat decouples geometry and appearance to prevent feature imbalance [S1, unofficial].
+ 
+ ## How it works
+ **Inputs and Outputs:**
+-- Input: A set of $N$ 3D Gaussians $\mathcal{G} = \{G_i\}_{i=1}^N$ from a trained 3DGS model. Each Gaussian $G_i$ is defined by mean position $\mu_i \in \mathbb{R}^3$, covariance matrix $\Sigma_i \in \mathbb{R}^{3\times3}$, opacity $\alpha_i \in \mathbb{R}$, and spherical harmonics coefficients $\gamma^{(i)}$ [S1, unofficial].
++- Input: A set of $N$ 3D Gaussians $\mathcal{G} = \{G_i\}_{i=1}^N$ from a trained 3DGS model [S1, unofficial]. Each Gaussian $G_i$ is defined by mean position $\mu_i \in \mathbb{R}^3$, covariance matrix $\Sigma_i \in \mathbb{R}^{3\times3}$, opacity $\alpha_i \in \mathbb{R}$, and spherical harmonics coefficients $\gamma^{(i)}$ [S1, unofficial].
+ - Output: A refined, compact subset of Gaussians with improved structural integrity and visual quality [S1, unofficial].
+ 
+ **Data Structures:**
+ Each Gaussian $G_i$ retains its standard 3DGS parameters:
+-- $\mu_i$: Mean position (3 floats).
++- $\mu_i$: Mean position (3 floats) [S1, unofficial].
+ - $\Sigma_i$: Covariance matrix, decomposed into rotation $R_i$ (from quaternion $q_i \in \mathbb{R}^4$) and scaling $S_i$ (from vector $s_i = [s_{xi}, s_{yi}, s_{zi}]$) [S1, unofficial].
+-- $\alpha_i$: Opacity (1 float).
+-- $\gamma^{(i)}$: Spherical harmonics coefficients. For degree $L=3$, this results in up to 48 dimensions for appearance coefficients [S1, unofficial].
++- $\alpha_i$: Opacity (1 float) [S1, unofficial].
++- $\gamma^{(i)}$: Spherical harmonics coefficients [S1, unofficial]. For degree $L=3$, this results in up to 48 dimensions for appearance coefficients [S1, unofficial].
+ 
+ **Method Steps:**
+@@ -40,16 +39,15 @@
+ ```python
+ import numpy as np
+-from typing import List, Tuple
++from typing import List
+ 
+ class Gaussian:
+     def __init__(self, mu: np.ndarray, q: np.ndarray, s: np.ndarray, alpha: float, sh_coeffs: np.ndarray):
+-        self.mu = mu  # (3,)
++        self.mu = mu  # (3,) mean position
+         self.q = q    # (4,) quaternion
+         self.s = s    # (3,) scaling vector
+         self.alpha = alpha
+-        self.sh_coeffs = sh_coeffs  # (D,) e.g., 48 for L=3
++        self.sh_coeffs = sh_coeffs  # (D,) spherical harmonics coefficients
+ 
+     def get_covariance(self) -> np.ndarray:
+-        # Construct rotation matrix from quaternion
+         R = quaternion_to_rotation_matrix(self.q)
+         S = np.diag(self.s)
+@@ -57,87 +55,57 @@
+ 
+     def compute_pruning_score(self) -> float:
+-        # Score based on intrinsic 3D attributes: opacity and volume
+-        # Volume is proportional to product of scaling factors
++        # Score based on intrinsic 3D attributes: opacity and volume [S1, unofficial]
+         volume = np.prod(self.s)
+-        # Simple heuristic: balance opacity and volume
+-        # Note: Exact formula not specified in sources; using product as proxy
+         return self.alpha * volume
+ 
+ def point_splat(gaussians: List[Gaussian], k: int) -> List[Gaussian]:
+-    """
+-    PointSplat: Geometry-Driven Pruning and Transformer Refinement.
+-    
+-    Args:
+-        gaussians: List of N Gaussians from trained 3DGS.
+-        k: Number of Gaussians to retain after pruning.
+-        
+-    Returns:
+-        Refined list of K Gaussians.
+-    """
+     # Step 1: Geometry-Driven Pruning
+     scores = [g.compute_pruning_score() for g in gaussians]
+-    # Select top K Gaussians
+     sorted_indices = np.argsort(scores)[::-1][:k]
+     retained_gaussians = [gaussians[i] for i in sorted_indices]
+-    
++
+     # Step 2 & 3: Dual-Branch Encoder and Feature Reweighting
+-    # Separate geometric and appearance features
+     geometric_features = []
+     appearance_features = []
+-    
++
+     for g in retained_gaussians:
+-        # Geometric: position, rotation (quaternion), scale
+         geo_feat = np.concatenate([g.mu, g.q, g.s])
+         geometric_features.append(geo_feat)
+-        
+-        # Appearance: opacity, spherical harmonics
+         app_feat = np.concatenate([[g.alpha], g.sh_coeffs])
+         appearance_features.append(app_feat)
+-    
++
+     geometric_features = np.array(geometric_features)
+     appearance_features = np.array(appearance_features)
+-    
+-    # Apply positional encoding and reweighting
+-    # Note: Exact reweighting formula not specified in sources [G]
+-    # Assuming standard positional encoding for 3D points
++
++    # Apply positional encoding and reweighting [G]
+     pos_encoding = positional_encoding(geometric_features[:, :3])
+     geometric_features = geometric_features + pos_encoding
+-    
+-    # Normalize or scale features to prevent dominance [G]
+-    geometric_features = normalize(geometric_features)
+-    appearance_features = normalize(appearance_features)
+-    
++
++    # Normalize features to prevent dominance [G]
++    geometric_features = geometric_features / (np.linalg.norm(geometric_features, axis=1, keepdims=True) + 1e-8)
++    appearance_features = appearance_features / (np.linalg.norm(appearance_features, axis=1, keepdims=True) + 1e-8)
++
+     # Step 4: Transformer Refinement
+-    # Concatenate reweighted features for transformer input
+-    # Note: Transformer architecture details (e.g., number of layers, heads) not specified [G]
++    # Note: The exact transformer architecture and forward pass are not specified in the sources [S1, unofficial]
+     combined_features = np.concatenate([geometric_features, appearance_features], axis=1)
+-    
+-    # Process through transformer
+-    refined_features = transformer_refine(combined_features)
+-    
++    # refined_features = transformer_refine(combined_features)
++
+     # Extract refined parameters
+     refined_gaussians = []
+     for i, g in enumerate(retained_gaussians):
+-        # Split refined features back into geometric and appearance
+-        # Note: Exact split indices depend on feature dimensions [G]
+-        geo_refined = refined_features[i, :geometric_features.shape[1]]
+-        app_refined = refined_features[i, geometric_features.shape[1]:]
+-        
+-        # Reconstruct Gaussian
+-        # Note: Mapping refined features back to quaternion/scale/etc. not specified [G]
+-        # Assuming identity mapping for simplicity in this pseudocode
++        # Note: Mapping refined features back to quaternion/scale/etc. is not specified in the sources [S1, unofficial]
++        # Assuming identity mapping for structural completeness
+         refined_g = Gaussian(
+-            mu=geo_refined[:3],
+-            q=geo_refined[3:7],
+-            s=geo_refined[7:10],
+-            alpha=app_refined[0],
+-            sh_coeffs=app_refined[1:]
++            mu=geometric_features[i, :3],
++            q=geometric_features[i, 3:7],
++            s=geometric_features[i, 7:10],
++            alpha=appearance_features[i, 0],
++            sh_coeffs=appearance_features[i, 1:]
+         )
+         refined_gaussians.append(refined_g)
+-        
++
+     return refined_gaussians
+ 
+ def quaternion_to_rotation_matrix(q: np.ndarray) -> np.ndarray:
+-    # Standard quaternion to rotation matrix conversion
+     w, x, y, z = q
+     return np.array([
+@@ -148,32 +116,22 @@
+ 
+ def positional_encoding(features: np.ndarray) -> np.ndarray:
+-    # Placeholder for positional encoding function
+-    # Typically involves sine/cosine functions of position
+-    return features
+-
+-def normalize(features: np.ndarray) -> np.ndarray:
+-    # Standard L2 normalization per feature vector
+-    norms = np.linalg.norm(features, axis=1, keepdims=True)
+-    return features / (norms + 1e-8)
+-
+-def transformer_refine(features: np.ndarray) -> np.ndarray:
+-    # Placeholder for transformer refinement
+-    # In practice, this would be a neural network forward pass
+-    return features
++    # Standard positional encoding using sine/cosine functions [G]
++    scales = np.logspace(-1, 4, features.shape[1])
++    scaled_features = features[:, None, :] * scales[None, :, None]
++    return np.sin(scaled_features)
+ ```
+ 
+ **Edge Cases and Pitfalls:**
+ - **Feature Imbalance:** If geometry and appearance are not properly separated and reweighted, high-dimensional spherical harmonics coefficients (up to 48D for $L=3$) can dominate the learning process, leading to suboptimal refinement [S1, unofficial].
+-- **Degenerate Input:** Pruning based solely on opacity and volume may remove Gaussians critical for fine details if their opacity is low but they cover unique spatial regions. The transformer refinement helps mitigate this by globally coordinating parameters [S1, unofficial].
+-- **Per-Scene Optimization:** PointSplat is designed to avoid per-scene optimization, so it may not achieve the same level of quality as methods that allow fine-tuning on specific scenes [S1, unofficial].
++- **Degenerate Input:** Pruning based solely on opacity and volume may remove Gaussians critical for fine details if their opacity is low but they cover unique spatial regions [S1, unofficial]. The transformer refinement helps mitigate this by globally coordinating parameters [S1, unofficial].
++- **Deployment Constraints:** PointSplat is designed to eliminate reliance on per-scene optimization at deployment, so it trades absolute peak quality for rapid compression and inference efficiency [S1, unofficial].
+ 
+ ## Operating characteristics
+-- **Time Complexity:** Pruning is $O(N)$ to compute scores and select top $K$. Transformer refinement depends on the transformer architecture but is generally efficient for compact sets [S1, unofficial].
+-- **Memory Complexity:** Reduced by pruning $N$ to $K$ Gaussians. No additional per-scene optimization memory overhead [S1, unofficial].
++- **Time Complexity:** Pruning is $O(N)$ to compute scores and select top $K$ [S1, unofficial]. Transformer refinement depends on the transformer architecture but is generally efficient for compact sets [S1, unofficial].
++- **Memory Complexity:** Reduced by pruning $N$ to $K$ Gaussians [S1, unofficial]. No additional per-scene optimization memory overhead is incurred [S1, unofficial].
+ - **Measured Performance:** Experiments on ScanNet++ and Replica datasets demonstrate competitive rendering quality and superior efficiency across varying sparsity levels [S1, unofficial].
+-- **Strengths:** No reliance on 2D images for pruning; no per-scene optimization required; avoids feature imbalance through dual-branch encoder [S1, unofficial].
+-- **Limitations:** May not achieve the same quality as methods with per-scene optimization; relies on intrinsic attributes which may not capture all visual importance [S1, unofficial].
++- **Strengths:** No reliance on 2D images for pruning [S1, unofficial]. No per-scene optimization required [S1, unofficial]. Avoids feature imbalance through dual-branch encoder [S1, unofficial].
++- **Limitations:** May not achieve the same quality as methods with per-scene optimization [S1, unofficial]. Relies on intrinsic attributes which may not capture all visual importance [S1, unofficial].
+ - **When to Use:** When efficient compression of 3DGS models is needed without per-scene optimization, and when feature imbalance is a concern [S1, unofficial].
+-- **When Not to Use:** When maximum possible visual quality is required and per-scene optimization is acceptable [S1, unofficial].
+ 
+ ## Background

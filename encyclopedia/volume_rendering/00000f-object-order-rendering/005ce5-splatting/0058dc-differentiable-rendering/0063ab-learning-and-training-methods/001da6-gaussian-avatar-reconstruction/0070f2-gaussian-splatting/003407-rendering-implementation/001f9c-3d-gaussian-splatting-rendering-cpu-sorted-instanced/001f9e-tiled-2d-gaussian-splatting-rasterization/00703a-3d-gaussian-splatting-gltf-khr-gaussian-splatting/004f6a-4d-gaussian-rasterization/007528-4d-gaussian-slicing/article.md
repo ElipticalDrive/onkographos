@@ -1,0 +1,122 @@
+# 4D Gaussian Slicing
+
+Also called: Slicing 4D Gaussians, Temporally-Slicing 4D Gaussians
+
+## Overview
+4D Gaussian Slicing is a method to calculate the 3D center position and 3D covariance of a 4D Gaussian at a specific time $t$ by intercepting the 4D Gaussian with the $t$-plane [S1, unofficial]. It enables the rendering of dynamic scenes represented by 4D Gaussians (3D spatial + 1D temporal) into a 2D image for a specific viewpoint and timestamp [S1, unofficial]. It sets itself apart from static 3D Gaussian Splatting by handling time-dependent opacity, position offsets, and spherical harmonics evaluation in 4D, and from other 4D methods like [4D Gaussian Splatting (DreamGaussian4D)](14897-4d-gaussian-splatting-dreamgaussian4d.md) by explicitly deriving the 3D Gaussian parameters via block matrix inversion to avoid numerical instability [S1, unofficial].
+
+## How it works
+**Inputs:**
+- A 4D Gaussian defined by mean $\boldsymbol{\mu} = (\mu_x, \mu_y, \mu_z, \mu_t)$ and covariance $\Sigma_{4D}$.
+- A target timestamp $t$.
+
+**Outputs:**
+- A 3D Gaussian at time $t$ defined by mean $\boldsymbol{\mu}(t) = (\mu_x(t), \mu_y(t), \mu_z(t))$ and covariance $\Sigma_{3D}$.
+
+**Data Structures:**
+- $\Sigma_{4D}^{-1}$: A $4 \times 4$ symmetric matrix with elements $c_{xx}, c_{xy}, c_{xz}, c_{xt}, c_{yy}, c_{yz}, c_{yt}, c_{zz}, c_{zt}, c_{tt}$.
+- $\Sigma_{4D}$: The inverse of $\Sigma_{4D}^{-1}$, partitioned as $\begin{pmatrix} U & V \\ V^T & W \end{pmatrix}$ where $U$ is $3 \times 3$.
+- $\Sigma_{4D}^{-1}$: Partitioned as $\begin{pmatrix} A & M \\ M^T & Z \end{pmatrix}$ where $A$ is $3 \times 3$.
+
+**Steps:**
+
+1.  **Compute 4D Covariance Inverse Elements:**
+    Calculate the elements of $\Sigma_{4D}^{-1}$ from the 4D rotor $\mathbf{r}$ and scale $\mathbf{S}_{4D}$:
+    $$ \Sigma_{4D} = \mathbf{R}_{4D}\mathbf{S}_{4D}\mathbf{S}_{4D}^T\mathbf{R}_{4D}^T $$
+    $$ \Sigma_{4D}^{-1} = \mathbf{R}_{4D}\mathbf{S}_{4D}^{-1} (\mathbf{S}_{4D}^{-1})^T \mathbf{R}_{4D}^T = \begin{pmatrix} c_{xx} & c_{xy} & c_{xz} & c_{xt} \\ c_{xy} & c_{yy} & c_{yz} & c_{yt} \\ c_{xz} & c_{yz} & c_{zz} & c_{zt} \\ c_{xt} & c_{yt} & c_{zt} & c_{tt} \end{pmatrix} $$
+    [S1, unofficial]
+
+2.  **Solve for Center Shift Coefficients:**
+    Solve the linear system for $\alpha, \beta, \gamma$:
+    $$ \begin{cases} c_{xx}\alpha + c_{xy}\beta + c_{xz}\gamma = c_{xt} \\ c_{xy}\alpha + c_{yy}\beta + c_{yz}\gamma = c_{yt} \\ c_{xz}\alpha + c_{yz}\beta + c_{zz}\gamma = c_{zt} \end{cases} $$
+    [S1, unofficial]
+
+3.  **Calculate 3D Mean:**
+    Compute the 3D center position at time $t$:
+    $$ \begin{cases} \mu_x(t) = \mu_x - \alpha(t - \mu_t) \\ \mu_y(t) = \mu_y - \beta(t - \mu_t) \\ \mu_z(t) = \mu_z - \gamma(t - \mu_t) \end{cases} $$
+    [S1, unofficial]
+
+4.  **Calculate Temporal Scalar:**
+    Compute $\lambda$:
+    $$ \lambda = c_{tt} - c_{xx}\alpha^2 - c_{yy}\beta^2 - c_{zz}\gamma^2 - 2c_{xy}\alpha\beta - 2c_{yz}\beta\gamma - 2c_{xz}\alpha\gamma $$
+    [S1, unofficial]
+
+5.  **Determine 3D Covariance Inverse:**
+    The inverse of the 3D covariance matrix is the top-left $3 \times 3$ block of $\Sigma_{4D}^{-1}$:
+    $$ \Sigma_{3D}^{-1} = \begin{pmatrix} c_{xx} & c_{xy} & c_{xz} \\ c_{xy} & c_{yy} & c_{yz} \\ c_{xz} & c_{yz} & c_{zz} \end{pmatrix} $$
+    [S1, unofficial]
+
+6.  **Avoid Numerical Instability:**
+    Do not invert $\Sigma_{3D}^{-1}$ directly to get $\Sigma_{3D}$. Instead, use the block matrix inverse formula on $\Sigma_{4D}$ and $\Sigma_{4D}^{-1}$, partitioned as $\begin{pmatrix} U & V \\ V^T & W \end{pmatrix}$ and $\begin{pmatrix} A & M \\ M^T & Z \end{pmatrix}$ respectively, where $U$ and $A$ are $3 \times 3$ matrices. This prevents errors when 3D Gaussian scales have substantial magnitude discrepancies [S1, unofficial].
+
+7.  **Construct Sliced Gaussian:**
+    The sliced 3D Gaussian is:
+    $$ G_{3D}(\mathbf{x}, t) = e^{-\frac{1}{2}\lambda(t - \mu_t)^2} e^{-\frac{1}{2}[\mathbf{x} - \boldsymbol{\mu}(t)]^T \Sigma_{3D}^{-1} [\mathbf{x} - \boldsymbol{\mu}(t)]} $$
+    [S1, unofficial]
+
+**Pseudocode:**
+> **Unverified code.** The code below did not pass a test run against a reference implementation, or no test fits it, so it may contain errors.
+
+```python
+import numpy as np
+
+def slice_4d_gaussian(mu_4d, sigma_4d_inv, t):
+    """
+    mu_4d: array of shape (4,) [mu_x, mu_y, mu_z, mu_t]
+    sigma_4d_inv: 4x4 numpy array, symmetric inverse covariance of 4D Gaussian
+    t: float, target timestamp
+    Returns: mu_3d (3,), lambda (float), sigma_3d_inv (3x3)
+    """
+    # Extract elements from sigma_4d_inv
+    c_xx, c_xy, c_xz, c_xt = sigma_4d_inv[0, 0], sigma_4d_inv[0, 1], sigma_4d_inv[0, 2], sigma_4d_inv[0, 3]
+    c_yy, c_yz, c_yt = sigma_4d_inv[1, 1], sigma_4d_inv[1, 2], sigma_4d_inv[1, 3]
+    c_zz, c_zt = sigma_4d_inv[2, 2], sigma_4d_inv[2, 3]
+    c_tt = sigma_4d_inv[3, 3]
+
+    # Solve linear system for alpha, beta, gamma
+    # [c_xx c_xy c_xz] [alpha]   [c_xt]
+    # [c_xy c_yy c_yz] [beta ] = [c_yt]
+    # [c_xz c_yz c_zz] [gamma]   [c_zt]
+    A_mat = np.array([
+        [c_xx, c_xy, c_xz],
+        [c_xy, c_yy, c_yz],
+        [c_xz, c_yz, c_zz]
+    ])
+    b_vec = np.array([c_xt, c_yt, c_zt])
+    
+    # Guard against singular matrix
+    if np.linalg.matrix_rank(A_mat) < 3:
+        alpha, beta, gamma = 0.0, 0.0, 0.0
+    else:
+        alpha, beta, gamma = np.linalg.solve(A_mat, b_vec)
+
+    # Calculate 3D mean
+    mu_x, mu_y, mu_z, mu_t = mu_4d
+    mu_x_t = mu_x - alpha * (t - mu_t)
+    mu_y_t = mu_y - beta * (t - mu_t)
+    mu_z_t = mu_z - gamma * (t - mu_t)
+    mu_3d = np.array([mu_x_t, mu_y_t, mu_z_t])
+
+    # Calculate lambda
+    lambda_val = c_tt - (c_xx * alpha**2 + c_yy * beta**2 + c_zz * gamma**2 + 
+                          2 * c_xy * alpha * beta + 2 * c_yz * beta * gamma + 2 * c_xz * alpha * gamma)
+
+    # Extract 3D covariance inverse (top-left 3x3 block)
+    sigma_3d_inv = sigma_4d_inv[:3, :3]
+
+    return mu_3d, lambda_val, sigma_3d_inv
+```
+[G] The pseudocode assumes `numpy` is available for linear algebra. The guard for singular matrix is added to prevent crashes, as the source notes numerical instability but does not specify a fallback.
+
+## Operating characteristics
+- **Time Complexity:** $O(1)$ per Gaussian, dominated by solving a $3 \times 3$ linear system.
+- **Memory Complexity:** $O(1)$ per Gaussian, storing $4 \times 4$ and $3 \times 3$ matrices.
+- **Strengths:** Avoids numerical instability associated with direct matrix inversion of ill-conditioned 3D Gaussians [S1, unofficial].
+- **Limitations:** Requires pre-computation of 4D covariance inverse [S1, unofficial].
+- **When to use:** When rendering dynamic scenes with 4D Gaussians where time-dependent deformation is significant [S1, unofficial].
+
+## Background
+4D Gaussian Slicing was introduced in "Deformable 3D Gaussians for high-fidelity monocular dynamic scene reconstruction" by Yuqing Zhang, Xiaogang Jin, et al. (2023) [S1, unofficial]. It is part of the broader field of differentiable rendering and Gaussian Splatting, specifically addressing the challenge of representing and rendering dynamic 3D scenes over time [S1, unofficial].
+
+## Sources
+[S1] 4D-Rotor Gaussian Splatting, https://arxiv.org/abs/2402.03307, fetched 2026-10-27 (unofficial)

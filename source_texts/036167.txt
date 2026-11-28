@@ -1,0 +1,809 @@
+1
+Micro-Splatting: Multistage Isotropy-informed Covariance
+Regularization Optimization for High-Fidelity 3D Gaussian Splatting
+Jee Won Lee1,2 , Hansol Lim1,2 , Sooyeun Yang1,2 , and Jongseong Brad Choi1,2*
+1 Department of Mechanical Engineering, State University of New York, Korea, Incheon, South Korea
+2 Department of Mechanical Engineering, State University of New York, Stony Brook, NY, United States
+arXiv:2504.05740v2 [cs.GR] 2 Sep 2025
+* Corresponding author
+Fig. 1. Overall Training Pipeline of Micro-splatting. This diagram shows how our method progresses from SfM points to fully optimized 3D Gaussians.
+Starting from the SfM points, we render the scene, compute a mixed photometric loss(L1 + L2 + SSIM) with a trace-based covariance penalty, and update
+parameters. Stage I (Growth, 15k iters) split only those Gaussians whose view-space footprint shows high local reconstruction error. Stage II (Micro-Refine,
+15 ¿ iters) prunes low-importance splats and merges redundant neighbors via view-agnostic checks. The end-to-end loop needs no auxiliary networks or
+post-processing and yields compact, near-isotropic, detail-preserving splats.
+Abstract—High-fidelity 3D Gaussian Splatting methods excel
+at capturing fine textures but often overlook model compactness,
+resulting in massive splat counts, bloated memory, long training,
+and complex post-processing. We present Micro-Splatting: Multistage Isotropy-informed Covariance Regularization Optimization
+for High-Fidelity 3D Gaussian Splatting, a unified pipeline that
+preserves visual detail while drastically reducing model complexity without any post-processing or auxiliary neural modules. In
+Stage I (Growth), we introduce a trace-based covariance regularization to maintain near-isotropic Gaussians, mitigating lowpass filtering in high-frequency regions and improving sphericalharmonic color fitting. We then apply gradient-guided adaptive
+densification that subdivides splats only in visually complex
+regions, leaving smooth areas sparse. In Stage II (Refinement), we
+prune low-impact splats using a simple opacity–scale importance
+score and merge redundant neighbors via lightweight spatial and
+feature thresholds, producing a lean yet detail-rich model. On
+four object-centric benchmarks, Micro-Splatting reduces splat
+count and model size by up to 60% and shortens training by
+20%, while matching or surpassing state-of-the-art PSNR, SSIM,
+and LPIPS in real-time rendering. These results demonstrate that
+Micro-Splatting delivers both compactness and high fidelity in a
+single, efficient, end-to-end framework.
+This work was supported by the National Research Foundation of Korea
+(NRF) grant funded by the Korea government (MSIT) (Grant No. RS-2022NR067080 and RS-2025-05515607).
+I. I NTRODUCTION
+H
+Igh-fidelity 3D scene representation is a cornerstone of
+modern computer vision and graphics, enabling applications from virtual reality to autonomous navigation. Traditional
+explicit models such as voxels, meshes, and point clouds often
+suffer from discontinuities and view-dependent artifacts [1],
+[2]. Neural Radiance Fields (NeRF) introduced a continuous
+volumetric formulation that produces photorealistic novel-view
+rendering but incurs prohibitive training and inference costs
+due to its reliance on deep MLPs [3],[4].
+Recently, 3D Gaussian Splatting (3DGS) has emerged as
+a powerful alternative, representing scenes as collections of
+oriented Gaussian primitives that can be rasterized in real time
+[5],[6]. By learning per-splat position, covariance, opacity, and
+spherical-harmonic color coefficients, 3DGS achieves much
+faster rendering than NeRF with competitive fidelity. However,
+capturing fine textures and sharp edges typically demands
+either oversized or highly anisotropic covariance radii, which
+act as directional low-pass filters and blur fine details, or
+uniformly tiny splats, which cause an explosion in point count
+and memory usage. This trade-off is further compounded by
+anisotropy biasing spherical-harmonic color fitting, motivating
+our introduction of a trace-based covariance regularization
+2
+to maintain near-isotropic support while adaptively allocating
+splats where detail is most needed.
+Recent works push 3DGS toward finer detail, often at
+substantial cost [7]. AbsGS [8] adaptively splits splats in
+high-frequency regions using gradient heuristics; FreGS [9]
+adds a global frequency regularizer that drives high-frequency
+content throughout training; Pixel-GS [10] aligns splats to
+pixel footprints to fight overlap and under-coverage. These
+strategies improve sharpness, but they commonly inflate point
+counts requiring millions of splats to represent the scene,
+increase memory and training time, and, in some cases,
+add multi-stage or auxiliary neural components (e.g., Taming
+3DGS [11]) that further raise complexity.
+First, we incorporate a covariance regularization term
+that enforces isotropic constraints on each gaussian splat.
+Isotropic kernels apply identical spatial extent in all directions,
+ensuring uniform treatment of high-frequency content without
+biasing along any axis. In contrast, anisotropic kernels can
+over-smooth details along their major axis, leading to uneven
+loss of fine structure [7],[8]. This uniform behavior aligns
+naturally with spherical harmonic-based color representations,
+which assume rotational symmetry, and further improves viewdependent color fidelity. By penalizing large or elongated
+covariances, our regularization keeps each splat compact and
+nearly spherical, preserving localized high-frequency details.
+A second thread targets compactness but risks oversimplification. EDC [12] performs learned compaction and
+distillation to shrink models, and Mini-Splatting 2 [13] uses
+hierarchical subdivision and consolidation to reduce footprint.
+While these approaches can be lightweight at inference, they
+tend to bias capacity toward object-centric regions and blur or
+wash out distance background detail.
+In this paper, we propose Micro-Splatting, a two-stage,
+fully in-training pipeline that addresses the long-standing
+trade-off between fine-detail fidelity and model compactness in
+3D Gaussian Splatting. Our approach integrates detail recovery
+and model reduction into a single optimization loop, without
+any post-processing or auxiliary neural modules. The core
+contributions are:
+• Trace-based isotropy in Stage I. We penalize oversized or highly anisotropic Gaussians via a simple trace
+and scale cap, keeping splats near-isotropic. This both
+mitigates the Gaussian low-pass bias, preserving highfrequency detail, and reduces directional bias in SH color
+fitting. Crucially, exceeding the cap also triggers splitting,
+so the constraint directly drives where capacity is added.
+• Gradient-guided densification in Stage I. After each
+update we compute a local reconstruction-gradient score
+over each splat’s view-space footprint and adapt the
+split threshold. Only splats covering high-gradient, highfrequency regions subdivide where flat regions remain
+sparse. This targets capacity where it matters and avoids
+blanket growth.
+• Two-stage refinement module in Stage II. We first
+prune low-impact splats using a cheap, interpretable importance score (opacity × max scale). We then merge
+redundant neighbors with simple, view-agnostic checks.
+Together these steps remove the long tail and collapse
+duplicates, yielding a lean yet detail-rich model.
+Simple computation. Unlike methods that add auxiliary
+networks or post-training passes, our sequence uses only
+lightweight computations within a single training loop.
+By integrating these techniques, Micro-Splatting achieves
+a simple yet powerful mechanism that deliver a robust, scalable
+solution for compact, high-fidelity 3DGS model. Our balanced
+design minimizes severe trade-offs and matches or exceeds
+state-of-the-art metrics.
+•
+II. R ELATED W ORKS
+A. Novel View Synthesis
+The field of Novel View Synthesis (NVS) has been
+transformed by Neural Radiance Fields (NeRF) [4], which encode scene as continuous volumetric functions via multilayer
+perceptrons, enabling photorealistic rendering from arbitrary
+viewpoints. Despite their visual quality, NeRF-based methods
+are hampered by lengthy training times and slowS inference.
+Addressing these limitations, EfficientNeRF [14] introduces
+optimizations that reduce both training and rendering costs,
+yet they remain constrained by the inherent overhead of
+neural networks. A significant paradigm shift occurred with
+the emergence of 3D Gaussian primitives that achieve realtime rendering through fast rasterization through continuous
+kernels.
+B. Detail-Preserving Enhancements in 3DGS
+Building on 3DGS, recent works target the loss of fine
+details caused by large or anisotropic splats. AbsGS [8] introduces a gradient-driven splitting rule that adaptively subdivides
+oversized Gaussians in high-frequency regions to sharpen
+local textures. FreGS [9] adds a frequency-domain regularizer that progressively encourages higher-frequency content
+during training. Spec-Gaussian [15] augments 3DGS with
+an anisotropic appearance model to better reproduce viewdependent effects such as specular highlights. Pixel-GS [10]
+aligns primitives with pixel footprints to better match perpixel residuals and improve fine-scale fidelity. TrimGS [16]
+performs contribution-based trimming and scale-driven splitting, periodically removing low-contribution Gaussians and
+subdividing oversized ones to keep kernels small and recover
+high-frequency geometry.
+However, recent detail-enhancing methods generally prioritize fidelity over compactness as they introduce complex
+losses and rarely include a built-in consolidation step (pruning/merging) where splat counts and memory often grow
+unchecked. Their refinement cues are typically global or pixelaligned rather than footprint-aware, which can oversample
+smooth regions and inflate training time. Our work targets
+these gaps by keeping the pipeline simple while actively
+controlling where and how much to densify and then compress.
+C. Isotropy and Shape Regularization in 3DGS
+Complementary to the detail-preserving methods, several
+works refine 3DGS by encouraging the Gaussians to be
+isotropic. Prior isotropy efforts either enforce hard isotropic
+3
+kernels for speed [17] or penalize eigenvalue imbalance via
+effective-rank or condition-number objectives or shape-aware
+splitting [18], [19]. In contrast, we apply a size-aware trace
+cap with a hinge penalty. This keeps splats compact and nearisotropic, without forbidding beneficial anisotropy. Crucially,
+violations trigger splitting, directly coupling the constraint
+to topology changes so capacity is added exactly where the
+constraint would other be breached. Our mechanism is analytic
+and in-training and alongside a footprint-local gradient trigger,
+which together yield compact yet detail-preserving models.
+D. Compact Representations for 3DGS
+In parallel, a body of work has explored compressing
+3DGS models to reduce storage and computational demands.
+Taming 3DGS [11] applies visibility- and contribution-based
+pruning after training, removing low-impact splats to shrink
+model size. Mini-Splatting 2 [13] adopt quantization and
+codebook-based encodings to store Gaussian parameters compactly, while EDC [12] uses an importance-driven decimation
+and clustering algorithm to merge spatially and spectrally
+similar primitives. Several other methods extend this trend by
+integrating more sophisticated compression strategies, including LightGaussian [20], which incorporates Gaussian volume
+and opacity into an importance metric followed by quantization for storage savings, and High-Fold Pruning [21], which
+uses opacity-assisted ranking to aggressively prune redundant splats. TrimGS [16] periodically prunes low-contribution
+splats and enforces small kernels via scale-driven splitting,
+yielding leaner models while preserving geometric detail.
+More recent approaches employ neural networks or heavy
+attribute compression frameworks to achieve higher compression ratios. Scaffold-GS [22] encodes Gaussian attributes via
+anchor-based features refined by per-view MLPs, achieving
+strong compression at the cost of additional inference passes.
+LocoGS [23] represents nearly all Gaussian attributes through
+a learned neural field, reducing storage but adding per-query
+neural evaluations. Optimized Minimal 3DGS (OMG) [24] integrates a lightweight neural field with sub-vector quantization
+to balance irregularity and continuity in sparse Gaussian sets.
+Compressed 3DGS [25] adopts residual vector quantization
+with entropy coding, while Reducing the Memory Footprint
+of 3DGS [26] applies hierarchical neural quantization for
+extreme size reduction. Although these techniques can produce
+highly compact models, they typically operate as post-training
+stages, rely on additional neural components that increase
+implementation complexity and inference cost, or optimize
+for either compactness or fidelity in isolation. In contrast,
+our method jointly optimizes both within the same training
+loop using only lightweight analytic operations, eliminating
+the need for post-processing or auxiliary neural modules.
+E. Visual and Photometric Effects of Splat Anisotropy
+Gaussian splats inherently exhibit a low-pass filtering
+effect, smoothing out high-frequency details within their spatial support [6]. When the covariance matrix is anisotropic,
+having significant differences in the eigenvalues, this smoothing becomes directional, blurring details preferentially along
+Fig. 2. Visual and Photometric Effects of Splat Anisotropy. (Top) Geometric
+representation of anisotropic and isotropic Gaussians. The anisotropic splat
+(Σ = [1.5, 0.5, 0.5]) exhibits elongated support along one axis, producing
+directional smoothing, whereas the isotropic splat (Σ = 0.5I) preserves
+uniform detail in all directions. (Bottom) Photometric impact on sphericalharmonic (SH) fitting for degrees L = 1, 2, 3. Anisotropic splats introduce
+directional bias, leading to higher RMSE and visible distortions in highfrequency components compared to isotropic splats.
+the elongated axis [27]. This geometric imbalance not only
+degrades fine spatial structures but also biases sphericalharmonic color fitting [28]. Fig. 2 (Top) illustrates the geometric distinction where anisotropic splats exhibit stretched support that amplifies blur along one direction whereas isotropic
+splats maintain uniform detail preservation in all directions.
+The photometric impact of this anisotropy is shown in
+Fig. 2 (Bottom), which compares the SH projections at degrees
+L=1, 2, 3 for isotropic and anisotropic splats against the
+ground truth. Anisotropic splats consistently produce higher
+root mean square error (RMSE) and introduce directional
+distortions, particularly in high-frequency components [18].
+These observations motivate our use of trace-based covariance
+regularization to maintain near-isotropic splats during training,
+mitigating both geometric and photometric degradation.
+III. P RELIMINARIES
+A. 3D Gaussian Splatting Fundamentals
+We represent a scene as a set of anisotropic 3D Gaussian
+primitives
+N
+G = {(µi , Σi , ci , αi )}i=1 ,
+(1)
+where µi ∈ R3 is the mean position, Σi ∈ R3×3 is the
+covariance matrix defining spatial extent and orientation, ci
+4
+encodes view-dependent color via spherical harmonics (SH),
+and αi ∈ [0, 1] denotes opacity. Each Σi is positive-definite
+and can be decomposed as
+Σi = Ri Si SiT RiT ,
+(2)
+where Ri ∈ SO(3) is a rotation matrix and Si ∈ R3×3
+is diagonal with entries proportional to the splat’s standard
+deviations along its principal axes. Differences among these
+eigenvalues determine the splat’s anisotropy, which impacts
+both geometric sharpness and SH color fitting.
+During rendering, each Gaussian is projected to the image
+plane, producing a 2D ellipse footprint from the transformed
+covariance
+Σ′i = Ji Σi JiT ,
+(3)
+where Ji is the Jacobian of the projection. The splats are
+rasterized in front-to-back order, blending their contributions
+according to alpha compositing. The spatial extent defined by
+Σi governs the degree of local smoothing: large, elongated
+splats act as directional low-pass filters, while compact, nearisotropic splats preserve high-frequency details.
+B. L2-Enhanced Photometric Loss
+The primary training objective in 3D Gaussian Splatting
+is to minimize the difference between rendered images and
+ground-truth views [6]. Let Ir and It denote the rendered
+and target images, respectively. The loss used in the original
+3DGS formulation is a combination of an L1 loss for structural
+accuracy and a perceptual similarity term such as SSIM:
+Ltotal = λ1 ∥Ir − It ∥1 + λSSIM (1 − SSIM (Ir , It )) ,
+(4)
+This formulation encourages both pixel-wise fidelity and perceptual consistency across views.
+In our work, we extend this objective with an additional
+term, which further penalizes large deviations and helps stabilize optimization in later stages of training. The combined
+loss balances fine detail preservation with robustness to noise
+thereby forming the basis of our total training objective.
+IV. M ICRO -S PLATTING
+A. Overview and Motivation
+Micro-Splatting is designed to maintain the sharpness
+of 3D Gaussian Splatting reconstructions while keeping the
+model size, memory footprint, and training time low. Unlike
+approaches that rely on post-training compression or auxiliary
+neural modules, as illustrated in Fig. 1, Micro-Splatting is a
+single, in-training pipeline composed entirely of lightweight,
+analytic checks.
+In Stage I (Growth), a trace-based covariance regularizer encourages splats to remain near-isotropic, reducing
+frequency-dependent blur. Growth is further guided by a
+footprint-local error metric, ensuring that new splats are added
+only in high-frequency regions where additional capacity is
+most beneficial. In Stage II (Micro-Refine), a simple importance score identifies and prunes low-impact splats, while
+Fig. 3. Eigen-Decomposition and Trace Constraint on the 3D Gaussian
+Covariance. This figure shows a Gaussian’s covariance Σk decomposed
+into RΛRT , where λ1 , λ2 , λ3 define the ellipsoid’s axes. By bounding
+trace(Σk ) = λ1 + λ2 + λ3 ≤ τ , we limit how large these axes can grow,
+preserving near-isotropy and preventing excessive elongation.
+redundant neighbors are merged using view-agnostic comparisons of position, color, and scale. This two-stage process
+yields a compact set of high-value splats that preserve fine
+detail while minimizing computational cost.
+B. Covariance Regularization and Loss Optimization
+Trace-based regularizer. Micro-Splatting encourages each
+splat to remain compact and near-isotropic, preserving highfrequency detail and avoiding directional blur in SH color
+fitting.
+Let Σk denote the covariance of splat k in eigen (axislength) parameterization:
+Σk = Rk diag(λk,1 , λk,2 , λk,3 ) RkT ,
+(5)
+where Rk ∈ SO(3) is a rotation matrix and λk,1 , λk,2 , λk,3 >
+0 are the squared axis lengths. The trace then becomes
+tr(Σk ) = λk,1 + λk,2 + λk,3 .
+(6)
+We impose a trace cap τ and apply a hinge penalty Pk per
+splat:
+X
+
+Pk = max tr(Σk ) − τ, 0 ,
+Lcov =
+Pk .
+(7)
+k
+Bounding the trace limits the overall spatial extent, preventing
+any axis from elongating excessively and thus maintaining
+near-isotropy.
+Unlike prior isotropy terms (e.g., Isotropic-GS [17]) that
+act as passive regularizers, here any splat with Pk > 0 is
+also split, directly coupling the regularization with topology
+changes in the growth stage. This active linkage ensures that
+capacity is added only where the isotropy constraint would
+otherwise be violated (Fig. 3).
+Photometric loss with L2 term Building on the photometric
+reconstruction loss in Eq. 4, we incorporate an additional L2
+term provides error-proportional gradients that help correct
+subtle residuals. Specifically,
+N
+L2 =
+2
+1 X ˆ
+Ii − Ii ,
+N i=1
+2
+(8)
+where Iˆi and Ii denote the rendered and target pixel intensities,
+1
+respectively. Unlike L1 , whose gradient magnitude ∂L
+∂e is
+5
+which approximates the pixel region influenced by the
+splat.
+(c)
+Using the same forward/backward pass as training, we
+read per-pixel reconstruction-loss gradients for Lrecon
+in Eq. 9 and compute a magnitude map:
+g(u, v) = ∥∇c Lrecon (u, v)∥ .
+(12)
+The local error score for a splat is the footprint average:
+X
+1
+g(u, v).
+(13)
+Mk =
+|Ωk |
+(u,v)∈Ωk
+We set ε adaptively at each iteration as the p-th percentile of the current {Mk } distribution, making the
+trigger scene-agnostic and robust.
+If Mk > ε, we split Gk into smaller clones by
+perturbing means inside Ωk along the principal axes,
+halving scales, and copying color and opacity to avoid
+holes. In addition, if the trace penalty for Gk is active
+(Pk > 0, from Eq. 7), we split to prevent elongated
+kernels from persisting.
+This process runs until iteration Trefine (15k in our experiments), concentrating many small, near-isotropic splats in
+high-frequency regions while leaving flat regions sparsely
+sampled.
+(d)
+Fig. 4. Stage I: Growth Phase. (a) Project each Gaussian and estimate its
+on-screen footprint. (b) Define a circular support around the project mean.
+(c) Measure reconstruction-loss gradients to detect under-fit, high-frequency
+regions. (d) Split into smaller clones to increase density only at details When
+the local score is high.
+constraint with respect to the pixel errorei , the gradient of
+2
+L2 scales linearly as ∂L
+∂ei = 2ei This proportionality enables
+finer correction of small errors, improving convergence and
+enhancing edge fidelity in pixel-supervised tasks. Prior studies
+have shown that combining L1 and L2 can yield both stability
+and perceptual quality [28], [29].
+Our total loss is therefore:
+Ltotal = λ1 L1 + λ2 L2 + λSSIM LSSIM + λcov Lcov ,
+(9)
+with λ1 = λ2 = 0.5 unless otherwise noted. Together with
+the trace-based covariance constraint, this L2 -augmented photometric loss provides a unified training objective for Stage I
+growth and Stage II refinement, enabling compact, detailpreserving splats without the need for auxiliary networks or
+post-processing.
+Stage II. Micro-Refine Phase
+After the growth phase, the splat set may still contain lowimportance primitives. Stage II removes these inefficiencies
+through two lightweight, view-agnostic operations (see Fig.
+5).
+Flow A– Importance Score Pruning.
+Each Gaussian’s size rk and opacity αk are combined
+into a simple importance score
+sk = αk · rk ,
+(14)
+where rk = ∥σ k ∥∞ is the maximum standard deviation among
+its principal axes. Splats in the lowest q% of scores are
+pruned, removing elements that contribute minimally to scene
+reconstruction.
+C. Two-Staged Refinement Module
+Stage I. Growth Phase. After each gradient step, we identify
+regions where the model still lacks detail and adds splats only
+in those locations (see Fig. 4):
+(a) Each Gaussian is projected into screen space, yielding
+its 2D covariance Σ2D
+k . We define a footprint radius as:
+q
+
+rk = λmax Σ2D
+.
+(10)
+k
+where λmax (·) is the largest eigenvalue. This provides
+a constant-time proxy for the splat’s apparent size.
+(b)
+Around the projected mean µ2D
+k , we define the circular
+footprint:
+
+Ωk = (u, v) : (u, v) − µ2D
+≤ rk .
+(11)
+k
+Fig. 5. Stage II: Micro-Refine Phase. Flow A – Rank splats with opacity-andsize and drop the lowest few percent. Flow B – Merge splats that are close
+in space, similar in base color and size checked in a view-agnostic way and
+replace each pair with a single splat.
+6
+Flow B– Redundancy-driven pairwise merging.
+Remaining splats are examined in pairs using a viewagnostic proximity test on three attributes:
+∥xi − xj ∥2 ≤ τxyz ,
+(15)
+∥fidc − fjdc ∥2 ≤ τcol ,
+(16)
+∥σ i − σ j ∥2 ≤ τscale .
+(17)
+spatial, color, and scale, respectively. If all conditions are
+met, the pair is merged by averaging each attribute, collapsing
+duplicates without degrading detail.
+Together, these two flows remove the negligible splats and
+consolidate redundancies, yielding a lean, high-detail model
+without any separate networks or post-processing.
+V. R ESULTS AND E VALUATION
+A. Implementation
+Our method is implemented in Python using the Pytorch framework [31], building on the custom CUDA-based
+rasterization kernel originally introduced by Kerbel et al.
+[6]. We extended these kernels to incorporate our adaptive
+densification and covariance-based splitting strategies. For interactive viewing and performance measurement, we employed
+the open-source SIBR library [32], which enabled real-time
+visualization of our rendered scenes. Additionally, we utilized
+the LPIPS metric [33] for perceptual evaluations, taking
+advantage of the publicly available library to quantify subtle
+differences in image quality.
+Fig. 6. PSNR vs. Iteration. PSNR progression over 30k training iterations for
+baseline 3DGS and Micro-Splatting.
+Fig. 7. Splat Count vs. Iteration. Evolution of splat count during training over
+30k training iterations for baseline 3DGS and Micro-Splatting.
+B. Training Dynamics
+We monitor PSNR on held-out views and the number of
+active splats throughout training. Micro-Splatting demonstrates
+a distinct two-phase trajectory: an initial growth phase, spanning approximately 0–15k iterations, in which PSNR increases
+concurrently with the expansion of the splat set, followed
+by a micro-refinement phase where the splat count steadily
+decreases. Notably, Fig. 6 and Fig. 7 clearly show that, even
+as the number of splats drops after 15k iterations, PSNR
+continues to rise and eventually stabilizes at a high level. This
+contrasts sharply with the baseline 3DGS, which exhibits an
+almost monotonically increasing splat count and a noticeably
+more irregular PSNR progression at comparable iterations.
+The stability and sustained PSNR gain of Micro-Splatting
+are the result of three integrated design choices. First, targeted
+splitting densifies only regions with high local reconstructiongradient magnitudes during Stage I, preventing the disruptive
+topology changes caused by the broad densify–reset cycles
+of 3DGS. Second, a trace-based covariance constraint enforces compact, near-isotropic kernels, which mitigates viewdependent instability and avoids transient over- or underblurring. Third, the inclusion of a mixed L1 and L2 photometric loss supplies error-proportional gradients near convergence, reducing the oscillatory behavior typical of a pure L1
+loss. These combined mechanisms enable Micro-Splatting to
+achieve comparable or superior PSNR with fewer Gaussians
+and a far steadier optimization trajectory.
+C. Splat Distribution in High-Frequency Regions
+To evaluate the behavior of Stage I (Growth), we compare
+three methods, Pixel-GS [10], FreGS [9], and MicroSplatting, all of which share the same objective of concentrating splats in high-frequency regions after 30k iterations.
+In our approach, a local reconstruction-gradient score Mk is
+computed over each splat’s view-space footprint after every
+backward pass, and only splats with high Mk values which
+are regions still requiring additional detail are split. Pixel-GS
+instead drives densification from pixel-aligned residuals, while
+FreGS employs a global frequency regularizer [9], [10].
+Fig. 8 presents point-cloud views (top) and rendered
+crops (bottom) along with per-method splat counts. Although all methods aim to allocate density to textured areas,
+Micro-Splatting concentrates splats more selectively in genuinely detailed regions such as the flowers in the scene, while
+keeping
+ low-frequency areas like flat walls sparse N30k ≈
+530k . In comparison, baseline 3DGS under-densifies the
+flowers (≈ 840k), Pixel-GS substantially overpopulates even
+the white wall (≈ 1.88M), and FreGS similarly increases
+splat density in low-texture regions (≈ 1.17M). These results
+demonstrate that, despite sharing the same high-frequency
+targeting goal, Micro-Splatting achieves sharper detail with
+fewer points by allocating capacity more precisely to truly
+high-frequency regions.
+7
+Fig. 8. Splat distribution vs. detail on Mip-NeRF 360 [34] room dataset. Point-cloud views (top) and render crops (bottom) at 30k iterations with per-method
+splat counts (N30k ). Micro-Splatting concentrates splats on the textured flowers while keeping smooth walls sparse (N30k ≈ 530k). Baseline 3DGS [6]
+under-densifies the flowers (≈ 840k); Pixel-GS [10], though also detail-seeking, heavily overpopulates even the white wall and yields the largest model
+(≈ 1.88M); FreGS [9] similarly increases wall splats and overall count (≈ 1.17M). The result is sharper detail with fewer points for Micro-Splatting, and
+noticeably better allocation of splats to genuinely high-frequency regions.
+D. Results
+We evaluate Micro-Splatting on five representative MipNeRF 360 scenes (bonsai, garden, kitchen, room, counter) [34]
+and compare against 3DGS [6], Pixel-GS [10], FreGS [9],
+EDC [12], Taming-3DGS [11], and Mini-Splatting 2 [13],
+and TrimGS [16]. All methods are trained for 30k iterations
+using identical data splits.
+Qualitative Evaluation (Mip-NeRF 360).
+Across all scenes, most baselines render foreground objects and nearby structures well but tend to lose detail in distant
+background regions. In contrast, Micro-Splatting preserves farfield cues more faithfully while maintaining a model size in
+the same range.
+• Bonsai: he small figurine visible through the rear window
+is sharply reconstructed by Micro-Splatting, matching
+Pixel-GS, while Taming-3DGS and Mini-Splatting 2 blur
+it away.
+• Garden: The narrow building between the brick wall
+and the tree remains clearly defined in Micro-Splatting,
+whereas it is entirely blurred in Taming-3DGS and MiniSplatting 2, despite only 50 MB difference in model size
+and partially lost in FreGS.
+• Kitchen: The back window emerging from a dark region
+appears closest to ground truth in Micro-Splatting. 3DGS
+and Taming-3DGS render it with blur or noticeable color
+shift, while other baselines smear it out.
+• Room: The TV screen reflection in the far background
+is sharply reproduced in Micro-Splatting, whereas other
+methods produce softer, less distinct reflections.
+• Counter: The specular highlight on the distant countertop
+is preserved in Micro-Splatting and Mini-Splatting 2 but
+is entirely missing in FreGS and most other baselines.
+In short, while foreground quality is comparable, MicroSplatting keeps long-range detail and reflections intact, align-
+ing the ground truth in the far field.
+Quantitative Evaluation (Mip-NeRF 360)
+Quantitative quality (Table 1). We compare 3DGS [6],
+Pixel-GS [10], FreGS [9], EDC [12], Taming 3DGS [11],
+Mini-Splatting 2 [13], TrimGS [16], and our method on
+five Mip-NeRF 360 [34] scenes (bonsai, garden, kitchen,
+room, counter), reporting SSIM, L1 , PSNR, and LPIPS.
+Micro-Splatting ranks first or second on nearly all metrics,
+with the highest SSIM and lowest L1 on bonsai, kitchen,
+and room, and competitive PSNR and LPIPS on garden and
+counter. Using an L1 + L2 + SSIM photometric objective
+together with trace-regularized kernels yields lower pixel error
+and stronger structural and perceptual fidelity, helping retain
+fine detail without introducing high-frequency artifacts.
+Efficiency & size (Table 2). For the same scenes and training
+budget, we report FPS, model size (MB), training time,
+and splat count (×103 ). Despite concentrating capacity in
+genuinely high-frequency regions, Micro-Splatting maintains
+real-time FPS comparable to 3DGS while producing smaller
+or similar model sizes in most cases. The Stage II refinement module (importance-score pruning + redundancy-aware
+merging) cuts splats substantially without quality loss, yielding compact, efficient models. In contrast, several baselines
+that aggressively densify high-frequency areas (e.g., Pixel-GS,
+FreGS) often inflate splat count and storage with limited gains.
+(In both tables, “Size” denotes on-disk .ply MB; arrows
+indicate the preferred direction.)
+8
+Fig. 9. Qualitative Comparison on Mip-NeRF 360 [34] (bonsai, garden, kitchen, room, and counter) at 30k iterations. Each triplet shows the ground truth
+(left), the baseline method (center), and our Micro-Splatting reconstruction (right). Compared to competing methods—3DGS [6], Pixel-GS [10], FreGS [9],
+EDC [12], Taming 3DGS [11], Mini-Splatting 2 [13], TrimGS [16], and Micro-Splatting—our approach better preserves fine structures and high-frequency
+details in both foreground and background regions. Notable examples include sharper flower textures (bonsai), clearer distant building edges (garden), more
+accurate back-window reconstruction (kitchen), well-defined TV reflections (room), and intact specular highlights (counter). Micro-Splatting achieves this
+while maintaining compact models and efficient rendering.
+9
+TABLE I
+Q UANTITATIVE R ESULTS ON M IP -N E RF 360 (30 K I TERATIONS )
+TABLE II
+E FFICIENCY AND SIZE COMPARISION ON M IP -N E RF 360 (30 K I TERATIONS )
+E. Ablation Study
+We evaluate each component via leave-one-out ablations
+relative to the full pipeline, using identical splits, iteration
+budgets, and schedules across all runs. Six variants are tested
+on eight scenes—five from Mip-NeRF 360 [34] (kitchen,
+bonsai, garden, counter, room) and three from Tanks & Temples [35] (Ignatius, Church, Truck): (a) Full Micro-Splatting,
+(b) – Covariance regularization, (c) – High-frequency focus,
+(d) – Importance-score pruning, (e) – Redundancy-driven
+merging, (f) – Isotropy enforcement. We report PSNR, SSIM,
+LPIPS, FPS, model size (MB; on-disk .ply), and splat
+count (×103 ). Table 3 lists the average results over all
+eight scenes, with detailed per-scene metrics provided in
+Appendix I. Table 4 provides a per-scene breakdown for the
+kitchen dataset, and Table 5 shows the radius-bin distribution
+(Bin 0 – Bin 9), which partitions the mean 2D footprint radius
+into ten equal-width intervals at the training resolution.
+(a) Full Micro-Splatting:
+Delivers the best overall balance, with top SSIM/PSNR,
+low LPIPS, compact size, and high FPS. Coverage is
+dense only in textured areas, with radius bins favoring
+small kernels and smooth tapering for fine detail without
+overgrowth.
+(b)
+No Covariance Regularization:
+Without the trace cap, kernels over-expand or elongate,
+causing directional blur and higher pixel error. The
+radius-bin histogram skews toward extremes, confirming
+unstable growth.
+(c)
+No High-Frequency Focus:
+Disabling gradient-driven splitting leads to sparse coverage and missed fine details, producing the largest quality
+drop among Stage I changes and collapsing small-radius
+bin counts.
+(d)
+No Importance-Score Pruning:
+Quality remains similar, but splat count, size, and
+training time rise sharply. Extra splats clutter already
+accurate regions, showing that pruning removes lowimpact points efficiently.
+(e)
+No Redundancy-Driven Merging:
+Near-duplicate splats remain, increasing memory use
+and reducing FPS. Dense areas show mild oversmoothing where merging would yield cleaner results.
+(f)
+No Isotropy Enforcement:
+Anisotropic kernels introduce smear and color bleeding
+along high-contrast edges, yielding poor LPIPS/PSNR
+despite moderate splat counts.
+The ablation study shows that Stage I components (Mkbased splitting, covariance trace cap, and isotropy enforcement) are key to producing stable, fine detail, while Stage
+II components (importance-score pruning and redundancy
+merging) maintain compactness without sacrificing fidelity.
+Together, these yield the best scores and cleanest reconstructions in Fig. 10, while controlling memory usage and runtime.
+TABLE III
+Q UANTITATIVE ABLATION RESULTS AVERAGED OVER 8 SCENES
+(5 M IP -N E RF 360; 3 TANKS & T EMPLES )
+10
+Table IV
+Q UANTITATIVE ABLATION RESULTS ON M IP -N E RF 360
+(K ITCHEN SCENE , 30 K ITERATIONS )
+Table V
+S PLAT C ARDINALITY OF ABLATION STUDY ON M IP -N E RF 360
+(K ITCHEN SCENE , 30 K ITERATIONS )
+Fig. 10. Qualitative ablation results on Mip-NeRF 360 [34] (Kitchen scene, 30k iterations). Comparison of full Micro-Splatting (a) and its ablated variants
+(b–f) at 30k iterations, shown in splat render, point-cloud, and ellipsoid views. The full model maintains sharp details with dense, well-placed splats, while
+ablations exhibit effects such as blur, under-densification, kernel over-expansion, or excessive redundancy, as reflected in the final splat counts N30k .
+VI. D ISCUSSION AND C ONCLUSION
+Discussion. Our experiments consistently demonstrate that
+Micro-Splatting enhances fine-detail reconstruction while
+maintaining compact models. This is supported by three key
+findings. First, the training dynamics exhibits a clear twophase progression: a targeted Stage I growth that selectively
+increases splats in high-frequency regions, followed by a Stage
+II micro-refinement that steadily reduces splat count even as
+PSNR continues to rise. Second, splat-distribution visualizations confirm that the view-space, gradient-guided split rule
+concentrates density only where texture is present, avoiding
+oversampling in smooth, low-detail areas. Third, the ablation
+study validates the role of each component: trace-capped
+covariance and isotropy enforcement stabilize kernel shapes
+and spherical harmonics fitting; the local Mk trigger recovers high-frequency structures; and importance-score pruning
+combined with redundancy-aware merging reduces splat count
+without perceptible quality loss. Compared to 3DGS, MicroSplatting yields smoother PSNR curves, attributable to the
+trace cap and mixed L1 + L2 photometric loss. Importantly,
+these gains are achieved through lightweight computations
+without auxiliary networks or costly post-processing, keeping
+training time on par with baselines and preserving real-time
+rendering performance.
+Conclusion. Micro-Splatting presents a unified, end-to-end
+framework that first concentrates growth in genuinely highfrequency regions and then refines to a compact, efficient set
+of Gaussians. By combining trace-based covariance control
+with isotropy enforcement, view-space gradient-guided splitting, and a lightweight refinement stage, the method achieves
+sharper textures, reduced artifacts, and significantly smaller
+model sizes compared to strong baselines, all while sustaining
+real-time rendering performance.
+VII. ACKNOWLEDGMENT
+This work was supported by the National Research Foundation
+of Korea (NRF) grant funded by the Korea government (MSIT)
+(Grant No. RS-2022-NR067080 and RS-2025-05515607).
+VIII. AUTHOR C ONTRIBUTION
+Jee Won Lee: Data Curation, Methodology, Validation, Visualization, Writing–Original draft, Software.
+Hansol Lim: Data Curation, Visualization, Validation.
+Sooyeun Yang: Data Curation, Formal Analysis, Writing–
+Original draft.
+Jongseong Brad Choi: Conceptualization, Methodology, Validation, Formal Analysis, Writing–Review & Editing.
+11
+R EFERENCES
+[1] E. M. Muñoz-Silva et al., “A Survey on Point Cloud Generation for 3D
+Scene Reconstruction,” in Proc. 2021 ICMEAE, Cuernavaca, Mexico,
+Jan. 24–27, 2021, pp. 82–87, doi:10.1109/ICMEAE55138.2021.00021.
+[2] J. Choi et al., “Computer-Aided Approach for Rapid Post-Event Visual
+Evaluation of a Building Façade,” Sensors, vol. 18, no. 9, Art. 3017,
+Sep. 2018, doi:10.3390/s18093017.
+[3] F. Simões et al., “Challenges in 3D Reconstruction from Images for
+Difficult Large-Scale Objects...,” in Proc. 2012 14th SVR, 2012, pp. 74–
+83, doi:10.1109/SVR.2012.5.
+[4] B. Mildenhall et al., “NeRF: Representing Scenes as Neural Radiance
+Fields for View Synthesis,” arXiv preprint arXiv:2003.08934, 2020,
+arXiv:2003.08934.
+[5] T. Hu et al., “EfficientNeRF: Efficient Neural Radiance Fields,” in
+Proc. CVPR, New Orleans, LA, USA, Jun. 2022, pp. 12892–12901,
+doi:10.1109/CVPR52688.2022.01256.
+[6] B. Kerbl, G. Kopanas, T. Leimkühler, and G. Drettakis, “3D Gaussian
+Splatting for Real-Time Radiance Field Rendering,” ACM Transactions
+on Graphics (SIGGRAPH 2023), vol. 42, no. 4, Art. 139, Jul. 2023,
+doi: 10.1145/3592433.
+[7] H. Lim, H. Chang, J. B. Choi, and C. M. Yeum, “LiDAR-3DGS:
+LiDAR reinforcement for multimodal initialization of 3D Gaussian splats,” Computers & Graphics, vol. 132, Art. 104293, 2025,
+doi: 10.1016/j.cag.2025.104293.
+[8] Z. Ye, W. Li, S. Liu, P. Qiao, and Y. Dou, “AbsGS: Recovering Fine
+Details in 3D Gaussian Splatting,” in Proc. 32nd ACM Int. Conf. on
+Multimedia (MM ’24), 2024, doi: 10.1145/3664647.3681361.
+[9] J. Zhang, F. Zhan, M. Xu, S. Lu, and E. P. Xing, “FreGS: 3D Gaussian
+Splatting with Progressive Frequency Regularization,” in Proc. 2024
+IEEE/CVF Conf. Comput. Vis. Pattern Recognit. (CVPR), Jun. 2024,
+pp. 21424–21433, doi: 10.1109/CVPR52733.2024.02024.
+[10] Z. Zhang, W. Hu, Y. Lao, T. He, and H. Zhao, “Pixel-GS: Density
+Control with Pixel-Aware Gradient for 3D Gaussian Splatting,” in
+Computer Vision – ECCV 2024, Lecture Notes in Computer Science,
+vol. 15077, Cham: Springer, 2025, pp. 326–342, doi: 10.1007/978-3031-72655-2 19.
+[11] S. S. Mallick, R. Goel, B. Kerbl, F. V. Carrasco, M. Steinberger, and F. De la Torre, “Taming 3DGS: High-Quality Radiance
+Fields with Limited Resources,” in SIGGRAPH Asia 2024 Conference Papers (SA ’24), Tokyo, Japan, Dec. 2024, Art. 2, pp. 1–11,
+doi: 10.1145/3680528.3687694.
+[12] X. Deng, C. Diao, M. Li, R. Yu, and D. Xu, “Efficient Density
+Control for 3D Gaussian Splatting,” arXiv preprint arXiv:2411.10133,
+Nov. 2024, doi: 10.48550/arXiv.2411.10133.
+[13] G. Fang and B. Wang, “Mini-Splatting2: Building 360 Scenes
+within Minutes via Aggressive Gaussian Densification,” arXiv preprint
+arXiv:2411.12788, Nov. 2024, doi: 10.48550/arXiv.2411.12788.
+[14] T. Hu, S. Liu, Y. Chen, T. Shen, and J. Jia, “EfficientNeRF: Efficient Neural Radiance Fields,” in Proc. 2022 IEEE/CVF Conf.
+Comput. Vis. Pattern Recognit. (CVPR), 2022, pp. 12902–12911,
+doi: 10.1109/CVPR52688.2022.01256.
+[15] Z. Yang, X. Gao, Y.-T. Sun, Y.-H. Huang, X. Lyu, W. Zhou, S. Jiao,
+X. Qi, and X. Jin, “Spec-Gaussian: Anisotropic View-Dependent
+Appearance for 3D Gaussian Splatting,” in Advances in Neural Information Processing Systems 37 (NeurIPS 2024), 2024,
+doi: 10.48550/arXiv.2402.15870.
+[16] L. Fan, Y. Yang, M. Li, H. Li, and Z. Zhang, “Trim 3D Gaussian Splatting for Accurate Geometry Representation,” arXiv preprint
+arXiv:2406.07499, 2024, doi: 10.48550/arXiv.2406.07499.
+[17] Y. Gong, L. Yu, and G. Yue, “Isotropic Gaussian Splatting for Real-Time
+Radiance Field Rendering,” arXiv preprint arXiv:2403.14244, 2024,
+doi: 10.48550/arXiv.2403.14244.
+[18] J. Hyung, S. Hong, S. Hwang, J. Lee, J. Choo, and J.-H. Kim,
+“Effective Rank Analysis and Regularization for Enhanced 3D
+Gaussian Splatting,” arXiv preprint arXiv:2406.11672, 2024,
+doi: 10.48550/arXiv.2406.11672.
+[19] L. Huang, J. Guo, J. Dan, R. Fu, S. Wang, Y. Li, and
+Y. Guo, “Spectral-GS: Taming 3D Gaussian Splatting with
+Spectral Entropy,” arXiv preprint arXiv:2409.12771, 2024,
+doi: 10.48550/arXiv.2409.12771.
+[20] Z. Fan, K. Wang, K. Wen, Z. Zhu, D. Xu, and Z. Wang, “LightGaussian: Unbounded 3D Gaussian Compression with 15× Reduction and 200+ FPS,” arXiv preprint arXiv:2311.17245, 2023,
+doi: 10.48550/arXiv.2311.17245.
+[21] S. Qiu, C. Wu, Z. Wan, and S. Tong, “High-Fold 3D Gaussian Splatting
+Model Pruning Method Assisted by Opacity,” Applied Sciences, vol. 15,
+no. 3, Art. 1535, Feb. 2025, doi: 10.3390/app15031535.
+[22] T. Lu, M. Yu, L. Xu, Y. Xiangli, L. Wang, D. Lin, and B. Dai,
+“Scaffold-GS: Structured 3D Gaussians for View-Adaptive Rendering,”
+in Proc. 2024 IEEE/CVF Conf. Comput. Vis. Pattern Recognit. (CVPR),
+2024, pp. 20654–20664, doi: 10.1109/CVPR52733.2024.01952.
+[23] S. Shin, J. Park, and S. Cho, “Locality-aware Gaussian Compression for
+Fast and High-quality Rendering,” in Proc. Int. Conf. Learn. Represent.
+(ICLR), Singapore, 2025, doi: 10.48550/arXiv.2501.05757.
+[24] Z. Kong, Y. Zhang, T. Yang, T. Wang, K. Zhang, B. Wu,
+G. Chen, W. Liu, and W. Luo, “OMG: Occlusion-Friendly Personalized
+Multi-concept Generation in Diffusion Models,” in Computer Vision –
+ECCV 2024, Lecture Notes in Computer Science, vol. 15089, Springer,
+2024, pp. 253–270, doi: 10.1007/978-3-031-72751-1 15.
+[25] S. Niedermayr, J. Stumpfegger, and R. Westermann, “Compressed 3D
+Gaussian Splatting for Accelerated Novel View Synthesis,” in Proc.
+2024 IEEE/CVF Conf. Comput. Vis. Pattern Recognit. (CVPR), 2024,
+pp. 10349–10358, doi: 10.1109/CVPR52733.2024.00985.
+[26] P. Papantonakis, G. Kopanas, B. Kerbl, A. Lanvin, and G. Drettakis,
+“Reducing the Memory Footprint of 3D Gaussian Splatting,” Proceedings of the ACM on Computer Graphics and Interactive Techniques,
+vol. 7, no. 1, Art. 16, May 2024, doi: 10.1145/3651282.
+[27] S. Fridovich-Keil, G. Meanti, F. R. Warburg, B. Recht, and A. Kanazawa,
+“K-Planes: Explicit Radiance Fields in Space, Time, and Appearance,”
+in Proc. 2023 IEEE/CVF Conf. Comput. Vis. Pattern Recognit. (CVPR),
+2023, pp. 12479–12488, doi: 10.1109/CVPR52729.2023.01201.
+[28] C. Lassner and M. Zollhöfer, “Pulsar: Efficient Sphere-based
+Neural Rendering,” in Proc. 2021 IEEE/CVF Conf. Comput.
+Vis. Pattern Recognit. (CVPR), Jun. 2021, pp. 1440–1449,
+doi: 10.1109/CVPR46437.2021.00149.
+[29] H. Zhao, O. Gallo, I. Frosio, and J. Kautz, “Loss Functions for Image
+Restoration with Neural Networks,” IEEE Trans. Comput. Imaging,
+vol. 3, no. 1, pp. 47–57, Mar. 2017, doi: 10.1109/TCI.2016.2644865.
+[30] P. Charbonnier, L. Blanc-Féraud, G. Aubert, and M. Barlaud,
+“Deterministic edge-preserving regularization in computed imaging,”
+IEEE Trans. Image Process., vol. 6, no. 2, pp. 298–311, 1997,
+doi: 10.1109/83.551699.
+[31] A. Paszke et al., “PyTorch: An Imperative Style, High-Performance
+Deep Learning Library,” in Advances in Neural Information Processing
+Systems 32 (NeurIPS 2019), 2019, doi: 10.48550/arXiv.1912.01703.
+[32] S. Bonopera, P. Hedman, J. Esnault, S. Prakash, S. Rodriguez, T. Thonat,
+M. Benadel, G. Chaurasia, J. Philip, and G. Drettakis, “SIBR: A System
+for Image-Based Rendering,” Inria, software, 2020. [Online]. Available:
+https://sibr.gitlabpages.inria.fr. Accessed: Aug. 13, 2025.
+[33] R. Zhang, P. Isola, A. A. Efros, E. Shechtman, and O. Wang, “The
+Unreasonable Effectiveness of Deep Features as a Perceptual Metric,”
+in Proc. IEEE/CVF Conf. Comput. Vis. Pattern Recognit. (CVPR), 2018,
+pp. 586–595, doi: 10.1109/CVPR.2018.00068.
+[34] J. T. Barron, B. Mildenhall, D. Verbin, P. P. Srinivasan, and P. Hedman,
+“Mip-NeRF 360 dataset,” project page, 2022. [Online]. Available: https:
+//jonbarron.info/mipnerf360. Accessed: Aug. 13, 2025.
+[35] A. Knapitsch, J. Park, Q.-Y. Zhou, and V. Koltun, “Tanks
+and Temples: Benchmarking Large-Scale Scene Reconstruction,”
+ACM Transactions on Graphics, vol. 36, no. 4, Art. 78, 2017,
+doi: 10.1145/3072959.3073599.
+12
+APPENDIX I. P ER -S CENE A BLATION R ESULTS
+This appendix reports concise per-scene results for the six variants defined in Section V. E. — (a) Full Micro-Splatting, (b) –
+Covariance regularization, (c) – High-frequency focus, (d) – Importance-score pruning, (e) – Redundancy-driven merging, (f)
+– Isotropy enforcement—under identical splits, iteration budgets, and schedules. We list PSNR/SSIM/LPIPS, FPS, model size
+(MB), splat count (×10³), and radius-bin distributions. Section V. E. summarizes averages over all 8 scenes (Table 4); a full
+per-scene example for kitchen appears in Table 4 and Fig. 10.
+Mip-NeRF 360 Dataset. Mip-NeRF 360 [34] is a widely used multi-view dataset with 360° camera coverage and unbounded
+scene extent. It contains challenging indoor scenes with glossy surfaces, thin structures, high-frequency textures, and large lowtexture regions—conditions that expose aliasing and over-smoothing in 3DGS. We evaluate kitchen, bonsai, garden, counter,
+room, using identical splits and training budgets across all ablations.
+Fig. A1. Qualitative results of the ablation study on Mip-NeRF 360 [34]: Per-scene ablation (kitchen, bonsai, garden, counter, room) over 30k iterations.
+Qualitative comparisons for variants (a) Full, (b) – Covariance reg., (c) – High-freq focus, (d) – Pruning, (e) – Merging, (f) – Hard-isotropy. Red boxes mark
+challenging high-frequency regions; Full Micro-Splatting preserves edges and textures while variants (b,c) either blur detail or misallocate capacity.
+13
+Table A1
+Q UANTITATIVE R ESULTS AND S PLAT C ARDINALITY OF A BLATION S TUDY ON M IP -N E RF 360.
+14
+Tanks & Temples Dataset. Tanks & Temples [35] is a large-scale multi-view benchmark with wide baselines, complex
+geometry, and challenging lighting. We evaluate Ignatius, Church, Truck, which stress high-frequency stone relief, repetitive
+masonry, and thin metallic edges/reflections. All ablations use identical splits and training budgets as in Section V. E.
+Fig. A2. Qualitative results of the ablation study on Mip-NeRF 360 [34]: Per-scene ablation (kitchen, bonsai, garden, counter, room) over 30k iterations.
+Qualitative comparisons for variants (a) Full, (b) – Covariance reg., (c) – High-freq focus, (d) – Pruning, (e) – Merging, (f) – Hard-isotropy. Red boxes mark
+challenging high-frequency regions; Full Micro-Splatting preserves edges and textures while variants (b,c) either blur detail or misallocate capacity.
+Table A2
+Q UANTITATIVE R ESULTS AND S PLAT C ARDINALITY OF A BLATION S TUDY ON M IP -N E RF 360.

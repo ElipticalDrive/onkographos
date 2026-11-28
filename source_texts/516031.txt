@@ -1,0 +1,144 @@
+Description Stack a time-varying scalar field's per-tick slices along a third (time) axis into a volume and extract the boundary between its zero and positive regions as a surface-net mesh -- the solid, with its empty regions forming tun...
+
+feat(mesh-viewer): space-time iso-surface mesh of a stacked scalar field (boundary extraction) · Issue #1868 · iamacoffeepot/aether · GitHub
+Skip to content
+You signed in with another tab or window. Reload to refresh your session.
+You signed out in another tab or window. Reload to refresh your session.
+You switched accounts on another tab or window. Reload to refresh your session.
+Dismiss alert
+feat(mesh-viewer): space-time iso-surface mesh of a stacked scalar field (boundary extraction) #1868
+New issue
+Copy link
+New issue
+Copy link
+Closed
+#1896
+Closed
+feat(mesh-viewer): space-time iso-surface mesh of a stacked scalar field (boundary extraction)#1868
+#1896
+Copy link
+Labels
+type:featNew featureNew feature
+Description
+iamacoffeepot
+opened on Jun 14, 2026
+Issue body actions
+Description
+Stack a time-varying scalar field's per-tick slices along a third (time) axis into a volume and extract the boundary between its zero and positive regions as a surface-net mesh -- the solid, with its empty regions forming tunnels through it. Costs O(boundary area) rather than O(volume cells) by meshing only the sign-change surface. Renders through the existing mesh / surface-nets path and camera (view_proj).
+Builds on the field eval and the reachability solver (#1857). Surfaces: crates/aether-mesh-viewer/, crates/aether-mesh/, crates/aether-math/. Crate home (mesh-viewer vs a new visualization crate) is a scope-time call. Mechanism only -- iso-surfacing a stacked scalar field.
+Problem statement
+aether can mesh a DSL/OBJ description into triangles (aether-mesh, ADR-0053) and replay them to aether.render through the view_proj camera (aether-mesh-viewer), but it has no way to turn a dense scalar volume into a surface. The reachability solver (#1857) produces a ScalarField { width, height, ticks, values: Vec<u32> } — a time-varying field whose per-tick slices already stack densely along the tick axis (row-major values[t*H*W + y*W + x]) — and there is no primitive that extracts the boundary between its zero and positive regions as a renderable mesh. This issue adds that: a naive-surface-nets pass that meshes only the sign-change interface of a stacked scalar volume, so a field becomes a solid whose empty regions read as tunnels through it.
+The pass has to be cheap and live-renderable. Done means: a pure surface_net meshing function in aether-mesh that turns a dense u32 volume + an iso threshold into a Vec<Triangle> costing O(boundary area) (sign-change cells only — an all-outside volume emits zero triangles, an all-inside volume emits only its outer shell, not its interior); a .field arm in the mesh viewer that decodes a ScalarField, meshes it, and replays the triangles to aether.render every frame through the existing cache-and-replay path; and hand-checked correctness on small volumes (single voxel, empty pocket, boundary clamping, sentinel classification) asserted by triangle/vertex counts and bounding boxes — no GPU capture required.
+Design notes
+Chosen approach
+Two surfaces, no new crate. The meat is a pure naive-surface-nets mesher in aether-mesh — pub fn surface_net(width, height, depth, values: &[u32], iso_threshold: u32, cell: Vec3, origin: Vec3) -> Vec<Triangle> in a new surface_net module, re-exported from lib.rs. It reuses the crate's existing Triangle { vertices: [Vec3; 3], color: u32 } (mesh.rs:44) and aether_math::Vec3, sits alongside the DSL mesher under ADR-0053's "the crate produces triangles" charter, and is already in the wasm build path (the viewer compiles aether-mesh into its cdylib). The algorithm is the dual (one-vertex-per-cell) variant, not marching cubes:
+Samples live at the W*H*D grid points; cells are the (W-1)*(H-1)*(D-1) cubes between 8 corner samples. A corner is inside iff value >= iso_threshold. Out-of-bounds corners count as outside, so an inside region touching the volume edge caps cleanly (a virtual outside shell).
+A cube straddles the surface iff its 8 corners are not all the same side. Only straddling cubes emit anything — this is the O(boundary area) win: interior-full and interior-empty cubes are skipped, so cost tracks the sign-change surface, not the W*H*D volume.
+Each straddling cube gets exactly one vertex (naive placement: the cube centroid, mapped to world via origin + cell * (i, j, k)). For each of the three axis-aligned grid edges whose two endpoints differ in side, the (up to four) cubes sharing that edge are connected into a quad, wound by the sign direction so the normal faces the inside region; each quad fans to two Triangles with a flat palette color.
+The field is consumed through #1857's shared ScalarField kind — no new volume kind. The stacking the title describes is the identity: the dense row-major field is the stacked volume, so the mesher reads values[t*H*W + y*W + x] with (x, y, t) as (x, y, z) (time → world-z, matching the camera's depth convention) and depth = ticks. The viewer integration is a new .field arm on the existing aether.mesh.load { namespace, path } file path in aether-mesh-viewer: load_bytes (runtime.rs:243) gains a try_replace_field branch that decodes the ScalarField from the read bytes, calls surface_net with the zero/positive convention (iso_threshold = 1, so cost-0 cells are outside and every positive value — the u32::MAX unreachable sentinel included — is inside, no special case), caches the resulting Vec<DrawTriangle>, and replays them every Render stage exactly like the DSL/OBJ paths. The whole cache, replay (on_render), parked-reply, and MeshLoadResult machinery is reused verbatim; the only viewer additions are the extension arm and a binary-decode dependency.
+The crate home is settled: the mesher lives in aether-mesh (library-only meshing, already wasm-built, reuses Triangle/Vec3), the integration in aether-mesh-viewer (the render actor). No new visualization crate — there is no no_std/reuse forcing function and no build-cost dodge, so a crate would not earn its place.
+Rejected options
+A new visualization crate (the body's open question) — nothing forces it: aether-mesh is already the meshing library and already compiles into the wasm viewer, so the mesher is a sibling module, not a crate split.
+Marching cubes — per-edge vertices, a 256-case table, and more triangles. Surface nets is dual (one vertex per straddling cell), matches the issue's "surface-net mesh" wording, and emits fewer triangles for the same boundary.
+A native #[transform] ScalarField -> Mesh on the DAG (ADR-0048, symmetric with feat(capabilities): minimum-cost reachability solver over a discretized space-time scalar field #1857's solver) — would produce a content-addressed mesh handle, but there is no path today for a wasm viewer to fetch a handle's bytes and replay them; it would need a new Mesh output kind plus handle-fed-viewer plumbing. Heavier, and rendering is the stated goal. Left as a follow-on (see Side findings).
+A new inline mail kind carrying the field ({ field: ScalarField }) — the canonical 64×64×1800 field is ~29 MB of u32; inlining it in mail is wasteful when the viewer already fetches files through aether.fs. The .field file arm reuses that transport.
+A new dedicated viewer kind for iso-surface params — the zero/positive boundary is fixed by the issue and the world placement is a fixed convention, so the existing aether.mesh.load extension dispatch carries it with no new wire kind. The pure surface_net still takes iso_threshold/cell/origin so the library stays reusable; the viewer pins the defaults.
+Affected surfaces
+crates/aether-mesh/src/surface_net.rs (new) — the pure surface_net mesher; iterative dense sweep (no recursion, per the load-bearing-code rule), reuses Triangle + aether_math::Vec3.
+crates/aether-mesh/src/lib.rs — pub mod surface_net; + pub use.
+crates/aether-mesh-viewer/src/runtime.rs — .field arm in load_bytes + a try_replace_field that decodes ScalarField, calls surface_net, and caches Vec<DrawTriangle> (reusing self.triangles, on_render, and the MeshLoadResult reply).
+crates/aether-mesh-viewer/Cargo.toml — a binary-decode dependency for ScalarField (postcard, matching the Serde-derived kind; or aether-codec). Small.
+Depends on crates/aether-kinds/src/lib.rs ScalarField from feat(capabilities): minimum-cost reachability solver over a discretized space-time scalar field #1857 — not added here; this issue consumes it (hard cross-dep, see Sub-issues note).
+crates/aether-capabilities/src/render.rs — unchanged; the existing aether.render DrawTriangle accumulate + view_proj camera renders the mesh as-is.
+No new ADR. Additive under ADR-0053 (the crate produces triangles; surface nets is a second producer alongside the DSL mesher) and ADR-0066 (shared ScalarField kind). No trait, wire, dispatch, or lifecycle change. Soft flag: this widens aether-mesh from "DSL mesher" to "meshing library" with a second input domain — if a reviewer reads that as a charter change a one-paragraph ADR note could be added, but it is not load-bearing-architectural.
+Implementation plan
+Model routing: model:opus — surface nets carries non-obvious judgment (dual-grid cell/edge indexing, one-vertex-per-cell placement, quad winding for outward normals, boundary clamping, threshold/sentinel classification), not mechanical execution from the plan.
+Surface-nets mesher — add crates/aether-mesh/src/surface_net.rs with pub fn surface_net(width, height, depth, values: &[u32], iso_threshold: u32, cell: Vec3, origin: Vec3) -> Vec<Triangle>: classify corners (value >= iso_threshold, out-of-bounds = outside), emit one centroid vertex per straddling cube, and a sign-wound quad (two Triangles, flat color) per sign-change grid edge. Iterative + dense; export from lib.rs. — aether-mesh — unit/integration tests in the mesh_*/assert_eq!(tris.len(), N) style: single inside sample in a 3x3x3 volume meshes to a closed 12-triangle surface (mirrors the box=12 precedent); all-outside volume → 0 triangles; all-inside cube → only the outer shell (count matches the surface-area formula, does not scale with interior depth — the O(area) guarantee); a volume with an interior empty pocket emits more than the shell (a tunnel) and its vertex Aabb::from_points matches the volume extent; corner winding gives outward normals on the single-voxel case; iso_threshold boundary at zero/positive with u32::MAX cells classified inside (no panic, no special case).
+Viewer .field arm — in crates/aether-mesh-viewer/src/runtime.rs, add a .field branch to load_bytes and a try_replace_field(bytes) that decodes the ScalarField, calls surface_net with iso_threshold = 1 and a fixed world cell/origin (time → z), maps Triangles to DrawTriangles through the existing palette helper, and replaces self.triangles; reuse the LoadOutcome / MeshLoadResult reply path. Add the decode dep to Cargo.toml. — aether-mesh-viewer — unit test: load_bytes on a postcard-encoded ScalarField replaces the cache with a non-empty triangle list and yields MeshLoadResult { ok: true }; a malformed buffer keeps the prior cache and reports ok: false.
+Render-path smoke (structural, no GPU capture) — drive the viewer through the in-process aether-substrate-bundle TestBench (already a dev-dep of the viewer): write a small ScalarField to a namespace, aether.mesh.load the .field path, advance, and assert count_observed(DrawTriangle) > 0. Assert mesh structure (triangle count / presence), not pixels — per the GPU-test split (crates/aether-capabilities/src/test_bench.rs has no GPU-capture host). — aether-mesh-viewer tests.
+Two crates touched (aether-mesh + aether-mesh-viewer) but one tightly-coupled feature (the iso-surfacing pass and its single integration point), so this is a single PR — no sub-issues.
+Sub-issues
+None — single PR. One hard cross-dependency: #1857 must land ScalarField in aether-kinds first (this issue consumes that kind; do not redefine it here).
+Side findings
+The body's "existing surface-nets path" does not exist yet — this issue adds the surface-nets pass. The existing path it renders through is the DrawTriangle replay + view_proj camera (aether-mesh-viewer → aether.render). Wording only; no work implied. — crate:mesh-viewer
+No transport gets a feat(capabilities): minimum-cost reachability solver over a discretized space-time scalar field #1857 field handle to the viewer — feat(capabilities): minimum-cost reachability solver over a discretized space-time scalar field #1857's solver output is a content-addressed handle in the substrate handle store (ADR-0049), but no MCP tool or path dumps a handle's bytes to a file, and a wasm component cannot read the handle store. This issue assumes the ScalarField arrives as .field file bytes (agent-written via aether.fs.write, or a prior step). A DAG-native ScalarField handle -> Mesh handle transform plus a handle-fed viewer would compose more cleanly but is a follow-on, not this issue. — crate:capabilities / crate:mesh-viewer
+A convoluted V can produce a heavy boundary — cost is O(boundary area), but a highly fragmented field over ~1800 ticks could still emit a large triangle count that exceeds the render cap's vertex_buffer_bytes (RenderConfig, crates/aether-capabilities/src/render.rs). No clamp on the viewer's triangle buffer today; worth a note (decimation or buffer sizing) if the canonical field stresses it. — crate:capabilities
+Activity
+iamacoffeepot
+added this to aether 0.4on Jun 14, 2026
+iamacoffeepot
+added
+type:featNew featureNew feature
+crate:mesh-viewer
+on Jun 14, 2026
+github-project-automation
+moved this to Todo in aether 0.4on Jun 14, 2026
+iamacoffeepot
+added
+phase:plan
+size:l
+model:opus
+phase:ready
+phase:executing
+and removed
+phase:plan
+phase:ready
+on Jun 14, 2026
+github-project-automation
+moved this from Todo to In Progress in aether 0.4on Jun 15, 2026
+iamacoffeepot
+added a commit that references this issue on Jun 15, 2026
+feat(mesh-viewer): space-time iso-surface mesh of a stacked scalar fi…
+...
+This issue will close once commit fee9cca is merged into the 'main' branch.
+fee9cca
+iamacoffeepot
+closed this as completedin #1896on Jun 15, 2026
+iamacoffeepot
+removed
+phase:executing
+on Jun 15, 2026
+github-project-automation
+moved this from In Progress to Done in aether 0.4on Jun 15, 2026
+iamacoffeepot
+added a commit that references this issue on Jun 15, 2026
+feat(mesh-viewer): trajectory and density overlay on a space-time fie…
+...
+099eaf2
+iamacoffeepot
+removed
+crate:mesh-viewer
+on Aug 11, 2026
+github-actions
+added
+crate:mesh-viewer
+on Aug 11, 2026
+iamacoffeepot
+removed
+crate:mesh-viewer
+on Aug 11, 2026
+github-actions
+added
+crate:mesh-viewer
+on Aug 11, 2026
+Sign up for free to join this conversation on GitHub. Already have an account? Sign in to comment
+Metadata
+Metadata
+Assignees
+No one assigned
+Labels
+type:featNew featureNew feature
+Projects
+aether 0.4
+Status
+Done
+Show more project fields
+Milestone
+No milestone
+Relationships
+None yet
+Development
+No branches or pull requests
+Issue actions
+Open in GitHub Copilot app
+You can’t perform that action at this time.

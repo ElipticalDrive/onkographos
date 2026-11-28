@@ -1,0 +1,99 @@
+# Adaptive Time Step for Spring Model Integration
+
+Also called: Adaptive Time Step for Spring Model, Spring Model Adaptive Step
+
+## Overview
+An algorithm to determine the time step $T$ for integrating the position adjustment of points in a spring model, ensuring stability and preventing destruction of the connection structure during deformation [S1]. It sets the step size based on the ratio of displacement to force magnitude, scaled by a user parameter, to balance convergence speed against structural integrity [S1].
+
+## How it works
+**Inputs:**
+- Force field $F(x)$ for each point $x$ in the mesh.
+- Original position $x_0$ for each point.
+- Current position $x$ for each point.
+- User parameter $\gamma$ (gamma).
+
+**Outputs:**
+- Time step $T$.
+
+**Data Structures:**
+- Points are indexed by $x$.
+- Positions $x$ and $x_0$ are vectors in $\mathbb{R}^3$.
+- Forces $F(x)$ are vectors in $\mathbb{R}^3$.
+
+**Steps:**
+1. For each point $x$, calculate the displacement vector $d = x - x_0$.
+2. Calculate the magnitude of the displacement $\|d\| = \|x - x_0\|$.
+3. For each point $x$, calculate the magnitude of the force $\|F(x)\|$.
+4. Compute the ratio $r_x = \frac{\|x - x_0\|}{\|F(x)\|}$ for each point $x$.
+5. Find the minimum ratio across all points: $r_{min} = \min_x (r_x)$.
+6. Calculate the time step $T = \gamma \cdot r_{min}$.
+
+**Formula:**
+$$T = \gamma \cdot \min_x \left( \frac{\max_{x_0} \|x - x_0\|}{\|F(x)\|} \right)$$
+
+Where:
+- $\gamma$ is the user-specified parameter.
+- $\min_x$ is the minimum over all points $x$.
+- $\|x - x_0\|$ is the Euclidean distance from the original position $x_0$ to the current position $x$.
+- $\|F(x)\|$ is the magnitude of the force at $x$.
+
+**Parameters:**
+- $\gamma$: A user-specified parameter controlling the time step magnitude. Typical value: 0.1 [S1].
+
+**Pitfalls:**
+- If $T$ is too small, integration takes too many iterations (slow) [S1].
+- If $T$ is too big, the solution may never stabilize [S1].
+- The adaptive step prevents destroying the connection structure by constraining maximum deformation per iteration [S1].
+
+**Pseudocode:**
+> **Unverified code.** The code below did not pass a test run against a reference implementation, or no test fits it, so it may contain errors.
+
+```python
+def calculate_adaptive_time_step(points, forces, gamma=0.1):
+    """
+    Calculate the adaptive time step for spring model integration.
+    
+    Args:
+        points: List of current positions x.
+        forces: List of force vectors F(x) corresponding to each point.
+        gamma: User-specified parameter (default 0.1).
+        
+    Returns:
+        T: The calculated time step.
+    """
+    min_ratio = float('inf')
+    
+    for x, F in zip(points, forces):
+        # Calculate displacement magnitude
+        dx = [x[i] - points_original[i] for i in range(3)] # Note: points_original must be available
+        displacement_mag = math.sqrt(sum(d**2 for d in dx))
+        
+        # Calculate force magnitude
+        force_mag = math.sqrt(sum(f**2 for f in F))
+        
+        # Avoid division by zero
+        if force_mag == 0:
+            continue
+            
+        ratio = displacement_mag / force_mag
+        if ratio < min_ratio:
+            min_ratio = ratio
+            
+    T = gamma * min_ratio
+    return T
+```
+Note: The pseudocode assumes `points_original` is accessible. The source formula uses $\max_{x_0} \|x - x_0\|$, which implies the maximum distance from the original position. In the context of the algorithm described, this is interpreted as the displacement magnitude for each point. The "max" notation in the source formula might refer to the maximum over all points in the minimization step, or it might be a typo for just $\|x - x_0\|$. Given the step description "maximum distance from its original position $x_0$ to its current position $x$", it likely means the displacement magnitude. The minimization is over all points.
+
+## Operating characteristics
+- **Time Complexity:** $O(N)$ where $N$ is the number of points, as it requires a single pass to compute ratios and find the minimum.
+- **Memory Complexity:** $O(1)$ additional memory beyond storing the points and forces.
+- **Strengths:** Prevents structural destruction during deformation by constraining maximum deformation per iteration [S1]. Balances convergence speed and stability [S1].
+- **Limitations:** Requires calculation of force magnitudes and displacements for all points. Performance depends on the choice of $\gamma$ [S1].
+- **When to use:** When integrating spring models for volume deformation, especially where stability is critical [S1].
+- **When not to use:** When computational cost of calculating forces for all points is prohibitive, or when a fixed time step is sufficient and known to be stable.
+
+## Background
+Originated in the context of volume deformation for tensor visualization [S1]. The method was employed to ensure a reasonable time step for each round of integration in spring models, addressing the trade-off between integration speed and solution stability [S1]. Tested on data sets including single point load, delta wing, and cylinder with hemispherical cap [S1].
+
+## Sources
+[S1] Volume Deformation For Tensor Visualization, https://avis.soe.ucsc.edu/images.tensordef/vis02.tensordef.pdf, fetched 2026-10-28

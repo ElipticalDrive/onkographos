@@ -1,0 +1,265 @@
+# Analytical Line Integrals of 3D Anisotropic Gabor Kernel
+
+Also called: Analytical Gabor Kernel Integration, Closed-form definite line integrals for Gabor kernel, Closed-form definite line integrals for projected 3D anisotropic Gabor kernel, Finite-domain Gabor line integral
+
+## Overview
+This method computes the exact line integral of a 3D anisotropic Gabor kernel along an arbitrary ray segment, avoiding the numerical sampling errors inherent in discrete voxel-based approaches [S1]. It enables distance sampling for multiple scattering by providing a closed-form cumulative distribution function, distinguishing it from splatting-based methods that rely on local affine approximations [S1]. It builds on [Analytic 3D Gaussian Ray Tracing for Tomography](3017-analytic-3d-gaussian-ray-tracing-for-tomography.md) by extending the analytical integration to include the oscillatory cosine modulation of the Gabor kernel.
+
+## How it works
+**Inputs and Outputs:**
+*   **Input:** Ray segment defined by origin $\mathbf{x}_0$ and direction $\tilde{\mathbf{v}}$ (normalized), Gabor kernel parameters: mean $\boldsymbol{\mu}$, covariance $\Sigma$, and modulation vector $\vec{\omega}$.
+*   **Output:** The definite line integral value $I$ over the segment $[t_0, t_1]$.
+
+**Data Structures:**
+The Gabor kernel is defined by:
+$$ g(x; \boldsymbol{\mu}, \Sigma, \vec{\omega}) = \frac{1}{\sqrt{8\pi^3|\Sigma|}} e^{-\frac{1}{2}(x-\boldsymbol{\mu})^T \Sigma^{-1}(x-\boldsymbol{\mu})} \cos\left(\vec{\omega}^T(x-\boldsymbol{\mu})\right) $$
+where $\vec{\omega}$ is the effective modulation vector [S1].
+
+**Steps:**
+
+1.  **Parameterize the Ray:**
+    Define the ray line as $x(t) = \mathbf{x}_0 + \tilde{\mathbf{v}}t$ for $t \in [t_0, t_1]$.
+    Define the offset vector $d = \mathbf{x}_0 - \boldsymbol{\mu}$ [S1].
+
+2.  **Compute Partial Whitening Scalars:**
+    Calculate scalar quantities resulting from partial whitening (translation and rotation to local coordinates) [S1]:
+    $$ a = \tilde{\mathbf{v}}^T \Sigma^{-1} \tilde{\mathbf{v}} $$
+    $$ \beta = \tilde{\mathbf{v}}^T \Sigma^{-1} d $$
+    $$ \gamma = d^T \Sigma^{-1} d $$
+    $$ B = \vec{\omega}^T \tilde{\mathbf{v}} $$
+    $$ \delta = \vec{\omega}^T d $$
+    These reduce the exponent and cosine argument to quadratic and linear forms in $t$:
+    $$ (d+t\tilde{\mathbf{v}})^T \Sigma^{-1}(d+t\tilde{\mathbf{v}}) = at^2 + 2\beta t + \gamma $$
+    $$ \vec{\omega}^T(d+t\tilde{\mathbf{v}}) = Bt + \delta $$
+
+3.  **Formulate Complex Exponential Integral:**
+    Use Euler's formula $\cos \theta = \Re(e^{i\theta})$ to rewrite the integral $I$:
+    $$ I = \frac{1}{\sqrt{8\pi^3|\Sigma|}} \Re\left\{e^{i\delta} e^{-\frac{1}{2}\gamma} \int_{t_0}^{t_1} \exp\left(-\frac{1}{2}at^2 - \beta t + iBt\right) dt\right\} $$
+
+4.  **Complete the Square:**
+    Transform the exponent:
+    $$ -\frac{1}{2}at^2 - \beta t + iBt = -\frac{1}{2}a\left(t - \frac{-\beta + iB}{a}\right)^2 + \frac{(-\beta + iB)^2}{2a} $$
+
+5.  **Evaluate Finite-Domain Integral:**
+    Define auxiliary variables:
+    $$ \alpha = \sqrt{\frac{a}{2}}, \quad \zeta = \frac{-\beta + iB}{\sqrt{2a}} $$
+    The closed-form solution is:
+    $$ I = \frac{1}{\sqrt{8\pi^3|\Sigma|}} \Re\left\{e^{i\delta} e^{-\frac{1}{2}\gamma} \sqrt{\frac{\pi}{2a}} \exp\left(\frac{(-\beta + iB)^2}{2a}\right) \times [\operatorname{erf}(\alpha t_1 - \zeta) - \operatorname{erf}(\alpha t_0 - \zeta)]\right\} $$
+    [S1]
+
+    **Alternative Whitened Formulation:**
+    In a fully whitened space (including scale), the covariance becomes identity, simplifying $a=1$. The integral is expressed using whitened ray parameters $\mathbf{p}_W, \vec{v}_W$ and frequency $\vec{k}_W$:
+    $$ W = R^T S^{-1}, \quad \mathbf{p}_W = W(\mathbf{x}_0 - \boldsymbol{\mu}), \quad \tilde{\mathbf{v}}_W = \frac{W \cdot \tilde{\mathbf{v}}}{\|W \cdot \tilde{\mathbf{v}}\|}, \quad \tilde{\mathbf{k}}_W = W \cdot \tilde{\mathbf{\sigma}} $$
+    where $\Sigma = R S R^T$. The integral becomes:
+    $$ I = \frac{\mathcal{K}}{2} e^{-\frac{1}{2} (c - b^2 + \Omega^2)} \times \text{Re} \left\{ e^{i(d - \Omega b)} \left[ \text{erf} \left( \frac{t_1 + b - i\Omega}{\sqrt{2}} \right) - \text{erf} \left( \frac{t_0 + b - i\Omega}{\sqrt{2}} \right) \right] \right\} $$
+    where $b = \mathbf{p}_W \cdot \vec{v}_W$, $c = \mathbf{p}_W \cdot \mathbf{p}_W$, $\Omega = \vec{k}_W \cdot \vec{v}_W$, $d = \vec{k}_W \cdot \mathbf{p}_W$, and $\mathcal{K} = \frac{1}{2\pi\sqrt{|\Sigma|} \cdot \|\mathbf{W} \cdot \vec{v}\|}$ [S1].
+
+6.  **Infinite-Domain Limit:**
+    If $t_0 \rightarrow -\infty$ and $t_1 \rightarrow +\infty$, use $\operatorname{erf}(\pm\infty) = \pm 1$ to simplify:
+    $$ I_\infty = \frac{1}{\sqrt{8\pi^3|\Sigma|}} \sqrt{\frac{2\pi}{a}} \exp\left(-\frac{1}{2}\left(\gamma - \frac{\beta^2}{a}\right)\right) \exp\left(-\frac{B^2}{2a}\right) \cos\left(\delta - \frac{\beta B}{a}\right) $$
+    [S1]
+
+**Parameters:**
+*   **Segment Size Threshold:** $\approx 10^{-4}$ in whitened, local space units. Segments smaller than this use the midpoint rule instead of the error function series [S1].
+*   **Max Taylor Terms:** 16 terms for the complex error function approximation [S1].
+
+**Edge Cases and Pitfalls:**
+*   **Small Segments:** For segments below the threshold, the midpoint rule approximation $I \approx \Delta t \cdot g(x(t_{mid}))$ is used to avoid numerical instability of the erf series [S1].
+*   **Complex Error Function:** The computation of $\operatorname{erf}(z)$ for complex $z$ requires careful handling. A truncated Taylor expansion is used to avoid branching between multiple algorithms [S1].
+
+**Pseudocode:**
+
+> **Unverified code.** The code below did not pass a test run against a reference implementation, or no test fits it, so it may contain errors.
+
+```python
+import math
+import cmath
+
+def compute_gabor_line_integral(x0, v, t0, t1, mu, Sigma, omega):
+    """
+    Computes the line integral of a 3D anisotropic Gabor kernel along a ray segment.
+    
+    Args:
+        x0: Ray origin (3D vector)
+        v: Ray direction (3D vector, assumed normalized)
+        t0, t1: Segment bounds
+        mu: Kernel mean (3D vector)
+        Sigma: Kernel covariance (3x3 matrix)
+        omega: Effective modulation vector (3D vector)
+        
+    Returns:
+        Integral value I
+    """
+    # 1. Offset
+    d = x0 - mu
+    
+    # 2. Partial whitening scalars
+    # Note: Sigma_inv is the inverse of Sigma
+    Sigma_inv = inverse(Sigma)
+    a = dot(v, dot(Sigma_inv, v))
+    beta = dot(v, dot(Sigma_inv, d))
+    gamma = dot(d, dot(Sigma_inv, d))
+    B = dot(omega, v)
+    delta = dot(omega, d)
+    
+    # 3. Constants
+    prefactor = 1.0 / math.sqrt(8 * math.pi**3 * determinant(Sigma))
+    
+    # Handle small segment size optimization
+    segment_length = t1 - t0
+    threshold = 1e-4 # Whitened space units approximation
+    
+    if segment_length < threshold:
+        # Midpoint rule approximation
+        t_mid = (t0 + t1) / 2.0
+        x_mid = x0 + v * t_mid
+        # Evaluate Gabor kernel at midpoint
+        diff = x_mid - mu
+        exp_term = math.exp(-0.5 * dot(diff, dot(Sigma_inv, diff)))
+        cos_term = math.cos(dot(omega, diff))
+        kernel_val = prefactor * exp_term * cos_term
+        return kernel_val * segment_length
+
+    # 4. Complex error function arguments
+    # alpha = sqrt(a/2)
+    # zeta = (-beta + i*B) / sqrt(2*a)
+    # erf_arg(t) = alpha * t - zeta
+    
+    sqrt_a_2 = math.sqrt(a / 2.0)
+    sqrt_2a = math.sqrt(2.0 * a)
+    
+    # Complex number for zeta
+    zeta_real = -beta / sqrt_2a
+    zeta_imag = B / sqrt_2a
+    
+    # Helper for erf term
+    def erf_term(t):
+        # z = alpha * t - zeta
+        z_real = sqrt_a_2 * t - zeta_real
+        z_imag = -zeta_imag
+        return complex_error_function_real(z_real, z_imag)
+
+    # 5. Compute the exponential part outside the erf
+    # exp_part = exp( (-beta + iB)^2 / (2a) )
+    # (-beta + iB)^2 = beta^2 - B^2 - 2i*beta*B
+    # Divide by 2a
+    num_real = beta**2 - B**2
+    num_imag = -2.0 * beta * B
+    exp_arg_real = num_real / (2.0 * a)
+    exp_arg_imag = num_imag / (2.0 * a)
+    
+    exp_outer = math.exp(-0.5 * gamma) * math.exp(exp_arg_real)
+    exp_outer_imag = math.exp(-0.5 * gamma) * math.exp(exp_arg_real) * math.sin(exp_arg_imag) # Not needed for Re{...} directly, but good for debugging
+    
+    # The term inside Re{...}
+    # e^(i*delta) * exp_outer * sqrt(pi/(2a)) * [erf(t1) - erf(t0)]
+    
+    sqrt_pi_2a = math.sqrt(math.pi / (2.0 * a))
+    
+    # Calculate erf differences
+    erf_t1 = erf_term(t1)
+    erf_t0 = erf_term(t0)
+    erf_diff = erf_t1 - erf_t0
+    
+    # Complex multiplication: e^(i*delta) * (erf_diff)
+    # e^(i*delta) = cos(delta) + i*sin(delta)
+    cos_delta = math.cos(delta)
+    sin_delta = math.sin(delta)
+    
+    # (cos_delta + i*sin_delta) * (erf_diff_real + i*erf_diff_imag)
+    # Real part = cos_delta * erf_diff_real - sin_delta * erf_diff_imag
+    real_part = cos_delta * erf_diff.real - sin_delta * erf_diff.imag
+    
+    # Combine with exp_outer and sqrt_pi_2a
+    # Result = prefactor * Re{ exp_outer * sqrt_pi_2a * (complex product) }
+    # Note: exp_outer is real in the derivation above? 
+    # Wait, exp( (-beta + iB)^2 / 2a ) is complex.
+    # Let's re-evaluate the complex exponential factor carefully.
+    
+    # Term: exp( (-beta + iB)^2 / 2a )
+    # Let Z = (-beta + iB)^2 / 2a
+    # Z = (beta^2 - B^2 - 2i beta B) / 2a
+    # exp(Z) = exp(Re(Z)) * (cos(Im(Z)) + i sin(Im(Z)))
+    
+    Z_real = (beta**2 - B**2) / (2.0 * a)
+    Z_imag = (-2.0 * beta * B) / (2.0 * a)
+    
+    exp_Z_real = math.exp(Z_real) * math.cos(Z_imag)
+    exp_Z_imag = math.exp(Z_real) * math.sin(Z_imag)
+    
+    # Now multiply exp_Z (complex) by (erf_diff) (complex)
+    # P = exp_Z * erf_diff
+    P_real = exp_Z_real * erf_diff.real - exp_Z_imag * erf_diff.imag
+    P_imag = exp_Z_real * erf_diff.imag + exp_Z_imag * erf_diff.real
+    
+    # Now multiply by e^(i*delta)
+    # Q = e^(i*delta) * P
+    # Q_real = cos(delta)*P_real - sin(delta)*P_imag
+    Q_real = cos_delta * P_real - sin_delta * P_imag
+    
+    # Final result
+    # I = prefactor * Re{ e^(-gamma/2) * sqrt(pi/2a) * Q }
+    # e^(-gamma/2) and sqrt(pi/2a) are real scalars
+    scalar = math.exp(-0.5 * gamma) * sqrt_pi_2a
+    
+    I = prefactor * scalar * Q_real
+    
+    return I
+
+def complex_error_function_real(z_real, z_imag):
+    """
+    Approximates Re[erf(z)] using truncated Taylor expansion.
+    z = z_real + i*z_imag
+    """
+    # z = (t + b - iOmega)/sqrt(2) in the whitened derivation, 
+    # but here we pass the general complex argument for erf(alpha*t - zeta)
+    
+    # Taylor series: Re[erf(z)] approx (2/sqrt(pi)) * sum_{n=0}^{N} ((-1)^n * Re(z^(2n+1))) / (n! * (2n+1))
+    
+    sum_val = 0.0
+    term = complex(z_real, z_imag) # z^1
+    factorial = 1.0
+    
+    # Max 16 terms
+    for n in range(16):
+        # Term is (-1)^n * Re(z^(2n+1)) / (n! * (2n+1))
+        # We maintain term = z^(2n+1)
+        
+        # Add to sum
+        sum_val += ((-1.0)**n * term.real) / (factorial * (2*n + 1))
+        
+        # Prepare next term: z^(2(n+1)+1) = z^(2n+3) = z^(2n+1) * z^2
+        # But we need to update factorial and check convergence
+        if n < 15:
+            # Update factorial for n+1
+            factorial *= (n + 1)
+            # Update term to z^(2n+3)
+            z_sq = complex(z_real**2 - z_imag**2, 2.0 * z_real * z_imag)
+            term = term * z_sq
+            
+            # Early exit check (relative size)
+            # This is a simplified check; in practice, compare magnitude of added term to sum
+            current_term_val = ((-1.0)**(n+1) * term.real) / (factorial * (2*(n+1) + 1))
+            if abs(sum_val) > 1e-15 and abs(current_term_val / sum_val) < 1e-15:
+                break
+                
+    return (2.0 / math.sqrt(math.pi)) * sum_val
+```
+
+## Subtopics
+
+### Complex Error Function Approximation
+Approximates the real part of the complex error function (Faddeeva function) required for finite segment integration of Gabor kernels, avoiding branching between multiple algorithms [S1]. It uses a truncated Taylor expansion of 16 terms maximum, with early exits based on relative term size, ensuring convergence for the expected value range [S1].
+
+## Operating characteristics
+*   **Time Complexity:** The closed-form solution is $O(1)$ per kernel per ray segment, dominated by the evaluation of the complex error function. The Taylor expansion for the error function is bounded by a constant number of terms (16), making it effectively constant time.
+*   **Memory Complexity:** $O(1)$ auxiliary storage for scalar intermediates.
+*   **Performance:** The method avoids numerical sampling errors and enables distance sampling. However, the complex error function computation is relatively expensive. Optimization is achieved by using the midpoint rule for very small segments ($< 10^{-4}$) and computing paired erf terms jointly [S1].
+*   **Strengths:** Exact integration, supports distance sampling for multiple scattering, handles arbitrary ray orientations and anisotropic kernels without local affine approximations.
+*   **Limitations:** Computationally more expensive than simple midpoint sampling for large segments. Requires careful implementation of the complex error function to avoid numerical instability.
+
+## Background
+This method is derived from the work on "Gabor Fields: Orientation-Selective Level-of-Detail for Volume Rendering" [S1]. It extends the analytical integration of 3D anisotropic Gaussians to include the Gabor modulation, enabling physically-based rendering with orientation-selective primitives. The derivation utilizes the continuous Fourier Transform of the Gabor kernel and the shift theorem [S1].
+
+## Sources
+[S1] Gabor Fields: Orientation-Selective Level-of-Detail for Volume Rendering, https://arxiv.org/abs/2602.05081, fetched 2026-10-27

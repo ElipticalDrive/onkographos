@@ -1,0 +1,57 @@
+# Monocular Depth Cues
+
+Also called: MonoSDF Monocular Cues, Omnidata Depth/Normal Priors
+
+## Overview
+Monocular Depth Cues is a method that integrates pre-trained monocular geometric priors (depth and surface normal maps) into the training of neural implicit surface reconstruction models (such as MonoSDF) to regularize geometry and improve reconstruction quality from sparse or single views [S1]. It differs from sibling methods like [NerfingMVS](9518-nerfingmvs.md) by relying on off-the-shelf monocular predictors (e.g., Omnidata) rather than multi-view stereo consistency or explicit MVS networks, and from [Depth-Guided NeRF Training via Earth Mover’s Distance](11911-depth-guided-nerf-training-via-earth-mover-s-distance.md) by using direct pixel-wise alignment losses rather than distributional matching [S1]. The method addresses the ambiguity of scale and detail in monocular inputs by providing semi-local relative depth and local surface normal cues [S1].
+
+## How it works
+**Inputs:**
+*   Input RGB images $I$.
+*   A pre-trained monocular predictor $G_\phi$ (specifically Omnidata [S1]).
+*   A neural implicit surface representation (e.g., MLP or Multi-Resolution Grids) [S1].
+
+**Outputs:**
+*   Aligned monocular depth map $\bar{D}$ and normal map $\bar{N}$ for each input image.
+*   Regularized neural implicit surface reconstruction [S1].
+
+**Data Structures:**
+*   **Monocular Depth Map ($\bar{D}$):** 2D array of relative depth values.
+*   **Monocular Normal Map ($\bar{N}$):** 2D array of 3D surface normal vectors.
+*   **Neural Representation:** Stores signed distance field (SDF) or density values queried by rays [S1].
+
+**Steps:**
+1.  **Cue Extraction:** Apply the pre-trained predictor $G_\phi$ to each input RGB image $I$ to generate a relative depth map $\bar{D}$ and a surface normal map $\bar{N}$ [S1].
+2.  **Scale and Shift Alignment:** Align the relative monocular depth $\bar{D}$ with the rendered depth $\tilde{D}$ from the neural model. Since monocular depth lacks absolute scale, find scale $w$ and shift $q$ by minimizing the least-squares error:
+    $$ \min_{w, q} \sum_{p} \| (w \cdot \text{sg}(\bar{D}(p)) + q) - \tilde{D}(p) \|^2 $$
+    where $\text{sg}(\cdot)$ is the stop-gradient operator, preventing gradients from flowing into the frozen predictor $G_\phi$ [S1].
+3.  **Loss Computation:** Compute a depth consistency loss $L_{depth}$ penalizing the difference between the aligned monocular depth and the rendered depth, and a normal consistency loss $L_{normal}$ penalizing the difference between the aligned monocular normals and the rendered normals (derived from the gradient of the SDF) [S1].
+4.  **Optimization:** Update the neural implicit surface parameters using the combined loss (RGB, depth, and normal losses) [S1].
+
+**Parameters:**
+*   **Predictor:** Omnidata [S1].
+*   **Resolution:** Standard cues are generated at 384×384 resolution [S1].
+
+**Edge Cases and Pitfalls:**
+*   **Scale Ambiguity:** Monocular depth is relative; without alignment, the reconstruction scale is undefined [S1].
+*   **Local vs. Global:** Depth cues provide semi-local relative information, while normal cues provide local geometric detail; they are complementary [S1].
+*   **Resolution Limits:** Standard 384×384 cues may lack fine details; higher-resolution variants are available (see Subtopics) [S1].
+
+## Subtopics
+
+### Divide-and-conquer high-resolution cue generation
+A method to generate higher-resolution monocular depth and normal maps by partitioning the input image into overlapping sub-images, predicting cues for each, merging them, and aligning them to recover fine details lost at lower resolutions [S1]. It produces cues with more fine details compared to the standard 384×384 resolution cues [S1]. It is used in MonoSDF when higher-quality geometric priors are desired [S1]. Steps: (1) Partition a high-resolution input image into multiple overlapping sub-images; (2) Predict monocular depth and normal maps for each sub-image using a pretrained predictor (e.g., Omnidata); (3) Merge the predictions from all sub-images into a single high-resolution depth and normal map; (4) Align the merged depth maps using the least-squares alignment formula [S1].
+
+## Operating characteristics
+*   **Time Complexity:** Depends on the inference time of the pre-trained predictor (Omnidata) and the alignment optimization. The divide-and-conquer variant increases inference time due to multiple sub-image predictions and merging overhead [S1].
+*   **Memory Complexity:** Requires storing the monocular depth and normal maps for each input view, plus the neural implicit representation [S1].
+*   **Performance:** On the DTU dataset with 3 input views, methods using monocular cues (MLP and Multi-Res. Grids) produce satisfying reconstructions where they otherwise fail, achieving competitive Chamfer distances (e.g., ~2.0–5.0 mm depending on scene) compared to state-of-the-art methods [S1].
+*   **Strengths:** Improves reconstruction quality for sparse views; provides complementary local (normal) and semi-local (depth) geometric information; easy to integrate via off-the-shelf predictors [S1].
+*   **Limitations:** Relies on the quality of the pre-trained monocular predictor; scale ambiguity requires careful alignment; standard resolution cues may lack fine details [S1].
+*   **When to use:** When training neural implicit surface reconstruction models from sparse or single views and higher-quality geometric priors are desired [S1].
+
+## Background
+The method originates from the MonoSDF paper, which explores the use of monocular geometric cues for neural implicit surface reconstruction [S1]. It leverages the Omnidata model for depth and normal prediction [S1]. The approach was developed to address the limitations of neural implicit methods that fail to produce satisfying reconstructions without geometric regularization, particularly in sparse-view settings [S1].
+
+## Sources
+[S1] MonoSDF: Exploring Monocular Geometric Cues for Neural Implicit Surface Reconstruction, https://doi.org/10.52202/068431-1814, fetched 2026-10-26

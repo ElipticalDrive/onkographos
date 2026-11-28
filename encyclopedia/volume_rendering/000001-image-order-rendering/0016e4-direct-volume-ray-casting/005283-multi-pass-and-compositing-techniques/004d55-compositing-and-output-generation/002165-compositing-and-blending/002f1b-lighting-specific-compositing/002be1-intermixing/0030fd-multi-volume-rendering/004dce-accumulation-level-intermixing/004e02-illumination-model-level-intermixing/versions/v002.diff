@@ -1,0 +1,146 @@
+--- v001.md
++++ v002.md
+@@ -3,82 +3,87 @@
+ 
+ ## Overview
+-Illumination model level intermixing is a multi-modal rendering technique where ray samples from different volumes are combined before colors and opacities are computed [S1, unofficial]. It addresses the depth ordering and physical consistency issues of image-level intermixing by treating the combined data as a single medium for the lighting calculation. It is distinguished from its sibling, accumulation-level intermixing, by the timing of the combination: accumulation-level intermixing combines colors and opacities at every step, whereas illumination model level intermixing combines the raw scalar fields (e.g., densities) first, then applies the lighting model once to the result [S1, unofficial].
++Illumination model level intermixing is a multi-modal rendering technique where ray samples from different volumes are combined before colors and opacities are computed [S1, unofficial]. It addresses the limitations of image-level intermixing by resolving depth ordering issues through accumulation-level combination, specifically allowing for physically motivated mixing of distinct volumetric properties (e.g., emission vs. attenuation) prior to the final lighting calculation [S1, unofficial]. It sets itself apart from standard accumulation-level intermixing by treating the combined density as a single physical entity for the purpose of optical property lookup, rather than blending final color/opacity values.
+ 
+ ## How it works
+-**Inputs:**
+-*   Multiple volume datasets $V_i$, each containing scalar values (typically density $\rho$ or attenuation coefficient $\mu$).
+-*   A ray $r(t) = o + td$.
+-*   A mixing function $M$ for combining scalar values.
+-
+-**Outputs:**
+-*   A final color $C$ and opacity $\alpha$ for the pixel.
++**Inputs and Outputs:**
++*   **Inputs:** Multiple volume datasets (e.g., $V_1, V_2$), each with associated density fields $\rho_i$ and potentially distinct optical properties.
++*   **Outputs:** A final pixel color $C$ and opacity $\alpha$.
+ 
+ **Data Structures:**
+-*   No specific complex data structures are required beyond standard volume textures. The method operates on scalar values retrieved during ray marching.
++*   Ray parameters: origin $\mathbf{o}$, direction $\mathbf{d}$, step size $\Delta s$.
++*   Volume data: Scalar fields $\rho_i(\mathbf{x})$ for each volume $i$.
++*   Transfer functions: $T_{color}(\rho)$, $T_{opacity}(\rho)$ mapping density to color and opacity.
+ 
+ **Steps:**
+-1.  **Sample:** For each step $t$ along the ray, retrieve the scalar value $s_i$ from each volume $V_i$.
+-2.  **Combine Scalars:** Compute a combined scalar value $s_{combined}$ using a mixing function. The sources specify two primary approaches:
+-    *   **Weighted Sum:** $s_{combined} = \sum w_i s_i$, where $w_i$ are weights [S1, unofficial].
+-    *   **Role Assignment:** Assign specific physical roles to volumes, such as one acting as an emission volume and another as an attenuation volume [S1, unofficial].
+-3.  **Compute Lighting:** Use $s_{combined}$ to look up or compute the color $c$ and opacity $\alpha$ (or extinction coefficient) for this step. This is the key distinction: the lighting model (transfer function) is applied to the *mixed* scalar, not to individual volume samples [S1, unofficial].
+-4.  **Composite:** Perform standard volume rendering compositing (e.g., front-to-back or back-to-front) using the computed $c$ and $\alpha$ values for the combined scalar [S1, unofficial].
++1.  **Ray Casting:** Cast a ray through the scene.
++2.  **Sample Acquisition:** For each step $j$ along the ray at position $\mathbf{x}_j$, sample the density $\rho_{i,j}$ from each volume $i$.
++3.  **Density Combination:** Compute a combined density $\rho_{comb}$ at $\mathbf{x}_j$. The primary method is a weighted sum:
++    $$ \rho_{comb} = \sum_{i} w_i \rho_{i,j} $$
++    where $w_i$ are weights assigned to each volume [S1, unofficial].
++    *   *Alternative Role Assignment:* Assign specific physical roles to volumes. For example, one volume acts as an emission source ($\rho_{emit}$) and another as an attenuator ($\rho_{att}$) [S1, unofficial].
++4.  **Optical Property Lookup:** Use $\rho_{comb}$ to look up the color $c_j$ and opacity $\alpha_j$ using the transfer functions:
++    $$ c_j = T_{color}(\rho_{comb}) $$
++    $$ \alpha_j = T_{opacity}(\rho_{comb}) $$
++    [S1, unofficial].
++5.  **Compositing:** Composite the samples $(c_j, \alpha_j)$ along the ray using standard front-to-back or back-to-front volume rendering integration to produce the final pixel color.
++
++**Parameters:**
++*   Weights $w_i$: Determined by the physical relationship between modalities (e.g., 1:1 for simple density addition, or specific ratios for emission/attenuation balance) [S1, unofficial].
++*   Step size $\Delta s$: Standard volume rendering step size.
++
++**Edge Cases and Pitfalls:**
++*   **Unit Mismatch:** Densities from different modalities (e.g., Hounsfield units in CT vs. arbitrary intensity in SPECT) may have different scales. Normalization or careful weighting is required [S1, unofficial].
++*   **Degenerate Input:** If all $\rho_{i,j}$ are zero, $\rho_{comb}$ is zero, resulting in background color.
+ 
+ **Pseudocode:**
+ ```python
+-def illumination_model_intermixing(ray, volumes, weights):
+-    # volumes: list of volume data structures
+-    # weights: list of scalar weights corresponding to each volume
++def illumination_model_intermixing(ray_origin, ray_direction, volumes, transfer_functions):
++    """
++    volumes: list of objects, each having a sample_density(x) method
++    transfer_functions: dict with 'color' and 'opacity' functions
++    """
++    color_accum = [0.0, 0.0, 0.0]
++    alpha_accum = 0.0
++    transmittance = 1.0
+     
+-    color_accum = 0.0
+-    alpha_accum = 0.0
+-    
+-    for t in ray.steps:
+-        # Step 1: Sample all volumes
+-        samples = []
+-        for i, vol in enumerate(volumes):
+-            samples.append(vol.sample(ray.position_at(t)))
++    # Standard ray marching loop
++    for t in range(0, ray_length, step_size):
++        pos = ray_origin + ray_direction * t
++        
++        # 1. Sample densities from all volumes
++        densities = []
++        for vol in volumes:
++            densities.append(vol.sample_density(pos))
+             
+-        # Step 2: Combine scalars (Weighted Sum approach)
+-        # Note: Role assignment (emission/attenuation) is a variant of this combination
+-        combined_scalar = 0.0
+-        for i, s in enumerate(samples):
+-            combined_scalar += weights[i] * s
+-            
+-        # Step 3: Compute color and opacity from combined scalar
+-        # This is the defining characteristic: lighting is applied to the mix
+-        color_step, opacity_step = transfer_function(combined_scalar)
++        # 2. Combine densities (Weighted Sum)
++        # Example: simple sum. Weights can be adjusted per volume.
++        combined_density = sum(densities)
+         
+-        # Step 4: Standard compositing
+-        # Front-to-back compositing
+-        alpha_accum += (1.0 - alpha_accum) * opacity_step
+-        color_accum += (1.0 - alpha_accum) * color_step # Note: alpha_accum is updated before color contribution in standard front-to-back
++        # 3. Lookup optical properties from combined density
++        color = transfer_functions['color'](combined_density)
++        opacity = transfer_functions['opacity'](combined_density)
+         
+-        if alpha_accum >= 1.0:
++        # 4. Composite
++        alpha = opacity * transmittance
++        color_accum = color_accum + alpha * color
++        transmittance = transmittance * (1.0 - opacity)
++        
++        if transmittance < epsilon:
+             break
+             
+-    return color_accum, alpha_accum
++    return color_accum
+ ```
+-
+-**Parameters:**
+-*   Weights $w_i$: Not given in the sources.
+-*   Transfer Function: Not given in the sources.
+-
+-**Edge Cases:**
+-*   **Degenerate Input:** If all volumes are empty, the result is background.
+-*   **Precision:** Combining densities before transfer function application may lead to values outside the expected range of individual transfer functions if weights are not normalized. [G]
+ 
+ ## Subtopics
+ 
+ ## Operating characteristics
+-*   **Time Complexity:** Same as standard volume rendering, $O(N)$ where $N$ is the number of samples per ray. However, it requires sampling from multiple volumes per step, increasing memory bandwidth usage.
+-*   **Memory Complexity:** Requires loading/accessing multiple volume textures.
+-*   **Strengths:** Physically plausible for scenarios where volumes represent different aspects of the same medium (e.g., metabolic activity within anatomical structure). Avoids artifacts from depth ordering between modalities.
+-*   **Limitations:** Requires careful selection of weights and transfer functions to ensure the combined scalar produces meaningful visual results. Less flexible than accumulation-level intermixing for artistic control.
+-*   **When to use:** Visualization of multi-modal data where the physical interaction is best described by a single medium (e.g., SPECT within CT, dose planning).
+-*   **When not to use:** When volumes represent distinct, non-interacting objects or when independent lighting per modality is desired.
++*   **Time Complexity:** $O(N \cdot M)$, where $N$ is the number of ray steps and $M$ is the number of volumes. Requires sampling all volumes at every step.
++*   **Memory Complexity:** $O(M \cdot V)$, where $V$ is the size of each volume dataset.
++*   **Strengths:** Physically intuitive for mixed-media scenarios (e.g., emissive activity within attenuating tissue); avoids color bleeding artifacts associated with image-level blending [S1, unofficial].
++*   **Limitations:** Requires careful normalization of heterogeneous data sources; computationally expensive due to multiple texture lookups per step [S1, unofficial].
++*   **When to use:** Multi-modal visualization where physical interaction between modalities (like attenuation of emission) is relevant, such as SPECT/CT fusion or radiation dose planning [S1, unofficial].
+ 
+ ## Background
+-Illumination model level intermixing is described in the context of multi-modal volume rendering. It is presented as a method to handle the visualization of multiple volumes, such as emissive metabolic activities in a SPECT volume within the spatial context of a CT attenuation volume [S1, unofficial]. Cai and Sakas demonstrated this method in radiation therapy dose planning, visualizing an emissive radiation beam embedded in an attenuating CT volume [S1, unofficial]. The concept is part of the broader category of accumulation-level intermixing techniques.
++Originating from multi-modal volume rendering research, this technique is described in the context of accumulation-level intermixing [S1, unofficial]. It was demonstrated by Cai and Sakas in the scenario of radiation therapy dose planning, visualizing an emissive radiation beam embedded in an attenuating CT volume [S1, unofficial]. The method leverages the advantage of multi-channel data to avoid the need for complex color transfer function searches when reproducing original physical properties [S1, unofficial].
+ 
+ ## Sources

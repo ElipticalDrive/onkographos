@@ -1,0 +1,108 @@
+# MVGS (Multi-view-regulated Gaussian Splatting)
+Also called: Multi-view Regulated Learning
+
+## Overview
+MVGS is a plug-and-play optimization method that improves Novel View Synthesis (NVS) performance for existing Gaussian-based methods by constraining the optimization of 3D Gaussians with multi-view information [S1]. It sets itself apart from standard single-view optimization paradigms by explicitly leveraging cross-view consistency through a cross-intrinsic guidance scheme and multi-view cross-ray densification to enhance detail and stability [S1].
+
+## How it works
+**Inputs and Outputs:**
+*   **Inputs:** A set of input images with known camera poses, an initial set of 3D Gaussians, and a multi-view selection schedule [S1].
+*   **Outputs:** Optimized 3D Gaussian parameters (position, covariance, opacity, spherical harmonics coefficients) and a trained scene representation [G].
+
+**Data Structures:**
+The method operates on the standard 3D Gaussian representation [G]. No new complex data structures are introduced, but the optimization loop aggregates gradients across a selected subset of views using a Sum operation instead of an Average operation [S1].
+
+**Parameters:**
+*   $M_s = \{48, 24, 12, 8\}$: The number of views selected for multi-view training at different stages [S1].
+*   $\tau = 1$: A scaling factor used in the proposed method [S1].
+*   Other settings follow the baseline implementations (e.g., standard 3DGS hyperparameters) [S1].
+
+**Steps:**
+1.  **Multi-view Selection:** Select a subset of $M$ views from the available training images for the current optimization iteration, governed by the schedule $M_s$ [S1].
+2.  **Gradient Aggregation:** Render the scene from all selected views and compute the loss (e.g., L1 loss between rendered and ground truth images) [G]. Compute gradients for the Gaussian parameters with respect to each view's loss [G]. Aggregate the gradients from all selected views using the **Sum** operation, not the Average operation [S1]. This preserves and amplifies the gradient magnitude, enhancing the optimization process for multi-view coherence constraints [S1].
+3.  **Cross-Intrinsic Guidance:** Apply the cross-intrinsic guidance scheme to facilitate multi-view training [S1].
+4.  **Multi-view Cross-ray Densification:** Apply multi-view cross-ray densification to enhance detail [S1].
+5.  **Update:** Update the Gaussian parameters using the aggregated gradients and the densification results [G].
+
+**Pseudocode:**
+> **Unverified code.** The code below did not pass a test run against a reference implementation, or no test fits it, so it may contain errors.
+
+```python
+def mvgs_optimize(gaussians, images, poses, M_s, tau, iterations):
+    # gaussians: dict of tensors for position, covariance, opacity, SH coefficients
+    # images: list of target RGB images
+    # poses: list of camera extrinsics/intrinsics
+    # M_s: list of view counts for training stages, e.g., [48, 24, 12, 8] [S1]
+    # tau: learning rate scaling factor, default 1 [S1]
+    # iterations: total optimization steps
+    num_views = len(images)
+    for step in range(iterations):
+        # Select number of views based on schedule M_s [S1]
+        m_index = step % len(M_s)
+        num_views_to_use = M_s[m_index]
+        # Select subset of views (e.g., random or sequential)
+        selected_indices = list(range(num_views_to_use))
+        selected_images = [images[i] for i in selected_indices]
+        selected_poses = [poses[i] for i in selected_indices]
+
+        # Initialize gradient accumulators to zero
+        grad_acc = {key: zeros_like(param) for key, param in gaussians.items()}
+
+        # Render and compute loss for each selected view, accumulate gradients
+        for img, pose in zip(selected_images, selected_poses):
+            rendered_img = differentiable_splatting(gaussians, pose)
+            loss = sum(abs(rendered_img - img)) / 3.0  # L1 loss
+            view_grads = compute_autograd_gradients(loss, gaussians)
+            # Aggregate using SUM operation, not Average [S1]
+            for key in grad_acc:
+                grad_acc[key] += view_grads[key]
+
+        # Apply cross-intrinsic guidance scheme [S1]
+        # [Comment: The exact mathematical formulation for cross-intrinsic guidance is not provided in the sources.]
+        gaussians = apply_guidance(gaussians, grad_acc, selected_images, selected_poses)
+
+        # Apply multi-view cross-ray densification [S1]
+        # [Comment: The exact mathematical formulation for multi-view cross-ray densification is not provided in the sources.]
+        gaussians = apply_densification(gaussians, selected_images, selected_poses)
+
+        # Update Gaussian parameters using aggregated gradients and tau [G]
+        for key, param in gaussians.items():
+            param.data -= tau * grad_acc[key]
+
+    return gaussians
+
+def differentiable_splatting(gaussians, pose):
+    # [G] Standard 3D Gaussian splatting rasterization projecting 3D Gaussians to 2D image plane
+    return projected_gaussians
+
+def compute_autograd_gradients(loss, gaussians):
+    # [G] Standard automatic differentiation computing d(loss)/d(param) for each parameter tensor
+    return {key: compute_gradient(loss, param) for key, param in gaussians.items()}
+
+def apply_guidance(gaussians, grad_acc, images, poses):
+    # [Comment: The exact mathematical formulation for cross-intrinsic guidance is not provided in the sources.]
+    return gaussians
+
+def apply_densification(gaussians, images, poses):
+    # [Comment: The exact mathematical formulation for multi-view cross-ray densification is not provided in the sources.]
+    return gaussians
+```
+
+**Edge Cases and Pitfalls:**
+*   **Computational Cost:** Optimizing across multiple views per iteration incurs significantly higher computational cost and longer training time compared to single-view optimization paradigms [S1].
+*   **Complexity in Simple Scenes:** Densification strategies may introduce additional complexity in simpler scenes [S1].
+*   **Gradient Aggregation:** Using Average instead of Sum for gradient aggregation reduces gradient magnitude and leads to inferior results in multi-view training [S1].
+
+## Operating characteristics
+*   **Time Complexity:** Higher than single-view methods due to rendering and gradient computation for $M$ views per iteration [S1]. The cost scales linearly with the number of views selected [S1].
+*   **Performance:** Achieves state-of-the-art results on standard datasets. On Mip-NeRF 360 'bonsai', PSNR improves from 31.63 to 31.93, SSIM from 0.913 to 0.925, and LPIPS from 0.211 to 0.202 [S1]. On 'garden', PSNR improves from 32.23 to 32.57, SSIM from 0.813 to 0.856, and LPIPS from 0.170 to 0.123 [S1]. On Tanks&Temples 'Truck', PSNR improves from 25.18 to 26.14, SSIM from 0.879 to 0.883, and LPIPS from 0.148 to 0.147 [S1].
+*   **Strengths:** Plug-and-play integration with existing Gaussian-based methods; improved detail and consistency; robust to complex scenes with dynamic lighting and reflections [S1].
+*   **Limitations:** Longer training time; higher computational cost; densification strategies may introduce additional complexity in simpler scenes [S1].
+*   **When to Use:** When high-fidelity NVS is required for complex scenes and computational resources allow for longer training times [S1].
+*   **When Not to Use:** When training time is a critical constraint or for simple scenes where single-view optimization is sufficient [S1].
+
+## Background
+MVGS (Multi-view-regulated Gaussian Splatting) was proposed by Du et al. [S1]. The work is funded by ARC-Discovery grant (DP220100800), ARC-DECRA grant (DE230100477), NVIDIA academic grant program, and Google Research Scholar Program [S1]. The method builds upon the foundation of 3D Gaussian Splatting and aims to address limitations in single-view optimization by incorporating multi-view constraints [S1].
+
+## Sources
+[S1] MVGS: Multi-view-regulated Gaussian Splatting for Novel View Synthesis, https://doi.org/10.48550/arXiv.2410.02103, fetched 2026-11-03

@@ -1,0 +1,212 @@
+--- v006.md
++++ v007.md
+@@ -8,9 +8,9 @@
+ ## How it works
+ **Inputs:**
+-*   A set of $N$ interpolation points $\{x_1, ..., x_N\}$ with associated signs (interior, exterior, or on surface) or scalar values.
+-*   Reconstruction parameters: Voxel size $S_c$, lower expansion order $p_0$, higher expansion order $p$.
++*   A set of $N$ interpolation points $\{x_1, ..., x_N\}$ with associated signs (interior, exterior, or on surface) or scalar values [S1].
++*   Reconstruction parameters: Voxel size $S_c$, lower expansion order $p_0$, higher expansion order $p$ [S1].
+ 
+ **Outputs:**
+-*   A triangular mesh representing the target isosurface.
++*   A triangular mesh representing the target isosurface [S1].
+ 
+ **Data Structures:**
+@@ -73,106 +73,104 @@
+ 
+ ```python
+-def two_step_surface_reconstruction(interpolation_points, signs, voxel_size, p_low, p_high):
+-    """
+-    interpolation_points: List of 3D coordinates [x, y, z]
+-    signs: List of integers (-1 for interior, 1 for exterior, 0 for on surface)
+-    voxel_size: Float, size of the voxel grid cells
+-    p_low: Integer, lower expansion order for rough evaluation
+-    p_high: Integer, higher expansion order for exact evaluation
+-    """
+-    # Step 1 & 2: Precompute FMM moments for both orders
+-    # This assumes a Black-Box FMM implementation is available
+-    moments_low = precompute_fmm_moments(interpolation_points, signs, p_low)
+-    moments_high = precompute_fmm_moments(interpolation_points, signs, p_high)
++def two_step_surface_reconstruction(points, weights, kernel_func, poly_func, voxel_size, p_low, p_high):
++    # Step 1 & 4: Determine bounding box and generate voxel grid
++    min_coords = [min(p[i] for p in points) for i in range(3)]
++    max_coords = [max(p[i] for p in points) for i in range(3)]
+     
+-    # Step 3 & 4: Define grid based on bounding box of interpolation_points
+-    # Determine bounding box min/max
+-    min_coords = min(p[:3] for p in interpolation_points)
+-    max_coords = max(p[:3] for p in interpolation_points)
+-    
+-    # Generate voxel grid indices covering the bounding box
+-    # Grid spacing is voxel_size
+-    grid = generate_voxel_grid(min_coords, max_coords, voxel_size)
+-    
++    grid = []
++    x = min_coords[0]
++    while x < max_coords[0]:
++        y = min_coords[1]
++        while y < max_coords[1]:
++            z = min_coords[2]
++            while z < max_coords[2]:
++                grid.append((x, y, z))
++                z += voxel_size
++            y += voxel_size
++        x += voxel_size
++
++    # Step 2: Precompute moments for low and high orders
++    moments_low = []
++    for n in range(1, p_low + 1):
++        m_n = sum(w * kernel_func.psi_n(n, p) for p, w in zip(points, weights))
++        moments_low.append(m_n)
++        
++    moments_high = []
++    for n in range(1, p_high + 1):
++        m_n = sum(w * kernel_func.psi_n(n, p) for p, w in zip(points, weights))
++        moments_high.append(m_n)
++
+     boundary_voxels = []
+     
+     # Step 5 & 6: Rough Evaluation and Screening
+-    for voxel in grid:
+-        vertices = voxel.get_vertices() # Returns 8 corner coordinates
++    for (x, y, z) in grid:
++        vertices = [
++            (x, y, z), (x+voxel_size, y, z), (x, y+voxel_size, z), (x+voxel_size, y+voxel_size, z),
++            (x, y, z+voxel_size), (x+voxel_size, y, z+voxel_size), (x, y+voxel_size, z+voxel_size), (x+voxel_size, y+voxel_size, z+voxel_size)
++        ]
++        
+         is_boundary = False
+-        
+-        for vertex in vertices:
+-            # Evaluate using lower order
+-            val_low = evaluate_fmm_approx(vertex, moments_low)
+-            err_low = compute_error_bound(vertex, moments_low) # epsilon_p0
+-            
+-            # Check if sign is unambiguous and outside error bound
+-            # We need to know the true sign context, but here we check if 
+-            # the value is confidently positive or negative relative to 0.
+-            # If val_low > err_low, it's confidently positive.
+-            # If val_low < -err_low, it's confidently negative.
+-            # If |val_low| <= err_low, it's ambiguous.
+-            
++        for v in vertices:
++            # Evaluate s_p0(v)
++            val_low = sum(m * kernel_func.phi_n(n, v) for n, m in enumerate(moments_low, 1)) + poly_func(v)
++            # Evaluate error bound epsilon_p0
++            err_low = sum(abs(w) * kernel_func.residual(n, v, p) for p, w in zip(points, weights))
++            
++            # Check sign ambiguity: if |val| <= err, sign is unreliable
+             if abs(val_low) <= err_low:
+                 is_boundary = True
+                 break
+-            # Note: The paper defines classification based on specific inequalities
+-            # involving sigma and epsilon. If the voxel is entirely exterior 
+-            # (all vertices > err) or interior (all vertices < -err), skip.
+-            # If any vertex is ambiguous, the voxel is a boundary candidate.
++            # If confidently positive or negative, continue checking other vertices
++            # If all vertices are confidently same sign, voxel is non-boundary
+         
+         if is_boundary:
+-            boundary_voxels.append(voxel)
++            boundary_voxels.append((x, y, z))
+             
+     # Step 7: Exact Evaluation
+     accurate_values = {}
+-    for voxel in boundary_voxels:
+-        vertices = voxel.get_vertices()
+-        for vertex in vertices:
+-            # Evaluate using higher order
+-            val_high = evaluate_fmm_approx(vertex, moments_high)
+-            accurate_values[vertex] = val_high
++    for (x, y, z) in boundary_voxels:
++        vertices = [
++            (x, y, z), (x+voxel_size, y, z), (x, y+voxel_size, z), (x+voxel_size, y+voxel_size, z),
++            (x, y, z+voxel_size), (x+voxel_size, y, z+voxel_size), (x, y+voxel_size, z+voxel_size), (x+voxel_size, y+voxel_size, z+voxel_size)
++        ]
++        for v in vertices:
++            val_high = sum(m * kernel_func.phi_n(n, v) for n, m in enumerate(moments_high, 1)) + poly_func(v)
++            accurate_values[v] = val_high
+             
+     # Step 8 & 9: Marching Cubes and Assembly
+     mesh_triangles = []
+-    for voxel in boundary_voxels:
+-        # Get accurate values for the 8 vertices of this voxel
+-        vertex_values = [accurate_values[v] for v in voxel.get_vertices()]
+-        
+-        # Apply standard Marching Cubes lookup
+-        # Case index is determined by signs of vertex_values relative to 0
+-        case_index = compute_marching_cubes_case_index(vertex_values)
+-        
+-        # Generate triangles based on case_index and vertex positions
+-        triangles = generate_triangles_from_case(case_index, voxel.get_vertices())
+-        mesh_triangles.extend(triangles)
+-        
++    for (x, y, z) in boundary_voxels:
++        vertices = [
++            (x, y, z), (x+voxel_size, y, z), (x, y+voxel_size, z), (x+voxel_size, y+voxel_size, z),
++            (x, y, z+voxel_size), (x+voxel_size, y, z+voxel_size), (x, y+voxel_size, z+voxel_size), (x+voxel_size, y+voxel_size, z+voxel_size)
++        ]
++        values = [accurate_values[v] for v in vertices]
++        
++        # Compute case index from signs relative to 0
++        case_index = 0
++        for i, val in enumerate(values):
++            if val > 0:
++                case_index |= (1 << i)
++                
++        # Standard Marching Cubes edge table (256 entries mapping case to intersecting edges)
++        # Each entry is a list of edge indices or -1
++        edge_table = [...] # Standard lookup table [G]
++        edge_intersections = []
++        
++        for edge_idx, edge_pair in enumerate(MC_EDGE_TABLE):
++            if (case_index >> edge_idx) & 1:
++                v1, v2 = vertices[edge_pair[0]], vertices[edge_pair[1]]
++                val1, val2 = values[edge_pair[0]], values[edge_pair[1]]
++                t = val1 / (val1 - val2)
++                intersection = (v1[0] + t*(v2[0]-v1[0]), v1[1] + t*(v2[1]-v1[1]), v1[2] + t*(v2[2]-v1[2]))
++                edge_intersections.append(intersection)
++                
++        # Generate triangles from edge intersections based on case_index
++        triangle_table = [...] # Standard lookup table [G]
++        for tri in triangle_table[case_index]:
++            if tri == -1: break
++            mesh_triangles.append((edge_intersections[tri[0]], edge_intersections[tri[1]], edge_intersections[tri[2]]))
++            
+     return mesh_triangles
+-
+-def precompute_fmm_moments(points, signs, order):
+-    """
+-    Placeholder for Black-Box FMM moment computation.
+-    Returns moments Psi_n for the given expansion order.
+-    """
+-    # In a real implementation, this calls the FMM library (e.g., Scal-FMM)
+-    # to compute the multipole expansions.
+-    pass
+-
+-def evaluate_fmm_approx(point, moments):
+-    """
+-    Evaluates the approximated implicit function s_p(x) at a point
+-    using precomputed moments.
+-    """
+-    # Sum over n=1 to p: Psi_n * phi_n(point)
+-    # This requires the basis functions phi_n to be defined.
+-    pass
+-
+-def compute_error_bound(point, moments):
+-    """
+-    Computes the evaluation error epsilon_p.
+-    """
+-    # Sum of omega_j * R_p(x, y_j)
+-    # This is the residual bound.
+-    pass
+ ```
+ 
+@@ -205,5 +203,5 @@
+ 
+ ## Background
+-The method was presented by J. Zhang and D. Zhong in *Applied Sciences* in 2022 [S1]. It builds on the Signed Marching Cubes (SMC) concept, which uses FMM to accelerate RBF evaluation. The core innovation is the two-step filtering process using different expansion orders to distinguish boundary from non-boundary voxels [S1]. It is implemented using the Scal-FMM library for FMM operations and VTK for visualization [S1].
++The method was presented by J. Zhang and D. Zhong in *Applied Sciences* in 2022 [S1]. It builds on the Signed Marching Cubes (SMC) concept, which uses FMM to accelerate RBF evaluation. The core innovation is the two-step filtering process using different expansion orders to distinguish boundary from non-boundary voxels [S1]. It is implemented using FMM libraries for evaluation operations and standard visualization toolkits [S1].
+ 
+ ## Sources

@@ -1,0 +1,234 @@
+# Amanatides and Woo Variation with 2-Point Input
+
+Also called: 2-Point Voxel Traversal, Amanatides and Woo ray marching, Improved Amanatides and Woo, Real Line Voxelization (RLV)
+
+## Overview
+This method is a voxel traversal algorithm that takes two endpoints (start and end points) instead of a ray origin and direction vector [S1, unofficial]. It is designed to be more precise than standard face-to-face traversal, specifically handling edge cases such as zero coordinate deltas, exact edge hits, negative traversal, and non-0-based block centers [S1, unofficial]. It builds on the foundational Amanatides and Woo DDA logic but adapts the initialization and termination conditions for finite line segments [S2, unofficial].
+
+## How it works
+**Inputs and Outputs:**
+*   **Input:** `pointA` (start point, `Vector3`), `pointB` (end point, `Vector3`) [S1, unofficial].
+*   **Output:** An iterable sequence of voxel coordinates (`IEnumerable<Vector3>` or list of `Vector3`) representing the voxels intersected by the line segment [S1, unofficial].
+
+**Data Structures:**
+*   `x, y, z`: Current voxel integer coordinates [S1, unofficial].
+*   `tMaxX, tMaxY, tMaxZ`: Distance along the line to the next voxel boundary in each axis [S1, unofficial].
+*   `tDeltaX, tDeltaY, tDeltaZ`: Distance along the line between consecutive voxel boundaries in each axis [S1, unofficial].
+*   `stepX, stepY, stepZ`: Direction signs (+1 or -1) for traversal in each axis [S1, unofficial].
+*   `lineLength`: Total Euclidean length of the segment `pointB - pointA` [S1, unofficial].
+
+**Formulas and Definitions:**
+*   Line equation: $p = p_0 + vt$, where $p_0$ is start position, $v$ is normalized direction, and $t$ is how much the direction is scaled [S2, unofficial].
+*   `Signum(d)`: Returns 1 if $d > 0$, -1 if $d < 0$, and 0 if $d == 0$ [S1, unofficial].
+*   `Mod(v, m)`: Returns $(v \% m + m) \% m$ to ensure positive modulo [S1, unofficial].
+*   `Ceil(s)`: Returns 1 if $s == 0$, else returns $\lceil s \rceil$ [S1, unofficial].
+*   `Intbound(s, ds)`: Calculates the distance to the next integer boundary [S1, unofficial]:
+    *   If $ds < 0$ and $s$ is an integer, return 0.
+    *   Else, $s = \text{Mod}(s, 1)$.
+    *   If $ds > 0$, return $(\text{Ceil}(s) - s) / |ds|$.
+    *   Else, return $(s - \text{Floor}(s)) / |ds|$.
+*   `Precision5(val)`: Rounds float to 5 decimal places using integer arithmetic: `((int)(100000 * val)) / 100000.0f`. Used to mitigate floating-point precision issues in comparisons [S1, unofficial].
+
+**Algorithm Steps:**
+
+1.  **Initialization:**
+    *   Round start point to nearest integer grid: $x = \text{round}(pointA.X)$, $y = \text{round}(pointA.Y)$, $z = \text{round}(pointA.Z)$ [S1, unofficial].
+    *   Compute $\delta = pointB - pointA$ [S1, unofficial].
+    *   Compute normalized direction $\delta_{normal} = \delta / \|\delta\|$ [S1, unofficial].
+    *   Extract components: $dx = \delta_{normal}.X$, $dy = \delta_{normal}.Y$, $dz = \delta_{normal}.Z$ [S1, unofficial].
+    *   Compute steps: $stepX = \text{Signum}(dx)$, $stepY = \text{Signum}(dy)$, $stepZ = \text{Signum}(dz)$ [S1, unofficial].
+    *   Compute initial distances to next boundary. Note: The source uses `pointA - 0.5f` in the `Intbound` call, accounting for .5f-based block centers [S1, unofficial]:
+        *   $tMaxX = \text{Intbound}(pointA.X - 0.5f, dx)$ [S1, unofficial].
+        *   $tMaxY = \text{Intbound}(pointA.Y - 0.5f, dy)$ [S1, unofficial].
+        *   $tMaxZ = \text{Intbound}(pointA.Z - 0.5f, dz)$ [S1, unofficial].
+    *   Compute step deltas:
+        *   $tDeltaX = stepX / dx$ [S1, unofficial].
+        *   $tDeltaY = stepY / dy$ [S1, unofficial].
+        *   $tDeltaZ = stepZ / dz$ [S1, unofficial].
+    *   Compute total length: $lineLength = \|\delta\|$ [S1, unofficial].
+    *   Initialize result list with starting voxel $(x, y, z)$ [S1, unofficial].
+
+2.  **Step Functions:**
+    *   `StepX()`: If $tMaxX \ge lineLength$, return `true` (end of line). Else, $x \leftarrow x + stepX$, $tMaxX \leftarrow tMaxX + tDeltaX$, return `false` [S1, unofficial].
+    *   `StepY()`: Analogous to `StepX()` using $y, tMaxY, tDeltaY$ [S1, unofficial].
+    *   `StepZ()`: Analogous to `StepX()` using $z, tMaxZ, tDeltaZ$ [S1, unofficial].
+
+3.  **Iteration:**
+    The iteration logic depends on which axes have non-zero steps [S1, unofficial].
+
+    *   **Case 1: 3D Traversal ($stepX \neq 0, stepY \neq 0, stepZ \neq 0$)**
+        Loop while true:
+        1.  Compare precision-rounded values: $tX = \text{Precision5}(tMaxX)$, $tY = \text{Precision5}(tMaxY)$, $tZ = \text{Precision5}(tMaxZ)$ [S1, unofficial].
+        2.  Determine smallest $t$:
+            *   If $tX < tY$:
+                *   If $tX < tZ$: call `StepX()`.
+                *   Else if $tZ < tX$: call `StepZ()`.
+                *   Else ($tZ == tX$): call `StepZ() || StepX()` (advance in both) [S1, unofficial].
+            *   Else if $tY < tX$:
+                *   If $tY < tZ$: call `StepY()`.
+                *   Else if $tZ < tY$: call `StepZ()`.
+                *   Else ($tZ == tY$): call `StepY() || StepZ()` (advance in both) [S1, unofficial].
+            *   Else ($tX == tY$):
+                *   If $tY < tZ$: call `StepX() || StepY()` (advance in both) [S1, unofficial].
+                *   Else if $tZ < tY$: call `StepZ()`.
+                *   Else ($tZ == tY$): call `StepX() || StepY() || StepZ()` (advance in all three) [S1, unofficial].
+        3.  Add current $(x, y, z)$ to result list.
+        4.  If any step function returned `true`, break loop.
+
+    *   **Case 2: 2D Traversal (One step is zero)**
+        Separate loops handle cases where one or two steps are zero [S1, unofficial].
+        *   Example: If $stepX \neq 0, stepY \neq 0, stepZ == 0$:
+            Loop while true:
+            1.  Compare $tX = \text{Precision5}(tMaxX)$ and $tY = \text{Precision5}(tMaxY)$.
+            2.  If $tX < tY$: `StepX()`.
+            3.  Else if $tY < tX$: `StepY()`.
+            4.  Else: `StepX() || StepY()` [S1, unofficial].
+            5.  Add current $(x, y, z)$ to result.
+            6.  Break if end reached.
+
+    *   **Case 3: 1D Traversal (Two steps are zero)**
+        *   Example: If $stepX \neq 0, stepY == 0, stepZ == 0$:
+            Loop while true:
+            1.  Call `StepX()`.
+            2.  Add current $(x, y, z)$ to result.
+            3.  Break if end reached [S1, unofficial].
+
+    *   **Termination:**
+        The iteration terminates when a step function returns `true`, which occurs when the current $tMax$ exceeds or equals `lineLength` [S1, unofficial]. Alternatively, in the RLV formulation, termination occurs when the sum of all $t_{min}$ components exceeds the length of the line [S2, unofficial]. The implementation in [S1, unofficial] uses the `tMax >= lineLength` check within the step functions.
+
+**Pseudocode:**
+> **Unverified code.** The code below did not pass a test run against a reference implementation, or no test fits it, so it may contain errors.
+
+```python
+import math
+
+def amanatides_woo_2point(pointA, pointB):
+    def signum(d):
+        return 1 if d > 0 else (-1 if d < 0 else 0)
+    
+    def mod(v, m):
+        return (v % m + m) % m
+    
+    def ceil_special(s):
+        return 1 if s == 0 else math.ceil(s)
+    
+    def intbound(s, ds):
+        if ds < 0 and s == int(s):
+            return 0
+        s = mod(s, 1)
+        if ds > 0:
+            return (ceil_special(s) - s) / abs(ds)
+        else:
+            return (s - math.floor(s)) / abs(ds)
+    
+    def precision5(val):
+        return int(val * 100000) / 100000.0
+    
+    x = round(pointA.x)
+    y = round(pointA.y)
+    z = round(pointA.z)
+    
+    delta = pointB - pointA
+    delta_normal = delta / delta.length()
+    dx, dy, dz = delta_normal.x, delta_normal.y, delta_normal.z
+    
+    stepX = signum(dx)
+    stepY = signum(dy)
+    stepZ = signum(dz)
+    
+    tMaxX = intbound(pointA.x - 0.5, dx)
+    tMaxY = intbound(pointA.y - 0.5, dy)
+    tMaxZ = intbound(pointA.z - 0.5, dz)
+    
+    tDeltaX = stepX / dx if dx != 0 else 0
+    tDeltaY = stepY / dy if dy != 0 else 0
+    tDeltaZ = stepZ / dz if dz != 0 else 0
+    
+    lineLength = delta.length()
+    line = [Vector3(x, y, z)]
+    
+    def step_x():
+        if tMaxX >= lineLength: return True
+        x += stepX
+        tMaxX += tDeltaX
+        return False
+        
+    def step_y():
+        if tMaxY >= lineLength: return True
+        y += stepY
+        tMaxY += tDeltaY
+        return False
+        
+    def step_z():
+        if tMaxZ >= lineLength: return True
+        z += stepZ
+        tMaxZ += tDeltaZ
+        return False
+
+    if stepX != 0 and stepY != 0 and stepZ != 0:
+        while True:
+            tX = precision5(tMaxX)
+            tY = precision5(tMaxY)
+            tZ = precision5(tMaxZ)
+            res = False
+            if tX < tY:
+                if tX < tZ: res = step_x()
+                elif tZ < tX: res = step_z()
+                else: res = step_z() or step_x()
+            elif tY < tX:
+                if tY < tZ: res = step_y()
+                elif tZ < tY: res = step_z()
+                else: res = step_y() or step_z()
+            else:
+                if tY < tZ: res = step_x() or step_y()
+                elif tZ < tY: res = step_z()
+                else: res = step_x() or step_y() or step_z()
+            line.append(Vector3(x, y, z))
+            if res: break
+    elif stepX != 0 and stepY != 0 and stepZ == 0:
+        while True:
+            tX = precision5(tMaxX)
+            tY = precision5(tMaxY)
+            res = False
+            if tX < tY: res = step_x()
+            elif tY < tX: res = step_y()
+            else: res = step_x() or step_y()
+            line.append(Vector3(x, y, z))
+            if res: break
+    elif stepX != 0 and stepY == 0 and stepZ == 0:
+        while True:
+            res = step_x()
+            line.append(Vector3(x, y, z))
+            if res: break
+    # Analogous branches for other 2D/1D zero-step combinations
+            
+    return line
+```
+
+**Pitfalls and Edge Cases:**
+*   **Zero Delta:** If a coordinate delta is zero (straight line parallel to an axis), the corresponding step is 0, and the algorithm must handle the reduced dimensionality (2D or 1D loops) [S1, unofficial].
+*   **Exact Edge Hits:** When $tMax$ values are equal, the algorithm advances in multiple axes simultaneously to avoid missing voxels [S1, unofficial].
+*   **Negative Traversal:** The `Signum` function handles negative directions correctly [S1, unofficial].
+*   **Block Centers:** The algorithm accounts for blocks with .5f-based centers by subtracting 0.5f in the `Intbound` calculation [S1, unofficial].
+*   **Precision:** Floating-point errors in comparisons are mitigated by `Precision5` [S1, unofficial].
+
+## Subtopics
+
+### Adjacency-Based Ray Traversal
+This variant uses the ray-volume impact point (from an initial intersection check) as the first ray-voxel intersection point (entry point) [S3, unofficial]. It calculates the point where the ray emerges from the current voxel (exit point) and tests the data between these points against user-specified target values [S3, unofficial]. It repeats this process until the ray emerges from the data volume or available light is depleted [S3, unofficial]. Unlike Levy's uniform resampling, which requires infinite samples to guarantee finding all surfaces or suffers from aliasing if steps are too large, this method guarantees traversal through every voxel the ray intersects [S3, unofficial].
+
+## Operating characteristics
+*   **Time Complexity:** Linear with respect to the number of voxels intersected by the line segment. Each step involves constant-time arithmetic and comparisons [S1, unofficial].
+*   **Memory Complexity:** Linear with respect to the number of voxels intersected, as it stores the list of visited voxels [S1, unofficial].
+*   **Strengths:** High precision compared to face-to-face traversal; handles edge cases like zero deltas and exact boundary hits robustly; works with finite line segments rather than infinite rays [S1, unofficial].
+*   **Limitations:** Potentially slower than standard Amanatides and Woo due to the overhead of handling 2-point input and precision rounding [S1, unofficial]. Requires careful handling of degenerate cases (zero steps) [S1, unofficial].
+*   **When to use:** When precise voxelization of a finite line segment is required, especially in contexts where edge cases (zero deltas, exact hits) are common, such as in voxel games or specific scientific visualizations [S1, unofficial].
+*   **When not to use:** When performance is critical and approximate traversal is acceptable, or when working with infinite rays where standard Amanatides and Woo is sufficient.
+
+## Background
+The algorithm is a variation of the Amanatides and Woo ray marching algorithm, originally proposed for voxelizing lines in a uniform grid [S2, unofficial]. The specific 2-point input variation was developed to address precision issues and edge cases in practical implementations, such as those found in voxel-based games [S1, unofficial]. The underlying concept of Real Line Voxelization (RLV) is discussed in literature comparing optimal scanline voxelization algorithms [S2, unofficial]. The adjacency-based variant is described in the context of volumetric rendering techniques for aerodynamic flow field data [S3, unofficial].
+
+## Sources
+[S1] Cast ray to select block in voxel game, https://gamedev.stackexchange.com/questions/47362, fetched 2026-10-25 (unofficial)
+[S2] PDF A Comparison of Optimal Scanline Voxelization Algorithms, https://liu.diva-portal.org/smash/get/diva2:1459330/FULLTEXT01.pdf, fetched 2026-10-25 (unofficial)
+[S3] DTIC ADA202661: Volumetric Rendering Techniques for the Display of Three-Dimensional Aerodynamic Flow Field Data, https://archive.org/details/DTIC_ADA202661, fetched 2026-10-26 (unofficial)

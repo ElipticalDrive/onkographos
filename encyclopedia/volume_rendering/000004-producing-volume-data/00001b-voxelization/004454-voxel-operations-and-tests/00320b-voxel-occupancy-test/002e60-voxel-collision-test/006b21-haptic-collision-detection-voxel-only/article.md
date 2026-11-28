@@ -1,0 +1,158 @@
+# Haptic Collision Detection (Voxel-Only)
+
+Also called: Voxel-Only Haptic Collision
+
+## Overview
+This method computes intersection points and force-feedback vectors between a haptic burr tool and a virtual object represented solely by a voxel set, enabling realistic tactile interaction during virtual carving [S1, book]. It distinguishes itself from sibling methods by relying exclusively on volumetric data for collision resolution, avoiding supplemental polygonal mesh information [S1, book]. Unlike [Entity Collision & Movement](11316-entity-collision-movement.md) which may use complex physics engines, or [Sphere-Voxel Collision Detection via Displacement Averaging](17929-sphere-voxel-collision-detection-via-displacement-averaging.md) which averages displacements, this method uses an "anchor-based" approach to determine force direction, ensuring stability in complex geometries like tight corners or pits [S1, book].
+
+## How it works
+**Inputs:**
+- Burr tool position in world coordinates ($P_{burr}^{world}$).
+- Burr radius ($R_{burr}$).
+- Voxel model local-to-world transformation matrix ($M_{local}^{world}$) and its inverse ($M_{world}^{local}$).
+- Set of cached voxels ($V_{cache}$) representing the object's volume. Each voxel is defined by its center position in local coordinates ($P_{voxel}^{local}$) and occupancy status.
+- Anchor drag distance ($D_{drag}$), a fixed scalar defining the search radius for alternate anchor points.
+
+**Outputs:**
+- Force feedback vector in world coordinates ($F_{world}$).
+- Link distance ($d_{link}$) between the burr center and the anchor point.
+- Boolean collision status.
+
+**Data Structures:**
+- `Voxel`: A structure containing `center` (vec3, local coords) and `occupied` (bool).
+- `Anchor`: A vec3 representing the contact point approximation.
+
+**Algorithm Steps:**
+
+1.  **Coordinate Transformation:** Convert the burr's current position from world coordinates to the voxel model's local coordinate system.
+    $$ P_{burr}^{local} = M_{world}^{local} \times P_{burr}^{world} $$
+
+2.  **Collision Search:** Iterate through the set of cached voxels ($V_{cache}$). For each voxel $v \in V_{cache}$:
+    a. Calculate the Euclidean distance from the voxel center to the burr center:
+    $$ d = \| P_{burr}^{local} - v.center \| $$
+    b. If $d \le R_{burr}$, a collision is detected. Halt iteration immediately. Set collision status to `true`.
+    c. If the iteration completes without finding any voxel satisfying the condition, set collision status to `false`.
+
+3.  **Anchor Initialization (No Collision):** If no collision occurred:
+    a. Set the anchor point ($A$) to the burr's current local position:
+    $$ A = P_{burr}^{local} $$
+    b. This anchor approximates the closest point to the burr head that does not intersect with any voxels.
+
+4.  **Anchor Refinement (Collision Detected):** If a collision occurred:
+    a. Determine if an alternate anchor point exists within the `anchor drag` distance ($D_{drag}$) that is closer to the burr head than the current anchor ($A_{old}$).
+    b. Generate 26 new candidate anchor positions ($C_i$) by applying the `anchor drag` distance in every combination of x, y, and z directions relative to $A_{old}$. The directions correspond to the 26 neighbors in a 3D grid (excluding the center and the 6 face-adjacent neighbors if strictly diagonal, but the source specifies 26 candidates, implying all 3x3x3 neighbors excluding the center itself, or specifically the 26 surrounding voxels in a cubic lattice).
+    $$ C_i = A_{old} + D_{drag} \times \vec{d}_i $$
+    where $\vec{d}_i \in \{-1, 0, 1\}^3 \setminus \{(0,0,0)\}$.
+    c. Disqualify any candidate $C_i$ that collides with one or more voxel points. A candidate collides if the distance from $C_i$ to any voxel center in $V_{cache}$ is $\le R_{burr}$.
+    d. From the remaining valid candidates, select the one with the shortest Euclidean distance to the burr center $P_{burr}^{local}$ as the new anchor point $A_{new}$.
+    $$ A_{new} = \arg \min_{C_i \in Valid} \| P_{burr}^{local} - C_i \| $$
+    e. If no valid candidates exist (all disqualified), retain $A_{old}$ as the anchor.
+
+5.  **Force Vector Calculation:** Compute the force vector and link distance using the established anchor $A$.
+    $$ \vec{F}_{local} = A - P_{burr}^{local} $$
+    $$ d_{link} = \| \vec{F}_{local} \| $$
+
+6.  **Output Transformation:** Convert the force vector from local coordinates to world coordinates.
+    $$ F_{world} = M_{local}^{world} \times \vec{F}_{local} $$
+    Send $F_{world}$ and $d_{link}$ to the haptic device.
+
+**Pseudocode:**
+
+> **Unverified code.** The code below did not pass a test run against a reference implementation, or no test fits it, so it may contain errors.
+
+```python
+def haptic_collision_detection(burr_pos_world, burr_radius, voxel_cache, 
+                               transform_local_to_world, transform_world_to_local, 
+                               anchor_drag_dist):
+    # 1. Transform burr position to local space
+    burr_pos_local = transform_world_to_local(burr_pos_world)
+    
+    collision_found = False
+    anchor = burr_pos_local
+    
+    # 2. Iterate through cached voxels to find collision
+    for voxel in voxel_cache:
+        dist = distance(burr_pos_local, voxel.center)
+        if dist <= burr_radius:
+            collision_found = True
+            break
+            
+    if not collision_found:
+        # No collision: anchor is burr position
+        anchor = burr_pos_local
+    else:
+        # Collision detected: refine anchor
+        current_anchor = anchor # From previous frame or initial guess
+        
+        # 3. Generate 26 candidates
+        candidates = []
+        for dx in [-1, 0, 1]:
+            for dy in [-1, 0, 1]:
+                for dz in [-1, 0, 1]:
+                    if dx == 0 and dy == 0 and dz == 0:
+                        continue
+                    
+                    candidate = current_anchor + vec3(dx, dy, dz) * anchor_drag_dist
+                    
+                    # Check if candidate collides with any voxel
+                    is_valid = True
+                    for voxel in voxel_cache:
+                        if distance(candidate, voxel.center) <= burr_radius:
+                            is_valid = False
+                            break
+                    
+                    if is_valid:
+                        candidates.append(candidate)
+        
+        # 4. Select best candidate
+        if candidates:
+            best_candidate = None
+            min_dist = infinity
+            for cand in candidates:
+                d = distance(burr_pos_local, cand)
+                if d < min_dist:
+                    min_dist = d
+                    best_candidate = cand
+            anchor = best_candidate
+        else:
+            # No valid candidates found, keep current anchor
+            pass
+            
+    # 5. Calculate force vector and distance
+    force_vector_local = anchor - burr_pos_local
+    link_dist = magnitude(force_vector_local)
+    
+    # 6. Transform force to world space
+    force_vector_world = transform_local_to_world(force_vector_local)
+    
+    return force_vector_world, link_dist, collision_found
+```
+
+**Parameters:**
+- `burr_radius`: Radius of the spherical burr head. Typical values depend on the simulation scale; not given in sources.
+- `anchor_drag_dist`: Fixed distance for searching alternate anchor points. Not given in sources.
+
+**Edge Cases and Pitfalls:**
+- **Precision:** Distance calculations must handle floating-point precision carefully, especially when $d \approx R_{burr}$.
+- **Boundaries:** If the burr is entirely inside a solid voxel region, the collision detection will trigger, but the anchor refinement might fail to find a valid candidate if the `anchor_drag_dist` is insufficient to reach the surface boundary.
+- **Degenerate Input:** Empty voxel cache results in no collision and anchor equals burr position.
+
+## Subtopics
+
+### Anchor-Based Force Direction
+A method for determining the direction of the haptic force vector using an 'anchor' point, preferred over nearest-voxel or voxel-summation methods to ensure stability in complex geometries [S1, book]. Nearest-voxel and voxel-summation methods perform erratically when the burr-head is in a tight corner or inside a pit. The anchor-based method performs as expected in these situations as well as on normal surface curvatures [S1, book].
+
+## Operating characteristics
+- **Time Complexity:** $O(N \cdot K)$, where $N$ is the number of cached voxels and $K$ is the number of candidate anchors (26). In the worst case, every candidate requires checking against all cached voxels.
+- **Memory Complexity:** $O(N)$ for storing the voxel cache.
+- **Performance:** The method is computationally intensive due to the nested loop of candidate validation against the voxel set. However, it provides stable force feedback.
+- **Strengths:** Provides stable force feedback in complex geometries (corners, pits) where other methods fail. Directly maps tool interaction to volumetric data.
+- **Limitations:** Does not use polygonal mesh information, potentially missing fine surface details not captured by the voxel resolution. Computationally heavier than simple nearest-voxel checks.
+- **When to use:** When using a voxel-only representation and stable force feedback in complex geometries is required.
+- **When not to use:** When high-frequency surface details from a mesh are needed, or when computational resources are extremely limited.
+
+## Background
+This method was introduced in the context of a Haptic-Based 3D Carving Simulator [S1, book]. It builds on William et al.’s graphical carving simulator [S1, book]. The system uses a pen-based haptic tool as a 3D mouse to "feel" the surface of the model and remove volume segments. The collision detection scheme is one of two presented, the other using supplemental polygonal mesh information [S1, book].
+
+## Sources
+[S1] Haptic-Based 3D Carving Simulator, https://doi.org/10.5772/8682, fetched 2026-10-26 (book)

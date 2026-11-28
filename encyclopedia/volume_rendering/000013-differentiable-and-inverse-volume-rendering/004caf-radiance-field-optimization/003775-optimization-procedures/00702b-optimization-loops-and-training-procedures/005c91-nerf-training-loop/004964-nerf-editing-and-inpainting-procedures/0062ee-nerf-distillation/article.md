@@ -1,0 +1,137 @@
+# NeRF Distillation
+
+Also called: Distilling edit to NeRF, Edit consolidation, Hashgrid export
+
+## Overview
+NeRF Distillation is a post-processing optimization procedure that collapses user-defined spatial edits into the canonical representation of a neural radiance field, specifically the Instant-NGP hashgrid format [S1]. Unlike iterative editing methods that maintain a separate deformation field or cage structure, this method re-trains the scene to bake the edits directly into the base hashgrid parameters [S1]. It is distinguished from sibling methods like [Progressive Inpainting-and-Erasing](8658-progressive-inpainting-and-erasing.md) by its focus on consolidating arbitrary geometric or appearance edits into a single, static representation without retaining the edit history [S1].
+
+## How it works
+**Inputs and Outputs:**
+*   **Input:** A pre-trained NeRF representation (typically Instant-NGP hashgrids), a set of user-defined edits (each defining a source cage and a target deformation), and the original training images [S1].
+*   **Output:** A single set of optimized NeRF parameters representing the edited scene in canonical space [S1].
+
+**Data Structures:**
+*   **Hashgrid:** The standard Instant-NGP multi-resolution hash table storing feature vectors [S1].
+*   **Ray Mappings:** A tracking structure storing all unique mappings per ray, where a mapping $s \to s_{i...j}$ denotes a sample $s$ transformed by edit $i$ (and potentially subsequent edits $j$), or the "default mapping" if the sample remains in canonical space [S1].
+
+**Algorithm:**
+
+1.  **Mapping Identification:** For each sample $s$ generated along rays during an initial pass, check if $s$ lies within the source cage of any edit $i$. If it does, compute the transformed position $s_i = T_i(s)$, establishing a mapping $s \to s_i$. Recursively check if $s_i$ lies within the source cage of another edit $j$; if so, compute $s_{ij} = T_j(s_i)$, creating a recursive mapping $s \to s_{ij}$. If $s$ is not transformed, it retains the "default mapping". All unique mappings along each traced ray are tracked during training [S1].
+2.  **Ray Preparation and Broken Mapping Check:** Re-trace each ray $r$ that has more than one unique mapping, along with copies $r'$, attempting to apply the identified mappings to each sample along $r$. Each mapping implies one or more deformations that copy or remap updates normally occurring in canonical space. A mapping $s \to s_i$ is considered "broken" if $s_i$ lies inside the deformed cage of a later edit $j$ (meaning deforming space according to $j$ overwrites the result of deformation by $i$). Broken mappings also occur for initial rays where the default mapping is no longer possible. The implementation handles this by simply skipping broken mappings [S1].
+3.  **Rendering and Loss Computation:** For each valid ray and mapping, query the NeRF at the mapped or canonical sample position to obtain density $\sigma$ and color $\mathbf{c}$. Perform volume rendering to compute the pixel color $C$. Compute the photometric loss $L_{render}$ against the original input images [S1].
+4.  **Gradient Propagation and Clearing:** Adapt color composition and gradient computation. Shared sample locations (outside cages) only receive gradients from the first ray that references them [S1]. For non-copying edits, contents at the source must be cleared to prevent random density or color in the left-behind empty space. Samples that end up in the undeformed cage of a non-copying edit during their mapping are part of these clearing rays; they accumulate density and integrate against an empty space target (zero density) [S1].
+5.  **Optimization Loop:** Minimize the total loss using gradient descent to update the NeRF parameters $\theta$. Repeat until convergence [S1].
+
+**Pseudocode:**
+
+> **Unverified code.** The code below did not pass a test run against a reference implementation, or no test fits it, so it may contain errors.
+
+```python
+def nerf_distillation(nerf_model, edits, training_images, optimizer, max_epochs):
+    """
+    Distills user edits into the NeRF hashgrid by re-training with forward-mapped samples.
+    :param nerf_model: Instant-NGP model with hashgrids
+    :param edits: List of dicts with keys 'cage' (contains point), 'transform' (maps point), 'is_copying' (bool), 'id' (int)
+    :param training_images: List of (image_tensor, camera_pose)
+    :param optimizer: Optimizer for nerf_model parameters
+    :param max_epochs: Integer, number of optimization iterations
+    """
+    # Define helpers not specified in sources
+    training_rays = generate_training_rays(training_images) # [G]
+    background_color = torch.tensor([0.0, 0.0, 0.0]) # [G]
+    
+    def is_broken_mapping(s, mapping_chain, edits):
+        # A mapping is broken if the target sample lies inside the deformed cage of a later edit
+        # or if the default mapping is no longer possible.
+        # Implementation detail not specified in sources. [G]
+        return False 
+
+    # Step 1: Identify mappings for a representative set of rays
+    ray_mappings = {}
+    for ray_id, ray in enumerate(training_rays):
+        samples = ray.cast(nerf_model) # Initial samples in canonical space
+        mappings = []
+        for s in samples:
+            current_s = s
+            mapping_chain = []
+            # Check for recursive mappings
+            for edit in edits:
+                if edit['cage'].contains(current_s):
+                    transformed_s = edit['transform'](current_s)
+                    mapping_chain.append((edit['id'], transformed_s))
+                    current_s = transformed_s
+                else:
+                    break
+            if mapping_chain:
+                mappings.append((s, mapping_chain))
+            else:
+                mappings.append((s, [])) # Default mapping
+        ray_mappings[ray_id] = mappings
+
+    # Step 2 & 3: Optimization Loop
+    for epoch in range(max_epochs):
+        total_loss = 0.0
+        for img, cam_pose in training_images:
+            ray = Ray(cam_pose, img.pixel_coords)
+            mappings = ray_mappings.get(ray.id, [])
+            
+            rendered_color = 0.0
+            alpha = 0.0
+            
+            # Process each mapping instance
+            for s, mapping_chain in mappings:
+                if is_broken_mapping(s, mapping_chain, edits):
+                    continue
+                
+                query_point = s
+                for edit_id, transformed_s in mapping_chain:
+                    query_point = transformed_s
+                
+                sigma, color = nerf_model.query(query_point)
+                
+                # Volume rendering step (simplified)
+                weight = sigma * exp(-sigma * distance)
+                rendered_color += weight * color
+                alpha += weight
+                
+                # Handle non-copying edit clearing
+                if mapping_chain and not edits[mapping_chain[-1][0]]['is_copying']:
+                    clear_loss = sigma**2 + (color - background_color)**2
+                    total_loss += clear_loss
+                
+                # Gradient sharing: Only process gradients for the first ray referencing this canonical point
+                # This is handled by the optimizer's gradient accumulation logic
+                # or by masking gradients for shared points
+            
+            # Photometric loss
+            photometric_loss = (rendered_color - img.pixel_value)**2
+            total_loss += photometric_loss
+        
+        optimizer.zero_grad()
+        total_loss.backward()
+        optimizer.step()
+```
+
+**Parameters:**
+*   **Learning Rate:** Not given in the sources.
+*   **Number of Epochs:** Not given in the sources.
+*   **Edit Order:** Not given in the sources.
+
+**Edge Cases and Pitfalls:**
+*   **Broken Mappings:** If a sample is transformed by edit $i$ into a region that is then transformed by edit $j$, and $j$'s deformation overwrites $i$'s result, the mapping is broken. The implementation skips these mappings [S1].
+*   **Non-Copying Edits:** Failure to clear the source region of a non-copying edit results in random density or color artifacts in the empty space [S1].
+*   **Gradient Conflicts:** Shared sample locations outside cages must only receive gradients from one ray to prevent conflicting updates [S1].
+
+## Operating characteristics
+*   **Time Complexity:** Requires re-training the entire scene [S1].
+*   **Memory Complexity:** No additional memory overhead for deformation fields or cages; the final representation is a standard Instant-NGP hashgrid [S1].
+*   **Strengths:** Produces a compact representation suitable for rendering; consolidates all edits into a single static model [S1].
+*   **Limitations:** Cannot easily undo edits; requires re-training for any change; broken mappings may lead to loss of content in complex edit sequences [S1].
+*   **When to Use:** When a final, optimized, and compact NeRF representation is needed after multiple edits [S1].
+*   **When Not to Use:** Not given in the sources.
+
+## Background
+NeRF Distillation was introduced in the context of converting between various NeRF representations, specifically targeting the Instant-NGP hashgrid format for its efficiency [S1]. It addresses the need for a clean, consolidated representation after complex editing operations, avoiding the accumulation of deformation fields [S1].
+
+## Sources
+[S1] NeRFshop, https://doi.org/10.1145/3585499, fetched 2026-10-26

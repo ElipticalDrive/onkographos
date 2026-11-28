@@ -1,0 +1,128 @@
+# Adaptive Sampling with Variance-Based Step Size
+
+Also called: Variance-based Adaptive Sampling
+
+## Overview
+This method controls sampling density in unstructured volumes by adjusting the ray-marching step size based on the normalized variance of the spatial partition being traversed, allowing users to tune the trade-off between image quality and frame rate [S1]. It sets itself apart from sibling methods by explicitly linking the step size to a precomputed statistical metric (variance) of the underlying data partition, rather than relying on runtime gradient estimates or fixed heuristics, and it includes a specific opacity correction term to maintain visual consistency when step sizes vary across partitions [S1].
+
+## How it works
+**Inputs and Outputs:**
+*   **Input:** A ray, a spatial partition (e.g., a node in a KD-tree or occupancy geometry), the partition's normalized variance $\sigma$, and user-defined parameters $s_1, s_2, p$.
+*   **Output:** A set of samples along the ray within the partition, integrated into the front-to-back accumulation, with correct opacity compositing.
+
+**Data Structures:**
+The method operates on spatial partitions. While the specific partitioning structure (e.g., KD-tree) is handled by the parent acceleration structure, each partition must store or provide access to its **normalized variance** $\sigma$ [S1]. The variance is computed from the scalar field values within the partition boundaries [S1].
+
+**Parameters:**
+*   $s_1$: Minimum step size (highest quality). User-defined; decreasing improves quality [S1].
+*   $s_2$: Maximum step size (lowest quality). User-defined; increasing improves frame rate [S1].
+*   $p$: Adaptive power. Controls the transition speed from high to low quality in medium variance partitions. Constraint: $p \geq 1$. Typical values: $p=2$ for Jets, Agulhas Current, Japan Earthquake datasets; $p=6$ for Deep Water Asteroid Impact [S1].
+
+**Formulas:**
+1.  **Step Size Calculation:**
+    The step size $s$ for a partition with normalized variance $\sigma$ is computed as:
+    $$ s = \max(s_1 + (s_2 - s_1)|\min(\sigma, 1) - 1|^p, s_1) $$
+    Here, $\sigma$ is the normalized variance. The term $|\min(\sigma, 1) - 1|$ maps the variance to a range where low variance yields a value close to 0 (resulting in $s \approx s_1$) and high variance yields a value close to 1 (resulting in $s \approx s_2$) [S1].
+
+2.  **Opacity Correction:**
+    When compositing samples taken with a step size $s$ different from the reference minimum step size $s_1$, the sample opacity $\alpha$ must be corrected to $\tilde{\alpha}$ to ensure physical correctness:
+    $$ \tilde{\alpha} = 1 - (1 - \alpha)^{s/s_1} $$
+    This ensures that the accumulated opacity remains consistent regardless of the varying step sizes used across different partitions [S1].
+
+**Numbered Steps:**
+1.  **Compute Step Size:** For the current partition, retrieve its normalized variance $\sigma$. Calculate the step size $s$ using the formula above. If $s_1 = s_2$, adaptive sampling is disabled, and a constant step size is used [S1].
+2.  **Ray Marching:** Integrate the ray front-to-back through the partition using the computed step size $s$. Sample points along the ray using the underlying point query kernel (e.g., `rtx-shared-faces` for tetrahedral meshes) [S1].
+3.  **Opacity Correction:** For each sample with opacity $\alpha$, compute the corrected opacity $\tilde{\alpha}$ using the formula above. Use $\tilde{\alpha}$ in the front-to-back compositing equation [S1].
+4.  **Early Ray Termination:** If the accumulated opacity becomes opaque (threshold reached), terminate the ray [S1].
+
+**Pseudocode:**
+> **Unverified code.** The code below did not pass a test run against a reference implementation, or no test fits it, so it may contain errors.
+
+```python
+def adaptive_sample_partition(ray, partition, s1, s2, p):
+    """
+    Samples a ray through a single partition using variance-based adaptive step size.
+    
+    Args:
+        ray: Ray origin and direction.
+        partition: Object containing 'variance' (sigma) and 'query_kernel' method.
+        s1: Minimum step size (highest quality).
+        s2: Maximum step size (lowest quality).
+        p: Adaptive power (p >= 1).
+        
+    Returns:
+        Accumulated color and opacity from this partition.
+    """
+    # 1. Compute step size based on partition variance
+    sigma = partition.variance
+    # Clamp sigma to [0, 1] for the formula as per source definition
+    sigma_clamped = min(sigma, 1.0)
+    
+    # Calculate step size s
+    # Formula: s = max(s1 + (s2 - s1) * |min(sigma, 1) - 1|^p, s1)
+    # Note: |min(sigma, 1) - 1| is equivalent to (1 - sigma_clamped) since sigma >= 0
+    variance_term = (1.0 - sigma_clamped) ** p
+    s = max(s1 + (s2 - s1) * variance_term, s1)
+    
+    # If s1 == s2, adaptive sampling is effectively disabled (constant step)
+    
+    # 2. Integrate ray front-to-back through partition
+    accumulated_color = (0.0, 0.0, 0.0)
+    accumulated_opacity = 0.0
+    t = ray.origin_distance_to_partition_start()
+    
+    # Determine number of steps or iterate until partition exit
+    # The source implies marching with step size s
+    while t < ray.exit_distance_from_partition():
+        # Sample point using the partition's query kernel
+        # Source mentions 'rtx-shared-faces' for tetrahedral meshes [S1]
+        sample_value = partition.query_kernel(ray.origin + ray.direction * t)
+        
+        # Convert scalar value to color and opacity via transfer function
+        # (Transfer function details are external to this method, assumed available)
+        color, alpha = transfer_function(sample_value)
+        
+        # 3. Opacity Correction
+        # Correct opacity for compositing across different step sizes
+        # Formula: alpha_tilde = 1 - (1 - alpha)^(s/s1)
+        alpha_tilde = 1.0 - (1.0 - alpha) ** (s / s1)
+        
+        # Front-to-back compositing
+        # C_out = C_in + (1 - A_in) * C_sample * alpha_tilde
+        # A_out = A_in + (1 - A_in) * alpha_tilde
+        weight = (1.0 - accumulated_opacity) * alpha_tilde
+        accumulated_color = accumulated_color + weight * color
+        accumulated_opacity = accumulated_opacity + weight
+        
+        # 4. Early Ray Termination
+        if accumulated_opacity >= 0.99: # Threshold for "opaque"
+            break
+            
+        t += s
+        
+    return accumulated_color, accumulated_opacity
+```
+
+**Edge Cases and Pitfalls:**
+*   **Non-Transparent Backgrounds:** If background regions are not 100% transparent, empty space skipping cannot discard partitions, limiting performance improvement. Adaptive sampling helps in semitransparent low-variance regions but does not solve the empty space skipping limitation [S1].
+*   **Limited Metadata:** The method is based only on the transfer function (scalar variance). It does not account for gradient shading or scattering effects, which would require additional metadata per partition [S1].
+*   **Geometry Changes:** Occupancy geometry (partitions) must be rebuilt on mesh geometry changes, impacting performance for time series data or runtime level-of-detail strategies [S1].
+*   **Partitioning Quality:** Median split KD-trees may not optimally partition uniform scalar fields (e.g., water in the Deep Water Asteroid Impact dataset was split into multiple partitions despite uniformity). Incorporating scalar field data into partitioning could improve results [S1].
+*   **Numerical Precision:** On large datasets, numerical precision issues may occur when traversing partitions. This may require adapting epsilon offsets or using custom higher-precision intersection tests [S1].
+*   **Diminishing Returns:** Performance gains diminish as the sampling rate becomes very low [S1].
+
+## Operating characteristics
+*   **Time Complexity:** The method adds negligible overhead for space skipping and partition traversal. Tracing rays through 4725 partitions on the Japan Earthquake dataset takes just 3ms [S1]. The core cost is the variance-based step size calculation and the modified ray marching, which reduces the total number of samples in low-variance regions [S1].
+*   **Memory Complexity:** Requires storing the normalized variance $\sigma$ for each partition. The source does not specify the exact memory overhead of this metadata [S1].
+*   **Measured Performance:** On an NVIDIA RTX 8000 GPU, the method achieves a 3.5x speedup on Jets, Agulhas Current, and Deep Water Asteroid Impact datasets, and a 7.8x speedup on the Japan Earthquake dataset, with SSIM $\geq 0.97$ [S1].
+*   **Scaling:** Performance improvements are significant when combined with empty space skipping, particularly in semitransparent low-variance regions [S1].
+*   **Strengths:** Intuitive user control over quality/frame rate trade-off via $s_1, s_2, p$; significant speedup with minimal quality loss; correct opacity compositing across varying step sizes [S1].
+*   **Limitations:** Does not account for shading/scattering without extra metadata; performance depends on partition quality; numerical precision issues on very large datasets; diminishing returns at very low sampling rates [S1].
+*   **When to Use:** When rendering unstructured volumes with significant low-variance regions and when user control over the quality/performance trade-off is desired. Particularly effective when combined with empty space skipping [S1].
+*   **When Not to Use:** When shading effects (gradient, scattering) are critical and cannot be approximated by scalar variance alone; when the mesh geometry changes frequently and partition rebuilding is too costly; when the scalar field is uniform but the partitioning strategy is suboptimal (e.g., median split KD-tree on uniform data) [S1].
+
+## Background
+The method was introduced in the paper "Efficient Space Skipping and Adaptive Sampling of Unstructured Volumes Using Hardware Accelerated Ray Tracing" by Wald et al. (2019) [S1]. It is designed for unstructured volumes (tetrahedral meshes) rendered using hardware-accelerated ray tracing (OptiX) [S1]. The approach builds on the concept of adaptive sampling by using a precomputed statistical metric (variance) of spatial partitions to drive the step size, addressing the limitations of fixed-step rendering in heterogeneous data [S1].
+
+## Sources
+[S1] Efficient Space Skipping and Adaptive Sampling of Unstructured Volumes Using Hardware Accelerated Ray Tracing, https://doi.org/10.1109/visual.2019.8933539, fetched 2026-10-24

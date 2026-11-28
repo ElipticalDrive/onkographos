@@ -1,0 +1,276 @@
+# Spherical Harmonics Lighting Calculation
+
+Also called: Calculating color from Spherical Harmonics, SH Evaluation with Lighting, SH Lighting, Spherical Harmonics Lighting
+
+## Overview
+Spherical Harmonics Lighting Calculation computes the final RGB color of a 3D Gaussian primitive by evaluating its stored spherical harmonic (SH) coefficients against a viewing direction vector. It solves the problem of representing view-dependent appearance (such as specular highlights and ambient occlusion) compactly within the Gaussian Splatting framework. It differs from [Spherical Harmonics Evaluation](3848-spherical-harmonics-evaluation.md) by explicitly applying the Condon–Shortley phase conventions, the specific 0.5 bias for numeric stability, and the hardcoded polynomial basis functions for degrees 0–3 required by the 3D Gaussian Splatting standard.
+
+## How it works
+
+### Inputs and Outputs
+**Inputs:**
+1.  **Direction Vector ($\mathbf{v}$):** A 3D vector $(x, y, z)$ representing the viewing direction relative to the Gaussian. This vector must be normalized (unit length).
+2.  **SH Coefficients:** A set of real spherical harmonic coefficients for the Gaussian. The coefficients are organized by degree $l$ and order $m$. For each degree $l$, there are $2l+1$ coefficients, each containing 3 values (one for Red, Green, Blue).
+    *   Degree 0: 3 coefficients ($SH_{0,0}$).
+    *   Degree 1: 9 coefficients ($SH_{1,-1}$ to $SH_{1,1}$).
+    *   Degree 2: 15 coefficients ($SH_{2,-2}$ to $SH_{2,2}$).
+    *   Degree 3: 21 coefficients ($SH_{3,-3}$ to $SH_{3,3}$).
+    *   *Note:* Higher degrees are not defined in the standard 3D Gaussian Splatting lighting model [S1, S2].
+
+**Outputs:**
+*   **Final Color:** A 3D vector $(R, G, B)$ representing the computed color of the Gaussian.
+
+### Data Structures
+The coefficients are typically stored in a flat array or structured list. The standard ordering for coefficients of degree $l$ is by order $m$ from $-l$ to $l$. For each $m$, the RGB components are stored contiguously.
+
+*   **Degree 0:** `[R_0,0, G_0,0, B_0,0]`
+*   **Degree 1:** `[R_1,-1, G_1,-1, B_1,-1, R_1,0, G_1,0, B_1,0, R_1,1, G_1,1, B_1,1]`
+*   **Degree 2:** `[R_2,-2, ..., B_2,2]` (15 values)
+*   **Degree 3:** `[R_3,-3, ..., B_3,3]` (21 values)
+
+### Steps and Formulas
+
+1.  **Normalize Direction:** Ensure the direction vector $\mathbf{v} = (x, y, z)$ has unit length ($r = \sqrt{x^2 + y^2 + z^2} = 1$) [S1, S2].
+2.  **Compute Degree 0 Component:**
+    The zeroth-order term represents the diffuse color. It is multiplied by the normalization constant $Y_{0,0}$ and a bias of 0.5 is added to keep values in the $[0, 1]$ range for numeric stability [S1, S2].
+    $$Color_{SH_0} = SH_{0,0} \cdot 0.2820947917738781$$
+    Where $0.2820947917738781 \approx \frac{1}{2}\sqrt{\frac{1}{\pi}}$ [S1, S2].
+3.  **Compute Degree 1 Component:**
+    Uses linear terms of $x, y, z$. The Condon–Shortley phase $(-1)^m$ is applied, negating odd orders ($m=-1, 1$) [S1, S2].
+    $$
+    \begin{aligned}
+    Color_{SH_1} =\;& SH_{1,-1} \cdot y \cdot (-0.4886025119029199) \\
+    +\;& SH_{1,0} \cdot z \cdot (0.4886025119029199) \\
+    +\;& SH_{1,1} \cdot x \cdot (-0.4886025119029199)
+    \end{aligned}
+    $$
+    Where $0.4886025119029199 = \sqrt{\frac{3}{4\pi}}$ [S1, S2].
+4.  **Compute Degree 2 Component:**
+    Uses quadratic terms. The Condon–Shortley phase affects the signs of the coefficients for $m=-2, -1, 1, 2$ [S1, S2].
+    $$
+    \begin{aligned}
+    Color_{SH_2} =\;& SH_{2,-2} \cdot xy \cdot (1.092548430592079) \\
+    +\;& SH_{2,-1} \cdot yz \cdot (-1.092548430592079) \\
+    +\;& SH_{2,0} \cdot (2z^2 - x^2 - y^2) \cdot (0.3153915652525200) \\
+    +\;& SH_{2,1} \cdot xz \cdot (-1.092548430592079) \\
+    +\;& SH_{2,2} \cdot (x^2 - y^2) \cdot (0.5462742152960395)
+    \end{aligned}
+    $$
+    Where $1.092548430592079 = \sqrt{\frac{15}{4\pi}}$, $0.3153915652525200 = \sqrt{\frac{5}{16\pi}}$, and $0.5462742152960395 = \frac{1}{2}\sqrt{\frac{15}{4\pi}}$ [S1, S2].
+5.  **Compute Degree 3 Component:**
+    Uses cubic terms. The Condon–Shortley phase affects the signs for odd $m$ [S1, S2].
+    $$
+    \begin{aligned}
+    Color_{SH_3} =\;& SH_{3,-3} \cdot y(3x^2 - y^2) \cdot (-0.5900435899266435) \\
+    +\;& SH_{3,-2} \cdot xyz \cdot (2.890611442640554) \\
+    +\;& SH_{3,-1} \cdot y(4z^2 - x^2 - y^2) \cdot (-0.4570457994644657) \\
+    +\;& SH_{3,0} \cdot z(2z^2 - 3x^2 - 3y^2) \cdot (0.3731763325901154) \\
+    +\;& SH_{3,1} \cdot x(4z^2 - x^2 - y^2) \cdot (-0.4570457994644657) \\
+    +\;& SH_{3,2} \cdot z(x^2 - y^2) \cdot (1.445305721320277) \\
+    +\;& SH_{3,3} \cdot x(x^2 - 3y^2) \cdot (-0.5900435899266435)
+    \end{aligned}
+    $$
+    Where $2.890611442640554 = \sqrt{\frac{105}{4\pi}}$, $0.3731763325901154 = \sqrt{\frac{7}{16\pi}}$, and $1.445305721320277 = \frac{1}{2}\sqrt{\frac{105}{4\pi}}$ [S1, S2].
+6.  **Sum and Bias:**
+    Sum the components and apply the 0.5 bias [S1, S2].
+    $$Color_{final} = Color_{SH_0} + Color_{SH_1} + Color_{SH_2} + Color_{SH_3} + 0.5$$
+
+### Pseudocode
+
+> **Unverified code.** The code below did not pass a test run against a reference implementation, or no test fits it, so it may contain errors.
+
+```python
+import math
+
+def spherical_harmonics_lighting(x: float, y: float, z: float, sh_coeffs: list) -> tuple:
+    """
+    Computes the RGB color of a Gaussian using Spherical Harmonics.
+    
+    Args:
+        x, y, z: Components of the normalized viewing direction vector.
+        sh_coeffs: List of SH coefficients. 
+                   Must contain at least 3 values (Degree 0).
+                   If Degree 1 is present, it must have 9 values.
+                   If Degree 2 is present, it must have 15 values.
+                   If Degree 3 is present, it must have 21 values.
+                   Coefficients are ordered by degree, then by order m (-l to l), 
+                   then by channel (R, G, B).
+                   
+    Returns:
+        (R, G, B) color tuple.
+    """
+    # Constants derived from SH basis functions and Condon-Shortley phase
+    C0 = 0.2820947917738781
+    C1 = 0.4886025119029199
+    C2_2 = 1.092548430592079
+    C2_1 = -1.092548430592079
+    C2_0 = 0.3153915652525200
+    C2_1_pos = -1.092548430592079 # Note: Source uses negative for m=1 in SH2
+    C2_2_pos = 0.5462742152960395
+    
+    C3_3 = -0.5900435899266435
+    C3_2 = 2.890611442640554
+    C3_1 = -0.4570457994644657
+    C3_0 = 0.3731763325901154
+    C3_1_pos = -0.4570457994644657
+    C3_2_pos = 1.445305721320277
+    C3_3_pos = -0.5900435899266435
+
+    # Initialize color accumulator
+    r, g, b = 0.0, 0.0, 0.0
+
+    # Degree 0 (Always required)
+    # sh_coeffs[0:3] are R, G, B for SH_0,0
+    r += sh_coeffs[0] * C0
+    g += sh_coeffs[1] * C0
+    b += sh_coeffs[2] * C0
+
+    # Degree 1 (Optional, but if present, must be fully defined)
+    if len(sh_coeffs) >= 12:
+        # SH_1,-1 (indices 3,4,5)
+        # SH_1,0 (indices 6,7,8)
+        # SH_1,1 (indices 9,10,11)
+        # Y_1,-1 ~ -y, Y_1,0 ~ z, Y_1,1 ~ -x
+        r += sh_coeffs[3] * y * (-C1) + sh_coeffs[6] * z * C1 + sh_coeffs[9] * x * (-C1)
+        g += sh_coeffs[4] * y * (-C1) + sh_coeffs[7] * z * C1 + sh_coeffs[10] * x * (-C1)
+        b += sh_coeffs[5] * y * (-C1) + sh_coeffs[8] * z * C1 + sh_coeffs[11] * x * (-C1)
+
+    # Degree 2 (Optional)
+    if len(sh_coeffs) >= 27:
+        # Indices 12-26
+        # SH_2,-2 (12-14), SH_2,-1 (15-17), SH_2,0 (18-20), SH_2,1 (21-23), SH_2,2 (24-26)
+        # Terms: xy, yz, 2z^2-x^2-y^2, xz, x^2-y^2
+        # Constants: 1.0925, -1.0925, 0.3153, -1.0925, 0.5462
+        
+        # SH_2,-2
+        r += sh_coeffs[12] * (x * y) * C2_2
+        g += sh_coeffs[13] * (x * y) * C2_2
+        b += sh_coeffs[14] * (x * y) * C2_2
+        
+        # SH_2,-1
+        r += sh_coeffs[15] * (y * z) * C2_1
+        g += sh_coeffs[16] * (y * z) * C2_1
+        b += sh_coeffs[17] * (y * z) * C2_1
+        
+        # SH_2,0
+        term_20 = 2 * z * z - x * x - y * y
+        r += sh_coeffs[18] * term_20 * C2_0
+        g += sh_coeffs[19] * term_20 * C2_0
+        b += sh_coeffs[20] * term_20 * C2_0
+        
+        # SH_2,1
+        r += sh_coeffs[21] * (x * z) * C2_1_pos
+        g += sh_coeffs[22] * (x * z) * C2_1_pos
+        b += sh_coeffs[23] * (x * z) * C2_1_pos
+        
+        # SH_2,2
+        term_22 = x * x - y * y
+        r += sh_coeffs[24] * term_22 * C2_2_pos
+        g += sh_coeffs[25] * term_22 * C2_2_pos
+        b += sh_coeffs[26] * term_22 * C2_2_pos
+
+    # Degree 3 (Optional)
+    if len(sh_coeffs) >= 48:
+        # Indices 27-47
+        # SH_3,-3 (27-29) to SH_3,3 (45-47)
+        # Terms: y(3x^2-y^2), xyz, y(4z^2-x^2-y^2), z(2z^2-3x^2-3y^2), x(4z^2-x^2-y^2), z(x^2-y^2), x(x^2-3y^2)
+        
+        # SH_3,-3
+        term_3_3 = y * (3 * x * x - y * y)
+        r += sh_coeffs[27] * term_3_3 * C3_3
+        g += sh_coeffs[28] * term_3_3 * C3_3
+        b += sh_coeffs[29] * term_3_3 * C3_3
+        
+        # SH_3,-2
+        term_3_2 = x * y * z
+        r += sh_coeffs[30] * term_3_2 * C3_2
+        g += sh_coeffs[31] * term_3_2 * C3_2
+        b += sh_coeffs[32] * term_3_2 * C3_2
+        
+        # SH_3,-1
+        term_3_1 = y * (4 * z * z - x * x - y * y)
+        r += sh_coeffs[33] * term_3_1 * C3_1
+        g += sh_coeffs[34] * term_3_1 * C3_1
+        b += sh_coeffs[35] * term_3_1 * C3_1
+        
+        # SH_3,0
+        term_3_0 = z * (2 * z * z - 3 * x * x - 3 * y * y)
+        r += sh_coeffs[36] * term_3_0 * C3_0
+        g += sh_coeffs[37] * term_3_0 * C3_0
+        b += sh_coeffs[38] * term_3_0 * C3_0
+        
+        # SH_3,1
+        term_3_1_pos = x * (4 * z * z - x * x - y * y)
+        r += sh_coeffs[39] * term_3_1_pos * C3_1_pos
+        g += sh_coeffs[40] * term_3_1_pos * C3_1_pos
+        b += sh_coeffs[41] * term_3_1_pos * C3_1_pos
+        
+        # SH_3,2
+        term_3_2_pos = z * (x * x - y * y)
+        r += sh_coeffs[42] * term_3_2_pos * C3_2_pos
+        g += sh_coeffs[43] * term_3_2_pos * C3_2_pos
+        b += sh_coeffs[44] * term_3_2_pos * C3_2_pos
+        
+        # SH_3,3
+        term_3_3_pos = x * (x * x - 3 * y * y)
+        r += sh_coeffs[45] * term_3_3_pos * C3_3_pos
+        g += sh_coeffs[46] * term_3_3_pos * C3_3_pos
+        b += sh_coeffs[47] * term_3_3_pos * C3_3_pos
+
+    # Apply 0.5 bias
+    r += 0.5
+    g += 0.5
+    b += 0.5
+
+    return (r, g, b)
+```
+
+### Parameters
+*   **Degree ($l$):** The maximum degree of spherical harmonics used. Standard 3D Gaussian Splatting supports up to Degree 3 [S1, S2].
+*   **Bias:** 0.5. Applied to the final color to maintain values in the $[0, 1]$ range [S1, S2].
+
+### Edge Cases and Pitfalls
+*   **Partial Degrees:** If higher-order spherical harmonics are used, all lower-order spherical harmonics MUST be provided. Partial definitions (e.g., providing Degree 2 but not Degree 1) are not allowed [S1, S2].
+*   **Normalization:** The direction vector must be normalized. If $r \neq 1$, the results will be incorrect because the basis functions assume unit vectors [S1, S2].
+*   **Condon–Shortley Phase:** The signs of the coefficients for odd orders ($m$) are negated. Implementers must ensure the coefficient storage order matches the sign conventions used in the formulas [S1, S2].
+*   **Range Clamping:** If using unsigned normalized color buffers, values less than 0 or greater than 1 are clamped automatically. However, the 0.5 bias is applied during training and rendering to keep the raw SH values centered around 0 for numeric stability [S1, S2].
+
+## Operating characteristics
+
+### Time and Memory Complexity
+*   **Time:** $O(1)$ per Gaussian, as the number of degrees is fixed (up to 3). The calculation involves a fixed number of multiplications and additions.
+*   **Memory:** The SH coefficients are stored per Gaussian. Degree 0 requires 3 floats, Degree 1 adds 9, Degree 2 adds 15, and Degree 3 adds 21. Total memory per Gaussian for Degree 3 is 48 floats (192 bytes) [S1, S2].
+
+### Measured Performance
+*   Not given in the sources.
+
+### Scaling
+*   Not given in the sources.
+
+### Strengths and Limitations
+*   **Strengths:** Compact representation of view-dependent effects. Allows for efficient rendering of complex lighting (specular, ambient occlusion) without explicit light sources [S1, S2].
+*   **Limitations:** Limited to low-frequency view-dependent effects (up to Degree 3). High-frequency specularities may not be captured accurately. Requires normalization of direction vectors [S1, S2].
+
+### When to Use
+*   Use when view-dependent appearance is required for 3D Gaussian Splatting.
+*   Use when memory efficiency is important compared to storing multiple texture maps or explicit light probes.
+
+### When Not to Use
+*   Do not use if high-frequency specular highlights are critical and cannot be approximated by low-degree SH.
+*   Do not use if the direction vector cannot be normalized.
+
+## Background
+
+### Origin
+The method is defined in the `KHR_gaussian_splatting` extension for glTF, which standardizes the storage and rendering of 3D Gaussian Splats. It builds on the original 3D Gaussian Splatting paper by Kerbl et al., adapting the SH evaluation for the glTF format [S1, S2].
+
+### History
+The use of spherical harmonics for view-dependent rendering in 3D Gaussian Splatting was introduced in the original 3D Gaussian Splatting paper. The `KHR_gaussian_splatting` extension formalized the specific constants, ordering, and biasing rules for interoperability [S1, S2].
+
+### Usage
+Used in glTF-based 3D Gaussian Splatting viewers and exporters to render view-dependent colors [S1, S2].
+
+## Sources
+
+[S1] KHR_gaussian_splatting, https://github.com/KhronosGroup/glTF/blob/main/extensions/2.0/Khronos/KHR_gaussian_splatting/README.md, fetched 2026-10-30
+[S2] KHR_gaussian_splatting, https://github.com/KhronosGroup/glTF/tree/main/extensions/2.0/Khronos/KHR_gaussian_splatting, fetched 2026-10-30

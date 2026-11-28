@@ -1,0 +1,107 @@
+# Mammen's Technique
+
+Also called: A-buffer visibility sort, Carpenter's A-buffer, Per-pixel transparent fragment sorting
+
+## Overview
+Mammen's Technique is a software algorithm that sorts per-pixel transparent fragments in front of the front-most opaque one [S2, unofficial]. It operates on pixel fragments instead of object fragments, allowing objects to be rasterized in any order without requiring object-space visibility sorting [S1, unofficial][S3]. This distinguishes it from object-space methods like MPVO, which must handle complex degeneracies and ordering constraints before rasterization [S1, unofficial].
+
+## How it works
+**Inputs and Outputs:**
+*   **Input:** A set of geometric primitives (polygons) defining the scene [S1, unofficial].
+*   **Output:** A depth-sorted list of fragments for each pixel, ready for compositing [S1, unofficial].
+
+**Data Structures:**
+*   **Per-Pixel Linked Lists:** For each pixel $(x, y)$, a singly linked list stores fragments [S1, unofficial].
+*   **Fragment Structure:** Each fragment stores its depth value $z$ and color/transparency attributes [S1, unofficial]. The exact bit-packing of the fragment structure is not specified in the sources [G: Standard implementation would include $z$, color, and a pointer to the next fragment].
+
+**Steps:**
+1.  **Rasterization:** Rasterize all objects in the scene into sets of pixel fragments [S1, unofficial].
+2.  **Storage:** Save the generated fragments into per-pixel linked lists [S1, unofficial].
+3.  **Sorting:** After all objects have been rasterized, sort the fragments in each per-pixel linked list using the stored depth values [S1, unofficial][S3].
+4.  **Compositing:** Composite the sorted fragments from front to back [G: Standard alpha blending/compositing procedure].
+
+**Formulas:**
+*   Not given in the sources.
+
+**Parameters:**
+*   Not given in the sources.
+
+**Edge Cases and Pitfalls:**
+*   **Memory Requirements:** The technique has substantial memory requirements because it stores all incoming fragments for every pixel [S1, unofficial][S3].
+*   **Hardware Implementation:** Current hardware implementations of this technique require multiple passes through the polygons in the scene [S2, unofficial][S3].
+
+**Pseudocode:**
+> **Unverified code.** The code below did not pass a test run against a reference implementation, or no test fits it, so it may contain errors.
+
+```python
+class Fragment:
+    def __init__(self, x, y, z, color):
+        self.x = x
+        self.y = y
+        self.z = z
+        self.color = color
+        self.next = None
+
+def mammen_technique(scene_primitives, image_width, image_height):
+    # Initialize per-pixel linked lists
+    pixel_lists = [None] * (image_width * image_height)
+
+    # Step 1 & 2: Rasterize all objects and store fragments
+    for primitive in scene_primitives:
+        # [G: Standard rasterization step generates pixel coverage and depth values]
+        fragments = [] 
+        for frag in fragments:
+            idx = frag.y * image_width + frag.x
+            node = Fragment(frag.x, frag.y, frag.z, frag.color)
+            node.next = pixel_lists[idx]
+            pixel_lists[idx] = node
+
+    # Step 3: Sort the lists after all objects have been rasterized
+    for i in range(len(pixel_lists)):
+        pixel_lists[i] = sort_linked_list_by_depth(pixel_lists[i])
+
+    return pixel_lists
+
+def sort_linked_list_by_depth(head):
+    if head is None or head.next is None:
+        return head
+    slow, fast = head, head.next
+    while fast and fast.next:
+        slow, fast = slow.next, fast.next.next
+    mid = slow.next
+    slow.next = None
+    return merge(sort_linked_list_by_depth(head), sort_linked_list_by_depth(mid))
+
+def merge(left, right):
+    dummy = Fragment(0, 0, float('inf'), None)
+    curr = dummy
+    while left and right:
+        if left.z < right.z:
+            curr.next, left = left, left.next
+        else:
+            curr.next, right = right, right.next
+        curr = curr.next
+    curr.next = left or right
+    return dummy.next
+```
+
+## Subtopics
+
+### [R-Buffer](2357-r-buffer.md)
+The R-Buffer is a hardware architecture proposal for implementing order-independent transparency (OIT) by storing fragments in a large, unordered, recirculating buffer shared across the entire screen, rather than using fixed-size per-pixel buffers [G]. It implements a sorting and compositing method similar to Mammen's software algorithm to handle transparent fragments in front of the front-most opaque one. Unlike previous hardware implementations that required multiple passes through the geometry, the R-Buffer scan-converts all polygons only once, storing uncomposited fragments in the recirculating buffer for subsequent depth-comparison passes. It is distinguished from its sibling [Mammen's Technique](1279-mammen-s-technique.md) by moving the sorting logic from software to dedicated hardware logic, and from [k-Buffer](1280-k-buffer.md) by using a single global FIFO buffer instead of fixed-size per-pixel arrays, thereby amortizing storage costs over the screen [G].
+
+## Operating characteristics
+*   **Time Complexity:** Not given in the sources [G].
+*   **Memory Complexity:** Substantial, as it stores all incoming fragments for every pixel [S1, unofficial][S3].
+*   **Strengths:** Objects can be rasterized in any order, avoiding the complexity of object-space visibility sorting [S1, unofficial].
+*   **Limitations:** High memory consumption [S1, unofficial][S3]. Software implementation requires sorting from scratch at each pixel, which is more work than incremental updates [S2, unofficial]. Hardware implementations may require multiple passes through the geometry [S2, unofficial][S3].
+*   **When to use:** When object-space ordering is difficult or impossible (e.g., due to visibility cycles) and memory is not a constraint [G].
+*   **When not to use:** When memory is limited or when incremental sorting per pixel is feasible [G].
+
+## Background
+The technique was proposed by Carpenter as the A-buffer [S1, unofficial][S3]. It is described in a software algorithm by Mammen [S2, unofficial]. The method operates on pixel fragments instead of object fragments [S1, unofficial][S3].
+
+## Sources
+[S1] PDF A Survey of GPU-Based Volume Rendering of Unstructured Grids, https://www.sci.utah.edu/~stevec/papers/gputet_survey.pdf, fetched 2026-10-27 (unofficial)
+[S2] PDF 0078-0903-2 1..13, https://sci.utah.edu/~csilva/papers/tvcg2004cr.pdf, fetched 2026-10-28 (unofficial)
+[S3] PDF Hardware-Assisted Visibility Sorting for Unstructured Volume Rendering, https://www.sci.utah.edu/~stevec/papers/havs.pdf, fetched 2026-10-29

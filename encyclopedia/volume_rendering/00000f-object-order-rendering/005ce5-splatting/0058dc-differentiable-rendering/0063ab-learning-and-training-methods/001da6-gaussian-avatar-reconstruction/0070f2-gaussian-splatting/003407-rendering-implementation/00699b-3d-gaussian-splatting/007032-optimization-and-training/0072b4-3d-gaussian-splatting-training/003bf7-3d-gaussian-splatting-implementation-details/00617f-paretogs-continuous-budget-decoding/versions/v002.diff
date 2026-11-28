@@ -1,0 +1,147 @@
+--- v001.md
++++ v002.md
+@@ -8,11 +8,11 @@
+ ## How it works
+ **Inputs and Outputs:**
+-*   **Inputs:** A set of nested adapted anchors (including a Full model), the global nested member ordering, and pre-calibrated interval exponents $(p, q)$.
+-*   **Outputs:** Standard $K$-Gaussian parameters (position, log scale, quaternion, opacity logit, DC color, higher-order SH coefficients) for a specified integer budget $K$.
++*   **Inputs:** A set of nested adapted anchors (including a Full model), the global nested member ordering, and pre-calibrated interval exponents $(p, q)$ [S1, unofficial].
++*   **Outputs:** Standard $K$-Gaussian parameters (position, log scale, quaternion, opacity logit, DC color, higher-order SH coefficients) for a specified integer budget $K$ [S1, unofficial].
+ 
+ **Data Structures:**
+ *   **Global Nested Ordering:** A permutation of Gaussian IDs derived from concatenating entry sequences of contracted anchors. Full-model parameters are reordered to match this sequence [S1, unofficial].
+ *   **Compressed Residual Atlas:** Stores orthogonal decompositions of non-full anchor residuals relative to the Full model.
+-    *   **Layout:** Stacked by member layer and parameter field.
++    *   **Layout:** Stacked by member layer and parameter field [S1, unofficial].
+     *   **Precision:** Quantization scales, anchor combination coefficients, and SH channel bases are stored in FP16 [S1, unofficial].
+     *   **Quantization:** Symmetric INT8 quantization applied independently to each channel within blocks of 64 Gaussian rows [S1, unofficial].
+@@ -49,5 +49,5 @@
+     *   Calculate the reconstruction loss $\ell_{v,h}$ for view $v$ at the lower endpoint, three intermediate budgets, and upper endpoint, indexed by $h=0, \dots, 4$, using image loss $\ell = 0.8 L1 + 0.2 (1 - SSIM)$ [S1, unofficial].
+     *   Compute loss delta, delta variance, and negative delta mean for each view [S1, unofficial]:
+-        $$ d_{v,h} = \frac{1}{3} \sum_{h=1}^{3} \frac{\ell_{v,h} - \ell_{v,h+1}}{t_{h+1} - t_h} $$
++        $$ d_{v,h} = \frac{1}{3} \sum_{k=1}^{3} \frac{\ell_{v,k} - \ell_{v,k+1}}{t_{k+1} - t_k} $$
+         $$ s_v = \frac{1}{3} \sum_{h=0}^{3} |d_{v,h} - (\ell_{v,0} - \ell_{v,4})| $$
+         $$ m_v = \frac{1}{4} \sum_{h=0}^{3} \max(-d_{v,h}, 0) $$
+@@ -67,5 +67,4 @@
+ 
+ **Pseudocode:**
+-
+ ```python
+ import math
+@@ -116,15 +115,7 @@
+     
+     # Calculate normalized progress t
+-    # t is the relative position of K between lower and upper anchor counts
+-    # Note: The source defines t based on normalized progress, 
+-    # but for interpolation between discrete anchors, we assume t represents 
+-    # the fraction of the way from lower to upper in terms of member inclusion.
+-    # The source mentions t in {0.25, 0.5, 0.75} for calibration, 
+-    # implying t is a continuous variable in [0, 1] for decoding.
+     t = (K - lower_anchor.count) / (upper_anchor.count - lower_anchor.count)
+     
+     # Identify shared and entering members
+-    # Shared members are those present in both lower and upper anchors
+-    # Entering members are those present in upper but not lower
+     lower_ids = set(lower_anchor.member_ids)
+     upper_ids = set(upper_anchor.member_ids)
+@@ -134,56 +125,23 @@
+     
+     # Initialize output parameters
+-    # We need to reconstruct the full set of K parameters
+-    # The global ordering helps us map IDs to positions
+-    
+-    # Create a mapping from ID to index in the global ordering
+-    id_to_idx = {gid: idx for idx, gid in enumerate(ordering)}
++    output_params = {}
+     
+     # Parameters for shared members: interpolate in raw coordinates
+-    # The source says "shared members follow Equation (4) in raw parameter coordinates"
+-    # Equation (4) is not provided, but typically this implies linear interpolation 
+-    # or interpolation based on the exponent p. 
+-    # Given the context of "shared-state exponent p", it likely modulates the 
+-    # contribution or the interpolation weight. 
+-    # However, without Eq (4), we assume standard linear interpolation for shared members 
+-    # as is common in such atlases, or that p affects the opacity/weighting.
+-    # Let's assume linear interpolation for raw parameters for shared members.
+-    
+-    # Parameters for entering members: use upper-anchor state, scale opacity by t^q
+-    # Opacity is stored as logit.
+-    
+-    output_params = {}
+-    
++    # Note: The exact interpolation formula for shared members is not provided in the sources [G].
++    # Standard linear interpolation is used here as a placeholder for raw coordinate interpolation.
+     for gid in shared_ids:
+-        idx = id_to_idx[gid]
+-        # Interpolate raw parameters between lower and upper
+-        # Assuming parameters are aligned by ID in the anchors
+         lower_p = lower_anchor.parameters[gid]
+         upper_p = upper_anchor.parameters[gid]
+-        
+-        # Linear interpolation for raw parameters
+-        # Note: The source mentions "shared-state exponent p". 
+-        # If p is an exponent for the shared state, it might mean:
+-        # param = lower_p + t^p * (upper_p - lower_p)
+-        # Or it might affect the opacity specifically.
+-        # Given the ambiguity of Eq (4), and the explicit instruction for entering members,
+-        # we will use linear interpolation for shared parameters as a safe default 
+-        # for "raw parameter coordinates" unless p is explicitly defined as a power law.
+-        # However, "shared-state exponent p" strongly suggests a power law interpolation.
+-        # Let's use t^p for the interpolation weight.
+         weight = t ** p
+         interpolated_p = lower_p + weight * (upper_p - lower_p)
+         output_params[gid] = interpolated_p
+         
++    # Parameters for entering members: use upper-anchor state, scale opacity by t^q
+     for gid in entering_ids:
+-        idx = id_to_idx[gid]
+-        # Use upper-anchor state
+-        upper_p = upper_anchor.parameters[gid]
++        upper_p = upper_anchor.parameters[gid].copy()
+         
+-        # Scale opacity by t^q
+         # Opacity is the 4th component (index 3) in the 59 scalar components
+-        # It is stored as a logit.
+         opacity_logit = upper_p[3]
+-        opacity = sigmoid(opacity_logit)
++        opacity = 1.0 / (1.0 + np.exp(-opacity_logit))
+         
+         # Scale opacity
+@@ -194,5 +152,5 @@
+         
+         # Convert back to logit
+-        scaled_opacity_logit = logit(scaled_opacity)
++        scaled_opacity_logit = math.log(scaled_opacity / (1 - scaled_opacity))
+         
+         # Update the opacity logit in the parameter vector
+@@ -208,10 +166,4 @@
+         
+     return final_params
+-
+-def sigmoid(x):
+-    return 1.0 / (1.0 + np.exp(-x))
+-
+-def logit(x):
+-    return np.log(x / (1 - x))
+ ```
+ 
+@@ -231,13 +183,13 @@
+ ## Operating characteristics
+ *   **Time Complexity:** Decoding is $O(K)$ for assembling the $K$ Gaussian parameters, assuming constant-time lookup of anchors and exponents. Calibration is $O(V \cdot |P| \cdot |Q| \cdot H)$, where $V$ is the number of views, $|P|$ and $|Q|$ are the sizes of the exponent sets, and $H$ is the number of intervals [S1, unofficial].
+-*   **Memory Complexity:** The compressed residual atlas reduces storage by using orthogonal decomposition (rank 10 for state, rank 36 for SH channels) and INT8 quantization [S1, unofficial]. The exact memory savings depend on the number of anchors and the compression ratio of the atlas.
++*   **Memory Complexity:** The compressed residual atlas reduces storage by using orthogonal decomposition (rank 10 for state, rank 36 for SH channels) and INT8 quantization [S1, unofficial]. The exact memory savings depend on the number of anchors and the compression ratio of the atlas [S1, unofficial].
+ *   **Measured Performance:** The method achieves high-quality continuous-budget rendering, with PSNR results comparable to full models at lower budgets [S1, unofficial].
+-*   **Strengths:** Enables smooth quality-performance trade-offs without retraining; preserves geometric fidelity through residual interpolation; efficient runtime decoding.
+-*   **Limitations:** Requires pre-calibration; calibration must be done carefully to avoid overfitting; no per-Gaussian progress correction.
+-*   **When to Use:** When continuous budget control is needed for deployment on devices with varying capabilities or when dynamic quality adjustment is required.
+-*   **When Not to Use:** When static compression is sufficient, or when per-Gaussian adaptive quality is needed.
++*   **Strengths:** Enables smooth quality-performance trade-offs without retraining; preserves geometric fidelity through residual interpolation; efficient runtime decoding [S1, unofficial].
++*   **Limitations:** Requires pre-calibration; calibration must be done carefully to avoid overfitting; no per-Gaussian progress correction [S1, unofficial].
++*   **When to Use:** When continuous budget control is needed for deployment on devices with varying capabilities or when dynamic quality adjustment is required [S1, unofficial].
++*   **When Not to Use:** When static compression is sufficient, or when per-Gaussian adaptive quality is needed [S1, unofficial].
+ 
+ ## Background
+-ParetoGS Continuous-Budget Decoding was introduced in the paper "ParetoGS: High-Quality Continuous-Budget 3D Gaussian Splatting with Sparse Adapted Anchors" [S1, unofficial]. It builds on the concept of adapted anchors and residual encoding to provide a flexible rendering pipeline.
++ParetoGS Continuous-Budget Decoding was introduced in the paper "ParetoGS: High-Quality Continuous-Budget 3D Gaussian Splatting with Sparse Adapted Anchors" [S1, unofficial]. It builds on the concept of adapted anchors and residual encoding to provide a flexible rendering pipeline [S1, unofficial].
+ 
+ ## Sources

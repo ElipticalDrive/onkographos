@@ -1,0 +1,129 @@
+--- v001.md
++++ v002.md
+@@ -1,81 +1,71 @@
+ # GPU-based Volume Sculpting System
+-
+ Also called: Weiskopf et al.38
+ 
+ ## Overview
+-A texture-based volume rendering system that enables real-time interactive sculpting of volumetric datasets by voxelizing geometric tools on the GPU via fragment shaders to generate a 3D mask [S1]. It differs from standard ray casting by decoupling the sculpting operation (mask generation) from the rendering pass, allowing for complex concave clipping and erasing without modifying the underlying scalar field data [S1].
++A texture-based volume rendering system that enables real-time interactive sculpting of volumetric datasets by voxelizing sculpting tools on the GPU via fragment shaders to create a 3D mask [S1]. It solves the problem of interactive volume modification by allowing users to clip, erase, or dig into volumes without complex transfer functions, building on the [Interactive Concave Volume Clipping via GPU Boolean Operations](3592-interactive-concave-volume-clipping-via-gpu-boolean-operatio.md) by providing the mechanism for generating the 3D mask used in subsequent rendering stages.
+ 
+ ## How it works
+ **Inputs and Outputs:**
+-*   **Input:** Volumetric dataset (stored as a 3D texture on GPU), user interaction parameters (tool type, position, radius/geometry), and the current 3D mask (SculptMap).
+-*   **Output:** Updated 3D mask (SculptMap) and the final rendered image in the Frame Buffer.
++*   **Input:** Volumetric dataset, user interaction (2D point, line segment, or 3D geometry), tool parameters (radius $r$).
++*   **Output:** A 3D mask (`SculptMap`) stored as a 3D texture on the GPU, where values indicate visibility or distance to the clipping boundary [S1].
+ 
+ **Data Structures:**
+-*   **SculptMap:** A 3D texture storing mask values. Values are either binary ($1=$ visible, $0=$ removed) or Euclidean distances to the closest point on the clipping object to avoid jagged artifacts [S1].
+-*   **Proxy Geometry:** A geometric primitive (e.g., rectangle, plane) representing the tool's interaction area in screen space, processed by a Proxy Geometric Shader.
++*   **3D Texture (`SculptMap`):** Stores the mask. Values are either binary (1.0 = visible, 0.0 = removed) or Euclidean distances to the closest point on the clipping object to avoid jaggy artifacts [S1].
++*   **Proxy Geometric Shader:** Generates a proxy rectangle covering the view frustum or specific tool area to drive fragment shader execution [S1].
++*   **Fragment Shaders:** `FSEraser` and `FSClipper` implement the voxelization logic [S1].
+ 
+ **Steps:**
+-1.  **Initialization:** Load the volumetric dataset into a 3D texture on the GPU [S1].
+-2.  **Tool Voxelization (Update):** When the user interacts, the active sculpting tool (e.g., Eraser, Clipper) is voxelized on the GPU. Fragment shaders process the proxy geometry to mark voxels for removal in the SculptMap [S1].
+-3.  **Rendering (Drawing):** The volume is rendered using the SculptMap and any clipping planes. Voxels marked in the mask are excluded or blended based on their mask values [S1].
++1.  **Initialization:** Process the volumetric dataset and store it as a 3D texture in GPU memory [S1].
++2.  **Update (Voxelization):** When the user interacts, the active sculpting tool geometry is voxelized on the GPU. Fragment shaders calculate the distance from each fragment's voxel center to the tool's geometric primitive. If the distance is within the tool's radius $r$, the voxel is marked for removal in the `SculptMap` [S1].
++3.  **Drawing:** The rendering pipeline uses the `SculptMap` and clipping planes to render the volume. Fragments are discarded or modified based on the mask values [S1].
+ 
+-**Pseudocode:**
+-The following pseudocode implements the `FSEraser` fragment shader logic described in [S1]. It calculates the distance from a fragment to a 2D point $P$ on the projection plane and updates the mask if the distance is within the tool radius.
++**Formulas and Logic:**
++*   **Eraser Tool (`FSEraser`):**
++    *   Input: 3D mask `SculptMap`, projection plane `ProjPlane`, 2D point $P$ (where $P.z = r$), `PolygonCoord` [S1].
++    *   For each fragment, project the 3D texture coordinate `texCoord` to the 2D projection plane:
++        $$ \text{PlaneCoordinates} = \frac{\text{mul}(\text{float4}(\text{texCoord.xyz} - 0.5f, 1.0f), \text{ProjPlane})}{\text{PlaneCoordinates.w}} $$
++    *   Calculate 2D Euclidean distance $D$ from the projected coordinate to $P$:
++        $$ D = \frac{\|\text{PlaneCoordinates.xy} - P.xy\|}{P.z} $$
++    *   Update the mask alpha channel if $D$ is smaller than the current value:
++        ```python
++        if D < Col.a:
++            Col.a = D
++        ```
++    *   [S1]
+ 
+-```python
+-# FSEraser Fragment Shader Logic
+-# Inputs:
+-#   SculptMap: sampler3D, current 3D mask
+-#   PolygonCoord: sampler2D, texture coordinates for the proxy rectangle
+-#   P: float3, (x, y) is the 2D point on the projection plane, z is the tool radius r
+-#   ProjPlane: float4x4, projection matrix mapping voxel coordinates to the projection plane
++*   **Clipper Tool (`FSClipper`):**
++    *   Input: 3D mask `SculptMap`, `clipPlane`, `PolygonCoord` [S1].
++    *   The 2D Clipper defines a line segment on the view plane. The shader calculates the distance of the fragment to this plane/line.
++    *   Update the mask alpha channel if the distance is smaller than the current value:
++        ```python
++        if D < Col.a:
++            Col.a = D
++        ```
++    *   [S1]
+ 
+-def FSEraser_fragment_shader(P, ProjPlane, SculptMap, PolygonCoord):
+-    # 1. Get texture coordinates from the proxy geometry
+-    # Assuming v2f.Tex0 is the input texture coordinate from the vertex shader
+-    tex_coord_2d = sample_texture(PolygonCoord, v2f.Tex0)
+-    
+-    # 2. Map 3D voxel coordinates to the 2D projection plane
+-    # Convert normalized texture coordinates (0-1) to world/voxel space (-0.5 to 0.5)
+-    voxel_pos = float4(tex_coord_2d.xyz - 0.5f, 1.0f)
+-    
+-    # Project to plane
+-    plane_coords = mul(voxel_pos, ProjPlane)
+-    plane_coords.xyz /= plane_coords.w
+-    
+-    # 3. Calculate 2D Euclidean distance from the fragment's projected position to P
+-    # P.xy is the center of the eraser on the plane, P.z is the radius r
+-    distance = length(plane_coords.xy - P.xy) / P.z
+-    
+-    # 4. Update the mask
+-    # Read current mask value (stored in alpha channel 'a')
+-    current_mask = sample_texture(SculptMap, tex_coord_2d.xyz)
+-    
+-    # If the distance is less than the current mask value, update the mask
+-    # This implements the "closest point" logic to avoid jaggy artifacts
+-    if distance < current_mask.a:
+-        current_mask.a = distance
+-        
+-    return current_mask
+-```
+-
+-*Note: The `FSClipper` shader follows a similar structure but uses a clipping plane defined by `clipPlane` instead of a point radius [S1].*
++**Parameters:**
++*   $r$: Tool radius.
++*   $P$: 2D point defining the eraser center.
++*   `clipPlane`: Plane equation for the clipper.
+ 
+ **Edge Cases and Pitfalls:**
+-*   **Jagged Artifacts:** Using binary masks can cause jagged edges. Using Euclidean distances to the closest point on the clipping object mitigates this [S1].
+-*   **Precision:** The distance calculation relies on the projection matrix `ProjPlane`. Incorrect projection setup will lead to misaligned sculpting [S1].
++*   Jaggy artifacts can occur if binary masks are used; Euclidean distances are recommended [S1].
++*   The system relies on GPU fragment shaders for voxelization, requiring hardware support for 3D textures and fragment shader output blending [S1].
+ 
+ ## Subtopics
+ 
+ ### [GPU-based Slice Rendering with SculptBuffer](15970-gpu-based-slice-rendering-with-sculptbuffer.md)
+-Uses a 3D texture (SculptBuffer) to store distances to a Surface of Reference Point (SRP), allowing interactive sculpting via fragment shader operations.
++A rendering technique that uses the `SculptBuffer` (generated by this system) to render only slices contained in a `ClippedImage` as convex polygons, discarding fragments based on distance to the sculpted boundary. It sets itself apart by integrating real-time geometric modification directly into the rendering pipeline via GPU-based distance lookups.
+ 
+ ## Operating characteristics
+-*   **Performance:** Real-time interaction is achieved because tools are voxelized on the GPU using fragment shaders, allowing for real-time tool manipulation and volume sculpting operations [S1].
+-*   **Complexity:** The method offloads the computational burden of voxelization and masking to the GPU, keeping the CPU free for interface handling [S1].
+-*   **Limitations:** The quality of the sculpted boundary depends on the resolution of the 3D mask texture and the precision of the fragment shader distance calculations [S1].
++*   **Time Complexity:** Real-time interaction is achieved by performing voxelization on the GPU via fragment shaders, allowing for interactive tool manipulation [S1].
++*   **Memory Complexity:** Requires storage for the volumetric dataset as a 3D texture and the `SculptMap` 3D texture on the GPU [S1].
++*   **Strengths:** Enables real-time sculpting operations (clipping, erasing, digging) without complex transfer functions; tools can be changed interactively [S1].
++*   **Limitations:** Dependent on GPU capabilities for 3D texture sampling and fragment shader execution; precision of sculpting depends on the resolution of the 3D mask [S1].
++*   **When to use:** When interactive, real-time volume modification is required for visualization.
++*   **When not to use:** When high-precision, non-voxelized geometric operations are required, or on hardware lacking 3D texture support.
+ 
+ ## Background
+-The system is based on the paradigm proposed by Weiskopf et al. [S1]. It integrates six sculpting tools (2D/3D Eraser, Digger, Clipper) into a texture-based volume rendering framework [S1].
++The system is based on the paradigm proposed by Weiskopf et al. [S1]. It was developed to integrate sculpting tools (2D/3D Eraser, Digger, Clipper) into a texture-based volume rendering system, allowing users to modify volumes interactively by marking voxels for removal via GPU fragment shaders [S1].
+ 
+ ## Sources

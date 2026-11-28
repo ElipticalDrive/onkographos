@@ -1,0 +1,30 @@
+# Few-View Reconstruction via Regularization
+
+Also called: Sparse-View Regularization, Geometric Priors for NeRF
+
+## Overview
+Few-View Reconstruction via Regularization is a family of approaches designed to mitigate the shape-radiance ambiguity inherent in neural radiance fields (NeRF) and 3D Gaussian Splatting (3DGS) when supervision from multiple viewpoints is sparse [S1, unofficial][S2]. By applying geometric or semantic priors, these methods prevent overfitting to observed views and improve generalization to unseen ones, addressing the "floater" and "background collapse" artifacts common in sparse-input settings [S1, unofficial][S2]. Unlike progressive reconstruction methods that restrain model capacity over time, this family relies on explicit regularization terms to guide the optimization toward geometrically plausible solutions [S1, unofficial].
+
+## Shared principles
+The core mechanism involves augmenting the standard photometric loss with auxiliary constraints that enforce consistency across views or adherence to prior knowledge about scene geometry.
+
+1.  **Geometric Priors**: These constraints stabilize the learned density field or Gaussian distribution. Common priors include:
+    *   **Smoothness**: Encouraging spatial continuity in the predicted depth or density values to reduce high-frequency noise [S1, unofficial].
+    *   **Normal Consistency**: Enforcing that surface normals derived from the depth field are consistent with the local geometry, often by minimizing the difference between predicted normals and those estimated from depth gradients [S1, unofficial].
+2.  **Semantic Regularization**: This approach leverages high-level scene structure to enforce cross-view consistency. It ensures that semantic features remain invariant across different viewpoints, promoting reconstructions that align with the expected object structure rather than just pixel-wise color matches [S1, unofficial].
+3.  **Unseen Viewpoint Regularization**: Specifically for sparse inputs, this principle involves regularizing the training process at viewpoints different from the input views. This mitigates overfitting to the limited set of training cameras and reduces background collapse [S2].
+
+## Subtopics
+
+### Unseen Viewpoint Regularization
+A module designed to mitigate background collapse and overfitting in sparse-input settings by regularizing 3DGS training at viewpoints different from the input views [S2]. It is chosen when training data is extremely sparse (e.g., few-shot synthesis) and standard photometric loss leads to artifacts like floaters or empty backgrounds [S2]. The method splits regularization based on the distance of the novel view from training cameras:
+*   For viewpoints **distant** from training cameras, it incorporates a Score Distillation Sampling (SDS) loss, leveraging a pre-trained diffusion model to provide geometric priors [S2].
+*   For viewpoints **close** to training cameras, it incorporates a depth warping loss, which uses traditional transformations to re-render depth and color from novel view points and enforces consistency [S2].
+
+## Background
+The challenge of reconstructing scenes from sparse views is critical in real-world settings where dense multi-view captures are impractical [S1, unofficial]. Early solutions focused on constraining variation between views, such as DietNeRF, which added constraints to ensure high-level semantic features remained the same across views [S2]. RegNeRF applied similar constraints to NeRF [S2]. More recently, with the advent of 3D Gaussian Splatting, methods like SparseGS have introduced specific modules like Unseen Viewpoint Regularization to address the unique artifacts of Gaussian representations, such as floaters, by combining SDS losses with depth-based constraints [S2]. The broader family of regularization approaches contrasts with progressive reconstruction techniques like FreeNeRF and Nerfies, which restrain model complexity over time rather than adding explicit loss terms [S1, unofficial].
+
+## Sources
+
+[S1] From reconstruction to reasoning : neural radiance fields for comprehensive 3D scene understanding, https://theses.hal.science/tel-05693528v1, fetched 2026-10-26 (unofficial)
+[S2] Sparsegs: Sparse View Synthesis Using 3D Gaussian Splatting, https://doi.org/10.1109/3dv66043.2025.00100, fetched 2026-10-26

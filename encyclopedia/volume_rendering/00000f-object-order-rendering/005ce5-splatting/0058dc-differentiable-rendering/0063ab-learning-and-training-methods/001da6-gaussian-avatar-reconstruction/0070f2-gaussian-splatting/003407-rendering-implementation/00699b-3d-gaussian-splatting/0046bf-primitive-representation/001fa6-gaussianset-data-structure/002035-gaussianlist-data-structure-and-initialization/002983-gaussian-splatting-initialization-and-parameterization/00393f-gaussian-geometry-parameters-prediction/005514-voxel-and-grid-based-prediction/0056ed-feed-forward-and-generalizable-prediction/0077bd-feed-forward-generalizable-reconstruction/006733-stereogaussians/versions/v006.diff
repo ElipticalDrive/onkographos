@@ -1,0 +1,446 @@
+--- v005.md
++++ v006.md
+@@ -1,92 +1,71 @@
+ # StereoGaussians
+ 
++Also called: StereoGaussians: Feed-Forward 3D Gaussian Splatting from Stereo Images
+ 
+ ## Overview
+-StereoGaussians is a feed-forward method that predicts a metric 3D Gaussian Splatting (3DGS) representation from a single calibrated stereo pair, enabling nearby-view extrapolation without per-scene optimization [S1, unofficial]. It distinguishes itself from sibling methods by freezing a pretrained stereo encoder to extract geometric anchors and features, while using a trainable predictor to generate two Gaussian layers on an expanded image canvas to handle disocclusions and outside-field-of-view content [S1, unofficial]. Unlike methods that refine inverse depth through a composer (e.g., SHARP) or synthesize images without explicit Gaussians (e.g., LVSM), StereoGaussians explicitly predicts Gaussian attributes conditioned on stereo disparity and multi-scale features [S1, unofficial].
++StereoGaussians is a feed-forward method that predicts a metric 3D Gaussian Splatting (3DGS) representation from a single calibrated stereo pair, enabling nearby-view extrapolation without per-scene optimization [S1, unofficial]. It distinguishes itself from siblings like [AnySplat Pipeline](12847-anysplat-pipeline.md) and [Splatt3R](16423-splatt3r.md) by explicitly leveraging frozen pretrained stereo features for geometry anchoring and introducing a second Gaussian layer with an expanded image canvas to handle disoccluded and outside-field-of-view content [S1, unofficial].
+ 
+ ## How it works
+ **Inputs and Outputs:**
+-*   **Inputs:** A calibrated rectified stereo pair $(I_L, I_R)$, camera intrinsics $K$ (focal lengths $f_x, f_y$, principal point $c_x, c_y$), and baseline $B$.
+-*   **Outputs:** A set of $N$ Gaussians $\mathcal{G} = \{(x_i, s_i, q_i, \alpha_i, c_i)\}$ in the left-camera frame, where $x_i$ is position, $s_i$ is scale, $q_i$ is rotation (quaternion), $\alpha_i$ is opacity, and $c_i$ is color (Spherical Harmonics coefficients) [S1, unofficial].
++*   **Inputs:** A calibrated rectified stereo pair (left image $I_L$, right image $I_R$), camera intrinsics $K$ (focal lengths $f_x, f_y$, principal point $c_x, c_y$), and baseline $B$.
++*   **Outputs:** A set of $N$ Gaussians $G = \{(x_i, s_i, q_i, \alpha_i, c_i)\}$ in the left-camera frame, where $x_i$ is position, $s_i$ is scale, $q_i$ is rotation (quaternion), $\alpha_i$ is opacity, and $c_i$ is color [S1, unofficial].
+ 
+ **Data Structures:**
+-The method operates on a dense descriptor $\Phi \in \mathbb{R}^{C \times H \times W}$ and attribute tensors predicted by the network.
+-*   **Descriptor $\Phi$:** Concatenation of stereo features, resized RGB, and resized depth at multiple scales.
+-*   **Attribute Residuals:** Predicted per canvas pixel for front and back layers. Each branch outputs 37 channels: 1 for opacity, 2 for image-plane offsets, 3 for scale, 4 for quaternion, and 27 for degree-2 SH coefficients [S1, unofficial].
+-*   **Back-layer Depth Offset:** A scalar output per pixel [S1, unofficial].
+-
+-**Parameters:**
+-*   **Canvas Padding ($P$):** Default 16 pixels per side [S1, unofficial].
+-*   **Neighborhood ($N_9$):** 9x9 spatial neighborhood for back-layer depth estimation [S1, unofficial].
+-*   **Isotropic Scale Factor ($\kappa$):** Constant for metric pixel footprint [S1, unofficial].
+-*   **Learning Rate:** $4 \times 10^{-4}$ (AdamW) [S1, unofficial].
+-*   **Weight Decay:** 0.01 [S1, unofficial].
+-*   **Momentum ($\beta_1, \beta_2$):** (0.9, 0.999) [S1, unofficial].
+-*   **Training Steps:** 30,000 [S1, unofficial].
+-*   **Batch Size:** 32 [S1, unofficial].
+-*   **Resolution:** 256x256 for ablations/training [S1, unofficial].
+-
+-**Algorithm:**
++The method operates on a dense descriptor $\Phi$ and Gaussian attributes.
++*   **Descriptor $\Phi$:** A tensor of shape $C \times H \times W$ (default $C=128$) at original image resolution.
++*   **Gaussian Attributes:** Predicted as residuals. Each layer outputs 37 channels per pixel: 1 for opacity, 2 for image-plane offsets, 3 for scale, 4 for quaternion, and 27 for degree-2 spherical harmonic (SH) coefficients [S1, unofficial].
++
++**Algorithm Steps:**
+ 
+ 1.  **Stereo Feature Extraction:**
+-    Pass the left reference image $I_L$ through a frozen pretrained stereo encoder (e.g., FoundationStereo) to obtain:
+-    *   Disparity map $d$.
+-    *   Multiscale features $\{F_s\}$ aligned with the left reference view.
+-    *   (Optional for Fast-FoundationStereo variant: Left-reference image features, RGB, and Depth at each scale; context and recurrent features are excluded) [S1, unofficial].
++    Pass the stereo inputs through a frozen pretrained stereo encoder (e.g., FoundationStereo) to obtain a left-reference disparity map $d$ and aligned multiscale features $\{F_s\}$ [S1, unofficial].
++    *   *Note:* For the Fast-FoundationStereo variant, only left-reference image features and RGB-D are used; context and recurrent features are excluded [S1, unofficial].
+ 
+ 2.  **Metric Depth Calculation:**
+-    Compute metric depth $z$ from disparity $d$:
++    Compute metric depth $z(p)$ for each pixel $p=(u,v)$ using the disparity $d(p)$:
+     $$ z(p) = \text{clip}\left( \frac{f_x B}{d(p)}, z_{\min}, z_{\max} \right) $$
+     where $f_x$ is the horizontal focal length in pixels, $B$ is the baseline, and $z_{\min}, z_{\max}$ are clipping bounds [S1, unofficial].
+ 
+ 3.  **Descriptor Generation:**
+-    Construct the dense full-resolution descriptor $\Phi$:
+-    $$ \Phi = D \left[ \{ F_s, \downarrow_s I_L, \downarrow_s z \}_s \right] \in \mathbb{R}^{C \times H \times W} $$
+-    where $D$ is a DPT-style decoder, $[\cdot, \cdot]$ denotes channel concatenation, and $\downarrow_s$ resizes inputs to feature scale $s$ (e.g., $s=4$ implies $H/4 \times W/4$) [S1, unofficial].
+-    *   $I_L$ is resized bilinearly.
+-    *   $z$ is resized by nearest-neighbor interpolation.
+-    *   At each scale, encoder features are projected to 128 channels via $1\times1$ convolution, Group Normalization, and GELU [S1, unofficial].
+-
+-4.  **Canvas Extension:**
+-    Extend $I_L$, $z$, and $\Phi$ by edge-replication padding $P$ on each side to size $(H + 2P) \times (W + 2P)$. Denote extended inputs as $\tilde{I}_L, \tilde{z}, \tilde{\Phi}$ [S1, unofficial].
+-    *   Update canvas intrinsics $K$: Focal lengths remain unchanged. Principal point shifts to $\tilde{c}_x = c_x + P, \tilde{c}_y = c_y + P$ [S1, unofficial].
++    Construct the dense descriptor $\Phi$ by concatenating stereo features with resized reference RGB and depth at each scale $s$, then passing through a DPT-style decoder $D$:
++    $$ \Phi = D \left[ \{F_s, \downarrow_s I_L, \downarrow_s z\}_s \right] \in \mathbb{R}^{C \times H \times W} $$
++    Here, $[\cdot, \cdot]$ denotes channel concatenation, and $\downarrow_s$ resizes inputs to feature scale $s$ (e.g., $s=4$ implies $H/4 \times W/4$ resolution) [S1, unofficial].
++    *   *Implementation Detail:* At each scale, concatenate encoder features with resized RGB (bilinear) and depth (nearest-neighbor). Project to 128 channels via $1\times1$ convolution, group normalization, and GELU. Use residual convolution units and coarse-to-fine fusion to yield the final 128-channel descriptor [S1, unofficial].
++
++4.  **Canvas Extension (Extrapolation-Aware Prediction):**
++    Extend the reference RGB $I_L$, processed depth $z$, and descriptor $\Phi$ by edge-replication padding $P$ on each side to size $(H + 2P) \times (W + 2P)$. Let the extended inputs be $\tilde{I}_L, \tilde{z}, \tilde{\Phi}$ [S1, unofficial].
++    *   *Canvas Intrinsics:* Update the principal point to $\tilde{c}_x = c_x + P, \tilde{c}_y = c_y + P$. Focal lengths remain unchanged [S1, unofficial].
++    *   *Default Padding:* $P = 16$ pixels [S1, unofficial].
+ 
+ 5.  **Gaussian Attribute Prediction:**
+-    Pass extended inputs through a convolutional predictor $H$:
++    Pass the extended inputs through a convolutional predictor $H$ to predict attribute residuals for two Gaussian layers and a back-layer depth offset:
+     $$ (\theta_{\text{front}}, \theta_{\text{back}}, \Delta z) = H([\tilde{I}_L, \tilde{z}, \tilde{\Phi}]) $$
+-    The predictor $H$ consists of:
+-    *   A shared regressor with two $3\times3$ convolutions and intermediate GELU mapping inputs to a 128-channel tensor $h$.
+-    *   Three output branches (Front, Back, Back-Depth Offset). Each branch processes $[h, \tilde{I}_L, \tilde{\Phi}]$ using a $3\times3$ convolution, Group Normalization, GELU, and a final $3\times3$ convolution [S1, unofficial].
+-
+-6.  **Front Layer Geometry:**
+-    *   Depth: $z_{\text{front}}(p) = \tilde{z}(p)$ [S1, unofficial].
+-    *   Image-plane offsets: $(\delta_{u,\ell}, \delta_{v,\ell}) = \sigma(o_\ell) - 0.5$, where $o_\ell$ is the 2-channel offset output for layer $\ell$, bounded to half a canvas pixel per axis [S1, unofficial].
+-    *   Center:
+-        $$ x_{\text{front}}(p) = z_{\text{front}}(p) \tilde{K}^{-1} [u + \delta_{u,\text{front}}, v + \delta_{v,\text{front}}, 1]^\top $$
+-        where $\tilde{K}$ is the extended canvas intrinsic matrix [S1, unofficial].
+-
+-7.  **Back Layer Geometry:**
+-    *   Depth Offset: $\Delta z(p)$ is the scalar output from the separate branch [S1, unofficial].
+-    *   Depth:
+-        $$ z_{\text{back}}(p) = \max_{q \in N_9(p)} \tilde{z}(q) + \text{softplus}(\Delta z(p)) $$
+-        where $N_9(p)$ is a 9x9 neighborhood [S1, unofficial].
+-    *   Center:
+-        $$ x_{\text{back}}(p) = z_{\text{back}}(p) \tilde{K}^{-1} [u + \delta_{u,\text{back}}, v + \delta_{v,\text{back}}, 1]^\top $$
+-        [S1, unofficial].
+-
+-8.  **Gaussian Attributes (Residual Composition):**
+-    Base attributes are defined by the reference image and geometry. The predictor outputs residuals:
+-    *   **Scale:** Bounded multiplicative updates. Base scale $s_{0,\ell} = \kappa z_\ell / (f_x f_y)$ [S1, unofficial].
+-    *   **Rotation:** Additive quaternion updates [S1, unofficial].
+-    *   **Opacity:** Updates in logit space [S1, unofficial].
+-    *   **Color:** Degree-2 Spherical Harmonic (SH) residuals around a reference-image DC base [S1, unofficial].
+-    *   Note: Unlike SHARP, front-layer stereo depth is fixed and image-plane offsets are bounded [S1, unofficial].
+-
+-9.  **Rendering and Training:**
+-    *   Concatenate front and back layers.
+-    *   Render target views using differentiable Gaussian rasterization.
+-    *   No edge mask restricts the back layer; visibility is determined by learned attributes [S1, unofficial].
+-    *   Loss: $\mathcal{L} = \text{MSE}(I_T, \hat{I}_T) + 0.05 \cdot \text{LPIPS}_{\text{VGG}}(I_T, \hat{I}_T)$ [S1, unofficial].
+-    *   Train predictor with AdamW; keep stereo encoder frozen [S1, unofficial].
++    *   *Predictor Architecture:*
++        1.  **Regressor:** Two $3\times3$ convolutions with intermediate GELU map $[\tilde{I}_L, \tilde{z}, \tilde{\Phi}]$ to a 128-channel tensor $h$ [S1, unofficial].
++        2.  **Output Branches:** Three branches process $[h, \tilde{I}_L, \tilde{\Phi}]$. Each branch uses a $3\times3$ convolution, group normalization, GELU, and a final $3\times3$ convolution [S1, unofficial].
++        3.  **Front/Back Branches:** Output 37 channels each [S1, unofficial].
++        4.  **Depth Offset Branch:** Outputs a scalar $\Delta z$ [S1, unofficial].
++
++6.  **Gaussian Center and Depth Calculation:**
++    For each canvas pixel $p$, compute centers for the front and back layers:
++    *   **Front Layer:**
++        *   Depth: $z_{\text{front}}(p) = \tilde{z}(p)$ [S1, unofficial].
++        *   Image-plane offsets: $(\delta_{u,\text{front}}, \delta_{v,\text{front}}) = \sigma(o_{\text{front}}) - 0.5$, bounded to half a canvas pixel per axis, where $o_{\text{front}}$ is the 2-channel offset output [S1, unofficial].
++        *   Center: $x_{\text{front}}(p) = z_{\text{front}}(p) \tilde{K}^{-1} [u + \delta_{u,\text{front}}, v + \delta_{v,\text{front}}, 1]^\top$, where $\tilde{K}$ is the extended canvas intrinsic matrix [S1, unofficial].
++    *   **Back Layer:**
++        *   Depth: $z_{\text{back}}(p) = \max_{q \in N_9(p)} \tilde{z}(q) + \text{softplus}(\Delta z(p))$, where $N_9(p)$ is a $9\times9$ neighborhood [S1, unofficial].
++        *   Center: $x_{\text{back}}(p) = z_{\text{back}}(p) \tilde{K}^{-1} [u + \delta_{u,\text{back}}, v + \delta_{v,\text{back}}, 1]^\top$, using back-layer offsets [S1, unofficial].
++
++7.  **Gaussian Attribute Composition:**
++    Predict attributes as residuals around a reference-image base:
++    *   **Base Scale:** Isotropic base scale $s_{0,\ell} = \kappa z_\ell / (f_x f_y)$, following the metric pixel footprint [S1, unofficial].
++    *   **Residuals:**
++        *   Scale: Bounded multiplicative updates.
++        *   Rotation: Additive quaternion updates.
++        *   Opacity: Updates in logit space.
++        *   Color: Degree-2 spherical harmonic (SH) residuals around a reference-image DC base [S1, unofficial].
++
++8.  **Rendering:**
++    Concatenate front and back layers. Render target views using both layers without an edge mask restricting the back layer, allowing learned attributes and visibility to determine contributions [S1, unofficial].
+ 
+ **Pseudocode:**
+@@ -97,173 +76,138 @@
+ import torch.nn.functional as F
+ 
+-def stereo_gaussians_predict(stereo_pair, intrinsics, baseline, encoder, predictor, padding=16):
+-    """
+-    Predicts 3D Gaussian Splatting parameters from a stereo pair.
+-    
+-    Args:
+-        stereo_pair: Tuple (I_L, I_R) of shape (B, 3, H, W), values in [0, 1].
+-        intrinsics: Dict with 'fx', 'fy', 'cx', 'cy'.
+-        baseline: Float, baseline distance B.
+-        encoder: Frozen pretrained stereo encoder.
+-        predictor: Trainable convolutional predictor H.
+-        padding: Int, padding per side P.
+-        
+-    Returns:
+-        Gaussians: List of tensors (x, s, q, alpha, sh_coeffs) for front and back layers.
+-    """
+-    I_L, I_R = stereo_pair
+-    B = I_L.shape[0]
+-    H, W = I_L.shape[2], I_L.shape[3]
+-    
+-    # 1. Input Preprocessing
+-    # Rescale to [0, 255] and normalize (ImageNet stats assumed from encoder requirements)
+-    I_L_norm = (I_L * 255.0) # Simplified normalization step; actual ImageNet norm applied inside encoder
+-    
+-    # 2. Stereo Feature Extraction (Frozen)
+-    # Returns disparity d and multiscale features {F_s}
+-    disparity, features = encoder(I_L_norm, I_R)
+-    
+-    # 3. Metric Depth Calculation
+-    fx = intrinsics['fx']
+-    B_dist = baseline
+-    # Clip depth to reasonable bounds [z_min, z_max]
+-    z = torch.clamp((fx * B_dist) / disparity, min=z_min, max=z_max)
+-    
+-    # 4. Descriptor Generation
+-    # Resize RGB and Depth to each feature scale s
+-    # Concatenate features, resized RGB, resized Depth
+-    # Pass through DPT-style decoder D
+-    descriptor = generate_descriptor(features, I_L, z)
+-    
+-    # 5. Canvas Extension
+-    # Edge-replication padding
+-    pad = padding
+-    I_L_ext = F.pad(I_L_norm, (pad, pad, pad, pad), mode='replicate')
+-    z_ext = F.pad(z, (pad, pad, pad, pad), mode='replicate')
+-    descriptor_ext = F.pad(descriptor, (pad, pad, pad, pad), mode='replicate')
+-    
+-    # Update intrinsics for extended canvas
+-    cx_ext = intrinsics['cx'] + pad
+-    cy_ext = intrinsics['cy'] + pad
+-    fx_ext = fx # Unchanged
+-    fy_ext = intrinsics['fy'] # Unchanged
+-    
+-    # 6. Predictor Forward Pass
+-    # Input: [I_L_ext, z_ext, descriptor_ext]
+-    # Output: theta_front, theta_back, delta_z
+-    theta_front, theta_back, delta_z = predictor(I_L_ext, z_ext, descriptor_ext)
+-    
+-    # 7. Front Layer Geometry
+-    z_front = z_ext
+-    # theta_front contains: opacity(1), offsets(2), scale(3), quat(4), SH(27)
+-    offsets_front = theta_front[:, 1:3, :, :] # Shape: (B, 2, H+2P, W+2P)
+-    
+-    # Compute offsets: sigma(o) - 0.5, bounded to half pixel
+-    # sigma is sigmoid
+-    delta_uv_front = torch.sigmoid(offsets_front) - 0.5
+-    # Bound to half canvas pixel (approx 0.5 in normalized coords relative to canvas size? 
+-    # Source says "bounded to half a canvas pixel per axis". Implementation detail: 
+-    # usually implies clamping or specific activation. We assume the network output is processed to satisfy this.)
+-    # For implementation, we assume the output branch handles the bounding or the user clamps.
+-    # Let's assume the output is already in the valid range or we clamp it.
+-    delta_uv_front = torch.clamp(delta_uv_front, -0.5, 0.5)
+-    
+-    # Generate grid for canvas coordinates
+-    # u, v are pixel coordinates on the extended canvas
+-    u, v = torch.meshgrid(torch.arange(W + 2*pad), torch.arange(H + 2*pad), indexing='ij')
+-    u = u.float().to(I_L.device)
+-    v = v.float().to(I_L.device)
+-    
+-    # Ray direction in camera space: K^{-1} [u, v, 1]^T
+-    # x = z * K^{-1} [u + du, v + dv, 1]^T
+-    # This requires constructing the 3D points.
+-    # For efficiency, we compute centers directly.
+-    
+-    # Front Centers
+-    # x = z * ( (u + du - cx) / fx )
+-    # y = z * ( (v + dv - cy) / fy )
+-    # z = z
+-    x_front = z_front * (u + delta_uv_front[:, 0, :, :] - cx_ext) / fx_ext
+-    y_front = z_front * (v + delta_uv_front[:, 1, :, :] - cy_ext) / fy_ext
+-    z_front_centers = z_front
+-    
+-    # Back Layer Geometry
+-    # Local max in 9x9 neighborhood
+-    # Use max pooling with kernel 9x9, stride 1, padding 4
+-    z_max_pool = F.max_pool2d(z_ext, kernel_size=9, stride=1, padding=4)
+-    delta_z_val = delta_z # Scalar output per pixel
+-    # softplus(delta_z)
+-    z_back = z_max_pool + F.softplus(delta_z_val)
+-    
+-    offsets_back = theta_back[:, 1:3, :, :]
+-    delta_uv_back = torch.sigmoid(offsets_back) - 0.5
+-    delta_uv_back = torch.clamp(delta_uv_back, -0.5, 0.5)
+-    
+-    x_back = z_back * (u + delta_uv_back[:, 0, :, :] - cx_ext) / fx_ext
+-    y_back = z_back * (v + delta_uv_back[:, 1, :, :] - cy_ext) / fy_ext
+-    z_back_centers = z_back
+-    
+-    # 8. Attributes
+-    # Front Attributes
+-    alpha_front = theta_front[:, 0, :, :] # Opacity (logit space? Source says "opacity updates in logit space")
+-    # If logit, apply sigmoid for rendering
+-    alpha_front_render = torch.sigmoid(alpha_front)
+-    
+-    scale_front = theta_front[:, 3:6, :, :] # Scale residuals
+-    quat_front = theta_front[:, 6:10, :, :] # Quaternion residuals
+-    sh_front = theta_front[:, 10:, :, :] # SH coefficients
+-    
+-    # Back Attributes
+-    alpha_back = theta_back[:, 0, :, :]
+-    alpha_back_render = torch.sigmoid(alpha_back)
+-    scale_back = theta_back[:, 3:6, :, :]
+-    quat_back = theta_back[:, 6:10, :, :]
+-    sh_back = theta_back[:, 10:, :, :]
+-    
+-    # 9. Combine Layers
+-    # Concatenate along the Gaussian index dimension (conceptually)
+-    # In practice, this results in two sets of Gaussians rendered together.
+-    gaussians = {
+-        'front': {
+-            'x': x_front, 'y': y_front, 'z': z_front_centers,
+-            'alpha': alpha_front_render,
+-            'scale': scale_front, 'quat': quat_front, 'sh': sh_front
+-        },
+-        'back': {
+-            'x': x_back, 'y': y_back, 'z': z_back_centers,
+-            'alpha': alpha_back_render,
+-            'scale': scale_back, 'quat': quat_back, 'sh': sh_back
+-        }
+-    }
+-    
+-    return gaussians
+-
+-def generate_descriptor(features, I_L, z):
+-    """
+-    Generates the dense descriptor Phi using a DPT-style decoder.
+-    """
+-    # Resize I_L and z to each scale s
+-    # Concatenate features, resized I_L, resized z
+-    # Project to 128 channels, GroupNorm, GELU
+-    # Coarse-to-fine fusion
+-    # Return full resolution descriptor
+-    pass # Implementation details of DPT decoder are complex; assumed available as D
++class StereoGaussians:
++    def __init__(self, encoder, predictor, padding=16):
++        self.encoder = encoder  # Frozen stereo encoder
++        self.predictor = predictor  # Trainable predictor H
++        self.padding = padding
++
++    def forward(self, I_L, I_R, K, B):
++        """
++        I_L, I_R: Tensor [B, 3, H, W]
++        K: Tensor [B, 3, 3] or intrinsics dict
++        B: Baseline scalar
++        """
++        # 1. Stereo Feature Extraction
++        # Returns disparity d and multiscale features {F_s}
++        d, F_s = self.encoder(I_L, I_R)
++        
++        # 2. Metric Depth Calculation
++        # fx is horizontal focal length from K
++        fx = K[:, 0, 0]
++        # Clip depth to reasonable bounds [z_min, z_max]
++        z = torch.clamp((fx * B) / d, min=z_min, max=z_max)
++        
++        # 3. Descriptor Generation
++        # Resize RGB and Depth for each scale s
++        # DPT-style decoder D
++        descriptor_inputs = []
++        for s in scales:
++            # Resize I_L and z to H/s x W/s
++            I_L_s = F.interpolate(I_L, size=(H//s, W//s), mode='bilinear', align_corners=False)
++            z_s = F.interpolate(z.unsqueeze(1), size=(H//s, W//s), mode='nearest').squeeze(1)
++            # Concatenate F_s, I_L_s, z_s
++            feat = torch.cat([F_s[s], I_L_s, z_s.unsqueeze(1)], dim=1)
++            descriptor_inputs.append(feat)
++        
++        # Decoder D projects to 128 channels and fuses coarse-to-fine
++        Phi = self.decoder(descriptor_inputs) # Shape [B, 128, H, W]
++        
++        # 4. Canvas Extension
++        P = self.padding
++        # Edge replication padding
++        I_L_ext = F.pad(I_L, (P, P, P, P), mode='replicate')
++        z_ext = F.pad(z.unsqueeze(1), (P, P, P, P), mode='replicate').squeeze(1)
++        Phi_ext = F.pad(Phi, (P, P, P, P), mode='replicate')
++        
++        # 5. Gaussian Attribute Prediction
++        # Predictor H takes [I_L_ext, z_ext, Phi_ext]
++        theta_front, theta_back, delta_z = self.predictor([I_L_ext, z_ext, Phi_ext])
++        
++        # theta_front, theta_back: [B, 37, H+2P, W+2P]
++        # delta_z: [B, 1, H+2P, W+2P]
++        
++        # 6. Gaussian Center and Depth Calculation
++        # Front Layer
++        z_front = z_ext
++        # Extract offsets from theta_front (channels 1:3)
++        o_front = theta_front[:, 1:3, :, :] # [B, 2, H', W']
++        # Sigmoid and shift
++        delta_uv_front = torch.sigmoid(o_front) - 0.5
++        # Bound to half canvas pixel (optional, depending on implementation details)
++        # Compute centers using extended intrinsics
++        # K_ext: principal point shifted by P, focal lengths unchanged
++        K_ext = self.get_extended_intrinsics(K, P)
++        centers_front = self.compute_centers(z_front, delta_uv_front, K_ext)
++        
++        # Back Layer
++        # Local max in 9x9 neighborhood + softplus(delta_z)
++        # Pad for max pooling
++        z_padded = F.pad(z_ext, (4, 4, 4, 4), mode='reflect')
++        z_max = F.max_pool2d(z_padded, kernel_size=9, stride=1)[:, :, 4:-4, 4:-4]
++        z_back = z_max + F.softplus(delta_z)
++        
++        o_back = theta_back[:, 1:3, :, :]
++        delta_uv_back = torch.sigmoid(o_back) - 0.5
++        centers_back = self.compute_centers(z_back, delta_uv_back, K_ext)
++        
++        # 7. Gaussian Attribute Composition
++        # Base scale
++        kappa = 1.0 # Constant
++        base_scale_front = kappa * z_front / (fx * K[:, 1, 1])
++        base_scale_back = kappa * z_back / (fx * K[:, 1, 1])
++        
++        # Residuals
++        # Scale: bounded multiplicative
++        # Rotation: additive quaternion
++        # Opacity: logit space
++        # Color: SH residuals
++        # (Detailed composition logic in Appendix A.2 of source)
++        
++        # 8. Rendering
++        # Concatenate layers and render
++        gaussians = self.concatenate_layers(centers_front, centers_back, ...)
++        rendered_image = self.render(gaussians, target_camera_K)
++        
++        return rendered_image
+ ```
+ 
++**Parameters:**
++*   **Learning Rate:** $4 \times 10^{-4}$ for AdamW [S1, unofficial].
++*   **Weight Decay:** 0.01 [S1, unofficial].
++*   **Momentum:** $\beta_1=0.9, \beta_2=0.999$ [S1, unofficial].
++*   **Scheduler:** OneCycleLR with 2,700 warm-up steps (9% of training), initial division factor 25, final division factor 100 [S1, unofficial].
++*   **Training Steps:** 30,000 [S1, unofficial].
++*   **Batch Size:** 32 [S1, unofficial].
++*   **Loss:** $L = \text{MSE}(I_T, \hat{I}_T) + 0.05 \text{LPIPS}_{\text{VGG}}(I_T, \hat{I}_T)$ [S1, unofficial].
++*   **Input Normalization:** RGB rescaled to [0, 255], then ImageNet normalized [S1, unofficial].
++*   **Decoder Channels:** 128 [S1, unofficial].
++*   **Output Channels per Branch:** 37 (1 opacity, 2 offsets, 3 scale, 4 quaternion, 27 SH) [S1, unofficial].
++*   **Padding:** Default 16 pixels [S1, unofficial].
++
++**Edge Cases and Pitfalls:**
++*   **Padding:** Without padding, empty target-border bands appear in rendered views; padding fills these newly exposed regions [S1, unofficial].
++*   **Fixed Depth:** Fixed front-layer depth limits stereo-error correction [S1, unofficial].
++*   **Teacher Artifacts:** Teacher artifacts can persist despite reconstruction-quality filtering [S1, unofficial].
++*   **Descriptor:** Without the DPT descriptor, tabletop distortions and foreground-boundary artifacts occur [S1, unofficial].
++
+ ## Operating characteristics
+-*   **Time Complexity:** Inference is $O(HW)$ per pixel for the predictor and descriptor generation, dominated by the convolutional operations of the frozen encoder and the predictor $H$. It is significantly faster than per-scene optimization methods.
+-*   **Memory Complexity:** Requires storing the descriptor $\Phi$ and the predictor weights. The Gaussian set size is $2 \times H \times W$ (front and back layers), which is large but manageable for typical resolutions (e.g., 256x256 or higher).
++*   **Time and Memory Complexity:** Not given in the sources.
+ *   **Measured Performance:**
+-    *   On StereoNVS: 21.261 PSNR, 0.9447 SSIM, 0.0818 LPIPS [S1, unofficial].
+-    *   On ReplicaGS: 30.266 PSNR, 0.9447 SSIM, 0.0818 LPIPS [S1, unofficial].
+-    *   Composition improves LPIPS and SSIM but lowers PSNR by 0.614 dB on StereoNVS and improves by 0.237 dB on ReplicaGS compared to the composer-free variant [S1, unofficial].
+-*   **Scaling:** Performance degrades without padding. Removing 16-pixel padding lowers PSNR by 3.168 dB on StereoNVS and 8.732 dB on ReplicaGS. Increasing padding to 64 pixels improves StereoNVS PSNR by 1.928 dB but lowers ReplicaGS PSNR by 0.101 dB [S1, unofficial].
+-*   **Strengths:** Enables nearby-view extrapolation from a single stereo pair; handles disocclusions via the back layer; handles outside-FoV content via canvas expansion; generalizes to unseen scenes.
+-*   **Limitations:** Fixed front-layer depth limits stereo-error correction; teacher artifacts can persist; evaluation focuses on nearby views; large number of Gaussians [S1, unofficial].
+-*   **When to use:** When a metric 3DGS representation is needed from a calibrated stereo pair for nearby-view synthesis, and per-scene optimization is prohibitive.
+-*   **When not to use:** When large viewpoint changes are required, or when stereo depth accuracy is poor and cannot be corrected by the back layer.
++    *   **StereoNVS:** 21.261 PSNR, 0.9447 SSIM, 0.0818 LPIPS [S1, unofficial].
++    *   **ReplicaGS:** 30.266 PSNR, 0.9447 SSIM, 0.0818 LPIPS [S1, unofficial].
++*   **Scaling:** Not given in the sources.
++*   **Strengths:**
++    *   Enables nearby-view extrapolation without per-scene optimization [S1, unofficial].
++    *   Second Gaussian layer and expanded canvas provide capacity for disoccluded and outside-FoV content [S1, unofficial].
++    *   Improves LPIPS and SSIM with composition (though PSNR may drop slightly) [S1, unofficial].
++*   **Limitations:**
++    *   Fixed front-layer depth limits stereo-error correction [S1, unofficial].
++    *   Teacher artifacts can persist [S1, unofficial].
++    *   Evaluation focuses on nearby views; larger viewpoint changes are not fully evaluated [S1, unofficial].
++*   **When to use:** When nearby-view extrapolation from a single calibrated stereo pair is required without per-scene optimization [S1, unofficial].
++*   **When not to use:** When large viewpoint changes are needed or when stereo-error correction is critical [S1, unofficial].
+ 
+ ## Background
+-StereoGaussians was introduced in 2026 (preprint) by authors associated with the SceneSplat-Stereo dataset and the FoundationStereo project [S1, unofficial]. It builds on the principles of feed-forward 3DGS prediction (e.g., Charatan et al., 2024; Chen et al., 2024; Xu et al., 2025b) and adapts the residual attribute composition from SHARP (Mescheder et al., 2025) [S1, unofficial]. The method addresses the gap in training data for stereo-based 3DGS by constructing SceneSplat-Stereo from quality-filtered 3DGS teachers [S1, unofficial]. It is used on StereoNVS and ReplicaGS datasets [S1, unofficial].
++StereoGaussians was introduced by Charatan et al. (2024) in the paper "StereoGaussians: Feed-Forward 3D Gaussian Splatting from Stereo Images" [S1, unofficial]. It builds on the concept of feed-forward 3DGS prediction, adapting it for stereo inputs by leveraging frozen pretrained stereo networks. The method was trained on the SceneSplat-Stereo dataset, which pairs stereo inputs with nearby target views from 803 training scenes [S1, unofficial]. It is used on StereoNVS and ReplicaGS datasets [S1, unofficial].
+ 
+ ## Sources

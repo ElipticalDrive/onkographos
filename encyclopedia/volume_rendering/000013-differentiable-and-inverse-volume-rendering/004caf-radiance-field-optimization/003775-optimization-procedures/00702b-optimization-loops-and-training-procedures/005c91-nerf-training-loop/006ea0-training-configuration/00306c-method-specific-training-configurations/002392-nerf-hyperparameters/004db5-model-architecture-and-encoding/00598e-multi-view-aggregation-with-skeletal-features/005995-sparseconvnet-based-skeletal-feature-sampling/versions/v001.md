@@ -1,0 +1,66 @@
+# SparseConvNet-based Skeletal Feature Sampling
+
+Also called: 3D sparse convolution feature diffusion, SparseConvNet sampling
+
+## Overview
+This method samples time-augmented skeletal features at arbitrary 3D query points by diffusing discrete skeletal features into a continuous 3D volume using sparse convolutions, enabling spatially aware feature retrieval for NeRF input [S1, unofficial]. It differs from dense voxelization by using sparse convolutions to process only occupied voxels, improving efficiency for large 3D spaces [S1, unofficial].
+
+## How it works
+**Inputs:**
+*   SMPL parameters defining the human body pose and shape.
+*   Discrete skeletal features $s_{01:C,t} \in \mathbb{R}^{L \times C \times d}$ associated with the skeleton at time $t$ [S1, unofficial].
+*   A 3D query point $x$ in world coordinates [S1, unofficial].
+
+**Outputs:**
+*   A sampled skeletal feature vector $s_{01:C,t}^x \in \mathbb{R}^{C \times 128}$ [S1, unofficial].
+
+**Data Structures:**
+*   **Input Volume:** A 3D grid of dimensions $D_0 \times H_0 \times W_0$ representing the 3D bounding box of the human body. The grid is sparse, containing features only at voxel locations corresponding to the skeleton [S1, unofficial].
+*   **SparseConvNet Architecture:** A sequence of sparse convolutional layers with batch normalization and ReLU activation. The architecture is defined as follows [S1, unofficial]:
+    *   Layer 1: $(3 \times 3 \times 3 \text{ conv}, 64 \text{ features}, \text{stride } 1) \times 2$
+    *   Layer 2: $(3 \times 3 \times 3 \text{ conv}, 64 \text{ features}, \text{stride } 2)$
+    *   Layer 3: $(3 \times 3 \times 3 \text{ conv}, 64 \text{ features}, \text{stride } 1) \times 2$
+    *   Layer 4: $(3 \times 3 \times 3 \text{ conv}, 64 \text{ features}, \text{stride } 2)$
+    *   Layer 5: $(3 \times 3 \times 3 \text{ conv}, 64 \text{ features}, \text{stride } 1) \times 3$
+    *   Layer 6: $(3 \times 3 \times 3 \text{ conv}, 64 \text{ features}, \text{stride } 2)$
+    *   Layer 7: $(3 \times 3 \times 3 \text{ conv}, 128 \text{ features}, \text{stride } 1) \times 3$
+    *   Layer 8: $(3 \times 3 \times 3 \text{ conv}, 128 \text{ features}, \text{stride } 2)$
+    *   Layer 9: $(3 \times 3 \times 3 \text{ conv}, 128 \text{ features}, \text{stride } 1) \times 3$
+    *   Layer 10: $(3 \times 3 \times 3 \text{ conv}, 128 \text{ features}, \text{stride } 2)$
+    *   Layer 11: $(3 \times 3 \times 3 \text{ conv}, 128 \text{ features}, \text{stride } 1) \times 3$
+    *   Layer 12: $(3 \times 3 \times 3 \text{ conv}, 128 \text{ features}, \text{stride } 2)$
+    *   Layer 13: $(3 \times 3 \times 3 \text{ conv}, 128 \text{ features}, \text{stride } 1) \times 3$
+    *   Layers 14-17: Resize and concatenate outputs of layers 5, 9, 13, and 17 [S1, unofficial].
+
+**Steps:**
+1.  **Bounding Box Computation:** Compute the 3D bounding box of the human body based on the SMPL parameters [S1, unofficial].
+2.  **Voxelization:** Divide the 3D bounding box into voxels of size $5\text{mm} \times 5\text{mm} \times 5\text{mm}$, resulting in a volume of dimensions $D_0 \times H_0 \times W_0$ [S1, unofficial].
+3.  **Coordinate Transformation:** Transform skeletal feature locations and the query location $x$ to the SMPL coordinate system to ensure invariance to world position and orientation [S1, unofficial].
+4.  **Feature Diffusion:** Pass the input volume through the SparseConvNet architecture. The network consists of 3D sparse convolutions that diffuse the skeletal features into the nearby 3D space [S1, unofficial].
+5.  **Multi-scale Aggregation:** Resize and concatenate the multi-scale outputs from layers 5, 9, 13, and 17 to form the output feature. The output feature dimensions are $D'/16 \times H'/16 \times W'/16 \times 384$ before reduction, where $D', H', W'$ correspond to the dimensions after the respective strided convolutions [S1, unofficial].
+6.  **Interpolation:** Sample the corresponding skeletal feature at query location $x$ via trilinear interpolation from the concatenated output volume [S1, unofficial].
+7.  **Channel Reduction:** Pass the sampled feature through a fully-connected layer to reduce the channel size to 128 [S1, unofficial].
+
+**Parameters:**
+*   Voxel size: $5\text{mm} \times 5\text{mm} \times 5\text{mm}$ [S1, unofficial].
+*   Output channel size after reduction: 128 [S1, unofficial].
+
+**Edge Cases and Pitfalls:**
+*   The method relies on the accuracy of the SMPL parameters to define the bounding box and coordinate transformation. Incorrect SMPL fitting may lead to misaligned features [S1, unofficial].
+*   Sparse convolutions require efficient data structures to handle sparsity. Inefficient implementation may negate the performance benefits [S1, unofficial].
+
+## Operating characteristics
+*   **Time Complexity:** Not given in the sources.
+*   **Memory Complexity:** Not given in the sources.
+*   **Measured Performance:** Not given in the sources.
+*   **Scaling:** Not given in the sources.
+*   **Strengths:** Improves efficiency for large 3D spaces by processing only occupied voxels [S1, unofficial].
+*   **Limitations:** Not given in the sources.
+*   **When to use:** When spatially aware feature retrieval for NeRF input is required, and efficiency in large 3D spaces is a concern [S1, unofficial].
+*   **When not to use:** Not given in the sources.
+
+## Background
+The method is described in "Neural Human Performer: Learning Generalizable Radiance Fields for Human Performance Rendering" [S1, unofficial]. It builds on [Parent](16433-multi-view-aggregation-with-skeletal-features.md).
+
+## Sources
+[S1] Neural Human Performer: Learning Generalizable Radiance Fields for Human Performance Rendering, https://doi.org/10.48550/arxiv.2109.07448, fetched 2026-10-30 (unofficial)

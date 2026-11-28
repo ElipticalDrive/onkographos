@@ -1,0 +1,346 @@
+--- v001.md
++++ v002.md
+@@ -4,137 +4,218 @@
+ 
+ ## Overview
+-This method accelerates traditional ray casting for large-scale aerosol visualization (smoke, fog, dust) by combining a Hierarchical Bounding Box Tree (BVH) for empty voxel skipping, early termination of light compositing, and grouped linear interpolation [S1]. It sets itself apart from sibling methods like [SparseLeap](5152-sparseleap.md) and [Efficient Space Skipping & Adaptive Sampling of Unstructured Volumes Using H.W. Accel. Ray Tracing](8217-efficient-space-skipping-adaptive-sampling-of-unstructured-v.md) by explicitly using a BVH constructed from an octree traversal to avoid recording empty nodes, thereby reducing computational complexity compared to pure octree-based skipping, while offering dynamic update capabilities superior to K-D trees [S1].
++This method accelerates traditional ray casting for large-scale aerosol visualization (smoke, fog, dust) by combining a Hierarchical Bounding Box Tree (BVH) for empty voxel skipping, early termination of light compositing, and grouped linear interpolation to reduce computational load [S1, S2]. It sets itself apart from sibling methods like [SparseLeap](5152-sparseleap.md) and [Efficient Space Skipping & Adaptive Sampling of Unstructured Volumes Using H.W. Accel. Ray Tracing](8217-efficient-space-skipping-adaptive-sampling-of-unstructured-v.md) by specifically employing a BVH constructed from an octree traversal to avoid the overhead of recording empty nodes, which increases complexity in pure octree-based approaches, while offering dynamic update capabilities superior to K-D trees [S1].
+ 
+ ## How it works
+-**Inputs:** 3D scalar volume data (aerosol density/opacity field).
+-**Outputs:** 2D rendered image with color and opacity.
+-
+-### Data Structures
+-
+-**1. Volume Data Block (Leaf Node Input)**
+-*   Represents a sub-block of the original volume data.
+-*   **Fields:**
+-    *   `min_val`: Minimum scalar value in the block.
+-    *   `max_val`: Maximum scalar value in the block.
+-    *   `data`: Array of scalar values.
+-    *   `expanded`: Boolean flag indicating if the block is expanded by one voxel boundary.
+-
+-**2. BVH Node**
+-*   The BVH is a binary tree [S1].
+-*   **Fields:**
+-    *   `bbox`: Axis-Aligned Bounding Box (AABB) defined by 6 values ($x_{min}, x_{max}, y_{min}, y_{max}, z_{min}, z_{max}$) parallel to the xy, xz, and yz planes [S1].
+-    *   `left_child`: Reference to left child node (or null).
+-    *   `right_child`: Reference to right child node (or null).
+-    *   `attribute`: Enum {EMPTY, NON_EMPTY, UNKNOWN}.
+-    *   `is_leaf`: Boolean. If true, points to a `Volume Data Block`.
+-
+-**3. Ray State**
+-*   **Fields:**
+-    *   `origin`: 3D vector $(o_x, o_y, o_z)$.
+-    *   `direction`: 3D normalized vector $(d_x, d_y, d_z)$.
+-    *   `t_min`: Entry distance into the volume bounding box.
+-    *   `t_max`: Exit distance from the volume bounding box.
+-    *   `current_t`: Current distance along the ray.
+-    *   `cumulative_opacity`: Scalar $a$, initialized to 0.
+-    *   `accumulated_color`: 3D vector (RGB), initialized to $(0,0,0)$.
+-    *   `sampling_interval`: Scalar, dynamically adjusted.
+-
+-### Construction Algorithm
+-
+-1.  **Preprocessing (Expansion):**
+-    *   Divide the volume data into sub-blocks.
+-    *   For each sub-block, expand the data by one voxel in all directions to avoid boundary interpolation errors [S1]. This ensures interpolated values do not exceed the original block's min/max bounds [S1].
+-    *   Compute `min_val` and `max_val` for each expanded sub-block.
+-
+-2.  **Octree Generation:**
+-    *   Recursively divide each data block into eight parts (children) to form an octree [S1].
+-    *   For each leaf node of the octree, determine its attribute:
+-        *   If all voxels are empty (e.g., density < threshold), attribute = `EMPTY`.
+-        *   If all voxels are non-empty, attribute = `NON_EMPTY`.
+-        *   Otherwise, attribute = `UNKNOWN`.
+-
+-3.  **Attribute Propagation:**
+-    *   For each non-leaf node in the octree:
+-        *   Count the proportion of child nodes with attributes `EMPTY`, `NON_EMPTY`, and `UNKNOWN`.
+-        *   Assign the node's attribute to the child attribute with the highest proportion [S1].
+-
+-4.  **BVH Construction (BFS):**
+-    *   Perform a breadth-first search (BFS) on the octree [S1].
+-    *   Identify volume data blocks (octree nodes) whose attribute differs from their parent node's attribute.
+-    *   Construct a bounding box for these identified blocks.
+-    *   Build the BVH as a binary tree where the root represents the largest bounding box, and each node splits into two sub-bounding boxes [S1].
+-    *   *Note:* The sources describe constructing the BVH from the octree attributes but do not specify the exact binary splitting heuristic (e.g., SAH, median split) used to form the binary tree from the octree nodes. [G] A standard implementation would recursively split the set of bounding boxes identified in step 4 into two subsets, creating a left and right child node for each split, until leaf nodes are reached.
+-
+-### Rendering Algorithm
+-
+-1.  **Initialization:**
+-    *   For each pixel, generate a ray with `origin` and `direction`.
+-    *   Intersect ray with the global volume bounding box to get `t_min` and `t_max`.
+-    *   Initialize `cumulative_opacity` $a = 0$.
+-    *   Initialize `accumulated_color` $C = (0,0,0)$.
+-    *   Set initial `sampling_interval` $s$ (base step size).
+-
+-2.  **Ray Traversal (Empty-Space Skipping):**
+-    *   Traverse the BVH from the root.
+-    *   For each node, check if the ray intersects the node's AABB.
+-    *   If no intersection, skip the subtree.
+-    *   If intersection:
+-        *   If node is `EMPTY`, skip the subtree.
+-        *   If node is `NON_EMPTY`, process the leaf data.
+-        *   If node is `UNKNOWN`, recurse to children.
+-    *   Merge and delete bounding boxes according to specific rules to determine the valid sampling range [S1]. *Note:* The sources do not detail the "merge and delete" rules, but imply that overlapping or redundant bounding boxes are consolidated to define the continuous sampling interval along the ray.
+-
+-3.  **Sampling and Compositing (with Adaptive Interval):**
+-    *   Iterate along the ray from `t_min` to `t_max` with step `sampling_interval`.
+-    *   For each sample point $P$:
+-        *   Sample the volume data at $P$ to get density $\rho$ and opacity $\alpha$.
+-        *   **Adaptive Sampling:**
+-            *   If the sample point is invalid (empty/noise), increase `sampling_interval` (e.g., $s \leftarrow s \times k, k > 1$) to reduce resampling frequency [S1].
+-            *   If a valid sampling point is encountered, restore `sampling_interval` to the base value [S1].
+-        *   **Grouped Linear Interpolation:**
+-            *   Divide resampling points into 3 levels based on distance from the viewpoint:
+-                *   Level 1: Closest (highest interpolation precision).
+-                *   Level 2: Middle.
+-                *   Level 3: Farthest (lowest interpolation precision) [S1].
+-            *   Apply different linear interpolation methods for each level, gradually decreasing the amount of interpolation calculation from Level 1 to Level 3 [S1]. *Note:* The specific interpolation formulas for each level are not provided in the sources. [G] Typically, this implies using trilinear interpolation for Level 1, bilinear or nearest-neighbor for Level 3, or reducing the number of texture lookups.
+-        *   **Compositing:**
+-            *   Update `accumulated_color` using front-to-back compositing:
+-                $$ C_{new} = C_{old} + \alpha \cdot c \cdot (1 - a) $$
+-                where $c$ is the color of the sample.
+-            *   Update `cumulative_opacity`:
+-                $$ a_{new} = a_{old} + \alpha \cdot (1 - a_{old}) $$
+-
+-4.  **Early Termination:**
+-    *   After each compositing step, check if `cumulative_opacity` $a$ exceeds a threshold $T$ [S1].
+-    *   If $a > T$, terminate the ray calculation for this pixel. The sources state "exceeds 1" in one place and "a threshold can be set" in another [S1]. The threshold $T$ is typically close to 1 (e.g., 0.99) to avoid unnecessary computation when the pixel is saturated [S1].
+-
+-5.  **Final Color:**
+-    *   If the ray completes traversal without early termination, the final pixel color is `accumulated_color`.
+-
+-### Parameters
+-*   **Early Termination Threshold ($T$):** A value for cumulative opacity $a$ above which the ray is terminated. The exact numerical value is not specified in the sources, but it is set to a value close to 1 [S1].
+-*   **Sampling Interval ($s$):** Base step size. Not given in the sources.
+-*   **Adaptive Multiplier ($k$):** Factor by which to increase the sampling interval when encountering invalid points. Not given in the sources.
+-
+-### Edge Cases and Pitfalls
+-*   **Boundary Interpolation Errors:** Without expanding sub-data blocks by one voxel, interpolated values may exceed the min/max of the original block, causing artifacts [S1].
+-*   **Precision:** The sources note that traditional interpolation is computationally expensive. The grouped interpolation method reduces this load but may introduce visual artifacts if the level transitions are not smooth. [G] Implementers should ensure smooth blending between interpolation levels to avoid visible seams.
+-*   **Dynamic Data:** The BVH is noted to be dynamically updatable if the dataset changes frequently, unlike K-D trees [S1]. However, the specific update algorithm is not detailed. [G] A standard approach is to rebuild the BVH or use a dynamic BVH structure (e.g., with refitting).
++**Inputs:** 3D scalar field data representing volume density; camera parameters (viewpoint, ray directions); early termination threshold $\alpha_{thresh}$; sampling interval parameters.
++**Outputs:** 2D image with color and opacity values for each pixel.
++
++**Data Structures:**
++1.  **Volume Data:** A 3D grid of scalar values.
++2.  **BVH (Bounding Volume Hierarchy):** A binary tree structure.
++    *   **Node Layout:** Each node contains an Axis-Aligned Bounding Box (AABB) defined by minimum and maximum coordinates $(x_{min}, y_{min}, z_{min})$ and $(x_{max}, y_{max}, z_{max})$.
++    *   **Leaf Nodes:** Correspond to sub-blocks of the volume data.
++    *   **Internal Nodes:** Represent the union of their children's bounding boxes.
++3.  **Attribute Map:** Derived from an intermediate octree structure, storing attributes for nodes: `Empty`, `Non-Empty`, or `Unknown`.
++
++**Algorithm Steps:**
++
++1.  **Data Subdivision and BVH Construction:**
++    a.  Subdivide the volume data into blocks. Each leaf node in the BVH corresponds to one sub-block.
++    b.  **Boundary Expansion:** Expand each sub-data block by one voxel in all dimensions. This prevents interpolation errors at block boundaries where interpolated values might exceed the original block's min/max [S1].
++    c.  **Attribute Assignment via Octree:**
++        i.  Recursively divide each data block into eight parts to form an octree.
++        ii. For each leaf node of the octree, determine its attribute:
++            *   `Empty`: If all voxels in the block are empty (density below threshold).
++            *   `Non-Empty`: If any voxel is non-empty.
++            *   `Unknown`: If the block contains a mix or requires further subdivision (though the text implies leaf nodes are final decisions, the "Unknown" state suggests a hybrid approach or intermediate state before BVH pruning) [S1].
++        iii. For each non-leaf node in the octree, count the proportion of child nodes with each attribute. Assign the node the attribute with the highest proportion [S1].
++    d.  **BVH Pruning and Bounding Box Generation:**
++        i.  Perform a breadth-first search (BFS) on the octree.
++        ii. Construct a bounding box for volume data blocks whose attributes differ from their parent node's attribute. This effectively merges homogeneous regions into larger bounding boxes, skipping empty space efficiently [S1].
++        iii. Store the min/max values of each sub-block in the BVH structure for texture generation and ray intersection tests [S1].
++
++2.  **Ray Casting with Empty-Space Skipping:**
++    a.  For each pixel, generate a ray from the viewpoint through the pixel center into the volume.
++    b.  Traverse the BVH. When a ray intersects a bounding box, determine if it is a valid sampling range.
++    c.  **Merge and Delete Rules:** Merge overlapping bounding boxes and delete those that do not contribute to the ray's path or are empty, based on the attribute map. This determines the valid sampling intervals, skipping empty voxels entirely [S1].
++
++3.  **Adaptive Sampling and Interpolation:**
++    a.  **Adaptive Interval:** As the ray traverses the volume:
++        i.  If an invalid sampling point (empty space) is encountered, increase the sampling interval (step size) to reduce resampling frequency.
++        ii. If a valid sampling point (non-empty space) is encountered, restore the standard resampling frequency [S1].
++    b.  **Grouped Linear Interpolation:** Divide all resampling points on a ray into 3 levels based on their distance from the viewpoint:
++        i.  **Level 1 (Closest):** Apply full linear interpolation.
++        ii. **Level 2 (Middle):** Apply reduced interpolation calculation.
++        iii. **Level 3 (Farthest):** Apply minimal interpolation calculation.
++        iv. The amount of interpolation calculation gradually decreases from Level 1 to Level 3, shortening total interpolation time without reducing image authenticity [S1].
++
++4.  **Compositing and Early Termination:**
++    a.  For each valid sample point, compute color $C$ and opacity $\alpha$ using an illumination model [S2].
++    b.  Perform front-to-back compositing:
++        $$ C_{out} = C_{in} + C_{sample} \cdot \alpha_{sample} \cdot (1 - \alpha_{in}) $$
++        $$ \alpha_{out} = \alpha_{in} + \alpha_{sample} \cdot (1 - \alpha_{in}) $$
++        where $C_{in}, \alpha_{in}$ are the accumulated color and opacity, and $C_{sample}, \alpha_{sample}$ are the current sample's values [S1].
++    c.  **Early Termination:** After each compositing step, check if the cumulative opacity $\alpha_{out}$ exceeds a threshold $\alpha_{thresh}$ (typically close to 1.0). If $\alpha_{out} \ge \alpha_{thresh}$, terminate the ray calculation for this pixel, as further sampling has minimal effect on the final pixel value [S1].
++
++**Pseudocode:**
++
++```python
++def render_volume(volume_data, camera, alpha_thresh=0.95):
++    """
++    Renders volume data using BVH acceleration, adaptive sampling, and early termination.
++    """
++    # Pre-processing: Build BVH
++    bvh = build_bvh(volume_data)
++    
++    # Initialize output image
++    image = create_empty_image(camera.width, camera.height)
++    
++    for y in range(camera.height):
++        for x in range(camera.width):
++            ray = camera.generate_ray(x, y)
++            pixel_color = (0.0, 0.0, 0.0)
++            pixel_alpha = 0.0
++            
++            # Adaptive sampling parameters
++            step_size = get_initial_step_size()
++            current_pos = ray.origin
++            
++            # Traverse BVH to find valid intervals
++            valid_intervals = get_valid_intervals(ray, bvh)
++            
++            for interval in valid_intervals:
++                # Interpolate step size based on distance/level
++                # Level 1: Closest, Level 3: Farthest
++                level = get_sample_level(current_pos, ray.origin)
++                current_step = get_step_for_level(level, step_size)
++                
++                while current_pos < interval.end:
++                    # Check if current position is valid (non-empty)
++                    if is_valid_sample(current_pos, bvh):
++                        # Sample volume data
++                        density = sample_volume(volume_data, current_pos)
++                        color, alpha = compute_color_and_opacity(density, current_pos)
++                        
++                        # Front-to-back compositing
++                        weight = alpha * (1.0 - pixel_alpha)
++                        pixel_color += color * weight
++                        pixel_alpha += weight
++                        
++                        # Early termination check
++                        if pixel_alpha >= alpha_thresh:
++                            break
++                    else:
++                        # Skip empty space with larger step
++                        current_step = get_large_step_size()
++                    
++                    current_pos += ray.direction * current_step
++                
++                if pixel_alpha >= alpha_thresh:
++                    break
++            
++            image.set_pixel(x, y, pixel_color)
++    
++    return image
++
++def build_bvh(volume_data):
++    """
++    Constructs BVH using octree attribute propagation and bounding box merging.
++    """
++    # 1. Create Octree
++    octree = create_octree(volume_data)
++    
++    # 2. Assign attributes to octree nodes
++    assign_octree_attributes(octree)
++    
++    # 3. Construct BVH by merging nodes with same attribute as parent
++    bvh_root = merge_homogeneous_nodes(octree)
++    
++    return bvh_root
++
++def assign_octree_attributes(octree):
++    """
++    Recursively assigns Empty, Non-Empty, or Unknown attributes.
++    """
++    for node in octree.traverse():
++        if node.is_leaf():
++            node.attribute = determine_leaf_attribute(node.data)
++        else:
++            # Count proportions of children attributes
++            proportions = count_child_attributes(node.children)
++            node.attribute = get_highest_proportion_attribute(proportions)
++
++def merge_homogeneous_nodes(octree):
++    """
++    BFS traversal to create BVH. Merge blocks whose attribute differs from parent.
++    """
++    bvh_root = None
++    queue = [octree.root]
++    
++    while queue:
++        node = queue.pop(0)
++        if node.attribute != node.parent.attribute:
++            # Create BVH node with bounding box covering this block
++            bvh_node = create_bvh_node(node.bounding_box)
++            bvh_node.attribute = node.attribute
++            # Add children to queue for further subdivision if needed
++            queue.extend(node.children)
++        else:
++            # Merge with parent (conceptually, the parent's box covers this)
++            pass
++            
++    return bvh_root
++
++def get_sample_level(pos, origin):
++    """
++    Determines interpolation level based on distance from viewpoint.
++    """
++    dist = length(pos - origin)
++    if dist < threshold1:
++        return 1
++    elif dist < threshold2:
++        return 2
++    else:
++        return 3
++
++def get_step_for_level(level, base_step):
++    """
++    Returns step size based on level. Level 1 has smallest step (highest res).
++    """
++    if level == 1:
++        return base_step
++    elif level == 2:
++        return base_step * 2
++    else:
++        return base_step * 4
++```
++
++**Parameters:**
++*   **Early Termination Threshold ($\alpha_{thresh}$):** A value for cumulative opacity above which ray calculation is terminated. The source states "a threshold can be set" but does not specify a numerical value. Typical values in volume rendering are 0.95–0.99 [S1].
++*   **Sampling Interval:** Adaptive. Base interval is not specified. Increased in empty space, restored in dense space [S1].
++*   **Interpolation Levels:** 3 levels defined by distance thresholds. Thresholds are not specified [S1].
++
++**Edge Cases and Pitfalls:**
++*   **Boundary Interpolation Errors:** Without expanding sub-data blocks by one voxel, interpolated values at block boundaries may exceed the original min/max, causing artifacts [S1].
++*   **Empty Node Overhead:** Pure octree methods record many empty nodes, increasing complexity. The BVH approach avoids this by merging homogeneous regions [S1].
++*   **Dynamic Data:** BVH is preferred over K-D trees for frequently changing datasets due to easier dynamic updates [S1].
+ 
+ ## Operating characteristics
+-*   **Time Complexity:** The BVH construction is $O(N \log N)$ or $O(N)$ depending on the splitting heuristic, where $N$ is the number of leaf nodes. Ray traversal is $O(\log N)$ for empty space skipping, but the actual sampling cost depends on the density of non-empty voxels and the adaptive sampling strategy.
+-*   **Memory Complexity:** The BVH stores bounding boxes for each node. The memory overhead is proportional to the number of nodes in the BVH. The sources state that the BVH avoids recording many empty nodes compared to octrees, reducing memory and computational complexity [S1].
+-*   **Measured Performance:** Experiments were conducted on an AMD Ryzen 5 5600H with Radeon Graphics 3.30 GHz, 16GB RAM, using Unity3D and HLSL [S1]. The method reduces hardware load and improves rendering speed, meeting real-time requirements for large-scale aerosols [S2].
++*   **Time Complexity:** Depends on BVH traversal depth and sampling density. BVH construction is $O(N \log N)$ or $O(N)$ depending on implementation. Ray traversal is $O(\log N)$ for empty space skipping. Adaptive sampling reduces the number of samples in empty regions.
++*   **Memory Complexity:** BVH storage is proportional to the number of non-empty blocks. Less memory than full octree if many empty nodes are merged [S1].
++*   **Measured Performance:** Tested on AMD Ryzen 5 5600H, 16GB RAM, Windows 10, using Unity3D/C#/HLSL. The method reduces hardware load and improves rendering speed, meeting real-time requirements for large-scale aerosols [S2]. Specific frame rates or speedup factors are not provided in the sources.
+ *   **Strengths:**
+-    *   Avoids recording empty nodes, reducing complexity compared to octree-based methods [S1].
+-    *   Dynamically updatable, suitable for frequently changing datasets [S1].
+-    *   Early termination and adaptive sampling significantly reduce computation for transparent or empty regions.
++    *   Avoids sampling empty spaces and invalid voxels [S1].
++    *   Reduces interpolation calculation time via grouped linear interpolation [S1].
++    *   Dynamic update capability [S1].
++    *   Early termination reduces compositing work for opaque regions [S1].
+ *   **Limitations:**
+-    *   The specific interpolation details for the 3 levels are not provided, which may require implementation guesswork [G].
+-    *   The "merge and delete" rules for bounding boxes are not specified [S1].
+-    *   Performance is dependent on the efficiency of the BVH construction and traversal implementation.
++    *   Requires pre-processing to build BVH [S1].
++    *   Interpolation levels are heuristic; optimal thresholds depend on data [S1].
++    *   Not given in the sources: Specific scalability limits for extremely large datasets (e.g., terabyte scale) beyond the tested aerosol examples.
+ 
+ ## Background
+-This method was proposed to address the low efficiency, slow speed, and large resource consumption of traditional ray casting algorithms when rendering large-scale aerosol data (smoke, fog, dust) [S1, S2]. It builds on the core acceleration mechanisms defined in [Acceleration](18-acceleration.md), which reduce work units through culling/skipping, termination, and adaptation [G]. The method combines a BVH for empty-space skipping with early termination and grouped linear interpolation to enhance rendering speed and color quality [S1]. It is particularly suited for large-scale aerosol visualization where real-time rendering is required [S2].
++*   **Origin:** Proposed in the paper "Large-scale Aerosols Visualization Based on the Accelerated Ray Casting Algorithm" [S1].
++*   **History:** Developed to address the low efficiency, slow speed, and large resource consumption of traditional ray casting for aerosol data (smoke, fog, dust) [S1, S2].
++*   **Usage:** Used for real-time visualization of large-scale aerosols in 3D scenes, implemented in Unity3D with HLSL shaders [S1, S2].
+ 
+ ## Sources

@@ -1,0 +1,393 @@
+--- v003.md
++++ v004.md
+@@ -4,135 +4,31 @@
+ 
+ ## Overview
+-SPZ Packed Format is a binary storage format for 3D Gaussian splats designed for low-precision, non-interleaved memory layouts with ZSTD compression support [S1, unofficial]. It solves the problem of efficient serialization and transmission of large-scale Gaussian datasets by separating attributes into parallel buffers, allowing for optimized entropy coding (e.g., g-zipping) and variable spherical harmonics (SH) degrees up to 4 [S1, unofficial]. It is distinguished from interleaved formats by its parallel vector storage and from [PNG-based Gaussian Compression](4834-png-based-gaussian-compression.md) by its native binary structure and ZSTD integration [S1, unofficial].
++SPZ Packed Format is a binary storage format for 3D Gaussian splats designed for low-precision, non-interleaved data storage with ZSTD compression [S1, unofficial]. It solves the problem of efficiently loading high-fidelity Gaussian splat captures in environments lacking native system-level decompression libraries, such as web browsers . It is distinguished from earlier SPZ versions (1–3) by using per-attribute ZSTD compression instead of a single gzip stream, and from generic PLY parsers by its specific handling of quantized fields and coordinate system transformations .
+ 
+ ## How it works
+-**Inputs:** A set of 3D Gaussians defined by position, scale, rotation (quaternion), opacity (alpha), base color, and spherical harmonics coefficients [S1, unofficial].
+-**Outputs:** A binary file stream starting with a header, followed by compressed attribute buffers [S1, unofficial].
++**Inputs:** A binary stream containing the SPZ file data.
++**Outputs:** A `GaussianCloud` structure containing unpacked positions, rotations, scales, alphas, colors, and spherical harmonics (SH) coefficients.
+ 
+ **Data Structures:**
+-The format is identified by the magic number `0x5053474e` (ASCII "SPZN") [S1, unofficial].
++The format uses a header followed by parallel attribute buffers.
+ 
+ 1.  **Header (`PackedGaussians`):**
+     *   `version` (`uint32_t`): Format version. Default is `LATEST_SPZ_HEADER_VERSION` (4) [S1, unofficial].
+-    *   `numPoints` (`int32_t`): Total number of Gaussians [S1, unofficial].
+-    *   `shDegree` (`int32_t`): Degree of spherical harmonics [S1, unofficial].
+-    *   `fractionalBits` (`int32_t`): Precision bits for fixed-point representations [S1, unofficial].
+-    *   `antialiased` (`bool`): Flag indicating antialiasing usage [S1, unofficial].
+-    *   `usesQuaternionSmallestThree` (`bool`): Default `true`. Indicates if SmallestThree quaternion encoding is used [S1, unofficial].
+-    *   `hadSkippedExtensions` (`bool`): Flag for extension handling [S1, unofficial].
+-    *   *Note:* In implementations supporting extensions, a conditional field `std::vector<SpzExtensionBasePtr> extensions` may be present, compiled only when `SPZ_BUILD_EXTENSIONS` is defined [S1, unofficial].
+-
+-2.  **Attribute Buffers:**
+-    Data is stored in separate `std::vector<uint8_t>` buffers for: `positions`, `scales`, `rotations`, `alphas`, `colors`, and `sh` [S1, unofficial].
+-
+-3.  **Single Gaussian View (`PackedGaussian`):**
+-    For indexing, a single Gaussian is viewed as a struct of 92 bytes (for SH degree 4):
+-    *   `position`: `std::array<uint8_t, 9>` (3 components, 3 bytes each) [S1, unofficial].
+-    *   `rotation`: `std::array<uint8_t, 4>` (4 components, 1 byte each) [S1, unofficial].
+-    *   `scale`: `std::array<uint8_t, 3>` (3 components, 1 byte each) [S1, unofficial].
+-    *   `color`: `std::array<uint8_t, 3>` (RGB, 1 byte each) [S1, unofficial].
+-    *   `alpha`: `uint8_t` [S1, unofficial].
+-    *   `shR`, `shG`, `shB`: `std::array<uint8_t, 24>` each (24 coefficients for degree 4) [S1, unofficial].
+-
+-**Decoding Steps:**
+-
+-1.  **Read Header:** Parse the first 24+ bytes to determine `version`, `numPoints`, `shDegree`, and flags [S1, unofficial].
+-2.  **Decompress Buffers:** If `version >= MIN_ZSTD_SPZ_HEADER_VERSION` (4), decompress the attribute buffers using ZSTD [S1, unofficial].
+-3.  **Decode Attributes:** Iterate through each Gaussian index $i$ from $0$ to `numPoints` - 1 [S1, unofficial].
+-
+-    **3a. Position, Scale, Color, Alpha:**
+-    These are stored as quantized uint8 values [S1, unofficial]. The specific quantization depends on `fractionalBits` and implementation details not fully specified in the core notes [S1, unofficial].
+-
+-    **3b. Rotation (Quaternion):**
+-    The encoding method depends on `usesQuaternionSmallestThree` and `version` [S1, unofficial].
+-
+-    *   **SmallestThree (Default for Version 3+):**
+-        1.  Pack 4 bytes into `uint32_t comp`.
+-        2.  Extract `i_largest = comp >> 30`.
+-        3.  Initialize `sum_squares = 0.0f`.
+-        4.  Loop `i` from 3 down to 0:
+-            *   If `i != i_largest`:
+-                *   Extract `mag = comp & 0x1FF`.
+-                *   Extract `negbit = (comp >> 9) & 1`.
+-                *   Shift `comp` right by 10 bits.
+-                *   Calculate `rotation[i] = sqrt(0.5f) * mag / 511.0f` [S1, unofficial].
+-                *   If `negbit` is 1, `rotation[i] = -rotation[i]` [S1, unofficial].
+-                *   `sum_squares += rotation[i] * rotation[i]` [S1, unofficial].
+-        5.  Calculate `rotation[i_largest] = sqrt(max(0.0f, 1.0f - sum_squares))` [S1, unofficial].
+-        6.  Apply `c.flipQ` to the first 3 components of the rotation vector [S1, unofficial].
+-        7.  If `c.rotFlipQFunc` exists, call it [S1, unofficial].
+-
+-    *   **FirstThree (Legacy):**
+-        1.  Convert the first 3 uint8s to floats.
+-        2.  Scale by `1/127.5`.
+-        3.  Subtract 1.
+-        4.  Multiply by `c.flipQ`.
+-        5.  Copy to `rotation[0..2]`.
+-        6.  Calculate `rotation[3] = sqrt(max(0.0f, 1.0f - (rotation[0]^2 + rotation[1]^2 + rotation[2]^2)))` [S1, unofficial].
+-        7.  If `c.rotFlipQFunc` exists, call it [S1, unofficial].
+-
+-    **3c. Spherical Harmonics (SH):**
+-    1.  Read `SH_MAX_COEFFS` (24 for degree 4) uint8 values for each R, G, B channel [S1, unofficial].
+-    2.  Unquantize each coefficient $x$ using:
+-        $$v = \frac{x - 128.0}{128.0}$$
+-        where $x$ is the uint8 value [S1, unofficial].
+-
+-    **3d. Alpha and Color:**
+-    1.  Alpha is a uint8 representing opacity [S1, unofficial].
+-    2.  Color is unquantized from uint8 to [0, 1] range [S1, unofficial].
+-    3.  Apply base color scale factor: $C_{base} = C_{raw} \times 0.15$ (instead of 0.282) to allow out-of-range base colors that higher SH bands can correct [S1, unofficial].
+-
+-**Pseudocode:**
+-```python
+-def decode_gaussian(data, version, uses_smallest_three, flip_q, rot_flip_q_func):
+-    # data is a flat byte buffer for one Gaussian
+-    # Position, scale, color, alpha quantization depends on fractionalBits (not given in sources)
+-    pos = [float(b) for b in data[0:9]]
+-    scale = [float(b) for b in data[9:12]]
+-    color = [float(b) for b in data[12:15]]
+-    alpha = data[15]
+-    sh = data[16:16 + 72] # 24 coeffs * 3 channels
+-
+-    rotation = [0.0] * 4
+-    if uses_smallest_three and version >= 3:
+-        comp = int.from_bytes(data[9:13], byteorder='little')
+-        i_largest = comp >> 30
+-        sum_squares = 0.0
+-        for i in range(3, -1, -1):
+-            if i != i_largest:
+-                mag = comp & 0x1FF
+-                negbit = (comp >> 9) & 1
+-                comp >>= 10
+-                rotation[i] = (0.5 ** 0.5) * mag / 511.0
+-                if negbit:
+-                    rotation[i] = -rotation[i]
+-                sum_squares += rotation[i] ** 2
+-        rotation[i_largest] = max(0.0, 1.0 - sum_squares) ** 0.5
+-    else:
+-        x, y, z = [float(b) / 127.5 - 1.0 for b in data[9:12]]
+-        rotation[0] = x * flip_q
+-        rotation[1] = y * flip_q
+-        rotation[2] = z * flip_q
+-        rotation[3] = max(0.0, 1.0 - (rotation[0]**2 + rotation[1]**2 + rotation[2]**2)) ** 0.5
+-
+-    rotation[0] *= flip_q
+-    rotation[1] *= flip_q
+-    rotation[2] *= flip_q
+-    if rot_flip_q_func:
+-        rot_flip_q_func(rotation)
+-
+-    # SH unquantization
+-    sh_floats = [(b - 128.0) / 128.0 for b in sh]
+-
+-    # Color scaling
+-    color = [c * 0.15 for c in color]
+-
+-    return pos, scale, rotation, alpha, color, sh_floats
+-```
+-
+-**Formulas:**
+-*   SH unquantization: $v = \frac{x - 128.0}{128.0}$ where $x$ is the uint8 value [S1, unofficial].
+-*   Inverse sigmoid: $v = \ln\left(\frac{x}{1 - x}\right)$ [S1, unofficial].
+-*   Color scale factor: $C_{base} = C_{raw} \times 0.15$ (instead of 0.282) to allow out-of-range base colors that higher SH bands can correct [S1, unofficial].
++    *   `numPoints` (`int32_t`): Number of Gaussian primitives [S1, unofficial].
++    *   `shDegree` (`int32_t`): Degree of spherical harmonics (0–4) [S1, unofficial].
++    *   `fractionalBits` (`int32_t`): Precision bits for position/scale quantization [S1, unofficial].
++    *   `antialiased` (`bool`): Flag indicating antialiasing support [S1, unofficial].
++    *   `usesQuaternionSmallestThree` (`bool`): Default `true` [S1, unofficial].
++    *   `hadSkippedExtensions` (`bool`): Flag for unknown extensions [S1, unofficial].
++    *   *Note:* Data is stored in separate `std::vector<uint8_t>` buffers for positions, scales, rotations, alphas, colors, and SH [S1, unofficial].
++
++2.  **Single Point View (`PackedGaussian`):**
++    *   Represents a single Gaussian for indexing purposes (92 bytes for SH degree 4) [S1, unofficial]:
++        *   `position`: `std::array<uint8_t, 9>` (3 floats, 3 bytes each) [S1, unofficial].
++        *   `rotation`: `std::array<uint8_t, 4>` (4 bytes) [S1, unofficial].
++        *   `scale`: `std::array<uint8_t, 3>` (3 bytes) [S1, unofficial].
++        *   `color`: `std::array<uint8_t, 3>` (3 bytes) [S1, unofficial].
++        *   `alpha`: `uint8_t` [S1, unofficial].
++        *   `shR`, `shG`, `shB`: `std::array<uint8_t, 24>` each (24 coefficients for degree 4) [S1, unofficial].
+ 
+ **Parameters:**
+@@ -141,26 +37,221 @@
+ *   `DEFAULT_SH_REST_BITS`: 4 (bits for remaining SH coefficients) [S1, unofficial].
+ *   `LATEST_SPZ_HEADER_VERSION`: 4 [S1, unofficial].
+-*   `MIN_ZSTD_SPZ_HEADER_VERSION`: 4 [S1, unofficial].
+-*   `MIN_SMALLEST_THREE_QUATERNIONS_VERSION`: 3 [S1, unofficial].
++*   `MIN_ZSTD_SPZ_HEADER_VERSION`: 4 (minimum version supporting ZSTD) [S1, unofficial].
++*   `MIN_SMALLEST_THREE_QUATERNIONS_VERSION`: 3 (minimum version using SmallestThree encoding) [S1, unofficial].
++
++**Steps:**
++
++1.  **Read Header:** Read the 8-byte magic number `0x5053474e` ("NGSP"). Read the header fields. If `version < MIN_ZSTD_SPZ_HEADER_VERSION`, decompression must be handled differently (e.g., gzip) [S1, unofficial].
++2.  **Decompress Buffers:** Decompress each attribute buffer (positions, rotations, etc.) using ZSTD. The compression is applied per attribute, not to the entire file as a single stream .
++3.  **Decode Positions:** Each position is 9 bytes (3 floats). Unquantize using `fractionalBits`.
++4.  **Decode Rotations:** Depending on `version` and `usesQuaternionSmallestThree`:
++    *   If `version >= MIN_SMALLEST_THREE_QUATERNIONS_VERSION` and `usesQuaternionSmallestThree` is true, use **SmallestThree** decoding [S1, unofficial].
++    *   Otherwise, use **FirstThree** decoding [S1, unofficial].
++5.  **Decode Scales:** Unquantize from uint8 to float.
++6.  **Decode Colors:** Unquantize from uint8 to float. Apply base color scale factor $C_{base} = C_{raw} \times 0.15$ [S1, unofficial].
++7.  **Decode Alphas:** Unquantize from uint8 to float.
++8.  **Decode SH Coefficients:** Unquantize uint8 values to float using $v = \frac{x - 128.0}{128.0}$ [S1, unofficial].
++9.  **Apply Extensions:** If `hadSkippedExtensions` is true, parse optional extension blocks (e.g., `CoordinateSystemAdobe`, `SafeOrbitCameraAdobe`) [S1, unofficial].
++
++**Pseudocode:**
++
++```python
++import struct
++import zstd
++import math
++
++def decode_spz(data: bytes):
++    """
++    Decodes an SPZ packed file into a GaussianCloud structure.
++    """
++    # 1. Read Header
++    magic = struct.unpack('<I', data[0:4])[0]
++    if magic != 0x5053474e:
++        raise ValueError("Invalid SPZ magic number")
++    
++    version = struct.unpack('<I', data[4:8])[0]
++    num_points = struct.unpack('<i', data[8:12])[0]
++    sh_degree = struct.unpack('<i', data[12:16])[0]
++    fractional_bits = struct.unpack('<i', data[16:20])[0]
++    antialiased = struct.unpack('<?', data[20:21])[0]
++    uses_smallest_three = struct.unpack('<?', data[21:22])[0]
++    had_skipped_extensions = struct.unpack('<?', data[22:23])[0]
++    
++    # Calculate buffer offsets (simplified: assume contiguous after header for this example)
++    # In reality, offsets are stored or calculated based on compressed sizes.
++    # For implementation, one must read the compressed chunk sizes for each attribute.
++    # Here we assume a helper `read_attribute_buffer` exists which handles ZSTD decompression.
++    
++    positions_raw = read_attribute_buffer(data, "positions")
++    rotations_raw = read_attribute_buffer(data, "rotations")
++    scales_raw = read_attribute_buffer(data, "scales")
++    colors_raw = read_attribute_buffer(data, "colors")
++    alphas_raw = read_attribute_buffer(data, "alphas")
++    sh_raw = read_attribute_buffer(data, "sh") # Interleaved R,G,B or separate? Source implies separate vectors.
++    
++    # 2. Decode Attributes
++    positions = decode_positions(positions_raw, fractional_bits)
++    rotations = decode_rotations(rotations_raw, version, uses_smallest_three)
++    scales = decode_scales(scales_raw, fractional_bits)
++    colors = decode_colors(colors_raw)
++    alphas = decode_alphas(alphas_raw)
++    sh_coeffs = decode_sh(sh_raw, sh_degree)
++    
++    return {
++        "num_points": num_points,
++        "positions": positions,
++        "rotations": rotations,
++        "scales": scales,
++        "colors": colors,
++        "alphas": alphas,
++        "sh_coeffs": sh_coeffs
++    }
++
++def decode_positions(raw_bytes, fractional_bits):
++    """
++    Decodes 9 bytes per position (3 floats, 3 bytes each).
++    """
++    positions = []
++    for i in range(0, len(raw_bytes), 9):
++        x = decode_float_from_bytes(raw_bytes[i:i+3], fractional_bits)
++        y = decode_float_from_bytes(raw_bytes[i+3:i+6], fractional_bits)
++        z = decode_float_from_bytes(raw_bytes[i+6:i+9], fractional_bits)
++        positions.append((x, y, z))
++    return positions
++
++def decode_rotations(raw_bytes, version, uses_smallest_three):
++    """
++    Decodes quaternion rotations.
++    """
++    rotations = []
++    if version >= 3 and uses_smallest_three:
++        # SmallestThree: 4 bytes per quaternion
++        for i in range(0, len(raw_bytes), 4):
++            comp = struct.unpack('<I', raw_bytes[i:i+4])[0]
++            i_largest = comp >> 30
++            rotation = [0.0] * 4
++            sum_squares = 0.0
++            temp_comp = comp
++            
++            # Extract 3 components
++            for j in range(3, -1, -1):
++                if j != i_largest:
++                    mag = temp_comp & 0x1FF
++                    negbit = (temp_comp >> 9) & 1
++                    temp_comp >>= 10
++                    
++                    val = math.sqrt(0.5) * mag / 511.0
++                    if negbit:
++                        val = -val
++                    rotation[j] = val
++                    sum_squares += val * val
++            
++            # Calculate largest component
++            rotation[i_largest] = math.sqrt(max(0.0, 1.0 - sum_squares))
++            
++            # Flip Q if necessary (coordinate system adjustment)
++            # Note: c.flipQ is typically -1 or 1 depending on coordinate system
++            # Assuming standard right-handed to left-handed or similar flip
++            # The source mentions c.flipQ applied to first 3 components.
++            # We assume a global flipQ factor is available or defaults to 1.
++            # [G] Default flipQ is 1.0 if not specified by extension.
++            flip_q = 1.0 
++            rotation[0] *= flip_q
++            rotation[1] *= flip_q
++            rotation[2] *= flip_q
++            
++            rotations.append(rotation)
++    else:
++        # FirstThree: 3 bytes per quaternion (8-bit fixed point)
++        for i in range(0, len(raw_bytes), 3):
++            x = (raw_bytes[i] / 127.5) - 1.0
++            y = (raw_bytes[i+1] / 127.5) - 1.0
++            z = (raw_bytes[i+2] / 127.5) - 1.0
++            
++            # [G] flipQ applied to xyz
++            flip_q = 1.0
++            x *= flip_q
++            y *= flip_q
++            z *= flip_q
++            
++            w = math.sqrt(max(0.0, 1.0 - (x*x + y*y + z*z)))
++            rotations.append([x, y, z, w])
++            
++    return rotations
++
++def decode_colors(raw_bytes):
++    """
++    Decodes colors. Base scale factor is 0.15.
++    """
++    colors = []
++    for i in range(0, len(raw_bytes), 3):
++        r = raw_bytes[i] * 0.15
++        g = raw_bytes[i+1] * 0.15
++        b = raw_bytes[i+2] * 0.15
++        colors.append((r, g, b))
++    return colors
++
++def decode_sh(raw_bytes, sh_degree):
++    """
++    Decodes Spherical Harmonics coefficients.
++    """
++    # SH_MAX_COEFFS is 24 for degree 4
++    # Each coefficient is 1 byte (uint8)
++    # Formula: v = (x - 128.0) / 128.0
++    coeffs = []
++    for byte_val in raw_bytes:
++        v = (byte_val - 128.0) / 128.0
++        coeffs.append(v)
++    return coeffs
++
++def read_attribute_buffer(data, attr_name):
++    """
++    Placeholder for ZSTD decompression of specific attribute chunks.
++    In the actual SPZ format, the file structure includes offsets and lengths
++    for each compressed attribute buffer.
++    """
++    # [G] Implementation detail: The SPZ format stores compressed chunks for each attribute.
++    # This function would parse the chunk header, decompress using zstd.decompress(),
++    # and return the raw bytes.
++    pass
++
++def decode_float_from_bytes(bytes_3, fractional_bits):
++    """
++    Decodes a 3-byte float with given fractional bits.
++    """
++    # [G] The exact quantization scheme for 3-byte floats is not fully detailed in the notes.
++    # Typically, it involves interpreting the 3 bytes as a fixed-point integer and scaling.
++    # Assuming a standard fixed-point interpretation:
++    val = (bytes_3[0] << 16) | (bytes_3[1] << 8) | bytes_3[2]
++    # Handle signedness if necessary (source doesn't specify signed/unsigned for pos)
++    # [G] Assuming unsigned 24-bit integer, then scaling.
++    # The source mentions `fractionalBits`.
++    # v = val / (2^fractionalBits) ? Or similar.
++    # Without exact formula, we leave this as a placeholder for the implementer to fill
++    # based on the specific quantization logic in the source code.
++    return val / (1 << fractional_bits)
++```
+ 
+ **Edge Cases and Pitfalls:**
+-*   **Quaternion Reconstruction:** If numerical error causes $1 - \sum_{i=0}^{2} r_i^2 < 0$, `std::max(0.0f, ...)` ensures the sqrt argument is non-negative [S1, unofficial].
+-*   **WASM Memory View:** In JavaScript/WebAssembly implementations, the callback must consume the chunk immediately because the typed memory view detaches if any subsequent WASM allocation grows the heap [S1, unofficial].
+-*   **Version Compatibility:** Decoders must check `version` to determine if ZSTD is used (>=4) and which quaternion encoding is active (>=3 uses SmallestThree) [S1, unofficial].
++*   **Quaternion Reconstruction:** If numerical error causes $1 - \sum_{i=0}^{2} r_i^2 < 0$, use `std::max(0.0f, ...)` to ensure the sqrt argument is non-negative [S1, unofficial].
++*   **WASM Memory View:** In JavaScript/WebAssembly environments, the typed memory view must be consumed immediately because it detaches if any subsequent WASM allocation grows the heap [S1, unofficial].
++*   **Coordinate Systems:** Extensions like `CoordinateSystemAdobe` may require flipping quaternion components or axes. Check `hadSkippedExtensions` and parse extensions if present [S1, unofficial].
+ 
+ ## Subtopics
+ 
+-### SPZ Packed Data Layout
+-A variant configuration focusing on the packing options for SH coefficients [S1, unofficial]. It uses `PackOptions::sh1Bits` (defaulting to `DEFAULT_SH1_BITS`=5) and `PackOptions::shRestBits` (defaulting to `DEFAULT_SH_REST_BITS`=4) to specify quantization bit depths for SH degree 1 and degree 2+ coefficients respectively [S1, unofficial]. This reduces entropy for g-zipping during the packing phase [S1, unofficial].
++### [SPZ v4 Format Parsing](7954-spz-v4-format-parsing.md)
++SPZ v4 format parsing is the method for decoding binary SPZ v4 files containing compressed 3D Gaussian splat data into a usable `SplatCloud` structure. It solves the problem of loading high-fidelity Gaussian splat captures in environments lacking native system-level decompression libraries, such as web browsers. It is distinguished from earlier SPZ versions (1–3) by using ZSTD compression per attribute instead of a single gzip stream, and from generic PLY parsers by its specific handling of quantized fields and coordinate system transformations.
+ 
+ ## Operating characteristics
+-*   **Time Complexity:** Decompression is linear in the number of bytes, dominated by ZSTD decompression and per-Gaussian decoding [S1, unofficial].
+-*   **Memory Complexity:** Linear in the number of Gaussians [S1, unofficial].
+-*   **Performance:** ZSTD compression provides significant size reduction, especially for correlated Gaussian data [S1, unofficial]. SmallestThree quaternion encoding offers better precision for small components compared to FirstThree, at the cost of slightly more complex decoding logic [S1, unofficial].
+-*   **Strengths:** Low precision storage, efficient compression, support for high-degree SH, flexible extension system [S1, unofficial].
+-*   **Limitations:** Requires custom decoder; non-interleaved layout may be less convenient for some rendering pipelines that expect interleaved data; WASM memory management requires careful handling [S1, unofficial].
++*   **Time Complexity:** Decompression is linear with respect to the number of bytes, $O(N)$, where $N$ is the file size. Decoding is also $O(N)$.
++*   **Memory Complexity:** $O(N)$ for storing the decompressed cloud.
++*   **Performance:** ZSTD compression provides high compression ratios for quantized data, reducing file size significantly compared to uncompressed PLY.
++*   **Strengths:** Efficient storage, fast decompression, browser-friendly (via WASM ZSTD), supports high-degree SH.
++*   **Limitations:** Requires ZSTD library for decompression. Non-interleaved layout may complicate certain GPU upload strategies compared to interleaved formats.
++*   **When to Use:** When storage efficiency and fast loading are critical, especially in web or mobile environments.
++*   **When Not to Use:** When random access to individual Gaussian attributes is required without decompressing the entire file, or when ZSTD is not available.
+ 
+ ## Background
+-SPZ Packed Format was developed by Niantic Labs as part of their open-source SPZ library for efficient storage and transmission of 3D Gaussian Splatting data [S1, unofficial]. It evolved to support higher precision requirements (SmallestThree quaternions) and compression (ZSTD) in later versions [S1, unofficial]. The format is used in Niantic's AR/VR applications and open-source 3D Gaussian Splatting toolchains [S1, unofficial].
++The SPZ format was developed by Niantic Labs [S1, unofficial]. It is an evolution of earlier Gaussian Splatting storage formats, designed to address the limitations of PLY files in terms of size and loading speed. Version 4 introduced ZSTD compression and SmallestThree quaternion encoding [S1, unofficial].
+ 
+ ## Sources

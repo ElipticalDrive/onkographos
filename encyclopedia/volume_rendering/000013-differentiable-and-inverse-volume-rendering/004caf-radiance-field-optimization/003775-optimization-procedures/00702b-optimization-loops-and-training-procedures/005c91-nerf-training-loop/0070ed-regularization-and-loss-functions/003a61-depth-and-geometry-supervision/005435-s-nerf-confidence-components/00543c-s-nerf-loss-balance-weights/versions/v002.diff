@@ -1,0 +1,139 @@
+--- v001.md
++++ v002.md
+@@ -4,17 +4,17 @@
+ 
+ ## Overview
+-S-NeRF Loss Balance Weights are hyperparameters ($\lambda_1, \lambda_2$) used to scale the depth and smoothness components of the composite loss function in S-NeRF, balancing geometric supervision against the primary RGB reconstruction loss. They are distinct from the learnable confidence weights ($\omega_i$) that adaptively weight individual confidence metrics; these balance weights are fixed user-defined constants. They set S-NeRF apart from standard NeRF by explicitly incorporating depth and edge-aware smoothness constraints, requiring careful tuning of $\lambda_1$ and $\lambda_2$ to handle the disparity between static background scenes and dynamic foreground vehicles.
++S-NeRF Loss Balance Weights are fixed user-defined hyperparameters ($\lambda_1, \lambda_2$) that scale the depth and edge-aware smoothness components of the composite loss function in S-NeRF, balancing geometric supervision against the primary RGB reconstruction loss [S1, unofficial]. They operate within a loss structure that explicitly incorporates depth and smoothness constraints, distinguishing S-NeRF from standard NeRF which relies primarily on RGB photometric loss [S1, unofficial].
+ 
+ ## How it works
+ **Inputs and Outputs:**
+-*   **Inputs:** Training rays $\mathcal{R}$, predicted RGB images $\hat{I}$, ground truth RGB images $I$, predicted depth $\hat{D}$, ground truth depth/disparity $D$, image gradients $|\partial I|$, and balance weights $\lambda_1, \lambda_2$.
+-*   **Outputs:** Total loss scalar $L_{total}$ used for gradient descent.
++*   **Inputs:** Training rays $\mathcal{R}$, ground truth RGB images $I$, predicted RGB images $\hat{I}$, ground truth depth/disparity $D$, predicted depth/disparity $\hat{D}$, image gradients $|\partial I|$, confidence metrics $\hat{C}$ and $\tilde{C}$, and balance weights $\lambda_1, \lambda_2$.
++*   **Outputs:** Total loss scalar $L_{total}$ for gradient descent.
+ 
+ **Data Structures:**
+-*   $\lambda_1$: Scalar float.
+-*   $\lambda_2$: Scalar float.
+-*   $L_{color}$: Scalar float (RGB loss).
+-*   $L_{depth}$: Scalar float (Depth loss).
+-*   $L_{smooth}$: Scalar float (Smoothness loss).
++*   $\lambda_1$: Scalar float, balance weight for depth loss.
++*   $\lambda_2$: Scalar float, balance weight for smoothness loss.
++*   $L_{color}$: Scalar float, RGB photometric loss.
++*   $L_{depth}$: Scalar float, confidence-conditioned depth loss.
++*   $L_{smooth}$: Scalar float, edge-aware smoothness loss.
+ 
+ **Formulas:**
+@@ -22,17 +22,17 @@
+ $$ L_{total} = L_{color} + \lambda_1 L_{depth} + \lambda_2 L_{smooth} $$
+ 
+-1.  **RGB Loss ($L_{color}$):** Mean squared error between rendered and ground truth images [S1, unofficial]:
++1.  **RGB Loss ($L_{color}$):** Sum of squared errors over all training rays [S1, unofficial]:
+     $$ L_{color} = \sum_{r \in \mathcal{R}} \| I(r) - \hat{I}(r) \|^2 $$
+ 
+-2.  **Depth Loss ($L_{depth}$):** Weighted absolute difference between predicted and ground truth depth/disparity, modulated by confidence $\hat{C}$ [S1, unofficial]:
+-    $$ L_{depth} = \sum_{r \in \mathcal{R}} \frac{\hat{C} \cdot |D - \hat{D}|}{6} $$
+-    *Note: The denominator 6 appears in the source formula [S1, unofficial]. For background scenes, $D$ represents disparity (inverse depth); for foreground vehicles, $D$ represents depth [S1, unofficial].*
++2.  **Depth Loss ($L_{depth}$):** Sum of absolute differences between ground truth and predicted depth/disparity, normalized by a factor of 6 [S1, unofficial]:
++    $$ L_{depth} = \sum_{r \in \mathcal{R}} \frac{|D - \hat{D}|}{6} $$
++    *Note: For background street scenes, $D$ represents disparity (inverse depth) to focus on close objects; for foreground vehicles, $D$ represents depth [S1, unofficial].*
+ 
+-3.  **Smoothness Loss ($L_{smooth}$):** Edge-aware smoothness constraint penalizing depth variance relative to image gradients [S1, unofficial]:
++3.  **Smoothness Loss ($L_{smooth}$):** Edge-aware constraint penalizing large depth variances relative to image gradients, weighted by confidence $\tilde{C}$ [S1, unofficial]:
+     $$ L_{smooth} = \sum_{r \in \mathcal{R}} \frac{\tilde{C} \cdot |D - \hat{D}|}{|\partial_x \hat{D}| \exp^{-|\partial_x I|} + |\partial_y \hat{D}| \exp^{-|\partial_y I|}} $$
+-    *Note: The source uses $\tilde{C}$ in the smoothness numerator, distinct from $\hat{C}$ in the depth loss [S1, unofficial]. $\partial_x$ and $\partial_y$ denote spatial derivatives.*
++    *Note: $\partial_x$ and $\partial_y$ denote spatial derivatives. The confidence $\tilde{C}$ is used here, distinct from $\hat{C}$ which is not applied to $L_{depth}$ in the source formula [S1, unofficial].*
+ 
+ **Parameters and Typical Values:**
+-$\lambda_1$ and $\lambda_2$ are user-defined. Reasonable ranges depend on the scene type [S1, unofficial]:
++$\lambda_1$ and $\lambda_2$ are user-defined constants [S1, unofficial]. Reasonable ranges depend on the scene type [S1, unofficial]:
+ *   **Street Background Views:** $\lambda_1 \in [0.1, 0.4]$, $\lambda_2 \in (0.005, 0.02)$. Typical values: $\lambda_1 = 0.2$, $\lambda_2 = 0.01$.
+ *   **Foreground Vehicles:** $\lambda_1 \in [0.5, 2]$, $\lambda_2 \in (0.075, 0.015)$. Typical values: $\lambda_1 = 1$, $\lambda_2 = 0.15$.
+@@ -40,16 +40,15 @@
+ **Pseudocode:**
+ ```python
+-def compute_snerf_loss(I_gt, I_pred, D_gt, D_pred, I_image, C_conf, C_smooth_conf, lambda1, lambda2):
++def compute_snerf_loss(I_gt, I_pred, D_gt, D_pred, I_image, C_smooth_conf, lambda1, lambda2):
+     """
+     Computes the total S-NeRF loss.
+     
+     Args:
+-        I_gt: Ground truth RGB image tensor.
+-        I_pred: Predicted RGB image tensor.
+-        D_gt: Ground truth depth (vehicles) or disparity (background) tensor.
+-        D_pred: Predicted depth/disparity tensor.
+-        I_image: Original RGB image tensor for gradient computation.
+-        C_conf: Confidence metric tensor for depth loss.
+-        C_smooth_conf: Confidence metric tensor for smoothness loss.
++        I_gt: Ground truth RGB image tensor (H, W, 3).
++        I_pred: Predicted RGB image tensor (H, W, 3).
++        D_gt: Ground truth depth (vehicles) or disparity (background) tensor (H, W).
++        D_pred: Predicted depth/disparity tensor (H, W).
++        I_image: Original RGB image tensor for gradient computation (H, W, 3).
++        C_smooth_conf: Confidence metric tensor for smoothness loss (H, W).
+         lambda1: Balance weight for depth loss.
+         lambda2: Balance weight for smoothness loss.
+@@ -59,38 +58,29 @@
+     """
+     # 1. RGB Loss (L_color)
+-    # Mean squared error over all rays/pixels
+     l_color = torch.sum((I_gt - I_pred) ** 2)
+     
+     # 2. Depth Loss (L_depth)
+-    # Weighted absolute difference, normalized by 6 as per source formula
+-    # Note: D_gt is disparity for background, depth for foreground [S1, unofficial]
++    # Source formula: sum(|D - D̂|) / 6
+     depth_diff = torch.abs(D_gt - D_pred)
+-    l_depth = torch.sum(C_conf * depth_diff) / 6.0
++    l_depth = torch.sum(depth_diff) / 6.0
+     
+     # 3. Smoothness Loss (L_smooth)
+-    # Edge-aware smoothness constraint [S1, unofficial]
+-    # Compute image gradients
+-    # Using central differences for simplicity; source assumes standard gradient operators
++    # Compute image gradients |∂I|
+     I_x = torch.abs(I_image[:, :, 1:, :] - I_image[:, :, :-1, :])
+     I_y = torch.abs(I_image[:, :, :, 1:] - I_image[:, :, :, :-1])
+     
+-    # Compute depth/disparity gradients
++    # Compute predicted depth/disparity gradients |∂D̂|
+     D_x = torch.abs(D_pred[:, :, 1:, :] - D_pred[:, :, :-1, :])
+     D_y = torch.abs(D_pred[:, :, :, 1:] - D_pred[:, :, :, :-1])
+     
+     # Denominator: |∂x D̂| exp^−|∂x I| + |∂y D̂| exp^−|∂y I|
+-    # Note: Source formula [S1, unofficial] uses exp^-|∂I|, which implies exp(-|gradient|)
+     denom = D_x * torch.exp(-I_x) + D_y * torch.exp(-I_y)
+-    
+-    # Avoid division by zero
+     denom = torch.clamp(denom, min=1e-8)
+     
+     # Numerator: C̃ · |D − D̂|
+-    # Source uses C̃ (tilde C) for smoothness, distinct from Ĉ (hat C) for depth [S1, unofficial]
+-    smoothness_num = C_smooth_conf * depth_diff
++    # Crop depth_diff to match gradient dimensions (H-1, W-1)
++    depth_diff_crop = depth_diff[:, :, 1:, :]
++    smoothness_num = C_smooth_conf[:, :, 1:, :] * depth_diff_crop
+     
+-    # Handle shape mismatch from gradient computation (H-1, W-1)
+-    # Assuming padding or cropping to match original dimensions is handled by the framework
+-    # Here we assume inputs are already aligned or gradients are computed on aligned tensors
+     l_smooth = torch.sum(smoothness_num / denom)
+     
+@@ -102,12 +92,12 @@
+ 
+ **Edge Cases and Pitfalls:**
+-*   **Sensitivity:** The method is not highly sensitive to $\lambda_1, \lambda_2$. Varying them outside reasonable ranges reduces PSNR/SSIM by only 0.2–1% on background views [S1, unofficial].
++*   **Sensitivity:** The method is robust to parameter variation; varying $\lambda_1$ or $\lambda_2$ outside reasonable ranges reduces PSNR and SSIM by only 0.2–1% on background novel view rendering [S1, unofficial].
+ *   **Disparity vs Depth:** For background scenes, $D$ must be disparity (inverse depth) to focus on close objects; for vehicles, it is depth [S1, unofficial]. Using the wrong interpretation breaks the loss semantics.
+-*   **Confidence Metrics:** The confidence $\hat{C}$ and $\tilde{C}$ are derived from geometry and reprojection measurements for background, and RGB/SSIM for foreground [Parent]. Incorrect confidence calculation leads to incorrect weighting.
++*   **Confidence Metrics:** The confidence $\tilde{C}$ is derived from geometry and reprojection measurements for background, and RGB/SSIM for foreground [Parent]. Incorrect confidence calculation leads to incorrect weighting.
+ 
+ ## Subtopics
+ 
+ ### S-NeRF Loss Functions
+-The composite loss function consisting of RGB loss, confidence-conditioned depth loss, and edge-aware smoothness constraints. It defines the structure within which $\lambda_1$ and $\lambda_2$ operate. The total loss is $L_{total} = L_{color} + \lambda_1 L_{depth} + \lambda_2 L_{smooth}$ [S1, unofficial]. The smoothness loss penalizes large depth variances according to image gradients: $L_{smooth} = \sum (\tilde{C} \cdot |D - \hat{D}|) / (|\partial_x \hat{D}| \exp^{-|\partial_x I|} + |\partial_y \hat{D}| \exp^{-|\partial_y I|})$ [S1, unofficial]. Typical values are $\lambda_1=1, \lambda_2=0.15$ for vehicles and $\lambda_1=0.2, \lambda_2=0.01$ for background [S1, unofficial].
++The composite loss function consists of RGB loss, confidence-conditioned depth loss, and edge-aware smoothness constraints, defining the structure within which $\lambda_1$ and $\lambda_2$ operate [S1, unofficial]. The total loss is $L_{total} = L_{color} + \lambda_1 L_{depth} + \lambda_2 L_{smooth}$ [S1, unofficial]. The smoothness loss penalizes large depth variances according to image gradients: $L_{smooth} = \sum (\tilde{C} \cdot |D - \hat{D}|) / (|\partial_x \hat{D}| \exp^{-|\partial_x I|} + |\partial_y \hat{D}| \exp^{-|\partial_y I|})$ [S1, unofficial]. Typical values are $\lambda_1=1, \lambda_2=0.15$ for vehicles and $\lambda_1=0.2, \lambda_2=0.01$ for background [S1, unofficial].
+ 
+ ## Operating characteristics

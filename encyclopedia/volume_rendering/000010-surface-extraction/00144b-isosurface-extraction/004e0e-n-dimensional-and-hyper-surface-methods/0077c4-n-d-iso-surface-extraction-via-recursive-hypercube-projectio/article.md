@@ -1,0 +1,133 @@
+# n-D Iso-surface Extraction via Recursive Hypercube Projection
+
+Also called: Iso-surface Extraction in nD, Marching Lines nD extension, nD Iso-surface Extraction, nD generalized algorithm, recursive iso-surface extraction
+
+## Overview
+This method extracts oriented iso-surfaces and their intersections in spaces of arbitrary dimension $n$ by recursively projecting an $n$-dimensional hypercube onto 2D planes [S1, unofficial]. It guarantees topological correctness (closeness, orientability, no self-intersections) through an inductive definition of orientation, serving as a generalization of Marching Cubes and Marching Lines [S1, unofficial]. Unlike [High-Dimensional Triangulation Tables](1336-high-dimensional-triangulation-tables.md) which rely on exhaustive combinatorial tables, this method uses recursive projection and orientation-preserving bijections to reduce complexity [S1, unofficial].
+
+## How it works
+**Inputs:** A scalar field defined on an $n$-dimensional regular grid. The algorithm processes one $n$-dimensional hypercube (cell) at a time.
+**Outputs:** A set of oriented $(n-1)$-dimensional hyper-surfaces (hyper-cycles) and their intersections (hyper-segments) within the hypercube.
+
+**Data Structures:**
+*   **Voxel Labels:** Vertices of the $n$-cube are labeled $0$ to $2^n-1$. Adjacent vertices have labels differing by 1 bit (Gray code ordering) [S1, unofficial].
+*   **Face Codes:** Hyper-faces are identified by codes $0$ to $2n-1$. The code corresponds to the dimension and the boundary value (0 or 1).
+    *   In 3D: Face 0 is $z=0$, Face 5 is $z=1$.
+    *   In 4D: Face 0 is $t=0$, Face 7 is $t=1$ [S1, unofficial].
+*   **Orientation Map:** A lookup table or function that reflects vertices of hyper-faces with odd codes to establish an orientation-preserving bijection with the base hyper-face (code 0) [S1, unofficial].
+
+**Algorithm Steps:**
+
+1.  **Hyper-face Identification:** Identify the $2n$ hyper-faces of the current $n$-cube. Each face is an $(n-1)$-cube defined by a hyper-plane equation (e.g., $x_i = 0$ or $x_i = 1$) [S1, unofficial].
+2.  **Orientation Correction:** For each hyper-face with an odd code, reflect its vertex ordering to match the orientation of the base hyper-face (code 0).
+    *   *Example (4D, Face 1):* The face defined by $z=0$ has vertices $\{0, 1, 2, 3, 8, 9, 10, 11\}$. Reflection yields $\{0, 2, 1, 3, 8, 10, 9, 11\}$ [S1, unofficial].
+    *   This ensures that any hyper-face can be traced back to the base $(n-1)$-cube in an orientation-preserving way [S1, unofficial].
+3.  **Recursive Projection (Top-Down):** Recursively project the $n$-cube onto 2D planes. The essence is dividing computation into sub-tasks by projecting $(n-2)$ times to the 2D plane [S1, unofficial].
+    *   *Base Case (2D):* Extract iso-vertices on the edges of the 2D square using linear interpolation.
+    *   *Inductive Step:* For $n > 2$, treat the problem as organizing results from $(n-1)$-dimensional sub-cubes.
+4.  **Local Iso-surface Extraction:** For each of the $2n$ face-cubes (which are $(n-1)$-cubes):
+    *   Biject the voxels of the face-cube into the voxels of the base $(n-1)$-cube using the orientation correction map [S1, unofficial].
+    *   Compute the iso-patch cycles (closed loops of iso-vertices) in the base $(n-1)$-cube.
+    *   Compute the bi-iso-segments (open paths representing intersections of multiple iso-surfaces) in the base $(n-1)$-cube [S1, unofficial].
+5.  **Re-assembly (Bottom-Up):**
+    *   Organize the computed cycles from all face-cubes into global **hyper-cycles** (oriented $(n-1)$-polyhedra) [S1, unofficial].
+    *   Organize the computed segments into global **hyper-segments** (oriented curves) [S1, unofficial].
+    *   Ensure that adjacent cycles composing the hyper-faces of a hyper-cycle have orientations related oppositely on common faces to maintain coherence [S1, unofficial].
+
+**Pseudocode (4D Case):**
+The following pseudocode illustrates the core recursive reduction from 4D to 3D, as described in the source [S1, unofficial].
+
+> **Unverified code.** The code below did not pass a test run against a reference implementation, or no test fits it, so it may contain errors.
+
+```python
+def extract_4d_iso_surface(hypercube_4d):
+    """
+    Extracts hyper-cycles and hyper-segments from a 4D hypercube.
+    hypercube_4d: A structure containing scalar values at 16 vertices.
+    Returns: List of hyper-cycles, List of hyper-segments.
+    """
+    hyper_cycles = []
+    hyper_segments = []
+    
+    # The 4D hypercube has 8 face-cubes (3D cubes)
+    # Face codes 0-7 correspond to t=0, t=1, z=0, z=1, y=0, y=1, x=0, x=1
+    # Base face is code 0 (t=0)
+    
+    for face_code in range(8):
+        # 1. Identify the 3D face-cube vertices
+        face_vertices = get_face_vertices(face_code)
+        
+        # 2. Biject voxels to the base cube (code 0)
+        # This involves reflecting vertices if face_code is odd
+        base_vertices = apply_orientation_map(face_vertices, face_code)
+        
+        # 3. Extract iso-structures in the base 3D cube
+        # This calls the 3D Marching Cubes logic or recursive 3D projection
+        base_cycles, base_segments = extract_3d_iso_surface(base_vertices)
+        
+        # 4. Map results back to the global coordinate system
+        # The orientation map ensures the normals/curves are correctly oriented
+        global_cycles = map_to_global(base_cycles, face_code)
+        global_segments = map_to_global(base_segments, face_code)
+        
+        hyper_cycles.extend(global_cycles)
+        hyper_segments.extend(global_segments)
+        
+    # 5. Organize into coherent hyper-cycles and hyper-segments
+    # This step links cycles from adjacent faces into closed 3D surfaces
+    # and segments into 1D curves, ensuring topological correctness
+    final_hyper_cycles = organize_hyper_cycles(hyper_cycles)
+    final_hyper_segments = organize_hyper_segments(hyper_segments)
+    
+    return final_hyper_cycles, final_hyper_segments
+
+def apply_orientation_map(vertices, face_code):
+    """
+    Reflects vertex order for odd face codes to preserve orientation.
+    Example for 4D face 1 (z=0): 
+    Original: {0, 1, 2, 3, 8, 9, 10, 11}
+    Reflected: {0, 2, 1, 3, 8, 10, 9, 11}
+    """
+    if face_code % 2 == 0:
+        return vertices
+    else:
+        # Apply specific reflection permutation for the odd face
+        # The exact permutation depends on the Gray code labeling
+        return reflect_vertices(vertices, face_code)
+
+def organize_hyper_cycles(cycles):
+    """
+    Links cycles from adjacent 3D faces into 3D polyhedra (hyper-cycles).
+    Ensures adjacent cycles have opposite orientation on common faces.
+    """
+    # Implementation detail: Use adjacency lists and orientation checks
+    # to merge cycles that share edges in the 4D space.
+    # [G] Standard graph-based cycle merging with orientation consistency checks.
+    pass
+
+def organize_hyper_segments(segments):
+    """
+    Links segments from adjacent 3D faces into 1D curves (hyper-segments).
+    """
+    # Implementation detail: Connect segment endpoints that coincide in 4D space.
+    # [G] Standard graph-based path merging.
+    pass
+```
+
+**Edge Cases and Pitfalls:**
+*   **Precision:** Linear interpolation for iso-vertex localization assumes scalar values are well-behaved. Degenerate cases (scalar value exactly equal to iso-value at a vertex) require consistent tie-breaking rules to avoid topological holes [S1, unofficial].
+*   **Boundary Conditions:** The algorithm assumes a grid structure. Handling boundaries of the entire volume requires special care to ensure hyper-cycles do not terminate abruptly unless intended [S1, unofficial].
+*   **Visualization:** Results in 4D are difficult to visualize directly; animation and color mapping are recommended [S1, unofficial].
+
+## Operating characteristics
+*   **Complexity:** The algorithm reduces $n$-D complexity to 2-D sub-tasks via recursive projection. The use of look-up tables for hyper-face transformation speeds up the reduction (e.g., 4D to 3D) compared to solving equations [S1, unofficial].
+*   **Performance:** The implementation is described as "quite straightforward" and efficient for tracking singularities across scale space [S1, unofficial].
+*   **Strengths:** Guarantees good topological properties (closeness, orientability, no self-intersections) [S1, unofficial]. Automatically finds connection order of singularities, making it reliable for tracking even if scale is not densely sampled [S1, unofficial].
+*   **Limitations:** Results are difficult to visualize in high dimensions [S1, unofficial]. The complexity of implementation grows with $n$ due to the need for orientation maps and recursive structures.
+*   **When to use:** When extracting iso-surfaces or their intersections in arbitrary dimensions, particularly for tracking feature curves (e.g., parabolic and crest curves) across scale space [S1, unofficial].
+
+## Background
+The method was introduced in a paper by the author of [S1, unofficial] to address the need for extracting iso-surfaces and their intersections in spaces of arbitrary dimension. It generalizes the 3D Marching Cubes and Marching Lines algorithms [S1, unofficial]. The motivation came from medical image processing and the analysis of scale-space behavior of characteristic curves (e.g., tracking parabolic and crest curves) [S1, unofficial]. The approach uses dimensional analogy to define orientation in $n$-D, avoiding "mysticism" about higher dimensions [S1, unofficial].
+
+## Sources
+[S1] Iso-surface Extraction in n-D applied to Tracking Feature Curves across Scale, https://inria.hal.science/inria-00615083v1, fetched 2026-10-27 (unofficial)

@@ -1,0 +1,147 @@
+# Exponential Decay Learning Rate Schedule with Warm-up
+
+Also called: Adam Optimization with Exponential LR Decay and Warm-up, Exponential Decay with Warm-up, Exponential LR Decay with Warm-up, Exposure Optimization, Warm-up and Exponential Decay LR Schedule
+
+## Overview
+This method schedules the learning rate for optimizing radiance field parameters (such as per-camera exposures or network weights) by combining an initial warm-up phase with subsequent exponential decay. It addresses the instability of starting optimization with high learning rates and the need for fine-grained convergence in later stages. It differs from standard exponential decay by explicitly preventing early divergence through a scaled warm-up period, and from step decay by providing a smooth, continuous reduction in learning rate without discrete jumps.
+
+## How it works
+The method computes the learning rate $lr_t$ at training step $t$ using a piecewise function that transitions from a warm-up phase to an exponential decay phase.
+
+**Inputs and Outputs:**
+- $t$: Current training step (integer, $t \ge 0$).
+- $lr_{init}$: Initial learning rate (float).
+- $lr_{final}$: Target final learning rate (float).
+- $T_{warmup}$: Number of warm-up steps (integer).
+- $T_{total}$: Total number of training steps (integer).
+- $\alpha$: Warm-up multiplier (float, $0 < \alpha < 1$).
+- $lr_t$: Computed learning rate at step $t$ (float).
+
+**Data Structures:**
+No complex data structures are required. The state is defined by the scalar parameters above.
+
+**Parameters and Typical Values:**
+- $lr_{init}$: $1 \times 10^{-3}$ [S1] or $2 \times 10^{-3}$ [S2].
+- $lr_{final}$: $1 \times 10^{-4}$ [S1] or $2 \times 10^{-5}$ [S2].
+- $T_{warmup}$: 512 steps [S2] or 5000 steps [S1] (used as a delay before exposure optimization).
+- $\alpha$: $0.01$ [S2] or $1 \times 10^{-3}$ [S1] (referred to as "delay multiplier").
+- $T_{total}$: Determined by the dataset size and epoch count (e.g., 44,000 iterations on DTU [S2]).
+
+**Formulas:**
+The learning rate schedule is defined as:
+
+$$
+lr_t = \begin{cases} 
+\alpha \cdot lr_{init} & \text{if } t < T_{warmup} \\
+lr_{init} \cdot \left( \frac{lr_{final}}{lr_{init}} \right)^{\frac{t - T_{warmup}}{T_{total} - T_{warmup}}} & \text{if } t \ge T_{warmup}
+\end{cases}
+$$
+
+Where:
+- $\frac{lr_{final}}{lr_{init}}$ is the total decay factor over the decay phase.
+- The exponent $\frac{t - T_{warmup}}{T_{total} - T_{warmup}}$ normalizes the progress through the decay phase to $[0, 1]$.
+
+**Numbered Steps:**
+1. Initialize the optimizer (e.g., Adam) with base learning rate $lr_{init}$.
+2. Determine $T_{warmup}$, $T_{total}$, $\alpha$, $lr_{init}$, and $lr_{final}$ based on the specific implementation variant.
+3. For each training step $t$:
+   a. If $t < T_{warmup}$, set $lr_t = \alpha \cdot lr_{init}$.
+   b. If $t \ge T_{warmup}$, calculate the decay factor $D = \frac{lr_{final}}{lr_{init}}$.
+   c. Calculate the normalized progress $p = \frac{t - T_{warmup}}{T_{total} - T_{warmup}}$.
+   d. Set $lr_t = lr_{init} \cdot D^p$.
+4. Apply gradient clipping (value clip at 0.1 and normalization to 0.1) to ensure stability [S2].
+5. Update model parameters using the optimizer with $lr_t$.
+
+**Pseudocode:**
+> **Unverified code.** The code below did not pass a test run against a reference implementation, or no test fits it, so it may contain errors.
+
+```python
+def compute_learning_rate(t, lr_init, lr_final, t_warmup, t_total, alpha):
+    """
+    Computes the learning rate at step t using exponential decay with warm-up.
+    
+    Args:
+        t (int): Current training step.
+        lr_init (float): Initial learning rate.
+        lr_final (float): Final learning rate.
+        t_warmup (int): Number of warm-up steps.
+        t_total (int): Total number of training steps.
+        alpha (float): Warm-up multiplier.
+        
+    Returns:
+        float: The computed learning rate.
+    """
+    if t < t_warmup:
+        return alpha * lr_init
+    else:
+        # Calculate the decay factor
+        decay_factor = lr_final / lr_init
+        
+        # Calculate normalized progress in the decay phase
+        # Avoid division by zero if t_warmup == t_total
+        if t_total == t_warmup:
+            progress = 1.0
+        else:
+            progress = (t - t_warmup) / (t_total - t_warmup)
+            
+        # Clamp progress to [0, 1] to handle potential floating point errors
+        progress = max(0.0, min(1.0, progress))
+        
+        # Apply exponential decay
+        return lr_init * (decay_factor ** progress)
+
+def apply_gradient_clipping(grad, clip_value=0.1):
+    """
+    Clips gradients by value and normalizes them.
+    
+    Args:
+        grad (tensor): The gradient tensor.
+        clip_value (float): The clipping threshold.
+        
+    Returns:
+        tensor: The clipped and normalized gradient.
+    """
+    # Clip by value
+    grad = torch.clamp(grad, -clip_value, clip_value)
+    
+    # Normalize to clip_value
+    norm = torch.norm(grad)
+    if norm > 0:
+        grad = grad * (clip_value / norm)
+    return grad
+```
+
+**Edge Cases and Pitfalls:**
+- If $T_{total} = T_{warmup}$, the decay phase is skipped; the schedule remains at $\alpha \cdot lr_{init}$ for all $t \ge T_{warmup}$.
+- Precision issues may arise if $lr_{final}$ is extremely small relative to $lr_{init}$, causing underflow in the base of the exponent.
+- The "delay multiplier" $\alpha$ in [S1] is applied to the initial LR during the warm-up, whereas [S2] uses a fixed multiplier of 0.01. Implementers must verify which variant is intended.
+
+## Subtopics
+
+### [Training Loop with Adaptive Regularization & LR Decay](2408-training-loop-with-adaptive-regularization-lr-decay.md)
+Combines LR scheduling with adaptive regularization terms. Choose when geometric consistency constraints are critical.
+
+### [Exponential Decay Learning Rate Schedule](9145-exponential-decay-learning-rate-schedule.md)
+Standard exponential decay without warm-up. Choose when early training stability is less of a concern.
+
+### [Linear Learning Rate Schedule](11850-linear-learning-rate-schedule.md)
+Linearly decreases LR. Choose for simpler, more predictable decay profiles.
+
+### [Cosine Decay Learning Rate Schedule](14118-cosine-decay-learning-rate-schedule.md)
+Uses a cosine curve for decay. Choose for smoother transitions in later stages.
+
+## Operating characteristics
+- **Time Complexity:** $O(1)$ per step for computing the learning rate.
+- **Memory Complexity:** $O(1)$ for storing schedule parameters.
+- **Measured Performance:** Used in FreeNeRF [S2] and hierarchical 3D Gaussian representations [S1]. In [S2], it was applied over 44k iterations on the DTU dataset with a batch size of 4096.
+- **Strengths:** Prevents early divergence via warm-up; smooth convergence via exponential decay; simple to implement.
+- **Limitations:** Requires careful tuning of $T_{warmup}$ and $\alpha$; exponential decay may converge too slowly for some tasks compared to cosine decay.
+- **When to Use:** When optimizing sensitive parameters like per-camera exposures or in sparse-view scenarios where early instability is a risk.
+- **When Not to Use:** When a more aggressive decay is needed, or when the warm-up phase is not beneficial for the specific dataset.
+
+## Background
+This method is derived from optimization practices in neural radiance field (NeRF) training, particularly for handling sparse consumer-level captures and per-camera exposure optimization. It was explicitly described in the context of hierarchical 3D Gaussian representations [S1] and FreeNeRF [S2]. The approach builds on the general principle of exponential decay schedules [Parent](18486-exponential-decay-schedules.md) by adding a warm-up phase to mitigate early training instability.
+
+## Sources
+[S1] A Hierarchical 3D Gaussian Representation for Real-Time Rendering of Very Large Datasets, https://www.youtube.com/watch?v=p-mb2TzVJZk, fetched 2026-10-31
+[S2] SGCNeRF: Few-Shot Neural Rendering via Sparse Geometric Consistency Guidance, https://doi.org/10.1109/tcsvt.2025.3610950, fetched 2026-10-30

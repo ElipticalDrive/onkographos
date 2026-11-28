@@ -1,0 +1,196 @@
+--- v046.md
++++ v047.md
+@@ -14,5 +14,5 @@
+ Each Gaussian $i$ is defined by four learnable parameter groups [S4]:
+ 1.  **Position:** $\mu_i \in \mathbb{R}^3$.
+-2.  **Shape:** Defined by a scaling vector $s_i \in \mathbb{R}^3$ and a rotation quaternion $q_i \in \mathbb{R}^4$ (normalized to unit length). The covariance matrix is computed as $\Sigma_i = R_i S_i S_i^T R_i^T$, where $R_i$ is the rotation matrix derived from $q_i$ and $S_i = \text{diag}(s_i)$ [S3, S4].
++2.  **Shape:** Defined by a scaling vector $s_i \in \mathbb{R}^3$ and a rotation quaternion $q_i \in \mathbb{R}^4$ (normalized to unit length) [S3][S4]. The covariance matrix is computed as $\Sigma_i = R_i S_i S_i^T R_i^T$, where $R_i$ is the rotation matrix derived from $q_i$ and $S_i = \text{diag}(s_i)$ [S3, S4].
+ 3.  **Opacity:** $\alpha_i \in \mathbb{R}$, typically initialized to a constant value [S12, unofficial].
+ 4.  **Color:** Spherical Harmonic (SH) coefficients $sh_i \in \mathbb{R}^{48}$ for degree 3 [S4].
+@@ -52,75 +52,120 @@
+     *   **Pruning:** Remove Gaussians with opacity $\alpha_i < \tau_\alpha$ (e.g., 0.005) or those that are too large [S1, S3].
+     *   **Densification:** For Gaussians with high positional gradient norm $\|\nabla_{\mu} \mathcal{L}\|_2 > \tau_p$ (e.g., 0.0002):
+-        *   **Over-reconstruction:** If the covariance scale $\|\Sigma\|_F > \tau_s$ (e.g., 0.01), split the Gaussian into two. The new covariance is scaled by 0.8 [S1, S3].
++        *   **Over-reconstruction:** If the covariance scale $\|\Sigma\|_F > \tau_s$ (e.g., 0.01), split the Gaussian into two. The new covariance is scaled by 0.8 [S1, S3][S6, unofficial].
+         *   **Under-reconstruction:** If $\|\Sigma\|_F \le \tau_s$, clone the Gaussian [S3].
+-    *   **Reset Opacity:** Reset the opacity of newly created Gaussians to maintain stability [S6, unofficial].
+ 
+ **Pseudocode**
+ ```python
+-def train_3dgs(images, cameras, initial_points, num_iters=30000):
++import math
++import numpy as np
++
++def train_3dgs(cameras, ground_truth_images, initial_points, num_iters=30000):
+     # 1. Initialization
+-    gaussians = initialize_gaussians(initial_points) # mu, s, q, alpha, sh
+-    optimizer = Adam(gaussians.parameters(), lr=1.6e-4)
++    gaussians = []
++    for p in initial_points:
++        g = {
++            'mu': np.array(p, dtype=np.float32),
++            's': np.array([0.5, 0.5, 0.5], dtype=np.float32),
++            'q': np.array([1.0, 0.0, 0.0, 0.0], dtype=np.float32),
++            'alpha': 0.1,
++            'sh': np.zeros(48, dtype=np.float32)
++        }
++        gaussians.append(g)
+     
+-    # Camera iterator with shuffling
+-    cam_indices = shuffle(range(len(cameras)))
+-    cam_iter = Iterator(cam_indices)
++    # Camera iterator with periodic shuffle
++    cam_indices = list(range(len(cameras)))
++    np.random.shuffle(cam_indices)
++    cam_iter_idx = 0
+     
+-    current_step = 1
+-    while current_step <= num_iters:
++    for step in range(1, num_iters + 1):
+         # 2. Camera Sampling
+-        cam_idx = cam_iter.next()
+-        if cam_iter.done():
+-            cam_indices = shuffle(range(len(cameras)))
+-            cam_iter = Iterator(cam_indices)
+-            
++        if cam_iter_idx >= len(cam_indices):
++            np.random.shuffle(cam_indices)
++            cam_iter_idx = 0
++        cam_idx = cam_indices[cam_iter_idx]
++        cam_iter_idx += 1
+         camera = cameras[cam_idx]
+-        gt_image = images[cam_idx]
++        gt = ground_truth_images[cam_idx]
+         
+         # Dynamic resolution scaling
+-        if current_step < 5000:
+-            resolution = (540, 960)
++        if step < 5000:
++            scale = 0.5
+         else:
+-            resolution = (1080, 1920)
+-            
+-        gt_image = resize(gt_image, resolution)
++            scale = 1.0
++        gt_resized = resize_image(gt, scale)
+         
+         # 3. Rendering
+-        rendered_image = rasterize(gaussians, camera)
++        rendered = rasterize_gaussians(gaussians, camera, scale)
+         
+         # 4. Loss Calculation
+-        loss = compute_loss(rendered_image, gt_image) # L1 + SSIM
++        loss = compute_l1_ssim_loss(rendered, gt_resized)
+         
+         # 5. Backpropagation
+-        optimizer.zero_grad()
+-        loss.backward()
+-        optimizer.step()
+-        
+-        # 6. Adaptive Density Control (every 100 steps)
+-        if current_step % 100 == 0:
+-            manage_gaussians(gaussians, current_step)
++        gradients = compute_gradients(loss, gaussians, camera)
++        update_parameters(gaussians, gradients, step)
++        
++        # 6. Adaptive Density Control
++        if step % 100 == 0:
++            gaussians = manage_gaussians(gaussians, step)
+             
+         # 7. Post-training updates
+-        update_schedulers(optimizer, current_step)
+-        
+-        current_step += 1
++        update_schedulers(step)
++
++def resize_image(image, scale):
++    # Standard bilinear downsampling
++    h, w = image.shape[:2]
++    return image[::int(1/scale), ::int(1/scale)]
++
++def rasterize_gaussians(gaussians, camera, scale):
++    # Project 3D Gaussians to 2D screen space, compute coverage radius
++    # Sort by depth, perform alpha-compositing per pixel
++    # Returns rendered RGB tensor
++    pass
++
++def compute_l1_ssim_loss(rendered, gt):
++    l1 = np.mean(np.abs(rendered - gt))
++    ssim = 0.2 * (1 - structural_similarity(rendered, gt))
++    return l1 + ssim
++
++def compute_gradients(loss, gaussians, camera):
++    # Chain rule through differentiable rasterizer
++    return {g: np.zeros_like(g['mu']) for g in gaussians}
++
++def update_parameters(gaussians, gradients, step):
++    lr = 1.6e-4 * (0.5 ** (step / 30000))
++    for g in gaussians:
++        g['mu'] -= lr * gradients[g]
++        # Update s, q, alpha, sh similarly
+ 
+ def manage_gaussians(gaussians, step):
+-    # Pruning
++    tau_alpha = 0.005
++    tau_p = 0.0002
++    tau_s = 0.01
++    new_gaussians = []
+     for g in gaussians:
+-        if g.alpha < 0.005 or is_too_large(g.covariance):
+-            remove_gaussian(g)
+-            
+-    # Densification
+-    for g in gaussians:
+-        grad_norm = norm(g.gradient_of_mu)
+-        if grad_norm > 0.0002:
+-            if norm(g.covariance) > 0.01:
+-                split_gaussian(g) # Scale cov by 0.8
++        cov_norm = np.linalg.norm(g['s'])
++        grad_norm = np.linalg.norm(gradients[g])
++        if g['alpha'] < tau_alpha or cov_norm > tau_s * 2:
++            continue # Prune
++        if grad_norm > tau_p:
++            if cov_norm > tau_s:
++                # Split
++                new_g = copy_gaussian(g)
++                new_g['s'] *= 0.8
++                new_gaussians.append(new_g)
++                new_gaussians.append(copy_gaussian(g))
+             else:
+-                clone_gaussian(g)
+-                
+-    # Reset opacity for new gaussians
+-    reset_new_opacities(gaussians)
++                # Clone
++                new_gaussians.append(copy_gaussian(g))
++        else:
++            new_gaussians.append(g)
++    return new_gaussians
++
++def copy_gaussian(g):
++    return {k: v.copy() if isinstance(v, np.ndarray) else v for k, v in g.items()}
++
++def update_schedulers(step):
++    # Adjust learning rate schedules, e.g., CosineAnnealingLR
++    pass
+ ```
+ 
+@@ -254,14 +299,12 @@
+ 
+ ## Operating characteristics
+-*   **Time Complexity:** Training typically requires 30,000 iterations [S1][S5, unofficial]. Each iteration involves rasterization and backpropagation, which are highly parallelizable on GPUs [S4].
+-*   **Memory Complexity:** Memory usage scales with the number of Gaussians $M$. Standard implementations store the entire training dataset in VRAM for speed, which can exceed GPU capacity for large scenes [S11, unofficial][S4].
++*   **Time Complexity:** Training typically requires 30,000 iterations [S1][S5, unofficial]. Each iteration involves rasterization and backpropagation, which are inherently parallel [S4].
++*   **Memory Complexity:** Memory usage scales with the number of Gaussians $M$. Standard implementations store the entire training dataset in VRAM for speed, which can exceed GPU capacity for large scenes [S4][S11, unofficial].
+ *   **Performance:** 3DGS training is significantly faster than NeRF-based methods, often completing in minutes to hours depending on scene size, compared to hours or days for NeRFs [S2][S7, unofficial].
+ *   **Strengths:** Real-time rendering capability after training, high visual fidelity, and explicit representation allows for easy editing and integration with other graphics pipelines [S2][S7, unofficial].
+-*   **Limitations:** High VRAM consumption for large scenes, potential for "floaters" or artifacts in unobserved regions, and sensitivity to initialization and hyperparameters [S2][S11, unofficial].
+-*   **When to use:** When real-time rendering of high-quality static or dynamic scenes is required, and sufficient GPU memory is available.
+-*   **When not to use:** For scenes with extreme dynamic range or complex lighting that cannot be captured by spherical harmonics, or when VRAM is severely constrained without offloading techniques [S2][S11, unofficial].
++*   **Limitations:** High VRAM consumption for large scenes [S11, unofficial][S4].
+ 
+ ## Background
+-3D Gaussian Splatting was introduced by Kerbl et al. in 2023 [S3]. It builds on the concept of radiance fields but replaces neural networks with explicit 3D Gaussians [S7, unofficial]. The method was designed to address the slow training and rendering speeds of NeRFs while maintaining high visual quality [S2]. The original implementation initializes Gaussians using sparse point clouds from Structure-from-Motion (SfM) tools like COLMAP [S3]. The training pipeline leverages differentiable rasterization to optimize Gaussian parameters end-to-end [S4].
++3D Gaussian Splatting was introduced by Kerbl et al. in 2023 [S4]. It builds on the concept of radiance fields but replaces neural networks with explicit 3D Gaussians [S7, unofficial]. The method was designed to address the slow training and rendering speeds of NeRFs while maintaining high visual quality [S2]. The original implementation initializes Gaussians using sparse point clouds from Structure-from-Motion (SfM) tools like COLMAP [S3]. The training pipeline leverages differentiable rasterization to optimize Gaussian parameters end-to-end [S4].
+ 
+ ## Sources

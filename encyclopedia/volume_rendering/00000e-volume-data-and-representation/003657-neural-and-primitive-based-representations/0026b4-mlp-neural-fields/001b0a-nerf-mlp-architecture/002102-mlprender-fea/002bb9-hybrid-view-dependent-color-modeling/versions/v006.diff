@@ -1,0 +1,230 @@
+--- v005.md
++++ v006.md
+@@ -4,120 +4,73 @@
+ 
+ ## Overview
+-Hybrid View-dependent Color Modeling is a neural rendering technique that predicts RGB color by combining a sparse feature voxel grid with a shallow Multi-Layer Perceptron (MLP) [S1]. It solves the problem of modeling view-dependent appearance (such as specular highlights) efficiently, avoiding the high computational cost of deep MLPs used in standard NeRF while maintaining higher quality than view-independent voxel grids alone [S1]. It sets itself apart from its parent [MLPRender_Fea](2414-mlprender-fea.md) by explicitly separating the representation into a spatial feature grid and a lightweight color decoder, and from siblings like [Volume Radiance Network](2576-volume-radiance-network.md) by using a hybrid explicit-implicit structure rather than pure implicit or pure explicit methods [S1].
++Hybrid View-dependent Color Modeling predicts RGB color by combining a sparse feature voxel grid with a shallow Multi-Layer Perceptron (MLP), addressing the trade-off between the slow convergence of pure neural fields and the limited quality of grid-only representations [S1]. Unlike [NeRF with Per-Image Embeddings](2484-nerf-with-per-image-embeddings.md) which uses global image vectors, or [Volume Radiance Network](2576-volume-radiance-network.md) which relies on dense MLPs, this method decouples view-independent diffuse color storage from view-dependent shading computation, enabling faster training and real-time rendering capabilities [S1, S3].
+ 
+ ## How it works
+ **Inputs and Outputs:**
+-*   **Input:** 3D position $\mathbf{x}$, view direction $\mathbf{v}$, and a feature grid $V$ with dimension $D$.
++*   **Input:** 3D position $\mathbf{x}$, view direction $\mathbf{v}$, and a precomputed feature vector $\mathbf{f}$ retrieved from a voxel grid at $\mathbf{x}$.
+ *   **Output:** RGB color $\mathbf{c}$.
+ 
+ **Data Structures:**
+-*   **Feature Voxel Grid ($V$):** A 3D grid storing feature vectors. The grid has dimensions $D \times D \times D$ (or similar cubic resolution). Each voxel stores a feature vector of size $C$ (channels). The sources specify $D$ values of 12 or 24 [S1]. The feature vectors are typically 4D or higher, though exact channel count $C$ is not explicitly defined in the primary source, it is implied to be sufficient for the shallow MLP input [S1, S3].
+-*   **Shallow MLP:** A neural network with 2 hidden layers, each containing 128 channels [S1].
++*   **Feature Voxel Grid:** A 3D grid of dimensions $D \times D \times D$. Each voxel stores a feature vector. Typical dimensions $D$ are 12 or 24 [S1]. The grid stores view-independent diffuse colors and feature vectors [S3].
++*   **Shallow MLP:** A feedforward network with 2 hidden layers, each containing 128 channels [S1].
+ 
+-**Algorithm:**
+-1.  **Feature Query:** Given a 3D position $\mathbf{x}$, query the feature voxel grid $V$ to retrieve the feature vector $\mathbf{f}$. This is typically done via trilinear interpolation of the surrounding voxels [S1, S3].
+-2.  **View Direction Encoding:** The view direction $\mathbf{v}$ is processed. The parent article [MLPRender_Fea](2414-mlprender-fea.md) specifies that positional encoding is applied to the view direction but not the position.
+-3.  **Concatenation:** Concatenate the queried feature vector $\mathbf{f}$ and the encoded view direction $\mathbf{v}_{enc}$ to form the input tensor $\mathbf{z} = [\mathbf{f}; \mathbf{v}_{enc}]$.
+-4.  **MLP Forward Pass:** Pass $\mathbf{z}$ through the shallow MLP. The MLP consists of 2 layers with 128 channels each [S1].
+-    *   Layer 1: $\mathbf{h}_1 = \text{ReLU}(\mathbf{W}_1 \mathbf{z} + \mathbf{b}_1)$
+-    *   Layer 2: $\mathbf{c} = \mathbf{W}_2 \mathbf{h}_1 + \mathbf{b}_2$
+-    *   Note: The final output $\mathbf{c}$ is the predicted RGB color. Some variants may apply an activation function (like ReLU) to the final output to ensure non-negative color values [S2, unofficial].
++**Numbered Steps:**
++1.  **Feature Retrieval:** Query the feature voxel grid at the 3D position $\mathbf{x}$ to obtain the feature vector $\mathbf{f}$ and the base diffuse color $\mathbf{c}_{diffuse}$ [S3].
++2.  **Concatenation:** Concatenate the retrieved feature vector $\mathbf{f}$ with the view direction $\mathbf{v}$ to form the input tensor $\mathbf{z} = [\mathbf{f}, \mathbf{v}]$ [S3].
++3.  **MLP Forward Pass:** Pass $\mathbf{z}$ through the shallow MLP (2 layers, 128 channels) to predict a view-dependent residual color $\mathbf{c}_{residual}$ [S1, S3].
++4.  **Color Composition:** Add the residual to the base diffuse color: $\mathbf{c} = \mathbf{c}_{diffuse} + \mathbf{c}_{residual}$ [S3].
++
++**Formulas:**
++The final color is computed as:
++$$ \mathbf{c} = \mathbf{c}_{diffuse} + \text{MLP}([\mathbf{f}, \mathbf{v}]) $$
++Where $\mathbf{c}_{diffuse}$ is the view-independent component stored in the grid, and $\mathbf{f}$ is the view-dependent feature vector also stored in the grid [S3].
+ 
+ **Parameters:**
++*   **MLP Layers:** 2 [S1].
++*   **MLP Channels:** 128 [S1].
+ *   **Grid Dimension ($D$):** 12 or 24 [S1].
+-*   **MLP Layers:** 2 [S1].
+-*   **MLP Channels:** 128 per layer [S1].
+ 
+ **Edge Cases and Pitfalls:**
+-*   **Precision:** Trilinear interpolation in the voxel grid requires careful handling of boundary conditions [S1].
+-*   **Memory:** Larger $D$ increases memory usage significantly. Free space skipping strategies are used to mitigate this [S1].
+-*   **Degenerate Input:** If the query point is outside the voxel grid bounds, interpolation must be handled (e.g., clamping or zero-padding) [G].
++*   **Precision:** Using only the shallow MLP results in worse quality due to its shallow depth compared to standard NeRF MLPs (8 layers, 256 channels) [S1].
++*   **Memory:** Without free-space skipping, fine-stage voxel grids may run out of memory (OOM) [S1].
++*   **Degenerate Input:** If the grid dimension $D$ is too small, rendering quality degrades significantly [S1].
+ 
+ **Pseudocode:**
+ ```python
+-import math
+-
+-def query_voxel_grid(grid, x, y, z, D):
++def hybrid_view_dependent_color(position, view_direction, voxel_grid, mlp):
+     """
+-    Query the feature voxel grid using trilinear interpolation.
+-    grid: 3D array of shape (D, D, D, C)
+-    x, y, z: continuous coordinates in [0, D-1]
+-    D: grid dimension
+-    Returns: feature vector of shape (C,)
++    Predicts RGB color using hybrid view-dependent modeling.
++    
++    Args:
++        position (float3): 3D position (x, y, z).
++        view_direction (float3): Normalized view direction (vx, vy, vz).
++        voxel_grid (VoxelGrid): Sparse 3D grid storing features and diffuse color.
++        mlp (MLP): Shallow MLP with 2 layers, 128 channels.
++        
++    Returns:
++        float3: Final RGB color.
+     """
+-    # Clamp coordinates to grid bounds
+-    x = max(0, min(D - 1 - 1e-6, x))
+-    y = max(0, min(D - 1 - 1e-6, y))
+-    z = max(0, min(D - 1 - 1e-6, z))
++    # Step 1: Retrieve feature vector and diffuse color from voxel grid
++    # Note: Interpolation method (e.g., trilinear) depends on implementation.
++    feature_vector = voxel_grid.query(position)
++    diffuse_color = voxel_grid.get_diffuse_color(position)
+     
+-    # Get integer and fractional parts
+-    x0, y0, z0 = math.floor(x), math.floor(y), math.floor(z)
+-    x1, y1, z1 = x0 + 1, y0 + 1, z0 + 1
+-    dx, dy, dz = x - x0, y - y0, z - z0
++    # Step 2: Concatenate feature vector with view direction
++    # Input to MLP is [feature_vector, view_direction]
++    input_tensor = concatenate(feature_vector, view_direction)
+     
+-    # Fetch 8 corner values
+-    # Note: In practice, this involves gathering from the grid tensor
+-    # For pseudocode clarity, we assume a function `get_val` that handles indexing
+-    v000 = get_val(grid, x0, y0, z0)
+-    v100 = get_val(grid, x1, y0, z0)
+-    v010 = get_val(grid, x0, y1, z0)
+-    v110 = get_val(grid, x1, y1, z0)
+-    v001 = get_val(grid, x0, y0, z1)
+-    v101 = get_val(grid, x1, y0, z1)
+-    v011 = get_val(grid, x0, y1, z1)
+-    v111 = get_val(grid, x1, y1, z1)
++    # Step 3: Pass through shallow MLP to get residual
++    residual_color = mlp.forward(input_tensor)
+     
+-    # Trilinear interpolation
+-    # Interpolate along x
+-    v00 = lerp(v000, v100, dx)
+-    v01 = lerp(v010, v110, dx)
+-    v10 = lerp(v001, v101, dx)
+-    v11 = lerp(v011, v111, dx)
++    # Step 4: Add residual to diffuse color
++    final_color = diffuse_color + residual_color
+     
+-    # Interpolate along y
+-    v0 = lerp(v00, v01, dy)
+-    v1 = lerp(v10, v11, dy)
+-    
+-    # Interpolate along z
+-    return lerp(v0, v1, dz)
+-
+-def lerp(a, b, t):
+-    return a + t * (b - a)
+-
+-def get_val(grid, x, y, z):
+-    # Placeholder for actual tensor indexing logic
+-    # In a real implementation, this would use torch.gather or similar
+-    return grid[x, y, z]
+-
+-def hybrid_view_dependent_color(x, v, grid, D):
+-    """
+-    Predict color using hybrid view-dependent modeling.
+-    x: 3D position (normalized or grid coordinates)
+-    v: view direction vector
+-    grid: feature voxel grid
+-    D: grid dimension
+-    """
+-    # 1. Query feature grid
+-    # Assuming x is in grid coordinates [0, D-1]
+-    f = query_voxel_grid(grid, x[0], x[1], x[2], D)
+-    
+-    # 2. Encode view direction (simplified, assuming positional encoding is done elsewhere)
+-    # In the parent article, positional encoding is applied to v
+-    v_enc = positional_encoding(v) 
+-    
+-    # 3. Concatenate
+-    z = concat(f, v_enc)
+-    
+-    # 4. Shallow MLP (2 layers, 128 channels)
+-    # Layer 1
+-    h1 = relu(matmul(W1, z) + b1)
+-    # Layer 2
+-    c = matmul(W2, h1) + b2
+-    
+-    # 5. Output color
+-    return c
++    return final_color
+ ```
+ 
+ ## Subtopics
++
++### [View-Independent SH Color (Degree 0)](9600-view-independent-sh-color-degree-0.md)
++This method simplifies neural field color representation by restricting spherical harmonics (SH) to degree 0, thereby modeling color as purely view-independent. It solves the problem of high computational overhead and memory usage associated with view-dependent shading in neural radiance fields. Unlike its sibling [DCGO](15557-dcgo-deep-convolutional-grid-optimization.md), which optimizes grid structures for view-dependent features, this approach explicitly discards directional information to accelerate training and reduce VRAM consumption at the cost of slight quality degradation.
+ 
+ ### [DCGO (Deep Convolutional Grid Optimization)](15557-dcgo-deep-convolutional-grid-optimization.md)
+@@ -125,42 +78,26 @@
+ 
+ ### Signed Residual Activation
+-Applies a signed residual to a per-primitive base color, entering inside the outer ReLU of the color equation to allow both darkening and brightening [S2, unofficial]. The formula for the signed residual is $\text{ReLU}(\text{base} + b_{SV})$. A positive-only restriction is $\text{ReLU}(\text{base} + b_{SV}) + \text{ReLU}(\rho)$ [S2, unofficial]. The signed residual is better in LPIPS on 10 of the 11 scenes and in PSNR on 10 of 11, by 0.31 dB and 0.019 LPIPS on Mip-NeRF 360 and 0.19 dB and 0.011 LPIPS on Deep Blending [S2, unofficial]. Positive-only makes optimization unreliable; seed spread across runs is an order of magnitude larger than signed (e.g., stump spread 0.0773 vs 0.0042) [S2, unofficial]. Positive-only restricts correction to add only, yielding a strictly smaller function class that fails wherever the texture must darken the base [S2, unofficial]. Used in the texture atlas baking pipeline for view-dependent color representation [S2, unofficial].
++Applies a signed residual to a per-primitive base color, entering inside the outer ReLU of the color equation to allow both darkening and brightening [S2, unofficial]. The formula is $\text{ReLU}(\text{base} + b_{SV})$. A positive-only restriction uses $\text{ReLU}(\text{base} + b_{SV}) + \text{ReLU}(\rho)$, which yields a strictly smaller function class that fails wherever the texture must darken the base [S2, unofficial]. The signed residual improves LPIPS on 10/11 scenes and PSNR on 10/11 by 0.31 dB (Mip-NeRF 360) and 0.19 dB (Deep Blending) [S2, unofficial]. Positive-only makes optimization unreliable; seed spread across runs is an order of magnitude larger than signed (e.g., stump spread 0.0773 vs 0.0042) [S2, unofficial]. Used in the texture atlas baking pipeline for view-dependent color representation [S2, unofficial].
+ 
+ ### Baking Neural Fields
+-A method that precomputes view-independent diffuse RGB color and view-dependent 4D feature vectors, storing them in a sparse voxel grid and texture atlas [S3]. The steps are: 1) Accumulate diffuse colors and feature vectors along a ray. 2) Concatenate accumulated values with the view direction. 3) Pass concatenated values to a shallow MLP to produce a view-dependent residual. 4) Add the view-dependent residual to the diffuse color [S3]. Image compression algorithms used to reduce storage size lead to relatively low-quality metrics [S3]. Averages less than 90 MB per scene [S3]. Rendered in real-time (higher than 30 fps on a laptop GPU for 800x800 images) [S3].
+-
+-### View-Independent SH Color (Degree 0)
+-Omits view-dependent spherical harmonics (SH) coefficients by setting the SH degree to 0, using only view-independent color [S4, unofficial]. Set SH degree to 0 during training to exclude view-dependent coefficients [S4, unofficial]. On Mip-NeRF360 outdoor scenes (RTX 4090), reduces training time from 5m31s to 2m24s, VRAM from 6.0GiB to 3.2GiB, and PSNR drops from 24.72 to 24.38 [S4, unofficial]. Speeds up training and reduces VRAM usage but slightly degrades quality [S4, unofficial].
++A method that precomputes view-independent diffuse RGB color and view-dependent 4D feature vectors, storing them in a sparse voxel grid and texture atlas [S3]. Steps include: 1) Accumulate diffuse colors and feature vectors along a ray; 2) Concatenate accumulated values with the view direction; 3) Pass concatenated values to a shallow MLP to produce a view-dependent residual; 4) Add the view-dependent residual to the diffuse color [S3]. Image compression algorithms used to reduce storage size lead to relatively low-quality metrics [S3]. Averages less than 90 MB per scene and renders in real-time (higher than 30 fps on a laptop GPU for 800x800 images) [S3].
+ 
+ ### View-Disparity Color Prediction
+-$\delta v_i$: The view disparity, representing the difference between the relative viewing direction of the target view and input view $i$. A smaller difference indicates higher similarity [S5].
++Uses $\delta v_i$, the view disparity, representing the difference between the relative viewing direction of the target view and input view $i$. A smaller difference indicates higher similarity [S4].
+ 
+ ### Sparse Neural Voxel Grid (SNeRG)
+-A model storing a precomputed NeRF on a sparse voxel grid, sometimes referred to as 'baking' [S6]. During evaluation, an MLP produces specular color [S6]. Combine specular color with alpha compositing of the specular color along the ray to yield final pixel color [S6]. Sparse voxel grid storing precomputed diffuse color, density, and feature vectors [S6]. Approximately 3000 times faster than the original NeRF implementation [S6].
++A model storing a precomputed NeRF on a sparse voxel grid, sometimes referred to as 'baking' [S5]. During evaluation, an MLP produces specular color, which is combined with alpha compositing of the specular color along the ray to yield final pixel color [S5]. The layout stores precomputed diffuse color, density, and feature vectors in a sparse voxel grid [S5]. It is approximately 3000 times faster than the original NeRF implementation [S5].
+ 
+ ## Operating characteristics
+-**Time and Memory Complexity:**
+-*   **Memory:** The feature voxel grid size scales with $D^3$. For $D=12$, memory is low; for $D=24$, it is higher [S1]. The hybrid approach is more memory-efficient than a full deep MLP for the same quality [S1].
+-*   **Time:** Training time is significantly faster than full NeRF. For $D=12$, training takes 7.3 minutes; for $D=24$, 8.8 minutes [S1]. This is much faster than the 15.6 minutes for the baseline with only free space skipping [S1].
+-
+-**Measured Performance:**
+-*   **Baseline ($D=12$, 2 layers, 128 ch):** PSNR 35.54, 7.3 min [S1].
+-*   **High-res ($D=24$, 2 layers, 128 ch):** PSNR 35.90, 8.8 min [S1].
+-
+-**Scaling:**
+-*   Larger $D$ and MLP channels improve quality at higher computational cost [S1].
+-
+-**Strengths and Limitations:**
+-*   **Strengths:** Fast convergence, high quality, efficient memory usage compared to deep MLPs [S1].
+-*   **Limitations:** Quality degrades if only the voxel grid is used without the MLP [S1].
+-
+-**When to Use:**
+-*   Use when fast training and rendering are required, and view-dependent effects are important [S1].
+-
+-**When Not to Use:**
+-*   Do not use if extreme view-dependent effects are needed and the shallow MLP cannot capture them [S1].
++*   **Time Complexity:** Faster than pure MLP-based NeRF due to the shallow MLP and grid lookups. Training converges faster than grid-only methods [S1].
++*   **Memory Complexity:** Depends on grid dimension $D$. Larger $D$ increases memory usage but improves quality [S1]. Free-space skipping strategies can reduce memory consumption [S1].
++*   **Measured Performance:** Baseline ($D=12$, 2 layers, 128 ch) achieves PSNR 35.54 in 7.3 minutes. High-res ($D=24$, 2 layers, 128 ch) achieves PSNR 35.90 in 8.8 minutes [S1].
++*   **Strengths:** Balances quality and speed; enables real-time rendering when baked [S3].
++*   **Limitations:** Quality degrades if grid resolution is too low; pure MLP is insufficient due to shallow depth [S1].
++*   **When to use:** When training time and inference speed are critical, but view-dependent effects are still desired [S1, S3].
++*   **When not to use:** When maximum possible quality is required regardless of speed, or when scene geometry is extremely complex requiring deep MLPs [S1].
+ 
+ ## Background
+-The method originates from the Direct Voxel Grid Optimization (DVGO) paper [S1]. It was developed to address the slow convergence of NeRF by using a voxel grid representation, but extended to handle view-dependent colors using a hybrid approach [S1]. The hybrid representation comprises a feature voxel grid and a shallow MLP [S1].
++Originated from the need to accelerate NeRF training and rendering. The hybrid approach combines the benefits of voxel grids (fast lookup, view-independent storage) and shallow MLPs (view-dependent modeling) [S1, S3]. It was developed as an alternative to spherical harmonics and dense MLPs, offering a middle ground in terms of computational cost and visual fidelity [S1]. The method is closely related to baking techniques where neural fields are precomputed into spatial structures [S3, S5].
+ 
+ ## Sources
+@@ -168,5 +105,4 @@
+ [S2] Bake It Till You Make It: Ultrafast Spatial Texture-Atlas Splatting, https://doi.org/10.48550/arXiv.2607.13808, fetched 2026-10-29 (unofficial)
+ [S3] Recent Advances and Trends in Learning‐Based 3D Representations, https://doi.org/10.1111/cgf.70530, fetched 2026-10-26
+-[S4] Faster-GS: Analyzing and Improving Gaussian Splatting Optimization, https://arxiv.org/abs/2602.09999v1, fetched 2026-10-26 (unofficial)
+-[S5] Rugularizing generalizable neural radiance field with limited-view images, https://link.springer.com/article/10.1007/s40747-024-01696-6, fetched 2026-10-29
+-[S6] Neural Radiance Fields in 3D Vision: A Comprehensive Review, https://doi.org/10.26599/cvm.2026.9450535, fetched 2026-10-28+[S4] Rugularizing generalizable neural radiance field with limited-view images, https://link.springer.com/article/10.1007/s40747-024-01696-6, fetched 2026-10-29
++[S5] Neural Radiance Fields in 3D Vision: A Comprehensive Review, https://doi.org/10.26599/cvm.2026.9450535, fetched 2026-10-28

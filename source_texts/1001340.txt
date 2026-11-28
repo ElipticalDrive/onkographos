@@ -1,0 +1,135 @@
+Contribute to Nico2398/BlastSimulator2026 development by creating an account on GitHub.
+
+feat: voxel storage moves to lazy cubic chunks, no more full-height arrays (#1182) by Nico2398 · Pull Request #1219 · Nico2398/BlastSimulator2026 · GitHub
+Skip to content
+You signed in with another tab or window. Reload to refresh your session.
+You signed out in another tab or window. Reload to refresh your session.
+You switched accounts on another tab or window. Reload to refresh your session.
+Dismiss alert
+Conversation
+Nico2398
+commented
+Sep 25, 2026
+Copy link
+Copy Markdown
+Owner
+Closes #1182
+15245 tests — all passing (468 files, npx vitest run), plus npm run scenarios (145/145) and npm run typecheck / npm run build clean.
+Summary
+Voxel storage in VoxelGrid no longer allocates one dense sizeY-tall typed-array set per owned (cx,cz) column. Each column now holds a sparse Map of lazily-allocated cubic 16×16×16 sub-chunks ("slabs"), one per 16-row y-band, allocated only when a write differs from the implicit air default (density 0, compId air, fracture 1.0, no ore). Reads and writes at any y — negative or past sizeY — succeed for an owned column without allocating unless the write is non-air. chunkDensityRange now distinguishes an unowned column (null) from an owned column with an unallocated slab ({min:0,max:0}). isInBounds deliberately keeps its sizeY bound (see Decisions below) so gameplay-facing validity checks (drill targeting, console inspect) are unaffected. Generated terrain is unchanged; this is a storage-layer change only.
+New public API: allocatedSlabCount (grid-wide) and slabCount(cx, cz) (per column), proving sparsity — raising a level's declared height allocates no extra slabs for the air above the old surface.
+Decisions taken
+Defaulted under agentic-decision-autonomy — none blocked this run.
+What was open: the issue's "dirty tracking and density summaries per cubic chunk" phrase doesn't say whether dirty tracking also moves to per-slab granularity.
+Chosen: dirty tracking stays column-level (dirty/touch/dirtyChunks/markChunkDirty unchanged).
+Why: the issue's own Test and Verification sections call out density summaries explicitly and say nothing about dirty-tracking granularity; no existing caller or test exercises finer-than-column dirty tracking.
+If reversed: re-key dirty as a per-(cx,cy,cz) set and change touch to take cy.
+What was open: whether isInBounds becomes y-unbounded along with the raw storage accessors.
+Chosen: isInBounds keeps checking y ∈ [0, sizeY); only the raw accessors (densityAt, fillVoxel, etc., via ownerOf) became y-unbounded.
+Why: DrillPlan.ts and the console inspect command gate player-facing validity on isInBounds — letting it pass for out-of-range y would let a player target a drill hole or inspect a coordinate below the world floor or above the sky, a gameplay change the issue's "No gameplay change" convention forbids.
+If reversed: drop the y-bound clause from isInBounds and audit DrillPlan.ts/console world.ts for a replacement bound.
+What was open: the issue didn't name the API for proving allocation sparsity.
+Chosen: allocatedSlabCount (grid-wide) and slabCount(cx,cz) (per column) — named during code review after an initial allocatedChunkCount was found to collide semantically with the existing column-level chunkCount.
+Why: chunkCount already exists and is column-ownership-only (sizeY-independent even under the old dense model), so it can't demonstrate the fix on its own; the corrected names follow this file's existing chunkCount/slabCount/chunkRect convention.
+If reversed: rename before landing — no other file depends on the name.
+None of these decisions change gameplay, economy, or a player-facing default, so none needed a decision-review follow-up issue.
+Verification channels run
+static — npm run typecheck: clean (root, scripts/, tests/ tsconfigs).
+logic — npx vitest run: 468 files / 15245 tests passing (full suite, run twice: once pre-refactor, once post-refactor).
+scenario — npm run scenarios: 145/145 passing, no expectation changed.
+visual — screenshots of all four campaign levels (tutorial_pit, dusty_hollow, grumpstone_ridge, treranium_depths) captured and inspected on this branch; render identically to main. TerrainMesh.ts was not modified — traced during planning that its one call into the changed behavior (chunkDensityRange's null→{0,0} case) is never reached by its actual call pattern, confirmed by the unchanged screenshots.
+build — npm run build: clean, 360 modules, no new warnings.
+Benchmarks (tests/unit/benchmarks/benchmarks.test.ts) pass at their existing thresholds, unmodified — a single-entry slab-level cache (mirroring the existing chunk-level cache) was added to keep hot-path accessor/mutator cost from regressing under the new two-level (column → slab) lookup.
+Review
+Five parallel reviewers (security, quality, i18n, duplication, semantic) ran; all findings were in-diff and fixed in the refactor pass on this branch (naming, a hardcoded literal replaced with a derived constant, write-side duplication across five mutators collapsed into shared helpers, two stale comments corrected, an undocumented cache-key range documented). No findings were out of scope for this PR, so nothing was filed as a follow-up issue.
+READY TO MERGE
+github-actions
+Bot
+added 5 commits
+September 25, 2026 09:42
+skeleton: cubic 16x16x16 VoxelGrid chunk storage skeleton (#1182)
+277f6d4
+test-writer: failing tests for cubic 16x16x16 VoxelGrid chunk storage (…
+…
+e096775
+```
+…#1182)
+```
+implementer: cubic 16x16x16 VoxelGrid chunk storage (#1182)
+64f83aa
+fixer: restore unconditional dirty-marking on voxel writes; fix false…
+…
+00848ea
+```
+… sizeY-invariance premise in memory test (#1182)
+
+Group A (2 failures): fillVoxel/setVoxel/clearVoxel/setFractureAt/scaleFractureAt
+were calling touch() only after their new no-op-value equality check, so a
+write that lands on an already-air/unallocated cell (e.g. clearVoxel on a
+freshly claimed, never-generated chunk) never marked the chunk dirty. Dirty
+tracking predates #1182 and its contract is "any write call marks dirty,
+regardless of whether the value actually changed" (VoxelGrid.test.ts's
+"marks a chunk dirty on any write", PlayableArea.test.ts's "marks a claimed
+chunk dirty once play digs into it"). Fixed by calling touch(chunk)
+unconditionally at the top of each mutator, before the no-op check that
+still correctly skips slab allocation.
+
+Group B (3 failures, VoxelGridMemory.test.ts): the test asserted
+allocatedChunkCount stays IDENTICAL when sizeY is quadrupled. Traced through
+TerrainGen.ts's generateColumn and WorldGen.ts's createWorldGenContext:
+groundOffset = floor(sizeY * 0.55) - centerHeight shifts the generated
+crust's vertical datum by a fraction of the declared sizeY, and
+generateColumn fills solid rock from y=0 up to that shifted surface — an
+absolute volume, not a repositioned fixed-thickness band. So a taller
+declared grid legitimately generates more rock (measured: 318 vs 972
+allocated slabs, ~3.06x for a 4x sizeY). This is pre-existing WorldGen/
+TerrainGen behaviour, unrelated to #1182's storage change and out of its
+scope (full-depth rock is #1183's job per the issue series). Rewrote the
+three assertions to prove #1182's actual, narrower claim instead: real
+allocation grows far less than the dense-model equivalent's exact 4x
+growth, and the sparsity gap between real allocation and the dense-model
+equivalent widens (not vanishes) as declared sizeY grows.
+
+Verified: targeted 3 files (157 tests) green; full suite green (15245/15245,
+one benchmarks.test.ts wall-clock flake reproduced only under two concurrent
+vitest processes, confirmed unrelated by an isolated rerun).
+```
+refactor: rename allocatedChunkCount to allocatedSlabCount, derive SL…
+…
+640a902
+```
+…AB_VOLUME, share cell-default reads, fix stale comments (#1182)
+```
+Hide details
+View details
+Nico2398
+merged commit 3fa9fd8
+into
+main
+Sep 25, 2026
+23 checks passed
+Uh oh!
+There was an error while loading. Please reload this page.
+Nico2398
+deleted the
+pipeline/feature-1182-36118372141
+branch
+September 25, 2026 11:01
+This was referenced Sep 25, 2026
+Terrain edit storage - Generated rock at every depth, and voxel chunks become a rebuildable cache
+#1183
+Closed
+Terrain edit storage - Cubic voxel chunks: any height is storable and air costs nothing
+#1182
+Closed
+Sign up for free
+to join this conversation on GitHub.
+Already have an account?
+Sign in to comment
+Uh oh!
+There was an error while loading. Please reload this page.
+Labels
+None yet
+1 participant
+Add this suggestion to a batch that can be applied as a single commit.This suggestion is invalid because no changes were made to the code.Suggestions cannot be applied while the pull request is closed.Suggestions cannot be applied while viewing a subset of changes.Only one suggestion per line can be applied in a batch.Add this suggestion to a batch that can be applied as a single commit.Applying suggestions on deleted lines is not supported.You must change the existing code in this line in order to create a valid suggestion.Outdated suggestions cannot be applied.This suggestion has been applied or marked resolved.Suggestions cannot be applied from pending reviews.Suggestions cannot be applied on multi-line comments.Suggestions cannot be applied while the pull request is queued to merge.Suggestion cannot be applied right now. Please check back later.
+You can’t perform that action at this time.

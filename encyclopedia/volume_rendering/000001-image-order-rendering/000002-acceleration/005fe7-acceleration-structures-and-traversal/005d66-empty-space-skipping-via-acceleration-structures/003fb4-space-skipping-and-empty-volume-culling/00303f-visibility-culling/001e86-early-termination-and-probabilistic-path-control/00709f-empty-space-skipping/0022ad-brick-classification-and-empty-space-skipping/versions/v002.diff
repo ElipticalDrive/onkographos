@@ -1,0 +1,132 @@
+--- v001.md
++++ v002.md
+@@ -8,25 +8,18 @@
+ ## How it works
+ **Inputs and Outputs:**
+-*   **Input:** Volume dataset partitioned into bricks; current transfer function; ray-caster traversal state.
+-*   **Output:** Classification metadata array; optimized ray traversal that skips or terminates early.
++*   **Input:** Volume dataset partitioned into bricks; current transfer function; ray-caster traversal state [S1, S2].
++*   **Output:** Classification metadata array; optimized ray traversal that skips or terminates early [S2].
+ 
+ **Data Structures:**
+ The core data structure is a classification array shared between host and GPU memory [S2].
+ *   **Layout:** An array of 32-bit integers, one per brick in the dataset [S2].
+-*   **Values:** Each integer encodes the brick's state:
+-    1.  **Skipped:** The brick is empty (no valid data or zero opacity) [S2].
+-    2.  **Early Termination:** The brick is saturated (ray opacity is 1.0) [S2].
+-    3.  **Sampled:** The brick requires dense sampling [S2].
++*   **Values:** Each integer encodes the brick's state: 1 for Skipped (empty), 2 for Early Termination (saturated), and 0 for Sampled [S2].
+ 
+ **Algorithm Steps:**
+-1.  **Initialization:** Determine which bricks are completely empty. A brick is defined as empty if it contains no valid data or is mapped to zero opacity by the current transfer function [S1, S2].
++1.  **Initialization:** Determine which bricks are completely empty based on data validity or zero opacity mapping [S1, S2].
+ 2.  **Classification:** Classify each brick into one of the three categories based on the transfer function and data content [S2].
+ 3.  **Storage:** Store the classification state in the shared 32-bit integer array [S2].
+-4.  **Ray Casting:**
+-    a.  For each ray, check the classification state of the current brick [S2].
+-    b.  If the state is **Skipped**, leap over the brick's spatial extent without sampling [S2].
+-    c.  If the state is **Early Termination**, terminate the ray immediately [S2].
+-    d.  If the state is **Sampled**, perform dense volume integration within the brick [S2].
+-5.  **Feedback (Ray-Guided):** The ray-caster writes accurate usage information back to the classification table, updating states for subsequent frames [S1].
++4.  **Ray Casting:** For each ray, check the classification state of the current brick [S2]. If the state is Skipped, leap over the brick's spatial extent without sampling [S2]. If the state is Early Termination, terminate the ray immediately [S2]. If the state is Sampled, perform dense volume integration within the brick [S2].
++5.  **Feedback:** The ray-caster writes accurate usage information back to the classification table, updating states for subsequent frames [S1].
+ 
+ **Pseudocode:**
+@@ -36,58 +29,53 @@
+ 
+ def classify_bricks(volume_data, transfer_function):
+-    """
+-    Classifies bricks based on data content and transfer function.
+-    Returns an array of 32-bit integers.
+-    """
+     num_bricks = volume_data.num_bricks
+     states = [0] * num_bricks
+-    
+     for i in range(num_bricks):
+         brick = volume_data.get_brick(i)
+         if is_empty(brick, transfer_function):
+-            states[i] = 1 # Skipped
++            states[i] = 1
+         elif is_saturated(brick, transfer_function):
+-            states[i] = 2 # Early Termination
++            states[i] = 2
+         else:
+-            states[i] = 0 # Sampled
++            states[i] = 0
+     return states
+ 
+ def is_empty(brick, transfer_function):
+-    """
+-    Returns True if brick has no valid data or maps to zero opacity.
+-    """
+-    # Implementation detail: Check if all voxels map to opacity 0
+-    # or if the brick is marked as missing/invalid in the page table.
+-    pass
++    # Returns True if brick has no valid data or all voxels map to zero opacity [S1, S2]
++    if brick.is_missing:
++        return True
++    for v in brick.voxels:
++        if transfer_function(v) > 0.0:
++            return False
++    return True
+ 
+ def is_saturated(brick, transfer_function):
+-    """
+-    Returns True if the brick causes ray saturation (opacity 1.0).
+-    """
+-    # Implementation detail: Check if integration through brick reaches 1.0
+-    pass
++    # Returns True if integration through brick reaches opacity 1.0 [S2]
++    alpha = 0.0
++    for v in brick.voxels:
++        a = transfer_function(v)
++        alpha += (1.0 - alpha) * a
++        if alpha >= 1.0:
++            return True
++    return False
+ 
+ def render_ray(ray, brick_states, volume_data):
+-    """
+-    Renders a single ray using brick classification.
+-    """
+     opacity = 0.0
+     color = (0.0, 0.0, 0.0)
+-    
+-    # Traverse bricks along the ray
+     for brick_id in ray.get_brick_sequence():
+         state = brick_states[brick_id]
+-        
+-        if state == 1: # Skipped
+-            continue # Leap over this brick
+-        elif state == 2: # Early Termination
+-            break # Ray is fully opaque, stop processing
+-        else: # Sampled
+-            # Perform dense sampling and compositing
+-            opacity, color = sample_and_composite(ray, brick_id, opacity, color)
+-            
++        if state == 1:
++            continue
++        elif state == 2:
++            break
++        else:
++            for sample in ray.samples_in_brick(brick_id):
++                c, a = volume_data.sample_voxel(sample)
++                color = tuple(color[i] + (1.0 - opacity) * c[i] * a for i in range(3))
++                opacity += (1.0 - opacity) * a
++                if opacity >= 1.0:
++                    break
+             if opacity >= 1.0:
+-                break # Saturated during sampling
+-                
++                break
+     return color
+ ```
+@@ -99,6 +87,6 @@
+ **Edge Cases and Pitfalls:**
+ *   **Transfer Function Changes:** Changing the transfer function invalidates existing metadata [S2]. Recomputing the classification for large datasets causes noticeable delays [S2].
+-*   **Concurrent Updates:** To maintain responsiveness, updates are offloaded to a background thread [S2]. Unprocessed bricks are treated as 'missing' during the update period, causing the renderer to request and filter them via empty checks [S2].
+-*   **Precision:** The method relies on accurate determination of "empty" and "saturated" states, which depends on the transfer function's opacity mapping [S1, S2].
++*   **Concurrent Updates:** To maintain responsiveness, updates are offloaded to a background thread [S2]. Unprocessed bricks are treated as missing during the update period, causing the renderer to request and filter them via empty checks [S2].
++*   **Precision:** The method relies on accurate determination of empty and saturated states, which depends on the transfer function's opacity mapping [S1, S2].
+ 
+ ## Operating characteristics

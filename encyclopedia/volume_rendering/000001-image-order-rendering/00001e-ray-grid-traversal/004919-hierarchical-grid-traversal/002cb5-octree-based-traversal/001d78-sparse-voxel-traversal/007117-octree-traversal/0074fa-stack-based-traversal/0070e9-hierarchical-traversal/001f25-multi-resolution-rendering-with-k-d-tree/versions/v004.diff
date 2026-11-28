@@ -1,0 +1,126 @@
+--- v003.md
++++ v004.md
+@@ -4,8 +4,8 @@
+ 
+ ## Overview
+-Multi-resolution rendering with K-D Tree is a hierarchical volume rendering technique that accelerates image-order ray casting by storing approximations of the underlying data within K-D tree nodes [S1]. It solves the performance bottleneck of rendering large, high-resolution datasets by allowing the renderer to skip detailed traversal when the data within a spatial region can be represented by a simple model within a user-specified error threshold [S1]. Unlike wavelet-based methods which store only detail coefficients, this method stores a complete model for each region, enabling fast "preview" images and adaptive detail [S1]. It builds on [Hierarchical Traversal](896-hierarchical-traversal.md) [S1].
++Multi-resolution rendering with K-D Tree is a hierarchical volume rendering technique that stores approximations of the underlying data within K-D tree nodes [S1]. It solves the performance bottleneck of rendering large datasets by allowing the renderer to skip detailed traversal when the data within a spatial region can be represented by a simple model within a user-specified error threshold [S1]. Unlike wavelet-based methods which store only detail coefficients, this method stores a complete model for each region, enabling fast preview images and adaptive detail [S1]. It builds on [Hierarchical Traversal](896-hierarchical-traversal.md) [S1].
+ 
+ ## How it works
+-**Inputs:** A K-D tree where each node represents a spatial subregion (nodal region) [S1]. A restrict box defining the region of interest [S1]. A user-defined acceptable error threshold $\epsilon$ [S1]. A user-defined polygon count cut-off $N_{cut}$ [S1]. Ray parameters (origin and direction) [S1].
++**Inputs:** A K-D tree where each node represents a spatial subregion (nodal region) [S1]. A restrict box defining the region of interest [S1]. A user-defined acceptable error threshold $\epsilon$ [S1]. A user-defined polygon count cut-off $N_{cut}$ [S1]. Ray parameters (origin and direction) [G].
+ 
+ **Outputs:** A set of subranges to be rendered, corresponding to K-D tree nodes that satisfy the error or leaf criteria [S1]. Rendered image pixels [S1].
+@@ -16,5 +16,5 @@
+ 3. **Nodal Model Parameters:** Eight data values corresponding to the corners of the nodal region [S1].
+ 4. **Polygon Subrange:** A contiguous range in a global polygon array ($Tid$) storing polygon IDs within the node's spatial region [S1].
+-5. **Children Pointers:** For non-leaf nodes [S1].
++5. **Children References:** Pointers to child nodes for non-leaf nodes [S1].
+ 
+ **Nodal Model Construction:** The nodal model is a trilinear function induced by eight data values stored at the corners of the nodal region [S1]. To compute the data value at a specific corner of the nodal region, the algorithm locates the grid cell in the original dataset that contains the corner point and interpolates within that grid cell to compute the data value at the corner [S1]. These eight values are stored directly in the tree node [S1]. The trilinear interpolation at a point $(x, y, z)$ within the nodal region is computed as:
+@@ -28,5 +28,5 @@
+ 3. **Check Inclusion:** If the node is entirely inside the restrict box, add its polygon subrange ($Tid$) to the set of subranges to be rendered and return without traversing children [S1].
+ 4. **Check Leaf/Cut-off:** If the node is a leaf, or if the number of polygons in its region is less than the user-specified cut-off $N_{cut}$, add its polygon subrange ($Tid$) to the set of subranges to be rendered and return [S1].
+-5. **Check Error:** If the node's stored error term $E$ is less than the acceptable error $\epsilon$, traversal stops at this node and the nodal region is drawn using the trilinear approximation model [S1].
++5. **Check Error:** If the node's stored error term $E$ is less than the acceptable error $\epsilon$, or the node is a leaf, traversal stops at this node and the nodal region is drawn using the trilinear approximation model [S1].
+ 6. **Recursive Step:** If none of the above exceptions apply (node is partially inside restrict box, not a leaf, polygon count $\ge N_{cut}$, and error $E \ge \epsilon$), add the polygon subrange ($Tid$) associated with the node itself (but not its descendants) to the set of subranges to be rendered, and recursively traverse the node's children [S1].
+ 
+@@ -37,13 +37,13 @@
+             ix*iy*z*v001 + x*iy*z*v101 + ix*y*z*v011 + x*y*z*v111)
+ 
+-def ray_node_intersection(node_bounds, ray_origin, ray_direction):
++def ray_box_intersect(box_min, box_max, ray_origin, ray_direction):
+     t_min, t_max = 0.0, float('inf')
+     for axis in range(3):
+         if ray_direction[axis] == 0:
+-            if not (node_bounds.min[axis] <= ray_origin[axis] <= node_bounds.max[axis]):
++            if not (box_min[axis] <= ray_origin[axis] <= box_max[axis]):
+                 return None
+         else:
+-            t1 = (node_bounds.min[axis] - ray_origin[axis]) / ray_direction[axis]
+-            t2 = (node_bounds.max[axis] - ray_origin[axis]) / ray_direction[axis]
++            t1 = (box_min[axis] - ray_origin[axis]) / ray_direction[axis]
++            t2 = (box_max[axis] - ray_origin[axis]) / ray_direction[axis]
+             t_min = max(t_min, min(t1, t2))
+             t_max = min(t_max, max(t1, t2))
+@@ -51,41 +51,48 @@
+ 
+ def draw_nodal_region(node, ray_origin, ray_direction):
+-    bounds = ray_node_intersection(node.bounds, ray_origin, ray_direction)
++    bounds = ray_box_intersect(node.bounds_min, node.bounds_max, ray_origin, ray_direction)
+     if bounds is None:
+         return
+     t_start, t_end = bounds
+-    dx = node.bounds.max.x - node.bounds.min.x
+-    dy = node.bounds.max.y - node.bounds.min.y
+-    dz = node.bounds.max.z - node.bounds.min.z
++    dx = node.bounds_max[0] - node.bounds_min[0]
++    dy = node.bounds_max[1] - node.bounds_min[1]
++    dz = node.bounds_max[2] - node.bounds_min[2]
+     steps = max(1, int((t_end - t_start) / max(dx, dy, dz)))
+     for i in range(steps + 1):
+         t = t_start + (t_end - t_start) * i / steps
+-        px, py, pz = ray_origin + ray_direction * t
+-        x = (px - node.bounds.min.x) / dx
+-        y = (py - node.bounds.min.y) / dy
+-        z = (pz - node.bounds.min.z) / dz
++        px = ray_origin[0] + ray_direction[0] * t
++        py = ray_origin[1] + ray_direction[1] * t
++        pz = ray_origin[2] + ray_direction[2] * t
++        x = (px - node.bounds_min[0]) / dx
++        y = (py - node.bounds_min[1]) / dy
++        z = (pz - node.bounds_min[2]) / dz
+         value = trilinear(*node.corners, x, y, z)
+         # Composite value into framebuffer [G]
+         pass
+ 
+-def traverse_kd_node(node, restrict_box, epsilon, n_cut, tid_array, render_set, ray_origin, ray_direction):
+-    if (node.bounds.max.x < restrict_box.min.x or node.bounds.min.x > restrict_box.max.x or
+-        node.bounds.max.y < restrict_box.min.y or node.bounds.min.y > restrict_box.max.y or
+-        node.bounds.max.z < restrict_box.min.z or node.bounds.min.z > restrict_box.max.z):
++def traverse_kd_node(node, restrict_box_min, restrict_box_max, epsilon, n_cut, tid_array, render_set, ray_origin, ray_direction):
++    # 1. Check Restrict Box: entirely outside
++    if (node.bounds_max[0] < restrict_box_min[0] or node.bounds_min[0] > restrict_box_max[0] or
++        node.bounds_max[1] < restrict_box_min[1] or node.bounds_min[1] > restrict_box_max[1] or
++        node.bounds_max[2] < restrict_box_min[2] or node.bounds_min[2] > restrict_box_max[2]):
+         return
+-    if (node.bounds.min.x >= restrict_box.min.x and node.bounds.max.x <= restrict_box.max.x and
+-        node.bounds.min.y >= restrict_box.min.y and node.bounds.max.y <= restrict_box.max.y and
+-        node.bounds.min.z >= restrict_box.min.z and node.bounds.max.z <= restrict_box.max.z):
++    # 2. Check Inclusion: entirely inside
++    if (node.bounds_min[0] >= restrict_box_min[0] and node.bounds_max[0] <= restrict_box_max[0] and
++        node.bounds_min[1] >= restrict_box_min[1] and node.bounds_max[1] <= restrict_box_max[1] and
++        node.bounds_min[2] >= restrict_box_min[2] and node.bounds_max[2] <= restrict_box_max[2]):
+         render_set.add(tid_array[node.tid_start : node.tid_end])
+         return
++    # 3. Check Leaf/Cut-off
+     if node.is_leaf or node.polygon_count < n_cut:
+         render_set.add(tid_array[node.tid_start : node.tid_end])
+         return
+-    if node.error < epsilon:
++    # 4. Check Error
++    if node.error < epsilon or node.is_leaf:
+         draw_nodal_region(node, ray_origin, ray_direction)
+         return
++    # 5. Recursive Step: partially inside & none above
+     render_set.add(tid_array[node.tid_start : node.tid_end])
+     for child in node.children:
+-        traverse_kd_node(child, restrict_box, epsilon, n_cut, tid_array, render_set, ray_origin, ray_direction)
++        traverse_kd_node(child, restrict_box_min, restrict_box_max, epsilon, n_cut, tid_array, render_set, ray_origin, ray_direction)
+ ```
+ 
+@@ -98,11 +105,11 @@
+ * **Memory Complexity:** Not given in the sources [S1].
+ * **Measured Performance:** The technique constructs very fast "preview" images to help orient the user in a very large data set [S1].
+-* **Strengths:** It enables adaptive detail based on user-defined error and supports hierarchical and parallelizable direct volume rendering for irregular and multiple grids [S1].
++* **Strengths:** It enables adaptive detail based on user-defined error [S1].
+ * **Limitations:** It requires careful handling of boundaries to avoid discontinuities between approximated and detailed regions [S1].
+-* **When to use:** It is suitable for large datasets where interactive preview or adaptive detail is required, provided visual continuity across approximation boundaries can be managed [S1].
++* **When to use:** It is suitable for large datasets where interactive preview or adaptive detail is required [S1].
+ * **When not to use:** It should be avoided in scenes requiring strict visual continuity across all spatial boundaries without specialized boundary handling [S1].
+ 
+ ## Background
+-The technique was proposed for hierarchical and parallelizable direct volume rendering of irregular and multiple grids [S1]. It departs from wavelet-based approaches by storing a complete model for each region rather than just detail information [S1]. Not given in the sources [G].
++The technique was proposed for hierarchical and parallelizable direct volume rendering [S1]. It departs from wavelet-based approaches by storing a complete model for each region rather than just detail information [S1]. Traversal occurs in front-to-back visibility order [S1].
+ 
+ ## Sources

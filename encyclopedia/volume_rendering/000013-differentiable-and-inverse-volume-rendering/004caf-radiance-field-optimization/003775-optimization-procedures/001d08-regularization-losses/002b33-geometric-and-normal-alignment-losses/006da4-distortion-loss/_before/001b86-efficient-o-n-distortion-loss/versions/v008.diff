@@ -1,0 +1,375 @@
+--- v007.md
++++ v008.md
+@@ -4,64 +4,57 @@
+ 
+ ## Overview
+-The Efficient O(N) Distortion Loss is a regularization term for volume rendering that prevents "floaters" (small, disconnected regions of volumetrically dense space) and "background collapse" (distant surfaces modeled as semi-transparent clouds close to the camera) by minimizing the integral of distances between all pairs of points along the 1D step function parameterized by ray distances and weights [S1]. It sets itself apart from naive implementations by reducing the computational complexity from $O(N^2)$ to $O(N)$ using prefix and suffix sums, enabling the handling of point-based queries with large numbers of sampled points (e.g., >256) without excessive GPU memory consumption [S2, unofficial].
++The Efficient O(N) Distortion Loss is a regularization term used in differentiable volume rendering to suppress "floaters" (small, disconnected regions of volumetrically dense space) and "background collapse" (distant surfaces incorrectly modeled as semi-transparent clouds close to the camera) [S1]. It minimizes the integral of distances between all pairs of points along the 1D step function parameterized by ray distances and weights [S1]. It sets itself apart from sibling regularizers like Total Variation by directly enforcing compactness along the ray parameterization, and from naive implementations by reducing computational complexity from $O(N^2)$ to $O(N)$, enabling its use with high sample counts (>256 points per ray) without excessive GPU memory consumption [S2, unofficial].
+ 
+ ## How it works
+-The method computes a regularization loss $\mathcal{L}_{\text{dist}}$ based on the normalized ray distances $\mathbf{s}$ and the accumulated weights $\mathbf{w}$ for each ray.
+-
+-### Inputs and Outputs
+-*   **Inputs**:
+-    *   $\mathbf{s}$: Array of normalized ray distances of shape $(N)$, where $s_i \in [0, 1]$. These are non-linearly normalized from near-far clipping distances to prevent overweighting distant intervals [S1][S2, unofficial].
+-    *   $\mathbf{w}$: Array of weights of shape $(N)$, where $w_i$ is the weight for the $i$-th sample.
+-    *   $\lambda$: Scalar hyperparameter balancing the data term and the regularizer. Typical value: 0.01 [S1].
+-*   **Outputs**:
+-    *   $\mathcal{L}_{\text{dist}}$: Scalar loss value.
+-    *   $\nabla_{\mathbf{w}} \mathcal{L}_{\text{dist}}$: Gradient of the loss with respect to weights, of shape $(N)$.
+-
+-### Data Structures
+-*   **Midpoints**: Array $\mathbf{m}$ of shape $(N)$, where $m_i = (s_i + s_{i+1}) / 2$. Note: For the last sample $N-1$, $s_N$ is typically the far clipping plane or the end of the normalized interval. The sources assume $s$ defines $N$ intervals, implying $s$ has length $N+1$ or $s_{i+1}$ is derived. However, the formulas in [S2, unofficial] use $s_i$ and $s_{i+1}$ for $i=0 \dots N-1$, implying $s$ has length $N+1$ or the interval boundaries are defined by the samples. The standard DVR formulation uses $N$ samples defining $N$ intervals. Let us assume $\mathbf{s}$ contains the boundaries $s_0, \dots, s_N$ or the samples are midpoints. The source [S2, unofficial] states "$s_i$ is the non-linearly normalized distance of the i-th sample... and $(s_{i+1}-s_i)$ is the length". This implies $s$ has $N+1$ elements (boundaries) or the samples are treated as interval starts. Given the standard DVR, $N$ samples usually have $N$ intervals. Let's assume $\mathbf{s}$ is of length $N+1$ representing interval boundaries, or the code handles $s_{N}$ as the far clip. The pseudocode below assumes $\mathbf{s}$ has length $N+1$ to define $N$ intervals $[s_i, s_{i+1})$. If $\mathbf{s}$ has length $N$, $s_{i+1}$ for $i=N-1$ must be provided (e.g., 1.0 or far clip). We will assume input $\mathbf{s}$ has length $N+1$.
+-*   **Prefix/Suffix Sums**: Temporary arrays of length $N$ storing cumulative sums of $\mathbf{w}$ and $\mathbf{w} \odot \mathbf{m}$.
+-
+-### Formulas
+-The total distortion loss is defined as [S1][S2, unofficial]:
+-
+-$$
+-\mathcal{L}_{\text{dist}}(\mathbf{s}, \mathbf{w}) = \mathcal{L}_{\text{dist}}^{\text{1st}} + \mathcal{L}_{\text{dist}}^{\text{2nd}}
+-$$
+-
+-Where:
+-1.  **First Term (Pairwise Midpoint Distances)**:
+-    $$
+-    \mathcal{L}_{\text{dist}}^{\text{1st}} = \sum_{i=0}^{N-1} \sum_{j=0}^{N-1} w_i w_j |m_i - m_j|
+-    $$
+-    This is optimized to $O(N)$ by eliminating the diagonal ($i=j$) and splitting the sum [S2, unofficial]:
+-    $$
+-    \mathcal{L}_{\text{dist}}^{\text{1st}} = 2 \sum_{i=1}^{N-1} w_i m_i \left( \sum_{j=0}^{i-1} w_j \right) - 2 \sum_{i=1}^{N-1} w_i \left( \sum_{j=0}^{i-1} w_j m_j \right)
+-    $$
+-
+-2.  **Second Term (Interval Sizes)**:
+-    $$
+-    \mathcal{L}_{\text{dist}}^{\text{2nd}} = \frac{1}{3} \sum_{i=0}^{N-1} w_i^2 (s_{i+1} - s_i)
+-    $$
+-
+-### Gradients
+-The gradient with respect to $w_k$ for the first term is [S2, unofficial]:
+-
+-$$
+-\frac{\partial}{\partial w_k} \mathcal{L}_{\text{dist}}^{\text{1st}} = 2m_k \sum_{j=0}^{k-1} w_j - 2 \sum_{j=0}^{k-1} w_j m_j + 2 \sum_{i=k+1}^{N-1} w_i m_i - 2m_k \sum_{i=k+1}^{N-1} w_i
+-$$
+-
+-The gradient for the second term is:
+-
+-$$
+-\frac{\partial}{\partial w_k} \mathcal{L}_{\text{dist}}^{\text{2nd}} = \frac{2}{3} w_k (s_{k+1} - s_k)
+-$$
+-
+-### Parameters
+-*   $\lambda$: Weight for the distortion loss. Default: 0.01 [S1].
+-*   $N$: Number of sampled points/intervals per ray. The efficient implementation supports uneven numbers of sampled points across different rays [S2, unofficial].
+-
+-### Pseudocode
+-The following Python-like pseudocode implements the $O(N)$ distortion loss and its gradient for a batch of rays. It assumes `s` has shape `(B, N+1)` and `w` has shape `(B, N)`.
+-
++**Inputs and Outputs:**
++*   **Inputs:**
++    *   $\mathbf{s}$: Array of normalized ray distances for $N$ samples per ray, shape $(N,)$ or $(B, N)$ for batched rays. Values are non-linearly normalized from near-far clipping distances to $[0, 1]$ [S1][S2, unofficial].
++    *   $\mathbf{w}$: Array of accumulated weights (opacity contributions) for $N$ samples per ray, shape $(N,)$ or $(B, N)$.
++    *   $\lambda$: Scalar hyperparameter balancing the distortion loss against the data reconstruction loss [S1].
++*   **Outputs:**
++    *   $\mathcal{L}_{\text{dist}}$: Scalar distortion loss value.
++    *   $\nabla_{\mathbf{w}} \mathcal{L}_{\text{dist}}$: Gradient of the loss with respect to weights, shape $(N,)$ or $(B, N)$ [S2, unofficial].
++
++**Data Structures:**
++*   **Midpoints ($\mathbf{m}$):** Array of length $N$, where $m_i = (s_i + s_{i+1}) / 2$. Note: For the last sample $N-1$, $s_N$ is typically the far clipping plane or handled via boundary conditions. The sources assume $s$ defines intervals $[s_i, s_{i+1})$ [S1][S2, unofficial].
++*   **Prefix/Suffix Sums:** Temporary arrays of length $N$ storing cumulative sums of $\mathbf{w}$ and $\mathbf{w} \odot \mathbf{m}$ to enable $O(1)$ lookup during the $O(N)$ computation [S2, unofficial].
++
++**Numbered Steps:**
++1.  **Compute Midpoints:** Calculate the midpoint of each interval: $m_i = \frac{s_i + s_{i+1}}{2}$ for $i = 0, \dots, N-1$. Ensure $m_i < m_{i+1}$ [S2, unofficial].
++2.  **Compute Second Term:** Calculate the weighted interval size term:
++    $$ \mathcal{L}_{\text{dist}}^{\text{2nd}} = \frac{1}{3} \sum_{i=0}^{N-1} w_i^2 (s_{i+1} - s_i) $$
++    This term minimizes the weighted size of each individual interval [S1][S2, unofficial].
++3.  **Compute Prefix/Suffix Sums for First Term:**
++    *   Compute prefix sums of weights: $P_w[k] = \sum_{j=0}^{k-1} w_j$ for $k=1, \dots, N$, with $P_w[0]=0$.
++    *   Compute prefix sums of weighted midpoints: $P_{wm}[k] = \sum_{j=0}^{k-1} w_j m_j$ for $k=1, \dots, N$, with $P_{wm}[0]=0$.
++    *   Compute suffix sums of weights: $S_w[k] = \sum_{j=k+1}^{N-1} w_j$ for $k=0, \dots, N-2$, with $S_w[N-1]=0$.
++    *   Compute suffix sums of weighted midpoints: $S_{wm}[k] = \sum_{j=k+1}^{N-1} w_j m_j$ for $k=0, \dots, N-2$, with $S_{wm}[N-1]=0$.
++    These allow direct lookup of inner summations [S2, unofficial].
++4.  **Compute First Term (O(N)):**
++    The first term of the distortion loss is:
++    $$ \mathcal{L}_{\text{dist}}^{\text{1st}} = \sum_{i=0}^{N-1} \sum_{j=0}^{N-1} w_i w_j |m_i - m_j| $$
++    By eliminating the diagonal ($i=j$) and exploiting symmetry ($|m_i - m_j| = m_i - m_j$ for $i > j$), this is rewritten as:
++    $$ \mathcal{L}_{\text{dist}}^{\text{1st}} = 2 \sum_{i=1}^{N-1} w_i m_i \left( \sum_{j=0}^{i-1} w_j \right) - 2 \sum_{i=1}^{N-1} w_i \left( \sum_{j=0}^{i-1} w_j m_j \right) $$
++    Using the prefix sums from Step 3:
++    $$ \mathcal{L}_{\text{dist}}^{\text{1st}} = 2 \sum_{i=1}^{N-1} w_i m_i P_w[i] - 2 \sum_{i=1}^{N-1} w_i P_{wm}[i] $$
++    This computation is $O(N)$ [S2, unofficial].
++5.  **Combine Terms:**
++    $$ \mathcal{L}_{\text{dist}} = \mathcal{L}_{\text{dist}}^{\text{1st}} + \mathcal{L}_{\text{dist}}^{\text{2nd}} $$
++    [S1][S2, unofficial].
++6.  **Compute Gradients (Optional but required for backprop):**
++    The gradient with respect to $w_k$ for the first term is:
++    $$ \frac{\partial}{\partial w_k} \mathcal{L}_{\text{dist}}^{\text{1st}} = 2m_k P_w[k] - 2 P_{wm}[k] + 2 S_{wm}[k] - 2m_k S_w[k] $$
++    The gradient for the second term is:
++    $$ \frac{\partial}{\partial w_k} \mathcal{L}_{\text{dist}}^{\text{2nd}} = \frac{2}{3} w_k (s_{k+1} - s_k) $$
++    Total gradient: $\frac{\partial \mathcal{L}_{\text{dist}}}{\partial w_k} = \frac{\partial \mathcal{L}_{\text{dist}}^{\text{1st}}}{\partial w_k} + \frac{\partial \mathcal{L}_{\text{dist}}^{\text{2nd}}}{\partial w_k}$ [S2, unofficial].
++
++**Formulas:**
++*   **Distortion Loss:**
++    $$ \mathcal{L}_{\text{dist}}(\mathbf{s}, \mathbf{w}) = \sum_{i=0}^{N-1} \sum_{j=0}^{N-1} w_i w_j \left| \frac{s_i + s_{i+1}}{2} - \frac{s_j + s_{j+1}}{2} \right| + \frac{1}{3} \sum_{i=0}^{N-1} w_i^2 (s_{i+1} - s_i) $$
++    [S1][S2, unofficial].
++*   **Normalized Distances:** $s_i$ are non-linearly normalized ray distances mapped to $[0, 1]$ [S1][S2, unofficial].
++*   **Hyperparameter:** $\lambda$ balances $\mathcal{L}_{\text{recon}}$ and $\mathcal{L}_{\text{dist}}$. Typical value: 0.01 [S1].
++
++**Pseudocode:**
+ ```python
+ import torch
+@@ -69,127 +62,153 @@
+ def efficient_distortion_loss(s, w, lambda_dist=0.01):
+     """
+-    Computes the Efficient O(N) Distortion Loss and its gradient.
++    Computes the O(N) distortion loss and its gradient w.r.t w.
+     
+     Args:
+-        s: Tensor of shape (B, N+1), normalized ray distances (interval boundaries).
+-        w: Tensor of shape (B, N), weights for each interval.
+-        lambda_dist: Scalar, weight for the distortion loss.
++        s: Tensor of shape (N,) or (B, N), normalized ray distances [0, 1].
++        w: Tensor of shape (N,) or (B, N), accumulated weights.
++        lambda_dist: Scalar weight for the distortion loss.
+         
+     Returns:
+         loss: Scalar tensor, the total distortion loss.
+-        grad_w: Tensor of shape (B, N), gradient of loss w.r.t w.
++        grad_w: Tensor of shape (N,) or (B, N), gradient of loss w.r.t w.
+     """
++    # Ensure s is sorted and has N+1 points to define N intervals
++    # s shape: (N+1,) or (B, N+1). If input s is (N,), assume uniform or handle accordingly.
++    # Based on sources, s defines intervals [s_i, s_{i+1}). 
++    # We assume s has length N+1. If w has length N, s must have length N+1.
++    
++    # Handle batch dimension
++    if s.dim() == 1:
++        s = s.unsqueeze(0)
++        w = w.unsqueeze(0)
++        batched = False
++    else:
++        batched = True
++        
+     B, N_plus_1 = s.shape
+     N = N_plus_1 - 1
+     
+     # 1. Compute midpoints m_i = (s_i + s_{i+1}) / 2
+-    # s shape: (B, N+1), m shape: (B, N)
++    # m shape: (B, N)
+     m = (s[:, :N] + s[:, 1:]) / 2.0
+     
+-    # 2. Compute interval lengths delta_i = s_{i+1} - s_i
+-    delta = s[:, 1:] - s[:, :N]  # shape (B, N)
+-    
+-    # --- First Term: Pairwise Midpoint Distances ---
+-    # We need prefix sums of w and w*m
+-    # prefix_w[i] = sum(w[0]...w[i-1])
+-    # prefix_wm[i] = sum(w[0]*m[0]...w[i-1]*m[i-1])
+-    
+-    # Cumsum along the last dimension (N)
+-    # cumsum returns shape (B, N+1) where cumsum[i] includes w[i]
+-    # We want sum up to i-1, so we take cumsum[:, :N] but shifted or use cumsum[:, :-1]
+-    
+-    cum_w = torch.cumsum(w, dim=1)  # (B, N)
+-    cum_wm = torch.cumsum(w * m, dim=1)  # (B, N)
+-    
+-    # To get sum_{j=0}^{i-1} w_j, we need cumsum at index i-1.
+-    # For i=0, sum is 0.
+-    # We can create padded zeros to align indices easily.
+-    # Let's compute prefix sums explicitly for clarity:
+-    # P_w[i] = sum_{j=0}^{i-1} w_j
+-    # P_wm[i] = sum_{j=0}^{i-1} w_j m_j
+-    
+-    # Using cumsum, P_w[i] = cum_w[i-1] if i>0 else 0
+-    # We can shift cum_w to the right by 1, filling with 0
+-    P_w = torch.cat([torch.zeros(B, 1, device=w.device), cum_w[:, :-1]], dim=1)
+-    P_wm = torch.cat([torch.zeros(B, 1, device=w.device), cum_wm[:, :-1]], dim=1)
+-    
+-    # Similarly for suffix sums: sum_{j=i+1}^{N-1}
+-    # S_w[i] = sum_{j=i+1}^{N-1} w_j
+-    # S_wm[i] = sum_{j=i+1}^{N-1} w_j m_j
+-    
++    # 2. Compute interval lengths
++    # lengths shape: (B, N)
++    lengths = s[:, 1:] - s[:, :N]
++    
++    # 3. Compute Second Term: 1/3 * sum(w_i^2 * length_i)
++    # term2 shape: (B,)
++    term2 = (1.0 / 3.0) * (w * w * lengths).sum(dim=1)
++    
++    # 4. Compute Prefix and Suffix Sums for First Term
++    # prefix_w[k] = sum(w[0]...w[k-1])
++    # prefix_wm[k] = sum(w[0]*m[0]...w[k-1]*m[k-1])
++    # We need these for indices 1 to N-1 in the summation formula.
++    
++    # Cumsum along dim=1
++    prefix_w = torch.cumsum(w, dim=1) # shape (B, N)
++    prefix_wm = torch.cumsum(w * m, dim=1) # shape (B, N)
++    
++    # Shift prefix sums to align with index i in the formula sum_{j=0}^{i-1}
++    # For i=1, we need sum_{j=0}^{0} w_j = w[0]. prefix_w[:, 0] is w[0].
++    # The formula uses P_w[i] which is sum_{j=0}^{i-1} w_j.
++    # In PyTorch cumsum, prefix_w[:, i] is sum_{j=0}^{i} w_j.
++    # So we need prefix_w[:, i-1] for the term sum_{j=0}^{i-1} w_j.
++    
++    # To avoid index errors, we pad or shift.
++    # Let's compute P_w[i] = sum_{j=0}^{i-1} w_j.
++    # P_w[0] = 0. P_w[1] = w[0]. P_w[2] = w[0]+w[1].
++    # We can create a shifted version.
++    
++    # Pad with zeros at the beginning
++    w_padded = torch.cat([torch.zeros(B, 1, device=w.device), w], dim=1) # (B, N+1)
++    wm_padded = torch.cat([torch.zeros(B, 1, device=w.device), w * m], dim=1) # (B, N+1)
++    
++    P_w = torch.cumsum(w_padded, dim=1)[:, :N] # (B, N), P_w[i] = sum_{j=0}^{i-1} w_j
++    P_wm = torch.cumsum(wm_padded, dim=1)[:, :N] # (B, N), P_Wm[i] = sum_{j=0}^{i-1} w_j m_j
++    
++    # Suffix sums: S_w[k] = sum_{j=k+1}^{N-1} w_j
++    # S_w[N-1] = 0.
+     # Reverse cumsum
+-    cum_w_rev = torch.cumsum(torch.flip(w, dims=[1]), dim=1)
+-    cum_wm_rev = torch.cumsum(torch.flip(w * m, dims=[1]), dim=1)
+-    
+-    # Shift back
+-    # S_w[i] corresponds to cum_w_rev[N - (i+1)]
+-    # Let's just use flip and shift logic
+-    # S_w[i] = cumsum(w[i+1:])
+-    # We can compute suffix sums by reversing, cumsumming, and reversing back, then shifting
+-    
+-    # S_w[i] = sum_{j=i+1}^{N-1} w_j
+-    # If we reverse w, index i becomes N-1-i.
+-    # Sum from i+1 to N-1 in original is sum from 0 to N-1-(i+1) in reversed.
+-    # Let's use a simpler approach:
+-    # Total sum - cumsum up to i
+-    total_w = torch.sum(w, dim=1, keepdim=True) # (B, 1)
+-    total_wm = torch.sum(w * m, dim=1, keepdim=True)
+-    
+-    # S_w[i] = total_w - cum_w[i] (since cum_w[i] includes w[i])
+-    # Wait, cum_w[i] = sum_{j=0}^i w_j.
+-    # We want sum_{j=i+1}^{N-1} w_j = total_w - cum_w[i]
+-    S_w = total_w - cum_w
+-    S_wm = total_wm - cum_wm
+-    
+-    # Now compute the first term loss
+-    # L1 = 2 * sum_{i=1}^{N-1} [ w_i * m_i * P_w[i] - w_i * P_wm[i] ]
+-    # Note: The formula in [S2, unofficial] sums i from 1 to N-1.
+-    # For i=0, the term is 0 because P_w[0]=0 and P_wm[0]=0.
+-    # So we can sum from i=0 to N-1 safely.
+-    
+-    term1_part1 = w * m * P_w  # (B, N)
+-    term1_part2 = w * P_wm    # (B, N)
+-    
+-    # L1 = 2 * sum_i (term1_part1 - term1_part2)
+-    L1 = 2.0 * torch.sum(term1_part1 - term1_part2, dim=1)
+-    
+-    # --- Second Term: Interval Sizes ---
+-    # L2 = 1/3 * sum_i w_i^2 * delta_i
+-    L2 = (1.0 / 3.0) * torch.sum(w**2 * delta, dim=1)
+-    
+-    loss = L1 + L2
+-    
+-    # --- Gradients ---
+-    # grad_w for L1
+-    # dL1/dw_k = 2 * m_k * S_w[k] - 2 * S_wm[k] + 2 * P_w[k] * m_k - 2 * P_wm[k] ?
+-    # Let's re-verify the gradient formula from [S2, unofficial]:
+-    # d/dw_k L1 = 2 m_k sum_{j=0}^{k-1} w_j - 2 sum_{j=0}^{k-1} w_j m_j + 2 sum_{i=k+1}^{N-1} w_i m_i - 2 m_k sum_{i=k+1}^{N-1} w_i
+-    #           = 2 m_k P_w[k] - 2 P_wm[k] + 2 S_wm[k] - 2 m_k S_w[k]
+-    
+-    grad_L1 = 2.0 * m * P_w - 2.0 * P_wm + 2.0 * S_wm - 2.0 * m * S_w
+-    
+-    # grad_w for L2
+-    # dL2/dw_k = 2/3 * w_k * delta_k
+-    grad_L2 = (2.0 / 3.0) * w * delta
+-    
+-    grad_w = grad_L1 + grad_L2
+-    
++    w_rev = torch.flip(w, dims=[1])
++    wm_rev = torch.flip(w * m, dims=[1])
++    
++    S_w_rev = torch.cumsum(w_rev, dim=1) # (B, N)
++    S_wm_rev = torch.cumsum(wm_rev, dim=1) # (B, N)
++    
++    # Flip back to get suffix sums in original order
++    # S_w[k] corresponds to S_w_rev[N-1-k]
++    S_w = torch.flip(S_w_rev, dims=[1]) # (B, N)
++    S_wm = torch.flip(S_wm_rev, dims=[1]) # (B, N)
++    
++    # 5. Compute First Term: 2 * sum_{i=1}^{N-1} [ w_i m_i P_w[i] - w_i P_Wm[i] ]
++    # Note: The formula sums from i=1 to N-1.
++    # We can compute the full sum and subtract i=0 term (which is 0 anyway) or mask.
++    # Let's compute for all i and mask out i=0 if necessary, but w[0]*m[0]*P_w[0] is 0.
++    
++    term1_part1 = 2.0 * (w * m * P_w).sum(dim=1)
++    term1_part2 = 2.0 * (w * P_Wm).sum(dim=1)
++    
++    term1 = term1_part1 - term1_part2
++    
++    # 6. Total Loss
++    loss = term1 + term2
++    
++    # 7. Gradients w.r.t w
++    # dL/dw_k for term2: 2/3 * w_k * length_k
++    grad_w_term2 = (2.0 / 3.0) * w * lengths
++    
++    # dL/dw_k for term1:
++    # From source [S2, unofficial]:
++    # 2 * m_k * P_w[k] - 2 * P_Wm[k] + 2 * S_Wm[k] - 2 * m_k * S_w[k]
++    # Note: P_w[k] in source is sum_{j=0}^{k-1} w_j. This matches our P_w[:, k].
++    
++    grad_w_term1 = 2.0 * m * P_w - 2.0 * P_Wm + 2.0 * S_Wm - 2.0 * m * S_w
++    
++    grad_w = grad_w_term1 + grad_w_term2
++    
++    # Scale by lambda if needed for the final loss value, but gradients should be scaled too
++    # Usually lambda is applied to the loss, so gradients are also scaled.
++    loss = lambda_dist * loss
++    grad_w = lambda_dist * grad_w
++    
++    if not batched:
++        loss = loss.squeeze(0)
++        grad_w = grad_w.squeeze(0)
++        
+     return loss, grad_w
+ ```
+ 
+-### Edge Cases and Pitfalls
+-*   **Normalization**: Using unnormalized ray distances $t$ instead of normalized $s$ significantly upweights distant intervals, causing nearby intervals to be effectively ignored [S1].
+-*   **Memory**: The naive $O(N^2)$ implementation consumes excessive GPU memory (e.g., >3GB for a batch of 4,096 rays with >256 samples per ray) [S2, unofficial]. The $O(N)$ implementation avoids this by using prefix/suffix sums.
+-*   **Uneven Samples**: The efficient implementation must support uneven numbers of sampled points across different rays, which requires careful handling of batch dimensions or masking [S2, unofficial].
++**Parameters:**
++*   $\lambda$ (or `lambda_distortion`): Weight for the distortion loss. Typical value: 0.01 [S1][S3, unofficial].
++*   $N$: Number of sampled points per ray. The efficient implementation supports uneven numbers of sampled points across different rays [S2, unofficial].
++
++**Edge Cases and Pitfalls:**
++*   **Unnormalized Distances:** Using unnormalized ray distances $t$ instead of normalized $s$ significantly upweights distant intervals, causing nearby intervals to be effectively ignored [S1].
++*   **Memory Usage:** Naive $O(N^2)$ implementations consume excessive GPU memory (>3GB for a batch of 4,096 rays with >256 samples per ray) [S2, unofficial].
++*   **Boundary Conditions:** The definition of $s_{N}$ (far clipping) and $s_{0}$ (near clipping) must be consistent with the weight accumulation. The loss assumes intervals $[s_i, s_{i+1})$ [S1][S2, unofficial].
++
++## Subtopics
++
++### Total Variation Regularization
++Enforces spatial smoothness of density/color fields. Choose when geometric smoothness is prioritized over ray-wise compactness. [Total Variation Regularization](860-total-variation-regularization.md)
++
++### Output Noise Regularization
++Injects noise into density to prevent floaters. Less effective than distortion loss at preventing background collapse. [Output Noise Regularization](928-output-noise-regularization.md)
++
++### Beta Distribution Prior on Exit Opacity
++Priors on opacity distributions. Choose when explicit opacity modeling is required. [Beta Distribution Prior on Exit Opacity](2274-beta-distribution-prior-on-exit-opacity.md)
+ 
+ ## Operating characteristics
+-*   **Time Complexity**: $O(N)$ per ray, where $N$ is the number of samples. This is a significant improvement over the naive $O(N^2)$ implementation [S2, unofficial].
+-*   **Memory Complexity**: $O(N)$ per ray for storing prefix and suffix sums, compared to $O(N^2)$ for the naive pairwise distance matrix [S2, unofficial].
+-*   **Performance**: The efficient implementation allows for more future works to benefit from the distortion loss, improving rendering quality and training speed by encouraging compactness [S2, unofficial].
+-*   **Strengths**: Effectively eliminates floaters and background collapse without reducing reconstruction quality, outperforming NeRF's noise injection regularizer [S1].
+-*   **Limitations**: Requires normalized ray distances. The gradient computation is more complex than simple MSE losses.
++*   **Time Complexity:** $O(N)$ per ray, where $N$ is the number of samples. This is a significant improvement over the naive $O(N^2)$ implementation [S2, unofficial].
++*   **Memory Complexity:** $O(N)$ per ray for storing prefix/suffix sums. Avoids the $O(N^2)$ memory footprint of the naive pairwise distance matrix [S2, unofficial].
++*   **Measured Performance:** The efficient implementation allows for >256 samples per ray without prohibitive memory usage, improving training speed and rendering quality by suppressing artifacts [S2, unofficial].
++*   **Strengths:** Effectively eliminates floaters and background collapse without reducing reconstruction quality, outperforming noise-injection methods [S1]. Enables high-resolution sampling [S2, unofficial].
++*   **Limitations:** Requires normalized ray distances. The gradient computation is more complex than simple MSE [S1][S2, unofficial].
++*   **When to Use:** When training NeRF-like models with high sample counts per ray and observing floaters or background collapse artifacts.
++*   **When Not to Use:** When computational resources are extremely limited and $N$ is very small (where $O(N^2)$ is negligible), or when ray-wise compactness is not a desired property.
+ 
+ ## Background
+-The distortion loss was proposed in MipNeRF 360 [S1] as a regularizer to prevent artifacts such as floaters and background collapse. It was later optimized for $O(N)$ complexity in DirectVoxGO [S2, unofficial] to handle point-based queries with large numbers of samples. It is also implemented in Instant-NSR-PL [S3, unofficial].
++The distortion loss was proposed in MipNeRF 360 [S1]. It was designed to address artifacts common in neural radiance fields, specifically "floaters" and "background collapse" [S1]. The efficient $O(N)$ implementation was later developed and popularized in DirectVoxGO and other subsequent works to handle larger sample counts [S2, unofficial]. It is widely used in modern differentiable volume rendering pipelines [S3, unofficial].
+ 
+ ## Sources

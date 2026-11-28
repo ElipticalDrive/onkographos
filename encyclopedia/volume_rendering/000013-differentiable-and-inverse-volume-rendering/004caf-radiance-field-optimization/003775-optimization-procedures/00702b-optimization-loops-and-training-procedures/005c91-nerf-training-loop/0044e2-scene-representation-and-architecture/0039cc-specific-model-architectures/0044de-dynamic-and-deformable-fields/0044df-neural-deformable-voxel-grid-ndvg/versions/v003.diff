@@ -1,0 +1,201 @@
+--- v002.md
++++ v003.md
+@@ -1,3 +1,4 @@
+ # Neural Deformable Voxel Grid (NDVG)
++
+ 
+ ## Overview
+@@ -35,9 +36,5 @@
+ 
+ **Positional Encoding:**
+-Positional encoding $\gamma(\cdot)$ is applied to coordinates $p$ and $t$ (frequency 5) and viewing direction $d$ (frequency 4) [S1].
+-$$
+-\gamma(\mathbf{x}) = (\sin(2^0 \pi \mathbf{x}), \cos(2^0 \pi \mathbf{x}), \dots, \sin(2^{L-1} \pi \mathbf{x}), \cos(2^{L-1} \pi \mathbf{x}))
+-$$
+-where $L$ is the number of frequency bands [S1].
++Positional encoding $\gamma(\cdot)$ is applied to coordinates $p$ and $t$ using 5 frequency bands, and to viewing direction $d$ using 4 frequency bands [S1].
+ 
+ **Algorithm Steps:**
+@@ -103,94 +100,97 @@
+     def __init__(self, grid_dims, feature_dims, mlp_configs):
+         """
+-        grid_dims: tuple (Nx, Ny, Nz) for deformation grid, (Nx', Ny', Nz') for density/color grids
+-        feature_dims: tuple (Nc for deformation, Nc' for color)
+-        mlp_configs: dict with 'deform' (layers, width) and 'canonical' (layers, width)
+-        """
+-        # Initialize grids
++        grid_dims: dict with 'deform' (Nx, Ny, Nz), 'density' (Nx', Ny', Nz'), 'color' (H', W', D')
++        feature_dims: dict with 'deform' (Nc), 'color' (Nc')
++        mlp_configs: dict with 'deform' (in_dim, width, num_layers) and 'canonical' (in_dim, width, num_layers)
++        """
+         self.G_d = nn.Parameter(torch.randn(*grid_dims['deform'], feature_dims['deform']))
+         self.G_sigma = nn.Parameter(torch.randn(*grid_dims['density']))
+         self.G_c = nn.Parameter(torch.randn(*grid_dims['color'], feature_dims['color']))
+-        
+-        # Initialize MLPs
+         self.deform_mlp = LightMLP(mlp_configs['deform'])
+         self.canonical_mlp = LightMLP(mlp_configs['canonical'])
+-        
+-        # Hyperparameters
+         self.freq_pos_time = 5
+         self.freq_dir = 4
+-        self.t_can = 0.0 # Canonical time instance
++        self.t_can = 0.0
+ 
+     def positional_encoding(self, x, freq_bands):
+         """Standard sinusoidal positional encoding."""
+-        # x shape: (..., D)
+-        # Output shape: (..., D * 2 * freq_bands)
+         scales = torch.tensor([2**i for i in range(freq_bands)], dtype=x.dtype, device=x.device)
+         scaled_x = x.unsqueeze(-1) * scales * torch.pi
+-        encoding = torch.cat([torch.sin(scaled_x), torch.cos(scaled_x)], dim=-1)
+-        return encoding.view(x.shape[:-1] + (-1,))
++        return torch.cat([torch.sin(scaled_x), torch.cos(scaled_x)], dim=-1)
+ 
+     def trilinear_interpolate(self, grid, points):
+         """
+         Trilinear interpolation.
+-        grid: (Nx, Ny, Nz, ...)
++        grid: (Nx, Ny, Nz, C)
+         points: (..., 3) normalized to [0, 1]
+         """
+-        # Normalize points to [-1, 1] for grid_sample if needed, 
+-        # but assuming standard interpolation logic for dense grids.
+-        # Using PyTorch grid_sample requires specific formatting.
+-        # For simplicity, assuming a helper that handles the interpolation.
+-        # In practice, this maps points to grid coordinates and samples.
+-        pass 
++        coords = points * torch.tensor([grid.shape[0]-1, grid.shape[1]-1, grid.shape[2]-1], device=points.device)
++        x0 = torch.floor(coords[..., 0]).long()
++        y0 = torch.floor(coords[..., 1]).long()
++        z0 = torch.floor(coords[..., 2]).long()
++        x1 = torch.clamp(x0 + 1, 0, grid.shape[0]-1)
++        y1 = torch.clamp(y0 + 1, 0, grid.shape[1]-1)
++        z1 = torch.clamp(z0 + 1, 0, grid.shape[2]-1)
++        x0 = torch.clamp(x0, 0, grid.shape[0]-1)
++        y0 = torch.clamp(y0, 0, grid.shape[1]-1)
++        z0 = torch.clamp(z0, 0, grid.shape[2]-1)
++        
++        dx = coords[..., 0] - x0.float()
++        dy = coords[..., 1] - y0.float()
++        dz = coords[..., 2] - z0.float()
++        
++        v000 = grid[x0, y0, z0, :]
++        v100 = grid[x1, y0, z0, :]
++        v010 = grid[x0, y1, z0, :]
++        v110 = grid[x1, y1, z0, :]
++        v001 = grid[x0, y0, z1, :]
++        v101 = grid[x1, y0, z1, :]
++        v011 = grid[x0, y1, z1, :]
++        v111 = grid[x1, y1, z1, :]
++        
++        w000 = (1-dx)*(1-dy)*(1-dz)
++        w100 = dx*(1-dy)*(1-dz)
++        w010 = (1-dx)*dy*(1-dz)
++        w110 = dx*dy*(1-dz)
++        w001 = (1-dx)*(1-dy)*dz
++        w101 = dx*(1-dy)*dz
++        w011 = (1-dx)*dy*dz
++        w111 = dx*dy*dz
++        
++        return (w000*v000 + w100*v100 + w010*v010 + w110*v110 +
++                w001*v001 + w101*v101 + w011*v011 + w111*v111)
+ 
+     def forward(self, p, d, t):
+-        """
+-        p: (..., 3) observation space position
+-        d: (..., 3) viewing direction
+-        t: (..., 1) time instance
+-        """
+         # 1. Deformation Query
+-        # Interpolate deformation features
+         f_d = self.trilinear_interpolate(self.G_d, p)
+-        
+-        # Encode inputs
+         p_enc = self.positional_encoding(p, self.freq_pos_time)
+         t_enc = self.positional_encoding(t, self.freq_pos_time)
+-        f_d_enc = f_d # Features are already learned
+-        
+-        # Regress offset and occlusion
+-        # Note: If t == t_can, delta_p should be 0. 
+-        # The MLP might learn this, or we enforce it.
+-        # The source says: if t == t_can, delta_p = 0.
+-        if torch.allclose(t, torch.tensor(self.t_can)):
+-            delta_p = torch.zeros_like(p)
+-            w_occ = torch.ones_like(p[..., :1])
+-        else:
+-            deform_input = torch.cat([p_enc, t_enc, f_d], dim=-1)
+-            delta_p, w_occ = self.deform_mlp(deform_input).chunk(2, dim=-1)
+-            # w_occ is typically a single scalar or per-feature weight, 
+-            # source implies it filters sigma and c. Assuming scalar per point or broadcastable.
+-            # Source eq 5: (Delta p, w_occ) = DNet(...). 
+-            # Source eq 6: sigma' = sigma * w_occ.
+-            # We assume w_occ is shape (..., 1) or scalar.
+-        
++        deform_input = torch.cat([p_enc, t_enc, f_d], dim=-1)
++        deform_out = self.deform_mlp(deform_input)
++        delta_p, w_occ = deform_out.chunk(2, dim=-1)
++        
++        # Enforce zero deformation at canonical time
++        mask = torch.abs(t - self.t_can) < 1e-6
++        delta_p = torch.where(mask, torch.zeros_like(delta_p), delta_p)
++        w_occ = torch.where(mask, torch.ones_like(w_occ), w_occ)
++
+         # 2. Canonical Position
+         p_prime = p + delta_p
+-        
++
+         # 3. Density Query
+         f_sigma = self.trilinear_interpolate(self.G_sigma, p_prime)
+         sigma = F.softplus(f_sigma)
+-        
++
+         # 4. Color Query
+         f_c = self.trilinear_interpolate(self.G_c, p_prime)
+         p_prime_enc = self.positional_encoding(p_prime, self.freq_pos_time)
+         d_enc = self.positional_encoding(d, self.freq_dir)
+-        
+         color_input = torch.cat([p_prime_enc, d_enc, f_c], dim=-1)
+         c = self.canonical_mlp(color_input)
+-        
++
+         # 5. Occlusion Filtering
+         sigma_prime = sigma * w_occ
+         c_prime = c * w_occ
+-        
++
+         return sigma_prime, c_prime
+ 
+@@ -202,5 +202,4 @@
+         width = config['width']
+         num_layers = config['num_layers']
+-        
+         for _ in range(num_layers):
+             layers.append(nn.Linear(in_dim, width))
+@@ -208,5 +207,4 @@
+             in_dim = width
+         self.net = nn.Sequential(*layers)
+-        
+     def forward(self, x):
+         return self.net(x)
+@@ -219,6 +217,6 @@
+     $$
+     *   $\mathcal{L}_{photo}$: Mean squared error between rendered color $\hat{C}(\mathbf{r})$ and ground truth $C(\mathbf{r})$ [S1].
+-    *   $\mathcal{L}_{ptc}$: Sampled point color supervision for top $N$ contributing points [S1].
+-    *   $\mathcal{L}_{bg}$: Background entropy loss [S1].
++    *   $\mathcal{L}_{ptc}$: Sampled point color supervision, which optimizes the color of sampled points with top $N$ weights that contribute most to the rendered color of the ray [S1].
++    *   $\mathcal{L}_{bg}$: Background entropy loss to encourage the points to concentrate on either foreground or background [S1].
+     *   $\mathcal{L}_{d\_norm}$: L1 regularization on deformation offset $\Delta p$ (prior: most points are static) [S1]:
+         $$
+@@ -242,9 +240,9 @@
+ **Edge Cases and Pitfalls:**
+ *   **Occlusion Artifacts:** If an empty point in observation space is static ($\Delta p=0$) but maps to an occupied location in canonical space, it retrieves non-zero density/color, causing artifacts [S1]. Solved by the occlusion mask $w^{occ}$ [S1].
+-*   **4D Grid Inefficiency:** Directly storing offsets in a 4D feature grid (3D pos + 1D time) is inefficient [S1]. NDVG uses a 3D deformation grid + MLP instead [S1].
++*   **4D Grid Inefficiency:** Directly storing offsets in a 4D feature grid (3D pos + 1D time) is inefficient [S1]. NDVG adopts a hybrid explicit-implicit representation consisting of a 3D feature grid and a light-weight MLP to decode the interpolated feature [S1].
+ 
+ ## Operating characteristics
+ *   **Speed:** NDVG achieves comparable performance to D-NeRF using only 20 minutes for training, which is more than 70× faster than D-NeRF [S1].
+-*   **Memory:** Uses explicit voxel grids. Coarse stage uses ~1.6M voxels for deformation and ~1M for canonical. Fine stage uses $190^3$ and $160^3$ voxels respectively [S1].
++*   **Memory:** Uses explicit voxel grids [S1]. Coarse stage uses ~1.6M voxels for deformation and ~1M for canonical [S1]. Fine stage uses $190^3$ and $160^3$ voxels respectively [S1].
+ *   **Strengths:** Fast training speed, efficient voxel-grid interpolation, explicit occlusion handling for dynamic scenes [S1].
+ *   **Limitations:** Monocular input requires careful occlusion modeling; resolution trade-off between quality and computation [S1].

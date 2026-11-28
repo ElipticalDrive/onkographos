@@ -1,0 +1,97 @@
+# Naive Voxel Ray Traversal
+
+Also called: Basic Voxel Raycasting, Direct Voxel Rendering, Fixed-step raycast, Linear voxel search with step equal to grid size, Naive Voxel Raycasting, Step-based voxel raycasting, Voxel Marching
+
+## Overview
+Naive Voxel Ray Traversal is a brute-force rendering technique that steps a ray forward in fixed increments along its direction vector, checking for occupied voxels at each step [S1, unofficial][S4, unofficial]. It solves the problem of determining ray-voxel intersections without converting volumetric data to triangle meshes, preserving high fidelity at smaller voxel sizes without the triangle count explosion [S2, unofficial]. Unlike [Amanatides-Woo Voxel Traversal](3132-amanatides-woo-voxel-traversal.md), which computes exact boundary crossings, this method uses a constant step size, prioritizing implementation simplicity over traversal accuracy [S1, unofficial][S2, unofficial].
+
+## How it works
+**Inputs:**
+- `ray_origin`: 3D vector $(O_x, O_y, O_z)$, typically the camera position [S4, unofficial][S7, unofficial].
+- `ray_direction`: Normalized 3D vector $(D_x, D_y, D_z)$ [S4, unofficial][S7, unofficial].
+- `voxel_grid`: 3D array or sparse structure storing voxel states (empty/filled or color data) [S4, unofficial][S5, unofficial].
+- `voxel_size`: Fixed step size $\Delta t$ along the ray, often equal to the physical voxel size or a smaller constant like `0.1f` [S4, unofficial][S5, unofficial][S7, unofficial].
+- `max_distance`: Maximum ray length in world units before termination [S4, unofficial][S5, unofficial].
+- `background_color`: Default output color when no voxel is hit [G].
+
+**Outputs:**
+- Pixel color: Color of the first non-empty voxel hit, or `background_color` if no hit occurs within `max_distance` [S4, unofficial].
+
+**Data Structures:**
+- The voxel grid is accessed via integer coordinates $(i, j, k)$ [S5, unofficial]. Continuous ray positions map to grid indices using $i = \lfloor x + 0.5 \rfloor$, $j = \lfloor y + 0.5 \rfloor$, $k = \lfloor z + 0.5 \rfloor$, rounding to the nearest integer grid center [S5, unofficial].
+
+**Algorithm Steps:**
+1. **Initialize Ray:** Set current position `pos` to `ray_origin`, `temp` (distance traveled) to 0.0, and `hit` flag to false [S4, unofficial][S7, unofficial].
+2. **Loop:** While `temp < max_distance` and `voxel_size > 0`:
+   a. **Query Voxel:** Convert `pos` to integer voxel coordinates $(i, j, k)$ using $\lfloor pos + 0.5 \rfloor$. Check if the voxel at $(i, j, k)$ is occupied [S5, unofficial][S7, unofficial].
+   b. **Check Hit:** If the voxel is filled, set `hit` to true, record the hit position and voxel data, and break the loop [S2, unofficial][S4, unofficial].
+   c. **Advance Ray:** Update `pos` by adding `ray_direction * voxel_size` and increment `temp` by `voxel_size` [S4, unofficial][S7, unofficial].
+3. **Termination:** The loop terminates when `temp >= max_distance` or a hit is found. If no hit occurs, the ray has exited the grid bounds or reached the maximum travel distance [S3, unofficial][S4, unofficial].
+4. **Output:** If `hit` is true, return the hit voxel's color. Otherwise, return `background_color` [S4, unofficial].
+
+**Pseudocode:**
+> **Unverified code.** The code below did not pass a test run against a reference implementation, or no test fits it, so it may contain errors.
+
+```python
+import math
+
+def naive_voxel_traverse(ray_origin, ray_direction, voxel_grid, voxel_size, max_distance, background_color):
+    if voxel_size <= 0:
+        return background_color
+    pos = list(ray_origin)
+    temp = 0.0
+    while temp < max_distance:
+        ix = math.floor(pos[0] + 0.5)
+        iy = math.floor(pos[1] + 0.5)
+        iz = math.floor(pos[2] + 0.5)
+        voxel = voxel_grid.get((ix, iy, iz))
+        if voxel is not None and voxel.is_filled():
+            return voxel.color
+        pos[0] += ray_direction[0] * voxel_size
+        pos[1] += ray_direction[1] * voxel_size
+        pos[2] += ray_direction[2] * voxel_size
+        temp += voxel_size
+    return background_color
+```
+
+**Parameters:**
+- `voxel_size`: The fixed step size. Often set to the physical size of a voxel in the grid, though smaller values (e.g., `0.1f`) are sometimes used to reduce tunneling at the cost of iteration count [S4, unofficial][S5, unofficial][S7, unofficial].
+- `max_distance`: Maximum ray length in world units [S4, unofficial][S5, unofficial].
+
+**Edge Cases and Pitfalls:**
+- **Tunneling/Missing Voxels:** The method can completely miss voxels that the ray should intersect, especially if the step size is large relative to the voxel size or if the ray passes through corners [S1, unofficial][S2, unofficial]. Decreasing the step size reduces this risk but does not eliminate it and significantly increases computation time [S1, unofficial].
+- **Aliasing Artifacts:** Fixed-step sampling causes visible aliasing artifacts because the sampling points are not aligned with the voxel grid boundaries [S4, unofficial].
+- **Double Processing:** Some voxels may be processed twice due to the stepping logic and coordinate rounding [S4, unofficial].
+- **Performance:** The method processes many empty voxels even if the ray does not hit anything, wasting computation [S4, unofficial]. Random memory access patterns cause high bandwidth usage, potentially exceeding GPU memory clock limits [S5, unofficial].
+- **Precision/Division:** Floating point precision errors in shaders may cause different results than CPU implementations; double precision or careful clamping may be required [S6, unofficial]. Division by zero must be avoided if direction components are zero [S6, unofficial].
+
+## Subtopics
+
+### Ray ID Optimization
+An optimization that tracks object identifiers during traversal to skip redundant intersection tests for the same object [S8, unofficial]. During traversal, a `rayID` is assigned or checked for each voxel to record which objects have already been tested, ensuring each object is intersected at most once per ray [S8, unofficial]. Its effectiveness scales with grid subdivision level, as higher subdivision causes objects to cover more voxels, increasing the probability of repeated visits [S8, unofficial]. In test scenes with high object counts, it can reduce ray intersections significantly (e.g., from 6.6 to 3.8 per ray in test scene 7 with 3540 objects) [S8, unofficial].
+
+### Block Walk / Ray-Voxel Intersections
+A compromise traversal approach where sampling occurs only when the ray intersects voxel boundaries (faces in 3D, edges in 2D) [S9, unofficial]. It attempts to balance speed and accuracy [S9, unofficial]. In 2D, 1 interpolation is necessary per sample; in 3D, 3 interpolations are necessary per sample (e.g., along Y, then Y again, then X) [S9, unofficial]. Pitfalls include unequal sampling distances, which can lead to clusters of samples very close together causing extra computation without improving visual quality, and lower accuracy compared to regular sampling due to uneven spacing [S9, unofficial]. It is faster than regular sampling but less accurate, and more accurate than nearest neighbor but slower [S9, unofficial].
+
+## Operating characteristics
+- **Time Complexity:** Linear in the number of voxels along the ray path per pixel [S4, unofficial]. Performance is generally unacceptable for real-time without optimization [S4, unofficial].
+- **Memory Complexity:** Depends on the voxel grid storage format; using SSBOs causes uncacheable random access, while texture caches improve locality [S5, unofficial].
+- **Measured Performance:** Rendering an 80x80x100 voxel grid (640k total voxels) at 700x444 resolution takes approximately 20 seconds per frame on an AMD Phenom II X6 @ 3.4 GHz using a single thread [S4, unofficial].
+- **Strengths:** Simple to implement; does not require complex data structures like octrees for basic traversal; renders only visible voxels, avoiding CPU-GPU transfer overhead compared to geometry shader approaches [S3, unofficial]. Unlike triangle mesh rendering, the number of rays remains constant per pixel regardless of voxel resolution [S2, unofficial].
+- **Limitations:** Prone to tunneling and aliasing artifacts; inefficient for sparse grids as it processes empty space; performance degrades quickly with multiple rays per pixel (shadows, AO) [S2, unofficial][S4, unofficial].
+- **When to Use:** Educational purposes, simple voxel rendering, or as a baseline for comparison [G].
+- **When Not to Use:** When high fidelity and artifact-free rendering are required, or when performance is critical [S1, unofficial][S4, unofficial].
+
+## Background
+Naive Voxel Ray Traversal originated as a foundational technique in voxel rendering, discussed in early game development forums and tutorials as a starting point before more efficient algorithms like Amanatides-Woo are introduced [S4, unofficial]. The method is used in Wolf and Doom raycasting techniques and in GLSL volumetric 3D back raytracers [S6, unofficial]. It is often discussed in the context of "Ray Line Voxelization" (RLV) and compared to other ray traversal techniques such as Regular Sampling and Nearest Neighbor [S3, unofficial][S7, unofficial]. The method highlights the fundamental trade-off between implementation simplicity and rendering accuracy/performance in voxel-based graphics [S2, unofficial].
+
+## Sources
+[S1] This Tiny Algorithm Can Render BILLIONS of Voxels in Real Time, https://www.youtube.com/watch?v=ztkh1r1ioZo, fetched 2026-10-25 (unofficial)
+[S2] Voxel Ray Tracing, https://www.youtube.com/watch?v=gXSHtBZFxEI, fetched 2026-10-25 (unofficial)
+[S3] PDF A Comparison of Optimal Scanline Voxelization Algorithms, https://liu.diva-portal.org/smash/get/diva2:1459330/FULLTEXT01.pdf, fetched 2026-10-25 (unofficial)
+[S4] Any fast voxel rendering algorithms? - GameDev.net, https://gamedev.net/forums/topic/597410-any-fast-voxel-rendering-algorithms/4785388/, fetched 2026-10-26 (unofficial)
+[S5] How many calculations can a GPU do with a given amount of FLOPS?, https://stackoverflow.com/questions/68490667/how-many-calculations-can-a-gpu-do-with-a-given-amount-of-flops, fetched 2026-10-27 (unofficial)
+[S6] How to handle incorrect index calculation for discretized ray tracing?, https://stackoverflow.com/questions/49214524/how-to-handle-incorrect-index-calculation-for-discretized-ray-tracing, fetched 2026-10-27 (unofficial)
+[S7] azetheon/voxelreach-rewrite, https://github.com/azetheon/voxelreach-rewrite, fetched 2026-10-27 (unofficial)
+[S8] Fast Voxel Traversal for Ray Tracing | PDF, https://www.scribd.com/document/6913705/A-faster-voxel-traversal-algorithm-for-ray-tracing, fetched 2026-10-25 (unofficial)
+[S9] Approaches to Ray Traversal for Direct Volume Rendering: Student Q&A and Exam Preparation, https://www.youtube.com/watch?v=Gwh395J4MeM, fetched 2026-10-25 (unofficial)

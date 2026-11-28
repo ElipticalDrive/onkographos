@@ -1,0 +1,157 @@
+# Surface Regularization
+
+Also called: Point Cloud Surface Regularization, Repulsion and Projection Regularization
+
+## Overview
+Surface Regularization is a geometric constraint strategy applied during the optimization of point-based radiance fields to prevent the point cloud from collapsing into local minima and to enforce manifold structure [S1]. It addresses the lack of inherent connectivity in point clouds by combining a repulsion term, which encourages uniform point distribution on local tangent planes, and a projection term, which forces points to lie on those planes [S1]. Unlike mesh-based regularization, it operates directly on unstructured points using weighted Principal Component Analysis (PCA) to estimate local geometry [S1].
+
+## How it works
+**Inputs and Outputs:**
+*   **Inputs:** A set of points $P = \{p_i\}$ with associated normals $N = \{n_i\}$, a neighborhood radius $D$, and an occlusion counter $O = \{o_k\}$ for each point [S1].
+*   **Outputs:** Gradient updates for point positions $p_i$ and normals $n_i$ derived from the regularization losses $L_r$ and $L_p$ [S1].
+
+**Data Structures:**
+*   **Point:** 3D position vector $p_i \in \mathbb{R}^3$ [S1].
+*   **Normal:** 3D unit vector $n_i \in \mathbb{R}^3$ [S1].
+*   **Occlusion Counter:** Integer $o_k \ge 0$ tracking how many times point $p_k$ is occluded across all camera views [S1].
+
+**Algorithm:**
+The method computes two loss terms based on local surface estimation via weighted PCA [S1].
+
+1.  **Compute Weights:** For a target point $p_i$ and each neighbor $p_k$ within distance $D$ (i.e., $\|p_i - p_k\| \le D$), compute three weights [S1]:
+    *   **Spatial Weight ($\psi_{ik}$):** Penalizes distance [S1].
+        $$ \psi_{ik} = \exp \left( - \frac{\|p_i - p_k\|^2}{D^2} \right) $$
+    *   **Normal Similarity Weight ($\theta_{ik}$):** Penalizes normal divergence [S1].
+        $$ \theta_{ik} = \exp \left( - \frac{(1 - n_k^\top n_i)^2}{\max(10^{-5}, 1 - \cos(\Theta))} \right) $$
+        The denominator uses a constant floor of $10^{-5}$ or a threshold $\cos(\Theta)$ to prevent division by zero when normals are identical [S1].
+    *   **Visibility Weight ($\phi_{ik}$):** Penalizes occluded points, treating them as potential outliers [S1].
+        $$ \phi_{ik} = \frac{1}{o_k + 1} $$
+    *   **Combined Weight ($w_{ik}$):**
+        $$ w_{ik} = \frac{\psi_{ik} \theta_{ik} \phi_{ik}}{\sum_{k \in \mathcal{N}_i} \psi_{ik} \theta_{ik} \phi_{ik}} $$
+        where $\mathcal{N}_i$ is the set of neighbors of $p_i$ [S1].
+
+2.  **Estimate Local Tangent Plane:**
+    *   Compute the weighted centroid $\mu_i = \sum_{k \in \mathcal{N}_i} w_{ik} p_k$ [S1].
+    *   Perform Singular Value Decomposition (SVD) on the matrix of weighted centered vectors $\sqrt{w_{ik}}(p_k - \mu_i)$ to find the principal components [S1].
+    *   Let $V$ be the matrix of eigenvectors (principal components) sorted by eigenvalue magnitude [S1].
+    *   $\tilde{V}$ contains the first 2 principal components (spanning the tangent plane) [S1].
+    *   $V_n$ is the 3rd principal component (the surface normal) [S1].
+
+3.  **Compute Repulsion Loss ($L_r$):**
+    *   Calculate projected point-to-point distances on the tangent plane:
+        $$ d_{ik} = \tilde{V}^\top (p_i - p_k) $$
+        This represents the 2D vector of distances in the tangent space [S1].
+    *   The loss encourages points to spread out uniformly:
+        $$ L_r = \frac{1}{N} \sum_{i} \sum_{k \in \mathcal{N}_i} \frac{\psi_{ik}}{N} (d_{ik}^\top d_{ik} + 10^{-4}) $$
+        The term $10^{-4}$ is added to the squared distance as specified in the source [S1].
+
+4.  **Compute Projection Loss ($L_p$):**
+    *   Calculate point-to-plane distances (distance to the tangent plane):
+        $$ d_{ik} = V_n^\top (p_i - p_k) $$
+        This is the scalar projection of the vector $(p_i - p_k)$ onto the normal $V_n$ [S1].
+    *   The loss forces points to lie on the surface:
+        $$ L_p = \frac{1}{N} \sum_{i} \sum_{k \in \mathcal{N}_i} w_{ik} d_{ik}^2 $$
+        The method minimizes this together with the per-pixel image loss [S1].
+
+5.  **Total Objective:**
+    The total loss for optimization is:
+    $$ L = \sum_{v=0}^{V} L(I_v, I_v^*) + \gamma_p L_p + \gamma_r L_r $$
+    where $L(I_v, I_v^*)$ is the image reconstruction loss for view $v$, $\gamma_p = 0.02$, and $\gamma_r = 0.05$ [S1].
+
+**Pseudocode:**
+
+> **Unverified code.** The code below did not pass a test run against a reference implementation, or no test fits it, so it may contain errors.
+
+```python
+import numpy as np
+
+def surface_regularization(points, normals, occlusion_counts, neighbors, D, gamma_p=0.02, gamma_r=0.05):
+    """
+    Computes regularization gradients for point positions based on Surface Regularization.
+    Normals and points are updated alternately during optimization [S1].
+    """
+    N = points.shape[0]
+    grad_p = np.zeros_like(points)
+    
+    for i in range(N):
+        p_i = points[i]
+        n_i = normals[i]
+        k_indices = neighbors[i]
+        K = len(k_indices)
+        
+        if K == 0:
+            continue
+            
+        p_k = points[k_indices]
+        n_k = normals[k_indices]
+        
+        # 1. Compute Weights
+        dist_sq = np.sum((p_i - p_k) ** 2, axis=1)
+        psi = np.exp(-dist_sq / (D ** 2))
+        
+        dot = np.sum(n_i * n_k, axis=1)
+        one_minus_cos = 1.0 - dot
+        theta = np.exp(-(1.0 - dot) ** 2 / np.maximum(1e-5, one_minus_cos))
+        
+        phi = 1.0 / (occlusion_counts[k_indices] + 1.0)
+        
+        raw_w = psi * theta * phi
+        w = raw_w / np.sum(raw_w)
+        
+        # 2. Weighted PCA for tangent plane
+        mu = np.sum(w[:, np.newaxis] * p_k, axis=0)
+        centered = p_k - mu
+        sqrt_w = np.sqrt(w)[:, np.newaxis]
+        A = sqrt_w * centered
+        _, _, Vt = np.linalg.svd(A, full_matrices=False)
+        
+        V_tilde = Vt[:2, :]  # Tangent plane basis (2x3)
+        V_n = Vt[2, :]       # Normal (3,)
+        
+        # 3. Repulsion Loss & Gradient
+        diff = (p_i - p_k).T  # (3, K)
+        d_rep = V_tilde @ diff  # (2, K)
+        d_rep_sq = np.sum(d_rep ** 2, axis=0)  # (K,)
+        
+        # Gradient of (d_rep^2 + 1e-4) w.r.t p_i: 2 * V_tilde^T @ d_rep
+        grad_rep_k = 2.0 * V_tilde.T @ d_rep  # (3, K)
+        grad_p[i] += gamma_r * np.sum((psi / (N * N))[:, np.newaxis] * grad_rep_k, axis=1)
+        
+        # 4. Projection Loss & Gradient
+        d_proj = V_n @ diff  # (K,)
+        # Gradient of d_proj^2 w.r.t p_i: 2 * d_proj * V_n
+        grad_proj_k = 2.0 * d_proj * V_n  # (K, 3)
+        grad_p[i] += gamma_p * np.sum((w / N)[:, np.newaxis] * grad_proj_k, axis=0)
+        
+    # Note: Normal gradients are computed similarly but omitted for brevity [G].
+    return grad_p
+```
+
+**Parameters:**
+*   $\gamma_p = 0.02$: Weight for the projection loss [S1].
+*   $\gamma_r = 0.05$: Weight for the repulsion loss [S1].
+*   $D$: Neighborhood radius. Not given in the sources.
+*   $\Theta$: Numerical floor constant. The source uses $\max(10^{-5}, 1 - \cos(\Theta))$ as a stability floor to prevent division by zero [S1].
+
+**Edge Cases and Pitfalls:**
+*   **Occlusion Counters:** Points with high occlusion counts receive low visibility weights, reducing their influence on the local plane estimation. This prevents outliers inside the model from distorting the surface [S1].
+*   **Normal Similarity:** The term $\max(10^{-5}, 1 - \cos(\Theta))$ prevents division by zero when normals are parallel. If normals are identical, the weight $\theta_{ik}$ becomes $\exp(0) = 1$ [S1].
+*   **Alternating Updates:** Normals and points are updated alternately because the gradient for positions depends on normals and vice versa. The source suggests optimizing normals for $T_n$ steps, then points for $T_p$ steps [S1].
+
+## Subtopics
+
+### Sparse Regularization for Point Cloud Opacity
+The parent method that provides the opacity constraints. Surface regularization adds geometric constraints to the point positions and normals. [Sparse Regularization for Point Cloud Opacity](15879-sparse-regularization-for-point-cloud-opacity.md)
+
+## Operating characteristics
+*   **Time Complexity:** The method requires computing weights and PCA for each point's neighborhood [G]. If $K$ is the average number of neighbors, the complexity per point is $O(K)$ for weight computation and $O(K \cdot 3^2)$ for the SVD [G]. Total complexity is $O(N \cdot K)$ [G].
+*   **Memory Complexity:** $O(N \cdot K)$ to store neighbor weights and intermediate vectors [G].
+*   **Strengths:** Effectively prevents point clustering in local minima and enforces clean manifold surfaces [S1]. It is robust to noise due to the weighted PCA and visibility filtering [S1].
+*   **Limitations:** Requires maintaining and updating normals for each point, which adds computational overhead compared to position-only optimization [G]. The method is sensitive to the choice of neighborhood radius $D$ [G].
+*   **When to Use:** Use when optimizing point-based radiance fields or implicit surfaces where geometric smoothness and uniformity are required, and mesh structures are not available [G].
+
+## Background
+Surface Regularization was introduced by Wang Yifan, Serena Felice, Shihao Wu, Cengiz Öztireli, and Olga Sorkine-Hornung in their paper "Differentiable Surface Splatting for Point-based Geometry Processing" (2020) [S1]. It is inspired by earlier works on point cloud denoising and surface reconstruction by Huang et al. (2009) and Öztireli et al. (2009) [S1]. The method is used in differentiable rendering pipelines that optimize point clouds to match target images, ensuring that the resulting geometry is well-structured and manifold-like [S1].
+
+## Sources
+[S1] Differentiable surface splatting for point-based geometry processing, https://doi.org/10.1145/3355089.3356513, fetched 2026-10-26

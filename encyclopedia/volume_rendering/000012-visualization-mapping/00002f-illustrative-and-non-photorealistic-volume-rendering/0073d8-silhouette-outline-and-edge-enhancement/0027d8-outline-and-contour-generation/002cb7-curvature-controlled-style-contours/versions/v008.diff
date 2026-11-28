@@ -1,0 +1,161 @@
+--- v007.md
++++ v008.md
+@@ -4,19 +4,19 @@
+ 
+ ## Overview
+-Curvature-Controlled Style Contours is a volume rendering technique that regulates contour thickness based on the normal curvature along the view direction to prevent the uncontrolled variation in thickness inherent in standard dot-product silhouette methods [S1]. While standard methods ($v \cdot n \approx 0$) produce contours that are too thick on flat surfaces and too thin on fine structures, this method uses curvature to maintain consistent visual weight across varying surface geometries [S1]. It builds on [Outline and Contour Generation](4137-outline-and-contour-generation.md) by integrating curvature-aware edge detection with style transfer functions.
++Curvature-Controlled Style Contours is a volume rendering technique that regulates contour thickness based on the normal curvature along the view direction to prevent the uncontrolled variation in thickness inherent in standard dot-product silhouette methods [S1]. While standard methods ($v \cdot n \approx 0$) produce contours that are too thick on flat surfaces and too thin on fine structures, this method uses curvature to maintain consistent visual weight across varying surface geometries [S1]. It builds on [Outline and Contour Generation](4137-outline-and-contour-generation.md) by integrating curvature-aware edge detection with style transfer functions [S1].
+ 
+ ## How it works
+ **Inputs and Outputs:**
+-- Input: Volumetric dataset, view vector $v$, user-defined thickness parameter $T$.
+-- Output: Rendered image with stylized contours whose thickness is controlled by local curvature.
++- Input: Volumetric dataset, view vector $v$, user-defined thickness parameter $T$ [S1].
++- Output: Rendered image with stylized contours whose thickness is controlled by local curvature [S1].
+ 
+ **Data Structures:**
+-- Sample point: Position, normal vector $n$, previous normal vector $n_{prev}$ (from the previous sample along the ray).
++- Sample point: Position, normal vector $n$, previous normal vector $n_{prev}$ (from the previous sample along the ray) [S1].
+ - Geometry: No pre-computed Hessian or geometry tensor textures are required [S1].
+ 
+ **Approximation of Normal Curvature ($\kappa_v$):**
+ Exact curvature requires the geometry tensor derived from the Hessian matrix, which is too expensive for fragment programs and requires two additional 3D textures for pre-computation [S1]. Instead, $\kappa_v$ is approximated using the rate of change of the normal along the viewing ray [S1].
+-1. During ray casting, store the normal $n_{prev}$ at the previous sample point.
+-2. Calculate the angle between the current normal $n$ and $n_{prev}$.
++1. During ray casting, store the normal $n_{prev}$ at the previous sample point [S1].
++2. Calculate the angle between the current normal $n$ and $n_{prev}$ [S1].
+ 3. Divide this angle by the step size $\Delta s$ between sample points:
+    $$ \kappa_v \approx \frac{\angle(n, n_{prev})}{\Delta s} $$
+@@ -27,12 +27,12 @@
+ $$ |n \cdot v| \le \sqrt{T \kappa_v (2 - T \kappa_v)} $$
+ Where:
+-- $n$ is the surface normal at the current sample.
+-- $v$ is the view vector.
+-- $T$ is the user-defined thickness value.
+-- $\kappa_v$ is the approximated normal curvature.
++- $n$ is the surface normal at the current sample [S1].
++- $v$ is the view vector [S1].
++- $T$ is the user-defined thickness value [S1].
++- $\kappa_v$ is the approximated normal curvature [S1].
+ 
+ **Style Integration (Lit Sphere Map):**
+ To integrate contours with style transfer functions (e.g., lit sphere maps), the normal projection coordinates are adjusted based on the curvature measure [S1].
+-1. Let $r = |n_{x,y}|$ be the length of the eye-space normal projected onto the lit sphere map.
++1. Let $r = |n_{x,y}|$ be the length of the eye-space normal projected onto the lit sphere map [S1].
+ 2. Calculate the adjustment factor $\delta$:
+    $$ \delta = 1 - \min\left(1, \frac{\sqrt{T \kappa_v (2 - T \kappa_v)} - |n \cdot v|}{\sqrt{T \kappa_v (2 - T \kappa_v)}}\right) $$
+@@ -43,51 +43,60 @@
+ **Pseudocode:**
+ ```python
+-def curvature_controlled_contour(ray_origin, ray_direction, volume, T):
+-    # Initialize previous normal
++import math
++
++def curvature_controlled_contour(volume, origin, direction, T, step_size, max_steps):
++    color = [0.0, 0.0, 0.0, 0.0]
++    transmittance = 1.0
+     n_prev = None
+-    
+-    # Ray casting loop
+-    for sample in ray_cast(ray_origin, ray_direction, volume):
+-        n = sample.normal
+-        pos = sample.position
+-        
+-        # Calculate step size from previous position
+-        if n_prev is not None:
+-            dist = distance(pos, sample.previous_position)
+-            # Approximate curvature: angle between normals divided by step size
+-            # angle_between returns radians
+-            kappa_v = angle_between(n, n_prev) / dist
++    pos_prev = origin
++
++    for i in range(max_steps):
++        pos = [origin[j] + direction[j] * (i * step_size) for j in range(3)]
++        if not volume.contains(pos):
++            break
++
++        n = volume.get_normal(pos)
++        dist = math.sqrt(sum((pos[j] - pos_prev[j])**2 for j in range(3)))
++
++        if n_prev is not None and dist > 1e-6:
++            cos_angle = max(-1.0, min(1.0, sum(n[j] * n_prev[j] for j in range(3))))
++            angle = math.acos(cos_angle)
++            kappa_v = angle / dist
+         else:
+             kappa_v = 0.0
+-            
++
+         n_prev = n
+-        
+-        # Check contour condition
+-        threshold = sqrt(T * kappa_v * (2 - T * kappa_v))
+-        dot_product = abs(dot(n, ray_direction))
+-        
+-        is_contour = dot_product <= threshold
+-        
++        pos_prev = pos
++
++        threshold_sq = T * kappa_v * (2.0 - T * kappa_v)
++        if threshold_sq < 0.0:
++            threshold_sq = 0.0
++        threshold = math.sqrt(threshold_sq)
++
++        dot_nv = abs(sum(n[j] * direction[j] for j in range(3)))
++        is_contour = dot_nv <= threshold
++
+         if is_contour:
+-            # Adjust lit sphere map coordinates for style transfer
+-            r = length(n.xy) # Projected normal length
+-            numerator = sqrt(T * kappa_v * (2 - T * kappa_v)) - dot_product
+-            denominator = sqrt(T * kappa_v * (2 - T * kappa_v))
+-            
+-            # Avoid division by zero if threshold is 0
+-            if denominator == 0:
++            r = math.sqrt(n[0]**2 + n[1]**2)
++            denom = threshold
++            if denom > 1e-6:
++                ratio = (denom - dot_nv) / denom
++                delta = 1.0 - min(1.0, ratio)
++            else:
+                 delta = 1.0
+-            else:
+-                delta = 1.0 - min(1.0, numerator / denominator)
+-                
+             r_prime = min(1.0, delta * r)
+-            
+-            # Use r_prime to lookup color in style transfer function
+-            color = lookup_style(r_prime)
++            c = volume.lookup_style(r_prime)
+         else:
+-            color = lookup_style(r)
+-            
+-        accumulate_color(color)
++            c = volume.lookup_style(math.sqrt(n[0]**2 + n[1]**2))
++
++        alpha = volume.get_opacity(pos)
++        color = [color[j] + transmittance * alpha * c[j] for j in range(4)]
++        transmittance *= (1.0 - alpha)
++        if transmittance < 1e-4:
++            break
++
++    return color
+ ```
++*Note: Standard front-to-back volume rendering accumulation is implemented to resolve the ray marching loop and color blending, as the source focuses on the contour/style logic [G].*
+ 
+ **Parameters:**
+@@ -95,5 +104,5 @@
+ 
+ **Edge Cases and Pitfalls:**
+-- If $\kappa_v$ is zero (flat surface), the threshold becomes zero, and the condition $|n \cdot v| \le 0$ implies only perfectly orthogonal normals are contours, which may result in no contours on flat regions if precision issues arise. However, the formula handles $T \kappa_v (2 - T \kappa_v)$; if $\kappa_v=0$, threshold is 0.
++- If $\kappa_v$ is zero, the threshold becomes zero and the condition $|n \cdot v| \le 0$ requires perfectly orthogonal normals to trigger a contour [S1].
+ - The approximation of $\kappa_v$ is not geometrically exact as it samples along the ray rather than the surface, but this is accepted as sufficient for the method's purpose [S1].
+ 
+@@ -104,6 +113,6 @@
+ 
+ ## Operating characteristics
+-- **Time Complexity:** Low overhead compared to exact curvature methods. The approximation requires only storing the previous normal and computing an angle, avoiding expensive Hessian calculations or additional texture lookups [S1].
+-- **Memory Complexity:** Minimal additional memory (one previous normal per ray or tile). No pre-computed 3D textures for geometry tensors are needed [S1].
++- **Time Complexity:** Low overhead compared to exact curvature methods [S1]. The approximation requires only storing the previous normal and computing an angle, avoiding expensive Hessian calculations or additional texture lookups [S1].
++- **Memory Complexity:** Minimal additional memory (one previous normal per ray or tile) [S1]. No pre-computed 3D textures for geometry tensors are needed [S1].
+ - **Strengths:** Provides consistent contour thickness across varying surface curvatures, addressing the "too thick on flat, too thin on fine" problem of standard dot-product contours [S1]. Interactive performance is maintained [S1].
+ - **Limitations:** The curvature approximation is coarse and not geometrically exact [S1]. It relies on the step size of the ray casting; varying step sizes may affect the consistency of $\kappa_v$ [S1].

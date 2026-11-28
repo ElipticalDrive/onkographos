@@ -1,0 +1,174 @@
+# Rectangular Heuristic
+
+Also called: Rectangular division scheme
+
+## Overview
+The Rectangular Heuristic is a load-balancing partitioning method for parallel volume rendering that divides the image plane into rectangular regions by organizing processors into a 2D mesh. It solves the scalability limitations of 1D horizontal division schemes, where the number of partitions is restricted by the number of scanlines and large workload disparities cause significant imbalance [S1, unofficial]. By partitioning in both dimensions, it improves load distribution across a 2D processor topology [S1, unofficial].
+
+## How it works
+**Inputs:**
+- Image plane dimensions (width $W$, height $H$).
+- Set of local triangles with their 3D bounding boxes.
+- Processor topology: $M$ clusters of $K$ processors each (total $P = M \times K$).
+
+**Outputs:**
+- A set of rectangular regions, each assigned to one processor.
+- Vertical division boundaries for all $M$ clusters, distributed to all processors.
+
+**Data Structures:**
+- `SWLA` (Scanline Work Load Array): Size $H$. `SWLA[i]` stores the workload contribution of horizontal scanline $i$. Used to determine the $M$ horizontal bands.
+- `XWLA` (X-dimension Work Load Arrays): A 2D array of size $M \times W$. `XWLA[v][j]` stores the workload contribution of vertical scanline $j$ within horizontal region (band) $v$. $v \in \{1, \dots, M\}$, $j \in \{1, \dots, W\}$.
+
+**Steps:**
+
+1.  **Horizontal Partitioning:**
+    Partition the image plane into $M$ horizontal bands using the Horizontal Division Scheme. This determines the $y$-coordinates of the horizontal cuts. Let the bands be indexed $v = 1, \dots, M$.
+
+2.  **Local Workload Calculation:**
+    For each processor, calculate the workload distribution in the x-dimension for each horizontal band:
+    a.  Project the bounding box of each local triangle onto the image plane.
+    b.  If a bounding box spans multiple horizontal bands, split it into segments corresponding to the intersection with each band.
+    c.  For each segment, update the corresponding entries in `XWLA`. Specifically, if a triangle segment covers vertical scanlines $j_{start}$ to $j_{end}$ in band $v$, add the triangle's workload contribution to `XWLA[v][j]` for all $j$ in that range. [G] The workload contribution is typically proportional to the area of the projected bounding box or the number of pixels covered.
+
+3.  **Global Sum:**
+    Perform a global sum operation on the `XWLA` arrays across all processors. After this step, every processor has the complete `XWLA` array representing the total workload in the x-dimension for each horizontal band.
+
+4.  **Prefix Sum:**
+    For each processor belonging to cluster $m_y\_cluster$, perform a prefix sum operation on its local `XWLA[m_y_cluster]` array. Let $L$ be the width of the image (number of vertical scanlines in x-dimension). The last entry `XWLA[m_y_cluster][L]` now holds the total workload for that horizontal band.
+
+5.  **Average Load Calculation:**
+    Calculate the average workload per processor within the cluster:
+    $$ AvrgLd = \frac{XWLA[m_y\_cluster][L]}{K} $$
+    where $K$ is the number of processors in the cluster.
+
+6.  **Vertical Division:**
+    Call the `FIND_DIVISION(K, XWLA[m_y_cluster])` procedure. This procedure (described in the context of the Horizontal Division Scheme) determines $K-1$ cut points that divide the horizontal band into $K$ vertical bands such that the workload is balanced. The input is the number of regions $K$ and the workload array for the specific cluster's horizontal band.
+
+7.  **Global Concatenate:**
+    Perform a global concatenate operation to distribute the vertical division boundaries calculated in Step 6 to all processors. This ensures every processor knows the vertical cuts for all $M$ clusters, allowing it to determine the exact rectangular region it owns for any given triangle projection. This operation can be implemented in $\log_2(M)$ steps.
+
+**Pseudocode:**
+
+> **Unverified code.** The code below did not pass a test run against a reference implementation, or no test fits it, so it may contain errors.
+
+```python
+def rectangular_heuristic(triangles, image_width, image_height, num_clusters_M, processors_per_cluster_K):
+    """
+    Implements the Rectangular Heuristic for volume rendering partitioning.
+    
+    Args:
+        triangles: List of triangle objects, each with a method get_bounding_box() 
+                   returning (x_min, y_min, x_max, y_max).
+        image_width: Width of the image plane (W).
+        image_height: Height of the image plane (H).
+        num_clusters_M: Number of horizontal bands (M).
+        processors_per_cluster_K: Number of processors per cluster (K).
+        
+    Returns:
+        divisions: A list of M lists, where divisions[v] contains K-1 vertical cut 
+                   positions for horizontal band v.
+    """
+    # Step 1: Horizontal Partitioning
+    # Determine M horizontal bands. This assumes a helper function exists 
+    # that implements the Horizontal Division Scheme using SWLA.
+    horizontal_bands = horizontal_division_scheme(triangles, image_height, num_clusters_M)
+    
+    # Initialize XWLA: M bands x W scanlines
+    # XWLA[v][j] stores workload for vertical scanline j in band v
+    XWLA = [[0.0] * image_width for _ in range(num_clusters_M)]
+    
+    # Step 2: Local Workload Calculation
+    for triangle in triangles:
+        bbox = triangle.get_bounding_box()
+        x_min, y_min, x_max, y_max = bbox
+        
+        # Determine which horizontal bands this triangle overlaps
+        for v in range(num_clusters_M):
+            band_y_min, band_y_max = horizontal_bands[v]
+            
+            # Check for overlap in y-dimension
+            if y_max <= band_y_min or y_min >= band_y_max:
+                continue
+            
+            # Calculate overlap in y-dimension
+            overlap_y_min = max(y_min, band_y_min)
+            overlap_y_max = min(y_max, band_y_max)
+            
+            # Project bounding box to x-dimension for this band
+            # The x-range is constant for the triangle's bounding box
+            # Update XWLA for the x-range covered by the triangle in this band
+            # Note: In practice, workload might be distributed based on pixel area.
+            # Here we assume a simple contribution per scanline or use a helper.
+            # For simplicity, we assume the triangle contributes to all scanlines 
+            # from x_min to x_max in this band.
+            for j in range(x_min, x_max):
+                if 0 <= j < image_width:
+                    # [G] Workload contribution calculation depends on specific 
+                    # implementation details not fully specified in sources.
+                    # Typically, this is the area of intersection or a weight.
+                    XWLA[v][j] += triangle.get_workload_contribution()
+    
+    # Step 3: Global Sum on XWLA
+    # All processors sum their local XWLA contributions to get the global XWLA
+    XWLA = global_sum(XWLA)
+    
+    # Step 4 & 5: Prefix Sum and Average Load Calculation
+    # Each processor belongs to a specific cluster m_y_cluster
+    # We assume this function is called per processor or cluster
+    divisions = []
+    
+    for v in range(num_clusters_M):
+        # Perform prefix sum on the v-th band's workload array
+        prefix_sum_array = prefix_sum(XWLA[v])
+        
+        # Total workload for this band
+        total_workload = prefix_sum_array[image_width - 1]
+        
+        # Average load per processor in this cluster
+        avg_load = total_workload / processors_per_cluster_K
+        
+        # Step 6: Find Vertical Divisions
+        # Find K-1 cut points to balance the workload in this band
+        cuts = find_division(processors_per_cluster_K, XWLA[v], avg_load)
+        divisions.append(cuts)
+        
+    # Step 7: Global Concatenate
+    # Distribute all vertical divisions to all processors
+    # [G] Implementation of global concatenate depends on the parallel 
+    # communication library used (e.g., MPI_Allgather).
+    all_divisions = global_concatenate(divisions)
+    
+    return all_divisions
+
+def find_division(num_regions, workload_array, avg_load):
+    """
+    Finds division points to balance workload.
+    This is a placeholder for the FIND_DIVISION procedure described in 
+    the Horizontal Division Scheme context.
+    """
+    # [G] Standard greedy partitioning algorithm:
+    # Iterate through scanlines, accumulating workload. 
+    # When accumulated workload exceeds i * avg_load, record a cut.
+    cuts = []
+    current_workload = 0.0
+    for i in range(1, num_regions):
+        target = i * avg_load
+        while current_workload < target and len(cuts) < num_regions - 1:
+            # This logic needs to be precise based on the specific 
+            # FIND_DIVISION implementation from the parent article.
+            # For now, we assume it returns the indices.
+            pass 
+    return cuts
+```
+
+## Operating characteristics
+- **Scalability:** Improves upon 1D horizontal division by allowing the number of partitions to scale with the number of processors in both dimensions, rather than being limited by the number of scanlines [S1, unofficial].
+- **Load Balance:** Reduces load imbalance when there are large differences in workload among scanlines, as it can balance load in both x and y directions [S1, unofficial].
+- **Complexity:** The algorithm involves global sum and prefix sum operations, which are $O(P)$ or $O(\log P)$ depending on the parallel implementation, plus the cost of finding divisions. The global concatenate step takes $\log_2(M)$ steps [S1, unofficial].
+- **Limitations:** Requires communication between all processors for global sums and concatenation, which can be a bottleneck on large-scale systems if not optimized.
+
+## Background
+The Rectangular Heuristic was introduced as an improvement over the Horizontal Division Scheme to address its scalability and load-balancing limitations. It is part of a family of greedy axis-aligned spatial partitioning methods used in parallel volume rendering. The method is described in the context of a 2D processor mesh organization [S1, unofficial].
+
+## Sources
+[S1] ;Г, ,1:. 'i f ,3 Ψ |'̂*i, ̂ t ѴУ t ̂ -.̂ 'j f'\ ' ‘'̂ '· îM. Vl ■I ·' !■' Í; 1 ! é .1 li ifi; .· ̂'■ '’(■H ' ■'“' ’"ΐ ΐ'-ΐ ...., https://repository.bilkent.edu.tr/server/api/core/bitstreams/a7dc03c6-3640-4028-b1b3-d6296aa2d23c/content, fetched 2026-10-30 (unofficial)

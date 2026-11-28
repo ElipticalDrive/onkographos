@@ -1,0 +1,75 @@
+# Opacity Loss
+
+Also called: Binary Cross Entropy Opacity Loss, Object Mask Constraint
+
+## Overview
+The Opacity Loss is a regularization term used in differentiable volume rendering to enforce geometric consistency when a binary object mask is available [S1]. It forces the rendered opacity of rays passing through the object region to align with the mask distribution, typically resulting in an opaque surface [S1]. It operates directly on the alpha compositing output rather than pixel color, distinguishing it from photometric losses [G].
+
+## How it works
+**Inputs and Outputs**
+*   **Inputs:**
+    *   $M$: Binary object mask tensor of shape $(H, W)$, where $H$ and $W$ are image dimensions. Values are $0$ or $1$ [S1][S2, unofficial].
+    *   $O$: Rendered opacity tensor of shape $(H, W)$, computed via alpha compositing [S1].
+    *   $w$: Scalar weight for the loss term [S2, unofficial].
+*   **Outputs:**
+    *   $\mathcal{L}_O$: Scalar loss value [S1].
+
+**Data Structures**
+*   **Mask ($M$):** A binary array/tensor. Values must be strictly $0$ (background) or $1$ (object) [S2, unofficial].
+*   **Opacity ($O$):** The accumulated opacity along the ray, defined as $O = \sum_{i \in N} T_i \alpha_i$, where $N$ is the set of samples along the ray, $T_i$ is the transmittance up to sample $i$, and $\alpha_i$ is the opacity of sample $i$ [S1].
+
+**Formulas**
+The primary formulation uses Binary Cross Entropy (BCE) [S1]:
+$$
+\mathcal{L}_{O} = -M\log {O} - (1-M)\log {(1-O)}
+$$
+where $M$ is the object mask and $O$ is the rendered opacity [S1].
+
+An alternative formulation, used in specific implementations, uses a mean absolute error on transmittance $T$ within the mask region [S2, unofficial]:
+$$
+L = w \cdot \frac{1}{N} \sum_{i=1}^{N} m_i \cdot |T_i - 1|
+$$
+where $L$ is the loss, $w$ is the weight, $N$ is the number of samples along the ray, $m_i \in \{0, 1\}$ is the binary mask value, and $T_i$ is the throughput (transmittance) value [S2, unofficial].
+
+**Parameters**
+*   **masks:** Binary mask array/tensor indicating regions where objects should be opaque. Values should be 0 or 1 [S2, unofficial].
+*   **weight:** Float scalar multiplying the loss term. Default/typical value: 1.0 [S2, unofficial].
+
+**Pseudocode**
+The following implementation uses the BCE formulation [S1], which is the standard definition in the literature.
+
+> **Unverified code.** The code below did not pass a test run against a reference implementation, or no test fits it, so it may contain errors.
+
+```python
+import math
+def opacity_loss(rendered_opacity, object_mask, weight=1.0):
+    eps = 1e-7
+    # Clip opacity to avoid log(0) singularities [G]
+    clipped_opacity = [max(eps, min(1.0 - eps, o)) for o in rendered_opacity]
+    mask = object_mask
+    # Compute BCE per pixel: -M*log(O) - (1-M)*log(1-O)
+    bce_per_pixel = [-m * math.log(o) - (1 - m) * math.log(1 - o) for m, o in zip(mask, clipped_opacity)]
+    # Average over all pixels
+    loss = sum(bce_per_pixel) / len(rendered_opacity)
+    return weight * loss
+```
+
+**Edge Cases and Pitfalls**
+*   **Logarithm of Zero:** If rendered opacity $O$ is exactly 0 or 1, $\log(O)$ or $\log(1-O)$ becomes undefined. Clipping $O$ to $[\epsilon, 1-\epsilon]$ is required [G].
+*   **Mask Precision:** The mask $M$ must be strictly binary (0 or 1) [S2, unofficial].
+*   **Gradient Flow:** The loss encourages opacity to be 1 where $M=1$ and 0 where $M=0$ [G].
+
+## Operating characteristics
+*   **Time Complexity:** Not given in the sources [G].
+*   **Memory Complexity:** Not given in the sources [G].
+*   **Strengths:** Effectively enforces hard surface boundaries when ground-truth masks are available, preventing "floaters" or translucent artifacts in object regions [S1].
+*   **Limitations:** Requires a binary object mask, which may not be available for all scenes or objects [S1]. It does not enforce geometric correctness directly, only opacity consistency [S1].
+*   **When to use:** When training differentiable volume rendering (e.g., NeRF, 3D Gaussians) with access to segmentation masks or object boundaries [S1].
+*   **When not to use:** When no mask is available, or when the object is transparent/translucent and should not be forced to be opaque [S1].
+
+## Background
+The Opacity Loss, also known as the Object Mask Constraint, was introduced in the context of Relightable 3D Gaussians [S1]. It leverages Binary Cross Entropy loss [43] to constrain the optimization of Gaussian points to align with an object mask, thereby improving geometric reconstruction by driving points to the object surface [S1]. It is used as part of the total loss function in differentiable rendering pipelines [S1].
+
+## Sources
+[S1] Relightable 3D Gaussians: Realistic Point Cloud Relighting with BRDF Decomposition and Ray Tracing, https://doi.org/10.1007/978-3-031-72995-9_5, fetched 2026-10-26
+[S2] JackZhouSz/tlir, https://github.com/JackZhouSz/tlir, fetched 2026-10-27 (unofficial)

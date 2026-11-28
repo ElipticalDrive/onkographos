@@ -1,0 +1,187 @@
+# Sparse Downsampling and Graph Preservation
+
+Also called: sc.downsample
+
+## Overview
+This method reduces the resolution of a sparse voxel grid by aggregating fine-grained voxels into coarser cells, supporting both value aggregation and topological graph preservation. It solves the problem of data reduction in sparse volumetric representations where standard dense downsampling is inefficient or where connectivity information (e.g., for skeletonization) must be maintained. It differs from [VoxelGrid Down Sample](1014-voxelgrid-down-sample.md) by explicitly handling sparse coordinate mapping and offering a graph-preserving variant that prevents false connections between distinct structures that are merely close in space.
+
+## How it works
+**Inputs and Outputs:**
+- Input: A set of occupied voxel coordinates $K = \{(x_i, y_i, z_i)\}$ and associated values $V = \{v_i\}$, typically stored as a sparse array (e.g., COO format) or parallel index/value arrays.
+- Output (`downsample`): A new set of coordinates $K'$ and aggregated values $V'$ on a coarser grid.
+- Output (`downsample_graph`): The coarser grid $K', V'$ and an explicit edge list $E'$ representing connectivity between coarse nodes.
+
+**Data Structures:**
+- Coordinates: Integer tuples $(x, y, z)$.
+- Values: Numeric types (float or int).
+- Graph: Adjacency list or edge list of coarse node indices.
+
+**Parameters:**
+- `factor`: Integer or length-3 tuple $(f_x, f_y, f_z)$. The downsampling factor. Supports anisotropic pooling [S1, unofficial].
+- `agg`: String. Aggregation function. Options: `'max'` (default), `'min'`, `'mean'`, `'sum'` [S1, unofficial].
+
+**Steps:**
+
+1. **Coordinate Mapping:**
+   For each fine voxel coordinate $p_i = (x_i, y_i, z_i)$, compute the coarse coordinate $p'_i$ using integer division:
+   $$
+   p'_i = \left( \left\lfloor \frac{x_i}{f_x} \right\rfloor, \left\lfloor \frac{y_i}{f_y} \right\rfloor, \left\lfloor \frac{z_i}{f_z} \right\rfloor \right)
+   $$
+   This maps multiple fine voxels to the same coarse cell if they fall within the same pooling window [S1, unofficial].
+
+2. **Deduplication and Aggregation (`downsample`):**
+   - Group fine voxels by their mapped coarse coordinate $p'$.
+   - For each unique coarse coordinate, aggregate the associated values $v_i$ using the function specified by `agg`.
+   - If `agg` is `'sum'` or `'mean'`, use `int64` accumulation to prevent overflow for integer inputs [S1, unofficial].
+   - The result is a set of unique coarse coordinates and their aggregated values.
+
+3. **Graph Construction (`downsample_graph`):**
+   - Perform steps 1 and 2 to obtain coarse nodes.
+   - Construct the fine-grained graph $G_f$ from the input data (e.g., using 6-neighbor connectivity or a pre-defined adjacency).
+   - Map each fine node $u$ to its coarse node $u'$.
+   - Construct the coarse graph $G_c$ by iterating over edges $(u, v)$ in $G_f$:
+     - Let $u'$ and $v'$ be the coarse nodes corresponding to $u$ and $v$.
+     - If $u' \neq v'$, add an edge $(u', v')$ to $E'$.
+     - **Crucial Constraint:** Do not introduce new connections between coarse cells that were not connected in the fine graph. This prevents "short-circuiting" where two distant structures appear connected because their coarse representatives are adjacent [S1, unofficial].
+
+**Pseudocode:**
+
+> **Unverified code.** The code below did not pass a test run against a reference implementation, or no test fits it, so it may contain errors.
+
+```python
+import numpy as np
+
+def sparse_downsample(coords, values, factor, agg='max'):
+    """
+    Downsample sparse voxels by aggregating values into coarser cells.
+    
+    Args:
+        coords: (N, 3) array of integer coordinates.
+        values: (N,) array of values.
+        factor: int or tuple of 3 ints.
+        agg: str. 'max', 'min', 'sum', 'mean'.
+        
+    Returns:
+        coarse_coords: (M, 3) array of unique coarse coordinates.
+        coarse_values: (M,) array of aggregated values.
+    """
+    # 1. Coordinate Mapping
+    if isinstance(factor, int):
+        factor = (factor, factor, factor)
+    
+    # Integer division to map to coarse grid
+    coarse_coords = coords // np.array(factor)
+    
+    # 2. Deduplication and Aggregation
+    # Sort by coarse coordinates to group
+    sort_idx = np.lexsort((coarse_coords[:, 2], coarse_coords[:, 1], coarse_coords[:, 0]))
+    sorted_coords = coarse_coords[sort_idx]
+    sorted_values = values[sort_idx]
+    
+    # Find unique coarse coordinates and their indices
+    unique_coords, inverse_indices, counts = np.unique(
+        sorted_coords, axis=0, return_inverse=True, return_counts=True
+    )
+    
+    # Aggregate values
+    if agg == 'max':
+        # Use np.maximum.reduceat for efficiency
+        coarse_values = np.maximum.reduceat(sorted_values, np.cumsum(np.insert(counts[:-1], 0, 0)))
+    elif agg == 'min':
+        coarse_values = np.minimum.reduceat(sorted_values, np.cumsum(np.insert(counts[:-1], 0, 0)))
+    elif agg == 'sum':
+        # Use int64 to prevent overflow
+        sorted_values_int64 = sorted_values.astype(np.int64)
+        coarse_values = np.add.reduceat(sorted_values_int64, np.cumsum(np.insert(counts[:-1], 0, 0))).astype(values.dtype)
+    elif agg == 'mean':
+        sorted_values_int64 = sorted_values.astype(np.int64)
+        sums = np.add.reduceat(sorted_values_int64, np.cumsum(np.insert(counts[:-1], 0, 0)))
+        coarse_values = (sums / counts.astype(np.int64)).astype(values.dtype)
+    else:
+        raise ValueError(f"Unknown aggregation function: {agg}")
+        
+    return unique_coords, coarse_values
+
+def sparse_downsample_graph(coords, values, edges, factor, agg='max'):
+    """
+    Downsample sparse voxels and preserve graph connectivity.
+    
+    Args:
+        coords: (N, 3) array of integer coordinates.
+        values: (N,) array of values.
+        edges: (E, 2) array of integer indices into coords.
+        factor: int or tuple of 3 ints.
+        agg: str. Aggregation function.
+        
+    Returns:
+        coarse_coords: (M, 3) array.
+        coarse_values: (M,) array.
+        coarse_edges: (E', 2) array of indices into coarse_coords.
+    """
+    # 1. Get coarse grid
+    coarse_coords, coarse_values = sparse_downsample(coords, values, factor, agg)
+    
+    # 2. Map fine nodes to coarse nodes
+    # Create a mapping from fine coordinate to coarse index
+    # Since coarse_coords are unique, we can use a dictionary or search
+    # For efficiency, assume coarse_coords are sorted or use a hash map
+    coord_to_coarse_idx = {tuple(c): i for i, c in enumerate(coarse_coords)}
+    
+    # Map edge endpoints
+    coarse_edge_indices = []
+    for u, v in edges:
+        u_coarse = tuple(coords[u] // np.array(factor))
+        v_coarse = tuple(coords[v] // np.array(factor))
+        
+        u_idx = coord_to_coarse_idx.get(u_coarse)
+        v_idx = coord_to_coarse_idx.get(v_coarse)
+        
+        # Only add edge if both nodes exist in coarse grid and are distinct
+        if u_idx is not None and v_idx is not None and u_idx != v_idx:
+            coarse_edge_indices.append((u_idx, v_idx))
+            
+    coarse_edges = np.array(coarse_edge_indices, dtype=np.int64)
+    
+    return coarse_coords, coarse_values, coarse_edges
+```
+
+**Edge Cases and Pitfalls:**
+- **False Connections:** Plain pooling can fuse structures less than $2 \times \text{factor}$ apart, creating false connections in the coarse grid. Use `downsample_graph` to preserve exact connectivity for tasks like skeletonization or component counting [S1, unofficial].
+- **Overflow:** When using `sum` or `mean` with integer values, ensure accumulation is done in `int64` to prevent overflow [S1, unofficial].
+- **Anisotropy:** The method supports anisotropic pooling via a tuple factor, but all dimensions must be handled consistently in coordinate mapping [S1, unofficial].
+
+## Subtopics
+
+### [Volume Resampling and Overflow Guard](1772-volume-resampling-and-overflow-guard.md)
+Handles interpolation and overflow during resampling, whereas this method uses integer pooling and explicit graph preservation.
+
+### [Grid Deformation](5372-grid-deformation.md)
+Adjusts grid geometry, while this method preserves the grid structure but reduces density.
+
+### [Optimization-based Downsampling](5825-optimization-based-downsampling.md)
+Uses optimization to minimize error, whereas this method uses deterministic aggregation.
+
+### [Pre-processing for Half Resolution](6436-pre-processing-for-half-resolution.md)
+Prepares data for half-resolution rendering, potentially using this method as a step.
+
+### [3D Average Pooling for Coarsening](13934-3d-average-pooling-for-coarsening.md)
+A specific case of this method using only average aggregation.
+
+### [Integer-Stride Preview Subsampling](21373-integer-stride-preview-subsampling.md)
+A simpler subsampling method that does not aggregate or preserve graphs.
+
+## Operating characteristics
+- **Time Complexity:** $O(N \log N)$ due to sorting and deduplication of coordinates, where $N$ is the number of fine voxels. Graph construction is $O(E)$, where $E$ is the number of edges.
+- **Memory Complexity:** $O(M)$ for the coarse grid, where $M$ is the number of coarse voxels.
+- **Measured Performance:** Equivalent to `scipy.ndimage.zoom` on dense grids but for sparse data, making it efficient for large, sparse volumes [S1, unofficial].
+- **Scaling:** Scales well with sparsity; performance depends on the number of occupied voxels, not the bounding box size.
+- **Strengths:** Preserves topology with `downsample_graph`; supports anisotropic pooling; handles sparse data efficiently.
+- **Limitations:** May lose fine-grained detail; graph preservation adds overhead.
+- **When to Use:** When reducing sparse voxel data for visualization or analysis while maintaining connectivity information.
+- **When Not to Use:** When dense interpolation is required or when topological preservation is not needed and simpler subsampling suffices.
+
+## Background
+This method is part of the `sparse-cubes` library, which provides transparent interoperability with 3-D sparse arrays (e.g., `scipy.sparse.coo_array`) [S1, unofficial]. It addresses the need for efficient downsampling in sparse volumetric data, particularly for applications like skeletonization and component counting where connectivity is critical [S1, unofficial].
+
+## Sources
+[S1] sparse-cubes, https://github.com/navis-org/sparse-cubes, fetched 2026-10-26 (unofficial)

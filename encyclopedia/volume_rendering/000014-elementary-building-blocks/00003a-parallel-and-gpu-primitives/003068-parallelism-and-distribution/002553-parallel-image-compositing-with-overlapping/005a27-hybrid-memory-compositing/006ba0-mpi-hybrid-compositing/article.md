@@ -1,0 +1,120 @@
+# MPI-hybrid Compositing
+
+
+## Overview
+MPI-hybrid compositing is a parallel image compositing optimization that reduces communication overhead by aggregating fragments in memory shared by six threads before exchanging them between processing elements (PEs) [S1, S2]. It sets itself apart from pure MPI-only compositing by leveraging hybrid parallelism to perform more compositing during ray integration, thereby sending fewer and smaller messages [S1, S2].
+
+## How it works
+**Inputs and Outputs:**
+*   **Input:** A set of fragments generated during the raycasting phase, each associated with a specific PE and image region.
+*   **Output:** Composite color and opacity values for the final image pixels.
+
+**Data Structures:**
+*   **Fragment Buffer:** Memory shared by six threads. The exact layout is not specified, but it holds fragments originating from the raycasting phase [S1, S2].
+*   **Compositing PEs:** A subset of the total processing elements dedicated to compositing tasks [S2].
+
+**Steps:**
+1.  **Fragment Aggregation:** During or immediately after ray integration, fragments originating from the same group of six threads are aggregated into a shared memory buffer [S1, S2].
+2.  **Local Compositing:** Because fragments are grouped into larger data blocks, additional compositing operations can be performed locally during ray integration, reducing the amount of data that needs to be exchanged [S1, S2].
+3.  **Fragment Exchange:** The aggregated fragment data is exchanged between PEs using the MPI `Alltoallv` call [S2]. This step sends fewer messages compared to MPI-only approaches because the fragments are already partially composed and grouped [S1, S2].
+4.  **Final Compositing:** The received fragments are composited to produce the final pixel values [S1, S2].
+
+**Parameters:**
+*   **Thread Group Size:** Six threads share memory for aggregation [S1, S2].
+*   **Communication Primitive:** MPI `Alltoallv` [S2].
+*   **Compositor Count:** At 216,000 cores, 4500 compositors were used for MPI-hybrid, compared to 6750 for MPI-only [S2].
+
+**Pseudocode:**
+> **Unverified code.** The code below did not pass a test run against a reference implementation, or no test fits it, so it may contain errors.
+
+```python
+# Pseudocode for MPI-hybrid compositing phase
+# Assumes 'fragments' is a list of fragment objects with fields:
+#   - origin_pe: int (PE ID where fragment originated)
+#   - image_region: int (ID of image region owned by a compositing PE)
+#   - color: vec3
+#   - opacity: float
+#   - depth: float
+
+def mpi_hybrid_compositing(fragments, my_pe, compositing_pes):
+    # Step 1: Aggregate fragments in memory shared by six threads
+    # Note: The exact mechanism for grouping by 6 threads is implementation-specific.
+    # We assume a function 'aggregate_fragments' handles this grouping.
+    aggregated_blocks = aggregate_fragments(fragments, thread_group_size=6)
+    
+    # Step 2: Exchange aggregated fragment data using MPI Alltoallv
+    # 'aggregated_blocks' is sent to the compositing PEs that own the image regions
+    # where the fragments lie.
+    # The MPI Alltoallv call handles the distribution of these blocks.
+    received_blocks = mpi_alltoallv(aggregated_blocks, compositing_pes)
+    
+    # Step 3: Composite received fragments
+    # Note: The specific compositing algorithm (e.g., front-to-back) is not detailed
+    # in the sources, but it is implied that compositing occurs after exchange.
+    final_image = []
+    for block in received_blocks:
+        for fragment in block:
+            composite_pixel(fragment, final_image)
+            
+    return final_image
+
+def aggregate_fragments(fragments, thread_group_size):
+    # Groups fragments based on the 6-thread shared memory concept.
+    # The exact grouping logic is not specified in the sources.
+    # This is a placeholder for the aggregation logic [G].
+    groups = {}
+    for i, frag in enumerate(fragments):
+        group_id = i // thread_group_size
+        if group_id not in groups:
+            groups[group_id] = []
+        groups[group_id].append(frag)
+    return list(groups.values())
+
+def composite_pixel(fragment, image):
+    # Standard front-to-back compositing logic [G].
+    # This is a generic implementation detail not specified in the sources.
+    pass
+```
+
+**Edge Cases and Pitfalls:**
+*   **Precision:** Not given in the sources.
+*   **Boundaries:** Not given in the sources.
+*   **Degenerate Input:** Not given in the sources.
+
+## Operating characteristics
+**Time and Memory Complexity:**
+*   **Communication Overhead:** MPI-hybrid uses on average about 6× fewer messages than MPI-only during compositing [S1, S2].
+*   **Data Volume:** MPI-hybrid exchanges less fragment data because its larger data blocks allow for more compositing to take place during ray integration [S1, S2].
+
+**Measured Performance:**
+*   **Scale:** 216,000 cores [S2].
+*   **Compositing Time:** 0.35s for MPI-hybrid (4500 compositors) vs. 1.06s for MPI-only (6750 compositors), a 67% reduction [S2].
+*   **Raycasting Time:** Roughly 0.2s for both implementations [S2].
+*   **Total Render Time:** 0.56s for MPI-hybrid vs. 1.25s for MPI-only, a 55% improvement [S2].
+*   **Scaling:** Performance gains improve at higher concurrency levels [S1, S2]. The advantage of MPI-hybrid over MPI-only becomes greater as the number of cores increases [S2].
+
+**Strengths and Limitations:**
+*   **Strengths:** Reduced memory footprint, reduced MPI overhead, and reduced communication traffic [S2]. Particularly effective at high concurrency where fragment exchange is the most expensive operation [S2].
+*   **Limitations:** Relies on the implementation of the MPI `Alltoallv` call, which may vary across libraries [S2].
+
+**When to Use:**
+*   Use MPI-hybrid compositing for large-scale distributed-memory supercomputers with multi-core CPUs, especially at high concurrency levels where communication overhead dominates [S1, S2].
+
+**When Not to Use:**
+*   Not given in the sources.
+
+## Background
+**Origin:**
+*   The method was introduced in the paper "Hybrid Parallelism for Volume Rendering on Large, Multi-core Systems" [S1, S2].
+
+**History and Development:**
+*   The study demonstrated that hybrid parallelism offers performance improvements and better resource utilization for raycasting volume rendering on large, distributed-memory supercomputers [S2].
+*   The findings align with previous work by Peterka et al. (2009b) on MPI implementations for IBM BG/P systems, suggesting similar optimizations in MPI libraries [S2].
+*   The approach is compatible with other compositing algorithms like "Radix-k" introduced by Peterka et al. (2009a) [S2].
+
+**Where it is Used:**
+*   Large, distributed-memory supercomputers comprised of multi-core CPUs [S2].
+
+## Sources
+[S1] Hybrid Parallelism for Volume Rendering on Large, Multi-core Systems, https://digital.library.unt.edu/ark:/67531/metadc1014417/?q=scientific volume visualization, fetched 2026-10-28
+[S2] Hybrid Parallelism for Volume Rendering on Large, Multi-core Systems, https://digital.library.unt.edu/ark:/67531/metadc1014428/?q=scientific volume visualization, fetched 2026-10-28

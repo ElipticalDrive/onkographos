@@ -1,0 +1,99 @@
+# Sine-based procedural voxel generation
+
+Also called: Trigonometric voxel pattern
+
+## Overview
+Sine-based procedural voxel generation determines voxel occupancy and color by evaluating trigonometric functions against integer spatial coordinates [S1, unofficial]. It generates deterministic, periodic structures without storing explicit grid data [S1, unofficial]. Unlike [Simple Heightmap Voxel Generation](4649-simple-heightmap-voxel-generation.md) or [Procedural Tree Voxel Generation](4445-procedural-tree-voxel-generation.md), it relies on global periodic wave interference for shape boundaries [S1, unofficial].
+
+## How it works
+**Inputs and Outputs**
+*   **Input**: 3D integer voxel coordinates $(pos_x, pos_y, pos_z)$, grid width, and a scaling constant [S1, unofficial].
+*   **Output**: A voxel state (empty or filled) and an RGBA color value [S1, unofficial].
+
+**Data Structures**
+*   **Coordinates**: Integer triplets representing voxel indices [S1, unofficial].
+*   **Color**: 32-bit value with 8-bit channels (R, G, B, A) [S1, unofficial].
+
+**Parameters**
+*   `mod`: The periodicity divisor, calculated as `width / 8` [S1, unofficial].
+*   `scale`: A constant multiplier for color channels, set to `0x20` (32) [S1, unofficial].
+
+**Algorithm Steps**
+1.  **Periodicity Calculation**: Compute `mod = width / 8` [S1, unofficial].
+2.  **Normalization**: Convert integer coordinates to a normalized range $[-1, 1]$ within the periodic cell:
+    $$ xx = \frac{(pos_x \bmod \text{mod}) \cdot 2}{\text{mod}} - 1 $$
+    $$ yy = \frac{(pos_y \bmod \text{mod}) \cdot 2}{\text{mod}} - 1 $$
+    $$ zz = \frac{(pos_z \bmod \text{mod}) \cdot 2}{\text{mod}} - 1 $$
+    [S1, unofficial]
+3.  **Radius Calculation**: Compute a variable radius $r$ defining the shape boundary:
+    $$ r = \left( \sin\left( \frac{pos_x/\text{mod} + pos_y/\text{mod} + pos_z/\text{mod}}{5} \right) + 1 \right) \cdot 0.3 $$
+    [S1, unofficial]
+4.  **Occupancy Test**: A voxel is filled if it satisfies both conditions:
+    *   It lies inside the spherical boundary: $xx^2 + yy^2 + zz^2 \le r$ [S1, unofficial].
+    *   It passes a secondary frequency filter: $\sin\left( \frac{pos_x \cdot 16 + pos_y \cdot 20 + pos_z \cdot 30}{\text{width}} \right) \ge 0$ [S1, unofficial].
+    If either condition fails, the voxel is empty [S1, unofficial].
+5.  **Color Assignment**: If filled, compute RGB values scaled by the position relative to `mod`:
+    $$ R = \frac{pos_x}{\text{mod}} \cdot 0x20 $$
+    $$ G = \frac{pos_y}{\text{mod}} \cdot 0x20 $$
+    $$ B = \frac{pos_z}{\text{mod}} \cdot 0x20 $$
+    $$ A = 255 $$
+    [S1, unofficial]
+
+**Pseudocode**
+> **Unverified code.** The code below did not pass a test run against a reference implementation, or no test fits it, so it may contain errors.
+
+```python
+import math
+
+def sine_voxel_generation(pos_x: int, pos_y: int, pos_z: int, width: int):
+    mod = width / 8
+    xx = ((pos_x % mod) * 2.0 / mod) - 1.0
+    yy = ((pos_y % mod) * 2.0 / mod) - 1.0
+    zz = ((pos_z % mod) * 2.0 / mod) - 1.0
+    
+    arg = (pos_x / mod + pos_y / mod + pos_z / mod) / 5.0
+    radius = (math.sin(arg) + 1.0) * 0.3
+    
+    if xx*xx + yy*yy + zz*zz > radius:
+        return None
+        
+    filter_arg = (pos_x * 16 + pos_y * 20 + pos_z * 30) / width
+    if math.sin(filter_arg) < 0:
+        return None
+        
+    scale = 0x20
+    r = int((pos_x / mod) * scale)
+    g = int((pos_y / mod) * scale)
+    b = int((pos_z / mod) * scale)
+    a = 255
+    
+    return (r, g, b, a)
+```
+
+**Edge Cases and Pitfalls**
+
+## Subtopics
+
+### Displacement Noise
+Harmonic trigonometric displacement noise adds organic or porous textures to volumes by modulating density [S2, unofficial]. It applies a multiplicative amplitude factor to the product of sines along each axis [S2, unofficial].
+Formula: $amp \cdot \sin(freq \cdot x) \cdot \sin(freq \cdot y) \cdot \sin(freq \cdot z)$ [S2, unofficial].
+Pseudocode:
+> **Unverified code.** The code below did not pass a test run against a reference implementation, or no test fits it, so it may contain errors.
+
+```python
+import math
+
+def displacement_noise(p_x: float, p_y: float, p_z: float, freq: float, amp: float) -> float:
+    return amp * math.sin(freq * p_x) * math.sin(freq * p_y) * math.sin(freq * p_z)
+```
+[S2, unofficial]
+
+## Operating characteristics
+Not given in the sources.
+
+## Background
+Not given in the sources.
+
+## Sources
+[S1] gabrielmuller/zazen, https://github.com/gabrielmuller/zazen, fetched 2026-10-26 (unofficial)
+[S2] bhubbard/sdf-math-rs, https://github.com/bhubbard/sdf-math-rs, fetched 2026-10-27 (unofficial)

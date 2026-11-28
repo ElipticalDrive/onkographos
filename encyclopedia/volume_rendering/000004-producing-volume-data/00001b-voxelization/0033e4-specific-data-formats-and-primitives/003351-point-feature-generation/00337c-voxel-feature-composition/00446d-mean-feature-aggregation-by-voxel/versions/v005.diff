@@ -1,0 +1,82 @@
+--- v004.md
++++ v005.md
+@@ -25,12 +25,12 @@
+ 2. **Device Transfer:** Move all input tensors (points, features, batch IDs, bounding boxes, colors, depth confidence) to the target device [S2, unofficial].
+ 3. **Voxel Index Computation:** Compute voxel indices using `get_vox_indices` with `shift=False` and `cat_batch_ids=True` [S2, unofficial].
+-4. **Spatial Averaging:** Voxelize the point clouds into a voxel grid. For each voxel cell, average the spatial positions of points falling into that cell to yield a 3-dim feature for the cell [S1].
++4. **Spatial Averaging:** Voxelize the point clouds into a voxel grid [S1]. For each voxel cell, average the spatial positions of points falling into that cell to yield a 3-dim feature for the cell [S1].
+ 5. **Hashing & Uniqueness:** Compute voxel hashes using `self.hash_fn(voxel_indices)` [S2, unofficial]. Get unique hashes and inverse IDs using `torch.unique(voxel_hash, return_inverse=True)` to identify unique occupied voxels [S2, unofficial].
+-6. **Feature Aggregation:** For each voxel cell, compute the mean feature vector. If $C_v$ is the set of points falling into voxel $v$, the aggregated feature $f_v$ is:
++6. **Feature Aggregation:** For each voxel cell, compute the mean feature vector [S2, unofficial]. If $C_v$ is the set of points falling into voxel $v$, the aggregated feature $f_v$ is:
+    $$ f_v = \frac{1}{|C_v|} \sum_{p_i \in C_v} f_i $$
+    The spatial position $p_v$ is similarly averaged:
+    $$ p_v = \frac{1}{|C_v|} \sum_{p_i \in C_v} p_i $$
+    This yields a 3-dim feature for the cell representing the centroid [S1].
+-7. **Neural Encoding:** Encode the scene geometry feature using a 3D sparse UNet on the voxel grid. The input is the voxel grid along with its 3-dim features. The output is neural volumetric features consisting of an n-dim feature for each occupied voxel [S1].
++7. **Neural Encoding:** Encode the scene geometry feature using a 3D sparse UNet on the voxel grid [S1]. The input is the voxel grid along with its 3-dim features [S1]. The output is neural volumetric features consisting of an n-dim feature for each occupied voxel [S1].
+ 
+ **Pseudocode:**
+@@ -49,5 +49,5 @@
+         
+     Returns:
+-        voxel_indices: Tensor of shape (M, 3), unique voxel indices.
++        unique_voxel_indices: Tensor of shape (M, 3), unique voxel indices.
+         voxel_features: Tensor of shape (M, D), aggregated features for each voxel.
+         voxel_centroids: Tensor of shape (M, 3), averaged spatial positions.
+@@ -59,40 +59,29 @@
+     voxel_indices = torch.floor(voxel_indices_float).long()
+     
+-    # 2. Compute voxel hashes (deterministic mapping for self-containment)
+-    # Maps 3D indices to 1D unique IDs compatible with torch.unique
+-    voxel_hashes = (voxel_indices[:, 0].long() << 40) | (voxel_indices[:, 1].long() << 20) | voxel_indices[:, 2].long()
++    # 2. Get unique voxel indices and inverse mapping (replaces abstract hash_fn)
++    unique_voxel_indices, inverse_indices = torch.unique(voxel_indices, dim=0, return_inverse=True)
+     
+-    # 3. Get unique hashes and inverse mapping
+-    unique_hashes, inverse_indices = torch.unique(voxel_hashes, return_inverse=True)
+-    
+-    # 4. Initialize accumulators
+-    M = unique_hashes.shape[0]
++    # 3. Initialize accumulators
++    M = unique_voxel_indices.shape[0]
+     voxel_feature_sums = torch.zeros(M, features.shape[1], device=points.device)
+     voxel_pos_sums = torch.zeros(M, 3, device=points.device)
+     voxel_counts = torch.zeros(M, device=points.device)
+     
+-    # 5. Scatter add operations
++    # 4. Scatter add operations
+     voxel_feature_sums.scatter_add_(0, inverse_indices.unsqueeze(1).expand(-1, features.shape[1]), features)
+     voxel_pos_sums.scatter_add_(0, inverse_indices.unsqueeze(1).expand(-1, 3), points)
+     voxel_counts.scatter_add_(0, inverse_indices, torch.ones_like(inverse_indices, dtype=features.dtype))
+     
+-    # 6. Compute means
++    # 5. Compute means
+     voxel_counts = torch.clamp(voxel_counts, min=1)
+     voxel_features = voxel_feature_sums / voxel_counts.unsqueeze(1)
+     voxel_centroids = voxel_pos_sums / voxel_counts.unsqueeze(1)
+     
+-    # Reconstruct 3D indices from unique hashes for output
+-    voxel_indices = torch.stack([
+-        (unique_hashes >> 40).long(),
+-        ((unique_hashes >> 20) & 0xFFFFF).long(),
+-        (unique_hashes & 0xFFFFF).long()
+-    ], dim=1)
+-    
+-    return voxel_indices, voxel_features, voxel_centroids
++    return unique_voxel_indices, voxel_features, voxel_centroids
+ ```
+ 
+ **Parameters:**
+-- `voxel_size`: Determines the resolution of the grid. Smaller sizes yield higher resolution but more voxels. Not given in the sources.
+-- `bounds`: Defines the spatial extent of the voxel grid. Not given in the sources.
++- `voxel_size`: Determines the resolution of the grid. Smaller sizes yield higher resolution but more voxels [G]. Not given in the sources.
++- `bounds`: Defines the spatial extent of the voxel grid. Not given in the sources [G].
+ 
+ **Edge Cases and Pitfalls:**
+@@ -109,5 +98,5 @@
+ - **Time Complexity:** Linear with respect to the number of points $N$ for the aggregation step, assuming efficient hash map or scatter operations [G].
+ - **Memory Complexity:** Proportional to the number of unique occupied voxels $M$ and the feature dimension $D$ [G].
+-- **Measured Performance:** Not given in the sources.
++- **Measured Performance:** Not given in the sources [G].
+ - **Strengths:** Simple to implement; effectively densifies sparse point clouds; compatible with standard 3D deep learning architectures like sparse UNets [S1].
+ - **Limitations:** Loses fine-grained detail within a voxel; sensitive to voxel size selection; does not account for point density variations within a voxel (unlike Gaussian-weighted methods) [G].

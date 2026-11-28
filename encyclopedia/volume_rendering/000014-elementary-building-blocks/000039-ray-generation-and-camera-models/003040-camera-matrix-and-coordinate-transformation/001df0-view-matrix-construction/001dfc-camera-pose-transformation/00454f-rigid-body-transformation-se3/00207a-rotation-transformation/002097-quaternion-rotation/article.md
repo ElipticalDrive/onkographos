@@ -1,0 +1,124 @@
+# Quaternion Rotation
+
+Also called: Quaternion Rotation of Vector, Quaternion-based vector rotation, Ray Rotation via Quaternion
+
+## Overview
+Quaternion Rotation computes the rotation of a 3D vector $v$ by a unit quaternion $q$, producing a rotated 3D vector $v'$. It solves the problem of applying rigid body rotations to points or directions in volume rendering pipelines without the singularities of Euler angles or the computational overhead of matrix multiplication. It sets itself apart from [Rotation Matrix Computation](2280-rotation-matrix-computation.md) by operating directly in the quaternion algebra, avoiding the intermediate construction of a $3 \times 3$ matrix, and from [Quaternion Operations](3474-quaternion-operations.md) by providing a specific, optimized implementation for vector rotation rather than general algebraic primitives.
+
+## How it works
+**Inputs and Outputs:**
+- Input: A quaternion $q = (w, x, y, z)$ and a 3D vector $v = (v_x, v_y, v_z)$. The quaternion $q$ must be a unit quaternion ($||q||=1$). If not, it must be normalized first [S3, unofficial].
+- Output: A 3D vector $v'$ representing the rotated vector.
+
+**Data Structures:**
+- Quaternion $q$: 4 floating-point values $(w, x, y, z)$.
+- Vector $v$: 3 floating-point values $(v_x, v_y, v_z)$.
+
+**Steps:**
+1.  **Normalization:** If $q$ is not guaranteed to be unit length, normalize it: $q \leftarrow q / ||q||$ [S3, unofficial].
+2.  **Decomposition:** Extract the scalar part $s = w$ and the vector part $\mathbf{u} = (x, y, z)$ from $q$ [S2, unofficial].
+3.  **Compute Dot Product:** Calculate $d = \mathbf{u} \cdot v = x v_x + y v_y + z v_z$ [S2, unofficial].
+4.  **Compute Cross Product:** Calculate $\mathbf{c} = \mathbf{u} \times v$ [S2, unofficial].
+5.  **Compute Intermediate Terms:**
+    -   Term $a = \mathbf{u} \cdot (2d)$ [S2, unofficial].
+    -   Term $b = v \cdot (s^2 - ||\mathbf{u}||^2)$ [S2, unofficial]. Note: $||\mathbf{u}||^2 = x^2 + y^2 + z^2$.
+    -   Term $c = \mathbf{c} \cdot (2s)$ [S2, unofficial].
+6.  **Result:** $v' = a + b + c$ [S2, unofficial].
+
+**Alternative Algebraic Form (Hamilton Product):**
+The rotation can also be viewed as treating $v$ as a pure quaternion $v_q = (0, v_x, v_y, v_z)$ and computing $v'_q = q \otimes v_q \otimes q^*$, where $q^*$ is the conjugate $(-x, -y, -z, w)$ if $q=(w,x,y,z)$, and then extracting the vector part of $v'_q$ [S3, unofficial]. The explicit formula above is the expanded, optimized version of this operation [S2, unofficial].
+
+**Pseudocode:**
+> **Unverified code.** The code below did not pass a test run against a reference implementation, or no test fits it, so it may contain errors.
+
+```python
+def quaternion_rotate_vector(q: list[float], v: list[float]) -> list[float]:
+    """
+    Rotates vector v by quaternion q.
+    q = [w, x, y, z]
+    v = [vx, vy, vz]
+    Assumes q is normalized. If not, normalize first.
+    """
+    # Extract scalar and vector parts of quaternion
+    s = q[0]
+    ux, uy, uz = q[1], q[2], q[3]
+    vx, vy, vz = v[0], v[1], v[2]
+
+    # Compute dot product of vector part of q and v
+    dot_uv = ux * vx + uy * vy + uz * vz
+
+    # Compute cross product of vector part of q and v
+    cross_uv_x = uy * vz - uz * vy
+    cross_uv_y = uz * vx - ux * vz
+    cross_uv_z = ux * vy - uy * vx
+
+    # Compute terms as per [S2, unofficial]
+    # a = u * (dot(u, v) * 2.0)
+    a_x = ux * (dot_uv * 2.0)
+    a_y = uy * (dot_uv * 2.0)
+    a_z = uz * (dot_uv * 2.0)
+
+    # b = v * ((s * s) - dot(u, u))
+    # dot(u, u) = ux^2 + uy^2 + uz^2
+    dot_uu = ux * ux + uy * uy + uz * uz
+    factor_b = (s * s) - dot_uu
+    b_x = vx * factor_b
+    b_y = vy * factor_b
+    b_z = vz * factor_b
+
+    # c = cross(u, v) * (2.0 * s)
+    factor_c = 2.0 * s
+    c_x = cross_uv_x * factor_c
+    c_y = cross_uv_y * factor_c
+    c_z = cross_uv_z * factor_c
+
+    # Return a + b + c
+    return [a_x + b_x + c_x, a_y + b_y + c_y, a_z + b_z + c_z]
+```
+
+**Edge Cases and Pitfalls:**
+-   **Non-unit Quaternion:** If $q$ is not normalized, the result will be scaled incorrectly. Normalization is required [S3, unofficial].
+-   **Precision:** For very small rotations, standard floating-point arithmetic is stable. However, repeated rotations should be re-normalized to prevent drift.
+-   **Input Format:** Ensure $q$ is in the format $(w, x, y, z)$ or $(x, y, z, w)$ consistently with the implementation. The pseudocode above assumes $(w, x, y, z)$ [S2, S3, unofficial].
+
+## Subtopics
+
+### [Quaternion to SO3 Conversion](2305-quaternion-to-so3-conversion.md)
+This method converts a 4D unit quaternion $q = (w, x, y, z)$ into a $3 \times 3$ rotation matrix $R \in SO(3)$. It solves the problem of representing a 3D rotation in a format compatible with standard linear algebra operations, such as transforming camera poses or rotating 3D points in volume rendering pipelines. It sets itself apart from [Quaternion Operations](3474-quaternion-operations.md) by directly computing the orthogonal matrix elements without intermediate cross products.
+
+### [Quaternion Operations](3474-quaternion-operations.md)
+This method implements the quaternion conjugate, quaternion multiplication, and vector rotation operations used to transform coordinates in volume rendering pipelines. It exposes the underlying algebraic steps rather than abstracting them into a single rotation call.
+
+#### Axis Extraction from Quaternion
+To extract the local axes of a rotated frame (e.g., for Gaussian Splatting), apply the quaternion rotation to the canonical basis vectors [S4, unofficial]:
+-   **X-axis:** Apply `quatVec(q, (1, 0, 0))` to get the rotated X-axis.
+-   **Y-axis:** Apply `quatVec(q, (0, 1, 0))` to get the rotated Y-axis.
+-   **Z-axis:** Apply `quatVec(q, (0, 0, 1))` to get the rotated Z-axis.
+This allows reconstruction of the full rotation matrix columns from the quaternion [S4, unofficial].
+
+## Operating characteristics
+**Time and Memory Complexity:**
+-   Time: $O(1)$ with a constant number of floating-point operations (approx. 12-15 multiplications/additions depending on optimization).
+-   Memory: $O(1)$, no auxiliary data structures required.
+
+**Measured Performance:**
+-   Generally faster than matrix-vector multiplication for a single rotation because it avoids constructing the $3 \times 3$ matrix.
+-   Comparable to or slightly slower than optimized matrix multiplication on hardware with strong SIMD support for matrix ops, but more memory-efficient.
+
+**Strengths and Limitations:**
+-   **Strengths:** No gimbal lock, compact representation (4 floats vs 9 for matrix), numerically stable if normalized.
+-   **Limitations:** Requires normalization to maintain unit length. Composition of rotations is more complex than matrix multiplication (requires quaternion multiplication).
+
+**When to Use:**
+-   Use when rotating individual vectors or when memory is constrained.
+-   Use when composing many rotations (quaternion multiplication is efficient).
+-   Do not use when interfacing with APIs that strictly require rotation matrices.
+
+## Background
+Quaternion rotation was introduced by William Rowan Hamilton in 1843. It has become a standard tool in computer graphics for representing 3D rotations due to its efficiency and stability. In volume rendering, it is used for camera pose transformations and rotating view directions.
+
+## Sources
+[S1] kyle-rosa/ray_marching, https://github.com/kyle-rosa/ray_marching, fetched 2026-10-26 (unofficial)
+[S2] unfinishedprogram/ray-marcher, https://github.com/unfinishedprogram/ray-marcher, fetched 2026-10-26 (unofficial)
+[S3] wanmeihuali/taichi_3d_gaussian_splatting, https://github.com/wanmeihuali/taichi_3d_gaussian_splatting, fetched 2026-10-27 (unofficial)
+[S4] sparkjsdev/spark, https://github.com/sparkjsdev/spark, fetched 2026-10-27 (unofficial)

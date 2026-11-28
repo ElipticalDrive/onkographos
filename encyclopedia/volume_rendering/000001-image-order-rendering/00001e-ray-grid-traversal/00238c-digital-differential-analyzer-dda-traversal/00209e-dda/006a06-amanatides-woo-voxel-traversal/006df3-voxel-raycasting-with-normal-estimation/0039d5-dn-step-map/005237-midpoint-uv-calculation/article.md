@@ -1,0 +1,91 @@
+# Midpoint UV Calculation
+
+Also called: Midpoint UV Vector
+
+## Overview
+Midpoint UV Calculation computes the UV coordinates of the midpoint plane within a voxel traversal step to determine height and lighting variations for surface rendering [S1, unofficial]. It sets apart from sibling methods by explicitly calculating a geometric midpoint between entry and exit UV states to drive height maps, whereas siblings like [Corner-based Voxel Volume Calculation](14665-corner-based-voxel-volume-calculation.md) rely on corner interpolation and [Voxel DDA Raymarching with Neighbor-Averaged Entry Interpolation](14668-voxel-dda-raymarching-with-neighbor-averaged-entry-interpola.md) focus on entry-point smoothing [S1, unofficial].
+
+## How it works
+**Inputs:**
+- `southwest`, `southeast`, `northwest`, `northeast`: 2D UV coordinate vectors representing the four corners of the current voxel face or traversal step [S1, unofficial].
+- `center`: A scalar representing the central reference point of the voxel [S1, unofficial].
+
+**Outputs:**
+- `midpoint_x`, `midpoint_y`: The calculated midpoint UV coordinates [S1, unofficial].
+- Derived height values for lighting/terrain generation [S1, unofficial].
+
+**Data Structures:**
+- `midpoints`: A list of two 2D vectors storing the Southwest and Northwest midpoint coordinates [S1, unofficial].
+
+**Steps:**
+1. Initialize the midpoint vector structure: `midpoints = load2()` [S1, unofficial].
+2. Calculate the Southwest midpoint UV by averaging the Southwest and Southeast UV coordinates: `midpoints[0] = (southwest + southeast) / 2` [S1, unofficial].
+3. Calculate the Northwest midpoint UV by averaging the Northwest and Northeast UV coordinates: `midpoints[1] = (northwest + northeast) / 2` [S1, unofficial].
+4. Apply Y min/max constraints to the midpoint Y component, ensuring the constraint is reused for both midpoints to maintain consistency [S1, unofficial].
+5. If `midpoints[0].y < 0.5`, set `midpoint_x = center + 0.5` [S1, unofficial].
+6. Otherwise, set `midpoint_y = center` [S1, unofficial].
+7. The resulting `midpointUV` is used to calculate map height and lighting variations [S1, unofficial].
+
+**Pitfalls:**
+- Rendering only functions correctly above the calculated midpoint; below it, the ray traversal lacks proper height calculations, causing incorrect visual output [S1, unofficial].
+- The method assumes a specific traversal direction; entering from above and exiting below without explicit quadrant handling can lead to inaccurate midpoint values [S1, unofficial].
+
+**Pseudocode:**
+> **Unverified code.** The code below did not pass a test run against a reference implementation, or no test fits it, so it may contain errors.
+
+```python
+def load2():
+    return [0.0, 0.0]
+
+def clamp(value, min_val, max_val):
+    return max(min_val, min(value, max_val))
+
+def calculate_midpoint_uv(southwest, southeast, northwest, northeast, center):
+    # Step 1: Initialize midpoint vector structure
+    midpoints = [load2(), load2()]
+
+    # Step 2: Calculate Southwest midpoint UV
+    midpoints[0] = [
+        (southwest[0] + southeast[0]) / 2.0,
+        (southwest[1] + southeast[1]) / 2.0
+    ]
+
+    # Step 3: Calculate Northwest midpoint UV
+    midpoints[1] = [
+        (northwest[0] + northeast[0]) / 2.0,
+        (northwest[1] + northeast[1]) / 2.0
+    ]
+
+    # Step 4: Apply Y min/max constraints (reused for both midpoints)
+    midpoints[0][1] = clamp(midpoints[0][1], 0.0, 1.0)
+    midpoints[1][1] = clamp(midpoints[1][1], 0.0, 1.0)
+
+    # Step 5 & 6: Determine final midpoint components based on Y threshold
+    if midpoints[0][1] < 0.5:
+        midpoint_x = center + 0.5
+        midpoint_y = midpoints[0][1]
+    else:
+        midpoint_x = midpoints[0][0]
+        midpoint_y = center
+
+    return midpoint_x, midpoint_y
+```
+
+## Subtopics
+
+### Midpoint Plane Y-Height Interpolation
+Calculates the exact Y height where a ray intersects the midpoint plane using linear interpolation between entry and exit Y values [S1, unofficial]. It determines the entry Y value ($Y_{entry}$) and exit Y value ($Y_{exit}$) for the current voxel step [S1, unofficial]. The Y difference is calculated as $\text{diff} = Y_{entry} - Y_{exit}$ [S1, unofficial]. The Y offset at the midpoint is found by multiplying the difference by the normalized X position ($t$, typically $0.5$) [S1, unofficial]. The intersection height is obtained by subtracting the offset from the entry Y height: $Y_{intersect} = Y_{entry} - (Y_{entry} - Y_{exit}) \times t$ [S1, unofficial]. A key pitfall is that midpoint accuracy degrades if the ray enters from above and exits below without explicit quadrant handling or proper step direction tracking [S1, unofficial].
+
+## Operating characteristics
+- **Time Complexity:** Constant time $O(1)$ per voxel step, involving basic arithmetic operations (addition, division, comparison) [S1, unofficial].
+- **Memory Complexity:** Constant space $O(1)$, requiring storage for a few scalar values and vectors [S1, unofficial].
+- **Strengths:** Provides a geometrically intuitive midpoint for height and lighting calculations, simplifying the transition between voxel faces [S1, unofficial].
+- **Limitations:** Fails below the calculated midpoint, requiring additional logic for full volume traversal [S1, unofficial].
+- **When to use:** Suitable for terrain rendering or surface approximation where height variation at the midpoint of a voxel step is critical [S1, unofficial].
+- **When not to use:** Not suitable for full volumetric density integration or cases requiring accurate height calculation below the midpoint plane without additional quadrant handling [S1, unofficial].
+
+## Background
+Documented in a video tutorial on voxel DDA raymarching techniques, this method was introduced to improve surface rendering in voxel-based environments by introducing geometric midpoints for height mapping [S1, unofficial].
+
+## Sources
+[S1] Smooth terrain with voxel DDA raymarching, https://www.youtube.com/watch?v=CxoC0E7inUg, fetched 2026-10-25 (unofficial)

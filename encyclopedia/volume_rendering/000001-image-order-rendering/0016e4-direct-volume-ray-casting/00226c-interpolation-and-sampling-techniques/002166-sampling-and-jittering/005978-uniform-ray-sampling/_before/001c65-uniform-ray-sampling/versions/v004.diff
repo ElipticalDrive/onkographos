@@ -1,0 +1,287 @@
+--- v003.md
++++ v004.md
+@@ -4,45 +4,32 @@
+ 
+ ## Overview
+-Uniform Ray Sampling generates a fixed number of 3D points along camera rays by distributing sample depths uniformly between a near plane ($t_n$) and a far plane ($t_f$) [S2][S5, S7, unofficial]. It serves as the baseline discretization method for volume rendering and neural radiance fields (NeRF) when no transmittance estimator or density prior is available, assuming every point along the ray contributes equally to the final image [S2]. Unlike [Stratified Monte Carlo Radiance Estimate](1373-stratified-monte-carlo-radiance-estimate.md) or [Stratified Ray Sampling](3014-stratified-ray-sampling.md), which divide the interval into bins to reduce variance, uniform sampling places points at fixed intervals or with independent random noise without enforcing coverage constraints per bin [S1, unofficial]. It is the simplest to implement but generally offers the lowest efficiency compared to spatial skipping or importance sampling methods [S2].
++Uniform Ray Sampling generates a fixed number of 3D points along camera rays by distributing sample depths evenly or randomly within the interval defined by the near and far clipping planes. It serves as the baseline discretization strategy for volume rendering and neural radiance fields (NeRF) when no transmittance estimator or density prior is available, assuming every point along the ray contributes equally to the final rendering [S2]. Unlike [Stratified Ray Sampling](3014-stratified-ray-sampling.md) which introduces controlled randomness within structured bins to break aliasing, or [Spatial Skipping](2516-sampling-and-jittering.md) which skips empty regions, uniform sampling distributes points across the entire depth range without structural adaptation, making it the simplest to implement but often the least efficient for scenes with large empty spaces [S2].
+ 
+ ## How it works
+ **Inputs:**
+-*   Ray origins $\mathbf{o} \in \mathbb{R}^3$ (shape $[N, 3]$ for $N$ rays) [S7, S12, unofficial].
+-*   Ray directions $\mathbf{d} \in \mathbb{R}^3$ (unit-norm, shape $[N, 3]$) [S7, S12, unofficial].
+-*   Near plane distance $t_n$ (or `min_depth`) [S6][S7, unofficial].
+-*   Far plane distance $t_f$ (or `max_depth`) [S6][S7, unofficial].
+-*   Number of samples per ray $N_s$ (or `n_pts_per_ray`) [S7, S12, unofficial].
++*   `origins`: Tensor of ray origins, shape $(N, 3)$, where $N$ is the number of rays.
++*   `directions`: Tensor of unit-norm ray directions, shape $(N, 3)$.
++*   `near`: Scalar or tensor of near clipping plane distances.
++*   `far`: Scalar or tensor of far clipping plane distances.
++*   `num_samples` (or `n_pts_per_ray`): Integer specifying the number of samples per ray.
+ 
+ **Outputs:**
+-*   Sample points $\mathbf{x} \in \mathbb{R}^3$ (shape $[N, N_s, 3]$) [S7, S12, unofficial].
+-*   Sample lengths/deltas $\Delta t \in \mathbb{R}$ (shape $[N, N_s, 1]$ or similar) [S6][S7, unofficial].
++*   `sample_points`: Tensor of 3D coordinates, shape $(N, \text{num\_samples}, 3)$.
++*   `sample_lengths`: Tensor of segment lengths, shape $(N, \text{num\_samples}, 1)$, used for integration weights.
+ 
+ **Data Structures:**
+-*   `RayBundle`: A container holding `origins`, `directions`, `sample_points`, and `sample_lengths` [S6][S8, unofficial].
+-*   Tensors for $t$ values (linearly spaced) and random noise if perturbation is enabled [S9, S14, unofficial].
++The method typically operates on a `RayBundle` object or similar structure containing `origins`, `directions`, `sample_points`, and `sample_lengths` [S6][S7, unofficial].
+ 
+ **Steps:**
+-1.  **Generate Depth Values:** Create $N_s$ depth values $t_i$ uniformly distributed in $[t_n, t_f]$.
+-    *   *Deterministic (Linear):* Use linear spacing:
+-        $$ t_i = t_n + \frac{i}{N_s - 1} (t_f - t_n), \quad i = 0, \dots, N_s-1 $$
+-        Or equivalently using normalized $z \in [0, 1]$:
+-        $$ t(z) = t_n (1 - z) + t_f z $$
+-        where $z_i = i / (N_s - 1)$ [S7, S9, S14, unofficial].
+-    *   *Stochastic (Uniform Random):* Draw $N_s$ independent uniform random variables $u_i \sim \mathcal{U}(0, 1)$ and compute:
+-        $$ t_i = t_n + (t_f - t_n) u_i $$
+-        [S2].
+-2.  **Broadcast Ray Parameters:** Reshape ray origins $\mathbf{o}$ to $[N, 1, 3]$ and directions $\mathbf{d}$ to $[N, 1, 3]$ to allow broadcasting with the depth tensor [S7, S12, S14, unofficial].
+-3.  **Compute 3D Coordinates:** Calculate sample positions by offsetting the ray origin along the direction:
+-    $$ \mathbf{x}_i = \mathbf{o} + t_i \mathbf{d} $$
+-    [S7, unofficial][S10][S12, S14, unofficial].
+-4.  **Compute Sample Lengths (Deltas):** Calculate the distance between consecutive samples for transmittance integration. For linear spacing, the delta is constant (except potentially at the last segment depending on implementation):
+-    $$ \Delta t_i = t_{i+1} - t_i $$
+-    For the last sample, $\Delta t$ is often set to a large value or the distance to the far plane [S7, S12, unofficial].
+-5.  **Optional Perturbation (Stratification):** To break symmetry and reduce aliasing, uniform noise can be added to the linearly spaced depths [S11, S14, unofficial].
+-    *   Compute midpoints $t_{mid, i} = 0.5 (t_i + t_{i+1})$ [S14, unofficial].
+-    *   Define intervals $[t_{lower, i}, t_{upper, i}]$ where $t_{lower, i} = t_{i-1}$ (or $t_n$ for $i=0$) and $t_{upper, i} = t_{i+1}$ (or $t_f$ for $i=N_s-1$) [S14, unofficial].
+-    *   Generate random noise $r_i \sim \mathcal{U}(0, 1)$ and update:
+-        $$ t_i' = t_{lower, i} + (t_{upper, i} - t_{lower, i}) r_i $$
+-        [S9, S14, unofficial]. Note: This specific perturbation method is often referred to as stratified sampling in NeRF implementations, but it originates from the uniform sampling base [S14, unofficial].
++1.  **Generate Depth Values:** Create a 1D tensor of `num_samples` values linearly spaced between `near` and `far`. Let these be $z_i$ for $i = 0, \dots, \text{num\_samples}-1$.
++    $$ z_i = \text{near} + \frac{i}{\text{num\_samples} - 1} (\text{far} - \text{near}) $$
++    *Note: Some implementations use $N+1$ points or specific indexing $i \in [0, N]$ for the interval endpoints [S10]. The standard discrete sampling for integration usually uses $N$ points representing the centers or start of intervals.*
++2.  **Broadcast Ray Parameters:** Reshape `origins` to $(N, 1, 3)$ and `directions` to $(N, 1, 3)$ to allow broadcasting with the depth tensor. Reshape $z$ to $(1, \text{num\_samples}, 1)$ or $(N, \text{num\_samples}, 1)$ depending on batch handling.
++3.  **Compute 3D Positions:** Calculate the 3D sample points $\mathbf{x}_i$ using the ray equation:
++    $$ \mathbf{x}_i = \mathbf{o} + z_i \cdot \mathbf{d} $$
++    where $\mathbf{o}$ is the ray origin and $\mathbf{d}$ is the ray direction [S10][S13, unofficial].
++4.  **Compute Segment Lengths:** Calculate the distance between consecutive samples to determine the integration step size (delta). For uniform sampling, the delta $\Delta z$ is constant:
++    $$ \Delta z = \frac{\text{far} - \text{near}}{\text{num\_samples}} $$
++    The `sample_lengths` tensor is filled with $\Delta z$ (or the specific distance between adjacent $z_i$ values) [S7, S12, unofficial].
+ 
+ **Pseudocode:**
+@@ -50,144 +37,112 @@
+ import torch
+ 
+-def uniform_ray_sampling(origins, directions, near, far, n_samples, perturb=0.0):
++def uniform_ray_sampling(origins, directions, near, far, num_samples):
+     """
+-    Generate uniform samples along rays.
++    Generates uniform sample points along camera rays.
+     
+     Args:
+         origins: Tensor of shape (N, 3)
+-        directions: Tensor of shape (N, 3), assumed unit-norm
+-        near: Float, near plane distance
+-        far: Float, far plane distance
+-        n_samples: Int, number of samples per ray
+-        perturb: Float, magnitude of random perturbation (0.0 for deterministic)
++        directions: Tensor of shape (N, 3), unit norm
++        near: Float or Tensor of shape (N,)
++        far: Float or Tensor of shape (N,)
++        num_samples: Int, number of samples per ray
+         
+     Returns:
+-        sample_points: Tensor of shape (N, n_samples, 3)
+-        sample_lengths: Tensor of shape (N, n_samples, 1)
++        sample_points: Tensor of shape (N, num_samples, 3)
++        sample_lengths: Tensor of shape (N, num_samples, 1)
+     """
+-    # 1. Generate linearly spaced t-values in [0, 1]
+-    # Using linspace ensures endpoints are included if steps are defined by count-1 intervals
+-    # However, standard NeRF uniform sampling often uses N points.
+-    # We generate N points.
+-    t_vals = torch.linspace(0.0, 1.0, n_samples, device=origins.device)
++    # 1. Generate linearly spaced depth values between near and far
++    # Using linspace to get num_samples points. 
++    # Note: Some implementations use num_samples + 1 for boundaries, 
++    # but for point sampling, num_samples points are standard.
++    # If near/far are scalars:
++    if near.dim() == 0:
++        z_vals = torch.linspace(near, far, num_samples, device=origins.device)
++    else:
++        # Handle per-ray near/far if they are tensors
++        # Reshape for broadcasting: (N, 1)
++        near = near.unsqueeze(1)
++        far = far.unsqueeze(1)
++        # Create steps
++        steps = torch.linspace(0, 1, num_samples, device=origins.device)
++        z_vals = near * (1 - steps) + far * steps
++        
++    # 2. Reshape for broadcasting
++    # origins: (N, 1, 3)
++    origins = origins.unsqueeze(1)
++    # directions: (N, 1, 3)
++    directions = directions.unsqueeze(1)
++    # z_vals: (N, num_samples, 1) if per-ray, else (num_samples, 1) -> broadcast to N
++    if near.dim() == 0:
++        z_vals = z_vals.unsqueeze(0).expand(origins.shape[0], -1, 1)
++    else:
++        z_vals = z_vals.unsqueeze(2) # (N, num_samples, 1)
++
++    # 3. Compute 3D sample points: P = O + D * z
++    sample_points = origins + directions * z_vals
+     
+-    # 2. Map to depth range [near, far]
+-    # Linear interpolation: z = near * (1 - t) + far * t
+-    z_vals = near * (1.0 - t_vals) + far * t_vals
+-    
+-    # 3. Optional Perturbation
+-    if perturb > 0.0:
+-        # Compute midpoints for interval boundaries
+-        # z_vals shape: (n_samples,)
+-        # We need to handle boundaries carefully.
+-        # Intervals are defined by the samples themselves.
+-        # For sample i, the interval is [z[i-1], z[i+1]] roughly, 
+-        # but standard implementation uses:
+-        # lower = z[i-1] (or near for i=0)
+-        # upper = z[i+1] (or far for i=N-1)
+-        # Actually, standard NeRF perturbation (S14) uses:
+-        # midpoints between samples, then perturb within the bin defined by neighbors.
++    # 4. Compute sample lengths (deltas)
++    # For uniform sampling, delta is constant
++    if near.dim() == 0:
++        delta = (far - near) / num_samples
++        sample_lengths = torch.full_like(sample_points[..., :1], delta)
++    else:
++        # Calculate delta from z_vals differences if needed, 
++        # but for uniform linspace, it's constant per ray
++        delta = (far - near) / num_samples
++        sample_lengths = torch.full_like(sample_points[..., :1], delta)
+         
+-        z_vals_mid = 0.5 * (z_vals[:-1] + z_vals[1:]) # Shape (n_samples - 1,)
+-        
+-        # Upper bound for sample i is z[i+1] (or far for last)
+-        # Lower bound for sample i is z[i-1] (or near for first)
+-        # Concatenate to get bounds for all samples
+-        upper = torch.cat([z_vals_mid, torch.tensor([far], device=origins.device)], dim=-1)
+-        lower = torch.cat([torch.tensor([near], device=origins.device), z_vals_mid], dim=-1)
+-        
+-        # Generate random noise
+-        perturb_rand = perturb * torch.rand(z_vals.shape, device=origins.device)
+-        
+-        # Perturb
+-        z_vals = lower + (upper - lower) * perturb_rand
+-
+-    # 4. Broadcast origins and directions
+-    # origins: (N, 3) -> (N, 1, 3)
+-    # directions: (N, 3) -> (N, 1, 3)
+-    # z_vals: (n_samples,) -> (1, n_samples, 1)
+-    
+-    o = origins.unsqueeze(1) # (N, 1, 3)
+-    d = directions.unsqueeze(1) # (N, 1, 3)
+-    z = z_vals.unsqueeze(0).unsqueeze(-1) # (1, n_samples, 1)
+-    
+-    # 5. Compute sample points
+-    # x = o + z * d
+-    sample_points = o + z * d # (N, n_samples, 3)
+-    
+-    # 6. Compute sample lengths (deltas)
+-    # Delta is distance between consecutive samples
+-    # deltas[i] = z[i+1] - z[i]
+-    # Shape (n_samples - 1,)
+-    deltas = z_vals[1:] - z_vals[:-1]
+-    
+-    # Append a large value for the last segment (or distance to far plane)
+-    # Often set to 1e10 or far - z[-1]
+-    last_delta = far - z_vals[-1]
+-    deltas = torch.cat([deltas, torch.tensor([last_delta], device=origins.device)], dim=-1)
+-    
+-    # Reshape deltas to (N, n_samples, 1)
+-    sample_lengths = deltas.unsqueeze(0).unsqueeze(-1).repeat(origins.shape[0], 1, 1)
+-    
+     return sample_points, sample_lengths
+ ```
++
++**Edge Cases and Pitfalls:**
++*   **Near/Far Equality:** If `near == far`, the interval is zero, leading to division by zero or identical sample points. Guard against this by clamping or skipping rays.
++*   **Precision:** In very large scenes, linear depth sampling can lead to poor resolution near the camera if `far` is large. This is addressed by variants like [Uniform NDC Point Sampling](2395-uniform-ndc-point-sampling.md) or logarithmic sampling [S10].
++*   **Aliasing:** Regular uniform sampling can cause aliasing artifacts (Moiré patterns) in volume rendering. This is often mitigated by adding small random noise (jitter) to the sample positions, effectively turning it into stratified sampling [S11, S14, unofficial].
+ 
+ ## Subtopics
+ 
+ ### [Stratified Monte Carlo Radiance Estimate](1373-stratified-monte-carlo-radiance-estimate.md)
+-An unbiased radiance estimation method that reduces variance compared to uniform sampling by dividing the ray interval into strata and sampling one point uniformly at random within each bin. It ensures coverage of the entire interval, unlike pure uniform random sampling which may cluster points. Choose this when degenerate distributions require more accurate integration than uniform sampling provides.
++The Stratified Monte Carlo Radiance Estimate is an unbiased radiance estimation method that reduces variance compared to uniform sampling by dividing the ray interval into strata and sampling within each. It is particularly effective for degenerate distributions where uniform sampling requires significantly more samples to achieve comparable accuracy. Unlike [Uniform Ray Sampling](1261-uniform-ray-sampling.md), which distributes points evenly or randomly across the entire depth range without structure, this method ensures coverage of the entire interval by enforcing one sample per bin.
+ 
+ ### [Evenly Spaced Sampling with Preprocessed Rays and Depth Indicators](2335-evenly-spaced-sampling-with-preprocessed-rays-and-depth-indi.md)
+-Ensures even spacing along rays within a voxel cell using preprocessed ray data and a 4-bit depth-sampling indicator stored in pixel opacity. It differs from uniform sampling by maintaining sampling continuity across cells via a stateful depth indicator, solving efficiency issues in trilinear interpolation evaluation.
++This method ensures even spacing along rays within a voxel cell by using preprocessed ray data and a 4-bit depth-sampling indicator stored in the pixel opacity. It solves the problem of efficiently computing sampling coordinates for trilinear interpolation and evaluating the Riemann sum in front-to-back order. It differs from [Uniform Ray Sampling](1261-uniform-ray-sampling.md) by relying on a shared set of preprocessed rays and a stateful depth indicator to maintain sampling continuity across cells.
+ 
+ ### [Uniform NDC Point Sampling](2395-uniform-ndc-point-sampling.md)
+-Transforms camera rays into an average camera frame and uniformly samples points within the projected Normalized Device Coordinates (NDC) space. It provides linear sampling in disparity from the near plane to infinity, combining benefits of uniform and logarithmic sampling. It is distinct because it is only applicable if all samples lie strictly in the front hemisphere of the average camera frame.
++Uniform NDC Point Sampling transforms camera rays into an average camera frame and uniformly samples points within the projected Normalized Device Coordinates (NDC) space. It solves the problem of inefficient sample distribution in large scenes by providing a linear sampling in disparity from the near plane to infinity in original space, which combines the benefits of uniform and logarithmic sampling approaches. It is distinct from other strategies because it is only applicable if all samples lie strictly in the front hemisphere of the average camera frame, a limitation not shared by siblings like Stratified Ray Sampling.
+ 
+ ### [Batch Stratified Sampling](2730-batch-stratified-sampling.md)
+-Generates $N_c$ evenly-spaced depth bins in the interval $[near, far]$ and perturbs sample positions within each bin to reduce aliasing artifacts. It extends uniform sampling by stratifying the depth interval to ensure more even distribution across the ray's depth range.
++Batch Stratified Sampling generates $N_c$ evenly-spaced depth bins in the interval $[near, far]$ and perturbs sample positions within each bin to reduce aliasing artifacts during volume rendering. It extends Uniform Ray Sampling by stratifying the depth interval, ensuring samples are distributed more evenly across the ray's depth range.
+ 
+ ### [Stratified Ray Sampling](3014-stratified-ray-sampling.md)
+-Divides the ray interval $[near, far]$ into $N$ evenly-spaced bins and draws one sample uniformly at random from each bin. Unlike fixed evenly spaced sampling, it introduces controlled randomness within structured intervals to improve training data quality by breaking regular patterns.
++Stratified Ray Sampling divides the ray interval $[near, far]$ into $N$ evenly-spaced bins and draws one sample uniformly at random from each bin. Unlike [Evenly Spaced Sampling with Preprocessed Rays and Depth Indicators](2335-evenly-spaced-sampling-with-preprocessed-rays-and-depth-indi.md) which uses fixed positions, this method introduces controlled randomness within structured intervals. It is used to improve the feel and quality of training data for volume rendering by breaking up regular sampling patterns.
++
++### [Local Sampling](5532-local-sampling.md)
++Local Sampling is a ray sampling strategy that reduces computational cost by concentrating samples around a known surface representation, such as a depth texture, rather than distributing them uniformly along the entire ray. It solves the problem of wasted evaluations in empty space, allowing for a drastic reduction in sample count (down to two per ray) while maintaining high rendering quality. Unlike [Uniform Ray Sampling](1261-uniform-ray-sampling.md), which samples the full depth range, Local Sampling relies on an oracle (ground truth or learned) to localize the surface, making it distinct from sibling methods like [Stratified Ray Sampling](3014-stratified-ray-sampling.md) that do not require explicit surface priors.
+ 
+ ### Forward Sampling Inside Surface
+-Samples points forward along the ray from a known surface to get SDF values inside the object, used when latent space is not pretrained [S3, unofficial]. It computes grid offsets based on `num_forward_sampling` and adds them to valid z-depths to generate internal samples [S3, unofficial].
++Samples points forward along the ray from the surface to get SDF values inside the object, used when latent space is not pretrained [S3, unofficial]. It asserts `num_forward_sampling > 0`, computes grid offsets, and generates points at `valid_zdepth + grid` to decode SDF values [S3, unofficial].
+ 
+ ### Camera Ray Sampling for Translucent Materials
+-Samples the ray randomly with a small number of samples (as low as one) when the camera ray reaches translucent material after diffuse interactions [S15]. It uses a specific formula involving the extinction coefficient $\sigma_t$ and total samples $k_{max}$ to determine sample depths, ensuring $k_{max}$ samples are placed even for small object widths [S15].
+-
+-### Local Sampling
+-Places a fraction of samples around a known ground truth surface representation (e.g., depth texture) to reduce empty space evaluations [S10]. It allows reducing the total number of samples to two with nearly no decrease in quality, though ground truth depth is often unavailable during inference [S10].
++For translucent materials, this method computes the exit point $d_{\max}$ and samples the ray randomly with a small number of samples (as low as one) [S15]. The sample depths $d_k$ are computed using the formula:
++$$ d_k = -\frac{1}{\sigma_t} \log \left( 1 - \frac{|k(1 - e^{-\sigma_t d_{\max}})|}{k_{\max}} \right) $$
++where $\sigma_t$ is the extinction coefficient, $k$ is the sample index, and $k_{\max}$ is the total number of samples [S15]. This ensures exactly $k_{\max}$ samples are placed, handling small object widths by preventing undersampling [S15].
+ 
+ ### Non-linear (Logarithmic) Sampling
+-Uses logarithmic non-linearity to focus samples on objects closer to the camera, reducing network evaluations in large depth ranges [S10]. The depth is transformed via $\tilde{d}_i = d_{min} + \frac{\log(d_i - d_{min} + 1)}{\log(d_{max} - d_{min} + 1)} \cdot (d_{max} - d_{min})$ [S10].
++A sample placement strategy using logarithmic non-linearity to focus samples on objects closer to the camera, reducing network evaluations without losing quality in large depth ranges [S10]. The logarithmic depth $\tilde{d}_i$ is calculated from uniform depth $d_i$ as:
++$$ \tilde{d}_i = d_{min} + \frac{\log(d_i - d_{min} + 1)}{\log(d_{max} - d_{min} + 1)} \cdot (d_{max} - d_{min}) $$
++In ablation studies, logarithmic sampling increases PSNR by 1.3 dB per doubling of $N$, compared to 1.8 dB for uniform sampling [S10].
+ 
+ ## Operating characteristics
+-**Time Complexity:** $O(N \cdot N_s)$, where $N$ is the number of rays and $N_s$ is the number of samples per ray [S7, S12, unofficial]. The computation is highly parallelizable on GPUs [S1, unofficial].
+-
+-**Memory Complexity:** $O(N \cdot N_s \cdot 3)$ for storing sample points and $O(N \cdot N_s)$ for depths/lengths [S7, S12, unofficial].
+-
+-**Performance:** On an RTX PRO 6000 Blackwell, uniform ray sampling for 1M rays on the dragon dataset (fp32, cone=0) takes approximately 2.790ms, with a speedup of 1.06x over unoptimized versions [S1, unofficial]. For the wdas_cloud dataset (2.6 GB fog), it takes 16.391ms with a 1.05x speedup [S1, unofficial].
+-
+-**Strengths:**
+-*   Simplest implementation [S2].
+-*   Deterministic behavior (without perturbation) aids reproducibility [S9, unofficial].
+-*   Baseline for comparing more complex sampling strategies [S2].
+-
+-**Limitations:**
+-*   Lowest efficiency in most cases compared to spatial skipping or PDF-based methods [S2].
+-*   Wastes samples in empty space or occluded regions [S2].
+-*   Prone to aliasing artifacts due to regular spacing, mitigated only by perturbation [S14, unofficial].
+-
+-**When to use:**
+-*   As a baseline or default strategy in NeRF-style rendering [S10].
+-*   When no density or transmittance estimator is available [S2].
+-*   For small scenes or individual objects where depth ranges are limited [S10].
+-
+-**When not to use:**
+-*   For large unbounded scenes where empty space dominates [S2].
+-*   When high efficiency is required and spatial skipping or importance sampling is feasible [S2].
++*   **Time Complexity:** $O(N \cdot S)$, where $N$ is the number of rays and $S$ is the number of samples per ray. The generation of points is linear in the total number of samples.
++*   **Memory Complexity:** $O(N \cdot S \cdot 3)$ for storing the sample points, plus $O(N \cdot S)$ for lengths.
++*   **Performance:** On an RTX PRO 6000 Blackwell, processing 1M rays for the dragon dataset with fp32 and cone=0 takes approximately 2.790ms (optimized) vs 2.953ms (baseline), a 1.06x speedup [S1, unofficial]. For the wdas_cloud dataset (2.6 GB fog), it takes 16.391ms vs 17.216ms, a 1.05x speedup [S1, unofficial].
++*   **Strengths:** Simple to implement; deterministic (if no jitter); serves as a robust baseline for comparison [S2].
++*   **Limitations:** Lowest efficiency in most cases compared to spatial skipping or PDF-based methods because it samples empty space uniformly [S2]. Prone to aliasing artifacts without jitter [S11, unofficial].
++*   **When to Use:** When no density information is available; as a baseline for training NeRFs; in scenes where objects are distributed uniformly throughout the depth range.
++*   **When Not to Use:** In scenes with large empty spaces (use Spatial Skipping); when high accuracy is needed with few samples (use Importance Sampling); when aliasing is a concern without jitter.
+ 
+ ## Background
+-Uniform sampling is the default raymarching strategy in NeRF [16] and subsequent neural rendering methods [S10]. It assumes a constant PDF and linearly decaying transmittance, which is mathematically equivalent to uniformly sampling along the ray [S2]. The method has been widely adopted as the standard baseline for evaluating new sampling techniques in neural radiance fields [S2, S10].
++Uniform sampling is the default raymarching strategy in NeRF-style rendering, placing samples uniformly between the near and far planes [S10]. It assumes a constant PDF and linearly decaying transmittance $T(t) = 1 - (t - t_n)/(t_f - t_n)$, which is mathematically equivalent to uniform sampling along the ray [S2]. This method is widely used as the baseline in NeRF [16] and its variants [S2, S10].
+ 
+ ## Sources

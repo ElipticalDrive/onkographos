@@ -1,0 +1,337 @@
+--- v001.md
++++ v002.md
+@@ -4,5 +4,5 @@
+ 
+ ## Overview
+-VF-Ray-GPU is a GPGPU implementation of the VF-Ray algorithm designed for memory-efficient ray casting on unstructured tetrahedral volumes [S1]. It solves the problem of rendering large datasets on GPUs with limited memory by avoiding explicit adjacency structures (like `Use_set`) and pre-computed normals, instead computing face parameters and volume integrals on-the-fly [S1]. It sets itself apart from its parent, Visible Faces Driven Ray Casting, by fully parallelizing the visibility determination, projection, and ray traversal across CUDA kernels, utilizing a hash-based local memory buffer for traversal state to minimize global memory bandwidth [S1].
++VF-Ray-GPU is a GPGPU implementation of the VF-Ray algorithm designed for memory-efficient ray casting on unstructured tetrahedral volumes [S1]. It solves the problem of rendering large datasets on GPUs with limited memory by avoiding explicit adjacency structures (like `Use_set`) and pre-computed normals, instead computing face parameters and volume integrals on-the-fly [S1]. It sets itself apart from its parent, Visible Faces Driven Ray Casting, by fully parallelizing the visibility determination, projection, and ray traversal across three CUDA kernels, utilizing a hash-based local memory buffer for traversal state to minimize global memory bandwidth [S1].
+ 
+ ## How it works
+@@ -26,205 +26,200 @@
+ The algorithm is divided into three CUDA kernels [S1].
+ 
+-**Kernel 1: Find Visible Faces**
+-*   **Thread Organization:** One thread per external face. Total threads = number of external faces [S1].
+-*   **Process:**
+-    1.  Read external face from `extFaces` (texture memory) [S1].
+-    2.  Compute plane equation coefficients for $z$ and $s$ interpolation by solving two $3 \times 3$ linear systems [S1].
+-    3.  Perform visibility test: Compare the $z$-coordinate of the fourth vertex (not on the face) with the projected $z$-coordinate on the face using the computed interpolation parameters [S1].
+-    4.  If projected $z <$ fourth vertex $z$, the face is visible [S1].
+-    5.  Store $z$ and $s$ interpolation parameters in `visFaces` (global memory) [S1].
+-*   **Cost:** Less than 5% of total time and memory [S1].
+-
+-**Kernel 2: Project Visible Faces**
+-*   **Thread Organization:** One thread per visible face [S1].
+-*   **Process:**
+-    1.  Read vertex coordinates from `vertList` (texture memory) using IDs from `tetList` (global memory) [S1].
+-    2.  Project visible faces to screen space [S1].
+-    3.  Compute bounding box of the projection [S1].
+-    4.  Store bounding box in `projVisFaces` (global memory) [S1].
+-
+-**Kernel 3: Ray Casting**
+-*   **Thread Organization:** CUDA grid divided into blocks; one block per visible face. Each block divided into threads; each thread computes a small set of pixels [S1]. Threads finishing early are reused by the hardware driver [S1].
+-*   **Process:**
+-    1.  Read `visFaces` and `projVisFaces` [S1].
+-    2.  Determine visible face pixels using the bounding box and a point-in-triangle test (cross product) [S1].
+-    3.  For each pixel, trigger ray casting using the visible face as the first entry face [S1].
+-    4.  Traverse tetrahedra:
+-        *   Compute face parameters on-the-fly (replacing pre-computed normals/gradients) [S1].
+-        *   Store next faces in `computedFaces` buffer.
+-        *   Hash index is the $z$-coordinate centroid of the face [S1].
+-        *   Handle hash collisions: Check stored $t_i$ and $f_i$ to ensure the correct face is read [S1].
+-    5.  Compute volume rendering integral on-the-fly for each cell contribution using Bunyk's method [S1].
++1.  **Kernel 1: Find Visible Faces**
++    *   **Thread Organization:** One thread per external face [S1].
++    *   **Process:**
++        1.  Read external face from `extFaces` (texture memory) [S1].
++        2.  Compute plane equation coefficients for $z$ and $s$ interpolation by solving two $3 \times 3$ linear systems [S1].
++        3.  Perform visibility test: Compare the $z$-coordinate of the fourth vertex (not on the face) with the projected $z$-coordinate on the face using the computed interpolation parameters [S1].
++        4.  If projected $z <$ fourth vertex $z$, the face is visible [S1].
++        5.  Store $z$ and $s$ interpolation parameters in `visFaces` (global memory) [S1].
++    *   **Cost:** Less than 5% of total time and memory [S1].
++
++2.  **Kernel 2: Project Visible Faces**
++    *   **Thread Organization:** One thread per visible face [S1].
++    *   **Process:**
++        1.  Read vertex coordinates from `vertList` (texture memory) using IDs from `tetList` (global memory) [S1].
++        2.  Project visible faces to screen space [S1].
++        3.  Compute bounding box of the projection [S1].
++        4.  Store bounding box in `projVisFaces` (global memory) [S1].
++
++3.  **Kernel 3: Ray Casting**
++    *   **Thread Organization:** CUDA grid divided into blocks; one block per visible face [S1]. Each block divided into threads; each thread computes a small set of pixels [S1]. Threads finishing early are reused by the hardware driver [S1].
++    *   **Process:**
++        1.  Read `visFaces` and `projVisFaces` [S1].
++        2.  Determine visible face pixels using the bounding box and a point-in-triangle test (cross product) [S1].
++        3.  For each pixel, trigger ray casting using the visible face as the first entry face [S1].
++        4.  Traverse tetrahedra:
++            *   Compute face parameters on-the-fly (replacing pre-computed normals/gradients) [S1].
++            *   Store next faces in `computedFaces` buffer [S1].
++            *   Hash index is the $z$-coordinate centroid of the face [S1].
++            *   Handle hash collisions: Check stored $t_i$ and $f_i$ to ensure the correct face is read [S1].
++        5.  Compute volume rendering integral on-the-fly for each cell contribution using Bunyk's method [S1].
++
++**Parameters:**
++*   **Viewport Resolution:** 512×512 pixels for small datasets (Blunt, Oxygen); 1024×1024 pixels for large datasets (Fighter, F16) [S1].
++*   **Hardware:** Intel Pentium Core 2 Duo 6400 (2.13 GHz), 2 GB RAM, nVidia GeForce 8800 Ultra (768 MB memory) [S1].
++
++**Edge Cases and Pitfalls:**
++*   **Degeneracies:** When a ray hits an edge or vertex, VF-Ray-GPU perturbs the ray to avoid the degenerate case, then continues traversal with the same direction without displacement [S1]. This yields approximate results but saves memory by not storing `Use_set` [S1].
++*   **Precision:** On-the-fly face parameter computation replaces pre-computed normals and gradients, increasing arithmetic intensity but reducing memory footprint [S1].
+ 
+ **Pseudocode:**
+-
+ ```python
+-# Data Structures
+-# vertList: array of (x, y, z, s)
+-# tetList: array of [v0, v1, v2, v3]
+-# extFaces: array of face indices
+-# visFaces: array of (t_id, f_id, z_param, s_param)
+-# projVisFaces: array of (t_id, f_id, min_x, min_y, max_x, max_y)
++# Global data structures (pre-computed or allocated)
++vertList = [...]  # List of (x, y, z, s)
++tetList = [...]   # List of [v0, v1, v2, v3]
++extFaces = [...]  # List of (t_id, f_id)
++visFaces = []     # List of (t_id, f_id, z_coeffs, s_coeffs)
++projVisFaces = [] # List of (t_id, f_id, min_x, min_y, max_x, max_y)
++
++EPSILON = 1e-6
++BUFFER_SIZE = 64  # Fixed size for local computedFaces buffer
+ 
+ def kernel_find_visible_faces(ext_face_idx):
+-    # Get face vertices from tetList using extFace data
++    t_id, f_id = extFaces[ext_face_idx]
+     # Face fi of tetrahedron ti uses vertices vi, v(i+1)%4, v(i+2)%4
+-    t_id, f_id = get_face_info(ext_face_idx)
+     v0 = vertList[tetList[t_id][f_id]]
+     v1 = vertList[tetList[t_id][(f_id + 1) % 4]]
+     v2 = vertList[tetList[t_id][(f_id + 2) % 4]]
+-    v3 = vertList[tetList[t_id][(f_id + 3) % 4]] # Fourth vertex
++    v3 = vertList[tetList[t_id][(f_id + 3) % 4]]
+ 
+     # Compute plane equation coefficients for z and s interpolation
+-    # Solve 3x3 linear systems for z and s
++    # Solves two 3x3 linear systems: one for z, one for s [S1]
+     z_coeffs = solve_linear_system(v0, v1, v2, v0.z, v1.z, v2.z)
+     s_coeffs = solve_linear_system(v0, v1, v2, v0.s, v1.s, v2.s)
+ 
+-    # Project v3 onto the plane defined by v0, v1, v2
++    # Project v3 onto the plane defined by v0, v1, v2 using z interpolation [S1]
+     projected_z = interpolate_z(v0, v1, v2, v3, z_coeffs)
+ 
+-    # Visibility test: back-face culling
++    # Visibility test: back-face culling [S1]
+     if projected_z < v3.z:
+-        # Store visible face parameters
+         visFaces.append((t_id, f_id, z_coeffs, s_coeffs))
+ 
+ def kernel_project_visible_faces(visible_face_idx):
+-    t_id, f_id, z_coeffs, s_coeffs = visFaces[visible_face_idx]
+-    
+-    # Get vertex coordinates
+-    v0 = vertList[tetList[t_id][f_id]]
+-    v1 = vertList[tetList[t_id][(f_id + 1) % 4]]
+-    v2 = vertList[tetList[t_id][(f_id + 2) % 4]]
+-
+-    # Project to screen space
+-    p0 = project_to_screen(v0)
+-    p1 = project_to_screen(v1)
+-    p2 = project_to_screen(v2)
+-
+-    # Compute bounding box
+-    min_x = min(p0.x, p1.x, p2.x)
+-    min_y = min(p0.y, p1.y, p2.y)
+-    max_x = max(p0.x, p1.x, p2.x)
+-    max_y = max(p0.y, p1.y, p2.y)
+-
+-    projVisFaces.append((t_id, f_id, min_x, min_y, max_x, max_y))
+-
+-def kernel_ray_casting(pixel_x, pixel_y, visible_face_idx):
+-    # Check if pixel is inside the bounding box
+-    bbox = projVisFaces[visible_face_idx]
+-    if not (bbox.min_x <= pixel_x <= bbox.max_x and 
+-            bbox.min_y <= pixel_y <= bbox.max_y):
+-        return
+-
+-    # Point-in-triangle test
+     t_id, f_id, z_coeffs, s_coeffs = visFaces[visible_face_idx]
+     v0 = vertList[tetList[t_id][f_id]]
+     v1 = vertList[tetList[t_id][(f_id + 1) % 4]]
+     v2 = vertList[tetList[t_id][(f_id + 2) % 4]]
+-    
++
++    # Project vertices to screen space [S1]
++    p0 = project_to_screen(v0)
++    p1 = project_to_screen(v1)
++    p2 = project_to_screen(v2)
++
++    # Compute bounding box [S1]
++    min_x, max_x = min(p0.x, p1.x, p2.x), max(p0.x, p1.x, p2.x)
++    min_y, max_y = min(p0.y, p1.y, p2.y), max(p0.y, p1.y, p2.y)
++    projVisFaces.append((t_id, f_id, min_x, min_y, max_x, max_y))
++
++def kernel_ray_casting(pixel_x, pixel_y, visible_face_idx):
++    bbox = projVisFaces[visible_face_idx]
++    if not (bbox.min_x <= pixel_x <= bbox.max_x and bbox.min_y <= pixel_y <= bbox.max_y):
++        return
++
++    t_id, f_id, z_coeffs, s_coeffs = visFaces[visible_face_idx]
++    v0 = vertList[tetList[t_id][f_id]]
++    v1 = vertList[tetList[t_id][(f_id + 1) % 4]]
++    v2 = vertList[tetList[t_id][(f_id + 2) % 4]]
++
+     if not point_in_triangle(pixel_x, pixel_y, v0, v1, v2):
+         return
+ 
+-    # Initialize ray
+     ray_origin = screen_to_world(pixel_x, pixel_y)
+     ray_direction = compute_ray_direction(pixel_x, pixel_y)
+-    
+-    # First entry face
+-    current_t_id = t_id
+-    current_f_id = f_id
+-    
+-    # Local buffer for computed faces
+-    computed_faces = [] # Fixed size buffer in local memory
+-
+-    while true:
+-        # Get current face vertices
++    current_t_id, current_f_id = t_id, f_id
++    local_buffer = [None] * BUFFER_SIZE
++
++    while True:
+         v0 = vertList[tetList[current_t_id][current_f_id]]
+         v1 = vertList[tetList[current_t_id][(current_f_id + 1) % 4]]
+         v2 = vertList[tetList[current_t_id][(current_f_id + 2) % 4]]
+-        
+-        # Compute face parameters on-the-fly
+-        # Replace pre-computed normals/gradients
++
++        # Compute face parameters on-the-fly, replacing pre-computed normals [S1]
+         face_normal = cross_product(v1 - v0, v2 - v0)
+-        
+-        # Find intersection with ray
+         t, hit_point = ray_plane_intersection(ray_origin, ray_direction, v0, face_normal)
+-        
++
+         if t < 0:
+-            break # Ray missed or went backwards
+-
+-        # Compute integral contribution for the segment
+-        # Use Bunyk's method for integration
++            break
++
++        # Compute volume rendering integral on-the-fly using Bunyk's method [S1]
+         contribution = compute_volume_integral(ray_origin, hit_point, current_t_id)
+         accumulate_color(contribution)
+ 
+-        # Find next face
+-        # Compute centroid z for hashing
++        # Hash index is the z-coordinate centroid of the face [S1]
+         centroid_z = (v0.z + v1.z + v2.z) / 3.0
+         hash_index = map_z_to_buffer_index(centroid_z)
+-        
+-        # Check local buffer for cached face
++
+         next_face = None
+-        if hash_index < len(computed_faces):
+-            cached = computed_faces[hash_index]
++        # Handle hash collisions: check stored ti and fi [S1]
++        if hash_index < BUFFER_SIZE and local_buffer[hash_index] is not None:
++            cached = local_buffer[hash_index]
+             if cached.t_id == current_t_id and cached.f_id != current_f_id:
+-                # Verify it's the correct face (handle collisions)
+-                # Check if this face is shared by current tetrahedron
+                 next_face = cached
+ 
+         if next_face is None:
+-            # Compute next face explicitly
+-            # Determine which vertex was not hit (or use connectivity)
+-            # Find adjacent tetrahedron sharing the face
+-            # This replaces Use_set
+             next_t_id, next_f_id = find_next_face(current_t_id, current_f_id, hit_point)
+-            
+-            # Store in local buffer
+-            if hash_index < len(computed_faces):
+-                computed_faces[hash_index] = (next_t_id, next_f_id, ...)
+-            else:
+-                computed_faces.append((next_t_id, next_f_id, ...))
+-            
++            if hash_index < BUFFER_SIZE:
++                local_buffer[hash_index] = (next_t_id, next_f_id)
+             next_face = (next_t_id, next_f_id)
+-        
++
+         current_t_id, current_f_id = next_face
+-        
+-        # Handle degeneracies by perturbing ray
++
++        # Handle degeneracies by perturbing ray, then continue with same direction [S1]
+         if is_degenerate(hit_point):
+-            ray_origin = hit_point + epsilon * ray_direction
++            ray_origin = hit_point + EPSILON * ray_direction
+         else:
+             ray_origin = hit_point
+ 
++# Helper functions (standard graphics/math operations)
+ def solve_linear_system(v0, v1, v2, val0, val1, val2):
+-    # Solve for plane equation ax + by + cz = d
+-    # Returns coefficients for interpolation
++    # Solves plane equation ax + by + cz = d for interpolation coefficients [G]
+     pass
+ 
+ def interpolate_z(v0, v1, v2, v3, coeffs):
+-    # Project v3 onto plane of v0,v1,v2 using z interpolation
++    # Projects v3 onto plane of v0,v1,v2 using z interpolation coefficients [G]
+     pass
+ 
+ def project_to_screen(vertex):
+-    # Apply projection matrix
++    # Applies projection matrix to transform vertex to screen coordinates [G]
+     pass
+ 
+ def point_in_triangle(x, y, v0, v1, v2):
+-    # Cross product test
++    # Standard cross-product barycentric point-in-triangle test [G]
+     pass
+ 
+ def ray_plane_intersection(origin, direction, point, normal):
+-    # Standard ray-plane intersection
++    # Standard ray-plane intersection returning distance t and hit point [G]
+     pass
+ 
+ def compute_volume_integral(origin, hit, t_id):
+-    # On-the-fly integration using Bunyk's method
++    # On-the-fly integration for cell contribution using Bunyk's method [S1]
+     pass
+ 
+ def find_next_face(t_id, f_id, hit_point):
+-    # Find adjacent tetrahedron and face
+-    # Uses conTet or vertex connectivity
++    # Finds adjacent tetrahedron and face using connectivity or vertex traversal [G]
+     pass
+ 
+ def is_degenerate(hit_point):
+-    # Check if hit is on edge or vertex
++    # Checks if hit lies on an edge or vertex of the face [S1]
++    pass
++
++def cross_product(a, b):
++    return (a.y*b.z - a.z*b.y, a.z*b.x - a.x*b.z, a.x*b.y - a.y*b.x)
++
++def accumulate_color(contribution):
++    # Accumulates ray contribution into framebuffer [G]
++    pass
++
++def map_z_to_buffer_index(centroid_z):
++    # Maps z-coordinate centroid to buffer index (minZ->first, maxZ->last) [S1]
++    return int((centroid_z - MIN_Z) / (MAX_Z - MIN_Z) * (BUFFER_SIZE - 1))
++
++def screen_to_world(px, py):
++    # Generates ray origin from screen coordinates [G]
++    pass
++
++def compute_ray_direction(px, py):
++    # Generates ray direction from screen coordinates [G]
+     pass
+ ```

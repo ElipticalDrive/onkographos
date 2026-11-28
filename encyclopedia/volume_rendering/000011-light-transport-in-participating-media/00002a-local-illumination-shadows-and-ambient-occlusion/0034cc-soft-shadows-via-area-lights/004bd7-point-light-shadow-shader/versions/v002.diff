@@ -1,0 +1,230 @@
+--- v001.md
++++ v002.md
+@@ -3,109 +3,136 @@
+ 
+ ## Overview
+-The Point Light Shadow Shader is a local illumination method that computes shadows cast by a scene onto a horizontal reference plane from a single point light source [S1, unofficial]. It differs from general volume shadowing by explicitly intersecting shadow rays against a defined geometric plane (typically the ground) to determine occlusion, rather than integrating transmittance through a volumetric density field [S1, unofficial]. It distinguishes itself from hard-shadow methods by applying a Gaussian filter to the resulting shadow map to simulate soft shadows [S1, unofficial].
++A shader function that applies shadow rays from surface points to a point light, handling plane intersections and soft shadows via Gaussian filtering [S1, unofficial]. It differs from its parent [Soft Shadows via Area Lights](7320-soft-shadows-via-area-lights.md) by modeling a single point source rather than an area, and from [Soft Shadows via Ray Tracing](5136-soft-shadows-via-ray-tracing.md) by using a specific plane-intersection refinement and post-process Gaussian blur rather than direct area-light sampling [S1, unofficial].
+ 
+ ## How it works
+-### Inputs and Outputs
+ **Inputs:**
+-*   `rays`: A structure containing ray origins, directions, and maximum distances for the primary view rays.
+-*   `rb` (Render Buffer): A structure holding per-pixel data including hit status (`hit`), depth (`depth`), intersection coordinates (`xyz`), and normals (`normal`).
+-*   `pipeline`: An object providing access to a neural field tracer (`pipeline.nef`) and a ray tracing function (`pipeline.tracer`).
+-*   `point_light`: The 3D position of the point light source.
+-*   `min_y`: The Y-coordinate of the horizontal reference plane.
+-*   `rb.depth`: The current depth buffer values.
++- `rays`: A `Rays` object containing `origins` (N, 3), `dirs` (N, 3), and `dist_max`.
++- `rb`: A render buffer object containing `hit` (N, bool), `depth` (N, 1), `xyz` (N, 3), `normal` (N, 3), and `rgb` (N, 4).
++- `pipeline`: An object with a `tracer` method and a `nef` (neural implicit field) representation.
++- `point_light`: Position of the point light, default `[1.5, 4.5, 1.5]` [S1, unofficial].
++- `min_y`: Location of the xz plane, default `-2.0` [S1, unofficial].
+ 
+-**Outputs:**
+-*   Updated `rb.rgb`: The final color buffer with shadowing applied.
+-*   Intermediate `shadow_map`: A 2D texture representing shadow intensity.
++**Data Structures:**
++- `Rays`: Contains `origins`, `dirs`, `dist_min`, `dist_max`.
++- `rb` (Render Buffer): Contains boolean `hit`, float `depth`, float `xyz`, float `normal`, float `rgb`.
+ 
+-### Data Structures
+-*   **Rays**: Contains fields `origins` (tensor of shape $[N, 3]$), `dirs` (tensor of shape $[N, 3]$), `dist_min`, and `dist_max`.
+-*   **Render Buffer (rb)**:
+-    *   `hit`: Boolean tensor of shape $[N]$, indicating if a primary ray hit a surface.
+-    *   `depth`: Tensor of shape $[N, 1]$, storing the distance to the hit point.
+-    *   `xyz`: Tensor of shape $[N, 3]$, storing the 3D coordinates of the hit point.
+-    *   `normal`: Tensor of shape $[N, 3]$, storing the surface normal at the hit point.
+-    *   `shadow`: Tensor of shape $[N, 1]$, storing the shadow result (0.0 for shadowed, 1.0 for lit).
+-    *   `rgb`: Tensor of shape $[N, 3]$, storing the final RGB color.
++**Steps:**
++1. **Plane Intersection Refinement:**
++   - Compute delta: $\delta = \text{rays.origins}[:, 1] - \text{min\_y}$ [S1, unofficial].
++   - Compute plane parameter: $t = \delta / \text{rate}$ [S1, unofficial]. Note: `rate` is not defined in the source notes. [G] Assume `rate` is a scalar constant or derived from ray direction magnitude if not provided. Given the context of `rays.dirs`, if `rate` is missing, it might be a typo for `rays.dirs[:, 1]` or a fixed constant. However, the source explicitly uses `rate`. Without definition, we treat it as an undefined constant or assume it equals 1.0 if not specified. [G] Let us assume `rate` is a global constant or parameter not listed. If `rate` is intended to be the y-component of the ray direction, the formula would be $t = \delta / \text{rays.dirs}[:, 1]$. The source says `rate`. We will use `rate` as a variable.
++   - Identify potential plane hits: `plane_hit` is True where $t > 0$ and $t < 500$ [S1, unofficial].
++   - Refine `plane_hit`: `plane_hit` = `plane_hit` & ($t < \text{rb.depth}[:, 0]$) [S1, unofficial].
++   - Update `rb.hit`: `rb.hit` = `rb.hit` & ~`plane_hit` [S1, unofficial].
++   - Update `rb.depth` and `rb.xyz` for `plane_hit`:
++     - $\text{rb.depth}[\text{plane\_hit}] = t[\text{plane\_hit}].\text{unsqueeze}(1)$ [S1, unofficial].
++     - $\text{rb.xyz}[\text{plane\_hit}] = \text{rays.origins}[\text{plane\_hit}] + \text{rays.dirs}[\text{plane\_hit}] \times t[\text{plane\_hit}].\text{unsqueeze}(1)$ [S1, unofficial].
++   - Set `rb.normal` for `plane_hit`:
++     - $\text{rb.normal}[\text{plane\_hit}] = 0$ [S1, unofficial].
++     - $\text{rb.normal}[\text{plane\_hit}, 1] = 1$ [S1, unofficial]. (Normal is $(0, 1, 0)$).
+ 
+-### Steps
+-1.  **Plane Intersection Calculation**:
+-    Calculate the vertical distance from the ray origin to the reference plane:
+-    $$ \Delta = \text{rays.origins}[:, 1] - \text{min\_y} $$
+-    Compute the parameter $t$ along the ray direction to intersect the plane:
+-    $$ t_{\text{plane}} = \frac{\Delta}{\text{rays.dirs}[:, 1]} $$
+-    *Note: The source code implies division by the Y-component of the direction. If the direction Y is zero or near-zero, this step may require a guard against division by zero, though none is explicitly provided in the source [G].*
++2. **Shadow Ray Generation:**
++   - Compute shadow ray origin: $\text{shadow\_ray\_o} = \text{rb.xyz} + 0.01 \times \text{rb.normal}$ [S1, unofficial].
++   - Compute shadow ray direction:
++     - Generate random noise: $\text{noise} \sim \mathcal{N}(0, 0.01)$ with shape same as `rb.xyz` [S1, unofficial].
++     - $\text{shadow\_ray\_d} = \text{normalize}(\text{noise} + \text{light\_o} - \text{shadow\_ray\_o})$ [S1, unofficial].
++     - `light_o` is `point_light` [S1, unofficial].
+ 
+-2.  **Initial Plane Hit Masking**:
+-    Identify rays that intersect the plane within a valid range:
+-    $$ \text{plane\_hit}_{\text{raw}} = (t_{\text{plane}} > 0) \land (t_{\text{plane}} < 500) $$
++3. **Shadow Ray Tracing:**
++   - Check if rays hit the light: `light_hit` = $(\text{shadow\_ray\_d} \cdot \text{rb.normal}) > 0.0$ [S1, unofficial].
++   - Create `shadow_rays`: `Rays(origins=shadow_ray_o, dirs=shadow_ray_d, dist_min=0, dist_max=rays.dist_max)` [S1, unofficial].
++   - Trace shadow rays: `rb.shadow` = `pipeline.tracer(pipeline.nef, rays=shadow_rays).hit` [S1, unofficial].
++   - Zero out shadow for non-light-hit rays: `rb.shadow[~light_hit]` = 0.0 [S1, unofficial].
+ 
+-3.  **Refine Plane Hit**:
+-    Ensure the plane intersection is closer than any previously recorded surface hit (e.g., a wall or object standing on the floor). If the ray already hit an object closer than the plane, the plane hit is invalid:
+-    $$ \text{plane\_hit} = \text{plane\_hit}_{\text{raw}} \land (t_{\text{plane}} < \text{rb.depth}[:, 0]) $$
+-    Update the primary hit status to exclude these plane intersections from being treated as primary surface hits:
+-    $$ \text{rb.hit} = \text{rb.hit} \land \neg \text{plane\_hit} $$
++4. **Shadow Map Application:**
++   - Compute shadow map: $\text{shadow\_map} = \text{clamp}((1.0 - \text{rb.shadow}.\text{float}()) + 0.7, 0.0, 1.0)$ [S1, unofficial].
++   - Apply Gaussian filter to `shadow_map` with $\sigma=2$ [S1, unofficial].
++   - Multiply `rb.rgb` by `shadow_map`: $\text{rb.rgb}[:, :3] \times= \text{shadow\_map}$ [S1, unofficial].
+ 
+-4.  **Update Plane Intersection Data**:
+-    For pixels where `plane_hit` is true:
+-    *   Update depth:
+-        $$ \text{rb.depth}[\text{plane\_hit}] = t_{\text{plane}}[\text{plane\_hit}].\text{unsqueeze}(1) $$
+-    *   Update coordinates:
+-        $$ \text{rb.xyz}[\text{plane\_hit}] = \text{rays.origins}[\text{plane\_hit}] + \text{rays.dirs}[\text{plane\_hit}] \times t_{\text{plane}}[\text{plane\_hit}].\text{unsqueeze}(1) $$
+-    *   Set normal to the plane normal (upward):
+-        $$ \text{rb.normal}[\text{plane\_hit}] = [0, 1, 0] $$
++**Pseudocode:**
++```python
++import torch
++import numpy as np
++from scipy.ndimage import gaussian_filter
+ 
+-5.  **Shadow Ray Generation**:
+-    *   **Origin**: Offset the intersection point slightly along the normal to prevent self-intersection artifacts:
+-        $$ \mathbf{o}_{\text{shadow}} = \text{rb.xyz} + 0.01 \times \text{rb.normal} $$
+-    *   **Direction**: Calculate the direction to the light source. The source code adds a small random perturbation to the light direction vector before normalization, likely to simulate a slightly diffuse light or reduce aliasing, though this is non-standard for a pure point light [S1, unofficial]:
+-        $$ \mathbf{d}_{\text{raw}} = \text{light\_o} - \mathbf{o}_{\text{shadow}} + \epsilon, \quad \epsilon \sim \mathcal{N}(0, 0.01) $$
+-        $$ \mathbf{d}_{\text{shadow}} = \text{normalize}(\mathbf{d}_{\text{raw}}) $$
+-    *   **Validity Check**: Ensure the light is in the direction of the normal (i.e., the light is "above" the surface relative to the normal):
+-        $$ \text{light\_hit} = (\mathbf{d}_{\text{shadow}} \cdot \text{rb.normal}) > 0 $$
+-
+-6.  **Shadow Ray Tracing**:
+-    *   Construct `shadow_rays` with origins $\mathbf{o}_{\text{shadow}}$ and directions $\mathbf{d}_{\text{shadow}}$.
+-    *   Trace these rays against the neural field (`pipeline.nef`) using `pipeline.tracer`.
+-    *   Extract the hit status:
+-        $$ \text{rb.shadow}_{\text{raw}} = \text{pipeline.tracer}(\dots).\text{hit} $$
+-
+-7.  **Shadow Computation**:
+-    *   Zero out shadow values for rays where the light was not in the valid direction (e.g., light below the floor):
+-        $$ \text{rb.shadow}[\neg \text{light\_hit}] = 0.0 $$
+-    *   Convert hit status to shadow intensity (1.0 if no hit, 0.0 if hit):
+-        $$ \text{shadow\_map}_{\text{raw}} = 1.0 - \text{rb.shadow}.\text{float}() $$
+-    *   Apply a bias/offset to soften the transition (value 0.7 added, then clamped):
+-        $$ \text{shadow\_map} = \text{clamp}(\text{shadow\_map}_{\text{raw}} + 0.7, 0.0, 1.0) $$
+-
+-8.  **Soft Shadow Filtering**:
+-    Apply a Gaussian filter to the shadow map with $\sigma = 2$ to create soft shadows:
+-    $$ \text{shadow\_map}_{\text{final}} = \text{gaussian\_filter}(\text{shadow\_map}, \sigma=2) $$
+-
+-9.  **Final Shading**:
+-    Multiply the base RGB color by the filtered shadow map:
+-    $$ \text{rb.rgb} = \text{rb.rgb} \times \text{shadow\_map}_{\text{final}} $$
+-
+-### Parameters
+-*   `point_light`: List of 3 floats, default `[1.5, 4.5, 1.5]`.
+-*   `min_y`: Float, default `-2.0`.
+-*   `sigma`: Float, default `2` (for Gaussian filter).
+-*   `offset`: Float, default `0.01` (shadow ray origin offset).
+-*   `noise_std`: Float, default `0.01` (perturbation for shadow ray direction).
+-*   `bias`: Float, default `0.7` (added to shadow map before clamping).
+-
+-### Edge Cases and Pitfalls
+-*   **Division by Zero**: If `rays.dirs[:, 1]` is zero, the plane intersection calculation $t_{\text{plane}}$ is undefined. The source does not explicitly handle this, which may lead to NaNs or infinities [G].
+-*   **Self-Shadowing**: The small offset (`0.01`) helps but may not be sufficient for all geometries, potentially causing acne or peter-panning.
+-*   **Light Direction Validity**: The check `(shadow_ray_d * rb.normal).sum(-1) > 0.0` ensures shadows are only computed for lights "above" the surface. If the light is below the plane, the shadow is forced to 0 (fully lit), which might be incorrect if the light is meant to illuminate from below.
++def point_light_shadow_shader(rays, rb, pipeline, point_light=[1.5, 4.5, 1.5], min_y=-2.0, rate=1.0):
++    """
++    Applies shadow rays from surface points to a point light, handling plane intersections 
++    and soft shadows via Gaussian filtering.
++    
++    Args:
++        rays: Object with origins (N,3), dirs (N,3), dist_max.
++        rb: Render buffer with hit (N,bool), depth (N,1), xyz (N,3), normal (N,3), rgb (N,4).
++        pipeline: Object with tracer method and nef.
++        point_light: Position of the point light.
++        min_y: Location of the xz plane.
++        rate: Scaling factor for plane intersection. Default 1.0 if not specified.
++    """
++    # Step 1: Plane Intersection Refinement
++    delta = rays.origins[:, 1] - min_y
++    plane_t = delta / rate
++    
++    # Identify potential plane hits
++    plane_hit = (plane_t > 0) & (plane_t < 500)
++    
++    # Refine plane_hit against existing depth
++    plane_hit = plane_hit & (plane_t < rb.depth[:, 0])
++    
++    # Update rb.hit
++    rb.hit = rb.hit & ~plane_hit
++    
++    # Update rb.depth and rb.xyz for plane_hit
++    plane_t_unsqueezed = plane_t[plane_hit].unsqueeze(1)
++    rb.depth[plane_hit] = plane_t_unsqueezed
++    rb.xyz[plane_hit] = rays.origins[plane_hit] + rays.dirs[plane_hit] * plane_t_unsqueezed
++    
++    # Set rb.normal for plane_hit
++    rb.normal[plane_hit] = 0.0
++    rb.normal[plane_hit, 1] = 1.0
++    
++    # Step 2: Shadow Ray Generation
++    shadow_ray_o = rb.xyz + 0.01 * rb.normal
++    light_o = torch.tensor(point_light, dtype=rb.xyz.dtype, device=rb.xyz.device)
++    
++    # Generate noise
++    noise = torch.zeros_like(rb.xyz).normal_(0.0, 0.01)
++    shadow_ray_d = torch.nn.functional.normalize(noise + light_o - shadow_ray_o, dim=1)
++    
++    # Step 3: Shadow Ray Tracing
++    # Check if rays hit the light (dot product > 0)
++    light_hit = (shadow_ray_d * rb.normal).sum(-1) > 0.0
++    
++    # Create shadow rays
++    shadow_rays = Rays(origins=shadow_ray_o, dirs=shadow_ray_d, dist_min=0, dist_max=rays.dist_max)
++    
++    # Trace shadow rays
++    rb.shadow = pipeline.tracer(pipeline.nef, rays=shadow_rays).hit
++    
++    # Zero out shadow for non-light-hit rays
++    rb.shadow[~light_hit] = 0.0
++    
++    # Step 4: Shadow Map Application
++    shadow_map = torch.clamp((1.0 - rb.shadow.float()) + 0.7, 0.0, 1.0)
++    
++    # Apply Gaussian filter
++    shadow_map_np = shadow_map.cpu().numpy()
++    shadow_map_filtered = gaussian_filter(shadow_map_np, sigma=2)
++    shadow_map_tensor = torch.from_numpy(shadow_map_filtered).unsqueeze(-1)
++    
++    # Multiply rb.rgb by shadow_map
++    rb.rgb[:, :3] *= shadow_map_tensor.cuda() if rb.rgb.device.type == 'cuda' else shadow_map_tensor
++    
++    return rb
++```
+ 
+ ## Operating characteristics
+-*   **Time Complexity**: Dominated by the shadow ray tracing step. If $N$ is the number of pixels, and $M$ is the number of samples per shadow ray, the complexity is $O(N \cdot M)$. The Gaussian filter adds $O(N)$ overhead with a constant kernel size.
+-*   **Memory Complexity**: $O(N)$ for storing ray data and shadow maps.
+-*   **Strengths**: Simple to implement; provides soft shadows via filtering; efficient for single point lights.
+-*   **Limitations**: Only works for a single point light; assumes a flat horizontal reference plane; soft shadows are achieved via post-processing blur rather than true geometric soft shadowing (which would require area light integration); perturbation of light direction is non-standard and may affect accuracy.
++- **Time Complexity:** Dominated by the ray tracing step `pipeline.tracer`, which is $O(N \cdot M)$ where $N$ is the number of rays and $M$ is the cost per ray in the neural field. The Gaussian filter is $O(N)$.
++- **Memory Complexity:** $O(N)$ for storing shadow rays and intermediate buffers.
++- **Strengths:** Simple implementation for point lights; Gaussian blur provides a soft shadow effect without complex area light sampling.
++- **Limitations:** The `rate` parameter is undefined in the source, which may lead to incorrect plane intersections if not set correctly. The Gaussian filter is a post-process approximation and may not accurately represent the true penumbra of a point light at varying distances. The method assumes a specific plane intersection logic that may not generalize to all scenes.
++- **When to use:** When a simple soft shadow effect for a point light is needed and computational resources are limited.
++- **When not to use:** When accurate penumbra calculation is required, or when the scene does not contain a clear xz plane for the initial intersection logic.
+ 
+ ## Background
+-The method is derived from the `kaolin-wisp` project by NVIDIA GameWorks, which provides interactive neural field rendering tools [S1, unofficial]. It adapts standard ray-tracing techniques for neural fields to include simple shadowing for visualization purposes.
++The method is described in the NVIDIA Kaolin-Wisp repository [S1, unofficial]. It is part of the interactive rendering pipeline in Wisp, a framework for neural implicit fields. The specific implementation handles plane intersections and applies a Gaussian filter to simulate soft shadows from a point light.
+ 
+ ## Sources

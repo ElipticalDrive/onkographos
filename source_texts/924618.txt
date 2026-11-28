@@ -1,0 +1,356 @@
+Problem Statement The engine renders one Reference scene of at most 1 km², spawned whole before the first frame, and nothing it loads ever leaves. ADR 0013's target is a 10 × 10 km streamed Game world, and lane 4 of the M3.5 audit (decis...
+
+M4: Streamed world · Issue #611 · gariasf/praxis · GitHub
+Skip to content
+You signed in with another tab or window. Reload to refresh your session.
+You signed out in another tab or window. Reload to refresh your session.
+You switched accounts on another tab or window. Reload to refresh your session.
+Dismiss alert
+M4: Streamed world #611
+New issue
+Copy link
+New issue
+Copy link
+Open
+13 / 1613 of 16 issues completed
+Open
+M4: Streamed world#611
+13 / 1613 of 16 issues completed
+Copy link
+Labels
+ready-for-agentFully specified, ready for an AFK agentFully specified, ready for an AFK agent
+Milestone
+M4
+Description
+gariasf
+opened on Nov 5, 2026
+Issue body actions
+Problem Statement
+The engine renders one Reference scene of at most 1 km², spawned whole before the first frame, and nothing it loads ever leaves. ADR 0013's target is a 10 × 10 km streamed Game world, and lane 4 of the M3.5 audit (decision) found seven ADR clauses and 17 M3 choices that stand in its way:
+Nothing streams or leaves. There is no Chunk or Placement type. The Mesh table, the Arenas and the Material table free nothing. A Mesh's identity is its load order, so cumulative Chunk loads would fill the 65,536-Mesh table and then refuse every Mesh (L4-03). The Material table counts Materials per Mesh load, not distinct ones (L4-05).
+Capacities are compile-time constants sized to town. The Instance buffer holds 524,288 slots. One provisional 16 MiB constant sizes five Arenas. The light buffer takes lights in query order and drops the rest past 4,096. The 8 GB GPU memory Budget is one number, not a Budget per kind.
+The static TLAS cannot follow a camera. It is built at scene load, in a frame anchored once and never moved. Its membership is the Instance slots below 262,144, so a static Renderable in a higher slot casts no shadow (L4-01). It rebuilds whole inside the frame's encoder on any static change. At 10 km from that anchor, a shadow ray's origin lifts 152.6 mm and a nearer occluder casts no shadow (L4-02).
+Binding Textures costs the square of their count on Metal. 10,005 bound Textures take 12.8 to 13.5 ms of kernel scheduling a frame, and 40,000 take 202 ms (State of the art: bindless residency cost on Metal and wgpu #599). No mip streams, so every mip of every Texture is Resident.
+Loads block the main thread. There is no IO pool, and the load path has no per-frame byte cap.
+The cooker enforces no pivot bound. town's ground reaches 777.8 m from its pivot, against ADR 0014's 128 m convention (L4-06).
+Solution
+M4, Streamed world, as charted on #609, with exit criteria on the M4 milestone:
+Cooked Chunks. Each 256 m Chunk holds its Placements and point lights. The cooker enforces the 128 m pivot bound, and ground cooks as 128 m tiles. Every Reference scene's static content cooks into Chunks and loads through one path.
+Streaming. Chunks inside the Load radius load around the camera through an IO pool, and Chunks outside it unload. The Meshes, Materials and Textures that no loaded Chunk or entity uses any more are freed. The pools key by Asset ID with generational Handles.
+Residency. Textures stream by mip into texture arrays per size class (ADR 0017's amendment, State of the art: bindless residency cost on Metal and wgpu #599's option B), each with a Resident tail that never leaves, so a late mip is blur and never a hole.
+Budgets. The 8 GB splits into a Budget per kind of GPU memory, and every capacity is sized from its Budget at device creation.
+The static TLAS. It holds the loaded Chunks' static Instances. It is re-anchored as the camera moves and rebuilt off the frame's critical path.
+A world Reference scene. A generated 40 × 40-Chunk world, with a library of unique Meshes and Textures over 8 GB, flown through at 50 m/s with a fast travel.
+Settled frames. Captures and Goldens render Settled frames, and benches measure true asynchronous streaming: p99 and the maximum frame, Late Chunks and late mips.
+Nothing draws past the Load radius: LOD, HLOD, far proxies and the 2 km view are M5's. Two surveys open the milestone and block their decisions: "State of the art: open-world streaming and IO" (survey 2) and "State of the art: acceleration structures for streamed worlds" (survey 4). Survey 3, "State of the art: LOD, HLOD and the far field without TAA", is M4's exit literature scan, from which M5 charts.
+User Stories
+Surveys and decisions
+As the owner, I want "State of the art: open-world streaming and IO" resolved before the streaming code, so that the Load radius, its hysteresis, the IO pool, the freeing policy and the memory-budget queries are chosen on evidence (survey rule).
+As the owner, I want survey 2 to answer whether static Placements become entities or Instances in a slot range their Chunk owns, so that the hardest-to-reverse choice of M4 rests on shipped practice and a measurement.
+As the owner, I want "State of the art: acceleration structures for streamed worlds" resolved before the TLAS work, so that where the static TLAS rebuilds, how it swaps in and when the anchor moves are chosen on evidence.
+As the owner, I want the Load radius recorded on the milestone before the world scene's ticket opens, so that the flythrough's criteria have a number.
+As the owner, I want "State of the art: LOD, HLOD and the far field without TAA" closed before M4 exits, so that M5 charts from evidence (standard clause's literature scan).
+Cooked Chunks
+As a content author, I want each Chunk cooked as one Blob holding its Placements and point lights, so that a Chunk loads and unloads as a unit.
+As a content author, I want a Placement to name its Mesh by Asset ID, with an f64 translation from the Chunk's origin and f32 rotation and scale (ADR 0018), so that a Chunk survives re-cooking its Meshes.
+As a content author, I want a point light in a Chunk to carry an f64 translation and photometric values as ADR 0023 defines them, so that lights stream with the content they light.
+As the owner, I want the cooker to refuse a Mesh that reaches more than 128 m from its pivot, naming the Mesh and the distance, so that ADR 0014's precision bar holds by construction (L4-06).
+As a content author, I want ground cooked as 128 m tiles, four per Chunk, so that ground meets the pivot bound.
+As a content author, I want a Placement to belong to the Chunk that holds its pivot, with the Chunk's bounds grown to hold its Meshes, so that content straddling a Chunk edge has one owner.
+As the owner, I want the cook to warn when a Placement names an Asset ID that is no longer defined (A renamed Asset's old ID still loads its stale Blob, unwarned #221), so that a renamed Asset never loads a stale Blob silently.
+As the owner, I want the Mesh Blob to store each Primitive's UV texel density (ADR 0017), so that mip priority needs no source data at runtime.
+As the owner, I want town's ground re-tiled into 128 m tiles in a ticket of its own, with before and after images if its Goldens move, so that the Chunk path's first ticket can stay bit-exact.
+One spawn path
+As the owner, I want town cooked into the Chunks it covers and loaded through the Chunk path, with its Goldens bit-exact, so that the Chunk path is proven before anything streams.
+As the owner, I want every Reference scene's static content to load through Chunks, so that one path is tested by every Golden.
+As a scene author, I want Moving Instances to stay spawned by scene systems, outside Chunks, so that M4 needs no Chunk-owned spawners.
+As the owner, I want captures and Goldens to render Settled frames, so that asynchronous loads never change an image from run to run.
+Streaming
+As a player, I want the Chunks within the Load radius loaded around me as I move, so that the world is there wherever I go.
+As a player, I want Chunks that leave the Load radius unloaded, so that memory follows where I am, not where I have been.
+As the owner, I want Chunks requested ahead of the camera, so that at 50 m/s no Chunk is late.
+As the owner, I want a Late Chunk counted in Frame stats, so that a streaming miss is measured, not guessed.
+As the owner, I want reads and decoding on an IO pool off the main thread (ADR 0016), so that a load never stalls a frame.
+As the owner, I want the bytes a frame writes into the staging belt capped by the staging Budget, with the rest waiting for a later frame (ADR 0017), so that no frame pays for a burst of loads.
+As a player, I want fast travel to hold until the Chunks in the Load radius are loaded, with every frame of the hold within Budget, so that I never arrive in an empty world and the engine never hitches.
+As the owner, I want the time from a fast travel until its Chunks are loaded measured and kept as a ceiling, so that it cannot regress unnoticed.
+Identity and lifetime
+As an implementing agent, I want the Mesh, Material and Texture pools keyed by Asset ID, with one entry per Asset however many Chunks load it, so that the tables count distinct Assets (L4-03, L4-05).
+As an implementing agent, I want generational Handles, so that a stale Handle is refused, never drawn as the Asset that reused its index.
+As an implementing agent, I want each pool entry counted by the loaded Chunks and entities that use it, so that an entry is freed only when nothing uses it.
+As the owner, I want a freed Mesh's Arena ranges returned to the offset allocator, so that a long traversal never fills an Arena with dead Meshes.
+As the owner, I want the moment an unused entry is freed (at once, or when its Arena or pool runs short) set by survey 2's decision, so that the edge of the Load radius does not thrash.
+Texture residency
+As the owner, I want each Channel bound as a binding array of texture arrays, one array per shape (size, mip count, format), so that Metal's per-Texture residency cost and wgpu-core's per-Texture tracking follow the number of classes, not of Textures (State of the art: bindless residency cost on Metal and wgpu #599).
+As the owner, I want the Capability floor kept at 256 layers per texture array, so that no adapter that meets it today is refused.
+As the owner, I want each Texture's Resident tail (mips of 64 KiB and smaller) kept for as long as the Texture is loaded, so that a late mip shows as blur, never a hole.
+As the owner, I want mips streamed by priority from distance and each Primitive's UV texel density, against the 1440p pixel footprint, so that the finest mip each Texture needs arrives first.
+As the owner, I want the Materials that rays reach off screen given a floor priority, measured on a Reference scene before ADR 0017:15 is amended, so that shadows and M6's probe rays never sample a missing mip.
+As the owner, I want a Texture whose Resident mips change moved to its new class by copy through the staging belt, so that streaming uses wgpu's safe API only.
+As the owner, I want eviction to drop the finest mip of the lowest-priority Texture first, least recently used breaking ties, with a mip evicted only below its load priority minus one (ADR 0017), so that residency does not thrash.
+As the owner, I want late mips counted and reported by the bench, so that blur from streaming is visible without gating it.
+As the owner, I want ADR 0017 amended in the PR that builds the texture arrays, and option A (a residency set through wgpu-hal) left as fog with its trigger, so that the decision and its alternative are on record.
+Budgets and capacities
+As the owner, I want the 8 GB GPU memory Budget split into Budgets for the geometry Arenas, the texture pool, Resident tails, render targets, acceleration structures and staging, so that each kind is capped on its own (ADRs 0013, 0017).
+As the owner, I want each kind's size proposed from a measurement in the split's PR and decided by me, so that the split is set on evidence.
+As an implementing agent, I want every fixed capacity (Instance slots, each Arena, the Mesh and Material tables, the light buffer, TLAS entries, texture classes) sized from its Budget at device creation, not a compile-time constant, so that one Budget change resizes everything that depends on it (lane 4 items 13, 14).
+As the owner, I want GPU memory counted by kind where it is created, so that no buffer or texture escapes gpu_memory_bytes and each kind is compared against its Budget.
+As the owner, I want acceleration-structure bytes counted exactly once M4 can read their sizes, so that the acceleration-structure Budget judges real bytes.
+As the owner, I want the vertex Arena's binding split, or the floor raised, only if the split sizes the vertex Arena above 128 MiB, so that the floor moves only when a Budget needs it (ADR 0021).
+As the owner, I want a request past any capacity refused, logged and counted in Frame stats, so that an overflow is visible, never silent.
+The static TLAS
+As the owner, I want the static TLAS to hold exactly the static Instances of the loaded Chunks, so that membership follows the world, not slot numbers (L4-01).
+As the owner, I want the static TLAS's anchor to move with the camera, so that a shadow ray's origin lifts by no more than its distance from the camera allows, at 10 km as at the origin (L4-02, ADR 0014).
+As the owner, I want the static TLAS rebuilt off the frame's critical path and swapped in whole, so that a Chunk load never adds a rebuild to a frame (ADR 0020).
+As the owner, I want the number of frames before a newly loaded Chunk casts shadows measured and kept as a ceiling, so that the delay the off-frame rebuild brings is bounded.
+As the owner, I want the dynamic TLAS to follow the static TLAS's anchor in the frame the new static TLAS swaps in, so that both answer rays in one frame.
+As the owner, I want the waits on BLAS compaction that every Mesh load pays (wgpu#9215) measured on frames that load during play and kept within criterion 1's bounds, so that BLAS builds cannot hitch a streaming frame.
+Lights
+As the owner, I want lights to stream with their Chunks, so that the light buffer holds the lights near the camera, not those of the whole world.
+As the owner, I want the light buffer filled by distance from the camera when more lights are loaded than it holds, so that the cut drops the farthest lights, not those last in query order.
+World Reference scene
+As the owner, I want a generated world of 40 × 40 Chunks, cooked by praxis cook, so that streaming is tested on the Game world's full extent.
+As the owner, I want its settlements as dense as the Budgets allow with streaming paused, with sparse land between them, so that the world tests streaming and town keeps testing density.
+As the owner, I want its unique Meshes and Textures to total more than 8 GB, so that eviction must run.
+As the owner, I want flat ground tiles until terrain arrives (M7), so that M4 needs no terrain system.
+As the owner, I want 10,000 Moving Instances around the camera, so that the dynamic TLAS is full while the world streams.
+As the owner, I want a camera path of about 60 s (into a settlement at 50 m/s, across sparse land, one fast travel) for the bench, so that the world is benched like every other Reference scene.
+As the owner, I want a full traversal along a side, along the diagonal and through one fast travel, run at exit, so that the whole world is crossed once with its p99, maximum, Late Chunks and peak GPU memory pasted.
+As the owner, I want CI to cook only what its frames load and run the world's Settled Goldens at a few frames and its counters on a short stretch, so that CI stays within its time and disk.
+As an implementing agent, I want a dev launch to cook a Chunk and the Assets it names when its load misses or finds them stale, instead of cooking a whole scene up front, so that a 1,600-Chunk world and CI cook only what they load.
+As the owner, I want the same Chunk content captured at the world's origin and at its far corner to give identical images, so that ADR 0014's precision is proven at 10 km.
+As the owner, I want nothing drawn past the Load radius, and the pop there recorded as a known difference until M5, so that M4's gallery judges streaming, not a stand-in for the far field.
+Bench and Frame stats
+As the owner, I want the bench to report p99 and the maximum frame beside the median and p95, with a Harness version bump, so that worst frames under streaming are measured (Literature scan for M4 and its load-bearing claims #210's decide 4).
+As the owner, I want compare to judge p99 against the CPU, GPU and gate Budgets and the maximum against 16.7 ms on the world scene, so that the exit criteria are commands.
+As the owner, I want Frame stats to count Late Chunks, late mips, Chunks loaded and unloaded, bytes read, and pool entries freed, so that streaming is observable in every bench record.
+As the owner, I want the static TLAS's build time reported apart from the frame's critical path, so that criterion 7 is a reading, not an inference.
+As the owner, I want Frame stats' GPU memory kept as a running total updated at load and eviction, so that reading it costs nothing per frame once Textures stream.
+Implementation Decisions
+Surveys first. Two surveys open the milestone, and each blocks the tickets its decisions shape. Each ends in options, and the owner's decisions land on M4 Streamed world: Chunks, streaming, residency and the static TLAS #609 before the tickets they block open.
+Survey 2, "State of the art: open-world streaming and IO", covers:
+(a) static Placements as entities, or as Instances in a slot range their Chunk owns, written from its cooked bytes. The charting's lean is the slot range.
+(b) when an unused pool entry is freed: at once, or when its Arena or pool runs short.
+(c) load and unload hysteresis at the Load radius.
+(d) the IO pool's shape.
+(e) per-backend memory-budget queries.
+With survey 4, the Load radius.
+Survey 4, "State of the art: acceleration structures for streamed worlds", covers:
+for M4: where the static TLAS rebuilds and how it swaps in; when the anchor moves; the rebuild time the Load radius costs; exact acceleration-structure sizes;
+for M5: far proxies, which LOD each BLAS holds, and per-cell merged static BLASes.
+Survey 3, "State of the art: LOD, HLOD and the far field without TAA", runs before the exit as the literature scan of M5's topics.
+The Chunk Asset (amends ADR 0018 in its PR). A Chunk Blob holds its Placements and its point lights:
+A Placement is a Mesh Asset ID, an f64 translation from the Chunk's origin, and f32 rotation and scale.
+A light is an f64 translation and photometric colour, intensity and range (ADR 0023).
+The Blob also holds the Chunk's bounds, grown to hold its Meshes.
+A Chunk's Asset ID derives from its scene's name and its integer coordinates, as procedural Assets' IDs derive from the scene's name today.
+The cooker.
+It refuses a Mesh that reaches more than 128 m from its pivot, naming the Mesh and the distance.
+Ground cooks as 128 m tiles, four per Chunk.
+A Placement goes to the Chunk holding its pivot.
+The cook warns when a Placement names an Asset ID no longer defined (A renamed Asset's old ID still loads its stale Blob, unwarned #221).
+The Mesh Blob gains each Primitive's UV texel density, a format bump that re-cooks every Mesh.
+Texture Blobs record their shape (size, mip count, format), which names their class. M4 resamples and pads nothing, so a class is an exact shape.
+Cook on a miss. A dev launch no longer cooks a whole scene before loading. A Chunk whose Blob, or any Asset it names, is missing or stale is cooked when its load asks for it. praxis cook <scene> still cooks a scene whole. This is what lets CI cook only what its frames load.
+Reference scenes.
+A scene's static content (Renderables that do not move, and point lights) is generated into Chunks at cook time. Its Moving Instances and directional lights stay spawned by scene systems at runtime.
+The spawn dispatch no longer builds static content: the Chunk streamer loads it.
+town cooks into the Chunks it covers. Its blocks span 4 × 4 Chunks. Its 1.1 km ground, re-tiled at 128 m in a ticket of its own first, spans 6 × 6, unless the re-tile trims it to 1,024 m, which that ticket decides with the owner's visual check.
+The other scenes follow in the same form.
+The Chunk streamer (new deep module).
+Each frame it takes the camera's World position and whether the camera teleported. It owns the set of loaded Chunks, using the cooked world's Chunk index to know which Chunks exist. It decides requests, loads and unloads by the Load radius and its hysteresis (survey 2).
+It requests Chunks ahead of the camera, counts Late Chunks, and holds after a teleport until every Chunk in the Load radius is loaded.
+It reports a frame Settled when every load it requested is Resident.
+It reaches IO through a narrow interface: the IO pool in the engine, a scripted stand-in in tests.
+It reads no GPU state and records no GPU work. Applying a loaded Chunk (its Placements to Instances, per survey 2's (a); its lights; its pool references) happens outside it, on the main thread.
+The IO pool (ADR 0016). Reads and decoding run on an IO pool beside the compute pool, which leaves the compute pool's threads to compute (L5-C24). Decoded bytes reach the main thread, which copies them into the load staging belt within the staging Budget's per-frame cap; the rest waits for a later frame.
+Pools.
+The Mesh, Material and Texture pools key by Asset ID, so a second load of an Asset returns its entry. Materials gain the deduplication Textures already have.
+Handles become generational (index plus generation), and a stale Handle is refused.
+Each entry is counted by the loaded Chunks and entities that use it. One whose count reaches zero is freed per survey 2's (b): its Arena ranges go back to the offset allocator, its BLAS is dropped, and its Texture slices are released.
+Capacities come from Budgets (below).
+BLAS compaction's CPU waits stay as they are, measured on load frames during play against criterion 1.
+Texture residency (amends ADR 0017 in its PR).
+Each Channel becomes a binding array of texture arrays, one array per class.
+A Layer becomes a class and a slice, decoded by one shared WGSL function with an oracle. Layer 0 stays the neutral default.
+Each Texture's Resident tail (mips of 64 KiB and smaller) stays Resident while the Texture is loaded.
+CPU priority comes from distance and each Primitive's UV texel density against the 1440p pixel footprint. The Materials of static TLAS Instances get a floor priority, measured on a Reference scene before ADR 0017:15 is amended.
+A Texture whose Resident mips change moves to its new class by copy through the staging belt.
+Eviction follows ADR 0017: the finest mip of the lowest-priority Texture first, least recently used breaking ties, with eviction only below the load priority minus one.
+Class capacities come from the texture pool's Budget.
+The Capability floor keeps 256 layers per array.
+The residency set through wgpu-hal stays fog.
+Budgets and capacities.
+The Budgets file gains one GPU memory Budget per kind: geometry Arenas, texture pool, Resident tails, render targets, acceleration structures and staging. The split's ticket measures the world scene, proposes the sizes and asks the owner under Decide.
+At device creation, every fixed capacity is sized from its Budget: the Instance slots, each Arena, the Mesh, Material and Texture tables, the light buffer, the TLAS capacities and the texture classes. The shader modules are assembled with those values, so no capacity remains a compile-time constant (lane 4 items 13 and 14).
+The vertex Arena's binding splits, or the floor rises, only if the split sizes that Arena above 128 MiB.
+GPU memory is counted by kind where it is created, as a running total updated at creation, load and eviction.
+Acceleration-structure bytes become exact per survey 4.
+Instances. The Instance buffer's slots are allocated per survey 2's (a). Every refusal is logged once and counted in Frame stats.
+The static TLAS (amends ADRs 0014 and 0020 in their PRs).
+Its membership is the static Instances of loaded Chunks and the static spawned Renderables, not slots below a constant (L4-01).
+It rebuilds off the frame's critical path and swaps in whole.
+Its anchor moves as the camera moves (L4-02). Where, how and when follow survey 4.
+The dynamic TLAS takes the anchor of the static TLAS the frame uses.
+Frame stats report the static build's time apart from the frame and how many frames a loaded Chunk waits to be traced.
+Lights. Point lights load and unload with their Chunks. When more are loaded than the light buffer holds, it takes the nearest to the camera, not query order, and counts the rest (amends ADR 0019's light-buffer clause in its PR).
+Settled frames and fast travel. Capture and the Goldens test wait each frame until the Chunk streamer reports it Settled; the bench never waits. A fast travel is a camera teleport: the Chunk streamer holds, the world scene's camera path pauses until the hold ends, and the hold's length is measured.
+Render switches. A residency switch holds back every mip finer than the Resident tail. Only capture and its tests pass it.
+The world Reference scene.
+A generator cooks 40 × 40 Chunks of flat 128 m ground tiles, with settlements as dense as the Budgets allow with streaming paused (measured in its ticket) and sparse land between them.
+Its library of unique Meshes and Textures totals more than 8 GB, so eviction runs.
+Scene systems keep 10,000 Moving Instances around the camera.
+Its bench path is about 60 s: into a settlement at 50 m/s, across sparse land, one fast travel.
+Its traversal (a side, the diagonal, a fast travel) is a separate run, for the exit.
+CI captures its Settled Goldens at a few frames and benches its counters on a short stretch.
+Bench and compare.
+Bench records gain p99 and the maximum for the CPU frame, GPU frame and gate (nearest rank, as p95), with a Harness version bump.
+compare judges p99 against the Budgets and the maximum against 16.7 ms, as it judges medians today.
+Bench Counters gain Late Chunks, late mips, Chunks loaded and unloaded, bytes read, pool entries freed, and the refusal counts Frame stats already hold (lights overflowed, static Instances left out, Renderables refused).
+Baselines are re-recorded.
+ADR status lines. Each ticket that changes an ADR clause lane 4 named (0002, 0003, 0013, 0014, 0017, 0019, 0020) amends it in its PR. A new module updates CLAUDE.md's project shape in the same PR.
+Dependencies. None expected: bevy_tasks already carries an IO pool, and offset-allocator already frees. Anything a survey's decision needs is an owner decision then.
+Testing Decisions
+What a good test is here. It drives external behaviour at an agreed seam and compares it against an independent source: a Golden, the same content rendered by another path or at another place, a closed-form count, or a scripted sequence's known answer. A test never reads a module's private state.
+Seams (agreed before this spec was written):
+Capture: a Reference scene to an image and Frame stats, in Settled frames. It covers:
+town through Chunks bit-exact against its Goldens as they stand after the re-tile, at its eight frames;
+every scene's Goldens on Metal and software Vulkan through the Chunk path;
+the world scene's Settled Goldens;
+the same Chunk content at the world's origin and at its far corner, identical;
+the residency switch on a texture whose mips are distinct colours, showing the Resident tail's colour and never Layer 0;
+a newly loaded Chunk tracing shadows within its ceiling of frames;
+the analytic shadow oracle and the 100 km check still passing at a moved anchor.
+Bench and compare. They cover:
+p99 and the maximum against Budgets and 16.7 ms;
+Late Chunks, late mips, the refusal counters and GPU memory per kind against their Budgets;
+the static TLAS build off the critical path;
+the fast-travel time;
+the traversal run;
+the re-recorded Baselines.
+Cook. It covers:
+Chunk Blobs round-tripped by Asset ID: Placements, lights and bounds;
+the pivot-bound refusal;
+each Placement in the Chunk holding its pivot;
+A renamed Asset's old ID still loads its stale Blob, unwarned #221's warning;
+UV texel density per Primitive;
+Texture shapes naming classes;
+cook on a miss of one Chunk cooking that Chunk and its Assets only.
+The Chunk streamer, without a GPU (new). A scripted camera path and a scripted IO stand-in, checked frame by frame:
+the Chunks requested, loaded and unloaded, against the Load radius and its hysteresis;
+requests ahead of the camera at 50 m/s, with 0 Late Chunks when IO keeps up, and an exact Late Chunk count when the script delays it;
+the hold after a teleport, released when the last Chunk in the radius is loaded;
+the Settled report;
+the pool entries whose last user left, in order.
+Pools and FramePreparer, on a headless adapter. They cover:
+one entry per Asset ID, Materials included;
+a stale generational Handle refused;
+a freed Mesh's Arena ranges reused by the next load;
+capacities taken from the Budgets given at creation;
+every refusal logged and counted;
+static TLAS membership equal to the loaded Chunks' static Instances, at a moved anchor;
+the light buffer cut nearest-first.
+Shader-function oracles. The decode from a Layer to a class and slice, against the CPU's mapping.
+Shown once, not kept as switches. The pop at the Load radius, shown in the world scene's PR as a known difference until M5.
+Prior art.
+The Goldens test: eight frames of town, the 100 km check, culling-off and every-light equivalence.
+The frame-stats tests: exact counts per scene, and camera motion writing no Instance.
+The cook tests' round trips by Asset ID and re-cooking only what changed.
+The procedural scenes rendering without assets/.
+The headless unit tests of FramePreparer, the Mesh and Material pools, and the static TLAS.
+praxis bench and praxis compare against Baselines and Budgets.
+The shader-function oracles.
+The compute pool test, which checks the pool leaves the main thread a core.
+Visual checks with the owner. town's re-tiled ground, if its Goldens move; the world scene's first Goldens; and the closing gallery.
+Out of Scope
+M5: LOD, HLOD, impostors and far proxies, the 2 km view, culling at millions of Instances, far-slice Froxel lists, which LOD each BLAS holds, and town's Budget breaches (its GPU frame and gate, on the LOD line).
+M7 and M8: terrain, foliage and other world content (M7); Chunk-owned spawners, simulating unloaded Chunks, and save and load (M8).
+Asset formats: glTF node transforms as Placements (M4 Streamed world: Chunks, streaming, residency and the static TLAS #609's open item, recommended fog until the first authored multi-node scene), USD, and archive packaging.
+Metal residency: a residency set or heaps through wgpu-hal, which is fog until wgpu ships read-only usages or Metal residency.
+Unchanged here: the wgpu 31 bump, which waits for its release; several Game worlds; HDR display output.
+Further Notes
+Order of work.
+Surveys 2 and 4.
+town's ground re-tile.
+Chunk Blobs and the cooker.
+town through Chunks, bit-exact.
+Pools by Asset ID with generational Handles.
+The Chunk streamer and the IO pool.
+Streaming in and out with freeing.
+The Budget split and capacities from Budgets.
+Texture arrays per size class, then mip streaming.
+The static TLAS off the critical path and re-anchored.
+Lights by distance.
+The world generator, then the bench's p99 and maximum and the traversal.
+Survey 3 and the exit.
+Pools, the Budget split and texture residency share modules, so their tickets name their merge order.
+Owner load.
+Two survey decisions, on M4 Streamed world: Chunks, streaming, residency and the static TLAS #609.
+The Budget split's sizes, decided in its PR.
+The ceilings set from first measurements: the fast-travel time and the frames before a loaded Chunk is traced.
+The visual checks above.
+Drift corrected while writing this spec. M4 Streamed world: Chunks, streaming, residency and the static TLAS #609's decision 11 assumed the dev build cooks on a miss. It cooks a whole scene before loading, so cook on a miss per Chunk joins M4.
+Renumbering. One M4 ticket renumbers the milestone references the M4/M5 split left stale (M4 Streamed world: Chunks, streaming, residency and the static TLAS #609, Not yet specified 3), once the guides rebuild merges. Its PR carries the gallery's empty differences.
+Sources. Lane 4's report (docs/audit/m3.5/scalability.md), docs/research/bindless-residency-cost.md, docs/research/gpu-memory-residency-streaming.md, docs/research/world-design-pre-mortem.md, and ADRs 0013, 0014, 0016 to 0020 and 0021.
+Activity
+gariasf
+added this to the M4 milestone on Nov 5, 2026
+gariasf
+added
+ready-for-agentFully specified, ready for an AFK agentFully specified, ready for an AFK agent
+on Nov 5, 2026
+gariasf
+added sub-issues on Nov 5, 2026
+State of the art: open-world streaming and IO #612
+State of the art: acceleration structures for streamed worlds #613
+Renumber milestone references after the M4/M5 split #614
+Ground in 128 m tiles; the cooker enforces the pivot bound #615
+UV texel density per Primitive in the Mesh Blob #616
+Cooked Chunks: Placements, lights and bounds #617
+Pools keyed by Asset ID #618
+Generational Handles and freeing a pool entry #619
+Bench: p99, maximum and refusal counters #620
+Light buffer cut nearest-first #621
+Texture arrays per size class #622
+Resident tail and the residency switch #623
+GPU memory counted by kind where it is created #624
+Capacities from Budgets: pools #625
+Capacities from Budgets: render #626
+State of the art: LOD, HLOD and the far field without TAA #627
+gariasf commented on Nov 6, 2026
+gariasf
+on Nov 6, 2026
+OwnerAuthor
+More actions
+Not yet specified (from #619's review, PR #642):
+A freed Material that a loaded Mesh still names. A Mesh's Meshlets bake its Primitives' Material indices. If a Material is freed while a loaded Mesh names it, that Mesh draws with whatever Material takes the index next. MaterialPool::free documents that the Mesh must be freed first, but nothing checks it. Revive when phase B frees Materials: a per-Material count of the Meshes that name it, or a check at free.
+Freeing a refitted (bent) Mesh. MeshPool::free refuses one with a warning, because the Metal refit's scratch is one region per refitted BLAS, in load order and sized once. Revive when streaming has to unload bent Meshes: rebuild the scratch, and the marker's bind group for it, whenever the refitted set changes.
+gariasf commented on Nov 6, 2026
+gariasf
+on Nov 6, 2026
+OwnerAuthor
+More actions
+Not yet specified (deferred from #623, PR #649): after a Texture moves from its Resident tail's Texture class to its whole chain's class, the tail's slice stays taken, so its tail is held and charged twice in resident_tails (87,408 bytes for a 2,048² BC7 or BC5 Texture, 1.6% of its chain). Kept on purpose for now: eviction can fall back to that slice without a copy. Revive when eviction lands, or when the Resident tails Budget is sized, to decide between releasing the slice after the move (a free list per class) and keeping it as the eviction target.
+gariasf
+added a commit that references this issue on Nov 6, 2026
+Load each Texture's Resident tail first, then move it to its chain's …
+...
+2b20776
+Sign up for free to join this conversation on GitHub. Already have an account? Sign in to comment
+Metadata
+Metadata
+Assignees
+No one assigned
+Labels
+ready-for-agentFully specified, ready for an AFK agentFully specified, ready for an AFK agent
+Projects
+No projects
+Milestone
+M4No due date
+Relationships
+None yet
+Development
+No branches or pull requests
+Issue actions
+Open in GitHub Copilot app
+You can’t perform that action at this time.

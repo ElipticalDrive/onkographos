@@ -1,0 +1,214 @@
+--- v006.md
++++ v007.md
+@@ -8,44 +8,40 @@
+ ## How it works
+ **Inputs and Outputs:**
+-*   **Input:** A parallel volume rendering task involving $P$ processors, a dataset of cells (e.g., tetrahedra), and a target image resolution.
+-*   **Output:** A composite rendered image.
++*   **Input:** A parallel volume rendering task involving multiple processors, a dataset of cells, and a target image resolution [S1].
++*   **Output:** A composite rendered image [S1].
+ *   **Parameters:**
+-    *   `polling_interval`: The number of cells processed before checking for incoming ray segments [S1].
++    *   `polling_interval`: The number of cells to be processed before checking for incoming ray segments [S1].
+     *   `buffer_depth`: The number of ray segments accumulated before an asynchronous send is posted [S1].
+     *   `num_buffers`: The number of ray segment buffers provided for each destination (typically $\ge 2$) [S1].
+ 
+ **Data Structures:**
+-*   **Ray Segment Buffer:** A queue or array holding ray segments destined for a specific processor.
+-*   **Buffer Pool:** For each destination processor $j$, there are `num_buffers` buffers. Let $B_{j,k}$ denote the $k$-th buffer for destination $j$, where $k \in \{0, \dots, \text{num\_buffers}-1\}$ [S1].
+-*   **State Flags:** Each buffer $B_{j,k}$ has a state indicating whether it is `empty`, `full` (ready for send), or `pending` (send operation in progress) [S1].
++*   **Ray Segment Buffer:** A queue or array holding ray segments destined for a specific processor [S1].
++*   **Buffer Pool:** For each destination processor $j$, there are `num_buffers` buffers [S1]. Let $B_{j,k}$ denote the $k$-th buffer for destination $j$, where $k \in \{0, \dots, \text{num\_buffers}-1\}$ [S1].
++*   **State Flags:** Each buffer $B_{j,k}$ tracks whether it is `empty`, `full` (ready for send), or `pending` (send operation in progress) [S1].
+ 
+ **Algorithm Steps:**
+ 
+ 1.  **Initialization:**
+-    *   Initialize `polling_interval` and `buffer_depth` based on empirical tuning for the target architecture and number of processors [S1].
+-    *   Allocate `num_buffers` for each destination processor.
+-    *   Mark all buffers as `empty`.
++    *   Set `polling_interval` and `buffer_depth` based on empirical tuning for the target architecture and number of processors [S1].
++    *   Allocate `num_buffers` for each destination processor [S1].
++    *   Mark all buffers as `empty` [S1].
+ 
+ 2.  **Main Loop (per processor):**
+     *   While rendering is not complete:
+         *   **Scan Conversion (Object-Space):**
+-            *   Process up to `polling_interval` cells.
+-            *   For each cell, generate ray segments.
++            *   Process up to `polling_interval` cells [S1].
++            *   For each cell, generate ray segments [S1].
+             *   For each ray segment destined for processor $j$:
+-                *   Identify the current active buffer $B_{j,k}$ (initially $k=0$).
+-                *   If $B_{j,k}$ is `empty` or `pending`:
+-                    *   If `empty`, add segment to $B_{j,k}$.
+-                    *   If `pending`, check if $B_{j,k}$ is full. If full, switch to companion buffer $B_{j, (k+1) \pmod{\text{num\_buffers}}}$ [S1].
+-                *   If the selected buffer $B_{j,k}$ becomes full (reaches `buffer_depth`):
+-                    *   Post an asynchronous send operation for $B_{j,k}$ to processor $j$.
+-                    *   Mark $B_{j,k}$ as `pending` [S1].
+-                    *   Switch to the next buffer $B_{j, (k+1) \pmod{\text{num\_buffers}}}$ for subsequent segments [S1].
++                *   Identify the current active buffer $B_{j,k}$ (initially $k=0$) [S1].
++                *   If $B_{j,k}$ is `empty`, add segment to $B_{j,k}$ [S1].
++                *   If $B_{j,k}$ is `pending`, check if it is full. If full, switch to the companion buffer $B_{j, (k+1) \pmod{\text{num\_buffers}}}$ [S1].
++                *   If the selected buffer $B_{j,k}$ becomes full (reaches `buffer_depth`), post an asynchronous send operation for $B_{j,k}$ to processor $j$ and mark it as `pending` [S1].
+         
+         *   **Polling (Image-Space):**
+-            *   Check for incoming ray segments from other processors.
++            *   Check for incoming ray segments from other processors [S1].
+             *   If segments are available, receive them and add to the local ray segment buffer for compositing [S1].
+         
+         *   **Ray Merging (Image-Space):**
+-            *   If incoming segments are available, perform ray merging (compositing) on them.
++            *   If incoming segments are available, perform ray merging (compositing) on them [S1].
+             *   This task is executed to overlap computation with communication and prevent deadlock if outbound buffers are congested [S1].
+ 
+@@ -63,68 +59,96 @@
+ ```python
+ def async_communication_task_management(num_processors, polling_interval, buffer_depth, num_buffers):
+-    # Initialize buffers for each destination
+-    # buffers[dest][buffer_id] = {'state': 'empty', 'segments': []}
+-    buffers = initialize_buffers(num_processors, num_buffers)
+-    
+-    # Termination coordination
++    # Initialize buffers: buffers[dest][k] tracks state and segments
++    buffers = [[{'state': 'empty', 'segments': []} for _ in range(num_buffers)] for _ in range(num_processors)]
++    local_done = False
+     designated_node = 0
+-    local_done = False
+-    
++    my_id = 0
++    global_termination_signal = False
++
+     while not global_termination_signal:
+-        # 1. Scan Conversion
++        # 1. Scan Conversion (Object-Space)
+         cells_processed = 0
+         while cells_processed < polling_interval:
+-            cell = get_next_cell()
++            cell = fetch_next_unprocessed_cell()
+             if cell is None:
+                 break
+-            
+-            segments = scan_convert(cell)
++            segments = generate_ray_segments(cell)
+             for seg in segments:
+                 dest = seg.destination
+-                # Find an available buffer
+-                buf_id = find_available_buffer(dest, buffers)
+-                
+-                if buf_id is not None:
++                # Find first empty buffer
++                buf_id = -1
++                for k in range(num_buffers):
++                    if buffers[dest][k]['state'] == 'empty':
++                        buf_id = k
++                        break
++                if buf_id != -1:
+                     buffers[dest][buf_id]['segments'].append(seg)
+                     if len(buffers[dest][buf_id]['segments']) >= buffer_depth:
+-                        # Post asynchronous send
+-                        post_async_send(dest, buf_id, buffers)
++                        post_nonblocking_send(dest, buf_id)
+                         buffers[dest][buf_id]['state'] = 'pending'
+-                        # Switch to next buffer for future segments
+-                        # Logic handled in find_available_buffer for next iteration
+                 else:
+                     # All buffers for dest are pending -> Deadlock prevention
+-                    # Switch to ray merging task
+-                    break 
+-            
++                    break # Switch to ray merging task
+             cells_processed += 1
+-        
+-        # 2. Polling and Ray Merging
+-        # Check for incoming segments
+-        incoming_segments = check_for_incoming_segments()
+-        
+-        if incoming_segments:
+-            for seg in incoming_segments:
+-                merge_segment(seg)
+-        
+-        # If we couldn't send due to congestion, ensure we do ray merging
++
++        # 2. Polling and Ray Merging (Image-Space)
++        incoming = check_nonblocking_receives()
++        if incoming:
++            for seg in incoming:
++                compositing_merge(seg)
++
++        # If scan conversion stalled, prioritize merging to clear congestion
+         if cells_processed < polling_interval:
+-            # Process more incoming segments to clear congestion
+-            while check_for_incoming_segments():
+-                seg = check_for_incoming_segments()
+-                merge_segment(seg)
+-                
+-        # Check for local completion
+-        if all_cells_processed():
++            while check_nonblocking_receives():
++                seg = check_nonblocking_receives()
++                compositing_merge(seg)
++
++        # Check local completion
++        if fetch_next_unprocessed_cell() is None:
+             local_done = True
+-            
+-        # Check for global termination
+-        if designated_node == my_id:
+-            if all_local_done_received():
+-                broadcast_global_termination()
++
++        # 3. Termination Coordination
++        if my_id == designated_node:
++            if all_processors_reported_done():
++                global_termination_signal = True
++                broadcast_termination_signal()
+         else:
+             if local_done:
+-                send_local_termination(designated_node)
+-            wait_for_global_termination()
++                send_done_message(designated_node)
++            while not global_termination_signal:
++                pass
++
++# Standard operations defined for self-containment:
++def fetch_next_unprocessed_cell():
++    # Returns next cell from dataset or None if exhausted
++    pass
++
++def generate_ray_segments(cell):
++    # Returns list of ray segments for the cell
++    pass
++
++def post_nonblocking_send(dest, buf_id):
++    # Initiates asynchronous send of buffers[dest][buf_id]['segments']
++    pass
++
++def check_nonblocking_receives():
++    # Returns list of newly arrived segments from any processor
++    pass
++
++def compositing_merge(seg):
++    # Composites segment into local image buffer
++    pass
++
++def all_processors_reported_done():
++    # Returns True if all local_done flags received
++    pass
++
++def send_done_message(target):
++    # Sends local_done signal to target
++    pass
++
++def broadcast_termination_signal():
++    # Sets global_termination_signal for all processors
++    pass
+ ```
+ 
+@@ -150,6 +174,4 @@
+ *   **Strengths:** Overlaps computation and communication, reduces data copying overheads, decouples sending and receiving tasks, prevents idle time [S1].
+ *   **Limitations:** Requires careful tuning of `polling_interval` and `buffer_depth`. Performance depends on the number of processors, number of ray segments, and target architecture characteristics [S1].
+-*   **When to Use:** When communication overhead is significant and the architecture supports asynchronous operations. Effective for large numbers of ray segments [S1].
+-*   **When Not to Use:** When the number of processors is small and communication overhead is negligible, or when the architecture does not support efficient asynchronous operations [S1].
+ 
+ ## Background

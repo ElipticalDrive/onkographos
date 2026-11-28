@@ -1,0 +1,359 @@
+--- v003.md
++++ v004.md
+@@ -4,220 +4,169 @@
+ 
+ ## Overview
+-Hierarchical DDA with Chunk Stepping traces a ray through a hierarchical voxel map by stepping through chunks using a 3D Digital Differential Analyzer (DDA) algorithm [S1, unofficial]. It builds on [Hierarchical DDA](5710-hierarchical-dda.md) by treating the lowest hierarchy level as solid $8 \times 8 \times 8$ blocks, allowing the ray to skip empty regions in $O(1)$ time per chunk boundary [S1, unofficial]. The method detects solid chunks, converts the world-space entry point to chunk-local coordinates, steps through the voxel grid, and continues until a hit is found or map bounds are exceeded [S1, unofficial].
++This method traces a ray through a hierarchical voxel map by stepping through large "chunks" using a 3D Digital Differential Analyzer (DDA) algorithm, detecting solid chunks, converting to local coordinates, and continuing the ray until a hit is found or bounds are exceeded [S1, unofficial]. It builds on [Hierarchical DDA](12757-hierarchical-dda.md) by explicitly managing the transition between chunks with varying refractive indices and handling asynchronous chunk loading via flags [S1, unofficial]. It sets itself apart from standard DDA by skipping empty space at the chunk level and from pure voxel marching by maintaining a hierarchical structure that allows for large-step traversal [S1, unofficial].
+ 
+ ## How it works
+-The method maintains a DDA state to determine when the ray crosses a chunk boundary [S1, unofficial]. Upon entering a solid chunk, it computes the exact entry point, converts it to local coordinates, and steps through the $8 \times 8 \times 8$ voxel grid [S1, unofficial]. If the chunk is not solid or has a pending load flag, the algorithm marks it for asynchronous loading and advances the DDA to the next chunk [S1, unofficial].
++**Inputs:** Ray origin ($rayPos$), ray direction ($rayDir$), inverse ray direction ($invRayDir$), map bounds, chunk size ($CHUNK\_SIZE$), and a hierarchical map data structure containing chunk metadata and voxel data.
++**Outputs:** A hit result containing the world position, local coordinate, and normal of the first intersected voxel, or a failure state if the ray exits the map or exceeds the range.
+ 
+-### Inputs and Outputs
+-**Inputs:**
+-- Ray origin: $\mathbf{rayPos}$ (world space) [S1, unofficial]
+-- Ray direction: $\mathbf{rayDir}$ (normalized) [S1, unofficial]
+-- Inverse ray direction: $\mathbf{invRayDir} = 1.0 / \mathbf{rayDir}$ [S1, unofficial]
+-- Current chunk position: $\mathbf{pos}$ (integer voxel coordinates of the chunk's origin) [S1, unofficial]
+-- Map bounds: defined by the extent of the loaded chunks [S1, unofficial]
++**Data Structures:**
++*   `DNchunk`: Contains `DNivec3 pos` (chunk position), `bool updated`, `uint32_t numVoxels`, `uint32_t numVoxelsGpu`, and `DNcompressedVoxel voxels[8][8][8]` [S1, unofficial].
++*   `DNcompressedVoxel`: A 64-bit structure packed as:
++    *   `normal` (32 bits): material (8 bits) | nx (8 bits) | ny (8 bits) | nz (8 bits).
++    *   `albedo` (32 bits): r (8 bits) | g (8 bits) | b (8 bits) | unused (8 bits) [S1, unofficial].
++*   `RaycastHit`: Contains `local` (IVec3), `position` (Vec3), and `normal` (IVec3) [S2, unofficial].
+ 
+-**Outputs:**
+-- Boolean: `True` if a hit was found within the chunk; `False` if the ray exited the map or chunk without hitting [S1, unofficial].
+-- Updated ray state: $\mathbf{rayPos}$, $\mathbf{hitNormal}$, $\mathbf{voxel}$ data, and refraction flags [S1, unofficial].
++**Parameters:**
++*   $CHUNK\_SIZE = 8$ (linear dimension in voxels) [S1, unofficial].
++*   $INV\_CHUNK\_SIZE = 1 / CHUNK\_SIZE$ [S1, unofficial].
++*   $EPSILON$: Small floating-point offset to prevent self-intersection and clamp boundaries [S1, unofficial].
++*   $ignoreFirst$: Boolean flag to skip the first voxel hit during DDA iteration [S1, unofficial].
+ 
+-### Data Structures
+-The implementation uses specific packed structures for memory efficiency [S1, unofficial].
++**Algorithm Steps:**
+ 
+-**`DNcompressedVoxel`** (64 bits total):
+-- `normal`: 32 bits. Packed as:
+-  - Material ID: 8 bits
+-  - Normal X ($n_x$): 8 bits
+-  - Normal Y ($n_y$): 8 bits
+-  - Normal Z ($n_z$): 8 bits
+-- `albedo`: 32 bits. Packed as:
+-  - Red ($r$): 8 bits
+-  - Green ($g$): 8 bits
+-  - Blue ($b$): 8 bits
+-  - Unused: 8 bits
++1.  **Initialization:**
++    Compute the initial DDA state for the ray. Calculate `rayStep` as the sign of `rayDir`. Calculate `deltaDist` as the absolute value of `invRayDir`. Initialize `sideDist` based on the distance to the first grid plane for each axis [S1, unofficial]. Set `ignoreFirst = true` [S1, unofficial].
+ 
+-**`DNchunk`** (Variable size, fixed voxel count):
+-- `pos`: `DNivec3` (3D integer vector) storing the chunk's world-space origin in voxels [S1, unofficial].
+-- `updated`: `bool` indicating if the chunk data is current [S1, unofficial].
+-- `numVoxels`: `uint32_t` count of active voxels [S1, unofficial].
+-- `numVoxelsGpu`: `uint32_t` count for GPU transfer [S1, unofficial].
+-- `voxels`: Array of $8 \times 8 \times 8 = 512$ `DNcompressedVoxel` elements [S1, unofficial].
++2.  **Main Loop:**
++    While the current voxel position `pos` is within map bounds:
++    
++    a.  **Chunk Identification:**
++        Retrieve the chunk index for the current position: `mapIndex = get_map_index(pos)` [S1, unofficial].
++        
++    b.  **Chunk Status Check:**
++        Fetch the chunk handle and check its flags. If `(mapTile.flags & 3) == 2`, the chunk is solid [S1, unofficial].
++        
++    c.  **Solid Chunk Handling:**
++        If the chunk is solid:
++        i.  Compute the exact entry point into the chunk by stepping back along the ray:
++            $$updatedRayPos = rayPos + rayDir \times (\min(lastSideDist.x, lastSideDist.y, lastSideDist.z) - EPSILON)$$
++        ii. Convert the world-space entry point to chunk-local coordinates:
++            $$chunkRayPos = (updatedRayPos - pos) \times CHUNK\_SIZE$$
++        iii. Clamp the local ray position to avoid boundary artifacts:
++            $$chunkRayPos = \text{clamp}(chunkRayPos, vec3(EPSILON), CHUNK\_SIZE - EPSILON)$$ [S1, unofficial].
++        iv. Step through the chunk using a voxel-level DDA:
++            Call `step_chunk(pos, mapIndex, rayDir, invRayDir, chunkRayPos, ignoreFirst, maxDepth, hitNormal, voxel, colorAdd, colorMult, refracted)` [S1, unofficial].
++        v.  If `step_chunk` returns true:
++            Convert back to world coordinates:
++            $$rayPos = pos + chunkRayPos \times INV\_CHUNK\_SIZE$$
++            Return true (hit found) [S1, unofficial].
++        vi. If `step_chunk` reports refraction:
++            Update position, reinitialize DDA, and reset `lastSideDist` to zero [S1, unofficial].
++            
++    d.  **Pending Load Handling:**
++        If the chunk is not solid but has a pending load flag, mark it as requested:
++        $$map[mapIndex].flags = 3$$
++        Set `requested = true` [S1, unofficial].
++        
++    e.  **DDA Advancement:**
++        Update `lastSideDist = sideDist`.
++        Iterate the DDA:
++        $$iterate\_DDA(deltaDist, rayStep, sideDist, pos, hitNormal)$$
++        Set `ignoreFirst = false` [S1, unofficial].
++        
++    f.  **Boundary Check:**
++        If the ray exceeds the map bounds or maximum range, terminate [S1, unofficial].
+ 
+-### Parameters
+-- `CHUNK_SIZE`: Linear dimension of a chunk in voxels. Value: $8$ [S1, unofficial].
+-- `INV_CHUNK_SIZE`: Reciprocal of `CHUNK_SIZE` ($1/8 = 0.125$), used to scale chunk-local coordinates back to world space [S1, unofficial].
+-- `EPSILON`: Small floating-point offset used to prevent self-intersection and clamp boundary coordinates. Exact value not specified in the sources [S1, unofficial].
+-- `ignoreFirst`: Boolean flag that skips the first voxel hit during DDA iteration to prevent re-detecting the entry voxel [S1, unofficial]. Initialized to `True` for the first iteration, then set to `False` after the initial DDA advance [S1, unofficial].
++**Pseudocode:**
+ 
+-### Algorithm Steps
+-
+-1.  **Initialize DDA State**:
+-    Before the main loop, initialize the DDA variables using the ray properties and the current chunk position $\mathbf{pos}$ [S1, unofficial]:
+-    - Compute $\mathbf{deltaDist} = \mathbf{invRayDir} \times \text{CHUNK\_SIZE}$ (distance to cross one chunk in each axis) [S1, unofficial].
+-    - Compute $\mathbf{rayStep}$: vector of $1$ or $-1$ indicating the direction of travel along each axis [S1, unofficial].
+-    - Compute $\mathbf{sideDist}$: distance to the next chunk boundary along each axis [S1, unofficial].
+-    - Set `ignoreFirst = True` and `lastSideDist = vec3(0.0)` [S1, unofficial].
+-
+-2.  **Main Traversal Loop**:
+-    Iterate while the current voxel position $\mathbf{pos}$ is within map bounds [S1, unofficial]:
+-    ```python
+-    CHUNK_SIZE = 8
+-    INV_CHUNK_SIZE = 1.0 / CHUNK_SIZE
+-    EPSILON = 1e-6  # Not given in the sources [G]
+-
+-    def spatial_hash(pos):
+-        # Standard spatial hash for chunk coordinates [G]
+-        return ((pos[0] * 73856093) ^ (pos[1] * 19349663) ^ (pos[2] * 83492791)) & 0xFFFFFFFF
+-
+-    def in_map_bounds(pos):
+-        # Checks if pos is within the loaded map extent [G]
+-        return True  # Placeholder for bounds check [G]
+-
+-    def init_DDA(rayDir, invRayDir, rayPos, pos, deltaDist, rayStep, sideDist):
+-        deltaDist[0] = invRayDir[0] * CHUNK_SIZE
+-        deltaDist[1] = invRayDir[1] * CHUNK_SIZE
+-        deltaDist[2] = invRayDir[2] * CHUNK_SIZE
+-        rayStep[0] = 1 if rayDir[0] >= 0 else -1
+-        rayStep[1] = 1 if rayDir[1] >= 0 else -1
+-        rayStep[2] = 1 if rayDir[2] >= 0 else -1
+-        sideDist[0] = (pos[0] + (1 if rayStep[0] > 0 else 0) - rayPos[0]) * invRayDir[0]
+-        sideDist[1] = (pos[1] + (1 if rayStep[1] > 0 else 0) - rayPos[1]) * invRayDir[1]
+-        sideDist[2] = (pos[2] + (1 if rayStep[2] > 0 else 0) - rayPos[2]) * invRayDir[2]
+-
+-    def iterate_DDA(deltaDist, rayStep, sideDist, pos, hitNormal):
+-        if sideDist[0] < sideDist[1]:
+-            if sideDist[0] < sideDist[2]:
+-                pos[0] += rayStep[0]
+-                sideDist[0] += deltaDist[0]
+-                hitNormal[0] = -rayStep[0]
+-                hitNormal[1] = 0.0
+-                hitNormal[2] = 0.0
+-            else:
+-                pos[2] += rayStep[2]
+-                sideDist[2] += deltaDist[2]
+-                hitNormal[0] = 0.0
+-                hitNormal[1] = 0.0
+-                hitNormal[2] = -rayStep[2]
+-        else:
+-            if sideDist[1] < sideDist[2]:
+-                pos[1] += rayStep[1]
+-                sideDist[1] += deltaDist[1]
+-                hitNormal[0] = 0.0
+-                hitNormal[1] = -rayStep[1]
+-                hitNormal[2] = 0.0
+-            else:
+-                pos[2] += rayStep[2]
+-                sideDist[2] += deltaDist[2]
+-                hitNormal[0] = 0.0
+-                hitNormal[1] = 0.0
+-                hitNormal[2] = -rayStep[2]
+-
+-    def step_chunk(pos, map_index, ray_dir, inv_ray_dir, chunk_ray_pos, ignore_first, max_depth, hit_normal, voxel, color_add, color_mult, refracted):
+-        local_pos = list(chunk_ray_pos)
+-        local_step = [1 if ray_dir[i] >= 0 else -1 for i in range(3)]
+-        local_delta = list(inv_ray_dir)
+-        local_side = [(int(local_pos[i]) + (1 if local_step[i] > 0 else 0) - local_pos[i]) * local_delta[i] for i in range(3)]
++```python
++def trace_ray(ray_origin, ray_direction, map_bounds, chunk_size=8):
++    inv_chunk_size = 1.0 / chunk_size
++    epsilon = 1e-6
++    
++    # Initialize DDA state
++    ray_step = sign(ray_direction)
++    delta_dist = abs(1.0 / ray_direction)
++    # Calculate initial side distances to the first grid plane
++    # This depends on the specific grid origin and ray origin
++    side_dist = calculate_initial_side_dist(ray_origin, ray_direction, delta_dist, ray_step)
++    
++    pos = world_to_chunk_index(ray_origin)
++    ignore_first = True
++    last_side_dist = side_dist
++    
++    while in_map_bounds(pos, map_bounds):
++        map_index = get_map_index(pos)
++        chunk_tile = map.get_tile(map_index)
+         
+-        for _ in range(max_depth):
+-            idx = [int(local_pos[i]) for i in range(3)]
+-            if 0 <= idx[0] < CHUNK_SIZE and 0 <= idx[1] < CHUNK_SIZE and 0 <= idx[2] < CHUNK_SIZE:
+-                if not ignore_first:
+-                    sampled = map_data[map_index].voxels[idx[0]][idx[1]][idx[2]]
+-                    if sampled is not None:
+-                        hit_normal[0] = sampled.normal[0]
+-                        hit_normal[1] = sampled.normal[1]
+-                        hit_normal[2] = sampled.normal[2]
+-                        voxel = sampled
+-                        return True
+-                ignore_first = False
++        # Check if chunk is solid (flags & 3 == 2)
++        if (chunk_tile.flags & 3) == 2:
++            # Compute exact entry point
++            min_dist = min(last_side_dist.x, last_side_dist.y, last_side_dist.z)
++            updated_ray_pos = ray_origin + ray_direction * (min_dist - epsilon)
+             
+-            if local_side[0] < local_side[1]:
+-                if local_side[0] < local_side[2]:
+-                    local_pos[0] += local_step[0]
+-                    local_side[0] += local_delta[0]
+-                else:
+-                    local_pos[2] += local_step[2]
+-                    local_side[2] += local_delta[2]
+-            else:
+-                if local_side[1] < local_side[2]:
+-                    local_pos[1] += local_step[1]
+-                    local_side[1] += local_delta[1]
+-                else:
+-                    local_pos[2] += local_step[2]
+-                    local_side[2] += local_delta[2]
+-        return False
+-
+-    rayPos = initial_ray_origin
+-    pos = initial_chunk_origin
+-    deltaDist = [0.0, 0.0, 0.0]
+-    rayStep = [0, 0, 0]
+-    sideDist = [0.0, 0.0, 0.0]
+-    lastSideDist = [0.0, 0.0, 0.0]
+-    ignoreFirst = True
+-    refracted = False
+-    hitNormal = [0.0, 0.0, 0.0]
+-    voxel = None
+-    colorAdd = [0.0, 0.0, 0.0]
+-    colorMult = [1.0, 1.0, 1.0]
+-    max_depth = 1000  # Not given in the sources [G]
+-
+-    init_DDA(rayDir, invRayDir, rayPos, pos, deltaDist, rayStep, sideDist)
+-
+-    while in_map_bounds(pos):
+-        mapIndex = spatial_hash(pos)
+-        mapTile = map_data[mapIndex]
+-        
+-        if (mapTile.flags & 3) == 2:
+-            min_side_dist = min(lastSideDist[0], lastSideDist[1], lastSideDist[2])
+-            updatedRayPos = [rayPos[i] + rayDir[i] * (min_side_dist - EPSILON) for i in range(3)]
+-            chunkRayPos = [(updatedRayPos[i] - pos[i]) * CHUNK_SIZE for i in range(3)]
+-            chunkRayPos = [max(EPSILON, min(CHUNK_SIZE - EPSILON, chunkRayPos[i])) for i in range(3)]
++            # Convert to chunk-local coordinates
++            chunk_ray_pos = (updated_ray_pos - pos) * chunk_size
+             
+-            hit_found = step_chunk(pos, mapIndex, rayDir, invRayDir, chunkRayPos, ignoreFirst, max_depth, hitNormal, voxel, colorAdd, colorMult, refracted)
++            # Clamp to avoid boundary noise
++            chunk_ray_pos = clamp(chunk_ray_pos, epsilon, chunk_size - epsilon)
++            
++            # Step through the chunk
++            hit_found, refracted = step_chunk(
++                pos, map_index, ray_direction, 1.0/ray_direction,
++                chunk_ray_pos, ignore_first, max_depth=100,
++                hit_normal=None, voxel=None, color_add=None, color_mult=None,
++                refracted_out=None
++            )
+             
+             if hit_found:
+-                rayPos = [pos[i] + chunkRayPos[i] * INV_CHUNK_SIZE for i in range(3)]
+-                return True
++                # Convert back to world coordinates
++                ray_origin = pos + chunk_ray_pos * inv_chunk_size
++                return True, ray_origin, hit_normal
+             
+             if refracted:
+-                rayPos = updatedRayPos
+-                init_DDA(rayDir, invRayDir, rayPos, pos, deltaDist, rayStep, sideDist)
+-                lastSideDist = [0.0, 0.0, 0.0]
++                # Handle refraction: update position, reinit DDA, reset side dist
++                ray_origin = ... # Updated position from refraction logic
++                side_dist = calculate_initial_side_dist(ray_origin, ray_direction, delta_dist, ray_step)
++                last_side_dist = side_dist
++                ignore_first = True
+                 continue
++        
++        # Check for pending load
++        if chunk_tile.flags == 3:
++            map[map_index].flags = 3
++            requested = True
+             
+-        elif mapTile.flags & 1:
+-            map_data[mapIndex].flags = 3
+-            requested = True
++        # Advance DDA
++        last_side_dist = side_dist
++        iterate_dda(delta_dist, ray_step, side_dist, pos)
++        ignore_first = False
+         
+-        lastSideDist = list(sideDist)
+-        iterate_DDA(deltaDist, rayStep, sideDist, pos, hitNormal)
+-        ignoreFirst = False
+-    ```
++    return False, None, None
+ 
+-3.  **`step_chunk` Logic** (Internal to chunk):
+-    - Uses standard 3D DDA to traverse the $8 \times 8 \times 8$ grid starting from `chunkRayPos` [S1, unofficial].
+-    - Samples `DNcompressedVoxel` at each step [S1, unofficial].
+-    - If a solid voxel is found, returns `True` [S1, unofficial].
+-    - If refraction is enabled and the voxel is refractive, calculates new direction via Snell's law [S1, unofficial].
+-
+-### Edge Cases and Pitfalls
+-- **Boundary Noise**: Clamping `chunkRayPos` to `[EPSILON, CHUNK_SIZE - EPSILON]` reduces boundary noise but is explicitly marked as a temporary workaround in the source code [S1, unofficial].
+-- **First Voxel Skip**: `ignoreFirst` must be set to `False` after the initial DDA step to prevent skipping valid subsequent hits within the chunk [S1, unofficial].
+-- **Async Loading**: If a chunk has a pending load flag, the algorithm marks it as requested and continues traversal, relying on asynchronous loading mechanisms not detailed in the sources [S1, unofficial].
++def iterate_dda(delta_dist, ray_step, side_dist, pos):
++    # Determine which axis is crossed next
++    if side_dist.x < side_dist.y:
++        if side_dist.x < side_dist.z:
++            pos.x += ray_step.x
++            side_dist.x += delta_dist.x
++        else:
++            pos.z += ray_step.z
++            side_dist.z += delta_dist.z
++    else:
++        if side_dist.y < side_dist.z:
++            pos.y += ray_step.y
++            side_dist.y += delta_dist.y
++        else:
++            pos.z += ray_step.z
++            side_dist.z += delta_dist.z
++```
+ 
+ ## Subtopics
+ 
+ ### [Voxel Refraction & Total Internal Reflection Handling](8624-voxel-refraction-total-internal-reflection-handling.md)
+-Modifies the ray direction upon entering a refractive voxel using Snell's law, ensuring physically plausible light bending within sparse voxel grids. It distinguishes itself from opaque traversal by continuing the ray after interaction and from non-refractive transparency by actively modifying the ray vector. A critical feature is the fallback to the original direction if total internal reflection (TIR) occurs, preventing infinite ray bouncing and performance degradation. It builds on [Hierarchical DDA with Chunk Stepping](8591-hierarchical-dda-with-chunk-stepping.md) by handling the transition between chunks with varying refractive indices.
++This method modifies the ray direction upon entering a refractive voxel using Snell's law, with a fallback to the original direction if total internal reflection occurs to prevent infinite ray bouncing and performance degradation. It builds on [Hierarchical DDA with Chunk Stepping](8591-hierarchical-dda-with-chunk-stepping.md) by handling the transition between chunks with varying refractive indices.
+ 
+ ## Operating characteristics
+-- **Time Complexity**: $O(1)$ per chunk boundary check for DDA iteration [S1, unofficial]. The cost scales linearly with the number of chunks traversed, not the total voxel count [S1, unofficial].
+-- **Memory Complexity**: Fixed memory per chunk at 512 compressed voxels [S1, unofficial]. Each voxel occupies 64 bits, resulting in 4 KB per chunk, plus metadata overhead for the `DNchunk` struct [S1, unofficial].
+-- **Performance**: Optimized for sparse scenes with large empty volumes, as the DDA skips entire chunks efficiently [S1, unofficial]. Async chunk loading is supported via flags, though synchronization details are not specified [S1, unofficial].
+-- **Strengths**: Fast traversal of empty space; low memory footprint per chunk; simple data structure layout [S1, unofficial].
+-- **Limitations**: Boundary artifacts require clamping workarounds; fixed chunk size ($8^3$) may not be optimal for all scene densities; refraction handling is basic [S1, unofficial].
++**Time Complexity:** The time complexity per DDA iteration is $O(1)$ [S1, unofficial]. Chunk boundary checks and potential asynchronous chunk loading are handled via flags, which may introduce variable latency depending on the loading system [S1, unofficial].
++**Memory Complexity:** Memory per chunk is fixed at 512 compressed voxels ($8 \times 8 \times 8$) [S1, unofficial].
++**Performance:** The method is optimized for sparse voxel worlds where large empty spaces can be skipped at the chunk level. It is used in the DoonEngine voxel rendering pipeline [S1, unofficial].
++**Strengths:** Efficient traversal of large empty volumes; hierarchical structure allows for scalable memory usage; handles refraction and dynamic chunk loading.
++**Limitations:** Clamping `chunkRayPos` is a temporary workaround to reduce noise and may introduce artifacts; precision issues at chunk boundaries require careful epsilon handling [S1, unofficial].
+ 
+ ## Background
+-This method is used in the DoonEngine voxel rendering pipeline for map and chunk traversal [S1, unofficial]. It is an implementation of hierarchical ray marching specifically tailored for sparse voxel octrees with a fixed chunk size [S1, unofficial]. The approach leverages the efficiency of DDA for grid traversal while adding a layer of hierarchy to skip empty regions [S1, unofficial].
++This method is used in the DoonEngine voxel rendering pipeline for map and chunk traversal [S1, unofficial]. It represents a practical implementation of hierarchical DDA tailored for real-time voxel rendering with dynamic chunk loading and refraction support.
+ 
+ ## Sources
+-[S1] frozein/DoonEngine, https://github.com/frozein/DoonEngine, fetched 2026-10-26 (unofficial)+[S1] frozein/DoonEngine, https://github.com/frozein/DoonEngine, fetched 2026-10-26 (unofficial)
++[S2] afonsolage/projekto, https://github.com/afonsolage/projekto, fetched 2026-10-27 (unofficial)

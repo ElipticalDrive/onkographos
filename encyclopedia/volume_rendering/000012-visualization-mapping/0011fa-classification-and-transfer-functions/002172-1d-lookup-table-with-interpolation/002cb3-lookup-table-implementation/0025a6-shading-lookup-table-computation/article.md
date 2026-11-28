@@ -1,0 +1,123 @@
+# Shading Lookup Table Computation
+
+Also called: Internal texture format selection, vpShadeTable
+
+## Overview
+Shading Lookup Table Computation recomputes the entries of a color lookup table based on current lighting, material, and view transformation parameters [S2]. It uses color index mode with texture lookup tables instead of pre-shaded color values to allow interactive manipulation of visual quantities [S1, S3]. It differs from [Hardcoded Transfer Function](1098-hardcoded-transfer-function.md) by computing values dynamically based on current scene parameters, and from [UpdateOpacityTransferFunction](2489-updateopacitytransferfunction.md) by encompassing the full color/opacity computation rather than just opacity adjustments [G].
+
+## How it works
+**Inputs and Outputs:**
+*   **Inputs:** Current lighting parameters (ambient, diffuse, specular coefficients, light positions), current material parameters (diffuse color, specular color, shininess), current view transformation parameters (view vector, normal vectors if encoded), and the sample slice distance $\Delta$ [S1, S2].
+*   **Outputs:** A populated 1D array of 4-component vectors $(R, G, B, \alpha)$ where each entry corresponds to a normalized scalar value in the domain $[0, 1]$ [G].
+
+**Data Structures:**
+The method assumes color index mode, where textures store color indices that are transformed to color values during rendering rather than pre-shaded color values [S1, S3]. For internal layout, size constraints, and normalization schemes, see [Lookup Table Implementation](5347-lookup-table-implementation.md).
+
+**Steps:**
+1.  **Initialize Parameters:** Set lighting and material properties using the active shading model [S2].
+2.  **Iterate LUT Entries:** For each index $i$ from $0$ to $N-1$:
+    a. Retrieve the scalar value $v_i$ and its associated normal vector $n_i$ (if using encoded normals) [S2].
+    b. Transform the normal vector $n_i$ into view space using the current view transformation matrix [S2].
+    c. Compute the shading contribution (ambient, diffuse, specular) based on the transformed normal, view vector, and light parameters [S2].
+    d. Map the scalar value $v_i$ to an extinction coefficient using the transfer function mapping $map[C_i]$ [S1].
+    e. Compute the opacity entry $\alpha_i$ using the sample slice distance $\Delta$:
+        $$ \alpha_i = 1 - e^{-map[C_i] \Delta} $$
+    f. Store the resulting $(R, G, B, \alpha)$ in the LUT at index $i$ [S2].
+3.  **Opacity Correction:** If the sample slice distance changes from $\Delta_0$ to $\Delta_k$, correct the stored opacity values in the color table using the new distance [S1].
+4.  **Commit:** Finalize the table for rendering [S2].
+
+**Parameters:**
+*   **Shading Model:** Typically Phong or Blinn-Phong [G].
+*   **Sample Slice Distance $\Delta$:** Chosen with respect to the width of texture elements [S1].
+
+**Edge Cases and Pitfalls:**
+*   **Timing:** The computation routine must be called after any changes to shading or viewing parameters, but *before* calling any rendering routines [S2].
+*   **Color Index Mode:** The method requires color index mode; pre-shaded values are often favored in practice but lack interactive manipulation capabilities [S1, S3].
+*   **Precision:** Opacity correction requires accurate handling of the exponential mapping to avoid artifacts at resolution boundaries [S1].
+
+**Pseudocode:**
+> **Unverified code.** The code below did not pass a test run against a reference implementation, or no test fits it, so it may contain errors.
+
+```python
+def compute_shading_lookup_table(lut_size, scalar_values, lighting_params, material_params, view_matrix, sample_distance):
+    """
+    Computes the shading lookup table entries.
+    
+    Args:
+        lut_size (int): Number of entries.
+        scalar_values (list): Scalar values for each LUT index.
+        lighting_params (dict): Ambient, diffuse, specular coefficients and light directions.
+        material_params (dict): Diffuse color, specular color, shininess.
+        view_matrix (list): 3x3 view transformation matrix.
+        sample_distance (float): Current sample slice distance Delta.
+        
+    Returns:
+        list: List of (R, G, B, alpha) tuples for the LUT.
+    """
+    lut = []
+    
+    for i in range(lut_size):
+        v = scalar_values[i]
+        
+        # Retrieve normal vector for this scalar value
+        n = get_normal_for_scalar(v)
+        
+        # Transform normal to view space
+        n_view = transform_vector(view_matrix, n)
+        
+        # Compute shading (Phong model)
+        ambient = lighting_params['ambient'] * material_params['diffuse']
+        
+        light_dir = normalize(lighting_params['light_direction'])
+        diff_intensity = max(0.0, dot(n_view, light_dir))
+        diffuse = diff_intensity * lighting_params['diffuse_coeff'] * material_params['diffuse']
+        
+        view_dir = normalize([-view_matrix[0][2], -view_matrix[1][2], -view_matrix[2][2]])
+        reflect_dir = reflect(-light_dir, n_view)
+        spec_intensity = pow(max(0.0, dot(view_dir, reflect_dir)), material_params['shininess'])
+        specular = spec_intensity * lighting_params['specular_coeff'] * material_params['specular']
+        
+        color = [ambient[j] + diffuse[j] + specular[j] for j in range(3)]
+        
+        # Compute opacity from scalar value
+        extinction = map_scalar_to_extinction(v)
+        alpha = 1.0 - exp(-extinction * sample_distance)
+        
+        lut.append(color + [alpha])
+        
+    return lut
+
+def get_normal_for_scalar(v):
+    # [G] Returns a normal vector associated with the scalar value
+    return [0.0, 0.0, 1.0]
+
+def transform_vector(matrix, vector):
+    # [G] Applies 3x3 linear transformation
+    return [sum(matrix[j][k] * vector[k] for k in range(3)) for j in range(3)]
+
+def map_scalar_to_extinction(v):
+    # [G] Maps scalar value to extinction coefficient via transfer function
+    return v * 0.5
+```
+
+## Subtopics
+
+### Color Index Mode with LUT
+Color Index Mode with LUT is a variant where the texture stores color indices rather than pre-shaded color values. These indices are transformed to color values using the shading lookup table during rendering [S3]. It is chosen over pre-shaded color values because it allows interactive manipulation of visual quantities (such as lighting and material properties) at runtime, whereas pre-shaded values are static and lack this interactivity [S3]. Pre-shaded values are often favored in practical applications for performance, but Color Index Mode is necessary when dynamic shading is required [S1, S3].
+
+## Operating characteristics
+*   **Time Complexity:** Not given in the sources.
+*   **Memory Complexity:** Not given in the sources.
+*   **Performance:** The computation is performed once per parameter change rather than per voxel, supporting interactive rendering [S2].
+*   **Strengths:** Enables dynamic lighting and material adjustments without re-rendering the entire volume or pre-computing multiple LUTs [S1, S3].
+*   **Limitations:** Requires color index mode support, which may not be available in all pipelines [S1, S3]. Opacity correction adds implementation complexity [S1].
+*   **When to use:** Interactive visualization requiring real-time lighting/material updates.
+*   **When not to use:** Static rendering where pre-shaded values offer better performance [S3].
+
+## Background
+The method was notably implemented in VolPack, a software volume rendering library, where `vpShadeTable()` served as the routine responsible for recomputing the color lookup table entries based on current lighting, material, and view transformation parameters [S2]. The approach was also discussed in the context of level-of-detail volume rendering via 3D textures, where color index mode was preferred for the interactive manipulation of visual quantities [S1, S3].
+
+## Sources
+[S1] Level-of-Detail Volume Rendering via 3D Textures, https://www.semanticscholar.org/paper/05e7d88387ac7484397e329456535b0c8c665a16, fetched 2026-11-03
+[S2] VolPack User's Guide, http://www-graphics.stanford.edu/software/volpack/vp_userguide.html, fetched 2026-10-28
+[S3] PDF Level-Of-Detail Volume Rendering via 3D Textures, https://publications.sci.utah.edu/publications/weiler00/IEEE-VolVis-2000.pdf, fetched 2026-10-27

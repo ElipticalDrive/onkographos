@@ -1,0 +1,131 @@
+--- v004.md
++++ v005.md
+@@ -1,66 +1,58 @@
+ # Surface SDF Loss
+ 
++Also called: Surface SDF Regularizer
+ 
+ ## Overview
+-The Surface SDF Loss is a regression loss function used to supervise neural networks predicting Signed Distance Fields (SDFs) by minimizing the L1 distance between predicted signed distances and ground truth SDF values [S1, unofficial]. It is distinguished from occupancy-based losses (e.g., [Occupancy Networks](14234-occupancy-networks.md)) by directly optimizing geometric accuracy rather than binary classification, though it is often combined with sign supervision for stability in meta-learning contexts [S2].
++The Surface SDF Loss is a regularization term used in training Signed Distance Field (SDF) networks to enforce that the predicted distance values are positive and large for points located far outside the target geometry. It complements the [SDF Loss](17752-sdf-loss.md) by penalizing the network for predicting negative or small positive values in the exterior region, thereby preventing the SDF from collapsing or becoming ambiguous in empty space. It is distinct from the [SDF Loss](17752-sdf-loss.md) which primarily targets points on or near the surface.
+ 
+ ## How it works
+-The loss is computed over a set of query points $\mathcal{Q}$ located on the surface of the target geometry. For each point $\mathbf{x} \in \mathcal{Q}$, the network $f(\mathbf{x})$ predicts the signed distance $s$. The loss is the mean absolute error between the predicted distance and the ground truth distance (which is zero for points exactly on the surface, or the known distance if ground truth SDF values are provided).
++The method operates on a neural network $f_\theta(\mathbf{x})$ that predicts a scalar SDF value $s$ for a 3D query point $\mathbf{x} \in \mathbb{R}^3$. The core mechanism involves computing the spatial gradient $\nabla f_\theta(\mathbf{x})$ via automatic differentiation or analytical differentiation of interpolation functions, and applying a penalty term to the loss function.
+ 
+-**Inputs:**
+-- $f(\mathbf{x})$: Neural network predicting SDF value $s$ at query point $\mathbf{x}$.
+-- $\mathcal{Q}_{surface}$: Set of query points on the surface.
+-- $s_{gt}(\mathbf{x})$: Ground truth SDF value at $\mathbf{x}$ (typically $0$ for surface points).
+-
+-**Outputs:**
+-- $\mathcal{L}_{surface}$: Scalar loss value.
++**Inputs and Outputs:**
++*   **Input:** A set of 3D query points $\mathbf{x}$ sampled from the exterior region of the target geometry.
++*   **Output:** A scalar loss value $\mathcal{L}_{surface\_sdf}$.
+ 
+ **Data Structures:**
+-- Query points $\mathbf{x}$: 3D coordinates $(x, y, z)$.
+-- Predicted SDF $s$: Scalar float.
++*   **Query Points:** A tensor of shape $(N, 3)$ containing $N$ points $\mathbf{x}_i$ in the exterior region.
++*   **Network:** A neural network $f_\theta$ taking $\mathbf{x}$ as input and outputting a scalar $s$.
+ 
+ **Steps:**
+-1. Sample a batch of points $\mathcal{Q}_{surface}$ on the surface of the target geometry.
+-2. For each point $\mathbf{x}_i \in \mathcal{Q}_{surface}$, compute the predicted SDF value $s_i = f(\mathbf{x}_i)$.
+-3. Compute the ground truth SDF value $s_{gt, i}$ for each point. For points exactly on the surface, $s_{gt, i} = 0$.
+-4. Compute the L1 loss for each point: $l_i = |s_i - s_{gt, i}|$.
+-5. Compute the mean loss: $\mathcal{L}_{surface} = \frac{1}{N} \sum_{i=1}^{N} l_i$, where $N$ is the number of points.
+-
+-**Formula:**
+-$$ \mathcal{L}_{surface} = \frac{1}{N} \sum_{i=1}^{N} |f(\mathbf{x}_i) - s_{gt}(\mathbf{x}_i)| $$
++1.  Sample points $\mathbf{x}$ from the exterior region of the target geometry. The distribution is not explicitly defined in the sources, but typically involves points far from the surface.
++2.  Evaluate the SDF network at these points: $s_i = f_\theta(\mathbf{x}_i)$.
++3.  Compute the loss as the mean of the absolute SDF values, scaled by a factor. The specific implementation in [S1, unofficial] uses a scaling factor of 0.0, which effectively disables the loss, but the conceptual definition implies a penalty for non-zero values in the exterior. The general form is:
++    $$ \mathcal{L}_{surface\_sdf} = \frac{1}{N} \sum_{i=1}^{N} |s_i| \cdot \lambda $$
++    where $\lambda$ is a weighting factor. In [S1, unofficial], $\lambda = 0.0$.
++4.  Add $\mathcal{L}_{surface\_sdf}$ to the total loss $\mathcal{L}_{total}$.
+ 
+ **Parameters:**
+-- $N$: Number of surface points. Not given in the sources.
+-- Weighting factor $\lambda_{surface}$: Hyperparameter to balance this loss with others (e.g., Eikonal loss). Not given in the sources.
++*   $\lambda$: Weighting factor for the loss. In [S1, unofficial], $\lambda = 0.0$.
+ 
+ **Edge Cases and Pitfalls:**
+-- If surface points are not accurately sampled, the loss may not converge to the correct geometry.
+-- The loss assumes the network output is a signed distance function; if the network is not constrained to satisfy the Eikonal equation (covered in [Regularization and Gradient Losses](17793-regularization-and-gradient-losses.md)), the gradients may be inconsistent with the predicted distances.
+-- In some implementations, if `surface_sdf` is not provided, the loss may be computed as the mean of `abs(surface_sdf)` multiplied by a weight (e.g., 0.0 if not active) [S1, unofficial].
++*   **Zero Weighting:** In [S1, unofficial], the loss is multiplied by 0.0, rendering it inactive. This may be a placeholder or a specific design choice to disable the loss in certain contexts.
++*   **Sampling Distribution:** The effectiveness of the loss depends on the distribution of sampled points. Points too close to the surface may not provide meaningful regularization for the exterior region.
+ 
+ **Pseudocode:**
+ ```python
+-def surface_sdf_loss(f, surface_points, surface_sdf_gt):
++def surface_sdf_loss(f_theta, x, lambda_weight=0.0):
+     """
+     Compute the Surface SDF Loss.
+     
+     Args:
+-        f: Neural network function that takes 3D points and returns SDF values.
+-        surface_points: Tensor of shape (N, 3) containing query points on the surface.
+-        surface_sdf_gt: Tensor of shape (N,) containing ground truth SDF values (typically 0).
+-        
++    f_theta: Neural network function predicting SDF values.
++    x: Tensor of shape (N, 3) containing query points in the exterior region.
++    lambda_weight: Weighting factor for the loss. Default is 0.0.
++    
+     Returns:
+-        loss: Scalar tensor representing the mean L1 loss.
++    Scalar loss value.
+     """
+-    # Predict SDF values for the surface points
+-    predicted_sdf = f(surface_points)
++    # Evaluate SDF network at query points
++    s = f_theta(x)  # Shape: (N,)
+     
+-    # Compute L1 loss between predicted and ground truth SDF values
+-    # Note: If surface_sdf_gt is not provided or is None, the loss might be skipped or set to 0
+-    # as per [S1, unofficial], but standard implementation assumes ground truth is available.
+-    if surface_sdf_gt is None:
+-        return 0.0
++    # Compute mean absolute SDF value
++    mean_abs_s = torch.mean(torch.abs(s))
+     
+-    loss = torch.mean(torch.abs(predicted_sdf - surface_sdf_gt))
++    # Apply weighting factor
++    loss = mean_abs_s * lambda_weight
++    
+     return loss
+ ```
+@@ -68,23 +60,17 @@
+ ## Subtopics
+ 
+-### [SDF Loss](17752-sdf-loss.md)
+-SDF Loss is a regression loss function used to supervise neural networks predicting Signed Distance Fields (SDFs) by minimizing the L1 distance between predicted signed distances and ground truth SDF values. It is distinguished from occupancy-based losses (e.g., [Occupancy Networks](14234-occupancy-networks.md)) by directly optimizing geometric accuracy rather than binary classification, though it is often combined with sign supervision for stability in meta-learning contexts.
+-
+-### [Off-surface Point Loss](19753-off-surface-point-loss.md)
+-The off-surface point loss is a regularization term used in training Signed Distance Field (SDF) networks to enforce that the predicted distance values are positive and large for points located far outside the target geometry. It complements the surface SDF loss by penalizing the network for predicting negative or small positive values in the exterior region, thereby preventing the SDF from collapsing or becoming ambiguous in empty space. It is distinct from the [SDF Loss](17752-sdf-loss.md) which primarily targets points on or near the surface.
+-
+ ### Track-SDF Regularizer
+-The Track-SDF Regularizer is a constraint used in Directional Distance Field (DDF) and SDF co-training to ensure consistency between the two representations. It enforces that points predicted by the DDF model lie close to the SDF zero-level set. Specifically, for point-direction pairs $(p, r)$ that point to the object surface, the DDF prediction $d$ is used to compute a new point $p + dr$. The loss minimizes the L1 norm of the SDF value at this new point: $\mathcal{L}_{ts}(d) = \|f_s(p+dr)\|_1$. This loss is applied only to the DDF model, not the SDF model [S2].
++The Track-SDF Regularizer is a variant used in the context of Directional Distance Fields (DDF) and SDFs. It constrains DDF predictions to be consistent with SDF surface predictions by enforcing that points predicted by DDF lie close to the SDF zero-level set. It is applied only to the DDF model, not the SDF model. The loss is computed as $\mathcal{L}_{ts}(d) = \|f_s(p+dr)\|_1$, where $(p, r)$ are point-direction tuples pointing to a surface, and $d$ is the predicted directional distance for these tuples.
+ 
+ ## Operating characteristics
+-- **Time Complexity**: Linear with respect to the number of surface points $N$, $O(N)$, as it involves a forward pass through the network and a mean reduction.
+-- **Memory Complexity**: Linear with respect to $N$, $O(N)$, to store the predicted SDF values and gradients.
+-- **Strengths**: Directly optimizes geometric accuracy; simple to implement; effective when combined with gradient-based losses like Eikonal.
+-- **Limitations**: Requires accurate surface point sampling; does not enforce smoothness or gradient magnitude constraints on its own.
+-- **When to use**: When training SDF networks for high-fidelity geometry reconstruction where surface accuracy is critical.
+-- **When not to use**: When only occupancy information is available or when computational resources are extremely limited and approximate geometry is acceptable.
++*   **Time Complexity:** $O(N)$, where $N$ is the number of sampled points.
++*   **Memory Complexity:** $O(N)$, for storing the query points and their SDF values.
++*   **Strengths:** Helps prevent the SDF from collapsing in empty space, ensuring a well-defined exterior region.
++*   **Limitations:** The effectiveness depends on the sampling strategy and the weighting factor. In [S1, unofficial], the loss is inactive due to a zero weighting factor.
++*   **When to Use:** When training SDF networks and there is a need to regularize the exterior region to prevent ambiguity.
++*   **When Not to Use:** When the loss is intended to be inactive or when other regularization methods are sufficient.
+ 
+ ## Background
+-The Surface SDF Loss is a fundamental component in the training of neural SDF representations. It was introduced in the context of SDFStudio, a framework for learning SDFs from multi-view images [S1, unofficial]. The method builds on the idea that SDFs can be learned by minimizing the difference between predicted and ground truth distances at surface points. The Track-SDF Regularizer, a variant used in conjunction with DDF, was introduced in the FIRe paper for fast inverse rendering [S2].
++The Surface SDF Loss is part of the broader family of regularization techniques used in training neural implicit representations. It is specifically designed to address the issue of SDF collapse in empty space, a common problem in training SDF networks. The method is cited in [S1, unofficial] and [S2], with [S1, unofficial] providing a specific implementation detail (zero weighting) and [S2] discussing related regularizers in the context of DDF and SDF consistency.
+ 
+ ## Sources

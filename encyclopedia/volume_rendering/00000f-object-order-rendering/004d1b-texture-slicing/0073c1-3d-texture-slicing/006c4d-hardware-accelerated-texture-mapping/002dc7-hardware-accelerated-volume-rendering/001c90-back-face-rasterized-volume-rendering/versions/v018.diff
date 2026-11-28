@@ -1,0 +1,193 @@
+--- v017.md
++++ v018.md
+@@ -1,5 +1,5 @@
+ # Back-face rasterized volume rendering
+ 
+-Also called: Back-Face Entry Point Method, Backface Rendering for Ray Casting, Backface Culling for Ray Casting Entry Points, Two-Pass Ray Setup, Ray Origin/Direction Texture Mapping
++Also called: Back-Face Coordinate Volume Rendering, Back-Face Entry Point Method, Backface Culling for Ray Casting Entry Points, Backface Rendering for Ray Casting, Ray Origin/Direction Texture Mapping, Two-Pass Ray Setup, Two-Pass Volume Ray Casting with Back-Face Coordinate Buffer, Two-Pass WebGL Volume Ray Casting
+ 
+ ## Overview
+@@ -8,11 +8,11 @@
+ ## How it works
+ **Inputs and Outputs:**
+-*   **Inputs:** 3D volume texture ($V$), transfer function texture ($TF$), camera projection/view matrices, bounding box geometry (unit cube or scaled cube).
+-*   **Outputs:** Final 2D image buffer with accumulated color and opacity.
++*   **Inputs:** 3D volume texture ($V$), transfer function texture ($TF$), camera projection/view matrices, bounding box geometry (unit cube or scaled cube) [S2, unofficial][S6, unofficial].
++*   **Outputs:** Final 2D image buffer with accumulated color and opacity [S2, unofficial].
+ 
+ **Data Structures:**
+ 1.  **Bounding Box Geometry:** A cube defined by 8 vertices in object coordinates $[0,1]^3$ and 36 indices forming 12 triangles [S6, unofficial].
+ 2.  **Back-Face Texture ($T_{back}$):** A 2D texture (resolution $W \times H$, format `GL_RGBA16F` or similar) storing the 3D entry/exit coordinates (or ray origins) derived from the back-face rasterization [S2, unofficial][S6, unofficial].
+-3.  **Frame Buffer Object (FBO):** Attached to $T_{back}$ for the first pass, and the default framebuffer for the second pass [S5, unofficial][S6, unofficial].
++3.  **Frame Buffer Object (FBO):** Attached to $T_{back}$ for the first pass, and the default framebuffer for the second pass [S5][S6, unofficial].
+ 
+ **Numbered Steps:**
+@@ -34,8 +34,8 @@
+         *   Sample $T_{back}$ using the interpolated texture coordinates (or `gl_FragCoord`) to retrieve the back-face position (`backColor`) [S2, unofficial][S6, unofficial].
+         *   Compute ray direction: $\vec{d} = \text{backColor}.rgb - \text{frontColor}.rgb$ [S2, unofficial].
+-        *   Compute ray length: $L = \|\vec{d}\|$ [S4].
++        *   Compute ray length: $L = \|\vec{d}\|$ [S4, unofficial].
+         *   If $L \approx 0$ (ray misses or is tangent), discard the fragment [S6, unofficial].
+         *   Normalize direction: $\vec{v} = \vec{d} / L$ [S2, unofficial].
+-        *   Calculate step size: $\Delta = L / N$, where $N$ is the number of steps (e.g., 256) [S2, unofficial][S4].
++        *   Calculate step size: $\Delta = L / N$, where $N$ is the number of steps (e.g., 256) [S2, unofficial][S4, unofficial].
+         *   Initialize accumulation variables: $C_{acc} = (0,0,0,0)$, $\alpha_{acc} = 0$, current position $p = \text{frontColor}.rgb$ [S2, unofficial].
+         *   **Ray Marching Loop:** For $i = 0$ to $N-1$:
+@@ -55,86 +55,70 @@
+ ```python
+ # Pass 1: Back-Face Rasterization
+-def pass1_backface_rasterization():
+-    bind_fbo(g_framebuffer, g_bfTexObj)
+-    set_viewport(0, 0, g_winWidth, g_winHeight)
+-    enable_culling(GL_FRONT) # Cull front faces, render back faces
+-    use_shader(g_bf_vert, g_bf_frag)
+-    draw_box() # Draws bounding box
+-    unbind_fbo()
++def pass1_backface_rasterization(fb, tex, bbox, viewport_width, viewport_height):
++    fb.bind()
++    set_viewport(0, 0, viewport_width, viewport_height)
++    enable_face_culling(cull_front=True) # Cull front faces, render back faces
++    for triangle in bbox.triangles:
++        rasterize_triangle(triangle, back_face_shader, tex)
++    fb.unbind()
++
++def back_face_shader(vertex_pos):
++    # Outputs vertex position as color to texture
++    return vec4(vertex_pos.x, vertex_pos.y, vertex_pos.z, 1.0)
+ 
+ # Pass 2: Front-Face Rasterization and Ray Marching
+-def pass2_frontface_raycasting():
+-    bind_default_fbo()
+-    enable_culling(GL_BACK) # Cull back faces, render front faces
+-    use_shader(g_rc_vert, g_rc_frag)
+-    set_uniform("uBackCoord", g_bfTexObj)
+-    set_uniform("uSteps", 256)
+-    set_uniform("uMinGrayVal", 0.001)
+-    set_uniform("uMaxGrayVal", 1.0)
+-    set_uniform("uTransferFunction", tf_texture)
+-    set_uniform("uVolume", volume_texture)
+-    draw_box() # Draws bounding box
++def pass2_frontface_raycasting(fb, back_tex, volume_tex, tf_tex, bbox, viewport_width, viewport_height, u_steps, u_min_gray, u_max_gray, u_opacity_val):
++    fb.bind()
++    set_viewport(0, 0, viewport_width, viewport_height)
++    enable_face_culling(cull_front=False) # Cull back faces, render front faces
++    for triangle in bbox.triangles:
++        rasterize_triangle(triangle, front_face_shader, back_tex, volume_tex, tf_tex, u_steps, u_min_gray, u_max_gray, u_opacity_val)
++    fb.unbind()
+ 
+-# Fragment Shader Logic (Pass 2)
+-def fragment_shader():
+-    # Get front face position (ray start)
+-    front_pos = get_vertex_position() # Interpolated from vertex shader
++def front_face_shader(front_pos, back_tex, volume_tex, tf_tex, u_steps, u_min_gray, u_max_gray, u_opacity_val):
++    # Interpolated front position from vertex shader
++    front_color = vec4(front_pos.x, front_pos.y, front_pos.z, 1.0)
+     
+-    # Get back face position (ray end) from texture
+-    # Sample using fragment coordinates normalized to [0,1]
+-    uv = gl_FragCoord.xy / vec2(g_winWidth, g_winHeight)
+-    back_pos = texture(uBackCoord, uv).rgb
++    # Sample back-face texture using fragment coordinates
++    uv = vec2(gl_frag_coord.x / viewport_width, gl_frag_coord.y / viewport_height)
++    back_color = back_tex.sample(uv)
+     
+     # Compute ray vector
+-    ray_dir = back_pos - front_pos
++    ray_dir = back_color.rgb - front_color.rgb
+     ray_len = length(ray_dir)
+     
+-    # Discard if ray length is zero (misses volume)
+     if ray_len < 1e-6:
+-        discard()
++        return vec4(0.0, 0.0, 0.0, 0.0) # Discard fragment
+         
+-    # Normalize direction
+     dir_norm = ray_dir / ray_len
++    step_size = ray_len / u_steps
+     
+-    # Calculate step size
+-    step_size = ray_len / uSteps
++    acc_color = vec4(0.0, 0.0, 0.0, 0.0)
++    acc_alpha = 0.0
++    current_pos = front_color.rgb
+     
+-    # Initialize accumulation
+-    acc_color = vec4(0.0)
+-    acc_alpha = 0.0
+-    current_pos = front_pos
+-    
+-    # Ray Marching Loop
+-    for i in range(int(uSteps)):
+-        # Sample volume
+-        val = texture(uVolume, current_pos).r
++    for i in range(int(u_steps)):
++        val = volume_tex.sample(current_pos).r
+         
+-        # Check bounds
+-        if val < uMinGrayVal or val > uMaxGrayVal:
++        if u_min_gray <= val <= u_max_gray:
++            tf_sample = tf_tex.sample(vec2(val, 0.5))
++            color = tf_sample.rgb
++            alpha = tf_sample.a * u_opacity_val
++        else:
++            color = vec3(0.0)
+             alpha = 0.0
+-            color = vec3(0.0)
+-        else:
+-            # Lookup transfer function
+-            tf_sample = texture(uTransferFunction, vec2(val, 0.5))
+-            color = tf_sample.rgb
+-            alpha = tf_sample.a * uOpacityVal # Apply opacity scaling
+             
+-        # Front-to-back compositing
+         acc_color.rgb += (1.0 - acc_alpha) * alpha * color
+         acc_alpha += (1.0 - acc_alpha) * alpha
+         
+-        # Advance position
+         current_pos += dir_norm * step_size
+         
+-        # Early Ray Termination
+         if acc_alpha >= 1.0:
+             break
+             
+-        # Boundary check (optional, depends on geometry precision)
+         if any(current_pos < 0.0) or any(current_pos > 1.0):
+             break
+             
+-    # Output final color
+-    out_color = acc_color
++    return acc_color
+ ```
+ 
+@@ -160,14 +144,14 @@
+ 
+ ## Operating characteristics
+-*   **Time Complexity:** $O(W \cdot H \cdot N)$, where $W, H$ are screen dimensions and $N$ is the number of steps per ray. The two-pass setup adds a constant overhead of $O(W \cdot H)$ for rasterizing the bounding box.
+-*   **Memory Complexity:** $O(W \cdot H)$ for the back-face texture storage.
+-*   **Performance:** Efficient for sparse volumes as it skips pixels outside the bounding box silhouette [S3, unofficial]. Performance is limited by the fragment shader's ray marching loop and memory bandwidth for volume texture sampling.
+-*   **Strengths:** Avoids complex ray-box intersection math in the fragment shader [S5, unofficial]. Handles zooming correctly by rendering back faces for entry points [S3, unofficial]. Simple to implement on older GPUs (PS 3.0) [S1, unofficial].
+-*   **Limitations:** Requires two render passes and an additional texture [S7, unofficial]. Less precise than analytical ray-box intersection for non-axis-aligned bounding boxes or complex shapes. Not suitable for dynamic bounding boxes without re-rasterization.
+-*   **When to Use:** Real-time volume rendering on GPUs with limited fragment shader complexity or when the volume is contained within a simple axis-aligned bounding box.
+-*   **When Not to Use:** When high precision is required for ray entry/exit points, or when the volume has a complex shape that cannot be approximated by a simple bounding box.
++*   **Time Complexity:** Not given in the sources.
++*   **Memory Complexity:** Not given in the sources.
++*   **Performance:** Efficient for sparse volumes as it skips pixels outside the bounding box silhouette [S3, unofficial]. Performance is limited by the fragment shader's ray marching loop and memory bandwidth for volume texture sampling [G].
++*   **Strengths:** Avoids complex ray-box intersection math in the fragment shader [S5]. Handles zooming correctly by rendering back faces for entry points [S3, unofficial]. Simple to implement on older GPUs (PS 3.0) [S1, unofficial].
++*   **Limitations:** Requires two render passes and an additional texture [S7, unofficial]. Less precise than analytical ray-box intersection for non-axis-aligned bounding boxes or complex shapes [G]. Not suitable for dynamic bounding boxes without re-rasterization [G].
++*   **When to Use:** Real-time volume rendering on GPUs with limited fragment shader complexity or when the volume is contained within a simple axis-aligned bounding box [S3, unofficial].
++*   **When Not to Use:** When high precision is required for ray entry/exit points, or when the volume has a complex shape that cannot be approximated by a simple bounding box [G].
+ 
+ ## Background
+-Originating from early GPU volume rendering techniques, this method leverages the rasterization pipeline to determine ray boundaries. It was popularized in WebGL and OpenGL tutorials for direct volume rendering, where it provided a straightforward way to implement raycasting without complex shader math [S3, unofficial][S1, unofficial]. It is often cited in the context of direct volume rendering with pixel shaders up to version 3.0 [S1, unofficial].
++Originating from early GPU volume rendering techniques, this method leverages the rasterization pipeline to determine ray boundaries [G]. It was popularized in WebGL and OpenGL tutorials for direct volume rendering, where it provided a straightforward way to implement raycasting without complex shader math [S3, unofficial][S1, unofficial]. It is often cited in the context of direct volume rendering with pixel shaders up to version 3.0 [S1, unofficial].
+ 
+ ## Sources
+@@ -175,6 +159,6 @@
+ [S2] levl-dev/VolumeRayCasting_0, https://github.com/levl-dev/VolumeRayCasting_0, fetched 2026-10-26 (unofficial)
+ [S3] Volume Rendering with WebGL, https://www.willusher.io/webgl/2019/01/13/volume-rendering-with-webgl, fetched 2026-10-26 (unofficial)
+-[S4] Real-Time Isosurface Extraction Using the GPU Programmable Geometry Pipeline, https://doi.org/10.1145/1281500.1361219, fetched 2026-11-03
+-[S5] fargiolas/qvrc, https://github.com/fargiolas/qvrc, fetched 2026-10-26 (unofficial)
++[S4] Real-Time Isosurface Extraction Using the GPU Programmable Geometry Pipeline, https://doi.org/10.1145/1281500.1361219, fetched 2026-11-03 (unofficial)
++[S5] fargiolas/qvrc, https://github.com/fargiolas/qvrc, fetched 2026-10-26
+ [S6] thePZH/VolumeRendering-OpenGL, https://github.com/thePZH/VolumeRendering-OpenGL, fetched 2026-10-26 (unofficial)
+ [S7] yngve-sk/Volume-Rendering-WebGL, https://github.com/yngve-sk/Volume-Rendering-WebGL, fetched 2026-10-27 (unofficial)

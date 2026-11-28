@@ -1,0 +1,159 @@
+--- v002.md
++++ v003.md
+@@ -1,5 +1,3 @@
+ # Neural 3D Volume Decomposition
+-
+-
+ ## Overview
+ Neural 3D Volume Decomposition (Neural-PIL) is a method for jointly estimating 3D shape, spatially-varying BRDF (SVBRDF), and per-image illumination from a collection of images of an object captured under varying viewpoints and lighting conditions [S1, unofficial]. It extends the Neural Radiance Field (NeRF) framework by replacing the implicit view-dependent color output with an explicit physical material representation (Cook-Torrance BRDF parameters) and a latent illumination vector [S1, unofficial]. Unlike standard NeRF which optimizes for novel view synthesis directly, this method solves the inverse problem of reflectance decomposition, enabling high-quality relighting and material-aware view synthesis [S1, unofficial].
+@@ -21,7 +19,9 @@
+ 
+ ### Data Structures
+-The neural volume $V$ is implemented as a Multi-Layer Perceptron (MLP) [S1, unofficial].
+-*   **Input to MLP:** 3D coordinate $x \in \mathbb{R}^3$ and view direction $d \in \mathbb{R}^3$ [S1, unofficial].
+-*   **Output of MLP:** The MLP predicts the material and density parameters; the exact tensor layout is implementation-defined [G].
++The neural volume $V$ is implemented as two Multi-Layer Perceptrons (MLPs) [S1, unofficial].
++*   **Coarse MLP:** Learns a coarse representation and samples the 3D volume in a fixed sampling pattern [S1, unofficial].
++*   **Fine MLP:** Uses the coarse density knowledge to sample the volume in high-density areas at a finer resolution [S1, unofficial].
++*   **Input to MLPs:** 3D coordinate $x \in \mathbb{R}^3$ and view direction $d \in \mathbb{R}^3$ [S1, unofficial].
++*   **Output of MLPs:** Predicts material and density parameters in a fixed tensor layout: indices 0-2 for $b_d$, 3-5 for $b_s$, 6 for $b_r$, 7-9 for $n$, and 10 for $\sigma$ [S1, unofficial].
+ *   **Illumination Storage:** A learnable tensor of shape $q \times 128$ storing $z_l$ for each image [S1, unofficial].
+ 
+@@ -40,5 +40,5 @@
+ $$
+ 
+-with $T(t) = \exp\left(-\int_{t_n}^{t} \sigma(t') dt'\right)$ [S1, unofficial].
++with $T(t) = \exp\left(-\int_{t_n}^{t} \sigma(t') dt'\right)$ [S1, unofficial]. Here, $c(t)$ represents the outgoing radiance computed from the BRDF and illumination at sample $t$.
+ 
+ ### Optimization
+@@ -52,22 +52,27 @@
+ 
+ class NeuralVolumeDecomposition:
+-    def __init__(self, num_images, num_samples_per_ray=64, near=0.1, far=10.0):
++    def __init__(self, num_images, coarse_samples=64, fine_samples=128, near=0.1, far=10.0):
+         self.num_images = num_images
+-        self.num_samples = num_samples_per_ray
++        self.coarse_samples = coarse_samples
++        self.fine_samples = fine_samples
+         self.near = near
+         self.far = far
+-        # Neural Volume MLP: Input (x, d) -> Output material/density parameters
+-        self.mlp = nn.Sequential(
+-            nn.Linear(6, 256),
+-            nn.ReLU(),
+-            nn.Linear(256, 256),
+-            nn.ReLU(),
+-            nn.Linear(256, 11) # Output dimension depends on implementation [G]
++        # Coarse MLP: maps (x, d) to material/density parameters
++        self.coarse_mlp = nn.Sequential(
++            nn.Linear(6, 256), nn.ReLU(),
++            nn.Linear(256, 256), nn.ReLU(),
++            nn.Linear(256, 11)
++        )
++        # Fine MLP: refines sampling in high-density areas
++        self.fine_mlp = nn.Sequential(
++            nn.Linear(6, 256), nn.ReLU(),
++            nn.Linear(256, 256), nn.ReLU(),
++            nn.Linear(256, 11)
+         )
+         # Learnable per-image illumination latent vectors z_l in R^128
+         self.illumination_latents = nn.Parameter(torch.randn(num_images, 128))
+-        
+-    def sample_rays(self, origins, directions):
+-        t_vals = torch.linspace(self.near, self.far, self.num_samples, device=origins.device)
++
++    def sample_rays(self, origins, directions, num_samples):
++        t_vals = torch.linspace(self.near, self.far, num_samples, device=origins.device)
+         origins_exp = origins.unsqueeze(1)
+         dirs_exp = directions.unsqueeze(1)
+@@ -77,11 +82,10 @@
+         delta_inf = torch.tensor([self.far - t_vals[-1]], device=origins.device)
+         deltas = torch.cat([deltas, delta_inf], dim=0)
+-        deltas = deltas.unsqueeze(0).unsqueeze(0).expand(origins.shape[0], self.num_samples, 1)
++        deltas = deltas.unsqueeze(0).unsqueeze(0).expand(origins.shape[0], num_samples, 1)
+         return points, deltas
+ 
+-    def query_volume(self, points, directions):
++    def query_volume(self, points, directions, mlp):
+         inputs = torch.cat([points, directions], dim=-1)
+-        outputs = self.mlp(inputs)
+-        # Parse outputs according to implementation-specific layout [G]
++        outputs = mlp(inputs)
+         b_d = outputs[:, :, 0:3]
+         b_s = outputs[:, :, 3:6]
+@@ -92,31 +96,31 @@
+         return b_d, b_s, b_r, n, sigma
+ 
+-    def compute_radiance(self, b_d, b_s, b_r, n, directions, image_idx):
++    def render(self, origins, directions, image_idx):
++        # Stage 1: Coarse fixed sampling
++        coarse_points, coarse_deltas = self.sample_rays(origins, directions, self.coarse_samples)
++        _, _, _, _, coarse_sigma = self.query_volume(coarse_points, directions, self.coarse_mlp)
++        coarse_sigma = torch.clamp(coarse_sigma, min=0.0)
++
++        # Stage 2: Fine sampling (density-guided refinement [G])
++        fine_points, fine_deltas = self.sample_rays(origins, directions, self.fine_samples)
++        fine_b_d, fine_b_s, fine_b_r, fine_n, fine_sigma = self.query_volume(fine_points, directions, self.fine_mlp)
++        fine_sigma = torch.clamp(fine_sigma, min=0.0)
++
++        # Use fine samples for final composition
++        points = fine_points
++        deltas = fine_deltas
++        b_d, b_s, b_r, n, sigma = fine_b_d, fine_b_s, fine_b_r, fine_n, fine_sigma
++
++        # Compute outgoing radiance c(t) from BRDF and illumination
++        # The exact mapping from z_l to light directions/intensity uses pre-trained networks (neural-PIL, light-SMAE) [G]
+         z_l = self.illumination_latents[image_idx]
+-        z_l_exp = z_l.unsqueeze(1).expand(-1, self.num_samples, -1)
+-        # The exact mapping from z_l to incident illumination is handled by 
+-        # pre-trained networks (neural-PIL, light-SMAE) not detailed in the source [G].
+-        # Placeholder: L = BRDF(b_d, b_s, b_r, n, view_dir, light_from_z_l)
+-        L = torch.zeros_like(b_d) # Placeholder for BRDF integration [G]
+-        return L
++        c = torch.zeros_like(b_d)
+ 
+-    def render(self, origins, directions, image_idx):
+-        points, deltas = self.sample_rays(origins, directions)
+-        b_d, b_s, b_r, n, sigma = self.query_volume(points, directions)
+-        L = self.compute_radiance(b_d, b_s, b_r, n, directions, image_idx)
+-        alpha = 1.0 - torch.exp(-sigma * deltas.squeeze(-1))
+-        sigma_delta = sigma.squeeze(-1) * deltas.squeeze(-1)
+-        T = torch.exp(-torch.cumsum(sigma_delta, dim=1))
++        alpha = 1.0 - torch.exp(-sigma.squeeze(-1) * deltas.squeeze(-1))
++        T = torch.exp(-torch.cumsum(sigma.squeeze(-1) * deltas.squeeze(-1), dim=1))
+         T_shifted = torch.cat([torch.ones(origins.shape[0], 1, device=origins.device), T[:, :-1]], dim=1)
+-        weights = T_shifted * alpha
+-        weights = weights.unsqueeze(-1)
+-        rendered_color = torch.sum(weights * L, dim=1)
++        weights = T_shifted * alpha.unsqueeze(-1)
++        rendered_color = torch.sum(weights * c, dim=1)
+         return rendered_color
+-
+-    def loss_function(self, rendered, target, mask):
+-        masked_rendered = rendered * mask
+-        masked_target = target * mask
+-        loss = torch.mean((masked_rendered - masked_target) ** 2)
+-        return loss
+ ```
+ 
+@@ -128,15 +132,15 @@
+ 
+ ### Hierarchical Grid Optimization
+-Accelerates neural volume queries using a multi-resolution grid structure, reducing memory and computation compared to dense MLPs [1414-hierarchical-grid-optimization.md].
++Accelerates neural volume queries using a multi-resolution grid structure, reducing memory and computation compared to dense MLPs [1414-hierarchical-grid-optimization.md]. Details on integration with this method are not given in the sources.
+ 
+ ### 3D Gaussian Splatting
+-Represents scenes as explicit 3D Gaussians for faster rasterization, trading off the implicit neural volume representation for speed [1795-3d-gaussian-splatting.md].
++Represents scenes as explicit 3D Gaussians for faster rasterization, trading off the implicit neural volume representation for speed [1795-3d-gaussian-splatting.md]. Details on integration with this method are not given in the sources.
+ 
+ ### Neural Radiance Fields (NeRF)
+-The foundational coordinate-based MLP method for novel view synthesis, which Neural 3D Volume Decomposition extends by adding physical material parameters [4972-neural-radiance-fields.md].
++The foundational coordinate-based MLP method for novel view synthesis, which Neural 3D Volume Decomposition extends by adding physical material parameters [4972-neural-radiance-fields.md]. The method explicitly builds on NeRF's two-MLP architecture [S1, unofficial].
+ 
+ ## Operating characteristics
+-*   **Time Complexity:** Not given in the sources.
+-*   **Memory Complexity:** Not given in the sources.
++*   **Time Complexity:** Not given in the sources. [S1, unofficial]
++*   **Memory Complexity:** Not given in the sources. [S1, unofficial]
+ *   **Strengths:** Enables high-quality relighting and material-aware view synthesis. Can recover accurate shape and material properties from real-world datasets [S1, unofficial].
+ *   **Limitations:** Requires images captured under varying illumination conditions. Optimization is complex and may require pre-trained networks for stability [S1, unofficial].

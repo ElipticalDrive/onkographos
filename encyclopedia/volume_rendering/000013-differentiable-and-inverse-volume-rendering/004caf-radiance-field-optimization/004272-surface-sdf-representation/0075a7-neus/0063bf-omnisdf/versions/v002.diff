@@ -1,0 +1,132 @@
+--- v001.md
++++ v002.md
+@@ -43,82 +43,68 @@
+ **Pseudocode**
+ ```python
++def compute_normal(sdf_net, x, eps=1e-4):
++    """Compute surface normal as the gradient of the SDF using finite differences."""
++    grad = [0.0, 0.0, 0.0]
++    for i in range(3):
++        x_plus = list(x)
++        x_minus = list(x)
++        x_plus[i] += eps
++        x_minus[i] -= eps
++        grad[i] = (sdf_net.forward(x_plus)[0] - sdf_net.forward(x_minus)[0]) / (2 * eps)
++    norm = (grad[0]**2 + grad[1]**2 + grad[2]**2)**0.5
++    return [g/norm for g in grad] if norm > 0 else [0.0, 0.0, 1.0]
++
+ def omnisdf_render(ray_origin, ray_direction, binoctree, sdf_net, color_net):
+-    """
+-    Renders a single ray using the adaptive spherical binoctree.
+-    """
+-    # 1. Traverse binoctree to find intersecting sphoxels
+-    # Use breadth-first search to handle inconsistent child counts
++    """Renders a single ray using the adaptive spherical binoctree."""
+     intersecting_sphoxels = binoctree.bfs_traverse(ray_origin, ray_direction)
+-    
+-    # 2. Sort sphoxels by distance from ray origin
+     intersecting_sphoxels.sort(key=lambda s: s.r_min)
+-    
++
+     accumulated_color = [0.0, 0.0, 0.0]
+     accumulated_alpha = 0.0
+-    t_current = ray_origin.distance_to_origin() # or near plane
+-    
++    t_current = 0.0
++
+     for sphoxel in intersecting_sphoxels:
+-        # 3. Intersection test for sphoxel boundaries
+         t_enter, t_exit = sphoxel.intersect_ray(ray_origin, ray_direction)
+-        
+-        # 4. Sample points within the sphoxel
+-        # Number of samples depends on sphoxel size and desired resolution
++        if t_enter < t_current:
++            t_enter = t_current
++
+         num_samples = sphoxel.calculate_sample_count()
+-        t_samples = linspace(t_enter, t_exit, num_samples)
+-        
++        if num_samples <= 0:
++            continue
++        t_samples = [t_enter + i * (t_exit - t_enter) / (num_samples - 1) for i in range(num_samples)]
++
+         for t in t_samples:
+-            x = ray_origin + t * ray_direction
+-            
+-            # 5. Query SDF network
++            x = [ray_origin[i] + t * ray_direction[i] for i in range(3)]
++            delta = (t_exit - t_enter) / num_samples if num_samples > 1 else 0.0
++
+             d, zeta = sdf_net.forward(x)
+-            
+-            # 6. Compute normal from SDF gradient (finite difference or auto-diff)
+             n = compute_normal(sdf_net, x)
+-            
+-            # 7. Compute weight w(t) from SDF (unbiased, occlusion-aware)
+-            # Implementation detail: Wang et al.'s method [S1]
+-            w = compute_weight(d)
+-            
+-            # 8. Query Appearance network
++            w = sphoxel.compute_weight_from_sdf(d, delta)
+             c = color_net.forward(x, n, ray_direction, zeta)
+-            
+-            # 9. Volume rendering accumulation
+-            alpha = 1.0 - exp(-w) # Simplified opacity model based on weight
+-            accumulated_color += alpha * c * (1.0 - accumulated_alpha)
+-            accumulated_alpha += alpha * (1.0 - accumulated_alpha)
+-            
++
++            accumulated_color = [accumulated_color[i] + w * c[i] * (1.0 - accumulated_alpha) for i in range(3)]
++            accumulated_alpha += w * (1.0 - accumulated_alpha)
++
+             if accumulated_alpha > 0.99:
+                 break
+-                
++        t_current = t_exit
++        if accumulated_alpha > 0.99:
++            break
++
+     return accumulated_color
+ 
+-def omnisdf_train(video_frames, binoctree, sdf_net, color_net):
+-    """
+-    Main training loop with adaptive binoctree subdivision.
+-    """
+-    # Preprocessing: Initialize binoctree from pre-trained depth estimates
++def omnisdf_train(video_frames, binoctree, sdf_net, color_net, num_epochs=1000):
++    """Main training loop with adaptive binoctree subdivision."""
+     binoctree.initialize_from_depth(video_frames)
+-    
++
+     for epoch in range(num_epochs):
+         for frame in video_frames:
+-            # Get camera pose for the frame
+-            pose = get_pose(frame)
+-            
++            pose = frame.get_pose()
+             for ray in frame.rays:
+-                # Render the ray
+                 rendered_color = omnisdf_render(ray.origin, ray.direction, binoctree, sdf_net, color_net)
+                 target_color = frame.pixel_color
+-                
+-                # Compute loss
+-                loss = mse(rendered_color, target_color)
+-                
+-                # Backpropagate to update networks
++                loss = sum((rendered_color[i] - target_color[i])**2 for i in range(3)) / 3.0
+                 loss.backward()
+-                
+-            # Adaptive Subdivision Step
+-            # Subdivide leaf nodes based on optimization depth and accuracy
+             binoctree.adaptive_subdivide(sdf_net)
+-            
+-            # Clear gradients
+             sdf_net.zero_grad()
+             color_net.zero_grad()
+@@ -128,5 +114,5 @@
+ *   **Sphoxel Elongation:** The binoctree must use binary subdivision in the radial direction to prevent sphoxels from becoming excessively elongated at large radii [S1].
+ *   **Uneven Shapes:** Standard ray-sphere or ray-box intersection tests may fail; a custom intersection test is required to accommodate the irregular shapes of sphoxels in the binoctree [S1].
+-*   **Initial Depth Errors:** Unlike fixed TSDF fusion methods, OmniSDF can refine incorrect initial depth estimates because it uses a neural implicit function [S1]. However, poor initial estimates may slow convergence [S1].
++*   **Initial Depth Errors:** Unlike fixed TSDF fusion methods, OmniSDF can refine incorrect initial depth estimates because it uses a neural implicit function [S1].
+ *   **Narrow Baseline:** The method is specifically designed for small circular sweep baselines where ray crossings are difficult to find; it may not be optimal for large baseline stereo setups [S1].
+ 

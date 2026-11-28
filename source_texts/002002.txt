@@ -1,0 +1,449 @@
+Just a blog
+
+dickyjim – Just a blog
+The first time you look at some compute code, you need to work out what each thread is going to do. Since everything is driven from the system IDs passed to the entry point, you need to know what each one means. Then later when you’re writing your own compute code, you need to remember the names and values of those system IDs. And every time I need to open the ID3D11DeviceContext::Dispatch() page to get the pretty/confusing diagram, and then I’m still challenged to work out the one I need. Not any more! Here’s what you need based on what you’re doing:
+1D Processing
+Use uint SV_DispatchThreadID/S_DISPATCH_THREAD_ID to index an element in 1D array.
+Use uint SV_GroupIndex/S_GROUP_INDEX (and SV_GroupThreadID/S_GROUP_THREAD_ID in the 1D case) to index within the group – maybe not for sharing between threads, but you could use LDS as a per-thread value cache.
+Use uint SV_GroupID/S_GROUP_ID to know which group of 64 you’re in – if you wanted to do a reduction.
+For example, assume we have N elements to process. We’ll handle 64¹ at a time with thread groups defined as numthreads(64,1,1), requiring a group count of (N+63)/64 and a dispatch(groupCount, 1, 1). Here is a visual concept of what that means:
+2D Processing
+Use uint SV_GroupIndex/S_GROUP_INDEX to index linearly within the group for LDS access.
+Use uint2 SV_GroupThreadID/S_GROUP_THREAD_ID to index the pixel in the tile.
+Use uint2 SV_DispatchThreadID/S_DISPATCH_THREAD_ID to index pixel/texel.
+Use uint2 SV_GroupID/S_GROUP_ID to index a matching tile in metadata (assuming 8×8).
+In this case we’ll consider a case of a 2D array of dimensions W by H. These will be split into 8×8 tiles with numthreads(8,8,1) mean we have (W+7)/8 tiles in X and (H+7)/8 tiles in Y and will be starting the shader with dispatch(tilesX, tilesY, 1). In the case of a 16×16 array (or 2×2 tiles), we get these values:
+Something to note
+One thing to know is that the only values that need to be passed to your shader are SV_GroupID/S_GROUP_ID and SV_GroupThreadID/S_GROUP_THREAD_ID. The other values are calculated based on these combined with the values from numthreads:
+```
+SV_DispatchThreadID = SV_GroupID * numthreads
+                    + SV_GroupThreadID;
+
+SV_GroupIndex = SV_GroupThreadID.z*numthreads.x*numthreads.y
+              + SV_GroupThreadID.y*numthreads.x
+              + SV_GroupThreadID.x;
+```
+This means there are implicit multiply-adds to calculate these values and on some platforms we can shave a few cycles by manually calculating them and using the 24bit versions of the multiplies rather than the full 32bit that the compiler may select. The minor problem with this is that you need to duplicate the numthreads values into the handwritten version (assuming you have less than 16M (2^24) odd threads). Check your assembly!
+¹ 64 – it’s always going to be 64!
+I’m a huge fan of my Vita for gaming and remote play on my PS4 – most likely due to my trophy hunter/gatherer nature. Every couple of months, a great title appears on PlayStation®Plus for Vita and then you go to grab it fresh from the store as soon as you can. However, this isn’t always as simple as you’d hope – this month I had to try a bunch of things before I could download Titan Souls.
+Here’s a set of steps you should take once you enter the store.
+Open the PlayStation®Plus section. If the game is there, cracking job! Start the download! If it’s not there, go straight to step 2:
+Try the Search box (top right). Give it a word from the title of the game and let it go find it. Beware that the title may be quite a way down the list of results. If that doesn’t work:
+For Plan C, you need to “purchase” the title elsewhere. You can do this on the PS Store website or on another PlayStation device, such as your PS4 if the title was cross-buy – it may even already be in the PS Plus section of the PS4 Store! Once purchased, you can go back to the PS Store application on your Vita and go to the Download List (lower right under the ellipsis) and near the top of the list should be your recent “purchase”, ready for you to download.
+If option 3 doesn’t work, it might just be a simple mistake – if it was really meant to be, it may appear by the end of the month – Titan Souls has now appeared on the PS Vita Store.
+How many cats have you skinned?
+Chances are, as a graphics programmer, you’ve spent some time implementing some engine and shader code that does vertex skinning. I don’t mean anything clever, none of your dual or more quaternion methods, just a bunch of weighted matrix * vertex transforms indexing some kind of palette. Like many “simple” graphics tasks, writing skinning from scratch is one of those things that despite its simplicity, is a complete bug factory – see also, writing a GL application from scratch, rendering offscreen the right way up, etc.
+In the spirit of OpenGL: Why Is Your Code Producing a Black Window?, I thought it would be good to make a list of possible mistakes and how to recognize them. Even though you may have implemented it before, it’s possible with all of this spare compute power, that you may be re-implementing it again soon.
+Personally I don’t think these kinds of mistakes are a sign of a bad graphics programmer – I’m sure it happens to the best. However, I think how you approach investigating the bug and how quickly you are able to fix the mistake is more indicative of experience with the GPU tools available and problem solving. I’d even say that it could make a good interview test (if you’re inclined to do those things) – something like “@InternDept is stuck implementing their own skinning – can you help them?” and before breaking out the tools, you could even show pictures of what the result currently looks like and have the interviewee guess.
+The stages of grief skinning
+If you’re implementing skinning incrementally, I’d expect you to go through the following stages:
+1) In the beginning, you just pass through the bind pose vertex positions. This sounds easy and you’re not likely to cock up the shader code, but this is where you start checking your bindings and make sure your input and output buffers are pointing in the right places. However, if/when you mess this part up, the rendering result can easily be:
+Nothing
+Forgot to set up the input buffer.
+Reading/writing float rather than float3.
+In compute, reading from or writing to ByteAddressBuffers and forgetting they take/give ints and you’ve introduced an implicit cast.
+2) Next, you move to indexing and weighting against an identity palette. This is the best place to hide fails since all those identity matrices will give you back whatever you put in unless you see:
+Shrunken skin
+Your weights don’t add to 1.0.
+Explodey skin
+Your indices index outside of your palette.
+A unit volume of noise
+Reading weights instead of vertex positions.
+A non-unit pile of noise
+Reading indices converted to floats instead of vertex positions.
+Small ball of noise with spikes
+Reading the palette instead of vertex positions.
+Half a skin with an explodey component
+1/4 size palette when you pass matrices as float4s and the matrix count as the float4 count.
+Nothing
+Reading indices with int data reinterpreted as floats.
+Zeros and not identity matrices in your palette.
+Zero sized palette.
+3) Then you generate some real animation output and use it to populate your matrix palette. This is where you get what I believe is the most common skinning fail:
+John Carpenter’s The Thing (another classic example at igetyourfail)
+A classic image that typically means that you’ve missed a transpose/mixed up the matrix-vector multiply order.
+A similar effect comes from reskinning the skinned data – possible if you have compute skinning feeding the skinning vertex shader path.
+A bat like monstrosity
+This can happen when mismatching indices and weights, e.g. using weight[i] with index[N-i] – possibly due to the endianness of your packing. Similar to The Thing, but typically features like fingers are extruded when skinned by the wrong bones.
+Not animated
+Are you still writing the input vertex positions direct to the output, or not actually using the palette?
+Skin at wrong location
+Palette includes the world transform and so does the shader after skinning – double world transform.
+If packing indices as bytes in a 32 bit value, you could find you completely cobbled the decode of the indices – did you mask the index out of the indices or just mask the index to zero?
+Nothing
+Same as previous, but the output has moved offscreen – look around!
+Your palette is full of rubbish.
+4) Once you’re happily animating, you want to get the rest of the lighting inputs so you want to skin the normals and maybe some bitangents. At this point you might see:
+Black sphere of noise
+Overwrote the input/output vertex positions with either the normals or bitangents.
+Correct mesh with lighting craziness
+Transformed the normals or bitangents with a W of 1.0, since you copied from the vertex positions.
+Used the vertex positions for the normals or bitangents – either bound the wrong view or reading everything from the vertex position view.
+The point of all this is that you should be able to check everything here in a few minutes with the great graphics debugging tools we have available – praise be to Razor and RenderDoc!
+Hello again.
+Well it’s been a while. Two and a half years to be almost exact.
+As you may have noticed, SIE (yeah, we changed the name – how’s that for you), has several exciting new products (PSVR and PS4(TM) Pro) coming out and they’ve been somewhat consuming of my development time. Meanwhile home time has been mostly taken up with kids; two of them now, one just having turned 2 years old and being too much fun to spend time on much else.
+My original plan was to write a post a month. That means I’m about 30 posts behind now. Guess I’d better get on with it.
+In an era of PS Plus, Humble Bundles, GOG.com and Steam sales, the backlog of games is ever growing (as I’ve mentioned before) and it’s very possible that there’s treasure hidden in that pile. Yahtzee’s remark (in his Broken Age review) about Driver being a game he wouldn’t have played if it had been forced on him, made me think about some of the great games I’ve found in unexpected places, such as Renegade Ops, Limbo and Thomas Was Alone. My plan for February was to play one new game a day.
+(One thing to note; February was possibly one of the best months to run this experiment due to the quality of the PS Vita line up!)
+The Games
+1) Saint’s Row IV (PS3) – A Christmas present put on hold by the release of the PS4. Having only experienced the 3rd of the series that I loved every minute of, I followed all of the press for this and couldn’t wait any longer. As games go, I think of Saints Row as the fun cousin of GTA, emphasising fun over authenticity, without losing any quality in the story. I played this all the way through to the end, and I’ll work my way through the DLC when I get through the other games.
+2) OlliOlli (PSVita) – OlliOlli is something I first saw a long time ago and it immediately reminded me of the wonder of playing Tony Hawk on the GBA. The game itself has an initial learning bump, mostly due to the controls, that you overcome to run through all of the levels. Each level takes a couple of tries before you complete it (at least on the easiest setting), and with enough challenges on each level to give you some reason go back and keep retrying. The challenge mechanic means that you don’t feel like you’re grinding (sorry – I didn’t want to use that word but I couldn’t think of an alternative) but rather you just keep trying and retrying.
+3) Skulls of the Shogun (iPad) – I downloaded this on a weekend when it was £0 with no idea what it actually was and it’s been the untouched icon next to my daily Tapped Out on the iPad since then. A turn-based strategy involving moving your little guys to a location they can hit the enemy and then doing some hitting. Once I started playing, I quickly came to the conclusion that this game wasn’t for me. I’m not a big fan of the anxiety that comes from a little guy riding into the range of the enemy, giving them half a whack and then waiting for the return hit to knock them dead.
+4) Tiny Death Star (Nexus 10) – Something that’s been sitting on my Android tablet for a while. It definitely drops you in without too much background or tutorial, but the fundamentals are easy to pick up. Initially I thought it was something I’d go back to from time-to-time (read daily) but the grind of running a lift to new floors eventually got to me to the point where I removed it for good.
+5) Monster Hotel – A PlayStation Mobile freebie. Possibly a bit of duplication after Tiny Death Star, but micro managing monsters was definitely more annoying than lifting people to each floor. A well executed plan let down by the scrolling often overshooting the target, especially while carrying a monster to a new destination, and the overlapping thought bubbles complicating knowing what each monster wants.
+6) Rock Boshers DX – Another PlayStation Mobile freebie. This gets bonus points for the Spectrum style loading and the 8-bitness of the whole deal. Overall, not a bad game with a proper retro feel; simple controls, escalating difficulty and living on a knife edge defined by the collision detection.
+7) Bike Rider DX (PS Vita) – And another PlayStation Mobile freebie. A great start to an idea for a game, but I think the missing component was any form of pressure or fear of loss. I think this could become a much stronger game if the challenge was increased or if you lost more when you died.
+8) Quiet Please (PS Vita) – The last of the PlayStation Mobile freebies I played and I’m glad I left it until last. A classic “adventure” style game where you have to silence all the noises in and around the house by finding and using items scattered about. Simple pixel graphics mixed with a difficult to define charm make this one of the gems I was hoping to find. I did get stuck on the first playthrough, but stubbornly I gave it another go, believing I’d just get stuck again and managed to finish it. Really worth a go, especially for the charisma of the little brother, and something I’d love to share with more casual gamers as an entry level adventure game.
+9) Crazy Market (PS Vita) – A F2P game I grabbed from the PS Store a while back but didn’t try. Basically you get the chance to be a check out operator (although I have strong ranty feelings about the self-service tills that are appearing in stores) and you have to scan products, type product codes and return dogs and babies to their owners/parents. The game fits the classic F2P mould with an in-game coin based currency, boosts you can buy, and a limited number of lives that refresh (30 minutes per life to a maximum of 3) to limit your playing without extra spend. I actually found the game to be quite enjoyable and it fitted in at the time when I only had time to play during tea breaks amidst swathes of DIY.
+10) Flappy Bird (iPad) – Based on a tweet from Tim Moss, and a background buzz of mentions at that time in the month, I thought I’d give Flappy Bird a try. The most accurate description I’ve heard is “crushing”. I got a high score of 3 after 10 goes, then deleted it. In the days following that, it really become a burning topic in the game industry, but I’d already left it behind.
+11) QWOP (Nexus 10) – I first saw this in a GDC Experimental Games Workshop session and thought how hard could it be!? Then it popped up in a Android Humble Bundle and I thought I’d grab it and give it a go (try the online version here). It’s basically a game where you control a runners thighs and calves by using the Q, W, O and P keys to race along – I was already wondering how the control scheme would move from keys to screen? The fact is, the original was damn hard but still quite hilarious to play and the Android port is a much more polished but just as devilish version. Using the touchscreen to control the legs means it’s much more challenging on a tablet than a phone, just due to the reach for your thumbs. And I’m awful at it. I got better with practice, but better means getting 4 metres along rather than 1 – I’m unlikely to complete the 100 metres and very unlikely to ever be ready for the hurdles.
+12) Rage HD (iPad) – A freebie downloaded long ago and left unplayed, but considered for deletion every time I need to find some space on the iPad. A simple on rails shooter, the gameplay is mostly smooth and easy to pick up. Having played the PS3 version, the visuals match my memory and despite the on rails nature, I found it a really enjoyable game. The money scoring mechanic initially confused me, as I expected an end of level shop to upgrade my weapons, but it’s just a score. And I really want better guns.
+13) Surge Deluxe (PS Vita) – A colourful join the dots game with a lot of pressure. One of the few games I can think of that I’ve bought based on the studio’s previous work, without it being the next in the series. Quite good fun, but the music reminded me of Velocity, while I’m still awaiting the arrival of Velocity 2X.
+14) TxK (PS Vita) – The definitive version of the Tempest games from Jeff Minter, heavily hyped and with a cult following even before launch. I’d only played Llamatron on the Amiga before, and I think it was before my time. I think it was the Genesis blog post that really got me interested. My initial play sucked until I trained my left thumb to only go left and right, but I still had issues on following the path on levels where the lines overlap. (The beginner’s guide also helps!) One of the features I love is the Restart Best option where the game tracks your best ever life count at the start of the level so you can start anywhere you’ve already played and play on, and if it’s too hard, skip back a few levels and then play it forward, trying not to die even more than usual, so that you have more lives on your future retries.
+15) Ben there, Dan that (Steam) – I discovered Dan Marshall’s Gibbage blog almost 2 years ago and I’ve been following @danthat on Twitter ever since. I like his style of comedy and I’ve wanted to try his adventure games for a long time. With regular price drops on Steam, I thought I’d try Ben there, Dan that. During the first full scene in the apartment I laughed out loud 3 times which is a rarity in most games. As with most adventure games, there’s still a lot left to do on this one.
+16) Dead Nation (PS3) – A Housemarque classic that was frequently mentioned in a lot of the press around Resogun, and which I’d put to one side (my PS3 says I downloaded it in 2011). However the Trophy Advisor on psnprofiles.com highlighted that there were quite a few of the easier trophies available there. That said, I started on the Grim setting and found an incredibly difficult game that felt very tense while still initially achievable. It feels different to my previous experiences with Housemarque games like Super Stardust and Resogun, since they’re more classic shooters that you restart from the start, whereas Dead Nation is a more linear experience where you continue from your furthest point.
+17) Skylanders Swapforce (PS4) – I considered this as a Christmas present for my 5 year old son, versus the similarly toy oriented Disney Infinity, but I skipped both due to the cost. However a recent price drop at one toy store gave me a second chance. The PS4 version is non-stop gorgeous and at the start I thought it a bit too easy but since then the complexity level has massively increased and the increasing number of battle arenas is taking its toll on the small army of figures I also bought, since you need a new character when one dies off. I think we’ll be playing this for a long time yet.
+18) Uplink (Steam) – From the Introversion Humble Bundle. I’ve been a long time follower of Introversions development, most recently Prison Architect, and when the Humble Bundle appeared, there was no need to think. Uplink was the first game that I unlocked on my Steam account that has remained dormant since HalfLife 2. An interesting hacking game, starting slightly complicated on the laptop due to high resolution and low mouse speed, but after a while I managed to start getting the hang of it. This is one that I think would play even better on a tablet, which is great because there’s an Android (which I also have via a Humble Bundle – yay) and iOS version – one for the plane on the way to GDC.
+19) Threes! (iPad) – This one suggested by Alex Evans on twitter (@mmalex) and further pushed by the wonderful gameplay gif (as seen here at toucharcade.com). A simple concept, well presented but I’ve not yet learnt the trick. I’m averaging a score of 1000 per go, which I was quite proud to maintain, but having seen @kazhiraiceo, a parody twitter account, scoring 67,000, leads me to believe I can do a lot better.
+20) Antichamber (Steam) – Included in the Humble Bundle (#11) that overlapped this month of trying games. Antichamber was something I’d previously seen but didn’t quite understand when I first saw it. It’s a long time since I played an FPS with mouse and keyboard so it took a few minutes to get back into it, and straight away I was dropped into a surreal black and white world with flashes of over-saturated colour. The puzzles are engaging and each is telegraphed in a different way with a clue somewhere nearby. The mapping and logo system help give a sense of the level of completion but the counting down timer means that you feel you need to keep moving forwards and exploring new places.
+21) Space Marine (PS3) – Big white guy running around with big guns shooting big orks? I’d heard this was a bit of an unexpected gem which is why I chose it from my PS Plus backlog. There’s a lot of elements that hark back to the Warhammer universe in the characters and races, dialogue and details. The environments are full of all of these amongst the epic scenery. There’s a couple of minor negative things, like a big flashing save indicator prior to every large encounter, and the clunkiness of a character in a space suit that looks heavier than a family car. Overall though, it felt like a futuristic God of War depending a little more on guns than melee, and I continued playing until I completed it.
+22) The Room (Nexus 10) – From one of the Humble Mobile Bundles. I managed to get through the first box while making and drinking a cup of tea, before getting pretty quickly stuck on the next one. A very beautiful game with incredible detail, but somewhat infuriating when you hit a brick wall.
+23) Fuel Tiracas (PSVita) – One of the free PSM games from last year that I must have overlooked. It’s a simple tap-the-right-place-at-the-right-time-to-fill-the-gauges game, very well polished with a well designed difficulty scale. This was great fun until I hit my natural speed limit and it felt like I was fighting just to stand still.
+24) Shadow Blade (iPad) – I think this was another Tim Moss recommendation. The gameplay is quite fluid as long as you can keep the ninja moving, which I found challenging, yet again due to the distance from the edge of the screen of the iPad case that my thumbs had to travel. I gave it half an hour, cleared the first section, but quickly lost interest when it got overly complex due to the controls.
+25) Dead Trigger 2 (iPad) – This was at the forefront of the store when I was browsing through for ideas and I thought since I’d missed the first, and it was used as a poster child for rendering quality, I’d give it a go. I had more thumb on iPad issues, although the controls are quite simple, if a little sensitive. The gameplay is kind of fun, but I spent too much time twitching and looking at the floor or ceiling.
+26) Device 6 (iPad) – The third in a row of games from the same engine, but a very different proposition. With an intro similar to a British 60’s TV show, the style is established early. I don’t want to give too many spoilers since it’s a game about discovery, but it’s a new way to approach an adventure game. I’m definitely going to go back to this, but next time, with a piece of paper by my side for my notes.
+27) Battle of Puppets (PS Vita) – A PlayStation Mobile title that I grabbed based on this blog post. A simple opera-inspired strategy game where you build attackers for your army and they march directly towards the enemy, scrapping with anyone they meet on the way. Once I found enemy archers stall the motion of whoever they hit, I pretty much ruined the game for myself by just using archer rushes.
+28) Gunhouse (PS Vita) – Another PS Mobile title grabbed based on a blog post. And like Battle of Puppets, there’s a very strongly defined art style. For the first few attempts , the tile matching game was confusing – it’s nothing like the Tetris or Match-3 games that my brain is wired for, but it’s really enjoyable ending up with weapons that you can use to assault the approaching attackers, before getting another go.
+So what did I learn?
+Well first, I did manage to find some gems; something new, OlliOlli, something very old, Ben there, Dan that and something unexpected, Quiet Please.
+I also discovered that thumb based tablet gaming mostly aggravates me, mostly due to the lack of control feedback. I’ve been a big Vita fan and the fact is, I’ve always preferred playing with a controller. This has lead me to look at stand alone Android controllers or possibly a NVIDIA SHIELD™ as a future option.
+I also know there’s still more games I’ve heard about that I want to try: FTL, Papers Please, Gone Home, Brothers – so maybe I’ll give this a go another month later this year.
+Following on Adding Precompiled Headers to vs-android
+No plan of operations extends with certainty beyond the first encounter with the enemy’s main strength – Helmuth von Moltke the Elder
+With my PCH-support hammer in hand, I went to find anything I could that uses a PCH. With this further testing I managed to uncover a few more issues that really need to be resolved before support for PCHs could be considered for adding to vs-android.
+Missing Directory Fail
+The first thing I found was that if the PCH output directory (remember that we put all the different PCH outputs in one directory for GCC to check) was missing, the build would fail at the PCH creation stage. To handle this, we need to add a new MSBuild target before the ClCompile target that performs the PCH and C/C++ compilation. For this target we need to make a list of all of the possible output directory names for PCH files and then invoke the Makedir task to create the directories. In MSBuild language, you need to add this to the Microsoft.Cpp.Android.targets* file:
+```
+<Target Name="CreatePCHDirs"
+ BeforeTargets="ClCompile"
+ DependsOnTargets="SelectClCompile">
+   <ItemGroup>
+     <GchDirsToMake Include="%(ClCompile.Identity).gch\" Condition="'%(ClCompile.CompileAs)' == 'CompileAsCHeader' or '%(ClCompile.CompileAs)' == 'CompileAsCppHeader'"/>
+   </ItemGroup>
+   <Makedir Directories="@(GchDirsToMake->DirectoryName()->Distinct())" />
+ </Target>
+```
+Gotta Link ’em All
+One other issue I found after applying PCH support to all the libraries I could find, when I updated an application to build with a PCH. This then failed to build when the linker thought it should helpfully link in the PCH output, and then fail. Looking at the log, I found there’s a LinkCompiled property of ClCompile elements which we could clear to tell the linker we don’t want it. To do this, go back to the Microsoft.Cpp.Android.targets* file, and after the ObjectFileName override from last time, add the following in the same group of elements:
+```
+ <LinkCompiled Condition="'%(ClCompile.CompileAs)' == 'CompileAsCHeader' or '%(ClCompile.CompileAs)' == 'CompileAsCppHeader'">false</LinkCompiled>
+```
+Are we done yet?
+Hopefully so. I’m much happier with this and it now works with everything that I could apply it to.
+*Note again that there’s 2 copies of each file once vs-android has been deployed – one under C:\Program Files (x86)\MSBuild\Microsoft.Cpp\v4.0\Platforms\Android\ (for VS 2010) and the other under C:\Program Files (x86)\MSBuild\Microsoft.Cpp\v4.0\V110\Platforms\Android\ (for VS 2012). You can make these changes prior to deployment, but that’s harder to test.
+I love vs-android – a Visual Studio extension that allows you to develop for Android from the comfort of VS.
+Out of the box it works really well and you can start deploying to your own device from the beginning. In fact there’s very few things wrong with it. However when you’re talking about building something big, the build times can really mount up. There’s 2 options here:
+Multithreaded compile. Basically running a separate instance of the compiler for each source file in parallel, rather than serially processing files.
+Precompiled headers. A standard way of processing a common header file ahead of time, that amortizes the cost of preprocessing the header over all the sources that use it.
+Both of these issues already have suggested implementations, but the multithreading fix is an involved set of changes to the C# code that manages the building and has already been accepted by the vs-android developer for a later fix. However the suggested PCH fix involves quite a few project file changes, whereas I’d expect it to be something to be handled by vs-android with minimum effort for the user.
+Precompiled Headers
+Precompiled headers are really easy to use with GCC. Basically precompile the header and then the compiler will go looking for the precompiled version before the actual header. All we need to do is mark up the header as needing precompilation. To do this we add a new file type to Props\android_gcc_compile.xml* Basically scroll down to the EnumProperty element for the CompileAs type and add the following values:
+```
+<!-- Advanced -->
+<EnumProperty Name="CompileAs" DisplayName="Compile As" Category="Advanced">
+...
+<EnumValue Name="CompileAsCHeader" DisplayName="Compile as C Compiled Header" Switch="x c-header">
+</EnumValue>
+<EnumValue Name="CompileAsCppHeader" DisplayName="Compile as C++ Compiled Header" Switch="x c++-header">
+</EnumValue>
+```
+Once that’s added you can open the Properties window in Visual Studio for the precompiled header and change the Compile As setting as needed.
+The next step is to tell the GCC compiler to compile the files with this markup before all of the other files. The compilation is handled by the GCCCompile element in Microsoft.Cpp.Android.targets* We need to duplicate what’s there and predicate the first one to only build headers, then the second to build everything else. To do this for C++ headers, we need to duplicate the <GCCCompile> block and change the header on one to:
+```
+<GCCCompile Condition="'%(ClCompile.ExcludedFromBuild)'!='true' and '%(ClCompile.CompileAs)'=='CompileAsCppHeader'"
+```
+and the header on the other <GCCCompile> block to have !=’CompileAsCppHeader’. This change precompiles the header to the intermediate directory which isn’t one of the places that GCC will search, so this needs redirection.
+The last step is to redirect the output for these header files to somewhere for GCC to find them. This means modifying Microsoft.Cpp.Android.targets* again to override the default output file name for the precompiled files.
+```
+<ObjectFileName Condition="('%(ClCompile.CompileAs)' == 'CompileAsCppHeader')">%(Identity).gch\$(ProjectName)_$(PlatformName)_$(ConfigurationName)%(Extension).gch</ObjectFileName>
+```
+There’s some important features of this output filename based on the GCC support for Precompiled Headers:
+The file is output to a subdirectory with the same name as the PCH plus the .gch suffix. This is supported by GCC to allow searching through multiple possible PCH outputs. See the “If you need to precompile the same header file for different languages…” paragraph in the GCC documentation.
+The output file has a name that incorporates the ConfigurationName property to ensure that you have a unique version per configuration as well as the PlatformName property to avoid conflicts with gch files from other platforms.
+With all of these changes in place, a clean and build should have improved your build time. I’ve seen halving of build times already!
+What’s Next?
+I’ve already passed this on to Gavin Pugh who maintains the vs-android project so hopefully it should appear in a future version.
+There’s also the question of Clang, which handles precompiled headers differently. The creation of the precompiled output is the same, but the compiler won’t use the precompiled version unless you explicitly pass it on the command line, which needs some extra more complex modifications.
+(Updated 15/01/2014 – make sure you also check out Adding Precompiled Headers to vs-android – Part 2)
+*Note that there’s 2 copies of each file once vs-android has been deployed – one under C:\Program Files (x86)\MSBuild\Microsoft.Cpp\v4.0\Platforms\Android\ (for VS 2010) and the other under C:\Program Files (x86)\MSBuild\Microsoft.Cpp\v4.0\V110\Platforms\Android\ (for VS 2012). You can make these changes prior to deployment, but that’s harder test.
+Almost exactly 10 years ago, at a global SCE R&D meeting following the SIGGRAPH graphics conference, the decision was made to start to work on a graphics engine for PlayStation 3.
+In the beginning
+Initially codenamed Pootle, the aim was to provide a graphics engine for the upcoming PlayStation 3 with the intention of being used as both an engine for games development and a technical reference for future PlayStation 3 developers. Research began in SCEI’s European R&D team on the best ways to take advantage of the platform’s unique features such as the Synergistic Processing Units (SPUs – blindingly fast processors that need to be well treated to obtain maximum performance).
+From the start there were several goals for the project:
+It would be given away for free to all licensed PlayStation 3 developers to ensure all developers could access it.
+It would be provided as source to allow developers to see how it works for research and debugging, taking any parts they need, or adding new functionality.
+It would be cross-platform, at least in terms of licensing, so that developers could use it without having to exclusively target PlayStation 3 (to this day developers are still surprised we allow this).
+To allow this last feature, the source was written to support multiple platforms including PC. Providing support for PC also meant that developers could use familiar PC tools to get started, transitioning to PlayStation specific tools to further tailor their title to the platform. Later we also decided to include ‘game templates’, more fully featured example code, representative of particular game genres, with all of the artwork included to show how it’s done.
+Introduced to the world
+PhyreEngine was first shown to the larger world at the 2006 Develop conference in Brighton, at that stage referred to as “PSSG”, named in line with other SDK components, where I presented the development process of one of our game templates to an audience mostly populated with the PhyreEngine faithful.
+It next surfaced at Games Developer Conference (GDC) (slides), where we re-launched the engine with a new, more memorable name and a lot of enhancements. PhyreEngine took PSSG and extended it from a graphics engine to a game engine by adding common gameplay features such as physics, audio, and terrain. This coincided nicely with Chris Eden’s presentation “Making Games for the PlayStation Network” combining the low cost of PlayStation 3 debug kits with the free code and examples that you need to get started writing a game.
+The following year, PhyreEngine returned to GDC to announce PhyreEngine 2.4.0. This was the first time we were able to gather a long list of very happy PhyreEngine users to share their experiences using PhyreEngine. Along with the developers directly using PhyreEngine for their titles, we also heard from CTOs that used PhyreEngine for reference. This was highlighted in Matt’s Swoboda’s talk “Deferred Lighting and Post Processing on PlayStation 3” showing advanced research on the use of the SPUs to accelerate post processing techniques – techniques which are now the back-bone of many other rendering engines.
+New platforms
+2010 saw the release of PhyreEngine for PSP, bringing the engine to PSP based on interest from the PSP development community. Matt came back to GDC in 2011 to introduce PhyreEngine 3.0. This newer version was better designed for modern multicore architectures, focusing on PS Vita and laying the ground-work for PlayStation 4, while taking the best parts of PlayStation 3 support from PhyreEngine 2. The presentation also dived deeply into some of the new technology and showed our latest game template, an indoor game using the new navigation and AI scripting features and showing rendering techniques that allowed us to reproduce the same beautiful image on PlayStation 3 and Vita.
+At the 2013 GDC this March we announced PhyreEngine 3.5. This was the third release of PhyreEngine 3 to support PlayStation 4 and our cross-platform approach meant that any developers already using PhyreEngine 3 on PlayStation 3 or PS Vita could take their title to PlayStation 4 with minimal changes. We were lucky to have worked in collaboration with other SDK teams to be able to provide feedback and develop early versions of PhyreEngine that could be used by other developers with early access to the platform.
+We’ve also been working the the PS.First team to provide PhyreEngine to universities and academic groups. This is a video from Birmingham University’s GamerCamp from this last year using PhyreEngine.
+The numbers so far
+At the time of writing, PhyreEngine has been used in at least 130 games released on PlayStation consoles alone. I say “at least” because the PhyreEngine license is very liberal, and developers don’t even have to tell us they’re using it, let alone include a credit. These 130 titles come from at least 58 different studios and more than 11 of those studios have released 4 or more games. There’s also a fair split between retail and digital with 61% of titles being digital-only. This also does not include any titles from developers who have taken advantage of our open approach, and utilised components of PhyreEngine in their own engines. These games cover a wide range of genre and platform (indeed, many of the titles appear on multiple platforms), and we’re proud of the tiny role we’ve had in each and every one of them.
+The future
+PhyreEngine provided support for PS4 with one of the earliest pre-release SDKs so that it was able to form the graphical base for the IDU (interactive display unit) software that will be used around the world in shops to showcase launch games, as well as at least six games being released during the initial launch window. One already announced is Secret Ponchos from Switchblade Monkeys – hopefully we’ll be able to introduce more of them sometime soon! We currently estimate 50 titles in development too so we expect to be busy for quite a while.
+Thanks
+We’d like to thank our developer community for all the great games they’ve made with PhyreEngine over the years, and we hope to see many more in the future. You guys are awesome – and probably a little bit crazy – and we love you all.
+This year HPG took place in Anaheim on July 19th-21st, collocating and running just prior to SIGGRAPH. The program is here.
+Friday July 19
+Advanced Rasterization
+Moderator: Charles Loop, Microsoft Research
+Theory and Analysis of Higher-Order Motion Blur Rasterization Site Slides
+Carl Johan Gribel, Lund University; Jacob Munkberg, Intel Corporation; Jon Hasselgren, Intel Corporation; Tomas Akenine-Möller, Lund University/Intel Corporation
+The conference started with a return to Intel’s work on Higher Order Rasterization. The presentation highlighted that motion is typically curved rather than linear and is therefore better represented by quadratics. The next part showed how to change the common types of traversal to handle this curved motion. The presenter demonstrated Interval and Tile based methods and how to extend them to handle quadratic motion. This section introduced Subdividable Linear Efficient Function Enclosures (SLEFES) which I’d not heard of before. SLEFES allows you to give tighter bounds on a function over an interval which are better than the convex hull of control points that you’d typically use – definitely something to look at later.
+PixelPie: Maximal Poisson-disk Sampling with Rasterization Paper Slides (should be)
+Cheuk Yiu Ip, University of Maryland, College Park; M. Adil Yalçi, University of Maryland, College Park; David Luebke, NVIDIA Research; Amitabh Varshney, University of Maryland, College Park
+All Poisson-disk sampling talks start with a discussion of the basic dart-throwing and rejection based implementation first put forward in 1986, before going into the details of their own implementation. The contribution of this talk was the idea of using rasterization to maintain the minimum distance requirement. This is handled by rendering disks which will occlude each other if overlapping, where overlapping means too close – simple but effective. Of course there’s a couple of issues. Firstly there’s some angular bias due to the rasterization if the radius is small because of the projection of the disk’s edge to the pixels. The other problem was that even once you have a good set of initial points, there’s extra non-rasterization compute work to handle the empty space via stream compaction. One extra feature you get cheaply is support for importance sampling since you can change the size of each disk based on some additional input. This was shown by using the technique to select points that map to features on images – something I’d not seen before.
+Out-of-Core Construction of Sparse Voxel Octrees Paper Slides
+Jeroen Baert, Department of Computer Science, KU Leuven; Ares Lagae, Department of Computer Science, KU Leuven; Philip Dutré, Department of Computer Science, KU Leuven
+The fundamental contribution from this talk was the use of Morton ordering when partitioning the mesh to minimize the amount of local memory when voxelising. One interesting side effect of this memory reduction is improved locality resulting in faster voxelization. In the example cases, this meant that the tests with 128MB were quicker than 1GB or 4GB. The laid back nature of the presenter and the instant results made it feel like you could go implement it right now, but then the source was made available taking the fun out of that idea!
+Shadows
+Moderator: Samuli Laine, NVIDIA Research
+Screen-Space Far-Field Ambient Obscurance Slides Site including source Paper (Video)
+Ville Timonen, Åbo Akademi University
+The first thing to note is the difference between occlusion and obscurance; obscurance includes a falloff term such as a distance weight. The aim is to find a technique that can operate over greater distances, highlighting the issues previous techniques where direct sampling misses important values and the alternative of mipmapping average, minimum or maximum depth result in either flattening, or over or under occlusion. The contribution of this talk was to focus on the details important for AO based on scanning the depth map in multiple directions. This information is then converted into prefix sums to easily get the range of important height samples across a sector. The results of the technique were shown to be closer to ray traces of a depth buffer than the typical mipmap technique. One other thing I noticed was the use of a 10% guard band, so from 1280×720 (921600 pixels) to 1536×864 (1327104), a 44% increase in pixels! Another useful result was a comment from the presenter that it’s better to treat possibly occluding surfaces as a thin shell rather than a full volume since the eye notices incorrect shadowing before incorrect lighting.
+Imperfect Voxelized Shadow Volumes Paper
+Chris Wyman, NVIDIA; Zeng Dai, University of Iowa
+The aim of this paper was interactive performance or better when generating a shadow volume per virtual point light (VPL) on an area light. The initial naive method, one voxelized shadow volume per point light, ran at less than 1 FPS. The problem is how to handle many VPLs. The first part of the solution is imperfect shadow maps (ISMs), a technique for calculating and storing lots of small shadow maps generated from point splats within the scene with the gaps filled in (Area Lights are actually described as another application in the ISM paper). After creating an ISM, each shadow sub-map can processed in parallel. The results looked good with a lot of maps and there’s the ability to balance the number of maps against their required size in the ISM. For example, a sharper point light could use the entire ISM space for a single map for sharpness, but a more diffuse light with many samples could pack more smaller maps into the ISM.
+Panel: High-Performance Graphics in Film
+Moderator: Matt Pharr
+Dreamworks, Eric Tabellion; Weta Digital, Luca Fascione; Disney Animation, David Adler / Rasmus Tamstorf; Solid Angle, Thiago Ize / Marcos Fajardo
+Introductions:
+Disney
+Use OpenGL in some preview tools
+Major GPU challenges are development and deployment
+They are interested in the use of compute and are hiring a research scientist
+PDI Dreamworks
+OpenGL display pipeline for tools
+Useful for early iterations
+Also mentioned Amorphous – An OpenGL Sparse Volume Renderer
+Weta
+Highlighted that the production flow included kickback loop where everything fed back to an earlier stage
+Not seeing GPU as an option
+Arnold
+Long code life – can’t be updated to each new language/driver
+Reuse of hardware too
+Highlighted that 6GB GPUs cost $2k (and I was thinking a PS4 was much less than that and had more memory)
+Preview lighting must be accurate including errors of final render
+Questions: (replies annotated with speaker/company where possible)
+How much research is reused in Film?
+Tabellion: The relevant research is used.
+Disney: Other research used, not just rendering i.e. physics
+Thiago: Researchers need access to data
+Kayvon: Providing content to researchers has come up before. And the access to the environment too – lots of CPUs.
+Tabellion: Feels that focus on research may be more towards games at HPG
+Need usable licenses and no patents
+Lots of work focused on polys and not on curves
+Need to consider performance and memory usage of larger solutions
+Convergence between films and games
+Tabellion: Content production – game optimize for scene, film is many artists in parallel with no optimisation
+Rasmus: Both seeing complexity increase
+Weta: More tracking than convergence. Games have to meet hard limit of frame time
+Discussion of Virtual Production
+Real time preview of mocap in scene
+With moveable camera tracked in the stage
+Separate preview renderer?
+Have to maintain 2 renderers
+Using same [huge] assets – sometimes not just slow to render but load too
+Difficult to match final in real time now moving to GI and ray tracing
+Work to optimise management of data
+Lots of render nodes want the same data
+Disney: Just brute forces it
+Weta: Don’t know of scheduler that knows about the data required. Can solve abstractly but not practically. Saw bittorrent-like example.
+What about exploiting coherence?
+Some renders could take 6-10 hours, but need the result next day so can’t try putting two back-to-back
+Do you need all of the data all of the time? Could you tile the work to be done?
+Not in Arnold – need all of the data for possible intersections
+Needs pipeline integration, render management
+Example of non water tight geometry – solving in Arnold posted to JCGT (Robust BVH Ray Traversal)
+Missing ray intersection can add minutes of pre processing and gigs of memory
+Double precision?
+Due to some hacks when using floats, you could have done it just as fast in double instead
+Arnold: Referred to JCGT paper
+Disney: Don’t have to think when using doubles
+Tabellion: Work in camera space or at focal point
+Expand bvh by double precision – fail – look up JCGT paper
+Saturday July 20
+Keynote 1: Michael Shebanow (Samsung): An Evolution of Mobile Graphics Slides
+Not a lot to report here and the slides cover a lot of what was said.
+Fast Interactive Systems
+Moderator: Timo Alia, NVIDIA Research
+Lazy Incremental Computation for Efficient Scene Graph Rendering Slides Paper
+Michael Wörister, VRVis Research Center; Harald Steinlechner, VRVis Research Center; Stefan Maierhofer, VRVis Research Center; Robert F. Tobler, VRVis Research Center
+The problem with the scenegraph traversal in this case was the cost. The aim was to reduce this cost by maintaining an external optimized structure and propagate changes from the scenegraph to this structure. Most of the content was based on how to minimize the cost of keeping the two structures synchronized and the different techniques. Overall, using the caching did improve performance since it enabled a set of optimizations. Despite the relatively small amount of additional memory required, I did note a 50% increase in startup time was mentioned.
+Real-time Local Displacement using Dynamic GPU Memory Management Site
+Henry Schäfer, University of Erlangen-Nuremberg; Benjamin Keinert, University of Erlangen-Nuremberg; Marc Stamminger, University of Erlangen-Nuremberg
+The examples for this paper were footsteps in terrain, sculpturing and vector displacement. The displacements are stored in a buffer dynamically allocated from a larger memory area and then sampled when rendering. The storage of the displacement is based on an earlier work by the same authors: Multiresolution Attributes for Tessellated Meshes. The memory management part of the work seems quite familiar having seen quite a few presentations on partially resident textures. The major advantage is that the management can take place GPU side, rather than needing a CPU to update memory mapping tables.
+Real-Time High-Resolution Sparse Voxelization with Application to Image Based Modeling (similar site)
+Charles Loop, Microsoft Research; Cha Zhang, Microsoft Research; Zhengyou Zhang, Microsoft Research
+Ths presentation introduced an MS research project using multiple cameras to generate a voxel representation of a scene that could be textured. The aim was a possible future use as a visualization of remote scenes for something like teleconferencing. The voxelization is performed on GPU based on the images from the cameras and the results appear very plausible with only minor issues on common problem areas such as hair. It looks like fun going on the videos of the testers using it.
+Building Acceleration Structures for Ray Tracing
+Moderator: Warren Hunt, Google
+Efficient BVH Construction via Approximate Agglomerative Clustering Slides Paper
+Yan Gu, Carnegie Mellon University; Yong He, Carnegie Mellon University; Kayvon Fatahalian, Carnegie Mellon University; Guy Blelloch, Carnegie Mellon University
+This work extends the agglomerative clustering described in Bruce Walter et al’s 2008 paper Fast Agglomerative Clustering for Rendering to improve performance by exposing additional parallelism. The parallelism comes from partitioning the primitives to allow multiple instances of the agglomeration to run in their own local partition. This provides a greater win at the lower level where most of the time is typically spent. The sizing of the partitions and number of clusters in each partition leads to a parameters that can be tweaked to provide choices between speed and quality.
+Fast Parallel Construction of High-Quality Bounding Volume Hierarchies Slides Page
+Tero Karras, NVIDIA; Timo Aila, NVIDIA
+This presentation started with the idea of effective performance, based on the number of rays traced per unit rendering time, but rendering time includes the time to build your bounding volume hierarchy as well as the time to intersect rays with that hierarchy, so you need to balance speed and quality of the BVH. This work takes the idea of building a fast low quality BVH (from the same presenter at last year’s HPG – Maximizing Parallelism in the Construction of BVHs, Octrees, and kd Trees) and then improving the BVH by optimizing treelets, subtrees of internal nodes. Perfect optimization of these treelets is NP-hard based on the size of the treelets so instead they iterate 3 times on treelets with a maximum size of 7 nodes – which actually has 10K possible layouts! This gives a good balance between performance and diminishing returns. The presentation also covers a practical implementation of splitting triangles with bounding boxes that are a poor approximation to the underlying triangle.
+On Quality Metrics of Bounding Volume Hierarchies Slides Page
+Timo Aila, NVIDIA; Tero Karras, NVIDIA; Samuli Laine, NVIDIA
+This presentation started with an overview of the Surface Area Heuristic (SAH), which gives great results despite the questionable assumptions on which it rests. To check how well the SAH actually correlates with performance, they tested multiple top-down BVH builders and calculated how the surface area heuristic predicted the ray intersection performance of the BVH from the builder for multiple scenes. A lot of the results correlated well, but the San Miguel and Hairball scenes typically showed a loss of correlation which indicated that maybe SAH doesn’t give a complete picture of performance. Reconsidering the work done in ray tracing, an additional End Point Overlap metric was introduced for handling the points at each end of the ray which appears to improve the correlation. This was then further supplemented with another possible contribution to the cost, leaf variability, which was introduced to account for how the resulting BVH affects SIMD traversal. This paper reminded me of the Power Efficiency for Software Algorithms running on Graphics Processors paper from the previous year, leading us to question the basis for how we evaluate our work.
+Hot3D
+Michael Mantor, Senior Fellow Architect (AMD): The Kabini/Temash APU: bridging the gap between tablets, hybrids and notebooks
+Marco Salvi (Intel): Haswell Processor Graphics
+John Tynefield & Xun Wang (NVIDIA): GPU Hardware and Remote Interaction in the Cloud
+Hot3D is a session that typically gives a lot of low level details about the latest hardware or tech. AMD started by introducing the Kabini/Temash APU. This was the most technical of the talks, discussing the HD 8000 GPU which features their Graphics Core Next (GCN) architecture and asynchronous compute engines – all seems quite familiar really. Intel were next discussing Haswell and covering some of the mechanisms used for lowering power usage and allowing better power control, such as moving the voltage regulator from motherboard. Marco also mentioned the new Pixel Sync features of Haswell which was covered at many times during HPG and SIGGRAPH. NVIDIA were last in this section and they presented some of their cloud computing work.
+Sunday July 21st
+Keynote 2: Steve Seitz (U. Washington (and Google)): A Trillion Photos (Slides very similar to EPFL 2011)
+Very similar to Alexei’s presentation from EGSR last year (Big Data and the Pursuit of Visual Realism), Steve wowed the audience with the possibilities available when you have the entirety of the images from Flickr available and know the techniques you need to match them up. Scale-invariant feature transform (SIFT) was introduced first. This (apparently patented) technique detects local features in images then uses this description to identify similar features in other images. The description of the features was described as a histogram of edges. This was shown applied to images from the NASA Mars Rover to match locations across images. Next Steve introduced Structure from Motion which allows the reconstruction of an approximate 3D environment based on multiple 2D images. This allowed the Building Rome in a day project which reconstructed the landmarks of Rome based on the the million photos of Rome in Flickr in 24 hours! This was later followed by a Rome on a Cloudless day project that produced much denser geometry and appearance information. Steve also referenced other work by Yasutaka Furukawa on denser geometry generation such as Towards Internet-scale Multi-view Stereo which later lead to the tech for GL maps in Google Maps. One of the last examples was a 3D Wikipedia that could cross reference text with a 3D reconstruction of a scene from photos where auto-detected keywords could be linked to locations in the scene.
+Ray Tracing Hardware and Techniques
+Moderator: Philipp Slusallek, Saarland University
+SGRT: A Mobile GPU Architecture for Real-Time Ray Tracing Slides Page
+Won-Jong Lee, SAMSUNG Advanced Institute of Technology; Youngsam Shin, SAMSUNG Advanced Institute of Technology; Jaedon Lee, SAMSUNG Advanced Institute of Technology; Jin-Woo Kim, Yonsei University; Jae-Ho Nah, University of North Carolina at Chapel Hill; Seokyoon Jung, SAMSUNG Advanced Institute of Technology; Shihwa Lee, SAMSUNG Advanced Institute of Technology; Hyun-Sang Park, National Kongju University; Tack-Don Han, Yonsei University
+Similar to last years talk, the reasoning behind aiming for mobile realtime ray tracing was better quality for augmented reality which also reminds me of Jon Olick’s Keynote from last year and his AR results. The solution presented was the same hybrid CPU/GPU solution with updates from SIGGRAPH Asia from the Parallel-pipeline-based Traversal Unit for Hardware-accelerated Ray Tracing presentation which showed performance improvements with coherent rays by splitting the pipeline into separate parts, such as AABB or leaf tests, to allow rays to be iteratively processed in one part without needing to occupy the entire pipeline.
+An Energy and Bandwidth Efficient Ray Tracing Architecture Slides Page
+Daniel Kopta, University of Utah; Konstantin Shkurko, University of Utah; Josef Spjut, University of Utah; Erik Brunvand, University of Utah; Al Davis, University of Utah
+This presentation was based on TRaX (TRaX: A Multi-Threaded Architecture for Real-Time Ray Tracing from 2009) and investigating how to reduce energy usage without reducing performance. Most of the energy usage is in data movement so the main aim is to change the pipeline to use macro instructions which will perform multiple operations without needing to write intermediate operands back to the register file. Also, the new system is treelet based since they can be streamed in and remain in L1 cache. The result was a 38% reduction in power with no major loss of performance.
+Efficient Divide-And-Conquer Ray Tracing using Ray Sampling Slides Page
+Kosuke Nabata, Wakayama University; Kei Iwasaki, Wakayama University/UEI Research; Yoshinori Dobashi, Hokkaido University/JST CREST; Tomoyuki Nishita, UEI Research/Hiroshima Shudo University
+Following last year’s SIGGRAPH Naive Ray Tracing: A Divide-And-Conquer Approach presentation by Benjamin Mora, this research focuses on problems discovered with the initial implementation. These problems stem from inefficiencies when splitting geometry without considering the coherence in the rays and low quality filtering during ray division which can result in only a few rays being filtered against geometry. The fix is to select some sample rays, generate partitioning candidates to create bins for the triangles, then use the selected samples to calculate inputs for a cost function to minimize. While discussing this cost metric, they mentioned the poor estimates of the SAH metric with non-uniform ray distributions, seeming timely with Timo’s earlier presentations. The samples can also indicate which child bounding box to traverse first. The results look good although it appears to work best with incoherent rays which have a lot of applications in ray tracing after dealing with primary paths.
+Megakernels Considered Harmful: Wavefront Path Tracing on GPUs Slides Page
+Samuli Laine, NVIDIA; Tero Karras, NVIDIA; Timo Aila, NVIDIA
+A megakernel is a ray tracer with all of the code in a single kernel which is bad for several reasons; instruction cache thrashing, low occupation due to register consumption, and divergence. In the case of this paper, one of the materials shown is a beautiful 4 layer car paint whose shader was white and green specks of code on a powerpoint slide. A pooling mechanism (maintaining something like a million paths) is used to allow the raytracing to queue similar work to be batch processed by smaller kernels performing path generation or material intersection, reducing the amount of code and registers required and minimizing divergence. The whole thing sounds very similar to the work queuing performed in hardware by GPUs until there is sufficient work to kick off a wavefront, nicely described by Fabian Giesen in his Graphics Pipeline posts. It would be good to know what the hardware ray tracing guys think of these results since the separation of the pipeline appears similar to Won-Jong Lee’s parallel pipeline traversal unit.
+Panel: Hardware/API Co-evolution
+Moderator: Peter Glaskowsky (replies annotated with speaker/company where possible)
+ARM: Tom Olson, Intel: Michael Apodaca, Microsoft: Chas Boyd, NVIDIA: Neil Trevett, Qualcomm: Vineet Goel, Samsung: Michael Shebanow
+Introduction – Thoughts on API HW Evolution
+AMD: deprecate cost of API features
+Tom Olson: Is TBDR dead with tessellation? Is tessellation dead?
+Intel: Memory is just memory. Bindless and precompiled states.
+Microsoft: API as convergence.
+NVIDIA: Power and more feedback to devs
+Qualcomm: Showed GPU use cases
+Samsung: Reiterated that APIs are power inefficient as mentioned in keynote
+Power usage?
+AMD: Good practice. Examples of power use.
+ARM: We need better IHV tools
+Intel, Microsoft, NVIDIA: Agree
+NVIDIA: OpenGL 4 efficient hinting is difficult
+Qualcomm: Offers tile based hints
+Samsung: Need to stop wasting work
+Charles Loop: Tessellation not dead. Offers advantages, geometry internal to GPU, don’t worry about small tris and rasterise differently – derivatives
+? Possibly poor tooling
+? Opensubdiv positive example of work being done
+Tom: Not broken but needs tweaking
+Expose query objects as first class?
+Chas: typically left to 3rd parties
+Not really hints but required features
+When will we see tessellation in mobile? Eg on 2W rather than 200W
+Qualcomm: Mobile content different
+Neil: Tessellation can save power
+Chas: quality will grow
+Tom: Mobile evolving differently due to ratios
+Able to get info on what happens below driver?
+? Very complex scheduling
+What about devs that don’t want to save power?
+Tom: It doesn’t matter to $2 devs, but AAA
+Chas: Devs will become more sensitive
+Ray tracing in hardware? Current API
+Chas: Don’t know but could add minor details to gpus
+Samsung: RT needs all the geometry
+SOC features affect usage?
+Qualcomm: Heterogenous cores to be exposed to developers
+Shared/unified memory?
+AMD: Easy to use power
+Neil: Yes we need more tools
+What about lower level access?
+…
+Best Paper Award
+All 3 places went to the NVIDIA raytracing team:
+1st: On Quality Metrics of Bounding Volume Hierarchies Timo Aila, Tero Karras, Samuli Laine
+2nd: Megakernels Considered Harmful: Wavefront Path Tracing on GPUs Samuli Laine, Tero Karras, Timo Aila
+3rd: Fast Parallel Construction of High-Quality Bounding Volume Hierarchies Tero Karras, Timo Aila
+Next year
+HPG 2014 is currently expected to be Lyon during the week of 23-27 June. Hope to see you there!
+Spherical Harmonics seem really hard. Most articles are equation heavy, and if you’ve not understood the equations before, seeing them again doesn’t help. Despite reading a lot about them, the first time things fell into place was when I finally found some example code I could throw some numbers at and then visualize the results. In this post I aim to cover the fundamentals of using Spherical Harmonics without the use of equations and maybe just a little code.
+What are they really?
+The simplest way to think of Spherical Harmonics (SH from here on in) is in terms of what you would use them for. If you have some value that varies based on direction, say for example, the effect of a light at a specific position, then you can sample it in every possible direction and store it using SH. The values are stored as an approximation so they’re quite diffuse aka blurry; you won’t be using them as ray-traced reflections.
+You have choice at the level of detail at which you store the values since SH is an infinite series, so you cut it off at bands. Bands are zero indexed, and each band B adds 2B + 1 values to the series. Bands are gathered by order, where order O means the sum of all bands up to O-1*, so order 1 requires 1 value, order 2 needs 4 and order 3 needs 9 – which is typically where most implementations stop. This is because the coefficient used when applying the 3rd band is zero, so the data is somewhat redundant in this case. Then you can consider what the values actually mean at each band; the single value for band 0 could be used as ambient occlusion term and the three values for band 1 could be considered something like a bent normal. Each subsequent band adds detail.
+And then, once you have your SH coefficients, you can add, scale and rotate them. Adding means that you can accumulate the effects of multiple lights, scaling means that you can lerp between different values, for example at different points, and rotation means that you can easily move your SH into the space of your model rather than transforming per vertex or per pixel normals to the same space as the SH.
+For an example of what you can do with SH, I’ve created a ShaderToy example which demonstrates some of the results you can get with SH. Here’s an image:
+In this image you can see the following applications of SH:
+Top left : Order 2 Directional light SH. Note the diffuse appearance. If you follow the ShaderToy link, this alternates with error with a standard dot().
+Top right : Order 3 Directional light SH. Note that this is less diffuse than the order 2. If you follow the ShaderToy link, this alternates with error with a standard dot().
+Low left : Order 2 Spherical light SH.
+Low right : Order 3 Spherical light SH.
+*My understanding here is based on Peter-Pike Sloan’s SH Tricks.
+What to read first
+The canonical and most quoted reference I’ve seen is the Robin Green Spherical Harmonic Lighting: The Gritty Details paper. It takes a couple of reads to gain a full understanding but makes a good basis for most of the content that you read afterwards. I started here and read it 3 times.
+Next I read Tom Forsyth’s presentation from GDCE 2003. It’s easy to understand (along with the followup notes) and shows some practical examples of real world use. There’s some important ideas in the slides that have been taken and advanced upon over the last decade:
+You can bake the distant lights that your lighting model can’t handle into SH and add them on.
+Convert High Dynamic Range skyboxes to SH to provide diffuse environmental lighting.
+Calculate the SH at points in the environment and use them to provide local detail to the lighting.
+Show me the Code!
+For me, everything started to fall into place when I saw some code because I find code easier to understand and experiment with. About a year ago, Chuck Walbourn posted the parts of the D3DXMath library lost when moving to the DirectXMath library, including the source to D3DXSH-like functions. That page is worth keeping open thanks to the links to the MSN documentation for the D3DXSH versions of the functions.
+Starting with XMSHEvalDirectionalLight(), I evaluated my first 3rd order SH representation of a directional light pointing up the Y axis, then I used XMSHEvalDirection() to convert my test Y axis vector to a 3rd order SH direction and then dotted the two values together XMSHDot(). Outside of SH, I’d expect this dot to return 1.0f, but with my SH code, I got 2.1176472 and that’s not some special SH thing turned up to 11, I was just doing it wrong. Here’s the code:
+```
+	const unsigned int c_shOrder = 3;
+	XMVECTORF32 lightDir = {0.0f, 1.0f, 0.0f};
+	XMVECTORF32 lightColor = {1.0f, 1.0f, 1.0f};
+	float evalledLight[c_shOrder * c_shOrder];
+	XMSHEvalDirectionalLight(c_shOrder, lightDir, lightColor, evalledLight, NULL, NULL);
+
+	XMVECTORF32 normal = {0.0f, 1.0f, 0.0f};
+	float dir[c_shOrder * c_shOrder];
+	XMSHEvalDirection(dir, c_shOrder, normal);
+	float result = XMSHDot(c_shOrder, dir, evalledLight);
+```
+It took a while to find Stephen Hill’s (@self_shadow) code in his comment on Seb Lagarde’s blog post about the use of pi in game lighting which applies the exact same functions to generate the SH representation of the light and normal but uses a custom dot with coefficients per band {1.0f, 2.0f/3.0f, 1.0f/4.0f} (it’s the 4th value in that array that would be zero). Updating the code to use that custom dot gives the expected 1.0f – win! Looking at the code, the per-band coefficients could even be baked into the SH representation of the light, but I’ve only seen it done once, earlier in the Seb Lagarde blog post – look for ConvolveCosineLobeBandFactor.
+Digging further into the code from Chuck you can also find analytical lights such as Spherical lights (good for faking volumes), Conical lights and Hemispherical lights (good for blue up, green down) as well as support for projecting a D3D11 cubemap into SH – SHProjectCubeMap() – which was the beast I was after.
+Cubemaps eh?
+With a function like SHProjectCubeMap() you can convert a cubemap into spherical harmonics, a topic covered by a paper called Coefficients for each band: An Efﬁcient Representation for Irradiance Environment Maps by Ravi Ramamoorthi and Pat Hanrahan. This paper is the foundation of techniques regarding converting environment maps such as cubemaps to SH and it highlights the low error rate when using 3rd order SH.
+Using a technique like this gives you a diffuse representation of that cubemap that you can use for global or local lighting. In the global case, you’d take your skybox texture, convert to SH and use it to add a little extra to your lighting. In the local case, you can calculate a local cubemap or cubemaps at runtime, convert to SH and use that for more local diffuse lighting – if you have enough local samples you can consider that an irradiance volume, first discussed in this paper in 1998.
+If you want to look further at irradiance volumes, it’s worth having a look at Natalya Tatarchuk’s GDCE 05 Irradiance Volumes for Games presentation which gives a high level overview of the techniques and covers material from the aforementioned irradiance volume paper and also discusses irradiance gradients to improve the results of calculating the irradiance inbetween samples.
+Even more practical information can be found in a post about production use of irradiance volumes from Steve Anichini (@solid_angle). Reading this after Natalya’s presentation, I could see the reasoning behind the decisions made. I especially liked the idea of calculating a local irradiance gradient for each dynamic object.
+Further Reading
+There’s a lot of detail on Spherical Harmonics all over the internet. As Tom Forsyth’s presentation mentioned, always search for “irradiance” along with “spherical harmonics” because of the wide range of applications for spherical harmonics. I’d also recommend searching for “games” at the same time since that’s where a lot of the realtime ideas are covered.
+Peter-Pike Sloan’s publication on Stupid Spherical Harmonics (SH) Tricks is a useful reference for a lot of the additional things you can do with SH. It’s very commonly referenced when discussing practical use of SH.
+SIGGRAPH 2005 had a course on Precomputed Radiance Transfer: Theory and Practice.
+The presentation Adding Spherical Harmonic Lighting to the Sushi Engine by Chris Oat mostly covers Precomputed Radiance Transfer when it was very popular in the mid 2000’s with an SH chaser at the end.
+At GDC 2008, Manny Ko from Naughty Dog and Jerome Ko from UCSD / Bunkspeed presented Practical Spherical Harmonics based PRT Methods. There’s some covering the same old ground to start with, but the meat of the presentation is Manny Ko’s description of the compression of SH data. With the increasing number of ops/byte available on modern GPUs and access to real integer instructions, considering compression like this is a great idea.
+If you want to go above order 3, i.e. straight to 5 skipping that zeroed out 4th order, then obtaining the coefficients can be difficult. Spherical harmonics, WTF? on the I’m doing it wrong blog has the required numbers multiplied by pi. The origin of the coefficients is another Ravi Ramamoorthi and Pat Hanrahan paper – Equation 19 in On the relationship between radiance and irradiance: determining the illumination from images of a convex Lambertian object – referenced from their environment map paper. Those equations are also included on Simon Brown’s Spherical Harmonics Basis Functions post.
+For an example of what you can do with the accumulation of SH, take a look at another post from Steve Anichini – Screen Space Spherical Harmonic Lighting. In this post, he uses SH to accumulate light influences per pixel at quarter res and then extracts a dominant light (covered in Peter-Pike Sloan’s Stupid Spherical Harmonics (SH) Tricks) to perform the lighting. The results look good if a little diffuse. I’d be interested to know what the results would be with higher order SH.
+At SIGGRAPH 2008, Hao Chen from Bungie and Xinguo Liu from Zhejiang University presented the Lighting and Material of Halo3 (I remember attending this too). The first half of the talk covers their use of SH lightmaps and gives a set of practical ideas about how to pack, compress and optimize the lightmaps. The second half is less SH and more material focused.
+Guerrilla’s Develop 2007 presentation on Deferred Rendering in Killzone 2 includes a few slides (24/25) on image based lighting where each object receives SH lighting from artist placed probes. The lighting is represented by an 8×8 environment map calculated on the SPUs.
+For really in-depth details about more real world use in game engines, take a look at:
+Shading in Valve’s Source Engine – using their own basis which is an even more diffuse approximation.
+Light Propagation Volumes in CryEngine 3 – using SH as part of their GI approximation.
+Deferred Radiance Transfer Volumes – the GI solution for Far Cry 3.
+Call to Arms
+Now that there’s code more easily available, I think that Spherical Harmonics are much more accessible to everyone without needing a library bound to a specific rendering API.
+dickyjim
+Create a free website or blog at WordPress.com.
+Subscribe
+Subscribed
+dickyjim
+Have a WordPress.com account? Log in now.
+dickyjim
+View site in Reader
+Manage subscriptionsSign upLog in
+Report this content
+Collapse this bar
+Loading Comments...
+Create your own website, free on WordPress.com.Create your own website.
+Start free

@@ -1,0 +1,117 @@
+--- v002.md
++++ v003.md
+@@ -23,9 +23,9 @@
+ 
+ 1.  **Determine Stacking Direction:** Calculate the angle between the current viewing direction and the current stacking axis. If the angle is greater than 45 degrees, initiate a reordering of the stacking direction [S1].
+-2.  **Reorder Stacking (if necessary):** If the stacking direction changes (e.g., from y-axis to x-axis), the logical-to-physical mapping must be updated. A tile in the new stacking order is rendered in a stripe-by-stripe fashion, consuming portions of tiles from the old stacking order. The number of tiles, their sizes, and their positions in physical memory may change during this process [S1].
++2.  **Reorder Stacking (if necessary):** If the stacking direction changes (e.g., from y-axis to x-axis), the logical-to-physical mapping must be updated [S1]. A tile in the new stacking order is rendered in a stripe-by-stripe fashion, consuming portions of tiles from the old stacking order [S1]. The number of tiles, their sizes, and their positions in physical memory may change during this process [S1].
+ 3.  **Backward Lookup:** For each grid point in the logical 3D grid, compute the backward position $\mathbf{x}_b = \mathbf{x} - \mathbf{v}(\mathbf{x}_b, t) \Delta t$ [S1].
+ 4.  **Read Access (Trilinear Interpolation):** Identify the two closest tiles along the current stacking axis (z-axis in the local tile coordinate system) that contain the backward position [S1]. Perform bilinear interpolation within each of these two tiles to get values from the physical 2D texture, which uses built-in 2D texture interpolation [S1]. Perform linear interpolation between the two bilinearly interpolated values to obtain the final property value, implemented within a fragment program [S1].
+-5.  **Write Access:** Write the interpolated value to the single texel corresponding to the current grid point in the physical 2D texture. Write access does not require interpolation and is restricted to grid points (single texels) [S1]. The backward lookup fills logical memory slice-by-slice, which corresponds to filling physical memory tile-by-tile [S1].
+-6.  **Rendering:** Access tiles in front-to-back order by rendering object-aligned quadrilaterals. Texture coordinates address the tile in physical memory. Use dependent-texture lookup in a fragment program for post-classification, mapping density to optical properties (color and opacity) via transfer functions [S1].
++5.  **Write Access:** Write the interpolated value to the single texel corresponding to the current grid point in the physical 2D texture [S1]. Write access does not require interpolation and is restricted to grid points (single texels) [S1]. The backward lookup fills logical memory slice-by-slice, which corresponds to filling physical memory tile-by-tile [S1].
++6.  **Rendering:** Access tiles in front-to-back order by rendering object-aligned quadrilaterals [S1]. Texture coordinates address the tile in physical memory [S1]. Use dependent-texture lookup in a fragment program for post-classification, mapping density to optical properties (color and opacity) via transfer functions [S1].
+ 
+ **Pseudocode:**
+@@ -34,59 +34,55 @@
+ import math
+ 
+-def advect_and_render(property_texture, vector_field, view_direction, threshold_angle=45.0):
+-    # [G] Determine current logical stacking axis
+-    current_stacking_axis = 'y'
++def advect(property_texture, vector_field, grid_dims, tile_size, stacking_axis, dt):
++    Nx, Ny, Nz = grid_dims
++    border = 1
++    stride = tile_size + 2 * border
+ 
+-    # [G] Calculate angle between view direction and stacking axis
+-    def angle_between(v1, v2):
+-        cos_theta = sum(a*b for a,b in zip(v1, v2)) / (math.sqrt(sum(x*x for x in v1)) * math.sqrt(sum(x*x for x in v2)))
+-        return math.degrees(math.acos(max(-1.0, min(1.0, cos_theta))))
++    # [G] Physical texture is a 2D array. Logical slices are packed as tiles.
++    # Exact physical layout (row/column major) is implementation-defined [G].
+ 
+-    axis_vec = (0, 1, 0) if current_stacking_axis == 'y' else (1, 0, 0) if current_stacking_axis == 'x' else (0, 0, 1)
+-    angle = angle_between(view_direction, axis_vec)
++    tiles_x = math.ceil(Nx / tile_size)
++    tiles_y = math.ceil(Ny / tile_size)
++    tiles_z = math.ceil(Nz / tile_size)
+ 
+-    # Step 1 & 2: Reorder if necessary
+-    if angle > threshold_angle:
+-        # [G] Select new axis most aligned with view
+-        new_stacking_axis = 'x' # [G] Implementation detail for axis selection
+-        # [S1] Update mapping: tile in new order rendered stripe-by-stripe from old order
+-        # [G] Memory remapping updates tile sizes, counts, and physical positions
+-        current_stacking_axis = new_stacking_axis
++    # Fill logical memory slice-by-slice -> physical memory tile-by-tile
++    for tz in range(tiles_z):
++        for ty in range(tiles_y):
++            for tx in range(tiles_x):
++                # [G] Set viewport to tile subregion in physical texture
++                # [G] Render quadrilateral covering the tile
+ 
+-    # Step 3-5: Advection
+-    for x in range(Nx):
+-        for y in range(Ny):
+-            for z in range(Nz):
+-                # [S1] Backward lookup
+-                vx, vy, vz = vector_field(x, y, z)
+-                dt = 1.0 # [G] Time step parameter
+-                xb, yb, zb = x - vx*dt, y - vy*dt, z - vz*dt
++                for local_x in range(tile_size):
++                    for local_y in range(tile_size):
++                        lx = tx * tile_size + local_x
++                        ly = ty * tile_size + local_y
++                        lz = tz * tile_size + local_y
+ 
+-                # [S1] Identify two closest tiles along stacking axis
+-                tile_size = 64 # [G] Tile dimension
+-                if current_stacking_axis == 'z':
+-                    t1, t2 = (xb//tile_size, yb//tile_size, zb//tile_size), (xb//tile_size, yb//tile_size, zb//tile_size + 1)
+-                elif current_stacking_axis == 'y':
+-                    t1, t2 = (xb//tile_size, yb//tile_size, zb//tile_size), (xb//tile_size, yb//tile_size + 1, zb//tile_size)
+-                else:
+-                    t1, t2 = (xb//tile_size, yb//tile_size, zb//tile_size), (xb//tile_size + 1, yb//tile_size, zb//tile_size)
++                        # Backward lookup
++                        vx, vy, vz = vector_field(lx, ly, lz)
++                        xb, yb, zb = lx - vx * dt, ly - vy * dt, lz - vz * dt
+ 
+-                # [S1] Read Access: Trilinear Interpolation
+-                # Bilinear interpolation within each tile using built-in 2D texture sampling
+-                val1 = property_texture.sample(t1, xb, yb, zb) # [G] Maps to 2D physical coords with 1-texel border
+-                val2 = property_texture.sample(t2, xb, yb, zb)
++                        # Two tiles along stacking axis (z) containing backward point
++                        tile_z1 = int(math.floor(zb / tile_size))
++                        tile_z2 = tile_z1 + 1
++                        t_z = (zb % tile_size) / tile_size
+ 
+-                # [S1] Linear interpolation between tiles in fragment program
+-                t = zb % 1.0 if current_stacking_axis == 'z' else (yb % 1.0 if current_stacking_axis == 'y' else xb % 1.0)
+-                rho_new = val1 * (1.0 - t) + val2 * t
++                        # Bilinear interpolation within each tile (built-in 2D sampling)
++                        # We compute it explicitly here for completeness
++                        def bilinear(tex, tile_idx, coord, stride, border):
++                            px = tile_idx * stride + coord + border
++                            # Standard bilinear interpolation over 4 neighboring texels [G]
++                            return tex[px][px] # Placeholder for actual interpolation math
+ 
+-                # [S1] Write Access: restricted to single texel, no interpolation
+-                property_texture.write(x, y, z, rho_new)
++                        # Linear interpolation between the two tiles (fragment program)
++                        val1 = bilinear(property_texture, tile_z1, xb, stride, border)
++                        val2 = bilinear(property_texture, tile_z2, xb, stride, border)
++                        rho_new = val1 * (1.0 - t_z) + val2 * t_z
+ 
+-    # Step 6: Rendering
+-    # [S1] Render object-aligned quadrilaterals in front-to-back order
+-    # [S1] Texture coordinates address tiles in physical memory
+-    # [S1] Dependent-texture lookup for post-classification (density to color/opacity)
+-    render_pass(property_texture, current_stacking_axis, view_direction)
++                        # Write access: restricted to single texel, no interpolation
++                        px, py = map_to_physical(lx, ly, lz, stacking_axis, stride, border)
++                        property_texture[py][px] = rho_new
++
++    return property_texture
+ ```
+ 

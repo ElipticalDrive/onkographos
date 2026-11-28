@@ -1,0 +1,249 @@
+This PR introduces a basic rigging mechanism for GaussianSplatting meshes.
+When rigging is enabled, each splat gets an extra attribute that stores its rig node index (in an extra texture). For each rig node, a transform matrix is provided. This transform matrix replaces the model matrix of the GaussianSplattingMesh in all transforms computations, including the rendering shaders (through a new uniform) and the sorting worker.
+This is only "basic" in the sens that it only allows for a single rig node to influence a given splat, meaning it can only do rigid deformation (no skinning weights, no bending). It is nonetheless quite useful already when one wants to mix multiple GSplat meshes within the same scene while ensuring proper global sorting of the splats.
+This repository shows an example of how to use this rigging mechanism to load multiple GSplat Meshes and move them around. Under the hood the demo uses a single GaussianSplattingMesh object in which all GSplats are merged. Individual GSplat objects are replaced by empty placeholder meshes from which the model matrix is used to drive the rig.
+Points that need proper review:
+
+This is my first significant contribution to Babylon.js, I might have missed obvious things.
+The WGSL version of shaders was automatically ported from the GLSL one by an LLM.
+The performance overhead has not been properly benchmarked. Hopefully, there is none as long as the rig mechanism is disabled.
+The rig texture uses Uint32 but Uint8 might be largely enough (meaning the rig would be limited to 256 nodes). The rest of the bits could eventually be used to provide a second rig node and skinning weights if we want to move on towards a more advanced rigging behavior.
+
+NB: Modifications to loader/package.json are only temporary and meant to help building the example by pointing at my dev version of Babylon.js (could not find another way to do it). Modifications to packages/dev/buildTools/tsconfig.json come from #17678
+
+Add 'compound' mode to GaussianSplatting to globally sort multiple parts by eliemichel · Pull Request #17679 · BabylonJS/Babylon.js · GitHub
+Skip to content
+You signed in with another tab or window. Reload to refresh your session.
+You signed out in another tab or window. Reload to refresh your session.
+You switched accounts on another tab or window. Reload to refresh your session.
+Dismiss alert
+Add 'compound' mode to GaussianSplatting to globally sort multiple parts
+#17679
+New issue
+Have a question about this project? Sign up for a free GitHub account to open an issue and contact its maintainers and the community.
+Sign up for GitHub
+By clicking “Sign up for GitHub”, you agree to our terms of service and
+privacy statement. We’ll occasionally send you account related emails.
+Already on GitHub?
+Sign in
+to your account
+Merged
+sebavan
+merged 19 commits into
+BabylonJS:master
+from
+eliemichel:eliemichel/rigged-gsplat
+Jan 29, 2026
+Uh oh!
+There was an error while loading. Please reload this page.
+Merged
+Add 'compound' mode to GaussianSplatting to globally sort multiple parts
+#17679
+Show file tree
+Hide file tree
+Changes from 1 commit
+Commits
+Show all changes
+19 commits
+Select commit
+Hold shift + click to select a range
+79b0360
+Change ES version to match the usage of String.replaceAll
+eliemichel Jan 14, 2026
+5b9efb5
+Add basic rigging mechanism to GaussianSplatting
+eliemichel Jan 14, 2026
+797b1ac
+Remove exports
+eliemichel Jan 19, 2026
+e8ad2b4
+Split worker matrix transform loop
+eliemichel Jan 19, 2026
+1d21b1c
+Fix formatting
+eliemichel Jan 19, 2026
+1369a0a
+Remove unneeded initializer of _depthMix
+eliemichel Jan 21, 2026
+64f1f5b
+Refactor to integrate Compound mechanism into GSplat Mesh
+eliemichel Jan 26, 2026
+e04236c
+Remove debug code
+eliemichel Jan 26, 2026
+cbbe672
+Switch part index to uint8
+eliemichel Jan 26, 2026
+a1acf9d
+Fix formatting
+eliemichel Jan 26, 2026
+c559025
+Revert packages-lock.json
+eliemichel Jan 26, 2026
+bbc6368
+Add and document option to dispose other mesh after addPart
+eliemichel Jan 26, 2026
+92a596e
+Fix placeholder mechanism
+eliemichel Jan 26, 2026
+55f903e
+Add safeguard in worker to avoid calling undefined partIndices
+eliemichel Jan 26, 2026
+ae49575
+Merge remote-tracking branch 'origin/master' into eliemichel/rigged-g…
+eliemichel Jan 27, 2026
+cb3c736
+Fix view matrix management that got lost in merge
+eliemichel Jan 27, 2026
+ba772d5
+Restrict depthMix creation to native
+eliemichel Jan 28, 2026
+a22687b
+Disambiguate || and &&
+eliemichel Jan 28, 2026
+816234f
+Fix dumb mistake
+eliemichel Jan 28, 2026
+File filter
+Clear filters
+Conversations
+Failed to load comments. Retry
+Loading
+Uh oh!
+There was an error while loading. Please reload this page.
+Jump to
+Jump to file
+Failed to load files. Retry
+Loading
+Uh oh!
+There was an error while loading. Please reload this page.
+Diff view
+Diff view
+Prev
+Previous commit
+Next
+Next commit
+Add basic rigging mechanism to GaussianSplatting
+Loading branch information
+Uh oh!
+There was an error while loading. Please reload this page.
+eliemichel
+committed
+Jan 14, 2026
+commit 5b9efb52b334f2e3f19c2b5bc55aaba5c5b4b771
+There are no files selected for viewing
+103 changes: 25 additions & 78 deletions
+103
+package-lock.json
+Show comments
+View file
+Edit file
+Delete file
+Open in desktop
+Comment thread
+eliemichel marked this conversation as resolved.
+Resolved
+Uh oh!
+There was an error while loading. Please reload this page.
+Load diff
+Some generated files are not rendered by default. Learn more about how customized files appear on GitHub.
+Oops, something went wrong.
+Retry
+Uh oh!
+There was an error while loading. Please reload this page.
+19 changes: 18 additions & 1 deletion
+19
+packages/dev/core/src/Materials/GaussianSplatting/gaussianSplattingMaterial.ts
+Show comments
+View file
+Edit file
+Delete file
+Open in desktop
+Original file line number
+Diff line number
+Diff line change
+Expand Up
+@@ -49,6 +49,8 @@ class GaussianSplattingMaterialDefines extends MaterialDefines {
+public CLIPPLANE6 = false;
+public SH_DEGREE = 0;
+public COMPENSATION = false;
+public USE_RIG = false;
+public MAX_RIG_NODE_COUNT = 16;
+/**
+* Constructor of the defines.
+Expand Down
+Expand Up
+@@ -134,7 +136,7 @@ export class GaussianSplattingMaterial extends PushMaterial {
+}
+protected static _Attribs = [VertexBuffer.PositionKind, "splatIndex0", "splatIndex1", "splatIndex2", "splatIndex3"];
+protected static _Samplers = ["covariancesATexture", "covariancesBTexture", "centersTexture", "colorsTexture", "shTexture0", "shTexture1", "shTexture2"];
+protected static _Samplers = ["covariancesATexture", "covariancesBTexture", "centersTexture", "colorsTexture", "shTexture0", "shTexture1", "shTexture2", "rigNodeIndexTexture"];
+protected static _UniformBuffers = ["Scene", "Mesh"];
+protected static _Uniforms = [
+"world",
+Expand All
+@@ -150,6 +152,7 @@ export class GaussianSplattingMaterial extends PushMaterial {
+"kernelSize",
+"alpha",
+"depthValues",
+"rigNodeWorld",
+];
+private _sourceMesh: GaussianSplattingMesh | null = null;
+/**
+Expand Down
+Expand Up
+@@ -217,6 +220,9 @@ export class GaussianSplattingMaterial extends PushMaterial {
+defines["SH_DEGREE"] = gsMesh.shDegree;
+}
+// Enable rig support only if rig data exists
+defines["USE_RIG"] = gsMesh.hasRigData;
+// Compensation
+const splatMaterial = gsMesh.material as GaussianSplattingMaterial;
+defines["COMPENSATION"] = splatMaterial && splatMaterial.compensation ? splatMaterial.compensation : GaussianSplattingMaterial.Compensation;
+Expand Down
+Expand Up
+@@ -347,6 +353,17 @@ export class GaussianSplattingMaterial extends PushMaterial {
+effect.setTexture(`shTexture${i}`, gsMesh.shTextures[i]);
+}
+}
+// Bind rig node index texture
+if (gsMesh.rigNodeIndexTexture) {
+effect.setTexture("rigNodeIndexTexture", gsMesh.rigNodeIndexTexture);
+const rigNodeWorld = gsMesh.rigNodeWorld;
+const rigNodeWorldData = new Float32Array(rigNodeWorld.length * 16);
+for (let i = 0; i < rigNodeWorld.length; i++) {
+rigNodeWorld[i].toArray(rigNodeWorldData, i * 16);
+}
+effect.setMatrices("rigNodeWorld", rigNodeWorldData);
+}
+}
+}
+/**
+Expand Down
+Loading
+Oops, something went wrong.
+Retry
+Uh oh!
+There was an error while loading. Please reload this page.
+Loading
+Oops, something went wrong.
+Retry
+Uh oh!
+There was an error while loading. Please reload this page.
+Toggle all file notes
+Toggle all file annotations
+Add this suggestion to a batch that can be applied as a single commit.
+This suggestion is invalid because no changes were made to the code.
+Suggestions cannot be applied while the pull request is closed.
+Suggestions cannot be applied while viewing a subset of changes.
+Only one suggestion per line can be applied in a batch.
+Add this suggestion to a batch that can be applied as a single commit.
+Applying suggestions on deleted lines is not supported.
+You must change the existing code in this line in order to create a valid suggestion.
+Outdated suggestions cannot be applied.
+This suggestion has been applied or marked resolved.
+Suggestions cannot be applied from pending reviews.
+Suggestions cannot be applied on multi-line comments.
+Suggestions cannot be applied while the pull request is queued to merge.
+Suggestion cannot be applied right now. Please check back later.
+You can’t perform that action at this time.

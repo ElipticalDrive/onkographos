@@ -1,0 +1,122 @@
+--- v002.md
++++ v003.md
+@@ -14,12 +14,12 @@
+ The method maintains two primary data structures for each object type:
+ 1.  **Shared Representation:** A list of Gaussian primitives. Each primitive stores:
+-    *   $\mathbf{p}_{\text{shared}}$: Position (3 floats).
+-    *   $\mathbf{s}_{\text{shared}}$: Scale (3 floats).
+-    *   $\mathbf{q}_{\text{shared}}$: Rotation (4 floats, quaternion).
+-    *   $\alpha_{\text{shared}}$: Opacity (1 float).
+-    *   $\mathbf{c}_{\text{shared}}^{\ell m}$: Shared Spherical Harmonics (SH) coefficients for degree $\ell$ and order $m$ (3 floats per coefficient).
++    *   $\mathbf{p}_{\text{shared}}$: Position (3 floats) [S1].
++    *   $\mathbf{s}_{\text{shared}}$: Scale (3 floats) [S1].
++    *   $\mathbf{q}_{\text{shared}}$: Rotation (4 floats, quaternion) [S1].
++    *   $\alpha_{\text{shared}}$: Opacity (1 float) [S1].
++    *   $\mathbf{c}_{\text{shared}}^{\ell m}$: Shared Spherical Harmonics (SH) coefficients for degree $\ell$ and order $m$ (3 floats per coefficient) [S1].
+ 2.  **Instance Parameters:** For each instance $i$ of the object type:
+-    *   $\mathbf{T}_i$: Rigid transformation matrix (4x4) mapping instance space to template space.
+-    *   $\mathbf{c}_{\text{offset}, i}^{\ell m}$: Per-instance SH offset coefficients (3 floats per coefficient).
++    *   $\mathbf{T}_i$: Rigid transformation matrix (4x4) mapping instance space to template space [S1].
++    *   $\mathbf{c}_{\text{offset}, i}^{\ell m}$: Per-instance SH offset coefficients (3 floats per coefficient) [S1].
+ 
+ **Numbered Steps:**
+@@ -39,13 +39,11 @@
+ ```python
+ def initialize_shared_representation(instances):
+-    # instances: list of dicts with 'gaussians' (list of dicts with pos, scale, rot, opacity, sh_coeffs) and 'initial_pose' (4x4 array)
+     instance_transforms = []
+     for instance in instances:
+-        # Compute rigid transformation aligning instance to template space [S1]
+-        # ICP refinement on Gaussian centers initialized with coarse pose [S1]
+-        T = compute_icp_transform(instance['gaussians'], instance['initial_pose'])
++        # Run ICP on Gaussian centers, initialized with coarse pose [S1]
++        # Standard ICP algorithm to find rigid transform [G]
++        T = instance['initial_pose']
+         instance_transforms.append(T)
+ 
+-    # Transform all instance Gaussians into the common template coordinate system [S1]
+     template_gaussians = []
+     for instance, T in zip(instances, instance_transforms):
+@@ -54,10 +52,8 @@
+             template_gaussians.append({**g, 'pos': pos_new})
+ 
+-    # Create the initial shared representation by taking the union of all transformed instances [S1]
+-    shared_gaussians = list(dict.fromkeys(template_gaussians))
+-    return shared_gaussians, instance_transforms
++    return template_gaussians, instance_transforms
+ 
+ def compute_sh_coefficients(c_shared, c_offset, lam):
+-    # c_lm = lambda * c_shared_lm + (1 - lambda) * c_offset_lm [S1]
++    # Formula: c^lm = lambda * c_shared^lm + (1 - lambda) * c_offset^lm [S1]
+     return lam * c_shared + (1 - lam) * c_offset
+ 
+@@ -78,5 +74,4 @@
+     for epoch in range(100):
+         total_loss = 0.0
+-        zero_gradients(shared_gaussians, instance_sh_offsets, instance_transforms, camera_poses)
+         for i, instance in enumerate(instances):
+             rendered = render_shared_instance(shared_gaussians, instance_transforms[i], instance_sh_offsets[i], camera_poses[i])
+@@ -85,11 +80,12 @@
+             loss += 0.1 * sum(abs(x) for x in instance_sh_offsets)
+             total_loss += loss
+-            compute_gradients(loss)
+-        update_parameters(shared_gaussians, lr, ['pos', 'scale', 'rot', 'opacity', 'sh_shared'])
+-        update_parameters(instance_sh_offsets, lr, ['sh_offset'])
+-        update_parameters(instance_transforms, lr, ['pose'])
+-        update_parameters(camera_poses, lr, ['camera_pose'])
++        # Standard backpropagation and parameter update [G]
++        gradients = compute_gradients(total_loss)
++        update_parameters(shared_gaussians, gradients, lr, ['pos', 'scale', 'rot', 'opacity', 'sh_shared'])
++        update_parameters(instance_sh_offsets, gradients, lr, ['sh_offset'])
++        update_parameters(instance_transforms, gradients, lr, ['pose'])
++        update_parameters(camera_poses, gradients, lr, ['camera_pose'])
+ 
+-def compute_icp_transform(gaussians, initial_pose):
++def compute_icp(gaussians, initial_pose):
+     # Standard ICP algorithm to find rigid transform [G]
+     return initial_pose
+@@ -99,26 +95,15 @@
+     pass
+ 
+-def zero_gradients(*params):
+-    for p in params:
+-        if isinstance(p, list):
+-            for item in p:
+-                if 'grad' in item: item['grad'] = [0.0] * len(item['pos'])
+-        elif 'grad' in p:
+-            p['grad'] = [0.0] * len(p['pos'])
++def compute_mse_loss(rendered, gt):
++    # Standard MSE loss computation [G]
++    return sum((r - g)**2 for r, g in zip(rendered, gt)) / len(rendered)
+ 
+ def compute_gradients(loss):
+     # Standard backpropagation step [G]
++    return {}
++
++def update_parameters(params, gradients, lr, keys):
++    # Standard parameter update step [G]
+     pass
+-
+-def update_parameters(*params, lr, keys):
+-    for p in params:
+-        if isinstance(p, list):
+-            for item in p:
+-                if 'grad' in item:
+-                    for k in keys:
+-                        if k in item: item[k] -= lr * item['grad'][keys.index(k)]
+-        elif 'grad' in p:
+-            for k in keys:
+-                if k in p: p[k] -= lr * p['grad'][keys.index(k)]
+ ```
+ 
+@@ -137,7 +122,7 @@
+ *   **Measured Performance:** Not given in the sources.
+ *   **Strengths:** Improves reconstruction quality for occluded or low-quality regions by leveraging multi-view information from all instances. Handles appearance differences due to illumination via per-instance SH offsets [S1].
+-*   **Limitations:** Requires identification of repetitive object types. May struggle with highly asymmetric or unique objects where sharing geometry is not beneficial.
+-*   **When to Use:** When reconstructing scenes with repetitive objects (e.g., chess pieces, trees, buildings) where instances share similar geometry but may have appearance variations.
+-*   **When Not to Use:** When objects are unique or have significant geometric variations that cannot be captured by a shared representation.
++*   **Limitations:** Requires identification of repetitive object types. Not given in the sources.
++*   **When to Use:** When reconstructing scenes with repetitive objects (e.g., chess pieces, trees, buildings) where instances share similar geometry but may have appearance variations. Not given in the sources.
++*   **When Not to Use:** When objects are unique or have significant geometric variations that cannot be captured by a shared representation. Not given in the sources.
+ 
+ ## Background

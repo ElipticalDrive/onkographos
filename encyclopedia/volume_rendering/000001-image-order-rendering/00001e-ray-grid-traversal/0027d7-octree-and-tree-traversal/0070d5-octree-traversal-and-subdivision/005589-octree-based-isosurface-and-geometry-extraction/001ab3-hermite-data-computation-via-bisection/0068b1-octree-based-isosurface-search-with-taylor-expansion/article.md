@@ -1,0 +1,268 @@
+# Octree-based Isosurface Search with Taylor Expansion
+
+Also called: Taylor Expansion Isosurface Intersection
+
+## Overview
+This method computes isosurface intersection points within an adaptive octree structure by evaluating the scalar field $u(\mathbf{r})$ using higher-order Taylor series expansions rather than linear interpolation, allowing for high-accuracy intersection detection via optimization [S1]. It sets itself apart from standard marching cubes or linear isovalue search methods by replacing linear edge interpolation with local Taylor expansions, enabling the use of gradient-based or bisectional optimization to find intersections with high precision [S1]. It builds on [Hermite Data Computation via Bisection](822-hermite-data-computation-via-bisection.md) by providing the specific scalar field evaluation and optimization strategy required to locate the zero-crossings that the parent method structures.
+
+## How it works
+**Inputs:**
+*   An adaptive octree structure representing the domain.
+*   A scalar field function $u(\mathbf{r})$ defined over the domain, which may involve boundary elements (e.g., from a Boundary Element Method).
+*   A target isovalue (typically 0).
+
+**Outputs:**
+*   A set of 3D points representing the intersection of the isosurface $u(\mathbf{r}) = \text{iso}$ with the octree cubes.
+*   These points are used to construct a meshed isosurface [S1].
+
+**Data Structures:**
+*   **Octree Cube:** Represents a volumetric cell. It stores or can compute the range of $u(\mathbf{r})$ within its bounds.
+*   **Boundary Elements:** Geometric primitives (e.g., triangles, segments) associated with the scalar field computation. Each element has associated nodes/values.
+*   **Search Lines:** 1D line segments defined within cube faces or interiors, used to probe for additional intersection points.
+
+**Method Steps:**
+
+1.  **Determine Global Range:**
+    Identify all boundary elements in the domain. Evaluate $u(\mathbf{r})$ at all nodes of these boundary elements. Determine the total range $[u_{\min}, u_{\max}]$ of the scalar field over the entire domain [S1].
+
+2.  **Cube Range Filtering:**
+    For each octree cube, determine the local range of $u(\mathbf{r})$ to decide if the isosurface intersects the cube.
+    *   Collect values of $u(\mathbf{r})$ at the 8 corners of the cube.
+    *   Collect values of $u(\mathbf{r})$ on all boundary elements that lie inside the cube.
+    *   Collect values of $u(\mathbf{r})$ on boundary elements belonging to neighbor cubes that extend into the current cube [S1].
+    *   The local range is the minimum and maximum of these collected values. If the isovalue lies outside this range, the cube is skipped [S1].
+
+3.  **Scalar Field Evaluation Strategy:**
+    For a cube determined to contain the isosurface, evaluate $u(\mathbf{r})$ based on the presence of boundary elements:
+    *   **Case A: No boundary elements** in the cube or its neighbor cubes.
+        Compute $u(\mathbf{r})$ using only the local Taylor series expansion (referred to as eqn (3) in [S1]). This expansion approximates the field locally without singular integrals [S1].
+    *   **Case B: Boundary elements present** in the cube or neighbor cubes.
+        Compute $u(\mathbf{r})$ by combining the local Taylor expansion (eqn (3)) with the evaluation of nearly singular integrals (referred to as eqn (1) in [S1]). This is computationally more expensive [S1].
+
+4.  **Edge Intersection Search:**
+    Determine the intersection points of the isosurface with the 12 edges of the octree cube.
+    *   Unlike linear methods, do not assume linear interpolation between corner values.
+    *   Apply an optimization method to find roots of $u(\mathbf{r}) = \text{iso}$ along each edge.
+    *   Suitable optimizers include a bisectional line search or a gradient-based search method [S1].
+    *   This yields high-accuracy intersection points at the cube edges [S1].
+
+5.  **Refinement Decision:**
+    *   **If Case B applies (boundary elements present):** Omit further refinement of the isosurface within this cube. The presence of boundary elements implies the resulting octree cubes are relatively small, automatically providing fine resolution [S1].
+    *   **If Case A applies (no boundary elements):** Proceed to refinement to capture curved isosurface details [S1].
+
+6.  **Face Refinement (Case A only):**
+    Refine the cube faces to obtain additional intersection points, which are critical for generating closed isosurface meshes.
+    *   Place search lines on the cube faces.
+    *   Evaluate $u(\mathbf{r})$ along these lines using the local Taylor expansion.
+    *   Apply the same optimization method (bisection/gradient) to find intersections along these lines [S1].
+
+7.  **Interior Refinement (Case A only):**
+    Use further search lines inside the cube volume to compute additional intersection points between the cube edges and faces.
+    *   These points are relevant for high-quality visualization of curved isosurfaces [S1].
+    *   Evaluate $u(\mathbf{r})$ along these interior lines and find roots [S1].
+
+8.  **Search Line Positioning Strategies:**
+    Several strategies exist for placing the additional search lines in steps 6 and 7:
+    *   **Equidistant parallel lines:** Lines parallel to cube edges with equidistant spacing [S1].
+    *   **Radial lines:** Lines radiating from the cube center, suitable for highly curved isosurfaces [S1].
+    *   **Mixed-direction parallel lines (Recommended):** Place all search lines parallel to cube edges but use a mixture of directions (e.g., varying offsets or orientations among the three axes). This provides almost regular distances of intersection points on curved isosurfaces with low computational costs and numerical robustness [S1].
+
+**Pseudocode:**
+
+> **Unverified code.** The code below did not pass a test run against a reference implementation, or no test fits it, so it may contain errors.
+
+```python
+def compute_isosurface_octree(octree, isovalue, boundary_elements):
+    """
+    Main entry point for the octree-based isosurface search.
+    """
+    # Step 1: Determine global range
+    global_min = infinity
+    global_max = -infinity
+    for elem in boundary_elements:
+        for node in elem.nodes:
+            val = evaluate_scalar_field(node.position, boundary_elements)
+            global_min = min(global_min, val)
+            global_max = max(global_max, val)
+    
+    # Check if isovalue is within global range
+    if not (global_min <= isovalue <= global_max):
+        return []
+
+    intersection_points = []
+    
+    # Traverse octree
+    for cube in octree:
+        # Step 2: Determine cube range
+        cube_values = []
+        
+        # Add corner values
+        for corner in cube.corners:
+            cube_values.append(evaluate_scalar_field(corner, boundary_elements))
+            
+        # Add boundary element values inside or extending into cube
+        relevant_elems = get_relevant_boundary_elements(cube, boundary_elements)
+        for elem in relevant_elems:
+            for node in elem.nodes:
+                if is_inside_or_extending_into(node.position, cube):
+                    cube_values.append(evaluate_scalar_field(node.position, boundary_elements))
+        
+        cube_min = min(cube_values)
+        cube_max = max(cube_values)
+        
+        # Filter: skip if isovalue not in range
+        if not (cube_min <= isovalue <= cube_max):
+            continue
+            
+        # Step 3: Determine evaluation mode
+        has_boundary_in_cube_or_neighbors = len(relevant_elems) > 0
+        
+        # Step 4: Edge Intersection Search
+        edge_intersections = []
+        for edge in cube.edges:
+            # Optimization to find root along edge
+            point = find_root_on_edge(edge, isovalue, has_boundary_in_cube_or_neighbors, boundary_elements)
+            if point is not None:
+                edge_intersections.append(point)
+        intersection_points.extend(edge_intersections)
+        
+        # Step 5 & 6 & 7: Refinement
+        if not has_boundary_in_cube_or_neighbors:
+            # Case A: Refine faces and interior
+            # Step 6: Face refinement
+            face_intersections = refine_faces(cube, isovalue, boundary_elements)
+            intersection_points.extend(face_intersections)
+            
+            # Step 7: Interior refinement
+            interior_intersections = refine_interior(cube, isovalue, boundary_elements)
+            intersection_points.extend(interior_intersections)
+            
+    return intersection_points
+
+def evaluate_scalar_field(r, boundary_elements):
+    """
+    Evaluates u(r) based on presence of boundary elements.
+    """
+    # Check if r is near any boundary element or if the cube containing r
+    # has boundary elements. For simplicity, we assume the caller handles
+    # the context of "boundary elements in cube".
+    # Here we implement the logic described in [S1]:
+    # If no boundary elements are lying in a cube or in its neighbour cubes,
+    # the local expansion suffices.
+    
+    # Note: In a real implementation, the context (cube) must be passed
+    # to determine if boundary elements are present.
+    # This function assumes the decision logic is handled by the caller
+    # passing a flag or by checking proximity.
+    
+    # Placeholder for actual math:
+    # If no boundary elements: return local_taylor_expansion(r)
+    # If boundary elements: return local_taylor_expansion(r) + singular_integrals(r)
+    
+    # [G] Since the exact formulas for eqn (1) and eqn (3) are not provided
+    # in the text, we assume a generic evaluation function exists.
+    return generic_u_eval(r)
+
+def find_root_on_edge(edge, isovalue, has_boundary, boundary_elements):
+    """
+    Finds intersection of isosurface with a cube edge using optimization.
+    """
+    # Step 4: Apply optimization method (bisectional line search or gradient-based)
+    # to determine intersection points of the isosurface with the octree cube edges.
+    
+    start_val = evaluate_scalar_field(edge.start, boundary_elements)
+    end_val = evaluate_scalar_field(edge.end, boundary_elements)
+    
+    # Simple bisectional line search
+    low = edge.start
+    high = edge.end
+    low_val = start_val - isovalue
+    high_val = end_val - isovalue
+    
+    # [G] Standard bisection guard
+    if low_val * high_val > 0:
+        return None
+        
+    for _ in range(50): # Max iterations
+        mid = (low + high) / 2.0
+        mid_val = evaluate_scalar_field(mid, boundary_elements) - isovalue
+        if abs(mid_val) < 1e-9:
+            return mid
+        if low_val * mid_val < 0:
+            high = mid
+            high_val = mid_val
+        else:
+            low = mid
+            low_val = mid_val
+            
+    return (low + high) / 2.0
+
+def refine_faces(cube, isovalue, boundary_elements):
+    """
+    Refines cube faces using search lines.
+    """
+    points = []
+    # Strategy: Mixed-direction parallel lines for robustness [S1]
+    # Place search lines parallel to cube edges but use a mixture of directions.
+    
+    for face in cube.faces:
+        # Generate search lines on the face
+        lines = generate_search_lines_on_face(face, strategy="mixed_parallel")
+        for line in lines:
+            # Find root along line
+            point = find_root_on_line(line, isovalue, boundary_elements)
+            if point is not None:
+                points.append(point)
+    return points
+
+def refine_interior(cube, isovalue, boundary_elements):
+    """
+    Uses search lines inside the cube to compute additional points.
+    """
+    points = []
+    # Generate interior search lines
+    lines = generate_interior_search_lines(cube, strategy="mixed_parallel")
+    for line in lines:
+        point = find_root_on_line(line, isovalue, boundary_elements)
+        if point is not None:
+            points.append(point)
+    return points
+
+def find_root_on_line(line, isovalue, boundary_elements):
+    """
+    Finds root along a 1D line segment.
+    """
+    # Reuse edge intersection logic adapted for arbitrary line
+    return find_root_on_edge(line, isovalue, False, boundary_elements) # Boundary context handled by eval
+
+def generate_search_lines_on_face(face, strategy):
+    # [G] Implementation detail for line generation.
+    # Strategy "mixed_parallel": Place lines parallel to edges with mixed directions.
+    # Strategy "equidistant": Equidistant lines parallel to cube edges.
+    # Strategy "radial": Radial search lines.
+    pass
+
+def generate_interior_search_lines(cube, strategy):
+    # [G] Implementation detail for interior line generation.
+    pass
+```
+
+## Operating characteristics
+*   **Accuracy:** High accuracy for intersection points due to the use of higher-order Taylor series expansions instead of linear interpolation [S1].
+*   **Complexity:**
+    *   **Time:** The method is efficient for filtering irrelevant cubes using the hierarchical tree structure and global range [S1]. However, if boundary elements are present in a cube or its neighbors, the computation is more expensive due to the evaluation of nearly singular integrals [S1].
+    *   **Memory:** Depends on the octree depth and the number of boundary elements. The method requires storing boundary element data and octree structure.
+*   **Strengths:**
+    *   High accuracy without requiring extremely fine uniform grids.
+    *   Adaptive resolution: Cubes near boundary elements are naturally small, providing fine resolution automatically [S1].
+    *   Robust refinement strategies for curved isosurfaces using mixed-direction search lines [S1].
+*   **Limitations:**
+    *   Computational cost increases significantly when boundary elements are present in the search volume due to singular integral evaluation [S1].
+    *   Refinement is omitted in these expensive cases, potentially limiting resolution control in complex boundary regions (though resolution is high due to small cube size) [S1].
+*   **When to use:** Suitable for implicit surface extraction where high accuracy is required and the scalar field involves boundary elements (e.g., BEM solutions). Not suitable if the field is simple and linear interpolation suffices, or if computational cost of singular integrals is prohibitive.
+
+## Background
+This method originates from meshfree isosurface computation techniques for Boundary Element Methods (BEM). It was proposed by A. Buchau et al. in 2017 [S1]. The approach addresses the challenge of accurately extracting isosurfaces from scalar fields defined by boundary elements, where standard linear interpolation fails to capture the true geometry of the field, especially near singularities or boundaries.
+
+## Sources
+[S1] A meshfree isosurface computation method for boundary element methods, https://doi.org/10.2495/cmem-v5-n5-647-658, fetched 2026-10-26

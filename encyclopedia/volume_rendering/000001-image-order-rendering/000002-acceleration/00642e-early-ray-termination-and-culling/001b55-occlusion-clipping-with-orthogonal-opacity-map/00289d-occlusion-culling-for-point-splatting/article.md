@@ -1,0 +1,147 @@
+# Occlusion Culling for Point Splatting
+
+Also called: Lee '00 Occlusion Culling, Mueller '00 Occlusion Culling
+
+## Overview
+Occlusion culling for point splatting is a technique to accelerate volume rendering by skipping the rasterization of points that are occluded by opaque volume material in front of their screen-space footprint [S1, unofficial]. It builds on [Occlusion Clipping with Orthogonal Opacity Map](990-occlusion-clipping-with-orthogonal-opacity-map.md) by operating directly on the splatted point primitives rather than voxel sub-volumes. It distinguishes itself from its siblings by using screen-space opacity accumulation (Mueller) or hierarchical spatial structures (Lee) to determine visibility, whereas [Hidden Volume Removal using Hierarchical Occlusion Maps](2624-hidden-volume-removal-using-hierarchical-occlusion-maps.md) and [Fine-Scale Occlusion Map Culling](13697-fine-scale-occlusion-map-culling.md) operate on voxel hierarchies or finer-scale maps.
+
+## How it works
+**Inputs and Outputs:**
+*   Input: A set of volume points (or octree nodes containing points), camera parameters, and an initial opacity/visibility map.
+*   Output: A subset of points to be rasterized (splatted) and an updated opacity/visibility map.
+
+**Data Structures:**
+*   **Opacity Map:** A 2D array of size $W \times H$ (image resolution), storing accumulated opacity values.
+*   **Octree:** A hierarchical structure organizing points in 3D space, where each node has a bounding box and a list of child nodes or leaf points.
+*   **Visibility Map (Quadtree):** A hierarchical structure corresponding to the opacity map, used for fast hierarchical culling [S1, unofficial].
+
+**Method Steps:**
+
+1.  **Front-to-Back Rendering Setup:** Ensure points are sorted or rendered in front-to-back order to correctly accumulate opacity in the occlusion map [S1, unofficial].
+2.  **Visibility Test (Mueller '00):**
+    *   After compositing a point, convolve the current opacity image with a box filter. The filter size equals the projected footprint of the point [S1, unofficial].
+    *   To check if a new point is occluded, check only the pixel in the convolved opacity map nearest to the projected center of the point's footprint.
+    *   If the value at this pixel is greater than a threshold (e.g., 1.0 or a specific opacity cutoff), the entire footprint neighborhood is considered occluded, and the point is culled. Otherwise, it is rasterized [S1, unofficial].
+3.  **Visibility Test (Lee '00):**
+    *   Maintain the points in an octree.
+    *   Maintain a visibility map in the form of a quadtree, corresponding to the screen space [S1, unofficial].
+    *   For each octree node, project its bounding box onto the screen.
+    *   Check the projection against the corresponding level of the visibility map quadtree.
+    *   If the node is occluded according to the quadtree, cull the entire node.
+    *   If not occluded, subdivide the octree node and repeat the test for children.
+    *   Rasterize (splat) the points that fail the occlusion test (i.e., are visible) [S1, unofficial].
+    *   Update the visibility map after rasterization [S1, unofficial].
+
+**Pseudocode (Mueller '00 Variant):**
+
+> **Unverified code.** The code below did not pass a test run against a reference implementation, or no test fits it, so it may contain errors.
+
+```python
+def occlusion_culling_mueller(points, image_width, image_height, footprint_radius, opacity_threshold):
+    # Initialize opacity map
+    opacity_map = zeros((image_height, image_width))
+    
+    # Pre-convolve kernel for footprint
+    # Box filter of size 2*footprint_radius + 1
+    kernel = ones((2 * footprint_radius + 1, 2 * footprint_radius + 1)) / (2 * footprint_radius + 1)**2
+    
+    visible_points = []
+    
+    for point in points:
+        # Project point center to screen coordinates (cx, cy)
+        cx, cy = project_to_screen(point.position)
+        
+        # Check bounds
+        if not is_in_bounds(cx, cy, image_width, image_height):
+            continue
+            
+        # Check occlusion using the convolved opacity map
+        # Note: In practice, the convolution is applied to the accumulated opacity map
+        # after each splat or in a post-process step. 
+        # For a single pass implementation, we check the current accumulated opacity
+        # at the center pixel, but Mueller's method specifically uses the 
+        # convolved map to approximate the footprint coverage.
+        
+        # If the opacity map is not pre-convolved, we approximate by checking
+        # the center pixel. For strict adherence to Mueller '00:
+        # 1. Accumulate splat to opacity_map
+        # 2. Convolve opacity_map with box filter
+        # 3. Check pixel at (cx, cy) in convolved map
+        
+        # Simplified check for implementation clarity:
+        # Check if the center pixel's opacity (or convolved value) exceeds threshold
+        current_opacity = opacity_map[int(cy)][int(cx)]
+        
+        if current_opacity < opacity_threshold:
+            # Point is visible
+            visible_points.append(point)
+            # Rasterize point (update opacity_map)
+            rasterize_point(point, opacity_map, footprint_radius)
+            
+            # Re-convolve or update convolved map efficiently
+            # [G] In a full implementation, the convolution would be updated 
+            # incrementally or recomputed. Here we assume a simplified check.
+            opacity_map = convolve(opacity_map, kernel)
+            
+    return visible_points
+```
+
+**Pseudocode (Lee '00 Variant):**
+
+> **Unverified code.** The code below did not pass a test run against a reference implementation, or no test fits it, so it may contain errors.
+
+```python
+def occlusion_culling_lee(octree, visibility_quadtree, image_width, image_height):
+    visible_points = []
+    
+    def traverse_node(node, quad_node):
+        # Project node bounding box to screen
+        screen_bbox = project_bbox(node.bounding_box)
+        
+        # Check if screen_bbox is fully occluded by quad_node
+        if is_fully_occluded(screen_bbox, quad_node):
+            return # Cull entire node
+            
+        if node.is_leaf():
+            # Rasterize points in leaf
+            for point in node.points:
+                visible_points.append(point)
+                rasterize_point(point)
+            # Update visibility map
+            update_visibility_map(screen_bbox, quad_node)
+        else:
+            # Subdivide
+            for child, child_quad in zip(node.children, quad_node.children):
+                traverse_node(child, child_quad)
+                
+    traverse_node(octree.root, visibility_quadtree.root)
+    return visible_points
+```
+
+**Edge Cases and Pitfalls:**
+*   **Precision:** Floating-point errors in projection or opacity accumulation can lead to incorrect culling.
+*   **Boundaries:** Points near the edge of the screen or volume may have partial footprints outside the image bounds.
+*   **Threshold Selection:** The opacity threshold for culling must be chosen carefully to balance performance and visual quality. Too high a threshold may cull visible points; too low may fail to cull occluded ones.
+*   **Convolution Cost:** The Mueller method requires convolution, which can be expensive if not optimized.
+
+## Subtopics
+
+### [Hidden Surface Rejection and Hole Filling](21218-hidden-surface-rejection-and-hole-filling.md)
+Hidden Surface Rejection and Hole Filling is a post-processing technique applied to point-splatted volume renderings to improve visual quality by removing occluded points and filling the resulting gaps with surviving data. It distinguishes itself from standard alpha blending by explicitly discarding points deemed occluded by closer neighbors in screen space, followed by a recursive expansion of valid pixels to eliminate holes, thereby creating a solid appearance from sparse point clouds.
+
+### Z-buffer Occlusion Culling
+Z-buffer Occlusion Culling is a visibility approximation technique to avoid updating descriptors of occluded points, reducing computational cost and improving training efficiency [S2]. It constructs a Z-buffer using the nearest rasterization scheme, reserving only the points with the lowest Z-value at each pixel position [S2].
+
+## Operating characteristics
+*   **Time Complexity:** Depends on the variant. Mueller's method is $O(N)$ for culling checks if convolution is optimized, but convolution itself is $O(W \cdot H \cdot K^2)$ where $K$ is footprint size. Lee's method is $O(N)$ in the best case (all culled) but can be $O(N \log N)$ or worse depending on tree depth and subdivision.
+*   **Memory Complexity:** $O(W \cdot H)$ for the opacity map. Lee's method requires additional memory for the octree and quadtree structures.
+*   **Performance:** Significant speedup when a large portion of the volume is occluded. Performance degrades when the volume is sparse or transparent.
+*   **Strengths:** Simple to implement (Mueller), hierarchical culling is efficient for large datasets (Lee).
+*   **Limitations:** Approximate culling may lead to visual artifacts if not handled carefully. Convolution can be costly.
+
+## Background
+The technique was introduced by Mueller et al. in 2000 and Lee et al. in 2000 for accelerating point-based volume rendering [S1, unofficial]. It addresses the computational bottleneck of rasterizing large numbers of points, many of which are occluded.
+
+## Sources
+[S1] Volumetric Points - Stony Brook Computer Science, https://www3.cs.stonybrook.edu/~mueller/teaching/cse616/volPts.pdf, fetched 2026-10-29 (unofficial)
+[S2] READ: Large-Scale Neural Scene Rendering for Autonomous Driving, https://doi.org/10.1609/aaai.v37i2.25238, fetched 2026-10-29

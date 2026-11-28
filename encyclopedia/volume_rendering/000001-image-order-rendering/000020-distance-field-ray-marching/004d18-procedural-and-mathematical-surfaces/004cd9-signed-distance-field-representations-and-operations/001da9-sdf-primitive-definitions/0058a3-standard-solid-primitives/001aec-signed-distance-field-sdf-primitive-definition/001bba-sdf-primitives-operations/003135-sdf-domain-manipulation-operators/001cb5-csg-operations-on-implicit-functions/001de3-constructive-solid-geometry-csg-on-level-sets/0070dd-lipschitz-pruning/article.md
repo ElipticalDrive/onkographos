@@ -1,0 +1,281 @@
+# Lipschitz Pruning
+
+Also called: Hierarchical Simplification of Primitive-Based SDFs, Hierarchical pruning with Lipschitz criteria, Smooth CSG Tree Pruning
+
+## Overview
+Lipschitz Pruning is a hierarchical algorithm that reduces the number of active nodes in a smooth Constructive Solid Geometry (CSG) tree for a specific region of space, outputting a pruned tree equivalent to the full tree within that region [S1]. It relies on the 1-Lipschitz property of the distance function to determine if binary operators can be replaced by a single operand without affecting the result [S1]. Unlike naive sphere tracing or range arithmetic which evaluates bounds globally or per-node, Lipschitz pruning uses a single local evaluation to prune sub-trees, significantly reducing computational cost while preserving exact distance values near surfaces [S1].
+
+## How it works
+**Inputs:**
+1.  A smooth CSG tree $T$ composed of primitives and binary operators (UNION, INTER, SUB).
+2.  A spatial region defined by a closed ball $B$ with center $p$ and radius $R$.
+3.  A hierarchical grid structure (optional, for multi-resolution application).
+
+**Outputs:**
+A pruned tree $T'$ containing only the nodes necessary to evaluate the SDF exactly within region $B$.
+
+**Data Structures:**
+The implementation uses three arrays [S1]:
+1.  **Immutable Node Array:** Stores the original CSG tree. Each node contains:
+    *   Type bit (primitive or operator).
+    *   For primitives: shape type, parameters, modifiers, transformation matrix.
+    *   For operators: operator type (UNION, INTER, SUB), blending radius $k$.
+    *   Derived fields: sign $s$, complementary flags $c_a, c_b$ (deduced from operator type).
+2.  **Mutable Node Array:** Stores the pruned tree data. Each element contains:
+    *   `ancestor_index`: Index of the closest non-skipped ancestor.
+    *   `cFlag`: Complementary flag for the node.
+    *   `global_index`: Index referencing the node in the Immutable Node Array.
+3.  **Cell Array:** Stores the start index and length of the mutable node slice for each grid cell. Indexed by Morton order for spatial locality.
+
+**Parameters:**
+*   $k$: Blending radius for smooth CSG operators. Determines the distance at which an operator reduces to one operand [S1].
+*   $R$: Radius of the spatial region (cell) being pruned.
+*   $p$: Center of the spatial region.
+
+**Algorithm Steps:**
+
+1.  **Constraint Definition:**
+    For a binary operator with operands $a, b$, define transformed values $a' = c_a \cdot a$ and $b' = c_b \cdot b$. The operator reduces to one operand if:
+    $$ \text{if } |a' - b'| > k, \quad \text{OP}(a, b) = \begin{cases} a' & \text{if } s \cdot a' \leq s \cdot b' \\ b' & \text{otherwise} \end{cases} \quad (1) $$
+    Where $s, c_a, c_b$ are defined per operator type [S1]:
+    *   UNION: $c_a=+1, c_b=+1, s=+1$
+    *   INTER: $c_a=+1, c_b=+1, s=-1$
+    *   SUB: $c_a=+1, c_b=-1, s=-1$
+
+2.  **Pruning Condition (Lipschitz Bound):**
+    For a binary operator with children $f_1, f_2$ and region $B(p, R)$, the operator can be skipped (replaced by a child) if:
+    $$ |f_1(p) - f_2(p)| \geq k + 2R \quad (2) $$
+    This holds because $f_1, f_2$ are 1-Lipschitz ($\|\nabla f\| \leq 1$), implying $|f_1(q) - f_2(q)| \geq |f_1(p) - f_2(p)| - 2R \geq k$ for all $q \in B$ [S1].
+
+3.  **Traversal #1 (Post-Order): Compute Local State:**
+    Iterate through nodes in post-order (children before parents). For each node:
+    *   **Inactive:** If the node does not contribute to its parent's value (e.g., parent is skipped and selects the other child, or parent is inactive). Mark as `INACTIVE`.
+    *   **Skipped:** If the node is a binary operator and satisfies Condition (2). Mark as `SKIPPED`.
+        *   Evaluate $f_1(p)$ and $f_2(p)$.
+        *   If $|f_1(p) - f_2(p)| \geq k + 2R$, mark operator `SKIPPED`.
+        *   Determine which child is kept based on Eq. (1). Mark the *other* child as `INACTIVE`.
+    *   **Active:** Otherwise, mark as `ACTIVE`.
+
+4.  **Traversal #2 (Pre-Order): Compute Global State and Rewire:**
+    Iterate through nodes in pre-order (parents before children).
+    *   **Global Activity:** A node is `GLOBALLY_ACTIVE` if it is `ACTIVE` and no ancestor is `INACTIVE`.
+    *   **Parent Rewiring:** If a node's parent is `SKIPPED`, update the node's parent to the closest ancestor that is not `SKIPPED`.
+    *   **Flag Propagation:** Propagate the complementary flag (`cFlag`) of `SKIPPED` nodes to their children. If a skipped node selected child $A$, child $A$'s `cFlag` remains unchanged; if it selected $B$, $B$'s `cFlag` is applied.
+    *   **Counting:** Count the number of `GLOBALLY_ACTIVE` nodes to determine the size of the pruned tree.
+
+5.  **Hierarchical Application:**
+    *   Start with a coarse grid.
+    *   For each cell, input is the pruned tree of its parent cell.
+    *   Apply Traversals 1 and 2 to generate the pruned tree for the current cell.
+    *   Subdivide cells and repeat until target resolution is reached.
+
+**Pseudocode:**
+
+> **Unverified code.** The code below did not pass a test run against a reference implementation, or no test fits it, so it may contain errors.
+
+```python
+def lipschitz_prune(tree_nodes, cell_center, cell_radius, blending_radius_k):
+    """
+    Prunes a CSG tree for a specific spatial region.
+    tree_nodes: List of node objects with fields: type, children (indices), k, s, ca, cb.
+    cell_center: Point p.
+    cell_radius: Radius R.
+    blending_radius_k: Scalar k.
+    Returns: List of indices of globally active nodes in post-order.
+    """
+    n = len(tree_nodes)
+    local_state = ['ACTIVE'] * n  # ACTIVE, INACTIVE, SKIPPED
+    global_state = [False] * n
+    new_parent = [-1] * n
+    c_flag = [1] * n  # Complementary flag for each node
+    
+    # Initialize c_flag based on immutable tree structure
+    for i in range(n):
+        node = tree_nodes[i]
+        if node.type == 'PRIMITIVE':
+            c_flag[i] = 1 # Primitives have no inherent complement in this context unless specified
+        else:
+            # c_flag is stored in children in the implementation, 
+            # but here we assume it's derived or passed. 
+            # For simplicity, we assume c_flag[i] is the flag applied TO node i 
+            # by its parent if the parent was skipped.
+            pass 
+
+    # Traversal 1: Post-Order (Forward iteration if nodes are stored in post-order)
+    # Assuming tree_nodes is ordered such that children appear before parents
+    for i in range(n):
+        node = tree_nodes[i]
+        if node.type == 'PRIMITIVE':
+            local_state[i] = 'ACTIVE'
+            continue
+            
+        # Binary Operator
+        left_child = node.children[0]
+        right_child = node.children[1]
+        
+        # Evaluate operands at center p
+        f1 = evaluate_sdf(tree_nodes, left_child, cell_center)
+        f2 = evaluate_sdf(tree_nodes, right_child, cell_center)
+        
+        # Apply complementary flags from children if they were skipped by their parents
+        # Note: In a full implementation, c_flag[left_child] and c_flag[right_child] 
+        # would be updated during the pre-order pass of the PARENT's processing or 
+        # propagated down. Here we assume they are current.
+        a_prime = node.ca * f1
+        b_prime = node.cb * f2
+        
+        # Check Skip Condition
+        if abs(a_prime - b_prime) >= blending_radius_k + 2 * cell_radius:
+            local_state[i] = 'SKIPPED'
+            
+            # Determine which child is kept
+            if node.s * a_prime <= node.s * b_prime:
+                kept = left_child
+                discarded = right_child
+            else:
+                kept = right_child
+                discarded = left_child
+                
+            # Mark discarded child as inactive
+            local_state[discarded] = 'INACTIVE'
+            
+            # Propagate c_flag to kept child? 
+            # The kept child's value is used directly. 
+            # If the operator reduces to a', the sign is handled by a'.
+            # The c_flag of the kept child remains as is relative to its own parent.
+        else:
+            local_state[i] = 'ACTIVE'
+
+    # Traversal 2: Pre-Order (Backward iteration if nodes are stored in post-order)
+    for i in range(n - 1, -1, -1):
+        node = tree_nodes[i]
+        
+        # Determine Global State
+        is_locally_active = (local_state[i] == 'ACTIVE')
+        parent_idx = get_parent_index(i)
+        
+        if parent_idx == -1:
+            is_globally_active = is_locally_active
+        else:
+            # Check if any ancestor is inactive
+            # In a linear array, we check the immediate parent's global state logic
+            # or propagate an "inactive ancestor" flag.
+            # Simplified: if parent is locally inactive, this node is globally inactive.
+            # However, we must also account for skipped ancestors rewiring.
+            
+            # Correct logic from source: "A node contributes... if it is active and 
+            # there are no inactive nodes among its ancestors."
+            # We need to track if an inactive ancestor exists.
+            # Let's assume we propagate a boolean `has_inactive_ancestor`
+            pass 
+            
+        # For implementation completeness, we track global activity:
+        if parent_idx == -1:
+            global_state[i] = is_locally_active
+        else:
+            # If parent is locally inactive, this node is globally inactive
+            if local_state[parent_idx] == 'INACTIVE':
+                global_state[i] = False
+            else:
+                # If parent is skipped, we look at grandparent?
+                # Source: "new parent of a node is its closest ancestor that is not skipped"
+                # But global activity depends on INACTIVE ancestors.
+                # If parent is SKIPPED, it doesn't block activity, but rewires parent.
+                # We need to check if the *rewired* parent or any ancestor is INACTIVE.
+                # Simplified assumption: Check if any node in the path to root is INACTIVE.
+                global_state[i] = is_locally_active and not has_inactive_ancestor(i)
+        
+        # Rewire Parent
+        if local_state[i] == 'SKIPPED':
+            # Find closest non-skipped ancestor
+            ancestor = parent_idx
+            while ancestor != -1 and local_state[ancestor] == 'SKIPPED':
+                ancestor = get_parent_index(ancestor)
+            new_parent[i] = ancestor
+        else:
+            new_parent[i] = parent_idx # Or keep original if not skipped
+            
+        # Propagate cFlag
+        # If this node is skipped, its children's cFlag might need adjustment?
+        # Source: "propagate the complementary flag of skipped nodes to their children"
+        # This usually means if a skipped node selected a child, that child's 
+        # relationship to the grandparent is direct.
+        pass
+
+    # Collect Globally Active Nodes
+    pruned_indices = [i for i in range(n) if global_state[i]]
+    return pruned_indices
+
+def evaluate_sdf(nodes, node_idx, p):
+    """
+    Evaluates the SDF for a specific node at point p.
+    For primitives, returns distance.
+    For operators, recursively evaluates children.
+    Note: In the pruning phase, we only evaluate at p.
+    """
+    node = nodes[node_idx]
+    if node.type == 'PRIMITIVE':
+        return compute_primitive_distance(node, p)
+    else:
+        f1 = evaluate_sdf(nodes, node.children[0], p)
+        f2 = evaluate_sdf(nodes, node.children[1], p)
+        return apply_operator(node, f1, f2)
+
+def apply_operator(node, f1, f2):
+    """
+    Applies the smooth CSG operator.
+    """
+    k = node.k
+    phi = lambda d: (1.0 / (4 * k)) * max(k - d, 0)**2
+    
+    if node.type == 'UNION':
+        return min(f1, f2) - phi(abs(f1 - f2))
+    elif node.type == 'INTER':
+        return max(f1, f2) + phi(abs(f1 - f2))
+    elif node.type == 'SUB':
+        return max(f1, -f2) + phi(abs(f1 + f2))
+```
+
+## Subtopics
+
+### [Far-field Culling](8625-far-field-culling.md)
+Far-field culling is an optimization for Signed Distance Field (SDF) evaluation that replaces sub-trees in cells sufficiently far from the 0-isosurface with a single constant node providing a conservative lower-bound distance. It builds on [Lipschitz Pruning](8623-lipschitz-pruning.md) by further reducing the number of active nodes during sphere tracing or contouring tasks, where exact differentiability is not required. Unlike the baseline hierarchical pruning which preserves the full tree structure within active regions, far-field culling aggressively simplifies the geometry representation in empty space, improving tracing performance by up to a factor of 2 on complex scenes.
+
+### [ComputeLocalState](9386-computelocalstate.md)
+ComputeLocalState is a procedure that determines the local state (ACTIVE, INACTIVE, or SKIPPED) of nodes in a hierarchical Signed Distance Field (SDF) tree relative to a specific spatial cell. It utilizes Lipschitz pruning to identify and ignore primitives that are provably too far from the cell's surface to affect the local distance field, thereby optimizing subsequent ray marching or evaluation steps. It differs from standard tree traversal by combining post-order evaluation with immediate state-based culling, building on the hierarchical CSG pruning framework described in [GPU Implementation of Hierarchical CSG Pruning](8626-gpu-implementation-of-hierarchical-csg-pruning.md) [G].
+
+### [1-Lipschitz Proxy Node Construction](20195-1-lipschitz-proxy-node-construction.md)
+1-Lipschitz Proxy Node Construction replaces a computationally intensive sub-tree of a Signed Distance Field (SDF) with a simpler proxy volume $V$ and a proxy field $v$, ensuring the resulting composite field $f_e$ is globally 1-Lipschitz continuous. Unlike standard proxy nodes which may yield discontinuous fields incompatible with smooth Boolean operators, this method maintains continuity, allowing the pruned tree to be used below smooth unions and other operators requiring Lipschitz continuity. It builds on [Lipschitz Pruning](8623-lipschitz-pruning.md) by providing the specific mechanism for substituting tree branches while preserving the mathematical properties required for safe hierarchical evaluation.
+
+## Operating characteristics
+**Time Complexity:**
+The pruning procedure runs in $O(N)$ time relative to the number of nodes in the input tree for a single cell [S1]. With hierarchical application, the complexity scales with the number of cells and the decreasing size of pruned trees at finer levels [S1].
+
+**Memory Complexity:**
+Memory usage is proportional to the sum of pruned tree sizes across all cells. The hierarchical approach prevents the explosion of memory that would occur if full trees were stored for every cell in a dense grid [S1]. The three-array structure (Cell, Mutable Node, Immutable Node) allows efficient double-buffering [S1].
+
+**Performance:**
+On an RTX 4060 laptop:
+*   Pruning time $T_p$ ranges from 0.72 ms (Gameboy, 65 nodes) to 125.54 ms (Fluid, 27,977 nodes) [S1].
+*   Sphere tracing time $T_s$ ranges from 1.17 ms to 78.52 ms [S1].
+*   Discretization time $T_d$ over a $256^3$ grid ranges from 0.19 ms to 6.99 ms [S1].
+*   Speedups over naive sphere tracing reach two orders of magnitude on City and Crowd scenes at 1920×1080 resolution [S1].
+*   Far-field culling improves tracing performance by up to a factor of 2 [S1].
+
+**Strengths:**
+*   Reduces evaluation cost significantly for complex scenes.
+*   Preserves exact distance values near surfaces.
+*   Compatible with smooth CSG operators.
+*   Efficient on GPU via compute shaders [S1].
+
+**Limitations:**
+*   Restricted to 1-Lipschitz functions ($\|\nabla f\| \leq 1$) [S1].
+*   Efficiency drops for densely packed primitives (e.g., fluid particles) where pruning potential is low [S1].
+*   High blending radius $k$ negatively affects runtime by reducing the range of effective pruning [S1].
+*   Requires affine transformations to be composed down to leaves as a pre-processing step [S1].
+
+## Background
+Lipschitz Pruning was introduced in the paper "Lipschitz Pruning: Hierarchical Simplification of Primitive-Based SDFs" [S1]. It addresses the computational bottleneck of evaluating smooth CSG trees for Signed Distance Fields. The method leverages the 1-Lipschitz property of SDFs to bound the influence of operators, allowing for aggressive tree simplification. It builds upon earlier work on hierarchical CSG pruning and GPU-based implicit surface rendering [S1].
+
+## Sources
+[S1] Lipschitz Pruning: Hierarchical Simplification of Primitive‐Based SDFs, https://doi.org/10.1111/cgf.70057, fetched 2026-10-26

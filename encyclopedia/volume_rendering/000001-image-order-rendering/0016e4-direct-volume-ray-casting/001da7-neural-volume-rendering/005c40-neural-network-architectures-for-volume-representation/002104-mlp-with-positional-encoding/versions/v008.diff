@@ -1,0 +1,285 @@
+--- v007.md
++++ v008.md
+@@ -4,40 +4,53 @@
+ 
+ ## Overview
+-A neural rendering module that predicts RGB color values from input features, 3D spatial positions, and viewing directions using a Multi-Layer Perceptron (MLP) with sinusoidal positional encoding applied to both position and view direction [S1, S2, unofficial]. It serves as the color prediction head in neural volume rendering pipelines, specifically within the context of hash-encoding-based methods like Instant Neural Graphics Primitives (NGP) [S1, unofficial]. It differs from [Sigma Network Layer](6256-sigma-network-layer.md) by outputting a 3-channel color vector instead of a scalar density, and from [Neural Radiance Caching](9347-neural-radiance-caching.md) by performing direct per-sample prediction rather than caching precomputed radiance values.
++A neural rendering module that predicts RGB color from input features, view directions, and 3D positions using a Multi-Layer Perceptron (MLP) with positional encoding applied to both position and view direction [S2, unofficial][S3, unofficial]. It solves the problem of mapping low-level geometric and semantic features to high-frequency view-dependent appearance by lifting inputs into a high-frequency frequency space, allowing the MLP to learn fine details that would otherwise be smoothed out by standard fully-connected layers [S2, unofficial][S3, unofficial]. It differs from its sibling [MLP with Positional Encoding and IOR Activation](4947-mlp-with-positional-encoding-and-ior-activation.md), which constrains output to a positive range for physical validity, and [MLCA](4947-mlp-with-positional-encoding-and-ior-activation.md) (via its hybrid module), which adds explicit spatial mixing before the MLP, by relying on the standard concatenation of raw and encoded features directly into the MLP input stream [S2, unofficial][S3, unofficial].
+ 
+ ## How it works
+ **Inputs and Outputs:**
+ *   **Inputs:**
+-    *   `pts`: 3D spatial coordinates, shape $(N, 3)$ [S1, S2, unofficial].
+-    *   `viewdirs`: Normalized viewing directions, shape $(N, 3)$ [S1, S2, unofficial].
+-    *   `features`: Input feature vectors from the volume representation (e.g., hash grid features), shape $(N, inChanel)$ [S2, unofficial].
++    *   `pts`: 3D position coordinates, shape $(N, 3)$ [S2, unofficial].
++    *   `viewdirs`: View direction vectors, shape $(N, 3)$ [S2, unofficial].
++    *   `features`: Input feature vector from the volume representation (e.g., from a tensor or voxel grid), shape $(N, inChanel)$ [S2, unofficial][S3, unofficial].
+ *   **Outputs:**
+-    *   `rgb`: Predicted RGB color values, shape $(N, 3)$, clamped to $[0, 1]$ [S1, S2, unofficial].
++    *   `rgb`: Predicted RGB color values, shape $(N, 3)$, values in $[0, 1]$ due to sigmoid activation [S2, unofficial][S3, unofficial].
+ 
+ **Parameters:**
+-*   `inChanel`: Input feature dimension from the volume representation [S2, unofficial].
+-*   `viewpe`: Number of frequency bands for view direction positional encoding. Default: 6 [S1, S2, unofficial].
+-*   `pospe`: Number of frequency bands for position positional encoding. Default: 6 [S1, S2, unofficial].
+-*   `featureC`: Hidden dimension size for the MLP layers. Default: 128 [S2, unofficial].
++*   `inChanel`: Input feature dimension from the volume representation [S3, unofficial].
++*   `viewpe`: Number of frequency bands for view direction positional encoding. Default: 6 [S2, unofficial].
++*   `pospe`: Number of frequency bands for position positional encoding. Default: 6 [S2, unofficial].
++*   `featureC`: Hidden dimension size for the MLP layers. Default: 128 [S2, unofficial][S3, unofficial].
++*   `mlp`: Sequence of linear layers.
+ 
+-**Data Structures and Layout:**
+-The MLP consists of three linear layers:
+-1.  **Layer 1:** Input dimension $in\_mlpC$, Output dimension $featureC$.
+-2.  **Layer 2:** Input dimension $featureC$, Output dimension $featureC$.
+-3.  **Layer 3:** Input dimension $featureC$, Output dimension 3 (RGB).
++**Data Structures:**
++The MLP consists of a sequence of fully connected layers. A common implementation uses 3 linear layers for the core mapping, though variants exist with more layers [S2, unofficial][S3, unofficial].
++*   Layer 1: Linear($in\_mlpC$, $featureC$)
++*   Layer 2: Linear($featureC$, $featureC$)
++*   Layer 3: Linear($featureC$, 3)
++*   Activations: ReLU applied after Layer 1 and Layer 2. Sigmoid applied to the output of Layer 3.
+ 
+-The input dimension $in\_mlpC$ is calculated as [S2, unofficial]:
+-$$
+-in\_mlpC = (3 + 2 \cdot viewpe \cdot 3) + (3 + 2 \cdot pospe \cdot 3) + inChanel
+-$$
+-This accounts for raw viewdirs (3), PE viewdirs ($2 \cdot viewpe \cdot 3$), raw pts (3), PE pts ($2 \cdot pospe \cdot 3$), and features [S2, unofficial].
++**Formulas:**
++The input dimension to the MLP, $in\_mlpC$, is calculated as [S3, unofficial]:
++$$ in\_mlpC = (3 + 2 \cdot viewpe \cdot 3) + (3 + 2 \cdot pospe \cdot 3) + inChanel $$
++This accounts for:
++*   Raw viewdirs: 3
++*   Encoded viewdirs: $2 \cdot viewpe \cdot 3$ (sine and cosine for each band)
++*   Raw pts: 3
++*   Encoded pts: $2 \cdot pospe \cdot 3$
++*   Features: $inChanel$
++
++The positional encoding function $\gamma$ for a coordinate $x$ with $L$ bands is typically defined as [S2, unofficial][S3, unofficial]:
++$$ \gamma(x) = [\sin(2^0 \pi x), \cos(2^0 \pi x), \dots, \sin(2^{L-1} \pi x), \cos(2^{L-1} \pi x)] $$
+ 
+ **Steps:**
+-1.  Initialize an input list `indata` with `[features, viewdirs]` [S1, S2, unofficial].
+-2.  If `pospe > 0`, compute the positional encoding of `pts` and append it to `indata` [S1, S2, unofficial].
+-3.  If `viewpe > 0`, compute the positional encoding of `viewdirs` and append it to `indata` [S1, S2, unofficial].
+-4.  Concatenate all elements in `indata` along the last dimension to form `mlp_in` [S1, S2, unofficial].
+-5.  Pass `mlp_in` through the MLP sequence: Layer 1, ReLU, Layer 2, ReLU, Layer 3 [S1, S2, unofficial].
+-6.  Apply sigmoid activation to the output of Layer 3 to clamp RGB values to $[0, 1]$ [S1, S2, unofficial].
++1.  Initialize an input list `indata` with the raw features and raw view directions: `indata = [features, viewdirs]` [S3, unofficial].
++2.  If `pospe > 0`, compute the positional encoding of `pts` and append it to `indata`: `indata += [positional_encoding(pts, pospe)]` [S2, unofficial][S3, unofficial]. Note: Features are *not* positional encoded in this standard variant [S3, unofficial].
++3.  If `viewpe > 0`, compute the positional encoding of `viewdirs` and append it to `indata`: `indata += [positional_encoding(viewdirs, viewpe)]` [S2, unofficial][S3, unofficial].
++4.  Concatenate all elements in `indata` along the last dimension to form the MLP input tensor `mlp_in`: `mlp_in = torch.cat(indata, dim=-1)` [S2, unofficial][S3, unofficial].
++5.  Pass `mlp_in` through the MLP sequence:
++    *   $h_1 = \text{ReLU}(\text{Linear}_1(mlp\_in))$
++    *   $h_2 = \text{ReLU}(\text{Linear}_2(h_1))$
++    *   $rgb_{raw} = \text{Linear}_3(h_2)$
++    [S2, unofficial][S3, unofficial].
++6.  Apply sigmoid activation to the output: `rgb = torch.sigmoid(rgb_raw)` [S2, unofficial][S3, unofficial].
+ 
+ **Pseudocode:**
+@@ -47,41 +60,24 @@
+ import math
+ 
+-def positional_encoding(x, num_freq_bands):
+-    """
+-    Computes sinusoidal positional encoding.
+-    x: tensor of shape (..., D)
+-    num_freq_bands: int
+-    Returns: tensor of shape (..., D * (2 * num_freq_bands + 1))
+-    """
+-    freq_bands = 2.0 ** torch.arange(num_freq_bands, dtype=x.dtype, device=x.device) * math.pi
+-    # Expand x to (..., 1, D) and freq_bands to (num_freq_bands, 1)
+-    # Result shape: (..., num_freq_bands, D)
+-    scaled_x = x.unsqueeze(-2) * freq_bands.unsqueeze(-1)
+-    # Concatenate sin and cos: (..., num_freq_bands * 2, D)
+-    pe = torch.cat([torch.sin(scaled_x), torch.cos(scaled_x)], dim=-2)
+-    # Concatenate original x: (..., D + num_freq_bands * 2, D) -> (..., D * (2*num_freq_bands + 1))
+-    # Note: The standard NeRF PE usually repeats the dimension. 
+-    # Based on S2 formula: (3+2*viewpe*3). This implies for each of the 3 dims, we get 2*viewpe bands.
+-    # So for input dim D, output is D * (1 + 2 * num_freq_bands).
+-    # The above implementation does: sin/cos for each freq band.
+-    # Let's align with S2's dimension count: 3 raw + 2*viewpe*3 encoded.
+-    # So for each input dimension, we append 2*num_freq_bands values.
+-    
+-    # Re-implementation to match S2 dimensionality exactly:
+-    # x: (..., D)
+-    # freq_bands: (num_freq_bands,)
+-    # scaled_x: (..., num_freq_bands, D)
+-    # pe: (..., num_freq_bands * 2, D)
+-    # final: (..., D + num_freq_bands * 2 * D) = (..., D * (1 + 2 * num_freq_bands))
+-    
+-    # However, standard implementation often interleaves or stacks.
+-    # S2 says: 3 raw + 2*viewpe*3 encoded.
+-    # This means for each of the 3 coordinates, we have 2*viewpe encoded values.
+-    # So total dim = 3 * (1 + 2*viewpe).
+-    
+-    # Let's write a helper that matches this specific layout.
+-    pass
++class PositionalEncoding(nn.Module):
++    def __init__(self, num_bands):
++        super().__init__()
++        self.num_bands = num_bands
+ 
+-class MLPRender_PE(nn.Module):
++    def forward(self, x):
++        # x shape: (..., D)
++        # Output shape: (..., D * 2 * num_bands)
++        freq_bands = 2.0 ** torch.arange(self.num_bands, device=x.device).float()
++        # Reshape for broadcasting: (..., D) -> (..., 1, D)
++        # freq_bands: (num_bands,) -> (1, num_bands, 1)
++        scaled_x = x.unsqueeze(1) * freq_bands.unsqueeze(0).unsqueeze(-1)
++        # scaled_x shape: (..., num_bands, D)
++        sin_x = torch.sin(scaled_x)
++        cos_x = torch.cos(scaled_x)
++        # Concatenate sin and cos along the last dimension
++        # Result shape: (..., num_bands * D * 2)
++        return torch.cat([sin_x, cos_x], dim=-1)
++
++class MLPRenderPE(nn.Module):
+     def __init__(self, inChanel, viewpe=6, pospe=6, featureC=128):
+         super().__init__()
+@@ -91,9 +87,13 @@
+         self.featureC = featureC
+         
+-        # Calculate input dimension
+-        # Raw viewdirs (3) + PE viewdirs (2 * viewpe * 3)
+-        # Raw pts (3) + PE pts (2 * pospe * 3)
++        # Calculate input dimension to MLP
++        # Raw viewdirs (3) + Encoded viewdirs (3 * 2 * viewpe)
++        # Raw pts (3) + Encoded pts (3 * 2 * pospe)
+         # Features (inChanel)
+         self.in_mlpC = (3 + 2 * viewpe * 3) + (3 + 2 * pospe * 3) + inChanel
++        
++        # Positional Encoders
++        self.pos_encoder = PositionalEncoding(pospe)
++        self.view_encoder = PositionalEncoding(viewpe)
+         
+         # MLP Layers
+@@ -102,8 +102,6 @@
+         self.layer3 = nn.Linear(featureC, 3)
+         
+-        # Initialize bias of the final layer to 0
++        # Initialize bias of final layer to 0
+         torch.nn.init.constant_(self.layer3.bias, 0)
+-        
+-        self.relu = nn.ReLU()
+ 
+     def forward(self, pts, viewdirs, features):
+@@ -115,82 +113,60 @@
+         
+         if self.pospe > 0:
+-            indata.append(self._positional_encoding(pts, self.pospe))
++            pts_pe = self.pos_encoder(pts)
++            indata.append(pts_pe)
+             
+         if self.viewpe > 0:
+-            indata.append(self._positional_encoding(viewdirs, self.viewpe))
++            viewdirs_pe = self.view_encoder(viewdirs)
++            indata.append(viewdirs_pe)
+             
++        # Concatenate along the last dimension
+         mlp_in = torch.cat(indata, dim=-1)
+         
+-        x = self.layer1(mlp_in)
+-        x = self.relu(x)
+-        x = self.layer2(x)
+-        x = self.relu(x)
+-        x = self.layer3(x)
++        # Forward pass through MLP
++        h1 = torch.relu(self.layer1(mlp_in))
++        h2 = torch.relu(self.layer2(h1))
++        rgb_raw = self.layer3(h2)
+         
+-        rgb = torch.sigmoid(x)
++        # Apply sigmoid to get RGB in [0, 1]
++        rgb = torch.sigmoid(rgb_raw)
++        
+         return rgb
+-
+-    def _positional_encoding(self, x, num_freq_bands):
+-        """
+-        Computes positional encoding such that for each input dimension d,
+-        we get 2 * num_freq_bands encoded values.
+-        Total output dim = input_dim * (1 + 2 * num_freq_bands).
+-        """
+-        freq_bands = 2.0 ** torch.arange(num_freq_bands, dtype=x.dtype, device=x.device) * math.pi
+-        # x: (N, D)
+-        # freq_bands: (num_freq_bands,)
+-        # scaled_x: (N, num_freq_bands, D)
+-        scaled_x = x.unsqueeze(1) * freq_bands.unsqueeze(0).unsqueeze(-1)
+-        # pe: (N, num_freq_bands * 2, D)
+-        pe = torch.cat([torch.sin(scaled_x), torch.cos(scaled_x)], dim=1)
+-        # Concatenate original x: (N, D + num_freq_bands * 2 * D)
+-        # Reshape to (N, D * (1 + 2 * num_freq_bands))
+-        # Note: The order is [x_0, sin(x_0*w1), cos(x_0*w1), ..., x_1, ...]
+-        # Or is it [x_0, x_1, ..., sin(x_0*w1), cos(x_0*w1), ...]?
+-        # S2 formula: 3 raw + 2*viewpe*3 encoded.
+-        # This implies the raw values are kept separate or interleaved?
+-        # Usually, PE is appended.
+-        # Let's assume standard concatenation: [x, pe]
+-        # But pe shape is (N, 2*freq*D).
+-        # We need to flatten the last two dims of pe to match D*(2*freq).
+-        pe_flat = pe.reshape(x.shape[0], -1)
+-        return torch.cat([x, pe_flat], dim=-1)
+ ```
+ 
+ **Edge Cases and Pitfalls:**
+-*   **Precision:** Sinusoidal functions can suffer from precision issues at high frequencies. [G] Clamping input coordinates to a reasonable range before encoding can help stabilize gradients.
+-*   **Boundary Conditions:** The sigmoid activation ensures RGB values are within $[0, 1]$, preventing invalid color outputs [S1, S2, unofficial].
+-*   **Degenerate Input:** If `viewdirs` are not normalized, the positional encoding may produce unexpected results. [G] Ensure `viewdirs` are normalized before encoding.
++*   **Precision:** High-frequency positional encoding can lead to numerical instability if the input coordinates are not normalized to a small range (e.g., $[-1, 1]$ or $[0, 1]$). Large coordinate values result in extremely high-frequency oscillations that are difficult for the MLP to learn [G].
++*   **Boundary Conditions:** The sigmoid activation ensures output is bounded, but if the raw output is very large negative, the gradient vanishes. Initializing the final bias to 0 helps start training near the middle of the sigmoid [S2, unofficial][S3, unofficial].
++*   **Feature Encoding:** In this specific variant, input features are *not* positional encoded, only `pts` and `viewdirs` [S3, unofficial]. Concatenating PE of features is an alternative approach but not the standard definition here.
+ 
+ ## Subtopics
+ 
+-### [RGB Network Layer](4051-rgb-network-layer.md)
+-The RGB Network Layer is a neural rendering module that predicts RGB color values from input features, view directions, and spatial positions using a Multi-Layer Perceptron (MLP) with positional encoding. It serves as the color prediction head in neural volume rendering pipelines, specifically within the context of hash-encoding-based methods like Instant Neural Graphics Primitives (NGP). It builds on [MLP with Positional Encoding](2416-mlp-with-positional-encoding.md) by handling the specific concatenation of directional and spatial embeddings and the final sigmoid activation for color clamping. It differs from [Sigma Network Layer](6256-sigma-network-layer.md) by outputting a 3-channel color vector instead of a scalar density, and from [Neural Radiance Caching](9347-neural-radiance-caching.md) by performing direct per-sample prediction rather than caching precomputed radiance values.
+-
+-### [MLP with Positional Encoding and IOR Activation](4947-mlp-with-positional-encoding-and-ior-activation.md)
+-A multi-layer perceptron that maps 3D coordinates to a scalar field (e.g., refractive index) using positional encoding, residual skip connections, and a domain-specific activation function to constrain output ranges. It is distinguished by a post-processing activation function that maps the MLP's raw output to a positive range $[1, \infty)$, ensuring physical validity for light propagation.
+-
+-### [Neural Radiance Caching](9347-neural-radiance-caching.md)
+-Neural Radiance Caching (NRC) is a neural rendering technique that uses a Multi-Layer Perceptron (MLP) to predict photorealistic pixel colors from per-pixel feature buffers containing world-space positions and auxiliary features. It solves the problem of real-time indirect illumination by deferring shading computations to a trained neural model, allowing for online adaptation to dynamic scenes. Unlike sibling methods that may require scene-specific retraining or lack dynamic support, NRC continuously overfits to the current lighting and geometry using sparse light paths spawned from the camera view, enabling real-time performance with a strict training budget.
+-
+ ### MLP with Per-layer Inputs Incorporation
+-An improved MLP network structure for few-shot view synthesis that mitigates overfitting by incorporating both 3D positions and 2D viewing directions at each layer input, ensuring each layer explicitly perceives the five-dimensional input embedding [S3]. The input fusion formula is $f_i = \phi_i(f_{i-1}, \gamma_L(X))$, with $f_1 = \phi_1(\gamma_L(X))$ where $X$ represents the five-dimensional information $(x,y,z,\theta,\phi)$, $\gamma_L(X)$ is the encoded input embedding, and $\phi_i$ represents the MLP of the $i$-th layer outputting feature $f_i$ [S3].
++An improved MLP structure for few-shot view synthesis that mitigates overfitting by incorporating both 3D positions and 2D viewing directions at each layer input, ensuring each layer explicitly perceives the five-dimensional input embedding [S4]. It differs from the standard MLP with PE by injecting the encoded input $\gamma_L(X)$ into every layer's computation rather than just the first [S4]. The formula is $f_i = \phi_i(f_{i-1}, \gamma_L(X))$, with $f_1 = \phi_1(\gamma_L(X))$, where $X$ is the 5D info $(x,y,z,\theta,\phi)$ [S4].
+ 
+ ### Ablation variants for positional encoding
+-Blind proposer: ignores input coarse features, always outputs identical proposals [S4, unofficial]. No-position proposer: ignores coarse sample positions along the ray, making it insensitive to feature ordering [S4, unofficial]. Concat proposer: concatenates positional encodings with features instead of summing [S4, unofficial]. Learnt-position proposer: learns positional encodings instead of using sinusoidal ones, summed with features [S4, unofficial]. The No-position proposer produces identical proposals for colinear rays of opposite directionality [S4, unofficial]. It is competitive on LLFF-NeRF because all scenes are forward-facing, but fails on Blender [S4, unofficial].
++Variants studied in [S5, unofficial] to understand the role of position in proposers:
++*   **Blind proposer:** Ignores input coarse features, always outputs identical proposals [S5, unofficial].
++*   **No-position proposer:** Ignores coarse sample positions along the ray, making it insensitive to feature ordering. It produces identical proposals for colinear rays of opposite directionality and fails on non-forward-facing scenes like Blender, though it is competitive on LLFF-NeRF [S5, unofficial].
++*   **Concat proposer:** Concatenates positional encodings with features instead of summing [S5, unofficial].
++*   **Learnt-position proposer:** Learns positional encodings instead of using sinusoidal ones, summed with features [S5, unofficial].
+ 
+ ### MLCA (Hybrid Spatial Feature Learning Module)
+-A module added after position encoding and before the MLP to capture spatial feature information and mix channels of these features, establishing mixed associations in feature dimension space [S5]. Input transformation: Concatenate position encoded spatial position $x$ and direction $d$: $X_{input} = Concat(PE(x), PE(d))$ [S5]. Spatial feature capture: Pass $X_{input}$ through fully connected layer with GELU activation: $X_{token} = GELU(W_{token} X_{input} + b_{token})$ [S5]. Hybrid feature channel mixing: Pass $X_{token}$ through fully connected layer with GELU activation: $X_{channel} = GELU(W_{channel} X_{token} + b_{channel})$ [S5].
++A module added after position encoding and before the MLP to capture spatial feature information and mix channels [S6]. It differs from the standard MLP with PE by adding two fully connected layers with GELU activation between the encoded input and the main MLP [S6]. Steps: 1. Concatenate $PE(x)$ and $PE(d)$ to get $X_{input}$. 2. $X_{token} = GELU(W_{token} X_{input} + b_{token})$. 3. $X_{channel} = GELU(W_{channel} X_{token} + b_{channel})$ [S6].
+ 
+ ## Operating characteristics
+-Not given in the sources.
++*   **Time Complexity:** Linear with respect to the number of samples $N$ and the input dimension $in\_mlpC$. The positional encoding step is $O(N \cdot (viewpe + pospe))$. The MLP forward pass is $O(N \cdot (in\_mlpC \cdot featureC + featureC^2 + featureC \cdot 3))$ [S2, unofficial][S3, unofficial].
++*   **Memory Complexity:** $O(N \cdot in\_mlpC)$ to store the concatenated input tensor. The model parameters are $O(in\_mlpC \cdot featureC + featureC^2 + featureC \cdot 3)$ [S2, unofficial][S3, unofficial].
++*   **Performance:** Standard parameters are `viewpe=6`, `pospe=6`, `featureC=128` [S2, unofficial]. This configuration is widely used in NeRF-based methods to achieve high-quality view synthesis [S2, unofficial][S3, unofficial].
++*   **Strengths:** Allows the MLP to learn high-frequency details by lifting inputs to a high-frequency space. Simple to implement and integrate into existing pipelines [S2, unofficial][S3, unofficial].
++*   **Limitations:** Can overfit to training data if not regularized, especially in few-shot settings [S4]. The high input dimension can lead to larger memory footprint and slower training compared to methods that do not use PE or use fewer bands [S2, unofficial].
+ 
+ ## Background
+-Origin: The use of positional encoding with MLPs for neural rendering was introduced in the original NeRF paper [S2, unofficial]. It has since become a standard component in neural volume rendering pipelines, particularly in methods like Instant Neural Graphics Primitives (NGP) [S1, unofficial].
++The method originates from the Neural Radiance Fields (NeRF) paper [S2, unofficial][S3, unofficial], which introduced the use of positional encoding for both position and view direction in an MLP to predict color and density. It has since become a standard component in many neural rendering architectures [S2, unofficial][S3, unofficial]. Variants and ablations have been studied to understand the impact of positional encoding on sampling and view synthesis quality [S5, unofficial].
+ 
+ ## Sources
+-[S1] Nemo1999/Joint-TensoRF, https://github.com/Nemo1999/Joint-TensoRF, fetched 2026-10-27 (unofficial)
+-[S2] Collaborative Neural Radiance Fields for Novel View Synthesis, https://github.com/ZhenyangLiu/Collaborative-Neural-Radiance-Fields-for-Novel-View-Synthesis, fetched 2026-10-29 (unofficial)
+-[S3] DASNeRF: depth consistency optimization, adaptive sampling, and hierarchical structural fusion for sparse view neural radiance fields., https://doi.org/10.1371/journal.pone.0321878, fetched 2026-10-27
+-[S4] NeRF in detail: Learning to sample for view synthesis, https://doi.org/10.48550/arxiv.2106.05264, fetched 2026-10-27 (unofficial)
+-[S5] Mixer-NeRF: Research on 3D Reconstruction Methods of Neural Radiance Fields Based on Hybrid Spatial Feature Information, https://doi.org/10.54097/0ek2xd53, fetched 2026-10-27+[S1] UV Volumes for Real-time Rendering of Editable Free-view Human Performance, https://doi.org/10.1109/cvpr52729.2023.01595, fetched 2026-10-26
++[S2] Nemo1999/Joint-TensoRF, https://github.com/Nemo1999/Joint-TensoRF, fetched 2026-10-27 (unofficial)
++[S3] https://github.com/ZhenyangLiu/Collaborative-Neural-Radiance-Fields-for-Novel-View-Synthesis, https://github.com/ZhenyangLiu/Collaborative-Neural-Radiance-Fields-for-Novel-View-Synthesis, fetched 2026-10-29 (unofficial)
++[S4] DASNeRF: depth consistency optimization, adaptive sampling, and hierarchical structural fusion for sparse view neural radiance fields., https://doi.org/10.1371/journal.pone.0321878, fetched 2026-10-27
++[S5] NeRF in detail: Learning to sample for view synthesis, https://doi.org/10.48550/arxiv.2106.05264, fetched 2026-10-27 (unofficial)
++[S6] Mixer-NeRF: Research on 3D Reconstruction Methods of Neural Radiance Fields Based on Hybrid Spatial Feature Information, https://doi.org/10.54097/0ek2xd53, fetched 2026-10-27

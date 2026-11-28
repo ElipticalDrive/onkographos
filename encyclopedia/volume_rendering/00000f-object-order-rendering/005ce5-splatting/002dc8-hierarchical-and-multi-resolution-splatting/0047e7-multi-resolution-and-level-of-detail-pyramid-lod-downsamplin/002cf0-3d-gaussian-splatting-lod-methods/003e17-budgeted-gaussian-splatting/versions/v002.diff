@@ -1,0 +1,157 @@
+--- v001.md
++++ v002.md
+@@ -1,20 +1,14 @@
+ # Budgeted Gaussian Splatting
+-
+-
+ ## Overview
+-Budgeted Gaussian Splatting (BCT) is a training and deployment method for large-scale 3D Gaussian Splatting that enables variable primitive counts (Level of Detail) without retraining, using a continuous budget-quality curve to select primitives [S1, unofficial]. It sets itself apart from sibling methods like [CityGaussian / VastGaussian / DoGaussian](6143-citygaussian-vastgaussian-dogaussian.md) and [Octree-GS](7341-octree-gs.md) by decoupling the LOD selection from the training process, allowing a single trained model to be exported to any standard rasterizer with different budgets, achieving near-lossless quality at low compression ratios [S1, unofficial].
+-
++Budgeted Gaussian Splatting (BCT) is a training and deployment method for large-scale 3D Gaussian Splatting that enables variable primitive counts (Level of Detail) without retraining, using a continuous budget-quality curve to select primitives [S1, unofficial]. It sets itself apart from sibling methods like [CityGaussian / VastGaussian / DoGaussian](6143-citygaussian-vastgaussian-dogaussian.md) and [LightGaussian](8036-lightgaussian.md) by decoupling the LOD selection from the training process, allowing a single trained model to be exported to any standard rasterizer with different budgets, achieving near-lossless quality at low compression ratios [S1, unofficial].
+ ## How it works
+ **Inputs and Outputs:**
+-*   **Input:** A fully trained 3D Gaussian Splatting model (means, covariances/scales, rotations, opacities, spherical harmonics coefficients) and a target budget parameter $c$ or a maximum primitive count $K$.
+-*   **Output:** A subset of primitives selected for rendering, stored in a compact binary format or exported as standard PLY files, ready for GPU rasterization.
++*   **Input:** A fully trained 3D Gaussian Splatting model (means, covariances/scales, rotations, opacities, spherical harmonics coefficients) and a target budget parameter $c$ or a maximum primitive count $K$ [S1, unofficial].
++*   **Output:** A subset of primitives selected for rendering, stored in a compact binary format or exported as standard PLY files, ready for GPU rasterization [S1, unofficial].
+ 
+ **Data Structures:**
+-1.  **Morton-Order Tree:** Primitives are stored in Morton order. The tree construction takes approximately 1.5 seconds with 19.4 GiB peak memory on an A100 GPU for 8.56M primitives [S1, unofficial].
+-2.  **Compact Binary Format:** Stores raw primitives in Morton order, per-band equivalent planks, and SH first moments of all degrees [S1, unofficial].
+-    *   **DC-only Compact Path:** Stores 3 floats per primitive, allowing selection of 13.1M primitives in 3.9 GB on 8 GB GPUs [S1, unofficial].
+-3.  **Residuals (for Adaptive Selection):** Per cluster, two residuals are stored:
+-    *   Geometric spread: $\sigma_{geo} = p \cdot \text{tr}(T^*) / W$ (world units), projected to pixels by $\sigma \cdot f / d$ [S1, unofficial].
+-    *   SH residual ratio: $\rho_{sh}$ (cluster-internal SH variance vs. global RMS) [S1, unofficial].
++1.  **Morton-Order Tree:** Primitives are stored in Morton order [S1, unofficial]. Tree construction takes 1.5 s with 19.4 GiB peak memory on an A100 GPU for 8.56M primitives [S1, unofficial].
++2.  **Compact Binary Format:** Stores raw primitives in Morton order, per-band equivalent planks, and SH first moments of all degrees [S1, unofficial]. The DC-only compact path stores 3 floats per primitive, selecting 13.1M primitives at 3.9 GB on 8 GB GPUs [S1, unofficial].
++3.  **Residuals (for Adaptive Selection):** Per cluster, two residuals are stored: geometric spread $\sigma_{geo} = p \cdot \text{tr}(T^*) / W$ (world units, projected to pixels by $\sigma \cdot f / d$) and SH residual ratio $\rho_{sh}$ (cluster-internal SH variance vs. global RMS) [S1, unofficial].
+ 4.  **Significance Scores (for Pure Count Budgets):** Accumulated per-pixel $T^*\alpha$ over all training views, where $T^*$ is front-to-back transmittance [S1, unofficial].
+ 
+@@ -24,106 +18,47 @@
+ 
+ **Algorithm Steps:**
+-
+-1.  **Preprocessing (Tree Construction):**
+-    *   Construct a Morton-order tree on the trained primitives [S1, unofficial].
+-    *   Store residuals ($\sigma_{geo}, \rho_{sh}$) or significance scores depending on the selection mode [S1, unofficial].
+-
+-2.  **Scoring (One-time or Pre-computed):**
+-    *   *For Pure Primitive-Count Budgets:* Score every primitive using LightGaussian significance [FWW* 24]. Perform a one-pass forward scan over all training cameras to accumulate per-pixel $T^*\alpha$ [S1, unofficial].
+-    *   *Validation:* Verify CUDA accumulation using the telescoping identity $\sum_i s_i = \sum_p (1 - T^*_{\text{final}})$, matched to $10^{-5}$ relative error [S1, unofficial].
+-    *   *Note:* A significant portion of primitives may score zero (e.g., 24.3% on Block_A), being invisible from all training views [S1, unofficial].
+-
+-3.  **Selection (Per-Frame or Global):**
+-    *   *Global/Static Budget:* Select top-$N$ primitives based on the significance score for a given budget point [S1, unofficial].
+-    *   *Adaptive/Per-Frame Budget:* Traverse the coverage-preserving prefix cut on the GPU. Use the residuals $\sigma_{geo}$ and $\rho_{sh}$ to proxy the switch error [S1, unofficial].
+-    *   *GPU Implementation:* Gather the selected prefix directly into rasterizer buffers, fusing SH evaluation and opacity compensation. No CPU-side collection or host-to-device upload is required [S1, unofficial].
+-    *   *Performance:* Preprocessing (selection + gather) takes 0.8 ms for a 7.07M tree at 1920×1080 [S1, unofficial].
+-
+-4.  **Export:**
+-    *   Export the selected tier to standard 3DGS PLY files.
+-    *   SH coefficients are zero-padded to degree 3.
+-    *   Scales and opacities are stored in log/logit domain for cross-renderer evaluation [S1, unofficial].
++1.  **Preprocessing (Tree Construction):** Construct a Morton-order tree on the trained primitives [S1, unofficial]. Store residuals ($\sigma_{geo}, \rho_{sh}$) or significance scores depending on the selection mode [S1, unofficial].
++2.  **Scoring (One-time or Pre-computed):** For pure primitive-count budgets, score every primitive using LightGaussian significance via a one-pass forward scan over all training cameras [S1, unofficial]. Validate CUDA accumulation using the telescoping identity $\sum_i s_i = \sum_p (1 - T^*_{\text{final}})$, matched to $10^{-5}$ relative error [S1, unofficial]. A significant portion of primitives may score zero (e.g., 24.3% on Block_A), being invisible from all training views [S1, unofficial].
++3.  **Selection (Per-Frame or Global):** For global/static budgets, select top-$N$ primitives based on the significance score for a given budget point [S1, unofficial]. For adaptive/per-frame budgets, traverse the coverage-preserving prefix cut on the GPU and use the residuals to proxy the switch error [S1, unofficial]. Gather the selected prefix directly into rasterizer buffers, fusing SH evaluation and opacity compensation, with no CPU-side collection or host-to-device upload [S1, unofficial]. Preprocessing (selection + gather) takes 0.8 ms for a 7.07M tree at 1920×1080 [S1, unofficial].
++4.  **Export:** Export the selected tier to standard 3DGS PLY files [S1, unofficial]. SH coefficients are zero-padded to degree 3, and scales/opacities are stored in log/logit domain for cross-renderer evaluation [S1, unofficial].
+ 
+ **Pseudocode:**
+-
+ ```python
+ import numpy as np
+ 
+ def compute_significance(primitives, training_cameras):
+-    """
+-    Compute LightGaussian significance for each primitive.
+-    primitives: list of Gaussian objects with mean, scale, rotation, opacity, SH
+-    training_cameras: list of camera parameters
+-    Returns: array of significance scores
+-    """
++    """Compute LightGaussian significance: accumulated per-pixel T*alpha over training views."""
+     n_prims = len(primitives)
+     scores = np.zeros(n_prims)
+-    
+-    # One-pass forward scan over training cameras
+     for cam in training_cameras:
+-        # Project primitives to screen space
+-        # Calculate per-pixel contribution T*alpha
+-        # Accumulate into scores
+-        # Note: This step is optimized in CUDA in the source, 
+-        # validated by telescoping identity sum(scores) == sum(1 - T_final)
+-        pass 
++        # One-pass forward scan: project primitives, accumulate per-pixel T*alpha
++        # CUDA kernel validates: sum(scores) == sum(1 - T_final) to 1e-5 relative error
++        pass
+     return scores
+ 
+-def select_primitives_budgeted(primitives, scores, residuals, budget_c, capacity_k):
+-    """
+-    Select primitives based on budget parameter c or capacity k.
+-    primitives: list of Gaussian objects
+-    scores: significance scores (if using pure count budget)
+-    residuals: tuple (sigma_geo, rho_sh) per cluster (if using adaptive selection)
+-    budget_c: compression factor
+-    capacity_k: max primitive count
+-    Returns: list of selected primitive indices
+-    """
++def select_primitives(primitives, scores, residuals, budget_c, capacity_k):
++    """Select primitives based on budget parameter c or capacity k."""
+     if capacity_k is not None:
+-        # Pure primitive-count budget
+-        # Select top-N based on scores
+-        sorted_indices = np.argsort(scores)[::-1]
+-        return sorted_indices[:capacity_k]
++        # Pure primitive-count budget: sort by significance, take top-N
++        indices = np.argsort(scores)[::-1]
++        return indices[:capacity_k]
+     else:
+-        # Adaptive selection based on compression factor c
+-        # Traverse Morton-order tree with coverage-preserving prefix cut
+-        # Use residuals to determine inclusion
+-        # This is performed on GPU in the source implementation
+-        # Pseudocode represents the logic:
+-        selected = []
+-        for cluster in MortonTree:
+-            # Check if cluster fits within budget c using residuals
+-            if meets_budget_criteria(cluster, residuals, budget_c):
+-                selected.extend(cluster.primitive_indices)
+-        return selected
+-
+-def export_to_ply(selected_primitives, output_path):
+-    """
+-    Export selected primitives to standard 3DGS PLY format.
+-    """
+-    # Zero-pad SH to degree 3
+-    # Convert scale/opacity to log/logit domain
+-    # Write to PLY
+-    pass
++        # Adaptive selection: traverse Morton-order tree with coverage-preserving prefix cut
++        # Use residuals (sigma_geo, rho_sh) to proxy switch error
++        # Gather selected prefix into rasterizer buffers, fusing SH evaluation and opacity compensation
++        pass
+ ```
+ 
+ **Edge Cases and Pitfalls:**
+-*   **Geometric Redundancy Blind Spot:** A primitive can be geometrically redundant yet visually load-bearing (occludes neighbors, carries unique color) or geometrically isolated yet invisible (fully occluded). Aggressive geometry-only pruning removes primitives a contribution-aware score would keep [S1, unofficial].
++*   **Geometric Redundancy Blind Spot:** A primitive can be geometrically redundant yet visually load-bearing (occludes neighbors, carries unique color) or geometrically isolated yet invisible (fully occluded) [S1, unofficial]. Aggressive geometry-only pruning removes primitives a contribution-aware score would keep [S1, unofficial].
+ *   **View-Direction Reversals:** Large-count outliers in per-frame selection coincide with view-direction reversals where leaves entering/leaving selection are back-facing and never rasterized [S1, unofficial].
+ *   **Precision:** The telescoping identity validation ensures accumulation accuracy to $10^{-5}$ relative error [S1, unofficial].
+-
+ ## Operating characteristics
+-*   **Time Complexity:** Tree construction is fast (1.5 s for 8.56M primitives). Per-frame selection + gather is 0.8 ms for 7.07M primitives at 1080p [S1, unofficial]. Significance scoring takes 234 s for 4565 views at 7.94M primitives on an RTX 4080 [S1, unofficial].
+-*   **Memory Complexity:** Model data size is 152 B/prim for 3DGS and 236 B/prim for GPS sh3. The DC-only compact path uses 3 floats per primitive [S1, unofficial]. Memory savings are significant: matching ~20.8 dB requires 110.6 MB vs. 1926 MB for full GPS (17× savings) [S1, unofficial].
++*   **Time Complexity:** Tree construction takes 1.5 s for 8.56M primitives [S1, unofficial]. Per-frame selection + gather takes 0.8 ms for 7.07M primitives at 1080p [S1, unofficial]. Significance scoring takes 234 s for 4565 views at 7.94M primitives on an RTX 4080 [S1, unofficial].
++*   **Memory Complexity:** Model data size is 152 B/prim for 3DGS and 236 B/prim for GPS sh3 [S1, unofficial]. The DC-only compact path uses 3 floats per primitive [S1, unofficial]. Matching ~20.8 dB requires 110.6 MB vs. 1926 MB for full GPS (17× savings) [S1, unofficial].
+ *   **Performance:** BCT wall-clock time is 78±7 min vs. 175 min for the traditional train-prune-finetune route (2.2× faster) [S1, unofficial]. Quality is higher (31.9 dB vs. 30.5 dB) [S1, unofficial].
+ *   **Scaling:** Per-frame count stability is high (median change of 1.1% between consecutive views on a 207-view trajectory at K=2M) [S1, unofficial].
+-*   **Strengths:** Near-lossless quality at low compression ratios; renderer-agnostic; fast deployment; continuous budget-quality curve.
+-*   **Limitations:** Requires pre-computation of scores/residuals; aggressive geometry-only pruning is ineffective; view-direction reversals can cause selection outliers.
+-*   **When to Use:** Large-scale scenes requiring variable LOD without retraining; deployment on hardware with limited memory; cross-renderer compatibility.
+-*   **When Not to Use:** When training-time optimization is preferred; when scene geometry is highly dynamic and pre-computed scores become stale.
+-
+ ## Background
+-Budgeted Gaussian Splatting (BCT) was introduced in the paper "Budgeted-GS: Real-Time Large-Scale Gaussian Splatting via Factoring LOD" [S1, unofficial]. It addresses the limitations of traditional training-prune-finetune pipelines by providing a unified framework for LOD management. The method builds on [3D Gaussian Splatting LOD methods](5439-3d-gaussian-splatting-lod-methods.md) and distinguishes itself from siblings like [LightGaussian](8036-lightgaussian.md) by its continuous budget curve and adaptive selection residuals.
+-
++Budgeted Gaussian Splatting (BCT) was introduced in the paper "Budgeted-GS: Real-Time Large-Scale Gaussian Splatting via Factoring LOD" [S1, unofficial]. It addresses the limitations of traditional training-prune-finetune pipelines by providing a unified framework for LOD management [S1, unofficial]. The method builds on [3D Gaussian Splatting LOD methods](5439-3d-gaussian-splatting-lod-methods.md) and distinguishes itself from siblings like [LightGaussian](8036-lightgaussian.md) by its continuous budget curve and adaptive selection residuals [S1, unofficial].
+ ## Sources
+ [S1] Budgeted-GS: Real-Time Large-Scale Gaussian Splatting via Factoring LOD, https://arxiv.org/abs/2610.03162, fetched 2026-10-29 (unofficial)

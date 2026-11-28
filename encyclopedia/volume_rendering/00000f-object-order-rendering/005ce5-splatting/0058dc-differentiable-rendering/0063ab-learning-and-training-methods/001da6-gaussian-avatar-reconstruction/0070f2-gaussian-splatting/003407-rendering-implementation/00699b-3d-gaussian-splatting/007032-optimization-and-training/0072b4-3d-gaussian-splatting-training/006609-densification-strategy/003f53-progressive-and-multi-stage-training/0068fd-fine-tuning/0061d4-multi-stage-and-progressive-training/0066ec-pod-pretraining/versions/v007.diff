@@ -1,0 +1,173 @@
+--- v006.md
++++ v007.md
+@@ -1,138 +1,59 @@
+ # POD Pretraining
+ 
+-Also called: Distillation-based amortized optimization, Predict–Optimize–Distill, Predict–Optimize–Distill (POD) Training, Principal Orthogonal Decomposition pretraining, Progressive Optimization Distillation
++Also called: Distillation-based amortized optimization, Predict–Optimize–Distill, Predict–Optimize–Distill (POD) Training, Progressive Optimization Distillation
+ 
+ ## Overview
+-POD Pretraining is a distillation-based amortized optimization procedure that stabilizes the training of feed-forward Gaussian predictors by supervising them with locally refined Gaussian targets instead of unstable image-space gradients [S1, unofficial]. It solves the problem of training collapse in multi-stage residual Gaussian prediction, where direct image-space supervision leads to non-unique inverse mappings and error accumulation across stages [S1, unofficial]. Unlike [Two-stage Optimization](14857-two-stage-optimization.md) which separates geometric and appearance optimization, or [On-the-Fly GS Progressive Training](17502-on-the-fly-gs-progressive-training.md) which handles streaming data, POD specifically addresses the instability of learning Gaussian increments by distilling short-horizon optimization results into the predictor [S1, unofficial].
++POD Pretraining is a distillation-based amortized optimization procedure that stabilizes the training of multi-stage residual Gaussian predictors by supervising them with locally refined Gaussian targets instead of unstable image-space gradients [S1, unofficial]. It solves the problem of training collapse caused by the non-unique inverse mapping from residual images to Gaussian parameters, which is amplified across stages through error accumulation [S1, unofficial]. Unlike direct image-space supervision, which leads to divergence, or sibling methods like [Two-stage Optimization](14857-two-stage-optimization.md) that rely on fixed initialization, POD actively refines the predicted increments via a short-horizon optimizer and distills this refined result back into the predictor as a well-conditioned regression target [S1, unofficial].
+ 
+ ## How it works
+ **Inputs and Outputs:**
+-- **Input:** Residual image $E_{i-1}$ from previous stage $i-1$; current predictor parameters $\theta_i$.
+-- **Output:** Refined Gaussian increments $\Delta \hat{G}_i$ used as regression targets for the predictor.
++*   **Input:** Residual image $E_{i-1}$ from previous stage $i-1$; current accumulated Gaussian set $G_{i-1}$ (fixed during local optimization).
++*   **Output:** Refined Gaussian increments $\Delta \hat{G}_i$ used as the regression target for stage $i$.
+ 
+ **Data Structures:**
+-- **Gaussian Increment $\Delta G_i$:** A set of Gaussian primitives defined by position $\mathbf{p}$, scale $\mathbf{s}$, rotation $\mathbf{q}$, opacity $\alpha$, and color $\mathbf{c}$.
+-- **Detached Copy $\Delta \hat{G}_i^{(t)}$:** A trainable copy of the predicted increments, detached from the predictor's computational graph to prevent backpropagation through the optimization steps.
++*   **Predicted Increments $\Delta G_i$:** The output of the stage predictor $f_{\theta_i}(E_{i-1})$, filtered by Stage Control.
++*   **Detached Copy $\Delta \hat{G}_i^{(0)}$:** A trainable copy of $\Delta G_i$ with gradients detached from the predictor.
++*   **Refined Increments $\Delta \hat{G}_i$:** The result after $K_i$ optimization steps.
+ 
+ **Numbered Steps:**
+-
+-1.  **Predict:** The residual predictor $f_{\theta_i}$ takes the residual image $E_{i-1}$ and produces predicted Gaussian increments $\Delta G_i$. Stage Control selects the effective subset $\Delta G_i$ [S1, unofficial].
+-2.  **Optimize (Init):** Create a detached, trainable copy of the predicted increments:
+-    $$ \Delta \hat{G}_i^{(0)} = \text{copy}(\Delta G_i) $$
+-    [S1, unofficial]
+-3.  **Optimize (Update):** Update the copy for $K_i$ steps using a short-horizon optimizer. The update rule is:
++1.  **Predict:** The residual predictor produces additional Gaussians $\Delta \hat{G}_i$ from $E_{i-1}$. Stage Control selects the effective subset $\Delta G_i$ [S1, unofficial].
++2.  **Optimize (Init):** Create a detached trainable copy of the predicted increments: $\Delta \hat{G}_i^{(0)} = \text{copy}(\Delta G_i)$ [S1, unofficial].
++3.  **Optimize (Update):** Update the copy for $K_i$ steps using the residual rendering objective. Previous-stage Gaussians $G_{i-1}$ are kept fixed so gradients flow only to $\Delta \hat{G}_i^{(t)}$ [S1, unofficial]:
+     $$ \Delta \hat{G}_i^{(t+1)} = \Delta \hat{G}_i^{(t)} - \eta \nabla L_{render}^{(i)}(R(\Delta \hat{G}_i^{(t)}), E_{i-1}) $$
+-    where $t = 0, \dots, K_i-1$, $\eta$ is the learning rate, and $L_{render}^{(i)}$ is the residual rendering objective [S1, unofficial].
+-    *   **Rendering Objective:** The residual rendering loss is a weighted combination of pixel-wise distortion and structural similarity:
+-        $$ L_{render} = 0.7 L_1 + 0.3 (1 - \text{SSIM}) $$
+-        [S1, unofficial]
+-    *   **SSIM Evaluation:** The SSIM component is evaluated on the accumulated rendering $R(G_{i-1} \cup \Delta \hat{G}_i^{(t)})$ against the ground truth image $I_{gt}$, because the residual $E_{i-1}$ may contain negative values. Previous-stage Gaussians $G_{i-1}$ are kept fixed so that gradients flow only to $\Delta \hat{G}_i^{(t)}$ [S1, unofficial].
+-4.  **Distill:** After $K_i$ steps, obtain the refined increments:
+-    $$ \Delta \hat{G}_i = \Delta \hat{G}_i^{(K_i)} $$
+-    [S1, unofficial]
+-    Use $\Delta \hat{G}_i$ as a fixed target to supervise the original prediction $\Delta G_i$ with a Gaussian-space regression loss:
++    where $t = 0, \dots, K_i-1$, $\eta$ is the learning rate, and $L_{render}^{(i)}$ is the residual rendering loss [S1, unofficial].
++    *   *Note:* The SSIM component of $L_{render}$ is evaluated on the accumulated rendering $R(G_{i-1} \cup \Delta \hat{G}_i^{(t)})$ against $I_{gt}$, as the residual $E_{i-1}$ may contain negative values [S1, unofficial].
++4.  **Distill Target:** The refined increments are obtained after $K_i$ steps: $\Delta \hat{G}_i = \Delta \hat{G}_i^{(K_i)}$ [S1, unofficial]. This result is detached and used as the fixed regression target.
++5.  **Distill Loss:** Supervise the original prediction $\Delta G_i$ with a Gaussian-space regression loss:
+     $$ L_{gaussian}^{(i)} = L_{gaussian}(\Delta G_i, \Delta \hat{G}_i) $$
+-    [S1, unofficial]
+-5.  **Accumulate:** Compute the total POD pretraining objective by summing the Gaussian-space regression losses across all $S$ stages with weights $\lambda_i$:
++    [S1, unofficial].
++6.  **Accumulate:** The overall POD pretraining objective sums the losses across all $S$ stages:
+     $$ L_{POD} = \sum_{i=1}^{S} \lambda_i L_{gaussian}^{(i)} $$
+-    [S1, unofficial]
++    [S1, unofficial].
+ 
+ **Parameters:**
+-- **$K_i$:** Number of optimization steps for refinement. Not given in the sources.
+-- **$\eta$:** Learning rate for the short-horizon optimizer. Not given in the sources.
+-- **$\lambda_i$:** Stage weight balancing the contribution of each stage. Set uniformly across stages [S1, unofficial].
+-- **Gaussian-space distillation loss coefficient:** Multiplied by 100 to match the gradient scale of Gaussian parameter regression [S1, unofficial].
++*   $K_i$: Number of local optimization steps. Not given in the sources.
++*   $\eta$: Learning rate for local optimization. Not given in the sources.
++*   $\lambda_i$: Stage weight balancing contribution. Set uniformly across stages [S1, unofficial].
++*   Gaussian-space distillation loss coefficient: Multiplied by 100 to match the gradient scale of Gaussian parameter regression [S1, unofficial].
++*   Residual rendering loss weights: $L_{render} = 0.7 L_1 + 0.3 (1 - \text{SSIM})$ [S1, unofficial].
+ 
+-**Edge Cases and Pitfalls:**
+-- **Training Collapse:** Direct image-space supervision is unstable and can collapse. In the "w/o POD Collapse" case, training collapses at iteration 80k, dropping final PSNR to 16.22 dB from a best of 32.13 dB [S1, unofficial].
+-- **Feature Dominance:** Without POD, the Stage-1 feature is dominated by a single principal component explaining 98.35% of the variance, leading to degenerate solutions [S1, unofficial]. With POD, the first three principal components explain 28.09%, 22.10%, and 14.47% of the variance, producing a more balanced feature distribution [S1, unofficial].
+-- **Non-Unique Mapping:** Direct supervision faces a non-unique inverse mapping from residual images to Gaussian parameters, amplified across stages through error accumulation and parameter compensation [S1, unofficial].
+-
+-**Pseudocode:**
+-
+-```python
+-def pod_pretraining_step(predictor, stage_index, residual_image, previous_gaussians, 
+-                         num_opt_steps, learning_rate, stage_weight, loss_coeff):
+-    """
+-    Performs one step of POD pretraining for a specific stage.
+-    
+-    Args:
+-        predictor: The feed-forward Gaussian predictor network.
+-        stage_index: The current stage index i.
+-        residual_image: The residual image E_{i-1}.
+-        previous_gaussians: The accumulated Gaussians G_{i-1} from previous stages.
+-        num_opt_steps: K_i, number of short-horizon optimization steps.
+-        learning_rate: eta, learning rate for refinement.
+-        stage_weight: lambda_i, weight for this stage's loss.
+-        loss_coeff: Coefficient for Gaussian-space distillation loss (e.g., 100).
+-        
+-    Returns:
+-        loss: The computed POD loss for this stage.
+-    """
+-    
+-    # Step 1: Predict
+-    # The predictor takes the residual image and outputs predicted increments
+-    predicted_increments = predictor(residual_image)
+-    
+-    # Step 2: Optimize (Init)
+-    # Create a detached, trainable copy of the predicted increments
+-    # Detached means it is not part of the predictor's computational graph
+-    refined_increments = copy(predicted_increments)
+-    refined_increments.requires_grad = True
+-    
+-    # Step 3: Optimize (Update)
+-    # Perform short-horizon optimization
+-    for t in range(num_opt_steps):
+-        # Render the accumulated Gaussians (previous + refined)
+-        # Previous Gaussians are fixed, only refined_increments get gradients
+-        rendered_image = render(previous_gaussians, refined_increments)
+-        
+-        # Compute residual rendering loss
+-        # L_render = 0.7 * L1 + 0.3 * (1 - SSIM)
+-        # Note: SSIM is evaluated on accumulated rendering against ground truth
+-        # For simplicity, assuming ground truth is available or passed in
+-        # In practice, this loss is computed against the target image
+-        # Here we assume a function compute_rendering_loss exists
+-        render_loss = compute_rendering_loss(rendered_image, previous_gaussians, refined_increments)
+-        
+-        # Backpropagate through the rendering to update refined_increments
+-        render_loss.backward()
+-        
+-        # Update the refined increments
+-        with torch.no_grad():
+-            refined_increments -= learning_rate * refined_increments.grad
+-            refined_increments.grad.zero_()
+-            
+-    # Step 4: Distill
+-    # The refined increments are now the target
+-    target_increments = refined_increments.detach()
+-    
+-    # Compute Gaussian-space regression loss
+-    # L_gaussian = L_gaussian(predicted_increments, target_increments)
+-    gaussian_loss = compute_gaussian_regression_loss(predicted_increments, target_increments)
+-    
+-    # Step 5: Accumulate
+-    # Scale the loss by the stage weight and the distillation coefficient
+-    total_loss = stage_weight * loss_coeff * gaussian_loss
+-    
+-    return total_loss
+-```
++**Pitfalls:**
++*   **Training Collapse:** Direct image-space supervision faces a non-unique inverse mapping from residual images to Gaussian parameters. This ambiguity is amplified across stages, leading to training collapse (e.g., PSNR dropping from 32.13 dB to 16.22 dB at iteration 80k) [S1, unofficial].
++*   **Unstable Gradients:** Residual rendering supervision alone is under-constrained, and image-space gradients do not always provide a stable or consistent direction in Gaussian parameter space [S1, unofficial].
++*   **Feature Degeneration:** Without POD, stage features may be dominated by a single principal component (e.g., 98.35% variance in Stage 1), indicating a degenerate solution [S1, unofficial].
+ 
+ ## Subtopics
+ 
+ ### AIR Predictor Architecture
+-A stage-wise predictor using a DINOv3 ViT-Base encoder and a lightweight convolutional head to predict Gaussian candidates from residual images [S1, unofficial]. It extracts multi-level features from the 5th and 11th transformer layers, projects them to a 1024-dimensional representation, and fuses them into a 32-channel spatial feature map. Patch embedding with patch size $p$ partitions the map into local patches, mapping each to a 64-dimensional token that predicts a Gaussian candidate [S1, unofficial]. The patch size $p$ controls spatial granularity and maximum candidate Gaussians, with evaluated settings of 5, 6, 7, and 14 [S1, unofficial]. The encoder is initialized with pretrained DINOv3 weights, optimized with AdamW and StepLR decay, using a batch size of 20 for POD pretraining (120k iterations, stages activated at [0, 20k, 40k, 60k]) and 16 for finetuning/quantization (300k total iterations) [S1, unofficial].
++A stage-wise predictor using a DINOv3 ViT-Base encoder and a lightweight convolutional head to predict Gaussian candidates from residual images [S1, unofficial]. It extracts multi-level features from the 5th and 11th transformer layers, projects them to 1024 dimensions, fuses them into a 32-channel spatial feature map, and applies patch embedding (patch size $p$) to map each patch to a 64-dimensional token. Each token predicts a Gaussian candidate, forming a dense candidate set $g_i$, which is masked by Stage Control to obtain effective increments $\Delta G_i$ [S1, unofficial]. Patch size $p$ controls spatial granularity and maximum candidate count; evaluated settings are 5, 6, 7, and 14 [S1, unofficial]. The encoder is initialized with pretrained DINOv3 weights, optimized with AdamW and StepLR decay [S1, unofficial].
+ 
+ ## Operating characteristics
+-- **Time Complexity:** POD pretraining amortizes iterative optimization into a feed-forward pass, but requires $K_i$ rendering steps per stage during training. Full POD reaches a best PSNR of 33.44 dB and remains stable with a final PSNR of 33.41 dB, with no collapse [S1, unofficial].
+-- **Memory Complexity:** Requires storing the predictor parameters, the detached trainable copies of Gaussian increments for each stage, and the intermediate rendering states during the short-horizon optimization [S1, unofficial].
+-- **Measured Performance:** On DIV2K, the method achieves 32.17 dB PSNR with 52k Gaussians, outperforming Instant-GI (29.67 dB) and Image-GS (31.90 dB) [S1, unofficial].
+-- **Strengths:** Stabilizes multi-stage residual Gaussian prediction, prevents training collapse, and produces more balanced feature distributions (PCA variance spread across top 3 components) [S1, unofficial].
+-- **Limitations:** Requires careful tuning of the distillation loss coefficient (100x) and stage weights. The short-horizon optimization adds computational overhead during training compared to direct supervision [S1, unofficial].
+-- **When to Use:** When training feed-forward Gaussian predictors for multi-stage residual reconstruction, especially when direct image-space supervision leads to instability or collapse [S1, unofficial].
+-- **When Not to Use:** When computational resources are extremely limited and training time is critical, as POD adds $K_i$ rendering steps per iteration. Also not suitable if the predictor architecture does not support detached trainable copies for refinement [S1, unofficial].
++*   **Stability:** POD prevents training collapse. Full POD reaches a best PSNR of 33.44 dB and remains stable with a final PSNR of 33.41 dB, whereas direct supervision collapses to 16.22 dB [S1, unofficial].
++*   **Feature Quality:** POD produces a more balanced feature distribution. With POD, the first three principal components explain 28.09%, 22.10%, and 14.47% of the variance, compared to 98.35% for a single component in the collapse case [S1, unofficial].
++*   **Performance:** POD improves training stability rather than just peak reconstruction quality [S1, unofficial].
++*   **Cost:** POD pretraining requires 120k iterations with a batch size of 20. Finetuning requires 300k iterations with a batch size of 16 [S1, unofficial].
+ 
+ ## Background
+-POD Pretraining was introduced in the AIR (Amortized Image Reconstruction Framework for Self-Supervised Feed-Forward 2D Gaussian Splatting) paper [S1, unofficial]. It addresses the instability of learning Gaussian increments in multi-stage settings by distilling short-horizon optimization results into the predictor [S1, unofficial]. The method is part of a broader trend in differentiable rendering to amortize iterative optimization processes into feed-forward networks [S1, unofficial].
++POD Pretraining was introduced in the AIR (Amortized Image Reconstruction Framework) paper to stabilize multi-stage residual Gaussian prediction [S1, unofficial]. It addresses the instability of direct image-space supervision in feed-forward 2D Gaussian Splatting by amortizing iterative optimization into a feed-forward network via distillation [S1, unofficial].
+ 
+ ## Sources

@@ -1,0 +1,174 @@
+The showcase covers extraction thoroughly but leaves two widely used operators undemonstrated, and the small-figure section wastes vertical space. Scope Show KDTree k-nearest-neighbour search on a sampled point set, with a zoom. Show fix...
+
+docs: showcase KDTree search and fix_normals recovery · Issue #34 · KhoiDOO/conquer3d · GitHub
+Skip to content
+You signed in with another tab or window. Reload to refresh your session.
+You signed out in another tab or window. Reload to refresh your session.
+You switched accounts on another tab or window. Reload to refresh your session.
+Dismiss alert
+docs: showcase KDTree search and fix_normals recovery #34
+New issue
+Copy link
+New issue
+Copy link
+Closed
+Closed
+docs: showcase KDTree search and fix_normals recovery#34
+Copy link
+Labels
+documentationImprovements or additions to documentationImprovements or additions to documentation
+Description
+KhoiDOO
+opened on Sep 9, 2026
+Issue body actions
+The showcase covers extraction thoroughly but leaves two widely used operators
+undemonstrated, and the small-figure section wastes vertical space.
+Scope
+Show KDTree k-nearest-neighbour search on a sampled point set, with a zoom.
+Show fix_normals recovering a mesh whose orientation has been destroyed.
+Lay the small figures out so each card is sized to its own content.
+Activity
+KhoiDOO commented on Sep 9, 2026
+KhoiDOO
+on Sep 9, 2026
+OwnerAuthor
+More actions
+Implemented in #33 (branch docs/gallery-and-showcases, 4 commits).
+1. API usage
+k nearest neighbours over a sampled point set.
+```
+import torch
+from conquer3d._C import KDTree
+from conquer3d.data.assets import StanfordBunny
+from conquer3d.data_structure import TriangleMesh
+
+v, f, _ = StanfordBunny().get()
+mesh = TriangleMesh(v.cuda(), f.cuda().int())
+mesh.fix_normals()
+
+pts = mesh.sample_points(24_000)[0].contiguous()   # (N, 3) float32 CUDA
+tree = KDTree(pts)
+
+queries = pts[:5].contiguous()
+dist, idx = tree.query(queries, k=8, exclude_self=True)
+# dist: (M, k) float32 SQUARED distances -- take sqrt for a radius
+# idx : (M, k) int64 indices into `pts`
+radius = dist.max().sqrt()
+```
+Recovering a mesh whose orientation was destroyed.
+```
+tris = mesh.triangles.clone()                      # keep an independent copy
+flip = torch.rand(tris.shape[0]) < 0.5
+broken = tris.clone()
+broken[flip] = broken[flip][:, [0, 2, 1]]          # reverse those windings
+
+snapshot = broken.clone()                          # see the caveat below
+bad = TriangleMesh(mesh.vertices.contiguous(), broken.int().contiguous())
+bad.fix_normals()
+
+reoriented = int((bad.triangles != snapshot).any(dim=1).sum())
+recovered  = int((bad.triangles == tris).all(dim=1).sum())
+```
+2. Advantages
+fix_normals recovers the original winding exactly, not merely a
+consistent one. With half of MaxPlanck's 99,991 faces reversed at random, it
+reoriented all 49,805 and matched the shipped winding on 99,991 / 99,991
+faces — it picked the outward global orientation, not the flip.
+KD-tree build is cheap and sublinear in practice — 400,000 points build in
+3.62 ms, and query cost is nearly flat in cloud size (0.198 ms at 24k points
+vs 0.293 ms at 400k for the same 4,096 queries).
+Queries are batched: one call handles an (M, 3) block rather than a loop.
+3. Disadvantages & trade-offs
+TriangleMesh aliases the triangle tensor it is given, and fix_normals
+rewrites it in place. This is the sharpest edge here. Comparing
+mesh.triangles against the tensor you passed in compares it to itself and
+always reports zero changes — my first measurement reported "0 reoriented"
+alongside perfectly repaired normals, which is self-contradictory. Any
+before/after comparison needs .clone() taken before construction. It also
+means calling fix_normals() silently mutates the caller's face array.
+query returns squared distances, so a radius needs a square root. The
+first row I checked came back [1.2e-5, 3.8e-5, ...] against true Euclidean
+[0.0035, 0.0062, ...].
+The usable k is 31, not 32. The binding checks search_k <= 32, but
+exclude_self=True reserves a slot internally, so k=32, exclude_self=True
+raises Requested K exceeds the hardware register limit (MAX_K = 32) while
+k=32, exclude_self=False succeeds. The message names a limit the call did
+not exceed.
+Reversed windings are invisible under normal shading. The renderer shades
+two-sided, so a destroyed mesh looks correct; only encoding normal direction
+as colour exposes it. Anything relying on winding for culling would be caught
+out the same way.
+4. Empirical measurements
+RTX 4090. KD-tree over Stanford Bunny samples, 4,096 queries at k = 8, median of
+10 runs after 3 warm-ups:
+Points
+Build
+4,096 queries
+24,000
+2.70 ms
+0.198 ms
+100,000
+1.55 ms
+0.291 ms
+400,000
+3.62 ms
+0.293 ms
+Neighbourhood radius on the figure's query (24,000 points), showing the k^(1/3)
+growth expected for points on a surface embedded in 3D:
+k
+radius
+4
+0.021
+12
+0.033
+31
+0.051
+fix_normals on MaxPlanck, 99,991 faces with 49,805 windings reversed:
+10.03 ms, 49,805 reoriented, 99,991 recovered, normal agreement 42% → 100%.
+5. Technical insights
+The aliasing defect is the kind that produces a confident wrong answer.
+The measurement did not error or look suspicious; it reported a plausible
+"0 reoriented" that happened to contradict the normals in the same run. Worth
+either documenting on the binding or having the constructor clone.
+Zooming a point cloud needs the cloud filtered, not just the camera moved.
+Points are drawn as world-scale cubes, so magnification enlarges every point
+equally and distant ones become foreground blocks. The zoom panels render only
+points inside a ball of 3.2x the k=31 radius, at 0.42x point size.
+The zoom target is chosen, not hand-picked: the query with the tightest
+k=31 neighbourhood, so the growth from k=4 shows against the densest sampling
+rather than getting lost in sparse noise.
+Column flow is the right layout for heterogeneous figures. A grid row is
+as tall as its tallest member; with figures ranging from a wide 3-panel strip
+to a tall 3x2 block, that guarantees dead space. columns: 3 340px also
+reflows to one column without a single media query — though it fills
+top-to-bottom then across, so reading order is column-major.
+KhoiDOO commented on Sep 9, 2026
+KhoiDOO
+on Sep 9, 2026
+OwnerAuthor
+More actions
+Implemented and covered by PR #33.
+KhoiDOO
+closed this as completedon Sep 9, 2026
+KhoiDOO
+added
+documentationImprovements or additions to documentationImprovements or additions to documentation
+on Sep 10, 2026
+Sign up for free to join this conversation on GitHub. Already have an account? Sign in to comment
+Metadata
+Metadata
+Assignees
+No one assigned
+Labels
+documentationImprovements or additions to documentationImprovements or additions to documentation
+Projects
+No projects
+Milestone
+No milestone
+Relationships
+None yet
+Development
+No branches or pull requests
+Issue actions
+Open in GitHub Copilot app
+You can’t perform that action at this time.

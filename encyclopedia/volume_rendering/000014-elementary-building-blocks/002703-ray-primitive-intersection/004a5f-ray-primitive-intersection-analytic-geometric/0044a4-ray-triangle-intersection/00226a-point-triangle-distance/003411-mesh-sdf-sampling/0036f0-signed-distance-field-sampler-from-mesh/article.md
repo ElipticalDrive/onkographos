@@ -1,0 +1,56 @@
+# Signed Distance Field Sampler from Mesh
+
+Also called: createMeshInstanceSdfSampler
+
+## Overview
+Creates a signed distance sampler function from a `THREE.Mesh` instance [S1, unofficial]. Returns a function with signature `(x, y, z) => number` that computes the shortest signed distance to the mesh at a world-space coordinate, where negative values indicate the point is inside the mesh and positive values indicate it is outside [S1, unofficial]. It acts as a thin wrapper that validates the input, updates the world matrix, and delegates the core distance computation to [Mesh SDF Sampling](7159-mesh-sdf-sampling.md) [S1, unofficial].
+
+## How it works
+**Inputs and Outputs:**
+- **Input:** A `THREE.Mesh` instance containing a `THREE.BufferGeometry` and a transformation matrix [S1, unofficial].
+- **Output:** A JavaScript function `(x, y, z) => number` that returns the signed distance in world space [S1, unofficial].
+
+**Data Structures:**
+The method references `instance.geometry` and `instance.matrixWorld` directly from the input mesh [S1, unofficial]. No new data structures are allocated by the wrapper itself.
+
+**Steps:**
+1. **Validation:** Check if the input object is an instance of `THREE.Mesh`. If not, throw an error with the message `'Expected a THREE.Mesh instance'` [S1, unofficial].
+2. **Matrix Update:** Call `instance.updateMatrixWorld(true)` to ensure the mesh's world transformation matrix is up-to-date [S1, unofficial].
+3. **Delegation:** Invoke `createGeometrySdfSampler` passing `instance.geometry` and `instance.matrixWorld` as arguments [S1, unofficial].
+
+**Pseudocode:**
+> **Unverified code.** The code below did not pass a test run against a reference implementation, or no test fits it, so it may contain errors.
+
+```python
+# Mesh: placeholder type for THREE.Mesh
+# create_geometry_sdf_sampler: helper not defined in sources [S1, unofficial]
+def create_mesh_instance_sdf_sampler(mesh):
+    # Step 1: Validation
+    if not isinstance(mesh, Mesh):
+        raise ValueError("Expected a THREE.Mesh instance")
+    # Step 2: Update World Matrix
+    mesh.update_matrix_world(True)
+    # Step 3: Delegate to Geometry Sampler
+    sampler = create_geometry_sdf_sampler(mesh.geometry, mesh.matrix_world)
+    return sampler
+```
+
+**Parameters:**
+Not given in the sources.
+
+**Edge Cases and Pitfalls:**
+- **Non-Mesh Input:** Passing a non-mesh object will cause an immediate runtime error [S1, unofficial].
+
+## Subtopics
+
+### [Surface Distance Query](13843-surface-distance-query.md)
+Determines the minimum Euclidean distance from a query point to a collection of geometric surfaces, optionally identifying the responsible surface. It solves proximity detection for scenes with multiple objects, serving as the foundational lookup for mesh-based SDF samplers [Parent]. Unlike single-mesh queries, it aggregates results across multiple surfaces to compute a global minimum distance. When to choose it: Not given in the sources.
+
+## Operating characteristics
+Time and memory complexity: Not given in the sources. Strengths and limitations: Not given in the sources.
+
+## Background
+Part of the `three.js-volume-renderer` project [S1, unofficial].
+
+## Sources
+[S1] here, https://github.com/Donitzo/three.js-volume-renderer, fetched 2026-10-28 (unofficial)

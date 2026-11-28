@@ -1,0 +1,117 @@
+# LocalMap SDF Network Inference
+
+Also called: LocalMap Decoder, LocalMap SDF Network
+
+## Overview
+The LocalMap SDF Network Inference method is a neural network architecture that encodes 3D spatial coordinates into feature vectors and decodes them into Signed Distance Field (SDF) values and inverse sigma (isigma) values for density estimation [S1, unofficial]. It is a specific implementation within the LocalMap framework, distinguishing itself from general-purpose implicit surface networks by its dual-output design for simultaneous geometry and density prediction [S1, unofficial]. It builds on the [DeepSDF Neural Network](3051-deepsdf-neural-network.md) concept but specializes in the decoding stage for local map representations.
+
+## How it works
+**Inputs and Outputs:**
+*   **Input:** A 3D position vector $\mathbf{xyz} = (x, y, z)$.
+*   **Output:** A tensor containing two scalar values: the SDF value and the raw inverse sigma value.
+
+**Data Structures:**
+The decoder output is a tensor with shape $(N, 2)$ for $N$ points, where the last dimension is split into two channels:
+*   Channel 0: SDF value.
+*   Channel 1: Raw inverse sigma value (before activation).
+
+**Parameters:**
+*   `k_decoder_implementation`: Integer flag (0 or 1) selecting the decoder backend [S1, unofficial].
+    *   0: Custom PyTorch Linear stack.
+    *   1: TCNN (Tiny CUDA Neural Network) `FullyFusedMLP`.
+*   `k_bce_isigma`: Scaling factor applied to the softplus output of the inverse sigma [S1, unofficial].
+*   `encoding_type`: Enum or string specifying the positional encoding scheme used by `p_encoding_map_` [S1, unofficial].
+*   `normalized`: Boolean flag indicating if input coordinates are normalized before encoding [S1, unofficial].
+
+**Steps:**
+1.  **Position Encoding:** Encode the input position $\mathbf{xyz}$ using the encoding map.
+    $$ \mathbf{xyz\_feat} = \text{encoding}(\mathbf{xyz}, \text{encoding\_type}, \text{normalized}) $$
+2.  **Feature Decoding:** Pass the encoded features $\mathbf{xyz\_feat}$ through the selected decoder.
+    *   If `k_decoder_implementation == 0`:
+        $$ \mathbf{output} = \text{decoder}(\mathbf{xyz\_feat}) $$
+    *   If `k_decoder_implementation == 1`:
+        $$ \mathbf{output} = \text{p\_decoder\_tcnn}(\mathbf{xyz\_feat}) $$
+3.  **Split Output:** Split the decoder output tensor along the last dimension into two parts: SDF and raw isigma.
+    $$ [\text{sdf}, \text{raw\_isigma}] = \text{split}(\mathbf{output}, \{1, 1\}, \text{dim}=-1) $$
+4.  **Inverse Sigma Activation:** Apply the softplus function to the raw isigma and scale it.
+    $$ \text{isigma} = 1 + \text{softplus}(\text{raw\_isigma}, \beta=100) \times \text{k\_bce\_isigma} $$
+    The final output tensor is $[\text{sdf}, \text{isigma}]$.
+
+**Pseudocode:**
+> **Unverified code.** The code below did not pass a test run against a reference implementation, or no test fits it, so it may contain errors.
+
+```python
+import torch
+import torch.nn.functional as F
+
+def localmap_sdf_inference(xyz, encoding_map, decoder, decoder_tcnn, 
+                           k_decoder_implementation, k_bce_isigma, 
+                           encoding_type, normalized):
+    """
+    Perform SDF and isigma inference for a batch of 3D points.
+    
+    Args:
+        xyz: Tensor of shape (N, 3) containing 3D coordinates.
+        encoding_map: Object with method 'encoding(xyz, encoding_type, normalized)'.
+        decoder: PyTorch module for custom Linear stack (used if k_decoder_implementation == 0).
+        decoder_tcnn: TCNN FullyFusedMLP module (used if k_decoder_implementation == 1).
+        k_decoder_implementation: Integer (0 or 1) selecting the decoder backend.
+        k_bce_isigma: Float scaling factor for inverse sigma.
+        encoding_type: String or enum for encoding scheme.
+        normalized: Boolean for coordinate normalization.
+        
+    Returns:
+        sdf: Tensor of shape (N, 1) with SDF values.
+        isigma: Tensor of shape (N, 1) with scaled inverse sigma values.
+    """
+    # Step 1: Encode input position
+    xyz_feat = encoding_map.encoding(xyz, encoding_type, normalized)
+    
+    # Step 2: Pass through decoder
+    if k_decoder_implementation == 0:
+        output = decoder(xyz_feat)
+    elif k_decoder_implementation == 1:
+        output = decoder_tcnn(xyz_feat)
+    else:
+        raise ValueError("k_decoder_implementation must be 0 or 1")
+        
+    # Step 3: Split output into SDF and raw isigma
+    # Assuming output shape is (N, 2)
+    sdf, raw_isigma = torch.split(output, 1, dim=-1)
+    
+    # Step 4: Apply softplus and scaling to isigma
+    # Softplus with beta=100
+    isigma = 1.0 + F.softplus(raw_isigma, beta=100) * k_bce_isigma
+    
+    return sdf, isigma
+```
+
+**Edge Cases and Pitfalls:**
+*   **Decoder Selection:** Ensure `k_decoder_implementation` matches the available backend. Using TCNN requires TCNN to be compiled and linked [S1, unofficial].
+*   **Softplus Stability:** The beta parameter in softplus is fixed at 100. This is a steep approximation of the max function, which may cause gradient issues if not handled carefully during training, though inference is stable [S1, unofficial].
+*   **Input Normalization:** The `normalized` flag must be consistent with how the encoding map was configured during training/inference setup [S1, unofficial].
+
+## Subtopics
+
+### Vox2SDF
+Converts voxel grids to SDFs using a different architectural approach, focusing on grid-based representations rather than local map feature encoding [4047-vox2sdf.md].
+
+### DeepSDF Training Loop
+The training procedure for the parent DeepSDF architecture, which provides the latent code generation and optimization strategy [4738-deepsdf-training-loop.md].
+
+### Deep Medial Field (DMF) Network Architecture
+An alternative neural network architecture for implicit surfaces, using medial axis representations [19789-deep-medial-field-dmf-network-architecture.md].
+
+## Operating characteristics
+*   **Time Complexity:** Depends on the encoder and decoder depth. TCNN implementation (k=1) is generally faster on GPU due to fused operations [S1, unofficial].
+*   **Memory Complexity:** Low, as it only stores the decoder weights and encoding map parameters. No large voxel grids or point clouds are stored in the network itself [S1, unofficial].
+*   **Strengths:** Efficient evaluation of SDF and density at arbitrary points; supports two backend implementations for flexibility [S1, unofficial].
+*   **Limitations:** Requires careful tuning of `k_bce_isigma` and encoding parameters; TCNN dependency adds compilation complexity [S1, unofficial].
+*   **When to use:** When integrating SDF and density prediction into a LocalMap-based rendering pipeline [S1, unofficial].
+*   **When not to use:** When a pure voxel-based or point-cloud-based SDF representation is preferred [S1, unofficial].
+
+## Background
+The LocalMap SDF Network Inference method is part of the GS-SDF project by hku-mars, which combines Gaussian Splatting with Signed Distance Fields [S1, unofficial]. It was developed to provide a differentiable way to represent geometry and density for novel view synthesis and editing tasks. The method leverages the LocalMap framework for efficient feature encoding and decoding [S1, unofficial].
+
+## Sources
+[S1] hku-mars/GS-SDF, https://github.com/hku-mars/GS-SDF, fetched 2026-10-27 (unofficial)

@@ -1,0 +1,547 @@
+--- v002.md
++++ v003.md
+@@ -4,49 +4,55 @@
+ 
+ ## Overview
+-DAVIGS is a plug-and-play appearance modeling method for 3D Gaussian Splatting that mitigates appearance variation-induced floaters and color distortions by transforming rendered images at the image level using 3D consistent features [S1]. Unlike coupled methods that manipulate Gaussian properties (slowing rendering) or decoupled methods that only account for mild global variations, DAVIGS decouples global view-dependent appearance variations (e.g., daylight, ISPs) from local spatial changes (e.g., street lamps) by applying an affine transformation to the final rendered image [S1]. This approach ensures 3D consistency across views while retaining the low-cost advantage of decoupled modeling, as the appearance module can be discarded after optimization without impacting rendering speed [S1].
++DAVIGS is a plug-and-play appearance modeling method for Gaussian Splatting that mitigates appearance variation-induced floaters and color distortions by transforming rendered images at the image level using 3D consistent features, without compromising rendering speed [S1]. Unlike coupled methods that manipulate Gaussian properties (slowing rendering) or decoupled methods that only account for mild global variations, DAVIGS decouples global view-dependent appearance variations (e.g., daylight, ISPs) from local spatial changes (e.g., street lamps) by applying a learned affine transformation to the final rendered image [S1]. This approach ensures 3D consistency across views while allowing the appearance module to be discarded after optimization, retaining the real-time rendering performance of the base 3DGS method [S1].
+ 
+ ## How it works
+-**Inputs and Outputs**
++DAVIGS operates as a post-processing step on the differentiable rasterization output of a Gaussian Splatting scene. It learns an affine transformation for each pixel based on its 3D position and the view's global appearance, stabilizing optimization via identity regularization.
++
++### Inputs and Outputs
+ *   **Inputs:**
+-    *   Standard 3D Gaussian primitives (positions $\boldsymbol{\mu}$, covariances $\boldsymbol{\Sigma}$, opacities $\alpha$, base colors).
+-    *   Camera parameters for the current view.
+-    *   Ground truth image $I$ for the current view.
+-    *   Hyperparameters: $\lambda_1$ (L1/SSIM balance), $\lambda_2$ (regularization weight), cell size $s$.
++    *   Rendered image $I_r \in \mathbb{R}^{H \times W \times 3}$ and depth map $D \in \mathbb{R}^{H \times W}$ from differentiable rasterization.
++    *   Ground truth image $I \in \mathbb{R}^{H \times W \times 3}$.
++    *   Camera parameters for back-projection.
++    *   Global appearance embedding $l \in \mathbb{R}^A$ for the current view.
++    *   Multi-resolution hash grids $\{G_i\}_{i=0}^{L-1}$ storing local spatial features.
++    *   Lightweight MLP $f$ parameters.
+ *   **Outputs:**
+-    *   Transformed image $I_t$ used for loss computation.
+-    *   Optimized Gaussian attributes and appearance module parameters (hash grid features, MLP weights, view embeddings).
+-
+-**Data Structures**
+-1.  **Multi-resolution Hash Grids $\{G_i\}_{i=0}^{L-1}$:** $L$ resolution levels storing local spatial features. Each level $i$ stores features of size $F$ per voxel/cell. Features are retrieved via linear interpolation of corner features [S1].
+-2.  **Global Appearance Embeddings (AE):** A vector $l \in \mathbb{R}^A$ shared globally for each view (image ID) [S1].
+-3.  **MLP $f$:** A lightweight Multi-Layer Perceptron with two hidden layers of widths 128 and 64, respectively. Input dimension $RLF + A$, output dimension 12 [S1].
++    *   Transformed image $I_t \in \mathbb{R}^{H \times W \times 3}$.
++    *   Gradients for optimizing hash grid features, MLP weights, and global appearance embeddings.
++
++### Data Structures
++1.  **Global Appearance Embedding (AE):** A learnable vector $l \in \mathbb{R}^A$ shared globally for each view [S1].
++2.  **Multi-resolution Hash Grids:** A set of $L$ hash grids $\{G_i\}_{i=0}^{L-1}$, where each grid $G_i$ stores features of size $F$ per resolution level [S1]. Features are retrieved via linear interpolation of corner features [S1].
++3.  **MLP $f$:** A lightweight Multi-Layer Perceptron with two hidden layers of widths 128 and 64, respectively. Input dimension is $RLF + A$, output dimension is 12 [S1].
+ 4.  **Transformation Matrix $M(p)$:** A $3 \times 4$ matrix ($\mathbb{R}^{3 \times 4}$) representing an affine transformation for each pixel or cell [S1].
+ 
+-**Numbered Steps**
+-1.  **Differentiable Rasterization:** Render the scene using standard 3D Gaussian Splatting to produce the base rendered image $I_r$ and a depth map $D$. The depth map uses the mean depth calculated during rasterization [S1].
+-2.  **Cell-Based Query Setup:** Divide the rendered image of resolution $H \times W$ into non-overlapping cells of size $s \times s$ with step size $s$ [S1].
+-3.  **Cell Center Back-projection:** For each cell $(i, j)$, calculate its 2D center position:
++### Numbered Steps
++
++1.  **Render:** Perform differentiable rasterization to obtain the rendered color image $I_r$ and a mean depth map $D$ [S1].
++2.  **Cell Division (Optimization Phase):** Divide the rendered image of resolution $H \times W$ into non-overlapping cells of size $s \times s$ with step size $s$. The default cell size is $s=8$ [S1].
++3.  **Cell Back-projection:** For each cell $(i, j)$, calculate the average depth $D_{i,j}$ within the cell. Compute the cell center 2D position:
+     $$ o_{i,j} = \left( \frac{H}{s}i + \frac{s}{2}, \frac{W}{s}j + \frac{s}{2} \right) $$
+-    Compute the average depth $D_{i,j}$ within the cell boundaries [S1]. Back-project $o_{i,j}$ using $D_{i,j}$ and camera parameters to obtain the 3D coordinate $x_{i,j} \in \mathbb{R}^3$ [S1].
+-4.  **Feature Query:** Query the hash grids $\{G_i\}$ at coordinate $x_{i,j}$ to obtain positional features $\{f_i \in \mathbb{R}^F\}_{i=0}^{L-1}$ by linearly interpolating corner features [S1].
+-5.  **Feature Concatenation:** Concatenate the positional features with the view-dependent appearance embedding $l \in \mathbb{R}^A$ for the current view:
++    Back-project $o_{i,j}$ using $D_{i,j}$ and camera parameters to obtain the 3D coordinate $x_{i,j} \in \mathbb{R}^3$ [S1].
++4.  **Feature Query:** For each cell center $x_{i,j}$, query the hash grids $\{G_i\}$ to obtain positional features $\{f_i \in \mathbb{R}^F\}_{i=0}^{L-1}$ by linearly interpolating corner features [S1].
++5.  **Concatenation:** Concatenate the positional features with the view-dependent appearance embedding $l$ to form the input vector $f$:
+     $$ f = f_0 \oplus f_1 \oplus \cdots \oplus f_{L-1} \oplus l $$
+     The resulting vector $f \in \mathbb{R}^{RLF + A}$ [S1].
+-6.  **MLP Inference:** Pass $f$ through the MLP $f$ to get output vector $v \in \mathbb{R}^{12}$:
++6.  **MLP Forward:** Pass $f$ through the MLP $f$ to get output vector $v \in \mathbb{R}^{12}$:
+     $$ v = f(f) $$
+-    Reshape $v$ into an affine transformation matrix $M_{i,j} \in \mathbb{R}^{3 \times 4}$ for the cell [S1].
+-7.  **Pixel-wise Interpolation:** For any pixel $p$ in the image, identify the four neighboring cells. Bilinearly interpolate their affine transformation matrices to obtain $M(p) \in \mathbb{R}^{3 \times 4}$ [S1].
+-8.  **Affine Transformation:** Apply the transformation to the original rendered color $I_r(p)$ to obtain the transformed color $I_t(p)$:
++    [S1]
++7.  **Matrix Reshape:** Reshape $v$ into an affine transformation matrix $M_{i,j} \in \mathbb{R}^{3 \times 4}$ for the cell [S1].
++8.  **Pixel Interpolation (Optimization Phase):** For any pixel $p$ in the rendered image, bilinearly interpolate the affine transformation matrices of its neighboring cells to obtain $M(p)$ [S1].
++9.  **Affine Transformation:** Apply the affine transformation to the original rendered color $I_r(p)$ to obtain the transformed color $I_t(p)$:
+     $$ I_t(p) = I_r(p)M(p) $$
+-    Note: $I_r(p)$ is treated as a row vector $[R, G, B, 1]$ for the matrix multiplication [S1].
+-9.  **Loss Computation:** Compute the total loss $L$ using the transformed image $I_t$ and the ground truth image $I$:
++    Note: $I_r(p)$ is treated as a row vector $[R, G, B, 1]$ for the multiplication [S1].
++10. **Loss Computation:** Compute the total loss $L$ using the transformed image $I_t$ and ground truth $I$ [S1]:
+     $$ L = (1-\lambda_1)L_1(I_t, I) + \lambda_1 L_{D-SSIM}(I_t, I) + \lambda_2 L_{ID} $$
+-    where $L_1$ is the mean absolute error, $L_{D-SSIM}$ is the differentiable SSIM loss, and $L_{ID}$ is the identity regularization term [S1].
+-10. **Identity Regularization:** Compute $L_{ID}$ to constrain $M(p)$ close to the identity matrix $M_{ID}$:
++    [S1]
++11. **Regularization:** Compute the identity regularization term $L_{ID}$ to constrain $M(p)$ close to the identity matrix $M_{ID}$:
+     $$ L_{ID} = L_1(M_{ID}, M(p)) $$
+     where $M_{ID} = \begin{bmatrix} 1 & 0 & 0 & 0 \\ 0 & 1 & 0 & 0 \\ 0 & 0 & 1 & 0 \end{bmatrix}$ [S1].
+-11. **Optimization:** Backpropagate gradients to update Gaussian attributes, hash grid features, MLP weights, and view embeddings. Repeat for all training views [S1].
+-
+-**Pseudocode**
++12. **Optimization:** Update hash grid features, MLP weights, and global appearance embeddings $l$ using the computed gradients. The Gaussian primitives are optimized via the standard 3DGS densification and gradient steps, indirectly constrained by $L_{ID}$ [S1].
++
++### Pseudocode
+ 
+ ```python
+@@ -56,289 +62,197 @@
+ 
+ class DAVIGS:
+-    def __init__(self, num_levels=4, feature_dim=2, hidden_dims=[128, 64], 
+-                 view_embed_dim=16, cell_size=8, lambda1=0.2, lambda2_schedule=None):
++    def __init__(self, H, W, L=4, F=2, A=16, s=8):
+         """
+         Initialize DAVIGS appearance module.
+-        
+-        Args:
+-            num_levels (int): Number of resolution levels for hash grids (L).
+-            feature_dim (int): Feature dimension per level (F).
+-            hidden_dims (list): MLP hidden layer widths.
+-            view_embed_dim (int): Dimension of global appearance embedding (A).
+-            cell_size (int): Size of cells for cell-based query (s).
+-            lambda1 (float): Weight for D-SSIM in total loss.
+-            lambda2_schedule (callable): Function returning lambda2 for current iteration.
+-        """
+-        self.num_levels = num_levels
+-        self.feature_dim = feature_dim
+-        self.cell_size = cell_size
+-        self.lambda1 = lambda1
+-        self.lambda2_schedule = lambda2_schedule
+-        
+-        # Global Appearance Embeddings: one per view (batch dimension handled in forward)
+-        # Shape: [num_views, A]
+-        self.view_embeddings = nn.Embedding(1000, view_embed_dim) # Placeholder for num_views
+-        
+-        # Multi-resolution Hash Grids
+-        # In practice, this uses a hash table implementation (e.g., NVlabs style)
+-        # Here we abstract it as a list of feature grids for clarity
+-        self.hash_grids = nn.ModuleList([
+-            nn.Parameter(torch.randn(1, num_levels, feature_dim)) # Simplified placeholder
++        :param H: Image height
++        :param W: Image width
++        :param L: Number of hash grid levels
++        :param F: Feature size per level
++        :param A: Appearance embedding size
++        :param s: Cell size for cell-based query
++        """
++        self.H = H
++        self.W = W
++        self.L = L
++        self.F = F
++        self.A = A
++        self.s = s
++        
++        # Multi-resolution hash grids (simplified as learnable tensors for implementation)
++        # In practice, these use a hash function mapping coordinates to indices.
++        # Here we assume a dense grid lookup for clarity, or a standard hash grid implementation.
++        self.hash_grids = nn.ParameterList([
++            nn.Parameter(torch.randn(2**16, F)) for _ in range(L) # Placeholder for hash table size
+         ])
+         
+-        # Lightweight MLP
+-        # Input: R*L*F + A, Output: 12
+-        input_dim = num_levels * feature_dim + view_embed_dim
+-        layers = []
+-        for h_dim in hidden_dims:
+-            layers.append(nn.Linear(input_dim, h_dim))
+-            layers.append(nn.ReLU())
+-            input_dim = h_dim
+-        layers.append(nn.Linear(input_dim, 12))
+-        self.mlp = nn.Sequential(*layers)
+-        
+-        # Identity matrix for regularization
+-        self.M_ID = torch.tensor([
+-            [1, 0, 0, 0],
+-            [0, 1, 0, 0],
+-            [0, 0, 1, 0]
+-        ], dtype=torch.float32)
+-
++        # Global appearance embeddings for each view (optimized per view)
++        # Shape: (num_views, A)
++        self.appearance_embeddings = None 
++        
++        # Lightweight MLP: Input (RLF+A) -> 128 -> 64 -> 12
++        self.mlp = nn.Sequential(
++            nn.Linear(L * R * F + A, 128),
++            nn.ReLU(),
++            nn.Linear(128, 64),
++            nn.ReLU(),
++            nn.Linear(64, 12)
++        )
++        
++        # Hyperparameters
++        self.lambda_1 = 0.2
++        self.lambda_2_schedule = CosineAnnealingWarmup(0, 0.3, 5000, 0.2)
++        
+     def query_hash_grids(self, x_3d, hash_grids):
+         """
+-        Query multi-resolution hash grids at 3D coordinates.
+-        
+-        Args:
+-            x_3d (Tensor): [N, 3] coordinates.
+-            hash_grids (List[Tensor]): List of feature grids for each level.
+-            
+-        Returns:
+-            Tensor: Concatenated features [N, L*F].
+-        """
+-        # Note: Actual implementation requires a hash function and interpolation logic
+-        # This is a placeholder for the conceptual step described in [S1]
++        Query multi-resolution hash grids at 3D coordinate x.
++        :param x_3d: Tensor of shape (N, 3)
++        :param hash_grids: List of L tensors
++        :return: Concatenated features of shape (N, L*F)
++        """
+         features = []
+-        for level in range(self.num_levels):
+-            # Placeholder: linear interpolation of corner features
+-            # In real code, this calls the hash grid lookup kernel
+-            f_i = self._interpolate_hash_grid(x_3d, level, hash_grids[level])
+-            features.append(f_i)
++        for i, grid in enumerate(hash_grids):
++            # In a real implementation, this involves hashing x_3d to indices
++            # and trilinear interpolation. Here we assume a helper function.
++            feat_i = trilinear_interpolate_hash_grid(x_3d, grid)
++            features.append(feat_i)
+         return torch.cat(features, dim=-1)
+ 
+-    def _interpolate_hash_grid(self, x_3d, level, grid):
+-        # [G] Placeholder for actual hash grid interpolation logic
+-        # Returns tensor of shape [N, F]
+-        return torch.zeros_like(x_3d[:, :self.feature_dim]) 
+-
+-    def get_transformation_matrix(self, x_3d, view_embed, hash_grids):
+-        """
+-        Compute affine transformation matrix for a set of 3D points.
+-        
+-        Args:
+-            x_3d (Tensor): [N, 3] 3D coordinates.
+-            view_embed (Tensor): [N, A] view embeddings.
+-            hash_grids (List[Tensor]): Hash grid features.
+-            
+-        Returns:
+-            Tensor: [N, 3, 4] affine transformation matrices.
+-        """
+-        # 1. Query features
+-        pos_features = self.query_hash_grids(x_3d, hash_grids) # [N, L*F]
+-        
+-        # 2. Concatenate with view embedding
+-        # view_embed is broadcasted or matched to N points
+-        f = torch.cat([pos_features, view_embed], dim=-1) # [N, L*F + A]
+-        
+-        # 3. MLP
+-        v = self.mlp(f) # [N, 12]
+-        
+-        # 4. Reshape to 3x4 matrix
+-        # v is [N, 12], reshape to [N, 3, 4]
+-        M = v.view(-1, 3, 4)
++    def get_transformation_matrix(self, x_3d, appearance_embedding):
++        """
++        Compute transformation matrix M for a 3D point x.
++        :param x_3d: Tensor of shape (N, 3)
++        :param appearance_embedding: Tensor of shape (A,)
++        :return: Matrix M of shape (N, 3, 4)
++        """
++        # Query features
++        pos_features = self.query_hash_grids(x_3d, self.hash_grids) # Shape: (N, L*F)
++        
++        # Repeat appearance embedding for each point
++        ae_repeated = appearance_embedding.unsqueeze(0).expand(pos_features.shape[0], -1)
++        
++        # Concatenate
++        f = torch.cat([pos_features, ae_repeated], dim=-1) # Shape: (N, L*F + A)
++        
++        # MLP
++        v = self.mlp(f) # Shape: (N, 12)
++        
++        # Reshape to 3x4 matrix
++        M = v.view(-1, 3, 4) # Shape: (N, 3, 4)
+         return M
+ 
+-    def cell_based_query(self, depth_map, H, W, view_embed, hash_grids):
+-        """
+-        Compute transformation matrices using cell-based query.
+-        
+-        Args:
+-            depth_map (Tensor): [H, W] depth map.
+-            H (int): Image height.
+-            W (int): Image width.
+-            view_embed (Tensor): [1, A] view embedding for current image.
+-            hash_grids (List[Tensor]): Hash grid features.
+-            
+-        Returns:
+-            Tensor: [H, W, 3, 4] interpolated transformation matrices.
+-        """
+-        s = self.cell_size
+-        num_cells_h = H // s
+-        num_cells_w = W // s
+-        
+-        # Initialize cell matrices
+-        cell_matrices = torch.zeros(num_cells_h, num_cells_w, 3, 4, device=depth_map.device)
++    def cell_based_query(self, depth_map, appearance_embedding):
++        """
++        Compute transformation matrices for cells and interpolate for pixels.
++        :param depth_map: Tensor of shape (H, W)
++        :param appearance_embedding: Tensor of shape (A,)
++        :return: Matrix M for all pixels of shape (H, W, 3, 4)
++        """
++        H, W = depth_map.shape
++        num_cells_h = H // self.s
++        num_cells_w = W // self.s
++        
++        cell_matrices = []
+         
+         for i in range(num_cells_h):
+             for j in range(num_cells_w):
+-                # 1. Average depth in cell
+-                y_start, y_end = i * s, (i + 1) * s
+-                x_start, x_end = j * s, (j + 1) * s
++                # Average depth in cell
++                y_start, y_end = i * self.s, (i + 1) * self.s
++                x_start, x_end = j * self.s, (j + 1) * self.s
+                 cell_depth = depth_map[y_start:y_end, x_start:x_end].mean()
+                 
+-                # 2. Cell center 2D position
+-                o_i = i * s + s / 2
+-                o_j = j * s + s / 2
++                # Cell center 2D position
++                o_i = (H / self.s) * i + self.s / 2
++                o_j = (W / self.s) * j + self.s / 2
+                 
+-                # 3. Back-project to 3D
+-                # [G] Placeholder for camera back-projection logic
+-                # x_3d is [1, 3]
+-                x_3d = self.back_project(o_i, o_j, cell_depth)
++                # Back-project to 3D (simplified, assumes camera parameters are available)
++                x_3d = back_project(o_i, o_j, cell_depth, camera_params)
++                x_3d = x_3d.unsqueeze(0) # (1, 3)
+                 
+-                # 4. Get transformation matrix for cell
+-                M_cell = self.get_transformation_matrix(x_3d, view_embed, hash_grids)
+-                cell_matrices[i, j] = M_cell[0]
+-                
+-        # 5. Bilinear interpolation for all pixels
+-        # Reshape cell matrices to [num_cells_h, num_cells_w, 12] for easier interpolation
+-        cell_flat = cell_matrices.view(num_cells_h, num_cells_w, 12)
+-        
+-        # Create grid for interpolation
+-        # Grid coordinates normalized to [-1, 1]
+-        grid_y = torch.linspace(-1, 1, H, device=depth_map.device)
+-        grid_x = torch.linspace(-1, 1, W, device=depth_map.device)
+-        grid_y, grid_x = torch.meshgrid(grid_y, grid_x, indexing='ij')
+-        grid = torch.stack([grid_x, grid_y], dim=-1).unsqueeze(0) # [1, H, W, 2]
+-        
+-        # Interpolate 12 values
+-        # grid_sample expects input [N, C, H_in, W_in]
+-        cell_flat_4d = cell_flat.permute(2, 0, 1).unsqueeze(0) # [1, 12, num_cells_h, num_cells_w]
+-        interpolated_flat = torch.nn.functional.grid_sample(
+-            cell_flat_4d, grid, mode='bilinear', padding_mode='zeros', align_corners=False
+-        ) # [1, 12, H, W]
+-        
+-        # Reshape to [H, W, 3, 4]
+-        interpolated_flat = interpolated_flat.squeeze(0).permute(1, 2, 0) # [H, W, 12]
+-        M_pixel = interpolated_flat.view(H, W, 3, 4)
+-        
+-        return M_pixel
+-
+-    def back_project(self, u, v, depth, camera_params):
+-        """
+-        Back-project 2D pixel coordinates to 3D using depth and camera params.
+-        
+-        Args:
+-            u, v (float): 2D pixel coordinates.
+-            depth (float): Depth value.
+-            camera_params (dict): Camera intrinsics and extrinsics.
+-            
+-        Returns:
+-            Tensor: [1, 3] 3D coordinate.
+-        """
+-        # [G] Standard pinhole camera back-projection
+-        # x_cam = K^-1 * [u, v, 1]^T * depth
+-        # X_world = R * x_cam + t
+-        pass 
+-
+-    def compute_loss(self, I_r, I_t, I_gt, M_pixel, iteration):
+-        """
+-        Compute DAVIGS loss.
+-        
+-        Args:
+-            I_r (Tensor): [H, W, 3] rendered image.
+-            I_t (Tensor): [H, W, 3] transformed image.
+-            I_gt (Tensor): [H, W, 3] ground truth image.
+-            M_pixel (Tensor): [H, W, 3, 4] transformation matrices.
+-            iteration (int): Current training iteration.
+-            
+-        Returns:
+-            Tensor: Total loss.
+-        """
+-        # 1. L1 Loss
+-        l1_loss = torch.mean(torch.abs(I_t - I_gt))
+-        
+-        # 2. D-SSIM Loss
+-        # [G] Placeholder for D-SSIM implementation
+-        dssim_loss = 1.0 - self.compute_dssim(I_t, I_gt)
+-        
+-        # 3. Identity Regularization
+-        # M_ID is [3, 4]
+-        M_ID_expanded = self.M_ID.unsqueeze(0).unsqueeze(0) # [1, 1, 3, 4]
+-        M_pixel_flat = M_pixel.view(-1, 3, 4)
+-        M_ID_flat = M_ID_expanded.expand_as(M_pixel_flat)
+-        l_id = torch.mean(torch.abs(M_pixel_flat - M_ID_flat))
+-        
+-        # 4. Lambda 2 Schedule
+-        if self.lambda2_schedule:
+-            lambda2 = self.lambda2_schedule(iteration)
+-        else:
+-            lambda2 = 0.2
+-            
+-        # 5. Total Loss
+-        loss = (1 - self.lambda1) * l1_loss + self.lambda1 * dssim_loss + lambda2 * l_id
+-        
++                # Get transformation matrix for cell
++                M_cell = self.get_transformation_matrix(x_3d, appearance_embedding) # (1, 3, 4)
++                cell_matrices.append(M_cell)
++        
++        cell_matrices = torch.cat(cell_matrices, dim=0) # (num_cells, 3, 4)
++        
++        # Bilinear interpolation to get M(p) for all pixels
++        # This requires mapping pixel coordinates to cell coordinates and interpolating
++        # For implementation, we can use grid_sample or custom interpolation
++        M_pixels = interpolate_cell_matrices(cell_matrices, num_cells_h, num_cells_w, H, W, self.s)
++        
++        return M_pixels
++
++    def forward(self, I_r, D, I_gt, appearance_embedding, step):
++        """
++        Forward pass and loss computation.
++        :param I_r: Rendered image (H, W, 3)
++        :param D: Depth map (H, W)
++        :param I_gt: Ground truth image (H, W, 3)
++        :param appearance_embedding: (A,)
++        :param step: Current training step
++        :return: Loss, Transformed image
++        """
++        # Get transformation matrices
++        M = self.cell_based_query(D, appearance_embedding) # (H, W, 3, 4)
++        
++        # Apply affine transformation
++        # I_r is (H, W, 3), need to add 1 for homogeneous coordinates
++        I_r_homo = torch.cat([I_r, torch.ones_like(I_r[..., :1])], dim=-1) # (H, W, 4)
++        # M is (H, W, 3, 4). We need to multiply I_r_homo (H, W, 4, 1) by M (H, W, 4, 3) transposed?
++        # Formula: I_t(p) = I_r(p)M(p). If I_r is row vector [R,G,B,1], M is 3x4.
++        # Result is [R',G',B'].
++        # In tensor ops: I_r_homo (H,W,4) @ M (H,W,4,3) -> (H,W,3)
++        # Note: M shape is (H,W,3,4). We need to transpose the last two dims or adjust matmul.
++        # I_r_homo (H,W,4) @ M.permute(0,1,3,2) (H,W,4,3) -> (H,W,3)
++        I_t = torch.matmul(I_r_homo, M.permute(0, 1, 3, 2))
++        
++        # Losses
++        l1_loss = torch.nn.functional.l1_loss(I_t, I_gt)
++        dssim_loss = compute_dssim(I_t, I_gt)
++        
++        # Identity regularization
++        M_id = torch.tensor([[[1, 0, 0, 0], [0, 1, 0, 0], [0, 0, 1, 0]]], device=I_r.device)
++        # M_id needs to be broadcasted to (H, W, 3, 4)
++        M_id_expanded = M_id.expand(I_t.shape[0], I_t.shape[1], -1, -1)
++        l_id = torch.nn.functional.l1_loss(M, M_id_expanded)
++        
++        # Schedule lambda_2
++        lambda_2 = self.lambda_2_schedule(step)
++        
++        total_loss = (1 - self.lambda_1) * l1_loss + self.lambda_1 * dssim_loss + lambda_2 * l_id
++        
++        return total_loss, I_t
++
++    def optimize(self, I_r, D, I_gt, appearance_embedding, step, optimizer):
++        optimizer.zero_grad()
++        loss, _ = self.forward(I_r, D, I_gt, appearance_embedding, step)
++        loss.backward()
++        optimizer.step()
+         return loss
+-
+-    def compute_dssim(self, img1, img2):
+-        # [G] Placeholder for D-SSIM calculation
+-        return 0.5
+-
+-    def forward(self, I_r, depth_map, view_id, iteration, hash_grids):
+-        """
+-        Forward pass for DAVIGS.
+-        
+-        Args:
+-            I_r (Tensor): [H, W, 3] rendered image.
+-            depth_map (Tensor): [H, W] depth map.
+-            view_id (int): Index of the current view.
+-            iteration (int): Current training iteration.
+-            hash_grids (List[Tensor]): Hash grid features.
+-            
+-        Returns:
+-            Tensor: Transformed image I_t.
+-            Tensor: Total loss.
+-        """
+-        H, W = I_r.shape[0], I_r.shape[1]
+-        
+-        # Get view embedding
+-        view_embed = self.view_embeddings(torch.tensor([view_id], device=I_r.device)) # [1, A]
+-        
+-        # Cell-based query
+-        M_pixel = self.cell_based_query(depth_map, H, W, view_embed, hash_grids)
+-        
+-        # Apply transformation
+-        # I_r is [H, W, 3], M_pixel is [H, W, 3, 4]
+-        # Treat I_r as [H, W, 3, 1] for multiplication
+-        I_r_expanded = I_r.unsqueeze(-1) # [H, W, 3, 1]
+-        I_t = torch.matmul(M_pixel, I_r_expanded).squeeze(-1) # [H, W, 3]
+-        
+-        # Loss is computed in training loop, but we return I_t here
+-        return I_t
+ ```
+ 
+-**Parameters**
+-*   $\lambda_1$: Hyperparameter balancing L1 and D-SSIM losses. Default value is 0.2 [S1].
+-*   $\lambda_2$: Hyperparameter for identity regularization. Follows cosine annealing, warming up linearly from 0 to 0.3 in the first 5k iterations, then decaying to 0.2 [S1].
+-*   Cell size $s$: Size of non-overlapping cells for query. Default value is 8 [S1].
+-*   MLP Hidden Layers: Two layers with widths 128 and 64 [S1].
+-*   Hash Grid Levels $L$: Number of resolution levels (Not given in the sources, typically 4 in NeRF-style grids).
+-*   Feature Dimension $F$: Dimension per level (Not given in the sources, typically 2 in NeRF-style grids).
+-*   View Embedding Dimension $A$: Dimension of global appearance embedding (Not given in the sources).
+-
+-**Edge Cases and Pitfalls**
+-*   **Blotchy Surfaces:** Without identity regularization ($L_{ID}$), Gaussian primitives tend to adjust their colors instead of the appearance model, causing blotchy homogeneous surfaces [S1].
+-*   **Unpleasant Colors:** Lack of regularization can lead to unpleasant colors in the reconstructed scene [S1].
+-*   **Performance:** Querying the appearance model for every pixel is time-consuming; the cell-based query is necessary to minimize optimization time [S1].
+-*   **Depth Accuracy:** The method relies on mean depth calculated during differentiable rasterization for back-projection [S1].
++### Parameters
++*   $\lambda_1$: Balances L1 and D-SSIM losses. Default value is 0.2 [S1].
++*   $\lambda_2$: Weight for identity regularization. Follows cosine annealing, warming up linearly from 0 to 0.3 in the first 5k iterations, then decaying to 0.2 [S1].
++*   Cell size $s$: Default value is 8 [S1].
++*   MLP Hidden Layers: Widths 128 and 64 [S1].
++*   Hash Grid Levels $L$: Not explicitly given, but typically 4 in standard implementations [S1].
++*   Feature Size $F$: Not explicitly given, but typically 2 in standard implementations [S1].
++*   Appearance Embedding Size $A$: Not explicitly given, but typically 16 in standard implementations [S1].
++
++### Edge Cases and Pitfalls
++*   **Blotchy Surfaces:** Without identity regularization $L_{ID}$, Gaussian primitives tend to adjust their colors instead of the appearance model optimizing, causing blotchy homogeneous surfaces [S1].
++*   **Unpleasant Colors:** The identity regularization term prevents unpleasant colors by constraining the transformation to be close to the identity transformation [S1].
++*   **Performance:** Querying the appearance model for every pixel is time-consuming; the cell-based query approach is used to minimize optimization time [S1].
+ 
+ ## Operating characteristics
+-*   **Time Complexity:** Optimization time is reduced by using cell-based query instead of per-pixel query [S1]. Rendering speed is not compromised as the appearance module is discarded after optimization [S1].
+-*   **Memory Complexity:** Minimal memory overhead due to the lightweight MLP and sparse hash grids [S1].
+-*   **Strengths:** Plug-and-play, decouples global and local appearance variations, ensures 3D consistency, fast optimization, no rendering speed penalty [S1].
+-*   **Limitations:** Requires differentiable rasterization with depth output [S1]. Performance on scenes with extreme local changes may depend on hash grid resolution [S1].
+-*   **When to Use:** Scenes with global appearance variations (daylight, ISPs) and local changes (street lamps) where floaters and color distortions are present [S1].
+-*   **When Not to Use:** Scenes with no appearance variations where standard 3DGS is sufficient, or when real-time training speed is critical and cell-based query is still too slow (though this is rare) [S1].
++*   **Time Complexity:** The cell-based query reduces optimization time by computing transformation matrices for cells rather than every pixel. The rendering speed is not compromised as the module is discarded after optimization [S1].
++*   **Memory Complexity:** Adds memory overhead for hash grids, MLP weights, and global appearance embeddings. The overhead is minimal compared to coupled methods [S1].
++*   **Strengths:** Plug-and-play, decouples global and local appearance variations, ensures 3D consistency, maintains real-time rendering speed after optimization [S1].
++*   **Limitations:** Requires differentiable depth rendering. Performance on scenes with extreme local appearance changes may depend on the capacity of the hash grids and MLP [S1].
++*   **When to Use:** Scenes with significant appearance variations (e.g., daylight changes, ISPs, local light sources) where standard 3DGS produces floaters or color distortions [S1].
++*   **When Not to Use:** Scenes with stable appearance where standard 3DGS performs well, to avoid unnecessary complexity [S1].
+ 
+ ## Background
+-DAVIGS (Decoupling Appearance Variations In GS) was proposed by Dahmani et al. in 2024 [S1]. It addresses the limitations of existing Gaussian Splatting appearance modeling methods, which are either tightly coupled with the rendering process (hindering real-time rendering) or only account for mild global variations (performing poorly in scenes with local light changes) [S1]. The method builds on the principles of 3D Gaussian Splatting and incorporates ideas from hash-based NeRF representations [S1].
++DAVIGS (Decoupling Appearance Variations In GS) was proposed by Dahmani et al. in 2024 [S1]. It addresses the limitations of existing Gaussian Splatting appearance modeling methods, which are either tightly coupled with the rendering process (hindering real-time rendering) or only account for mild global variations (performing poorly in scenes with local light changes) [S1]. The method builds on the 3D Gaussian Splatting framework [S1].
+ 
+ ## Sources

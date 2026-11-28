@@ -1,0 +1,597 @@
+Stunning Procedural Skies in WebGL – Part 2
+Sep 25, 2013
+Stunning Procedural Skies in WebGL – Part 2
+Conor Dickinson
+Conor Dickinson
+3D rendering, Cloud Party, clouds, developer blog, sky, technical article 29 Comments
+This is the second of three technical articles detailing my recent work on improving the look and customizability of the skies in Cloud Party. Part 1 covered background and research on sky dome rendering; part 2 (this one) will go into detail on the implementation and optimization of the sky dome rendering technique; and part 3 will cover the details of the cloud system.
+Recall from last time that our goal is to create a sky renderer that looks good (not necessarily correct, but believable), is customizable by users, reacts to changes in sun angle, and runs very fast. Speed is important because we want to run and look good on a wide variety of GPUs, and ideally the sky rendering should not take up very much of our frame time.
+If you missed it last time, go check out the demo!
+The code in this article is licensed under a Creative Commons Attribution 3.0 Unported License.
+Initial Implementation
+The first simplification to the scattering problem we are going to make is to only compute single-scattering (assuming light bounces of particles in the atmosphere at most one time) instead of multiple-scattering (where light bounces around many times). We are also going to assume that the density of the atmosphere is constant.
+With these simplifications, using the ATI paper I referenced last time I wrote the following (completely unoptimized) GLSL functions:
+```
+
+vec3 beta_rayleigh, beta_mie;
+float g_mie;
+float PI = 3.14159265359;
+
+vec3 calcExtinction(float dist) {
+  return exp(-dist * (beta_rayleigh + beta_mie));
+}
+vec3 calcScattering(float cos_theta) {
+  // phase for rayleigh scattering
+  float phase_rayleigh = (3.0 / (16.0 * PI)) * (1.0 + cos_theta * cos_theta);
+  // phase for mie scattering, using Henyey/Greenstein approximation
+  float phase_mie = (1.0 / (4.0 * PI)) * (1.0 - g_mie) * (1.0 - g_mie);
+  phase_mie /= pow(1.0 + g_mie * g_mie - 2.0 * g_mie * cos_theta, 3.0 / 2.0);
+  return (phase_rayleigh * beta_rayleigh + phase_mie * beta_mie) / (beta_rayleigh + beta_mie);
+}
+```
+Additionally we need to calculate the distance through the atmosphere for a particular position and vector. To do this I use a ray-sphere intersection test, which I simplified by assuming the position is located inside the atmosphere:
+```
+
+float PLANET_RADIUS = 6371000;
+float ATMO_RADIUS = PLANET_RADIUS + 100000;
+
+float opticalDepth(in vec3 position, in vec3 ray) {
+  // the incoming position is in a space with the origin on the surface of the planet
+  // convert to a space with the origin at the center of the planet
+  position.z += PLANET_RADIUS;
+
+  // ray-sphere intersection, assuming position is inside the sphere
+  float a0 = ATMO_RADIUS * ATMO_RADIUS - dot(position, position);
+  float a1 = dot(position, ray);
+  return sqrt(a1 * a1 + a0) - a1;
+}
+```
+Now all that is left is to use these functions to calculate single-scattering for the sun. The standard method for doing this is to step along the view ray and then cast a ray towards the sun, calculating the amount of light that makes it through the atmosphere to that point. Then we compute the amount of in-scattered light from each of these rays and accumulate:
+```
+
+int NUM_STEPS = 20;
+
+vec3 current_position = vec3(0.0);
+float ray_dist = opticalDepth(current_position, view_vector);
+float step_size = ray_dist / float(NUM_STEPS);
+
+// calculate extinction for a single step
+vec3 step_extinction = calcExtinction(step_size);
+
+// calculate the in-scattering for a single step
+vec3 step_scattering = calcScattering(dot(view_vector, sun_vector));
+step_scattering *= 1.0 - step_extinction;
+
+vec3 extinction = vec3(1.0);
+vec3 in_scatter = vec3(0.0);
+
+for (int ii = 0; ii <= NUM_STEPS; ii++) {
+  // cast a ray towards the sun and calculate the incoming extincted light
+  float light_ray_dist = opticalDepth(current_position, sun_vector);
+  vec3 incoming_light = sun_light * calcExtinction(light_ray_dist);
+
+  // multiply by scattering to determine how much light
+  // bounces into the view direction
+  in_scatter += incoming_light * step_scattering * extinction;
+
+  // accumulate extinction for this step
+  extinction *= step_extinction;
+  current_position += step_size * view_vector;
+}
+
+gl_FragColor.xyz = in_scatter;
+```
+Improved Implementation
+The iterative steps in this method can get very expensive to calculate, and since I did not want to precompute a solution I needed to simplify it even further. Instead of calculating all those incoming light values for a particular view ray, what if we could calculate the average light value hitting the view ray? Then we could use that light value in place of the constant light in the initial solution.
+The method I devised works by picking a single point along the view ray to use to calculate this “average” incoming light. This is not correct, but with some experimentation and analysis of a few example scenarios I was able to come up with a result that looks reasonable. When the sun is high in the sky I select a point farther from the viewer; this means there is less atmosphere for the light to go through, so less light is extincted (this makes the sky more blue). When the sun is close to the horizon I select a point closer to the viewer. In this case there is more atmosphere for the light to travel through, so more light is extincted (this makes the sky more red).
+This actually works extremely well, producing accurate-looking skies for different times of day. It is also very efficient to render, leaving more GPU cycles free to draw the rest of the scene! Here is the unoptimized GLSL code:
+```
+
+// optical depth along view ray
+float ray_dist = opticalDepth(vec3(0.0), view_vector);
+vec3 extinction = calcExtinction(ray_dist);
+
+// optical depth for incoming light hitting the view ray
+float ray_scale = 0.15 + 0.75 * sun_vector.z;
+vec3 light_ray_pos = view_vector * (ray_dist * ray_scale);
+float light_ray_dist = opticalDepth(light_ray_pos, sun_vector);
+
+// optical depth for edge of atmosphere:
+// this handles the case where the sun is low in the sky and
+// the view is facing away from the sun; in this case the distance
+// the light needs to travel is much greater
+float light_ray_dist_full = opticalDepth(view_vector * ray_dist, sun_vector);
+light_ray_dist = max(light_ray_dist, light_ray_dist_full);
+
+// cast a ray towards the sun and calculate the incoming extincted light
+vec3 incoming_light = sun_light * calcExtinction(light_ray_dist);
+
+// calculate the in-scattering
+vec3 scattering = calcScattering(dot(view_vector, sun_vector));
+scattering *= 1.0 - extinction;
+
+// combine
+vec3 in_scatter = incoming_light * scattering;
+
+gl_FragColor.xyz = in_scatter;
+```
+Finishing Touches
+In addition to the sky dome itself (which is modeling the light bounced around from the sun), I also render the sun. This is merely a disk (calculated by angle between view vector and light vector) drawn with the extincted sunlight color.
+I also apply extinction to the sunlight color used when lighting the rest of the scene. This way the lighting responds to the change of sun angle and matches the sky. Also I calculate in-scattering for the light direction and add that to the lighting (if you don’t do this you will notice the light is over-saturated at noon).
+Note that these calculations are all in linear space, so make sure you are using linear space lighting with HDR tonemapping.
+For customization I expose various parameters to the user. The planet size and atmosphere thickness are exposed as multipliers on Earth values (so 1.0 for each is Earth normal). Atmosphere density and pollution sliders affect Rayleigh and Mie scattering strength and phase. Finally, the sun disk size and intensity are tunable as well.
+Optimizations
+Optimization is key to achieving good performance for any graphics technique. The first pass of optimizations I did on the sky rendering are standard shader optimizations. To start, I moved all operations on values that are constant for the frame to the CPU. This includes calculating the scattering values from the input parameters, precomputing the square of the atmosphere radius for the raycast code, and various others. After that I reformulated many of the calculations in the shader to match the typical low-level shader instruction set. See Emil Persson’s Low-Level Thinking In High-Level Languages for more details.
+For my second optimization pass, I realized that there is no reason to draw the sky using a dome or sphere mesh. Instead, a single fullscreen quad drawn with depth forced to the far end of the depth range works just as well with far less vertex and pixel-quad overhead. In fact, you could take this optimization even further by drawing only a single triangle that goes beyond the edges of the screen but covers it entirely; that way you don’t have the repeated pixel-quads along the screen diagonal.
+Finally, I draw the sky after drawing opaque geometry, with depth testing turned on. That way we only pay the pixel shader cost for the skydome where it is actually visible.
+Final Code
+Here is the final optimized shader code:
+```
+
+vec3 calcExtinction(float dist) {
+  return exp(dist * sky_params6.xyz);
+}
+
+vec3 calcScattering(float cos_theta) {
+  float r_phase = (cos_theta * cos_theta) * sky_params6.w + sky_params6.w;
+  float m_phase = sky_params1.w * pow(sky_params2.w * cos_theta + sky_params3.w, -1.5);
+  return sky_params2.xyz * r_phase + (sky_params3.xyz * m_phase);
+}
+
+float baseOpticalDepth(in vec3 ray) {
+  float a1 = sky_params4.x * ray.z;
+  return sqrt(a1 * a1 + sky_params4.w) - a1;
+}
+
+float opticalDepth(in vec3 pos, in vec3 ray) {
+  pos.z += sky_params4.x;
+  float a0 = sky_params4.y - dot(pos, pos);
+  float a1 = dot(pos, ray);
+  return sqrt(a1 * a1 + a0) - a1;
+}
+
+float cos_theta = dot(view_vec, sun_vector);
+
+// optical depth along view ray
+float ray_dist = baseOpticalDepth(view_vec);
+
+// extinction of light along view ray
+vec3 extinction = calcExtinction(ray_dist);
+
+// optical depth for incoming light hitting the view ray
+vec3 light_ray_pos = view_vec * (ray_dist * sky_params4.z);
+float light_ray_dist = opticalDepth(light_ray_pos, sun_vector);
+
+// optical depth for edge of atmosphere:
+// this handles the case where the sun is low in the sky and
+// the view is facing away from the sun; in this case the distance
+// the light needs to travel is much greater
+float light_ray_dist_full = opticalDepth(view_vec * ray_dist, sun_vector);
+
+light_ray_dist = max(light_ray_dist, light_ray_dist_full);
+
+// cast a ray towards the sun and calculate the incoming extincted light
+vec3 incoming_light = calcExtinction(light_ray_dist);
+
+// calculate the in-scattering
+vec3 scattering = calcScattering(cos_theta);
+scattering *= 1.0 - extinction;
+
+// combine
+vec3 in_scatter = incoming_light * scattering;
+
+// sun disk
+float sun_strength = clamp(cos_theta * sky_params1.x + sky_params1.y, 0.0, 1.0);
+sun_strength *= sun_strength;
+vec3 sun_disk = extinction * sun_strength;
+
+gl_FragColor.xyz = sky_params5.xyz * (sky_params5.w * sun_disk + in_scatter);
+gl_FragColor.w = 1.0;
+```
+And the CPU setup code:
+```
+
+function sqr(val) {
+  return val * val;
+}
+
+function pow4(val) {
+  val = val * val;
+  return val * val;
+}
+
+var sky_lambda = Vec3.create(680e-9, 550e-9, 450e-9);
+var sky_k = Vec3.create(0.686, 0.678, 0.666);
+
+var earth_radius = 6.371e6;
+var earth_atmo_thickness = 0.1e6;
+
+var clarity = 1 + sky_props.clarity;
+var two_pi = 2 * Math.PI;
+
+// compute betaR
+var factor = 1.86e-31 / (clarity * Math.max(sky_props.density, 0.001));
+this.sky_params2.x = factor / pow4(sky_lambda.x);
+this.sky_params2.y = factor / pow4(sky_lambda.y);
+this.sky_params2.z = factor / pow4(sky_lambda.z);
+
+// combute betaM
+factor = 1.36e-19 * Math.max(sky_props.pollution, 0.001);
+this.sky_params3.x = factor * sky_k.x * sqr(two_pi / sky_lambda.x);
+this.sky_params3.y = factor * sky_k.y * sqr(two_pi / sky_lambda.y);
+this.sky_params3.z = factor * sky_k.z * sqr(two_pi / sky_lambda.z);
+
+// betaR + betaM, -(betaR + betaM), betaR / (betaR + betaM), betaM / (betaR + betaM)
+this.sky_params1.fromAdd(this.sky_params2, this.sky_params3);
+this.sky_params6.fromAdd(this.sky_params2, this.sky_params3).mulScalar(-1);
+this.sky_params2.div(this.sky_params1);
+this.sky_params3.div(this.sky_params1);
+
+// mie scattering phase constants
+var g = (1 - sky_props.pollution) * 0.2 + 0.75;
+this.sky_params1.w =  sqr(1 - g) / (4 * Math.PI);
+this.sky_params2.w = -2 * g;
+this.sky_params3.w = 1 + sqr(g);
+
+var planet_radius = earth_radius * sky_props.planet_scale;
+var atmo_radius = planet_radius + earth_atmo_thickness * sky_props.atmosphere_scale;
+this.sky_params4.x = planet_radius;
+this.sky_params4.y = atmo_radius * atmo_radius;
+this.sky_params4.z = 0.15 + 0.75 * light_props.sun_vector.z;
+this.sky_params4.w = atmo_radius * atmo_radius - planet_radius * planet_radius;
+
+// sun disk cutoff
+this.sky_params1.y = -(1 - 0.015 * sky_props.sun_disk_radius);
+this.sky_params1.x = 1 / (1 + this.sky_params1.y);
+this.sky_params1.y *= this.sky_params1.x;
+
+this.sky_params5.fromVec3(this.sun_color).mulScalar(sky_props.brightness);
+this.sky_params5.w = sky_props.sun_disk_intensity;
+
+this.sky_params6.w = clarity * 3 / (16 * Math.PI);
+```
+In the final article of this series I will explain how we render clouds in Cloud Party, including details of shape generation and lighting.
+« Weekly Update September 16th-22th » New feature release – play video in Cloud Party!
+29 Comments
+Simon
+Sep 26, 2013 @
+03:54:06
+Very interesting, would it be possible to have a simple working code ? I’m blocking on a few details.
+Reply
+Conor Dickinson
+Sep 26, 2013 @
+14:20:38
+What details are you blocked on? Unfortunately I don’t have time right now to put together fully functional stand-alone code; the demo I link to is built on Cloud Party’s render engine and is definitely not a simple implementation!
+Reply
+Simon
+Sep 26, 2013 @
+15:09:55
+I see. I’m new to webgl/opengl, I get the math of the algorithm but I’m mostly having trouble figuring out on which object am I supposed to apply the shader. Is it a big sphere all around your scene ? how big ? any tricks to setting this up ?
+Reply
+Conor Dickinson
+Sep 27, 2013 @
+11:32:39
+The easiest thing to do is use a sphere mesh and center it around the camera, then it just needs to be big enough to go past the near plane. Make sure you draw with depth writes disabled.
+Reply
+Simon
+Sep 27, 2013 @
+15:05:42
+Hello again, thanks for your response.
+I noticed a mistake in your code, line 54 of your shadder is wrong. I assumed the correct line was :
+float sun_strength = clamp(cos_theta * sky_params1.x + sky_params1.y, 0.0, 1.0)
+is that correct ?
+Anyway, I’m almost there but I still have a few issues, I’m not exactly sure how to have the correct value for “view_vec”. In my vertex shadder I get the vertex position like that : gl_Position = uPMatrix * uMVMatrix * vec4(aVertexPosition, 1.0);
+Could you tell me how to find “view_vec” from that once in the fragment shadder ?
+Reply
+Conor Dickinson
+Sep 27, 2013 @
+15:28:47
+Yes you are correct, looks like I had a copy-paste bug! Thanks for catching that, I will correct it.
+For the view vector you can just pass your aVertexPosition to the fragment shader in a varying param, then normalize it in your fragment shader to get the view vector. This works because the sky mesh is centered around the camera already.
+Reply
+Simon
+Sep 28, 2013 @
+14:06:37
+I’m done (kinda), but somehow the colors don’t feel quite right compare to your example.
+here is a simple working code, directional keys to move around : http://tinyurl.com/leyuwvn
+The default values are the same as yours, but it is so much darker, I can’t really see what I did wrong.
+maybe you use something to refine the colors after the initial rendering ?
+Reply
+Lee Salzman
+Sep 30, 2013 @
+00:37:25
+You have to be careful that, as he noted, the lighting is done in *linear* space, not *gamma* space. So if your framebuffer is not an sRGB render target or is not storing linear light, the end of your shader must gamma encode the value. This is simple to fix, assuming a gamma of 2.2, then you simply do:
+color = pow(color, 1.0/2.2);
+If you don’t know if your renderer is linear or gamma space, then it is gamma space. It’s one of those things where “if you have to ask”, you’re not using linear lighting.
+Reply
+Simon
+Oct 01, 2013 @
+18:57:02
+thanks, it look much better now !
+Conor Dickinson
+Oct 01, 2013 @
+11:06:07
+Nicely done!
+As Lee said, you need to make sure you output in gamma space. Also, I apply an S-curve filmic tonemapping to the entire scene, which will adjust the colors somewhat.
+Reply
+Lee Salzman
+Sep 30, 2013 @
+00:33:59
+I implemented this for my game, Tesseract (http://tesseract.gg), and the results are quite nice.
+Here’s a video of it in action: http://youtu.be/hFkNw3H32f8
+Reply
+Conor Dickinson
+Oct 01, 2013 @
+11:06:41
+Awesome!
+Reply
+Weekly Update Sept 23rd – 29th
+Sep 30, 2013 @
+10:55:51
+[…] this time from Jimb Esser on Efficient Load Balancing, and later this week part 3 of Conor’s post on our gorgeous new skies. Have a great […]
+Reply
+Ruud van Gaal
+Oct 02, 2013 @
+07:38:22
+Nice article, thanks for sharing! Especially those red sunsets can be tricky. Some notes on the algorithm:
+- I’ve tried the CPU side code on the GPU directly with floats. This didn’t work, I think due to the high precision values (1.86e-31) involved. Something to note when trying to test this for the first time (it’s easier to just throw it all on the GPU at the first instance).
+- This line (#47):
+this.sky_params4.z = 0.15 + 0.75 * light_props.sun_vector.z;
+First: what is your coordinates system: Z=up? Or Y=up?
+Second: is it ok if Z becomes negative? It seems this may cause problems since sky_params4.z becomes calcExtinction(light_ray_dist) does light_ray_dist*sky_params6.xyz, where the .xyz are all negative.
+This means the exp() gives a low number (here rounded to 0 even).
+When negating sky_params6, things become better. I might interpret this faulty:
+this.sky_params6.fromAdd(this.sky_params2, this.sky_params3).mulScalar(-1);
+This is the same as: sky_params6=-(sky_params2+sky_params3), right? As sky_params2 and 3 are both positive, this always becomes negative. Where does my thinking go wrong?
+Thanks to get me on the way!
+Reply
+Ruud van Gaal
+Oct 02, 2013 @
+08:03:55
+An edit button would be so nice. Here’s another try:
+Some notes on the algorithm:
+- I’ve tried the CPU side code on the GPU directly with floats. This didn’t work, I think due to the high precision values (1.86e-31) involved.
+Something to note when trying to test this for the first time (it’s easier to just throw it all on the GPU at the first instance).
+- The line:
+this.sky_params4.z = 0.15 + 0.75 * light_props.sun_vector.z;
+First: what is your coordinates system: Z=up? Or Y=up?
+Second: is it ok if Z becomes negative? It seems this may cause problems since sky_params4.z becomes calcExtinction(light_ray_dist) does light_ray_dist*sky_params6.xyz, where the .xyz are all negative.
+This means the exp() gives a low number (here 0 even).
+When negating sky_params6, things become better. I might interpret this faulty:
+this.sky_params6.fromAdd(this.sky_params2, this.sky_params3).mulScalar(-1);
+This is the same as: sky_params6=-(sky_params2+sky_params3), right? As sky_params2 and 3 are both positive, this always becomes negative. Where does my thinking go wrong?
+Reply
+Conor Dickinson
+Oct 02, 2013 @
+10:45:18
+Hmm, good point, I should have mentioned my coordinate system! You are correct, z-up, y-forward.
+The simplifications I made do assume the sun cannot go below the horizon. When that happens you have to take into account when the sunlight hits the earth (this should be doable with an extra ray cast in opticalDepth, but I haven’t tried it myself).
+sky_params6 should be negative, the distance passed to the calcExtinction function should be positive. You should be taking exp() of a negative number to calculate extinction.
+Reply
+Ruud van Gaal
+Oct 03, 2013 @
+01:55:56
+I suspected that Z was up. Is it righthanded of lefthanded? In other words, is X left (lefthanded) or right (righthanded)?
+I can understand now indeed that sky_params6 is negative, since your original calculation used exp(-dist*(beta_m+beta_r)), and you included the minus signal in the parameter.
+Now also to modify my own light amount to yours; I’m using a physical kilolux HDR output (sky around 25-50 klux to 10000 klux in the sun center) so that requires some scaling.
+Reply
+Ruud van Gaal
+Oct 04, 2013 @
+03:18:26
+I’d expected WebGL, like OpenGL, to be righthanded. Although it’s funny that Z=up, since OpenGL normally uses Y=up.
+These axis system definitions are very important, since I just found that opticalDepth() gave NaN since I had an upside down sun_vector, AND upside down view_vector.
+If you could add to the article the direction of your XYZ axes, *and* the direction of your sun_vector (and possibly view_vector). I have a light direction, which is precisely the negative of your sun_vector. This gave negative sun_vector.z (vertical) positions, and messed up sky_params4.z.
+I think I’ll make something symmetrical, because looking under my ground I can see a sunset-type gradient when the top hemisphere is nice and blueish.
+Reply
+Conor Dickinson
+Oct 04, 2013 @
+11:14:48
+WebGL, like OpenGL, does not care about which axis is up for world coordinates. I happen to like right-handed z-up (having -Z go into the screen always annoyed me) so I set my projection matrices up that way. In this case it doesn’t matter what handedness the coordinate system is in, since the z component of the sun vector is the only thing looked at. As long as the view vector and the sun vector are in the same space then the dot product will give you the cosine of the angle between them and everything will work out correctly.
+So just to be clear, the sun vector points from the viewer towards the sun. The view vector points from the viewer to the pixel. Therefore both will have positive z values when looking above the horizon.
+Just as a note, there is no reason you can’t use y-up, just replace the references to sun_vector.z with sun_vector.y
+Ruud van Gaal
+Oct 02, 2013 @
+08:05:03
+It seems parts of my message is clamped off. I’ll try in parts:
+I’m getting NaN’s in Cg; here’s my walkthrough of some numbers:
+- Starting out with a sun_vector of 0.26,0.53,-0.8
+This gives me the following parameters:
+float4 sky_params1=float4(666.661987,-665.661987,0.000004,0.000250);
+float4 sky_params2=float4(0.753957,0.825765,0.878159,-1.888000);
+float4 sky_params3=float4(0.246043,0.174235,0.121842,1.891136);
+float4 sky_params4=float4(6371000.000000,41873842372608.0,-0.450000,1284199940096.0);
+float4 sky_params5=float4(100.739998,95.629997,90.928795,0.500000);
+float4 sky_params6=float4(-0.000001,-0.000002,-0.000004,0.071620);
+ray_dist=65504.0 (baseOpticalDepth)
+extinction somewhere inbetween 0 and 1 (ok)
+light_ray_pos positions with XYZ all between -65504 and +65504 (seems logical given the above numbers)
+light_ray_dist becomes 65504
+light_ray_dist_full also 65504
+light_ray_dist=max() becomes 65504
+incoming_light becomes (0,0,0) (hm?)
+=> calcExtinction(light_ray_dist) does light_ray_dist*sky_params6.xyz, where the .xyz are all negative.
+This means the exp() gives a low number (here 0 even).
+When negating sky_params6, things become better.
+Reply
+Ruud van Gaal
+Oct 02, 2013 @
+09:54:58
+I see that nVidia is clamping my stored floats to 65504. Still I don’t see anything indicating a blue sky. The sky_params2 seems responsible for Rayleigh lighting using calcScattering(), thus the blue light. With my:
+const float4 sky_params2=float4(0.753957,0.825765,0.878159,-1.888000);
+It gives a very gray color. If I understand correctly:
+- ‘extinction’ should be small (0..0.2) in the shader
+- ‘light_ray_dist’ and the likes are very big numbers (in the millions)
+- ‘scattering’ should be what you’d call the sky tint (so blue-ish in daylight).
+- ‘incoming_light’ should be blue as well? Hm.
+Note that line #44 has a small typo; a duplicate ‘(‘ in calling calcExtinction()).
+When using sky_params6 as above, I get a red signal in ‘incoming_light’. When I negate sky_params6.xyz, then I get a blue light, see http://racer.nl/images/temp/sky.JPG
+Reply
+Ruud van Gaal
+Oct 02, 2013 @
+10:06:55
+(sorry for flooding, but I don’t see an edit button)
+If you could extend the demo to include the contents of the sky_params1-6 settings, that would help tremendously in debugging implementations.
+Reply
+Conor Dickinson
+Oct 02, 2013 @
+11:01:19
+Great idea!
+With:
+sun_color: Vec3
+x: 1.652430637107293
+y: 1.6047531908865496
+z: 1.5338989284430014
+sun_vector: Vec3
+x: -0.6963549289726694
+y: -0.4118231547227058
+z: 0.5877852517116324
+I get:
+sky_params1: Vec4
+x: 7410.123299462788
+y: -7409.123299462788
+z: 4.7537431273343537e-7
+w: 0.00019894367886486952
+sky_params2: Vec4
+x: 0.9166085540664916
+y: 0.9444444865601335
+z: 0.9627597292326507
+w: -1.9
+sky_params3: Vec4
+x: 0.08339144593350853
+y: 0.05555551343986658
+z: 0.0372402707673493
+w: 1.9024999999999999
+sky_params4: Vec4
+x: 6483534.564901849
+y: 43325135354630.26
+z: 0.5908389387837243
+w: 1288914900353.2422
+sky_params5: Vec4
+x: 2.7312025852564887
+y: 2.5462369436172954
+z: 2.2819956640914927
+w: 0.5748319183426474
+sky_params6: Vec4
+x: -9.575999727395984e-8
+y: -2.1715832748429446e-7
+z: -4.7537431273343537e-7
+w: 0.6565141402540683
+Reply
+Ruud van Gaal
+Oct 03, 2013 @
+01:36:41
+Just to be sure; if possible, it would be nice to see the sky_params live in the WebGL online demo, to check multiple configurations. But thanks for the list; currently I’m seeing different numbers, but that may be due to the inputs. For example, sky_params4.x is just the Earth’s radius (6.371e6) but it’s 6483534 in your output. Can you show the sky_props inputs you used for those sky_params? I’m currently using:
+double sky_lambda[3]={ 680e-9, 550e-9, 450e-9 };
+double sky_k[3]={ 0.686, 0.678, 0.666 };
+double earth_radius = 6.371e6;
+double earth_atmo_thickness = 0.1e6;
+// Sky settings
+const double skyClarity=0.2; // 0..20
+const double skyDensity=0.99; // ?..?
+const double skyPollution=0.03; // ?..?
+const double skySunDiskRadius=0.1; // 0..1
+const double skyBrightness=1.46; // 0..4
+const double skySunDiskIntensity=0.5; // 0..1
+const double skyPlanetScale=1.0; // 0..10
+const double skyAtmosphereScale=1.0; // 0..10
+I’ll try to hardcode those sky_params you posted, thanks!
+Ruud van Gaal
+Oct 03, 2013 @
+03:39:39
+I’m getting different numbers that I can’t place. The sky properties (skyClarity etc) I posted were directly taken from the webdemo (I assume the values onscreen are those in sky_props 1:1). The calculation looks trivial: skyParams6.xyz = -(betaR+betaM). However, I get this in the end:
+float4 sky_params6=float4(-9.71213e-007,-2.072e-006,-4.34784e-006,0.0716197);
+which is ~10x times higher than your posted sky_params6. My relevant code for this:
+const double skyClarity=0.2;
+const double skyDensity=0.99;
+const double skyPollution=0.03;
+double clarity = 1.0+skyClarity;
+// compute betaR
+double factor = 1.86e-31 / (clarity * max(skyDensity, 0.001));
+for(i=0;i<3;i++)sky_params2[i] = factor / pow4(sky_lambda[i]);
+// compute betaM
+factor = 1.36e-19 * max(skyPollution, 0.001);
+for(i=0;i<3;i++)
+sky_params3[i] = factor * sky_k[i] * sqr(two_pi / sky_lambda[i]);
+// betaR + betaM, -(betaR + betaM), betaR / (betaR + betaM), betaM / (betaR + betaM)
+for(i=0;i<3;i++)sky_params1[i]=sky_params2[i]+sky_params3[i];
+for(i=0;i<3;i++)sky_params6[i]=-sky_params1[i];
+I have a hunch the problem lies in the sky_props?
+Ruud van Gaal
+Oct 04, 2013 @
+02:56:32
+Take sky_params6.w:
+- sky_props.clarity=0.2 (from your demo)
+- var clarity = 1 + sky_props.clarity; so clarity=1.2
+- this.sky_params6.w = clarity * 3 / (16 * Math.PI); so w=0.0716
+Your posted sky_params6.w=0.6565, which gives me:
+clarity=16*PI*w/3, so clarity would be 11.0. Something doesn’t add up?!
+I’ve tried code extracted from Simon’s Javascript example at http://tinyurl.com/leyuwvn and that also gives me sky_params6.w~0.07.
+I’ll try to get it working with the calculated parameters; I have some NaN in opticalDepth(). Have to figure out what a0 and a1 do; I get a1*a1+a0 becoming negative, hence the sqrt() giving NaN.
+Simon
+Oct 04, 2013 @
+03:37:18
+I think the sky_params6.w=0.6565 he posted is wrong. I check his demo and the value is also ~0.07 there. (precisely 0.07178459867900967)
+Conor Dickinson
+Oct 04, 2013 @
+11:07:44
+Yeah I totally messed that up, I was looking at the values right before I set params6.w, and the input values were not at their defaults. Here we go again, with default values:
+sun_color: Vec3
+x: 3.9996605025803884
+y: 3.9996605025803884
+z: 3.9996605025803884
+sun_vector: Vec3
+x: -0.43037101320045845
+y: 0.7545207083850168
+z: 0.4954586679179033
+sky_params1: Vec4
+x: 671.3655360635131
+y: -670.3655360635131
+z: 0.000004246451273727131
+w: 0.00024099110338806197
+sky_params2: Vec4
+x: 0.7839840036435455
+y: 0.848786576656935
+z: 0.8951362959596614
+w: -1.8899384986484786
+sky_params3: Vec4
+x: 0.2160159963564544
+y: 0.15121342334306506
+z: 0.1048637040403387
+w: 1.8929668821684165
+sky_params4: Vec4
+x: 6371000
+y: 41873841000000
+z: 0.5215940009384274
+w: 1284200000000
+sky_params5: Vec4
+x: 5.840046247176372
+y: 5.840046247176372
+z: 5.840046247176372
+w: 0.5003919244808795
+sky_params6: Vec4
+x: -9.298705966870914e-7
+y: -0.000002006855517343681
+z: -0.000004246451273727131
+w: 0.07178459867900967
+Ruud van Gaal
+Oct 08, 2013 @
+02:19:06
+That’s looks better. I do get slightly different results, that may be due to slightly different sky_props settings. I’d like a more reddish sunset, but I guess I’ll have to tweaks some settings. Can’t wait for your cloud tutorial!
+My results for your sun_vector and sun_color:
+float4 sky_params1=float4(666.667,-665.667,4.34784e-006,0.000249555);
+float4 sky_params2=float4(0.753957,0.825765,0.878158,-1.888);
+float4 sky_params3=float4(0.246043,0.174235,0.121842,1.89114);
+float4 sky_params4=float4(6.371e+006,4.18738e+013,0.521594,1.2842e+012);
+float4 sky_params5=float4(5.8395,5.8395,5.8395,0.5);
+float4 sky_params6=float4(-9.71213e-007,-2.072e-006,-4.34784e-006,0.0716197);
+double sky_lambda[3]={ 680e-9, 550e-9, 450e-9 };
+double sky_k[3]={ 0.686, 0.678, 0.666 };
+const double skyClarity=0.2; // 0..20
+const double skyDensity=0.99; // ?..?
+const double skyPollution=0.03; // ?..?
+const double skySunDiskRadius=0.1; // 0..1
+const double skyBrightness=1.46; // 0..4
+const double skySunDiskIntensity=0.5; // 0..1
+const double skyPlanetScale=1.0; // 0..10
+const double skyAtmosphereScale=1.0;
+Leave a Reply Cancel

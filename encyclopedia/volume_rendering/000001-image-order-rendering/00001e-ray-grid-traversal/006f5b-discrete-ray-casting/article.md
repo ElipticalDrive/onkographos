@@ -1,0 +1,101 @@
+# Discrete Ray Casting
+
+Also called: 3D Bresenham Ray Casting, Line Scan-conversion Ray Casting, Voxelization-based Ray Casting
+
+## Overview
+Discrete Ray Casting is a direct volume rendering technique that traverses a discrete, voxelized representation of the ray rather than a continuous mathematical line [S1, unofficial][S2]. It differs from continuous traversal methods (such as [DDA Traversal](3061-digital-differential-analyzer-dda-traversal.md)) by generating the ray path using integer arithmetic via a 3D Bresenham-like algorithm or 3D line scan-conversion, effectively treating the ray as a sequence of occupied voxels [S1, unofficial][S2].
+
+## How it works
+**Inputs:**
+- Ray origin $\mathbf{o}$ and direction $\mathbf{d}$ (normalized or unnormalized) [G].
+- Uniform grid with voxel size $v$ and dimensions $N_x, N_y, N_z$ [S1, unofficial].
+- Volume data array $V$ where $V[i,j,k]$ stores the scalar value (e.g., density or opacity) at voxel indices $(i,j,k)$ [S1, unofficial].
+
+**Outputs:**
+- Accumulated color and opacity for the pixel corresponding to the ray [S1, unofficial].
+
+**Data Structures:**
+- **Voxel Indices:** Integer tuple $(i, j, k)$ representing the current voxel [S1, unofficial].
+- **Ray State:** Current position in voxel space, updated via integer increments [S1, unofficial].
+
+**Algorithm Steps:**
+1.  **Initialization:** Determine the starting voxel index $(i_0, j_0, k_0)$ containing the ray origin $\mathbf{o}$ [S1, unofficial].
+2.  **Discretization:** Generate the sequence of voxels intersected by the ray using a 3D Bresenham line algorithm or 3D line scan-conversion algorithm [S1, unofficial][S2]. This produces a list of integer voxel coordinates $(i_m, j_m, k_m)$ for $m=0 \dots M-1$.
+3.  **Sampling:** For each voxel in the sequence, retrieve the scalar value $s_m = V[i_m, j_m, k_m]$ [S1, unofficial].
+4.  **Integration:** Apply the volume rendering integral using the sampled values. Typically, this involves compositing the contribution of each voxel along the path. If the voxel size is $v$, the optical depth contribution is proportional to $v \cdot s_m$ [S1, unofficial].
+    $$
+    C = \sum_{m=0}^{M-1} c_m \cdot \alpha_m \cdot \prod_{n=0}^{m-1} (1 - \alpha_n)
+    $$
+    where $c_m$ is the color and $\alpha_m$ is the opacity derived from $s_m$ [S1, unofficial].
+5.  **Termination:** Stop when the ray exits the grid bounds or a maximum opacity threshold is reached [S1, unofficial].
+
+**Pseudocode:**
+> **Unverified code.** The code below did not pass a test run against a reference implementation, or no test fits it, so it may contain errors.
+
+```python
+def discrete_ray_casting(ray_origin, ray_direction, voxel_size, volume_data, grid_bounds):
+    # 1. Determine starting voxel
+    start_voxel = [
+        int(ray_origin[i] // voxel_size) for i in range(3)
+    ]
+    
+    # 2. Determine end voxel (intersection with grid bounds)
+    # Simplified: assume ray always intersects or use a robust intersection test
+    end_voxel = [
+        int((grid_bounds.max[i] - ray_origin[i]) / ray_direction[i] // voxel_size) 
+        if ray_direction[i] > 0 else 
+        int((grid_bounds.min[i] - ray_origin[i]) / ray_direction[i] // voxel_size)
+        for i in range(3)
+    ]
+    
+    # 3. Generate discrete ray path using 3D Bresenham-like algorithm
+    # This step replaces continuous distance calculations with integer steps
+    voxel_path = bresenham_3d(start_voxel, end_voxel)
+    
+    # 4. Traverse and composite
+    accumulated_color = [0.0, 0.0, 0.0]
+    accumulated_opacity = 0.0
+    
+    for voxel in voxel_path:
+        # Check bounds
+        if not grid_bounds.contains(voxel):
+            continue
+            
+        # Get scalar value (zero-order interpolation)
+        scalar = volume_data[voxel[0], voxel[1], voxel[2]]
+        
+        # Map scalar to color and opacity [S1, unofficial]
+        color, opacity = transfer_function(scalar)
+        
+        # Composite
+        weight = opacity * (1.0 - accumulated_opacity)
+        accumulated_color = [
+            accumulated_color[i] + color[i] * weight 
+            for i in range(3)
+        ]
+        accumulated_opacity += weight
+        
+        if accumulated_opacity >= 1.0:
+            break
+            
+    return accumulated_color
+```
+
+**Edge Cases and Pitfalls:**
+- **Precision:** Integer arithmetic avoids floating-point accumulation errors in traversal but may introduce aliasing artifacts if the ray direction is not aligned with the grid [S1, unofficial].
+- **Degenerate Input:** Rays parallel to grid axes may require special handling in the Bresenham implementation to avoid skipping voxels or double-counting [S1, unofficial].
+- **Boundary Conditions:** The Bresenham algorithm must correctly handle the exit condition from the grid volume [S1, unofficial].
+
+## Operating characteristics
+- **Time Complexity:** $O(L)$, where $L$ is the number of voxels intersected by the ray, determined by the length of the Bresenham path [S1, unofficial].
+- **Memory Complexity:** $O(1)$ auxiliary space if the Bresenham generator is iterative; $O(L)$ if the path is stored [S1, unofficial].
+- **Strengths:** Simple implementation; no floating-point division in the traversal loop; efficient for uniform grids [S1, unofficial].
+- **Limitations:** Aliasing artifacts due to discrete sampling; less accurate than continuous methods for oblique rays [S1, unofficial].
+- **When to use:** When computational resources are limited and high precision is not critical; suitable for real-time applications on simple uniform volumes [S1, unofficial].
+
+## Background
+Discrete Ray Casting was introduced as an alternative to continuous ray casting methods, leveraging classic computer graphics line-drawing algorithms (Bresenham's algorithm) for volume traversal [S1, unofficial]. It is part of the early direct volume rendering techniques that sought to simplify the traversal process by avoiding floating-point arithmetic [S1, unofficial].
+
+## Sources
+[S1] Volume Rendering, https://www.cs.unh.edu/~cs880/visualization/Celebi-Volume%20Rendering.pdf, fetched 2026-10-26 (unofficial)
+[S2] graphXDoses/VolumeInspector, https://github.com/graphXDoses/VolumeInspector, fetched 2026-10-28

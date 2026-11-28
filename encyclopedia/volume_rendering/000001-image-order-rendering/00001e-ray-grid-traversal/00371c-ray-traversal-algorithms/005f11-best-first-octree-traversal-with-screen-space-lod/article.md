@@ -1,0 +1,103 @@
+# Best-First Octree Traversal with Screen-Space LOD
+
+Also called: Budgeted Octree Traversal
+
+## Overview
+This method renders hierarchical point-cloud or sparse volume data by traversing an octree in screen-space order, prioritizing nodes that project largest on the display [S1, unofficial]. It solves the problem of maintaining visual fidelity while adhering to a strict rendering budget by dynamically adjusting the level of detail based on camera distance and frustum visibility [S1, unofficial]. Unlike fixed-depth traversal, it stops refining nodes once the budget is exhausted, ensuring consistent performance regardless of scene complexity [S1, unofficial].
+
+## How it works
+**Inputs:**
+- An octree where each node contains a list of children (`node["children"]`) and a coarse point sample (`node["sample"]`) [S1, unofficial].
+- Camera parameters to compute screen-space projections and frustum bounds [G].
+- A rendering budget (`budget`) defining the maximum number of points allowed per frame [S1, unofficial].
+- A minimum screen-space size threshold (`lod_px`) in pixels [S1, unofficial].
+
+**Outputs:**
+- A list of coarse samples (`node["sample"]`) selected for rendering, totaling no more than `budget` points [S1, unofficial].
+
+**Data Structures:**
+- **Priority Queue:** Stores nodes ordered by their projected screen-space size, largest first [S1, unofficial].
+- **Node Structure:**
+  - `children`: List of child node references or indices; empty for leaves [S1, unofficial].
+  - `sample`: List of points associated with the node, rendered if the node is not refined further [S1, unofficial].
+
+**Algorithm Steps:**
+1. **Initialization:** Compute the screen-space size of the root node and push it into the priority queue. Initialize `points = 0` [S1, unofficial].
+2. **Traversal Loop:** While the priority queue is not empty and `points < budget`:
+   a. **Extract:** Pop the node with the largest screen-space size from the queue [S1, unofficial].
+   b. **Frustum Culling:** Cull the node if it lies outside the view frustum [S1, unofficial].
+   c. **Refinement Decision:** Evaluate the boolean condition `refine = node["children"] and size >= lod_px and points + len(node["sample"]) < budget` [S1, unofficial].
+   d. **Action:** If `refine` is true, compute screen sizes for all children and push them into the queue [S1, unofficial]. If `refine` is false, add `len(node["sample"])` to `points` and add the node's coarse sample to the render list [S1, unofficial].
+3. **Termination:** Stop traversal when the point budget is exhausted [S1, unofficial].
+
+**Pseudocode:**
+> **Unverified code.** The code below did not pass a test run against a reference implementation, or no test fits it, so it may contain errors.
+
+```python
+import heapq
+
+def best_first_octree_traversal(root, camera, budget, lod_px):
+    # Priority queue stores tuples: (-screen_size, node) for max-heap behavior
+    pq = []
+    # Compute projected screen-space size in pixels from node bounds and camera projection [G]
+    root_size = compute_screen_size(root, camera)
+    heapq.heappush(pq, (-root_size, root))
+    
+    points_rendered = 0
+    render_list = []
+    
+    while pq and points_rendered < budget:
+        neg_size, node = heapq.heappop(pq)
+        screen_size = -neg_size
+        
+        # Check if node's bounding box intersects the view frustum [G]
+        if not intersects_frustum(node.bounding_box, camera):
+            continue
+            
+        has_children = node.children is not None and len(node.children) > 0
+        is_large_enough = screen_size >= lod_px
+        can_afford_sample = (points_rendered + len(node.sample)) < budget
+        
+        # refine = node["children"] and size >= lod_px and points + len(node["sample"]) < budget [S1, unofficial]
+        refine = has_children and is_large_enough and can_afford_sample
+        
+        if refine:
+            for child in node.children:
+                child_size = compute_screen_size(child, camera)  # [G]
+                heapq.heappush(pq, (-child_size, child))
+        else:
+            points_rendered += len(node.sample)
+            render_list.append(node.sample)
+            
+    return render_list
+
+def compute_screen_size(node, camera):
+    # Standard projection: transform node bounds to clip space, project to screen, return max dimension or area in pixels [G]
+    pass
+
+def intersects_frustum(aabb, camera):
+    # Standard test: check if axis-aligned bounding box overlaps the six frustum planes [G]
+    pass
+```
+
+**Parameters:**
+- `lod_px`: Minimum screen-space size in pixels a node must project to be considered for refinement [S1, unofficial].
+- `budget`: Maximum total number of points allowed to be drawn in the frame [S1, unofficial].
+
+**Edge Cases and Pitfalls:**
+- **Budget Exhaustion:** If the budget is reached before the queue is empty, the traversal stops, potentially leaving large background areas unrendered or coarsely rendered [S1, unofficial].
+- **Small Nodes:** Nodes smaller than `lod_px` are never refined, even if they are in the foreground, ensuring a minimum LOD [S1, unofficial].
+- **Precision:** Screen-space size calculation must be robust to avoid jitter or incorrect ordering due to floating-point errors [G].
+
+## Operating characteristics
+- **Time Complexity:** Not given in the sources.
+- **Memory Complexity:** Not given in the sources.
+- **Performance:** On a 2.18 million point room scan, a far camera drew ~60,000 points coarsely covering the whole scene, while a near camera drew ~60,000 points densely on foreground surfaces, culling side nodes [S1, unofficial].
+- **Strengths:** Consistent performance, adaptive LOD, efficient frustum culling [S1, unofficial].
+- **Limitations:** Requires a priority queue, which can be expensive on GPU if not implemented carefully [G].
+
+## Background
+This method was described in an unofficial source discussing point cloud level of detail using octrees [S1, unofficial]. It emphasizes a best-first traversal approach driven by screen-space size and budget constraints.
+
+## Sources
+[S1] Point Cloud Level of Detail: Octrees and Out-of-Core ..., https://learngeodata.eu/point-cloud-level-of-detail-octree/, fetched 2026-10-28 (unofficial)

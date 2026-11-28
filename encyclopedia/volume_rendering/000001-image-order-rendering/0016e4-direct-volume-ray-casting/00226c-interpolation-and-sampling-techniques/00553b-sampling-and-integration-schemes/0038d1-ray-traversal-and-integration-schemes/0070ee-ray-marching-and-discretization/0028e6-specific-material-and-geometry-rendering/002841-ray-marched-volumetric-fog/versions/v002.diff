@@ -1,0 +1,247 @@
+--- v001.md
++++ v002.md
+@@ -4,118 +4,120 @@
+ 
+ ## Overview
+-Ray-marched volumetric fog simulates light absorption, scattering, soft shadows, and light shafts (god rays) by treating fog as a 3D volume of participating media traced via ray-marching from the camera to the scene [S1, unofficial]. It differs from backward ray-marching (scene to camera) by enabling early-out optimizations when transmittance becomes negligible, and it differs from voxel-based methods by operating directly in screen space using depth reconstruction rather than explicit volume data structures [S1, unofficial].
++Ray-marched volumetric fog simulates light absorption, scattering, soft shadows, and light shafts (god rays) by treating fog as a 3D volume of participating media traced via forward ray-marching from the camera to the scene [S1, unofficial]. It differs from backward ray-marching by allowing early-out optimizations when transmittance becomes negligible, and it decouples the physical density data from visual appearance rules via material parameterization and gradient-based classification as defined in [Specific Material and Geometry Rendering](4395-specific-material-and-geometry-rendering.md).
+ 
+ ## How it works
+-**Inputs and Outputs**
+-*   **Inputs:** Camera view ray direction, camera position, depth buffer (for scene intersection), light position, light intensity ($\Phi$), fog density ($\tau$), scattering coefficient ($a$), and step size ($\Delta l$).
+-*   **Outputs:** Final pixel color (radiance $L$).
++**Inputs and Outputs:**
++- **Inputs:** Camera position, view direction per pixel, depth buffer (for scene intersection reconstruction), light position and intensity, fog density ($\tau$), scattering coefficient ($a$), and phase function parameters.
++- **Outputs:** Final pixel color (radiance $L$).
+ 
+-**Data Structures**
+-*   **Depth Buffer:** 2D texture or array storing depth values $z$ for each pixel UV coordinate.
+-*   **Ray State:** Current position $x$, accumulated transmittance $T$, accumulated radiance $L_{acc}$.
++**Data Structures:**
++- **Depth Buffer:** 2D texture or array storing depth values $z$ for each pixel UV coordinate.
++- **Ray:** Defined by origin (camera position) and direction (reconstructed from UV and depth).
++- **Accumulators:** Floating-point variables for accumulated radiance and transmittance.
+ 
+-**Numbered Steps**
+-1.  **Ray Initialization:** For each pixel with UV coordinate $u$, shoot a ray from the camera origin $C$ through the view direction $\omega$.
+-2.  **Scene Intersection:** Reconstruct the 3D position of the scene intersection point $x_{end}$ by sampling the depth buffer at $u$ and unprojecting the depth value [S1, unofficial].
+-3.  **Ray Clamping:** Clamp the total ray length to a maximum distance $z_{far}$ to prevent infinite marching if the ray misses the scene geometry [S1, unofficial].
+-4.  **Jittering (Optional):** Add a pseudo-random delta step $\delta$ to the ray's starting position to fix slice artifacts [S1, unofficial].
+-5.  **Marching Loop:** Iterate from $n = 0$ to $N$ along the ray from camera to $x_{end}$:
+-    a. Calculate current sample position $x(l_n)$.
+-    b. Calculate distance $d$ from $x(l_n)$ to the light source.
+-    c. Calculate visibility $v(x)$ from $x(l_n)$ to the light source.
+-    d. Calculate in-scattering $L_i$.
+-    e. Calculate transmittance $e^{-\tau l_n}$ from camera to $x(l_n)$.
+-    f. Accumulate radiance: $L_{acc} += L_i \cdot e^{-\tau l_n} \cdot \Delta l$.
+-6.  **Final Compositing:** Combine accumulated fog radiance with the background scene color (not detailed in source, implied by "full-screen shader").
++**Numbered Steps:**
++1.  **Ray Initialization:** For each pixel, reconstruct the 3D world position of the scene intersection point by sampling the depth buffer using the current pixel's UV coordinate [S1, unofficial]. Define the ray origin as the camera position and the ray direction as the vector from the camera to the reconstructed intersection point.
++2.  **Ray Clamping:** Clamp the maximum ray distance to a predefined `zfar` value to prevent infinite marching if the ray does not hit the scene geometry [S1, unofficial].
++3.  **Jittering (Optional but Recommended):** Add a pseudo-random delta step to the ray's starting position to fix slice artifacts caused by aligned samples [S1, unofficial].
++4.  **Ray Marching Loop:** Iterate from the camera (start) to the scene intersection (finish) at regular intervals $\Delta l$.
++    -   Calculate the current sample position $x(l_n)$ along the ray.
++    -   Calculate the distance $l_n$ traveled from the camera to the current sample.
++    -   Calculate the transmittance $T(l_n) = e^{-\tau l_n}$ [S1, unofficial].
++    -   Calculate the in-scattering term $L_i(x(l_n), \omega)$ for the current sample.
++    -   Accumulate the contribution: $L \leftarrow L + L_i(x(l_n), \omega) \cdot T(l_n) \cdot \Delta l$ [S1, unofficial].
++    -   Update transmittance for the next step: $T \leftarrow T \cdot e^{-\tau \Delta l}$.
++    -   Early-out: If transmittance drops below a threshold, break the loop [S1, unofficial].
++5.  **Final Composition:** Combine the accumulated fog radiance with the background scene color (if applicable) using the final transmittance.
+ 
+-**Formulas**
+-The total radiance $L$ is approximated using a Riemann sum [S1, unofficial]:
++**Formulas:**
++The total radiance $L$ is approximated using the Riemann sum method [S1, unofficial]:
++$$ L = \sum_{n=0}^{N} L_i(x(l_n), \omega) e^{-\tau l_n} \Delta l $$
++Where:
++-   $L$: Calculated radiance.
++-   $N$: Total number of steps.
++-   $L_i(x(l_n), \omega)$: In-scattering term at step $n$.
++-   $e^{-\tau l_n}$: Transmittance for distance $l_n$ traveled from the camera.
++-   $\Delta l$: Ray-march step size.
+ 
+-$$ L = \sum_{n=0}^{N} L_i(x(l_n), \omega) e^{-\tau l_n} \Delta l $$
++The in-scattering term $L_i(x, \omega)$ for a point light source is:
++$$ L_i(x, \omega) = \frac{a \Phi}{4\pi d^2} v(x) e^{-\tau d} P(\omega, \omega') $$
++Where:
++-   $\tau$: Fog density (thickness).
++-   $a$: Scattering coefficient (probability of photon scattering).
++-   $\Phi$: Point light intensity.
++-   $d$: Distance between the sample point $x$ and the light source.
++-   $v(x)$: Visibility of the sample point from the light source (1 if no shadow mapping, or sampled from a light's cube shadow map) [S1, unofficial].
++-   $e^{-\tau d}$: Transmittance from the sample point to the light source.
++-   $P(\omega, \omega')$: Phase function describing the probability density of scattering direction.
+ 
+-Where:
+-*   $L$: Calculated radiance.
+-*   $L_i(x(l_n), \omega)$: In-scattering term at step $n$.
+-*   $e^{-\tau l_n}$: Transmittance for distance $l_n$ travelled from camera.
+-*   $\Delta l$: Ray-march step size.
+-*   $\tau$: Fog density.
++**Parameters:**
++-   **Density ($\tau$):** Constant for uniform fog. Can be procedurally generated, sampled from a texture, or from OpenVDB for non-uniform fog [S1, unofficial].
++-   **Visibility ($v(x)$):** Set to 1 in basic implementations. Can be sampled from a light's cube shadow map if available [S1, unofficial].
++-   **Phase Function ($P$):** Uses the Schlick phase function approximation of the Henyey-Greenstein (HG) function for real-time performance, as the original HG function is expensive [S1, unofficial].
++-   **Step Size ($\Delta l$):** Determines the resolution of the ray march. Smaller steps reduce artifacts but increase computation.
+ 
+-The in-scattering term $L_i$ for a point light is [S1, unofficial]:
++**Pitfalls:**
++-   **Slice Artifacts:** Occur when marching rays with the same step size starting at the same point, causing samples to align on the same "slices" [S1, unofficial].
++-   **Noise:** Jittering samples reduces slice artifacts but can introduce noise, especially at larger step sizes [S1, unofficial].
++-   **Banding:** Visible in the distance even with jittering; further jittering of every sample on a ray can mitigate this [S1, unofficial].
+ 
+-$$ L_i(x, \omega) = \frac{a \Phi}{4\pi d^2} v(x) e^{-\tau d} P(\omega, \omega') $$
+-
+-Where:
+-*   $a$: Scattering coefficient (probability of photon scattering).
+-*   $\Phi$: Point light intensity.
+-*   $d$: Distance between sample point $x$ and light source.
+-*   $v(x)$: Visibility of sample point from light source.
+-*   $e^{-\tau d}$: Transmittance from light to sample point.
+-*   $P(\omega, \omega')$: Phase function describing scattering direction probability.
+-
+-**Parameters**
+-*   **Density ($\tau$):** Constant for uniform fog [S1, unofficial].
+-*   **Visibility ($v(x)$):** Set to 1 in the reference implementation [S1, unofficial]. Can be sampled from a light's cube shadow map if available.
+-*   **Phase Function ($P$):** Uses Schlick phase function approximation of Henyey-Greenstein (HG) for real-time performance [S1, unofficial].
+-*   **Step Size ($\Delta l$):** Determines resolution of the march. Larger steps increase noise but reduce cost.
+-
+-**Pitfalls**
+-*   **Slice Artifacts:** Occur when rays march with the same step size starting at the same point, causing samples to align on the same "slices" [S1, unofficial].
+-*   **Noise:** Jittering reduces slice artifacts but can make the result look noisier, especially with larger step sizes [S1, unofficial].
+-*   **Banding:** Visible in the distance, partially mitigated by jittering every sample on a ray [S1, unofficial].
+-
+-**Pseudocode**
++**Pseudocode:**
+ ```python
+-def ray_marched_volumetric_fog(uv, camera_pos, view_direction, depth_buffer, light_pos, light_intensity, density, scattering_coeff, step_size, z_far):
+-    # 1. Reconstruct scene intersection
++def ray_marched_volumetric_fog(camera_pos, view_dir, depth_buffer, light_pos, light_intensity, fog_density, scattering_coeff, step_size, zfar, jitter_seed):
++    # Reconstruct scene intersection
++    uv = get_pixel_uv()
+     depth = depth_buffer.sample(uv)
+-    scene_pos = unproject(uv, depth) # [G] Standard unprojection using camera matrices
++    scene_pos = reconstruct_world_position(uv, depth)
+     
+-    # 2. Calculate ray direction and length
++    # Ray direction
+     ray_dir = normalize(scene_pos - camera_pos)
+-    ray_len = length(scene_pos - camera_pos)
++    ray_origin = camera_pos
+     
+-    # 3. Clamp ray length
+-    if ray_len > z_far:
+-        ray_len = z_far
++    # Ray length
++    ray_length = length(scene_pos - camera_pos)
++    if ray_length > zfar:
++        ray_length = zfar
+         
+-    # 4. Jitter start position to fix slice artifacts
+-    jitter = random_float() * step_size # [G] Pseudo-random value in [0, step_size)
+-    start_offset = jitter * ray_dir
++    # Jitter start position
++    jitter = pseudo_random(jitter_seed) * step_size
++    current_pos = ray_origin + ray_dir * jitter
++    current_dist = jitter
+     
+-    # 5. Initialize accumulation
+     accumulated_radiance = vec3(0.0)
+-    current_pos = camera_pos + start_offset
++    transmittance = 1.0
+     
+-    # 6. Marching loop
+-    num_steps = int(ray_len / step_size)
+-    for n in range(num_steps):
+-        # Current sample position
+-        sample_pos = camera_pos + (n * step_size + jitter) * ray_dir
++    # March from camera to scene
++    while current_dist < ray_length:
++        # Calculate in-scattering
++        # Distance from sample to light
++        dist_to_light = length(current_pos - light_pos)
+         
+-        # Distance from sample to light
+-        d = length(light_pos - sample_pos)
++        # Visibility (1 if no shadow map)
++        visibility = 1.0 
+         
+-        # Visibility (set to 1 if no shadow mapping)
+-        visibility = 1.0 # [S1, unofficial]
+-        
+-        # Transmittance from camera to sample
+-        l_n = length(sample_pos - camera_pos)
+-        transmittance_camera = exp(-density * l_n)
+-        
+-        # Transmittance from light to sample
+-        transmittance_light = exp(-density * d)
+-        
+-        # Phase function (Schlick approximation of Henyey-Greenstein)
+-        # [G] Simplified Schlick phase function P(g, theta)
+-        # g is asymmetry parameter, theta is angle between view and light direction
+-        # Assuming g=0 for isotropic or pre-calculated for HG approx
+-        phase = schlick_phase_function(view_direction, normalize(light_pos - sample_pos))
++        # Phase function (Schlick approximation of HG)
++        phase = schlick_phase_function(view_dir, normalize(light_pos - current_pos))
+         
+         # In-scattering term
+         # L_i = (a * Phi / (4 * pi * d^2)) * v(x) * e^(-tau * d) * P
+-        in_scattering = (scattering_coeff * light_intensity / (4.0 * 3.14159 * d * d)) * visibility * transmittance_light * phase
++        in_scattering = (scattering_coeff * light_intensity / (4.0 * 3.14159 * dist_to_light * dist_to_light)) * visibility * exp(-fog_density * dist_to_light) * phase
+         
+-        # Accumulate: L_i * transmittance_from_camera * step_size
+-        accumulated_radiance += in_scattering * transmittance_camera * step_size
++        # Transmittance from camera to current sample
++        camera_transmittance = exp(-fog_density * current_dist)
++        
++        # Accumulate radiance
++        # L += L_i * T_camera * delta_l
++        accumulated_radiance += in_scattering * camera_transmittance * step_size
++        
++        # Update transmittance for next step
++        transmittance *= exp(-fog_density * step_size)
++        
++        # Early-out optimization
++        if transmittance < 0.01:
++            break
++            
++        # Move to next step
++        current_pos = ray_origin + ray_dir * (current_dist + step_size)
++        current_dist += step_size
+         
+     return accumulated_radiance
+@@ -124,21 +126,21 @@
+ ## Subtopics
+ 
+-### [Procedural Volumetric Cloud Rendering](3480-procedural-volumetric-cloud-rendering.md)
+-Renders volumetric clouds using procedural noise functions. Choose when clouds are the primary volumetric element and require complex internal structure.
++### Procedural Volumetric Cloud Rendering
++Renders volumetric clouds using procedural noise functions. Choose when clouds are the primary volumetric element and require complex internal structure. [Procedural Volumetric Cloud Rendering](3480-procedural-cloud-rendering.md)
+ 
+-### [Mr-Voxel Volume Rendering](3874-mr-voxel-volume-rendering.md)
+-Renders volumes using voxel grids and marching cubes/rays. Choose when explicit volumetric data (e.g., medical scans, smoke simulations) is available and high accuracy is needed.
++### Mr-Voxel Volume Rendering
++Uses voxel-based rendering for complex volumetric data. Choose when working with pre-defined voxel grids or medical/scientific data. [Mr-Voxel Volume Rendering](3874-mr-voxel-volume-rendering.md)
+ 
+ ## Operating characteristics
+-*   **Time Complexity:** $O(N \cdot P)$, where $N$ is the number of pixels and $P$ is the number of march steps per ray.
+-*   **Memory Complexity:** $O(1)$ per pixel (excluding depth buffer and light shadow maps).
+-*   **Performance:** Real-time capable on modern GPUs if step count is limited. Performance degrades with higher resolution, larger step sizes, or complex light interactions (shadow maps).
+-*   **Strengths:** Simple implementation, works with existing scene geometry, allows dynamic lighting interactions (soft shadows, god rays).
+-*   **Limitations:** Slice artifacts without jittering, noise with large steps, no occlusion by other volumetric objects (only scene geometry), uniform fog assumption in basic implementation.
+-*   **When to use:** Real-time games requiring atmospheric fog with dynamic lighting.
+-*   **When not to use:** Offline rendering requiring high accuracy, scenes with complex non-uniform volumetric data (use voxel methods), or when performance is extremely constrained and simple 2D fog is sufficient.
++-   **Time Complexity:** $O(N \cdot S)$, where $N$ is the number of pixels and $S$ is the number of steps per ray.
++-   **Memory Complexity:** $O(1)$ per pixel, plus storage for depth buffer and light shadow maps if used.
++-   **Performance:** Real-time performance is achievable with Schlick phase function approximation and early-out optimizations. Step size significantly impacts performance and visual quality.
++-   **Strengths:** Simple implementation, dynamic interaction with scene geometry and lights, early-out optimization.
++-   **Limitations:** Slice artifacts, noise with jittering, performance cost with large step counts or high resolutions.
++-   **When to Use:** Real-time fog effects in games or applications where dynamic lighting interaction is required.
++-   **When Not to Use:** When high-fidelity, artifact-free volumetric rendering is required without post-processing, or when performance is extremely constrained.
+ 
+ ## Background
+-The technique is based on the paper "Real-time Volumetric Lighting in Participating Media" by Toth and Umenhofer [S1, unofficial]. It has been implemented in games such as Horizon Zero Dawn, Death Stranding, and Returnal [S1, unofficial]. The implementation described is a forward ray-marching approach, deviating from the backward ray-marching in the original paper to allow for early-out optimizations [S1, unofficial].
++Ray-marched volumetric fog is used in games like *Horizon Zero Dawn*, *Death Stranding*, and *Returnal* to simulate dynamic fog interacting with world light and geometry [S1, unofficial]. The technique is based on the principles of participating media and ray-marching, as described in the paper "Real-time Volumetric Lighting in Participating Media" by Toth and Umenhofer [S1, unofficial].
+ 
+ ## Sources

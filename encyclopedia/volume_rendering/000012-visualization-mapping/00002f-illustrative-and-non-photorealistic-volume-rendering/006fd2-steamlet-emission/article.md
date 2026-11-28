@@ -1,0 +1,125 @@
+# Steamlet Emission
+
+Also called: Particle Systems for Volume, Steam Rendering
+
+## Overview
+Steamlet Emission is a technique for visualizing 3D data by emitting and propagating particles, referred to as "steamlets," through the volume to directly visualize exterior structure without surface extraction [S1, unofficial][S2, unofficial]. It differs from traditional ray casting by replacing continuous volume integration with a discrete particle system approach, simulating phenomena like advection and diffusion [S1, unofficial]. This method is particularly noted for its ability to obscure internal details while highlighting boundaries, making it suitable for illustrative visualization but potentially unsuitable for volumes with fuzzy boundaries or intricate external details where precise structural fidelity is required [S1, unofficial].
+
+## How it works
+**Inputs and Outputs:**
+*   **Input:** A 3D scalar field (volume data), a set of emission strategies (uniform, density-based, or gradient-based), and optical properties for the steamlets (color, opacity, velocity).
+*   **Output:** A 2D image produced by integrating steamlet contributions along viewing rays.
+
+**Data Structures:**
+Each steamlet is represented as a particle with the following fields [S1, unofficial]:
+*   `position`: 3D vector $(x, y, z)$ indicating location within the volume.
+*   `velocity`: 3D vector $(v_x, v_y, v_z)$ indicating direction and speed of propagation.
+*   `optical_properties`: Scalar or vector values defining color and opacity contribution.
+
+**Steps:**
+1.  **Emission:** Emit a multitude of steamlets from various points within the volume [S2, unofficial]. The distribution strategy is chosen from the following options [S1, unofficial][S2, unofficial]:
+    *   **Uniform Distribution:** Steamlets are emitted evenly across the volume.
+    *   **Density-Based Distribution:** More steamlets are emitted from regions of low density to enhance visibility in sparse areas.
+    *   **Gradient-Based Distribution:** Steamlets are emitted along gradients to highlight boundaries and feature edges.
+2.  **Propagation (Simulation):** Simulate the movement of steamlets using a particle system approach. Each steamlet updates its position based on its velocity, simulating simple phenomena such as advection and diffusion [S1, unofficial]. [G] In a standard implementation, this involves iterating through time steps $t$, updating position $P_{t+1} = P_t + V_t \cdot \Delta t$, and potentially applying diffusion noise to the velocity or position to simulate the "steam" effect.
+3.  **Integration:** Integrate the contributions of all steamlets along viewing rays to produce the initial image [S1, unofficial]. This involves accumulating the color and opacity values of each steamlet intersected by a ray.
+4.  **Compositing:** Apply compositing techniques, such as front-to-back or back-to-front compositing, to ensure correct blending of steamlet contributions [S1, unofficial]. [G] Front-to-back compositing is typically preferred for alpha-blended steamlets to handle transparency correctly: $C_{out} = C_{in} + C_{steam} \cdot \alpha_{steam} \cdot (1 - \alpha_{accumulated})$.
+
+**Pseudocode:**
+> **Unverified code.** The code below did not pass a test run against a reference implementation, or no test fits it, so it may contain errors.
+
+```python
+def render_steamlet_emission(volume_data, camera, emission_strategy):
+    """
+    Renders a volume using Steamlet Emission.
+    
+    Args:
+        volume_data: 3D array of scalar values.
+        camera: Camera object with ray generation function.
+        emission_strategy: Enum or string ('uniform', 'density', 'gradient').
+        
+    Returns:
+        2D image array.
+    """
+    # 1. Emit Steamlets
+    steamlets = []
+    volume_bounds = get_volume_bounds(volume_data)
+    
+    if emission_strategy == 'uniform':
+        # Emit N particles uniformly distributed in volume_bounds
+        steamlets = emit_uniform(volume_bounds, count=N)
+    elif emission_strategy == 'density':
+        # Emit more particles in low-density regions
+        # [G] Implementation: Sample volume, invert density, use as probability distribution
+        steamlets = emit_density_based(volume_data, volume_bounds, count=N)
+    elif emission_strategy == 'gradient':
+        # Emit particles along gradients
+        # [G] Implementation: Compute gradient field, emit along gradient vectors
+        steamlets = emit_gradient_based(volume_data, volume_bounds, count=N)
+        
+    # 2. Propagate Steamlets (Simplified single-step for illustration)
+    # In practice, this may involve multiple time steps
+    for particle in steamlets:
+        particle.position += particle.velocity * delta_time
+        # [G] Apply diffusion/advection noise if simulating physical steam behavior
+        particle.velocity += get_diffusion_noise(particle.position)
+        
+    # 3. Integrate and Composite
+    image_width, image_height = camera.resolution
+    image = zeros((image_height, image_width, 3))
+    
+    for y in range(image_height):
+        for x in range(image_width):
+            ray = camera.generate_ray(x, y)
+            accumulated_color = 0.0
+            accumulated_alpha = 0.0
+            
+            # Sort steamlets by distance along ray for front-to-back compositing
+            intersecting_particles = get_intersecting_particles(ray, steamlets)
+            intersecting_particles.sort(key=lambda p: distance(ray.origin, p.position))
+            
+            for particle in intersecting_particles:
+                # Sample particle optical properties at intersection
+                # [G] Assuming particle has a spatial extent or is a point sample
+                color = particle.color
+                alpha = particle.opacity
+                
+                # Front-to-back compositing
+                # C_out = C_in + C_particle * alpha_particle * (1 - alpha_accumulated)
+                contribution = color * alpha * (1.0 - accumulated_alpha)
+                accumulated_color += contribution
+                accumulated_alpha += alpha * (1.0 - accumulated_alpha)
+                
+                # Break if fully opaque
+                if accumulated_alpha >= 1.0:
+                    break
+            
+            image[y, x] = accumulated_color
+            
+    return image
+```
+
+**Parameters:**
+*   `N`: Number of steamlets. Not given in the sources.
+*   `delta_time`: Time step for propagation. Not given in the sources.
+*   `emission_strategy`: Determines particle distribution. Options: 'uniform', 'density', 'gradient' [S1, unofficial][S2, unofficial].
+
+**Edge Cases and Pitfalls:**
+*   **Fuzzy Boundaries:** The method is unsuitable for visualizing volumes with fuzzy boundaries or intricate external details, as it directly visualizes exterior structure without surface extraction [S1, unofficial].
+*   **Performance:** The particle system approach is typically faster than ray casting but may still be unsuitable for real-time applications depending on the number of steamlets and complexity of propagation [S1, unofficial].
+*   **Distribution Bias:** Choosing an inappropriate emission strategy (e.g., uniform for sparse data) can lead to obscure or uninformative visualizations [S2, unofficial].
+
+## Operating characteristics
+*   **Time Complexity:** Typically faster than ray casting, but performance depends on the number of steamlets and the complexity of the propagation simulation [S1, unofficial].
+*   **Memory Complexity:** Depends on the number of steamlets stored in memory. Each steamlet requires storage for position, velocity, and optical properties [S1, unofficial].
+*   **Strengths:** Directly visualizes exterior structure without surface extraction; can simulate phenomena like advection and diffusion; offers editability of individual components [S1, unofficial].
+*   **Limitations:** Unsuitable for volumes with fuzzy boundaries or intricate external details; may produce obscure visualizations if distribution is not carefully chosen [S1, unofficial][S2, unofficial].
+*   **When to Use:** When an illustrative, obscured view of the volume's exterior structure is desired, or when simulating steam-like phenomena is beneficial.
+*   **When Not to Use:** When precise structural fidelity of fuzzy boundaries or intricate external details is required.
+
+## Background
+Steamlet Emission, also known as Steam Rendering or Particle Systems for Volume, is a technique for visualizing 3D data by emitting and propagating particles through the volume [S1, unofficial][S2, unofficial]. It was developed as an alternative to traditional surface rendering methods that rely on extracting surfaces from the data [S1, unofficial]. The technique is particularly relevant in fields such as industrial inspection, molecular modeling, and geological visualization, where understanding the exterior structure of volumetric data is crucial [S1, unofficial].
+
+## Sources
+[S1] Llama version of Ct Volume Rendering, https://www.flyriver.com/l/ct-volume-rendering, fetched 2026-10-29 (unofficial)
+[S2] ChatGPT version of Ct Volume Rendering, https://www.flyriver.com/s/ct-volume-rendering, fetched 2026-10-29 (unofficial)

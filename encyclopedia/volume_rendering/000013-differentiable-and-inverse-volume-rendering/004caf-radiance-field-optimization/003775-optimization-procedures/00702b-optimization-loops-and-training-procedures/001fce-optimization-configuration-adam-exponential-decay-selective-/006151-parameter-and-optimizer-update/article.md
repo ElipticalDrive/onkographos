@@ -1,0 +1,109 @@
+# Parameter and Optimizer Update
+Also called: Update Param with Optimizer
+
+## Overview
+A utility to update model parameters and their corresponding optimizer states using custom functions, handling both optimized and un-optimized parameters [S1, unofficial]. It separates parameters into those managed by an optimizer (e.g., Adam) and those updated directly, allowing flexible integration of custom update rules within differentiable volume rendering pipelines [S1, unofficial].
+
+## How it works
+**Inputs and Outputs:**
+- `params`: Dictionary mapping parameter names to tensors.
+- `optimizers`: Dictionary mapping parameter names (or prefixes) to optimizer objects.
+- `param_fn`: Callable `(name, tensor) -> tensor` for direct parameter updates.
+- `optimizer_fn`: Callable `(key, value) -> value` for optimizer state updates.
+- `optimizers_prefix`: String prefix to identify optimizer keys in the state dict [S1, unofficial].
+
+**Data Structures:**
+- `optimizer.state`: Dictionary containing state for each parameter group. Keys are typically parameter names or indices. Values are dictionaries of state tensors (e.g., `exp_avg`, `exp_avg_sq` for Adam).
+- `optimizer.param_groups`: List of dictionaries containing `params`, `lr`, `betas`, `eps`, etc.
+
+**Steps:**
+1. **Split Names:** Iterate through `params`. Separate names into `optimized_names` (present in `optimizers`) and `un_optimized_names` (not present) [S1, unofficial].
+2. **Update Optimized Parameters:**
+   - For each `name` in `optimized_names`:
+     - Retrieve the `optimizer` and `param` tensor.
+     - Extract the `param_state` from `optimizer.state[name]` [S1, unofficial].
+     - For each `key` in `param_state` except `'step'`:
+       - Update the state value: `new_value = optimizer_fn(key, param_state[key])` [S1, unofficial].
+     - Update the parameter: `new_param = param_fn(name, param)` [S1, unofficial].
+     - Update `optimizer.param_groups` and `optimizer.state` with `new_param` and updated state [S1, unofficial].
+3. **Update Un-Optimized Parameters:**
+   - For each `name` in `un_optimized_names`:
+     - Apply `param_fn`: `new_param = param_fn(name, params[name])` [S1, unofficial].
+     - Update `params[name]` with `new_param` [S1, unofficial].
+
+**Pseudocode:**
+> **Unverified code.** The code below did not pass a test run against a reference implementation, or no test fits it, so it may contain errors.
+
+```python
+def update_parameters(params, optimizers, param_fn, optimizer_fn, optimizers_prefix):
+    optimized_names = []
+    un_optimized_names = []
+    
+    # Split names
+    for name in params:
+        if name in optimizers:
+            optimized_names.append(name)
+        else:
+            un_optimized_names.append(name)
+            
+    # Update optimized params
+    for name in optimized_names:
+        optimizer = optimizers[name]
+        param = params[name]
+        param_state = optimizer.state[name]
+        
+        # Update optimizer state
+        for key in param_state:
+            if key == 'step':
+                continue
+            param_state[key] = optimizer_fn(key, param_state[key])
+            
+        # Update parameter
+        new_param = param_fn(name, param)
+        params[name] = new_param
+        
+        # Update optimizer param_groups and state dict
+        # Note: In practice, this involves updating the tensor reference in param_groups
+        # and ensuring the state dict points to the correct tensor.
+        # This step is implementation-specific to the optimizer framework.
+        # [G] Assuming standard PyTorch-like behavior where param_groups['params'] 
+        # holds the tensor reference.
+        for group in optimizer.param_groups:
+            if name in group['params']:
+                group['params'][0] = new_param # Assuming single param per group for simplicity
+        
+    # Update un-optimized params
+    for name in un_optimized_names:
+        new_param = param_fn(name, params[name])
+        params[name] = new_param
+```
+
+**Parameters:**
+- `param_fn`: Callable taking parameter name and tensor, returning new tensor [S1, unofficial].
+- `optimizer_fn`: Callable taking optimizer state key and value, returning new state value [S1, unofficial].
+- `optimizers_prefix`: String prefix for optimizer keys [S1, unofficial].
+
+**Edge Cases and Pitfalls:**
+- Precision: Ensure `optimizer_fn` handles floating-point precision correctly, especially for exponential moving averages.
+- Boundaries: If `param_fn` involves clipping (e.g., density non-negativity), apply it after the optimizer step if required by the specific variant [S2].
+- Degenerate Input: Handle cases where `param_state` is empty or `optimizer` is not initialized for a parameter.
+
+## Subtopics
+
+### Density Update with Adam
+Builds lighting $L$ from density $\rho$ and lights. Renders image $I^c = R(\rho, L, c)$. Computes gradient $\nabla_\rho = \partial L_\rho / \partial \rho$. Updates $\rho$ with $\nabla_\rho$ using Adam optimizer. Clips negative density: $\rho \leftarrow \max(\rho, 0)$ [S2].
+
+## Operating characteristics
+- **Time Complexity:** Linear in the number of parameters for the split step. Optimizer update time depends on the complexity of `optimizer_fn` and `param_fn`.
+- **Memory Complexity:** Linear in the number of parameters for storing optimizer states.
+- **Strengths:** Flexible integration of custom update rules. Separation of concerns between optimizer-managed and direct updates.
+- **Limitations:** Requires careful implementation of `optimizer_fn` and `param_fn` to ensure correctness. Performance depends on the efficiency of these functions.
+- **When to Use:** When standard optimizers are insufficient or when custom update rules are needed for specific parameters (e.g., density clipping, learning rate scheduling).
+- **When Not to Use:** When standard optimizers suffice and no custom updates are required.
+
+## Background
+Originated in the context of differentiable volume rendering and inverse rendering, where flexible parameter updates are needed for various scene representations (e.g., densities, colors, normals) [S1, unofficial]. Developed to handle the complexity of optimizing both learned parameters and auxiliary variables in radiance field optimization [S1, unofficial].
+
+## Sources
+[S1] carlinds/splatad, https://github.com/carlinds/splatad, fetched 2026-10-27 (unofficial)
+[S2] Global Transport for Fluid Reconstruction with Learned Self-Supervision, https://doi.org/10.1109/cvpr46437.2021.00168, fetched 2026-10-30

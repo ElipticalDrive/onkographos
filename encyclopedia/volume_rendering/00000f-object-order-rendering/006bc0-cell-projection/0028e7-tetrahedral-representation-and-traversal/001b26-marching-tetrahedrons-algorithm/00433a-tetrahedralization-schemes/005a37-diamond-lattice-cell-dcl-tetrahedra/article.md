@@ -1,0 +1,174 @@
+# Diamond Lattice Cell (DCL) Tetrahedra
+Also called: Alternative Cube Slicing Method, DCL Marching Tetrahedra, DCL tetrahedra, Diamond Lattice Cell (DCL) Marching Tetrahedra
+
+## Overview
+The Diamond Lattice Cell (DCL) method is a tetrahedralization scheme for isosurface extraction that partitions cubic voxels into five tetrahedra based on a diamond cubic lattice structure [S1, S2]. It solves the ambiguity and artifact issues of standard cube slicing by ensuring consistent diagonal interpolation across shared faces through an alternating orientation pattern [S1, S2]. Unlike standard Marching Tetrahedra, DCL introduces additional calculations for diagonals across cube faces, making it structurally closer to Dual Contouring in its handling of face intersections [S1, S2].
+
+## How it works
+### Inputs and Outputs
+- **Input**: A scalar field $S$ defined on a regular 3D grid of vertices $V_{grid}$ [S1, S2]. An isosurface threshold $T$ [Parent].
+- **Output**: A triangle mesh representing the isosurface $S(x,y,z) = T$ [S1, S2].
+
+### Data Structures
+The algorithm processes a grid of cubic cells [S1, S2]. Each cell is decomposed into five tetrahedra using a diamond cubic lattice basis [S1, S2]. The connectivity and orientation of the tetrahedra are determined by the parity of the cell coordinates [S2].
+
+### Steps
+1. **Grid Iteration**: Iterate over every cubic cell in the grid [S2].
+2. **Orientation Determination**: Determine the tetrahedron orientation for the current cell based on the sum of its integer coordinates $(i, j, k)$ [S2]. If $(i + j + k)$ is odd, use Orientation A; otherwise (even), use the inverted Orientation B [S2]. This ensures near cells do not use a different diagonal to compute the intersection [S2].
+3. **Tetrahedral Decomposition**: Slice the cube into 5 tetrahedra using the diamond cubic lattice basis [S1, S2]. For each tetrahedron inscribed in a cube, using the vertices of the cube and edges that cross the faces of the cube, the tetrahedron will occupy 4 points; the other 4 points form the corners of an inverted tetrahedron [S1]. Cubes are mated on each side with another that has an opposite alignment of the tetrahedron around the centroid of the cube [S1].
+4. **Intersection Calculation**: For each of the 5 tetrahedra in the cell, evaluate the scalar values $S_1, S_2, S_3, S_4$ at the four vertices [Parent]. Determine the sign of $(S_i - T)$ for each vertex $i$ [Parent]. If signs differ across an edge, linear interpolation finds the intersection point $P$:
+   $$ P = V_1 + \frac{T - S_1}{S_2 - S_1} (V_2 - V_1) $$
+   where $V_1, V_2$ are vertex positions and $S_1, S_2$ are scalar values [Parent]. The collection of these points forms the output triangle mesh vertices [S1].
+5. **Mesh Assembly**: Connect the intersection points to form triangles [Parent]. The alternating orientation ensures that the diagonal used for interpolation on shared faces is consistent between neighboring cells, preventing discontinuities [S1, S2].
+
+### Parameters
+- **Threshold $T$**: The scalar value defining the isosurface [Parent].
+- **Grid Resolution**: Determines the number of cells [S1, S2].
+
+### Edge Cases and Pitfalls
+- **Mesh Dependency**: Alternating vertices have a different number of tetrahedra intersecting on them, resulting in a slightly different mesh depending on position [S1, S2].
+- **Artifacts**: The choice of tetrahedron orientation may produce artificial "bumps" in the isosurface because of interpolation along the face diagonals [S1, S2].
+- **Near Points Inside Surface**: The technique does not address the case when two near points 'inside' a surface are a combined distance < 1 from the surface; they should generate two points on the edge instead of 1 [S1]. The related modification is Manifold Dual Contouring [S1].
+
+### Pseudocode
+> **Unverified code.** The code below did not pass a test run against a reference implementation, or no test fits it, so it may contain errors.
+
+```python
+def diamond_lattice_cell_tetrahedra(grid, threshold):
+    """
+    Extracts isosurface using Diamond Lattice Cell tetrahedralization.
+    
+    Args:
+        grid: 3D array of scalar values. Dimensions (Nx, Ny, Nz).
+        threshold: Float, the isosurface value T.
+        
+    Returns:
+        triangles: List of triangles, each triangle is a list of 3 vertices.
+                   Each vertex is a tuple (x, y, z).
+    """
+    triangles = []
+    Nx, Ny, Nz = grid.shape
+    
+    # Standard Marching Tetrahedra case table (vertex indices for triangles)
+    # Maps 4-bit sign mask to list of triangle vertex index triplets [G]
+    MT_CASES = [
+        [], # 0
+        [(0, 1, 2)], # 1
+        [(0, 1, 3)], # 2
+        [(0, 1, 2), (0, 1, 3)], # 3
+        [(1, 2, 3)], # 4
+        [(0, 1, 2), (1, 2, 3)], # 5
+        [(0, 1, 3), (1, 2, 3)], # 6
+        [(0, 1, 2), (0, 1, 3), (1, 2, 3)], # 7
+        [(0, 2, 3)], # 8
+        [(0, 1, 2), (0, 2, 3)], # 9
+        [(0, 1, 3), (0, 2, 3)], # 10
+        [(0, 1, 2), (0, 1, 3), (0, 2, 3)], # 11
+        [(0, 1, 2), (0, 1, 3), (0, 2, 3), (1, 2, 3)], # 12
+        [(0, 1, 2), (0, 1, 3), (0, 2, 3), (1, 2, 3)], # 13
+        [(0, 1, 2), (0, 1, 3), (0, 2, 3), (1, 2, 3)], # 14
+        [(0, 1, 2), (0, 1, 3), (0, 2, 3), (1, 2, 3)]  # 15
+    ]
+    
+    # Edge table for interpolation: maps edge index to vertex pair indices
+    EDGES = [
+        (0, 1), (0, 2), (0, 3),
+        (1, 2), (1, 3), (2, 3)
+    ]
+    
+    def interpolate(v1, v2, s1, s2, t):
+        if abs(s2 - s1) < 1e-9:
+            return None
+        ratio = (t - s1) / (s2 - s1)
+        return (
+            v1[0] + ratio * (v2[0] - v1[0]),
+            v1[1] + ratio * (v2[1] - v1[1]),
+            v1[2] + ratio * (v2[2] - v1[2])
+        )
+
+    # Base tetrahedra connectivity for Orientation A (odd parity)
+    # Vertices: 0:(0,0,0), 1:(1,0,0), 2:(0,1,0), 3:(1,1,0),
+    #           4:(0,0,1), 5:(1,0,1), 6:(0,1,1), 7:(1,1,1)
+    TETRA_A = [
+        [0, 1, 2, 4],
+        [1, 3, 5, 7],
+        [2, 3, 6, 7],
+        [0, 4, 6, 2],
+        [1, 5, 7, 3]
+    ]
+    
+    # Orientation B (even parity) uses inverted/shifted connectivity
+    # Swaps vertex roles to maintain consistent face diagonals [S1, S2]
+    TETRA_B = [
+        [7, 6, 5, 4],
+        [6, 4, 2, 0],
+        [5, 4, 1, 0],
+        [7, 5, 3, 1],
+        [6, 5, 2, 3]
+    ]
+
+    for i in range(Nx - 1):
+        for j in range(Ny - 1):
+            for k in range(Nz - 1):
+                # Get 8 vertices of the current cell
+                v0 = (i, j, k)
+                v1 = (i+1, j, k)
+                v2 = (i, j+1, k)
+                v3 = (i+1, j+1, k)
+                v4 = (i, j, k+1)
+                v5 = (i+1, j, k+1)
+                v6 = (i, j+1, k+1)
+                v7 = (i+1, j+1, k+1)
+                
+                verts = [v0, v1, v2, v3, v4, v5, v6, v7]
+                scalars = [grid[x, y, z] for x, y, z in verts]
+                
+                # Determine orientation based on parity [S2]
+                if (i + j + k) % 2 == 1:
+                    tetra_list = TETRA_A
+                else:
+                    tetra_list = TETRA_B
+                
+                for tetra in tetra_list:
+                    # Get scalar values for this tetrahedron
+                    t_scalars = [scalars[v] for v in tetra]
+                    
+                    # Compute sign mask: 1 if scalar < threshold, else 0
+                    mask = 0
+                    for idx, s in enumerate(t_scalars):
+                        if s < threshold:
+                            mask |= (1 << idx)
+                    
+                    # Get triangle vertex indices for this case
+                    tri_indices = MT_CASES[mask]
+                    
+                    # Compute intersection points for all crossing edges
+                    edge_pts = [None] * 6
+                    for e_idx, (v_a, v_b) in enumerate(EDGES):
+                        s_a, s_b = t_scalars[v_a], t_scalars[v_b]
+                        if (s_a - threshold) * (s_b - threshold) < 0:
+                            edge_pts[e_idx] = interpolate(verts[tetra[v_a]], verts[tetra[v_b]], s_a, s_b, threshold)
+                    
+                    # Form triangles from intersection points
+                    for tri in tri_indices:
+                        p0 = edge_pts[tri[0]]
+                        p1 = edge_pts[tri[1]]
+                        p2 = edge_pts[tri[2]]
+                        if p0 and p1 and p2:
+                            triangles.append([p0, p1, p2])
+
+    return triangles
+```
+
+## Operating characteristics
+- **Time Complexity**: $O(N)$, where $N$ is the number of voxels, as each voxel is processed once [G].
+- **Memory Complexity**: $O(N)$ for the output mesh, potentially higher than standard MT due to the 5-tetrahedron split [G].
+- **Strengths**: Provides additional planes of symmetry and generates open spaces around points outside the surface, which can be beneficial for certain visualization tasks [S1, S2]. It avoids the ambiguity of standard cube slicing by ensuring consistent diagonal interpolation [S1, S2].
+- **Limitations**: The alternating vertex density results in a mesh that varies slightly depending on position [S1, S2]. It may produce artificial "bumps" due to face diagonal interpolation [S1, S2]. It requires additional calculations for diagonals across cube faces compared to Dual Contouring [S1, S2]. It does not handle the "near points inside surface" case, which may require Manifold Dual Contouring modifications [S1].
+
+## Background
+The Diamond Lattice Cell method is an alternative cube slicing technique based on the diamond cubic lattice [S1, S2]. It was introduced as an efficient method of triangulating equi-valued surfaces using tetrahedral cells by Akio Doi and Akio Koide in 1991 [S1, S2]. The method is discussed in the Visualization Handbook by Hansen and Johnson [S2]. It is often compared to Dual Contouring due to its handling of face diagonals [S1, S2].
+
+## Sources
+[S1] Marching tetrahedra, https://en.wikipedia.org/wiki/Marching_tetrahedra, fetched 2026-10-26
+[S2] Marching tetrahedra - HandWiki, https://handwiki.org/wiki/Marching_tetrahedra, fetched 2026-10-29

@@ -1,0 +1,128 @@
+--- v007.md
++++ v008.md
+@@ -49,7 +49,7 @@
+     *   **Define Free Space:** Identify points in free space using threshold $\tau_c = 10^{-3}$ and skip query points in this space during optimization [S1].
+     *   **Optimize:** For 10,000 iterations:
+-        *   Sample rays from the training images.
+-        *   For each ray, sample $K$ points with step size $\delta_c = 0.5 s_c$.
+-        *   Query $V_{\text{dens}}$ for raw density $\sigma_{\text{raw}}$.
++        *   Sample rays from the training images [S1].
++        *   For each ray, sample $K$ points with step size $\delta_c = 0.5 s_c$ [S1][S4, unofficial].
++        *   Query $V_{\text{dens}}$ for raw density $\sigma_{\text{raw}}$ [S1].
+         *   **Post-Activation Interpolation:** Trilinearly interpolate $\sigma_{\text{raw}}$ from the grid, then apply activation (e.g., Softplus or ReLU) to produce opacity $\alpha$ [S1][S4, unofficial]. This allows modeling sharp surfaces within a single grid cell [S1][S4, unofficial].
+         *   Query $V_{\text{color}}$ for color $\mathbf{c}$ via trilinear interpolation [S3].
+@@ -61,10 +61,10 @@
+ 2.  **Fine Detail Reconstruction:**
+     *   **Scale Grid:** Progressively scale the fine-stage voxel grid resolution (e.g., at checkpoints 1000, 2000, 3000) [S1].
+-    *   **Initialize Fine Grid:** Create $V_{\text{dens}}$ of size $M_f^3$ (e.g., $160^3$). Initialize raw density values such that activated alpha is $\alpha_{\text{init}}^{(f)} = 0.01$ [S1][S4, unofficial].
++    *   **Initialize Fine Grid:** Create $V_{\text{dens}}$ of size $M_f^3$ (e.g., $160^3$) [S1][S4, unofficial]. Initialize raw density values such that activated alpha is $\alpha_{\text{init}}^{(f)} = 0.01$ [S1][S4, unofficial].
+     *   **Define Unknown Space:** Skip low-density query points where $\sigma < \tau_f = 10^{-4}$ [S1].
+     *   **Optimize:** For 20,000 iterations:
+-        *   Sample rays from the training images.
+-        *   For each ray, sample $K$ points with step size $\delta_f = 0.5 s_f$.
+-        *   Query $V_{\text{dens}}$ for raw density $\sigma_{\text{raw}}$.
++        *   Sample rays from the training images [S1].
++        *   For each ray, sample $K$ points with step size $\delta_f = 0.5 s_f$ [S1][S4, unofficial].
++        *   Query $V_{\text{dens}}$ for raw density $\sigma_{\text{raw}}$ [S1].
+         *   **Post-Activation Interpolation:** Trilinearly interpolate $\sigma_{\text{raw}}$, then apply activation to produce $\alpha$ [S1][S4, unofficial].
+         *   Query $V_{\text{feat}}$ for feature vector $\mathbf{f}$ via trilinear interpolation [S1].
+@@ -98,9 +98,8 @@
+ **Pseudocode:**
+ ```python
+-import math
++import torch
+ 
+ def positional_encoding(x, k):
+     """Standard positional encoding for 3D vector x with k frequencies."""
+-    # x: (N, 3) -> (N, 3 * 2k + 3)
+     freq_bands = [2.0 ** i for i in range(k)]
+     pe = []
+@@ -108,6 +107,6 @@
+         pe.append(x[:, i])
+         for f in freq_bands:
+-            pe.append(math.sin(x[:, i] * f))
+-            pe.append(math.cos(x[:, i] * f))
++            pe.append(torch.sin(x[:, i] * f))
++            pe.append(torch.cos(x[:, i] * f))
+     return torch.stack(pe, dim=-1)
+ 
+@@ -170,16 +169,16 @@
+         return color
+ 
+-def volume_render(rays, V_dens, V_feat, mlp, bg_color, step_size):
++def volume_render(rays, V_density, V_appearance, mlp, bg_color, near, far, step_size):
+     origins = rays[:, 0]
+     directions = rays[:, 1]
+     N_rays = origins.shape[0]
+     K = 128
+-    t_vals = torch.linspace(0, 1, K).to(rays.device)
++    t_vals = torch.linspace(near, far, K).to(rays.device)
+     points = origins.unsqueeze(1) + directions.unsqueeze(1) * t_vals.unsqueeze(2)
+     
+-    raw_dens = trilinear_interpolate(V_dens, points)
++    raw_dens = trilinear_interpolate(V_density, points)
+     sigma = torch.nn.functional.softplus(raw_dens)
+     
+-    deltas = step_size * torch.norm(directions, dim=1, keepdim=True)
++    deltas = step_size * torch.ones_like(directions[:, 0:1])
+     alphas = 1.0 - torch.exp(-sigma * deltas)
+     
+@@ -187,8 +186,11 @@
+     T = torch.cat([torch.ones(N_rays, 1).to(rays.device), torch.cumprod(one_minus_alpha, dim=1)[:, :-1]], dim=1)
+     
+-    features = trilinear_interpolate(V_feat, points)
+-    ray_dirs = directions.unsqueeze(1).expand(-1, K, -1)
+-    colors = mlp(points, ray_dirs, features)
+-    
++    if mlp is None:
++        colors = trilinear_interpolate(V_appearance, points)
++    else:
++        features = trilinear_interpolate(V_appearance, points)
++        ray_dirs = directions.unsqueeze(1).expand(-1, K, -1)
++        colors = mlp(points, ray_dirs, features)
++        
+     weights = T * alphas
+     T_last = torch.prod(one_minus_alpha, dim=1)
+@@ -208,5 +210,5 @@
+     return torch.mean((rendered - target) ** 2)
+ 
+-def optimize_dvgo(images, poses, V_dens_c, V_feat_c, V_color_c, V_dens_f, V_feat_f, mlp, lr=0.1, batch_size=8192):
++def optimize_dvgo(images, poses, V_dens_c, V_feat_c, V_color_c, V_dens_f, V_feat_f, mlp, lr=0.1, batch_size=8192, near=0.0, far=1.0):
+     optimizer_c = torch.optim.Adam([V_dens_c, V_color_c, V_feat_c], lr=lr)
+     optimizer_f = torch.optim.Adam([V_dens_f, V_feat_f, list(mlp.parameters())], lr=1e-3)
+@@ -214,5 +216,5 @@
+     for i in range(10000):
+         rays = sample_rays_from_poses(poses, batch_size)
+-        color_coarse = volume_render(rays, V_dens_c, V_color_c, None, 0.0, 0.5)
++        color_coarse = volume_render(rays, V_dens_c, V_color_c, None, 0.0, near, far, 0.5)
+         loss = photometric_loss(color_coarse, images)
+         optimizer_c.zero_grad()
+@@ -222,5 +224,5 @@
+     for i in range(20000):
+         rays = sample_rays_from_poses(poses, batch_size)
+-        color_fine = volume_render(rays, V_dens_f, V_feat_f, mlp, 0.0, 0.5)
++        color_fine = volume_render(rays, V_dens_f, V_feat_f, mlp, 0.0, near, far, 0.5)
+         loss = photometric_loss(color_fine, images)
+         optimizer_f.zero_grad()
+@@ -238,6 +240,6 @@
+ 
+ ## Operating characteristics
+-*   **Time Complexity:** Training is significantly faster than implicit methods. Convergence is about two orders of magnitude faster than NeRF [S1].
+-*   **Memory Complexity:** Uses dense voxel grids. Memory usage scales with $M^3$. For $M=160$, this is manageable on modern GPUs [S1].
++*   **Time Complexity:** Training is significantly faster than implicit methods [S1]. Convergence is about two orders of magnitude faster than NeRF [S1].
++*   **Memory Complexity:** Uses dense voxel grids [S1]. Memory usage scales with $M^3$. For $M=160$, this is manageable on modern GPUs [S1].
+ *   **Measured Performance:** Training time is ~15 minutes on NVIDIA RTX 2080 Ti for $M=160^3$ (31.95 PSNR) [S1]. Training time is ~22 minutes on NVIDIA RTX 2080 Ti for $M=256^3$ (32.80 PSNR) [S1]. Rendering speed is ~45x faster than NeRF (0.64s vs 29s per 800x800 image) [S1].
+ *   **Strengths:** Extremely fast convergence from scratch (no pre-training or conversion needed) [S1][S4, unofficial]. High rendering speed [S1]. Sharp surface modeling via post-activation interpolation [S1][S4, unofficial].
+@@ -247,5 +249,5 @@
+ 
+ ## Background
+-Direct Voxel Grid Optimization was introduced by Cheng Sun, Min Sun, and Hwann-Tzong Chen in 2022 [S1][S4, unofficial]. It addresses the slow training times of NeRF by directly optimizing explicit voxel grids. The method builds on the idea of explicit volumetric representations but improves upon previous voxel methods by training from scratch and using post-activation interpolation [S1][S4, unofficial]. It is used for novel view synthesis on benchmarks like Syn-NeRF, Syn-NSVF, BlendedMVS, and Tanks and Temples [S1][S4, unofficial].
++Direct Voxel Grid Optimization was introduced by Cheng Sun, Min Sun, and Hwann-Tzong Chen in 2022 [S1][S4, unofficial]. It addresses the slow training times of NeRF by directly optimizing explicit voxel grids [S1]. The method builds on the idea of explicit volumetric representations but improves upon previous voxel methods by training from scratch and using post-activation interpolation [S1][S4, unofficial]. It is used for novel view synthesis on benchmarks like Syn-NeRF, Syn-NSVF, BlendedMVS, and Tanks and Temples [S1][S4, unofficial].
+ 
+ ## Sources
+@@ -253,4 +255,4 @@
+ [S2] ScanNeRF: a Scalable Benchmark for Neural Radiance Fields, https://doi.org/10.1109/wacv56688.2023.00088, fetched 2026-10-26
+ [S3] Leveraging Neural Radiance Fields for Large-Scale 3D Reconstruction from Aerial Imagery, https://doi.org/10.3390/rs16244655, fetched 2026-10-26
+-[S4] Direct Voxel Grid Optimization: Super-Fast Convergence ..., https://openaccess.thecvf.com/content/CVPR2022/papers/Sun_Direct_Voxel_Grid_Optimization_Super-Fast_Convergence_for_Radiance_Fields_Reconstruction_CVPR_2022_paper.pdf, fetched 2026-10-29 (unofficial)
++[S4] Neural Rendering — Technologies & Tricks, https://www.chengjianglong.com/ml/3D-Neural_Rendering_SOTA_Updated.html, fetched 2026-10-27 (unofficial)
+ [S5] Direct Voxel Grid Optimization: Super-Fast Convergence ..., https://openaccess.thecvf.com/content/CVPR2022/papers/Sun_Direct_Voxel_Grid_Optimization_Super-Fast_Convergence_for_Radiance_Fields_Reconstruction_CVPR_2022_paper.pdf, fetched 2026-10-29

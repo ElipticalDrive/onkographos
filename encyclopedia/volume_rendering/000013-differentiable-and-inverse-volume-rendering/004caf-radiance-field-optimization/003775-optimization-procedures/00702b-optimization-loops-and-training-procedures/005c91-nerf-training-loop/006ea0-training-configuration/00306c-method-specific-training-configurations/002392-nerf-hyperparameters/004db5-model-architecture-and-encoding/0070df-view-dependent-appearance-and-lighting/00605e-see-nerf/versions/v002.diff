@@ -1,0 +1,255 @@
+--- v001.md
++++ v002.md
+@@ -4,202 +4,98 @@
+ 
+ ## Overview
+-See-NeRF is a unified sensor-physics grounded framework for sharp High Dynamic Range (HDR) novel view synthesis (NVS) from single-exposure blurry Low Dynamic Range (LDR) images and corresponding event data [S1, unofficial]. It solves the problem of suboptimal HDR reconstruction and deblurring caused by sensor-physics mismatches in traditional methods, which often ignore the specific imaging characteristics of RGB and event sensors [S1, unofficial]. Unlike sibling methods like EvHDR-NeRF that apply tone mapping directly to 3D points, See-NeRF explicitly models the radiance-to-measurement process for both RGB and event sensors using physically grounded Camera Response Function (CRF) models [S1, unofficial].
++See-NeRF is a unified sensor-physics grounded NeRF framework for sharp High Dynamic Range (HDR) novel view synthesis from single-exposure blurry Low Dynamic Range (LDR) images and corresponding event data [S1, unofficial]. It solves the problem of recovering sharp 3D radiance from blurry inputs by explicitly modeling the physical imaging processes of both RGB and event sensors, thereby bridging the sensor-physics mismatch that plagues methods like EvHDR-NeRF which apply tone mapping directly to 3D points [S1, unofficial]. Unlike its sibling [REF2-NeRF](18124-ref2-nerf.md), See-NeRF distinguishes itself by introducing differentiable Camera Response Function (CRF) models for both RGB and event sensors, jointly optimizing them with the NeRF network to align predicted radiance with actual sensor measurements [S1, unofficial].
+ 
+ ## How it works
+ **Inputs and Outputs:**
+-*   **Inputs:** Single-exposure blurry LDR image $\mathcal{I}_{LDR}$, corresponding event stream $B$, camera poses $p(t)$, and exposure time $\Delta t_{exp}$.
+-*   **Outputs:** Sharp HDR radiance field representation, enabling novel view synthesis of sharp HDR and LDR images.
++*   **Inputs:** Single-exposure blurry LDR image $\mathcal{I}_{LDR}$, corresponding event stream $B$, camera poses $p(t)$, and exposure parameters ($t_{start}, t_{end}$).
++*   **Outputs:** Sharp HDR novel view images $\hat{\mathcal{I}}_{HDR}$ and LDR images $\hat{\mathcal{I}}_{LDR}$ for arbitrary camera poses.
+ 
+ **Data Structures:**
+-*   **NeRF Network ($F_\theta$):** A multi-layer perceptron (MLP) with parameters $\theta$. It takes positional encoding of 3D point $\mathbf{o}$ and direction $\mathbf{d}$ as input and outputs actual radiance $\mathbf{e}$ and density $\sigma$.
++*   **NeRF Network ($F_\theta$):** A multi-layer perceptron (MLP) with parameters $\theta$. It takes positional encoded 3D position $\mathbf{o}$ and viewing direction $\mathbf{d}$ as input.
++    *   Input: $\gamma_o(\mathbf{o}), \gamma_d(\mathbf{d})$.
++    *   Output: Raw HDR radiance $\mathbf{e}$ and density $\sigma$.
+ *   **RGB CRF Model:** Three separate MLPs ($f_{crf}$), one for each color channel (R, G, B).
++    *   Input: Log-domain raw HDR pixel value.
++    *   Output: Estimated LDR pixel value.
+ *   **Event CRF Model:**
+-    *   Delay coefficient MLP ($f_{ev}$): Outputs a scalar delay coefficient $\epsilon_i$.
+-    *   Offset estimation function ($h(\cdot)$): Estimates temporal delay offset from input events (implementation details omitted in source [S1, unofficial]).
+-*   **Positional Encoding ($\gamma_M$):** Standard hierarchical sinusoidal encoding: $\gamma_M(x) = \{\sin(2^m\pi x), \cos(2^m\pi x)\}_{m=0}^{M}$ [S1, unofficial].
++    *   **Delay Coefficient MLP ($f_{ev}$):** Takes event sensor pixel radiance as input, outputs delay coefficient $\epsilon_i$.
++    *   **Low-pass Filter:** State variable $L^{i}_{lp}$ storing filtered radiance.
++    *   **Offset Estimator ($h(\cdot)$):** Estimates temporal delay offset from input events (implementation details omitted in source, treated as a black-box function $h$) [S1, unofficial].
+ 
+-**Parameters:**
+-*   $b$: Number of time intervals minus one. Total sampled time points are $b+1$. Default value: 4 [S1, unofficial].
+-*   $\lambda$: Weight for event loss. Default value: 0.005 [S1, unofficial].
+-*   $\Theta$: Contrast threshold for event generation. Definition: Minimum detectable brightness change lower bound [S1, unofficial].
+-*   $\Delta t_{exp}$: Exposure time, defined as $t_{end} - t_{start}$ [S1, unofficial].
++**Positional Encoding:**
++Standard hierarchical sinusoidal positional encoding is used for both position and direction [S1, unofficial]:
++$$ \gamma_M(x) = \{\sin(2^m\pi x), \cos(2^m\pi x)\}_{m=0}^{M} $$
+ 
+-**Algorithm Steps:**
++**Numbered Steps:**
+ 
+-1.  **Scene Representation:** For a 3D point $\mathbf{o}$ and viewing direction $\mathbf{d}$, compute actual radiance $\mathbf{e}$ and density $\sigma$ using the NeRF network:
++1.  **Scene Representation:** For a 3D point $\mathbf{o}$ and viewing direction $\mathbf{d}$, query the NeRF network to obtain raw HDR radiance $\mathbf{e}$ and density $\sigma$:
+     $$ (\mathbf{e}, \sigma) = F_{\theta}(\gamma_o(\mathbf{o}), \gamma_d(\mathbf{d})) $$
+     [S1, unofficial]
+ 
+-2.  **Time Sampling:** Discretely sample $b+1$ time points $\{t_i\}_{i=0}^b$ within the exposure interval $[t_{start}, t_{end}]$. Calculate weights $w_i$ based on these time points [S1, unofficial].
++2.  **Time Discretization:** Discretize the exposure interval $[t_{start}, t_{end}]$ into $b+1$ time points $\{t_i\}_{i=0}^b$. The source specifies $b=4$ as a trade-off between performance and training time [S1, unofficial].
+ 
+-3.  **Volume Rendering (HDR Radiance):** For a pixel $(x,y)$ and camera pose $p(t)$, simulate the HDR scene rays hitting the sensor. Sample $N$ 3D points along the ray. Compute the latent sharp HDR radiance $E(x,y,p(t))$ at time $t$:
++3.  **Volume Rendering (Latent HDR):** For a pixel $(x,y)$ and camera pose $p(t)$, simulate the ray hitting the sensor. Sample $N$ 3D points along the ray with distances $\delta_i$. Compute the latent sharp HDR radiance $E(x,y,p(t))$ at time $t$ using standard volume rendering:
+     $$ E(x,y,p(t)) = \sum_{i=1}^{N} T_i (1-\exp(-\sigma_i \delta_i)) \mathbf{e}_i $$
+-    where $T_i = \exp(-\sum_{j=1}^{i-1} \sigma_j \delta_j)$ is the accumulated transmittance, and $\delta_i$ is the distance between adjacent sampled 3D points [S1, unofficial].
++    where transmittance $T_i = \exp(-\sum_{j=1}^{i-1} \sigma_j \delta_j)$ [S1, unofficial].
+ 
+-4.  **Raw HDR Pixel Calculation:** Calculate the predicted raw HDR pixel value by summing the weighted radiance values at the sampled time points:
++4.  **Raw HDR Pixel Calculation:** Calculate the predicted raw HDR pixel value $\hat{\mathcal{I}}_{HDR}(x,y)$ by summing the weighted radiance values at the sampled time points. Weights $w_i$ are calculated based on the time points $\{t_i\}_{i=0}^b$ [S1, unofficial]:
+     $$ \hat{\mathcal{I}}_{HDR}(x,y) = \sum_{i=0}^{b} w_i E_i(x,y,p(t_i)) $$
+     [S1, unofficial]
+ 
+-5.  **Physically Grounded RGB CRF Model:** Convert the raw HDR pixel value to LDR to align with sensor-recorded values. Apply the pixel-wise RGB CRF model in the log domain using three separate MLPs $f_{crf}$:
+-    $$ \hat{\mathcal{I}}_{LDR}(x,y) = f_{crf}(\ln(\hat{\mathcal{I}}_{HDR}(x,y) \Delta t_{exp})) $$
++5.  **RGB CRF Application:** Convert the raw HDR pixel value to LDR using the learned CRF models in the log domain. Let $\Delta t_{exp} = t_{end} - t_{start}$ be the exposure time. For each color channel $c \in \{R, G, B\}$:
++    $$ \hat{\mathcal{I}}_{LDR}^c(x,y) = f_{crf}^c(\ln(\hat{\mathcal{I}}_{HDR}^c(x,y) \Delta t_{exp})) $$
+     [S1, unofficial]
+ 
+-6.  **Event CRF Model - Bayer Adaptation:** Input the $b+1$ scene radiance values $\{E(x,y,p(t_i))\}_{i=0}^b$ into an RGGB Bayer pattern to obtain event sensor pixel radiance values $E_{ev}(x,y,p(t_i))$ [S1, unofficial].
++6.  **Event CRF - Bayer Adaptation:** Input the $b+1$ scene radiance values $\{E(x,y,p(t_i))\}_{i=0}^b$ into an RGGB Bayer pattern to obtain the event sensor pixel radiance values $E_{ev}(x,y,p(t_i))$ [S1, unofficial].
+ 
+-7.  **Event CRF Model - Delay Coefficient:** Calculate the delay coefficient $\epsilon_i$ for each time point using the MLP-based function $f_{ev}$:
++7.  **Event CRF - Delay Coefficient:** Calculate the delay coefficient $\epsilon_i$ for each time point using the MLP $f_{ev}$:
+     $$ \epsilon_i = f_{ev}(E_{ev}(x,y,p(t_i))) $$
+     [S1, unofficial]
+ 
+-8.  **Event CRF Model - Latency Synthesis:** Synthesize event latency using a second-order low-pass filter. Initialize $L^0_{lp} = E_{ev}(p(t_0))$. For $i > 0$:
++8.  **Event CRF - Latency Synthesis:** Synthesize event latency using a second-order low-pass filter. Initialize $L^0_{lp} = E_{ev}(p(t_0))$. For $i > 0$:
+     $$ L^{i}_{lp} = (1-\epsilon_i)L^{i-1}_{lp} + \epsilon_i E_{ev}(p(t_i)) $$
+     [S1, unofficial]
+ 
+-9.  **Event CRF Model - Ideal Event Count:** Calculate the estimated number of events $\hat{B}'(t_i, t_{i+1})$ during the interval $[t_i, t_{i+1}]$ using the ideal event generation model on the filtered radiance:
++9.  **Event CRF - Ideal Event Count:** Calculate the estimated number of events $\hat{B}'(t_i, t_{i+1})$ during the interval $[t_i, t_{i+1}]$ using the contrast threshold $\Theta$:
+     $$ \hat{B}'(t_i, t_{i+1}) = \text{floor}\left(\frac{\ln(L^{i+1}_{lp}) - \ln(L^{i}_{lp})}{\Theta}\right) $$
+     [S1, unofficial]
+ 
+-10. **Event CRF Model - Delay Compensation:** Compensate for temporal delay by estimating an offset $h(B(t_i, t_{i+1}))$ from the input events and subtracting it to get the final estimated event count:
++10. **Event CRF - Delay Compensation:** Compensate for temporal delay by estimating an offset $h(B(t_i, t_{i+1}))$ from the input events and subtracting it to get the final estimated event count $\hat{B}(t_i, t_{i+1})$:
+     $$ \hat{B}(t_i, t_{i+1}) = \hat{B}'(t_i, t_{i+1}) - h(B(t_i, t_{i+1})) $$
+     [S1, unofficial]
+ 
+-11. **Optimization:** Minimize the combined loss function $\mathcal{L}$ by jointly optimizing the NeRF network parameters $\theta$ and the CRF model parameters:
++11. **Optimization:** Minimize the combined loss function $\mathcal{L}$ with respect to $\theta$ and the CRF parameters:
+     $$ \mathcal{L} = \lambda \mathcal{L}_{evs} + \mathcal{L}_{ldr} $$
+-    where:
++    where $\lambda = 0.005$ [S1, unofficial].
++
++**Loss Functions:**
++*   **LDR Loss:** Mean squared error between predicted LDR and ground truth LDR:
+     $$ \mathcal{L}_{ldr} = \sum_{(x,y)\in \mathcal{X}} ||\hat{\mathcal{I}}_{LDR}(x,y) - \mathcal{I}_{LDR}(x,y)||^2_2 $$
++    [S1, unofficial]
++*   **Event Loss:** Mean squared error between predicted event counts and ground truth event counts:
+     $$ \mathcal{L}_{evs} = \sum_{(x,y)\in \mathcal{X}} \sum_{i=0}^{b-1} ||\hat{B}(t_i, t_{i+1}) - B(t_i, t_{i+1})||^2_2 $$
+-    and $\mathcal{X}$ denotes all pixels of the camera sensor [S1, unofficial].
++    [S1, unofficial]
+ 
+-**Pseudocode:**
+-
+-```python
+-import math
+-
+-def positional_encoding(x, M):
+-    """
+-    Standard hierarchical sinusoidal positional encoding.
+-    x: input tensor
+-    M: number of frequency bands
+-    Returns: concatenated sin/cos features
+-    """
+-    features = []
+-    for m in range(M):
+-        freq = 2**m * math.pi
+-        features.append(math.sin(freq * x))
+-        features.append(math.cos(freq * x))
+-    return concat(features)
+-
+-def nerf_forward(o, d, theta):
+-    """
+-    Forward pass of the NeRF network.
+-    o: 3D point coordinates
+-    d: viewing direction
+-    theta: network parameters
+-    Returns: radiance e, density sigma
+-    """
+-    gamma_o = positional_encoding(o, M)
+-    gamma_d = positional_encoding(d, M)
+-    e, sigma = F_theta(gamma_o, gamma_d, theta)
+-    return e, sigma
+-
+-def volume_render(ray_origins, ray_directions, sampled_points, theta):
+-    """
+-    Standard volume rendering along a ray.
+-    Returns: HDR radiance E
+-    """
+-    N = len(sampled_points)
+-    E = 0.0
+-    T = 1.0
+-    for i in range(N):
+-        o_i = sampled_points[i]
+-        e_i, sigma_i = nerf_forward(o_i, ray_directions, theta)
+-        # delta_i is distance to previous point
+-        delta_i = distance(sampled_points[i-1], o_i) if i > 0 else 0.0
+-        
+-        alpha = 1.0 - math.exp(-sigma_i * delta_i)
+-        weight = T * alpha
+-        E += weight * e_i
+-        T *= (1.0 - alpha)
+-    return E
+-
+-def rgb_crf_model(raw_hdr, delta_t_exp, f_crf):
+-    """
+-    Physically grounded RGB CRF model.
+-    raw_hdr: raw HDR pixel value
+-    delta_t_exp: exposure time
+-    f_crf: list of 3 MLPs for R, G, B channels
+-    Returns: LDR pixel value
+-    """
+-    # Apply log domain transformation and CRF
+-    log_val = math.log(raw_hdr * delta_t_exp)
+-    ldr = [mlp(log_val) for mlp in f_crf]
+-    return ldr
+-
+-def event_crf_model(radiance_sequence, theta_ev, theta_offset, Theta):
+-    """
+-    Latency-aware and photometrically calibrated event CRF model.
+-    radiance_sequence: list of radiance values E_ev at b+1 time points
+-    theta_ev: parameters for delay coefficient MLP
+-    theta_offset: parameters for offset estimation function h
+-    Theta: contrast threshold
+-    Returns: estimated event counts B_hat
+-    """
+-    b = len(radiance_sequence) - 1
+-    L_lp = [0.0] * b
+-    B_hat_prime = [0.0] * b
+-    B_hat = [0.0] * b
+-    
+-    # Initialize low-pass filter
+-    L_lp[0] = radiance_sequence[0]
+-    
+-    for i in range(1, b + 1):
+-        # Calculate delay coefficient
+-        epsilon_i = f_ev(radiance_sequence[i], theta_ev)
+-        
+-        # Update low-pass filter
+-        L_lp[i] = (1 - epsilon_i) * L_lp[i-1] + epsilon_i * radiance_sequence[i]
+-        
+-        # Calculate ideal event count
+-        if L_lp[i] > 0 and L_lp[i-1] > 0:
+-            B_hat_prime[i-1] = math.floor((math.log(L_lp[i]) - math.log(L_lp[i-1])) / Theta)
+-        else:
+-            B_hat_prime[i-1] = 0
+-            
+-    # Temporal delay compensation
+-    for i in range(b):
+-        # h(B) estimates offset from input events B
+-        # Note: Input events B are assumed to be available as ground truth for loss calculation
+-        # In training, B is the observed event count.
+-        # The offset function h is defined in supplementary materials [S1, unofficial]
+-        offset = h(radiance_sequence, i, theta_offset) 
+-        B_hat[i] = B_hat_prime[i] - offset
+-        
+-    return B_hat
+-
+-def compute_loss(B_hat, B_observed, I_LDR_hat, I_LDR_observed, lambda_ev):
+-    """
+-    Compute combined loss.
+-    """
+-    l_ldr = sum((hat - obs)**2 for hat, obs in zip(I_LDR_hat, I_LDR_observed))
+-    l_evs = sum((hat - obs)**2 for hat, obs in zip(B_hat, B_observed))
+-    return lambda_ev * l_evs + l_ldr
+-```
++**Parameters:**
++*   $b$: Number of time intervals minus one. Value: 4 [S1, unofficial].
++*   $\lambda$: Weight for event loss. Value: 0.005 [S1, unofficial].
++*   $\Theta$: Contrast threshold. Definition: Minimum detectable brightness change lower bound. Value: Not given in the sources.
++*   $\Delta t_{exp}$: Exposure time ($t_{end} - t_{start}$).
+ 
+ **Edge Cases and Pitfalls:**
+-*   **Sensor-Physics Mismatch:** Traditional methods ignore sensor-physics mismatches (e.g., applying tone mapping directly to 3D points), leading to suboptimal HDR and deblurring results because rendered outputs do not align with supervision signals [S1, unofficial].
+-*   **Low-Light Delay:** Event generation exhibits significant delay in low-light regions, which the event CRF model attempts to compensate for [S1, unofficial].
+-*   **Contrast Threshold:** The fixed contrast threshold $\Theta$ bounds the minimum detectable brightness change, leading to quantifiable errors in radiometric estimation [S1, unofficial].
++*   **Sensor-Physics Mismatch:** Traditional methods ignore the mismatch between sensor output and physical radiance (e.g., applying tone mapping directly to 3D points), leading to suboptimal HDR and deblurring results [S1, unofficial]. See-NeRF avoids this by applying CRFs at the pixel level after volume rendering [S1, unofficial].
++*   **Event Delay in Low-Light:** Actual event generation deviates from the ideal model with significant delay in low-light regions due to the fixed contrast threshold $\Theta$ [S1, unofficial]. The event CRF model explicitly compensates for this.
++*   **Pose Estimation:** Camera poses $p(t)$ change during exposure in handheld scenarios. The method relies on event-guided COLMAP for pose estimation [S1, unofficial].
+ 
+ ## Operating characteristics
+-*   **Time Complexity:** Not given in the sources.
+-*   **Memory Complexity:** Not given in the sources.
+-*   **Measured Performance:** Achieves state-of-the-art HDR and deblurring novel view synthesis results on synthetic and real datasets (RealWorld-Challenge) with single-exposure blurry LDR images and corresponding events [S1, unofficial].
+-*   **Scaling:** Not given in the sources.
+-*   **Strengths:** Explicitly models the radiance-to-measurement process for both RGB and event sensors, aligning predicted radiance with sensor measurements. Jointly optimizes NeRF and CRF models leveraging spatial and temporal dynamic information in events [S1, unofficial].
+-*   **Limitations:** Requires corresponding event data. Performance depends on the accuracy of the event CRF model and the offset estimation function $h(\cdot)$ [S1, unofficial].
+-*   **When to use:** When high-quality deblurring and HDR reconstruction are required from single-exposure blurry LDR images and event data, especially in extreme lighting conditions [S1, unofficial].
+-*   **When not to use:** When event data is not available, or when real-time performance is critical and the joint optimization overhead is prohibitive (not given in sources).
++*   **Time and Memory Complexity:** Not given in the sources. The method involves joint optimization of a coarse and a fine network [S1, unofficial].
++*   **Measured Performance:** Achieves state-of-the-art HDR and deblurring novel view synthesis results on synthetic (HDR-NeRF scenes) and real datasets (RealWorld-Challenge) using single-exposure blurry LDR images and events [S1, unofficial].
++*   **Strengths:** Physically grounded modeling of RGB and event sensors; effective deblurring and HDR reconstruction from single-exposure blurry inputs; handles sensor-physics mismatches.
++*   **Limitations:** Requires corresponding event data; relies on external pose estimation (event-guided COLMAP); performance depends on the accuracy of the learned CRF models.
++*   **When to use:** When sharp HDR novel view synthesis is required from single-exposure blurry LDR images and synchronized event streams.
++*   **When not to use:** When event data is unavailable; when real-time performance is critical without pre-training (training involves joint optimization of multiple networks).
+ 
+ ## Background
+-See-NeRF was proposed by researchers from iCVTEAM. It addresses the limitations of existing methods like EvHDR-NeRF, which extends HDR-NeRF by applying tone mapping to 3D points without considering event generation characteristics [S1, unofficial]. The method builds upon the physical imaging principles of RGB and event sensors, aiming to bridge the gap between physical scene dynamics and sensor output [S1, unofficial]. The code and datasets are publicly available at https://github.com/iCVTEAM/See-NeRF [S1, unofficial].
++See-NeRF was proposed by researchers from iCVTEAM (Institute of Computer Vision and Technology) [S1, unofficial]. It addresses the limitations of previous methods like EvHDR-NeRF, which extended HDR-NeRF by applying tone mapping directly to 3D points without considering event generation characteristics [S1, unofficial]. See-NeRF explicitly models the radiance-to-measurement process for both RGB and event sensors, jointly optimizing the NeRF network with differentiable CRF models [S1, unofficial]. The code and datasets are publicly available at https://github.com/iCVTEAM/See-NeRF [S1, unofficial].
+ 
+ ## Sources

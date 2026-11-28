@@ -1,0 +1,718 @@
+DV-Det: Efficient 3D Point Cloud Object Detection
+with Dynamic Voxelization
+arXiv:2107.12707v1 [cs.CV] 27 Jul 2021
+Zhaoyu Su
+Pin Siang Tan Yu-Hsing Wang
+DESR Laboratory
+Department of Civil and Environmental Engineering
+Hong Kong University of Science and Technology
+{zsuad, pstan}@connect.ust.hk; ceyhwang@ust.hk
+Abstract
+In this work, we propose a novel two-stage framework for the efficient 3D point
+cloud object detection. Instead of transforming point clouds into 2D bird eye
+view projections, we parse the raw point cloud data directly in the 3D space yet
+achieve impressive efficiency and accuracy. To achieve this goal, we propose
+dynamic voxelization, a method that voxellizes points at local scale on-the-fly. By
+doing so, we preserve the point cloud geometry with 3D voxels, and therefore
+waive the dependence on expensive MLPs to learn from point coordinates. On
+the other hand, we inherently still follow the same processing pattern as pointwise methods (e.g., PointNet) and no longer suffer from the quantization issue
+like conventional convolutions. For further speed optimization, we propose the
+grid-based downsampling and voxelization method, and provide different CUDA
+implementations to accommodate to the discrepant requirements during training
+and inference phases. We highlight our efficiency on KITTI 3D object detection
+dataset with 75 FPS and on Waymo Open dataset with 25 FPS inference speed
+with satisfactory accuracy.
+1
+Introduction
+Algorithms for point cloud detection are receiving increasing attention nowadays thanks to the
+blooming of robotics and the autonomous driving industry. Different from the detection algorithms on
+2D images, detection on 3D point cloud is a non-trivial task due to the high sparsity and unstructured
+property of point clouds. Meanwhile, detection algorithms are expected to run at the real-time speed,
+while they are usually deployed on the edge devices with limited computation resources, which
+induces exigent demand for the computation efficiency.
+The existing point cloud detection methods can be roughly classified into two groups: grid based
+methods and point-wise methods. Grid based methods basically follow the same pattern as the 2D
+image cases: they transform the point cloud into regular grid representations like 3D voxels[1, 20,
+29, 22] or 2D bird eye view (BEV) projections[9, 24, 23], and then use 3D or 2D convolutional
+neural networks (CNNs) to extract the features and obtain bounding box predictions. However, the
+transformation from the point cloud to regular grids leads to the information loss, and due to the
+quantization issue, the feature maps at high-level CNN layers often lack the precise regional feature
+representations (Fig.1 a), which is essential for an accurate bounding box regression.
+On the other hand, developed from the pioneering work PointNet[14, 15], more and more point-wise
+methods are proposed recently, which directly take raw 3D LiDAR points as input and learn point-wise
+feature representations from point coordinates via multi-layer perceptrons (MLPs)[13, 19, 27]. As
+shown in Fig.1 b, point-wise methods no longer suffer from the quantization problem as conventional
+convolutions, but this comes at a price: learning representations from unstructured point coordinates
+Preprint. Under review.
+Layer 2
+Layer 2
+Layer 2
+Layer 1
+Layer 1
+MLPs
+Layer 1
+MLPs
+MLPs
+MLPs
+Layer 0
+Layer 0
+(a) Grid based method
+(b) Point-wise method
+Layer 0
+(c) Point-wise convolution (ours)
+Figure 1: Comparison between different sampling strategies and network architectures. (a) Global
+voxelization for most of the grid based methods, notice the severe quantization issue at layer 2. (b)
+Point-wise method, commonly used for the point-wise MLPs based methods like PointNet; (c) Our
+proposed point-wise convolution based on the dynamic voxelization operation.
+is a hard task, and therefore, heavy MLPs architectures with expensive computational cost are usually
+involved in these methods, leading to relatively slow inference speed.
+There have been attempts that try to combine grid based methods and point-wise methods, e.g., in
+PV-RCNN[18] , these two methods are leveraged in an alternate pattern at the framework level to
+achieve the best performance. Despite the impressive accuracy, heavy MPLs still remain in [18],
+while the inference speed is still limited. Currently, the mainstream point cloud detection methods
+run at a speed of 20 FPS for the KITTI dataset (few can reach 45 FPS1 [9]) on a powerful dedicated
+GPU, with 90° horizontal front-view FOV. This is apparently not sufficient for the full 360° FOV
+scenario with a LiDAR sampling rate of 20Hz in reality, not to mention the limited computation
+hardware resources on the edge devices.
+In this work, we propose a new method that combines the advantages from both grid based methods
+and point-wise methods at the perceptron level. As shown in Fig.1 c, given a point cloud, we first
+extract key-points and gather neighbouring points around each key-point just like the point-wise
+methods. However, instead of learning from point coordinates with MLPs, we leverage local-scale
+3D voxels to preserve the 3D geometry and then learn features with 3D convolutions. By doing so,
+we waive the requirements for the expensive MLPs and tackle the quantization issue as well.
+Just like other point-wise methods, we also face the same problem: how to extract key-points from
+hundreds of thousands of input points efficiently. In addition, we also need to figure out how to
+construct 3D voxels on-the-fly during the network propagation at real-time. To this end, we propose
+the grid based downsampling and hierarchical point-wise convolution with dynamic voxelization, to
+take the place of commonly adopted farthest point sampling (FPS) + k-nearest-neighbours (k-NN)
+combination, which is time consuming and memory-hungry. In addition, as a two-stage detection
+framework, we also develop location-aware RoI pooling, a light-weight pooling method that is 3×
+faster and 4× more memory efficient than the previous work without losing accuracy significantly.
+Moreover, for further performance improvement, we adopt 3D IoU loss[28] for bounding box
+regression. We develop an efficient algorithm for 3D IoU loss calculation, which is fully based on the
+native TensorFlow operations and can be implemented with less than 200 lines of Python code. The
+tedious back propagation calculation of 3D IoU can just be left to the deep learning frameworks and
+no longer has to be manually implemented.
+Powered by all the innovations above, we propose DV-Det, a two-stage detection framework for
+efficient 3D object detection from point clouds. Our method achieves the impressive 75 FPS inference
+speed on the KITTI dataset[4] and 25 FPS on the Waymo Open Dataset [21], while still maintains
+satisfactory accuracy performance.
+1
+Without TensorRT optimization.
+2
+2
+Related Works
+2.1
+Point-wise Based 3D Detection
+The point-wise 3D detection methods has gained a lot of attention after the success of PointNet
+[14], and PointNet is still the most widely adopted perceptron unit in many point-wise detection
+methods. Frustum-PointNet[13] is the first work to apply PointNet into 3D detection, it crops 3D
+frustums based on the detection results from 2D images, and then use PointNet to parse the frustums
+point cloud data. STD[27] employs PointNet++[15] as the backbone for features extraction, and
+uses PointsPool for efficient proposal refinement. Similarly, [19, 29] also leverages PointNet++ to
+generate RoI proposals directly from the input point clouds, while [12] uses a voting strategy for
+better feature aggregation returned from PointNet++.
+However, PointNet (including its variants) relies on the MLPs (functioning like a sub-network in each
+layer) to learn the geometrical features from the point coordinates, and it is therefore a computationally
+intensive method. Hence, the point-wise methods mentioned above usually run only at ∼10 FPS on
+the KITTI dataset with a dedicated GPU.
+2.2
+Grid Based 3D Detection
+Convolutions are particularly good at dealing with data organised in regular grids. By converting the
+unstructured point cloud into 3D voxels, the geometry of points is preserved within the arrangement
+of voxels, and therefore, it no longer has to be learnt from point coordinates like PointNet. In
+previous works[20, 22, 6], 3D point clouds are converted into 3D voxel representations, and 3D
+sparse convolutions[5] are used as backbones for feature extractions.
+By converting the 3D points into 2D bird eye view (BEV) projections[9, 23, 24], most of the methods
+originally proposed for detection on 2D images can be transferred to the 3D seamlessly. However,
+converting the entire point cloud into 2D projections means the permanent loss of 3D geometry
+information, and therefore, the existing 2D BEV based methods usually show relatively low accuracy
+on the benchmark datasets, especially for the hard cases only with few points. There are also works
+that adopt similar implementation, and fuse the LiDAR point cloud with 2D camera images at the
+feature map level[10, 11], but the interpretation of high-resolution camera images is a difficult task,
+which usually leads to unsatisfactory inference speed.
+2.3
+Rethink About Existing Methods
+Point-wise methods are able to learn precise point-wise feature representations, however, their
+dependencies on MLPs often lead to heavy network architectures. Meanwhile, expensive operations
+like k-NN and FPS are also involved for point downsampling and feature aggregation, which further
+drags down the inference efficiency.
+On the other hand, the grid based methods are more efficient, but due to the feature dilution issue,
+feature maps at high-level network layers often possess low resolution, which obstructs the network
+learning precise local feautre representations. E.g., in work [20], although the RoI proposals have
+already been predicted at the bottle-neck of its U-Net [17] style network architecture, but the feature
+maps are still upsampled to provide accurate enough information for the RoI-pooling in second stage.
+In this work, we propose a novel method which maintains precise feature representations like pointwise methods without the requirement for complicated MLPs, while avoids the general issues existing
+in the grid base methods at the same time.
+3
+Proposed Method
+Learning from point coordinates with MLPs is too expensive for a rapid detection framework to adopt,
+therefore, we stick to the grid based convolution approach as our basic perceptron unit. However,
+instead of converting the entire point cloud into 3D voxels, we adopt similar strategy as point-wise
+methods: we only construct local-scale 3D voxels around the key-points of the point cloud, and parse
+3D features with dense 3D convolution. In this way, we fuse the point-wise methods and grid based
+methods at the perceptron level, and achieve remarkable efficiency improvement.
+3
+Stage-1
+[ 0.1m, 16 ]
+Foreground? Foreground?
+True
+False
+[ 0.2m, 32 ]
+[ 0.4m, 64 ]
+[ 0.8m, 128 ]
+Foreground? True
+MLPs
+RoI proposals
+Raw points
+Stage-2
+[ 3x3x3, 256 ]
+Conficence
+score
+[ 5x5x5, 128 ]
+[ 1x1x1, 256 ]
+MLPs
+Final predictions
+Location-Aware
+3D RoI pooling
+3D Convolution
+Foreground feature points
+with proposal (BEV)
+Figure 2: Visualization of the proposed two-stage DV-Det framework. In the first stage, raw 3D
+points are processed by point-wise convolutional layers with dynamic voxelization to extract features
+and obtain 3D bounding-box proposals. In the second stage, the proposals are refined based on the
+Location-Aware RoI pooling method to get the final prediction results.
+Nevertheless, just like other point-wise methods, we are facing the same problem: how to select
+key-points from a point cloud with hundreds of thousands of points. Moreover, we also need to
+construct the 3D convolution kernels on-the-fly during the forward propagation efficiently enough to
+achieve the real-time performance. In this section, we will give our answers to these two questions in
+section 3.1 and 3.2 respectively, followed by the illustrations to our Location-Aware RoI pooling in
+section 3.3 and 3D IoU loss function in section 3.4.
+3.1
+Grid Based Point Downsampling
+Farthest point sampling (FPS) is the most widely adopted algorithm for point cloud downsampling[14],
+however, as an algorithm with complexity O(n2 ), it runs very slowly for point cloud at large scales,
+making it a straggler in the real-time detection framework. On the other hand, random downsampling
+is efficient enough with O(n) complexity, but it is sensitive to the local point density and often leads
+to unstable performance[7]. In this work, we propose the grid based point downsampling method,
+which runs almost as efficiently as random sampling, while keeps similar functionalities as FPS.
+Specifically, for a point cloud S = {(pi , fi ) : i = 1, 2, ..., N }, where pi ∈ R3 is the point coordinate,
+fi ∈ Rc is the point-wise feature with channel c and N is the total number of points, given the
+downsampling resolution r, we first divide the entire point cloud into 3D regular grids with grid
+length r as shown in Fig.3 a.
+For every point pi in P with coordinate [pxi , pyi , pzi ], we obtain its corresponding grid index as
+py
+px
+pz
+[b ri c, b ri c, b ri c], which indicates the grid that point will fall into. Next, we randomly select one
+point in each grid as our downsampling output, unless the grid is not occupied by any points. This
+strategy may sound straightforward, but not the implementation, especially for the balance between
+the time and space complexity. Therefore, we adopt different implementations for inference and
+training phase separately due to their different needs for speed and memory efficiency.
+For the inference purpose, speed matters more than memory efficiency, and therefore, our impleL
+H
+mentation creates a 3D grid buffer with size b W
+r c × b r c × b r c first, where the W , L and H stand
+for the dimensions of the input point cloud; then, we calculate the grid index for every point which
+are fitted into the corresponding grid buffer location. Each grid buffer location is writable for only
+once, which means its value cannot be modified once it has been occupied, so that the other points
+with the same grid index will not overwrite the same buffer again. With this setup, we achieve the
+O(n) complexity, but the speed also comes at a price: the 3D grid buffer has to be pre-allocated in
+4
+j-2
+j-1
+j
+j+1
+j-2
+j+2
+j-1
+j
+j+1
+j+2
+Ignored point
+i-2
+i-2
+i-1
+i-1
+Selected key-point
+Point involved in dynamic voxelization
+Grid overlapping with kernel area
+Occupied grid
+i
+i
+i+1
+i+1
+i+2
+i+2
+(a)
+R
+Kernel area
+(b)
+Figure 3: Visualization of grid based point downsampling (a) and dynamic voxelization (b).
+the memory space first. Fortunately, it usually will not be a problem for most of the cases, e.g., for
+Waymo Open Dataset with input range of 150m × 150m × 6m, when the r is 0.1m, the total RAM
+consumption by our inference implementation is around 500MB (with float32), while the speed is
+5× faster than our training implementation (introduced below). Another good news is that we can
+reuse the same downsampling results in the subsequent model layers, as long as the downsampling
+ratio r remains unchanged.
+By contrast, in the training implementation, we aim at fitting as large batch size as possible into
+GPU, while the time consumption is less important. Following this principle, we calculate the grid
+py
+pz
+px
+index [b ri c, b ri c, b ri c] for every point first, then sort the points according to their grid indexes, and
+collect the points with unique grid indexes as the final downsampling results. By doing so, we waive
+the requirement for the memory-hungry grid buffer implementation. Since the sorting operation is
+involved here, the approximate complexity is O(nlogn), not as ideal as O(n), but still much faster
+than the FPS.
+3.2
+Hierarchical Convolution with Dynamic Voxelization
+The purpose of our hierarchical point-wise convolution is to combine the advantages of both conventional convolutions and the point-wise operations. Instead of applying these two techniques in an
+alternate way like PV-RCNN[18], in this work, we directly deploy 3D convolutions in a point-wise
+fashion. Specifically, after the extraction of key-points via downsampling, we first construct localscale 3D voxels around each key-point with our proposed dynamic voxelization operation, then we
+parse the point-wise 3D voxel data with dense 3D convolution to obtain the feature representations.
+3.2.1
+Dynamic Voxelization
+Given the input point cloud S1 = {(pi1 , f1i ) : i = 1, 2, ..., N1 }, pi1 ∈ R3 , f1i ∈ Rc1 , with the subscript
+"1" suggesting it is the first layer in the network, we first downsample {pi1 } using our grid-based
+downsampling with the downsampling resolution r1 , and get the downsampled key point set {pi2 :
+i = 1, 2, ..., N2 , N2 ≤ N1 } ⊆ {pi1 : i = 1, 2, ..., N1 }. Next, for every pi2 , we query its neighbouring
+points in S1 within a fixed radius R1 : S1i = {(pj1 , f1j ) : j = 1, 2, ..., N1i | pj1 − pi2 ≤ R1 }, and then
+fit S1i into the 3D regular voxels with resolution k × k × k. By doing so, we convert the original
+S1 into a set of point-wise 3D voxels: V1 = {(pi2 , v1i ), i = 1, 2, ..., N2 }, where v1i ∈ Rk×k×k×c1
+encodes the local point cloud geometry around the key point pi2 .
+The key of our dynamic voxelization lies on how to construct the 3D voxels v i for each key-point
+pi . However, even after the grid based downsampling operation, the total number of remaining
+key-points is still considerable (∼ 100k at most), and to perform local-scale voxelization with so
+many key-points in real-time, we propose the grid based voxelization operation.
+As suggested by its name, grid based voxelization basically shares a similar implementation as our
+grid based downsampling operation. As shown in Fig.3 b, given the kernel radius R and kernel
+resolution k, we divide the point cloud into regular grids with resolution 2R/k (defined as kernel
+5
+resolution in this context), and for any given kernel centroid and query radius R, we fit interior points
+into the k × k × k 3D voxels. In regard to the voxels occupied by multiple points, the average-pooling
+strategy is used.
+To accelerate this process, we only need to go through the points that lies in the grids which overlap
+with the kernel area, meanwhile, we also apply different implementations separately to fulfill the
+different preferences during training and inference phases, and readers may refer to the source code
+for more details.
+A similar idea to our dynamic convolution is also introduced in [8], however, the voxelization is only
+performed once for all the layers before the network propagation in [8], therefore, all the layers in the
+network always share the same receptive field and there is no concept of hierarchy. By contrast, in
+our work, the voxelization is performed on-the-fly in every convolutional layer with highly efficient
+implementations, and therefore the receptive field dynamically changes along the model depth.
+3.2.2
+Point-wise 3D Convolution
+As for the convolution part, taking the first convolutional layer as an example, we convolve the pointwise 3D voxel v1i with dense 3D kernel W1 ∈ Rk×k×k×c1 ×c2 . W1 has the same k×k×k resolution as
+v1i , while c1 and c2 are the input and output feature channels respectively. After convolution, we have
+f2i = v1i ∗ W1 , and f2i ∈ Rc2 . Finally, we obtain a new point set S2 = {(pi2 , f2i ) : i = 1, 2, ..., N2 },
+which can be treated as the input of another successive convolutional layer. Since the convolution
+output features are closely associated with the point coordinates, the output f i now exactly represents
+the features at location pi , instead of a large pooling area, like conventional convolutions in Fig.1
+a. A hierarchical arrangement of point-wise convolutional layers shapes our backbone and region
+proposal network (RPN) as shown in the Fig.2.
+3.3
+Location-Aware RoI Pooling
+As a two-stage detection framework, RoI pooling plays an essential part in the second refinement
+stage. However, to perform efficient yet accurate RoI pooling still remains an open problem for 3D
+point cloud detection. The concept of RoI pooling was officially introduced in [20], and later on was
+adopted in the successive works[18].
+But how to efficiently aggregate the point-wise
+features into RoI pooling grids still remains a
+problem. In [18], features in each pooling grid
+are learnt from additional convolutions, e.g., for
+RoI pooling with grid resolution of 6 × 6 × 6,
+a total number of 216 convolution calculations
+are involved, and that is for one single RoI only,
+therefore, it is unaffordable to an efficient detection framework.
+To this end, we propose the Location-Aware
+RoI Pooling method. As shown in Fig.4, during the pooling operation, we assign additional
+weight to the input point-wise features according to their Euclidean distances to the pooling
+grid centre. Specifically, given a 3D RoI of dimension W × L × H and the target pooling grid
+resolution k, we first gather all the interior pointwise features {fi } within a certain pooling grid
+g among the k × k × k grids; next, we calculate
+representative features fg as:
+Pooling grid
+Feature point
+Grid center
+f4
+g w1 f1
+w4
+w2
+w3
+f2
+f3
+RoI with 2x2
+pooling resolution
+Figure 4: Location-Aware RoI pooling illustrated
+in 2D with two proposals and pooling resolution of
+2×2. With LA-RoI pooling, our network can capture the tiny variance between to the two proposals
+that are very close to each other.
+n
+fg =
+di
+1X
+W L H
+wi fi ; wi = e1− r ; r = max{ , , }
+n i=1
+k k k
+(1)
+where di is the Euclidean distance between the feature point fi and the grid centre g, r is the maximum
+dimension of pooling grid among W , L and H orientations. We normalize fg by the total number
+of interior points n in each pooling grid, so that the scale of fg will not be heavily affected by n.
+6
+In practice, the largest value of n is set as 5, which means for each grid g, only at most 5 interior
+point-wise features fi are taken into consideration, and the redundant points are simply omitted. By
+doing so, we are able to capture the tiny location perturbations between different RoIs, while avoid
+the expensive convolution computations.
+ALGORITHM 1: 3D IoU Loss Calculation
+Input :Predicted bounding box B p and the corresponding ground truth Bg :
+B p = (xp , y p , z p , wp , lp , hp , rp ), B g = (xg , y g , z g , wg , lg , hg , rg )
+Output :The 3D IoU loss between B p and B g : LIoU
+p
+g
+1: Convert Bp and Bg to BEV representation: Bbev
+= (xp , y p , wp , lp , rp ), Bbev
+= (xg , y g , wg , lg , rg )
+p
+g
+2: Get the vertices of Bbev and Bbev . For i ∈ {1, 2, 3, 4}:
+Vip = [(−1)i wp /2, (−1)i−1 lp /2] + [xp , y p ]; Vig = [(−1)i wg /2, (−1)i−1 lg /2] + [xg , y g ]
+g
+3: Get the perspective coordinates of Vp regarding its relative position to Bbev
+as Vp→g :
+p→g
+p T
+p
+g
+p
+g
+V
+= R(rp −rg ) [V ] + [x − x , y − y ] (R∗ is the rotation transformation regarding angle ∗)
+p
+4: Get the edge extensions of Bbev
+with vertices Vp→g . For i ∈ {1, 2, 3, 4}:
+V
+p→g
+[1]−V
+p→g
+[1]
+y = (−1)i Vip→g [0]−Vi−1
+x + (−1)i−1
+p→g
+[0]
+p→g
+p→g
+Vi−1 [1]Vi
+p→g
+p→g
+[0]−Vi
+p→g
+p→g
+[1]Vi−1 [0]
+[0]−Vi−1 [0]
+i
+i−1
+p
+g
+5: Get all the intersections {Igj }, j ∈ {1, 2, ..., 16} between Bbev
+and Bbev
+by setting x as ± 21 wg or setting y
+g
+g
+1 g
+as ± 2 l in Step 4 (the superscript g indicates I is represented based on its relative position to Bbev
+)
+g
+6: Concatenate Ig , Vp→g and Vg as Pg ={Ig , Vp→g ,Vg }, filter out the points in Pg that are outside Bbev
+,
+g
+g
+g
+g
+1 g
+1 g
+and that leads to P = {Pk |k ∈ {1, 2, ..., 24} ∩ kPk [0]k ≤ 2 w ∩ kPk [1]k ≤ 2 l }
+p
+7: Similar to Step 3, get the perspective coordinates of Pg regarding its relative position to Bbev
+as Pg→p
+p
+8: Repeat Step 6 to filter out the points in Pg→p that are outside Bbev
+, and that returns a new set P ⊂ Pg→p ,
+p
+g
+which are the vertices of the polygon intersection area between Bbev
+and Bbev
+Vi
+9: Sort the points in P counterclock-wisely and calculate the area of the intersection polygon using Shoelace
+n−1
+n−1
+P
+P
+Pi+1 [0]Pi [1]) − P1 [0]Pn [1]
+algorithm: A = 21 (
+Pi [0]Pi+1 [1]) + Pn [0]P1 [1] − (
+i=1
+i=1
+10: Get the intersection height H between B p and B g , then calculate the 3D IoU as:
+A×H
+IoU3D = wp ×lp ×hp +w
+g ×lg ×hg −A×H , and LIoU = 1 − IoU3D
+3.4
+Loss Functions
+As a two-stage model, we use multi-task loss functions to train our model in both stages. During the
+first stage, we try to differentiate foreground points from the point cloud and generate RoI proposals
+for every foreground points at the same time. As for loss function for the RoI regression optimization,
+we use the 3D IoU loss[28] as our optimization target, instead of the commonly adopted smooth-L1
+loss.
+3D IoU Loss. The IoU loss has been proven to be more suitable for detection tasks than smooth-L1
+loss[28, 16], as it naturally reflects the bias between a predicted bounding box and its corresponding
+ground truth. The calculation itself for 3D IoU is not difficult, but as a loss function, being differentiable is a prerequisite and it is not an easy task. In previous works[28], the back propagation of 3D
+IoU has to be implemented manually with C++/CUDA extensions, which can be tedious and fallible.
+To tackle this problem, here we propose an efficient algorithm for 3D IoU calculation, which is fully
+based on the native operations supported by the modern deep learning framework like TensorFlow
+and PyTorch. This means that we no long have to implement the back propagation manually and can
+safely leave this task to the auto differentiation functions of modern deep learning frameworks.
+Concretely, given a pair of predicted bounding boxes B p = (xp , y p , z p , wp , lp , hp , rp ) and the
+corresponding ground truth B g = (xg , y g , z g , wg , lg , hg , rg ), where [x∗ , y ∗ , z ∗ ] is the geometry
+centroid of bounding box ∗; w∗ , l∗ and h∗ are the 3D dimensions and r∗ is the rotation angle around
+z(yaw) axis (assuming only have rotations along z axis), we calculate the 3D IoU loss according to
+the algorithm 1. The key of our algorithm lies on how to obtain the intersections efficiently between
+two bounding boxes on 2D BEV plane, and to achieve this goal, we transform the vertex coordinates
+of two bounding boxes based on their relative positions to each other via rotations and translations.
+By doing so, the intersections can be easily determined by setting restrictions on x, y coordinates,
+and more importantly, our algorithm can be executed in batch-wise pattern without looping through
+every bounding box, which ensures its usability in applications.
+7
+The multi-task loss function we use for the firs stage optimization is:
+Lstage1 = Lcls + αLiou + βLrot
+(2)
+where Lcls is the focal loss for foreground classification and Li ou is the 3D IoU loss. Lrot is the
+smooth-L1 loss for rotation angle regression and Lrot =smooth-L1(sin (rp − rg )), which prevents
+Liou mixing up the w and l dimension. As for the second stage, the loss function is defined as follow:
+Lstage2 = Lconf + αLiou + βLrot + γLf lip
+(3)
+where Lconf is the loss for IoU guided confidence score [pvrcnn], while Liou and Lrot follow the
+same definitions as before. Lf lip is the cross-entropy loss for binary classification, which decides
+whether the predicted bounding box shall be rotated by 180°. The reason why Lf lip is needed is
+that Lrot only regulates on the sin value of rp − rg , and the network cannot differentiate the correct
+orientation of bounding boxes basing on Lrot alone. In practice, we set α = 2, β = γ = 0.5. Lcls
+and Lconf are calculated for all the output points, while Liou , Lrot and Lf lip are only calculated for
+the foreground points.
+4
+Experiments
+4.1
+Implementation Details
+Network Architecture. As shown in Fig.2, our backbone network is based on the hierarchical
+point-wise convolutional layers with dynamic voxelization. The backbone is composed of four
+convolution blocks, and each block includes two point-wise convolutional layers. The downsampling
+resolution r is set as 0.1m, 0.2m, 0.4m, 0.8m for each block, and the kernel resolution k is 3 for all
+the blocks with the number of feature channels 16, 32, 64 and 128. The output features from each
+block are then concatenated and fed into the second stage as input to the LA-RoI pooling layer. The
+LA-RoI pooling transforms the point-wise features into 5 × 5 × 5 dense 3D voxels, and pass them
+to the dense 3 × 3 × 3 3D convolutions. We apply “valid” padding strategy for the 3D convolution
+and the voxel dimensions are reduced to 1 × 1 × 1 after two successive dense convolutional layers.
+Finally, we feed these features into MLPs to return the final predictions.
+Training and Inference Setup. We train our DV-Det in an end-to-end fashion from scratch on the
+KITTI 3D object detection dataset[4] and Waymo Open dataset[21]. The model is trained on 16
+NVIDIA RTX 2080 Ti GPUs with 80 training epochs and the learning rate of 0.01. Batch size is set
+as 64 for KITTI dataset and 32 for Waymo dataset. In the second stage, we resample the negative and
+positive proposals with a ratio of 2:1 and IoU threshold of 0.5. During training phase, the input data
+are augmented with random rotations along z axis between range [− π4 , π4 ] and random scaling along
+three axes in range [0.95, 1.05]. Following the practice in [18, 22], we also randomly "paste" ground
+truth objects collected from different scenes (within the same dataset) to enrich the training data.
+We train our model with the "training" implementations of grid based downsampling and dynamic
+voxelization, and run inference with the "inference" implementations.
+4.2
+Evaluation on KITTI Dataset
+We first evaluate our performance on the KITTI 3D object detection dataset, which comprises two
+partitions: training dataset (7,481 samples) and testing dataset (7,518 samples). We further divide
+the training partition into two sets: train set with 3,712 samples and val set with 3,769 samples. In
+training phase, we utilize 80% of the samples in the train+val combination as training data, and leave
+the rest 20% for validation. We evaluate the performance based on the testing dataset from the KITTI
+official online evaluation server, and report our accuracy on car and cyclist class in Table 1.
+We only compare with the pure point cloud based methods, and we divide the existing methods
+into two categories: "3D Perceptron" are the methods that parse the point cloud in 3D space using
+perceptrons like 3D convolution or PointNet; "BEV" are the methods that convert 3D point cloud onto
+2D BEV plane, the process data with 2D convolutions. We notice that all of the existing 3D perceptron
+based methods have a inference speed less than 25 FPS on a dedicated GPU, and considering the
+90°front-view FOV in KITTI dataset, we can hardly say they are ready for the real-world applications.
+On the other hand, BEV based methods run at considerably faster speed than the 3D perceptrons
+based methods, however, converting 3D point cloud into 2D BEV projections means the permanent
+loss of 3D spatial information, and that usually leads to unsatisfactory performance on hard examples.
+8
+Method
+†
+BEV
+3D Perceptron
+Point-RCNN [19]
+STD† [27]
+Fast Point-RCNN† [2]
+PV-RCNN† [18]
+SECOND[22]
+Voxel-RCNN† [3]
+SA-SSD[6]
+3DSSD[26]
+PIXOR[25]
+HDNET[23]
+PointPillars[9]
+DV-Det (Ours)†
+† Two-stage model
+Speed
+(FPS)
+∼10
+<20
+∼20
+∼15
+∼30
+∼25
+∼25
+∼25
+∼10
+∼25
+∼45
+∼75
+Car - 3D Detection
+Easy Mod. Hard
+86.96 75.64 70.70
+87.95 79.71 75.09
+85.29 77.40 70.24
+90.25 81.43 76.82
+83.34 72.55 65.82
+90.90 81.62 77.06
+88.75 79.79 74.16
+88.36 79.57 74.55
+82.58 74.31 68.99
+85.32 76.74 70.02
+Car - BEV Detection
+Easy Mod. Hard
+92.13 87.39 82.72
+94.74 89.19 86.42
+90.87 87.84 80.52
+94.98 90.65 86.14
+89.39 83.77 78.59
+95.03 91.03 85.96
+81.70 77.05 72.95
+89.14 86.57 78.32
+90.07 86.56 82.81
+91.53 87.65 83.27
+Cyclist - 3D Detection
+Easy Mod. Hard
+74.96 58.82 52.53
+78.69 61.59 55.30
+78.60 63.71 57.65
+71.33 52.08 45.83
+82.48 64.10 56.90
+77.10 58.65 51.92
+77.94 58.77 52.49
+Cyclist - BEV Detection
+Easy Mod. Hard
+82.56 67.24 60.28
+81.36 67.23 59.35
+82.49 68.89 62.41
+76.50 56.05 49.45
+79.90 62.73 55.58
+80.92 63.08 57.32
+Table 1: Performance comparison on the KITTI testing dataset based on the mean Average Precision
+(mAP) with 40 recall positions.
+By contrast, our method achieves remarkable 75 FPS on the KITTI dataset, which is 3× faster than
+the state-of-the-art 3D perceptron based method. Meanwhile, compared with the existing BEV based
+methods, we overperform them regarding all the evaluation metrics and achieve 45% faster inference
+speed than the widely adopted PointPillar method.
+4.3
+Evaluation on Waymo Open Dataset
+Apart from the KITTI dataset, we also test our model on the Waymo Open Dataset to give a
+comprehensive evaluation. We train our model based on 798 training sequences with ∼158k point
+cloud scenes, and test our performance on 202 validation sequences with ∼40k point cloud scenes.
+Different from KITTI dataset, Waymo Open Dataset possesses a full 360°view angle with denser
+point cloud point cloud, which asks for more efficient models to achieve the real-time processing
+speed. We evaluate our method based on the official tools released by Waymo. The mAP performance
+of DV-Det is reported in Table 2 for vehicle detection with IoU threshold of 0.7, and we only consider
+the examples with difficulty LEVEL_1 (objects possess more than 5 LiDAR points).
+Speed
+3D mAP (IoU=0.7)
+BEV mAP (IoU=0.7)
+(FPS) Overall 0-30m 30-50m 50m-Inf Overall 0-30m 30-50m 50m-Inf
+PV-RCNN[19] <5 70.30 91.92 69.21 42.17 82.96 97.53 82.99 64.97
+Voxel-RCNN[3] <10 75.59 92.49 74.09 53.15 88.19 97.62 87.34 77.70
+PointPillar[9] ∼15 56.62 81.01 51.75 27.94 75.57 92.10 74.06 55.47
+DV-Det (Ours) ∼25 63.42 85.72 55.89 30.73 78.38 95.12 76.93 59.36
+Method
+Table 2: Performance (mAP) comparison on the Waymo Open Dataset with 202 validation sequences
+for vehicle class.
+Our DV-Det is overperformed by the state-of-the-art 3D perceptron based methods like Voxel-RCNN
+regarding the detection accuracy, but our method can run at a speed of 25 FPS, which is even faster
+than the 2D BEV methods like PointPillar with obviously higher accuracy.
+5
+Conclusion
+We present the DV-Det, a novel two-stage framework for efficient 3D object detection from point
+clouds. Our method combines the advantages from both point-wise methods and grid based methods,
+and as a pure 3D point cloud based method, DV-Det overperforms the 2D BEV based methods by
+a large margin regarding both efficiency and accuracy for the first time. With innovations like grid
+based point downsampling and dynamic voxelization techniques, we achieve satisfactory performance
+on KITTI and Waymo benchmark dataset. We hope our method can be inspiring and encourage more
+future works.
+9
+References
+[1] Xiaozhi Chen, Huimin Ma, Ji Wan, Bo Li, and Tian Xia. Multi-view 3d object detection network for
+autonomous driving. 2017.
+[2] Yilun Chen, Shu Liu, Xiaoyong Shen, and Jiaya Jia. Fast point r-cnn. pages 9775–9784, 2019.
+[3] Jiajun Deng, Shaoshuai Shi, Peiwei Li, Wengang Zhou, Yanyong Zhang, and Houqiang Li. Voxel r-cnn:
+Towards high performance voxel-based 3d object detection. arXiv preprint arXiv:2012.15712, 2020.
+[4] Andreas Geiger, Philip Lenz, and Raquel Urtasun. Are we ready for autonomous driving? the kitti vision
+benchmark suite. pages 3354–3361, 2012.
+[5] Benjamin Graham and Laurens van der Maaten. Submanifold sparse convolutional networks. 6 2017.
+[6] Chenhang He, Hui Zeng, Jianqiang Huang, Xian-Sheng Hua, and Lei Zhang. Structure aware single-stage
+3d object detection from point cloud. pages 11873–11882, 2020.
+[7] Qingyong Hu, Bo Yang, Linhai Xie, Stefano Rosa, Yulan Guo, Zhihua Wang, Niki Trigoni, and Andrew
+Markham. Randla-net: Efficient semantic segmentation of large-scale point clouds. pages 11108–11117,
+2020.
+[8] Binh-Son Hua, Minh-Khoi Tran, and Sai-Kit Yeung. Pointwise convolutional neural networks. In
+Proceedings of the IEEE Conference on Computer Vision and Pattern Recognition, pages 984–993, 2018.
+[9] Alex H. Lang, Sourabh Vora, Holger Caesar, Lubing Zhou, Jiong Yang, and Oscar Beijbom. Pointpillars:
+Fast encoders for object detection from point clouds. 2019.
+[10] Ming Liang, Bin Yang, Yun Chen, Rui Hu, and Raquel Urtasun. Multi-task multi-sensor fusion for 3d
+object detection. 2019.
+[11] Ming Liang, Bin Yang, Shenlong Wang, and Raquel Urtasun. Deep continuous fusion for multi-sensor 3d
+object detection. In Proceedings of the European Conference on Computer Vision (ECCV), pages 641–656,
+2018.
+[12] Charles R Qi, Or Litany, Kaiming He, and Leonidas J Guibas. Deep hough voting for 3d object detection
+in point clouds. pages 9277–9286, 2019.
+[13] Charles R Qi, Wei Liu, Chenxia Wu, Hao Su, and Leonidas J Guibas. Frustum pointnets for 3d object
+detection from rgb-d data. pages 918–927, 2018.
+[14] Charles R. Qi, Hao Su, Kaichun Mo, and Leonidas J. Guibas. Pointnet: Deep learning on point sets for 3d
+classification and segmentation. volume 2017-Janua, pages 77–85, 2017.
+[15] Charles R. Qi, Li Yi, Hao Su, and Leonidas J. Guibas. Pointnet++: Deep hierarchical feature learning on
+point sets in a metric space. 2017.
+[16] Hamid Rezatofighi, Nathan Tsoi, JunYoung Gwak, Amir Sadeghian, Ian Reid, and Silvio Savarese.
+Generalized intersection over union: A metric and a loss for bounding box regression. In Proceedings of
+the IEEE/CVF Conference on Computer Vision and Pattern Recognition, pages 658–666, 2019.
+[17] Olaf Ronneberger, Philipp Fischer, and Thomas Brox. U-net: Convolutional networks for biomedical
+image segmentation. volume 9351, pages 234–241, 5 2015.
+[18] Shaoshuai Shi, Chaoxu Guo, Li Jiang, Zhe Wang, Jianping Shi, Xiaogang Wang, and Hongsheng Li.
+Pv-rcnn: Point-voxel feature set abstraction for 3d object detection. pages 10529–10538, 2020.
+[19] Shaoshuai Shi, Xiaogang Wang, and Hongsheng Li. Pointrcnn: 3d object proposal generation and detection
+from point cloud. 2019.
+[20] Shaoshuai Shi, Zhe Wang, Jianping Shi, Xiaogang Wang, and Hongsheng Li. Part-a2 net: 3d part-aware and
+aggregation neural network for object detection. Proceedings of the IEEE Computer Society Conference
+on Computer Vision and Pattern Recognition, 2019.
+[21] Pei Sun, Henrik Kretzschmar, Xerxes Dotiwalla, Aurelien Chouard, Vijaysai Patnaik, Paul Tsui, James
+Guo, Yin Zhou, Yuning Chai, Benjamin Caine, et al. Scalability in perception for autonomous driving:
+Waymo open dataset. pages 2446–2454, 2020.
+[22] Yan Yan, Yuxing Mao, and Bo Li. Second: Sparsely embedded convolutional detection. Sensors, 18:3337,
+2018.
+[23] Bin Yang, Ming Liang, and Raquel Urtasun. Hdnet: Exploiting hd maps for 3d object detection. In
+Conference on Robot Learning, pages 146–155. PMLR, 2018.
+[24] Bin Yang, Wenjie Luo, and Raquel Urtasun. Pixor: Real-time 3d object detection from point clouds. In
+Proceedings of the IEEE conference on Computer Vision and Pattern Recognition, pages 7652–7660, 2018.
+[25] Bin Yang, Wenjie Luo, and Raquel Urtasun. Pixor: Real-time 3d object detection from point clouds. 2018.
+[26] Zetong Yang, Yanan Sun, Shu Liu, and Jiaya Jia. 3dssd: Point-based 3d single stage object detector. pages
+11040–11048, 2020.
+10
+[27] Zetong Yang, Yanan Sun, Shu Liu, Xiaoyong Shen, and Jiaya Jia. Std: Sparse-to-dense 3d object detector
+for point cloud. pages 1951–1960, 2019.
+[28] Dingfu Zhou, Jin Fang, Xibin Song, Chenye Guan, Junbo Yin, Yuchao Dai, and Ruigang Yang. Iou loss
+for 2d/3d object detection. pages 85–94, 2019.
+[29] Yin Zhou and Oncel Tuzel. Voxelnet: End-to-end learning for point cloud based 3d object detection. pages
+4490–4499, 2018.
+11

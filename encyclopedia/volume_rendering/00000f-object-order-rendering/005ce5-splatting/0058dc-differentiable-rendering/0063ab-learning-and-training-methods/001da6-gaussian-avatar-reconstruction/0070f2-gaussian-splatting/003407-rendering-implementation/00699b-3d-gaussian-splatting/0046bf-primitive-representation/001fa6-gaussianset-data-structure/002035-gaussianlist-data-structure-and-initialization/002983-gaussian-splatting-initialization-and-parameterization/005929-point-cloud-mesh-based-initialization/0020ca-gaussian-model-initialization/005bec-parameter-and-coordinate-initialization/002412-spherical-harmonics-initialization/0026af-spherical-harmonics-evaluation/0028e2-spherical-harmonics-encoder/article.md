@@ -1,0 +1,106 @@
+# Spherical Harmonics Encoder
+
+Also called: SH Encoding, Spherical Harmonics Basis
+
+## Overview
+A neural network module that encodes a 3D direction vector into spherical harmonics (SH) coefficients up to a specified degree [S1, unofficial]. It solves the problem of representing directional information (view direction) in a differentiable, basis-function expansion for view-dependent rendering [S1, unofficial].
+
+## How it works
+**Inputs and Outputs:**
+- Input: A direction vector $\mathbf{d} = (x, y, z)$ of dimension 3 [S1, unofficial].
+- Output: A tensor of SH coefficients with shape `(*input.shape[:-1], out_dim)` [S1, unofficial]. The last dimension holds coefficients in $m$-order (m=0, then m=-1,1, then m=-2,0,2, etc.) [S1, unofficial].
+
+**Parameters:**
+- `input_dim`: Dimensionality of the input vector. Must be 3 [S1, unofficial].
+- `degree`: Maximum degree of spherical harmonics to compute. Valid range is 1 to 5 [S1, unofficial].
+- `out_dim`: Output dimensionality. The source notes state it is calculated as `degree ** 2` (e.g., 16 for degree 4), but the coefficient indices extend to `(degree + 1)^2 - 1` (indices 0–24 for degree 4) [S1, unofficial].
+
+**Data Structures and Constants:**
+The encoder uses precomputed constants for the SH basis functions [S1, unofficial]:
+- $C_0 = 0.28209479177387814$
+- $C_1 = 0.4886025119029199$
+- $C_2 = [0.4886025119029199, -0.4886025119029199, 0.3490658503988659, -0.4886025119029199, 0.1057855469155632]$ [S1, unofficial].
+- Constants for degrees 3 and 4 are not provided in the sources [S1, unofficial].
+
+**Steps:**
+1. Unbind the input direction vector into components $x, y, z$ [S1, unofficial].
+2. Compute degree 0 ($l=0, m=0$) coefficient at index 0 [S1, unofficial].
+3. If `degree` > 1, compute degree 1 ($l=1$) coefficients at indices 1, 2, 3 [S1, unofficial].
+4. If `degree` > 2, compute intermediate quadratic terms ($xx, yy, zz, xy, yz, xz$) and degree 2 ($l=2$) coefficients at indices 4–8 [S1, unofficial].
+5. If `degree` > 3, compute degree 3 ($l=3$) coefficients at indices 9–15 using cubic terms [S1, unofficial].
+6. If `degree` > 4, compute degree 4 ($l=4$) coefficients at indices 16–24 using quartic terms [S1, unofficial].
+
+**Pseudocode:**
+> **Unverified code.** The code below did not pass a test run against a reference implementation, or no test fits it, so it may contain errors.
+
+```python
+def spherical_harmonics_encode(directions, degree):
+    # directions: tensor of shape (*, 3)
+    # degree: integer in [1, 5]
+    assert directions.shape[-1] == 3
+    assert 1 <= degree <= 5
+    
+    x, y, z = directions.unbind(-1)
+    out_dim = degree ** 2  # Matches source note; standard SH uses (degree + 1) ** 2 [G]
+    result = torch.zeros((*directions.shape[:-1], out_dim), device=directions.device)
+
+    # Degree 0 (m=0)
+    result[..., 0] = 0.28209479177387814
+
+    if degree > 1:
+        # Degree 1 (m=-1, 0, 1) at indices 1, 2, 3
+        result[..., 1] = -0.4886025119029199 * y
+        result[..., 2] = 0.4886025119029199 * z
+        result[..., 3] = -0.4886025119029199 * x
+
+    if degree > 2:
+        # Intermediate quadratic terms
+        xx, yy, zz = x * x, y * y, z * z
+        xy, yz, xz = x * y, y * z, x * z
+        C2 = [0.4886025119029199, -0.4886025119029199, 0.3490658503988659, -0.4886025119029199, 0.1057855469155632]
+        # Degree 2 (m=-2 to 2) at indices 4-8
+        result[..., 4] = C2[0] * xy
+        result[..., 5] = C2[1] * yz
+        result[..., 6] = C2[2] * (2.0 * zz - xx - yy)
+        result[..., 7] = C2[3] * xz
+        result[..., 8] = C2[4] * (xx - yy)
+
+    if degree > 3:
+        # Degree 3 coefficients at indices 9-15 using constants C3 and cubic terms
+        # Constants and exact formulas for degree 3 are not provided in the sources [S1, unofficial]
+        pass
+
+    if degree > 4:
+        # Degree 4 coefficients at indices 16-24 using constants C4 and quartic terms
+        # Constants and exact formulas for degree 4 are not provided in the sources [S1, unofficial]
+        pass
+
+    return result
+```
+
+**Pitfalls:**
+- For degree 2, index 6, an alternative formula `C2[2] * (3.0 * zz - 1)` exists but is commented out in the source because `xx + yy + zz == 1` on the unit sphere, yet this alternative leads to different backward gradients [S1, unofficial].
+
+## Subtopics
+
+### [SH Feature Encoding](6642-sh-feature-encoding.md)
+SH Feature Encoding is a method for modeling view-dependent effects in neural radiance fields by multiplying each Spherical Harmonics (SH) basis coefficient with a learnable feature vector, rather than using the vanilla scalar SH encoding. It solves the problem of representing directional information (view direction) in a differentiable, basis-function expansion for view-dependent rendering by allowing the magnitude and orientation of the SH response to be modulated by spatially varying features. It differs from vanilla SH encoding [Spherical Harmonics Evaluation](3848-spherical-harmonics-evaluation.md) by introducing learnable per-coefficient feature vectors predicted from the scene's spatial features, and differs from the [SPZ Encoder](6850-spz-encoder.md) by relying on the explicit SH basis expansion rather than a direct parameterization.
+
+### [SPZ Encoder](6850-spz-encoder.md)
+The SPZ Encoder serializes Spherical Harmonics (SH) coefficients into a compact byte array. It handles degree clamping, dimension mapping, and fixed-point quantization for view-dependent color data.
+
+### [Neural Basis Functions](19516-neural-basis-functions.md)
+Neural Basis Functions are a set of parameterized functions used to represent the neural basis $\tilde{H}$ in the rendering equation, allowing ablation of different functional forms. They solve the problem of encoding viewing direction into a differentiable feature vector for view-dependent rendering. What sets them apart from siblings like [Spherical Harmonics Encoder](4390-spherical-harmonics-encoder.md) is the explicit use of custom analytic forms tailored to specific viewing constraints rather than relying on standard orthogonal polynomial bases.
+
+### Non-spatial Input Encoding
+Encode auxiliary non-spatial dimensions (e.g., view direction, material parameters) using established techniques like one-blob encoding or spherical harmonics basis, as the hash encoding targets low-dimensional spatial coordinates [S2, unofficial].
+
+## Operating characteristics
+Not given in the sources.
+
+## Background
+In neural rendering, SH basis functions are used to encode view direction for view-dependent appearance [S2, unofficial].
+
+## Sources
+[S1] yashbhalgat/HashNeRF-pytorch, https://github.com/yashbhalgat/HashNeRF-pytorch, fetched 2026-10-26 (unofficial)
+[S2] Nvidia – learning representations of positions in a 3D scene [pdf], https://nvlabs.github.io/instant-ngp/assets/mueller2022instant.pdf, fetched 2026-10-26 (unofficial)

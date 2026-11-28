@@ -1,0 +1,351 @@
+Learn how the VDB file format works through this illustrative article written by one of our EmberGen developers.
+
+JangaFX - Insight: VDB, a deep dive
+VDB: A Deep Dive
+by Said Al Attrach
+......
+Share
+Copy
+Comments (0)
+No comments yet.
+Be the first to share your thoughts!
+Log in to post comments
+Comments (0)
+No comments yet.
+Be the first to share your thoughts!
+Log in to post comments
+Motivation
+VDB is a popular and widely used format for storing volumetric data. OpenVDB is the de facto reference implementation of a reader and writer for this file format. It also functions as a utility library for manipulating the underlying data structure. It allows the user to insert, modify, and remove voxels from several, usually three dimensional grids and write these grids to a file or a more generic stream abstraction.
+At its core the VDB format is about hierarchically storing voxel data in a tree-like data structure. This is important since it allows the creation of sparse volumes, where only the interesting regions of space are stored, i.e. those in which voxel data is present.
+OpenVDB relies heavily on C++ templates which enable the construction of many different variants of the core data structure that can be highly customized to one's needs while still providing useful algorithms for the manipulation of the data structure. In practice, however, only one variant seems to be used: the 5-4-3 variant; I'll shortly explain what this is. Additionally, in this article we are only interested in building a custom writer for this specific variant and will see that the resulting code is quite compact and simple.
+The documentation for the VDB format is rather sparse, if not non-existent. The paper focuses on the underlying data structure and the algorithms performed on it, but it does not discuss how exactly it is encoded as a bit stream, and there aren't any resources on this besides the OpenVDB codebase, as far as I could tell. I will talk about key concepts of the data structure first, and then describe how to write a valid VDB file with some minimum set of features.
+This is not meant to be a formal or exhaustive specification but rather a simple guide to building a custom writer. It is based on my exploration of the OpenVDB codebase and inspection of the files produced by the library.
+Data Structure Overview
+VDB seeks to represent voxel data that exist in an axis-aligned, regularly spaced grid structure. There's a root node which spans all of space. It then divides space into several equally sized cubic regions that are a power of two along each dimension. Each region has an origin, its location in 3D space. Let's call these regions the top-level nodes of our tree. They are the direct children of the root node and we can have as many of them as we like, but we want them to be non-overlapping (although I haven't looked into what happens if I let the nodes overlap; probably nothing good).
+In the 5-4-3 variant, the top level nodes are 32x32x32. This means that they have 32 * 32 * 32 = 32768 children. Notice that 2^5 = 1 << 5 = 32. This is where the 5 comes from in the variant name. You can probably guess what this means for the remaining numbers. Every child of a 32x32x32 node is itself a node with 16x16x16 children, because 2^4 = 1 << 4 = 16. The children of each one of these nodes are in turn 8x8x8 nodes. These are the leaf nodes in our tree and contain the voxel data itself, which can technically be of any arbitrary type, including user-defined types, but we will focus on simple floating point data, specifically 16-bit floating point numbers.
+Let's recap by noticing some interesting things here.
+Each node's dimension is a power of two. We can define a log2dim property for each node level:
+```
+32x32x32 nodes: log2dim = 5
+16x16x16 nodes: log2dim = 4
+8x8x8    nodes: log2dim = 3
+```
+We can see that the dimension of each node is dim = 1 << log2dim. Let's call the nodes as follows:
+A 5-node is a node that has 32x32x32 children. These are the top level nodes.
+A 4-node is a node that has 16x16x16 children.
+A 3-node is a node that has 8x8x8 children. The children in this case are the voxel data itself and we therefore also call 3-nodes leaf nodes.
+We could also call voxels 0-nodes to be semantically consistent, in which case the voxels would technically be the leaf nodes, but we will stick to calling 3-nodes the leaf nodes to better distinguish nodes from voxels. Another reason is that voxel data is written "directly" in the VDB format and isn't explicitly written out as a node.
+In order to be able to cover as much space as possible there can be an arbitrary number of 5-nodes. They can be placed anywhere in space by specifying their origin. Each 5-node, however, contains a fixed number (32x32x32) of children. 4-nodes and 3-nodes also have a fixed number of children. This is in contrast to how trees are usually structured, where they can have a dynamic number of children at any level. This is an important feature of VDB since it allows us to efficiently find where to write a voxel's data given its position in space. More on this soon.
+We know how many children each node has; let's now figure out how much 3D space each node covers. 3-nodes are the simplest and most obvious ones, each node spans an 8x8x8 cube of voxels. A 4-node contains 16x16x16 3-nodes, which means that it spans a 128x128x128 cube of voxels. Finally, a 5-node spans a cube of 4096x4096x4096 voxels.
+To get a sense of size we can look at how many voxels that is in volume, i.e. by cubing the dimension. For the 3-node it's only 8*8*8 = 512 voxels. A 4-node spans 128*128*128 = 2097152 voxels, about 2 million. Going up to a 5-node we find that it spans 4096*4096*4096 = 68719476736 voxels, 68.7 billion! This means that if we were to store one 16-bit floating point number for each voxel we would need 128 GiB of memory for the voxel data of one 5-node alone!
+Notice I've used the words "spans" and not "contains". This is because although each 5-node conceptually contains 32x32x32 4-nodes and each 4-node conceptually contains 16x16x16 3-nodes, not all of these nodes contain voxel data and therefore do not have to be explicitly stored. On the other hand, the 8x8x8 voxels of a 3-node are always stored fully, or densely if you will (unless compression is enabled, but we're getting ahead of ourselves).
+As mentioned earlier, VDB allows us to represents these vast regions of space sparsely. Not every voxel in a 4096x4096x4096 region may contain data. These voxels are said to be inactive and assume the so-called background value, which only needs to specified once. So we do not necessarily need 128 GiB of data for one 5-node; we can get away with a lot less.
+So how does this "sparseness" work? Let's talk about masks.
+Masks
+The tree structure I've describe so far would have been useless if it was completely frozen in size, because we might as well have stored the data in a dense 3D array. Clearly the tree structure has to be useful somehow. Its value comes from the fact that we can omit some nodes, eliminating entire subtrees.
+For example, let's consider a 4-node (spans 128x128x128 voxels). Let's also assume we have some interesting voxel data in only one 8x8x8 region, that is, only one of the children is active. It would be nice if we only had to store these 8x8x8 voxels without the remaining 128*128*128 - 8*8*8 = 2096640 voxels. If we do that, we need to know the location of these interesting 8x8x8 voxels relative to their parent 4-node.
+In VDB this is achieved with bit masks. The 4-node will store one bit for every one of its potential 3-node children, so 4096 bits in this case. These can be compactly stored in 4096 / 64 = 64 64-bit integers and is what we will be using for our implementation, but it's worth noting that the underlying integer type is not actually important and is an implementation detail, as long as the bits are written out and read in the correct order.
+So what order do the bits go in? Here's the formula:
+```
+bit_index = z + y * 16 + x * 256
+```
+Here bit_index is the index into the bit array for a 3-node with an offset of (x, y, z) relative to its 4-node parent. Remember that a 4-node can have up to 16x16x16 children so the range of values for x, y, and z is [0, 16). You can verify that setting all of them to the maximum value of 15 results in the index of the last bit in the array of 4096 bits.
+5-nodes and 3-nodes also have these masks, but since they contain a different number of children they need a different number of bits. A 5-node needs 32768 bits (512 64-bits integers), while a 3-node needs 512 bits (8 64-bit integers). Even though the 3-node is a leaf node it still has a bit mask which indicates which of its voxels are active. The formula for a 3-node would be:
+```
+bit_index = z + y * 8 + x * 64
+```
+And for a 5-node
+```
+bit_index = z + y * 32 + x * 1024
+```
+Maybe you notice the pattern and can deduce the generalized formula using our definitions from earlier of dim.
+```
+bit_index = z + y * dim + x * dim * dim
+```
+Because dim = 1 << log2dim (definition from earlier), the multiplications can be converted to bit shifts:
+```
+bit_index = z + (y << log2dim) + (x << (log2dim << 1))
+```
+Furthermore, by recalling that the range of x, y, and z is [0, dim) we see that the number of bits needed for each one is log2dim bits. Notice how y is shifted up by log2dim bits, which is exactly how many bits z occupies. x is shifted by log2dim << 1 = log2dim * 2 bits which is the number of bits occupied by y and z. For a 3-node the final positions of the bits would look like this:
+```
+xxxyyyzzz
+```
+We can conclude that we do not need the overflow logic of adds and can replace them with bitwise ORs:
+```
+bit_index = z | (y << log2dim) | (x << (log2dim << 1))
+```
+We can also write the formula using fused multiply adds:
+```
+bit_index = madd(madd(x, (1 << logdim), y), (1 << logdim), z)
+```
+where
+```
+madd(a, b, c) = a * b + c
+```
+These masks are called child masks because they encode the topology of the children of a node.
+Visualization
+The widget below should help visualize how the mask of a 3-node is stored as an array of 8 64-bit integers. The masks of 4-nodes and 5-nodes work in a similar way, there's just a lot more 64-bit integers: 64 for 4-nodes and 512 for 5-nodes.
+You can use the sliders to view any voxel inside the cube. You can left-click on a voxel to set the corresponding bit in the mask and right-click to clear it. You can also change the mask directly and see which voxels become active or inactive.
+Slice X
+Slice Y
+Slice Z
+Number format HexadecimalBinaryDecimal
+array: [8]u64 = {
+mask0
+mask1
+mask2
+mask3
+mask4
+mask5
+mask6
+mask7
+}
+Clear mask
+Now that we have a way of mapping a bit in the parent's mask to a child's relative position, we actually have a well-defined order in which to store the children of a parent, namely, the children are sorted by their bit index.
+Visualization with an EmberGen Simulation
+To hopefully make the concept more clear consider this 32x32x64 EmberGen simulation. There are 4x4x8 3-nodes here and we will "zoom in" on the highlighted one to see how the mask behaves as the flames go in and out of that 3-node. The masks of the higher level nodes behave similarly except they represent larger regions of space.
+Slice X
+Slice Y
+Slice Z
+Note that the simulation contains both smoke and flames, and we only show the mask for flames here. How we decide if a voxel is "active" is entirely up to us. Here we use a small threshold value below which a voxel is considered inactive.
+Tiles
+These are the core ideas of the data structure. I'll forego discussion of many of the optional features of the format, since we are interested in the bare minimum amount of features required to write a valid VDB file.
+One optional feature worth mentioning though is that of tiles. In addition to the child mask described above a node will contain another mask, the value mask. It works exactly the same way, but it encodes a different piece of information. A set bit in the value mask indicates that all voxels spanned by the corresponding child node have the same value. In that case the subtree of that child is not stored and only the single value is stored at the parent level. Such children are called tiles.
+File Structure
+The following is a description of the file structure as I have deduced it from looking at the OpenVDB C++ source code as well as inspecting the raw binary data produced by the library. As mentioned before, I did this because I could not find a formal (or even informal) specification of the file format.
+It is not a complete specification of the format but rather a recipe for roughly the minimum amount of data needed to generate a valid VDB file with some voxels in it. It should serve you as a first step in implementing a writer and make it easier to read OpenVDB source code should you need more features, although what I'll describe may be enough for many common use-cases.
+All integer and floating point numbers are in little endian in this format. I'll use the common convention of describing floats with an f and ints with a u (unsigned) or i (signed) followed the number of bits. A few examples:
+u8 - unsigned 8-bit integer
+i32 - signed 32-bit integer
+f64 - 64-bit floating point number a.k.a double
+I link each step of the process to the corresponding line(s) in the source code of the example writer that I provide as a reference. It is written in the Odin programming language, which we use at JangaFX for developing our products. You do not have to be familiar with Odin to follow the rest of this article. I avoid using any exotic features and keep the code as simple as possible.
+Although I hope that the explanation in this article suffices to reconstruct the the source code, you can refer to it in full for verifying details or in case something isn't 100% clear.
+Header
+The file starts off with a header containing some simple information in this order:
+An 8 byte magic number consisting of the bytes:
+```
+{0x20, 0x42, 0x44, 0x56, 0x0, 0x0, 0x0, 0x0}
+```
+The first byte is the space character and the next three bytes spell out BDV. Code
+A u32 indicating the file version, I used version 224. Code
+Two u32s, the fist indicates the major indicating the major and minor version of the library. I set major to 8 and minor to 1 to pretend that the file was written by OpenVDB 8.1, which I used for generating the reference files. Code
+A u8 that indicates whether grid offsets will be specified. These are byte offsets that point to the beginning and end of a grid. I set that to 0 at first, but as you add more than one grid, it's useful to specify those offsets so readers of the file can easily skip grids they're not interested in. The grid offsets are not stored in the header; we'll get to that later. Code
+A string representation of a 128-bit UUID. I used a valid, but constant UUID for testing. Eventually, you'll want to have a valid one, which you can generate using a library. However, it's not hard to implement on your own, a coworker later implemented this in roughly 10 lines of code in a few minutes based on the RFC.
+Code
+Metadata about the whole file. The number of entries is written first as a u32 followed by the metadata itself. I write a 0 u32 to indicate no metadata. We'll see how to add metadata because we need it to specify metadata per grid later. Code
+A u32 for the number of grids, we'll write just one grid for now. Code
+Trees and Grids
+In VDB data is stored in so-called trees, as described earlier in the overview. Each tree and its data may be referenced by one or more grids. We will be creating only one grid and one tree, so we don't really need to make a distinction, but do keep in mind that the format supports it.
+A grid not only references a tree, it also has a transform. This is a map (in the mathematical sense) that converts coordinates from index-space to world-space. Index-space is simply a continuous extension of the discrete (x, y, z) indices used to locate a specific voxel.
+As a small aside, I am still not 100% clear on how exactly this works with regards to voxel centers and corners. The OpenVDB docs suggest that (0, 0, 0) maps to the first voxel's center, which means that if we wanted the corner to coincide with the world origin we'd need to use a transform that applies a (-0.5, -0.5, -0.5) offset. In practice, however, I've found that Blender, for example, treats index-space more like uvw coordinates in computer graphics where (0, 0, 0) coincides with the corner of the voxel, making the transform unnecessary. If someone knows more about this, please let me know.
+Before we move on I should describe how VDB writes some strings: It first writes the length of a string as a u32 and then the string data itself without a null-terminator. Let's call these length-based strings here to distinguish them from other strings.
+Here's how a grid is written (this comes right after the header):
+The name of the grid as a length-based string. I used density as it's a common name recognized by a lot of software. You can use other names of course, but you might need to take some extra steps so your 3D software can display the file correctly. Code
+The grid type as a length-based string. This is important as it determines how our data is to be interpreted. We will use 16-bit floating point to store our voxel data and a 5-4-3 tree structure. We therefore write as the grid type:
+```
+Tree_float_5_4_3_HalfFloat
+```
+If we were to omit the _HalfFloat suffix, we would be using 32-bit floating point data. Other formats are possible by replacing float with the appropriate string. We'll get to that later. Code
+Instance parent as a u32. We write a zero here since we aren't using instancing. Code
+Byte offset of the "Grid Descriptor" as a u64. The grid descriptor starts 3 u64s after the current byte offset, so we write just that: our current stream position plus 24 bytes. Code
+These are the two u64s before the grid descriptor. These are the grid byte offsets that we in fact disabled in the header of the file. Therefore, we can write zeros for both u64s. If we enabled grid offsets, the first u64 is the start of the grid data and the second the end of it. Code
+A u32 indicating if we're using any compression for our grid data. We don't, so we write a zero. This is also where the grid data starts and is at the byte offset that the first byte in the previous point should contain if grid offsets are enabled. Again, we don't enable them so we don't have to worry about that. Code
+The grid metadata as a u32 indicating the number of metadata entries followed by the metadata itself. Writing one metadata entry involves 3 things:
+Writing the name of the entry as a length-based string.
+Writing the type of the entry as a length-based string.
+Writing the entry data itself based on the type specified.
+We will only need entries of type "string" and "bool". The data of a "string" entry is a length-based string. The data of a "bool" consists of a 1 as a u32 (indicating the number of bytes required to represent the bool) followed by a u8 that is either 0 or 1 depending on the value of the bool. We write 4 entries:
+name: "class" type: "string" data: "unknown"
+name: "file_compression" type: "string" data: "none"
+name: "is_saved_as_half_float" type: "bool" data: true
+name: "name" type: "string" data: "density"
+Code
+The transform. This one starts with the name of the mathematical map used for the transform as a length-based string. We will use an "AffineMap", so we write that length-based string followed by 16 f64s that are the entries of the 4x4 matrix representing the affine transformation. Important note for graphics programmers is that OpenVDB uses the convention of right-multiplying the matrix by a vector which transposes the meaning of the entries. For example, if we had the 4x4 affine matrix A
+```
+a00 a01 a02 a03
+a10 a11 a12 a13
+a20 a21 a22 a23
+a30 a31 a32 a33
+```
+and the row vector v
+```
+x y z 1
+```
+then v * A would result in the row vector
+```
+a00 * x + a10 * y + a20 * z + a30
+a01 * x + a11 * y + a21 * z + a31
+a02 * x + a12 * y + a22 * z + a32
+a03 * x + a13 * y + a23 * z + a33
+```
+I wrote the result as a column vector for clarity, but it would technically be a row vector too.
+The entries of A are written in row-major order. Also note that I set a03, a13, and a23 to 0 and a33 to 1 in the example code to ensure that the fourth component of the resultant vector is 1. Pretty straightforward, but you can read more about this on Wikipedia.
+Code
+The tree data itself, the actual meat of the file format. We'll look at that in the following section.
+After we are finished writing the grid we would need to patch up the grid offset in point 4 to this byte position, but we don't have to because we disabled this feature in the header.
+Writing a Tree: Overview
+This is the hardest part, but also where we finally get to write our data and use all that information I presented in the beginning of the article about how the tree is structured.
+Remember that our top-level node is a 5-node which spans 4096x4096x4096 voxels. This is such a large amount of voxels that we will only have one of these nodes for our minimal VDB file. In a real application you can have as many of these nodes as you like and they can be arbitrarily far apart, as far as the range of 3 i32s allows at least.
+To write the topology of the tree we need to traverse it in depth-first order. There is, of course, the question of how we store that structure in memory. I will assume that such a structure already exists and describe the process in terms of the operations that such a structure needs to support. From that we will be able to come up with a simple suitable data structure.
+We start writing the tree as follows:
+Write a 1 as a u32, for some reason unknown to me. Code
+Write the background value of the root node that spans all of space. The type will depend on the grid type we specified earlier, except in this case where we write it as an f32, even if our grid data is f16. Code
+Number of top-level tiles as a u32. We don't have these so we write a 0. Code
+Number of children the root node has as a u32. These are our 5-nodes. As mentioned earlier, we'll only have one 5-node so we can write a 1 here. Code
+Descend the tree depth-first writing out its topology. Code
+Write the data of the leaf nodes, in the same order that the topology of the leaf nodes was written in the previous step (depth-first). Code
+Let's describe steps 5 and 6 in more detail.
+Writing a Tree: Topology
+We started at the root node and wrote a small tree "header" (air quotes because I don't think OpenVDB calls it that) that specified how many top-level nodes we have, among some other things.
+At step 5 in the previous section we will begin by visiting each 5-node. We can visit them in any order, but in our case we only have one. Visiting a 5-node involves writing out the following:
+The origin of the 5-node, three i32s in index-space. Code
+The child mask, 32768 bits, or 512 u64s. Code
+The value mask, also 32768 bits, all zeros in our case. Code
+A 6 as a u8 to indicate that the values about to follow are not compressed. Code
+The values, 65536 bytes, all zeros in our case. Code
+The child mask is the compact representation of a node's active children and their relative position to the node in space. The value mask and the corresponding values are the tiles we talked about earlier, where a child node's voxels are all the same value. We do not use this feature so the value mask and the values will be all zeros.
+The child mask is made up of as many bits as there are children. For a 5-node that's 32*32*32 = 32768 bits or 512 u64s. The value mask has the same size. There are as many values as there are children and the size of each value is the size of the voxel storage data type, in our case f16. This adds up to 32768 * 2 = 65536 bytes for the values. The values can be compressed, but again, for the sake of simplicity we do not use this feature.
+Once the header of a node has been written we can start visiting the children of the node. The children are visited in the same order as the bits in the parent's mask. This is very important as that's the only way VDB knows which node is located where. More concretely, the "on" bits in the parent's mask have to be iterated sequentially and the children written out in that order.
+Each child of a 5-node is a 4-node and that also requires its header to be written out. The steps are almost identical to how the header of a 5-node is written except there is no origin and the amount of data changes. The masks have only 16*16*16 = 4096 bits (64 u64s) and the number of values is 4096 (8192 bytes for f16). Let's describe this more explicitly; the header of a 4-node consists of the following:
+The child mask, 4096 bits, or 64 u64s. Code
+The value mask, also 4096 bits, all zeros in our case. Code
+A 6 as a u8 to indicate that the values about to follow are not compressed. Code
+The values, 8192 bytes, all zeros in our case. Code
+The children of a 4-node, 3-nodes, are also written in the same order as the "on" bits in the child mask of the 4-node.
+3-nodes are the leaf nodes and do not have a child mask, but they do have a value mask that indicates which voxels are active. When we reach a 3-node in our descent we write the following:
+The value mask, 512 bits for a 3-node because it has 8*8*8 = 512 voxels, or 8 u64s. Code
+Notice that we have not written any actual voxel data yet. We have only written the structure of the tree with the help of the masks at each node level. The actual data is written after the entire tree has been traversed and its topology written out.
+Writing a Tree: Data
+Now that the topology has been written out, we need to traverse the tree again in the same order as before, but this time we do not write anything as we visit 5-nodes and 4-nodes. When we reach a 3-node, we write the following:
+Its value mask, again. I'm not sure exactly why, though. Code
+A 6 as a u8 to indicate no compression on the data that follows. Code
+512 f16s, finally we get to write our voxel data. Code
+And with that we are done with our minimal VDB file!
+A Simple Writer
+Now I'll talk a little bit more about the source code and the data structure for storing our voxel data so it's ready to be written out using the steps described previously. Of course, if your data is organized differently you'll need to perform some transformations on it or maybe you can even find a way to still perform the steps above from a conceptual point of view but in a more efficient manner for your data structure.
+Data Structure
+Let's start with empty space and start adding voxels to it. We will implement one function for setting a particular voxel to a specific value at a specific grid location (x, y, z):
+```
+VDB :: struct {
+}
+
+set_voxel :: proc(vdb: ^VDB, p: [3]u32, v: f16) {
+}
+```
+This is not the most efficient way to go about constructing the file. Indeed, it would be better to do it one 3-node at a time and in tree traversal order to minimize processing and have as few write syscalls as possible. However, it is probably the most educational approach and should help clarify the concepts presented.
+We have one 5-node and we will fix its origin at (0, 0, 0) in index-space, so we do not need to explicitly encode any information about it.
+The 5-node can have 32x32x32 4-node children, which we will sparsely store using Odin's built-in map type. We will use a map that uses the bit_index of a 4-node as a key and a pointer to a 4-node struct as a value.
+```
+VDB :: struct {
+	node_5: Node_5,
+}
+
+Node_5 :: struct {
+	nodes_4: map[u32]^Node_4,
+}
+
+Node_4 :: struct {
+}
+```
+We can do the same for a 4-node and store its 3-node children in the form of a map. The 3-node will store its mask and voxel data directly. We also augment the structs with the appropriate mask at each node level. This will simplify some code later on.
+```
+Node_5 :: struct {
+	mask:    [512]u64,
+	nodes_4: map[u32]^Node_4,
+}
+
+Node_4 :: struct {
+	mask:    [64]u64,
+	nodes_3: map[u32]^Node_3,
+}
+
+Node_3 :: struct {
+	mask:    [8]u64,
+	data:    [512]f16,
+}
+```
+I am trying to avoid the use of generics or abstractions in the spirit of keeping the example and clear as possible. In fact, the above data structure is all we need to build our minimal VDB file. We just need to implement the set_voxel routine and then perform the steps described in File Structure.
+Setting One Voxel
+To set a voxel we need to know which element in the data array of a 3-node we need to set. We start at the VDB struct and work our way down to a Node_3, looking up child nodes by their keys in the maps.
+These keys are computed using the bit_index formula from Masks. Let's start with the bit_index of a 4-node:
+```
+get_bit_index_4 :: proc(p: [3]u32) -> u32 {
+	p := p & u32(4096-1);
+	idx_3d := [3]u32{p.x >> 7, p.y >> 7, p.z >> 7};
+	idx := idx_3d.z | (idx_3d.y << 5) | (idx_3d.x << 10);
+	return idx;
+}
+```
+The first line computes p (in voxels) relative to the nearest 5-node. The second line figures out the relative (x, y, z) coordinates of the 4-node relative to the 5-node. These are the values for the bit_index formula and you can verify that the third line is indeed that formula.
+Similarly, we can compute the bit_index of a 3-node:
+```
+get_bit_index_3 :: proc(p: [3]u32) -> u32 {
+	p := p & u32(128-1);
+	idx_3d := [3]u32{p.x >> 3, p.y >> 3, p.z >> 3};
+	idx := idx_3d.z | (idx_3d.y << 4) | (idx_3d.x << 8);
+	return idx;
+}
+```
+We could also do the same for the voxels of a 3-node:
+```
+get_bit_index_0 :: proc(p: [3]u32) -> u32 {
+	p := p & u32(8-1);
+	idx_3d := [3]u32{p.x >> 0, p.y >> 0, p.z >> 0};
+	idx := idx_3d.z | (idx_3d.y << 3) | (idx_3d.x << 6);
+	return idx;
+}
+```
+The reason for the function name is to stay consistent with the other function names, as we could also call voxels 0-nodes. We could think of them as nodes with 2^0 = 1 << 0 = 1 child.
+We can now implement set_voxel:
+```
+set_voxel :: proc(vdb: ^VDB, p: [3]u32, v: f16) {
+	node_5 := &vdb.node_5;
+
+	bit_index_4 := get_bit_index_4(p);
+	bit_index_3 := get_bit_index_3(p);
+	bit_index_0 := get_bit_index_0(p);
+
+	node_4, node_4_found := node_5.nodes_4[bit_index_4];
+	if !node_4_found {
+		node_4 = new(Node_4);
+		map_insert(&node_5.nodes_4, bit_index_4, node_4);
+	}
+
+	node_3, node_3_found := node_4.nodes_3[bit_index_3];
+	if !node_3_found {
+		node_3 = new(Node_3);
+		map_insert(&node_4.nodes_3, bit_index_3, node_3);
+	}
+
+	node_5.mask[bit_index_4 >> 6] |= 1 << (bit_index_4 & (64-1));
+	node_4.mask[bit_index_3 >> 6] |= 1 << (bit_index_3 & (64-1));
+	node_3.mask[bit_index_0 >> 6] |= 1 << (bit_index_0 & (64-1));
+
+	node_3.data[bit_index_0] = v;
+}
+```
+Iterating the Data Structure
+As described in Writing a Tree: Topology we need to iterate the tree depth-first and iterate the children of each node in bit mask order.
+I will show how to do this for iterating the mask of a 5-node, but the procedure is exactly the same as that for a 4-node.
+```
+// Iterate the 4-nodes of a 5-node
+// using the mask of the 5-node
+for word, word_index in node_5.mask {
+	for word := word; word != 0; word &= word - 1 {
+		bit_index := u32(word_index) * 64 + u32(intrinsics.count_trailing_zeros(word));
+
+		node_4, node_4_found := node_5.nodes_4[bit_index];
+		assert(node_4_found);
+
+		// Do something with the 4-node, like iterate its 3-node
+		// children in a similar way
+	}
+}
+```
+The code is pretty straightforward; we iterate all the u64 words that make up the mask and use Odin's intrinsic for counting the trailing zeros of the binary representation of the word, this gives us the index of least significant set bit. word &= word - 1 clears the least significant set bit so the next iteration will produce the index of the next set bit and so on. We assert that the 4-node is found because we should not have set the bit for it if doesn't exist in the map.
+Conclusion
+OpenVDB is more than just a reader and writer for the VDB format. It also implements many algorithms for accessing, iterating, and modifying the underlying data structure. What I've shown here is a just the small fraction of what OpenVDB does which is writing the 5-4-3 variant of the data structure with only a subset of the features.
+Since we only use specific VDB features at JangaFX we are replacing OpenVDB with a custom writer that we can optimize for our needs. We'll also be able to reduce our dependencies significantly since OpenVDB pulls in quite a few DLLs. Hopefully this article encourages others interested in the format to explore it more. Investigating how libraries work under the hood can be very useful in simplifying a codebase, reducing dependencies, and customizing things to one's own needs.
+Cookie consent
+We use third-party cookies to provide you with the best user experience and for performance analytics. Learn more.
+Accept EssentialAccept All

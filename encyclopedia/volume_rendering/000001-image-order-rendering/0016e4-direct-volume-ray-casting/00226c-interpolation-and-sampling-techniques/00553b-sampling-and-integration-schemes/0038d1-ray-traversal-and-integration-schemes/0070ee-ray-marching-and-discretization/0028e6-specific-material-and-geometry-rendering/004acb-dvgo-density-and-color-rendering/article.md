@@ -1,0 +1,161 @@
+# DVGO Density and Color Rendering
+
+Also called: DVGO volume rendering
+
+## Overview
+DVGO renders 3D scenes by decoupling geometry and appearance into a voxel grid and a neural network. It maps stored grid values to non-negative densities using a shifted softplus activation, and computes view-dependent color emission via a shallow MLP taking interpolated features and positional encodings [S1]. The method accumulates radiance along rays using standard volume rendering quadrature [S1]. Post-activation interpolation (applying non-linearities after trilinear interpolation) produces sharp surfaces, reducing the required grid resolution for surface detail [S1].
+
+## How it works
+**Inputs:** Voxel grid resolution $N_x \times N_y \times N_z$, feature grid $V^{(f)} \in \mathbb{R}^{C \times N_x \times N_y \times N_z}$, density grid $V^{(d)} \in \mathbb{R}^{N_x \times N_y \times N_z}$ storing raw values $\ddot{\sigma}$, shallow MLP $MLP_\Theta$, shift hyperparameter $b$, sample count $n$, background color $c_{bg}$ [S1].
+**Outputs:** Rendered color $\hat{C}(r)$ for a ray $r$ [S1].
+
+**Data Structures:**
+1. **Density Grid ($V^{(d)}$):** 3D tensor of shape $(N_x, N_y, N_z)$ storing raw scalar values $\ddot{\sigma}$, which serve as inputs to the activation function [S1].
+2. **Feature Grid ($V^{(f)}$):** 3D tensor of shape $(C, N_x, N_y, N_z)$ storing $C$-dimensional feature vectors at each voxel [S1].
+3. **MLP ($MLP_\Theta$):** Small neural network mapping concatenated interpolated features and positional encodings to RGB color [S1].
+
+**Numbered Steps:**
+1. **Ray Casting & Sampling:** For each pixel, cast ray $r$ from camera origin. Sample $n$ points $x_i$ uniformly between near and far planes. Let $\delta_i$ be the distance to the adjacent sampled point [S1].
+2. **Density Retrieval:** Interpolate raw density $\ddot{\sigma}_i$ from $V^{(d)}$ at $x_i$ using trilinear interpolation [S1].
+3. **Density Activation:** Compute $\sigma_i = \text{softplus}(\ddot{\sigma}_i) = \log(1 + \exp(\ddot{\sigma}_i + b))$ [S1].
+4. **Color Feature Retrieval:** Interpolate feature vector $f_i$ from $V^{(f)}$ at $x_i$ using trilinear interpolation [S1].
+5. **Color Emission:** Apply positional encoding $\gamma(\cdot)$ to $x_i$ and ray direction $d$. Compute $c_i^{(rgb)} = MLP_\Theta([f_i; \gamma(x_i); \gamma(d)])$ [S1].
+6. **Termination Probability:** Compute $\alpha_i = 1 - \exp(-\sigma_i \delta_i)$ [S1].
+7. **Accumulated Transmittance:** Compute $T_i = \prod_{j=1}^{i-1} (1 - \alpha_j)$, with $T_1 = 1$ [S1].
+8. **Volume Rendering Quadrature:** Accumulate color $\hat{C}(r) = \sum_{i=1}^{n} T_i \alpha_i c_i^{(rgb)} + T_{n+1} c_{bg}$ [S1].
+
+**Pseudocode:**
+> **Unverified code.** The code below did not pass a test run against a reference implementation, or no test fits it, so it may contain errors.
+
+```python
+import math
+import numpy as np
+
+def softplus(x, b=0.0):
+    """Shifted softplus activation: log(1 + exp(x + b))."""
+    return np.log(1.0 + np.exp(x + b))
+
+def trilinear_interpolate(grid, x, y, z):
+    """Trilinear interpolation for 3D or 4D grids. Coordinates in [0, 1]."""
+    # Clamp coordinates to valid range
+    x = np.clip(x, 0.0, 1.0)
+    y = np.clip(y, 0.0, 1.0)
+    z = np.clip(z, 0.0, 1.0)
+    
+    # Map to grid indices
+    if grid.ndim == 3:
+        Nx, Ny, Nz = grid.shape
+        C = 1
+    else:
+        C, Nx, Ny, Nz = grid.shape
+        
+    ix = np.floor(x * (Nx - 1)).astype(int)
+    iy = np.floor(y * (Ny - 1)).astype(int)
+    iz = np.floor(z * (Nz - 1)).astype(int)
+    
+    fx = x * (Nx - 1) - ix
+    fy = y * (Ny - 1) - iy
+    fz = z * (Nz - 1) - iz
+    
+    # Handle boundary indices
+    ix1 = np.minimum(ix + 1, Nx - 1)
+    iy1 = np.minimum(iy + 1, Ny - 1)
+    iz1 = np.minimum(iz + 1, Nz - 1)
+    
+    if C == 1:
+        v000 = grid[ix, iy, iz]
+        v100 = grid[ix1, iy, iz]
+        v010 = grid[ix, iy1, iz]
+        v110 = grid[ix1, iy1, iz]
+        v001 = grid[ix, iy, iz1]
+        v101 = grid[ix1, iy, iz1]
+        v011 = grid[ix, iy1, iz1]
+        v111 = grid[ix1, iy1, iz1]
+    else:
+        v000 = grid[:, ix, iy, iz]
+        v100 = grid[:, ix1, iy, iz]
+        v010 = grid[:, ix, iy1, iz]
+        v110 = grid[:, ix1, iy1, iz]
+        v001 = grid[:, ix, iy, iz1]
+        v101 = grid[:, ix1, iy, iz1]
+        v011 = grid[:, ix, iy1, iz1]
+        v111 = grid[:, ix1, iy1, iz1]
+        
+    w000 = (1 - fx) * (1 - fy) * (1 - fz)
+    w100 = fx * (1 - fy) * (1 - fz)
+    w010 = (1 - fx) * fy * (1 - fz)
+    w110 = fx * fy * (1 - fz)
+    w001 = (1 - fx) * (1 - fy) * fz
+    w101 = fx * (1 - fy) * fz
+    w011 = (1 - fx) * fy * fz
+    w111 = fx * fy * fz
+    
+    return (w000 * v000 + w100 * v100 + w010 * v010 + w110 * v110 +
+            w001 * v001 + w101 * v101 + w011 * v011 + w111 * v111)
+
+def positional_encoding(x, min_deg=0, max_deg=10):
+    """Standard NeRF positional encoding: [sin(2^k pi x), cos(2^k pi x)]."""
+    scales = [2 ** i for i in range(min_deg, max_deg)]
+    scaled_x = np.outer(x, np.array(scales) * np.pi)
+    return np.concatenate([np.sin(scaled_x), np.cos(scaled_x)], axis=-1)
+
+def render_ray(ray_origin, ray_direction, near, far, 
+               density_grid, feature_grid, mlp, b, n_samples, c_bg):
+    """Renders a single ray using DVGO."""
+    # 1. Sample points along the ray
+    t_vals = np.linspace(near, far, n_samples)
+    points = ray_origin + t_vals[:, np.newaxis] * ray_direction
+    
+    # Calculate uniform step size
+    delta = (far - near) / (n_samples - 1) if n_samples > 1 else (far - near)
+    
+    accumulated_color = np.zeros(3)
+    accumulated_transmittance = 1.0
+    
+    for i in range(n_samples):
+        x, y, z = points[i]
+        
+        # 2. Retrieve density and apply activation
+        raw_density = trilinear_interpolate(density_grid, x, y, z)
+        sigma = softplus(raw_density, b)
+        
+        # 3. Calculate termination probability
+        alpha = 1.0 - np.exp(-sigma * delta)
+        
+        # 4. Retrieve color features
+        color_features = trilinear_interpolate(feature_grid, x, y, z)
+        
+        # 5. Compute color emission
+        pos_enc = positional_encoding(points[i], min_deg=0, max_deg=10)
+        dir_enc = positional_encoding(ray_direction, min_deg=0, max_deg=4)
+        mlp_input = np.concatenate([color_features, pos_enc, dir_enc])
+        color_emission = mlp(mlp_input)
+        
+        # 6. Accumulate
+        weight = accumulated_transmittance * alpha
+        accumulated_color += weight * color_emission
+        accumulated_transmittance *= (1.0 - alpha)
+        
+    # 7. Add background
+    accumulated_color += accumulated_transmittance * c_bg
+    
+    return accumulated_color
+```
+
+**Edge Cases and Pitfalls:**
+- **Post-Activation Sharpness:** Applying non-linear activation functions (like softplus) *after* trilinear interpolation produces sharper surfaces than pre-activation, allowing fewer grid cells for surface detail [S1].
+- **Boundary Conditions:** Coordinates must be clamped to the grid bounds before interpolation to prevent out-of-bounds indexing.
+- **Precision:** The exponential function in $\alpha_i$ and $T_i$ can underflow or overflow if $\sigma_i \delta_i$ is extreme. Not given in the sources.
+
+## Operating characteristics
+- **Time Complexity:** Not given in the sources.
+- **Memory Complexity:** Not given in the sources.
+- **Performance:** Not given in the sources.
+- **Strengths:** Sharp surfaces with fewer cells due to post-activation interpolation [S1].
+- **Limitations:** Not given in the sources.
+
+## Background
+The method uses a shifted softplus activation from Mip-NeRF to ensure non-negative densities [S1]. It demonstrates that post-activation interpolation for density enables sharp surfaces, reducing the need for high-resolution grids [S1].
+
+## Sources
+[S1] NeRF Synthesis with Shading Guidance, https://link.springer.com/chapter/10.1007/978-981-99-9666-7_16, fetched 2026-10-26

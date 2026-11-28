@@ -1,0 +1,107 @@
+# 3D Cartesian Data Distribution
+
+Also called: Cartesian process topology mapping
+
+## Overview
+3D Cartesian Data Distribution maps a 3D volumetric grid onto a 3D Cartesian processor topology using linear distribution to achieve load-balanced computation [S1, unofficial]. It differs from physical interconnect constraints by using a virtual topology that matches the data grid structure, simplifying the mapping process [S1, unofficial].
+
+## How it works
+**Inputs and Outputs:**
+- Input: A 3D volumetric dataset with dimensions $(D_x, D_y, D_z)$ and an MPI communicator defining $P$ processors.
+- Output: A 3D Cartesian process topology and a partition of the dataset into contiguous sub-cubes assigned to each process.
+
+**Data Structures:**
+- **Process Topology:** Defined by dimensions $(x, y, z)$ such that $x \cdot y \cdot z = P$. Each process is identified by coordinates $(i, j, k)$ where $0 \le i < x$, $0 \le j < y$, $0 \le k < z$.
+- **Data Sub-cube:** Each process holds a contiguous block of the volume. For the x-dimension, process $i$ holds rows from $start_x$ to $end_x$. Similar logic applies to y and z dimensions.
+
+**Steps:**
+1. **Create Topology:** Initialize a 3D Cartesian topology using MPI calls (e.g., `MPI_Cart_create`) with dimensions $(x, y, z)$. If $P < 8$, MPI may create a lower-dimensional topology, but the distribution logic extends directly [S1, unofficial].
+2. **Calculate Sub-cube Boundaries:** For each dimension, calculate the base number of elements per processor and the remainder.
+   - Let $Q$ be the size of the dataset in a specific dimension (e.g., $D_x$).
+   - Let $X$ be the number of processors in that dimension (e.g., $x$).
+   - Base size: $B = \lfloor Q / X \rfloor$.
+   - Remainder: $R = Q \pmod X$.
+3. **Assign Rows/Columns/Depths:**
+   - For processor index $i$ in the current dimension:
+     - Start index: $S_i = i \cdot B + \min(i, R)$.
+     - End index: $E_i = S_i + B + (1 \text{ if } i < R \text{ else } 0) - 1$.
+     - Alternatively, using the formula from sources: Processor $i$ gets rows $i \cdot \lfloor Q/X \rfloor$ to $(i+1) \cdot \lfloor Q/X \rfloor - 1$, with remainder rows distributed round-robin to the first $R$ processors [S1, unofficial].
+4. **Handle Remainder:** Distribute the $R$ remainder elements evenly among the first $R$ processors (round-robin) or assign all to one processor. Round-robin minimizes load imbalance [S1, unofficial].
+5. **Map to Topology:** Assign the calculated sub-cube to the process at coordinates $(i, j, k)$ in the Cartesian topology.
+
+**Pseudocode:**
+> **Unverified code.** The code below did not pass a test run against a reference implementation, or no test fits it, so it may contain errors.
+
+```python
+def distribute_3d_cartesian(dataset_dims, num_procs):
+    """
+    dataset_dims: tuple (Dx, Dy, Dz)
+    num_procs: int P
+    Returns: dict mapping process_rank -> (start_x, end_x, start_y, end_y, start_z, end_z)
+    """
+    # Factorize P into x, y, z
+    # Note: In practice, MPI_Cart_create handles this, but for distribution logic:
+    # We assume a balanced factorization or a predefined topology (x, y, z)
+    # For this example, we assume x, y, z are provided or derived.
+    # Let's assume we have x, y, z such that x*y*z = P
+    x, y, z = factorize(num_procs) 
+    
+    distribution = {}
+    
+    for rank in range(num_procs):
+        # Get coordinates in Cartesian topology
+        i = rank // (y * z)
+        j = (rank // z) % y
+        k = rank % z
+        
+        # Calculate x-dimension bounds
+        Dx = dataset_dims[0]
+        base_x = Dx // x
+        rem_x = Dx % x
+        
+        start_x = i * base_x + min(i, rem_x)
+        end_x = start_x + base_x + (1 if i < rem_x else 0) - 1
+        
+        # Calculate y-dimension bounds
+        Dy = dataset_dims[1]
+        base_y = Dy // y
+        rem_y = Dy % y
+        
+        start_y = j * base_y + min(j, rem_y)
+        end_y = start_y + base_y + (1 if j < rem_y else 0) - 1
+        
+        # Calculate z-dimension bounds
+        Dz = dataset_dims[2]
+        base_z = Dz // z
+        rem_z = Dz % z
+        
+        start_z = k * base_z + min(k, rem_z)
+        end_z = start_z + base_z + (1 if k < rem_z else 0) - 1
+        
+        distribution[rank] = (start_x, end_x, start_y, end_y, start_z, end_z)
+        
+    return distribution
+```
+
+**Parameters:**
+- $D_x, D_y, D_z$: Dimensions of the volumetric dataset [S1, unofficial].
+- $x, y, z$: Number of processors in each dimension of the Cartesian topology [S1, unofficial].
+- $P$: Total number of processors ($P = x \cdot y \cdot z$) [S1, unofficial].
+
+**Edge Cases and Pitfalls:**
+- If $Q$ is not evenly divisible by $X$, load imbalance occurs. Round-robin distribution minimizes this [S1, unofficial].
+- For large datasets, the imbalance is often negligible [S1, unofficial].
+- Example: A $387^3$ dataset on 64 processors (4x4x4 topology) results in the first three row processors getting 96 rows and the final one getting 99 rows, a ~3% imbalance [S1, unofficial].
+
+## Operating characteristics
+- **Time Complexity:** $O(1)$ for distribution calculation per process.
+- **Memory Complexity:** $O(N)$ where $N$ is the total number of voxels, distributed evenly among processes.
+- **Performance:** Load imbalance is typically small (<5%) for large datasets, leading to near-linear scaling [S1, unofficial].
+- **Strengths:** Simple to implement using MPI Cartesian topologies; matches data structure to processor topology [S1, unofficial].
+- **Limitations:** Potential load imbalance if dataset dimensions are not multiples of processor counts; static distribution may not adapt to dynamic workload variations [S1, unofficial].
+
+## Background
+This method was used in parallel volume visualization on the nCUBE 2, which has a hypercube interconnection network. The virtual Cartesian topology was chosen to simplify mapping from the 3D grid data to the processors [S1, unofficial].
+
+## Sources
+[S1] DTIC ADA296601: An Investigation of the Parallel Implementation of Two Volume Visualization Techniques on the nCUBE 2., https://archive.org/details/DTIC_ADA296601, fetched 2026-10-26 (unofficial)

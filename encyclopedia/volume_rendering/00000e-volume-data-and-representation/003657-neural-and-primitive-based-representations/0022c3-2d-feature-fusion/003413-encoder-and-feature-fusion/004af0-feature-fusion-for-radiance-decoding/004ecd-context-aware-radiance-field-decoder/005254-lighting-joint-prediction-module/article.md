@@ -1,0 +1,143 @@
+# Lighting Joint Prediction Module
+Also called: Lighting Decoding Network
+## Overview
+The Lighting Joint Prediction Module predicts a volumetric lighting representation by fusing global scene features and local visible surface features, processed by a 3D UNet [S1]. It differs from sibling methods that use sequences of 3D transpose convolutions for global feature decoding by employing an MLP decoder, which is more flexible and naturally extensible to multi-view input [S1].
+## How it works
+**Inputs:**
+1.  Input image $I$ [S1].
+2.  Global feature vector $\tilde{f}_L$ (encoded from the input image by a Direct Prediction Module) [S1].
+3.  Predicted visible surface properties at pixel locations: depth $\tilde{D}$, normal $\tilde{N}$, and albedo $\tilde{A}$ [S1].
+4.  Camera intrinsics [S1].
+
+**Outputs:**
+*   Lighting Volume $\hat{L} \in \mathbb{R}^{8 \times X \times Y \times Z}$, representing Volumetric Spherical Gaussian (VSG) lighting containing HDR intensity [S1].
+
+**Data Structures:**
+*   **Voxel Grid:** A 3D grid of resolution $X \times Y \times Z$. The standard resolution used is $128^3$ [S1].
+*   **Global Feature Volume:** $z_g \in \mathbb{R}^{C \times X_g \times Y_g \times Z_g}$ [S1]. The source does not specify the channel dimension $C$ or the resolution dimensions $X_g, Y_g, Z_g$ relative to the output volume $X, Y, Z$ [S1].
+*   **Local Feature Volume:** $z_l \in \mathbb{R}^{9 \times X \times Y \times Z}$ [S1].
+
+**Parameters:**
+*   $\sigma_d$: Hyper-parameter for Gaussian distance decay, set to 0.15 meters [S1].
+
+**Steps:**
+
+1.  **Compute Global Feature Volume:**
+    For each voxel center $(x, y, z)$, compute the global feature $z_g$ using an MLP decoder $h_{GFD}$ taking the voxel coordinates and the global feature $\tilde{f}_L$ [S1]:
+    $$ z_g = h_{GFD} (x, y, z, \tilde{f}_L) $$
+    This is repeated for all voxels in the global feature grid [S1].
+
+2.  **Compute Local Features:**
+    For each voxel in the output volume grid $(X \times Y \times Z)$:
+    a.  Unproject the voxel center to find its projection $(u_p, v_p)$ onto the input image plane, assuming a depth $d_p$ corresponding to the voxel's depth along the ray [S1].
+    b.  Retrieve the predicted depth $\tilde{D}_p$, normal $\tilde{N}_p$, albedo $\tilde{A}_p$, and input image RGB $I_p$ at pixel $(u_p, v_p)$ [S1].
+    c.  Compute the Gaussian distance factor $k$:
+        $$ k = e^{-\frac{(d - \tilde{D}_p)^2}{2\sigma_d^2}} $$
+        where $d$ is the voxel's depth along the ray [S1].
+    d.  Compute local features $z_l$:
+        $$ z_l = [k I_p, k \tilde{N}_p, k \tilde{A}_p] $$
+        This results in a 9-channel feature vector per voxel (3 for RGB, 3 for Normal, 3 for Albedo) [S1].
+
+3.  **Fuse and Decode:**
+    Concatenate global features $z_g$ and local features $z_l$ [S1]. Process the concatenated volume through a 3D CNN $h_{JP}$ (specifically a 3D UNet) to output the lighting volume $\hat{L}$ [S1]:
+    $$ \hat{L} = h_{JP} (z_g, z_l; \Theta_{JP}) $$
+    where $\Theta_{JP}$ are the parameters of the 3D CNN [S1].
+
+**Pseudocode:**
+
+> **Unverified code.** The code below did not pass a test run against a reference implementation, or no test fits it, so it may contain errors.
+
+```python
+def lighting_joint_prediction_module(
+    global_feature_vector,
+    predicted_depth,
+    predicted_normal,
+    predicted_albedo,
+    input_image,
+    camera_intrinsics,
+    voxel_centers,
+    sigma_d=0.15
+):
+    # 1. Compute Global Feature Volume
+    # h_GFD is an MLP decoder mapping (x, y, z, f_L) to a feature vector.
+    # Source does not specify output resolution (X_g, Y_g, Z_g) or channel count C.
+    global_feature_volume = []
+    for x, y, z in voxel_centers:
+        z_g = mlp_global_decoder(x, y, z, global_feature_vector)
+        global_feature_volume.append(z_g)
+    global_feature_volume = reshape_to_3d_grid(global_feature_volume, voxel_centers)
+
+    # 2. Compute Local Features
+    local_feature_volume = []
+    for x, y, z in voxel_centers:
+        u_p, v_p, d = unproject_voxel(x, y, z, camera_intrinsics)
+
+        # Check if projection is within image bounds
+        if not (0 <= u_p < input_image.shape[1] and 0 <= v_p < input_image.shape[0]):
+            local_feature_volume.append([0.0] * 9)
+            continue
+
+        # Retrieve properties at pixel (u_p, v_p)
+        I_p = input_image[:, v_p, u_p]
+        D_p = predicted_depth[v_p, u_p]
+        N_p = predicted_normal[:, v_p, u_p]
+        A_p = predicted_albedo[:, v_p, u_p]
+
+        # Compute Gaussian distance factor
+        k = math.exp(-((d - D_p) ** 2) / (2 * sigma_d ** 2))
+
+        # Concatenate features: [k*I_p, k*N_p, k*A_p]
+        z_l = list(k * I_p) + list(k * N_p) + list(k * A_p)
+        local_feature_volume.append(z_l)
+
+    local_feature_volume = reshape_to_3d_grid(local_feature_volume, voxel_centers)
+
+    # 3. Fuse and Decode
+    fused_volume = concatenate_channels(global_feature_volume, local_feature_volume)
+    lighting_volume = h_JP_3d_unet(fused_volume)
+    return lighting_volume
+
+def mlp_global_decoder(x, y, z, f_L):
+    # Standard MLP forward pass. Weights not provided in sources [S1].
+    return f_L
+
+def unproject_voxel(x, y, z, K):
+    # Standard pinhole camera projection
+    if z == 0:
+        return 0, 0, 0  # Guard against division by zero
+    u_p = K[0][0] * x / z + K[0][2]
+    v_p = K[1][1] * y / z + K[1][2]
+    return u_p, v_p, z
+
+def reshape_to_3d_grid(features, centers):
+    # Sort centers to form a regular 3D grid
+    sorted_indices = sorted(range(len(centers)), key=lambda i: (centers[i][2], centers[i][1], centers[i][0]))
+    return [features[i] for i in sorted_indices]
+
+def concatenate_channels(vol1, vol2):
+    # Concatenate feature vectors along channel dimension
+    return [f1 + f2 for f1, f2 in zip(vol1, vol2)]
+
+def h_JP_3d_unet(volume):
+    # Standard 3D UNet forward pass. Parameters not provided in sources [S1].
+    return volume
+```
+
+**Edge Cases and Pitfalls:**
+*   **Voxels outside FOV:** Voxels that do not project onto the input image must be handled, likely by zeroing out local features or skipping them [S1].
+*   **Depth Mismatch:** The Gaussian factor $k$ decays rapidly with distance. Voxels far from the predicted surface manifold will have near-zero local features, relying entirely on global features [S1].
+*   **Precision:** The source does not specify numerical precision requirements [S1].
+## Subtopics
+
+### [Hybrid Lighting Prediction Network](19371-hybrid-lighting-prediction-network.md)
+Predicts a hybrid lighting representation for outdoor street scenes by simultaneously estimating an HDR sky dome and a Volumetric Spherical Gaussian (VSG) lighting volume. It differs from prior methods by explicitly tailoring the VSG volume dimensions ($256 \times 256 \times 64$) to accommodate large outdoor scales ($300 \times 300 \times 80$ meters$^3$) and employing a log projection to handle dense close-to-camera surfaces. Choose this variant when rendering large-scale outdoor environments with complex sky and volumetric lighting interactions.
+
+## Operating characteristics
+*   **Memory:** The model consumes 7.5GB of memory with a batch size of 1 [S1].
+*   **Resolution:** The standard resolution for the initialized visible surface volume and predicted VSG lighting is $128^3$ [S1].
+*   **Comparison:** Compared to methods using sequences of 3D transpose convolutions for global feature decoding, this MLP-based approach is more flexible and naturally extensible to multi-view input [S1].
+*   **Performance:** On the InteriorNet dataset, the method achieves a Normal Angular Error of $22.95^\circ$ (with full training losses) compared to $23.94^\circ$ for NIR [S1].
+## Background
+The Lighting Joint Prediction Module is part of a pipeline for learning indoor inverse rendering from a single image, introduced in "Learning Indoor Inverse Rendering with 3D Spatially-Varying Lighting" [S1]. The pipeline includes a Direct Prediction Module, the Joint Prediction Module (this module), a Differentiable Re-rendering Module, and a Joint Re-prediction Module [S1].
+## Sources
+[S1] Learning Indoor Inverse Rendering with 3D Spatially-Varying Lighting, https://doi.org/10.1109/iccv48922.2021.01231, fetched 2026-10-26

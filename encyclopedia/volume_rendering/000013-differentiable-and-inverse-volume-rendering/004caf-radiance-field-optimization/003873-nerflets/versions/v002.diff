@@ -1,0 +1,181 @@
+--- v001.md
++++ v002.md
+@@ -8,21 +8,21 @@
+ ## How it works
+ **Inputs and Outputs:**
+-*   **Inputs:** 2D image observations (RGB) and their corresponding camera poses. Optional 2D semantic or instance segmentation masks can be used to initialize or guide the placement of nerflets [S1, S2].
+-*   **Outputs:** A set of local radiance field parameters (MLP weights, positions, orientations, ranges) and rendered novel views.
++*   **Inputs:** 2D image observations and corresponding camera poses [S2].
++*   **Outputs:** Rendered novel views and the optimized set of nerflet parameters [S1, S2].
+ 
+ **Data Structures:**
+-The scene is represented as a collection of $N$ nerflets. Each nerflet $i$ is defined by:
+-1.  **Spatial Position:** A 3D center coordinate $\mathbf{c}_i \in \mathbb{R}^3$.
+-2.  **Orientation:** A rotation matrix or quaternion $\mathbf{R}_i$ defining the local coordinate frame.
+-3.  **Range/Influence:** A spatial extent or radius $r_i$ determining the volume of influence.
+-4.  **Neural Weights:** Parameters for a small Multi-Layer Perceptron (MLP) $f_i$.
++The scene is represented as a collection of $N$ nerflets [S2]. Each nerflet $i$ stores:
++1.  **Spatial Position:** A 3D center coordinate $\mathbf{c}_i \in \mathbb{R}^3$ [G].
++2.  **Orientation:** A rotation matrix or quaternion $\mathbf{R}_i$ defining the local coordinate frame [G].
++3.  **Range/Influence:** A spatial extent or radius $r_i$ determining the volume of influence [G].
++4.  **Neural Weights:** Parameters for a small Multi-Layer Perceptron (MLP) $f_i$ [S2].
+ 
+ **Influence Function:**
+-Each nerflet has an influence function $w_i(\mathbf{x})$ that determines its contribution to a point $\mathbf{x}$ in space. The specific mathematical form of the influence function is not detailed in the sources, but it acts as a weighting mechanism based on the point's proximity to the nerflet's range [S1, S2].
++Each nerflet has an influence function $w_i(\mathbf{x})$ that determines its contribution to a point $\mathbf{x}$ in space [S1]. The exact mathematical form is not detailed in the sources, but it acts as a weighting mechanism based on the point's proximity to the nerflet's range [S2]. A standard implementation uses a Gaussian falloff based on distance to $\mathbf{c}_i$ and $r_i$ [G].
+ 
+ **Rendering Steps:**
+-1.  **Sampling:** For a given ray, sample a set of 3D points $\{\mathbf{x}_j\}$.
++1.  **Sampling:** For a given ray, sample a set of 3D points $\{\mathbf{x}_j\}$ along a segment $[t_{\text{near}}, t_{\text{far}}]$.
+ 2.  **Local Evaluation:** For each sampled point $\mathbf{x}_j$, evaluate all $N$ nerflets. Each nerflet $i$ uses its small MLP $f_i$ to predict a local density $\sigma_{i}(\mathbf{x}_j)$ and color $\mathbf{c}_{i}(\mathbf{x}_j)$ [S2].
+-3.  **Weighting:** Compute the influence weight $w_i(\mathbf{x}_j)$ for each nerflet at point $\mathbf{x}_j$ based on its spatial range and orientation [S1, S2].
++3.  **Weighting:** Compute the influence weight $w_i(\mathbf{x}_j)$ for each nerflet at point $\mathbf{x}_j$ [S1, S2].
+ 4.  **Aggregation:** Combine the local predictions into a global density and color for the point using weighted averaging:
+     $$
+@@ -37,5 +37,7 @@
+ **Pseudocode:**
+ ```python
+-def render_ray(ray_origin, ray_direction, nerflets, num_samples):
++import math
++
++def render_ray(ray_origin, ray_direction, nerflets, num_samples, t_near=0.0, t_far=10.0):
+     """
+     Renders a single ray using the Nerflets representation.
+@@ -48,6 +50,8 @@
+             - orientation: Rotation matrix
+             - range: Float (influence radius)
+-            - mlp: Function mapping (position, direction) -> (density, color)
++            - mlp: Function mapping (position) -> (density, color)
+         num_samples: Integer, number of points to sample along the ray.
++        t_near: Float, near clipping plane distance.
++        t_far: Float, far clipping plane distance.
+         
+     Returns:
+@@ -55,34 +59,32 @@
+         final_alpha: Float, accumulated alpha.
+     """
+-    # Sample points along the ray
+-    t_vals = linspace(0, max_distance, num_samples)
+-    points = ray_origin + ray_direction * t_vals
+-    
+-    # Initialize accumulators
++    if num_samples < 2:
++        return [0.0, 0.0, 0.0], 0.0
++
++    # Sample points along the ray segment [t_near, t_far]
++    t_vals = [t_near + i * (t_far - t_near) / (num_samples - 1) for i in range(num_samples)]
++    points = [ray_origin + ray_direction * t for t in t_vals]
++    delta_t = (t_far - t_near) / (num_samples - 1)
++
+     accumulated_color = [0.0, 0.0, 0.0]
+     accumulated_alpha = 0.0
+-    last_t = 0
+-    
++
+     for point in points:
+-        # Calculate local density and color from all nerflets
+         local_density_sum = 0.0
+         local_color_sum = [0.0, 0.0, 0.0]
+         weight_sum = 0.0
+-        
++
+         for nerflet in nerflets:
+-            # Calculate influence weight based on point position relative to nerflet
+-            # Note: Exact influence function formula is not provided in sources [S1, S2]
+-            weight = calculate_influence_weight(point, nerflet)
+-            
+-            # Get local density and color from the small MLP
+-            # The MLP takes the point's position (and possibly direction) as input
++            # Compute influence weight based on distance to nerflet center and range [G]
++            dist = math.sqrt(sum((p - c)**2 for p, c in zip(point, nerflet.position)))
++            weight = math.exp(-dist**2 / (2 * nerflet.range**2))
++
++            # Evaluate local MLP for density and color [S2]
+             local_density, local_color = nerflet.mlp(point)
+-            
+-            # Accumulate weighted values
++
+             local_density_sum += weight * local_density
+             local_color_sum += weight * local_color
+             weight_sum += weight
+-            
+-        # Avoid division by zero
++
+         if weight_sum > 1e-6:
+             global_density = local_density_sum / weight_sum
+@@ -91,60 +93,36 @@
+             global_density = 0.0
+             global_color = [0.0, 0.0, 0.0]
+-            
+-        # Volume rendering step (standard alpha compositing)
+-        # Note: Standard NeRF volume rendering uses exponential density integration
+-        # This step assumes standard volume rendering integration is applied after aggregation
+-        # [S2] implies weighted averaging happens before rendering, but standard 
+-        # volume rendering requires density integration. The sources describe 
+-        # weighted averaging of density/color directly.
+-        
+-        # Approximate volume rendering with discrete samples
+-        # delta_t is the distance between samples
+-        delta_t = t_vals[1] - t_vals[0] # Assuming uniform sampling for simplicity
+-        
+-        # Alpha for this segment
+-        alpha = 1.0 - exp(-global_density * delta_t)
+-        
+-        # Contribution to final color
++
++        # Standard volume rendering alpha compositing [G]
++        alpha = 1.0 - math.exp(-global_density * delta_t)
+         transmittance = 1.0 - accumulated_alpha
+         accumulated_color += transmittance * alpha * global_color
+         accumulated_alpha += transmittance * alpha
+-        
++
+         if accumulated_alpha > 0.99:
+             break
+-            
++
+     return accumulated_color, accumulated_alpha
+-
+-def calculate_influence_weight(point, nerflet):
+-    """
+-    Placeholder for the influence function.
+-    Sources state the weight is based on spatial position and range [S1, S2].
+-    The exact mathematical formulation is not provided.
+-    """
+-    # [G] Typical implementation might use a Gaussian or sigmoid falloff 
+-    # based on distance from nerflet.position and nerflet.range.
+-    # Since the source does not specify, this is a structural placeholder.
+-    return 1.0 # Placeholder value
+ ```
+ 
+ **Parameters:**
+-*   **Number of Nerflets ($N$):** Not specified. Depends on scene complexity and object instances [S1, S2].
+-*   **MLP Size:** "Small" MLPs are used, but specific layer counts or hidden dimensions are not given [S2].
+-*   **Range ($r_i$):** Determines the spatial extent of each nerflet. Updated via data association across frames [S1].
++*   **Number of Nerflets ($N$):** Not specified in the sources [S1, S2].
++*   **MLP Size:** Described as "small" but specific layer counts or hidden dimensions are not given [S2].
++*   **Range ($r_i$):** Determines the spatial extent of each nerflet and is updated via data association across frames [S1].
+ 
+ **Edge Cases and Pitfalls:**
+-*   **Boundary Handling:** The influence weights must handle points outside all nerflet ranges gracefully to avoid undefined behavior [S1, S2].
+-*   **Overlap:** Multiple nerflets may influence the same point. The weighted averaging scheme handles this, but the choice of influence function affects smoothness [S1, S2].
+-*   **2D Supervision:** Training relies on 2D images. Ensuring consistent 3D structure from 2D cues can be challenging without 3D priors [S2].
++*   **Boundary Handling:** Influence weights must decay to zero outside the range to prevent undefined contributions [G].
++*   **Overlap:** Multiple nerflets influence the same point; weighted averaging resolves this, but smooth transitions require careful influence function design [G].
++*   **2D Supervision:** Training uses only 2D images, which requires the optimization procedure to handle depth ambiguity [S2].
+ 
+ ## Operating characteristics
+ *   **Efficiency:** Provides a more efficient and compact representation than global NeRF, particularly for outdoor environments [S1].
+-*   **Performance:** Achieves higher PSNR (more than one point higher) on KITTI-360 and ScanNet datasets compared to baseline methods [S2].
+-*   **Scalability:** The local nature allows for parallel evaluation of nerflets, potentially improving rendering speed [S1, S2].
++*   **Performance:** Achieves a PSNR more than one point higher on KITTI-360 and ScanNet datasets compared to baseline methods [S2].
++*   **Scalability:** Local evaluation allows parallel processing across nerflets [G].
+ *   **Strengths:** Enables direct scene editing and decomposition; supports 2D supervision; handles complex object instances [S1, S2].
+-*   **Limitations:** Requires determining the number and placement of nerflets; influence function definition is critical but not fully specified in sources [S1, S2].
++*   **Limitations:** Requires determining the number and placement of nerflets; the influence function definition is critical but not fully specified in the sources [S1, S2].
+ 
+ ## Background
+-Nerflets was introduced to address the limitations of global NeRF, which requires 3D supervision and lacks semantic/instance information [S2]. It builds on the concept of local radiance fields to provide a structure-aware representation [S2]. The method is cited in reviews of semantically-aware neural radiance fields [S1] and surveys on improving NeRF quality [S2].
++Nerflets was introduced to address the limitations of global NeRF, which requires 3D supervision and lacks semantic/instance information [S2]. It builds on the concept of local radiance fields to provide a structure-aware representation [S2]. The method is discussed in reviews of semantically-aware neural radiance fields [S1] and surveys on improving NeRF quality [S2].
+ 
+ ## Sources

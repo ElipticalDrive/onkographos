@@ -1,0 +1,287 @@
+# Variational Tetrahedral Mesh Generation from Discrete Volume Data
+
+Also called: Centroidal Voronoi Tessellation (CVT) based meshing, Voronoi-based tetrahedralization
+
+## Overview
+This method generates high-quality tetrahedral meshes directly from discrete volumetric data (voxels) without requiring an intermediate polygonal surface mesh [S1]. It solves the problem of poor mesh quality and discretization error inherent in voxel-based meshing by using a variational clustering framework to aggregate voxels into cells, replacing each with a vertex, and then triangulating these vertices [S1]. Unlike surface-based meshing methods that enrich an input surface with new vertices—often inducing bad aspect ratios at boundaries—this method constrains sites near object boundaries to preserve accuracy and quality [S1].
+
+## How it works
+
+### Inputs and Outputs
+*   **Input:** A discrete volume domain $\Omega$ composed of voxels belonging to one or more objects $O_i$. The domain is defined as $\Omega = \cup_i O_i$ [S1].
+*   **Parameters:**
+    *   $n$: User-defined number of vertices (cells) in the meshing domain [S1].
+    *   $\rho(x)$: A density function denoting the local desired vertex density. It can be generated from a medial axis approximation or manually painted by the user [S1].
+*   **Output:** A tetrahedral mesh where each tetrahedron is associated with an object $O_i$ [S1].
+
+### Data Structures
+*   **Voxel Grid:** The input domain $\Omega$ represented as a grid of voxels. Each voxel is assigned to an object ID.
+*   **Sites ($z_i$):** A set of $n$ points representing the vertices of the mesh. Each site $z_i$ corresponds to a cluster $C_i$ of voxels.
+*   **Clusters ($C_i$):** A partition of the input voxels into $n$ cells. Each cell $C_i$ is associated with a site $z_i$ [S1].
+*   **Mesh:** A set of tetrahedra defined by their vertex indices. Each tetrahedron is tagged with an object ID [S1].
+
+### Steps
+
+1.  **Density Map Calculation (Optional but Recommended):**
+    Calculate a density map $\rho(x)$ to ensure dense sampling in complex or narrow regions. This is done by computing the medial axis of the shape using a constrained Discrete Voronoi Cell (DVC) [S1]. The user may modify this map manually [S1].
+
+2.  **Variational Clustering (Centroidal Voronoi Diagram Approximation):**
+    Partition the input space $\Omega$ by clustering input voxels into $n$ cells $C_i$, approximating a Centroidal Voronoi Diagram (CVD) [S1].
+    *   Each cell $C_i$ is assigned a site $z_i$.
+    *   The site $z_i$ is the barycenter of its cell, weighted by the density function $\rho(x)$:
+        $$ z_i = \frac{\int_{C_i} x \cdot \rho(x) dx}{\int_{C_i} \rho(x) dx} $$
+        [S1]
+    *   The clustering minimizes the energy term:
+        $$ E_V = \sum_{i=1}^{n} \int_{C_i} \rho(x) \|x - z_i\|^2 dx $$
+        [S1]
+    *   **Boundary Constraints:** Sites $z_i$ located on the boundary of an object $O_i$ are constrained to lie on the boundary subset (e.g., the barycenter of the boundary voxels) to preserve the accuracy of the object surface [S1].
+
+3.  **Triangulation (Mesh Generation):**
+    Triangulate the sites $z_i$ using the dual of the generated clustering [S1].
+    *   Construct a Voronoi Diagram from the point cloud of sites. The geometrical dual is the Delaunay triangulation [S1].
+    *   **Greedy Algorithm:** Build the mesh using a set of acceptable tetrahedra $\Gamma$.
+        1.  Choose two neighbor tetrahedra in an unambiguous region of $\Gamma$ [S1].
+        2.  Create a front from their external faces [S1].
+        3.  Add new tetrahedra to the front until it reaches the domain boundary $\partial \Omega$ [S1].
+    *   **Ambiguity Resolution:** Resolve local ambiguities (e.g., co-cyclic sites causing undefined Delaunay triangles) using Constrained Delaunay Triangulation [S1].
+
+4.  **Object Association:**
+    Associate each constructed tetrahedron to an object $O_i$ [S1].
+    *   Count the voxels contained within each tetrahedron.
+    *   If voxels belong to two objects, assign the tetrahedron to the dominant class (the object with the majority of voxels) [S1].
+
+5.  **Topological Optimization:**
+    Improve mesh quality without inserting or deleting vertices, only modifying connectivity (edge flips) [S1]. Operations are denoted $m-n$, where $m$ tetrahedra are removed and $n$ are created [S1].
+    *   **3-2 Transformation:** On three tetrahedra sharing the same edge, the cycle of tetrahedra around this edge forms a polygon which is triangulated. The faces of this triangulation are associated with the vertices of the initial common edge to form new tetrahedra. This deletes one edge and adds one or several faces [S1].
+    *   **2-3 Transformation:** The inverse of 3-2. Deletes one or several faces and builds one edge. Can be extended to neighborhoods where faces are joined by edges of degree four [S1].
+    *   **5-4 Transformation:** Removes slivers. Deletes one sliver and four of its neighbors, creating four new tetrahedra. Can have two different results for a given set [S1].
+    *   **4-4 Transformation:** Used for 3D boundary restoration. Similar to 3-2 but with one more input tetrahedron. Restores boundaries where tetrahedra belong to two regions [S1].
+
+    **Optimization Loop:**
+    1.  Fill a priority queue $Q(id, qual)$ with tetrahedra whose quality indicator $qual$ does not meet the criterion [S1].
+    2.  Pick element $id$ with the worst quality [S1].
+    3.  Apply the transformation (3-2, 2-3, 5-4, or 4-4) that provides the best quality improvement [S1].
+    4.  Repeat until the criterion is fulfilled or no new transformation is possible [S1].
+
+6.  **Boundary Enhancement:**
+    Apply transformations that best decrease the number of voxels in non-dominant classes to remove spikes on the object surfaces [S1]. This improves the accuracy of the objects' boundaries [S1].
+
+### Pseudocode
+
+> **Unverified code.** The code below did not pass a test run against a reference implementation, or no test fits it, so it may contain errors.
+
+```python
+def generate_tetrahedral_mesh(voxels, n, density_map=None):
+    """
+    Generate a tetrahedral mesh from discrete volume data.
+    
+    Args:
+        voxels: List of voxel objects, each with position (x,y,z), object_id, and volume.
+        n: Number of desired vertices in the mesh.
+        density_map: Optional function rho(x) returning local density. 
+                     If None, uniform density is assumed.
+    
+    Returns:
+        mesh: List of tetrahedra, each defined by 4 vertex indices and an object_id.
+    """
+    
+    # Step 1: Density Map Calculation (if not provided)
+    if density_map is None:
+        # Compute medial axis from constrained DVC
+        medial_axis = compute_medial_axis(voxels)
+        density_map = generate_density_from_medial_axis(medial_axis)
+    
+    # Step 2: Variational Clustering
+    # Initialize n sites randomly or via k-means++ within the voxel bounds
+    sites = initialize_sites(n, voxels)
+    clusters = [[] for _ in range(n)]
+    
+    # Iterate to minimize Ev (Lloyd's algorithm variant with constraints)
+    for iteration in range(max_iterations):
+        # Assign voxels to nearest site (weighted by density)
+        for voxel in voxels:
+            # Find site z_i minimizing integral of rho(x)||x-zi||^2
+            # Approximated by assigning voxel to site with smallest weighted distance
+            best_site_idx = argmin([weighted_distance(voxel, sites[i], density_map) for i in range(n)])
+            clusters[best_site_idx].append(voxel)
+        
+        # Update sites (barycenters)
+        for i in range(n):
+            if not clusters[i]:
+                continue
+            
+            # Calculate weighted barycenter
+            numerator = Vector3(0, 0, 0)
+            denominator = 0.0
+            
+            for voxel in clusters[i]:
+                # Density at voxel position
+                rho = density_map(voxel.position)
+                numerator += voxel.position * rho
+                denominator += rho
+            
+            if denominator > 0:
+                new_site = numerator / denominator
+                
+                # Apply boundary constraints if site is on object boundary
+                if is_on_boundary(clusters[i], voxel_objects):
+                    new_site = constrain_to_boundary(new_site, clusters[i])
+                
+                sites[i] = new_site
+    
+    # Step 3: Triangulation
+    # Construct Delaunay triangulation of sites
+    # Use Greedy algorithm with ambiguity resolution
+    mesh_tetrahedra = []
+    front = []
+    
+    # Pick initial unambiguous tetrahedra
+    initial_tets = find_initial_unambiguous_tetrahedra(sites)
+    for tet in initial_tets:
+        mesh_tetrahedra.append(tet)
+        front.extend(tet.external_faces)
+    
+    while front:
+        face = front.pop()
+        # Find candidate tetrahedron on the other side of the face
+        candidate_tet = find_candidate_tetrahedron(face, sites, mesh_tetrahedra)
+        
+        if candidate_tet is not None:
+            # Check for ambiguity (co-cyclic sites)
+            if is_ambiguous(candidate_tet, face):
+                # Resolve using Constrained Delaunay Triangulation
+                resolved_tets = constrained_delaunay_triangulate(face, candidate_tet, sites)
+                mesh_tetrahedra.extend(resolved_tets)
+                front.extend(resolved_tets.external_faces)
+            else:
+                mesh_tetrahedra.append(candidate_tet)
+                front.extend(candidate_tet.external_faces)
+    
+    # Step 4: Object Association
+    for tet in mesh_tetrahedra:
+        voxel_counts = count_voxels_in_tetrahedron(tet, voxels)
+        # Assign to dominant object
+        tet.object_id = get_dominant_object(voxel_counts)
+    
+    # Step 5 & 6: Topological Optimization and Boundary Enhancement
+    optimize_mesh_quality(mesh_tetrahedra, sites, density_map)
+    enhance_boundaries(mesh_tetrahedra, voxels)
+    
+    return mesh_tetrahedra
+
+def weighted_distance(voxel, site, density_map):
+    """
+    Approximate the contribution to the energy term for a voxel.
+    """
+    # In practice, this involves integrating rho(x)||x-z||^2 over the voxel volume.
+    # A simple approximation is using the voxel center and density at center.
+    dist_sq = voxel.position.distance_squared(site)
+    rho = density_map(voxel.position)
+    return dist_sq * rho
+
+def optimize_mesh_quality(tetrahedra, sites, density_map):
+    """
+    Apply topological transformations to improve quality.
+    """
+    quality_criteria = ['Q1', 'Q2', 'Q3', 'Q4']
+    priority_queue = PriorityQueue()
+    
+    # Fill queue with poor quality tetrahedra
+    for tet in tetrahedra:
+        qual = calculate_quality(tet, quality_criteria)
+        if qual < threshold:
+            priority_queue.push(tet.id, qual)
+    
+    while not priority_queue.empty():
+        worst_tet_id = priority_queue.pop()
+        worst_tet = tetrahedra[worst_tet_id]
+        
+        # Try all possible transformations (3-2, 2-3, 5-4, 4-4)
+        best_transformation = None
+        best_improvement = -infinity
+        
+        for trans in get_possible_transformations(worst_tet, tetrahedra):
+            new_quality = evaluate_transformation_quality(trans, tetrahedra)
+            if new_quality > best_improvement:
+                best_improvement = new_quality
+                best_transformation = trans
+        
+        if best_transformation is not None:
+            apply_transformation(best_transformation, tetrahedra, sites)
+            # Update queue with affected tetrahedra
+            update_queue_with_new_tetrahedra(tetrahedra, priority_queue)
+
+def calculate_quality(tetrahedron, criteria):
+    """
+    Calculate quality metrics.
+    Q1: Minimal dihedral angle (normalized 0-1, max 70.5 deg)
+    Q2: Maximal dihedral angle
+    Q3: Radius ratio
+    Q4: Form factor normalized 0-1
+    """
+    if 'Q4' in criteria:
+        V = tetrahedron.volume
+        l = tetrahedron.average_edge_length
+        # Q4 = 12 / ((3 * V)^(2/3) * l)
+        q4 = 12.0 / ((3.0 * V)**(2.0/3.0) * l)
+        return q4
+    # ... other criteria
+    return 0.0
+```
+
+### Edge Cases and Pitfalls
+*   **Ambiguities:** Co-cyclic sites (in 2D) or co-spherical sites (in 3D) cause undefined Delaunay triangulations. These must be resolved locally using Constrained Delaunay Triangulation [S1].
+*   **Boundary Accuracy:** If sites on boundaries are not constrained, the mesh may deviate from the object surface, leading to spikes and poor boundary representation [S1].
+*   **Slivers:** Poor quality tetrahedra (slivers) can degrade FEM simulation performance. The 5-4 transformation is specifically designed to remove slivers [S1].
+*   **Precision:** The quality criterion Q4 is sensitive to volume and edge length. Small numerical errors in volume calculation can affect quality assessment [S1].
+
+## Operating characteristics
+
+### Time and Memory Complexity
+*   **Clustering:** The clustering step dominates the runtime. For a $50^3$ voxel grid, clustering takes 2.42 seconds [S1]. The complexity is related to the number of voxels and the number of iterations in the Lloyd's algorithm variant.
+*   **Meshing:** The greedy meshing step is fast. For $50^3$ voxels, meshing takes 0.44 seconds [S1].
+*   **Optimization:** Topological optimization is iterative. For $50^3$ voxels, optimization takes 0.72 seconds [S1].
+*   **Total Time:** For a $50^3$ voxel grid resulting in 55,329 tetrahedra, the total time is approximately 3.58 seconds (2.42 + 0.44 + 0.72) [S1]. For larger grids ($200^3$), the time increases significantly (271.96s clustering, 36.11s meshing, 42.26s optimization) [S1].
+
+### Measured Performance
+*   **Discretization Error:** Measured as Hausdorff distance using an isosurface mesh (S1) as reference.
+    *   AMIRA voxel mesh (S2): 0.31% of bounding box diagonal [S1].
+    *   Proposed method (S3): 0.17% of bounding box diagonal [S1].
+    *   The proposed method has approximately half the error of standard voxel meshing [S1].
+*   **Mesh Quality:**
+    *   **Q1 (Min Dihedral Angle):** The proposed method (S3) achieves a minimum Q1 of 16.31°, compared to 10.12° for AMIRA voxel mesh (S2) and 13.41° for AMIRA isosurface mesh (S1) [S1].
+    *   **Q4 (Form Factor):** The proposed method (S3) achieves an average Q4 of 0.911, compared to 0.824 for S2 and 0.843 for S1 [S1].
+*   **Simulation Performance:** The high-quality mesh reduces the number of iterations for FEM solvers.
+    *   **EM Simulation:** S3 required 121 iterations vs. 171 (S1) and 205 (S2) [S1].
+    *   **Thermal Simulation:** S3 required 4004 iterations vs. 5002 (S1) and 5004 (S2) [S1].
+
+### Strengths and Limitations
+*   **Strengths:**
+    *   Directly uses voxel data, avoiding intermediate surface reconstruction [S1].
+    *   Produces high-quality tetrahedra suitable for FEM simulations [S1].
+    *   Lower discretization error than standard voxel meshing [S1].
+    *   Allows user control over vertex density via $\rho(x)$ [S1].
+*   **Limitations:**
+    *   Higher error than isosurface-based meshing (S1) for thermal simulations where surface accuracy is critical [S1].
+    *   Computation time increases significantly with voxel grid size [S1].
+    *   Requires careful handling of boundary constraints to avoid spikes [S1].
+
+### When to Use
+*   Use when you have discrete volumetric data (voxels) and need a high-quality tetrahedral mesh for FEM simulations (e.g., electromagnetic or thermal) [S1].
+*   Use when you want to control mesh density in specific regions via a density map [S1].
+*   Do not use if you already have a high-quality surface mesh; isosurface-based methods may yield better surface accuracy [S1].
+
+## Background
+
+### Origin
+The method was proposed by Valette, Siauve, Burais, and Prost [S1]. The paper "Variational tetrahedral mesh generation from discrete volume data" was published in *The Visual Computer* [S1].
+
+### History and Development
+The method builds on the concept of Centroidal Voronoi Tessellation (CVT) and its discrete approximation [S1]. It extends previous work on medial axis-based density maps  and topological optimization techniques for mesh quality improvement  [S1]. The authors implemented the algorithm in C++ using the VTK library [S1].
+
+### Usage
+The method has been tested on various models including the Armadillo, Stanford Bunny, Venus body, and the Visible Human Project (VHP) models [S1]. It is particularly suited for 3D numerical simulations such as electromagnetic field computation and thermal simulations [S1].
+
+## Sources
+
+[S1] Variational tetrahedral mesh generation from discrete volume data, https://doi.org/10.1007/s00371-009-0323-7, fetched 2026-10-26

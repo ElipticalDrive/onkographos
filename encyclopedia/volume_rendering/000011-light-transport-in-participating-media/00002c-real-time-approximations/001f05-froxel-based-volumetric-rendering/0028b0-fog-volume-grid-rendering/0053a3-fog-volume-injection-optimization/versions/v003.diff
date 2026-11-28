@@ -1,0 +1,162 @@
+--- v002.md
++++ v003.md
+@@ -4,18 +4,18 @@
+ 
+ ## Overview
+-Fog Volume Injection Optimization reduces the computational cost of injecting scene fog volumes into a froxel grid by ensuring each volume is processed only by the froxels it geometrically covers, rather than having every froxel test every scene fog volume [S1, S2, unofficial]. It differs from the brute-force approach (where every froxel iterates all volumes) by using precomputed CPU-side bounds to cull irrelevant volume-froxel pairs, and differs from Godot’s per-volume dispatch by using a single GPU kernel with a culled list of ranges, avoiding the overhead of many small kernel launches [S2, unofficial].
++Fog Volume Injection Optimization reduces the computational cost of injecting scene fog volumes into a froxel grid by ensuring each volume is processed only by the froxels it geometrically covers, rather than having every froxel test every scene fog volume [S1, S2, unofficial]. It differs from the brute-force approach by using precomputed CPU-side bounds to cull irrelevant volume-froxel pairs, and differs from Godot’s per-volume dispatch by using a single GPU kernel with a culled list of ranges, avoiding the overhead of many small kernel launches [S2, unofficial].
+ 
+ ## How it works
+ **Inputs:**
+-- List of scene fog volumes, each defined by eight world-space corners and associated density, albedo, and emission parameters.
+-- Camera parameters: view matrix, projection matrix, near plane distance, and `Fog::length` (far clip).
+-- Froxel grid parameters: grid dimensions ($N_x, N_y, N_z$) and world-space origin/spacing.
++- List of scene fog volumes, each defined by eight world-space corners and associated density, albedo, and emission parameters [S2, unofficial].
++- Camera parameters: view matrix, projection matrix, near plane distance, and `Fog::length` (far clip) [G].
++- Froxel grid parameters: grid dimensions ($N_x, N_y, N_z$) and world-space origin/spacing [G].
+ 
+ **Outputs:**
+-- Updated froxel storage buffers: density (fixed-point) and scattering (R11G11B10 packed).
++- Updated froxel storage buffers: density (fixed-point) and scattering (R11G11B10 packed) [S2, unofficial].
+ 
+ **Data Structures:**
+ - `fog_volume_froxels`: A storage buffer (group 1, binding 9) containing a list of structures. Each structure represents a volume's froxel range:
+-  - `first`: `u32`, the first froxel index (linearized) covered by the volume.
++  - `first`: `u32`, the first froxel index covered by the volume.
+   - `last`: `u32`, the last froxel index covered.
+   - `volume`: `u32`, the index of the scene fog volume in the scene list.
+@@ -29,24 +29,24 @@
+ 
+ 1. **Frustum Culling:**
+-   - For each scene fog volume, determine if it intersects the visible frustum.
++   - For each scene fog volume, determine if it intersects the visible frustum [S2, unofficial].
+    - Drop volumes that lie entirely behind the camera, entirely beyond `Fog::length`, or entirely beside the frame without crossing the camera plane [S2, unofficial].
+ 
+ 2. **Bounding Froxel Range Calculation:**
+-   - Transform the volume's eight world-space corners to view space.
+-   - Handle volumes crossing the camera's near plane: If any corner is on or behind the camera's plane, expand the froxel range to cover the entire frame (all $x, y$) up to the slice of the farthest corner [S2, unofficial].
+-   - For other volumes, compute the min and max froxel indices ($i_{min}, i_{max}$) occupied by the corners.
+-   - Apply widening: $i_{min} \leftarrow \max(0, i_{min} - \lceil 0.01 \times \text{grid\_size} \rceil)$ and $i_{max} \leftarrow \min(\text{grid\_size} - 1, i_{max} + \lceil 0.01 \times \text{grid\_size} \rceil)$ [S2, unofficial].
+-   - Linearize the 3D froxel indices to a 1D range $[first, last]$ based on the grid dimensions [S2, unofficial].
++   - Transform the volume's eight world-space corners to view space [S2, unofficial].
++   - Handle volumes crossing the camera's near plane: If any corner is on or behind the camera's plane, expand the froxel range to cover the entire frame up to the slice of the farthest corner [S2, unofficial].
++   - For other volumes, compute the min and max froxel indices ($i_{min}, i_{max}$) occupied by the corners [S2, unofficial].
++   - Apply widening by $0.01$ froxel to the computed bounds to absorb rounding errors [S2, unofficial].
++   - Compute the linear froxel range $[first, last]$ from the min/max indices [G].
+ 
+ 3. **Upload Range List:**
+-   - Construct the `fog_volume_froxels` list with entries $(first, last, volume)$ for all surviving volumes.
+-   - Sort the list by `volume` index.
++   - Construct the `fog_volume_froxels` list with entries $(first, last, volume)$ for all surviving volumes [S2, unofficial].
++   - Sort the list by `volume` index [S2, unofficial].
+    - Upload this list to the `fog_volume_froxels` storage buffer every frame [S2, unofficial].
+ 
+ 4. **Injection Shader Execution:**
+-   - The GPU launches a compute shader for the froxel grid.
+-   - Each workgroup/thread processes a specific froxel (or a tile of froxels).
+-   - For the current froxel index $F$, iterate through the `fog_volume_froxels` list.
+-   - For each entry $(first, last, vol\_idx)$, check if $first \le F \le last$.
++   - The GPU launches a compute shader for the froxel grid [G].
++   - Each workgroup/thread processes a specific froxel [G].
++   - For the current froxel index $F$, iterate through the `fog_volume_froxels` list [S2, unofficial].
++   - For each entry $(first, last, vol\_idx)$, check if $first \le F \le last$ [S2, unofficial].
+    - If the condition holds, evaluate the volume's density and scattering at the froxel's position and accumulate into the froxel's storage buffers using atomics [S2, unofficial].
+ 
+@@ -54,5 +54,4 @@
+ 
+ ```python
+-# CPU-side bounds calculation (simplified)
+ def compute_froxel_range(volume_corners, camera_view_matrix, froxel_grid):
+     # Transform corners to view space
+@@ -64,5 +63,6 @@
+         max_z = max(c.z for c in view_corners)
+         far_slice = froxel_grid.z_index_at_depth(max_z)
+-        return (0, froxel_grid.total_xy_froxels() * far_slice, volume.index)
++        total_xy = froxel_grid.width * froxel_grid.height
++        return (0, total_xy * far_slice, volume.index)
+     
+     # Compute min/max froxel indices for all corners
+@@ -74,42 +74,37 @@
+     max_z = max(froxel_grid.z_index_at_depth(c.z) for c in view_corners)
+     
+-    # Apply widening
+-    widen = ceil(0.01 * froxel_grid.resolution)
+-    min_x = max(0, min_x - widen)
+-    max_x = min(froxel_grid.width - 1, max_x + widen)
+-    min_y = max(0, min_y - widen)
+-    max_y = min(froxel_grid.height - 1, max_y + widen)
+-    min_z = max(0, min_z - widen)
+-    max_z = min(froxel_grid.depth - 1, max_z + widen)
++    # Apply widening: 0.01 froxel absolute offset
++    widen = 0.01
++    min_x = max(0.0, min_x - widen)
++    max_x = min(float(froxel_grid.width - 1), max_x + widen)
++    min_y = max(0.0, min_y - widen)
++    max_y = min(float(froxel_grid.height - 1), max_y + widen)
++    min_z = max(0.0, min_z - widen)
++    max_z = min(float(froxel_grid.depth - 1), max_z + widen)
+     
+     # Linearize to 1D range
+-    first = froxel_grid.linear_index(min_x, min_y, min_z)
+-    last = froxel_grid.linear_index(max_x, max_y, max_z)
++    first = froxel_grid.linear_index(int(min_x), int(min_y), int(min_z))
++    last = froxel_grid.linear_index(int(max_x), int(max_y), int(max_z))
+     
+     return (first, last, volume.index)
+ 
+-# GPU-side injection shader (WGSL-like pseudocode)
+-@compute
+-fn inject_fog(froxel_index: u32, fog_volume_froxels: array<VolumeRange>, fog_volumes: array<FogVolume>, density_buffer: atomic<u32>, scattering_buffer: atomic<u32>) {
+-    for i in 0..fog_volume_froxels.length {
+-        let range = fog_volume_froxels[i];
+-        if froxel_index >= range.first && froxel_index <= range.last {
+-            let volume = fog_volumes[range.volume];
++def inject_fog(froxel_index, fog_volume_froxels, fog_volumes, density_buffer, scattering_buffer):
++    for i in range(len(fog_volume_froxels)):
++        range_entry = fog_volume_froxels[i]
++        if range_entry.first <= froxel_index <= range_entry.last:
++            volume = fog_volumes[range_entry.volume]
+             
+-            // Evaluate density at froxel position
+-            let density = evaluate_density(volume, froxel_position);
++            # Evaluate density at froxel position
++            density = evaluate_density(volume, froxel_position)
+             
+-            // Accumulate density (scaled by 1024, truncated)
+-            let density_fixed = u32(density * 1024.0);
+-            atomicAdd(&density_buffer[froxel_index], density_fixed);
++            # Accumulate density (scaled by 1024, truncated)
++            density_fixed = int(density * 1024.0)
++            density_buffer[froxel_index] += density_fixed
+             
+-            // Accumulate scattering (albedo * clamp(density, 0, 1), packed R11G11B10)
+-            let scattering_weight = clamp(density, 0.0, 1.0);
+-            let scattering_val = volume.albedo * scattering_weight;
+-            let scattering_packed = pack_r11g11b10(scattering_val);
+-            atomicAdd(&scattering_buffer[froxel_index], scattering_packed);
+-        }
+-    }
+-}
++            # Accumulate scattering (albedo * clamp(density, 0, 1), packed R11G11B10)
++            scattering_weight = min(1.0, max(0.0, density))
++            scattering_val = volume.albedo * scattering_weight
++            scattering_packed = pack_r11g11b10(scattering_val)
++            scattering_buffer[froxel_index] += scattering_packed
+ ```
+ 
+@@ -121,12 +116,9 @@
+ ## Operating characteristics
+ - **Time Complexity:** Reduces the fog injection loop from $O(F \times V)$ to $O(F \times V_{in\_view}) + O(V \times F_{per\_volume})$, where $F$ is total froxels, $V$ is total volumes, $V_{in\_view}$ is volumes in view, and $F_{per\_volume}$ is froxels per volume [S2, unofficial].
+-- **Measured Performance:**
+-  - In Hyperdrive (1920×1080, High, 32 tunnel volumes), brute-force volume loop was ~1.3–1.5 ms of 4.5 ms total fog injection [S1, unofficial].
+-  - With the optimization (SGL main #42 fix), fog injection dropped from 1.72 ms to 1.25 ms (High/Low night), 4.74 ms to 3.55 ms (High/High night), and 4.96 ms to 3.97 ms (Ultra night) [S1, unofficial].
+-  - At High/Low day, it dropped from 0.91 ms to 0.31 ms; at Ultra day, from 4.14 ms to 2.15 ms [S1, unofficial].
++- **Measured Performance:** In Hyperdrive (1920×1080, High, 32 tunnel volumes), brute-force volume loop was ~1.3–1.5 ms of 4.5 ms total fog injection [S1, unofficial]. With the optimization (SGL main #42 fix), fog injection dropped from 1.72 ms to 1.25 ms (High/Low night), 4.74 ms to 3.55 ms (High/High night), and 4.96 ms to 3.97 ms (Ultra night) [S1, unofficial]. At High/Low day, it dropped from 0.91 ms to 0.31 ms; at Ultra day, from 4.14 ms to 2.15 ms [S1, unofficial].
+ - **Strengths:** Eliminates redundant volume tests; avoids overhead of many small kernel dispatches (compared to Godot's per-volume dispatch) [S2, unofficial].
+ - **Limitations:** Requires CPU-side bounds calculation every frame; still iterates all volumes in view for each froxel (though fewer volumes pass the range test) [S2, unofficial].
+-- **When to Use:** When the number of scene fog volumes is significant and many do not intersect the visible froxel grid.
+-- **When Not to Use:** When the number of volumes is very small, or when volumes are uniformly distributed across the entire grid, reducing the benefit of culling [S2, unofficial].
++- **When to Use:** When the number of scene fog volumes is significant and many do not intersect the visible froxel grid [S2, unofficial].
++- **When Not to Use:** When the number of volumes is very small, or when volumes are uniformly distributed across the entire grid, reducing the benefit of culling [G].
+ 
+ ## Background

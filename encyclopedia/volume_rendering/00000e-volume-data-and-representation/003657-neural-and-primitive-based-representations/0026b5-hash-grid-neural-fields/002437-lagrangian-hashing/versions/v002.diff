@@ -1,0 +1,329 @@
+--- v001.md
++++ v002.md
+@@ -4,8 +4,8 @@
+ 
+ ## Overview
+-Lagrangian Hashing is a hybrid neural field representation that combines the memory efficiency of Eulerian hierarchical hash grids (specifically InstantNGP) with a Lagrangian point-based representation (similar to 3D Gaussian Splatting) to achieve high-quality novel view synthesis with compact parameters [S1]. It differs from its siblings by storing a small set of learnable points, each equipped with a feature and a field of influence, inside the high-resolution hash buckets, allowing the representation to adaptively allocate budget to regions requiring more detail without relying on careful initialization or pruning heuristics [S1].
++Lagrangian Hashing is a hybrid neural field representation that combines the memory efficiency of Eulerian hierarchical hash grids (specifically InstantNGP) with the adaptive density control of Lagrangian point-based representations (such as 3D Gaussian Splatting) [S1]. It solves the problem of representing high-frequency scene details with minimal parameters by storing a mixture of Gaussians within the hash buckets of high-resolution grid levels, allowing features to move freely in space rather than being fixed to uniform grid vertices [S1]. Unlike its sibling [HashGrid Encoding](3866-hashgrid-encoding.md), which uses static feature vectors, Lagrangian Hashing computes per-bucket features as weighted sums of isotropic Gaussians centered at learnable means, enabling compact reconstruction of complex signals [S1].
+ 
+ ## How it works
+-Lagrangian Hashing builds on the multi-scale hash grid structure of InstantNGP [Parent](3855-hash-grid-neural-fields.md). It replaces the static feature vectors in the finest resolution levels with a mixture of Gaussians (MoG) centered at learnable positions.
++Lagrangian Hashing builds on the multi-scale hash grid structure of InstantNGP [S1]. It maintains a stack of $L$ resolution levels. For levels $l < L - \tilde{L}$ (shallow levels), it uses standard Eulerian feature vectors stored in hash buckets. For the deepest $\tilde{L}$ levels (high-resolution layers), it employs a Lagrangian representation where each hash bucket contains a small set of points, each equipped with a feature and a field of influence [S1].
+ 
+ ### Inputs and Outputs
+@@ -14,213 +14,148 @@
+ 
+ ### Data Structures
+-The representation consists of $L$ levels of hash tables. For each level $l \in \{1, \dots, L\}$:
+-*   **Resolution:** $N_l = N_{\min} \cdot b^l$, where $N_{\min}$ is the base resolution and $b$ is the scaling base [S1].
+-*   **Bucket Size:** $B$ is the maximum number of points per bucket [S1].
++The representation consists of a stack of feature tensors $\{\mathbf{F}_l\}_{l=1}^L$.
++*   **Resolution:** Level $l$ has resolution $N_l = N_{\min} \cdot b^l$, where $N_{\min}$ is the base resolution and $b$ is the scaling base [S1].
++*   **Bucket Size:** $B$ is the maximum capacity of a hash bucket [S1].
+ *   **Feature Tensor $\mathbf{F}_l$:**
+-    *   If $N_l < B$: Shape $\mathbb{R}^{N_l \times F}$. The map is injective.
+-    *   If $N_l \ge B$: Shape $\mathbb{R}^{B \times F}$. The map is a hash function [S1].
+-*   **Lagrangian Points (for $l \ge L - \tilde{L}$):**
+-    *   Each bucket $v$ in the hash table stores a set of $K$ points.
+-    *   Each point $k$ has:
+-        *   Position $\mathbf{p}_{l,v,k} \in \mathbb{R}^D$ (learnable).
+-        *   Feature vector $\mathbf{c}_{l,v,k} \in \mathbb{R}^F$ (learnable).
+-        *   Standard deviation $\sigma$ (non-trainable, implicitly proportional to grid resolution) [S1].
+-    *   The Gaussians are isotropic [S1].
++    *   If $N_l < B$: The hash map is injective. $\mathbf{F}_l$ has shape $\mathbb{R}^{N_l \times F}$.
++    *   If $N_l \ge B$: The hash map is a collision-prone hash function. $\mathbf{F}_l$ has shape $\mathbb{R}^{B \times F}$ [S1].
++*   **Lagrangian Points (for deep levels):** Inside each bucket $v$ of level $l$ (where $l \ge L - \tilde{L}$), instead of a single vector, there is a set of points. Each point $k$ has:
++    *   A position $\mathbf{p}_{l,v,k}$ (learnable).
++    *   A feature vector $\mathbf{c}_{l,v,k}$ (learnable).
++    *   An isotropic Gaussian field of influence with standard deviation $\sigma_l$ implicitly proportional to the grid resolution $N_l$ (non-trainable) [S1].
+ 
+ ### Numbered Steps
+ 
+ 1.  **Coordinate Normalization and Grid Positioning:**
+-    Compute the grid position $\mathbf{pos}$ for level $l$ using the scale $\text{scale}_l$ and alignment offset as defined in the parent article [Parent](3855-hash-grid-neural-fields.md).
++    Normalize $\mathbf{x}$ to $[0, 1]$. For each level $l$, compute the scale $\text{scale}_l = 2^l \times H - 1$ (where $H$ is the base resolution parameter from the parent [Hash Grid Neural Fields](3855-hash-grid-neural-fields.md)). Compute the continuous position:
+     $$ \mathbf{pos} = \mathbf{x} \times \text{scale}_l + (\text{align\_corners} ? 0.0 : 0.5) $$
+-    Compute integer grid coordinates $\mathbf{pos\_grid} = \lfloor \mathbf{pos} \rfloor$ and fractional parts $\mathbf{pos\_frac} = \mathbf{pos} - \mathbf{pos\_grid}$ [Parent](3855-hash-grid-neural-fields.md).
++    Compute integer grid coordinates $\mathbf{pos\_grid} = \lfloor \mathbf{pos} \rfloor$ and fractional parts $\mathbf{pos\_frac} = \mathbf{pos} - \mathbf{pos\_grid}$ [S1, Parent].
+ 
+ 2.  **Hash Indexing:**
+-    For each of the $V = 2^D$ corners $v$ of the voxel containing $\mathbf{x}$:
+-    *   Compute the hash index $h_v = \text{hash}(\mathbf{pos\_grid}_v) \pmod{B}$ (or $N_l$ if $N_l < B$) using the standard hash function from the parent article [Parent](3855-hash-grid-neural-fields.md).
+-    *   Retrieve the bucket index $v$ in the feature tensor $\mathbf{F}_l$ [S1].
++    For each of the $2^D$ corners $v$ of the voxel containing $\mathbf{x}$, compute the hash index $idx_v$ using the hash function $H_l$ defined in the parent article [Hash Grid Neural Fields](3855-hash-grid-neural-fields.md). The hash function maps $\mathbf{pos\_grid}$ to $[0, B-1]$ [S1].
+ 
+ 3.  **Per-Level Feature Computation ($\mathbf{f}_l(\mathbf{x})$):**
+-    The feature $\mathbf{f}_l(\mathbf{x})$ is computed by summing contributions from all $V$ corners. The contribution of corner $v$ depends on whether the level is Eulerian or Lagrangian.
+-    $$ \mathbf{f}_l(\mathbf{x}) = \sum_{v \in \mathcal{H}_l(\mathbf{x})} \alpha_v \cdot \mathbf{F}_l[v](\mathbf{x}) \quad (2) $$
++    For each level $l$, compute the interpolated feature $\mathbf{f}_l(\mathbf{x})$ by summing contributions from the $V=2^D$ corners:
++    $$ \mathbf{f}_l(\mathbf{x}) = \sum_{v \in \mathcal{H}_l(\mathbf{x})} \alpha_v \cdot \mathbf{F}_l[v](\mathbf{x}) $$
+     where $\alpha_v$ are the trilinear interpolation weights derived from $\mathbf{pos\_frac}$ [S1].
+-
+-    *   **Case A: Eulerian Level ($l < L - \tilde{L}$):**
+-        $\mathbf{F}_l[v](\mathbf{x})$ is the static feature vector stored at index $v$ in $\mathbf{F}_l$.
+     
+-    *   **Case B: Lagrangian Level ($l \ge L - \tilde{L}$):**
+-        $\mathbf{F}_l[v](\mathbf{x})$ is the weighted sum of features from the $K$ points stored in bucket $v$. Each point $k$ contributes based on its Gaussian influence at $\mathbf{x}$:
+-        $$ \mathbf{F}_l[v](\mathbf{x}) = \sum_{k=1}^{K} w_{l,v,k}(\mathbf{x}) \cdot \mathbf{c}_{l,v,k} $$
+-        The weight $w_{l,v,k}(\mathbf{x})$ is the value of the isotropic Gaussian centered at $\mathbf{p}_{l,v,k}$ evaluated at $\mathbf{x}$:
+-        $$ w_{l,v,k}(\mathbf{x}) = \exp\left( -\frac{\|\mathbf{x} - \mathbf{p}_{l,v,k}\|^2}{2\sigma_l^2} \right) $$
+-        The standard deviation $\sigma_l$ is non-trainable and proportional to the grid resolution of level $l$ [S1]. The weights are typically normalized so $\sum_k w_{l,v,k}(\mathbf{x}) = 1$ or handled as raw contributions depending on the specific implementation of the decoder [S1, G]. *Note: The source describes the representation as a mixture of Gaussians, implying the weights define the mixture.*
++    *   **For Eulerian Levels ($l < L - \tilde{L}$):** $\mathbf{F}_l[v](\mathbf{x})$ is simply the static feature vector stored at bucket $v$ in tensor $\mathbf{F}_l$.
++    *   **For Lagrangian Levels ($l \ge L - \tilde{L}$):** $\mathbf{F}_l[v](\mathbf{x})$ is computed by evaluating the mixture of Gaussians stored in bucket $v$. Let the bucket contain $K$ points with positions $\mathbf{p}_{k}$ and features $\mathbf{c}_{k}$. The feature is:
++        $$ \mathbf{F}_l[v](\mathbf{x}) = \sum_{k=1}^{K} w_k(\mathbf{x}) \cdot \mathbf{c}_{k} $$
++        where $w_k(\mathbf{x})$ is the weight of the $k$-th Gaussian at query point $\mathbf{x}$. The Gaussians are isotropic with standard deviation $\sigma_l \propto N_l$ [S1]. The exact weighting function is a Gaussian kernel $w_k(\mathbf{x}) \propto \exp\left(-\frac{\|\mathbf{x} - \mathbf{p}_k\|^2}{2\sigma_l^2}\right)$, normalized such that $\sum w_k = 1$ [S1, G].
+ 
+ 4.  **Feature Concatenation and Decoding:**
+-    Concatenate the features from all $L$ levels:
+-    $$ \mathbf{f}_{\text{total}}(\mathbf{x}) = \mathbf{f}_1(\mathbf{x}) \oplus \mathbf{f}_2(\mathbf{x}) \oplus \dots \oplus \mathbf{f}_L(\mathbf{x}) $$
+-    Pass through a shared MLP decoder with parameters $\boldsymbol{\theta}$:
+-    $$ \mathcal{F}(\mathbf{x}) = \text{MLP}(\mathbf{f}_{\text{total}}(\mathbf{x}); \boldsymbol{\theta}) \quad (1) $$
++    Concatenate the features from all levels:
++    $$ \mathbf{f}_{\text{concat}} = \mathbf{f}_1(\mathbf{x}) \oplus \mathbf{f}_2(\mathbf{x}) \oplus \dots \oplus \mathbf{f}_L(\mathbf{x}) $$
++    Pass the concatenated vector through a shared Multi-Layer Perceptron (MLP) with parameters $\boldsymbol{\theta}$ to produce the final output:
++    $$ \mathcal{F}(\mathbf{x}) = \text{MLP}(\mathbf{f}_{\text{concat}}; \boldsymbol{\theta}) $$
++    where $\mathcal{F}(\mathbf{x}) : \mathbb{R}^D \rightarrow \mathbb{R}^F$ [S1].
+ 
+ ### Parameters
+-*   $L$: Number of levels of detail [S1].
+-*   $N_{\min}$: Minimum resolution base [S1].
++*   $L$: Number of levels of detail in the stack of regular grids [S1].
++*   $N_{\min}$: Minimum resolution base for the geometric progression of grid resolutions [S1].
+ *   $b$: Base of the geometric progression for grid resolution scaling [S1].
+ *   $B$: Bucket size for the hash table, used when $N_l \ge B$ [S1].
+-*   $\tilde{L}$: Number of Lagrangian levels at the top of the hierarchy [S1].
+-*   $K$: Number of points per bucket in Lagrangian levels [S1, G]. *Not explicitly given in sources, but implied by "small set of points".*
+-
+-### Edge Cases and Pitfalls
+-*   **Initialization:** Unlike 3D Gaussian Splatting, Lagrangian Hashing does not require careful initialization from depth, COLMAP, or LiDAR, nor does it rely on heuristics to grow/prune points [S1].
+-*   **Gaussian Standard Deviation:** The standard deviation is non-trainable and implicitly proportional to grid resolution. This differs from 3DGS which uses trainable anisotropic Gaussians [S1].
+-*   **Precision:** As with all hash-based methods, hash collisions in the bucket can cause feature interference. The injective map for $N_l < B$ avoids this, but hash collisions are possible for $N_l \ge B$ [S1].
++*   $\tilde{L}$: Number of deep levels using Lagrangian representation (not explicitly named in sources, but implied by "last $\tilde{L}$ are Lagrangian") [S1].
+ 
+ ### Pseudocode
+ 
+ ```python
+-import torch
+-import math
+-
+-def lagrangian_hashing_forward(x, levels, mlp_decoder, params):
++def lagrangian_hashing_forward(x, levels, mlp, hash_tables, lagrangian_params):
+     """
+-    x: Tensor of shape (..., D), query coordinates in [0, 1]
+-    levels: List of level configurations
+-    mlp_decoder: Shared MLP decoder
+-    params: Dictionary containing hyperparameters L, N_min, b, B, L_tilde, K
++    x: Query coordinate, shape (D,)
++    levels: List of level configurations, each containing:
++        - l: level index
++        - N_l: resolution
++        - B: bucket size
++        - is_lagrangian: boolean
++        - sigma_l: standard deviation for Gaussians (if lagrangian)
++    mlp: Shared decoder MLP
++    hash_tables: List of feature tensors F_l
++    lagrangian_params: Dictionary mapping (l, bucket_idx) to list of points
++                       Each point has 'pos' (D,) and 'feature' (F,)
+     """
+-    L = params['L']
+-    N_min = params['N_min']
+-    b = params['b']
+-    B = params['B']
+-    L_tilde = params['L_tilde']
+-    K = params['K'] # Number of points per bucket
+-    
+     concatenated_features = []
+     
+-    for l in range(1, L + 1):
+-        # 1. Resolution Scaling
+-        scale_l = 2**l * params['H'] - 1 # Assuming H is base resolution from parent
+-        # Note: Parent article defines scale_l = 2^l * H - 1. 
+-        # InstantNGP usually uses 2^l * N_min. We follow parent's formula structure.
++    for level_cfg in levels:
++        l = level_cfg['l']
++        N_l = level_cfg['N_l']
++        B = level_cfg['B']
++        is_lagrangian = level_cfg['is_lagrangian']
++        sigma_l = level_cfg['sigma_l']
+         
+-        # 2. Grid Positioning (from Parent)
+-        # Assuming align_corners is False for standard case
+-        pos = x * scale_l + 0.5
+-        pos_grid = torch.floor(pos).long()
+-        pos_frac = pos - pos_grid.float()
++        # 1. Coordinate Normalization and Grid Positioning
++        # Assuming parent Hash Grid Neural Fields principles for scale and pos calculation
++        scale_l = 2**l * (hash_tables[0].shape[0] if l==0 else 1) # Placeholder for base H logic from parent
++        # Note: Exact scale formula depends on parent article's H definition. 
++        # Using generic scale_l as provided in parent notes.
++        pos = x * scale_l + 0.5 # align_corners=False assumed for generality
++        pos_grid = floor(pos)
++        pos_frac = pos - pos_grid
+         
+-        # 3. Hashing and Interpolation
+-        level_feature = torch.zeros_like(x[..., :params['F']]) # Assuming F is output dim per level? 
+-        # Actually, f_l(x) is a vector. Let's assume F is the feature dim per level.
+-        # The final output dim is L * F.
++        # 2. Hash Indexing for 2^D corners
++        corners = get_2d_corners(pos_grid) # Returns list of 2^D integer vectors
++        corner_indices = [hash_function(c, B) for c in corners]
++        corner_weights = compute_trilinear_weights(pos_frac) # Returns list of 2^D floats
+         
+-        # Get all 2^D corners
+-        corners = get_corners(pos_grid) # Shape (..., 2^D, D)
+-        corner_fracs = get_corner_fracs(pos_frac) # Shape (..., 2^D, D)
++        level_feature = zeros(F) # F is output feature dimension
+         
+-        # Compute interpolation weights alpha_v
+-        # alpha_v is product of frac or 1-frac for each dim
+-        alpha_v = compute_trilinear_weights(corner_fracs) # Shape (..., 2^D)
+-        
+-        # Hash indices for all corners
+-        # Using the hash function from parent: sum(pos_grid[i] * primes[i]) % H_l
+-        # We need to implement the hash function
+-        primes = [1, 2654435761, 805459861, 3674653429, 2097192037, 1434869437, 2165219737]
+-        hash_indices = compute_hash_indices(corners, primes, B) # Shape (..., 2^D)
+-        
+-        # Retrieve features from buckets
+-        # We need to access the feature tensor F_l and the Lagrangian points
+-        # This requires gathering from the global state. 
+-        # For pseudocode, we assume access to global tensors F_l and Points_l
+-        
+-        bucket_features = gather_bucket_features(l, hash_indices, B, K) # Shape (..., 2^D, F)
+-        
+-        # Compute weighted sum for this level
+-        # f_l(x) = sum_v alpha_v * F_l[v](x)
+-        level_feature = torch.sum(alpha_v.unsqueeze(-1) * bucket_features, dim=-2)
+-        
++        # 3. Per-Level Feature Computation
++        for v_idx, (corner, weight) in enumerate(zip(corner_indices, corner_weights)):
++            if is_lagrangian:
++                # Retrieve points from the specific bucket in the Lagrangian params
++                points = lagrangian_params.get((l, corner), [])
++                bucket_feature = zeros(F)
++                total_weight = 0.0
++                
++                for point in points:
++                    p_k = point['pos']
++                    c_k = point['feature']
++                    # Isotropic Gaussian weight
++                    dist_sq = sum((x - p_k)**2 for x in p_k) # Euclidean distance squared
++                    w_k = exp(-dist_sq / (2 * sigma_l**2))
++                    bucket_feature += w_k * c_k
++                    total_weight += w_k
++                
++                # Normalize weights
++                if total_weight > 0:
++                    bucket_feature /= total_weight
++                else:
++                    bucket_feature = zeros(F) # Fallback if no points in bucket
++                    
++            else:
++                # Eulerian: Direct lookup
++                bucket_feature = hash_tables[l][corner]
++            
++            level_feature += weight * bucket_feature
++            
+         concatenated_features.append(level_feature)
+         
+-    # 4. Concatenate and Decode
+-    total_feature = torch.cat(concatenated_features, dim=-1)
+-    output = mlp_decoder(total_feature)
+-    
++    # 4. Feature Concatenation and Decoding
++    final_input = concatenate(concatenated_features)
++    output = mlp(final_input)
+     return output
++```
+ 
+-def compute_hash_indices(corners, primes, B):
+-    """
+-    corners: (..., 2^D, D)
+-    primes: List of D primes
+-    B: Hash table size
+-    """
+-    # Dot product of corners and primes
+-    # corners shape: (..., 2^D, D)
+-    # primes shape: (D,)
+-    # result shape: (..., 2^D)
+-    hash_val = torch.sum(corners * torch.tensor(primes, device=corners.device), dim=-1)
+-    return hash_val % B
+-
+-def gather_bucket_features(l, hash_indices, B, K):
+-    """
+-    Retrieves features from the hash table for level l.
+-    If l < L - L_tilde: Eulerian (static features)
+-    If l >= L - L_tilde: Lagrangian (MoG)
+-    """
+-    # This is a placeholder for the actual tensor gathering logic
+-    # which depends on the specific implementation of the hash table storage.
+-    # For Eulerian: return F_l[hash_indices]
+-    # For Lagrangian: return weighted sum of K points in each bucket
+-    
+-    # Assuming global state access
+-    if l < params['L'] - params['L_tilde']:
+-        # Eulerian
+-        return F_l[l][hash_indices]
+-    else:
+-        # Lagrangian
+-        # Retrieve K points for each hash index
+-        # Points_l[l] has shape (B, K, D) for positions and (B, K, F) for features
+-        # We need to compute Gaussian weights for each point relative to x
+-        # This requires broadcasting x and points_l[l]
+-        
+-        # Get positions and features for the hashed buckets
+-        # Note: hash_indices might have collisions, so we gather all K points for each index
+-        bucket_positions = Points_l[l][hash_indices] # (..., 2^D, K, D)
+-        bucket_features = Features_l[l][hash_indices] # (..., 2^D, K, F)
+-        
+-        # Compute Gaussian weights
+-        # sigma_l is non-trainable, proportional to grid resolution
+-        sigma_l = get_sigma_for_level(l)
+-        
+-        # Distance squared
+-        diff = x.unsqueeze(-2) - bucket_positions # (..., 2^D, K, D)
+-        dist_sq = torch.sum(diff**2, dim=-1) # (..., 2^D, K)
+-        
+-        # Gaussian weights
+-        weights = torch.exp(-dist_sq / (2 * sigma_l**2)) # (..., 2^D, K)
+-        
+-        # Normalize weights? Source says "mixture of Gaussians", usually implies normalized weights
+-        # But in hash grid context, they might be raw contributions. 
+-        # Let's assume normalized for mixture interpretation
+-        weights_sum = torch.sum(weights, dim=-1, keepdim=True) + 1e-8
+-        weights_norm = weights / weights_sum
+-        
+-        # Weighted sum of features
+-        # (..., 2^D, K, F) * (..., 2^D, K, 1) -> (..., 2^D, F)
+-        bucket_feat = torch.sum(weights_norm.unsqueeze(-1) * bucket_features, dim=-2)
+-        
+-        return bucket_feat
+-```
++### Edge Cases and Pitfalls
++*   **Bucket Collision:** When $N_l \ge B$, the hash function is not injective. Collisions are handled by the hash table structure (e.g., chaining or open addressing), but this may reduce accuracy compared to injective maps [S1].
++*   **Gaussian Weight Normalization:** If a bucket contains no points or the query point is extremely far from all points, the sum of weights may be near zero. A fallback (e.g., zero vector or nearest neighbor) is required [G].
++*   **Initialization:** Unlike 3D Gaussian Splatting, Lagrangian Hashing does not require careful initialization from depth, COLMAP, or LiDAR. Points are guided by a loss function during training [S1].
+ 
+ ## Subtopics
+ 
+ ### [Lagrangian Per-Bucket Feature Representation](3527-lagrangian-per-bucket-feature-representation.md)
+-A feature representation used at deeper levels (l >= L - L_tilde) of a hierarchical hash grid where features are not stored as static vectors in buckets but are instead computed as a weighted sum of isotropic Gaussians centered at learnable means, allowing for continuous, position-dependent feature retrieval.
++Defines the feature retrieval mechanism for the deepest levels. Instead of static vectors, it computes features as a weighted sum of isotropic Gaussians centered at learnable means, allowing continuous, position-dependent feature retrieval. Choose this when high-frequency detail requires adaptive point density without the complexity of acceleration structures.
+ 
+ ## Operating characteristics
+-*   **Memory Efficiency:** Achieves high-quality novel view synthesis with fewer parameters than traditional methods. For example, it achieves a PSNR of 35.60 dB with 6.68M parameters, compared to a baseline of 27.31 dB with the same parameter count [S1].
+-*   **Training:** Does not require careful initialization (e.g., from depth, COLMAP, or LiDAR) or heuristics for point growth/pruning [S1].
+-*   **Performance:** Combines the fast training of Eulerian grids with the adaptive representation of Lagrangian points [S1].
+-*   **Limitations:** The method relies on a fixed number of points per bucket and non-trainable standard deviations, which may limit flexibility compared to fully trainable anisotropic Gaussian methods like 3DGS [S1].
++*   **Memory Efficiency:** Achieves high-quality novel view synthesis with fewer parameters than traditional Eulerian grids. For example, it achieves a PSNR of 35.60 dB with 6.68M parameters, compared to a baseline of 27.31 dB with the same parameter count [S1].
++*   **Performance:** Reuses the fast hash implementation of InstantNGP, avoiding the need for approximate nearest neighbor searches typically required by Lagrangian point clouds [S1].
++*   **Strengths:** Compact representation for high-frequency signals; no need for complex initialization or pruning heuristics; combines speed of grids with adaptivity of points [S1].
++*   **Limitations:** Requires careful design of the guidance loss to move Gaussians to regions needing representation; isotropic Gaussians may be less flexible than anisotropic ones for certain geometries [S1].
++*   **When to Use:** When memory is constrained but high-fidelity rendering is required, and scene geometry is complex enough to benefit from adaptive point density [S1].
++*   **When Not to Use:** When anisotropic features are critical for capturing sharp directional details (3DGS may be better) or when initialization data is available and can be leveraged directly [S1].
+ 
+ ## Background
+-Lagrangian Hashing was introduced in 2024 by researchers from Simon Fraser University, University of Trento, University of Toronto, University of British Columbia, and Google DeepMind [S1]. It was presented as a solution to the demand for compact multimedia formats for immersive mixed reality and volumetric content capture. The method bridges the gap between Eulerian representations (like InstantNGP) and Lagrangian point-based representations (like 3D Gaussian Splatting) [S1].
++Lagrangian Hashing was introduced in 2024 by researchers from Simon Fraser University, University of Trento, University of Toronto, University of British Columbia, and Google DeepMind [S1]. It addresses the limitations of both Eulerian methods (like InstantNGP, which use fixed grids) and Lagrangian methods (like 3D Gaussian Splatting, which require large point clouds and careful initialization) by hybridizing them [S1]. The method was published in the proceedings of ECCV 2024 [S1].
+ 
+ ## Sources

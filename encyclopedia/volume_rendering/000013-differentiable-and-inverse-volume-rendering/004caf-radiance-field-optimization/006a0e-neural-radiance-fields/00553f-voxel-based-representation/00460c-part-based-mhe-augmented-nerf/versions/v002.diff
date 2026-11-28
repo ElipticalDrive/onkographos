@@ -1,0 +1,187 @@
+--- v001.md
++++ v002.md
+@@ -10,6 +10,6 @@
+ 
+ ### Inputs and Outputs
+-*   **Inputs:** Sparse multi-view video frames of a human performer; SMPL parametric human model parameters (pose $\rho$, shape $\beta$); camera intrinsics and extrinsics.
+-*   **Outputs:** Photorealistic novel view renderings of the dynamic human for any frame $t$ and camera pose.
++*   **Inputs:** Sparse multi-view video frames of a human performer; SMPL parametric human model parameters (pose $\rho$, shape $\beta$); camera intrinsics and extrinsics [S1].
++*   **Outputs:** Photorealistic novel view renderings of the dynamic human for any frame $t$ and camera pose [S1].
+ 
+ ### Data Structures
+@@ -18,5 +18,5 @@
+ The human body is decomposed into $K$ parts based on the SMPL template mesh $M=(V, E)$, where $V$ represents vertices and $E$ represents edges [S1].
+ *   **Blend Weights:** Each vertex $v_i$ has a blend weight vector $w_i$ indicating influence of $J$ bones [S1].
+-*   **Part Definition:** For each part $k \in \{1, \dots, K\}$, a set of bones $\Omega_k$ is defined. The mesh for part $k$ is $M_k = (V_k, E_k)$, where:
++*   **Part Definition:** For each part $k \in \{1, \dots, K\}$, a set of bones $\Omega_k$ is defined [S1]. The mesh for part $k$ is $M_k = (V_k, E_k)$, where:
+     $$ V_k = \{v_i \mid \arg\max w_i \in \Omega_k\} $$
+     $$ E_k = \{(v_i, v_j) \mid v_i \in V_k, v_j \in V_k\} $$
+@@ -25,10 +25,10 @@
+ **2. Multiresolution Hash Encoding (MHE) Tables**
+ Each part $k$ has its own MHE table $\psi_k$ [S1].
+-*   **Layout:** A hash table mapping input coordinates to trainable feature vectors.
++*   **Layout:** A hash table mapping input coordinates to trainable feature vectors [G].
+ *   **Size:** The size of the hash table for part $k$ is adapted based on the complexity of that part (e.g., face vs. torso) [S1]. Uniformly large tables (e.g., $2^{20}$) across all parts are avoided to prevent memory waste and slower iteration times [S1].
+ 
+ **3. Network Architectures**
+-*   **Density Network ($MLP_{\sigma_k}$):** Takes encoded canonical point $\psi_k(x)$ as input. Outputs density $\sigma_k$ and feature vector $z$ [S1].
+-*   **Color Network ($MLP_{c_k}$):** Takes feature vector $z$, viewing direction $d$, and latent embedding $l_t$ (for frame $t$) as input. Outputs color $c_k$ [S1].
++*   **Density Network ($MLP_{\sigma_k}$):** Takes encoded canonical point $\psi_k(x)$ as input [S1]. Outputs density $\sigma_k$ and feature vector $z$ [S1].
++*   **Color Network ($MLP_{c_k}$):** Takes feature vector $z$, viewing direction $d$, and latent embedding $l_t$ (for frame $t$) as input [S1]. Outputs color $c_k$ [S1].
+ 
+ ### Numbered Steps
+@@ -69,7 +69,8 @@
+ import torch
+ import torch.nn as nn
++import math
+ 
+ class PartBasedMHENeRF:
+-    def __init__(self, num_parts, smpl_model, hash_table_sizes):
++    def __init__(self, num_parts, smpl_model, hash_table_sizes, feature_dim=2):
+         """
+         Initialize the Part-based MHE-augmented NeRF.
+@@ -80,4 +81,5 @@
+                          blend weights, and transformation matrices G_j.
+             hash_table_sizes (list[int]): Size of the MHE hash table for each part k.
++            feature_dim (int): Dimension of features per resolution level in MHE [G].
+         """
+         self.K = num_parts
+@@ -88,5 +90,5 @@
+         for k in range(self.K):
+             # Create MHE encoder for part k with specific size
+-            mhe_encoder = MultiresolutionHashEncoding(hash_table_sizes[k])
++            mhe_encoder = MultiresolutionHashEncoding(hash_table_sizes[k], feature_dim)
+             
+             # Density network: Input -> (sigma, z)
+@@ -97,5 +99,4 @@
+             
+             # Residual deformation network: (u, v, t) encoded -> delta_x
+-            # Note: MHE is applied to (u, v, t) before MLP
+             residual_net = MLP_Residual(input_dim=mhe_encoder.output_dim)
+             
+@@ -118,5 +119,4 @@
+         
+         # 3. Get blend weight w_k and UV coordinate (u_k, v_k) from SMPL model
+-        # SMPL model provides mapping from surface point to blend weights and UV
+         w_k = smpl_model.get_blend_weight(p_k)
+         u_k, v_k = smpl_model.get_uv_coordinate(p_k)
+@@ -132,5 +132,4 @@
+         
+         # Compute weighted sum of transformations
+-        # w is a vector of weights for J bones
+         weighted_transform = torch.zeros_like(x)
+         for j in range(len(w)):
+@@ -139,11 +138,9 @@
+         
+         # Invert the transformation matrix
+-        # Note: In practice, this might be solved via linear system or precomputed
+-        # Here we assume a generic inverse operation
+         inv_transform = torch.inverse(weighted_transform)
+         x_0 = inv_transform @ x
+         return x_0
+ 
+-    def forward(self, query_points, frame_indices, poses, camera_intrinsics, camera_extrinsics):
++    def forward(self, query_points, frame_indices, poses, camera_intrinsics, camera_extrinsics, step_size):
+         """
+         Render a batch of rays.
+@@ -154,12 +151,9 @@
+             poses: Tensor of shape (T, J, 4, 4) or similar, pose parameters for each frame.
+             camera_intrinsics, camera_extrinsics: Camera parameters.
++            step_size (float): Distance between consecutive samples along a ray [G].
+             
+         Returns:
+             rendered_colors: Tensor of shape (N, 3)
+         """
+-        # Sample points along rays (standard NeRF sampling)
+-        # This part is handled by the parent method's sampling strategy
+-        # We assume query_points are already sampled along rays in world space
+-        
+         all_densities = []
+         all_colors = []
+@@ -224,30 +218,41 @@
+             all_colors.append(c)
+             
+-        # Step 5: Volume Rendering
+-        # Use the standard volume rendering equation from the parent article
+-        rendered_colors = volume_rendering(all_densities, all_colors, ray_samples)
+-        
++        # Step 5: Explicit Volume Rendering (matches parent formula)
++        # C(r) = sum_{i=1}^N T_i (1 - exp(-sigma_i * delta_i)) c_i
++        # T_i = exp(-sum_{j=1}^{i-1} sigma_j * delta_j)
++        T = torch.ones(len(all_densities))
++        C = torch.zeros(len(all_densities), 3)
++        
++        for i in range(len(all_densities)):
++            sigma = all_densities[i]
++            color = all_colors[i]
++            alpha = 1.0 - torch.exp(-sigma * step_size)
++            weight = T[i] * alpha
++            C[i] += weight * color
++            T[i+1] = T[i] * torch.exp(-sigma * step_size) if i+1 < len(T) else T[i]
++            
++        rendered_colors = C
+         return rendered_colors
+ 
+     def get_latent_embedding(self, t):
+-        # Retrieve or learn latent embedding for frame t
++        # Retrieve or learn latent embedding for frame t [S1]
+         pass
+ 
+     def get_viewing_direction(self, x, K, E):
+-        # Compute viewing direction from camera parameters
++        # Compute viewing direction from camera parameters [G]
+         pass
+ 
+ class MultiresolutionHashEncoding(nn.Module):
+-    def __init__(self, table_size):
++    def __init__(self, table_size, feature_dim):
+         super().__init__()
+-        # Initialize hash table with trainable features
++        # Initialize hash table with trainable features [G]
+         self.table = nn.Embedding(table_size, feature_dim)
++        self.feature_dim = feature_dim
+         
+     def forward(self, x):
+-        # Hash input coordinates to indices
+-        indices = hash_function(x)
++        # Hash input coordinates to indices using standard modular hashing [G]
++        indices = torch.abs(torch.round(x * 10000)).long() % self.table.num_embeddings
+         # Lookup features
+         features = self.table(indices)
+-        # Concatenate features from multiple resolutions (if applicable)
+         return features
+ 
+@@ -264,4 +269,5 @@
+             nn.Linear(256, 256 + 1) # Output: z (256 dims) + sigma (1 dim)
+         )
++        self.output_dim_z = 256
+         
+     def forward(self, x):
+@@ -315,11 +321,11 @@
+ 
+ ### Multiresolution Hash Encoding (MHE)
+-A technique to embed input coordinates to a high-dimensional space using trainable hash tables, allowing for efficient and high-resolution representation [S1]. It sets itself apart by enabling spatially varying resolution and faster training compared to dense voxel grids. Choose it when memory efficiency and high-frequency detail are needed. [S1]
++A technique to embed input coordinates to a high-dimensional space using trainable hash tables, allowing for efficient and high-resolution representation [S1]. It sets itself apart by enabling spatially varying resolution and faster training compared to dense voxel grids [G]. Choose it when memory efficiency and high-frequency detail are needed [G]. [S1]
+ 
+ ### Inverse Linear Blend Skinning (LBS)
+-A method to transform points from world space to unposed space using the inverse of the weighted sum of bone transformations. It is used as the base motion field before residual deformation. [S1]
++A method to transform points from world space to unposed space using the inverse of the weighted sum of bone transformations. It is used as the base motion field before residual deformation [S1].
+ 
+ ### SMPL Model
+-A parametric human model used to define the body shape, pose, and part decomposition. It provides the mesh, blend weights, and UV coordinates necessary for the part-based representation. [S1]
++A parametric human model used to define the body shape, pose, and part decomposition. It provides the mesh, blend weights, and UV coordinates necessary for the part-based representation [S1].
+ 
+ ## Operating characteristics
+@@ -327,8 +333,8 @@
+ *   **Memory Complexity:** Memory consumption is reduced by adapting the hash table size per part. Uniformly large tables are avoided to prevent excessive memory usage [S1].
+ *   **Measured Performance:** On the ZJU-MoCap dataset, the method achieves competitive PSNR. Ablation studies show that the part-based approach (286M params) converges faster and yields higher PSNR than a single MHE-augmented NeRF for the whole body (302M params) [S1].
+-*   **Strengths:** Fast training (minutes vs. hours), competitive visual quality, efficient distribution of representational power.
+-*   **Limitations:** Requires a parametric human model (SMPL) for part decomposition and motion parameterization. Performance may degrade if the SMPL fit is poor. [S1]
+-*   **When to use:** When rapid reconstruction of dynamic humans from sparse views is required, and a parametric model is available.
+-*   **When not to use:** When high-fidelity reconstruction of non-human subjects or subjects without a good parametric model is needed.
++*   **Strengths:** Fast training (minutes vs. hours), competitive visual quality, efficient distribution of representational power [S1].
++*   **Limitations:** Requires a parametric human model (SMPL) for part decomposition and motion parameterization [S1].
++*   **When to use:** When rapid reconstruction of dynamic humans from sparse views is required, and a parametric model is available [S1].
++*   **When not to use:** When high-fidelity reconstruction of non-human subjects or subjects without a good parametric model is needed [G].
+ 
+ ## Background

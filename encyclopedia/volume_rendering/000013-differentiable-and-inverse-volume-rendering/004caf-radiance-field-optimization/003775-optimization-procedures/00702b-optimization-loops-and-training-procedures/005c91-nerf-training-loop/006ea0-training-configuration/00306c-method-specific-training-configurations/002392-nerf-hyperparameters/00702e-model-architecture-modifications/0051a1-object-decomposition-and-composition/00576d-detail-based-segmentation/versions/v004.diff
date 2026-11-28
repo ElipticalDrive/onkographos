@@ -1,0 +1,241 @@
+--- v003.md
++++ v004.md
+@@ -4,137 +4,117 @@
+ 
+ ## Overview
+-Detail-based Segmentation is a divide-and-conquer preprocessing method that decomposes a complex scene into multiple NeRFs by segmenting objects based on their detail frequency [S1]. It assigns high-frequency objects to individual NeRFs while grouping low-frequency objects into a single joint NeRF, thereby reducing the learning burden on each network [S1]. Unlike sibling methods that may rely on semantic segmentation or geometric articulation, this approach uses frequency analysis of detected objects to determine architectural decomposition [S1].
++Detail-based Segmentation is a preprocessing technique for NeRF training that partitions a scene into multiple radiance fields based on the spatial frequency of detected objects [S1]. It solves the problem of single-NeRF networks struggling to learn high-frequency details by assigning high-frequency objects to dedicated NeRFs while grouping low-frequency objects into a shared NeRF [S1]. Unlike sibling methods that rely on semantic labels or explicit geometric decomposition, this method uses image-domain frequency analysis to determine object importance, ensuring that complex visual features are handled by specialized networks [S1].
+ 
+ ## How it works
+-**Inputs:** A set of original training images, object detection masks for all objects in those images, and a user-defined frequency threshold.
+-**Outputs:** A collection of segmented image sets, where each set corresponds to a dedicated NeRF (for high-frequency objects) or a joint NeRF (for low-frequency objects).
++**Inputs:** A set of training images $I = \{I_1, I_2, ..., I_N\}$ and a user-defined frequency threshold $\tau$.
++**Outputs:** A set of segmented image datasets $\{D_1, D_2, ..., D_K\}$, where each dataset $D_j$ corresponds to a specific NeRF instance (either a dedicated high-frequency object or a shared low-frequency background group).
+ 
+ **Data Structures:**
+-*   **Object Frequency Map:** A dictionary or table mapping each unique object ID to its maximum recorded detail frequency across all training images.
+-*   **Segmentation Mask:** A binary mask per image, where pixels belonging to a detected object are marked. Boundaries are defined by the outermost non-zero pixels of the mask.
++*   **Object Metadata:** For each detected object $o$ in image $I_n$, store:
++    *   `mask`: Binary mask $M_{n,o}$ of size $H \times W$.
++    *   `max_freq`: Scalar value representing the maximum detail frequency of object $o$ across all images.
++*   **Segmented Images:** New images $I'_{n,o}$ of size $H \times W$ containing only the scaled object $o$ on a transparent or black background.
++
++**Steps:**
++
++1.  **Object Detection:** Apply an object detection algorithm to all training images $I_n$ to identify objects and generate binary masks $M_{n,o}$ covering the pixels occupied by each object $o$ [S1].
++2.  **Frequency Calculation:** For each detected object $o$ in each image $I_n$, calculate the detail frequency $f_{n,o}$ [S1].
++    *   *Note:* The specific formula for $f_{n,o}$ is not provided in the sources [G]. It is assumed to be a measure of high-frequency content (e.g., gradient magnitude or Laplacian variance) within the masked region [G].
++3.  **Max Frequency Aggregation:** Determine the maximum frequency recorded for each object $o$ across all images in the dataset:
++    $$ F_o = \max_{n} (f_{n,o}) $$
++    This metric is chosen over average frequency because the maximum frequency better reflects the object's importance to the user's viewing experience, particularly when users focus on complex or high-frequency regions [S1].
++4.  **Segmentation Decision:** Compare $F_o$ against the threshold $\tau$:
++    *   If $F_o > \tau$, object $o$ is assigned to a **dedicated NeRF**.
++    *   If $F_o \le \tau$, object $o$ is assigned to the **shared NeRF** group (along with other low-frequency objects) [S1].
++5.  **Image Extraction and Scaling:** For each object $o$ assigned to a dedicated NeRF:
++    *   Extract the object from each image $I_n$ using the mask $M_{n,o}$, using the outermost pixels of the mask as boundaries [S1].
++    *   Apply interpolation scaling to enlarge the segmented object within the $H \times W$ frame [S1]. This reduces the spatial frequency of details the network must learn, improving rendering quality for high-frequency regions [S1].
++    *   Store the resulting scaled image as part of the training set for the dedicated NeRF [S1].
++6.  **Shared Group Processing:** For objects in the shared NeRF group, the original images (or cropped versions if necessary) are used for training the single shared NeRF [S1].
++
++**Pseudocode:**
++
++```python
++def detail_based_segmentation(images, threshold_tau):
++    """
++    images: List of training images.
++    threshold_tau: User-defined frequency threshold.
++    Returns: List of datasets for each NeRF.
++    """
++    # Step 1: Object Detection
++    # Returns list of (image_index, object_id, mask)
++    detections = detect_objects(images) 
++    
++    # Step 2 & 3: Frequency Calculation and Aggregation
++    # Object max frequencies
++    object_max_freqs = {} 
++    
++    for img_idx, obj_id, mask in detections:
++        # Calculate detail frequency for this object in this image
++        # Note: Specific frequency metric implementation is source-dependent [G]
++        freq = calculate_detail_frequency(images[img_idx], mask)
++        
++        if obj_id not in object_max_freqs:
++            object_max_freqs[obj_id] = freq
++        else:
++            # Update maximum frequency
++            object_max_freqs[obj_id] = max(object_max_freqs[obj_id], freq)
++            
++    # Step 4: Segmentation Decision
++    dedicated_objects = []
++    shared_objects = []
++    
++    for obj_id, max_freq in object_max_freqs.items():
++        if max_freq > threshold_tau:
++            dedicated_objects.append(obj_id)
++        else:
++            shared_objects.append(obj_id)
++            
++    # Step 5 & 6: Image Extraction and Scaling
++    dedicated_datasets = []
++    for obj_id in dedicated_objects:
++        dataset = []
++        for img_idx, obj_id_curr, mask in detections:
++            if obj_id_curr == obj_id:
++                # Extract object using outermost pixels as boundaries
++                cropped = extract_object(images[img_idx], mask)
++                # Scale up to retain image size but enlarge object
++                scaled = interpolate_scale(cropped, target_size=images[img_idx].shape)
++                dataset.append(scaled)
++        dedicated_datasets.append(dataset)
++        
++    # Shared dataset uses original images or combined low-freq objects
++    # Implementation detail for shared group not fully specified in sources [G]
++    shared_dataset = prepare_shared_dataset(images, shared_objects)
++    
++    return dedicated_datasets + [shared_dataset]
++```
+ 
+ **Parameters:**
+-*   **Threshold Frequency ($T$):** A user-adjustable scalar value used to decide if an object warrants a dedicated NeRF. Typical values are not specified in the sources [S1].
+-
+-**Steps:**
+-1.  **Object Detection:** Apply an object detection algorithm to all original training images to identify objects and generate binary masks covering all pixels occupied by each object [S1].
+-2.  **Frequency Calculation:** For each detected object in each image, calculate the detail frequency of that object within the image context [S1].
+-3.  **Max Frequency Aggregation:** Record the detail frequency for each object in each image. Determine the maximum frequency recorded for each object across all images [S1].
+-    *   *Note:* The method uses the maximum frequency rather than the average frequency because the maximum better reflects the importance of an object to the user's viewing experience [S1].
+-4.  **Classification:** Compare each object's maximum frequency against the threshold $T$:
+-    *   If $\text{MaxFreq}(obj) > T$, assign the object to a dedicated NeRF.
+-    *   If $\text{MaxFreq}(obj) \le T$, assign the object to the joint NeRF group [S1].
+-5.  **Extraction:** Extract the segmented object from each image based on its mask. The boundary of the extracted region is defined by the outermost pixels of the mask [S1].
+-6.  **Scaling:** Apply interpolation scaling to the extracted segmented parts to create new images for training. The target object is enlarged while retaining the same overall image size [S1]. This reduces the frequency of details the network needs to learn [S1].
+-
+-**Pseudocode:**
+-```python
+-def detail_based_segmentation(images, masks, threshold):
+-    """
+-    images: List of original training images.
+-    masks: List of corresponding object detection masks.
+-           Each mask may contain multiple objects or be processed per object.
+-    threshold: Float, the frequency threshold T.
+-    """
+-    # Step 1 & 2: Calculate max frequency for each object
+-    # Assuming objects are identified and masks are provided per object instance
+-    # or a single mask with labeled regions.
+-    object_max_frequencies = {} 
+-    
+-    for image, mask in zip(images, masks):
+-        # Identify distinct objects in the mask
+-        # Note: The source implies object detection provides the masks.
+-        # We iterate through detected objects.
+-        detected_objects = get_detected_objects(mask) 
+-        
+-        for obj_id, obj_mask in detected_objects:
+-            # Calculate detail frequency for this object in this image
+-            freq = calculate_detail_frequency(image, obj_mask)
+-            
+-            # Step 3: Update max frequency
+-            if obj_id not in object_max_frequencies:
+-                object_max_frequencies[obj_id] = freq
+-            else:
+-                object_max_frequencies[obj_id] = max(
+-                    object_max_frequencies[obj_id], freq
+-                )
+-    
+-    # Step 4: Classify objects
+-    dedicated_neRF_objects = []
+-    joint_neRF_objects = []
+-    
+-    for obj_id, max_freq in object_max_frequencies.items():
+-        if max_freq > threshold:
+-            dedicated_neRF_objects.append(obj_id)
+-        else:
+-            joint_neRF_objects.append(obj_id)
+-            
+-    # Step 5 & 6: Extract and Scale
+-    # Create training sets for dedicated NeRFs
+-    dedicated_training_sets = {}
+-    for obj_id in dedicated_neRF_objects:
+-        # Initialize set for this object
+-        dedicated_training_sets[obj_id] = []
+-        
+-        for image, mask in zip(images, masks):
+-            # Extract object using mask
+-            # Boundary is outermost pixels of the mask for this obj_id
+-            segmented_part = extract_region(image, mask, obj_id)
+-            
+-            # Scale up the object, keeping image size constant
+-            # Interpolation scaling is used
+-            scaled_image = interpolation_scale(segmented_part, target_size=image.shape)
+-            
+-            dedicated_training_sets[obj_id].append(scaled_image)
+-            
+-    # Create training set for joint NeRF
+-    joint_training_set = []
+-    for obj_id in joint_neRF_objects:
+-        for image, mask in zip(images, masks):
+-            segmented_part = extract_region(image, mask, obj_id)
+-            scaled_image = interpolation_scale(segmented_part, target_size=image.shape)
+-            joint_training_set.append(scaled_image)
+-            
+-    return dedicated_training_sets, joint_training_set
+-
+-def calculate_detail_frequency(image, mask):
+-    """
+-    Placeholder for the specific frequency calculation metric.
+-    The source does not provide the exact formula for 'detail frequency'.
+-    It is implied to be a measure of high-frequency content within the masked region.
+-    """
+-    # Implementation detail not provided in sources [S1]
+-    pass
+-
+-def extract_region(image, mask, obj_id):
+-    """
+-    Extracts the region defined by the mask for a specific object.
+-    Uses outermost pixels as boundaries.
+-    """
+-    # Implementation detail not provided in sources [S1]
+-    pass
+-
+-def interpolation_scale(segmented_part, target_size):
+-    """
+-    Scales the segmented part to target_size using interpolation.
+-    """
+-    # Implementation detail not provided in sources [S1]
+-    pass
+-```
++*   $\tau$ (Threshold frequency): A user-adjustable threshold used to decide which objects warrant individual NeRF representations [S1]. Typical values are not given in the sources [G].
+ 
+ **Edge Cases and Pitfalls:**
+-*   **Frequency Calculation:** The exact formula for "detail frequency" is not provided in the sources [S1]. Implementers must define this metric (e.g., using gradient magnitude, Laplacian variance, or Fourier analysis) [G].
+-*   **Mask Boundaries:** The method specifies using "outermost pixels" as boundaries. Care must be taken to handle irregular shapes and ensure the bounding box or crop region is correctly defined before scaling [S1].
+-*   **Threshold Sensitivity:** The threshold $T$ is user-adjustable. An inappropriate threshold may lead to too many or too few dedicated NeRFs, affecting rendering quality and resource usage [S1].
++*   **Precision:** The accuracy of the segmentation depends heavily on the object detection quality and the robustness of the frequency calculation metric [S1].
++*   **Boundaries:** The extraction process uses the "outermost pixels" of the mask as boundaries, which may lead to jagged edges if the mask is not smooth [S1].
++*   **Degenerate Input:** If no objects exceed the threshold, all objects are grouped into a single NeRF, effectively reverting to standard NeRF training [S1].
++
++## Subtopics
++
++### Frequency Metric Selection
++Uses maximum frequency rather than average frequency to prioritize objects with complex details that impact user experience [S1].
++
++### Scaling Strategy
++Interpolation scaling is used to enlarge objects in dedicated datasets, reducing the frequency of details the network needs to learn [S1].
+ 
+ ## Operating characteristics
+-*   **Time Complexity:** Depends on the object detection and frequency calculation steps. The segmentation itself is linear with respect to the number of objects and images.
+-*   **Memory Complexity:** Reduces the memory footprint per NeRF by isolating high-frequency details. The joint NeRF handles low-frequency objects, potentially sharing parameters [S1].
+-*   **Performance:** Improves rendering quality for high-frequency objects by reducing the frequency of details each network must learn [S1].
+-*   **Strengths:** Abstracts away network details, allowing direct application to all NeRF variants without modification [S1]. Better reflects user viewing experience by prioritizing high-frequency objects [S1].
+-*   **Limitations:** Requires accurate object detection and mask generation. The definition of "detail frequency" is not standardized in the source [S1].
++*   **Time Complexity:** The method adds a preprocessing overhead proportional to the number of images and detected objects, involving detection, frequency calculation, and image scaling [S1].
++*   **Memory Complexity:** Increases memory usage during training due to the storage of multiple NeRF models and their associated datasets [S1].
++*   **Performance:** Improves rendering quality for high-frequency details by allowing dedicated networks to focus on specific objects [S1].
++*   **Strengths:** Abstracts away network details, allowing direct application to any NeRF variant without modification [S1]. Reduces the learning burden for high-frequency regions [S1].
++*   **Limitations:** Requires object detection as a prerequisite. The threshold $\tau$ must be tuned manually [S1].
++*   **When to use:** When rendering complex scenes with distinct high-frequency objects on resource-constrained devices (e.g., mobile) where single NeRFs fail to capture details [S1].
+ 
+ ## Background
+-Detail-based Segmentation is part of the NeRFlex framework, designed for resource-aware real-time high-quality rendering of complex scenes on mobile devices [S1]. It addresses the limitation that a single NeRF has weak learning ability for high-frequency details, which results in lower rendering quality in those regions [S1]. The method is based on the observation that users often focus on the more complex side or high-frequency regions of objects [S1].
++Detail-based Segmentation was introduced in the NeRFlex framework, designed for resource-aware, real-time, high-quality rendering of complex scenes on mobile devices [S1]. The method leverages domain knowledge that single NeRFs have weak learning ability for high-frequency details, resulting in lower rendering quality in those regions [S1]. By segmenting objects based on frequency, NeRFlex can allocate computational resources more effectively [S1].
+ 
+ ## Sources

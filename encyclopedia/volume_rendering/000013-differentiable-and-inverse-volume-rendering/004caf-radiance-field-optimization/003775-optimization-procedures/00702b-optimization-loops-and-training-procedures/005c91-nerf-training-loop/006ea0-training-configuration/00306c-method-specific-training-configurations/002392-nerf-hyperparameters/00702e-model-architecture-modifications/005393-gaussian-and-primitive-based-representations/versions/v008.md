@@ -1,0 +1,44 @@
+# Gaussian and Primitive-Based Representations
+
+Also called: Explicit Radiance Fields, Differentiable Primitives, Neural Point Clouds
+
+## Overview
+Gaussian and Primitive-Based Representations replace the global continuous volumetric field of standard NeRF with explicit, differentiable geometric primitives (Gaussians, quadrics, or points) to improve rendering speed and geometric interpretability. Unlike implicit methods that require dense ray sampling, these methods leverage explicit structures to avoid empty space sampling and enable real-time rasterization or efficient local aggregation [S1].
+
+## Shared principles
+The family shares a shift from a monolithic MLP $F_\Theta: (\mathbf{x}, \mathbf{d}) \rightarrow (\sigma, \mathbf{c})$ to an explicit representation $\mathcal{E}$. The rendering process integrates outputs from these primitives along rays. Common mechanisms include:
+1.  **Explicit Parameterization:** Scene geometry and appearance are stored in learnable parameters of primitives (e.g., mean/covariance for Gaussians, coefficients for quadrics, feature vectors for points) rather than weights of a single deep network.
+2.  **Differentiable Assembly:** The final radiance is computed by differentiable operations over these primitives, such as rasterization (Gaussian Splatting), set-theoretic operations (DPA), or weighted aggregation (Point-NeRF) [S1].
+3.  **Local vs. Global:** Queries for density and color are resolved locally using neighborhood information or primitive intersections, reducing the computational complexity from $O(N_{samples} \times N_{layers})$ to operations dependent on the number of primitives $N_{prim}$ [S1].
+
+## Subtopics
+
+### [Differentiable Primitive Assembly](13657-differentiable-primitive-assembly.md)
+DPA models 3D shapes as an explicit assembly of quadric primitives, utilizing differentiable intersection and union operations to compute occupancy [13657-differentiable-primitive-assembly.md]. Unlike global continuous fields, DPA derives density and color from local interactions with these primitives, enabling shape abstraction trained solely with image-space losses without 3D supervision [13657-differentiable-primitive-assembly.md]. It distinguishes itself from sibling methods like Gaussian Splatting by using set-theoretic operations (intersection/union) on primitive distances rather than weighted aggregation or rasterization [13657-differentiable-primitive-assembly.md].
+
+### [Viewing Direction Gaussian Splatting](14273-viewing-direction-gaussian-splatting.md)
+VDGS is a hybrid neural rendering method that combines the explicit geometric representation of 3D Gaussian Splatting (GS) with the view-dependent appearance modeling of Neural Radiance Fields (NeRF) [14273-viewing-direction-gaussian-splatting.md]. It solves the limitation of classical GS, where color and opacity are static per primitive, by using a neural network to modulate opacity (and optionally color) based on the viewing direction, thereby accurately rendering specular reflections, transparency, and shadows without significantly increasing training time [14273-viewing-direction-gaussian-splatting.md]. Unlike classical GS, VDGS achieves NeRF-quality view-dependent effects while retaining the fast differentiable rasterization pipeline of Gaussian primitives [14273-viewing-direction-gaussian-splatting.md].
+
+### [Point-NeRF Representation](15538-point-nerf-representation.md)
+Point-NeRF is a point-based radiance field representation that models a continuous volumetric radiance field using a discrete neural point cloud [15538-point-nerf-representation.md]. It solves the inefficiency of global continuous fields by leveraging classical point clouds to approximate scene geometry, thereby avoiding ray sampling in empty space [15538-point-nerf-representation.md]. Unlike its sibling [Differentiable Primitive Assembly](13657-differentiable-primitive-assembly.md) which uses differentiable set operations on primitive distances, Point-NeRF relies on local aggregation of neural features from neighboring points via inverse distance weighting [15538-point-nerf-representation.md].
+
+### [Frequency-Modulated Point Cloud Rendering](15903-frequency-modulated-point-cloud-rendering.md)
+Frequency-Modulated Point Cloud Rendering (also known as AFNet) is a real-time rendering pipeline that represents scenes as explicit point clouds and uses an Adaptive Frequency Net (AFNet) to modulate implicit radiance signals with local texture frequency encoding [15903-frequency-modulated-point-cloud-rendering.md]. It solves the problem of high-frequency reconstruction limitations in standard neural radiance fields by allowing the network to adaptively select frequency basis support for each point, enabling high-fidelity local detail reconstruction and user-friendly editing [15903-frequency-modulated-point-cloud-rendering.md]. Unlike implicit NeRF methods, it is 1700× faster than NeRF and 37× faster than CCNeRF, while supporting direct point cloud manipulation for object editing and scene composition [15903-frequency-modulated-point-cloud-rendering.md].
+
+### GARF
+#### definition
+- GARF uses Gaussian activations as an effective alternative to positional encoding in NeRF, in conjunction with bundle adjustment for pose estimation [S1].
+- It successfully recovers scene representations from unknown camera poses, even in challenging scenes with low-textured regions, making it suitable for real-world applications [S1].
+
+#### step
+- Uses Gaussian activations instead of positional encoding [S1].
+- Performs bundle adjustment for pose estimation [S1].
+
+#### number
+- Successfully recovers scene representations from unknown camera poses in challenging scenes with low-textured regions [S1].
+
+## Background
+The shift from implicit to explicit representations in radiance fields emerged to address the computational bottlenecks of volume rendering and the lack of explicit geometric control in standard NeRF. While early NeRF variants relied on dense MLPs, methods like Gaussian Splatting and Point-NeRF introduced explicit primitives to enable real-time rendering. Differentiable Primitive Assembly (DPA) further explored explicit shape abstraction using quadrics. GARF (April 2022) introduced Gaussian activations as an alternative to positional encoding, specifically targeting pose estimation from unknown camera poses [S1]. These methods collectively form a family of "explicit" or "primitive-based" radiance fields that prioritize geometric interpretability and rendering efficiency over the purely implicit continuity of standard NeRF.
+
+## Sources
+[S1] Neural Radiance Fields in 3D Vision: A Comprehensive Review, https://doi.org/10.26599/cvm.2026.9450535, fetched 2026-10-28

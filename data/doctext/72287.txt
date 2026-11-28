@@ -1,0 +1,2482 @@
+# Logic Voxels
+
+This is a personal game project created with [Bevy](https://bevyengine.org/).
+Development overview and final thoughts at [LogicProjects on Youtube](https://www.youtube.com/watch?v=VoohRYGMjf8).
+
+This is a multiplayer voxel game project using renet networking.  The game can be launched by default in a host mode where a single application will run both the server and the client.  A standalone server can also be launched which will create a gui allowing for the modification of server entities and viewing debugging information about network traffic.  
+
+Clients are able to break and place blocks which will update the chunks on the server which will also send those updates on to other connected clients. The design also features a simple way to send data blocks larger than a single packet size which is used for streaming chunks from the server to the client in a compressed format.  The player moves with WASD, places blocks with right click, and destroys blocks with left click.  The world randomly generates upon the first load but subsequent plays will read the chunks from save files.
+
+The actual chunk meshes are created at run time using a greedy meshing algorithm.  This results in a much lower vertex count allowing for larger worlds to be loaded.
+
+![Example Gif](gifs/greedy_mesh_demo.gif)
+
+The game features integration with rapier physics which allows for the players and physics objects to collide with the dynamically generated chunk mesh.
+
+![Example Gif](gifs/physics_demo.gif)
+
+The organization follows a server client model.  In src/bin there are 3 projects, one for running the game in host mode which is the default, and one each for the server and client.  In the chunks module there is general shared data and functions like blocks and core chunk data types but then within the module there are sub-modules for the specfic client and server side operations (such as greedy mesh creation). Finally the networking module provides a simple wrapper over Renet and turns the raw packets into more friendly Bevy events and other ECS concepts.
+
+All assets and code were created by LogicProjects (mwbryant) and are free to use in any way without restriction.
+
+# Usage
+
+Run the experimental single binary which creates a server and client in 1 app
+```
+cargo run
+```
+
+Run the standalone server
+```
+cargo run --bin server
+```
+
+Run a client
+```
+cargo run --bin client
+```
+
+# Contributions
+This project is currently closed to contributions! This is just a personal fun project for me.
+
+### assets/custom_material.wgsl
+```
+#import bevy_pbr::mesh_view_bindings
+#import bevy_pbr::mesh_bindings
+
+#import bevy_pbr::mesh_functions
+
+struct Vertex {
+    @location(0) position: vec3<f32>,
+    @location(1) normals: vec2<u32>,
+    @location(2) uvs: vec2<u32>,
+    @location(3) index: u32,
+};
+
+struct VertexOutput {
+    @builtin(position) clip_position: vec4<f32>,
+    @location(1) normals: vec2<u32>,
+    @location(2) uvs: vec2<f32>,
+    @location(3) index: u32,
+};
+
+@vertex
+fn vertex(vertex: Vertex) -> VertexOutput {
+    var out: VertexOutput;
+    out.clip_position = mesh_position_local_to_clip(mesh.model, vec4<f32>(vertex.position, 1.0));
+    out.uvs = vec2<f32>(vertex.uvs);
+    if (vertex.uvs.x == u32(0)) {
+        out.uvs.x = 0.001;
+    } else {
+        out.uvs.x -= 0.001;
+    }
+    if (vertex.uvs.y == u32(0)) {
+        out.uvs.y = 0.001;
+    } else {
+        out.uvs.y -= 0.001;
+    }
+
+    out.index = vertex.index;
+    out.normals = vertex.normals;
+    return out;
+}
+
+@group(1) @binding(0)
+var array_texture: texture_2d_array<f32>;
+//var texture: texture_2d<f32>;
+@group(1) @binding(1)
+var texture_sampler: sampler;
+
+@fragment
+fn fragment(input: VertexOutput) -> @location(0) vec4<f32> {
+    //var u = f32(input.uvs.x) / 16.0;
+    //var v = f32(input.uvs.y) / 16.0;
+    //var uv = vec2<f32>(u,v);
+    //uv.x += f32(input.index & u32(0x000F)) / 16.0;
+    //uv.y += f32(input.index & u32(0x00F0)) / 16.0;
+    
+
+    //return vec4<f32>(0.5,0.5,0.5,0.5);
+
+    //return vec4<f32>(f32(input.normals[1]) / 3.0);
+    return textureSample(array_texture, texture_sampler, input.uvs, i32(input.index));
+}
+```
+
+### src/lib.rs
+```
+#![allow(clippy::too_many_arguments)]
+
+pub use bevy::{
+    asset::AssetServerSettings,
+    pbr::wireframe::WireframePlugin,
+    render::{
+        render_resource::{AddressMode, FilterMode, SamplerDescriptor},
+        texture::ImageSettings,
+    },
+    window::PresentMode,
+};
+use lz4::block::{compress, CompressionMode};
+
+pub use crate::prelude::*;
+pub use bevy_flycam::{FlyCam, NoCameraPlayerPlugin};
+pub use bevy_inspector_egui::WorldInspectorPlugin;
+
+pub use bevy::utils::HashMap;
+pub use bevy_renet::renet::*;
+pub use bevy_renet::*;
+use serde::{Deserialize, Serialize};
+
+pub const PROTOCOL_ID: u64 = 1000;
+
+mod chunks;
+mod networking;
+mod physics;
+mod prelude;
+
+#[derive(Debug, Clone, Eq, PartialEq, Hash)]
+pub enum ClientState {
+    MainMenu,
+    Connecting,
+    Gameplay,
+}
+```
+
+### src/physics.rs
+```
+use bevy::{ecs::event::ManualEventReader, input::mouse::MouseMotion};
+use bevy_flycam::MovementSettings;
+
+use bevy_rapier3d::prelude::*;
+
+use crate::prelude::*;
+
+pub struct PhysicsPlugin;
+
+impl Plugin for PhysicsPlugin {
+    fn build(&self, app: &mut App) {
+        app
+            //.add_plugin(NoCameraPlayerPlugin)
+            .add_plugin(RapierPhysicsPlugin::<NoUserData>::default())
+            .add_plugin(RapierDebugRenderPlugin::default())
+            .init_resource::<InputState>()
+            .insert_resource(MovementSettings {
+                sensitivity: 0.00012,
+                speed: 4.,
+            })
+            .add_system_set(SystemSet::on_enter(ClientState::Gameplay).with_system(test_physics))
+            .add_system_set(
+                SystemSet::on_update(ClientState::Gameplay)
+                    .with_system(player_move)
+                    .with_system(player_look)
+                    .with_system(cursor_grab),
+            );
+    }
+}
+
+fn test_physics(mut commands: Commands, mut meshes: ResMut<Assets<Mesh>>, mut mats: ResMut<Assets<StandardMaterial>>) {
+    commands
+        .spawn_bundle(SpatialBundle::default())
+        //.spawn_bundle(PbrBundle {
+        //mesh: meshes.add(shape::Cube::default().into()),
+        //material: mats.add(Color::RED.into()),
+        //..default()
+        //})
+        .insert(LockedAxes::ROTATION_LOCKED)
+        .insert(RigidBody::Dynamic)
+        .insert(Collider::capsule(Vec3::new(0.0, 0.7, 0.0), Vec3::splat(0.0), 0.4))
+        .insert(GravityScale(0.1))
+        .insert(Restitution::coefficient(0.7));
+}
+
+//Yoinked from NoCameraPlayerPlugin to allow working with system sets
+fn player_move(
+    keys: Res<Input<KeyCode>>,
+    time: Res<Time>,
+    windows: Res<Windows>,
+    settings: Res<MovementSettings>,
+    mut query: Query<(&mut Transform, &mut Velocity), With<FlyCam>>,
+) {
+    if let Some(window) = windows.get_primary() {
+        for (mut transform, mut phys_velocity) in query.iter_mut() {
+            let mut velocity = Vec3::ZERO;
+            let local_z = transform.local_z();
+            let forward = -Vec3::new(local_z.x, 0., local_z.z);
+            let right = Vec3::new(local_z.z, 0., -local_z.x);
+
+            for key in keys.get_pressed() {
+                if window.cursor_locked() {
+                    match key {
+                        KeyCode::W => velocity += forward,
+                        KeyCode::S => velocity -= forward,
+                        KeyCode::A => velocity -= right,
+                        KeyCode::D => velocity += right,
+                        //KeyCode::Space => velocity += Vec3::Y,
+                        //KeyCode::LShift => velocity -= Vec3::Y,
+                        _ => (),
+                    }
+                }
+            }
+
+            velocity = velocity.normalize_or_zero();
+
+            info!("{:?}", velocity);
+            phys_velocity.linvel.x = 0.0;
+            phys_velocity.linvel.z = 0.0;
+            phys_velocity.linvel += velocity * settings.speed * time.delta_seconds() * 100.;
+        }
+    } else {
+        warn!("Primary window not found for `player_move`!");
+    }
+}
+//What is this...
+#[derive(Default)]
+struct InputState {
+    reader_motion: ManualEventReader<MouseMotion>,
+    pitch: f32,
+    yaw: f32,
+}
+
+fn player_look(
+    settings: Res<MovementSettings>,
+    windows: Res<Windows>,
+    mut state: ResMut<InputState>,
+    motion: Res<Events<MouseMotion>>,
+    mut query: Query<&mut Transform, With<FlyCam>>,
+) {
+    if let Some(window) = windows.get_primary() {
+        let mut delta_state = state.as_mut();
+        for mut transform in query.iter_mut() {
+            for ev in delta_state.reader_motion.iter(&motion) {
+                if window.cursor_locked() {
+                    // Using smallest of height or width ensures equal vertical and horizontal sensitivity
+                    let window_scale = window.height().min(window.width());
+                    delta_state.pitch -= (settings.sensitivity * ev.delta.y * window_scale).to_radians();
+                    delta_state.yaw -= (settings.sensitivity * ev.delta.x * window_scale).to_radians();
+                }
+
+                delta_state.pitch = delta_state.pitch.clamp(-1.54, 1.54);
+
+                // Order is important to prevent unintended roll
+                transform.rotation =
+                    Quat::from_axis_angle(Vec3::Y, delta_state.yaw) * Quat::from_axis_angle(Vec3::X, delta_state.pitch);
+            }
+        }
+    } else {
+        warn!("Primary window not found for `player_look`!");
+    }
+}
+
+fn toggle_grab_cursor(window: &mut Window) {
+    window.set_cursor_lock_mode(!window.cursor_locked());
+    window.set_cursor_visibility(!window.cursor_visible());
+}
+
+fn cursor_grab(keys: Res<Input<KeyCode>>, mut windows: ResMut<Windows>) {
+    if let Some(window) = windows.get_primary_mut() {
+        if keys.just_pressed(KeyCode::Escape) {
+            toggle_grab_cursor(window);
+        }
+    } else {
+        warn!("Primary window not found for `cursor_grab`!");
+    }
+}
+
+pub fn add_collider(commands: &mut Commands, entity: Entity, desc: MeshDescription) {
+    //FIXME this seems to not work if the entity did not already have a collider
+    // Is rapier caching something? can I add a disabled collider to work around this
+    if let Some(new_collider) = create_collider(desc) {
+        commands.entity(entity).insert(new_collider);
+    } else {
+        commands.entity(entity).remove::<Collider>();
+    }
+}
+
+pub fn create_collider(desc: MeshDescription) -> Option<Collider> {
+    let tri_count = desc.vert_indicies.len() / 3;
+    let mut indices = Vec::with_capacity(tri_count);
+    for index in 0..tri_count {
+        indices.push([
+            desc.vert_indicies[index * 3] as u32,
+            desc.vert_indicies[index * 3 + 1] as u32,
+            desc.vert_indicies[index * 3 + 2] as u32,
+        ]);
+    }
+    if tri_count > 0 {
+        Some(Collider::trimesh(desc.verts, indices))
+    } else {
+        None
+    }
+}
+```
+
+### src/prelude.rs
+```
+pub use bevy::prelude::*;
+
+pub use crate::chunks::direction::Direction;
+pub use crate::chunks::*;
+pub use crate::networking::*;
+pub use crate::physics::*;
+pub use crate::*;
+
+pub const CHUNK_SIZE: usize = 16;
+pub const WORLD_SIZE: usize = 2;
+pub const MAX_CHUNK_UPDATES_PER_FRAME: usize = 30;
+
+//XXX maybe a memory leak because unloaded chunks are never removed
+// Not a very robust design
+#[derive(Default)]
+pub struct LoadedChunks {
+    pub ent_map: HashMap<IVec3, Entity>,
+}
+```
+
+### src/bin/client.rs
+```
+use bevy::log::LogSettings;
+
+use logic_voxels::{client_chunks::ClientChunkPlugin, *};
+
+fn main() {
+    App::new()
+        .add_system(panic_on_error_system)
+        .insert_resource(ImageSettings {
+            default_sampler: SamplerDescriptor {
+                address_mode_u: AddressMode::Repeat,
+                address_mode_v: AddressMode::Repeat,
+                address_mode_w: AddressMode::Repeat,
+                mag_filter: FilterMode::Nearest,
+                min_filter: FilterMode::Nearest,
+                ..Default::default()
+            },
+        })
+        .insert_resource(LogSettings {
+            filter: "info,wgpu_core=warn,wgpu_hal=off,rechannel=warn".into(),
+            level: bevy::log::Level::DEBUG,
+        })
+        .insert_resource(WindowDescriptor {
+            width: 1280.,
+            height: 720.,
+            title: "Voxel Tests".to_string(),
+            //present_mode: PresentMode::Immediate,
+            resizable: false,
+            ..Default::default()
+        })
+        .insert_resource(AssetServerSettings {
+            watch_for_changes: true,
+            ..default()
+        })
+        .add_state(ClientState::MainMenu)
+        .add_plugin(RenetClientPlugin)
+        //.insert_resource(create_renet_client())
+        .init_resource::<Lobby>()
+        //XXX is this a bad way to do things...
+        .init_resource::<CurrentClientMessages>()
+        .init_resource::<CurrentClientBlockMessages>()
+        .add_stage_after(CoreStage::PreUpdate, ReadMessages, SystemStage::parallel())
+        .add_system_to_stage(
+            ReadMessages,
+            client_recieve_messages.with_run_criteria(run_if_client_connected),
+        )
+        .add_system_set(SystemSet::on_update(ClientState::MainMenu).with_system(client_connection_system))
+        .add_system_set(SystemSet::on_update(ClientState::Connecting).with_system(client_connection_ready))
+        .add_plugin(ClientChunkPlugin)
+        .add_plugin(PhysicsPlugin)
+        .add_plugins(DefaultPlugins)
+        //TODO move
+        .add_plugin(MaterialPlugin::<CustomMaterial>::default())
+        .add_plugin(WorldInspectorPlugin::default())
+        .add_plugin(WireframePlugin)
+        .add_startup_system(spawn_camera)
+        .add_system_set(SystemSet::on_update(ClientState::Gameplay).with_system(client_ping_test))
+        .run();
+}
+```
+
+### src/bin/server.rs
+```
+use bevy::log::LogSettings;
+
+use logic_voxels::{server_chunks::ServerChunkPlugin, *};
+use renet_visualizer::RenetServerVisualizer;
+
+fn main() {
+    App::new()
+        .insert_resource(LogSettings {
+            filter: "info,wgpu_core=warn,wgpu_hal=off,rechannel=warn".into(),
+            level: bevy::log::Level::DEBUG,
+        })
+        .insert_resource(WindowDescriptor {
+            width: 1200.,
+            height: 640.,
+            title: "Voxel Server".to_string(),
+            //present_mode: PresentMode::Immediate,
+            resizable: false,
+            ..Default::default()
+        })
+        .add_plugins(DefaultPlugins)
+        .add_plugin(WorldInspectorPlugin::default())
+        // Cpu limiting (I wish I had a better way to make a headless bevy app low power but I can't find one)
+        // Poor headless bevy
+        //.add_system(janky_cpu_limiting)
+        //.add_plugin(LogPlugin::default())
+        .add_plugin(RenetServerPlugin)
+        .init_resource::<Lobby>()
+        .insert_resource(create_renet_server())
+        .insert_resource(RenetServerVisualizer::<200>::default())
+        .add_system(update_visulizer)
+        .add_system(server_connection)
+        //XXX is this a bad way to do things...
+        .init_resource::<CurrentServerMessages>()
+        .add_stage_after(CoreStage::PreUpdate, ReadMessages, SystemStage::parallel())
+        .add_system_to_stage(ReadMessages, server_recieve_messages)
+        .add_plugin(ServerChunkPlugin)
+        .add_system(server_ping_test)
+        .run();
+}
+```
+
+### src/bin/single.rs
+```
+use std::net::SocketAddr;
+
+use bevy::log::LogSettings;
+
+use local_ip_address::local_ip;
+use logic_voxels::{client_chunks::ClientChunkPlugin, server_chunks::ServerChunkPlugin, *};
+use renet_visualizer::RenetServerVisualizer;
+
+fn main() {
+    App::new()
+        .add_system(panic_on_error_system)
+        .insert_resource(ImageSettings {
+            default_sampler: SamplerDescriptor {
+                address_mode_u: AddressMode::Repeat,
+                address_mode_v: AddressMode::Repeat,
+                address_mode_w: AddressMode::Repeat,
+                mag_filter: FilterMode::Nearest,
+                min_filter: FilterMode::Nearest,
+                ..Default::default()
+            },
+        })
+        .insert_resource(LogSettings {
+            filter: "info,wgpu_core=warn,wgpu_hal=off,rechannel=warn".into(),
+            level: bevy::log::Level::DEBUG,
+        })
+        .insert_resource(WindowDescriptor {
+            width: 1280.,
+            height: 720.,
+            title: "Voxel Tests".to_string(),
+            //present_mode: PresentMode::Immediate,
+            resizable: false,
+            ..Default::default()
+        })
+        .insert_resource(AssetServerSettings {
+            watch_for_changes: true,
+            ..default()
+        })
+        .add_stage_after(CoreStage::PreUpdate, ReadMessages, SystemStage::parallel())
+        .init_resource::<CurrentServerMessages>()
+        .init_resource::<CurrentClientMessages>()
+        .insert_resource(RenetServerVisualizer::<200>::default())
+        .init_resource::<CurrentClientBlockMessages>()
+        .add_state(ClientState::Connecting)
+        .add_plugin(RenetClientPlugin)
+        .add_plugin(RenetServerPlugin)
+        .insert_resource(create_renet_client(SocketAddr::new(local_ip().unwrap(), 5000)))
+        .insert_resource(create_renet_server())
+        .init_resource::<Lobby>()
+        .add_system(server_connection)
+        .add_system_to_stage(ReadMessages, server_recieve_messages)
+        .add_plugin(ServerChunkPlugin)
+        .add_system_to_stage(
+            ReadMessages,
+            client_recieve_messages.with_run_criteria(run_if_client_connected),
+        )
+        .add_system_set(SystemSet::on_update(ClientState::MainMenu).with_system(client_connection_system))
+        .add_system_set(SystemSet::on_update(ClientState::Connecting).with_system(client_connection_ready))
+        .add_plugin(ClientChunkPlugin)
+        .add_plugins(DefaultPlugins)
+        .add_plugin(PhysicsPlugin)
+        //TODO move
+        .add_plugin(MaterialPlugin::<CustomMaterial>::default())
+        .add_plugin(WorldInspectorPlugin::default())
+        .add_plugin(WireframePlugin)
+        .add_startup_system(spawn_camera)
+        .add_system_set(SystemSet::on_update(ClientState::Gameplay).with_system(server_ping_test))
+        .add_system_set(SystemSet::on_update(ClientState::Gameplay).with_system(client_ping_test))
+        .run();
+}
+```
+
+### src/chunks/block.rs
+```
+use crate::prelude::*;
+
+#[derive(Default, Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub enum Block {
+    #[default]
+    Air,
+    Grass,
+    Dirt,
+    Metal,
+    Glass,
+    Machine,
+}
+
+impl Block {
+    pub fn is_filled(&self) -> bool {
+        !matches!(self, Block::Air)
+    }
+
+    pub fn get_face_index(&self, direction: Direction) -> u32 {
+        match self {
+            Block::Air => 0,
+            Block::Grass => match direction {
+                Direction::Front | Direction::Back | Direction::Left | Direction::Right => 1,
+                Direction::Top => 0,
+                Direction::Bottom => 2,
+            },
+            Block::Dirt => 2,
+            Block::Metal => match direction {
+                Direction::Front | Direction::Back | Direction::Left | Direction::Right => 3,
+                Direction::Top => 5,
+                Direction::Bottom => 6,
+            },
+            Block::Glass => 4,
+            Block::Machine => match direction {
+                Direction::Front | Direction::Back | Direction::Left | Direction::Right => 7,
+                Direction::Top => 5,
+                Direction::Bottom => 6,
+            },
+        }
+    }
+}
+```
+
+### src/chunks/chunk.rs
+```
+use std::sync::{Arc, RwLock, Weak};
+
+use lz4::block::decompress;
+
+use crate::prelude::*;
+
+#[derive(Component)]
+pub struct ChunkComp {
+    chunk: Arc<RwLock<Chunk>>,
+    associated_entities: HashMap<IVec3, Entity>,
+    buffered_writes: Vec<BufferedWrite>,
+}
+
+#[derive(Component, Clone, Serialize, Deserialize)]
+pub struct BlockController {
+    block: Block,
+}
+
+#[derive(Component, Clone, Serialize, Deserialize)]
+pub enum MachineType {
+    Furnace,
+}
+
+#[derive(Component, Clone, Serialize, Deserialize)]
+pub struct Furnace {
+    heat: f32,
+}
+
+#[derive(Bundle, Serialize, Deserialize)]
+pub struct FurnaceBundle {
+    machine: MachineType,
+    furnace: Furnace,
+    controller: BlockController,
+}
+
+#[derive(Serialize, Deserialize)]
+pub struct SerializedMachines {
+    furnaces: Vec<FurnaceBundle>,
+}
+
+impl MachineType {
+    fn spawn_machine(&self, commands: &mut Commands) -> Entity {
+        match self {
+            MachineType::Furnace => commands
+                .spawn_bundle(FurnaceBundle {
+                    machine: self.clone(),
+                    furnace: Furnace { heat: 100.0 },
+                    controller: BlockController { block: Block::Machine },
+                })
+                .id(),
+        }
+    }
+    fn serialize_all_machines(
+        //Usually from a chunks associated entities
+        entities: Vec<Entity>,
+        //All the types in the bundle
+        //TODO it would be nice to not need a query for literally every machine type but hmm
+        furnace_query: &Query<(&MachineType, &Furnace, &BlockController)>,
+    ) -> SerializedMachines {
+        let mut to_return = SerializedMachines {
+            furnaces: Vec::default(),
+        };
+        for entity in entities {
+            if let Ok((machine, furnace, controller)) = furnace_query.get(entity) {
+                to_return.furnaces.push(FurnaceBundle {
+                    machine: machine.clone(),
+                    furnace: furnace.clone(),
+                    controller: controller.clone(),
+                });
+            }
+        }
+        to_return
+    }
+}
+
+pub struct BufferedWrite {
+    offset: IVec3,
+    to_write: Block,
+}
+
+impl ChunkComp {
+    pub fn new(chunk: Arc<RwLock<Chunk>>) -> Self {
+        ChunkComp {
+            chunk,
+            associated_entities: HashMap::default(),
+            buffered_writes: Vec::default(),
+        }
+    }
+    //These functions prevent deadlocks, in reality all that matters is writes finish so a pub read, private write would be nice
+    //TODO send to all clients if server write?
+    pub fn write_block(&self, index: IVec3, block: Block) {
+        //There's really no point in bounds checking this index, a logic error trying to write the wrong block should panic
+        //Maybe one day there will be a use for a varient that returns a recoverable error
+        self.write_block_xyz(index.x as usize, index.y as usize, index.z as usize, block);
+    }
+
+    pub fn buffered_write(&mut self, index: IVec3, block: Block) {
+        self.buffered_writes.push(BufferedWrite {
+            offset: index,
+            to_write: block,
+        });
+    }
+
+    pub fn apply_buffered_writes(&mut self) {
+        for write in self.buffered_writes.iter() {
+            self.write_block(write.offset, write.to_write);
+        }
+        self.buffered_writes.clear();
+    }
+
+    pub fn write_block_xyz(&self, x: usize, y: usize, z: usize, block: Block) {
+        //let _span = info_span!("Write Block", name = "Write Block").entered();
+        self.chunk.write().unwrap().cubes[x][y][z] = block;
+        //Really only need to dirty if block is different but eh
+        if !self.chunk.read().unwrap().dirty {
+            self.write_dirty(true);
+        }
+        if x == CHUNK_SIZE - 1 {
+            self.dirty_neighbor(Direction::Front);
+        }
+        if x == 0 {
+            self.dirty_neighbor(Direction::Back);
+        }
+        if y == CHUNK_SIZE - 1 {
+            self.dirty_neighbor(Direction::Top);
+        }
+        if y == 0 {
+            self.dirty_neighbor(Direction::Bottom);
+        }
+        if z == CHUNK_SIZE - 1 {
+            self.dirty_neighbor(Direction::Left);
+        }
+        if z == 0 {
+            self.dirty_neighbor(Direction::Right);
+        }
+    }
+
+    pub fn write_dirty(&self, value: bool) {
+        self.chunk.write().unwrap().dirty = value;
+    }
+
+    pub fn dirty_neighbor(&self, dir: Direction) {
+        if let Some(neighbor) = self.chunk.read().unwrap().neighbors[dir].upgrade() {
+            if !neighbor.read().unwrap().dirty {
+                neighbor.write().unwrap().dirty = true;
+            }
+        }
+    }
+
+    pub fn set_neighbor(&self, dir: Direction, neighbor: &ChunkComp) {
+        self.chunk.write().unwrap().neighbors[dir] = neighbor.as_neighbor();
+    }
+
+    //Times for updating dirt with 16 chunksize and 20 world size, all chunks updated (8000)
+    //~16-18 ms to pre-read neighbors
+    //~20-22 ms to read as you go
+    //There probably is a way to only do one loop here while also getting and holding the read lock but borrow checker angry
+    #[allow(clippy::needless_range_loop)]
+    pub fn apply_function_to_blocks<F>(&mut self, mut function: F)
+    where
+        F: FnMut(&Block, [Option<Block>; 6]) -> Option<Block>,
+    {
+        let chunk = self.read_chunk();
+        let mut neighbors = [[[[None; 6]; CHUNK_SIZE]; CHUNK_SIZE]; CHUNK_SIZE];
+        for x in 0..CHUNK_SIZE {
+            for y in 0..CHUNK_SIZE {
+                for z in 0..CHUNK_SIZE {
+                    //TODO this can be better, a lot of repeated neighbor getting
+                    //let neighbors = self.read_chunk().get_block_neighbors(x, y, z);
+                    neighbors[x][y][z] = chunk.get_block_neighbors(x, y, z);
+                }
+            }
+        }
+        drop(chunk);
+        for x in 0..CHUNK_SIZE {
+            for y in 0..CHUNK_SIZE {
+                for z in 0..CHUNK_SIZE {
+                    if let Some(block) = function(&self.read_block_xyz(x, y, z), neighbors[x][y][z]) {
+                        //TODO perf check buffered versus normal write
+                        //self.write_block(IVec3::new(x as i32, y as i32, z as i32), block)
+                        self.buffered_write(IVec3::new(x as i32, y as i32, z as i32), block)
+                    }
+                }
+            }
+        }
+    }
+
+    fn as_neighbor(&self) -> Weak<RwLock<Chunk>> {
+        Arc::downgrade(&self.chunk)
+    }
+
+    pub fn read_block_xyz(&self, x: usize, y: usize, z: usize) -> Block {
+        //returns a copy of the block
+        self.chunk.read().unwrap().cubes[x][y][z]
+    }
+
+    pub fn read_block(&self, index: IVec3) -> Block {
+        //returns a copy of the block
+        self.chunk.read().unwrap().cubes[index.x as usize][index.y as usize][index.z as usize]
+    }
+
+    pub fn read_dirty(&self) -> bool {
+        self.chunk.read().unwrap().dirty
+    }
+
+    pub fn read_chunk(&self) -> std::sync::RwLockReadGuard<Chunk> {
+        self.chunk.read().unwrap()
+    }
+}
+
+type ChunkData = [[[Block; CHUNK_SIZE]; CHUNK_SIZE]; CHUNK_SIZE];
+pub type CompressedChunk = Vec<u8>;
+
+#[derive(Clone, Debug, Serialize, Deserialize)]
+pub struct Chunk {
+    pub pos: IVec3,
+    pub cubes: ChunkData,
+    pub dirty: bool,
+    //Cant be pub because then you could write them and cause weird deadlocks
+    #[serde(skip)]
+    neighbors: [Weak<RwLock<Chunk>>; 6],
+}
+
+impl Default for Chunk {
+    fn default() -> Chunk {
+        Chunk {
+            pos: IVec3::ZERO,
+            cubes: [[[Block::Air; CHUNK_SIZE]; CHUNK_SIZE]; CHUNK_SIZE],
+            dirty: false,
+            neighbors: [
+                Weak::new(),
+                Weak::new(),
+                Weak::new(),
+                Weak::new(),
+                Weak::new(),
+                Weak::new(),
+            ],
+        }
+    }
+}
+
+impl Chunk {
+    pub fn from_compressed(bytes: &CompressedChunk) -> Self {
+        let message = decompress(bytes, None).unwrap();
+        bincode::deserialize(&message).unwrap()
+    }
+
+    pub fn compress(&self) -> CompressedChunk {
+        let message = bincode::serialize(self).unwrap();
+        //Lib doesn't document max compression value but the linux man for the same underlying lib says 12 is max
+        compress(&message, Some(CompressionMode::HIGHCOMPRESSION(12)), true).unwrap()
+    }
+
+    //FIXME this is so janky
+    pub fn world_to_chunk(pos: Vec3) -> (IVec3, IVec3) {
+        let mut i_pos = pos.as_ivec3();
+        if pos.x < 0. {
+            i_pos.x -= 1;
+        }
+        if pos.y < 0. {
+            i_pos.y -= 1;
+        }
+        if pos.z < 0. {
+            i_pos.z -= 1;
+        }
+        Chunk::i_world_to_chunk(i_pos)
+    }
+
+    // Chunk pos and offset
+    pub fn i_world_to_chunk(pos: IVec3) -> (IVec3, IVec3) {
+        let size = CHUNK_SIZE as i32;
+        let offset = IVec3::new(pos.x.rem_euclid(size), pos.y.rem_euclid(size), pos.z.rem_euclid(size));
+        let x = if pos.x >= 0 {
+            pos.x / size
+        } else {
+            (pos.x + 1) / size - 1
+        };
+        let y = if pos.y >= 0 {
+            pos.y / size
+        } else {
+            (pos.y + 1) / size - 1
+        };
+        let z = if pos.z >= 0 {
+            pos.z / size
+        } else {
+            (pos.z + 1) / size - 1
+        };
+        let chunk_pos = IVec3::new(x, y, z);
+        (chunk_pos, offset)
+    }
+
+    pub fn get_block(&self, x: isize, y: isize, z: isize) -> Option<Block> {
+        if Self::index_inbounds(x) && Self::index_inbounds(y) && Self::index_inbounds(z) {
+            Some(self.cubes[x as usize][y as usize][z as usize])
+        } else if x < 0 {
+            assert!(Self::index_inbounds(y) && Self::index_inbounds(z));
+            self.neighbors[Direction::Back]
+                .upgrade()
+                .map(|back| back.read().unwrap().cubes[CHUNK_SIZE - 1][y as usize][z as usize])
+        } else if x >= CHUNK_SIZE as isize {
+            assert!(Self::index_inbounds(y) && Self::index_inbounds(z));
+            self.neighbors[Direction::Front]
+                .upgrade()
+                .map(|front| front.read().unwrap().cubes[0][y as usize][z as usize])
+        } else if z < 0 {
+            assert!(Self::index_inbounds(x) && Self::index_inbounds(y));
+            self.neighbors[Direction::Right]
+                .upgrade()
+                .map(|front| front.read().unwrap().cubes[x as usize][y as usize][CHUNK_SIZE - 1])
+        } else if z >= CHUNK_SIZE as isize {
+            assert!(Self::index_inbounds(x) && Self::index_inbounds(y));
+            self.neighbors[Direction::Left]
+                .upgrade()
+                .map(|back| back.read().unwrap().cubes[x as usize][y as usize][0])
+        } else if y < 0 {
+            assert!(Self::index_inbounds(x) && Self::index_inbounds(z));
+            self.neighbors[Direction::Bottom]
+                .upgrade()
+                .map(|bottom| bottom.read().unwrap().cubes[x as usize][CHUNK_SIZE - 1][z as usize])
+        } else if y >= CHUNK_SIZE as isize {
+            assert!(Self::index_inbounds(x) && Self::index_inbounds(z));
+            self.neighbors[Direction::Top]
+                .upgrade()
+                .map(|top| top.read().unwrap().cubes[x as usize][0][z as usize])
+        } else {
+            None
+        }
+    }
+
+    pub fn get_block_neighbors(&self, x: usize, y: usize, z: usize) -> [Option<Block>; 6] {
+        let (x, y, z) = (x as isize, y as isize, z as isize);
+        let mut block_neighbors = [None; 6];
+        //Front
+        block_neighbors[Direction::Front] = self.get_block(x + 1, y, z);
+        block_neighbors[Direction::Back] = self.get_block(x - 1, y, z);
+        block_neighbors[Direction::Left] = self.get_block(x, y, z + 1);
+        block_neighbors[Direction::Right] = self.get_block(x, y, z - 1);
+        block_neighbors[Direction::Top] = self.get_block(x, y + 1, z);
+        block_neighbors[Direction::Bottom] = self.get_block(x, y - 1, z);
+        block_neighbors
+    }
+
+    fn index_inbounds(index: isize) -> bool {
+        index >= 0 && index < CHUNK_SIZE as isize
+    }
+}
+```
+
+### src/chunks/chunk_updating.rs
+```
+use bevy::render::primitives::Aabb;
+
+use crate::prelude::*;
+
+pub fn update_dirty_chunks(
+    mut commands: Commands,
+    mut chunks: Query<(Entity, &ChunkComp, &mut Handle<Mesh>)>,
+    mut meshes: ResMut<Assets<Mesh>>,
+) {
+    //TODO all of this can be done in parallel except for adding mesh to assets
+    //FIXME for now I'm just going to cap the number of chunk updates per frame
+    let mut updates = 0;
+    for (entity, chunk, mut mesh) in &mut chunks {
+        if chunk.read_dirty() {
+            let data = create_chunk_mesh(&chunk.read_chunk());
+            *mesh = meshes.add(data.0);
+            add_collider(&mut commands, entity, data.1);
+
+            //Remove because it needs to be recalculated by bevy
+            commands.entity(entity).remove::<Aabb>();
+            updates += 1;
+            chunk.write_dirty(false);
+        }
+        if updates > MAX_CHUNK_UPDATES_PER_FRAME {
+            return;
+        }
+    }
+}
+
+pub fn apply_buffered_chunk_writes(mut chunks: Query<&mut ChunkComp>) {
+    chunks.par_for_each_mut(5, |mut chunk| {
+        chunk.apply_buffered_writes();
+    });
+}
+
+pub fn update_dirt_sys(mut chunks: Query<&mut ChunkComp>, input: Res<Input<KeyCode>>) {
+    if input.just_pressed(KeyCode::P) {
+        chunks.par_for_each_mut(5, |mut chunk| {
+            //let _span = info_span!("Dirt update", name = "Dirt Update").entered();
+            chunk.apply_function_to_blocks(update_dirt);
+        });
+    }
+}
+
+pub fn update_dirt(block: &Block, neighbors: [Option<Block>; 6]) -> Option<Block> {
+    if matches!(block, Block::Grass) {
+        if let Some(top) = neighbors[Direction::Top] {
+            if !matches!(top, Block::Air) {
+                return Some(Block::Dirt);
+            }
+        }
+    }
+    None
+}
+```
+
+### src/chunks/direction.rs
+```
+use std::{
+    f32::consts::PI,
+    ops::{Index, IndexMut},
+};
+
+use bevy::prelude::*;
+
+#[derive(Clone, Copy)]
+pub enum Direction {
+    Front = 0,  // x + 1
+    Back = 1,   // x - 1
+    Left = 2,   // z + 1
+    Right = 3,  // z - 1
+    Top = 4,    // y + 1
+    Bottom = 5, // y - 1
+}
+
+impl<T> Index<Direction> for [T; 6] {
+    type Output = T;
+
+    fn index(&self, index: Direction) -> &Self::Output {
+        &self[index as usize]
+    }
+}
+
+impl<T> IndexMut<Direction> for [T; 6] {
+    fn index_mut(&mut self, index: Direction) -> &mut Self::Output {
+        &mut self[index as usize]
+    }
+}
+impl Direction {
+    pub fn get_face_rotation(&self) -> Quat {
+        match self {
+            Direction::Front => Quat::from_axis_angle(Vec3::Y, PI / 2.0),
+            Direction::Back => Quat::from_axis_angle(Vec3::Y, -PI / 2.0),
+            Direction::Top => Quat::from_axis_angle(Vec3::X, -PI / 2.0),
+            Direction::Bottom => Quat::from_axis_angle(Vec3::X, PI / 2.0),
+            Direction::Left => Quat::from_axis_angle(Vec3::Y, 0.0),
+            Direction::Right => Quat::from_axis_angle(Vec3::Y, PI),
+        }
+    }
+
+    pub fn opposite(&self) -> Direction {
+        match self {
+            Direction::Front => Direction::Back,
+            Direction::Back => Direction::Front,
+            Direction::Left => Direction::Right,
+            Direction::Right => Direction::Left,
+            Direction::Top => Direction::Bottom,
+            Direction::Bottom => Direction::Top,
+        }
+    }
+}
+```
+
+### src/chunks/mod.rs
+```
+pub mod block;
+pub mod chunk;
+pub mod chunk_updating;
+pub mod client;
+pub mod direction;
+pub mod server;
+
+pub use block::*;
+pub use chunk::*;
+pub use chunk_updating::*;
+pub use client::*;
+pub use direction::Direction;
+pub use server::*;
+```
+
+### src/networking/client_utils.rs
+```
+use std::{
+    net::{SocketAddr, UdpSocket},
+    time::{Duration, SystemTime},
+};
+
+use crate::*;
+use bevy::app::AppExit;
+use bevy_inspector_egui::{bevy_egui::EguiContext, egui};
+use bevy_rapier3d::prelude::{
+    Ccd, Collider, Damping, Dominance, ExternalForce, GravityScale, LockedAxes, RigidBody, Velocity,
+};
+
+pub fn create_renet_client(server_addr: SocketAddr) -> RenetClient {
+    let socket = UdpSocket::bind("0.0.0.0:0").unwrap();
+    let connection_config = RenetConnectionConfig::default();
+    let current_time = SystemTime::now().duration_since(SystemTime::UNIX_EPOCH).unwrap();
+    let client_id = current_time.as_millis() as u64;
+    let authentication = ClientAuthentication::Unsecure {
+        client_id,
+        protocol_id: PROTOCOL_ID,
+        server_addr,
+        user_data: None,
+    };
+    RenetClient::new(current_time, socket, client_id, connection_config, authentication).unwrap()
+}
+
+// If any error is found we just panic
+pub fn panic_on_error_system(mut renet_error: EventReader<RenetError>, mut exit: EventWriter<AppExit>) {
+    for e in renet_error.iter() {
+        if matches!(e, RenetError::Rechannel(RechannelError::ClientDisconnected(..)))
+            || matches!(e, RenetError::Netcode(NetcodeError::Disconnected(..)))
+        {
+            warn!("Server disconnected! Shutting down");
+            exit.send(AppExit);
+        } else {
+            panic!("{}", e);
+        }
+    }
+}
+
+pub struct DefaultServerAddr(String);
+
+impl FromWorld for DefaultServerAddr {
+    fn from_world(_world: &mut World) -> Self {
+        //TODO load from file of last used
+        DefaultServerAddr("192.168.0.16".to_string())
+    }
+}
+
+pub fn client_connection_system(
+    mut commands: Commands,
+    keyboard: Res<Input<KeyCode>>,
+    mut state: ResMut<State<ClientState>>,
+    mut egui_context: ResMut<EguiContext>,
+    mut addr: Local<DefaultServerAddr>,
+) {
+    egui::Window::new("Connect to server").show(egui_context.ctx_mut(), |ui| {
+        ui.label("Address: ");
+        ui.add(egui::TextEdit::singleline(&mut addr.0));
+        if ui.button("Connect").clicked() || keyboard.just_pressed(KeyCode::Return) {
+            info!("Starting Connection!");
+            let server_addr = format!("{}:5000", addr.0).parse().unwrap();
+            commands.insert_resource(create_renet_client(server_addr));
+            let _ = state.set(ClientState::Connecting);
+        }
+    });
+}
+
+pub fn client_connection_ready(
+    mut state: ResMut<State<ClientState>>,
+    client: Res<RenetClient>,
+    mut timeout_countdown: Local<Timer>,
+    mut egui_context: ResMut<EguiContext>,
+    time: Res<Time>,
+) {
+    //This is the default timeout time, could be cleaner and do a from world but eh
+    timeout_countdown.set_duration(Duration::from_secs_f32(15.));
+
+    if client.is_connected() {
+        info!("Connected!");
+        timeout_countdown.reset();
+        let _ = state.set(ClientState::Gameplay);
+    } else if let Some(reason) = client.disconnected() {
+        error!("Failed to connect! {}", reason);
+        timeout_countdown.reset();
+        let _ = state.set(ClientState::MainMenu);
+    } else {
+        timeout_countdown.tick(time.delta());
+        egui::Window::new("Connect to server").show(egui_context.ctx_mut(), |ui| {
+            ui.label(format!(
+                "Connecting! Time until timeout: {:.1}",
+                timeout_countdown.duration().as_secs_f32() - timeout_countdown.elapsed_secs()
+            ));
+            if ui.button("Give Up").clicked() {
+                timeout_countdown.reset();
+                let _ = state.set(ClientState::MainMenu);
+            }
+        });
+    }
+}
+//Run before update
+pub fn client_recieve_messages(
+    mut client: ResMut<RenetClient>,
+    mut messages: ResMut<CurrentClientMessages>,
+    mut block_messages: ResMut<CurrentClientBlockMessages>,
+) {
+    messages.clear();
+    block_messages.clear();
+    for channel in [Channel::Reliable, Channel::Unreliable] {
+        while let Some(message) = client.receive_message(channel.id()) {
+            let server_message = bincode::deserialize(&message).unwrap();
+            messages.push(server_message);
+        }
+    }
+    while let Some(message) = client.receive_message(Channel::Block.id()) {
+        let server_message = bincode::deserialize(&message).unwrap();
+        block_messages.push(server_message);
+    }
+}
+
+pub fn client_ping_test(
+    mut client: ResMut<RenetClient>,
+    keyboard: Res<Input<KeyCode>>,
+    messages: Res<CurrentClientMessages>,
+) {
+    if keyboard.just_pressed(KeyCode::P) {
+        info!("Sending ping!");
+        ClientMessage::Ping.send(&mut client);
+    }
+    for message in messages.iter() {
+        if matches!(message, ServerMessage::Pong) {
+            info!("Pong!");
+        }
+    }
+}
+
+pub fn spawn_camera(mut commands: Commands) {
+    commands
+        .spawn_bundle(NodeBundle {
+            style: Style {
+                size: Size::new(Val::Percent(100.0), Val::Percent(100.0)),
+                align_self: AlignSelf::Center,
+                justify_content: JustifyContent::Center,
+                ..default()
+            },
+            color: Color::NONE.into(),
+            ..default()
+        })
+        .with_children(|commands| {
+            commands.spawn_bundle(NodeBundle {
+                style: Style {
+                    size: Size::new(Val::Px(10.0), Val::Px(10.0)),
+                    align_self: AlignSelf::Center,
+                    justify_content: JustifyContent::Center,
+                    ..default()
+                },
+                color: Color::RED.into(),
+                ..default()
+            });
+        });
+
+    commands
+        .spawn_bundle(Camera3dBundle {
+            transform: Transform::from_xyz(-0.0, 1.1, -0.0).looking_at(Vec3::new(100.0, 0.0, 100.0), Vec3::Y),
+            ..default()
+        })
+        .insert_bundle(VisibilityBundle::default())
+        //.insert(PhysicsObject::default())
+        .insert(RigidBody::Dynamic)
+        //.insert(Collider::cuboid(0.5, 0.5, 0.5))
+        //.insert(Collider::capsule(Vec3::splat(0.0), Vec3::splat(0.5), 0.3))
+        .insert(Collider::capsule(
+            Vec3::new(0.0, -1.0, 0.0),
+            Vec3::new(0.0, 0.0, 0.0),
+            0.4,
+        ))
+        .insert(LockedAxes::ROTATION_LOCKED)
+        .insert(Dominance::group(10))
+        .insert(GravityScale(0.1))
+        .insert(Damping {
+            linear_damping: 0.5,
+
+            angular_damping: 1.0,
+        })
+        .insert(Velocity {
+            linvel: Vec3::ZERO,
+            angvel: Vec3::ZERO,
+        })
+        .insert(ExternalForce {
+            force: Vec3::ZERO,
+            torque: Vec3::ZERO,
+        })
+        .insert(Ccd::enabled())
+        .insert(FlyCam);
+}
+```
+
+### src/networking/message.rs
+```
+use crate::prelude::*;
+
+#[derive(Debug, Default, Deref, DerefMut)]
+pub struct CurrentServerMessages(Vec<(u64, ClientMessage)>);
+
+#[derive(Debug, Default, Deref, DerefMut)]
+pub struct CurrentClientMessages(Vec<ServerMessage>);
+#[derive(Default, Deref, DerefMut)]
+pub struct CurrentClientBlockMessages(Vec<ServerBlockMessage>);
+
+#[derive(Debug, Serialize, Deserialize)]
+pub enum ServerMessage {
+    Pong,
+}
+
+//Enum size is the max message size, so big messages need to be handled seperate
+#[derive(Serialize, Deserialize)]
+pub enum ServerBlockMessage {
+    Chunk(CompressedChunk),
+}
+
+#[derive(Debug, Serialize, Deserialize)]
+pub enum ClientMessage {
+    Ping,
+    BreakBlock(IVec3),
+    PlaceBlock(IVec3, Block),
+    RequestChunk(IVec3),
+}
+
+pub enum SendError {
+    CannotSend,
+}
+
+impl ServerBlockMessage {
+    pub fn send(&self, server: &mut RenetServer, id: u64) -> Result<(), SendError> {
+        if server.can_send_message(id, Channel::Block.id()) {
+            let message = bincode::serialize(self).unwrap();
+            server.send_message(id, Channel::Block.id(), message);
+            Ok(())
+        } else {
+            Err(SendError::CannotSend)
+        }
+    }
+
+    pub fn broadcast(&self, server: &mut RenetServer) -> Result<(), SendError> {
+        for id in server.clients_id() {
+            if !server.can_send_message(id, Channel::Block.id()) {
+                return Err(SendError::CannotSend);
+            }
+        }
+        let message = bincode::serialize(self).unwrap();
+        server.broadcast_message(Channel::Block.id(), message);
+        Ok(())
+    }
+
+    pub fn broadcast_except(&self, server: &mut RenetServer, id: u64) -> Result<(), SendError> {
+        for all_id in server.clients_id() {
+            if all_id == id {
+                continue;
+            }
+            if !server.can_send_message(id, Channel::Block.id()) {
+                return Err(SendError::CannotSend);
+            }
+        }
+        let message = bincode::serialize(self).unwrap();
+        server.broadcast_message_except(id, Channel::Block.id(), message);
+        Ok(())
+    }
+}
+
+impl ServerMessage {
+    pub fn send(&self, server: &mut RenetServer, id: u64) -> Result<(), SendError> {
+        if server.can_send_message(id, Channel::Reliable.id()) {
+            return Err(SendError::CannotSend);
+        }
+        let message = bincode::serialize(self).unwrap();
+        match self {
+            ServerMessage::Pong => server.send_message(id, Channel::Reliable.id(), message),
+        }
+        Ok(())
+    }
+
+    pub fn broadcast(&self, server: &mut RenetServer) -> Result<(), SendError> {
+        //TODO only in debug please
+        for id in server.clients_id() {
+            if server.can_send_message(id, Channel::Reliable.id()) {
+                return Err(SendError::CannotSend);
+            }
+        }
+        let message = bincode::serialize(self).unwrap();
+        match self {
+            ServerMessage::Pong => server.broadcast_message(Channel::Reliable.id(), message),
+        }
+        Ok(())
+    }
+
+    pub fn broadcast_except(&self, server: &mut RenetServer, id: u64) -> Result<(), SendError> {
+        for id in server.clients_id() {
+            if server.can_send_message(id, Channel::Reliable.id()) {
+                return Err(SendError::CannotSend);
+            }
+        }
+        let message = bincode::serialize(self).unwrap();
+        match self {
+            ServerMessage::Pong => server.broadcast_message_except(id, Channel::Reliable.id(), message),
+        }
+        Ok(())
+    }
+}
+
+impl ClientMessage {
+    pub fn send(&self, client: &mut RenetClient) -> Result<(), SendError> {
+        let message = bincode::serialize(self).unwrap();
+        match self {
+            ClientMessage::Ping
+            | ClientMessage::RequestChunk(..)
+            | ClientMessage::BreakBlock(..)
+            | ClientMessage::PlaceBlock(..) => {
+                if client.can_send_message(Channel::Reliable.id()) {
+                    client.send_message(Channel::Reliable.id(), message);
+                    Ok(())
+                } else {
+                    Err(SendError::CannotSend)
+                }
+            }
+        }
+    }
+}
+```
+
+### src/networking/mod.rs
+```
+pub use bevy::{
+    asset::AssetServerSettings,
+    pbr::wireframe::WireframePlugin,
+    render::{
+        render_resource::{AddressMode, FilterMode, SamplerDescriptor},
+        texture::ImageSettings,
+    },
+    window::PresentMode,
+};
+
+pub use crate::prelude::*;
+pub use bevy_flycam::{FlyCam, NoCameraPlayerPlugin};
+pub use bevy_inspector_egui::WorldInspectorPlugin;
+
+pub use bevy::utils::HashMap;
+pub use bevy_renet::renet::*;
+pub use bevy_renet::*;
+
+mod client_utils;
+mod message;
+mod server_utils;
+
+pub use client_utils::*;
+pub use message::*;
+pub use server_utils::*;
+
+#[derive(StageLabel)]
+pub struct ReadMessages;
+
+#[derive(Debug, Default)]
+pub struct Lobby {
+    pub players: HashMap<u64, Entity>,
+    //TODO theres better structures for this 2 way coupling but sick today
+    //Bimap or something
+    pub entities: HashMap<Entity, u64>,
+}
+
+pub enum Channel {
+    Reliable,
+    Unreliable,
+    Block,
+}
+
+impl Channel {
+    pub fn id(&self) -> u8 {
+        match self {
+            Channel::Reliable => ReliableChannelConfig::default().channel_id,
+            Channel::Unreliable => UnreliableChannelConfig::default().channel_id,
+            Channel::Block => BlockChannelConfig::default().channel_id,
+        }
+    }
+}
+```
+
+### src/networking/server_utils.rs
+```
+use std::{
+    net::{SocketAddr, UdpSocket},
+    time::SystemTime,
+};
+
+use crate::*;
+
+use bevy_inspector_egui::bevy_egui::EguiContext;
+use local_ip_address::local_ip;
+use renet_visualizer::RenetServerVisualizer;
+
+pub fn create_renet_server() -> RenetServer {
+    //TODO prompt for lan or external?
+    //I have a weak understanding here
+    let server_addr = SocketAddr::new(local_ip().unwrap(), 5000);
+    println!("Creating Server! {:?}", server_addr);
+
+    let socket = UdpSocket::bind(server_addr).unwrap();
+    //TODO increase block package queue size from default 8
+    let connection_config = RenetConnectionConfig::default();
+    let server_config = ServerConfig::new(64, PROTOCOL_ID, server_addr, ServerAuthentication::Unsecure);
+    let current_time = SystemTime::now().duration_since(SystemTime::UNIX_EPOCH).unwrap();
+    RenetServer::new(current_time, server_config, connection_config, socket).unwrap()
+}
+
+pub fn update_visulizer(
+    mut egui_context: ResMut<EguiContext>,
+    mut visualizer: ResMut<RenetServerVisualizer<200>>,
+    lobby: Res<Lobby>,
+    server: Res<RenetServer>,
+) {
+    visualizer.update(&server);
+    bevy_inspector_egui::egui::TopBottomPanel::bottom("bottom_panel")
+        .min_height(200.)
+        .resizable(true)
+        .show(egui_context.ctx_mut(), |ui| {
+            bevy_inspector_egui::egui::ScrollArea::vertical().show(ui, |ui| {
+                ui.heading("Network Info");
+                for (id, _) in lobby.players.iter() {
+                    ui.label(format!("Client: {}", *id));
+                    ui.horizontal(|ui| {
+                        visualizer.draw_client_metrics(*id, ui);
+                    });
+                }
+            });
+        });
+}
+
+pub fn server_connection(
+    mut server_events: EventReader<ServerEvent>,
+    mut commands: Commands,
+    mut lobby: ResMut<Lobby>,
+    mut visualizer: ResMut<RenetServerVisualizer<200>>,
+) {
+    for event in server_events.iter() {
+        match event {
+            ServerEvent::ClientConnected(id, _) => {
+                visualizer.add_client(*id);
+                // Spawn new player
+                let player_entity = commands.spawn().insert(Name::new(format!("Player {}", id))).id();
+
+                lobby.players.insert(*id, player_entity);
+            }
+            ServerEvent::ClientDisconnected(id) => {
+                visualizer.remove_client(*id);
+                if let Some(player_entity) = lobby.players.remove(id) {
+                    commands.entity(player_entity).despawn();
+                }
+            }
+        }
+    }
+}
+
+//Run before update
+pub fn server_recieve_messages(mut server: ResMut<RenetServer>, mut messages: ResMut<CurrentServerMessages>) {
+    messages.clear();
+    for client_id in server.clients_id().into_iter() {
+        for channel in [Channel::Reliable, Channel::Unreliable] {
+            while let Some(message) = server.receive_message(client_id, channel.id()) {
+                let client_message = bincode::deserialize(&message).unwrap();
+                messages.push((client_id, client_message));
+            }
+        }
+    }
+}
+
+pub fn server_ping_test(messages: Res<CurrentServerMessages>, mut server: ResMut<RenetServer>) {
+    for (id, message) in messages.iter() {
+        if matches!(message, ClientMessage::Ping) {
+            info!("Got ping from {}!", id);
+            ServerMessage::Pong.send(&mut server, *id);
+        }
+    }
+}
+```
+
+### src/chunks/client/chunk_mesh_generation.rs
+```
+use crate::client::material::*;
+use crate::prelude::*;
+use bevy::render::{
+    mesh::{Indices, VertexAttributeValues},
+    render_resource::PrimitiveTopology,
+};
+
+//FIXME remove clone
+#[derive(Default, Clone)]
+pub struct MeshDescription {
+    pub verts: Vec<Vec3>,
+    true_normals: Vec<Vec3>,
+    normals: Vec<[u8; 2]>,
+    uvs: Vec<[u8; 2]>,
+    texture_indices: Vec<u32>,
+    pub vert_indicies: Vec<usize>,
+}
+
+pub fn create_chunk_mesh(chunk: &Chunk) -> (Mesh, MeshDescription) {
+    let mut mesh = Mesh::new(PrimitiveTopology::TriangleList);
+    let mut description = MeshDescription::default();
+
+    create_mesh_faces(chunk, &mut description);
+    //FIXME I hate this clone
+    let to_return = description.clone();
+
+    mesh.insert_attribute(
+        Mesh::ATTRIBUTE_POSITION,
+        description
+            .verts
+            .iter()
+            .map(|vec| vec.to_array())
+            .collect::<Vec<[f32; 3]>>(),
+    );
+
+    // TODO figure out how to make bevy let me not add this
+    // Currently just sending the positions again
+    mesh.insert_attribute(
+        Mesh::ATTRIBUTE_NORMAL,
+        description
+            .true_normals
+            .iter()
+            .map(|normal| normal.to_array())
+            .collect::<Vec<[f32; 3]>>(),
+    );
+
+    mesh.set_indices(Some(Indices::U32(
+        description
+            .vert_indicies
+            .iter()
+            .map(|usized| *usized as u32)
+            .collect::<Vec<u32>>(),
+    )));
+
+    mesh.insert_attribute(CUSTOM_NORMAL, VertexAttributeValues::Uint8x2(description.normals));
+
+    mesh.insert_attribute(CUSTOM_UV, VertexAttributeValues::Uint8x2(description.uvs));
+
+    mesh.insert_attribute(ATTRIBUTE_TEXTURE_INDEX, description.texture_indices);
+
+    (mesh, to_return)
+}
+
+// A single slide of a chunk, direction agnostic, used for greedy meshing
+#[derive(Default, Copy, Clone)]
+pub struct Sheet {
+    blocks: [[Block; CHUNK_SIZE]; CHUNK_SIZE],
+}
+
+//Gathers the slices and runs the greedy algorithm
+fn create_mesh_faces(chunk: &Chunk, mesh_description: &mut MeshDescription) {
+    let mut top_slices = [Sheet::default(); CHUNK_SIZE];
+    let mut bottom_slices = [Sheet::default(); CHUNK_SIZE];
+    let mut left_slices = [Sheet::default(); CHUNK_SIZE];
+    let mut right_slices = [Sheet::default(); CHUNK_SIZE];
+    let mut front_slices = [Sheet::default(); CHUNK_SIZE];
+    let mut back_slices = [Sheet::default(); CHUNK_SIZE];
+    for x in 0..CHUNK_SIZE as isize {
+        for y in 0..CHUNK_SIZE as isize {
+            for z in 0..CHUNK_SIZE as isize {
+                let current_block = chunk.get_block(x, y, z).unwrap();
+                let [front_block, back_block, left_block, right_block, top_block, bottom_block] =
+                    chunk.get_block_neighbors(x as usize, y as usize, z as usize);
+
+                if current_block.is_filled() && (left_block.is_none() || !left_block.unwrap().is_filled()) {
+                    left_slices[z as usize].blocks[x as usize][y as usize] = current_block;
+                }
+                if current_block.is_filled() && (right_block.is_none() || !right_block.unwrap().is_filled()) {
+                    right_slices[z as usize].blocks[x as usize][y as usize] = current_block;
+                }
+                if current_block.is_filled() && (front_block.is_none() || !front_block.unwrap().is_filled()) {
+                    front_slices[x as usize].blocks[z as usize][y as usize] = current_block;
+                }
+                if current_block.is_filled() && (back_block.is_none() || !back_block.unwrap().is_filled()) {
+                    back_slices[x as usize].blocks[z as usize][y as usize] = current_block;
+                }
+                if current_block.is_filled() && (top_block.is_none() || !top_block.unwrap().is_filled()) {
+                    top_slices[y as usize].blocks[x as usize][z as usize] = current_block;
+                }
+                if current_block.is_filled() && (bottom_block.is_none() || !bottom_block.unwrap().is_filled()) {
+                    bottom_slices[y as usize].blocks[x as usize][z as usize] = current_block;
+                }
+            }
+        }
+    }
+    for index in 0..CHUNK_SIZE as isize {
+        greedy(
+            &back_slices[index as usize],
+            Direction::Back,
+            mesh_description,
+            index as usize,
+        );
+        greedy(
+            &front_slices[index as usize],
+            Direction::Front,
+            mesh_description,
+            index as usize,
+        );
+        greedy(
+            &left_slices[index as usize],
+            Direction::Left,
+            mesh_description,
+            index as usize,
+        );
+        greedy(
+            &right_slices[index as usize],
+            Direction::Right,
+            mesh_description,
+            index as usize,
+        );
+        greedy(
+            &top_slices[index as usize],
+            Direction::Top,
+            mesh_description,
+            index as usize,
+        );
+        greedy(
+            &bottom_slices[index as usize],
+            Direction::Bottom,
+            mesh_description,
+            index as usize,
+        );
+    }
+}
+
+//I think it makes the code clearer as is, clippy wants to make the iterations over finished
+//But there are 2 different uses for every index so doing the iterator over finished and also enumerating it
+//Seems to break a single concept into 2 for no great reason
+#[allow(clippy::needless_range_loop)]
+fn greedy(sheet: &Sheet, dir: Direction, desc: &mut MeshDescription, z: usize) {
+    let mut finished = [[false; CHUNK_SIZE]; CHUNK_SIZE];
+
+    for x in 0..CHUNK_SIZE {
+        for y in 0..CHUNK_SIZE {
+            finished[x][y] = !sheet.blocks[x][y].is_filled();
+        }
+    }
+
+    //gross
+    while finished.iter().flatten().any(|x| x == &false) {
+        for x in 0..CHUNK_SIZE {
+            for y in 0..CHUNK_SIZE {
+                if !finished[x][y] {
+                    //Starting point, walk x to get width
+                    let start = sheet.blocks[x][y];
+                    let mut width = 1;
+                    for w in x + 1..CHUNK_SIZE {
+                        if start == sheet.blocks[w][y] && !finished[w][y] {
+                            width += 1;
+                        } else {
+                            break;
+                        }
+                    }
+                    //Now walk y to get height
+                    let mut height = 1;
+                    for h in y + 1..CHUNK_SIZE {
+                        let mut all_same = true;
+                        for w in x..x + width {
+                            if start != sheet.blocks[w][h] || finished[w][h] {
+                                all_same = false;
+                                break;
+                            }
+                        }
+                        if all_same {
+                            height += 1;
+                        } else {
+                            break;
+                        }
+                    }
+
+                    //Time to make the rect and mark finished
+                    create_greedy_face(start, dir, x, y, z, width, height, desc);
+
+                    for u in x..x + width {
+                        for v in y..y + height {
+                            finished[u][v] = true;
+                        }
+                    }
+                }
+            }
+        }
+    }
+}
+
+// Creates a single face on the mesh
+fn create_greedy_face(
+    block: Block,
+    dir: Direction,
+    x: usize,
+    y: usize,
+    z: usize,
+    width: usize,
+    height: usize,
+    mesh_description: &mut MeshDescription,
+) {
+    let width = width as f32;
+    let height = height as f32;
+    let (x, y, z) = (x as f32, y as f32, z as f32 + 1.0);
+    let new_verts = match dir {
+        Direction::Front => [
+            Vec3::new(z, y, width + x),
+            Vec3::new(z, y, x),
+            Vec3::new(z, height + y, x),
+            Vec3::new(z, height + y, width + x),
+        ],
+        Direction::Back => [
+            Vec3::new(z - 1.0, y, x),
+            Vec3::new(z - 1.0, y, width + x),
+            Vec3::new(z - 1.0, height + y, width + x),
+            Vec3::new(z - 1.0, height + y, x),
+        ],
+        Direction::Left => [
+            Vec3::new(x, y, z),
+            Vec3::new(width + x, y, z),
+            Vec3::new(width + x, height + y, z),
+            Vec3::new(x, height + y, z),
+        ],
+        Direction::Right => [
+            Vec3::new(width + x, y, z - 1.0),
+            Vec3::new(x, y, z - 1.0),
+            Vec3::new(x, height + y, z - 1.0),
+            Vec3::new(width + x, height + y, z - 1.0),
+        ],
+        Direction::Top => [
+            Vec3::new(x, z, height + y),
+            Vec3::new(width + x, z, height + y),
+            Vec3::new(width + x, z, y),
+            Vec3::new(x, z, y),
+        ],
+        Direction::Bottom => [
+            Vec3::new(x, z - 1.0, y),
+            Vec3::new(width + x, z - 1.0, y),
+            Vec3::new(width + x, z - 1.0, height + y),
+            Vec3::new(x, z - 1.0, height + y),
+        ],
+    };
+
+    let new_uvs = [[0, height as u8], [width as u8, height as u8], [width as u8, 0], [0, 0]];
+
+    let new_texture_indices = [block.get_face_index(dir); 4];
+    let new_normals = match dir {
+        Direction::Front => [
+            Vec3::new(1.0, 0.0, 0.0),
+            Vec3::new(1.0, 0.0, 0.0),
+            Vec3::new(1.0, 0.0, 0.0),
+            Vec3::new(1.0, 0.0, 0.0),
+        ],
+        Direction::Back => [
+            Vec3::new(-1.0, 0.0, 0.0),
+            Vec3::new(-1.0, 0.0, 0.0),
+            Vec3::new(-1.0, 0.0, 0.0),
+            Vec3::new(-1.0, 0.0, 0.0),
+        ],
+        Direction::Left => [
+            Vec3::new(0.0, 0.0, 1.0),
+            Vec3::new(0.0, 0.0, 1.0),
+            Vec3::new(0.0, 0.0, 1.0),
+            Vec3::new(0.0, 0.0, 1.0),
+        ],
+        Direction::Right => [
+            Vec3::new(0.0, 0.0, -1.0),
+            Vec3::new(0.0, 0.0, -1.0),
+            Vec3::new(0.0, 0.0, -1.0),
+            Vec3::new(0.0, 0.0, -1.0),
+        ],
+        Direction::Top => [
+            Vec3::new(0.0, 1.0, 0.0),
+            Vec3::new(0.0, 1.0, 0.0),
+            Vec3::new(0.0, 1.0, 0.0),
+            Vec3::new(0.0, 1.0, 0.0),
+        ],
+        Direction::Bottom => [
+            Vec3::new(0.0, -1.0, 0.0),
+            Vec3::new(0.0, -1.0, 0.0),
+            Vec3::new(0.0, -1.0, 0.0),
+            Vec3::new(0.0, -1.0, 0.0),
+        ],
+    };
+
+    //let rotation = dir.get_face_rotation();
+    ////FIXME normals aren't right maybe?
+    //new_normals.iter_mut().for_each(|vec| *vec = rotation * *vec);
+
+    let normals = new_normals
+        .iter()
+        .map(|norm| {
+            if norm.x > 0.5 {
+                [0, 1]
+            } else if norm.x < 0.5 {
+                [0, 2]
+            } else if norm.y > 0.5 {
+                [0, 3]
+            } else if norm.y < 0.5 {
+                [0, 4]
+            } else if norm.z > 0.5 {
+                [0, 5]
+            } else if norm.z < 0.5 {
+                [0, 6]
+            } else {
+                [0, 0]
+            }
+        })
+        .collect::<Vec<[u8; 2]>>();
+
+    let vert_start = mesh_description.verts.len();
+    mesh_description.verts.extend_from_slice(&new_verts);
+    mesh_description.normals.extend_from_slice(&normals);
+    //info!("{:?}", new_normals);
+    mesh_description.true_normals.extend_from_slice(&new_normals);
+    mesh_description.uvs.extend_from_slice(&new_uvs);
+
+    mesh_description.texture_indices.extend_from_slice(&new_texture_indices);
+
+    mesh_description
+        .vert_indicies
+        .extend_from_slice(&[vert_start, vert_start + 1, vert_start + 2]);
+    mesh_description
+        .vert_indicies
+        .extend_from_slice(&[vert_start, vert_start + 2, vert_start + 3]);
+}
+```
+
+### src/chunks/client/click_detection.rs
+```
+use crate::prelude::*;
+
+pub struct ClickEvent {
+    //TODO track held and stuff
+    button: MouseButton,
+    world_pos: IVec3,
+    prev_pos: IVec3,
+}
+
+pub(crate) fn click_to_break(
+    loaded_chunks: Res<LoadedChunks>,
+    comps: Query<&ChunkComp>,
+    mut click_reader: EventReader<ClickEvent>,
+    mut client: ResMut<RenetClient>,
+) {
+    for ev in click_reader.iter() {
+        if ev.button == MouseButton::Left {
+            let (chunk_pos, offset) = Chunk::i_world_to_chunk(ev.world_pos);
+            if let Some(chunk) = loaded_chunks.ent_map.get(&chunk_pos) {
+                ClientMessage::BreakBlock(ev.world_pos).send(&mut client);
+                let chunk = comps.get(*chunk).unwrap();
+                chunk.write_block(offset, Block::Air);
+            }
+        }
+    }
+}
+
+pub(crate) fn click_to_place(
+    loaded_chunks: Res<LoadedChunks>,
+    comps: Query<&ChunkComp>,
+    mut click_reader: EventReader<ClickEvent>,
+    mut client: ResMut<RenetClient>,
+) {
+    for ev in click_reader.iter() {
+        if ev.button == MouseButton::Right {
+            let (chunk_pos, offset) = Chunk::i_world_to_chunk(ev.prev_pos);
+            if let Some(chunk) = loaded_chunks.ent_map.get(&chunk_pos) {
+                let chunk = comps.get(*chunk).unwrap();
+                if chunk.read_block(offset) == Block::Air {
+                    ClientMessage::PlaceBlock(ev.prev_pos, Block::Machine).send(&mut client);
+                    chunk.write_block(offset, Block::Machine);
+                }
+            }
+        }
+    }
+}
+
+pub(crate) fn click_detection(
+    mouse: Res<Input<MouseButton>>,
+    transform: Query<&Transform, With<Camera3d>>,
+    loaded_chunks: Res<LoadedChunks>,
+    comps: Query<&ChunkComp>,
+    mut click_writer: EventWriter<ClickEvent>,
+) {
+    let transform = transform.single();
+    let range = 9.0;
+    if mouse.any_just_pressed([MouseButton::Left, MouseButton::Right]) {
+        let end = transform.translation + transform.forward() * range;
+        let mut current = transform.translation;
+
+        let diff = end - current;
+
+        let steps = diff.abs().max_element().ceil() * 5.0;
+
+        let inc = diff / steps;
+
+        for _i in 0..(steps as usize) {
+            let block_pos = current - Vec3::ONE / 2.0;
+            let world_pos = block_pos.round().as_ivec3();
+            let (chunk_pos, offset) = Chunk::i_world_to_chunk(world_pos);
+
+            if let Some(chunk) = loaded_chunks.ent_map.get(&chunk_pos) {
+                let chunk = comps.get(*chunk).unwrap();
+
+                if chunk.read_block(offset) != Block::Air {
+                    //Rewind for placement
+                    let block_pos = current - Vec3::ONE / 2.0 - inc;
+                    let prev_pos = block_pos.round().as_ivec3();
+                    if mouse.just_pressed(MouseButton::Left) {
+                        click_writer.send(ClickEvent {
+                            button: MouseButton::Left,
+                            world_pos,
+                            prev_pos,
+                        });
+                    }
+                    //gross
+                    if mouse.just_pressed(MouseButton::Right) {
+                        click_writer.send(ClickEvent {
+                            button: MouseButton::Right,
+                            world_pos,
+                            prev_pos,
+                        });
+                    }
+                    return;
+                }
+            }
+
+            current += inc;
+        }
+    }
+}
+```
+
+### src/chunks/client/client_chunks.rs
+```
+use std::sync::{Arc, RwLock};
+
+use bevy::{
+    tasks::{AsyncComputeTaskPool, Task},
+    utils::{FloatOrd, HashMap},
+};
+use futures_lite::future;
+
+use crate::client::click_detection::*;
+use crate::prelude::*;
+
+pub struct ClientChunkPlugin;
+
+impl Plugin for ClientChunkPlugin {
+    fn build(&self, app: &mut App) {
+        app.init_resource::<LoadedChunks>()
+            .add_event::<ClickEvent>()
+            .add_system(spawn_chunk_meshes)
+            .add_system_set(
+                SystemSet::on_enter(ClientState::Gameplay)
+                    .with_system(initial_chunk_requests)
+                    //TODO run on image loaded
+                    .with_system(create_array_texture),
+            )
+            .add_system(load_chunks_from_server)
+            .add_system(update_dirt_sys)
+            .add_system(update_dirty_chunks)
+            .add_system_to_stage(CoreStage::PostUpdate, apply_buffered_chunk_writes)
+            .add_startup_system_to_stage(StartupStage::PreStartup, client::material::load_chunk_texture)
+            .add_system_set(SystemSet::on_update(ClientState::Gameplay).with_system(click_detection))
+            .add_system(click_to_break.with_run_criteria(run_if_client_connected))
+            .add_system(click_to_place.with_run_criteria(run_if_client_connected));
+    }
+}
+
+#[derive(Component)]
+pub struct CreateChunkTask(Task<(Chunk, Mesh, MeshDescription)>);
+
+pub fn load_chunks_from_server(mut commands: Commands, messages: Res<CurrentClientBlockMessages>) {
+    for message in messages.iter() {
+        if let ServerBlockMessage::Chunk(chunk) = message {
+            let chunk_data = Chunk::from_compressed(chunk);
+            let thread_pool = AsyncComputeTaskPool::get();
+            let task = thread_pool.spawn(async move {
+                let _span = info_span!("Chunk Generation Task", name = "Chunk Generation Task").entered();
+                let (mesh, desc) = create_chunk_mesh(&chunk_data);
+                (chunk_data, mesh, desc)
+            });
+            commands.spawn().insert(CreateChunkTask(task));
+        }
+    }
+}
+
+pub fn initial_chunk_requests(mut client: ResMut<RenetClient>) {
+    info!("Init Chunks");
+    if client.is_connected() {
+        let chunks_to_spawn = (WORLD_SIZE / 2) as i32 + 1;
+
+        let mut request = Vec::default();
+        for x in -chunks_to_spawn..chunks_to_spawn {
+            for y in -chunks_to_spawn..chunks_to_spawn {
+                for z in -chunks_to_spawn..chunks_to_spawn {
+                    request.push(IVec3::new(x, y, z));
+                }
+            }
+        }
+
+        //TODO closest to player
+        request.sort_by_key(|pos| FloatOrd(Vec3::distance(Vec3::ZERO, pos.as_vec3())));
+
+        request.iter().for_each(|request| {
+            info!("Requesting Chunk {:?}", request);
+            ClientMessage::RequestChunk(*request).send(&mut client);
+        });
+    } else {
+        error!("Not connected to a server!");
+    }
+}
+
+pub fn spawn_chunk_meshes(
+    mut commands: Commands,
+    mut tasks: Query<(Entity, &mut CreateChunkTask)>,
+    //How to fake mut here for interior mutability parallelism
+    chunks: Query<&ChunkComp>,
+    mut materials: ResMut<Assets<CustomMaterial>>,
+    mut meshes: ResMut<Assets<Mesh>>,
+    texture: Res<client::material::ChunkTexture>,
+    mut loaded_chunks: ResMut<LoadedChunks>,
+) {
+    let mut spawned_this_frame = HashMap::default();
+    let mut updates = 0;
+    for (ent, mut task) in &mut tasks {
+        if let Some((chunk, mesh, mesh_data)) = future::block_on(future::poll_once(&mut task.0)) {
+            let chunk_pos = chunk.pos;
+            let pos = CHUNK_SIZE as i32 * chunk.pos;
+
+            let arc = Arc::new(RwLock::new(chunk));
+            //Check doesn't already exists!
+            if let Some(chunk) = loaded_chunks.ent_map.remove(&chunk_pos) {
+                commands.entity(chunk).despawn_recursive();
+            }
+            loaded_chunks.ent_map.insert(chunk_pos, ent);
+            let arc = ChunkComp::new(arc);
+
+            fn connect_neighbor(
+                pos: IVec3,
+                dir: Direction,
+                loaded_chunks: &ResMut<LoadedChunks>,
+                chunks: &Query<&ChunkComp>,
+                comp: &ChunkComp,
+                spawned_this_frame: &HashMap<Entity, ChunkComp>,
+            ) {
+                if loaded_chunks.ent_map.contains_key(&pos) {
+                    //Set this chunks top neighbor
+                    //Set the top neighbors bottom to this chunk
+                    if let Ok(neighbor) = chunks.get(loaded_chunks.ent_map[&pos]) {
+                        comp.set_neighbor(dir, neighbor);
+                        neighbor.set_neighbor(dir.opposite(), comp);
+                        //Dirty neighbors because I have changed
+                        neighbor.write_dirty(true);
+                    } else {
+                        //Spawned this frame
+                        let neighbor = &spawned_this_frame[&loaded_chunks.ent_map[&pos]];
+                        comp.set_neighbor(dir, neighbor);
+                        neighbor.set_neighbor(dir.opposite(), comp);
+                        neighbor.write_dirty(true);
+                    }
+                }
+            }
+
+            connect_neighbor(
+                chunk_pos + IVec3::Y,
+                Direction::Top,
+                &loaded_chunks,
+                &chunks,
+                &arc,
+                &spawned_this_frame,
+            );
+            connect_neighbor(
+                chunk_pos - IVec3::Y,
+                Direction::Bottom,
+                &loaded_chunks,
+                &chunks,
+                &arc,
+                &spawned_this_frame,
+            );
+
+            connect_neighbor(
+                chunk_pos + IVec3::X,
+                Direction::Front,
+                &loaded_chunks,
+                &chunks,
+                &arc,
+                &spawned_this_frame,
+            );
+            connect_neighbor(
+                chunk_pos - IVec3::X,
+                Direction::Back,
+                &loaded_chunks,
+                &chunks,
+                &arc,
+                &spawned_this_frame,
+            );
+
+            connect_neighbor(
+                chunk_pos + IVec3::Z,
+                Direction::Left,
+                &loaded_chunks,
+                &chunks,
+                &arc,
+                &spawned_this_frame,
+            );
+            connect_neighbor(
+                chunk_pos - IVec3::Z,
+                Direction::Right,
+                &loaded_chunks,
+                &chunks,
+                &arc,
+                &spawned_this_frame,
+            );
+            commands.entity(ent).insert_bundle(MaterialMeshBundle {
+                mesh: meshes.add(mesh),
+                //mesh: meshes.add(shape::Box::default().into()),
+                material: materials.add(CustomMaterial {
+                    textures: texture.0.clone(),
+                }),
+                transform: Transform::from_xyz(pos.x as f32, pos.y as f32, pos.z as f32),
+
+                ..default()
+            });
+            add_collider(&mut commands, ent, mesh_data);
+            spawned_this_frame.insert(ent, arc);
+
+            commands.entity(ent).remove::<CreateChunkTask>();
+            updates += 1;
+            if updates > MAX_CHUNK_UPDATES_PER_FRAME {
+                break;
+            }
+        }
+    }
+    for (ent, comp) in spawned_this_frame.into_iter() {
+        commands.entity(ent).insert(comp);
+    }
+}
+```
+
+### src/chunks/client/material.rs
+```
+use bevy::{
+    asset::LoadState,
+    pbr::{MaterialPipeline, MaterialPipelineKey},
+    prelude::*,
+    reflect::TypeUuid,
+    render::{
+        mesh::{MeshVertexAttribute, MeshVertexBufferLayout},
+        render_resource::{
+            AsBindGroup, CompareFunction, RenderPipelineDescriptor, ShaderRef, SpecializedMeshPipelineError,
+            VertexFormat,
+        },
+    },
+};
+pub struct ChunkTexture(pub Handle<Image>);
+
+pub fn load_chunk_texture(mut commands: Commands, server: Res<AssetServer>) {
+    commands.insert_resource(ChunkTexture(server.load("array_test.png")));
+}
+
+pub fn create_array_texture(
+    asset_server: Res<AssetServer>,
+    texture: Res<ChunkTexture>,
+    mut images: ResMut<Assets<Image>>,
+) {
+    while asset_server.get_load_state(texture.0.clone()) != LoadState::Loaded {
+        panic!("waiting on load, please fix this");
+    }
+    let image = images.get_mut(&texture.0).unwrap();
+    if image.texture_descriptor.size.depth_or_array_layers != 1 {
+        return;
+    }
+
+    // Create a new array texture asset from the loaded texture.
+    let array_layers = image.texture_descriptor.size.height / image.texture_descriptor.size.width;
+    image.reinterpret_stacked_2d_as_array(array_layers);
+}
+
+pub const CUSTOM_UV: MeshVertexAttribute = MeshVertexAttribute::new("CustomUV", 52894552143, VertexFormat::Uint8x2);
+
+pub const CUSTOM_NORMAL: MeshVertexAttribute =
+    MeshVertexAttribute::new("CutsomNormal", 1374029579328, VertexFormat::Uint8x2);
+
+pub const ATTRIBUTE_TEXTURE_INDEX: MeshVertexAttribute =
+    MeshVertexAttribute::new("TextureIndex", 15092354854, VertexFormat::Uint32);
+
+#[derive(AsBindGroup, Debug, Clone, TypeUuid)]
+#[uuid = "f690fdae-d598-45ab-8225-97e2a3f056e0"]
+pub struct CustomMaterial {
+    #[texture(0, dimension = "2d_array")]
+    #[sampler(1)]
+    pub textures: Handle<Image>,
+}
+
+impl Material for CustomMaterial {
+    fn vertex_shader() -> ShaderRef {
+        "custom_material.wgsl".into()
+    }
+    fn fragment_shader() -> ShaderRef {
+        "custom_material.wgsl".into()
+    }
+    fn alpha_mode(&self) -> AlphaMode {
+        AlphaMode::Blend
+    }
+
+    fn specialize(
+        _pipeline: &MaterialPipeline<Self>,
+        descriptor: &mut RenderPipelineDescriptor,
+        layout: &MeshVertexBufferLayout,
+        _key: MaterialPipelineKey<Self>,
+    ) -> Result<(), SpecializedMeshPipelineError> {
+        let vertex_layout = layout.get_layout(&[
+            Mesh::ATTRIBUTE_POSITION.at_shader_location(0),
+            CUSTOM_NORMAL.at_shader_location(1),
+            CUSTOM_UV.at_shader_location(2),
+            ATTRIBUTE_TEXTURE_INDEX.at_shader_location(3),
+        ]);
+        descriptor.depth_stencil.as_mut().unwrap().depth_write_enabled = true;
+        //Ugh FIXME Transparent faces need to be ordered or seperate mesh
+        descriptor.depth_stencil.as_mut().unwrap().depth_compare = CompareFunction::GreaterEqual;
+        let vertex_layout = vertex_layout.unwrap();
+        descriptor.vertex.buffers = vec![vertex_layout];
+        Ok(())
+    }
+}
+```
+
+### src/chunks/client/mod.rs
+```
+mod click_detection;
+pub mod client_chunks;
+
+pub mod chunk_mesh_generation;
+mod material;
+
+pub use crate::chunks::chunk_mesh_generation::*;
+pub use material::{create_array_texture, CustomMaterial};
+```
+
+### src/chunks/server/mod.rs
+```
+pub mod server_chunks;
+```
+
+### src/chunks/server/server_chunks.rs
+```
+use std::{
+    fs,
+    path::Path,
+    sync::{Arc, RwLock},
+};
+
+use crate::prelude::*;
+use bevy::app::AppExit;
+use bevy_inspector_egui::{bevy_egui::EguiContext, egui};
+use noise::{NoiseFn, Perlin};
+
+pub struct ServerChunkPlugin;
+impl Plugin for ServerChunkPlugin {
+    fn build(&self, app: &mut App) {
+        app.add_system(server_create_chunks)
+            .add_system(server_break_blocks)
+            .add_system(server_place_blocks)
+            .add_system(server_save_and_quit)
+            .init_resource::<LoadedChunks>();
+    }
+}
+
+fn server_save_and_quit(
+    mut egui_context: ResMut<EguiContext>,
+    loaded_chunks: Res<LoadedChunks>,
+    comps: Query<&ChunkComp>,
+    _keyboard: Res<Input<KeyCode>>,
+    mut exit: EventWriter<AppExit>,
+    mut server: ResMut<RenetServer>,
+) {
+    egui::Window::new("Quit Server").show(egui_context.ctx_mut(), |ui| {
+        //if ui.button("Quit and Save").clicked() || keyboard.just_pressed(KeyCode::Escape) {
+        if ui.button("Quit and Save").clicked() {
+            for (pos, chunk) in loaded_chunks.ent_map.iter() {
+                let chunk = comps.get(*chunk).unwrap();
+                //Copied from elsewhere! Duplicated code
+                let filename = format!("saves/chunk_{}_{}_{}.chunk", pos.x, pos.y, pos.z);
+                let filename = Path::new(&filename);
+                fs::write(filename, chunk.read_chunk().compress()).unwrap();
+            }
+            //XXX does this actually reach all clients?
+            server.disconnect_clients();
+            exit.send(AppExit);
+        }
+    });
+}
+
+fn server_break_blocks(
+    loaded_chunks: Res<LoadedChunks>,
+    comps: Query<&ChunkComp>,
+    messages: Res<CurrentServerMessages>,
+    mut server: ResMut<RenetServer>,
+) {
+    for (id, message) in messages.iter() {
+        if let ClientMessage::BreakBlock(pos) = message {
+            let (chunk_pos, offset) = Chunk::i_world_to_chunk(*pos);
+            if let Some(chunk) = loaded_chunks.ent_map.get(&chunk_pos) {
+                let chunk = comps.get(*chunk).unwrap();
+                chunk.write_block(offset, Block::Air);
+                ServerBlockMessage::Chunk(chunk.read_chunk().compress()).broadcast_except(&mut server, *id);
+            } else {
+                warn!("Chunk not loaded on server!");
+            }
+        }
+    }
+}
+
+fn server_place_blocks(
+    loaded_chunks: Res<LoadedChunks>,
+    comps: Query<&ChunkComp>,
+    messages: Res<CurrentServerMessages>,
+    mut server: ResMut<RenetServer>,
+) {
+    for (id, message) in messages.iter() {
+        if let ClientMessage::PlaceBlock(pos, block) = message {
+            let (chunk_pos, offset) = Chunk::i_world_to_chunk(*pos);
+            if let Some(chunk) = loaded_chunks.ent_map.get(&chunk_pos) {
+                let chunk = comps.get(*chunk).unwrap();
+                info!("Writing to {}, {} {}", pos, chunk_pos, offset);
+                chunk.write_block(offset, *block);
+                ServerBlockMessage::Chunk(chunk.read_chunk().compress()).broadcast_except(&mut server, *id);
+            } else {
+                warn!("Chunk not loaded on server!");
+            }
+        }
+    }
+}
+
+//World generation
+fn gen_chunk(chunk_x: i32, chunk_y: i32, chunk_z: i32) -> Chunk {
+    //Check if file, if not then write
+    //FIXME handle windows path encoding
+    let filename = format!("saves/chunk_{}_{}_{}.chunk", chunk_x, chunk_y, chunk_z);
+    let filename = Path::new(&filename);
+
+    if filename.exists() {
+        let chunk_bytes = fs::read(filename).unwrap();
+        Chunk::from_compressed(&chunk_bytes)
+    } else {
+        info!("Creating new chunk {:?}", filename);
+        let mut chunk = Chunk::default();
+        let perlin = Perlin::new();
+
+        for x in 0..CHUNK_SIZE {
+            for y in 0..CHUNK_SIZE {
+                for z in 0..CHUNK_SIZE {
+                    let chunk_x = chunk_x * CHUNK_SIZE as i32;
+                    let chunk_y = chunk_y * CHUNK_SIZE as i32;
+                    let chunk_z = chunk_z * CHUNK_SIZE as i32;
+                    let value = (perlin.get([
+                        (x as f64 + chunk_x as f64) / 21.912,
+                        (y as f64 + chunk_y as f64) / 29.312,
+                        (z as f64 + chunk_z as f64) / 23.253,
+                    ]) + 1.0)
+                        / 2.0
+                        + (0.12
+                            * perlin.get([
+                                (x as f64 + chunk_x as f64) / 3.912,
+                                (y as f64 + chunk_y as f64) / 2.312,
+                                (z as f64 + chunk_z as f64) / 3.253,
+                            ])
+                            + 0.06);
+                    //if value >= (y as f32 / CHUNK_SIZE as f32) as f64 || y == 0 {
+                    if value >= 0.95 {
+                        chunk.cubes[x][y][z] = Block::Grass
+                    }
+                }
+            }
+        }
+        //Write to file
+        fs::write(filename, chunk.compress()).unwrap();
+        chunk
+    }
+}
+
+//FIXME needs to wire up neighbors and stuff..
+fn server_load_chunk(
+    commands: &mut Commands,
+    loaded_chunks: &mut LoadedChunks,
+    chunks: &Query<&ChunkComp>,
+    chunk_pos: IVec3,
+) -> CompressedChunk {
+    //Check doesn't already exists!
+    match loaded_chunks.ent_map.get(&chunk_pos) {
+        Some(ent) => {
+            info!("I already have this chunk loaded! {:?}", chunk_pos);
+            chunks.get(*ent).unwrap().read_chunk().compress()
+        }
+        None => {
+            info!("Creating new chunk");
+            let mut chunk = gen_chunk(chunk_pos.x, chunk_pos.y, chunk_pos.z);
+            chunk.pos = chunk_pos;
+            let data = chunk.compress();
+
+            let arc = Arc::new(RwLock::new(chunk));
+            let comp = ChunkComp::new(arc);
+            let ent = commands.spawn().insert(comp).id();
+            loaded_chunks.ent_map.insert(chunk_pos, ent);
+            data
+        }
+    }
+}
+
+pub fn server_create_chunks(
+    mut commands: Commands,
+    messages: Res<CurrentServerMessages>,
+    mut server: ResMut<RenetServer>,
+    mut queued_requests: Local<Vec<(u64, IVec3)>>,
+    chunks: Query<&ChunkComp>,
+    mut loaded_chunks: ResMut<LoadedChunks>,
+) {
+    queued_requests.retain(|(id, pos)| {
+        if server.can_send_message(*id, Channel::Block.id()) {
+            info!("Sending Chunk! {}", *pos);
+            let chunk_data = server_load_chunk(&mut commands, &mut loaded_chunks, &chunks, *pos);
+            ServerBlockMessage::Chunk(chunk_data).send(&mut server, *id);
+            return false;
+        }
+        true
+    });
+
+    for message in messages.iter() {
+        if let (id, ClientMessage::RequestChunk(pos)) = message {
+            if server.can_send_message(*id, Channel::Block.id()) {
+                info!("Sending Chunk! {}", pos);
+                let chunk_data = server_load_chunk(&mut commands, &mut loaded_chunks, &chunks, *pos);
+                ServerBlockMessage::Chunk(chunk_data).send(&mut server, *id);
+            } else {
+                queued_requests.push((*id, *pos));
+            }
+        }
+    }
+}
+```

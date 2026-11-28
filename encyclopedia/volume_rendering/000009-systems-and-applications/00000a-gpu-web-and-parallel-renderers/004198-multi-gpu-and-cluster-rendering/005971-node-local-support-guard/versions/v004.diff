@@ -1,0 +1,114 @@
+--- v003.md
++++ v004.md
+@@ -1,5 +1,5 @@
+ # Node-Local Support Guard
+ 
+-Also called: Guard, Parallel Support Guard, Support Guard, node-local guard
++Also called: Guard, Parallel Support Guard, node-local guard
+ 
+ ## Overview
+@@ -11,13 +11,13 @@
+ ### Inputs and Outputs
+ *   **Inputs:**
+-    *   $\theta$: The set of stored 3D Gaussian parameters for $N$ primitives. Each primitive $i$ has parameters $\theta_i$ organized into fields $f$ and components $c$.
+-    *   $S_p$: The subset of primitives assigned to node $p$.
++    *   $\theta$: The set of stored 3D Gaussian parameters for $N$ primitives. Each primitive $i$ has parameters $\theta_i$ organized into fields $f$ and components $c$ [S1, unofficial].
++    *   $S_p$: The subset of primitives assigned to node $p$ [S1, unofficial].
+     *   $M$: The scrub interval (number of frames between guard re-applications) [S1, unofficial].
+ *   **Outputs:**
+-    *   Clamped parameters $\theta'$ ready for rendering.
++    *   Clamped parameters $\theta'$ ready for rendering [S1, unofficial].
+     *   A clamp count $C_p$ for health monitoring [S1, unofficial].
+ 
+ ### Data Structures
+-*   **Support Box ($B_f$):** For each field $f$, a pair of bounds $(\ell_{f,c}, h_{f,c})$ for each component $c$.
++*   **Support Box ($B_f$):** For each field $f$, a pair of bounds $(\ell_{f,c}, h_{f,c})$ for each component $c$ [S1, unofficial].
+     *   $\ell_{f,c} = \min_i \theta_{i,f,c}$
+     *   $h_{f,c} = \max_i \theta_{i,f,c}$
+@@ -40,36 +40,35 @@
+ 2.  **Per-Frame Guard Application (Node $p$):**
+     For each frame, on node $p$ holding primitive subset $S_p$:
+-    a. Initialize local clamp counter: $clamp_{sp} \leftarrow 0$.
+-    b. Iterate over each primitive $i \in S_p$ in parallel.
++    a. Initialize local clamp counter: $clamp_{sp} \leftarrow 0$ [S1, unofficial].
++    b. Iterate over each primitive $i \in S_p$ in parallel [S1, unofficial].
+     c. For each field $f$ and component $c$:
+         i. Check if the value is out of bounds or non-finite:
+            If $\theta_{i,f,c} \notin [\ell_{f,c}, h_{f,c}]$ or $\theta_{i,f,c}$ is non-finite:
+-           - Clamp the value: $\theta_{i,f,c} \leftarrow \text{clamp}(\theta_{i,f,c}, \ell_{f,c}, h_{f,c})$
+-           - Increment counter: $clamp_{sp} \leftarrow clamp_{sp} + 1$
+-    d. Render the subset $S_p$ to the node's tile.
+-    e. Composite tiles across nodes.
++           - Clamp the value: $\theta_{i,f,c} \leftarrow \text{clamp}(\theta_{i,f,c}, \ell_{f,c}, h_{f,c})$ [S1, unofficial].
++           - Increment counter: $clamp_{sp} \leftarrow clamp_{sp} + 1$ [S1, unofficial].
++    d. Render the subset $S_p$ to the node's tile [S1, unofficial].
++    e. Composite tiles across nodes [S1, unofficial].
+     f. Check if the total clamp count across all nodes exceeds a health threshold. If so, raise a host parity/scrub alert to signal silent-data-corruption rather than masking the degrading device [S1, unofficial].
+ 
+ ### Pseudocode
+ ```python
++import math
++
+ # Precomputation (One-time, after training)
+-# Input: theta (N primitives, fields f, components c)
++# Input: theta (list of N primitives, each a dict of fields f -> components c -> value)
+ # Output: bounds (dict mapping (f, c) to (min_val, max_val))
+-
+-bounds = {}
+-for f in fields:
+-    for c in components:
+-        # Extract all values for this field/component across all primitives
+-        values = [theta[i][f][c] for i in range(N)]
+-        bounds[(f, c)] = (min(values), max(values))
++def precompute_support_box(theta, fields, components):
++    bounds = {}
++    for f in fields:
++        for c in components:
++            values = [theta[i][f][c] for i in range(len(theta))]
++            bounds[(f, c)] = (min(values), max(values))
++    return bounds
+ 
+ # Per-Frame Execution (Node p)
+-# Input: theta_p (subset of primitives owned by node p), bounds, health_threshold
+-# Output: rendered_tile, alert_signal
+-
+-def node_local_support_guard(theta_p, bounds, health_threshold):
++# Input: theta_p (list of primitives owned by node p), bounds, fields, components, health_threshold
++# Output: clamped_theta_p, clamp_count
++def node_local_support_guard(theta_p, bounds, fields, components, health_threshold):
+     clamp_count = 0
+-    
+-    # Parallel map over primitives owned by this node
+     for i in range(len(theta_p)):
+         for f in fields:
+@@ -77,25 +76,17 @@
+                 val = theta_p[i][f][c]
+                 min_val, max_val = bounds[(f, c)]
+-                
+                 # Check for out-of-bounds or non-finite values
+-                if not (min_val <= val <= max_val) or not is_finite(val):
++                if not (min_val <= val <= max_val) or not math.isfinite(val):
+                     # Clamp to the trained support box
+-                    theta_p[i][f][c] = clamp(val, min_val, max_val)
++                    theta_p[i][f][c] = max(min_val, min(max_val, val))
+                     clamp_count += 1
+-    
+-    # Render the clamped primitives
+-    tile = render_primitives(theta_p)
+-    
+-    # Composite tiles from all nodes (implementation specific to renderer)
++    # Render the subset to the node's tile and composite tiles across nodes
++    # tile = render_primitives(theta_p)
+     # composite_tiles(tile)
+-    
+     # Health check: surface errors rather than silently masking them
+-    # Note: In a distributed system, clamp_counts from all nodes are aggregated
+     # if clamp_count > health_threshold:
+     #     raise_alert("Silent Data Corruption Detected")
+-    
+-    return tile
++    return theta_p, clamp_count
+ ```
+-[G] `is_finite` checks for NaN and Inf. `clamp` restricts a value to a range. The aggregation of `clamp_count` across nodes is implied by the text's mention of "total clamp count across all nodes" [S1, unofficial].
+ 
+ ### Edge Cases and Pitfalls

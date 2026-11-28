@@ -1,0 +1,184 @@
+# DeepSDF Training Loop
+
+Also called: DeepSDF Optimization Loop, DeepSDF Training
+
+## Overview
+The DeepSDF Training Loop is the optimization procedure for the DeepSDF architecture, which learns a continuous signed distance function (SDF) representation for 3D shapes [S1, S2, unofficial]. It solves the problem of learning compact, shape-specific implicit representations by jointly optimizing a global latent code per shape and a neural network that maps (latent code, 3D point) to signed distance values [S2, unofficial]. It sets itself apart from its siblings like [Vox2SDF](4047-vox2sdf.md) and [Deep Medial Field (DMF) Network Architecture](19789-deep-medial-field-dmf-network-architecture.md) by using a single global latent vector for the entire shape rather than local voxel features or medial axes [S1, S2, unofficial].
+
+## How it works
+**Inputs and Outputs:**
+- **Inputs:** A dataset of shapes, where each shape $i$ has a set of query points $P_i$ and corresponding ground-truth SDF values $D_i$.
+- **Outputs:** Optimized MLP weights $\theta$ and shape-specific latent codes $z_i$ for all shapes in the dataset.
+
+**Data Structures:**
+- **Latent Embeddings:** An `nn.Embedding` layer with `num_embeddings` equal to the number of shapes in the dataset and `embedding_dim` equal to $d_z$. The weights are initialized from a normal distribution $\mathcal{N}(0, 1/\sqrt{d_z})$ [S1, unofficial].
+- **DeepSDF Model:** An MLP with input dimension $d_z + 3$, hidden dimension $d_h$, and output dimension 1. It consists of an input layer, $n_{hidden}$ hidden layers, and an output layer [S1, unofficial].
+- **Batch:** A tuple `(points, sdfs, indices)` where `points` is a tensor of shape $(B, 3)$, `sdfs` is a tensor of shape $(B, 1)$, and `indices` is a tensor of shape $(B,)$ containing the shape IDs for the current batch [S1, S2, unofficial].
+
+**Parameters:**
+- $d_z$: Latent code dimension. Value: 512 [S1, unofficial].
+- $d_h$: Hidden layer dimension. Value: 512 [S1, unofficial].
+- $n_{hidden}$: Number of hidden layers. Value: 8 [S1, unofficial].
+- $lr_{model}$: Learning rate for MLP parameters. Value: $5 \times 10^{-4}$ [S1, unofficial].
+- $lr_{embed}$: Learning rate for embedding parameters. Value: $10^{-3}$ [S1, unofficial].
+- $batch\_size$: Samples per iteration. Value: 24 [S1, unofficial].
+- $epochs$: Total training epochs. Value: 2000 [S1, unofficial].
+- $scheduler$: StepLR with $step\_size=500$ and $gamma=0.5$ [S1, S2, unofficial].
+- $loss\_function$: L1 Loss with `reduction="sum"` [S1, S2, unofficial].
+
+**Algorithm:**
+1. **Initialization:**
+   - Initialize the embedding layer weights $E$ with $\mathcal{N}(0, 1/\sqrt{d_z})$ [S1, unofficial].
+   - Initialize the MLP parameters $\theta$ (typically using He or Xavier initialization, though specific initialization for the MLP weights is not explicitly detailed in the provided sources beyond the embedding init) [G].
+   - Create optimizers: Adam for $\theta$ with $lr_{model}$ and Adam for $E$ with $lr_{embed}$ [S1, unofficial].
+   - Create learning rate scheduler (StepLR) for the embedding optimizer with $step\_size=500$ and $gamma=0.5$ [S1, S2, unofficial].
+   - Create data loader with `batch_size` and `shuffle=True` [S1, S2, unofficial].
+
+2. **Training Loop:**
+   For each epoch $e$ from 1 to $epochs$:
+   - Set model to training mode.
+   - Initialize `epoch_loss = 0`.
+   - For each batch `(points, sdfs, indices)` from the data loader:
+     1. Move `points` and `sdfs` to the device (e.g., GPU) [S2, unofficial].
+     2. Retrieve latent codes: $Z = E(indices)$ [S1, S2, unofficial].
+     3. Forward pass: $SDF_{pred} = \text{DeepSDF}(Z, points)$ [S1, S2, unofficial].
+     4. Reshape $SDF_{pred}$ and $sdfs$ to match the batch size dimensions (e.g., $(B, 1)$) [S2, unofficial].
+     5. Compute loss: $L = \text{L1Loss}(SDF_{pred}, sdfs)$ [S1, S2, unofficial].
+     6. Zero gradients for both optimizers [S1, S2, unofficial].
+     7. Backward pass: $L.backward()$ [S1, S2, unofficial].
+     8. Step both optimizers [S1, S2, unofficial].
+     9. Accumulate loss: `epoch_loss += L.item()` [S2, unofficial].
+   - Step the learning rate scheduler [S2, unofficial].
+   - If $e \pmod{100} == 0$:
+     - Save model state: `DeepSDF_epoch_{e}.param` (MLP weights) and `embeddings_epoch_{e}.param` (embedding table weights) [S2, unofficial].
+     - Save losses array `losses.npy` [S2, unofficial].
+     - Yield epoch number and losses list [S2, unofficial].
+
+**Pseudocode:**
+> **Unverified code.** The code below did not pass a test run against a reference implementation, or no test fits it, so it may contain errors.
+
+```python
+import torch
+import torch.nn as nn
+import torch.optim as optim
+from torch.utils.data import DataLoader
+
+class DeepSDFTrainingLoop:
+    def __init__(self, dataset, latent_dim=512, hidden_dim=512, n_hidden_layers=8, 
+                 batch_size=24, epochs=2000, lr_model=5e-4, lr_embed=1e-3, 
+                 step_size=500, gamma=0.5, save_freq=100):
+        self.dataset = dataset
+        self.latent_dim = latent_dim
+        self.num_shapes = len(dataset)
+        
+        # Initialize Embedding Layer
+        self.embeddings = nn.Embedding(self.num_shapes, self.latent_dim)
+        torch.nn.init.normal_(self.embeddings.weight.data, 0, 1 / (self.latent_dim ** 0.5))
+        
+        # Initialize DeepSDF MLP
+        # Input: latent_dim + 3, Output: 1
+        layers = []
+        layers.append(nn.Linear(self.latent_dim + 3, hidden_dim))
+        layers.append(nn.ReLU())
+        for _ in range(n_hidden_layers - 1):
+            layers.append(nn.Linear(hidden_dim, hidden_dim))
+            layers.append(nn.ReLU())
+        layers.append(nn.Linear(hidden_dim, 1))
+        self.deepsdf_model = nn.Sequential(*layers)
+        
+        # Optimizers
+        self.optimizer_model = optim.Adam(self.deepsdf_model.parameters(), lr=lr_model)
+        self.optimizer_embed = optim.Adam(self.embeddings.parameters(), lr=lr_embed)
+        
+        # Scheduler
+        self.scheduler = optim.lr_scheduler.StepLR(self.optimizer_embed, step_size=step_size, gamma=gamma)
+        
+        # Data Loader
+        self.dataloader = DataLoader(dataset, batch_size=batch_size, shuffle=True)
+        
+        self.epochs = epochs
+        self.save_freq = save_freq
+        self.losses = []
+
+    def train_epoch(self):
+        self.deepsdf_model.train()
+        self.embeddings.train()
+        epoch_loss = 0.0
+        
+        for points, sdfs, indices in self.dataloader:
+            # Move to device (assuming CUDA if available)
+            device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+            points = points.to(device)
+            sdfs = sdfs.to(device)
+            indices = indices.to(device)
+            
+            # Forward pass
+            latents = self.embeddings(indices)
+            # Concatenate latent code and point coordinates
+            # latents shape: (batch_size, latent_dim)
+            # points shape: (batch_size, 3)
+            # x shape: (batch_size, latent_dim + 3)
+            x = torch.cat([latents, points], dim=-1)
+            
+            sdf_preds = self.deepsdf_model(x)
+            
+            # Compute Loss
+            loss = nn.functional.l1_loss(sdf_preds.view(-1), sdfs.view(-1), reduction="sum")
+            
+            # Backward pass
+            self.optimizer_model.zero_grad()
+            self.optimizer_embed.zero_grad()
+            loss.backward()
+            
+            # Step optimizers
+            self.optimizer_model.step()
+            self.optimizer_embed.step()
+            
+            epoch_loss += loss.item()
+            
+        self.scheduler.step()
+        self.losses.append(epoch_loss)
+        return epoch_loss
+
+    def run(self):
+        for epoch in range(1, self.epochs + 1):
+            epoch_loss = self.train_epoch()
+            if epoch % self.save_freq == 0:
+                # Save model state
+                torch.save(self.deepsdf_model.state_dict(), f"deepsdf_epoch_{epoch}.param")
+                torch.save(self.embeddings.state_dict(), f"embeddings_epoch_{epoch}.param")
+                # Save losses
+                import numpy as np
+                np.save("losses.npy", np.array(self.losses))
+            yield epoch, self.losses
+```
+
+## Subtopics
+
+### H3D
+H3D is a variant that uses a two-stage training process for head modeling [S3]. First, an SDF network is trained on a large dataset of 3D scans, and its parameters are fixed [S3]. Second, an implicit neural rendering model is trained using the fixed SDF as a prior [S3]. After convergence, the SDF parameters are unfrozen, and training continues for fine-tuning [S3]. This approach leverages pre-trained SDF knowledge to improve reconstruction quality for complex structures like heads [S3].
+
+## Operating characteristics
+**Time and Memory Complexity:**
+- **Memory:** The memory usage is dominated by the embedding table size ($N \times d_z$) and the MLP weights ($O(d_z \cdot d_h + d_h^2 \cdot n_{hidden})$). The batch size determines the GPU memory required for the forward/backward pass [S1, S2, unofficial].
+- **Time:** Each epoch processes all shapes in the dataset. The complexity per iteration is linear in the number of query points per batch [S1, S2, unofficial].
+
+**Measured Performance:**
+- Trained for 2000 epochs with a batch size of 24 [S1, unofficial].
+- Learning rate decay is applied every 500 epochs [S1, S2, unofficial].
+
+**Strengths and Limitations:**
+- **Strengths:** Compact representation via global latent codes; continuous surface representation [S1, S2, unofficial].
+- **Limitations:** Global latent code may struggle with high-frequency details compared to local feature methods like VoxelSDF [S1, unofficial]. Training requires joint optimization of latent codes and network weights, which can be sensitive to initialization [S1, S2, unofficial].
+
+**When to Use:**
+- Use when a compact, global representation is sufficient and the shapes are relatively smooth or low-frequency [S1, S2, unofficial].
+- Do not use when high-frequency geometric details are critical and local feature interpolation (as in VoxelSDF) is preferred [S1, unofficial].
+
+## Background
+DeepSDF was introduced by Park et al. in 2019 [S1, S2, unofficial]. It represents shapes as continuous signed distance functions parameterized by a neural network conditioned on a latent code [S1, S2, unofficial]. The training loop jointly optimizes these latent codes and the network weights using L1 loss on sampled points [S1, S2, unofficial]. It is widely used in 3D reconstruction and generative modeling [S1, S2, unofficial].
+
+## Sources
+[S1] VC-SDFGen2, https://github.com/TurtleJayWang/VC-SDFGen2, fetched 2026-10-28 (unofficial)
+[S2] VC-SDFGen, https://github.com/TurtleJayWang/VC-SDFGen, fetched 2026-10-28 (unofficial)
+[S3] Human 3D Avatar Modeling with Implicit Neural Representation: A Brief Survey, https://doi.org/10.1109/icsps58776.2022.00148, fetched 2026-10-26

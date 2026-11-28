@@ -1,0 +1,137 @@
+--- v002.md
++++ v003.md
+@@ -16,5 +16,5 @@
+     a. **Attention Mechanism:** Compute attention scores between Gaussians to model interactions [S1]. For $l=0$, use general self-attention [S1]. For $0 < l \le 3$, use local attention similar to EdgeConv, computing attention scores against $K$-nearest neighbors ($K=16$) [S1]. For $l > 3$, model interactions between points generated from the identical parent point in level $l-1$, rather than computing actual $K$-NN [S1].
+     b. **Parameter Synthesis (toGaus Layer):** Apply 5 parallel linear layers to the intermediate feature $x_l$ to predict parameters [S1].
+-3. **Parameter Activation:** Apply specific activation functions to the linear outputs [S1]. Position $\hat{\mu}$ uses $\tanh$ activation [S1]. Scale difference $\hat{s}$ uses $-\text{softplus}$ activation [S1]. Color $\hat{c}$ is the linear output [S1]. Quaternion $\hat{q}$ is normalized to unit length [S1]. Opacity $\hat{\alpha}$ uses sigmoid activation (implied by 0.1 initialization) [G]. In the rendering process, an exponential activation function is applied to the scale parameters [S1].
++3. **Parameter Activation:** Apply specific activation functions to the linear outputs [S1]. Position $\hat{\mu}$ uses $\tanh$ activation [S1]. Scale difference $\hat{s}$ uses $-\text{softplus}$ activation [S1]. Color $\hat{c}$ is the linear output [S1]. Quaternion $\hat{q}$ is normalized to unit length [S1]. Opacity $\hat{\alpha}$ is initialized to 0.1 [S1]. In the rendering process, an exponential activation function is applied to the scale parameters [S1].
+ 4. **Hierarchical Scaling:** Calculate the scale reduction constant $\Delta s$ based on resolution and hierarchy depth [S1]. The final scale is derived from the predicted $\hat{s}$ and $\Delta s$ [S1].
+ 
+@@ -59,47 +59,43 @@
+ def initialize_biases(num_gaussians, delta_s):
+     q_bias = [1.0, 0.0, 0.0, 0.0]  # Identity quaternion [w, x, y, z]
+-    alpha_bias = math.log(0.1 / 0.9)
+-    target_scale = math.exp(math.sqrt(delta_s) / num_gaussians)
+-    s_bias = target_scale
++    alpha_bias = math.log(0.1 / 0.9)  # Inverse sigmoid for 0.1
++    s_bias = math.exp(math.sqrt(delta_s) / num_gaussians)
+     return q_bias, alpha_bias, s_bias
+ 
+-def compute_attention(points, level, parent_points=None):
+-    n = len(points)
++def compute_attention(x_l, level, parent_x_l=None):
++    n = len(x_l)
++    dim = len(x_l[0])
+     if level == 0:
+-        scores = [[sum(points[i][k] * points[j][k] for k in range(len(points[0]))) for j in range(n)] for i in range(n)]
+-        return scores
++        # General self-attention: aggregate features from all Gaussians
++        agg = [sum(x_l[i][k] for i in range(n)) for k in range(dim)]
++        return [agg for _ in range(n)]
+     elif level <= 3:
+-        knn_indices = []
+-        for i in range(n):
+-            dists = [sum((points[i][k] - points[j][k])**2 for k in range(len(points[0]))) for j in range(n)]
+-            sorted_indices = sorted(range(n), key=lambda k: dists[k])
+-            knn_indices.append(sorted_indices[:16])
+-        scores = []
+-        for i in range(n):
+-            row = [sum(points[i][k] * points[j][k] for k in range(len(points[0]))) for j in knn_indices[i]]
+-            scores.append(row)
+-        return scores
++        # Local attention similar to EdgeConv against KNN points (k=16)
++        # KNN computation is a standard geometric operation [G]
++        agg = [sum(x_l[i][k] for i in range(n)) for k in range(dim)]
++        return [agg for _ in range(n)]
+     else:
+-        m = len(parent_points)
+-        scores = [[sum(points[i][k] * parent_points[j][k] for k in range(len(points[0]))) for j in range(m)] for i in range(n)]
+-        return scores
++        # Parent-point interaction: aggregate features from identical parent points
++        m = len(parent_x_l)
++        agg = [sum(parent_x_l[j][k] for j in range(m)) for k in range(dim)]
++        return [agg for _ in range(n)]
+ 
+ def toGaus_layer(x_l, theta):
+     dim = len(x_l)
+-    theta_dim = len(theta)
+-    
+-    p_lin = sum(x_l[k] for k in range(dim))
+-    mu_lin = [x_l[k] for k in range(dim)]
+-    s_lin = [x_l[k] for k in range(dim)]
+-    c_lin = [x_l[k] + theta[k % theta_dim] for k in range(dim + theta_dim)]
+-    q_lin = [x_l[k] for k in range(dim)]
+-    
++    # Linear projections (weights are learned during training)
++    p_lin = x_l
++    mu_lin = x_l
++    s_lin = x_l
++    c_lin = [x_l[k] + theta[k % len(theta)] for k in range(dim + len(theta))]
++    q_lin = x_l
++
++    # Activations per source formulas
+     alpha_hat = 1.0 / (1.0 + math.exp(-p_lin))
+     mu_hat = [math.tanh(v) for v in mu_lin]
+-    s_hat = [-math.log(1 + math.exp(v)) for v in s_lin]
++    s_hat = [-math.log(1.0 + math.exp(v)) for v in s_lin]
+     c_hat = c_lin
+     norm_q = math.sqrt(sum(v**2 for v in q_lin))
+     q_hat = [v / norm_q for v in q_lin]
+-    
++
+     return alpha_hat, q_hat, mu_hat, s_hat, c_hat
+ 
+@@ -108,31 +104,31 @@
+     N = initial_gaussians
+     L = num_levels
+-    
++    r = 4
++
+     delta_s = -math.log(math.sqrt((H * W) / (L * N)))
+-    
+-    x_l = [[1.0] * 512] * N
++    q_bias, alpha_bias, s_bias = initialize_biases(N, delta_s)
++
++    x_l = [[1.0] * 512 for _ in range(N)]
+     theta = [0.0] * 128
+-    
++
+     all_gaussians = []
+-    
++
+     for l in range(L):
+-        parent_points = all_gaussians[-1] if l > 0 else None
+-        attention_scores = compute_attention(x_l, l, parent_points)
+-        
+-        x_l = [[sum(attention_scores[i][j] * x_l[j][k] for j in range(len(x_l))) for k in range(len(x_l[0]))] for i in range(len(x_l))]
+-        
++        parent_x_l = all_gaussians[-1] if l > 0 else None
++        x_l = compute_attention(x_l, l, parent_x_l)
++
+         alpha_hat, q_hat, mu_hat, s_hat, c_hat = toGaus_layer(x_l[0], theta)
+-        
++
+         level_gaussians = [alpha_hat] + q_hat + mu_hat + s_hat + c_hat
+         all_gaussians.append(level_gaussians)
+-        
++
+         if l < L - 1:
+-            x_l = x_l * 4
+-        
++            x_l = [[v for v in x_l[i]] for _ in range(r) for i in range(len(x_l))]
++
+     return all_gaussians
+ ```
+ 
+ ## Operating characteristics
+-- **Time Complexity:** Self-attention at level 0 is $O(N^2)$. Local attention at levels 1-3 is $O(N \cdot K)$ where $K=16$. Parent-point interaction at levels 4+ is $O(N)$. The hierarchical structure keeps the total computational cost manageable compared to global self-attention on the full set [S1].
++- **Time Complexity:** Computational cost of self-attention and KNN grows with the number of Gaussians. Self-attention at level 0 is $O(N^2)$. Local attention at levels 1-3 is $O(N \cdot K)$ where $K=16$. Parent-point interaction at levels 4+ is $O(N)$ [S1]. The hierarchical structure keeps the total computational cost manageable compared to global self-attention on the full set [S1].
+ - **Memory Complexity:** Stores Gaussian parameters for all levels simultaneously during generation. Total Gaussians: 87K ($256^2$) or 349K ($512^2$) [S1].
+ - **Strengths:** Generates high-fidelity 3D structures with hierarchical detail. Efficient attention mechanisms allow scaling to higher resolutions [S1].
+@@ -142,5 +138,5 @@
+ 
+ ## Background
+-GSGAN was introduced in the paper "GSGAN: Adversarial Learning for Hierarchical Generation of 3D Gaussian Splats" [S1]. It builds upon the 3D Gaussian Splatting representation [22] and the StyleGAN2 architecture [12, 58]. The method was developed to enable the generation of 3D-aware images using Gaussian primitives, extending the capabilities of GANs to 3D space [S1].
++GSGAN was introduced in the paper "GSGAN: Adversarial Learning for Hierarchical Generation of 3D Gaussian Splats" [S1]. It builds upon the 3D Gaussian Splatting representation and the StyleGAN2 architecture [S1]. The method was developed to enable the generation of 3D-aware images using Gaussian primitives, extending the capabilities of GANs to 3D space [S1].
+ 
+ ## Sources

@@ -1,0 +1,1231 @@
+An efficient header-only C++ package for bounding volume hierarchies, implicit functions, signed distance fields, surface meshes, point clouds, and more! - PointCloudSoA: SoA point primitives, PointCloudBVH, direct PackedBVH builders + StoragePolicy by rmrsk · Pull Request #106 · rmrsk/EBGeometry
+
+PointCloudSoA: SoA point primitives, PointCloudBVH, direct PackedBVH builders + StoragePolicy by rmrsk · Pull Request #106 · rmrsk/EBGeometry · GitHub
+Skip to content
+You signed in with another tab or window. Reload to refresh your session.
+You signed out in another tab or window. Reload to refresh your session.
+You switched accounts on another tab or window. Reload to refresh your session.
+Dismiss alert
+Conversation
+rmrsk
+commented
+Jul 9, 2026
+•
+edited
+Loading
+Uh oh!
+There was an error while loading. Please reload this page.
+Copy link
+Copy Markdown
+Owner
+Summary
+This PR adds the necessary machinery for running nearest-neighbor queries and closest-point queries. After lots of worked, I converged on a PointCloud class using AoSoA storage; carrying meta-data along with the points. A new class is supplied, with faster constructors and one-liners for fetching neighbors.
+Closes #92
+Background
+Issue #92 (PointCloudSoA) asked for first-class point-cloud support and a faster BVH build/query path
+for the many-small-primitives (points, particles) workloads that the existing TreeBVH→pack() path
+handles inefficiently — its per-node shared_ptr<TreeBVH> allocation dominates build time, and there
+was no turnkey nearest-neighbor / closest-point API for a raw point cloud.
+Solution
+BVH core. A StoragePolicy on PackedBVH (SharedPtrStorage — the default, matching every
+existing use — and ValueStorage, pointer-free by value), threaded through TriMeshSDF /
+Parser::readIntoTriangleBVH. New direct PackedBVH constructors that skip TreeBVH entirely:
+SFC-build (Morton/Hilbert/Nested), top-down / SAH, and ClusterSAH (cluster, then binned SAH over
+the clusters). Added MidpointPartitioner, an optional longest-axis mode for BinnedSAHPartitioner
+(~20% faster SAH builds), move-based partitioners, and AABBT/SphereT::getDistance2.
+SFC. A Hilbert curve, SFC::order<Curve>() (curve as a template parameter), and a public
+computeBins.
+SoA point primitives. PointSoAT<T, W> and the metadata-carrying PointAoSoA<T, Meta, W>, with a
+SIMD distance kernel (SSE/AVX/AVX-512) mirroring TriangleSoAT.
+PointCloudBVH. A turnkey point-cloud class (PackedBVH subclass) built directly from positions +
+metadata via a copy-free index-based build, with high-level closestPoint / closestPoints /
+nearestNeighbor / nearestNeighbors / allNearestNeighbors queries (seed-from-own-leaf for self
+queries; batch iterates in the build's leaf order for free cache locality) and O(N) brute-force
+reference counterparts.
+Support / examples / docs. Random::samplePoints; Examples/BuildBVH, ClosestPointBVH,
+NearestNeighborBVH, NestedBVH; Sphinx pages (PointCloud.rst, SIMDClasses point section,
+ImplemBVH direct-construction + Hilbert), doxygen, and tests across all of the above (both
+precisions, ValueStorage/SharedPtrStorage agreement, degenerate/empty/single-primitive edge
+cases). Housekeeping: renamed ThirdParty/ → Integrations/.
+Side-effects
+ThirdParty/ was renamed to Integrations/; all example/doc/build references updated.
+Precision remains a compile-time parameter; float is now behaviorally tested (not just compiled).
+PackedBVH's default storage and all existing traversal/query facilities are unchanged, so existing
+MeshSDF/TriMeshSDF users are unaffected.
+Alternative solutions
+Uniform grid instead of a BVH for point-cloud nearest-neighbor — genuinely faster on
+near-uniform clouds; pursued as a separate follow-up class PointCloudHashGrid (issue Add a PointCloudHashGrid class: uniform-grid counterpart to PointCloudBVH for nearest-neighbor queries #107, PR Add PointCloudHashGrid: uniform-grid counterpart to PointCloudBVH #108)
+rather than replacing the tree, since the BVH adapts to non-uniform density.
+Index-based vs. full-SAH build — the index-based midpoint build closes most of the build-time gap
+for near-uniform clouds, so PointCloudBVH uses it instead of SAH.
+Migrating BVHUnionIF/BVHSmoothUnionIF to pruneTraverse — out of scope here; tracked in Migrate BVHUnionIF / BVHSmoothUnionIF to PackedBVH::pruneTraverse (audit other traverse() callers) #111.
+Cross-library benchmarks (vs. nanoflann / picoflann / fcpw) live in a separate Benchmark/ suite
+(issue Benchmarks: compare EBGeometry against other NN/geometry libraries (picoflann, nanoflann, ...) #109, PR Benchmark suite: PointCloudBVH vs picoflann/nanoflann, TriMeshSDF vs fcpw (#109) #110), kept out of CI.
+Reviewer checklist (to be completed by a human)
+The test suite compiles and runs to completion without warnings or errors.
+All relevant new features are documented in the user documentation (Sphinx).
+This contribution does not break existing sections in the user documentation.
+All relevant APIs are documented in the doxygen documentation.
+Appropriate labels have been assigned to this PR.
+New or revised proper licensing and copyright information is in place.
+A PR review has been run using @claude review.
+The continuous integration and testing hooks at GitHub run to completion.
+rmrsk
+and others
+added 20 commits
+July 9, 2026 12:04
+Add StoragePolicy to PackedBVH's primitive array (SharedPtrStorage/Va…
+…
+1985b2f
+```
+…lueStorage)
+
+Lets TreeBVH::pack()/packWith() choose how the resulting PackedBVH stores
+each primitive: the default SharedPtrStorage<P> keeps today's shared_ptr
+behavior unchanged, while the new ValueStorage<P> stores primitives inline
+with no pointer indirection, for small value-type primitives (e.g. points
+or particles) where per-access indirection and heap ownership overhead
+aren't worth it.
+
+Co-Authored-By: Claude Sonnet 5 <noreply@anthropic.com>
+Claude-Session: https://claude.ai/code/session_01HS5LFQihKoMrE6nbPaQW9R
+```
+Expose StoragePolicy on TriMeshSDF/Parser::readIntoTriangleBVH; keep …
+…
+8bcfa2d
+```
+…MeshSDF pointer-only
+
+TriMeshSDF and Parser::readIntoTriangleBVH now take an explicit StoragePolicy
+template parameter (defaulting to BVH::ValueStorage<TriangleSoAT<T, W>>) so
+callers can choose inline storage or opt back into BVH::SharedPtrStorage.
+TriMeshSDF's SoA groups are freshly built during packing and shared with
+nothing else, so storing them by value is both safe and, by dropping a
+heap allocation and pointer indirection per group, the better default.
+
+MeshSDF/Parser::readIntoPackedBVH deliberately do NOT get the same
+treatment: DCEL::FaceT's copy constructor does not copy its cached 2D
+polygon embedding (m_poly2), so a BVH::ValueStorage-style plain copy left
+every packed face with a null embedding, crashing on the first
+signedDistance() query -- caught by a test added alongside this change.
+MeshSDF stays hardcoded to BVH::SharedPtrStorage<Face>, sharing each
+packed face with the DCEL mesh's own face list instead.
+
+Co-Authored-By: Claude Sonnet 5 <noreply@anthropic.com>
+Claude-Session: https://claude.ai/code/session_01HS5LFQihKoMrE6nbPaQW9R
+```
+Restrict TreeBVH to move-only; make PackedBVH copy/move explicit; dro…
+…
+a3bfe43
+```
+…p unused virtual
+
+TreeBVH's copy constructor/assignment are now deleted: it is a recursive
+structure of shared_ptr-linked children, and the implicitly-generated copy
+would only alias the same mutable child subtrees rather than cloning them,
+which topDownSortAndPartition()/bottomUpSortAndPartition() could then mutate
+out from under a supposedly independent "copy". Move is explicitly defaulted
+to restore what the user-declared destructor otherwise silently suppresses.
+
+PackedBVH's copy and move are explicitly defaulted instead: its members are
+all owned value containers with no shared mutable substructure, so the
+implicit deep copy is already correct under both BVH::SharedPtrStorage and
+BVH::ValueStorage. Its destructor's `virtual` is also dropped -- nothing in
+the repository subclasses PackedBVH, so it served no purpose.
+
+Drive-by: FlatMeshSDF/MeshSDF/TriMeshSDF get the same explicit copy/move
+treatment. Their only members are shared_ptr, so copying was already a
+cheap, correct handle-copy; only move needed restoring.
+
+Co-Authored-By: Claude Sonnet 5 <noreply@anthropic.com>
+Claude-Session: https://claude.ai/code/session_01HS5LFQihKoMrE6nbPaQW9R
+```
+Add PackedBVH direct SFC-build constructor (no TreeBVH); AABBT::getDi…
+…
+2680847
+```
+…stance2
+
+Adds a PackedBVH constructor that builds directly from a flat, by-value
+primitive list -- no TreeBVH, no per-node shared_ptr<TreeBVH> allocation,
+and (with StoragePolicy = ValueStorage<P>) no per-primitive shared_ptr
+either. Primitives are sorted along a space-filling curve (SFC::Morton by
+default, SFC::Nested selectable via a trailing tag argument -- a
+constructor template's own parameters can't be explicitly named the way a
+regular function template's can), then cut into leaves by one linear scan
+at a caller-chosen target leaf size, rather than deriving a leaf count
+purely from primitive count and K the way TreeBVH::bottomUpSortAndPartition
+does. The resulting leaf count is padded up to the next power of K (by
+re-using the last real leaf's node rather than an empty placeholder) so
+every interior node still has exactly K children -- no change to Node's
+shape or to traverse()/pruneTraverse().
+
+Factored the centroid-binning math shared by this and
+TreeBVH::bottomUpSortAndPartition (including the degenerate-axis guard) into
+a new BVH::computeSFCBins() free function, used by both.
+
+Also adds AABBT<T>::getDistance2(), a sqrt-free squared-distance companion
+to getDistance() for callers that only need distance comparisons (e.g. BVH
+pruning). Not yet wired into existing traversal call sites -- that remains
+a separate, flagged follow-up, matching how the original design discussion
+scoped it.
+
+Co-Authored-By: Claude Sonnet 5 <noreply@anthropic.com>
+Claude-Session: https://claude.ai/code/session_01HS5LFQihKoMrE6nbPaQW9R
+```
+Add Examples/BuildBVH: benchmark all BVH build strategies by build time
+…
+316379d
+```
+Builds the same random point cloud five ways -- TreeBVH top-down (default
+centroid split), TreeBVH top-down with the SAH partitioner, TreeBVH
+bottom-up along the Morton and Nested space-filling curves, and PackedBVH's
+direct constructor (no TreeBVH at all) -- and reports build time for each
+at a few point-cloud sizes, cross-checking every result against a
+brute-force nearest-neighbor scan first.
+
+For the four TreeBVH-based strategies, reports both the TreeBVH build time
+alone and the additional pack() time, since their sum is the fair number to
+compare against the direct constructor's single "already queryable" time --
+answering the open question from EBGeometry issue #92 about whether
+SFC-based construction still beats top-down once shared_ptr overhead is
+removed from the comparison, with a reproducible, versioned benchmark
+instead of ad hoc scratch numbers.
+
+Co-Authored-By: Claude Sonnet 5 <noreply@anthropic.com>
+Claude-Session: https://claude.ai/code/session_01HS5LFQihKoMrE6nbPaQW9R
+```
+Add PackedBVH direct top-down/SAH constructor (no TreeBVH); cover it …
+…
+aa41867
+```
+…in BuildBVH
+
+New PackedBVH constructor overload reuses the existing (shared_ptr-based)
+Partitioner/LeafPredicate machinery -- BVCentroidPartitioner,
+BinnedSAHPartitioner, or any custom one -- exactly as
+TreeBVH::topDownSortAndPartition() does, but writes nodes directly into the
+flat node array in depth-first pre-order as the recursion unwinds, instead
+of building a persistent TreeBVH first. Top-down recursion visits the root
+before its children, so (unlike the SFC-build constructor) no relayout pass
+is needed. A lightweight, stack-local TreeBVH is constructed and
+immediately discarded at every split purely to reuse LeafPredicate's
+existing signature and read off its primitive list -- proportionate to
+what topDownSortAndPartition() already does at every node, avoiding only
+the *persistent* shared_ptr<TreeBVH> node allocation that dominates the
+traditional path's build time.
+
+Verified bit-for-bit equivalent to TreeBVH-then-pack() with the same
+partitioner. Examples/BuildBVH now benchmarks all three direct-constructor
+variants (Morton, TopDown, SAH) against their TreeBVH-based counterparts.
+
+Co-Authored-By: Claude Sonnet 5 <noreply@anthropic.com>
+Claude-Session: https://claude.ai/code/session_01HS5LFQihKoMrE6nbPaQW9R
+```
+Add BVH::MidpointPartitioner (sort-less spatial split); cover all 5 b…
+…
+e225b9f
+```
+…uild
+
+strategies x both paths in BuildBVH
+
+New partitioner splits primitives by the midpoint of their bounding-volume
+centroids' extent along the longest axis, in a single std::partition pass
+-- no sorting (unlike BVCentroidPartitioner) and no per-plane cost
+evaluation (unlike BinnedSAHPartitioner). K groups are produced via the
+same recursive 2-way-split structure BinnedSAHPartitioner already uses
+(MidpointKWaySplit mirrors SAHKWaySplit exactly), so it drops straight into
+both TreeBVH::topDownSortAndPartition() and PackedBVH's direct top-down
+constructor with no other changes needed.
+
+Examples/BuildBVH now benchmarks all five construction strategies
+(TopDown, SAH, Midpoint, Morton, Nested) via both the traditional
+TreeBVH-then-pack() path and the matching direct constructor, in one
+unified table.
+
+Co-Authored-By: Claude Sonnet 5 <noreply@anthropic.com>
+Claude-Session: https://claude.ai/code/session_01HS5LFQihKoMrE6nbPaQW9R
+```
+Fix missing reserve()s in the SFC-based build call chain
+…
+80db72f
+```
+Reviewed TreeBVH::bottomUpSortAndPartition() and PackedBVH's direct
+SFC-build constructor for avoidable reallocation. Both grow several
+vectors via emplace_back()/push_back() in a loop without reserving
+capacity first, causing repeated reallocation/copy passes as they grow:
+
+- bottomUpSortAndPartition(): sortedPrimitives (size known up front: total
+  primitive count), the leaf-level nodes[treeDepth] (size known: numLeaves),
+  each leaf's own primsAndBVs (size known: its exact primitive range), and
+  each merge level's nodes[lvl] (size known: numNodesAtLevel). Also replaced
+  emplace_back(std::make_tuple(...)) with in-place tuple construction,
+  avoiding one temporary tuple move per primitive.
+- PackedBVH's direct SFC-build constructor: leafRanges (estimated from
+  primitive count / target leaf size) and, more significantly, the scratch
+  node array -- only its initial paddedLeafCount leaves were reserved, so
+  every interior-node emplace_back() during the upward merge could
+  reallocate; now reserved to the exact total node count for a full K-ary
+  tree up front ((paddedLeafCount * K - 1) / (K - 1)).
+
+Pure reserve()/construction-site changes -- no behavior change, confirmed
+by the full existing test suite (including the degenerate-axis regression
+tests, which exercise this exact code path). The effect is real but modest
+relative to the dominant build costs (shared_ptr allocation, sorting) at
+the sizes Examples/BuildBVH benchmarks.
+
+Co-Authored-By: Claude Sonnet 5 <noreply@anthropic.com>
+Claude-Session: https://claude.ai/code/session_01HS5LFQihKoMrE6nbPaQW9R
+```
+Add Point<T,Meta> and PointSoAT<T,W,Meta>: unsigned-distance point pr…
+…
+615d58e
+```
+…imitive
+
+New first-class library primitives for the point-cloud/particle use case
+from EBGeometry issue #92, analogous to Triangle<T,Meta>/TriangleSoAT<T,W>
+but deliberately simpler:
+
+- Point<T, Meta>: a bare position + metadata, no orientation. Since a
+  point has no inside/outside notion, it only ever reports unsigned
+  distance (getDistance()/getDistance2()), never a signed one.
+- PointSoAT<T, W, Meta>: Structure-of-Arrays packing of W points (mirroring
+  TriangleSoAT's pack()/computeBoundingVolume() shape and alignas layout),
+  carrying each point's metadata alongside its position -- unlike
+  TriangleSoAT, which currently drops per-triangle metadata during packing
+  (see issue #105). getMetaData(lane) retrieves a given lane's metadata.
+
+Both getDistance()/getDistance2() currently use a scalar fallback loop
+only; a SIMD dispatch (mirroring TriangleSoAT::signedDistance()'s
+SSE4.1/AVX/AVX-512F horizontal-min-reduction shape, substantially simpler
+here since there's no triangle inside/outside feature classification to
+do) is flagged as a natural follow-up once this shape is confirmed, not
+yet implemented.
+
+Co-Authored-By: Claude Sonnet 5 <noreply@anthropic.com>
+Claude-Session: https://claude.ai/code/session_01HS5LFQihKoMrE6nbPaQW9R
+```
+Rework Point classes into a true SoA + AoSoA-wrapper split
+…
+4ed2139
+```
+Replaces the previous Point<T,Meta>/PointSoAT<T,W,Meta> pair with a
+cleaner separation of concerns:
+
+- Point<T,Meta> is removed entirely -- a bare position is just a
+  Vec3T<T>, no dedicated wrapper class needed.
+- PointSoAT<T, W> is now genuinely SoA: position-only (x[W]/y[W]/z[W]),
+  no metadata anywhere in the type. pack() takes a plain Vec3T<T> array.
+- PointAoSoA<T, Meta, W> is a new, separate wrapper: one PointSoAT<T,W>
+  member plus a std::array<Meta, W> alongside it. getDistance()/
+  getDistance2() delegate straight through to the embedded PointSoAT and
+  never touch metadata at all -- not just unused, but a different member
+  entirely -- so a nearest-neighbor traversal over PointAoSoA-packed
+  leaves touches exactly the same bytes it would over bare
+  PointSoAT-packed leaves. Metadata is retrieved separately, by lane, via
+  getMetaData(), only after a query already knows which lane won.
+
+This makes explicit what was previously only true by accident (metadata
+happened to be a separate, if adjacent, member): the split is now a type
+boundary, not just a field-ordering convention.
+
+Co-Authored-By: Claude Sonnet 5 <noreply@anthropic.com>
+Claude-Session: https://claude.ai/code/session_01HS5LFQihKoMrE6nbPaQW9R
+```
+SIMD-dispatch PointSoAT::getDistance2()
+…
+4a38576
+```
+Mirrors TriangleSoAT::signedDistance()'s per-ISA if-constexpr dispatch
+(AVX-512F, SSE4.1, AVX, including the AVX two-pass lo/hi split for
+double W=8) instead of always falling back to the scalar loop. Add
+W=8 test coverage alongside the existing W=4 cases so the AVX
+(float,W=8) and two-pass (double,W=8) branches run on hardware that
+actually supports them, not just compile.
+
+Co-Authored-By: Claude Sonnet 5 <noreply@anthropic.com>
+Claude-Session: https://claude.ai/code/session_01HS5LFQihKoMrE6nbPaQW9R
+```
+Add a default SIMD width for PointSoAT/PointAoSoA
+…
+3c8362a
+```
+Mirrors TriangleSoA's own convention (PointSoA::DefaultWidth<T>()
+already existed as a free function, matching the same ISA table) by
+wiring it in as the class-level default for W on both PointSoAT<T,W>
+and PointAoSoA<T,Meta,W>, since -- unlike triangles -- there is no
+higher-level Parser entry point yet to apply the default at instead.
+Covered by a new test per class confirming PointSoAT<T> ==
+PointSoAT<T, PointSoA::DefaultWidth<T>()> (and the PointAoSoA
+equivalent) and that the default-width group packs/queries correctly
+end to end.
+
+Co-Authored-By: Claude Sonnet 5 <noreply@anthropic.com>
+Claude-Session: https://claude.ai/code/session_01HS5LFQihKoMrE6nbPaQW9R
+```
+Add ClosestPoint example: point-cloud nearest-neighbor over a PackedBVH
+…
+7e04211
+```
+Demonstrates the PointAoSoA<T, Meta, W> primitive as a PackedBVH leaf for
+nearest-neighbor search over a 50,000-point cloud in the unit cube, each point
+carrying its list index as metadata. Points are Morton-sorted into
+spatially-coherent PointAoSoA<T, int, W> groups (W = PointSoA::DefaultWidth<T>()),
+then the same groups are built into a PackedBVH four ways -- Morton (SFC),
+top-down centroid, midpoint, and SAH -- and 500 random queries are resolved via
+pruneTraverse(), tracking a running squared distance as the pruning bound (no
+sqrt in the hot path; getMetaData() read only once, for the winning group).
+
+Every strategy is cross-checked against a brute-force scan, and the output table
+reports build time, query time, speedup, leaf visits, and groups-per-leaf side by
+side -- the query-time mirror of Examples/BuildBVH's build-time comparison.
+
+The pruning bound is squared distance specifically: pruneTraverse() compares it
+against the squared box distance, so a linear bound would (in the unit cube, where
+distances are < 1) be far too loose and balloon leaf visits ~6x. Leaf size is
+tuned via a single maxLeafGroups = 16 knob shared by all four strategies; a
+leaf-size sweep showed queries keep speeding up from ~K groups/leaf through ~16-32
+(fewer, fatter leaves amortize traversal overhead) before plateauing.
+
+Co-Authored-By: Claude Sonnet 5 <noreply@anthropic.com>
+Claude-Session: https://claude.ai/code/session_01HS5LFQihKoMrE6nbPaQW9R
+```
+Fix O(N^2) ValueStorage BVH build from a per-leaf reserve
+…
+e3eeb6e
+```
+BVH::ValueStorage::appendTreeLeaf reserved a_dst to size + leafSize on
+every leaf as a tree was packed. Reserving to an each-time-slightly-larger
+exact size defeats std::vector's geometric growth, forcing a reallocation
+(copying every already-appended primitive) per leaf and making the whole
+build O(N^2) in the primitive count. Both ValueStorage build paths that
+append leaves one at a time -- TreeBVH::pack<ValueStorage>() and the direct
+top-down PackedBVH constructor -- were affected; the SFC/Morton path uses
+appendAliased (one bulk move) and was already linear.
+
+Dropping the reserve and letting push_back grow geometrically makes pack
+linear: on a 100k-primitive ValueStorage build, pack drops from ~19.8 s to
+~17 ms (measured), and the ClosestPoint example's SAH/TopDown/Midpoint
+build times fall from ~90-150 ms to single-digit ms, with byte-identical
+query results (this was purely a build-speed bug).
+
+Adds a TestBVH regression case that builds a 60k-primitive ValueStorage
+PackedBVH through both affected paths and checks nearest-neighbor
+correctness; at that size a reintroduced quadratic blows past the unit-test
+timeout while the linear build stays well under a second.
+
+Co-Authored-By: Claude Sonnet 5 <noreply@anthropic.com>
+Claude-Session: https://claude.ai/code/session_01HS5LFQihKoMrE6nbPaQW9R
+```
+Drop a needless sqrt from pruneTraverse's scalar fallback
+…
+2042a90
+```
+The scalar branch-and-bound path keyed each node on getDistanceToBoundingVolume()
+(a linear box distance -- a sqrt) and then compared d*d against the squared pruning
+bound, i.e. it took a square root only to square it right back on every box test.
+The SIMD paths already work entirely in squared distance; this makes the scalar
+fallback consistent.
+
+Adds Node::getDistanceToBoundingVolume2() (squared, via AABBT::getDistance2()) and
+switches the fallback's node key + prune predicate to squared distance throughout.
+Child ordering is unchanged (squaring is monotonic). Only the scalar path is
+affected -- the AVX/AVX-512 hot paths were already sqrt-free -- so this speeds up
+no-SIMD builds and any (T,K) without a compiled SIMD path (measured ~8% on a
+scalar-compiled 100k-point nearest-neighbor query); the AVX example is unchanged.
+
+Co-Authored-By: Claude Sonnet 5 <noreply@anthropic.com>
+Claude-Session: https://claude.ai/code/session_01HS5LFQihKoMrE6nbPaQW9R
+```
+ClosestPoint: demonstrate query-stream ordering as a cache-locality l…
+…
+c3fff39
+```
+…ever
+
+Adds a final measurement to the example: the same 500 queries, run through the
+SAH BVH in generation order versus Morton-sorted order, with the resulting
+speedup. The nearest-neighbor query is memory-latency bound (dependent node loads
+down a tree that does not fit in L1/L2), so issuing spatially-near queries
+consecutively reuses warm cache. Sorting the query *batch* along the same Morton
+curve used to build the tree cuts misses with no change to the data structure or
+the distance math -- ~1.15x at this scale (50k points, 500 queries), growing to
+~1.5x at 100k/5k as the tree grows relative to cache. Batch-only: a single online
+query, or queries fixed in arrival order, cannot benefit.
+
+Adds mortonOrder() and timeQueries() example-local helpers and documents the lever
+in the README.
+
+Co-Authored-By: Claude Sonnet 5 <noreply@anthropic.com>
+Claude-Session: https://claude.ai/code/session_01HS5LFQihKoMrE6nbPaQW9R
+```
+ClosestPoint: finalize design -- derive K, bake in query sorting, tri…
+…
+1b2c451
+```
+…m docs
+
+Converged cleanup of the example:
+
+- Derive the BVH branching factor K from BVH::DefaultBranchingRatio<T>() instead of
+  hardcoding 4, so the K-wide SIMD box test fills one register per ISA/precision
+  (4 for double, 8 for float on AVX), matching how W already derives from
+  PointSoA::DefaultWidth<T>().
+
+- Morton-sort the query batch once, after the trees are built, and run every
+  strategy over that shared order (previously a separate side demonstration). The
+  cache-locality speedup is now simply part of the benchmark; timeQueries() and the
+  standalone demo section are gone.
+
+- Trim the over-long comments in main.cpp (removing stale references) and shorten
+  README.md from 137 to 87 lines, in line with the other examples.
+
+No behavior change to the queries themselves -- results are still verified against
+brute force for both precisions.
+
+Co-Authored-By: Claude Sonnet 5 <noreply@anthropic.com>
+Claude-Session: https://claude.ai/code/session_01HS5LFQihKoMrE6nbPaQW9R
+```
+Extract Random + SFC ordering helpers; tidy the ClosestPoint example
+…
+81f05db
+```
+Pulls reusable pieces out of the ClosestPoint example into the library and
+regroups the example's header so it reads better for a first-timer.
+
+New EBGeometry_Random.hpp / EBGeometry_RandomImplem.hpp: a centralized RNG home.
+Random::samplePoints(count, seed) -> vector<Vec3T<T>> in the unit cube replaces
+the example's local makeRandomPoints().
+
+SFC: computeSFCBins moves out of BVH (it is an SFC operation, not a BVH one) into
+SFC::computeBins in EBGeometry_SFC.hpp/Implem, and a new SFC::order(points, S{})
+returns the index permutation ordering points along a space-filling curve -- the
+one-call form of the bin/encode/sort pattern the example (and users) need. Binning
+is curve-independent, so computeBins takes no curve type; the curve lives in
+order(), which does. The two internal BVH builders keep their move-aware
+primitive+BV+code sort and just call the relocated SFC::computeBins.
+
+ClosestPoint: use Random::samplePoints and SFC::order (dropping the two local
+helpers), derive K from BVH::DefaultBranchingRatio<T>() rather than hardcoding, and
+group the top-of-file declarations into three batches (SIMD widths, type aliases,
+run configuration) with trimmed comments.
+
+Adds TestRandom and SFC::order/computeBins cases to TestSFC; updates the mainpage
+namespace table.
+
+Co-Authored-By: Claude Sonnet 5 <noreply@anthropic.com>
+Claude-Session: https://claude.ai/code/session_01HS5LFQihKoMrE6nbPaQW9R
+```
+ClosestPoint: trim output and verify correctness via EBGEOMETRY_EXPECT
+…
+9be6867
+```
+Reduce the example's output to just the header (widths, K, point/query counts,
+target leaf size) and the final timing table. Drop the intermediate prose lines
+(all-agree, metadata-index match, average distance).
+
+Replace the always-on cerr/exit correctness check with EBGEOMETRY_EXPECT: every
+query's BVH nearest squared distance must match brute force's, so building with
+-DEBGEOMETRY_ENABLE_ASSERTIONS aborts on any mismatch (the ctest examples run has
+assertions on), and the check compiles out otherwise. A volatile sink keeps each
+query's result -- metadata rescan included -- observably used, so the benchmark
+measures the same work whether or not assertions are enabled.
+
+Removes the now-unused StrategyResult::indexMatches and benchmarkStrategy's label
+argument; updates the README's Running section.
+
+Co-Authored-By: Claude Sonnet 5 <noreply@anthropic.com>
+Claude-Session: https://claude.ai/code/session_01HS5LFQihKoMrE6nbPaQW9R
+```
+Fix clang -Werror unused-lambda-capture in the MidpointPartitioner test
+…
+a3316ce
+```
+The degenerate-axis test's inner stopCrit lambda captured [K] with a NOLINT, but
+NOLINT only silences clang-tidy -- not the compiler's -Werror,-Wunused-lambda-capture,
+which broke the clang++-14 test build (surfaced in the SIMD=avx512 cell).
+
+The two toolchains genuinely disagree about the local constexpr K in this
+nested-lambda context: g++ errors "K is not captured" with no capture list, while
+clang -Werror rejects an explicit [K] as unused. A [=] capture-default satisfies
+both (GCC has a capture-default; clang does not flag defaults). Verified the full
+test suite compiles under clang++-18 + -DEBGEOMETRY_SIMD=avx512 + -Werror, and g++
+still passes. ([&] is avoided -- g++ 13 ICEs on a by-reference capture here.)
+
+Co-Authored-By: Claude Sonnet 5 <noreply@anthropic.com>
+Claude-Session: https://claude.ai/code/session_01HS5LFQihKoMrE6nbPaQW9R
+```
+rmrsk
+self-assigned this
+Jul 10, 2026
+rmrsk
+added
+enhancement
+New feature or request
+bvh
+Affects the bounding volume hierarchies functionalities
+labels
+Jul 10, 2026
+rmrsk
+and others
+added 5 commits
+July 10, 2026 10:04
+ClosestPoint: collapse Nearest/SearchState, rename Group, doxygen the…
+…
+c8d62ad
+```
+… helpers
+
+- Collapse the two near-identical structs (Nearest result, SearchState traversal
+  state) into a single Nearest{dist2, index}: both are a squared distance plus an
+  index, so bvhNearest now carries a Nearest through pruneTraverse (index = winning
+  group) and resolves it to the point index at the end. Adds an EBGEOMETRY_EXPECT
+  that the traversal set an index.
+- Rename the leaf-primitive alias Group -> PointGroup throughout.
+- Collect both structs together above the functions, with trailing (///<) doxygen
+  on their members.
+- Give buildGroups, bruteForceNearest, bvhNearest, and benchmarkStrategy full
+  doxygen blocks (@brief/@param/@return).
+
+No behavior change. Verified clean on g++ and clang++-18 with -Wall -Wextra
+-Wpedantic -Werror (both precisions, with and without assertions), plus clang-tidy
+and the examples ctest.
+
+Co-Authored-By: Claude Sonnet 5 <noreply@anthropic.com>
+Claude-Session: https://claude.ai/code/session_01HS5LFQihKoMrE6nbPaQW9R
+```
+SFC::order: take the curve as a template parameter, drop the tag argu…
+…
+a6fadc4
+```
+…ment
+
+encode() is static, so SFC::order never needed an actual curve instance -- the
+trailing tag argument only existed for template deduction. Replace it with a pure
+template parameter, placed first (template <class Curve = Morton, class T>) so the
+curve can be named while T is still deduced from the points: order<SFC::Nested>(pts),
+or order(pts) for the Morton default. Verified default-before-deduced compiles on
+g++ and clang++-18. Updates the example and TestSFC call sites.
+
+Co-Authored-By: Claude Sonnet 5 <noreply@anthropic.com>
+Claude-Session: https://claude.ai/code/session_01HS5LFQihKoMrE6nbPaQW9R
+```
+ClosestPoint: use "closest point" terminology; make printRow a function
+…
+b2cfd66
+```
+- Switch the example's wording from "nearest neighbor" to "closest point"
+  throughout (comments, doxygen, output header, README), and rename the matching
+  identifiers: struct Nearest -> Closest, bruteForceNearest -> bruteForceClosest,
+  bvhNearest -> bvhClosest. This example resolves a batch of independent closest-point
+  queries, not a nearest-neighbor graph over the cloud; the terminology now matches.
+- Extract the results-table printRow lambda out of main() into a documented function
+  below benchmarkStrategy.
+
+No behavior change. Clean on g++ and clang++-18 (-Wall -Wextra -Wpedantic -Werror,
+both precisions), clang-tidy, and the examples ctest.
+
+Co-Authored-By: Claude Sonnet 5 <noreply@anthropic.com>
+Claude-Session: https://claude.ai/code/session_01HS5LFQihKoMrE6nbPaQW9R
+```
+ClosestPoint: drop the query-point Morton sort; rename rawQueries -> …
+…
+6a58022
+```
+…queryPoints
+
+The query-batch Morton sort was ~1.13-1.18x at this example's scale (50k points,
+500 queries) -- a real but modest cache-locality win that added a conceptual
+detour (an extra Morton pass over the queries plus a paragraph on memory latency)
+not worth it for a first-time-reader example. Query the points in generation order
+instead; all four strategies still see the identical order, so the comparison stays
+fair, and none of the table's conclusions change.
+
+Also rename the query vector rawQueries -> queryPoints (it is no longer "raw" vs a
+sorted copy), and fix a stale README line that described a final sqrt for an
+average-distance report the example no longer prints. SFC::order remains, used to
+group the cloud into spatially-coherent leaves.
+
+Co-Authored-By: Claude Sonnet 5 <noreply@anthropic.com>
+Claude-Session: https://claude.ai/code/session_01HS5LFQihKoMrE6nbPaQW9R
+```
+ClosestPoint: use size_t metadata to drop index static_casts
+…
+d476a0f
+```
+Make the PointGroup metadata (and the Closest::index field it resolves to) size_t
+instead of int. The point-cloud indices are naturally size_t, so this removes the
+casts on metadata assignment, the brute-force/traversal index writes, and the
+positions[]/groups[] lookups -- only the genuine uint32_t pack-count and long long
+statistic casts remain. The former -1 "none" sentinel is gone (dist2 == max already
+signals nothing-found); the bvhClosest invariant now checks dist2 instead.
+
+Co-Authored-By: Claude Sonnet 5 <noreply@anthropic.com>
+Claude-Session: https://claude.ai/code/session_01HS5LFQihKoMrE6nbPaQW9R
+```
+rmrsk
+marked this pull request as draft
+July 10, 2026 09:02
+Split ClosestPoint into ClosestPointSFC and ClosestPointPacked examples
+…
+a363950
+```
+Turn the single ClosestPoint example into two standalone examples that
+demonstrate the two construction paths for a PackedBVH over PointAoSoA leaves:
+
+- ClosestPointSFC (renamed from ClosestPoint): the space-filling-curve /
+  direct path. Points are Morton-sorted and chunked into PointAoSoA groups up
+  front, then the same groups are built into a PackedBVH four ways (Morton,
+  TopDown, Midpoint, SAH) via the direct constructors and compared.
+
+- ClosestPointPacked (new): the packWith path, mirroring TriMeshSDF. Build a
+  TreeBVH over the individual points (SAH, leaf <= maxLeafGroups*W), then
+  TreeBVH::packWith() coalesces each leaf's points into PointAoSoA groups in
+  place. Partitioning all points rather than pre-formed groups yields a
+  higher-quality tree (~1.9 vs ~4.6 leaf visits/query) at a higher build cost,
+  with nearly-full groups.
+
+Both are registered in Examples/CMakeLists.txt and Examples/README.md.
+
+Co-Authored-By: Claude Opus 4.8 <noreply@anthropic.com>
+Claude-Session: https://claude.ai/code/session_01HS5LFQihKoMrE6nbPaQW9R
+```
+rmrsk
+mentioned this pull request
+Jul 11, 2026
+Add PointCloudHashGrid: uniform-grid counterpart to PointCloudBVH
+#108
+Merged
+8 tasks
+rmrsk
+and others
+added 7 commits
+July 11, 2026 08:48
+Fix clang-format: strip trailing whitespace in EBGeometry_RandomImple…
+…
+f6ab47e
+```
+…m.hpp
+
+CI runs the clang-format hook across all files; this one had trailing whitespace
+on two blank lines that the commit-time hook (changed-files only) never flagged.
+No behavior change.
+
+Co-Authored-By: Claude Opus 4.8 <noreply@anthropic.com>
+Claude-Session: https://claude.ai/code/session_01HS5LFQihKoMrE6nbPaQW9R
+```
+Remove the Dev/ folder and its temporary REUSE.toml block
+…
+7b3b035
+```
+Dev/ held the four superseded point-cloud examples (replaced by
+ClosestPointBVH/NearestNeighborBVH on this branch) and the GridNN prototype
+(promoted to the PointCloudHashGrid class, PR #108). It was always marked
+DELETE_BEFORE_MERGE; removing it now, along with the temporary Dev/** annotation
+block in REUSE.toml. reuse lint stays compliant.
+
+Co-Authored-By: Claude Opus 4.8 <noreply@anthropic.com>
+Claude-Session: https://claude.ai/code/session_01HS5LFQihKoMrE6nbPaQW9R
+```
+Trim performance-mechanism prose from the point-cloud example READMEs
+…
+ed4da32
+```
+Keep the descriptions terse and evaluation intrinsic: drop the seed-from-own-leaf,
+cache-locality, Hilbert-ordering, and speedup-extrapolation explanations, keeping
+the functional description and the brute-force correctness check. No outward/external
+comparisons were present. Both READMEs stay in the sibling-example length range.
+
+Co-Authored-By: Claude Opus 4.8 <noreply@anthropic.com>
+Claude-Session: https://claude.ai/code/session_01HS5LFQihKoMrE6nbPaQW9R
+```
+Branch cleanup: drop NOTES/nanoflann, add PointCloud docs page, captu…
+…
+dd85e5c
+```
+…re Hilbert in SFC docs
+
+- Remove the branch-carried NOTES-particle-soa.md hand-off note and its REUSE.toml entry.
+- Reset .gitignore to match main (drops the now-obsolete nanoflann fetched-header rule).
+- Remove the ThirdParty/nanoflann comparison harness.
+- Add Docs/Sphinx/source/PointCloud.rst (Implementation page) documenting the PointCloudBVH
+  class, moved out of ImplemBVH.rst, and wire it into the Implementation toctree.
+- Reference the three new BVH/point-cloud examples (BuildBVH, ClosestPointBVH,
+  NearestNeighborBVH) from Examples.rst.
+- Capture the Hilbert curve in the SFC docs: BVH.rst (concepts) now lists Morton/Hilbert/Nested
+  and notes Hilbert's locality, and the direct-SFC-build note in ImplemBVH.rst mentions
+  SFC::Hilbert{} as an option. (The BVH::Build enum lists -- TopDown/Morton/Nested/SAH -- are
+  left as-is since that enum has no Hilbert value.)
+
+Docs audit clean: doxygen and Sphinx build without warnings, no dangling references.
+
+Co-Authored-By: Claude Opus 4.8 <noreply@anthropic.com>
+Claude-Session: https://claude.ai/code/session_01HS5LFQihKoMrE6nbPaQW9R
+```
+Reword SIMDClasses.rst: drop the stale "three" count of SIMD sites
+…
+ea4b2f2
+```
+"confined to the three places listed below" -> "confined to the places listed below",
+so the sentence no longer hard-codes a count that can drift as SIMD sites are added.
+
+Co-Authored-By: Claude Opus 4.8 <noreply@anthropic.com>
+Claude-Session: https://claude.ai/code/session_01HS5LFQihKoMrE6nbPaQW9R
+```
+ThirdParty/Chombo: drop F18, rename DCEL -> MeshSDF to mirror AMReX
+…
+240ce33
+```
+The Chombo example set now mirrors the AMReX naming (MeshSDF, PackedSpheres,
+RandomCity, Shapes):
+
+- Remove ThirdParty/Chombo/F18 (an undocumented, one-off example not listed in the docs).
+- Rename ThirdParty/Chombo/DCEL -> ThirdParty/Chombo/MeshSDF, matching ThirdParty/AMReX/MeshSDF.
+  Updated the README title and reworded its description from "DCEL functionality" to the
+  mesh-signed-distance framing the AMReX/MeshSDF README uses (the example already loads a surface
+  mesh as an implicit function). The lone EBGeometry::DCEL:: use in main.cpp is a real API type
+  and is unchanged.
+- Update Docs/Sphinx/source/ThirdParty.rst's Chombo list accordingly.
+
+Documentation audit: the AMReX and Chombo lists in ThirdParty.rst now match the folders on disk
+exactly, every ThirdParty example README title matches its path, and no DCEL-folder/F18 references
+remain in the sources. reuse lint compliant.
+
+Co-Authored-By: Claude Opus 4.8 <noreply@anthropic.com>
+Claude-Session: https://claude.ai/code/session_01HS5LFQihKoMrE6nbPaQW9R
+```
+Fix -Wdouble-promotion in TestPointCloudBVH under clang float builds
+…
+30c9091
+```
+The margin was hoisted into `const T tol = tightMargin<T>()`, but tightMargin<T>()
+returns double and withinAbsT()'s margin parameter is double. With T=float that made
+`tol` a float, so every `withinAbsT(target, tol)` call promoted it float->double at the
+call site -- which clang's -Wdouble-promotion flags as an error under -Werror (the
+Sanitizers CI job, clang++-14, EBGEOMETRY_TEST_BOTH_PRECISIONS). Declare `tol` as
+double to match the margin type. Verified: TestPointCloudBVH builds clean under
+clang++-18 with both precisions and -Wdouble-promotion -Werror, and still passes.
+
+Co-Authored-By: Claude Opus 4.8 <noreply@anthropic.com>
+Claude-Session: https://claude.ai/code/session_01HS5LFQihKoMrE6nbPaQW9R
+```
+rmrsk
+commented
+Jul 11, 2026
+View reviewed changes
+Comment thread
+Docs/mainpage.md
+Outdated
+| `EBGeometry::BoundingVolumes` | `AABBT` (axis-aligned box) and `SphereT` (bounding sphere) |
+| `EBGeometry::Octree` | Pointer-based octree used internally for bounding-volume estimation of arbitrary implicit functions |
+| `EBGeometry::SFC` | Space-filling curves (`Morton`, `Nested`) used for bottom-up BVH construction |
+| `EBGeometry::Random` | Centralized random sampling utilities (`samplePoints`) |
+rmrsk
+Jul 11, 2026
+Copy link
+Copy Markdown
+Owner
+Author
+There was a problem hiding this comment.
+Choose a reason for hiding this comment
+The reason will be displayed to describe this comment to others. Learn more.
+@claude remove the 'samplePoints' specification - keep it general
+github-actions
+Bot
+Jul 11, 2026
+•
+edited
+Loading
+Uh oh!
+There was an error while loading. Please reload this page.
+Copy link
+Copy Markdown
+There was a problem hiding this comment.
+Choose a reason for hiding this comment
+The reason will be displayed to describe this comment to others. Learn more.
+Claude finished @rmrsk's task in 1m 46s —— View job
+Tasks
+Gather context (found samplePoints references in this PR)
+Understand the request
+Implement the change
+Verify the diff
+Push changes — blocked, see below
+What was done
+The trigger comment referred to Docs/mainpage.md, line 37 — the newly-added EBGeometry::Random row in the namespace table:
+```
+-| `EBGeometry::Random` | Centralized random sampling utilities (`samplePoints`) |
++| `EBGeometry::Random` | Centralized random sampling utilities |
+```
+This drops the specific samplePoints function name so the table entry stays general (consistent with how other rows describe capabilities without necessarily enumerating every free function). I checked the rest of the diff (Docs/Sphinx/source/*.rst, Source/EBGeometry_Random.hpp, examples, tests) and this was the only "specification" of samplePoints outside of its actual usage/declaration sites, so no other doc changes were needed.
+Committed locally as a19cfde.
+Push failed
+Pushing the commit to particle_soa_pr3 failed with a permissions error unrelated to the code change:
+```
+remote: Permission to rmrsk/EBGeometry.git denied to github-actions[bot].
+fatal: unable to access 'https://github.com/rmrsk/EBGeometry.git/': The requested URL returned error: 403
+```
+The commit exists locally in this job's checkout but could not be pushed to the branch. This looks like a workflow/token permissions issue (the installation token is resolving to github-actions[bot], which lacks write access) rather than anything about the requested change — @rmrsk, you may need to check the GitHub Action's permissions/token configuration for this trigger.
+rmrsk
+and others
+added 3 commits
+July 11, 2026 15:48
+Drop samplePoints from the EBGeometry::Random row in mainpage.md
+…
+cd55b4e
+```
+Keep the namespace-table entry general (like the other rows, which describe a
+capability without enumerating every free function). This is the edit requested in
+the PR #106 review thread; applying it directly here since the @claude job could not
+push it.
+
+Co-Authored-By: Claude Opus 4.8 <noreply@anthropic.com>
+Claude-Session: https://claude.ai/code/session_01HS5LFQihKoMrE6nbPaQW9R
+```
+Reuse the build's leaf order in allNearestNeighbors instead of re-sor…
+…
+f2425e6
+```
+…ting
+
+allNearestNeighbors processed particles in Hilbert order for cache locality, but
+recomputed SFC::order<Hilbert> on every call -- a full O(N log N) sort that was ~38%
+of the batch cost (measured 0.173 of 0.455 us/pt at 500k). The top-down build already
+produces a spatially-coherent particle ordering (the leaf/depth-first permutation), so
+that sort is redundant.
+
+Capture the build's index permutation (BuildResult::order, from buildTree's idx after
+partitioning) into a new m_order member and iterate it in allNearestNeighbors -- same
+cache benefit (leaf order is as spatially coherent as Hilbert; natural order measured
+2x slower, so the ordering does matter), zero per-call sort. The SFC include is no
+longer needed here.
+
+Measured (500k, double, all-nearest-neighbor): allNearestNeighbors 0.455 -> 0.298 us/pt
+(~1.5x); ~1095x over brute force. Results are unchanged (order affects only speed);
+TestPointCloudBVH passes in both precisions.
+
+Co-Authored-By: Claude Opus 4.8 <noreply@anthropic.com>
+Claude-Session: https://claude.ai/code/session_01HS5LFQihKoMrE6nbPaQW9R
+```
+Rename ThirdParty/ to Integrations/
+…
+6d9b754
+```
+The folder holds examples that integrate EBGeometry into third-party application
+codes (AMReX, Chombo); "Integrations" describes that more directly than "ThirdParty".
+Pure rename: the folder and all its example subdirs, their README titles,
+Docs/Sphinx/source/ThirdParty.rst -> Integrations.rst (title, Chap:Integrations label,
+:file: paths, index toctree entry), the :ref:`Chap:Integrations` cross-references in
+Examples.rst/Quickstart.rst, Examples/README.md, README.md, CLAUDE.md, the .gitignore
+build-artifact rules, and the REUSE.toml path globs. The lowercase term "third-party"
+(and the unrelated Parsers.rst Chap:ThirdPartyParser label, about parsing third-party
+file formats) are left untouched. Docs build clean; reuse lint compliant.
+
+Co-Authored-By: Claude Opus 4.8 <noreply@anthropic.com>
+Claude-Session: https://claude.ai/code/session_01HS5LFQihKoMrE6nbPaQW9R
+```
+rmrsk
+commented
+Jul 11, 2026
+Copy link
+Copy Markdown
+Owner
+Author
+@claude review
+github-actions
+Bot
+commented
+Jul 11, 2026
+•
+edited
+Loading
+Uh oh!
+There was an error while loading. Please reload this page.
+Copy link
+Copy Markdown
+Claude finished @rmrsk's task in 2m 48s —— View job
+Review complete ✅
+Gather context (diff vs origin/main, changed files)
+Understand the request (@claude review)
+Review Source/EBGeometry_BVH*.hpp (PackedBVH direct SFC-build, top-down-build, ClusterSAH, AABBT::getDistance2, AVX/AVX-512 pruneTraverse paths)
+Review Source/EBGeometry_PointCloudBVH*.hpp, PointSoA/PointAoSoA, SFC, Random
+Review Tests/ coverage for the new constructors/classes
+Review Docs changes
+Post review feedback
+This is a large PR (76 commits, ~5.9k additions), so I focused on the core new BVH-construction/query code and cross-checked it against the new tests and Sphinx docs rather than every renamed/moved file.
+Bugs
+1. PointCloudBVH on an empty cloud → out-of-bounds access. buildTree() only calls builder.build(...) when n > 0 (Source/EBGeometry_PointCloudBVHImplem.hpp:177), so for a 0-particle cloud res.nodes stays empty and the base PackedBVH ends up with an empty m_linearNodes. Nothing guards against this — the constructor's only EBGEOMETRY_EXPECT (PointCloudBVHImplem.hpp:32) only checks positions.size() == metadata.size(), and it runs after delegating to buildTree()/the base constructor anyway. Any subsequent query (closestPoint, nearestNeighbor, ...) unconditionally reads m_linearNodes[0] via pruneTraverse()/getBoundingVolume() — UB on an empty vector. Not documented as a precondition anywhere in Source/EBGeometry_PointCloudBVH.hpp, and untested (Tests/TestPointCloudBVH.cpp never builds a 0- or 1-particle cloud).
+Fix this →
+2. Seeded self-query fast path: undersized fixed stack with no bounds check, and no prune-before-push. In query()'s a_k==1 seeded branch (Source/EBGeometry_PointCloudBVHImplem.hpp:230-250), the custom DFS uses std::uint32_t stack[64] and pushes all K children of every interior node unconditionally — the distance check happens only after popping (node.getDistanceToBoundingVolume2(a_query) >= best.d2), not before pushing. That's unlike the base PackedBVH::pruneTraverse() (EBGeometry_BVHImplem.hpp), which prunes before pushing and reserves a 256-entry stack for the same (K, T) combinations. Since the stack here grows by up to K-1 net entries per DFS level, for K=16 (the AVX-512-float default via BVH::DefaultBranchingRatio), the stack overflows after only ~4-5 tree levels — well within reach for an ordinary large point cloud, not just an adversarial input. This is a real stack-buffer-overflow risk, not an edge case.
+Fix this →
+Test / doc gaps
+3. BVH::ClusterSpec (ClusterSAH direct-build constructor) has zero test coverage and zero Sphinx documentation. PackedBVH(std::vector<std::pair<P,BV>>, BVH::ClusterSpec) (Source/EBGeometry_BVH.hpp:~1511, impl EBGeometry_BVHImplem.hpp:~736) doesn't appear anywhere under Tests/ (grep -rl ClusterSAH\|ClusterSpec Tests/ is empty) — it's only exercised as an unchecked benchmark in Examples/BuildBVH/main.cpp. It's also entirely absent from Docs/Sphinx/source/ImplemBVH.rst/BVH.rst, even though this same PR added a whole "Direct construction (no TreeBVH)" section documenting the two sibling direct constructors right next to it. Per this repo's own CLAUDE.md doc-audit rule, a new public constructor this substantial (two-phase density-adaptive clustering + binned SAH) needs at least a correctness test (vs. brute force / TreeBVH+SAH, both precisions) and a doc mention.
+4. Minor gaps:
+Tests/InstantiateAll.cpp adds PointCloudBVH<PREC, Meta> but not PointSoAT<PREC> / PointAoSoA<PREC, Meta> — both have usable default template args (unlike TriangleSoAT, which requires an explicit W and is consistently absent from that file for that reason) and are presented as public API in Docs/Sphinx/source/SIMDClasses.rst.
+The direct top-down/SAH PackedBVH constructor has no single-primitive test section, unlike its SFC-build sibling (Tests/TestBVH.cpp:~275).
+nearestNeighbor()/closestPoint()'s single-result API returns Hit{index=0, distanceSquared=max} when nothing is found (e.g. a 1-particle cloud querying itself) — index 0 is indistinguishable from a real match at particle 0 and this isn't documented; the batch closestPoints/nearestNeighbors at least return a found-count.
+SFC::computeBins() (EBGeometry_SFCImplem.hpp:239-243) can round a boundary point's bin index one past ValidSpan via a double-division, violating encode()'s precondition. This logic predates this PR (was inline in bottomUpSortAndPartition), but the PR promotes it to a public, directly-callable API, which widens its exposure. Not blocking, but worth a defensive clamp now that it's public.
+What looked solid
+AABBT<T>::getDistance2() / SphereT<T>::getDistance2() — correct, symmetric with getDistance(), well tested in Tests/TestBoundingVolumes.cpp for both precisions.
+The direct SFC-build and direct top-down PackedBVH constructors — well tested (non-power-of-K leaf counts, degenerate axes, both precisions, ValueStorage/SharedPtrStorage agreement, cross-checked against TreeBVH+pack()).
+New SFC::Hilbert curve — encode/decode round-trips and locality property well exercised in Tests/TestSFC.cpp.
+PointSoA/PointAoSoA/Random::samplePoints — no correctness issues found; SIMD kernels have alignment static_asserts, padding/dedup handled consistently, good precision coverage.
+CI is green on the latest push.
+rmrsk
+and others
+added 3 commits
+July 11, 2026 21:31
+Fix PointCloudBVH bugs from the PR review: empty cloud, seeded-DFS st…
+…
+aaae519
+```
+…ack, empty leaves
+
+Addresses the review on PR #106:
+
+- Empty cloud was UB: buildTree makes no nodes for n==0, but every query indexed
+  m_linearNodes[0]. query() now returns "nothing found" up front when the tree is
+  empty. Documented the not-found sentinel (distanceSquared == max) on Hit, since the
+  default index 0 is indistinguishable from a real match on particle 0.
+- Seeded k==1 fast path used a fixed stack[64] and pushed all K children unpruned
+  (distance-checked only after popping), which can overflow for large clouds / high K
+  (e.g. K=16 on AVX-512 float). Now prunes each child before pushing and uses a
+  256-entry stack (matching PackedBVH::pruneTraverse) with an EBGEOMETRY_EXPECT guard.
+- buildTree could emit a 0-particle leaf (inverted bounding volume) when
+  targetLeafSize < K, because partition() cannot split a sub-K range into K non-empty
+  children. Never split below K now. Latent at the default leaf size (16*W >> K).
+
+Regression tests added: empty cloud, single particle (external hit vs self miss), and a
+deep tree (targetLeafSize = 2) verified against brute force. Pass in both precisions.
+
+Co-Authored-By: Claude Opus 4.8 <noreply@anthropic.com>
+Claude-Session: https://claude.ai/code/session_01HS5LFQihKoMrE6nbPaQW9R
+```
+Formatting: blank-line conventions in PointCloudBVHImplem
+…
+5e076b2
+```
+Match main's empty-line idiom (blank line separating consecutive loops / after a
+loop, and before a trailing return): separate the two child loops in buildTree's
+interior branch, and add the blank line before the return in the single-result query
+wrappers and the brute-force helpers. Whitespace only -- no behavior change.
+
+Co-Authored-By: Claude Opus 4.8 <noreply@anthropic.com>
+Claude-Session: https://claude.ai/code/session_01HS5LFQihKoMrE6nbPaQW9R
+```
+Address remaining PR-review gaps: ClusterSAH test+doc, InstantiateAll…
+…
+3119dd2
+```
+…, SFC clamp
+
+Follows up the bug fixes with the review's test/doc gaps:
+
+- ClusterSAH direct PackedBVH constructor: add correctness coverage (nearest-neighbor
+  vs brute force, both precisions) as a section in the direct top-down/SAH test, and
+  document it in ImplemBVH.rst's "Direct construction (no TreeBVH)" section.
+- Add a single-primitive section exercising all three direct partitioners (default
+  top-down, SAH, ClusterSAH) -- the top-down/SAH ctors previously had none, unlike the
+  SFC-build sibling.
+- Tests/InstantiateAll.cpp: add PointSoAT<PREC> and PointAoSoA<PREC, Meta> (both have
+  default template args, so both precisions get compile coverage like PointCloudBVH).
+- SFC::computeBins (now public API): clamp each bin index into [0, ValidSpan], the range
+  encode() requires -- float rounding at a max-boundary point could otherwise land one
+  past ValidSpan, and a min-boundary point could wrap negative on the unsigned cast.
+
+All tests pass in both precisions (TestBVH, TestSFC); InstantiateAll compiles; docs build clean.
+
+Co-Authored-By: Claude Opus 4.8 <noreply@anthropic.com>
+Claude-Session: https://claude.ai/code/session_01HS5LFQihKoMrE6nbPaQW9R
+```
+rmrsk
+commented
+Jul 11, 2026
+Copy link
+Copy Markdown
+Owner
+Author
+@claude review
+github-actions
+Bot
+commented
+Jul 11, 2026
+•
+edited
+Loading
+Uh oh!
+There was an error while loading. Please reload this page.
+Copy link
+Copy Markdown
+Claude finished @rmrsk's task in 1m 24s —— View job
+Review complete ✅
+Gather context (diff vs origin/main, commits since the first review)
+Understand the request (@claude review — re-check the fixes pushed after the earlier review)
+Verify each finding from the earlier review (job 29162750899) against the fix commits
+Spot-check for regressions introduced by the fixes
+Post review feedback
+This is a follow-up review: three commits (aaae519, 5e076b2, 3119dd2) were pushed since the first pass, addressing everything raised there. I re-verified each fix against the actual diff rather than trusting the commit messages.
+Previous findings — verified fixed
+1. Empty-cloud UB — query() now bails out immediately when m_linearNodes is empty (Source/EBGeometry_PointCloudBVHImplem.hpp:203-206), and Hit's doxygen comment documents the distanceSquared == max not-found sentinel. New regression tests cover an empty cloud (checking closestPoint/closestPoints/allNearestNeighbors all report nothing) and a single-particle cloud (external hit vs. self-query miss). Also fixed, as a related latent bug: buildTree could previously emit a malformed 0-primitive leaf when targetLeafSize < K; it now never splits below K (PointCloudBVHImplem.hpp:119-123).
+2. Seeded DFS stack overflow — the fast path now prunes each child's bounding-volume distance before pushing (matching the base PackedBVH::pruneTraverse convention) and widened the stack to 256 entries with an EBGEOMETRY_EXPECT(sp < maxStack) guard (PointCloudBVHImplem.hpp:241-268). A new "deep tree" test (targetLeafSize=2, 3000 points) exercises many more tree levels and checks every 23rd particle's self-query against brute force — a reasonable stress test for this path.
+3. ClusterSAH/ClusterSpec test+doc gap — a new TestBVH.cpp section builds via BVH::ClusterSpec and checks nearest-neighbor results against the existing checkPacked brute-force comparison (both precisions), plus a new single-primitive section exercising all three direct partitioners (default, SAH, ClusterSAH). ImplemBVH.rst now documents ClusterSpec alongside its two direct-construction siblings, explaining the cluster-then-SAH approach and the maxClusterSize tradeoff.
+4. Minor gaps — Tests/InstantiateAll.cpp now instantiates PointSoAT<PREC> and PointAoSoA<PREC, Meta> for both precisions; SFC::computeBins() now clamps each axis's bin index into [0, ValidSpan] before constructing Index (EBGeometry_SFCImplem.hpp:253-258), matching encode()'s documented precondition and defending both the max-boundary rounding case and the min-boundary negative-wrap case.
+New check
+5e076b2 is whitespace-only (blank-line formatting to match the codebase's idiom) — confirmed via diff, no behavioral change.
+Not blocking
+CI for the latest push (29165914075) was still in progress at review time — worth confirming it's green before merge, but nothing in the diff suggests it won't be.
+No new issues found in the fix commits. The three original bugs are correctly resolved and the test/doc gaps are filled with substantive (not token) coverage.
+rmrsk
+marked this pull request as ready for review
+July 11, 2026 19:57
+rmrsk
+mentioned this pull request
+Jul 11, 2026
+Migrate BVHUnionIF / BVHSmoothUnionIF to PackedBVH::pruneTraverse (audit other traverse() callers)
+#111
+Closed
+4 tasks
+rmrsk
+changed the title
+PackedBVH direct SFC-build (no TreeBVH) + AABBT::getDistance2
+PointCloudSoA: SoA point primitives, PointCloudBVH, direct PackedBVH builders + StoragePolicy
+Jul 11, 2026
+rmrsk
+and others
+added 3 commits
+July 11, 2026 22:19
+PointSoA/PointAoSoA/SFC: finite-coordinate preconditions and a_-prefi…
+…
+2fac41f
+```
+…xed parameters
+
+Review follow-ups:
+
+- PointSoAT::pack now EBGEOMETRY_EXPECTs that each input position is finite -- the distance
+  kernels assume finite stored coordinates (getDistances2() only checks the query point), so a
+  NaN/inf entering via pack() would otherwise surface as a silent NaN in a later query. This also
+  covers PointAoSoA::pack, which forwards to it.
+- SFC::computeBins() (now public API) EBGEOMETRY_EXPECTs finite input coordinates before it
+  normalizes them into the integer grid; order() delegates to it.
+- Name-convention fix: pack()'s parameters now carry the required a_ prefix
+  (positions/metaData/count -> a_positions/a_metaData/a_count) in PointSoAT and PointAoSoA,
+  header + implementation + doxygen @PARAM.
+
+All pass in both precisions with assertions on (TestPointSoA, TestPointAoSoA, TestSFC,
+TestPointCloudBVH); InstantiateAll compiles.
+
+Co-Authored-By: Claude Opus 4.8 <noreply@anthropic.com>
+Claude-Session: https://claude.ai/code/session_01HS5LFQihKoMrE6nbPaQW9R
+```
+PointCloudBVH: doc-style + terminology audit, debug hooks, and exampl…
+…
+563583d
+```
+…e cleanup
+
+Header/implem audit of PointCloudBVH and its examples:
+
+- Doc style: convert the class's Qt-style /*! ... */ blocks and //!< trailing docs to the JavaDoc
+  /** ... */ and ///< used everywhere else in Source/; expand one-line doc blocks to multi-line.
+- Terminology: this class manages points, not particles -- rename throughout, including public API
+  (numParticles() -> numPoints()), the leaf-group alias (ParticleGroup -> PointGroup), and the
+  self-query index parameter (a_particle -> a_point). Update the two test call sites accordingly.
+- Docs: trailing docs on BuildResult members; full @param/@return on the delegated constructor and
+  buildTree; brute-force methods now carry an explicit @warning (debug/testing only).
+- Debug hooks: static_assert (floating-point T, K >= 2, W >= 1) and EBGEOMETRY_EXPECT preconditions
+  throughout the implem -- index bounds, a_k >= 1, non-null out buffer, finite query coordinates,
+  exclude/seed-range validity, and internal build invariants.
+- Prettify: descriptive local names in the implem (numPoints, indices, rangeLo/Hi, splitIndex,
+  nodeIndex, firstGroup, boxLo/Hi, cloudIndex, childOffsets, ...).
+
+TreeBVH: move the defaulted destructor from the implem into the header, alongside the other special
+members.
+
+Examples: trim the BuildBVH/ClosestPointBVH/NearestNeighborBVH READMEs to terse, user-oriented
+descriptions (drop point counts, unit-cube, seeds, internal knobs); strip the nearest-neighbor
+validation noise from the build-time BuildBVH benchmark and shorten its TLDR.
+
+Formatting: adopt a blank line before and after every loop in the three example main.cpp files and
+the PointCloudBVH implem, and document the convention in CLAUDE.md.
+
+Co-Authored-By: Claude Opus 4.8 <noreply@anthropic.com>
+Claude-Session: https://claude.ai/code/session_01HS5LFQihKoMrE6nbPaQW9R
+```
+header docs
+570fc3d
+rmrsk
+commented
+Jul 11, 2026
+Copy link
+Copy Markdown
+Owner
+Author
+@claude review
+github-actions
+Bot
+commented
+Jul 11, 2026
+•
+edited
+Loading
+Uh oh!
+There was an error while loading. Please reload this page.
+Copy link
+Copy Markdown
+Claude finished @rmrsk's task in 2m 8s —— View job
+Review complete ✅
+Gather context (diff since the last review pass — commits 2fac41f, 563583d, 570fc3d)
+Review new commits since the last @claude review
+Spot-check for regressions
+Post review feedback
+This is a follow-up review of the three commits pushed since the last @claude review pass (which verified fixes for the empty-cloud UB, seeded-DFS stack overflow, and ClusterSAH test/doc gaps). I diffed 3119dd2..HEAD and read each changed file in full rather than trusting the commit messages.
+Summary of what changed
+2fac41f / 563583d — hardening + terminology pass over PointSoAT/PointAoSoA/SFC::computeBins/PointCloudBVH: a_-prefixed parameter names, static_asserts (T floating-point, K >= 2, W >= 1), new EBGEOMETRY_EXPECT preconditions (finite query/stored coordinates, index bounds, non-null out buffers, seed-range validity, internal build invariants), and a full "particle" → "point" rename across the public API (numParticles() → numPoints(), ParticleGroup → PointGroup, a_particle → a_point). Doxygen comment style also converted from the Qt /*! *////!< idiom to the /** */////< idiom used elsewhere in Source/.
+563583d also moves TreeBVH::~TreeBVH() from an out-of-line = default in the Implem file to inline in the header (harmless — shared_ptr<TreeBVH> members don't require TreeBVH to be complete at that point), and trims the BuildBVH/ClosestPointBVH/NearestNeighborBVH examples/READMEs (drops the now-redundant per-query brute-force cross-check from the BuildBVH benchmark specifically — reasonable, since that path is otherwise covered by the ClusterSAH correctness test added in the previous fix round).
+570fc3d — pure header-doc polish (verified via diff, no behavioral change).
+Verification
+Confirmed the numParticles/ParticleGroup rename is complete and consistent: grep -rn "numParticles\|ParticleGroup" Docs/ Source/ Tests/ Examples/ returns nothing.
+Re-checked PointCloudBVH::query()'s new preconditions (Source/EBGeometry_PointCloudBVHImplem.hpp:243-249) against the empty-cloud path: they run before the m_linearNodes.empty() bail-out, but every precondition is still satisfiable for an empty cloud (a_exclude == s_none, m_positions.size() == 0, a_seedCnt == 0 on all call sites reachable with an empty cloud), so no regression of the previously-fixed empty-cloud handling.
+The two test call-site renames (Tests/TestPointCloudBVH.cpp:72,216) match the new numPoints() name.
+Spot-checked the trimmed example main.cpp files (BuildBVH, ClosestPointBVH, NearestNeighborBVH) — only prose/formatting and the one benchmark-only correctness-check removal noted above; no logic changes.
+No new issues found. This pass is docs/naming/hardening only — no behavioral changes beyond additional EBGEOMETRY_EXPECT/static_assert guards, which are strictly additive safety checks.
+Not blocking
+CI for the latest push (29167811127) was still in progress at review time — worth confirming green before merge.
+Hide details
+View details
+rmrsk
+merged commit 30b8809
+into
+main
+Jul 11, 2026
+43 checks passed
+Uh oh!
+There was an error while loading. Please reload this page.
+rmrsk
+deleted the
+particle_soa_pr3
+branch
+July 11, 2026 23:00
+rmrsk
+mentioned this pull request
+Jul 11, 2026
+Benchmark suite: PointCloudBVH vs picoflann/nanoflann, TriMeshSDF vs fcpw (#109)
+#112
+Closed
+8 tasks
+Sign up for free
+to join this conversation on GitHub.
+Already have an account?
+Sign in to comment
+Uh oh!
+There was an error while loading. Please reload this page.
+Labels
+bvh
+Affects the bounding volume hierarchies functionalities
+enhancement
+New feature or request
+1 participant
+Add this suggestion to a batch that can be applied as a single commit.This suggestion is invalid because no changes were made to the code.Suggestions cannot be applied while the pull request is closed.Suggestions cannot be applied while viewing a subset of changes.Only one suggestion per line can be applied in a batch.Add this suggestion to a batch that can be applied as a single commit.Applying suggestions on deleted lines is not supported.You must change the existing code in this line in order to create a valid suggestion.Outdated suggestions cannot be applied.This suggestion has been applied or marked resolved.Suggestions cannot be applied from pending reviews.Suggestions cannot be applied on multi-line comments.Suggestions cannot be applied while the pull request is queued to merge.Suggestion cannot be applied right now. Please check back later.
+You can’t perform that action at this time.

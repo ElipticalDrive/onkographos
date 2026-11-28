@@ -1,0 +1,166 @@
+--- v003.md
++++ v004.md
+@@ -4,62 +4,101 @@
+ 
+ ## Overview
+-Voxel Bricks is a space-skipping acceleration structure for voxel ray marching that groups voxels into fixed-size $8 \times 8 \times 8$ blocks (bricks) and maintains a sparse index (brickgrid) to reference only non-empty bricks [S1, unofficial][S2, unofficial]. It solves the problem of excessive memory bandwidth and traversal overhead in dense or sparse voxel volumes by skipping entire empty regions without visiting individual voxels [S2, unofficial]. Unlike [Adaptive Ray Marching with Voxel Skipping](3870-adaptive-ray-marching-with-voxel-skipping.md) which may use variable-sized blocks or different culling criteria, Voxel Bricks relies on a strict two-level hierarchy: a sparse grid of pointers/references and fixed $8^3$ bricks, offering minimal structural overhead suitable for interactive, dynamic voxel worlds [S2, unofficial].
++Voxel Bricks is a space-skipping acceleration structure for voxel ray marching that groups voxels into fixed-size $8 \times 8 \times 8$ blocks (bricks) and uses a sparse index (brickgrid) to reference only non-empty bricks [S1, unofficial][S2, unofficial]. It solves the problem of excessive memory bandwidth and traversal overhead in dynamic voxel volumes by skipping entire empty regions without visiting individual voxels [S2, unofficial]. Unlike [Adaptive Ray Marching with Voxel Skipping](3870-adaptive-ray-marching-with-voxel-skipping.md) which may use variable-sized blocks, Voxel Bricks relies on a strict two-level hierarchy of a sparse grid and fixed $8^3$ bricks, offering minimal structural overhead suitable for interactive worlds [S2, unofficial].
+ 
+ ## How it works
+ **Inputs:**
+-- A 3D voxel volume where each voxel has a density/value.
+-- A ray defined by origin $\mathbf{o}$ and direction $\mathbf{d}$.
++- A 3D voxel volume where each voxel has a density/value [G].
++- A ray defined by origin $\mathbf{o}$ and direction $\mathbf{d}$ [G].
+ - A brick size $B = 8$ (fixed in standard implementations) [S1, unofficial][S2, unofficial].
+ 
+ **Outputs:**
+-- A rendered pixel color/intensity via ray marching, skipping empty space.
++- A rendered pixel color/intensity via ray marching, skipping empty space [G].
+ 
+ **Data Structures:**
+-1.  **Brickgrid:** A sparse, potentially infinite 3D grid that references bricks. It does not store voxel data, only references to existing bricks [S1, unofficial]. The grid size is not fixed; it expands as needed to cover the volume of interest [S1, unofficial].
+-2.  **Brickmap (Brick):** A fixed-size block containing $8 \times 8 \times 8 = 512$ voxels [S1, unofficial][S2, unofficial].
+-3.  **Occupancy Flag:** Each brick has a boolean flag indicating if it is empty (all voxels are air/background) [S2, unofficial].
++1.  **Brickgrid:** An infinite layer that references brickmaps and has no particular fixed size [S1, unofficial].
++2.  **Brickmap (Brick):** A statically sized group of $8 \times 8 \times 8$ voxels [S1, unofficial].
++3.  **Occupancy Flag:** A boolean flag per brick indicating if it is empty (all voxels are air/background) [S2, unofficial].
+ 
+ **Algorithm Steps:**
+-1.  **Brickgrid Traversal:** Perform a 3D-DDA (Digital Differential Analyzer) traversal on the brickgrid to find the sequence of bricks intersected by the ray [S1, unofficial].
++1.  **Brickgrid Traversal:** Perform a 3D-DDA traversal on the brickgrid to find the sequence of bricks intersected by the ray [S1, unofficial].
+ 2.  **Empty Check:** For each brick visited by the DDA, check its occupancy flag [S2, unofficial].
+-3.  **Skip or Traverse:**
+-    -   If the brick is marked empty, skip to the next brick in the DDA sequence [S2, unofficial].
+-    -   If the brick is occupied, retrieve the brickmap and perform standard ray marching on the $8 \times 8 \times 8$ voxels within that brick [S2, unofficial].
+-4.  **Termination:** Continue until the ray exits the volume or a termination condition (e.g., opacity threshold) is met.
++3.  **Skip or Traverse:** If the brick is marked empty, skip to the next brick; if occupied, retrieve the brickmap and traverse all voxels within it using a basic ray marching algorithm [S2, unofficial].
++4.  **Termination:** Continue until the ray exits the volume or a standard termination condition (e.g., opacity threshold) is met [G].
+ 
+ **Pseudocode:**
+ ```python
+-def ray_march_voxel_bricks(ray_origin, ray_direction, brickgrid, brick_size=8):
+-    # 1. Determine the bounding box of the brickgrid to traverse
+-    #    This requires mapping ray_origin and ray_direction to brick coordinates
+-    brick_start = floor(ray_origin / brick_size)
+-    brick_end = floor((ray_origin + ray_direction * max_dist) / brick_size)
++def ray_march_voxel_bricks(o, d, brickgrid, brick_size=8, max_steps=1000):
++    # 1. Initialize 3D-DDA for brick coordinates
++    bx = int(o[0] // brick_size)
++    by = int(o[1] // brick_size)
++    bz = int(o[2] // brick_size)
+     
+-    # 2. 3D-DDA on the brickgrid
+-    #    Initialize DDA state for brick coordinates
+-    dda = BrickGridDDA(brick_start, brick_end, ray_direction)
++    step_x = 1 if d[0] > 0 else -1
++    step_y = 1 if d[1] > 0 else -1
++    step_z = 1 if d[2] > 0 else -1
+     
+-    while dda.has_next():
+-        brick_coords = dda.next()
++    # Distance to next brick boundary along ray (handles zero direction components)
++    t_max_x = (bx * brick_size + (brick_size if step_x > 0 else 0) - o[0]) / d[0] if d[0] != 0 else float('inf')
++    t_max_y = (by * brick_size + (brick_size if step_y > 0 else 0) - o[1]) / d[1] if d[1] != 0 else float('inf')
++    t_max_z = (bz * brick_size + (brick_size if step_z > 0 else 0) - o[2]) / d[2] if d[2] != 0 else float('inf')
++    
++    # Incremental t_delta for each axis
++    t_delta_x = brick_size / d[0] if d[0] != 0 else float('inf')
++    t_delta_y = brick_size / d[1] if d[1] != 0 else float('inf')
++    t_delta_z = brick_size / d[2] if d[2] != 0 else float('inf')
++    
++    accumulated_t = 0.0
++    color = [0.0, 0.0, 0.0, 0.0]
++    alpha = 0.0
++    
++    for _ in range(max_steps):
++        # Find next brick to visit
++        if t_max_x < t_max_y and t_max_x < t_max_z:
++            bx += step_x
++            accumulated_t = t_max_x
++            t_max_x += t_delta_x
++        elif t_max_y < t_max_z:
++            by += step_y
++            accumulated_t = t_max_y
++            t_max_y += t_delta_y
++        else:
++            bz += step_z
++            accumulated_t = t_max_z
++            t_max_z += t_delta_z
++            
++        # Check if brick exists and is occupied
++        brick = brickgrid.get((bx, by, bz))
++        if brick is None or brick.is_empty:
++            continue
++            
++        # Ray is inside an occupied brick. Perform standard ray marching.
++        # Local origin relative to brick start
++        local_o = [o[0] + accumulated_t * d[0] - bx * brick_size,
++                   o[1] + accumulated_t * d[1] - by * brick_size,
++                   o[2] + accumulated_t * d[2] - bz * brick_size]
+         
+-        # 3. Check if brick exists and is non-empty
+-        #    Note: brickgrid may return None if no brick is stored at this location
+-        brick = brickgrid.get(brick_coords)
+-        
+-        if brick is None or not brick.is_occupied:
+-            continue  # Skip empty brick
++        # March through the 8x8x8 voxels in this brick
++        for step in range(brick_size):
++            vx = int(local_o[0])
++            vy = int(local_o[1])
++            vz = int(local_o[2])
+             
+-        # 4. Ray march within the occupied brick
+-        #    Map global ray to local brick coordinates
+-        local_origin = ray_origin - (brick_coords * brick_size)
+-        local_ray = Ray(local_origin, ray_direction)
+-        
+-        # Perform standard ray marching on the 8x8x8 voxel data in brick
+-        color = ray_march_brick(local_ray, brick.voxels, brick_size)
+-        
+-        if color.is_opaque():
+-            return color
++            # Clamp to brick bounds
++            vx = max(0, min(vx, brick_size - 1))
++            vy = max(0, min(vy, brick_size - 1))
++            vz = max(0, min(vz, brick_size - 1))
+             
+-    return background_color
++            density = brick.voxels[vx][vy][vz]
++            alpha += density * (1.0 - alpha)
++            color = [c * (1.0 - density) + src * density for c, src in zip(color, [1.0, 1.0, 1.0])]
++            
++            local_o[0] += d[0]
++            local_o[1] += d[1]
++            local_o[2] += d[2]
++            
++            if alpha >= 0.99:
++                return color
++        return color
++    return color
+ ```
+ 
+@@ -67,5 +106,5 @@
+ -   **Precision:** Floating-point precision errors in DDA traversal may cause missed bricks or double visits. Use epsilon adjustments when comparing brick boundaries [G].
+ -   **Sparse Volumes:** If the volume is extremely sparse, the brickgrid itself may consume significant memory if not implemented as a hash map or sparse array. The sources note the brickgrid is "infinite" and has "no particular size," implying a dynamic allocation strategy [S1, unofficial].
+--   **Brick Size:** The $8 \times 8 \times 8$ size is fixed in the cited sources. Changing this size requires adjusting the DDA step and brick data layout [S1, unofficial][S2, unofficial].
++-   **Brick Size:** The $8 \times 8 \times 8$ size is fixed in the cited sources [S1, unofficial][S2, unofficial].
+ 
+ ## Subtopics
+@@ -78,11 +117,11 @@
+ 
+ ## Operating characteristics
+--   **Time Complexity:** Worst-case scenario for brickgrid traversal is $O(n\sqrt{2})$ for an $n \times n$ grid, where $n$ is the number of bricks along the ray path [S1, unofficial]. Actual performance depends on the sparsity of the volume.
+--   **Memory Complexity:** Proportional to the number of occupied bricks. The brickgrid overhead is minimal if implemented as a sparse structure, but can grow with volume size if not managed [S1, unofficial][S2, unofficial].
++-   **Time Complexity:** Worst-case scenario for brickgrid traversal is $O(n\sqrt{2})$ for an $n \times n$ grid, where $n$ is the number of bricks along the ray path [S1, unofficial]. Actual performance depends on the sparsity of the volume [G].
++-   **Memory Complexity:** Proportional to the number of occupied bricks [G]. The brickgrid overhead is minimal if implemented as a sparse structure, but can grow with volume size if not managed [S1, unofficial][S2, unofficial].
+ -   **Strengths:** Minimal structural overhead, suitable for dynamic/interactive voxel worlds where voxels change frequently [S2, unofficial]. Drastically reduces render times by skipping empty space [S2, unofficial].
+--   **Limitations:** Fixed brick size ($8^3$) may not be optimal for all volumes. The brickgrid can become large for very sparse volumes if not sparse-encoded. Does not handle occlusion culling automatically unless combined with ray-guided strategies [S1, unofficial].
++-   **Limitations:** Fixed brick size ($8^3$) may not be optimal for all volumes [S1, unofficial][S2, unofficial]. The brickgrid can become large for very sparse volumes if not sparse-encoded [S1, unofficial].
+ 
+ ## Background
+-The Voxel Bricks method was proposed in the context of optimizing voxel ray-tracing for interactive applications. It was introduced by Uygar B. in a blog post detailing a simple solution to sparse voxel traversal [S1, unofficial]. It was also adopted by Joris Rijsdijk for a ray-marched voxel simulation, prioritizing interactivity and minimal structure overhead for dynamic voxel edits [S2, unofficial]. The approach is often contrasted with more complex structures like SVOs (Sparse Voxel Octrees) or distance fields, offering a simpler alternative for specific use cases [S1, unofficial].
++The Voxel Bricks method was proposed in the context of optimizing voxel ray-tracing for interactive applications [S1, unofficial]. It was adopted by Joris Rijsdijk for a ray-marched voxel simulation, prioritizing interactivity and minimal structure overhead for dynamic voxel edits [S2, unofficial]. The approach is often contrasted with more complex structures like Sparse Voxel Octrees (SVOs) or distance fields, offering a simpler alternative for specific use cases [S1, unofficial].
+ 
+ ## Sources

@@ -1,0 +1,41 @@
+# Index Computation and Mapping
+
+Also called: Voxel Indexing, Grid Coordinate Mapping
+
+## Overview
+[G] Index Computation and Mapping translates continuous 3D geometric coordinates into discrete linear array indices within a voxel grid. [G] It solves spatial lookup in dense volume representations by converting positions into memory offsets. [G] It differs from [Uniform Grid Adjacent Cell Indexing](2992-uniform-grid-adjacent-cell-indexing.md) by targeting single-point primary lookup rather than neighborhood traversal, and from [Sparse Voxel Storage and Chunking](15595-sparse-voxel-storage-and-chunking.md) by operating on dense, regularly spaced grids.
+
+## Shared principles
+[G] All methods linearize 3D grid coordinates $(i, j, k)$ into a 1D integer index $I$ via $I = i \cdot S_x + j \cdot S_y + k \cdot S_z$, where $S_x, S_y, S_z$ are strides derived from grid dimensions. [G] The standard convention is row-major ordering ($X$ fastest, $Z$ slowest), yielding $S_x = N_y N_z$, $S_y = N_z$, $S_z = 1$. [G] Coordinate transformation precedes linearization: translation $\mathbf{p}_{rel} = \mathbf{p} - \mathbf{b}_{min}$, scaling $\mathbf{c}_{float} = \mathbf{p}_{rel} / \mathbf{s}$, and discretization $i = \lfloor c_{float,x} \rfloor$. [G] Points outside the axis-aligned bounding box (AABB) are clamped to $[0, N-1]$ to prevent out-of-bounds access, except where explicit boundary detection is required.
+
+> **Unverified code.** The code below did not pass a test run against a reference implementation, or no test fits it, so it may contain errors.
+
+```python
+def compute_linear_index(position, bounds_min, bounds_max, cells_per_edge):
+    rel = [position[d] - bounds_min[d] for d in range(3)]
+    size = [bounds_max[d] - bounds_min[d] for d in range(3)]
+    epsilon = 1e-9
+    size = [max(s, epsilon) for s in size]
+    idx_float = [rel[d] / size[d] * cells_per_edge for d in range(3)]
+    idx_int = [int(f) for f in idx_float]
+    idx_int = [max(0, min(n - 1, i)) for i, n in zip(idx_int, [cells_per_edge]*3)]
+    return idx_int[0] + idx_int[1] * cells_per_edge + idx_int[2] * cells_per_edge * cells_per_edge
+```
+
+## Subtopics
+
+### [Uniform Grid Adjacent Cell Indexing](2992-uniform-grid-adjacent-cell-indexing.md)
+Computes the four linear indices of cells sharing a specific edge. [G] It maps edge geometry to a neighbor set rather than a single cell. Choose it for edge-based surface reconstruction algorithms like Marching Cubes.
+
+### [Uniform Grid Indexing](6941-uniform-grid-indexing.md)
+Maps a continuous 3D position to a single linear index in a uniform grid. [G] It assumes fixed homogeneous grids with strides derived directly from dimensions. Choose it for standard dense volume lookup with strict AABB constraints.
+
+### [Voxel Index Computation](13870-voxel-index-computation.md)
+Maps continuous coordinates to discrete indices with two modes: batch-aware mapping for Gaussian splatting and compact 3-bit texel indexing for texture compression. [G] It handles batched inputs and non-standard compression contexts. Choose it when processing point clouds or requiring BC6H-style compression.
+
+### [Brick Index Computation](20907-brick-index-computation.md)
+Maps 3D voxel coordinates to a linear index in brick-structured datasets. [G] It decomposes stride calculation into precomputed lookup tables to avoid division/modulus at runtime. Choose it for large datasets where cache locality and branch prediction avoidance are critical.
+
+## Background
+[G] Originating from standard computer graphics techniques for texture mapping and volume rendering, this family is foundational to rasterization or ray-marching pipelines using voxelized data. [G] The linearization formula $I = i \cdot N_y N_z + j \cdot N_z + k$ is a standard convention in 3D array storage. [G] Boundary handling and floating-point precision strategies evolved with GPU rendering, favoring divergence-free branching and consistent clamping.
+

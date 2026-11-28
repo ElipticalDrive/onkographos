@@ -1,0 +1,118 @@
+# Indirect Observation Projection (Volumetric Rendering)
+Also called: Differentiable Volumetric Rendering with Factor Fields, Factor Fields Projection
+
+## Overview
+Indirect Observation Projection extends a projection function $P$ to handle cases where only indirect observations (e.g., 2D images) are available, such as in neural radiance field optimization [S1, unofficial]. It differs from direct observation methods by incorporating a differentiable volumetric rendering process that maps view direction and spatial features to color and density, followed by alpha compositing along camera rays [S1, unofficial]. This allows the model to learn 4D signals (density and radiance) from 2D image observations [S1, unofficial].
+
+## How it works
+**Inputs:**
+- View direction $\mathbf{d} \in \mathbb{R}^3$.
+- Spatial location $\mathbf{x} \in \mathbb{R}^3$.
+- Product features $\bigodot_i f_i$ at location $\mathbf{x}$, where $f_i$ are factor fields and $\bigodot$ denotes the Hadamard product [S1, unofficial].
+- Camera ray parameters defining sample positions $\mathbf{x}_i$ and distances $\delta_i$ [S1, unofficial].
+
+**Outputs:**
+- Rendered RGB color $\mathbf{c}_r \in \mathbb{R}^3$ for the pixel [S1, unofficial].
+
+**Data Structures:**
+- The method uses a Multi-Layer Perceptron (MLP) as the default setting to map inputs to outputs [S1, unofficial].
+- The MLP takes $\mathbf{d}$ and $\bigodot_i f_i$ as input and outputs color $\mathbf{c} \in \mathbb{R}^3$ and volume density $\sigma \in \mathbb{R}$ [S1, unofficial].
+- Sample points $\{(\mathbf{c}_i, \sigma_i)\}_{i=1}^N$ are stored along a camera ray [S1, unofficial].
+
+**Steps:**
+1. **Space Contraction (Optional):** If the signal is bounded within a bounding box $[\mathbf{u}, \mathbf{v}]$, normalize coordinates $\mathbf{x}$ to $[0, 1]$ using:
+   $$ \text{contract}(\mathbf{x}) = \frac{\mathbf{x} - \mathbf{u}}{\mathbf{v} - \mathbf{u}} $$
+   For unbounded signals, a different contraction function is used (details not provided in sources) [S1, unofficial].
+2. **Feature Product:** Compute the Hadamard product of factor fields $\bigodot_i f_i$ at the contracted location $\mathbf{x}$ [S1, unofficial].
+3. **MLP Evaluation:** Apply the MLP to map the view direction $\mathbf{d}$ and the product features $\bigodot_i f_i$ to color $\mathbf{c} \in \mathbb{R}^3$ and volume density $\sigma \in \mathbb{R}$ [S1, unofficial].
+4. **Sampling:** Sample $N$ points along a camera ray. For each sample $i$, compute the distance to the next sample $\delta_i = \|\mathbf{x}_{i+1} - \mathbf{x}_i\|_2$ [S1, unofficial].
+5. **Alpha Compositing:** Compute the alpha value $\alpha_i$ and transmittance $T_i$ for each sample:
+   $$ \alpha_i = 1 - \exp(-\sigma_i \delta_i) $$
+   $$ T_i = \prod_{j=1}^{i-1} (1 - \alpha_j) $$
+   where $T_i$ is the transmittance and $\alpha_i$ is the alpha value of sample $i$ [S1, unofficial].
+6. **Color Accumulation:** Compute the final pixel color $\mathbf{c}_r$ using:
+   $$ \mathbf{c}_r = \sum_{i=1}^N T_i \alpha_i \mathbf{c}_i $$
+   The composition of the learned MLP and this volume rendering function constitutes the projection function $P$ [S1, unofficial].
+
+**Pseudocode:**
+> **Unverified code.** The code below did not pass a test run against a reference implementation, or no test fits it, so it may contain errors.
+
+```python
+def indirect_observation_projection(d, x, factor_fields, ray_samples, is_bounded, u, v):
+    """
+    d: view direction vector (3,)
+    x: spatial location (3,)
+    factor_fields: list of factor field tensors
+    ray_samples: list of sample points along ray (N, 3)
+    is_bounded: boolean, whether the signal is bounded
+    u: lower bound of bounding box (3,)
+    v: upper bound of bounding box (3,)
+    """
+    # Step 1: Space Contraction
+    if is_bounded:
+        x_contracted = (x - u) / (v - u)
+    else:
+        # Not given in the sources.
+        x_contracted = x
+    
+    # Step 2: Feature Product
+    # Hadamard product of factor fields
+    product_features = factor_fields[0]
+    for i in range(1, len(factor_fields)):
+        product_features = product_features * factor_fields[i]
+        
+    # Step 3: MLP Evaluation
+    # The MLP takes d and product_features as input
+    # Output: color c and density sigma
+    # Not given in the sources: specific MLP architecture and weights.
+    # Assuming a generic MLP function `mlp` is defined elsewhere.
+    c, sigma = mlp(d, product_features)
+    
+    # Step 4: Sampling
+    # Compute distances between neighboring samples
+    N = len(ray_samples)
+    deltas = []
+    for i in range(N - 1):
+        delta = np.linalg.norm(ray_samples[i+1] - ray_samples[i])
+        deltas.append(delta)
+    # Handle the last sample if necessary (e.g., assume delta=0 or use a default)
+    # Not given in the sources.
+    
+    # Step 5: Alpha Compositing
+    alphas = 1 - np.exp(-sigma * deltas)
+    transmittances = np.ones(N)
+    for i in range(1, N):
+        transmittances[i] = transmittances[i-1] * (1 - alphas[i-1])
+        
+    # Step 6: Color Accumulation
+    color_r = np.zeros(3)
+    for i in range(N):
+        color_r += transmittances[i] * alphas[i] * c[i]
+        
+    return color_r
+```
+
+**Parameters:**
+- $N$: Number of random samples along a camera ray. Typical value not given in the sources.
+- MLP: Shallow non-linear multi-layer perceptron. Default setting in experiments [S1, unofficial].
+
+**Edge Cases and Pitfalls:**
+- Unbounded signals require a specific contraction function not detailed in the sources [S1, unofficial].
+- Precision issues may arise in the exponential function for alpha calculation if $\sigma_i \delta_i$ is very large or very small [G].
+- Boundary conditions for the last sample in the ray are not specified [G].
+
+## Operating characteristics
+- **Time Complexity:** Depends on the number of samples $N$ and the MLP evaluation cost. Not given in the sources.
+- **Memory Complexity:** Depends on the storage of factor fields and MLP weights. Not given in the sources.
+- **Strengths:** Allows learning from indirect 2D observations; flexible model via MLP [S1, unofficial].
+- **Limitations:** Requires numerical integration approximation; intractable volumetric projection integral [S1, unofficial].
+- **When to use:** When optimizing neural radiance fields from 2D images [S1, unofficial].
+- **When not to use:** When direct 4D signal observations are available [S1, unofficial].
+
+## Background
+- **Origin:** Introduced in "Factor Fields: A Unified Framework for Neural Fields and Beyond" [S1, unofficial].
+- **History:** Extends the concept of projection functions to include differentiable volumetric rendering for neural radiance fields [S1, unofficial].
+- **Usage:** Used in optimizing neural radiance fields where only 2D images are observed [S1, unofficial].
+
+## Sources
+[S1] Factor Fields: A Unified Framework for Neural Fields and Beyond, https://doi.org/10.48550/arxiv.2302.01226, fetched 2026-10-26 (unofficial)

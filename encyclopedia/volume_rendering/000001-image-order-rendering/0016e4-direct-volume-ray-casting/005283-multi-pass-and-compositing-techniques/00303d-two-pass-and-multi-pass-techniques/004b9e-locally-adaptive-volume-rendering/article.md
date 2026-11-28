@@ -1,0 +1,108 @@
+# Locally Adaptive Volume Rendering
+
+Also called: Contribution Map Based Volume Rendering, Implementation of Locally Adaptive Volume Rendering
+
+## Overview
+Locally Adaptive Volume Rendering (LAVR) is a two-pass technique that enhances feature visibility and reduces noise in volume rendering by dynamically adjusting fragment opacity based on the local density of contributing voxels [S1]. Unlike standard direct volume rendering which uses a fixed per-voxel opacity, LAVR decouples the classification of relevant data from the final compositing, allowing the renderer to adaptively suppress noise in sparse regions while preserving sharp borders in dense regions [S1]. It sets itself apart from siblings like [Two-pass volume rendering](1292-two-pass-volume-rendering.md) by specifically targeting the statistical distribution of contributions per pixel rather than just splitting light transport or ray marching steps [G].
+
+## How it works
+LAVR operates as a slicing-based approach on graphics hardware using 3D textures, consisting of two distinct passes [S1].
+
+### Inputs and Outputs
+*   **Input:** A 3D scalar volume dataset ($V$), a binary classification function ($\delta$) derived from a transfer function, and a 1D lookup texture ($\alpha_{lookup}$) [S1].
+*   **Output:** A 2D color buffer with adaptively modulated opacity [S1].
+
+### Data Structures
+1.  **Contribution Map:** A 2D floating-point texture (Frame Buffer Object) with dimensions matching the screen resolution ($W \times H$) [S1]. It stores the count of relevant contributions for each pixel [S1].
+2.  **Alpha Lookup:** A 1D texture mapping the contribution count to a final opacity value [S1].
+
+### Steps
+
+**Pass 1: Contribution Map Generation**
+1.  Render the volume dataset using a slicing proxy (e.g., a bounding box or slice planes) [S1].
+2.  For each fragment, evaluate the binary classification function $\delta(s)$ based on the scalar value $s$ of the voxel at the fragment's position [S1].
+3.  If $\delta(s) = 1$ (relevant contribution), add $1.0$ to the pixel's color value using additive blending. If $\delta(s) = 0$, add $0.0$ [S1].
+4.  The result is a 2D texture where each pixel $(x, y)$ contains the integer count $n(x, y)$ of relevant voxels along the ray passing through that pixel [S1].
+
+**Pass 2: Adaptive Compositing**
+1.  Bind the Contribution Map as a 2D texture sampler [S1].
+2.  Render the volume dataset again using the same slicing geometry [S1].
+3.  In the fragment shader, for each fragment:
+    a.  Sample the 3D dataset to retrieve scalar values $s_1$ and $s_2$ at the entry and exit points of the ray segment within the current slice/proxy [S1].
+    b.  Sample the Contribution Map at the fragment's normalized screen coordinates $(x_c, y_c)$ to retrieve the total contribution count $n$ [S1].
+    c.  Sample the transfer function to retrieve the base color $C$ and base opacity $\alpha_{base}$ for the scalar values [S1].
+    d.  Calculate the final opacity $\alpha_{final}$ by sampling the $\alpha_{lookup}$ texture with the contribution count $n$ [S1].
+    e.  Set the fragment color to $C$ and opacity to $\alpha_{final}$ if $\alpha_{base} > 0$, otherwise set opacity to 0 [S1].
+
+### Pseudocode
+> **Unverified code.** The code below did not pass a test run against a reference implementation, or no test fits it, so it may contain errors.
+
+```python
+# Standard operations (defined for completeness)
+def sample_3d_texture(tex, coords):
+    return trilinear_interpolation(tex, coords)
+def sample_2d_texture(tex, coords):
+    return bilinear_interpolation(tex, coords)
+def sample_1d_texture(tex, coord):
+    return linear_interpolation(tex, coord)
+
+# Pass 1: Contribution Map Generation
+# Render target: contribution_map (2D texture, initialized to 0.0)
+# Blending mode: ADD
+def pass1_fragment_shader(scalar_value, transfer_function):
+    # Binary classification: 1 if relevant, 0 otherwise
+    base_alpha = sample_1d_texture(transfer_function, scalar_value)
+    if base_alpha > 0.0:
+        return (1.0, 0.0, 0.0, 0.0)
+    else:
+        return (0.0, 0.0, 0.0, 0.0)
+
+# Pass 2: Adaptive Compositing
+# Inputs: dataset (3D texture), contribution_map (2D texture),
+#         alpha_lookup (1D texture), transfer_function (2D texture)
+# Uniforms: fbo_x_size, fbo_y_size (screen resolution in pixels)
+def pass2_fragment_shader(entry_coords, exit_coords, frag_coord, fbo_x_size, fbo_y_size):
+    # Sample scalar values at entry and exit points of the ray segment
+    scalar1 = sample_3d_texture(dataset, entry_coords)
+    scalar2 = sample_3d_texture(dataset, exit_coords)
+
+    # Normalize fragment coordinates to [0, 1]
+    xc = frag_coord.x / fbo_x_size
+    yc = frag_coord.y / fbo_y_size
+
+    # Retrieve total contribution count for this pixel
+    contrib = sample_2d_texture(contribution_map, (xc, yc))
+
+    # Sample transfer function for base color and opacity
+    color_sample = sample_2d_texture(transfer_function, (scalar2, scalar1))
+    base_color = color_sample[:3]
+    base_alpha = color_sample[3]
+
+    # Determine final opacity based on contribution count
+    if base_alpha > 0.0:
+        final_alpha = sample_1d_texture(alpha_lookup, contrib)
+    else:
+        final_alpha = 0.0
+
+    return (base_color[0], base_color[1], base_color[2], final_alpha)
+```
+
+### Parameters
+*   **$\alpha_{lookup}$**: A 1D texture mapping contribution counts to opacity. The shape of this curve determines the visual style (e.g., suppressing noise in low-count regions) [S1].
+*   **Binary Threshold**: The threshold used in Pass 1 to determine $\delta(s)$. It is defined as $\delta(s) = 1$ if the transfer function's opacity $\alpha_{\text{TF}}(s) > 0$, and $0$ otherwise [S1].
+
+### Edge Cases and Pitfalls
+*   **Filtering**: The contribution map may exhibit noise. The source suggests an alternative implementation where the contribution map is rendered at a lower resolution during the first pass, and stretched using the GPU's native bilinear filtering capabilities to smooth the count, trading accuracy for performance [S1].
+
+## Operating characteristics
+*   **Time Complexity**: Not given in the sources. [S1]
+*   **Memory Complexity**: Requires one additional 2D texture for the contribution map, sized $W \times H$ (screen resolution) [S1].
+*   **Performance**: Faster than full ray-marching integration per pixel because it relies on hardware rasterization of slice proxies. The alternative bilinear filtering approach for smoothing the contribution map is faster but less accurate [S1].
+*   **Strengths**: Enhances internal high-frequency details, sharpens borders in DVR, and prevents saturation in additive rendering by adapting to local density [S1].
+*   **Limitations**: Requires two passes; relies on the quality of the binary classification; may introduce artifacts if the contribution map is not smoothed appropriately [S1].
+
+## Background
+Locally Adaptive Volume Rendering was introduced by [S1] (Feature Enhancement using Locally Adaptive Volume Rendering, 2007) as a method to improve the visual quality of volume rendering by adapting the opacity based on the local number of contributing voxels. It builds on the principles of direct volume ray casting but introduces a pre-pass to gather statistical information about the volume density along each ray [S1].
+
+## Sources
+[S1] Feature Enhancement using Locally Adaptive Volume Rendering, https://doi.org/10.2312/vg/vg07/041-048, fetched 2026-10-26

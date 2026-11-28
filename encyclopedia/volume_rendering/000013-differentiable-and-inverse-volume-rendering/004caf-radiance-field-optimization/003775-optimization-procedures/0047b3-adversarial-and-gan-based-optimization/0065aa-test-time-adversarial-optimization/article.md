@@ -1,0 +1,103 @@
+# Test-time Adversarial Optimization
+
+Also called: Adversarial refinement, Discriminator test-time optimization
+
+## Overview
+Test-time adversarial optimization is a post-processing step applied to radiance field or lighting prediction results at inference time to correct photorealism artifacts [S1]. It solves the problem of visual inconsistencies, such as incorrect shadow directions or erroneous specular highlights, which often arise from low-resolution rendering or limited capacity during the initial end-to-end training phase [S1]. Unlike standard training which updates the generator and discriminator jointly, this method freezes the discriminator and pre-trained components, optimizing only the specific output parameters (e.g., lighting or object insertion) to minimize the adversarial loss [S1].
+
+## How it works
+**Inputs and Outputs:**
+*   **Inputs:** Initial editing result (e.g., virtual object insertion with predicted lighting), pre-trained discriminator $D$, and initial network weights $\Theta$ (specifically the lighting prediction network weights) [S1].
+*   **Outputs:** Optimized network weights $\Theta'$ that produce a refined image $\hat{I}_{edit}$ with corrected lighting and shadows [S1].
+
+**Data Structures:**
+*   **Discriminator $D$:** A neural network trained to distinguish real image patches from generated ones. Parameters $\eta$ are frozen [S1].
+*   **Lighting Prediction Network:** Parameterized by $\Theta$. Only these weights are updated during optimization [S1].
+*   **Sky Decoder:** Pre-trained and frozen [S1].
+
+**Steps:**
+1.  **Initialization:** Retrieve the network weights $\Theta$ and the discriminator $D$ from a checkpoint taken in the middle of the training process (e.g., the 10-th epoch) [S1].
+2.  **Freeze Components:** Keep the discriminator $D$ and the pre-trained sky decoder frozen. Do not update their parameters [S1].
+3.  **Forward Pass:** Render the initial editing result $\hat{I}_{edit}$ using the current weights $\Theta$ [S1].
+4.  **Compute Adversarial Loss:** Calculate the adversarial loss $L_{adv}$ using the discriminator's output on the generated image [S1]:
+    $$
+    L_{adv} = -D(\hat{I}_{edit})
+    $$
+    Note: The negative sign indicates minimization of the discriminator's score for the fake image, effectively trying to fool the discriminator [S1].
+5.  **Optimization:** Update $\Theta$ to minimize $L_{adv}$ using an optimizer (e.g., Adam) [S1].
+6.  **Iteration:** Repeat steps 3-5 for a fixed number of iterations (e.g., 5 or 10) [S1].
+
+**Parameters:**
+*   **Optimizer:** Adam [S1].
+*   **Learning Rate:** $1e-4$ [S1].
+*   **Iterations:** Typically 5 to 10 iterations are shown in results [S1].
+
+**Edge Cases and Pitfalls:**
+*   **Low-Resolution Artifacts:** Initial edits may contain pixelated effects or incorrect shadows due to low-resolution rendering during the initial end-to-end training [S1]. The discriminator detects these as "fake" and guides the optimization to correct them [S1].
+*   **Lighting Consistency:** The method specifically targets spatially-varying lighting cues, such as shadow direction and intensity, ensuring they match the rest of the scene [S1].
+
+**Pseudocode:**
+> **Unverified code.** The code below did not pass a test run against a reference implementation, or no test fits it, so it may contain errors.
+
+```python
+def test_time_adversarial_optimization(initial_weights, discriminator, initial_image, num_iterations=10, lr=1e-4):
+    """
+    Optimizes lighting prediction weights at test time to minimize adversarial loss.
+    
+    Args:
+        initial_weights: Initial parameters Theta for the lighting prediction network.
+        discriminator: Pre-trained discriminator D (frozen).
+        initial_image: The initial rendered image I_hat_edit.
+        num_iterations: Number of optimization steps.
+        lr: Learning rate for Adam optimizer.
+        
+    Returns:
+        optimized_weights: Updated parameters Theta.
+    """
+    # Create a copy of weights to optimize
+    theta = initial_weights.clone()
+    theta.requires_grad = True
+    
+    # Initialize Adam optimizer for theta only
+    optimizer = torch.optim.Adam([theta], lr=lr)
+    
+    for i in range(num_iterations):
+        optimizer.zero_grad()
+        
+        # Render the image using current theta
+        # Note: The exact rendering function depends on the specific radiance field implementation.
+        # Here we assume a differentiable renderer that takes theta and returns the image.
+        current_image = render_lighting(theta)
+        
+        # Compute adversarial loss: minimize -D(I_hat_edit)
+        # D returns a score; we want to maximize the score (make it look real),
+        # so we minimize the negative score.
+        discriminator_score = discriminator(current_image)
+        loss = -discriminator_score
+        
+        # Backpropagate and update theta
+        loss.backward()
+        optimizer.step()
+        
+    return theta
+```
+
+## Subtopics
+
+### Test-time Adversarial Optimization for Lighting Prediction
+A specific application of test-time adversarial optimization focused on understanding the photorealism signal perceived by the discriminator by optimizing lighting prediction network weights [S1]. It is chosen when the primary artifact is incorrect lighting, such as wrong shadow direction or missing specular highlights, rather than geometry or texture errors [S1]. It differs from general adversarial refinement by specifically targeting the lighting prediction network's output to match the implicit photorealism cues learned by the discriminator [S1].
+
+## Operating characteristics
+*   **Time Complexity:** Linear with respect to the number of optimization iterations. Each iteration requires a forward pass through the lighting prediction network, the renderer, and the discriminator [S1].
+*   **Memory Complexity:** Low, as the discriminator and sky decoder are frozen and do not require gradient storage for backpropagation [S1].
+*   **Performance:** Effectively corrects specific lighting artifacts like shadow direction and specular highlights, improving perceptual realism and user preference [S1].
+*   **Strengths:** Can fix artifacts that are difficult to learn during end-to-end training due to resolution limits or optimization instability [S1].
+*   **Limitations:** Requires a pre-trained discriminator and is limited to correcting artifacts that the discriminator has learned to recognize as "fake" [S1].
+*   **When to Use:** When initial rendering results show clear lighting inconsistencies (e.g., wrong shadow direction) that degrade photorealism [S1].
+*   **When Not to Use:** When the artifacts are structural or geometric, or when the discriminator has not been trained to recognize the specific type of error [S1].
+
+## Background
+Test-time adversarial optimization was introduced in the context of neural light field estimation for street scenes with differentiable virtual object insertion [S1]. It leverages the implicit knowledge of photorealism encoded in a discriminator trained during the main training phase [S1]. The method was demonstrated to improve the perceptual realism of virtual object insertion by correcting lighting artifacts that were not fully resolved during the initial training [S1].
+
+## Sources
+[S1] Neural Light Field Estimation for Street Scenes with Differentiable Virtual Object Insertion, https://doi.org/10.1007/978-3-031-20086-1_22, fetched 2026-10-30

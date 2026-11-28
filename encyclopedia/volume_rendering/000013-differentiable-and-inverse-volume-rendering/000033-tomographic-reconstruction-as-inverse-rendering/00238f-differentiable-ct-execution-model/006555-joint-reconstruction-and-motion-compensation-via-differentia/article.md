@@ -1,0 +1,274 @@
+# Joint Reconstruction and Motion Compensation via Differentiable Projector
+
+Also called: Differentiable MBIR with Motion Compensation, Joint Cone-Beam CT Reconstruction and Rigid Motion Compensation Using A Differentiable Projector, Joint Image Reconstruction and Motion Estimation
+
+## Overview
+This method solves the problem of motion artifacts in Cone-Beam Computed Tomography (CBCT) by jointly estimating the attenuation volume and rigid motion parameters within a single optimization loop. Unlike sibling methods that rely on gradient-free stochastic optimization [S1] or computationally expensive volume warping via differentiable interpolation [S1], this approach uses a differentiable forward projector to compute analytical gradients for both the image and motion parameters. It sets itself apart by optimizing a projection-domain data fidelity objective directly, avoiding the need for image-based sharpness criteria or repeated large-volume transformations.
+
+## How it works
+
+### Inputs and Outputs
+**Inputs:**
+*   Log-corrected projection data $p_n$ for $N$ projection frames [S1].
+*   Initial estimate of the attenuation volume $\mu^{(0)}$ [S1].
+*   Initial estimate of motion parameters $\theta^{(0)}$ for each view [S1].
+*   System geometry parameters (source-to-detector distance, detector pixel size, etc.) [S1].
+
+**Outputs:**
+*   Reconstructed attenuation volume $\hat{\mu}$ [S1].
+*   Estimated motion parameters $\hat{\theta}_n$ for each view $n$ [S1].
+
+### Data Structures
+*   **Image Volume ($\mu$):** A 3D grid of attenuation coefficients.
+    *   *Simulation Layout:* $160 \times 160 \times 128$ voxels with spacing $(1.444, 1.444, 1.172)$ mm [S1].
+    *   *Physical Study Layout:* $256 \times 256 \times 290$ voxels with spacing $1$ mm [S1].
+*   **Motion Parameters ($\theta_n$):** A vector of 6 Degrees of Freedom (DoF) for each view $n$.
+    *   *Layout:* $\theta_n = [t_x, t_y, t_z, \gamma_x, \gamma_y, \gamma_z]$ [S1].
+    *   $t_x, t_y, t_z$: Translations along the x, y, z axes [S1].
+    *   $\gamma_x, \gamma_y, \gamma_z$: Rotations about the x, y, z axes [S1].
+*   **Transformation Matrix ($M$):** A $4 \times 4$ homogeneous transformation matrix representing the rigid motion for a specific view [S1].
+    *   *Layout:*
+        $$
+        M_{4\times4} = \begin{bmatrix} R_{3\times3} & t_{3\times1} \\ 0_{1\times3} & 1 \end{bmatrix}
+        $$
+        where $R_{3\times3}$ is the rotation matrix derived from $\gamma_x, \gamma_y, \gamma_z$, and $t_{3\times1} = [t_x, t_y, t_z]^T$ [S1].
+*   **Projection Data ($p_n$):** 2D array of measured intensities.
+    *   *Simulation Layout:* $384 \times 256$ pixels with $1.0$ mm isotropic spacing [S1].
+    *   *Physical Study Layout:* Downsampled to $384 \times 384$ pixels with $1.114$ mm spacing [S1].
+
+### Numbered Steps
+
+1.  **Initialize:** Set initial volume $\mu^{(0)}$ and motion parameters $\theta^{(0)}_n$ for all $n=1 \dots N$. Initialize AdamW optimizer states for $\mu$ and $\theta$ [S1].
+2.  **Iterate** for $k = 0, 1, \dots$ until convergence:
+    3.  **Compute Forward Projections:** For each view $n$, construct the motion matrix $M_n$ from $\theta^{(k)}_n$. Compute the forward projection $P_{\theta_n}(\mu^{(k)})$ using the differentiable projector [S1].
+    4.  **Compute Data Loss:** Calculate the projection-domain data fidelity loss:
+        $$
+        \mathcal{L}_{data}(\mu^{(k)}, \theta^{(k)}) = \sum_{n=1}^{N} \| p_n - P_{\theta_n}(\mu^{(k)}) \|_2^2
+        $$
+        where $p_n$ is the measured log-corrected projection and $P_{\theta_n}(\mu^{(k)})$ is the estimated projection [S1].
+    5.  **Compute Gradient w.r.t. Image ($\nabla_\mu \mathcal{L}$):**
+        $$
+        \nabla_\mu \mathcal{L}_{data} = -2 \sum_{n=1}^{N} P^T_{\theta_n} (p_n - P_{\theta_n}(\mu^{(k)}))
+        $$
+        where $P^T_{\theta_n}$ is the backprojection operator corresponding to the motion state $\theta_n$ [S1].
+    6.  **Compute Gradient w.r.t. Motion ($\nabla_\theta \mathcal{L}$):**
+        Apply the chain rule:
+        $$
+        \nabla_\theta \mathcal{L}_{data} = \nabla_P \mathcal{L}_{data} \cdot \nabla_M P \cdot \nabla_\theta M
+        $$
+        *   $\nabla_P \mathcal{L}_{data}$ is derived from the loss function (Eq. 2 in [S1]).
+        *   $\nabla_\theta M$ is the closed-form gradient of the transformation matrix with respect to the 6 DoF parameters [S1].
+        *   $\nabla_M P$ is the gradient of the projector with respect to the motion matrix $M$, computed using the authors' PyTorch-compatible tools [S1].
+    7.  **Update Image:**
+        $$
+        \mu^{(k+1)} = \mu^{(k)} - \text{AdamW}(\nabla_\mu \mathcal{L}_{data}(\mu^{(k)}, \theta^{(k)}))
+        $$
+        [S1]
+    8.  **Update Motion:**
+        $$
+        \theta^{(k+1)}_n = \theta^{(k)}_n - \text{AdamW}(\nabla_\theta \mathcal{L}_{data}(\mu^{(k)}, \theta^{(k)}))
+        $$
+        for each view $n$ [S1].
+
+### Formulas and Definitions
+
+*   **Point Transformation:** A point $x'$ in the object frame transforms to $x$ in the detector frame via:
+    $$
+    x'_{1} = M_{4\times4} x_{1}
+    $$
+    where $x_1$ and $x'_1$ are homogeneous coordinates [S1].
+*   **Objective Function:**
+    $$
+    \hat{\mu}, \hat{\theta} = \arg\min_{\mu, \theta} \mathcal{L}_{data}(\mu, \theta)
+    $$
+    [S1]
+*   **Gradient w.r.t. Image:**
+    $$
+    \nabla_\mu \mathcal{L}_{data} = -2 \sum_{n=1}^{N} P^T_{\theta_n} (p_n - P_{\theta_n}(\mu))
+    $$
+    [S1]
+*   **Gradient w.r.t. Motion:**
+    $$
+    \nabla_\theta \mathcal{L}_{data} = \nabla_P \mathcal{L}_{data} \cdot \nabla_M P \cdot \nabla_\theta M
+    $$
+    [S1]
+
+### Parameters
+*   **Optimizer:** AdamW [S1]. Two separate applications are used: one for $\mu$ and one for $\theta$ [S1].
+*   **Motion Range (Simulation):** Jerk motion with amplitudes from 1 mm to 10 mm (translation) and 0.02 rad to 0.2 rad (rotation) [S1].
+*   **Motion Range (Physical):** Jerk motion of 5 mm translation and 0.1 rad rotation [S1].
+
+### Edge Cases and Pitfalls
+*   **Numerical Instability:** Unlike finite-difference approximations, this method avoids sensitivity to perturbation size [S1].
+*   **Memory Constraints:** Unlike methods that warp large volumes repeatedly using differentiable interpolation, this method computes gradients analytically through the projector, reducing memory intensity [S1].
+*   **Convergence:** Gradient-based optimization offers improved convergence rates compared to gradient-free methods like CMA-ES, which require evaluating multiple candidate solutions per iteration [S1].
+
+### Pseudocode
+
+> **Unverified code.** The code below did not pass a test run against a reference implementation, or no test fits it, so it may contain errors.
+
+```python
+import torch
+import torch.nn.functional as F
+
+# Assume differentiable_projector and backprojector are defined elsewhere
+# as per the authors' PyTorch-compatible tools [S1].
+# Assume compute_motion_matrix(theta) returns the 4x4 matrix M.
+# Assume compute_gradient_projector_M(M, P_output) returns dP/dM.
+
+def compute_gradient_motion_matrix(theta):
+    """
+    Computes the closed-form gradient of the 4x4 motion matrix M
+    with respect to the 6 DoF parameters theta.
+    theta: [tx, ty, tz, gx, gy, gz]
+    Returns: List of 6 tensors, each of shape (4, 4), representing dM/dtheta_i.
+    """
+    # Implementation details for closed-form dM/dtheta are not provided in [S1].
+    # This function must be implemented based on the analytical derivative
+    # of the rotation and translation components of M.
+    pass
+
+def joint_reconstruction_motion_compensation(projections, initial_mu, initial_theta, num_iterations):
+    """
+    Jointly reconstructs volume and estimates motion using differentiable projector.
+    
+    Args:
+        projections: List of N tensors, shape (H, W), log-corrected projection data.
+        initial_mu: Tensor, shape (D, H, W), initial volume estimate.
+        initial_theta: List of N tensors, shape (6,), initial motion parameters.
+        num_iterations: int, number of optimization steps.
+        
+    Returns:
+        mu: Reconstructed volume tensor.
+        theta: List of estimated motion parameters.
+    """
+    N = len(projections)
+    device = initial_mu.device
+    
+    # Initialize variables
+    mu = initial_mu.clone().requires_grad_(True)
+    theta = [t.clone().requires_grad_(True) for t in initial_theta]
+    
+    # Initialize AdamW optimizers
+    # Note: AdamW state needs to be maintained separately for mu and each theta_n
+    optimizer_mu = torch.optim.AdamW([mu], lr=0.01) # Typical LR not given [S1]
+    optimizer_theta = [torch.optim.AdamW([theta[n]], lr=0.01) for n in range(N)]
+    
+    for k in range(num_iterations):
+        # Zero gradients
+        optimizer_mu.zero_grad()
+        for n in range(N):
+            optimizer_theta[n].zero_grad()
+            
+        loss = 0.0
+        # Accumulate gradients for mu and theta
+        # We need to store intermediate values for backpropagation or compute explicitly
+        
+        # 1. Forward Projection and Loss Calculation
+        # We need to compute the gradient w.r.t mu explicitly as per Eq 5 [S1]
+        # and w.r.t theta using the chain rule [S1].
+        
+        # Compute forward projections for all views
+        projected_views = []
+        for n in range(N):
+            M = compute_motion_matrix(theta[n])
+            # P_theta_n(mu) is the forward projection of mu under motion M
+            proj = differentiable_forward_projector(mu, M)
+            projected_views.append(proj)
+            
+        # Compute data fidelity loss
+        for n in range(N):
+            diff = projections[n] - projected_views[n]
+            loss += torch.sum(diff ** 2)
+            
+        # 2. Gradient w.r.t. Image Volume (mu)
+        # Eq 5: grad_mu = -2 * sum_n ( P^T_theta_n (p_n - P_theta_n(mu)) )
+        grad_mu = torch.zeros_like(mu)
+        for n in range(N):
+            diff = projections[n] - projected_views[n]
+            # P^T is the backprojection operator
+            backproj = differentiable_backprojector(diff, theta[n])
+            grad_mu -= 2.0 * backproj
+            
+        # 3. Gradient w.r.t. Motion Parameters (theta)
+        # Chain rule: dL/dtheta = dL/dP * dP/dM * dM/dtheta [S1]
+        
+        # dL/dP for each view is 2 * (P_theta_n(mu) - p_n)
+        # We need dP/dM. The authors provide tools for this [S1].
+        # Let's assume a function get_dP_dM(proj_output, M) exists.
+        
+        for n in range(N):
+            diff = projections[n] - projected_views[n]
+            # dL/dP is the gradient of the loss w.r.t the projected image
+            # Loss = sum(diff^2), so dL/dP = 2 * diff
+            dL_dP = 2.0 * diff
+            
+            # Get gradient of projector w.r.t motion matrix M
+            # This requires the specific implementation from the authors' tools [S1]
+            # dP_dM is a tensor or list of tensors representing the derivative
+            dP_dM = get_gradient_projector_wrt_motion_matrix(projected_views[n], theta[n])
+            
+            # Get gradient of motion matrix w.r.t theta
+            dM_dtheta_list = compute_gradient_motion_matrix(theta[n])
+            
+            # Compute dL/dtheta for each of the 6 DoF
+            # dL/dtheta_i = sum_{i,j,k,l} (dL/dP_{ij} * dP_{ij}/dM_{kl} * dM_{kl}/dtheta_i)
+            # This contraction must be performed carefully.
+            
+            grad_theta_n = torch.zeros(6, device=device)
+            for i in range(6):
+                # Contract dL/dP, dP/dM, and dM/dtheta_i
+                # This step depends on the exact layout of dP_dM from the tools [S1]
+                # Assuming dP_dM is structured to allow this contraction
+                grad_theta_n[i] = contract_gradients(dL_dP, dP_dM, dM_dtheta_list[i])
+                
+            # Update theta
+            optimizer_theta[n].step() # This step is tricky with manual gradients
+            # In PyTorch, we would typically set grad directly
+            theta[n].grad = grad_theta_n
+            optimizer_theta[n].step()
+            
+        # Update mu
+        mu.grad = grad_mu
+        optimizer_mu.step()
+        
+    return mu, theta
+
+def contract_gradients(dL_dP, dP_dM, dM_dtheta):
+    """
+    Helper to compute the scalar gradient for one DoF.
+    This is a placeholder for the specific tensor contraction logic
+    provided by the authors' tools [S1].
+    """
+    # Not given in the sources. [G]
+    # This function must implement the chain rule contraction:
+    # sum_{u,v} dL_dP[u,v] * dP_dM[u,v,:,:] * dM_dtheta[,:,:]
+    # The exact shape of dP_dM depends on the projector implementation.
+    pass
+```
+
+## Operating characteristics
+
+*   **Time Complexity:** The method uses gradient-based optimization (AdamW), which converges faster than gradient-free methods like CMA-ES that require multiple candidate evaluations per iteration [S1]. It avoids the computational cost of finite-difference approximations [S1].
+*   **Memory Complexity:** It is more memory-efficient than methods that use differentiable interpolation operators to warp large volumes repeatedly, as it computes gradients analytically through the projector framework without repeated warping [S1].
+*   **Performance:**
+    *   *Simulation:* SSIM improved by 18%, 37%, and 48% for motion amplitudes of (3 mm, 0.06 rad), (6 mm, 0.12 rad), and (9 mm, 0.18 rad) respectively, relative to motion-free ground truth [S1].
+    *   *Physical:* Qualitative evaluation showed restored sharpness and anatomical continuity in coronal and sagittal planes under 5 mm translation and 0.1 rad rotation [S1].
+*   **Strengths:**
+    *   Analytical gradients provide numerical stability compared to finite differences [S1].
+    *   Joint optimization avoids the need for separate motion estimation steps or image-based sharpness criteria [S1].
+    *   Scalable to high-resolution reconstructions due to lower memory footprint compared to warping-based methods [S1].
+*   **Limitations:**
+    *   Requires implementation of the specific gradient tools for the projector w.r.t. the motion matrix [S1].
+    *   Assumes rigid motion; non-rigid motion is not addressed [S1].
+*   **When to Use:** When motion artifacts are present in CBCT data and computational resources allow for GPU-accelerated differentiable projection. It is preferred over CMA-ES for speed and over warping-based methods for memory efficiency.
+
+## Background
+
+*   **Origin:** The method was proposed in the paper "Joint Cone-Beam CT Reconstruction and Rigid Motion Compensation Using A Differentiable Projector" [S1].
+*   **History:** It addresses limitations of previous methods: CMA-ES (high computational cost) [S1], finite differences (numerical instability) [S1], L-BFGS (expensive for large-scale problems) [S1], and differentiable interpolation (memory-intensive warping) [S1].
+*   **Usage:** Validated in simulation studies using the CQ500 dataset [S1] and physical phantom studies on a CBCT test bench with a flat-panel detector and hexapod robot [S1].
+
+## Sources
+
+[S1] Joint Cone-Beam CT Reconstruction and Rigid Motion Compensation Using A Differentiable Projector., https://doi.org/10.1117/12.3087735, fetched 2026-10-26

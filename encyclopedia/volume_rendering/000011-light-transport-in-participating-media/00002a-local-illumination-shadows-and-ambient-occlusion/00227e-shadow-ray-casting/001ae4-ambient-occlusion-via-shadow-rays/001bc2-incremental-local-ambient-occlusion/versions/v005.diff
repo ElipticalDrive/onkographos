@@ -1,0 +1,130 @@
+--- v004.md
++++ v005.md
+@@ -4,19 +4,19 @@
+ 
+ ## Overview
+-Incremental Local Ambient Occlusion (LAO) is a shading model for direct volume rendering that computes ambient lighting effects by integrating attenuated transfer function density over a local spherical neighborhood around each voxel, rather than using a constant ambient factor or global shadowing [S2, unofficial]. It solves the problem of missing local shadowing and context in direct volume rendering while avoiding global shadows that might hide relevant information [S2, unofficial]. Unlike its siblings, which may compute occlusion in a single pass or use different sampling strategies, LAO-I updates the occlusion result incrementally, processing one ray direction per frame and storing the accumulated result in an ambient light texture using OpenGL blend operations, allowing for user interaction during computation [S2, unofficial].
++Incremental Local Ambient Occlusion (LAO) is a shading model for direct volume rendering that computes ambient lighting by integrating attenuated transfer function density over a local spherical neighborhood around each voxel, rather than using a constant ambient factor or global shadowing [S2, unofficial]. It solves the problem of missing local shadowing and context in direct volume rendering while avoiding global shadows that might hide relevant information [S2, unofficial]. Unlike its siblings, which may compute occlusion in a single pass or use different sampling strategies, LAO-I updates the occlusion result incrementally, processing one ray direction per frame and storing the accumulated result in an ambient light texture using OpenGL blend operations, allowing for user interaction during computation [S2, unofficial].
+ 
+ ## How it works
+ **Inputs and Outputs:**
+-*   **Inputs:** A regular linear volume data set, a transfer function (TF) mapping density to opacity $\alpha$ and color, a set of ray directions distributed over a sphere, and a neighborhood radius $R_b$.
+-*   **Outputs:** An ambient light intensity texture (3D texture) storing the accumulated LAO value $A(x)$ for each voxel, and the final rendered image combining emissive color and ambient light.
++*   **Inputs:** A regular linear volume data set, a transfer function (TF) mapping density to opacity $\alpha$ and color, a set of ray directions distributed over a sphere, and a neighborhood radius $R_b$ [S2, unofficial].
++*   **Outputs:** An ambient light intensity texture (3D texture) storing the accumulated LAO value $A(x)$ for each voxel, and the final rendered image combining emissive color and ambient light [S2, unofficial].
+ 
+ **Data Structures:**
+-1.  **Packed Volume Texture:** A 3D texture containing the volume data organized into a multiresolution representation.
++1.  **Packed Volume Texture:** A 3D texture containing the volume data organized into a multiresolution representation [S2, unofficial].
+     *   **Layout:** The volume is divided into blocks of typically $16^3$ voxels [S2, unofficial].
+     *   **LOD Levels:** Each block is encoded with levels of detail: $8^3, 4^3, 2^3, 1^3$ voxels [S2, unofficial].
+     *   **Constraints:** The minimum LOD for nonempty blocks is often restricted to $4^3$ voxels to allow the reverse mapping index texture to be 64 times smaller than the packed volume [S2, unofficial].
+ 2.  **Index Textures:**
+-    *   **Forward Mapping:** Maps packed coordinates to volume coordinates.
+-    *   **Reverse Mapping:** Maps volume coordinates back to packed coordinates (size reduced by restricting min LOD) [S2, unofficial].
++    *   **Forward Mapping:** Maps packed coordinates to volume coordinates [S2, unofficial].
++    *   **Reverse Mapping:** Maps volume coordinates back to packed coordinates, with size reduced by restricting minimum LOD [S2, unofficial].
+ 3.  **Ambient Light Texture:** A 3D texture with the same dimensions and multiresolution layout as the packed volume texture, storing the accumulated intensity $A(x)$ [S2, unofficial].
+ 4.  **Direction Texture:** Stores ray directions and their associated weights $w_k$ [S2, unofficial].
+@@ -27,10 +27,10 @@
+ *   $M$: Number of samples for the highest resolution fixed sampling rate. Value: 15 [S2, unofficial].
+ *   $K$: Number of ray directions to sample. Dynamically configurable. Baseline for quality: 128 directions [S2, unofficial].
+-*   $w_k$: Weight for direction $k$.
++*   $w_k$: Weight for direction $k$ [S2, unofficial].
+ 
+ **Formulas:**
+ The light contribution for direction $k$ at voxel $x$ is given by [S2, unofficial]:
+ $$ A_k(x) = \int_{a}^{R_b} g_A(s) \cdot e^{-\int_{a}^{s} \alpha(t) dt} ds $$
+-where $\alpha(t)$ is the extinction coefficient (opacity from TF) and $g_A(s)$ is the light contribution function.
++where $\alpha(t)$ is the extinction coefficient (opacity from TF) and $g_A(s)$ is the light contribution function [S2, unofficial].
+ 
+ To avoid sharp shadow boundaries, $g_A(s)$ is defined as a volumetric distribution [S2, unofficial]:
+@@ -47,6 +47,6 @@
+ **Incremental Update:**
+ The accumulation is updated incrementally using OpenGL blend operations [S2, unofficial]:
+-$$ A_k = \frac{1}{k} A_k + \left(1 - \frac{1}{k}\right) A_{k-1} $$
+-where $A_k$ is the accumulated intensity after $k$ ray directions, $A_0 = 0$, and $A_{k-1}$ is the previous accumulation [S2, unofficial].
++$$ A_k = \frac{1}{k} I_k + \frac{k-1}{k} A_{k-1} $$
++where $A_k$ is the accumulated intensity after $k$ ray directions, $A_0 = 0$, $I_k$ is the current ray's contribution, and $A_{k-1}$ is the previous accumulation [S2, unofficial].
+ 
+ **Steps:**
+@@ -69,4 +69,45 @@
+     1.  Once all $K$ directions are processed, use the final ambient light intensity volume in the standard rendering pass [S2, unofficial].
+ 
++**Pseudocode:**
++```python
++def preprocess_volume(volume_data, block_size=16):
++    # Divide volume into blocks and encode LODs (8^3, 4^3, 2^3, 1^3)
++    packed_texture = pack_multiresolution(volume_data, block_size)
++    forward_map = create_forward_index(packed_texture)
++    reverse_map = create_reverse_index(packed_texture, min_lod=4)
++    ambient_texture = create_zero_texture_like(packed_texture)
++    return packed_texture, forward_map, reverse_map, ambient_texture
++
++def compute_ray_contribution(voxel_pos, direction, packed_texture, forward_map, reverse_map, tf, R_b, a, M, adaptive=False):
++    # Initialize front-to-back compositing
++    accumulated_opacity = 0.0
++    light_contribution = 0.0
++    step_size = 1.0 if not adaptive else get_adaptive_step(voxel_pos, packed_texture, reverse_map)
++    
++    for m in range(1, M + 1):
++        sample_pos = voxel_pos + direction * (a + m * step_size)
++        opacity = tf.lookup(sample_pos)
++        transmittance = math.exp(-accumulated_opacity)
++        light_contribution += transmittance * (1.0 / R_b) * opacity
++        accumulated_opacity += opacity
++        if accumulated_opacity >= 1.0:
++            break
++    return light_contribution / M
++
++def incremental_lao_pipeline(packed_texture, forward_map, reverse_map, ambient_texture, directions, weights, R_b, a, M):
++    k = 0
++    for direction, weight in zip(directions, weights):
++        k += 1
++        # Render quad to trigger per-fragment computation
++        for voxel in mapped_voxels_from_framebuffer():
++            I_k = compute_ray_contribution(voxel, direction, packed_texture, forward_map, reverse_map, tf, R_b, a, M)
++            # OpenGL blend operation implements: A_k = (1/k)*I_k + ((k-1)/k)*A_{k-1}
++            blend_factor = 1.0 / k
++            ambient_texture[voxel] = blend_factor * I_k + (1.0 - blend_factor) * ambient_texture[voxel]
++        # Interleave with rendering for user interaction
++        render_with_current_ambient(ambient_texture)
++    return ambient_texture
++```
++
+ **Edge Cases and Pitfalls:**
+ *   **Sharp Shadows:** Using boundary light contribution ($g_A(s) = \delta(s-R_b)$) causes hard shadows if any occluder intersects the sphere. Use volumetric light contribution to smooth shadows [S2, unofficial].
+@@ -79,23 +120,24 @@
+ 
+ ### [Vicinity Shading](1210-vicinity-shading.md)
+-Vicinity shading is a pre-computed volumetric ambient occlusion technique that enhances volume visualization by calculating an "obscurance" value for each voxel, representing the occlusion information from its immediate neighborhood. It differs from local volumetric shadowing methods (e.g., Hernell et al.) by explicitly testing visibility against the first occluder and ignoring the environment beyond it, rather than integrating attenuation over the entire ray distance. This approach allows for interactive exploration and saliency map generation at a computational cost proportional to the number of voxels times the number of directions, significantly lower than the quadratic complexity of full volumetric shadowing. [Vicinity Shading](1210-vicinity-shading.md)
++Vicinity shading is a pre-computed volumetric ambient occlusion technique that enhances volume visualization by calculating an "obscurance" value for each voxel, representing the occlusion information from its immediate neighborhood. It differs from local volumetric shadowing methods (e.g., Hernell et al.) by explicitly testing visibility against the first occluder and ignoring the environment beyond it, rather than integrating attenuation over the entire ray distance. This approach allows for interactive exploration and saliency map generation at a computational cost proportional to the number of voxels times the number of directions, significantly lower than the quadratic complexity of full volumetric shadowing. Choose it when interactive frame rates are required and full volumetric shadowing is too expensive.
+ 
+ ### [Multiresolution LAO Pipeline](12400-multiresolution-lao-pipeline.md)
+-The Multiresolution LAO Pipeline is a per-fragment GPU-based method for computing Local Ambient Occlusion (LAO) illumination in multiresolution volume rendering. It accelerates LAO computation by leveraging the same data reduction achieved by the volume's Level-of-Detail (LOD) selection, adapting sampling rates to voxel block resolution. Unlike the parent Incremental LAO method which updates one ray direction per frame, this pipeline processes all incident light directions incrementally over multiple frames using a fragment shader pipeline, allowing for dynamic configuration of ray counts and efficient hardware-accelerated blending. [Multiresolution LAO Pipeline](12400-multiresolution-lao-pipeline.md)
++The Multiresolution LAO Pipeline is a per-fragment GPU-based method for computing Local Ambient Occlusion (LAO) illumination in multiresolution volume rendering. It accelerates LAO computation by leveraging the same data reduction achieved by the volume's Level-of-Detail (LOD) selection, adapting sampling rates to voxel block resolution. Unlike the parent Incremental LAO method which updates one ray direction per frame, this pipeline processes all incident light directions incrementally over multiple frames using a fragment shader pipeline, allowing for dynamic configuration of ray counts and efficient hardware-accelerated blending. Choose it when dynamic ray counts and hardware-accelerated blending are prioritized over single-direction incremental updates.
+ 
+ ### Adaptive Sampling Density for LAO
+-A method to improve LAO performance by adjusting sampling density along rays for voxels in lower resolution blocks, using adaptive step lengths based on the sampled block's resolution to avoid missing occluding features [S2, unofficial].
++A method to improve LAO performance by adjusting sampling density along rays for voxels in lower resolution blocks, using adaptive step lengths based on the sampled block's resolution to avoid missing occluding features [S2, unofficial]. Choose it when lower-resolution blocks risk missing occluding features in neighboring higher-resolution blocks, accepting a slight decrease in parallelism for fewer artifacts [S2, unofficial].
+ 
+ ## Operating characteristics
+-*   **Time Complexity:** The performance of LAO computation is slightly superlinear with respect to data reduction [S2, unofficial]. The reduction increases the number of low-resolution blocks, decreasing the number of voxels and allowing longer sample steps, reducing average time per occlusion calculation [S2, unofficial].
+-*   **Memory Complexity:** Requires storage for the packed volume texture, index textures, ambient light texture, and direction texture. The reverse mapping index texture size is reduced by restricting minimum LOD [S2, unofficial].
+-*   **Measured Performance:** Tested on a volume with native resolution $512^3$ voxels. LAO computation time per ray is slightly superlinear with respect to data reduction [S2, unofficial].
++*   **Time Complexity:** Performance scales slightly superlinearly with data reduction because lower-resolution blocks decrease the voxel count and permit longer sample steps, reducing the average time per occlusion calculation [S2, unofficial].
++*   **Memory Complexity:** Requires storage for the packed volume texture, index textures, ambient light texture, and direction texture [S2, unofficial]. The reverse mapping index texture size is reduced by restricting minimum LOD to $4^3$ voxels [S2, unofficial].
++*   **Measured Performance:** Tested on a volume with native resolution $512^3$ voxels [S2, unofficial]. LAO computation time per ray is slightly superlinear with respect to data reduction [S2, unofficial].
++*   **Scaling:** Data reduction via LOD selection directly implies performance gain in LAO computation because processing is driven by the multiresolution layout [S2, unofficial].
+ *   **Strengths:** Allows interactive frame rates; less sensitive to noisy data sets compared to gradient-based methods (e.g., diffuse shading); improves cross-section visibility at clip planes; incorporates semitransparency [S2, unofficial].
+ *   **Limitations:** High-frequency surface details are lost; requires multiple frames for full convergence if updated incrementally; adaptive sampling decreases parallelism [S2, unofficial].
+-*   **When to Use:** Medical DVR for diagnosis and surgical planning, specifically for MRI data sets, virtual autopsies, and clip plane rendering [S2, unofficial].
+-*   **When Not to Use:** When fine high-frequency surface details are critical and noise is low (combine with diffuse shading); when global shadows are required [S2, unofficial].
++*   **When to Use:** Radiologists have tested the method for diagnosis and surgical planning, particularly with MRI data sets and clip plane rendering [S2, unofficial].
++*   **When Not to Use:** When fine high-frequency surface details are critical and noise is low, as LAO alone loses those details and should be combined with diffuse shading [S2, unofficial].
+ 
+ ## Background
+-Local Ambient Occlusion was introduced by Hernell et al. in 2010 [S2, unofficial]. It builds on earlier local volumetric shadowing methods by Ropinski et al. [2008] and Hernell et al. [2007], which computed local histograms or integrated attenuated transfer function density over a surrounding sphere [S1, unofficial]. The incremental approach allows for progressive refinement during user interaction [S2, unofficial].
++Local Ambient Occlusion was introduced by Hernell et al. in 2010 [S2, unofficial]. It builds on earlier local volumetric shadowing methods by Ropinski et al. [2008] and Hernell et al. [2007], which computed local histograms or integrated attenuated transfer function density over a surrounding sphere [S1, unofficial]. The incremental approach allows for progressive refinement of the ambient light texture while maintaining interactive frame rates [S2, unofficial].
+ 
+ ## Sources

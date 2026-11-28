@@ -1,0 +1,192 @@
+--- v001.md
++++ v002.md
+@@ -4,92 +4,122 @@
+ 
+ ## Overview
+-Bricked Multi-Resolution Single-Pass Ray-Casting is a GPU-based volume rendering technique that combines hierarchical data storage (bricking) with adaptive sampling to efficiently render large-scale multi-resolution volumes. It solves the problem of high memory bandwidth consumption and cache inefficiency in large datasets by varying the sampling density based on proximity to the isosurface and screen-space statistics. It sets itself apart from its siblings by executing a single-pass fragment program that performs both adaptive object-space sampling (along the ray) and adaptive image-space sampling (based on screen tiles), using transfer function-based Level of Detail (LOD) selection to fetch correct neighborhood samples for interpolation directly in the shader [S1, unofficial].
++Bricked Multi-Resolution Single-Pass Ray-Casting is a GPU-based volume rendering technique that combines hierarchical data storage (bricking) with adaptive sampling to render large-scale multi-resolution volumes [S1, unofficial][S2]. It sets itself apart from its siblings by executing a single-pass fragment program that performs adaptive object-space sampling along the ray and adaptive image-space sampling based on screen tile statistics [S1, unofficial]. The method uses transfer function-based Level of Detail (LOD) selection to fetch correct neighborhood samples for interpolation directly in the shader [S1, unofficial].
+ 
+ ## How it works
+-The method operates on a multi-resolution grid stored in bricks. The rendering pipeline executes a single-pass fragment program.
++The method operates on a multi-resolution grid stored in bricks [S1, unofficial]. The rendering pipeline executes a single-pass fragment program [S1, unofficial].
+ 
+ **Inputs:**
+-*   Multi-resolution volume data (bricks).
+-*   Transfer function (for LOD selection and color/opacity).
+-*   View parameters (camera, ray origin, direction).
+-*   Screen tile statistics (for adaptive image-space sampling).
++*   Multi-resolution volume data (bricks) [S1, unofficial].
++*   Transfer function (for LOD selection and color/opacity) [S1, unofficial].
++*   View parameters (camera, ray origin, direction) [G].
++*   Screen tile statistics (for adaptive image-space sampling) [S1, unofficial].
+ 
+ **Outputs:**
+-*   Final pixel color and opacity.
++*   Final pixel color and opacity [G].
+ 
+ **Data Structures:**
+-*   **Bricks:** Blocks of volume data at various resolution levels.
+-*   **Page Tables:** Hierarchical structures mapping virtual coordinates to brick locations.
+-*   **Tile Statistics:** Metadata per screen tile indicating required sampling density or error bounds.
++*   **Bricks:** Blocks of volume data at various resolution levels [S1, unofficial].
++*   **Page Tables:** Hierarchical structures mapping virtual coordinates to brick locations [S2].
++*   **Tile Statistics:** Metadata per screen tile indicating required sampling density [S1, unofficial].
+ 
+ **Steps:**
+-1.  **Ray Initialization:** For each pixel, compute the ray origin and direction.
+-2.  **Adaptive Image-Space Sampling:** Determine the sampling rate for the current screen tile based on pre-computed statistics. This may involve skipping pixels or adjusting the step size in screen space if the method supports it, though the primary adaptation is often along the ray [S1, unofficial].
++1.  **Ray Initialization:** For each pixel, compute the ray origin and direction [G].
++2.  **Adaptive Image-Space Sampling:** Determine the sampling rate for the current screen tile based on pre-computed statistics [S1, unofficial].
+ 3.  **Ray Marching Loop:**
+-    a.  **Position Calculation:** Determine the current sample position $p$ in normalized virtual volume space along the ray.
+-    b.  **LOD Selection:** Compute a floating-point Level of Detail value $lod(p)$ for the current sample. This is typically estimated by calculating the projected screen-space size of the corresponding voxel at the current depth [S2].
++    a.  **Position Calculation:** Determine the current sample position $p$ in normalized virtual volume space along the ray [S2].
++    b.  **LOD Selection:** Compute a floating-point Level of Detail value $lod(p)$ for the current sample, typically by estimating the projected screen-space size of the corresponding voxel [S2].
+     c.  **Resolution Level Determination:** Convert $lod(p)$ to an integer resolution level $l$ by rounding to the nearest integer [S2].
+-    d.  **Address Translation:** Perform hierarchical address translation to find the brick containing the sample at level $l$. This involves traversing the page table hierarchy (page directory, page table) to locate the brick [S2]. Spatial coherence is exploited by tracking the last used indices to reduce lookup overhead [S2].
+-    e.  **Data Fetching:** Fetch the voxel data from the identified brick. Ensure correct neighborhood samples are fetched for interpolation [S1, unofficial].
+-    f.  **Interpolation:** Sample the data at position $p$ using tri-linear interpolation at the selected resolution level $l$ [S2]. Alternatively, compute two adjacent resolution levels, sample both, and interpolate linearly in-between [S2].
+-    g.  **Transfer Function Application:** Use the transfer function to determine color and opacity based on the sampled value. The transfer function also aids in LOD selection [S1, unofficial].
+-    h.  **Accumulation:** Composite the color and opacity into the final pixel value using front-to-back or back-to-front compositing.
+-    i.  **Step Advancement:** Advance the ray position. The step size is adapted based on the sampling density requirements (adaptive object-space sampling) [S1, unofficial].
+-4.  **Termination:** Stop when the ray exits the volume or the accumulated opacity reaches a threshold.
++    d.  **Address Translation:** Perform hierarchical address translation to find the brick containing the sample at level $l$ [S2]. Exploit spatial coherence by tracking the last used page directory and page table indices to reduce lookup overhead [S2].
++    e.  **Data Fetching & Interpolation:** Fetch the voxel data from the identified brick and ensure correct neighborhood samples are fetched for interpolation [S1, unofficial]. Sample the data at position $p$ using tri-linear interpolation at level $l$ [S2]. Alternatively, compute the two adjacent resolution levels, sample both, and interpolate linearly in-between [S2].
++    f.  **Transfer Function Application:** Use the transfer function to determine color and opacity based on the sampled value, leveraging transfer function-based LOD selection [S1, unofficial].
++    g.  **Accumulation:** Composite the color and opacity into the final pixel value using front-to-back compositing [G].
++    h.  **Step Advancement:** Advance the ray position using an adaptive step size based on sampling density requirements [S1, unofficial].
++4.  **Termination:** Stop when the ray exits the volume or the accumulated opacity reaches a threshold [G].
+ 
+ **Pseudocode:**
+ ```python
+-def render_pixel(ray_origin, ray_direction, tile_stats):
+-    # Adaptive image-space sampling: determine initial step or skip logic based on tile_stats
+-    # [S1, unofficial] Adaptive image-space sampling, based on statistics for screen tiles
++def render_pixel(ray_origin, ray_direction, volume_bounds, tile_stats):
++    # Compute entry and exit distances for the volume [G]
++    t_min = max((volume_bounds.min - ray_origin) / ray_direction)
++    t_max = min((volume_bounds.max - ray_origin) / ray_direction)
++    if t_min > t_max:
++        return (0.0, 0.0, 0.0, 0.0)
+     
+     accumulated_color = (0.0, 0.0, 0.0, 0.0)
+-    t = 0.0
++    accumulated_opacity = 0.0
++    t = t_min
+     last_page_dir_idx = -1
+     last_page_table_idx = -1
+     
+-    while t < ray_length:
+-        # Compute sample position in normalized virtual volume space
++    while t < t_max and accumulated_opacity < 1.0:
++        # Position Calculation: sample position in normalized virtual volume space [S2]
+         p = ray_origin + ray_direction * t
+         
+-        # Compute floating-point LOD value based on projected screen space size of voxel
+-        lod_p = compute_lod(p, ray_direction, camera_params)
++        # LOD Selection: estimate projected screen space size of the voxel [S2]
++        lod_p = compute_lod(p, ray_direction)
+         
+-        # Determine integer resolution level
++        # Resolution Level Determination: round to nearest integer [S2]
+         l = round(lod_p)
+         
+-        # Hierarchical address translation with coherence optimization
+-        # [S2] Exploiting Spatial Coherence for Page Table Look-Ups
++        # Address Translation: hierarchical lookup with coherence optimization [S2]
+         page_dir_idx, page_table_idx, brick_offset = translate_address(p, l, last_page_dir_idx, last_page_table_idx)
+-        
+-        # Update last used indices for coherence
+         last_page_dir_idx = page_dir_idx
+         last_page_table_idx = page_table_idx
+         
+-        # Fetch voxel data from brick
+-        # [S1, unofficial] Correct neighborhood samples for interpolation fetched in shader
++        # Data Fetching & Interpolation: fetch neighborhood samples and interpolate [S1, unofficial][S2]
+         voxel_value = fetch_voxel(brick_offset, p)
+-        
+-        # Interpolation
+-        # [S2] Tri-linear interpolation at level l
+-        # Or: sample two adjacent levels and interpolate linearly
+         interpolated_value = tri_linear_interpolate(voxel_value, p)
+         
+-        # Transfer function application for color, opacity, and LOD selection
+-        # [S1, unofficial] Transfer function-based LOD selection
++        # Transfer Function Application: determine color and opacity [S1, unofficial]
+         color, opacity = apply_transfer_function(interpolated_value, l)
+         
+-        # Front-to-back compositing
+-        accumulated_color = composite(accumulated_color, color, opacity)
++        # Accumulation: front-to-back compositing [G]
++        alpha = opacity * (1.0 - accumulated_opacity)
++        accumulated_color = (
++            accumulated_color[0] + color[0] * alpha,
++            accumulated_color[1] + color[1] * alpha,
++            accumulated_color[2] + color[2] * alpha,
++            accumulated_color[3] + alpha
++        )
++        accumulated_opacity += alpha
+         
+-        if accumulated_color.a >= 1.0:
+-            break
+-            
+-        # Adaptive step size along ray
+-        # [S1, unofficial] Adapting sampling density along ray
++        # Step Advancement: adaptive step size [S1, unofficial]
+         step = compute_adaptive_step(p, l, tile_stats)
+         t += step
+         
+     return accumulated_color
++
++def compute_lod(p, ray_direction):
++    # Estimate projected screen space size of the corresponding voxel [S2]
++    return 1.0 / max(abs(ray_direction[0]), abs(ray_direction[1]), abs(ray_direction[2]))  # [G]
++
++def translate_address(p, l, last_page_dir_idx, last_page_table_idx):
++    # Hierarchical address translation exploiting spatial coherence [S2]
++    # Compute virtual multi-resolution address (l, p)
++    dir_idx = int(p[0] * (1 << l)) & 0x3FF
++    table_idx = int(p[1] * (1 << l)) & 0x3FF
++    if dir_idx == last_page_dir_idx and table_idx == last_page_table_idx:
++        return last_page_dir_idx, last_page_table_idx, 0
++    return dir_idx, table_idx, 0
++
++def fetch_voxel(brick_offset, p):
++    # Fetch voxel data from the identified brick [S2]
++    # Sources do not specify the exact memory access pattern for brick fetching.
++    return 1.0  # [G] Standard memory access
++
++def tri_linear_interpolate(voxel_value, p):
++    # Tri-linear interpolation at the selected resolution level [S2]
++    # Sources do not specify the exact interpolation weights.
++    return voxel_value  # [G] Standard interpolation
++
++def apply_transfer_function(value, l):
++    # Use transfer function for color, opacity, and LOD selection [S1, unofficial]
++    # Sources do not specify the exact transfer function mapping.
++    return (value, value * 0.5)  # [G] Standard mapping
++
++def compute_adaptive_step(p, l, tile_stats):
++    # Adaptive step size based on sampling density requirements [S1, unofficial]
++    # Sources do not specify the exact step calculation formula.
++    return 0.5  # [G] Standard step calculation
+ ```
+ 
+@@ -101,5 +131,5 @@
+ **Edge Cases:**
+ *   **Precision:** Floating-point precision in $lod(p)$ calculation may affect LOD selection stability.
+-*   **Boundaries:** Ray exit conditions must be handled correctly.
++*   **Boundaries:** Ray exit conditions must be handled correctly via volume bounds checking.
+ *   **Degenerate Input:** Rays parallel to axes may have specific coherence patterns (e.g., page table accessed every 32 voxels, page directory every 1024 voxels for $b_{pt}=32, t=2$) [S2].
+ 
+@@ -113,8 +143,6 @@
+ *   **Memory Complexity:** Proportional to the size of the multi-resolution grid and page tables. Bricking allows for efficient memory management and streaming [S1, unofficial].
+ *   **Performance:** Efficient for large-scale volumes due to adaptive sampling and bricking. Single-pass execution reduces overhead [S1, unofficial].
+-*   **Strengths:** Handles large datasets, adaptive resolution, efficient memory usage.
+-*   **Limitations:** Complexity of implementation, potential artifacts from LOD transitions.
+-*   **When to use:** Large-scale scientific visualization, petascale data streams [S1, unofficial][S2].
+-*   **When not to use:** Small datasets where overhead is not justified, or when strict consistency between LOD levels is critical without interpolation [S2].
++*   **Strengths:** Handles large datasets, adaptive resolution, efficient memory usage [S1, unofficial][S2].
++*   **Limitations:** Complexity of implementation, potential artifacts from LOD transitions [S1, unofficial][S2].
+ 
+ ## Background

@@ -1,0 +1,155 @@
+--- v002.md
++++ v003.md
+@@ -8,16 +8,14 @@
+ ## How it works
+ **Inputs and Outputs:**
+-*   **Inputs:** A set of training images $V$, initial camera poses, a scene graph, and a primary NeRF model (including geometry SDF $f$ and traditional color network $C_o$).
+-*   **Outputs:** Updated confidence scores $CS(v_i)$ for each view $v_i \in V$, used to guide ray sampling.
++*   **Inputs:** A set of training images $V$, initial camera poses, a scene graph, and a primary NeRF model containing a geometry SDF $f$ and a traditional color network $C_o$ [S1].
++*   **Outputs:** Updated confidence scores $CS(v_i)$ for each view $v_i \in V$, used to guide ray sampling [S1].
+ 
+ **Data Structures:**
+-*   **Confidence Score ($CS(v_i)$):** A scalar value representing the reliability of pose $v_i$. Initialized based on keypoint matches and updated iteratively.
+-*   **Detached Color Network ($C_n$):** A shallow Multi-Layer Perceptron (MLP) identical in architecture to the primary color network $C_o$ but without viewing direction input.
+-*   **PSNR Estimates:**
+-    *   $PSNR_o$: PSNR estimated using the primary color network $C_o$.
+-    *   $PSNR_n$: PSNR estimated using the detached color network $C_n$.
++*   **Confidence Score ($CS(v_i)$):** A scalar value representing the reliability of pose $v_i$, initialized from keypoint matches and updated iteratively [S1].
++*   **Detached Color Network ($C_n$):** A shallow Multi-Layer Perceptron (MLP) identical in architecture to the primary color network $C_o$ but without viewing direction input [S1].
++*   **PSNR Estimates:** $PSNR_o$ tracks rendering quality from $C_o$, and $PSNR_n$ tracks rendering quality from $C_n$ [S1].
+ 
+ **Parameters:**
+-*   $\lambda_c$: Weight for PSNR contribution to confidence update. [G] Typical value not explicitly given in sources; assumed to be a small positive constant (e.g., 1.0 or normalized weight) based on standard additive update rules.
++*   $\lambda_c$: Weight for PSNR contribution to confidence update. Not given in the sources.
+ *   $\tau_1$: Inlier-outlier threshold for PSNR discrepancy between $C_o$ and $C_n$. Set to 9 [S1].
+ *   $\lambda$: Weight for regularization term in loss. Set to 0.1 [S1].
+@@ -28,5 +26,5 @@
+     Calculate initial confidence scores $CS(v_i)$ based on keypoint matches from the scene graph. Let $|M_i|$ be the total number of edges (matches) for view $v_i$. Normalize these scores to form a probability distribution:
+     $$ CS(v_i) = \frac{|M_i|}{\sum_{v \in V} |M_v|} $$
+-    (Note: The source describes normalizing based on match counts initially, then updating additively [S1]).
++    [S1]
+ 
+ 2.  **Construct Detached Color Network ($C_n$):**
+@@ -37,13 +35,10 @@
+ 
+ 4.  **Compute Rendering Losses:**
+-    For each training image $i$:
+-    *   Render the image using $C_o$ to get $\hat{C}_o$. Compute photometric loss $L_{color}(C_o) = \|\hat{C}_o - C\|_1$ [S1].
+-    *   Render the image using $C_n$ to get $\hat{C}_n$. Compute photometric loss $L_{color}(C_n) = \|\hat{C}_n - C\|_1$ [S1].
+-    *   Estimate $PSNR_o$ from $L_{color}(C_o)$ and $PSNR_n$ from $L_{color}(C_n)$ [S1].
++    For each training image $i$, compute the photometric loss $L_{color} = \|\hat{C} - C\|_1$ for both networks [S1]. Estimate $PSNR_o$ from $L_{color}(C_o)$ and $PSNR_n$ from $L_{color}(C_n)$ for efficiency [S1].
+ 
+ 5.  **Update Confidence Scores:**
+     Update the confidence score for each view $v_i$ using the PSNR estimated by the detached network $C_n$:
+     $$ CS(v_i) = CS(v_i) + \lambda_c \cdot PSNR_n(v_i) $$
+-    where $PSNR_n(v_i)$ is the PSNR value for view $v_i$ estimated by $C_n$ [S1].
++    [S1]
+ 
+ 6.  **Normalize Confidence Scores:**
+@@ -52,72 +47,40 @@
+     This distribution guides the training to sample more rays from poses with higher confidence [S1].
+ 
+-7.  **Identify Outliers (Optional Filtering):**
+-    Monitor the discrepancy between $PSNR_o$ and $PSNR_n$. If $|PSNR_o - PSNR_n| > \tau_1$ (where $\tau_1 = 9$), the pose is identified as an outlier [S1]. This discrepancy indicates shape-radiance ambiguity where the view-dependent network $C_o$ overfits to the wrong pose while the view-independent network $C_n$ fails to render accurately [S1].
++7.  **Identify Outliers:**
++    Monitor the discrepancy between $PSNR_o$ and $PSNR_n$. If $|PSNR_o - PSNR_n| > \tau_1$ (where $\tau_1 = 9$), the pose is flagged as an outlier, indicating anomalous data due to shape-radiance ambiguity [S1].
+ 
+ **Pseudocode:**
+ 
+ ```python
+-def initialize_confidence(views, scene_graph):
+-    """
+-    Initialize confidence scores based on keypoint matches.
+-    views: List of view indices.
+-    scene_graph: Graph structure containing match counts.
+-    """
+-    confidence_scores = {}
+-    total_matches = 0
++import math
++
++def initialize_confidence(views, match_counts):
++    """Initialize confidence scores based on keypoint matches."""
++    confidence = {v: match_counts[v] for v in views}
++    total = sum(confidence.values())
+     for v in views:
+-        # |M_v| is the number of matching pairs/edges for view v
+-        match_count = scene_graph.get_edge_count(v)
+-        confidence_scores[v] = match_count
+-        total_matches += match_count
+-    
+-    # Normalize to form initial probability distribution
++        confidence[v] /= total
++    return confidence
++
++def estimate_psnr_from_loss(loss_value):
++    """Estimate PSNR from rendering loss for efficiency."""
++    # Standard approximation: PSNR = 10 * log10(MAX^2 / MSE)
++    # Using L1 loss as a proxy for error magnitude.
++    return 10.0 * math.log10(1.0 / max(loss_value, 1e-8))
++
++def update_confidence(views, confidence, psnr_n_values, lambda_c):
++    """Update confidence scores using PSNR from detached network and normalize."""
+     for v in views:
+-        confidence_scores[v] /= total_matches
+-        
+-    return confidence_scores
++        confidence[v] += lambda_c * psnr_n_values[v]
++    total = sum(confidence.values())
++    for v in views:
++        confidence[v] /= total
++    return confidence
+ 
+-def train_detached_color_network(C_n, geometry_features, ground_truth_images, lr=0.001):
+-    """
+-    Train the detached color network C_n independently.
+-    C_n: MLP taking only geometry features.
+-    geometry_features: Features from SDF network at sampled points.
+-    ground_truth_images: GT RGB images.
+-    """
+-    optimizer = torch.optim.Adam(C_n.parameters(), lr=lr)
+-    
+-    for epoch in range(num_epochs):
+-        optimizer.zero_grad()
+-        rendered_colors = C_n(geometry_features)
+-        loss = torch.mean(torch.abs(rendered_colors - ground_truth_images))
+-        loss.backward()
+-        optimizer.step()
+-        
+-    return loss
+-
+-def update_confidence(views, confidence_scores, psnr_n_values, lambda_c=1.0):
+-    """
+-    Update confidence scores using PSNR from detached network.
+-    psnr_n_values: Dict mapping view index to PSNR_n.
+-    """
+-    for v in views:
+-        psnr_n = psnr_n_values[v]
+-        confidence_scores[v] += lambda_c * psnr_n
+-        
+-    # Normalize
+-    total_confidence = sum(confidence_scores.values())
+-    for v in views:
+-        confidence_scores[v] /= total_conf
+-        
+-    return confidence_scores
+-
+-def identify_outliers(psnr_o_values, psnr_n_values, threshold=9.0):
+-    """
+-    Identify outliers based on discrepancy between C_o and C_n PSNR.
+-    """
++def detect_outliers(psnr_o_values, psnr_n_values, threshold):
++    """Identify outliers based on discrepancy between C_o and C_n PSNR."""
+     outliers = []
+     for v in psnr_o_values:
+-        discrepancy = abs(psnr_o_values[v] - psnr_n_values[v])
+-        if discrepancy > threshold:
++        if abs(psnr_o_values[v] - psnr_n_values[v]) > threshold:
+             outliers.append(v)
+     return outliers
+@@ -131,5 +94,5 @@
+ ## Operating characteristics
+ *   **Time Complexity:** Adds minimal computational overhead because $C_n$ is a shallow MLP, similar to the existing color network [S1]. Training time increases slightly but remains comparable to baseline NeuS/SG-NeRF (e.g., 13 hours for 150k iterations on SG-NeRF, 22 hours for 300k iterations on DTU on RTX 3090) [S1].
+-*   **Memory Complexity:** Requires storing parameters for an additional shallow MLP $C_n$. [G] Exact memory footprint not given, but described as not substantially increasing costs.
++*   **Memory Complexity:** Requires storing parameters for an additional shallow MLP $C_n$. Not given in the sources.
+ *   **Performance:** Effectively differentiates inliers and outliers, leading to higher quality 3D reconstructions and accurate pose rectification [S1].
+ *   **Strengths:** Robust against shape-radiance ambiguity; simple rule-based thresholding ($\tau_1=9$) for outlier detection; does not complicate the joint pose-NeRF optimization [S1].

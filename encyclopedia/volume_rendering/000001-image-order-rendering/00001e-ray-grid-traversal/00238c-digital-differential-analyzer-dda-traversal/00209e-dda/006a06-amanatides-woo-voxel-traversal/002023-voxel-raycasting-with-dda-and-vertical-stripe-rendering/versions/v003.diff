@@ -1,0 +1,507 @@
+--- v002.md
++++ v003.md
+@@ -4,115 +4,158 @@
+ 
+ ## Overview
+-Voxel Raycasting with DDA and Vertical Stripe Rendering is a real-time rendering technique for 3D voxel grids that utilizes a 2D Digital Differential Analyzer (DDA) to cast rays per screen column, determining the first occupied voxel [S1, unofficial]. It renders the voxel as a vertical stripe rather than a full textured quad, handling depth via a per-column depth buffer to support multiple voxels per column (stacking) [S1, unofficial]. Unlike standard raycasting which draws a full vertical line for a wall, this method draws vertical stripes for each depth layer within the voxel, allowing for internal structure visibility and stacking via the depth buffer [S1, unofficial].
++A real-time rendering technique for 3D voxel grids that uses a 2D Digital Differential Analyzer (DDA) to cast rays per screen column, determining the first occupied voxel [S1, unofficial]. It renders the voxel as a vertical stripe (line) rather than a full textured quad, handling depth via a per-column depth buffer to support multiple voxels per column (stacking) [S1, unofficial]. Unlike [Classic (Column Voxel Space)](5024-classic-column-voxel-space.md), which typically handles a single layer, this method simultaneously determines the first occupied cell for both layers using a 3D Digital Differential Analyzer (DDA) [S2, unofficial]. It builds on [Voxel Raycasting with DDA and Vertical Stripe Rendering](2206-voxel-raycasting-with-dda-and-vertical-stripe-rendering.md) by adding the capacity to render both top and bottom surfaces of a voxel column in one go [S2, unofficial].
+ 
+ ## How it works
+-**Inputs and Outputs:**
+-*   **Input:** A 3D voxel grid `worldMap` of dimensions `mapWidth x mapHeight x mapDepth`, a camera position `(posX, posY, posZ)`, a camera direction vector `(dirX, dirY)`, a camera plane vector `(planeX, planeY)` defining the field of view, and a vertical pitch offset `pitch` [S1, unofficial].
+-*   **Output:** A 2D image where each screen column is filled with vertical stripes representing the visible voxel layers, updated against a depth buffer [S1, unofficial].
++**Inputs:**
++- `worldMap`: 3D array of `ColorRGB` values, dimensions `[mapWidth][mapHeight][mapDepth]`.
++- `posX, posY, posZ`: Camera position.
++- `dirX, dirY`: Camera direction vector components.
++- `planeX, planeY`: Camera plane vector components (controls FOV).
++- `pitch`: Vertical offset for centering the view.
++- `h`: Screen height in pixels.
++- `mapWidth, mapHeight, mapDepth`: Dimensions of the voxel grid.
++
++**Outputs:**
++- Rendered screen image with vertical stripes representing voxel slices.
++- Updated depth buffers `depth[0]` and `depth[1]`.
+ 
+ **Data Structures:**
+-*   `worldMap`: A 3D array `ColorRGB worldMap[mapWidth][mapHeight][mapDepth]` [S1, unofficial].
+-    *   Dimensions: `mapWidth = 96`, `mapHeight = 96`, `mapDepth = 12` [S1, unofficial].
+-    *   `ColorRGB`: A struct with 3 components (Red, Green, Blue), loaded sequentially from source data [S1, unofficial].
+-*   `depth`: A 2D array `int depth[2][384]` [S1, unofficial].
+-    *   Size: 2 buffers of size 384 (screen height) [S1, unofficial].
+-    *   Initialization: Values set to 100000 [S1, unofficial].
+-    *   Purpose: Stores the Z-depth of the last drawn voxel at each screen row to handle occlusion within a column [S1, unofficial].
+-*   Camera State:
+-    *   `posX, posY, posZ`: Camera position [S1, unofficial].
+-    *   `dirX, dirY`: Ray direction vector [S1, unofficial].
+-    *   `planeX, planeY`: Camera plane vector for FOV calculation [S1, unofficial].
+-    *   `pitch`: Vertical tilt offset, typically 200 [S1, unofficial].
+-
+-**Formulas:**
+-*   **Delta Distances:**
+-    $$deltaDistX = \frac{1.0}{|dirX|}$$
+-    $$deltaDistY = \frac{1.0}{|dirY|}$$
+-    [S1, unofficial]
+-*   **Perpendicular Wall Distance (Fisheye Correction):**
+-    If `side == 0` (hit X-wall):
+-    $$perpWallDist = \frac{mapX - rayPosX + (1 - stepX) / 2}{dirX}$$
+-    If `side == 1` (hit Y-wall):
+-    $$perpWallDist = \frac{mapY - rayPosY + (1 - stepY) / 2}{dirY}$$
+-    This projects the oblique distance onto the camera axis to prevent the fisheye effect [S1, unofficial].
+-*   **Line Height on Screen:**
+-    $$lineHeight = \left\lfloor \frac{h}{perpWallDist} \right\rfloor$$
+-    where $h$ is the screen height. Note: The source notes that dividing by 2 for square voxels causes a crash, so it is omitted, resulting in vertically stretched voxels [S1, unofficial].
+-*   **Draw Start/End for Layer `b`:**
+-    $$drawStart = (lineHeight \times (b - posZ)) + pitch$$
+-    $$drawEnd = lineHeight + drawStart$$
+-    Values are clamped to `[0, h-1]` [S1, unofficial].
+-
+-**Algorithm Steps:**
+-1.  **Initialize Ray Parameters:**
+-    Calculate `deltaDistX` and `deltaDistY` based on `dirX` and `dirY` [S1, unofficial].
+-    Determine initial `stepX` and `stepY` based on ray direction:
+-    If `dirX < 0`: `stepX = -1`, `sideDistX = (posX - mapX) * deltaDistX`
+-    Else: `stepX = 1`, `sideDistX = (mapX + 1.0 - posX) * deltaDistX`
+-    Same logic for Y using `posY`, `mapY`, `dirY`, `stepY`, `sideDistY` [S1, unofficial].
+-2.  **DDA Loop (Find First Hit):**
+-    Initialize `mapX`, `mapY` to the starting grid cell. Initialize `hit = 0`, `count = 0` [S1, unofficial].
+-    While `hit < 900`:
+-    *   If `sideDistX < sideDistY`:
+-        *   `sideDistX += deltaDistX`
+-        *   `mapX += stepX`
+-        *   `side = 0`
+-    *   Else:
+-        *   `sideDistY += deltaDistY`
+-        *   `mapY += stepY`
+-        *   `side = 1`
+-    *   Clamp `mapX` to `[0, mapWidth-1]` and `mapY` to `[0, mapHeight-1]` [S1, unofficial].
+-    *   Increment `hit` and `count` [S1, unofficial].
+-3.  **Calculate Geometry for Current Hit:**
+-    *   Calculate `perpWallDist` using the formula above [S1, unofficial].
+-    *   Calculate `lineHeight` using the formula above [S1, unofficial].
+-    *   **Prepare Horizontal Fill State:**
+-        Copy current `mapX, mapY, side, sideDistX, sideDistY` to temporary variables `tmapX, tmapY, tside, tsideDistX, tsideDistY` [S1, unofficial].
+-        Advance one step again using the same DDA logic to determine the extent of the voxel face [S1, unofficial].
+-        Clamp `tmapX, tmapY` [S1, unofficial].
+-        Calculate `tperpWallDist` and `tlineHeight` using the same formulas [S1, unofficial].
+-4.  **Render Vertical Stripes (Depth Layers):**
+-    Iterate through all depth layers `b` from `0` to `mapDepth - 1`:
+-    *   Calculate `drawStart` and `drawEnd` for layer `b` [S1, unofficial].
+-    *   Get color `color = worldMap[mapX][mapY][b]` [S1, unofficial].
+-    *   Apply shading: If `side == 1`, `color = color / 2` [S1, unofficial].
+-    *   If `color` is not black:
+-        *   Call `verLineTriDepth(x, drawStart, drawEnd, color, depth[0], 384, &count, 0, depth[1])` [S1, unofficial].
+-        *   This function draws the vertical line segment, updating `depth[0]` and `depth[1]` to handle occlusion within the column [S1, unofficial].
+-5.  **Render Second Pass (Horizontal Fill/Edge):**
+-    Iterate through all depth layers `b` from `0` to `mapDepth - 1`:
+-    *   Calculate `tdrawStart` and `tdrawEnd` using `tlineHeight` [S1, unofficial].
+-    *   Get `tcolor = worldMap[mapX][mapY][b]` [S1, unofficial].
+-    *   Apply shading: `tcolor = tcolor / 3` [S1, unofficial].
+-    *   Call `verLineTriDepth` with `drawStart` or `tdrawStart` depending on whether `b < posZ`, and `depth[1]` as the primary buffer [S1, unofficial].
+-6.  **Swap Depth Buffers:**
+-    At the end of the DDA loop iteration (per voxel hit), copy `depth[1]` to `depth[0]`:
+-    `memcpy(depth[0], depth[1], 384 * sizeof(int))`
+-    This prepares `depth[1]` for the next ray or pass [S1, unofficial].
++- `worldMap[mapWidth][mapHeight][mapDepth]`: 3D array. `mapWidth=96`, `mapHeight=96`, `mapDepth=12` [S1, unofficial]. `ColorRGB` struct has 3 components (R, G, B) [S1, unofficial].
++- `depth[2][384]`: Two integer arrays of size 384 (screen height). Initialized to 100000. Used to store Z-depth of the last drawn voxel at each screen row [S1, unofficial].
++- `side`: Integer (0 or 1) indicating which side of the voxel was hit (0 for X-side, 1 for Y-side) [S1, unofficial].
++
++**Steps:**
++
++1. **Initialize Camera Ray:**
++   Calculate ray direction and plane vectors based on camera state. The FOV is controlled by `planeY = 0.66` [S1, unofficial].
++
++2. **Determine Step Direction and Initial Side Distance:**
++   For each screen column `x` (from 0 to 383):
++   - Calculate ray direction:
++     $$dirX = dirX_{base} + planeX \cdot (2x - 384) / 384$$
++     $$dirY = dirY_{base} + planeY \cdot (2x - 384) / 384$$
++   - Calculate initial map position:
++     $$mapX = \lfloor posX \rfloor$$
++     $$mapY = \lfloor posY \rfloor$$
++   - Calculate delta distances (step sizes):
++     $$deltaDistX = \sqrt{1 + (dirY / dirX)^2} \quad \text{if } dirX \neq 0 \text{ else } \infty$$
++     $$deltaDistY = \sqrt{1 + (dirX / dirY)^2} \quad \text{if } dirY \neq 0 \text{ else } \infty$$
++   - Calculate initial side distances:
++     If `dirX < 0`:
++       $$stepX = -1$$
++       $$sideDistX = (posX - mapX) \cdot deltaDistX$$
++     Else:
++       $$stepX = 1$$
++       $$sideDistX = (mapX + 1.0 - posX) \cdot deltaDistX$$
++     If `dirY < 0`:
++       $$stepY = -1$$
++       $$sideDistY = (posY - mapY) \cdot deltaDistY$$
++     Else:
++       $$stepY = 1$$
++       $$sideDistY = (mapY + 1.0 - posY) \cdot deltaDistY$$
++
++3. **Perform DDA Loop:**
++   Initialize `hit = 0`, `count = 0`.
++   While `mapX < 0 || mapY < 0 || (count < 384 && hit < 900)`:
++   - If `sideDistX < sideDistY`:
++     $$sideDistX += deltaDistX$$
++     $$mapX += stepX$$
++     $$side = 0$$
++   - Else:
++     $$sideDistY += deltaDistY$$
++     $$mapY += stepY$$
++     $$side = 1$$
++   - Clamp `mapX` to `[0, mapHeight-1]` and `mapY` to `[0, mapWidth-1]` [S1, unofficial].
++   - Increment `hit`.
++   - If `worldMap[mapX][mapY][0]` is not empty (or some hit condition is met):
++     - Break loop.
++   - Increment `count`.
++
++4. **Calculate Perpendicular Wall Distance:**
++   If `side == 0`:
++     $$perpWallDist = (mapX - posX + (1 - stepX) / 2) / dirX$$
++   Else:
++     $$perpWallDist = (mapY - posY + (1 - stepY) / 2) / dirY$$
++   This corrects for the fisheye effect [S1, unofficial].
++
++5. **Calculate Line Height:**
++   $$lineHeight = \lfloor h / perpWallDist \rfloor$$
++   Note: The code comments mention dividing by 2 for square voxels but notes it crashes, so it is not divided [S1, unofficial].
++
++6. **Iterate Through Depth Layers:**
++   For `b` from 0 to `mapDepth - 1`:
++   - Calculate `drawStart`:
++     $$drawStart = \lfloor lineHeight \cdot (b - posZ) + pitch \rfloor$$
++     Clamp `drawStart` to `[0, h-1]`.
++   - Calculate `drawEnd`:
++     $$drawEnd = lineHeight + \lfloor lineHeight \cdot (b - posZ) + pitch \rfloor$$
++     Clamp `drawEnd` to `[0, h-1]`.
++   - Get color: `color = worldMap[mapX][mapY][b]`.
++   - Apply shading: If `side == 1`, `color = color / 2` [S1, unofficial].
++   - Render voxel slice: If `color != RGB_Black`, call `verLineTriDepth(x, drawStart, drawEnd, color, depth[0], 384, &count, 0, depth[1])`. This function draws the vertical line segment, updating the depth buffer `depth[0]` and `depth[1]` to handle occlusion within the column [S1, unofficial].
++
++7. **Render Second Pass (Horizontal Fill/Edge):**
++   - Copy current state to `tmapX, tmapY, tside`.
++   - Advance one step again using the same DDA logic (`if(sideDistX < sideDistY)...`). Clamp `tmapX, tmapY` [S1, unofficial].
++   - Calculate `tperpWallDist` and `tlineHeight` using the same formulas as above [S1, unofficial].
++   - For `b` from 0 to `mapDepth - 1`:
++     - Calculate `tdrawStart`:
++       $$tdrawStart = \lfloor tlineHeight \cdot (b - posZ) + pitch \rfloor$$
++       Clamp `tdrawStart` to `[0, h-1]`.
++     - Calculate `tdrawEnd`:
++       $$tdrawEnd = tlineHeight + \lfloor tlineHeight \cdot (b - posZ) + pitch \rfloor$$
++       Clamp `tdrawEnd` to `[0, h-1]`.
++     - Get `tcolor = worldMap[mapX][mapY][b]`.
++     - Apply shading: `tcolor = tcolor / 3` [S1, unofficial].
++     - Call `verLineTriDepth` with `drawStart` or `tdrawStart` depending on `b < posZ`, and `depth[1]` as the primary buffer [S1, unofficial].
++
++8. **Swap Depth Buffers:**
++   After processing all depth layers for a voxel hit, swap depth buffers:
++   $$memcpy(depth[0], depth[1], 384 \cdot sizeof(int))$$
++   This prepares `depth[1]` for the next ray or pass [S1, unofficial].
+ 
+ **Pseudocode:**
++
+ ```python
+-def render_voxel_column(screen_x, ray_pos_x, ray_pos_y, ray_pos_z, ray_dir_x, ray_dir_y, 
+-                        map_width, map_height, map_depth, world_map, screen_height, pitch, depth_buf):
+-    # 1. Initialize DDA
+-    delta_dist_x = abs(1.0 / ray_dir_x)
+-    delta_dist_y = abs(1.0 / ray_dir_y)
+-
+-    map_x = int(ray_pos_x)
+-    map_y = int(ray_pos_y)
+-
+-    if ray_dir_x < 0:
+-        step_x = -1
+-        side_dist_x = (ray_pos_x - map_x) * delta_dist_x
+-    else:
+-        step_x = 1
+-        side_dist_x = (map_x + 1.0 - ray_pos_x) * delta_dist_x
+-
+-    if ray_dir_y < 0:
+-        step_y = -1
+-        side_dist_y = (ray_pos_y - map_y) * delta_dist_y
+-    else:
+-        step_y = 1
+-        side_dist_y = (map_y + 1.0 - ray_pos_y) * delta_dist_y
++def render_voxel_column(x, posX, posY, posZ, dirX, dirY, planeX, planeY, worldMap, depth, h, pitch, mapWidth, mapHeight, mapDepth):
++    # Step 1: Initialize Camera Ray
++    # Assuming base dirX, dirY, planeX, planeY are set up before this function call
++    # Calculate ray direction for column x
++    rayDirX = dirX + planeX * (2 * x - 384) / 384
++    rayDirY = dirY + planeY * (2 * x - 384) / 384
++
++    # Step 2: Determine Step Direction and Initial Side Distance
++    mapX = int(posX)
++    mapY = int(posY)
++
++    if rayDirX == 0:
++        deltaDistX = float('inf')
++    else:
++        deltaDistX = abs(1.0 / rayDirX) * (1.0 + (rayDirY / rayDirX) ** 2) ** 0.5 # Simplified from sqrt(1 + (dirY/dirX)^2) * abs(1/rayDirX)
++        # Note: The source formula is deltaDistX = sqrt(1 + (dirY / dirX)^2) if dirX != 0 else inf
++        # This is the distance to cross one unit in X, projected onto the ray length.
++        # Actually, the standard DDA deltaDist is 1/|rayDir| for the axis being stepped.
++        # The source says: deltaDistX = sqrt(1 + (dirY / dirX)^2) if dirX != 0 else inf
++        # Let's stick to the source formula exactly.
++        deltaDistX = (1.0 + (rayDirY / rayDirX) ** 2) ** 0.5
++
++    if rayDirY == 0:
++        deltaDistY = float('inf')
++    else:
++        deltaDistY = (1.0 + (rayDirX / rayDirY) ** 2) ** 0.5
++
++    if rayDirX < 0:
++        stepX = -1
++        sideDistX = (posX - mapX) * deltaDistX
++    else:
++        stepX = 1
++        sideDistX = (mapX + 1.0 - posX) * deltaDistX
++
++    if rayDirY < 0:
++        stepY = -1
++        sideDistY = (posY - mapY) * deltaDistY
++    else:
++        stepY = 1
++        sideDistY = (mapY + 1.0 - posY) * deltaDistY
+ 
+     hit = 0
+@@ -120,102 +163,113 @@
+     side = 0
+ 
+-    # 2. DDA Loop
+-    while hit < 900:
+-        if side_dist_x < side_dist_y:
+-            side_dist_x += delta_dist_x
+-            map_x += step_x
++    # Step 3: Perform DDA Loop
++    while mapX < 0 or mapY < 0 or (count < 384 and hit < 900):
++        if sideDistX < sideDistY:
++            sideDistX += deltaDistX
++            mapX += stepX
+             side = 0
+         else:
+-            side_dist_y += delta_dist_y
+-            map_y += step_y
++            sideDistY += deltaDistY
++            mapY += stepY
+             side = 1
+-
+-        # Clamp map coordinates (fixed swapped bounds from source)
+-        map_x = max(0, min(map_x, map_width - 1))
+-        map_y = max(0, min(map_y, map_height - 1))
+-
++        
++        # Clamp mapX and mapY
++        mapX = max(0, min(mapX, mapHeight - 1))
++        mapY = max(0, min(mapY, mapWidth - 1))
++        
+         hit += 1
++        
++        # Check for hit (assuming non-black color indicates a voxel)
++        # Note: worldMap access might need bounds checking if mapX/Y are clamped but still out of valid range
++        if mapX < mapWidth and mapY < mapHeight and mapDepth > 0:
++            if worldMap[mapX][mapY][0] != (0, 0, 0): # Assuming RGB_Black is (0,0,0)
++                break
+         count += 1
+ 
+-    if hit >= 900:
+-        return
+-
+-    # 3. Calculate Geometry
++    # Step 4: Calculate Perpendicular Wall Distance
+     if side == 0:
+-        perp_wall_dist = (map_x - ray_pos_x + (1 - step_x) / 2) / ray_dir_x
+-    else:
+-        perp_wall_dist = (map_y - ray_pos_y + (1 - step_y) / 2) / ray_dir_y
+-
+-    line_height = int(screen_height / perp_wall_dist)
+-
+-    # Prepare horizontal fill state
+-    t_map_x, t_map_y, t_side = map_x, map_y, side
+-    t_side_dist_x, t_side_dist_y = side_dist_x, side_dist_y
+-
+-    # Advance one step for t variables
+-    if t_side_dist_x < t_side_dist_y:
+-        t_side_dist_x += delta_dist_x
+-        t_map_x += step_x
+-        t_side = 0
+-    else:
+-        t_side_dist_y += delta_dist_y
+-        t_map_y += step_y
+-        t_side = 1
+-
+-    t_map_x = max(0, min(t_map_x, map_width - 1))
+-    t_map_y = max(0, min(t_map_y, map_height - 1))
+-
+-    if t_side == 0:
+-        t_perp_wall_dist = (t_map_x - ray_pos_x + (1 - step_x) / 2) / ray_dir_x
+-    else:
+-        t_perp_wall_dist = (t_map_y - ray_pos_y + (1 - step_y) / 2) / ray_dir_y
+-
+-    t_line_height = int(screen_height / t_perp_wall_dist)
+-
+-    # 4. Render Vertical Stripes
+-    for b in range(map_depth):
+-        draw_start = (line_height * (b - ray_pos_z)) + pitch
+-        draw_end = line_height + draw_start
+-
+-        draw_start = max(0, min(draw_start, screen_height - 1))
+-        draw_end = max(0, min(draw_end, screen_height - 1))
+-
+-        color = world_map[map_x][map_y][b]
+-
++        perpWallDist = (mapX - posX + (1 - stepX) / 2) / rayDirX
++    else:
++        perpWallDist = (mapY - posY + (1 - stepY) / 2) / rayDirY
++
++    # Step 5: Calculate Line Height
++    lineHeight = int(h / perpWallDist)
++
++    # Step 6: Iterate Through Depth Layers
++    for b in range(mapDepth):
++        drawStart = int(lineHeight * (b - posZ) + pitch)
++        drawStart = max(0, min(drawStart, h - 1))
++        
++        drawEnd = lineHeight + int(lineHeight * (b - posZ) + pitch)
++        drawEnd = max(0, min(drawEnd, h - 1))
++        
++        color = worldMap[mapX][mapY][b]
++        
++        # Apply shading
+         if side == 1:
+-            color = color / 2
+-
++            color = tuple(c / 2 for c in color)
++        
+         if color != (0, 0, 0):
+-            ver_line_tri_depth(screen_x, draw_start, draw_end, color, depth_buf[0], 384, count, 0, depth_buf[1])
+-
+-    # 5. Render Second Pass (Horizontal Fill/Edge)
+-    for b in range(map_depth):
+-        t_draw_start = (t_line_height * (b - ray_pos_z)) + pitch
+-        t_draw_end = t_line_height + t_draw_start
+-
+-        t_draw_start = max(0, min(t_draw_start, screen_height - 1))
+-        t_draw_end = max(0, min(t_draw_end, screen_height - 1))
+-
+-        t_color = world_map[map_x][map_y][b]
+-        t_color = t_color / 3
+-
+-        if b < ray_pos_z:
+-            start = draw_start
++            # Call verLineTriDepth
++            # This function is not defined in the source, so we assume it updates depth[0] and depth[1]
++            # and draws the line. We will simulate the depth update logic here for completeness.
++            # The source says: verLineTriDepth(x, drawStart, drawEnd, color, depth[0], 384, &count, 0, depth[1])
++            # We assume it draws from drawStart to drawEnd, updating depth[0] and depth[1]
++            for y in range(drawStart, drawEnd + 1):
++                if y < 384:
++                    # Update depth buffer
++                    depth[0][y] = b # Simplified depth update
++                    depth[1][y] = b # Simplified depth update
++            # Note: The actual drawing is not implemented here, only the logic described.
++
++    # Step 7: Render Second Pass (Horizontal Fill/Edge)
++    # Copy current state
++    tmapX, tmapY, tside = mapX, mapY, side
++    tsideDistX, tsideDistY = sideDistX, sideDistY
++    
++    # Advance one step again
++    if tsideDistX < tsideDistY:
++        tsideDistX += deltaDistX
++        tmapX += stepX
++        tside = 0
++    else:
++        tsideDistY += deltaDistY
++        tmapY += stepY
++        tside = 1
++    
++    tmapX = max(0, min(tmapX, mapHeight - 1))
++    tmapY = max(0, min(tmapY, mapWidth - 1))
++    
++    if tside == 0:
++        tperpWallDist = (tmapX - posX + (1 - stepX) / 2) / rayDirX
++    else:
++        tperpWallDist = (tmapY - posY + (1 - stepY) / 2) / rayDirY
++    
++    tlineHeight = int(h / tperpWallDist)
++    
++    for b in range(mapDepth):
++        tdrawStart = int(tlineHeight * (b - posZ) + pitch)
++        tdrawStart = max(0, min(tdrawStart, h - 1))
++        
++        tdrawEnd = tlineHeight + int(tlineHeight * (b - posZ) + pitch)
++        tdrawEnd = max(0, min(tdrawEnd, h - 1))
++        
++        tcolor = worldMap[mapX][mapY][b]
++        tcolor = tuple(c / 3 for c in tcolor)
++        
++        # Call verLineTriDepth with depth[1] as primary buffer
++        # The source says: call verLineTriDepth with drawStart or tdrawStart depending on b < posZ
++        if b < posZ:
++            start = drawStart
+         else:
+-            start = t_draw_start
+-
+-        ver_line_tri_depth(screen_x, start, t_draw_end, t_color, depth_buf[1], 384, count, 0, depth_buf[1])
+-
+-    # 6. Swap Depth Buffers
+-    depth_buf[0] = depth_buf[1].copy()
+-
+-def ver_line_tri_depth(x, start, end, color, depth_buf, width, count, flag, other_buf):
+-    # Draws a vertical line segment and updates the depth buffer for occlusion handling.
+-    # Implements standard depth-buffered line rasterization for the column.
+-    for row in range(start, end + 1):
+-        if 0 <= row < width:
+-            # Update depth buffer to track the closest drawn surface at this screen row
+-            if depth_buf[row] > 100000:
+-                depth_buf[row] = 100000 - (row - start)
++            start = tdrawStart
++            
++        # Simulate depth update for depth[1]
++        for y in range(start, tdrawEnd + 1):
++            if y < 384:
++                depth[1][y] = b
++
++    # Step 8: Swap Depth Buffers
++    depth[0] = depth[1][:] # Copy depth[1] to depth[0]
+ ```
+ 
+@@ -223,26 +277,27 @@
+ 
+ ### [Dual-Layer DDA Raycasting](2212-dual-layer-dda-raycasting.md)
+-Extends this method to support two distinct vertical layers (ceilings and floors) in a single pass using a 3D DDA, differing from the single-layer focus of the parent.
++Dual-Layer DDA Raycasting is a real-time rendering technique that extends standard voxel raycasting by supporting two distinct vertical layers (`worldMap[0]` for ceilings and `worldMap[1]` for floors) within a single ray traversal pass. Unlike [Classic (Column Voxel Space)](5024-classic-column-voxel-space.md), which typically handles a single layer, this method simultaneously determines the first occupied cell for both layers using a 3D Digital Differential Analyzer (DDA). It builds on [Voxel Raycasting with DDA and Vertical Stripe Rendering](2206-voxel-raycasting-with-dda-and-vertical-stripe-rendering.md) by adding the capacity to render both top and bottom surfaces of a voxel column in one go.
+ 
+ ### [Classic (Column Voxel Space)](5024-classic-column-voxel-space.md)
+-A simpler technique that casts one ray per screen column using a height-map-based march, differing from this method's per-pixel/vertical-stripe approach.
++Classic rendering is a real-time terrain visualization technique that redraws the camera frustum every frame by marching world-vertical columns from the camera to the horizon. It differs from its sibling [Voxel Raycasting with DDA and Vertical Stripe Rendering](2206-voxel-raycasting-with-dda-and-vertical-stripe-rendering.md) by casting one ray per screen column rather than per pixel, and from [Dual-Layer DDA Raycasting](2212-dual-layer-dda-raycasting.md) by using a height-map-based column march instead of a dual-layer DDA approach.
+ 
+ ### [Screen-Space Ray Casting with Layer Traversal](5221-screen-space-ray-casting-with-layer-traversal.md)
+-Performs ray casting in screen space with explicit layer index handling for multiple refractions, differing from this method's strict 3D grid traversal.
++A real-time rendering technique that performs ray casting in screen space by marching pixel by pixel along the projected ray direction to intersect voxel columns and find entry/exit points for volume rendering. It distinguishes itself from its parent [Voxel Raycasting with DDA and Vertical Stripe Rendering](2206-voxel-raycasting-with-dda-and-vertical-stripe-rendering.md) by explicitly handling multiple surface layers within a column via a layer index, enabling the tracing of multiple refractions and deep ambient occlusion by leveraging full knowledge of surface layers rather than just the front-most surface.
+ 
+ ### [Voxel Polygon Rendering](6747-voxel-polygon-rendering.md)
+-Fills the screen with vertical bars representing heights stored in a voxel map, projecting an area of the map onto the screen as if it were a flat landscape.
++Voxel Polygon Rendering is a hybrid real-time rendering technique that projects a 2D voxel height map onto the screen as vertical bars, solving the problem of rendering high-detail terrain at constant speed without traditional 6DOF polygon operations. It sets itself apart from its sibling [Voxel Raycasting with DDA and Vertical Stripe Rendering](2206-voxel-raycasting-with-dda-and-vertical-stripe-rendering.md) by introducing "voxel polygons" to vary local detail and an s-buffer (vertical c-buffer) to handle floating geometry, whereas the sibling relies on a simpler per-column depth buffer for stacking.
+ 
+ ## Operating characteristics
+-*   **Time Complexity:** Linear with respect to the number of screen columns and the maximum traversal depth (capped at 900 steps in the source) [S1, unofficial]. The DDA traversal is efficient, jumping directly between grid boundaries [S1, unofficial].
+-*   **Memory Complexity:** Dominated by the 3D voxel grid `worldMap` and the two depth buffers [S1, unofficial]. For the source dimensions, this is minimal [S1, unofficial].
+-*   **Performance:** Designed for real-time rendering on limited hardware (implied by the C-style implementation and lack of complex shading) [S1, unofficial].
+-*   **Strengths:** Handles internal voxel structure visibility via depth buffering; avoids fisheye distortion; efficient traversal [S1, unofficial].
+-*   **Limitations:** Vertically stretched voxels due to aspect ratio handling; limited to 2 depth buffers for occlusion; hardcoded bounds and parameters in the source implementation [S1, unofficial].
+-*   **When to use:** Real-time voxel visualization where internal structure is important and performance is critical [S1, unofficial].
+-*   **When not to use:** When square voxel aspect ratio is required without workarounds; when deep volume rendering with many layers is needed beyond the fixed depth buffer capacity [S1, unofficial].
++- **Time Complexity:** O(N) per screen column, where N is the number of voxels traversed along the ray. The DDA loop runs until a hit is found or a maximum step count is reached.
++- **Memory Complexity:** O(W * H * D) for the voxel grid, where W, H, D are the dimensions of the grid. O(H) for the depth buffers, where H is the screen height.
++- **Measured Performance:** The method is designed for real-time rendering. The specific performance metrics are not given in the sources.
++- **Scaling:** The method scales linearly with the number of screen columns and the number of voxels traversed.
++- **Strengths:** Real-time performance, simple implementation, supports stacking of voxels within a column.
++- **Limitations:** Fisheye effect if not corrected, vertically stretched voxels if aspect ratio is not handled correctly, limited to grid-aligned voxels.
++- **When to use:** Real-time rendering of voxel grids where performance is critical and high visual fidelity is not the primary concern.
++- **When not to use:** When high visual fidelity, anti-aliasing, or complex lighting effects are required.
+ 
+ ## Background
+-This method originates from the `voxnine` project by JCLemme, an unofficial implementation of 3D voxel raycasting using DDA [S1, unofficial]. It builds on the Amanatides–Woo Voxel Traversal algorithm for efficient grid traversal [S1, unofficial]. The technique is notable for its use of vertical stripes and dual depth buffers to handle voxel stacking, distinguishing it from standard Wolfenstein 3D-style raycasting [S1, unofficial].
++The method is described in the source [S1, unofficial], which is an unofficial repository. The specific origin and history are not provided in the sources.
+ 
+ ## Sources

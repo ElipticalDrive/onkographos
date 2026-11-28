@@ -1,0 +1,222 @@
+--- v006.md
++++ v007.md
+@@ -1,5 +1,5 @@
+ # Feature-Guided Diffusion for Inverse Rendering
+ 
+-Also called: Diffusion-CMA-ES Inverse Rendering, Diffusion-based CMA-ES, FGD, Feature-Guided Diffusion, Feature-Guided Diffusion for Non-Differentiable Inverse Rendering, Feature-Informed Diffusion Evolution
++Also called: Diffusion-CMA-ES Inverse Rendering, Diffusion-based CMA-ES, FGD, FIDE, Feature-Guided Diffusion, Feature-Guided Diffusion for Non-Differentiable Inverse Rendering, Feature-Informed Diffusion Evolution
+ 
+ ## Overview
+@@ -23,8 +23,10 @@
+     -   Covariance matrix $\boldsymbol{\Sigma} \in \mathbb{R}^{d \times d}$, initialized to $\sigma_0 \mathbf{I}_{d \times d}$ [S1, unofficial].
+ 2.  **Diffusion Model $\tilde{f}_{\theta}^{-1}$**:
+-    -   Transformer-based parameter refinement architecture [S1, unofficial].
+-    -   **Input Tokens**: Image features $\mathbf{F} = E(\mathbf{y})$ flattened into tokens with learned positional embeddings; noisy parameters $\mathbf{z} \in \mathbb{R}^d$ projected into tokens via a learned linear layer [S1, unofficial].
++    -   Transformer-based architecture [S1, unofficial].
++    -   **Input Tokens**:
++        -   Image features $\mathbf{F} = E(\mathbf{y})$ flattened into tokens with learned positional embeddings [S1, unofficial].
++        -   Noisy parameters $\mathbf{z} \in \mathbb{R}^d$ projected into tokens via a learned linear layer [S1, unofficial].
+     -   **Processing**: Four self-attention blocks on parameter tokens, followed by cross-attention with image tokens [S1, unofficial].
+-    -   **Conditioning**: Feature-wise Linear Modulation (FiLM) injects timestep information (derived from $\boldsymbol{\Sigma}$) into each attention block [S1, unofficial].
++    -   **Conditioning**: Feature-wise Linear Modulation (FiLM) injects timestep information into each attention block [S1, unofficial].
+     -   **Output**: Parameter tokens concatenated and projected back to $\mathbb{R}^d$ via a linear layer [S1, unofficial].
+ 3.  **Training Data**:
+@@ -32,18 +34,18 @@
+ 
+ ### Numbered Steps
+-1.  **Initialization**: Set $\boldsymbol{\mu} = \mathbf{0}_d$, $\boldsymbol{\Sigma} = \sigma_0 \mathbf{I}_{d \times d}$. Initialize diffusion weights $\theta$. Normalize all task parameters to $[0, 1]$ and initialize parameters at $0.5$ [S1, unofficial].
++1.  **Initialization**: Set $\boldsymbol{\mu} = \mathbf{0}_d$, $\boldsymbol{\Sigma} = \sigma_0 \mathbf{I}_{d \times d}$. Initialize diffusion weights $\theta$ [S1, unofficial]. Normalize all task parameters to $[0, 1]$ and initialize at $0.5$ [S1, unofficial].
+ 2.  **Iteration Loop** (for $i = 1$ to $N$):
+     1.  **Sampling**: Draw $k$ candidates $\{\mathbf{x}_j\}_{j=0}^{k-1} \sim \mathcal{N}(\boldsymbol{\mu}, \boldsymbol{\Sigma})$ [S1, unofficial].
+     2.  **Inverse Prediction (Partial Denoising)**:
+-        -   Select the first $k/2$ candidates.
++        -   Select the first $k/2$ candidates [S1, unofficial].
+         -   Compute the timestep proxy $\mathbf{s} = \sqrt{\text{diag}(\boldsymbol{\Sigma})}$ [S1, unofficial].
+         -   Denoise these candidates using the diffusion model: $\{\mathbf{x}'_j\}_{j=0}^{k/2-1} = \tilde{f}_{\theta}^{-1}(\{\mathbf{x}_j\}_{j=0}^{k/2-1}, E(\mathbf{y}^*), \boldsymbol{\Sigma})$ [S1, unofficial].
+         -   The denoising is performed by solving the reverse-time ODE using Euler's method with 3 steps and schedule $[0.3, 0.2, 0.1]$ [S1, unofficial].
+         -   The remaining $k/2$ candidates are passed through unmodified to preserve diversity and prevent mode collapse [S1, unofficial].
+-        -   The denoised and undenoised candidates form the population for the next iteration [S1, unofficial].
++        -   Combine denoised and undenoised candidates to form the new population $\{\mathbf{x}_j\}_{j=0}^{k-1}$ [S1, unofficial].
+     3.  **Evaluation**: Render all candidates to obtain images $\{\mathbf{y}_j\}_{j=0}^{k-1} = f(\{\mathbf{x}_j\}_{j=0}^{k-1})$ [S1, unofficial].
+     4.  **Feature Extraction**: Extract features $\{\mathbf{e}_j\}_{j=0}^{k-1} = E(\{\mathbf{y}_j\}_{j=0}^{k-1})$ [S1, unofficial].
+-    5.  **Online Training**: Train the diffusion model $\tilde{f}_{\theta}^{-1}$ on the current dataset $\{(\mathbf{x}_j, \mathbf{y}_j, \boldsymbol{\Sigma})\}$ for $T$ epochs (default 20) using the training objective:
+-        $$ \mathcal{L}_{diff} = \| \tilde{f}_{\theta}^{-1}(z, \mathbf{y}, \boldsymbol{\Sigma}) - x \|_2^2 $$
++    5.  **Online Training**: Train the diffusion model $\tilde{f}_{\theta}^{-1}$ on the current dataset $\{(\mathbf{x}_j, \mathbf{e}_j, \boldsymbol{\Sigma})\}$ for $T$ epochs (default 20) using the training objective:
++        $$ \mathcal{L}_{diff} = \| \tilde{f}_{\theta}^{-1}(z, \mathbf{e}, \boldsymbol{\Sigma}) - x \|_2^2 $$
+         where $z \sim \mathcal{N}(x, \sigma(s)^2)$ is the noisy version of $x$ [S1, unofficial]. Use Adam optimizer with learning rate $0.001$ [S1, unofficial].
+     6.  **CMA-ES Update**:
+@@ -56,90 +58,83 @@
+ import numpy as np
+ 
+-class Adam:
+-    def __init__(self, params, lr=0.001, beta1=0.9, beta2=0.999, eps=1e-8):
+-        self.params = params
+-        self.lr = lr
+-        self.beta1, self.beta2 = beta1, beta2
+-        self.eps = eps
+-        self.m = {id(p): np.zeros_like(p) for p in params}
+-        self.v = {id(p): np.zeros_like(p) for p in params}
+-        self.t = 0
+-    def step(self):
+-        self.t += 1
+-        for p in self.params:
+-            self.m[id(p)] = self.beta1 * self.m[id(p)] + (1 - self.beta1) * p.grad
+-            self.v[id(p)] = self.beta2 * self.v[id(p)] + (1 - self.beta2) * (p.grad ** 2)
+-            m_hat = self.m[id(p)] / (1 - self.beta1 ** self.t)
+-            v_hat = self.v[id(p)] / (1 - self.beta2 ** self.t)
+-            p -= self.lr * m_hat / (np.sqrt(v_hat) + self.eps)
+-            p.grad = None
+-
+-class DiffusionModel:
+-    def __init__(self, d):
+-        self.d = d
+-        self.theta = np.random.randn(d) # Placeholder weights
+-    def forward(self, z, y_features, sigma_diag):
+-        # Simplified reverse ODE step with Euler solver (3 steps, schedule [0.3, 0.2, 0.1])
+-        # In practice, this runs a transformer cross-attention network conditioned on y_features
+-        # and timestep proxy sigma_diag. Returns predicted clean parameters.
+-        return z - 0.1 * self.theta # Placeholder update
+-
+ def fide_inverse_rendering(renderer, target_image, d, k=500, N=50, sigma_0=1.0/6.0, 
+                            epochs=20, lr=0.001, feature_extractor=None):
+     """
+     Implements Feature-Guided Diffusion for Inverse Rendering (FIDE).
++    
++    Args:
++        renderer: Black-box function f: R^d -> Image
++        target_image: Target image y*
++        d: Dimensionality of parameter space
++        k: Population size
++        N: Number of evolution cycles
++        sigma_0: Initial standard deviation
++        epochs: Number of training epochs for diffusion model per iteration
++        lr: Learning rate for diffusion model training
++        feature_extractor: Frozen feature extractor E (e.g., DINOv3)
++        
++    Returns:
++        mu: Optimized parameters (mean of final distribution)
+     """
++    # 1. Initialization
+     mu = np.zeros(d)
+     Sigma = sigma_0 * np.eye(d)
+-    
+-    diffusion_model = DiffusionModel(d)
+-    # Simulate parameter objects for optimizer
+-    class Param:
+-        def __init__(self, val): self.val = val; self.grad = None
+-    theta_param = Param(diffusion_model.theta)
+-    optimizer = Adam([theta_param], lr=lr)
+-    
++    # Diffusion model weights theta initialized to zeros [G]
++    theta = np.zeros(1) 
++    # Pre-compute target features
+     target_features = feature_extractor(target_image)
+-    
++
+     for iteration in range(N):
+-        # 1. Sampling
++        # 2. Sampling: Draw k candidates from N(mu, Sigma)
+         candidates = np.random.multivariate_normal(mu, Sigma, size=k)
+         
+-        # 2. Inverse Prediction (Partial Denoising)
++        # 3. Inverse Prediction (Partial Denoising)
+         half_k = k // 2
+         noisy_params = candidates[:half_k]
++        
++        # Compute timestep proxy from covariance diagonal
+         timestep_proxy = np.sqrt(np.diag(Sigma))
+         
+-        denoised_candidates = diffusion_model.forward(noisy_params, target_features, timestep_proxy)
++        # Denoise using diffusion model conditioned on target features
++        # x_denoised = f_theta^-1(noisy_params, target_features, Sigma)
++        # This involves solving the reverse-time ODE with Euler's method (3 steps)
++        denoised_candidates = reverse_ode_step(noisy_params, target_features, timestep_proxy, steps=3)
++        
++        # Combine denoised and undenoised candidates
+         candidates = np.concatenate([denoised_candidates, candidates[half_k:]])
+         
+-        # 3. Evaluation
++        # 4. Evaluation: Render all candidates
+         rendered_images = np.array([renderer(x) for x in candidates])
+         
+-        # 4. Feature Extraction
++        # 5. Feature Extraction
+         image_features = feature_extractor(rendered_images)
+         
+-        # 5. Online Training
++        # 6. Online Training: Train diffusion model on current dataset
++        # Generate noisy versions for training: z ~ N(x, sigma(s)^2)
++        noise = np.random.normal(0, 1, size=candidates.shape)
++        # sigma(s) approximated by timestep_proxy for simplicity [G]
++        z = candidates + noise * timestep_proxy
++        
++        # Train for 'epochs'
+         for epoch in range(epochs):
+-            # Generate noisy inputs z ~ N(x, sigma(s)^2)
+-            noise = np.random.normal(0, 1, size=candidates.shape)
+-            z = candidates + noise * np.sqrt(timestep_proxy)
++            # Forward pass: predict x from z, features, timestep
++            predicted_x = diffusion_forward(z, image_features, timestep_proxy, theta)
+             
+-            # Forward pass
+-            predicted_x = diffusion_model.forward(z, image_features, timestep_proxy)
+-            
+-            # Loss: || f_theta^-1(z, y, Sigma) - x ||^2
++            # Loss: || predicted_x - x ||^2
+             loss = np.mean((predicted_x - candidates) ** 2)
+             
+-            # Backpropagate (simulated)
+-            theta_param.grad = (predicted_x - candidates) / candidates.size
+-            optimizer.step()
+-            diffusion_model.theta = theta_param.val
++            # Backpropagate and update theta (standard optimizer step) [G]
++            grad = np.gradient(loss, theta)
++            theta = theta - lr * grad
+             
+-        # 6. CMA-ES Update
++        # 7. CMA-ES Update
++        # Compute costs (using LPIPS or MSE as per source)
+         costs = np.array([compute_loss(rendered_images[i], target_image) for i in range(k)])
++        
++        # Rank candidates
+         sorted_indices = np.argsort(costs)
+         ranked_candidates = candidates[sorted_indices]
+         
++        # Weights: higher for top candidates
+         weights = np.zeros(k)
+         weights[:k//10] = 2.0
+@@ -147,9 +142,34 @@
+         weights /= weights.sum()
+         
++        # Update mean
+         mu = np.dot(weights, ranked_candidates)
++        
++        # Update covariance
+         centered = ranked_candidates - mu
+         Sigma = np.sum(weights[:, None, None] * (centered[:, :, None] * centered[:, None, :]), axis=0)
+         
+     return mu
++
++def reverse_ode_step(z, features, timestep, steps=3):
++    # Simplified Euler reverse ODE solver for diffusion [G]
++    current = z.copy()
++    schedule = [0.3, 0.2, 0.1]
++    for i in range(steps):
++        # Predict clean parameters
++        pred = diffusion_forward(current, features, timestep, theta_placeholder)
++        # Euler step towards prediction
++        current = current + schedule[i] * (pred - current)
++    return current
++
++def diffusion_forward(z, features, timestep, theta):
++    # Placeholder for transformer architecture:
++    # 1. Flatten features to tokens with pos embeddings
++    # 2. Project z to tokens via linear layer
++    # 3. 4 self-attention blocks on param tokens
++    # 4. Cross-attention with image tokens
++    # 5. FiLM conditioning with timestep
++    # 6. Concat and project back to d
++    # Returns predicted parameters [G]
++    return np.zeros_like(z)
+ 
+ def compute_loss(rendered, target):

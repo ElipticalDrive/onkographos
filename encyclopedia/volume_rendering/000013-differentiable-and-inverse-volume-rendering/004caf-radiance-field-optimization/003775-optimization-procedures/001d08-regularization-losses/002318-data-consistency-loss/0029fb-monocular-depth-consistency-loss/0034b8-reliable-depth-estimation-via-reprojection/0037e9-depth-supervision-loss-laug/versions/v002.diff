@@ -1,0 +1,175 @@
+--- v001.md
++++ v002.md
+@@ -1,103 +1,99 @@
+ # Depth Supervision Loss (Laug)
+ Also called: Laug
++## Overview
++Laug is a bidirectional depth consistency loss used to regularize radiance field optimization by enforcing agreement between rendered depth and reliable monocular depth estimates. It distinguishes itself from standard L2 depth losses by incorporating reliability masks and stop-gradient operators to prevent gradient flow into unreliable depth estimates or unstable rendered depths, thereby stabilizing training under sparse input views.
++## How it works
++**Inputs and Outputs**
++- Inputs: Rendered depth map $z_m$, monocular depth estimate $z_a$, reliability masks $m_a$ and $m_m$, and the stop-gradient operator $\hat{\nabla}$.
++- Output: Scalar loss value $L_{aug}$.
+ 
+-## Overview
+-The Depth Supervision Loss ($L_{aug}$) is a data consistency term used to regularize radiance field optimization by enforcing geometric plausibility through monocular depth estimates. It differs from standard photometric losses by operating on depth maps rather than color, specifically designed to handle unreliable depth predictions via reliability masks. It builds on [Reliable Depth Estimation via Reprojection](7293-reliable-depth-estimation-via-reprojection.md).
++**Data Structures**
++- $z_m$: Rendered depth map, shape $(H, W)$.
++- $z_a$: Monocular depth estimate, shape $(H, W)$.
++- $m_a$: Mask indicating reliability of monocular depth, binary values $\{0, 1\}$, shape $(H, W)$.
++- $m_m$: Mask indicating reliability of rendered depth, binary values $\{0, 1\}$, shape $(H, W)$.
+ 
+-## How it works
+-**Inputs and Outputs:**
+-*   **Inputs:**
+-    *   $z_m$: Predicted depth map from the radiance field rendering.
+-    *   $z_a$: Estimated depth map from a monocular depth estimator.
+-    *   $m_a$: Reliability mask for the estimated depth $z_a$ (binary or continuous).
+-    *   $m_m$: Reliability mask for the predicted depth $z_m$ (binary or continuous).
+-*   **Outputs:**
+-    *   Scalar loss value $L_{aug}$.
++**Steps**
++1. Compute the forward consistency term: Calculate the squared L2 distance between the rendered depth $z_m$ and the stop-gradient of the monocular depth $\hat{\nabla}(z_a)$.
++2. Compute the backward consistency term: Calculate the squared L2 distance between the stop-gradient of the rendered depth $\hat{\nabla}(z_m)$ and the monocular depth $z_a$.
++3. Apply reliability masks: Element-wise multiply the forward term by $m_a$ and the backward term by $m_m$.
++4. Sum the terms: Add the masked forward and backward terms to produce $L_{aug}$.
+ 
+-**Data Structures:**
+-*   Masks $m_a, m_m$ and depths $z_m, z_a$ are 2D tensors of identical spatial dimensions (width $\times$ height).
+-*   Values are typically normalized or in metric units consistent with the depth estimator.
++**Formulas**
++The loss is defined as [S1]:
++$$ L_{aug} = \mathbb{1}_{m_a=1} \odot \| z_m - \hat{\nabla}(z_a) \|^2 + \mathbb{1}_{m_m=1} \odot \| \hat{\nabla}(z_m) - z_a \|^2 $$
++Where:
++- $\odot$ denotes element-wise multiplication.
++- $\mathbb{1}_{condition}$ is the indicator function, returning 1 if the condition is true, 0 otherwise.
++- $\hat{\nabla}(\cdot)$ is the stop-gradient operator, which blocks gradient propagation through its argument during backpropagation.
++- $\| \cdot \|^2$ is the squared L2 norm (element-wise squared difference).
+ 
+-**Formula:**
+-The loss is defined as [S2]:
+-$$ L_{aug} = \mathbb{1}_{\{m_a=1\}} \odot \| z_m - \hat{\nabla}(z_a) \|^2 + \mathbb{1}_{\{m_m=1\}} \odot \| \hat{\nabla}(z_m) - z_a \|^2 $$
++**Parameters**
++- Typical values: Masks $m_a, m_m$ are binary. No other hyperparameters are specified in the source.
+ 
+-Where:
+-*   $\odot$ is the element-wise (Hadamard) product.
+-*   $\mathbb{1}_{\{condition\}}$ is the indicator function, returning 1 if the condition is true, 0 otherwise. In practice, this acts as a mask selecting only reliable pixels.
+-*   $\hat{\nabla}(\cdot)$ denotes the stop-gradient operator, preventing gradients from flowing through the monocular depth estimator or the radiance field's depth prediction in that specific term, stabilizing training [S2].
+-*   $\| \cdot \|^2$ is the squared L2 norm (element-wise squared difference).
++**Edge Cases and Pitfalls**
++- Precision: The stop-gradient operator is critical. Without it, gradients from the loss may flow into the monocular depth estimator or the depth renderer, potentially destabilizing the optimization [S1].
++- Boundaries: The reliability masks must be correctly computed to exclude invalid depth regions (e.g., occlusions or low-confidence areas) to avoid introducing noise into the radiance field [S1].
+ 
+-**Steps:**
+-1.  Render the depth map $z_m$ from the current radiance field state for the current camera view.
+-2.  Obtain the estimated depth map $z_a$ from the monocular depth network.
+-3.  Compute the reliability masks $m_a$ and $m_m$ based on the reprojection consistency or other reliability metrics defined in the parent method [Reliable Depth Estimation via Reprojection](7293-reliable-depth-estimation-via-reprojection.md).
+-4.  Apply the stop-gradient operator to $z_a$ and $z_m$ respectively for the cross-terms: $\hat{z}_a = \hat{\nabla}(z_a)$ and $\hat{z}_m = \hat{\nabla}(z_m)$.
+-5.  Compute the element-wise squared differences:
+-    *   $diff_1 = (z_m - \hat{z}_a)^2$
+-    *   $diff_2 = (\hat{z}_m - z_a)^2$
+-6.  Apply the masks:
+-    *   $term_1 = m_a \odot diff_1$
+-    *   $term_2 = m_m \odot diff_2$
+-7.  Sum all elements of $term_1$ and $term_2$ and divide by the number of valid pixels (or keep as sum, depending on normalization convention) to get $L_{aug}$.
+-
+-**Pseudocode:**
++**Pseudocode**
+ ```python
+-def compute_laug(z_m, z_a, m_a, m_m):
++def compute_laug_loss(z_m, z_a, m_a, m_m):
+     """
+-    Compute Depth Supervision Loss (Laug).
++    Compute the bidirectional depth supervision loss.
+     
+     Args:
+-        z_m (Tensor): Rendered depth map from radiance field.
+-        z_a (Tensor): Estimated depth map from monocular estimator.
+-        m_a (Tensor): Reliability mask for z_a (1.0 for reliable, 0.0 otherwise).
+-        m_m (Tensor): Reliability mask for z_m (1.0 for reliable, 0.0 otherwise).
++        z_m: Rendered depth map (H, W)
++        z_a: Monocular depth estimate (H, W)
++        m_a: Reliability mask for monocular depth (H, W), binary
++        m_m: Reliability mask for rendered depth (H, W), binary
+         
+     Returns:
+-        Tensor: Scalar loss value.
++        Scalar loss value
+     """
+-    # Stop-gradient to prevent backprop through depth estimators
+-    # Note: In frameworks like PyTorch, this is typically z_a.detach()
+-    z_a_stopped = z_a.detach() 
+-    z_m_stopped = z_m.detach()
++    # Stop-gradient operator blocks gradients
++    # Note: In practice, this is implemented using framework-specific 
++    # stop_gradient or detach() functions.
++    z_a_stopped = stop_gradient(z_a)
++    z_m_stopped = stop_gradient(z_m)
+     
+-    # Element-wise squared differences
+-    # Using detach() effectively implements the stop-gradient operator \hat{\nabla}
+-    diff_1 = (z_m - z_a_stopped) ** 2
+-    diff_2 = (z_m_stopped - z_a) ** 2
++    # Forward term: Rendered vs Monocular (monocular stopped)
++    forward_diff = z_m - z_a_stopped
++    forward_loss = forward_diff ** 2
++    
++    # Backward term: Monocular vs Rendered (rendered stopped)
++    backward_diff = z_m_stopped - z_a
++    backward_loss = backward_diff ** 2
+     
+     # Apply reliability masks
+-    # m_a and m_m are assumed to be 0.0 or 1.0 (or continuous reliability scores)
+-    term_1 = m_a * diff_1
+-    term_2 = m_m * diff_2
++    # m_a and m_m are binary masks (0 or 1)
++    masked_forward = forward_loss * m_a
++    masked_backward = backward_loss * m_m
+     
+-    # Sum over all pixels
+-    loss = torch.sum(term_1) + torch.sum(term_2)
++    # Sum and average over pixels (optional, depending on implementation)
++    # The source formula implies element-wise sum, but typically reduced to scalar
++    total_loss = masked_forward + masked_backward
+     
+-    return loss
++    # Return mean loss over valid pixels or total sum
++    # Source does not specify reduction, assuming sum over all elements for L2 norm definition
++    return total_loss.sum()
+ ```
+ 
+-**Parameters:**
+-*   **Weight:** The weight of $L_{aug}$ relative to photometric loss is not specified in the sources [S1, unofficial][S2].
+-*   **Mask Thresholds:** The method for generating $m_a$ and $m_m$ is described in [Reliable Depth Estimation via Reprojection](7293-reliable-depth-estimation-via-reprojection.md).
++## Subtopics
+ 
+-**Edge Cases and Pitfalls:**
+-*   **Sparse Geometry:** The loss gradients only affect voxels intersected by rays corresponding to reliable depth pixels. Since COLMAP key points (used for depth estimation) are orders of magnitude fewer than color pixels, the depth loss affects only a small portion of the voxel space [S1, unofficial].
+-*   **Low Data Performance:** With low data, the improvement in PSNR is minimal (e.g., 0.01 PSNR increase) compared to non-depth supervised approaches [S1, unofficial].
+-*   **Precision:** Ensure depth units are consistent between $z_m$ and $z_a$.
++### Reliability Masking
++Determines which depth pixels are trustworthy. It sets apart Laug from naive depth losses by ignoring unreliable estimates. Choose when input views are sparse and monocular depth is noisy. [Reliable Depth Estimation via Reprojection](7293-reliable-depth-estimation-via-reprojection.md)
+ 
+ ## Operating characteristics
+-*   **Time Complexity:** $O(N)$ where $N$ is the number of pixels in the rendered depth map, assuming constant-time depth estimation and mask application.
+-*   **Memory Complexity:** $O(N)$ to store intermediate depth maps and masks.
+-*   **Performance:** Experiments on TensoRF-DS showed minimal PSNR improvement (0.01) over non-depth supervised methods with low data [S1, unofficial].
+-*   **Strengths:** Provides geometric regularization when color cues are ambiguous or sparse.
+-*   **Limitations:** Ineffective when depth estimates are unreliable or sparse; gradients are localized to a small subset of the scene [S1, unofficial].
+-*   **When to use:** When monocular depth estimates are available and reliable masks can be computed.
+-*   **When not to use:** When data is extremely sparse and depth estimates are noisy, as the loss may not provide significant benefit [S1, unofficial].
++- Time and memory complexity: Linear in the number of pixels $H \times W$. The stop-gradient operation adds negligible overhead.
++- Measured performance: Effective in regularizing NeRF, TensoRF, and ZipNeRF under sparse input conditions [S1].
++- Scaling: Scales linearly with resolution.
++- Strengths: Stabilizes training by preventing gradient flow into unreliable depth estimates.
++- Limitations: Depends entirely on the quality of the reliability masks.
++- When to use: Sparse input view reconstruction where monocular depth is available but noisy.
++- When not: Dense input views where depth supervision is less critical.
+ 
+ ## Background
+-The Depth Supervision Loss ($L_{aug}$) was introduced in the context of regularizing sparse input radiance fields. It is part of the "Simple-RF" framework [S2]. The approach was evaluated in "Low-Cost Neural Radiance Fields" [S1, unofficial], where it was applied to TensoRF. The method addresses the challenge of optimizing radiance fields with limited input views by leveraging external depth priors.
++Originated in "Simple-RF: Regularizing Sparse Input Radiance Fields with Simpler Solutions" by [S1]. It is part of a family of augmentations for simple radiance fields to handle sparse inputs.
+ 
+ ## Sources
+-[S1] Low-Cost Neural Radiance Fields, https://doi.org/10.48550/arxiv.2605.09312, fetched 2026-10-26 (unofficial)
+-[S2] Simple-RF: Regularizing Sparse Input Radiance Fields with Simpler Solutions, https://arxiv.org/abs/2404.19015v5, fetched 2026-10-27+[S1] Simple-RF: Regularizing Sparse Input Radiance Fields with Simpler Solutions, https://arxiv.org/abs/2404.19015v5, fetched 2026-10-27

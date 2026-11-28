@@ -1,0 +1,147 @@
+--- v001.md
++++ v002.md
+@@ -4,11 +4,11 @@
+ 
+ ## Overview
+-Silhouette Loss provides boundary supervision for differentiable volume rendering by penalizing discrepancies between predicted surface probabilities and ground-truth image masks. It ensures that the rendered alpha channel aligns with the object's silhouette, preventing geometric artifacts and providing warm-start supervision for fine-grained geometry [S1, S2]. It is distinct from photometric losses (e.g., MSE) by operating on the alpha channel rather than RGB values, and from depth losses by focusing on binary boundary presence rather than metric distance [S2].
++Silhouette Loss provides boundary supervision for differentiable volume rendering by penalizing discrepancies between predicted surface probabilities and ground-truth image masks [S1, S2]. It ensures that the rendered alpha channel aligns with the object's silhouette, preventing geometric artifacts and providing warm-start supervision for fine-grained geometry [S1].
+ 
+ ## How it works
+ **Inputs and Outputs:**
+ - **Inputs:**
+-  - $m$: Ground-truth binary image mask, where $m_{ij} \in \{0, 1\}$ for pixel $(i,j)$ [S2].
+-  - $\sigma$: Predicted ray hit probability (alpha value) from the differentiable volume rendering (DDF) model [S2].
++  - $m$: Ground-truth binary image mask, where $m \in \{0, 1\}$ [S2].
++  - $\sigma$: Predicted ray hit probability from the differentiable volume rendering (DDF) model [S2].
+   - $s$: Predicted signed distance field (SDF) value at the ray intersection point [S2].
+   - $\tau$: Truncation distance parameter for the SDF model [S2].
+@@ -17,88 +17,71 @@
+ 
+ **Data Structures:**
+-- Masks and probabilities are typically stored as 2D tensors of shape $(H, W)$ with floating-point precision [S2].
++- Masks, probabilities, and SDF values are stored as per-pixel tensors or arrays matching the image resolution [S2].
+ 
+ **Method:**
+-The loss combines two terms: a binary cross-entropy term for the alpha channel and a truncation-based term for the SDF. The core intuition is that where rays hit the surface (high $\sigma$), the SDF $s$ should be low (near zero or negative), and where rays do not hit (low $\sigma$), the SDF $s$ should be high (positive and large) [S2].
++The loss enforces boundary constraints by combining mask supervision and SDF supervision [S2]. The core intuition is that where rays hit the surface, the SDF must be as low as possible, and where rays do not hit, the SDF must be high [S2]. The exact mathematical formulation (referenced as Eq. (8) in the source) is not provided in the available text [S2]. The implementation follows these steps:
+ 
+-1. **Alpha Term:** Compute the binary cross-entropy between the predicted probability $\sigma$ and the mask $m$.
+-   $$ L_{\alpha} = - \left[ m \log(\sigma + \epsilon) + (1 - m) \log(1 - \sigma + \epsilon) \right] $$
+-   Where $\epsilon$ is a small constant for numerical stability [G].
+-
+-2. **SDF Term:** Compute the penalty based on the predicted SDF $s$ relative to the truncation distance $\tau$. The loss penalizes non-zero SDF values where the ray hits the surface and zero SDF values where it does not. A common formulation (derived from the description in [S2]) is:
+-   $$ L_{sdf} = \max(0, s - \tau)^2 \cdot (1 - m) + \max(0, -s - \tau)^2 \cdot m $$
+-   *Note: The exact formula for the SDF term is not explicitly written as an equation in the provided text, but the logic "where rays hit, SDF must be low; where rays don't, SDF must be high" implies a truncation loss. The standard DDF silhouette loss often uses a truncated linear or quadratic loss. We assume a quadratic truncation loss here based on standard practices in DDF literature cited in [S2]. If the source implies a simpler linear constraint, the implementation should adjust accordingly. However, [S2] explicitly references "Eq. (8)" for $L_\sigma$, which is not provided. We define $L_\sigma$ as the sum of the alpha and SDF components.*
+-
+-   A more precise interpretation of [S2] suggests $L_\sigma$ is defined in Eq. (8). Since Eq. (8) is missing, we describe the components:
+-   - If $m=1$ (hit): Encourage $s \approx 0$ (or $s < \tau$).
+-   - If $m=0$ (no hit): Encourage $s > \tau$.
+-
+-3. **Total Loss:**
+-   $$ L_\sigma = L_{\alpha} + \lambda L_{sdf} $$
+-   Where $\lambda$ is a weighting factor [G].
++1. **Mask Discrepancy:** Compute the difference between the predicted hit probability $\sigma$ and the ground-truth mask $m$.
++2. **SDF Boundary Penalty:** Apply a truncation-based penalty to the predicted SDF $s$ relative to $\tau$. If $m=1$ (hit), penalize $s$ when it exceeds $\tau$. If $m=0$ (no hit), penalize $s$ when it falls below $-\tau$ [S2].
++3. **Aggregation:** Sum the mask discrepancy and SDF penalty across all pixels to produce $L_\sigma$ [S2].
+ 
+ **Parameters:**
+ - $\tau$: Truncation distance. Typical values depend on the scene scale [S2].
+-- $\lambda$: Weight for the SDF term. Not given in the sources [S2].
++- Weights for combining the mask and SDF terms are not specified in the sources [S2].
+ 
+ **Edge Cases and Pitfalls:**
+-- **Precision:** $\sigma$ must be clamped to $[\epsilon, 1-\epsilon]$ to avoid $\log(0)$ [G].
+-- **Degenerate Input:** If the mask $m$ is all zeros or all ones, the gradient signal may vanish or become unstable without proper weighting [G].
++- **Precision:** $\sigma$ must be clamped to a valid probability range to avoid numerical instability during differentiation [G].
++- **Degenerate Input:** Uniform masks (all zeros or all ones) may reduce gradient signal without proper weighting [G].
+ - **Artifacts:** Without this loss, models suffer from artifacts around the performance due to lack of boundary supervision [S1].
+ 
+ **Pseudocode:**
+ ```python
+-def silhouette_loss(mask, sigma, sdf, tau, epsilon=1e-7):
++def silhouette_loss(mask, sigma, sdf, tau):
+     """
+     Computes the Silhouette Loss for DDF.
+     
+     Args:
+-        mask (Tensor): Ground truth binary mask, shape (H, W), values in {0, 1}.
+-        sigma (Tensor): Predicted ray hit probability, shape (H, W), values in [0, 1].
+-        sdf (Tensor): Predicted signed distance, shape (H, W).
++        mask (list of lists): Ground truth binary mask, values in {0, 1}.
++        sigma (list of lists): Predicted ray hit probability, values in [0, 1].
++        sdf (list of lists): Predicted signed distance.
+         tau (float): Truncation distance for the SDF model.
+-        epsilon (float): Small constant for numerical stability.
+         
+     Returns:
+-        Tensor: Scalar loss value.
++        float: Scalar loss value L_sigma.
+     """
+-    # Clamp sigma for log stability
+-    sigma_clamped = torch.clamp(sigma, min=epsilon, max=1 - epsilon)
++    # Note: The exact formula for L_sigma (Eq. 8) is not provided in the sources [S2].
++    # This implementation follows the described logic: penalize discrepancies between
++    # hit probability and mask, and enforce SDF bounds relative to tau.
+     
+-    # Alpha term: Binary Cross Entropy
+-    # L_alpha = - [m * log(sigma) + (1 - m) * log(1 - sigma)]
+-    bce = -(mask * torch.log(sigma_clamped) + (1 - mask) * torch.log(1 - sigma_clamped))
+-    loss_alpha = torch.mean(bce)
++    total_loss = 0.0
++    count = 0
+     
+-    # SDF term: Truncation loss
+-    # Logic: Where m=1, sdf should be low (near 0). Where m=0, sdf should be high (> tau).
+-    # Standard DDF loss formulation (inferred from [S2] description):
+-    # If m=1: penalize sdf if sdf > tau (should be near 0)
+-    # If m=0: penalize sdf if sdf < -tau (should be positive and large)
+-    # Note: The exact formula from Eq. (8) is not provided. This is a standard implementation.
+-    
+-    # Term 1: Penalize positive SDF where mask is 1 (surface should be at 0)
+-    # Using a truncated linear or quadratic loss. Quadratic is common.
+-    sdf_hit = torch.relu(sdf - tau) # Penalize if sdf > tau
+-    sdf_hit = sdf_hit * mask
+-    
+-    # Term 2: Penalize negative SDF where mask is 0 (surface should be far away)
+-    sdf_miss = torch.relu(-sdf - tau) # Penalize if sdf < -tau
+-    sdf_miss = sdf_miss * (1 - mask)
+-    
+-    loss_sdf = torch.mean(sdf_hit**2 + sdf_miss**2)
+-    
+-    # Combine losses
+-    # Weighting factor lambda is not specified in sources
+-    loss = loss_alpha + loss_sdf
+-    
+-    return loss
++    for i in range(len(mask)):
++        for j in range(len(mask[0])):
++            m = mask[i][j]
++            s = sigma[i][j]
++            d = sdf[i][j]
++            
++            # Mask discrepancy term
++            alpha_term = abs(s - m)
++            
++            # SDF boundary penalty term
++            # Where hit (m=1), encourage low SDF (penalize if d > tau)
++            # Where miss (m=0), encourage high SDF (penalize if d < -tau)
++            if m == 1:
++                sdf_term = max(0.0, d - tau)
++            else:
++                sdf_term = max(0.0, -d - tau)
++                
++            total_loss += alpha_term + sdf_term
++            count += 1
++            
++    return total_loss / count
+ ```
+ 
+ ## Operating characteristics
+-- **Time Complexity:** $O(N)$ where $N$ is the number of pixels, as it involves element-wise operations [S2].
+-- **Memory Complexity:** $O(N)$ for storing intermediate tensors [S2].
++- **Time and Memory Complexity:** Not given in the sources.
+ - **Strengths:** Essential for modeling fine-grained geometry; prevents artifacts around boundaries [S1].
+-- **Limitations:** Requires ground-truth masks; does not enforce photometric consistency [S2].
++- **Limitations:** Requires ground-truth masks [S2].
+ - **When to use:** When training differentiable volume rendering models that predict SDFs and alpha values, especially when geometric accuracy at boundaries is critical [S1, S2].
+ 

@@ -1,0 +1,142 @@
+# Intensity Interpolation
+
+Also called: Anisotropic Volume Rendering Using Intensity Interpolation
+
+## Overview
+Intensity Interpolation is an anisotropic volume rendering technique that computes the lighting intensity at a sample position between two consecutive slices by linearly interpolating the pre-computed intensity values of the voxels in those slices, rather than interpolating density values and recalculating normals for every sample [S1]. It is designed specifically for medical datasets where axial resolution is significantly higher than the resolution in the perpendicular (slice) direction, offering a speedup over density-interpolation methods without the storage overhead of pre-interpolated slices [S1].
+
+## How it works
+**Inputs and Outputs:**
+*   **Input:** A 3D volume dataset with anisotropic resolution (high in $X,Y$, low in $Z$); a lighting model (ambient and diffuse); light vector $L$.
+*   **Output:** Rendered image with intensity values for samples located between original voxel slices.
+
+**Data Structures:**
+*   **Original Voxels:** Stored in a 3D grid. Each voxel $v$ has a density value $d(v)$ and a pre-computed normal vector $N(v)$.
+*   **Normals:** Normal vectors are computed only for the original voxels in the dataset. No normals are stored for interpolated positions.
+*   **Storage:** The method requires no extra memory for interpolated slices, maintaining the same storage size as the original anisotropic data [S1].
+
+**Parameters:**
+*   $m$: Interpolation weight ($0 \le m \le 1$) representing the position of the sample $v_i$ between voxel $v_k$ (slice $k$) and $v_{k+1}$ (slice $k+1$). The distance is divided as $m : (1-m)$ [S1].
+*   $K_a$: Ambient reflection coefficient.
+*   $I_a$: Ambient-light intensity.
+*   $K_d$: Diffuse-reflection coefficient.
+*   $L$: Light vector.
+*   $\lambda$: Wavelength or scaling factor used in conventional normal calculation (contextual constant) [S1].
+
+**Method Steps:**
+1.  **Pre-computation:** For every original voxel $v$ in the anisotropic volume, compute the normal vector $N(v)$ based on its density neighbors. Compute the intensity $I(v)$ using the lighting equation:
+    $$I(v) = K_a I_a + K_d (L \cdot N(v))$$
+    Store $I(v)$ for each original voxel. [S1]
+
+2.  **Ray Casting:** Cast rays through the volume. When a sample point $v_i$ falls between two adjacent slices $k$ and $k+1$ (specifically between voxel $v_k$ in slice $k$ and $v_{k+1}$ in slice $k+1$), determine the interpolation weight $m$ based on the sample's position relative to the slices [S1].
+
+3.  **Intensity Interpolation:** Calculate the intensity $I(v_i)$ at the sample position $v_i$ by linearly interpolating the pre-computed intensities of the two voxels:
+    $$I(v_i) = I(v_k)(1 - m) + I(v_{k+1})m$$
+    [S1]
+
+**Mathematical Equivalence:**
+The method relies on the linearity of the diffuse lighting equation. Substituting the lighting equation into the interpolation formula proves that the interpolated intensity is equivalent to calculating intensity from an interpolated normal $\tilde{N}(v_i)$:
+$$
+\begin{aligned}
+I(v_i) &= (K_a I_a + K_d (L \cdot N(v_k)))(1 - m) + (K_a I_a + K_d (L \cdot N(v_{k+1})))m \\
+&= K_a I_a (1 - m + m) + K_d L \cdot (N(v_k)(1 - m) + N(v_{k+1})m) \\
+&= K_a I_a + K_d (L \cdot \tilde{N}(v_i))
+\end{aligned}
+$$
+where the interpolated normal is:
+$$\tilde{N}(v_i) = N(v_k)(1 - m) + N(v_{k+1})m$$
+[ S1 ]
+
+**Normal Vector Comparison:**
+The normal vector along the Z-axis for the interpolated sample using this method is:
+$$\tilde{N}_Z(v_i) = N_Z(v_k)(1 - m) + N_Z(v_{k+1})m$$
+In contrast, the conventional method references more samples (e.g., $v_{k-1}, v_k, v_{k+1}, v_{k+2}$) to calculate the normal, often using a formula such as:
+$$N_Z(v_i) = \frac{(d(v_{k+1}) - d(v_{k-1}))(1 - m) + (d(v_{k+2}) - d(v_k))m}{2\lambda}$$
+The intensity interpolation method uses fewer samples for normal estimation, resulting in smoother images but potentially different high-frequency behavior [S1].
+
+**Pseudocode:**
+> **Unverified code.** The code below did not pass a test run against a reference implementation, or no test fits it, so it may contain errors.
+
+```python
+def compute_intensity_interpolation(v_k, v_k_plus_1, m, K_a, I_a, K_d, L):
+    """
+    Computes the intensity at an interpolated sample position between two voxels.
+    
+    Args:
+        v_k: Voxel object from slice k. Must have pre-computed intensity I(v_k)
+             and normal N(v_k).
+        v_k_plus_1: Voxel object from slice k+1. Must have pre-computed intensity I(v_k_plus_1)
+                     and normal N(v_k_plus_1).
+        m: Interpolation weight (0 to 1).
+        K_a: Ambient reflection coefficient.
+        I_a: Ambient light intensity.
+        K_d: Diffuse reflection coefficient.
+        L: Light vector.
+        
+    Returns:
+        float: The interpolated intensity value I(v_i).
+    """
+    # Step 1: Linearly interpolate the pre-computed intensities
+    # I(v_i) = I(v_k)(1 - m) + I(v_k+1)m
+    intensity_interpolated = v_k.intensity * (1 - m) + v_k_plus_1.intensity * m
+    
+    return intensity_interpolated
+
+def precompute_voxel_data(voxel):
+    """
+    Pre-computes intensity and normal for an original voxel.
+    This step is performed once per original voxel in the anisotropic volume.
+    """
+    # Compute normal N(v) from density neighbors
+    # Note: Specific density-based normal calculation is not detailed in the source
+    # for the general case, but the source implies N(v) is computed for original voxels.
+    # [G] Assuming a standard gradient-based normal calculation from density d(v)
+    # is performed here to get N(v).
+    normal = compute_normal_from_density(voxel.density, voxel.neighbors)
+    
+    # Compute intensity using the lighting model
+    # I(v) = K_a * I_a + K_d * (L . N(v))
+    dot_product = dot(L, normal)
+    intensity = K_a * I_a + K_d * dot_product
+    
+    voxel.normal = normal
+    voxel.intensity = intensity
+```
+
+**Edge Cases and Pitfalls:**
+*   **Overblurring:** The method may cause overblurring in high-frequency areas. This is noted as a limitation, with the authors stating they are extending the approach to avoid it [S1].
+*   **Anisotropy Assumption:** The method assumes the anisotropy is primarily along the Z-axis (slice direction). It is not designed for isotropic data or anisotropy in other directions without modification [S1].
+
+## Operating characteristics
+**Time and Memory Complexity:**
+*   **Memory:** The method requires no extra storage for interpolated slices, maintaining the same storage size as the original anisotropic data (e.g., 71.8 MB for airway data) [S1]. This is significantly less than pre-interpolation methods (P-Interp), which require 240.8 MB for the same data [S1].
+*   **Preprocessing:** No preprocessing time is required for interpolation, unlike P-Interp which took 12,684 ms for airway data [S1].
+*   **Rendering Speed:** The method is faster than real-time density interpolation (R-Interp). On an 800 MHz Pentium III PC with 512 MB RAM:
+    *   Colon data (512x512x141): 1.46x speedup with 0.6M samples, 1.68x with 8.1M samples, and 1.83x with 13.3M samples compared to R-Interp [S1].
+    *   Airway data: Average rendering time of 1108 ms, compared to 1486 ms for P-Interp and 1513 ms for R-Interp [S1].
+
+**Strengths and Limitations:**
+*   **Strengths:** Fast rendering speed; no extra memory for interpolated slices; no preprocessing time; simpler normal calculation for interpolated samples (only uses two adjacent slices) [S1].
+*   **Limitations:** Potential overblurring in high-frequency areas; limited to anisotropic data with high axial resolution [S1].
+
+**When to Use:**
+*   Use for medical applications with anisotropic volume datasets where the resolution in the axial plane is higher than in the perpendicular direction [S1].
+*   Use when memory and preprocessing time are constraints, and real-time or near-real-time rendering is needed [S1].
+
+**When Not to Use:**
+*   Do not use for isotropic data where the method's assumptions about anisotropy do not hold.
+*   Avoid if high-frequency detail preservation is critical and the overblurring limitation is unacceptable [S1].
+
+## Background
+**Origin:**
+The method was proposed by T. Kim, Y. Shin, and B. Shin from Seoul National University and Inha University, Korea [S1]. It was published in the paper "Anisotropic Volume Rendering Using Intensity Interpolation" in 2003 [S1].
+
+**History and Development:**
+The method was developed to address the inefficiency of conventional density interpolation methods for anisotropic medical data. Conventional methods require computing density values and normal vectors for every interpolated sample, which is computationally expensive. The intensity interpolation method simplifies this by pre-computing intensities for original voxels and interpolating those values directly [S1].
+
+**Usage:**
+The method is primarily used in medical imaging applications for visualizing anisotropic volume data sets, such as CT scans where slice thickness is greater than in-plane resolution [S1].
+
+## Sources
+
+[S1] Anisotropic Volume Rendering Using Intensity Interpolation, https://doi.org/10.1007/3-540-45468-3_163, fetched 2026-10-26

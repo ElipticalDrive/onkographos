@@ -1,0 +1,458 @@
+--- v001.md
++++ v002.md
+@@ -4,85 +4,88 @@
+ 
+ ## Overview
+-This method provides an explicit, non-recursive analytical derivation of gradients for differentiable global illumination within the 3D Gaussian Splatting framework [S1]. It solves the problem of efficiently computing derivatives of the loss function with respect to scene geometry, materials, and lighting by establishing a duality between the forward light transport pass and the backward gradient propagation pass [S1]. Unlike standard automatic differentiation or path replay backpropagation [Vicini et al. 2021, cited in S1], this approach yields accurate, closed-form solutions that avoid the computational overhead of recursive gradient tracing [S1].
++This method computes the analytical gradients of a loss function $\mathcal{L}$ with respect to the underlying geometry, materials, and lighting conditions of a scene represented by 3D Gaussian surfels. It solves the problem of efficiently backpropagating through the global illumination (light transport) solver used in differentiable rendering. Unlike automatic differentiation techniques such as path replay backpropagation, this method exploits the duality between the forward pass (light propagation) and the backward pass (gradient propagation), allowing for non-recursive, accurate, and efficient analytical definitions of gradients for emissions, materials, and geometry [S1].
+ 
+ ## How it works
+-The method computes gradients for three categories of parameters: emissions, material coefficients (BRDF), and geometric properties. It relies on the output of the forward differentiable tile-based rasterizer, specifically the partial derivative of the loss $\mathcal{L}$ with respect to the calculated outgoing radiance $\mathbf{B}_i^c$ for each surfel $i$ [S1].
++The method derives gradients by differentiating the radiosity equation with respect to the scene parameters. It relies on the output of the forward pass, specifically the outgoing radiance $\mathbf{B}_i^c$ and the visibility/decay terms $V_{ij}$, to compute gradients with respect to emissions $\mathbf{E}_i^c$, BRDF coefficients $\mathbf{f}_i^c$, and geometric properties $\beta_i$.
+ 
+ ### Inputs and Outputs
+-**Inputs:**
+-*   $\mathcal{L}$: The scalar loss function.
+-*   $\frac{\partial \mathcal{L}}{\partial \mathbf{B}_i^c}$: The gradient of the loss with respect to the outgoing radiance of surfel $i$, obtained from the forward pass [S1].
+-*   $\mathbf{E}_i^c$: The emission vector of surfel $i$.
+-*   $\mathbf{f}_i^c$: The material coefficient (BRDF) vector of surfel $i$.
+-*   $\beta_i$: A geometric property of surfel $i$ (e.g., position $\mathbf{p}_i$, scaling $\mathbf{S}_i$, or rotation $\mathbf{T}_i$) [S1].
+-*   $V_{ij}$: The visibility/decay term between surfel $i$ and surfel $j$ [S1].
+-*   $\mathbf{Y}(\omega_l)$: The spherical harmonic basis vector for direction $\omega_l$ [S1].
+-*   $P_i, P_j$: The surface patches associated with surfels $i$ and $j$ [S1].
+-*   $s_i^u$: A scaling factor associated with surfel $i$ [S1].
+-
+-**Outputs:**
+-*   $\frac{\partial \mathcal{L}}{\partial \mathbf{E}_i^c}$: Gradient w.r.t. emission.
+-*   $\frac{\partial \mathcal{L}}{\partial \mathbf{f}_i^c}$: Gradient w.r.t. material coefficients.
+-*   $\frac{\partial \mathcal{L}}{\partial \beta_i}$: Gradient w.r.t. geometry.
++*   **Inputs:**
++    *   Loss gradient w.r.t. outgoing radiance: $\frac{\partial \mathcal{L}}{\partial \mathbf{B}_i^c}$ for each surfel $i$, obtained from the differentiable tile-based rasterizer [S1].
++    *   Scene parameters: Emissions $\mathbf{E}_i^c$, BRDF coefficients $\mathbf{f}_i^c$, geometric properties $\beta_i$ (e.g., position $\mathbf{p}_i$, scaling $\mathbf{S}_i$, rotation $\mathbf{T}_i$) [S1].
++    *   Forward pass results: Outgoing radiance $\mathbf{B}_i^c$, visibility/decay terms $V_{ij}$, and spherical harmonic coefficients $\mathbf{Y}(\omega_l)$ [S1].
++    *   Visibility pairs: A list of kernel pairs $(a, b)$ or $(i, j)$ that are visible to each other, recorded during the forward pass [S1].
++*   **Outputs:**
++    *   Gradients $\frac{\partial \mathcal{L}}{\partial \mathbf{E}_i^c}$, $\frac{\partial \mathcal{L}}{\partial \mathbf{f}_i^c}$, and $\frac{\partial \mathcal{L}}{\partial \beta_i}$ for all surfels $i$ [S1].
+ 
+ ### Data Structures
+-The implementation requires caching specific quantities within the surfel data structures during the forward pass to prevent redundant computation in the backward pass [S1].
+-*   **Visibility Cache:** A list or adjacency structure recording pairs of kernels $(a, b)$ that are visible to each other (i.e., $V_{ab} \neq 0$) [S1].
+-*   **Radiance Cache:** The outgoing radiance $\mathbf{B}_i^c$ for each surfel [S1].
+-*   **Emission Cache:** The emission $\mathbf{E}_i^c$ for each surfel [S1].
++*   **Surfel Data:** Each surfel $i$ stores:
++    *   $\mathbf{E}_i^c$: Emission vector.
++    *   $\mathbf{f}_i^c$: BRDF coefficient vector.
++    *   $\mathbf{B}_i^c$: Computed outgoing radiance vector.
++    *   $\mathbf{Y}(\omega_l)$: Spherical harmonic coefficients for direction $\omega_l$.
++    *   $\beta_i$: Geometric property to differentiate (scalar or vector depending on the property).
++*   **Visibility Cache:** A list or adjacency structure recording pairs of surfels $(a, b)$ where $V_{ab} > 0$. This is generated during the forward light transport pass [S1].
+ 
+ ### Formulas and Definitions
+-
+-**1. Gradient with respect to Emissions**
+-The gradient with respect to emission $\mathbf{E}_i^c$ is derived as [S1]:
+-
+-$$
+-\frac{\partial \mathcal{L}}{\partial \mathbf{E}_i^c} = \frac{\partial \mathcal{L}}{\partial \mathbf{B}_i^c} + \frac{1}{\mathbf{f}_i^c} \sum_{j=1}^N \int_{P_i} \int_{P_j} \mathbf{f}_i(\omega_l) \left( \mathbf{Y}(\omega_l)^T \left( \mathbf{f}_j^c \times \frac{\partial \mathcal{L}}{\partial \mathbf{E}_j^c} \right) \right) \overline{V}_{ji} \, d\mathbf{x}' \, d\mathbf{x}
+-$$
+-
+-where $\overline{V}_{ji} = V_{ij}$ [S1]. This equation demonstrates that the emission gradient propagation resembles a forward pass, propagating gradients instead of emissions [S1].
+-
+-**2. Gradient with respect to Materials (BRDF Coefficients)**
+-The gradient with respect to the material coefficient $\mathbf{f}_i^c$ is given by the closed-form solution [S1]:
+-
+-$$
+-\frac{\partial \mathcal{L}}{\partial \mathbf{f}_i^c} = \frac{\partial \mathcal{L}}{\partial \mathbf{E}_i^c} \times \frac{(\mathbf{B}_i^c - \mathbf{E}_i^c)}{\mathbf{f}_i^c}
+-$$
+-
+-This formula is analytical, non-recursive, and accurate [S1].
+-
+-**3. Gradient with respect to Geometry**
+-Geometric gradients $\frac{\partial \mathcal{L}}{\partial \beta_i}$ are split into two components: those arising from the decay term $V$ and those from directional effects.
+-
+-*From the Decay Term:*
+-$$
+-\frac{\partial \mathcal{L}}{\partial \beta_i} = \sum_{a=1}^N \sum_{b=1}^N \int_{P_b} \int_{P_a} \frac{\left( \overline{\mathbf{Y}}^T \left( \mathbf{f}_b^c \times \frac{\partial \mathcal{L}}{\partial \mathbf{E}_b^c} \right) \right) \left( \mathbf{Y}^T \mathbf{B}_a^c \right)}{s_a^u s_a^u s_b^u s_b^u} \frac{\partial (V_{ab} s_a^u s_a^u s_b^u)}{\partial \beta_i} \, d\mathbf{x}' \, d\mathbf{x}
+-$$
+-
+-*From Directional Effects:*
+-$$
+-\begin{aligned}
+-\frac{\partial \mathcal{L}}{\partial \beta_i} = & \sum_{j=1}^N \int_{P_i} \int_{P_j} \left[ V_{ji} (\mathbf{Y}^T \mathbf{B}_j^c) \left( \mathbf{f}_i^c \times \frac{\partial \mathcal{L}}{\partial \mathbf{E}_i^c} \right) \right]^T \bar{\mathbf{Y}}'(\omega_I) \frac{\partial \omega_I}{\partial \beta_i} \, d\mathbf{x}' \, d\mathbf{x} \\
+-& + \sum_{j=1}^N \int_{P_j} \int_{P_i} \left[ \bar{V}_{ji} \left( \bar{\mathbf{Y}}^T \left( \mathbf{f}_j^c \times \frac{\partial \mathcal{L}}{\partial \mathbf{E}_j^c} \right) \right) \mathbf{B}_i^c \right]^T \mathbf{Y}'(\omega_I) \frac{\partial \omega_I}{\partial \beta_i} \, d\mathbf{x}' \, d\mathbf{x}
+-\end{aligned}
+-$$
+-
+-where $\beta_i$ represents the geometric property being differentiated [S1].
++Let $N$ be the number of surfels. Let $P_i$ denote the surface area of surfel $i$. Let $\mathbf{Y}(\omega_l)$ be the spherical harmonic basis vector for direction $\omega_l$. Let $\overline{V}_{ji} = V_{ij}$ be the visibility from $j$ to $i$ [S1].
++
++1.  **Gradient w.r.t. Emissions:**
++    The gradient with respect to the emission of surfel $i$ is given by:
++    $$
++    \frac{\partial \mathcal{L}}{\partial \mathbf{E}_i^c} = \frac{\partial \mathcal{L}}{\partial \mathbf{B}_i^c} + \frac{1}{\mathbf{f}_i^c} \sum_{j=1}^N \int_{P_i} \int_{P_j} \mathbf{f}_i(\omega_l) \left( \mathbf{Y}(\omega_l)^T \left( \mathbf{f}_j^c \times \frac{\partial \mathcal{L}}{\partial \mathbf{E}_j^c} \right) \right) \overline{V}_{ji} \, d\mathbf{x}' \, d\mathbf{x}
++    $$
++    where $\overline{V}_{ji} = V_{ij}$ [S1].
++    *Note: This equation resembles the forward pass equation but propagates gradients instead of emissions. The term $\frac{\partial \mathcal{L}}{\partial \mathbf{E}_j^c}$ on the right-hand side implies a dependency on other emission gradients, but the method treats this as a non-recursive analytical definition by solving the system or using the duality property [S1]. In practice, the summation iterates over all $j$, but only visible pairs contribute significantly.*
++
++2.  **Gradient w.r.t. Materials (BRDF Coefficients):**
++    The gradient with respect to the BRDF coefficient of surfel $i$ is:
++    $$
++    \frac{\partial \mathcal{L}}{\partial \mathbf{f}_i^c} = \frac{\partial \mathcal{L}}{\partial \mathbf{E}_i^c} \times \frac{(\mathbf{B}_i^c - \mathbf{E}_i^c)}{\mathbf{f}_i^c}
++    $$
++    This is a closed-form solution derived from the relationship $\mathbf{B}^c = \mathbf{E}^c + \mathbf{f}^c \cdot (\dots)$ [S1].
++
++3.  **Gradient w.r.t. Geometry from Decay Term:**
++    For a geometric property $\beta_i$ (e.g., $\mathbf{p}_i, \mathbf{S}_i, \mathbf{T}_i$), the contribution from the decay term $V$ is:
++    $$
++    \frac{\partial \mathcal{L}}{\partial \beta_i} = \sum_{a=1}^N \sum_{b=1}^N \int_{P_b} \int_{P_a} \frac{\left( \overline{\mathbf{Y}}^T \left( \mathbf{f}_b^c \times \frac{\partial \mathcal{L}}{\partial \mathbf{E}_b^c} \right) \right) \left( \mathbf{Y}^T \mathbf{B}_a^c \right)}{s_a^u s_a^u s_b^u s_b^u} \frac{\partial (V_{ab} s_a^u s_a^u s_b^u)}{\partial \beta_i} \, d\mathbf{x}' \, d\mathbf{x}
++    $$
++    where $s_a^u$ and $s_b^u$ are scaling factors related to the surfel geometry [S1].
++
++4.  **Gradient w.r.t. Geometry from Directional Effects:**
++    The contribution from directional effects is:
++    $$
++    \begin{aligned}
++    \frac{\partial \mathcal{L}}{\partial \beta_i} = & \sum_{j=1}^N \int_{P_i} \int_{P_j} \left[ V_{ji} (\mathbf{Y}^T \mathbf{B}_j^c) \left( \mathbf{f}_i^c \times \frac{\partial \mathcal{L}}{\partial \mathbf{E}_i^c} \right) \right]^T \bar{\mathbf{Y}}'(\omega_I) \frac{\partial \omega_I}{\partial \beta_i} \, d\mathbf{x}' \, d\mathbf{x} \\
++    & + \sum_{j=1}^N \int_{P_j} \int_{P_i} \left[ \bar{V}_{ji} \left( \bar{\mathbf{Y}}^T \left( \mathbf{f}_j^c \times \frac{\partial \mathcal{L}}{\partial \mathbf{E}_j^c} \right) \right) \mathbf{B}_i^c \right]^T \mathbf{Y}'(\omega_I) \frac{\partial \omega_I}{\partial \beta_i} \, d\mathbf{x}' \, d\mathbf{x}
++    \end{aligned}
++    $$
++    where $\omega_I$ is the incident direction, and $\mathbf{Y}'(\omega_I)$ is the derivative of the spherical harmonic basis with respect to $\omega_I$ [S1].
++
++### Parameters
++*   $N$: Number of surfels.
++*   $\mathbf{f}_i^c$: BRDF coefficient. If $\mathbf{f}_i^c$ is zero, the division in the emission and material gradients is undefined. [G] Guard against division by zero by adding a small epsilon or skipping the term if $\mathbf{f}_i^c \approx 0$.
++*   $\beta_i$: Geometric property. The derivative $\frac{\partial (V_{ab} s_a^u s_a^u s_b^u)}{\partial \beta_i}$ and $\frac{\partial \omega_I}{\partial \beta_i}$ must be computed analytically based on the specific geometry parameter.
+ 
+ ### Pseudocode
+-The following Python-like pseudocode implements the gradient calculation. It assumes the forward pass has already computed $\mathbf{B}_i^c$, $\mathbf{E}_i^c$, and the visibility cache `visible_pairs`.
+-
+ ```python
+-def compute_gradients(surfels, loss_grad_B, visible_pairs):
++def compute_gradients(surfels, visibility_pairs, loss_grad_B):
+     """
+-    surfels: List of surfel objects with attributes:
+-             - id: int
+-             - E_c: np.array (emission)
+-             - f_c: np.array (material coeff)
+-             - B_c: np.array (outgoing radiance from forward pass)
+-             - p, S, T: geometric properties (for derivative calculation)
+-             - patches: List of surface patch objects for integration
+-    loss_grad_B: Dict mapping surfel_id -> np.array (gradient of loss w.r.t B_c)
+-    visible_pairs: List of tuples (a_id, b_id) where V_ab != 0
++    Computes gradients for emissions, materials, and geometry.
++    
++    Args:
++        surfels: List of surfel objects, each containing:
++            - id: int
++            - E: emission vector
++            - f: BRDF coefficient vector
++            - B: outgoing radiance vector
++            - Y: spherical harmonic coefficients
++            - p, S, T: geometry parameters (position, scale, rotation)
++        visibility_pairs: List of tuples (a, b) where surfel a is visible to surfel b.
++        loss_grad_B: Dictionary mapping surfel id to gradient w.r.t. outgoing radiance.
++    
++    Returns:
++        grads_E: Dictionary mapping surfel id to gradient w.r.t. emission.
++        grads_f: Dictionary mapping surfel id to gradient w.r.t. BRDF.
++        grads_geom: Dictionary mapping surfel id to gradient w.r.t. geometry.
+     """
+     N = len(surfels)
+@@ -90,150 +93,160 @@
+     
+     # Initialize gradients
+-    grad_E = {}
+-    grad_f = {}
+-    grad_beta = {}
+-    
+-    # 1. Compute Emission Gradients
+-    # Note: This is a system of equations due to the sum over j.
+-    # However, the source describes it as a non-recursive analytical definition
+-    # implying the structure allows direct computation or a specific ordering.
+-    # Based on Eq 17, we compute iteratively or via matrix solve if coupled.
+-    # For implementation clarity, we assume the source implies direct evaluation
+-    # where the RHS sum uses already computed grad_E_j. 
+-    # In practice, this might require solving a linear system or fixed-point iteration
+-    # if the dependency is cyclic, but the text emphasizes "non-recursive".
+-    # We implement the direct formula as stated.
+-    
+-    for i in range(N):
+-        surfel_i = surfels[i]
+-        id_i = surfel_i.id
++    grads_E = {s.id: torch.zeros_like(s.E) for s in surfels}
++    grads_f = {s.id: torch.zeros_like(s.f) for s in surfels}
++    grads_geom = {s.id: torch.zeros_like(s.p) for s in surfels} # Simplified for position
++    
++    # Step 1: Compute Gradients w.r.t. Emissions
++    # Eq. 17: dL/dE_i = dL/dB_i + (1/f_i) * sum_j (integral ... * V_ji)
++    # Note: The formula involves dL/dE_j on the RHS. The source states this is 
++    # non-recursive and analytical, implying we can compute it directly or 
++    # that the structure allows a forward-like propagation. 
++    # Based on the source, we iterate over all pairs.
++    
++    for i in surfels:
++        grads_E[i.id] = loss_grad_B[i.id]
+         
+-        # Base term from rasterizer
+-        term1 = loss_grad_B[id_i]
++        # Sum over all j
++        for j in surfels:
++            # Check visibility: V_ji = V_ij (source says V_bar_ji = V_ij)
++            # In practice, only visible pairs contribute.
++            if (j.id, i.id) in visibility_pairs or (i.id, j.id) in visibility_pairs:
++                # Compute integral term
++                # Integral over P_i and P_j of f_i(omega_l) * (Y(omega_l)^T * (f_j^c x dL/dE_j)) * V_ji
++                # Approximation: For Gaussian surfels, integrals are often evaluated analytically 
++                # or via Monte Carlo. Here we assume a pre-computed or simplified term.
++                
++                # Cross product and dot product
++                cross_term = torch.cross(j.f, grads_E[j.id])
++                dot_term = torch.dot(i.Y, cross_term) # Simplified Y representation
++                
++                # Visibility factor
++                V_ji = get_visibility(i, j) # V_ij from forward pass
++                
++                # Scaling factor 1/f_i
++                # Guard against division by zero
++                if torch.norm(i.f) > 1e-8:
++                    term = (1.0 / i.f) * dot_term * V_ji
++                    grads_E[i.id] += term
++                else:
++                    # [G] If f_i is zero, the term is undefined. 
++                    # In practice, this surfel does not reflect, so gradient might be zero or handled separately.
++                    pass
++
++    # Step 2: Compute Gradients w.r.t. Materials (BRDF)
++    # Eq. 18: dL/df_i = dL/dE_i * (B_i - E_i) / f_i
++    for i in surfels:
++        if torch.norm(i.f) > 1e-8:
++            grads_f[i.id] = grads_E[i.id] * (i.B - i.E) / i.f
++        else:
++            grads_f[i.id] = torch.zeros_like(i.f)
++
++    # Step 3: Compute Gradients w.r.t. Geometry
++    # From Decay Term (Eq. 19) and Directional Effects (Eq. 20)
++    
++    # Initialize geometry gradients
++    for i in surfels:
++        grads_geom[i.id] = torch.zeros_like(i.p)
+         
+-        # Summation term
+-        term2 = np.zeros_like(surfel_i.E_c)
+-        
+-        # Iterate over visible pairs involving i
+-        # The formula sums over j. We restrict to visible pairs for efficiency.
+-        for j in range(N):
+-            # Check if (i, j) or (j, i) is in visible_pairs to ensure V_ij != 0
+-            # The formula uses V_ji = V_ij.
+-            if (id_i, surfels[j].id) in visible_pairs or (surfels[j].id, id_i) in visible_pairs:
+-                surfel_j = surfels[j]
+-                id_j = surfel_j.id
+-                
+-                # Ensure grad_E_j is computed. 
+-                # If the dependency is cyclic, this simple loop fails.
+-                # The source states "non-recursive", suggesting the structure 
+-                # allows evaluation. We assume topological order or direct evaluation.
+-                if id_j not in grad_E:
+-                    # Fallback: if not computed, use initial guess or solve system.
+-                    # For this pseudocode, we assume we can access grad_E_j.
+-                    # In a real solver, this might be part of a larger linear solve.
+-                    pass 
+-                
+-                grad_E_j = grad_E.get(id_j, np.zeros_like(surfel_j.E_c))
+-                
+-                # Integral part: simplified as a scalar multiplier for pseudocode
+-                # Real implementation requires numerical integration over P_i and P_j
+-                integral_val = compute_integral_decay_term(surfel_i, surfel_j, grad_E_j)
+-                
+-                term2 += (1.0 / surfel_i.f_c) * integral_val
+-        
+-        grad_E[id_i] = term1 + term2
+-
+-    # 2. Compute Material Gradients
+-    for i in range(N):
+-        surfel_i = surfels[i]
+-        id_i = surfel_i.id
+-        
+-        grad_E_i = grad_E[id_i]
+-        # Eq 18: grad_f = grad_E * (B - E) / f
+-        grad_f[id_i] = grad_E_i * (surfels[i].B_c - surfel_i.E_c) / surfel_i.f_c
+-
+-    # 3. Compute Geometry Gradients
+-    for i in range(N):
+-        surfel_i = surfels[i]
+-        id_i = surfel_i.id
+-        grad_E_i = grad_E[id_i]
+-        
+-        # Part A: From Decay Term
+-        grad_decay = np.zeros_like(surfel_i.p) # Example for position
+-        for a_id, b_id in visible_pairs:
+-            surfel_a = surfel_map[a_id]
+-            surfel_b = surfel_map[b_id]
+-            
+-            # Check if i is involved in the pair (a or b)
+-            if a_id == id_i or b_id == id_i:
+-                # Compute integral and derivative of V term
+-                # Eq 19
+-                integral_val = compute_integral_decay_geometry(surfel_a, surfel_b, grad_E)
+-                dV_dbeta = compute_derivative_V(surfel_a, surfel_b, surfel_i)
+-                grad_decay += integral_val * dV_dbeta
+-                
+-        # Part B: From Directional Effects
+-        grad_dir = np.zeros_like(surfel_i.p)
+-        for j in range(N):
+-            surfel_j = surfels[j]
+-            id_j = surfel_j.id
+-            
+-            # Only compute if visible
+-            if (id_i, id_j) in visible_pairs or (id_j, id_i) in visible_pairs:
+-                grad_E_j = grad_E.get(id_j, np.zeros_like(surfel_j.E_c))
+-                
+-                # Eq 20, first term
+-                term1_dir = compute_integral_directional_1(surfel_i, surfel_j, grad_E_i)
+-                domega_dbeta = compute_derivative_direction(surfel_i, surfel_j, surfel_i)
+-                grad_dir += term1_dir * domega_dbeta
+-                
+-                # Eq 20, second term
+-                term2_dir = compute_integral_directional_2(surfel_i, surfel_j, grad_E_j)
+-                domega_dbeta_2 = compute_derivative_direction(surfel_i, surfel_j, surfel_j)
+-                grad_dir += term2_dir * domega_dbeta_2
+-                
+-        grad_beta[id_i] = grad_decay + grad_dir
+-
+-    return grad_E, grad_f, grad_beta
+-
+-def compute_integral_decay_term(surfel_i, surfel_j, grad_E_j):
+-    # Placeholder for the double integral in Eq 17
+-    # Returns: f_i(omega_l) * (Y(omega_l)^T (f_j^c x grad_E_j)) * V_ji
+-    return np.zeros_like(surfel_i.E_c)
+-
+-def compute_integral_decay_geometry(surfel_a, surfel_b, grad_E):
+-    # Placeholder for the double integral in Eq 19
+-    return 0.0
+-
+-def compute_derivative_V(surfel_a, surfel_b, surfel_i):
+-    # Placeholder for d(V_ab * s_a * s_b) / d(beta_i)
+-    return 0.0
+-
+-def compute_integral_directional_1(surfel_i, surfel_j, grad_E_i):
+-    # Placeholder for first term in Eq 20
+-    return np.zeros_like(surfel_i.p)
+-
+-def compute_integral_directional_2(surfel_i, surfel_j, grad_E_j):
+-    # Placeholder for second term in Eq 20
+-    return np.zeros_like(surfel_i.p)
+-
+-def compute_derivative_direction(surfel_i, surfel_j, surfel_k):
+-    # Placeholder for d(omega_I) / d(beta_k)
+-    return np.zeros_like(surfel_i.p)
++    # Decay Term Gradients
++    # Sum over all pairs a, b
++    for a in surfels:
++        for b in surfels:
++            if (a.id, b.id) in visibility_pairs:
++                # Compute integral term for decay
++                # Numerator: (Y_bar^T * (f_b^c x dL/dE_b)) * (Y^T * B_a^c)
++                cross_b = torch.cross(b.f, grads_E[b.id])
++                term1 = torch.dot(b.Y, cross_b) # Simplified Y_bar
++                
++                term2 = torch.dot(a.Y, a.B)
++                
++                # Denominator: s_a^u s_a^u s_b^u s_b^u
++                # [G] Assuming s^u is related to scale/area. 
++                # Exact definition of s^u is not fully detailed in notes, 
++                # but it's part of the derivative of (V_ab s_a^u s_a^u s_b^u).
++                denom = (a.scale ** 2) * (b.scale ** 2) # Placeholder for s^u
++                
++                if denom > 1e-8:
++                    integrand = (term1 * term2) / denom
++                    
++                    # Derivative of (V_ab s_a^u s_a^u s_b^u) w.r.t beta_i
++                    # This depends on the specific geometry parameter beta_i.
++                    # For position p_i, we compute d(V_ab ...)/dp_i.
++                    # This requires the analytical derivative of the visibility and scaling terms.
++                    dV_dbeta = compute_geometry_derivative_decay(a, b, i)
++                    
++                    grads_geom[i.id] += integrand * dV_dbeta
++
++    # Directional Effects Gradients
++    for i in surfels:
++        for j in surfels:
++            if (i.id, j.id) in visibility_pairs:
++                # First term: integral over P_i, P_j
++                # [V_ji * (Y^T * B_j^c) * (f_i^c x dL/dE_i)]^T * Y_bar'(omega_I) * d(omega_I)/d(beta_i)
++                cross_i = torch.cross(i.f, grads_E[i.id])
++                term1_inner = torch.dot(i.Y, cross_i)
++                term1_outer = V_ji * torch.dot(j.Y, j.B) * term1_inner
++                
++                # Derivative of omega_I w.r.t beta_i
++                domega_dbeta = compute_geometry_derivative_directional(i, j, i)
++                
++                # Y_bar'(omega_I) derivative of SH basis
++                dY_domega = compute_SH_derivative(j.Y, i, j)
++                
++                grads_geom[i.id] += term1_outer * dY_domega * domega_dbeta
++                
++                # Second term: integral over P_j, P_i
++                # [V_bar_ji * (Y_bar^T * (f_j^c x dL/dE_j)) * B_i^c]^T * Y'(omega_I) * d(omega_I)/d(beta_i)
++                cross_j = torch.cross(j.f, grads_E[j.id])
++                term2_inner = torch.dot(j.Y, cross_j)
++                term2_outer = V_ij * term2_inner * torch.dot(i.Y, i.B)
++                
++                domega_dbeta_2 = compute_geometry_derivative_directional(j, i, i)
++                dY_domega_2 = compute_SH_derivative(i.Y, j, i)
++                
++                grads_geom[i.id] += term2_outer * dY_domega_2 * domega_dbeta_2
++
++    return grads_E, grads_f, grads_geom
++
++def get_visibility(surfel_a, surfel_b):
++    # Returns V_ab from forward pass cache
++    return surfel_a.visibility_cache.get(surfel_b.id, 0.0)
++
++def compute_geometry_derivative_decay(a, b, i):
++    # Computes d(V_ab s_a^u s_a^u s_b^u) / d(beta_i)
++    # This is a complex analytical derivative depending on the geometry of a, b, and i.
++    # [G] Implementation detail: This requires the specific analytical form of V_ab 
++    # and s^u in terms of p, S, T.
++    return 0.0 # Placeholder for complex analytical derivative
++
++def compute_geometry_derivative_directional(i, j, target):
++    # Computes d(omega_I) / d(beta_target)
++    # omega_I is the incident direction.
++    return 0.0 # Placeholder for complex analytical derivative
++
++def compute_SH_derivative(Y, surfel_i, surfel_j):
++    # Computes derivative of SH basis w.r.t direction
++    return 0.0 # Placeholder
+ ```
+ 
+ ### Edge Cases and Pitfalls
+-*   **Visibility Caching:** The decay term gradient calculation requires enumerating pairs of kernels. To avoid $O(N^2)$ complexity, the implementation must record visible pairs during the forward pass and only iterate over these pairs [S1].
+-*   **Redundant Computation:** The solver must cache necessary quantities (such as $\mathbf{B}_i^c$, $\mathbf{E}_i^c$, and visibility data) within the surfels during the forward pass to prevent redundant computation during the backward pass [S1].
+-*   **Precision:** The analytical formulas are closed-form, avoiding the numerical instability often associated with recursive automatic differentiation in complex light transport scenarios [S1].
++*   **Division by Zero:** The formulas for emission and material gradients involve division by $\mathbf{f}_i^c$. If $\mathbf{f}_i^c$ is zero, the gradient is undefined. [G] Add a small epsilon to the denominator or skip the term if the norm of $\mathbf{f}_i^c$ is below a threshold.
++*   **Visibility Pairs:** The decay term gradient requires enumerating all pairs of kernels, which is $O(N^2)$. In practice, only pairs that are visible to each other contribute, as the decay term is zero otherwise. The forward pass must record these visible pairs to optimize the backward pass [S1].
++*   **Directional Effects:** The directional effects gradient also requires summing over visible kernels. Only kernels visible to the $i$-th kernel need to be considered [S1].
++*   **Caching:** To prevent redundant computation, the solver caches necessary quantities (e.g., visibility, radiance, gradients) within the surfels during the backward pass [S1].
+ 
+ ## Operating characteristics
+-*   **Time Complexity:** The emission gradient calculation involves a summation over $N$ surfels. The geometry gradient from the decay term involves a double summation over pairs, which is optimized by caching visible pairs. The directional effect gradient involves a summation over visible neighbors. Overall, it is more efficient than standard automatic differentiation or path replay backpropagation [S1].
+-*   **Memory Complexity:** Requires storing gradients for emissions, materials, and geometry for all surfels, plus the visibility cache [S1].
+-*   **Strengths:** Provides accurate, non-recursive analytical gradients. More efficient than auto-differentiation methods [S1].
+-*   **Limitations:** Requires explicit derivation and caching logic. The geometry gradient from the decay term can still be costly if the number of visible pairs is large [S1].
++*   **Time Complexity:** The naive computation of geometry gradients from the decay term is $O(N^2)$ due to the double summation over all pairs of kernels. However, by caching visibility pairs from the forward pass, the complexity is reduced to $O(E)$, where $E$ is the number of visible pairs. The emission and material gradients are $O(N)$ and $O(N)$ respectively, assuming the visibility summation is optimized [S1].
++*   **Memory Complexity:** $O(N)$ to store surfel parameters and gradients, plus $O(E)$ to store visibility pairs [S1].
++*   **Strengths:**
++    *   **Analytical and Non-recursive:** Provides accurate and efficient gradients without relying on automatic differentiation or path replay backpropagation [S1].
++    *   **Duality:** Exploits the duality between forward and backward passes, allowing for efficient implementation [S1].
++    *   **Efficiency:** More efficient than standard auto-differentiation methods, as shown in ablation studies [S1].
++*   **Limitations:**
++    *   **Complexity of Derivation:** The analytical derivatives for geometry (especially directional effects) are complex and require careful implementation [S1].
++    *   **Visibility Dependency:** Requires recording visibility pairs during the forward pass, adding overhead to the forward pass [S1].
+ 
+ ## Background
+-This method originates from the paper "Differentiable Light Transport with Gaussian Surfels via Adapted Radiosity for Efficient Relighting and Geometry Reconstruction" [S1]. It was developed to address the inefficiencies of automatic differentiation in the context of Gaussian Splatting-based global illumination. The work highlights the duality between forward light transport and backward gradient propagation, a concept also observed in path tracing by Nimier-David et al. [2020, cited in S1] [S1].
++This method was introduced in the paper "Differentiable Light Transport with Gaussian Surfels via Adapted Radiosity for Efficient Relighting and Geometry Reconstruction" [S1]. It addresses the limitations of automatic differentiation in global illumination rendering by providing an explicit gradient derivation. The method is based on the radiosity framework and leverages the duality between light transport and gradient propagation, a concept also observed in path tracing by Nimier-David et al. [2020] [S1].
+ 
+ ## Sources

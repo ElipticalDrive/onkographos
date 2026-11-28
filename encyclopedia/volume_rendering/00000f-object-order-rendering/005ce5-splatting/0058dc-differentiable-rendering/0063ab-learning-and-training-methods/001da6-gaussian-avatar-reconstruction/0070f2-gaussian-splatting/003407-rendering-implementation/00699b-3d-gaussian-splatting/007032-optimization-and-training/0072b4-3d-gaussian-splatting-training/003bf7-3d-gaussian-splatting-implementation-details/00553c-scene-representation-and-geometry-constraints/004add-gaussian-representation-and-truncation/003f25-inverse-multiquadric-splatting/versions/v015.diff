@@ -1,0 +1,201 @@
+--- v014.md
++++ v015.md
+@@ -4,13 +4,13 @@
+ 
+ ## Overview
+-Inverse Multiquadric Splatting replaces the standard Gaussian density function with an inverse multiquadric radial basis function to modify the alpha blending behavior during rendering [S1]. It sets itself apart from the base Gaussian Splatting method by using a function with heavier tails, which can improve the representation of certain geometric structures or reduce artifacts in specific optimization scenarios [S1].
++Inverse Multiquadric Splatting replaces the standard Gaussian density function with an inverse multiquadric radial basis function to modify the alpha blending behavior during rendering [S1]. It sets itself apart from base Gaussian Splatting by using a different radial basis function that requires a correction factor to scale the 3D covariance matrix [S1].
+ 
+ ## How it works
+ **Inputs and Outputs:**
+-*   **Input:** A set of 3D Gaussians defined by mean $\boldsymbol{\mu}$, 3D covariance $\boldsymbol{\Sigma}$, opacity $\alpha_{base}$, and color. For each pixel/ray intersection, the 2D projected mean $\boldsymbol{\mu}'$ and 2D covariance $\boldsymbol{\Sigma}'_{2 \times 2}$ are computed.
+-*   **Output:** The final alpha value $\alpha$ for the splat, and gradients for the mean and covariance matrices during backpropagation.
++*   **Input:** A set of 3D Gaussians defined by mean $\boldsymbol{\mu}$, 3D covariance $\boldsymbol{\Sigma}$, opacity $\alpha_{base}$, and color, along with their 2D projected mean $\boldsymbol{\mu}'$ and 2D covariance $\boldsymbol{\Sigma}'_{2 \times 2}$ [S1].
++*   **Output:** The final alpha value $\alpha$ for the splat, and gradients for the mean and covariance matrices during backpropagation [S1].
+ 
+ **Data Structures:**
+-The method operates on the standard 3DGS conic matrix representation for the 2D projection. The conic matrix $\mathbf{C}$ is the inverse of the 2D covariance matrix, often stored in a compact symmetric format. Let $\mathbf{C} = \begin{bmatrix} a & b \\ b & c \end{bmatrix}$, where the entries correspond to the inverse covariance elements. The 2D distance vector is $\mathbf{d} = \mathbf{x} - \boldsymbol{\mu}' = (d.x, d.y)$.
++The method operates on the standard 3DGS conic matrix representation for the 2D projection [S1]. The conic matrix $\mathbf{C}$ is the inverse of the 2D covariance matrix, stored in a compact symmetric format [S1]. Let $\mathbf{C} = \begin{bmatrix} a & b \\ b & c \end{bmatrix}$, where the entries correspond to the inverse covariance elements [S1]. The 2D distance vector is $\mathbf{d} = \mathbf{x} - \boldsymbol{\mu}' = (d.x, d.y)$ [S1].
+ 
+ **Parameters:**
+@@ -22,9 +22,8 @@
+ The 3D inverse multiquadric function is defined as [S1]:
+ $$ f(d_M) = \frac{1}{\frac{1}{\xi} (d_M)^2 + 1} $$
+-where $d_M \geq 0$. In the implementation, the parameter $\xi$ is absorbed into the correction factor or set such that the term simplifies to the form used in the code. The 2D splat weight $w$ is calculated as [S1]:
++where $d_M \geq 0$. The 2D splat weight $w$ is calculated as [S1]:
+ $$ w = \frac{1}{\left[ \frac{1}{\xi} (\mathbf{x} - \boldsymbol{\mu}')^T (\boldsymbol{\Sigma}'_{2 \times 2})^{-1} (\mathbf{x} - \boldsymbol{\mu}') + 1 \right]} $$
+-In the CUDA implementation, the term $\frac{1}{\xi} (\mathbf{x} - \boldsymbol{\mu}')^T (\boldsymbol{\Sigma}'_{2 \times 2})^{-1} (\mathbf{x} - \boldsymbol{\mu}')$ is computed as `ellipse`. The final alpha is [S1]:
+-$$ \alpha = \min(0.99, w \cdot \alpha_{base}) $$
+-where $w = \frac{1}{ellipse + 1}$.
++In the CUDA implementation, the term $\frac{1}{\xi} (\mathbf{x} - \boldsymbol{\mu}')^T (\boldsymbol{\Sigma}'_{2 \times 2})^{-1} (\mathbf{x} - \boldsymbol{\mu}')$ is computed as `ellipse` [S1]. The final alpha is [S1]:
++$$ \alpha = \min(0.99, \alpha_{base} \cdot \frac{1}{ellipse + 1}) $$
+ 
+ **Steps:**
+@@ -43,27 +42,22 @@
+ def inverse_multiquadric_forward(con_o, d, alpha_base, correction_factor=1.38):
+     """
+-    con_o: Conic matrix entries (a, b, c, w) where a, b, c form the symmetric 2x2 inverse covariance.
+-    d: 2D distance vector (dx, dy) from pixel center to gaussian mean.
++    con_o: tuple (a, b, c, w) representing the 2x2 symmetric conic matrix and base opacity.
++    d: tuple (dx, dy) representing the 2D distance vector.
+     alpha_base: The base opacity of the gaussian.
+     """
+-    # 1. Scale covariance (conceptually, affects con_o if derived from cov, 
+-    # but in the provided code, con_o is already the conic. 
+-    # The code scales cov2D before inversion to conic. 
+-    # Here we assume con_o represents the scaled conic.)
+-    
+-    # 2. Calculate ellipse term
+-    a, b, c = con_o.a, con_o.b, con_o.c
+-    dx, dy = d.dx, d.dy
+-    
++    a, b, c, w = con_o
++    dx, dy = d
++
++    # 1. Calculate ellipse term (quadratic form)
+     ellipse = a * dx * dx + c * dy * dy + 2.0 * b * dx * dy
+-    
+-    # 3. Boundary checks
++
++    # 2. Boundary checks
+     if ellipse <= 0.0 or ellipse >= 9.0:
+-        return None, None # Skip splat
+-        
+-    # 4. Calculate weight and alpha
++        return None, None
++
++    # 3. Compute weight and alpha
+     G = 1.0 / (ellipse + 1.0)
+-    alpha = min(0.99, alpha_base * G)
+-    
++    alpha = min(0.99, w * G)
++
+     return alpha, G
+ 
+@@ -73,92 +67,52 @@
+     G: The weight 1/(ellipse+1).
+     dL_dalpha: Gradient of loss w.r.t alpha.
+-    con_o: Conic matrix entries.
+-    d: 2D distance vector.
++    con_o: tuple (a, b, c, w) representing the 2x2 symmetric conic matrix and base opacity.
++    d: tuple (dx, dy) representing the 2D distance vector.
+     """
+-    # Gradient w.r.t G
+-    dL_dG = alpha_base * dL_dalpha # Note: alpha_base is needed here. 
+-    # In the source code: dL_dG = con_o.w * dL_dalpha. 
+-    # Assuming con_o.w stores alpha_base or it is passed separately.
+-    # Let's assume alpha_base is available as 'base_alpha'.
+-    
+-    # From source: const float dL_dG = con_o.w * dL_dalpha;
+-    # We need base_alpha. Let's assume it's passed or stored.
+-    # For the sake of self-contained pseudocode, we assume base_alpha is known.
+-    
+-    # Gradient of G w.r.t ellipse components
+-    # dL_dG is gradient of loss w.r.t G.
+-    # G = 1 / (ellipse + 1)
++    a, b, c, w = con_o
++    dx, dy = d
++
++    # 1. Gradient w.r.t G
++    dL_dG = w * dL_dalpha
++
++    # 2. Compute ellipse value again for gradients
++    ellipse = a * dx * dx + c * dy * dy + 2.0 * b * dx * dy
++
++    # 3. Gradient of G w.r.t ellipse
+     # dG/d(ellipse) = -1 / (ellipse + 1)^2
+-    
+-    ellipse = con_o.a * d.dx * d.dx + con_o.c * d.dy * d.dy + 2.0 * con_o.b * d.dx * d.dy
+-    
+-    # dL_dellipse = dL_dG * dG/d(ellipse)
+-    # dG/d(ellipse) = -1 / (ellipse + 1)^2
+-    # Source uses: ellipsepow = - dL_dG * 2.f / pow(ellipse + 1.f, 2.f)
+-    # Wait, source calculates dG_ddelx directly.
+-    
+-    # dG/d(dx) = dG/d(ellipse) * d(ellipse)/d(dx)
+-    # d(ellipse)/d(dx) = 2 * (a*dx + b*dy)
+-    
+-    # Source code logic:
+-    # const float dL_dG = con_o.w * dL_dalpha;
+-    # const float ellipsepow = - dL_dG * 2.f / pow(ellipse + 1.f, 2.f);
+-    # const float dG_ddelx = ellipsepow * (d.x * con_o.x + d.y * con_o.y);
+-    # Note: con_o.x is 'a', con_o.y is 'b', con_o.z is 'c' in the source snippet?
+-    # Source: con_o.x * d.x * d.x + con_o.z * d.y * d.y + 2.f * con_o.y * d.x * d.y
+-    # So con_o.x=a, con_o.y=b, con_o.z=c.
+-    
+-    # dG/d(dx) = (-1/(ellipse+1)^2) * 2 * (a*dx + b*dy)
+-    # dG/d(dy) = (-1/(ellipse+1)^2) * 2 * (c*dy + b*dx)
+-    
+-    # Source: dG_ddelx = ellipsepow * (d.x * con_o.x + d.y * con_o.y)
+-    # ellipsepow = - dL_dG * 2 / (ellipse+1)^2
+-    # So dG_ddelx = dL_dG * dG/d(dx)
+-    
+     denom_sq = (ellipse + 1.0) ** 2
+-    factor = -2.0 * dL_dG / denom_sq
+-    
+-    # Gradient w.r.t mean (dx, dy)
+-    # dL_dmean_x = dL_dG * dG/d(dx)
+-    # dL_dmean_y = dL_dG * dG/d(dy)
+-    
+-    dL_dmean_x = factor * (con_o.a * d.dx + con_o.b * d.dy)
+-    dL_dmean_y = factor * (con_o.b * d.dx + con_o.c * d.dy)
+-    
+-    # Gradient w.r.t conic matrix (a, b, c)
++    dL_dellipse = -dL_dG / denom_sq
++
++    # 4. Gradient w.r.t mean (dx, dy)
++    # d(ellipse)/d(dx) = 2*(a*dx + b*dy)
++    # d(ellipse)/d(dy) = 2*(c*dy + b*dx)
++    dL_dmean_x = dL_dellipse * 2.0 * (a * dx + b * dy)
++    dL_dmean_y = dL_dellipse * 2.0 * (c * dy + b * dx)
++
++    # 5. Gradient w.r.t conic matrix entries (a, b, c)
+     # d(ellipse)/da = dx^2
+     # d(ellipse)/db = 2*dx*dy
+     # d(ellipse)/dc = dy^2
+-    
+-    # dL_da = dL_dG * dG/d(ellipse) * d(ellipse)/da
+-    # dL_da = (-1/(ellipse+1)^2) * dL_dG * dx^2
+-    
+-    # Source: halfellipsepow = 0.5 * ellipsepow
+-    # dL_da = halfellipsepow * d.x * d.x
+-    # halfellipsepow = - dL_dG / (ellipse+1)^2
+-    # So dL_da = - dL_dG / (ellipse+1)^2 * dx^2
+-    
+-    half_factor = -dL_dG / denom_sq
+-    
+-    dL_da = half_factor * d.dx * d.dx
+-    dL_dc = half_factor * d.dy * d.dy
+-    dL_db = half_factor * 2.0 * d.dx * d.dy
+-    
++    dL_da = dL_dellipse * dx * dx
++    dL_db = dL_dellipse * 2.0 * dx * dy
++    dL_dc = dL_dellipse * dy * dy
++
++    # 6. Apply correction factor to conic gradients
++    dL_da *= correction_factor
++    dL_db *= correction_factor
++    dL_dc *= correction_factor
++
+     return dL_dmean_x, dL_dmean_y, dL_da, dL_db, dL_dc
+ ```
+ 
+ **Edge Cases and Pitfalls:**
+-*   **Boundary Conditions:** Splats with $ellipse \leq 0$ or $ellipse \geq 9.0$ are skipped. This prevents numerical instability and unnecessary computation for very distant or degenerate projections [S1].
+-*   **Covariance Scaling:** The correction factor $1.38$ must be applied to the covariance matrices before projection/inversion to ensure the correct shape of the inverse multiquadric function [S1].
++*   **Boundary Conditions:** Splats with $ellipse \leq 0$ or $ellipse \geq 9.0$ are skipped [S1].
++*   **Covariance Scaling:** The correction factor $1.38$ must be applied to the covariance matrices before projection/inversion [S1].
+ 
+ ## Operating characteristics
+-*   **Time Complexity:** Similar to standard Gaussian Splatting, as it involves a constant number of arithmetic operations per pixel per Gaussian. The boundary checks may reduce the number of active splats slightly.
+-*   **Memory Complexity:** No additional memory overhead compared to standard 3DGS, as it uses the same data structures.
+-*   **Strengths:** Can provide better fitting for certain types of geometry or reduce artifacts compared to Gaussian splatting in specific contexts [S1].
+-*   **Limitations:** The choice of correction factor and boundary limits is heuristic. It may not generalize as well as Gaussian splatting for all scenes.
+-*   **When to use:** When standard Gaussian Splatting exhibits artifacts or fails to represent certain features, and when the specific benefits of the inverse multiquadric function are desired [S1].
++Not given in the sources.
+ 
+ ## Background
+-Inverse Multiquadric Splatting was introduced in the paper "DARB-Splatting: Generalizing Splatting with Decaying Anisotropic Radial Basis Functions" [S1]. It is part of a family of methods that generalize the radial basis functions used in splatting beyond the standard Gaussian.
++Inverse Multiquadric Splatting was introduced in the paper "DARB-Splatting: Generalizing Splatting with Decaying Anisotropic Radial Basis Functions" [S1]. It is part of a family of methods that generalize the radial basis functions used in splatting beyond the standard Gaussian [S1].
+ 
+ ## Sources

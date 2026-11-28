@@ -1,0 +1,124 @@
+# Pairwise Chamfer Distance via Relative Transform
+
+Also called: Pairwise Distance Chamfer
+
+## Overview
+Computes the pairwise Chamfer distance between two sets of world-to-link transforms by evaluating the geometric error of sampled mesh points under the relative transformation between each pair of transforms [S1, unofficial]. It differs from standard point-cloud Chamfer distance by operating on transform sets, using relative rigid-body motions to align sampled surface points for distance evaluation [S1, unofficial].
+
+## How it works
+**Inputs:**
+- `A`: Set of world-to-link transforms (matrices).
+- `B`: Set of world-to-link transforms.
+- `model_points_eval`: Optional pre-sampled points from the object mesh. If `None`, 500 points are sampled from the object mesh [S1, unofficial].
+- `scale`: Multiplier for position units. Default 1000. If position units are meters, `scale=1000` converts distance to millimeters [S1, unofficial].
+
+**Outputs:**
+- A distance matrix of shape `(len(A), len(B))` containing the pairwise Chamfer distances [S1, unofficial].
+
+**Data Structures:**
+- Transforms are represented as concatenated 9D vectors: translation (3D) + rotation (6D encoding) [S1, unofficial].
+- Relative transformation matrices $I_{approx}$ are computed for all pairs [S1, unofficial].
+
+**Steps:**
+1. **Extract and Concatenate:** For each transform in sets $A$ and $B$, extract translation $t$ and rotation $r$ (encoded as 6D). Concatenate to form a 9D vector $v = [t, r]$ [S1, unofficial].
+2. **Compute Pairwise Distances in Transform Space:** Compute the pairwise Euclidean distance (`cdist`) between the concatenated 9D representations of $A$ and $B$ [S1, unofficial].
+3. **Sample Points (if needed):** If `model_points_eval` is not provided, sample 500 points from the object mesh [S1, unofficial].
+4. **Compute Relative Transformations:** For each pair of transforms, compute the relative transformation matrix $I_{approx}[a, b] = T_{inv}[b] \otimes T[a]$ using batched matrix multiplication (`einsum`) [S1, unofficial].
+5. **Evaluate Chamfer Distance:** Reshape $I_{approx}$ to $(N_A \times N_B, 4, 4)$ and apply `batch_chamfer_dist` with the model points to get `errors_per_batch` [S1, unofficial].
+6. **Reshape and Return:** Reshape `errors_per_batch` to $(N_A, N_B)$ and return the pairwise distance matrix [S1, unofficial].
+
+**Pseudocode:**
+> **Unverified code.** The code below did not pass a test run against a reference implementation, or no test fits it, so it may contain errors.
+
+```python
+import torch
+
+def pairwise_chamfer_distance_via_relative_transform(A_tfs, B_tfs, model_points=None, scale=1000):
+    """
+    Compute pairwise Chamfer distance between sets of transforms A and B.
+    
+    Args:
+        A_tfs: Tensor of shape (N_A, 4, 4)
+        B_tfs: Tensor of shape (N_B, 4, 4)
+        model_points: Tensor of shape (N_pts, 3) or None.
+        scale: Scale factor for position units.
+        
+    Returns:
+        Tensor of shape (N_A, N_B) with pairwise Chamfer distances.
+    """
+    N_A, N_B = A_tfs.shape[0], B_tfs.shape[0]
+    
+    # Step 1: Extract translation (t) and rotation (r as 6D) from world_to_link_tfs matrices
+    t_A = A_tfs[:, :3, 3]  # (N_A, 3)
+    t_B = B_tfs[:, :3, 3]  # (N_B, 3)
+    # 6D rotation encoding: first two columns of the rotation matrix flattened
+    r_A = A_tfs[:, :3, :2].reshape(N_A, -1)  # (N_A, 6)
+    r_B = B_tfs[:, :3, :2].reshape(N_B, -1)  # (N_B, 6)
+    v_A = torch.cat([t_A, r_A], dim=1)  # (N_A, 9)
+    v_B = torch.cat([t_B, r_B], dim=1)  # (N_B, 9)
+    
+    # Step 2: Compute cdist between the concatenated representations
+    dist_9d = torch.cdist(v_A, v_B)  # (N_A, N_B)
+    
+    # Step 3: If model_points_eval is None, sample 500 points from the object mesh
+    if model_points is None:
+        # Standard mesh point sampling routine [G]
+        model_points = sample_mesh_points(500)  # (500, 3)
+        
+    # Step 4: Compute the relative transformation matrix Iapprox for all pairs using einsum
+    # Iapprox[b,p] = T_inv[p] @ T[b] -> adapted to sets A and B: Iapprox[a,b] = T_inv[b] @ T[a]
+    B_inv = torch.inverse(B_tfs)  # (N_B, 4, 4)
+    Iapprox = torch.einsum('bij,ajk->abik', B_inv, A_tfs)  # (N_A, N_B, 4, 4)
+    
+    # Step 5: Reshape Iapprox to (B*P, 4, 4) and call batch_chamfer_dist with the model points
+    Iapprox_flat = Iapprox.reshape(-1, 4, 4)  # (N_A * N_B, 4, 4)
+    # Apply homogeneous transformation to model points
+    pts_h = torch.cat([model_points, torch.ones(model_points.shape[0], 1, device=model_points.device)], dim=1)  # (N_pts, 4)
+    transformed_pts_h = torch.bmm(Iapprox_flat, pts_h.unsqueeze(2)).squeeze(2)[:, :3, :]  # (N_A*N_B, 3, N_pts)
+    errors_per_batch = compute_chamfer_distance(transformed_pts_h, model_points)  # (N_A * N_B)
+    
+    # Step 6: Reshape errors_per_batch to (B, P) and return
+    return errors_per_batch.reshape(N_A, N_B) * scale  # (N_A, N_B)
+
+def sample_mesh_points(n):
+    # Placeholder for mesh sampling; returns n points on the object surface [G]
+    return torch.rand(n, 3) * 2.0 - 1.0
+
+def compute_chamfer_distance(transformed_pts, target_pts):
+    # transformed_pts: (N_pairs, 3, N_pts), target_pts: (N_pts, 3)
+    # Compute pairwise squared distances: (N_pairs, N_pts, N_pts)
+    diff = transformed_pts.unsqueeze(2) - target_pts.unsqueeze(0).unsqueeze(0)
+    dist_sq = torch.sum(diff ** 2, dim=1)
+    # Chamfer distance: sum of min distances in both directions
+    min_fwd = torch.min(dist_sq, dim=2)[0]  # (N_pairs, N_pts)
+    min_bwd = torch.min(dist_sq, dim=1)[0]  # (N_pairs, N_pts)
+    chamfer = torch.sum(min_fwd, dim=1) + torch.sum(min_bwd, dim=1)
+    return chamfer
+```
+
+**Parameters:**
+- `scale`: Multiplier for position units. Default 1000. If position units are meters, `scale=1000` converts distance to millimeters [S1, unofficial].
+
+**Edge Cases and Pitfalls:**
+- Precision: Inverting transform matrices can be numerically unstable if matrices are near-singular [G].
+- Boundaries: Sampling points from the mesh must be dense enough to capture surface details accurately [G].
+- Degenerate Input: If `model_points` is empty, the distance calculation is undefined [G].
+
+## Subtopics
+
+### [Plausible Diversity Metric](13076-plausible-diversity-metric.md)
+The Plausible Diversity Metric evaluates an estimated set of object poses against a reference set of plausible poses by computing plausibility and coverage scores. Plausibility measures the average distance from each estimated pose to its nearest plausible pose, while coverage measures the average distance from each plausible pose to its nearest estimated pose.
+
+## Operating characteristics
+- **Time and Memory Complexity:** Not given in the sources.
+- **Measured Performance:** Not given in the sources.
+- **Scaling:** Linear in the number of transforms and sampled points [G].
+- **Strengths and Limitations:** Not given in the sources.
+- **When to Use:** Not given in the sources.
+- **When Not to Use:** Not given in the sources.
+
+## Background
+Not given in the sources.
+
+## Sources
+[S1] GitHub - UM-ARM-Lab/pytorch_volumetric: Volumetric structures such as ..., https://github.com/UM-ARM-Lab/pytorch_volumetric, fetched 2026-10-30 (unofficial)

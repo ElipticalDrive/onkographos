@@ -1,0 +1,4928 @@
+Voxel Engine
+============
+
+My nameless engine used for rendering cubic voxel meshes, with [SGL](https://github.com/nnarain/sgl-wrapper)
+at its core.
+
+
+Dependencies
+------------
+
+- SGL
+- GLFW
+- luabind
+	- lua 5.2
+	- Boost C++
+	
+Building
+--------
+
+CmakeList.txt will be added soon.
+
+Blog Posts
+----------
+
+- [Intro to my Voxel Engine](http://nnarain.github.io/2015/06/26/Intro%20to%20my%20Voxel%20Engine.html)
+
+TODO
+----
+
+- Voxel lighting
+- Light Gamma Correction
+- Multiple Renderers
+- Command Line Interface
+- Block selection
+
+### Block.h
+```
+#ifndef BLOCK_H
+#define BLOCK_H
+
+#include <SGL/Math/Vector2.h>
+#include <SGL/Math/Vector3.h>
+#include <SGL/Graphics/Color.h>
+
+#include <cstdint>
+
+#define R_MASK 0x000F    // mask for light R channel
+#define G_MASK 0x00F0    // mask for light G channel
+#define B_MASK 0x0F00    // mask for light B channel
+
+#define CHNL_MASK 0x000F // mask for a single channel of light
+#define CHNL_BITS 4      // bits per channel
+
+// get the R channel value
+#define GET_LIGHT_LEVEL_R(light) ((light & R_MASK))
+// get the G channel value
+#define GET_LIGHT_LEVEL_G(light) ((light & G_MASK) >> CHNL_BITS )
+// get the B channel value
+#define GET_LIGHT_LEVEL_B(light) ((light & B_MASK) >> (CHNL_BITS * 2) )
+
+// set the R channel value
+#define SET_LIGHT_LEVEL_R(light, level) (light) = ( ( (light) & ~R_MASK ) | ((level) & CHNL_MASK) )
+// get the G channel value
+#define SET_LIGHT_LEVEL_G(light, level) (light) = ( ( (light) & ~G_MASK ) | ((level) & CHNL_MASK) << (CHNL_BITS) )
+// get the B channel value
+#define SET_LIGHT_LEVEL_B(light, level) (light) = ( ( (light) & ~B_MASK ) | ((level) & CHNL_MASK) << (CHNL_BITS * 2) )
+
+// light data type
+typedef uint16_t light_t;
+
+/**
+	A single vertex for mesh creation
+
+	Contains position, normal, texCoord and color attributes
+*/
+struct Vertex
+{
+	Vertex(sgl::Vector3& pos, sgl::Vector3& n, sgl::ColorRGB32f c) : position(pos), normal(n), color(c)
+	{
+	}
+
+	Vertex(sgl::Vector3& pos, sgl::Vector3& n) : Vertex(pos, n, sgl::ColorRGB32f(1, 1, 1))
+	{
+	}
+
+	Vertex(sgl::Vector3& pos) : Vertex(pos, sgl::Vector3(0, 0, 0), sgl::ColorRGB32f(1,1,1))
+	{
+	}
+
+	sgl::Vector3     position;
+	sgl::Vector3     normal;
+	sgl::Vector2     texCoord;
+	sgl::ColorRGB32f color;
+};
+
+struct Block
+{
+	Block() : Block(0, 0, 0, 0)
+	{
+	}
+
+	Block(uint8_t t, uint8_t x, uint8_t y, uint8_t z) : t(t), x(x), y(y), z(z)
+	{
+		lights[0] = 0;
+		lights[1] = 0;
+		lights[2] = 0;
+		lights[3] = 0;
+		lights[4] = 0;
+		lights[5] = 0;
+	}
+
+	uint8_t  t;        // the block type
+	uint8_t  x;        // block x value in chunk
+	uint8_t  y;        // block y value in chunk
+	uint8_t  z;        // block z value in chunk
+	light_t lights[6]; // light values for each face
+};
+
+// block face number
+enum class BlockFace
+{
+	LEFT, RIGHT,
+	TOP,  BOTTOM,
+	NEAR, FAR
+};
+
+// check if a block is opaque
+static bool isBlockOpaque(Block& block)
+{
+	return block.t != 0;
+}
+
+// check if the block has a light value
+static bool hasLight(Block& block)
+{
+	return (block.lights[0] | block.lights[1] | block.lights[2] | block.lights[3] | block.lights[4] | block.lights[5]) != 0;
+}
+
+#endif
+```
+
+### Chunk.cpp
+```
+#include "Chunk.h"
+
+#include "VoxelEngine.h"
+
+#include <SGL/Math/Vector4.h>
+
+#include <iostream>
+#include <memory>
+
+using namespace engine;
+using namespace sgl;
+
+Chunk::Chunk(int size) : Chunk(size, 1)
+{
+}
+
+Chunk::Chunk(int size, float blockSize) : 
+	_mesh(Mesh::Type::TRIANGLES, Buffer::Usage::STATIC_DRAW),
+	_size(size),
+	_blockSize(blockSize),
+	_dirty(true),
+	_shouldRender(false),
+	_hasLocation(false),
+
+	left(nullptr),
+	right(nullptr),
+	top(nullptr),
+	bottom(nullptr),
+	near(nullptr),
+	far(nullptr)
+{
+	// allocate blocks and flags
+	_blocks.resize(size * size * size);
+	_hasLocationFlags.resize(size * size * size, false);
+
+	// setup mesh
+	_mesh.addAttribute(VertexAttribute(0, 3));
+	_mesh.addAttribute(VertexAttribute(1, 3));
+	_mesh.addAttribute(VertexAttribute(2, 2));
+	_mesh.addAttribute(VertexAttribute(3, 3));
+
+	_mesh.create(sizeof(Vertex));
+}
+
+void Chunk::setBlock(int x, int y, int z, int t)
+{
+	Block* block = getBlock(x, y, z);
+	block->t = t;
+
+	_dirty = true;
+}
+
+Block* Chunk::getBlock(int x, int y, int z)
+{
+	int idx = (x * _size) + (y * _size * _size) + z;
+
+	Block* block = &_blocks[idx];
+
+	if (!_hasLocationFlags[idx])
+	{
+		block->x = x;
+		block->y = y;
+		block->z = z;
+	}
+
+	return block;
+}
+
+Block* Chunk::getAdjacentBlock(int x, int y, int z)
+{
+	if (x < 0)
+	{
+		if (this->left != nullptr)
+			return this->left->getAdjacentBlock(_size + x, y, z);
+		else
+			return nullptr;
+	}
+	else if (x >= _size)
+	{
+		if (this->right != nullptr)
+			return this->right->getAdjacentBlock(x - _size, y, z);
+		else
+			return nullptr;
+	}
+
+	if (y < 0)
+	{
+		if (this->bottom != nullptr)
+			return this->bottom->getAdjacentBlock(x, _size + y, z);
+		else
+			return nullptr;
+	}
+	else if (y >= _size)
+	{
+		if (this->top != nullptr)
+			return this->top->getAdjacentBlock(x, y - _size, z);
+		else
+			return nullptr;
+	}
+
+	if (z < 0)
+	{
+		if (this->near != nullptr)
+			return this->near->getAdjacentBlock(x, y, _size + z);
+		else
+			return nullptr;
+
+	}
+	else if (z >= _size)
+	{
+		if (this->far != nullptr)
+			return this->far->getAdjacentBlock(x, y, z - _size);
+		else
+			return nullptr;
+	}
+
+	return getBlock(x, y, z);
+}
+
+void Chunk::setLightSource(int x, int y, int z, int r, int g, int b)
+{
+	Block* block = getBlock(x, y, z);
+
+	setLightLevel(block, r, g, b, BlockFace::LEFT);
+	setLightLevel(block, r, g, b, BlockFace::RIGHT);
+	setLightLevel(block, r, g, b, BlockFace::TOP);
+	setLightLevel(block, r, g, b, BlockFace::BOTTOM);
+	setLightLevel(block, r, g, b, BlockFace::NEAR);
+	setLightLevel(block, r, g, b, BlockFace::FAR);
+
+
+	_lightSourceList[block] = LightNode(block, this);
+}
+
+void Chunk::removeLight(int x, int y, int z)
+{
+	Block* block = getBlock(x, y, z);
+
+	_lightRemovalList[block] = LightNode(block, this);
+
+	_updateCallback(this);
+	_dirty = true;
+}
+
+void Chunk::setLightLevel(Block* block, int r, int g, int b, BlockFace face)
+{
+	int idx = static_cast<int>(face);
+
+	SET_LIGHT_LEVEL_R(block->lights[idx], r);
+	SET_LIGHT_LEVEL_G(block->lights[idx], g);
+	SET_LIGHT_LEVEL_B(block->lights[idx], b);
+}
+
+void Chunk::render()
+{
+	_mesh.bind();
+	_mesh.draw();
+	_mesh.unbind();
+}
+
+void Chunk::build()
+{
+	_shouldRender = false;
+
+	// clear existing data from the buffer
+	_buffer.clear();
+
+	// remove any sources that are listed
+	removeLightSources();
+
+	// propagate any light sources in the chunk
+	propagateLight();
+
+	// iterate over each block and created the mesh
+
+	int x, y, z;
+
+	for (x = 0; x < _size; ++x)
+	{
+		for (y = 0; y < _size; ++y)
+		{
+			for (z = 0; z < _size; ++z)
+			{
+				Block* block = getBlock(x, y, z);
+
+				// add this block if it is active
+				if (block->t)
+				{
+					// check if the adjacent blocks are active, if so don't create the joining face in the mesh
+					bool l, r, t, b, n, f;
+
+					Block* adjacentBlock;
+
+					adjacentBlock = getAdjacentBlock(block->x - 1, block->y, block->z);
+					l = (adjacentBlock == nullptr || adjacentBlock->t == 0);
+
+					adjacentBlock = getAdjacentBlock(block->x + 1, block->y, block->z);
+					r = (adjacentBlock == nullptr || adjacentBlock->t == 0);
+
+					adjacentBlock = getAdjacentBlock(block->x, block->y + 1, block->z);
+					t = (adjacentBlock == nullptr || adjacentBlock->t == 0);
+
+					adjacentBlock = getAdjacentBlock(block->x, block->y - 1, block->z);
+					b = (adjacentBlock == nullptr || adjacentBlock->t == 0);
+
+					adjacentBlock = getAdjacentBlock(block->x, block->y, block->z - 1);
+					n = (adjacentBlock == nullptr || adjacentBlock->t == 0);
+
+					adjacentBlock = getAdjacentBlock(block->x, block->y, block->z + 1);
+					f = (adjacentBlock == nullptr || adjacentBlock->t == 0);
+
+					createCubeMesh(*block, l, r, t, b, n, f);
+					_shouldRender = true;
+				}
+			}
+		}
+	}
+
+	_mesh.setDrawCount(_buffer.size() * 3);
+
+	Buffer& vbo = _mesh.getVBO();
+	vbo.bind();
+
+	if (_buffer.size() > 0)
+	{
+		vbo.setData(&_buffer[0], _buffer.size() * sizeof(Chunk::Face));
+	}
+	else
+	{
+		vbo.setData(0, 0);
+	}
+
+	vbo.unbind();
+
+	_dirty = false;
+}
+
+void Chunk::createCubeMesh(Block& block, bool l, bool r, bool t, bool b, bool n, bool f)
+{
+	// create the 8 vertices that make up the cube
+	// l - left, r - right  (x axis)
+	// t - top , b - bottom (y axis)
+	// n - near, f - far    (z axis)
+
+	float x = (float)block.x;
+	float y = (float)block.y;
+	float z = (float)block.z;
+
+	float X = _offset.x * (_size * _blockSize * 2);
+	float Y = _offset.y * (_size * _blockSize * 2);
+	float Z = _offset.z * (_size * _blockSize * 2);
+
+	Vector3 lbn((x * 2 * _blockSize + X) - _blockSize, (y * 2 * _blockSize + Y) - _blockSize, (z * 2 * _blockSize + Z) - _blockSize);
+	Vector3 rbn((x * 2 * _blockSize + X) + _blockSize, (y * 2 * _blockSize + Y) - _blockSize, (z * 2 * _blockSize + Z) - _blockSize);
+	Vector3 ltn((x * 2 * _blockSize + X) - _blockSize, (y * 2 * _blockSize + Y) + _blockSize, (z * 2 * _blockSize + Z) - _blockSize);
+	Vector3 rtn((x * 2 * _blockSize + X) + _blockSize, (y * 2 * _blockSize + Y) + _blockSize, (z * 2 * _blockSize + Z) - _blockSize);
+	Vector3 lbf((x * 2 * _blockSize + X) - _blockSize, (y * 2 * _blockSize + Y) - _blockSize, (z * 2 * _blockSize + Z) + _blockSize);
+	Vector3 rbf((x * 2 * _blockSize + X) + _blockSize, (y * 2 * _blockSize + Y) - _blockSize, (z * 2 * _blockSize + Z) + _blockSize);
+	Vector3 ltf((x * 2 * _blockSize + X) - _blockSize, (y * 2 * _blockSize + Y) + _blockSize, (z * 2 * _blockSize + Z) + _blockSize);
+	Vector3 rtf((x * 2 * _blockSize + X) + _blockSize, (y * 2 * _blockSize + Y) + _blockSize, (z * 2 * _blockSize + Z) + _blockSize);
+
+	Vector3 ux(1, 0, 0);
+	Vector3 uy(0, 1, 0);
+	Vector3 uz(0, 0, 1);
+
+	Vertex vLBN(lbn, calculatePerVertexNormal(-ux, -uy, -uz, l, b, n));
+	Vertex vRBN(rbn, calculatePerVertexNormal( ux, -uy, -uz, r, b, n));
+	Vertex vLTN(ltn, calculatePerVertexNormal(-ux,  uy, -uz, l, t, n));
+	Vertex vRTN(rtn, calculatePerVertexNormal( ux,  uy, -uz, r, t, n));
+
+	Vertex vLBF(lbf, calculatePerVertexNormal(-ux, -uy, uz, l, b, f));
+	Vertex vRBF(rbf, calculatePerVertexNormal( ux, -uy, uz, r, b, f));
+	Vertex vLTF(ltf, calculatePerVertexNormal(-ux,  uy, uz, l, t, f));
+	Vertex vRTF(rtf, calculatePerVertexNormal( ux,  uy, uz, r, t, f));
+
+	// near face
+	if (n)
+	{
+		_buffer.push_back(makeFace(vLBN, vRBN, vRTN, block, true, getBlockColor(block, BlockFace::NEAR)));
+		_buffer.push_back(makeFace(vRTN, vLTN, vLBN, block, false, getBlockColor(block, BlockFace::NEAR)));
+	}
+
+	// far face
+	if (f)
+	{
+		_buffer.push_back(makeFace(vLBF, vRBF, vRTF, block, true, getBlockColor(block, BlockFace::FAR)));
+		_buffer.push_back(makeFace(vRTF, vLTF, vLBF, block, false, getBlockColor(block, BlockFace::FAR)));
+	}
+
+	// left face
+	if (l)
+	{
+		_buffer.push_back(makeFace(vLBN, vLTN, vLTF, block, true, getBlockColor(block, BlockFace::LEFT)));
+		_buffer.push_back(makeFace(vLTF, vLBF, vLBN, block, false, getBlockColor(block, BlockFace::LEFT)));
+	}
+
+	// right face
+	if (r)
+	{
+		_buffer.push_back(makeFace(vRBN, vRTN, vRTF, block, true, getBlockColor(block, BlockFace::RIGHT)));
+		_buffer.push_back(makeFace(vRTF, vRBF, vRBN, block, false, getBlockColor(block, BlockFace::RIGHT)));
+	}
+
+	// top face
+	if (t)
+	{
+		_buffer.push_back(makeFace(vLTN, vLTF, vRTF, block, true, getBlockColor(block, BlockFace::TOP)));
+		_buffer.push_back(makeFace(vRTF, vRTN, vLTN, block, false, getBlockColor(block, BlockFace::TOP)));
+	}
+
+	// bottom face
+	if (b)
+	{
+		_buffer.push_back(makeFace(vLBN, vLBF, vRBF, block, true, getBlockColor(block, BlockFace::BOTTOM)));
+		_buffer.push_back(makeFace(vRBF, vRBN, vLBN, block, false, getBlockColor(block, BlockFace::BOTTOM)));
+	}
+}
+
+Vector3 Chunk::calculatePerVertexNormal(Vector3 x, Vector3 y, Vector3 z, bool adjacentX, bool adjacentY, bool adjacentZ)
+{
+	Vector3 result;
+	if (adjacentX) result += x;
+	if (adjacentY) result += y;
+	if (adjacentZ) result += z;
+
+	return result.normalize();
+}
+
+Chunk::Face Chunk::makeFace(Vertex& v1, Vertex& v2, Vertex& v3, Block block, bool firstHalf, ColorRGB32f& color)
+{
+	v1.color = color;
+	v2.color = color;
+	v3.color = color;
+
+	return textureFace(v1, v2, v3, block, firstHalf);
+}
+
+Chunk::Face Chunk::textureFace(Vertex& v1, Vertex& v2, Vertex& v3, Block block, bool firstHalf)
+{
+	// set vertex texture coordinates
+	Texture::TextureRegion region = VoxelEngine::getEngine()->getResources().getTextureManager().getAtlas(_atlasName).getRegion(block);
+
+	if (firstHalf)
+	{
+		v1.texCoord = region.topLeft;
+		v2.texCoord = region.bottomLeft;
+		v3.texCoord = region.bottomRight;
+	}
+	else
+	{
+		v1.texCoord = region.bottomRight;
+		v2.texCoord = region.topRight;
+		v3.texCoord = region.topLeft;
+	}
+
+	return Face(v1, v2, v3);
+}
+
+void Chunk::propagateLight()
+{
+	// keep a set of all chunks that are affected by the light propagation
+	ChunkSet updateSet;
+
+	for (auto& source : _lightSourceList)
+	{
+		// breathe first searh queue of light nodes
+		std::queue<LightNode> bfsLightQueue;
+
+		bfsLightQueue.push(source.second);
+
+		while (!bfsLightQueue.empty())
+		{
+
+			// get the next node
+			LightNode node = bfsLightQueue.front();
+
+			// extract information
+
+			int x = (int)node.block->x;
+			int y = (int)node.block->y;
+			int z = (int)node.block->z;
+
+			Chunk* owner = node.owner;
+			updateSet.insert(owner);
+
+			// remove node from queue
+			bfsLightQueue.pop();
+
+			//
+			LightNode adjacentNode;
+
+			adjacentNode = owner->getLightNode(x - 1, y, z);
+
+			if (adjacentNode.owner != nullptr && propagateLightPerFace(node, adjacentNode, BlockFace::LEFT))
+				bfsLightQueue.push(adjacentNode);
+
+			adjacentNode = owner->getLightNode(x + 1, y, z);
+
+			if (adjacentNode.owner != nullptr && propagateLightPerFace(node, adjacentNode, BlockFace::RIGHT))
+				bfsLightQueue.push(adjacentNode);
+
+			adjacentNode = owner->getLightNode(x, y + 1, z);
+
+			if (adjacentNode.owner != nullptr && propagateLightPerFace(node, adjacentNode, BlockFace::TOP))
+				bfsLightQueue.push(adjacentNode);
+
+			adjacentNode = owner->getLightNode(x, y - 1, z);
+
+			if (adjacentNode.owner != nullptr && propagateLightPerFace(node, adjacentNode, BlockFace::BOTTOM))
+				bfsLightQueue.push(adjacentNode);
+
+			adjacentNode = owner->getLightNode(x, y, z - 1);
+
+			if (adjacentNode.owner != nullptr && propagateLightPerFace(node, adjacentNode, BlockFace::NEAR))
+				bfsLightQueue.push(adjacentNode);
+
+			adjacentNode = owner->getLightNode(x, y, z + 1);
+
+			if (adjacentNode.owner != nullptr && propagateLightPerFace(node, adjacentNode, BlockFace::FAR))
+				bfsLightQueue.push(adjacentNode);
+		}
+	}
+
+	// update all chunks affected
+	for (auto& chunk : updateSet)
+		chunk->markForUpdate();
+
+
+}
+
+bool Chunk::propagateLightPerFace(LightNode& source, LightNode& adjacent, BlockFace face)
+{
+	Block* sourceBlock   = source.block;
+	Block* adjacentBlock = adjacent.block;
+
+	bool propagate = false;
+
+	// check if the light should propagate through the neighbour block
+	if (isBlockOpaque(*adjacentBlock))
+	{
+		bool f1, f2, f3, f4, f5;
+
+		if (face == BlockFace::LEFT || face == BlockFace::RIGHT)
+		{
+			f1 = spreadLight(adjacent, BlockFace::NEAR,   sourceBlock->lights[(int)BlockFace::NEAR]);
+			f2 = spreadLight(adjacent, BlockFace::FAR,    sourceBlock->lights[(int)BlockFace::FAR]);
+			f3 = spreadLight(adjacent, BlockFace::TOP,    sourceBlock->lights[(int)BlockFace::TOP]);
+			f4 = spreadLight(adjacent, BlockFace::BOTTOM, sourceBlock->lights[(int)BlockFace::BOTTOM]);
+
+			if (face == BlockFace::LEFT)
+			{
+				f5 = spreadLight(adjacent, BlockFace::RIGHT, sourceBlock->lights[(int)face]);
+			}
+			else
+			{
+				f5 = spreadLight(adjacent, BlockFace::LEFT, sourceBlock->lights[(int)face]);
+			}
+		}
+		else if (face == BlockFace::TOP || face == BlockFace::BOTTOM)
+		{
+			f1 = spreadLight(adjacent, BlockFace::LEFT,  sourceBlock->lights[(int)BlockFace::LEFT]);
+			f2 = spreadLight(adjacent, BlockFace::RIGHT, sourceBlock->lights[(int)BlockFace::RIGHT]);
+			f3 = spreadLight(adjacent, BlockFace::NEAR,  sourceBlock->lights[(int)BlockFace::NEAR]);
+			f4 = spreadLight(adjacent, BlockFace::FAR,   sourceBlock->lights[(int)BlockFace::FAR]);
+
+			if (face == BlockFace::TOP)
+			{
+				f5 = spreadLight(adjacent, BlockFace::BOTTOM, sourceBlock->lights[(int)face]);
+			}
+			else
+			{
+				f5 = spreadLight(adjacent, BlockFace::TOP, sourceBlock->lights[(int)face]);
+			}
+		}
+		else //if (face == BlockFace::NEAR || face == BlockFace::FAR)
+		{
+			f1 = spreadLight(adjacent, BlockFace::LEFT,   sourceBlock->lights[(int)BlockFace::LEFT]);
+			f2 = spreadLight(adjacent, BlockFace::RIGHT,  sourceBlock->lights[(int)BlockFace::RIGHT]);
+			f3 = spreadLight(adjacent, BlockFace::TOP,    sourceBlock->lights[(int)BlockFace::TOP]);
+			f4 = spreadLight(adjacent, BlockFace::BOTTOM, sourceBlock->lights[(int)BlockFace::BOTTOM]);
+
+			if (face == BlockFace::NEAR)
+			{
+				f5 = spreadLight(adjacent, BlockFace::FAR, sourceBlock->lights[(int)face]);
+			}
+			else
+			{
+				f5 = spreadLight(adjacent, BlockFace::NEAR, sourceBlock->lights[(int)face]);
+			}
+		}
+
+		propagate = f1 || f2 || f3 || f4 || f5;
+	}
+	else
+	{
+		light_t sourceLevel = sourceBlock->lights[static_cast<int>(face)];
+
+		bool f1, f2, f3, f4, f5, f6;
+
+		f1 = spreadLight(adjacent, BlockFace::LEFT,   sourceLevel);
+		f2 = spreadLight(adjacent, BlockFace::RIGHT,  sourceLevel);
+		f3 = spreadLight(adjacent, BlockFace::TOP,    sourceLevel);
+		f4 = spreadLight(adjacent, BlockFace::BOTTOM, sourceLevel);
+		f5 = spreadLight(adjacent, BlockFace::NEAR,   sourceLevel);
+		f6 = spreadLight(adjacent, BlockFace::FAR,    sourceLevel);
+
+		propagate = f1 || f2 || f3 || f4 || f5 || f6;
+	}
+
+	return propagate;
+}
+
+bool Chunk::spreadLight(LightNode& node, BlockFace face, light_t level)
+{
+	// vectors corresponding to each face
+	static Vector3 neighbours[] = {
+		Vector3(-1,  0,  0), // left
+		Vector3( 1,  0,  0), // right
+		Vector3( 0,  1,  0), // top
+		Vector3( 0, -1,  0), // bottom
+		Vector3( 0,  0, -1), // near
+		Vector3( 0,  0,  1)  // far
+	};
+
+	// get the face index
+	int idx = static_cast<int>(face);
+
+	// the neighboring block
+	Vector3 neighbour = neighbours[idx];
+	Block* neighbourBlock = node.owner->getAdjacentBlock(
+		(int)node.block->x + (int)neighbour.x,
+		(int)node.block->y + (int)neighbour.y,
+		(int)node.block->z + (int)neighbour.z
+	);
+
+	// 
+	bool isNeighbourActive = (neighbourBlock != nullptr) && (neighbourBlock->t != 0);
+
+	// flag, whether or not to propagate light of this node for this face
+	bool propagate = false;
+
+	// propagate the light, if the node is a air block (t == 0) of its neighbor is not active
+	if ((node.block->t == 0) || !isNeighbourActive)
+	{
+		// get the source lights channel values
+
+		int r1 = GET_LIGHT_LEVEL_R(level);
+		int g1 = GET_LIGHT_LEVEL_G(level);
+		int b1 = GET_LIGHT_LEVEL_B(level);
+
+		// get the current channel values
+
+		int r2 = GET_LIGHT_LEVEL_R(node.block->lights[idx]);
+		int g2 = GET_LIGHT_LEVEL_G(node.block->lights[idx]);
+		int b2 = GET_LIGHT_LEVEL_B(node.block->lights[idx]);
+
+		//
+		int newR = r2, newG = g2, newB = b2;
+
+		// if the current level is 2 or more less than the new level it can be brightened
+
+		if (r2 + 2 <= r1)
+		{
+			newR = r1 - 1;
+			propagate = true;
+		}
+
+		if (g2 + 2 <= g1)
+		{
+			newG = g1 - 1;
+			propagate = true;
+		}
+
+		if (b2 + 2 <= b1)
+		{
+			newB = b1 - 1;
+			propagate = true;
+		}
+
+		// set the new level
+		node.owner->setLightLevel(node.block, newR, newG, newB, face);
+	}
+
+	// return propage
+	return propagate;
+}
+
+Chunk::LightNode Chunk::getLightNode(int x, int y, int z)
+{
+	if (x < 0)
+	{
+		if (this->left != nullptr)
+			return this->left->getLightNode(_size + x, y, z);
+		else
+			return LightNode(nullptr, nullptr);
+	}
+	else if (x >= _size)
+	{
+		if (this->right != nullptr)
+			return this->right->getLightNode(x - _size, y, z);
+		else
+			return LightNode(nullptr, nullptr);
+	}
+
+	if (y < 0)
+	{
+		if (this->bottom != nullptr)
+			return this->bottom->getLightNode(x, _size + y, z);
+		else
+			return LightNode(nullptr, nullptr);
+	}
+	else if (y >= _size)
+	{
+		if (this->top != nullptr)
+			return this->top->getLightNode(x, y - _size, z);
+		else
+			return LightNode(nullptr, nullptr);
+	}
+
+	if (z < 0)
+	{
+		if (this->near != nullptr)
+			return this->near->getLightNode(x, y, _size + z);
+		else
+			return LightNode(nullptr, nullptr);
+	}
+	else if (z >= _size)
+	{
+		if (this->far != nullptr)
+			return this->far->getLightNode(x, y, z - _size);
+		else
+			return LightNode(nullptr, nullptr);
+	}
+
+	Block* block = getBlock(x, y, z);
+
+	return LightNode(block, this);
+}
+
+void Chunk::removeLightSources()
+{
+	// store a list of chunks that need to be updated
+	ChunkSet updateSet;
+
+	// iterate over every node that needs to be removed
+	for (auto& iter : _lightRemovalList)
+	{
+		std::queue<LightNode> lightQueue;
+		std::map<Block*, int> intensities;
+
+		// add the source node to the FIFO queue
+		lightQueue.push(iter.second);
+
+		// get the highest light intensity of each channel of each face
+
+		int sourceIntensity = 0;
+
+		int i;
+		for (i = 0; i < 6; ++i)
+		{
+			int r = GET_LIGHT_LEVEL_R(iter.second.block->lights[i]);
+			int g = GET_LIGHT_LEVEL_G(iter.second.block->lights[i]);
+			int b = GET_LIGHT_LEVEL_B(iter.second.block->lights[i]);
+
+			sourceIntensity = std::max(std::max(std::max(r, g), b), sourceIntensity);
+		}
+
+		// clear the source block light
+		clearBlockLight(iter.second.block);
+
+		// set the intensity value in the map
+		intensities[iter.first] = sourceIntensity;
+
+		while (!lightQueue.empty())
+		{
+			LightNode source = lightQueue.front();
+
+			int x = (int)source.block->x;
+			int y = (int)source.block->y;
+			int z = (int)source.block->z;
+
+			lightQueue.pop();
+
+			// intensity of the current block
+			int intensity = intensities[source.block];
+
+			// 
+			if (intensity > 0)
+			{
+				// get every adjacent block to the current node and clear its light channels
+				// then add its owning chunk to the update set
+
+				LightNode adjacent;
+
+				adjacent = source.owner->getLightNode(x - 1, y, z);
+				clearLightNode(adjacent, lightQueue, intensities, intensity);
+				if (adjacent.owner != nullptr)
+					updateSet.insert(adjacent.owner);
+
+				adjacent = source.owner->getLightNode(x + 1, y, z);
+				clearLightNode(adjacent, lightQueue, intensities, intensity);
+				if (adjacent.owner != nullptr)
+					updateSet.insert(adjacent.owner);
+
+				adjacent = source.owner->getLightNode(x, y + 1, z);
+				clearLightNode(adjacent, lightQueue, intensities, intensity);
+				if (adjacent.owner != nullptr)
+					updateSet.insert(adjacent.owner);
+
+				adjacent = source.owner->getLightNode(x, y - 1, z);
+				clearLightNode(adjacent, lightQueue, intensities, intensity);
+				if (adjacent.owner != nullptr)
+					updateSet.insert(adjacent.owner);
+
+				adjacent = source.owner->getLightNode(x, y, z - 1);
+				clearLightNode(adjacent, lightQueue, intensities, intensity);
+				if (adjacent.owner != nullptr)
+					updateSet.insert(adjacent.owner);
+
+				adjacent = source.owner->getLightNode(x, y, z + 1);
+				clearLightNode(adjacent, lightQueue, intensities, intensity);
+				if (adjacent.owner != nullptr)
+					updateSet.insert(adjacent.owner);
+			}
+		}
+
+		iter.second.owner->getLightSourceMap().erase(iter.first);
+	}
+
+	for (auto& chunk : updateSet)
+		chunk->markForUpdate();
+
+	_lightRemovalList.clear();
+}
+
+void Chunk::clearLightNode(LightNode& node, std::queue<LightNode>& queue, std::map<Block*, int>& intensities, int intensity)
+{
+	if (node.block != nullptr)
+	{
+		// if the block hasn't already been discovered
+		if (intensities.find(node.block) == intensities.end())
+		{
+			LightMap& sourceList = node.owner->getLightSourceMap();
+
+			// and the block isn't in the parent chunk's source list
+			if (sourceList.find(node.block) == sourceList.end())
+			{
+				queue.push(node);
+				intensities[node.block] = intensity - 1;
+				clearBlockLight(node.block);
+			}
+		}
+	}
+}
+
+void Chunk::clearBlockLight(Block* block)
+{
+	block->lights[0] = 0;
+	block->lights[1] = 0;
+	block->lights[2] = 0;
+	block->lights[3] = 0;
+	block->lights[4] = 0;
+	block->lights[5] = 0;
+}
+
+ColorRGB32f Chunk::getBlockColor(Block& block, BlockFace face)
+{
+	light_t light = block.lights[static_cast<int>(face)];
+
+	// get the channel values
+	uint8_t ri = GET_LIGHT_LEVEL_R(light);
+	uint8_t gi = GET_LIGHT_LEVEL_G(light);
+	uint8_t bi = GET_LIGHT_LEVEL_B(light);
+
+	// convert to floating point
+	float rf = (float)ri / (float)CHNL_MASK;
+	float gf = (float)gi / (float)CHNL_MASK;
+	float bf = (float)bi / (float)CHNL_MASK;
+
+	//
+	return ColorRGB32f(rf, gf, bf);
+}
+
+Chunk::LightNode Chunk::getLightNode(Block* block, BlockFace face)
+{
+	// get the node by getting the neighbor block that coresponds to the face
+
+	switch (face)
+	{
+	case BlockFace::LEFT:
+		return getLightNode((int)block->x - 1, (int)block->y, (int)block->z);
+	case BlockFace::RIGHT:
+		return getLightNode((int)block->x + 1, (int)block->y, (int)block->z);
+	case BlockFace::TOP:
+		return getLightNode((int)block->x, (int)block->y + 1, (int)block->z);
+	case BlockFace::BOTTOM:
+		return getLightNode((int)block->x, (int)block->y - 1, (int)block->z);
+	case BlockFace::NEAR:
+		return getLightNode((int)block->x, (int)block->y, (int)block->z - 1);
+	case BlockFace::FAR:
+		return getLightNode((int)block->x, (int)block->y, (int)block->z + 1);
+
+	default:
+		return LightNode(nullptr, nullptr);
+	}
+}
+
+bool Chunk::isSetup(void) const
+{
+	return _dirty == false;
+}
+
+bool Chunk::shouldRender(void)
+{
+	return _shouldRender;
+}
+
+bool Chunk::hasLocation(void) const
+{
+	return _hasLocation;
+}
+
+void Chunk::setLocation(int x, int y, int z)
+{
+	_offset.x = (float)x;
+	_offset.y = (float)y;
+	_offset.z = (float)z;
+
+	_hasLocation = true;
+}
+
+Vector3 Chunk::getLocation(void)
+{
+	return _offset;
+}
+
+void Chunk::setAtlasName(const std::string& name)
+{
+	_atlasName = name;
+}
+
+void Chunk::calculateBounds(Matrix4& worldTransform)
+{
+	// calculate this chunks AABB
+
+	// the main offset for the chunk
+	float X = _offset.x * (_size * _blockSize * 2);
+	float Y = _offset.y * (_size * _blockSize * 2);
+	float Z = _offset.z * (_size * _blockSize * 2);
+
+	float maxBlockOffset = (float)(_size - 1);
+
+	// lbn vertex for block 0, 0, 0
+	Vector4 lbn;
+	lbn.x = (0 * 2 * _blockSize + X) - _blockSize;
+	lbn.y = (0 * 2 * _blockSize + Y) - _blockSize;
+	lbn.z = (0 * 2 * _blockSize + Z) - _blockSize;
+	lbn.w = 1;
+
+	// rtf vertex for block 15, 15, 15
+	Vector4 rtf;
+	rtf.x = (maxBlockOffset * 2 * _blockSize + X) + _blockSize;
+	rtf.y = (maxBlockOffset * 2 * _blockSize + Y) + _blockSize;
+	rtf.z = (maxBlockOffset * 2 * _blockSize + Z) + _blockSize;
+	rtf.w = 1;
+
+	Vector4 min = worldTransform * lbn;
+	Vector4 max = worldTransform * rtf;
+
+	Vector4 center = (max + min) / 2.0f;
+	_bounds.center = Vector3(center.x, center.y, center.z);
+	_bounds.radius = (Vector3(max.x, max.y, max.z) - _bounds.center).length();
+}
+
+Sphere& Chunk::getBounds()
+{
+	return _bounds;
+}
+
+void Chunk::setUpdateCallback(std::function<void(Chunk*)> callback)
+{
+	_updateCallback = callback;
+}
+
+Chunk::LightMap& Chunk::getLightSourceMap()
+{
+	return _lightSourceList;
+}
+
+void Chunk::markForUpdate()
+{
+	// notify the parent chunk manager that an update is required
+
+	_updateCallback(this);
+	_dirty = true;
+}
+
+Chunk::~Chunk()
+{
+
+}
+```
+
+### Chunk.h
+```
+#ifndef CHUNK_H
+#define CHUNK_H
+
+#include "Block.h"
+
+#include <SGL/GL/Mesh.h>
+#include <SGL/Math/Sphere.h>
+#include <SGL/Math/Matrix4.h>
+
+#include <vector>
+#include <queue>
+#include <set>
+#include <map>
+#include <string>
+#include <functional>
+
+namespace engine
+{
+	class Chunk
+	{
+	public:
+
+		// Structure of a block's face
+		struct Face
+		{
+			Face(Vertex& v1, Vertex& v2, Vertex& v3) : v1(v1), v2(v2), v3(v3)
+			{
+			}
+
+			Vertex v1;
+			Vertex v2;
+			Vertex v3;
+		};
+
+		// structure used for lighting
+		struct LightNode
+		{
+			LightNode(Block* block, Chunk* owner) : block(block), owner(owner)
+			{
+			}
+
+			LightNode() : LightNode(nullptr, nullptr)
+			{
+			}
+
+			Block* block;
+			Chunk* owner;
+		};
+
+		typedef std::map<Block*, LightNode> LightMap;
+
+		/**
+			Initialize chunk with the number of block per each axis
+		*/
+		Chunk(int size);
+
+		/**
+			Initialize chunk with the number of block per each axis and block render size
+		*/
+		Chunk(int size, float blockSize);
+		~Chunk();
+
+		/**
+			@return the block at (x, y, z) in this chunk
+		*/
+		Block* getBlock(int x, int y, int z);
+
+		/**
+			Get block at location (x, y, z).
+
+			The difference between this function and Block::getBlock is that it accounts for the 
+			coordinates to overflow into neighboring chunks
+		*/
+		Block* getAdjacentBlock(int x, int y, int z);
+
+		/**
+			Build the mesh for this chunk
+		*/
+		void build();
+
+		/**
+			Render this chunk
+		*/
+		void render();
+
+		/**
+			Set the block at (x, y, z) to type t
+		*/
+		void setBlock(int x, int y, int z, int t);
+
+		/**
+			Set the light color value at (x, y, z)
+		*/
+		void setLightSource(int x, int y, int z, int r, int g, int b);
+
+		/**
+			Remove light at (x, y, z)
+		*/
+		void removeLight(int x, int y, int z);
+
+		/**
+			check if the chunk is set up
+		*/
+		bool isSetup(void) const;
+
+		/**
+			@return is the chunk should be rendered
+		*/
+		bool shouldRender(void);
+
+		/**
+			check if this chunk's location has already been set
+		*/
+		bool hasLocation(void) const;
+
+		/**
+			Set the location of this chunk
+		*/
+		void setLocation(int x, int y, int z);
+
+		/**
+			@return the location of this chunk in the grid
+		*/
+		sgl::Vector3 getLocation(void);
+
+		/**
+			Set the texture atlas name of this chunk
+		*/
+		void setAtlasName(const std::string& name);
+
+		/**
+			Calculate the bounding volume of this chunk
+		*/
+		void calculateBounds(sgl::Matrix4& worldTransform);
+
+		/**
+			@return the bounding volume of this chunk
+		*/
+		sgl::Sphere& getBounds();
+
+		/**
+			Set the callback for when this chunk needs to be updated
+		*/
+		void setUpdateCallback(std::function<void(Chunk*)> callback);
+
+		/**
+			Mark this chunk for an update
+		*/
+		void markForUpdate();
+
+		/**
+			@return the list of light sources
+		*/
+		LightMap& getLightSourceMap();
+
+	public:
+
+		Chunk* left;   // the chunk left neighbor
+		Chunk* right;  // the chunk right neighbor
+		Chunk* top;    // the chunk top neighbor
+		Chunk* bottom; // the chunk bottom neighbor
+		Chunk* near;   // the chunk near neighbor
+		Chunk* far;    // the chunk far neighbor
+
+	private:
+
+		// mesh for this chunk
+		sgl::Mesh _mesh;
+
+		// buffer of faces for each block of the mesh
+		std::vector<Face> _buffer;
+
+		// the chunk offest
+		sgl::Vector3 _offset;
+
+		// list of blocks
+		std::vector<Block> _blocks;
+		// flag indicating if a blocks location has already been set
+		std::vector<bool> _hasLocationFlags;
+
+		// list of light sources
+		LightMap _lightSourceList;
+		// list os light sources to be removed
+		LightMap _lightRemovalList;
+
+		// the texture atlas name for this chunk
+		std::string _atlasName;
+
+		// callback for when the chunk needs to be updated
+		std::function<void(Chunk*)> _updateCallback;
+
+		// the number of blocks per axis of this chunk
+		int _size;
+		// the block render size
+		float _blockSize;
+
+		// flag indicated that the chunk need rebuilding
+		bool _dirty;
+		// flag for is the chunk shoud be rendered
+		bool _shouldRender;
+
+		// flag for if the chunks offest has already been set
+		bool _hasLocation;
+
+		// spherical bounding area of the chunk
+		sgl::Sphere _bounds;
+
+	private:
+
+		// create the mesh for this block
+		void createCubeMesh(Block& block, bool l, bool r, bool t, bool b, bool n, bool far);
+
+		/**
+			make a face of a block using the 3 vertices
+		*/
+		Face makeFace(Vertex& v1, Vertex& v2, Vertex& v3, Block block, bool firstHalf, sgl::ColorRGB32f& color);
+		sgl::Vector3 calculatePerVertexNormal(sgl::Vector3 x, sgl::Vector3 y, sgl::Vector3 z, bool adjacentX, bool adjacentY, bool adjacentZ);
+		Face textureFace(Vertex& v1, Vertex& v2, Vertex& v3, Block block, bool firstHalf);
+
+		/**
+			Propagate the light sources
+		*/
+		void propagateLight();
+		bool propagateLightPerFace(LightNode& source, LightNode& block, BlockFace face);
+		bool spreadLight(LightNode& node, BlockFace face, light_t level);
+		void setLightLevel(Block* block, int r, int g, int b, BlockFace face);
+
+		LightNode getLightNode(int x, int y, int z);
+		LightNode getLightNode(Block* block, BlockFace face);
+
+		void removeLightSources();
+		void clearBlockLight(Block* block);
+		void clearLightNode(LightNode& node, std::queue<LightNode>& queue, std::map<Block*, int>& intensities, int intensity);
+
+		sgl::ColorRGB32f getBlockColor(Block& block, BlockFace face);
+	};
+}
+
+#endif
+```
+
+### ChunkManager.cpp
+```
+#include "ChunkManager.h"
+
+#include "VoxelEngine.h"
+
+#include <iostream>
+
+using namespace engine;
+using namespace sgl;
+
+ChunkManager::ChunkManager(int x, int y, int z, const char *atlasName) : ChunkManager(x, y, z, 16, 1, atlasName)
+{
+}
+
+ChunkManager::ChunkManager(int x, int y, int z, int blocksPerChunk, float blockSize, const char *atlasName) :
+	_blockX(x),
+	_blockY(y),
+	_blockZ(z),
+	_blocksPerChunk(blocksPerChunk),
+	_blockSize(blockSize),
+	_rebuildsPerFrame(5),
+	_atlasName(atlasName),
+	_renderDebug(false),
+	_updateBoundingVolume(true)
+{
+	allocateChunks(blocksPerChunk, blockSize);
+
+	_worldTransform.toTranslation(0, 0, 0);
+}
+
+void ChunkManager::update()
+{
+	if (_updateBoundingVolume)
+	{
+		updateChunkVolumes();
+		_updateBoundingVolume = false;
+	}
+
+	rebuildChunks();
+}
+
+void ChunkManager::updateVisiblityList(Frustum& frustum)
+{
+	// clear the current chunks
+	_chunkRenderSet.clear();
+
+	int i, j, k;
+
+	for (i = 0; i < _size; ++i)
+	{
+		for (j = 0; j < _size; ++j)
+		{
+			for (k = 0; k < _size; ++k)
+			{
+				Chunk& chunk = getChunk(i, j, k);
+
+				Sphere& bounds = chunk.getBounds();
+
+				Frustum::Side side = frustum.checkSphere(bounds);
+
+				if (side == Frustum::Side::INSIDE || side == Frustum::Side::INTERSECT)
+				{
+					if (chunk.isSetup())
+					{
+						_chunkRenderSet.insert(&chunk);
+					}
+					else
+					{
+						_chunkRebuildSet.insert(&chunk);
+					}
+				}
+			}
+		}
+	}
+}
+
+void ChunkManager::translate(float x, float y, float z)
+{
+	_worldTransform.translate(x, y, z);
+	_updateBoundingVolume = true;
+}
+
+void ChunkManager::rotate(float x, float y, float z)
+{
+	_worldTransform.rotate(x, y, z);
+	_updateBoundingVolume = true;
+}
+
+void ChunkManager::scale(float s)
+{
+	_worldTransform.scale(s);
+	_updateBoundingVolume = true;
+}
+
+void ChunkManager::render()
+{
+	ChunkSet::iterator iter;
+	for (iter = _chunkRenderSet.begin(); iter != _chunkRenderSet.end(); ++iter)
+	{
+		Chunk* chunk = (*iter);
+		
+		if (chunk->shouldRender())
+		{
+			chunk->render();
+		}
+	}
+}
+
+void ChunkManager::updateChunkVolumes()
+{
+	int i, j, k;
+	for (i = 0; i < _size; ++i)
+		for (j = 0; j < _size; ++j)
+			for (k = 0; k < _size; ++k)
+			{
+				Chunk& chunk = getChunk(i, j, k);
+				chunk.calculateBounds(_worldTransform);
+			}
+
+	_updateBoundingVolume = false;
+}
+
+Block ChunkManager::getBlockFromWorldPosition(const sgl::Vector3& p)
+{
+	return getBlockFromWorldPosition(p.x, p.y, p.z);
+}
+
+Block ChunkManager::getBlockFromWorldPosition(float x, float y, float z)
+{
+	float blockRenderSize = _blockSize * 2;
+
+	int blockX = (int)(x / blockRenderSize);
+	int blockY = (int)(y / blockRenderSize);
+	int blockZ = (int)(z / blockRenderSize);
+
+	return getBlock(blockX, blockY, blockZ);
+}
+
+Chunk& ChunkManager::getChunkFromWorldPosition(const sgl::Vector3& pos)
+{
+	return getChunkFromWorldPosition(pos.x, pos.y, pos.z);
+}
+
+Chunk& ChunkManager::getChunkFromWorldPosition(float x, float y, float z)
+{
+	// world space size of a chunk
+	float chunkRenderSize = (float)(_blocksPerChunk * _blockSize * 2);
+
+	// get the x,y,z indices of the chunk at given location 
+
+	int chunkX = (int)(x / chunkRenderSize);
+	int chunkY = (int)(y / chunkRenderSize);
+	int chunkZ = (int)(z / chunkRenderSize);
+
+	//
+	return getChunk(chunkX, chunkY, chunkZ);
+}
+
+Block ChunkManager::getBlock(int x, int y, int z)
+{
+	int chunkX = x / _blocksPerChunk;
+	int chunkY = y / _blocksPerChunk;
+	int chunkZ = z / _blocksPerChunk;
+
+	int blockX = x % _blocksPerChunk;
+	int blockY = y % _blocksPerChunk;
+	int blockZ = z % _blocksPerChunk;
+
+	Chunk& chunk = getChunk(chunkX, chunkY, chunkZ);
+
+	return *chunk.getBlock(blockX, blockY, blockZ);
+}
+
+void ChunkManager::setBlock(int x, int y, int z, int t)
+{
+	int chunkX = x / _blocksPerChunk;
+	int chunkY = y / _blocksPerChunk;
+	int chunkZ = z / _blocksPerChunk;
+
+	int blockX = x % _blocksPerChunk;
+	int blockY = y % _blocksPerChunk;
+	int blockZ = z % _blocksPerChunk;
+
+	Chunk& chunk = getChunk(chunkX, chunkY, chunkZ);
+	chunk.setBlock(blockX, blockY, blockZ, t);
+}
+
+void ChunkManager::setLightSource(int x, int y, int z, int r, int g, int b)
+{
+	int chunkX = x / _blocksPerChunk;
+	int chunkY = y / _blocksPerChunk;
+	int chunkZ = z / _blocksPerChunk;
+
+	int blockX = x % _blocksPerChunk;
+	int blockY = y % _blocksPerChunk;
+	int blockZ = z % _blocksPerChunk;
+
+	Chunk& chunk = getChunk(chunkX, chunkY, chunkZ);
+	chunk.setLightSource(blockX, blockY, blockZ, r, g, b);
+}
+
+void ChunkManager::removeLight(int x, int y, int z)
+{
+	int chunkX = x / _blocksPerChunk;
+	int chunkY = y / _blocksPerChunk;
+	int chunkZ = z / _blocksPerChunk;
+
+	int blockX = x % _blocksPerChunk;
+	int blockY = y % _blocksPerChunk;
+	int blockZ = z % _blocksPerChunk;
+
+	Chunk& chunk = getChunk(chunkX, chunkY, chunkZ);
+	chunk.removeLight(blockX, blockY, blockZ);
+}
+
+Chunk& ChunkManager::getChunk(int x, int y, int z)
+{
+	if (x < 0) x = 0;
+	if (y < 0) y = 0;
+	if (z < 0) z = 0;
+
+	Chunk& chunk = *(_chunks[(x * _size) + (y * _size * _size) + z]);
+
+	if (!chunk.hasLocation())
+	{
+		chunk.setLocation(x, y, z);
+		chunk.calculateBounds(_worldTransform);
+		setChunkNeighbors(chunk);
+		chunk.setUpdateCallback(std::bind(&ChunkManager::updateCallback, this, std::placeholders::_1));
+	}
+
+	return chunk;
+}
+
+void ChunkManager::rebuildChunks()
+{
+	// nothing to rebuild
+	if (_chunkRebuildSet.size() == 0) return;
+
+	int rebuiltCount = 0;
+
+	ChunkList rebuilt;
+
+	ChunkSet::iterator iter;
+	for (iter = _chunkRebuildSet.begin(); rebuiltCount < _rebuildsPerFrame && iter != _chunkRebuildSet.end(); ++iter)
+	{
+		// build the chunk
+		Chunk* chunk = (*iter);
+		chunk->build();
+
+		// set it to be removed later
+		rebuilt.push_back(chunk);
+
+		// add to the render list
+		_chunkRenderSet.insert(chunk);
+
+		//
+		rebuiltCount++;
+	}
+
+	// remove rebuilt chunks
+	ChunkList::iterator rebuiltIter;
+	for (rebuiltIter = rebuilt.begin(); rebuiltIter != rebuilt.end(); ++rebuiltIter)
+	{
+		_chunkRebuildSet.erase(*rebuiltIter);
+	}
+}
+
+void ChunkManager::updateCallback(Chunk* chunk)
+{
+	_chunkRebuildSet.insert(chunk);
+}
+
+int ChunkManager::getBlockX() const
+{
+	return _blockX;
+}
+
+int ChunkManager::getBlockY() const
+{
+	return _blockY;
+}
+
+int ChunkManager::getBlockZ() const
+{
+	return _blockZ;
+}
+
+sgl::Matrix4& ChunkManager::getWorldTransform()
+{
+	return _worldTransform;
+}
+
+void ChunkManager::setAtlasName(const std::string& name)
+{
+	_atlasName = name;
+}
+
+std::string ChunkManager::getAtlasName()
+{
+	return _atlasName;
+}
+
+void ChunkManager::setRenderDebug(bool d)
+{
+	_renderDebug = d;
+}
+
+bool ChunkManager::boundingVolumeOutOfDate()
+{
+	return _updateBoundingVolume;
+}
+
+void ChunkManager::allocateChunks(int chunkSize, float blockSize)
+{
+	int xSize = _blockX / chunkSize;
+	int ySize = _blockY / chunkSize;
+	int zSize = _blockZ / chunkSize;
+
+	if (xSize >= ySize && xSize >= zSize) _size = xSize;
+	if (ySize >= xSize && ySize >= zSize) _size = ySize;
+	if (zSize >= ySize && zSize >= xSize) _size = zSize;
+
+	int chunksToAllocate = _size * _size * _size;
+
+	int i;
+	for (i = 0; i < chunksToAllocate; ++i)
+	{
+		Chunk* chunk = new Chunk(chunkSize, blockSize);
+		chunk->setAtlasName(_atlasName);
+
+		_chunks.push_back(chunk);
+	}
+}
+
+void ChunkManager::setChunkNeighbors(Chunk& chunk)
+{
+	Vector3 loc = chunk.getLocation();
+	int x = (int)loc.x;
+	int y = (int)loc.y;
+	int z = (int)loc.z;
+
+	if (x - 1 >= 0)
+		chunk.left   = &getChunk(x - 1, y, z);
+	if (x + 1 < _size)
+		chunk.right  = &getChunk(x + 1, y, z);
+	if (y + 1 < _size)
+		chunk.top    = &getChunk(x, y + 1, z);
+	if (y - 1 >= 0)
+		chunk.bottom = &getChunk(x, y - 1, z);
+	if (z - 1 >= 0)
+		chunk.near   = &getChunk(x, y, z - 1);
+	if (z + 1 < _size)
+		chunk.far    = &getChunk(x, y, z + 1);
+}
+
+ChunkManager::~ChunkManager()
+{
+	ChunkList::iterator iter;
+	for (iter = _chunks.begin(); iter != _chunks.end(); ++iter)
+	{
+		delete *iter;
+	}
+}
+```
+
+### ChunkManager.h
+```
+#ifndef CHUNKMANAGER_H
+#define CHUNKMANAGER_H
+
+#include "Chunk.h"
+#include "FPSCamera.h"
+
+#include <SGL/Math/Matrix4.h>
+
+#include <vector>
+#include <set>
+#include <string>
+
+namespace engine
+{
+	typedef std::vector<Chunk*> ChunkList;
+	typedef std::set<Chunk*>    ChunkSet;
+
+	class ChunkManager
+	{
+	public:
+
+		/**
+			(x, y, z) - grid dimensions in blocks
+
+			chunkSize - number of blocks per chunk
+			blockSize - half the render size of the block
+		*/
+		ChunkManager(int x, int y, int z, int blocksPerChunk, float blockSize, const char *atlasName);
+
+		/**
+			(x, y, z) - grid dimensions in blocks
+		*/
+		ChunkManager(int x, int y, int z, const char *atlasName);
+
+		~ChunkManager();
+
+		/**
+			Update which chunks should be rendered using a camera frustum
+		*/
+		void update();
+
+		/**
+			get the list of chunks in visible range of the camera frustum
+		*/
+		void updateVisiblityList(sgl::Frustum& frustum);
+
+		/**
+			translate this grid
+		*/
+		void translate(float x, float y, float z);
+
+		/**
+			rotate this grid
+		*/
+		void rotate(float x, float y, float z);
+
+		/**
+			scale this block
+		*/
+		void scale(float s);
+
+		/**
+			render visible chunks
+		*/
+		void render();
+
+		/**
+			Get the block at the specified grid position
+		*/
+		Block getBlock(int x, int y, int z);
+
+		/**
+			Set the block type at position (x, y, z)
+		*/
+		void setBlock(int x, int y, int z, int t);
+
+		/**
+		*/
+		void setLightSource(int x, int y, int z, int r, int g, int b);
+
+		/**
+			remove light source at location (x, y, z)
+		*/
+		void removeLight(int x, int y, int z);
+
+		/**
+			Get the block from the specified position
+		*/
+		Block getBlockFromWorldPosition(const sgl::Vector3& position);
+
+		Chunk& getChunkFromWorldPosition(const sgl::Vector3& position);
+		Chunk& getChunkFromWorldPosition(float x, float y, float z);
+		
+		/**
+		*/
+		Block getBlockFromWorldPosition(float x, float y, float z);
+
+		int getBlockX() const;
+		int getBlockY() const;
+		int getBlockZ() const;
+
+		sgl::Matrix4& getWorldTransform();
+
+		void setAtlasName(const std::string& name);
+		std::string getAtlasName();
+
+		void setRenderDebug(bool d);
+
+		bool boundingVolumeOutOfDate();
+
+	private:
+
+		ChunkList _chunks;
+		ChunkSet  _chunkRenderSet;
+		ChunkSet  _chunkVisibleSet;
+		ChunkSet  _chunkRebuildSet;
+
+		int _blockX;           // number of block in the x direction
+		int _blockY;           // number of block in the y direction
+		int _blockZ;           // number of block in the z direction
+
+		int   _blocksPerChunk; // number of blocks in one dimesnsion of the chunk
+		float _blockSize;      // half size of block
+
+		int _size;
+
+		int _rebuildsPerFrame;
+
+		bool _renderDebug;
+
+		sgl::Matrix4 _worldTransform;
+
+		std::string _atlasName;
+
+		bool _updateBoundingVolume;
+
+	private:
+		Chunk& getChunk(int x, int y, int z);
+
+		void rebuildChunks();
+
+		void updateChunkVolumes();
+
+		void allocateChunks(int chunkSize, float blockSize);
+		void setChunkNeighbors(Chunk& chunk);
+
+		void updateCallback(Chunk* chunk);
+
+	};
+}
+
+#endif
+```
+
+### CommandLine.cpp
+```
+#include "CommandLine.h"
+#include "VoxelEngine.h"
+#include "Window.h"
+
+#include <glfw/glfw3.h>
+
+#include <sstream>
+#include <algorithm>
+
+namespace engine
+{
+	namespace gui
+	{
+		CommandLine::CommandLine() : _isActive(false)
+		{
+		}
+
+		void CommandLine::init()
+		{
+			_text.setFont(&VoxelEngine::getEngine()->getResources().getFontManager().getFont("DefaultFont"));
+			_text.setDimensions(20, 20);
+		}
+
+		void CommandLine::addCommand(const std::string& name, const CommandFunc& func)
+		{
+			_commands[name] = func;
+		}
+
+		void CommandLine::dispatch()
+		{
+			// break the input string into tokens
+			StringList tokens;
+			tokenize(tokens, _buffer, " ");
+
+			// get the command
+			std::string cmd = tokens.front();
+
+			// get command arguments
+			StringList args(tokens.begin() + 1, tokens.end());
+
+			// get the command if it exists
+			if (_commands.find(cmd) != _commands.end())
+			{
+				_commands[cmd](args);
+			}
+
+			// clear text
+			clear();
+
+			// disable after command is executed
+			setActive(false);
+		}
+
+		void CommandLine::process(int keycode)
+		{	
+			static int caseOffset = (int)'a' - (int)'A';
+
+			gui::Window& window = *VoxelEngine::getEngine()->getWindow();
+
+			switch (keycode)
+			{
+			case GLFW_KEY_ENTER:
+				dispatch();
+				break;
+
+			case GLFW_KEY_BACKSPACE:
+				removeBack();
+				break;
+
+			default:
+
+				char c = keycode;
+
+				// only accept letters, numbers and spaces
+				if (keycode >= (int)'A' && keycode <= (int)'Z')
+				{
+					if (!window.isKeyPressed(GLFW_KEY_LEFT_SHIFT) && !window.isKeyPressed(GLFW_KEY_RIGHT_SHIFT))
+						c = keycode + caseOffset;
+					else
+						c = keycode;
+
+					std::string str = { (char)c };
+					push(str.c_str());
+				}
+				else if (keycode >= (int)'0' && keycode <= (int)'9' || keycode == ' ' || keycode == '-')
+				{
+					std::string str = { (char)c };
+					push(str.c_str());
+				}
+
+				break;
+			}
+		}
+
+		void CommandLine::append(const char *str)
+		{
+			_text << str;
+		}
+
+		void CommandLine::push(const char *str)
+		{
+			_text << str;
+			_buffer.push_back(*str);
+		}
+
+		void CommandLine::removeBack()
+		{
+			if (_buffer.size() > 0)
+			{
+				_buffer.pop_back();
+				_text.removeBack();
+			}
+		}
+
+		void CommandLine::clear()
+		{
+			_text.clear();
+			_buffer.clear();
+		}
+
+		sgl::Text& CommandLine::getText()
+		{
+			return _text;
+		}
+
+		void CommandLine::setActive(bool a)
+		{
+			_isActive = a;
+
+			if (!a)
+			{
+				clear();
+			}
+		}
+
+		bool CommandLine::isActive()
+		{
+			return _isActive;
+		}
+
+		void CommandLine::tokenize(StringList& tokens, std::string &s, const std::string &delimiter)
+		{
+			// check that is still valid
+			while (s.find(delimiter, 0) != std::string::npos){
+				// get pos of next delimiter
+				size_t pos = s.find(delimiter, 0);
+				// create a token
+				std::string token = s.substr(0, pos);
+				// erase the current token 
+				s.erase(0, pos + 1);
+				// add the token to  vector
+				tokens.push_back(token);
+			}
+			// push the last token
+			tokens.push_back(s);
+		}
+
+		CommandLine::~CommandLine()
+		{
+		}
+	}
+}
+```
+
+### CommandLine.h
+```
+#ifndef COMMANDLINE_H
+#define COMMANDLINE_H
+
+#include <SGL/Graphics/BitmapFont.h>
+#include <SGL/Graphics/Text.h>
+
+#include <string>
+#include <map>
+#include <functional>
+
+namespace engine
+{
+	namespace gui
+	{
+		/**
+			Provides direct user interface to the engine
+		*/
+		class CommandLine
+		{
+		public:
+
+			typedef std::function<bool(std::vector<std::string>&)> CommandFunc;
+			typedef std::vector<std::string> StringList;
+
+			CommandLine();
+			~CommandLine();
+
+			void init();
+
+			/**
+				Add a command function to the command line
+			*/
+			void addCommand(const std::string& name, const CommandFunc& func);
+
+			/**
+				Process an incoming key even
+			*/
+			void process(int keycode);
+
+			/**
+				Append text to the command lien display
+
+				This does not alter the buffer, only the render text
+			*/
+			void append(const char *str);
+
+			/**
+				Clear the command line buffer
+			*/
+			void clear();
+
+			/**
+				@return thr render text object
+			*/
+			sgl::Text& getText();
+
+			/**
+				enable the command line
+			*/
+			void setActive(bool a);
+
+			/**
+				Check if the command line is active
+			*/
+			bool isActive();
+
+		private:
+
+			// render text for command line
+			sgl::Text _text;
+			// user input string
+			std::string _buffer;
+
+			// command map
+			std::map<std::string, CommandFunc> _commands;
+
+			// command enable flag
+			bool _isActive;
+
+		private:
+
+			/**
+				Execute the input command with arguments
+			*/
+			void dispatch();
+
+			/**
+				push a character to the buffer
+			*/
+			void push(const char *str);
+
+			/**
+				remove the last character
+			*/
+			void removeBack();
+
+			/**
+				tokenize an input string with a delimiter
+			*/
+			void tokenize(StringList& v, std::string &s, const std::string &delimiter);
+		};
+	}
+}
+
+#endif
+```
+
+### ConfigReader.cpp
+```
+#include "ConfigReader.h"
+#include "FatalError.h"
+
+#include <fstream>
+
+#include <boost/property_tree/json_parser.hpp>
+
+namespace engine
+{
+	ConfigReader::ConfigReader() : _isLoaded(false)
+	{
+	}
+
+	void ConfigReader::load(const std::string& configFileName)
+	{
+		std::ifstream file(configFileName);
+
+		if (!file.good()) throw std::exception(std::string("Could not open file: " + configFileName).c_str());
+
+		// read in the file
+		std::stringstream buffer;
+		buffer << file.rdbuf();
+
+		// parse the json file
+		boost::property_tree::ptree ptree;
+		boost::property_tree::read_json(buffer, ptree);
+
+		// check if the 'config' root node exist
+		if (ptree.count("config"))
+		{
+			_root = ptree.get_child("config");
+		}
+		else
+		{
+			fatalError("Error: config.json must contain the attribute config as the root element");
+		}
+		
+
+		_isLoaded = true;
+	}
+
+	bool ConfigReader::exists(const std::string& child)
+	{
+		return _isLoaded && _root.count(child) > 0;
+	}
+
+	ConfigReader::~ConfigReader()
+	{
+	}
+}
+```
+
+### ConfigReader.h
+```
+#ifndef CONFIGREADER_H
+#define CONFIGREADER_H
+
+#include <string>
+#include <cassert>
+
+#include <boost/property_tree/ptree.hpp>
+
+namespace engine
+{
+	/**
+		Read a JSON configuration file
+	*/
+	class ConfigReader
+	{
+	public:
+
+		ConfigReader();
+		~ConfigReader();
+
+		/**
+			Load the config file
+		*/
+		void load(const std::string& configFileName);
+
+		/**
+			Check if a value exists under the "config" root node
+		*/
+		bool exists(const std::string& child);
+
+		/**
+			Get a generic value from the config file under the "config" root node
+		*/
+		template<typename T>
+		T getValue(const std::string& child)
+		{
+			assert(_isLoaded);
+			return _root.get<T>(child);
+		}
+
+	private:
+
+		boost::property_tree::ptree _root;
+
+		bool _isLoaded;
+
+	};
+}
+
+#endif
+```
+
+### DebugDeferredRenderer.cpp
+```
+#include "DebugDeferredRenderer.h"
+
+#include "VoxelEngine.h"
+#include "GLSL_GeometryPass.h"
+#include "GLSL_LightPass.h"
+
+#include <SGL/Util/Context.h>
+
+using namespace engine;
+using namespace sgl;
+
+DebugDeferredRenderer::DebugDeferredRenderer(void)
+{
+}
+
+void DebugDeferredRenderer::init()
+{
+	try
+	{
+		// load geometry pass shader
+		_geometryPass.load(ShaderProgram::Type::VERTEX,   GLSL_GEOMETRYPASS_VERT);
+		_geometryPass.load(ShaderProgram::Type::FRAGMENT, GLSL_GEOMETRYPASS_FRAG);
+
+		_geometryPass.addAttribute("vPosition");
+		_geometryPass.addAttribute("vNormal");
+		_geometryPass.addAttribute("vTexCoord");
+
+		_geometryPass.bindFragOutput("outNormal");
+		_geometryPass.bindFragOutput("outDiffuse");
+		_geometryPass.bindFragOutput("outColor");
+
+		_geometryPass.link();
+
+		// load the light pass shader
+		_lightPass.load(ShaderProgram::Type::VERTEX,   GLSL_LIGHTPASS_VERT);
+		_lightPass.load(ShaderProgram::Type::FRAGMENT, GLSL_DEBUG_LIGHTPASS_FRAG);
+
+		_lightPass.addAttribute("vPosition");
+
+		_lightPass.link();
+
+		// initialize the GBuffer
+		_gBuffer.init((int)Context::getViewPortWidth(), (int)Context::getViewPortHeight());
+
+		// init the screen mesh
+		initScreenMesh(_screenMesh);
+
+	}
+	catch (Exception& e)
+	{
+		std::cout << "Error initializing the Renderer" << std::endl;
+
+		throw std::exception(e.what());
+	}
+
+	glClearColor(1, 1, 1, 1);
+	glEnable(GL_DEPTH_TEST);
+
+	glEnable(GL_BLEND);
+	glBlendFunc(GL_SRC_ALPHA, GL_ONE_MINUS_SRC_ALPHA);
+	glEnable(GL_ALPHA_TEST);
+	glAlphaFunc(GL_GREATER, 0);
+
+	initialized = true;
+
+	setRenderOption("sampler", "diffuse-map");
+}
+
+void DebugDeferredRenderer::begin()
+{
+	// clear the back buffer
+	Context::clear(Context::BufferBits::COLOR_DEPTH);
+
+	// bind to write to the gbuffer
+	_gBuffer.bindForWriting();
+
+	// clear the gbuffer 
+	Context::clear(Context::BufferBits::COLOR_DEPTH);
+
+	// start the geometry pass
+	_geometryPass.begin();
+
+	// depth testing is required
+	glEnable(GL_DEPTH_TEST);
+}
+
+void DebugDeferredRenderer::render(ChunkManager& chunkManager, sgl::Matrix4& VP)
+{
+	// get the chunkmanager transform matrix and calculate the MVP
+
+	Matrix4& M = chunkManager.getWorldTransform();
+	Matrix4 MVP = VP * M;
+	Matrix3 N = M.toNormalMatrix();
+
+	_geometryPass["MVP"].set(MVP);
+	_geometryPass["N"].set(N);
+
+	Texture& texture = VoxelEngine::getEngine()->getResources().getTextureManager().getTexture(chunkManager.getAtlasName());
+	texture.bind(Texture::Unit::T0);
+
+	_geometryPass["blockTexture"].set(texture);
+
+	chunkManager.render();
+
+	texture.unbind();
+}
+
+void DebugDeferredRenderer::end()
+{
+	_geometryPass.end();
+
+	// render full screen quad using the light pass shader
+
+	// bind gbuffer to access textures
+	//_gBuffer.bindForReading();
+	_gBuffer.unbind();
+	Texture& texture = _gBuffer.getTexture(renderOptions["sampler"]);
+
+	texture.bind(Texture::Unit::T0);
+
+	// disable depth testing as it's not needed in thsi pass
+	glDisable(GL_DEPTH_TEST);
+
+	_lightPass.begin();
+	{
+		_lightPass["screenSize"].set(Context::getViewPortDimensions());
+
+		_lightPass["sampler"].set(texture);
+
+		_screenMesh.bind();
+		_screenMesh.draw();
+		_screenMesh.unbind();
+	}
+	_lightPass.end();
+}
+
+void DebugDeferredRenderer::initScreenMesh(sgl::Mesh& mesh)
+{
+	// float buffer with screen space coordinates of quad
+	float screenMeshBuffer[] = {
+		-1,  1,
+		 1,  1,
+		-1, -1,
+
+		 1,  1,
+		-1, -1,
+		 1, -1
+	};
+
+	mesh.addAttribute(VertexAttribute(0, 2));
+	mesh.create(2 * sizeof(float));
+	mesh.setDrawCount(6);
+
+	Buffer& vbo = mesh.getVBO();
+	vbo.bind();
+	vbo.setData(screenMeshBuffer, sizeof(screenMeshBuffer));
+	vbo.unbind();
+}
+
+DebugDeferredRenderer::~DebugDeferredRenderer()
+{
+}
+```
+
+### DebugDeferredRenderer.h
+```
+#ifndef DEBUGDEFERREDRENDERER_H
+#define DEBUGDEFERREDRENDERER_H
+
+#include "IRenderer.h"
+
+#include "GBuffer.h"
+
+#include <SGL/GL/ShaderProgram.h>
+#include <SGL/GL/Texture.h>
+#include <SGL/GL/Mesh.h>
+
+#include <SGL/Math/Matrix4.h>
+
+namespace engine
+{
+	/**
+		Shader to select which textures from the GBuffer to display
+	*/
+	class DebugDeferredRenderer : public IRenderer
+	{
+	public:
+
+		DebugDeferredRenderer(void);
+		~DebugDeferredRenderer();
+
+		void init();
+
+		void begin();
+		void render(ChunkManager& chunkManager, sgl::Matrix4& VP);
+		void end();
+
+	private:
+
+		sgl::ShaderProgram _geometryPass;
+		sgl::ShaderProgram _lightPass;
+
+		GBuffer            _gBuffer;
+
+		sgl::Mesh          _screenMesh;
+
+	private:
+
+		void initScreenMesh(sgl::Mesh& mesh);
+
+	};
+}
+
+#endif
+```
+
+### DefaultShaders.h
+```
+#ifndef DEFAULTSHADERS_H
+#define DEFAULTSHADERS_H
+
+#include <string>
+
+#define GLSL(src) "\n" #src
+
+//
+static const std::string GLSL_VERTEX_NORMAL_TEXTURE_VERT = GLSL(
+
+	in vec3 vPosition;
+	in vec3 vNormal;
+	in vec2 vTexCoord;
+
+	out vec3 fNormal;
+	out vec2 fTexCoord;
+	
+	uniform mat4 MVP;
+
+	void main()
+	{
+		gl_Position = MVP * vec4(vPosition, 1);
+
+		fNormal   = vNormal;
+		fTexCoord = vTexCoord;
+	}
+);
+
+static const std::string GLSL_VERTEX_NORMAL_TEXTURE_FRAG = GLSL(
+
+	out vec4 fragColor;
+
+	in vec3 fNormal;
+	in vec2 fTexCoord;
+
+	uniform sampler2D blockTexture;
+
+	void main()
+	{
+		fragColor = texture(blockTexture, fTexCoord);
+	}
+
+);
+
+#endif
+```
+
+### DeferredRenderer.cpp
+```
+#include "DeferredRenderer.h"
+#include "DefaultShaders.h"
+#include "GLSL_GeometryPass.h"
+#include "GLSL_LightPass.h"
+#include "VoxelEngine.h"
+
+#include "GL/glew.h"
+
+#include <SGL/Util/Context.h>
+#include <SGL/Util/Exception.h>
+#include <SGL/Math/Vector3.h>
+
+#include <iostream>
+
+using namespace engine;
+using namespace sgl;
+
+DeferredRenderer::DeferredRenderer(void)
+{
+
+}
+
+void DeferredRenderer::init()
+{
+	try
+	{
+		// load geometry pass shader
+		_geometryPass.load(ShaderProgram::Type::VERTEX,   GLSL_GEOMETRYPASS_VERT);
+		_geometryPass.load(ShaderProgram::Type::FRAGMENT, GLSL_GEOMETRYPASS_FRAG);
+
+		_geometryPass.addAttribute("vPosition");
+		_geometryPass.addAttribute("vNormal");
+		_geometryPass.addAttribute("vTexCoord");
+
+		_geometryPass.bindFragOutput("outNormal");
+		_geometryPass.bindFragOutput("outDiffuse");
+		_geometryPass.bindFragOutput("outColor");
+
+		_geometryPass.link();
+
+		// load the light pass shader
+		_lightPass.load(ShaderProgram::Type::VERTEX,   GLSL_LIGHTPASS_VERT);
+		_lightPass.load(ShaderProgram::Type::FRAGMENT, GLSL_LIGHTPASS_FRAG);
+
+		_lightPass.addAttribute("vPosition");
+
+		_lightPass.link();
+
+		// initialize the GBuffer
+		_gBuffer.init((int)Context::getViewPortWidth(), (int)Context::getViewPortHeight());
+
+		// init the screen mesh
+		initScreenMesh(_screenMesh);
+
+	}
+	catch (Exception& e)
+	{
+		std::cout << "Error initializing the Renderer" << std::endl;
+
+		throw std::exception(e.what());
+	}
+
+	glClearColor(1, 1, 1, 1);
+	glEnable(GL_DEPTH_TEST);
+
+	glEnable(GL_BLEND);
+	glBlendFunc(GL_SRC_ALPHA, GL_ONE_MINUS_SRC_ALPHA);
+	glEnable(GL_ALPHA_TEST);
+	glAlphaFunc(GL_GREATER, 0);
+
+	initialized = true;
+}
+
+void DeferredRenderer::initScreenMesh(sgl::Mesh& mesh)
+{
+	// float buffer with screen space coordinates of quad
+	float screenMeshBuffer[] = {
+		-1,  1,
+		 1,  1,
+		-1, -1,
+
+		 1,  1,
+		-1, -1,
+		 1, -1
+	};
+
+	mesh.addAttribute(VertexAttribute(0, 2));
+	mesh.create(2 * sizeof(float));
+	mesh.setDrawCount(6);
+
+	Buffer& vbo = mesh.getVBO();
+	vbo.bind();
+	vbo.setData(screenMeshBuffer, sizeof(screenMeshBuffer));
+	vbo.unbind();
+}
+
+void DeferredRenderer::begin()
+{
+	// clear the back buffer
+	Context::clear(Context::BufferBits::COLOR_DEPTH);
+
+	// bind to write to the gbuffer
+	_gBuffer.bindForWriting();
+
+	// clear the gbuffer 
+	Context::clear(Context::BufferBits::COLOR_DEPTH);
+
+	// start the geometry pass
+	_geometryPass.begin();
+
+	// depth testing is required
+	glEnable(GL_DEPTH_TEST);
+}
+
+void DeferredRenderer::render(ChunkManager& chunkManager, Matrix4& VP)
+{
+	// get the chunkmanager transform matrix and calculate the MVP
+
+	Matrix4& M  = chunkManager.getWorldTransform();
+	Matrix4 MVP = VP * M;
+	Matrix3 N   = M.toNormalMatrix();
+
+	_geometryPass["MVP"].set(MVP);
+	_geometryPass["N"].set(N);
+
+	Texture& texture = VoxelEngine::getEngine()->getResources().getTextureManager().getTexture(chunkManager.getAtlasName());
+	texture.bind(Texture::Unit::T0);
+
+	_geometryPass["blockTexture"].set(texture);
+
+	chunkManager.render();
+
+	texture.unbind();
+}
+
+void DeferredRenderer::end()
+{
+	_geometryPass.end();
+
+	// render full screen quad using the light pass shader
+
+	// bind gbuffer to access textures
+	_gBuffer.bindForReading();
+
+	// disable depth testing as it's not needed in thsi pass
+	glDisable(GL_DEPTH_TEST);
+
+	_lightPass.begin();
+	{
+		_lightPass["screenSize"].set(Context::getViewPortDimensions());
+
+		_lightPass["normalMap"].set(_gBuffer.getNormalTexture());
+		_lightPass["diffuseMap"].set(_gBuffer.getDiffuseTexture());
+		_lightPass["colorMap"].set(_gBuffer.getColorTexture());
+
+		_screenMesh.bind();
+		_screenMesh.draw();
+		_screenMesh.unbind();
+	}
+	_lightPass.end();
+}
+
+DeferredRenderer::~DeferredRenderer()
+{
+}
+```
+
+### DeferredRenderer.h
+```
+#ifndef DEFERREDRENDERER_H
+#define DEFERREDRENDERER_H
+
+#include "IRenderer.h"
+
+#include "ChunkManager.h"
+#include "TextureManager.h"
+
+#include "GBuffer.h"
+
+#include <SGL/GL/ShaderProgram.h>
+#include <SGL/GL/Texture.h>
+#include <SGL/GL/Mesh.h>
+
+#include <SGL/Math/Matrix4.h>
+
+namespace engine
+{
+	/**
+		The main shader for the voxel engine
+	*/
+	class DeferredRenderer : public IRenderer
+	{
+	public:
+
+		DeferredRenderer(void);
+		~DeferredRenderer();
+
+		void init();
+
+		void begin();
+		void render(ChunkManager& chunkManager, sgl::Matrix4& VP);
+		void end();
+
+	private:
+		sgl::ShaderProgram _geometryPass;
+		sgl::ShaderProgram _lightPass;
+
+		GBuffer            _gBuffer;
+
+		sgl::Mesh          _screenMesh;
+
+	private:
+
+		void initScreenMesh(sgl::Mesh& mesh);
+
+	};
+}
+
+#endif
+```
+
+### FPSCamera.cpp
+```
+#include "FPSCamera.h"
+
+#include <SGL/Math/MathUtil.h>
+#include <SGL/Util/Context.h>
+
+#include <iostream>
+
+#define SPEED 0.5f
+#define MOVE_SPEED 20
+
+using namespace engine;
+using namespace sgl;
+
+FPSCamera::FPSCamera() : FPSCamera(Vector3(0, 0, 0))
+{
+}
+
+FPSCamera::FPSCamera(const sgl::Vector3& position) :
+	position(position),
+	_lookAngleH(107),
+	_lookAngleV(75),
+	_fov(45)
+{
+}
+
+void FPSCamera::update()
+{
+	// update the player directions
+	calculateView();
+
+	// update the player projection
+
+	float ratio = Context::getScreenAspectRatio();
+	_proj.perspective(_fov, ratio, 0.1f, 100.0f);
+
+	// update the view frustum
+	_frustum.construct(_fov, ratio, 0.1f, 100.0f, position, _view);
+}
+
+void FPSCamera::updateLookDirection(float x, float y, float delta)
+{
+	float viewportWidth = Context::getViewPortWidth();
+	float viewportHeight = Context::getViewPortHeight();
+
+	_lookAngleH += SPEED * ((viewportWidth / 2) - x) * delta;
+	_lookAngleV += SPEED * ((viewportHeight / 2) - y) * delta;
+}
+
+void FPSCamera::calculateView()
+{
+	// forward
+	direction.x = cos(_lookAngleV) * sin(_lookAngleH);
+	direction.y = sin(_lookAngleV);
+	direction.z = cos(_lookAngleV) * cos(_lookAngleH);
+
+	// right
+	right.x = sin(_lookAngleH - 3.14f / 2.0f);
+	right.y = 0;
+	right.z = cos(_lookAngleH - 3.14f / 2.0f);
+
+	// up
+	Vector3 up;
+	up.set(right).cross(direction);
+
+	//
+	_view.lookAt(position, position + direction, up);
+}
+
+sgl::Vector3& FPSCamera::getPosition(void)
+{
+	return position;
+}
+
+sgl::Vector3& FPSCamera::getDirection(void)
+{
+	return direction;
+}
+
+sgl::Matrix4& FPSCamera::getView(void)
+{
+	return _view;
+}
+
+sgl::Matrix4& FPSCamera::getProjection(void)
+{
+	return _proj;
+}
+
+sgl::Frustum& FPSCamera::getFrustum(void)
+{
+	return _frustum;
+}
+
+void FPSCamera::incrementFOV(float inc)
+{
+	_fov += inc;
+}
+```
+
+### FPSCamera.h
+```
+#ifndef FPSCAMERA_H
+#define FPSCAMERA_H
+
+#include <SGL/Util/PerspectiveCamera.h>
+
+#include <SGL/Math/Math.h>
+#include <SGL/Math/Frustum.h>
+
+namespace engine
+{
+	class FPSCamera
+	{
+	public:
+
+		FPSCamera();
+		FPSCamera(const sgl::Vector3& position);
+
+		void update();
+
+		void updateLookDirection(float x, float y, float delta);
+
+		sgl::Vector3& getPosition(void);
+		sgl::Vector3& getDirection(void);
+
+		sgl::Matrix4& getView(void);
+		sgl::Matrix4& getProjection(void);
+
+		sgl::Frustum& getFrustum(void);
+
+		void incrementFOV(float inc);
+
+		sgl::Vector3& getVerticalVelocity(void);
+		void setVerticalVelocity(float v);
+
+	public:
+		sgl::Vector3 position;
+		sgl::Vector3 direction;
+		sgl::Vector3 right;
+
+	private:
+
+		sgl::Matrix4 _view;
+		sgl::Matrix4 _proj;
+
+		sgl::Frustum _frustum;
+
+		float _fov;
+
+		float _lookAngleH;
+		float _lookAngleV;
+
+	private:
+		void calculateView();
+		void updatePosition(float delta);
+
+	};
+}
+
+#endif
+```
+
+### FatalError.h
+```
+#ifndef FATALERROR_H
+#define FATALERROR_H
+
+#include <string>
+#include <exception>
+
+namespace engine
+{
+	static void fatalError(const std::string& what)
+	{
+		throw std::exception(what.c_str());
+	}
+}
+
+#endif
+```
+
+### FontManager.cpp
+```
+#include "FontManager.h"
+
+#include <boost/filesystem.hpp>
+
+using namespace sgl;
+
+namespace engine
+{
+	FontManager::FontManager()
+	{
+	}
+
+	void FontManager::addFont(const char* filename, unsigned int cols, unsigned int rows, bool flip)
+	{
+		BitmapFont* font = new BitmapFont();
+		font->init(filename, cols, rows, flip);
+
+		std::string name = boost::filesystem::basename(filename);
+
+		_fontMap[name] = font;
+	}
+
+	BitmapFont& FontManager::getFont(const std::string &name)
+	{
+		return *_fontMap[name];
+	}
+
+	FontManager::~FontManager()
+	{
+		// delete the font objects
+		for (auto& iter : _fontMap)
+			delete iter.second;
+	}
+}
+```
+
+### FontManager.h
+```
+#ifndef FONTMANAGER_H
+#define FONTMANAGER_H
+
+#include <SGL/Graphics/BitmapFont.h>
+
+#include <map>
+#include <string>
+
+namespace engine
+{
+	/**
+		Load and Access BitmapFonts
+	*/
+	class FontManager
+	{
+	public:
+
+		FontManager();
+		~FontManager();
+
+		void addFont(const char* filename, unsigned int cols, unsigned int rows, bool flip);
+
+		sgl::BitmapFont& getFont(const std::string &name);
+
+	private:
+
+		typedef std::map<std::string, sgl::BitmapFont*> FontMap;
+
+		FontMap _fontMap;
+
+	};
+}
+
+#endif
+```
+
+### GBuffer.cpp
+```
+#include "GBuffer.h"
+
+using namespace engine;
+using namespace sgl;
+
+GBuffer::GBuffer() : 
+	_normalTexture(Texture::Target::TEXTURE2D),
+	_diffuseTexture(Texture::Target::TEXTURE2D),
+	_colorTexture(Texture::Target::TEXTURE2D)
+{
+}
+
+void GBuffer::bindForWriting()
+{
+	_fbo.bind();
+}
+
+void GBuffer::bindForReading()
+{
+	unbind();
+
+	_normalTexture.bind(Texture::Unit::T0);
+	_diffuseTexture.bind(Texture::Unit::T1);
+	_colorTexture.bind(Texture::Unit::T2);
+}
+
+void GBuffer::unbind()
+{
+	_fbo.unbind();
+}
+
+void GBuffer::init(int width, int height)
+{
+	initTexture(_normalTexture, width, height);
+	initTexture(_diffuseTexture, width, height);
+	initTexture(_colorTexture, width, height);
+
+	// init the depth buffer
+	_depthBuffer.bind();
+	_depthBuffer.storage(RenderBuffer::Storage::DEPTH, width, height);
+	_depthBuffer.unbind();
+
+	_fbo.bind();
+
+	// set the depths buffer
+	_fbo.setRenderBuffer(_depthBuffer, FrameBuffer::Attachment::DEPTH);
+
+	// add multiple render targets
+	_fbo.addMRT(_normalTexture);
+	_fbo.addMRT(_diffuseTexture);
+	_fbo.addMRT(_colorTexture);
+	_fbo.setMRTBuffers();
+
+	// check
+	_fbo.checkError();
+
+	_fbo.unbind();
+
+	// add the textures to the map
+	_textureMap["normal-map"]  = &_normalTexture;
+	_textureMap["diffuse-map"] = &_diffuseTexture;
+	_textureMap["color-map"]   = &_colorTexture;
+}
+
+Texture& GBuffer::getNormalTexture()
+{
+	return _normalTexture;
+}
+
+Texture& GBuffer::getDiffuseTexture()
+{
+	return _diffuseTexture;
+}
+
+Texture& GBuffer::getColorTexture()
+{
+	return _colorTexture;
+}
+
+void GBuffer::initTexture(sgl::Texture& texture, int width, int height)
+{
+	texture.bind();
+
+	texture.setPixelDataType(GLType::FLOAT);
+
+	texture.setWidth(width);
+	texture.setHeight(height);
+
+	texture.setFormat(Texture::Format::RGB);
+	texture.setInternalFormat(Texture::InternalFormat::RGB);
+
+	texture.setData(0);
+
+	texture.parameter(Texture::ParamName::MAG_FILTER, Texture::Param::LINEAR);
+	texture.parameter(Texture::ParamName::MIN_FILTER, Texture::Param::LINEAR);
+
+	texture.unbind();
+}
+
+Texture& GBuffer::getTexture(const std::string& key)
+{
+	return *(_textureMap[key]);
+}
+
+GBuffer::~GBuffer()
+{
+}
+```
+
+### GBuffer.h
+```
+#ifndef GBUFFER_H
+#define GBUFFER_H
+
+#include <SGL/GL/FrameBuffer.h>
+#include <SGL/GL/Texture.h>
+#include <SGL/GL/RenderBuffer.h>
+
+#include <map>
+#include <string>
+
+namespace engine
+{
+	class GBuffer
+	{
+	public:
+
+		GBuffer();
+		~GBuffer();
+
+		void init(int width, int height);
+
+		void bindForWriting();
+		void bindForReading();
+
+		void unbind();
+
+		sgl::Texture& getNormalTexture();
+		sgl::Texture& getDiffuseTexture();
+		sgl::Texture& getColorTexture();
+
+		sgl::Texture& getTexture(const std::string& key);
+
+	private:
+		sgl::FrameBuffer _fbo;
+
+		sgl::Texture _normalTexture;
+		sgl::Texture _diffuseTexture;
+		sgl::Texture _colorTexture;
+
+		sgl::RenderBuffer _depthBuffer;
+
+		std::map<std::string, sgl::Texture*> _textureMap;
+
+	private:
+
+		void initTexture(sgl::Texture& texture, int width, int height);
+	};
+}
+
+#endif
+```
+
+### GLSL_GeometryPass.h
+```
+#ifndef GLSL_GEOMETRYPASS_H
+#define GLSL_GEOMETRYPASS_H
+
+#define GLSL(src) "\n" #src
+
+#include <string>
+
+namespace sgl
+{
+	const std::string GLSL_GEOMETRYPASS_VERT = GLSL(
+		in vec3 vPosition;
+		in vec3 vNormal;
+		in vec2 vTexCoord;
+		in vec3 vColor;
+
+		out vec3 fNormal;
+		out vec2 fTexCoord;
+		out vec3 fColor;
+
+		uniform mat4 MVP;
+		uniform mat3 N;
+
+		void main()
+		{
+			gl_Position = MVP * vec4(vPosition, 1);
+
+			fNormal   = N * vNormal;
+			fTexCoord = vTexCoord;
+			fColor    = vColor;
+		}
+	);
+
+	const std::string GLSL_GEOMETRYPASS_FRAG = GLSL(
+
+		out vec3 outNormal;
+		out vec3 outDiffuse;
+		out vec3 outColor;
+
+		in vec3 fNormal;
+		in vec2 fTexCoord;
+		in vec3 fColor;
+
+		uniform sampler2D blockTexture;
+
+		void main()
+		{
+			outNormal  = normalize(fNormal);
+			outDiffuse = texture(blockTexture, fTexCoord).xyz;
+			outColor   = fColor;
+		}
+	);
+}
+
+#endif
+```
+
+### GLSL_LightPass.h
+```
+#ifndef GLSL_LIGHTPASS_H
+#define GLSL_LIGHTPASS_H
+
+#define GLSL(src) "\n" #src
+
+#include <string>
+
+namespace sgl
+{
+	const std::string GLSL_LIGHTPASS_VERT = GLSL(
+		in vec2 vPosition;
+
+		void main()
+		{
+			gl_Position = vec4(vPosition, 0, 1);
+		}
+	);
+
+	const std::string GLSL_LIGHTPASS_FRAG = GLSL(
+
+		out vec3 fragColor;
+
+		uniform vec2 screenSize;
+
+		uniform sampler2D normalMap;
+		uniform sampler2D diffuseMap;
+		uniform sampler2D colorMap;
+
+		vec2 calcTexCoord();
+
+		void main()
+		{
+			vec2 texCoord = calcTexCoord();
+
+			vec3 normal     = texture(normalMap,  texCoord).xyz;
+			vec3 baseColor  = texture(diffuseMap, texCoord).xyz;
+			vec3 lightColor = texture(colorMap,   texCoord).xyz;
+
+			// ambient light
+			vec3 ambientColor = vec3(1, 1, 1) * 0.3;
+
+			// diffuse color
+
+			vec3 diffuseColor = vec3(0, 0, 0);
+
+			float diffuseFactor = dot(normal, -vec3(-1, -1, -1));
+
+			if (diffuseFactor > 0)
+			{
+				diffuseColor = vec3(1, 1, 1) * 0.2 * diffuseFactor;
+			}
+
+			fragColor = (baseColor)* (ambientColor + diffuseColor + lightColor);
+			//fragColor = lightColor;
+		}
+
+		vec2 calcTexCoord()
+		{
+			return gl_FragCoord.xy / screenSize;
+		}
+
+	);
+
+	const std::string GLSL_DEBUG_LIGHTPASS_FRAG = GLSL(
+
+		out vec3 fragColor;
+
+		uniform vec2 screenSize;
+
+		uniform sampler2D sampler;
+
+		vec2 calcTexCoord();
+
+		void main()
+		{
+			vec2 texCoord = calcTexCoord();
+
+			vec3 texColor = texture(sampler, texCoord).xyz;
+
+			fragColor = texColor;
+		}
+
+		vec2 calcTexCoord()
+		{
+			return gl_FragCoord.xy / screenSize;
+		}
+
+	);
+}
+
+#endif
+```
+
+### IRenderer.cpp
+```
+#include "IRenderer.h"
+
+using namespace engine;
+
+IRenderer::IRenderer() : initialized(false)
+{
+}
+
+bool IRenderer::isInitialized()
+{
+	return initialized;
+}
+
+void IRenderer::setRenderOption(const std::string& key, const std::string& value)
+{
+	renderOptions[key] = value;
+}
+
+std::string IRenderer::getRenderOption(const std::string& key)
+{
+	return renderOptions[key];
+}
+```
+
+### IRenderer.h
+```
+#ifndef IRENDERER_H
+#define IRENDERER_H
+
+#include "ChunkManager.h"
+#include "TextureManager.h"
+
+#include <SGL/Math/Matrix4.h>
+
+#include <map>
+#include <string>
+
+
+namespace engine
+{
+	/**
+		Interface for rendering chunk managers
+	*/
+	class IRenderer
+	{
+	public:
+
+		IRenderer();
+
+		virtual void init()                                               = 0;
+
+		virtual void begin()                                              = 0;
+		virtual void render(ChunkManager& chunkManager, sgl::Matrix4& VP) = 0;
+		virtual void end()                                                = 0;
+
+		bool isInitialized();
+
+		void setRenderOption(const std::string& key, const std::string& value);
+		std::string getRenderOption(const std::string& key);
+
+	protected:
+		bool initialized;
+
+		std::map<std::string, std::string> renderOptions;
+	};
+}
+
+#endif
+```
+
+### Logger.cpp
+```
+#include "Logger.h"
+
+using namespace engine::util;
+
+Logger::Logger(const std::string& logName) : _logFile(logName)
+{
+}
+
+void Logger::log(const std::string& what)
+{
+	_logFile << what << std::endl;
+}
+
+Logger::~Logger()
+{
+}
+```
+
+### Logger.h
+```
+#ifndef LOGGER_H
+#define LOGGER_H
+
+#include <fstream>
+#include <string>
+
+namespace engine
+{
+	namespace util
+	{
+		/**
+			Used for logging data to an external file
+		*/
+		class Logger
+		{
+		public:
+
+			Logger(const std::string& logName);
+			~Logger();
+
+			void log(const std::string& what);
+
+		private:
+
+			std::ofstream _logFile;
+		};
+	}
+}
+
+#endif
+```
+
+### Noise.cpp
+```
+#include "Noise.h"
+
+using namespace engine;
+using namespace engine::noise;
+
+#include <SGL/Math/MathUtil.h>
+
+#include <cassert>
+#include <random>
+
+Noise::Noise(int w, int h) :
+	_width(w),
+	_height(h),
+	_noise(w * h, 0)
+{
+}
+
+void Noise::generate(int octaveCount)
+{
+	std::vector<std::vector<float>> smoothNoise(octaveCount);
+	std::vector<std::vector<float>>::iterator iter;
+	for (iter = smoothNoise.begin(); iter != smoothNoise.end(); ++iter)
+	{
+		std::vector<float>& v = (*iter);
+		v.resize(_width * _height);
+	}
+
+	std::vector<float> baseNoise(_width * _height);
+	generateWhiteNoise(baseNoise);
+
+	int octave;
+	for (octave = 0; octave < octaveCount; ++octave)
+	{
+		generateSmoothNoise(smoothNoise[octave], baseNoise, octave);
+	}
+
+	float amplitude = 1.0f;
+	float totalAmplitude = 0.0f;
+	float persistance = 0.5f;
+
+	// blend noise
+	for (octave = octaveCount - 1; octave >= 0; --octave)
+	{
+		amplitude *= persistance;
+		totalAmplitude += amplitude;
+
+		int i, j;
+		for (i = 0; i < _width; ++i)
+		{
+			for (j = 0; j < _height; ++j)
+			{
+				float &noise = get(_noise, i, j);
+				noise += get(smoothNoise[octave], i, j) * amplitude;
+			}
+		}
+	}
+
+	// normalize
+	int i, j;
+	for (i = 0; i < _width; ++i)
+	{
+		for (j = 0; j < _height; ++j)
+		{
+			float &noise = get(_noise, i, j);
+			noise /= totalAmplitude;
+		}
+	}
+}
+
+void Noise::generateSmoothNoise(std::vector<float>& out, std::vector<float>& baseNoise, int octave)
+{
+	int   period = 1 << octave;
+	float frequency = 1.0f / (float)period;
+
+	int i, j;
+	for (i = 0; i < _width; ++i)
+	{
+		int samplei0 = (i / period) * period;
+		int samplei1 = (samplei0 + period) % _width;
+		float hBlend = (float)(i - samplei0) * frequency;
+
+		for (j = 0; j < _height; ++j)
+		{
+			int samplej0 = (j / period) * period;
+			int samplej1 = (samplej0 + period) % _height;
+			float vBlend = (float)(j - samplej0) * frequency;
+
+			float top = sgl::math::lerp<float>(get(baseNoise, samplei0, samplej0), get(baseNoise, samplei1, samplej0), hBlend);
+			float bottom = sgl::math::lerp<float>(get(baseNoise, samplei0, samplej1), get(baseNoise, samplei1, samplej1), hBlend);
+
+			set(out, i, j, sgl::math::lerp<float>(top, bottom, vBlend));
+		}
+	}
+}
+
+void Noise::generateWhiteNoise(std::vector<float>& arr)
+{
+	int i, j;
+	for (i = 0; i < _width; ++i)
+	{
+		for (j = 0; j < _height; ++j)
+		{
+			set(arr, i, j, (float)(rand() % 2));
+		}
+	}
+}
+
+void Noise::set(std::vector<float>& arr, int x, int y, float value)
+{
+	arr[(x * _width) + y] = value;
+}
+
+float& Noise::get(std::vector<float>& arr, int x, int y)
+{
+	return arr[(x * _width) + y];
+}
+
+float Noise::at(int x, int y)
+{
+	assert(x < _width && y < _height && "Value out of range");
+
+	return _noise[(x * _width) + y];
+}
+```
+
+### Noise.h
+```
+#ifndef NOISE_H
+#define NOISE_H
+
+#include <vector>
+
+namespace engine
+{
+	namespace noise
+	{
+		/**
+			Random value noise class
+		*/
+		class Noise
+		{
+		public:
+
+			Noise(int w, int h);
+
+			void generate(int octaveCount);
+
+			float at(int x, int y);
+
+		private:
+
+			int _width;
+			int _height;
+
+			std::vector<float> _noise;
+
+			/* Private Functions */
+
+			void generateWhiteNoise(std::vector<float>& arr);
+			void generateSmoothNoise(std::vector<float>& out, std::vector<float>& baseNoise, int octave);
+
+			void set(std::vector<float>& noise, int x, int y, float value);
+			float& get(std::vector<float>& arr, int x, int y);
+
+		};
+	}
+}
+
+#endif
+```
+
+### ResourceManager.cpp
+```
+#include "ResourceManager.h"
+
+using namespace engine;
+
+ResourceManager::ResourceManager()
+{
+}
+
+TextureManager& ResourceManager::getTextureManager()
+{
+	return _textureManager;
+}
+
+FontManager& ResourceManager::getFontManager()
+{
+	return _fontManager;
+}
+
+void ResourceManager::setResourcePath(const std::string& path)
+{
+	_resourcePath = path;
+}
+
+std::string ResourceManager::getResourcePath()
+{
+	return _resourcePath;
+}
+
+ResourceManager::~ResourceManager()
+{
+}
+```
+
+### ResourceManager.h
+```
+#ifndef RESOURCEMANAGER_H
+#define RESOURCEMANAGER_H
+
+#include "TextureManager.h"
+#include "FontManager.h"
+
+#include <string>
+
+namespace engine
+{
+	/**
+		Manager all resources of the engine
+	*/
+	class ResourceManager
+	{
+	public:
+
+		ResourceManager();
+		~ResourceManager();
+
+		TextureManager& getTextureManager();
+		FontManager&    getFontManager();
+
+		void setResourcePath(const std::string& path);
+		std::string getResourcePath();
+
+	private:
+		TextureManager _textureManager;
+		FontManager    _fontManager;
+
+		std::string _resourcePath;
+	};
+}
+
+#endif
+```
+
+### ScriptEngine.cpp
+```
+#include "ScriptEngine.h"
+
+// exported classes
+#include "VoxelEngine.h"
+#include "Window.h"
+#include "Timer.h"
+#include "Noise.h"
+#include "FPSCamera.h"
+#include "CommandLine.h"
+
+#include <SGL/Math/Vector3.h>
+
+using namespace engine;
+using namespace engine::script;
+
+ScriptEngine::ScriptEngine() : _errorCallback(nullptr)
+{
+	_state = luaL_newstate();
+}
+
+void ScriptEngine::init()
+{
+	using namespace luabind;
+
+	open(_state);
+
+	luaL_openlibs(_state);
+
+	// export classes
+	module(_state)[
+
+		class_<VoxelEngine>("Engine")
+			.scope[
+				def("getEngine", &VoxelEngine::getEngine)
+			]
+			.def("update",           &VoxelEngine::update)
+			.def("render",           &VoxelEngine::render)
+			.def("createWindow",     &VoxelEngine::init)
+			.def("getWindow",        &VoxelEngine::getWindow)
+			.def("getCamera",        &VoxelEngine::getCamera)
+			.def("addManager",       &VoxelEngine::addChunkManager)
+			.def("updateCameraView", &VoxelEngine::updateCamera)
+			.def("loadTexture",      &VoxelEngine::loadTexture)
+			.def("loadAtlas",        &VoxelEngine::loadAtlas)
+			.def("loadFont",         &VoxelEngine::loadFont)
+			.def("setRenderMode",    &VoxelEngine::setRenderer)
+			.def("setRenderOption",  &VoxelEngine::setRenderOption)
+			.def("getCommandLine",   &VoxelEngine::getCommandLine),
+
+		class_<Block>("Block")
+			.def_readonly("t", &Block::t)
+			.def_readonly("x", &Block::x)
+			.def_readonly("y", &Block::y)
+			.def_readonly("z", &Block::z),
+
+		class_<ChunkManager>("ChunkManager")
+			.def(constructor<int, int, int, const char *>())
+			.def(constructor<int, int, int, int, float, const char *>())
+			.def("getBlock",       &ChunkManager::getBlock)
+			.def("setBlock",       &ChunkManager::setBlock)
+			.def("setLightSource", &ChunkManager::setLightSource)
+			.def("removeLight",    &ChunkManager::removeLight)
+			.def("setAtlasName",   &ChunkManager::setAtlasName)
+			.def("getBlockX",      &ChunkManager::getBlockX)
+			.def("getBlockY",      &ChunkManager::getBlockY)
+			.def("getBlockZ",      &ChunkManager::getBlockZ)
+			.def("setRenderDebug", &ChunkManager::setRenderDebug)
+			.def("translate",      &ChunkManager::translate)
+			.def("rotate",         &ChunkManager::rotate)
+			.def("scale",          &ChunkManager::scale),
+
+		class_<FPSCamera>("Camera")
+			.def_readwrite("position",  &FPSCamera::position)
+			.def_readwrite("direction", &FPSCamera::direction)
+			.def_readwrite("right",     &FPSCamera::right),
+
+		class_<gui::CommandLine>("CommandLine")
+			.def(constructor<>())
+			.def("append",    &gui::CommandLine::append)
+			.def("process",   &gui::CommandLine::process)
+			.def("isActive",  &gui::CommandLine::isActive)
+			.def("setActive", &gui::CommandLine::setActive),
+
+		class_<gui::Window>("Window")
+			.def(constructor<const char*, int, int>())
+			.def("shouldClose",      &gui::Window::shouldClose)
+			.def("pollEvents",       &gui::Window::pollEvents)
+			.def("swapBuffers",      &gui::Window::swapBuffers)
+			.def("setMousePosition", &gui::Window::setMousePosition)
+			.def("isKeyPressed",     &gui::Window::isKeyPressed)
+			.def("isKeyReleased",    &gui::Window::isKeyReleased)
+			
+			// key constants
+			.scope[
+				class_<gui::Window::Key>("Key")
+					.enum_("key_constants")[
+						value("A", GLFW_KEY_A),
+						value("B", GLFW_KEY_B),
+						value("C", GLFW_KEY_C),
+						value("D", GLFW_KEY_D),
+						value("E", GLFW_KEY_E),
+						value("F", GLFW_KEY_F),
+						value("G", GLFW_KEY_G),
+						value("H", GLFW_KEY_H),
+						value("I", GLFW_KEY_I),
+						value("J", GLFW_KEY_J),
+						value("K", GLFW_KEY_K),
+						value("L", GLFW_KEY_L),
+						value("M", GLFW_KEY_M),
+						value("N", GLFW_KEY_N),
+						value("O", GLFW_KEY_O),
+						value("P", GLFW_KEY_P),
+						value("Q", GLFW_KEY_Q),
+						value("R", GLFW_KEY_R),
+						value("S", GLFW_KEY_S),
+						value("T", GLFW_KEY_T),
+						value("U", GLFW_KEY_U),
+						value("V", GLFW_KEY_V),
+						value("W", GLFW_KEY_W),
+						value("X", GLFW_KEY_X),
+						value("Y", GLFW_KEY_Y),
+						value("Z", GLFW_KEY_Z),
+
+						value("NUM_0", GLFW_KEY_0),
+						value("NUM_1", GLFW_KEY_1),
+						value("NUM_2", GLFW_KEY_2),
+						value("NUM_3", GLFW_KEY_3),
+						value("NUM_4", GLFW_KEY_4),
+						value("NUM_5", GLFW_KEY_5),
+						value("NUM_6", GLFW_KEY_6),
+						value("NUM_7", GLFW_KEY_7),
+						value("NUM_8", GLFW_KEY_8),
+						value("NUM_9", GLFW_KEY_9),
+
+						value("SPACE",  GLFW_KEY_SPACE),
+						value("ENTER",  GLFW_KEY_ENTER),
+						value("DELETE", GLFW_KEY_BACKSPACE),
+						value("LCTRL",  GLFW_KEY_LEFT_CONTROL),
+						value("LSHIFT", GLFW_KEY_LEFT_SHIFT),
+						value("SLASH",  GLFW_KEY_SLASH),
+
+						value("ACTION_PRESS",   GLFW_PRESS),
+						value("ACTION_RELEASE", GLFW_RELEASE)
+					]
+			],
+
+		class_<noise::Noise>("Noise")
+			.def(constructor<int, int>())
+			.def("generate", &noise::Noise::generate)
+			.def("at",       &noise::Noise::at),
+
+		class_<Timer>("Timer")
+			.def(constructor<>())
+			.def("getElapsed", &Timer::getElapsed),
+
+		class_<sgl::Vector3>("Vector3")
+			.def(constructor<float, float, float>())
+			.def_readwrite("x", &sgl::Vector3::x)
+			.def_readwrite("y", &sgl::Vector3::y)
+			.def_readwrite("z", &sgl::Vector3::z)
+
+			.def(self + other<sgl::Vector3>())
+			.def(self - other<sgl::Vector3>())
+			.def(self * float())
+			.def(self / float())
+	];
+
+}
+
+void ScriptEngine::run(char *scriptName)
+{
+	// run the script file
+	if (luaL_dofile(_state, scriptName) != 0)
+	{
+		// if an error occurs and there is a error callback function
+		if (_errorCallback != NULL)
+		{
+			std::string error = getErrorString();
+			VoxelEngine::getEngine()->getLogger().log(error);
+			_errorCallback(error);
+		}
+	}
+}
+
+std::string ScriptEngine::getErrorString()
+{
+	std::string error(lua_tostring(_state, -1));
+	lua_pop(_state, 1);
+
+	return error;
+}
+
+void ScriptEngine::setErrorCallback(ErrorCallback callback)
+{
+	_errorCallback = callback;
+}
+
+ScriptEngine::~ScriptEngine()
+{
+	lua_close(_state);
+}
+```
+
+### ScriptEngine.h
+```
+#ifndef SCRIPTENGINE_H
+#define SCRIPTENGINE_H
+
+#include <lua.hpp>
+#include <luabind/luabind.hpp>
+#include <luabind/operator.hpp>
+
+#include <string>
+
+namespace engine
+{
+	namespace script
+	{
+		class ScriptEngine
+		{
+		public:
+
+			// Error Callback
+			typedef void(*ErrorCallback)(const std::string& what);
+
+			ScriptEngine();
+			~ScriptEngine();
+
+			/**
+			Initialize script modules
+			*/
+			void init();
+
+			/**
+			Run a script
+			*/
+			void run(char *scriptName);
+
+			/**
+
+			*/
+			void setErrorCallback(ErrorCallback callback);
+
+			/**
+			*/
+			template<typename T>
+			void addFunction(const std::string& name, T func)
+			{
+				using namespace luabind;
+
+				module(_state)[
+					def(name.c_str(), func)
+				];
+			}
+
+			/**
+			*/
+			template<typename... Args>
+			void callFunction(const std::string& name, Args... args)
+			{
+				luabind::call_function<void>(_state, name.c_str(), args...);
+			}
+
+		private:
+
+			lua_State* _state;
+
+			ErrorCallback _errorCallback;
+
+			/* Private Functions */
+
+			std::string getErrorString();
+
+		};
+	}
+}
+
+#endif // SCRIPTENGINE_H
+```
+
+### TextRenderer.cpp
+```
+#include "TextRenderer.h"
+
+#include <SGL/Util/Exception.h>
+
+#include <SGL/Util/GLSL/GLSL_Position_TexCoord_Color.h>
+
+using namespace sgl;
+
+namespace engine
+{
+	TextRenderer::TextRenderer()
+	{
+	}
+
+	void TextRenderer::begin()
+	{
+		_batch.begin(&_textShader);
+	}
+
+	void TextRenderer::draw(sgl::Text& text)
+	{
+		draw(text, false, false);
+	}
+
+	void TextRenderer::draw(sgl::Text& text, bool flipH, bool flipV)
+	{
+		text.draw(_batch, flipH, flipV);
+	}
+
+	void TextRenderer::end()
+	{
+		_batch.end();
+	}
+
+	void TextRenderer::init()
+	{
+		try
+		{
+			loadshader::position_texCoord_color(_textShader);
+		}
+		catch (Exception& e)
+		{
+			throw std::exception(e.what());
+		}
+	}
+
+	TextRenderer::~TextRenderer()
+	{
+	}
+}
+```
+
+### TextRenderer.h
+```
+#ifndef TEXTRENDERER_H
+#define TEXTRENDERER_H
+
+#include <SGL/Graphics/SpriteBatch.h>
+#include <SGL/GL/ShaderProgram.h>
+#include <SGL/Graphics/Text.h>
+
+namespace engine
+{
+	class TextRenderer
+	{
+	public:
+
+		TextRenderer();
+		~TextRenderer();
+
+		void init();
+
+		void begin();
+
+		void draw(sgl::Text& text);
+		void draw(sgl::Text& text, bool flipH, bool flipV);
+
+		void end();
+
+	private:
+		sgl::SpriteBatch   _batch;
+		sgl::ShaderProgram _textShader;
+	};
+}
+
+#endif
+```
+
+### TextureAtlas.cpp
+```
+#include "TextureAtlas.h"
+
+#include <fstream>
+#include <sstream>
+#include <cassert>
+#include <iostream>
+
+#include <boost/property_tree/ptree.hpp>
+#include <boost/property_tree/json_parser.hpp>
+#include <boost/foreach.hpp>
+
+using namespace engine;
+using namespace sgl;
+
+TextureAtlas::TextureAtlas(Texture* texture, const std::string& packFilename)
+{
+	load(texture, packFilename);
+}
+
+void TextureAtlas::load(Texture* texture, const std::string& packFilename)
+{
+	using namespace boost::property_tree;
+
+	std::ifstream file(packFilename);
+
+	if (!file.good()) throw std::exception(std::string("Could not open file: " + packFilename).c_str());
+
+	//
+	std::stringstream buffer;
+	buffer << file.rdbuf();
+
+	//
+	ptree pt;
+
+	// parse out the json file
+	read_json(buffer, pt);
+
+	// get the optional inversion value from the json file
+	bool inverted = (pt.count("inverted")) ? pt.get<bool>("inverted") : false;
+
+	// get the pixel dimensions to calculate the texture region
+	BOOST_FOREACH(ptree::value_type& v, pt.get_child("atlas"))
+	{
+		float x = v.second.get<float>("x");
+		float y = v.second.get<float>("y");
+		float w = v.second.get<float>("w");
+		float h = v.second.get<float>("h");
+
+		//
+		if (inverted) y = texture->getHeight() - y - h;
+
+		//
+		_regions.push_back(texture->region(x, y, w, h));
+	}
+}
+
+Texture::TextureRegion& TextureAtlas::getRegion(Block block)
+{
+	assert(block.t > 0);
+	return _regions[block.t - 1];
+}
+
+TextureAtlas::~TextureAtlas()
+{
+}
+```
+
+### TextureAtlas.h
+```
+#ifndef TEXTUREATLAS_H
+#define TEXTUREATLAS_H
+
+#include "Block.h"
+
+#include <SGL/GL/Texture.h>
+
+#include <vector>
+
+namespace engine
+{
+	class TextureAtlas
+	{
+	public:
+
+		TextureAtlas(sgl::Texture* texture, const std::string& packFilename);
+		~TextureAtlas();
+
+		void load(sgl::Texture* texture, const std::string& packFilename);
+
+		sgl::Texture::TextureRegion& getRegion(Block block);
+
+	private:
+		std::vector<sgl::Texture::TextureRegion> _regions;
+	
+	};
+}
+
+#endif
+```
+
+### TextureManager.cpp
+```
+#include "TextureManager.h"
+#include "FatalError.h"
+
+#include <SGL/Util/Image.h>
+#include <SGL/Util/Exception.h>
+
+#include <boost/filesystem.hpp>
+
+#include <iostream>
+#include <exception>
+
+using namespace engine;
+using namespace sgl;
+
+TextureManager::TextureManager()
+{
+}
+
+void TextureManager::addAtlas(const char *atlasPath)
+{
+	using namespace boost::filesystem;
+
+	// load the texture
+	addTexture(atlasPath);
+
+	// get the file name without extension
+	std::string baseName = getNameFromPath(atlasPath);
+	std::string packFilename = baseName + ".json";
+
+	// get the pack file 
+	path packFilePath = path(atlasPath).parent_path();
+	packFilePath.append(packFilename);
+
+	if (exists(packFilePath))
+	{
+		Texture* texture = _textureMap[baseName];
+
+		_textureAtlasMap[baseName] = new TextureAtlas(texture, packFilePath.string());
+	}
+	else
+	{
+		fatalError(std::string("Error. pack file does not exist: " + packFilename));
+	}
+}
+
+void TextureManager::addTexture(const char *texturePath)
+{
+	Texture* texture = new Texture(Texture::Target::TEXTURE2D);
+
+	try
+	{
+		texture->bind();
+
+		Image::load(*texture, texturePath);
+
+		texture->parameter(Texture::ParamName::MAG_FILTER, Texture::Param::LINEAR);
+		texture->parameter(Texture::ParamName::MIN_FILTER, Texture::Param::LINEAR);
+
+		texture->unbind();
+	}
+	catch (sgl::Exception& e)
+	{
+		fatalError(std::string(e.what()) + ": " + std::string(texturePath));
+	}
+
+	_textureMap[getNameFromPath(texturePath)] = texture;
+}
+
+std::string TextureManager::getNameFromPath(const char *path)
+{
+	return boost::filesystem::basename(path);
+}
+
+Texture& TextureManager::getTexture(const std::string& name)
+{
+	return *(_textureMap[name]);
+}
+
+TextureAtlas& TextureManager::getAtlas(const std::string& name)
+{
+	return *(_textureAtlasMap[name]);
+}
+
+void TextureManager::dispose()
+{
+	TextureMap::iterator iter;
+	for (iter = _textureMap.begin(); iter != _textureMap.end(); ++iter)
+	{
+		delete iter->second;
+	}
+
+	TextureAtlasMap::iterator atlasIter;
+	for (atlasIter = _textureAtlasMap.begin(); atlasIter != _textureAtlasMap.end(); ++atlasIter)
+	{
+		delete atlasIter->second;
+	}
+}
+
+TextureManager::~TextureManager()
+{
+	dispose();
+}
+```
+
+### TextureManager.h
+```
+#ifndef TEXTUREMANAGER_H
+#define TEXTUREMANAGER_H
+
+#include "TextureAtlas.h"
+
+#include <SGL/GL/Texture.h>
+
+#include <map>
+#include <string>
+
+namespace engine
+{
+	class TextureManager
+	{
+	public:
+
+		TextureManager();
+		~TextureManager();
+
+		void addAtlas(const char *atlasPath);
+		void addTexture(const char *texturePath);
+
+		sgl::Texture& getTexture(const std::string& name);
+		TextureAtlas& getAtlas(const std::string& name);
+
+	private:
+
+		typedef std::map<std::string, sgl::Texture*> TextureMap;
+		typedef std::map<std::string, TextureAtlas*> TextureAtlasMap;
+
+		TextureMap _textureMap;
+		TextureAtlasMap _textureAtlasMap;
+
+	private:
+		std::string getNameFromPath(const char *path);
+		void dispose();
+
+	};
+}
+
+#endif
+```
+
+### Timer.cpp
+```
+#include "Timer.h"
+
+#include <glfw/glfw3.h>
+
+using namespace engine;
+
+Timer::Timer()
+{
+	_last = glfwGetTime();
+}
+
+float Timer::getElapsed()
+{
+	double current = glfwGetTime();
+	float delta = (float)(current - _last);
+
+	_last = current;
+
+	return delta;
+}
+```
+
+### Timer.h
+```
+#ifndef TIMER_H
+#define TIMER_H
+
+namespace engine
+{
+	class Timer
+	{
+	public:
+
+		Timer();
+
+		float getElapsed();
+
+	private:
+
+		double _last;
+
+	};
+}
+
+#endif
+```
+
+### VoxelEngine.cpp
+```
+#include "VoxelEngine.h"
+#include "DeferredRenderer.h"
+#include "DebugDeferredRenderer.h"
+#include "CommandLine.h"
+
+#include <SGL/SGL.h>
+#include <SGL/Util/Context.h>
+#include <SGL/Util/PerspectiveCamera.h>
+
+#include <glfw/glfw3.h>
+
+#include <iostream>
+#include <cassert>
+
+#include <boost/filesystem.hpp>
+
+using namespace engine;
+using namespace sgl;
+
+VoxelEngine::VoxelEngine() : _camera(Vector3(10, 45, 10)), _logger("engine.log")
+{
+}
+
+void VoxelEngine::update()
+{
+	if (_updateChunks)
+	{
+		updateChunkManagersVisibility(_camera.getFrustum());
+		_updateChunks = false;
+	}
+
+	std::set<ChunkManager*>::iterator iter;
+	for (iter = _chunkManagers.begin(); iter != _chunkManagers.end(); ++iter)
+	{
+		ChunkManager* manager = (*iter);
+		manager->update();
+	}
+}
+
+void VoxelEngine::render()
+{
+	Matrix4 VP = _camera.getProjection() * _camera.getView();
+
+	_renderer->begin();
+	{
+		std::set<ChunkManager*>::iterator iter;
+		for (iter = _chunkManagers.begin(); iter != _chunkManagers.end(); ++iter)
+		{
+			ChunkManager* manager = (*iter);
+			_renderer->render(*manager, VP);
+		}
+	}
+	_renderer->end();
+
+	_textRenderer->begin();
+	{
+		_textRenderer->draw(_commandLine->getText(), true, false);
+	}
+	_textRenderer->end();
+}
+
+void VoxelEngine::addChunkManager(ChunkManager* manager)
+{
+	_chunkManagers.insert(manager);
+}
+
+void VoxelEngine::updateChunkManagersVisibility(Frustum& frustum)
+{
+	std::set<ChunkManager*>::iterator iter;
+	for (iter = _chunkManagers.begin(); iter != _chunkManagers.end(); ++iter)
+	{
+		ChunkManager* manager = *iter;
+		manager->updateVisiblityList(frustum);
+	}
+}
+
+void VoxelEngine::updateCamera(float delta)
+{
+	static Vector3 cameraPosition;
+	static Vector3 cameraDirection;
+
+	Vector2 mousePos = _window->getMousePosition();
+	_window->setMousePosition((float)_window->getWidth() / 2, (float)_window->getHeight() / 2);
+
+	_camera.updateLookDirection(mousePos.x, mousePos.y, delta);
+	_camera.update();
+
+	//
+	Vector3& currentPosition = _camera.getPosition();
+	Vector3& currentDirection = _camera.getDirection();
+
+	// if the camera has moved
+	if (currentPosition != cameraPosition || currentDirection != cameraDirection)
+	{
+		// update to the new position, direction and render distance
+		cameraPosition = currentPosition;
+		cameraDirection = currentDirection;
+
+		//
+		_updateChunks = true;
+	}
+}
+
+void VoxelEngine::init(const char * title, int width, int height)
+{
+	// create the window
+	_window = std::make_unique<gui::Window>(title, width, height);
+	
+	// tell SGL the window dimensions
+	Context::setViewPortDimension((float)width, (float)height);
+
+	// initialize the opengl context
+	initializeContext();
+
+	// load default resources
+	_resources.getFontManager().addFont("resources/DefaultFont.DDS", 16, 8, false);
+
+	// initialize the command line
+	_commandLine = std::make_unique<gui::CommandLine>();
+	_commandLine->init();
+
+	// the functions to the command line interface
+	addCommandLineFunctions();
+
+	// initialize the text renderer
+	_textRenderer = std::make_unique<TextRenderer>();
+	_textRenderer->init();
+
+	// load optional config file
+	if (boost::filesystem::exists("config.json"))
+		_config.load("config.json");
+}
+
+void VoxelEngine::initializeContext()
+{
+	glfwMakeContextCurrent(_window->getWindow());
+	sgl::init();
+
+	allocateRenderers();
+
+	// set to the default renderer
+	setRenderer(0);
+}
+
+void VoxelEngine::addCommandLineFunctions()
+{
+	_commandLine->addCommand("setrendermode",
+		[](gui::CommandLine::StringList& args)
+		{
+			if (args.size() < 1) return false;
+
+			std::istringstream buffer(args[0]);
+
+			int mode;
+			buffer >> mode;
+
+			VoxelEngine::getEngine()->setRenderer(mode);
+
+			return true;
+		}
+	);
+
+	_commandLine->addCommand("setrenderoption",
+		[](gui::CommandLine::StringList& args)
+		{
+			if (args.size() < 2) return false;
+
+			std::string key = args[0];
+			std::string value = args[1];
+
+			std::transform(key.begin(), key.end(), key.begin(), tolower);
+			std::transform(value.begin(), value.end(), value.begin(), tolower);
+
+			VoxelEngine::getEngine()->setRenderOption(key.c_str(), value.c_str());
+
+			return true;
+		}
+	);
+}
+
+void VoxelEngine::allocateRenderers()
+{
+	_renderers.push_back(new DeferredRenderer());
+	_renderers.push_back(new DebugDeferredRenderer());
+}
+
+void VoxelEngine::loadTexture(const char *textureName)
+{
+	_resources.getTextureManager().addTexture(textureName);
+}
+
+void VoxelEngine::loadAtlas(const char *atlasName)
+{
+	_resources.getTextureManager().addAtlas(atlasName);
+}
+
+void VoxelEngine::loadFont(const char *fontname, int cols, int rows, bool flip)
+{
+	_resources.getFontManager().addFont(fontname, (unsigned int)cols, (unsigned int)rows, flip);
+}
+
+IRenderer& VoxelEngine::getRenderer()
+{
+	return *(_renderer);
+}
+
+void VoxelEngine::setRenderer(unsigned int idx)
+{
+	if (idx >= _renderers.size()) return;
+
+	_renderer = _renderers[idx];
+	
+	if (!_renderer->isInitialized())
+		_renderer->init();
+}
+
+void VoxelEngine::setRenderOption(const char *key, const char *value)
+{
+	_renderer->setRenderOption(std::string(key), std::string(value));
+}
+
+ResourceManager& VoxelEngine::getResources()
+{
+	return _resources;
+}
+
+gui::Window* VoxelEngine::getWindow()
+{
+	return _window.get();
+}
+
+FPSCamera* VoxelEngine::getCamera()
+{
+	return &_camera;
+}
+
+util::Logger& VoxelEngine::getLogger()
+{
+	return _logger;
+}
+
+gui::CommandLine* VoxelEngine::getCommandLine()
+{
+	return _commandLine.get();
+}
+
+ConfigReader& VoxelEngine::getConfig()
+{
+	return _config;
+}
+
+VoxelEngine* VoxelEngine::getEngine()
+{
+	static VoxelEngine engine;
+	return &engine;
+}
+
+VoxelEngine::~VoxelEngine()
+{
+	for (IRenderer* renderer : _renderers)
+		delete renderer;
+}
+```
+
+### VoxelEngine.h
+```
+#ifndef VOXELENGINE_H
+#define VOXELENGINE_H
+
+#include "ChunkManager.h"
+#include "FPSCamera.h"
+#include "Window.h"
+#include "IRenderer.h"
+#include "ResourceManager.h"
+#include "TextRenderer.h"
+#include "Logger.h"
+#include "CommandLine.h"
+#include "ConfigReader.h"
+
+#include <SGL/Util/DebugRenderer.h>
+#include <SGL/Graphics/SpriteBatch.h>
+
+#include <set>
+#include <memory>
+
+namespace engine
+{
+	class VoxelEngine
+	{
+	public:
+
+		~VoxelEngine();
+		
+		void update();
+		void render();
+
+		void addChunkManager(ChunkManager* manager);
+
+		void updateCamera(float delta);
+
+		void init(const char * title, int width, int height);
+
+		void loadTexture(const char *textureName);
+		void loadAtlas(const char *atlasName);
+		void loadFont(const char *fontname, int cols, int rows, bool flip);
+
+		FPSCamera* getCamera();
+
+		gui::Window* getWindow();
+
+		IRenderer& getRenderer();
+
+		void setRenderer(unsigned int idx);
+		void setRenderOption(const char *key, const char *value);
+
+		ResourceManager& getResources();
+
+		util::Logger& getLogger();
+
+		gui::CommandLine* getCommandLine();
+
+		ConfigReader& getConfig();
+
+		/**
+			Return the instance of the voxel engine
+		*/
+		static VoxelEngine* getEngine();
+
+	private:
+		/* Block creation of an engine from outside this class */
+		VoxelEngine();
+		VoxelEngine(const VoxelEngine&);
+
+		//
+		std::set<ChunkManager*> _chunkManagers;
+		bool _updateChunks;
+
+		//
+		std::unique_ptr<gui::Window> _window;
+
+		//
+		IRenderer* _renderer;
+
+		std::vector<IRenderer*> _renderers;
+
+		// 
+		ResourceManager _resources;
+
+		//
+		FPSCamera _camera;
+
+		//
+		std::unique_ptr<gui::CommandLine> _commandLine;
+
+		//
+		std::unique_ptr<TextRenderer> _textRenderer;
+
+		//
+		ConfigReader _config;
+
+		//
+		util::Logger _logger;
+
+	private:
+
+		void updateChunkManagersVisibility(sgl::Frustum& frustum);
+
+		void initializeContext();
+
+		void allocateRenderers();
+
+		void addCommandLineFunctions();
+	};
+}
+
+#endif
+```
+
+### Window.cpp
+```
+#include "Window.h"
+
+namespace engine
+{
+	namespace gui
+	{
+		Window::Window(const std::string& title, int w, int h) : _width(w), _height(h), _window(NULL)
+		{
+			_window = glfwCreateWindow(w, h, title.c_str(), NULL, NULL);
+
+			if (!_window)
+			{
+				glfwTerminate();
+				exit(1);
+			}
+
+			glfwSetInputMode(_window, GLFW_CURSOR, GLFW_CURSOR_HIDDEN);
+		}
+
+		bool Window::shouldClose()
+		{
+			return glfwWindowShouldClose(_window) > 0;
+		}
+
+		void Window::pollEvents()
+		{
+			glfwPollEvents();
+		}
+
+		bool Window::isKeyPressed(int key)
+		{
+			return glfwGetKey(_window, key) == GLFW_PRESS;
+		}
+
+		bool Window::isKeyReleased(int key)
+		{
+			return glfwGetKey(_window, key) == GLFW_RELEASE;
+		}
+
+		sgl::Vector2 Window::getMousePosition()
+		{
+			double x, y;
+			glfwGetCursorPos(_window, &x, &y);
+
+			float invY = (float)(-1) * ((float)y - (float)_height);
+
+			return sgl::Vector2((float)x, (float)y);
+		}
+
+		void Window::setMousePosition(float x, float y)
+		{
+			glfwSetCursorPos(_window, x, y);
+		}
+
+		void Window::swapBuffers()
+		{
+			glfwSwapBuffers(_window);
+		}
+
+		GLFWwindow* Window::getWindow()
+		{
+			return _window;
+		}
+
+		int Window::getWidth()
+		{
+			return _width;
+		}
+
+		int Window::getHeight()
+		{
+			return _height;
+		}
+
+		Window::~Window()
+		{
+			glfwDestroyWindow(_window);
+		}
+
+	}
+}
+```
+
+### Window.h
+```
+#ifndef WINDOW_H
+#define WINDOW_H
+
+#include <GL/glew.h>
+#include <GLFW/glfw3.h>
+
+#include <SGL/Math/Vector2.h>
+
+#include <string>
+
+namespace engine
+{
+	namespace gui
+	{
+		class Window
+		{
+		public:
+
+			// empty struct for lua binding
+			struct Key{};
+
+			/**
+				Create a window with a title and dimensions
+			*/
+			Window(const std::string& title, int w, int h);
+			~Window();
+
+			bool shouldClose();
+			void pollEvents();
+
+			bool isKeyPressed(int key);
+			bool isKeyReleased(int key);
+
+			void setMousePosition(float x, float y);
+			sgl::Vector2 getMousePosition();
+
+			void swapBuffers();
+
+			GLFWwindow *getWindow();
+
+			int getWidth();
+			int getHeight();
+
+		private:
+
+			GLFWwindow* _window;
+			int _width;
+			int _height;
+		};
+	}
+}
+
+#endif
+```
+
+### main.cpp
+```
+#include "VoxelEngine.h"
+#include "ScriptEngine.h"
+#include "Window.h"
+
+#include <SGL/SGL.h>
+#include <SGL/Util/Exception.h>
+
+#include <iostream>
+#include <string>
+
+#define VERSION "1.0"
+
+using namespace engine;
+using namespace engine::script;
+
+/* Prototypes */
+
+static void scriptError(const std::string &what);
+
+static void registerUICallbacks(gui::Window* window);
+
+/* UI callbacks */
+
+static void onKeyEvent(GLFWwindow* window, int key, int scancode, int action, int mods);
+static void onMouseMove(GLFWwindow*, double x, double y);
+
+/* Globals */
+
+static ScriptEngine* g_ScriptEngine;
+
+int main(int argc, char *argv[])
+{
+	// check for valid number of arguments
+	if (argc < 2)
+	{
+		std::cout << "Please provide a script to run" << std::endl;
+		return -1;
+	}
+
+	// init GLFW
+	if (!glfwInit())
+	{
+		std::cout << "failed to initialize GLFW" << std::endl;
+		return -1;
+	}
+
+	glfwWindowHint(GLFW_OPENGL_PROFILE, 0);
+
+	//
+	char *scriptName = argv[1];
+
+	// Initialize the scripting engine
+	ScriptEngine scriptEngine;
+	scriptEngine.init();
+	scriptEngine.setErrorCallback(scriptError);
+
+	scriptEngine.addFunction("registerUICallbacks", registerUICallbacks);
+
+	g_ScriptEngine = &scriptEngine;
+
+	// run the script
+	scriptEngine.run(scriptName);
+
+
+	// terminate glfw
+	glfwTerminate();
+
+	return 0;
+}
+
+void registerUICallbacks(gui::Window* window)
+{
+	GLFWwindow* gWindow = window->getWindow();
+
+	glfwSetKeyCallback(gWindow, onKeyEvent);
+	glfwSetCursorPosCallback(gWindow, onMouseMove);
+}
+
+void onKeyEvent(GLFWwindow* window, int key, int scancode, int action, int mods)
+{
+	if (key == 256) exit(0);
+
+	g_ScriptEngine->callFunction("onKeyEvent", key, action);
+}
+
+void onMouseMove(GLFWwindow* window, double x, double y)
+{
+	g_ScriptEngine->callFunction("onMouseMove", x, y);
+}
+
+void scriptError(const std::string& what)
+{
+	std::cout << what << std::endl;
+}
+```

@@ -1,0 +1,109 @@
+# Scalable Reconstruction Scheme
+## Overview
+A method for reconstructing large-scale urban scenes by partitioning the global volume into fixed-size sub-volumes that fit within GPU memory, processing them sequentially via streaming, and aggregating surface voxels on the CPU [S1, unofficial]. It differs from monolithic GPU voxel carving by overcoming VRAM limits through a stream-processing architecture, enabling the reconstruction of volumes significantly larger than the available video memory [S1, unofficial].
+
+## How it works
+**Inputs:**
+*   Triangulated 3D points to determine the global bounding box [S1, unofficial].
+*   Depth maps, source images, and camera projection matrices [S1, unofficial].
+*   Global volume dimensions defining the reconstruction region [S1, unofficial].
+
+**Outputs:**
+*   A set of surface voxels with associated positions, colors, and compressed plane information [S1, unofficial].
+
+**Data Structures:**
+*   **Sub-volume Stream:** A data structure transferred between CPU and GPU [S1, unofficial].
+    *   Fields: `volume_size` (bounds of the sub-volume), `position` (offset in the global grid), `resolution` (local resolution, fixed at $256^3$) [S1, unofficial].
+    *   Voxel Array: A 3D array of voxels. Initial state: all voxels marked as "uncarved" [S1, unofficial].
+*   **GPU Memory:** Stores all depth maps, images, and projection matrices prior to carving [S1, unofficial].
+
+**Parameters:**
+*   **Sub-volume Size:** Fixed at $256^3$ voxels to fit within the GPU memory of the target hardware (e.g., 512 MB VRAM) [S1, unofficial].
+*   **Grid Partitioning:** The global volume is divided into a grid of sub-volumes [S1, unofficial]. For a $2560 \times 256 \times 2560$ grid, this results in $10 \times 1 \times 10$ sub-volumes [S1, unofficial].
+
+**Steps:**
+1.  **Bounding Box Determination:** Calculate the minimum bounding box of the input triangulated 3D points to define the global reconstruction region [S1, unofficial].
+2.  **GPU Initialization:** Upload all generated depth maps, images, and camera projection matrices to GPU memory [S1, unofficial].
+3.  **Stream Preparation:** Subdivide the global volume into sub-volumes of size $256^3$ [S1, unofficial]. Initialize each sub-volume stream with its size, position, resolution, and set all internal voxels to "uncarved" [S1, unofficial].
+4.  **Streaming Execution:**
+    a. Transfer one input sub-volume stream from main memory to GPU memory [S1, unofficial].
+    b. Execute the parallel voxel carving kernel on the GPU for this sub-volume [S1, unofficial].
+    c. Transfer the output carved sub-volume stream back to main memory [S1, unofficial].
+5.  **Surface Extraction:** On the CPU, iterate through the returned streams [S1, unofficial]. Extract the surface voxels and store them along with their global voxel positions [S1, unofficial].
+
+**Pseudocode:**
+> **Unverified code.** The code below did not pass a test run against a reference implementation, or no test fits it, so it may contain errors.
+
+```python
+class SubVolumeStream:
+    def __init__(self, position, resolution):
+        self.position = position
+        self.resolution = resolution
+        self.voxels = [{"status": "uncarved", "color": None, "plane_info": None, "position": (0, 0, 0)} for _ in range(resolution ** 3)]
+
+def compute_min_max_bbox(points):
+    # [G] Standard bounding box computation over 3D points
+    min_pt = [min(p[i] for p in points) for i in range(3)]
+    max_pt = [max(p[i] for p in points) for i in range(3)]
+    return min_pt, max_pt
+
+def transfer_to_gpu(data):
+    # [G] Simulates copying data to device memory
+    return data
+
+def transfer_from_gpu(data):
+    # [G] Simulates copying data back to host memory
+    return data
+
+def voxel_carving_kernel(stream, gpu_static):
+    # [G] Parallel voxel carving logic not detailed in sources
+    pass
+
+def scalable_reconstruction(triangulated_points, depth_maps, images, projections, global_dims):
+    min_bbox, max_bbox = compute_min_max_bbox(triangulated_points)
+    gpu_static = transfer_to_gpu((depth_maps, images, projections))
+
+    SUB_VOL_SIZE = 256
+    grid_x = (max_bbox[0] - min_bbox[0]) // SUB_VOL_SIZE
+    grid_y = (max_bbox[1] - min_bbox[1]) // SUB_VOL_SIZE
+    grid_z = (max_bbox[2] - min_bbox[2]) // SUB_VOL_SIZE
+
+    surface_voxels = []
+
+    for gx in range(grid_x):
+        for gy in range(grid_y):
+            for gz in range(grid_z):
+                stream = SubVolumeStream(
+                    position=(gx * SUB_VOL_SIZE, gy * SUB_VOL_SIZE, gz * SUB_VOL_SIZE),
+                    resolution=SUB_VOL_SIZE
+                )
+                gpu_stream = transfer_to_gpu(stream)
+                voxel_carving_kernel(gpu_stream, gpu_static)
+                carved_stream = transfer_from_gpu(gpu_stream)
+
+                for voxel in carved_stream.voxels:
+                    if voxel["status"] == "surface":
+                        global_pos = tuple(c + p for c, p in zip(voxel["position"], carved_stream.position))
+                        surface_voxels.append({
+                            "position": global_pos,
+                            "color": voxel["color"],
+                            "plane_info": voxel["plane_info"]
+                        })
+    return surface_voxels
+```
+
+**Edge Cases and Pitfalls:**
+*   **Memory Limits:** The sub-volume size is constrained by the specific GPU's VRAM [S1, unofficial]. If VRAM is insufficient for $256^3$ voxels plus auxiliary data, the sub-volume size must be reduced, increasing overhead [S1, unofficial].
+*   **Boundary Consistency:** Since subdivision does not affect the final output, boundary handling between adjacent sub-volumes must be consistent with the global projection logic to avoid artifacts [S1, unofficial].
+
+## Operating characteristics
+*   **Scalability:** The method scales to volumes significantly larger than GPU memory. Tested on grids up to $10,240 \times 256 \times 5,120$ voxels [S1, unofficial].
+*   **Performance:** On an NVIDIA GeForce 9800 GT (512 MB VRAM), processing $10 \times 1 \times 10$ sub-volumes ($256^3$ each) for a $2,560 \times 256 \times 2,560$ grid yielded ~5.5M surface voxels [S1, unofficial]. Larger Walnut Creek tests ($10,240 \times 256 \times 5,120$) produced 19M surface voxels [S1, unofficial].
+*   **Quality:** Produces denser, more detailed results than PMVS2, with fewer holes or gaps, by integrating multiple depth maps into a watertight model [S1, unofficial].
+*   **Limitations:** Requires sequential processing of sub-volumes, which may limit throughput compared to fully parallel approaches if I/O bandwidth is a bottleneck [S1, unofficial]. Dependent on GPU memory capacity for the fixed sub-volume size [S1, unofficial].
+
+## Background
+Developed for large-scale urban scene reconstruction using multi-view stereo [S1, unofficial]. The method addresses the rapid performance drop and memory limitations of standard GPU-based volumetric reconstruction when applied to large datasets [S1, unofficial]. It builds on parallel voxel carving techniques by introducing a streaming mechanism [S1, unofficial].
+
+## Sources
+[S1] GPU-based Scalable Volumetric Reconstruction for Multi-view Stereo, https://digital.library.unt.edu/ark:/67531/metadc831231/?q=gpu volume rendering, fetched 2026-10-28 (unofficial)

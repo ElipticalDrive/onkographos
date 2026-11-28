@@ -1,0 +1,171 @@
+--- v001.md
++++ v002.md
+@@ -4,54 +4,134 @@
+ 
+ ## Overview
+-Mesh Level of Detail is a secondary optimization system applied to individual mesh instances within a voxel-based instancing framework to reduce vertex count based on distance [S1]. It operates on top of the primary spatial LOD system (such as terrain or brick LOD), allowing distinct geometric resolutions for the same logical object type as the viewer approaches [S1]. Unlike primary volume LOD which changes the data representation (e.g., voxel resolution), this method swaps the entire mesh asset used for rendering [S1]. It is specifically designed for `VoxelInstanceLibraryMultiMeshItem` to avoid the overhead of duplicating scene objects or managing separate visibility ranges for each resolution variant [S1].
++Mesh Level of Detail is a secondary optimization system applied to individual mesh instances within a voxel-based instancing framework to reduce vertex count based on camera distance [S1]. It operates independently of the primary terrain or volume LOD, allowing distinct geometric representations (such as high-poly models, low-poly approximations, or 2D impostor quads) to be swapped for specific instances as they move further from the viewer [S1]. Unlike general volume LOD which reduces data resolution, this method reduces geometric complexity per instance, building on the instancing principles of [LOD Selection and Culling](5338-lod-selection-and-culling.md).
+ 
+ ## How it works
+-The system maintains a hierarchy of mesh assets associated with a single logical instance type. The renderer selects the appropriate mesh based on the instance's distance from the camera relative to the primary terrain LOD's view distance.
+-
+ **Inputs and Outputs:**
+-*   **Input:** A list of visible voxel instances, each associated with a `VoxelInstanceLibraryMultiMeshItem`.
+-*   **Output:** A set of draw calls using the selected mesh resolution for each instance.
++*   **Input:** A set of voxel instances managed by a `VoxelInstanceLibraryMultiMeshItem` structure [S1]. Each instance carries a reference to a mesh and associated LOD parameters [S1].
++*   **Output:** The rendered geometry for each visible instance, selected from a predefined hierarchy of meshes based on the instance's distance from the camera relative to the terrain's view distance [S1].
+ 
+ **Data Structures:**
+-The core data structure is `VoxelInstanceLibraryMultiMeshItem`. It contains specific properties for mesh LODs:
+-*   `mesh`: The base mesh (LOD0).
+-*   `mesh_lod_1`: The mesh for the first LOD transition (LOD1).
+-*   `mesh_lod_2`: The mesh for the second LOD transition (LOD2).
+-*   `mesh_lod_3`: The mesh for the third LOD transition (LOD3).
+-*   *Note:* If only `mesh` is set, no LOD is used. Fewer than 4 LODs can be simulated by assigning the same mesh to multiple slots [S1].
++The method relies on the `VoxelInstanceLibraryMultiMeshItem` configuration [S1]. This structure includes specific properties for mesh LODs:
++*   `LOD0`: The highest resolution mesh (closest distance).
++*   `LOD1`: The intermediate resolution mesh.
++*   `LOD2`: The lower resolution mesh.
++*   `LOD3`: The lowest resolution mesh (farthest distance) [S1].
++*   *Note:* The source specifies three mesh LOD properties but lists indices 0-3. Implementation should support up to four levels if the API allows, or map the available properties to the required hierarchy [S1]. If only the base `mesh` property is set, no LOD system is active [S1].
+ 
+ **Parameters:**
+-*   **LOD Switch Distances:** Defined as ratios $r_i$ (typically $0 \le r_i \le 1$) relative to the view distance $D_{terrain}$ of the corresponding terrain LOD level [S1].
+-    *   Let $D_{terrain}$ be the maximum render distance for the current terrain LOD index.
+-    *   The switch distance for LOD $i$ is $D_{switch, i} = r_i \times D_{terrain}$.
+-*   **Maximum LOD Distance:** The distance corresponding to the last defined LOD mesh. Instances beyond this distance can be hidden from rendering [S1].
++*   **LOD Switch Distances:** Defined as ratios $r_i$ (typically $0 \le r_i \le 1$) relative to the view distance of the corresponding terrain LOD level, indexed by `lod_index` [S1].
++    *   Let $D_{terrain}$ be the view distance for the current terrain LOD level.
++    *   The switch distance for LOD level $i$ is $D_{switch, i} = r_i \times D_{terrain}$ [S1].
++*   **Mesh Assignment:** To simulate fewer than the maximum number of LODs, the same mesh asset can be assigned to multiple LOD slots (e.g., assigning the high-poly mesh to both LOD0 and LOD1) [S1].
+ 
+-**Algorithm:**
+-1.  **Retrieve Distance:** For each visible instance, calculate its Euclidean distance $d$ from the camera.
+-2.  **Determine Terrain LOD:** Identify the current terrain LOD index and its associated view distance $D_{terrain}$ [S1].
+-3.  **Calculate Thresholds:** Compute the switch distances $D_{switch, 1}, D_{switch, 2}, D_{switch, 3}$ using the configured ratios [S1].
+-4.  **Select Mesh:**
+-    *   If $d > D_{switch, 3}$, select `mesh_lod_3`.
+-    *   Else if $d > D_{switch, 2}$, select `mesh_lod_2`.
+-    *   Else if $d > D_{switch, 1}$, select `mesh_lod_1`.
+-    *   Else, select `mesh` (LOD0).
+-5.  **Cull Distant Instances:** If $d$ exceeds the maximum distance of the last defined LOD mesh (or a configured global maximum), mark the instance as hidden. The instance is still generated in memory but not rendered [S1].
+-6.  **Render:** Issue draw calls using the selected mesh for all visible instances.
++**Algorithm Steps:**
++1.  **Instance Generation:** Generate voxel instances at their respective world positions [S1].
++2.  **Distance Calculation:** For each visible instance, calculate the Euclidean distance $d$ from the camera to the instance's position [G].
++3.  **Terrain LOD Lookup:** Determine the current terrain LOD level index `lod_index` based on the camera's position relative to the terrain hierarchy [S1].
++4.  **View Distance Retrieval:** Retrieve the view distance $D_{terrain}$ associated with `lod_index` [S1].
++5.  **Threshold Comparison:** Compare $d$ against the switch distances $D_{switch, i}$ for each LOD level $i$ (from highest to lowest resolution) [S1].
++    *   Select the mesh $M_{selected}$ corresponding to the highest resolution level $i$ such that $d > D_{switch, i}$.
++    *   If $d$ is less than the threshold for LOD0, use LOD0 [G].
++6.  **Culling:** If $d$ exceeds the maximum distance defined by the last LOD level (e.g., LOD3), the instance is hidden (not rendered) but remains generated in memory [S1].
++7.  **Rendering:** Render the instance using $M_{selected}$ [S1].
++
++**Pseudocode:**
++```python
++def select_mesh_for_instance(instance, camera_position, terrain_lod_data):
++    """
++    Selects the appropriate mesh LOD for a voxel instance based on distance.
++    
++    Args:
++        instance: Object containing position and LOD mesh references (LOD0, LOD1, LOD2, LOD3).
++        camera_position: Vector3 position of the camera.
++        terrain_lod_data: Dictionary or object containing view distances and switch ratios 
++                          for the current terrain LOD level.
++                          
++    Returns:
++        Mesh: The selected mesh to render.
++    """
++    # 1. Calculate distance from camera to instance
++    distance = vector_length(instance.position - camera_position)
++    
++    # 2. Get terrain LOD context
++    lod_index = get_current_terrain_lod_index(camera_position)
++    terrain_view_distance = terrain_lod_data.get_view_distance(lod_index)
++    
++    # 3. Define switch thresholds based on ratios
++    # Ratios are typically between 0 and 1 relative to terrain view distance
++    ratios = terrain_lod_data.get_switch_ratios(lod_index) 
++    # ratios[0] for LOD0, ratios[1] for LOD1, etc.
++    
++    # Calculate absolute switch distances
++    # Note: Source implies ratios define the boundary. 
++    # Usually, LOD0 is used when distance < ratio[0]*D, LOD1 when ratio[0]*D < distance < ratio[1]*D, etc.
++    # However, standard LOD logic often uses "distance > threshold" to drop quality.
++    # Assuming ratios define the *maximum* distance for that LOD level or the transition point.
++    # Based on "ratios relative to view distance", we calculate transition points.
++    
++    # Let's assume ratios[i] is the distance threshold where we switch FROM LOD[i] TO LOD[i+1]
++    # Or more commonly, LOD[i] is valid if distance > threshold[i].
++    # The source says: "defined as ratios... relative to the view distance".
++    # We will implement a standard descending LOD selection.
++    
++    switch_distances = [ratio * terrain_view_distance for ratio in ratios]
++    
++    # 4. Select Mesh
++    # Check from lowest detail (highest index) to highest detail (lowest index)
++    # If distance is greater than the switch distance for LOD3, use LOD3.
++    # If distance is greater than switch distance for LOD2, use LOD2, etc.
++    
++    num_lods = 4 # LOD0, LOD1, LOD2, LOD3
++    selected_mesh = None
++    
++    # Check if instance is beyond the last LOD's range
++    # If the last switch distance is the max range, anything beyond is culled
++    max_lod_index = num_lods - 1
++    
++    # Determine if we should hide the instance
++    # Source: "Hiding Distant Instances: Instances beyond the maximum distance of the last LOD can be hidden."
++    # This implies if distance > switch_distances[max_lod_index] (if that ratio is < 1) or a specific max distance.
++    # Assuming the last ratio defines the outer bound of the last LOD.
++    
++    if distance > switch_distances[max_lod_index]:
++        return None # Hide instance
++    
++    # Find the highest quality LOD that satisfies the distance condition
++    # Typically: if distance > switch_distances[i], we can use LOD[i] or lower.
++    # We want the highest quality (lowest index) that is valid.
++    # If distance > switch_distances[3], we use LOD3.
++    # If distance > switch_distances[2] (but <= switch_distances[3]), we use LOD2.
++    
++    for i in range(max_lod_index, -1, -1):
++        if distance > switch_distances[i]:
++            selected_mesh = instance.meshes[i]
++            break
++    else:
++        # Distance is less than the first switch distance (closest range)
++        selected_mesh = instance.meshes[0]
++        
++    return selected_mesh
++```
+ 
+ **Edge Cases and Pitfalls:**
+-*   **Performance Issue:** Changing `MultiMesh.mesh` to a different LOD dynamically may cause performance issues or glitches in the underlying engine implementation [S1].
+-*   **Generation vs. Rendering:** Hiding instances beyond the max LOD distance does not stop their generation, only their rendering [S1]. This is useful if the terrain itself has no LOD, but adds CPU overhead for culling [S1].
+-*   **Editor Limitations:** Manual editing of instances in the editor is not supported; instances must be defined via procedural generation [S1].
++*   **Performance Issue:** Changing `MultiMesh.mesh` to a different LOD dynamically can cause performance issues in the underlying engine (Godot) [S1].
++*   **Generation vs. Rendering:** Hidden instances are still generated in memory; they are only excluded from the render pass [S1]. This is useful if the terrain itself has no LOD, preventing distant objects from rendering while keeping them in the simulation [S1].
++*   **Impostors:** Simple quads can be used as LOD meshes to fake presence at far distances, significantly boosting performance for dense scenes like forests [S1].
+ 
+ ## Subtopics
+ 
++### [Far Terrain LOD with Voxel Coverage Masking](15834-far-terrain-lod-with-voxel-coverage-masking.md)
++A technique for distant terrain that uses pre-generated static meshes with LOD, employing a coverage mask to discard geometry where dynamic voxel chunks are present, preventing z-fighting and sky leaks. Choose this when rendering static far terrain that intersects with dynamic voxel areas.
++
+ ## Operating characteristics
+-*   **Complexity:** The selection logic is $O(1)$ per instance, involving simple distance comparisons. The primary cost is the memory overhead of storing multiple mesh variants per instance type and the CPU cost of generating instances that are subsequently culled [S1].
+-*   **Strengths:** Reduces vertex count for distant objects without requiring complex geometry simplification algorithms at runtime. Allows for "impostor" techniques (e.g., using simple quads for distant trees) [S1]. Avoids the scene graph overhead of managing separate objects for each LOD level [S1].
+-*   **Limitations:** Limited to 4 LOD levels (LOD0-LOD3) per instance type [S1]. Switching meshes dynamically may incur performance penalties [S1]. Does not reduce the cost of instance generation, only rendering [S1].
+-*   **When to use:** When rendering large numbers of identical objects (e.g., forests) where distant objects can be represented by lower-poly meshes or impostors [S1]. When the primary volume LOD is insufficient for mesh-level detail control [S1].
++*   **Time Complexity:** $O(N)$ where $N$ is the number of visible instances, as each instance requires a distance calculation and a constant-time lookup (up to 4 comparisons) to select the mesh [S1].
++*   **Memory Complexity:** $O(N \times M)$ where $M$ is the number of LOD levels per instance, as all LOD meshes must be loaded/available in memory for the instances [G].
++*   **Strengths:** Reduces vertex count significantly for distant objects; allows use of 2D impostors for extreme distances; decouples mesh detail from terrain resolution [S1].
++*   **Limitations:** Only applies to `VoxelInstanceLibraryMultiMeshItem` instances; does not reduce memory usage of the instances themselves, only rendering cost; dynamic mesh switching may incur engine-specific performance penalties [S1].
++*   **When to use:** When rendering large numbers of distinct objects (e.g., trees, buildings) where geometric detail is not needed at a distance.
++*   **When not to use:** When memory bandwidth is the primary bottleneck (since all LODs are loaded) or when using engines that handle mesh LOD automatically (e.g., Godot 4+) [S1].
+ 
+ ## Background
+-This system was introduced in the Voxel Tools addon for Godot 4 to address the lack of automatic mesh LOD in Godot 3 [S1]. It serves as an alternative to using Visibility Ranges with MultiMesh, which requires duplicating data and increasing the number of scene objects to process [S1]. Godot 4 later added automatic mesh LOD, but this system remains for users requiring fine-grained control over mesh and material assignment per LOD level [S1].
++Mesh Level of Detail in this context originates from the Voxel Tools plugin for the Godot game engine [S1]. It was introduced to address the lack of automatic mesh LOD in Godot 3, providing a manual override for `VoxelInstanceLibraryMultiMeshItem` to control mesh and material usage per LOD level [S1]. Godot 4 later added automatic mesh LOD, making this system less critical but still useful for fine-grained control [S1].
+ 
+ ## Sources

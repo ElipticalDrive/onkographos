@@ -1,0 +1,149 @@
+# Brick Map
+
+Also called: Sparse Voxel Octree alternative, Two-level sparse voxel grid
+
+## Overview
+A Brick Map is a two-level sparse spatial data structure for ray tracing that combines a low-resolution full voxel grid with high-resolution sparse 'bricks' to store triangle indices, avoiding the traversal complexity of BVHs and SVOs while skipping free space [S1, unofficial]. It is designed specifically for real-time ray tracing of secondary rays (reflections/refractions) starting from surfaces, supporting dynamic content and allowing ray bouncing with controlled execution time [S1, unofficial]. Unlike SVOs which require stack-based or recursive traversal, the Brick Map allows hard-coded, branch-free traversal by always reading the low-resolution cell to determine if a brick is present, resulting in low shader divergence [S1, unofficial].
+
+## How it works
+**Inputs:** A structured buffer containing all scene triangles (captured from skins, deformers, instancing, and generated geometry like marching cubes) [S1, unofficial].
+**Outputs:** A low-resolution volume texture (grid) and a structured buffer (bricks) containing triangle linked lists [S1, unofficial].
+
+**Data Structures:**
+1. **Low-Resolution Grid:** A volume texture where each cell contains a `uint` index [S1, unofficial]. The index is either `0` (empty) or points to a brick in the structured buffer [S1, unofficial].
+2. **Brick Buffer:** A structured buffer (or volume texture) containing `uint` values that point to triangle linked lists [S1, unofficial]. Each brick covers a fixed region of the high-resolution space (e.g., $8 \times 8 \times 8$ cells) [S1, unofficial].
+3. **Triangle Storage:** Linked lists of triangle indices stored per cell within the bricks [S1, unofficial].
+
+**Parameters:**
+* Low-resolution grid size: Typically $64 \times 64 \times 64$ cells [S1, unofficial].
+* Brick dimensions: Typically $8 \times 8 \times 8$ cells per brick, though the author also used $4 \times 4 \times 4$ bricks yielding a $256 \times 256 \times 256$ effective resolution [S1, unofficial].
+* Effective resolution: Low-res size multiplied by brick size [S1, unofficial].
+* Brick buffer allocation: Preallocated based on expected fill rate, typically 10-20% of the low-res grid cells [S1, unofficial].
+* Coordinate space: Can be generated in camera space, world space, or a moving grid [S1, unofficial].
+
+**Build Steps:**
+1. **Geometry Capture:** Run a first pass to capture all scene triangles into a single structured buffer [S1, unofficial]. This handles skins, deformers, instancing, and generated geometry [S1, unofficial]. Time: ~0.3 ms per frame [S1, unofficial].
+2. **Mark Low-Res Grid:** Render geometry to the low-resolution voxel grid to mark which cells are filled [S1, unofficial]. This is done using a geometry shader and pixel shader combination [S1, unofficial]. The geometry shader expands triangles to handle small/perpendicular triangles that might otherwise be skipped by rasterization [S1, unofficial]. The pixel shader performs a distance-from-triangle test to ensure proper processing [S1, unofficial].
+3. **Allocate Bricks:** Post-process the low-res grid to allocate bricks for filled cells and store brick indices in the volume texture [S1, unofficial]. The brick buffer is preallocated based on expected fill (10-20%) [S1, unofficial].
+4. **Fill High-Res Grid:** Render geometry to the high-resolution grid (low-res size $\times$ brick size) [S1, unofficial]. For each cell, read the low-res grid to find the brick, locate the position in the brick, and atomically append the triangle index to the cell's linked list [S1, unofficial]. The rasterizer handles 2D components (X, Y) while a loop in the pixel shader handles the Z depth [S1, unofficial]. To reduce atomic contention, this can be split into 2 passes over the geometry instead of 1 [S1, unofficial].
+
+**Ray Traversal Steps:**
+1. **Step Low-Res:** Step along the low-resolution voxel grid using DDA [S1, unofficial].
+2. **Check Empty:** If the current low-res cell is empty, continue stepping [S1, unofficial]. If filled, read the brick index [S1, unofficial].
+3. **Step High-Res:** Look up the brick data and step along the high-resolution brick cells [S1, unofficial]. Always read the low-res cell at every iteration to determine if a brick is present [S1, unofficial].
+4. **Intersect:** When a brick cell contains triangles, trace against the linked list of triangles in that cell [S1, unofficial].
+5. **Bend/Bounce:** To bounce a ray, change the ray direction and DDA coefficients, then continue stepping through the same two-level structure [S1, unofficial]. The shader execution loop can be limited by the number of cells marched rather than the number of bounces to prevent infinite loops from quick local bounces [S1, unofficial].
+
+**Pseudocode:**
+> **Unverified code.** The code below did not pass a test run against a reference implementation, or no test fits it, so it may contain errors.
+
+```python
+# Data Structures
+# low_res_grid[L][L][L]: uint volume texture (0 = empty, >0 = brick index)
+# brick_buffer[B][B][B]: uint array per brick (linked list heads)
+# triangle_list: StructuredBuffer<Triangle>
+
+# Helper: Standard 3D DDA state
+class DDAState:
+    def __init__(self, origin, direction, cell_size):
+        self.x = int(floor(origin.x / cell_size))
+        self.y = int(floor(origin.y / cell_size))
+        self.z = int(floor(origin.z / cell_size))
+        self.step_x = 1 if direction.x > 0 else -1
+        self.step_y = 1 if direction.y > 0 else -1
+        self.step_z = 1 if direction.z > 0 else -1
+        self.t_max_x = (self.x * cell_size + (cell_size if direction.x > 0 else 0) - origin.x) / direction.x
+        self.t_max_y = (self.y * cell_size + (cell_size if direction.y > 0 else 0) - origin.y) / direction.y
+        self.t_max_z = (self.z * cell_size + (cell_size if direction.z > 0 else 0) - origin.z) / direction.z
+
+    def advance(self):
+        if self.t_max_x < self.t_max_y:
+            if self.t_max_x < self.t_max_z:
+                self.t_max_x += 1.0
+                self.x += self.step_x
+            else:
+                self.t_max_z += 1.0
+                self.z += self.step_z
+        else:
+            if self.t_max_y < self.t_max_z:
+                self.t_max_y += 1.0
+                self.y += self.step_y
+            else:
+                self.t_max_z += 1.0
+                self.z += self.step_z
+
+def build_brick_map(triangles, L, B):
+    # Step 1: Geometry Capture (~0.3 ms)
+    # triangles buffer is pre-populated
+    
+    # Step 2: Mark Low-Res Grid
+    low_res_grid = [[0]*L for _ in range(L*L)]
+    # Rasterize triangles to low_res_grid using GS/PS with distance test
+    for tri in triangles:
+        for cell in rasterize_triangle_to_cells(tri, L):
+            low_res_grid[cell] = 1
+            
+    # Step 3: Allocate Bricks
+    brick_buffer = []
+    brick_indices = [[0]*L for _ in range(L*L)]
+    for z in range(L):
+        for y in range(L):
+            for x in range(L):
+                if low_res_grid[z*L*L + y*L + x] == 1:
+                    brick_indices[z*L*L + y*L + x] = len(brick_buffer)
+                    brick_buffer.append([[0]*B for _ in range(B*B)])
+                    
+    # Step 4: Fill High-Res Grid
+    # Rasterize to high-res grid (L*B), read low-res to find brick, atomic append
+    for tri in triangles:
+        for cell in rasterize_triangle_to_cells(tri, L*B):
+            z, y, x = cell // (L*B*B), (cell // B) % L, cell % B
+            brick_idx = brick_indices[z*L*L + y*L + x]
+            local_x, local_y, local_z = x % B, y % B, z % B
+            atomic_append_to_linked_list(brick_buffer[brick_idx][local_z*B*B + local_y*B + local_x], tri.index)
+            
+    return low_res_grid, brick_buffer
+
+def trace_ray(ray_origin, ray_direction, max_steps):
+    # Initialize DDA for high-res grid (cell_size = 1.0)
+    dda = DDAState(ray_origin, ray_direction, 1.0)
+    
+    for step in range(max_steps):
+        # Always read low-res cell at every iteration
+        brick_idx = low_res_grid[dda.z * L * L + dda.y * L + dda.x]
+        
+        if brick_idx > 0:
+            # Brick is present
+            local_x = dda.x % B
+            local_y = dda.y % B
+            local_z = dda.z % B
+            head = brick_buffer[brick_idx][local_z * B * B + local_y * B + local_x]
+            
+            if head != 0:
+                hit = trace_triangle_list(ray_origin, ray_direction, head)
+                if hit:
+                    return hit
+        
+        # Advance DDA
+        dda.advance()
+        
+        # Check bounds
+        if not is_out_of_bounds(dda.x, dda.y, dda.z, L * B):
+            break
+            
+    return None
+```
+
+## Operating characteristics
+* **Time Complexity:** Build time is 2-10 ms per frame for scenes in '5 Faces', depending on triangle count and contention [S1, unofficial]. Geometry capture is ~0.3 ms per frame [S1, unofficial].
+* **Memory Complexity:** Memory usage is proportional to the number of filled low-res cells times the brick size [S1, unofficial]. High-resolution grids consume significant VRAM; running out of VRAM can occur if managing different allocation sizes dynamically [S1, unofficial].
+* **Strengths:** Simple and fast to build; much more memory-efficient than a regular voxel grid for high resolution; skips free space; efficient shader with no complex tree traversal and little divergence; easy ray bending; supports dynamic content; finds exact leaf cell in 2 steps [S1, unofficial].
+* **Limitations:** Hard limited on scene complexity (triangles per cell); atomic contention during build; small/perpendicular triangles may be skipped without special handling [S1, unofficial].
+* **When to use:** Real-time ray tracing of secondary rays (reflections/refractions) from surfaces; dynamic scenes; solid geometry; when low divergence and controlled execution time are critical [S1, unofficial].
+* **When not to use:** Primary camera rays; scenes requiring millions of triangles [S1, unofficial].
+
+## Background
+The Brick Map was introduced by the author of the "direct to video" blog in 2013 for use in the '5 Faces' demo and production settings [S1, unofficial]. It was designed for a real-time raytracer handling secondary rays, where rays start on surfaces and need to bounce multiple times [S1, unofficial]. The structure is also used by Pixar's RenderMan for Global Illumination (GI) and by Marcos Fajardo in the Arnold renderer (using uniform grids as a 2-level hierarchy of ugrids) [S1, unofficial]. The author notes that Brick Maps are tailored to specific use cases (secondary rays, dynamic, solid, low divergence) and are not expected to replace structures used in Octane or Optix [S1, unofficial].
+
+## Sources
+[S1] real time ray tracing part 2. | direct to video, https://directtovideo.wordpress.com/2013/05/08/real-time-ray-tracing-part-2/, fetched 2026-10-24 (unofficial)

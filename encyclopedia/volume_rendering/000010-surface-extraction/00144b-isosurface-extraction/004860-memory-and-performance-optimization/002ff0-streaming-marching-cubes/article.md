@@ -1,0 +1,152 @@
+# Streaming Marching Cubes
+
+Also called: Hash table vertex sharing, Polygon-Vertex Identification for Isosurface Polygons
+
+## Overview
+Streaming Marching Cubes is a memory-optimized isosurface extraction method that processes volumetric data in a streaming fashion while ensuring topological consistency through explicit vertex sharing [S1, unofficial][S2]. It solves the problem of excessive memory consumption for large datasets by keeping only two data slices in memory at any time [S2], while a hash table links polygon vertices to cell edges to guarantee that adjacent polygons share identical vertex instances [S1, unofficial]. It builds on [Memory and Performance Optimization](12239-memory-and-performance-optimization.md) by combining streaming data access with explicit vertex identification.
+
+## How it works
+**Inputs and Outputs:**
+*   **Input:** A scalar volume dataset $V$ defined on a 3D grid, an isovalue $C$, and the grid dimensions $(N_x, N_y, N_z)$ [G].
+*   **Output:** A triangle mesh representing the isosurface $S(x,y,z) = C$, where shared vertices are uniquely identified [S1, unofficial].
+
+**Data Structures:**
+1.  **Hash Table ($H$):** A dictionary mapping a unique key (representing a cell edge) to a vertex position. The key is the ordered pair of integer grid coordinates $(i_1, j_1, k_1)$ and $(i_2, j_2, k_2)$ of the edge nodes [S1, unofficial]. The value is the 3D position $(x, y, z)$ of the interpolated vertex [S1, unofficial].
+2.  **Streaming Buffer:** A memory buffer holding only two adjacent slices of the volume data (e.g., current and next $z$-slice) to minimize RAM usage [S2].
+
+**Numbered Steps:**
+1.  **Initialize:** Create an empty hash table $H$ [G]. Load the first two slices of the volume data into the streaming buffer [S2].
+2.  **Traverse Cells:** Iterate through the volume data in a streaming manner, processing one cell at a time [S2]. For each cell, identify the 8 corner nodes [S1, unofficial].
+3.  **Sign Determination:** For each of the 8 nodes $n_i$ of the current cell, compute the sign of $S(n_i) - C$, where $S(n_i)$ is the scalar value at node $n_i$ [S1, unofficial].
+4.  **Skip Non-Isosurface Cells:** If all 8 signs are equal, the cell does not intersect the isosurface and the calculation is skipped [S1, unofficial].
+5.  **Identify Intersecting Edges:** Determine which cell edges intersect the isosurface. A cell edge connects two nodes $n_a$ and $n_b$ [S1, unofficial]. The edge intersects the isosurface if the signs of $S(n_a) - C$ and $S(n_b) - C$ differ [S1, unofficial].
+6.  **Vertex Identification and Registration:** For each intersecting edge defined by nodes $n_a$ and $n_b$:
+    *   Construct the edge key $K = (n_a, n_b)$.
+    *   If $K$ exists in $H$, retrieve the existing vertex position $V_{pos}$ from $H$ [S1, unofficial].
+    *   If $K$ does not exist, interpolate the vertex position $V_{pos}$ on the edge between $n_a$ and $n_b$ using linear interpolation based on $S(n_a)$, $S(n_b)$, and $C$ [G].
+    *   Register $V_{pos}$ in $H$ with key $K$ [S1, unofficial].
+7.  **Generate Triangles:** Use the standard Marching Cubes lookup table to determine the topology of the isosurface within the cell. Generate the triangles using the vertex positions retrieved or created in Step 6 [G].
+8.  **Stream Next Slice:** Advance the streaming buffer to load the next slice of the volume data, discarding the oldest slice to maintain constant memory usage [S2].
+9.  **Repeat:** Continue until all cells are processed [S2].
+
+**Pseudocode:**
+> **Unverified code.** The code below did not pass a test run against a reference implementation, or no test fits it, so it may contain errors.
+
+```python
+def streaming_marching_cubes_with_hash_sharing(volume, isovalue, dimensions):
+    """
+    volume: 3D array of scalar values
+    isovalue: float C
+    dimensions: tuple (Nx, Ny, Nz)
+    """
+    H = {}  # Hash table: key=(node_idx1, node_idx2), value=(x, y, z)
+    triangles = []
+    Nx, Ny, Nz = dimensions
+
+    # Standard MC triangle configuration table [G]
+    # Implementation uses the standard 256-case lookup to map cell sign masks to triangle vertex indices.
+    def get_mc_triangles(case_idx):
+        # Standard 256-case Marching Cubes triangle configuration table [G]
+        # Returns list of triangle vertex indices (0-11) for the given case.
+        # Omitted for brevity; standard implementation uses a static 256x3 array.
+        return []
+
+    # Initialize streaming buffer with first two slices
+    buf_prev = volume[:, :, 0]
+    buf_curr = volume[:, :, 1]
+
+    for z in range(Nz - 1):
+        for y in range(Ny - 1):
+            for x in range(Nx - 1):
+                # Get 8 nodes of the current cell
+                nodes = [
+                    (x, y, z), (x+1, y, z), (x+1, y+1, z), (x, y+1, z),
+                    (x, y, z+1), (x+1, y, z+1), (x+1, y+1, z+1), (x, y+1, z+1)
+                ]
+                values = [
+                    buf_curr[y, x], buf_curr[y, x+1], buf_curr[y+1, x+1], buf_curr[y+1, x],
+                    buf_prev[y, x], buf_prev[y, x+1], buf_prev[y+1, x+1], buf_prev[y+1, x]
+                ]
+
+                # Determine signs
+                signs = [1 if v > isovalue else -1 for v in values]
+
+                # Skip if no intersection
+                if all(s == signs[0] for s in signs):
+                    continue
+
+                # Standard MC edge indices for a cube
+                edges = [
+                    (0, 1), (1, 2), (2, 3), (3, 0),
+                    (4, 5), (5, 6), (6, 7), (7, 4),
+                    (0, 4), (1, 5), (2, 6), (3, 7)
+                ]
+
+                edge_vertices = [None] * 12
+                for e_idx, (i, j) in enumerate(edges):
+                    if signs[i] != signs[j]:
+                        # Linear interpolation
+                        denom = values[j] - values[i]
+                        t = (isovalue - values[i]) / denom if denom != 0 else 0.5
+                        # Compute position on edge
+                        x1, y1, z1 = nodes[i]
+                        x2, y2, z2 = nodes[j]
+                        vx = x1 + t * (x2 - x1)
+                        vy = y1 + t * (y2 - y1)
+                        vz = z1 + t * (z2 - z1)
+                        key = (nodes[i], nodes[j])
+                        if key in H:
+                            edge_vertices[e_idx] = H[key]
+                        else:
+                            H[key] = (vx, vy, vz)
+                            edge_vertices[e_idx] = (vx, vy, vz)
+                    else:
+                        edge_vertices[e_idx] = None
+
+                # Generate triangles using standard MC case lookup [G]
+                case_index = sum(1 << i for i, s in enumerate(signs) if s == 1)
+                tri_indices = get_mc_triangles(case_index)
+
+                for tri in tri_indices:
+                    v1, v2, v3 = edge_vertices[tri[0]], edge_vertices[tri[1]], edge_vertices[tri[2]]
+                    if v1 and v2 and v3:
+                        triangles.append((v1, v2, v3))
+
+            # Stream next slice
+            buf_prev = buf_curr
+            if z + 2 < Nz:
+                buf_curr = volume[:, :, z + 2]
+
+    return triangles
+
+**Parameters:**
+*   **Isovalue ($C$):** The scalar threshold for surface extraction. Typical values depend on the data range [G].
+*   **Hash Table Size:** Not given in the sources. [G] Should be sized to accommodate the number of unique cell edges intersecting the isosurface.
+
+**Edge Cases and Pitfalls:**
+*   **Memory Limitations:** Cell-edge data is not usually preserved in volume data structures due to limited memory space, necessitating this explicit identification process [S1, unofficial].
+*   **Precision:** Linear interpolation assumes the scalar field is well-behaved between nodes. Division by zero in interpolation is handled by defaulting to $t=0.5$ [G].
+*   **Degenerate Input:** If $S(n_a) = S(n_b) = C$, the sign is zero. The sources define sign as equal or not equal. [G] Standard practice is to treat zero consistently (e.g., as positive) to avoid ambiguity.
+
+```
+
+## Subtopics
+
+### Marching Slices with Slab-based Caching
+Processes data in slabs and caches vertex data to reduce hash table lookups. Choose when cache locality is more critical than minimal memory footprint. [9753-marching-slices-with-slab-based-caching.md]
+
+## Operating characteristics
+*   **Time Complexity:** $O(N)$ where $N$ is the number of cells, with a constant factor dependent on hash table operations [G].
+*   **Memory Complexity:** $O(E)$ where $E$ is the number of unique cell edges intersecting the isosurface, plus $O(S)$ for the streaming buffer where $S$ is the size of two slices [G]. This is significantly lower than storing the entire volume or all cell-edge data [S1, unofficial].
+*   **Measured Performance:** Allows processing of extremely large datasets that would not fit in memory [S2].
+*   **Strengths:** Minimal memory usage, guaranteed vertex sharing for clean mesh topology [S1, unofficial].
+*   **Limitations:** Hash table overhead; potential cache misses if the hash table is large [G].
+*   **When to Use:** Large volumetric datasets where memory is constrained and mesh quality (shared vertices) is important [S1, unofficial][S2].
+*   **When Not to Use:** Small datasets where memory is not a constraint, or when real-time performance is critical and hash table overhead is prohibitive [G].
+
+## Background
+The vertex identification process using a hash table was described in the context of isosurface propagation algorithms to share vertices across generated polygons [S1, unofficial]. The streaming implementation of Marching Cubes, which reduces memory requirements to two data slices for processing extremely large datasets, was originally developed and patented by GE Medical Systems for use in their CT and MRI equipment [S2]. The patent has since expired, placing the algorithm in the public domain [S2].
+
+## Sources
+[S1] marching cubes, https://www.sciencedirect.com/topics/engineering/marching-cube, fetched 2026-10-27 (unofficial)
+[S2] Marching Cubes Marching Cubes, https://daac.hpc.mil/gettingStarted/Marching_Cubes.html, fetched 2026-10-29

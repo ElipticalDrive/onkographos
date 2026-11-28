@@ -1,0 +1,140 @@
+# Gradientless Shading via Pixel Textures
+
+Also called: Forward Difference Shading, Frame Buffer Arithmetic Shading
+
+## Overview
+Gradientless Shading via Pixel Textures is an image-based shading technique that approximates the diffuse lighting gradient by computing forward differences of scalar material values using OpenGL blending and pixel textures [S1, unofficial]. It solves the problem of calculating surface normals for shading without storing or copying the entire frame buffer for gradient calculation, which is required by sibling methods like [Depth-Gradient Shading](6618-depth-gradient-shading.md) [S1, unofficial]. It sets itself apart by exploiting the rasterization pipeline's texture coordinate interpolation and pixel texturing to perform arithmetic on the frame buffer directly, rather than relying on explicit depth-difference calculations or texture lookups for gradients [S1, unofficial].
+
+## How it works
+The method approximates the directional derivative of the scalar field $X$ towards the light source $\vec{L}$ to estimate diffuse intensity [S1, unofficial].
+
+**Inputs and Outputs:**
+- Input: Scalar volume data mapped to a slicing plane, light direction $\vec{L}$, viewport dimensions [S1, unofficial].
+- Output: Frame buffer containing the approximated diffuse lighting intensity $I_d$ [S1, unofficial].
+
+**Data Structures:**
+- **Frame Buffer:** Stores RGB color values, initially used to store interpolated texture coordinates (surface positions), then used for arithmetic results [S1, unofficial].
+- **Texture Lookup Table (LUT):** A 1D or 2D table mapping scalar values to RGB colors, where the alpha channel is used for alpha testing [S1, unofficial].
+- **Pixel Texture:** Enabled during the shading passes to re-sample the material values from the frame buffer content [S1, unofficial].
+
+**Parameters:**
+- $\Delta$: Step size for the forward difference. Not given in the sources how this is varied per-point; it is a global constant for the pass [S1, unofficial].
+- OpenGL Pixel Bias: Used to shift texture coordinates in the second pass [S1, unofficial].
+
+**Formulas:**
+The diffuse intensity is approximated by the forward difference:
+$$I_d \approx \frac{\partial X}{\partial L} = X(\vec{p}_0) - X(\vec{p}_0 + \Delta \cdot \vec{L})$$
+where:
+- $X$ is the scalar material value [S1, unofficial].
+- $\vec{p}_0$ is the surface point [S1, unofficial].
+- $\vec{L}$ is the light direction [S1, unofficial].
+- $\Delta$ is the step size [S1, unofficial].
+
+**Steps:**
+1. **Vertex Attribute Assignment:** For each vertex of the slicing plane geometry, assign the computed texture coordinates $(u, v, w)$ as the vertex color $(R, G, B)$ [S1, unofficial]. The texture coordinates are in the range $[0, 1]$ [S1, unofficial].
+2. **Disable Modulation:** Temporarily set all RGB values in the RGB$\alpha$ lookup table to 1 [S1, unofficial]. This ensures that during rasterization, the interpolated color values (which correspond to the texture space coordinates/positions of points on the slicing plane) are not modulated by texture samples [S1, unofficial].
+3. **Render Positions:** Render the slicing plane [S1, unofficial]. The frame buffer now contains the position of surface points encoded in the RGB channels [S1, unofficial].
+4. **Restore Material Values:** Reset the RGB entries of the texture lookup table to produce the original scalar values [S1, unofficial]. Read the pixel data from the frame buffer into main memory [S1, unofficial].
+5. **First Shading Pass:** Draw the pixel data into the frame buffer with pixel texture enabled [S1, unofficial]. Render the original surface points [S1, unofficial]. The frame buffer now contains the scalar values $X(\vec{p}_0)$ [S1, unofficial].
+6. **Second Shading Pass:** Draw the pixel data into the frame buffer again with pixel texture enabled [S1, unofficial]. Shift the pixel values (texture coordinates) towards the light source using the OpenGL pixel bias [S1, unofficial]. This effectively samples $X(\vec{p}_0 + \Delta \cdot \vec{L})$ [S1, unofficial].
+7. **Blending:** Change the blending equation to subtract the second pass values from the first pass values already in the frame buffer [S1, unofficial]. The result is the approximated diffuse lighting $I_d$ [S1, unofficial].
+
+**Pseudocode:**
+> **Unverified code.** The code below did not pass a test run against a reference implementation, or no test fits it, so it may contain errors.
+
+```python
+def gradientless_shading(surface_vertices, scalar_values, light_direction, step_size, viewport_size):
+    # Step 1: Vertex Attribute Assignment
+    # Assign computed texture coordinates (u, v, w) to vertices as RGB color values.
+    for vertex in surface_vertices:
+        vertex.color = (vertex.u, vertex.v, vertex.w)
+
+    # Step 2: Disable Modulation
+    # Temporarily set all RGB values in the RGBα lookup table to one.
+    lookup_table_rgb = [1.0] * len(lookup_table_rgb)
+
+    # Step 3: Render Positions
+    # Rasterize the slicing plane. Interpolated colors correspond to texture space coordinates.
+    # The frame buffer now stores the position of surface points.
+    framebuffer = rasterize_geometry(surface_vertices, viewport_size)
+
+    # Step 4: Restore Material Values & Read Back
+    # Reset RGB entries of the texture lookup table to produce original scalar values.
+    lookup_table_rgb = map_scalars_to_lookup_table(scalar_values)
+    # Read the pixel data into main memory.
+    pixel_data = read_framebuffer_to_memory(framebuffer)
+
+    # Step 5: First Shading Pass
+    # Draw the pixel data into the frame buffer with pixel texture enabled.
+    enable_pixel_texturing()
+    set_blending_mode(replace_destination)
+    draw_pixel_data(pixel_data)
+
+    # Step 6: Second Shading Pass
+    # Shift pixel values towards the light source using the OpenGL pixel bias.
+    bias_vector = step_size * normalize(light_direction)
+    set_pixel_bias(bias_vector)
+    # Change the blending equation to subtract the second pass values from the first pass values.
+    set_blending_mode(subtract_source_from_destination)
+    draw_pixel_data(pixel_data)
+
+    # Cleanup
+    disable_pixel_texturing()
+    reset_pixel_bias()
+
+# Helper definitions for pipeline operations
+def rasterize_geometry(vertices, viewport):
+    """Rastersizes the slicing plane geometry into the frame buffer."""
+    pass
+
+def map_scalars_to_lookup_table(values):
+    """Resets the RGB entries of the texture lookup table to produce original scalar values."""
+    pass
+
+def read_framebuffer_to_memory(framebuffer):
+    """Reads the pixel data from the frame buffer into main memory."""
+    pass
+
+def enable_pixel_texturing():
+    """Enables the pixel texturing extension."""
+    pass
+
+def set_blending_mode(mode):
+    """Sets the OpenGL blending equation. 'replace_destination' overwrites, 'subtract_source_from_destination' computes dst = dst - src."""
+    pass
+
+def draw_pixel_data(data):
+    """Draws the pixel data array into the frame buffer using the current texture state."""
+    pass
+
+def set_pixel_bias(bias):
+    """Sets the OpenGL pixel bias vector to shift texture coordinates."""
+    pass
+
+def disable_pixel_texturing():
+    """Disables the pixel texturing extension."""
+    pass
+
+def reset_pixel_bias():
+    """Resets the OpenGL pixel bias to zero."""
+    pass
+```
+
+**Edge Cases and Pitfalls:**
+- **Low Contrast:** Surfaces rendered by this method exhibit low contrast [S1, unofficial].
+- **Incorrect Results:** Incorrect results are produced in regions where the variation of the gradient magnitude across the surface is high [S1, unofficial].
+- **Fixed Step Size:** The step size $\Delta$ cannot be easily varied per-point with this approach, which limits accuracy in areas requiring finer gradient estimation [S1, unofficial].
+
+## Operating characteristics
+- **Time Complexity:** The overhead of reading/writing pixel data does not depend on data resolution but on the size of the viewport [S1, unofficial].
+- **Memory Complexity:** Uses one fourth of the memory needed in gradient shading [S1, unofficial].
+- **Performance:** Rendering time differs insignificantly from gradient shading [S1, unofficial]. However, it requires reading and writing pixel data twice with enabled pixel texturing, whereas gradient shading copies the frame buffer once [S1, unofficial].
+- **Scaling:** The relative contribution to overall rendering time decreases rapidly with increasing data size because the overhead is viewport-dependent, not data-dependent [S1, unofficial].
+- **Strengths:** Lower memory footprint compared to gradient shading; avoids explicit frame buffer copying for gradient calculation [S1, unofficial].
+- **Limitations:** Low contrast; inaccurate in regions of high gradient magnitude variation; fixed step size [S1, unofficial].
+
+## Background
+This technique is described in the context of volume rendering via 2D textures using register combiners and pixel textures [S1, unofficial]. It is presented as an alternative to gradient shading, exploiting OpenGL's pixel texturing capabilities to perform frame buffer arithmetic [S1, unofficial].
+
+## Sources
+[S1] Volume Visualization and Volume Rendering Techniques, https://www.cs.unh.edu/~cs880/visualization/Meissner-VolRenderingEGTutorial-rdb.pdf, fetched 2026-10-27 (unofficial)

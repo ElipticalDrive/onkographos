@@ -1,0 +1,152 @@
+--- v003.md
++++ v004.md
+@@ -4,70 +4,59 @@
+ 
+ ## Overview
+-Sparse Voxel Chunk Indexing maps logical 3D voxel coordinates $(x, y, z)$ to a linear buffer of attribute data by organizing active voxels into fixed-size $8 \times 8 \times 8$ chunks, each represented by a 512-bit bitmask. It solves the lookup latency of flat sparse lists by using bit-counting over chunk masks to compute offsets in $O(1)$ amortized time, avoiding the traversal overhead of tree-based structures like [Octrees](link) or the hash collisions of [Hash Tables](link). It is distinct from [Sparse Voxel Grid](8021-sparse-voxel-grid.md) which may use larger or variable blocks, and [OpenVDB Volume Grid Storage](14574-openvdb-volume-grid-storage.md) which uses a multi-resolution tree structure; this method relies on a flat array of chunk descriptors with embedded bitmasks [S1, unofficial].
++Sparse Voxel Chunk Indexing is a memory-efficient storage scheme for sparse 3D voxel grids that organizes active voxels into fixed-size $8 \times 8 \times 8$ chunks, each accompanied by a 512-bit bitmask indicating occupancy [S1, unofficial]. It solves the problem of excessive memory overhead in dense grids and the pointer-chasing latency of deep trees by providing $O(1)$ access to chunk topology and linear storage for values [S1, unofficial]. Unlike [Sparse Voxel Grid](8021-sparse-voxel-grid.md) which may use hash maps or larger tree nodes, and [OpenVDB Volume Grid Storage](14574-openvdb-volume-grid-storage.md) which uses a multi-resolution octree, this method relies on shallow, fixed-depth chunking with bit-level precision [S1, unofficial].
+ 
+ ## How it works
+-**Inputs:** A set of active voxel coordinates $\{(x_i, y_i, z_i)\}$ and their associated attribute data $d_i$.
+-**Outputs:** A linear `voxel_buffer` containing attributes $d_i$, and an `IndexGrid` (or chunk array) mapping chunk indices to voxel offsets.
++**Inputs:** A set of active voxel coordinates $(x, y, z)$ and their associated scalar/vector values.
++**Outputs:** A linear buffer of voxel values and a list of Chunk structures containing bitmasks and metadata.
+ 
+ **Data Structures:**
+-1.  **Chunk Struct:**
+-    *   `bitMask[16]`: Array of 16 `uint32_t` values (64 bytes total). Represents the occupancy of an $8 \times 8 \times 8$ chunk (512 bits). Bit $k$ is 1 if the voxel at local index $k$ is active, 0 otherwise.
+-    *   `partialCounts[3]`: Array of 3 `uint32_t` values. Stores cumulative voxel counts within the chunk at specific bit positions to accelerate bit counting. Specifically, these correspond to cumulative counts at the 1/4, 1/2, and 3/4 points of the chunk's bit range [S1, unofficial].
+-    *   `voxelIndex`: A `uint32_t` offset pointing to the start of this chunk's voxels in the global `voxel_buffer`.
+-2.  **Chunk Handle/Map:** A list or hash map of `Chunk` structs, indexed by a global chunk ID.
+-3.  **Voxel Buffer:** A contiguous array of attribute data.
++1.  **Chunk:** A struct representing an $8 \times 8 \times 8$ block of voxels.
++    *   `bitMask[16]`: An array of 16 unsigned integers (64-bit or 32-bit depending on implementation, but logically 512 bits total). Each bit corresponds to a voxel in the chunk. The mapping from 3D coordinate $(x, y, z)$ within the chunk to a bit index is typically $x + 8y + 64z$ or a similar linearization [S1, unofficial].
++    *   `partialCounts[3]`: An array of 3 cumulative voxel counts. These store the number of active voxels at the 1/4, 1/2, and 3/4 points of the chunk's linearized bit order to accelerate rank queries (finding the $k$-th active voxel) [S1, unofficial].
++    *   `voxelIndex`: An integer offset pointing to the start of this chunk's active values in the global linear voxel buffer [S1, unofficial].
++2.  **IndexGrid / Chunk List:** A contiguous array of `Chunk` handles or structures, ordered spatially or by creation time [S1, unofficial].
++3.  **Voxel Buffer:** A linear array storing only the values of active voxels, ordered by their appearance in the chunk bitmasks [S1, unofficial].
+ 
+-**Coordinate Mapping:**
+-Voxels are linearized within a chunk using local index $k = x + 8y + 64z$, where $0 \le k < 512$. The global voxel index is derived from the chunk's `voxelIndex` plus the bit count of active voxels preceding $k$ in `bitMask`.
++**Algorithm: Mapping Map Index to Voxel Index**
++To find the global linear index of the $k$-th active voxel in the entire grid (where $k$ is the "map index"):
++1.  Determine which chunk contains the $k$-th voxel. This is often done via a binary search or direct lookup if chunks are uniform, but the source describes a specific traversal using `partialCounts` [S1, unofficial].
++2.  Let `mapIndex` be the index of the chunk in the chunk list.
++3.  Calculate the local rank `localIndex` of the voxel within that chunk: `localIndex = k - map[mapIndex].voxelIndex` [S1, unofficial].
++4.  Determine the `bitMaskIndex` by shifting `localIndex` right by 5 (dividing by 32): `bitMaskIndex = localIndex >> 5` [S1, unofficial].
++5.  Initialize `voxNum` (the count of active voxels in previous masks) using `partialCounts` if `bitMaskIndex > 3`. Specifically, `voxNum` is initialized to the cumulative count stored at the highest relevant partial count entry [S1, unofficial].
++6.  Loop from `startMask = bitMaskIndex & ~3` to `bitMaskIndex`. For each mask index `i` in this range:
++    *   If `i` is the final index (`i == bitMaskIndex`), mask out bits at and after the target voxel using `(1 << (localIndex & 31)) - 1`.
++    *   Add the population count (bit count) of the masked value to `voxNum` [S1, unofficial].
++7.  Return `map[mapIndex].voxelIndex + voxNum` as the global linear index in the voxel buffer [S1, unofficial].
+ 
+-**Algorithm: Lookup Voxel Index from Chunk and Local Index**
+-Given a `mapIndex` (index into the chunk array), a `chunk` descriptor, and a `localIndex` ($0 \le localIndex < 512$):
+-
+-1.  Calculate `bitMaskIndex` = `localIndex` >> 5 (integer division by 32). This identifies which of the 16 `uint32_t` words in `bitMask` contains the target bit.
+-2.  Initialize `voxNum` = 0.
+-3.  If `bitMaskIndex` > 3, add `chunk.partialCounts[bitMaskIndex - 4]` to `voxNum` [S1, unofficial]. *Note: The source logic implies `partialCounts` are used for offsets greater than the first 4 words, likely mapping indices 4-7, 8-11, 12-15 to the 3 partial counts.*
+-4.  Loop `i` from `bitMaskIndex & ~3` (start of the 4-word block containing `bitMaskIndex`) to `bitMaskIndex - 1`:
+-    *   Add `popcount(chunk.bitMask[i])` to `voxNum`.
+-5.  Handle the final word `chunk.bitMask[bitMaskIndex]`:
+-    *   Create a mask `m = (1 << (localIndex & 31)) - 1`. This mask has 1s for all bit positions strictly less than `localIndex` within the 32-bit word.
+-    *   Add `popcount(chunk.bitMask[bitMaskIndex] & m)` to `voxNum`.
+-6.  Return `map[mapIndex].voxelIndex + voxNum`.
+-
+-**Algorithm: Lookup Chunk Position from Chunk Index and Voxel Number**
+-Given a `chunk` descriptor and a target `voxNum` (0-based index of the voxel within the chunk's active voxels):
+-
+-1.  Initialize `count = 0`, `pos = 0`, `startIndex = 0`.
++**Algorithm: Mapping Chunk Index and Voxel Number to 3D Position**
++To find the 3D coordinate $(x, y, z)$ of the $n$-th active voxel in a specific chunk:
++1.  Initialize `count = 0`, `pos = 0`, `startIndex = 0` [S1, unofficial].
+ 2.  Loop `i` from 0 to 2:
+-    *   If `chunk.partialCounts[i] < voxNum`:
+-        *   `count = chunk.partialCounts[i]`
+-        *   `pos += 128` (Skip 4 words * 32 bits)
+-        *   `startIndex += 4`
+-        *   Continue to next iteration.
++    *   If `chunks[chunk].partialCounts[i] < voxNum`:
++        *   Set `count` to `chunks[chunk].partialCounts[i]`.
++        *   Add 128 to `pos`.
++        *   Add 4 to `startIndex`.
++    *   Else: break [S1, unofficial].
++3.  Increment `voxNum` by `count` (effectively adjusting `voxNum` to be relative to the start of the current 1/4 segment) [S1, unofficial].
++4.  Loop `i` from `startIndex` to 15:
++    *   If `count == voxNum`, break [S1, unofficial].
++    *   Get `bitCount` of `bitMask[i]` [S1, unofficial].
++    *   If `count + bitCount >= voxNum`:
++        *   Step bit-by-bit:
++        *   Loop `bitNum` from 0:
++            *   Add `(bitMask[i] >> bitNum) & 1` to `count`.
++            *   Increment `bitNum` and `pos` until `count == voxNum` [S1, unofficial].
+     *   Else:
+-        *   Break loop.
+-3.  Increment `voxNum` by 1 (adjusting for 0-based vs 1-based counting logic in source) [S1, unofficial].
+-4.  Loop `i` from `startIndex` to 15:
+-    *   If `count == voxNum`, break.
+-    *   Get `bitCount = popcount(chunk.bitMask[i])`.
+-    *   If `count + bitCount >= voxNum`:
+-        *   Iterate bit-by-bit within `chunk.bitMask[i]`:
+-            *   Initialize `bitNum = 0`.
+-            *   While `count < voxNum`:
+-                *   If `(chunk.bitMask[i] >> bitNum) & 1`:
+-                    *   `count += 1`
+-                *   `bitNum += 1`
+-                *   `pos += 1`
+-            *   Break inner loop.
+-    *   Else:
+-        *   `count += bitCount`
+-        *   `pos += 32`
++        *   Add `bitCount` to `count`.
++        *   Add 32 to `pos` [S1, unofficial].
+ 5.  Decrement `pos` by 1 [S1, unofficial].
+-6.  If `count < voxNum`, return `(-1, -1, -1)` (error/not found).
++6.  If `count < voxNum`, return `(-1, -1, -1)` (error) [S1, unofficial].
+ 7.  Else, return `ivec3(pos % 8, (pos / 8) % 8, pos / 64)` [S1, unofficial].
+ 
+ **Pitfalls:**
+-*   **Total Internal Reflection (TIR):** In refraction-based rendering using this structure, TIR can cause infinite loops if the ray direction becomes zero or invalid. Check if `rayDir == vec3(0.0)` after refraction calculation; if so, revert to `oldRayDir` [S1, unofficial].
+-*   **Bitmask Precision:** Ensure `uint32_t` operations are used for bitmasks to avoid overflow in `popcount` or shift operations.
+-*   **Boundary Conditions:** The `partialCounts` logic assumes a specific mapping of indices to counts. If the chunk has fewer than 512 voxels, the bitmask correctly reflects 0s, but `partialCounts` must be precomputed accurately during chunk construction.
++*   **Total Internal Reflection (TIR):** In ray marching through refractive media, TIR can cause `rayDir` to become zero or invalid, leading to infinite loops. The implementation must check if `rayDir == vec3(0.0)` after refraction calculation and revert to `oldRayDir` if so [S1, unofficial].
++*   **Precision:** Bitwise operations on large indices may overflow if not using 64-bit integers for `voxNum` or `pos` in very large grids [G].
++*   **Boundary Conditions:** The `partialCounts` array only covers 3 points for 16 masks. The logic assumes a specific distribution of bits. If the bitmask distribution is highly irregular, the optimization may fail or require fallback [S1, unofficial].
+ 
+ ## Subtopics
+@@ -79,6 +68,7 @@
+ IndexGrid is a sparse data structure derived from NanoVDB, designed to aggressively accelerate stencil-centric operations (e.g., convolution) while serving as an effective acceleration structure for ray marching and other spatial operations. It solves the problem of memory inefficiency and code complexity in standard VDB implementations by separating topology (sparsity pattern) from values (features). Unlike hash tables, which lack spatial coherence, or octrees, which suffer from $O(\log n)$ access times, IndexGrid uses a fixed-depth shallow tree to maintain $O(1)$ amortized access while preserving spatial coherence.
+ 
+-#### Slice-Based Binary Shell (SBS) Conversion
++### Slice-Based Binary Shell (SBS) Conversion
+ **Definition:** Converts a dense 3D volume into a sparse Slice-Based Binary Shell structure containing only non-empty voxels, organized by slice with cumulative offsets for fast GPU traversal [S2, unofficial].
++
+ **Steps:**
+ 1.  Initialize `current_offset = 0` and iterate over each z-slice [S2, unofficial].
+@@ -88,17 +78,17 @@
+ 5.  Update `slice_offsets[z] = current_offset` and increment `current_offset += len(indices)` [S2, unofficial].
+ 6.  Convert lists to numpy arrays: `index_array` to int32, `attribute_list` to uint8 [S2, unofficial].
+-**Layout:** Dictionary `sbs_data` with three fields: `index_array` (N×2 int32, stores [y, x] coordinates), `attribute_list` (N uint8, stores voxel values), `slice_offsets` (Z int32, stores cumulative start index per z-slice) [S2, unofficial].
++
++**Layout:**
++Dictionary `sbs_data` with three fields: `index_array` (N×2 int32, stores [y, x] coordinates), `attribute_list` (N uint8, stores voxel values), `slice_offsets` (Z int32, stores cumulative start index per z-slice) [S2, unofficial].
+ 
+ ## Operating characteristics
+-*   **Time Complexity:** Lookup is $O(1)$ amortized for both coordinate-to-index and index-to-coordinate mappings, dominated by bit counting operations (`popcount`) which are typically hardware-accelerated. Construction is $O(N)$ where $N$ is the number of active voxels.
+-*   **Memory Complexity:** Each chunk consumes 64 bytes (bitmask) + 12 bytes (partial counts) + 4 bytes (voxel index) = 80 bytes, plus the attribute data. This is more memory-efficient than octrees for moderately dense chunks but less efficient than hash tables for extremely sparse data.
+-*   **Performance:** Competitive memory footprint on GPU [S1, unofficial]. Suitable for large-scale inputs with dynamic sparsity [S1, unofficial].
+-*   **Strengths:** Fast stencil operations, spatial coherence, no tree traversal overhead.
+-*   **Limitations:** Fixed chunk size ($8^3$) may lead to fragmentation if sparsity is highly irregular. Bitmask operations can be costly on older hardware without `popcount` instructions.
+-*   **When to Use:** When spatial coherence is important and chunk density is relatively uniform. Ideal for GPU-based rendering and convolution operations.
+-*   **When Not to Use:** For extremely sparse data where most chunks are empty (use hash tables or sparse voxel grids). For data with highly variable resolution (use multi-resolution structures like OpenVDB).
++*   **Time Complexity:** Access to a voxel's value is $O(1)$ amortized if the chunk is known. Finding the chunk from a global rank or coordinate requires $O(\log C)$ or $O(1)$ depending on the index structure (e.g., binary search over chunks or direct mapping) [S1, unofficial]. Rank queries (finding the $k$-th active voxel) are accelerated by `partialCounts` to near $O(1)$ for the chunk level, with bit-counting being $O(1)$ on modern hardware [S1, unofficial].
++*   **Memory Complexity:** Storage is proportional to the number of active voxels plus the overhead of the bitmasks (1 bit per potential voxel in the chunk, so 1/8 byte per voxel) and chunk metadata [S1, unofficial]. This is significantly more compact than hash-based sparse grids for moderately dense regions.
++*   **Performance:** Measured performance depends heavily on the sparsity pattern. For highly sparse data, it outperforms dense grids. For very sparse data with large holes, it may still allocate full chunks if the chunking granularity is coarse [S1, unofficial].
++*   **Strengths:** Cache-friendly linear storage of values; simple bitwise operations for topology; no pointer chasing [S1, unofficial].
++*   **Limitations:** Fixed chunk size ($8^3$) may lead to fragmentation if active voxels are clustered in smaller regions; bit-counting can be slower than direct indexing if not optimized [S1, unofficial].
+ 
+ ## Background
+-Originating from implementations like DoonEngine, this method leverages the efficiency of bitmasks for sparse voxel storage [S1, unofficial]. It is closely related to the IndexGrid structure derived from NanoVDB, aiming to optimize stencil-centric operations [S1, unofficial]. The approach addresses the limitations of traditional VDB structures by separating topology from values and using fixed-depth structures for faster access [S1, unofficial].
++Sparse Voxel Chunk Indexing is a core component of the NanoVDB and OpenVDB libraries, developed by DreamWorks Animation and later open-sourced [S1, unofficial]. It was designed to handle the massive datasets generated in visual effects (VFX) and scientific visualization, where memory efficiency and fast access are critical [S1, unofficial]. The method evolved from earlier sparse voxel octree representations to provide a more regular and GPU-friendly memory layout [S1, unofficial].
+ 
+ ## Sources

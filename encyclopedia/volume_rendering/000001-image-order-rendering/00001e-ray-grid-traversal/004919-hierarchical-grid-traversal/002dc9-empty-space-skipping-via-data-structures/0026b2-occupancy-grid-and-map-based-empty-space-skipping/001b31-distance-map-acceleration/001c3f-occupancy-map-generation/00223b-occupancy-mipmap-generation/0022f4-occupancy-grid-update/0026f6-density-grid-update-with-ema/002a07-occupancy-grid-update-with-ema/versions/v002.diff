@@ -1,0 +1,229 @@
+--- v001.md
++++ v002.md
+@@ -4,131 +4,128 @@
+ 
+ ## Overview
+-This method maintains a dynamic occupancy grid to guide point sampling along rays during training by updating grid occupancy values using an Exponential Moving Average (EMA) of predicted densities [S2]. It differs from static occupancy maps by periodically re-evaluating a subset of cells (uniformly and from occupied regions) to adapt to changes in the learned scene representation, building on the density stabilization techniques of [Density Grid Update with EMA](3884-density-grid-update-with-ema.md).
++This method maintains a dynamic occupancy grid to accelerate ray-marching by skipping empty space during differentiable volume rendering [S1, unofficial][S2]. It updates the occupancy estimator using an Exponential Moving Average (EMA) of density estimates derived from a 3D scene representation, adaptively guiding point sampling along rays [S1, unofficial][S2]. Unlike static occupancy grids, this approach continuously refines the empty-space map during training, improving efficiency by skipping voxels deemed empty based on the EMA history [S1, unofficial]. It builds on [Density Grid Update with EMA](3884-density-grid-update-with-ema.md) by applying similar EMA principles to occupancy rather than density values directly.
+ 
+ ## How it works
+-**Inputs and Outputs:**
+-- **Inputs:** Current training step, occupancy evaluation function (`occ_eval_fn`), occupancy threshold (`occ_thre`), EMA decay rate (`ema_decay`), warmup step count (`warmup_steps`), and update frequency (`n`).
+-- **Outputs:** Updated occupancy grid state.
++**Inputs:**
++- `step`: Current training step (integer).
++- `self.training`: Boolean flag indicating training mode.
++- `self.resolution`: Resolution of the occupancy grid (integer).
++- `self.cells_per_lvl`: Number of cells per level (integer).
++- `self.grid_coords`: Tensor of grid coordinates (shape: `[N, 3]`, integer).
++- `self.binaries`: Binary occupancy grid tensor (shape: `[m, resx, resy, resz]`).
++- `self.aabbs`: Axis-aligned bounding boxes for grids (shape: `[m, 6]`).
++- `occ_eval_fn`: Callable taking sample locations `(N, 3)` and returning occupancy values `(N, 1)`.
++- `occ_thre`: Threshold for binarizing occupancy (float, default: `1e-2`).
++- `ema_decay`: Decay rate for EMA (float, default: `0.95`).
++- `warmup_steps`: Steps to sample all cells (integer, default: `256`).
++- `n`: Update interval in steps (integer, default: `16`).
++- `alpha`: EMA smoothing factor (float, default: `0.05` from [S2]).
++
++**Outputs:**
++- Updated `self.binaries` occupancy grid.
+ 
+ **Data Structures:**
+-- `self.grid_coords`: Tensor of grid coordinates.
+-- `self.cells_per_lvl`: Number of cells per level.
+-- `self.resolution`: Resolution of the grid.
+-- `self.binaries`: Binary occupancy mask for the grid.
+-
+-**Parameters:**
+-- `occ_thre`: Threshold for binarizing occupancy. Default: $10^{-2}$ [S1, unofficial].
+-- `ema_decay`: Decay rate for EMA. Default: $0.95$ [S1, unofficial]. Note: [S2] uses $\alpha = 0.05$ as the mixing coefficient in the update formula, which implies a decay factor of $1-\alpha = 0.95$ if interpreted as $o_{new} = \alpha \sigma + (1-\alpha) o_{old}$, but the formula provided is $o_{EMA} \leftarrow \max(\sigma_g, \alpha(\sigma_g - o_{EMA}) + o_{EMA})$. With $\alpha=0.05$, this is a slow update. [S1, unofficial] lists `ema_decay` default as $0.95$, which likely corresponds to the $(1-\alpha)$ term or is a separate parameter. The formula in [S2] is explicit: $\alpha = 0.05$.
+-- `warmup_steps`: Steps to sample all cells. Default: $256$ [S1, unofficial].
+-- `n`: Update interval. Default: $16$ [S1, unofficial].
++- `self.binaries`: Binary tensor representing occupancy. `1` indicates occupied, `0` empty.
++- `self.grid_coords`: Tensor storing 3D coordinates of grid cells.
+ 
+ **Steps:**
+-1. Check if training is active. If not, raise `RuntimeError` [S1, unofficial].
+-2. Check if the current step is a multiple of `n`. If not, return [S1, unofficial].
+-3. If `step < warmup_steps`, select all cells in the grid [S1, unofficial].
+-4. If `step >= warmup_steps`, select $N = \text{cells\_per\_lvl} // 4$ cells uniformly and $N$ cells from currently occupied regions [S1, unofficial].
+-5. For each selected level and indices:
+-    a. Retrieve `grid_coords` for the indices [S1, unofficial].
+-    b. Compute sample positions $x = (\text{grid\_coords} + \text{rand}(\text{grid\_coords})) / \text{resolution}$, where rand is uniform in $[0, 1)$ [S1, unofficial].
+-    c. Evaluate the occupancy/density function at $x$ to get predicted densities $D_g = \{\sigma_i\}_{i=1}^9$ for the 9 points (center + 8 vertices) of the grid cell $g$ [S2].
+-    d. Compute grid density $\sigma_g = \max(D_g)$ [S2].
+-    e. Update occupancy $o_{EMA}$ using EMA:
+-       $$ o_{EMA} \leftarrow \max(\sigma_g, \alpha(\sigma_g - o_{EMA}) + o_{EMA}) $$
+-       where $\alpha = 0.05$ [S2].
+-6. Binarize the occupancy grid using `occ_thre` [S1, unofficial].
++1. Check if `self.training` is `False`. If so, raise `RuntimeError` [S1, unofficial].
++2. If `step % n == 0` and `self.training` is `True`, call `_update(step, occ_eval_fn, occ_thre, ema_decay, warmup_steps)` [S1, unofficial].
++3. In `_update`:
++   a. If `step < warmup_steps`:
++      i. Get all cell indices using `self._get_all_cells()` [S1, unofficial].
++   b. If `step >= warmup_steps`:
++      i. Set `N = self.cells_per_lvl // 4` [S1, unofficial].
++      ii. Sample cells using `self._sample_uniform_and_occupied_cells(N)` [S1, unofficial]. This samples 1/4 of cells uniformly and 1/4 from occupied regions [S1, unofficial].
++   c. For each level `lvl` and indices in `lvl_indices`:
++      i. Get `grid_coords = self.grid_coords[indices]` [S1, unofficial].
++      ii. Compute sample positions `x = (grid_coords + torch.rand_like(grid_coords, dtype=torch.float32)) / self.resolution` [S1, unofficial]. This adds uniform noise to sample within the voxel [G].
++      iii. Evaluate densities at `x` using `occ_eval_fn(x)` to get `Dg` [S2].
++      iv. For each grid `g`, define point set `Xg` containing the center and 8 vertices of grid `g` [S2].
++      v. Get predicted densities `Dg = {σig ∈ R+}_{i=1}^9` for these 9 points [S2].
++      vi. Calculate density `σg` as `max(Dg)` [S2].
++      vii. Update occupancy `oEMA_g` using EMA: `oEMA_g ← max(σg, α(σg - oEMA_g) + oEMA_g)` where `α = 0.05` [S2].
++      viii. Binarize `oEMA_g` using `occ_thre` to update `self.binaries` [S1, unofficial].
+ 
+ **Pseudocode:**
+ ```python
+-def update_occupancy_grid(step, occ_eval_fn, occ_thre=1e-2, ema_decay=0.95, warmup_steps=256, n=16):
+-    if not training:
+-        raise RuntimeError("Update only allowed during training")
++def update_occupancy_grid(step, self, occ_eval_fn, occ_thre=1e-2, ema_decay=0.95, warmup_steps=256, n=16, alpha=0.05):
++    if not self.training:
++        raise RuntimeError("Occupancy grid update only supported during training")
+     
+-    if step % n != 0:
+-        return
++    if step % n == 0:
++        _update(step, self, occ_eval_fn, occ_thre, ema_decay, warmup_steps, alpha)
+ 
+-    # Determine cells to update
++def _update(step, self, occ_eval_fn, occ_thre, ema_decay, warmup_steps, alpha):
+     if step < warmup_steps:
+-        indices = get_all_cells()
++        indices = self._get_all_cells()
+     else:
+-        N = cells_per_lvl // 4
+-        uniform_indices = sample_uniform_cells(N)
+-        occupied_indices = sample_occupied_cells(N)
+-        indices = uniform_indices + occupied_indices
+-
+-    for lvl, idx in indices:
+-        grid_coords = self.grid_coords[idx]
+-        # Add random offset for jittered sampling within cells
+-        rand_offset = torch.rand_like(grid_coords, dtype=torch.float32)
+-        x = (grid_coords + rand_offset) / self.resolution
++        N = self.cells_per_lvl // 4
++        indices = self._sample_uniform_and_occupied_cells(N)
++    
++    for lvl in self.levels:
++        lvl_indices = indices[lvl]
++        grid_coords = self.grid_coords[lvl_indices]
+         
+-        # Evaluate density at 9 points (center + 8 vertices)
+-        # Note: The source implies evaluating at specific points relative to the grid cell.
+-        # Assuming grid_coords are cell centers, we need to generate the 9 points.
+-        # However, the source says "set a point set Xg ... containing the center and 8 vertices".
+-        # And then "get predicted densities Dg ... of these points".
+-        # The formula for x above seems to sample within the cell volume, not necessarily the 9 points.
+-        # Re-reading [S2]: "To calculate the density of g, we set a point set Xg ... containing the center and 8 vertices ... Then, we get the predicted densities Dg ... of these points".
+-        # The code snippet in [S1, unofficial] computes x = (grid_coords + rand) / resolution. This looks like random sampling, not the 9 points.
+-        # There is a discrepancy between [S1, unofficial] code and [S2] description.
+-        # [S2] is the primary source for the method definition. [S1, unofficial] is an implementation.
+-        # We will follow [S2]'s description of the 9 points for the method, but note [S1, unofficial] uses random sampling.
+-        # Given the instruction to implement from text, and [S2] provides the specific "9 points" logic, we use that.
++        # Add uniform noise to sample within voxel
++        x = (grid_coords + torch.rand_like(grid_coords, dtype=torch.float32)) / self.resolution
+         
+-        # Generate 9 points: center and 8 vertices of the grid cell
+-        # Assuming grid_coords are integer indices, we need to convert to world space or use them directly if the function handles it.
+-        # Let's assume occ_eval_fn takes world coordinates.
+-        # We need to construct the 9 points.
+-        # This requires knowing the grid spacing and origin.
+-        # Since these details are not fully explicit in the notes for constructing the 9 points from grid_coords,
+-        # we will use the random sampling from [S1, unofficial] as a fallback if 9 points are not feasible, 
+-        # but [S2] is very specific about 9 points.
+-        # Let's stick to [S2]'s 9 points logic.
++        # Evaluate densities at sample points
++        # occ_eval_fn returns occupancy values (N, 1)
++        densities = occ_eval_fn(x)
+         
+-        # Construct 9 points relative to grid cell
+-        # This part is ambiguous in the notes regarding coordinate system.
+-        # We will assume the function can handle grid indices or we convert them.
+-        # For the sake of a complete implementation, we will use the random sampling from [S1, unofficial] 
+-        # as it is more concrete in the code snippet, but note the discrepancy.
+-        # Actually, the prompt asks to implement from the article. The article notes cite [S2] for the 9 points.
+-        # We will implement the 9 points logic.
++        # For each grid, we need to evaluate 9 points (center + 8 vertices)
++        # This part requires expanding grid_coords to 9 points per grid
++        # Assuming grid_coords is already expanded to 9 points per grid for simplicity
++        # In practice, this involves generating 9 points per grid cell
+         
+-        # Get grid bounds
+-        # This is a gap. We assume grid_coords are integer indices.
+-        # We need to expand them to 9 points.
+-        # Let's assume a helper to get 9 points.
+-        points_9 = get_9_points_from_grid_coord(grid_coords) # [G] Helper to generate 9 points
++        # Calculate max density for each grid
++        # densities shape: [num_grids * 9, 1]
++        # Reshape to [num_grids, 9, 1] and take max over 9 points
++        densities_reshaped = densities.view(-1, 9, 1)
++        sigma_g = torch.max(densities_reshaped, dim=1).values  # [num_grids, 1]
+         
+-        densities = occ_eval_fn(points_9) # [G] Assuming occ_eval_fn returns densities
+-        sigma_g = torch.max(densities)
++        # Update EMA occupancy
++        # oEMA_g is stored in self.occupancy_ema
++        oEMA_g = self.occupancy_ema[lvl_indices]
++        new_oEMA = torch.max(sigma_g, alpha * (sigma_g - oEMA_g) + oEMA_g)
++        self.occupancy_ema[lvl_indices] = new_oEMA
+         
+-        # Update EMA
+-        alpha = 0.05
+-        current_occupancy = self.get_occupancy(idx)
+-        new_occupancy = max(sigma_g, alpha * (sigma_g - current_occupancy) + current_occupancy)
+-        self.set_occupancy(idx, new_occupancy)
+-
+-    # Binarize
+-    self.binaries = (self.occupancy > occ_thre).float()
++        # Binarize occupancy
++        binaries = (new_oEMA > occ_thre).float()
++        self.binaries[lvl_indices] = binaries
+ ```
+ 
++**Parameters:**
++- `step`: Current training step [S1, unofficial].
++- `occ_eval_fn`: Callable for occupancy evaluation [S1, unofficial].
++- `occ_thre`: Threshold for binarization, default `1e-2` [S1, unofficial].
++- `ema_decay`: Decay rate for EMA, default `0.95` [S1, unofficial].
++- `warmup_steps`: Steps to sample all cells, default `256` [S1, unofficial].
++- `n`: Update interval, default `16` [S1, unofficial].
++- `alpha`: EMA smoothing factor, default `0.05` [S2].
++
+ **Edge Cases and Pitfalls:**
+-- **Precision:** The EMA update uses `max` to ensure occupancy does not decrease below the current density estimate, preventing "forgetting" of occupied regions [S2].
+-- **Boundaries:** The random sampling in [S1, unofficial] ensures coverage within cells, but the 9-point method in [S2] is more deterministic for grid boundaries.
+-- **Degenerate Input:** If `occ_eval_fn` returns NaN or Inf, the EMA update may fail. Guard against this [G].
++- Precision: EMA updates may suffer from precision issues if `alpha` is very small [S2].
++- Boundaries: Ensure `grid_coords` are within valid range before sampling [G].
++- Degenerate Input: If `occ_eval_fn` returns NaN or Inf, handle gracefully [G].
+ 
+ ## Subtopics
+ 
+-### Voxel Prior Loss
+-A regularization technique that encourages sparsity in the occupancy grid, often used in conjunction with occupancy updates to maintain efficient scene representations [10726-voxel-prior-loss.md].
++### [Dynamic Occupancy Grid Sampling](20666-dynamic-occupancy-grid-sampling.md)
++Dynamic Occupancy Grid Sampling is a ray-marching acceleration technique that partitions the 3D scene into a fixed-resolution grid of occupancy voxels to skip empty space during differentiable volume rendering. It improves training efficiency by adaptively guiding point sampling along rays, skipping voxels deemed empty based on an Exponential Moving Average (EMA) of density estimates, whereas ordinary sampling processes all points along the ray regardless of occupancy.
+ 
+ ## Operating characteristics
+-- **Time Complexity:** Updating all cells is $O(N)$, but with warmup and sampling, it is $O(N/2)$ after warmup. The update is performed every `n` steps.
+-- **Memory Complexity:** $O(N)$ for storing the occupancy grid.
+-- **Performance:** Adaptive sampling reduces the number of cells to update, speeding up training [S1, unofficial].
+-- **Strengths:** Stabilizes training by smoothing occupancy estimates [S2].
+-- **Limitations:** Requires periodic evaluation of the occupancy function, which can be costly if the function is complex [S1, unofficial].
++- Time Complexity: O(N) per update, where N is the number of sampled cells [S1, unofficial].
++- Memory Complexity: O(M) for storing occupancy grid, where M is total number of cells [S1, unofficial].
++- Measured Performance: Not given in the sources.
++- Scaling: Scales with grid resolution and number of levels [S1, unofficial].
++- Strengths: Adaptive empty-space skipping, efficient during training [S1, unofficial][S2].
++- Limitations: Requires careful tuning of `alpha` and `occ_thre` [S2].
++- When to Use: During training of neural radiance fields or implicit surfaces [S1, unofficial][S2].
++- When Not to Use: During inference or when static occupancy is sufficient [S1, unofficial].
+ 
+ ## Background
+-The method was introduced in the context of HelixSurf, a neural implicit surface learning method for indoor scenes, to adaptively guide point sampling [S2]. It builds on the concept of dynamic occupancy grids for efficient ray traversal.
++Originated in the context of dynamic occupancy grids for accelerating ray-marching in neural rendering [S1, unofficial][S2]. Developed to improve training efficiency by adaptively guiding point sampling [S2]. Used in methods like HelixSurf for robust neural implicit surface learning [S2].
+ 
+ ## Sources

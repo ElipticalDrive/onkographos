@@ -1,0 +1,168 @@
+--- v001.md
++++ v002.md
+@@ -4,16 +4,16 @@
+ 
+ ## Overview
+-Scan Offset Computation generates the lookup table that maps 2D scanline coordinates $(j, k)$ to their starting positions within the 1D Run-Length Encoded (RLE) data stream. It solves the problem of efficiently locating the beginning of a ray's traversal through a volume without scanning the entire RLE array for every ray. Unlike [ComputeIndex](52-compute-index.md), which maps every individual voxel coordinate to a specific run position, this method only stores the starting offsets for each scanline $(j, k)$, requiring the renderer to traverse the RLE runs sequentially along the $i$-axis to find specific voxels [S1, unofficial].
++Scan Offset Computation recomputes the `scan_offsets` array for a classified volume, where each `ScanOffset` entry stores the first length offset and first data offset for a specific scanline $(j, k)$ plane [S1, unofficial]. Unlike [ComputeIndex](52-compute-index.md), which maps every voxel coordinate to a specific run position, this method only stores the starting offsets for each scanline $(j, k)$, requiring the renderer to traverse the RLE runs sequentially along the $i$-axis to locate voxels [S1, unofficial].
+ 
+ ## How it works
+-The method iterates through the volume dimensions in the order $k$, then $j$, accumulating the lengths of RLE headers and data payloads to compute cumulative offsets.
++The method iterates through the volume dimensions in the order $k$, then $j$, accumulating the lengths of RLE headers and data payloads to compute cumulative offsets [S1, unofficial].
+ 
+ **Inputs and Outputs:**
+ *   **Input:** A classified RLE volume structure (`rle_voxels`) containing:
+-    *   `ilen`, `jlen`, `klen`: The dimensions of the volume along the $i$, $j$, and $k$ axes respectively.
+-    *   `run_lengths`: A pointer to the RLE header data. This data consists of pairs of integers: `zerocount` (number of zero-valued voxels) and `nonzerocount` (number of non-zero voxels) for each run.
+-    *   `voxel_size`: The size in bytes of a single voxel's data payload.
+-    *   `mmapped`: A boolean flag indicating if the data is memory-mapped.
+-*   **Output:** An array of `ScanOffset` structures, indexed by $(j, k)$, where each entry contains the starting byte offset for the RLE headers (`first_len`) and the starting byte offset for the voxel data (`first_data`).
++    *   `ilen`, `jlen`, `klen`: The dimensions of the volume along the $i$, $j$, and $k$ axes respectively [S1, unofficial].
++    *   `run_lengths`: A pointer to the RLE header data, consisting of pairs of integers: `zerocount` (number of zero-valued voxels) and `nonzerocount` (number of non-zero voxels) for each run [S1, unofficial].
++    *   `voxel_size`: The size in bytes of a single voxel's data payload [S1, unofficial].
++    *   `mmapped`: A boolean flag indicating if the data is memory-mapped [S1, unofficial].
++*   **Output:** An array of `ScanOffset` structures, indexed by $(j, k)$, where each entry contains the starting byte offset for the RLE headers (`first_len`) and the starting byte offset for the voxel data (`first_data`) [S1, unofficial].
+ 
+ **Data Structures:**
+@@ -25,25 +25,23 @@
+ } ScanOffset;
+ ```
+-The output array is allocated as `ScanOffset*` of size `jlen * klen`. The indexing into this array for a specific scanline $(j, k)$ is typically `scan_offsets[k * jlen + j]`.
++The output array is allocated as `ScanOffset*` of size `klen * jlen` [S1, unofficial]. The indexing into this array for a specific scanline $(j, k)$ is `scan_offsets[k * jlen + j]` [G].
+ 
+ **Algorithm Steps:**
+-1.  **Guard Check:** If `rle_voxels->mmapped` is true, return an error (e.g., `VPERROR_IO`). This prevents modification of read-only memory-mapped segments [S1, unofficial].
++1.  **Guard Check:** If `rle_voxels->mmapped` is true, return `VPERROR_IO` immediately to prevent modification of memory-mapped data [S1, unofficial].
+ 2.  **Initialization:**
+-    *   Let $I = \text{rle\_voxels->ilen}$, $J = \text{rle\_voxels->jlen}$, $K = \text{rle\_voxels->klen}$.
+-    *   Let $V_{size} = \text{rle\_voxels->voxel\_size}$.
+-    *   Initialize pointers/indices: `len_offset = 0`, `data_offset = 0`.
+-    *   Initialize a pointer `RLEptr` to the start of `rle_voxels->run_lengths`.
++    *   Let $I = \text{rle\_voxels->ilen}$, $J = \text{rle\_voxels->jlen}$, $K = \text{rle\_voxels->klen}$ [S1, unofficial].
++    *   Let $V_{size} = \text{rle\_voxels->voxel\_size}$ [S1, unofficial].
++    *   Initialize `len_offset = 0` and `data_offset = 0` [S1, unofficial].
++    *   Initialize a pointer `RLElen` to the start of `rle_voxels->run_lengths` [S1, unofficial].
+ 3.  **Iteration:** Loop $k$ from $0$ to $K-1$:
+     *   Loop $j$ from $0$ to $J-1$:
+-        *   Set `scan_offsets[k * J + j].first_len = len_offset`.
+-        *   Set `scan_offsets[k * J + j].first_data = data_offset`.
+-        *   Initialize `voxel_count = 0`.
+-        *   While `voxel_count < I`:
+-            *   Read `zerocount = *RLEptr++`.
+-            *   Read `nonzerocount = *RLEptr++`.
+-            *   Update `len_offset += 2` (since each run contributes 2 integers to the header stream).
+-            *   Update `data_offset += nonzerocount * V_{size}`.
+-            *   Update `voxel_count += zerocount + nonzerocount`.
+-        *   Assert `voxel_count == I` to ensure the RLE data for the scanline is complete and consistent with the volume dimension [S1, unofficial].
++        *   Set `scan_offsets[k * J + j].first_len = len_offset` and `scan_offsets[k * J + j].first_data = data_offset` [S1, unofficial].
++        *   Initialize `i = 0` as a counter for processed voxels [S1, unofficial].
++        *   While `i < I`:
++            *   Read `zerocount = *RLElen++` and `nonzerocount = *RLElen++` [S1, unofficial].
++            *   Increment `len_offset` by $2$ (each run contributes two integers to the header stream) [S1, unofficial].
++            *   Add `nonzerocount * V_size` to `data_offset` [S1, unofficial].
++            *   Add `zerocount + nonzerocount` to `i` [S1, unofficial].
++        *   Assert `i == I` to verify the RLE data exactly covers the scanline length [S1, unofficial].
+ 
+ **Pseudocode:**
+@@ -51,5 +49,5 @@
+ def compute_scan_offsets(rle_voxels):
+     if rle_voxels.mmapped:
+-        raise IOError("Cannot modify memory-mapped volume")
++        return "VPERROR_IO"
+ 
+     ilen = rle_voxels.ilen
+@@ -57,70 +55,53 @@
+     klen = rle_voxels.klen
+     voxel_size = rle_voxels.voxel_size
+-    
+-    # Allocate output array: size jlen * klen
+-    scan_offsets = [None] * (jlen * klen)
+-    
+-    # Pointers to RLE data
+-    rle_ptr = rle_voxels.run_lengths
+-    
++
++    scan_offsets = [None] * (klen * jlen)
++    run_lengths = rle_voxels.run_lengths
++    rle_idx = 0
++
+     len_offset = 0
+     data_offset = 0
+-    
++
+     for k in range(klen):
+         for j in range(jlen):
+-            # Store starting offsets for this (j, k) scanline
+             scan_offsets[k * jlen + j] = {
+                 'first_len': len_offset,
+                 'first_data': data_offset
+             }
+-            
+-            # Consume RLE runs until ilen voxels are accounted for
++
+             voxels_processed = 0
+             while voxels_processed < ilen:
+-                # Read pair: (zero_count, non_zero_count)
+-                # Note: In C, these are typically int or unsigned int
+-                zerocount = rle_ptr[0]
+-                nonzerocount = rle_ptr[1]
+-                rle_ptr += 2
+-                
+-                # Update offsets
++                zerocount = run_lengths[rle_idx]
++                nonzerocount = run_lengths[rle_idx + 1]
++                rle_idx += 2
++
+                 len_offset += 2
+                 data_offset += nonzerocount * voxel_size
+-                
+                 voxels_processed += zerocount + nonzerocount
+-            
+-            # Verify that the RLE data exactly covers the scanline length
++
+             if voxels_processed != ilen:
+-                raise ValueError("RLE data mismatch for scanline")
+-                
++                raise AssertionError("RLE data mismatch for scanline")
++
+     return scan_offsets
+ ```
+ 
+ **Parameters:**
+-*   `voxel_size`: Typically 1 byte for 8-bit intensity, 4 bytes for 32-bit float, or 12-16 bytes for RGBA/RGB with opacity. Not given in the sources.
++*   `voxel_size`: Not given in the sources.
+ 
+ **Edge Cases and Pitfalls:**
+-*   **Memory-Mapped Data:** If the volume is memory-mapped, the function must fail immediately to avoid writing to read-only memory [S1, unofficial].
+-*   **RLE Consistency:** The sum of `zerocount` and `nonzerocount` for all runs in a scanline must exactly equal `ilen`. If it does not, the RLE data is corrupted or incomplete [S1, unofficial].
++*   **Memory-Mapped Data:** If `rle_voxels->mmapped` is true, the function returns `VPERROR_IO` immediately to prevent modification of read-only memory [S1, unofficial].
++*   **RLE Consistency:** The sum of `zerocount` and `nonzerocount` for all runs in a scanline must exactly equal `ilen`. An assertion verifies this condition at the end of each scanline [S1, unofficial].
+ *   **Offset Overflow:** If the volume is very large, `len_offset` or `data_offset` may exceed the capacity of `unsigned` integers. The sources use `unsigned`, implying a limit of $2^{32}-1$ bytes/entries. Not given in the sources.
+ 
+-## Subtopics
+-
+-### ComputeIndex
+-Maps every voxel coordinate $(i, j, k)$ to a specific run position. Use when random access to specific voxels is required. [ComputeIndex](52-compute-index.md)
+-
+-### Volpack RLE Storage
+-The parent storage format that provides the `run_lengths` array. [Volpack RLE Storage](4325-volpack-run-length-encoded-volume-classification-and-storage.md)
+-
+ ## Operating characteristics
+-*   **Time Complexity:** $O(J \times K \times \text{avg\_runs\_per\_scanline})$. Since every RLE entry in the volume must be read exactly once to compute offsets, the complexity is linear with respect to the number of RLE runs in the volume.
+-*   **Memory Complexity:** $O(J \times K)$ for the `scan_offsets` array. Each entry is 8 bytes (two `unsigned` integers).
+-*   **Strengths:** Simple to implement; low memory overhead for the offset table; enables fast ray casting by providing direct access to the start of each scanline's data.
+-*   **Limitations:** Does not provide direct random access to individual voxels; requires sequential traversal of RLE runs for each ray.
+-*   **When to Use:** When rendering volumes via ray casting along the $i$-axis (or other axes with appropriate permutation) and the primary access pattern is scanline-based.
+-*   **When Not to Use:** When random voxel access is required (use [ComputeIndex](52-compute-index.md) instead).
++*   **Time Complexity:** Linear with respect to the number of RLE runs in the volume, as every RLE entry must be read exactly once to compute offsets [G].
++*   **Memory Complexity:** $O(J \times K)$ for the `scan_offsets` array, where each entry is 8 bytes (two `unsigned` integers) [G].
++*   **Strengths:** Simple to implement; low memory overhead for the offset table; enables fast ray casting by providing direct access to the start of each scanline's data [G].
++*   **Limitations:** Does not provide direct random access to individual voxels; requires sequential traversal of RLE runs for each ray [S1, unofficial].
++*   **When to Use:** When rendering volumes via ray casting along the $i$-axis (or other axes with appropriate permutation) and the primary access pattern is scanline-based [G].
++*   **When Not to Use:** When random voxel access is required (use [ComputeIndex](52-compute-index.md) instead) [S1, unofficial].
+ 
+ ## Background
+-Scan Offset Computation is part of the Volpack library, a widely used volume rendering toolkit. It was developed to optimize the rendering of large volumetric datasets by reducing the overhead of locating data during ray casting. The method is specific to the Volpack RLE format, which classifies voxels and stores them in a run-length encoded structure optimized for three orthogonal viewing axes.
++Scan Offset Computation is part of the Volpack library, a widely used volume rendering toolkit [S1, unofficial]. It was developed to optimize the rendering of large volumetric datasets by reducing the overhead of locating data during ray casting [G]. The method is specific to the Volpack RLE format, which classifies voxels and stores them in a run-length encoded structure optimized for three orthogonal viewing axes [S1, unofficial].
+ 
+ ## Sources

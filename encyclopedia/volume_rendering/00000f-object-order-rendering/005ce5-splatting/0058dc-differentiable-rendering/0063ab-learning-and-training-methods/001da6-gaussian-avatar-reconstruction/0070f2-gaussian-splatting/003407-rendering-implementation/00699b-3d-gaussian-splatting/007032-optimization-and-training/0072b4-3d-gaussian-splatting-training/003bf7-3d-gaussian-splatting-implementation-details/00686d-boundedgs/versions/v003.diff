@@ -1,0 +1,189 @@
+--- v002.md
++++ v003.md
+@@ -23,5 +23,5 @@
+     a. Read Gaussian position, opacity $\alpha_i$, and maximum scale [S1, unofficial].
+     b. Exclude Gaussians with camera-space depth $z_i \le 0.2$ or activated opacity $\alpha_i \le 1/255$ [S1, unofficial].
+-    c. Compute the projection Jacobian $A_i$ using detailed projection focal lengths. Clamp normalized coordinates $x_i/z_i$ and $y_i/z_i$ to $\pm 1.3 \tan(\text{FOV}_x/2)$ and $\pm 1.3 \tan(\text{FOV}_y/2)$ respectively [S1, unofficial].
++    c. Compute the projection Jacobian $A_i$ using detailed projection focal lengths [S1, unofficial]. Clamp normalized coordinates $x_i/z_i$ and $y_i/z_i$ to $\pm 1.3 \tan(\text{FOV}_x/2)$ and $\pm 1.3 \tan(\text{FOV}_y/2)$ respectively [S1, unofficial].
+     d. Estimate screen covariance bound [S1, unofficial].
+     e. Calculate screen-space rectangle half-widths:
+@@ -45,19 +45,19 @@
+        *   $B_{\text{sample}}$: bucket-to-tile indices, transmittance and RGB state for 256 pixels per bucket [S1, unofficial].
+        *   $B_{\text{out}}$: FP32 RGB output buffer, plus depth buffer if enabled [S1, unofficial].
+-    c. **Budget Splitting:** If $E(R) > L$ and $R$ can be split, bisect along the dimension with more tiles (ties broken horizontally). Children remain disjoint and cover the parent. Stop when $E(R) \le L$ or $R$ is one tile [S1, unofficial].
++    c. **Budget Splitting:** If $E(R) > L$ and $R$ can be split, bisect along the dimension with more tiles (ties broken horizontally) [S1, unofficial]. Children remain disjoint and cover the parent [S1, unofficial]. Stop when $E(R) \le L$ or $R$ is one tile [S1, unofficial].
+     d. **Leaf Execution:** For each final leaf $R$:
+-       i. Recount intersections under current projection.
++       i. Recount intersections under current projection [S1, unofficial].
+        ii. Perform rasterization (within-tile sorting and compositing) and compute loss $L_R = 0.8 L_{1,R} + 0.2 (1 - \text{SSIM}_R)$ [S1, unofficial].
+-       iii. Compute backward pass to get gradients for projected attributes.
++       iii. Compute backward pass to get gradients for projected attributes [S1, unofficial].
+        iv. Accumulate these gradients into the group's compact parameter-gradient storage, indexed by candidate IDs [S1, unofficial].
+        v. Release leaf state (intersections, compositing buffers, loss state) [S1, unofficial].
+-    e. **Group Cleanup:** After all leaves, perform projection backward to accumulate parameter gradients from projected attributes. Release group projection and gradient caches [S1, unofficial].
+-4.  **Update:** After all groups, compute global regularization (e.g., GNS pruning term during 15K–19K window) once. Combine gradients from all groups. Perform one parameter update using the optimizer (e.g., CUDA Adam) [S1, unofficial].
++    e. **Group Cleanup:** After all leaves, perform projection backward to accumulate parameter gradients from projected attributes [S1, unofficial]. Release group projection and gradient caches [S1, unofficial].
++4.  **Update:** After all groups, compute global regularization (e.g., GNS pruning term during 15K–19K window) once [S1, unofficial]. Combine gradients from all groups. Perform one parameter update using the optimizer (e.g., CUDA Adam) [S1, unofficial].
+ 
+ **Pseudocode:**
+ 
+ ```python
+-def bounded_gs_train_step(global_params, camera, image, g, L):
+-    # 1. Divide image into g^2 groups
++def bounded_gs_step(global_params, camera, image, g, L):
++    # 1. Divide image into g^2 non-overlapping groups [S1, unofficial]
+     groups = []
+     gw, gh = image.width // g, image.height // g
+@@ -68,7 +68,8 @@
+     view_gradients = {} 
+     
+-    # 2. Process groups in row-major order
++    # 2. Process groups in row-major order [S1, unofficial]
+     for group_bounds in groups:
+         candidates = []
++        # Candidate screening [S1, unofficial]
+         for i in range(global_params.num_gaussians):
+             pos = global_params.pos[i]
+@@ -79,5 +80,7 @@
+                 continue
+                 
+-            A_i = compute_projection_jacobian(camera, pos)
++            # Compute projection Jacobian A_i using detailed projection focal lengths [S1, unofficial]
++            # [G] Standard 3DGS projection Jacobian computation
++            A_i = camera.compute_jacobian(pos) 
+             x_norm = clamp(pos.x / z_i, -1.3 * tan(camera.fov_x / 2), 1.3 * tan(camera.fov_x / 2))
+             y_norm = clamp(pos.y / z_i, -1.3 * tan(camera.fov_y / 2), 1.3 * tan(camera.fov_y / 2))
+@@ -89,23 +92,29 @@
+             e_y = max(0, sqrt(2 * log(255 * alpha_i) * Sigma_bar[1,1] + 2))
+             
++            # Include Gaussian i in C_j if rectangle intersects tile-padded bounds [S1, unofficial]
+             if (pos.x - e_x < group_bounds[2] and pos.x + e_x > group_bounds[0] and
+                 pos.y - e_y < group_bounds[3] and pos.y + e_y > group_bounds[1]):
+                 candidates.append(i)
+         
+-        projected_attrs = []
+-        for i in candidates:
+-            projected_attrs.append(project_gaussian(global_params, i, camera))
+-            
++        # Projection: Read original parameter rows at IDs in C_j and project them once [S1, unofficial]
++        # [G] Standard 3DGS projection step
++        projected_attrs = [camera.project(params[i]) for i in candidates]
++        
++        # Leaf Subdivision: Determine leaves covering the group [S1, unofficial]
+         leaves = []
+         queue = [group_bounds]
+         while queue:
+             R = queue.pop(0)
+-            n_R = count_intersections(R, projected_attrs)
+-            p_R = pixel_count(R)
++            # [G] Standard intersection and pixel count
++            n_R = sum(1 for attr in projected_attrs if intersects(R, attr))
++            p_R = (R[2] - R[0]) * (R[3] - R[1])
+             t_R = ceil(R[2]/16) * ceil(R[3]/16)
+             u_R = min(t_R, n_R)
+             b_R = floor((n_R + 31*u_R + 31)/32)
++            # Estimate allocation size E(R) [S1, unofficial]
++            # [G] Standard memory estimation based on B_bin, B_image, B_sample, B_out
+             E_R = estimate_memory(n_R, p_R, t_R, b_R)
+             
++            # Budget Splitting: If E(R) > L and R can be split, bisect along dimension with more tiles [S1, unofficial]
+             if E_R > L and R[2] > 16 and R[3] > 16:
+                 if ceil(R[2]/16) >= ceil(R[3]/16):
+@@ -123,11 +132,17 @@
+         
+         for leaf in leaves:
+-            intersections = find_intersections(leaf, projected_attrs)
++            # Recount intersections under current projection [S1, unofficial]
++            intersections = [attr for attr in projected_attrs if intersects(leaf, attr)]
++            
++            # Rasterization and loss backward [S1, unofficial]
++            # [G] Standard 3DGS rasterization, compositing, and loss computation
+             alpha_map, color_map, contributors = rasterize(leaf, intersections)
+             loss = compute_loss(color_map, image[leaf], alpha_map)
+             grad_proj_attrs = backward_rasterization(leaf, intersections, grad_loss=1.0)
+             
++            # Accumulate gradients into group's compact parameter-gradient storage [S1, unofficial]
+             for i in candidates:
+                 if i in contributors:
++                    # [G] Standard backward projection
+                     grad_p = backward_projection(projected_attrs[i], grad_proj_attrs[i])
+                     if i not in group_gradients:
+@@ -135,6 +150,8 @@
+                     group_gradients[i] += grad_p
+             
++            # Release leaf state [S1, unofficial]
+             del intersections, alpha_map, color_map, contributors, loss, grad_proj_attrs
+             
++        # Group Cleanup: After all leaves, projection backward directly accumulates parameter gradients [S1, unofficial]
+         for i, grad in group_gradients.items():
+             if i not in view_gradients:
+@@ -142,62 +159,22 @@
+             view_gradients[i] += grad
+             
++        # Release group projection and gradient caches [S1, unofficial]
+         del projected_attrs, group_gradients
+         
++    # Update: Global regularization computed once after all groups [S1, unofficial]
+     if step in [15000, 19000]:
++        # [G] GNS regularization term during pruning window
+         reg_loss = compute_gns_regularization(global_params)
+         
++    # Optimizer updates after view gradients have been collected [S1, unofficial]
+     optimizer.step(global_params, view_gradients)
+-
+-def compute_projection_jacobian(camera, pos):
+-    # Standard projection Jacobian computation
+-    return camera.Jacobian(pos)
+-
+-def project_gaussian(params, i, camera):
+-    # Project Gaussian i using camera
+-    return camera.Project(params[i])
+-
+-def count_intersections(leaf, projected_attrs):
+-    # Count intersections within leaf bounds
+-    return sum(1 for attr in projected_attrs if intersects(leaf, attr))
+-
+-def pixel_count(leaf):
+-    return (leaf[2] - leaf[0]) * (leaf[3] - leaf[1])
+-
+-def estimate_memory(n, p, t, b):
+-    # Standard memory estimation function
+-    return n * 8 + p * 4 + t * 16 + b * 4
+-
+-def find_intersections(leaf, projected_attrs):
+-    return [attr for attr in projected_attrs if intersects(leaf, attr)]
+-
+-def rasterize(leaf, intersections):
+-    # Standard rasterization
+-    return leaf.Render(intersections)
+-
+-def compute_loss(pred, target, alpha):
+-    return 0.8 * L1(pred, target) + 0.2 * (1 - SSIM(pred, target))
+-
+-def backward_rasterization(leaf, intersections, grad_loss):
+-    return leaf.Backward(grad_loss)
+-
+-def backward_projection(attr, grad_proj):
+-    return attr.Backward(grad_proj)
+-
+-def intersects(leaf, attr):
+-    return leaf.overlaps(attr)
+-
+-def L1(pred, target):
+-    return np.mean(np.abs(pred - target))
+-
+-def SSIM(pred, target):
+-    return np.mean((2 * pred * target + 1) / (pred**2 + target**2 + 1))
+ ```
+ 
+ ## Operating characteristics
+-*   **Memory Complexity:** The rendering working set is bounded and nearly constant with respect to resolution. In a resolution sweep with 6M Gaussians, the working set stays within 1.073–1.077 GiB from 1K to 16K resolution [S1, unofficial]. The peak memory is approximated as $M^{peak}_v \approx \max_t [M_{res}(t) + M_{view}(t) + M_{rast}(t)]$, where $M_{rast}$ is bounded by the leaf budget $L$ [S1, unofficial].
++*   **Memory Complexity:** The rendering working set is bounded and nearly constant with respect to resolution [S1, unofficial]. In a resolution sweep with 6M Gaussians, the working set stays within 1.073–1.077 GiB from 1K to 16K resolution [S1, unofficial]. The peak memory is approximated as $M^{peak}_v \approx \max_t [M_{res}(t) + M_{view}(t) + M_{rast}(t)]$, where $M_{rast}$ is bounded by the leaf budget $L$ [S1, unofficial].
+ *   **Performance:** At 11K resolution, a warm pass takes 19.79 seconds versus 21.76 seconds for full-frame execution (~9% faster) [S1, unofficial]. On five native 5K outdoor scenes, full training reduces the mean rendering working set from 9.97 to 1.76 GiB (82.3% reduction) and shortens training time from 36.7 to 33.9 minutes [S1, unofficial].
+ *   **Quality:** The largest relative L1 difference over shared settings is $\approx 6.8 \times 10^{-7}$ [S1, unofficial]. Final reconstruction quality is close to the original method [S1, unofficial].
+-*   **Strengths:** Bounded GPU memory usage regardless of resolution; no need for multi-GPU synchronization or host offloading for rendering state.
+-*   **Limitations:** Requires CPU-assisted structure rebuilding for leaf layout management; potential overhead from candidate screening and leaf subdivision logic.
++*   **Strengths:** Bounded GPU memory usage regardless of resolution; no need for multi-GPU synchronization or host offloading for rendering state [S1, unofficial].
++*   **Limitations:** Requires CPU-assisted structure rebuilding for leaf layout management; potential overhead from candidate screening and leaf subdivision logic [S1, unofficial].
+ 
+ ## Background

@@ -1,0 +1,462 @@
+--- v013.md
++++ v014.md
+@@ -4,116 +4,119 @@
+ 
+ ## Overview
+-The Mip-NeRF 360 MLP architecture is a specific neural network configuration for radiance fields that replaces standard positional encoding with **Integrated Positional Encoding (IPE)** to handle aliasing and frequency ambiguity in continuous volume rendering [S1, unofficial]. It decomposes the mapping from 3D coordinates $\mathbf{x}$ and viewing directions $\mathbf{d}$ into a density network $f_\sigma$ and a color network $f_\mathbf{c}$, connected by a bottleneck feature vector [S1, unofficial]. It is distinguished from standard NeRF by its use of integrated encoding over conical frustums (via lifted means and covariances) and its support for advanced shading features like specular tinting, roughness prediction, and reflection directions [S1, unofficial].
++The Mip-NeRF 360 MLP architecture is a specific neural network configuration for differentiable volume rendering that replaces standard positional encoding with **Integrated Positional Encoding (IPE)** to handle aliasing and frequency uncertainty in 3D points [S1, unofficial]. It structures the model into a density network and a color network, where the density network processes 3D coordinates using IPE to integrate over conical frustums, and the color network combines these features with directional encoding to predict RGB color [S1, unofficial]. It is distinguished from standard NeRF by its explicit handling of the spatial extent of rays via covariance lifting, and from later grid-based methods by its reliance on dense MLP layers with specific skip connections and bias configurations [S1, unofficial].
+ 
+ ## How it works
++The method maps a 3D spatial coordinate $\mathbf{x} \in \mathbb{R}^3$ and a viewing direction $\mathbf{d} \in S^2$ to a volume density $\sigma \in \mathbb{R}_{\ge 0}$ and an RGB color vector $\mathbf{c} \in [0, 1]^3$. The architecture consists of two primary components: a density network $f_\sigma$ and a color network $f_\mathbf{c}$, connected by a bottleneck feature vector.
+ 
+ ### Inputs and Outputs
+ **Inputs:**
+-- 3D spatial coordinates $\mathbf{x} \in \mathbb{R}^3$ (often represented as a mean $\mu$ and covariance $\Sigma$ for integrated encoding).
+-- Viewing direction $\mathbf{d} \in S^2$ (or reflection direction $\mathbf{r}$ if reflections are enabled).
+-- Optional normal vectors $\mathbf{n}$ (if predicted or provided).
++*   3D point coordinates $\mathbf{x}$ (or mean $\mu$ and covariance $\Sigma$ for integrated encoding).
++*   Viewing direction $\mathbf{d}$ (or reflection direction $\mathbf{r}$ if reflections are enabled).
++*   Optional auxiliary inputs: normals $\mathbf{n}$, roughness $\alpha$, GLO vectors.
+ 
+ **Outputs:**
+-- Volume density $\sigma \in \mathbb{R}_{\ge 0}$.
+-- RGB color vector $\mathbf{c} \in [0, 1]^3$.
+-- Optional auxiliary outputs: normals, roughness, diffuse/specular components.
++*   Raw density $\sigma_{raw}$.
++*   Raw gradient density $\nabla \sigma_{raw}$ (for normal computation).
++*   RGB color $\mathbf{c}$.
+ 
+ ### Data Structures and Parameters
+ The architecture is defined by a configuration object containing the following fields [S1, unofficial]:
+ 
+-| Parameter | Type | Default | Description |
+-|---|---|---|---|
+-| `net_depth` | int | 8 | Depth of the density MLP. |
+-| `net_width` | int | 256 | Width of the density MLP layers. |
+-| `bottleneck_width` | int | 256 | Width of the feature vector connecting density and color networks. |
+-| `net_depth_viewdirs` | int | 1 | Depth of the color MLP. |
+-| `net_width_viewdirs` | int | 128 | Width of the color MLP layers. |
+-| `min_deg_point` | int | 0 | Minimum degree of positional encoding for points. |
+-| `max_deg_point` | int | 12 | Maximum degree of positional encoding for points. |
+-| `skip_layer` | int | 4 | Skip connection frequency for density MLP. |
+-| `skip_layer_dir` | int | 4 | Skip connection frequency for color MLP. |
+-| `deg_view` | int | 4 | Degree of encoding for directions. |
+-| `density_bias` | float | -1.0 | Bias added to raw density before activation. |
+-| `density_noise` | float | 0.0 | Standard deviation of noise added to raw density. |
+-| `rgb_bias` | float | 0.0 | Bias added to raw color before activation. |
+-| `rgb_padding` | float | 0.001 | Padding for RGB output range $[-p, 1+p]$. |
+-| `use_reflections` | bool | False | Use reflection directions instead of view directions. |
+-| `use_directional_enc` | bool | False | Use Integrated Directional Encoding (IDE). |
+-| `enable_pred_roughness` | bool | False | Predict roughness parameter. |
+-| `roughness_bias` | float | -1.0 | Bias for raw roughness. |
+-| `use_diffuse_color` | bool | False | Predict diffuse and specular colors separately. |
+-| `use_specular_tint` | bool | False | Predict a tint vector for specular color. |
+-| `use_n_dot_v` | bool | False | Append $\mathbf{n} \cdot \mathbf{d}$ to color network input. |
+-| `bottleneck_noise` | float | 0.0 | Noise added to bottleneck features. |
+-| `basis_shape` | str | 'icosahedron' | Basis shape for IPE ('icosahedron' or 'octahedron'). |
+-| `basis_subdivisions` | int | 2 | Tessellation count for the basis. |
+-| `density_activation` | Callable | Softplus | Activation for density. |
+-| `rgb_activation` | Callable | Sigmoid | Activation for RGB. |
+-| `net_activation` | Callable | ReLU | Activation for hidden layers. |
+-
+-### Algorithm Steps
+-
+-1.  **Setup and Basis Precomputation**:
+-    Generate the transpose of the basis matrix $B^T$ using `geopoly.generate_basis(basis_shape, basis_subdivisions)`. Store as $B^T$ [S1, unofficial].
+-
+-2.  **Directional Encoding Function**:
+-    If `use_directional_enc` is True, generate an Integrated Directional Encoding (IDE) function using `ref_utils.generate_ide_fn(deg_view)`. Otherwise, define a standard positional encoding function `dir_enc_fn` with `min_deg=0`, `max_deg=deg_view`, and `append_identity=True` [S1, unofficial].
+-
+-3.  **Coordinate Warping (Optional)**:
+-    If a warping function `warp_fn` is provided, linearize the means $\mu$ and covariances $\Sigma$ of the input coordinates using `coord.track_linearize(warp_fn, mu, Sigma)` [S1, unofficial].
+-
+-4.  **Lift and Diagonalize**:
+-    Lift the means and covariances into the basis space to account for the integrated encoding. Compute lifted means $\tilde{\mu}$ and lifted variances $\tilde{\Sigma}$ using `coord.lift_and_diagonalize(mu, Sigma, B^T)` [S1, unofficial].
+-
+-5.  **Integrated Positional Encoding (Density Input)**:
+-    Compute the integrated positional encoding input $x_{point}$ using `coord.integrated_pos_enc(lifted_means, lifted_vars, min_deg_point, max_deg_point)`. This replaces the standard $\sin(\gamma \mathbf{x})$ encoding with an integral over the conical frustum [S1, unofficial].
+-
+-6.  **Density Network Forward Pass**:
+-    Initialize input $x = x_{point}$.
+-    Iterate $i$ from $0$ to `net_depth` - 1:
+-    - Apply dense layer: $x = \text{activation}(W_i x + b_i)$.
+-    - If $i > 0$ and $i \pmod{\text{skip\_layer}} == 0$, concatenate original input $x_{point}$ to $x$: $x = \text{concat}(x, x_{point})$ [S1, unofficial].
+-    
+-    Compute raw density: $\sigma_{raw} = W_{\sigma} x + b_{\sigma}$, taking the first scalar component [S1, unofficial].
+-
+-7.  **Density Noise (Optional)**:
+-    If `density_noise` > 0, add Gaussian noise: $\sigma_{raw} \leftarrow \sigma_{raw} + \mathcal{N}(0, \text{density\_noise})$ [S1, unofficial].
+-
+-8.  **Normal Computation (Optional)**:
+-    If `disable_density_normals` is False:
+-    - Flatten $\mu$ and $\Sigma$.
+-    - Compute gradient of raw density with respect to coordinates: $(\sigma_{raw}, \nabla \sigma_{raw}) = \text{value\_and\_grad}(\text{predict\_density})$.
+-    - Compute normals: $\mathbf{n} = -\frac{\nabla \sigma_{raw}}{\|\nabla \sigma_{raw}\|_2}$ [S1, unofficial].
+-    *Pitfall*: Normals are computed from raw density (pre-activation) for numerical stability [S1, unofficial].
+-
+-9.  **Density Activation**:
+-    Compute final density: $\sigma = \text{density\_activation}(\sigma_{raw} + \text{density\_bias})$ [S1, unofficial].
+-
+-10. **Directional Encoding**:
+-    Compute direction encoding $e_{dir} = \text{dir\_enc\_fn}(\mathbf{d})$ (or $\mathbf{r}$ if reflections are used).
+-    *Reflection Handling*: If `use_reflections` is True, flip view directions ($-\mathbf{d}$) before computing reflection, as standard reflection functions assume vectors pointing toward the camera [S1, unofficial].
+-    Broadcast $e_{dir}$ to match the bottleneck width [S1, unofficial].
+-
+-11. **Color Network Input Construction**:
+-    Initialize input list $x_{color} = [\text{bottleneck\_features}, e_{dir}]$.
+-    - If `use_n_dot_v` is True, compute $d_{nv} = \mathbf{n} \cdot \mathbf{d}$ and append to $x_{color}$.
+-    - If `glo_vec` is provided, broadcast and append it.
+-    Concatenate all elements in $x_{color}$ along the last axis [S1, unofficial].
+-
+-12. **Color Network Forward Pass**:
+-    Iterate $i$ from $0$ to `net_depth_viewdirs` - 1:
+-    - Apply dense layer: $x_{color} = \text{activation}(W_i x_{color} + b_i)$.
+-    - If $i > 0$ and $i \pmod{\text{skip\_layer\_dir}} == 0$, concatenate original input $x_{color, initial}$ to $x_{color}$ [S1, unofficial].
+-
+-13. **RGB Output**:
+-    Compute raw RGB: $\mathbf{c}_{raw} = W_{rgb} x_{color} + b_{rgb}$.
+-    Apply activation and padding: $\mathbf{c} = \text{rgb\_activation}(\text{rgb\_premultiplier} \cdot \mathbf{c}_{raw} + \text{rgb\_bias})$.
+-    Apply padding: $\mathbf{c} = \mathbf{c} \cdot (1 + 2 \cdot \text{rgb\_padding}) - \text{rgb\_padding}$ [S1, unofficial].
+-
+-14. **Specular/Diffuse Split (Optional)**:
+-    If `use_diffuse_color` is True:
+-    - Compute diffuse linear: $\mathbf{c}_{diffuse} = \sigma(\mathbf{c}_{raw, diffuse} - \ln(3.0))$.
+-    - Compute specular linear: If `use_specular_tint`, $\mathbf{c}_{specular} = \text{tint} \cdot \mathbf{c}$; else $\mathbf{c}_{specular} = 0.5 \cdot \mathbf{c}$.
+-    - Combine and tone map: $\mathbf{c}_{final} = \text{clip}(\text{linear\_to\_srgb}(\mathbf{c}_{specular} + \mathbf{c}_{diffuse}), 0, 1)$ [S1, unofficial].
++*   `net_depth`: int, default 8. Depth of the density MLP.
++*   `net_width`: int, default 256. Width of the density MLP layers.
++*   `bottleneck_width`: int, default 256. Width of the feature vector passed from density to color network.
++*   `net_depth_viewdirs`: int, default 1. Depth of the color MLP.
++*   `net_width_viewdirs`: int, default 128. Width of the color MLP layers.
++*   `min_deg_point`: int, default 0. Minimum frequency for point encoding.
++*   `max_deg_point`: int, default 12. Maximum frequency for point encoding.
++*   `skip_layer`: int, default 4. Frequency of skip connections in the density network.
++*   `skip_layer_dir`: int, default 4. Frequency of skip connections in the color network.
++*   `deg_view`: int, default 4. Degree of spherical harmonics or positional encoding for directions.
++*   `density_bias`: float, default -1. Bias added to raw density before activation.
++*   `density_noise`: float, default 0. Standard deviation of noise added to raw density.
++*   `rgb_bias`: float, default 0. Bias added to raw color before activation.
++*   `rgb_padding`: float, default 0.001. Padding applied to RGB output range.
++*   `use_reflections`: bool, default False. Enable reflection direction encoding.
++*   `use_directional_enc`: bool, default False. Use Integrated Directional Encoding (IDE).
++*   `basis_shape`: str, default 'icosahedron'. Basis shape for IPE ('octahedron' or 'icosahedron').
++*   `basis_subdivisions`: int, default 2. Tessellation count for the basis.
++*   `enable_pred_normals`: bool. Enable explicit normal prediction.
++*   `disable_density_normals`: bool. Disable gradient-based normal computation.
++*   `use_diffuse_color`: bool. Split color into diffuse and specular components.
++*   `use_specular_tint`: bool. Apply a tint vector to specular color.
++*   `use_n_dot_v`: bool. Include $\mathbf{n} \cdot \mathbf{v}$ in color network input.
++*   `bottleneck_noise`: float, default 0.0. Noise added to bottleneck features.
++*   `warp_fn`: Callable. Optional warping function for linearization.
++
++### Numbered Steps
++
++1.  **Setup and Basis Generation**:
++    *   If `use_reflections` is True, ensure normals are available (either via `enable_pred_normals` or by not disabling density normals). If not, raise `ValueError` [S1, unofficial].
++    *   Precompute the transpose of the basis matrix $B^T$ using `geopoly.generate_basis(basis_shape, basis_subdivisions)` and store as `self.pos_basis_t` [S1, unofficial].
++
++2.  **Directional Encoding Preparation**:
++    *   If `use_directional_enc` is True, generate the Integrated Directional Encoding (IDE) function using `ref_utils.generate_ide_fn(deg_view)` [S1, unofficial].
++    *   Otherwise, define `dir_enc_fn` to use standard positional encoding with `min_deg=0`, `max_deg=deg_view`, and `append_identity=True` [S1, unofficial].
++
++3.  **Density Network Input (Integrated Positional Encoding)**:
++    *   If a `warp_fn` is provided, linearize the means $\mu$ and covariances $\Sigma$ using `coord.track_linearize(warp_fn, mu, Sigma)` [S1, unofficial].
++    *   Lift and diagonalize the means and covariances using the precomputed basis transpose:
++        $$ \mu_{lifted}, \Sigma_{lifted} = \text{coord.lift\_and\_diagonalize}(\mu, \Sigma, B^T) $$
++        This yields lifted means $\mu_{lifted}$ and lifted variances $\Sigma_{lifted}$ [S1, unofficial].
++    *   Compute the integrated positional encoding input $x$ by integrating the positional encoding functions over the Gaussian distribution defined by $\mu_{lifted}$ and $\Sigma_{lifted}$:
++        $$ x = \text{coord.integrated\_pos\_enc}(\mu_{lifted}, \Sigma_{lifted}, \text{min\_deg\_point}, \text{max\_deg\_point}) $$
++        This step approximates the integral of the positional encoding over the spatial extent of the ray segment, reducing aliasing [S1, unofficial].
++
++4.  **Density Network Forward Pass**:
++    *   Initialize input $x$.
++    *   Iterate $i$ from 0 to `net_depth` - 1:
++        *   Apply a dense layer with width `net_width` and activation `net_activation` (typically ReLU):
++            $$ x = \text{Activation}(W_i x + b_i) $$
++        *   If $i > 0$ and $i \pmod{\text{skip\_layer}} == 0$, concatenate the original input $x$ (before the current layer) to the current output along the last axis:
++            $$ x = \text{Concat}(x, x_{original}) $$
++    *   Output raw density $\sigma_{raw}$ using a final dense layer with width 1:
++        $$ \sigma_{raw} = \text{Dense}_{1}(x)[..., 0] $$
++    *   If `density_noise` > 0, add Gaussian noise:
++        $$ \sigma_{raw} \leftarrow \sigma_{raw} + \text{density\_noise} \cdot \mathcal{N}(0, 1) $$
++    *   Apply density activation (e.g., Softplus or Exponential) and bias:
++        $$ \sigma = \text{DensityActivation}(\sigma_{raw} + \text{density\_bias}) $$
++
++5.  **Normal Computation (Optional)**:
++    *   If `disable_density_normals` is False, compute normals from the gradient of the raw density (pre-activation) for numerical stability [S1, unofficial].
++    *   Flatten $\mu$ and $\Sigma$.
++    *   Compute $\sigma_{raw}$ and $\nabla \sigma_{raw}$ simultaneously using `jax.vmap(jax.value_and_grad(predict_density, has_aux=True))` [S1, unofficial].
++    *   Compute normals $\mathbf{n}$ as the negative normalized gradient:
++        $$ \mathbf{n} = -\frac{\nabla \sigma_{raw}}{\|\nabla \sigma_{raw}\|_2} $$
++
++6.  **Color Network Input Preparation**:
++    *   Obtain the bottleneck feature vector $f$ from the density network output (typically the output of the last layer before the density head, or a specific projection).
++    *   Compute directional encoding $e_d$ using `dir_enc_fn` on the viewing direction $\mathbf{d}$ (or reflection direction $\mathbf{r}$ if `use_reflections` is True). Note: If using reflections, flip viewdirs ($-\mathbf{d}$) before reflection calculation as they point from camera to point [S1, unofficial].
++    *   Broadcast $e_d$ to match the bottleneck shape dimensions.
++    *   Initialize input list $x_{color} = [f]$.
++    *   If `use_n_dot_v` is True, compute dot product $d_{nv} = \mathbf{n} \cdot \mathbf{d}$ and append to $x_{color}$ [S1, unofficial].
++    *   If `glo_vec` is provided, broadcast and append to $x_{color}$ [S1, unofficial].
++    *   Concatenate all elements in $x_{color}$ along the last axis.
++
++7.  **Color Network Forward Pass**:
++    *   Iterate $i$ from 0 to `net_depth_viewdirs` - 1:
++        *   Apply a dense layer with width `net_width_viewdirs` and activation `net_activation`:
++            $$ x_{color} = \text{Activation}(W_i x_{color} + b_i) $$
++        *   If $i > 0$ and $i \pmod{\text{skip\_layer\_dir}} == 0$, concatenate the original input $x_{color}$ to the current output along the last axis [S1, unofficial].
++
++8.  **RGB Output and Post-Processing**:
++    *   Compute raw RGB:
++        $$ \mathbf{c}_{raw} = \text{Dense}_{num\_rgb\_channels}(x_{color}) $$
++    *   Apply RGB activation and bias:
++        $$ \mathbf{c} = \text{RGBActivation}(\mathbf{c}_{raw} + \text{rgb\_bias}) $$
++    *   If `use_diffuse_color` is True, split color:
++        $$ \mathbf{c}_{diffuse} = \text{Sigmoid}(\mathbf{c}_{raw\_diffuse} - \ln(3.0)) $$
++        If `use_specular_tint` is True:
++        $$ \mathbf{c}_{specular} = \text{tint} \cdot \mathbf{c} $$
++        Else:
++        $$ \mathbf{c}_{specular} = 0.5 \cdot \mathbf{c} $$
++        Combine and tone map:
++        $$ \mathbf{c}_{final} = \text{Clip}(\text{LinearToSRGB}(\mathbf{c}_{specular} + \mathbf{c}_{diffuse}), 0.0, 1.0) $$
++    *   Apply RGB padding:
++        $$ \mathbf{c}_{final} = \mathbf{c}_{final} \cdot (1 + 2 \cdot \text{rgb\_padding}) - \text{rgb\_padding} $$
+ 
+ ### Pseudocode
+@@ -123,112 +126,112 @@
+ from jax import random, vmap, value_and_grad
+ 
+-def mipnerf360_mlp_forward(
+-    coords,          # Shape: (..., 3) or (..., 3, 3) for (mean, cov)
+-    viewdirs,        # Shape: (..., 3)
+-    config,          # Configuration object with parameters
+-    params,          # Network weights
+-    rng,             # Random key
+-    normals=None     # Optional normals (..., 3)
+-):
++def mipnerf360_mlp_forward(params, x, cov, viewdirs, config):
+     """
+-    Forward pass for Mip-NeRF 360 MLP architecture.
++    Forward pass for Mip-NeRF 360 MLP.
++    
++    Args:
++        params: Dictionary of network weights and biases.
++        x: 3D coordinates (N, 3).
++        cov: Covariance matrices (N, 3, 3).
++        viewdirs: Viewing directions (N, 3).
++        config: Configuration object with hyperparameters.
++        
++    Returns:
++        sigma: Volume density (N,).
++        rgb: RGB color (N, 3).
++        normals: Surface normals (N, 3), if enabled.
+     """
++    
+     # 1. Setup Basis
+-    # Precomputed in init: self.pos_basis_t
++    # Precomputed in __init__, accessed via config or params
+     pos_basis_t = config.pos_basis_t 
+     
+-    # 2. Directional Encoding Function
+-    if config.use_directional_enc:
+-        dir_enc_fn = generate_ide_fn(config.deg_view)
++    # 2. Linearize and Lift (Integrated Positional Encoding)
++    if config.warp_fn is not None:
++        x_lin, cov_lin = track_linearize(config.warp_fn, x, cov)
+     else:
+-        dir_enc_fn = lambda x: pos_enc(x, min_deg=0, max_deg=config.deg_view, append_identity=True)
+-
+-    # 3. Warping (Optional)
+-    if config.warp_fn is not None:
+-        means, covs = track_linearize(config.warp_fn, coords.mean, coords.cov)
+-    else:
+-        means, covs = coords.mean, coords.cov
+-
+-    # 4. Lift and Diagonalize
+-    lifted_means, lifted_vars = lift_and_diagonalize(means, covs, pos_basis_t)
+-
+-    # 5. Integrated Positional Encoding
+-    x_point = integrated_pos_enc(lifted_means, lifted_vars, 
+-                                 config.min_deg_point, config.max_deg_point)
+-
+-    # 6. Density Network
+-    x = x_point
++        x_lin, cov_lin = x, cov
++        
++    lifted_means, lifted_vars = lift_and_diagonalize(x_lin, cov_lin, pos_basis_t)
++    
++    # Compute Integrated Positional Encoding
++    # This integrates the positional encoding over the Gaussian defined by lifted_means and lifted_vars
++    x_enc = integrated_pos_enc(lifted_means, lifted_vars, 
++                               config.min_deg_point, config.max_deg_point)
++    
++    # 3. Density Network
++    x_net = x_enc
+     for i in range(config.net_depth):
+-        x = dense_layer(x, params['density_weights'][i], params['density_biases'][i])
+-        x = activation(x) # e.g., ReLU
++        x_net = dense_layer(x_net, params[f'density_w_{i}'], params[f'density_b_{i}'])
++        x_net = activation(x_net) # e.g., ReLU
++        
+         if i > 0 and i % config.skip_layer == 0:
+-            x = jnp.concatenate([x, x_point], axis=-1)
+-    
+-    raw_density = dense_layer(x, params['density_weights_final'], params['density_biases_final'])[..., 0]
+-
+-    # 7. Density Noise
++            x_net = concat([x_net, x_enc], axis=-1)
++            
++    raw_sigma = dense_layer(x_net, params['density_head_w'], params['density_head_b'])[..., 0]
++    
++    # Add density noise
+     if config.density_noise > 0:
+-        raw_density += config.density_noise * random.normal(rng, raw_density.shape)
+-
+-    # 8. Normals (Optional)
++        raw_sigma += config.density_noise * random.normal(random.PRNGKey(0), raw_sigma.shape)
++        
++    # Density activation (e.g., Softplus) and bias
++    sigma = density_activation(raw_sigma + config.density_bias)
++    
++    # 4. Normal Computation (if enabled)
+     normals = None
+     if not config.disable_density_normals:
+-        # Compute gradient of raw_density w.r.t. means
+-        # Note: In practice, this uses jax.vmap over batch dimensions
+-        raw_density_val, raw_grad_density = value_and_grad(
+-            lambda m: predict_density_single(m, covs, params, config), means
+-        )
+-        # raw_grad_density is gradient w.r.t. means
+-        normals = -l2_normalize(raw_grad_density)
+-
+-    # 9. Density Activation
+-    density = density_activation(raw_density + config.density_bias)
+-
+-    # 10. Directional Encoding
+-    dir_input = viewdirs
+-    if config.use_reflections:
+-        # Flip viewdirs because they point camera->point, reflect assumes point->camera
+-        dir_input = -viewdirs
+-        # Compute reflection direction if normals are available, else use dir_input
+-        if normals is not None:
+-            dir_input = reflect(dir_input, normals)
+-    
+-    dir_enc = dir_enc_fn(dir_input)
+-    # Broadcast dir_enc to bottleneck width
+-    dir_enc = jnp.broadcast_to(
+-        dir_enc[..., None, :], 
+-        (*dir_enc.shape[:-1], config.bottleneck_width)
+-    )
+-
+-    # 11. Color Network Input
+-    bottleneck = get_bottleneck_features(x) # From density network output or separate
+-    if config.bottleneck_noise > 0:
+-        bottleneck += config.bottleneck_noise * random.normal(rng, bottleneck.shape)
+-        
+-    x_color = [bottleneck, dir_enc]
+-    
++        # Compute gradient of raw_sigma w.r.t x for stability
++        # Note: In JAX, this requires vmap over the batch dimension if x is batched
++        def predict_density_single(x_single):
++            # Re-run density network for single point to get gradient
++            # This is computationally expensive; usually optimized in practice
++            pass 
++        
++        # Simplified: assume raw_grad_sigma is computed via vmap(value_and_grad)
++        raw_grad_sigma = compute_gradient(raw_sigma, x) 
++        normals = -l2_normalize(raw_grad_sigma)
++        
++    # 5. Bottleneck and Directional Encoding
++    # Bottleneck is typically the output of the last density layer before the head
++    # Or a specific projection. Here we assume x_net (after last layer) is the bottleneck
++    bottleneck = x_net
++    
++    # Directional Encoding
++    if config.use_directional_enc:
++        dir_enc = generate_ide_fn(config.deg_view)(viewdirs)
++    else:
++        dir_enc = pos_enc(viewdirs, min_deg=0, max_deg=config.deg_view, append_identity=True)
++        
++    # Broadcast dir_enc to match bottleneck shape
++    dir_enc = jnp.broadcast_to(dir_enc[..., None, :], bottleneck.shape[:-1] + (dir_enc.shape[-1],))
++    
++    x_color = [bottleneck]
++    
++    # Optional: Normal-View Dot Product
+     if config.use_n_dot_v and normals is not None:
+         n_dot_v = jnp.sum(normals * viewdirs[..., None, :], axis=-1, keepdims=True)
+         x_color.append(n_dot_v)
+         
++    # Optional: GLO Vectors
+     if config.glo_vec is not None:
+-        glo_vec = jnp.broadcast_to(config.glo_vec, (*bottleneck.shape[:-1], glo_vec.shape[-1]))
++        glo_vec = jnp.broadcast_to(config.glo_vec, bottleneck.shape)
+         x_color.append(glo_vec)
+         
+-    x_color = jnp.concatenate(x_color, axis=-1)
+-
+-    # 12. Color Network
++    x_color = concat(x_color, axis=-1)
++    
++    # 6. Color Network
+     for i in range(config.net_depth_viewdirs):
+-        x_color = dense_layer(x_color, params['color_weights'][i], params['color_biases'][i])
++        x_color = dense_layer(x_color, params[f'color_w_{i}'], params[f'color_b_{i}'])
+         x_color = activation(x_color)
++        
+         if i > 0 and i % config.skip_layer_dir == 0:
+-            x_color = jnp.concatenate([x_color, x_color_initial], axis=-1)
+-
+-    # 13. RGB Output
+-    raw_rgb = dense_layer(x_color, params['color_weights_final'], params['color_biases_final'])
+-    rgb = rgb_activation(config.rgb_premultiplier * raw_rgb + config.rgb_bias)
+-    rgb = rgb * (1 + 2 * config.rgb_padding) - config.rgb_padding
+-
+-    # 14. Specular/Diffuse Split (Optional)
++            x_color = concat([x_color, x_color_original], axis=-1) # Note: x_color_original needs to be saved
++            
++    raw_rgb = dense_layer(x_color, params['color_head_w'], params['color_head_b'])
++    
++    # RGB Activation and Bias
++    rgb = rgb_activation(raw_rgb + config.rgb_bias)
++    
++    # 7. Post-Processing (Diffuse/Specular Split, Padding)
+     if config.use_diffuse_color:
+         raw_rgb_diffuse = raw_rgb # Assuming separate head or split
+@@ -239,21 +242,27 @@
+             specular_linear = 0.5 * rgb
+         rgb = clip(linear_to_srgb(specular_linear + diffuse_linear), 0.0, 1.0)
+-
+-    return density, rgb, normals
++        
++    # RGB Padding
++    rgb = rgb * (1 + 2 * config.rgb_padding) - config.rgb_padding
++    
++    return sigma, rgb, normals
+ ```
+ 
++### Edge Cases and Pitfalls
++*   **Reflections Require Normals**: If `use_reflections` is True, normals must be computed. This requires either `enable_pred_normals` to be True or `disable_density_normals` to be False. If neither is set, a `ValueError` is raised [S1, unofficial].
++*   **Reflection Direction Flip**: When computing reflection directions, viewing directions $\mathbf{d}$ (which point from camera to point) must be flipped ($-\mathbf{d}$) before applying the reflection function, as the reflection utility typically assumes directions pointing toward the camera [S1, unofficial].
++*   **Normal Stability**: Normals are computed from the gradient of the *raw* (pre-activation) density. Using the post-activation density can lead to numerical instability if the activation function has a steep or flat gradient [S1, unofficial].
++*   **Precision**: Color correction and metric computation should use 64-bit floating point precision to ensure accuracy [S1, unofficial].
++
+ ## Operating characteristics
+-
+-- **Time Complexity**: $O(D \cdot W)$ per sample, where $D$ is network depth and $W$ is width. The integrated encoding adds overhead for basis matrix multiplication and covariance lifting, but avoids sampling multiple points per ray for frequency approximation.
+-- **Memory Complexity**: $O(W^2)$ for weight matrices. The basis matrix size depends on `basis_subdivisions` and `basis_shape`, typically small (e.g., $12 \times 12$ for icosahedron with 2 subdivisions).
+-- **Performance**: Significantly reduces aliasing artifacts in novel views compared to standard NeRF, especially for high-frequency details and wide-baseline reconstructions [S1, unofficial].
+-- **Strengths**: Handles frequency ambiguity naturally; supports advanced shading (specular, roughness); numerically stable normal computation.
+-- **Limitations**: Slightly higher computational cost per sample due to covariance lifting; requires careful tuning of `density_bias` and `rgb_padding` for stable training.
++*   **Time Complexity**: The density network has depth 8 and width 256, while the color network has depth 1 and width 128. The dominant cost is the matrix multiplications in the density network. The integrated positional encoding adds overhead compared to standard positional encoding due to the covariance lifting and integration steps.
++*   **Memory Complexity**: The model stores weights for two MLPs. The bottleneck width is 256. The memory footprint is larger than standard NeRF due to the additional parameters for the color network's skip connections and the overhead of storing covariance matrices for each sample.
++*   **Performance**: The architecture is designed for "360" scenes, which are unbounded and require handling of large depth ranges. The IPE helps maintain quality at varying distances, reducing aliasing artifacts common in standard NeRF.
++*   **Strengths**: Robust to aliasing, handles unbounded scenes well, supports advanced features like specular tinting and diffuse/specular splitting.
++*   **Limitations**: Slower than grid-based methods (e.g., Instant NGP) due to dense MLP evaluation. The integrated encoding computation is more complex than simple positional encoding.
+ 
+ ## Background
+-
+-The Mip-NeRF 360 MLP architecture was introduced by Google Research as part of the Mip-NeRF 360 project, which extends the original NeRF framework to unbounded scenes and wide-baseline imagery [S1, unofficial]. It builds on the Mip-NeRF concept of integrating positional encoding over conical frustums to mitigate aliasing. The architecture supports various extensions like Integrated Directional Encoding (IDE) and specular/diffuse splitting, making it suitable for high-fidelity relighting and material estimation. It is implemented in the `multinerf` repository [S1, unofficial].
++The Mip-NeRF 360 MLP architecture was introduced in the "Mip-NeRF 360" paper by T. Müller et al. (2022) [S1, unofficial]. It extends the original Mip-NeRF concept to unbounded, 360-degree scenes. The key innovation is the use of integrated positional encoding to approximate the integral of the positional encoding over the spatial extent of the ray, effectively treating the ray segment as a Gaussian distribution. This method is part of the Google Research "multinerf" codebase [S1, unofficial].
+ 
+ ## Sources
+-
+ [S1] google-research/multinerf, https://github.com/google-research/multinerf, fetched 2026-10-26 (unofficial)

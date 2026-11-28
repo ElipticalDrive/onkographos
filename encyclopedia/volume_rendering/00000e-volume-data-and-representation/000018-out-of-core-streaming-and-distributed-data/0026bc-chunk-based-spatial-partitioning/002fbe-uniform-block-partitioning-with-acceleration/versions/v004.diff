@@ -1,0 +1,110 @@
+--- v003.md
++++ v004.md
+@@ -1,69 +1,39 @@
+ # Uniform Block Partitioning with Acceleration
++
+ Also called: Volume Partitioning with Acceleration, Volume subdivision with acceleration
+ 
+ ## Overview
+-Uniform Block Partitioning with Acceleration divides a volume dataset into fixed-size spatial blocks to enable independent processing and applies acceleration techniques such as early ray termination, empty space skipping, and occlusion clipping to achieve interactive rendering [S1]. It differs from sibling methods like [Chunk-based World Streaming](2369-chunk-based-world-streaming.md) by focusing on static partitioning with immediate acceleration rather than dynamic streaming, and from [Chunk Trees](4050-chunk-trees.md) by using a flat uniform grid instead of a hierarchical tree structure.
++Uniform Block Partitioning with Acceleration subdivides a volume dataset into uniform-sized blocks and applies acceleration techniques such as early ray termination, empty space skipping, and occlusion clipping to enable interactive display [S1]. It differs from hierarchical methods like [Chunk Trees](4050-chunk-trees.md) by using a flat, uniform grid structure, and from distributed approaches like [MPI-based Volume Partitioning](1093-mpi-based-volume-partitioning.md) by focusing on single-node rendering optimization rather than network data distribution.
+ 
+ ## How it works
+-**Inputs:** A 3D volume dataset $V$ with dimensions $D_x \times D_y \times D_z$.
+-**Outputs:** Rendered image or extracted isosurface.
++**Inputs:** A volume dataset $V$ defined on a regular grid.
++**Outputs:** A rendered image or isosurface mesh.
+ 
+ **Data Structures:**
+-The volume is decomposed into a 3D grid of uniform blocks. Each block $B_{i,j,k}$ contains a fixed number of voxels. The global coordinate $(x, y, z)$ maps to block indices $(i, j, k)$ using the parent's coordinate mapping logic [S1, Parent].
++The global domain is decomposed into a set of non-overlapping uniform blocks $\{B_i\}$. Each block $B_i$ has a fixed spatial extent defined by dimensions $W_x, W_y, W_z$ (in voxels). The layout is a regular 3D grid of blocks.
+ 
+ **Steps:**
+-1.  **Subdivision:** Subdivide the volume dataset into uniform-sized blocks [S1].
++1.  **Subdivision:** Divide the volume dataset into uniform-sized blocks [S1]. For a global voxel coordinate $\mathbf{p} = (x, y, z)$, the block index $\mathbf{k} = (k_x, k_y, k_z)$ is determined by:
++    $$
++    k_x = \lfloor x / W_x \rfloor, \quad k_y = \lfloor y / W_y \rfloor, \quad k_z = \lfloor z / W_z \rfloor
++    $$
++    This allows $O(1)$ determination of the block containing any sample point [Parent].
++
+ 2.  **Acceleration Application:** Apply acceleration techniques to the blocks [S1]:
+-    *   **Early Ray Termination:** Stop ray casting when accumulated opacity exceeds a threshold.
+-    *   **Empty Space Skipping:** Skip blocks that do not contribute to the view (e.g., contain only background or are occluded).
+-    *   **Occlusion Clipping:** Clip rays against previously rendered geometry or opaque blocks.
+-
+-**Pseudocode:**
+-```python
+-def render_volume(volume, camera, blocks):
+-    # Initialize output buffer
+-    image = zeros(camera.resolution)
+-    
+-    # Iterate over pixels
+-    for u, v in camera.pixel_coordinates():
+-        ray = camera.cast_ray(u, v)
+-        accumulated_color = 0.0
+-        accumulated_opacity = 0.0
+-        
+-        # Traverse blocks along the ray
+-        for block in blocks.intersected_by(ray):
+-            # Check for empty space skipping
+-            if block.is_empty():
+-                continue
+-                
+-            # Sample block data
+-            block_data = block.sample(ray)
+-            
+-            # Apply early ray termination
+-            if accumulated_opacity > 0.99:
+-                break
+-                
+-            # Composite block contribution
+-            color, opacity = block_data.compute_compositing()
+-            accumulated_color += color * (1.0 - accumulated_opacity)
+-            accumulated_opacity += opacity * (1.0 - accumulated_opacity)
+-            
+-        image[u, v] = accumulated_color
+-        
+-    return image
+-```
++    *   **Empty Space Skipping:** Skip blocks that do not contain relevant data (e.g., density below a threshold or outside the view frustum).
++    *   **Early Ray Termination:** Stop ray casting when the accumulated opacity exceeds a threshold.
++    *   **Occlusion Clipping:** Skip blocks occluded by previously rendered geometry.
+ 
+ **Parameters:**
+-*   Block size: Not given in the sources.
+-*   Opacity threshold for early termination: Not given in the sources.
++*   Block dimensions $W_x, W_y, W_z$: Not given in the sources.
++*   Thresholds for early termination and empty space: Not given in the sources.
+ 
+ **Edge Cases:**
+-*   **Boundary Artifacts:** As noted in the parent, naive division creates discontinuities. Overlap regions or specific boundary handling are required to prevent visual artifacts like black stripes in ray casting [Parent].
+-*   **Precision:** Floating-point precision in ray-block intersection tests may cause gaps if not handled carefully [Parent].
++*   **Boundary Artifacts:** Naive partitioning at block boundaries can introduce visual artifacts (e.g., black stripes) because rendering kernels may span across edges. This is mitigated by using an overlap region of width $w_{overlap}$, where data from adjacent blocks is included but masked out during final compositing [Parent].
+ 
+ ## Subtopics
+ 
+ ### Block-based Acceleration Structure
+-A hierarchical data structure used to efficiently select relevant parts of the volume for surface extraction, enabling interactive frame rates by avoiding processing of empty or irrelevant blocks [S2, unofficial]. It sets itself apart by computing min/max density values per block to quickly cull blocks where the isovalue does not lie within the range [S2, unofficial]. Choose this when interactive surface extraction is required.
++A hierarchical data structure used to efficiently select relevant parts of the volume for surface extraction, enabling interactive frame rates by avoiding processing of empty or irrelevant blocks [S2, unofficial]. It sets itself apart by computing min/max density values per block to determine if an isovalue lies within the block's range [S2, unofficial]. Choose this when interactive surface extraction is required.
+ 
+ **Steps:**
+@@ -73,12 +43,13 @@
+ 
+ ## Operating characteristics
+-*   **Time Complexity:** Depends on the number of non-empty blocks and acceleration effectiveness. Early ray termination reduces per-ray cost.
+-*   **Memory Complexity:** Linear with respect to the number of blocks.
+-*   **Performance:** Enables interactive display of CT datasets [S1].
+-*   **Strengths:** Simple implementation, good parallelization potential [S2, unofficial].
+-*   **Limitations:** Uniform blocks may lead to inefficient memory usage if the volume has varying density [S1].
++*   **Time Complexity:** Depends on the acceleration techniques. Empty space skipping reduces the number of blocks processed. Early ray termination reduces the number of samples per ray.
++*   **Memory Complexity:** Linear with respect to the number of blocks. Each block stores its data and potentially min/max values for acceleration.
++*   **Strengths:** Simple implementation, efficient for uniform data distributions, enables interactive frame rates [S1][S2, unofficial].
++*   **Limitations:** May not be optimal for highly heterogeneous data distributions where hierarchical methods might perform better.
++*   **When to use:** Interactive volume rendering of large datasets on a single node [S1].
++*   **When not to use:** Distributed rendering across multiple nodes (use [MPI-based Volume Partitioning](1093-mpi-based-volume-partitioning.md)) or when hierarchical detail is required (use [Chunk Trees](4050-chunk-trees.md)).
+ 
+ ## Background
+-The technique was employed by Xie et al. to subdivide volume datasets into uniform-sized blocks for interactive display of CT datasets [S1]. It builds on earlier work using octrees for empty space skipping [S1].
++The technique was employed by Xie et al. to subdivide volume datasets into uniform-sized blocks and apply acceleration techniques for interactive display of CT datasets [S1]. It builds on the principles of chunk-based spatial partitioning [Parent].
+ 
+ ## Sources

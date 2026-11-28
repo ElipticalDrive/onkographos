@@ -1,0 +1,164 @@
+--- v003.md
++++ v004.md
+@@ -1,21 +1,21 @@
+ # MPI Parallel Slice-Based Volume Rendering
+-Also called: Distributed Slice Rendering, Domain Decomposition Slicing, MPI Parallel Slicing, Parallel Slice Rendering, Parallel Volume Rendering
++Also called: Distributed Slice Rendering, Domain Decomposition Slicing, MPI Parallel Slicing, Parallel Slice Rendering
+ 
+ ## Overview
+-MPI Parallel Slice-Based Volume Rendering is a distributed computing method that decomposes a 3D volume dataset along the slicing axis (typically the Z-axis) among multiple MPI processes, where each process renders its local subset of slices and sends the resulting image fragments to a root process for final assembly [S1, unofficial]. It differs from [MPI Master Node Parallel Rendering Workflow](2625-mpi-master-node-parallel-rendering-workflow.md) by explicitly handling the domain decomposition logic and image concatenation within the rendering loop itself, rather than relying on a pre-defined master-slave workflow abstraction, and it differs from [MPI Master-Slave Octree Volume Rendering](2744-mpi-master-slave-octree-volume-rendering.md) by operating on uniform slice blocks rather than hierarchical octree structures [S1, unofficial].
++MPI Parallel Slice-Based Volume Rendering is a distributed computing method that decomposes a 3D volume dataset along the slicing axis (typically the Z-axis) among multiple MPI processes, where each process renders its local subset of slices and sends the resulting image fragments to a root process for final assembly [S1, unofficial]. It operates on uniform slice blocks rather than hierarchical octree structures, differing from [MPI Master-Slave Octree Volume Rendering](2744-mpi-master-slave-octree-volume-rendering.md) [S1, unofficial].
+ 
+ ## How it works
+ **Inputs and Outputs:**
+-*   **Input:** A 3D scalar volume dataset (e.g., VTI file), a transfer function (color and opacity), the number of MPI processes (`size`), and the current process rank (`rank`).
+-*   **Output:** A composite 2D image assembled by the root process (rank 0).
++*   **Input:** A 3D scalar volume dataset (e.g., VTI file), a transfer function (color and opacity), the number of MPI processes (`size`), and the current process rank (`rank`) [S1, unofficial].
++*   **Output:** A composite 2D image assembled by the root process (rank 0) [S1, unofficial].
+ 
+ **Data Structures:**
+-*   **Volume Data:** A 3D NumPy array `camera_grid` of shape $(H, W, D)$, where $H$ is height, $W$ is width, and $D$ is depth (number of slices). The data is transposed such that the slicing axis corresponds to the last dimension (axis 2) [S1, unofficial].
+-*   **Local Image Buffer:** A 3D NumPy array `image` of shape $(H, W, 3)$, initialized to zeros, storing the RGBA or RGB result for the local slices [S1, unofficial].
++*   **Volume Data:** A 3D NumPy array `camera_grid` of shape $(H, W, D)$, where $H$ is height, $W$ is width, and $D$ is depth (number of slices). The data is transposed so the slicing axis corresponds to the last dimension (axis 2) [S1, unofficial].
++*   **Local Image Buffer:** A 3D NumPy array `image` of shape $(H, W, 3)$, initialized to zeros, storing the RGB result for the local slices [S1, unofficial].
+ *   **MPI Communicator:** `MPI.COMM_WORLD` [S1, unofficial].
+ 
+ **Parameters:**
+-*   `size`: Total number of MPI processes.
+-*   `rank`: Unique identifier for the current process ($0 \le rank < size$).
++*   `size`: Total number of MPI processes [S1, unofficial].
++*   `rank`: Unique identifier for the current process ($0 \le rank < size$) [S1, unofficial].
+ *   **Transfer Function Range:** Scalar values are mapped from -5000 to 2600 [S1, unofficial].
+ *   **Opacity Points:** Opacity is 1.0 at -5000.0 and 0.0 at 2600.0 (linear interpolation implied by `vtkPiecewiseFunction` usage in source) [S1, unofficial]. Note: Another variant uses opacity 0.8 at -5000.0 and 0.2 at 2600.0 [S1, unofficial].
+@@ -31,15 +31,15 @@
+ 5.  **Initialize Local Buffer:** Create `image = np.zeros((camera_grid.shape[1], camera_grid.shape[2], 3))` [S1, unofficial].
+ 6.  **Render Local Slices:** For each slice in `camera_grid`:
+-    *   Apply logarithmic scaling to the scalar values: $x = \log(\text{slice})$.
++    *   Apply logarithmic scaling to the scalar values: $x = \log(\text{slice})$ [S1, unofficial].
+     *   Compute Color $(R, G, B)$ using a Gaussian mixture transfer function or lookup table [S1, unofficial].
+     *   Compute Opacity $(\alpha)$ using a piecewise function [S1, unofficial].
+     *   Perform front-to-back compositing for the slice:
+         $$ I_{new} = \alpha \cdot C + (1 - \alpha) \cdot I_{old} $$
+-        where $I$ is the image buffer and $C$ is the slice color [S1, unofficial].
++        where $I$ is the image buffer and $C$ is the computed slice color [S1, unofficial].
+ 7.  **Communicate Results:**
+     *   If `rank != 0`: Send `image` to rank 0 using `comm.Send(image, dest=0)` [S1, unofficial].
+     *   If `rank == 0`: Initialize `total_data` with its own `image`. Then, loop $k$ from 1 to `size-1`:
+         *   Receive `image` from source $k$ using `comm.Recv(image, source=k)` [S1, unofficial].
+-        *   Concatenate `image` to `total_data`.
++        *   Concatenate `image` to `total_data` [S1, unofficial].
+ 8.  **Display/Save:** The root process displays or saves `total_data` [S1, unofficial].
+ 
+@@ -47,5 +47,15 @@
+ ```python
+ import numpy as np
+-import MPI
++from mpi4py import MPI
++
++def load_volume(filename):
++    """Stub for loading a VTI file into a NumPy array of shape (D, H, W)."""
++    # In practice, use vtkXMLImageDataReader or similar standard I/O.
++    return np.random.rand(100, 64, 64)  # Placeholder dimensions
++
++def display_image(image_array):
++    """Stub for displaying or saving a NumPy image array."""
++    # In practice, use matplotlib.pyplot.imshow or PIL.
++    pass
+ 
+ def transfer_function_color(x):
+@@ -60,13 +70,10 @@
+     return r, g, b
+ 
+-def transfer_function_opacity(x, opacity_func):
++def transfer_function_opacity(x):
+     """
+     Linear opacity function defined by points (-5000, 1.0) and (2600, 0.0).
+     x: scalar value (log-scaled).
+-    opacity_func: A simple linear interpolation function or lookup.
+     Returns: alpha
+     """
+-    # Simplified linear interpolation for demonstration
+-    # In practice, use vtkPiecewiseFunction or similar
+     min_val, max_val = -5000.0, 2600.0
+     min_alpha, max_alpha = 1.0, 0.0
+@@ -76,11 +83,11 @@
+ 
+ def main():
++    # 1. Initialize MPI
+     comm = MPI.COMM_WORLD
+     rank = comm.Get_rank()
+     size = comm.Get_size()
+ 
+-    # 1. Load and Transform Data
+-    # Assume load_volume() returns array of shape (D, H, W)
+-    original_array = load_volume('data.vti') 
++    # 2. Load and Transform Data
++    original_array = load_volume('data.vti')
+     # Transpose to (H, W, D) for Z-axis slicing
+     camera_grid = np.transpose(original_array, (2, 1, 0))
+@@ -89,5 +96,5 @@
+     D = a[2] # Depth
+     
+-    # 2. Calculate Slice Range
++    # 3. Calculate Slice Range
+     p1 = (D // size) * rank
+     if rank < size - 1:
+@@ -99,9 +106,9 @@
+     local_grid = camera_grid[:, :, p1:p2]
+     
+-    # 3. Initialize Local Image Buffer
++    # 4. Initialize Local Image Buffer
+     H, W, _ = local_grid.shape
+     image = np.zeros((H, W, 3), dtype=np.float32)
+     
+-    # 4. Render Local Slices
++    # 5. Render Local Slices
+     for dataslice in local_grid:
+         # Log scale
+@@ -112,16 +119,12 @@
+         
+         # Get Opacity
+-        alpha = transfer_function_opacity(x, None) # Placeholder for actual TF object
++        alpha = transfer_function_opacity(x)
+         
+-        # Composite
+-        # image[:, :, 0] = alpha * r + (1 - alpha) * image[:, :, 0]
+-        # image[:, :, 1] = alpha * g + (1 - alpha) * image[:, :, 1]
+-        # image[:, :, 2] = alpha * b + (1 - alpha) * image[:, :, 2]
+-        
+-        # Vectorized operation for speed
+-        color = np.stack([r, g, b], axis=-1)
+-        image = alpha * color + (1 - alpha) * image
++        # Composite per channel as in source
++        image[:, :, 0] = alpha * r + (1 - alpha) * image[:, :, 0]
++        image[:, :, 1] = alpha * g + (1 - alpha) * image[:, :, 1]
++        image[:, :, 2] = alpha * b + (1 - alpha) * image[:, :, 2]
+ 
+-    # 5. Communicate Results
++    # 6. Communicate Results
+     if rank != 0:
+         comm.Send(image, dest=0)
+@@ -132,5 +135,4 @@
+             # Concatenate along axis 1 (Width) as per source code, 
+             # though logically slices are along axis 2 (Depth). 
+-            # This implies a specific layout assumption in the source.
+             total_data = np.concatenate((total_data, recv_image), axis=1)
+             
+@@ -138,5 +140,5 @@
+         # total_data = total_data[:, p2:(p2 + a[2]), :] # Source code snippet
+         
+-    # 6. Display
++    # 7. Display
+     if rank == 0:
+         display_image(total_data)
+@@ -160,7 +162,7 @@
+ 
+ ## Operating characteristics
+-*   **Time Complexity:** $O(N/P)$ for rendering, where $N$ is the total number of slices and $P$ is the number of processes, assuming uniform data distribution. Communication overhead is $O(P)$ for gathering images [S1, unofficial].
+-*   **Memory Complexity:** $O(N/P)$ per process for local volume data and image buffers [S1, unofficial].
+-*   **Performance:** Scales linearly with the number of processes for large volumes, limited by network bandwidth for image transfer [S1, unofficial].
++*   **Time Complexity:** $O(N/P)$ for rendering, where $N$ is the total number of slices and $P$ is the number of processes, assuming uniform data distribution [G]. Communication overhead is $O(P)$ for gathering images [G].
++*   **Memory Complexity:** $O(N/P)$ per process for local volume data and image buffers [G].
++*   **Performance:** Scales linearly with the number of processes for large volumes, limited by network bandwidth for image transfer [G].
+ *   **Strengths:** Simple implementation, effective for large uniform volumes, leverages MPI for robust distributed computing [S1, unofficial].
+ *   **Limitations:** Load imbalance if volume density is non-uniform, potential visual artifacts at boundaries if not handled (see Subtopics), and concatenation axis errors in naive implementations [S1, unofficial].

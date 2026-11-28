@@ -1,0 +1,228 @@
+# Gaussian Parameterization and Initialization
+
+Also called: GS-LRM Initialization, GS-LRM Parameterization
+
+## Overview
+This method defines the decoding strategy and data preprocessing required to transform raw transformer output tokens into valid 3D Gaussian parameters for the GS-LRM architecture [S1]. It maps unconstrained neural network outputs to physically meaningful Gaussian attributes while ensuring training stability through specific bias offsets and normalization constraints [S1]. It differs from sibling methods like L4GM by explicitly decoupling the parameterization into zero-order spherical harmonics for color and using a distance-based ray parameterization for XYZ coordinates [S1].
+
+## How it works
+
+### Inputs and Outputs
+**Inputs:**
+- Raw output tokens $G_{ij}$ from the transformer decoder, representing a batch of Gaussians [S1].
+- Camera parameters (origin $\mathbf{ray}_o$ and direction $\mathbf{ray}_d$) for scene-level reconstruction [S1].
+- Scene type indicator (Object-level or Scene-level) determining depth bounds and normalization rules [S1].
+
+**Outputs:**
+- A set of 3D Gaussians defined by:
+  - Center position $\mathbf{xyz} \in \mathbb{R}^3$ [S1].
+  - Scale $\mathbf{s} \in \mathbb{R}^3$ [S1].
+  - Rotation $\mathbf{q} \in \mathbb{R}^4$ (unit quaternion) [S1].
+  - Opacity $\alpha \in [0, 1]$ [S1].
+  - Color $\mathbf{c} \in \mathbb{R}^3$ (SH coefficient) [S1].
+
+### Data Structures
+The raw output $G_{ij}$ is decomposed into five distinct components: $G_{rgb}$, $G_{scale}$, $G_{rotation}$, $G_{opacity}$, and $G_{distance}$ [S1].
+
+### Preprocessing: Camera Pose Normalization
+Camera pose normalization is applied only for Scene-level GS-LRM [S1]. Object-level GS-LRM skips this step because object sizes are pre-normalized during data generation [S1].
+1. Compute Mean Pose: Calculate the mean camera pose by averaging all input camera poses (rotation and translation) from the input set [S1].
+2. Coordinate Frame Alignment: Define the coordinate frame of this mean pose as the world space [S1].
+3. Scaling: Scale the camera locations such that they fit within the bounding box $[-1, 1]^3$ in the world space [S1].
+
+### Parameter Decoding Steps
+
+#### 1. Rotation
+Predict unnormalized quaternions from $G_{rotation}$ and apply L2-normalization as an activation function to obtain unit quaternions $\mathbf{q}$ [S1].
+
+$$ \mathbf{q} = \frac{G_{rotation}}{\|G_{rotation}\|_2} $$
+
+#### 2. Color (RGB)
+Interpret $G_{rgb}$ directly as zero-order Spherical Harmonics (SH) coefficients [S1]. Higher-order SH is not used [S1].
+
+$$ \mathbf{c} = G_{rgb} $$
+
+#### 3. Scale
+Apply an exponential activation with a bias offset, followed by clipping [S1]. The bias offset shifts the zero-mean output to produce a scale where $\exp(-2.3) \approx 0.1$ [S1].
+
+$$ \mathrm{scale} = \min \left( \exp(G_{scale} - 2.3), 0.3 \right) $$
+
+- Bias Offset: $2.3$ [S1].
+- Max Scale: $0.3$ [S1].
+
+#### 4. Opacity
+Apply a sigmoid activation with a bias offset [S1]. The bias offset shifts the zero-mean output to produce an opacity where $\sigma(-2.0) \approx 0.1$ [S1].
+
+$$ \alpha = \sigma(G_{opacity} - 2.0) $$
+
+- Bias Offset: $2.0$ [S1].
+- Sigmoid: $\sigma(x) = \frac{1}{1 + e^{-x}}$ [S1].
+
+#### 5. Position (XYZ) and Distance
+The center position is parameterized along the camera ray using a distance parameter $t$ derived from $G_{distance}$ [S1].
+
+1. Map Distance to Range: Convert $G_{distance}$ to a normalized weight $\omega \in [0, 1]$ using sigmoid, then map to the range $[d_{near}, d_{far}]$ to get $t$ [S1].
+
+    $$ \omega = \sigma(G_{distance}) $$
+    $$ t = (1 - \omega) \cdot d_{near} + \omega \cdot d_{far} $$
+
+2. Compute XYZ: Calculate the 3D position using the ray origin and direction [S1].
+
+    $$ \mathbf{xyz} = \mathbf{ray}_o + t \cdot \mathbf{ray}_d $$
+
+3. Clipping (Object-level only): For Object-level GS-LRM, clip the predicted $\mathbf{xyz}$ coordinates to be inside the cube $[-1, 1]^3$ [S1]. This aligns with the training data rendering setup and prevents line-shaped Gaussians from spreading gradients to multiple pixels, which hurts training stability [S1]. Scene-level GS-LRM does not apply this clipping [S1].
+
+### Parameters and Constants
+
+| Parameter | Object-level Value | Scene-level Value | Description |
+| :--- | :--- | :--- | :--- |
+| $d_{near}$ | $0.1$ | $0.0$ | Near depth bound for ray parameterization [S1]. |
+| $d_{far}$ | $4.5$ | $500$ | Far depth bound. $500$ accounts for large depth variations in indoor/outdoor scenes [S1]. |
+| Scale Bias | $2.3$ | $2.3$ | Offset for scale exponential [S1]. |
+| Opacity Bias | $2.0$ | $2.0$ | Offset for opacity sigmoid [S1]. |
+| Max Scale | $0.3$ | $0.3$ | Upper bound for scale [S1]. |
+| Camera Normalization | None | Yes | Mean pose alignment and bounding box scaling [S1]. |
+| XYZ Clipping | Yes | No | Clip to $[-1, 1]^3$ [S1]. |
+
+### Pseudocode
+
+> **Unverified code.** The code below did not pass a test run against a reference implementation, or no test fits it, so it may contain errors.
+
+```python
+import math
+
+def sigmoid(x):
+    return 1.0 / (1.0 + math.exp(-x))
+
+def decode_gaussian_parameters(G_raw, ray_o, ray_d, scene_type='object'):
+    """
+    Decodes raw transformer output into Gaussian parameters.
+    
+    Args:
+        G_raw: Dictionary containing G_rgb, G_scale, G_rotation, G_opacity, G_distance.
+        ray_o: Ray origin (3D vector).
+        ray_d: Ray direction (3D vector).
+        scene_type: 'object' or 'scene'.
+        
+    Returns:
+        dict: Decoded Gaussian parameters.
+    """
+    # 1. Rotation: L2-normalize unnormalized quaternion
+    q_raw = G_raw['G_rotation']
+    norm = math.sqrt(sum(q**2 for q in q_raw))
+    q = [q / norm for q in q_raw]
+    
+    # 2. Color: Direct mapping to zero-order SH
+    c = G_raw['G_rgb']
+    
+    # 3. Scale: Exp with bias, clipped
+    scale_raw = G_raw['G_scale']
+    scale_unclipped = [math.exp(s - 2.3) for s in scale_raw]
+    scale = [min(s, 0.3) for s in scale_unclipped]
+    
+    # 4. Opacity: Sigmoid with bias
+    opacity_raw = G_raw['G_opacity']
+    alpha = sigmoid(opacity_raw - 2.0)
+    
+    # 5. Position: Distance parameterization
+    distance_raw = G_raw['G_distance']
+    
+    # Set depth bounds based on scene type
+    if scene_type == 'object':
+        d_near = 0.1
+        d_far = 4.5
+    else: # scene
+        d_near = 0.0
+        d_far = 500
+        
+    # Map distance to t
+    omega = sigmoid(distance_raw)
+    t = (1.0 - omega) * d_near + omega * d_far
+    
+    # Compute XYZ
+    xyz = [ray_o[i] + t * ray_d[i] for i in range(3)]
+    
+    # 6. Clipping (Object-level only)
+    if scene_type == 'object':
+        xyz = [max(-1.0, min(1.0, coord)) for coord in xyz]
+        
+    return {
+        'xyz': xyz,
+        'scale': scale,
+        'rotation': q,
+        'opacity': alpha,
+        'color': c
+    }
+
+def normalize_camera_poses(camera_poses):
+    """
+    Normalizes camera poses for scene-level GS-LRM.
+    Args:
+        camera_poses: List of camera pose translation vectors.
+    Returns:
+        List of normalized camera poses.
+    """
+    # Compute mean pose translation
+    mean_x = sum(p[0] for p in camera_poses) / len(camera_poses)
+    mean_y = sum(p[1] for p in camera_poses) / len(camera_poses)
+    mean_z = sum(p[2] for p in camera_poses) / len(camera_poses)
+    
+    # Calculate scale factor to fit in [-1, 1]^3 [G]
+    max_dist = 0
+    for p in camera_poses:
+        dx = p[0] - mean_x
+        dy = p[1] - mean_y
+        dz = p[2] - mean_z
+        dist = math.sqrt(dx*dx + dy*dy + dz*dz)
+        if dist > max_dist:
+            max_dist = dist
+            
+    scale_factor = 1.0 / max_dist if max_dist > 0 else 1.0
+    
+    normalized_poses = []
+    for p in camera_poses:
+        new_x = (p[0] - mean_x) * scale_factor
+        new_y = (p[1] - mean_y) * scale_factor
+        new_z = (p[2] - mean_z) * scale_factor
+        normalized_poses.append([new_x, new_y, new_z])
+        
+    return normalized_poses
+```
+
+### Edge Cases and Pitfalls
+- Training Stability: Without the bias offsets (2.3 for scale, 2.0 for opacity), the initial zero-mean output of the transformer may result in scales or opacities that are too small or too large, causing gradient issues. The biases ensure initial values are around 0.1 [S1].
+- Line-shaped Gaussians: In object-level reconstruction, failing to clip XYZ to $[-1, 1]^3$ can result in line-shaped Gaussians that spread gradients to multiple pixels, hurting training stability [S1].
+- Scene Depth Variation: Using object-level depth bounds ($d_{far}=4.5$) for scene-level reconstruction will fail to capture distant geometry. Scene-level requires $d_{far}=500$ [S1].
+- Camera Normalization: Applying camera normalization to object-level data is unnecessary and potentially harmful, as object sizes are already pre-normalized [S1].
+
+## Operating characteristics
+
+### Time and Memory Complexity
+- Time: The decoding process is $O(N)$ where $N$ is the number of Gaussians, involving simple arithmetic operations (exp, sigmoid, normalization) [S1]. It is negligible compared to the transformer forward pass.
+- Memory: The method does not introduce significant additional memory overhead beyond storing the raw output tokens and the decoded parameters [S1].
+
+### Strengths and Limitations
+- Strengths:
+  - Ensures training stability through careful initialization of scale and opacity via bias offsets [S1].
+  - Simplifies color representation by using zero-order SH, reducing model complexity [S1].
+  - Adapts to different scene scales via configurable depth bounds and camera normalization [S1].
+- Limitations:
+  - Zero-order SH limits view-dependent color modeling [S1].
+  - The method relies on empirical constants (bias offsets, depth bounds) that may need tuning for specific datasets [S1].
+
+### When to Use
+- Use for GS-LRM reconstruction tasks where training stability is critical [S1].
+- Use for scene-level reconstruction when large depth variations are present (requires scene-level parameters) [S1].
+- Do not use if view-dependent effects are required without modifying the SH order [S1].
+
+## Background
+
+### Origin
+The method originates from the GS-LRM (Large Reconstruction Model for 3D Gaussian Splatting) paper by K. Zhang, S. Bi, H. Tan et al. [S1]. It was developed to facilitate the training of a transformer-based model that generates 3D Gaussian splats from 2D images.
+
+### History and Development
+The parameterization was designed to address the challenges of training a large transformer model to output 3D geometry. By decomposing the output into specific components and applying targeted activations (exp for scale, sigmoid for opacity/distance), the authors ensured that the model could learn meaningful representations from the start. The distinction between object-level and scene-level parameters reflects the need to handle different scales and normalization requirements in 3D reconstruction [S1].
+
+## Sources
+
+[S1] GS-LRM: Large Reconstruction Model for 3D Gaussian Splatting, https://doi.org/10.1007/978-3-031-72670-5_1, fetched 2026-10-26

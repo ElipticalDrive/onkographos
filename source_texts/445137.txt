@@ -1,0 +1,194 @@
+RAY_FLAG_SKIP_TRIANGLES and RAY_FLAG_SKIP_PROCEDURAL_PRIMITIVES reach optixTrace as undefined flag bits, with no diagnostic. Reproduction (v2026.14.1) RaytracingAccelerationStructure gScene; RWStructuredBuffer<float4> gOut; struct Payloa...
+
+CUDA/PTX: HLSL ray flags with no OptixRayFlags equivalent are passed through to optixTrace · Issue #12629 · shader-slang/slang · GitHub
+Skip to content
+You signed in with another tab or window. Reload to refresh your session.
+You signed out in another tab or window. Reload to refresh your session.
+You switched accounts on another tab or window. Reload to refresh your session.
+Dismiss alert
+CUDA/PTX: HLSL ray flags with no OptixRayFlags equivalent are passed through to optixTrace #12629
+New issue
+Copy link
+New issue
+Copy link
+Open
+Bug
+#12644
+Open
+CUDA/PTX: HLSL ray flags with no OptixRayFlags equivalent are passed through to optixTrace#12629
+Bug
+#12644
+Copy link
+Assignees
+Labels
+reproducedProvided instructions confirmed to reproduce the issueProvided instructions confirmed to reproduce the issue
+Milestone
+Q3 2026 (Summer)
+Description
+jkwak-work
+opened on Aug 19, 2026
+Issue body actions
+RAY_FLAG_SKIP_TRIANGLES and RAY_FLAG_SKIP_PROCEDURAL_PRIMITIVES reach optixTrace as undefined flag bits, with no diagnostic.
+Reproduction (v2026.14.1)
+```
+RaytracingAccelerationStructure gScene;
+RWStructuredBuffer<float4> gOut;
+
+struct Payload { float4 color; };
+
+[shader("raygeneration")]
+void rayGenMain()
+{
+    RayDesc ray;
+    ray.Origin = float3(0, 0, 0);
+    ray.Direction = float3(0, 0, 1);
+    ray.TMin = 0.0f;
+    ray.TMax = 1000.0f;
+
+    Payload payload;
+    payload.color = float4(0, 0, 0, 0);
+
+    TraceRay(gScene,
+             RAY_FLAG_FORCE_OPAQUE | RAY_FLAG_SKIP_PROCEDURAL_PRIMITIVES,
+             0xff, 0, 1, 0, ray, payload);
+
+    gOut[0] = payload.color;
+}
+```
+```
+slangc -target cuda -stage raygeneration -entry rayGenMain rayflags.slang
+```
+What happens
+slangc exits 0. The flag argument is emitted verbatim, including bit 9, which OptixRayFlags does not define:
+```
+optixTrace(globalParams_0->gScene_0, 513U, 255U, 0U, 1U, 0U, ray_0, &payload_0);
+```
+513 is 0x201: RAY_FLAG_FORCE_OPAQUE (0x01) OR RAY_FLAG_SKIP_PROCEDURAL_PRIMITIVES (0x200). RAY_FLAG_SKIP_TRIANGLES on its own emits 256U, i.e. 0x100.
+OptixRayFlags in optix_types.h (OptiX 9.0) defines bits 0 through 7 only:
+```
+OPTIX_RAY_FLAG_DISABLE_ANYHIT               = 1u << 0,   // 0x01
+OPTIX_RAY_FLAG_ENFORCE_ANYHIT               = 1u << 1,   // 0x02
+OPTIX_RAY_FLAG_TERMINATE_ON_FIRST_HIT       = 1u << 2,   // 0x04
+OPTIX_RAY_FLAG_DISABLE_CLOSESTHIT           = 1u << 3,   // 0x08
+OPTIX_RAY_FLAG_CULL_BACK_FACING_TRIANGLES   = 1u << 4,   // 0x10
+OPTIX_RAY_FLAG_CULL_FRONT_FACING_TRIANGLES  = 1u << 5,   // 0x20
+OPTIX_RAY_FLAG_CULL_DISABLED_ANYHIT         = 1u << 6,   // 0x40
+OPTIX_RAY_FLAG_CULL_ENFORCED_ANYHIT         = 1u << 7,   // 0x80
+```
+The HLSL flags below 0x100 survive the pass-through only because they happen to share bit values with their OptiX counterparts.
+Reproduces identically on 2026.5.2.
+Expected outcome
+optixTrace receives flag bits outside the range OptixRayFlags defines, and the compile succeeds, so nothing indicates it at build time.
+Because the compile succeeds, the problem first appears at runtime. In one case it surfaced as a GPU fault rather than a wrong image, and the reported address reads like a null pointer dereference:
+```
+Invalid __global__ read of size 4 bytes
+  at __raygen__rayGenMain+0xa0
+  Access to 0xb6c is out of bounds
+  and is 8,589,931,668 bytes before the nearest allocation
+```
+That sends you into resource binding and parameter layout, because the trace call compiled cleanly and reads as ordinary HLSL. The shader is valid; only the lowering is wrong. A compile-time diagnostic for ray flags with no OptiX equivalent would be far more useful than the runtime failure.
+Activity
+jkwak-work
+added
+Dev Opened
+on Aug 19, 2026
+nv-slang-bot
+added
+reproducedProvided instructions confirmed to reproduce the issueProvided instructions confirmed to reproduce the issue
+on Aug 19, 2026
+nv-slang-bot
+added the
+Bug
+issue type on Aug 19, 2026
+nv-slang-bot commented on Aug 19, 2026
+nv-slang-botBot
+on Aug 19, 2026 – with nv-slang-bot
+Last edited by nv-slang-bot
+Contributor
+More actions
+Triage update — fix implemented & locally verified in draft PR #12644, pending review
+Status: Reproduced at top-of-tree and fixed. The fix is in draft PR Fix #12629: diagnose HLSL ray flags with no OptiX equivalent for CUDA/OptiX target #12644 (Closes #12629), rebased onto current master and locally verified. Issue carries reproduced + Issue Type Bug.
+Link: PR Fix #12629: diagnose HLSL ray flags with no OptiX equivalent for CUDA/OptiX target #12644 — +140/−0 across 5 files: a new CUDA/OptiX IR pass diagnoseUnsupportedCUDARayFlags (slang-ir-legalize-varying-params.cpp), a new error E55215 ray-flag-unsupported-for-optix (slang-diagnostics.lua), and a GPU-free regression test (tests/cuda/rayflags-unsupported-optix-diagnostic.slang).
+Verdict: Confirmed compiler bug — the CUDA arm of TraceRay (hlsl.meta.slang) is a bare __intrinsic_asm "optixTrace" pass-through, so ray flags OptiX cannot express per-ray reached optixTrace verbatim with no diagnostic. The fix errors at compile time when a TraceRay's constant RayFlags sets a bit with no OptixRayFlags equivalent. The unsupported set was enumerated against the actual OptixRayFlags (optix_types.h): exactly RAY_FLAG_SKIP_TRIANGLES (0x100) and RAY_FLAG_SKIP_PROCEDURAL_PRIMITIVES (0x200). RAY_FLAG_FORCE_OMM_2_STATE (0x400) is supported (== OptiX bit 10) and is deliberately not flagged; a runtime-computed (non-constant) flags value is un-checkable at compile time and left alone (documented limitation).
+Tests: The reported repro now errors with E55215 instead of compiling silently; the regression test (//DIAGNOSTIC_TEST, no GPU) plus positive/negative flag controls pass on the rebuilt compiler.
+Next-action: Maintainer review + merge. PR Fix #12629: diagnose HLSL ray flags with no OptiX equivalent for CUDA/OptiX target #12644 is still a draft, so it needs to be marked ready-for-review for full CI to run; it Closes #12629 and will auto-close this issue on merge.
+🤖 Generated by an automated Slang coworker — may be inaccurate. A human maintainer should verify.
+jkwak-work
+self-assigned this
+on Aug 19, 2026
+jkwak-work
+added this to the Q3 2026 (Summer) milestone on Aug 19, 2026
+nv-slang-bot
+added 2 commits that reference this issue on Aug 20, 2026
+Fix #12629: diagnose HLSL ray flags with no OptiX equivalent
+...
+This issue will close once commit eaa3841 is merged into the 'master' branch.
+eaa3841
+Fix #12629: diagnose HLSL ray flags with no OptiX equivalent
+...
+This issue will close once commit edc771c is merged into the 'master' branch.
+edc771c
+jkwak-work commented on Oct 1, 2026
+jkwak-work
+on Oct 1, 2026
+CollaboratorAuthor
+More actions
+@nv-slang-bot I think the problem is on the fact that Slang must emit the enum flag as "string" not the integer value because the actual value for the given enum keyword could change from one version of optiX to another version.
+This had been a problem with HLSL before and it was corrected a few months ago.
+👀React with 👀1Reacted by nv-slang-bot
+nv-slang-bot commented on Oct 1, 2026
+nv-slang-botBot
+on Oct 1, 2026 – with nv-slang-bot
+Contributor
+More actions
+@jkwak-work Agreed, that's the root cause: the CUDA arm of TraceRay passes RayFlags as a raw integer instead of OPTIX_RAY_FLAG_* names. I'll follow your #11437 pattern.
+#11437 also errors on values that have no name (validateBarrierFlagsForHLSL). RAY_FLAG_SKIP_TRIANGLES (0x100) and RAY_FLAG_SKIP_PROCEDURAL_PRIMITIVES (0x200) have no OPTIX_RAY_FLAG_* name in any OptiX release (7.0–9.1). So I propose named emission plus keeping the compile-time error for those two.
+Before I rework #12644:
+Should named emission go alongside that error, or replace it?
+Unlike barrier flags, RayFlags can be a runtime value. Should I (a) emit names only for compile-time constants, as Move workgraph APIs to experimental module #11437 does, or (b) add a CUDA prelude helper that translates each bit to its OPTIX_RAY_FLAG_* name at runtime? For (b), how should 0x100/0x200 in a runtime value be handled?
+🤖 Generated by an automated Slang coworker — may be inaccurate. A human maintainer should verify.
+jkwak-work
+removed
+Dev Opened
+on Oct 8, 2026
+minco3 commented on Oct 29, 2026
+minco3
+on Oct 29, 2026
+More actions
+Input on the open question of how to handle RAY_FLAG_SKIP_TRIANGLES / RAY_FLAG_SKIP_PROCEDURAL_PRIMITIVES on CUDA/OptiX:
+A hard error for these two flags breaks shader code shared across targets that sets the flag unconditionally. D3D12 and Vulkan honor it; on OptiX the shader is otherwise valid, and the filtering has to come from the pipeline or SBT setup instead. With an error, every such TraceRay needs a target guard.
+Suggestion: on CUDA/OptiX, clear the two bits from the value passed to optixTrace, and warn when they are set in a compile-time constant. Clearing the bits also covers runtime flag values, since 0x100 and 0x200 are not defined OptixRayFlags bits. Users who want the strict behavior can use -warnings-as-errors.
+On v2026.20, TraceRay with RAY_FLAG_SKIP_TRIANGLES still emits optixTrace(..., 256U, ...) with no diagnostic.
+👀React with 👀1Reacted by nv-slang-bot
+nv-slang-bot commented on Oct 30, 2026
+nv-slang-botBot
+on Oct 30, 2026 – with nv-slang-bot
+Contributor
+More actions
+Thanks, minco3. That matches current master: the CUDA arm of TraceRay still passes RayFlags to optixTrace unchanged, with no diagnostic.
+@jkwak-work this sharpens my question 1. For RAY_FLAG_SKIP_TRIANGLES (0x100) and RAY_FLAG_SKIP_PROCEDURAL_PRIMITIVES (0x200) on CUDA/OptiX, which do you prefer?
+Hard error (draft Fix #12629: diagnose HLSL ray flags with no OptiX equivalent for CUDA/OptiX target #12644's current behavior): loud for compile-time constants, but a shader shared across targets needs a target guard on every such TraceRay. Runtime values still pass through unchanged with no diagnostic.
+Clear the two bits and warn (minco3's suggestion): portable, and the clearing also covers runtime values. But traversal on OptiX then differs from D3D12/Vulkan unless the host filters primitives in the pipeline or SBT setup, and the warning fires only for compile-time constants.
+Emitting OPTIX_RAY_FLAG_* names for the other bits (your #11437 pattern) works with either option. Questions 2 and 3 (constant-only IR op vs. runtime prelude helper, and runtime handling of 0x100/0x200) still stand; clear-and-warn would partly answer 3.
+I'm holding #12644 until you decide.
+🤖 Generated by an automated Slang coworker — may be inaccurate. A human maintainer should verify.
+Sign up for free to join this conversation on GitHub. Already have an account? Sign in to comment
+Metadata
+Metadata
+Assignees
+jkwak-work
+Labels
+reproducedProvided instructions confirmed to reproduce the issueProvided instructions confirmed to reproduce the issue
+Type
+Bug
+Projects
+No projects
+Milestone
+Q3 2026 (Summer)
+Relationships
+None yet
+Development
+No branches or pull requests
+Issue actions
+Open in GitHub Copilot app
+You can’t perform that action at this time.

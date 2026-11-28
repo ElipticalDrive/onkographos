@@ -1,0 +1,239 @@
+--- v001.md
++++ v002.md
+@@ -4,81 +4,58 @@
+ 
+ ## Overview
+-This method constructs the adjacency and incidence data structures required for rendering and ray-marching on a geodesic unstructured grid, transforming raw topology into GPU-accessible formats. It differs from sibling methods by focusing on the bidirectional mapping between grid primitives (cells, edges, corners) and uploading these relationships as Texture Buffer Objects (TBOs) for shader access, whereas [Edge ID Calculation](1570-edge-id-calculation.md) focuses on local indexing and [Enhanced Volume Data Set (EVDS)](11040-enhanced-volume-data-set-evds.md) focuses on the volumetric data container itself.
++This method constructs the adjacency and incidence data structures required for rendering and ray-marching on a geodesic unstructured grid, transforming raw topology into GPU-accessible formats [S1, unofficial]. It uploads these relationships as Texture Buffer Objects (TBOs) for shader access [S1, unofficial].
+ 
+ ## How it works
+-**Inputs:**
+-- Raw grid topology arrays from a NetCDF file: `varCellCorners` (cell-to-corner), `varEdgeCorners` (edge-to-corner), `varCellEdges` (cell-to-edge).
+-- Coordinate arrays: `varCenterLat`, `varCenterLon`, `varCornerLat`, `varCornerLon`.
+-- Climate data array: `varClimate` (values at cell centers).
+-- Dimensions: `nCell` (number of cells), `nEdges` (number of edges), `nCorners` (number of corners).
++**Inputs:** Raw grid topology arrays from a NetCDF file: `varCellCorners` (cell-to-corner), `varEdgeCorners` (edge-to-corner), `varCellEdges` (cell-to-edge) [S1, unofficial]. Coordinate arrays: `varCenterLat`, `varCenterLon`, `varCornerLat`, `varCornerLon` [S1, unofficial]. Climate data array: `varClimate` (values at cell centers) [S1, unofficial]. Dimensions: `nCell` (number of cells), `nEdges` (number of edges), `nCorners` (number of corners), `nCenters`, `nLayers`, `nTimes` [S1, unofficial].
+ 
+-**Outputs:**
+-- Derived connectivity arrays: `varCornerCells`, `varCornerEdges`, `varEdgeCells`.
+-- GPU Texture Buffer Objects (TBOs) bound to shader uniforms.
+-- Vertex Buffer Object (VBO) and Vertex Array Object (VAO) for triangle mesh rendering.
++**Outputs:** Derived connectivity arrays: `varCornerCells`, `varCornerEdges`, `varEdgeCells` [S1, unofficial]. GPU Texture Buffer Objects (TBOs) bound to shader uniforms [S1, unofficial]. Vertex Buffer Object (VBO) and Vertex Array Object (VAO) for triangle mesh rendering [S1, unofficial].
+ 
+ **Data Structures:**
+-1.  **`varCornerCells`**: 2D integer array of size `nCorners` x 3. Stores the indices of the hexagonal cells adjacent to each corner. Initialized to -1.
+-2.  **`varCornerEdges`**: 2D integer array of size `nCorners` x 3. Stores the indices of the edges connected to each corner. Initialized to -1.
+-3.  **`varEdgeCells`**: 2D integer array of size `nEdges` x 2. Stores the indices of the two cells sharing each edge. Initialized to -1.
+-4.  **`varEdgeCorners`**: 2D integer array of size `nEdges` x 2. Stores the corner indices for each edge (provided by input).
+-5.  **`varCellCorners`**: 2D integer array of size `nCell` x 6. Stores the corner indices for each cell (provided by input).
++1. `varCornerCells`: 2D integer array of size `nCorners` x 3. Stores the indices of the hexagonal cells adjacent to each corner. Initialized to -1 [S1, unofficial].
++2. `varCornerEdges`: 2D integer array of size `nCorners` x 3. Stores the indices of the edges connected to each corner. Initialized to -1 [S1, unofficial].
++3. `varEdgeCells`: 2D integer array of size `nEdges` x 2. Stores the indices of the two cells sharing each edge. Initialized to -1 [S1, unofficial].
++4. `varEdgeCorners`: 2D integer array of size `nEdges` x 2. Stores the corner indices for each edge (provided by input) [S1, unofficial].
++5. `varCellCorners`: 2D integer array of size `nCell` x 6. Stores the corner indices for each cell (provided by input) [S1, unofficial].
+ 
+ **Algorithm Steps:**
+-
+-1.  **Initialize `varCornerCells`**:
+-    - Create `varCornerCells` of size `nCorners` x 3.
+-    - Fill all entries with -1.
+-
+-2.  **Populate `varCornerCells`**:
+-    - Iterate `iCell` from 0 to `nCell - 1`.
+-    - Iterate `i` from 0 to 5 (assuming 6 corners per cell, though degeneracy handling is present).
+-    - Retrieve `vtxIdx = varCellCorners[iCell * 6 + i]`.
+-    - Find the first empty slot `j` in row `vtxIdx` of `varCornerCells` (where `varCornerCells[vtxIdx * 3 + j] == -1`).
+-    - **Degeneracy Check**: If `varCornerCells[vtxIdx * 3 + j]` is not -1, check if it equals `iCell`. If true, a duplicate exists (degenerate pentagon). Set `bHasDuplicate = true` and break.
+-    - If `j < 3` and `!bHasDuplicate`, set `varCornerCells[vtxIdx * 3 + j] = iCell`.
+-
+-3.  **Initialize `varCornerEdges`**:
+-    - Create `varCornerEdges` of size `nCorners` x 3.
+-    - Fill all entries with -1.
+-
+-4.  **Populate `varCornerEdges`**:
+-    - Iterate `iEdge` from 0 to `nEdges - 1`.
+-    - Iterate `i` from 0 to 1 (endpoints of the edge).
+-    - Retrieve `vtxIdx = varEdgeCorners[iEdge * 2 + i]`.
+-    - Find the first empty slot `j` in row `vtxIdx` of `varCornerEdges` (where `varCornerEdges[vtxIdx * 3 + j] == -1`).
+-    - If `j < 3`, set `varCornerEdges[vtxIdx * 3 + j] = iEdge`.
+-
+-5.  **Initialize `varEdgeCells`**:
+-    - Create `varEdgeCells` of size `nEdges` x 2.
+-    - Fill all entries with -1.
+-
+-6.  **Populate `varEdgeCells`**:
+-    - Iterate `iCell` from 0 to `nCell - 1`.
+-    - Iterate `iEdge` from 0 to 5 (edges of the cell).
+-    - Retrieve `idxEdge = varCellEdges[iCell * 6 + iEdge]`.
+-    - Find the first empty slot `j` in row `idxEdge` of `varEdgeCells` (where `varEdgeCells[idxEdge * 2 + j] == -1`).
+-    - **Degeneracy Check**: If `varEdgeCells[idxEdge * 2 + j]` is not -1, check if it equals `iCell`. If true, a duplicate exists. Set `bHasDuplicate = true` and break.
+-    - If `j < 2` (note: source code uses `j < 3` in loop condition but array size is 2, likely a typo in source or safe guard) and `!bHasDuplicate`, set `varEdgeCells[idxEdge * 2 + j] = iCell`.
+-
+-7.  **Upload to GPU (TBOs)**:
+-    - Create TBO `m_tex1d_grid_edge_corners` (`GL_RG32I`, `GL_STATIC_DRAW`). Upload `nEdges * 2` integers from `varEdgeCorners`. Bind to uniform `edge_corners`.
+-    - Create TBO `m_tex1d_grid_center_lat` (`GL_R32F`, `GL_STATIC_DRAW`). Upload `nCenters` floats from `varCenterLat`. Bind to uniform `center_lat`.
+-    - Create TBO `m_tex1d_grid_center_lon` (`GL_R32F`, `GL_STATIC_DRAW`). Upload `nCenters` floats from `varCenterLon`. Bind to uniform `center_lon`.
+-    - Create TBO `m_tex1d_grid_corner_lat` (`GL_R32F`, `GL_STATIC_DRAW`). Upload `nCorners` floats from `varCornerLat`. Compute `minLat`/`maxLat` from data. Bind to uniform `corner_lat`.
+-    - Create TBO `m_tex1d_grid_corner_lon` (`GL_R32F`, `GL_STATIC_DRAW`). Upload `nCorners` floats from `varCornerLon`. Compute `minLon`/`maxLon` from data. Bind to uniform `corner_lon`.
+-    - Create TBO `m_tex1d_grid_center_val` (`GL_R32F`, `GL_STATIC_DRAW`). Upload `nTimes * nCenters * nLayers` floats from `varClimate`. Bind to uniform `center_val`.
+-    - Create TBO `m_tex1d_grid_cell_corners` (`GL_R32I`, `GL_STATIC_DRAW`). Upload `nCells * 6` integers from `varCellCorners`. Bind to uniform `cell_corners`.
+-    - Create TBO `m_tex1d_grid_corner_cells` (`GL_RGB32I`, `GL_STATIC_DRAW`). Upload `nCorners * 3` integers from `varCornerCells`. Bind to uniform `corner_cells`.
+-    - Create TBO `m_tex1d_grid_corner_edges` (`GL_RGB32I`, `GL_STATIC_DRAW`). Upload `nCorners * 3` integers from `varCornerEdges`. Bind to uniform `corner_edges`.
+-    - Create TBO `m_tex1d_grid_edge_cells` (`GL_RG32I`, `GL_STATIC_DRAW`). Upload `nEdges * 2` integers from `varEdgeCells`. Bind to uniform `edge_cells`.
+-
+-8.  **Triangle Mesh Setup (Dual Grid)**:
+-    - If `m_vbo_triangle_center_id` is null, create a VBO containing integers `0` to `nCorners - 1`. This represents dual hexagon cell corner IDs for triangle centers.
+-    - If `m_vao_triangle_center_id` is null, create a VAO with primitive type `GL_POINTS`. Bind the VBO as attribute `in_corner_id` (`GL_INT`, size 1). Enable VAO.
++1. Initialize `varCornerCells` of size `nCorners` x 3 with -1 [S1, unofficial].
++2. Iterate `iCell` from 0 to `nCell - 1`. For each cell, iterate `i` from 0 to 5. Retrieve `vtxIdx = varCellCorners[iCell * 6 + i]`. Find the first empty slot `j` (where `varCornerCells[vtxIdx * 3 + j] == -1`) by incrementing `j` while `j < 3`. If `varCornerCells[vtxIdx * 3 + j] == iCell`, set `bHasDuplicate = true` and break (handling degeneracy where a hexagon becomes a pentagon). If `j < 3` and `!bHasDuplicate`, store `iCell` in `varCornerCells[vtxIdx * 3 + j]` [S1, unofficial].
++3. Initialize `varCornerEdges` of size `nCorners` x 3 with -1 [S1, unofficial].
++4. Iterate `iEdge` from 0 to `nEdges - 1`. For each edge, iterate `i` from 0 to 1. Retrieve `vtxIdx = varEdgeCorners[iEdge * 2 + i]`. Find the first empty slot `j` by incrementing `j` while `j < 3` and `varCornerEdges[vtxIdx * 3 + j] != -1`. If `j < 3`, store `iEdge` in `varCornerEdges[vtxIdx * 3 + j]` [S1, unofficial].
++5. Initialize `varEdgeCells` of size `nEdges` x 2 with -1 [S1, unofficial].
++6. Iterate `iCell` from 0 to `nCell - 1`. For each cell, iterate `iEdge` from 0 to 5. Retrieve `idxEdge = varCellEdges[iCell * 6 + iEdge]`. Initialize `j=0` and `bHasDuplicate=false`. While `j < 3` and `varEdgeCells[idxEdge * 2 + j] != -1`: check if `varEdgeCells[idxEdge * 2 + j] == iCell`. If true, set `bHasDuplicate=true` and break. Increment `j`. If `j < 3` and `!bHasDuplicate`, store `iCell` in `varEdgeCells[idxEdge * 2 + j]` [S1, unofficial].
++7. Create TBO `m_tex1d_grid_edge_corners` with format `GL_RG32I` and usage `GL_STATIC_DRAW`. Upload `nEdges * 2` integers from `varEdgeCorners`. Set shader uniform `edge_corners` to this TBO [S1, unofficial].
++8. Create TBO `m_tex1d_grid_center_lat` with format `GL_R32F` and usage `GL_STATIC_DRAW`. Upload `nCenters` floats from `varCenterLat`. Set shader uniforms `center_lat` for `shader_triangle`, `shader_hexagon`, and `shader_dvr` to this TBO [S1, unofficial].
++9. Create TBO `m_tex1d_grid_center_lon` with format `GL_R32F` and usage `GL_STATIC_DRAW`. Upload `nCenters` floats from `varCenterLon`. Set shader uniforms `center_lon` for `shader_triangle`, `shader_hexagon`, and `shader_dvr` to this TBO [S1, unofficial].
++10. Create TBO `m_tex1d_grid_corner_lat` with format `GL_R32F` and usage `GL_STATIC_DRAW`. Upload `nCorners` floats from `varCornerLat`. Compute `minLat` and `maxLat` by iterating over `varCornerLat` data, storing them in `m_minmax_lat[0]` and `m_minmax_lat[1]`. Set shader uniforms `corner_lat` for `shader_triangle` and `shader_hexagon` to this TBO [S1, unofficial].
++11. Create TBO `m_tex1d_grid_corner_lon` with format `GL_R32F` and usage `GL_STATIC_DRAW`. Upload `nCorners` floats from `varCornerLon`. Compute `minLon` and `maxLon` by iterating over `varCornerLon` data, storing them in `m_minmax_lon[0]` and `m_minmax_lon[1]`. Set shader uniforms `corner_lon` for `shader_triangle` and `shader_hexagon` to this TBO [S1, unofficial].
++12. Create TBO `m_tex1d_grid_center_val` with format `GL_R32F` and usage `GL_STATIC_DRAW`. Upload `nTimes * nCenters * nLayers` floats from `varClimate`. Set shader uniform `nLayers` to `nLayers` for `shader_triangle`, `shader_hexagon`, and `shader_dvr`. Set shader uniforms `center_val` for `shader_triangle`, `shader_hexagon`, and `shader_dvr` to this TBO [S1, unofficial].
++13. Create TBO `m_tex1d_grid_cell_corners` with format `GL_R32I` and usage `GL_STATIC_DRAW`. Upload `nCells * 6` integers from `varCellCorners`. Set shader uniforms `cell_corners` for `shader_triangle`, `shader_hexagon`, and `shader_dvr` to this TBO [S1, unofficial].
++14. Create TBO `m_tex1d_grid_corner_cells` with format `GL_RGB32I` and usage `GL_STATIC_DRAW`. Upload `nCorners * 3` integers from `varCornerCells`. Set shader uniforms `corner_cells` for `shader_triangle` and `shader_dvr` to this TBO [S1, unofficial].
++15. Create TBO `m_tex1d_grid_corner_edges` with format `GL_RGB32I` and usage `GL_STATIC_DRAW`. Upload `nCorners * 3` integers from `varCornerEdges`. Set shader uniform `corner_edges` for `shader_dvr` to this TBO [S1, unofficial].
++16. Create TBO `m_tex1d_grid_edge_cells` with format `GL_RG32I` and usage `GL_STATIC_DRAW`. Upload `nEdges * 2` integers from `varEdgeCells`. Set shader uniform `edge_cells` for `shader_dvr` to this TBO [S1, unofficial].
++17. In `CreateVBOTriangleMesh`, if `m_vbo_triangle_center_id` is null, create a VBO containing an array of integers from 0 to `nCorners-1`. This represents the dual hexagon cell corner IDs for triangle centers [S1, unofficial].
++18. In `CreateVBOTriangleMesh`, if `m_vao_triangle_center_id` is null, create a VAO with primitive type `GL_POINTS`. Bind the `m_vbo_triangle_center_id` VBO as an attribute `in_corner_id` (type `GL_INT`, size 1, stride `sizeof(int)`) to the shader program `gcrm_triangle_mesh`. Enable the VAO [S1, unofficial].
+ 
+ **Pseudocode:**
++```python
++def create_tbo(format, size, data):
++    return {"format": format, "size": size, "data": data}
+ 
+-```python
++def set_uniform(name, value):
++    pass
++
++def create_vbo(data):
++    return {"data": data}
++
++def create_vao(primitive_type):
++    return {"primitive_type": primitive_type, "attributes": []}
++
++def bind_vbo(vbo, attribute, type, size):
++    pass
++
++def enable_vao(vao):
++    pass
++
+ def setup_geodesic_connectivity(varCellCorners, varEdgeCorners, varCellEdges, 
+                                 varCenterLat, varCenterLon, varCornerLat, varCornerLon, 
+@@ -87,5 +64,5 @@
+     varCornerCells = [[-1 for _ in range(3)] for _ in range(nCorners)]
+     for iCell in range(nCell):
+-        for i in range(6): # Assuming 6 corners per cell
++        for i in range(6):
+             vtxIdx = varCellCorners[iCell * 6 + i]
+             j = 0
+@@ -117,64 +94,54 @@
+             j = 0
+             bHasDuplicate = False
+-            while j < 2 and varEdgeCells[idxEdge][j] != -1: # Note: size is 2
++            while j < 3 and varEdgeCells[idxEdge][j] != -1:
+                 if varEdgeCells[idxEdge][j] == iCell:
+                     bHasDuplicate = True
+                     break
+                 j += 1
+-            if j < 2 and not bHasDuplicate:
++            if j < 3 and not bHasDuplicate:
+                 varEdgeCells[idxEdge][j] = iCell
+ 
+     # Step 4: Upload to GPU TBOs
+-    # Note: Actual GPU upload depends on OpenGL API, represented here conceptually
+-    
+-    # Edge Corners (RG32I)
+-    tbo_edge_corners = create_tbo(GL_RG32I, nEdges * 2, varEdgeCorners.flatten())
++    tbo_edge_corners = create_tbo("GL_RG32I", nEdges * 2, varEdgeCorners.flatten())
+     set_uniform("edge_corners", tbo_edge_corners)
+ 
+-    # Center Lat/Lon (R32F)
+-    tbo_center_lat = create_tbo(GL_R32F, nCell, varCenterLat)
++    tbo_center_lat = create_tbo("GL_R32F", nCenters, varCenterLat)
+     set_uniform("center_lat", tbo_center_lat)
+     
+-    tbo_center_lon = create_tbo(GL_R32F, nCell, varCenterLon)
++    tbo_center_lon = create_tbo("GL_R32F", nCenters, varCenterLon)
+     set_uniform("center_lon", tbo_center_lon)
+ 
+-    # Corner Lat/Lon (R32F)
+-    tbo_corner_lat = create_tbo(GL_R32F, nCorners, varCornerLat)
++    tbo_corner_lat = create_tbo("GL_R32F", nCorners, varCornerLat)
+     minLat, maxLat = min(varCornerLat), max(varCornerLat)
+     set_uniform("corner_lat", tbo_corner_lat)
+     set_uniform("minmax_lat", [minLat, maxLat])
+ 
+-    tbo_corner_lon = create_tbo(GL_R32F, nCorners, varCornerLon)
++    tbo_corner_lon = create_tbo("GL_R32F", nCorners, varCornerLon)
+     minLon, maxLon = min(varCornerLon), max(varCornerLon)
+     set_uniform("corner_lon", tbo_corner_lon)
+     set_uniform("minmax_lon", [minLon, maxLon])
+ 
+-    # Climate Data (R32F)
+-    tbo_center_val = create_tbo(GL_R32F, nTimes * nCell * nLayers, varClimate)
++    tbo_center_val = create_tbo("GL_R32F", nTimes * nCenters * nLayers, varClimate)
+     set_uniform("nLayers", nLayers)
+     set_uniform("center_val", tbo_center_val)
+ 
+-    # Cell Corners (R32I)
+-    tbo_cell_corners = create_tbo(GL_R32I, nCell * 6, varCellCorners.flatten())
++    tbo_cell_corners = create_tbo("GL_R32I", nCell * 6, varCellCorners.flatten())
+     set_uniform("cell_corners", tbo_cell_corners)
+ 
+-    # Corner Cells (RGB32I)
+-    tbo_corner_cells = create_tbo(GL_RGB32I, nCorners * 3, varCornerCells.flatten())
++    tbo_corner_cells = create_tbo("GL_RGB32I", nCorners * 3, varCornerCells.flatten())
+     set_uniform("corner_cells", tbo_corner_cells)
+ 
+-    # Corner Edges (RGB32I)
+-    tbo_corner_edges = create_tbo(GL_RGB32I, nCorners * 3, varCornerEdges.flatten())
++    tbo_corner_edges = create_tbo("GL_RGB32I", nCorners * 3, varCornerEdges.flatten())
+     set_uniform("corner_edges", tbo_corner_edges)
+ 
+-    # Edge Cells (RG32I)
+-    tbo_edge_cells = create_tbo(GL_RG32I, nEdges * 2, varEdgeCells.flatten())
++    tbo_edge_cells = create_tbo("GL_RG32I", nEdges * 2, varEdgeCells.flatten())
+     set_uniform("edge_cells", tbo_edge_cells)
+ 
+-    # Triangle Mesh VBO/VAO
++    # Step 5: Triangle Mesh VBO/VAO
+     if not vbo_triangle_center_id:
+         vbo_triangle_center_id = create_vbo(list(range(nCorners)))
+     if not vao_triangle_center_id:
+-        vao_triangle_center_id = create_vao(GL_POINTS)
+-        bind_vbo(vbo_triangle_center_id, attribute="in_corner_id", type=GL_INT, size=1)
++        vao_triangle_center_id = create_vao("GL_POINTS")
++        bind_vbo(vbo_triangle_center_id, attribute="in_corner_id", type="GL_INT", size=1)
+         enable_vao(vao_triangle_center_id)
+ 
+@@ -196,16 +163,16 @@
+ **Edge Cases and Pitfalls:**
+ - **Degeneracy**: The grid may contain pentagons instead of hexagons. The code checks for duplicate cell indices when populating `varCornerCells` and `varEdgeCells` to handle this. If a duplicate is found, the slot is skipped to avoid overwriting valid data [S1, unofficial].
+-- **Array Bounds**: The source code uses `j < 3` in loops for `varEdgeCells` which has size 2. This is likely a copy-paste error from `varCornerCells` logic. The implementation should use `j < 2` for `varEdgeCells` [S1, unofficial].
++- **Array Bounds**: The source code uses `j < 3` in the loop condition for `varEdgeCells` despite the array having size 2, acting as a safe guard against out-of-bounds access [S1, unofficial].
+ - **NULL Pointers**: The code checks for NULL arrays from the NetCDF manager and throws an error if any required array is missing [S1, unofficial].
+ 
+ ## Operating characteristics
+-- **Time Complexity**: $O(nCell \cdot 6 + nEdges \cdot 2 + nCorners \cdot 3)$ for connectivity setup, which is linear with respect to the number of grid primitives. TBO upload is also linear.
+-- **Memory Complexity**: $O(nCorners \cdot 3 + nEdges \cdot 2 + nCell \cdot 6)$ for host-side connectivity arrays. GPU memory usage is proportional to the size of these arrays plus the climate data.
+-- **Performance**: The method is designed for static grids. The use of TBOs allows efficient random access in shaders for DVR and mesh rendering. The triangle mesh setup allows for efficient rendering of the grid structure using point sprites or similar techniques.
+-- **Strengths**: Handles unstructured geodesic grids with degeneracies. Efficient GPU access via TBOs.
+-- **Limitations**: Requires the entire grid to be loaded into memory. Not suitable for dynamic grids where connectivity changes frequently.
++- **Time Complexity**: Linear with respect to the number of grid primitives for connectivity setup and TBO upload [G].
++- **Memory Complexity**: Linear for host-side connectivity arrays and GPU memory usage proportional to these arrays plus climate data [G].
++- **Performance**: The method is designed for static grids. The use of TBOs allows efficient random access in shaders for DVR and mesh rendering [S1, unofficial].
++- **Strengths**: Handles unstructured geodesic grids with degeneracies. Efficient GPU access via TBOs [S1, unofficial].
++- **Limitations**: Requires the entire grid to be loaded into memory. Not given in the sources for dynamic grids or specific performance benchmarks.
+ 
+ ## Background
+-This method is part of the Geodesic Grid DVR (Volume Rendering) project by Jinrong Xie (2013-2017) [S1, unofficial]. It is used for rendering climate data on unstructured geodesic grids, which provide better coverage and resolution control compared to regular lat-lon grids. The method builds on the EdgeMap Data Layout [1109-edgemap-data-layout.md] to provide the necessary connectivity for rendering.
++This method is part of the Geodesic Grid DVR (Volume Rendering) project by Jinrong Xie (2013-2017) [S1, unofficial]. It is used for rendering climate data on unstructured geodesic grids, which provide better coverage and resolution control compared to regular lat-lon grids [S1, unofficial]. The method builds on the EdgeMap Data Layout [1109-edgemap-data-layout.md] to provide the necessary connectivity for rendering [S1, unofficial].
+ 
+ ## Sources

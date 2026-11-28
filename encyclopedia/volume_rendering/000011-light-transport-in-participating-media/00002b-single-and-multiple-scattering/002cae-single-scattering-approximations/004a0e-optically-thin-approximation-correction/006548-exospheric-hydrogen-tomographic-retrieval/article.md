@@ -1,0 +1,163 @@
+# Exospheric Hydrogen Tomographic Retrieval
+Also called: Tomographic Retrieval of Exospheric Hydrogen
+
+## Overview
+This method retrieves the three-dimensional density distribution of atomic hydrogen in Earth's exosphere from Lyman-alpha (Lyα) photon radiance measurements. It solves the inverse problem of the single-scattering emission model, motivated by the Carruthers Geocorona Observatory mission [S1]. It differs from generic tomography by using a parametric spherical harmonic basis for angular variations and Tikhonov regularization for radial smoothness, specifically addressing the low-signal, optically thin nature of the exosphere [S1].
+
+## How it works
+**Inputs:**
+*   $I$: Vector of $N$ noisy Lyα photon radiance measurements (phot s⁻¹ cm⁻² sr⁻¹) [S1].
+*   $g$: Solar g-factor (phot s⁻¹ atom⁻¹), assumed known [S1].
+*   $\phi$: Scattering phase function (unitless), assumed known [S1].
+*   Observation geometry: Camera positions and orientations over an observation window [S1].
+
+**Outputs:**
+*   $\rho(r, e, a)$: Reconstructed hydrogen density field (atom cm⁻³) [S1].
+
+**Data Structures:**
+The density is represented by coefficients $c_{rlm}$ for radial shells $r$ and spherical harmonic degrees $l$ and orders $m$.
+*   Radial domain: $r \in [3 R_E, 25 R_E]$ (Earth radii) [S1].
+*   Angular domain: Elevation $e$ and azimuth $a$ [S1].
+*   Spherical Harmonic Truncation: Degree $L$ [S1].
+*   Polar Binning: Measurements are mapped to 100 radial and 50 azimuthal polar pixels [S1].
+
+**Formulas:**
+The forward model relates density to radiance [S1]:
+$$ I = \int g \phi \rho \, dl + \epsilon $$
+where $\epsilon$ is measurement noise [S1].
+
+The density model uses a truncated spherical harmonic series for angular variation and a finite difference operator for radial regularization [S1]:
+$$ \rho(r, e, a) = \sum_{l=0}^{L} \sum_{m=-l}^{l} c_{rlm} H_{lm}(e, a) + \lambda D_r \rho $$
+where:
+*   $H_{lm}(e, a)$ is the spherical harmonic function of degree $l$ and order $m$ [S1].
+*   $c_{rlm}$ is the scaling coefficient for shell $r$, degree $l$, and order $m$ [S1].
+*   $L$ is the truncation degree [S1].
+*   $D_r$ is a finite difference operator in the radial direction [S1].
+*   $\lambda$ is the Tikhonov regularizer parameter [S1].
+
+**Parameters:**
+*   $L$: Spherical harmonic truncation degree. Limits high-frequency spatial content. Typical value $L=3$ [S1].
+*   $\lambda$: Regularization parameter controlling the enforcement of smooth radial decay [S1].
+*   Noise: Modeled as 45 dB additive white Gaussian noise in the polar binning scheme [S1].
+
+**Algorithm Steps:**
+1.  **Initialize:** Define the radial grid from $3 R_E$ to $25 R_E$ and angular grid for elevation and azimuth. Initialize coefficients $c_{rlm}$ [S1].
+2.  **Project:** For each measurement $i$, compute the line integral through the current density model $\rho$ along the ray path from the spacecraft to the scattering volume. Apply the known $g$ and $\phi$ factors to predict radiance $I_{pred}$ [S1].
+3.  **Compare:** Calculate the residual between predicted radiance $I_{pred}$ and measured radiance $I_{meas}$, including the noise model [S1].
+4.  **Update:** Use an iterative optimization algorithm (e.g., gradient descent via automatic differentiation) to update coefficients $c_{rlm}$ to minimize the residual, incorporating the Tikhonov regularization term $\lambda D_r \rho$ [S1].
+5.  **Reconstruct:** Convert the optimized coefficients $c_{rlm}$ back to the density field $\rho(r, e, a)$ [S1].
+
+**Pseudocode:**
+> **Unverified code.** The code below did not pass a test run against a reference implementation, or no test fits it, so it may contain errors.
+
+```python
+def reconstruct_exospheric_hydrogen(measurements, geometry, L=3, lambda_reg=1.0):
+    """
+    Reconstruct exospheric hydrogen density from Lyalpha radiance measurements.
+    
+    Args:
+        measurements: List of (position, orientation, radiance_value) tuples.
+        geometry: Camera parameters and observation window details.
+        L: Spherical harmonic truncation degree.
+        lambda_reg: Tikhonov regularization parameter.
+        
+    Returns:
+        rho: Reconstructed density field.
+    """
+    # Initialize coefficients c_rlm for radial shells and spherical harmonics
+    # Radial range: 3 Re to 25 Re
+    # Angular range: elevation e, azimuth a
+    # Number of radial shells: Not given in the sources.
+    # Number of spherical harmonic coefficients: (L+1)^2 per shell
+    c_rlm = initialize_coefficients(L=L)
+    
+    # Define forward model function
+    def forward_model(c_rlm):
+        # Reconstruct density field from coefficients
+        rho = coefficients_to_density(c_rlm, L=L)
+        
+        predicted_radiance = []
+        for pos, orient, I_meas in measurements:
+            # Compute line integral along ray path
+            # Integrate g * phi * rho along the line of sight
+            # g and phi are assumed known constants/functions
+            I_pred = integrate_line_of_sight(rho, pos, orient, g_factor, phase_function)
+            predicted_radiance.append(I_pred)
+        
+        return predicted_radiance
+
+    # Define loss function with regularization
+    def loss(c_rlm):
+        I_pred = forward_model(c_rlm)
+        
+        # Data fidelity term
+        data_error = sum((I_pred[i] - measurements[i][2])**2 for i in range(len(measurements)))
+        
+        # Tikhonov regularization term
+        # D_r is a finite difference operator in the radial direction
+        rho = coefficients_to_density(c_rlm, L=L)
+        regularization = lambda_reg * sum((D_r_rho)**2 for rho in rho)
+        
+        return data_error + regularization
+
+    # Optimize coefficients
+    # Use an iterative optimizer (e.g., Adam, L-BFGS)
+    # The source mentions "automatically differentiable iterative retrievals"
+    c_optimized = optimize(loss, c_rlm)
+    
+    # Reconstruct final density
+    rho_final = coefficients_to_density(c_optimized, L=L)
+    return rho_final
+
+def coefficients_to_density(c_rlm, L):
+    """
+    Convert spherical harmonic coefficients to density field.
+    """
+    # Initialize density grid
+    # Radial shells: Not given in the sources.
+    # Angular grid: elevation e, azimuth a
+    rho = zeros_like_density_grid()
+    
+    for r in radial_shells:
+        for l in range(L + 1):
+            for m in range(-l, l + 1):
+                # Evaluate spherical harmonic H_lm at each (e, a)
+                # and add c_rlm * H_lm to rho
+                H_lm = evaluate_spherical_harmonic(l, m, elevation_grid, azimuth_grid)
+                rho[r, :, :] += c_rlm[r, l, m] * H_lm
+                
+    return rho
+
+def integrate_line_of_sight(rho, pos, orient, g, phi):
+    """
+    Integrate g * phi * rho along the line of sight.
+    """
+    # Define ray path from spacecraft position along orientation
+    # Discretize ray into steps
+    # For each step, sample rho at the current position
+    # Accumulate g * phi * rho * step_size
+    I = 0.0
+    for point in ray_path(pos, orient):
+        rho_val = sample_density(rho, point)
+        I += g * phi * rho_val * step_size
+    return I
+```
+
+**Edge Cases and Pitfalls:**
+*   Retrieval errors are large near the $25 R_E$ boundary due to low hydrogen density resulting in reduced signal-to-noise ratio [S1].
+*   Retrieval errors peak at 19% in the noon/midnight region due to lack of measurement constraints (Earth blocks visibility) [S1].
+*   The method assumes the exosphere is optically thin, consistent with the parent method [S1].
+
+## Operating characteristics
+*   **Time Complexity:** Not given in the sources. The source mentions "GPU-enabled" and "approach the speed of natively written code" but provides no specific complexity class [S1].
+*   **Memory Complexity:** Not given in the sources. Depends on the number of radial shells and spherical harmonic coefficients [S1].
+*   **Measured Performance:** Tested with 10 noisy radiance measurements over a 1-month observation window [S1].
+*   **Accuracy:** Retrieval errors are less than 50% where density exceeds 25 atoms cm⁻³, meeting NASA mission requirements [S1]. Peak error is 19% in the noon/midnight region [S1].
+*   **Strengths:** Handles the parametric nature of the exosphere efficiently; uses automatic differentiation for rapid algorithm development [S1].
+*   **Limitations:** Performance degrades at large distances ($25 R_E$) and in regions with poor viewing geometry (noon/midnight) [S1].
+
+## Background
+The method was developed for the Carruthers Geocorona Observatory, a spacecraft studying Earth's exosphere that launched in 2025 [S1]. The exosphere is primarily composed of atomic hydrogen, which is detectable via resonant scattering of UV Lyα photons from the Sun [S1]. Understanding this hydrogen distribution is important for studying long-term water loss from Earth [S1]. The implementation, named TomoSphero, is a GPU-enabled, automatically differentiable tomographic projector over spherical grids [S1].
+
+## Sources
+[S1] TomoSphero: Fast Differentiable Projector for Planetary and Solar Tomography on Spherical Grids, https://doi.org/10.3847/1538-4357/ae6db5, fetched 2026-10-30

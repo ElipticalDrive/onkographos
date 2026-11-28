@@ -1,0 +1,215 @@
+--- v001.md
++++ v002.md
+@@ -3,15 +3,15 @@
+ 
+ ## Overview
+-Fiber Surface Extraction generalizes isosurface extraction from univariate scalar fields to bivariate vector fields by extracting the preimage of a curve in the range space [S1]. It solves the problem of visualizing topological features defined by relationships between two scalar components, such as the boundary of a specific texture or the edge of a color region, which cannot be represented by a single scalar threshold [S1]. It sets itself apart from standard Marching Cubes by replacing the scalar isovalue comparison with a point-in-polygon test in the range space and computing edge intersections via range-space line intersection rather than scalar interpolation [S1].
++Fiber Surface Extraction generalizes isosurface extraction from univariate scalar fields to bivariate vector fields by extracting the preimage of a curve in the range space [S1]. It sets itself apart from standard Marching Cubes by replacing the scalar isovalue comparison with a point-in-polygon test in the range space and computing edge intersections via range-space line intersection rather than scalar interpolation [S1].
+ 
+ ## How it works
+ **Inputs and Outputs:**
+-*   **Input:** A bivariate function $f: \mathbb{R}^3 \to \mathbb{R}^2$, defined as $f(x) = (f_1(x), f_2(x))$; a computational mesh $M$ in the domain $\text{Dom } f$ (typically a cubic grid); and a Fiber Surface Control Polygon (FSCP) $P$ in the range $\text{Ran } f$ [S1]. The FSCP is a closed loop of line segments defining the boundary in the 2D range [S1].
++*   **Input:** A bivariate function $f: \mathbb{R}^3 \to \mathbb{R}^2$, defined as $f(x) = (f_1(x), f_2(x))$; a computational mesh $M$ in the domain $\text{Dom } f$ (typically a cubic grid); and a Fiber Surface Control Polygon (FSCP) $P$ in the range $\text{Ran } f$ [S1]. The FSCP is a closed loop of line segments defining the boundary in the 2D range [S1]. Field values are computed on the fly during extraction rather than stored [S1].
+ *   **Output:** A triangular mesh approximating the fiber surface $f^{-1}(P)$ in the domain [S1].
+ 
+ **Data Structures:**
+-The method relies on the standard Marching Cubes data structures inherited from the parent [Lookup Table and Ambiguity Handling](10327-lookup-table-and-ambiguity-handling.md):
+-1.  **Edge Intersection Table (`edgeTable`)**: 256 entries, 12-bit bitmasks indicating which of the 12 cube edges are intersected.
+-2.  **Triangle Connection Table (`triangleTable`)**: $256 \times 16$ array of edge indices grouped in triplets, terminated by `-1`.
++The method relies on the standard Marching Cubes data structures inherited from the parent [G].
++1.  **Edge Intersection Table (`edgeTable`)**: 256 entries, 12-bit bitmasks indicating which of the 12 cube edges are intersected [G].
++2.  **Triangle Connection Table (`triangleTable`)**: $256 \times 16$ array of edge indices grouped in triplets, terminated by `-1` [G].
+ 3.  **Vertex Classification**: A binary classification of the 8 cube vertices as "black" (inside $P$) or "white" (outside $P$) [S1].
+ 
+@@ -22,66 +22,62 @@
+ For an arbitrary closed polygon $P$, the algorithm adapts Marching Cubes as follows:
+ 
+-1.  **Vertex Classification (Stage I):** For each cell $C$ in mesh $M$, and for each vertex $V$ of $C$, evaluate $f(V)$. Perform a point-in-polygon test to determine if $f(V)$ lies inside $P$. If inside, classify $V$ as "black"; otherwise, classify as "white" [S1].
+-2.  **Case Index Calculation:** Compute the 8-bit case index $C$ based on the black/white classification of the 8 vertices, using the standard bit assignment convention [Lookup Table and Ambiguity Handling](10327-lookup-table-and-ambiguity-handling.md).
+-3.  **Lookup:** Retrieve the intersection mask from `edgeTable[C]` and the triangle configuration from `triangleTable[C]` [S1].
++1.  **Vertex Classification (Stage I):** For each cell $C$ in mesh $M$, and for each vertex $V$ of $C$, evaluate $f(V)$ [S1]. Perform a point-in-polygon test to determine if $f(V)$ lies inside $P$ [S1]. If inside, classify $V$ as "black"; otherwise, classify as "white" [S1].
++2.  **Case Index Calculation:** Compute the 8-bit case index $C$ based on the black/white classification of the 8 vertices, using the standard bit assignment convention [G].
++3.  **Lookup:** Retrieve the intersection mask from `edgeTable[C]` and the triangle configuration from `triangleTable[C]` [G].
+ 4.  **Edge Intersection and Interpolation (Stages III/IV):** For each triangle in the MC case, and for each intersected cell edge defined by vertices $u$ and $v$:
+     *   Map vertices to the range: $p_u = f(u)$ and $p_v = f(v)$ [S1].
+     *   Find the intersection point $w$ of the line segment $p_u p_v$ in the range with the polygon boundary $P$ [S1].
+-    *   Determine the parameter $t \in [0, 1]$ along the segment $p_u p_v$ such that $w = (1-t)p_u + t p_v$ [S1].
++    *   Determine the parameter $t \in [0, 1]$ along the segment $f(u)f(v)$ such that $w = (1-t)f(u) + t f(v)$ [S1].
+     *   Interpolate the spatial position in the domain: $e = u + t(v - u)$ [S1].
+-    *   Interpolate the normal vector at $e$. This can be done by interpolating the normals of $u$ and $v$ using $t$, or by computing the gradient of the derived field if applicable [S1].
++    *   Interpolate the normal vector at $e$ [S1].
+ 
+ **Pseudocode:**
+-The following pseudocode implements the general FSCP extraction. It assumes a helper function `point_in_polygon(point, polygon)` and `segment_polygon_intersection(p1, p2, polygon)` which returns the intersection parameter $t$ and point $w$.
++The following pseudocode implements the general FSCP extraction [S1]. It uses the signed distance field of the FSCP to compute the intersection parameter $t$ efficiently, as recommended by the sources [S1]. Standard computational geometry routines are marked [G].
+ 
+ ```python
+ def extract_fiber_surface(mesh, f, polygon):
++    # Standard MC edge-to-vertex mapping [G]
++    EDGE_VERTICES = [
++        (0, 1), (1, 2), (2, 3), (3, 0),  # Bottom face
++        (4, 5), (5, 6), (6, 7), (7, 4),  # Top face
++        (0, 4), (1, 5), (2, 6), (3, 7)   # Vertical edges
++    ]
++    # LUTs provided by parent Marching Cubes Lookup and Configuration [G]
++    # edge_table: list of 256 ints (12-bit masks)
++    # triangle_table: list of 256 lists (16 ints, -1 terminated)
++    
+     triangles = []
+-    
+-    # Precompute signed distance field for the polygon to avoid slow geometric tests [S1]
+-    # Note: The sources suggest using the distance field for efficiency, 
+-    # but Algorithm 1 explicitly describes the geometric test approach.
+-    # We implement the explicit geometric approach as described in Algorithm 1 [S1].
+-    
+     for cell in mesh.cells:
+         # Stage I: Vertex Classification
+-        vertex_classifications = []
+-        for vertex in cell.vertices:
+-            range_point = f(vertex)
+-            if point_in_polygon(range_point, polygon):
+-                vertex_classifications.append(1) # Black
++        vertex_flags = []
++        for v in cell.vertices:
++            p = f(v)
++            if point_in_polygon(p, polygon):  # [G]
++                vertex_flags.append(1)
+             else:
+-                vertex_classifications.append(0) # White
++                vertex_flags.append(0)
+         
+-        # Compute Case Index
+-        case_index = 0
+-        for i in range(8):
+-            if vertex_classifications[i]:
+-                case_index |= (1 << i)
++        # Case Index Calculation
++        case_index = sum(flag << i for i, flag in enumerate(vertex_flags))
+         
+-        # Get MC configuration
++        # Lookup
+         edge_mask = edge_table[case_index]
+         tri_indices = triangle_table[case_index]
+         
+-        # Stages III/IV: Edge Intersection and Interpolation
+-        # We need to compute edge intersections in the range space to find t
+-        edge_intersections_t = {}
+-        
+-        for edge_idx in range(12):
+-            if (edge_mask >> edge_idx) & 1:
+-                # Get the two vertices of this edge
+-                v1_idx, v2_idx = edge_vertex_map[edge_idx]
+-                v1 = cell.vertices[v1_idx]
+-                v2 = cell.vertices[v2_idx]
+-                
+-                p1 = f(v1)
+-                p2 = f(v2)
+-                
+-                # Find intersection of segment p1-p2 with polygon boundary
+-                # Returns parameter t on segment p1-p2
+-                t, w = segment_polygon_intersection(p1, p2, polygon)
+-                
+-                if t is not None:
+-                    edge_intersections_t[edge_idx] = t
++        # Edge Intersections via Signed Distance Field [S1]
++        edge_t = {}
++        for e_idx in range(12):
++            if (edge_mask >> e_idx) & 1:
++                v1_idx, v2_idx = EDGE_VERTICES[e_idx]
++                v1, v2 = cell.vertices[v1_idx], cell.vertices[v2_idx]
++                p1, p2 = f(v1), f(v2)
++                d1 = signed_distance(p1, polygon)  # [G]
++                d2 = signed_distance(p2, polygon)  # [G]
++                denom = d1 - d2
++                if abs(denom) > 1e-9:
++                    t = d1 / denom
++                    edge_t[e_idx] = t
++                else:
++                    edge_t[e_idx] = 0.0  # Degenerate edge parallel to contour
+         
+         # Generate Triangles
+@@ -89,49 +85,19 @@
+             if tri_indices[i] == -1:
+                 break
++            e1, e2, e3 = tri_indices[i], tri_indices[i+1], tri_indices[i+2]
++            t1, t2, t3 = edge_t[e1], edge_t[e2], edge_t[e3]
+             
+-            e1, e2, e3 = tri_indices[i], tri_indices[i+1], tri_indices[i+2]
++            v1_1, v1_2 = EDGE_VERTICES[e1]
++            v2_1, v2_2 = EDGE_VERTICES[e2]
++            v3_1, v3_2 = EDGE_VERTICES[e3]
+             
+-            # Retrieve t values for the three edges
+-            t1 = edge_intersections_t.get(e1)
+-            t2 = edge_intersections_t.get(e2)
+-            t3 = edge_intersections_t.get(e3)
++            # Interpolate domain positions
++            e1_pos = cell.vertices[v1_1] + t1 * (cell.vertices[v1_2] - cell.vertices[v1_1])
++            e2_pos = cell.vertices[v2_1] + t2 * (cell.vertices[v2_2] - cell.vertices[v2_1])
++            e3_pos = cell.vertices[v3_1] + t3 * (cell.vertices[v3_2] - cell.vertices[v3_1])
+             
+-            # If any edge intersection is missing (should not happen if mask is correct), skip
+-            if t1 is None or t2 is None or t3 is None:
+-                continue
+-                
+-            # Get vertex indices for the edges
+-            # Note: edge_vertex_map must map edge index to (v1_idx, v2_idx)
+-            v1_1, v1_2 = edge_vertex_map[e1]
+-            v2_1, v2_2 = edge_vertex_map[e2]
+-            v3_1, v3_2 = edge_vertex_map[e3]
+-            
+-            # Interpolate positions
+-            # For edge e1, we need the specific vertex that corresponds to the start of the segment
+-            # The standard MC assumes edges are directed or indexed consistently.
+-            # We assume edge_vertex_map provides consistent ordering relative to the triangle orientation.
+-            # However, standard MC triangle table just lists edge indices.
+-            # We must determine which vertex of the edge is 'u' and which is 'v' for the interpolation.
+-            # The parameter t is defined on the segment f(u)f(v).
+-            # We need to know the direction. Standard convention:
+-            # Edge 0: (0,1), Edge 1: (1,2), etc.
+-            # We assume edge_vertex_map returns (start, end) consistent with the standard edge numbering.
+-            
+-            p_start1 = cell.vertices[v1_1]
+-            p_end1 = cell.vertices[v1_2]
+-            p_start2 = cell.vertices[v2_1]
+-            p_end2 = cell.vertices[v2_2]
+-            p_start3 = cell.vertices[v3_1]
+-            p_end3 = cell.vertices[v3_2]
+-            
+-            e1_pos = p_start1 + t1 * (p_end1 - p_start1)
+-            e2_pos = p_start2 + t2 * (p_end2 - p_start2)
+-            e3_pos = p_start3 + t3 * (p_end3 - p_start3)
+-            
+-            # Interpolate normals (simplified: flat shading or vertex averaging not shown here)
+-            # For flat shading, normal is computed from e1_pos, e2_pos, e3_pos
+-            normal = cross(e2_pos - e1_pos, e3_pos - e1_pos)
+-            normal = normalize(normal)
+-            
++            # Flat shading normal
++            normal = cross(e2_pos - e1_pos, e3_pos - e1_pos)  # [G]
++            normal = normalize(normal)  # [G]
+             triangles.append((e1_pos, e2_pos, e3_pos, normal))
+             
+@@ -140,18 +106,16 @@
+ 
+ **Edge Cases and Pitfalls:**
+-*   **Performance:** Standard geometric tests (point-in-polygon, line-polygon intersection) are slow [S1]. The sources recommend mitigating this by precomputing the signed distance field of the FSCP. Interpolating this distance field yields the intersection parameter $t$ directly without explicit geometric tests, as the fiber surface corresponds to the zero-contour of this distance field [S1].
++*   **Performance:** Standard geometric tests (point-in-polygon, line-polygon intersection) are slow [S1]. The sources recommend mitigating this by precomputing the signed distance field of the FSCP, where interpolating the distance field yields the intersection parameter $t$ directly without explicit geometric tests [S1].
+ *   **Topology:** If the domain of $f$ does not touch the boundary of the range polygon $P$, the resulting fiber surface is a closed 2-manifold [S1].
+-*   **Ambiguity:** The standard Marching Cubes ambiguity cases (46, 47, 98, 99, 210, 213, 214, 215) still apply. The fixed triangulation in the LUT may cause cracks if adjacent voxels resolve the ambiguity differently, although the sources do not specify a modified ambiguity resolution for FSCP [Lookup Table and Ambiguity Handling](10327-lookup-table-and-ambiguity-handling.md).
++*   **Ambiguity:** The standard Marching Cubes ambiguity cases (46, 47, 98, 99, 210, 213, 214, 215) still apply [G]. The fixed triangulation in the LUT may cause cracks if adjacent voxels resolve the ambiguity differently [G].
+ 
+ ## Operating characteristics
+ *   **Time Complexity:** $O(N)$ where $N$ is the number of cells in the mesh, as each cell is processed independently [S1]. The cost per cell is dominated by the point-in-polygon test and segment-polygon intersection, which are more expensive than the scalar comparisons in standard Marching Cubes [S1].
+-*   **Memory Complexity:** $O(N)$ for the output mesh. The input requires storing the bivariate field values and the polygon definition [S1].
+ *   **Strengths:** Allows visualization of complex relationships in bivariate data, such as texture boundaries or color regions, which are not accessible via scalar isosurfaces [S1]. It generalizes naturally from lines (weighted sums) to arbitrary polygons [S1].
+-*   **Limitations:** Computationally more expensive than standard Marching Cubes due to geometric tests in the range space [S1]. The topology of the fiber surface depends on the topology of the polygon in the range and the mapping $f$ [S1].
++*   **Limitations:** The topology of the fiber surface depends on the topology of the polygon in the range and the mapping $f$ [S1].
+ *   **When to use:** When the user wants to extract surfaces based on the relationship between two scalar fields (e.g., "extract the surface where the RGB color is on the boundary of this texture patch") [S1].
+-*   **When not to use:** For simple scalar thresholding, standard Marching Cubes is faster and simpler [S1].
+ 
+ ## Background
+-Fiber Surface Extraction was introduced by Hamish Carr, Zhao Geng, Julien Tierny, Amit Chattopadhyay, and Aaron Knoll in the paper "Fiber Surfaces: Generalizing Isosurfaces to Bivariate Data" [S1]. The method generalizes the concept of isosurfaces to bivariate functions, allowing the extraction of surfaces defined by arbitrary curves in the range space [S1]. It builds on the topological properties of bivariate functions and the standard Marching Cubes algorithm [S1].
++Fiber Surface Extraction was introduced by Hamish Carr, Zhao Geng, Julien Tierny, Amit Chattopadhyay, and Aaron Knoll in the paper "Fiber Surfaces: Generalizing Isosurfaces to Bivariate Data" [S1]. The method generalizes the concept of isosurfaces to bivariate functions, allowing the extraction of surfaces defined by arbitrary curves in the range space [S1].
+ 
+ ## Sources

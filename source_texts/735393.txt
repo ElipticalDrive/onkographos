@@ -1,0 +1,1163 @@
+An open-source, GPU-accelerated physics simulation engine built upon NVIDIA Warp, specifically targeting roboticists and simulation researchers. - Improve sdf collision performance by nvtw · Pull Request #3801 · newton-physics/newton
+
+Improve sdf collision performance by nvtw · Pull Request #3801 · newton-physics/newton · GitHub
+Skip to content
+You signed in with another tab or window. Reload to refresh your session.
+You signed out in another tab or window. Reload to refresh your session.
+You switched accounts on another tab or window. Reload to refresh your session.
+Dismiss alert
+Conversation
+nvtw
+commented
+Aug 5, 2026
+•
+edited
+Loading
+Uh oh!
+There was an error while loading. Please reload this page.
+Copy link
+Copy Markdown
+Member
+Description
+Improve mesh-SDF contact performance by caching and pre-scaling collision-edge geometry, specializing texture-SDF and identity-scale paths, reducing redundant SDF samples and transforms, deduplicating corner contacts, filtering fully inward mesh edges, and reducing contact-reduction overhead.
+Performance
+Nut-and-bolt captured collision pass:
+Worlds
+main
+This branch
+Time reduction
+Throughput
+100
+29.13 ms
+15.45 ms
+47.0%
+1.89x
+500
+125.14 ms
+72.52 ms
+42.1%
+1.73x
+2,000
+475.04 ms
+290.86 ms
+38.8%
+1.63x
+Hot mesh-SDF collision kernel:
+Worlds
+main
+This branch
+Time reduction
+Throughput
+100
+28.79 ms
+13.58 ms
+52.8%
+2.12x
+2,000
+495.53 ms
+278.86 ms
+43.7%
+1.78x
+Measured on an RTX 3080 Laptop GPU with one nut-and-bolt assembly per world, SAP broad phase, contact reduction, and the example's default collision configuration.
+Checklist
+New or existing tests cover these changes
+The documentation is up to date with these changes
+Towncrier changelog fragments have been added for user-facing changes
+Test plan
+```
+uv run --extra dev -m newton.tests -k test_finalize_packs_collision_edge_geometry
+uv run --extra dev -m newton.tests -k test_texture_sdf_paired_hw_gradient_matches_scalar_cuda_0
+uv run --extra dev -m newton.tests -k test_mesh_mesh_sdf_vs_bvh_nxn_cuda_0
+uv run --extra dev -m newton.tests -k test_11_dr_legs_dvi_contact_force_balances_weight
+uv run --extra dev python -m unittest newton.tests.test_mesh_edge_angle_filter newton.tests.test_sdf_contact
+uvx pre-commit run -a
+```
+Summary by CodeRabbit
+New Features
+Mesh SDF construction now filters fully inward collision edges by default, with an option to preserve them.
+Added support for scaled meshes and precomputed edge geometry during collision detection.
+Improved hardware SDF sampling and gradient accuracy.
+Added face-normal utilities for contact reduction.
+Bug Fixes
+Improved contact deduplication and retention in dense scenes.
+Corrected contact indexing and visualization consistency.
+Improved collision handling for inverted, translated, concave, and non-unit-scaled meshes.
+nvtw
+added 9 commits
+August 5, 2026 08:34
+Cache mesh collision edge vectors
+…
+6253d0f
+```
+Store local-space center and half-vector data for packed mesh collision edges and pass it through the generic collision pipeline. Mesh-SDF contact kernels can then avoid two indirect vertex fetches and two point transforms for each edge while keeping the old index-based path as a fallback.
+
+This reduces the PhoenX nut/bolt default 80x80 captured frame from about 15.0 ms to about 14.0 ms on the test GPU, with the mesh-mesh SDF kernel dropping by several percent.
+
+Tests: uv run --extra dev -m newton.tests -k test_contact_reduction_global
+
+Tests: uv run --extra dev -m newton.tests -k test_collision_pipeline
+```
+Specialize packed mesh-SDF edge access
+…
+3629dfc
+```
+Compile separate packed-edge and mesh-index access paths so the hot contact kernel does not retain an unused fallback branch. Preserve edge transforms, SDF sampling, contact selection, and reduction behavior.
+```
+Avoid duplicate SDF gradient normalization
+…
+0e5e7d8
+```
+Normalize contact gradients once after their rigid world-space rotation. This removes a redundant square root and vector division from accepted mesh-SDF contacts without changing search, contact selection, or reduction.
+```
+Cache mesh SDF collision edge vectors
+…
+97d8747
+```
+Precompute collision-only edge centers and half-vectors when the model is finalized. This activates the packed mesh-SDF kernel path and avoids repeated mesh index and vertex fetches without changing collision meshes, solver budgets, or contact tolerances.
+```
+Overlap mesh SDF gradient samples
+…
+b23efc4
+```
+Pair independent central-difference texture samples so the GPU can overlap their latency. Reuse subgrid slot lookups when both samples occupy the same coarse cell without changing the sampled positions or gradient stencil.
+```
+Adapt SDF optimizations to current main
+…
+41d5f4a
+```
+Route newer accepted-edge refresh sites through the compiled edge accessor so the packed and fallback kernel variants both compile. Keep only the relevant SDF performance changelog entry from the divergent source branch.
+```
+Revert "Overlap mesh SDF gradient samples"
+…
+17d51b5
+```
+This reverts commit b23efc4.
+```
+Reapply "Overlap mesh SDF gradient samples"
+…
+fd7d0ce
+```
+This reverts commit 17d51b5.
+```
+Split SDF gradient equivalence kernels
+…
+de442e3
+```
+Evaluate paired and scalar gradients in separate CUDA kernels.
+
+This avoids overflowing per-thread local state during validation.
+```
+nvtw
+self-assigned this
+Aug 5, 2026
+nvtw
+marked this pull request as draft
+August 5, 2026 07:29
+coderabbitai
+Bot
+commented
+Aug 5, 2026
+•
+edited
+Loading
+Uh oh!
+There was an error while loading. Please reload this page.
+Copy link
+Copy Markdown
+Contributor
+Note
+Reviews paused
+It looks like this branch is under active development. To avoid overwhelming you with review comments due to an influx of new commits, CodeRabbit has automatically paused this review. You can configure this behavior by changing the reviews.auto_review.auto_pause_after_reviewed_commits setting.
+Use the following commands to manage reviews:
+@coderabbitai resume to resume automatic reviews.
+@coderabbitai review to trigger a single review.
+Use the checkboxes below for quick actions:
+▶️ Resume reviews
+🔍 Trigger review
+📝 Walkthrough
+Walkthrough
+This PR adds inward-edge filtering, packed mesh-edge geometry, texture-only and identity-scale SDF kernel specializations, paired hardware SDF sampling, updated collision wiring, and one-based contact reduction with duplicate suppression.
+Changes
+Mesh-SDF edge preparation
+Layer / File(s)
+Summary
+Inward filtering and cached edge geometry
+newton/_src/geometry/edge_inward_filter.py, newton/_src/geometry/types.py, newton/_src/sim/builder.py, newton/_src/sim/model.py, newton/tests/test_mesh_edge_angle_filter.py
+Mesh SDF construction filters fully inward edges by default. Model finalization stores scale-aware edge centers, radii, half-vectors, and endpoint ownership data.
+Paired texture-SDF sampling
+Layer / File(s)
+Summary
+Paired texture-SDF sampling
+newton/_src/geometry/sdf_texture.py, newton/tests/test_sdf_texture.py
+Texture lookup resolves paired cells and performs paired hardware samples. Hardware gradients use paired axis samples and CUDA regression tests.
+Specialized mesh-SDF contact kernels
+Layer / File(s)
+Summary
+Specialized mesh-SDF contact kernels
+newton/_src/geometry/sdf_contact.py, newton/tests/test_sdf_contact.py
+Contact kernels support packed or indexed edges, texture-only sampling, identity-scale SDFs, endpoint ownership, cached centers, scale-aware culling, and world-space gradient normalization.
+Collision routing and launch integration
+Layer / File(s)
+Summary
+Collision routing and launch integration
+newton/_src/sim/collide.py, newton/_src/geometry/narrow_phase.py, newton/tests/test_heightfield.py
+CollisionPipeline derives SDF specialization flags. NarrowPhase selects matching kernels, forwards packed edge arrays, and uses tiled reduced-contact export launches.
+Contact reduction and ID handling
+Layer / File(s)
+Summary
+Contact reduction and ID handling
+newton/_src/geometry/contact_reduction_global.py, newton/_src/geometry/contact_reduction_hydroelastic.py, newton/_src/geometry/sdf_hydroelastic.py, newton/_src/geometry/contact_reduction.py, newton/tests/test_contact_reduction_global.py, newton/tests/test_contact_reduction.py
+Contact buffers reserve ID zero and expose one-based IDs. Provisional claims and roundoff-equivalent suppression preserve selected contacts. Hydroelastic access, visualization, face-normal lookup, and tests use the updated indexing.
+Estimated code review effort: 5 (Critical) | ~120 minutes
+Possibly related PRs
+newton-physics/newton#3829: Shares direct changes to mesh-SDF contact, reduction, edge filtering, and specialization paths.
+newton-physics/newton#3490: Modifies the same texture-SDF reduction path and centered two-spatial-depth export.
+newton-physics/newton#3184: Introduces related SDF contact-search and contact-reduction infrastructure.
+Suggested reviewers: mzamoramora-nvidia, adenzler-nvidia
+🚥 Pre-merge checks | ✅ 5
+✅ Passed checks (5 passed)
+Check name
+Status
+Explanation
+Docstring Coverage
+✅ Passed
+Docstring coverage is 82.05% which is sufficient. The required threshold is 80.00%.
+Linked Issues check
+✅ Passed
+Check skipped because no linked issues were found for this pull request.
+Out of Scope Changes check
+✅ Passed
+Check skipped because no linked issues were found for this pull request.
+Description Check
+✅ Passed
+Check skipped - CodeRabbit’s high-level summary is enabled.
+Title check
+✅ Passed
+The title clearly and concisely describes the primary change: improving SDF collision performance.
+✨ Finishing Touches 💡 1
+🛠️ Fix failing CI checks 💡
+Create stacked PR
+Commit on current branch
+🧪 Generate unit tests (beta)
+Create PR with unit tests
+Thanks for using CodeRabbit! It's free for OSS, and your support helps us grow. If you like it, consider giving us a shout-out.
+❤️ Share
+X
+Mastodon
+Reddit
+LinkedIn
+Comment @coderabbitai help to get the list of available commands.
+coderabbitai
+Bot
+reviewed
+Aug 5, 2026
+View reviewed changes
+coderabbitai
+Bot
+left a comment
+Copy link
+Copy Markdown
+Contributor
+There was a problem hiding this comment.
+Choose a reason for hiding this comment
+The reason will be displayed to describe this comment to others. Learn more.
+Actionable comments posted: 1
+🧹 Nitpick comments (1)
+newton/_src/geometry/narrow_phase.py (1)
+1819-1820: 📐 Maintainability & Code Quality | 🔵 Trivial | ⚡ Quick win
+Document the cached edge geometry parameters.
+Line 1819 adds mesh_edge_centers. Line 1820 adds mesh_edge_halves. The Args: section does not define either parameter.
+Add entries that define their packed layout and their required correspondence with shape_edge_range. Document the same inputs for NarrowPhase.launch() if callers can pass them through that API.
+As per coding guidelines, use Google-style docstrings and format Args: entries as name: description.
+🤖 Prompt for AI Agents
+```
+Verify each finding against current code. Fix only still-valid issues, skip the
+rest with a brief reason, keep changes minimal, and validate.
+
+In `@newton/_src/geometry/narrow_phase.py` around lines 1819 - 1820, Update the
+Google-style docstrings for the function declaring mesh_edge_centers and
+mesh_edge_halves to document each parameter’s packed layout and required
+correspondence with shape_edge_range. Also add matching Args entries to
+NarrowPhase.launch() if it forwards these inputs, using the name: description
+format.
+```
+Source: Coding guidelines
+🤖 Prompt for all review comments with AI agents
+```
+Verify each finding against current code. Fix only still-valid issues, skip the
+rest with a brief reason, keep changes minimal, and validate.
+
+Inline comments:
+In `@newton/tests/test_mesh_edge_angle_filter.py`:
+- Around line 212-228: Add a CUDA regression test alongside
+test_finalize_packs_collision_edge_geometry that uses a nonuniformly scaled and
+transformed mesh, then computes mesh contacts through both indexed-edge and
+cached/precomputed-edge SDF paths and compares their outputs. Ensure the test
+exercises the cached collision path and verifies equivalent contact results.
+
+---
+
+Nitpick comments:
+In `@newton/_src/geometry/narrow_phase.py`:
+- Around line 1819-1820: Update the Google-style docstrings for the function
+declaring mesh_edge_centers and mesh_edge_halves to document each parameter’s
+packed layout and required correspondence with shape_edge_range. Also add
+matching Args entries to NarrowPhase.launch() if it forwards these inputs, using
+the name: description format.
+```
+🪄 Autofix
+Fix all unresolved CodeRabbit comments on this PR:
+Push a commit to this branch (recommended)
+Create a new PR with the fixes
+ℹ️ Review info
+⚙️ Run configuration
+Configuration used: Path: .coderabbit.yml
+Review profile: CHILL
+Plan: Pro Plus
+Run ID: 2a5f5f13-b548-453b-ba08-a1affe8cf911
+📥 Commits
+Reviewing files that changed from the base of the PR and between fddee2b and de442e3.
+📒 Files selected for processing (9)
+CHANGELOG.md
+newton/_src/geometry/narrow_phase.py
+newton/_src/geometry/sdf_contact.py
+newton/_src/geometry/sdf_texture.py
+newton/_src/sim/builder.py
+newton/_src/sim/collide.py
+newton/_src/sim/model.py
+newton/tests/test_mesh_edge_angle_filter.py
+newton/tests/test_sdf_texture.py
+Comment thread
+newton/tests/test_mesh_edge_angle_filter.py
+Resolved
+Uh oh!
+There was an error while loading. Please reload this page.
+codecov
+Bot
+commented
+Aug 5, 2026
+•
+edited
+Loading
+Uh oh!
+There was an error while loading. Please reload this page.
+Copy link
+Copy Markdown
+Codecov Report
+❌ Patch coverage is 97.57085% with 6 lines in your changes missing coverage. Please review.
+✅ All tests successful. No failed tests found.
+Files with missing lines
+Patch %
+Lines
+newton/_src/geometry/edge_inward_filter.py
+97.31%
+4 Missing ⚠️
+newton/_src/geometry/narrow_phase.py
+95.23%
+1 Missing ⚠️
+newton/_src/geometry/sdf_contact.py
+90.90%
+1 Missing ⚠️
+📢 Thoughts on this report? Let us know!
+nvtw
+added 5 commits
+August 5, 2026 09:56
+Pack mesh edge radii for SDF pruning
+…
+ed6f4f4
+```
+Store each collision edge radius alongside its center so SDF culling can reject edges without loading or transforming the half-vector. Use a conservative radius bound for non-uniform scales.
+```
+Hoist SDF edge radius scaling
+…
+3b1baf8
+```
+Compute the conservative edge-radius scale once per shape pair instead of once per edge during mesh-SDF pruning.
+```
+Pre-scale packed SDF collision edges
+…
+79958b0
+```
+Bake each shape scale into packed edge geometry so the mesh-SDF kernel avoids repeated component-wise scaling. Cache by exact mesh and scale so differently scaled shared meshes retain distinct data.
+```
+Align packed SDF edge half-vectors
+…
+f52e34b
+```
+Store packed half-vectors as vec4 values so accepted mesh-SDF edges use aligned 16-byte loads. Reserve the fourth component for follow-up cached edge data.
+```
+Specialize texture-only SDF contacts
+…
+154a271
+```
+Select a smaller mesh contact kernel when every participating SDF has a provisioned texture. Remove heightfield and BVH fallback branches from the hot sampling and pruning paths while retaining the general kernel for mixed scenes.
+```
+coderabbitai
+Bot
+reviewed
+Aug 5, 2026
+View reviewed changes
+coderabbitai
+Bot
+left a comment
+Copy link
+Copy Markdown
+Contributor
+There was a problem hiding this comment.
+Choose a reason for hiding this comment
+The reason will be displayed to describe this comment to others. Learn more.
+Actionable comments posted: 1
+🧹 Nitpick comments (1)
+newton/_src/geometry/sdf_contact.py (1)
+634-647: 📐 Maintainability & Code Quality | 🔵 Trivial | ⚡ Quick win
+Document use_texture_sdf_only in Args:.
+The new parameter is not documented in this Google-style docstring. Add an Args: entry that states it compiles a texture-SDF-only evaluation path.
+Proposed fix
+```
+     Args:
+         enable_heightfields: When False, all heightfield code paths are compiled out.
++        use_texture_sdf_only: When True, compile direct texture-SDF evaluation only.
+```
+As per coding guidelines, “Use Google-style docstrings” and format Args: entries as name: description.
+🤖 Prompt for AI Agents
+```
+Verify each finding against current code. Fix only still-valid issues, skip the
+rest with a brief reason, keep changes minimal, and validate.
+
+In `@newton/_src/geometry/sdf_contact.py` around lines 634 - 647, Update the Args
+section of _create_sdf_contact_funcs to document use_texture_sdf_only, stating
+that it compiles a texture-SDF-only evaluation path, using the existing
+Google-style name: description format.
+```
+Source: Coding guidelines
+🤖 Prompt for all review comments with AI agents
+```
+Verify each finding against current code. Fix only still-valid issues, skip the
+rest with a brief reason, keep changes minimal, and validate.
+
+Inline comments:
+In `@newton/_src/sim/collide.py`:
+- Around line 1078-1092: Update the mesh_sdf_texture_only calculation near
+mesh_sdf_shapes and the NarrowPhase call to require that no colliding
+heightfield is present before enabling the texture-only specialization. Preserve
+the existing texture availability checks, and add a mesh-heightfield regression
+case using a valid mesh texture SDF to verify heightfield evaluation and contact
+results are not bypassed.
+
+---
+
+Nitpick comments:
+In `@newton/_src/geometry/sdf_contact.py`:
+- Around line 634-647: Update the Args section of _create_sdf_contact_funcs to
+document use_texture_sdf_only, stating that it compiles a texture-SDF-only
+evaluation path, using the existing Google-style name: description format.
+```
+🪄 Autofix
+Fix all unresolved CodeRabbit comments on this PR:
+Push a commit to this branch (recommended)
+Create a new PR with the fixes
+ℹ️ Review info
+⚙️ Run configuration
+Configuration used: Path: .coderabbit.yml
+Review profile: CHILL
+Plan: Pro Plus
+Run ID: 8db46fe6-ed92-4808-9d38-c9eb3f8193a6
+📥 Commits
+Reviewing files that changed from the base of the PR and between de442e3 and 154a271.
+📒 Files selected for processing (6)
+newton/_src/geometry/narrow_phase.py
+newton/_src/geometry/sdf_contact.py
+newton/_src/sim/builder.py
+newton/_src/sim/collide.py
+newton/_src/sim/model.py
+newton/tests/test_mesh_edge_angle_filter.py
+🚧 Files skipped from review as they are similar to previous changes (4)
+newton/tests/test_mesh_edge_angle_filter.py
+newton/_src/sim/model.py
+newton/_src/sim/builder.py
+newton/_src/geometry/narrow_phase.py
+Comment thread
+newton/_src/sim/collide.py
+Resolved
+Uh oh!
+There was an error while loading. Please reload this page.
+nvtw
+added 2 commits
+August 5, 2026 11:10
+Specialize textured mesh heightfields
+…
+2bb6988
+```
+Keep heightfield sampling while compiling mesh BVH fallback out when every participating mesh has a provisioned texture SDF. Preserve the general kernel for mixed or unprovisioned mesh scenes.
+```
+Merge remote-tracking branch 'origin/main' into dev/tw4/sdf_performance
+ffadc1e
+coderabbitai
+Bot
+reviewed
+Aug 5, 2026
+View reviewed changes
+coderabbitai
+Bot
+left a comment
+Copy link
+Copy Markdown
+Contributor
+There was a problem hiding this comment.
+Choose a reason for hiding this comment
+The reason will be displayed to describe this comment to others. Learn more.
+Actionable comments posted: 1
+🤖 Prompt for all review comments with AI agents
+```
+Verify each finding against current code. Fix only still-valid issues, skip the
+rest with a brief reason, keep changes minimal, and validate.
+
+Inline comments:
+In `@CHANGELOG.md`:
+- Line 61: Remove the duplicate VBD cable-slot entry from CHANGELOG.md, or merge
+only its concise user-facing slot mapping into the existing entry on line 60.
+Omit the internal “pre-split world-form parent solve Hessian” implementation
+detail.
+```
+🪄 Autofix
+Fix all unresolved CodeRabbit comments on this PR:
+Push a commit to this branch (recommended)
+Create a new PR with the fixes
+ℹ️ Review info
+⚙️ Run configuration
+Configuration used: Path: .coderabbit.yml
+Review profile: CHILL
+Plan: Pro Plus
+Run ID: a9b861e2-ae36-48eb-b63b-5bbf97bd53e4
+📥 Commits
+Reviewing files that changed from the base of the PR and between 154a271 and ffadc1e.
+📒 Files selected for processing (5)
+CHANGELOG.md
+newton/_src/geometry/narrow_phase.py
+newton/_src/geometry/sdf_contact.py
+newton/_src/sim/collide.py
+newton/tests/test_heightfield.py
+🚧 Files skipped from review as they are similar to previous changes (3)
+newton/_src/sim/collide.py
+newton/_src/geometry/narrow_phase.py
+newton/_src/geometry/sdf_contact.py
+Comment thread
+CHANGELOG.md
+Resolved
+Uh oh!
+There was an error while loading. Please reload this page.
+nvtw
+added 2 commits
+August 5, 2026 14:39
+Deduplicate roundoff-equivalent contacts
+…
+978d0f5
+```
+Select one canonical winner when separate reduction slots contain contact geometry that differs only by floating-point rounding. Keep the comparison bounded to the seven winners in each entry.
+```
+Merge remote-tracking branch 'origin/main' into dev/tw4/sdf_performance
+f4d2591
+coderabbitai
+Bot
+reviewed
+Aug 5, 2026
+View reviewed changes
+coderabbitai
+Bot
+left a comment
+Copy link
+Copy Markdown
+Contributor
+There was a problem hiding this comment.
+Choose a reason for hiding this comment
+The reason will be displayed to describe this comment to others. Learn more.
+Actionable comments posted: 1
+🤖 Prompt for all review comments with AI agents
+```
+Verify each finding against current code. Fix only still-valid issues, skip the
+rest with a brief reason, keep changes minimal, and validate.
+
+Inline comments:
+In `@newton/tests/test_contact_reduction_global.py`:
+- Around line 628-631: Extend the verification after num_exported in the
+relevant test to locate the exported (10, 110) contact and assert its position
+matches the input position for fingerprint 10. Keep the existing count
+assertion, ensuring the test validates both deduplication and retention of the
+correct representative.
+```
+🪄 Autofix
+Fix all unresolved CodeRabbit comments on this PR:
+Push a commit to this branch (recommended)
+Create a new PR with the fixes
+ℹ️ Review info
+⚙️ Run configuration
+Configuration used: Path: .coderabbit.yml
+Review profile: CHILL
+Plan: Pro Plus
+Run ID: d0d5e8b3-e65e-4783-9261-b8ad647f4b9e
+📥 Commits
+Reviewing files that changed from the base of the PR and between ffadc1e and 978d0f5.
+📒 Files selected for processing (2)
+newton/_src/geometry/contact_reduction_global.py
+newton/tests/test_contact_reduction_global.py
+Comment thread
+newton/tests/test_contact_reduction_global.py
+Resolved
+Uh oh!
+There was an error while loading. Please reload this page.
+nvtw
+and others
+added 3 commits
+August 5, 2026 22:25
+Parallelize reduced contact export
+44037cc
+Strengthen SDF heightfield regression
+…
+77a1a48
+```
+Verify texture-specialized mesh-heightfield contacts retain finite, unit-length upward normals. Remove the duplicated VBD cable-slot changelog entry and its internal implementation detail.
+```
+Merge branch 'main' into dev/tw4/sdf_performance
+8a64dd8
+nvtw
+marked this pull request as ready for review
+August 6, 2026 06:39
+Scale SDF gradients by inverse spacing
+…
+8e3f744
+```
+Use the stored inverse voxel spacing directly when scaling finite\ndifferences. This removes three precise divisions per emitted contact\nwithout changing gradient sample locations or search iterations.
+```
+nvtw
+changed the title
+Slightly improve sdf collision performance
+Improve sdf collision performance
+Aug 6, 2026
+coderabbitai
+Bot
+reviewed
+Aug 6, 2026
+View reviewed changes
+coderabbitai
+Bot
+left a comment
+Copy link
+Copy Markdown
+Contributor
+There was a problem hiding this comment.
+Choose a reason for hiding this comment
+The reason will be displayed to describe this comment to others. Learn more.
+Actionable comments posted: 4
+🧹 Nitpick comments (6)
+newton/_src/geometry/contact_reduction.py (1)
+210-253: 📐 Maintainability & Code Quality | 🔵 Trivial | 💤 Low value
+Consider deriving the branch chain from _ICOSAHEDRON_NORMALS instead of retyping the values.
+get_face_normal repeats all 20 icosahedron normals that already exist in _ICOSAHEDRON_NORMALS at Line 165. The two tables can drift apart on any future change to the polyhedron data. test_face_normal_lookup_matches_matrix detects the drift, but the duplication remains the root cause.
+One option keeps the same generated code and removes the duplication: read the components from the module-level tuple inside wp.static(...), so Warp still embeds literals.
+♻️ Sketch of a data-driven lookup
+```
+`@wp.func`
+def get_face_normal(face_idx: int) -> wp.vec3:
+    """Return a face normal without materializing the full icosahedron matrix."""
+    if wp.static(NORMAL_BINNING_POLYHEDRON != "icosahedron"):
+        return FACE_NORMALS[face_idx]
+    result = wp.vec3(
+        wp.static(_ICOSAHEDRON_NORMALS[57]),
+        wp.static(_ICOSAHEDRON_NORMALS[58]),
+        wp.static(_ICOSAHEDRON_NORMALS[59]),
+    )
+    for i in range(wp.static(NUM_NORMAL_BINS - 1)):
+        if face_idx == i:
+            result = wp.vec3(
+                wp.static(...),  # components 3*i .. 3*i+2 via a generated closure
+            )
+    return result
+```
+If a flat branch chain is required for register pressure, generating the function source from _ICOSAHEDRON_NORMALS is also acceptable. Keep the current form if the explicit literals are needed for a measured codegen reason.
+🤖 Prompt for AI Agents
+```
+Verify each finding against current code. Fix only still-valid issues, skip the
+rest with a brief reason, keep changes minimal, and validate.
+
+In `@newton/_src/geometry/contact_reduction.py` around lines 210 - 253, Update
+get_face_normal to derive its 20 icosahedron normals from the existing
+_ICOSAHEDRON_NORMALS data instead of duplicating explicit literals, while
+preserving the current Warp-generated lookup behavior and fallback for
+non-icosahedron configurations. Use static component access or generate the
+equivalent branch chain from the tuple; retain the literal branch form only if
+measured register/codegen constraints require it.
+```
+newton/_src/geometry/types.py (1)
+783-783: 📐 Maintainability & Code Quality | 🔵 Trivial | 💤 Low value
+Add the release note entry as a Towncrier fragment.
+CHANGELOG.md already covers edge_inward_filter=False for restoring the previous edge set, but user-facing changes should live under changelog/ as a Towncrier fragment, not in CHANGELOG.md during the PR.
+🤖 Prompt for AI Agents
+```
+Verify each finding against current code. Fix only still-valid issues, skip the
+rest with a brief reason, keep changes minimal, and validate.
+
+In `@newton/_src/geometry/types.py` at line 783, Add a Towncrier fragment under
+changelog/ documenting the user-facing edge_inward_filter behavior, specifically
+that setting it to False restores the previous edge set; do not modify
+CHANGELOG.md.
+```
+Source: Path instructions
+newton/_src/geometry/narrow_phase.py (2)
+2213-2239: 📐 Maintainability & Code Quality | 🔵 Trivial | ⚡ Quick win
+Derive the export lane flag from the export block dimension.
+Line 2239 launches with block_dim=EXPORT_REDUCED_CONTACTS_BLOCK_DIM, but Line 2235 passes int(self.block_dim > 1) as the kernel's parallel_pairs argument. self.block_dim belongs to the primitive and GJK launches, not to this launch. The two values agree today only because both are greater than one on CUDA and self.block_dim is one on CPU.
+Compute the flag from the value actually used for this launch so a future change to self.block_dim cannot desynchronize the lane assumption.
+♻️ Proposed change
+```
+                 effective_block_dim = min(self.block_dim, EXPORT_REDUCED_CONTACTS_BLOCK_DIM)
++                # One lane per block on CPU tiled launches; many lanes on CUDA.
++                export_parallel_pairs = int(effective_block_dim > 1)
+@@
+-                        int(self.block_dim > 1),
++                        export_parallel_pairs,
+```
+🤖 Prompt for AI Agents
+```
+Verify each finding against current code. Fix only still-valid issues, skip the
+rest with a brief reason, keep changes minimal, and validate.
+
+In `@newton/_src/geometry/narrow_phase.py` around lines 2213 - 2239, Update the
+export_reduced_contacts_kernel launch so its parallel_pairs argument is derived
+from the actual export launch block dimension,
+EXPORT_REDUCED_CONTACTS_BLOCK_DIM, rather than self.block_dim. Keep the flag
+consistent with the block_dim passed to wp.launch_tiled.
+```
+1837-1840: 📐 Maintainability & Code Quality | 🔵 Trivial | ⚡ Quick win
+Document the new mesh-edge parameters.
+launch_custom_write gains mesh_edge_centers and mesh_edge_halves, but the Args: block documents only mesh_edge_indices and shape_edge_range. State that both new arrays are optional and that the precomputed-edge kernel variant is selected only when both are supplied.
+📝 Proposed docstring addition
+```
+             mesh_edge_indices: Packed array of mesh edge vertex pairs for all shapes.
++            mesh_edge_centers: Optional packed per-edge scaled center and radius.
++                Supply together with ``mesh_edge_halves`` to select the
++                precomputed-edge kernel variant.
++            mesh_edge_halves: Optional packed per-edge scaled half-vector.
+             shape_edge_range: Per-shape (start, count) into mesh_edge_indices.
+```
+As per coding guidelines: "Use Google-style docstrings with types in annotations, `Args:` entries formatted as `name: description`".
+Also applies to: 1866-1867
+🤖 Prompt for AI Agents
+```
+Verify each finding against current code. Fix only still-valid issues, skip the
+rest with a brief reason, keep changes minimal, and validate.
+
+In `@newton/_src/geometry/narrow_phase.py` around lines 1837 - 1840, Update the
+Google-style docstring for launch_custom_write to add Args entries for
+mesh_edge_centers and mesh_edge_halves, describing both as optional precomputed
+edge arrays and stating that the precomputed-edge kernel variant is used only
+when both are supplied; keep the existing mesh_edge_indices and shape_edge_range
+documentation unchanged.
+```
+Source: Coding guidelines
+newton/_src/geometry/sdf_contact.py (1)
+645-658: 📐 Maintainability & Code Quality | 🔵 Trivial | ⚡ Quick win
+Document the new use_texture_sdf_only parameter.
+The Args: block lists only enable_heightfields. Add an entry for use_texture_sdf_only that states it compiles out the BVH sampling paths.
+📝 Proposed docstring addition
+```
+     Args:
+         enable_heightfields: When False, all heightfield code paths are compiled out.
++        use_texture_sdf_only: When True, every SDF is a texture SDF, so the BVH
++            sampling paths are compiled out and the edge search uses paired
++            texture sampling.
+```
+As per coding guidelines: "Use Google-style docstrings with types in annotations, `Args:` entries formatted as `name: description`".
+🤖 Prompt for AI Agents
+```
+Verify each finding against current code. Fix only still-valid issues, skip the
+rest with a brief reason, keep changes minimal, and validate.
+
+In `@newton/_src/geometry/sdf_contact.py` around lines 645 - 658, Update the
+docstring for _create_sdf_contact_funcs to add a Google-style Args entry for
+use_texture_sdf_only, documenting that it compiles out the BVH sampling paths
+while preserving the existing enable_heightfields entry.
+```
+Source: Coding guidelines
+newton/tests/test_heightfield.py (1)
+497-531: 📐 Maintainability & Code Quality | 🔵 Trivial | ⚡ Quick win
+Add coverage for the rejected specialization combination.
+create_narrow_phase_process_mesh_mesh_contacts_kernel raises ValueError("identity SDF scale specialization requires texture-only SDFs") when use_identity_sdf_scale is set without use_texture_sdf_only. No test exercises that guard. A direct factory-level test needs no CUDA device and no SDF cook.
+Do you want me to generate that test?
+🤖 Prompt for AI Agents
+```
+Verify each finding against current code. Fix only still-valid issues, skip the
+rest with a brief reason, keep changes minimal, and validate.
+
+In `@newton/tests/test_heightfield.py` around lines 497 - 531, Add a direct
+factory-level test for create_narrow_phase_process_mesh_mesh_contacts_kernel
+that sets use_identity_sdf_scale without use_texture_sdf_only and asserts it
+raises ValueError with the message “identity SDF scale specialization requires
+texture-only SDFs”; keep the test independent of CUDA and SDF construction.
+```
+🤖 Prompt for all review comments with AI agents
+```
+Verify each finding against current code. Fix only still-valid issues, skip the
+rest with a brief reason, keep changes minimal, and validate.
+
+Inline comments:
+In `@newton/_src/geometry/edge_inward_filter.py`:
+- Around line 44-52: Center the mesh vertices before computing signed volume in
+the edge-filter flow: derive the AABB center or vertex mean, subtract it from
+vertices, and use the centered coordinates for v0, v1, and v2 in the np.einsum
+calculation. Keep the existing tolerance, zero-volume handling, and orientation
+logic unchanged.
+
+In `@newton/_src/geometry/narrow_phase.py`:
+- Around line 1784-1794: Update the mesh-mesh block offset computation to pass
+self.num_mesh_mesh_blocks as the target_blocks value instead of
+self.mesh_mesh_target_blocks, ensuring the scan matches the doubled CUDA launch
+grid configured in the reduce_contacts setup.
+
+In `@newton/_src/geometry/sdf_contact.py`:
+- Around line 752-787: Preserve endpoint evaluation in the texture-only seeding
+path by separating endpoint-sweep state from the tightened Brent bracket. Update
+the paired-seeding logic around _texture_sample_sdf_hw_pair so the else branch
+cannot suppress sampling at t=0 and t=1; track whether each endpoint remains
+unprocessed, and clear its flag only when Brent moves that bound inward. Keep
+the existing bracket tightening and endpoint sweep behavior otherwise unchanged.
+
+In `@newton/tests/test_sdf_contact.py`:
+- Around line 40-49: Update the assertion in the _sdf_rsqrt_rn_kernel test to
+use a relative tolerance of at least one float32 ULP (approximately 1.19e-7),
+while preserving the zero absolute tolerance and existing device coverage.
+
+---
+
+Nitpick comments:
+In `@newton/_src/geometry/contact_reduction.py`:
+- Around line 210-253: Update get_face_normal to derive its 20 icosahedron
+normals from the existing _ICOSAHEDRON_NORMALS data instead of duplicating
+explicit literals, while preserving the current Warp-generated lookup behavior
+and fallback for non-icosahedron configurations. Use static component access or
+generate the equivalent branch chain from the tuple; retain the literal branch
+form only if measured register/codegen constraints require it.
+
+In `@newton/_src/geometry/narrow_phase.py`:
+- Around line 2213-2239: Update the export_reduced_contacts_kernel launch so its
+parallel_pairs argument is derived from the actual export launch block
+dimension, EXPORT_REDUCED_CONTACTS_BLOCK_DIM, rather than self.block_dim. Keep
+the flag consistent with the block_dim passed to wp.launch_tiled.
+- Around line 1837-1840: Update the Google-style docstring for
+launch_custom_write to add Args entries for mesh_edge_centers and
+mesh_edge_halves, describing both as optional precomputed edge arrays and
+stating that the precomputed-edge kernel variant is used only when both are
+supplied; keep the existing mesh_edge_indices and shape_edge_range documentation
+unchanged.
+
+In `@newton/_src/geometry/sdf_contact.py`:
+- Around line 645-658: Update the docstring for _create_sdf_contact_funcs to add
+a Google-style Args entry for use_texture_sdf_only, documenting that it compiles
+out the BVH sampling paths while preserving the existing enable_heightfields
+entry.
+
+In `@newton/_src/geometry/types.py`:
+- Line 783: Add a Towncrier fragment under changelog/ documenting the
+user-facing edge_inward_filter behavior, specifically that setting it to False
+restores the previous edge set; do not modify CHANGELOG.md.
+
+In `@newton/tests/test_heightfield.py`:
+- Around line 497-531: Add a direct factory-level test for
+create_narrow_phase_process_mesh_mesh_contacts_kernel that sets
+use_identity_sdf_scale without use_texture_sdf_only and asserts it raises
+ValueError with the message “identity SDF scale specialization requires
+texture-only SDFs”; keep the test independent of CUDA and SDF construction.
+```
+🪄 Autofix
+Fix all unresolved CodeRabbit comments on this PR:
+Push a commit to this branch (recommended)
+Create a new PR with the fixes
+ℹ️ Review info
+⚙️ Run configuration
+Configuration used: Path: .coderabbit.yml
+Review profile: CHILL
+Plan: Pro Plus
+Run ID: ce0defca-8e75-4672-a44b-098bcafa301d
+📥 Commits
+Reviewing files that changed from the base of the PR and between 978d0f5 and 8e3f744.
+📒 Files selected for processing (16)
+CHANGELOG.md
+newton/_src/geometry/contact_reduction.py
+newton/_src/geometry/contact_reduction_global.py
+newton/_src/geometry/contact_reduction_hydroelastic.py
+newton/_src/geometry/edge_inward_filter.py
+newton/_src/geometry/narrow_phase.py
+newton/_src/geometry/sdf_contact.py
+newton/_src/geometry/sdf_hydroelastic.py
+newton/_src/geometry/sdf_texture.py
+newton/_src/geometry/types.py
+newton/_src/sim/collide.py
+newton/tests/test_contact_reduction.py
+newton/tests/test_contact_reduction_global.py
+newton/tests/test_heightfield.py
+newton/tests/test_mesh_edge_angle_filter.py
+newton/tests/test_sdf_contact.py
+🚧 Files skipped from review as they are similar to previous changes (3)
+CHANGELOG.md
+newton/tests/test_contact_reduction_global.py
+newton/_src/geometry/sdf_texture.py
+Comment thread
+newton/_src/geometry/edge_inward_filter.py
+Resolved
+Uh oh!
+There was an error while loading. Please reload this page.
+Comment thread
+newton/_src/geometry/narrow_phase.py
+Resolved
+Uh oh!
+There was an error while loading. Please reload this page.
+Comment thread
+newton/_src/geometry/sdf_contact.py
+Resolved
+Uh oh!
+There was an error while loading. Please reload this page.
+Comment thread
+newton/tests/test_sdf_contact.py
+Resolved
+Uh oh!
+There was an error while loading. Please reload this page.
+nvtw
+added 6 commits
+August 6, 2026 17:28
+Shorten SDF reducer context lifetimes
+…
+7f4b7ee
+```
+Load inverse transforms and voxel metadata only when an SDF contact reaches the reducer. This reduces register lifetimes and spill traffic in the bounded producer while preserving deterministic contact output.
+```
+Shorten SDF midpoint lifetime
+…
+2bd65a9
+```
+Compute the pair midpoint only after a contact reaches the global reducer.\nThis keeps three reducer-only values out of the edge culling and SDF\nsearch loops while preserving deterministic contact output.
+```
+Use reciprocal edge length in SDF search
+…
+982a2c8
+```
+Compute Brent's parametric tolerance with CUDA's round-to-nearest reciprocal square root. This removes a square root and division per accepted edge while preserving the iteration budget and contacts.
+```
+Deduplicate mesh SDF corner contacts
+…
+424f84a
+```
+Assign every canonical mesh vertex to one retained collision edge and
+suppress exact endpoint contacts from the other incident edges. Preserve
+zero as the legacy encoding so existing packed arrays retain their prior
+behavior.
+
+This reduces redundant reducer traffic without changing the SDF search
+budget, tolerances, or interior edge contacts.
+```
+Avoid redundant SDF reducer transform
+…
+75642bb
+```
+Pass the carrier-local contact position directly to the two-depth
+reducer. Compute it with one inverse quaternion rotation instead of
+constructing a world-to-local transform and then applying it.
+
+This preserves deterministic contact sets while reducing nut-and-bolt
+collision time across 100 to 2,000 worlds.
+```
+Merge remote-tracking branch 'origin/main' into dev/tw4/sdf_performance
+0197239
+coderabbitai
+Bot
+mentioned this pull request
+Aug 7, 2026
+Collision performance improvements
+#3829
+Closed
+3 tasks done
+nvtw
+added 3 commits
+August 7, 2026 10:35
+Merge branch 'main' into dev/tw4/sdf_performance
+5401708
+Use Towncrier for SDF performance notes
+…
+a0a9cc8
+```
+Move the branch's user-facing release notes into categorized Towncrier fragments and restore unrelated SolverVBD changelog wording from main.
+```
+Address SDF performance review feedback
+…
+5ec456b
+```
+Center signed-volume inputs for translation stability, align mesh work partitioning with the CUDA launch grid, and make the reciprocal-square-root test tolerate one float32 ULP.
+```
+nvtw
+marked this pull request as ready for review
+August 7, 2026 08:58
+coderabbitai
+Bot
+reviewed
+Aug 7, 2026
+View reviewed changes
+coderabbitai
+Bot
+left a comment
+Copy link
+Copy Markdown
+Contributor
+There was a problem hiding this comment.
+Choose a reason for hiding this comment
+The reason will be displayed to describe this comment to others. Learn more.
+Actionable comments posted: 2
+🤖 Prompt for all review comments with AI agents
+```
+Verify each finding against current code. Fix only still-valid issues, skip the
+rest with a brief reason, keep changes minimal, and validate.
+
+Inline comments:
+In `@changelog/`+sdf-performance-a7c4d2e9.changed.1.md:
+- Line 1: Merge the entries in
+changelog/+sdf-performance-a7c4d2e9.changed.1.md:1-1 and
+changelog/+sdf-performance-a7c4d2e9.changed.md:1-1 into one changed Towncrier
+fragment containing both performance entries, then remove the duplicate fragment
+changelog/+sdf-performance-a7c4d2e9.changed.1.md.
+
+In `@changelog/`+sdf-performance-a7c4d2e9.fixed.md:
+- Line 1: Add a final period to the changelog entry so the sentence ends with
+standard punctuation, preserving its existing wording and imperative tense.
+```
+🪄 Autofix
+Fix all unresolved CodeRabbit comments on this PR:
+Push a commit to this branch (recommended)
+Create a new PR with the fixes
+ℹ️ Review info
+⚙️ Run configuration
+Configuration used: Path: .coderabbit.yml
+Review profile: CHILL
+Plan: Pro Plus
+Run ID: 9f5fc111-dc5f-4175-b870-b684963f9337
+📥 Commits
+Reviewing files that changed from the base of the PR and between 0197239 and 5ec456b.
+📒 Files selected for processing (8)
+changelog/+sdf-performance-a7c4d2e9.changed.1.md
+changelog/+sdf-performance-a7c4d2e9.changed.md
+changelog/+sdf-performance-a7c4d2e9.fixed.md
+newton/_src/geometry/edge_inward_filter.py
+newton/_src/geometry/narrow_phase.py
+newton/_src/sim/builder.py
+newton/tests/test_mesh_edge_angle_filter.py
+newton/tests/test_sdf_contact.py
+🚧 Files skipped from review as they are similar to previous changes (5)
+newton/_src/sim/builder.py
+newton/_src/geometry/edge_inward_filter.py
+newton/tests/test_mesh_edge_angle_filter.py
+newton/tests/test_sdf_contact.py
+newton/_src/geometry/narrow_phase.py
+Comment thread
+changelog/+sdf-performance-a7c4d2e9.changed.1.md
+Resolved
+Uh oh!
+There was an error while loading. Please reload this page.
+Comment thread
+changelog/+sdf-performance-a7c4d2e9.fixed.md
+Resolved
+Uh oh!
+There was an error while loading. Please reload this page.
+Accelerate inward SDF edge filtering
+…
+50c9d15
+```
+Batch corner geometry, topology validation, and concavity checks with NumPy to avoid per-element Python overhead during SDF cooking. Preserve the conservative one-ring cycle check and identical filtered edge ordering.
+```
+github-actions
+Bot
+added
+the
+api-changes
+This PR modifies public API
+label
+Aug 7, 2026
+github-actions
+Bot
+commented
+Aug 7, 2026
+Copy link
+Copy Markdown
+Contributor
+API review
+Detected 3 interface change(s): 0 added, 0 removed, 3 modified.
+Modified: newton.Mesh.build_sdf (method)
+Modified: newton.geometry.NarrowPhase (class)
+Modified: newton.geometry.NarrowPhase.launch_custom_write (method)
+This check is advisory: the label means API review needed, not that a breaking change is proven.
+This was referenced Aug 10, 2026
+Add predictive rigid contact manifolds
+#3853
+Closed
+Add predictive rigid contact manifolds
+#3854
+Merged
+nvtw
+requested review from
+camevor and
+mzamoramora-nvidia
+August 10, 2026 05:57
+mzamoramora-nvidia
+approved these changes
+Aug 10, 2026
+View reviewed changes
+mzamoramora-nvidia
+left a comment
+Copy link
+Copy Markdown
+Member
+There was a problem hiding this comment.
+Choose a reason for hiding this comment
+The reason will be displayed to describe this comment to others. Learn more.
+I reviewed the current head (50c9d15) locally. Overall, this looks good to me.
+The packed edge data is passed through CollisionPipeline, and the existing mesh-SDF tests exercise the cached kernel. The new tests also cover packed edge geometry, non-uniform scale, paired texture samples, and SDF scale specialization.
+The inward-edge filter is a documented behavior change with an opt-out. Its focused tests cover a concave mesh, inverted winding, large translation, and a convex mesh.
+I found no correctness issue in the cases I tested.
+nvtw
+enabled auto-merge
+August 10, 2026 08:17
+nvtw
+added this pull request to the merge queue
+Aug 10, 2026
+Hide details
+View details
+Merged
+via the queue into
+newton-physics:main
+with commit 8e938a0
+Aug 10, 2026
+32 checks passed
+Uh oh!
+There was an error while loading. Please reload this page.
+coderabbitai
+Bot
+mentioned this pull request
+Aug 13, 2026
+Accelerate SDF and hydroelastic collision
+#3904
+Merged
+2 of 3 tasks
+This was referenced Oct 9, 2026
+[BUG] Mesh contacts ignore Model.shape_scale changes made after finalize()
+#4608
+Closed
+Apply runtime shape_scale to mesh collision edges and texture SDFs
+#4609
+Merged
+Sign up for free
+to join this conversation on GitHub.
+Already have an account?
+Sign in to comment
+Uh oh!
+There was an error while loading. Please reload this page.
+Labels
+api-changes
+This PR modifies public API
+2 participants
+Add this suggestion to a batch that can be applied as a single commit.This suggestion is invalid because no changes were made to the code.Suggestions cannot be applied while the pull request is closed.Suggestions cannot be applied while viewing a subset of changes.Only one suggestion per line can be applied in a batch.Add this suggestion to a batch that can be applied as a single commit.Applying suggestions on deleted lines is not supported.You must change the existing code in this line in order to create a valid suggestion.Outdated suggestions cannot be applied.This suggestion has been applied or marked resolved.Suggestions cannot be applied from pending reviews.Suggestions cannot be applied on multi-line comments.Suggestions cannot be applied while the pull request is queued to merge.Suggestion cannot be applied right now. Please check back later.
+You can’t perform that action at this time.

@@ -1,0 +1,161 @@
+# Incremental Implicit Scene Representation
+
+Also called: Incremental NeRF, Local Radiance Fields
+
+## Overview
+Incremental Implicit Scene Representation is a method for reconstructing large-scale scenes by dynamically allocating multiple local neural radiance fields (LR) as the camera moves, rather than relying on a single global representation [S1]. It solves the problems of local minima convergence and cubic memory constraints inherent in global NeRF approaches for long sequences [S1]. It differs from [NeRF with Local Neural Fields (Nerflets)](20286-nerf-with-local-neural-fields-nerflets.md) by using a strictly sequential, incremental registration process where previous fields are frozen once the camera exits their spatial bounds, whereas Nerflets typically optimizes a fixed set of local fields jointly [S1].
+
+## How it works
+**Inputs and Outputs:**
+*   **Inputs:** A sequence of monocular images $I_i$ and their corresponding estimated depth maps $D_i$ for $i=1 \dots M$. Camera intrinsics are required for ray generation.
+*   **Outputs:** A set of $n$ local radiance fields $\{\text{LR}_{\theta_1}^1, \dots, \text{LR}_{\theta_n}^n\}$ and optimized camera poses $\{R, T\}$, which render color $\mathbf{c}$ and density $\sigma$ [S1].
+
+**Data Structures:**
+1.  **Local Radiance Field (LR):** Defined by parameters $\theta_j$. It contains a 3D feature grid $\mathcal{G}$ factorized via Vector-Matrix (VM) decomposition [S1].
+2.  **Vector-Matrix Grid ($\mathcal{G}$):** Instead of storing a dense tensor, $\mathcal{G}$ is stored as a sum of outer products of vectors and matrices [S1]:
+    $$ \mathcal{G} = \sum_{r=1}^R \mathbf{v}_r^X \circ \mathbf{M}_r^{YZ} + \mathbf{v}_r^Y \circ \mathbf{M}_r^{XZ} + \mathbf{v}_r^Z \circ \mathbf{M}_r^{XY} $$
+    where $\mathbf{v}_r^X, \mathbf{v}_r^Y, \mathbf{v}_r^Z$ are vectors corresponding to the XYZ axes, and $\mathbf{M}_r^{YZ}, \mathbf{M}_r^{XZ}, \mathbf{M}_r^{XY}$ are matrices [S1].
+3.  **Pose History:** A list of camera poses $\{R, T\}$ indexed by frame number.
+4.  **Boundaries:** Each local field $j$ has an associated spatial boundary $\text{Bound}_j$ [S1].
+
+**Algorithm Steps:**
+The optimization follows Algorithm 1 [S1]:
+
+1.  **Initialization:**
+    *   Set local field index $j=1$, pose start index $p=1$, and current frame index $q=1$ [S1].
+    *   Initialize poses $\{R, T\}_{p..q}$ as identity [S1].
+    *   Initialize the first local radiance field $\theta_1$ [S1].
+    *   Set the center of the first field $t_1$ based on the initial pose [S1].
+
+2.  **Iterative Registration (Loop over frames $q < P$):**
+    *   **Local Optimization:** For the current frame $q$, optimize the parameters $\theta_j$ of the current local field for 100 iterations [S1].
+    *   **Sliding Window Refinement:**
+        *   While the current camera pose $\{R, T\}_q$ is within the boundary $\text{Bound}_j$ of the current local field:
+            1.  Increment $q$ to include the next frame [S1].
+            2.  Append the new pose: $\{R, T\}_q \leftarrow \{R, T\}_{q-1}$ (initially, then refined) [S1].
+            3.  Jointly optimize the poses $\{R, T\}_{p..q}$ and the local field parameters $\theta_j$ [S1].
+    *   **Incremental Expansion:**
+        *   If $q < P$ (more frames remain):
+            1.  Increment $j$ to create a new local field [S1].
+            2.  Initialize new field $\theta_j$ [S1].
+            3.  Set the center of the new field $t_j$ to the last known pose $t_q$ [S1].
+            4.  Update the start index $p \leftarrow p + n$ (where $n$ is a step size, effectively stopping consideration of frames handled by the previous local field) [S1].
+
+3.  **Freezing:**
+    *   Once the camera pose exceeds the boundary of a local field, optimization of that field's poses and network parameters ceases (freezes) to reduce memory usage [S1].
+
+**Ray Marching and Integration:**
+*   **Ray Generation:** For each input image, generate rays $\mathbf{r} = \mathbf{x}_i + t \mathbf{d}_i$ using the camera intrinsic matrix and pose [S1].
+*   **Sampling:** Sample points $\mathbf{x}_i$ along the rays. The method uses estimated depth information to guide this sampling process [S1].
+*   **Query:** Query the active local radiance field $\text{LR}_{\theta_j}$ to get color $\mathbf{c}$ and density $\sigma$ [S1].
+*   **Feature Interpolation:** To compute features for a voxel, tri-linear interpolation is performed directly on the vector/matrix factors of the VM decomposition, rather than recovering eight individual tensor elements [S1].
+*   **Volume Rendering:** The final color $\hat{\mathbf{C}}(\mathbf{r})$ is computed via standard differentiable volume rendering [S1]:
+    $$ \hat{\mathbf{C}}(\mathbf{r}) = \sum_{i=1}^N T_i (1 - \exp(-\sigma_i \delta_i)) \mathbf{c}_i $$
+    $$ T_i = \exp \left( - \sum_{j=1}^i \sigma_j \delta_j \right) $$
+    where $\sigma_i$ is density, $\delta_i$ is the distance between samples, and $T_i$ is the accumulated transmittance [S1].
+
+**Pseudocode:**
+
+> **Unverified code.** The code below did not pass a test run against a reference implementation, or no test fits it, so it may contain errors.
+
+```python
+def incremental_implicit_scene_representation(images, depths, intrinsics, total_frames):
+    """
+    Implements the incremental registration of local radiance fields.
+    """
+    # Initialization
+    j = 1  # Current local field index
+    p = 1  # Start index for pose optimization window
+    q = 1  # Current frame index being processed
+    poses = [IdentityPose()]  # List of poses, index 1-based logic mapped to 0-based list
+    local_fields = []  # List of LR objects
+    bounds = []  # List of boundaries for each LR
+    
+    # Initialize first local field
+    theta_1 = InitializeLR()
+    local_fields.append(theta_1)
+    bounds.append(CalculateBound(poses[0])) # Bound centered at initial pose
+    
+    # Set initial pose
+    poses[0] = IdentityPose()
+    
+    # Main loop
+    while q < total_frames:
+        # 1. Optimize current field with current frame
+        # Optimize theta_j for 100 iterations using image q and depth q
+        for m in range(100):
+            theta_j = local_fields[j-1]
+            OptimizeParameters(theta_j, images[q-1], depths[q-1], poses[q-1], intrinsics)
+        
+        # 2. Sliding window refinement
+        # While current pose is within the boundary of the current local field
+        while IsPoseInBound(poses[q-1], bounds[j-1]):
+            q += 1
+            if q > total_frames:
+                break
+            
+            # Append new pose (initially copy previous, then refine)
+            # Note: Source says {R,T}_q <- {R,T}_{q-1} initially
+            poses.append(poses[q-2].Copy()) 
+            
+            # Jointly optimize poses p..q and local field theta_j
+            # p is the start of the window, j is the current field index
+            window_poses = poses[p-1 : q] # Slice from p to q
+            theta_j = local_fields[j-1]
+            JointOptimize(window_poses, theta_j, images[p-1 : q], depths[p-1 : q], intrinsics)
+            
+            # Update bound based on refined poses
+            bounds[j-1] = CalculateBound(poses[q-1])
+            
+            if q >= total_frames:
+                break
+
+        # 3. Incremental expansion
+        if q < total_frames:
+            j += 1
+            # Initialize new local field
+            theta_new = InitializeLR()
+            local_fields.append(theta_new)
+            
+            # Center new field around last pose
+            t_j = poses[q-1] 
+            theta_new.center = t_j
+            
+            # Update p: stop considering frames in last local radiance field
+            # n is a step size parameter defined in source
+            p = p + n 
+            
+            # Initialize boundary for new field
+            bounds.append(CalculateBound(t_j))
+
+    return local_fields, poses
+
+def IsPoseInBound(pose, bound):
+    # Check if pose position is within the spatial extent of the bound
+    # Implementation detail: [G] Typically involves checking distance against radius or AABB
+    return Distance(pose.position, bound.center) < bound.radius
+
+def JointOptimize(pos_list, lr_params, img_list, depth_list, intrinsics):
+    # Perform gradient descent on poses and LR parameters
+    # Loss includes rendering loss and depth consistency
+    pass
+```
+
+**Parameters:**
+*   **Optimization Iterations per Frame:** 100 [S1].
+*   **VM Decomposition Rank:** $R$ (Not given in the sources).
+*   **Step Size $n$:** Not given in the sources.
+
+## Operating characteristics
+*   **Complexity:** Reduces space complexity from cubic $O(n^3)$ (typical voxel grid) to square $O(n)$ via Vector-Matrix decomposition [S1].
+*   **Memory:** Decreases memory usage by freezing and discarding supervisory frames for local fields once the camera moves beyond their boundaries [S1].
+*   **Strengths:** Avoids local minima common in global NeRF for large-scale scenes; handles long sequences by decomposing the problem into manageable local optimizations [S1].
+*   **Limitations:** Requires accurate initial depth estimation to guide sampling; performance depends on the definition of boundaries $\text{Bound}_j$ [S1].
+*   **Performance:** On Tanks and Temples datasets, the method achieves higher PSNR than NoPe-NeRF and LocalRF [S1].
+
+## Background
+*   **Origin:** Proposed in 2025 by authors of "Incremental Joint Learning of Depth, Pose, and Implicit Scene Representation on Monocular Camera in Large-Scale Scenes" [S1].
+*   **Context:** Addresses limitations of existing implicit scene representations (like global NeRF) which struggle with large-scale scenes and converge to local minima [S1]. It builds on the concept of local neural radiance fields [S1].
+
+## Sources
+[S1] Incremental Joint Learning of Depth, Pose, and Implicit Scene Representation on Monocular Camera in Large-Scale Scenes, https://doi.org/10.1109/tase.2025.3617654, fetched 2026-10-29

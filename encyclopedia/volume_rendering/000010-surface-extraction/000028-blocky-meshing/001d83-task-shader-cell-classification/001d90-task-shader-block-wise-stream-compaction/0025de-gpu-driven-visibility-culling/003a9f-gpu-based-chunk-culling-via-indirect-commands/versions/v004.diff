@@ -1,0 +1,199 @@
+--- v003.md
++++ v004.md
+@@ -4,10 +4,10 @@
+ 
+ ## Overview
+-A rendering optimization that uses a compute shader to filter visible chunks and generates indirect draw arguments on the GPU, reducing CPU-GPU synchronization overhead [S1, S2, unofficial]. It differs from CPU-side culling by moving the visibility test and command buffer population entirely to the GPU, and from general GPU-driven visibility culling by specifically targeting chunk-based mesh data and using atomic counters to compact the output command list [S1, S2, unofficial].
++A rendering optimization that uses a compute shader to filter visible chunks and generates indirect draw arguments on the GPU, reducing CPU-GPU synchronization overhead [S1, unofficial]. It differs from CPU-side culling by moving the visibility test and command buffer population entirely to the GPU, and from general GPU-driven visibility culling by specifically targeting chunk-based mesh data and using atomic counters to compact the output command list [S1, S2, unofficial].
+ 
+ ## How it works
+ **Inputs and Outputs:**
+-*   **Input:** A list of chunk mesh data (bounding boxes, geometry references) and camera frustum parameters (position, plane normals/distances).
+-*   **Output:** An indirect draw command buffer containing draw calls only for visible chunks.
++*   **Input:** A list of chunk mesh data (bounding boxes, geometry references) and camera frustum parameters (position, plane normals/distances) [S2, unofficial].
++*   **Output:** An indirect draw command buffer containing draw calls only for visible chunks [S1, S2, unofficial].
+ 
+ **Data Structures:**
+@@ -29,5 +29,5 @@
+     *   `data2`: `uint` (packed: `startSquare` offset).
+ 
+-3.  **GPUCullRenderResources** (CPU-side constants, D3D12 style) [S1, unofficial]:
++3.  **GPUCullRenderResources** (CPU-side constants, D3D12 root constants) [S1, unofficial]:
+     *   `number_of_chunks`: `u32`.
+     *   `indirect_command_srv_index`: `u32`.
+@@ -45,23 +45,25 @@
+     *   `farPlane`, `leftPlane`, `rightPlane`, `upPlane`, `downPlane`: `vec4` (xyz = plane normal, w = distance).
+ 
++6.  **Buffers** (GPU memory) [S2, unofficial]:
++    *   `meshDataBuffer`: binding 0, std430, readonly restrict, holds `MeshData` array.
++    *   `commandsBuffer`: binding 1, std430, restrict, holds `IndirectDrawArgs` array.
++    *   `commandsCount`: binding 0, offset 0, uniform atomic_uint, tracks output count.
++
+ **Numbered Steps:**
+ 
+ 1.  **CPU Preparation:**
+     *   Iterate through loaded chunks and populate a vector of `IndirectCommand` structs [S1, unofficial].
+-    *   Set root constants (D3D12) or uniforms (OpenGL) with `GPUCullRenderResources` and camera frustum planes [S1, S2, unofficial].
+-    *   Copy CPU data to the indirect command buffer's upload resource [S1, unofficial].
++    *   Set compute root constants (D3D12) or uniforms (OpenGL) with `GPUCullRenderResources` and camera frustum planes [S1, S2, unofficial].
++    *   Transition indirect command buffer to `COPY_DEST` state and copy CPU data via `memcpy` [S1, unofficial].
+ 
+ 2.  **GPU Culling Dispatch:**
+-    *   Reset the UAV counter buffer to zero [S1, unofficial].
+-    *   Transition the indirect command buffer state: `COPY_DEST` -> `UNORDERED_ACCESS` [S1, unofficial].
+-    *   Dispatch the compute shader. Workgroup count is `ceil(meshData.size() / threadGroupSize)` [S2, unofficial]. One workgroup per mesh is typical [S2, unofficial].
++    *   Reset the UAV counter buffer to zero using `CopyBufferRegion` [S1, unofficial].
++    *   Transition the indirect command buffer state to `UNORDERED_ACCESS` [S1, unofficial].
++    *   Dispatch the compute shader. Workgroup count is `ceil(meshData.size() / threadGroupSize)` [S2, unofficial].
+ 
+ 3.  **Compute Shader Execution:**
+     *   Read `MeshData` from the readonly buffer [S2, unofficial].
+-    *   Reconstruct the normal vector from `data1`:
+-        *   `normalID = data1 & 7u` (mask 3 bits) [S2, unofficial].
+-        *   Axis index: `normalID >> 1`.
+-        *   Sign: `normalID & 1u`.
+-        *   Normal vector: `axis * (-2 * float(normalID & 1u) + 1)` [S2, unofficial].
++    *   Extract `normalID` and `squaresCount` from `data1`. Extract `startSquare` from `data2` [S2, unofficial].
++    *   Reconstruct normal vector: `normalID = data1 & 7u` (mask 3 bits) [S2, unofficial]. Axis index: `normalID >> 1`. Sign: `normalID & 1u`. Normal vector: `axis * (-2 * float(normalID & 1u) + 1)` [S2, unofficial].
+     *   Test visibility against the camera frustum [S2, unofficial]:
+         *   Check if the mesh is behind the camera relative to its normal: `dot(center - normal * size - position, normal) > 0`. If true, discard [S2, unofficial].
+@@ -72,75 +74,82 @@
+ 
+ 4.  **Execution:**
+-    *   Transition the indirect command buffer state: `UNORDERED_ACCESS` -> `INDIRECT_ARGUMENT` [S1, unofficial].
++    *   Transition the indirect command buffer state to `INDIRECT_ARGUMENT` [S1, unofficial].
+     *   Issue a memory barrier for indirect commands [S2, unofficial].
+     *   Execute indirect draw using the counter offset to determine the number of commands [S1, unofficial].
++
++**Formulas:**
++
++*   `outsidePlane(center, size, plane)`: `normalSign = sign(plane.xyz)`, `closestPoint = center + size * normalSign`, `return dot(closestPoint, plane.xyz) + plane.w < 0` [S2, unofficial].
++*   `cameraCulling(center, size, normal)`: Returns false if `dot(center - normal * size - position, normal) > 0`. Returns false if `outsidePlane` returns true for far, left, right, up, or down planes. Otherwise returns true [S2, unofficial].
++
++**Parameters:**
++*   `MAX_CHUNKS_TO_BE_DRAWN`: Maximum number of indirect draw calls per frame. Used as the second argument to `ExecuteIndirect` [S1, unofficial].
++*   `mask3Bits`: Constant 7u (0b111) used to extract the 3-bit normal ID from `data1` [S2, unofficial].
++*   `threadGroupSize`: Not given in the sources.
++
++**Edge Cases and Pitfalls:**
++*   **Resource State Transitions:** Must strictly follow D3D12 rules: `INDIRECT_ARGUMENT` -> `COPY_DEST` -> `UNORDERED_ACCESS` -> `INDIRECT_ARGUMENT`. Missing transitions cause validation errors or undefined behavior [S1, unofficial].
++*   **Normal Reconstruction:** Assumes `normalID >> 1` maps to axis index (0=x, 1=y, 2=z) and `normalID & 1` maps to sign. The formula `-2 * float(normalID & 1u) + 1` yields +1 for positive, -1 for negative [S2, unofficial].
++*   **Backface Culling:** The logic `dot(center - normal * size - position, normal) > 0` ignores meshes whose normal points away from the camera position relative to the mesh center [S2, unofficial].
+ 
+ **Pseudocode (Compute Shader Logic):**
+ 
+ ```python
+-# Pseudocode for the compute shader kernel
+-# Inputs: meshDataBuffer (readonly), commandsBuffer (writeonly), commandsCount (atomic), 
+-#         frustumPosition, farPlane, leftPlane, rightPlane, upPlane, downPlane
++def dot(v1: tuple, v2: tuple) -> float:
++    return v1[0]*v2[0] + v1[1]*v2[1] + v1[2]*v2[2]
+ 
+-kernel void cull_meshes(uint3 mesh_id) {
+-    uint index = mesh_id.x;
+-    MeshData mesh = meshDataBuffer[index];
+-    
+-    // Reconstruct normal
+-    uint normalID = mesh.data1 & 7u;
+-    uint axisIdx = normalID >> 1;
+-    int sign = -2 * int(normalID & 1u) + 1;
+-    vec3 normal = vec3(0.0);
+-    if (axisIdx == 0) normal.x = float(sign);
+-    else if (axisIdx == 1) normal.y = float(sign);
+-    else normal.z = float(sign);
+-    
+-    // Check if facing away from camera
+-    vec3 centerToPos = mesh.center - frustumPosition;
+-    if (dot(centerToPos, normal) > dot(mesh.size, normal)) { // Simplified backface check based on source [S2, unofficial]
+-        return;
++def outside_plane(center: tuple, size: tuple, plane: tuple) -> bool:
++    normal_sign = tuple(1.0 if x > 0 else -1.0 for x in plane[:3])
++    closest_point = tuple(c + s * ns for c, s, ns in zip(center, size, normal_sign))
++    return dot(closest_point, plane[:3]) + plane[3] < 0.0
++
++def cull_meshes(mesh_id: int, mesh_data: list, commands: list, count_ref: list,
++                position: tuple, far_plane: tuple, left_plane: tuple, right_plane: tuple,
++                up_plane: tuple, down_plane: tuple) -> None:
++    mesh = mesh_data[mesh_id]
++    center = mesh['center']
++    data1 = mesh['data1']
++    size = mesh['size']
++    data2 = mesh['data2']
++
++    # Reconstruct normal from data1
++    normal_id = data1 & 7  # mask3Bits
++    axis_idx = normal_id >> 1
++    sign = -2 * (normal_id & 1) + 1
++    normal = [0.0, 0.0, 0.0]
++    if axis_idx == 0: normal[0] = float(sign)
++    elif axis_idx == 1: normal[1] = float(sign)
++    else: normal[2] = float(sign)
++
++    # Backface check: dot(center - normal * size - position, normal) > 0
++    vec = tuple(c - n * s - p for c, n, s, p in zip(center, normal, size, position))
++    if dot(vec, normal) > 0.0:
++        return
++
++    # Frustum culling
++    planes = [far_plane, left_plane, right_plane, up_plane, down_plane]
++    for plane in planes:
++        if outside_plane(center, size, plane):
++            return
++
++    # Write command
++    cmd_index = count_ref[0]
++    commands[cmd_index] = {
++        'count': data1 & 0x1FFFFFFF,  # squaresCount
++        'instanceCount': 1,
++        'first': data2,               # startSquare
++        'baseInstance': 0
+     }
+-    
+-    // Frustum culling
+-    if (outsidePlane(mesh.center, mesh.size, farPlane)) return;
+-    if (outsidePlane(mesh.center, mesh.size, leftPlane)) return;
+-    if (outsidePlane(mesh.center, mesh.size, rightPlane)) return;
+-    if (outsidePlane(mesh.center, mesh.size, upPlane)) return;
+-    if (outsidePlane(mesh.center, mesh.size, downPlane)) return;
+-    
+-    // Write command
+-    uint cmdIndex = atomicAdd(commandsCount, 1u);
+-    commandsBuffer[cmdIndex] = IndirectDrawArgs(
+-        mesh.data1 & 0x1FFFFFFFu, // squaresCount as count
+-        1u,
+-        mesh.data2,               // startSquare as first
+-        0u
+-    );
+-}
+-
+-bool outsidePlane(vec3 center, vec3 size, vec4 plane) {
+-    vec3 normalSign = sign(plane.xyz);
+-    vec3 closestPoint = center + size * normalSign;
+-    return dot(closestPoint, plane.xyz) + plane.w < 0.0;
+-}
++    count_ref[0] += 1
+ ```
+ 
+-**Parameters:**
+-*   `MAX_CHUNKS_TO_BE_DRAWN`: Maximum number of indirect draw calls per frame. Used as the second argument to `ExecuteIndirect` [S1, unofficial].
+-*   `threadGroupSize`: Typically 32 or 64, depending on hardware and implementation [S2, unofficial].
+-
+-**Edge Cases and Pitfalls:**
+-*   **Resource State Transitions:** Must strictly follow API rules (e.g., D3D12: `INDIRECT_ARGUMENT` -> `COPY_DEST` -> `UNORDERED_ACCESS` -> `INDIRECT_ARGUMENT`). Missing transitions cause validation errors or undefined behavior [S1, unofficial].
+-*   **Normal Reconstruction:** Assumes `normalID >> 1` maps to axis index (0=x, 1=y, 2=z) and `normalID & 1` maps to sign [S2, unofficial].
+-*   **Backface Culling:** The logic `dot(center - normal * size - position, normal) > 0` ignores meshes whose normal points away from the camera position relative to the mesh center [S2, unofficial].
+-
+ ## Operating characteristics
+-*   **Time Complexity:** O(N) for culling, where N is the number of chunks. The compute shader dispatch is parallelized.
+-*   **Memory Complexity:** O(N) for storing the indirect command buffer and mesh data.
+-*   **Performance:** Reduces CPU-GPU synchronization overhead by eliminating CPU-side frustum culling and command buffer population [S1, S2, unofficial].
++*   **Time Complexity:** O(N) for culling, where N is the number of chunks. The compute shader dispatch is parallelized [S2, unofficial].
++*   **Memory Complexity:** O(N) for storing the indirect command buffer and mesh data [S2, unofficial].
++*   **Performance:** Reduces CPU-GPU synchronization overhead by eliminating CPU-side frustum culling and command buffer population [S1, unofficial].
+ *   **Strengths:** Efficient for large scenes with many chunks; minimal CPU intervention [S1, S2, unofficial].
+ *   **Limitations:** Requires GPU support for indirect drawing and compute shaders; overhead of buffer management and state transitions [S1, unofficial].
+ *   **When to use:** Large voxel terrains or chunk-based scenes where culling is a bottleneck [S1, S2, unofficial].
+-*   **When not to use:** Small scenes where CPU culling is sufficient; hardware without indirect draw support.
++*   **When not to use:** Not given in the sources.
+ 
+ ## Background

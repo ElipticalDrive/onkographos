@@ -1,0 +1,179 @@
+--- v001.md
++++ v002.md
+@@ -4,17 +4,17 @@
+ 
+ ## Overview
+-Spherical Coordinate Volume Rendering is a volume ray casting technique designed to render radar or atmospheric data directly in spherical coordinates, eliminating the need for preprocessing or resampling to a uniform Cartesian grid [S1, book][S2, unofficial]. It solves the accuracy loss and memory trade-offs associated with Cartesian resampling or the geometric gaps left by textured conic surface approximations [S1, book]. Unlike standard texture slicing which relies on parallel planar cuts, this method operates on the intrinsic curvilinear structure of the data, making it distinct from siblings like [View-Aligned Slicing with 3D Textures](870-view-aligned-slicing-with-3d-textures.md) which assume regular grid structures.
++Spherical Coordinate Volume Rendering is a volume ray casting technique designed to render radar or atmospheric data directly in spherical coordinates, eliminating the need for preprocessing or resampling to a uniform Cartesian grid [S1, book][S2, unofficial]. It solves the accuracy loss and memory trade-offs associated with Cartesian resampling or the geometric gaps left by textured conic surface approximations [S1, book].
+ 
+ ## How it works
+ **Inputs and Outputs:**
+-*   **Input:** A volume dataset stored as stacked 2D images representing radar sweeps, where each image corresponds to a specific elevation angle. The dataset contains non-uniform elevation spacing.
+-*   **Output:** A rendered 2D image (e.g., 800×800 canvas) composited via hardware alpha blending.
++*   **Input:** A volume dataset stored as stacked 2D images representing radar sweeps, where each image corresponds to a specific elevation angle [S1, book]. The dataset contains non-uniform elevation spacing [S1, book].
++*   **Output:** A rendered 2D image (e.g., 800×800 canvas) composited via the general volume ray casting accumulation process [S1, book].
+ 
+ **Data Structures:**
+ The volume is stored in memory as a single large image formed by stacking 2D images vertically [S1, book].
+-*   **Image Layout:** Each 2D image represents one elevation sweep.
+-    *   **Columns:** 360 columns, spaced 1 degree apart in azimuth ($\phi$).
+-    *   **Rows:** 400 rows, spaced 250 meters apart in range ($r$).
+-*   **Coordinate System:** The data is indexed by spherical coordinates $(r, \phi, \theta)$, where $\theta$ is the elevation angle.
++*   **Image Layout:** Each 2D image represents one elevation sweep [S1, book].
++    *   **Columns:** 360 columns, spaced 1 degree apart in azimuth ($\phi$) [S1, book].
++    *   **Rows:** 400 rows, spaced 250 meters apart in range ($r$) [S1, book].
++*   **Coordinate System:** The data is indexed by spherical coordinates $(r, \phi, \theta)$, where $\theta$ is the elevation angle [S1, book].
+ 
+ **Algorithm Steps:**
+@@ -26,23 +26,19 @@
+     $$ \phi = \arctan(y, x) + \pi $$
+     $$ \theta = \arccos(z/\phi) $$
+-    *Note: The source uses $\phi$ in the denominator of the $\theta$ equation, which is mathematically inconsistent with standard spherical definitions where $\phi$ is the azimuth. However, this is the exact formula provided in the source [S1, book].*
+-3.  **Azimuth and Range Lookup:**
+-    *   Map $\phi$ to the column index (0–359).
+-    *   Map $r$ to the row index within the elevation slice (0–399).
+-4.  **Elevation Search (Handling Non-Uniform Spacing):**
+-    *   Because elevation angles are not uniformly incremented, there is no direct linear mapping from $\theta$ to the slice index in the stacked image [S1, book].
+-    *   Perform a search to find the two elevation slices (images) immediately above and below the current sample point's $\theta$ value.
+-5.  **Interpolation:**
+-    *   Retrieve the values from the two bounding elevation slices at the calculated $(r, \phi)$ position.
+-    *   Interpolate between these two values to determine the final volume value at the sample point [S1, book].
+-6.  **Compositing:**
+-    *   Accumulate the color and opacity of the sample using the standard hardware alpha blending equation, processing slices in depth order [S1, book].
++    The source explicitly uses $\phi$ in the denominator of the $\theta$ equation, which differs from standard spherical definitions where $r$ is typically used [S1, book].
++3.  **Azimuth and Range Lookup:** Map $\phi$ to the column index (0–359) and map $r$ to the row index within the elevation slice (0–399) [S1, book].
++4.  **Elevation Search (Handling Non-Uniform Spacing):** Because elevation angles are not uniformly incremented, there is no direct linear mapping from $\theta$ to the slice index in the stacked image [S1, book]. Perform a search to find the two elevation slices (images) immediately above and below the current sample point's $\theta$ value [S1, book].
++5.  **Interpolation:** Retrieve the values from the two bounding elevation slices at the calculated $(r, \phi)$ position and interpolate between these two values to determine the final volume value at the sample point [S1, book].
++6.  **Compositing:** Accumulate the color and opacity of the sample using the general volume ray casting accumulation process [S1, book].
+ 
+ **Pseudocode:**
+ ```python
+-def render_spherical_volume(ray_origin, ray_direction, volume_data, elevation_angles):
++import math
++
++def render_spherical_volume(ray_origin, ray_direction, ray_length, volume_data, elevation_angles):
+     """
+     ray_origin: (x, y, z)
+-    ray_direction: (dx, dy, dz)
++    ray_direction: (dx, dy, dz) assumed normalized
++    ray_length: total distance to traverse
+     volume_data: List of 2D arrays (images), one per elevation angle.
+                  Each image is 400 rows (range) x 360 cols (azimuth).
+@@ -50,65 +46,62 @@
+     """
+     num_steps = 200
+-    step_size = length(ray_direction) # Assumed normalized or derived from scene bounds
+-    accumulated_color = (0, 0, 0)
+-    accumulated_opacity = 0
+-    
+-    # Precompute elevation angle bounds for faster search if needed, 
+-    # but source implies a search process is required [S1, book].
+-    
++    step_size = ray_length / num_steps
++    accumulated_color = (0.0, 0.0, 0.0)
++    accumulated_opacity = 0.0
++
++    def find_bounding_elevation(theta, angles):
++        """Linear search for indices k such that angles[k] <= theta < angles[k+1]."""
++        for k in range(len(angles) - 1):
++            if angles[k] <= theta < angles[k+1]:
++                return k, k + 1
++        return len(angles) - 2, len(angles) - 1
++
++    def transfer_function(value):
++        """Maps scalar volume value to (color, opacity) [G]."""
++        return (value, value)  # Simplified mapping for demonstration
++
+     for i in range(num_steps):
+-        # Current point in Cartesian coordinates
+-        t = i * step_size
+-        x = ray_origin.x + ray_direction.x * t
+-        y = ray_origin.y + ray_direction.y * t
+-        z = ray_origin.z + ray_direction.z * t
+-        
++        step_t = i * step_size
++        x = ray_origin[0] + ray_direction[0] * step_t
++        y = ray_origin[1] + ray_direction[1] * step_t
++        z = ray_origin[2] + ray_direction[2] * step_t
++
+         # Convert to spherical coordinates [S1, book]
+-        r = sqrt((x - 0.5)**2 + (y - 0.5)**2 + (z - 0.5)**2)
+-        phi = atan2(y, x) + pi
+-        # Note: Source formula uses phi in denominator, potentially erroneous 
+-        # but implemented as specified [S1, book].
+-        theta = acos(z / phi)
+-        
++        r = ((x - 0.5)**2 + (y - 0.5)**2 + (z - 0.5)**2)**0.5
++        phi = math.atan2(y, x) + math.pi
++        theta = math.acos(z / phi)
++
+         # 1. Find bounding elevation slices [S1, book]
+-        # Search for indices k such that elevation_angles[k] <= theta < elevation_angles[k+1]
+-        # This requires a search process due to non-uniform spacing.
+         lower_idx, upper_idx = find_bounding_elevation(theta, elevation_angles)
+-        
++
+         # 2. Map r and phi to image coordinates
+-        # Range resolution: 250m per row. Azimuth: 1 deg per col.
+-        # Assuming r and phi are normalized or scaled appropriately to indices.
+-        row_idx = r / 250.0 
+-        col_idx = phi / (2 * pi) * 360.0
+-        
++        row_idx = r / 250.0
++        col_idx = (phi / (2 * math.pi)) * 360.0
++
+         # Clamp indices to valid range [0, 399] and [0, 359]
+-        row_idx = clamp(row_idx, 0, 399)
+-        col_idx = clamp(col_idx, 0, 359)
+-        
++        row_idx = max(0, min(399, row_idx))
++        col_idx = max(0, min(359, col_idx))
++
+         # 3. Interpolate between elevation slices [S1, book]
+-        # Interpolate factor based on theta distance between lower and upper angles
+         theta_lower = elevation_angles[lower_idx]
+         theta_upper = elevation_angles[upper_idx]
+-        t_theta = (theta - theta_lower) / (theta_upper - theta_lower)
+-        
+-        # Get values from the two slices at the same (row, col)
+-        val_lower = volume_data[lower_idx][row_idx][col_idx]
+-        val_upper = volume_data[upper_idx][row_idx][col_idx]
+-        
+-        volume_value = lerp(val_lower, val_upper, t_theta)
+-        
+-        # 4. Apply transfer function to get color and opacity
++        t_theta = (theta - theta_lower) / (theta_upper - theta_lower) if theta_upper != theta_lower else 0.0
++
++        val_lower = volume_data[lower_idx][int(row_idx)][int(col_idx)]
++        val_upper = volume_data[upper_idx][int(row_idx)][int(col_idx)]
++
++        volume_value = val_lower + t_theta * (val_upper - val_lower)
++
++        # 4. Apply transfer function to get color and opacity [G]
+         color, opacity = transfer_function(volume_value)
+-        
+-        # 5. Composite
+-        # Standard alpha blending: C_dest = C_src * A_src + C_dest * (1 - A_src)
+-        # [S1, book] references general volume ray casting compositing
+-        alpha_contrib = opacity * (1 - accumulated_opacity)
+-        accumulated_color += color * alpha_contrib
++
++        # 5. Composite using general volume ray casting accumulation [S1, book]
++        alpha_contrib = opacity * (1.0 - accumulated_opacity)
++        accumulated_color = tuple(c + col * alpha_contrib for c, col in zip(accumulated_color, color))
+         accumulated_opacity += alpha_contrib
+-        
++
+         if accumulated_opacity >= 1.0:
+             break
+-            
++
+     return accumulated_color
+ ```
+@@ -127,5 +120,5 @@
+ *   **Time Complexity:** High per-pixel cost due to trigonometric conversions and elevation searches for every sample point along every ray [S1, book].
+ *   **Memory Complexity:** Efficient in terms of preprocessing; no resampling to a larger Cartesian grid is required, avoiding the memory bloat associated with uniform grid resampling [S1, book].
+-*   **Performance:** Requires powerful hardware and specific WebGL implementations (e.g., Firefox with native OpenGL, Opera) to compile and run the complex shaders efficiently [S1, book]. Not feasible for real-time use on older or less capable hardware.
++*   **Performance:** Requires powerful hardware and specific WebGL implementations (e.g., Firefox with native OpenGL, Opera) to compile and run the complex shaders efficiently [S1, book]. Not feasible for real-time use on older or less capable hardware [S1, book].
+ *   **Strengths:** Preserves original data detail without resampling artifacts; avoids gaps associated with conic surface approximations [S1, book].
+ *   **Limitations:** Computationally intensive; dependent on specific browser/hardware capabilities for WebGL shader compilation [S1, book].

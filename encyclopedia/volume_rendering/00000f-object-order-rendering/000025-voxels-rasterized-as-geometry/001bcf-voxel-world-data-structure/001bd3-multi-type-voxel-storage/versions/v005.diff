@@ -1,0 +1,207 @@
+--- v004.md
++++ v005.md
+@@ -4,46 +4,41 @@
+ 
+ ## Overview
+-Multi-type Voxel Storage is a sparse voxel representation that maps 3D integer coordinates to discrete material types (enums) within fixed-size chunks, using a hash map to store only non-empty voxels. It solves the problem of efficiently storing heterogeneous voxel worlds where most space is empty, distinguishing itself from sibling structures by explicitly associating a `VoxelKind` enum with each occupied coordinate rather than storing binary existence flags or fixed-density arrays. It builds on [Voxel World Data Structure](1101-voxel-world-data-structure.md) by adding type information to the sparse lookup.
++Multi-type Voxel Storage is a sparse data structure that extends binary voxel existence models by associating a discrete material identifier (`VoxelKind`) with each occupied voxel [S1, unofficial]. It solves the problem of distinguishing between different material kinds (e.g., dirt, stone) in a voxel world, rather than treating all voxels as identical solid entities [S1, unofficial]. It builds on [Voxel World Data Structure](1101-voxel-world-data-structure.md) by introducing a specific enumeration-based type system for voxel content [S1, unofficial]. Unlike [Brick-based Sparse Voxel Lookup with Open-Addressing Hash](2587-brick-based-sparse-voxel-lookup-with-open-addressing-hash.md), which focuses on dense brick-level hashing, this method uses a hash map per chunk to store only non-empty, typed voxels.
+ 
+ ## How it works
+ **Inputs and Outputs:**
+-- Input: World coordinate `position` (IVec3), optional material type `kind` (VoxelKind enum).
+-- Output: Updated world state with modified chunk data.
++- Input: A world coordinate `position` (integer 3D vector), and an optional `kind` (material type).
++- Output: Updated chunk state in the world data structure.
+ 
+ **Data Structures:**
+-1.  **Chunk**:
+-    -   `position`: `IVec3` representing the chunk's origin in world space (aligned to 32-voxel grid).
+-    -   `voxels`: `HashMap<IVec3, VoxelKind>`. Maps local 3D integer coordinates (relative to chunk origin) to a `VoxelKind` enum.
+-    -   `mesh`: Reference or handle to the generated mesh geometry. `None` indicates the mesh is invalid and needs regeneration.
+-2.  **VoxelKind**: An enumeration defining material types (e.g., `Dirt`, `Stone`, `Air`). The absence of a key in `voxels` implies `Air`.
+-3.  **World**:
+-    -   `chunks`: `HashMap<IVec3, Chunk>`. Maps chunk positions to their respective Chunk structures.
++1.  **Chunk**: A container for a $32 \times 32 \times 32$ block of voxels.
++    -   `voxels`: A `HashMap` mapping local 3D integer coordinates (`IVec3`) to `VoxelKind` enums.
++    -   `mesh`: A reference to the generated mesh geometry (set to `none` on modification).
++2.  **VoxelKind**: An enumeration defining material types (e.g., `Dirt`, `Stone`, `Air`). The absence of a key in the `HashMap` represents air/nothing.
++3.  **World**: A collection of `Chunk` objects indexed by chunk position.
+ 
+ **Parameters:**
+--   **Chunk Size**: Fixed at $32 \times 32 \times 32$ voxels.
+--   **Local Coordinate Range**: $[0, 31]$ for each axis within a chunk.
++-   Chunk size: $32 \times 32 \times 32$ voxels [S1, unofficial].
++-   Local coordinate range: $[0, 31]$ for each axis within a chunk.
+ 
+ **Steps:**
+ 
+-1.  **Calculate Chunk and Local Coordinates**:
+-    Given a world position $P$, compute the chunk position $C$ and local position $L$:
++1.  **Calculate Chunk and Local Coordinates:**
++    Given a world position $P$, calculate the chunk position $C$ and local position $L$:
+     $$ C = \text{div\_euclid}(P, 32) $$
+     $$ L = \text{rem\_euclid}(P, 32) $$
+-    Where `div_euclid` performs Euclidean division (floor division for positive divisors) and `rem_euclid` returns the remainder.
++    Where `div_euclid` is the Euclidean division (floor division for positive divisors) and `rem_euclid` is the Euclidean remainder. This ensures correct handling of negative coordinates [S1, unofficial].
+ 
+-2.  **Retrieve or Create Chunk**:
+-    Access the `chunks` map in the World. If $C$ is not present, create a new `Chunk` at $C$.
+-    -   If the new chunk is at $Y=0$ (ground level), initialize `voxels` with `Dirt` for all $L$ where $L.y=0$.
+-    -   If generating a general chunk, iterate $x, y, z \in [0, 31]$. Calculate world position $W = C \times 32 + L$.
+-        -   If $W.y = 0$, insert $(L, \text{Dirt})$.
+-        -   If $W.y < 0$, insert $(L, \text{Stone})$.
+-        -   Otherwise, do not insert (implicitly air).
++2.  **Retrieve or Create Chunk:**
++    Access the `Chunk` at position $C$ in the World. If it does not exist, create a new `Chunk` and initialize it.
+ 
+-3.  **Update Voxel**:
+-    -   If `kind` is `None` (remove voxel): Remove $L$ from `chunk.voxels`.
+-    -   If `kind` is not `None`: Insert $(L, \text{kind})$ into `chunk.voxels`.
++3.  **Update Voxel State:**
++    -   If `kind` is `None` (representing air/removal):
++        -   Remove the key $L$ from `chunk.voxels`.
++    -   If `kind` is not `None`:
++        -   Insert the pair $(L, \text{kind})$ into `chunk.voxels`.
+ 
+-4.  **Invalidate Mesh**:
+-    Set `chunk.mesh = None` to signal that the visual representation must be regenerated.
++4.  **Invalidate Mesh:**
++    Set `chunk.mesh` to `none` to indicate that the visual representation needs regeneration [S1, unofficial].
+ 
+ **Pseudocode:**
+@@ -51,84 +46,86 @@
+ ```python
+ def set_voxel(world: World, position: IVec3, kind: Optional[VoxelKind]):
+-    # 1. Calculate chunk and local positions
++    # Calculate chunk and local coordinates using Euclidean division
+     chunk_position = position.div_euclid(32)
+     local_position = position.rem_euclid(32)
+ 
+-    # 2. Retrieve or create chunk
+-    chunk = world.chunks.get(chunk_position)
+-    if chunk is None:
+-        chunk = Chunk(position=chunk_position)
+-        world.chunks[chunk_position] = chunk
++    # Get or create the chunk
++    chunk = get_or_create_chunk(world, chunk_position)
++
++    # Invalidate mesh generation
++    chunk.mesh = None
++
++    # Update the voxel map
++    if kind is None:
++        # Remove voxel if it exists
++        if local_position in chunk.voxels:
++            del chunk.voxels[local_position]
++    else:
++        # Insert or update voxel type
++        chunk.voxels[local_position] = kind
++
++def get_or_create_chunk(world: World, chunk_position: IVec3) -> Chunk:
++    # Check if chunk exists
++    if chunk_position not in world.chunks:
++        # Create new chunk
++        chunk = Chunk()
++        chunk.voxels = {}
+         
+-        # Initialize chunk content if it's a new chunk
+-        # Note: This initialization logic is specific to the source's generation example
+-        # In a general storage method, initialization might be deferred or handled separately.
+-        # Here we follow the source's explicit generation loop for new chunks.
+-        if chunk.position.y == 0:
++        # Initialize chunk with default terrain if at ground level
++        if chunk_position.y == 0:
++            # Generate dirt layer at Y=0 relative to chunk
+             for z in range(32):
+                 for x in range(32):
+-                    offset = IVec3(x, 0, z)
+-                    chunk.voxels[offset] = VoxelKind.Dirt
++                    local_pos = IVec3(x, 0, z)
++                    chunk.voxels[local_pos] = VoxelKind.Dirt
+         else:
++            # General generation logic for other chunks
+             for z in range(32):
+                 for y in range(32):
+                     for x in range(32):
+                         offset = IVec3(x, y, z)
+-                        world_pos = chunk.position * 32 + offset
++                        # Calculate world position
++                        world_pos = chunk_position * 32 + offset
++                        
+                         if world_pos.y == 0:
+                             chunk.voxels[offset] = VoxelKind.Dirt
+                         elif world_pos.y < 0:
+                             chunk.voxels[offset] = VoxelKind.Stone
+-
+-    # 3. Update voxel data
+-    if kind is None:
+-        if local_position in chunk.voxels:
+-            del chunk.voxels[local_position]
+-    else:
+-        chunk.voxels[local_position] = kind
+-
+-    # 4. Invalidate mesh
+-    chunk.mesh = None
+-
+-def get_voxel(world: World, position: IVec3) -> Optional[VoxelKind]:
+-    chunk_position = position.div_euclid(32)
+-    local_position = position.rem_euclid(32)
++                        # Else: air (not inserted)
++        
++        world.chunks[chunk_position] = chunk
+     
+-    chunk = world.chunks.get(chunk_position)
+-    if chunk is None:
+-        return None # Air
+-    
+-    return chunk.voxels.get(local_position)
++    return world.chunks[chunk_position]
+ ```
+ 
+ **Edge Cases and Pitfalls:**
+--   **Negative Coordinates**: `div_euclid` and `rem_euclid` must handle negative world coordinates correctly to ensure consistent chunk mapping. Standard integer division (truncation towards zero) will fail for negative indices.
+--   **Hash Collisions**: The `HashMap` implementation must handle collisions. The source assumes a standard hash map behavior.
+--   **Memory Growth**: As more unique voxel types are added, the hash map grows. Empty chunks (no keys) should ideally be removed from the world's chunk map to save memory, though the source does not explicitly detail garbage collection of empty chunks.
++-   **Negative Coordinates:** Use Euclidean division (`div_euclid`, `rem_euclid`) to ensure consistent chunk indexing for negative world coordinates. Standard integer division may truncate towards zero, causing incorrect chunk lookups [S1, unofficial].
++-   **Mesh Invalidation:** Failing to invalidate the mesh after a voxel change will result in visual artifacts where old geometry persists [S1, unofficial].
++-   **Hash Map Overhead:** For dense regions, the hash map overhead may exceed that of a dense array. This structure is optimized for sparse worlds [S1, unofficial].
+ 
+ ## Subtopics
+ 
+ ### [Typed Voxels](1399-typed-voxels.md)
+-Typed Voxels associate a discrete type identifier (enum) with each voxel in a sparse grid to distinguish between different material kinds, such as dirt or stone. It differs from [Voxel Flag System & Filled State Logic](2040-voxel-flag-system-filled-state-logic.md) by focusing on material type enumeration rather than binary geometric classification [2040-voxel-flag-system-filled-state-logic.md].
++Typed Voxels extend the binary existence model of sparse voxel structures by associating a discrete material identifier with each occupied voxel. This allows a voxel world to distinguish between different material kinds (e.g., dirt, stone) rather than treating all voxels as identical solid entities. It builds on [Multi-type Voxel Storage](1104-multi-type-voxel-storage.md) by introducing a specific enumeration-based type system for voxel content.
+ 
+ ### [Adaptive Bit-Packed Voxel Array](4986-adaptive-bit-packed-voxel-array.md)
+-The Adaptive Bit-Packed Voxel Array is a memory-efficient storage structure for a fixed-size 16×16×16 voxel section (4096 voxels) that dynamically adjusts its memory layout based on the number of unique voxel IDs present. It supports four states—Empty, Uniform, Palette, and bit-packed indices—to optimize memory usage for homogeneous or sparse sections. Unlike [Typed Voxels](1399-typed-voxels.md), which may use fixed-size arrays or more complex sparse structures, this method uses a single palette and bit-packed indices, allowing it to collapse to zero heap memory for empty or uniform data.
++The Adaptive Bit-Packed Voxel Array is a storage structure for a fixed-size $16 \times 16 \times 16$ voxel section (4096 voxels) that dynamically adjusts its memory layout based on the number of unique voxel IDs present. It supports Empty, Uniform, and Palette states to optimize memory usage for homogeneous or sparse sections. Unlike [Typed Voxels](1399-typed-voxels.md), which may use fixed-size arrays or more complex sparse structures, this method uses a single palette and bit-packed indices, allowing it to collapse to zero heap memory for empty or uniform data.
+ 
+ ### Voxel Hashing
+-A GPU-side spatial hash table implementation for storing active TSDF voxel blocks, enabling fast random access and parallel block processing [S2].
+--   **Voxel block size**: Fixed to $8 \times 8 \times 8$ in experiments [S2].
+--   **TSDF truncation band**: Set to one block width (8 voxels) in experiments [S2].
+--   **Voxel resolution**: 5 mm for human sequences, 1 cm for Blender Film scenes [S2].
++A GPU-side spatial hash table implementation for storing active TSDF voxel blocks, enabling fast random access and parallel block processing [S2]. It is used in sparse TSDF representation and conversion, where each frame is decomposed into voxel blocks. Active blocks are stored in a GPU-side spatial hash table using voxel hashing [Nießner et al. 2013], enabling fast random access and parallel block processing for encoding and decoding [S2].
++-   **Voxel block size:** Fixed to $8 \times 8 \times 8$ in experiments [S2].
++-   **TSDF truncation band:** Set to one block width (8 voxels) in experiments [S2].
++-   **Voxel resolution:** 5 mm for human sequences, 1 cm for Blender Film scenes [S2].
+ 
+ ## Operating characteristics
+--   **Time Complexity**: Lookup and insertion are $O(1)$ average case for hash map operations. Chunk generation is $O(32^3)$ for initialization, but subsequent updates are $O(1)$.
+--   **Memory Complexity**: Proportional to the number of non-empty voxels. Each entry stores a 3D integer key and an enum value. Overhead includes hash map bucket arrays and chunk objects.
+--   **Strengths**: Efficient for sparse worlds with many empty voxels. Simple to implement. Supports arbitrary material types via enums.
+--   **Limitations**: Hash map overhead can be significant for dense voxels. Cache locality may be poor due to hash map indirection. Mesh regeneration is required after any voxel change.
+--   **When to use**: Voxel games or simulations with large empty spaces and diverse block types.
+--   **When not to use**: Dense volumetric data (e.g., medical imaging) where fixed arrays or octrees are more efficient.
++-   **Time Complexity:** Lookup and insertion are $O(1)$ on average for hash map operations. Chunk creation is $O(N)$ where $N$ is the chunk volume ($32^3$) if generating default terrain [S1, unofficial].
++-   **Memory Complexity:** Proportional to the number of non-empty voxels. Each voxel stores a key (3 integers) and a value (enum). Hash map overhead adds constant factors [S1, unofficial].
++-   **Strengths:** Simple implementation, supports arbitrary material types, efficient for sparse worlds [S1, unofficial].
++-   **Limitations:** Hash map overhead for dense regions, potential cache misses due to pointer chasing [S1, unofficial].
++-   **When to use:** Voxel games or simulations with sparse, multi-material worlds [S1, unofficial].
++-   **When not to use:** Dense volumetric rendering or GPU-side processing requiring contiguous memory [S2].
+ 
+ ## Background
+-Originating from practical voxel engine implementations, this structure is described in [S1, unofficial] as a weekend project approach to voxel storage. It leverages standard hash maps to provide a flexible, type-aware sparse grid. The concept of using hash tables for spatial data is also applied in GPU-side TSDF storage [S2], though with different block sizes and resolutions.
++Originating from unofficial tutorials on building voxel engines, this method provides a practical approach to managing multi-material voxel worlds using standard hash maps [S1, unofficial]. It is often cited in the context of weekend voxel engine projects [S1, unofficial]. The concept of voxel hashing for TSDF volumes was formalized by Nießner et al. [S2].
+ 
+ ## Sources

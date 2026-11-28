@@ -1,0 +1,160 @@
+# Distributed Convolution with Data Overlap
+
+Also called: Neighbour-based filtering on Transputer network, Slice-based 3D convolution
+
+## Overview
+Distributed Convolution with Data Overlap is a method for performing local spatial filtering (convolution) on 3D voxel datasets partitioned across multiple processors in a distributed memory architecture. It solves the problem of computing voxel intensities that depend on neighboring voxels when those neighbors reside on different processing nodes. Unlike methods that rely on frequent inter-processor communication (data swapping), this approach minimizes network traffic by maintaining redundant copies of boundary data (overlap) on each node [S1, unofficial]. It is specifically designed for slice-based data-space parallel distribution, leveraging the typically lower axial correlation in medical imaging to often restrict operations to 2D within slices [S1, unofficial].
+
+## How it works
+**Inputs and Outputs:**
+*   **Input:** A 3D voxel dataset $V$ distributed across $N$ processors. Each processor $i$ holds a local subset of slices $S_i$. A convolution kernel $h$.
+*   **Output:** A processed 3D voxel dataset where each voxel intensity is updated based on the convolution result.
+
+**Data Structures:**
+*   **Local Volume:** A 3D array of voxel intensities $f(x,y,z)$ held by each processor.
+*   **Overlap Buffer:** Additional memory allocated at the boundaries of the local slice subset to store copies of adjacent slices from neighboring processors. The size of this buffer depends on the kernel dimensions and slice size [S1, unofficial].
+*   **Kernel:** A 3D matrix $h(p,q,r)$ (or 2D $h(p,q)$ if restricted to slice-local operations).
+
+**Steps:**
+1.  **Data Distribution:** The 3D volume is partitioned into contiguous 2D slices. Each processor is assigned a subset of these slices [S1, unofficial].
+2.  **Overlap Initialization:** To handle neighbors on different nodes, each processor allocates extra memory to store overlapping data from adjacent slices. This data is copied from neighboring processors' boundary slices into the local overlap buffers [S1, unofficial].
+3.  **Convolution Computation:** For each voxel $f(x,y,z)$ in the local domain (including overlap regions if they are part of the computational domain for neighbor nodes):
+    *   If the kernel is 3D ($3 \times 3 \times 3$), access neighbors in adjacent slices (requiring the overlap data).
+    *   If the kernel is 2D ($3 \times 3$), access only neighbors within the same slice. This is often sufficient due to low axial correlation in many scanners [S1, unofficial].
+    *   Compute the weighted sum using the formula below.
+4.  **Boundary Handling:** For voxels at the edges of the local data subset that lack external neighbors (and are not covered by overlap), apply boundary conditions:
+    *   Assign zero values to non-existing neighbors.
+    *   Or, wrap around to the opposite side of the image [S1, unofficial].
+5.  **Result Aggregation:** The processed local slices are combined to form the final volume.
+
+**Formula:**
+The new intensity $g$ at position $(x,y)$ (or $(x,y,z)$ for 3D) is computed as:
+
+$$ g(x,y) = \sum_{p} \sum_{q} h(p,q) \cdot f(x+p,y+q) $$
+
+Where:
+*   $g(x,y)$ is the new intensity.
+*   $h(p,q)$ is the convolution kernel weight at offset $(p,q)$.
+*   $f(x+p,y+q)$ is the original intensity at the neighbor position.
+*   $(p,q)$ are the kernel offsets. For a 3D extension, a third dimension $r$ is added to the sums and indices [S1, unofficial].
+
+**Parameters:**
+*   **Kernel Size:** Typically $3 \times 3$ for 2D operations within a slice. Extends to $3 \times 3 \times 3$ for full 3D operations [S1, unofficial].
+*   **Overlap Size:** Determined by the kernel dimensions and the slice size. Must be large enough to cover the kernel radius for all boundary voxels [S1, unofficial].
+
+**Pitfalls:**
+*   **Boundary Artifacts:** Voxels at the image boundaries lack neighbors. Improper handling (e.g., ignoring them) causes edge artifacts. Use zero-padding or wrapping [S1, unofficial].
+*   **Memory Usage:** The overlap requires additional memory proportional to the kernel size and slice dimensions. This must be accounted for in resource planning [S1, unofficial].
+*   **Axial Correlation Assumption:** Using 2D kernels assumes low correlation between adjacent slices. If the data has high axial resolution/correlation, 2D approximations may introduce errors [S1, unofficial].
+
+**Pseudocode:**
+> **Unverified code.** The code below did not pass a test run against a reference implementation, or no test fits it, so it may contain errors.
+
+```python
+def distributed_convolution(local_slices, overlap_slices, kernel, is_3d=False):
+    """
+    Performs convolution on local slices with overlap data.
+    
+    Args:
+        local_slices: 3D array (z, y, x) of voxel intensities for this node.
+        overlap_slices: Dictionary or array containing boundary slices from neighbors.
+        kernel: 2D or 3D array representing the convolution kernel h.
+        is_3d: Boolean flag indicating if 3D kernel (3x3x3) is used.
+        
+    Returns:
+        processed_slices: 3D array of convolution results.
+    """
+    # Determine kernel dimensions
+    if is_3d:
+        k_z, k_y, k_x = kernel.shape
+        half_z, half_y, half_x = k_z // 2, k_y // 2, k_x // 2
+    else:
+        k_y, k_x = kernel.shape
+        half_z, half_y, half_x = 0, k_y // 2, k_x // 2
+
+    processed_slices = zeros_like(local_slices)
+    z_min, z_max = local_slices.shape[0]
+    y_max, x_max = local_slices.shape[1], local_slices.shape[2]
+
+    for z in range(z_min, z_max):
+        for y in range(y_max):
+            for x in range(x_max):
+                # Handle boundary conditions for x and y
+                # For simplicity, assume zero-padding for out-of-bounds x,y
+                # In practice, check if x,y are at edge and use overlap or wrap
+                
+                sum_val = 0.0
+                for dz in range(-half_z, half_z + 1):
+                    for dy in range(-half_y, half_y + 1):
+                        for dx in range(-half_x, half_x + 1):
+                            # Determine source of voxel value
+                            # If within local slice bounds, use local_slices
+                            # If in overlap region, use overlap_slices
+                            # If out of bounds, use 0 (zero-padding)
+                            
+                            current_z = z + dz
+                            current_y = y + dy
+                            current_x = x + dx
+                            
+                            val = get_voxel_value(current_z, current_y, current_x, 
+                                                  local_slices, overlap_slices, 
+                                                  z_min, z_max, y_max, x_max)
+                            
+                            sum_val += kernel[dz + half_z, dy + half_y, dx + half_x] * val
+                
+                processed_slices[z, y, x] = sum_val
+
+    return processed_slices
+
+def get_voxel_value(z, y, x, local_slices, overlap_slices, z_min, z_max, y_max, x_max):
+    """
+    Retrieves voxel value, checking local data, overlap, or returning 0 for boundaries.
+    """
+    # Check if z is within local slice range
+    if z_min <= z < z_max:
+        # Check y, x bounds for local slice
+        if 0 <= y < y_max and 0 <= x < x_max:
+            return local_slices[z - z_min, y, x]
+        else:
+            # Boundary in y/x within local slice: zero-pad or wrap
+            # Assuming zero-pad for this implementation
+            return 0.0
+    else:
+        # z is outside local range, check overlap
+        # This part depends on the specific overlap data structure implementation
+        # For example, if overlap_slices contains 'prev' and 'next' slices
+        if z < z_min:
+            # Access previous slice from overlap
+            # overlap_slices['prev'] might be at index z_min - 1
+            # Need to map global z to local overlap index
+            return overlap_slices.get_value(z, y, x) # [G] Placeholder for specific overlap access logic
+        elif z >= z_max:
+            # Access next slice from overlap
+            return overlap_slices.get_value(z, y, x) # [G] Placeholder for specific overlap access logic
+    
+    # If still out of bounds (e.g., y/x in overlap), return 0
+    return 0.0
+```
+
+## Subtopics
+
+### Laplace Filter
+A local 3D filter that detects high spatial frequencies along the X, Y, and Z axes. It computes three orthogonal 2D Laplace convolutions (typically on XY, XZ, and YZ planes) and assigns the maximum value among the three results to the center voxel [S1, unofficial]. This is chosen when edge detection or high-frequency feature extraction is required in 3D space [S1, unofficial].
+
+### Minimum and Maximum Filters
+Local 3D filters used for automatic thresholding to eliminate illumination variations. They compute the local minimum and maximum values over the neighborhood. These values establish a dynamic threshold that normalizes illumination effects before further processing [S1, unofficial]. They are chosen when adaptive thresholding is needed to handle non-uniform lighting or intensity variations in the volume [S1, unofficial].
+
+## Operating characteristics
+*   **Time Complexity:** $O(N \cdot K^3)$, where $N$ is the number of voxels processed per node and $K$ is the kernel dimension (e.g., 3 for $3 \times 3 \times 3$). The complexity is linear with respect to the number of voxels.
+*   **Memory Complexity:** $O(N + O_{size})$, where $O_{size}$ is the memory required for overlap data. $O_{size}$ depends on the kernel dimensions and slice size [S1, unofficial].
+*   **Performance:** Reduces communication overhead compared to data-swapping methods by minimizing inter-processor traffic. Performance is limited by the memory bandwidth required to load overlap data and the computational cost of the convolution [S1, unofficial].
+*   **Strengths:** Low communication overhead; suitable for systems with limited network bandwidth; leverages low axial correlation to simplify computation to 2D in many cases [S1, unofficial].
+*   **Limitations:** Increased memory usage due to overlap; potential accuracy loss if 2D approximation is used on data with high axial correlation; boundary artifacts if not handled correctly [S1, unofficial].
+*   **When to Use:** When processing large 3D volumes on distributed memory systems (e.g., Transputer networks) where communication is expensive and axial resolution is lower than in-plane resolution [S1, unofficial].
+*   **When Not to Use:** When high axial correlation exists and 3D convolution is strictly required without overlap overhead; when memory is extremely constrained [S1, unofficial].
+
+## Background
+The method was developed for voxel data processing on Transputer networks, a parallel computing architecture popular in the late 1980s and early 1990s. It was described in the report "Voxel Data Processing on a Transputer Network" (DTIC ADA245410) [S1, unofficial]. The approach was motivated by the need to perform image processing operations (such as mean, Laplace, Sobel, Roberts, and median filters) on 3D datasets distributed across multiple processors. The choice of slice-based distribution was influenced by the typical characteristics of medical scanners, which often have higher resolution in the x,y plane than along the z-axis, allowing for effective 2D approximations within slices [S1, unofficial].
+
+## Sources
+[S1] DTIC ADA245410: Voxel Data Processing on a Transputer Network, https://archive.org/details/DTIC_ADA245410, fetched 2026-10-26 (unofficial)

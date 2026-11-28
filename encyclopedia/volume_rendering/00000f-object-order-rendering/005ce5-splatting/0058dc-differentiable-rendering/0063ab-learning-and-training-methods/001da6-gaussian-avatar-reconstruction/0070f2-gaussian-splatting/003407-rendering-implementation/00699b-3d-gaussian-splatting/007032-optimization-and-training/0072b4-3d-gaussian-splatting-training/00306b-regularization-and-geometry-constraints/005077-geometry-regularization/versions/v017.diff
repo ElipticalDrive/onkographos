@@ -1,0 +1,211 @@
+--- v016.md
++++ v017.md
+@@ -4,168 +4,61 @@
+ 
+ ## Overview
+-Geometry Regularization is a training-time constraint technique for 3D Gaussian Splatting that improves geometric fidelity and surface smoothness by explicitly constraining the shape and orientation of Gaussian primitives [S1, unofficial]. Unlike depth supervision, which primarily constrains the location of Gaussians, this method enforces planarity and normal alignment to reduce artifacts such as "floaters" (spurious, low-opacity Gaussians in empty space) and ensure coherent surface representations [S1, S2, unofficial]. It distinguishes itself from frequency-domain methods by operating directly on the spatial covariance structure of the Gaussians rather than comparing image spectra [S1, S2, unofficial].
++Geometry regularization is a training constraint for 3D Gaussian Splatting that improves surface smoothness and reduces volumetric artifacts (floaters) by enforcing geometric priors on the Gaussian kernels [S1, S2, unofficial]. Unlike depth supervision, which constrains only the spatial location of the surface, this method constrains the shape and orientation of the Gaussians themselves [S1, unofficial]. It sets itself apart from siblings like [Frequency Regularization](6130-frequency-regularization.md) by operating directly on the 3D covariance structure rather than the image frequency spectrum, and from [Hard and Soft Depth Regularization](9178-hard-and-soft-depth-regularization.md) by focusing on normal alignment and flattening rather than depth value consistency [S1, S2, unofficial].
+ 
+ ## How it works
+ **Inputs and Outputs:**
+-*   **Input:** The current state of the 3D Gaussian scene (centers, covariances, opacities, colors) and rendered depth maps from training views.
+-*   **Output:** A modified loss function term that penalizes deviations from planar surface assumptions and normal consistency.
++*   **Inputs:** Per-Gaussian scaling factors $s \in \mathbb{R}^3$, per-Gaussian normals $n_g$, rendered depth map $D_{rendered}$, and rendered normal map $N_{rendered}$ derived from $D_{rendered}$.
++*   **Outputs:** Gradient updates for Gaussian parameters (specifically scaling and orientation) that minimize the regularization loss.
+ 
+ **Data Structures:**
+-*   **Gaussian Scaling Factor ($s$):** A vector $s \in \mathbb{R}^3$ representing the scale along the three principal axes of each Gaussian.
+-*   **Gaussian Normal ($n_g$):** The normal vector associated with each Gaussian, typically derived from the eigenvector corresponding to the smallest eigenvalue of the covariance matrix (the axis of least extent).
+-*   **Rendered Depth Normal ($n_d$):** The surface normal estimated from the rendered depth buffer of a training view.
++*   **Gaussian Parameters:** Each Gaussian $i$ has a scaling vector $s_i \in \mathbb{R}^3$ representing the lengths of the principal axes. The covariance matrix $\Sigma_i$ is constructed from $s_i$ and a rotation matrix $R_i$ derived from the Gaussian's orientation quaternion.
++*   **Normals:** $n_g$ is the normal vector associated with the Gaussian's orientation. $N_{rendered}$ is the surface normal estimated from the gradient of the rendered depth map.
++
++**Steps:**
++1.  **Enable Check:** Verify if geometry regularization is enabled via the `use_normal_loss` parameter [S1, unofficial].
++2.  **Depth Normal Consistency:**
++    *   Compute the normal map $N_{rendered}$ from the rendered depth buffer [S1, unofficial].
++    *   For each pixel, identify the contributing Gaussian(s).
++    *   Calculate the alignment loss between the rendered normal $n_{rendered}$ and the Gaussian's intrinsic normal $n_g$ [S1, unofficial].
++3.  **Flattening Surface (Scaling Loss):**
++    *   For each Gaussian, identify the smallest component of the scaling factor vector $s_i$. Let $s_{min} = \min(s_{i,x}, s_{i,y}, s_{i,z})$ [S2, unofficial].
++    *   Minimize $s_{min}$ towards zero during optimization [S2, unofficial]. This forces the Gaussian to flatten into a 2D surfel aligned with the surface [S2, unofficial].
++4.  **Gradient Update:** Combine the depth normal consistency loss and the flattening loss to update the Gaussian parameters [S1, S2, unofficial].
++
++**Formulas:**
++The total regularization loss $\mathcal{L}_{geo}$ is composed of two terms:
++
++1.  **Depth Normal Consistency Loss:**
++    $$ \mathcal{L}_{normal} = \sum_{p} (1 - n_{rendered, p} \cdot n_{g, p}) $$
++    where $p$ indexes pixels, $n_{rendered, p}$ is the normal from the rendered depth map, and $n_{g, p}$ is the normal of the Gaussian contributing to pixel $p$ [S1, unofficial].
++
++2.  **Flattening Loss (Scaling Loss):**
++    $$ \mathcal{L}_{flatten} = \sum_{i} s_{min, i} $$
++    where $s_{min, i}$ is the smallest component of the scaling factor $s_i$ for Gaussian $i$ [S2, unofficial].
+ 
+ **Parameters:**
+-*   **`use_normal_loss`:** A boolean flag (default `false`) that enables the geometry regularization module [S1, unofficial].
+-*   **Weighting Coefficients:** Not explicitly defined in the provided sources; typically tuned hyperparameters balancing the regularization term against the photometric loss [G].
+-
+-**Steps:**
+-1.  **Enable Regularization:** If `use_normal_loss` is true, compute the geometry regularization loss terms for each Gaussian during the training step.
+-2.  **Flattening Constraint:** For each Gaussian, identify the smallest component of its scaling factor vector $s$. Minimize this value towards zero to encourage the Gaussian to flatten into a surfel (surface element) aligned with the local geometry [S2, unofficial].
+-3.  **Normal Consistency:**
+-    *   Compute the per-Gaussian normal $n_g$ based on the Gaussian's orientation (specifically the axis corresponding to the smallest scale) [S1, S2, unofficial].
+-    *   Render a depth map from the current camera view and compute the surface normal $n_d$ at the projected pixel location.
+-    *   Enforce alignment between $n_g$ and $n_d$ [S1, unofficial].
+-
+-**Formulas:**
+-Let $s_i \in \mathbb{R}^3$ be the scaling factors for the $i$-th Gaussian. The flattening loss $L_{flat}$ for a single Gaussian is proportional to the smallest component of $s_i$:
+-$$ L_{flat} \propto \min(s_{i,1}, s_{i,2}, s_{i,3}) $$
+-The goal is to minimize this term, driving the smallest scale towards zero [S2, unofficial].
+-
+-Let $n_{g,i}$ be the normal of the $i$-th Gaussian and $n_{d,j}$ be the normal derived from the rendered depth at pixel $j$. The normal consistency loss $L_{normal}$ encourages the dot product to be close to 1:
+-$$ L_{normal} \propto 1 - (n_{g,i} \cdot n_{d,j}) $$
+-This ensures the Gaussian's orientation aligns with the local surface geometry inferred from depth [S1, unofficial].
+-
+-**Pseudocode:**
+-```python
+-def compute_geometry_regularization_loss(gaussians, rendered_depth, camera_params, use_normal_loss):
+-    """
+-    Computes geometry regularization losses for 3D Gaussian Splatting.
+-    
+-    Args:
+-        gaussians: Object containing per-Gaussian properties:
+-            - scales: Tensor of shape (N, 3), scaling factors s for each Gaussian.
+-            - rotations: Tensor of shape (N, 4), quaternions for orientation.
+-        rendered_depth: Tensor of shape (H, W), depth values for the current view.
+-        camera_params: Object containing camera pose and intrinsics.
+-        use_normal_loss: Boolean, whether to enable normal consistency and flattening.
+-        
+-    Returns:
+-        float: Total geometry regularization loss.
+-    """
+-    if not use_normal_loss:
+-        return 0.0
+-
+-    loss = 0.0
+-    N = gaussians.scales.shape[0]
+-    
+-    # 1. Flattening Loss: Minimize the smallest scaling component
+-    # Identify the minimum scale along any axis for each Gaussian
+-    min_scales = torch.min(gaussians.scales, dim=1).values # Shape (N,)
+-    
+-    # Sum of minimum scales encourages flattening towards zero
+-    # Note: Sources do not specify if this is summed or averaged; sum is standard for loss terms.
+-    loss += torch.sum(min_scales)
+-    
+-    # 2. Normal Consistency Loss
+-    # Compute per-Gaussian normals from rotations
+-    # The normal is typically the direction of the smallest scale axis.
+-    # Assuming standard basis alignment before rotation, the axis with min scale
+-    # is identified, then rotated.
+-    # For simplicity, we assume the normal is derived from the covariance eigenvector
+-    # corresponding to the smallest eigenvalue.
+-    
+-    # Get the axis indices of the minimum scales
+-    min_scale_indices = torch.argmin(gaussians.scales, dim=1) # Shape (N,)
+-    
+-    # Define basis vectors for the three axes
+-    basis = torch.tensor([[1, 0, 0], [0, 1, 0], [0, 0, 1]], device=gaussians.scales.device)
+-    
+-    # Select the basis vector corresponding to the smallest scale for each Gaussian
+-    local_normals = basis[min_scale_indices] # Shape (N, 3)
+-    
+-    # Rotate local normals to world space using quaternions
+-    world_normals = rotate_vectors(gaussians.rotations, local_normals) # Shape (N, 3)
+-    
+-    # Project Gaussians to 2D to find corresponding depth pixels
+-    # This requires a rasterization step or projection logic.
+-    # For each Gaussian, find the pixel (u, v) it projects to.
+-    # If a Gaussian projects to multiple pixels or none, handle accordingly.
+-    # Here we assume a simplified mapping where we sample the rendered depth normal
+-    # at the projected center of each Gaussian.
+-    
+-    projected_centers = project_to_screen(gaussians.centers, camera_params) # Shape (N, 2)
+-    
+-    # Sample rendered depth normals at projected centers
+-    # Note: rendered_depth_normals must be pre-computed from rendered_depth
+-    # This is a placeholder for the actual normal extraction from depth buffer
+-    sampled_normals = sample_depth_normals(projected_centers, rendered_depth_normals) # Shape (N, 3)
+-    
+-    # Compute dot product between world normal and sampled depth normal
+-    dot_products = torch.sum(world_normals * sampled_normals, dim=1) # Shape (N,)
+-    
+-    # Loss encourages dot product to be 1 (aligned)
+-    # 1 - dot_product is 0 when aligned, positive when misaligned
+-    normal_loss_term = torch.sum(1.0 - dot_products)
+-    loss += normal_loss_term
+-    
+-    return loss
+-
+-def rotate_vectors(quaternions, vectors):
+-    """
+-    Rotates vectors by quaternions.
+-    quaternions: (N, 4)
+-    vectors: (N, 3)
+-    Returns: (N, 3)
+-    """
+-    # Standard quaternion-vector rotation
+-    # q = (w, x, y, z)
+-    # v' = v + 2*w*cross(q_xyz, v) + 2*cross(q_xyz, cross(q_xyz, v))
+-    w = quaternions[:, 0]
+-    xyz = quaternions[:, 1:]
+-    
+-    cross1 = torch.cross(xyz, vectors)
+-    cross2 = torch.cross(xyz, cross1)
+-    
+-    rotated = vectors + 2.0 * (w.unsqueeze(1) * cross1 + cross2)
+-    return rotated
+-
+-def project_to_screen(centers, camera_params):
+-    """
+-    Projects 3D centers to 2D screen coordinates.
+-    """
+-    # Implementation depends on camera model (perspective/orthographic)
+-    # Returns (N, 2) coordinates
+-    pass
+-
+-def sample_depth_normals(coords, depth_normals):
+-    """
+-    Samples normals from a pre-computed depth normal map at given 2D coordinates.
+-    """
+-    # Implementation depends on interpolation method (bilinear, nearest)
+-    pass
+-```
++*   `use_normal_loss`: A boolean flag (default `false`) that enables this regularization [S1, unofficial].
++*   $\lambda_{geo}$: Weighting coefficient for the total regularization loss. Not given in the sources.
+ 
+ **Edge Cases and Pitfalls:**
+-*   **Depth Refitting:** Depth maps from different frames may vary in scale. They must be refitted against a prior point cloud to a consistent scale before being used for supervision. Depth maps that fail this refitting process should be discarded [S1, unofficial].
+-*   **Precision:** Minimizing the smallest scale component towards zero can lead to numerical instability if the scale becomes extremely small. A lower bound or epsilon might be required in implementation [G].
+-*   **Ambiguity in Normal Direction:** The normal derived from the smallest scale axis has an inherent sign ambiguity (inward vs. outward). Consistency with the camera view direction or surrounding geometry is required to resolve this [G].
++*   **Sky/Distant Background:** Geometry regularization may pull geometry onto itself if applied to distant background elements. The source suggests using a "Sky Dome" (frozen shell of Gaussians) to disentangle sky from foreground, as regularization on the dome can make the ground less opaque [S1, unofficial].
++*   **Depth Refitting:** Depth maps must be refitted against a prior point cloud to the same scale before use. Depth maps that fail refitting are discarded [S1, unofficial].
++*   **Floater Trade-off:** While flattening reduces floaters, aggressive regularization may reduce the number of remaining points, potentially compromising reconstruction quality [S2, unofficial].
+ 
+ ## Subtopics
+ 
+ ### Scaling Loss for Geometry Modeling
+-A specific variant of geometry regularization that focuses exclusively on the shape of the Gaussian kernels. It minimizes the smallest component of the scaling factor $s \in \mathbb{R}^3$ towards zero, effectively flattening the Gaussian into a 3D "surflet" aligned with the surface [S2, unofficial]. This approach aids in determining Gaussian normals by explicitly selecting the shortest scaled edge as the surface normal direction. It is particularly useful for disentangling sky/distant background from foreground geometry by encouraging planar structures [S2, unofficial].
++A specific variant of geometry regularization that focuses exclusively on flattening Gaussian kernels into 3D surfels aligned with the surface [S2, unofficial]. It minimizes the smallest component of the scaling factor $s \in \mathbb{R}^3$ towards zero [S2, unofficial]. This aids in determining Gaussian normals by selecting the shortest scaled edge [S2, unofficial]. It is chosen when the primary goal is to enforce planar surface constraints without necessarily relying on rendered normal alignment [S2, unofficial].
+ 
+ ## Operating characteristics
+-*   **Time Complexity:** Adds a linear pass over the number of Gaussians $N$ for computing scales and normals, plus the cost of sampling depth normals. The overhead is generally low compared to the rasterization step [S1, S2, unofficial].
+-*   **Memory Complexity:** Requires storing per-Gaussian normals and potentially pre-computed depth normal maps. No significant additional memory structures are required beyond standard training buffers [S1, S2, unofficial].
+-*   **Performance:** Improves geometric fidelity and reduces "floaters" (spurious Gaussians) [S1, unofficial]. It can lead to a trade-off where the number of remaining points is reduced, potentially compromising detail if not balanced with other regularization terms like entropy loss for opacity [S2, unofficial].
+-*   **Strengths:** Directly enforces surface-like properties, improving smoothness and reducing artifacts in complex scenes [S1, unofficial].
+-*   **Limitations:** Requires accurate depth maps for normal consistency. If depth is noisy or missing, the normal consistency term may introduce errors. The flattening assumption may not hold for volumetric or non-planar objects [S1, S2, unofficial].
+-*   **When to Use:** When high geometric fidelity and smooth surfaces are required, and depth supervision is available. Particularly effective for scenes with distinct planar structures [S1, S2, unofficial].
+-*   **When Not to Use:** For highly volumetric or non-planar scenes where the flattening assumption is invalid. If depth maps are unreliable or unavailable [S1, unofficial].
++*   **Time Complexity:** Adds overhead proportional to the number of Gaussians and pixels for normal computation and loss calculation. Not given in the sources.
++*   **Memory Complexity:** Requires storing rendered depth and normal maps. Not given in the sources.
++*   **Strengths:** Improves geometry smoothness, reduces floaters, and enforces planar surface constraints [S1, S2, unofficial].
++*   **Limitations:** May reduce the number of remaining points if not balanced with pruning; can negatively affect distant background if not handled with techniques like Sky Dome [S1, S2, unofficial].
++*   **When to use:** When high-quality, smooth surface reconstruction is required and floaters are a significant issue.
++*   **When not to use:** When the scene contains significant non-planar structures or when computational resources are extremely limited.
+ 
+ ## Background
+-Geometry Regularization in the context of 3D Gaussian Splatting was introduced as an extension to the standard optimization pipeline to address the lack of explicit geometric constraints in the original method. It builds upon the observation that unconstrained optimization of Gaussian primitives can lead to artifacts such as floaters and poor surface reconstruction [S1, S2, unofficial]. The technique leverages the relationship between the Gaussian's covariance structure (specifically its scaling factors) and the local surface geometry, drawing inspiration from surfel-based rendering methods [S2, unofficial]. It is implemented in various frameworks, including GaussianSplatting.jl, where it is exposed via configuration parameters like `use_normal_loss` [S1, unofficial].
++Originating from improvements to 3D Gaussian Splatting training pipelines, this technique was introduced to address the arbitrary spatial distribution and anisotropic kernels of tiny 3D Gaussians [S2, unofficial]. It builds on the idea that representing surfaces with flattened Gaussians (surfels) provides better geometric priors [S2, unofficial]. The method is implemented in libraries such as GaussianSplatting.jl [S1, unofficial] and GauStudio [S2, unofficial].
+ 
+ ## Sources

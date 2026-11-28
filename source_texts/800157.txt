@@ -1,0 +1,85 @@
+Generate multiresolution neuroglancer meshes and skeletons from segmentation volumes (zarr, N5, precomputed), parallelized with Dask. - Work in voxel indices on worldarray blocks; read any stored axis order by davidackerman · Pull Request #52 · janelia-cellmap/mesh-n-bone
+
+Work in voxel indices on worldarray blocks; read any stored axis order by davidackerman · Pull Request #52 · janelia-cellmap/mesh-n-bone · GitHub
+Skip to content
+You signed in with another tab or window. Reload to refresh your session.
+You signed out in another tab or window. Reload to refresh your session.
+You switched accounts on another tab or window. Reload to refresh your session.
+Dismiss alert
+Conversation
+davidackerman
+commented
+Nov 3, 2026
+•
+edited
+Loading
+Uh oh!
+There was an error while loading. Please reload this page.
+Copy link
+Copy Markdown
+Collaborator
+Summary
+Drop funlib, work in voxel indices on worldarray blocks, and read volumes stored in any axis order.
+funlib is gone. Roi/Coordinate were an integer world frame: CellMapArray rounded the voxel size and translation to integers, the block loop tiled the ROI in those units, and _assemble_mesh mapped the vertices back onto the true floats at the end. Now Meshify works in the voxel indices of the level it reads and places vertices with the level's float voxel size and translation directly, as cellmap-analyze does since its #96.
+VolumeGeometry (util/volume_geometry.py) replaces CellMapArray: shape, chunks, dtype, float voxel_size and translation (voxel 0's centre), all z, y, x, no tensorstore handle. Meshify.roi is an IndexBox of the current level's voxels; a custom roi is still a world-unit dict (begin/end or offset/shape), snapped per level to the voxels whose centres lie in it.
+get_chunked_meshes tiles the ROI with worldarray.blocks (Meshify._meshing_blocks): the Blocks record goes to the workers and each materializes its block by id, so the driver still holds no block list. Each read is the block grown by one output voxel; reads past the volume are filled with background. dask_util's DaskBlock/create_blocks/count_blocks/block_from_index are deleted, and read_block takes index boxes.
+The integer-to-float vertex remap, _dataset_origin, base_voxel_size_funlib and output_voxel_size_funlib are gone; base_voxel_size (the level's voxel size in output units) and true_voxel_size (times the downsample factor) remain. lod_scale_multiplier and the octree's voxel_size_nm now follow a voxel_size_nm override, as the vertices always did.
+Fixes in-worker downsampling across blocks. Blocks were read_write_block_shape_pixels output voxels wide, but the worker clipped each block to read_write_block_shape_pixels // factor output voxels, so with a downsample factor and more than one block most of every block was discarded: a sphere meshed with downsample_factor=2 from 16-voxel blocks kept 7% of its volume. Blocks are now read_write_block_shape_pixels voxels of the level being read, rounded up to a multiple of the per-axis factor, and the clip extent is the block's own size. This path is taken by the downsample_factor option and by any LOD downsampled in-worker (downsample_method: nearest, use_existing_scales: false, or a pyramid that could not be built); LODs read from pyramid levels were unaffected.
+Volumes stored in another axis order. TensorSwitch writes OME-Zarr with dimension_names ["x","y","z"] (every MIA crop; their label s0 is 16×16×45 nm). worldarray presents stored order, and Meshify assumes z, y, x by position, so those volumes meshed with x and z swapped, silently. Volumes are now opened with worldarray 0.10's axes_order="zyx" (open_volume, both open_pyramid discovery calls), which moves the axes named z, y, x to the end in that order with shape, chunks, voxel size, translation and the pyramid's level placements reordered to match. VolumeGeometry refuses an array that does not present three spatial axes as z, y, x. The pyramid builder no longer symlinks s0 for such a source, since its array metadata would contradict the group's z, y, x axes. A roi stays z, y, x in world units whatever the stored order (README).
+Dependencies: worldarray>=0.10,<1 (lock 0.10.0), funlib.geometry removed.
+Tests: 356 passed, 3 skipped. New: block grid (tiles the ROI from its first voxel, ROI end rounded up to whole blocks, blocks whole output voxels, one output voxel of context); the downsampled sphere keeps its volume across blocks; an asymmetric cube stored x, y, z meshes to the same bounds as the z, y, x store; an x, y, z pyramid's levels are discovered as (1,2,2), (2,4,4) in z, y, x; a 2-D array is refused. The coordinate tests from #48 still pin every storage convention to a tenth of a voxel.
+Work in voxel indices on worldarray blocks; read any stored axis order
+…
+f985de6
+```
+Drop funlib.geometry. CellMapArray's integer frame (Roi/Coordinate,
+rounded voxel size and translation, the vertex remap in assembly) is
+replaced by VolumeGeometry: the level's shape, chunks and float voxel
+size and translation in z, y, x. Meshify.roi is an IndexBox of the
+level's voxels; get_chunked_meshes tiles it with worldarray.blocks and
+workers materialize their block by id from the Blocks record. The
+block helpers in dask_util are deleted and read_block takes index
+boxes.
+
+Fix in-worker downsampling across blocks: blocks were
+read_write_block_shape_pixels output voxels wide but each was clipped
+to read_write_block_shape_pixels // factor, so a downsampled run with
+several blocks discarded most of every block (a sphere kept 7% of its
+volume at factor 2). Blocks are now that many voxels of the level
+read, rounded up to a multiple of the factor, and the clip extent is
+the block's own size.
+
+Open every volume with worldarray 0.10's axes_order="zyx", so an
+x, y, z OME-Zarr (TensorSwitch's) is read z, y, x with its voxel size,
+translation and pyramid levels reordered; VolumeGeometry refuses an
+array that does not present three spatial axes as z, y, x, and the
+pyramid builder leaves s0 absent for such a source. Pin
+worldarray>=0.10,<1.
+```
+Hide details
+View details
+davidackerman
+merged commit 4cd899d
+into
+master
+Nov 3, 2026
+2 checks passed
+Uh oh!
+There was an error while loading. Please reload this page.
+davidackerman
+mentioned this pull request
+Nov 3, 2026
+Bump version to 0.9.0
+#53
+Merged
+Sign up for free
+to join this conversation on GitHub.
+Already have an account?
+Sign in to comment
+Uh oh!
+There was an error while loading. Please reload this page.
+Labels
+None yet
+1 participant
+Add this suggestion to a batch that can be applied as a single commit.This suggestion is invalid because no changes were made to the code.Suggestions cannot be applied while the pull request is closed.Suggestions cannot be applied while viewing a subset of changes.Only one suggestion per line can be applied in a batch.Add this suggestion to a batch that can be applied as a single commit.Applying suggestions on deleted lines is not supported.You must change the existing code in this line in order to create a valid suggestion.Outdated suggestions cannot be applied.This suggestion has been applied or marked resolved.Suggestions cannot be applied from pending reviews.Suggestions cannot be applied on multi-line comments.Suggestions cannot be applied while the pull request is queued to merge.Suggestion cannot be applied right now. Please check back later.
+You can’t perform that action at this time.

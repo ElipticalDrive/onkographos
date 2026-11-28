@@ -1,0 +1,107 @@
+# TriplaneGaussian
+
+
+## Overview
+TriplaneGaussian is a feed-forward method for generating 3D Gaussian Splatting (3DGS) representations from a single input image [S1][S2, unofficial]. It solves the problem of single-image 3D reconstruction by bypassing per-scene iterative optimization, instead predicting Gaussian attributes directly via a neural network [S1][S2, unofficial]. It sets itself apart from sibling methods like [GaussianDiffusion](9190-gaussiandiffusion.md) by employing a hybrid representation that combines a transformer-based point cloud decoder with a tri-plane decoder, rather than relying solely on diffusion processes or multi-view inputs [S1][S2, unofficial].
+
+## How it works
+**Inputs and Outputs:**
+*   **Input:** A single RGB image $I$.
+*   **Output:** A set of 3D Gaussians defined by attributes $\{\mu_k, s_k, q_k, \alpha_k, \mathbf{c}_k\}$ for $k=1 \dots N$, where $\mu$ is position, $s$ is scale, $q$ is rotation (quaternion), $\alpha$ is opacity, and $\mathbf{c}$ is color.
+
+**Data Structures:**
+1.  **Tri-plane:** A set of three 2D feature grids $T_x, T_y, T_z$, each of resolution $R \times R$ with $C$ channels. These encode spatial features for the 3D Gaussian attributes.
+2.  **Point Cloud:** A set of 3D points $P = \{p_k\}$ representing the initial centers of the Gaussians.
+3.  **MLP:** A multi-layer perceptron that maps augmented features to Gaussian attributes.
+
+**Steps:**
+1.  **Image Feature Extraction:** Extract features from the input image $I$ using a backbone network (e.g., ViT or ResNet) to obtain image features $F_{img}$ [S1][S2, unofficial].
+2.  **Coarse Generation:**
+    *   Generate a coarse point cloud $P_{coarse}$ using a transformer-based point cloud decoder conditioned on $F_{img}$ [S1][S2, unofficial].
+    *   Simultaneously, generate a tri-plane $T$ encoding 3DGS attribute information using a tri-plane decoder conditioned on $F_{img}$ [S1][S2, unofficial].
+3.  **Densification:** Densify the coarse point cloud $P_{coarse}$ through an upsampling method to produce a denser point cloud $P_{dense}$ [S1][S2, unofficial].
+4.  **Feature Querying:** Project the points in $P_{dense}$ onto the three planes of the tri-plane $T$. For each point $p_k$, sample features from $T_x, T_y, T_z$ at the projected 2D coordinates. Concatenate or aggregate these to form a tri-plane feature vector $f_{tri}$ for each point [S1][S2, unofficial].
+5.  **Feature Augmentation:** Augment the queried tri-plane features $f_{tri}$ with the projected image features $F_{img}$ corresponding to the viewpoint. This fusion combines global geometric context (from the tri-plane) with local appearance cues (from the image) [S1][S2, unofficial].
+6.  **Attribute Prediction:** Pass the augmented features through an MLP to predict the final 3D Gaussian attributes $\{\mu_k, s_k, q_k, \alpha_k, \mathbf{c}_k\}$ for each point in $P_{dense}$ [S1][S2, unofficial].
+
+**Pseudocode:**
+> **Unverified code.** The code below did not pass a test run against a reference implementation, or no test fits it, so it may contain errors.
+
+```python
+def triplane_gaussian_generate(image):
+    # 1. Extract image features
+    F_img = image_encoder(image)
+    
+    # 2. Generate coarse point cloud and tri-plane
+    P_coarse = transformer_point_cloud_decoder(F_img)
+    T = tri_plane_decoder(F_img)
+    
+    # 3. Densify point cloud
+    P_dense = upsampling_method(P_coarse)
+    
+    # 4. Query tri-plane features for each point
+    # Project 3D points to 2D on XY, YZ, XZ planes
+    coords_xy = P_dense[:, [0, 1]]
+    coords_yz = P_dense[:, [1, 2]]
+    coords_xz = P_dense[:, [0, 2]]
+    
+    # Sample features from tri-plane T at these coordinates
+    f_xy = sample_2d(T['xy'], coords_xy)
+    f_yz = sample_2d(T['yz'], coords_yz)
+    f_xz = sample_2d(T['xz'], coords_xz)
+    
+    # Aggregate tri-plane features (e.g., concatenate or sum)
+    f_tri = aggregate([f_xy, f_yz, f_xz])
+    
+    # 5. Augment with image features
+    # Project image features to match point locations or use global context
+    # Note: Exact projection mechanism for F_img is not specified in sources [G]
+    # Assuming F_img is broadcast or pooled to match point count
+    f_aug = concatenate([f_tri, F_img_pooled])
+    
+    # 6. Predict Gaussian attributes
+    gaussians = mlp_predictor(f_aug)
+    
+    return gaussians
+```
+
+**Parameters:**
+*   Tri-plane resolution $R$: Not given in the sources.
+*   Tri-plane channels $C$: Not given in the sources.
+*   Upsampling factor: Not given in the sources.
+
+**Edge Cases and Pitfalls:**
+*   **Precision:** Sampling from the tri-plane requires interpolation; bilinear or trilinear interpolation is standard but not explicitly stated [G].
+*   **Boundaries:** Points projected outside the tri-plane bounds need clamping or padding [G].
+*   **Degenerate Input:** Single images may lack depth information; the tri-plane helps infer 3D structure, but occluded regions may have ambiguous features [S1][S2, unofficial].
+
+## Subtopics
+
+### [Hybrid Gaussian Representation with Geometry-Guided Constraints](10609-hybrid-gaussian-representation-with-geometry-guided-constrai.md)
+This method is a 3D Gaussian Splatting rendering technique that adaptively selects between 2D and 3D Gaussian primitives based on local geometric cues to reduce redundancy in planar structures while maintaining volumetric accuracy. It integrates TensoSDF for global geometric consistency, enforcing implicit surface constraints during optimization. Unlike standard 3DGS which uses only 3D ellipsoids, or 2DGS which uses only tangent planes, this method dynamically switches representations to better fit both thin surfaces and volumetric details. It builds on [TriplaneGaussian](7558-triplanegaussian.md) by introducing explicit geometry-guided constraints via TensoSDF rather than relying solely on tri-plane initialization.
+
+### [Volume-Based Densification](10710-volume-based-densification.md)
+Volume-Based Densification is a refinement strategy for 3D Gaussian Splatting that replaces or supplements gradient-based Adaptive Density Control (ADC) with geometric volume analysis to manage primitive density. It solves the failure of traditional ADC in high-frequency, sparse regions (e.g., grass, wires) where positional gradients are insufficient to trigger densification, and where uncontrolled Gaussian growth leads to blurred artifacts. Unlike its sibling [Hybrid Gaussian Representation with Geometry-Guided Constraints](10609-hybrid-gaussian-representation-with-geometry-guided-constrai.md) which uses geometry-guided constraints, this method specifically leverages the ellipsoid volume and covariance condition number to drive cloning and splitting decisions.
+
+### Phys3DGS
+Phys3DGS is a physically-based inverse rendering method that resolves the "hidden Gaussian" problem, where Gaussians beneath the surface adversely affect pixel color in volume rendering, by employing deferred rendering and a mesh-3DGS hybrid representation [S1, [S2]]. It differs from standard relightable 3DGS methods by decoupling geometry estimation from material learning via a two-step training process, and from naive deferred approaches by introducing specific regularizations to stabilize BRDF learning and prevent mesh extraction artifacts [S1, [S2]].
+
+### FDGaussian
+FDGaussian injects tri-plane features into the diffusion model for better geometry generation [S2, unofficial].
+
+## Operating characteristics
+*   **Time Complexity:** Feed-forward inference is significantly faster than iterative optimization-based methods (like standard 3DGS training) as it avoids per-scene gradient descent [S1][S2, unofficial].
+*   **Memory Complexity:** Requires memory for the tri-plane representation and the MLP, plus the stored Gaussian attributes. The tri-plane size depends on resolution $R$ and channels $C$ [S1][S2, unofficial].
+*   **Measured Performance:** Not given in the sources.
+*   **Scaling:** Scales with the number of Gaussians generated, which is determined by the upsampling step and tri-plane resolution [S1][S2, unofficial].
+*   **Strengths:** Fast generation from a single image; hybrid representation captures both geometry and appearance [S1][S2, unofficial].
+*   **Limitations:** Quality depends on the generalization of the trained network; may struggle with unseen object categories or extreme viewpoints [S1][S2, unofficial].
+*   **When to use:** When fast single-image 3DGS generation is needed and iterative optimization is too slow.
+*   **When not to use:** When high-fidelity reconstruction from multiple views is available and iterative optimization is feasible.
+
+## Background
+TriplaneGaussian was proposed in the context of recent advances in 3D Gaussian Splatting, specifically addressing the need for direct generation of 3DGS from single images [S1][S2, unofficial]. It builds on the principles of hybrid representations and feed-forward learning methods in the Gaussian Avatar Reconstruction family [S1][S2, unofficial]. The method is cited in surveys of recent advances in 3D Gaussian Splatting [S1][S2, unofficial].
+
+## Sources
+[S1] Recent advances in 3D Gaussian splatting, https://doi.org/10.1007/s41095-024-0436-y, fetched 2026-10-26
+[S2] PDF Recent advances in 3D Gaussian splatting - Springer, https://link.springer.com/content/pdf/10.1007/s41095-024-0436-y.pdf, fetched 2026-10-29 (unofficial)

@@ -1,0 +1,437 @@
+--- v003.md
++++ v004.md
+@@ -1,232 +1,231 @@
+ # Animated Sparse Voxel Octrees (ASVO)
+ 
++Also called: Animated Sparse Voxel Octree Renderer with X-Toon Shading, SVO renderer, XToonVolume
+ 
+ ## Overview
+-Animated Sparse Voxel Octrees (ASVO) is a GPU-based rendering technique that applies rigid transformations or skeletal skinning to voxel-based 3D models in real-time [S1, unofficial]. It differs from standard Sparse Voxel Octree ray traversal by decoupling traversal into a parallel job queue system that processes animated leaf nodes, allowing efficient skeletal animation without reconstructing the octree structure per frame [S1, unofficial].
++ASVO is a GPU-based raycasting method for rendering animated sparse voxel octrees (SVOs) using X-Toon shading [S1, S2, unofficial]. It solves the problem of efficiently rendering voxel-based characters and models that undergo rigid transformations or skinning by animating rigid octree parts via a keyframed skeleton and placing them in a per-frame top-level bounding volume hierarchy (BVH) [S1, unofficial]. Unlike static SVO renderers, ASVO dynamically updates the spatial acceleration structure every frame to account for bone-driven deformation, allowing for real-time animation of complex voxel models [S2, unofficial].
+ 
+ ## How it works
+-ASVO operates in two main phases: a traversal phase that identifies visible, animated voxels and a drawing phase that resolves pixel coverage and lighting [S1, unofficial]. The method relies on a breadth-first search (BFS) job queue to manage traversal state across the octree hierarchy [S1, unofficial].
++The method consists of an octree builder, an animation system, a traversal kernel, and a shading/draw kernel. It is implemented using OpenGL 4.5 compute shaders [S1, unofficial].
+ 
+ ### Inputs and Outputs
+ **Inputs:**
+-*   **Octree Data:**
+-    *   `innerNodes`: Array of `BFSInnerNode` structures. Each contains a `mask` (bitmask of children) and `childPtr` (index offset to children) [S1, unofficial].
+-    *   `leaves`: Array of `VisualData` structures. Each contains visual properties (`normal`, `tangent`, `pos`, `texCoord`, `eyeVec`, `originalCenter`) and animation data (`boneWeights`, `boneIndex0-3`) [S1, unofficial].
+-    *   `animation`: Array of `float4x4` matrices representing bone transformations for the current frame. Size is `frameCount * boneCount` [S1, unofficial].
+-    *   `jobs`: Initial queue of `BFSJob` structures. Each job contains `index` (node index), `x`, `y`, `z` (subdivision coordinates) [S1, unofficial].
+-    *   `dim`: The total dimension of the octree space [S1, unofficial].
+-    *   `level`: The maximum depth of the octree [S1, unofficial].
+-    *   `boneCount`: Number of bones in the skeleton [S1, unofficial].
+-*   **Camera/View:**
+-    *   `world`, `view`, `projection`: Transformation matrices [S1, unofficial].
+-    *   `camPos`: Camera position in world space [S1, unofficial].
+-*   **Lighting:**
+-    *   `shadowMap`: Depth texture for shadow testing [S1, unofficial].
+-    *   `diffuse`, `illum`, `spec`, `normal`: Texture maps for material properties [S1, unofficial].
++*   Sparse Voxel Octree data: Inner nodes, leaf nodes (visual data), and animation bone matrices.
++*   Scene data: Camera position, view/projection matrices, light position, and texture maps (diffuse, illumination, normal, specular) [S2, unofficial].
++*   Animation frame index [S2, unofficial].
+ 
+ **Outputs:**
+-*   `depthBuffer`: Buffer storing the minimum depth for each screen pixel [S1, unofficial].
+-*   `voxelBuffer`: Buffer storing visual data for visible voxels [S1, unofficial].
+-*   `colorBuffer`: Final rendered image [S1, unofficial].
++*   Color buffer (final rendered image) [S2, unofficial].
++*   Depth buffer (for visibility culling) [S2, unofficial].
+ 
+ ### Data Structures
+-*   **BFSJob**: `index` (`uint32_t`), `x`, `y`, `z` (`uint32_t`) [S1, unofficial].
+-*   **BFSInnerNode**: `mask` (`uint64_t`), `childPtr` (`uint32_t`) [S1, unofficial].
+-*   **VisualData** (Leaf Node): `vd.boneWeights` (`float4`), `vd.boneIndex0-3` (`uint32_t`), `vd.normal`, `vd.tangent`, `vd.pos`, `vd.texCoord`, `vd.eyeVec`, `vd.originalCenter` (`float3`/`float4`), `mask` (`uint64_t`) [S1, unofficial].
+-
+-### Algorithm Steps
+-1.  **Initialization**: Load octree data, animation matrices, and initial BFS jobs from the root [S1, unofficial]. Initialize `depthBuffer` with maximum depth values [S1, unofficial]. Initialize `sharedTravQueuePtr` to 0 [S1, unofficial].
+-2.  **Traversal Kernel (Per Job)**: Each thread processes one job from the queue [S1, unofficial].
+-    a. **Grid Cell Calculation**: Calculate the dimensions of the current voxel in world space based on the octree level [S1, unofficial].
+-       $$ gridCellDim = \frac{dim}{2^{level}} $$
+-       $$ gridCellHalfDim = gridCellDim \times 0.5 $$
+-    b. **Voxel Center Computation**: Determine the center of the voxel in world space [S1, unofficial].
+-       *   If the node is a leaf with skinning (`node.vd.boneWeights.x > 0.0`):
+-           *   Retrieve bone transformations $M_0, M_1, M_2, M_3$ from the `animation` buffer using `boneIndex0-3` [S1, unofficial].
+-           *   Interpolate the center position $P_{orig}$ using bone weights $w_0, w_1, w_2, w_3$:
+-               $$ P_{world} = \sum_{i=0}^{3} w_i \cdot (M_i \cdot P_{orig}) $$
+-           *   Adjust the half-dimension to counteract stretching during skinning:
+-               $$ involvedBones = \sum_{i=0}^{3} w_i $$
+-               $$ gridCellHalfDim = gridCellHalfDim \times \min(2.0, involvedBones) $$
+-       *   Otherwise, use the original center position from the leaf data [S1, unofficial].
+-    c. **Clip Space Transformation**: Transform the center and dimensions into clip space [S1, unofficial].
+-       $$ P_{clip} = projection \times view \times world \times P_{world} $$
+-       Compute the eye vector:
+-       $$ eyeVec = \frac{camPos - P_{world}}{\|camPos - P_{world}\|} $$
+-    d. **Culling**:
+-       *   **Frustum Culling**: Check if the voxel's clip-space bounds are within $[-1, 1]$ [S1, unofficial].
+-       *   **Back-face Culling**: If `level > 8`, check the dot product of the normal and eye vector:
+-           $$ dot(node.vd.normal, eyeVec) \ge -0.4 $$
+-       If either culling test fails, discard the voxel [S1, unofficial].
+-    e. **Screen Projection and Depth**: Project the voxel center to screen coordinates $(x, y)$ [S1, unofficial]. Compute depth:
+-       $$ depth = P_{clip}.z \times 2147483647 $$
+-    f. **Queue Management or Buffer Update**:
+-       *   If the voxel has children (`popcount(node.mask) != 0`) AND spans more than 1 pixel (`dimVec.x > 1.0`):
+-           *   Generate child jobs for the 8 sub-voxels.
+-           *   Add child jobs to the queue using `atomicAdd` on `sharedTravQueuePtr` [S1, unofficial].
+-       *   Otherwise (leaf node or too small):
+-           *   Update the depth buffer:
+-               $$ atomicMin(depthBuffer + index, depth) $$
+-    g. **Visual Data Storage**: If the voxel was drawn (`P_{clip}.w == 1.0`) and its depth matches the updated depth buffer value:
+-       *   Write visual data (`normal`, `tangent`, `position`, `texCoord`, `eyeVec`, `originalCenter`) to `voxelBuffer` at the screen index [S1, unofficial].
+-3.  **Drawing Kernel (Per Pixel)**: For each pixel $(x, y)$:
+-    a. **Neighborhood Scan**: Scan a $3 \times 3$ neighborhood in the `depthBuffer` to find the voxel with the minimum depth that covers the pixel [S1, unofficial]. A voxel covers the pixel if:
+-       $$ |vd.pos.x - 0.5 - x| \le vd.pos.z $$
+-       $$ |vd.pos.y - 0.5 - y| \le vd.pos.w $$
+-    b. **Lighting**: Transform the voxel center to light space [S1, unofficial]. Check shadow mapping against `shadowMap` [S1, unofficial]. Compute diffuse and specular lighting using `diffuse`, `illum`, `normal`, and `spec` textures [S1, unofficial]. Update the `colorBuffer` [S1, unofficial].
++The implementation uses parallel arrays to store the octree and job queue.
++
++**Inner Nodes (`BFSInnerNode`):**
++*   `mask`: Bitmask indicating which of the 8 children are occupied.
++*   `childPtr`: Index offset to the first child in the inner node array.
++
++**Leaf Nodes (`VisualData`):**
++*   `boneWeights`: Array of 4 floats representing skinning weights. If `boneWeights.x > 0`, the leaf is skinned [S2, unofficial].
++*   `boneIndex0-3`: Indices of the 4 bones influencing this leaf [S2, unofficial].
++*   `normal`: Surface normal vector [S2, unofficial].
++*   `pos`: Packed position/size data (used for screen-space checks) [S2, unofficial].
++*   `tangent`, `texCoord`, `eyeVec`, `originalCenter`: Additional visual data [S2, unofficial].
++
++**Jobs (`BFSJob`):**
++*   `index`: Index of the node in the inner node array.
++*   `x`, `y`, `z`: Subscript within the parent node (0-7) [S2, unofficial].
++
++**Animation Buffer:**
++*   `animation`: Array of `float4x4` matrices. Size is `m_frameCount * m_boneCount` [S2, unofficial].
++
++### Numbered Steps
++
++1.  **Octree Building (Pre-processing):**
++    *   Build the octree from Signed Distance Fields (SDFs) or raw volumes using a Morton-sorted, bottom-up approach [S1, unofficial].
++    *   Prefilter color and normal data during construction [S1, unofficial].
++    *   Perform size checks on nodes [S1, unofficial].
++
++2.  **Animation Update:**
++    *   Update the current animation frame based on elapsed time [S2, unofficial].
++    *   Rigid octree parts are animated by a keyframed skeleton [S1, unofficial].
++    *   Construct a per-frame top-level BVH containing the animated parts [S1, unofficial].
++
++3.  **Traversal Kernel (Job Queue Processing):**
++    *   Each thread processes one job from a shared queue.
++    *   **Grid Cell Calculation:** Calculate the dimensions of the voxel at the current octree level:
++        $$gridCellDim = \frac{dimension}{2^{octreeLevel}}$$
++        $$gridCellHalfDim = gridCellDim \times 0.5$$
++        [S2, unofficial]
++    *   **Skinning Application:**
++        *   Compute the voxel center in world space.
++        *   If the leaf node has bone weights (`node.vd.boneWeights.x > 0`), interpolate the center position using up to 4 bone transformations from the `animation` buffer based on `boneIndex0-3` and `boneWeights.x-w` [S2, unofficial].
++        *   Otherwise, use the original center [S2, unofficial].
++    *   **Dimension Adjustment:** Resize the voxel half-dimension to counteract stretching during skinning:
++        $$gridCellHalfDim \times= \min(2.0, \text{involvedBones})$$
++        [S2, unofficial]
++    *   **Transformation to Clip Space:**
++        *   Transform the center and dimensions into clip space by multiplying by `world`, `view`, and `projection` matrices [S2, unofficial].
++        *   Compute the eye vector:
++            $$eyeVec = \text{normalize}(camPos - center)$$
++            [S2, unofficial]
++    *   **Culling:**
++        *   Perform frustum culling: The voxel is visible if its clip-space bounds are within $[-1, 1]$ [S2, unofficial].
++        *   Perform back-face culling: If the octree level is greater than 8, the voxel is visible only if:
++            $$\text{dot}(node.vd.normal, eyeVec) \ge -0.4$$
++            [S2, unofficial]
++    *   **Screen Projection and Queueing:**
++        *   Project the voxel center to screen coordinates $(x, y)$ and compute depth:
++            $$depth = center.z \times \text{INT\_MAX}$$
++            [S2, unofficial]
++        *   If the voxel has children (`d_getChildCountFromMask(node.mask) != 0`) and spans more than 1 pixel (`dimVec.x > 1.0`), add child jobs to the queue using `atomicAdd` on `sharedTravQueuePtr` [S2, unofficial].
++        *   Otherwise, update the depth buffer:
++            $$atomicMin(depthBuffer + index, depth)$$
++            [S2, unofficial]
++    *   **Visual Data Writing:**
++        *   If the voxel was drawn (`w==1`) and its depth matches the updated depth buffer value, write its visual data (normal, tangent, position, texCoord, eyeVec, originalCenter) to the `voxelBuffer` at the screen index [S2, unofficial].
++
++4.  **Draw Kernel (Shading):**
++    *   For each pixel, scan a 3x3 neighborhood in the depth buffer to find the voxel with the minimum depth that covers the pixel [S2, unofficial].
++    *   A voxel covers the pixel if:
++        $$|vd.pos.x - 0.5 - x| \le vd.pos.z \quad \text{and} \quad |vd.pos.y - 0.5 - y| \le vd.pos.w$$
++        [S2, unofficial]
++    *   **Lighting:**
++        *   Transform the voxel center to light space [S2, unofficial].
++        *   Check shadow mapping against `shadowMap` [S2, unofficial].
++        *   Compute diffuse and specular lighting using textures for diffuse, illumination, normal, and specular maps [S2, unofficial].
++        *   Update the color buffer [S2, unofficial].
+ 
+ ### Pseudocode
++
+ ```python
+-import math
+-
+-class BFSJob:
+-    def __init__(self, index, x, y, z):
+-        self.index = index
+-        self.x = x
+-        self.y = y
+-        self.z = z
+-
+-class float3:
+-    def __init__(self, x, y, z):
+-        self.x, self.y, self.z = x, y, z
+-    def __mul__(self, s): return float3(self.x*s, self.y*s, self.z*s)
+-    def __add__(self, o): return float3(self.x+o.x, self.y+o.y, self.z+o.z)
+-    def __sub__(self, o): return float3(self.x-o.x, self.y-o.y, self.z-o.z)
+-    def __matmul__(self, m):
+-        return float3(
+-            m[0][0]*self.x + m[0][1]*self.y + m[0][2]*self.z + m[0][3],
+-            m[1][0]*self.x + m[1][1]*self.y + m[1][2]*self.z + m[1][3],
+-            m[2][0]*self.x + m[2][1]*self.y + m[2][2]*self.z + m[2][3]
+-        )
+-    def __rmul__(self, s): return self * s
+-
+-class float4:
+-    def __init__(self, x, y, z, w):
+-        self.x, self.y, self.z, self.w = x, y, z, w
+-
+-def dot(a, b):
+-    return a.x*b.x + a.y*b.y + a.z*b.z
+-
+-def length(v):
+-    return math.sqrt(v.x**2 + v.y**2 + v.z**2)
+-
+-def normalize(v):
+-    l = length(v)
+-    return float3(v.x/l, v.y/l, v.z/l) if l > 0 else float3(0,0,0)
+-
+-def atomicAdd(ptr, val):
+-    old = ptr[0]
+-    ptr[0] = old + val
+-    return old
+-
+-def atomicMin(ptr, val):
+-    old = ptr[0]
+-    if val < old: ptr[0] = val
+-    return old
+-
+-def popcount(n):
+-    return bin(n).count('1')
+-
+-def traverse_job(job, innerNodes, leaves, animation, dim, level, camPos, world, view, projection,
+-                 depthBuffer, voxelBuffer, queue, queuePtr, width, height):
+-    gridCellDim = dim / (1 << level)
+-    gridCellHalfDim = gridCellDim * 0.5
+-
+-    is_leaf = job.index >= len(innerNodes)
+-    node = leaves[job.index - len(innerNodes)] if is_leaf else innerNodes[job.index]
+-
+-    if is_leaf and node.vd.boneWeights.x > 0.0:
+-        P_orig = node.vd.originalCenter
+-        w = node.vd.boneWeights
+-        M0, M1, M2, M3 = animation[node.vd.boneIndex0], animation[node.vd.boneIndex1], animation[node.vd.boneIndex2], animation[node.vd.boneIndex3]
+-        P_world = w.x * (M0 @ P_orig) + w.y * (M1 @ P_orig) + w.z * (M2 @ P_orig) + w.w * (M3 @ P_orig)
+-        involvedBones = w.x + w.y + w.z + w.w
+-        gridCellHalfDim = gridCellHalfDim * min(2.0, involvedBones)
++# Traversal Kernel
++def traversal_kernel(job_queue, inner_nodes, leaves, animation, world_matrix, view_matrix, projection_matrix, cam_pos, depth_buffer, voxel_buffer, shared_trav_queue_ptr):
++    job = job_queue.pop()
++    node = inner_nodes[job.index]
++    
++    # Determine octree level from job context or global state
++    octree_level = get_octree_level(job)
++    dimension = get_world_dimension()
++    
++    # Grid cell dimensions
++    grid_cell_dim = dimension / (2.0 ** octree_level)
++    grid_cell_half_dim = grid_cell_dim * 0.5
++    
++    # Get leaf visual data if this is a leaf traversal, or process children
++    # Assuming job points to a node to be expanded or a leaf to be rendered
++    # For simplicity, assuming we are processing a leaf node's contribution here
++    # In the actual BFS, jobs point to inner nodes to expand. 
++    # The logic below reflects the leaf processing described in notes.
++    
++    # If this job represents a leaf node (or we are processing leaf data):
++    vd = leaves[job.index] # Simplified indexing for leaf
++    
++    # Skinning
++    center = get_original_center(job)
++    if vd.bone_weights[0] > 0.0:
++        involved_bones = count_non_zero(vd.bone_weights)
++        # Interpolate center using up to 4 bone transformations
++        center = interpolate_skinning(center, vd.bone_index_0, vd.bone_index_1, vd.bone_index_2, vd.bone_index_3, vd.bone_weights, animation)
++        # Counteract stretching
++        grid_cell_half_dim *= min(2.0, involved_bones)
++    
++    # Transform to clip space
++    center_world = center
++    center_clip = projection_matrix * view_matrix * world_matrix * center_world
++    
++    # Eye vector
++    eye_vec = normalize(cam_pos - center_world)
++    
++    # Culling
++    if not is_in_frustum(center_clip):
++        return
++    
++    if octree_level > 8:
++        if dot(vd.normal, eye_vec) < -0.4:
++            return
++            
++    # Project to screen
++    x_screen, y_screen = project_to_screen(center_clip)
++    depth = center_clip.z * INT_MAX
++    
++    # Check if leaf or has children
++    child_count = get_child_count_from_mask(node.mask)
++    dim_vec = get_dimension_vector(node)
++    
++    if child_count != 0 and dim_vec.x > 1.0:
++        # Add children to queue
++        for i in range(8):
++            if (node.mask & (1 << i)) != 0:
++                new_job = BFSJob(node.child_ptr + i, (job.x * 2) + (i & 1), (job.y * 2) + ((i & 2) >> 1), (job.z * 2) + ((i & 4) >> 2))
++                atomic_add(shared_trav_queue_ptr, 1)
++                job_queue[atomic_add(shared_trav_queue_ptr, -1)] = new_job # Push to queue
+     else:
+-        P_world = node.vd.originalCenter
+-
+-    P_clip = projection @ view @ world @ P_world
+-    eyeVec = normalize(camPos - P_world)
+-
+-    if not (-1.0 <= P_clip.x <= 1.0 and -1.0 <= P_clip.y <= 1.0 and -1.0 <= P_clip.z <= 1.0):
+-        return
+-    if level > 8:
+-        if dot(node.vd.normal, eyeVec) < -0.4:
+-            return
+-
+-    x_screen = P_clip.x / P_clip.w
+-    y_screen = P_clip.y / P_clip.w
+-    depth = P_clip.z * 2147483647
+-
+-    childCount = popcount(node.mask)
+-    # Estimate screen-space dimension of the voxel
+-    dimClip = projection @ view @ world @ (P_world + float3(gridCellHalfDim, 0, 0))
+-    dimVec = float3(dimClip.x / dimClip.w, dimClip.y / dimClip.w, dimClip.z / dimClip.w)
+-    dimScreen = abs(dimVec.x - x_screen) + abs(dimVec.y - y_screen)
+-
+-    if childCount != 0 and dimScreen > 1.0:
+-        for j in range(8):
+-            if (node.mask >> j) & 1:
+-                child_index = 0
+-                for k in range(j):
+-                    if (node.mask >> k) & 1:
+-                        child_index += 1
+-                new_job = BFSJob(
+-                    index=node.childPtr + child_index,
+-                    x=2*job.x + (j & 1),
+-                    y=2*job.y + ((j & 2) >> 1),
+-                    z=2*job.z + ((j & 4) >> 2)
+-                )
+-                idx = atomicAdd(queuePtr, 1)
+-                queue[idx] = new_job
+-    else:
+-        index = int(x_screen) + int(y_screen) * width
+-        old_depth = atomicMin(depthBuffer + index, depth)
+-        if P_clip.w == 1.0 and depth == old_depth:
+-            voxelBuffer[index] = node.vd
+-
+-def draw_pixel(x, y, depthBuffer, voxelBuffer, shadowMap, diffuse, illum, spec, normal, width, height):
+-    min_depth = float('inf')
++        # Update depth buffer
++        index = get_screen_index(x_screen, y_screen)
++        old_depth = atomic_min(depth_buffer + index, depth)
++        
++        # If we won the depth test (or it was the first write)
++        if depth == depth_buffer[index]:
++            # Write visual data
++            voxel_buffer[index] = VisualData(vd.normal, vd.tangent, center_world, vd.tex_coord, eye_vec, vd.original_center)
++
++# Draw Kernel
++def draw_kernel(depth_buffer, voxel_buffer, shadow_map, diffuse_map, illum_map, spec_map, normal_map, color_buffer):
++    x, y = get_pixel_coordinates()
++    
++    # Scan 3x3 neighborhood for min depth
++    min_depth = INT_MAX
+     best_voxel = None
+-    for dx in range(-1, 2):
+-        for dy in range(-1, 2):
+-            px, py = x + dx, y + dy
+-            if 0 <= px < width and 0 <= py < height:
+-                idx = px + py * width
+-                d = depthBuffer[idx]
+-                if d < min_depth:
+-                    min_depth = d
+-                    best_voxel = voxelBuffer[idx]
+-
++    
++    for dy in range(-1, 2):
++        for dx in range(-1, 2):
++            idx = get_screen_index(x + dx, y + dy)
++            d = depth_buffer[idx]
++            if d < min_depth:
++                min_depth = d
++                best_voxel = voxel_buffer[idx]
++                
+     if best_voxel is None:
+         return
+-
+-    if abs(best_voxel.pos.x - 0.5 - x) <= best_voxel.pos.z and \
+-       abs(best_voxel.pos.y - 0.5 - y) <= best_voxel.pos.w:
+-        # Transform to light space and sample shadow map [G]
+-        # P_light = light_view_projection @ world @ best_voxel.originalCenter
+-        # shadow = shadowMap.sample(P_light.xy / P_light.w, P_light.z / P_light.w)
+-        # Compute diffuse and specular lighting from textures [G]
+-        # color = compute_diffuse(best_voxel, diffuse, illum) + compute_specular(best_voxel, spec)
+-        # color *= shadow
+-        colorBuffer[x + y * width] = best_voxel.color # Placeholder for final color [G]
++        
++    # Check coverage
++    if abs(best_voxel.pos.x - 0.5 - x) <= best_voxel.pos.z and abs(best_voxel.pos.y - 0.5 - y) <= best_voxel.pos.w:
++        # Lighting
++        light_space_pos = transform_to_light_space(best_voxel.original_center)
++        shadow = check_shadow_mapping(light_space_pos, shadow_map)
++        
++        diffuse = sample_texture(diffuse_map, best_voxel.tex_coord)
++        illum = sample_texture(illum_map, best_voxel.tex_coord)
++        spec = sample_texture(spec_map, best_voxel.tex_coord)
++        normal = sample_texture(normal_map, best_voxel.tex_coord)
++        
++        color = compute_diffuse_specular_lighting(normal, best_voxel.eye_vec, light_space_pos, shadow, diffuse, illum, spec)
++        color_buffer[x, y] = color
+ ```
+ 
+-### Parameters and Edge Cases
+-*   **Level Threshold**: Back-face culling is only applied if `level > 8` [S1, unofficial].
+-*   **Bone Weights**: Skinning is applied only if `boneWeights.x > 0.0` [S1, unofficial].
+-*   **Precision**: Depth is computed as `center.z * INT_MAX`, which may introduce precision issues for very large scenes or deep octrees [S1, unofficial].
+-*   **Queue Size**: The traversal uses a dynamic queue with `atomicAdd`, requiring careful management of shared memory or global memory contention [S1, unofficial].
++### Parameters
++*   **Graphics API:** OpenGL 4.5 compute shaders [S1, unofficial].
++*   **Back-face Culling Threshold:** `dot(normal, eyeVec) >= -0.4` for levels > 8 [S2, unofficial].
++*   **Skinning Stretch Compensation:** `min(2.0, involvedBones)` [S2, unofficial].
++
++### Edge Cases and Pitfalls
++*   **Divide by Zero:** In the original 2016 shader, a divide by zero error occurred when `r = 1` in the X-Toon log formula [S1, unofficial]. This must be guarded against.
++*   **Light Direction:** The original shader incorrectly used the light position as a direction vector. It must be converted to a direction (light position - surface position) [S1, unofficial].
++*   **Negative Dot Product:** Using `pow` on a negative `n.v` (normal dot view) caused issues. Ensure the base is non-negative or handle negative results appropriately [S1, unofficial].
++*   **Unsigned Gradients:** Ensure gradients are handled as signed values if required by the shading model, as unsigned gradients caused artifacts in the original version [S1, unofficial].
++*   **GL_REPEAT:** Issues with `GL_REPEAT` texture wrapping were present in the original shader and must be fixed [S1, unofficial].
+ 
+ ## Operating characteristics
+-*   **Time Complexity**: Not given in the sources.
+-*   **Memory Complexity**: Requires storage for `innerNodes`, `leaves`, `animation` matrices, and buffers (`depthBuffer`, `voxelBuffer`, `colorBuffer`). The queue size depends on the branching factor and visibility [S1, unofficial].
+-*   **Performance**: High performance on CUDA-capable GPUs (Compute Capability 3.0+) due to parallel job processing [S1, unofficial].
+-*   **Strengths**: Efficient handling of animated voxel models; no need to rebuild the octree for animation frames [S1, unofficial].
+-*   **Limitations**: Limited to rigid transformations and skinning; complex deformations may require more sophisticated approaches. Precision issues with depth buffering in large scenes [S1, unofficial].
++*   **Time Complexity:** The traversal is hierarchical DDA with pixel-footprint LOD [S1, unofficial]. The complexity depends on the depth of the octree and the number of visible voxels. The use of a job queue allows for parallel processing on the GPU [S2, unofficial].
++*   **Memory Complexity:** Requires storage for inner nodes, leaf nodes, animation matrices, and the BVH [S1, S2, unofficial]. The BVH is rebuilt per frame, which adds overhead but allows for efficient culling of animated parts [S1, unofficial].
++*   **Performance:** The implementation includes unit tests for traversal and BVH against brute force, and a `--compare` mode that checks GPU output against the CPU renderer, ensuring correctness [S1, unofficial].
++*   **Strengths:** Efficiently handles animated voxel models using skinning and hierarchical culling. The per-frame BVH allows for efficient culling of non-visible animated parts.
++*   **Limitations:** The per-frame BVH construction adds overhead. The method is specific to OpenGL 4.5 compute shaders in the provided implementation [S1, unofficial].
+ 
+ ## Background
+-ASVO was developed as a CUDA/C++ implementation for rendering animated voxel models [S1, unofficial]. It builds on the concept of Sparse Voxel Octrees, extending them to support skeletal animation by applying bone transformations to leaf nodes during traversal [S1, unofficial]. The project includes a high-performance CUDA implementation and an XNA/C# prototype for algorithm design [S1, unofficial].
++ASVO was introduced as part of a thesis project on animated sparse voxel octrees [S2, unofficial]. The original implementation was in CUDA/C++ with an XNA/C# prototype for design [S2, unofficial]. A later rebuild by Andre Rogers added an OpenGL 4.5 compute shader implementation with X-Toon shading, fixing several shader bugs from the original 2016 version [S1, unofficial]. The method is demonstrated with scenes such as a crowd of walkers sharing limb octrees and a bonsai tree [S1, unofficial].
+ 
+ ## Sources
+-[S1] denniskb/asvo, https://github.com/denniskb/asvo, fetched 2026-10-26 (unofficial)+[S1] Add svo/: animated sparse voxel octree renderer with X-Toon shading, https://github.com/andrerogers/XToonVolume/pull/1, fetched 2026-10-25 (unofficial)
++[S2] denniskb/asvo, https://github.com/denniskb/asvo, fetched 2026-10-26 (unofficial)

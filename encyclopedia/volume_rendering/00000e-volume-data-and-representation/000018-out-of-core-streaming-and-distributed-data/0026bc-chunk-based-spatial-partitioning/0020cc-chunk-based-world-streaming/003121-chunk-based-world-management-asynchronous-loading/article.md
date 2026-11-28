@@ -1,0 +1,164 @@
+# Chunk-Based World Management & Asynchronous Loading
+
+Also called: Async Chunk Streaming, CalculateDistances, CheckRegion, Chunk Culling and Unloading, Chunk Loading and Culling, Chunk Management (Distance-Based Loading/Unloading), Dynamic Chunk Loading, Region-Based Chunk Management
+
+## Overview
+Chunk-Based World Management & Asynchronous Loading manages voxel worlds by dividing them into fixed-size chunks and dynamically loading or unloading them based on camera proximity [S2, S4, S5, unofficial]. It solves memory and rendering load issues by removing distant chunks and requesting missing ones [S1, S2, unofficial]. It sets itself apart from [Synchronous Chunk Loading](3904-synchronous-chunk-loading.md) by throttling generation to prevent frame spikes, and from [Chunk Lifecycle Management](3987-chunk-lifecycle-management.md) by focusing on spatial culling and the asynchronous I/O/generation pipeline [S2, S4, unofficial].
+
+## How it works
+**Inputs:** Camera/player position, render distance parameters, chunk size, asynchronous generation flag [S1, S4, S5, unofficial].
+**Outputs:** Updated set of active chunks in the scene, with meshes rendered and distant meshes disposed [S2, S4, unofficial].
+
+**Data Structures:**
+*   `chunks`: Map or vector storing chunk data keyed by position (string `'x|y|z'` or `glm::ivec3`) [S2, S5, unofficial].
+*   `pendingChunks`: List of chunk positions awaiting generation [S2, unofficial].
+*   `activeChunkKeys_`: List of chunk keys currently within render distance [S5, unofficial].
+*   `meshes`: Map storing GPU resources (VAOs, geometries) associated with chunk keys [S2, unofficial].
+
+**Steps:**
+
+1.  **Calculate Proximity:**
+    *   For flat worlds: Compute camera chunk coordinates using integer division:
+        $$x_{pos} = \lfloor \text{CameraPos}_x / \text{CHUNK\_SIZE} \rfloor$$
+        $$y_{pos} = \lfloor \text{CameraPos}_z / \text{CHUNK\_SIZE} \rfloor$$ [S6, unofficial]
+    *   For spherical worlds: Calculate distance to planet center:
+        $$d_{center} = \| \text{CamPos} - \text{PlanetCenter} \|$$
+        $$d_{surface} = d_{center} - \text{Radius}$$ [S5, unofficial]
+        Calculate relative camera chunk key:
+        $$\text{CamChunkKey} = \lfloor (\text{CamPos} - \text{PlanetCenter}) / \text{ChunkSize} \rfloor$$ [S5, unofficial]
+
+2.  **Identify Active Chunks:**
+    *   Query nearby chunks within `removeDistance` (or `chunkRenderDistance`) from the camera [S1, S2, S4, unofficial].
+    *   For spherical worlds, iterate a radius around the camera chunk key. Skip chunks if their distance from the camera exceeds the render limit [S5, unofficial].
+    *   For spherical worlds, ensure chunks intersect the planet sphere by checking if the chunk center distance is within $\text{Radius} + \text{ChunkSize} \times \sqrt{3}$ [S5, unofficial].
+
+3.  **Unload Distant Chunks:**
+    *   Iterate over all currently loaded chunks [S2, S4, unofficial].
+    *   If a chunk is not in the active set:
+        *   Remove from `pendingChunks` if present [S2, unofficial].
+        *   Dispose GPU resources (e.g., delete VAOs, geometries) [S2, S4, unofficial].
+        *   Delete chunk data and mesh references from storage [S2, S4, unofficial].
+        *   Emit `removeChunk` event [S2, S4, unofficial].
+
+4.  **Load Missing Chunks (Asynchronous):**
+    *   Identify chunks in the active set that are not yet loaded [S2, S4, unofficial].
+    *   If `asyncChunkGeneration` is false, load all pending chunks immediately [S2, unofficial].
+    *   If `asyncChunkGeneration` is true, throttle the load rate:
+        *   Calculate count: $\max(1, \min(\text{pendingChunks.length} \times 0.1, \text{pendingChunks.length}))$ [S2, unofficial].
+        *   Or limit to `maxNewPerFrame` (e.g., 16) for spherical worlds [S5, unofficial].
+        *   Or load only one chunk per frame if a `chunkAdded` flag is set [S6, unofficial].
+    *   For each chunk to load:
+        *   Add to `pendingChunks` if not already present [S2, unofficial].
+        *   Trigger asynchronous generation task with seed, position, and radius [S5, unofficial].
+        *   If meshing is required, add async mesh building task [S5, unofficial].
+
+5.  **Render Active Chunks:**
+    *   For each key in `activeChunkKeys_`:
+        *   If chunk data is ready and mesh exists:
+            *   Initialize OpenGL context if needed [S5, unofficial].
+            *   Render if distance $\le \text{ChunkSize} \times (\text{ChunkRenderDistance} + 1)$ [S5, unofficial].
+
+**Parameters:**
+*   `CHUNK_SIZE`: Spatial dimensions of a chunk in world units [S6, unofficial].
+*   `CHUNK_RENDER_RADIUS`: Maximum distance in chunks from camera to load/unload [S6, unofficial].
+*   `removeDistance`: Maximum distance from player to keep chunks loaded [S2, S4, unofficial].
+*   `asyncChunkGeneration`: Boolean flag for throttled loading [S2, unofficial].
+*   `CHUNK_LOAD_RATE`: Minimum time interval (seconds) between chunk loading operations [S6, unofficial].
+*   `hideDistance = CHUNK\_SIDE \times chunkViewDistance`, `removeDistance = hideDistance + hideDistance \times chunkMantainDistance` [S1, unofficial].
+
+**Pseudocode:**
+> **Unverified code.** The code below did not pass a test run against a reference implementation, or no test fits it, so it may contain errors.
+
+```python
+def manage_chunks(camera_pos, chunk_size, render_radius, remove_distance, async_gen, planet_center=None, planet_radius=None):
+    # State variables
+    chunks = {}          # key -> chunk_data
+    meshes = {}          # key -> mesh_object
+    pending_chunks = []  # list of keys
+    active_chunk_keys = []
+
+    # 1. Identify active chunks
+    if planet_center is None:
+        cam_chunk_x = int(camera_pos.x // chunk_size)
+        cam_chunk_y = int(camera_pos.z // chunk_size)
+        for dx in range(-render_radius, render_radius + 1):
+            for dy in range(-render_radius, render_radius + 1):
+                active_chunk_keys.append((cam_chunk_x + dx, cam_chunk_y + dy))
+    else:
+        dist_to_center = ((camera_pos.x - planet_center.x)**2 + (camera_pos.y - planet_center.y)**2 + (camera_pos.z - planet_center.z)**2)**0.5
+        cam_chunk_key = (int((camera_pos.x - planet_center.x) // chunk_size), int((camera_pos.y - planet_center.y) // chunk_size), int((camera_pos.z - planet_center.z) // chunk_size))
+        build_radius = min(render_radius, 16)
+        for x in range(cam_chunk_key[0] - build_radius, cam_chunk_key[0] + build_radius + 1):
+            for y in range(cam_chunk_key[1] - build_radius, cam_chunk_key[1] + build_radius + 1):
+                for z in range(cam_chunk_key[2] - build_radius, cam_chunk_key[2] + build_radius + 1):
+                    if abs(x - cam_chunk_key[0]) + abs(y - cam_chunk_key[1]) + abs(z - cam_chunk_key[2]) > build_radius:
+                        continue
+                    key = (x, y, z)
+                    cco = (x * chunk_size, y * chunk_size, z * chunk_size)
+                    if ((cco[0] - planet_center.x)**2 + (cco[1] - planet_center.y)**2 + (cco[2] - planet_center.z)**2)**0.5 <= planet_radius + chunk_size * 1.732:
+                        active_chunk_keys.append(key)
+
+    # 2. Unload distant chunks
+    for key in list(chunks.keys()):
+        if key not in active_chunk_keys:
+            if key in pending_chunks:
+                pending_chunks.remove(key)
+            if key in meshes:
+                for vao in meshes[key].get("vertex_array_objects", []):
+                    vao.dispose()
+                del meshes[key]
+            del chunks[key]
+            # emit_event('removeChunk', key)
+
+    # 3. Load missing chunks
+    for key in active_chunk_keys:
+        if key not in chunks and key not in pending_chunks:
+            pending_chunks.append(key)
+
+    if not async_gen:
+        load_count = len(pending_chunks)
+    else:
+        load_count = max(1, min(len(pending_chunks) * 0.1, len(pending_chunks)))
+
+    for _ in range(load_count):
+        if not pending_chunks:
+            break
+        key = pending_chunks.pop(0)
+        chunks[key] = {"status": "DATA_READY"}
+        meshes[key] = {"vertex_array_objects": []}
+        # emit_event('renderChunk', key)
+
+    # 4. Render active chunks
+    for key in active_chunk_keys:
+        if key in chunks and key in meshes:
+            if meshes[key].get("vertex_array_objects"):
+                # render logic
+                pass
+```
+
+## Subtopics
+
+### Chunked Async Reading
+Reads data in chunks to fill a buffer asynchronously [S7, unofficial]. Reserves 8 MB in buffer, loops reading into buffer until capacity is reached or EOF, yielding after each read [S7, unofficial].
+
+### Radius-based Chunk Loading with Modified Manhattan Distance
+Iterates x and y from `-radius` to `radius`, filtering with `|x| + |y| - 1 <= radius` [S8, unofficial]. Iterates z from 0 to `terrain.maxZ`, computes chunk position, creates chunk if not in map, updates voxel neighbors, adds to map and loaded list [S8, unofficial]. Removes chunks if horizontal Manhattan distance exceeds radius, checking `(|Δx_chunk| - 1 + |Δy_chunk| > radius) OR (|Δx_chunk| > radius) OR (|Δy_chunk| > radius)` [S8, unofficial]. Parameter: `radius` integer defining horizontal load distance, default 3 [S8, unofficial].
+
+## Operating characteristics
+*   **Time Complexity:** Loading is throttled to $O(1)$ or $O(k)$ per frame where $k$ is small (e.g., 1–16 chunks), preventing frame spikes [S2, S5, S6, unofficial]. Unloading is $O(N)$ where $N$ is the number of loaded chunks [S2, S4, unofficial].
+*   **Memory Complexity:** Memory usage scales with the number of loaded chunks and their resolution [S2, S4, unofficial].
+*   **Performance:** Prevents stuttering during camera movement or large jumps by spreading generation cost over multiple frames [S2, S4, unofficial].
+*   **Limitations:** Requires tuning `removeDistance` and `renderRadius` to balance memory and latency [S2, S4, unofficial]. Spherical worlds add complexity with distance checks against planet radius [S5, unofficial].
+
+## Background
+Originating from voxel game engines like `voxel-engine` [S2, unofficial] and extended to spherical planet rendering in projects like `AzureVoxel` [S5, unofficial] and `VoxelEngine` [S6, unofficial], this method addresses the scalability limits of in-memory voxel storage [S2, S4, unofficial]. It evolved from simple distance-based culling to include asynchronous generation and meshing to maintain frame rates [S2, S5, unofficial].
+
+## Sources
+[S1] Javier-Garzo/Marching-cubes-on-Unity-3D, https://github.com/Javier-Garzo/Marching-cubes-on-Unity-3D, fetched 2026-10-26 (unofficial)
+[S2] max-mapper/voxel-engine, https://github.com/max-mapper/voxel-engine, fetched 2026-10-26 (unofficial)
+[S3] TanTanDev/first_voxel_engine, https://github.com/TanTanDev/first_voxel_engine, fetched 2026-10-26 (unofficial)
+[S4] voxel/voxel-engine-stackgl, https://github.com/voxel/voxel-engine-stackgl, fetched 2026-10-27 (unofficial)
+[S5] AlexandruDodita/AzureVoxel, https://github.com/AlexandruDodita/AzureVoxel, fetched 2026-10-28 (unofficial)
+[S6] GitHub Repo for VoxelEngine, https://github.com/TheSlabby/VoxelEngine, fetched 2026-10-29 (unofficial)
+[S7] Brush – A new compatible Gaussian splatting engine, https://github.com/ArthurBrussee/brush, fetched 2026-10-26 (unofficial)
+[S8] edgorman/Voxel-Engine, https://github.com/edgorman/Voxel-Engine, fetched 2026-10-27 (unofficial)

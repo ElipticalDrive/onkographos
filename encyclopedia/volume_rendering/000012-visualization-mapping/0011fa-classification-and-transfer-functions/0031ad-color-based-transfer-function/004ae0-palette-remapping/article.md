@@ -1,0 +1,99 @@
+# Palette Remapping
+
+Also called: Color Palette Remapping, Schematic Color Remapping
+
+## Overview
+Palette Remapping replaces the colors of a source volume or image with colors from a target palette, ensuring the output strictly adheres to a limited set of allowed colors [S1, unofficial]. It differs from [Windowing](6611-windowing.md) and [Colormap Application for Visualization](7714-colormap-application-for-visualization.md) by mapping discrete source colors to discrete target palette entries rather than interpolating continuous scalar values into a gradient [S1, unofficial].
+
+## How it works
+**Inputs:** A source schematic or volume containing a set of unique colors and a target palette [S1, unofficial].
+**Outputs:** A remapped schematic or volume where each voxel's color is replaced by the closest match in the target palette [S1, unofficial].
+
+**Data Structures:**
+1. **Source Colors List:** A collection of unique colors found in the input [S1, unofficial].
+2. **Target Palette:** An ordered list of colors, typically capped at 256 entries for 8-bit indexing [S1, unofficial].
+3. **Palette Dictionary:** A hash map mapping source color identifiers (RGB tuples) to their corresponding index in the target palette [S1, unofficial].
+
+**Steps:**
+1. Collect all unique colors used in the input schematic via `schematic.UsedColors` [S1, unofficial].
+2. For each unique color, find its index in the target palette using `ColorComparison.CompareColorRGB` and store the mapping in `paletteDictionary` [S1, unofficial].
+3. Iterate over all voxels in the schematic [S1, unofficial].
+4. Replace each voxel's color with the remapped color from the target palette using the dictionary lookup [S1, unofficial].
+
+**Formulas:** Not given in the sources. Standard squared Euclidean distance is used for color comparison [G].
+**Parameters:** Not given in the sources. Target palette size is typically capped at 256 entries for 8-bit indexing [G].
+
+**Edge Cases and Pitfalls:** If a color in the schematic is not found in the palette, the dictionary lookup may throw a `KeyNotFoundException` or return an invalid index, as the code assumes `CompareColorRGB` always succeeds [S1, unofficial]. A fallback strategy (e.g., default color or nearest neighbor with tolerance) is required [G].
+
+**Pseudocode:**
+> **Unverified code.** The code below did not pass a test run against a reference implementation, or no test fits it, so it may contain errors.
+
+```python
+def remap_palette(source_schematic, target_palette):
+    # Step 1: Collect unique colors
+    source_colors = set()
+    if hasattr(source_schematic, 'UsedColors'):
+        source_colors = set(source_schematic.UsedColors())
+    else:
+        for voxel in source_schematic.voxels:
+            source_colors.add(voxel.color)
+
+    # Step 2: Build mapping
+    palette_dictionary = {}
+    for src_color in source_colors:
+        best_index = 0
+        min_distance = float('inf')
+        for idx, tgt_color in enumerate(target_palette):
+            distance = compare_color_rgb(src_color, tgt_color)
+            if distance < min_distance:
+                min_distance = distance
+                best_index = idx
+        palette_dictionary[src_color] = best_index
+
+    # Step 3: Remap voxels
+    for voxel in source_schematic.voxels:
+        if voxel.color in palette_dictionary:
+            mapped_index = palette_dictionary[voxel.color]
+            voxel.color = target_palette[mapped_index]
+        else:
+            voxel.color = target_palette[0]  # [G] Fallback for missing colors
+
+    return source_schematic
+
+def compare_color_rgb(color_a, color_b):
+    r_diff = color_a.r - color_b.r
+    g_diff = color_a.g - color_b.g
+    b_diff = color_a.b - color_b.b
+    return r_diff**2 + g_diff**2 + b_diff**2
+```
+
+## Subtopics
+
+### Nearest Color Lookup with Gamma Correction
+A technique to find the best matching color from a palette by computing error in gamma-corrected space, optionally using a precomputed lookup table for performance [S2, unofficial]. It precomputes a 16×16×16 lookup table (4096 entries) where each entry stores an unsigned int packing foreground (5 bits) and background (5 bits) indices as `(bg << 5) | fg` [S2, unofficial]. For each input color, gamma correction (power 2.2) is applied to palette entries and the input color before computing error [S2, unofficial]. The error metric is the squared Euclidean distance in gamma space, with an additional weight of 0.04 on the difference between foreground and background gamma values [S2, unofficial]. The formula for error $E$ between a target color $C$ and a palette entry with foreground $P_{fg}$ and background $P_{bg}$ is:
+$$ E = \sum_{c \in \{r,g,b\}} (\gamma(P_{bg,c}) - \gamma(C_c))^2 + 0.04 \sum_{c \in \{r,g,b\}} (\gamma(P_{bg,c}) - \gamma(P_{fg,c}))^2 $$
+Parameters include a gamma exponent of 2.2 and an error weight of 0.04 [S2, unofficial]. This variant is chosen when perceptual accuracy is prioritized over raw RGB distance and performance constraints allow a 4096-entry LUT [S2, unofficial].
+
+### Dynamic Base Color Palette Removal
+A process to remove color palettes that do not contribute significantly to the stylization, reducing the number of base colors used [S3]. It initializes $N_P = 8$ base colors according to a uniform distribution $\hat{P} \sim U[0, 1)$ [S3]. It samples 10 poses from the training dataset and evaluates the weight network [S3]. It derives a per-palette mean contribution, which is always between 0 and 1 [S3]. Finally, it removes all color palettes with a mean contribution less than the threshold of 0.025 [S3].
+
+### Palette Weight Linear Transformation
+A user-controlled linear transformation of the learned weights $\hat{w}$ using palette weights and biases to modify the importance of individual base colors [S3]. The transformation is applied as:
+$$ \hat{w}_{\text{new}} = \min(\hat{w}_{\text{old}} \cdot \hat{w}_P + \hat{b}_P, 0) $$
+followed by normalization of $\hat{w}_{\text{new}}$ by its sum [S3]. Variables are $\hat{w}_{\text{old}}$ (original weight), $\hat{w}_P$ (palette weight), and $\hat{b}_P$ (palette bias) [S3]. Parameters are palette weights $\hat{w}_P \in \mathbb{R}^{N_P}$ and palette biases $\hat{b}_P \in [-1, 1]^{N_P}$ [S3].
+
+## Operating characteristics
+*   **Time Complexity:** $O(N \cdot M)$ for building the mapping where $N$ is the number of unique source colors and $M$ is the target palette size; the remapping step is $O(V)$ where $V$ is the number of voxels, assuming $O(1)$ dictionary lookup [S1, unofficial].
+*   **Memory Complexity:** $O(N)$ to store the source colors and the dictionary [S1, unofficial]. The gamma-corrected variant uses a fixed 4096-entry table [S2, unofficial].
+*   **Strengths:** Guarantees output colors are strictly from the target palette; fast lookup after initial mapping; simple to implement [S1, unofficial].
+*   **Limitations:** Discontinuous color transitions if source colors are not well-represented in the target palette; sensitive to the definition of "closest" color; potential for `KeyNotFoundException` if source colors are not found [S1, unofficial].
+*   **When to use:** Schematic visualization, voxel art conversion, or any scenario requiring a strict, limited color set [S1, unofficial].
+*   **When not to use:** When smooth gradients or continuous color mapping are required (use [Colormap Application for Visualization](7714-colormap-application-for-visualization.md) instead) [S1, unofficial].
+
+## Background
+Palette Remapping is commonly used in voxel-based game engines and schematic tools to convert high-color-depth models into formats that support limited palettes, such as the Minecraft .schematic format or legacy 8-bit display modes [S1, unofficial]. The technique is implemented in tools like FileToVox for converting .vox files to schematics [S1, unofficial]. It is also adapted in neural radiance field stylization pipelines to manage and prune learned color palettes for efficient rendering [S3].
+
+## Sources
+[S1] FileToVox, https://github.com/Zarbuz/FileToVox, fetched 2026-10-29 (unofficial)
+[S2] a1k0n/asciitracing, https://github.com/a1k0n/asciitracing, fetched 2026-10-26 (unofficial)
+[S3] LAENeRF: Local Appearance Editing for Neural Radiance Fields, https://doi.org/10.1109/cvpr52733.2024.00475, fetched 2026-10-26

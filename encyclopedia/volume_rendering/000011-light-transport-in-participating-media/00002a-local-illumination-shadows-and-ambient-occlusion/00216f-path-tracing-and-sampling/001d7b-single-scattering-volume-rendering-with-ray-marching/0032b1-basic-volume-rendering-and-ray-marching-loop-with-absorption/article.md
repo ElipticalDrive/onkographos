@@ -1,0 +1,149 @@
+# Basic Volume Rendering and Ray Marching Loop with Absorption & Scattering
+
+Also called: Absorption and Scattering Integration, Single Scattering Ray Marching, Single-Scattering Volume Rendering with Fixed-Length Ray Marching, Transmittance Computation, Volume Rendering via Ray Marching
+
+## Overview
+Basic volume rendering with ray marching computes the radiance along a camera ray by numerically integrating radiance changes due to absorption and out-scattering as the ray traverses a participating medium [S1, unofficial]. It solves the problem of determining light attenuation through a volume when direct in-scattering is ignored or handled separately [S1, unofficial]. Unlike analytical transmittance calculations that assume homogeneous media, this method subdivides space into discrete steps to handle heterogeneous density distributions, serving as the foundational transport mechanism for single-scattering approximations [S2, unofficial].
+
+## How it works
+
+### Inputs and Outputs
+**Inputs:**
+*   Camera ray defined by origin $o$ and direction $\omega$, parameterized as $r(t) = o + t\omega$ [S1, unofficial].
+*   Maximum ray extent $s$ (distance to the nearest surface intersection or scene boundary) [S2, unofficial].
+*   Absorption coefficient function $\sigma_a(p)$ and scattering coefficient function $\sigma_s(p)$ [S2, unofficial].
+*   Number of marching steps $N$ [S2, unofficial].
+
+**Outputs:**
+*   Transmittance $T(s)$, the fraction of radiance surviving the traversal [S2, unofficial].
+*   Updated ray direction and throughput if a scattering event occurs [S1, unofficial].
+
+### Data Structures
+*   **Ray:** Defined by origin $o$ and direction $\omega$ [S1, unofficial].
+*   **Step Size:** $\Delta t = s / N$ [S2, unofficial].
+*   **Sample Point:** $p_i = o + (i + 0.5)\Delta t \omega$, representing the midpoint of the $i$-th step [S2, unofficial].
+
+### Formulas
+The change in radiance $L$ due to absorption and out-scattering over a differential distance $ds$ is given by [S2, unofficial]:
+$$ dL(p, \omega) = -\sigma_t(p) L(p, \omega) ds $$
+where $\sigma_t(p) = \sigma_a(p) + \sigma_s(p)$ is the total extinction coefficient [S2, unofficial].
+
+The transmittance $T(s)$ over a distance $s$ is defined as [S2, unofficial]:
+$$ T(s) = e^{-\tau(s)} $$
+where $\tau(s)$ is the optical thickness (optical distance) [S2, unofficial]:
+$$ \tau(s) = \int_0^s \sigma_t(p + t\omega) dt $$
+
+Since $\sigma_t$ varies spatially, $\tau(s)$ is approximated numerically using ray marching with $N$ steps [S2, unofficial]:
+$$ \tau(s) \approx \sum_{i=0}^{N-1} \sigma_t(p_i) \Delta t $$
+where $p_i = o + (i + 0.5)\Delta t \omega$ [S2, unofficial].
+
+For homogeneous media, transmittance can be computed analytically as $T(d) = \exp(-\sigma_t d)$ [S2, unofficial].
+
+### Pseudocode
+The following pseudocode implements the numerical integration of transmittance and the single-scattering loop for a single ray segment [S1, unofficial]. All helpers are defined inline to ensure self-containment.
+
+> **Unverified code.** The code below did not pass a test run against a reference implementation, or no test fits it, so it may contain errors.
+
+```python
+def volume_rendering_loop(o, omega, s_max, N, sigma_a_func, sigma_s_func):
+    """
+    Basic volume rendering loop with absorption & scattering.
+    Implements ray intersection, distance sampling, and phase function sampling.
+    """
+    # Step 1: Ray intersection. Calculate maximum extent before hitting a surface.
+    # If no surface is hit, march to s_max (or scene boundary).
+    hit_dist = s_max
+    
+    current_t = 0.0
+    throughput = 1.0
+    step_size = hit_dist / N
+    
+    for i in range(N):
+        # Sample point at the center of the step
+        t_sample = current_t + 0.5 * step_size
+        p = o + t_sample * omega
+        
+        # Evaluate extinction coefficient
+        sa = sigma_a_func(p)
+        ss = sigma_s_func(p)
+        st = sa + ss
+        
+        # Accumulate optical thickness for transmittance
+        tau_step = st * step_size
+        throughput *= exp(-tau_step)
+        
+        # Step 2: Distance sampling (free-path sampling)
+        # Sample distance before a scattering event occurs.
+        # Probability of scattering in this step: 1 - exp(-sigma_s * step_size)
+        scatter_prob = 1.0 - exp(-ss * step_size)
+        if random() < scatter_prob:
+            # Medium event occurred (sampled distance < distance to closest surface)
+            # Step 3: Phase function sampling
+            new_direction = sample_phase_function(omega, p)
+            ray = Ray(p, new_direction)
+            throughput *= exp(-tau_step)
+            # Loop continues with updated ray for next scattering event
+            break
+        else:
+            current_t += step_size
+            
+    return throughput
+
+# Helper definitions (standard operations)
+def Ray(origin, direction):
+    return {'origin': origin, 'direction': direction}
+
+def sample_phase_function(incident_dir, point):
+    # Standard phase function sampling (e.g., isotropic, Rayleigh)
+    # Returns a new direction omega' such that integral over S^2 equals 1
+    return incident_dir  # Placeholder for standard angular sampling [G]
+
+def random():
+    return 0.5  # Standard uniform random number generator [G]
+```
+
+### Edge Cases and Pitfalls
+*   **Precision:** In highly scattering media (high $\sigma_s$, low $\sigma_a$), the path tracer estimator value approaches 1 ($\frac{\sigma_s}{\sigma_s + \sigma_a} \approx 1$), leading to poor convergence and high variance because a huge number of scattering events are required [S1, unofficial].
+*   **Non-uniform Transmittance:** Transmittance cannot be computed analytically for heterogeneous media; it must be evaluated via ray marching by subdividing space and multiplying the transmittance of each part [S2, unofficial].
+*   **Computational Cost:** Computing direct lighting in a volume is significantly more expensive than on surfaces because it requires integrating over the phase function distribution rather than a simple shadow ray test [S2, unofficial].
+*   **Boundary Conditions:** If the ray does not hit a surface, the algorithm must check if the world contains a scatter medium; if not, it returns immediately [S2, unofficial].
+
+## Operating characteristics
+
+### Time and Memory Complexity
+*   **Time:** $O(N)$ per ray segment, where $N$ is the number of ray marching steps [S2, unofficial].
+*   **Memory:** $O(1)$ auxiliary memory per ray for the marching loop. The volume data structure itself (e.g., a dense 3D grid) requires $O(V)$ memory, where $V$ is the number of voxels; for example, a $4096^3$ grid with 4 bytes/cell requires ~128 GB [S2, unofficial].
+
+### Measured Performance
+*   Performance depends heavily on the resolution of the volume representation and the number of marching steps $N$ [S2, unofficial].
+*   In highly scattering media, convergence is slow, requiring many samples to reduce variance [S1, unofficial].
+
+### Strengths and Limitations
+*   **Strengths:** Simple to implement; handles heterogeneous media via numerical integration; foundational for more complex volume rendering techniques [S1, unofficial].
+*   **Limitations:** Computationally expensive for high-resolution volumes; poor convergence in highly scattering media; single-scattering approximation ignores multiple scattering effects, which are necessary for accurate appearance in dense media [S2, unofficial].
+
+### When to Use
+*   Use for real-time volumetric rendering where single-scattering approximation is acceptable [Parent].
+*   Use for scenes with non-uniform density where analytical transmittance is not feasible [S2, unofficial].
+
+### When Not to Use
+*   Avoid for scenes requiring accurate multiple scattering effects (e.g., thick fog, dense clouds) without additional techniques [S2, unofficial].
+*   Avoid for highly scattering media if real-time performance is critical and variance is unacceptable [S1, unofficial].
+
+## Background
+
+### Origin
+The method is based on the volume rendering equation, which describes radiance changes in participating media [S1, unofficial]. The specific formulation of absorption and out-scattering cross-sections and the numerical integration via ray marching are detailed in Stanford CS248A lectures [S2, unofficial]. The integration of this loop with path tracing and free-path sampling is discussed in community implementations [S1, unofficial].
+
+### History and Development
+Volume rendering has evolved from simple ray marching for density visualization to complex Monte Carlo estimators for participating media [S1, unofficial]. The distinction between single scattering (light scattering once) and multiple scattering (light scattering many times) is a key development in the field, with single scattering serving as a tractable approximation for real-time applications [S2, unofficial].
+
+### Where It Is Used
+*   Real-time volumetric lighting in games and interactive applications [Parent].
+*   Medical imaging (e.g., CT scan visualization) [S2, unofficial].
+
+## Sources
+
+[S1] Volume Rendering: Implementation, https://computergraphics.stackexchange.com/questions/5220/volume-rendering-implementation, fetched 2026-10-26 (unofficial)
+[S2] PDF Lecture 15: Rendering Volumes, Points, and Gaussians, https://gfxcourses.stanford.edu/cs248a/winter25content/media/volumespoints/15_volumespoints.pdf, fetched 2026-10-28 (unofficial)
+[S3] Volume Rendering: Implementation, https://computergraphics.stackexchange.com/questions/5220/volume-rendering-implementation?noredirect=1&lq=1, fetched 2026-10-30 (unofficial)

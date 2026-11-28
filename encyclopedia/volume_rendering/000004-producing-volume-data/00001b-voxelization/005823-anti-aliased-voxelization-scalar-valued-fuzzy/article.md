@@ -1,0 +1,131 @@
+# Anti-aliased Voxelization (Scalar-valued/Fuzzy)
+
+Also called: De-binarization, Fuzzy set voxelization, Object-space pre-filtering
+
+## Overview
+Anti-aliased voxelization generates scalar-valued voxels that represent the percentage of spatial occupancy within a voxel, creating a fuzzy set where the boundary between inclusion and exclusion is smooth [S1, book]. Unlike binary voxelization, which classifies voxels into a discrete {0,1} set and suffers from object-space aliasing (jagged surfaces) that propagates to image-space aliasing during rendering, this method employs object-space pre-filtering to suppress these artifacts [S1, book]. It is distinguished from sibling methods like [VoxelGrid from Mesh (Fill Method)](1013-voxelgrid-from-mesh-fill-method.md) by its continuous output values and from [Gaussian Voxelization](8884-gaussian-voxelization.md) by its linear distance-based filter rather than a probabilistic kernel.
+
+## How it works
+**Inputs:** A triangle mesh (or parametric surface) and a 3D voxel grid defined by a bounding box and resolution $(N_x, N_y, N_z)$.
+**Outputs:** A 3D array of scalar values where each voxel stores a value in $[0, 1]$ representing occupancy probability or fuzzy membership.
+
+**Data Structures:**
+*   **Voxel Grid:** A 3D array `grid[N_x][N_y][N_z]` of floating-point numbers. Initialized to 0.0.
+*   **Triangle:** Defined by vertices $V_0, V_1, V_2$.
+
+**Algorithm Steps:**
+1.  **Bounding Box Calculation:** Compute the axis-aligned bounding box (AABB) of the triangle in voxel coordinates. Determine the integer range $[x_{min}, x_{max}]$, $[y_{min}, y_{max}]$, $[z_{min}, z_{max}]$ covering all voxels that the triangle's footprint intersects.
+2.  **Voxel Iteration:** Iterate through each voxel $(i, j, k)$ within the bounding box.
+3.  **Distance Evaluation:** For each voxel, calculate the signed distance $d$ from the voxel center $C_{ijk}$ to the triangle surface. The value stored in the voxel is a linear function of this distance.
+4.  **Filter Application:** Apply a filter equation to the distance. The optimal sampling filter for central difference gradient estimation in low-curvature areas is a one-dimensional box filter of width 1 voxel unit, oriented perpendicular to the surface [S1, book]. This filter is computed as a linear function of the distance from the triangle.
+5.  **Fuzzy Union:** Update the voxel value using the fuzzy algebraic union operator, which is the maximum operator. If the computed value for the current triangle is greater than the existing value in `grid[i][j][k]`, update it.
+
+**Formulas:**
+Let $d$ be the distance from the voxel center to the triangle surface. The value $v$ assigned to the voxel is determined by the filter function $F(d)$. While the exact linear function coefficients depend on the specific implementation of the "linear function of distance" mentioned in the source, the core operation is:
+$$ v = F(d) $$
+$$ \text{grid}[i][j][k] = \max(\text{grid}[i][j][k], v) $$
+
+**Parameters:**
+*   **Filter Width:** 1 voxel unit [S1, book].
+*   **Filter Orientation:** Perpendicular to the surface [S1, book].
+
+**Pitfalls:**
+*   **Binary Classification Errors:** Avoiding the binary {0,1} classification is critical; using hard thresholds reintroduces object-space aliasing [S1, book].
+*   **Gradient Estimation:** The method is optimized for central difference gradient estimation. Deviating from the 1-unit box filter may degrade rendering quality in low-curvature areas [S1, book].
+
+**Pseudocode:**
+> **Unverified code.** The code below did not pass a test run against a reference implementation, or no test fits it, so it may contain errors.
+
+```python
+def anti_aliased_voxelization(triangle, grid, voxel_size):
+    """
+    Voxelizes a triangle into a scalar-valued fuzzy grid.
+    
+    Args:
+        triangle: Object with vertices V0, V1, V2 (3D vectors).
+        grid: 3D numpy array or list of lists of lists, initialized to 0.0.
+        voxel_size: Size of one voxel unit in world coordinates.
+    """
+    # 1. Compute bounding box in voxel coordinates
+    # Convert triangle vertices to voxel coordinates
+    v0_vx = triangle.V0 / voxel_size
+    v1_vx = triangle.V1 / voxel_size
+    v2_vx = triangle.V2 / voxel_size
+    
+    # Determine integer bounds
+    x_min = int(min(v0_vx.x, v1_vx.x, v2_vx.x))
+    x_max = int(max(v0_vx.x, v1_vx.x, v2_vx.x))
+    y_min = int(min(v0_vx.y, v1_vx.y, v2_vx.y))
+    y_max = int(max(v0_vx.y, v1_vx.y, v2_vx.y))
+    z_min = int(min(v0_vx.z, v1_vx.z, v2_vx.z))
+    z_max = int(max(v0_vx.z, v1_vx.z, v2_vx.z))
+    
+    # Precompute triangle normal and plane equation for distance
+    # Normal N = (V1-V0) x (V2-V0)
+    e1 = v1_vx - v0_vx
+    e2 = v2_vx - v0_vx
+    normal = cross(e1, e2)
+    # Normalize normal
+    norm_len = length(normal)
+    if norm_len == 0:
+        return # Degenerate triangle
+    normal = normal / norm_len
+    
+    # Plane equation: dot(N, P - V0) = 0
+    # Distance from point P to plane is dot(N, P - V0)
+    # Note: The source describes a filter linear in distance. 
+    # We assume the filter maps distance to [0,1] occupancy.
+    # A standard linear filter for a box of width 1 centered at distance 0 
+    # might be: v = 1 - |d| if |d| < 0.5 else 0. 
+    # However, the source specifies "oriented perpendicular to the surface" 
+    # and "linear function". We implement the generic linear evaluation.
+    
+    for i in range(x_min, x_max + 1):
+        for j in range(y_min, y_max + 1):
+            for k in range(z_min, z_max + 1):
+                # Voxel center in voxel coordinates
+                center = (vector(i + 0.5, j + 0.5, k + 0.5))
+                
+                # Distance from center to triangle plane
+                # d = dot(normal, center - v0_vx)
+                # Note: This is signed distance to the infinite plane.
+                # For a triangle, we might need to check if the projection 
+                # falls inside the triangle, but the source emphasizes 
+                # "linear function of the distance from the triangle" 
+                # and "fuzzy set". We use the plane distance as the primary metric 
+                # for the filter as per the "box filter... oriented perpendicular" description.
+                dist = dot(normal, center - v0_vx)
+                
+                # Apply filter: Linear function of distance.
+                # The source cites Sramek and Kaufman [308] for a 1-unit box filter.
+                # A box filter of width 1 centered at 0 is:
+                # f(d) = 1 - |d| for |d| <= 0.5, else 0.
+                # This is a linear function of distance in the active region.
+                abs_dist = abs(dist)
+                if abs_dist < 0.5:
+                    value = 1.0 - abs_dist
+                else:
+                    value = 0.0
+                
+                # Fuzzy Union (Max operator)
+                if value > grid[i][j][k]:
+                    grid[i][j][k] = value
+```
+
+## Subtopics
+
+### [Object Voxelization by Filtering](23034-object-voxelization-by-filtering.md)
+Treats 3D scan conversion as a sampling process applying low-pass filtering to suppress aliasing before discretization. It differs by explicitly framing the scalar-valued output as a result of spatial occupancy representation to avoid surface normal estimation errors. Choose when smooth gradients are required for rendering without jagged edges.
+
+## Operating characteristics
+*   **Time Complexity:** $O(N \cdot B)$, where $N$ is the number of triangles and $B$ is the average number of voxels in the bounding box of a triangle.
+*   **Memory Complexity:** $O(N_x \cdot N_y \cdot N_z)$ for the voxel grid.
+*   **Strengths:** Eliminates object-space aliasing (jagged surfaces) and subsequent image-space aliasing. Provides smooth gradients suitable for central difference estimation in volume rendering.
+*   **Limitations:** Produces scalar values rather than binary occupancy, which may require different handling in downstream binary operations. The linear filter approximation may be less accurate for high-curvature surfaces compared to more complex splatting techniques.
+*   **When to use:** When rendering quality is prioritized over binary topological consistency, and when the rendering pipeline supports scalar-valued density fields.
+
+## Background
+The method was devised to address the limitations of binary voxelization, which exhibits object-space aliasing due to the binary classification of voxels into the {0,1} set [S1, book]. It extends the two-dimensional line anti-aliasing method of Gupta and Sproull [103] to 3D. Sramek and Kaufman [308][309] demonstrated that a one-dimensional box filter of width 1 voxel unit, oriented perpendicular to the surface, is optimal for central difference gradient estimation in low-curvature areas. This approach allows for direct visualization from a fuzzy set, avoiding image aliasing.
+
+## Sources
+[S1] Volume Visualization and Volume Graphics, https://www3.cs.stonybrook.edu/~mueller/teaching/cse332/volvisChapter.pdf, fetched 2026-10-28 (book)

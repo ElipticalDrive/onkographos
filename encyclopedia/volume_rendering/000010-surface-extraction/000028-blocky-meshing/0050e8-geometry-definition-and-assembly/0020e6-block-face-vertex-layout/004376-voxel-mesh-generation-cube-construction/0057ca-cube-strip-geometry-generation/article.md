@@ -1,0 +1,97 @@
+# Cube Strip Geometry Generation
+
+Also called: Triangle Strip Cube, 14-Vertex Box
+
+## Overview
+Generates a triangle strip representing a 3D box (cube) defined by minimum and maximum coordinates in the x, y, and z dimensions [S1, unofficial]. It serves as the fundamental geometry primitive for voxel-based rendering, providing a compact representation of a single voxel block compared to naive vertex-per-face approaches [S1, unofficial]. It builds on [Voxel Mesh Generation (Cube Construction)](11001-voxel-mesh-generation-cube-construction.md) by optimizing the vertex count from 24 to 14 for a single static cube.
+
+## How it works
+**Inputs:**
+- `xmin`, `xmax`: Minimum and maximum x coordinates.
+- `ymin`, `ymax`: Minimum and maximum y coordinates.
+- `zmin`, `zmax`: Minimum and maximum z coordinates.
+
+**Outputs:**
+- An array of 14 vertices (42 floats) forming a single triangle strip [S1, unofficial].
+
+**Data Structure:**
+The output is a flat array of floats, where each vertex consists of 3 consecutive floats representing $(x, y, z)$. The total size is $14 \times 3 = 42$ floats.
+
+**Steps:**
+1. Define the eight corners of the bounding box using the input min/max values.
+2. Generate the 14 vertices in the specific order required to form a continuous triangle strip that covers all 6 faces of the cube without gaps or degenerate triangles.
+
+**Vertex Order:**
+The vertices are generated in the following sequence [S1, unofficial]:
+1. $(x_{max}, y_{max}, z_{min})$
+2. $(x_{min}, y_{max}, z_{min})$
+3. $(x_{max}, y_{max}, z_{max})$
+4. $(x_{min}, y_{max}, z_{max})$
+5. $(x_{min}, y_{min}, z_{max})$
+6. $(x_{min}, y_{max}, z_{min})$
+7. $(x_{min}, y_{min}, z_{min})$
+8. $(x_{max}, y_{max}, z_{min})$
+9. $(x_{max}, y_{min}, z_{min})$
+10. $(x_{max}, y_{max}, z_{max})$
+11. $(x_{max}, y_{min}, z_{max})$
+12. $(x_{min}, y_{min}, z_{max})$
+13. $(x_{max}, y_{min}, z_{min})$
+14. $(x_{min}, y_{min}, z_{min})$
+
+**Pseudocode:**
+> **Unverified code.** The code below did not pass a test run against a reference implementation, or no test fits it, so it may contain errors.
+
+```python
+def generate_cube_strip(xmin, xmax, ymin, ymax, zmin, zmax):
+    """
+    Generates a triangle strip for a cube defined by min/max coordinates.
+    Returns a list of 14 tuples, each containing (x, y, z).
+    """
+    vertices = [
+        (xmax, ymax, zmin),
+        (xmin, ymax, zmin),
+        (xmax, ymax, zmax),
+        (xmin, ymax, zmax),
+        (xmin, ymin, zmax),
+        (xmin, ymax, zmin),
+        (xmin, ymin, zmin),
+        (xmax, ymax, zmin),
+        (xmax, ymin, zmin),
+        (xmax, ymax, zmax),
+        (xmax, ymin, zmax),
+        (xmin, ymin, zmax),
+        (xmax, ymin, zmin),
+        (xmin, ymin, zmin)
+    ]
+    return vertices
+```
+
+**Edge Cases and Pitfalls:**
+- **Degenerate Triangles:** The strip contains implicit degenerate triangles (zero-area) between non-adjacent faces to maintain continuity. These are generally ignored by modern graphics pipelines but must be accounted for in culling or collision logic if not handled by the hardware.
+- **Winding Order:** The winding order is consistent for front-face culling, but the specific order of vertices is critical. Deviating from the specified sequence will result in incorrect face normals or gaps.
+- **Precision:** Floating-point precision issues may arise if `xmin` equals `xmax` or similar, resulting in zero-volume cubes. Such cases should be handled by the caller or by clamping coordinates.
+
+## Subtopics
+
+### Basin Core Geometry Construction
+A variant that constructs a specific "core" geometry for voxel demolition simulations, consisting of bedrock slabs and basin retaining walls [S2, unofficial].
+- **Step:** Calculate the center Y coordinate of the core bedrock cuboid: `coreCy = bedrock - halfT`, ensuring its top face lands exactly on the bedrock level [S2, unofficial].
+- **Step:** If no excavation rect is specified, create a single flat map-sized core cuboid slab centered at $(0,0)$ with half-widths `halfX`, `halfZ`, center Y `coreCy`, and half-height `halfT` [S2, unofficial].
+- **Step:** If a rect is specified, create a 'picture frame' core using four slabs: West strip spanning full Z depth; East strip spanning full Z depth; North strip filling only the rect's X span; South strip filling only the rect's X span. All have center Y `coreCy` and half-height `halfT` [S2, unofficial].
+- **Step:** Create the excavated basin floor: a cuboid centered at the rect's center $(cx, cz)$ with half-widths $hx$, $hz$, center Y $floorY - ft / 2$, and half-height $ft / 2$ [S2, unofficial].
+- **Step:** Create four retaining walls for the basin: North, South, West, and East. Each wall is a cuboid with half-height `wallHy`, center Y `wallCy`, and thickness `wt` (half-width `wh`). North/South walls span the rect's X span plus wall thickness; West/East walls span the rect's Z span plus wall thickness [S2, unofficial].
+- **Parameter:** Friction: 0.9. Restitution: 0.0. These are set on all core colliders [S2, unofficial].
+
+## Operating characteristics
+- **Time Complexity:** $O(1)$ per cube, as it involves a fixed number of arithmetic operations and array assignments.
+- **Memory Complexity:** $O(1)$ per cube, requiring storage for exactly 14 vertices (42 floats).
+- **Performance:** Significantly more efficient than naive mesh generation (24 vertices, 36 indices) in terms of vertex buffer size and draw call overhead for static cubes.
+- **Strengths:** Compact vertex count, simple generation logic, suitable for static voxel blocks.
+- **Limitations:** Only suitable for axis-aligned cubes. Not directly applicable to non-axis-aligned or deformed geometries without modification. The triangle strip format requires specific handling in some rendering contexts compared to indexed triangle lists.
+
+## Background
+Originated in the context of voxel-based visualization and game development, specifically within projects like VisWeb and voxel-demolition simulations [S1, unofficial][S2, unofficial]. The method leverages the efficiency of triangle strips for rendering simple convex shapes like cubes, which are fundamental building blocks in voxel engines.
+
+## Sources
+[S1] johanna-b/VisWeb, https://github.com/johanna-b/VisWeb, fetched 2026-10-27 (unofficial)
+[S2] JerzySukiennik/voxel-demolition, https://github.com/JerzySukiennik/voxel-demolition, fetched 2026-10-28 (unofficial)

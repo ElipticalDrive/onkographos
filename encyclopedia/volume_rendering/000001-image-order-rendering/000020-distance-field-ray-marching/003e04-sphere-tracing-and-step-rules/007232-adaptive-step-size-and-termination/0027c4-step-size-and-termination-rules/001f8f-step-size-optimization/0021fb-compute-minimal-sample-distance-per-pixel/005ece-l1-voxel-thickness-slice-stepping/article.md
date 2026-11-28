@@ -1,0 +1,93 @@
+# L1 Voxel Thickness Slice Stepping
+
+Also called: L1 Slice Step Measure, L1 slice step, getVoxelThicknessAlongNormal
+
+## Overview
+L1 Voxel Thickness Slice Stepping is a method for determining the distance between consecutive oblique slices in a volume viewport to ensure no voxel overlap and no gaps. It uses the L1 norm (Manhattan distance) of the projected voxel spacing vector along the view plane normal, rather than the L2 norm (Euclidean distance). It sets itself apart from its sibling [Projected Voxel Size / LOD Calculation](4189-projected-voxel-size-lod-calculation.md) by focusing on the discrete overlap test of voxel lattices rather than continuous projection scaling.
+
+## How it works
+**Inputs and Outputs:**
+*   **Input:** `imageVolume` (voxel grid with spacing vector $s$), `viewPlaneNormal` ($n$).
+*   **Output:** `spacingInNormalDirection` (scalar step distance $T_v$).
+
+**Data Structures:**
+*   `imageVolume`: Contains `spacing` array $s = [s_0, s_1, s_2]$ representing voxel dimensions along the three axes.
+*   `viewPlaneNormal`: Normalized 3D vector $n = [n_0, n_1, n_2]$.
+*   Basis vectors $a_i$: Standard unit vectors $[1,0,0], [0,1,0], [0,0,1]$.
+
+**Formulas:**
+The correct step size $T_v$ is the L1 voxel thickness:
+$$ T_v = \sum_{i=0}^{2} |n \cdot a_i| \cdot s_i = \sum_{i=0}^{2} |n_i| \cdot s_i $$
+
+The historically incorrect L2 measure $S_n$ is:
+$$ S_n = \sqrt{\sum_{i=0}^{2} (n \cdot a_i \cdot s_i)^2} = \sqrt{\sum_{i=0}^{2} (n_i \cdot s_i)^2} $$
+
+**Parameters:**
+*   `rendering.sliceStepMeasure`: Configuration flag. Defaults to `'l2'` (historic behavior). Set to `'l1'` to enable this method [S1, unofficial].
+
+**Steps:**
+1.  Extract the voxel spacing vector $s$ from `imageVolume`.
+2.  Extract the view plane normal vector $n$.
+3.  Compute the L1 thickness $T_v$ using the formula above.
+4.  Return $T_v$ as the slice step distance.
+
+**Pseudocode:**
+> **Unverified code.** The code below did not pass a test run against a reference implementation, or no test fits it, so it may contain errors.
+
+```python
+def get_voxel_thickness_along_normal(image_volume, view_plane_normal):
+    """
+    Computes the L1 voxel thickness along the view plane normal.
+    image_volume: object with attribute 'spacing' (list/tuple of 3 floats)
+    view_plane_normal: list/tuple of 3 floats (assumed normalized)
+    """
+    spacing = image_volume.spacing
+    n = view_plane_normal
+    
+    # Calculate L1 thickness: sum of absolute component projections scaled by spacing
+    thickness = 0.0
+    for i in range(3):
+        thickness += abs(n[i]) * spacing[i]
+        
+    return thickness
+
+def compute_slice_step(image_volume, view_plane_normal, measure_type='l2'):
+    """
+    Wrapper to select step measure based on configuration.
+    """
+    if measure_type == 'l1':
+        return get_voxel_thickness_along_normal(image_volume, view_plane_normal)
+    else:
+        # Historic L2 behavior
+        spacing = image_volume.spacing
+        n = view_plane_normal
+        sum_sq = 0.0
+        for i in range(3):
+            sum_sq += (n[i] * spacing[i]) ** 2
+        return math.sqrt(sum_sq)
+```
+
+**Edge Cases and Pitfalls:**
+*   **Overlap with L2:** Using $S_n$ causes consecutive oblique slices to share voxels because $S_n < T_v$ for oblique normals. This results in 22-40% overlap for oblique normals [S1, unofficial].
+*   **45-Degree Visibility Loss:** At specific angles like 45 degrees with isotropic voxels, using the L1 step with a symmetric strict depth test ($|d| < h - \epsilon$) causes every second plane of the voxel lattice to be hidden (0% coverage for those planes) because voxel centers fall exactly on slab boundaries [S1, unofficial].
+*   **Axis-Aligned:** When the normal is parallel to a voxel axis, $T_v = S_n$, so both measures yield the same result [S1, unofficial].
+
+## Subtopics
+
+### [Focal Point Origin Slice Positioning](17784-focal-point-origin-slice-positioning.md)
+Decouples slice grid topology from the volume bounding box by anchoring to the focal point. Choose this when misaligned slice indexing causes visual artifacts in oblique views.
+
+## Operating characteristics
+*   **Time Complexity:** $O(1)$ relative to volume size; depends only on the number of dimensions (3).
+*   **Memory Complexity:** $O(1)$.
+*   **Performance:** Eliminates voxel overlap artifacts in oblique views. Requires a half-open depth test to avoid visibility loss at 45 degrees [S1, unofficial].
+*   **Strengths:** Ensures zero overlap and 100% coverage for a single plane fill. Correctly identifies the minimal sample distance required to avoid re-rendering the same voxels.
+*   **Limitations:** The step size $T_v$ is larger than $S_n$, which may increase the number of slices required to cover the volume extent. Requires careful implementation of the depth test (half-open, non-symmetric) to prevent missing voxel planes at commensurate angles [S1, unofficial].
+*   **When to use:** When rendering oblique slices where voxel overlap is unacceptable.
+*   **When not to use:** When legacy behavior matching the L2 step is required, or when the depth test implementation does not support half-open intervals.
+
+## Background
+Originating from issues in the Cornerstone3D library (Issue #2912, PR #2743), this method addresses a defect where volume viewports stepped oblique slices by the L2 spacing, causing the same voxels to appear on multiple adjacent slices [S1, unofficial]. The issue was identified by `wayfarer3130` in September 2026. The correction involves implementing requirement I1 (L1 measure) and I4 (half-open depth test) to satisfy the digital plane properties of voxel lattices [S1, unofficial].
+
+## Sources
+[S1] A volume viewport steps an oblique slice by the L2 spacing, and shows the same voxels on two slices, https://github.com/cornerstonejs/cornerstone3D/issues/2912, fetched 2026-10-27 (unofficial)

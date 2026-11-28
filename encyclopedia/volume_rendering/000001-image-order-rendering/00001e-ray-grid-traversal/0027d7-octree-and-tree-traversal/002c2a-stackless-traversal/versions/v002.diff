@@ -1,0 +1,136 @@
+--- v001.md
++++ v002.md
+@@ -1,69 +1,74 @@
+ # Stackless Traversal
+ 
+-Also called: Algorithme sans pile, Parcours sans pile
++Also called: Algorithme sans pile, Parcours sans pile, Parent-link traversal, Stack-less Tree Traversal
+ 
+ ## Overview
+-Stackless Traversal is a method for traversing hierarchical volume structures (specifically N3-trees) that eliminates the need for a stack data structure by recalculating Digital Differential Analyzer (DDA) parameters at each tree descent and ascent [S1, unofficial]. It differs from sibling methods like [Leaf Collection](899-leaf-collection.md) and [Point Plane Test Traversal](982-point-plane-test-traversal.md) by relying on parent pointers for ascent and full DDA recalculation rather than incremental updates or explicit leaf enumeration, optimizing for GPU register usage and branch divergence [S1, unofficial].
++Stackless Traversal is a hierarchical volume rendering method that traverses tree structures (specifically N3-trees) without a stack data structure by recalculating Digital Differential Analyzer (DDA) parameters at each tree descent and ascent [S1, unofficial]. It differs from sibling methods like [Hierarchical Trilinear Ray Casting](851-hierarchical-trilinear-ray-casting.md) and [Digital Differential Analyzer (DDA) Traversal](3061-digital-differential-analyzer-dda-traversal.md) by relying on explicit parent pointers for upward navigation and full DDA recalculation rather than incremental updates or implicit stack management, optimizing for GPU register pressure and branch divergence [S1, unofficial].
+ 
+ ## How it works
+-**Inputs:** A hierarchical volume structure (N3-tree) where each node stores a pointer to its parent and, if non-empty, an average color/value and occupancy status. A ray defined by origin and direction.
+-**Outputs:** Integrated color and opacity for the ray.
++**Inputs:** A hierarchical volume structure (N3-tree) where each node stores a pointer to its parent and, if non-empty, an average color/value and occupancy status [S1, unofficial]. A ray defined by origin and direction [S1, unofficial].
++**Outputs:** Integrated color and opacity for the ray [S1, unofficial].
+ 
+ **Data Structures:**
+-*   **Node:** Contains a pointer to the parent node, a pointer to child nodes (if internal), and metadata (average color, occupancy).
+-*   **DDA State:** Current position, step size, and direction signs for the current voxel/brick.
++*   **Node:** Contains a pointer to the parent node, a pointer to child nodes (if internal), and metadata (average color, occupancy) [S1, unofficial].
++*   **DDA State:** Current position, step size, and direction signs for the current voxel/brick [S1, unofficial].
+ 
+ **Steps:**
+ 1.  **Initialization:** Compute initial DDA parameters for the root node based on the ray origin and direction [S1, unofficial].
+-2.  **Descent:** Traverse down the tree. At each step, recalculate all DDA parameters for the child node based on the current ray state and the child's spatial bounds [S1, unofficial].
+-3.  **Node Evaluation:**
+-    *   If the current node is empty, ignore it and proceed to the next candidate [S1, unofficial].
+-    *   If the node is not empty, extract the current cell information from the direct pointer to the exact child node within the parent's grid, avoiding recalculation [S1, unofficial].
+-4.  **Accumulation:** If the node is a leaf or contains data, use the stored average color/value and accumulate it based on the distance traversed by the ray in that brick (pre-integration) [S1, unofficial]. If the node is a loaded brick, sample it; if it is an unloaded brick (due to dynamic loading failure or out-of-core constraints), use the stored average [S1, unofficial].
+-5.  **Ascent:** Return to the parent node using the parent pointer stored in the hierarchical structure [S1, unofficial].
+-6.  **Iteration:** Repeat descent and ascent until the ray exits the volume or is fully occluded.
++2.  **Descent:** Traverse down the tree. At each step, recalculate all DDA parameters for the child node from scratch based on the current ray state and the child's spatial bounds [S1, unofficial].
++3.  **Node Evaluation:** If the current node is empty, ignore it and proceed to the next candidate [S1, unofficial]. If the node is not empty, determine if it is a loaded brick or an unloaded brick [S1, unofficial].
++4.  **Accumulation:** If the node is a loaded brick, perform standard ray-marching sampling. If the node is an unloaded brick (due to dynamic loading failure or out-of-core constraints), use the stored average color/value and accumulate it based on the distance traversed by the ray in that brick (pre-integration) [S1, unofficial].
++5.  **Ascent:** Return to the parent node using the parent pointer stored in the hierarchical structure [S1, unofficial]. Extract the current cell information directly from the parent's grid using the direct pointer to the exact child node, avoiding DDA recalculation during ascent [S1, unofficial].
++6.  **Iteration:** Repeat descent and ascent until the ray exits the volume bounds or is fully occluded [S1, unofficial].
+ 
+ **Pseudocode:**
+ ```python
+-def stackless_traverse(ray, root):
+-    # Initialize DDA for the root
+-    dda = compute_dda(ray, root.bounds)
+-    current_node = root
++def stackless_traverse(ray_o, ray_d, root):
++    # Initialize DDA for root brick
++    step = [1 if ray_d[i] > 0 else (-1 if ray_d[i] < 0 else 0) for i in range(3)]
++    delta_t = [1.0 / abs(ray_d[i]) if ray_d[i] != 0 else float('inf') for i in range(3)]
++    t_max = [(root.bounds[i].start - ray_o[i]) / ray_d[i] if ray_d[i] != 0 else float('inf') for i in range(3)]
++    current = root
+     
+-    while current_node is not None:
+-        # Descent: Recalculate DDA for the next child
+-        # This step replaces stack-based state preservation
+-        next_node, dda = descend_and_recalc_dda(current_node, dda)
++    while current is not None:
++        # Descent: find next child index based on minimum t_max
++        child_idx = -1
++        min_t = float('inf')
++        for i in range(3):
++            if t_max[i] < min_t:
++                min_t = t_max[i]
++                child_idx = i
++        if child_idx == -1:
++            # Ascent: use parent pointer
++            current = current.parent
++            if current is not None:
++                # Extract cell info from parent grid using direct pointer to exact child
++                # Avoids full DDA recalculation during ascent
++                t_max = extract_dda_from_parent(current, child_idx)
++            continue
+         
+-        if next_node is None:
+-            # Ascent: Use parent pointer to go back up
+-            current_node = current_node.parent
+-            if current_node is not None:
+-                # Extract current cell info from parent's grid using direct pointer
+-                # to the exact child node, avoiding recalculation
+-                dda = extract_dda_from_parent(current_node, next_node_was)
++        current = current.children[child_idx]
++        
++        # Recalculate DDA for the new child's bounds from scratch
++        t_max = [(current.bounds[i].start - ray_o[i]) / ray_d[i] if ray_d[i] != 0 else float('inf') for i in range(3)]
++        
++        if current.is_empty:
++            current = current.parent
+             continue
+             
+-        current_node = next_node
++        # Compute intersection distance with current brick
++        t_entry = max((current.bounds[i].start - ray_o[i]) / ray_d[i] for i in range(3) if ray_d[i] != 0)
++        t_exit = min((current.bounds[i].end - ray_o[i]) / ray_d[i] for i in range(3) if ray_d[i] != 0)
++        dist = t_exit - t_entry
+         
+-        # Evaluate node
+-        if current_node.is_empty:
+-            # Ignore empty nodes
+-            current_node = current_node.parent
+-            continue
+-            
+         # Accumulate contribution
+-        distance = compute_ray_brick_intersection_distance(ray, current_node.bounds)
+-        if current_node.is_loaded:
+-            color = sample_voxel_data(ray, current_node.data, dda)
++        if current.is_loaded:
++            color = sample_voxel_data(ray_o, ray_d, current.data, t_entry, t_exit)
+         else:
+-            # Use stored average for unloaded bricks
+-            color = current_node.average_color
+-            
+-        accumulate(color, distance)
++            color = current.average_color
++        accumulate(color, dist)
+         
+-        # Continue traversal
+-        # Logic to determine next child or ascent is handled in descend_and_recalc_dda
+-        # based on ray exit from current brick
++        # Advance ray origin to brick exit
++        ray_o = ray_o + ray_d * t_exit
+ ```
+ 
+@@ -73,5 +78,5 @@
+ 
+ **Edge Cases and Pitfalls:**
+-*   **GPU Memory Latency:** On NVIDIA G80 architecture, dynamically indexed arrays are placed in 'local' memory (device memory) by the shader compiler, which is uncached and up to 50x slower than registers [S1, unofficial]. This negatively impacts performance compared to register-based stack access [S1, unofficial].
++*   **GPU Memory Latency:** On NVIDIA G80 architecture, dynamically indexed arrays are placed in 'local' memory (device memory) by the shader compiler, which is uncached and up to 50x slower than registers [S1, unofficial].
+ *   **Dynamic Loading Failure:** If a brick fails to load dynamically (e.g., due to sudden load overload), the algorithm falls back to using the stored average color in the node [S1, unofficial].
+ 
+@@ -81,5 +86,5 @@
+ *   **Limitations:** Recalculating DDA parameters at every step increases computational cost per node compared to incremental updates; performance is sensitive to GPU memory hierarchy (local memory penalty) [S1, unofficial].
+ *   **When to use:** When stack memory is constrained or when GPU register pressure is a bottleneck; suitable for hierarchical structures with parent pointers [S1, unofficial].
+-*   **When not to use:** On architectures where local memory latency is prohibitive and register usage cannot be sufficiently optimized; when incremental DDA updates are significantly cheaper than recalculation [S1, unofficial].
++*   **When not to use:** On architectures where local memory latency is prohibitive and register usage cannot be sufficiently optimized [G].
+ 
+ ## Background

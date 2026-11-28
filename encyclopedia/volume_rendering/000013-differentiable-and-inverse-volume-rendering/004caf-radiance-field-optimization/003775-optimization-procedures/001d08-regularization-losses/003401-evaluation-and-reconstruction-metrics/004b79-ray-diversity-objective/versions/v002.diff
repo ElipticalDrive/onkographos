@@ -1,0 +1,132 @@
+--- v001.md
++++ v002.md
+@@ -1,4 +1,3 @@
+ # Ray Diversity Objective
+-
+ 
+ ## Overview
+@@ -7,10 +6,10 @@
+ ## How it works
+ **Inputs and Outputs:**
+-*   **Inputs:** A set of camera poses $\{c_k\}$, a mesh with faces $\{j=1 \dots J\}$, surface normals $\hat{n}_j$ for each face, and for each ray $i$ from each camera $k$, the intersection point or visibility $V_{ijk}$ (binary or continuous weight indicating if ray $i$ from $c_k$ observes face $j$).
++*   **Inputs:** A set of camera poses $\{c_k\}$, a mesh with faces $\{j=1 \dots J\}$, surface normals $\hat{n}_j$ for each face, and for each ray $i$ from each camera $k$, the intersection point or visibility $V_{ijk}$ (binary or continuous weight indicating if ray $i$ from $c_k$ observes face $j$) [S1, unofficial].
+ *   **Outputs:** The scalar objective value $f_D$.
+ 
+ **Data Structures:**
+-*   Ray data: For each face $j$, a list of observing rays. Each ray $i$ has a direction vector $\mathbf{r}_i$ (or is defined by its origin and target) and its intersection point on the mesh.
+-*   Face data: Surface normal $\hat{n}_j$ (unit vector).
++*   Ray data: For each face $j$, a list of observing rays [S1, unofficial]. Each ray $i$ has a direction vector $\mathbf{i}$ (or is defined by its origin and target) and its intersection point on the mesh [S1, unofficial].
++*   Face data: Surface normal $\hat{n}_j$ (unit vector) [S1, unofficial].
+ 
+ **Steps:**
+@@ -19,7 +18,7 @@
+     For each ray $i$ from camera pose $c_k$ observing face $j$:
+     $$
+-    \theta_{ij} = \arccos\left( \frac{\mathbf{r}_i \cdot \hat{n}_j}{|\mathbf{r}_i| |\hat{n}_j|} \right) \frac{180^\circ}{\pi} - 90^\circ
++    \theta_{ij} = \arccos\left( \frac{\mathbf{i} \cdot \hat{n}_j}{|\mathbf{i}| |\hat{n}_j|} \right) \frac{180^\circ}{\pi} - 90^\circ
+     $$
+-    where $\mathbf{r}_i$ is the ray direction vector, $\hat{n}_j$ is the surface normal of face $j$, and $|\cdot|$ denotes the Euclidean norm [S1, unofficial].
++    where $\mathbf{i}$ is the ray direction vector, $\hat{n}_j$ is the surface normal of face $j$, and $|\cdot|$ denotes the Euclidean norm [S1, unofficial].
+ 
+ 2.  **Compute Outlier Score ($\psi_{ij}$):**
+@@ -41,5 +40,5 @@
+ 
+ 4.  **Compute Ray Diversity ($\delta_j$):**
+-    For face $j$, let $I$ be the number of observing rays. Let $x_i, y_i, z_i$ be the components of the principal axis values of each observing ray $i$ (interpreted as vectors from the camera center or normalized direction vectors). Compute the variance of these components:
++    For face $j$, let $I$ be the number of observing rays [S1, unofficial]. Let $x_i, y_i, z_i$ be the components of the principal axis values of each observing ray $i$ (interpreted as vectors from the camera center or normalized direction vectors) [S1, unofficial]. Compute the variance of these components:
+     $$
+     \bar{x} = \frac{1}{I} \sum_{i=1}^I x_i, \quad \bar{y} = \frac{1}{I} \sum_{i=1}^I y_i, \quad \bar{z} = \frac{1}{I} \sum_{i=1}^I z_i
+@@ -60,7 +59,12 @@
+ All objective functions ($f_C, f_Q, f_D, f_T$) are smoothed and clipped using:
+ $$
+-\xi(x) = \max\left(0, \min\left(1, \frac{1}{3} \left[ \frac{1}{1 + e^{(-\alpha_3 x) + (\alpha_3 0.5 e)}} + 1 \right] \right)\right)
++\xi(x) = \max\left(0, \min\left(1, \frac{1}{3} \left[ \frac{1}{1 + e^{(-\alpha_3 x) + (\alpha_3 \cdot 0.5)}} + 1 \right] \right)\right)
+ $$
+ with $\alpha_3 = 3$ [S1, unofficial].
++
++**Edge Cases and Pitfalls:**
++*   Zero observing rays ($I=0$) or zero visibility ($K_j=0$) must be skipped to avoid division by zero.
++*   The objective requires ground-truth mesh geometry for normals and intersections, making it inapplicable during early reconstruction stages without a surrogate estimator [S1, unofficial].
++*   Numerical stability requires clamping the dot product for $\arccos$ to $[-1, 1]$ and handling zero-norm direction vectors.
+ 
+ **Pseudocode:**
+@@ -69,5 +73,5 @@
+ import numpy as np
+ 
+-def ray_diversity_objective(mesh_faces, rays_per_face, alpha1=1.0, alpha2=-10.0, alpha3=3.0):
++def ray_diversity_objective(mesh_faces, alpha1=1.0, alpha2=-10.0, alpha3=3.0):
+     """
+     Compute the Ray Diversity Objective.
+@@ -77,8 +81,9 @@
+             - normal: numpy array (3,), unit surface normal n_hat_j
+             - rays: List of ray objects. Each ray has:
+-                - direction: numpy array (3,), ray direction r_i
++                - direction: numpy array (3,), ray direction i
+                 - visibility: float V_ijk (weight)
++        alpha1, alpha2, alpha3: Hyperparameters for soft-thresholding and smoothing.
+     Returns:
+-        f_D: float, the normalized effective Ray Diversity objective value.
++        f_D: float, the smoothed and clipped normalized effective Ray Diversity objective value.
+     """
+     J = len(mesh_faces)
+@@ -86,5 +91,5 @@
+     
+     for face in mesh_faces:
+-        normals = face.normal
++        n_hat = face.normal
+         rays = face.rays
+         I = len(rays)
+@@ -96,17 +101,11 @@
+         outlier_scores = []
+         for ray in rays:
+-            r_i = ray.direction
+-            # Ensure direction is normalized for dot product if not already
+-            r_i_norm = r_i / np.linalg.norm(r_i)
++            i_vec = ray.direction
++            i_norm = i_vec / np.linalg.norm(i_vec)
+             
+-            # Cosine of angle between ray and normal
+-            cos_theta = np.dot(r_i_norm, normals)
+-            # Clamp to [-1, 1] for numerical stability
++            cos_theta = np.dot(i_norm, n_hat)
+             cos_theta = np.clip(cos_theta, -1.0, 1.0)
+             
+-            # Grazing angle in degrees
+             theta_deg = np.arccos(cos_theta) * (180.0 / np.pi) - 90.0
+-            
+-            # Outlier score psi_ij
+             psi = 1.0 - (alpha1 / (1.0 + np.exp(-theta_deg + alpha2)))
+             outlier_scores.append(psi)
+@@ -122,9 +121,7 @@
+         
+         # Step 4: Ray diversity delta_j
+-        # Extract principal axis values (x, y, z components of ray directions)
+         directions = np.array([ray.direction for ray in rays])
+-        # Normalize directions if they are not unit vectors
+         norms = np.linalg.norm(directions, axis=1, keepdims=True)
+-        norms = np.where(norms == 0, 1.0, norms) # Avoid division by zero
++        norms = np.where(norms == 0, 1.0, norms)
+         unit_directions = directions / norms
+         
+@@ -145,5 +142,5 @@
+     
+     # Smoothing and clipping
+-    f_D_smoothed = np.max([0.0, np.min([1.0, (1.0/3.0) * (1.0 / (1.0 + np.exp((-alpha3 * f_D) + (alpha3 * 0.5 * np.e))) + 1.0)])])
++    f_D_smoothed = np.max([0.0, np.min([1.0, (1.0/3.0) * (1.0 / (1.0 + np.exp(-alpha3 * f_D + alpha3 * 0.5)) + 1.0)])])
+     
+     return f_D_smoothed
+@@ -151,11 +148,11 @@
+ 
+ ## Operating characteristics
+-*   **Complexity:** Linear in the number of faces and the total number of rays observing those faces.
+-*   **Strengths:** Explicitly encourages views that provide diverse geometric information (high variance in ray directions) while penalizing views that are geometrically uninformative (grazing angles near 90 degrees).
++*   **Complexity:** Linear in the number of faces and the total number of rays observing those faces [G].
++*   **Strengths:** Explicitly encourages views that provide diverse geometric information (high variance in ray directions) while penalizing views that are geometrically uninformative (grazing angles near 90 degrees) [S1, unofficial].
+ *   **Limitations:** Requires access to a ground truth mesh to compute surface normals and ray-face intersections, which limits applicability during initial reconstruction phases where the mesh is unknown [S1, unofficial]. This limitation is addressed in the source by using a surrogate network (SOARNet) to estimate the objective [S1, unofficial].
+ *   **Use Case:** Active view planning for NeRF reconstruction where selecting optimal camera poses is critical [S1, unofficial].
+ 
+ ## Background
+-The Ray Diversity Objective was introduced in the context of SO-NeRF (Surrogate Objectives for NeRF), an active view planning method. It was proposed to address the need for selecting training images from as many views as possible to improve multi-view correspondences [S1, unofficial]. The method is part of a family of surrogate objectives ($f_C, f_Q, f_D, f_T$) used to guide a deep neural network (SOARNet) in predicting next-step camera poses [S1, unofficial].
++The Ray Diversity Objective was introduced in the context of SO-NeRF (Surrogate Objectives for NeRF), an active view planning method [S1, unofficial]. It was proposed to address the need for selecting training images from as many views as possible to improve multi-view correspondences [S1, unofficial]. The method is part of a family of surrogate objectives ($f_C, f_Q, f_D, f_T$) used to guide a deep neural network (SOARNet) in predicting next-step camera poses [S1, unofficial].
+ 
+ ## Sources

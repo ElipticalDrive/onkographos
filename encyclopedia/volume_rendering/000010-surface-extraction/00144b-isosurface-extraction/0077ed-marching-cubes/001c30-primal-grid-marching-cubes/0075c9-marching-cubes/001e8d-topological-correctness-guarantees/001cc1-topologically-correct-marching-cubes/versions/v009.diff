@@ -1,0 +1,226 @@
+--- v008.md
++++ v009.md
+@@ -3,103 +3,153 @@
+ 
+ ## Overview
+-Topologically Correct Marching Cubes (TMC) is an extension to the standard Marching Cubes algorithm that guarantees the output mesh is homeomorphic to the trilinear interpolant of the input scalar field within each voxel [S1, unofficial][S2]. It solves the ambiguity problem by inserting additional vertices inside cells to resolve complex topological features, such as tunnels or handles, which standard linear interpolation fails to represent correctly [S1, unofficial][S2]. Unlike standard Marching Cubes, which may produce disconnected sheets for a single continuous tunnel, TMC ensures the mesh accurately reflects the topology of the underlying trilinear field [S2].
++Topologically Correct Marching Cubes (TMC) is an extension to the standard Marching Cubes algorithm that guarantees the output mesh is homeomorphic to the trilinear interpolant of the input scalar field within each cell [S1, unofficial][S2]. It solves the problem of topological ambiguity in standard Marching Cubes, where specific vertex sign patterns (such as those forming a tunnel within a single cell) are incorrectly resolved into disconnected sheets [S2]. Unlike standard Marching Cubes, which may produce non-manifold artifacts or incorrect connectivity in these ambiguous cases, TMC inserts additional vertices to resolve complex features, ensuring a 2-manifold and watertight mesh provided the isosurface does not intersect the domain boundaries [S1, unofficial][S2].
+ 
+ ## How it works
+ **Inputs and Outputs:**
+-*   **Input:** A scalar field defined on a 3D grid (domain), an isovalue threshold, and a domain definition specifying the grid structure and vertex values [S2].
+-*   **Output:** A polygonal mesh (typically triangles) representing the isosurface [S2].
++*   **Input:** A voxel grid (domain) with scalar values at vertices, and an isovalue.
++*   **Output:** A polygon mesh (list of points and polygons) representing the isosurface [S2].
+ 
+ **Data Structures:**
+-The algorithm operates on a voxel grid. For each cube (voxel), it evaluates the scalar values at the 8 vertices. If the standard Marching Cubes lookup table indicates a cut, TMC checks for topological ambiguity. If ambiguity is detected (specifically cases involving saddle points that create tunnels or complex internal structures), the algorithm inserts a new vertex.
+-*   **Vertex Insertion:** A new vertex is placed at the center of the cell or at an optimized position [S1, unofficial]. The sources mention placement at the center of the cell or optimization using Quadric Error Metrics (QEM) for Dual Contouring, but for TMC specifically, the core mechanism is the insertion of vertices to resolve topology [S1, unofficial].
++The implementation relies on the standard Marching Cubes lookup table for the 15 topological cases but augments the vertex generation phase. When an ambiguous configuration is detected, the algorithm allocates additional vertex structures within the cell to represent the internal topology [S2].
+ 
+ **Steps:**
+-1.  Iterate over all voxels in the domain [S2].
+-2.  For each voxel, determine the intersection case based on the signs of the scalar values at the 8 vertices relative to the isovalue [S2].
+-3.  If the case is one of the standard 15 ambiguous cases (or specifically those requiring topological correction), analyze the trilinear interpolant within the cell [S1, unofficial][S2].
+-4.  If the trilinear interpolant contains a saddle point that results in a topology not representable by the standard 14 basic configurations (e.g., a tunnel passing through the cell), insert a new vertex [S1, unofficial][S2].
+-5.  Connect the new vertex to the existing edge intersection points to form a triangulation that is homeomorphic to the trilinear surface [S1, unofficial][S2].
+-6.  Assemble the triangles from all voxels into a global mesh [S2].
++1.  **Grid Traversal:** Iterate over every voxel in the input domain.
++2.  **Case Identification:** Determine the standard Marching Cubes case index based on the signs of the scalar values at the 8 vertices of the voxel relative to the isovalue.
++3.  **Ambiguity Detection:** Identify if the current case corresponds to an ambiguous configuration where the standard linear interpolation fails to capture the true topology of the trilinear interpolant (e.g., the "tunnel" case) [S2].
++4.  **Vertex Insertion:** If an ambiguous case is detected:
++    *   Insert additional vertices within the cell. The sources indicate these are placed at the center of the cell or optimized using Quadric Error Metrics (QEM) for Dual Contouring-style quality, though the primary TMC mechanism is insertion to resolve topology [S1, unofficial].
++    *   Connect these new vertices to the edge intersections to form a triangulation that is homeomorphic to the trilinear surface [S1, unofficial][S2].
++5.  **Standard Triangulation:** If the case is not ambiguous, proceed with standard Marching Cubes edge intersection calculations and triangulation [S2].
++6.  **Mesh Assembly:** Collect all generated polygons and points to form the final mesh [S2].
++
++**Parameters:**
++*   `use_topologically_correct_marching_cubes`: A boolean flag. Set to `true` to enable TMC; `false` for standard Marching Cubes [S2].
++*   `isovalue`: The scalar threshold for surface extraction [S2].
++
++**Edge Cases and Pitfalls:**
++*   **Boundary Intersection:** The guarantee of the mesh being 2-manifold and watertight holds *only* if the isosurface does not intersect the domain boundaries. If the surface touches or crosses the boundary, the topological guarantees may fail [S1, unofficial][S2].
++*   **Sharp Features:** TMC does not guarantee the recovery of sharp features present in the input field; it focuses on topological correctness of the smooth trilinear interpolant [S2].
++*   **Complexity:** The insertion of vertices increases the vertex count per cell compared to standard MC, potentially impacting memory and rendering performance [S2].
+ 
+ **Pseudocode:**
+ ```python
+ def topologically_correct_marching_cubes(domain, isovalue):
++    """
++    Extracts an isosurface using Topologically Correct Marching Cubes.
++    
++    Args:
++        domain: A structure containing the voxel grid values and geometry.
++        isovalue: The scalar threshold.
++        
++    Returns:
++        points: List of 3D coordinates.
++        polygons: List of polygon indices.
++    """
+     points = []
+     polygons = []
+     
+-    for voxel in domain.voxels:
+-        # Get scalar values at the 8 vertices of the voxel
+-        values = [domain.scalar(v) for v in voxel.vertices]
++    # Map for caching vertex positions to ensure manifold connectivity
++    vertex_cache = {} 
++    
++    for cell in domain.cells:
++        # 1. Get vertex values
++        vertex_values = [domain.value(v) for v in cell.vertices]
+         
+-        # Determine the standard Marching Cubes case index
+-        case_index = compute_mc_case_index(values, isovalue)
++        # 2. Determine case index (standard 15-case table logic)
++        case_index = 0
++        for i, val in enumerate(vertex_values):
++            if val < isovalue:
++                case_index |= (1 << i)
++                
++        # 3. Check for ambiguity
++        is_ambiguous = is_ambiguous_case(case_index)
+         
+-        # Check if the case requires topological correction
+-        # Standard MC handles 14 cases. Cases 15-23 are ambiguous.
+-        # TMC specifically handles cases where the trilinear surface has a saddle point
+-        # that creates a tunnel or complex topology not captured by linear edges.
+-        if case_index in AMBIGUOUS_CASES:
+-            # Analyze the trilinear interpolant to detect saddle points
+-            # This involves checking the discriminant or critical points of the trilinear function
+-            has_tunnel = detect_trilinear_tunnel(values, isovalue)
++        if is_ambiguous:
++            # 4. Resolve ambiguity by inserting vertices
++            # Insert a vertex at the cell center or optimized position
++            center_vertex = compute_center_vertex(cell, isovalue)
++            points.append(center_vertex)
++            center_idx = len(points) - 1
+             
+-            if has_tunnel:
+-                # Insert a new vertex at the center of the cell
+-                # [G] The exact position might be the geometric center or an optimized point
+-                center = voxel.center()
+-                new_vertex_index = points.append(center)
++            # Compute edge intersections as usual
++            edge_intersections = compute_edge_intersections(cell, isovalue)
++            
++            # Create topology-correct triangulation using the center vertex
++            # The specific connectivity depends on the ambiguous case type
++            # This replaces the standard 15-case triangulation
++            triangles = resolve_ambiguous_triangulation(case_index, edge_intersections, center_idx)
++            
++            for tri in triangles:
++                polygons.append(tri)
++        else:
++            # 5. Standard Marching Cubes processing
++            edge_intersections = compute_edge_intersections(cell, isovalue)
++            triangles = standard_marching_cubes_triangulation(case_index, edge_intersections)
++            
++            for tri in triangles:
++                polygons.append(tri)
+                 
+-                # Generate triangles connecting the new vertex to the edge intersections
+-                # The edge intersections are computed as in standard MC
+-                edge_intersections = compute_edge_intersections(values, isovalue, voxel)
+-                
+-                # Connect new_vertex_index to the appropriate edge intersections
+-                # to form a topology-correct triangulation
+-                triangles = generate_tunnel_triangles(new_vertex_index, edge_intersections)
+-                polygons.extend(triangles)
+-            else:
+-                # Fall back to standard Marching Cubes for non-tunnel ambiguous cases
+-                # or cases where the topology is simple
+-                triangles = standard_mc_triangulation(values, isovalue, voxel)
+-                polygons.extend(triangles)
+-        else:
+-            # Standard non-ambiguous case
+-            triangles = standard_mc_triangulation(values, isovalue, voxel)
+-            polygons.extend(triangles)
+-            
+     return points, polygons
+ 
+-def detect_trilinear_tunnel(values, isovalue):
+-    # [G] This function would analyze the trilinear interpolant
+-    # to determine if it contains a saddle point that creates a tunnel.
+-    # This typically involves solving for critical points of the trilinear function
+-    # and checking their values relative to the isovalue.
+-    # Not fully specified in sources, but implied by "analyze the trilinear interpolant".
+-    return False # Placeholder for actual topological analysis
++def is_ambiguous_case(case_index):
++    """
++    Returns true if the case index corresponds to an ambiguous configuration
++    where standard linear interpolation fails to represent the trilinear surface.
++    """
++    # Implementation detail: Check against known ambiguous cases
++    # e.g., cases with saddle faces or tunnel configurations
++    pass
++
++def compute_center_vertex(cell, isovalue):
++    """
++    Computes a new vertex position within the cell to resolve topology.
++    May use cell center or optimization techniques like QEM.
++    """
++    # [G] Simple implementation uses geometric center
++    center = sum(cell.vertices) / len(cell.vertices)
++    return center
++
++def compute_edge_intersections(cell, isovalue):
++    """
++    Computes the intersection points of the isosurface with the cell edges
++    using linear interpolation.
++    """
++    intersections = {}
++    for edge in cell.edges:
++        v1, v2 = edge.vertices
++        val1 = domain.value(v1)
++        val2 = domain.value(v2)
++        if (val1 - isovalue) * (val2 - isovalue) < 0:
++            t = (isovalue - val1) / (val2 - val1)
++            point = lerp(v1, v2, t)
++            intersections[edge.id] = point
++    return intersections
++
++def resolve_ambiguous_triangulation(case_index, edge_intersections, center_idx):
++    """
++    Generates triangles for an ambiguous case using the inserted center vertex.
++    """
++    # [G] Specific connectivity rules for each ambiguous case
++    # This function maps the edge intersections and center vertex to triangles
++    # ensuring the mesh is homeomorphic to the trilinear interpolant.
++    pass
+ ```
+-
+-**Parameters:**
+-*   `use_topologically_correct_marching_cubes`: A boolean flag. Set to `true` to enable TMC [S2].
+-
+-**Edge Cases and Pitfalls:**
+-*   **Boundary Intersection:** The guarantee of the mesh being 2-manifold and watertight holds only if the isosurface does not intersect the domain boundaries [S1, unofficial][S2].
+-*   **Sharp Features:** TMC does not guarantee the recovery of sharp features present in the input field [S2].
+-*   **Complexity:** The insertion of vertices increases the vertex count and complexity of the mesh compared to standard MC [S2].
+ 
+ ## Subtopics
+ 
+ ### [Topology-aware mesh quality improvement for Marching Cubes 33](1617-topology-aware-mesh-quality-improvement-for-marching-cubes-3.md)
+-Improves mesh quality while maintaining topological correctness using Extended Marching Cubes 33 and skinny triangle removal.
++Improves aspect ratio of MC33 triangulations by modifying scalar field values near intersections while preventing topological errors. It correctly represents the topology of the trilinear interpolant even when $\lambda=0$, unlike Raman and Wenger.
+ 
+ ## Operating characteristics
+-*   **Time Complexity:** Higher than standard Marching Cubes due to the additional topological analysis and vertex insertion steps [S2].
+-*   **Memory Complexity:** Higher than standard Marching Cubes due to the potential insertion of additional vertices [S2].
+-*   **Strengths:** Guarantees topological correctness of the trilinear interpolant; accurately represents small complex features like tunnels [S1, unofficial][S2].
+-*   **Limitations:** Does not guarantee sharp feature recovery; increased computational cost [S2].
+-*   **When to use:** When topological accuracy is critical, especially for complex internal structures like tunnels or handles [S1, unofficial][S2].
+-*   **When not to use:** When sharp feature preservation is required, or when computational resources are limited [S2].
++*   **Time Complexity:** Higher than standard Marching Cubes due to the overhead of ambiguity detection and vertex insertion calculations. The complexity remains linear with respect to the number of voxels, but the constant factor is larger.
++*   **Memory Complexity:** Increases vertex count per cell for ambiguous cases, leading to higher memory usage for the output mesh.
++*   **Performance:** Accurately represents small complex features (e.g., tunnels) that standard MC misses. However, it does not guarantee recovery of sharp features [S2].
++*   **Strengths:** Guarantees a 2-manifold, watertight mesh homeomorphic to the trilinear interpolant, provided boundary conditions are met.
++*   **Limitations:** Fails to guarantee manifoldness if the isosurface intersects domain boundaries. Does not preserve sharp features.
++*   **When to use:** When topological correctness is critical (e.g., medical imaging, simulation) and the surface is expected to be smooth and contained within the domain.
++*   **When not to use:** When sharp feature preservation is required, or when the surface intersects the domain boundaries.
+ 
+ ## Background
+-Topologically Correct Marching Cubes was introduced by Roberto Grosso in the paper "Construction of topologically correct and manifold isosurfaces" published in *Computer Graphics Forum*, volume 35, pages 187–196, by Wiley Online Library in 2016 [S1, unofficial]. It is implemented in the CGAL 3D Isosurfacing package, available since CGAL 6.1 (released in the fall of 2025) [S1, unofficial].
++Topologically Correct Marching Cubes was introduced by Roberto Grosso in the paper "Construction of topologically correct and manifold isosurfaces," published in *Computer Graphics Forum*, volume 35, pages 187–196, by Wiley Online Library in 2016 [S1, unofficial][S2]. It is implemented in the CGAL "3D Isosurfacing" package, which became available in CGAL 6.1 (released fall 2025) [S1, unofficial][S2].
+ 
+ ## Sources

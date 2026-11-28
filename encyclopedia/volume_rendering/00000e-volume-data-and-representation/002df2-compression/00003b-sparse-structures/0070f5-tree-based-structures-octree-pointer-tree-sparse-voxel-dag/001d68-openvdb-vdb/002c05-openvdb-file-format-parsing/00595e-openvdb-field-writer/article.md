@@ -1,0 +1,132 @@
+# OpenVDB Field Writer
+
+Also called: OpenVDB File Format Writer, OpenVDB Grid Exporter, VDB File Format (Writer), VDB File Writer, VDB Serialization
+
+## Overview
+The OpenVDB Field Writer is a Python-based serialization technique that converts 3D regular volumetric grids into the OpenVDB sparse tree format for export to VFX software like Blender [S2]. It differs from dense grid export by leveraging OpenVDB's sparse tree structure to efficiently store volumetric data and prune background values [S2]. It builds on [OpenVDB File Format Parsing](5173-openvdb-file-format-parsing.md) by providing the high-level API to construct and persist the grid structure [S2].
+
+## How it works
+**Inputs and Outputs**
+*   **Input:** A 3D `numpy` array (`grid`), origin coordinates (`origin`), delta spacing (`delta`), optional tolerance (`tolerance`), grid name (`name`), and metadata (`metadata`) [S2].
+*   **Output:** A `.vdb` file on disk containing the serialized OpenVDB grid [S2].
+
+**Data Structures**
+The writer uses two predefined dictionaries to map between NumPy and OpenVDB types:
+1.  `_DTYPES_NP2VDB`: Maps `numpy.dtype` to a list of candidate OpenVDB grid type strings or `DownCastTo` markers [S2].
+    *   `np.dtype('bool'): ['BoolGrid']`
+    *   `np.dtype('int8'): ['Int32Grid', 'FloatGrid']`
+    *   `np.dtype('uint8'): ['Int32Grid', 'FloatGrid']`
+    *   `np.dtype('int16'): ['Int32Grid', 'FloatGrid']`
+    *   `np.dtype('uint16'): ['Int32Grid', 'FloatGrid']`
+    *   `np.dtype('int32'): ['Int32Grid', DownCastTo('FloatGrid')]`
+    *   `np.dtype('uint32'): [DownCastTo('Int32Grid'), DownCastTo('FloatGrid')]`
+    *   `np.dtype('int64'): ['Int64Grid', DownCastTo('FloatGrid')]`
+    *   `np.dtype('uint64'): ['Int64Grid', DownCastTo('FloatGrid')]`
+    *   `np.dtype('float16'): ['HalfGrid', 'FloatGrid']`
+    *   `np.dtype('float32'): ['FloatGrid']`
+    *   `np.dtype('float64'): ['DoubleGrid', DownCastTo('FloatGrid')]` [S2]
+2.  `_DTYPES_VDB2NP`: Maps OpenVDB grid type strings to `numpy.dtype` [S2].
+    *   `'BoolGrid': np.dtype('bool')`
+    *   `'Int32Grid': np.dtype('int32')`
+    *   `'Int64Grid': np.dtype('int64')`
+    *   `'FloatGrid': np.dtype('float32')`
+    *   `'DoubleGrid': np.dtype('float64')`
+    *   `'HalfGrid': np.dtype('float16')` [S2]
+3.  `DownCastTo`: A dataclass wrapper with a single field `gridType` (str) used to mark precision-loss fallback grid types [S2].
+
+**Parameters**
+*   `grid`: `numpy.ndarray`, 3D array containing volumetric data [S2].
+*   `origin`: `numpy.ndarray`, cartesian coordinates of the center of the grid cell at index `[0,0,0]` [S2].
+*   `delta`: `numpy.ndarray`, 1D length-3 array or 3x3 diagonal matrix defining grid spacing/cell dimensions [S2].
+*   `tolerance`: `float`, threshold; values below this are treated as background for sparse storage. Default is `None` [S2].
+*   `name`: `str`, identifier for the grid. Default is `'density'` [S2].
+*   `metadata`: `dict`, additional key-value pairs to embed in the VDB file header [S2].
+
+**Steps**
+1.  **Initialization:** Instantiate `OpenVDBField` with `grid`, `origin`, `delta`, `name`, `tolerance`, and `metadata` [S2].
+2.  **Validation:** Verify `grid` is 3-dimensional. Raise `ValueError` if not [S2].
+3.  **Delta Validation:** Validate `delta`. If `delta` is a matrix, enforce orthorhombic constraint (no non-zero off-diagonal elements). Raise `ValueError` if violated [S2].
+4.  **Type Mapping:** Look up `grid.dtype` in `_DTYPES_NP2VDB`. Select the first available grid type. Raise `TypeError` if dtype is unsupported [S2].
+5.  **Grid Instantiation:** Instantiate the selected OpenVDB grid class (e.g., `openvdb.FloatGrid`) [S2].
+6.  **Population:** Populate the OpenVDB grid with data from the numpy array [S2].
+7.  **Pruning:** If `tolerance` is provided, apply tolerance-based pruning: values below the threshold are treated as background and stored sparsely [S2].
+8.  **Transform and Metadata:** Attach `grid` metadata and set the spatial transform (origin and delta) on the OpenVDB grid object [S2].
+9.  **Write:** Write the constructed OpenVDB grid to a `.vdb` file on disk [S2].
+
+**Pseudocode**
+> **Unverified code.** The code below did not pass a test run against a reference implementation, or no test fits it, so it may contain errors.
+
+```python
+import numpy as np
+from dataclasses import dataclass
+
+@dataclass
+class DownCastTo:
+    gridType: str
+
+class OpenVDBField:
+    _DTYPES_NP2VDB = {
+        np.dtype("bool"): ["BoolGrid"],
+        np.dtype("int8"): ["Int32Grid", "FloatGrid"],
+        np.dtype("uint8"): ["Int32Grid", "FloatGrid"],
+        np.dtype("int16"): ["Int32Grid", "FloatGrid"],
+        np.dtype("uint16"): ["Int32Grid", "FloatGrid"],
+        np.dtype("int32"): ["Int32Grid", DownCastTo("FloatGrid")],
+        np.dtype("uint32"): [DownCastTo("Int32Grid"), DownCastTo("FloatGrid")],
+        np.dtype("int64"): ["Int64Grid", DownCastTo("FloatGrid")],
+        np.dtype("uint64"): ["Int64Grid", DownCastTo("FloatGrid")],
+        np.dtype("float16"): ["HalfGrid", "FloatGrid"],
+        np.dtype("float32"): ["FloatGrid"],
+        np.dtype("float64"): ["DoubleGrid", DownCastTo("FloatGrid")],
+    }
+
+    def __init__(self, grid=None, origin=None, delta=None, name="density", tolerance=None, metadata=None):
+        if grid.ndim != 3:
+            raise ValueError(f"OpenVDB requires a 3D grid, got {grid.ndim}D")
+        delta_arr = np.asarray(delta)
+        if delta_arr.ndim == 2:
+            if not np.allclose(delta_arr, np.diag(np.diag(delta_arr))):
+                raise ValueError("Delta matrix must be diagonal (orthorhombic)")
+        self.grid = grid
+        self.origin = origin
+        self.delta = delta_arr
+        self.name = name
+        self.tolerance = tolerance
+        self.metadata = metadata if metadata is not None else {}
+        self._select_grid_type()
+
+    def _select_grid_type(self):
+        dtype = self.grid.dtype
+        if dtype not in self._DTYPES_NP2VDB:
+            raise TypeError(f"Unsupported numpy dtype: {dtype}")
+        self.candidates = self._DTYPES_NP2VDB[dtype]
+        self.selected_type = self.candidates[0]
+
+    def write(self, filename):
+        # Instantiate native OpenVDB grid class and populate with numpy data
+        # Apply tolerance-based pruning if self.tolerance is not None
+        # Attach metadata and set spatial transform (origin and delta)
+        # Write the constructed grid to filename
+        pass
+```
+
+**Edge Cases and Pitfalls**
+*   **Non-orthorhombic cells:** If `delta` contains non-zero off-diagonal elements, a `ValueError` is raised [S2].
+*   **Empty grids:** If the input grid has no active voxels (or results in an empty bounding box), a `RuntimeWarning` is triggered, and the resulting array shape is `(0, 0, 0)` [S2].
+*   **Unsupported dtypes:** If the numpy dtype is not in `_DTYPES_NP2VDB`, a `TypeError` is raised [S2].
+*   **Metadata errors:** Unreadable metadata keys during extraction trigger a `UserWarning` [S2].
+
+## Operating characteristics
+*   **Time Complexity:** Not given in the sources [S2].
+*   **Memory Complexity:** Not given in the sources [S2].
+*   **Performance:** The sparse tree structure efficiently stores volumetric data by pruning background values, making it suitable for large datasets with sparse active regions [S2].
+*   **Strengths:** Native support in Blender and VFX software; sparse storage reduces file size for data with large empty regions [S2].
+*   **Limitations:** Requires the `openvdb` library; limited to 3D regular grids; orthorhombic constraint on delta [S2].
+*   **When to use:** Exporting volumetric data for visualization in Blender or other VFX software [S2].
+*   **When not to use:** Non-3D data; non-orthorhombic grids; when dense storage is required [S2].
+
+## Background
+The OpenVDB Field Writer was introduced in the `gridData` package version 1.2.0 as a native OpenVDB field writer [S2]. It is used in the `gridData` Python package for exporting volumetric data to Blender and other VFX software [S2]. The OpenVDB format is used by Blender and other VFX software for volumetric data [S2].
+
+## Sources
+[S2] gridData.OpenVDB — GridDataFormats 1.2.0+9.g8a8f174 documentation, https://www.mdanalysis.org/GridDataFormats/_modules/gridData/OpenVDB.html, fetched 2026-10-27

@@ -1,0 +1,1936 @@
+Deformable Radial Kernel Splatting
+Target
+GS (50)
+GS (500)
+GS (5K)
+DRK (50)
+Render
+Scale-Down
+arXiv:2412.11752v2 [cs.CV] 23 Mar 2025
+Yi-Hua Huang1 Ming-Xian Lin1 Yang-Tian Sun1 Ziyi Yang1 Xiaoyang Lyu1
+Yan-Pei Cao2† Xiaojuan Qi1†
+1
+The University of Hong Kong 2 VAST
+Figure 1. Gaussian Splatting vs. Our Deformable Radial Kernel (DRK) Splatting: Gaussian splatting requires thousands of Gaussians
+to approximate detailed textures and shapes. In contrast, our kernel efficiently fits the target pattern with just 30 primitives, achieving
+superior results.
+Abstract
+Recently, Gaussian splatting has emerged as a robust technique for representing 3D scenes, enabling real-time rasterization and high-fidelity rendering. However, Gaussians’
+inherent radial symmetry and smoothness constraints limit
+their ability to represent complex shapes, often requiring
+thousands of primitives to approximate detailed geometry.
+We introduce Deformable Radial Kernel (DRK), which extends Gaussian splatting into a more general and flexible framework. Through learnable radial bases with adjustable angles and scales, DRK efficiently models diverse
+shape primitives while enabling precise control over edge
+sharpness and boundary curvature. iven DRK’s planar nature, we further develop accurate ray-primitive intersection
+computation for depth sorting and introduce efficient kernel
+culling strategies for improved rasterization efficiency. Extensive experiments demonstrate that DRK outperforms existing methods in both representation efficiency and rendering quality, achieving state-of-the-art performance while
+dramatically reducing primitive count.
+1. Introduction
+3D Gaussian Splatting [25] (3D-GS) has emerged as a leading 3D representation method thanks to its rapid rasteriza†Corresponding Author
+Project page: https://yihua7.github.io/DRK-web/.
+tion and superior rendering quality. Its key advantages– explicit point-based representation, flexibility for manipulation, and MLP-free rendering– have positioned it as a dominant approach in novel view synthesis. However, this success raises an intriguing question: Is the Gaussian kernel
+truly optimal for representing 3D scenes?
+Natural scenes often consist of primitives with diverse
+shapes (see Fig. 2), such as rectangles, triangles, and ellipses, which cannot be fully captured by Gaussians alone.
+Moreover, the inherently smooth nature of Gaussian kernels
+makes them less effective at representing sharp transitions.
+As a result, densely packed or numerous Gaussians are frequently required to accurately model scene primitives with
+non-Gaussian geometries or sharp boundaries (see Fig. 1),
+leading to inefficiencies in both computation and memory.
+Recent works have explored modifications to the Gaussian kernel to better handle discontinuities. For example,
+GES [18] adaptively adjusts the exponent values to control the sharpness of Gaussians, while still maintaining rotational symmetry, which limits its representational flexibility. DisC-GS [41] and 3D-HGS [29] introduce curveand half-cutting techniques to the Gaussian kernel, respectively, improving its ability to capture discontinuous transitions. However, these cutting-based approaches remain fundamentally constrained by the inherent smoothness of the
+Gaussian kernel. Another line of research [7, 14, 17, 20]
+leverages 2D Gaussians to represent 3D scenes. While
+this approach offers better surface reconstruction compared
+to 3DGS, it is still constrained by the inherent limitations
+of the Gaussian framework, which restricts the flexibility
+of the representation. Notably, the concurrent work 3DCS [19] employs novel 3D smooth convex shapes as primitives for geometry modeling with satisfactory results.
+In this work, our objective is to design new shape primitives that can adapt to complex 3D scenes. Motivated by
+the success of 2D Gaussian Splatting (2D-GS), we focus
+on developing adaptive 2D planar kernels. Specifically,
+we introduce the 2D Deformable Radial Kernel (DRK), a
+flexible planar primitive for representing 3D scenes (see
+Fig. 4). At its core, DRK extends traditional radial bases
+with learnable parameters that enable precise control over
+shape deformation through three key features: 1) multiple
+radial bases with learnable polar angles and scale parameters allow the kernel to adaptively stretch, rotate, and shrink,
+providing significantly more flexibility than fixed Gaussian
+functions; 2) a hybrid distance metric combining L1 and L2
+norms with learnable weights enables DRK to naturally represent both curved surfaces and sharp geometric features;
+and 3) an adaptive piecewise linear remapping function provides fine-grained control over value distributions, particularly enhancing the representation of sharp boundaries. Despite its enhanced expressiveness, DRK maintains a simple parametric form that is easy to optimize and efficient
+to render. The DRK determines the location and orientation of the tangent plane through its center and rotation parameters, building upon these radial bases as its structural
+foundation to conform to target shapes, bypassing the geometric and smoothness constraints typically imposed by
+Gaussian functions. As shown in Fig. 2, a single DRK
+primitive can flexibly model a wide range of shape primitives, whereas many Gaussians are often required to represent similar shapes. The formulation is also backwardscompatible – DRK naturally reduces to a Gaussian kernel
+when using two orthogonal major bases with different decay rates, while achieving superior rendering quality with
+comparable computational efficiency.
+We experimentally validate DRK on our proposed
+dataset (DiverseScene) covering various scenarios, including rich textures, fine geometry, specular effects, and large
+spatial scale. We also evaluate DRK on unbounded MipNeRF 360 [2] datasets. Experimental results demonstrate
+our method has advantages in preserving visual details more
+effectively and efficiently.
+Overall, our work makes the following contributions:
+• We introduce Deformable Radial Kernel (DRK), a novel
+primitive that generalizes conventional Gaussian splatting. DRK enables flexible shape modeling through learnable radial bases, hybrid distance metrics, and adaptive
+sharpness control, significantly reducing the number of
+primitives needed for high-quality scene representation.
+• We develop a differentiable and efficient rendering
+pipeline for DRK, featuring polygon-based tile culling
+and cache-sorting strategies to enhance both rendering efficiency and view consistency.
+• We created DiverseScenes, a new dataset covering rich
+textures, fine geometry, specular effects, and large scenes
+for more effectively evaluating the ability to model complex scenarios of different algorithms.
+2. Related Work
+2.1. Novel View Synthesis
+Novel view synthesis from multi-view images represents
+a fundamental challenge in computer graphics and computer vision. The field has evolved through increasingly
+sophisticated 3D scene representations. Traditional light
+field approaches [8, 16, 28] attempt to model the entire
+scene through a single 4D function of ray-slice intersections, but this implicit representation struggles with sparse
+inputs and complex geometry. Advancing beyond singlefunction modeling, Multi-Plane-Images (MPI) [36, 49, 53,
+56, 65] introduced a layered representation using multiple depth planes, offering better 3D structure modeling.
+However, its discrete depth layering limits the handling of
+large viewpoint changes, particularly in rotational views.
+To achieve continuous depth modeling, subsequent works
+adopted explicit 3D proxies including meshes [5, 9, 54, 57],
+point clouds [1, 35, 39, 55], and voxels [12, 31, 46, 47].
+These representations offer more flexible geometry modeling, with point-based methods further enhanced by neural
+networks [43, 44] for improved stability.
+Most recently, continuous neural representations have
+emerged as a powerful alternative, replacing discrete geometric proxies with MLPs that directly map 3D coordinates to scene properties. NeRF [37] pioneered this approach with radiance fields, spawning numerous extensions
+for faster inference [13, 24, 38], large-scale scenes [2, 15,
+51, 62], dynamic content [30, 40, 48], reflection modeling [3, 22, 27, 58], and stylization [11, 21, 63].
+2.2. Gaussian Splatting
+Point-based rendering approaches have made the rendering process of point clouds differentiable, enabling end-toend training for novel view synthesis. 3D Gaussian Splatting (3D-GS) [25] introduced scene modeling using 3D
+Gaussian distributions, compositing the appearance of intersected Gaussians along viewing rays through α-blending.
+This seminal work has inspired numerous extensions across
+various applications, including dynamic scene view synthesis [23, 33, 61], 3D content generation [52, 66], geometry
+reconstruction [20, 34], video representation [50] and neural network-enhanced high-fidelity view synthesis [32, 60].
+The flexible representation, computational efficiency, and
+superior rendering quality of 3D-GS have established it as
+a prominent approach in the field.
+The key innovation of 3D-GS lies in its use of Gaussian
+kernels for point effect decay, where the continuous nature
+of these functions facilitates the optimization of discrete
+representations. Subsequent research has focused on both
+constraining and extending these Gaussian kernels for specific applications. Notable developments include the constraint of 3D Gaussians to 2D space [7, 17, 20], yielding planar representations that better approximate scene surfaces
+for precise geometry reconstruction. Other works have extended the framework to 4D space [10, 59], enabling temporal dynamic modeling through 3D slicing of 4D Gaussians
+for view synthesis. To address limitations in representing
+sharp edges, researchers have proposed modifications to the
+Gaussian shape using curve-cutting [41], hemispheric truncation [29], and novel 3D convex shapes [19].
+3. Preliminaries
+In this section, we first review 3D Gaussian Splatting (3DGS) and 2D Gaussian Splatting (2D-GS), and their mathematical formulations (Sec. 3.1 and Sec. 3.2). We then
+introduce our general kernel splatting framework that extends beyond traditional Gaussian primitives (Sec. 3.3). Finally, we analyze the inherent limitations of Gaussian-based
+representations, motivating the need for our proposed deformable radial kernel formulation (Sec. 3.4).
+3.1. 3D Gaussian Splatting (3D-GS)
+3D Gaussian Splatting represents scenes using colored 3D
+Gaussians [25]. Each Gaussian G is parameterized by a
+3D center µ, covariance matrix Σ = RSS T RT (where R
+is a rotation matrix from quaternion q ∈ SO(3) and S is
+a scaling matrix from vector s), opacity o, and spherical
+harmonic coefficients sh for view-dependent appearance. A
+scene is represented as G = {Gj : µj , qj , sj , oj , shj }.
+Rendering involves projecting Gaussians onto the image
+plane with 2D covariance Σ′ = JW ΣW T J T and center
+µ′ = JW µ. The pixel color C(u) is computed via neural
+point-based α-blending:
+C(u) =
+X
+Ti αi SH(shi , vi ), where Ti = Πi−1
+j=1 (1 − αj ), (1)
+i∈N
+where SH evaluates spherical harmonics with view direction vi , and αi is:
+1
+′ T
+′
+′
+αi = oi e− 2 (p−µi ) Σi (p−µi ) .
+(2)
+By optimizing these Gaussian parameters and adaptively
+adjusting their density, 3D-GS achieves high-quality scene
+representation with real-time rendering capabilities.
+3.2. 2D Gaussian Splatting (2D-GS)
+Recognizing that real-world scenes primarily consist of surface structures where 3D Gaussians naturally compress into
+planar formations, recent works [7, 20] proposed 2D Gaussian Splatting (2D-GS). The opacity α is computed using
+local coordinates (u, v) on the tangent plane:
+
+
+
+v2
+1 u2
+,
+(3)
++
+α = o · exp −
+2 s2u
+s2v
+where s2u and s2v denote the variances along the U and V
+axes. This surface-centric formulation aligns with the success of polygon meshes in 3D modeling, offering a more
+compact scene representation.
+3.3. General Kernel Splatting
+We extend conventional 2D Gaussians by introducing a
+more general planar kernel splatting formulation (Fig. 3).
+Given a ray from position ro ∈ R3 with direction rd ∈ R3
+intersecting a tangent plane centered at µ with rotation
+R ∈ SO(3), the intersection point is:
+i = ro +
+(µ − ro )T Rz
+rd ,
+rdT Rz
+(4)
+where Rz is the plane normal. The local UV coordinates at
+this intersection are:
+   T
+u
+Rx
+=
+(i − µ),
+v
+RyT
+(5)
+where RxT and RyT are the first and second rows of R. The
+kernel splatting function then maps these UV coordinates to
+a density value α, determining the primitive’s shape.
+Kernel Function
+Local Frame
+Center
+Ray
+Intersection
+(u, v)
+Figure 3. Illustration of general planar kernel splatting: UV coordinates of ray-plane intersections are mapped to density values via
+a kernel function that determines the primitive’s shape.
+3.4. Discussions
+While 3D-GS demonstrates remarkable efficacy, our analysis reveals several inherent limitations. First, screen-space
+projection of Gaussians yields 2D elliptical distributions
+with rotational symmetry, constraining their ability to approximate diverse primitive shapes. Second, their conic
+curve boundaries (derived by the L2 norm) challenge the
+representation of linear edges and intermediate edge forms.
+Third, Gaussian distributions inherently couple decay rate
+with spatial extent through the covariance matrix—sharp
+features necessitate narrow distributions, making it challenging to simultaneously capture abrupt transitions and extended spatial regions.
+PSNR 43.6
+PSNR 43.3
+PSNR 41.9
+PSNR 52.9
+PSNR 48.5
+PSNR 48.7
+PSNR 47.8
+DRK
+3D-GS
+PSNR 47.8
+Render
+Contour
+Render
+Contour
+Render
+Contour
+Render
+Contour
+Figure 2. Comparison of 3D-GS versus a single DRK: DRK achieves superior geometric fidelity with just one primitive compared to
+multiple Gaussians. We visualize the contours of 3D-GS and DRK to better illustrate primitive count, scale, and position.
+These constraints necessitate millions of fine-grained
+Gaussians to approximate arbitrary shapes, leading to overparameterization while still failing to achieve perfect fidelity under practical constraints. As shown in Fig. 2, even
+elementary shapes like triangles and rectangles—which can
+be described concisely—require numerous Gaussians for
+approximation, exhibiting artifacts like interior inconsistencies and external floating points (last column). Our deformable radial kernel (DRK) addresses these limitations
+through radial basis functions with varying lengths sk and
+polar angles θk , controlled by parameters η and τ for contour curvature and sharpness (Fig. 4).
+4. Deformable Radial Kernel Splatting
+Deformable Radial Kernel (DRK) is a novel primitive for
+3D scene representation characterized by a set of parameters Θ = {µ, q, sk , θk , η, τ, o, sh}, where:
+• µ ∈ R3 , q ∈ SO(3), o, and sh follow 3D-GS for position,
+orientation, opacity, and view-dependent appearance
+• {sk , θk }K
+k=1 define radial basis lengths and angles that
+control the kernel shape
+• η ∈ (0, 1) and τ ∈ (−1, 1) control boundary curvature
+and sharpness, respectively
+In the following sections, we detail each component
+of DRK. First, we introduce the radial basis formulation
+(Sec. 4.1), showing that traditional 2D Gaussians are a special case within our framework. Then, we discuss L1&L2
+norm blending and edge sharpening in Sec. 4.2 and Sec. 4.3,
+which enable flexible control of boundary curvature and
+sharpness. Finally, in Sec. 4.4, we explore efficient rasterization strategies specifically tailored for DRK, including
+low-pass filtering, kernel culling, and cache sorting.
+Basis
+Center
+Contour
+Alpha
+Kernel Shape
+𝑠𝑘
+𝜂
+Δ𝜃𝑘
+𝜏
+Figure 4. DRK defines a deformable shape using radial basis functions characterized by lengths sk and polar angles θk , with parameters η and τ governing the shape’s curvature and sharpness
+respectively.
+4.1. Radial Basis
+Our radial basis defines a kernel’s shape through K control
+points in polar coordinates {sk , θk }, where sk > 0 represents each radial length and angles are ordered as 0 < θ0 <
+... < θK ≤ 2π. For any point with local tangent coordinates (u, v),√we compute its polar representation using L2
+norm r2 = u2 + v 2 and angle θ = arccos(u/r2 ). Given a
+point lying between basis k and k + 1 (i.e., θk < θ ≤ θk+1 ),
+k )π
+we define its relative angular distance as ∆θk = θ(θ−θ
+.
+k+1 −θk
+The kernel function is then formulated as:
+ 2
+
+1 + cos(∆θk )
+1 − cos(∆θk )
+r
+α = o · exp − 2
++
+. (6)
+2
+2s2k
+2s2k+1
+This formulation smoothly interpolates between adjacent
+radial bases using cosine weighting terms, ensuring continuous transitions in the kernel’s shape.
+2D Gaussian as a Special Case. Our formulation generalizes 2D Gaussian kernels. By setting K = 4 with
+θk = kπ
+2 and s0 = s2 = su , s1 = s3 = sv , we can derive the 2D Gaussian form in Eq. (3). For points in the first
+UV quadrant where ∆θk = 2θ:
+ 2 2
+
+r2 cos θ cos2 θ
+α = o · exp −
++
+2
+s2
+s2
+ 2 0 2  1
+
+1 u
+v
+= o · exp −
++ 2
+,
+2
+2 s0
+s1
+where we use the identity cos(∆θk ) = cos(2θ) =
+2 cos2 θ − 1. The derivation extends to other quadrants by
+symmetry.
+4.2. L1&L2 Norm Blending
+
+
+k)
+k)
++ 1−cos(∆θ
+in
+The scaling term s̄12 = 1+cos(∆θ
+2s2k
+2s2k+1
+Eq. (6) enforces smooth contours at radial endpoints, where
+ds̄
+d∆θk = 0 at ∆θk = 0 or π. However, since radials converge at the kernel center and are not parallel, this L2 formulation inherently produces conic curves, limiting its ability to represent straight edges common in man-made environments.
+To address this limitation, we incorporate L1 norm into
+our DRK formulation. For a point (u, v) between radial
+endpoints ei = (si cos(θi ), si sin(θi )) and ei+1 , we compute its L1 norm as:
+r1 =
+ei
+ei+1
+ 
+−1 u
+.
+v 1
+(7)
+This transformation maps the diamond-shaped L1 unit ball
+(|x| + |y| = 1, 0 ≤ x, y ≤ 1) to the segment between
+adjacent endpoints, enabling straight-line boundaries.
+We then introduce a blending weight η ∈ (0, 1) to
+smoothly interpolate between L1 and L2 norms, yielding
+our complete kernel function:
+
+
+
+r2
+1
+ηr12 + (1 − η) 22
+.
+α = o · exp −
+2
+s̄
+(8)
+Note that r12 requires no explicit scaling term as it is inherently scaled through the inverse transformation in Eq. (7).
+Please see Fig. 4 (right) for illustration.
+4.3. Edge Sharpening
+As shown in Fig. 2, Gaus- 1
+Ψ(𝑔)
+sian functions inherently couple scale and edge sharpness
+through their variance param- 0.5
+eter, making it challenging to
+Identity
+achieve precise shape approxiSharpen
+mation even with thousands of
+𝑔
+Gaussians. To decouple these O
+1
+𝜏/4 0.5
+properties, we introduce a sharpFigure 5. Sharpening
+ening coefficient τ ∈ (−1, 1)
+function illustration.
+that adaptively adjusts edge transitions. Given the exponential term g (i.e., the density value
+before opacity scaling) in Eq. (8), our sharpening function
+is:
+ 1−τ
+ 1+τ g
+1+τ
+τ
+g − 1−τ
+Ψ(g) =
+1−τ
+ 1−τ
+2τ
+g + 1+τ
+1+τ
+if
+if
+if
+0
+1+τ
+4
+3−τ
+4
+≤ g < 1+τ
+,
+4
+≤ g < 3−τ
+,
+4
+≤ g ≤ 1.
+(9)
+As illustrated in Fig. 5, this piecewise function reshapes the
+alpha values toward 0 or 1, creating sharper edge transitions
+while maintaining the kernel’s spatial extent. The final kernel opacity is computed as α = o · Ψ(g).
+4.4. Rasterization
+Low-pass Filtering. Camera-captured images represent
+discretely sampled signals from scene rays, inherently limiting the maximum recoverable frequency of 3D content.
+Without proper frequency constraints, optimization tends to
+generate small, floating primitives that overfit to individual
+training views. These primitives become too fine-grained
+(smaller than ray coverage) and only contribute to specific
+rays, resulting in poor generalization.
+While 3D-GS leverages EWA splatting for closed-form
+Gaussian low-pass filtering, DRK requires an alternative approach. Following Botsch et al. [4], we approximate filtering by taking the maximum between the kernel function
+and a view-dependent low-pass filter. Since DRK represents planar primitives, its frequency should be bounded on
+its tangent plane while potentially unbounded when viewed
+orthogonally, so we scale the filter size by the cosine of the
+view angle:
+α̃ = max(α, o · exp(−
+∆p2w
+∆p2h
+1
+(
++
+))),
+2
+2|rd · Rz |2 sl
+s2l
+(10)
+where ∆ph and ∆pw are image space distances between the
+pixel and the projected kernel center, rd · Rz accounts for
+view-dependent scaling, and sl controls the filter radius.
+Kernel Culling. Our rendering pipeline, based on 3DGS, performs image rendering using 2D thread grids on
+CUDA. The process begins by dividing images into 16×16
+tiles, with each tile corresponding to potentially intersecting primitives (kernels or 3D Gaussians). While 3D-GS
+projects the major axis of a 3D Gaussian onto the image
+plane to create a square axis-aligned bounding box (AABB)
+for tile coverage, this method can be computationally inefficient for primitives that project as highly anisotropic or
+elongated shapes, as shown in Fig. 6. This inefficiency becomes particularly evident in DRK due to its diverse shape
+representations. To address this, we introduce a more precise radius calculation and an improved tile culling strategy.
+Polygon
+Endpoint
+Center
+Untouched
+GS-Touched
+After-Culling
+Figure 6. Polygon-based tile culling using radial basis endpoints
+enables efficient rasterization by eliminating untouched tiles.
+The effective range of DRK is governed by its radial basis, whose endpoints define the kernel’s boundary. Following the 3-σ principle, we define the boundary radius sck , but
+extend it to account for opacity o and sharpness τ parameters. The calibrated radial length sck is defined as:
+s
+sck = sk
+
+
+e−32
+−1
+− log Ψ (
+) .
+o
+(11)
+The derivation details are provided in the Supplementary
+Material. Using this calibrated length, we calculate each
+radial basis endpoint vk :
+vk = µ + sck (cos θk Rx + sin θk Ry ).
+(12)
+Simple
+Methods
+2D-GS
+3D-GS
+3D-HGS
+GES
+DRK (S2)
+DRK (S1)
+DRK
+Texture
+Geometry
+Specular
+PSNR
+LPIPS
+SSIM
+PSNR
+LPIPS
+SSIM
+PSNR
+LPIPS
+SSIM
+42.10
+39.51
+41.41
+40.95
+40.34
+42.24
+43.46
+.0209
+.0311
+.0199
+.0266
+.0283
+.0168
+.0105
+.9969
+.9941
+.9931
+.9955
+.9946
+.9974
+.9985
+42.59
+44.57
+46.19
+45.23
+47.67
+47.86
+49.08
+.0624
+.0628
+.0397
+.0579
+.0537
+.0410
+.0396
+.9834
+.9968
+.9912
+.9977
+.9976
+.9988
+.9990
+29.90
+29.14
+30.42
+30.36
+30.68
+31.67
+31.93
+.0513 .9700
+.0552 .9658
+.0406 .9598
+.0468 .9704
+.0477 .9709
+.0394 .9788
+.0366 .9803
+PSNR
+LPIPS
+Large
+Average
+SSIM
+PSNR
+LPIPS
+SSIM
+PSNR
+LPIPS
+SSIM
+27.18 .0570 .9550
+27.16 .0758 .9523
+27.27 .0512 .9447
+27.04 .0632 .9550
+27.07 .0704 .9570
+27.77 .0631 .9603
+28.19 .0592 .9615
+27.80
+32.19
+33.17
+31.67
+31.57
+33.78
+35.28
+.2500
+.2054
+.1672
+.2074
+.2090
+.1685
+.1348
+.8388
+.9017
+.8721
+.8987
+.8985
+.9196
+.9372
+33.92
+34.41
+35.68
+35.05
+35.03
+36.62
+37.58
+.0881
+.0861
+.0637
+.0804
+.0823
+.0668
+.0564
+.9514
+.9621
+.9521
+.9634
+.9637
+.9701
+.9752
+Table 1. Rendering quality evaluation on DiverseScene datasets across various categories
+Num(↓)
+MB(↓)
+FPS(↑)
+2DGS
+3DGS
+3DHGS
+GES
+DRK(S2)
+DRK(S1)
+DRK
+359K
+83.6
+251.3
+336K
+79.7
+247.1
+373K
+89.6
+154.5
+330K
+78.1
+227.4
+42 K
+12.3
+234.9
+109K
+32.1
+119.2
+260K
+76.6
+77.5
+Table 2. Evaluation results of average primitive number (Num),
+model size (MB), and rendering speed (FPS) on DiverseScene.
+kernels with identical center depths, comparing rasterization results with and without cache-sorting, preventing popping artifacts while maintaining rendering efficiency.
+5. Experiment
+5.1. Datasets and Evaluation Metrics
+These endpoints form a polygon that accurately approximates the kernel’s boundary. By projecting this polygon
+onto the image plane, we can efficiently identify and cull
+tiles that don’t intersect with the kernel, making the rasterization more efficient.
+w/o sort
+Kernel
+List
+pop
+w/ sort
+Cache
+Array
+Figure 7. Our cache-sorting uses rt as keys in cache-sorting to
+rectify the sorting order while preventing popping artifacts.
+Cache Sorting. 3D-GS sorts the Gaussian using the depth
+of the center µ, which can lead to inconsistencies across
+multiple views. While Radl et al. [42] address this by estimating the depth of the Gaussian at the point of maximum
+density and applying a hierarchical sorting solution to mitigate popping artifacts caused by inconsistent sorting, we
+propose a simpler yet effective solution. In our approach,
+the distance rt from the camera to the intersection between
+the ray and DRK is calculated as:
+rt =
+(µ − ro )T Rz
+.
+rdT Rz
+(13)
+During rendering, each thread processes a pixel using an
+sorted array to cache the rt values and kernel indices, as illustrated in Fig. 7. The array is kept sorted by performing
+insert sorting for each new-coming kernel. If the array is
+full, the kernel with the smallest rt is popped out for processing. A dynamic cursor is used to record the scanning.
+We maintain an array length of 8, which is sufficient for
+approximating a more accurate sort. Fig. 7 demonstrates
+our method’s effectiveness in handling multiple overlapping
+To evaluate our method’s performance across diverse scenarios, we focused on four key aspects: texture complexity,
+geometric detail, view-dependent effects, and scene scale.
+We collected 10 representative 3D scenes from Sketchfab1 ,
+with two scenes per category: simple objects, richly textured surfaces, intricate geometric details, specular materials, and large-scale environments. The dataset, namely
+DiverseScenes, serves as a benchmark to assess our representation method’s capabilities. Detailed information about
+DiverseScenes can be found in the supplementary materials. For the evaluation on unbounded real-world scenes,
+we utilized the Mip-NeRF360 dataset [2], which contains
+multi-view images captured in open environments. Camera
+poses were estimated using COLMAP [45]. We assessed
+performance using three metrics: Peak Signal-to-Noise Ratio (PSNR) for overall reconstruction accuracy, Structural
+Similarity Index (SSIM) for perceptual quality and Learned
+Perceptual Image Patch Similarity (LPIPS) [64] for humanperceived visual fidelity. We observed that the number
+of primitives significantly impacts rendering quality. To
+evaluate DRK’s performance across different densities, we
+present results using various hyper-parameters (details provided in the Supp), where the density decreases progressively from DRK to DRK(S2) and then to DRK(S1).
+5.2. Quantitative Comparisons
+DiverseScenes. We compare our method, DRK, against
+state-of-the-art Gaussian representations: 3D-GS [25], 2DGS [20], 3D-HGS [29], and GES [18], using their official implementations. To ensure a fair comparison focused
+on kernel representation, we adjust the gradient threshold
+for densification in these methods, aligning their primitive
+count with that of 3D-GS (300K+). The results for each
+dataset category are shown in Table 1, demonstrating that
+our method achieves the best average performance. This
+1 https://sketchfab.com/
+3D-GS
+3D-HGS
+GES
+Ours (S2)
+Ours (S1)
+Ours
+Large
+Specular
+Geometry
+Texture
+GT
+Figure 8. Qualitative comparisons of DRK with state-of-the-art methods across various scenarios show that DRK effectively captures sharp
+texture and geometry boundaries.
+is followed by our sparser version, DRK (S1). DRK (S2)
+also performs comparably to other state-of-the-art methods,
+with significantly fewer primitives and lower space occupancy, while maintaining comparable FPS, as detailed in
+Table 2. Although our method requires more computation,
+the rendering framerates remain efficient (FPS > 50).
+Mip-NeRF360 Datasets. We also tested DRK on MipNeRF360 datasets, known for accurate camera poses and
+unbounded scenes. Results are shown in Tab. 3. On
+unbounded scenes, DRK still excels in perceptual quality (LPIPS, SSIM), it shows less advantage in PSNR, especially with sparser kernels. We hypothesize that DRK
+may tend to overfit distant regions with limited supervision. To address this, we used MiVOS[6] to mask image sequences, training on original images but evaluating only the
+foreground. The results (M-PSNR) indicate our method’s
+strength in well-supervised central regions.
+Methods
+PSNR(↑)
+M-PSNR(↑)
+LPIPS(↓)
+SSIM(↑)
+Num(↓)
+Size(↓)
+2D-GS
+3D-GS
+3D-GS (L)
+3D-HGS
+GES
+26.32
+26.48
+26.94
+26.74
+26.62
+32.01
+32.23
+32.75
+32.51
+32.11
+.2987
+.3045
+.2688
+.2999
+.3047
+.7617
+.7537
+.7799
+.7561
+.7542
+928 K
+811 K
+1191 K
+842 K
+824 K
+216.0 M
+191.3 M
+281.6 M
+202.4 M
+195.0 M
+DRK (S2)
+DRK (S1)
+DRK
+26.20
+26.40
+26.76
+32.31
+32.56
+32.81
+.2781
+.2601
+.2364
+.7601
+.7722
+.7871
+388 K
+551 K
+952 K
+125.9 M
+161.9 M
+279.1 M
+Table 3. Quantitative evaluation on Mip-NeRF360 scenes [2].
+5.3. Qualitative Comparison
+We conducted qualitative comparisons to highlight the advantages of DRK over other state-of-the-art kernel representations. Fig.8 shows results across different scene categories, where our method achieves better texture and geometry fitting with a comparable or smaller number of kernels.
+Fig.9 demonstrates that DRK effectively handles fine ge-
+3D-GS
+3D-HGS
+GES
+Ours (S2)
+Ours (S1)
+Ours
+Stump
+Treehill
+Flowers
+GT
+Figure 9. Comparisons on the MipNeRF 360 dataset show our method achieves clearer details and high-fidelity rendering.
+ometries, such as flowers and leaves, and detailed textures,
+like tags and bark, outperforming other representations that
+may have used more primitives (see Tab. 3).
+5.4. Converting Mesh to DRK
+All existing ”Splatting” methods [18, 20, 25, 29] fail to
+seamlessly integrate with traditional assets. In contrast, our
+DRK framework provides a versatile representation that allows for effortless conversion of triangle and polygon faces
+into DRK. This is accomplished by placing the DRK endpoints at the polygon vertices and adjusting the parameters
+τ and η to control sharpness, with both L1 and L2 curvature set to 1. This process eliminates the need for training
+data rendering or model optimization. Consequently, rich
+3D assets can be seamlessly transferred into DRK, bridging
+the gap between millions of traditional 3D assets and our
+fast, high-quality reconstruction representation. Figure 10
+illustrates the potential applications of Mesh2DRK.
+Reconstructed Scenes
+Composed Scenes
+Unified
+Rendering
+Millions of 3D Assets
+Mesh → DRK
+DRK
+Train-free
+Conversion
+Triangle/Polygon Face
+Figure 10. The conversion from Mesh to DRK demonstrates the
+efficiency of using DRK to incorporate traditional 3D assets into
+any DRK scene at low cost.
+6. Conclusion
+We present DRK, a novel primitive representation that generalizes and enhances Gaussian splatting. By incorporating learnable radial bases, adaptive shape control, and efficient rendering strategies, DRK effectively addresses the
+fundamental limitations of Gaussian kernels in representing
+diverse geometric features. Our experiments on both synthetic and real-world scenes demonstrate that DRK achieves
+superior rendering quality with significantly fewer primitives, while maintaining computational efficiency through
+carefully designed rasterization optimizations. Leveraging
+the flexibility of DRK, traditional triangle or polygon mesh
+representations can be seamlessly converted into DRK without requiring any training. This capability bridges rich 3D
+assets with reconstructed scenes, paving the way for future
+applications such as real-scene editing, VR digital world
+creation, and AR scene enhancement.
+Acknowledgement
+This work has been supported in part by Hong Kong Research Grant Council - Early Career Scheme (Grant No.
+27209621), General Research Fund Scheme (Grant No.
+17202422, 17212923), Theme-based Research (Grant No.
+T45-701/22-R) and Shenzhen Science and Technology Innovation Commission (SGDX20220530111405040). Part
+of the described research work is conducted in the JC STEM
+Lab of Robotics for Soft Materials funded by The Hong
+Kong Jockey Club Charities Trust.
+References
+[1] Kara-Ali Aliev, Artem Sevastopolsky, Maria Kolos, Dmitry
+Ulyanov, and Victor Lempitsky. Neural point-based graphics. In Proceedings of the European Conference on Computer Vision (ECCV), pages 696–712. Springer, 2020. 2
+[2] Jonathan T Barron, Ben Mildenhall, Dor Verbin, Pratul P
+Srinivasan, and Peter Hedman. Mip-NeRF 360: Unbounded
+anti-aliased neural radiance fields. In CVPR, pages 5470–
+5479, 2022. 2, 6, 7, 3
+[3] Mark Boss, Raphael Braun, Varun Jampani, Jonathan T Barron, Ce Liu, and Hendrik Lensch. NeRD: Neural reflectance
+decomposition from image collections. In ICCV, pages
+12684–12694, 2021. 2
+[4] Mario Botsch, Alexander Hornung, Matthias Zwicker, and
+Leif Kobbelt. High-quality surface splatting on today’s
+gpus. In Proceedings Eurographics/IEEE VGTC Symposium
+Point-Based Graphics, 2005., pages 17–141. IEEE, 2005. 5
+[5] Chris Buehler, Michael Bosse, Leonard McMillan, Steven
+Gortler, and Michael Cohen. Unstructured lumigraph rendering. In Proceedings of the 28th annual conference on
+Computer graphics and interactive techniques, pages 425–
+432, 2001. 2
+[6] Ho Kei Cheng, Yu-Wing Tai, and Chi-Keung Tang. Modular
+interactive video object segmentation: Interaction-to-mask,
+propagation and difference-aware fusion. In CVPR, 2021. 7
+[7] Pinxuan Dai, Jiamin Xu, Wenxiang Xie, Xinguo Liu,
+Huamin Wang, and Weiwei Xu. High-quality surface reconstruction using gaussian surfels. In ACM SIGGRAPH 2024
+Conference Papers, pages 1–11, 2024. 1, 3
+[8] Abe Davis, Marc Levoy, and Fredo Durand. Unstructured
+light fields. Computer Graphics Forum, 31(2pt1):305–314,
+2012. 2
+[9] Paul E Debevec, Camillo J Taylor, and Jitendra Malik. Modeling and rendering architecture from photographs: A hybrid
+geometry-and image-based approach. In Proceedings of the
+23rd annual conference on Computer graphics and interactive techniques, pages 11–20, 1996. 2
+[10] Yuanxing Duan, Fangyin Wei, Qiyu Dai, Yuhang He, Wenzheng Chen, and Baoquan Chen. 4d gaussian splatting:
+Towards efficient novel view synthesis for dynamic scenes.
+arXiv preprint arXiv:2402.03307, 2024. 3
+[11] Zhiwen Fan, Yifan Jiang, Peihao Wang, Xinyu Gong, Dejia
+Xu, and Zhangyang Wang. Unified implicit neural stylization. In ECCV, pages 636–654, 2022. 2
+[12] John Flynn, Michael Broxton, Paul Debevec, Matthew DuVall, Graham Fyffe, Ryan Overbeck, Noah Snavely, and
+Richard Tucker. DeepView: View synthesis with learned
+gradient descent. In Proceedings of the IEEE/CVF Conference on Computer Vision and Pattern Recognition (CVPR),
+pages 2367–2376, 2019. 2
+[13] Sara Fridovich-Keil, Alex Yu, Matthew Tancik, Qinhong
+Chen, Benjamin Recht, and Angjoo Kanazawa. Plenoxels:
+Radiance fields without neural networks. In CVPR, pages
+5501–5510, 2022. 2
+[14] Jian Gao, Chun Gu, Youtian Lin, Hao Zhu, Xun Cao, Li
+Zhang, and Yao Yao. Relightable 3d gaussian: Real-time
+point cloud relighting with brdf decomposition and ray tracing. arXiv preprint arXiv:2311.16043, 2023. 1
+[15] Yiming Gao, Yan-Pei Cao, and Ying Shan. SurfelNeRF:
+Neural surfel radiance fields for online photorealistic reconstruction of indoor scenes. arXiv preprint arXiv:2304.08971,
+2023. 2
+[16] Steven J Gortler, Radek Grzeszczuk, Richard Szeliski, and
+Michael F Cohen. The lumigraph. In Proceedings of the
+23rd annual conference on Computer graphics and interactive techniques, pages 43–54, 1996. 2
+[17] Antoine Guédon and Vincent Lepetit. Sugar: Surfacealigned gaussian splatting for efficient 3d mesh reconstruction and high-quality mesh rendering. In Proceedings of
+the IEEE/CVF Conference on Computer Vision and Pattern
+Recognition, pages 5354–5363, 2024. 1, 3
+[18] Abdullah Hamdi, Luke Melas-Kyriazi, Jinjie Mai, Guocheng
+Qian, Ruoshi Liu, Carl Vondrick, Bernard Ghanem, and
+Andrea Vedaldi. Ges: Generalized exponential splatting
+for efficient radiance field rendering. In Proceedings of
+the IEEE/CVF Conference on Computer Vision and Pattern
+Recognition, pages 19812–19822, 2024. 1, 6, 8
+[19] Jan Held, Renaud Vandeghen, Abdullah Hamdi, Adrien
+Deli‘ege, Anthony Cioppa, Silvio Giancola, Andrea Vedaldi,
+Bernard Ghanem, and Marc Van Droogenbroeck. 3D convex splatting: Radiance field rendering with 3D smooth convexes. arXiv, abs/2411.14974, 2024. 2, 3
+[20] Binbin Huang, Zehao Yu, Anpei Chen, Andreas Geiger, and
+Shenghua Gao. 2d gaussian splatting for geometrically accurate radiance fields. In ACM SIGGRAPH 2024 Conference
+Papers, pages 1–11, 2024. 1, 2, 3, 6, 8
+[21] Yi-Hua Huang, Yue He, Yu-Jie Yuan, Yu-Kun Lai, and Lin
+Gao. StylizedNeRF: consistent 3D scene stylization as stylized NeRF via 2D-3D mutual learning. In CVPR, pages
+18342–18352, 2022. 2
+[22] Yi-Hua Huang, Yan-Pei Cao, Yu-Kun Lai, Ying Shan, and
+Lin Gao. Nerf-texture: Texture synthesis with neural radiance fields. In ACM SIGGRAPH 2023 Conference Proceedings, pages 1–10, 2023. 2
+[23] Yi-Hua Huang, Yang-Tian Sun, Ziyi Yang, Xiaoyang Lyu,
+Yan-Pei Cao, and Xiaojuan Qi. Sc-gs: Sparse-controlled
+gaussian splatting for editable dynamic scenes. In Proceedings of the IEEE/CVF Conference on Computer Vision and
+Pattern Recognition, pages 4220–4230, 2024. 2
+[24] Animesh Karnewar, Tobias Ritschel, Oliver Wang, and Niloy
+Mitra. Relu fields: The little non-linearity that could. In
+ACM SIGGRAPH 2022 Conference Proceedings, pages 1–9,
+2022. 2
+[25] Bernhard Kerbl, Georgios Kopanas, Thomas Leimkühler,
+and George Drettakis. 3d gaussian splatting for real-time
+radiance field rendering. ACM Trans. Graph., 42(4):139–1,
+2023. 1, 2, 3, 6, 8
+[26] Arno Knapitsch, Jaesik Park, Qian-Yi Zhou, and Vladlen
+Koltun. Tanks and temples: Benchmarking large-scale scene
+reconstruction. ACM Transactions on Graphics, 36(4), 2017.
+2
+[27] Zhengfei Kuang, Kyle Olszewski, Menglei Chai, Zeng
+Huang, Panos Achlioptas, and Sergey Tulyakov. NeROIC:
+Neural rendering of objects from online image collections.
+ACM Trans. Graph., 41(4):1–12, 2022. 2
+[28] Marc Levoy and Pat Hanrahan. Light field rendering. In Proceedings of the 23rd annual conference on Computer graphics and interactive techniques, pages 31–42, 1996. 2
+[29] Haolin Li, Jinyang Liu, Mario Sznaier, and Octavia
+Camps. 3d-hgs: 3d half-gaussian splatting. arXiv preprint
+arXiv:2406.02720, 2024. 1, 3, 6, 8
+[30] Jia-Wei Liu, Yan-Pei Cao, Weijia Mao, Wenqiao Zhang,
+David Junhao Zhang, Jussi Keppo, Ying Shan, Xiaohu Qie,
+and Mike Zheng Shou. DeVRF: Fast deformable voxel radiance fields for dynamic scenes. In NeurIPS, pages 36762–
+36775, 2022. 2
+[31] Stephen Lombardi, Tomas Simon, Jason Saragih, Gabriel
+Schwartz, Andreas Lehrmann, and Yaser Sheikh. Neural volumes: Learning dynamic renderable volumes from images.
+ACM Transactions on Graphics (TOG), 2019. 2
+[32] Tao Lu, Mulin Yu, Linning Xu, Yuanbo Xiangli, Limin
+Wang, Dahua Lin, and Bo Dai. Scaffold-gs: Structured 3d
+gaussians for view-adaptive rendering. In Proceedings of
+the IEEE/CVF Conference on Computer Vision and Pattern
+Recognition, pages 20654–20664, 2024. 2
+[33] Jonathon Luiten, Georgios Kopanas, Bastian Leibe, and
+Deva Ramanan.
+Dynamic 3d gaussians: Tracking
+by persistent dynamic view synthesis.
+arXiv preprint
+arXiv:2308.09713, 2023. 2
+[34] Xiaoyang Lyu, Yang-Tian Sun, Yi-Hua Huang, Xiuzhe Wu,
+Ziyi Yang, Yilun Chen, Jiangmiao Pang, and Xiaojuan Qi.
+3dgsr: Implicit surface reconstruction with 3d gaussian splatting. arXiv preprint arXiv:2404.00409, 2024. 2
+[35] Moustafa Meshry, Dan B Goldman, Sameh Khamis, Hugues
+Hoppe, Rohit Pandey, Noah Snavely, and Ricardo MartinBrualla. Neural rerendering in the wild. In Proceedings of
+the IEEE/CVF Conference on Computer Vision and Pattern
+Recognition (CVPR), pages 6878–6887, 2019. 2
+[36] Ben Mildenhall, Pratul P Srinivasan, Rodrigo Ortiz-Cayon,
+Nima Khademi Kalantari, Ravi Ramamoorthi, Ren Ng, and
+Abhishek Kar. Local light field fusion: Practical view synthesis with prescriptive sampling guidelines. ACM Transactions on Graphics (TOG), 38(4):1–14, 2019. 2
+[37] Ben Mildenhall, Pratul P Srinivasan, Matthew Tancik,
+Jonathan T Barron, Ravi Ramamoorthi, and Ren Ng. NeRF:
+Representing scenes as neural radiance fields for view synthesis. Communications of the ACM, 65(1):99–106, 2021.
+2
+[38] Thomas Müller, Alex Evans, Christoph Schied, and Alexander Keller. Instant neural graphics primitives with a multiresolution hash encoding. ACM Trans. Graph., 41(4):1–15,
+2022. 2
+[39] Simon Niklaus, Long Mai, Jimei Yang, and Feng Liu. 3D
+Ken Burns effect from a single image. ACM Transactions on
+Graphics (TOG), 38(6):1–15, 2019. 2
+[40] Yi-Ling Qiao, Alexander Gao, and Ming Lin.
+NeuPhysics: Editable neural geometry and physics from monocular videos. In NeurIPS, pages 12841–12854, 2022. 2
+[41] Haoxuan Qu, Zhuoling Li, Hossein Rahmani, Yujun Cai, and
+Jun Liu. Disc-gs: Discontinuity-aware gaussian splatting.
+arXiv preprint arXiv:2405.15196, 2024. 1, 3
+[42] Lukas Radl, Michael Steiner, Mathias Parger, Alexander Weinrauch, Bernhard Kerbl, and Markus Steinberger.
+Stopthepop: Sorted gaussian splatting for view-consistent
+real-time rendering. ACM Transactions on Graphics (TOG),
+43(4):1–17, 2024. 6, 4, 5
+[43] Gernot Riegler and Vladlen Koltun. Free view synthesis. In
+Proceedings of the European Conference on Computer Vision (ECCV), pages 623–640. Springer, 2020. 2
+[44] Gernot Riegler and Vladlen Koltun. Stable view synthesis. In
+Proceedings of the IEEE/CVF Conference on Computer Vision and Pattern Recognition (CVPR), pages 12216–12225,
+2021. 2
+[45] Johannes Lutz Schönberger and Jan-Michael Frahm.
+Structure-from-motion revisited. In CVPR, 2016. 6, 3
+[46] Steven M Seitz and Charles R Dyer. Photorealistic scene
+reconstruction by voxel coloring. International Journal of
+Computer Vision, 35(2):151–173, 1999. 2
+[47] Vincent Sitzmann, Justus Thies, Felix Heide, Matthias
+Nießner, Gordon Wetzstein, and Michael Zollhofer. DeepVoxels: Learning persistent 3D feature embeddings. In Proceedings of the IEEE/CVF Conference on Computer Vision
+and Pattern Recognition (CVPR), pages 2437–2446, 2019. 2
+[48] Liangchen Song, Anpei Chen, Zhong Li, Zhang Chen, Lele
+Chen, Junsong Yuan, Yi Xu, and Andreas Geiger. NeRFPlayer: A streamable dynamic scene representation with decomposed neural radiance fields. IEEE TVCG, 29(5):2732–
+2742, 2023. 2
+[49] Pratul P Srinivasan, Richard Tucker, Jonathan T Barron,
+Ravi Ramamoorthi, Ren Ng, and Noah Snavely. Pushing the
+boundaries of view extrapolation with multiplane images. In
+Proceedings of the IEEE/CVF Conference on Computer Vision and Pattern Recognition (CVPR), pages 175–184, 2019.
+2
+[50] Yang-Tian Sun, Yi-Hua Huang, Lin Ma, Xiaoyang Lyu, YanPei Cao, and Xiaojuan Qi. Splatter a video: Video gaussian representation for versatile processing. arXiv preprint
+arXiv:2406.13870, 2024. 2
+[51] Matthew Tancik, Vincent Casser, Xinchen Yan, Sabeek Pradhan, Ben Mildenhall, Pratul P Srinivasan, Jonathan T Barron,
+and Henrik Kretzschmar. Block-NeRF: Scalable large scene
+neural view synthesis. In Proceedings of the IEEE/CVF Conference on Computer Vision and Pattern Recognition, pages
+8248–8258, 2022. 2
+[52] Jiaxiang Tang, Jiawei Ren, Hang Zhou, Ziwei Liu, and Gang
+Zeng. Dreamgaussian: Generative gaussian splatting for efficient 3d content creation. arXiv preprint arXiv:2309.16653,
+2023. 2
+[53] Richard Tucker and Noah Snavely. Single-view view synthesis with multiplane images. In Proceedings of the IEEE/CVF
+Conference on Computer Vision and Pattern Recognition
+(CVPR), pages 551–560, 2020. 2
+[54] Michael Waechter, Nils Moehrle, and Michael Goesele. Let
+there be color! large-scale texturing of 3D reconstructions.
+In Proceedings of the European conference on computer vision (ECCV), pages 836–850. Springer, 2014. 2
+[55] Olivia Wiles, Georgia Gkioxari, Richard Szeliski, and Justin
+Johnson. SynSin: End-to-end view synthesis from a single image. In Proceedings of the IEEE/CVF Conference
+on Computer Vision and Pattern Recognition (CVPR), pages
+7467–7477, 2020. 2
+[56] Suttisak Wizadwongsa, Pakkapon Phongthawee, Jiraphon
+Yenphraphai, and Supasorn Suwajanakorn. NeX: Real-time
+view synthesis with neural basis expansion. In Proceedings
+of the IEEE/CVF Conference on Computer Vision and Pattern Recognition (CVPR), pages 8534–8543, 2021. 2
+[57] Daniel N Wood, Daniel I Azuma, Ken Aldinger, Brian Curless, Tom Duchamp, David H Salesin, and Werner Stuetzle.
+Surface light fields for 3D photography. In Proceedings of
+the 27th annual conference on Computer graphics and interactive techniques, pages 287–296, 2000. 2
+[58] Ziyi Yang, Yanzhen Chen, Xinyu Gao, Yazhen Yuan, Yu
+Wu, Xiaowei Zhou, and Xiaogang Jin. Sire-ir: Inverse
+rendering for brdf reconstruction with shadow and illumination removal in high-illuminance scenes. arXiv preprint
+arXiv:2310.13030, 2023. 2
+[59] Zeyu Yang, Hongye Yang, Zijie Pan, and Li Zhang.
+Real-time photorealistic dynamic scene representation and
+rendering with 4d gaussian splatting.
+arXiv preprint
+arXiv:2310.10642, 2023. 3
+[60] Ziyi Yang, Xinyu Gao, Yangtian Sun, Yihua Huang, Xiaoyang Lyu, Wen Zhou, Shaohui Jiao, Xiaojuan Qi, and
+Xiaogang Jin. Spec-gaussian: Anisotropic view-dependent
+appearance for 3d gaussian splatting.
+arXiv preprint
+arXiv:2402.15870, 2024. 2
+[61] Ziyi Yang, Xinyu Gao, Wen Zhou, Shaohui Jiao, Yuqing
+Zhang, and Xiaogang Jin. Deformable 3d gaussians for highfidelity monocular dynamic scene reconstruction. In Proceedings of the IEEE/CVF Conference on Computer Vision
+and Pattern Recognition, pages 20331–20341, 2024. 2
+[62] Kai Zhang, Gernot Riegler, Noah Snavely, and Vladlen
+Koltun. NeRF++: Analyzing and improving neural radiance
+fields. arXiv preprint arXiv:2010.07492, 2020. 2
+[63] Kai Zhang, Nick Kolkin, Sai Bi, Fujun Luan, Zexiang Xu,
+Eli Shechtman, and Noah Snavely. ARF: Artistic radiance
+fields. In ECCV, pages 717–733, 2022. 2
+[64] Richard Zhang, Phillip Isola, Alexei A Efros, Eli Shechtman,
+and Oliver Wang. The unreasonable effectiveness of deep
+features as a perceptual metric. In CVPR, 2018. 6
+[65] Tinghui Zhou, Richard Tucker, John Flynn, Graham Fyffe,
+and Noah Snavely. Stereo magnification: Learning view
+synthesis using multiplane images. ACM Transactions on
+Graphics (TOG), 2018. 2
+[66] Zi-Xin Zou, Zhipeng Yu, Yuan-Chen Guo, Yangguang Li,
+Ding Liang, Yan-Pei Cao, and Song-Hai Zhang. Triplane
+meets gaussian splatting: Fast and generalizable single-view
+3d reconstruction with transformers. In Proceedings of
+the IEEE/CVF Conference on Computer Vision and Pattern
+Recognition, pages 10324–10335, 2024. 2
+Deformable Radial Kernel Splatting
+Supplementary Material
+Outline
+Mesh
+DRK
+In this supplementary file, we provide additional applications and potential usages of DRK, an introduction to the
+DiverseScenes dataset, implementation details, and further
+results that could not be included in the main paper due to
+space constraints. The content is organized as follows:
+• Sec. S1: More results of seamless conversion from mesh
+models to DRK representations, bridging millions of 3D
+assets with high-fidelity reconstructed scenes.
+• Sec. S2: Introduction to the DiverseScenes dataset.
+• Sec. S3: Additional experimental results on public
+datasets and an analysis of limitations.
+• Sec. S4: Detailed implementation of the DRK framework.
+S1. Converting Mesh to DRK
+We present more examples of converting 3D mesh assets
+to DRK within seconds, without the need for training data
+preparation or optimization, in Fig. S1. Rendered depth and
+normal images are also provided. In these examples, the
+DRK is kernel-wise colored and shaded over the base color
+using the normal and predefined illumination. In the future, by assigning UV attributes to DRK and rendering them
+into images, material properties such as albedo, roughness,
+and metallicity can be retrieved from the material maps, enabling deferred rendering using the rendered normals. This
+capability allows DRK to handle traditional assets and compose scenes reconstructed from real-world multi-views and
+man-made artistic 3D assets.
+It is worth noting that cache-sorting has minimal impact
+on reconstruction quality but plays a crucial role in the conversion from mesh to DRK. This is because Mesh2DRK
+produces a compact geometric representation, where each
+DRK kernel represents a relatively larger unit of a mesh face
+compared to those learned from multi-view images, which
+use smaller units to capture high-frequency appearance details. Cache-sorting ensures that the sorting order is nearly
+correct, resulting in satisfactory conversion outcomes.
+S2. DiverseScenes Dataset
+We collected 10 scenes from Sketchfab2 , encompassing a
+variety of 3D scene types. As illustrated in Fig. S2, the
+dataset includes scenes with simple geometry and textures
+(e.g., McCree, House), detailed textures (e.g., Newspaper,
+Book), fine geometry (e.g., PalmTree, Dress), and large
+scales (e.g., Minecraft, Street). The training set consists
+2 https://sketchfab.com/
+Color
+Depth
+Normal
+Figure S1. Examples of converting various 3D assets. The normal
+of DRK can be used for shading under illumination. UV texture
+mapping is applicable for DRK in future implementations.
+of 200 views, and the test set includes 30 views, sampled
+from the unit sphere. For Minecraft and Street, there are
+230 training views, with the train and test views simulating
+a walking camera along specified paths.
+McCree
+House
+Armor
+DiscoBall
+Newspaper
+Book
+PalmTree
+Dress
+MineCraft
+Street
+Figure S2. Overview of DiverseScenes. The dataset is composed
+of five categories: simple, specular, detailed geometry, fine texture, and large scale.
+McCree
+Methods
+House
+Scene
+PSNR(↑)
+LPIPS(↓)
+SSIM(↑)
+PSNR(↑)
+LPIPS(↓)
+SSIM(↑)
+2D-GS
+3D-GS
+3D-HGS
+GES
+40.95
+39.15
+40.64
+40.48
+.0067
+.0115
+.0062
+.0086
+.9985
+.9975
+.9965
+.9982
+43.25
+39.87
+42.17
+41.42
+.0351
+.0507
+.0335
+.0446
+.9953
+.9907
+.9897
+.9927
+Ours (S2)
+Ours (S1)
+Ours
+39.76
+40.90
+41.70
+.0104
+.0067
+.0047
+.9977
+.9985
+.9989
+40.92
+43.57
+45.22
+.0462
+.0269
+.0163
+.9914
+.9963
+.9980
+PSNR(↑)
+LPIPS(↓)
+SSIM(↑)
+PSNR(↑)
+LPIPS(↓)
+SSIM(↑)
+2D-GS
+3D-GS
+3D-HGS
+GES
+38.20
+42.25
+43.48
+43.49
+.1199
+.1211
+.0775
+.1122
+.9673
+.9944
+.9842
+.9960
+46.97
+46.89
+48.89
+46.97
+.0048
+.0045
+.0019
+.0036
+.9995
+.9991
+.9981
+.9993
+Ours (S2)
+Ours (S1)
+Ours
+43.28
+45.57
+47.28
+.1042
+.0904
+.0801
+.9961
+.9976
+.9983
+47.75
+49.76
+50.88
+.0032
+.0023
+.0019
+.9991
+.9992
+.9993
+PSNR(↑)
+LPIPS(↓)
+SSIM(↑)
+PSNR(↑)
+LPIPS(↓)
+SSIM(↑)
+2D-GS
+3D-GS
+3D-HGS
+GES
+26.04
+25.45
+27.30
+27.31
+.0367
+.0378
+.0217
+.0254
+.9807
+.9782
+.9773
+.9859
+33.76
+32.82
+33.54
+33.41
+.0659
+.0725
+.0595
+.0682
+.9593
+.9533
+.9423
+.9549
+Ours (S2)
+Ours (S1)
+Ours
+27.56
+29.19
+29.61
+.0362
+.0225
+.0196
+.9770
+.9899
+.9917
+33.80
+34.14
+34.25
+.0592
+.0562
+.0536
+.9648
+.9677
+.9688
+PSNR(↑)
+LPIPS(↓)
+SSIM(↑)
+PSNR(↑)
+LPIPS(↓)
+SSIM(↑)
+2D-GS
+3D-GS
+3D-HGS
+GES
+32.65
+31.51
+32.26
+31.98
+.0500
+.0687
+.0518
+.0603
+.9742
+.9684
+.9512
+.9713
+21.70
+22.81
+22.28
+22.09
+.0639
+.0828
+.0505
+.0661
+.9357
+.9361
+.9381
+.9386
+Ours (S2)
+Ours (S1)
+Ours
+32.01
+33.27
+34.07
+.0592
+.0430
+.0346
+.9736
+.9791
+.9814
+22.13
+22.26
+22.31
+.0816
+.0832
+.0838
+.9404
+.9414
+.9415
+Book
+Methods
+Newspaper
+Dress
+Methods
+PalmTree
+Armor
+Methods
+Street
+PSNR(↑)
+LPIPS(↓)
+SSIM(↑)
+PSNR(↑)
+LPIPS(↓)
+SSIM(↑)
+2D-GS
+3D-GS
+3D-HGS
+GES
+23.15
+25.81
+26.10
+25.83
+.4119
+.3516
+.3070
+.3554
+.7262
+.8116
+.7568
+.8072
+32.45
+38.56
+40.23
+37.51
+.0881
+.0591
+.0274
+.0594
+.9514
+.9917
+.9873
+.9902
+Ours (S2)
+Ours (S1)
+Ours
+25.01
+25.98
+26.84
+.3584
+.3057
+.2512
+.8019
+.8410
+.8755
+38.12
+41.58
+43.72
+.0596
+.0312
+.0183
+.9950
+.9981
+.9989
+PSNR(↑)
+LPIPS(↓)
+SSIM(↑)
+Num(↓)
+Size(↓)
+FPS(↑)
+2D-GS
+3D-GS
+3D-HGS
+GES
+33.92
+34.41
+35.68
+35.05
+.0881
+.0861
+.0637
+.0804
+.9514
+.9621
+.9521
+.9634
+359K
+346K
+373K
+330K
+83.6M
+82.0M
+89.6M
+78.1M
+251.3
+247.1
+154.5
+227.4
+Ours (S2)
+Ours (S1)
+Ours
+35.03
+36.62
+37.58
+.0823
+.0668
+.0564
+.9637
+.9701
+.9752
+42K
+109K
+260K
+12.3M
+32.1M
+76.6M
+234.9
+119.2
+77.5
+Average
+Methods
+Texture
+Coarse Fine
+✓
+×
+✓
+×
+×
+✓
+×
+✓
+✓
+×
+✓
+×
+×
+✓
+✓
+×
+×
+✓
+✓
+×
+Scale
+Small Large
+✓
+×
+✓
+×
+✓
+×
+✓
+×
+✓
+×
+✓
+×
+✓
+×
+✓
+×
+×
+✓
+×
+✓
+Material
+Diffuse Specular
+✓
+×
+✓
+×
+✓
+×
+✓
+×
+✓
+×
+✓
+×
+×
+✓
+×
+✓
+✓
+×
+✓
+✓
+Table S2. Summary of scene attribute annotations.
+Scene
+2D-GS
+3D-GS
+3D-HGS
+GES
+DRK (S2)
+DRK (S1)
+DRK
+Chair
+Drums
+Ficus
+Hotdog
+Lego
+Materials
+Mic
+Ship
+34.88
+25.67
+35.80
+36.89
+34.82
+30.14
+34.38
+31.09
+35.83
+26.15
+34.87
+37.72
+35.78
+30.00
+35.36
+30.80
+34.29
+26.29
+35.45
+37.54
+33.92
+29.88
+36.58
+31.10
+34.05
+26.05
+35.27
+37.13
+33.73
+29.74
+35.73
+30.94
+34.38
+25.90
+35.56
+37.19
+33.90
+29.38
+35.17
+30.84
+35.28
+26.12
+36.27
+37.84
+35.38
+30.14
+35.70
+31.28
+35.61
+26.13
+36.50
+38.17
+36.25
+30.48
+36.00
+31.42
+Avg PSNR
+32.96
+33.32
+33.13
+32.83
+32.79
+33.50
+33.82
+Num
+Size
+107K
+25.0M
+131K
+31.1M
+83K
+20.0M
+73K
+17.4M
+32K
+9.6M
+75K
+22.0M
+158K
+46.6M
+Table S3. PSNR scores, primitive numbers, and model sizes on
+NeRF-Synthetic [37] scenes (transposed).
+Discoball
+Minecraft
+Methods
+McCree
+House
+Book
+Newspaper
+Dress
+PalmTree
+Armor
+DiscoBall
+Street
+MineCraft
+Geometry
+Coarse Fine
+✓
+×
+✓
+×
+✓
+×
+✓
+×
+×
+✓
+×
+✓
+✓
+×
+✓
+×
+✓
+×
+✓
+×
+Table S1. We show the PSNR, LPIPS, and SSIM metrics for novel
+view synthesis on DiverseScenes.
+To offer a more comprehensive overview of the DiverseScenes Dataset, we manually annotated the attributes of
+each scene, as summarized in Table S2. Note that some attributes overlap; for instance, both Armor and Street include
+fine textures. To clarify the performance of methods on DiverseScenes, we present the per-scene results in Table S1.
+These results are also summarized by scene categories in
+the main paper.
+S3. More Experiments & Limitation Analysis
+Evaluation on NeRF-Synthetic Scenes. We conducted a
+quantitative evaluation on NeRF-Synthetic [37] scenes, reporting PSNR scores, primitive numbers, and model sizes
+in Table S3. Unlike DiverseScenes, the training cameras
+for NeRF-Synthetic scenes (except Ficus) are sampled from
+the upper hemisphere, and some test views fall outside the
+range covered by the training views. This setup partially
+assesses performance on view extrapolation. Our DRK
+method demonstrates superior performance. While the kernel number for DRK is slightly larger than for 3D-GS [25],
+DRK (S1) maintains a compact number and outperforms
+other methods in PSNR scores. DRK (S3) has a very small
+kernel number and model size, with an average PSNR still
+comparable to others.
+Ablation Study To gain a comprehensive understanding
+of DRK, we perform ablation studies on its attributes to assess their impact. We remove the effects of sharpening and
+curvature learning by setting τ = 0 and η = 0, respectively. We also examine the impact of the hyper-parameter
+K. Ablation results on DiverseScenes are shown in Tab. S4.
+We found that K significantly influences performance, with
+K = 3 causing the greatest drop. Additionally, η is more
+vital than τ , though both enhance representation capability.
+Evaluation on Tank&Temple Scenes. To assess our
+method’s performance on more challenging scenes with
+imperfect camera conditions due to dynamic objects and
+changing exposures, we evaluated the Tank&Temple [26]
+Methods
+τ =0
+η=0
+K=3
+K=5
+K=8
+DRK (S2)
+DRK (S1)
+DRK
+34.97
+36.22
+37.46
+34.82
+36.04
+37.27
+33.93
+35.50
+36.60
+34.47
+35.88
+36.85
+35.03
+36.62
+37.58
+is less robust to camera noise, which may explain its performance drop on the Tank&Temple dataset.
+GT
+3D-GS
+DRK
+3D-GS
+DRK
+PSNR 48.87
+PSNR 54.11
+PSNR 24.78
+PSNR 19.15
+PSNR 39.02
+PSNR 42.53
+PSNR 30.04
+PSNR 27.20
+Table S4. Ablation study on the impact of τ , η, and K.
+datasets. We used 9 scenes in total, including 8 intermediate scenes and the Truck scene. We report the PSNR scores,
+foreground-only PSNR scores (M-PSNR), primitive numbers, and model sizes in Table S5. The results indicate that
+DRK faces significant challenges with this dataset, likely
+due to higher camera error estimated by COLMAP [45].
+The Tank&Temple datasets are captured in dynamic environments with moving pedestrians and changing exposure,
+making camera estimation more difficult than in MipNeRF360 [2], where objects are primarily diffuse and free from
+view-dependent effects, transients, or significant sunlight
+exposure changes. To further investigate the robustness of
+DRK, we conducted evaluations with noisy camera data.
+Methods
+2D-GS
+3D-GS
+3D-HGS
+GES
+Ours (S2)
+Ours (S1)
+Ours
+PSNR
+M-PSNR
+Num
+Size
+20.65
+26.50
+1168K
+271.9M
+21.09
+26.92
+275K
+65.4M
+21.59
+27.58
+267K
+64.2M
+20.58
+26.56
+259K
+61.7M
+20.20
+26.36
+173K
+50.9M
+20.31
+26.41
+212K
+62.4M
+20.41
+26.37
+383K
+112.6M
+Table S5. Quantitative evaluation on Tank&Temple scenes.
+Robustness against Camera Noise To evaluate the performance of DRK under varying levels of camera noise, we
+simulated camera noise with different standard deviations
+(Std). The PSNR scores on DiverseScenes with noisy cameras are reported in Table S6. We observed that the PSNR
+scores of DRK drop significantly as the camera noise increases, whereas the performance of 3D-GS degrades more
+smoothly and slightly.
+Noise Std
+3D-GS
+DRK
+DRK (S1)
+DRK (S2)
+0
+1e − 3
+2.5e − 3
+5e − 3
+34.41
+33.44
+31.32
+29.37
+37.58
+31.59
+29.27
+27.85
+36.62
+31.19
+28.89
+27.44
+35.03
+30.88
+28.60
+27.14
+Table S6. Average PSNR scores on DiverseScenes of 3D-GS and
+DRK under different levels of camera noise.
+Fig. S3 shows the rendering results of 3D-GS and DRK
+trained with both accurate and noisy cameras. When trained
+with accurate cameras, DRK achieves higher-quality rendering with sharper and clearer appearances. However, even
+with very small camera noise, the performance of DRK deteriorates significantly, producing blurrier and more chaotic
+results compared to 3D-GS. In contrast, 3D-GS maintains
+the ability to model the coarse appearance of the scene under noisy conditions. These results demonstrate that DRK
+Noise Std = 0
+Noise Std = 1e-3
+Figure S3. Rendering results of 3D-GS and DRK trained on cameras with and without noise.
+S4. Method Details
+Parametrization. DRK attributes are modeled using unconstrained learnable parameters in (−∞, ∞), with appropriate activation functions to ensure valid ranges. We apply
+a sigmoid function to constrain opacity o to (0, 1), an exponential function for scale activation sk , and a normalization function for rotation quaternion q. The sharpness τ is
+bounded within (−0.1, 0.99) through a composite function
+combining sigmoid and linear remapping, while the L1&L2
+blending weight η is activated using a sigmoid function.
+For the basis angle θk , we employ a three-step activation
+process: first applying a sigmoid function, then adding a
+1
+to maintain minimum angular separaresidual term K−2
+tion, applying cumulative summation to enforce monotonic
+increase, and finally normalizing to make sK = 2π. The
+residual term prevents basis polar angles from exceeding π,
+thereby avoiding degradation in the representation. We set
+K = 8 to balance flexibility and memory efficiency.
+Model Training. Following 3D-GS, we optimize model
+parameters and dynamically adjust kernel density through
+an adaptive training process. For DRK-specific parameters - sharpness τ , blending weight η, basis angles θk , and
+scales sk - we set a uniform learning rate of 5e−3 and decay them gradually to the rate 1e−2 × at the end of training
+(35K steps). We implement three density control configurations through the 2D screen gradient densification threshold
+and opacity pruning threshold pairs: (5e−4 , 5e−2 ) for density comparable to 3D-GS, (1e−3 , 5e−2 ) for Sparse Level 1
+(S1), and (2e−3 , 1e−1 ) for Sparse Level 2 (S2).
+Figure S4. Sorting accuracy comparisons: We found that pre-sorting tile-kernel pairs based on the nearest distance, combined with cachesorting, achieves the highest accuracy. Cache-sorting is sufficiently effective in correcting most sorting disorders.
+in StopThePop [42], the backward processing must also be
+adjusted to proceed from front to back to maintain consistency with forward rendering.
+𝑞
+𝜇
+{𝜃𝑘 }
+𝑢𝑣
+𝜃
+Δ𝜃𝑘
+𝑟2
+𝑟1
+{𝑠𝑘 }
+𝑠ҧ
+Algorithm 1: Cache-Sorting
+Input: A cache chain with limited size, a new DRK
+(with an index and depth)
+Output: The index of textitDRK or a status code
+1 if the cache is empty then
+2
+if the new DRK is invalid then
+3
+return a finish code;
+4
+5
+𝜂
+𝑔
+Initialize the cache with the new DRK;
+return success;
+if the new DRK is invalid then
+Pop the DRK from the head;
+8
+return the index of the popped DRK;
+6
+7
+𝜏
+Ψ(𝑔)
+9
+10
+if the cache is full then
+Mark the head DRK to be popped;
+Determine where to insert the new DRK by
+scanning the cache, guided by the DRK’s depth;
+12 Adjust the pointers in the cache to insert the new
+DRK at the correct position;
+13 if the cache was full then
+14
+Pop the oldest DRK;
+11
+𝑜
+𝛼
+Figure S5. The ”Tensor Graph” of DRK, showing the dependence
+between parameters to optimize, intermediate variables, and the
+final output (α).
+Tensor Graph of DRK To provide a detailed overview of
+DRK, we present its ”Tensor Graph,” which illustrates the
+flow from the learnable leaf parameters through the intermediate variables, ultimately leading to the outputs. The
+graph is shown in Fig. S5. Blue arrows represent data dependencies, along which gradients are back-propagated in
+reverse during optimization.
+Cache-Sorting To clarify the cache-sorting algorithm, we
+briefly summarize the process in Algorithm 1. As discussed
+15
+return the index of the popped DRK (or success if
+none was popped);
+We evaluate the effectiveness of cache-sorting using a
+cache length of 8. DRK kernels are randomly sampled from
+the space, and the depths of DRK intersections processed
+in a front-to-back order are visualized in Fig. S4. Additionally, we assess the performance using metrics such as
+accuracy, Kendall’s Tau, and MAE. Our results show that in
+the pre-sorting stage (kernel-tile sorting), sorting based on
+the nearest distance between the DRK and the tile achieves
+the highest sorting accuracy. Sorting based on the most centric approach closely follows in performance. Both methods
+provide notable improvements compared to cache-sorting
+alone. Presorting with the nearest distance is also better
+than the vanilla presorting strategy on DRK. For further details and a more in-depth discussion, we refer readers to the
+StopThePop [42] paper, a pioneering work in this field.

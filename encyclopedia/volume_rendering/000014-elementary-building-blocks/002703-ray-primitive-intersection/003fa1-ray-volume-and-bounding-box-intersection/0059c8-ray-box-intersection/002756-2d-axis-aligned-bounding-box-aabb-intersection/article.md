@@ -1,0 +1,82 @@
+# 2D Axis-Aligned Bounding Box (AABB) Intersection
+
+Also called: Rect, Rect Intersection, Rectangle Overlap Test
+
+## Overview
+This method determines whether two 2D axis-aligned rectangles overlap in space [S1, unofficial]. It solves the problem of spatial culling and collision detection in 2D graphics by checking for separation along the X and Y axes [G]. It is distinguished from its parent [Ray-box intersection](8356-ray-box-intersection.md) by operating on two static bounding volumes rather than a ray and a volume, and from [Two-stage Accurate Intersection Test (TAIT)](15038-two-stage-accurate-intersection-test-tait.md) by using a simple overlap test rather than a two-stage approximation for projected Gaussians [S1, unofficial].
+
+## How it works
+**Inputs and Outputs:**
+- Input: Two rectangles, $R_1$ and $R_2$, each defined by minimum and maximum coordinates [S1, unofficial].
+- Output: A boolean value `true` if the rectangles overlap (including edge/touching cases), `false` otherwise [S1, unofficial].
+
+**Data Structures:**
+The rectangles are represented using integer coordinates [S1, unofficial]. The layout is a struct containing two 2D integer vectors:
+- `min`: A `Vec2i` representing the lower-left corner $(min.x, min.y)$ [S1, unofficial].
+- `max`: A `Vec2i` representing the upper-right corner $(max.x, max.y)$ [S1, unofficial].
+
+**Formulas:**
+The width and height of a rectangle are inclusive [S1, unofficial]:
+$$ width = max.x - min.x + 1 $$
+$$ height = max.y - min.y + 1 $$
+
+**Algorithm:**
+The intersection test checks for overlap along both axes independently [S1, unofficial]. Two rectangles do not intersect if one is completely to the left, right, above, or below the other [S1, unofficial]. The intersection is `true` if none of these separation conditions are met [S1, unofficial].
+Separation conditions:
+1. $R_1$ is to the left of $R_2$: $R_1.max.x < R_2.min.x$ [S1, unofficial]
+2. $R_1$ is to the right of $R_2$: $R_1.min.x > R_2.max.x$ [S1, unofficial]
+3. $R_1$ is below $R_2$: $R_1.max.y < R_2.min.y$ [S1, unofficial]
+4. $R_1$ is above $R_2$: $R_1.min.y > R_2.max.y$ [S1, unofficial]
+
+**Pseudocode:**
+> **Unverified code.** The code below did not pass a test run against a reference implementation, or no test fits it, so it may contain errors.
+
+```python
+def intersects(r1, r2):
+    """
+    Check if two 2D AABBs overlap.
+    r1, r2: Objects with attributes min (Vec2i) and max (Vec2i).
+    Returns: True if overlapping, False otherwise.
+    """
+    # Check separation along X axis
+    if r1.max.x < r2.min.x or r1.min.x > r2.max.x:
+        return False
+    # Check separation along Y axis
+    if r1.max.y < r2.min.y or r1.min.y > r2.max.y:
+        return False
+    return True
+```
+*Note: The source code uses a negated less-than operator logic `!(r1.max.x < r2.min.x || r1.max.y < r2.min.y || r1.min.x > r2.max.x || r1.min.y > r2.max.y)` which is logically equivalent to the explicit checks above [S1, unofficial].*
+
+**Parameters:**
+- Not given in the sources.
+
+**Edge Cases:**
+- **Touching Edges:** If rectangles share an edge or corner (e.g., $R_1.max.x == R_2.min.x$), the test returns `true` (overlap) because the condition $R_1.max.x < R_2.min.x$ is false [S1, unofficial]. This is consistent with inclusive bounds [S1, unofficial].
+- **Degenerate Rectangles:** If $min == max$ (a point), the logic still holds [S1, unofficial]. A point overlaps a rectangle if it lies within or on the boundary of the rectangle [S1, unofficial].
+
+## Subtopics
+
+### [AABB Ray Distance](5309-aabb-ray-distance.md)
+Computes the distance along a ray direction from a given point to the nearest intersection with an axis-aligned bounding box (AABB). It returns -1 if the starting point is inside the box or if the ray points away from the box.
+
+### [Two-stage Accurate Intersection Test (TAIT)](15038-two-stage-accurate-intersection-test-tait.md)
+TAIT is a two-stage culling method used in 3D Gaussian Splatting rasterization to accurately determine overlaps between projected Gaussians and rasterization tiles, reducing false positives from the standard Axis-Aligned Bounding Box (AABB) test which overestimates coverage. It builds on [2D Axis-Aligned Bounding Box (AABB) Intersection](4027-2d-axis-aligned-bounding-box-aabb-intersection.md) by introducing a tighter bounding box approximation in Stage 1 and a geometric line-distance check in Stage 2, balancing accuracy and computational cost.
+
+### 3D Axis-Aligned Bounding Box (AABB) Intersection
+Determines whether two axis-aligned bounding boxes overlap in 3D space by checking independent overlap along the X, Y, and Z axes [S2, unofficial]. Check overlap along X: $min.x \le other.max.x \land max.x \ge other.min.x$. Check overlap along Y: $min.y \le other.max.y \land max.y \ge other.min.y$. Check overlap along Z: $min.z \le other.max.z \land max.z \ge other.min.z$. Return true only if all three axes overlap [S2, unofficial]. Formula: $min.x \le other.max.x \land max.x \ge other.min.x \land min.y \le other.max.y \land max.y \ge other.min.y \land min.z \le other.max.z \land max.z \ge other.min.z$ [S2, unofficial].
+
+## Operating characteristics
+- **Time Complexity:** $O(1)$. The test involves a fixed number of comparisons (4 comparisons for separation, or 8 if written as 4 separate `if` statements returning false) [G].
+- **Memory Complexity:** $O(1)$. No additional memory is allocated [G].
+- **Strengths:** Extremely fast, branch-predictable, and simple to implement [G].
+- **Limitations:** Only works for axis-aligned rectangles. Rotated rectangles require different methods (e.g., SAT with rotated axes) [G].
+- **When to use:** 2D collision detection, spatial partitioning culling, UI hit testing [G].
+- **When not to use:** Rotated objects, non-axis-aligned volumes [G].
+
+## Background
+The method is a fundamental primitive in computational geometry and computer graphics. The specific implementation details (integer coordinates, inclusive bounds) are derived from the `mc` utility by Nicholas Marriott [S1, unofficial].
+
+## Sources
+[S1] nsf/mc, https://github.com/nsf/mc, fetched 2026-10-26 (unofficial)
+[S2] Linirby/HelloVoxel, https://github.com/Linirby/HelloVoxel, fetched 2026-10-27 (unofficial)

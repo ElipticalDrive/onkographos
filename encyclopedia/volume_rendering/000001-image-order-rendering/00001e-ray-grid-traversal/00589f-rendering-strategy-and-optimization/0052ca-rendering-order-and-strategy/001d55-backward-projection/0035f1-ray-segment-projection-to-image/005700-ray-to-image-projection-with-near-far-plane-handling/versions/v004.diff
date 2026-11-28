@@ -1,0 +1,97 @@
+--- v003.md
++++ v004.md
+@@ -56,4 +56,7 @@
+    Construct masks for each combination and assign $t_{min}, t_{max}, xy_{min}, xy_{max}$ based on the valid projections [S1, S2, unofficial].
+ 
++**Formulas:**
++- Other coordinate at intersection: $y_{other} = c_o + \frac{f_o (o_o (c \cdot d_z - d_s) + d_o (o_s - c \cdot o_z))}{d_z \cdot o_s - d_s \cdot o_z}$, where $c_o, f_o$ are principal point and focal length for the other dimension, $o_o, d_o$ are origin/direction components for the other dimension, $c$ is the principal point for the current dimension, and $o_z, d_z$ are the z-components of origin and direction [S1, unofficial].
++
+ **Pseudocode:**
+ 
+@@ -82,20 +85,41 @@
+     # 1. Transform to Camera Space
+     w2c = torch.linalg.inv(extrinsics)
+-    o_cam = torch.einsum('bij,bj->bi', w2c[:, :3, :3], o_world) + w2c[:, :3, 3]
+-    d_cam = torch.einsum('bij,bj->bi', w2c[:, :3, :3], d_world)
+-    
++    # Homogenize origins (append 1) and directions (append 0)
++    o_world_h = torch.cat([o_world, torch.ones(B, 1, device=o_world.device)], dim=1)
++    d_world_h = torch.cat([d_world, torch.zeros(B, 1, device=d_world.device)], dim=1)
++    o_cam_h = torch.einsum('bij,bj->bi', w2c, o_world_h)
++    d_cam_h = torch.einsum('bij,bj->bi', w2c, d_world_h)
++    o_cam = o_cam_h[:, :3]
++    d_cam = d_cam_h[:, :3]
++
+     projections = []
+     
++    # Extract intrinsics components
++    fx = intrinsics[:, 0, 0]
++    fy = intrinsics[:, 1, 1]
++    cx = intrinsics[:, 0, 2]
++    cy = intrinsics[:, 1, 2]
++
+     # 2. Compute Boundary Intersections
+     for dim, val in [(0, 0.0), (0, 1.0), (1, 0.0), (1, 1.0)]:
+         d_s = d_cam[:, dim]
+         o_s = o_cam[:, dim]
++        # Division by zero avoided by float inf handling [S1, unofficial]
+         t = (val - o_s) / d_s
+         other_dim = 1 - dim
+-        p_other = o_cam[:, other_dim] + t * d_cam[:, other_dim]
++        # Perspective projection formula for the other coordinate [S1, unofficial]
++        c_o_val = cy if other_dim == 1 else cx
++        f_o_val = fy if other_dim == 1 else fx
++        c_val = cy if dim == 1 else cx
++        oz = o_cam[:, 2]
++        dz = d_cam[:, 2]
++        oo = o_cam[:, other_dim]
++        do = d_cam[:, other_dim]
++        numerator = f_o_val * (oo * (c_val * dz - d_s) + do * (o_s - c_val * oz))
++        denominator = dz * o_s - d_s * oz
++        p_other = c_o_val + numerator / denominator
+         valid = (p_other >= 0) & (p_other <= 1)
+-        x = o_cam[:, 0] + t * d_cam[:, 0]
+-        y = o_cam[:, 1] + t * d_cam[:, 1]
+-        projections.append((t, x, y, valid))
++        # Store (t, projected_x, projected_y, valid)
++        projections.append((t, val, p_other, valid))
+         
+     # 3. Handle Near/Far Clipping
+@@ -120,5 +144,5 @@
+     mask_invalid_zero_depth = mask_depth_zero & ~at_camera
+     
+-    # Adjust near projection validity for degenerate origins
++    # Adjust near projection validity for degenerate origins [S1, S2, unofficial]
+     if near is None:
+         o_adj = torch.where(at_camera.unsqueeze(1), d_cam, o_cam)
+@@ -148,8 +172,10 @@
+     
+     # 6. Determine Final Segment
+-    # Source [S2, unofficial] iterates over 4 validity combinations of min/max projections 
+-    # using itertools.product([True, False], [True, False]) to construct masks and assign values.
+-    overlaps_image = (t_min < t_max) & (t_min < float('inf')) & (t_max > float('-inf'))
+-    overlaps_image = overlaps_image & ~mask_invalid_zero_depth
++    # Iterate over 4 validity combinations of min/max projections [S2, unofficial]
++    overlaps_image = torch.zeros(B, dtype=torch.bool, device=o_cam.device)
++    for min_valid, max_valid in itertools.product([True, False], [True, False]):
++        mask = (all_valid[torch.arange(B), idx_min] == min_valid) & (all_valid[torch.arange(B), idx_max] == max_valid)
++        overlaps_image = overlaps_image | mask
++    overlaps_image = overlaps_image & (t_min < t_max) & (t_min < float('inf')) & (t_max > float('-inf')) & ~mask_invalid_zero_depth
+     
+     return t_min, t_max, xy_min, xy_max, overlaps_image
+@@ -162,11 +188,11 @@
+ 
+ ## Operating characteristics
+-- **Time Complexity:** Not given in the sources.
+-- **Memory Complexity:** Not given in the sources.
++- **Time Complexity:** Not given in the sources. [G]
++- **Memory Complexity:** Not given in the sources. [G]
+ - **Performance:** Efficient for batched ray generation. The use of floating-point infinity handling avoids expensive division-by-zero checks [S1, unofficial].
+ - **Strengths:** Robust handling of degenerate camera origins and infinite depth. Deterministic results for grazing views using the least-squares proxy [S3, unofficial].
+ - **Limitations:** Assumes normalized image coordinates $[0, 1]$. Precision issues may arise if $t$ values are very large or very small, though infinity handling mitigates this [S1, unofficial].
+-- **When to use:** Not given in the sources.
+-- **When not to use:** Not given in the sources.
++- **When to use:** Not given in the sources. [G]
++- **When not to use:** Not given in the sources. [G]
+ 
+ ## Background

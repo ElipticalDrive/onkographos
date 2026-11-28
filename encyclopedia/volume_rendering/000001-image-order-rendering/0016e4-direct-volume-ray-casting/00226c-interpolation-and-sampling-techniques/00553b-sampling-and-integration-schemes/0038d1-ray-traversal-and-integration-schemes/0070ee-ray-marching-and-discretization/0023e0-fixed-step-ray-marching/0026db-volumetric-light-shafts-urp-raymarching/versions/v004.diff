@@ -1,0 +1,258 @@
+--- v003.md
++++ v004.md
+@@ -3,54 +3,71 @@
+ 
+ ## Overview
+-Volumetric Light Shafts (URP Raymarching) is a real-time technique for rendering atmospheric light scattering (crepuscular rays) in Unity's Universal Render Pipeline (URP) by raymarching from the camera through a fixed-distance volume, modulated by the main directional light's shadow map [S2, unofficial]. It differs from its siblings by targeting a single directional light with real-time shadow sampling rather than complex volume textures or multiple light sources, offering a lightweight alternative to full volumetric ray marching [S2, unofficial].
++Volumetric Light Shafts (URP Raymarching) is a real-time post-processing technique for rendering volumetric light scattering (crepuscular rays) in the Unity Universal Render Pipeline (URP) by performing per-pixel raymarching through a main light's shadow map [S2, unofficial]. It approximates single in-scattering from a single directional light source, modulated by a Henyey-Greenstein phase function and estimated occlusion derived from realtime shadow sampling [S2, unofficial]. Unlike slice-based volume rendering or complex shadow-map methods, it requires no preprocessing, extra scene geometry, or high fill rate, making it significantly cheaper than full volumetric ray marching [S2, unofficial]. However, it is limited to a single light source and lacks full volumetric depth information, leading to artifacts when foreground objects obscure background light shafts [S2, unofficial].
+ 
+ ## How it works
+ **Inputs and Outputs:**
+-*   **Input:** Camera position, fragment world position, main light shadow map, main light position, main light color/intensity, and material parameters (`_Density`, `_StepCount`, `_MaxDistance`, `_Scattering`, `_BaseColor`).
+-*   **Output:** Accumulated volumetric color and alpha, added additively to the screen buffer.
++*   **Input:** Screen-space position (fragment world position), camera world position, main light realtime shadow map, light position, light color/intensity, and material parameters (density, step count, max distance, scattering multiplier).
++*   **Output:** Accumulated volumetric light color and alpha, added additively to the screen buffer.
+ 
+ **Data Structures:**
+-*   **Vertex Shader Output (`Varyings`):**
+-    *   `positionHCS` (`float4`): Homogeneous clip-space position.
+-    *   `positionWS` (`float3`): World-space position of the fragment.
+-*   **Material Properties (`UnityPerMaterial` CBUFFER):**
+-    *   `_BaseColor` (`float4`): Base color of the effect. Default: `(1, 1, 1, 1)`.
+-    *   `_Density` (`float`): Volume density. Default: `0.5`. Range: `[0, 1]`.
+-    *   `_StepCount` (`int`): Number of march steps. Default: `64`. Range: `[16, 128]`.
+-    *   `_MaxDistance` (`float`): Maximum march distance. Default: `20`.
+-    *   `_Scattering` (`float`): Scattering multiplier. Default: `1.2`.
+-    *   `_LightPos` (`float4`): Light position `(x, y, z, 1)`. Updated dynamically.
+-    *   `_LightColor` (`float4`): Light color * intensity. Updated dynamically.
++*   **Shader Constants:**
++    *   `_BaseColor` (float4): Base color of the volumetric effect. Default: `(1, 1, 1, 1)`.
++    *   `_Density` (float): Density of the volume. Default: `0.5`. Range: `0` to `1`.
++    *   `_StepCount` (int): Number of raymarching steps. Default: `64`. Range: `16` to `128`.
++    *   `_MaxDistance` (float): Maximum distance for raymarching. Default: `20`.
++    *   `_Scattering` (float): Scattering multiplier for the final color. Default: `1.2`.
++    *   `_LightPos` (float4): Position of the light source in world space (`xyz` position, `w=1`). Updated dynamically.
++    *   `_LightColor` (float4): Color of the light source multiplied by intensity. Updated dynamically.
++*   **Vertex Shader Output:**
++    *   `positionHCS` (float4): Clip space position.
++    *   `positionWS` (float3): World space position of the fragment.
+ 
+ **Numbered Steps:**
+ 
+-1.  **Vertex Transformation:** Transform the input object-space position to clip space and world space. Pass the world-space position to the fragment shader via `TEXCOORD0` [S2, unofficial].
+-2.  **Ray Direction Calculation:** In the fragment shader, calculate the ray direction from the camera world position (`camPos`) to the fragment's world position (`IN.positionWS`):
+-    $$ \text{rayDir} = \text{normalize}(\text{IN.positionWS} - \text{camPos}) $$
+-    [S2, unofficial]
+-3.  **Initialization:** Initialize the accumulated light amount `accum = 0.0`. Determine the number of steps `steps = \max(\_StepCount, 1)` to prevent division by zero or invalid loop behavior [S2, unofficial]. Calculate the step size:
+-    $$ \text{stepSize} = \frac{\_MaxDistance}{\text{steps}} $$
+-    [S2, unofficial]
+-4.  **Ray Marching Loop:** Iterate `i` from `0` to `steps - 1`:
+-    a.  **Distance Calculation:** Calculate the current distance along the ray:
+-        $$ \text{dist} = i \times \text{stepSize} $$
+-        [S2, unofficial]
+-    b.  **Sample Position:** Calculate the 3D sample position:
++1.  **Vertex Transformation:**
++    *   Input vertex position in object space (`positionOS`).
++    *   Transform to clip space (`positionCS`) and world space (`positionWS`) using standard Unity vertex utilities.
++    *   Pass `positionWS` to the fragment shader via `TEXCOORD0`.
++
++2.  **Ray Direction Calculation:**
++    *   In the fragment shader, retrieve the camera world position (`camPos`).
++    *   Calculate the ray direction by normalizing the vector from the camera to the fragment's world position:
++        $$ \text{rayDir} = \text{normalize}(\text{positionWS} - \text{camPos}) $$
++
++3.  **Initialization:**
++    *   Initialize accumulation variable `accum = 0.0`.
++    *   Determine the number of steps: `steps = max(_StepCount, 1)`. This prevents division by zero or invalid loop behavior if `_StepCount` is less than 1 [S2, unofficial].
++    *   Calculate step size: `stepSize = _MaxDistance / steps`.
++
++4.  **Raymarching Loop:**
++    *   Loop `i` from `0` to `steps - 1`.
++    *   Calculate distance along the ray: `dist = i * stepSize`.
++    *   Calculate sample position in world space:
+         $$ \text{samplePos} = \text{rayOrigin} + \text{rayDir} \times \text{dist} $$
+-        [S2, unofficial]
+-    c.  **Shadow Sampling:** Transform `samplePos` to shadow coordinates using `TransformWorldToShadowCoord(samplePos)`. Sample the main light's realtime shadow map:
+-        $$ \text{shadow} = \text{MainLightRealtimeShadow}(\text{shadowCoord}) $$
+-        [S2, unofficial]
+-    d.  **Light Direction:** Calculate the direction from the sample position to the light source:
++        *(Note: `rayOrigin` is typically the camera position or the near plane intersection, but in this specific URP post-process implementation, the ray originates from the camera and marches through the screen space volume defined by `_MaxDistance` [S2, unofficial].)*
++
++5.  **Shadow Sampling:**
++    *   Transform `samplePos` to shadow coordinates: `shadowCoord = TransformWorldToShadowCoord(samplePos)`.
++    *   Sample the main light realtime shadow: `shadow = MainLightRealtimeShadow(shadowCoord)`.
++    *   This value represents the occlusion factor (1.0 if lit, 0.0 if shadowed, or intermediate values for soft shadows) [S2, unofficial].
++
++6.  **Phase Function Calculation:**
++    *   Calculate the light direction from the sample position to the light position:
+         $$ \text{lightDir} = \text{normalize}(\_LightPos.xyz - \text{samplePos}) $$
+-        [S2, unofficial]
+-    e.  **Phase Function:** Calculate the Henyey-Greenstein phase function value $P(\theta)$, where $\theta$ is the angle between `rayDir` and `lightDir`:
++    *   Calculate the cosine of the angle between the ray direction and the light direction:
+         $$ \cos\theta = \text{dot}(\text{rayDir}, \text{lightDir}) $$
++    *   Compute the Henyey-Greenstein phase function with hardcoded asymmetry parameter $g = 0.35$:
+         $$ P(\theta) = \frac{1 - g^2}{(1 + g^2 - 2g \cos\theta)^{1.5}} $$
+-        With hardcoded $g = 0.35$ [S2, unofficial].
+-    f.  **Accumulation:** Add to `accum`:
++        Where $g = 0.35$ [S2, unofficial].
++
++7.  **Accumulation:**
++    *   Add to `accum`:
+         $$ \text{accum} += \text{shadow} \times P(\theta) \times \_Density \times \text{stepSize} $$
+-        [S2, unofficial]
+-5.  **Final Color:** Multiply `_LightColor.rgb` by `accum` (light amount) and `_Scattering`. The alpha is `saturate(accum)` [S2, unofficial].
++
++8.  **Final Color Computation:**
++    *   Compute the final light amount: `lightAmount = accum`.
++    *   Multiply `_LightColor.rgb` by `lightAmount` and `_Scattering`.
++    *   Compute alpha: `alpha = saturate(lightAmount)`.
++    *   Output the result as an additive blend to the screen buffer.
+ 
+ **Pseudocode:**
+@@ -58,82 +75,90 @@
+ ```python
+ # Vertex Shader
+-Varyings vert(Attributes IN):
+-    Varyings OUT
+-    pos_inputs = GetVertexPositionInputs(IN.positionOS)
+-    OUT.positionHCS = pos_inputs.positionCS
+-    OUT.positionWS = pos_inputs.positionWS
+-    return OUT
++struct Attributes {
++    float3 positionOS;
++};
++
++struct Varyings {
++    float4 positionHCS : SV_POSITION;
++    float3 positionWS : TEXCOORD0;
++};
++
++Varyings vert(Attributes IN) {
++    Varyings OUT;
++    // Standard Unity vertex transformation
++    VertexPositionInputs pos = GetVertexPositionInputs(IN.positionOS);
++    OUT.positionHCS = pos.positionCS;
++    OUT.positionWS = pos.positionWS;
++    return OUT;
++}
+ 
+ # Fragment Shader
+-float HenyeyGreenstein(float cosTheta, float g):
+-    g2 = g * g
+-    return (1.0 - g2) / pow(1.0 + g2 - 2.0 * g * cosTheta, 1.5)
++uniform float4 _BaseColor;
++uniform float _Density;
++uniform int _StepCount;
++uniform float _MaxDistance;
++uniform float _Scattering;
++uniform float4 _LightPos;
++uniform float4 _LightColor;
++uniform float3 camPos; // Camera world position
+ 
+-float4 frag(Varyings IN):
+-    camPos = GetCameraWorldPosition() # Assumed standard URP function
+-    rayDir = normalize(IN.positionWS - camPos)
++float HenyeyGreenstein(float cosTheta, float g) {
++    float g2 = g * g;
++    return (1.0 - g2) / pow(1.0 + g2 - 2.0 * g * cosTheta, 1.5);
++}
++
++float4 frag(Varyings IN) : SV_TARGET {
++    float3 rayDir = normalize(IN.positionWS - camPos);
+     
+-    accum = 0.0
+-    steps = max(_StepCount, 1)
+-    stepSize = _MaxDistance / steps
++    int steps = max(_StepCount, 1);
++    float stepSize = _MaxDistance / steps;
++    float accum = 0.0;
+     
+-    for i in range(steps):
+-        dist = i * stepSize
+-        samplePos = IN.positionWS + rayDir * dist # Note: rayOrigin is effectively IN.positionWS for screen-space projection from camera
++    for (int i = 0; i < steps; i++) {
++        float dist = i * stepSize;
++        float3 samplePos = camPos + rayDir * dist;
+         
+-        # Shadow Sampling
+-        shadowCoord = TransformWorldToShadowCoord(samplePos)
+-        shadow = MainLightRealtimeShadow(shadowCoord)
++        // Shadow sampling
++        float4 shadowCoord = TransformWorldToShadowCoord(samplePos);
++        float shadow = MainLightRealtimeShadow(shadowCoord);
+         
+-        # Light Direction
+-        lightDir = normalize(_LightPos.xyz - samplePos)
++        // Light direction
++        float3 lightDir = normalize(_LightPos.xyz - samplePos);
++        float cosTheta = dot(rayDir, lightDir);
+         
+-        # Phase Function
+-        cosTheta = dot(rayDir, lightDir)
+-        phase = HenyeyGreenstein(cosTheta, 0.35)
++        // Phase function
++        float phase = HenyeyGreenstein(cosTheta, 0.35);
+         
+-        # Accumulation
+-        accum += shadow * phase * _Density * stepSize
+-        
+-    lightAmount = accum
+-    finalColor = _LightColor.rgb * lightAmount * _Scattering
+-    alpha = saturate(lightAmount)
++        // Accumulation
++        accum += shadow * phase * _Density * stepSize;
++    }
+     
+-    return float4(finalColor, alpha)
++    float lightAmount = accum;
++    float3 finalColor = _LightColor.rgb * lightAmount * _Scattering;
++    float alpha = saturate(lightAmount);
++    
++    return float4(finalColor, alpha);
++}
+ ```
+-
+-**Parameters:**
+-*   `_BaseColor`: Base color. Default: `(1,1,1,1)`.
+-*   `_Density`: Density. Default: `0.5`. Range: `[0, 1]`.
+-*   `_StepCount`: Steps. Default: `64`. Range: `[16, 128]`.
+-*   `_MaxDistance`: Max distance. Default: `20`.
+-*   `_Scattering`: Scattering multiplier. Default: `1.2`.
+-*   `_LightPos`: Light position. Updated by C# controller.
+-*   `_LightColor`: Light color * intensity. Updated by C# controller.
+-
+-**Edge Cases and Pitfalls:**
+-*   If `_StepCount` is less than 1, it is clamped to 1 to prevent division by zero or invalid loop behavior [S2, unofficial].
+-*   The method uses a single directional light and does not support multiple lights or complex volume textures [S2, unofficial].
+-*   Performance cost is significant; adding god rays can increase frame time by 2.30 ms on a 5.0 ms frame in benchmarked scenarios [S1, unofficial].
+ 
+ ## Subtopics
+ 
+ ### [Screen-Space God Rays](3981-screen-space-god-rays.md)
+-A real-time post-processing technique that approximates volumetric light scattering by performing per-pixel additive sampling of an image light source in screen space. It simplifies the volume rendering equation to estimate single in-scattering from a single light source, modulated by an estimated occlusion factor derived from radial sampling. Unlike slice-based volume rendering or shadow-map methods, it requires no preprocessing, extra scene geometry, or high fill rate, making it significantly cheaper than volumetric ray marching. However, it is limited to single light sources and lacks full volumetric depth information, leading to artifacts when foreground objects obscure background light shafts.
++Screen-Space God Rays is a real-time post-processing technique that approximates volumetric light scattering (crepuscular rays) by performing per-pixel additive sampling of an image light source in screen space. It simplifies the volume rendering equation to estimate single in-scattering from a single light source, modulated by an estimated occlusion factor derived from radial sampling. Unlike slice-based volume rendering or shadow-map methods, it requires no preprocessing, extra scene geometry, or high fill rate, making it significantly cheaper than volumetric ray marching. However, it is limited to single light sources and lacks full volumetric depth information, leading to artifacts when foreground objects obscure background light shafts.
+ 
+ ### [Volumetric Sun Shafts (God Rays)](15833-volumetric-sun-shafts-god-rays.md)
+-A post-processing technique that renders volumetric light shafts by marching a view ray through a sun shadow map, accumulating in-scattered light where the ray is lit and no light where it is shadowed, modulated by ground-hugging haze density.
++A post-processing technique that renders volumetric light shafts (sun shafts) by marching a view ray through a sun shadow map, accumulating in-scattered light where the ray is lit and no light where it is shadowed, modulated by ground-hugging haze density. It differs from screen-space alternatives by relying on a dedicated shadow map for occlusion rather than screen-space depth, allowing for more accurate volumetric occlusion from geometry outside the current view frustum, while trading off higher memory bandwidth for the shadow map.
+ 
+ ## Operating characteristics
+-*   **Time Complexity:** $O(N \cdot S)$, where $N$ is the number of pixels (screen resolution) and $S$ is the number of steps (`_StepCount`).
+-*   **Memory Complexity:** $O(1)$ per pixel, plus the cost of the main light's shadow map.
+-*   **Measured Performance:** Adds 2.30 ms to a 5.0 ms frame in benchmarked scenarios [S1, unofficial].
++*   **Time Complexity:** $O(N \cdot S)$, where $N$ is the number of pixels (screen resolution) and $S$ is the number of raymarching steps (`_StepCount`).
++*   **Memory Complexity:** $O(1)$ per pixel, plus the memory cost of the main light's realtime shadow map.
++*   **Measured Performance:** In a voxel engine benchmark, enabling god rays added 2.30 ms to a 5.0 ms frame [S1, unofficial]. Performance in URP depends on `_StepCount` and shadow map resolution.
+ *   **Strengths:** Lightweight, customizable, URP compatible, no preprocessing required, good for stylized effects [S2, unofficial].
+-*   **Limitations:** Limited to single directional light, no complex volume textures, artifacts when foreground objects obscure background light shafts (due to screen-space nature or lack of full depth info in some variants), performance cost increases with step count and resolution [S2, unofficial].
+-*   **When to Use:** Real-time atmospheric lighting, fog beams, stylized god rays in URP.
+-*   **When Not to Use:** Multi-light scenarios, high-fidelity volumetric rendering requiring complex density fields, or when performance is critical and step count cannot be reduced.
++*   **Limitations:** Limited to a single directional light, no support for complex volume textures, artifacts when foreground objects obscure background light shafts due to lack of full volumetric depth [S2, unofficial].
++*   **When to Use:** Real-time stylized atmospheric lighting, fog beams, god rays in URP projects where performance is critical and single-light approximation is acceptable.
++*   **When Not to Use:** Scenes with multiple light sources, complex volumetric clouds, or when accurate occlusion from geometry outside the view frustum is required.
+ 
+ ## Background
+-Originating from Unity URP community implementations, this method provides a lightweight solution for volumetric light shafts using raymarching in a custom shader with main light shadow sampling [S2, unofficial]. It is often disabled by default due to performance costs [S1, unofficial]. The technique is part of a broader family of screen-space and raymarching-based volumetric effects used in real-time graphics to simulate atmospheric scattering.
++Volumetric light shafts, commonly known as "God Rays," are a technique for rendering volumetric light scattering (fog beams, atmospheric lighting) in Unity URP using raymarching in a custom shader with main light shadow sampling [S2, unofficial]. A C# controller is often used for dynamic light color, density, and quality settings [S2, unofficial]. The technique is disabled by default in some engines due to performance cost [S1, unofficial]. The Henyey-Greenstein phase function is commonly used to model the scattering behavior [S2, unofficial].
+ 
+ ## Sources

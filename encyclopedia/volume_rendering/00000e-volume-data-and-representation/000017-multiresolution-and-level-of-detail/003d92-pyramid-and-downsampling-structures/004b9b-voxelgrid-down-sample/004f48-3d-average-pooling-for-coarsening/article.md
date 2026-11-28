@@ -1,0 +1,79 @@
+# 3D Average Pooling for Coarsening
+
+Also called: Coarsen Resolution, Window Mean Pooling
+
+## Overview
+3D Average Pooling for Coarsening reduces the resolution of a 3D voxel grid by averaging over local windows to produce a coarsened dataset [S1, unofficial]. It differs from its parent [VoxelGrid Down Sample](1014-voxelgrid-down-sample.md) by computing means instead of maxima [G].
+
+## How it works
+**Inputs:**
+- Original 3D dataset with resolution `res` (tuple of integers or scalar) [S1, unofficial].
+- Target coarse resolution `coarse_res` (tuple of integers or scalar) [S1, unofficial].
+
+**Outputs:**
+- Coarsened 3D dataset with resolution `coarse_res` [S1, unofficial].
+
+**Data Structures:**
+- Not given in the sources.
+
+**Steps:**
+1. Calculate the window size for downsampling: `window_size = int(res / coarse_res)` [G]. (Note: The source notation `int(coarse_res/res)` is inverted for downsampling; corrected here to yield a valid integer window size.)
+2. Coarsen along the x-axis with boundary trim and mean pooling: `dataset.coarsen(x=window_size, boundary='trim').mean()` [S1, unofficial].
+3. Coarsen along the y-axis with boundary trim and mean pooling: `.coarsen(y=window_size, boundary='trim').mean()` [S1, unofficial].
+
+**Formulas:**
+For the x-axis pass, where $W = \text{window\_size}$:
+$$ D_{xy}(i, j, k) = \frac{1}{W} \sum_{w=0}^{W-1} D_{xyz}(i \cdot W + w, j, k) $$
+where boundary voxels that do not form a complete window of size $W$ are discarded [S1, unofficial]. The y-axis pass applies the same operation along the second dimension.
+
+**Pseudocode:**
+> **Unverified code.** The code below did not pass a test run against a reference implementation, or no test fits it, so it may contain errors.
+
+```python
+def coarsen_3d_average_pooling(dataset, res, coarse_res):
+    # Calculate window size. Source notation `int(coarse_res/res)` is inverted for downsampling;
+    # corrected to `int(res / coarse_res)` to yield a valid integer window size [G].
+    window_size = int(res / coarse_res)
+    
+    # Step 2: Coarsen along x-axis with boundary trim and mean pooling [S1, unofficial]
+    trim_x = dataset.shape[0] % window_size
+    data_x = dataset[:dataset.shape[0] - trim_x, :, :]
+    # Reshape to group windows and compute mean along the window axis
+    data_x = data_x.reshape(data_x.shape[0] // window_size, window_size, data_x.shape[1], data_x.shape[2]).mean(axis=1)
+    
+    # Step 3: Coarsen along y-axis with boundary trim and mean pooling [S1, unofficial]
+    trim_y = data_x.shape[1] % window_size
+    data_y = data_x[:, :data_x.shape[1] - trim_y, :]
+    # Reshape to group windows and compute mean along the window axis
+    result = data_y.reshape(data_y.shape[0], data_y.shape[1] // window_size, window_size, data_y.shape[2]).mean(axis=2)
+    
+    # Z-axis coarsening follows the same pattern. Not given in the sources.
+    return result
+```
+
+**Edge Cases and Pitfalls:**
+- **Boundary Trimming:** Voxels at the boundary that do not fit into a complete window of size `window_size` are discarded to maintain the regular grid structure [S1, unofficial].
+- **Precision:** Averaging over windows may introduce floating-point accumulation errors for large volumes; double precision is recommended if values are large [G].
+- **Anisotropic Resolution:** The source notation implies a uniform or scalar window size [S1, unofficial]. Per-axis window sizes are not detailed in the sources.
+
+## Subtopics
+
+### [Image Slicing & Downsampling](19590-image-slicing-downsampling.md)
+This method extracts 2D planar slices from 3D volumetric data and reduces spatial resolution to enable visualization on systems with limited memory or rendering capabilities. It serves as a lightweight alternative to full 3D volume rendering, allowing for the inspection of scalar fields and RGBA modalities on commodity hardware. Unlike the parent method [3D Average Pooling for Coarsening](13934-3d-average-pooling-for-coarsening.md), which coarsens the entire 3D dataset, this approach operates on 2D projections or subsets, significantly reducing the data volume for terminal plotting or 2D visualization tools.
+
+### [Volume Binning](22553-volume-binning.md)
+Volume Binning is a coarsening method that partitions a 3D voxel grid into uniform $N \times N \times N$ blocks and replaces each block with the arithmetic mean of its constituent values. It serves as a specific implementation of 3D average pooling for multiresolution level-of-detail generation, distinct from general adaptive downsampling by enforcing strict spatial uniformity in the bin structure. Unlike [Image Slicing & Downsampling](19590-image-slicing-downsampling.md), which may operate on 2D projections or variable strides, Volume Binning operates natively in 3D data space.
+
+## Operating characteristics
+- **Time Complexity:** $O(N)$ per axis pass, where $N$ is the number of voxels in the input volume.
+- **Memory Complexity:** $O(N)$ for input and output volumes; intermediate reshaped arrays require temporary memory proportional to the input size [G].
+- **Strengths:** Preserves average intensity; computationally efficient; simple to implement [G].
+- **Limitations:** Discards edge data due to boundary trimming; loses high-frequency details [G].
+- **When to use:** When average intensity is the key metric (e.g., extinction, density) and performance is critical [G].
+- **When not to use:** When preserving maximum values (use [VoxelGrid Down Sample](1014-voxelgrid-down-sample.md)) or when exact boundary preservation without data loss is required [G].
+
+## Background
+Not given in the sources.
+
+## Sources
+[S1] lforster/hybridCT, https://github.com/lforster/hybridCT, fetched 2026-10-27 (unofficial)

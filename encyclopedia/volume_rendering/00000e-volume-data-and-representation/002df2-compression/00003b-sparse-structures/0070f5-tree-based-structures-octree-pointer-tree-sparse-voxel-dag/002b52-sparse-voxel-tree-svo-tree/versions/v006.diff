@@ -1,0 +1,141 @@
+--- v005.md
++++ v006.md
+@@ -4,5 +4,5 @@
+ 
+ ## Overview
+-A Sparse Voxel Tree (SVO) is a tree data structure for sparse voxel grids where all 3 dimensions are divided and each node has 8 leaves [S3, unofficial]. It solves the problem of storing and querying large, sparse 3D volumes by allocating memory only for non-empty regions, providing compression proportional to sparsity [S2]. It sets itself apart from [Sparse Voxel DAGs](2791-sparse-voxel-dags.md) by allowing multiple paths to the same voxel (no sharing), and from [Compact pointer trees](844-compact-pointer-tree.md) by using a fixed branching factor of 8 rather than variable $N$ [S3, unofficial].
++A Sparse Voxel Tree (SVO) is a tree data structure for sparse voxel grids where all 3 dimensions are divided and each node has 8 leaves [S3, unofficial]. It solves the problem of storing and querying large, sparse 3D volumes by allocating memory only for non-empty regions, providing compression proportional to sparsity [S2]. It sets itself apart from [Sparse Voxel DAGs](2791-sparse-voxel-dags.md) by allowing multiple paths to the same voxel (no sharing), and from [Compact pointer trees](844-compact-pointer-tree.md) by using a fixed branching factor of 8 rather than variable $N$ [G].
+ 
+ ## How it works
+@@ -47,10 +47,4 @@
+ ```python
+ def alloc(voxel_position, voxel_data):
+-    # State variables (initialized per source [S1, unofficial])
+-    # axis_width = 1 << max_depth
+-    # bounds = [...]
+-    # discard_overflow = ...
+-    # root_node = Node(depth=0, mask=0, block_index=node_pool.alloc())
+-    
+     # 1. Overflow Check
+     if voxel_position.x >= bounds[0] or voxel_position.y >= bounds[1] or voxel_position.z >= bounds[2]:
+@@ -72,5 +66,4 @@
+         node_extent = axis_width >> depth
+         
+-        # Compute child index, bit, existence, and next position
+         idx_x = (pos[0] - node_position[0]) // node_extent
+         idx_y = (pos[1] - node_position[1]) // node_extent
+@@ -86,5 +79,4 @@
+         
+         node.mask |= child_bit
+-        
+         node_block = node_pool.blocks[node.block_index]
+         
+@@ -110,6 +102,8 @@
+     flat_index = idx_x + 2 * idx_y + 4 * idx_z
+     child_bit = 1 << flat_index
++    exist = (node.mask & child_bit) != 0
+     node.mask |= child_bit
+     
++    node_block = node_pool.blocks[node.block_index]
+     if not exist:
+         new_node = Node()
+@@ -117,10 +111,9 @@
+         new_node.mask = 0
+         new_node.block_index = voxel_pool.acquire_next_index()
+-        parent_block = node_pool.blocks[node.block_index]
+-        parent_block[flat_index] = new_node
++        node_block[flat_index] = new_node
+         voxel_pool.alloc()
+-        node = parent_block[flat_index]
++        node = node_block[flat_index]
+     else:
+-        node = node_pool.blocks[node.block_index][flat_index]
++        node = node_block[flat_index]
+ 
+     # 6. Voxel Allocation (Depth MAX_DEPTH)
+@@ -133,4 +126,78 @@
+     voxel_block = voxel_pool.blocks[node.block_index]
+     voxel_block[flat_index] = voxel_data
++
++def get(voxel_position):
++    if voxel_position.x >= bounds[0] or voxel_position.y >= bounds[1] or voxel_position.z >= bounds[2]:
++        if discard_overflow:
++            return None
++        else:
++            assert False, "Out of bounds"
++    pos = [voxel_position.x << 1, voxel_position.y << 1, voxel_position.z << 1]
++    node = root_node
++    node_position = [0, 0, 0]
++    for i in range(max_depth - 1):
++        depth = i
++        node_extent = axis_width >> depth
++        idx_x = (pos[0] - node_position[0]) // node_extent
++        idx_y = (pos[1] - node_position[1]) // node_extent
++        idx_z = (pos[2] - node_position[2]) // node_extent
++        flat_index = idx_x + 2 * idx_y + 4 * idx_z
++        child_bit = 1 << flat_index
++        exist = (node.mask & child_bit) != 0
++        if not exist:
++            return None
++        node_block = node_pool.blocks[node.block_index]
++        node = node_block[flat_index]
++        node_position = [node_position[0] + (idx_x % 2) * node_extent, node_position[1] + (idx_y % 2) * node_extent, node_position[2] + (idx_z % 2) * node_extent]
++    node_extent = 2
++    idx_x = (pos[0] - node_position[0]) // node_extent
++    idx_y = (pos[1] - node_position[1]) // node_extent
++    idx_z = (pos[2] - node_position[2]) // node_extent
++    flat_index = idx_x + 2 * idx_y + 4 * idx_z
++    exist = (node.mask & (1 << flat_index)) != 0
++    if not exist:
++        return None
++    return voxel_pool.blocks[node.block_index][flat_index]
++
++def dealloc(voxel_position):
++    path = []
++    child_bits = []
++    depth = 0
++    node = root_node
++    node_position = [0, 0, 0]
++    pos = [voxel_position.x << 1, voxel_position.y << 1, voxel_position.z << 1]
++    for i in range(max_depth):
++        node_extent = axis_width >> i
++        idx_x = (pos[0] - node_position[0]) // node_extent
++        idx_y = (pos[1] - node_position[1]) // node_extent
++        idx_z = (pos[2] - node_position[2]) // node_extent
++        flat_index = idx_x + 2 * idx_y + 4 * idx_z
++        child_bit = 1 << flat_index
++        exist = (node.mask & child_bit) != 0
++        if not exist:
++            return False
++        path.append(node)
++        child_bits.append(child_bit)
++        node_block = node_pool.blocks[node.block_index]
++        node = node_block[flat_index]
++        node_position = [node_position[0] + (idx_x % 2) * node_extent, node_position[1] + (idx_y % 2) * node_extent, node_position[2] + (idx_z % 2) * node_extent]
++        depth += 1
++    
++    # 8. Voxel Block Deallocation
++    path[depth].mask &= ~child_bits[depth]
++    if path[depth].mask != 0:
++        return True
++    voxel_pool.dealloc(path[depth].block_index)
++    path[depth-1].mask &= ~child_bits[depth-1]
++    depth -= 1
++    
++    # 9. Node Block Deallocation
++    while depth >= 1:
++        if path[depth].mask != 0:
++            break
++        node_pool.dealloc(path[depth].block_index)
++        path[depth-1].mask &= ~child_bits[depth-1]
++        depth -= 1
++    return True
+ ```
+ 
+@@ -160,5 +227,5 @@
+ 
+ ## Background
+-The Sparse Voxel Octree (SVO) is a tree data structure for sparse voxel grids where all 3 dimensions are divided and each node has 8 leaves [S3, unofficial]. It is used in techniques such as Interactive Indirect Illumination Using Voxel Cone Tracing, where it stores pre-filtered hierarchical voxel representations of scene geometry on the GPU to estimate visibility and integrate indirect energy [S6]. The structure is also foundational in Neural Sparse Voxel Fields, which learn sparse voxel grids progressively [S3, unofficial], and in PlenOctrees for NeRF-SH conversion [S4, unofficial].
++The Sparse Voxel Octree (SVO) is a tree data structure for sparse voxel grids where all 3 dimensions are divided and each node has 8 leaves [S3, unofficial]. It is used in techniques such as Interactive Indirect Illumination Using Voxel Cone Tracing, where it stores pre-filtered hierarchical voxel representations of scene geometry on the GPU to estimate visibility and integrate indirect energy [S6]. The structure is also foundational in Neural Sparse Voxel Fields, which learn sparse voxel grids progressively [S3, unofficial], and in PlenOctrees for NeRF-SH conversion [S3, unofficial].
+ 
+ ## Sources

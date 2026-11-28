@@ -1,0 +1,127 @@
+# Conservative Rasterization via Triangle Expansion
+
+Also called: Conservative Rasterization via Geometry Shader Expansion, Hole Repair via Conservative Rasterization, Triangle Expansion Method, GS Edge Expansion, Manual Conservative Rasterization
+
+## Overview
+This method repairs holes in voxelized meshes caused by standard fixed-function rasterization, which only emits fragments for pixels whose centers lie inside the projected triangle [S2, unofficial]. It expands the triangle in clip space within a geometry shader to ensure all potentially covered pixels are rasterized, then culls the overestimated coverage in the fragment shader [S1, S2, unofficial]. It is distinguished from exact bounding polygon methods by using a simple triangle expansion and fragment-shader culling, which is faster in practice despite higher fragment shader workload [S1, unofficial].
+
+## How it works
+**Inputs:** A triangle mesh; projection matrix (orthographic assumed for simplicity in source formulas); pixel size in clip space [S2, unofficial].
+**Outputs:** A set of fragments covering the triangle and its immediate neighborhood, written to a voxel grid [G].
+
+**Data Structures:**
+*   `pos[3]`: The three vertices of the triangle in clip space (homogeneous coordinates `vec4`) [G].
+*   `edgePlanes[3]`: Homogeneous plane representations of the triangle edges (`vec3`) [G].
+*   `aabb`: Axis-Aligned Bounding Box in clip space (`vec4`, `xy` = min, `zw` = max) [G].
+*   `pixelDiagonal`: Half the diagonal length of a pixel in clip space (`vec2`) [S2, unofficial].
+
+**Steps:**
+1.  **Calculate Clip-Space AABB:** Compute the 2D bounding box of the triangle in clip space ($x, y$), ignoring $z$ [S2, unofficial].
+2.  **Expand AABB:** Expand the bounding box by `pixelDiagonal` in all directions to ensure edge pixels are not missed during culling [S2, unofficial].
+3.  **Compute Edge Planes:** For each edge of the triangle, compute a homogeneous plane normal in clip space [S2, unofficial].
+4.  **Expand Edge Planes:** Shift each plane outward along its normal by a distance proportional to the pixel size [S2, unofficial].
+5.  **Compute Expanded Vertices:** Calculate the intersection of the expanded edge planes to find the new vertices of the expanded triangle [S2, unofficial].
+6.  **Rasterize:** Pass the expanded triangle to the fixed-function rasterizer [S1, unofficial].
+7.  **Cull in Fragment Shader:** For each generated fragment, determine if it lies within the original triangle [S2, unofficial]. Discard fragments outside the original triangle but inside the expanded region [S1, S2, unofficial].
+
+**Formulas:**
+*   **AABB Expansion:**
+    $$ AABB_{expanded}.xy = AABB_{original}.xy - pixelDiagonal $$
+    $$ AABB_{expanded}.zw = AABB_{original}.zw + pixelDiagonal $$
+    Where $pixelDiagonal$ is half the diagonal length of a pixel in clip space [S2, unofficial].
+
+*   **Edge Plane Calculation:**
+    For an edge from vertex $P_i$ to $P_j$, the homogeneous plane normal $N$ is:
+    $$ N = (P_i.xyw - P_j.xyw) \times P_j.xyw $$
+    Where $\times$ denotes the 3D cross product, and $xyw$ refers to the $x, y, w$ components of the vertex [S2, unofficial].
+
+*   **Plane Expansion:**
+    The $z$ component (representing the plane offset in this homogeneous representation) is shifted:
+    $$ N_z' = N_z - \text{dot}(halfPixel, |N_{xy}|) $$
+    Where $halfPixel$ is the pixel size vector and $|N_{xy}|$ is the absolute value of the $x, y$ components of the normal [S2, unofficial].
+
+*   **Fragment Culling:**
+    In the fragment shader, calculate barycentric coordinates or distance to the original triangle edges [S2, unofficial]. If the fragment is outside the original triangle, discard it [S1, S2, unofficial].
+
+**Pseudocode:**
+
+> **Unverified code.** The code below did not pass a test run against a reference implementation, or no test fits it, so it may contain errors.
+
+```python
+# Geometry Shader Stage
+def process_triangle(pos: list[vec4], pixel_diagonal: vec2) -> list[vec4]:
+    """
+    pos: List of 3 vec4 vertices in clip space.
+    pixel_diagonal: Half the diagonal length of a pixel in clip space.
+    Returns: List of 3 vec4 vertices for the expanded triangle.
+    """
+    # Step 3: Compute Edge Planes
+    # Edge 0: P0 -> P2, Edge 1: P1 -> P0, Edge 2: P2 -> P1
+    edge_planes = [
+        cross(pos[0].xyw - pos[2].xyw, pos[2].xyw),
+        cross(pos[1].xyw - pos[0].xyw, pos[0].xyw),
+        cross(pos[2].xyw - pos[1].xyw, pos[1].xyw)
+    ]
+    
+    # Step 4: Expand Edge Planes
+    half_pixel = vec2(pixel_diagonal.x, pixel_diagonal.y)
+    expanded_planes = []
+    for i in range(3):
+        plane = edge_planes[i]
+        shift = dot(half_pixel, abs(plane.xy))
+        plane.z -= shift
+        expanded_planes.append(plane)
+        
+    # Step 5: Compute Expanded Vertices
+    # Intersection of two 2D lines in homogeneous coordinates (A,B,C) is cross(A, B)
+    v0 = cross(expanded_planes[1], expanded_planes[2])
+    v1 = cross(expanded_planes[2], expanded_planes[0])
+    v2 = cross(expanded_planes[0], expanded_planes[1])
+    
+    # In orthographic projection w=1, so homogeneous coordinates are directly usable
+    return [v0, v1, v2]
+
+# Fragment Shader Stage
+def fragment_shader(original_pos: list[vec4], fragment_pos: vec4) -> bool:
+    """
+    original_pos: The 3 original triangle vertices in clip space.
+    fragment_pos: The position of the current fragment in clip space.
+    Returns: True if fragment should be kept, False if discarded.
+    """
+    # Calculate edge planes of the ORIGINAL triangle
+    original_edge_planes = [
+        cross(original_pos[0].xyw - original_pos[2].xyw, original_pos[2].xyw),
+        cross(original_pos[1].xyw - original_pos[0].xyw, original_pos[0].xyw),
+        cross(original_pos[2].xyw - original_pos[1].xyw, original_pos[1].xyw)
+    ]
+    
+    # Check if fragment is on the inside of all three edge planes
+    # For consistent counter-clockwise winding, inside is dot(plane, fragment.xyw) >= 0
+    for plane in original_edge_planes:
+        if dot(plane, fragment_pos.xyw) < 0:
+            return False # Outside original triangle
+            
+    return True # Inside original triangle
+```
+
+**Parameters:**
+*   `pixelDiagonal`: Half the diagonal length of a pixel in clip space, used as the shift vector for plane expansion [S2, unofficial].
+
+**Edge Cases and Pitfalls:**
+*   **Precision:** Homogeneous calculations can suffer from precision issues near the clipping planes [G].
+*   **Winding Order:** The sign of the plane dot product depends on the winding order of the triangle [G].
+*   **Overestimation:** The expanded triangle covers more area than the original, leading to unnecessary fragment shader invocations for discarded pixels [S1, unofficial].
+
+## Operating characteristics
+*   **Time Complexity:** $O(1)$ per triangle in the geometry shader (constant number of operations) [G]. $O(N)$ in the fragment shader, where $N$ is the number of pixels covered by the expanded triangle [G].
+*   **Memory Complexity:** Minimal additional memory in the geometry shader [G].
+*   **Performance:** Faster in practice than computing the exact bounding polygon in the geometry shader, despite the extra work in the fragment shader [S1, unofficial].
+*   **Strengths:** Simple to implement; leverages fixed-function rasterization; effective at eliminating holes [G].
+*   **Limitations:** Overestimates coverage, leading to wasted fragment shader cycles [S1, unofficial].
+
+## Background
+This technique is described in the context of sparse voxelization using OpenGL, specifically addressing the issue of holes in voxelized meshes due to standard rasterization [S1, S2, unofficial]. It is presented as a practical solution for real-time voxelization on GPUs [S1, S2, unofficial].
+
+## Sources
+[S1] OpenGL Insights: Sparse Voxelization, https://icare3d.org/research/OpenGLInsights-SparseVoxelization.pdf, fetched 2026-10-29 (unofficial)
+[S2] 体素化Voxelization：基于GPU的三维体素化, https://yangwc.com/2019/06/11/Voxelization/, fetched 2026-10-30 (unofficial)

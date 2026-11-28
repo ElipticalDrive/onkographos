@@ -1,0 +1,150 @@
+# Octree-based Void Culling
+
+Also called: Brick Octree, Void Culling Octree
+
+## Overview
+Octree-based void culling is a spatial acceleration technique used in direct volume ray casting to reduce rasterization load by skipping empty regions within volume bricks [S1, unofficial]. It builds on [Window/Level Volume Raycasting with Bricking](2775-window-level-volume-raycasting-with-bricking.md) by introducing a per-brick octree structure that describes only the geometry of visible data, allowing the renderer to bypass void areas before invoking the GPU [S1, unofficial]. Unlike sibling methods that may rely on global spatial structures or GPU-side culling, this approach generates and traverses the octree on the CPU to minimize GPU workload, while the GPU handles the actual interpolation, transfer function application, and blending [S1, unofficial].
+
+## How it works
+
+### Inputs and Outputs
+*   **Input:** A volume brick (texture), a transfer function mapping scalar values to opacity ($\alpha$) and color, an octree level limit, and the camera direction [S1, unofficial].
+*   **Output:** A set of rasterized slices (cuboid boxes) representing the visible portion of the brick, blended into the frame buffer [S1, unofficial].
+
+### Data Structures
+The octree is stored in main memory [S1, unofficial]. Each node in the octree represents a cuboid sub-region of the brick [S1, unofficial].
+*   **Node Fields:**
+    *   `ratio` ($r$): A float representing the ratio of visible data to total data within the node's cube [S1, unofficial].
+    *   `children`: An array of 8 child nodes (if not a leaf) [S1, unofficial].
+    *   `is_leaf`: Boolean indicating if the node represents a single cell [S1, unofficial].
+*   **Leaf Nodes:** At the final octree level, each node represents a unique cell [S1, unofficial].
+    *   If the cell is completely void, $r = 0$ [S1, unofficial].
+    *   If the cell is completely filled (visible), $r = 1$ [S1, unofficial].
+
+### Definitions
+*   **Cell:** The smallest unit of void detection [S1, unofficial].
+    *   For trilinear interpolation, a cell is a cube defined by 8 corner adjacent voxel values [S1, unofficial].
+    *   A cell is **completely void** if all 8 corner values are transparent ($\alpha = 0$) after applying the transfer function [S1, unofficial].
+    *   For other interpolation kernels, the cell size is defined as $(kernelsize - 1)^3$ [S1, unofficial].
+
+### Algorithm Steps
+
+1.  **Octree Construction (CPU):**
+    *   Initialize leaf nodes for the brick [S1, unofficial].
+    *   For each leaf node, determine if it is void or filled based on the cell definition. Set $r=0$ or $r=1$ accordingly [S1, unofficial].
+    *   Recursively calculate $r$ for higher-level nodes by averaging the $r$ values of their 8 children:
+        $$ r_{parent} = \frac{1}{8} \sum_{i=1}^{8} r_{child_i} $$
+    *   This calculation is performed only when the transfer function changes [S1, unofficial].
+
+2.  **Rendering Preparation (CPU):**
+    *   Sort bricks in front-to-back order relative to the camera [S1, unofficial].
+    *   For each brick, traverse its octree starting from the root node [S1, unofficial].
+
+3.  **Octree Traversal and Culling (CPU):**
+    *   For each node, evaluate its ratio $r$ against a threshold $T$ (where $0 < T \le 1$) [S1, unofficial].
+    *   **Case $r = 0$:** The node is completely void. Do not draw and do not traverse further [S1, unofficial].
+    *   **Case $0 < r < T$:** The node contains mixed data. Sort its 8 children in front-to-back order. There are 8 possible valid orders due to axis alignment constraints (not $8!$) [S1, unofficial]. Recursively apply this strategy to each child [S1, unofficial].
+    *   **Case $r \ge T$:** The node is sufficiently filled. Draw the node completely as a cuboid box. Do not traverse further [S1, unofficial].
+    *   **Level Limit:** To prevent excessive overhead at deep levels, an octree level limit is set. Nodes below this level that are not void ($r > 0$) are drawn completely without further traversal [S1, unofficial].
+
+4.  **Rendering (GPU):**
+    *   When a node is selected for drawing (Case $r \ge T$ or leaf nodes), the corresponding cuboid box is sliced [S1, unofficial].
+    *   Slices can be axis-aligned or viewport-aligned [S1, unofficial].
+    *   The brick texture is interpolated on each slice [S1, unofficial].
+    *   The transfer function is applied [S1, unofficial].
+    *   Slices are rasterized and blended into the previously drawn slices [S1, unofficial].
+
+### Pseudocode
+
+> **Unverified code.** The code below did not pass a test run against a reference implementation, or no test fits it, so it may contain errors.
+
+```python
+def traverse_octree(node, threshold, max_depth, current_depth, camera_dir):
+    # Base case: leaf node or reached maximum allowed depth
+    if node.is_leaf or current_depth >= max_depth:
+        if node.r > 0:
+            render_cuboid_box(node.bounds, camera_dir)
+        return
+
+    # Case 1: Completely void -> skip entirely
+    if node.r == 0:
+        return
+
+    # Case 2: Mixed data, below threshold -> recurse
+    if node.r < threshold:
+        # Sort 8 children front-to-back along camera_dir.
+        # Due to axis alignment, only 8 of the 8! permutations are valid.
+        sorted_children = sort_children_front_to_back(node.children, camera_dir)
+        for child in sorted_children:
+            traverse_octree(child, threshold, max_depth, current_depth + 1, camera_dir)
+    else:
+        # Case 3: Sufficiently filled -> draw completely
+        render_cuboid_box(node.bounds, camera_dir)
+
+def render_cuboid_box(bounds, camera_dir):
+    # Determine slice orientation (axis-aligned or viewport-aligned)
+    slice_step = 1.0  # Step size matching voxel dimensions
+    num_slices = int(math.ceil(dot(bounds.max - bounds.min, camera_dir) / slice_step))
+    
+    for i in range(num_slices):
+        # Compute slice plane position along camera direction
+        t = i * slice_step
+        plane_origin = bounds.min + camera_dir * t
+        
+        # Interpolate brick texture on the 2D slice plane
+        slice_scalars = []
+        for x in range(bounds.x_min, bounds.x_max):
+            for y in range(bounds.y_min, bounds.y_max):
+                # Map 2D slice coordinates to 3D voxel grid
+                voxel_pos = plane_origin + vec2_to_3d(x, y, camera_dir)
+                scalar = trilinear_interpolate(voxel_pos)
+                slice_scalars.append(scalar)
+        
+        # Apply transfer function to scalar data -> (R, G, B, alpha)
+        colors = []
+        alphas = []
+        for s in slice_scalars:
+            c, a = transfer_function(s)
+            colors.append(c)
+            alphas.append(a)
+            
+        # Rasterize and blend into frame buffer (front-to-back alpha blending)
+        for idx in range(len(slice_scalars)):
+            frame_color = blend(frame_color, colors[idx], alphas[idx])
+
+def sort_children_front_to_back(children, camera_dir):
+    # Sort by depth along camera_dir, then reorder to valid octant sequence
+    depths = [(dot(child.center, camera_dir), child) for child in children]
+    depths.sort(key=lambda x: x[0])
+    # Reorder to 8 valid axis-aligned permutations
+    return [c for _, c in reorder_to_octant_sequence(depths)]
+
+def trilinear_interpolate(pos):
+    # Standard trilinear interpolation of voxel grid at pos
+    # Returns interpolated scalar value
+    pass # Not given in the sources.
+
+def blend(frame_color, color, alpha):
+    # Front-to-back alpha blending
+    return frame_color * (1.0 - alpha) + color * alpha
+```
+
+## Subtopics
+
+### Octree-Skipped GPU Volume Rendering
+A technique using an octree to speed up GPU rendering of bricks by skipping empty space rather than for data paging [S2, unofficial]. The octree is stored in main memory and used in an out-of-core preprocess phase to decompose desired bricks into visible regions (non-empty octree nodes) [S2, unofficial]. These visible regions are then mapped to triangular cuts of the volume [S2, unofficial]. A pitfall is that the technique still requires data to remain uncompressed in main memory [S2, unofficial].
+
+## Operating characteristics
+*   **Time and Memory Complexity:** Not given in the sources.
+*   **Measured Performance:** Tested on nVidia QuadroFX 3400 (256MB), ATi FireGL X1 (128MB), and 3DLabs Wildcat 7110 (256MB) [S1, unofficial].
+*   **Scaling:** The technique demonstrates that GPU volume rendering can scale to large data [S2, unofficial].
+*   **Strengths:** Reduces the rasterization bottleneck by skipping void bricks and nodes [S1, unofficial]. Lowers GPU workload by offloading octree generation and traversal to the CPU [S1, unofficial].
+*   **Limitations:** Setting the threshold too high causes a high triangle count at boundaries of visible data structures [S1, unofficial]. Requires uncompressed data in main memory for the variant [S2, unofficial].
+*   **When to use:** When void regions are large and the transfer function changes infrequently, allowing efficient culling without frequent octree rebuilds [S1, unofficial].
+
+## Background
+Originated in Danny Ruijters' work on optimizing GPU volume rendering [S1, unofficial]. A similar technique was later applied by Ruijters and Vilanova to demonstrate that GPU volume rendering can scale to large data using out-of-core preprocessing [S2, unofficial].
+
+## Sources
+[S1] PDF Optimizing GPU Volume Rendering - Danny Ruijters, https://dannyruijters.nl/docs/OptimizingGPUVolumeRendering_final.pdf, fetched 2026-10-26 (unofficial)
+[S2] PDF A Survey of Octree Volume Rendering Methods, https://www.sci.utah.edu/~knolla/octsurvey.pdf, fetched 2026-10-29 (unofficial)

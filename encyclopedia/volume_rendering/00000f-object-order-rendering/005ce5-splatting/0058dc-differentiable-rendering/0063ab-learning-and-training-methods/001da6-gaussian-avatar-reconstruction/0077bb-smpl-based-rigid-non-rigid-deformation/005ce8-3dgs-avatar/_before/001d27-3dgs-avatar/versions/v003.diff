@@ -1,0 +1,76 @@
+--- v002.md
++++ v003.md
+@@ -3,53 +3,37 @@
+ 
+ ## Overview
+-3DGS-Avatar is a full-body avatar reconstruction method that combines 3D Gaussian primitives with an underlying SMPL parametric model [S2, unofficial]. It solves the problem of animating high-fidelity human avatars by applying both non-rigid and rigid transformations to Gaussians based on the SMPL pose [S2, unofficial]. It is distinguished from its siblings by its use of the SMPL-X rig and per-Gaussian deformation MLPs, whereas Gaussian Avatars uses FLAME for heads and AnimatableGaussians uses explicit pose-conditioned offsets [S1, unofficial].
++3DGS-Avatar is a full-body avatar reconstruction method that combines 3D Gaussian Splatting with an underlying SMPL model to represent both rigid skeletal and non-rigid soft-tissue deformations [S2, unofficial]. It distinguishes itself from sibling methods like Gaussian Avatar by utilizing an SMPL-X rig and a per-Gaussian deformation MLP to predict pose-dependent offsets, enabling high-fidelity reconstruction of full-body dynamics [S1, unofficial].
+ 
+ ## How it works
+-**Inputs:** Multi-view video of a human subject; SMPL-X model parameters (pose $\beta$, shape $\theta$).
+-**Outputs:** A set of 3D Gaussians $\{G_i\}$ where each Gaussian $i$ has position $\mu_i$, covariance $\Sigma_i$, opacity $\alpha_i$, and spherical harmonic coefficients $c_i$.
++**Inputs:** Multi-view video sequences of a human subject in various poses; initial SMPL-X mesh parameters (shape $\beta$, pose $\theta$) fitted to the input frames.
++**Outputs:** A set of 3D Gaussians $\{g_i\}$, each defined by position $\mathbf{t}_i$, rotation $\mathbf{q}_i$, scale $\mathbf{s}_i$, opacity $\alpha_i$, and spherical harmonic coefficients $\mathbf{c}_{i,lm}$ for color.
+ 
+ **Data Structures:**
+-*   **Gaussian Attributes:** Stored in flat arrays. $\mu \in \mathbb{R}^{3N}$, $\Sigma \in \mathbb{R}^{6N}$ (lower triangular), $\alpha \in \mathbb{R}^{N}$, $c \in \mathbb{R}^{N \times K}$.
+-*   **Deformation Network:** A Multi-Layer Perceptron (MLP) $f_{\theta}$ that maps local Gaussian coordinates and global pose parameters to deformation offsets.
++1.  **Gaussian Attributes:** For each Gaussian $i$, store $\mathbf{t}_i \in \mathbb{R}^3$, $\mathbf{q}_i \in \mathbb{R}^4$ (quaternion), $\mathbf{s}_i \in \mathbb{R}^3$, $\alpha_i \in \mathbb{R}$, and $\mathbf{c}_{i,lm}$.
++2.  **Deformation Network:** A small Multi-Layer Perceptron (MLP) $f_{\text{def}}$ that takes as input the local Gaussian position (in SMPL rest space) and the global pose parameters $\theta$, outputting a 3D offset $\Delta \mathbf{t}$ and potentially rotation/scale adjustments [S1, unofficial].
+ 
+ **Steps:**
+-1.  **Initialization:** Initialize Gaussians on the surface of the SMPL mesh in its T-pose. Each Gaussian is associated with a specific mesh triangle or vertex [S2, unofficial].
++1.  **Initialization:** Initialize Gaussians on the surface of the SMPL-X mesh in its rest pose. Each Gaussian is associated with a specific triangle or vertex of the mesh [S2, unofficial].
+ 2.  **Pose-Conditioned Deformation:** For a target pose $\theta$:
+-    *   Compute the rigid transformation $T_{rigid}(\theta)$ from the SMPL model.
+-    *   Compute non-rigid offsets using the deformation MLP: $\Delta \mu_i = f_{\theta}(\mu_i^{local}, \theta)$ [S1, unofficial].
+-    *   Update Gaussian position: $\mu_i^{new} = T_{rigid}(\theta) \cdot \mu_i^{init} + \Delta \mu_i$ [S2, unofficial].
+-    *   Update rotation and scale to align with the deformed surface normal and tangent space.
+-3.  **Differentiable Rendering:** Render the scene using object-order splatting [S1, unofficial]. Project Gaussians to 2D, compute coverage, and blend colors based on opacity and spherical harmonics.
+-4.  **Optimization:** Minimize photometric loss $\mathcal{L} = ||I_{rendered} - I_{target}||_1$ with respect to Gaussian attributes and MLP weights. Dynamic densification is applied to maintain detail [S1, unofficial].
+-
+-**Parameters:**
+-*   Learning rate: Not given in the sources.
+-*   Densification interval: Not given in the sources.
++    a. Retrieve the SMPL-X mesh vertices $\mathbf{V}(\theta)$.
++    b. For each Gaussian $i$ at rest position $\mathbf{t}_i^0$, compute its deformed position $\mathbf{t}_i(\theta)$ using the SMPL skinning weights and the deformation MLP:
++       $$ \mathbf{t}_i(\theta) = \mathbf{t}_i^0 + f_{\text{def}}(\mathbf{t}_i^0, \theta) $$
++       The MLP allows for non-rigid corrections to the rigid SMPL skinning [S1, unofficial].
++    c. Update rotation and scale based on the local deformation gradient or learned parameters conditioned on $\theta$ [S2, unofficial].
++3.  **Differentiable Rendering:** Render the scene using standard 3D Gaussian Splatting rasterization. The Gaussians are transformed to camera space using the deformed positions $\mathbf{t}_i(\theta)$ and rotations.
++4.  **Optimization:** Minimize the photometric loss $\mathcal{L} = \mathcal{L}_{\text{RGB}} + \lambda \mathcal{L}_{\text{depth}}$ between the rendered image and the ground truth image for the given pose. Gradients flow through the differentiable renderer to update Gaussian attributes and the weights of the deformation MLP [S2, unofficial].
+ 
+ **Edge Cases:**
+-*   **Degenerate Poses:** Extreme poses may cause self-intersection or tearing if the deformation MLP is not sufficiently regularized [G].
+-*   **Precision:** Floating-point precision in the deformation MLP output affects the smoothness of the avatar's skin [G].
+-
+-## Subtopics
+-
+-### Gaussian Avatars
+-Uses FLAME for head-only reconstruction with riggable features. Choose for high-fidelity facial animation. [Gaussian Avatars](1477-gaussian-avatars.md)
+-
+-### AnimatableGaussians
+-Uses SMPL-X with explicit pose-conditioned offsets. Choose for simpler deformation logic without MLPs. [AnimatableGaussians](1480-animatable-gaussians.md)
+-
+-### SplattingAvatar
+-Embeds Gaussians in mesh tangent space. Choose for better surface adherence. [SplattingAvatar](1481-splatting-avatar.md)
++*   **Degenerate Poses:** Extreme poses may cause mesh self-intersection or invalid skinning weights. The deformation MLP helps mitigate artifacts but may require regularization [S1, unofficial].
++*   **Precision:** Floating-point precision in the deformation network output can affect fine details. [G] Use float32 for MLP weights and positions to balance speed and accuracy.
+ 
+ ## Operating characteristics
+-*   **Time Complexity:** Rendering is $O(N)$ per pixel, where $N$ is the number of Gaussians. Training time depends on MLP size and densification steps.
+-*   **Memory Complexity:** $O(N)$ for Gaussian attributes plus $O(M)$ for MLP weights, where $M$ is the number of MLP parameters.
+-*   **Strengths:** High-fidelity full-body reconstruction; supports arbitrary SMPL-X poses.
+-*   **Limitations:** Requires SMPL-X fitting; MLP inference adds latency compared to rigid transforms.
+-*   **When to use:** When full-body animation with high visual fidelity is required.
+-*   **When not to use:** For head-only avatars (use Gaussian Avatars) or when computational resources are extremely limited.
++*   **Time Complexity:** Training time is comparable to standard 3DGS but requires additional forward passes through the deformation MLP per Gaussian per frame. Inference is fast, dominated by splatting rasterization.
++*   **Memory Complexity:** Higher than static 3DGS due to the storage of the deformation MLP weights and the need to store pose-conditioned parameters.
++*   **Strengths:** High-fidelity full-body reconstruction; handles both rigid and non-rigid motion; real-time rendering capability.
++*   **Limitations:** Requires multi-view video for training; performance degrades with occluded body parts; complex to implement due to the integration of SMPL-X and MLP [S1, unofficial].
+ 
+ ## Background
+-3DGS-Avatar was introduced as a method to reconstruct full-body avatars using 3D Gaussian Splatting [S2, unofficial]. It builds on the SMPL-X parametric model and introduces per-Gaussian deformation MLPs to handle non-rigid body dynamics [S1, unofficial]. It is part of the broader family of Gaussian Avatar Reconstruction methods [S2, unofficial].
++3DGS-Avatar was introduced as an advancement in human-centric Gaussian Splatting, building on the principles of SMPL-based deformation. It specifically addresses the limitations of rigid SMPL skinning by introducing per-Gaussian deformation networks, allowing for more realistic soft-tissue dynamics [S1, unofficial]. It is part of a broader family of methods including Gaussian Avatar and Animatable Gaussians, which also leverage parametric models for avatar reconstruction [S2, unofficial].
+ 
+ ## Sources

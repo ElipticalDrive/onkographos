@@ -1,0 +1,330 @@
+--- v010.md
++++ v011.md
+@@ -4,78 +4,65 @@
+ 
+ ## Overview
+-Iterative Octree Traversal is a method for raycasting against a Sparse Voxel Octree (SVO) that replaces recursive function calls with an explicit stack-based data structure, primarily to comply with hardware constraints such as the lack of recursion support in HLSL [S2, S4, unofficial]. It differs from [Recursive Octree Traversal](2632-recursive-octree-traversal.md) by managing traversal state (depth, parent pointers, visited children) in fixed-size arrays, and from [Parametric Octree Traversal](2361-parametric-octree-traversal.md) by using a greedy, distance-based child selection strategy that backtracks on false positives rather than following a strict parametric order [S2, unofficial].
++Iterative Octree Traversal is a method for raycasting against a Sparse Voxel Octree (SVO) that replaces recursive function calls with an explicit stack-based data structure, primarily to satisfy hardware constraints such as HLSL recursion limits or CPU stack size restrictions [S2, S4, unofficial]. It solves the problem of traversing hierarchical spatial data without risking stack overflow or violating shader model restrictions, using a greedy approach that prioritizes the closest node and backtracks on false positives [S2, unofficial]. Unlike [Recursive Octree Traversal](2632-recursive-octree-traversal.md), which relies on the call stack, this method explicitly manages traversal state and parent pointers to navigate the tree hierarchy [S2, unofficial].
+ 
+ ## How it works
+ **Inputs and Outputs:**
+-*   **Input:** An octree structure (root node, internal nodes, leaf voxels), a ray defined by origin $O$ and direction $D$, and a maximum iteration count `maxIterations`.
+-*   **Output:** The color and depth of the closest voxel intersected by the ray, or a default value if no intersection is found.
++*   **Input:** An octree structure (root node address, hierarchy data), a ray defined by origin $O$ and direction $D$, and a maximum iteration count `maxIterations`.
++*   **Output:** The color/depth of the closest voxel intersected by the ray, or a default value (e.g., background) if no intersection is found.
+ 
+ **Data Structures:**
+-The algorithm simulates the call stack using fixed-size arrays to track traversal state per depth level [S2, unofficial]:
+-*   `skipListPerDepth[4]`: An integer array where each bit $i$ indicates if child $i$ of the node at `currentDepth` has already been visited [S2, unofficial].
+-*   `parentListPerDepth[4]`: Stores the index of the parent node at each depth level to facilitate backtracking [S2, unofficial].
+-*   `positionListPerDepth[4]`: Stores the 3D position (`float3`) of the parent node at each depth level [S2, unofficial].
+-*   `stack_item_t` (Alternative Implementation): A struct containing slab boundaries (`tnum tx0, ty0, tz0, tx1, ty1, tz1`), node address (`int adr`), and child index (`char idx`) [S5, unofficial].
+-*   `Container`: Represents a node, containing `childStartIndex`, `hasData`, `currentSize`, and `currentPosition` [S2, unofficial].
++1.  **Stack (`stack_item_t`):** A fixed-size array simulating the call stack. Each item contains:
++    *   `tx0, ty0, tz0`: Entry slab boundaries (scaled to fixed-point integers).
++    *   `tx1, ty1, tz1`: Exit slab boundaries (scaled to fixed-point integers).
++    *   `adr`: Node address/index in the octree data structure.
++    *   `idx`: Current child index being processed (0-7).
++    *   *Note:* In some implementations, auxiliary arrays `skipListPerDepth`, `parentListPerDepth`, and `positionListPerDepth` are used to track visited children and parent context for backtracking [S2, unofficial].
++2.  **State Variables:**
++    *   `minDistToNode`: Tracks the closest intersection distance found so far.
++    *   `currentDepth`: Tracks the current depth in the octree.
++    *   `dir_mask`: Bitmask indicating ray direction signs (x=4, y=2, z=1) to handle coordinate flipping [S5, unofficial].
+ 
+ **Steps:**
+ 
+ 1.  **Ray Preprocessing:**
+-    *   If any component of the ray direction $D$ is zero, add a small epsilon (e.g., $0.001$) to avoid division by zero [S5, unofficial].
+-    *   If a component of $D$ is negative, negate the corresponding component of the ray origin $O$ and direction $D$, and set a bit in `dir_mask` (x=4, y=2, z=1) to track the flip [S5, unofficial].
+-    *   Compute slab entry and exit distances for the octree bounds:
+-        $$tx_0 = \frac{min_x - o_x}{d_x}, \quad tx_1 = \frac{max_x - o_x}{d_x}$$
+-        $$ty_0 = \frac{min_y - o_y}{d_y}, \quad ty_1 = \frac{max_y - o_y}{d_y}$$
+-        $$tz_0 = \frac{min_z - o_z}{d_z}, \quad tz_1 = \frac{max_z - o_z}{d_z}$$
+-        where $(min_x, min_y, min_z)$ and $(max_x, max_y, max_z)$ are the octree bounds [S5, unofficial].
+-    *   Scale slab boundaries by a fixed-point factor (e.g., `tnum_scale = 10000`) to convert them to integer coordinates for traversal [S5, unofficial].
++    *   If any ray direction component is zero, add a small epsilon (e.g., 0.001) to avoid division by zero [S5, unofficial].
++    *   If a direction component is negative, negate the corresponding ray origin and direction components, and set the corresponding bit in `dir_mask` [S5, unofficial].
++    *   Compute initial slab boundaries for the octree root bounds $[min_x, max_x] \times [min_y, max_y] \times [min_z, max_z]$:
++        $$ tx_0 = \frac{min_x - o_x}{d_x}, \quad tx_1 = \frac{max_x - o_x}{d_x} $$
++        $$ ty_0 = \frac{min_y - o_y}{d_y}, \quad ty_1 = \frac{max_y - o_y}{d_y} $$
++        $$ tz_0 = \frac{min_z - o_z}{d_z}, \quad tz_1 = \frac{max_z - o_z}{d_z} $$
++    *   Scale these boundaries by a fixed-point factor (e.g., `tnum_scale = 10000`) to convert them to integers for traversal [S5, unofficial].
+ 
+ 2.  **Initialization:**
+-    *   Initialize `skipListPerDepth`, `parentListPerDepth`, and `positionListPerDepth` to zero/empty states [S2, unofficial].
+-    *   Set `currentDepth = 0` [S2, unofficial].
+-    *   Get the root node entry and decode child validity/leaf status into arrays `c_leaf[8]`, `c_valid[8]`, `c_offset[8]` [S5, unofficial].
+-    *   Initialize `minDistToNode` to infinity [S2, unofficial].
++    *   Initialize the stack with the root node. Set `minDistToNode` to infinity.
++    *   Initialize backtracking structures (e.g., `skipListPerDepth`, `parentListPerDepth`) if using the greedy backtracking variant [S2, unofficial].
+ 
+-3.  **Main Traversal Loop:**
+-    Iterate for `maxIterations` times [S2, unofficial]:
+-    *   **Child Selection:**
+-        *   Get `childStartIndex` from the current parent node [S2, unofficial].
+-        *   Iterate through children $i$ from 0 to 7:
+-            *   Check if child $i$ was already visited: `if (((skipListPerDepth[currentDepth] >> i) & 1)) continue;` [S2, unofficial].
+-            *   Retrieve the child container. If it has no data, skip [S2, unofficial].
+-            *   Update child properties:
+-                $$child.currentSize = parent.currentSize \times 0.5$$
+-                $$child.currentPosition = parent.currentPosition + octantVectors[i] \times child.currentSize$$
+-            *   Perform Ray-AABB intersection test between the ray and the child's bounding box to get $t'$ [S4, unofficial].
+-            *   **Non-Intersectable Node Omission:** If the child's minimum slab boundary $t_{i1}$ is less than the current best intersection $t_{min}$, or if $t_{i0}$ is greater than $t_{max}$, skip the child [S4, unofficial].
+-            *   If the intersection is valid ($t' \in (0, t_{min})$):
+-                *   If the child is a leaf (e.g., size $\le 32$):
+-                    *   Perform raycasting on the leaf volume [S2, unofficial].
+-                    *   If a voxel is found and $t_{minVoxel} < minDistToVoxel$, update `minDistToVoxel` and set `voxelFound = true` [S2, unofficial].
+-                    *   If no voxel is found, reset `minDistToNode` to infinity to allow other nodes to be checked [S2, unofficial].
+-                *   If the child is an internal node:
+-                    *   Store the current parent's index and position in `parentListPerDepth` and `positionListPerDepth` [S2, unofficial].
+-                    *   Mark child $i$ as visited: `skipListPerDepth[currentDepth] |= (1 << i)` [S2, unofficial].
+-                    *   Set `nextParent = child`, `usedIndex = i`, `nextIndex = childStartIndex + i` [S2, unofficial].
+-                    *   Break the child loop to descend [S2, unofficial].
++3.  **Traversal Loop:**
++    *   While the stack is not empty and `minDistToNode` is not yet determined as the final hit (or within `maxIterations`):
++        a.  **Pop:** Retrieve the top node `n` from the stack.
++        b.  **Intersection Test:** Perform a Ray-AABB intersection test between the ray and the bounding box of node `n`. Let the result be $t'$.
++        c.  **Validation:** If $t' \in (0, t)$ (where $t$ is the current best intersection distance, initially infinity):
++            i.  **Leaf Check:** If `n` is a leaf node (voxel):
++                *   Update $t = t'$.
++                *   Extract color/depth data from the leaf.
++                *   *Note:* In some variants, the loop continues to check if other branches contain closer voxels [S2, unofficial].
++            ii. **Internal Node:** If `n` is an internal node:
++                *   Compute slab boundaries for its 8 children. The midpoints $t_m$ are calculated as $((t_0 + t_1) \times 0.5)$ [S4, unofficial].
++                *   For each child $i$ (0 to 7):
++                    *   **Culling:** If the child's minimum slab boundary $t_{i1}$ is less than the current best intersection $t_{min}$, or if the maximum slab boundary $t_{i0}$ is greater than $t_{max}$, skip the child [S4, unofficial].
++                    *   **Push:** If the child is valid and not culled, push its slab boundaries and address onto the stack. Children are often pushed in reverse order (7 down to 0) so that the first child (closest in Morton order or spatial order) is popped first [S4, unofficial].
+ 
+-    *   **Backtracking or Descending:**
+-        *   If `voxelFound` is true, break the main loop [S2, unofficial].
+-        *   If `nextParent.isNull` is true (all children visited or no valid child found):
+-            *   Reset `skipListPerDepth[currentDepth]` to 0 [S2, unofficial].
+-            *   Decrement `currentDepth`. If `currentDepth < 0`, terminate [S2, unofficial].
+-            *   Retrieve the parent from `parentListPerDepth[currentDepth]` and restore its size and position [S2, unofficial].
+-        *   Else (forward traversal):
+-            *   Increment `currentDepth` [S2, unofficial].
+-            *   Update `parent = nextParent` and `currentIndex = nextIndex` [S2, unofficial].
++4.  **Backtracking (Greedy Variant):**
++    *   If a false positive occurs (a parent node had the shortest distance, but its children do not intersect closer than the current best), backtrack to the parent [S2, unofficial].
++    *   Use `skipListPerDepth` to mark visited children and `parentListPerDepth` to restore parent context.
++    *   Decrement `currentDepth` and retrieve the next best sibling from the parent's children list [S2, unofficial].
+ 
+-4.  **Result Extraction:**
+-    *   If a voxel was found, extract the color from the leaf node data and write it to the output buffer with alpha = 1 [S2, unofficial].
+-    *   If no voxel was found, return a default value (e.g., background color or depth -1) [S4, unofficial].
++5.  **Termination:**
++    *   If the stack is empty and no hit was found, return -1 (or background color) [S4, unofficial].
++    *   If a hit was found, return the associated color/depth [S2, unofficial].
+ 
+ **Pseudocode:**
+-
+ ```python
+-def iterative_octree_traversal(ray, octree, max_iterations):
++def iterative_octree_traversal(ray, octree, max_iterations=100):
+     # Preprocessing
+     dir_mask = 0
+@@ -87,5 +74,5 @@
+     if ray.d.z < 0: ray.o.z = -ray.o.z; ray.d.z = -ray.d.z; dir_mask |= 1
+ 
+-    # Slab calculation
++    # Initial slab calculation
+     tx0 = (octree.min_x - ray.o.x) / ray.d.x
+     tx1 = (octree.max_x - ray.o.x) / ray.d.x
+@@ -95,5 +82,5 @@
+     tz1 = (octree.max_z - ray.o.z) / ray.d.z
+     
+-    # Fixed-point scaling
++    # Scale to fixed point
+     tnum_scale = 10000
+     tx0 *= tnum_scale; tx1 *= tnum_scale
+@@ -101,82 +88,61 @@
+     tz0 *= tnum_scale; tz1 *= tnum_scale
+ 
+-    # State initialization
+-    skip_list = [0] * 4
+-    parent_list = [0] * 4
+-    position_list = [0.0, 0.0, 0.0] * 4
+-    current_depth = 0
+-    min_dist_to_node = float('inf')
+-    min_dist_to_voxel = float('inf')
+-    voxel_found = False
++    # Stack initialization
++    stack = []
++    stack.append({
++        'tx0': tx0, 'ty0': ty0, 'tz0': tz0,
++        'tx1': tx1, 'ty1': ty1, 'tz1': tz1,
++        'adr': octree.root_address,
++        'idx': 0
++    })
+     
+-    parent = octree.root
+-    current_index = 0
+-    
++    min_dist = float('inf')
++    hit_color = None
++
+     for _ in range(max_iterations):
+-        child_start_index = parent.entry.child_start_index
+-        found_next = False
+-        
+-        for i in range(8):
+-            # Check if already visited
+-            if (skip_list[current_depth] >> i) & 1:
+-                continue
+-            
+-            child = get_container(child_start_index + i)
+-            if not child.has_data:
+-                continue
+-                
+-            # Update child properties
+-            child.current_size = parent.current_size * 0.5
+-            child.current_position = parent.current_position + octant_vectors[i] * child.current_size
+-            
+-            # Ray-AABB intersection
+-            t_prime = ray_aabb_intersect(ray, child.bounding_box)
+-            
+-            # Non-intersectable node omission
+-            # Calculate child slab boundaries tm
+-            tm = 0.5 * (t0 + t1) # Simplified logic for tm
+-            if t_prime < min_dist_to_node:
+-                if child.is_leaf:
+-                    # Raycast leaf volume
+-                    t_voxel = raycast_leaf(ray, child.voxel_data)
+-                    if t_voxel < min_dist_to_voxel:
+-                        min_dist_to_voxel = t_voxel
+-                        voxel_found = True
+-                        break
+-                else:
+-                    # Store parent state for backtracking
+-                    parent_list[current_depth] = current_index
+-                    position_list[current_depth] = parent.current_position
+-                    skip_list[current_depth] |= (1 << i)
+-                    
+-                    next_parent = child
+-                    used_index = i
+-                    next_index = child_start_index + i
+-                    found_next = True
+-                    break
+-        
+-        if voxel_found:
++        if not stack:
+             break
+             
+-        if not found_next:
+-            # Backtrack
+-            skip_list[current_depth] = 0
+-            current_depth -= 1
+-            if current_depth < 0:
+-                break
+-            current_index = parent_list[current_depth]
+-            parent = get_container(current_index)
+-            parent.current_size = octree.initial_size >> current_depth
+-            parent.current_position = position_list[current_depth]
+-        else:
+-            # Descend
+-            current_depth += 1
+-            parent = next_parent
+-            current_index = next_index
+-            
+-    if voxel_found:
+-        return extract_color(min_dist_to_voxel)
+-    else:
++        current = stack.pop()
++        node = octree.get_node(current['adr'])
++        
++        # Ray-AABB intersection for current node
++        t_prime = ray_aabb_intersect(ray, node.bounds)
++        
++        if 0 < t_prime < min_dist:
++            if node.is_leaf():
++                min_dist = t_prime
++                hit_color = node.color
++                # In greedy variant, continue to find potentially closer leaves
++            else:
++                # Compute child midpoints
++                tm_x = (current['tx0'] + current['tx1']) / 2
++                tm_y = (current['ty0'] + current['ty1']) / 2
++                tm_z = (current['tz0'] + current['tz1']) / 2
++                
++                # Push children in reverse order
++                for i in range(7, -1, -1):
++                    # Determine child slab boundaries based on index i and midpoints
++                    # This logic depends on specific Morton code mapping
++                    child_tx0, child_tx1, child_ty0, child_ty1, child_tz0, child_tz1 = compute_child_slabs(i, current, tm_x, tm_y, tm_z)
++                    
++                    # Culling check
++                    if child_tx1 < min_dist * tnum_scale or child_ty1 < min_dist * tnum_scale or child_tz1 < min_dist * tnum_scale:
++                        continue
++                    if child_tx0 > min_dist * tnum_scale or child_ty0 > min_dist * tnum_scale or child_tz0 > min_dist * tnum_scale:
++                        continue
++                        
++                    child_node = node.children[i]
++                    if child_node is not None:
++                        stack.append({
++                            'tx0': child_tx0, 'ty0': child_ty0, 'tz0': child_tz0,
++                            'tx1': child_tx1, 'ty1': child_ty1, 'tz1': child_tz1,
++                            'adr': child_node.address,
++                            'idx': 0
++                        })
++                        
++    if min_dist == float('inf'):
+         return -1
++    return hit_color
+ ```
+ 
+@@ -184,37 +150,40 @@
+ 
+ ### [ESVO (Efficient Sparse Voxel Octrees)](3089-esvo-efficient-sparse-voxel-octrees.md)
+-ESVO is a GPU-based ray casting algorithm that uses a Sparse Voxel Octree (SVO) to reduce voxel storage costs and enable real-time rendering of large scenes. It sets itself apart from sibling methods by using a compact 4-byte node encoding with a depth-first (z-curve) memory layout, which optimizes for localized memory access patterns on the GPU. Unlike [Hierarchical Ray Marching](5238-hierarchical-ray-marching.md) which may use larger leaf nodes or different traversal strategies, ESVO relies on a near 1:1 port of the original implementation with specific pointer encoding changes to facilitate buffer-less tree construction.
++GPU-based variant using compact 4-byte node encoding and z-curve layout.
+ 
+ ### [Octree Traversal with Fixed-Size Leaf Volumes](3900-octree-traversal-with-fixed-size-leaf-volumes.md)
+-This method accelerates sparse voxel octree (SVO) raycasting by enforcing a uniform leaf node size, decoupling traversal depth from data sparsity and ensuring predictable memory access patterns. Unlike [Iterative Octree Traversal](2618-iterative-octree-traversal.md), which may vary leaf granularity, this approach fixes the leaf volume to 32×32×32 voxels, optimizing for hardware cache efficiency and reducing branch divergence in GPU warps, at the cost of increased false-positive checks in noisy or dense regions.
++Enforces uniform 32x32x32 leaf nodes for cache efficiency.
+ 
+ ### [Octree Traversal with LOD & Constant Nodes](4181-octree-traversal-with-lod-constant-nodes.md)
+-This method renders a Sparse Voxel Octree (SVO) on the CPU by traversing the hierarchy to project voxels into a color buffer, using depth-sorted traversal and hierarchical culling based on projected size. It distinguishes itself from sibling methods by supporting Level of Detail (LOD) switching between constant-value nodes and textured bricks. It builds on [Iterative Octree Traversal](2618-iterative-octree-traversal.md) by adding specific logic for constant node handling and brick texture sampling.
++CPU-based variant supporting LOD switching and constant-value nodes.
+ 
+ ### [Ordered List Generation via N3-Tree Traversal](5023-ordered-list-generation-via-n3-tree-traversal.md)
+-This method generates a list of spatial bricks ordered from closest to furthest relative to the viewpoint to avoid testing blocks behind untested unloaded blocks. It solves the problem of unnecessary data loading by ensuring that visibility tests are performed in an order where any previously reached node cannot be occluded by a subsequently reached node. It sets itself apart from sibling methods by integrating view-dependent axis prioritization directly into a depth-first traversal of the N3-tree structure, followed by a lightweight distance sort.
++Generates spatially ordered brick lists to avoid testing unloaded blocks.
+ 
+ ### [Hierarchical Ray Marching](5238-hierarchical-ray-marching.md)
+-Hierarchical Ray Marching is a sparse voxel traversal technique that dynamically switches between octree levels and voxel levels to optimize ray-marching performance. It differs from sibling methods by adjusting the traversal granularity up or down based on hit/miss status, allowing rapid skipping of empty regions at coarse levels and precise sampling at fine levels.
++Dynamically switches between voxel-level stepping and octree-level skipping.
+ 
+ ### [Ray-Direction Child Ordering](5462-ray-direction-child-ordering.md)
+-Ray-Direction Child Ordering is an iterative traversal optimization for sparse voxel octrees that processes child nodes in a sequence determined by the ray's direction, ensuring nodes closer to the ray origin are visited first. It solves the inefficiency of standard recursive traversal, which examines all eight children and performs redundant intersection tests for non-intersected subtrees, by using a deterministic neighbor-linking strategy to skip empty or non-intersected branches. Unlike its siblings, it avoids recursion entirely within a node's children by maintaining a `currNode` state and computing the next neighbor based on exit plane t-values, thereby reducing the number of intersection tests and improving performance on sparse structures.
++Orders child nodes based on ray direction to minimize intersection tests.
+ 
+ ### [Octree Iteration with Culling](11319-octree-iteration-with-culling.md)
+-This method performs a depth-first traversal of a Sparse Voxel Octree (SVO) to collect leaf nodes that intersect a specified spatial region, typically a bounding box or ray volume. It solves the problem of efficiently identifying relevant geometry for rendering or physics without visiting every node in the tree. It sets itself apart from sibling methods by explicitly integrating a `BoxIntersector` check at every node visit, allowing early termination of branches that lie outside the region of interest, whereas siblings like [ESVO](3089-esvo-efficient-sparse-voxel-octrees.md) or [Hierarchical Ray Marching](5238-hierarchical-ray-marching.md) may focus on different traversal optimizations or data layouts.
++Integrates BoxIntersector checks for early branch termination.
+ 
+ ### [Single-kernel Octree Traversal](15600-single-kernel-octree-traversal.md)
+-Single-kernel octree traversal is a technique for traversing an octree for ray tracing by performing the entire traversal logic, including recursion simulation, within a single CUDA kernel execution per ray, rather than using multiple kernel launches for each recursion depth. It is preferred over multi-kernel recursion because kernel invocation overhead is high. Although single-kernel traversal may cause thread divergence due to the SIMD nature of GPUs, coherent rays in a warp traverse similarly, mitigating this issue.
++Performs entire traversal within a single CUDA kernel per ray.
++
++### Non-Intersectable Node Omission
++An optimization where children are not added to the stack if their slab boundaries indicate they cannot intersect the ray closer than the current best intersection $t_{min}$ [S4, unofficial]. Specifically, if a child's minimum slab boundary $t_{i1}$ is less than $t_{min}$, or its maximum slab boundary $t_{i0}$ is greater than $t_{max}$, the child is skipped [S4, unofficial]. This reduces the number of intersection tests and improves performance [S4, unofficial].
+ 
+ ## Operating characteristics
+-*   **Time Complexity:** In the ideal case, the time complexity is $O(\log s)$, where $s$ is the initial size of the Octree [S2, unofficial]. The leaf raycasting is $O(1)$ as it always processes a fixed 32x32x32 volume [S2, unofficial]. In the worst case (e.g., traversing along a diagonal where every leaf node must be checked), the complexity is $O(s \cdot \log s)$ [S2, unofficial].
+-*   **Memory Complexity:** The algorithm uses fixed-size arrays for the stack simulation (`skipListPerDepth`, `parentListPerDepth`, `positionListPerDepth`), typically of length 4, making the auxiliary memory usage constant and independent of the octree depth [S2, unofficial].
+-*   **Strengths:** Eliminates recursion overhead and complies with GPU constraints (HLSL) [S2, S4, unofficial]. The greedy approach with backtracking efficiently handles false positives by revisiting parent nodes [S2, unofficial].
+-*   **Limitations:** The greedy strategy may lead to redundant checks if many false positives occur [S2, unofficial]. The fixed-size stack limits the maximum traversal depth [S5, unofficial].
+-*   **When to use:** When targeting hardware that does not support recursion (e.g., older GPUs, HLSL) or when stack overflow is a concern [S2, S4, unofficial].
+-*   **When not to use:** When the octree depth exceeds the fixed stack size limit [S5, unofficial].
++*   **Time Complexity:** $O(\log s)$ in the ideal case, where $s$ is the initial size of the octree [S2, unofficial]. The leaf raycasting is $O(1)$ as it processes a fixed volume (e.g., 32x32x32) [S2, unofficial]. In the worst case (e.g., diagonal traversal through dense regions), it can reach $O(s \cdot \log s)$ [S2, unofficial].
++*   **Memory Complexity:** Depends on the stack size. A fixed-size stack (e.g., 100 elements) is often used to prevent stack overflow [S5, unofficial]. Auxiliary arrays for backtracking (e.g., `skipListPerDepth`) add constant overhead relative to tree depth [S2, unofficial].
++*   **Strengths:** Avoids recursion limits in GPUs (HLSL) and CPU stack overflows; allows explicit control over traversal order and backtracking; efficient culling of non-intersecting nodes [S2, S4, unofficial].
++*   **Limitations:** Fixed-size stack may require careful sizing; greedy backtracking can be complex to implement correctly; performance depends heavily on ray coherence and tree balance [S2, S4, unofficial].
++*   **When to use:** When rendering on GPUs with recursion limits (HLSL) or when CPU stack space is constrained; for sparse volumes where culling is effective [S2, S4, unofficial].
++*   **When not to use:** For very deep trees where stack size becomes prohibitive; for highly coherent rays where simpler DDA might suffice [S2, unofficial].
+ 
+ ## Background
+-Iterative Octree Traversal originated as a solution to the limitations of recursive raycasting in shader languages like HLSL, which do not support general method recursion [S2, unofficial]. It was developed to enable efficient raycasting of large voxel spaces on GPUs by replacing the call stack with explicit data structures [S2, S4, unofficial]. The method is a key component in various sparse voxel rendering pipelines, including those described in theses on voxel rendering and GPU-based ray tracing [S2, S4, unofficial].
++Iterative Octree Traversal originated as a solution to the limitations of recursive ray tracing in shader languages like HLSL, which do not support general recursion [S2, unofficial]. It was developed to enable efficient raycasting on GPUs by simulating the call stack with explicit data structures [S2, S4, unofficial]. The method builds on earlier discrete ray-tracing techniques [S3, unofficial] and has been adapted for various platforms, including CPU-based renderers [S1, unofficial] and GPU-based systems [S2, S4, unofficial]. It is widely used in real-time voxel rendering and global illumination calculations [S4, unofficial].
+ 
+ ## Sources

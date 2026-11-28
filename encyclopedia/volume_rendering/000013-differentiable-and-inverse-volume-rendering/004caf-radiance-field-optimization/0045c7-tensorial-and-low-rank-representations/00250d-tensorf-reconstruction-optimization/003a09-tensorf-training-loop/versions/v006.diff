@@ -1,0 +1,346 @@
+--- v005.md
++++ v006.md
+@@ -4,5 +4,5 @@
+ 
+ ## Overview
+-The TensoRF Training Loop is the iterative optimization procedure used to minimize the L2 rendering loss of a tensorial radiance field, using ground truth pixel colors as supervision [S1, unofficial]. It distinguishes itself from standard NeRF training by incorporating specific regularization terms (orthogonal, L1 density, and Total Variation) tailored to the low-rank tensor decomposition structure, alongside a dynamic alpha mask update mechanism [S1, unofficial].
++The TensoRF Training Loop is the iterative optimization procedure used to minimize the L2 rendering loss of a tensorial radiance field, using ground truth pixel colors as supervision [S1, unofficial]. It distinguishes itself from standard NeRF training by integrating specific regularization terms (orthogonal, L1 density, and Total Variation) and dynamic resolution updates via an alpha mask, which are critical for stabilizing the low-rank tensor decomposition [S1, unofficial]. It builds on [TensoRF Reconstruction Optimization](3453-tensorf-reconstruction-optimization.md).
+ 
+ ## How it works
+@@ -11,185 +11,119 @@
+ **Inputs:**
+ *   Training dataset (images, poses, intrinsics) [S1, unofficial].
+-*   Model parameters: `density_n_comp`, `appearance_n_comp`, `app_dim`, `near_far`, `shadingMode`, `alphaMask_thres`, `density_shift`, `distance_scale`, `pos_pe`, `view_pe`, `fea_pe`, `featureC`, `step_ratio`, `fea2denseAct` [S1, unofficial].
+-*   Hyperparameters: `N_voxel_init` (initial voxel count), `nSamples` (samples per ray), `lr_decay_target_ratio`, `Ortho_weight`, `L1_weight_inital`, `TV_weight_density`, `TV_weight_app` [S1, unofficial].
++*   Model configuration parameters (see Parameters below) [S1, unofficial].
++*   Optimizer (typically Adam) [S1, unofficial].
+ 
+ **Outputs:**
+-*   Optimized tensor factors representing the radiance field [S1, unofficial].
+-*   Rendered RGB maps, alphas, depths, weights, and uncertainty estimates [S1, unofficial].
++*   Optimized tensor factors (density and appearance) [S1, unofficial].
++*   Rendered RGB, alpha, depth, and uncertainty maps for training batches [S1, unofficial].
+ 
+ ### Data Structures
+-*   **Rays:** Stored as tensors `allrays` and `allrgbs`. If NDC is not used, rays are filtered using `tensorf.filtering_rays` with `bbox_only=True` [S1, unofficial].
+-*   **Sampler:** `SimpleSampler` manages ray batching via `nextids()` [S1, unofficial].
+-*   **Model:** `tensorf` object containing the decomposed tensor components [S1, unofficial].
+-*   **Renderer:** `renderer` function that takes rays, model, chunk size, and sampling parameters to produce outputs [S1, unofficial].
++The model `tensorf` stores the radiance field as decomposed tensors. The specific layout depends on the [TensoRF Decomposition Models](13296-tensorf-decomposition-models.md) used (e.g., Vector-Matrix or Tri-Plane), but generally includes:
++*   Density factors: Vectors/matrices representing the spatial density field [S1, unofficial].
++*   Appearance factors: Vectors/matrices representing view-dependent color [S1, unofficial].
++*   Positional Embeddings: Pre-computed or on-the-fly encoded position and view direction vectors (`pos_pe`, `view_pe`, `fea_pe`) [S1, unofficial].
+ 
+-### Numbered Steps
++### Parameters
++*   `N_voxel_init`: Initial number of voxels for the feature grid [S1, unofficial].
++*   `nSamples`: Number of samples per ray, calculated as `min(args.nSamples, cal_n_samples(reso_cur, args.step_ratio))` [S1, unofficial].
++*   `lr_decay_target_ratio`: Target ratio for learning rate decay [S1, unofficial].
++*   `Ortho_weight` (or `Ortho_reg_weight`): Weight for orthogonal regularization [S1, unofficial].
++*   `L1_weight_inital`: Initial weight for L1 density regularization [S1, unofficial].
++*   `TV_weight_density`: Initial weight for Total Variation (TV) density regularization [S1, unofficial].
++*   `TV_weight_app`: Initial weight for TV appearance regularization [S1, unofficial]
++*   `density_shift`: Shift applied to density values [S1, unofficial].
++*   `alphaMask_thres`: Threshold for alpha mask updates [S1, unofficial].
+ 
+-1.  **Initialization:** Load train/test data. Determine `aabb`, `near_far`, `white_bg`, and `ndc_ray` flags [S1, unofficial]. Initialize the `tensorf` model with the specified parameters [S1, unofficial].
+-2.  **Learning Rate Setup:** Calculate the per-iteration decay factor:
+-    $$ lr\_factor = args.lr\_decay\_target\_ratio^{(1/args.lr\_decay\_its)} $$
+-    [S1, unofficial]
+-3.  **Ray Filtering:** If not using NDC, filter rays to the bounding box:
+-    ```python
+-    allrays, allrgbs = tensorf.filtering_rays(allrays, allrgbs, bbox_only=True)
+-    ```
+-    [S1, unofficial]
+-4.  **Iteration Loop:** For each iteration:
+-    a.  **Sample Rays:** Get ray indices and fetch data:
+-        ```python
+-        ray_idx = trainingSampler.nextids()
+-        rays_train, rgb_train = allrays[ray_idx], allrgbs[ray_idx].to(device)
+-        ```
+-        [S1, unofficial]
+-    b.  **Render:** Compute the rendering output:
+-        ```python
+-        rgb_map, alphas_map, depth_map, weights, uncertainty = renderer(
+-            rays_train, tensorf, chunk=args.batch_size, 
+-            N_samples=nSamples, white_bg=white_bg, 
+-            ndc_ray=ndc_ray, device=device, is_train=True
+-        )
+-        ```
+-        [S1, unofficial]
+-    c.  **Compute Base Loss:** Calculate Mean Squared Error (MSE):
+-        $$ loss = \text{mean}((rgb\_map - rgb\_train)^2) $$
+-        [S1, unofficial]
+-    d.  **Regularization:**
+-        *   **Orthogonal:** If `Ortho_reg_weight > 0`:
+-            $$ loss\_reg = tensorf.vector\_comp\_diffs() $$
+-            $$ total\_loss += Ortho\_reg\_weight \times loss\_reg $$
+-            [S1, unofficial]
+-        *   **L1 Density:** If `L1_reg_weight > 0`:
+-            $$ loss\_reg\_L1 = tensorf.density\_L1() $$
+-            $$ total\_loss += L1\_reg\_weight \times loss\_reg\_L1 $$
+-            [S1, unofficial]
+-        *   **TV Density:** If `TV_weight_density > 0`:
+-            Decay weight by `lr_factor`. Compute:
+-            $$ loss\_tv = tensorf.TV\_loss\_density(tvreg) \times TV\_weight\_density $$
+-            Add to `total_loss` [S1, unofficial].
+-        *   **TV Appearance:** If `TV_weight_app > 0`:
+-            Decay weight by `lr_factor`. Compute:
+-            $$ loss\_tv = tensorf.TV\_loss\_app(tvreg) \times TV\_weight\_app $$
+-            Add to `total_loss` [S1, unofficial].
+-    e.  **Backpropagation:**
+-        ```python
+-        optimizer.zero_grad()
+-        total_loss.backward()
+-        optimizer.step()
+-        ```
+-        [S1, unofficial]
+-    f.  **Learning Rate Update:**
+-        ```python
+-        for param_group in optimizer.param_groups:
+-            param_group['lr'] = param_group['lr'] * lr_factor
+-        ```
+-        [S1, unofficial]
+-5.  **Evaluation:** Periodically evaluate test PSNR and log metrics to TensorBoard [S1, unofficial].
+-6.  **Alpha Mask Update:** If the current iteration is in `update_AlphaMask_list` and the current voxel count is less than $256^3$, update the volume resolution [S1, unofficial].
++### Steps
++1.  **Initialization:** Load training and test data. Compute axis-aligned bounding box (`aabb`), near/far clipping planes (`near_far`), background flag (`white_bg`), and NDC ray coordinates if applicable [S1, unofficial]. Initialize the `tensorf` model with the configuration parameters [S1, unofficial]. Calculate the learning rate decay factor: `lr_factor = args.lr_decay_target_ratio**(1/args.lr_decay_iters)` [S1, unofficial].
++2.  **Ray Filtering:** If not using NDC, filter rays to the bounding box: `allrays, allrgbs = tensorf.filtering_rays(allrays, allrgbs, bbox_only=True)` [S1, unofficial]. Initialize a `SimpleSampler` for batching [S1, unofficial].
++3.  **Iteration Loop:**
++    a.  **Sampling:** Get ray indices: `ray_idx = trainingSampler.nextids()`. Fetch rays and ground truth RGBs: `rays_train, rgb_train = allrays[ray_idx], allrgbs[ray_idx].to(device)` [S1, unofficial].
++    b.  **Rendering:** Render the batch: `rgb_map, alphas_map, depth_map, weights, uncertainty = renderer(rays_train, tensorf, chunk=args.batch_size, N_samples=nSamples, white_bg=white_bg, ndc_ray=ndc_ray, device=device, is_train=True)` [S1, unofficial].
++    c.  **Loss Computation:**
++        *   Base Loss: `loss = torch.mean((rgb_map - rgb_train) ** 2)` [S1, unofficial].
++        *   Orthogonal Regularization: If `Ortho_reg_weight > 0`, compute `loss_reg = tensorf.vector_comp_diffs()` and add `Ortho_reg_weight * loss_reg` to `total_loss` [S1, unofficial].
++        *   L1 Density Regularization: If `L1_reg_weight > 0`, compute `loss_reg_L1 = tensorf.density_L1()` and add `L1_reg_weight * loss_reg_L1` to `total_loss` [S1, unofficial].
++        *   TV Density Regularization: If `TV_weight_density > 0`, decay the weight by `lr_factor`, compute `loss_tv = tensorf.TV_loss_density(tvreg) * TV_weight_density`, and add to `total_loss` [S1, unofficial].
++        *   TV Appearance Regularization: If `TV_weight_app > 0`, decay the weight by `lr_factor`, compute `loss_tv = tensorf.TV_loss_app(tvreg) * TV_weight_app`, and add to `total_loss` [S1, unofficial].
++    d.  **Optimization:** Zero gradients, backpropagate, and step: `optimizer.zero_grad(); total_loss.backward(); optimizer.step()` [S1, unofficial].
++    e.  **Learning Rate Update:** Update all parameter groups: `param_group['lr'] = param_group['lr'] * lr_factor` [S1, unofficial].
++4.  **Evaluation and Updates:** Periodically evaluate test PSNR and log metrics [S1, unofficial]. If the current iteration is in `update_AlphaMask_list` and the current voxel count is less than $256^3$, update the volume resolution using the alpha mask [S1, unofficial].
+ 
+ ### Pseudocode
+ 
+ ```python
+-# Initialization
+-dataset = load_dataset()
+-tensorf = initialize_tensorf(
+-    density_n_comp=args.density_n_comp,
+-    appearance_n_comp=args.appearance_n_comp,
+-    app_dim=args.app_dim,
+-    near_far=args.near_far,
+-    shadingMode=args.shadingMode,
+-    alphaMask_thres=args.alphaMask_thres,
+-    density_shift=args.density_shift,
+-    distance_scale=args.distance_scale,
+-    pos_pe=args.pos_pe,
+-    view_pe=args.view_pe,
+-    fea_pe=args.fea_pe,
+-    featureC=args.featureC,
+-    step_ratio=args.step_ratio,
+-    fea2denseAct=args.fea2denseAct
+-)
+-
+-# Learning rate setup
+-lr_factor = args.lr_decay_target_ratio ** (1.0 / args.lr_decay_iters)
+-
+-# Ray filtering
+-if not ndc_ray:
+-    allrays, allrgbs = tensorf.filtering_rays(allrays, allrgbs, bbox_only=True)
+-
+-sampler = SimpleSampler()
+-
+-for iteration in range(total_iterations):
+-    # 1. Sample Rays
+-    ray_idx = sampler.nextids()
+-    rays_train = allrays[ray_idx].to(device)
+-    rgb_train = allrgbs[ray_idx].to(device)
++def train_tensorf(dataset, model_config, optimizer, num_iterations):
++    # 1. Initialization
++    aabb, near_far, white_bg, ndc_ray = dataset.get_aabb_and_params()
++    tensorf = TensorFModel(**model_config)
++    lr_factor = args.lr_decay_target_ratio ** (1 / args.lr_decay_iters)
+     
+-    # 2. Render
+-    rgb_map, alphas_map, depth_map, weights, uncertainty = renderer(
+-        rays_train, tensorf, 
+-        chunk=args.batch_size, 
+-        N_samples=min(args.nSamples, cal_n_samples(reso_cur, args.step_ratio)),
+-        white_bg=white_bg, 
+-        ndc_ray=ndc_ray, 
+-        device=device, 
+-        is_train=True
+-    )
++    if not ndc_ray:
++        allrays, allrgbs = tensorf.filtering_rays(dataset.allrays, dataset.allrgbs, bbox_only=True)
++    else:
++        allrays, allrgbs = dataset.allrays, dataset.allrgbs
++        
++    sampler = SimpleSampler(allrays)
+     
+-    # 3. Base Loss
+-    loss = torch.mean((rgb_map - rgb_train) ** 2)
+-    total_loss = loss
+-    
+-    # 4. Regularization
+-    if Ortho_reg_weight > 0:
+-        loss_reg = tensorf.vector_comp_diffs()
+-        total_loss += Ortho_reg_weight * loss_reg
++    for iteration in range(num_iterations):
++        # 2. Sampling
++        ray_idx = sampler.nextids()
++        rays_train = allrays[ray_idx].to(device)
++        rgb_train = allrgbs[ray_idx].to(device)
+         
+-    if L1_reg_weight > 0:
+-        loss_reg_L1 = tensorf.density_L1()
+-        total_loss += L1_reg_weight * loss_reg_L1
++        # 3. Rendering
++        rgb_map, alphas_map, depth_map, weights, uncertainty = renderer(
++            rays_train, tensorf, 
++            chunk=args.batch_size, 
++            N_samples=min(args.nSamples, cal_n_samples(tensorf.reso_cur, args.step_ratio)),
++            white_bg=white_bg, 
++            ndc_ray=ndc_ray, 
++            device=device, 
++            is_train=True
++        )
+         
+-    if TV_weight_density > 0:
+-        tvreg = ... # TV regularization object/state
+-        loss_tv = tensorf.TV_loss_density(tvreg) * TV_weight_density
+-        total_loss += loss_tv
+-        TV_weight_density *= lr_factor # Decay weight
++        # 4. Loss Computation
++        loss = torch.mean((rgb_map - rgb_train) ** 2)
++        total_loss = loss
+         
+-    if TV_weight_app > 0:
+-        loss_tv = tensorf.TV_loss_app(tvreg) * TV_weight_app
+-        total_loss += loss_tv
+-        TV_weight_app *= lr_factor # Decay weight
++        if args.Ortho_reg_weight > 0:
++            loss_reg = tensorf.vector_comp_diffs()
++            total_loss += args.Ortho_reg_weight * loss_reg
++            
++        if args.L1_reg_weight > 0:
++            loss_reg_L1 = tensorf.density_L1()
++            total_loss += args.L1_reg_weight * loss_reg_L1
++            
++        if args.TV_weight_density > 0:
++            tv_weight = args.TV_weight_density * lr_factor
++            loss_tv = tensorf.TV_loss_density(tvreg) * tv_weight
++            total_loss += loss_tv
++            
++        if args.TV_weight_app > 0:
++            tv_weight = args.TV_weight_app * lr_factor
++            loss_tv = tensorf.TV_loss_app(tvreg) * tv_weight
++            total_loss += loss_tv
++            
++        # 5. Optimization
++        optimizer.zero_grad()
++        total_loss.backward()
++        optimizer.step()
+         
+-    # 5. Backpropagation
+-    optimizer.zero_grad()
+-    total_loss.backward()
+-    optimizer.step()
+-    
+-    # 6. Update Learning Rate
+-    for param_group in optimizer.param_groups:
+-        param_group['lr'] *= lr_factor
+-        
+-    # 7. Alpha Mask Update
+-    if iteration in update_AlphaMask_list:
+-        if current_voxel_count < 256**3:
+-            update_volume_resolution()
++        # 6. LR Update
++        for param_group in optimizer.param_groups:
++            param_group['lr'] = param_group['lr'] * lr_factor
+             
+-    # 8. Evaluation
+-    if iteration % eval_interval == 0:
+-        evaluate_test_psnr()
+-        log_to_tensorboard()
++        # 7. Periodic Updates
++        if iteration % eval_interval == 0:
++            evaluate_test_psnr(dataset, tensorf)
++            
++        if iteration in update_AlphaMask_list and tensorf.voxel_count < 256**3:
++            tensorf.update_alpha_mask()
+ ```
+ 
+-### Parameters
+-*   `N_voxel_init`: Initial number of voxels [S1, unofficial].
+-*   `nSamples`: Number of samples per ray, calculated as $\min(args.nSamples, cal\_n\_samples(reso\_cur, args.step\_ratio))$ [S1, unofficial].
+-*   `lr_decay_target_ratio`: Target learning rate ratio for decay [S1, unofficial].
+-*   `Ortho_weight`: Weight for orthogonal regularization [S1, unofficial].
+-*   `L1_weight_inital`: Initial weight for L1 density regularization [S1, unofficial].
+-*   `TV_weight_density`: Initial weight for TV density regularization [S1, unofficial].
+-*   `TV_weight_app`: Initial weight for appearance regularization [S1, unofficial].
+-
+ ### Edge Cases and Pitfalls
+-*   **Alpha Mask Resolution:** The volume resolution update is conditional on the voxel count being less than $256^3$ [S1, unofficial].
+-*   **TV Weight Decay:** TV regularization weights decay by `lr_factor` at each step where they are applied [S1, unofficial].
+-*   **NDC Filtering:** Ray filtering is skipped if NDC rays are used [S1, unofficial].
++*   **Depth Supervision Limitations:** When using depth supervision, the improvement in PSNR may be minimal (e.g., 0.01 PSNR) because COLMAP key points are orders of magnitude fewer than color pixels, causing depth loss gradients to affect only a small portion of the voxel space [S2, unofficial].
++*   **Low Data Performance:** Training with low data and low iterations (e.g., 2,500 iterations with 4x downsampling) results in significantly lower PSNR compared to full-data training [S2, unofficial].
+ 
+ ## Subtopics
+@@ -210,24 +144,44 @@
+ A training optimization scheme that reduces initial training cost and regularizes feature representations by initializing a 3D feature grid at a coarse resolution and progressively upscaling it to higher resolutions. It improves model convergence and makes camera refinement more effective compared to training at full resolution from the start. Unlike static grid methods, this approach dynamically adapts the spatial detail of the feature representation during the optimization process.
+ 
++### [Codec-Adaptive TriPlane Radiance Fields](17898-codec-adaptive-triplane-radiance-fields.md)
++Codec-Adaptive TriPlane Radiance Fields (CATRF) is a compression framework for plane-factorized radiance fields that optimizes neural features directly in the decoded space of a standard video or image codec. It solves the problem of severe rendering degradation at low bitrates by integrating a real codec round-trip (JPEG, VP9, HEVC, or AV1) into the training loop via a Straight-Through Estimator (STE). Unlike Codec-Agnostic (CA) methods that compress features after training, or Learned-Codec-in-the-Loop (LCL) methods that require shipping scene-specific neural decoder parameters, CATRF adapts features to real codec distortions without introducing any learned codec parameters or entropy models.
++
+ ### TensoRF Downsampling
+-Downsamples both train and test data by a factor of 4. Training iterations are reduced to 2,500 (vs. 30,000 in original TensoRF paper) due to memory and time constraints. Tested on the synthetic Lego scene from the NeRF dataset with 100 training views and 200 test views [S2, unofficial].
++Downsamples both train and test data by a factor of 4. Training iterations are reduced to 2,500 (vs. 30,000 in the original TensoRF paper) due to memory and time constraints. Tested on the synthetic Lego scene from the NeRF dataset with 100 training views and 200 test views [S2, unofficial].
+ 
+ ### Depth Supervised TensoRF
+-Applies depth supervision loss during training. A key pitfall is low PSNR with low data. Minimal improvement (0.01 PSNR) over non-depth supervised approach because COLMAP key points are orders of magnitude fewer than color pixel comparisons, causing depth loss gradients to affect only a small portion of voxel space [S2, unofficial].
++Applies depth supervision loss during training. However, it suffers from low PSNR with low data and minimal improvement (0.01 PSNR) over non-depth supervised approaches because COLMAP key points are orders of magnitude fewer than color pixel comparisons, causing depth loss gradients to affect only a small portion of voxel space [S2, unofficial].
+ 
+ ### TensoRF with PATA
+-Uses spike-based modules. TensoRF T: Maximum time step set to 8. Initial membrane time constant $\tau = 2.0$. Firing threshold = 0.5. TensoRF Input Dimensions: Spike-based color decoder receives 150-dimensional input on Synthetic-NeRF and 30-dimensional input on LLFF [S3, unofficial].
++Integrates Spiking Neural Networks (SNN) components. Parameters include: Maximum time step $T=8$, initial membrane time constant $\tau=2.0$, and firing threshold $0.5$. The spike-based color decoder receives 150-dimensional input on Synthetic-NeRF and 30-dimensional input on LLFF [S3, unofficial].
+ 
+ ## Operating characteristics
+-*   **Complexity:** Not given in the sources.
+-*   **Performance:** Not given in the sources.
+-*   **Scaling:** Not given in the sources.
+-*   **Strengths:** Incorporates specific regularizations (Orthogonal, L1, TV) for tensor factors; dynamic alpha mask update [S1, unofficial].
+-*   **Limitations:** Not given in the sources.
+-*   **When to use:** When optimizing TensoRF models with standard L2 loss and tensor-specific regularizations [S1, unofficial].
+-*   **When not:** Not given in the sources.
++
++### Time and Memory Complexity
++*   **Memory:** The low-rank tensor decomposition significantly reduces memory usage compared to dense voxel grids or MLPs, scaling with the rank of the decomposition rather than the full 3D volume resolution [S1, unofficial].
++*   **Time:** Training time is reduced by the efficiency of tensor operations and the coarse-to-fine grid updates. However, joint pose optimization or depth supervision may introduce additional computational overhead or require careful tuning to avoid local minima [S2, unofficial].
++
++### Measured Performance
++*   **Standard TensoRF:** Achieves high PSNR (e.g., ~29.92 test PSNR on Lego) with 30,000 iterations on full-resolution data [S2, unofficial].
++*   **Downsampled TensoRF:** With 4x downsampling and 2,500 iterations, PSNR drops significantly (e.g., ~15.23 test PSNR on Lego) [S2, unofficial].
++*   **Depth Supervised:** Shows minimal PSNR improvement (0.01) over non-depth supervised variants in low-data scenarios [S2, unofficial].
++
++### Scaling
++*   The method scales well with resolution due to the tensor decomposition, but performance is sensitive to the number of training views and iterations, especially in low-data regimes [S2, unofficial].
++
++### Strengths and Limitations
++*   **Strengths:** High rendering quality with lower memory footprint than NeRF; effective regularization techniques (Ortho, L1, TV) stabilize training; flexible decomposition models [S1, unofficial].
++*   **Limitations:** Depth supervision is ineffective with sparse COLMAP points; low-data training yields poor results without sufficient iterations or data augmentation; joint pose optimization can be unstable without frequency control [S2, unofficial].
++
++### When to Use
++*   Use when memory is constrained but high-quality novel view synthesis is required [S1, unofficial].
++*   Use when integrating with stylization (StyleTRF) or compression (CATRF) pipelines [S1, unofficial].
++
++### When Not to Use
++*   Avoid when depth accuracy is critical and ground truth depth is sparse (Depth Supervised TensoRF performs poorly) [S2, unofficial].
++*   Avoid when training data is extremely limited and computational budget is very low (Downsampled TensoRF yields low PSNR) [S2, unofficial].
+ 
+ ## Background
+-The TensoRF Training Loop originates from the TensoRF paper (ECCV 2022) [S1, unofficial]. It is used in conjunction with various extensions such as NeuManifold, Joint Pose Optimization, StyleTRF, and PATA [S1, S2, S3, unofficial].
++TensoRF was introduced in the ECCV 2022 paper "Tensorial Radiance Fields" [S1, unofficial]. It represents the radiance field as a tensor decomposed into lower-rank components, enabling efficient storage and rendering. The training loop incorporates specific regularizations to handle the low-rank constraints and dynamic resolution updates to refine the field during optimization [S1, unofficial]. Variants like NeuManifold, StyleTRF, and CATRF extend the base TensoRF framework for specific tasks like mesh extraction, stylization, and compression [S1, unofficial].
+ 
+ ## Sources

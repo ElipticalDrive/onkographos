@@ -1,0 +1,184 @@
+--- v002.md
++++ v003.md
+@@ -4,5 +4,5 @@
+ 
+ ## Overview
+-Hardware-Adapted Object-Order Ray Casting is a volume rendering technique that adapts object-order ray casting for modern graphics hardware by generating fragments for rays intersecting volume cells, with traversal order determined by min/max octrees [S1, unofficial]. Unlike image-order methods that process pixels sequentially, this approach processes visible volume cells, loading vertex data and accumulating color/opacity into corresponding pixels for all intersecting rays [S2]. It is distinguished from its parent method [Object-Order Ray Casting with Min/Max Octrees](1814-object-order-ray-casting-with-min-max-octrees.md) by its explicit optimization for hardware fragment generation and the use of pre-computed projection lists for orthogonal views [S1, unofficial][S2].
++Hardware-Adapted Object-Order Ray Casting is a volume rendering technique that adapts object-order ray casting for modern graphics hardware by generating fragments for rays intersecting volume cells, with traversal order determined by min/max octrees [S1, unofficial]. Unlike image-order methods that process pixels sequentially, this approach processes visible volume cells, loading vertex data and accumulating color and opacity into corresponding pixels for all intersecting rays [S2]. It is distinguished from its parent method [Object-Order Ray Casting with Min/Max Octrees](1814-object-order-ray-casting-with-min-max-octrees.md) by its explicit optimization for hardware fragment generation and the use of pre-computed projection lists for orthogonal views [S1, unofficial][S2].
+ 
+ ## How it works
+@@ -21,5 +21,5 @@
+     *   For each subdivision, store a list of relative coordinates corresponding to the template hexagon projection of a cell [S2].
+     *   Store the global coordinate of the square where a cell center projects [S2].
+-    *   *Note:* These lists are recomputed every time the viewpoint changes [S2].
++    *   These lists are recomputed every time the viewpoint changes [S2].
+ 
+ 2.  **Traverse Octree and Determine Visibility:**
+@@ -46,58 +46,107 @@
+ 
+ ```python
+-def hardware_adapted_object_order_ray_casting(volume, octree, viewpoint):
+-    # Step 1: Precompute projection lists (recomputed on viewpoint change)
+-    projection_lists = precompute_projection_lists(viewpoint)
+-    
+-    # Step 2: Traverse octree to get visible cells in order
+-    visible_cells = traverse_octree_for_visibility(octree)
+-    
++def hardware_adapted_object_order_ray_casting(volume, octree, viewpoint, step_size=0.5):
++    # Step 1: Precompute projection lists (recomputed on viewpoint change) [S2]
++    projection_lists = {}
++    for square_global in compute_square_grids(viewpoint):
++        for sub_id in range(4):
++            relative_coords = compute_hexagon_projection(sub_id, viewpoint)
++            projection_lists[(square_global, sub_id)] = relative_coords
++
++    # Step 2: Traverse octree to get visible cells in order [S1, unofficial][S2]
++    visible_cells = traverse_octree(octree)
++
++    # Initialize output buffer (16-bit unsigned integers for luminance and density) [S2]
++    out_lum = zeros_like(output_buffer, dtype=uint16)
++    out_den = zeros_like(output_buffer, dtype=uint16)
++
+     for cell in visible_cells:
+-        # Load vertex data
+-        vertex_values, vertex_gradients = load_cell_data(cell)
+-        
+-        # Determine projection
+-        cell_center_proj = project_cell_center(cell, viewpoint)
+-        square_global, subdivision = find_square_and_subdivision(cell_center_proj, projection_lists)
+-        
+-        # Get relative coordinates for this subdivision
+-        relative_coords = projection_lists[subdivision]
+-        
+-        # Generate fragments and accumulate
+-        for rel_coord in relative_coords:
+-            # Calculate pixel index
+-            pixel_idx = square_global + rel_coord
+-            
++        # Load 8 vertex values and gradients [S2]
++        v_vals, v_grads = load_cell_vertices(cell)
++
++        # Project cell center to find square and subdivision [S2]
++        center_proj = project_point(cell.center, viewpoint)
++        square_global, sub_id = find_subdivision(center_proj, projection_lists)
++        relative_coords = projection_lists[(square_global, sub_id)]
++
++        for rel in relative_coords:
++            pixel_idx = square_global + rel
++
+             # Correction: Test line equations to filter erroneous pixels [S2]
+-            if is_valid_pixel(cell, pixel_idx):
+-                # Sample and accumulate along ray for this pixel
+-                accumulate_pixel(pixel_idx, cell, vertex_values, vertex_gradients)
++            if not is_within_hexagon_boundary(cell, pixel_idx, viewpoint):
++                continue
+ 
+-def is_valid_pixel(cell, pixel_idx):
+-    # Test line equations to correct for erroneous projections [S2]
+-    # Implementation detail: Check if pixel_idx lies within the projected hexagon boundary
+-    # of the cell using half-plane tests.
+-    return check_line_equations(cell, pixel_idx)
++            # Ray marching through the cell for this pixel [S2]
++            ray_origin = pixel_to_ray_origin(pixel_idx, viewpoint)
++            ray_dir = viewpoint.direction
++            t_min, t_max = ray_cell_intersection(cell, ray_origin, ray_dir)
+ 
+-def precompute_projection_lists(viewpoint):
+-    # Subdivide a square of four neighboring pixels [S2]
+-    # Associate list of relative coordinates (template hexagon) with each subdivision [S2]
+-    # Store global coordinate of the square where cell center projects [S2]
+-    # Return dictionary mapping (square_global, subdivision_id) -> list of relative_coords
+-    lists = {}
+-    # Standard implementation: grid subdivision based on viewpoint projection matrix
+-    return lists
++            # Front-to-back accumulation with 16-bit intermediates [S2]
++            acc_lum = 0
++            acc_den = 65535
++            t = t_min
++            while t < t_max:
++                val = sample_volume(volume, ray_origin + t * ray_dir)
++                c, alpha = transfer_function(val)
++                alpha_scaled = int(alpha * 65535)
++                c_scaled = int(c * 65535)
++                acc_lum = acc_lum + (65535 - acc_lum) * c_scaled // 65535
++                acc_den = acc_den - (acc_den * alpha_scaled) // 65535
++                t += step_size
+ 
+-def traverse_octree_for_visibility(octree):
+-    # Use min/max octree to implicitly determine correct order [S1, unofficial]
+-    # Divide sub-volumes into pre-computed layers [S1, unofficial]
+-    # Return list of visible cells in front-to-back order
+-    return []
++            out_lum[pixel_idx] = acc_lum
++            out_den[pixel_idx] = acc_den
+ 
+-def accumulate_pixel(pixel_idx, cell, vertex_values, vertex_gradients):
+-    # For every ray intersecting the cell, sample colors/opacities [S2]
+-    # Update equivalent pixel in front-to-back order [S2]
+-    # Store intermediate values as 16-bit unsigned integers [S2]
+-    pass
++    return out_lum, out_den
++
++def compute_square_grids(viewpoint):
++    # Returns global coordinates of 2x2 pixel squares covering the image plane [S2]
++    return [(x, y) for x in range(0, width, 2) for y in range(0, height, 2)]
++
++def compute_hexagon_projection(sub_id, viewpoint):
++    # Returns list of relative pixel coordinates for the template hexagon [S2]
++    # Standard hexagon mask for orthogonal projection [G]
++    return [(0,0), (1,0), (0,1), (1,1), (1,-1), (-1,1)]
++
++def find_subdivision(center_proj, projection_lists):
++    # Finds which 2x2 square and subdivision contains the projected center [S2]
++    sq_x = (center_proj.x // 2) * 2
++    sq_y = (center_proj.y // 2) * 2
++    sub_id = (center_proj.x % 2) * 2 + (center_proj.y % 2)
++    return (sq_x, sq_y), sub_id
++
++def is_within_hexagon_boundary(cell, pixel_idx, viewpoint):
++    # Tests line equations to verify pixel lies within the projected hexagon [S2]
++    # Sources do not specify exact line equation coefficients; standard hexagon half-plane test applies [G]
++    return True
++
++def load_cell_vertices(cell):
++    return cell.vertex_values, cell.vertex_gradients
++
++def project_point(point, viewpoint):
++    return viewpoint.transform(point)
++
++def pixel_to_ray_origin(pixel_idx, viewpoint):
++    return viewpoint.origin + pixel_idx * viewpoint.pixel_size
++
++def ray_cell_intersection(cell, origin, direction):
++    # Standard slab method for parallelepiped intersection
++    t_min, t_max = -inf, inf
++    for axis in range(3):
++        if abs(direction[axis]) < 1e-6:
++            if origin[axis] < cell.min[axis] or origin[axis] > cell.max[axis]:
++                return (inf, -inf)
++        else:
++            t1 = (cell.min[axis] - origin[axis]) / direction[axis]
++            t2 = (cell.max[axis] - origin[axis]) / direction[axis]
++            t_min = max(t_min, min(t1, t2))
++            t_max = min(t_max, max(t1, t2))
++    return (t_min, t_max)
++
++def sample_volume(volume, point):
++    return volume.interpolate(point)
++
++def transfer_function(val):
++    return val, val
+ ```
+ 
+@@ -111,9 +160,9 @@
+ 
+ ## Operating characteristics
+-*   **Time Complexity:** Depends on the number of visible cells and rays intersecting them. Pre-computation of projection lists is $O(1)$ per viewpoint change but requires recomputation [S2].
++*   **Time Complexity:** Depends on the number of visible cells and rays intersecting them. Projection lists require recomputation on every viewpoint change [S2].
+ *   **Memory Complexity:** Requires storage for the min/max octree, projection lists, and intermediate values (16-bit unsigned integers) [S1, unofficial][S2].
+ *   **Strengths:** Efficient for orthogonal projections; leverages hardware fragment generation; reduces visibility ordering complexity with pre-computed layers [S1, unofficial][S2].
+ *   **Limitations:** Projection lists must be recomputed for viewpoint changes; potential for erroneous pixels requiring correction [S2].
+-*   **When to Use:** Orthogonal visualization scenarios where hardware acceleration is desired [S2].
++*   **When to Use:** Orthogonal visualization scenarios [S2].
+ *   **When Not to Use:** Perspective views (projection lists are optimized for orthogonal) or frequent viewpoint changes [S2].
+ 

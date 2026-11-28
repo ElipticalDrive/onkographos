@@ -1,0 +1,190 @@
+# yt Volume Rendering Pipeline
+
+Also called: Direct Ray Casting Volume Rendering, Radiative Transfer Rendering, Volume Rendering in yt, yt Volume Rendering
+
+## Overview
+
+The yt Volume Rendering Pipeline is a software-based method that generates 3D visualizations of simulation data by evaluating radiative transfer equations through a volume using user-defined transfer functions for each ray [S1, S2]. It solves the problem of visualizing complex, multi-scale structures (such as cosmological gas distributions) by accommodating both opaque and transparent structures without requiring specialized hardware [S1, S2]. Unlike standard yt Slices & Projections, which project data onto 2D planes, this method integrates emission and absorption along ray paths, allowing for appropriate handling of depth and transparency [S1].
+
+## How it works
+
+### Inputs and Outputs
+
+**Inputs:**
+*   A dataset object (e.g., `yt.Dataset`) containing grid-based or particle-based simulation data [S1].
+*   A `Scene` object containing a `Camera`, a `Lens`, and one or more `RenderSource` objects (specifically `VolumeSource`) [S1].
+*   Transfer functions mapping field values to color and opacity [S1].
+
+**Outputs:**
+*   A rendered image (typically saved as a file or displayed inline) [S1].
+*   The `Scene` object containing the rendered image data [S1].
+
+### Data Structures
+
+**TransferFunction:**
+A 2D array structure where:
+*   The x-dimension represents field values (e.g., density) [S1].
+*   The y-dimension consists of 4 channels: Red, Green, Blue, and Alpha (opacity) [S1].
+*   Initial values for the y-dimension are all zeros, meaning rays traversing the source will not appear unless features are added [S1].
+
+**Tree Structure:**
+*   If volume elements are grids, the `VolumeSource` uses an `AMRKDTree` object to decompose volume elements into a tree structure for back-to-front rendering of fixed-resolution blocks [S1].
+
+**Bricks:**
+*   The domain is partitioned into non-overlapping, fully domain-tiling "bricks" [S1].
+*   Each brick contains the finest available data at any location [S1].
+
+### Parameters
+
+*   **lens_type**: Specifies the projection method. Supported values include `'perspective'`, `'plane_parallel'`, `'fisheye'`, `'spherical'`, and `'stereo'` variants [S1]. Default is `'plane_parallel'` [S1].
+*   **sigma_clip**: A parameter for the `save()` method to improve image contrast by flooring especially bright pixels. Typical values are 4.0 and 6.0 [S1, S2].
+*   **samples_per_cell**: Number of times every cell a ray intersects is sampled. Default is 5, adjustable by parameter [S1].
+*   **grey_opacity**: Boolean flag for opacity model.
+    *   `True`: All colors are opaque to each other (e.g., blue blocks red) [S1].
+    *   `False` (Default): Each channel is opaque only to itself (e.g., red persists if blue is encountered) [S1].
+*   **use_ghost_zones**: Boolean flag. If `True`, generates vertex-centered data for all grids. Important for low-resolution datasets to avoid artifacts; may cause substantial slowdown for high-resolution data with marginal visual improvement [S1].
+
+### Steps
+
+1.  **Scene Construction**: Create an empty `Scene` object [S1].
+2.  **Source Creation**: Create a `VolumeSource` object. This decomposes volume elements into a tree structure (using `AMRKDTree` if grids are used) [S1]. By default, a transfer function is created based on the extrema of the field [S1].
+3.  **Camera Setup**: Create a `Camera` and add it to the scene. A `Lens` is created by default (e.g., plane-parallel) [S1].
+4.  **Data Preparation**:
+    *   Partition all chunks into non-overlapping, fully domain-tiling "bricks" containing the finest available data [S1].
+    *   Generate vertex-centered data for all grids in the volume rendered domain if `use_ghost_zones` is enabled [S1].
+5.  **Ray Plane Initialization**: Construct a plane of rays parallel to the image plane. Initial pixel values are set to zero. The rays are located at the back of the region to be rendered [S1].
+6.  **Brick Ordering**: Order the bricks from front-to-back relative to the camera [S1].
+7.  **Ray Casting Loop**: For every brick in the ordered list:
+    *   Identify which rays intersect the brick [S1].
+    *   Cast these rays through the brick [S1].
+    *   For each intersection, sample every cell 5 times (default) [S1].
+    *   Trilinearly interpolate data values from the vertex-centered data at each sampling point [S1].
+8.  **Transfer Function Evaluation**: Evaluate each transfer function at each sample point to obtain emission ($j$) and absorption ($\alpha$) values for each color channel [S1].
+    *   Mapping: $f(v) \rightarrow (r,g,b,a)$, where $v$ is the field variable value [S1].
+9.  **Integration**: Update the pixel value using rectangular integration over the path length $\Delta s$ between samples:
+    $$v^{n+1}_{i} = j_{i}\Delta s + (1 - \alpha_{i}\Delta s )v^{n}_{i}$$
+    Where:
+    *   $n$ and $n+1$ represent the pixel state before and after passing through a sample.
+    *   $i$ is the color channel (red, green, blue).
+    *   $\Delta s$ is the path length between samples [S1].
+10. **Early Termination**: Determine if any further integration will change the sample value significantly. If not, terminate integration for that ray. This reduces integration time when rendering front-to-back [S1].
+11. **Output**: Return the image and scene object. Optionally save to disk using `save()`, applying `sigma_clip` if specified [S1].
+
+### Pseudocode
+
+> **Unverified code.** The code below did not pass a test run against a reference implementation, or no test fits it, so it may contain errors.
+
+```python
+def yt_volume_render_pipeline(scene, camera, lens, volume_source, transfer_function):
+    """
+    Executes the volume rendering pipeline for a single VolumeSource.
+    """
+    # 1. Prepare Data
+    # Partition chunks into non-overlapping bricks containing finest data
+    bricks = partition_into_bricks(volume_source.data_chunks)
+    
+    # Generate vertex-centered data if ghost zones are used
+    if volume_source.use_ghost_zones:
+        vertex_data = generate_vertex_centered_data(volume_source.grids)
+    else:
+        vertex_data = volume_source.grids # Use cell-centered directly or handle interpolation internally
+
+    # 2. Initialize Ray Plane
+    # Create plane of rays parallel to image plane
+    # Initial pixel values set to zero
+    # Rays located at the back of the region
+    ray_plane = initialize_ray_plane(camera, lens, volume_source.bounds)
+    
+    # 3. Order Bricks
+    # Order bricks from front-to-back relative to camera
+    ordered_bricks = order_bricks_front_to_back(bricks, camera.position, camera.normal_vector)
+    
+    # 4. Cast Rays
+    for brick in ordered_bricks:
+        # Identify rays intersecting this brick
+        intersecting_rays = find_intersecting_rays(ray_plane, brick.bounds)
+        
+        for ray in intersecting_rays:
+            # Initialize ray state within the brick
+            current_pixel_value = ray_plane.get_pixel_value(ray.id) # Initially 0
+            
+            # Sample cells along the ray path through the brick
+            # Default 5 samples per cell intersection
+            num_samples = volume_source.samples_per_cell # Default 5
+            
+            for sample_idx in range(num_samples):
+                # Determine sample position within the cell
+                sample_pos = interpolate_sample_position(ray, sample_idx)
+                
+                # Trilinearly interpolate data value from vertex-centered data
+                field_value = trilinear_interpolate(vertex_data, sample_pos)
+                
+                # Evaluate transfer function
+                # f(v) -> (r, g, b, a)
+                color_rgba = transfer_function.evaluate(field_value)
+                r, g, b, alpha = color_rgba
+                
+                # Calculate emission and absorption for each channel
+                # j is emission, alpha is absorption coefficient
+                # Note: In standard volume rendering, alpha is often derived from opacity
+                # Here, the formula uses alpha directly as absorption coefficient
+                j_r = r
+                j_g = g
+                j_b = b
+                alpha_r = alpha
+                alpha_g = alpha
+                alpha_b = alpha
+                
+                # Path length between samples
+                delta_s = ray.step_size
+                
+                # Rectangular Integration Update
+                # v^{n+1}_i = j_i * delta_s + (1 - alpha_i * delta_s) * v^n_i
+                
+                # Update Red Channel
+                new_r = j_r * delta_s + (1 - alpha_r * delta_s) * current_pixel_value.r
+                # Update Green Channel
+                new_g = j_g * delta_s + (1 - alpha_g * delta_s) * current_pixel_value.g
+                # Update Blue Channel
+                new_b = j_b * delta_s + (1 - alpha_b * delta_s) * current_pixel_value.b
+                
+                # Check for early termination
+                # If change is negligible, break
+                if abs(new_r - current_pixel_value.r) < epsilon and \
+                   abs(new_g - current_pixel_value.g) < epsilon and \
+                   abs(new_b - current_pixel_value.b) < epsilon:
+                    break
+                
+                current_pixel_value.r = new_r
+                current_pixel_value.g = new_g
+                current_pixel_value.b = new_b
+            
+            # Store final pixel value
+            ray_plane.set_pixel_value(ray.id, current_pixel_value)
+            
+    return ray_plane.image
+```
+
+### Edge Cases and Pitfalls
+
+*   **Zero Opacity**: If the y-dimension (opacity/color) of a `TransferFunction` starts with all zeros, rays traversing the `VolumeSource` will not appear in the final image [S1].
+*   **Resolution Artifacts**: For low-resolution datasets, using interpolated vertex-centered data (`use_ghost_zones=True`) is important to avoid artifacts. For high-resolution data, this setting may cause a substantial slowdown for marginal visual improvement [S1].
+*   **High Emissivity Scaling**: If the image appears too dark due to high-emissivity points scaling the rest of the image, use `sigma_clip` to remove values more than N standard deviations brighter than the mean. Typical N is 4 to 6 [S1, S2].
+*   **Grey Opacity Mode**: In `grey_opacity=True` mode, colors are mutually opaque (e.g., blue blocks red). In `grey_opacity=False` (default), channels are independent (e.g., red persists if blue is encountered) [S1].
+
+## Operating characteristics
+
+*   **Time Complexity**: The method involves casting rays through a volume, sampling cells, and integrating along the path. Complexity depends on the number of rays, samples per cell, and the depth of the volume traversal. Early termination helps reduce time for opaque regions.
+*   **Memory Complexity**: Requires storing the dataset, the `AMRKDTree` structure, vertex-centered data (if enabled), and the ray plane image.
+*   **Performance**: Implemented in software, requiring no specialized hardware [S1]. Optimized versions using OpenGL and GPUs are being actively developed [S1]. Parallelism is supported via MPI and OpenMP [S1]. MPI parallelization decomposes the volume by splitting the `AMRKDTree` in a balanced way [S1].
+*   **Strengths**: Accommodates both opaque and transparent structures; user-defined transfer functions allow flexible visualization; software-based implementation ensures portability [S1, S2].
+*   **Limitations**: Software-based rendering can be slow for high-resolution data; `use_ghost_zones` can cause substantial slowdowns for high-resolution data; requires careful tuning of transfer functions and parameters like `sigma_clip` [S1].
+
+## Background
+
+The yt Volume Rendering Pipeline is implemented in the yt Project (version 4.4.0) for 3D visualization of simulation data, including cosmological simulations [S1]. It differs from standard yt Slices & Projections by evaluating radiative transfer equations through the volume [S1]. The method follows a straightforward approach of creating transfer functions governing emission and absorption as a function of one or more variables [S1].
+
+## Sources
+
+[S1] 3D Visualization and Volume Rendering, https://yt-project.org/doc/visualizing/volume_rendering.html, fetched 2026-10-28
+[S2] https://yt-project.org/docs/dev/visualizing/volume_rendering.html#volume-rendering-components, https://yt-project.org/docs/dev/visualizing/volume_rendering.html, fetched 2026-10-29

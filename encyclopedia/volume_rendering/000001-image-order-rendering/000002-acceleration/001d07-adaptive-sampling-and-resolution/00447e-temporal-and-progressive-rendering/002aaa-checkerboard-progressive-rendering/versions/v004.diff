@@ -1,0 +1,162 @@
+--- v003.md
++++ v004.md
+@@ -2,83 +2,103 @@
+ Also called: Checkerboard sampling
+ ## Overview
+-Checkerboard Progressive Rendering reduces per-frame computational cost by tracing only half the pixels in a checkerboard pattern each frame, then blending the new results with previous frames to maintain a complete image [S1, unofficial]. It sets itself apart from [Temporal Upsampling and Dithering](2872-temporal-upsampling-and-dithering.md) by using a spatial subsampling pattern rather than temporal accumulation of full-resolution buffers, and from [Multi-Resolution Rendering for Clouds](7260-multi-resolution-rendering-for-clouds.md) by operating on a uniform resolution grid with temporal stability rather than spatially varying resolution levels.
++Checkerboard Progressive Rendering reduces per-frame computational cost by tracing only half the pixels in a checkerboard pattern each frame, then blending the new results with previous frames to maintain a complete image [S1, unofficial]. It addresses the problem of interactive volume rendering where full-resolution ray tracing per frame is too expensive, trading per-frame noise for temporal stability [S1, unofficial].
+ ## How it works
+ **Inputs and Outputs:**
+-*   Input: Previous frame's accumulated color buffer $C_{prev}$, camera parameters, scene geometry.
+-*   Output: Current frame's color buffer $C_{curr}$.
++*   Input: Previous frame's blended color buffer $C_{prev}$, ray origin $\mathbf{o}$, ray direction $\mathbf{d}$, volume grid $V$.
++*   Output: Current frame's blended color buffer $C_{final}$.
+ 
+ **Data Structures:**
+-*   $C_{prev}$: A 2D array of color values (e.g., `float3` or `vec3`) with dimensions $W \times H$.
+-*   $C_{curr}$: A 2D array of color values with dimensions $W \times H$.
++*   $C_{prev}$: A 2D array of color vectors (e.g., `float3`) with dimensions $W \times H$.
++*   $V$: A 3D array of scalar density values with dimensions $D_x \times D_y \times D_z$.
+ 
+ **Steps:**
+-1.  **Determine Checkerboard Pattern:** For the current frame $f$, define a boolean mask $M(x, y)$ based on pixel coordinates $(x, y)$. If $f$ is even, $M(x, y) = 1$ if $(x + y) \pmod 2 == 0$, else $0$. If $f$ is odd, $M(x, y) = 1$ if $(x + y) \pmod 2 == 1$, else $0$.
+-2.  **Trace Active Pixels:** For each pixel $(x, y)$ where $M(x, y) == 1$, cast a ray through the volume and compute the color $C_{new}(x, y)$ using the volume rendering integral. For pixels where $M(x, y) == 0$, set $C_{new}(x, y) = C_{prev}(x, y)$.
+-3.  **Blend:** Compute the final color for the current frame by blending the new and previous values. A simple average is often used:
+-    $$ C_{final}(x, y) = \frac{C_{new}(x, y) + C_{prev}(x, y)}{2} $$
+-    Alternatively, a weighted blend can be applied if confidence metrics are available, but the basic method assumes equal weight [S1, unofficial].
+-4.  **Update Buffer:** Store $C_{final}(x, y)$ into $C_{prev}$ for the next frame.
++1.  Initialize an empty buffer $C_{curr}$ of size $W \times H$.
++2.  For each pixel $(x, y)$, determine if it is active in the current frame $f$ using a checkerboard mask: $M(x, y, f) = ((x + y + f) \bmod 2 == 0)$.
++3.  If $M(x, y, f)$ is true, trace a ray through the volume to compute $C_{new}(x, y)$. If false, copy the previous buffer: $C_{curr}(x, y) = C_{prev}(x, y)$.
++4.  Blend $C_{curr}$ and $C_{prev}$ to produce $C_{final}$.
++5.  Return $C_{final}$ as the output and the new $C_{prev}$ for the next frame.
++
++**Formulas:**
++*   Checkerboard activation: $M(x, y, f) = \begin{cases} 1 & \text{if } (x + y + f) \bmod 2 = 0 \\ 0 & \text{otherwise} \end{cases}$
++*   Volume rendering integral (discrete slab march): $C = \sum_{i=0}^{N-1} T_i \cdot (1 - e^{-\sigma_i \Delta t}) \cdot c_i$, where $T_i = e^{-\sum_{j=0}^{i-1} \sigma_j \Delta t}$ is the accumulated transmittance, $\sigma_i$ is the density at step $i$, $\Delta t$ is the step size, and $c_i$ is the emitted color [G].
++*   Temporal blend: $C_{final}(x, y) = \alpha \cdot C_{curr}(x, y) + (1 - \alpha) \cdot C_{prev}(x, y)$, where $\alpha$ is the blend weight.
++
++**Parameters:**
++*   Frame index $f$: Integer, increments by 1 each frame.
++*   Blend weight $\alpha$: Not given in the sources. [G] Standard implementations use $\alpha = 0.5$ for simple averaging.
++*   Step size $\Delta t$: Not given in the sources. [G] Typically set to the grid cell size or a fraction thereof.
++
++**Edge Cases and Pitfalls:**
++*   **Zero Direction Components:** Division by zero occurs when computing inverse direction for slab stepping. Handled by clamping or using a large sentinel value [G].
++*   **Boundary Crossing:** Rays exiting the volume grid must be clamped to $[0, D_{max}]$ to prevent out-of-bounds memory access.
++*   **Motion Artifacts:** Rapid camera or object movement breaks temporal coherence, causing ghosting. The method assumes minimal motion between frames [S1, unofficial].
++*   **Convergence:** Full resolution is achieved after two frames. The first frame after a scene change or reset will show checkerboard artifacts until blending stabilizes.
+ 
+ **Pseudocode:**
+ ```python
+-def checkerboard_progressive_render(frame_index, width, height, previous_buffer, scene):
+-    # Initialize current buffer with previous values
+-    current_buffer = copy(previous_buffer)
+-    
+-    # Determine parity of the frame
+-    is_even_frame = (frame_index % 2 == 0)
+-    
++import math
++
++def checkerboard_progressive_render(frame_index, width, height, prev_buffer, grid, ray_origin, ray_dir):
++    curr_buffer = [[None] * width for _ in range(height)]
+     for y in range(height):
+         for x in range(width):
+-            # Determine if this pixel is active in the checkerboard pattern
+-            if is_even_frame:
+-                is_active = ((x + y) % 2 == 0)
++            is_active = ((x + y + frame_index) % 2 == 0)
++            if is_active:
++                color = trace_volume(ray_origin, ray_dir, grid)
++                curr_buffer[y][x] = color
+             else:
+-                is_active = ((x + y) % 2 == 1)
+-            
+-            if is_active:
+-                # Trace ray for this pixel
+-                ray = create_ray(x, y, camera_params)
+-                color = trace_volume(ray, scene)
+-                current_buffer[y][x] = color
+-            else:
+-                # Keep previous value
+-                current_buffer[y][x] = previous_buffer[y][x]
++                curr_buffer[y][x] = prev_buffer[y][x]
+     
+-    # Blend new and previous buffers
+-    # Note: In some implementations, the blend might be done incrementally
+-    # or the "previous buffer" might be the result of the previous blend.
+-    # Based on [S1, unofficial], it implies blending the newly traced pixels
+-    # with the previous frame's result.
+-    
+-    blended_buffer = empty_buffer(width, height)
++    alpha = 0.5  # [G] Standard simple averaging
++    final_buffer = [[None] * width for _ in range(height)]
+     for y in range(height):
+         for x in range(width):
+-            blended_buffer[y][x] = (current_buffer[y][x] + previous_buffer[y][x]) / 2.0
++            final_buffer[y][x] = alpha * curr_buffer[y][x] + (1 - alpha) * prev_buffer[y][x]
++    return final_buffer
++
++def trace_volume(origin, direction, grid, grid_extent=10.0, step_size=0.5):
++    inv_dir = [1.0 / d if d != 0.0 else float('inf') for d in direction]
++    t_min = 0.0
++    t_max = grid_extent
++    t = t_min
++    color = [0.0, 0.0, 0.0]
++    transmittance = 1.0
++    
++    while t < t_max:
++        gx = int((origin[0] + t * direction[0]) / step_size)
++        gy = int((origin[1] + t * direction[1]) / step_size)
++        gz = int((origin[2] + t * direction[2]) / step_size)
++        
++        if 0 <= gx < grid_extent and 0 <= gy < grid_extent and 0 <= gz < grid_extent:
++            density = grid[gz][gy][gx]
++        else:
++            density = 0.0
+             
+-    return blended_buffer
++        absorption = density * step_size
++        color[0] += transmittance * (1.0 - math.exp(-absorption))
++        color[1] += transmittance * (1.0 - math.exp(-absorption))
++        color[2] += transmittance * (1.0 - math.exp(-absorption))
++        transmittance *= math.exp(-absorption)
++        
++        if transmittance < 1e-4:
++            break
++        t += step_size
++    return color
+ ```
++## Subtopics
+ 
+-**Parameters:**
+-*   Frame index: Integer, increments per frame.
+-*   Blend factor: Typically 0.5 for simple averaging [S1, unofficial].
++### [Progressive Ray Tracing](9723-progressive-ray-tracing.md)
++Computes only a subset of rays during interaction and progressively fills remaining pixels when interaction stops. Chose when interactive latency is critical and full refinement can occur offline; differs from checkerboard rendering by using spatial subsampling with interpolation rather than temporal blending of half-pixel traces.
+ 
+-**Edge Cases:**
+-*   **Motion:** If the camera or objects move significantly between frames, simple blending causes ghosting. This method assumes static or slowly moving scenes unless motion vectors are used to align the previous buffer (not detailed in [S1, unofficial]).
+-*   **Convergence:** The image converges to the full-resolution result over two frames. Artifacts may be visible during the first frame after a scene change.
+-
+-## Subtopics
+ ## Operating characteristics
+-**Time Complexity:** $O(W \cdot H)$ per frame, but with a constant factor of 0.5 compared to full rendering, as only half the pixels are traced.
+-**Memory Complexity:** $O(W \cdot H)$ to store the previous frame's buffer.
+-**Performance:** Reduces per-frame compute by 50% [S1, unofficial].
+-**Strengths:** Simple to implement, reduces latency for interactive applications by providing a complete image every frame (albeit with noise/ghosting).
+-**Limitations:** Ghosting artifacts with motion, requires two frames to converge to the full-resolution result.
++**Time Complexity:** $O(W \cdot H)$ per frame, with a constant factor of 0.5 compared to full rendering, as only half the pixels are traced each frame [S1, unofficial].
++**Memory Complexity:** $O(W \cdot H)$ to store the previous frame's buffer and the current frame's buffer.
++**Performance:** Reduces per-frame compute by tracing only half the pixels each frame while blending results over time [S1, unofficial].
++**Strengths:** Provides a complete image every frame, reducing latency for interactive applications.
++**Limitations:** Ghosting artifacts with motion; requires two frames to converge to the full-resolution result.
+ **When to use:** Interactive volume rendering where frame rate is critical and motion is minimal.
+ **When not to use:** High-motion scenes or when high fidelity is required every frame.
+-
+ ## Background
+-Checkerboard Progressive Rendering is a technique used in real-time volume rendering to maintain interactive frame rates. It is described in the context of a voxel raytracer implementation [S1, unofficial]. The method leverages the temporal coherence of images to reduce the computational load per frame.
+-
++Checkerboard Progressive Rendering is a technique used in real-time volume rendering to maintain interactive frame rates by deviating from fixed uniform sampling [S1, unofficial]. It was implemented in a voxel raytracer to reduce per-frame compute by tracing only half the pixels each frame while blending results over time [S1, unofficial].
+ ## Sources
+ [S1] NiekMSoftware/bad-apple-voxel-raytracer, https://github.com/NiekMSoftware/bad-apple-voxel-raytracer, fetched 2026-10-24 (unofficial)

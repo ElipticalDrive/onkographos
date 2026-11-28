@@ -1,0 +1,146 @@
+# Row-Packed Voxel Storage
+
+Also called: in-memory compressed box representation, row packed format
+
+## Overview
+Row-Packed Voxel Storage is a memory layout for voxel chunks that reduces memory overhead while maintaining constant-time row access by storing rows as either allocated (with an offset to uncompressed cell data) or unallocated (represented by a single material byte) [S1, unofficial]. It solves the problem of high memory consumption in dense voxel grids, particularly for large terrains with low vertical variation, by compressing uniform rows into a global lookup table rather than storing explicit data for every cell [S1, unofficial]. Unlike its sibling [Palette Compression with Reference Counting and Reuse](14211-palette-compression-with-reference-counting-and-reuse.md), which focuses on material index reuse, this method focuses on spatial row-level redundancy within a chunk.
+
+## How it works
+**Inputs and Outputs:**
+- Input: A voxel chunk of size $N \times N \times N$ (typically $32^3$, but applicable to $16^3$ or $4^3$) [S1, unofficial].
+- Output: A compact memory representation allowing $O(1)$ read access to any row and deferred allocation for writes [S1, unofficial].
+
+**Data Structures:**
+1.  **Row Header Array:** An array of $N^2$ entries, one per row (indexed by $y \cdot N + z$). Each entry is 2 bytes (16 bits) [S1, unofficial].
+    -   Bit 15 (MSB): `allocated` flag.
+    -   Bits 0–14: `mask`.
+    -   If `allocated` is 0: `mask` holds the material value. All cells in the row are this material with default occupancy (1 for solid, 0 for air) [S1, unofficial].
+    -   If `allocated` is 1: `mask` holds an offset into the `Cell Data` array [S1, unofficial].
+2.  **Cell Data:** A linear, contiguous array storing uncompressed voxel data for all allocated rows. Rows are stored sequentially [S1, unofficial].
+3.  **Global Lookup Table (`gCellRows`):** A read-only array containing pre-filled voxel arrays for every possible material up to the maximum chunk size. Used to serve unallocated rows without per-chunk allocation [S1, unofficial].
+
+**Numbered Steps:**
+
+1.  **Read Row:**
+    -   Calculate row index: $idx = y \cdot N + z$.
+    -   Retrieve the 2-byte row header $H$ from the Row Header Array at $idx$.
+    -   If $H$'s allocated bit is 0: Return a pointer to the pre-filled array in `gCellRows` indexed by $H$'s mask value [S1, unofficial].
+    -   If $H$'s allocated bit is 1: Return a pointer to `Cell Data` at offset $(H$'s mask $\cdot N)$ [S1, unofficial].
+
+2.  **Write Row (Stage 1 - Marking):**
+    -   Identify rows that will be modified.
+    -   Analyze the content to be written. If the new content matches the "default" pattern for a single material (all cells same material, default occupancy), mark the row as unallocated (set allocated bit to 0, set mask to material value) [S1, unofficial].
+    -   If the content varies, mark the row as allocated.
+
+3.  **Write Row (Stage 2 - Allocation and Write):**
+    -   Reallocate the `Cell Data` array if necessary to accommodate newly allocated rows. Ensure sufficient space for the new data [S1, unofficial].
+    -   Update the Row Header for allocated rows to point to their new offsets in `Cell Data`.
+    -   Perform the actual writes of new cell data into the `Cell Data` array [S1, unofficial].
+
+**Pseudocode:**
+> **Unverified code.** The code below did not pass a test run against a reference implementation, or no test fits it, so it may contain errors.
+
+```python
+# Constants
+kRowTagAllocated = 0x8000  # Bit 15 set
+kRowTagMask = 0x7FFF       # Bits 0-14
+
+# Global read-only table
+# gCellRows[material_id] returns a pointer to a pre-filled array of size N*N
+# representing a row of that material with default occupancy.
+
+def read_row(rows, rowdata, size, y, z):
+    """
+    Read a row from the chunk.
+    rows: list of uint16_t, length size*size
+    rowdata: list of bytes, contiguous cell data for allocated rows
+    size: int, dimension N (e.g., 32)
+    y, z: int, coordinates of the row
+    """
+    idx = y * size + z
+    header = rows[idx]
+    
+    if header & kRowTagAllocated:
+        # Allocated row: offset is in the mask
+        offset = header & kRowTagMask
+        # Each row has 'size' cells. Assuming 1 byte per cell for simplicity
+        # in the offset calculation as per source logic: offset * size
+        # Note: Source implies offset is in units of rows, so multiply by size
+        # to get byte offset if rowdata is byte array.
+        return rowdata[offset * size : offset * size + size]
+    else:
+        # Unallocated row: mask is material ID
+        material_id = header & kRowTagMask
+        return gCellRows[material_id]
+
+def write_row_stage1(rows, size, y, z, new_content):
+    """
+    Stage 1: Determine if row should be allocated or packed.
+    new_content: list of bytes, length size
+    Returns: (is_allocated, material_id_or_offset_placeholder)
+    """
+    # Check if new_content is uniform and matches default occupancy
+    # Default occupancy: 1 for solid, 0 for air. 
+    # Simplified check: all bytes equal?
+    if all(c == new_content[0] for c in new_content):
+        material_id = new_content[0]
+        return (False, material_id)
+    else:
+        return (True, None)
+
+def write_row_stage2(rows, rowdata, size, y, z, new_content, next_offset):
+    """
+    Stage 2: Allocate and write.
+    next_offset: current offset in rowdata (in units of rows)
+    """
+    idx = y * size + z
+    
+    # Check if it was already allocated
+    if rows[idx] & kRowTagAllocated:
+        # Already allocated, just update data
+        offset = rows[idx] & kRowTagMask
+        rowdata[offset * size : offset * size + size] = new_content
+    else:
+        # Was unallocated, now allocate
+        material_id = rows[idx] & kRowTagMask
+        # If content is still uniform, we could keep it packed, 
+        # but if we are here, we decided to allocate.
+        # Update header to allocated state with new offset
+        rows[idx] = kRowTagAllocated | next_offset
+        # Write data
+        rowdata[next_offset * size : next_offset * size + size] = new_content
+        return next_offset + 1
+    return next_offset
+
+# Pitfall Mitigation:
+# If frequent tiny writes cause excessive repacking, pessimistically 
+# unpack the entire chunk by allocating all rows at any point.
+def pessimistic_unpack(rows, size):
+    for i in range(size * size):
+        rows[i] = kRowTagAllocated | 0 # Mark all as allocated
+```
+
+**Parameters:**
+-   **Chunk Size:** $32^3$ is the primary example, though the method applies to $16^3$ or $4^3$ [S1, unofficial].
+-   **Row Header Size:** 2 bytes per row [S1, unofficial].
+
+**Edge Cases and Pitfalls:**
+-   **Precision/Overflow:** For $32^3$ chunks, there are 1024 rows. The offset into `Cell Data` may exceed 1 byte, necessitating the 2-byte header [S1, unofficial].
+-   **Frequent Tiny Writes:** Repeated small writes can cause excessive reallocation and repacking of the chunk. Mitigation: pessimistically unpack the entire chunk by allocating all rows at any point [S1, unofficial].
+-   **Boundary Conditions:** The global lookup table `gCellRows` must be pre-filled for all possible materials up to the maximum chunk size [S1, unofficial].
+
+## Operating characteristics
+-   **Time Complexity:** Read operations are $O(1)$ constant time [S1, unofficial]. Write operations are more complex, involving two stages and potential reallocation, making them slower than reads [S1, unofficial].
+-   **Memory Complexity:** Adds 2 bytes per row overhead. For a $32^3$ chunk (1024 rows), this is 2 KB [S1, unofficial].
+-   **Measured Performance:** On a level with 1 billion non-empty voxels, row-packed storage uses 488 MB (0.49 bytes per voxel), compared to 2973 MB (2.97 bytes per voxel) for unpacked storage [S1, unofficial].
+-   **Scaling:** Memory savings vary by content. In extreme cases (e.g., one-voxel-thick layer), it reduces a 64 KB chunk to 2 KB (32x reduction) [S1, unofficial].
+-   **Strengths:** Constant-time reads, significant memory reduction for uniform rows, minimal impact on read performance [S1, unofficial].
+-   **Limitations:** Slower and more complex writes, potential for excessive repacking with frequent tiny writes, 2-byte overhead per row [S1, unofficial].
+-   **When to Use:** Large terrains with low vertical variation, memory-constrained environments, read-heavy workloads [S1, unofficial].
+-   **When Not to Use:** Highly dynamic scenes with frequent tiny writes, scenes with high vertical variation where few rows are uniform [S1, unofficial].
+
+## Background
+Originating from Zeux's blog post on voxel terrain storage in 2017, this method was developed to address memory overhead in large voxel terrains where traditional chunk sizes imposed significant memory costs [S1, unofficial]. It builds on ideas from RLE packing, assuming long contiguous runs of the same voxel data occupy full rows [S1, unofficial]. It is used in voxel terrain rendering systems where memory efficiency is critical [S1, unofficial].
+
+## Sources
+[S1] Voxel terrain: storage, https://zeux.io/2017/03/27/voxel-terrain-storage/, fetched 2026-10-29 (unofficial)

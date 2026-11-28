@@ -1,0 +1,138 @@
+--- v005.md
++++ v006.md
+@@ -40,16 +40,13 @@
+         param.requires_grad = True
+ 
+-def compute_weighted_loss(preds, targets, weights):
++def adjust_lr(optimizer, epoch, base_lr, decay_rate):
++    for param_group in optimizer.param_groups:
++        param_group['lr'] = base_lr * (decay_rate ** epoch)
++
++def compute_loss(preds, targets, weights):
+     loss = 0.0
+     for key, weight in weights.items():
+-        loss += weight * mean_squared_error(preds[key], targets[key])
++        loss += weight * sum((p - t) ** 2 for p, t in zip(preds[key], targets[key])) / len(preds[key])
+     return loss
+-
+-def mean_squared_error(pred, target):
+-    return sum((p - t) ** 2 for p, t in zip(pred, target)) / len(pred)
+-
+-def adjust_learning_rate(optimizer, epoch, base_lr, decay_rate):
+-    for param_group in optimizer.param_groups:
+-        param_group['lr'] = base_lr * (decay_rate ** epoch)
+ 
+ def multi_stage_training(model, data_loader, config):
+@@ -57,39 +54,39 @@
+     freeze_model(model.lighting_joint_prediction_module)
+     freeze_model(model.joint_reprediction_module)
+-    optimizer_direct = Adam(model.direct_prediction_module.parameters(), lr=config.lr_direct)
++    optimizer = Adam(model.direct_prediction_module.parameters(), lr=config.lr_direct)
+     for epoch in range(config.pretrain_epochs):
+-        adjust_learning_rate(optimizer_direct, epoch, config.lr_direct, config.lr_decay)
++        adjust_lr(optimizer, epoch, config.lr_direct, config.lr_decay)
+         for data in data_loader:
+-            optimizer_direct.zero_grad()
++            optimizer.zero_grad()
+             outputs = model.direct_prediction_module(data)
+-            loss = compute_weighted_loss(outputs, data.targets, config.loss_weights_direct)
++            loss = compute_loss(outputs, data.targets, config.loss_weights_direct)
+             loss.backward()
+-            optimizer_direct.step()
++            optimizer.step()
+ 
+     # Step 2: Joint Train Direct and Lighting Modules
+     unfreeze_model(model.lighting_joint_prediction_module)
+-    optimizer_joint = Adam(list(model.direct_prediction_module.parameters()) + list(model.lighting_joint_prediction_module.parameters()), lr=config.lr_joint)
++    optimizer = Adam(list(model.direct_prediction_module.parameters()) + list(model.lighting_joint_prediction_module.parameters()), lr=config.lr_joint)
+     for epoch in range(config.joint_epochs):
+-        adjust_learning_rate(optimizer_joint, epoch, config.lr_joint, config.lr_decay)
++        adjust_lr(optimizer, epoch, config.lr_joint, config.lr_decay)
+         for data in data_loader:
+-            optimizer_joint.zero_grad()
++            optimizer.zero_grad()
+             direct_out = model.direct_prediction_module(data)
+             lighting_out = model.lighting_joint_prediction_module(direct_out, data)
+-            loss = compute_weighted_loss({'albedo': direct_out.albedo, 'normal': direct_out.normal, 'depth': direct_out.depth, 'light': lighting_out.light, 'visible': lighting_out.visible, 'reg': lighting_out.reg}, data.targets, config.loss_weights_joint)
++            loss = compute_loss({'albedo': direct_out.albedo, 'normal': direct_out.normal, 'depth': direct_out.depth, 'light': lighting_out.light, 'visible': lighting_out.visible, 'reg': lighting_out.reg}, data.targets, config.loss_weights_joint)
+             loss.backward()
+-            optimizer_joint.step()
++            optimizer.step()
+ 
+     # Step 3: Train Joint Re-prediction Module
+     freeze_model(model.direct_prediction_module)
+     freeze_model(model.lighting_joint_prediction_module)
+-    optimizer_repred = Adam(model.joint_reprediction_module.parameters(), lr=config.lr_repred)
++    optimizer = Adam(model.joint_reprediction_module.parameters(), lr=config.lr_repred)
+     for epoch in range(config.repred_epochs):
+-        adjust_learning_rate(optimizer_repred, epoch, config.lr_repred, config.lr_decay)
++        adjust_lr(optimizer, epoch, config.lr_repred, config.lr_decay)
+         for data in data_loader:
+-            optimizer_repred.zero_grad()
++            optimizer.zero_grad()
+             repred_out = model.joint_reprediction_module(data)
+-            loss = compute_weighted_loss(repred_out, data.targets, config.loss_weights_repred)
++            loss = compute_loss(repred_out, data.targets, config.loss_weights_repred)
+             loss.backward()
+-            optimizer_repred.step()
++            optimizer.step()
+ 
+     # Step 4: End-to-End Finetune
+@@ -97,26 +94,27 @@
+     unfreeze_model(model.lighting_joint_prediction_module)
+     unfreeze_model(model.joint_reprediction_module)
+-    optimizer_e2e = Adam(model.parameters(), lr=config.lr_e2e)
++    optimizer = Adam(model.parameters(), lr=config.lr_e2e)
+     for epoch in range(config.finetune_epochs):
+-        adjust_learning_rate(optimizer_e2e, epoch, config.lr_e2e, config.lr_decay)
++        adjust_lr(optimizer, epoch, config.lr_e2e, config.lr_decay)
+         for data in data_loader:
+-            optimizer_e2e.zero_grad()
++            optimizer.zero_grad()
+             direct_out = model.direct_prediction_module(data)
+             lighting_out = model.lighting_joint_prediction_module(direct_out, data)
+             repred_out = model.joint_reprediction_module(data)
+-            loss = compute_weighted_loss({'joint': lighting_out, 'intermediate': repred_out}, data.targets, config.loss_weights_e2e)
++            loss = compute_loss({'joint': lighting_out, 'intermediate': repred_out}, data.targets, config.loss_weights_e2e)
+             loss.backward()
+-            optimizer_e2e.step()
++            optimizer.step()
+ ```
+ 
+ ### Parameters
+-*   **Learning Rate Decay:** Exponential decay is applied across stages. For UV Volume variants, decay rates $\gamma$ are used [S2].
++*   **Learning Rate Decay:** Exponential decay is applied across stages [S1]. For UV Volume variants, decay rates $\gamma = 1 \times 10^{-1}$ are used [S2].
+ *   **Loss Weights:** $\lambda_A, \lambda_N, \lambda_D, \lambda_L, \lambda_{visible}, \lambda_{reg}, \lambda_{rerender}$ balance the multi-task loss [S1].
+ *   **Ray Sampling:** 64 points sampled along each camera ray between near and far bounds [S2].
+ *   **Optimizer:** Adam optimizer [S2].
++*   **Scene Bounds:** Estimated based on the SMPL model [S2].
++*   **Resolution:** Initialized visible surface volume and predicted VSG lighting resolution is $128^3$ [S1].
+ 
+ ### Edge Cases and Pitfalls
+ *   **Dependency Violation:** If the Direct Prediction Module is not pretrained, the Lighting Joint Prediction Module may receive unreasonable inputs, leading to poor convergence [S1].
+-*   **Freezing Timing:** Freezing modules too early may prevent necessary co-adaptation; freezing too late may lead to instability. The protocol specifies freezing after Step 2 and unfreezing in Step 4 [S1].
+ *   **UV Volume Warm-start:** In UV-based methods, UV volumes must be learned first to warm-start coarse geometry before optimizing the Neural Texture Stack (NTS) for high-frequency signals [S2].
+ 
+@@ -130,16 +128,14 @@
+ 
+ ### UV Volume Training Strategy
+-The UV Volume Training Strategy uses two optimization strategies for UV volumes and the Neural Texture Stack (NTS) branch. UV volumes are learned primarily in early stages to warm-start coarse geometry, while NTS is optimized later to fit high-frequency signals. The learning rate for UV volumes is calculated as $l_{uv} = 1 \times 10^{-3} \gamma^{epoch}$, where $\gamma = 1 \times 10^{-1}$. The learning rate for NTS is calculated as $l_{nts} = 5 \times 10^{-4} \gamma^{epoch}$, where $\gamma = 1 \times 10^{-1}$. Ray sampling uses 64 points along each camera ray between near and far bounds, with scene bounds estimated based on the SMPL model. The Adam optimizer is used. Training on 26-view videos of 100 frames at 960 × 540 resolution takes approximately 20 hours (200k iterations) on a single NVIDIA A100 GPU [S2].
++The UV Volume Training Strategy uses two optimization strategies for UV volumes and the Neural Texture Stack (NTS) branch [S2]. UV volumes are learned primarily in early stages to warm-start coarse geometry, while NTS is optimized later to fit high-frequency signals [S2]. The learning rate for UV volumes is calculated as $l_{\text{uv}} = 1 \times 10^{-3} \gamma^{\text{epoch}}$, where $\gamma = 1 \times 10^{-1}$ [S2]. The learning rate for NTS is calculated as $l_{\text{nts}} = 5 \times 10^{-4} \gamma^{\text{epoch}}$, where $\gamma = 1 \times 10^{-1}$ [S2]. Ray sampling uses 64 points along each camera ray between near and far bounds, with scene bounds estimated based on the SMPL model [S2]. The Adam optimizer is used [S2]. Training on 26-view videos of 100 frames at 960 × 540 resolution takes approximately 20 hours (200k iterations) on a single NVIDIA A100 GPU [S2].
+ 
+ ## Operating characteristics
+-*   **Time Complexity:** Multi-stage training increases total training time compared to single-stage methods due to sequential phases. For example, UV Volume training takes ~20 hours for 200k iterations [S2].
+-*   **Memory Complexity:** Depends on the representation (e.g., $128^3$ volume or UV grids). Pretraining stages may require less memory if only subsets of parameters are active.
+-*   **Strengths:** Stabilizes convergence for complex models with dependent components; allows for specialized optimization strategies for different parts of the network (e.g., geometry vs. appearance).
+-*   **Limitations:** Increased training time; requires careful tuning of stage transitions and learning rates; potential for suboptimal solutions if stages are not well-coordinated.
+-*   **When to Use:** When training complex inverse rendering models or neural fields with heterogeneous components (e.g., lighting, material, geometry) that conflict during joint optimization.
+-*   **When Not to Use:** For simple NeRFs where single-stage training converges reliably; when computational resources are extremely limited and training time is a critical constraint.
++*   **Time and Memory Complexity:** Not given in the sources.
++*   **Measured Performance:** Training on 26-view videos of 100 frames at 960 × 540 resolution takes approximately 20 hours (200k iterations) on a single NVIDIA A100 GPU [S2].
++*   **Strengths and Limitations:** Not given in the sources.
++*   **When to Use and When Not to Use:** Not given in the sources.
+ 
+ ## Background
+-The multi-stage training protocol originated in the context of inverse rendering and neural radiance field optimization, where models often comprise multiple interconnected modules (e.g., direct prediction, lighting estimation, re-prediction). The approach was formalized in works such as "Learning Indoor Inverse Rendering with 3D Spatially-Varying Lighting" [S1] and "UV Volumes for Real-time Rendering of Editable Free-view Human Performance" [S2]. It addresses the instability observed in end-to-end training of such complex systems by progressively introducing model complexity.
++The multi-stage training protocol originated in the context of inverse rendering and neural radiance field optimization, where models often comprise multiple interconnected modules (e.g., direct prediction, lighting estimation, re-prediction) [S1]. It addresses the instability observed in end-to-end training of such complex systems by progressively introducing model complexity [S1]. The approach was formalized in works such as "Learning Indoor Inverse Rendering with 3D Spatially-Varying Lighting" [S1] and "UV Volumes for Real-time Rendering of Editable Free-view Human Performance" [S2].
+ 
+ ## Sources

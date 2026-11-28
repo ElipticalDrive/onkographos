@@ -1,0 +1,136 @@
+# Voxel-Conditioned Continuous Normalizing Flow (VC-CNF)
+Also called: Neural ODE Latent Flow, VC-CNF
+
+## Overview
+VC-CNF transforms a base Gaussian latent distribution into a shape-specific latent code conditioned on a voxel grid representation by integrating a time-dependent neural Ordinary Differential Equation (ODE) from $t=0$ to $t=1$ [S1, unofficial][S2, unofficial]. It builds on [ODENetwork (Conditioned Neural ODE)](5241-odenetwork-conditioned-neural-ode.md) by explicitly framing latent code generation as a continuous flow process [S1, unofficial].
+
+## How it works
+**Inputs:**
+- Voxel grid tensor of shape `(batch_size, 1, 32, 32, 32)` [S1, unofficial].
+- Base latent vector $z_0$ at $t=0$, sampled from $\mathcal{N}(0, 1/\sqrt{\text{latent\_dim}})$ [S1, unofficial][S2, unofficial].
+- Integration time interval $[0, 1]$ [S1, unofficial].
+
+**Outputs:**
+- Final conditioned latent vector $z_1$ at $t=1$ of shape `(batch_size, latent_dim)` [S1, unofficial].
+
+**Data Structures:**
+- **VoxelEncoder**: Maps discrete voxel grid to continuous embedding. Architecture: `Conv3d(1->32, k=3, p=1) -> ReLU -> MaxPool3d(2) -> Conv3d(32->128, k=3, p=1) -> ReLU -> MaxPool3d(2) -> Conv3d(128->256, k=3, p=1) -> ReLU -> MaxPool3d(2) -> Conv3d(256->output_dim, k=4, s=1, p=0) -> Flatten` [S1, unofficial].
+- **ODEFunc**: MLP computing $\frac{dz}{dt}$. Input concatenates `[latent, voxel_latent, t]`. Hidden layers use ReLU. If layer index $i \pmod{\text{skip\_frequency}} == 1$, input is `[hidden, voxel_latent, t]`; else `[hidden]`. Output layer maps `hidden_dim` to `latent_dim` [S1, unofficial].
+
+**Parameters:**
+- `latent_dim`: Dimension of the latent vector. Default: 512 [S1, unofficial][S2, unofficial].
+- `hidden_dim`: Dimensionality of hidden layers in ODEFunc. Default: 512 [S1, unofficial][S2, unofficial].
+- `num_hidden_layers`: Number of hidden layers in ODE network. Default: 4 [S2, unofficial].
+- `skip_layers`: Indices of layers receiving skip connections with voxel embedding and time. Default: `[1, 3]` [S2, unofficial].
+- `voxel_embedding_dim`: Dimension of the voxel condition embedding. Default: 128 [S2, unofficial].
+- `skip_frequency`: Integer controlling skip connections in ODEFunc hidden layers. Default: 2 [S1, unofficial].
+- `integrated_time`: Tensor `[0.0, 1.0]` defining the integration interval for the ODE [S1, unofficial].
+
+**Steps:**
+1. Encode voxel grid to embedding $e_{\text{voxel}}$ via `VoxelEncoder` [S1, unofficial][S2, unofficial].
+2. Initialize base latent vector $z$ at $t=0$ as $z_0 \sim \mathcal{N}(0, 1/\sqrt{\text{latent\_dim}})$ [S1, unofficial][S2, unofficial].
+3. Define ODE function $\frac{dz}{dt} = f(z, t, e_{\text{voxel}})$ [S1, unofficial][S2, unofficial].
+4. Integrate from $t=0$ to $t=1$ using RK4 [S1, unofficial][S2, unofficial].
+5. Return final $z$ as conditioned latent code [S1, unofficial][S2, unofficial].
+
+**Formulas:**
+$$\frac{dz}{dt} = f(z, t, e_{\text{voxel}})$$
+$$z(1) = z(0) + \int_0^1 f(z(t), t, e_{\text{voxel}}) dt \approx \text{RK4}(z_0, e_{\text{voxel}}, [0, 1])$$
+
+**Pseudocode:**
+> **Unverified code.** The code below did not pass a test run against a reference implementation, or no test fits it, so it may contain errors.
+
+```python
+import torch
+import torch.nn as nn
+
+class VoxelEncoder(nn.Module):
+    def __init__(self, output_dim):
+        super().__init__()
+        self.encoder = nn.Sequential(
+            nn.Conv3d(1, 32, kernel_size=3, padding=1), nn.ReLU(), nn.MaxPool3d(2),
+            nn.Conv3d(32, 128, kernel_size=3, padding=1), nn.ReLU(), nn.MaxPool3d(2),
+            nn.Conv3d(128, 256, kernel_size=3, padding=1), nn.ReLU(), nn.MaxPool3d(2),
+            nn.Conv3d(256, output_dim, kernel_size=4, stride=1, padding=0), nn.Flatten()
+        )
+    def forward(self, x):
+        return self.encoder(x)
+
+class ODEFunc(nn.Module):
+    def __init__(self, latent_dim, hidden_dim, num_hidden_layers, skip_layers, voxel_embedding_dim, skip_frequency):
+        super().__init__()
+        self.latent_dim = latent_dim
+        self.hidden_dim = hidden_dim
+        self.num_hidden_layers = num_hidden_layers
+        self.skip_layers = set(skip_layers)
+        self.voxel_embedding_dim = voxel_embedding_dim
+        self.skip_frequency = skip_frequency
+        self.layers = nn.ModuleList()
+        for i in range(num_hidden_layers):
+            if i in self.skip_layers:
+                in_dim = hidden_dim + voxel_embedding_dim + 1
+            else:
+                in_dim = hidden_dim
+            self.layers.append(nn.Linear(in_dim, hidden_dim))
+            self.layers.append(nn.ReLU())
+        self.output_layer = nn.Linear(hidden_dim, latent_dim)
+
+    def forward(self, t, latent, voxel_latent):
+        t_exp = t.expand_as(latent)
+        x = torch.cat([latent, voxel_latent, t_exp], dim=-1)
+        for i, layer in enumerate(self.layers):
+            if i in self.skip_layers:
+                x = torch.cat([x, voxel_latent, t_exp], dim=-1)
+            x = layer(x)
+        return self.output_layer(x)
+
+class VC_CNF:
+    def __init__(self, latent_dim=512, hidden_dim=512, num_hidden_layers=4,
+                 skip_layers=[1, 3], voxel_embedding_dim=128, skip_frequency=2):
+        self.voxel_encoder = VoxelEncoder(output_dim=voxel_embedding_dim)
+        self.ode_func = ODEFunc(latent_dim, hidden_dim, num_hidden_layers,
+                                skip_layers, voxel_embedding_dim, skip_frequency)
+        self.integrated_time = torch.tensor([0.0, 1.0])
+
+    def forward(self, voxel_grid, z0):
+        voxel_embedding = self.voxel_encoder(voxel_grid)
+        def ode_func(t, latent):
+            return self.ode_func(t, latent, voxel_embedding)
+        
+        def rk4_step(func, t0, y0, dt):
+            k1 = func(t0, y0)
+            k2 = func(t0 + dt/2, y0 + dt/2 * k1)
+            k3 = func(t0 + dt/2, y0 + dt/2 * k2)
+            k4 = func(t0 + dt, y0 + dt * k3)
+            return y0 + (dt/6) * (k1 + 2*k2 + 2*k3 + k4)
+
+        t0, t1 = self.integrated_time[0].item(), self.integrated_time[1].item()
+        dt = t1 - t0
+        z1 = rk4_step(ode_func, t0, z0, dt)
+        return z1
+```
+
+**Edge Cases and Pitfalls:**
+- **Precision**: RK4 integration over $[0, 1]$ assumes the ODE is well-behaved; stiff ODEs may require adaptive step solvers [G].
+- **Boundaries**: Voxel grid size is fixed at $32 \times 32 \times 32$ in the encoder architecture; non-matching inputs will fail [S1, unofficial].
+- **Degenerate Input**: If `latent_dim` or `hidden_dim` is zero, linear layers will raise dimension errors [G].
+
+## Subtopics
+
+### [Conditional Normalizing Flow (Sylvester Flow)](18452-conditional-normalizing-flow-sylvester-flow.md)
+Conditional Normalizing Flows (CNFs) using Sylvester transformations map samples from a latent prior distribution to radiance and density values, conditioned on 5D location-direction pairs. This method serves as the invertible transformation layer within the VC-CNF framework, enabling the generation of probabilistic radiance fields with reliable uncertainty quantification. It distinguishes itself from standard MLP-based radiance fields by providing a structured, invertible mapping that allows for exact likelihood computation and depth uncertainty estimation, rather than deterministic point estimates.
+
+## Operating characteristics
+- **Time Complexity**: Proportional to the number of RK4 evaluation steps and the forward pass cost of the ODE network, which scales linearly with `num_hidden_layers` and `hidden_dim` [S1, unofficial][G].
+- **Memory Complexity**: Proportional to `latent_dim` and `hidden_dim` for storing the latent state and network weights during integration [G].
+- **Strengths**: Provides a smooth, differentiable path from prior to posterior latent codes conditioned on voxel grids [S1, unofficial].
+- **Limitations**: Requires solving an ODE, making it computationally more expensive than direct MLP mappings [G].
+- **When to Use**: When a continuous, invertible mapping from a prior to a conditioned latent space is required, and voxel conditions are available [S1, unofficial].
+- **When Not to Use**: When computational efficiency is critical and a direct deterministic mapping suffices [G].
+
+## Background
+VC-CNF is implemented in the `VC-SDFGen` repository by TurtleJayWang [S1, unofficial]. It is part of a pipeline for generating Signed Distance Functions (SDFs) conditioned on voxel grids, building on [ODENetwork (Conditioned Neural ODE)](5241-odenetwork-conditioned-neural-ode.md) [S1, unofficial]. The method leverages a neural ODE to compute latent code evolution over time, transforming a Gaussian base distribution into a shape-specific target distribution [S2, unofficial].
+
+## Sources
+[S1] TurtleJayWang/VC-SDFGen2, https://github.com/TurtleJayWang/VC-SDFGen2, fetched 2026-10-28 (unofficial)
+[S2] TurtleJayWang/VC-SDFGen, https://github.com/TurtleJayWang/VC-SDFGen, fetched 2026-10-28 (unofficial)

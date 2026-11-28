@@ -1,0 +1,269 @@
+--- v003.md
++++ v004.md
+@@ -1,14 +1,13 @@
+ # Depth Map to Absolute Camera Coordinates
+-
+ Also called: Depth Map Unprojection, depth2pc
+ 
+ ## Overview
+-Converts a 2D depth map, camera intrinsics, and camera pose into 3D points in world coordinates [S1, S2, S3, unofficial]. It solves the problem of backprojecting pixel-space depth measurements into a global 3D reference frame, enabling the construction of point clouds from single or multi-view depth estimates. It differs from [Point Cloud Generation and Refinement](8042-point-cloud-generation-and-refinement.md) by focusing strictly on the geometric reprojection step rather than feature fusion or refinement, and from [Fixed-size initialization from RGB-D backprojection](10155-fixed-size-initialization-from-rgb-d-backprojection.md) by handling arbitrary depth maps and explicit pose transformations rather than fixed-size buffers [S1, S2, S3, unofficial][S4].
++This method converts a 2D depth map, camera intrinsic parameters, and an optional camera pose (extrinsic parameters) into a 3D point cloud in absolute world coordinates [S1, S3, unofficial]. It solves the problem of backprojecting per-pixel depth measurements from image space into a global 3D reference frame [S2, unofficial]. It differs from sibling methods like [Point Cloud Generation and Refinement](8042-point-cloud-generation-and-refinement.md) by focusing strictly on the geometric reprojection step, whereas the sibling also includes feature estimation and semantic fusion [S4]. It differs from [Fixed-size initialization from RGB-D backprojection](10155-fixed-size-initialization-from-rgb-d-backprojection.md) by typically operating on variable-resolution depth maps without enforcing a fixed grid size during the initial unprojection [S3, unofficial].
+ 
+ ## How it works
+ **Inputs:**
+-- Depth map $D'$ of size $H \times W$ (or batch $B \times H \times W$), where $d_{i,j}$ is the depth at pixel $(i, j)$ [S3, unofficial].
+-- Camera intrinsics matrix $K$ (or focal lengths $f_x, f_y$ and principal point $c_x, c_y$) [S2, S3, unofficial].
+-- Camera pose (extrinsics) $T_{cam2world}$, comprising rotation $R_{cam2world}$ and translation $t_{cam2world}$ [S1, S3, unofficial]. If only relative coordinates are needed, this may be omitted [S1, unofficial].
++- Depth map $D'$ of size $H \times W$ (or batch $B \times H \times W$), where $d_{i,j}$ is the depth value at pixel $(i, j)$ [S3, unofficial].
++- Camera intrinsic matrix $K$ (or focal lengths $f_x, f_y$ and principal point $c_x, c_y$) [S2, S3, unofficial].
++- Camera extrinsic matrix $T_{cam2world}$ (rotation $R$ and translation $t$) [S1, S3, unofficial]. Optional; if absent, output is in camera space [S1, unofficial].
+ 
+ **Outputs:**
+@@ -16,149 +15,121 @@
+ 
+ **Data Structures:**
+-- Homogeneous coordinates: 4D vectors $[x, y, z, 1]^T$.
+-- Camera space points: 3D vectors $[x_{cam}, y_{cam}, z_{cam}]^T$.
+-- World space points: 3D vectors $[x_{world}, y_{world}, z_{world}]^T$.
++- Pixel coordinates: 2D grid $(i, j)$ where $i \in [0, H-1]$ and $j \in [0, W-1]$ [S3, unofficial].
++- Homogeneous coordinates: 4D vectors $[x, y, z, 1]^T$ [S3, unofficial].
+ 
+ **Steps:**
+ 
+-1. **Pixel Coordinate Generation**: Create a meshgrid of pixel coordinates $(i, j)$ for $i \in [0, H-1]$ and $j \in [0, W-1]$ [S2, S3, unofficial].
+-
+-2. **Normalization**: Normalize pixel coordinates to the range $[-1, 1]$ [S3, unofficial]:
++1. **Coordinate Normalization:**
++   Normalize pixel indices to the range $[-1, 1]$ [S3, unofficial]:
+    $$ x_{norm} = \frac{2j}{W-1} - 1 $$
+    $$ y_{norm} = \frac{2i}{H-1} - 1 $$
+-   *Note: Some implementations use inverse depth scaling directly on raw pixel coordinates offset by principal point [S2, unofficial].*
++   *Note:* Some implementations use a meshgrid from $0.5$ to $S-0.5$ to center coordinates on pixel centers before normalization [S2, unofficial].
+ 
+-3. **Camera Space Construction**: Form homogeneous camera space coordinates $p_{camera}$ [S3, unofficial]:
++2. **Camera Space Construction:**
++   Form homogeneous coordinates in camera space $p_{camera}$ [S3, unofficial]:
+    $$ p_{camera} = [x_{norm}, y_{norm}, d_{i,j}]^T $$
+-   *Alternative (S2):* Extract rotation `rot` and translation `trans` from extrinsics. Stack `x, y, 1` into `pts_2d`. Set z-component to `1.0 / (depth + 1e-8)` to handle inverse depth representations common in neural rendering [S2, unofficial]. Subtract principal point offsets: $x' = x - c_x$, $y' = y - c_y$. Divide by focal lengths: $x_{norm} = x' / f_x$, $y_{norm} = y' / f_y$ [S2, unofficial].
++   Alternatively, using inverse depth for numerical stability in some pipelines:
++   $$ z_{inv} = \frac{1}{d_{i,j} + \epsilon} $$
++   where $\epsilon$ is a small constant (e.g., $10^{-8}$) to avoid division by zero [S2, unofficial].
+ 
+-4. **Depth Scaling (Optional/Variant)**: If using a specific projection matrix formulation involving $f_1, f_2$ (e.g., for normalized device coordinate adjustments), scale depth values [S3, unofficial]:
++3. **Depth Scaling (Optional/Variant):**
++   If the depth map requires scaling based on the projection matrix elements $f_1, f_2$ (often corresponding to $f_x, f_y$ or specific calibration offsets), adjust the depth value $s_{d_{i,j}}$ [S3, unofficial]:
+    $$ s_{d_{i,j}} = \frac{f_1 d_{i,j} + f_2}{d_{i,j}} $$
+-   Adjusted camera coordinates: $p'_{camera} = [x_{norm}, y_{norm}, s_{d_{i,j}}]^T$ [S3, unofficial].
++   The adjusted camera space coordinate becomes $p'_{camera} = [x_{norm}, y_{norm}, s_{d_{i,j}}]^T$ [S3, unofficial].
++   *Note:* In standard pinhole models, this step is often implicit or handled by the intrinsic matrix inversion. If principal point offsets are used directly, subtract $c_x, c_y$ from $x, y$ and divide by $f_x, f_y$ [S2, unofficial].
+ 
+-5. **World Space Transformation**:
+-   - **Method A (Explicit Rotation/Translation) [S1, S2, unofficial]:**
+-     If camera pose is provided, transform camera space points to world space:
+-     $$ X_{world} = R_{cam2world} \cdot X_{cam} + t_{cam2world} $$
+-     In batched form (S2): `pts = rot^T * pts_2d - rot^T * trans` (assuming `pts_2d` contains normalized coordinates and inverse depth handling) [S2, unofficial].
+-   - **Method B (Projection Matrix Inverse) [S3, unofficial]:**
+-     Multiply by the inverse of the full projection transform matrix $T$ (where $T$ combines intrinsics and extrinsics):
+-     $$ p_{world} = T^{-1} \times [x_{norm}, y_{norm}, s_{d_{i,j}}, 1]^T $$
+-     Discard homogeneous coordinate to get Cartesian coordinates:
++4. **World Space Transformation:**
++   If camera pose $T_{cam2world}$ is provided:
++   - Extract rotation $R_{cam2world}$ and translation $t_{cam2world}$ [S1, unofficial].
++   - Transform camera space points to world space [S1, unofficial]:
++     $$ X_{world} = R_{cam2world} X_{cam} + t_{cam2world} $$
++   - Alternatively, using the full inverse projection transform matrix $T$ (where $T$ is the inverse of the combined projection matrix):
++     $$ p_{world} = T \times [x_{norm}, y_{norm}, s_{d_{i,j}}, 1]^T $$
++     Then discard the homogeneous coordinate to get Cartesian coordinates [S3, unofficial]:
+      $$ D = p'_{world} = \frac{p_{world}[0:3]}{p_{world}[3]} $$
+-     [S3, unofficial].
+ 
+-**Parameters:**
+-- Epsilon for numerical stability: $1e-8$ (used in inverse depth calculation) [S2, unofficial].
+-- Typical values for $f_1, f_2$ depend on the specific camera calibration and normalization scheme [S3, unofficial].
+-
+-**Edge Cases and Pitfalls:**
+-- **Zero Depth:** Depth values of zero cause division by zero in inverse depth or normalization. Use epsilon addition [S2, unofficial].
+-- **Invalid Pixels:** Mask out pixels with invalid depth (e.g., 0 or NaN) before transformation [S1, unofficial].
+-- **Coordinate System Convention:** Ensure consistency between the depth map's coordinate system (e.g., Z-forward vs Z-backward) and the camera model [S2, S3, unofficial].
+-- **Principal Point Offset:** Failure to subtract $(c_x, c_y)$ leads to skewed point clouds if raw pixel coordinates are used instead of normalized ones [S2, unofficial].
++5. **Reshaping:**
++   Reshape the resulting points from the grid structure to a point cloud format (e.g., $B \times N \times 3$) [S2, unofficial].
+ 
+ **Pseudocode:**
+-
+ ```python
+-import torch
+ import numpy as np
+ 
+-def depth_map_to_absolute_camera_coordinates(
+-    depth_map: torch.Tensor,
+-    intrinsics: torch.Tensor,
+-    extrinsics: torch.Tensor = None,
+-    use_inverse_depth: bool = False
+-) -> torch.Tensor:
++def depth_map_to_absolute_camera_coordinates(depth_map, intrinsics, extrinsics=None):
+     """
+-    Converts depth map to 3D world coordinates.
++    Convert depth map to 3D world coordinates.
+     
+     Args:
+-        depth_map: Tensor of shape (B, H, W) or (H, W). Depth values.
+-        intrinsics: Tensor of shape (B, 3, 3) or (3, 3). Camera intrinsic matrix K.
+-        extrinsics: Tensor of shape (B, 4, 4) or (4, 4). Camera-to-world transformation matrix.
+-        use_inverse_depth: If True, treats depth_map as inverse depth (1/d).
+-        
++        depth_map: np.ndarray of shape (H, W) or (B, H, W). Depth values.
++        intrinsics: np.ndarray of shape (3, 3) or (B, 3, 3). Camera intrinsic matrix K.
++        extrinsics: np.ndarray of shape (3, 4) or (B, 3, 4). Camera extrinsic matrix [R|t].
++    
+     Returns:
+-        Points in world coordinates of shape (B, H, W, 3).
++        points_world: np.ndarray of shape (H, W, 3) or (B, H, W, 3).
+     """
+     # Handle batch dimension
+-    if depth_map.dim() == 2:
+-        depth_map = depth_map.unsqueeze(0)
+-        intrinsics = intrinsics.unsqueeze(0)
++    if depth_map.ndim == 2:
++        depth_map = depth_map[np.newaxis, ...]
++        intrinsics = intrinsics[np.newaxis, ...]
+         if extrinsics is not None:
+-            extrinsics = extrinsics.unsqueeze(0)
+-            
++            extrinsics = extrinsics[np.newaxis, ...]
++    
+     B, H, W = depth_map.shape
+     
+-    # 1. Generate pixel coordinates
+-    # Create meshgrid: j in [0, W-1], i in [0, H-1]
+-    j_coords, i_coords = torch.meshgrid(
+-        torch.arange(W, device=depth_map.device, dtype=torch.float32),
+-        torch.arange(H, device=depth_map.device, dtype=torch.float32),
+-        indexing='ij'
+-    )
++    # Create pixel coordinate grid
++    # Using 0.5 offset to center on pixel
++    j, i = np.meshgrid(np.arange(W) + 0.5, np.arange(H) + 0.5)
+     
+-    # 2. Normalize to [-1, 1]
+-    x_norm = (2.0 * j_coords) / (W - 1) - 1.0
+-    y_norm = (2.0 * i_coords) / (H - 1) - 1.0
++    # Normalize to [-1, 1] as per AtomGS [S3, unofficial]
++    # Note: Some implementations skip this and use pixel coordinates directly with intrinsics [S2, unofficial]
++    # Here we follow the explicit normalization step from [S3, unofficial]
++    x_norm = (2 * j / (W - 1)) - 1
++    y_norm = (2 * i / (H - 1)) - 1
+     
+-    # 3. Handle Depth and Inverse Depth
+-    depth = depth_map
+-    if use_inverse_depth:
+-        # Add epsilon to avoid division by zero
+-        depth = 1.0 / (depth + 1e-8)
+-        
+-    # 4. Construct Camera Space Points
+-    # Option A: Using normalized coordinates and depth directly (S3)
+-    # p_camera = [x_norm, y_norm, depth]
+-    # However, standard pinhole projection requires scaling by focal length
+-    # Extract intrinsics
+-    fx = intrinsics[:, 0, 0] # (B,)
+-    fy = intrinsics[:, 1, 1] # (B,)
+-    cx = intrinsics[:, 0, 2] # (B,)
+-    cy = intrinsics[:, 1, 2] # (B,)
++    # Stack normalized coordinates
++    # Shape: (B, H, W, 3)
++    pts_camera_norm = np.stack([x_norm, y_norm, depth_map], axis=-1)
+     
+-    # Adjust for principal point if using raw pixel coordinates, 
+-    # but here we use normalized coordinates which implicitly handle aspect ratio 
+-    # if the image is square or if we assume standard NDC. 
+-    # For general case, we map normalized coords back to metric camera space.
+-    # x_metric = x_norm * (W-1)/2 * (1/fx) ? No, standard unprojection:
+-    # x_cam = (x_pixel - cx) / fx
+-    # y_cam = (y_pixel - cy) / fy
+-    # z_cam = depth
++    # Apply depth scaling if required by specific intrinsic formulation [S3, unofficial]
++    # Assuming intrinsics[0,0] is f_x and intrinsics[1,1] is f_y
++    # This step is specific to the AtomGS formulation [S3, unofficial]
++    f1 = intrinsics[:, 0, 0] # f_x
++    f2 = intrinsics[:, 1, 1] # f_y
++    # Avoid division by zero
++    depth_safe = depth_map + 1e-8
+     
+-    # Re-calculate using pixel coordinates for robustness with arbitrary intrinsics
+-    x_pixel = j_coords.float()
+-    y_pixel = i_coords.float()
++    # Scale depth
++    s_d = (f1[:, np.newaxis, np.newaxis] * depth_map + f2[:, np.newaxis, np.newaxis]) / depth_safe
+     
+-    x_cam = (x_pixel - cx.view(-1, 1, 1)) / fx.view(-1, 1, 1)
+-    y_cam = (y_pixel - cy.view(-1, 1, 1)) / fy.view(-1, 1, 1)
+-    z_cam = depth
++    # Update z-component
++    pts_camera_scaled = pts_camera_norm.copy()
++    pts_camera_scaled[:, :, :, 2] = s_d
+     
+-    # Stack to (B, H, W, 3)
+-    points_camera = torch.stack([x_cam, y_cam, z_cam], dim=-1)
+-    
+-    # 5. Transform to World Space
++    # Transform to world coordinates
+     if extrinsics is not None:
+-        # Extrinsics is 4x4 matrix [R | t; 0 0 0 1]
+-        # R is 3x3, t is 3x1
++        # Extrinsics is [R|t] shape (3, 4)
+         R = extrinsics[:, :3, :3] # (B, 3, 3)
+         t = extrinsics[:, :3, 3] # (B, 3)
+         
+-        # Reshape points_camera to (B, H*W, 3)
+-        points_camera_flat = points_camera.view(B, -1, 3)
++        # Convert to homogeneous (B, H, W, 4)
++        pts_hom = np.concatenate([pts_camera_scaled, np.ones_like(pts_camera_scaled[..., :1])], axis=-1)
+         
+-        # Apply rotation: (B, 3, 3) @ (B, 3, N)^T -> (B, 3, N)
+-        # Or use matmul: (B, N, 3) @ (B, 3, 3)^T
+-        points_world_flat = torch.matmul(points_camera_flat, R.transpose(1, 2)) + t.view(-1, 1, 3)
++        # Matrix multiplication: R * X_cam + t
++        # pts_camera_scaled is (B, H, W, 3)
++        # R is (B, 3, 3)
++        # Result: (B, H, W, 3)
++        pts_world = np.einsum('bij,bhwj->bhiw', R, pts_camera_scaled) + t[:, np.newaxis, np.newaxis, :]
+         
+-        # Reshape back to (B, H, W, 3)
+-        points_world = points_world_flat.view(B, H, W, 3)
++        return pts_world
+     else:
+-        points_world = points_camera
+-        
+-    return points_world
++        # Return camera space coordinates
++        return pts_camera_scaled[..., :3]
+ ```
++
++**Edge Cases and Pitfalls:**
++- **Zero Depth:** Division by zero occurs if $d_{i,j} = 0$. Use a small epsilon ($10^{-8}$) [S2, unofficial].
++- **Invalid Pixels:** Depth maps often contain invalid values (e.g., 0, NaN, or max depth). These should be masked out or handled separately [S1, unofficial].
++- **Coordinate System:** Ensure consistency between the depth map's coordinate system (e.g., Z-forward vs Z-backward) and the camera model [S2, unofficial].
++- **Principal Point:** If using pixel coordinates directly, subtracting the principal point $(c_x, c_y)$ is required before dividing by focal lengths [S2, unofficial].
+ 
+ ## Subtopics
+@@ -168,14 +139,12 @@
+ 
+ ## Operating characteristics
+-- **Time Complexity:** $O(H \times W)$ per view, as it involves a single pass over the depth map pixels [S3, unofficial].
+-- **Memory Complexity:** $O(H \times W)$ to store the output point cloud [S3, unofficial].
+-- **Performance:** Highly efficient on GPU due to parallelizable pixel-wise operations [S2, unofficial][S4].
+-- **Strengths:** Simple, differentiable (if depth is differentiable), and compatible with standard neural rendering pipelines [S4].
+-- **Limitations:** Sensitive to depth errors; noisy depth maps result in noisy point clouds [S4]. Requires accurate camera calibration [S2, unofficial].
+-- **When to use:** When constructing initial point clouds from estimated depth maps for novel view synthesis or 3D reconstruction [S4].
+-- **When not to use:** When high-precision geometric normals are required without post-processing (use [Virtual Laser Scan](16278-virtual-laser-scan-for-point-cloud-generation.md) for normals) or when dealing with non-planar projections without adjustment [S3, unofficial].
++- **Time Complexity:** $O(H \times W)$ per image, as each pixel is processed independently [S3, unofficial].
++- **Memory Complexity:** $O(H \times W \times 3)$ to store the resulting 3D points [S3, unofficial].
++- **Performance:** Highly parallelizable on GPUs. Performance scales linearly with resolution [S3, unofficial].
++- **Strengths:** Simple, deterministic, and efficient for converting dense depth maps to 3D [S3, unofficial].
++- **Limitations:** Sensitive to noise in depth maps; invalid depth values lead to outliers in the point cloud [S1, unofficial]. Requires accurate intrinsics and extrinsics [S2, unofficial].
+ 
+ ## Background
+-Originated from standard computer vision techniques for backprojecting depth maps to 3D space [S3, unofficial]. It is widely used in neural radiance fields (NeRF) and 3D Gaussian Splatting pipelines for initializing point clouds or converting rendered depth buffers to world coordinates [S1, S3, unofficial][S4]. The method is foundational in multi-view stereo and depth estimation evaluation [S1, unofficial].
++The method originates from the need to convert 2D sensor data (depth maps) into 3D representations for tasks like novel view synthesis and 3D reconstruction [S3, unofficial]. It is a fundamental building block in neural rendering pipelines, such as those using Gaussian Splatting [S3, unofficial] and neural point clouds [S4]. The specific normalization and scaling steps described in [S3, unofficial] are part of the AtomGS pipeline, while the inverse depth and meshgrid approaches are common in other frameworks like GPS_plus [S2, unofficial] and InstantSplat [S1, unofficial].
+ 
+ ## Sources

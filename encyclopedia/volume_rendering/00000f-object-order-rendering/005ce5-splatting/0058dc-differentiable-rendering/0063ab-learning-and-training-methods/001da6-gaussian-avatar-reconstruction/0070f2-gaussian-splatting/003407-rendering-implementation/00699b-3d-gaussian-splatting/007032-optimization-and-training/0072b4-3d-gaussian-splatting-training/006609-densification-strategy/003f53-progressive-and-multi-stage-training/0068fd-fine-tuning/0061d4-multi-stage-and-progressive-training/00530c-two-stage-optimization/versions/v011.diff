@@ -1,0 +1,282 @@
+--- v010.md
++++ v011.md
+@@ -4,196 +4,112 @@
+ 
+ ## Overview
+-Two-stage optimization is a training strategy that decomposes the optimization of 3D Gaussian parameters into sequential phases to address specific stability or complexity challenges. It separates the learning of stable geometric/appearance features from complex constraints such as codec quantization, material decomposition, or high-resolution refinement. Unlike single-stage training, this method prevents gradient conflicts and instability by freezing or constraining parameters optimized in earlier stages during later phases [S1, S2][S3, unofficial].
++Two-stage optimization is a training strategy that decouples the optimization of 3D Gaussian representations into sequential phases to resolve conflicting objectives, such as stability versus compression or geometry versus appearance. It addresses the instability caused by jointly optimizing complex generative pipelines with quantization bottlenecks [S3, unofficial] or the difficulty of simultaneously fitting geometry and material properties [S2]. By separating these concerns, the method ensures stable initial convergence before refining for specific downstream metrics like rate-distortion performance [S3, unofficial] or inverse rendering fidelity [S2].
+ 
+ ## How it works
+-The method generally follows a sequential dependency where Stage $k$ initializes from the output of Stage $k-1$. The specific implementation varies by application domain (CT reconstruction, inverse rendering, or compression), but the core logic involves a coarse/stable phase followed by a fine/complex phase.
++The method generally follows a sequential dependency where Stage $k$ initializes from the output of Stage $k-1$. The specific implementation varies by application domain, primarily falling into two categories: resolution-based refinement for volumetric reconstruction [S1] and codec-aware refinement for feed-forward generation [S3, unofficial], or geometry-appearance decoupling for inverse rendering [S2].
+ 
+ ### Inputs and Outputs
+-*   **Inputs:** Context views (images/depth), camera poses, and optionally target views for supervision.
+-*   **Outputs:** Optimized 3D Gaussian set $\mathcal{G}$ (positions $\mathbf{p}$, scales $\mathbf{s}$, rotations $\mathbf{q}$, opacities $\alpha$, colors $\mathbf{c}$) and potentially auxiliary parameters (materials $\mathbf{M}$, latent codes, or depth maps).
++*   **Inputs:** Context views (images and poses), target view images (for supervision), and hyperparameters (learning rates, loss weights, resolution grids).
++*   **Outputs:** Optimized 3D Gaussian primitives (position, scale, rotation, opacity, color/SH coefficients) and, in codec variants, latent codes or codec modules.
+ 
+ ### Data Structures
+-The Gaussian representation $\mathcal{G}$ consists of a set of $N$ primitives. Each primitive $i$ is defined by:
+-*   Position: $\mathbf{p}_i \in \mathbb{R}^3$
+-*   Scale: $\mathbf{s}_i \in \mathbb{R}^3$
+-*   Rotation: $\mathbf{q}_i \in \mathbb{R}^4$ (quaternion)
+-*   Opacity: $\alpha_i \in [0, 1]$
+-*   Color: $\mathbf{c}_i$ (typically SH coefficients or RGB)
++*   **Gaussian Set ($\mathcal{G}$):** A collection of 3D Gaussians. In feed-forward methods, these are predicted from features; in volumetric methods, they are optimized directly.
++*   **Feature Tensor ($\mathbf{F}$):** In feed-forward pipelines, a dense tensor (e.g., $N \times C_F \times H \times W$) used to predict Gaussian attributes [S3, unofficial].
++*   **Depth Maps:** Encoder-side depth ($D_{enc}$) and decoder-side normalized inverse-depth ($S$) used for supervision [S3, unofficial].
+ 
+-In CodecSplat [S3, unofficial], an intermediate feature tensor $\mathbf{F}_g \in \mathbb{R}^{N \times C_F \times H \times W}$ is used to predict Gaussians. In GS-IR [S2], material parameters $\mathbf{M} = \{\mathbf{a}, \rho, \mathbf{m}\}$ are added to the geometric set $\mathbf{T} = \{\mathbf{p}, \mathbf{s}, \mathbf{q}, \mathbf{n}\}$.
++### Steps
+ 
+-### Numbered Steps
++#### Variant A: Resolution-Based Refinement (Volumetric/CT)
++Used in sparse-view CT reconstruction [S1].
+ 
+-#### Variant 1: Low-Resolution to Full-Resolution (3DGR-CT) [S1]
+-Used for sparse-view CT reconstruction to manage computational burden and place Gaussians correctly.
++1.  **Stage 1: Low-Resolution Optimization**
++    *   Sample a low-resolution grid, specifically $1/2 \times 1/2 \times 1/2$ of the original volume [S1].
++    *   Optimize Gaussian parameters rapidly to place them in approximately correct positions [S1].
++    *   Minimize the projection loss using the $L_2$ norm between projected data $\hat{p}$ and actual measurements $p$:
++        $$ \min_{\theta_i} \| \hat{p}[V(\theta)] - p \|_2^2 $$
++        where $V(\theta)$ is the discretized volume parameterized by $\theta$ [S1].
+ 
+-1.  **Stage 1 (Low-Resolution Optimization):**
+-    *   Sample a low-resolution grid, specifically $1/2 \times 1/2 \times 1/2$ of the original volume.
+-    *   Optimize Gaussian parameters rapidly to place them in approximately correct positions.
+-    *   Loss: Minimize the $L_2$ norm between projected data $\hat{\mathbf{p}}$ and actual measurements $\mathbf{p}$:
+-        $$ \min_{\theta_i} \| \hat{\mathbf{p}}[\mathcal{V}(\theta)] - \mathbf{p} \|_2^2 $$
+-        where $\mathcal{V}$ is the discretized volume and $\theta_i$ are the Gaussian parameters [S1].
++2.  **Stage 2: Full-Resolution Refinement**
++    *   Initialize from the Stage 1 checkpoint.
++    *   Sample over all voxels of the original volume [S1].
++    *   Refine Gaussian parameters for fine-grained adjustments to capture finer details [S1].
++    *   Continue minimizing the same projection loss function with the full-resolution grid [S1].
+ 
+-2.  **Stage 2 (Full-Resolution Refinement):**
+-    *   Sample over all voxels of the original volume.
+-    *   Refine Gaussian parameters for fine-grained adjustments and higher-quality reconstruction.
+-    *   The differentiable CT projector generates projected data $\hat{\mathbf{p}}$ from the discretized volume. Discrepancies are quantified using the $L_2$ norm [S1].
++#### Variant B: Codec-Aware Refinement (Feed-Forward 3DGS)
++Used in CodecSplat [S3, unofficial].
+ 
+-#### Variant 2: Initial to Decomposition (GS-IR) [S2]
+-Used for inverse rendering to separate geometry/appearance from material properties.
++1.  **Stage 1: Codec-Free Gaussian Generation**
++    *   Train the modified feed-forward Gaussian generation pipeline *without* the feature codec.
++    *   Predict the codec-free Gaussian set $\mathcal{G}_{cf}$ from the refined feature $\mathbf{F}_c$ and encoder-side depth $D_{enc}$ [S3, unofficial].
++    *   Render the target view $\hat{Y}_{tcf}$:
++        $$ \hat{Y}_{tcf} = \text{Render}(\mathcal{G}_{cf}, K_t, T_t) $$
++    *   Minimize the rendering reconstruction loss:
++        $$ \mathcal{L}_{stage1} = D_{render}(\hat{Y}_{tcf}, Y_t) $$
++        where $Y_t$ is the target-view image and $D_{render}$ is the reconstruction loss metric [S3, unofficial].
+ 
+-1.  **Stage 1 (Initial Optimization):**
+-    *   Optimize geometric parameters $\mathbf{T} = \{\mathbf{p}, \mathbf{s}, \mathbf{q}, \mathbf{n}\}$ and appearance $\mathbf{A}$ for 30,000 iterations.
+-    *   Loss: Minimize color reconstruction loss $L_c$ and normal loss $L_n$:
+-        $$ L_{init} = L_c + L_n $$
+-    *   $L_n$ includes a total variation smoothing term:
+-        $$ L_n = L_{n-p} + \lambda_{n-TV} TV_{normal} $$
+-    *   Hyperparameters: $\lambda_{n-TV} = 5.0$ [S2].
++2.  **Stage 2: Codec-Aware Latent Coding**
++    *   Initialize from the Stage 1 checkpoint.
++    *   Enable the feature codec and post-codec refiner.
++    *   Keep remaining backbone modules fixed; optimize only codec-related modules [S3, unofficial].
++    *   Decode the Gaussian set $\hat{\mathcal{G}}$ and render the target view $\hat{Y}_t$:
++        $$ \hat{Y}_t = \text{Render}(\hat{\mathcal{G}}, K_t, T_t) $$
++    *   Minimize the rate-distortion objective:
++        $$ \mathcal{L}_{stage2}(\lambda) = \frac{\lambda}{\lambda_{max}} D_{render}(\hat{Y}_t, Y_t) + \gamma D_{codec-depth} + \beta R $$
++        where $R$ is the estimated rate, $\lambda$ is the rate parameter sampled from $[16, 1024]$ during training (fixed at test time), $\lambda_{max} = 1024$, $\gamma$ is the depth supervision weight, and $\beta$ is the rate penalty weight [S3, unofficial].
++    *   The codec-side depth loss uses normalized inverse depth:
++        $$ D_{codec-depth} = \| S - S_{enc} \|_1 $$
++        where $S$ is the decoder-side normalized inverse-depth map and $S_{enc}$ is the supervision target derived from encoder depth:
++        $$ S_{enc,i}(p) = \frac{D_{enc,i}(p)^{-1} - f_i^{-1}}{n_i^{-1} - f_i^{-1}} $$
++        with $n_i$ and $f_i$ being the near and far bounds of context view $i$ [S3, unofficial].
+ 
+-2.  **Stage 2 (Decomposition Optimization):**
++#### Variant C: Geometry-Appearance Decoupling (Inverse Rendering)
++Used in GS-IR [S2].
++
++1.  **Stage 1: Initial Optimization**
++    *   Optimize geometric parameters $\mathbf{T} = \{p, s, q, n\}$ (position, scale, rotation, normal) and appearance parameters $\mathbf{A}$ (color/SH) [S2].
++    *   Run for 30,000 iterations using the Adam optimizer [S2].
++    *   Minimize the initial loss $\mathcal{L}_{init}$:
++        $$ \mathcal{L}_{init} = \mathcal{L}_c + \mathcal{L}_n $$
++        where $\mathcal{L}_c$ is the $L_1$ color reconstruction loss and $\mathcal{L}_n$ is the normal loss:
++        $$ \mathcal{L}_n = \mathcal{L}_{n-p} + \lambda_{n-TV} \text{TV}_{normal} $$
++        with $\lambda_{n-TV} = 5.0$ [S2].
++
++2.  **Stage 2: Decomposition Optimization**
+     *   Fix $\mathbf{T}$ and $\mathbf{A}$.
+-    *   Optimize material parameters $\mathbf{M}$ for 10,000 iterations.
+-    *   Loss: Minimize decomposition loss $L_d$:
+-        $$ L_d = L_{shade} + \lambda_M TV_{mat} + \lambda_E TV_{light} $$
+-    *   Hyperparameters: $\lambda_M = 1.0$, $\lambda_E = 0.01$ [S2].
++    *   Optimize material parameters $\mathbf{M} = \{a, \rho, m\}$ (albedo, roughness, etc.) [S2].
++    *   Run for 10,000 iterations using the Adam optimizer [S2].
++    *   Minimize the decomposition loss $\mathcal{L}_d$:
++        $$ \mathcal{L}_d = \mathcal{L}_{shade} + \lambda_M \text{TV}_{mat} + \lambda_E \text{TV}_{light} $$
++        where $\lambda_M = 1.0$ and $\lambda_E = 0.01$ [S2]. $\mathcal{L}_{shade}$ models the shading difference, and $\text{TV}_{mat}$, $\text{TV}_{light}$ are total variation smoothing terms for material and light fields respectively [S2].
+ 
+-#### Variant 3: Codec-Free to Codec-Aware (CodecSplat) [S3, unofficial]
+-Used for ultra-compact latent coding in feed-forward 3DGS.
++### Parameters and Typical Values
++*   **Resolution Grid:** $1/2 \times 1/2 \times 1/2$ for Stage 1 in volumetric methods [S1].
++*   **Iterations:** 30,000 for Stage 1 and 10,000 for Stage 2 in inverse rendering [S2].
++*   **Optimizer:** Adam [S2] or AdamW [S3, unofficial].
++*   **Learning Rate:** $10^{-4}$ with weight decay $0.01$ [S3, unofficial].
++*   **Rate Parameter ($\lambda$):** Sampled from $[16, 1024]$ during training [S3, unofficial].
++*   **Depth Supervision Weight ($\gamma$):** $0.1$ [S3, unofficial].
++*   **Rate Penalty Weight ($\beta$):** $10^{-4}$ for DL3DV, $4 \times 10^{-4}$ for RE10K [S3, unofficial].
++*   **Smoothing Weights:** $\lambda_{n-TV}=5.0$, $\lambda_M=1.0$, $\lambda_E=0.01$ [S2].
+ 
+-1.  **Stage 1 (Codec-Free Gaussian Generation):**
+-    *   Train the feed-forward Gaussian generation pipeline *without* the feature codec.
+-    *   Predict Gaussian set $\mathcal{G}_{cf}$ from refined feature $\mathbf{F}_c$ and encoder-side depth $\mathbf{D}_{enc}$.
+-    *   Render target view $\hat{\mathbf{Y}}_{tcf} = \text{Render}(\mathcal{G}_{cf}, \mathbf{K}_t, \mathbf{T}_t)$.
+-    *   Loss:
+-        $$ L_{stage1} = D_{render}(\hat{\mathbf{Y}}_{tcf}, \mathbf{Y}_t) $$
+-        where $\mathbf{Y}_t$ is the target-view image and $D_{render}$ is the rendering reconstruction loss [S3, unofficial].
+-
+-2.  **Stage 2 (Codec-Aware Latent Coding):**
+-    *   Initialize from Stage 1 checkpoint.
+-    *   Enable the feature codec and post-codec refiner.
+-    *   Optimize codec-related modules while keeping remaining backbone modules fixed.
+-    *   Render decoded Gaussian set $\hat{\mathcal{G}}$ to target view: $\hat{\mathbf{Y}}_t = \text{Render}(\hat{\mathcal{G}}, \mathbf{K}_t, \mathbf{T}_t)$.
+-    *   Loss:
+-        $$ L_{stage2}(\lambda) = \frac{\lambda}{\lambda_{max}} \left[ D_{render}(\hat{\mathbf{Y}}_t, \mathbf{Y}_t) + \gamma D_{codec-depth} + \beta R \right] $$
+-        where $R$ is the estimated rate, $\gamma$ weights the codec-side depth supervision, and $\beta$ controls the rate penalty [S3, unofficial].
+-    *   Codec-side depth loss:
+-        $$ D_{codec-depth} = \| \mathbf{S} - \mathbf{S}_{enc} \|_1 $$
+-        where $\mathbf{S}$ is the decoder-side normalized inverse-depth map and $\mathbf{S}_{enc}$ is the supervision target [S3, unofficial].
+-    *   Encoder-side normalized inverse-depth:
+-        $$ \mathbf{S}_{enc,i}(\mathbf{p}) = \frac{\mathbf{D}_{enc,i}(\mathbf{p})^{-1} - \mathbf{f}_i^{-1}}{\mathbf{n}_i^{-1} - \mathbf{f}_i^{-1}} $$
+-        where $\mathbf{n}_i$ and $\mathbf{f}_i$ are the near and far bounds of context view $i$ [S3, unofficial].
+-    *   Hyperparameters: $\gamma = 0.1$, $\beta = 10^{-4}$ (DL3DV) or $4 \times 10^{-4}$ (RE10K), $\lambda_{max} = 1024$. During training, $\lambda \in [16, 1024]$; at test time, $\lambda$ is fixed [S3, unofficial].
+-
+-### Pseudocode
+-```python
+-def two_stage_optimization(method_variant, context_views, target_views, config):
+-    """
+-    Generic two-stage optimization framework.
+-    method_variant: '3dgr_ct', 'gs_ir', or 'codecsplat'
+-    """
+-    if method_variant == '3dgr_ct':
+-        # Stage 1: Low-Resolution
+-        volume_grid = create_low_res_grid(scale=0.5)
+-        gaussians = initialize_gaussians(volume_grid)
+-        for iteration in range(config.stage1_iters):
+-            projections = differentiable_ct_projector(gaussians)
+-            loss = l2_norm(projections, config.measurements)
+-            update_gaussians(gaussians, loss)
+-            
+-        # Stage 2: Full-Resolution
+-        volume_grid = create_full_res_grid()
+-        # Re-initialize or refine positions based on Stage 1
+-        gaussians = refine_gaussians(gaussians, volume_grid)
+-        for iteration in range(config.stage2_iters):
+-            projections = differentiable_ct_projector(gaussians)
+-            loss = l2_norm(projections, config.measurements)
+-            update_gaussians(gaussians, loss)
+-            
+-    elif method_variant == 'gs_ir':
+-        # Stage 1: Initial
+-        gaussians = initialize_gaussians()
+-        for iteration in range(30000):
+-            rendered_color, rendered_normal = render(gaussians)
+-            loss_color = l1_loss(rendered_color, target_views)
+-            loss_normal = normal_loss(rendered_normal, config.lambda_n_tv)
+-            loss = loss_color + loss_normal
+-            update_gaussians(gaussians, loss)
+-            
+-        # Stage 2: Decomposition
+-        # Fix geometry T and appearance A
+-        materials = initialize_materials()
+-        for iteration in range(10000):
+-            rendered_shading = render_shading(gaussians, materials)
+-            loss_shade = l1_loss(rendered_shading, target_views)
+-            loss_mat = tv_loss(materials, config.lambda_M)
+-            loss_light = tv_loss(materials, config.lambda_E)
+-            loss = loss_shade + loss_mat + loss_light
+-            update_materials(materials, loss)
+-            
+-    elif method_variant == 'codecsplat':
+-        # Stage 1: Codec-Free
+-        backbone = initialize_backbone()
+-        for iteration in range(config.stage1_iters):
+-            features, depth = backbone(context_views)
+-            gaussians_cf = predict_gaussians(features, depth)
+-            rendered = render(gaussians_cf)
+-            loss = rendering_loss(rendered, target_views)
+-            update_backbone(backbone, loss)
+-            
+-        # Stage 2: Codec-Aware
+-        # Load Stage 1 checkpoint
+-        codec = initialize_codec()
+-        refiner = initialize_refiner()
+-        for iteration in range(config.stage2_iters):
+-            # Sample lambda for rate-distortion trade-off
+-            lambda_val = random.uniform(16, 1024)
+-            
+-            features, depth = backbone(context_views)
+-            latent = encode(features, codec)
+-            features_decoded = decode(latent, codec)
+-            features_refined = refiner(features_decoded)
+-            gaussians_decoded = predict_gaussians(features_refined, depth)
+-            rendered = render(gaussians_decoded)
+-            
+-            loss_render = rendering_loss(rendered, target_views)
+-            loss_depth = l1_loss(normalized_inverse_depth(gaussians_decoded), 
+-                                 normalized_inverse_depth(context_views))
+-            rate = estimate_rate(latent)
+-            
+-            loss = (lambda_val / 1024) * (loss_render + 
+-                                          config.gamma * loss_depth + 
+-                                          config.beta * rate)
+-            update_codec(codec, refiner, loss)
+-```
+-
+-### Parameters and Edge Cases
+-*   **Learning Rate:** Adam optimizer is commonly used [S2][S3, unofficial]. CodecSplat uses AdamW with LR $10^{-4}$ and weight decay $0.01$ [S3, unofficial].
+-*   **Hardware:** GS-IR uses a single NVIDIA V100 [S2]. CodecSplat uses four NVIDIA RTX 5880 48GB GPUs [S3, unofficial].
+-*   **Edge Cases:**
+-    *   **CodecSplat:** Direct training with a quantized bottleneck is unstable [S3, unofficial]. The two-stage approach prevents the model from having to adapt the Gaussian generation pipeline while simultaneously learning a compact latent representation.
+-    *   **GS-IR:** Fixing parameters in Stage 2 prevents catastrophic forgetting of geometry learned in Stage 1 [S2].
+-    *   **3DGR-CT:** Low-resolution sampling reduces computational burden without compromising accuracy [S1].
++### Edge Cases and Pitfalls
++*   **Instability:** Directly training with a quantized bottleneck is unstable due to the need to adapt the generation pipeline and latent representation simultaneously [S3, unofficial].
++*   **Gradient Conflict:** Jointly optimizing geometry and appearance can lead to interference; decoupling prevents this [S2].
++*   **Hardware Constraints:** Volumetric methods may require custom CUDA kernels for efficient voxelization due to PyTorch's lack of native support for dynamic patch slicing [S1].
+ 
+ ## Subtopics
+ 
+ ### [Two-stage training procedure for Relightable 3D Gaussians](15262-two-stage-training-procedure-for-relightable-3d-gaussians.md)
+-Defines the optimization protocol for Relightable 3D Gaussians (R3DG), combining standard 3DGS rendering with PBR and BRDF decomposition. It uses normal gradient-based densification in Stage 1 and PBR-specific loss terms in Stage 2.
++Defines the optimization for Relightable 3D Gaussians (R3DG), using normal gradient-based densification in Stage 1 and PBR-specific losses in Stage 2 to recover geometry, material, and lighting.
+ 
+ ## Operating characteristics
+-*   **Time Complexity:** Generally $O(N \cdot I)$ where $N$ is the number of Gaussians and $I$ is the total iterations across both stages. Stage 1 may use fewer voxels or iterations to accelerate convergence.
+-*   **Memory Complexity:** Depends on the resolution of the volume sampled. Stage 1 in 3DGR-CT uses $1/8$ the volume of Stage 2, reducing memory usage during the initial phase [S1].
+-*   **Performance:**
+-    *   **CodecSplat:** Achieves KiB-level scene bitstreams while preserving dominant scene structure, outperforming MiB-level compressed baselines [S3, unofficial].
+-    *   **GS-IR:** Successfully separates geometry, appearance, and material, enabling inverse rendering tasks [S2].
+-    *   **3DGR-CT:** Provides accurate sparse-view CT reconstruction with reduced computational burden [S1].
+-*   **Strengths:** Stabilizes training for complex objectives (codec, material), prevents gradient conflict, allows coarse-to-fine refinement.
+-*   **Limitations:** Requires careful tuning of stage transitions and hyperparameters (e.g., $\lambda$, $\beta$). Freezing parameters may lead to suboptimal solutions if the initial stage is poor.
++*   **Time Complexity:** Two-stage optimization typically doubles the training time compared to single-stage methods, but Stage 1 is often faster due to lower resolution or frozen parameters [S1, S2].
++*   **Memory Complexity:** Stage 1 in volumetric methods reduces memory usage by operating on a coarser grid [S1]. Codec-aware methods reduce final storage size significantly (KiB-level) at the cost of encoding/decoding overhead [S3, unofficial].
++*   **Performance:** Achieves higher quality reconstruction and better rate-distortion trade-offs than single-stage baselines [S1][S3, unofficial].
++*   **Strengths:** Stabilizes training for complex pipelines; prevents catastrophic forgetting of geometry during material optimization; enables ultra-compact bitstreams [S1, S2][S3, unofficial].
++*   **Limitations:** Requires careful tuning of stage transitions and loss weights; increased total training time [S1, S2][S3, unofficial].
+ 
+ ## Background
+-*   **Origin:** The concept of multi-stage optimization in 3D Gaussian Splatting has emerged from various applications requiring stability or complex parameter separation.
+-    *   **3DGR-CT:** Introduced for sparse-view CT reconstruction to handle computational constraints [S1].
+-    *   **GS-IR:** Developed for inverse rendering to decouple geometry/appearance from material properties [S2].
+-    *   **CodecSplat:** Proposed for ultra-compact latent coding to stabilize the training of quantized bottlenecks in feed-forward 3DGS [S3, unofficial].
+-*   **History:** These methods build upon the foundational 3D Gaussian Splatting technique [Kerbl et al., 2023] and extend it to specialized domains like medical imaging, inverse rendering, and compression.
++Two-stage optimization in 3D Gaussian Splatting emerged to address specific limitations of single-stage training. The resolution-based approach was introduced in 3DGR-CT for sparse-view CT reconstruction to handle the computational burden of full-volume optimization [S1]. The codec-aware approach was proposed in CodecSplat to enable ultra-compact latent coding for feed-forward 3DGS, solving the instability of joint quantization training [S3, unofficial]. The geometry-appearance decoupling was introduced in GS-IR for inverse rendering, allowing for the separate optimization of geometry and material properties [S2].
+ 
+ ## Sources

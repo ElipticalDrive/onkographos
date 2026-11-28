@@ -1,0 +1,174 @@
+# Hierarchical Sampling
+
+Also called: Coarse and Refined Stage Sampling, Importance Sampling for NeRF, Multi-Stage Voxel Sampling, Two-Stage Sampling
+
+## Overview
+Hierarchical sampling is a two-stage strategy for volume rendering that improves image quality by concentrating samples in regions of high geometric or color complexity, addressing the bottleneck of point sampling in neural radiance fields [S2, unofficial][S6]. It sets itself apart from uniform sampling by using a coarse network to estimate density and guide importance sampling for a fine network [S2, unofficial][S6].
+
+## How it works
+**Inputs and Outputs:**
+*   **Inputs:** Ray origin $\mathbf{o}$ and direction $\mathbf{d}$, near/far bounds $[t_n, t_f]$, number of coarse samples $N_{coarse}$, number of fine samples $N_{fine}$, coarse neural network $f_c$, fine neural network $f_f$ [S1, S6].
+*   **Outputs:** Rendered color $\hat{C}(\mathbf{r})$ and depth/transmittance for the ray $\mathbf{r}$ [S7].
+
+**Data Structures:**
+*   **Sample Depths:** Arrays of size $N_{coarse}$ and $N_{fine}$ storing scalar distances $t$ along the ray [S7].
+*   **Density/Color:** Tensors of shape $(N, 4)$ or $(N, 3)$ storing volume density $\sigma$ and color $\mathbf{c}$ for each sample point [S7].
+*   **CDF:** Cumulative distribution array of size $N_{coarse}$, normalized to $[0, 1]$ [S7].
+
+**Parameters:**
+*   $N_{coarse}$: Number of coarse samples. Typical value: 64 [S1, S6].
+*   $N_{fine}$: Number of fine samples. Typical value: 64 [S1] or 128 [S6].
+
+**Steps:**
+
+1.  **Coarse Sampling:** Uniformly sample $N_{coarse}$ points along the ray interval $[t_n, t_f]$ [S1, S6].
+2.  **Coarse Pass:** Evaluate the coarse network $f_c$ at each sample to predict volume density $\sigma_c$ and color $\mathbf{c}_c$ [S2, unofficial][S6].
+3.  **Weight Computation:** Compute the weight $w_i$ for each coarse sample, representing its expected color contribution [S7][S8, unofficial]:
+    $$ w_i = T_c(t_{c,i}) \left( 1 - \exp\left(- \sigma_c(t_{c,i}) \Delta t_{c,i}\right) \right) $$
+    where $T_c(t_{c,i}) = \exp\left(-\sum_{j=1}^{i-1} \sigma_c(t_{c,j}) \Delta t_{c,j}\right)$ is the transmittance up to sample $i$, and $\Delta t_{c,i} = t_{c,i+1} - t_{c,i}$ is the interval length [S6, S7].
+4.  **CDF Construction:** Construct the cumulative distribution function (CDF) from the weights $w_i$ [S7].
+5.  **Fine Sampling (Importance Sampling):** Sample $N_{fine}$ points from the CDF [S1, S7].
+6.  **Fine Pass:** Evaluate the fine network $f_f$ at each fine sample to predict density $\sigma_f$ and color $\mathbf{c}_f$ [S2, unofficial][S6].
+7.  **Rendering:** Combine coarse and fine samples (typically by concatenating and sorting them by depth) and perform volume rendering integration [S7].
+
+**Pseudocode:**
+
+> **Unverified code.** The code below did not pass a test run against a reference implementation, or no test fits it, so it may contain errors.
+
+```python
+import torch
+
+def hierarchical_sample(ray_origins, ray_directions, t_near, t_far, 
+                        n_coarse, n_fine, coarse_net, fine_net):
+    """
+    Performs hierarchical sampling for a batch of rays.
+    
+    Args:
+        ray_origins: (B, 3) Tensor of ray origins.
+        ray_directions: (B, 3) Tensor of ray directions (normalized).
+        t_near: (B,) Tensor of near bounds.
+        t_far: (B,) Tensor of far bounds.
+        n_coarse: int, number of coarse samples.
+        n_fine: int, number of fine samples.
+        coarse_net: Module, coarse neural network.
+        fine_net: Module, fine neural network.
+        
+    Returns:
+        t_coarse: (B, n_coarse) Tensor of coarse sample depths.
+        sigma_coarse: (B, n_coarse, 1) Tensor of coarse densities.
+        c_coarse: (B, n_coarse, 3) Tensor of coarse colors.
+        t_fine: (B, n_fine) Tensor of fine sample depths.
+        sigma_fine: (B, n_fine, 1) Tensor of fine densities.
+        c_fine: (B, n_fine, 3) Tensor of fine colors.
+    """
+    B = ray_origins.shape[0]
+    
+    # 1. Coarse Sampling: Uniform stratified sampling
+    u_coarse = torch.linspace(0, 1, n_coarse, device=ray_origins.device).unsqueeze(0) # (1, n_coarse)
+    noise = torch.rand(B, n_coarse, device=ray_origins.device)
+    u_coarse = u_coarse + noise / n_coarse
+    u_coarse = torch.clamp(u_coarse, 0, 1)
+    
+    t_coarse = t_near.unsqueeze(1) + u_coarse * (t_far.unsqueeze(1) - t_near.unsqueeze(1)) # (B, n_coarse)
+    
+    # Get 3D points (positional encoding applied internally by network)
+    pts_coarse = ray_origins.unsqueeze(1) + t_coarse.unsqueeze(2) * ray_directions.unsqueeze(1) # (B, n_coarse, 3)
+    
+    # 2. Coarse Pass
+    pts_coarse_flat = pts_coarse.view(-1, 3)
+    sigma_coarse_flat, c_coarse_flat = coarse_net(pts_coarse_flat)
+    sigma_coarse = sigma_coarse_flat.view(B, n_coarse, 1) # (B, n_coarse, 1)
+    c_coarse = c_coarse_flat.view(B, n_coarse, 3) # (B, n_coarse, 3)
+    
+    # 3. Weight Computation
+    # Calculate intervals explicitly to handle boundaries correctly
+    dt_coarse = torch.zeros_like(t_coarse)
+    dt_coarse[:, 0] = t_coarse[:, 0] - t_near.unsqueeze(1)
+    dt_coarse[:, 1:-1] = t_coarse[:, 1:] - t_coarse[:, :-1]
+    dt_coarse[:, -1] = t_far.unsqueeze(1) - t_coarse[:, -1]
+    
+    # Transmittance T_i = exp(-sum_{j<i} sigma_j * dt_j)
+    alpha_dt_coarse = sigma_coarse.squeeze(2) * dt_coarse # (B, n_coarse)
+    cum_alpha_coarse = torch.cumsum(alpha_dt_coarse, dim=1) # (B, n_coarse)
+    T_coarse = torch.exp(-torch.cat([torch.zeros(B, 1, device=t_coarse.device), cum_alpha_coarse[:, :-1]], dim=1)) # (B, n_coarse)
+    
+    # Weight w_i = T_i * (1 - exp(-sigma_i * dt_i))
+    sigma_squeezed = sigma_coarse.squeeze(2)
+    weights_coarse = T_coarse * (1 - torch.exp(-sigma_squeezed * dt_coarse)) # (B, n_coarse)
+    
+    # 4. CDF Construction
+    weights_sum = weights_coarse.sum(dim=1, keepdim=True) + 1e-10 # (B, 1)
+    weights_norm = weights_coarse / weights_sum # (B, n_coarse)
+    cdf_coarse = torch.cumsum(weights_norm, dim=1) # (B, n_coarse)
+    
+    # 5. Fine Sampling: Inverse CDF sampling
+    u_fine = torch.rand(B, n_fine, device=ray_origins.device) # (B, n_fine)
+    
+    # Find indices in CDF: cdf[i-1] < u <= cdf[i]
+    indices = torch.searchsorted(cdf_coarse, u_fine, right=True) # (B, n_fine)
+    indices = torch.clamp(indices, 0, n_coarse - 1)
+    
+    # Interpolate t values
+    lower_indices = indices - 1
+    lower_indices = torch.clamp(lower_indices, 0, n_coarse - 1)
+    
+    cdf_lower = torch.gather(cdf_coarse, 1, lower_indices) # (B, n_fine)
+    cdf_upper = torch.gather(cdf_coarse, 1, indices) # (B, n_fine)
+    
+    t_lower = torch.gather(t_coarse, 1, lower_indices) # (B, n_fine)
+    t_upper = torch.gather(t_coarse, 1, indices) # (B, n_fine)
+    
+    # Linear interpolation
+    denom = cdf_upper - cdf_lower + 1e-10
+    t_fine = t_lower + (t_upper - t_lower) * (u_fine - cdf_lower) / denom # (B, n_fine)
+    
+    # Get 3D points for fine samples
+    pts_fine = ray_origins.unsqueeze(1) + t_fine.unsqueeze(2) * ray_directions.unsqueeze(1) # (B, n_fine, 3)
+    
+    # 6. Fine Pass
+    pts_fine_flat = pts_fine.view(-1, 3)
+    sigma_fine_flat, c_fine_flat = fine_net(pts_fine_flat)
+    sigma_fine = sigma_fine_flat.view(B, n_fine, 1) # (B, n_fine, 1)
+    c_fine = c_fine_flat.view(B, n_fine, 3) # (B, n_fine, 3)
+    
+    return t_coarse, sigma_coarse, c_coarse, t_fine, sigma_fine, c_fine
+```
+
+**Edge Cases and Pitfalls:**
+*   **Gradient Flow:** The sampling step (inverse CDF lookup) is non-differentiable with respect to the coarse model's output [S4, unofficial].
+*   **Degenerate CDF:** If all coarse weights are zero (e.g., empty space), the CDF is flat [G].
+*   **Boundary Conditions:** The last interval $\Delta t$ for the coarse samples must be handled carefully, as there is no subsequent sample [G].
+
+## Subtopics
+
+### [Hierarchical Density Adaptation](4868-hierarchical-density-adaptation.md)
+Controls rendering density using a hierarchy of sampled data to maintain constant frame rates, generating coarse density estimates on-the-fly via convolution rather than a separate pre-allocated grid.
+
+### [Hu et al. Density-based Sampling](7323-hu-et-al-density-based-sampling.md)
+Restricts fine network evaluation to regions of significant geometric presence using a fixed density threshold, skipping empty space entirely.
+
+### [DDNeRF](8860-ddnerf.md)
+Improves sampling efficiency by learning a continuous density distribution (mixture of truncated Gaussians) within each ray interval, replacing discrete weight normalization with parametric Gaussian estimation.
+
+## Operating characteristics
+*   **Time Complexity:** $O(N_{coarse} + N_{fine})$ network evaluations per ray [S1, S6].
+*   **Memory Complexity:** $O(N_{coarse} + N_{fine})$ per ray for storing sample positions, densities, and colors [G].
+*   **Measured Performance:** In NeRF-like settings, using $N_{coarse}=64$ and $N_{fine}=64-128$ provides a significant quality improvement over uniform sampling with similar total sample counts, or allows for higher quality with the same computational budget [S1, S6].
+*   **Strengths:** Efficiently allocates samples to complex regions, reducing noise and aliasing in detailed areas while maintaining speed in smooth regions [S4, unofficial][S6].
+*   **Limitations:** Requires two network passes (coarse and fine), increasing latency per ray, and the quality of the fine sampling is dependent on the accuracy of the coarse network's density predictions [S6].
+*   **When to Use:** When rendering scenes with high-frequency details or varying opacity, and computational resources allow for two network evaluations per ray [G].
+*   **When Not to Use:** In real-time applications with strict latency constraints where a single network pass is required, or in scenes with uniform density where uniform sampling is sufficient [G].
+
+## Background
+Hierarchical sampling was introduced as a core component of Neural Radiance Fields (NeRF) by Mildenhall et al. in 2020 [S2, unofficial][S6]. It was designed to address the issue that uniform sampling along rays is inefficient for scenes with complex geometry, as it wastes samples in empty space and under-samples detailed regions [S6][S8, unofficial]. The method builds on the idea of importance sampling, using a coarse estimate of the scene's density to guide the placement of finer samples [S1][S4, unofficial]. It has since become a standard technique in neural volume rendering and is used in many subsequent works, including [DDNeRF](8860-ddnerf.md) and [Hu et al. Density-based Sampling](7323-hu-et-al-density-based-sampling.md) [S1][S2, unofficial].
+
+## Sources
+[S1] VolRecon: Volume Rendering of Signed Ray Distance Functions for Generalizable Multi-View Reconstruction, https://doi.org/10.1109/cvpr52729.2023.01601, fetched 2026-10-26
+[S2] VaxNeRF: Revisiting the Classic for Voxel-Accelerated Neural Radiance Field, https://doi.org/10.48550/arxiv.2111.13112, fetched 2026-10-26 (unofficial)
+[S3] samirangode/Volume-Rendering-and-Neural-Radiance-Fields, https://github.com/samirangode/Volume-Rendering-and-Neural-Radiance-Fields, fetched 2026-10-26 (unofficial)
+[S4] yashtmy/nerf-3d-vision, https://github.com/yashtmy/nerf-3d-vision, fetched 2026-10-26 (unofficial)
+[S5] Volume ray casting — Grokipedia, https://grokipedia.com/page/Volume_ray_casting, fetched 2026-10-26
+[S6] 360FusionNeRF: Panoramic Neural Radiance Fields with Joint Guidance, https://doi.org/10.1109/iros55552.2023.10341346, fetched 2026-10-26
+[S7] Neural Radiance Field-based Visual Rendering: a Comprehensive Review, https://ieeexplore.ieee.org/abstract/document/11455380, fetched 2026-10-30
+[S8] Neural Radiance Fields - Lei Mao's Log Book, https://leimao.github.io/blog/Neural-Radiance-Fields-NeRF/, fetched 2026-10-27 (unofficial)
+[S9] Volume Rendering Integral: Definition & AI/ML Use, https://inferensys.com/glossary/neural-radiance-fields-and-spatial-computing/neural-scene-representations/volume-rendering-integral, fetched 2026-10-28 (unofficial)

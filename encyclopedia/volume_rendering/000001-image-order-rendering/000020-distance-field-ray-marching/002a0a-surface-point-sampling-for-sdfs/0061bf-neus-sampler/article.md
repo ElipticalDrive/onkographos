@@ -1,0 +1,226 @@
+# NeuS Sampler
+
+Also called: Fixed Variance SDF Sampling, NeuS SDF Sampling
+
+## Overview
+The NeuS Sampler is an iterative importance sampling method for Neural Surface Signed Distance Functions (SDFs) that refines sample distributions along rays by merging new high-probability points with existing ones [S1, unofficial]. It distinguishes itself from static sampling strategies by dynamically adjusting the "softness" of the SDF-to-alpha conversion via a fixed variance parameter that scales exponentially with iteration count, ensuring robust convergence near the surface [S1, unofficial].
+
+## How it works
+**Inputs and Outputs**
+- **Input**: `ray_samples` (initial uniform samples along rays), `sdf_fn` (neural SDF network), `num_upsample_steps` (integer), `num_samples_importance` (integer), `base_variance` (float).
+- **Output**: Refined `ray_samples` containing merged uniform and importance samples, sorted by distance.
+
+**Data Structures**
+- `ray_samples`: A structure containing sample positions and distances. Specifically, `ray_samples.deltas` is a tensor of shape `(num_rays, num_samples-1, 1)` representing the distance between adjacent sample points [S1, unofficial].
+- `sdf`: Tensor of SDF values evaluated at sample points.
+- `weights`: Tensor of rendering weights derived from alphas.
+- `sorted_index`: Indices used to maintain spatial order when merging old and new samples [S1, unofficial].
+
+**Parameters**
+- `num_samples`: Number of initial uniform samples. Default: 64 [S1, unofficial].
+- `num_samples_importance`: Number of importance samples to draw per upsample step [S1, unofficial].
+- `num_upsample_steps`: Number of iterative upsampling steps. Default: 4 [S1, unofficial].
+- `base_variance`: Base value for the inverse softness parameter `inv_s`. Default: 64 [S1, unofficial].
+
+**Algorithm Steps**
+1. **Initialization**: Set `total_iters = 0`. Initialize `sorted_index = None`, `sdf = None`. Set `new_samples` to the initial `ray_samples` [S1, unofficial].
+2. **Iteration Loop**: While `total_iters < num_upsample_steps`:
+    a. **SDF Evaluation**: Evaluate the SDF network on `new_samples` using `sdf_fn` in a no-gradient context (`torch.no_grad()`) [S1, unofficial].
+    b. **Merge SDF Values**:
+        - If `sorted_index` is not `None`, concatenate the existing `sdf` and the newly computed `new_sdf`. Gather the concatenated values using `sorted_index` to maintain the correct spatial order along the ray.
+        - If `sorted_index` is `None`, set `sdf = new_sdf` [S1, unofficial].
+    c. **Compute Alphas**: Calculate rendering alphas using the fixed variance method. The inverse softness parameter is computed as:
+       $$ inv\_s = base\_variance \times 2^{total\_iters} $$
+       Pass `ray_samples`, the reshaped `sdf` tensor, and `inv_s` to the alpha computation function [S1, unofficial].
+    d. **Compute Weights**:
+        - Calculate weights from the alphas.
+        - Concatenate a zero tensor of shape `(..., 1)` to the end of the weights tensor along dimension 1 (the sample dimension) [S1, unofficial].
+    e. **Draw Importance Samples**: Use a PDF sampler to draw `num_samples_importance // num_upsample_steps` new importance samples based on the current weights [S1, unofficial].
+    f. **Merge Ray Samples**: Merge the current `ray_samples` with the newly drawn `new_samples` using a merge function. This function returns the updated `ray_samples` and the `sorted_index` required for the next SDF merging step [S1, unofficial].
+    g. **Increment**: Increment `total_iters` by 1 [S1, unofficial].
+3. **Return**: The final merged `ray_samples` [S1, unofficial].
+
+**Alpha Computation Details**
+The core of the sampling lies in converting SDF values to alpha values robustly. Given SDF values at sample points, the algorithm estimates the derivative (cosine) of the SDF to determine the probability of intersection:
+1. Compute the cosine of the angle between adjacent SDF values:
+   $$ cos\_val = \frac{next\_sdf - prev\_sdf}{deltas + 10^{-5}} $$
+   where `deltas` are the distances between samples [S1, unofficial].
+2. Estimate the previous cosine value by shifting the current cosine array:
+   $$ prev\_cos\_val = [0, cos\_val[:, :-1]] $$
+   (Concatenated along the last dimension) [S1, unofficial].
+3. Compute the robust cosine by taking the element-wise minimum of the forward and backward estimates, then clipping to `[-1e3, 0.0]`:
+   $$ cos\_val = \min(prev\_cos\_val, cos\_val) $$
+   $$ cos\_val = \text{clip}(cos\_val, -1000, 0.0) $$
+   This step makes sampling robust against non-monotonic SDFs or noise [S1, unofficial].
+4. Estimate the SDF at the midpoints between samples:
+   $$ prev\_esti\_sdf = mid\_sdf - cos\_val \times dist \times 0.5 $$
+   $$ next\_esti\_sdf = mid\_sdf + cos\_val \times dist \times 0.5 $$
+   where `dist` is the distance between samples [S1, unofficial].
+5. Compute the cumulative distribution function (CDF) values using the sigmoid function with the current `inv_s`:
+   $$ prev\_cdf = \sigma(prev\_esti\_sdf \times inv\_s) $$
+   $$ next\_cdf = \sigma(next\_esti\_sdf \times inv\_s) $$
+6. Compute the alpha value:
+   $$ alpha = \frac{prev\_cdf - next\_cdf + 10^{-5}}{prev\_cdf + 10^{-5}} $$
+   [S1, unofficial].
+
+**Pseudocode**
+
+> **Unverified code.** The code below did not pass a test run against a reference implementation, or no test fits it, so it may contain errors.
+
+```python
+import torch
+import torch.nn.functional as F
+
+def neu_s_sampler(ray_samples, sdf_fn, num_upsample_steps=4, num_samples_importance=64, base_variance=64.0):
+    """
+    Iteratively upsample ray samples using NeuS fixed variance SDF sampling.
+    
+    Args:
+        ray_samples: Initial ray samples structure containing positions and deltas.
+        sdf_fn: Neural SDF function.
+        num_upsample_steps: Number of upsampling iterations.
+        num_samples_importance: Total importance samples to draw across all steps.
+        base_variance: Base inverse softness parameter.
+        
+    Returns:
+        Refined ray_samples.
+    """
+    total_iters = 0
+    sorted_index = None
+    sdf = None
+    new_samples = ray_samples
+    
+    # Pre-calculate number of importance samples per step
+    num_samples_per_step = num_samples_importance // num_upsample_steps
+    
+    while total_iters < num_upsample_steps:
+        # 1. Evaluate SDF on new samples
+        with torch.no_grad():
+            new_sdf = sdf_fn(new_samples)
+            
+        # 2. Merge SDF values
+        if sorted_index is not None:
+            # Concatenate old and new SDFs
+            all_sdf = torch.cat([sdf, new_sdf], dim=-1)
+            # Gather to maintain order
+            sdf = torch.gather(all_sdf, -1, sorted_index)
+        else:
+            sdf = new_sdf
+            
+        # 3. Compute alphas using fixed variance
+        inv_s = base_variance * (2 ** total_iters)
+        
+        # Extract deltas from ray_samples
+        # Assuming ray_samples.deltas has shape (num_rays, num_samples-1, 1)
+        deltas = ray_samples.deltas[..., 0] # Shape: (num_rays, num_samples-1)
+        
+        # Compute cos_val
+        # next_sdf and prev_sdf are derived from sdf tensor
+        # sdf shape: (num_rays, num_samples)
+        prev_sdf = sdf[..., :-1]
+        next_sdf = sdf[..., 1:]
+        
+        cos_val = (next_sdf - prev_sdf) / (deltas + 1e-5)
+        
+        # Compute prev_cos_val
+        zeros = torch.zeros_like(cos_val[..., :1])
+        prev_cos_val = torch.cat([zeros, cos_val[..., :-1]], dim=-1)
+        
+        # Robust cosine estimation
+        cos_val_stack = torch.stack([prev_cos_val, cos_val], dim=-1)
+        cos_val, _ = torch.min(cos_val_stack, dim=-1)
+        cos_val = torch.clamp(cos_val, min=-1e3, max=0.0)
+        
+        # Estimate midpoints
+        # mid_sdf is the average of prev and next sdf
+        mid_sdf = (prev_sdf + next_sdf) / 2.0
+        # dist is the delta distance
+        dist = deltas
+        
+        prev_esti_sdf = mid_sdf - cos_val * dist * 0.5
+        next_esti_sdf = mid_sdf + cos_val * dist * 0.5
+        
+        # Compute CDFs
+        prev_cdf = torch.sigmoid(prev_esti_sdf * inv_s)
+        next_cdf = torch.sigmoid(next_esti_sdf * inv_s)
+        
+        # Compute alphas
+        alpha = (prev_cdf - next_cdf + 1e-5) / (prev_cdf + 1e-5)
+        
+        # 4. Compute weights
+        # Alpha is probability of intersection in the interval.
+        # Weight is typically product of (1-alpha) up to that interval.
+        # Assuming standard volume rendering weights calculation
+        trans = torch.cumprod(1.0 - alpha + 1e-5, dim=-1)
+        weights = alpha * torch.cat([torch.ones_like(alpha[..., :1]), trans[..., :-1]], dim=-1)
+        
+        # Concatenate zero tensor to weights
+        weights = torch.cat([weights, torch.zeros_like(weights[..., :1])], dim=-1)
+        
+        # 5. Draw new importance samples
+        # This step requires a PDF sampler implementation.
+        # For the purpose of this article, we assume a helper function exists
+        # that draws samples based on weights.
+        new_samples = draw_importance_samples(ray_samples, weights, num_samples_per_step)
+        
+        # 6. Merge ray samples
+        ray_samples, sorted_index = merge_ray_samples(ray_samples, new_samples)
+        
+        # 7. Increment
+        total_iters += 1
+        
+    return ray_samples
+
+def draw_importance_samples(ray_samples, weights, num_samples):
+    """
+    Helper function to draw importance samples.
+    Implementation detail: [G]
+    """
+    # Normalize weights to form a PDF
+    pdf = weights / (weights.sum(dim=-1, keepdim=True) + 1e-5)
+    cdf = torch.cumsum(pdf, dim=-1)
+    # Add boundary conditions
+    cdf = torch.cat([torch.zeros_like(cdf[..., :1]), cdf], dim=-1)
+    
+    # Draw uniform random numbers
+    u = torch.rand_like(cdf)
+    
+    # Inverse CDF sampling
+    # Find indices where cdf >= u
+    indices = torch.searchsorted(cdf, u, side='right')
+    
+    # Interpolate positions
+    # This is a simplified placeholder for the actual interpolation logic
+    # which depends on the specific ray_samples structure
+    return ray_samples.interpolate(indices)
+
+def merge_ray_samples(old_samples, new_samples):
+    """
+    Helper function to merge and sort ray samples.
+    Implementation detail: [G]
+    """
+    # Concatenate samples
+    all_samples = torch.cat([old_samples.positions, new_samples.positions], dim=-1)
+    # Sort positions
+    sorted_positions, sorted_indices = torch.sort(all_samples, dim=-1)
+    
+    # Reconstruct ray_samples structure from sorted_positions
+    # This is a simplified placeholder
+    merged_samples = old_samples.copy()
+    merged_samples.positions = sorted_positions
+    
+    return merged_samples, sorted_indices
+```
+
+## Operating characteristics
+- **Time Complexity**: $O(N \cdot K \cdot \log M)$, where $N$ is the number of rays, $K$ is the number of upsample steps, and $M$ is the number of samples per step. The sorting step dominates the complexity [S1, unofficial].
+- **Memory Complexity**: $O(N \cdot M)$, as it stores SDF values and weights for all samples [S1, unofficial].
+- **Strengths**: Robust to noise and non-monotonic SDFs due to the minimum cosine estimation. The exponential scaling of `inv_s` ensures that early iterations explore broadly while later iterations focus tightly on the surface [S1, unofficial].
+- **Limitations**: Requires multiple forward passes through the SDF network per ray. The fixed variance parameter may need tuning for different scene scales [S1, unofficial].
+- **When to use**: Ideal for neural surface reconstruction where the SDF is learned and may exhibit noise or non-ideal properties near the surface [S1, unofficial].
+
+## Background
+The NeuS Sampler was introduced in the context of Neural Surface SDFs, specifically within the Nerfstudio framework [S1, unofficial]. It builds upon the NeuS (Neural Surface SDF) method, which uses a neural network to represent a signed distance function for implicit surface reconstruction [S1, unofficial]. The method addresses the challenge of efficiently sampling along rays to render high-quality images from noisy or imperfect SDFs [S1, unofficial].
+
+## Sources
+[S1] nerfstudio-project/nerfstudio, https://github.com/nerfstudio-project/nerfstudio, fetched 2026-10-26 (unofficial)

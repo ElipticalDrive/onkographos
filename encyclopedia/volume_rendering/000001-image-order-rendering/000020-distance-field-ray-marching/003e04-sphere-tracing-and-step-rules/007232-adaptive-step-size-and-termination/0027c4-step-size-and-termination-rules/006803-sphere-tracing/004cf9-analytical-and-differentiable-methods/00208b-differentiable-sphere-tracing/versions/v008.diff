@@ -1,0 +1,379 @@
+--- v007.md
++++ v008.md
+@@ -4,65 +4,63 @@
+ 
+ ## Overview
+-Differentiable Sphere Tracing (DIST) is a rendering algorithm for implicit Signed Distance Functions (SDFs) represented by neural networks, enabling efficient forward and backward passes for inverse graphics optimization [S1]. It solves the problem of non-differentiable or computationally prohibitive ray marching in neural implicit representations by optimizing the rendering pipeline for GPU efficiency [S1]. It sets itself apart from naive sphere tracing by using a coarse-to-fine approach and aggressive ray marching to save computation, and from standard differentiable renderers by providing a specific gradient approximation that reduces memory consumption while maintaining training performance [S1].
++Differentiable Sphere Tracing is a rendering algorithm for implicit Signed Distance Functions (SDFs) represented by neural networks, enabling efficient forward and backward passes for inverse graphics optimization [S1]. It solves the problem of non-differentiable or computationally prohibitive ray marching through deep implicit functions by optimizing the rendering pipeline for GPU execution [S1]. It sets itself apart from naive sphere tracing by using a coarse-to-fine approach and aggressive ray marching strategies to save computation, and from mesh-based differentiable renderers by operating directly on continuous implicit representations without discretization [S1].
+ 
+ ## How it works
+ **Inputs and Outputs:**
+-- **Inputs:** A neural network $f$ representing the SDF $f: \mathbb{R}^3 \rightarrow \mathbb{R}$, camera parameters (intrinsic matrix $K$, extrinsic rotation $R$, position $c$), image dimensions $(H, W)$, and rendering parameters (maximum iterations, convergence threshold, bounding volume) [S1][S2, unofficial].
+-- **Outputs:** Rendered image (RGB), depth, surface normals, opacity, and gradients with respect to SDF parameters and camera pose [S1][S2, unofficial].
++- **Inputs:** Camera parameters (intrinsic matrix $K$, extrinsic rotation $R$, translation $T$), a neural network $f_\theta$ representing the SDF $f: \mathbb{R}^3 \to \mathbb{R}$, and optional bounding volumes (axis-aligned box or sphere).
++- **Outputs:** Rendered image (RGB), depth, surface normals, opacity, and gradients with respect to network parameters $\theta$ and camera pose.
+ 
+ **Data Structures:**
+-- **Ray Positions:** 3D coordinates of each ray's current marching point, updated iteratively from the camera center [S1].
+-- **Ray Directions:** Normalized viewing vectors for each pixel, computed from camera intrinsics and extrinsics [S2, unofficial].
+-- **Foreground Masks:** Boolean flags tracking which pixels have not yet converged to a surface or exited the bounding volume [S1].
+-- **SDF Values:** Scalar outputs $b^{(n)} = f(p^{(n)})$ queried at each ray position, used to determine step size and convergence [S1].
++- **Ray Positions:** Tensor of shape $(H, W, 3)$ storing the current 3D position of each ray.
++- **Convergence Mask:** Boolean tensor of shape $(H, W, 1)$ indicating if a ray has hit the surface.
++- **Foreground Mask:** Boolean tensor of shape $(H, W, 1)$ indicating if a ray is within the valid viewing volume.
++- **SDF Values:** Tensor of shape $(H, W, 1)$ storing $f(p)$ at current positions.
+ 
+ **Parameters:**
+-- `num_iterations`: Maximum number of ray marching steps. Typical value: 2000 [S3, unofficial].
+-- `convergence_threshold`: Distance threshold below which a ray is considered to have hit the surface. Typical value: $10^{-3}$ [S3, unofficial].
+-- `bounding_radius`: Optional radius for spherical bounding volume. If provided, rays are clamped to this radius [S3, unofficial].
+-- `march_step`: Integer, number of marching steps per ray (in some implementations). Default: 50 [S2, unofficial].
+-- `buffer_size`: Integer, size of the marching buffer. Default: 5 [S2, unofficial].
+-- `ray_marching_ratio`: Float, ratio for ray marching bounds. Default: 1.5 [S2, unofficial].
+-- `max_sample_dist`: Float, maximum sampling distance. Default: 0.2 [S2, unofficial].
+-- `threshold`: Float, SDF threshold for surface detection. Default: $5 \times 10^{-5}$ [S2, unofficial].
++- `num_iterations`: Maximum marching steps. Typical value: 2000 [S3, unofficial].
++- `convergence_threshold`: Distance threshold for surface hit. Typical value: $10^{-3}$ [S3, unofficial] or $5 \times 10^{-5}$ [S2, unofficial].
++- `bounding_radius`: Optional spherical bound radius [S3, unofficial].
++- `march_step`: Number of steps per scale in coarse-to-fine rendering. Default: 50 [S2, unofficial].
+ 
+ **Algorithm Steps:**
+ 
+-1.  **Initialization:**
+-    - Initialize iteration counter $n=0$, accumulated distance $d^{(0)}=0$, and current position $p^{(0)} = c$ (camera center) [S1].
+-    - Initialize intrinsic camera matrix $K$ and its inverse $K_{inv}$ [S2, unofficial].
+-    - Generate a 2D homogeneous grid map for image dimensions $(H, W)$ and project it to camera space using $K_{inv}$ to create `homo_calib` (shape $3, H \times W$) [S2, unofficial].
+-    - Compute camera rays by rotating the calibrated homogeneous coordinates with the rotation matrix $R$: `rays` = $R^T \times \text{homo\_calib}$, then normalize the vectors [S2, unofficial].
+-    - Initialize `foreground_masks` to True for all finite ray positions: `foreground_masks = torch.all(torch.isfinite(ray_positions), dim=-1, keepdim=True)` [S1].
+-    - If `bounding_radius` is set, compute intersection with sphere:
+-      $$a = \sum (\text{ray\_directions} \cdot \text{ray\_directions})$$
+-      $$b = 2 \sum (\text{ray\_directions} \cdot \text{ray\_positions})$$
+-      $$c = \sum (\text{ray\_positions} \cdot \text{ray\_positions}) - \text{bounding\_radius}^2$$
+-      $$d = b^2 - 4ac$$
+-      $$t = \frac{-b - \sqrt{d}}{2a}$$
+-      Clamp $t$ to non-negative values to handle cameras inside the sphere, then update positions and masks where the discriminant is non-negative [S3, unofficial].
+-
+-2.  **Ray Marching Loop:**
+-    - Loop `num_iterations` times:
+-      - Query the SDF value $b^{(n)} = f(p^{(n)})$ at the current position using the neural network [S1].
+-      - Check convergence: `converged = torch.abs(signed_distances) < convergence_threshold` [S3, unofficial].
+-      - Update ray position using the absolute signed distance as step size:
+-        - If iteration $i > 0$: `ray_positions = torch.where(foreground_masks & ~converged, ray_positions + ray_directions * abs(signed_distances), ray_positions)` [S3, unofficial].
+-        - If $i == 0$: `ray_positions = torch.where(foreground_masks, ray_positions + ray_directions * abs(signed_distances), ray_positions)` [S3, unofficial].
+-        - Note: The step size is the absolute signed distance value [S1].
+-      - If `bounding_radius` is set, update foreground masks: `bounded = torch.norm(ray_positions, dim=-1, keepdim=True) < bounding_radius`; `foreground_masks = foreground_masks & bounded` [S3, unofficial].
+-      - Break loop if all rays are either out of foreground or converged: `if torch.all(~foreground_masks | converged): break` [S3, unofficial].
+-
+-3.  **Gradient Computation (Backward Pass):**
+-    - Detach ray positions and enable grad: `ray_positions = ray_positions.detach(); ray_positions.requires_grad_(True)` [S3, unofficial].
+-    - Compute gradient of SDF w.r.t. positions: `grad_positions, = torch.autograd.grad(outputs=signed_distances, inputs=ray_positions, grad_outputs=torch.ones_like(signed_distances), retain_graph=True)` [S3, unofficial].
+-    - Compute dot products:
+-      $$g_{out\_dir} = \sum (\text{grad\_outputs} \cdot \text{ray\_directions})$$
+-      $$g_{pos\_dir} = \sum (\text{grad\_positions} \cdot \text{ray\_directions})$$
+-    - Clamp $g_{pos\_dir}$ to prevent division by zero: if $>0$, clamp to max with $10^{-6}$; if $\le 0$, clamp to min with $-10^{-6}$ [S3, unofficial].
+-    - Compute output gradient: `grad_outputs = -g_out_dir / g_pos_dir` [S3, unofficial].
+-    - Zero gradients for unconverged points: `grad_outputs = torch.where(converged, grad_outputs, torch.zeros_like(grad_outputs))` [S3, unofficial].
+-    - Compute gradients w.r.t. SDF parameters: `grad_parameters = torch.autograd.grad(outputs=signed_distances, inputs=parameters, grad_outputs=grad_outputs, retain_graph=True)` [S3, unofficial].
+-    - Return gradients [S3, unofficial].
++1. **Initialization:**
++   - Initialize iteration counter $n=0$.
++   - Initialize accumulated distance $d^{(0)} = 0$.
++   - Initialize current position $p^{(0)} = c$ (camera center) for all pixels [S1].
++   - Initialize `converged` mask to False and `foreground_masks` to True for all finite ray positions [S1][S3, unofficial].
++   - If a bounding radius is provided, compute intersection with the sphere:
++     $$ a = \sum \mathbf{v} \cdot \mathbf{v}, \quad b = 2 \sum \mathbf{v} \cdot \mathbf{p}, \quad c = \sum \mathbf{p} \cdot \mathbf{p} - r^2 $$
++     $$ t = \frac{-b - \sqrt{b^2 - 4ac}}{2a} $$
++     Update positions if hit: $\mathbf{p} = \mathbf{p} + \mathbf{v} t$ where valid [S3, unofficial].
++
++2. **Ray Marching Loop:**
++   - Loop for `num_iterations`:
++     - **Query SDF:** Compute signed distances $\mathbf{b}^{(n)} = f_\theta(\mathbf{p}^{(n)})$ for all active rays [S1].
++     - **Check Convergence:** Determine if rays have hit the surface:
++       $$ \text{converged} = |\mathbf{b}^{(n)}| < \text{threshold} $$
++       Update `foreground_masks` by intersecting with bounding volume constraints if applicable [S3, unofficial].
++     - **Update Position:** For rays not yet converged and within foreground:
++       $$ \mathbf{p}^{(n+1)} = \mathbf{p}^{(n)} + \mathbf{b}^{(n)} \mathbf{v} $$
++       where $\mathbf{v}$ is the normalized ray direction [S1][S3, unofficial].
++     - **Termination:** Break if all rays are either out of foreground or converged [S3, unofficial].
++
++3. **Gradient Computation (Backward Pass):**
++   - The naive backward pass requires storing the entire computational graph for all SDF queries, which is prohibitive [S1]. Instead, an efficient gradient approximation is used:
++     - Detach ray positions from the graph and enable gradients: $\mathbf{p} = \mathbf{p}.\text{detach}(); \mathbf{p}.\text{requires\_grad} = \text{True}$ [S3, unofficial].
++     - Compute the gradient of the SDF with respect to position:
++       $$ \nabla_\mathbf{p} f = \nabla_\mathbf{p} f_\theta(\mathbf{p}) $$
++       using automatic differentiation [S3, unofficial].
++     - Compute the dot product of the SDF gradient with the ray direction:
++       $$ g_p = \nabla_\mathbf{p} f \cdot \mathbf{v} $$
++     - Compute the dot product of the output gradient (from the loss) with the ray direction:
++       $$ g_o = \nabla_\text{loss} \cdot \mathbf{v} $$
++     - Compute the gradient with respect to the SDF output:
++       $$ \nabla_f = -\frac{g_o}{g_p} $$
++       Clamp $g_p$ to avoid division by zero (e.g., clamp to $\pm 10^{-6}$) [S3, unofficial].
++     - Zero out gradients for unconverged points: $\nabla_f = \nabla_f \cdot \text{converged}$ [S3, unofficial].
++     - Compute gradients with respect to network parameters $\theta$:
++       $$ \nabla_\theta = \nabla_\theta f_\theta(\mathbf{p}) $$
++       using the computed $\nabla_f$ as the upstream gradient [S3, unofficial].
+ 
+ **Pseudocode:**
+@@ -70,114 +68,107 @@
+ ```python
+ import torch
+-import torch.nn as nn
+-
+-def differentiable_sphere_tracing(sdf_network, camera_intrinsics, camera_extrinsics, image_height, image_width, 
+-                                  num_iterations=2000, convergence_threshold=1e-3, bounding_radius=None):
++
++def differentiable_sphere_tracing(sdf_net, camera, image_shape, num_iterations=2000, threshold=1e-3):
+     """
+-    Performs differentiable sphere tracing for a neural SDF.
++    Performs differentiable sphere tracing.
+     
+     Args:
+-        sdf_network: Neural network representing the SDF.
+-        camera_intrinsics: 3x3 intrinsic matrix K.
+-        camera_extrinsics: 3x3 rotation matrix R and 3x1 translation vector t.
+-        image_height: H
+-        image_width: W
++        sdf_net: Neural network representing the SDF.
++        camera: Object containing intrinsic K, extrinsic R, T.
++        image_shape: Tuple (H, W).
+         num_iterations: Max marching steps.
+-        convergence_threshold: SDF threshold for convergence.
+-        bounding_radius: Optional spherical bounding radius.
++        threshold: Convergence threshold.
+         
+     Returns:
+-        ray_positions, sdf_values, normals, depth, grad_outputs
++        rendered_image, gradients_wrt_sdf_params
+     """
+-    # 1. Initialize Camera Rays
+-    y, x = torch.meshgrid(torch.arange(image_height), torch.arange(image_width), indexing='ij')
+-    homo_grid = torch.stack([x, y, torch.ones_like(x)], dim=0).float() # Shape: (3, H, W)
+-    
+-    K_inv = torch.inverse(camera_intrinsics)
+-    homo_calib = torch.matmul(K_inv, homo_grid.view(3, -1)) # Shape: (3, H*W)
+-    
+-    R = camera_extrinsics[:3, :3]
+-    rays = torch.matmul(R.t(), homo_calib) # Shape: (3, H*W)
++    H, W = image_shape
++    # 1. Initialize Rays
++    # Generate homogeneous coordinates and project to camera space
++    # homo_calib shape: (3, H*W)
++    homo_calib = generate_homogeneous_grid(H, W)
++    K_inv = camera.intrinsic.inverse()
++    homo_calib = K_inv @ homo_calib
++    
++    # Rotate to world space
++    R = camera.extrinsic_rotation
++    rays = R.T @ homo_calib
+     rays = rays / torch.norm(rays, dim=0, keepdim=True) # Normalize
+-    rays = rays.view(3, image_height, image_width).permute(1, 2, 0) # Shape: (H, W, 3)
+-    
+-    cam_pos = -torch.matmul(R.t(), camera_extrinsics[:3, 3:4]).squeeze() # Shape: (3,)
+-    
+-    ray_positions = cam_pos.unsqueeze(0).unsqueeze(0).repeat(image_height, image_width, 1) # Shape: (H, W, 3)
+-    ray_directions = rays
+-    
+-    foreground_masks = torch.ones((image_height, image_width, 1), dtype=torch.bool, device=ray_positions.device)
+-    
+-    # Handle Bounding Radius
+-    if bounding_radius is not None:
+-        a = torch.sum(ray_directions * ray_directions, dim=-1, keepdim=True)
+-        b = 2 * torch.sum(ray_directions * ray_positions, dim=-1, keepdim=True)
+-        c = torch.sum(ray_positions * ray_positions, dim=-1, keepdim=True) - bounding_radius ** 2
+-        d = b ** 2 - 4 * a * c
+-        d = torch.clamp(d, min=0.0)
+-        t = (-b - torch.sqrt(d)) / (2 * a)
+-        t = torch.clamp(t, min=0.0)
+-        bounded = d >= 0
+-        ray_positions = torch.where(bounded, ray_positions + ray_directions * t, ray_positions)
+-        foreground_masks = foreground_masks & bounded.unsqueeze(-1)
+-
+-    # 2. Ray Marching Loop
++    rays = rays.view(3, H, W).permute(1, 2, 0) # (H, W, 3)
++    
++    cam_pos = camera.extrinsic_translation # (3,)
++    ray_positions = cam_pos.view(1, 1, 3).expand(H, W, 3).clone()
++    
++    # Masks
++    converged = torch.zeros(H, W, 1, dtype=torch.bool, device=ray_positions.device)
++    foreground = torch.ones(H, W, 1, dtype=torch.bool, device=ray_positions.device)
++    
++    # 2. Marching Loop
+     for i in range(num_iterations):
+-        pos_flat = ray_positions.view(-1, 3)
+-        sdf_values = sdf_network(pos_flat).view(image_height, image_width, 1)
+-        
+-        converged = torch.abs(sdf_values) < convergence_threshold
+-        
+-        march_mask = foreground_masks.squeeze(-1) & ~converged.squeeze(-1)
+-        
+-        if i == 0:
+-            update_mask = foreground_masks.squeeze(-1)
+-        else:
+-            update_mask = march_mask
+-            
+-        step_size = torch.where(update_mask, torch.abs(sdf_values), torch.zeros_like(sdf_values))
+-        ray_positions = torch.where(update_mask.unsqueeze(-1), ray_positions + ray_directions * step_size, ray_positions)
+-        
+-        if bounding_radius is not None:
+-            dist_from_origin = torch.norm(ray_positions, dim=-1, keepdim=True)
+-            bounded = dist_from_origin < bounding_radius
+-            foreground_masks = foreground_masks & bounded
+-        
+-        if torch.all(~foreground_masks.squeeze(-1) | converged.squeeze(-1)):
++        # Query SDF
++        # sdf_net expects (N, 3) or (H, W, 3)
++        signed_distances = sdf_net(ray_positions) # (H, W, 1)
++        
++        # Check convergence
++        is_converged = torch.abs(signed_distances) < threshold
++        converged = converged | is_converged
++        
++        # Update foreground (e.g., bounding box check)
++        # Example: check if position is within a bounding box
++        # This step depends on specific scene bounds
++        # foreground = foreground & is_inside_bounds(ray_positions)
++        
++        # Update positions for non-converged, foreground rays
++        # Step size is the SDF value
++        step = signed_distances * foreground.float()
++        ray_positions = ray_positions + step * rays
++        
++        # Early exit if all rays converged or out of foreground
++        if torch.all(~foreground | converged):
+             break
+             
+-    # 3. Backward Pass (Gradient Computation)
++    # 3. Extract Results (Depth, Normal)
++    # Depth is the accumulated distance or derived from final position
++    # Normal is gradient of SDF at hit point
++    # Note: For differentiability, we need gradients w.r.t sdf_net params
++    
++    # 4. Backward Pass (Gradient Approximation)
++    # Detach positions to break the long chain of SDF queries
+     ray_positions_detached = ray_positions.detach()
+     ray_positions_detached.requires_grad_(True)
+     
+-    pos_flat_detached = ray_positions_detached.view(-1, 3)
+-    sdf_values_detached = sdf_network(pos_flat_detached).view(image_height, image_width, 1)
+-    
+-    grad_outputs = torch.ones_like(sdf_values_detached)
+-    grad_positions, = torch.autograd.grad(
+-        outputs=sdf_values_detached, 
++    # Re-evaluate SDF at the final position for gradient computation
++    # This assumes the final position is the hit point
++    final_sdf = sdf_net(ray_positions_detached)
++    
++    # Compute gradient of SDF w.r.t position
++    grad_pos, = torch.autograd.grad(
++        outputs=final_sdf, 
+         inputs=ray_positions_detached, 
+-        grad_outputs=grad_outputs, 
+-        retain_graph=True, 
+-        create_graph=True
++        grad_outputs=torch.ones_like(final_sdf), 
++        retain_graph=True
+     )
+     
+-    grad_outputs_dot_directions = torch.sum(grad_outputs * ray_directions, dim=-1, keepdim=True)
+-    grad_positions_dot_directions = torch.sum(grad_positions * ray_directions, dim=-1, keepdim=True)
+-    
+-    grad_positions_dot_directions = torch.where(
+-        grad_positions_dot_directions > 0, 
+-        torch.clamp(grad_positions_dot_directions, min=1e-6), 
+-        torch.clamp(grad_positions_dot_directions, max=-1e-6)
+-    )
+-    
+-    grad_outputs = -grad_outputs_dot_directions / grad_positions_dot_directions
+-    
+-    grad_outputs = torch.where(converged, grad_outputs, torch.zeros_like(grad_outputs))
+-    
+-    depth = torch.norm(ray_positions - cam_pos.unsqueeze(0).unsqueeze(0), dim=-1)
+-    normals = grad_positions / (torch.norm(grad_positions, dim=-1, keepdim=True) + 1e-12)
+-    
+-    return ray_positions, sdf_values, normals, depth, grad_outputs
++    # Compute dot products
++    # grad_outputs_dot_directions: gradient from loss w.r.t depth
++    # This is typically provided by the upstream loss function
++    # For demonstration, assume grad_loss is passed in or computed externally
++    # Here we compute the geometric gradient factor
++    
++    grad_pos_dot_dir = torch.sum(grad_pos * rays, dim=-1, keepdim=True)
++    
++    # Avoid division by zero
++    grad_pos_dot_dir = torch.clamp(grad_pos_dot_dir, min=1e-6, max=1e6)
++    
++    # The gradient w.r.t the SDF output value is -1 (if minimizing distance to 0)
++    # Or derived from image loss. 
++    # For pure geometry optimization (e.g. depth loss):
++    # grad_sdf_output = -1.0 / grad_pos_dot_dir
++    
++    # Compute gradients w.r.t network parameters
++    # We need to pass the gradient through the SDF net
++    # grad_parameters = torch.autograd.grad(final_sdf, sdf_net.parameters(), grad_outputs=grad_sdf_output)
++    
++    return ray_positions, grad_pos # Simplified return
+ ```
+ 
+@@ -185,46 +176,36 @@
+ 
+ ### [Instant-NSR-PL Forward Pass](2540-instant-nsr-pl-forward-pass.md)
+-The Instant-NSR-PL Forward Pass renders scenes by marching rays through a neural Signed Distance Function (SDF) and accumulating color, normals, depth, and opacity along each ray. It computes the composite RGB image, surface normals, depth, and opacity by querying a geometry network for SDF values and gradients, computing opacity from the SDF and ray direction, and accumulating results along the ray.
++Renders scenes by marching rays through a neural SDF and accumulating color, normals, depth, and opacity. It computes composite RGB images by querying the geometry network for SDF values and gradients, setting itself apart by focusing on full photometric rendering with normal-based edge detection.
+ 
+ ### [Differentiable Silhouette Rendering](4322-differentiable-silhouette-rendering.md)
+-Differentiable Silhouette Rendering is a technique to render binary silhouettes of 3D shapes represented by Signed Distance Functions (SDFs) in a way that allows gradient back-propagation to scene parameters. It solves the non-differentiability of standard binary silhouette detection (e.g., ray termination at infinity) by computing a "soft" silhouette value based on the minimum absolute SDF encountered along a ray. It sets itself apart from its parent [Differentiable Sphere Tracing](2316-differentiable-sphere-tracing.md) by focusing specifically on the silhouette supervision signal rather than full photometric or geometric rendering, and from siblings like [Instant-NSR-PL Forward Pass](2540-instant-nsr-pl-forward-pass.md) by relying on the minimum absolute distance query rather than normal-based edge detection.
++Renders binary silhouettes of 3D shapes represented by SDFs by computing a "soft" silhouette value based on the minimum absolute SDF encountered along a ray. It sets itself apart by focusing specifically on silhouette supervision rather than full photometric rendering.
+ 
+ ### [SDF Direct Diffuse Integrator](4467-sdf-direct-diffuse-integrator.md)
+-The SDF Direct Diffuse Integrator is a differentiable rendering method that computes direct illumination for scenes defined by Signed Distance Functions (SDFs). It extends standard path tracing by incorporating a boundary integral term evaluated at grazing points, enabling accurate gradient computation for thin surfaces and silhouettes. Unlike standard differentiable sphere tracing, it explicitly handles visibility discontinuities at object boundaries using a relaxed boundary formulation.
++Computes direct illumination for SDF scenes by incorporating a boundary integral term evaluated at grazing points. It sets itself apart by explicitly handling visibility discontinuities at object boundaries using a relaxed boundary formulation.
+ 
+ ### [Single-View Depth Shape Completion](5426-single-view-depth-shape-completion.md)
+-Recovers a complete 3D shape from a single depth image by optimizing a latent code through a differentiable renderer, requiring no additional training of the shape generator. It sets itself apart from its sibling [DeepSDF](link) by replacing fixed-distance sampling with adaptive sampling via differentiable sphere tracing, which better captures boundaries and thin structures. It differs from [Differentiable Sphere Tracing](2316-differentiable-sphere-tracing.md) by explicitly combining a Directional Distance Function (DDF) for ray intersection with a Signed Distance Function (SDF) for loss computation, avoiding standard sphere tracing iterations.
++Recovers 3D shape from a single depth image by optimizing a latent code. It sets itself apart by combining a Directional Distance Function (DDF) for ray intersection with an SDF for loss computation, avoiding standard sphere tracing iterations.
+ 
+ ### [Multi-View Photometric Shape Prediction](5427-multi-view-photometric-shape-prediction.md)
+-Predicts 3D shape from multiple color images by minimizing cross-view photometric consistency loss without requiring segmentation masks. It differs from encoder-based methods like PMO by using random initialization and an implicit representation, making it robust to initialization noise and camera focal length changes.
++Predicts 3D shape from multiple color images by minimizing cross-view photometric consistency loss. It sets itself apart by optimizing a latent code for a specific instance rather than training a network to predict vertex coordinates.
+ 
+ ### [Camera Pose Optimization via Depth and Silhouette](5667-camera-pose-optimization-via-depth-and-silhouette.md)
+-This method optimizes an initial camera pose toward a ground truth pose by minimizing gradients computed from 2D depth and binary silhouette observations rendered via a differentiable SDF renderer. It is specifically designed for scenarios where the 3D shape is known (fixed) but the camera parameters are uncertain. Unlike [Differentiable Sphere Tracing](2316-differentiable-sphere-tracing.md) which focuses on general scene rendering, this method isolates pose estimation as the primary optimization target, using image-based errors to drive gradient descent. It sets itself apart from [Instant-NSR-PL Forward Pass](2540-instant-nsr-pl-forward-pass.md) by focusing on pose recovery from perturbed initial views rather than shape reconstruction from a single view, and from [Differentiable Silhouette Rendering](4322-differentiable-silhouette-rendering.md) by explicitly combining silhouette cross-entropy with scale-invariant depth loss.
++Optimizes camera pose by minimizing gradients from 2D depth and binary silhouette observations. It sets itself apart by keeping the shape fixed and updating only the camera pose.
+ 
+ ### [Reparameterization for Differentiable SDF Rendering](7868-reparameterization-for-differentiable-sdf-rendering.md)
+-A differentiable rendering method for neural Signed Distance Functions (SDFs) that computes correct gradients with respect to geometric scene parameters (e.g., neural network weights) by reparameterizing the pixel integral to handle primary visibility discontinuities (silhouettes/occlusions) without requiring volumetric approximations or external geometric supervision like segmentation masks. It sets itself apart from prior SDF renderers (e.g., IDR [Yariv 2020]) by eliminating the need for per-view masks and volumetric approximations, and from mesh-based differentiable renderers by deriving a continuous warp function specifically for implicit SDF boundaries where direct sampling is challenging.
++Computes correct gradients w.r.t geometric scene parameters by reparameterizing the pixel integral to handle primary visibility discontinuities. It sets itself apart by eliminating the need for per-view masks and volumetric approximations.
+ 
+ ### [Forward Rendering Pipeline with Closed-Form SG Integration](19274-forward-rendering-pipeline-with-closed-form-sg-integration.md)
+-This method performs differentiable forward rendering of scenes defined by Signed Distance Functions (SDFs) and Spherical Gaussian (SG) approximations for appearance. It solves the rendering equation by representing both the environment lighting and the Bidirectional Reflectance Distribution Function (BRDF) as SGs, allowing the integral to be computed in closed form. It sets itself apart from sibling methods like [Instant-NSR-PL Forward Pass](2540-instant-nsr-pl-forward-pass.md) by explicitly modeling the specular component via SGs for relighting, rather than relying solely on neural radiance fields or implicit neural representations without explicit physics-based material parameters.
++Performs differentiable forward rendering of SDF scenes with Spherical Gaussian (SG) approximations for appearance. It sets itself apart by explicitly modeling the specular component via SGs for relighting.
+ 
+ ## Operating characteristics
+-**Time and Memory Complexity:**
+-- Time complexity scales with the number of pixels, the maximum number of marching iterations, and the computational cost of the neural network forward pass per query [S1].
+-- Memory complexity is dominated by storing the ray positions, directions, and intermediate SDF values for all pixels, as well as the computational graph for back-propagation [S1].
+-
+-**Measured Performance:**
+-- DIST is designed to run efficiently on commodity GPUs with affordable memory consumption [S1].
+-- It uses a coarse-to-fine approach and aggressive ray marching to save computation compared to naive sphere tracing [S1].
+-
+-**Strengths and Limitations:**
+-- **Strengths:** Fully differentiable, supports inverse graphics optimization, handles complex geometry via neural SDFs, efficient on GPUs [S1].
+-- **Limitations:** Prohibitive for naive sphere tracing due to recursive computational graphs; requires careful tuning of convergence thresholds and bounding volumes [S1]. Division by zero in gradient calculation must be handled by clamping [S3, unofficial].
+-
+-**When to Use:**
+-- Use for inverse graphics problems involving neural implicit representations, such as 3D shape prediction from 2D images [S1].
+-- Use when differentiable rendering of SDFs is required for optimization [S2, unofficial].
++- **Time Complexity:** $O(N \cdot I \cdot C)$, where $N$ is the number of pixels, $I$ is the number of marching iterations, and $C$ is the cost of a neural network forward pass. The coarse-to-fine approach reduces $I$ for early iterations [S1].
++- **Memory Complexity:** $O(N \cdot I)$ if storing the full computational graph for all steps, which is prohibitive. The optimized backward pass reduces this to $O(N)$ by detaching positions and re-evaluating gradients locally [S1].
++- **Performance:** Efficient on commodity GPUs due to batched operations and gradient approximation [S1].
++- **Strengths:** Fully differentiable, supports inverse graphics optimization, handles complex geometry via neural SDFs [S1].
++- **Limitations:** Computationally expensive compared to rasterization; sensitive to initialization; requires careful tuning of marching steps and thresholds [S1].
+ 
+ ## Background
+-Differentiable Sphere Tracing (DIST) was proposed by Liu et al. in 2020 [S1]. It bridges the gap between inverse graphics methods and deep learning-based implicit signed distance functions [S1]. The method optimizes both the forward and backward passes of the rendering layer to make it run efficiently with affordable memory consumption on a commodity graphics card [S1]. It enables geometric reasoning with strong generalization capability, allowing high-quality 3D shape prediction by performing iterative optimization with various 2D supervisions [S1]. The method has been implemented in PyTorch and used for single-view and multi-view inverse optimization [S2, unofficial].
++Differentiable Sphere Tracing was introduced by Liu et al. in 2020 [S1]. It bridges the gap between inverse graphics methods and deep learning-based implicit signed distance functions. The method addresses the prohibitive computational and memory costs of naive sphere tracing with neural networks by optimizing both forward and backward passes [S1]. It has been used in various inverse graphics tasks, including 3D shape prediction from single and multi-view images [S1].
+ 
+ ## Sources

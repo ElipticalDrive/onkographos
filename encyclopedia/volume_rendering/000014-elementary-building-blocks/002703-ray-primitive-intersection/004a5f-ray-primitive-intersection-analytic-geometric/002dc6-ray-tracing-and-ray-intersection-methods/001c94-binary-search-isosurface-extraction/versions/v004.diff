@@ -1,0 +1,194 @@
+--- v003.md
++++ v004.md
+@@ -4,98 +4,104 @@
+ 
+ ## Overview
+-Binary Search IsoSurface Extraction approximates the position of an isosurface between two sample points by iteratively halving the interval based on scalar field values [S1, unofficial]. It solves the problem of locating the precise intersection of a ray with a specific density threshold (isovalue) within a volumetric dataset [S2, unofficial]. Unlike [Trilinear Isosurface Intersection](2213-trilinear-isosurface-intersection.md), which analytically solves for the intersection with linearly interpolated planes, this method uses a numerical bisection approach [S1, unofficial]. It differs from [Hybrid Implicit Isosurface Ray Tracing](3832-hybrid-implicit-isosurface-ray-tracing.md) by relying on discrete texture sampling rather than implicit function evaluation or hierarchical acceleration structures [S2, unofficial].
++Binary Search IsoSurface Extraction approximates the position of an isosurface between two sample points by iteratively halving the interval based on scalar field values [S1, unofficial]. It solves the problem of finding the precise intersection of a ray with a volume's isovalue surface without requiring explicit geometric primitives, serving as a high-accuracy alternative to marching cubes [S3, unofficial]. Unlike [Trilinear Isosurface Intersection](2213-trilinear-isosurface-intersection.md) which uses linear interpolation, this method uses recursive bisection to converge on the root, and unlike [Hybrid Implicit Isosurface Ray Tracing](3832-hybrid-implicit-isosurface-ray-tracing.md) which may use analytical derivatives, it relies solely on sampled scalar values [S1, unofficial].
+ 
+ ## How it works
+-**Inputs and Outputs**
+-*   **Inputs**:
+-    *   `left`: 3D coordinate where the scalar field value is less than or equal to the isovalue.
+-    *   `right`: 3D coordinate where the scalar field value is greater than the isovalue.
+-    *   `iso`: The target scalar density value defining the surface [S1, unofficial].
+-    *   `texVol`: A 3D texture object representing the volumetric scalar field [S1, unofficial].
+-    *   `rec_depth`: The fixed number of bisection iterations [S1, unofficial].
+-*   **Outputs**:
+-    *   `surf`: The 3D coordinate of the estimated isosurface intersection [S1, unofficial].
++**Inputs:**
++- `left`: 3D vector (`vec3`) representing the starting point of the search interval, typically the entry point into the volume or the previous sample.
++- `right`: 3D vector (`vec3`) representing the end point of the search interval, typically the exit point or the next sample.
++- `iso`: The target isovalue (scalar density) defining the surface. Can be a single scalar or a batched tensor [S2, unofficial].
++- `texVol`: A 3D texture object containing the volumetric scalar field [S1, unofficial].
++- `rec_depth`: Integer specifying the number of binary search iterations. Fixed at 5 in the primary implementation [S1, unofficial].
+ 
+-**Data Structures**
+-The method operates on standard 3D vectors (`vec3`) and scalar floats. In GPU implementations (e.g., CUDA), parameters may be packed into a struct for constant memory optimization [S2, unofficial].
++**Outputs:**
++- `surf`: 3D vector (`vec3`) representing the estimated intersection point on the isosurface [S1, unofficial].
+ 
+-*   **Parameters Struct (Scalar Case)**:
+-    *   `stepsize`: `scalar_t` (e.g., float) [S2, unofficial].
+-    *   `binarySearchSteps`: `int` [S2, unofficial].
+-    *   `isovalue`: `scalar_t` [S2, unofficial].
+-    *   `isocontourRange`: `scalar_t` [S2, unofficial].
+-    *   `isocontourTexture`: `cudaTextureObject_t` [S2, unofficial].
++**Data Structures:**
++In GPU implementations (e.g., CUDA), parameters are often packed into a struct for constant memory access [S2, unofficial].
++- **Scalar Case Struct:**
++  - `stepsize`: `scalar_t` (e.g., float/double)
++  - `binarySearchSteps`: `int` (Range 0-20, Default 0) [S2, unofficial]
++  - `isovalue`: `scalar_t` (Default 0.5) [S2, unofficial]
++  - `isocontourRange`: `scalar_t` (Range 0.01f-500.0f, Default 5.0f) [S2, unofficial]
++  - `isocontourTexture`: `cudaTextureObject_t` (Optional, for curvature shading) [S2, unofficial]
++- **Batched Case Struct:**
++  - `stepsize`: `scalar_t`
++  - `binarySearchSteps`: `int`
++  - `isovalue`: `::kernel::Tensor1Read<scalar_t>` (Tensor of shape `(B,)`) [S2, unofficial]
++  - `isocontourRange`: `scalar_t`
++  - `isocontourTexture`: `cudaTextureObject_t`
+ 
+-*   **Parameters Struct (Batched Case)**:
+-    *   `stepsize`: `scalar_t` [S2, unofficial].
+-    *   `binarySearchSteps`: `int` [S2, unofficial].
+-    *   `isovalue`: `::kernel::Tensor1Read<scalar_t>` (accessor for batched tensor) [S2, unofficial].
+-    *   `isocontourRange`: `scalar_t` [S2, unofficial].
+-    *   `isocontourTexture`: `cudaTextureObject_t` [S2, unofficial].
++**Algorithm Steps:**
++1. Initialize the search interval with `left` and `right` boundaries.
++2. Loop `iter` from 0 to `rec_depth - 1` (inclusive):
++   a. Compute the midpoint: `mid = (right + left) / 2.0`.
++   b. Sample the volume scalar value at `mid`: `curIso = texture(texVol, mid).x`.
++   c. Compare `curIso` with `iso`:
++      - If `curIso <= iso`, the surface lies in the right half (or at mid); update `left = mid`.
++      - Else (`curIso > iso`), the surface lies in the left half; update `right = mid`.
++3. After the loop, compute the final surface position as the midpoint of the final interval: `surf = (right + left) / 2.0` [S1, unofficial].
+ 
+-**Algorithm Steps**
+-1.  Initialize the recursion depth limit `rec_depth` to 5 [S1, unofficial].
+-2.  Loop `iter` from 0 to `rec_depth - 1`:
+-    a.  Compute the midpoint: `mid = (right + left) / 2.0` [S1, unofficial].
+-    b.  Sample the volume scalar value at the midpoint: `curIso = texture(texVol, mid).x` [S1, unofficial].
+-    c.  If `curIso <= iso`, the surface lies in the right half; update `left = mid` [S1, unofficial].
+-    d.  Else, the surface lies in the left half; update `right = mid` [S1, unofficial].
+-3.  Return the final surface position as the midpoint of the final interval: `surf = (right + left) / 2.0` [S1, unofficial].
+-
+-**Pseudocode**
++**Pseudocode:**
+ ```python
+-def binary_search_isosurface_extraction(left: vec3, right: vec3, iso: float, texVol: Texture3D, rec_depth: int = 5) -> vec3:
++def binary_search_isosurface_extraction(left: Vec3, right: Vec3, iso: float, tex_vol: Texture3D, rec_depth: int = 5) -> Vec3:
+     """
+-    Approximates the isosurface intersection between left and right using binary search.
++    Finds the intersection of a ray segment [left, right] with the isosurface defined by 'iso'.
+     
+     Args:
+-        left: vec3, coordinate where scalar <= iso
+-        right: vec3, coordinate where scalar > iso
+-        iso: float, target isovalue
+-        texVol: 3D texture object for volume sampling
+-        rec_depth: int, number of bisection iterations (default 5)
++        left: Start point of the interval.
++        right: End point of the interval.
++        iso: Target scalar value.
++        tex_vol: 3D texture object for volume sampling.
++        rec_depth: Number of bisection iterations.
+         
+     Returns:
+-        vec3: Estimated surface position
++        surf: Estimated intersection point.
+     """
++    # Initialize boundaries
++    current_left = left
++    current_right = right
++    
+     for iter in range(rec_depth):
+-        # Compute midpoint
+-        mid = (right + left) / 2.0
++        # 1. Compute midpoint
++        mid = (current_right + current_left) / 2.0
+         
+-        # Sample volume value at midpoint
+-        # Assuming texture sampling returns a vec4, take the x component (scalar)
+-        curIso = texVol.sample(mid).x
++        # 2. Sample scalar value at midpoint
++        # Assuming texture lookup returns a vector where .x is the scalar value
++        cur_iso = tex_vol.sample(mid).x
+         
+-        # Bisection step
+-        if curIso <= iso:
+-            left = mid
++        # 3. Bisection logic
++        if cur_iso <= iso:
++            # Surface is in the right half (or at mid)
++            current_left = mid
+         else:
+-            right = mid
++            # Surface is in the left half
++            current_right = mid
+             
+-    # Return final midpoint
+-    surf = (right + left) / 2.0
++    # 4. Return final midpoint
++    surf = (current_right + current_left) / 2.0
+     return surf
+ ```
+ 
+-**Parameters**
+-*   `rec_depth`: Fixed number of bisection iterations, typically set to 5 [S1, unofficial].
+-*   `isovalue`: The scalar density value defining the surface. Can be a single double or a batched tensor. Default 0.5 [S2, unofficial].
+-*   `binarySearchSteps`: In some implementations, this controls the number of refinement steps. Range 0-20. Default 0 [S2, unofficial].
++**Parameters:**
++- `rec_depth`: Fixed at 5 iterations in the reference implementation [S1, unofficial]. This provides a precision of $2^{-5} = 1/32$ of the initial interval length.
++- `isovalue`: Default 0.5 [S2, unofficial].
++- `binarySearchSteps`: Optional refinement steps (0-20), default 0 [S2, unofficial].
++- `isocontourRange`: Range for surface feature mapping (0.01f-500.0f), default 5.0f [S2, unofficial].
+ 
+-**Edge Cases and Pitfalls**
+-*   **Bracketing Requirement**: The method assumes `left` and `right` strictly bracket the isovalue (i.e., `value(left) <= iso` and `value(right) > iso`). If the values do not bracket the isovalue, the bisection logic will converge to the wrong boundary or fail to find the surface [S1, unofficial].
+-*   **Precision**: The result is limited by the number of iterations. With `rec_depth = 5`, the interval is reduced by a factor of $2^5 = 32$. Higher precision requires more iterations or a hybrid approach [S1, unofficial].
+-*   **Texture Sampling**: The method relies on `texture(texVol, mid)`. If the volume is not properly bound or the coordinates are out of bounds, sampling behavior (clamp, repeat, or error) affects correctness [S1, unofficial].
++**Edge Cases and Pitfalls:**
++- **Bracketing Requirement:** The method assumes the isovalue is bracketed by the scalar values at `left` and `right` (i.e., one is $\le$ iso and the other is $>$ iso). If both endpoints are on the same side of the isovalue, the algorithm will converge to one of the endpoints or an incorrect location [S1, unofficial].
++- **Precision:** The result is limited by the number of iterations. With `rec_depth=5`, the error is bounded by $L/32$ where $L$ is the initial interval length [S1, unofficial].
++- **Texture Sampling:** Requires a valid 3D texture object. If `mid` falls outside the volume bounds, sampling behavior (clamp, repeat, or zero) affects correctness [S1, unofficial].
+ 
+ ## Subtopics
+ 
+ ### [Surface Location via Segment Endpoint Values](3756-surface-location-via-segment-endpoint-values.md)
+-This method locates isosurface intersections as a function of the scalar field values at the segment endpoints along a ray to eliminate coverage gaps that cause aliasing artifacts. It builds on [Binary Search IsoSurface Extraction](1316-binary-search-isosurface-extraction.md) by using endpoint values to determine surface presence without intermediate sampling checks.
++This variant locates isosurface intersections as a function of the scalar field values at the segment endpoints along a ray to eliminate coverage gaps that cause aliasing artifacts. It builds on Binary Search IsoSurface Extraction by using endpoint values to determine surface presence without intermediate sampling checks.
+ 
+ ### [Isocontour Shading with Curvature](3819-isocontour-shading-with-curvature.md)
+-Isocontour Shading with Curvature is a shading method for isosurfaces that uses surface features including first curvature ($k_1$), second curvature ($k_2$), mean curvature ($(k_1+k_2)/2$), Gaussian curvature ($k_1 \cdot k_2$), or a curvature texture. It distinguishes itself from sibling methods by explicitly incorporating curvature data and multi-level isocontour highlighting into the shading kernel.
++Isocontour Shading with Curvature is a shading method for isosurfaces that uses surface features including first curvature ($k_1$), second curvature ($k_2$), mean curvature ($(k_1+k_2)/2$), Gaussian curvature ($k_1 \cdot k_2$), or a curvature texture. It distinguishes itself from sibling methods by explicitly incorporating curvature data and multi-level isocontour highlighting into the shading kernel. It uses parameters like `selectedSurfaceFeature` (OFF, FIRST_PRINCIPAL_CURVATURE, etc.) and `numIsocontours` (0-10, default 5).
+ 
+ ### [Multi-Stage Rasterization for Shaded Isosurfaces](5394-multi-stage-rasterization-for-shaded-isosurfaces.md)
+-Multi-Stage Rasterization for Shaded Isosurfaces is a hardware-accelerated technique for rendering shaded isosurfaces from volumetric data on standard PC graphics hardware. It adapts the "Fast Shaded Isosurfaces" algorithm by utilizing multi-stage rasterization and 2D textures to compute surface normals and lighting interactions efficiently. Unlike general volume rendering methods that integrate opacity, this method focuses on extracting and shading a specific isosurface boundary. It is distinct from [Binary Search IsoSurface Extraction](1316-binary-search-isosurface-extraction.md) by replacing iterative ray-marching with a two-pass rasterization pipeline that leverages the GPU's fixed-function register combiners for gradient interpolation and dot-product shading.
++Multi-Stage Rasterization for Shaded Isosurfaces is a hardware-accelerated technique for rendering shaded isosurfaces from volumetric data on standard PC graphics hardware. It adapts the "Fast Shaded Isosurfaces" algorithm by utilizing multi-stage rasterization and 2D textures to compute surface normals and lighting interactions efficiently. Unlike general volume rendering methods that integrate opacity, this method focuses on extracting and shading a specific isosurface boundary. It is distinct from Binary Search IsoSurface Extraction by replacing iterative ray-marching with a two-pass rasterization pipeline that leverages the GPU's fixed-function register combiners for gradient interpolation and dot-product shading.
+ 
+ ### Isosurface Function
+@@ -103,14 +109,14 @@
+ 
+ ## Operating characteristics
+-*   **Time Complexity**: $O(k)$, where $k$ is the number of bisection iterations (`rec_depth`). Each iteration involves one vector addition, one division, and one texture lookup [S1, unofficial].
+-*   **Memory Complexity**: $O(1)$ auxiliary memory per ray, excluding the volume texture storage [S1, unofficial].
+-*   **Performance**: The method is computationally lightweight per ray compared to full marching cubes, as it avoids complex geometric intersection logic. However, it requires multiple texture lookups (one per iteration). With `rec_depth = 5`, this is 5 lookups per intersection [S1, unofficial].
+-*   **Strengths**: Simple to implement; robust for smooth scalar fields; easy to parallelize on GPUs [S1, unofficial].
+-*   **Limitations**: Accuracy depends on the initial bracketing interval and the number of iterations; may miss thin structures if the initial step size is too large; does not provide explicit surface normals (requires post-processing or gradient sampling) [S1, unofficial].
+-*   **When to Use**: Suitable for real-time visualization where approximate surface location is sufficient, or as a refinement step after a coarse intersection estimate [S1, unofficial].
+-*   **When Not to Use**: When high geometric precision is required without iterative refinement, or when the scalar field is noisy and bracketing is unreliable [S1, unofficial].
++- **Time Complexity:** $O(k)$ where $k$ is the number of binary search iterations (fixed at 5 in the primary implementation) [S1, unofficial]. Each iteration requires one texture lookup and basic arithmetic.
++- **Memory Complexity:** $O(1)$ auxiliary memory per ray, plus the volume texture storage [S1, unofficial].
++- **Performance:** The fixed iteration count makes it predictable and suitable for parallel execution on GPUs [S1, unofficial]. It is slower than linear interpolation methods like Trilinear Isosurface Intersection but more robust to non-linear scalar fields [S1, unofficial].
++- **Strengths:** High accuracy for smooth scalar fields; simple implementation; no derivative calculation required [S1, unofficial].
++- **Limitations:** Requires the isovalue to be bracketed by the interval endpoints; precision is limited by iteration count; may miss thin structures if the initial interval is too large [S1, unofficial].
++- **When to Use:** When high precision is needed for smooth isosurfaces and the volume data is accessible via texture sampling [S1, unofficial].
++- **When Not to Use:** When the scalar field is highly discontinuous or when the bracketing condition cannot be guaranteed [S1, unofficial].
+ 
+ ## Background
+-Binary Search IsoSurface Extraction is a ray evaluation stepping method that finds the intersection with an isovalue surface using a binary search refinement [S2, unofficial]. It is a recursive bisection method to find the intersection point of an isosurface between two 3D points `left` and `right` where the volume scalar values bracket the isovalue [S1, unofficial]. The method is often used in software ray casting for volume visualization, providing a balance between simplicity and accuracy [S3, unofficial]. It is part of the broader family of ray tracing and ray intersection methods, which define rays by an origin and direction and execute computations in parallel [Parent].
++Binary Search IsoSurface Extraction originates from ray evaluation stepping methods in volume rendering [S2, unofficial]. It is described in the context of scientific visualization lectures as a method to compute isosurfaces with higher accuracy than marching cubes [S3, unofficial]. The specific implementation with `rec_depth=5` is found in the "Ray" project by ShashwatC [S1, unofficial]. The method is also integrated into the fV-SRN renderer for GPU-based volume rendering with optional curvature shading [S2, unofficial].
+ 
+ ## Sources

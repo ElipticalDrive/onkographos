@@ -1,0 +1,102 @@
+# Per-voxel Projection (Object-order)
+
+Also called: Forward rendering, Histogram-based sorting, Object Space Approach, Object order voxel projection with value-sorted array, Object-order voxel projection, Voxel projection with value sorting, Voxel space projection
+
+## Overview
+Per-voxel projection is an object-order volume rendering technique that iterates through volume data, projecting each voxel directly onto the image plane to accumulate pixel values [S1, S3][S4, unofficial]. It solves the problem of efficiently computing Maximum Intensity Projections (MIP) by avoiding expensive read-compare-write GPU cycles, instead relying on a value-sorted traversal order where later projections overwrite earlier ones [S1, S3]. Unlike its sibling [Naive Voxel Rendering](1103-naive-voxel-rendering.md), which rasterizes individual cubes, this method treats voxels as point samples projected to single pixels, and unlike [Front-to-Back Object-Order Projection](11222-front-to-back-object-order-projection.md), it does not require a Z-buffer or depth buffer for visibility resolution, instead using value magnitude to determine occlusion [S1, S3].
+
+## How it works
+**Inputs:** A 3D volume dataset $V$ of size $N_x \times N_y \times N_z$, a viewing transformation matrix $M$, and an image plane resolution $W \times H$ [G].
+**Outputs:** A 2D image buffer $I$ of size $W \times H$, initialized to a background value (typically 0 for MIP) [S1, S3].
+
+**Data Structures:**
+1. **Value-Sorted Array ($P$):** An array of voxel positions (indices or coordinates) containing only "interesting" voxels [S1, S3].
+2. **Sorting Key:** The voxel values $v$ from $V$ [S1, S3].
+3. **Cumulative Histogram Array ($H_{cum}$):** An auxiliary array storing cumulative counts of voxels up to specific value thresholds, used to facilitate histogram-based sorting [S1, S3].
+4. **Image Buffer ($I$):** A 2D array where $I[u, v]$ stores the accumulated value for pixel $(u, v)$ [S1, S3].
+
+**Steps:**
+1. **Filter and Sort:** Iterate through the volume $V$ [S1, S3]. Identify all voxels with $v > 0$ (interesting voxels) and store their positions in a temporary list [S1, S3]. Sort this list based on their corresponding voxel values in ascending order (low to high) [S1, S3]. The sources indicate that cumulative histogram values are stored in an additional array, implying a histogram-based sorting algorithm is used to achieve this order efficiently [S1, S3].
+2. **Project and Accumulate:** Initialize the image buffer $I$ to the background value [S1]. Iterate through the sorted positions in $P$ from the first element (lowest value) to the last (highest value) [S1, S3]. For each voxel position $p_i$ in $P$: compute the 2D image coordinates $(u, v)$ by applying the viewing transformation $M$ to the 3D position of $p_i$ and projecting onto the image plane [S3][S4, unofficial]. Retrieve the voxel value $v_i$ associated with $p_i$ [S3]. Update the image buffer at $(u, v)$ with $I[u, v] \leftarrow v_i$ [S1, S3]. Since the voxels are processed in ascending order of value, the current voxel's value $v_i$ is guaranteed to be greater than or equal to any previously written value at $(u, v)$, so a simple overwrite operation correctly implements the Maximum Intensity Projection [S1, S3].
+3. **Handle Undersampling (Edge Case):** For non-axial views, simple point projection may cause holes in the image due to undersampling [S1]. To mitigate this, a continuous function must be reconstructed using morphological sampling, followed by a morphological closing of the projection images [S1].
+
+**Pseudocode:**
+> **Unverified code.** The code below did not pass a test run against a reference implementation, or no test fits it, so it may contain errors.
+
+```python
+def per_voxel_projection_mip(volume, view_matrix, image_width, image_height):
+    # Initialize image buffer with background value (0 for MIP)
+    image = [[0 for _ in range(image_width)] for _ in range(image_height)]
+    
+    # Step 1: Filter interesting voxels (value > 0)
+    interesting_voxels = []
+    for z in range(volume.depth):
+        for y in range(volume.height):
+            for x in range(volume.width):
+                value = volume[z][y][x]
+                if value > 0:
+                    interesting_voxels.append((x, y, z, value))
+    
+    # Step 2: Sort voxels by value in ascending order
+    # Sources imply histogram-based sorting using cumulative arrays [S1, S3]
+    interesting_voxels.sort(key=lambda voxel: voxel[3])
+    
+    # Step 3: Project and accumulate
+    for (x, y, z, value) in interesting_voxels:
+        u, v = project_to_image(x, y, z, view_matrix, image_width, image_height)
+        if 0 <= u < image_width and 0 <= v < image_height:
+            # Overwrite implements max operation due to ascending sort order [S1, S3]
+            image[v][u] = value
+    return image
+
+def project_to_image(x, y, z, view_matrix, width, height):
+    # Apply 4x4 viewing matrix to voxel center [G]
+    vx = view_matrix[0][0]*x + view_matrix[0][1]*y + view_matrix[0][2]*z + view_matrix[0][3]
+    wy = view_matrix[1][0]*x + view_matrix[1][1]*y + view_matrix[1][2]*z + view_matrix[1][3]
+    qz = view_matrix[2][0]*x + view_matrix[2][1]*y + view_matrix[2][2]*z + view_matrix[2][3]
+    
+    # Perspective divide
+    if qz == 0:
+        return -1, -1
+    px = vx / qz
+    py = wy / qz
+    
+    # Map normalized device coordinates [-1, 1] to pixel coordinates [G]
+    u = int((px + 1) * 0.5 * width)
+    v = int((1 - py) * 0.5 * height)
+    return u, v
+```
+
+**Parameters:**
+*   **Threshold for "Interesting" Voxels:** 0. Voxels with value $\le 0$ are excluded [S1].
+*   **Sorting Order:** Ascending (low to high) [S1, S3].
+
+**Pitfalls:**
+*   **Arbitrary Order:** If voxels are projected in arbitrary order, the final image is incorrect because the last projected voxel overwrites previous ones, regardless of depth or value [S4, unofficial].
+*   **Undersampling Holes:** Non-axial views may exhibit holes due to sparse sampling of the volume by the projection rays [S1].
+*   **Precision:** Overwriting assumes that the value-sorted order perfectly aligns with the MIP requirement. If the volume contains negative values and the background is not handled correctly, the initialization of the image buffer must be to $-\infty$ or the minimum possible value [G].
+
+## Subtopics
+
+### [Object-order Binary Volume Projection](6605-object-order-binary-volume-projection.md)
+Handles binary data (0/1) using back-to-front traversal for occlusion, without a Z-buffer.
+
+### [Front-to-Back Object-Order Projection](11222-front-to-back-object-order-projection.md)
+Supports continuous values and transparency, using front-to-back traversal for early ray termination.
+
+## Operating characteristics
+*   **Time Complexity:** Dominated by the sorting step, $O(N \log N)$ or $O(N)$ with histogram-based sorting, where $N$ is the number of non-zero voxels [S1, S3]. The projection step is $O(N)$ [S3].
+*   **Memory Complexity:** $O(N)$ for storing the value-sorted array and cumulative histogram [S1, S3].
+*   **Performance:** Substantial reduction in processed voxels (often >95%) by excluding zero voxels [S1]. Allows compression-domain rendering as MIP can be computed directly on the value-sorted array without full 3D reconstruction [S1].
+*   **Strengths:** Efficient for MIP; avoids Z-buffer contention; suitable for sparse volumes [S1, S3].
+*   **Limitations:** Primarily suited for MIP or simple overwriting compositing; requires sorting overhead [S1, S3].
+*   **When to Use:** When computing Maximum Intensity Projections on sparse volumetric data where performance is critical and transparency is not required [S1, S3].
+
+## Background
+The method was introduced as an object-order voxel-projection technique [MKG00] to avoid processing empty space in volume rendering [S3]. It was notably applied in the context of morphological pyramids for multiresolution MIP rendering, where it allowed for efficient progressive refinement by storing data in value-sorted arrays [S1]. The approach is part of the broader object-space rendering paradigm, which projects contributions from the volume to the image plane, contrasting with image-space ray tracing [S2, S4, unofficial].
+
+## Sources
+[S1] Comparison of Morphological Pyramids for Multiresolution MIP Volume Rendering, https://doi.org/10.2312/vissym/vissym02/061-070, fetched 2026-10-29
+[S2] Direct rendering of multiresolution decomposed volume data., https://doi.org/10.82465/4870, fetched 2026-10-26 (unofficial)
+[S3] Multiresolution MIP Rendering of Large Volumetric Data Accelerated on Graphics Hardware, https://doi.org/10.2312/vissym/eurovis07/243-250, fetched 2026-10-26
+[S4] Medical Volume Rendering Techniques, https://arxiv.org/pdf/1802.07710v1, fetched 2026-10-27 (unofficial)

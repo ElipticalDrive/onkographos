@@ -1,0 +1,2774 @@
+Pointersect: Neural Rendering with Cloud-Ray Intersection
+Jen-Hao Rick Chang1 , Wei-Yu Chen1,2 ,* Anurag Ranjan1 , Kwang Moo Yi1,3∗ , Oncel Tuzel1
+1
+Apple, 2 Carnegie Mellon University, 3 University of British Columbia
+arXiv:2304.12390v1 [cs.CV] 24 Apr 2023
+https://machinelearning.apple.com/research/pointersect
+Abstract
+We propose a novel method that renders point clouds as if
+they are surfaces. The proposed method is differentiable and
+requires no scene-specific optimization. This unique capability enables, out-of-the-box, surface normal estimation, rendering room-scale point clouds, inverse rendering, and ray
+tracing with global illumination. Unlike existing work that
+focuses on converting point clouds to other representations—
+e.g., surfaces or implicit functions—our key idea is to directly
+infer the intersection of a light ray with the underlying surface represented by the given point cloud. Specifically, we
+train a set transformer that, given a small number of local
+neighbor points along a light ray, provides the intersection
+point, the surface normal, and the material blending weights,
+which are used to render the outcome of this light ray. Localizing the problem into small neighborhoods enables us
+to train a model with only 48 meshes and apply it to unseen point clouds. Our model achieves higher estimation
+accuracy than state-of-the-art surface reconstruction and
+point-cloud rendering methods on three test sets. When applied to room-scale point clouds, without any scene-specific
+optimization, the model achieves competitive quality with the
+state-of-the-art novel-view rendering methods. Moreover, we
+demonstrate ability to render and manipulate Lidar-scanned
+point clouds such as lighting control and object insertion.
+(a) Illustration of the proposed method
+(b) Rendered results of a sphere represented by points
+Figure 1. We propose pointersect, a novel method to perform cloudray intersection. (a) Instead of projecting points onto the sensor,
+suffering from holes, we trace rays from the sensor and estimate
+the intersection point p between a ray and the underlying surface
+represented by the points. We additionally estimate the surface
+normal ⃗n, and the convex combination weights of points near the
+ray to blend material or color, wj . (b) The capability to perform
+cloud-ray intersection enables us to render point clouds with the
+standard ray tracing method, i.e., path tracing. The result shows the
+effect of global illumination, e.g., the cast shadow and reflection.
+1. Introduction
+Point clouds are abundant. They are samples of surfaces,
+and can be captured by sensors such as Lidar, continuouswave time-of-flight, and stereo camera setups. Point-cloud
+representation provides a straightforward connection to the
+location of the surfaces in space, and thus is an intuitive
+primitive to represent geometry [21].
+Despite being ubiquitous, a core limitation of point clouds
+is that they are non-trivial to render. Each point in the
+point cloud occupies no volume—one cannot render them
+into images as is. Therefore, existing methods either as-
+sign each point a volume-occupying shape, e.g., an oriented disk [50, 74], a sphere [37], or turn it into other
+shape representations like meshes [36] or implicit functions [19, 24, 29, 39, 49]. However, it is difficult to determine the ideal shape, e.g., the radius of spheres or disks,
+for rendering. Small shapes would cause holes, while large
+shapes would cause blobby renderings, producing artifacts
+in the rasterized images. While the artifacts can be alleviated
+* Work done at Apple. Corresponding author: jenhao chang@apple.com
+1
+by finetuning the rasterized images with an additional neural
+rendering step, the operation often requires per-scene training [3, 13, 37]. On the other hand, transforming point clouds
+into other shape representations complicates the pipeline and
+prevents gradients passing back to the point cloud through
+the new shape representation (in the case of inverse rendering). For example, turning point clouds into a mesh or
+a Signed Distance Function (SDF) [24, 39] would require
+any changes on the point cloud to trigger retraining of these
+representations, which would clearly be prohibitive.
+Recent works [48, 72] raise new ideas to directly perform
+ray-casting on point clouds. For each scene, these methods
+first learn a feature embedding for each point; then they
+aggregate features near each camera ray to predict colors.
+However, these methods require per-scene training since the
+feature embedding is scene-dependent. In our case, we aim
+for a solution that does not require scene-specific optimization and can be applied to any scene.
+In this work, we propose pointersect, an alternative that
+can directly ray-trace point clouds by allowing one to use
+point clouds as surface primitives, as shown in Figure 1.
+That is, we propose to train a neural network that provides
+the surface intersection point, surface normal, and material
+blending weights—the necessary information to render (or
+ray trace) a surface—given a point cloud and a query ray.
+Implementing this idea requires paying attention to details. A core observation is that the problem to find the
+intersecting surface point is SE(3) equivariant—any rigid
+transform on the input (i.e., the point cloud and the query
+ray) should result in the rigid transformation of the output
+(i.e., the intersection point and the surface normal). Naively
+training a neural network would require the network to learn
+this equivariance, which is non-trivial [5, 18, 65]. Instead,
+we opt to remove the need for learning this equivariance by
+canonicalizing the input according to the queried light ray.
+In addition, pointersect should be invariant to the order in
+which the points are provided—we thus utilize a transformer
+to learn the set function.
+It is important to note that finding intersection points between rays and surfaces is a highly atomic and localized
+problem which can be solved only with local information.
+Thus, we design our method to only consider nearby points,
+where the surface would have been, and how the surface
+texture and normal can be derived from these nearby points.
+By constraining the input to be a small number (∼100) of
+neighboring points associated to a query ray, our method can
+be trained on only a handful of meshes, then be applied to
+unseen point clouds. As our experiments show, while only
+trained on 48 meshes, pointersect significantly improves the
+Poisson surface reconstruction, a scene-specific optimization method, on three test datasets. We also demonstrate the
+generality and differentiability of pointersect on various applications: novel-view synthesis on room-scale point clouds,
+inverse rendering, and ray tracing with global illumination.
+Finally, we render room-scale Lidar-scanned point clouds
+and showcase the capability to directly render edited scenes,
+without any scene-specific optimization.
+In short, our contributions are:
+• We propose pointersect, a neural network performing the
+cloud-ray intersection operation. Pointersect is easy to
+train, and once learned, can be applied to unseen point
+clouds—we evaluate the same model on three test datasets.
+• We demonstrate various applications with pointersect, including room-scale point cloud rendering, relighting, inverse rendering, and ray tracing.
+• We apply pointersect on Lidar-scanned point clouds and
+demonstrate novel-view synthesis and scene editing.
+We encourage the readers to examine results and videos
+of novel-view rendering, relighting, and scene editing in the
+supplemental material and website (https://machinelearning.
+apple.com/research/pointersect).
+2. Related work
+This section briefly summarizes strategies to render point
+clouds. Please see Table 4 in the supplementary for a detailed
+overview on the capabilities/limitations of each method.
+Rasterizing point clouds. Rasterization is a common
+method to render point clouds. The idea is to project each
+point onto the sensor while making sure closer points occlude farther points. Filling holes between points is the key
+problem in point-cloud rasterization. Classical methods like
+visibility splatting [50, 74] cover holes by replacing points
+with oriented disks. However, since the size and shape of
+the holes between projected points depend on the distribution of the points in space, the method cannot fill in all
+gaps. Recently, Zhang et al. [77] achieve high-quality results via alpha-blending surface splatting [82], coarse-to-fine
+optimization, and point insertion. However, their method
+requires per-scene optimization on the point cloud.
+Recent works propose to combine rasterization with neural networks. Given a point cloud and RGB images of a
+scene, Aliev et al. [3] and Rückert et al. [60] learn an embedding for each point by rasterizing feature maps and minimizing the difference between the rendered images and the given
+ones. The hole is handled by downsampling then upsampling the rasterized feature map. Similarly, Dai et al. [13]
+aggregate points into multi-plane images, combined with a
+3D-convolutional network. Huang et al. [26] use a U-Net
+refinement network to fill in the holes. Recently, Rakhimov
+et al. [53] show that point embedding can be directly extracted from input images, which enables their method to
+render unseen point clouds without per-scene optimization.
+It is difficult to render global illumination with these methods, since rasterization does not support such an operation.
+Moreover, we show empirically in Section 4 that our method
+2
+renders higher quality images than recent methods while
+directly working on xyz and rgb, without a feature extractor.
+we focus on rendering a point cloud, where 3D information
+is available, without additional per-scene training.
+Converting into other representations. An alternative way
+to render a point cloud is converting it to other primitives,
+such as an indicator function [29, 49], a SDF [39], or a
+mesh [24]. Poisson surface reconstruction [29, 30] fits an
+indicator function (i.e., 1 inside the object and 0 otherwise)
+to the input point cloud by solving a Poisson optimization
+problem. Meshes can then be extracted from the learned
+function, allowing ray tracing to be performed. However,
+Possion surface reconstruction requires vertex normal, which
+can be difficult to estimate even when the points only contain a small amount of noise, and it is difficult to support
+non-watertight objects. Peng et al. [49] learn the indicator
+function with a differentiable solver and incorporate Poisson
+optimization in a neural network.
+Ma et al. [39] learn a SDF represented as a neural field,
+and Hanocka et al. [24] fit a deformable mesh to an objects
+with a self-prior. These methods require per-scene optimization, and to the best of our knowledge, have not been
+extended to render surface colors.
+Alternatively, Feng et al. [19] propose a new primitive,
+Neural Point, or a collection of local neural surfaces extracted from the point cloud. The method supports new
+scenes and estimates surface normal; however, dense sampling or cube marching is needed to render novel views, and
+the method does not render color.
+3. Method
+We aim to directly perform ray casting with point clouds.
+We thus first introduce the generic surface-ray intersection.
+We then introduce how we enable cloud-ray intersection and
+discuss how it can be used for actual rendering.
+3.1. Problem formulation
+Surface-ray intersection. Surface-ray intersection is a
+building-block operator in physics-based rendering [51]. At
+a high level, it identifies the contacting point between a query
+ray and the scene geometry so that key information like material properties, surface normal, and incoming light at the
+point can be retrieved and computed [51]. Most graphics
+primitives allow the intersecting point to be easily found.
+For example, with triangular meshes we simply intersect
+the query ray with individual triangles (while using accelerated structures to reduce the number of triangles of interest).
+However, for point clouds, finding the intersection point
+becomes a challenging problem.
+Cloud-ray intersection. We formulate the cloud-ray intersection as follows. We are given the following information:
+• a set of points P = {p1 , . . . , pn } that are samples on a
+surface S, where pi ∈ R3 is i-th point’s coordinate;
+• optionally, the material (e.g., RGB color or Cook-Torrance
+coefficients [12]) associated with each point, ci ∈ Rd ;
+• a querying ray r = (ro , r⃗d ), where ro ∈ R3 is the ray
+origin and r⃗d ∈ S2 is the ray direction.
+Ray-casting. Instead of rasterization, point clouds can also
+be rendered by ray-casting. Early work [1, 2, 4, 22, 35, 69]
+develop iterative algorithms or formulate optimization programs to intersect a ray with the approximated local plane
+constructed by nearby points. These methods rely on neighborhood kernels, which is non-trivial to determine [21, 34].
+Recently, Xu et al. [72] and Ost et al. [48] learn feature
+embedding at each point and aggregate the features along
+a query ray. Xu et al. [72] march camera rays through the
+point cloud, average neighbor features, predict density and
+color by a Multi-Layer Perceptron (MLP), and render the
+final color via volumetric rendering [44]. Ost et al. [48] utilize a transformer to aggregate point features into a feature
+associated with the query ray and predict color by an MLP.
+Both methods do not estimate surface intersection points or
+normal, and they need per-scene training [48] or per-scene
+fine-tuning [72] to achieve high-quality results. As we show
+later, our method can be applied to completely novel classes
+of scenes without any retraining.
+Our goal is to estimate the following quantities:
+• the probability, h ∈ [0, 1], that r intersects with the underlying surfaces of P;
+• the intersection point p ∈ R3 between r and S;
+• the surface normal ⃗n at p;
+• and optionally the blending
+Pn weights w = [w1 , . . . , wn ],
+where wi ∈ [0, 1] and i=1
+Pnwi = 1, to estimate the material property at p: c(p) = i=1 wi ci .
+Note that this problem is under-determined—there can be infinitely many surfaces passing through points in P. Thereby,
+hand-crafting constraints such as surface smoothness are
+typically utilized to solve the problem [34]. In this work, we
+learn surface priors from a dataset of common objects using
+a neural network, so manual design is not needed.
+Neural rendering from 2D images. Recently, Neural Radiance Field (NeRF) and similar methods [16, 17, 37, 38, 44,
+57, 62, 70, 73, 79] have demonstrated high-quality novelview synthesis results. Due to the lack of immediately available 3D information, most of these methods require a perscene optimization or surface reconstruction. In this work,
+3.2. Pointersect
+Pointersect is a neural network, fθ (r, P) 7→ (h, p, ⃗n, w),
+that estimates the intersection point and surface normal between r and the underlying surface of P. We learn the network by formulating a regression problem, using a dataset
+3
+of meshes. We generate training data by randomly sampling
+rays and point clouds on the meshes, i.e., our inputs, and
+running a mesh-ray intersection algorithm [51] to acquire
+the ground-truth outputs.
+Despite the simplicity of the framework, we note, however, care must be taken when designing fθ . Specifically,
+we incorporate the following geometric properties into the
+design of fθ to ease training and allow generalization:
+First, we utilize the fact that the intersection point is along
+the query ray and design f to estimate the distance t from
+the ray origin, i.e., p = ro + t r⃗d .
+Second, we utilize the SE(3) equivariance—rotating and
+translating the ray and the points together should move the
+intersection point in the same way. Mathematically, for all
+rotation matrix R ∈ SO(3) and translation b ∈ R3 , we have
+Figure 2. The pointersect model f is composed of a pre-processing
+step and a transformer. (a) The pre-processing step rotates and
+translates the world coordinate such that the ray lies on the z r -axis.
+The new coordinate origin is selected such that the closest point to
+the ray origin lies on the z r = 0 plane. (b) The transformer takes as
+f_\theta (\r , \cP ) \mapsto (h, t, \vec {n}, \w ) {\Rightarrow } f_\theta (T(\r ), T(\cP )) \mapsto (h, t, R\vec {n}, \w ),
+inputs the points in the new coordinate, i.e., (pri , ci ). The output of
+a learned token is used to estimate t, the traveling distance between
+where T (P)={R pi +b}i=1...n and T (r)=(T (ro ), R r⃗d ).
+the ray origin and the intersection point, ⃗nr , the surface normal in
+Additionally, this holds for any point along the ray, thus
+the new coordinate, and h, the output of a sigmoid function on a
+f_\theta (\r , \cP ) {\mapsto } (h, t, \vec {n}, \w ) {\Rightarrow } f_\theta ((r_o + t' \vec {r_d}, \vec {r_d}) , \cP ) {\mapsto } (h, t-t', \vec {n}, \w ), logit (not drawn) to predict the probability that the ray hits a surface.
+It is also used as the query in the softmax attention to calculate the
+weight w. Finally, we transform ⃗nr back to the world coordinate
+for all 0 ≤ t′ ≤ t. Thereby, to eliminate this ambiguity,
+and make sure it point to the opposite direction of the ray. The
+given a query ray r = (ro , r⃗d ), we rotate and translate both
+transformer has 4 layers (L = 4) and a feature dimension of 64.
+the ray and the scene such that R r⃗d = (0, 0, 1) and the
+closest point in the half space defined by r has z = 0.
+Third, the intersection point can be estimated by using
+the local neighborhood of the ray. Given r and P, we form a
+new set of points, Pr , by keeping only the closest k points
+(in terms of their orthogonal distances to r) within a cylinder
+of radius δ surrounding the ray.
+Last, since P is a set, i.e., the order of the points in P is
+irrelevant, we use a set transformer [67] as our architecture
+of choice. See Figure 2 for an overview and Appendix C for
+detailed descriptions.
+We train fθ by optimizing the following problem:
+and RGB color ci ∈ R3 , and the target camera intrinsic and
+extrinsic matrices, we can simply cast camera rays toward P.
+The final color of a camera ray, c(r) can be computed by
+c(\r ) = \sum _{i=1}^{n} w_i(\r , \cP ) \, c_i, \label {eq: blending}
+(2)
+where wi (r, P) is the blending weight of pi estimated by fθ ,
+and wi (r, P) = 0 if pi is not a neighbor point of r.
+Rendering with ray tracing. A unique capability of pointersect is ray tracing. Ray tracing allows occlusion and global
+illumination effects like cast shadow and specular reflection
+to be faithfully rendered. Suppose we are given a point
+cloud P = {(pi , ci )}i=1...n , where each point has both position pi ∈ R3 and material information ci ∈ Rd like albedo,
+Cook-Torrance [12], or emission coefficients, and we have
+the environment map and the target camera intrinsic and extrinsic matrices. We can use standard ray tracing techniques
+like path tracing [27] to render the image. At a high level,
+we trace a ray through multiple intersections with the point
+cloud until reaching the environment map or background. At
+each intersection point, we calculate the material property by
+interpolating the material of neighboring points (using the
+blending equation (2)), shade the intersection point based on
+the reflection equation [27], and determine the direction to
+continue tracing [61].
+When we end the ray tracing with a single bounce, i.e.,
+\min _\theta \, \bbE _{\r , \cP } \, \hat {h} \left ( \lambda \| t - \hat {t} \|_2^2 + \| \vec {n} \cross \hat {\vec {n}} \|^2_2 + \| c - \hat {c} \|_1 \right ) \nonumber \\ + \hat {h} \log h + (1 - \hat {h}) \log (1 - h), \label {eq: training loss}
+(1)
+ˆ , ĉ, and ĥ ∈ {0, 1} are the ground-truth ray travelwhere t̂, ⃗n
+ing distance,
+P surface normal, color, and ray hit, respectively,
+and c =
+wi ci is the output color. The expectation is
+over the query rays and the point clouds, which we sample
+randomly every iteration from a dataset of meshes. We omit
+the dependency on P and r in the notations for simplicity.
+3.3. Rendering point clouds with pointersect
+Our ability to perform cloud-ray intersection allows two
+main techniques to render a point cloud.
+Image-based rendering. Given a point cloud P =
+{(pi , ci )}i=1...n , where each point has both position pi ∈ R3
+4
+4.2. Evaluating pointersect
+We use three datasets to evaluate the estimated intersection points, surface normal, and blending weights.
+• 7 meshes provided by Zhou et al. [80], including the Stanford Bunny, Buddha, etc.
+• 30 meshes in ShapeNet Core dataset [9] containing sharp
+edges, including chairs, rifles, and airplanes.
+• 13 test meshes in the sketchfab dataset [52].
+For each mesh, 6 RGBD images taken from front, back,
+left, right, top, and bottom are used to create the input point
+cloud; 144 output RGBD images at novel viewpoints are
+estimated and compared with the ground-truth rendering
+from Open3D. See Figure 4 for an illustration of the camera
+poses. All cameras are 200 × 200 resolution and has a fieldof-view of 30 degrees. The input RGBD images are used
+only to construct the input point cloud, i.e., we do not extract
+any image-patch features from the RGB images (except for
+NPBG++, see below).
+We compare with four baselines:
+• Visibility splatting is the default point-cloud visualization
+method in Open3D. We set the point size to 1 pixel. We
+use Open3D to estimate vertex normal at input points. The
+main purpose of including the baseline is to illustrate the
+input point cloud from the target viewpoint.
+• Screened Poisson surface reconstruction [30] fits a scenespecific indicator function (1 inside the object and 0 outside) to reconstruct a surface from the point cloud. It is
+the workhorse for point-based graphics. We use the implementation in Open3D with the default parameters, and we
+provide ground-truth vertex normal from the mesh.
+• NPBG++ [53] uses rasterization and downsampling to
+fill in holes on the image plane. It supports unseen point
+clouds but requires input RGB images to extract features.
+We use the implementation and pretrained model from the
+authors. We do not perform scene-specific finetuning.
+• Neural Points [19] fits local implicit functions on the point
+clouds. Once the functions are fit, they can be used to
+increase the sampling rate and estimates surface normals.
+We use the original implementation and pretrained model
+from the authors. For visualization, we use the method to
+upsample the point clouds by 96 times.
+• Oracle directly rasterizes the mesh.
+For pointersect, we use k = 40, δ = 0.1, and image-based
+rendering for all experiments unless otherwise noted. We
+provide only point-wise xyz and rgb to pointersect; no other
+feature is used. For all methods, we compute the Root Mean
+Square Error (RMSE) of the intersection point estimation,
+the average angle between the ground-truth and the estimated
+normal, the accuracy on whether a camera ray hit the surface,
+the Peak Signal-to-Noise Ratio (PSNR), Structural Similarity Index Measure (SSIM) [71], and LPIPS [78] between
+Figure 3. Training meshes (left) and example camera poses (right).
+using pointersect to determine the first intersection point with
+the scene, and directly shade the intersection point with the
+environment, we get an equivalent algorithm of rasterization
+with deferred shading for meshes [14].
+4. Experiments
+We evaluate the proposed method’s capability to estimate
+intersection points and surface normal. We then showcase
+the use of pointersect in various applications, including rendering point clouds with image-based rendering and raytracing, and inverse rendering. Note that the same model is
+used for all experiments—no per-scene optimization is used.
+4.1. Model training
+The model is trained on 48 training meshes in the sketchfab dataset [52].We show 10 training meshes in Figure 3 and
+all 48 training meshes and their download links and credits
+in Figure 17 in Appendix J. The meshes are centered and
+scaled such that the longest side of their bounding box is 2
+units. For each training iteration, we randomly select one
+mesh and construct 30 input cameras and 1 target camera,
+which capture RGBD images using the mesh-ray intersection
+method in Open3D [81] without anti-aliasing filtering. We
+design the input and target camera poses to be those likely to
+appear in novel-view synthesis. Specifically, we uniformly
+sample camera position within a spherical shell of radius 0.5
+to 3, looking at a random position in the unit-length cube
+containing the object, as shown in Figure 3. During testing,
+the camera poses are non-overlapping with the training poses
+— the poses used in Table 1, shown in Figure 4, have a spiral
+trajectory with radius changing periodically between 3 to 4
+and those used in room scenes (Figure 6 and 7) are chosen
+to follow the room layouts.
+The input RGBD images create the input point cloud,
+where each point carries only point-wise information, including xyz, rgb, and the direction from input camera to
+the particular point. To support point clouds without these
+information, we randomly drop rgb and other features independently 50 % of the time—during inference, we use
+only xyz and rgb for all experiments. We also use a random
+k ∈ [12, 200] at every iteration. To help learning blending
+weights, at every iteration we select a random image patch
+from ImageNet dataset as the texture map for the mesh. We
+train the model for 350,000 iterations, and it takes 10 days
+on 8 A100 GPUs. Please see more details in Appendix E.
+5
+Table 1. Test results on unseen meshes in three datasets.
+Method
+Metrics
+tex-models
+ShapeNet
+Sketchfab
+Visibility
+splatting
+depth (RMSE) ↓
+normal (angle (◦ )) ↓
+hit (accuracy (%)) ↑
+color (PSNR (dB)) ↑
+color (SSIM) ↑
+color (LPIPS) ↓
+0.25 ± 0.20
+12.57 ± 4.60
+98.0 ± 1.5
+19.2 ± 2.2
+0.8 ± 0.2
+0.19 ± 0.13
+0.08 ± 0.08
+11.78 ± 5.40
+98.5 ± 1.7
+22.5 ± 4.1
+0.9 ± 0.1
+0.10 ± 0.10
+0.20 ± 0.12
+14.04 ± 4.73
+98.0 ± 2.0
+19.6 ± 2.9
+0.7 ± 0.2
+0.21 ± 0.13
+Poisson
+surface
+recon.
+depth (RMSE) ↓
+normal (angle (◦ )) ↓
+hit (accuracy (%)) ↑
+color (PSNR (dB)) ↑
+color (SSIM) ↑
+color (LPIPS) ↓
+0.02 ± 0.04
+8.48 ± 3.97
+99.8 ± 0.1
+25.7 ± 2.4
+0.9 ± 0.0
+0.08 ± 0.04
+0.03 ± 0.05
+16.89 ± 7.96
+98.8 ± 1.8
+0.9 ± 0.1
+0.06 ± 0.05
+0.06 ± 0.08
+14.58 ± 6.29
+99.5 ± 0.5
+25.0 ± 3.1
+0.9 ± 0.1
+0.10 ± 0.04
+Neural
+points
+[19]
+depth (RMSE) ↓
+normal (angle (◦ )) ↓
+hit (accuracy (%)) ↑
+color (PSNR (dB)) ↑
+color (SSIM) ↑
+color (LPIPS) ↓
+0.07 ± 0.10
+11.28 ± 3.30
+98.9 ± 0.4
+not supp.
+not supp.
+not supp.
+0.04 ± 0.03
+17.14 ± 6.01
+98.9 ± 0.7
+not supp.
+not supp.
+not supp.
+0.06 ± 0.05
+14.28 ± 3.44
+99.1 ± 0.2
+not supp.
+not supp.
+not supp.
+NPBG++
+[53]
+depth (RMSE) ↓
+normal (angle (◦ )) ↓
+hit (accuracy (%)) ↑
+color (PSNR (dB)) ↑
+color (SSIM) ↑
+color (LPIPS) ↓
+not supp.
+not supp.
+not supp.
+16.5 ± 2.1
+0.7 ± 0.1
+0.27 ± 0.07
+not supp.
+not supp.
+not supp.
+19.3 ± 4.0
+0.8 ± 0.1
+0.18 ± 0.08
+not supp.
+not supp.
+not supp.
+18.0 ± 1.6
+0.7 ± 0.1
+0.24 ± 0.08
+Proposed
+depth (RMSE) ↓
+normal (angle (◦ )) ↓
+hit (accuracy (%)) ↑
+color (PSNR (dB)) ↑
+color (SSIM) ↑
+color (LPIPS) ↓
+0.05 ± 0.09
+6.77 ± 2.71
+99.8 ± 0.2
+28.2 ± 1.9
+1.0 ± 0.0
+0.04 ± 0.03
+0.03 ± 0.03
+11.29 ± 5.08
+99.6 ± 0.6
+28.0 ± 6.4
+1.0 ± 0.0
+0.04 ± 0.04
+0.05 ± 0.04
+8.53 ± 2.79
+99.8 ± 0.1
+28.1 ± 2.7
+0.9 ± 0.0
+0.06 ± 0.04
+We randomly select a room scene in the Hypersim
+dataset [58] which contains 100 RGBD images captured
+in the room. We randomly select 90 of them to construct the
+input point cloud and use the rest for evaluation. We downsample the images by 2 (from 1024 × 768 to 512 × 384), and
+we use uniform voxel downsampling to reduce the number
+of points (the room size is 4 units and the voxel size is 0.01
+units). We provide the ground-truth vertex normal from the
+dataset to Poisson reconstruction. We also train a state-ofthe-art NeRF method, NGP [45, 66], using the same 90 input
+images, for 1000 epochs, taking 2 hours on 1 A100 GPU.
+Note that NGP and pointersect are not directly comparable—
+NGP utilizes scene-specific optimization whereas pointersect
+utilizes depth. We provide it as a reference baseline.
+Figure 5, Figure 6, and Table 2 show the results on the
+10 test RGBD images. As can be seen, while pointersect is
+trained on small meshes, it generalizes to room-scale scenes
+and outperforms prior state-of-the-art baselines.
+4.4. Ray tracing with point clouds
+As mentioned before in Section 3, pointersect provides a
+unique capability of ray-tracing with global illumination that
+is difficult to achieve with methods like NeRFs. We build
+a simple path tracer in PyTorch, following [61]. We also
+implement the Cook-Torrance microfacet specular shading
+model (with the split sum approximation), following [28].
+We construct a scene composed of a Lambertian floor (albedo
+= 0.2), a vertical mirror (kbase = 0.5, roughness = 0, metallic
+= 1, specular = 0.5), a sphere (kbase = 0.7, roughness = 0.7,
+metallic = 0.5, specular = 0), and an all-white environment
+map. The floor and the mirror are represented analytically,
+and the sphere is represented with 5000 points. We trace 4
+bounces and 2000 rays per pixel.
+As shown in Figure 1b, the result clearly shows the effect
+of global illumination, e.g., the reflection of the sphere in the
+mirror and the cast shadow on the floor.
+Table 2. Test results on the Hypersim dataset. The test is conducted
+on 10 new images not used to create the point cloud.
+Metric
+Vis. splatting
+Poisson recon.
+NPBG++
+NGP [45]
+Proposed
+PSNR (dB) ↑
+SSIM ↑
+LPIPS ↓
+11.7 ± 1.1
+0.12 ± 0.05
+0.79 ± 0.04
+26.3 ± 3.1
+0.85 ± 0.06
+0.37 ± 0.04
+27.9 ± 3.7
+0.89 ± 0.04
+0.33 ± 0.03
+28.5 ± 5.8
+0.90 ± 0.06
+0.31 ± 0.08
+29.8 ± 5.1
+0.91 ± 0.04
+0.25 ± 0.04
+ground-truth and estimated color images. To ensure fair
+comparisons between all methods, we compute the errors of
+surface normal and depth map only for camera rays that both
+ground-truth and the testing method agree to hit a surface.
+The results are shown in Table 1, and we provide examples in Figure 4. Optimizing each input point cloud directly,
+Poisson surface reconstruction achieves high PSNR and low
+normal errors, outperforming the scene-agnostic baselines
+like NPBG++ and Neural Points. Pointersect outperforms
+all prior methods even though it is scene-agnostic. Trained
+on the sketchfab dataset, it performs best on the sketchfab
+dataset. Nevertheless, it still outperforms the scene-specific
+Poisson reconstruction on unseen meshes in the ShapeNet
+dataset and performs comparably on the tex-models dataset.
+Moreover, pointersect is the only method supporting estimating intersection points, surface normal, and blending weights
+of any query ray without scene-specific optimization.
+4.5. Inverse rendering
+Another unique capability of pointersect is its differentiability. As a neural net, pointersect allows gradient calculation
+of color (blending weights) and surface normal with respect
+to the point cloud (e.g., xyz and rgb). We optimize a noisy
+point cloud’s xyz and rgb given 100 clean input RGB images, camera poses, and binary foreground segmentation
+maps. The results (Figure 12 and Table 5 in the supplementary) show that the optimization effectively denoises the
+point cloud. Please refer to Appendix F for details.
+4.6. Real Lidar-scanned point clouds
+4.3. Room-scale rendering with RGBD images
+Finally, we test pointersect on real Lidar-scanned point
+clouds. The goal is to evaluate how it handles a small amount
+of noise in scanned point clouds, even though it is trained on
+Next, we evaluate pointersect on a room-scale scene,
+whose geometry is very different from the training meshes.
+6
+Figure 4. Example results of pointersect and baselines. Please see supplementary material for novel-view rendering videos.
+30
+clean ones. We take two Lidar point clouds from the ARKitScenes dataset [7], perform uniform voxel downsampling
+to reduce the number of points (the voxel size is 0.01 and
+the scene size is around 14 units), and rendered with Poisson
+reconstruction and pointersect (with k = 100 and δ = 0.2
+since the scene is larger and not unit-length normalized).
+As can be seen in Figure 7, our model successfully renders
+the real point clouds, whereas the output quality of Poisson
+reconstruction degrades significantly.
+PSNR (dB)
+25
+ours
+NGP
+poisson recon.
+NPBG++
+vis. splatting
+20
+15
+10
+101
+102
+time (second)
+103
+Figure 5. PSNR vs. time of Figure 6. The x axis is the time to
+render 10 validation images of resolution 512 × 384. We train the
+NGP [45, 66] from 1 to 1000 epochs, and the time includes both
+training on the 90 input images and the rendering.
+Scene editing. One advantage of utilizing point clouds as the
+scene representation instead of an implicit representation like
+NeRF is that we can easily edit the scene (by directly moving,
+adding, removing points). In Figure 7, we present results of
+scene relighting which utilizes the estimated surface normal
+and scene editing where we insert new and change the size
+and location of point-cloud objects in the scene.
+Table 3. Optimize a noisy point cloud with pointersect.
+PSNR (dB) ↑
+normal (angle (◦ )) ↓
+depth (rmse) ↓
+100 input views
+before opt.
+after opt.
+144 novel views
+before opt.
+after opt.
+10.1 ± 0.5
+54.0 ± 0.9
+0.46 ± 0.08
+13.9 ± 0.8
+55.3 ± 0.4
+0.33 ± 0.08
+24.6 ± 0.5
+17.8 ± 2.1
+0.09 ± 0.06
+25.7 ± 1.2
+18.3 ± 2.7
+0.10 ± 0.07
+7
+Figure 6. Room-scale point cloud rendering results. Please see supplementary material for novel-view rendering videos.
+Figure 7. We test our model on a Lidar-scanned point cloud. Due to the small amount of noise, the quality of Poisson reconstruction degrades
+significantly. In comparison, pointersect is less affected. With the estimated surface normal, we re-render the scene with directional-dominant
+light using the colors as albedo. Using point cloud as the scene representation enables easy scene editing. We edit the input point clouds
+and render the new scene using pointersect. Can you spot the differences? Please see supplementary material for novel-view rendering,
+relighting, and scene-editing videos. c clock: Gush [23].
+5. Discussions
+a mesh with a Directed Distance Field (DDF). Similar to
+a SDF, a DDF, D(r), is learned specifically for each mesh,
+and it records the traveling distance of ray r to the nearest
+surface. The proposed pointersect, f (r, P), can be thought
+of as an estimator of DDFs. Aumentado-Armstrong et al.
+[5] derive several geometric properties of DDFs, which also
+apply to pointersect.
+Rendering speed. Pointersect requires one transformer evaluation per query ray. In contrast, NeRF and SDF methods
+require multiple evaluations per ray (in addition to per-scene
+training). Figure 5 shows the time to render 10 test images in
+Section 4.3. With a resolution of 512 × 384 and 700k points,
+the current rendering speed of pointersect is ∼ 1 frame per
+second (fps) with unoptimized Python code. The speed can
+be greatly improved with streamlined implementation and
+accelerated attention [33, 42]. See Appendix D for detailed
+complexity and runtime analysis.
+6. Conclusion
+Known artifacts. Currently, our pointersect model produces
+two types of artifacts. First, pointersect may generate floating
+points when a query ray is near an edge where the occluded
+background is far away or at the middle of two parallel edges.
+Second, we currently pass a fixed number of neighboring
+points to the pointersect model. Thus when there are multiple
+layers of surfaces, the actual (i.e., first) surface may receive
+only a small number of points, reducing the output quality.
+We have introduced pointersect, a novel method to render
+point clouds as if they are surfaces. Compared to other scene
+representations like implicit functions and prior point-cloud
+rendering methods, pointersect provides a unique combination of capabilities, including direct rendering of input point
+clouds without per-scene optimization, direct surface normal
+estimation, differentiability, ray tracing with global illumination, and intuitive scene editing. With the ubiquitousness
+of point clouds in 3D capture and reconstruction, we believe
+that pointersect will spur innovations in computer vision as
+well as virtual and augmented reality technology.
+Connection to directed distance fields. AumentadoArmstrong et al. [5] and Feng et al. [18] propose to represent
+Acknowledgment. We thank Yi Hua for all the interesting
+general discussions about geometry.
+8
+References
+Computer Vision and Pattern Recognition, pages 7830–7839,
+2020. 2, 13
+[14] Michael Deering, Stephanie Winner, Bic Schediwy, Chris
+Duffy, and Neil Hunt. The triangle processor and normal
+vector shader: a vlsi system for high performance graphics.
+SIGGRAPH, 22(4):21–30, 1988. 5
+[15] Kangle Deng, Andrew Liu, Jun-Yan Zhu, and Deva Ramanan.
+Depth-supervised nerf: Fewer views and faster training for
+free. In Proceedings of the IEEE/CVF Conference on Computer Vision and Pattern Recognition, pages 12882–12891,
+2022. 12, 13
+[16] Stavros Diolatzis, Julien Philip, and George Drettakis. Active
+exploration for neural global illumination of variable scenes.
+ACM Transactions on Graphics (TOG), 41(5):1–18, 2022. 3
+[17] Stefano Esposito, Daniele Baieri, Stefan Zellmann, André
+Hinkenjann, and Emanuele Rodolà. KiloNeuS: Implicit neural representations with real-time global illumination. arXiv
+preprint arXiv:2206.10885, 2022. 3
+[18] Brandon Yushan Feng, Yinda Zhang, Danhang ”Danny” Tang,
+Ruofei Du, and Amitabh Varshney. PRIF: Primary ray-based
+implicit function. In European Conference on Computer
+Vision (ECCV), 2022. 2, 8
+[19] Wanquan Feng, Jin Li, Hongrui Cai, Xiaonan Luo, and Juyong Zhang. Neural points: Point cloud representation with
+neural fields for arbitrary upsampling. In IEEE Conference
+on Computer Vision and Pattern Recognition (CVPR), pages
+18633–18642, 2022. 1, 3, 5, 6, 13, 19, 20
+[20] Sara Fridovich-Keil, Alex Yu, Matthew Tancik, Qinhong
+Chen, Benjamin Recht, and Angjoo Kanazawa. Plenoxels:
+Radiance fields without neural networks. In Proceedings of
+the IEEE/CVF Conference on Computer Vision and Pattern
+Recognition, pages 5501–5510, 2022. 12, 13
+[21] Markus Gross and Hanspeter Pfister. Point-based graphics.
+Elsevier, 2011. 1, 3
+[22] Gaël Guennebaud and Markus Gross. Algebraic point set
+surfaces. In ACM SIGGRAPH 2007 Papers, SIGGRAPH
+’07, page 23–es, New York, NY, USA, 2007. Association for
+Computing Machinery. 3
+[23] Joseph Gush.
+Antique wall clock.
+https :
+/ / sketchfab . com / 3d - models / antique - wall - clock 1542879be00b4c1d8d4330aac9669927. 8
+[24] Rana Hanocka, Gal Metzer, Raja Giryes, and Daniel CohenOr. Point2mesh: a self-prior for deformable meshes. ACM
+Transactions on Graphics (TOG), 39(4):126–1, 2020. 1, 2, 3,
+13
+[25] Dan Hendrycks and Kevin Gimpel. Gaussian error linear
+units (gelus). arXiv preprint arXiv:1606.08415, 2016. 13
+[26] Xiaoyang Huang, Yi Zhang, Bingbing Ni, Teng Li, Kai Chen,
+and Wenjun Zhang. Boosting point clouds rendering via
+radiance mapping. In Proceedings of the AAAI conference on
+artificial intelligence, 2023. 2
+[27] James T. Kajiya. The rendering equation. SIGGRAPH,
+20(4):143–150, aug 1986. 4
+[28] Brian Karis and Epic Games. Real shading in unreal engine
+4. Proc. Physically Based Shading Theory Practice, 4(3):1,
+2013. 6
+[29] Michael Kazhdan, Matthew Bolitho, and Hugues Hoppe. Poisson surface reconstruction. In Proceedings of the fourth Eurographics symposium on Geometry processing, volume 7,
+[1] Bart Adams, Richard Keiser, Mark Pauly, Leonidas J Guibas,
+Markus Gross, and Philip Dutré. Efficient raytracing of deforming point-sampled surfaces. In Computer Graphics Forum, volume 24, pages 677–684, 2005. 3
+[2] Anders Adamson and Marc Alexa. Approximating and intersecting surfaces from points. In Proceedings of the 2003
+Eurographics/ACM SIGGRAPH symposium on Geometry processing, pages 230–239, 2003. 3, 13
+[3] Kara-Ali Aliev, Artem Sevastopolsky, Maria Kolos, Dmitry
+Ulyanov, and Victor Lempitsky. Neural point-based graphics.
+In European Conference on Computer Vision, pages 696–712.
+Springer, 2020. 2, 13
+[4] Nina Amenta and Yong Joo Kil. Defining point-set surfaces.
+ACM Transactions on Graphics (TOG), 23(3):264–270, 2004.
+3
+[5] Tristan Aumentado-Armstrong, Stavros Tsogkas, Sven Dickinson, and Allan D Jepson. Representing 3d shapes with
+probabilistic directed distance fields. In IEEE Conference
+on Computer Vision and Pattern Recognition (CVPR), pages
+19343–19354, 2022. 2, 8
+[6] Jonathan T Barron, Ben Mildenhall, Matthew Tancik, Peter
+Hedman, Ricardo Martin-Brualla, and Pratul P Srinivasan.
+Mip-nerf: A multiscale representation for anti-aliasing neural
+radiance fields. In Proceedings of the IEEE/CVF International
+Conference on Computer Vision, pages 5855–5864, 2021. 12
+[7] Gilad Baruch, Zhuoyuan Chen, Afshin Dehghan, Tal Dimry,
+Yuri Feigin, Peter Fu, Thomas Gebauer, Brandon Joffe, Daniel
+Kurz, Arik Schwartz, and Elad Shulman. ARKitScenes - a
+diverse real-world dataset for 3d indoor scene understanding
+using mobile RGB-D data. In Thirty-fifth Conference on Neural Information Processing Systems Datasets and Benchmarks
+Track (Round 1), 2021. 7, 17, 23
+[8] Mark Boss, Raphael Braun, Varun Jampani, Jonathan T Barron, Ce Liu, and Hendrik Lensch. Nerd: Neural reflectance
+decomposition from image collections. In Proceedings of
+the IEEE/CVF International Conference on Computer Vision,
+pages 12684–12694, 2021. 12, 13
+[9] Angel X Chang, Thomas Funkhouser, Leonidas Guibas, Pat
+Hanrahan, Qixing Huang, Zimo Li, Silvio Savarese, Manolis
+Savva, Shuran Song, Hao Su, et al. Shapenet: An informationrich 3d model repository. arXiv preprint arXiv:1512.03012,
+2015. 5
+[10] Anpei Chen, Zexiang Xu, Fuqiang Zhao, Xiaoshuai Zhang,
+Fanbo Xiang, Jingyi Yu, and Hao Su. Mvsnerf: Fast generalizable radiance field reconstruction from multi-view stereo.
+In Proceedings of the IEEE/CVF International Conference
+on Computer Vision, pages 14124–14133, 2021. 12, 13
+[11] Inchang Choi, Orazio Gallo, Alejandro Troccoli, Min H Kim,
+and Jan Kautz. Extreme view synthesis. In Proceedings of
+the IEEE/CVF International Conference on Computer Vision,
+pages 7781–7790, 2019. 12, 13
+[12] Robert L Cook and Kenneth E. Torrance. A reflectance
+model for computer graphics. ACM Transactions on Graphics
+(TOG), 1(1):7–24, 1982. 3, 4
+[13] Peng Dai, Yinda Zhang, Zhuwen Li, Shuaicheng Liu, and
+Bing Zeng. Neural point cloud rendering via multi-plane
+projection. In Proceedings of the IEEE/CVF Conference on
+9
+[46] Thomas Müller, Alex Evans, Christoph Schied, and Alexander Keller. Instant neural graphics primitives with a multiresolution hash encoding. arXiv preprint arXiv:2201.05989, 2022.
+12, 13
+[47] Michael Niemeyer, Lars Mescheder, Michael Oechsle, and
+Andreas Geiger. Differentiable volumetric rendering: Learning implicit 3d representations without 3d supervision. In
+Proceedings of the IEEE/CVF Conference on Computer Vision and Pattern Recognition, pages 3504–3515, 2020. 12,
+13
+[48] Julian Ost, Issam Laradji, Alejandro Newell, Yuval Bahat,
+and Felix Heide. Neural point light fields. In Proceedings of
+the IEEE/CVF Conference on Computer Vision and Pattern
+Recognition, pages 18419–18429, 2022. 2, 3, 13
+[49] Songyou Peng, Chiyu Jiang, Yiyi Liao, Michael Niemeyer,
+Marc Pollefeys, and Andreas Geiger. Shape as points: A
+differentiable poisson solver. Advances in Neural Information
+Processing Systems (NeurIPS), 34:13032–13044, 2021. 1, 3,
+13
+[50] Hanspeter Pfister, Matthias Zwicker, Jeroen Van Baar, and
+Markus Gross. Surfels: Surface elements as rendering primitives. In Proceedings of the 27th annual conference on Computer graphics and interactive techniques, pages 335–342,
+2000. 1, 2, 13
+[51] Matt Pharr, Wenzel Jakob, and Greg Humphreys. Physically
+based rendering: From theory to implementation. Morgan
+Kaufmann, 2016. 3, 4, 12
+[52] Yue Qian, Junhui Hou, Sam Kwong, and Ying He. Pugeo-net:
+A geometry-centric network for 3d point cloud upsampling.
+In European Conference on Computer Vision (ECCV), pages
+752–769. Springer, 2020. 5, 14, 19, 22, 24
+[53] Ruslan Rakhimov, Andrei-Timotei Ardelean, Victor Lempitsky, and Evgeny Burnaev. NPBG++: Accelerating neural
+point-based graphics. In IEEE Conference on Computer Vision and Pattern Recognition (CVPR), pages 15969–15979,
+2022. 2, 5, 6, 13, 19
+[54] Prajit Ramachandran, Barret Zoph, and Quoc Le. Searching for activation functions. In International Conference on
+Learning Representations (ICLR), 2018. 13
+[55] Christian Reiser, Songyou Peng, Yiyi Liao, and Andreas
+Geiger. Kilonerf: Speeding up neural radiance fields with
+thousands of tiny mlps. In Proceedings of the IEEE/CVF
+International Conference on Computer Vision, pages 14335–
+14345, 2021. 12, 13
+[56] Gernot Riegler and Vladlen Koltun. Free view synthesis. In
+European Conference on Computer Vision, pages 623–640.
+Springer, 2020. 12, 13
+[57] Gernot Riegler and Vladlen Koltun. Stable view synthesis.
+In Proceedings of the IEEE/CVF Conference on Computer
+Vision and Pattern Recognition, pages 12216–12225, 2021.
+3, 12, 13
+[58] Mike Roberts, Jason Ramapuram, Anurag Ranjan, Atulit
+Kumar, Miguel Angel Bautista, Nathan Paczan, Russ Webb,
+and Joshua M Susskind. Hypersim: A photorealistic synthetic
+dataset for holistic indoor scene understanding. In IEEE
+International Conference on Computer Vision (ICCV), pages
+10912–10922, 2021. 6
+[59] Barbara Roessle, Jonathan T Barron, Ben Mildenhall, Pratul P
+Srinivasan, and Matthias Nießner. Dense depth priors for
+2006. 1, 3, 13
+[30] Michael Kazhdan and Hugues Hoppe. Screened poisson surface reconstruction. ACM Transactions on Graphics (TOG),
+32(3):1–13, 2013. 3, 5
+[31] Petr Kellnhofer, Lars C Jebe, Andrew Jones, Ryan Spicer,
+Kari Pulli, and Gordon Wetzstein. Neural lumigraph rendering. In Proceedings of the IEEE/CVF Conference on
+Computer Vision and Pattern Recognition, pages 4287–4297,
+2021. 12, 13
+[32] Diederik P. Kingma and Jimmy Ba. Adam: A method
+for stochastic optimization. In International Conference on
+Learning Representations (ICLR), 2015. 15
+[33] Nikita Kitaev, Lukasz Kaiser, and Anselm Levskaya. Reformer: The efficient transformer. In International Conference on Learning Representations (ICLR), 2020. 8
+[34] Leif Kobbelt and Mario Botsch. A survey of point-based
+techniques in computer graphics. Computers & Graphics,
+28(6):801–814, 2004. 3
+[35] Ravikrishna Kolluri. Provably good moving least squares.
+ACM Transactions on Algorithms (TALG), 4(2):1–25, 2008. 3
+[36] Patrick Labatut, Jean-Philippe Pons, and Renaud Keriven.
+Efficient multi-view reconstruction of large-scale scenes using
+interest points, delaunay triangulation and graph cuts. In IEEE
+International Conference on Computer Vision (ICCV), pages
+1–8, 2007. 1
+[37] Christoph Lassner and Michael Zollhofer. Pulsar: Efficient
+sphere-based neural rendering. In IEEE Conference on Computer Vision and Pattern Recognition (CVPR), pages 1440–
+1449, 2021. 1, 2, 3, 12, 13
+[38] Linjie Lyu, Ayush Tewari, Thomas Leimkühler, Marc Habermann, and Christian Theobalt. Neural radiance transfer fields
+for relightable novel-view synthesis with global illumination.
+In European Conference on Computer Vision (ECCV), pages
+153–169. Springer, 2022. 3
+[39] Baorui Ma, Zhizhong Han, Yu-Shen Liu, and Matthias
+Zwicker. Neural-pull: Learning signed distance function from
+point clouds by learning to pull space onto surface. In International Conference on Machine Learning (ICML), pages
+7246–7257. PMLR, 2021. 1, 2, 3, 13
+[40] Geoffrey Marchal. Cupid. https://skfb.ly/6vN6Z. 18
+[41] Geoffrey Marchal. Seated jew. https://skfb.ly/6ynCI. 18
+[42] Dmitrii Marin, Jen-Hao Rick Chang, Anurag Ranjan, Anish
+Prabhu, Mohammad Rastegari, and Oncel Tuzel. Token pooling in vision transformers. arXiv preprint arXiv:2110.03860,
+2021. 8
+[43] Ben Mildenhall, Pratul P Srinivasan, Rodrigo Ortiz-Cayon,
+Nima Khademi Kalantari, Ravi Ramamoorthi, Ren Ng, and
+Abhishek Kar. Local light field fusion: Practical view synthesis with prescriptive sampling guidelines. ACM Transactions
+on Graphics (TOG), 38(4):1–14, 2019. 12, 13
+[44] Ben Mildenhall, Pratul P Srinivasan, Matthew Tancik,
+Jonathan T Barron, Ravi Ramamoorthi, and Ren Ng. Nerf:
+Representing scenes as neural radiance fields for view synthesis. Communications of the ACM, 65(1):99–106, 2021. 3, 12,
+13
+[45] Thomas Müller, Alex Evans, Christoph Schied, and Alexander Keller. Instant neural graphics primitives with a multiresolution hash encoding. ACM Transactions on Graphics (TOG),
+41(4):102:1–102:15, July 2022. 6, 7, 18, 19
+10
+neural radiance fields from sparse input views. In Proceedings
+of the IEEE/CVF Conference on Computer Vision and Pattern
+Recognition, pages 12892–12901, 2022. 12, 13
+[60] Darius Rückert, Linus Franke, and Marc Stamminger. ADOP:
+Approximate differentiable one-pixel point rendering. ACM
+Transactions on Graphics (TOG), 41(4):1–14, 2022. 2, 13
+[61] Peter Shirley. Ray tracing in one weekend. Amazon Digital
+Services LLC, 1, 2018. 4, 6
+[62] Vincent Sitzmann, Semon Rezchikov, Bill Freeman, Josh
+Tenenbaum, and Fredo Durand. Light field networks: Neural
+scene representations with single-evaluation rendering. Advances in Neural Information Processing Systems, 34:19313–
+19325, 2021. 3, 12, 13
+[63] Pratul P Srinivasan, Boyang Deng, Xiuming Zhang, Matthew
+Tancik, Ben Mildenhall, and Jonathan T Barron. Nerv: Neural reflectance and visibility fields for relighting and view
+synthesis. In Proceedings of the IEEE/CVF Conference on
+Computer Vision and Pattern Recognition, pages 7495–7504,
+2021. 12, 13
+[64] Mohammed Suhail, Carlos Esteves, Leonid Sigal, and
+Ameesh Makadia. Light field neural rendering. In Proceedings of the IEEE/CVF Conference on Computer Vision and
+Pattern Recognition, pages 8269–8279, 2022. 12, 13
+[65] Weiwei Sun, Andrea Tagliasacchi, Boyang Deng, Sara Sabour,
+Soroosh Yazdani, Geoffrey E Hinton, and Kwang Moo Yi.
+Canonical capsules: Self-supervised capsules in canonical
+pose. Advances in Neural Information Processing Systems
+(NeurIPS), 34:24993–25005, 2021. 2
+[66] Towaki Takikawa, Or Perel, Clement Fuji Tsang, Charles
+Loop, Joey Litalien, Jonathan Tremblay, Sanja Fidler, and
+Maria Shugrina. Kaolin wisp: A pytorch library and
+engine for neural fields research. https : / / github. com /
+NVIDIAGameWorks/kaolin-wisp, 2022. 6, 7
+[67] Ashish Vaswani, Noam Shazeer, Niki Parmar, Jakob Uszkoreit, Llion Jones, Aidan N Gomez, Lukasz Kaiser, and Illia
+Polosukhin. Attention is all you need. Advances in Neural
+Information Processing Systems (NeurIPS), 30:5998–6008,
+2017. 4, 13, 15
+[68] Dor Verbin, Peter Hedman, Ben Mildenhall, Todd Zickler,
+Jonathan T. Barron, and Pratul P. Srinivasan. Ref-NeRF:
+Structured view-dependent appearance for neural radiance
+fields. IEEE Conference on Computer Vision and Pattern
+Recognition (CVPR), 2022. 12
+[69] Ingo Wald and Hans-Peter Seidel. Interactive ray tracing
+of point-based models. In Proceedings of the Second Eurographics / IEEE VGTC Conference on Point-Based Graphics,
+SPBG’05, page 9–16, Goslar, DEU, 2005. Eurographics Association. 3
+[70] Qianqian Wang, Zhicheng Wang, Kyle Genova, Pratul P Srinivasan, Howard Zhou, Jonathan T Barron, Ricardo MartinBrualla, Noah Snavely, and Thomas Funkhouser. Ibrnet:
+Learning multi-view image-based rendering. In Proceedings
+of the IEEE/CVF Conference on Computer Vision and Pattern
+Recognition, pages 4690–4699, 2021. 3, 12, 13, 18
+[71] Zhou Wang, Alan C Bovik, Hamid R Sheikh, and Eero P
+Simoncelli. Image quality assessment: from error visibility to
+structural similarity. IEEE Transactions on Image Processing,
+13(4):600–612, 2004. 5
+[72] Qiangeng Xu, Zexiang Xu, Julien Philip, Sai Bi, Zhixin Shu,
+Kalyan Sunkavalli, and Ulrich Neumann. Point-nerf: Pointbased neural radiance fields. In Proceedings of the IEEE/CVF
+Conference on Computer Vision and Pattern Recognition,
+pages 5438–5448, 2022. 2, 3, 13
+[73] Lior Yariv, Yoni Kasten, Dror Moran, Meirav Galun, Matan
+Atzmon, Basri Ronen, and Yaron Lipman. Multiview neural
+surface reconstruction by disentangling geometry and appearance. Advances in Neural Information Processing Systems,
+33:2492–2502, 2020. 3, 12, 13
+[74] Wang Yifan, Felice Serena, Shihao Wu, Cengiz Öztireli, and
+Olga Sorkine-Hornung. Differentiable surface splatting for
+point-based geometry processing. ACM Transactions on
+Graphics (TOG), 38(6):1–14, 2019. 1, 2
+[75] Alex Yu, Ruilong Li, Matthew Tancik, Hao Li, Ren Ng, and
+Angjoo Kanazawa. Plenoctrees for real-time rendering of
+neural radiance fields. In Proceedings of the IEEE/CVF International Conference on Computer Vision, pages 5752–5761,
+2021. 12, 13
+[76] Alex Yu, Vickie Ye, Matthew Tancik, and Angjoo Kanazawa.
+pixelnerf: Neural radiance fields from one or few images.
+In Proceedings of the IEEE/CVF Conference on Computer
+Vision and Pattern Recognition, pages 4578–4587, 2021. 12,
+13
+[77] Qiang Zhang, Seung-Hwan Baek, Szymon Rusinkiewicz, and
+Felix Heide. Differentiable point-based radiance fields for
+efficient view synthesis. In SIGGRAPH Asia 2022 Conference Papers, New York, NY, USA, 2022. Association for
+Computing Machinery. 2
+[78] Richard Zhang, Phillip Isola, Alexei A Efros, Eli Shechtman, and Oliver Wang. The unreasonable effectiveness of
+deep features as a perceptual metric. In IEEE Conference on
+Computer Vision and Pattern Recognition (CVPR), 2018. 5
+[79] Xiuming Zhang, Pratul P Srinivasan, Boyang Deng, Paul Debevec, William T Freeman, and Jonathan T Barron. Nerfactor:
+Neural factorization of shape and reflectance under an unknown illumination. ACM Transactions on Graphics (TOG),
+40(6):1–18, 2021. 3, 12, 13
+[80] Kun Zhou, Xi Wang, Yiying Tong, Mathieu Desbrun, Baining
+Guo, and Heung-Yeung Shum. Texturemontage: Seamless
+texturing of arbitrary surfaces from multiple images. ACM
+Transactions on Graphics (TOG), 24(3):1148–1155, 2005.
+Available at http://kunzhou.net/tex-models.htm. 5, 16, 17, 20
+[81] Qian-Yi Zhou, Jaesik Park, and Vladlen Koltun. Open3D: A
+modern library for 3D data processing. arXiv:1801.09847,
+2018. 5, 14
+[82] Matthias Zwicker, Hanspeter Pfister, Jeroen Van Baar, and
+Markus Gross. Surface splatting. In Proceedings of Computer
+Graphics and Interactive Techniques, pages 371–378, 2001.
+2
+11
+In the supplementary material, we provide details about
+the following topics:
+images. The estimated geometry is then used to provide additional supervision for NeRF [15, 59] or to anchor feature
+aggregation [56, 57].
+As mentioned earlier, this paper focuses on point-cloud
+rendering without per-scene optimization. The methods discussed above operate in a different setting or require perscene training. Therefore, while we are inspired by many of
+these methods, our method is not directly comparable.
+• overview of related work in Appendix A;
+• accelerated structure in Appendix B;
+• model architecture in Appendix C;
+• complexity and runtime analyses in Appendix D;
+• training procedure in Appendix E;
+• inverse rendering in Appendix F;
+B. Finding points along a ray
+• Chamfer distance in Appendix G;
+Finding the intersection point of a ray r = (ro , r⃗d ) with
+a point cloud P requires only points near the ray. Thus, we
+pass only the k nearest points within a cylinder of radius
+δ in terms of their perpendicular distances to the ray. A
+naive implementation would examine all points in P, sort
+them according to their distances, and keep the k nearest
+ones, taking O(n log n) operations per ray, where n is the
+total number of points in P. Since we only need points
+with the cylinder, a commonly used strategy to reduce the
+time complexity is to build an accelerated structure like
+octree to reduce the number of candidate points to examine
+[51]. Building an octree takes O(n log n) operations, and
+searching for nearby points takes O(log n) operations per
+ray. For a static scene, the octree can be built once and keep
+reusing the tree to find neighbor points.
+While octree greatly improves the speed for static P,
+for dynamic scenes or for inverse rendering, where many
+points in P can change at every iteration, rebuilding the
+tree at every iteration becomes an overhead. We build an
+accelerated structure that can be built in parallel on GPU
+to improve the speed of inverse rendering. The structure
+is based on a voxel grid. Intuitively, as can be seen from
+Fig. 8, we divide the space into voxels, and we record the
+points contained in each voxel with a table. Thus, building
+the voxel grid structure takes O(n) operations, where n is
+the total number of points. When a ray is given, we trace
+the ray through the voxel grid. The grid-ray intersection can
+be computed in O(g) time for a given ray, where g is the
+number of grid cells per dimension, and the computation for
+each ray can be computed in parallel using multiple GPU
+threads.
+Overall, the time complexity of finding k nearest
+points within a surrounding cylinder of radius δ is
+O (n + mg + mq log(q)), where q is the number of points
+lying within the cylinder, and the last term corresponds to
+the cost of sorting the distances from the points to the ray.
+In the case, when the points are uniformly distributed, in
+expectation q = n/g 3 Note that our implementation is not
+optimized; for example, the optimal time complexity of retrieving an unordered k nearest points from the q points is
+O(q). This structure can be slower than using an octree for
+static scenes, which takes n log(n) + m log(n) + mq, but its
+faster construction makes it more suitable for dynamic point
+• additional results to evaluate and gain insights on pointersect, including:
+– novel-view rendering video and additional scenes in
+Figure 13 and in the offline web page,
+– ablation study on the number of input views and the
+choice of k in Appendix H.1,
+– ablation study on the input resolution in Appendix H.2,
+– and the effect of ground-truth vertex normal to Poisson
+reconstruction in Appendix H.3;
+• Effect of noise in depth map in Appendix I;
+• and finally, the entire training dataset containing 48
+meshes and their credits in Appendix J.
+A. Additional related work
+In this paper, we focus on comparing with point-cloud
+rendering methods that do not require per-scene optimization.
+In this section, we briefly discuss and include additional
+related work. We also provide an overview in Tab. 4 for
+interested readers.
+Many recent works develop novel view synthesis techniques given only the RGB images and optionally their camera information. Neural Radiance Field (NeRF) [44] achieve
+a great success by representing the volume density and the
+radiance field with a neural network, and it is able to render
+high-quality photo-realistic images from novel viewpoints.
+Many follow-up works further improve the quality [6, 68],
+the training efficiency [55, 75], the rendering speed [20, 46],
+and the generalization capability [70, 76]. Additional capabilities have also been introduced into NeRF, including
+estimating shape and reflectance [8, 63, 79]. Several methods also aim to reduce or completely avoid the per-scene
+optimization of NeRF by utlizing image features [10, 70, 76].
+These methods often rely on additional information, including class labels,
+Other rendering primitives, including spheres [37], occupancy field [47], Signed Distance Function (SDF) [31, 73],
+light field [62, 64], or a plane sweep volume [10, 11, 43]
+have also been developed.
+Hybrid methods have also been developed. These methods first utilize Structure from Motion (SfM) or multi-view
+geometry to estimate scene geometry form the input RGB
+12
+Table 4. Rendering methods for 2D images and point clouds. The table provides a summary of the scene presentation (geometry
+primitives) and the capabilities of various methods. ✓∗ : require vertex normal as inputs. ✓♭ : provides good results, and per-scene
+optimization further improves the quality. ✓: depth and normal can be estimated from the density function.
+Render
+color
+Estimate
+depth
+Estimate
+normal
+No per-scene
+optimization
+volume density (MLP)
+volume density (MLP)
+volume density (MLP)
+volume density (MLP)
+volume density (grid MLP)
+volume density (multi-resolution MLP)
+volume density (octree)
+volume density (voxel)
+volume density (MLP + 2D features)
+volume density (MLP + 2D features)
+spheres
+occupancy field
+SDF
+SDF
+light field
+light field
+plane sweep volume
+plane sweep volume
+plane sweep volume + light field
+✓
+✓
+✓
+✓
+✓
+✓
+✓
+✓
+✓
+✓
+✓
+✓
+✓
+✓
+✓
+✓
+✓
+✓
+✓
+✓
+✓
+✓
+✓
+✓
+✓
+✓
+✓
+✓
+✓
+✓
+✓
+✓
+✓
+✗
+✗
+✓
+✓
+✓
+✓
+✓
+✓
+✓
+✓
+✓
+✓
+✓
+✓
+✓
+✓
+✓
+✓
+✓
+✗
+✗
+✗
+✓
+✗
+✗
+✗
+✗
+✗
+✗
+✗
+✗
+✗
+✓
+✓♭
+✗
+✗
+✗
+✗
+✗
+✗
+✓
+✓♭
+✓
+Depth-supervised NeRF [15]
+Dense Depth Priors [59]
+Free View Synthesis [56]
+Stable View Synthesis [57]
+volume density (MLP)
+volume density (MLP)
+mesh
+mesh
+✓
+✓
+✓
+✓
+✓
+✓
+✓
+✓
+✓
+✓
+✓
+✓
+✗
+✗
+✓
+✓
+Point cloud to
+other representations
+Poisson reconstruction [29]
+Shape as point [49]
+Neural pull [39]
+Point2Mesh [24]
+Neural point [19]
+indicator func.
+indicator func.
+SDF
+mesh
+neural point
+✓
+✗
+✗
+✗
+✗
+✓
+✓
+✓
+✓
+✓
+✓∗
+✓∗
+✓
+✓
+✓
+✗
+✗
+✗
+✗
+✓
+Point cloud rasterization
+Visibility Splatting [50]
+NPBG [3]
+ADOP [60]
+Multi-plane [13]
+NPBG++ [53]
+surfel
+points
+points
+points
+points
+✓
+✓
+✓
+✓
+✓
+✓
+✗
+✗
+✗
+✗
+✓∗
+✗
+✗
+✗
+✗
+✓
+✗
+✗
+✗
+✓
+Point cloud ray-casting
+Iterative ray-surface intersection [2]
+Point-Nerf [72]
+NPLF [48]
+Ours (pointersect)
+points
+points
+points
+points
+✓
+✓
+✓
+✓
+✓
+✓
+✗
+✓
+✓
+✓
+✗
+✓
+✗
+✓♭
+✗
+✓
+Category
+Method
+Primitives
+Rendering from 2D images
+NeRF [44]
+NeRD [8]
+NeRV [63]
+NeRFactor [79]
+KiloNeRF [55]
+InstantNGP [46]
+Plenoctrees [75]
+Plenoxels [20]
+PixelNeRF [76]
+IBRNet [70]
+Pulsar [37]
+Differentiable Volumetric Rendering [47]
+IDR [73]
+Neural Lumigraph Rendering [31]
+Light field Networks [62]
+Light Field Neural Rendering [64]
+Extreme View Synthesis [11]
+MVSNeRF [10]
+Local Light Field Fusion [43]
+Rendering from 2D images + SfM Depth
+C. Architecture details
+We use a transformer to build the pointersect model. The
+model architecture details, including the number of layers
+and the layer composition, are illustrated in Fig. 9b.
+The model architecture is composed of a Multi-layer Perceptron (MLP) and a transformer. The MLP is used to convert the input features (e.g., xyz, rgb) into the dimensionality
+used by the transformer (which is 64). We do not use positional encoding for xyz like NeRF [44]—we found that
+adding positional encoding reduces the estimation accuracy.
+We use the standard transformer block from Vaswani et al.
+[67]. We remove the layer normalization layer, and we use
+a dropout probability of 0.1. The transformer is composed
+of 4 layers of transformer blocks and has a dimension of 64.
+We additional learn a token and insert it at the input of the
+transformer, in order to estimate the ray traveling distance,
+the surface normal, and the probability of hitting a surface.
+We use the SiLU nonlinearity [25, 54].
+The output of the transformer contain k + 1 tokens—1
+Figure 8. The voxel grid structure utilizes the easy computation of
+grid-ray intersection. Note that we need to trace the ray along the
+slowest moving axis (in this case the x = ci planes).
+clouds. We also want to point out that while we implement
+the accelerated structure in CUDA, the implementation is
+not optimized, and the speed can be further improved, as we
+will see in Appendix D.
+13
+radius δ centered on the query ray. In the case, when the
+points are uniformly distributed, in expectation q = n/g 3
+The transformation to the canonical coordinate is O(mk),
+where k is the number of the nearest neighbor points. The
+transformer has a time complexity of O(Lkd(k + d)), where
+L and d are the number of layers and the dimension of the
+transformer, respectively.
+Fig. 10 shows the runtime measurements of various settings. In the experiment, we simulate an adversarial scenario
+where the points are uniformly sampled within a square cube
+between [−1, 1]3 (instead of on surfaces as typical scenarios). As can be seen from the results, the main bottlenecks
+are finding neighboring points of a ray and the transformer.
+While we implement the neighbor-point searching with a
+custom CUDA kernel, there is still a significant room for
+improvement. Nevertheless, with a point cloud containing
+n = 10, 000 points and k = 40, our non-optimized implementation is capable of rendering 100 × 100 images in 10
+fps, 200 × 200 images in 5 fps, and 500 × 400 in 1 fps.
+E. Model training details
+We train the pointersect model with the 48 training
+meshes in the sketchfab dataset [52]. We center and scale
+the meshes such that the longest side of their bounding box
+is 2 units in length. For each training iteration, we randomly
+select one mesh and randomly construct 30 input cameras
+and 1 target camera, which capture RGBD images using
+the mesh-ray intersection method in Open3D [81]. We do
+not apply anti-aliasing filters on the RGBD images. This
+allows us to get the ground truth of the specific intersection
+point, instead of a blurred and average one across a local
+neighborhood. The ground-truth RGBD images are rendered
+without global illumination. This is intentional and allows
+the learned w to focus on material properties and not be
+affected by lighting conditions and cast shadows. Both input
+and target cameras have a field-of-view of 60 degrees.
+We create the input point cloud using the input RGBD
+images. Specifically, for each pixel in an input RGBD image,
+we cast a ray from the pixel center towards the camera pinhole and use the depth map to determine the point location.
+For each point, we gather the following information (see
+Fig. 9a for illustration):
+Figure 9. (a) Point-wise features extracted from camera rays and
+(b) model architecture details.
+corresponding to the special token and k for the neighboring
+points. We use a linear layer to convert the special token to
+the corresponding hestimates. To compute the material blendi
+Pk
+ing weights, w = w1 , . . . , wk | wi ∈ [0, 1], i=1 wi = 1 ,
+we use a multihead attention layer and take its output attention weights as w. In other words, the tokens are projected
+by a linear layers as queries, keys, and values, and the softmax attention is used to compute the similarities between
+the tokens and the special token.
+D. Complexity analysis
+In this section, we analyze the computation complexity of
+our implementation. Pointersect is composed of three main
+operations:
+• xyz, or p ∈ R3 , the location of the point;
+• finding points along the query ray (Appendix B);
+• rgb, or c ∈ R3 , color of the point in input RGBD image;
+• transform to the canonical coordinate (Section 3);
+• and run the transformer model (Appendix C).
+• ⃗rd ∈ S2 , the cast camera ray direction (normalized);
+• u ∈ R3 , a vector from the point corresponding to the
+current pixel to the point corresponding to the next pixel
+in the x direction on the input RGBD image (see Fig. 9a);
+Finding neighboring points, as discussed in Appendix B,
+has a time complexity of O(n + mg + mq log(q)), where
+n is the number of points, m is the number of query rays,
+g is the number of cells in each dimension of the grid, and
+q is the total number of points lying within a cylinder of
+• v ∈ R3 , same as u but in the y direction;
+• z ∈ S2 , the optical axis direction of the input camera;
+14
+10
+10
+3
+10
+4
+number of rays
+10
+5
+(a) effect of number of rays.
+number of points = 10,000
+k = 40
+10
+6
+0.20
+10
+2
+10
+3
+10
+4
+number of rays
+10
+5
+10
+6
+time (second)
+100
+10 1
+2
+0.25
+0.20
+0.15
+0.10
+0.05
+0.00
+time (second)
+10 1
+time (second)
+time (second)
+rest
+transformer
+coord. transform
+find neighbor
+100
+0.15
+0.10
+0.05
+25 50 75 100 125 150 175 200
+k
+(c) effect of k.
+number of points = 10,000
+number of rays = 10,000
+(b) effect of number of rays.
+number of points = 100,000
+k = 40
+0.00 2
+10
+103
+104
+105
+number of points
+106
+(d) effect of number of points.
+number of rays = 10,000
+k = 40
+Figure 10. Runtime measurements of the proposed method rendering (a, b) different numbers of rays, (c) different numbers of neighboring
+points k, and (d) different number of points. We break the total runtime into four main categories and illustrate them as cumulative plots. In
+the experiment, we uniformly sample points within a square cube between [−1, 1]3 , uniformly sample ray origin in the cube, and uniformly
+sample rays toward all directions. We repeat each case by three times and report the average. The experiment is conducted on a single A100
+GPU and PyTorch 1.10.1 with the typical implementation of transformer.
+F. Inverse rendering: details
+• ℓc ∈ {0, 1}, a binary indicator, which is set to 1 when
+c contains valid information or 0 when we set c to
+(0.5, 0.5, 0.5);
+As we have discussed, the pointersect model f allows gradient computation of color and surface normal with respect
+to the point cloud’s xyz and rgb. In this section, we provide
+details of our inverse rendering experiment in Section 4.5.
+Our goal is to demonstrate the use of pointersect in an inverse rendering application, so we assume a simple scenario
+where we have ground-truth RGB images, camera poses, and
+foreground segmentation masks. Our purpose is to demonstrate the potential, not to compare with the state-of-the-art
+inverse rendering methods.
+Given N input RGB images, I = {I1 , . . . , IN |Ii ∈
+Rh×w×3 }, their corresponding foreground masks, Y =
+{Y1 , . . . , YN |Yi ∈ [0, 1]h×w }, camera extrinsic and
+intrinsic matrices, and a noisy point cloud, P =
+{(p1 , c1 ), . . . , (pn , cn )}, our goal is to optimize the position p = {p1 , . . . , pn } and color c = {c1 , . . . , cn } of the
+points such that when we render P with pointersect from the
+input camera views, the output images match the input ones.
+Let rjk be a camera ray from the j-th input image. We use
+bilinear interpolation to calculate the corresponding color
+and the foreground mask values, ĉ(rjk ) and ŷ(rjk ), respectively. We optimize the following loss function while fixing
+the network parameter of the pointersect model (i.e., simply
+use it as part of the rendering forward function):
+• and ℓa ∈ {0, 1}, a binary indicator, which is set to 1 when
+⃗rd , u, v, v, z contain valid information or 0 when we set
+all of them to zeors.
+All of the features are point-wise and can be easily extracted
+from the camera pose. To support point clouds that contain
+only xyz information and without these information, we
+randomly drop rgb and other features independently 50 % of
+the time (and set ℓc and ℓa accordingly). During inference,
+in all experiments shown in the paper, we do not use any of
+the features, except xyz and rgb.
+To diversify the sampling rates of the point cloud, we
+randomly set the resolution (ranging from 30 × 30 to 300 ×
+300) and position (1 to 3 units from the origin) for each input
+camera. The target camera has a 50 × 50 resolution, i.e.,
+2500 query rays per iteration. To increase the diversity of
+the query rays, we point the target camera towards a random
+point in a centered box of a width equal to 1 unit and position
+the camera at a random location (between 0.5 to 3 units to
+the origin). To help learning the blending weights of color,
+at every iteration we select a random image patch with a
+size from 20 × 20 to 200 × 200 in the ImageNet dataset
+as the texture map for the mesh. We also select a random
+k ∈ [12, 200] at every iteration.
+To optimize the loss function in Eq. (1), We use ADAM
+[32] with β1 = 0.9, β2 = 0.98, and a learning rate schedule
+used by Vaswani et al. [67] with a warm-up period of 4,000
+iterations. Within the warm-up iterations, the learning rate
+increases rapidly to 2e−6 , and it gradually decreases afterwards. We train the model for 350,000 iterations, and it takes
+10 days on 8 A100 GPUs.
+& \min _{\cP } \sum _{j=1}^{N} \sum _{\r _k^j} \left \| \hat {c}(\r _k^j) - c(\r _k^j, \cP ) \right \|^2_2 \label {eq: inv loss} \\ & - \hat {y}(\r _k^j) \log h(\r _k^j, \cP ) \label {eq: inv hit 1} \\ & - (1 - \hat {y}(\r _k^j)) \log (1 - h(\r _k^j, \cP )) \label {eq: inv hit 2} \\ & + \left (n(\r _k^j, \cP ) \cross n(\r _{k+1_u}^j, \cP ) \right )^2 \label {eq: inv normal 1} \\ & + \left (n(\r _k^j, \cP ) \cross n(\r _{k+1_v}^j, \cP ) \right )^2, \label {eq: inv normal 2}
+(7)
+15
+Table 5. Optimize a noisy point cloud with pointersect.
+25
+PSNR (dB)
+PSNR
+23
+diff. angle
+30
+diff. angle (°)
+40
+24
+PSNR (dB) ↑
+normal (angle (◦ )) ↓
+depth (rmse) ↓
+100 input views
+before opt.
+after opt.
+144 novel views
+before opt.
+after opt.
+10.1 ± 0.5
+54.0 ± 0.9
+0.46 ± 0.08
+13.9 ± 0.8
+55.3 ± 0.4
+0.33 ± 0.08
+24.6 ± 0.5
+17.8 ± 2.1
+0.09 ± 0.06
+25.7 ± 1.2
+18.3 ± 2.7
+0.10 ± 0.07
+22
+20
+we are able to optimize the point cloud to reduce the rgb,
+depth, and normal errors.
+21
+0
+2000
+4000
+6000
+8000
+10000
+iteration
+G. Deviation from ground-truth surface
+Figure 11. PSNR and the angle between the ground-truth and
+estimated color and surface normal, respectively, during the inverse
+rendering optimization. The shade represents the standard deviation
+of the values over the 100 input views.
+We measure the error “along” the ray as we are interested
+in the accuracy from a ray intersection stand point, which
+is the main focus of the paper. To further provide insight
+into the accuracy of the surfaces that would be reconstructed,
+Table 6 shows the Chamfer distance using the same setup as
+Table 1.
+where c(rjk , P), n(rjk , P), and h(rjk , P) are pointersect’s estimates of color (using blending weights), surface normal,
+and hit, respectively (see Section 3 in the main paper). In
+the optimization program, we minimize the ℓ2 loss of color
+(eq. (3)), the negative log-likelihood of foreground hit estimation (eq. (4) and eq. (5)), and the smoothness of the
+estimated normal map between neighboring pixels on the
+images (eq. (6) and eq. (7)). The loss terms related to normal
+smoothness is optional—we add it for demonstration. Note
+that we do not couple the input rgb colors with the groundtruth surface normal to provide additional supervision to the
+geometry—the color is computed simply by interpolating
+the rgb values of input images.
+We create an example problem by capturing 100 RGBD
+images from the Stanford Bunny mesh [80] (whose size is
+scaled to have 2 units in length), adding Gaussian noise with
+standard deviation equal to 0.2 to the depth channel, and
+using the RGBD images to create the noisy point cloud and
+RGB images as our input images. We solve the optimization
+problem using stochastic gradient descent with a learning
+rate of 0.01 with 10000 iterations. Each iteration we select
+a point in P, project it onto all input images, and cast rays
+from the local 10 × 10 patch of the projected pixel location.
+We cast roughly a total of 10000 rays every iteration. At
+the end of every iteration, we project the RGB values of the
+point cloud to [0, 1]. Every 150 iterations, we use the groundtruth foreground segmentation maps to perform silhouette
+carving on P, which allows us to remove points that are
+apparently invalid. We insert new points by casting rays
+from random input pixels using pointersect’s estimates of
+point position and color. This operation is fast, easy to
+implement, and significantly speeds up the optimization.
+The entire optimization (10000 iterations) takes 1 hour on
+one A100 GPU.
+Figure 12 shows the results, Fig. 11 shows the optimization progression, and Table 5 shows the statistics on 100
+input views and 144 novel views. As can be seen, with the
+capability to back-propogate gradient through pointersect,
+Table 6. Chamfer distance (×10−3 ). Note that Chamfer distance
+measures square distances, whereas the RMSE (used by the rest of
+the paper) measure distance.
+dataset
+Visibility splatting
+Poisson recon.
+Neural Points
+Ours
+ShapeNet
+Sketchfab
+2.32 ± 9.55
+13.33 ± 25.53
+0.51 ± 1.98
+1.58 ± 4.30
+0.30 ± 0.43
+0.98 ± 2.47
+0.29 ± 0.48
+0.87 ± 2.19
+H. Additional results
+Figure 13 extends Figure 4 in the paper and shows two
+results from the Sketchfab test dataset. The supplementary
+offline website showcases the result videos of Section 4.2,
+Section 4.3, Section 4.5, and Section 4.6. In the following,
+we provide two ablation studies on the number of views, the
+choice of k, and the sampling rate (i.e., density) of the point
+clouds.
+H.1. Number of input views and the choice of k
+In Section 4.2, we constructed the input point clouds by
+capturing 6 200 × 200 RGBD images, each from front, back,
+left, right, top, and bottom, of the object of interest. The
+input point cloud, constructed in this manner, may fail to
+contain occluded part of the object. Here, we repeat the
+experiment with an increased number of input RGBD images, 30 and 60. Specifically, we randomly sample 30 (or
+60) cameras uniformly within a sphere shell with inner radius of 3 and outer radius of 4. All cameras have a field
+of view of 30 degrees, a resolution of 200 × 200, and point
+to the center of the object of interest. All settings are the
+same as those in Section 4.2—k = 40, δ = 0.1, and we
+provide ground-truth vertex normal to Poisson reconstruction and visibility splatting. The depth and normal errors
+are computed only on non-hole pixels. Additionally, since
+increasing the number of input views increases the density
+of the point cloud, choosing the same number of nearest
+16
+Figure 12. We back-propagate gradient through the pointersect model to optimize a noisy point cloud, comparing output images with the
+given clean RGB images and foreground binary mask.
+points, i.e., using the same k, effectively reduces the size of
+the neighborhood the pointersect model can attend to. Thus,
+we also include a pointersect result where we increase k to
+200, which retains the expected neighborhood size for 30
+input views and halves it for 60 input views.
+The results are shown in Tab. 7. As can be seen, pointersect, regardless of the choice of k, achieves the best results
+in color estimations. Increasing k (thus allows pointersect
+to attend to a larger neighborhood) also makes pointersect
+outperform all baselines in terms of the estimation accuracy
+of depth and surface normal.
+5 input images.
+H.3. Poisson without ground-truth vertex normal
+In all experiments in the paper (except the ones on real
+Lidar point cloud where we do not have ground-truth vertex
+normal), we provide the ground-truth vertex normal to Poisson surface reconstruction. However, in practice, groundtruth vertex normal is difficult to get, and thus we often need
+to estimate the vertex normal from the point cloud before
+computing Poisson reconstruction.
+In Fig. 16 we show an additional result where Poisson
+reconstruction is given the estimated vertex normal. We
+estimate the vertex normal directly from the point cloud
+using Open3D, which estimates vertex normal by fitting
+local planes. As can be seen, the output quality of Possion
+reconstruction is significantly affected when we use vertex
+normal that contains a small amount of noise. Pointersect,
+on the other hand, does not use vertex normal, so the result
+is unaffected.
+H.2. Number of views vs. point density
+In this experiment, we study the effect of point density
+when we capture the scene in a frontal-view position. We
+take the Stanford Bunny [80] and capture 1 RGBD image
+from the center frontal view in various resolutions. Since the
+field-of-view of remain the same, increasing the resolution
+increases the density of the points. We also capture 4 more
+RGBD images at the 4 corners of the axis-aligned bounding
+box, also from the frontal view. The output cameras are on a
+circle centered at the center viewpoint and looking towards
+the center of the bunny. All settings are the same as those
+in Section 4.2, i.e., k = 40, δ = 0.1, and we provide the
+ground-truth vertex normal to Poisson surface reconstruction
+and visibility splatting.
+The results are shown in Table 8 and Figure 14. As can
+be seen, even with a single view point, pointersect is able to
+render the point cloud from novel view points. Increasing the
+point density improves the estimation accuracy of pointersect. When we use only a single view (and part of the bunny
+is occluded and missing in the input point cloud), pointersect
+renders faithfully the point cloud and thus produces with a
+missing ear. The occluded ear appears when we include all
+I. Noisy point cloud from handheld devices
+Pointersect is trained on clean point clouds that are created from meshes. Thus, pointersect renders the input point
+cloud as is—if an input point cloud contains noisy points,
+the noise will appear in the rendered images and estimated
+depth and normal maps. It would be interesting to see what
+would happen if we directly apply the pointersect model on
+a noisy point cloud that is captured by a handheld device.
+We take 19 RGBD images from the ARKitScenes
+dataset [7], where the depth maps and camera poses are
+estimated by ARKit. We perform a simple point-cloud outlier removal utilizing the confidence map output by ARKit.
+We then perform a voxel downsampling on the noisy point
+cloud with a cell width of 0.05. We apply various methods to
+17
+Figure 13. Additional example results of pointersect and baselines on Sketchfab dataset. Mesh credit: c Marchal [41]. c Marchal [40].
+render novel views, including visibility splatting where each
+point is rendered as 1 pixel, screened Poisson reconstruction,
+IBRNet [70], NGP [45] where we train the model for 200
+epochs, and the same pointersect model used in the paper
+that is trained on clean point clouds. We use the same setting
+as those in Section 4.6: k = 100, δ = 0.2. Note that Poisson
+and NGP utilize per-scene optimization; IBRNet does not
+utilize depth information; pointersect never sees real noisy
+RGBD images during training. It is simply an exploratory
+experiment to inspire future work.
+Figure 15 shows the results. As can be seen, while the
+pointersect model never sees real-world noisy point clouds
+during training, it is able to render the point cloud with
+reasonable quality. Utilizing the depth information, pointersect can directly renders the input images without any
+training, and the rendered results do not contain floating
+artifacts. Since pointersect does not perform any per-scene
+optimization, the rendered images present the varying exposure and white-balance settings in the input images / point
+cloud. While the surface normal estimation are reasonable,
+they are affected most severe by the noise in the point cloud
+and camera poses compared to the estimated depth map and
+the results when the input point cloud is clean.
+18
+Table 7. Test results on three datasets. Inputs are 30 or 60 RGBD images captured at random locations within sphere shell, pointing toward
+the center. All test meshes are unseen during training. NGP does not use depth information and is trained for 1000 epochs (about 10 minutes).
+It is included as a reference baseline.
+tex-models
+Method
+Metrics
+ShapeNet
+Sketchfab
+30 input views
+60 input views
+30 input views
+60 input views
+30 input views
+60 input views
+Visibility
+splatting
+depth (RMSE) ↓
+normal (angle (◦ )) ↓
+hit (accuracy (%)) ↑
+color (PSNR (dB)) ↑
+color (SSIM) ↑
+color (LPIPS) ↓
+0.06 ± 0.07
+5.59 ± 2.40
+99.1 ± 0.3
+22.0 ± 1.8
+0.9 ± 0.0
+0.07 ± 0.05
+0.04 ± 0.03
+5.72 ± 2.64
+99.0 ± 0.3
+21.9 ± 2.1
+0.9 ± 0.0
+0.05 ± 0.02
+0.03 ± 0.03
+6.85 ± 3.67
+99.1 ± 0.5
+24.0 ± 3.0
+0.9 ± 0.1
+0.05 ± 0.03
+0.03 ± 0.03
+7.01 ± 3.82
+99.1 ± 0.6
+23.8 ± 3.1
+0.9 ± 0.1
+0.04 ± 0.03
+0.05 ± 0.03
+7.84 ± 3.06
+99.3 ± 0.2
+23.3 ± 1.3
+0.9 ± 0.1
+0.08 ± 0.06
+0.04 ± 0.02
+8.13 ± 3.31
+99.2 ± 0.2
+23.2 ± 1.5
+0.9 ± 0.1
+0.07 ± 0.03
+Poisson
+surface
+recon.
+depth (RMSE) ↓
+normal (angle (◦ )) ↓
+hit (accuracy (%)) ↑
+color (PSNR (dB)) ↑
+color (SSIM) ↑
+color (LPIPS) ↓
+0.02 ± 0.04
+5.76 ± 2.65
+99.9 ± 0.1
+27.5 ± 3.1
+0.9 ± 0.0
+0.05 ± 0.03
+0.02 ± 0.04
+5.46 ± 2.53
+99.9 ± 0.1
+27.7 ± 3.1
+0.9 ± 0.0
+0.05 ± 0.03
+0.03 ± 0.07
+11.14 ± 6.04
+98.1 ± 7.3
+0.9 ± 0.1
+0.05 ± 0.06
+0.03 ± 0.06
+10.49 ± 6.89
+99.3 ± 1.3
+0.9 ± 0.0
+0.05 ± 0.04
+0.06 ± 0.09
+10.59 ± 6.51
+99.6 ± 0.4
+26.5 ± 3.6
+0.9 ± 0.0
+0.08 ± 0.04
+0.06 ± 0.09
+10.14 ± 6.18
+99.6 ± 0.6
+26.5 ± 3.9
+0.9 ± 0.0
+0.08 ± 0.04
+Neural
+points
+[19]
+depth (RMSE) ↓
+normal (angle (◦ )) ↓
+hit (accuracy (%)) ↑
+color (PSNR (dB)) ↑
+color (SSIM) ↑
+color (LPIPS) ↓
+0.04 ± 0.02
+12.59 ± 2.73
+99.0 ± 0.4
+not supp.
+not supp.
+not supp.
+0.04 ± 0.02
+13.00 ± 2.58
+99.0 ± 0.4
+not supp.
+not supp.
+not supp.
+0.03 ± 0.03
+16.93 ± 4.57
+99.0 ± 0.7
+not supp.
+not supp.
+not supp.
+0.03 ± 0.03
+16.86 ± 4.44
+99.0 ± 0.7
+not supp.
+not supp.
+not supp.
+0.04 ± 0.02
+15.24 ± 3.21
+99.2 ± 0.2
+not supp.
+not supp.
+not supp.
+0.04 ± 0.02
+15.64 ± 3.15
+99.2 ± 0.2
+not supp.
+not supp.
+not supp.
+NPBG++
+[53]
+depth (RMSE) ↓
+normal (angle (◦ )) ↓
+hit (accuracy (%)) ↑
+color (PSNR (dB)) ↑
+color (SSIM) ↑
+color (LPIPS) ↓
+not supp.
+not supp.
+not supp.
+17.2 ± 2.4
+0.7 ± 0.1
+0.23 ± 0.05
+not supp.
+not supp.
+not supp.
+17.3 ± 2.4
+0.7 ± 0.1
+0.23 ± 0.05
+not supp.
+not supp.
+not supp.
+19.8 ± 4.1
+0.8 ± 0.1
+0.17 ± 0.08
+not supp.
+not supp.
+not supp.
+19.8 ± 4.1
+0.8 ± 0.1
+0.17 ± 0.08
+not supp.
+not supp.
+not supp.
+18.8 ± 1.7
+0.8 ± 0.1
+0.21 ± 0.07
+not supp.
+not supp.
+not supp.
+18.9 ± 1.7
+0.8 ± 0.1
+0.21 ± 0.06
+NGP [45]
+depth (RMSE) ↓
+normal (angle (◦ )) ↓
+hit (accuracy (%)) ↑
+color (PSNR (dB)) ↑
+color (SSIM) ↑
+color (LPIPS) ↓
+not supp.
+not supp.
+not supp.
+18.3 ± 7.7
+0.8 ± 0.1
+0.22 ± 0.14
+not supp.
+not supp.
+not supp.
+22.3 ± 8.2
+0.8 ± 0.2
+0.16 ± 0.19
+not supp.
+not supp.
+not supp.
+0.9 ± 0.1
+0.14 ± 0.10
+not supp.
+not supp.
+not supp.
+0.9 ± 0.1
+0.17 ± 0.14
+not supp.
+not supp.
+not supp.
+23.7 ± 6.9
+0.9 ± 0.1
+0.14 ± 0.10
+not supp.
+not supp.
+not supp.
+24.8 ± 7.3
+0.9 ± 0.1
+0.12 ± 0.11
+Proposed
+(k = 40)
+depth (RMSE) ↓
+normal (angle (◦ )) ↓
+hit (accuracy (%)) ↑
+color (PSNR (dB)) ↑
+color (SSIM) ↑
+color (LPIPS) ↓
+0.02 ± 0.02
+5.85 ± 1.82
+99.9 ± 0.0
+32.4 ± 2.1
+1.0 ± 0.0
+0.02 ± 0.02
+0.02 ± 0.02
+6.30 ± 1.75
+99.9 ± 0.0
+33.3 ± 1.9
+1.0 ± 0.0
+0.01 ± 0.02
+0.02 ± 0.02
+8.85 ± 3.61
+99.8 ± 0.3
+29.7 ± 3.8
+1.0 ± 0.0
+0.03 ± 0.03
+0.02 ± 0.02
+9.25 ± 3.29
+99.8 ± 0.2
+30.5 ± 3.9
+1.0 ± 0.0
+0.02 ± 0.02
+0.03 ± 0.02
+7.01 ± 2.11
+99.9 ± 0.0
+30.3 ± 2.7
+1.0 ± 0.0
+0.04 ± 0.04
+0.03 ± 0.02
+7.47 ± 2.02
+99.9 ± 0.0
+30.9 ± 2.7
+1.0 ± 0.0
+0.04 ± 0.04
+Proposed
+(k = 200)
+depth (RMSE) ↓
+normal (angle (◦ )) ↓
+hit (accuracy (%)) ↑
+color (PSNR (dB)) ↑
+color (SSIM) ↑
+color (LPIPS) ↓
+0.01 ± 0.01
+5.09 ± 1.83
+99.9 ± 0.1
+32.4 ± 2.6
+1.0 ± 0.0
+0.01 ± 0.01
+0.01 ± 0.01
+4.91 ± 1.65
+99.9 ± 0.0
+33.3 ± 2.6
+1.0 ± 0.0
+0.01 ± 0.00
+0.01 ± 0.01
+8.08 ± 3.57
+99.7 ± 0.3
+29.7 ± 3.6
+1.0 ± 0.0
+0.03 ± 0.03
+0.01 ± 0.01
+7.59 ± 3.38
+99.8 ± 0.3
+30.4 ± 3.8
+1.0 ± 0.0
+0.02 ± 0.02
+0.01 ± 0.01
+5.88 ± 1.96
+99.9 ± 0.1
+30.9 ± 2.7
+1.0 ± 0.0
+0.04 ± 0.04
+0.01 ± 0.01
+5.43 ± 1.69
+99.9 ± 0.0
+31.6 ± 2.8
+1.0 ± 0.0
+0.04 ± 0.04
+J. Sketchfab dataset
+able on sketchfab.com. We use the same 13 test meshes —
+they are all with the Creative Common license. In Figure 17,
+we plot the training and test meshes, and in Table 9 and Table 10 we list their download links and license information.
+We train our model on a subset of the Sketchfab dataset
+that was used by Qian et al. [52] to train Neural Points [19].
+The original dataset contains 90 training meshes and 13 test
+meshes. However, we use only the 48 training meshes that
+are with variants of the Creative Common license and search-
+19
+Table 8. Test results on the Stanford Bunny mesh with a single input RGBD image captured at the frontal view. Target views are a frontal
+circle looking towards the mesh.
+1 view
+25 × 25
+1 view
+50 × 50
+1 view
+100 × 100
+1 view
+200 × 200
+5 views
+25 × 25
+5 views
+50 × 50
+5 views
+100 × 100
+5 views
+200 × 200
+Visibility
+splatting
+depth (RMSE) ↓
+normal (angle (◦ )) ↓
+hit (accuracy (%)) ↑
+color (PSNR (dB)) ↑
+color (SSIM) ↑
+color (LPIPS) ↓
+0.07 ± 0.05
+4.24 ± 0.44
+62.8 ± 1.2
+11.0 ± 0.2
+0.6 ± 0.0
+0.42 ± 0.02
+0.07 ± 0.04
+4.28 ± 0.34
+64.9 ± 1.2
+11.2 ± 0.2
+0.6 ± 0.0
+0.36 ± 0.02
+0.05 ± 0.03
+3.82 ± 0.26
+73.1 ± 1.1
+12.4 ± 0.3
+0.6 ± 0.0
+0.33 ± 0.01
+0.02 ± 0.01
+3.07 ± 0.10
+93.0 ± 1.0
+18.2 ± 0.3
+0.8 ± 0.0
+0.17 ± 0.01
+0.21 ± 0.02
+11.53 ± 0.87
+63.5 ± 1.2
+11.1 ± 0.2
+0.6 ± 0.0
+0.38 ± 0.02
+0.19 ± 0.02
+10.39 ± 0.82
+67.5 ± 1.2
+11.5 ± 0.2
+0.6 ± 0.0
+0.32 ± 0.01
+0.15 ± 0.01
+7.62 ± 0.56
+79.7 ± 0.9
+13.5 ± 0.3
+0.6 ± 0.0
+0.29 ± 0.01
+0.04 ± 0.01
+3.64 ± 0.22
+97.7 ± 0.1
+21.6 ± 0.2
+0.8 ± 0.0
+0.12 ± 0.01
+Poisson
+surface
+recon.
+depth (RMSE) ↓
+normal (angle (◦ )) ↓
+hit (accuracy (%)) ↑
+color (PSNR (dB)) ↑
+color (SSIM) ↑
+color (LPIPS) ↓
+0.09 ± 0.02
+27.45 ± 1.45
+76.3 ± 3.3
+12.0 ± 0.6
+0.4 ± 0.0
+0.53 ± 0.03
+0.09 ± 0.03
+19.96 ± 1.28
+72.2 ± 4.8
+10.6 ± 0.8
+0.4 ± 0.0
+0.51 ± 0.04
+0.08 ± 0.03
+13.44 ± 1.67
+72.2 ± 4.8
+11.0 ± 0.8
+0.5 ± 0.0
+0.45 ± 0.03
+0.07 ± 0.03
+8.79 ± 1.53
+73.0 ± 4.9
+11.2 ± 0.9
+0.6 ± 0.0
+0.38 ± 0.03
+0.07 ± 0.02
+21.46 ± 1.07
+76.6 ± 3.2
+11.5 ± 0.6
+0.4 ± 0.0
+0.48 ± 0.03
+0.05 ± 0.02
+14.90 ± 1.00
+77.7 ± 4.5
+12.1 ± 1.2
+0.5 ± 0.0
+0.41 ± 0.04
+0.03 ± 0.02
+8.69 ± 0.69
+82.4 ± 3.9
+13.4 ± 1.5
+0.6 ± 0.0
+0.30 ± 0.04
+0.02 ± 0.02
+5.11 ± 0.44
+88.3 ± 1.2
+15.7 ± 0.6
+0.8 ± 0.0
+0.19 ± 0.02
+Neural
+points
+[19]
+depth (RMSE) ↓
+normal (angle (◦ )) ↓
+hit (accuracy (%)) ↑
+color (PSNR (dB)) ↑
+color (SSIM) ↑
+color (LPIPS) ↓
+0.04 ± 0.01
+18.01 ± 0.14
+86.9 ± 1.2
+not supp.
+not supp.
+not supp.
+0.03 ± 0.01
+14.94 ± 0.41
+95.1 ± 1.2
+not supp.
+not supp.
+not supp.
+0.02 ± 0.00
+11.83 ± 0.50
+96.3 ± 1.2
+not supp.
+not supp.
+not supp.
+0.02 ± 0.00
+9.73 ± 0.31
+96.8 ± 1.2
+not supp.
+not supp.
+not supp.
+0.07 ± 0.01
+18.37 ± 0.36
+94.4 ± 0.7
+not supp.
+not supp.
+not supp.
+0.04 ± 0.01
+15.04 ± 0.78
+98.1 ± 0.1
+not supp.
+not supp.
+not supp.
+0.06 ± 0.01
+11.91 ± 0.68
+98.3 ± 0.2
+not supp.
+not supp.
+not supp.
+0.04 ± 0.01
+9.87 ± 0.62
+98.7 ± 0.1
+not supp.
+not supp.
+not supp.
+Proposed
+depth (RMSE) ↓
+normal (angle (◦ )) ↓
+hit (accuracy (%)) ↑
+color (PSNR (dB)) ↑
+color (SSIM) ↑
+color (LPIPS) ↓
+0.02 ± 0.01
+15.58 ± 0.45
+91.4 ± 1.0
+16.4 ± 0.4
+0.6 ± 0.0
+0.32 ± 0.01
+0.02 ± 0.00
+8.73 ± 0.31
+95.4 ± 1.2
+19.2 ± 0.7
+0.7 ± 0.0
+0.26 ± 0.01
+0.01 ± 0.01
+5.07 ± 0.10
+96.4 ± 1.2
+20.6 ± 1.0
+0.8 ± 0.0
+0.16 ± 0.01
+0.01 ± 0.00
+3.90 ± 0.10
+96.8 ± 1.2
+21.8 ± 1.4
+0.9 ± 0.0
+0.09 ± 0.01
+0.03 ± 0.01
+15.07 ± 0.69
+96.3 ± 1.0
+18.7 ± 0.9
+0.7 ± 0.0
+0.29 ± 0.01
+0.02 ± 0.01
+7.79 ± 0.52
+99.4 ± 0.1
+22.9 ± 0.4
+0.8 ± 0.0
+0.20 ± 0.01
+0.01 ± 0.01
+4.87 ± 0.26
+99.7 ± 0.1
+25.5 ± 0.3
+0.9 ± 0.0
+0.10 ± 0.01
+0.01 ± 0.01
+3.86 ± 0.16
+99.8 ± 0.1
+28.8 ± 0.6
+0.9 ± 0.0
+0.04 ± 0.00
+Method
+Metrics
+Figure 14. The effect of number of views and the sampling rate of the input point cloud. We create various kinds of input point clouds of the
+Stanford Bunny [80] by capturing 1 or 5 input RGBD images of various resolutions. The first row shows the 5 input RGBD images (with the
+center one enlarged). The input point cloud becomes denser from left to right when the resolution of the input images increases. With 5
+input views, the point cloud covers a wider area than using only the center input view. The bottom three rows show the output rendering
+from pointersect at 3 novel viewpoints.
+20
+Table 9. Download links and credits of the entire Sketchfab training set used to train the model.
+Name
+Download link
+Credit
+Alliance-statue
+https://skfb.ly/DHIV
+”Warcraft Alliance Statue” (https://skfb.ly/DHIV)
+(http://creativecommons.org/licenses/by-nc/4.0/).
+by
+Amphitrite
+https://skfb.ly/6n9PF
+”Amphitrite - Louvre Museum (Low Definition)” (https://skfb.ly/6n9PF) by Benjamin Bardou is licensed under Creative Commons Attribution
+(http://creativecommons.org/licenses/by/4.0/).
+Ancient-turti
+https://skfb.ly/6o9KR
+Angel5
+https://skfb.ly/6svWA
+”Archelon - Dragon Sea Turtle” (https://skfb.ly/6o9KR) by inkhero is licensed under Creative Commons
+(http://creativecommons.org/licenses/by/4.0/).
+”Angel Sculpture 3D Scan (Einscan-S)” (https://skfb.ly/6svWA) by 3DWP is licensed under Creative Commons
+(http://creativecommons.org/licenses/by/4.0/).
+Angel6
+https://skfb.ly/WyIS
+”Angels” (https://skfb.ly/WyIS) by rvscanners is licensed under Creative Commons Attribution (http://creativecommons.org/licenses/by/4.0/).
+Angel-statue
+https://skfb.ly/6qxUQ
+”Angel Statue in Fossano” (https://skfb.ly/6qxUQ) by Albyfos is licensed under Creative Commons Attribution (http://creativecommons.org/licenses/by/4.0/).
+Angel2
+https://skfb.ly/SNow
+”Angel 00” (https://skfb.ly/SNow) by TomaszGap is licensed under CC Attribution-NonCommercial-NoDerivs (http://creativecommons.org/licenses/by-ncnd/4.0/).
+Angel3
+https://skfb.ly/KVRY
+”Angel” (https://skfb.ly/KVRY) by Medolino is licensed under Creative Commons Attribution (http://creativecommons.org/licenses/by/4.0/).
+Angel4
+https://skfb.ly/SZOv
+”Baptismal Angel kneeling” (https://skfb.ly/SZOv) by Geoffrey Marchal is licensed under Creative Commons Attribution-NonCommercial
+(http://creativecommons.org/licenses/by-nc/4.0/).
+Angel-diffuse2
+https://skfb.ly/69usM
+”Angel playing harp” (https://skfb.ly/69usM)
+(http://creativecommons.org/licenses/by-nc/4.0/).
+Armadillo
+https://skfb.ly/otzQs
+”Stanford Armadillo PBR” (https://skfb.ly/otzQs) by hackmans is licensed under Creative Commons Attribution (http://creativecommons.org/licenses/by/4.0/).
+Buddha-sit
+https://skfb.ly/6nXwQ
+”Buddha” (https://skfb.ly/6nXwQ) by icenvain is licensed under Creative Commons Attribution (http://creativecommons.org/licenses/by/4.0/).
+Camera
+https://skfb.ly/Lp7U
+”Panasonic GH4 Body” (https://skfb.ly/Lp7U) by ScanSource 3D is licensed under Creative Commons Attribution (http://creativecommons.org/licenses/by/4.0/).
+Compressor
+https://skfb.ly/6oIZS
+”Compressor Scan” (https://skfb.ly/6oIZS) by GoMeasure3D is licensed under Creative Commons Attribution (http://creativecommons.org/licenses/by/4.0/).
+Dragon-plate
+https://skfb.ly/osUnp
+”Dragon (decimated sculpt)” (https://skfb.ly/osUnp)
+(http://creativecommons.org/licenses/by/4.0/).
+Dragon- stand
+https://skfb.ly/6oTOQ
+”Chinese Dragon” (https://skfb.ly/6oTOQ) by icenvain is licensed under Creative Commons Attribution (http://creativecommons.org/licenses/by/4.0/).
+Dragon-warrior
+https://skfb.ly/otvrO
+”Dragon-stl” (https://skfb.ly/otvrO) by Thunk3D 3D Scanner is licensed under Creative Commons Attribution (http://creativecommons.org/licenses/by/4.0/).
+Dragon-wing
+https://skfb.ly/M9KW
+”Wooden Dragon” (https://skfb.ly/M9KW) by jschmidtcreaform is licensed under Creative Commons Attribution (http://creativecommons.org/licenses/by/4.0/).
+Dragon2
+https://skfb.ly/BZsM
+”XYZ RGB Dragon” (https://skfb.ly/BZsM) by 3D graphics 101 is licensed under Creative Commons Attribution-NonCommercial
+(http://creativecommons.org/licenses/by-nc/4.0/).
+Fox-skull
+https://skfb.ly/6UoqE
+”Grey Fox skull” (https://skfb.ly/6UoqE) by RISD Nature Lab is licensed under Creative Commons Attribution (http://creativecommons.org/licenses/by/4.0/).
+Ganesha
+https://skfb.ly/66opT
+”The elephant god Ganesha” (https://skfb.ly/66opT) by Geoffrey Marchal is licensed under Creative Commons Attribution-NonCommercial
+(http://creativecommons.org/licenses/by-nc/4.0/).
+Ganesha-plane
+https://skfb.ly/ovrr6
+”Ganesha” (https://skfb.ly/ovrr6) by Paulotronics is licensed under Creative Commons Attribution (http://creativecommons.org/licenses/by/4.0/).
+Gargo
+https://skfb.ly/6S8qQ
+”Gargo” (https://skfb.ly/6S8qQ) by rudyprieto is licensed under Creative Commons Attribution (http://creativecommons.org/licenses/by/4.0/).
+Grid-dog
+https://skfb.ly/DTuH
+”Girl With Dog” (https://skfb.ly/DTuH) by pencas is licensed under Creative Commons Attribution (http://creativecommons.org/licenses/by/4.0/).
+Golden-elephant
+https://skfb.ly/GZSL
+”Golden
+Ephant”
+(https://skfb.ly/GZSL)
+by
+(http://creativecommons.org/licenses/by-nc/4.0/).
+dievitacola
+is
+licensed
+under
+Creative
+Commons
+Attribution-NonCommercial
+Guanyiny
+https://skfb.ly/ZuHU
+”Guanyin”
+(https://skfb.ly/ZuHU)
+by
+Geoffrey
+(http://creativecommons.org/licenses/by-nc/4.0/).
+Marchal
+is
+licensed
+under
+Creative
+Commons
+Attribution-NonCommercial
+Happy-vrip
+https://skfb.ly/BYQD
+”Happy Buddha (Stanford)” (https://skfb.ly/BYQD) by 3D graphics 101 is licensed under Creative Commons Attribution-NonCommercial
+(http://creativecommons.org/licenses/by-nc/4.0/).
+Lion-ball
+https://skfb.ly/6GDqU
+”King of Narnia:
+ASLAN” (https://skfb.ly/6GDqU)
+(http://creativecommons.org/licenses/by/4.0/).
+Man-face
+https://skfb.ly/GrGu
+Man-statue
+https://skfb.ly/T9oz
+”Bust of a Roman” (https://skfb.ly/GrGu) by Geoffrey Marchal is licensed under Creative Commons Attribution-NonCommercial
+(http://creativecommons.org/licenses/by-nc/4.0/).
+”Man On Bench Statue PHOTOGRAMMETRY” (https://skfb.ly/T9oz) by MrDavids1 is licensed under Creative Commons Attribution
+(http://creativecommons.org/licenses/by/4.0/).
+Maria
+https://skfb.ly/6tzH7
+”Maria Fjodorovna Barjatinskaja” (https://skfb.ly/6tzH7)
+(http://creativecommons.org/licenses/by/4.0/).
+Mesh-little-angle
+https://skfb.ly/6s8yO
+”Little Angle” (https://skfb.ly/6s8yO) by MicMac is licensed under Creative Commons Attribution (http://creativecommons.org/licenses/by/4.0/).
+Modello-buddha
+https://skfb.ly/6qnIn
+”Wooden Buddha statuette” (https://skfb.ly/6qnIn)
+(http://creativecommons.org/licenses/by/4.0/).
+Mozart
+https://skfb.ly/FZyK
+”The Infant Mozart” (https://skfb.ly/FZyK) by Geoffrey Marchal is licensed under Creative Commons Attribution (http://creativecommons.org/licenses/by/4.0/).
+Roman- sphinx
+https://skfb.ly/Y9sx
+”Roman Sphinx” (https://skfb.ly/Y9sx) by tony-eight is licensed under Creative Commons Attribution-NonCommercial (http://creativecommons.org/licenses/bync/4.0/).
+Snake
+https://skfb.ly/BrOL
+”Cobra Statue” (https://skfb.ly/BrOL) by Jonathan Williamson is licensed under Creative Commons Attribution (http://creativecommons.org/licenses/by/4.0/).
+Statue-air-force
+https://skfb.ly/LZBS
+”a sculpture in Air Force Museum of Vietnam” (https://skfb.ly/LZBS) by HoangHiepVu is licensed under Creative Commons Attribution
+(http://creativecommons.org/licenses/by/4.0/).
+Statue-child-fish
+https://skfb.ly/6pJ9s
+”Château de Chamarande - France”
+(http://creativecommons.org/licenses/by/4.0/).
+Statue-death
+https://skfb.ly/ovIRF
+”The death and the mother” (https://skfb.ly/ovIRF) by Geoffrey Marchal is licensed under Creative Commons Attribution-NonCommercial
+(http://creativecommons.org/licenses/by-nc/4.0/).
+Statue-madona
+https://skfb.ly/Lv9v
+”Madona Sculpture” (https://skfb.ly/Lv9v) by jan.zachar is licensed under Creative Commons Attribution (http://creativecommons.org/licenses/by/4.0/).
+Statue-mother
+https://skfb.ly/6pUOp
+”Pieta” (https://skfb.ly/6pUOp) by MSU Broad Art Museum is licensed under Creative Commons Attribution (http://creativecommons.org/licenses/by/4.0/).
+Statue-napoleon
+https://skfb.ly/6xHwD
+”Equestrian statue of Napoleon” (https://skfb.ly/6xHwD)
+(http://creativecommons.org/licenses/by/4.0/).
+Statue- neptune-horse
+https://skfb.ly/6npKK
+”Neptune - Louvre Museum” (https://skfb.ly/6npKK)
+(http://creativecommons.org/licenses/by/4.0/).
+Statue-oxen
+https://skfb.ly/R9Ps
+”Ox Statue (Kek Lok Si Buddhist Temple, Penang)” (https://skfb.ly/R9Ps) by nate siddle is licensed under Creative Commons Attribution
+(http://creativecommons.org/licenses/by/4.0/).
+Two-wrestiers-in-combat
+https://skfb.ly/RTzv
+”Two wrestlers in combat (repost)” (https://skfb.ly/RTzv) by Geoffrey Marchal is licensed under Creative Commons Attribution
+(http://creativecommons.org/licenses/by/4.0/).
+Vase-empire
+https://skfb.ly/6uDFR
+”Empire vase” (https://skfb.ly/6uDFR) by
+(http://creativecommons.org/licenses/by-nc/4.0/).
+Vishnu
+https://skfb.ly/6nCoN
+”The God Vishnu” (https://skfb.ly/6nCoN) by Geoffrey Marchal is licensed under Creative Commons Attribution (http://creativecommons.org/licenses/by/4.0/).
+by
+ahtiandr
+OpenScan
+by
+by
+by
+21
+under
+licensed
+Ashraf
+by
+licensed
+is
+under
+Bouhadida
+Anahit
+by
+by
+Sakado
+Creative
+Creative
+licensed
+is
+Marchal
+andrea.notarstefano
+by
+is
+Takiryan
+Geoffrey
+(https://skfb.ly/6pJ9s)
+Geoffrey
+is
+is
+is
+under
+licensed
+licensed
+licensed
+Commons
+under
+licensed
+is
+Commons
+under
+under
+under
+Attribution-NonCommercial
+Attribution
+Attribution
+Attribution-NonCommercial
+Creative
+Creative
+Creative
+Creative
+Creative
+Commons
+Commons
+Commons
+Commons
+Commons
+Attribution
+Attribution
+Attribution
+Attribution
+Attribution
+Lo¨ic
+Norgeot
+is
+licensed
+under
+Creative
+Commons
+Attribution
+Benjamin
+Bardou
+is
+licensed
+under
+Creative
+Commons
+Attribution
+Marchal
+is
+licensed
+under
+Creative
+Commons
+Attribution-NonCommercial
+Table 10. Download links and credits of the test set of the Sketchfab dataset [52].
+Name
+Download link
+Credit
+A9-vulcan aligned
+https://skfb.ly/6AAGM
+”Vulcan”
+(https://skfb.ly/6AAGM) by
+Geoffrey
+(http://creativecommons.org/licenses/by-nc/4.0/).
+Marchal
+is
+a72-seated jew aligned
+https://skfb.ly/6ynCI
+”Seated Jew” (https://skfb.ly/6ynCI) by Geoffrey
+(http://creativecommons.org/licenses/by-nc/4.0/).
+asklepios aligned
+https://skfb.ly/6zt76
+”Young roman as Asklepios” (https://skfb.ly/6zt76) by Geoffrey Marchal is licensed under Creative Commons Attribution-NonCommercial
+(http://creativecommons.org/licenses/by-nc/4.0/).
+baron seutin aligned
+https://skfb.ly/6Bq6Y
+”Baron Seutin” (https://skfb.ly/6Bq6Y) by
+(http://creativecommons.org/licenses/by-nc/4.0/).
+Geoffrey
+Marchal
+is
+licensed
+under
+Creative
+Commons
+Attribution-NonCommercial
+charite - CleanUp - LowPoly aligned
+https://skfb.ly/6yWCX
+”The Charity” (https://skfb.ly/6yWCX) by
+(http://creativecommons.org/licenses/by-nc/4.0/).
+Geoffrey
+Marchal
+is
+licensed
+under
+Creative
+Commons
+Attribution-NonCommercial
+cheval terracotta - LowPoly-RealOne aligned
+https://skfb.ly/6APDT
+”Relief in terracotta” (https://skfb.ly/6APDT) by Geoffrey Marchal is licensed under Creative Commons Attribution-NonCommercial
+(http://creativecommons.org/licenses/by-nc/4.0/).
+”Cupid”
+(https://skfb.ly/6vN6Z)
+by
+Geoffrey
+Marchal
+is
+licensed
+under
+Creative
+Commons
+Attribution-NonCommercial
+(http://creativecommons.org/licenses/by-nc/4.0/).
+Marchal
+licensed
+under
+Creative
+Commons
+Attribution-NonCommercial
+licensed
+under
+Creative
+Commons
+Attribution-NonCommercial
+is
+cupid aligned
+https://skfb.ly/6vN6Z
+dame assise - CleanUp - LowPoly aligned
+https://skfb.ly/6BNFn
+”Seated Lady” (https://skfb.ly/6BNFn) by
+(http://creativecommons.org/licenses/by-nc/4.0/).
+drunkard - CleanUp - LowPoly aligned
+https://skfb.ly/6BH8D
+”Drunkard - Cap Re” (https://skfb.ly/6BH8D) by Geoffrey Marchal is licensed under Creative Commons Attribution-NonCommercial
+(http://creativecommons.org/licenses/by-nc/4.0/).
+Gramme aligned
+https://skfb.ly/6ABqV
+”Statue of Zénobe Gramme” (https://skfb.ly/6ABqV)
+(http://creativecommons.org/licenses/by/4.0/).
+madeleine aligned
+https://skfb.ly/6AtTy
+”Marie-Madeleine” (https://skfb.ly/6AtTy) by
+(http://creativecommons.org/licenses/by-nc/4.0/).
+retheur - LowPoly aligned
+https://skfb.ly/ooIRB
+”Bust of a rhetorician Restored” (https://skfb.ly/ooIRB) by Digital Restoration is licensed under Creative Commons Attribution-NonCommercial
+(http://creativecommons.org/licenses/by-nc/4.0/).
+saint lambert aligned
+https://skfb.ly/6ANWw
+”Lambert de Maestricht and Liège” (https://skfb.ly/6ANWw) by Geoffrey Marchal is licensed under Creative Commons Attribution-NonCommercial
+(http://creativecommons.org/licenses/by-nc/4.0/).
+22
+Geoffrey
+Geoffrey
+Marchal
+by
+is
+LZ
+Marchal
+is
+licensed
+under
+Creation
+is
+licensed
+under
+Creative
+licensed
+Commons
+under
+Creative
+Attribution-NonCommercial
+Creative
+Commons
+Commons
+Attribution
+Attribution-NonCommercial
+(a) Novel-view rendering on noisy point cloud captured by a handheld device
+(b) Depth (left) and surface normal (right) estimation at the viewpoints in (a).
+Figure 15. Results on noisy depth maps captured by a handheld device. Inputs are 19 RGBD images from the ARKitScenes dataset [7],
+where the depth maps and camera poses are estimated by ARKit and thus contain noise. Note that the pointersect model is not trained to
+render noisy point clouds and has never seen real noisy RGBD images during training. The result is provided to motivate future work.
+23
+Figure 16. Novel view rendering on Buddha. The output quality of Poisson surface reconstruction depends highly on the quality of the
+vertex normal. Pointersect does not need nor use vertex normal.
+(a) 48 training meshes
+(b) 13 test meshes
+Figure 17. (a) The entire training meshes used to train our model. The meshes are from a subset of the Sketchfab dataset [52]. (b) is the test
+meshes. See Table 9 and Table 10 for credits.
+24

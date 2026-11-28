@@ -1,0 +1,101 @@
+# General Background Blending
+
+
+## Overview
+General Background Blending composites a rendered RGBA image over an arbitrary background color to produce a final RGB image. Unlike [White Background Compositing](4015-white-background-compositing.md), which assumes a fixed white backdrop, this method allows the background to be specified dynamically, enabling the visualization of volume data against non-white environments or specific scene contexts. It serves as the final compositing step in many ray-casting pipelines where the alpha channel represents opacity against the chosen background.
+
+## How it works
+The method takes an RGBA image and a background color, then blends them using standard alpha compositing.
+
+**Inputs and Outputs:**
+- Input: An image with at least 4 channels (RGBA). If the image has fewer than 4 channels, it is returned unchanged [S1, unofficial].
+- Input: A background color (RGB vector or scalar).
+- Output: An RGB image.
+
+**Data Structures:**
+- The image is treated as a tensor of shape $(H, W, 4)$, where the first three channels are Red, Green, and Blue, and the fourth is Alpha (opacity) [S1, unofficial].
+- The background color is a 3-component vector. If the input background color is `None`, the method uses a default `self.background_color` [S1, unofficial]. If this default is set to `'last_sample'` or `'random'`, it is resolved to `'black'` [S1, unofficial].
+
+**Steps:**
+1. Validate input channels. If channels < 4, return image [S1, unofficial].
+2. Extract RGB channels ($C_{rgb}$) and Alpha channel ($\alpha$) from the input image [S1, unofficial].
+3. Determine the final background color ($C_{bg}$) based on the input parameter and defaults [S1, unofficial].
+4. Compute the result for each pixel using the linear blend formula:
+   $$C_{result} = C_{rgb} \times \alpha + C_{bg} \times (1 - \alpha)$$
+   where $C_{result}$ is the output RGB color [S1, unofficial].
+
+**Pseudocode:**
+> **Unverified code.** The code below did not pass a test run against a reference implementation, or no test fits it, so it may contain errors.
+
+```python
+import numpy as np
+
+def general_background_blend(image: np.ndarray, background_color: np.ndarray = None) -> np.ndarray:
+    """
+    Composite an RGBA image over a background color.
+    
+    Args:
+        image: Input RGBA image (H, W, 4).
+        background_color: RGB background color. If None, uses default logic.
+        
+    Returns:
+        RGB image (H, W, 3).
+    """
+    # Step 1: Check channel count
+    if image.shape[2] < 4:
+        return image[:, :, :3] if image.shape[2] == 3 else image
+
+    # Step 2: Split RGB and Alpha
+    rgb = image[:, :, :3].astype(np.float32)
+    alpha = image[:, :, 3:4].astype(np.float32)
+
+    # Step 3: Determine background color
+    if background_color is None:
+        # Assume self.background_color exists in context or is passed
+        # If it is 'last_sample' or 'random', use black
+        # [G] Implementation detail: In a class context, self.background_color 
+        # would be accessed. Here we assume a variable `default_bg` holds it.
+        # If default_bg is a string indicating special handling:
+        if isinstance(default_bg, str) and default_bg in ['last_sample', 'random']:
+            bg_color = np.array([0.0, 0.0, 0.0])
+        else:
+            bg_color = default_bg
+    else:
+        bg_color = background_color
+
+    # Ensure bg_color is a 3-element array
+    bg_color = np.asarray(bg_color).reshape(1, 1, 3)
+
+    # Step 4: Blend
+    # Formula: result = rgb * alpha + bg * (1 - alpha)
+    result = rgb * alpha + bg_color * (1.0 - alpha)
+
+    return result
+```
+
+**Parameters:**
+- `background_color`: The color to composite behind the volume. Typical values are black `[0,0,0]` or white `[1,1,1]`, but any RGB value is supported [S1, unofficial].
+
+**Edge Cases:**
+- Non-RGBA input: Images with fewer than 4 channels are returned unchanged [S1, unofficial].
+- Default resolution: If the background color is not explicitly provided and defaults to special modes (`'last_sample'`, `'random'`), it falls back to black [S1, unofficial].
+
+## Subtopics
+
+### Sky Background and Ambient Fill
+This variant is used in cloud rendering to simulate the sky behind volumetric clouds. It uses the video card's alpha-blending capabilities to composite the cloud color against the sky color [S2, unofficial]. Additionally, a small amount of white is added to the cloud color to prevent total blackness in shadowed areas [S2, unofficial]. This white fill is considered a hack; with more physically correct calculations (e.g., proper ambient lighting models), this term could be removed [S2, unofficial]. It is chosen when rendering clouds where the background sky is visible through semi-transparent regions.
+
+## Operating characteristics
+- **Time Complexity:** $O(N)$ where $N$ is the number of pixels, as it performs a single pass of per-pixel arithmetic.
+- **Memory Complexity:** $O(N)$ for the output image buffer.
+- **Strengths:** Simple, fast, and flexible background support.
+- **Limitations:** The "Sky Background and Ambient Fill" variant relies on a hack (white fill) which may not be physically accurate [S2, unofficial]. Standard blending assumes a linear background, which may not match complex environment maps without further processing.
+- **When to use:** When the background is a solid color or simple gradient.
+- **When not to use:** When the background requires complex environment mapping or when physically accurate lighting integration is needed instead of simple alpha blending [S2, unofficial].
+
+## Background
+The general blending formula is a standard alpha compositing operation widely used in computer graphics. The specific implementation details regarding default background handling (`'last_sample'`, `'random'` to black) are found in the nerfstudio project [S1, unofficial]. The concept of using alpha blending for sky backgrounds in cloud rendering, along with the ambient fill hack, originates from work on realistic cloud animation, specifically referencing Dobashi et al.'s SIGGRAPH 2000 paper on efficient cloud animation [S2, unofficial].
+
+## Sources
+[S1] nerfstudio-project/nerfstudio, https://github.com/nerfstudio-project/nerfstudio, fetched 2026-10-26 (unofficial)
+[S2] Cloud Animation and Rendering, Final Project for CSC570 by Kendall Merriman, http://users.csc.calpoly.edu/~zwood/teaching/csc570/final07/kmerrima/, fetched 2026-10-30 (unofficial)

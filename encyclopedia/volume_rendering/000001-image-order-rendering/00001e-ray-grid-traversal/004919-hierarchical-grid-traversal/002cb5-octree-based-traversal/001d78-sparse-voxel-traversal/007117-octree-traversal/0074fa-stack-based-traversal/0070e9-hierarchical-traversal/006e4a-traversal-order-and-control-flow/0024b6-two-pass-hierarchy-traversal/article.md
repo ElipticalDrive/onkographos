@@ -1,0 +1,131 @@
+# Two-Pass Hierarchy Traversal
+
+Also called: Two-Step Hierarchy Traversal, Two-pass traversal
+
+## Overview
+Two-Pass Hierarchy Traversal is an optimization for spatial hierarchy traversal that reduces computational cost by splitting the descent into a coarse first pass and a detailed second pass. It solves the problem of redundant intersection tests in deep hierarchies by extracting a coarse subtree in the first step and restarting traversal from that subtree in the second step [S1]. It sets itself apart from siblings like [Iterative Up-Down Tree Traversal](21243-iterative-up-down-tree-traversal.md) by explicitly decoupling the coarse culling phase from the fine traversal phase to enable tile-sharing optimizations for single scattering [S1].
+
+## How it works
+The method operates on a rooted tree $\mathcal{H}$ where each node $N$ has a bounding volume (AABB) and pointers to children. The traversal is split into two distinct phases based on a configurable stopping depth.
+
+### Inputs and Outputs
+*   **Input:** Ray $R(t) = \mathbf{o} + t\mathbf{d}$, the root of the spatial hierarchy $\mathcal{H}$, and the stopping depth parameter $D_{stop}$ (measured relative to the leaves).
+*   **Output:** A list of leaf nodes intersected by the ray, or the traversal state required to process them.
+
+### Data Structures
+*   **Hierarchy Node:** Contains bounding box (AABB), children pointers, and leaf data.
+*   **Subtree Buffer:** A list or stack of nodes identified at the end of Step 1.
+
+### Parameters
+*   **Stopping Depth ($D_{stop}$):** The depth relative to the leaves where the first traversal stops. A value of $D_{stop}=3$ means the first step stops 3 levels above the leaves, producing a set of subtrees of depth 3 [S1].
+
+### Steps
+
+1.  **Coarse Subtree Extraction (Step 1):**
+    *   Start traversal from the root of $\mathcal{H}$.
+    *   Perform standard ray-AABB intersection tests.
+    *   Descend into children only if the ray intersects the node's bounding box.
+    *   **Termination Condition:** Stop descending when the current node's depth relative to the leaves is equal to $D_{stop}$.
+    *   Collect all such nodes into a **Subtree Buffer**. These nodes form the roots of the coarse subtrees [S1].
+
+2.  **Fine Traversal (Step 2):**
+    *   For each node $N_{sub}$ in the Subtree Buffer:
+        *   Restart traversal from $N_{sub}$ as the new root.
+        *   Continue standard ray-AABB intersection tests down to the leaves.
+        *   Process leaf nodes (e.g., for shading or scattering) [S1].
+
+### Pseudocode
+
+> **Unverified code.** The code below did not pass a test run against a reference implementation, or no test fits it, so it may contain errors.
+
+```python
+def two_pass_hierarchy_traversal(ray, root_node, stopping_depth):
+    """
+    ray: Ray object with origin o and direction d
+    root_node: Root of the spatial hierarchy
+    stopping_depth: Integer, depth relative to leaves where pass 1 stops
+    """
+    # Step 1: Extract coarse subtree
+    subtree_buffer = []
+    stack = [(root_node, 0)] # (node, current_depth_from_root)
+    
+    # Note: To determine stopping condition relative to leaves, 
+    # the max_depth of the tree must be known or precomputed.
+    # Let max_depth be the depth of the leaves.
+    # Current depth from leaves = max_depth - current_depth_from_root
+    
+    while stack:
+        node, depth_from_root = stack.pop()
+        
+        # Check intersection
+        if not ray_intersects_aabb(ray, node.bbox):
+            continue
+            
+        # Calculate depth relative to leaves
+        # Assuming max_depth is available globally or passed in
+        depth_from_leaves = max_depth - depth_from_root
+        
+        if depth_from_leaves <= stopping_depth:
+            # Reached stopping depth, add to buffer for Step 2
+            subtree_buffer.append(node)
+        else:
+            # Continue descending in Step 1
+            for child in node.children:
+                stack.append((child, depth_from_root + 1))
+                
+    # Step 2: Traverse subtrees
+    leaf_results = []
+    for sub_root in subtree_buffer:
+        sub_stack = [sub_root]
+        while sub_stack:
+            current = sub_stack.pop()
+            
+            # Check intersection (redundant if Step 1 was perfect, but safe)
+            if not ray_intersects_aabb(ray, current.bbox):
+                continue
+                
+            if current.is_leaf:
+                leaf_results.append(current)
+            else:
+                for child in current.children:
+                    sub_stack.append(child)
+                    
+    return leaf_results
+
+def ray_intersects_aabb(ray, bbox):
+    """Standard slab-based AABB intersection test."""
+    # Implementation details omitted as per shared principles
+    # Returns True if ray intersects bbox
+    pass
+```
+
+### Edge Cases and Pitfalls
+*   **Stopping Depth 0:** If $D_{stop}=0$, the first step descends through the entire hierarchy. The second step cost is null, and performance equals the direct implementation [S1].
+*   **Secondary Rays:** Do not apply the tile-sharing optimization (sharing Step 1 results) to secondary rays (rays that have bounced at least once) [S1].
+*   **Material Edges:** Do not apply tile-sharing when the $2 \times 2$ pixel block covers an edge of the material, as the subtree structure may differ significantly between adjacent pixels [S1].
+
+## Subtopics
+
+### Rendering Pipeline
+In the context of point-based rendering for participating media, the "two-pass" concept extends to the rendering pipeline itself, not just hierarchy traversal.
+*   **Step 1:** Trace rays from the camera. Store rays that encounter translucent material, along with their start and end points, in an auxiliary buffer [S1].
+*   **Step 2:** Process all rays in the buffer to compute single, double, and multiple scattering contributions, adding them to pixel values [S1].
+*   **Attenuation:** After each bounce, compute attenuation from absorption and BRDF reflectance. Stop tracing when attenuation exceeds a threshold [S1].
+*   **Single Scattering Optimization:** Gather single scattering contributions only over a material layer of thickness $\ell$ (one mean-free-path), as it becomes negligible compared to multiple scattering after this distance [S1].
+*   **Multiple Scattering Optimization:** Group neighboring rays using $4 \times 4$ downsampling and interpolation, as multiple scattering effects are mostly low frequency [S1].
+*   **Auxiliary Buffer:** Contains all paths through the material, including primary rays (from camera) and secondary rays (after bounces) [S1].
+
+## Operating characteristics
+*   **Performance:** Reduces traversal time by up to 30% when combined with tile sharing [S1]. The two-pass method alone provides a 15% reduction at optimal stopping depth [S1]. Overall, it provides a 20% performance improvement over naive hierarchy traversal [S1].
+*   **Optimal Stopping Depth:** Best performance is achieved when the first step produces a set of trees of depth 3 (i.e., $D_{stop}=3$) [S1].
+*   **Scaling:** The gain depends on the stopping depth. Stopping higher in the hierarchy reduces Step 1 cost but increases Step 2 cost [S1].
+*   **Strengths:** Significant speedup for single scattering computations by discarding a large subset of the hierarchy before the second pass [S1]. Enables tile sharing for neighboring pixels [S1].
+*   **Limitations:** Not beneficial for secondary rays or at material edges where tile sharing fails [S1]. Requires precomputation or knowledge of tree depth to determine stopping condition relative to leaves [G].
+
+## Background
+*   **Origin:** Introduced in the GPU implementation of the point-based rendering algorithm for participating media [S1].
+*   **Paper:** "Point-Based Rendering for Homogeneous Participating Media with Refractive Boundaries" [S1].
+*   **Usage:** Used in rendering homogeneous participating media with refractive boundaries, specifically for handling single and multiple scattering [S1].
+
+## Sources
+[S1] Point-Based Rendering for Homogeneous Participating Media with Refractive Boundaries, https://doi.org/10.1109/TVCG.2017.2768525, fetched 2026-10-26

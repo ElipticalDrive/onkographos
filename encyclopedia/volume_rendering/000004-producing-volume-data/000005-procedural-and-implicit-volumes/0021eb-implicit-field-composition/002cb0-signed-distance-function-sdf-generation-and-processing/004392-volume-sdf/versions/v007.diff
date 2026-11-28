@@ -1,0 +1,137 @@
+--- v006.md
++++ v007.md
+@@ -21,10 +21,10 @@
+     *   Use case: For fog volumes, set to True so white (high density) areas become negative (interior) [S1].
+ 3.  **Use Maximum Distance (boolean):** If true, computation stops for voxels beyond a specified distance from the isocontour [S1].
+-4.  **Maximum Distance ($D_{\text{max}}$):** The object-space distance threshold. Voxels farther than $D_{\text{max}}$ from the isocontour are clamped to $\pm D_{\text{max}}$ [S1].
++4.  **Maximum Distance ($D_{\text{max}}$):** The object-space distance threshold [S1]. Voxels farther than $D_{\text{max}}$ from the isocontour are clamped to $\pm D_{\text{max}}$ [S1].
+ 5.  **Rebuild With Fast Iterative Method (boolean):** Selects the algorithm [S1].
+     *   False: Uses Fast Marching Method (FMM) [S1].
+     *   True: Uses Fast Iterative Method (FIM) [S1].
+ 6.  **FIM Tolerance ($\tau_{\text{frac}}$):** Fraction of $\Delta_{\text{min}}$ used as convergence criteria for FIM [S1].
+-7.  **Max FIM Iterations ($K_{\text{max}}$):** Hard limit on iterations for FIM [S1].
++7.  **Max FIM Iterations ($K_{\text{max}}$):** Hard limit on iterations for FIM [S1]. This value should be several times larger than the bandwidth size to ensure that all the voxels in the band can be rebuilt [S1].
+ 
+ **Algorithm Steps:**
+@@ -34,13 +34,13 @@
+     *   Identify the **Frontier Set** $F$: voxels where $|v(\mathbf{x}) - I_{\text{iso}}| < \epsilon$ (where $\epsilon$ is a small threshold for numerical equality, effectively the isocontour voxels) [G: Standard isocontour extraction].
+     *   For each voxel $\mathbf{x} \in F$, set $d(\mathbf{x}) = 0$ [G: Standard SDF initialization].
+-    *   If **Invert** is true, the sign convention is reversed: voxels with $v(\mathbf{x}) > I_{\text{iso}}$ are considered "interior" (negative distance) and $v(\mathbf{x}) < I_{\text{iso}}$ are "exterior" (positive distance) [S1].
++    *   Determine the sign convention: voxels with $v(\mathbf{x}) > I_{\text{iso}}$ are exterior (positive distance) and $v(\mathbf{x}) < I_{\text{iso}}$ are interior (negative distance) [S1]. If **Invert** is true, reverse this mapping [S1].
+ 
+ 2.  **Propagation (Selection based on parameter):**
+ 
+-    *   **Case A: Fast Marching Method (Default)**
++    *   **Case A: Fast Marching Method (Default)** [S1]
+         *   Maintain a Min-Heap $H$ of voxels in $F$, keyed by their current $d(\mathbf{x})$ [G: Standard FMM implementation].
+         *   While $H$ is not empty:
+             1.  Extract voxel $\mathbf{x}_{\text{min}}$ with the smallest $d$ value from $H$ [G: Standard FMM implementation].
+-            2.  Mark $\mathbf{x}_{\text{min}}$ as "Fixed".
++            2.  Mark $\mathbf{x}_{\text{min}}$ as "Fixed" [G: Standard FMM implementation].
+             3.  For each neighbor $\mathbf{n}$ of $\mathbf{x}_{\text{min}}$:
+                 *   If $\mathbf{n}$ is not Fixed and not in $H$:
+@@ -50,5 +50,5 @@
+                     *   Update key of $\mathbf{n}$ in $H$ to $\min(d_{\text{tent}}, \text{current key})$ [G: Standard FMM implementation].
+ 
+-    *   **Case B: Fast Iterative Method (FIM)**
++    *   **Case B: Fast Iterative Method (FIM)** [S1]
+         *   Initialize a set of "Active" voxels $A = F$ [G: Standard FIM implementation].
+         *   Set iteration counter $k = 0$.
+@@ -57,7 +57,7 @@
+             2.  For each voxel $\mathbf{x} \in A$:
+                 *   Compute new distance $d_{\text{new}}(\mathbf{x})$ using the Fast Iterative update rule (typically averaging neighbors or solving the local quadratic equation) [G: Standard FIM implementation].
+-                *   Let $\Delta d = |d_{\text{new}}(\mathbf{x}) - d_{\text{old}}(\mathbf{x})|$.
++                *   Let $\Delta d = |d_{\text{new}}(\mathbf{x}) - d_{\text{old}}(\mathbf{x})|$ [G: Standard FIM implementation].
+                 *   If $\Delta d > \tau_{\text{frac}} \cdot \Delta_{\text{min}}$:
+-                    *   Update $d(\mathbf{x}) = d_{\text{new}}(\mathbf{x})$.
++                    *   Update $d(\mathbf{x}) = d_{\text{new}}(\mathbf{x})$ [G: Standard FIM implementation].
+                     *   Add neighbors of $\mathbf{x}$ to $A_{\text{next}}$ [G: FIM typically propagates changes to neighbors if the value changes significantly].
+             3.  $A = A_{\text{next}}$.
+@@ -90,4 +90,7 @@
+         3D list of shape (Nx, Ny, Nz) containing the signed distance field d(x).
+     """
++    import heapq
++    import math
++    
+     Nx, Ny, Nz = len(volume_data), len(volume_data[0]), len(volume_data[0][0])
+     d = [[[float('inf')] * Nz for _ in range(Ny)] for _ in range(Nx)]
+@@ -101,4 +104,12 @@
+                     frontier.append((x, y, z))
+                     
++    # Determine sign convention based on input volume relative to iso_surface
++    # Default: v > iso_surface -> positive (exterior), v < iso_surface -> negative (interior)
++    def get_sign(x, y, z):
++        sign = 1.0 if volume_data[x][y][z] > iso_surface else -1.0
++        if invert:
++            sign = -sign
++        return sign
++
+     if use_fim:
+         active = set(frontier)
+@@ -112,12 +123,15 @@
+                 if not fixed_neighbors:
+                     continue
+-                # FIM update: solve quadratic equation for distance based on sorted neighbor distances
++                # Standard FIM update: solve local Eikonal equation approximation [G]
+                 dists = sorted([d[nx][ny][nz] for (nx, ny, nz) in fixed_neighbors])
+-                # Standard FIM update rule approximation
+-                min_d = dists[0]
+-                new_dist = min_d + voxel_size
++                if len(dists) >= 2:
++                    d1, d2 = dists[0], dists[1]
++                    new_dist = (d1 + d2 + math.sqrt((d1 - d2)**2 + 4 * voxel_size**2)) / 2
++                else:
++                    new_dist = dists[0] + voxel_size
++                    
+                 delta = abs(new_dist - d[x][y][z])
+                 if delta > fim_tolerance_frac * voxel_size:
+-                    d[x][y][z] = new_dist
++                    d[x][y][z] = new_dist * get_sign(x, y, z)
+                     for (nx, ny, nz) in neighbors:
+                         if d[nx][ny][nz] == float('inf'):
+@@ -125,5 +139,4 @@
+             active = next_active
+     else:
+-        import heapq
+         heap = []
+         for (x, y, z) in frontier:
+@@ -134,16 +147,21 @@
+                 continue
+             neighbors = get_neighbors(x, y, z, Nx, Ny, Nz)
++            # Compute tentative distance from fixed neighbors [G]
++            fixed_vals = [d[nx][ny][nz] for (nx, ny, nz) in neighbors if d[nx][ny][nz] < float('inf')]
++            if not fixed_vals:
++                continue
++            min_fixed = min(fixed_vals)
++            tentative = min_fixed + voxel_size
+             for (nx, ny, nz) in neighbors:
+                 if d[nx][ny][nz] == float('inf'):
+-                    min_fixed = min(d[nx][ny][nz] for (nx, ny, nz) in neighbors if d[nx][ny][nz] < float('inf'))
+-                    tentative = min_fixed + voxel_size
+                     d[nx][ny][nz] = tentative
+                     heapq.heappush(heap, (tentative, nx, ny, nz))
+                     
+-    if invert:
+-        for x in range(Nx):
+-            for y in range(Ny):
+-                for z in range(Nz):
+-                    d[x][y][z] = -d[x][y][z]
++    # Apply sign convention to all computed distances
++    for x in range(Nx):
++        for y in range(Ny):
++            for z in range(Nz):
++                if d[x][y][z] != float('inf'):
++                    d[x][y][z] = d[x][y][z] * get_sign(x, y, z)
+                     
+     if use_max_dist:
+@@ -170,7 +188,7 @@
+ ## Operating characteristics
+ *   **Time Complexity:**
+-    *   Fast Marching Method (FMM): $O(N \log N)$ where $N$ is the number of voxels, due to heap operations [S1].
+-    *   Fast Iterative Method (FIM): Generally faster than FMM in practice for large volumes, but convergence depends on the tolerance and bandwidth [S1]. Complexity is not strictly defined in the sources but is iterative [S1].
+-*   **Memory Complexity:** $O(N)$ for storing the distance field and auxiliary structures (heap or active set) [S1].
++    *   Fast Marching Method (FMM): $O(N \log N)$ where $N$ is the number of voxels, due to heap operations [G: Standard FMM complexity].
++    *   Fast Iterative Method (FIM): Generally faster than FMM in practice for large volumes, but convergence depends on the tolerance and bandwidth [S1]. Complexity is iterative and not strictly defined in the sources [S1].
++*   **Memory Complexity:** $O(N)$ for storing the distance field and auxiliary structures (heap or active set) [G: Standard grid-based SDF storage].
+ *   **Performance:** The Fast Iterative Method is generally faster than the default Fast Marching Method, but it is not as accurate. This should be used when performance is prioritized over the accuracy of the SDF [S1].
+ *   **Limitations:**

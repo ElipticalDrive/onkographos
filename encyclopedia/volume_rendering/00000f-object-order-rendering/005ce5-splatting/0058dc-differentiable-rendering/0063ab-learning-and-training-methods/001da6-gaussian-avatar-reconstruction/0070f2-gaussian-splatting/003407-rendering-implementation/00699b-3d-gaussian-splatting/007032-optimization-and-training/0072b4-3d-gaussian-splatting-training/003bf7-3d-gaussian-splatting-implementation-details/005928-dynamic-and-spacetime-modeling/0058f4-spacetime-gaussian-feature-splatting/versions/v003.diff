@@ -1,0 +1,514 @@
+--- v002.md
++++ v003.md
+@@ -4,310 +4,221 @@
+ 
+ ## Overview
+-Spacetime Gaussian Feature Splatting (STG) is a dynamic scene representation that extends 3D Gaussian Splatting to the 4D spacetime domain to model emerging, vanishing, and deforming content in real-time [S1]. It distinguishes itself from static 3D Gaussian Splatting by introducing time-dependent opacity, parametric polynomial motion/rotation, and neural features, while outperforming grid-based dynamic methods like K-Planes in adapting to delicate scene structures and achieving higher rendering speeds [S1].
++Spacetime Gaussian Feature Splatting (STG) is a dynamic scene representation that extends 3D Gaussian Splatting to the 4D spacetime domain, enabling the modeling of static, dynamic, and transient content in real-time [S1]. It distinguishes itself from sibling methods by replacing spherical harmonics with a compact neural feature vector and a shallow MLP, and by employing a polynomial motion model rather than linear deformation or grid-based factorization [S1]. This approach achieves high-fidelity novel view synthesis with compact storage and real-time rendering speeds, addressing the limitations of grid-like representations that struggle with delicate dynamic details [S1].
+ 
+ ## How it works
+ **Inputs and Outputs:**
+-*   **Input:** Multi-view video sequences (sparse point clouds from Structure-from-Motion at all timestamps, camera poses, and ground-truth images).
+-*   **Output:** A set of Spacetime Gaussians (STGs) and a small Multi-Layer Perceptron (MLP) $\Phi$, enabling real-time novel view synthesis at arbitrary viewpoints and timestamps.
++*   **Input:** Multi-view video sequences (images at various timestamps and viewpoints).
++*   **Output:** A set of Spacetime Gaussians (STGs) and a small Multi-Layer Perceptron (MLP) $\Phi$, allowing rendering of novel views at arbitrary timestamps $t$.
+ 
+ **Data Structures:**
+ Each STG $i$ stores the following parameters:
+-1.  **Spatial Opacity:** $\sigma_{is}$ (scalar, time-independent).
+-2.  **Temporal Opacity:** $\sigma_{\tau i}$ (scalar, scaling factor), $\mu_{\tau i}$ (scalar, temporal center).
+-3.  **Motion (Position):** Polynomial coefficients $\{b_{i,k}\}_{k=0}^{n_p}$ where $b_{i,k} \in \mathbb{R}^3$.
+-4.  **Rotation:** Polynomial coefficients $\{c_{i,k}\}_{k=0}^{n_q}$ where $c_{i,k} \in \mathbb{R}^4$ (quaternions).
+-5.  **Scaling:** $s_i \in \mathbb{R}^3$ (time-independent diagonal scaling vector).
+-6.  **Features:** $f_{base} \in \mathbb{R}^3$, $f_{dir} \in \mathbb{R}^3$, $f_{time} \in \mathbb{R}^3$. Total feature dimension is 9.
+-
+-**Formulas:**
+-The opacity of an STG at spacetime point $(x, t)$ is defined as [S1]:
+-$$ \alpha_i(t) = \sigma_i(t) \exp \left( -\frac{1}{2} (x - \mu_i(t))^T \Sigma_i(t)^{-1} (x - \mu_i(t)) \right) $$
+-where $\sigma_i(t)$ is the temporal opacity, $\mu_i(t)$ is the time-dependent position, and $\Sigma_i(t)$ is the time-dependent covariance.
+-
+-**Temporal Opacity:**
+-Modeled as a 1D Gaussian in time [S1]:
+-$$ \sigma_i(t) = \sigma_{is} \exp \left( -s_{\tau i} |t - \mu_{\tau i}|^2 \right) $$
+-
+-**Polynomial Motion:**
+-Position $\mu_i(t)$ is modeled using a polynomial trajectory [S1]:
+-$$ \mu_i(t) = \sum_{k=0}^{n_p} b_{i,k} (t - \mu_{\tau i})^k $$
+-In implementation, $n_p = 3$ [S1].
+-
+-**Polynomial Rotation:**
+-Rotation $q_i(t)$ is modeled as a polynomial of quaternions [S1]:
+-$$ q_i(t) = \sum_{k=0}^{n_q} c_{i,k} (t - \mu_{\tau i})^k $$
+-The rotation matrix $R_i(t)$ is derived from $q_i(t)$. In experiments, $n_q = 1$ [S1].
+-
+-**Covariance:**
+-The covariance matrix $\Sigma_i(t)$ is constructed from the time-independent scaling $S_i$ and time-dependent rotation $R_i(t)$ [S1]:
+-$$ \Sigma_i(t) = R_i(t) S_i S_i^T R_i(t)^T $$
+-where $S_i = \text{diag}(s_i)$ [S1].
+-
+-**Projection:**
+-The 3D Gaussian is projected to 2D image space using a first-order approximation of the perspective transformation [S1]:
+-$$ \mu^{2D}_i = \left( K \left( \frac{W \mu_i(t)}{(W \mu_i(t))_z} \right) \right)_{1:2} $$
+-$$ \Sigma^{2D}_i = \left( J W \Sigma_i(t) W^T J^T \right)_{1:2,1:2} $$
+-where $W$ is the viewing transformation, $K$ is the projection matrix, and $J$ is the Jacobian of the projective transformation [S1].
+-
+-**Feature Splatting and Rendering:**
+-Instead of spherical harmonics, each STG stores features $f_i(t) \in \mathbb{R}^9$ [S1]:
+-$$ f_i(t) = [f_{base}, f_{dir}, (t - \mu_{\tau i})f_{time}]^T $$
+-During rendering, features are splatted to the image plane. At each pixel, the splatted features are split into $F_{base}, F_{dir}, F_{time}$. The final color $I$ is computed by passing these features through a tiny MLP $\Phi$ along with the view direction $r$ [S1]:
+-$$ I = F_{base} + \Phi(F_{dir}, F_{time}, r) $$
+-The volume rendering equation for the accumulated color remains [S1]:
+-$$ I = \sum_{i \in N} c_i \alpha^{2D}_i \prod_{j=1}^{i-1} (1 - \alpha^{2D}_j) $$
+-where $N$ is the set of Gaussians sorted in depth order, and $c_i$ is the feature vector (which is processed by $\Phi$) [S1].
+-
+-**Optimization:**
+-Parameters optimized include $\sigma_{is}, s_{\tau i}, \mu_{\tau i}, \{b_{i,k}\}, \{c_{i,k}\}, s_i, f_{base}, f_{dir}, f_{time}$ and the MLP $\Phi$ [S1].
+-*   **Optimizer:** Adam [S1].
+-*   **Loss:** L1 term + D-SSIM term comparing rendered images to ground truth [S1].
+-*   **Density Control:** Interleaved with training. More aggressive pruning than standard 3DGS is used to reduce Gaussian count [S1].
+-*   **Scaling Constraint:** $S_i$ is kept time-independent because time-conditioned scaling did not improve rendering quality [S1].
+-
+-**Guided Sampling:**
+-To address sparse coverage in distant areas, new Gaussians are sampled after training loss stabilizes [S1]:
+-1.  Aggregate training errors patch-wise to identify substantial errors.
+-2.  Select rays from the center of high-error patches.
+-3.  Use a coarse depth map (generated during splatting) to determine a specific depth range.
+-4.  Sample new Gaussian centers uniformly within this depth range along the rays, adding small noise [S1].
+-5.  This process is conducted no more than 3 times per scene [S1].
+-
+-**Lite-Version:**
+-For maximum speed, the MLP $\Phi$ can be dropped, using only $F_{base}$ for rendering [S1].
++1.  **Spatial Opacity:** $\sigma_{is} \in \mathbb{R}$ (time-independent base opacity).
++2.  **Temporal Opacity Parameters:** $s_{\tau i} \in \mathbb{R}$ (temporal scaling), $\mu_{\tau i} \in \mathbb{R}$ (temporal center/timestamp of peak visibility).
++3.  **Motion Parameters:** Polynomial coefficients $\{b_{i,k}\}_{k=0}^{n_p}$ for position, where $b_{i,k} \in \mathbb{R}^3$.
++4.  **Rotation Parameters:** Polynomial coefficients $\{c_{i,k}\}_{k=0}^{n_q}$ for quaternion rotation, where $c_{i,k} \in \mathbb{R}^4$.
++5.  **Scaling:** $s_i \in \mathbb{R}^3$ (3D scaling vector, time-independent).
++6.  **Features:** A feature vector $f_i(t) \in \mathbb{R}^9$ composed of:
++    *   $f_{base} \in \mathbb{R}^3$: Base RGB color.
++    *   $f_{dir} \in \mathbb{R}^3$: View-direction dependent features.
++    *   $f_{time} \in \mathbb{R}^3$: Time-dependent features.
++7.  **Covariance:** $\Sigma_i$ is derived from $s_i$ and a quaternion $q_i$ (derived from $\{c_{i,k}\}$), but the raw quaternion coefficients are optimized, not the matrix directly.
++
++**Parameters:**
++*   Polynomial degree for motion: $n_p = 3$ [S1].
++*   Polynomial degree for rotation: $n_q = 1$ [S1].
++*   Feature dimension: 9 (vs. 48 for 3-degree Spherical Harmonics) [S1].
++*   Optimizer: Adam [S1].
++*   Loss: Combination of L1 loss and D-SSIM loss [S1].
++
++**Step-by-Step Method:**
++
++1.  **Initialization:**
++    Initialize STGs using Structure-from-Motion (SfM) sparse point clouds collected from all available timestamps in the input video [S1].
++
++2.  **Temporal Opacity Calculation:**
++    For a given time $t$, compute the temporal opacity $\sigma_i(t)$ using a 1D Gaussian function:
++    $$ \sigma_i(t) = \sigma_{is} \exp \left( -s_{\tau i} |t - \mu_{\tau i}|^2 \right) $$
++    where $\sigma_{is}$ is the spatial opacity, $s_{\tau i}$ controls the duration, and $\mu_{\tau i}$ is the timestamp where the Gaussian is most visible [S1].
++
++3.  **Motion and Rotation Calculation:**
++    Compute the time-dependent position $\mu_i(t)$ and rotation quaternion $q_i(t)$ using polynomial functions centered at $\mu_{\tau i}$:
++    $$ \mu_i(t) = \sum_{k=0}^{n_p} b_{i,k} (t - \mu_{\tau i})^k $$
++    $$ q_i(t) = \sum_{k=0}^{n_q} c_{i,k} (t - \mu_{\tau i})^k $$
++    Note: $q_i(t)$ must be normalized to unit length after computation [S1]. The scaling $s_i$ remains constant over time [S1].
++
++4.  **Covariance Construction:**
++    Construct the 3D covariance matrix $\Sigma_i(t)$ from the rotation matrix $R_i(t)$ (derived from $q_i(t)$) and the diagonal scaling matrix $S_i$ (derived from $s_i$):
++    $$ \Sigma_i(t) = R_i(t) S_i S_i^T R_i(t)^T $$
++    where $S_i = \text{diag}(s_i)$ [S1].
++
++5.  **Projection to 2D:**
++    Project the 3D Gaussian to the image plane for a specific camera view. Let $W$ be the viewing transformation and $K$ be the projection matrix.
++    Compute the 2D center $\mu^{2D}_i$:
++    $$ \mu^{2D}_i = \left( K \left( \frac{W \mu_i(t)}{(W \mu_i(t))_z} \right) \right)_{1:2} $$
++    Compute the 2D covariance $\Sigma^{2D}_i$ using the Jacobian $J$ of the projective transformation:
++    $$ \Sigma^{2D}_i = \left( J W \Sigma_i(t) W^T J^T \right)_{1:2,1:2} $$
++    [S1].
++
++6.  **Feature Splatting:**
++    Instead of computing color directly, splat the feature vector $f_i(t)$ to the image plane. The feature vector is defined as:
++    $$ f_i(t) = [f_{base}, f_{dir}, (t - \mu_{\tau i}) f_{time}]^T $$
++    During rasterization, accumulate the splatted features $F_{base}, F_{dir}, F_{time}$ at each pixel weighted by the 2D opacity $\alpha^{2D}_i$ and depth order, similar to standard alpha blending:
++    $$ I_{feat} = \sum_{i \in N} f_i(t) \alpha^{2D}_i \prod_{j=1}^{i-1} (1 - \alpha^{2D}_j) $$
++    where $N$ is the set of Gaussians sorted by depth [S1].
++
++7.  **Color Reconstruction:**
++    Pass the accumulated features through a shallow MLP $\Phi$ along with the view direction $r$ to produce the final color $C$:
++    $$ C = f_{base} + \Phi(F_{dir}, F_{time}, r) $$
++    [S1].
++
++8.  **Optimization:**
++    Optimize all STG parameters ($\sigma_{is}, s_{\tau i}, \mu_{\tau i}, \{b_{i,k}\}, \{c_{i,k}\}, s_i, f_{base}, f_{dir}, f_{time}$) and the MLP $\Phi$ using the Adam optimizer. The loss function is:
++    $$ L = L_{L1} + \lambda L_{D-SSIM} $$
++    where $L_{L1}$ is the L1 loss between rendered and ground truth images, and $L_{D-SSIM}$ is the differentiable SSIM loss [S1].
++
++9.  **Density Control and Guided Sampling:**
++    *   **Pruning:** Perform more aggressive pruning than standard 3DGS to reduce Gaussian count and model size [S1].
++    *   **Guided Sampling:** After training loss stabilizes, identify pixels with large errors. Aggregate errors patch-wise. Use a coarse depth map (generated during splatting) to determine the depth range. Sample new Gaussians uniformly along rays from the center of high-error patches within this depth range, adding small noise to centers. This is performed no more than 3 times [S1].
+ 
+ **Pseudocode:**
+ 
+ ```python
+-def initialize_stgs(point_clouds):
+-    """
+-    Initialize Spacetime Gaussians from SfM sparse point clouds.
+-    Returns list of STG objects with random initial parameters.
+-    """
+-    stgs = []
+-    for point in point_clouds:
+-        stg = STG()
+-        stg.position = point.position
+-        stg.opacity = random_positive_scalar()
+-        stg.scaling = random_vector_3d()
+-        stg.rotation = identity_quaternion()
+-        stg.temporal_center = random_timestamp()
+-        stg.temporal_scaling = random_positive_scalar()
+-        stg.spatial_opacity = random_positive_scalar()
+-        # Polynomial coefficients for motion (degree 3)
+-        stg.motion_coeffs = [random_vector_3d() for _ in range(4)]
+-        # Polynomial coefficients for rotation (degree 1)
+-        stg.rotation_coeffs = [random_quaternion() for _ in range(2)]
+-        # Features
+-        stg.f_base = random_vector_3d()
+-        stg.f_dir = random_vector_3d()
+-        stg.f_time = random_vector_3d()
+-        stgs.append(stg)
++import numpy as np
++
++def compute_temporal_opacity(sigma_is, s_tau, mu_tau, t):
++    """
++    Computes temporal opacity sigma_i(t).
++    """
++    return sigma_is * np.exp(-s_tau * (t - mu_tau)**2)
++
++def compute_motion(mu_tau, b_coeffs, t, n_p=3):
++    """
++    Computes position mu_i(t) using polynomial coefficients.
++    b_coeffs: list of numpy arrays [b_0, b_1, ..., b_n_p], each shape (3,)
++    """
++    mu_t = np.zeros(3)
++    for k in range(n_p + 1):
++        mu_t += b_coeffs[k] * (t - mu_tau)**k
++    return mu_t
++
++def compute_rotation(mu_tau, c_coeffs, t, n_q=1):
++    """
++    Computes quaternion q_i(t) using polynomial coefficients.
++    c_coeffs: list of numpy arrays [c_0, c_1, ..., c_n_q], each shape (4,)
++    Returns normalized quaternion.
++    """
++    q_t = np.zeros(4)
++    for k in range(n_q + 1):
++        q_t += c_coeffs[k] * (t - mu_tau)**k
++    # Normalize quaternion
++    q_t = q_t / np.linalg.norm(q_t)
++    return q_t
++
++def quaternion_to_rotation_matrix(q):
++    """
++    Converts a unit quaternion [w, x, y, z] to a 3x3 rotation matrix.
++    """
++    w, x, y, z = q[0], q[1], q[2], q[3]
++    R = np.array([
++        [1 - 2*y*y - 2*z*z, 2*x*y - 2*w*z, 2*x*z + 2*w*y],
++        [2*x*y + 2*w*z, 1 - 2*x*x - 2*z*z, 2*y*z - 2*w*x],
++        [2*x*z - 2*w*y, 2*y*z + 2*w*x, 1 - 2*x*x - 2*y*y]
++    ])
++    return R
++
++def render_stg(stgs, camera_params, t, mlp):
++    """
++    Renders a frame for time t.
++    stgs: List of STG objects.
++    camera_params: Contains W (view matrix), K (proj matrix), J (Jacobian).
++    mlp: The neural feature MLP.
++    """
++    # 1. Project Gaussians to 2D
++    projected_gaussians = []
++    for i, g in enumerate(stgs):
++        # Compute time-dependent properties
++        sigma_t = compute_temporal_opacity(g.sigma_is, g.s_tau, g.mu_tau, t)
++        mu_t = compute_motion(g.mu_tau, g.b_coeffs, t)
++        q_t = compute_rotation(g.mu_tau, g.c_coeffs, t)
++        
++        # Covariance
++        R_t = quaternion_to_rotation_matrix(q_t)
++        S = np.diag(g.s_i)
++        Sigma_t = R_t @ S @ S.T @ R_t.T
++        
++        # Projection
++        # mu_3d_homogeneous = [mu_t[0], mu_t[1], mu_t[2], 1]
++        # W_mu = camera_params.W @ mu_3d_homogeneous
++        # mu_2d_center = (camera_params.K @ (W_mu / W_mu[2]))[:2]
++        # Sigma_2d = (camera_params.J @ camera_params.W @ Sigma_t @ camera_params.W.T @ camera_params.J.T)[:2, :2]
++        
++        # Note: Standard 3DGS projection approximation is used here conceptually.
++        # In implementation, use the specific Jacobian approximation from 3DGS.
++        
++        projected_gaussians.append({
++            'mu_2d': mu_2d_center,
++            'Sigma_2d': Sigma_2d,
++            'alpha_2d': sigma_t * gaussian_2d_pdf(mu_2d_center, Sigma_2d, pixel_coords), # Simplified
++            'features': np.concatenate([g.f_base, g.f_dir, (t - g.mu_tau) * g.f_time]),
++            'depth': mu_t[2] # For sorting
++        })
++    
++    # 2. Sort by depth
++    projected_gaussians.sort(key=lambda x: x['depth'])
++    
++    # 3. Rasterize (Splat)
++    # Accumulate features per pixel
++    # This step involves iterating over pixels and Gaussians, or vice versa.
++    # For pseudocode clarity, we assume a rasterization function exists.
++    accumulated_features = rasterize(projected_gaussians, image_shape)
++    
++    # 4. Decode Color
++    # accumulated_features contains F_base, F_dir, F_time per pixel
++    # View direction r is also available per pixel
++    colors = mlp(accumulated_features['F_dir'], accumulated_features['F_time'], accumulated_features['r'])
++    
++    return accumulated_features['F_base'] + colors
++
++def guided_sampling(stgs, error_map, coarse_depth_map, num_samples=3):
++    """
++    Samples new Gaussians based on training error and depth.
++    """
++    for _ in range(num_samples):
++        # Aggregate errors patch-wise
++        patches = aggregate_errors_patchwise(error_map)
++        
++        # Select high-error patches
++        high_error_patches = select_top_patches(patches, threshold=0.8)
++        
++        for patch in high_error_patches:
++            # Get ray from center of patch
++            ray = get_ray_from_patch_center(patch)
++            
++            # Determine depth range from coarse depth map
++            depth_min, depth_max = get_depth_range_from_coarse_map(patch, coarse_depth_map)
++            
++            # Sample new Gaussian centers along ray
++            new_centers = np.random.uniform(depth_min, depth_max, size=(10, 1)) * ray.direction + ray.origin
++            
++            # Add small noise
++            new_centers += np.random.normal(0, 0.01, new_centers.shape)
++            
++            # Initialize new STGs at these centers
++            for center in new_centers:
++                new_stg = initialize_stg_from_point(center)
++                stgs.append(new_stg)
++                
+     return stgs
+-
+-def get_stg_state(stg, t):
+-    """
+-    Compute time-dependent state of an STG at time t.
+-    """
+-    # Temporal Opacity
+-    sigma_t = stg.spatial_opacity * exp(-stg.temporal_scaling * (t - stg.temporal_center)**2)
+-    
+-    # Position
+-    pos = vector_3d(0,0,0)
+-    for k, coeff in enumerate(stg.motion_coeffs):
+-        pos += coeff * (t - stg.temporal_center)**k
+-        
+-    # Rotation Matrix
+-    q = quaternion(0,0,0,1)
+-    for k, coeff in enumerate(stg.rotation_coeffs):
+-        q += coeff * (t - stg.temporal_center)**k
+-    q = normalize(q)
+-    R = quaternion_to_rotation_matrix(q)
+-    
+-    # Covariance
+-    S = diag(stg.scaling)
+-    Sigma = R @ S @ S.T @ R.T
+-    
+-    return pos, Sigma, sigma_t
+-
+-def feature_splatting(stgs, camera, t):
+-    """
+-    Render image using feature splatting.
+-    """
+-    image = zeros_like(target_image)
+-    alpha_accum = zeros_like(target_image)
+-    
+-    # Sort STGs by depth
+-    sorted_stgs = sort_by_depth(stgs, camera, t)
+-    
+-    for stg in sorted_stgs:
+-        pos, Sigma, sigma_t = get_stg_state(stg, t)
+-        
+-        # Project to 2D
+-        mu_2d = project_2d(pos, camera.W, camera.K)
+-        Sigma_2d = project_covariance(Sigma, camera.W, camera.J)
+-        
+-        # Compute 2D Gaussian alpha
+-        alpha_2d = compute_2d_alpha(mu_2d, Sigma_2d, sigma_t)
+-        
+-        # Compute Feature
+-        f_base = stg.f_base
+-        f_dir = stg.f_dir
+-        f_time = stg.f_time
+-        f_splat = f_base + f_dir * view_direction + f_time * (t - stg.temporal_center)
+-        
+-        # Composite
+-        weight = alpha_2d * (1 - alpha_accum)
+-        image += f_splat * weight
+-        alpha_accum += alpha_2d * (1 - alpha_accum)
+-        
+-        if alpha_accum > 0.99:
+-            break
+-            
+-    return image, alpha_accum
+-
+-def guided_sampling(stgs, camera, error_map, depth_map, t):
+-    """
+-    Sample new Gaussians in high-error regions.
+-    """
+-    patches = find_high_error_patches(error_map, threshold=0.1)
+-    new_stgs = []
+-    for patch in patches:
+-        ray = get_ray_from_patch_center(patch, camera)
+-        depth_min, depth_max = get_depth_range_from_map(depth_map, ray)
+-        num_samples = 5 # Example constant
+-        for _ in range(num_samples):
+-            depth = uniform_random(depth_min, depth_max)
+-            pos = ray.origin + ray.direction * depth
+-            pos += small_noise()
+-            new_stg = create_new_stg(pos, t)
+-            new_stgs.append(new_stg)
+-    return new_stgs
+-
+-def train_step(stgs, cameras, gt_images, t):
+-    """
+-    Single training iteration.
+-    """
+-    pred_images = []
+-    for camera, gt in zip(cameras, gt_images):
+-        pred, _ = feature_splatting(stgs, camera, t)
+-        pred_images.append(pred)
+-        
+-    loss = 0
+-    for pred, gt in zip(pred_images, gt_images):
+-        loss += L1_loss(pred, gt)
+-        loss += D_SSIM_loss(pred, gt)
+-        
+-    loss.backward()
+-    optimizer.step()
+-    optimizer.zero_grad()
+-    
+-    # Density control
+-    stgs = prune_low_opacity(stgs, threshold=0.005)
+-    stgs = split_large_gradients(stgs)
+-    
+-    return loss
+ ```
+ 
+-## Subtopics
+-
+-### DeSplat
+-Focuses on deblurring and handling motion blur in dynamic scenes, whereas STG focuses on explicit temporal modeling of Gaussian parameters [12925-desplat.md].
+-
+-### 360 Gaussian Splatting
+-Addresses omnidirectional or wide-baseline dynamic scenes, while STG is optimized for multi-view video setups with specific temporal polynomial modeling [12929-360-gaussian-splatting.md].
+-
+-### Data Compression and Storage Optimization
+-General techniques for reducing model size, whereas STG achieves compactness through feature dimensionality reduction (9 vs 48 params) and polynomial motion [12943-data-compression-and-storage-optimization.md].
+-
+-### Bézier-boundary gradient approximation
+-Uses Bézier curves for boundary handling, distinct from STG's polynomial trajectory for motion [13137-b-zier-boundary-gradient-approximation.md].
+-
+-### Discontinuity-aware Gaussian Splatting
+-Handles geometric discontinuities explicitly, while STG relies on temporal opacity for emerging/vanishing content [13138-discontinuity-aware-gaussian-splatting.md].
+-
+-### SOGS
+-Uses second-order anchors for optimization, whereas STG uses first-order polynomial coefficients for motion [13171-sogs-second-order-anchor-for-advanced-3d-gaussian-splatting.md].
+-
+-### TraGraph-GS
+-Uses graph-based temporal consistency, while STG uses parametric polynomials [14454-tragraph-gs.md].
+-
+-### Optimization Schedule and Densification
+-General densification strategies; STG adds guided sampling for sparse areas [15107-optimization-schedule-and-densification.md].
+-
+-### 3D Gaussian Splatting Training Loop
+-The base loop; STG extends it with temporal parameters and guided sampling [15139-3d-gaussian-splatting-training-loop.md].
+-
+-### Scene Representation and Geometry Constraints
+-Adds geometry losses; STG focuses on appearance and motion [15421-scene-representation-and-geometry-constraints.md].
+-
+-### Perceptual Wrapper
+-Adds perceptual losses; STG uses D-SSIM [15438-perceptual-wrapper.md].
+-
+-### TurboGS
+-Focuses on rendering acceleration; STG achieves speed via feature MLP and polynomial motion [15697-turbogs.md].
+-
+-### Error-Guided Sparse Pixel Sampling
+-Similar to STG's guided sampling but may differ in depth usage or aggregation [15708-error-guided-sparse-pixel-sampling.md].
+-
+-### DashGaussian
+-Optimizes for streaming; STG is for offline training with real-time rendering [15742-dashgaussian.md].
+-
+-### Frequency Guided Resolution Scheduler
+-Adaptive resolution; STG renders at fixed high resolution [15751-frequency-guided-resolution-scheduler.md].
+-
+-### Inverse and Internal Rendering
+-Different application domain; STG is for novel view synthesis [15764-inverse-and-internal-rendering.md].
+-
+-### Neural SDF Inference via Gaussian Pulling
+-Extracts geometry; STG is primarily for rendering [15776-neural-sdf-inference-via-gaussian-pulling.md].
+-
+-### Multi-View Regulated Gaussian Splatting
+-Enforces multi-view consistency; STG assumes consistent multi-view input [15783-multi-view-regulated-gaussian-splatting.md].
+-
+-### Gaussian Frosting
+-Adds a surface layer; STG is volumetric [15863-gaussian-frosting.md].
+-
+-### FisherRF
+-Uses Fisher information for optimization; STG uses Adam [15865-fisherrf.md].
+-
+-### SpacetimeGaussians Training Pipeline
+-The specific pipeline for STG [15898-spacetimegaussians-training-pipeline.md].
+-
+-### Semantic and Language Integration
+-Adds semantic labels; STG is appearance-only [15930-semantic-and-language-integration.md].
+-
+-### 3D Difference-of-Gaussians (3D-DoG)
+-Edge detection method; STG uses DoG for densification in base 3DGS but STG's core is temporal [16198-3d-difference-of-gaussians-3d-dog.md].
+-
+-### Hardware and Computational Acceleration
+-General hardware tips; STG is optimized for GPU [16214-hardware-and-computational-acceleration.md].
+-
+-### Pruning and Density Control
+-STG uses more aggressive pruning [16215-pruning-and-density-control.md].
+-
+-### QuantumGS
+-Quantum computing approach; STG is classical [16253-quantumgs.md].
+-
+-### Deformable 3D Gaussians
+-Uses deformation fields; STG uses polynomial motion [16260-deformable-3d-gaussians.md].
+-
+-### Human Gaussian Splatting
+-Specialized for humans; STG is general dynamic scenes [16261-human-gaussian-splatting.md].
+-
+ ## Operating characteristics
+-*   **Time Complexity:** Training time is 40-60 minutes for a 50-frame sequence on a single NVIDIA A6000 GPU [S1].
+-*   **Memory Complexity:** Model size is compact. Feature dimension is 9 per STG, compared to 48 for 3-degree Spherical Harmonics [S1].
+-*   **Measured Performance:**
+-    *   140 FPS at 1352 × 1014 resolution on the Neural 3D Video Dataset [S1].
+-    *   66 FPS at 8K resolution on an Nvidia RTX 4090 GPU [S1].
+-*   **Scaling:** Rendering speed is high due to the shallow/narrow MLP and efficient splatting [S1].
+-*   **Strengths:** Real-time high-resolution rendering, compact storage, handles emerging/vanishing content, adaptive to scene structures [S1].
+-*   **Limitations:** Polynomial motion may be less expressive than deformation fields for complex non-rigid deformations (though better than linear models) [S1].
+-*   **When to use:** Real-time dynamic view synthesis with multi-view video input [S1].
+-*   **When not to use:** Scenes requiring extremely complex non-rigid deformation where polynomial motion is insufficient, or when deformation fields are preferred [S1].
++*   **Rendering Speed:** Achieves 140 FPS at 1352 × 1014 resolution on the Neural 3D Video Dataset [S1]. The lite-version (without MLP) renders 8K video at 66 FPS on an Nvidia RTX 4090 GPU [S1].
++*   **Training Time:** 40-60 minutes for a 50-frame sequence on a single NVIDIA A6000 GPU [S1].
++*   **Memory/Size:** Uses 9 parameters per STG for features, significantly fewer than the 48 parameters required for 3-degree Spherical Harmonics [S1]. Aggressive pruning keeps the model size compact [S1].
++*   **Strengths:** Real-time high-resolution rendering, compact storage, ability to model transient content (emergence/vanishing), and better handling of delicate dynamic details compared to grid-based methods [S1].
++*   **Limitations:** Requires multi-view video input. The polynomial motion model may be less efficient for extremely long, complex motions compared to deformation fields, though it offers higher quality than linear models [S1].
+ 
+ ## Background
+-Spacetime Gaussian Feature Splatting was introduced by Zhan Li, Zhang Chen, Zhong Li, and Yi Xu from OPPO US Research Center and Portland State University in the paper "Spacetime Gaussian Feature Splatting for Real-Time Dynamic View Synthesis" (arXiv:2312.16812v2, Apr 4 2024) [S1]. It builds on 3D Gaussian Splatting [41] and addresses the challenges of dynamic scene representation by combining temporal opacity, polynomial motion, and neural features [S1].
++Spacetime Gaussian Feature Splatting was introduced by Zhan Li, Zhang Chen, Zhong Li, and Yi Xu from OPPO US Research Center and Portland State University in the paper "Spacetime Gaussian Feature Splatting for Real-Time Dynamic View Synthesis" (arXiv:2312.16812v2, published April 4, 2024) [S1]. It builds upon the 3D Gaussian Splatting framework [41] and addresses the challenges of dynamic scene representation by incorporating temporal components and neural features.
+ 
+ ## Sources

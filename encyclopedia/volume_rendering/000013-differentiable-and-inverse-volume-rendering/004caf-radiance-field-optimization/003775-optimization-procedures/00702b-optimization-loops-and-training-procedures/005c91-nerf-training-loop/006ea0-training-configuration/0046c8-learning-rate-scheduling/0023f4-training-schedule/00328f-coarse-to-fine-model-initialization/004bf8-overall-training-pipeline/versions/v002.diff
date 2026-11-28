@@ -1,0 +1,149 @@
+--- v001.md
++++ v002.md
+@@ -7,5 +7,5 @@
+ 
+ ## How it works
+-**Inputs:** A set of unordered images $I$, initial camera poses (typically identity), and pre-extracted deep features (e.g., DINO) and monocular depth estimates (e.g., DPT) [S1, unofficial].
++**Inputs:** A set of unordered images $I$, initial camera poses (identity transformation), and pre-extracted deep features (e.g., DINO) and monocular depth estimates (e.g., DPT) [S1, unofficial].
+ **Outputs:** Optimized camera poses $p$, neural radiance field parameters (coarse and fine MLPs), and transient network parameters [S1, unofficial].
+ 
+@@ -28,15 +28,6 @@
+ **Steps:**
+ 1.  **Initialization:** Set initial camera poses to identity transformation. Extract deep features and monocular depth offline [S1, unofficial].
+-2.  **Sampling:**
+-    *   For the **coarse model**, sample points using density $\sigma$. Render using detached transient outputs $\hat{\alpha}(\tau)$ and $\hat{C}_i(\tau)$ [S1, unofficial].
+-    *   For the **fine model**, compose the sample set using both shared density $\sigma$ and candidate density $\sigma_i$. The usage of $\sigma_i$ is governed by the scheduling factor $w_{u,v}$ [S1, unofficial].
+-3.  **Loss Computation:**
+-    *   Compute RGB loss for the coarse model:
+-        $$ L_{coarse\_rgb} = \frac{1}{2} \| \hat{C}_i(r) - C_i(r) \|_2^2 $$
+-        where $\hat{C}_i(r)$ is the rendered color using detached transient outputs and no uncertainty [S1, unofficial].
+-    *   Compute the total loss for the fine model:
+-        $$ L = w_{u,v} L_{rgb} + (1 - w_{u,v}) (L_{feat} + \lambda_d L_{depth}) $$
+-        where $L_{rgb}$ is the RGB reconstruction loss, $L_{feat}$ is the feature matching loss, and $L_{depth}$ is the depth consistency loss [S1, unofficial].
+-    *   The scheduling factor $w_{u,v}$ controls the transition. At the start ($w_{u,v} \approx 0$), the model relies on features and depth. As training progresses ($w_{u,v} \to 1$), it relies on RGB reconstruction [S1, unofficial].
++2.  **Sampling:** For the **coarse model**, sample points using density $\sigma$. Render using detached transient outputs $\hat{\alpha}(\tau)$ and $\hat{C}_i(\tau)$ [S1, unofficial]. For the **fine model**, compose the sample set using both shared density $\sigma$ and candidate density $\sigma_i$. The usage of $\sigma_i$ is governed by the scheduling factor $w_{u,v}$ [S1, unofficial].
++3.  **Loss Computation:** Compute RGB loss for the coarse model: $L_{coarse\_rgb} = \frac{1}{2} \|\hat{C}_i(r) - C_i(r)\|_2^2$, where $\hat{C}_i(r)$ is the rendered color using detached transient outputs and no uncertainty [S1, unofficial]. Compute the total loss for the fine model: $L = w_{u,v} L_{rgb} + (1 - w_{u,v}) (L_{feat} + \lambda_d L_{depth})$, where $L_{rgb}$ is the RGB reconstruction loss, $L_{feat}$ is the feature matching loss, and $L_{depth}$ is the depth consistency loss [S1, unofficial]. The scheduling factor $w_{u,v}$ controls the transition. At the start ($w_{u,v} \approx 0$), the model relies on features and depth. As training progresses ($w_{u,v} \to 1$), it relies on RGB reconstruction [S1, unofficial].
+ 4.  **Transient Handling:** The transient confidence weight $W_{depth}$ is manually detached (gradient stop) to prevent its parameters from affecting the NeRF backbone directly [S1, unofficial]. The TransientNet is optimized using the fine model alone [S1, unofficial].
+ 5.  **Optimization:** Update all parameters using Adam. The coarse-to-fine strategy is active from training progress 0.1 to 0.5 [S1, unofficial].
+@@ -44,65 +35,65 @@
+ **Pseudocode:**
+ ```python
++import math
++
++def lerp(t, t0, t1):
++    if t <= t0: return 0.0
++    if t >= t1: return 1.0
++    return (t - t0) / (t1 - t0)
++
++def render_volume(points, color_fn, alpha_fn, num_samples):
++    weights = []
++    alpha_cum = 1.0
++    for i in range(num_samples):
++        a = alpha_fn(points[i])
++        w = alpha_cum * a
++        weights.append(w)
++        alpha_cum *= (1.0 - a)
++    return sum(w * color_fn(points[i]) for i, w in enumerate(weights))
++
++def sample_points(rays, density_fn, num_samples):
++    return [density_fn(ray) for ray in rays]
++
++def sample_points_mixed(rays, density_fn, candidate_density_fn, w, num_samples):
++    return [candidate_density_fn(ray) if math.random() < w else density_fn(ray) for ray in rays]
++
+ # Initialization
+-poses = IdentityTransformations(num_images)
+-nerf_coarse = InitMLP()
+-nerf_fine = InitMLP()
+-transient_net = InitMLP()
+-optimizer_nerf = Adam(nerf_coarse.parameters() + nerf_fine.parameters(), lr=5e-4)
+-optimizer_transient = Adam(transient_net.parameters(), lr=5e-4)
+-optimizer_pose = Adam(poses.parameters() + depth_factors.parameters(), lr=2e-3)
++poses = [IdentityMatrix() for _ in range(num_images)]
++nerf_coarse = MLP()
++nerf_fine = MLP()
++transient_net = MLP()
++optimizer_nerf = Adam(params=nerf_coarse.parameters() + nerf_fine.parameters(), lr=5e-4)
++optimizer_transient = Adam(params=transient_net.parameters(), lr=5e-4)
++optimizer_pose = Adam(params=poses + depth_factors, lr=2e-3)
+ 
+-# Scheduling parameters
+ u, v = 0.1, 0.5
+ lambda_d = 0.001
+ 
+ for iteration in range(600000):
+-    # 1. Sample rays
+-    rays = SampleRandomPixels(num_rays=2048)
+-    
+-    # 2. Compute scheduling factor w_u,v based on iteration progress
+-    # Note: Exact formula for w_u,v is not provided in sources, 
+-    # but it transitions from 0 to 1 between progress u and v [S1, unofficial]
+     progress = iteration / 600000
+-    w_u_v = ComputeSchedulingFactor(progress, u, v)
+-    
+-    # 3. Coarse Model Forward Pass
+-    # Sample points using coarse density sigma
+-    points_coarse = SamplePoints(rays, nerf_coarse.density, num_samples=128)
+-    
+-    # Render with detached transient outputs
+-    # Detach transient parameters to prevent gradient flow to NeRF
++    # Scheduling factor w_u,v transitions from 0 to 1 between progress u and v [S1, unofficial]
++    w_u_v = lerp(progress, u, v)
++
++    rays = [RandomPixelRay() for _ in range(2048)]
++
++    points_coarse = sample_points(rays, nerf_coarse.density, 128)
+     alpha_detached = transient_net.alpha(points_coarse).detach()
+     C_transient_detached = transient_net.color(points_coarse).detach()
+-    
+-    C_coarse_rendered = VolumetricRender(points_coarse, nerf_coarse.color, alpha_detached)
++    C_coarse_rendered = render_volume(points_coarse, nerf_coarse.color, alpha_detached, 128)
+     C_gt = rays.gt_color
+-    
+-    L_coarse_rgb = 0.5 * SquaredL2Norm(C_coarse_rendered - C_gt)
+-    
+-    # 4. Fine Model Forward Pass
+-    # Sample points using both sigma and candidate sigma_i
+-    # The mix depends on w_u,v [S1, unofficial]
+-    points_fine = SamplePointsMixed(rays, nerf_coarse.density, nerf_fine.candidate_density, w_u_v, num_samples=128)
+-    
+-    # Render fine model
+-    C_fine_rendered = VolumetricRender(points_fine, nerf_fine.color, transient_net.alpha(points_fine))
+-    
+-    L_rgb = SquaredL2Norm(C_fine_rendered - C_gt)
+-    
+-    # Compute feature and depth losses
+-    L_feat = FeatureLoss(rays.features, ExtractFeatures(C_fine_rendered))
+-    L_depth = DepthLoss(rays.depth, ExtractDepth(C_fine_rendered))
+-    
+-    # 5. Total Loss
++    L_coarse_rgb = 0.5 * sum((c1 - c2)**2 for c1, c2 in zip(C_coarse_rendered, C_gt))
++
++    points_fine = sample_points_mixed(rays, nerf_coarse.density, nerf_fine.candidate_density, w_u_v, 128)
++    C_fine_rendered = render_volume(points_fine, nerf_fine.color, transient_net.alpha(points_fine), 128)
++    L_rgb = sum((c1 - c2)**2 for c1, c2 in zip(C_fine_rendered, C_gt))
++    L_feat = sum((f1 - f2)**2 for f1, f2 in zip(rays.features, C_fine_rendered))
++    L_depth = sum((d1 - d2)**2 for d1, d2 in zip(rays.depth, C_fine_rendered))
++
+     L_total = w_u_v * L_rgb + (1 - w_u_v) * (L_feat + lambda_d * L_depth)
+-    
+-    # 6. Backpropagation
++
+     optimizer_nerf.zero_grad()
+     optimizer_transient.zero_grad()
+     optimizer_pose.zero_grad()
+-    
+     L_total.backward()
+-    
+     optimizer_nerf.step()
+     optimizer_transient.step()
+@@ -122,8 +113,7 @@
+ *   **Limitations:** Relies on pseudo-labels from monocular depth networks, which can degrade rendering quality if overused (hence the scheduling) [S1, unofficial].
+ *   **When to use:** Unordered, unposed image collections where initial pose estimates are poor or unavailable [S1, unofficial].
+-*   **When not to use:** When ground-truth poses are available or when computational resources are severely limited [S1, unofficial].
+ 
+ ## Background
+-UP-NeRF was introduced in 2023 by the authors of "UP-NeRF: Unconstrained Pose-Prior-Free Neural Radiance Fields" [S1, unofficial]. It builds upon the BARF (Blending Artificial Reality Features) coarse-to-fine strategy [S1, unofficial]. The method addresses the limitations of prior unposed NeRF approaches that relied on restrictive pose priors or failed to converge when combined with other techniques like BARF [S1, unofficial]. It is used for novel view synthesis and camera pose estimation on datasets like PhotoTourism [S1, unofficial].
++UP-NeRF builds upon the BARF (Blending Artificial Reality Features) coarse-to-fine strategy [S1, unofficial]. The method addresses the limitations of prior unposed NeRF approaches that relied on restrictive pose priors or failed to converge when combined with other techniques like BARF [S1, unofficial]. It is used for novel view synthesis and camera pose estimation on datasets like PhotoTourism [S1, unofficial].
+ 
+ ## Sources

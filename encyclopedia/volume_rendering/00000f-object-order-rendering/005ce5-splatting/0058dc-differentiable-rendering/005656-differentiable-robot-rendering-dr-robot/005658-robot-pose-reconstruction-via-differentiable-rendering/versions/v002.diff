@@ -1,0 +1,179 @@
+--- v001.md
++++ v002.md
+@@ -4,5 +4,5 @@
+ 
+ ## Overview
+-This method optimizes a robot's joint angles and camera pose from a single monocular RGB image by minimizing the pixel-wise difference between the input image and a differentially rendered image [S1, unofficial]. It builds on [Differentiable Robot Rendering (Dr. Robot)](15698-differentiable-robot-rendering-dr-robot.md) by leveraging its kinematics-aware deformation and Gaussian Splatting to provide accurate gradients for gradient-based control [S1, unofficial]. Unlike neural network-based refiners such as Robopose, this approach performs direct optimization without a learned prior [S1, unofficial].
++This method optimizes a robot's joint angles and camera pose from a single monocular RGB image by minimizing the pixel-wise difference between the input image and a differentially rendered image [S1, unofficial]. It builds on [Differentiable Robot Rendering (Dr. Robot)](15698-differentiable-robot-rendering-dr-robot.md) to provide accurate gradients for gradient-based control. Unlike the neural network refiner Robopose, this approach performs direct optimization without a learned prior [S1, unofficial].
+ 
+ ## How it works
+@@ -12,14 +12,12 @@
+ 
+ **Data Structures**
+-*   $\mathbf{p}$: Vector of robot joint angles.
+-*   $\theta_{\pi}$: Vector of camera pose parameters (extrinsics/intrinsics as defined by the renderer $\pi$).
+-*   $I$: Input image tensor.
++*   $\mathbf{p}$: Vector of robot joint angles [S1, unofficial].
++*   $\theta_{\pi}$: Vector of camera pose parameters (extrinsics/intrinsics as defined by the renderer $\pi$) [S1, unofficial].
++*   $I$: Input image tensor [S1, unofficial].
+ *   $\mathbf{f}(\mathbf{p})$: The robot's geometric representation deformed by pose $\mathbf{p}$, as defined in the parent method [S1, unofficial].
+ *   $\pi$: The differentiable rasterizer/renderer function [S1, unofficial].
+ 
+ **Algorithm Steps**
+-1.  **Initialization:**
+-    *   For the first frame of a video sequence, initialize $\mathbf{p}$ and $\theta_{\pi}$ from scratch (e.g., random or neutral pose) [S1, unofficial].
+-    *   For subsequent frames, warm start the optimization by setting the initial $\mathbf{p}$ and $\theta_{\pi}$ to the values estimated from the previous frame [S1, unofficial].
++1.  **Initialization:** For the first frame of a video sequence, initialize $\mathbf{p}$ and $\theta_{\pi}$ from scratch (e.g., random or neutral pose) [S1, unofficial]. For subsequent frames, warm start the optimization by setting the initial $\mathbf{p}$ and $\theta_{\pi}$ to the values estimated from the previous frame [S1, unofficial].
+ 2.  **Objective Definition:** Define the reconstruction loss $\mathcal{L}_{\text{Rec}}$ as the L2 norm between the input image $I$ and the rendered image $\pi(\mathbf{f}(\mathbf{p}))$ [S1, unofficial].
+ 3.  **Optimization:** Use gradient descent to minimize the objective function with respect to $\mathbf{p}$ and $\theta_{\pi}$ [S1, unofficial].
+@@ -33,86 +31,55 @@
+ 
+ Where:
+-*   $\mathbf{p}$ is the robot pose vector (joint angles).
+-*   $\theta_{\pi}$ represents the camera pose parameters.
+-*   $I$ is the input monocular RGB image.
+-*   $\pi$ is the differentiable rasterizer/renderer function.
+-*   $\mathbf{f}(\mathbf{p})$ is the deformed robot geometry.
++*   $\mathbf{p}$ is the robot pose vector (joint angles) [S1, unofficial].
++*   $\theta_{\pi}$ represents the camera pose parameters [S1, unofficial].
++*   $I$ is the input monocular RGB image [S1, unofficial].
++*   $\pi$ is the differentiable rasterizer/renderer function [S1, unofficial].
++*   $\mathbf{f}(\mathbf{p})$ is the deformed robot geometry [S1, unofficial].
+ 
+ **Pseudocode**
+ ```python
+-def optimize_robot_pose(I, initial_pose_p, initial_pose_theta_pi, renderer, robot_model, num_iterations=100, lr=0.01):
++def optimize_robot_pose(I, p_init, theta_pi_init, renderer, robot_model, num_iterations=100, lr=0.01):
+     """
+     Optimizes robot joint angles and camera pose to match input image I.
+-    
+-    Args:
+-        I: Input monocular RGB image tensor.
+-        initial_pose_p: Initial robot joint angles vector.
+-        initial_pose_theta_pi: Initial camera pose parameters.
+-        renderer: Differentiable rasterizer function pi.
+-        robot_model: Function f that deforms robot geometry based on pose p.
+-        num_iterations: Number of gradient descent steps.
+-        lr: Learning rate for gradient descent.
+-        
+-    Returns:
+-        p_opt: Optimized robot joint angles.
+-        theta_pi_opt: Optimized camera pose parameters.
+     """
+-    # Initialize trainable parameters
+-    p = torch.tensor(initial_pose_p, requires_grad=True)
+-    theta_pi = torch.tensor(initial_pose_theta_pi, requires_grad=True)
+-    
+-    optimizer = torch.optim.Adam([p, theta_pi], lr=lr)
+-    
+-    for i in range(num_iterations):
+-        optimizer.zero_grad()
+-        
+-        # Get deformed robot geometry
+-        # f(p) is defined in the parent Dr. Robot method
++    p = p_init.copy()
++    theta_pi = theta_pi_init.copy()
++    p.requires_grad = True
++    theta_pi.requires_grad = True
++
++    for _ in range(num_iterations):
+         deformed_geometry = robot_model(p)
+-        
+-        # Render the image using the differentiable renderer
+-        # pi is the differentiable rasterizer
+         rendered_image = renderer(deformed_geometry, theta_pi)
+-        
+-        # Calculate L2 loss between input image and rendered image
+-        loss = torch.norm(I - rendered_image, p=2)
+-        
+-        # Backpropagate gradients
++        loss = sum((I - rendered_image) ** 2) / I.numel()
+         loss.backward()
+-        
+-        # Update parameters
+-        optimizer.step()
+-        
++
++        p -= lr * p.grad
++        theta_pi -= lr * theta_pi.grad
++        p.grad.zero_()
++        theta_pi.grad.zero_()
++
+     return p.detach(), theta_pi.detach()
+ 
+-def process_video_sequence(video_frames):
+-    """
+-    Processes a sequence of video frames using warm-start optimization.
+-    """
++def get_neutral_pose():
++    # [G] Returns a zero-vector or default joint angles for the robot
++    return [0.0] * num_joints
++
++def get_standard_camera_pose():
++    # [G] Returns default extrinsics/intrinsics for the camera
++    return [0.0, 0.0, 0.0, 0.0, 0.0, 0.0]
++
++def process_video_sequence(video_frames, renderer, robot_model):
+     prev_p = None
+     prev_theta_pi = None
+-    
+     for i, frame in enumerate(video_frames):
+         if i == 0:
+-            # Initialize from scratch for the first frame
+-            # [G] Typical initialization might be neutral joint angles and standard camera pose
+-            init_p = get_neutral_pose() 
++            init_p = get_neutral_pose()
+             init_theta_pi = get_standard_camera_pose()
+         else:
+-            # Warm start with previous frame's estimates
+             init_p = prev_p
+             init_theta_pi = prev_theta_pi
+-            
+-        p_opt, theta_pi_opt = optimize_robot_pose(
+-            I=frame,
+-            initial_pose_p=init_p,
+-            initial_pose_theta_pi=init_theta_pi,
+-            renderer=dr_robot_renderer,
+-            robot_model=dr_robot_model
+-        )
+-        
++        p_opt, theta_pi_opt = optimize_robot_pose(frame, init_p, init_theta_pi, renderer, robot_model)
+         prev_p = p_opt
+         prev_theta_pi = theta_pi_opt
+-        
+     return prev_p, prev_theta_pi
+ ```
+@@ -120,6 +87,5 @@
+ **Edge Cases and Pitfalls**
+ *   **Local Minima:** Optimization from scratch on the first frame may converge to local minima if the initial pose is far from the ground truth. Warm starting subsequent frames mitigates this for video sequences [S1, unofficial].
+-*   **Camera Pose Ambiguity:** If the camera pose is unknown, it is optimized jointly with the robot pose. This can lead to ambiguity if the robot's appearance is symmetric or lacks distinctive features [S1, unofficial].
+-*   **Occlusions:** The method assumes the robot is visible. Severe occlusions may degrade reconstruction accuracy [S1, unofficial].
++*   **Joint Pose Optimization:** Camera and robot poses are optimized jointly when both are unknown. The method also supports reconstruction with known camera or robot parameters, or using multiple views at once [S1, unofficial].
+ 
+ ## Subtopics
+@@ -129,6 +95,6 @@
+ 
+ ## Operating characteristics
+-*   **Time Complexity:** Depends on the number of optimization iterations and the cost of differentiable rendering. Typically slower than neural network-based methods like Robopose per frame, but does not require training time [S1, unofficial].
+-*   **Memory Complexity:** Low, as it does not store large neural network weights for the refiner. Memory usage is dominated by the differentiable renderer and robot model [S1, unofficial].
++*   **Time Complexity:** Not given in the sources.
++*   **Memory Complexity:** Not given in the sources.
+ *   **Measured Performance:** On the Panda-3cam dataset:
+     *   Azure camera: 9.33 L1 error (std 2.65) vs Robopose 16.8 (std 3.38) [S1, unofficial].
+@@ -136,11 +102,11 @@
+     *   Realsense camera: 17.83 L1 error (std 5.5) vs Robopose 24.57 (std 3.71) [S1, unofficial].
+ *   **Scaling:** Performance is consistent across different camera platforms with varying fields of view and mounting positions [S1, unofficial].
+-*   **Strengths:** High accuracy, outperforms SOTA neural refiner (Robopose) by 32.9% in joint angle estimation accuracy (L1 distance) [S1, unofficial]. Can reconstruct challenging parts like gripper poses when visible [S1, unofficial].
+-*   **Limitations:** Requires gradient descent optimization per frame, which is computationally more expensive than a single forward pass of a neural network. Sensitive to initialization for the first frame [S1, unofficial].
+-*   **When to use:** When high accuracy is required and computational budget allows for per-frame optimization. When a differentiable renderer is already available.
+-*   **When not to use:** When real-time performance is critical and a neural network refiner is preferred. When the robot is heavily occluded.
++*   **Strengths:** Outperforms the previous state-of-the-art method (Robopose) by 32.9% in joint angle estimation accuracy (L1 distance) [S1, unofficial]. Can reconstruct challenging parts like gripper poses when visible [S1, unofficial].
++*   **Limitations:** Not given in the sources.
++*   **When to use:** Not given in the sources.
++*   **When not to use:** Not given in the sources.
+ 
+ ## Background
+-The method was introduced in the paper "Differentiable Robot Rendering" by [S1, unofficial]. It evaluates the quality of gradients produced by Dr. Robot on the practical task of robot joint angles estimation from a single in-the-wild image. The evaluation uses the Panda-3CAM dataset, which consists of around 10K images with corresponding robot poses [S1, unofficial]. The method is compared against Robopose, a state-of-the-art method that uses a refiner neural network [S1, unofficial].
++The method was introduced in the paper "Differentiable Robot Rendering" [S1, unofficial]. It evaluates the quality of gradients produced by Dr. Robot on the practical task of robot joint angle estimation from a single in-the-wild image [S1, unofficial]. Evaluation uses the Panda-3CAM dataset, which consists of around 10K images with corresponding robot poses [S1, unofficial]. The method is compared against Robopose, a state-of-the-art method that uses a refiner neural network [S1, unofficial].
+ 
+ ## Sources

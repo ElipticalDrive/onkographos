@@ -1,0 +1,720 @@
+# Physics-Based Differentiable Rendering: From Theory to Implementation
+
+SHUANG ZHAO, University of California, Irvine WENZEL JAKOB, École Polytechnique Fédérale de Lausanne TZU-MAO LI, MIT CSAIL
+
+
+
+### ACM Reference Format:
+
+Shuang Zhao, Wenzel Jakob, and Tzu-Mao Li. 2020. Physics-Based Differentiable Rendering: From Theory to Implementation. In Special Interest Group on Computer Graphics and Interactive Techniques Conference Courses (SIGGRAPH '20 Courses), August 17, 2020. ACM, New York, NY, USA, 30 pages. 
+
+### 1 INTRODUCTION
+
+Physics-based rendering algorithms generate photorealistic images by simulating the flow of light through a detailed mathematical representation of a virtual scene. In contrast, physics-based differentiable rendering algorithms focus on computing derivative of images exhibiting complex light transport effects (e.g., soft shadows, interreflection, and caustics) with respect to arbitrary scene parameters such as camera pose, object geometry (e.g., vertex positions) as well as spatially varying material properties expressed as 2D textures and 3D volumes. This new level of generality has made physics-based differentiable rendering a key ingredient for solving many challenging inverse-rendering problems, that is, the search of scene configurations optimizing user-specified objective functions, using gradient-based methods (as illustrated in the figure below). Further, these techniques can be incorporated into probabilistic inference and machine learning pipelines. For instance, differentiable renderers allow "rendering losses" to be computed with complex light transport effects captured. Additionally, they can be used as generative models that synthesize photorealistic images.
+
+Challenges. Compared to its "ordinary" counterpart, physics-based differentiable rendering introduces unique theoretical and practical challenges. For instance, practical problems can involve many (e.g., 106–1010) parameters, making simple techniques for differentiation such as finite differences impractical. More advanced tools for
+
+Permission to make digital or hard copies of part or all of this work for personal or classroom use is granted without fee provided that copies are not made or distributed for profit or commercial advantage and that copies bear this notice and the full citation on the first page. Copyrights for third-party components of this work must be honored. For all other uses, contact the owner/author(s).
+
+SIGGRAPH '20 Courses, August 17, 2020, Virtual Event, USA
+
+© 2020 Copyright held by the owner/author(s).
+
+ACM ISBN 978-1-4503-7972-4/20/08.
+
+
+
+automatic differentiation (e.g., PyTorch or Tensorflow) record a graph of intermediate computation steps that tends to become prohibitively large. Lastly, geometric derivatives involve a unique challenge: boundaries of objects introduce troublesome discontinuities during the computation of shadows and interreflections that lead to incorrect gradients if precautions are not taken. Thankfully, recent advances in physics-based differentiable rendering theory have enabled the differentiation of radiometric measurements with respect to arbitrary scene parameters as well as unbiased Monte Carlo estimators. In this course, we provide an in-depth introduction to general-purpose physics-based differentiable rendering.
+
+Course outline. This course is comprised of two major components: (i) a theory-focused component covering the mathematical foundation of physics-based differentiable rendering; and (ii) an implementation-focused component discussing the corresponding Monte Carlo solutions as well as how these estimators can be implemented correctly and efficiently. For physics-based differentiable rendering theory, we cover the following topics.
+
+§2. Motivation and Preliminaries: We motivate the differentiable rendering problem with a toy example of two constant color triangles. We also introduce the mathematical preliminaries on the differentiation of integrals using Leibniz's rule and Reynolds transport theorem. §3.1. Differentiable rendering of surfaces: We utilize the results from §?? to differentiate the rendering equation (RE) in §3.1.1 and §3.1.2, enabling general-purpose differentiable rendering of surfaces. §3.2. Differentiable rendering of participating media: We discuss how the full radiative transfer equation (RTE) can be differentiated with respect to arbitrary scene parameters. On the implementation side, we discuss the following aspects: §4.1. Monte Carlo solutions: We present a few Monte Carlo solutions for derivative estimation including differentiable path tracing with edge sampling (§4.1.1\), its reparameterized variant (§4.1.2\), and differentiable volume path tracing (§4.1.3\). §4.2. Automatic differentiation: We discuss how automatic differentiation (autodiff), a key ingredient to general-purpose differentiable renderers, should be implemented for rendering. Lastly, we demonstrate in §5 potential applications of physics-based differentiable rendering to several challenging
+
+inverse rendering problems.
+
+### 1.1 Scope
+
+In this course, we will mainly discuss how to correctly and efficiently differentiate rendering operations, with hard surface boundaries in the presence.
+
+Geometry and representation. We mostly focus our discussions on mesh representations for our scene geometry, as it is currently the standard of 3D photorealistic rendering. Most techniques and theories we present can potentially be generalized to handle other geometric representations that represent surfaces such as implicit functions, polynomials, or boundary representation.
+
+Approximation v.s. unbiased method. We mainly focus on how to correctly derive the derivatives and consistant/unbiased estimators of rendering in this course. We briefly discuss approximated methods in Section 2.6, and show that many of them are compatible with our theory. We note that it is still debatable whether approximation is necessary for fast differentiable rendering. From our experience, the main bottleneck of most differentiable rendering systems lie in the irregular memory access in the derivative computation, instead of the visibility computation, regardless of rasterization or ray-tracing. Further research is required to accelerate both approximated and unbiased methods.
+
+
+
+Fig. 1. We start with a simplified rendering example to explain our motivation. Given two constant color triangles in 2D \(a\), we want to generate an image. A naïve approach is to evaluate the color for each pixel at the center \(b\). However, this approach is prone to aliasing in the signal processing sense, which produces artifacts such as jagged edges, fake fine details, and temporal flickering. Most renderers, whether differentiable or not, real-time or offline, rasterized or ray-traced, have to perform anti-aliasing \(c\). Anti-aliasing is formulated as an integral for each pixel, over the support of a low-pass filter. In the case of a uniform box filter, we want to compute the average color for each pixel.
+
+Scene initialization, parametrization, topology, and prior. We focus on discussing the gradient computation of the rendering process. A real inverse rendering pipeline is more involved than just the gradient computation, instead it includes proper initialization and parametrization to avoid being trapped in local minima, handling discrete topology changes of meshes, and assigning priors to resolve the ill-posedness of the problem. These issues, while being very important research problems, are out of the scope of this course.
+
+### 2 MOTIVATION AND MATHEMATICAL PRELIMINARIES
+
+In this section, we will work on a simplified problem with rendering two 2D triangles with constant color (Fig. 1a\). The two triangles can occlude each other. In this case our scene parameters are the 6 triangle vertices (12 real numbers) and the colors of the two triangles (6 real numbers). Given these 18 real numbers as a vector ��, where we denote the vertices parameters as ���� and the color parameters as ���� , we want to generate an image ��(��) and compute a loss function ��(��(��)) (e.g., comparing the image with a target, or feeding the image to a neural network classifier). Our goal to compute the gradient ∇����(��(��)) so that we can minimize the loss using gradient-based optimization.
+
+We will first show that rendering is usually modeled as an integration problem. Then we show that, while the integrands are discontinuous, the integrals are actually differentiable. Unfortunately, naïve combination of integral discretization and automatic differentiation does not compute the correct derivatives that converge in the limit. We discuss the mathematical tools that help us to correctly discretize the derivatives of integrals.
+
+### 2.1 Rendering as an Integration Problem
+
+Before we talk about the gradient, we need to discuss how the image �� is defined. How do we generate an image from these two triangles? We can imagine that the two triangles define an underlying imaging function ��(��, ��; ��) that maps continuous 2D coordinates (��, ��) to a RGB color, depending on which triangle the 2D coordinate hits. However an image is a discrete 2D grid. How do we go from the imaging function �� to the image �� ? A naïve approach (Fig. 1b\) is to evaluate �� at the center of each pixel. This approach is prone to aliasing, which causes issues including jagged edges, temporal flickering, Moiré patterns, and breaking up fine details [6].
+
+From the signal processing perspective, we are sampling this 2D domain with a discrete image, where the sampling rate is determined by the imaging function. Since the imaging function �� is discontinuous, it has energy at all frequencies and is not bandlimited. Therefore, as long as we are evaluating at the center of the pixels, we
+
+will suffer from the aliasing problem no matter how large we select the resolution. To resolve the aliasing issue, we need to remove the high frequencies energy from the imaging function  $m$ . This is done by convolving the imaging function with a low pass filter (Fig. 1c). For each pixel  $I_i$ , we evaluate an integral centered around the pixel center  $(x_i, y_i)$ :
+
+
+$$I_i = \iint k(x, y) m(x_i + x, y_i + y; \pi) dx dy = \iint f(x, y; \pi) dx dy, \quad (1)$$
+
+where  $k$  is the filtering kernel. For convenience we define the rendering integrand  $f(x, y) = k(x, y) m(x_i + x, y_i + y)$ .
+
+Intuitively, to remove the artifacts introduced by aliasing, instead of only evaluating the center at each pixel, we evaluate the weighted average color over an area. The selection of the filtering kernel  $k$  is an art in its own right, which involves subjective trade-offs between blurriness and ringing artifacts [28]. From now on we will assume we are using a simple kernel called box filter, which assign uniform weights inside the pixel area. The technique we introduce throughout this course works for any filter kernels, even non-differentiable ones.
+
+There are at least two ways to solve the anti-aliasing integral (Eq. (1)), one is analytical and one is numerical. Catmull [3] proposed to solve the integral analytically, by clipping the polygons against each other and partition the integral into multiple regions, and analytically integrate the polygons. Arvo [2] derived an analytical approach to compute the derivatives of diffuse global illumination. The analytical approach is unfriendly to modern hardware architectures as it is hard to parallelize and involves extensive branching. It is also difficult to generalize analytical integral for a different imaging function  $m$  and a kernel  $k$  – What if we want to use primitives other than triangles such as ellipse or polynomials? What if, inside the polygons, we have color variation, and we don't have analytical solution for the color variation?
+
+Most renderers, whether real-time, offline, physics-based, differentiable or not, need to deal with the aliasing issue. Most of them solve the anti-aliasing integral using numerical solution by evaluating the imaging function at various locations, a process often called discretization:
+
+
+$$I_i \approx \frac{1}{N} \sum_{j=1}^N f(x_j, y_j; \pi), \quad (2)$$
+
+The naïve approach of evaluating at pixel center can also be seen as a (poor) approximation to the integral by setting  $N = 1$  and  $x_0 = y_0 = 0.5$ .
+
+We say a discretization is consistent if the discretization converges to the integral, i.e.,  $\lim_{N \rightarrow \infty} 1/N \sum_{j=1}^N f(x_j, y_j) = I_i$ . The choice of the samples  $x_j, y_j$  does not need to be stochastic. Nevertheless, if we are randomly sampling  $x_j, y_j$  using probabilistic distribution, we say a discretization is unbiased if the expectation is the same as the integral, i.e.,  $\mathbb{E}[f(x_j, y_j)] = I_i$ .
+
+It turns out that, as we will show in Section 3, integrals are ubiquitous in rendering [5], and they do not just appear in anti-aliasing. For example, we can model motion blur as an integration over time during the camera shutter is open. We can model defocus blur for non-pinhole cameras as an integration over the aperture area. Given an area light, we compute the radiance that goes from the light source to the camera by integrating over the area of the light source. Kajiya [19] showed that we can model global illumination as an recursive integral, by integrating each 3D point in the scene recursively. Therefore, most rendering problems are about 1) How do we model the integrand  $f$  inside these multi-dimensional integrals, and 2) How do we evaluate, approximate, precompute, or compress the integral  $\int f$  for each pixel. Differentiable rendering instead asks the third question: how do we differentiate these integrals?
+
+For now let us focus on the anti-aliasing problem with the two constant color triangles in Figure 1.
+
+
+
+Fig. 2. A discontinuous integrand does not lead to non-differentiable integral. Here we show a discontinuous function  $z = x + y > \theta ? 1.0 : 0.5$  and we want to integrate it over  $[-1, 1] \times [-1, 1]$ . The integrand  $z$  is not differentiable with respect to the boundary parameter  $\theta$ . Therefore, all the yellow samples will return zero if we ask them the derivative with respect to  $\theta$ . However, changing  $\theta$  (the blur arrow) will lead to a continuous change to the volume below the curve. This is because derivative of a sample can only detect local changes, and the chance a sample lands exactly at the boundary is zero.
+
+## 2.2 Computing Gradients by Differentiating the Integrals.
+
+Remember that our goal is to compute the gradient of the image  $I$  that contains the two triangles, over some scalar loss function  $L$ , that is,  $\nabla_{\pi} L(I(\pi))$ . Using the chain rule, we know that for each component  $\pi \in \mathbb{R}$  in the parameter vector  $\pi$ 
+
+$$\frac{\partial}{\partial \pi} L(I(\pi)) = \sum_i \frac{\partial L}{\partial I_i(\pi)} \frac{\partial I_i(\pi)}{\partial \pi}. \quad (3)$$
+
+To be more concrete, if our loss function is the sum of pixel-wise squared difference with another target image  $\hat{I}$ , that is,
+
+$$L = \left( I(\pi) - \hat{I}(\pi) \right)^2, \quad (4)$$
+
+then the gradient is
+
+$$\sum_i 2 \left( I_i(\pi) - \hat{I}_i(\pi) \right) \frac{\partial I_i(\pi)}{\partial \pi}. \quad (5)$$
+
+The loss can be any differentiable function, including a neural network. We can compute  $L$ 's gradient with respect to the image  $(\partial L / \partial I_i(\pi))$  efficiently using the backpropagation or, equivalently, reverse-mode automatic differentiation algorithm (Section 4.2).
+
+Now we want to compute the derivative of a pixel color with respect to the scene parameters  $\partial I_i(\pi) / \partial \pi$ . A common misconception of the non-differentiability of rendering is that the derivative  $\partial I_i(\pi) / \partial \pi$  is discontinuous and not differentiable. However, recall that  $I_i$  is an integral that evaluates the average color within the filter support. Therefore, the movement of the triangle vertices will in fact lead to continuous and differentiable changes to the average color (Fig. 2). The integrand of rendering is discontinuous and not differentiable, but the integral is actually differentiable! Importantly, we did not make rendering an integration problem to make it
+
+differentiable. Instead, rendering is an integration problem in the first place. All the approaches in any rendering methods, real-time or offline, are different approximations or discretizations of the rendering integral.
+
+How do we compute the derivatives of an integral? Recall that we wanted to compute the integral numerically (Eq. (2)). Unfortunately, we cannot just automatically differentiate the numerical integrator. For the vertex position parameters, the numerical integrator will always evaluate to 0 (the function return the color based on which triangle  $(x, y)$  hits). However, the derivative of the integral with respect to a vertex position parameter  $\pi_v \in \pi_v$  is not 0 (Fig. 2).
+
+$$\frac{\partial}{\partial \pi_v} \iint f(x, y; \boldsymbol{\pi}) dx dy \not\approx \frac{1}{N} \sum_{j=1}^N \frac{\partial}{\partial \pi_v} f(x_j, y_j; \boldsymbol{\pi}) = 0.^1 \quad (6)$$
+
+In general, the discretization and the gradient operator do not commute for discontinuous integrands. This is because derivatives are measuring local changes, and uniform discretization has zero chance of detect the local changes around discontinuities. To see this, let us simplify the problem and consider the following 1D derivative integral with a step function:
+
+$$\frac{\partial}{\partial p} \int_0^1 (x < p ? 1 : 0) dx. \quad (7)$$
+
+If we discretize this function and evaluate derivative with respect to  $p$ , the derivative is always 0. However, the integral evaluate to  $p$  for  $0 \leq p \leq 1$  and thus the derivative is 1. This is because the discretization relies on point sampling of the integrand. However, the point sampling can only access the integrand locally through its infinitesimal neighborhood. Given a sample  $x_j$  and its small neighborhood  $(x_j - \epsilon, x_j + \epsilon)$ , the only location where change happens is at  $x = p$ . However, the chance of us hitting  $x = p$  randomly is exactly zero. Therefore we will never detect the change of the integral through discretization.
+
+Our strategy to differentiate the integrals is then to explicitly put samples at the discontinuities to detect the local change. In the following we provide the mathematical tools that allows us to do this.
+
+
+
+### 2.3 Distributional Derivatives and Dirac Delta
+
+One way to formalize the statement above mathematically is to use the concept of distributional derivatives, which defines the derivative for even discontinuous functions. In the case above, the distributional derivative of the integrand with respect to  $p$  is a Dirac delta  $\delta$ :
+
+$$\frac{\partial}{\partial p} x < p ? 1 : 0 = \delta(x - p). \quad (8)$$
+
+ $\delta(x - p)$  is not a function but a distribution. We cannot just feed a Dirac delta an input value and get an output value back. We can only evaluate Dirac delta through an integral (usually called the test function). We define the Dirac delta's integral as  $\int_0^1 \delta(x - p) = 1$  if  $0 \leq p \leq 1$ , otherwise it is 0.
+
+Mathematically, doing algebra with Dirac delta inside an integral and derive the correct measure is not entirely trivial. This is mostly due to the fact that Dirac delta is a distribution and not a function. For example, the multiplication of two Dirac deltas is not well-defined. While it is possible to derive differentiable rendering using Dirac delta [23, 35], in this course note we use an alternative strategy that leads to simpler derivations in higher-dimensional space.
+
+### 2.4 Leibniz's Rule for Differentiating 1D Integrals
+
+Our alternative strategy is to, conceptually, split the integral such that all the discontinuities are at the boundaries. We will demonstrate this for 1D functions, and generalize this to higher-dimensional space in the next subsection.
+
+
+
+1Here  $\not\approx$  means that when we choose  $x_j, y_j$  randomly, the sum will not converge to the integral even if  $N$  goes to infinity. In contrast, the original approximation (Eq. (2)) does converge to the corresponding integral when we choose the samples randomly.
+
+
+
+Fig. 3. To compute the derivative of an 1D integral with a discontinuous integrand, given a set of boundary points (orange) that include all discontinuities, we can compute the derivatives by separately computing the derivatives of the continuous part (the interior derivative), and the discontinuous part (the boundary derivative). The set of boundary points can include continuous points, since the difference  $f^- - f^+$  evaluates to zero for those points.
+
+For the step function example we can split it into two constant integrals
+
+$$\frac{\partial}{\partial p} \int_0^1 (x < p ? 1 : 0) dx = \frac{\partial}{\partial p} \int_0^p 1 dx + \frac{\partial}{\partial p} \int_p^1 0 dx. \quad (9)$$
+
+Importantly, the splitting is done only for derivation purposes, and we do not actually clip the polygons for computation.
+
+After the splitting, the derivative can then be evaluated through the fundamental theorem of calculus, i.e.,
+
+$$\frac{\partial}{\partial p} \int_0^p 1 dx = 1, \quad \frac{\partial}{\partial p} \int_p^1 0 dx = 0, \quad (10)$$
+
+thus the derivative evaluate to 1.
+
+The general version of differentiation with respect to both the integral boundaries and the integrand is the Leibniz's rule. Formally, let  $\pi \in \mathbb{R}$  and consider the following Riemann integral over some interval  $(a(\pi), b(\pi)) \subset \mathbb{R}$ :
+
+
+$$\int_{a(\pi)}^{b(\pi)} f(x; \pi) dx, \quad (11)$$
+
+where the integrand  $f$  is differentiable everywhere with respect to  $x$  and  $\pi$ . Then, Leibniz's rule for differentiation under the integral sign [9] states that the derivative of Eq. (11) with respect to  $\pi$  is
+
+
+$$\frac{\partial}{\partial \pi} \int_{a(\pi)}^{b(\pi)} f(x; \pi) dx = \boxed{\int_{a(\pi)}^{b(\pi)} \dot{f}(x; \pi) dx} + \boxed{\dot{b}(\pi) f(b(\pi); \pi) - \dot{a}(\pi) f(a(\pi), \pi)}, \quad (12)$$
+
+where  $\dot{f} := \partial f / \partial \pi$ ,  $\dot{a} := da/d\pi$ , and  $\dot{b} := db/d\pi$ . This equation involves a interior and a boundary term where the former equals the original integral (11) with the integrand differentiated while the latter given by the integrand
+
+
+
+Fig. 4. (a) illustrates Reynolds transport theorem for differentiating 2D integrals. In contrast to the 1D case, our boundary term becomes an integral as well. As in the 1D case, our boundary points can include points that land in the continuous regions of the integrand, such as the occluded part of the blue triangle. For the continuous regions, the difference  $\delta f(x; \pi)$  evaluates to 0. (b) shows that, for each point on the boundary, we need to compute the 2D movement of the boundary with respect to the differentiating parameter  $\dot{x}$ . We then need to project  $\dot{x}$  to the normal direction and multiply it with the difference. This is to account for the infinitesimal width of our line integral, so that we can properly measure the infinitesimal area changes at the boundary.
+
+evaluated at the integral boundaries  $a(\pi)$  and  $b(\pi)$  modulated by their change rates  $\dot{a}(\pi)$  and  $\dot{b}(\pi)$ . The proof of the equation easily follows from the fundamental theorem of calculus.
+
+Therefore, given an 1D integral  $\int_0^1 f(x; \pi) dx$ , and a set of points  $p_0, p_1, \dots, p_{M-1}$  represent the point of discontinuities with respect to the parameter  $\pi$ , the derivative of the integral is
+
+
+$$\frac{\partial}{\partial \pi} \int_0^1 f(x; \pi) dx = \boxed{\int_0^1 \dot{f}(x; \pi) dx} + \boxed{\sum_{k=0}^M (f^-(p_k; \pi) - f^+(p_k; \pi))}, \quad (13)$$
+
+where we define  $f^-(x; \pi)$  and  $f^+(x; \pi)$  as the right-hand and left-hand limits of  $f$  at  $x$  respectively, i.e.,  $f^-(x; \pi) = \lim_{x' \rightarrow x^-} f(x'; \pi)$  and  $f^+(x; \pi) = \lim_{x' \rightarrow x^+} f(x'; \pi)$ . For notational convenience, when  $f$  is not differentiable at  $(x; \pi)$ , we define  $\dot{f}(x; \pi) = 0$ . Intuitively, we are explicitly summing over the difference at the two sides of the discontinuities. Fig. 3 illustrates this process. We can derive the exact same results using distributional derivatives 2.3: the derivatives at discontinuities at  $p_k$  result in Dirac delta signals, which we can explicitly integrate into the discrete sum.
+
+We can then estimate the derivative integral (Eq. (13)) by discretizing the interior integral, and sum over all the differences. Note that, first, the set of discontinuity points  $p_k$  can include points that turn out to be continuous, since for continuous regions the difference  $f^-(x; \pi) = f^+(x; \pi)$ . This is important for handling occlusion later in 2D when we do not know if a triangle boundary is occluded or not. Second, we do not need to actually decompose the integral, since the continuous regions can be assembled back to the full integral.
+
+Next we will generalize our approach to 2D and higher-dimensional spaces. To do this we will use a mathematical tool in fluid mechanics that was used for tracking the evolution of a surface, called Reynolds transport theorem.
+
+## 2.5 Reynolds Transport Theorem for Differentiating Multi-dimensional Integrals
+
+In two-dimensional space, our discontinuities become lines instead of points (point discontinuities in 2D will be smoothed out by the integrals and do not affect the derivatives). In our two triangles example (Fig. 1), the discontinuities are defined by the edges of the triangles. Similar to the 1D case, we want to explicitly sample the discontinuities, and evaluate the difference at the two sides. The point evaluation over the discontinuities in 1D becomes integrals over the lines in 2D. We can formalize this idea using Reynolds transport theorem, a generalization of the Leibniz's rule for differentiation (12).
+
+Formally, let  $f$  be a (potentially discontinuous) scalar-valued function defined on some  $n$ -dimensional manifold  $\Omega(\pi)$  parameterized with some  $\pi \in \mathbb{R}$ . Additionally, let  $\Gamma(\pi) \subset \Omega(\pi)$  be an  $(n - 1)$ -dimensional manifold given by the union of the external boundary  $\partial\Omega(\pi)$  and the internal one containing the discontinuous locations of  $f$ . Then, it holds that
+
+
+$$\frac{\partial}{\partial \pi} \left( \int_{\Omega} f \, d\Omega \right) = \boxed{\int_{\Omega} \dot{f} \, d\Omega} + \boxed{\int_{\Gamma} \langle \mathbf{n}, \dot{\mathbf{x}} \rangle \Delta f \, d\Gamma}, \quad (14)$$
+
+where  $\dot{\mathbf{x}} := \frac{\partial \mathbf{x}}{\partial \pi}$  (note that  $\dot{\mathbf{x}}$  is a  $n$ -dimensional vector, representing the relative boundary movement with respect to the parameter  $\pi$ ),  $d\Omega$  and  $d\Gamma$  respectively denote the standard measures associated with  $\Omega$  and  $\Gamma$ ; and  $\langle \cdot, \cdot \rangle$  indicates vector dot (inner) product. As in the 1D case, when  $f$  is not differentiable at  $(\mathbf{x}; \pi)$ , we define  $\dot{f}(\mathbf{x}; \pi) = 0$ . Further,  $\mathbf{n}$  is the normal direction at each  $\mathbf{x} \in \Gamma(\pi)$ , and  $\Delta f$  is given by2
+
+
+$$\Delta f(\mathbf{x}) := \lim_{\epsilon \rightarrow 0^-} f(\mathbf{x} + \epsilon \mathbf{n}) - \lim_{\epsilon \rightarrow 0^+} f(\mathbf{x} + \epsilon \mathbf{n}), \quad (15)$$
+
+for all  $\mathbf{x} \in \Gamma(\pi)$ .
+
+Fig. 4 illustrates the idea. As in the 1D case (Eq. (13)), we have the interior term and the boundary term. The interior term is just the derivative of the continuous part of the integrand. The boundary term is now an integral that integrates over the difference at the  $(n - 1)$ -dimensional discontinuities  $\Gamma$  (all the discontinuities with lower dimensionality do not affect the derivative). For each point on the discontinuity, we compute the difference of the integrand at the two sides of the boundary ( $\Delta f$ ). To take the infinitesimal area of the boundary changes with respect to the differentiating parameters into account, we multiply the difference with the speed of the boundary movement with respect to the parameters ( $\dot{\mathbf{x}}$ ), projected to the normal direction (Fig. 4b). This multiplication is in contrast to the 1D case, where the boundary can only move left or right and is always aligned with the normal direction. See Flanders' article for a simple proof of Reynolds transport theorem [9].
+
+Discretizing the integrals. We now know how to compute the rendering derivative of our triangle rendering example. Given our anti-aliasing integral (Eq. (1)), we separate its derivative integral into an interior integral and a boundary integral using Reynolds transport theorem (Eq. (14)). We can then estimate the two integrals by discretizing them:
+
+
+$$\begin{aligned} \int_{\Omega} \dot{f} \, d\Omega &\approx \frac{1}{N_i} \sum_{j=1}^{N_i} \dot{f}(\mathbf{x}_j) \\ \int_{\Gamma} \langle \mathbf{n}, \dot{\mathbf{x}} \rangle \Delta f \, d\Gamma &\approx \frac{1}{N_b} \sum_{j=1}^{N_b} \langle \mathbf{n}, \dot{\mathbf{x}} \rangle \Delta f(\mathbf{x}_j) \end{aligned} \quad (16)$$
+
+For the interior integral, we can just use the same discretization strategy in normal rendering. For example, we can randomly sample inside the filter support. We can also divide the filter support into a grid, and sample the
+
+
+
+2When  $\mathbf{x}$  approaches  $\Gamma(\pi)$  from the exterior of the integral domain  $\Omega(\pi)$ , the corresponding one-sided limit in Eq. (15) is set to zero.
+
+center at each grid. Both rasterization and ray tracing can be used for computing the interior integral. For the constant color parameters, �� �� = 1. For the vertex positions parameters, �� �� = 0.
+
+������ ������ For the boundary integral, we use the fact that the boundary domain Γ can be include continuous points. For the points that land in the continuous regions, Δ�� evaluates to 0 due to the definition of continuity. Therefore we define Γ to be the set of points on all the triangle edges. To select a point on the edge, we first randomly pick an edge (there are 6 edges out of 2 triangles), we then uniformly pick a point on the edge. To evaluate the difference Δ�� , in practice we select a small �� and query �� from the two sides. Furthermore, we are estimating many pixel integrals ���� in the same time. When we pick a point on the edge, we will gather all the pixels whose filter support intersect with the point we pick, and scatter the derivative to the corresponding pixel integral discretization.
+
+When there are more triangles in the scene, this can be accelerated by pruning out the set of edges that are not the silhouette and importance sampling. We will discuss more about the discretization of the boundary integral in Section 4.1.1.
+
+### 2.6 Relation to Rasterization-based Differentiable Renderers
+
+Our discretization strategy for the boundary integral above can only be efficiently computed using a ray-tracing based visibility engine, since it requires random query to the pixel integrand �� . Using hardware rasterization to compute it is possible but likely to be wasteful.
+
+However, many existing rasterization-based differentiable renderers can be seen as a particular discretization to the boundary integral (Eq. \(16\)). For example, OpenDR [25] approximates the boundary term ⟨��, ��¤⟩ Δ�� using pixel finite difference, and choose between central difference, forward difference and backward difference depending on the result of the object ID detection. Kato et al. [20], on the other hand, apply an edge rasterization pass by rasterizing all the edges, while interpolating the color buffer to compute the difference. de La Gorce et al. [8], inspired by discontinuity edge overdraw [36], also perform an edge rasterization pass, but compute the difference by assuming the mesh is a closed manifold, and compute the shading twice at the two sides of the silhouette.
+
+Liu et al.'s work [24] does not fully fit in our theory. They tackled the differentiable rendering problem by changing the forward rendering formulation to be differentiable without the boundary integral, through introducing two modifications: 1) They analytically approximate the spatial anti-aliasing integral (Eq. \(1\)) using a sigmoid function by assuming only one triangle is inside the pixel. 2) They make all the surfaces in the scene transparent using a form of weighted order independent transparency [27].
+
+In contrast, our theory can support transparent surfaces as well without any modification. It works for both order independent transparency and the more traditional OVER operator [34] – they are just different rendering integrands �� . We do not need to resort to spatial analytical approximation, which can produce artifacts when many triangles are in a single pixel or when texture is presented. Rendering transparent surfaces efficiently is a longstanding problem in real-time rendering, and it usually makes efficient occlusion culling techniques not applicable. On the other hand, transparency can make inverse rendering more tractable and less susceptible to local minima.
+
+These methods, while being different approximations to the anti-aliasing and boundary integrals, are not consistent nor unbiased discretization. This can have negative impacts on the convergence of stochastic gradient descent, which assumes that the approximated gradients converge to the correct gradient.
+
+The performance of rasterization v.s. ray tracing is a longstanding debate [7, 15]. Differentiable rendering further introduces more performance tradeoffs with different memory access patterns and arithmetic intensity characteristics. While the performance comparison between rasterization and ray tracing under the differentiable rendering context deserves at least a full stand-alone research article, we list a few remarks here:
+
+- A common misconception is that ray tracing can only be used for computing advanced effects such as shadow and global illumination. In contrast, the techniques we introduced here can be used for rendering local shading as well.
+- Visibility query is usually not the biggest bottleneck in current differentiable rendering systems. Instead, most of the rendering time is spent on incoherent memory access, irregular scattering, and atomic operations during the derivative computation.
+- The interior integral and the boundary integral do not need to be computed using the same visibility algorithm. One can compute the interior integral using rasterization, while computing the boundary integral using ray tracing.
+- Many acceleration strategies that are used in rasterization, such as the hierarchical Z-buffer [11] for occlusion culling, can also be used for ray tracing based boundary evaluation (we can reject edges using occlusion culling techniques).
+- The set of the boundary is often sparse in the image space compared to the number of pixels. It is conceivable that we can compute the boundary integral with much less samples (����) compared to the number of pixels while achieving very low error.
+- Ray tracing is getting hardware support as well. The performance gap between coherent ray tracing and rasterization is closing.
+
+Nevertheless, our goal with the theory presented in this course is to guide future developments of differentiable rendering with a principled mathematical model. We hope that our theory can be the foundation of future approximation methods.
+
+In the next section, we will generalize our theory to handle the recursive rendering equation that computes global illumination, and the radiative transfer equation that models participating media.
+
+### 3 PHYSICS-BASED DIFFERENTIABLE RENDERING THEORY
+
+Given the mathematical tools described in §2, we now provide an in-depth introduction to the theory of physicsbased differentiable rendering. Specifically, we discuss in §3.1 the differentiation of the rendering equation (RE) [19] with respect to arbitrary scene parameters. Then, we present in §3.2 the differentiation of the radiative transfer equation (RTE) [4], another key equation to physics-based rendering.
+
+### 3.1 Differentiable Rendering of Surfaces
+
+Physics-based rendering of surfaces has been a central topic in computer graphics for decades and is governed by the well-known rendering equation (RE) [19]. The RE is an integral equation stating that the (steady-state) radiance �� at any surface point �� with direction ��o is given by:
+
+
+$$L(x, \omega_0) = L_e(x, \omega_0) + \int_{\mathbb{S}^2} L_i(x, \omega_i) f_s(x, \omega_i, \omega_0) d\sigma(\omega_i), \quad (17)$$
+
+where ��i indicate the incident radiance, ��s denotes the cosine-weighted BSDF, and d�� is the solid-angle measure.
+
+The RE has no analytical solution in general, and numerous numerical methods have been developed. Some of the widely adopted examples include unbiased methods like unidirectional and bidirectional path tracing, as well as biased ones such as photon mapping and lightcuts. [SZ: citations]
+
+3.1.1 Direct Illumination. Before differentiating the full RE \(17\), we first consider the case of direct illumination as a warm-up. Specifically, the radiance ��r resulting from exactly one reflection at a surface point �� with direction
+
+
+
+Fig. 5. The normal directions of arcs and circles (that are respectively the projections of line segments and spheres) as spherical curves.
+
+ $\omega_0$  equals
+
+
+$$L_r(\mathbf{x}, \omega_0) = \int_{\mathbb{S}^2} L_e(\mathbf{y}, -\omega_i) f_s(\mathbf{x}, \omega_i, \omega_0) d\sigma(\omega_i), \quad (18)$$
+
+where  $\mathbf{y}$  is the closest intersection of a light ray originated at  $\mathbf{x}$  with direction  $\omega_i$ . That is,  $\mathbf{y} = \text{rayTrace}(\mathbf{x}, \omega_i)$ . Unlike the RE (17) that takes the form of an integral equation, Eq. (18) is a simple spherical integral as its right-hand side involves only known quantities.
+
+We now consider the problem of calculating the derivative of  $L_r(\mathbf{x}, \omega_0)$  with respect to some abstract scene parameter  $\pi \in \mathbb{R}$ . Given  $\mathbf{x}$  and  $\omega_0$ , let  $f_{\text{direct}}(\omega_i; \mathbf{x}, \omega_0) := L_e(\mathbf{y}, -\omega_i) f_s(\mathbf{x}, \omega_i, \omega_0)$ . It holds that
+
+$$[L_r(\mathbf{x}, \omega_0)]' := \frac{d}{d\pi} [L_r(\mathbf{x}, \omega_0)] = \frac{d}{d\pi} \left( \int_{\mathbb{S}^2} f_{\text{direct}}(\omega_i; \mathbf{x}, \omega_0) d\sigma(\omega_i) \right). \quad (19)$$
+
+By applying Reynolds transport theorem (14) to this equation, we have
+
+$$[L_r(\mathbf{x}, \omega_0)]' = \underbrace{\int_{\mathbb{S}^2} [f_{\text{direct}}(\omega_i; \mathbf{x}, \omega_0)]' d\sigma(\omega_i)}_{\text{interior}} + \underbrace{\int_{\Delta\mathbb{S}^2} \langle \mathbf{n}_\perp, \dot{\omega}_i \rangle \Delta f_{\text{direct}}(\omega_i; \mathbf{x}, \omega_0) d\ell(\omega_i)}_{\text{boundary}}. \quad (20)$$
+
+where  $d\ell$  is the curve-length measure. In this equation, the interior term is an integral over the unit sphere  $\mathbb{S}^2$ , which is independent of the scene parameter  $\pi$ , making the integral variable  $\omega_i$  also be  $\pi$ -independent. The boundary term, on the other hand, emerges due to the (jump) discontinuity points of  $f_{\text{direct}}$  (with respect to  $\omega_i$ ) and captures how they “move”  $\pi$  varies. These discontinuity points forms 1D discontinuity curves, which we denote as  $\Delta\mathbb{S}^2$ , over the unit sphere. For any  $\omega_i \in \mathbb{S}(\mathbf{x}, \omega_0)$ ,  $\mathbf{n}_\perp(\omega_i)$  is a vector in the tangent space of  $\mathbb{S}^2$  at  $\omega_i$  perpendicular to the discontinuity curve (see Figure 5). with unit-normal field  $\mathbf{n}_\perp$  (see Figure 5).
+
+Assuming the (cosine-weighted) BSDF  $f_s(\mathbf{x}, \omega_i, \omega_0)$  to be continuous with respect to  $\omega_i$ , which is usually the case except for perfectly specular BSDFs, the discontinuities of the integrand  $f_{\text{direct}}$  fully emerge from those of the incident emission  $L_e(\mathbf{y}, \omega_i)$ , which is generally discontinuous due to occulsions [SZ: Add a figure.] Therefore,
+
+$$\Delta f_{\text{direct}}(\omega_i; \mathbf{x}, \omega_0) = f_s(\mathbf{x}, \omega_i, \omega_0) \Delta L_e(\mathbf{y}, -\omega_i). \quad (21)$$
+
+3.1.2 Differential Rendering Equation. Based on the analyses in §3.1.1, we now differentiate the full rendering equation (RE) (17) using Reynolds transport theorem (14). This yields another integral equation, which we call
+
+the differential rendering equation:
+
+$$[L(\mathbf{x}, \omega_0)]' = [L_e(\mathbf{x}, \omega_0)]' + \int_{\mathbb{S}^2} [L_i(\mathbf{x}, \omega_i) f_s(\mathbf{x}, \omega_i, \omega_0)]' d\sigma(\omega_i) + \int_{\Delta\mathbb{S}^2} \langle \mathbf{n}_\perp, \dot{\omega}_i \rangle f_s(\mathbf{x}, \omega_i, \omega_0) \Delta L_i(\mathbf{x}, \omega_i) d\ell(\omega_i). \quad (22)$$
+
+Similar to its original counterpart (17), the differential rendering equation (22) has no analytical solution in general. We will discuss Monte Carlo solutions to this equation in §4.1.
+
+
+
+### 3.2 Differentiable Rendering of Participating Media
+
+Besides surface reflection and refraction, another important type of light-transport effects is volumetric: light can be absorbed and scattering within participating media comprised of microscopic particles. To model volumetric scattering of light, the radiative transfer theory (RTT) [4] has been introduced by physicists half a century ago. We review RTT in §3.2.1 and present its differential variant in §3.2.2.
+
+3.2.1 Radiative Transfer Theory Preliminaries. Radiative transfer [4] uses energy conservation principles to model light transport in participating media. At its core is the radiative transfer equation (RTE): Consider a medium confined in a volume  $\Omega \subseteq \mathbb{R}^3$  with boundary  $\partial\Omega$ . The steady-state RTE is a linear integral equation on the radiance field  $L$  in the interior of the volume that can be expressed in operator form as [42]:
+
+
+$$L = (\mathcal{K}_T \mathcal{K}_C + \mathcal{K}_S) L + L^{(0)}. \quad (23)$$
+
+In this equation, the transport operator  $\mathcal{K}_T$  maps any function  $g : (\Omega \setminus \partial\Omega) \times \mathbb{S}^2 \rightarrow \mathbb{R}_+$  to a new function
+
+$$(\mathcal{K}_T g)(\mathbf{x}, \omega) = \int_0^D T(\mathbf{x}', \mathbf{x}) g(\mathbf{x}', \omega) d\tau, \quad (24)$$
+
+where:  $\mathbf{x}' := \mathbf{x} - \tau\omega$ ;  $D$  is the distance from  $\mathbf{x}$  to the medium's boundary in the direction of  $-\omega$ ;
+
+$$D = \inf \{ \tau \in \mathbb{R}_+ : \mathbf{x} - \tau\omega \in \partial\Omega \}; \quad (25)$$
+
+and  $T(\mathbf{x}', \mathbf{x})$  is the transmittance between  $\mathbf{x}'$  and  $\mathbf{x}$ , that is, the fraction of light that transmits straight between  $\mathbf{x}'$  and  $\mathbf{x}$  without being absorbed or scattered away:
+
+$$T(\mathbf{x}', \mathbf{x}) = \exp \left( - \int_0^\tau \sigma_t(\mathbf{x} - \tau'\omega) d\tau' \right), \quad (26)$$
+
+with  $\sigma_t$  denoting the medium's extinction coefficient.
+
+In Eq. (23), the collision operator  $\mathcal{K}_C$  maps the interior radiance field  $L$  to3
+
+
+$$(\mathcal{K}_C L)(\mathbf{x}, \omega) = \sigma_s(\mathbf{x}) \underbrace{\int_{\mathbb{S}^2} f_p(\mathbf{x}, -\omega_i, \omega) L(\mathbf{x}, \omega_i) d\sigma(\omega_i)}_{=: L^{\text{ins}}(\mathbf{x}, \omega)}, \quad (27)$$
+
+where  $\sigma_s$  and  $f_p$  respectively denote the medium's scattering coefficient and single-scattering phase function, and  $L^{\text{ins}}$  is usually termed as the in-scattered radiance.4 Additionally, the interfacial scattering operator  $\mathcal{K}_S$  follows the
+
+
+
+3In this course, we follow the convention that all directions point away from  $\mathbf{x}$  when expressing BSDFs and phase functions, yielding the negative sign before  $\omega_i$  in Eq. (27).
+
+
+
+4Precisely,  $L^{\text{ins}}$  captures the in-scattered radiance before volumetric absorption.
+
+$$\dot{L} = \underbrace{(\mathcal{K}_T \mathcal{K}_C L)^}_{\S 3.2.3} + \underbrace{(\mathcal{K}_S L)^}_{\S 3.2.5} + \underbrace{\dot{L}^{(0)}}_{\S 3.2.6}.$$
+
+Fig. 6. An outline of the derivations of the differential radiative transfer equation.rendering equation (17) and is defined as
+
+$$(\mathcal{K}_S L)(\mathbf{x}, \boldsymbol{\omega}) = T(\mathbf{x}_0, \mathbf{x}) \int_{\mathbb{S}^2} f_s(\mathbf{x}_0, -\boldsymbol{\omega}_i, \boldsymbol{\omega}) L(\mathbf{x}_0, \boldsymbol{\omega}_i) d\sigma(\boldsymbol{\omega}_i), \quad (28)$$
+
+where  $\mathbf{x}_0 := \mathbf{x} - D\boldsymbol{\omega}$  is a point on the medium's boundary. This term accounts for contributed radiance due to reflection and transmission at the medium's boundary.
+
+The last term on the right-hand side (RHS) of the RTE (23) is
+
+
+$$L^{(0)}(\mathbf{x}, \boldsymbol{\omega}) := (\mathcal{K}_T \sigma_a Q)(\mathbf{x}, \boldsymbol{\omega}) + T(\mathbf{x}_0, \mathbf{x}) L_e(\mathbf{x}_0, \boldsymbol{\omega}), \quad (29)$$
+
+which indicates the contribution of radiant emission in the medium and from its boundary. In this equation,  $\sigma_a := \sigma_t - \sigma_s$  is the absorption coefficient, and  $Q$  represents the medium's radiant emission.
+
+3.2.2 Differential Radiative Transfer. We now present a differential theory of radiative transfer introduced by Zhang et al. [42] by showing how the interior radiance  $L$  can be differentiated with respect to some scene parameter  $\pi \in \mathbb{R}$ . To this end, we derive the partial derivative  $\dot{L} := \partial L / \partial \pi$  by differentiating each of the operators on the right-hand side (RHS) of Eq. (23).
+
+Assumptions. As most participating media and translucent materials are non-emissive, we neglect the volumetric emission term  $Q$  in Eqs. (29) when deriving  $\dot{L}$ . Additionally, we assume that: (i) the RTE and RE parameters  $\sigma_t$ ,  $\sigma_s$ ,  $f_p$ ,  $f_s$ , and  $L_e$  are continuous spatially and directionally; and (ii) there are no zero-measure light sources (e.g., point and directional) or ideal specular surfaces (e.g., perfect mirrors).
+
+Overview. Figure 6 outlines the structure of our derivations. As a preview, based on the assumptions above, the scene partial derivative  $\dot{L}$  will take the form of Eq. (45).
+
+3.2.3 Differentiation of the transport and collision operators. We start with the first term on the RHS in Figure 6,  $\partial_\pi \mathcal{K}_T \mathcal{K}_C L$ , which can be shown to equal [42]:
+
+$$\begin{aligned} (\partial_\pi \mathcal{K}_T \mathcal{K}_C L)(\mathbf{x}, \boldsymbol{\omega}) &= \int_0^D T(\mathbf{x}', \mathbf{x}) \sigma_s(\mathbf{x}') \dot{L}^{\text{ins}}(\mathbf{x}', \boldsymbol{\omega}) d\tau \\ &\quad + \int_0^D T(\mathbf{x}', \mathbf{x}) [\dot{\sigma}_s(\mathbf{x}') - \Sigma_t(\mathbf{x}, \boldsymbol{\omega}, \tau) \sigma_s(\mathbf{x}')] L^{\text{ins}}(\mathbf{x}', \boldsymbol{\omega}) d\tau + \dot{D} T(\mathbf{x}_0, \mathbf{x}) \sigma_s(\mathbf{x}_0) L^{\text{ins}}(\mathbf{x}_0, \boldsymbol{\omega}), \end{aligned} \quad (30)$$
+
+where  $\mathbf{x}' := \mathbf{x} - \tau\boldsymbol{\omega}$  is a point on the ray originated from  $\mathbf{x}$  with direction  $-\boldsymbol{\omega}$ ;  $\mathbf{x}_0 := \mathbf{x} - D\boldsymbol{\omega}$  is the location where the ray intersects the medium boundary;  $L^{\text{ins}}$  is the in-scattered radiance from Eq. (27); and  $\Sigma_t(\mathbf{x}, \boldsymbol{\omega}, \tau)$ , defined as
+
+
+$$\Sigma_t(\mathbf{x}, \boldsymbol{\omega}, \tau) := \int_0^\tau \dot{\sigma}_t(\mathbf{x} - \tau'\boldsymbol{\omega}) d\tau', \quad (31)$$
+
+appears when we differentiate the transmittance  $T(\mathbf{x}', \mathbf{x})$ .
+
+In Eqs. (30) and (31),  $\dot{\sigma}_t$  and  $\dot{\sigma}_s$  are essentially material derivatives given by [21]
+
+$$\dot{\sigma}(\mathbf{x}) = \frac{\partial \sigma}{\partial \pi}(\mathbf{x}) + \langle \dot{\mathbf{x}}, \nabla \sigma(\mathbf{x}) \rangle, \quad (32)$$
+
+
+
+Fig. 7. Calculating the in-scattered radiance  $L^{\text{ins}}$  at location  $x_0 \in \partial\Omega$  with direction  $\omega$  pointing toward the interior of the medium (illustrated in gray). (a) When  $\omega' \in \mathbb{H}_+$  (i.e., pointing toward the exterior of the medium), the interior radiance  $L(x_0, \omega')$  involving a line integral (indicated as the dashed line in green) from the interior is used. (b) When  $\omega' \in \mathbb{H}_-$ , on the contrary, the interfacial radiance  $L(x_0, \omega')$  from the interior is used. This radiance is in turn determined by interior radiances reflected and refracted by the interface (shown as dashed lines in orange).
+
+
+
+Fig. 8. (a) Definitions of  $\mathbb{S}(x)$  and  $\partial^2\Omega(x)$ . (b) Deriving the change-of-measure ratio  $\sin\theta/\|y-x\|$  in Eq. (36) by projecting a differential curve  $dy$  to the surface of a unit sphere around  $x$ .
+
+for  $\sigma \in \{\sigma_t, \sigma_s\}$  with  $\nabla$  being the gradient operator.
+
+Evaluating the RHS of Eq. (30) also requires  $\dot{D}$ ,  $L^{\text{ins}}(x_0, \omega)$ , and  $\dot{L}^{\text{ins}}(x', \omega)$ . In what follows, we derive formulas for these terms.
+
+In-scattered radiance at the boundary. The last term required for evaluating  $\partial_\pi \mathcal{K}_T \mathcal{K}_C L$  in Eq. (30) involves the in-scattered radiance  $L^{\text{ins}}$  at boundary point  $x_0$ . Caution is needed here since light transport behaves differently at the two sides of the boundary.
+
+ $L^{\text{ins}}(x_0, \omega)$  is given by the limit of  $L^{\text{ins}}(x', \omega)$  as  $x'$  approaches the boundary location  $x_0$  from the interior of the medium along the direction of  $-\omega$ . Namely,  $L^{\text{ins}}(x_0, \omega) = \lim_{\tau \rightarrow D^-} L^{\text{ins}}(x', \omega)$  with  $x' := x - \tau\omega$ . This limit can be further expressed as
+
+$$L^{\text{ins}}(x_0, \omega) = \int_{\mathbb{H}_+} f_p(x_0, -\omega', \omega) L(x_0, \omega') d\omega' + \int_{\mathbb{H}_-} f_p(x_0, -\omega', \omega) L(x_0, \omega') d\omega', \quad (33)$$
+
+where  $\mathbb{H}_+$  and  $\mathbb{H}_-$  are the two hemispheres separated by the boundary at  $x_0$  (see Figure 7) given by
+
+$$\mathbb{H}_+ = \{\omega' \in \mathbb{S}^2 : \langle \mathbf{n}(x_0), \omega' \rangle > 0\}, \quad \mathbb{H}_- = \{\omega' \in \mathbb{S}^2 : \langle \mathbf{n}(x_0), \omega' \rangle < 0\}, \quad (34)$$
+
+where  $\mathbf{n}(x_0)$  is the boundary normal pointing toward the exterior of the medium (i.e.,  $\langle \mathbf{n}(x_0), \omega \rangle < 0$ ).
+
+3.2.4 Differentiation of the in-Scattered radiance. Evaluating the RHS of Eq. (30) also requires the derivative of the in-scattered radiance  $L^{\text{ins}}$  of Eq. (??). Recall that  $L^{\text{ins}}$  is expressed as an integral of  $f_p(x, -\omega', \omega) L(x, \omega')$  over directions  $\omega'$ . Note that  $L(x, \omega')$  may have discontinuities in  $\omega'$  (for fixed  $x$ ) due to visibility changes. Thus, to differentiate  $L^{\text{ins}}$ , we must consider how the discontinuities change with respect to the scene parameter  $\pi$ .
+
+Let  $\mathbb{S}(\mathbf{x}) \subset \mathbb{S}^2$  be a set of spherical curves capturing all discontinuities of  $f_p(\mathbf{x}, -\omega', \omega) L(\mathbf{x}, \omega')$  with respect to  $\omega'$  (see the red curves in Figure 8). At an interior point  $\mathbf{x} \in \Omega \setminus \partial\Omega$  and direction  $\omega \in \mathbb{S}^2$ , the derivative of  $L^{\text{ins}}$  can be expressed as
+
+
+$$L^{\text{ins}}(\mathbf{x}, \omega) = \int_{\mathbb{S}^2} \partial_\pi [f_p(\mathbf{x}, -\omega', \omega) L(\mathbf{x}, \omega')] d\omega' + \underbrace{\int_{\mathbb{S}(\mathbf{x})} \langle \mathbf{n}_\perp, \dot{\omega}' \rangle f_p(\mathbf{x}, -\omega', \omega) \Delta L(\mathbf{x}, \omega') d\ell(\omega')}_{:= B^{\text{ins}}(\mathbf{x}, \omega)}. \quad (35)$$
+
+The first term on the RHS of this equation is an integral over the unit sphere  $\mathbb{S}^2$ , which is independent of the scene parameter  $\pi$ , making the integral variable  $\omega'$  also be  $\pi$ -independent. To evaluate this term, the derivative of the phase function  $f_p$  is needed. In practice,  $f_p$  usually has analytical expressions, allowing  $\dot{f}_p(\mathbf{x}, -\omega', \omega)$  to be obtained using symbolic differentiation.
+
+The second term in Eq. (35) arises from the boundary integral term in Eq. (??) after Reynolds transport theorem (14) is applied. It emerges due to the discontinuities of  $f_p(\mathbf{x}, -\omega', \omega) L(\mathbf{x}, \omega')$  with respect to  $\omega'$ , corresponding to how the discontinuities “move” as the scene parameter  $\pi$  varies. We denote this integral as  $B^{\text{ins}}(\mathbf{x}, \omega)$ , wherein  $\dot{\omega}'$  is the change rate (with respect to  $\pi$ ) of the discontinuity location  $\omega'$ , and  $\ell(\omega')$  indicates the curve length measure.
+
+In Eq. (35),  $\mathbf{n}_\perp$  is a vector in the tangent space of  $\mathbb{S}^2$  at  $\omega'$  perpendicular to the discontinuity curve (see Figure 5). Further,  $\Delta L$  is the radiance difference across a discontinuity curve in  $\mathbb{S}(\mathbf{x})$ . We discuss both terms in more detail later in this subsection.
+
+While  $B^{\text{ins}}$  integrates over a set of spherical curves on  $\mathbb{S}^2$ , it is computationally more convenient to rewrite this integral in terms of boundary curves in the 3D space. As shown in Figure 9, the 3D boundary curves comprise all the geometric edges that cause discontinuities of  $L(\mathbf{x}, \omega')$  in  $\omega'$  when viewed from  $\mathbf{x}$ , including (i) boundary edges associated with only one face; (ii) silhouette edges shared by a front-facing and a back-facing face; and (iii) front-facing sharp edges across which the surface normals are discontinuous.
+
+Let  $\partial^2\Omega(\mathbf{x}) \subset \partial\Omega$  denote all the boundary curves when viewed from  $\mathbf{x}$ . By changing the measure of curve length from  $\mathbb{S}^2$  to the 3D Euclidean space, we rewrite the last term  $B^{\text{ins}}(\mathbf{x}, \omega)$  in Eq. (35) as
+
+
+$$B^{\text{ins}}(\mathbf{x}, \omega) = \int_{\partial^2\Omega(\mathbf{x})} \langle \mathbf{n}_\perp, \partial_\pi(\mathbf{y} \rightarrow \mathbf{x}) \rangle f_p(\mathbf{x}, \mathbf{x} \rightarrow \mathbf{y}, \omega) \Delta L(\mathbf{x}, \mathbf{y} \rightarrow \mathbf{x}) V(\mathbf{x}, \mathbf{y}) \frac{\sin \theta}{\|\mathbf{y} - \mathbf{x}\|} d\ell(\mathbf{y}), \quad (36)$$
+
+where  $\mathbf{y} \rightarrow \mathbf{x}$  indicates the normalized direction from  $\mathbf{y}$  to  $\mathbf{x}$ ,  $\partial_\pi(\mathbf{y} \rightarrow \mathbf{x})$  is the same as  $\dot{\omega}'$ ,  $V(\mathbf{x}, \mathbf{y})$  denotes the mutual visibility between  $\mathbf{x}$  and  $\mathbf{y}$ , and  $\theta$  is the angle between the tangent direction at  $\mathbf{y}$  and  $\mathbf{y} \rightarrow \mathbf{x}$  (see Figure 8-b). As a result,  $\ell(\mathbf{y})$  here is the length measure in Euclidean space.
+
+Lastly, we discuss how to compute the ingredients needed for evaluating Eq. (35), namely,  $\mathbf{n}_\perp, \dot{\omega}' = \partial_\pi(\mathbf{y} \rightarrow \mathbf{x})$ , and  $\Delta L$ .
+
+Normal. The normal  $\mathbf{n}_\perp$  in Eqs. (35) and (36) emerges from the application of Reynolds transport theorem (14) and represents the normal vector of the discontinuity boundary on the integration manifold (i.e.,  $\mathbb{S}^2$ ). Therefore,  $\mathbf{n}_\perp$  must be in the tangent space of  $\omega' \in \mathbb{S}^2$ .
+
+In practice, when the scene geometry is depicted using polygonal meshes, the boundary curves  $\partial^2\Omega(\mathbf{x})$  in Eq. (36) are comprised of polygonal face edges. Consider an edge with endpoints  $\mathbf{p}$  and  $\mathbf{q}$ . Its projection on a unit sphere centered at  $\mathbf{x}$  is an arc on which every point has the same normal in the tangent space (see Figure 5-a):
+
+$$\mathbf{n}_\perp = \frac{(\mathbf{p} - \mathbf{x}) \times (\mathbf{q} - \mathbf{x})}{\|(\mathbf{p} - \mathbf{x}) \times (\mathbf{q} - \mathbf{x})\|}. \quad (37)$$
+
+Change rate of  $\omega'$ . Boundary curves in  $\partial^2\Omega(\mathbf{x})$  may vary with respect to the scene parameter  $\pi$ —for example, an object may move in 3D along a trajectory parameterized by  $\pi$ . Suppose that a point  $\mathbf{y} \in \partial^2\Omega(\mathbf{x})$  has a change
+
+
+
+Fig. 9. Three types of edges (drawn in yellow) that can cause geometric discontinuities: (a) boundary, (b) silhouette, and (c) sharp.
+
+rate  $\dot{\mathbf{y}}$ . Then, the corresponding direction  $\boldsymbol{\omega}' = (\mathbf{y} \rightarrow \mathbf{x})$  has the derivative:
+
+$$\dot{\boldsymbol{\omega}}' = \partial_{\pi} \left( \frac{\mathbf{x}-\mathbf{y}}{\|\mathbf{x}-\mathbf{y}\|} \right) = \frac{\dot{\mathbf{x}}-\dot{\mathbf{y}}}{\|\mathbf{x}-\mathbf{y}\|} - \boldsymbol{\omega}' \left\langle \boldsymbol{\omega}', \frac{\dot{\mathbf{x}}-\dot{\mathbf{y}}}{\|\mathbf{x}-\mathbf{y}\|} \right\rangle. \quad (38)$$
+
+Evaluating  $\Delta L$ . Recall that, in Eq. (35),  $\Delta L(\mathbf{x}, \boldsymbol{\omega}')$  indicates the difference in radiance across discontinuity boundaries with respect to  $\boldsymbol{\omega}'$ . This is given by the difference between two one-sided limits of  $\Delta L(\mathbf{x}, \hat{\boldsymbol{\omega}})$  when  $\hat{\boldsymbol{\omega}}$  approaches the discontinuity boundary  $\boldsymbol{\omega}'$  from both sides along the normal direction  $\mathbf{n}_{\perp}$ . Namely,
+
+
+$$\Delta L(\mathbf{x}, \boldsymbol{\omega}') = \lim_{\epsilon \rightarrow 0^-} L(\mathbf{x}, \boldsymbol{\omega}' + \epsilon \mathbf{n}_{\perp}) - \lim_{\epsilon \rightarrow 0^+} L(\mathbf{x}, \boldsymbol{\omega}' + \epsilon \mathbf{n}_{\perp}). \quad (39)$$
+
+3.2.5 Differentiation of the interfacial scattering operator. We now move on to the second term in Figure 6, the derivative of  $\mathcal{K}_S L$ . Differentiating  $(\mathcal{K}_S L)(\mathbf{x}, \boldsymbol{\omega}) = T(\mathbf{x}_0, \boldsymbol{\omega}) L_{\tau}(\mathbf{x}_0, \boldsymbol{\omega})$  yields
+
+$$\begin{aligned} (\partial_{\pi} \mathcal{K}_S L)(\mathbf{x}, \boldsymbol{\omega}) &= \partial_{\pi} [T(\mathbf{x}_0, \mathbf{x}) L_{\tau}(\mathbf{x}_0, \mathbf{x})] \\ &= T(\mathbf{x}_0, \mathbf{x}) \dot{L}_{\tau}(\mathbf{x}_0, \boldsymbol{\omega}) + \dot{T}(\mathbf{x}_0, \mathbf{x}) L_{\tau}(\mathbf{x}_0, \boldsymbol{\omega}) \\ &= T(\mathbf{x}_0, \mathbf{x}) \left[ - (\Sigma_{\text{t}}(\mathbf{x}, \boldsymbol{\omega}, D) + \dot{D} \sigma_{\text{t}}(\mathbf{x}_0)) L_{\tau}(\mathbf{x}_0, \boldsymbol{\omega}) + \dot{L}_{\tau}(\mathbf{x}_0, \boldsymbol{\omega}) \right]. \end{aligned} \quad (40)$$
+
+The expression of  $\dot{T}(\mathbf{x}_0, \mathbf{x})$  equals:
+
+
+$$\dot{T}(\mathbf{x}_0, \mathbf{x}) = -T(\mathbf{x}_0, \mathbf{x}) (\Sigma_{\text{t}}(\mathbf{x}, \boldsymbol{\omega}, D) + \dot{D} \sigma_{\text{t}}(\mathbf{x}_0)), \quad (41)$$
+
+where  $\Sigma_{\text{t}}$  follows the definition in Eq. (31) but with the distance variable  $\tau$  replaced by  $D$ . The last term  $\dot{D} \sigma_{\text{t}}(\mathbf{x}_0)$  appears because the total travel distance  $D$  in the medium depends on the medium's boundary that might change under  $\pi$ .
+
+The last component needed in Eq. (40) is  $\dot{L}_{\tau}(\mathbf{x}_0, \boldsymbol{\omega})$ , whose specific form is analogous to  $\dot{L}^{\text{ins}}$  from Eq. (35) since both  $L^{\text{ins}}$  and  $L_{\tau}$  involve integrations over  $\mathbb{S}^2$  (with the difference that  $L_{\tau}$  modulates incident radiance with the cosine-weighted BSDF  $f_{\text{s}}$ , while  $L^{\text{ins}}$  uses the phase function  $f_{\text{p}}$ ). Thus,  $\dot{L}_{\tau}$  takes the form expressed in Eq. (42):
+
+$$\begin{aligned} \dot{L}_{\tau}(\mathbf{x}, \boldsymbol{\omega}) &= \int_{\mathbb{S}^2} \partial_{\pi} [f_{\text{s}}(\mathbf{x}, -\boldsymbol{\omega}', \boldsymbol{\omega}) L(\mathbf{x}, \boldsymbol{\omega}')] d\boldsymbol{\omega}' + \\ &\quad \int_{\partial^2 \Omega(\mathbf{x})} \langle \mathbf{n}_{\perp}, \partial_{\pi}(\mathbf{y} \rightarrow \mathbf{x}) \rangle f_{\text{s}}(\mathbf{x}, \mathbf{x} \rightarrow \mathbf{y}, \boldsymbol{\omega}) \Delta L(\mathbf{x}, \mathbf{y} \rightarrow \mathbf{x}) V(\mathbf{x}, \mathbf{y}) \frac{\sin \theta}{\|\mathbf{y}-\mathbf{x}\|} d\ell(\mathbf{y}), \end{aligned} \quad (42)$$
+
+where  $\Delta L$  follows Eq. (39). Further,  $\partial_{\pi} f_{\text{s}} L$  in the first term depends on the derivative of the BSDF  $f_{\text{s}}$  which can generally be obtained using symbolic/automated differentiation.
+
+
+
+Fig. 10. Silhouette edges are the main cause of the discontinuities in rendering. Given a viewpoint  $v$  and an edge associated with two faces, the edge is a silhouette if for any point  $p$  on it, the vector  $p - v$  is facing towards different directions with respect to the two normals, that is,  $\text{sign}(\langle p - v, n_f \rangle) \neq \text{sign}(\langle p - v, n_b \rangle)$ .
+
+3.2.6 Completing  $\dot{L}$ . The final term in Figure 6 is the derivative of  $L^{(0)} = TL_e$ . Since Eq. (40) has already provided  $\partial_\pi TL_r$ ,  $\dot{L}^{(0)}$  can be obtained by replacing  $L_r$  and  $\dot{L}_r$  in Eq. (40) with  $L_e$  and  $\dot{L}_e$ , yielding
+
+
+$$\dot{L}^{(0)}(\mathbf{x}, \boldsymbol{\omega}) = \partial_\pi [T(\mathbf{x}_0, \mathbf{x}) L_e(\mathbf{x}_0, \boldsymbol{\omega})] = T(\mathbf{x}_0, \mathbf{x}) \left[ - (\Sigma_t(\mathbf{x}, \boldsymbol{\omega}, D) + \dot{D} \sigma_t(\mathbf{x}_0)) L_e(\mathbf{x}_0, \boldsymbol{\omega}) + \dot{L}_e(\mathbf{x}_0, \boldsymbol{\omega}) \right]. \quad (43)$$
+
+Similar to  $\dot{f}_p$  and  $\dot{f}_s$ ,  $\dot{L}_e(\mathbf{x}_0, \boldsymbol{\omega})$  can be obtained using symbolic differentiation.
+
+Putting together. We now combine Eqs. (30, 40, 43) to get  $\dot{L}$ , the partial scene derivative of the interior radiance  $L$ .
+
+Since  $\dot{L} = \dot{L}_r + \dot{L}_e$ , adding Eq. (40) and (43) effectively yields the derivative of the source term  $Q$ :
+
+
+$$\dot{Q}(\mathbf{x}, \boldsymbol{\omega}) = \left( \partial_\pi \mathcal{K}_S L + \dot{L}^{(0)} \right)(\mathbf{x}, \boldsymbol{\omega}) = T(\mathbf{x}_0, \mathbf{x}) \left[ - (\Sigma_t(\mathbf{x}, \boldsymbol{\omega}, D) + \dot{D} \sigma_t(\mathbf{x}_0)) L(\mathbf{x}_0, \boldsymbol{\omega}) + \dot{L}(\mathbf{x}_0, \boldsymbol{\omega}) \right]. \quad (44)$$
+
+Adding Eq. (30) and (44) completes the derivation of  $\dot{L}$ , as shown in Eq. (??) below.
+
+
+$$\begin{aligned} [L(\mathbf{x}, \boldsymbol{\omega})]' &= \int_0^D T(\mathbf{x}', \mathbf{x}) \left[ \sigma_s(\mathbf{x}') \dot{L}^{\text{ins}}(\mathbf{x}', \boldsymbol{\omega}) + (\dot{\sigma}_s(\mathbf{x}') - \Sigma_t(\mathbf{x}, \boldsymbol{\omega}, \tau) \sigma_s(\mathbf{x}')) L^{\text{ins}}(\mathbf{x}', \boldsymbol{\omega}) \right] d\tau \\ &\quad + T(\mathbf{x}_0, \mathbf{x}) \left[ - (\Sigma_t(\mathbf{x}, \boldsymbol{\omega}, D) + \dot{D} \sigma_t(\mathbf{x}_0)) L(\mathbf{x}_0, \boldsymbol{\omega}) + \dot{L}(\mathbf{x}_0, \boldsymbol{\omega}) + \dot{D} \sigma_s(\mathbf{x}_0) L^{\text{ins}}(\mathbf{x}_0, \boldsymbol{\omega}) \right]. \end{aligned} \quad (45)$$
+
+### 3.3 Path-Space Differentiable Rendering
+
+TBD.
+
+## 4 PHYSICS-BASED DIFFERENTIABLE RENDERING IMPLEMENTATION
+
+
+
+### 4.1 Monte Carlo Estimators
+
+4.1.1 Differentiable Path Tracing with Edge Sampling. As mentioned in the previous sections, we can discretize the boundary integral by sampling points on triangle edges and evaluate the rendering contribution at the two sides of the edge. A naïve approach is to collect all the edges on the meshes, uniformly select one, and then uniformly select a point on the edge. This works for simple scenes such as the one in Figure 1 but generates large variance for more complex scenes. We want to select the edges and points in a smarter way. We will discuss boundaries integral for the surfaces directly visible to the camera first, then we will discuss boundaries for shadow and global illumination.
+
+
+
+
+
+Fig. 11. Zhang et al. [41] proposed an alternative edge sampling algorithm by sampling a path segment from an edge directly. Given an edge, such as an edge associated with the blocker in \(a\), they sample a segment by randomly selecting a point and a direction, and connect the segments to light sources and cameras. To efficiently select a direction from the selected edge, we can use the fact that only a few set of directions will see the edge as a silhouette edge (the green region in b\).
+
+One of the key observation to speedup the sampling of edges is to notice that, if our shading is smooth over the mesh, the only edges that can be the boundaries are the silhouette edges (Fig. 10\). For the edges associated with two faces, we classify them as non-silhouette if the normals of the two faces face towards the same sides, when comparing to the vector connecting between an arbitrary point on the edge �� and the viewpoint ��. That is, if the two associated faces have normals ���� and ����, the edge is a silhouette edge if and only if
+
+| $\text{sign}(\langle p - v, n_f \rangle) \neq \text{sign}(\langle p - v, n_b \rangle) .$ | (46) |
+|------------------------------------------------------------------------------------------|------|
+|------------------------------------------------------------------------------------------|------|
+
+Edges that associate with only one face is always a silhouette edge, and edges associate with three or more faces can be converted into multiple edges with two faces. The majority of the edges of a mesh with respect to a viewpoint are not silhouettes, as the number of silhouettes is roughly at the complexity of √ �� with �� being the number of edges [26].
+
+For directly visible surfaces, given a set of edges of a mesh and the camera position, we can classify them into silhouette and non-silhouette edges, and then project all the silhouette edges to the screen. The classification and projection can be done at a precomputation pass before rendering. During rendering, we then randomly pick one edge with probability proportional to their length in the screen space, and uniformly pick one point on the edge to evaluate the contribution at the two sides (Eq. 16\). This is fast and does not require any sophisticated data structures. To further improve the edge selection for scenes with high depth complexity, we can potentially incorporate more advanced occlusion culling algorithms to skip the edges [10, 11]. Finally, this can also be modified to work with non-pinhole projective cameras: we can compute a bounding box for the aperture of the camera, and conservatively classify the edges as silhouette as long as one viewpoint in the bounding box �� can view the edge as a silhouette.
+
+For the secondary visibility such as shadow, mirror reflection, and global illumination, determining silhouettes for our shading points becomes more involved. In contrast to the directly visible surfaces case, now the viewpoint �� is our shading point and can be anywhere in the scene. Sampling an edge in this case becomes a problem similar to the many-lights sampling problem [32, 40]. In many-lights sampling, given a shading point and a set of light sources, we want to sample the light sources to compute the lighting at the shading point. In contrast, now given a shading point and a set of geometric edges, we want to sample the edges to compute the boundary integral. In the many-lights sampling literature, a common way (but not the only way) to sample the light sources is to build a tree data structure to select important light sources while traversing the tree: for each node in the tree, we can collect some summary statistics of the light sources, such as their total emission power, spatial bounding box, ranges of their orientations, etc, and use that to determine the importance of the tree node. We can use the same strategy for sampling edges as well, while rejecting nodes containing only non-silhouettes given a shading point. Li et al. [22] proposed to detect the silhouette in the Hough space [31] and we refer to Li's thesis for the details regarding this approach.
+
+Li's edge sampling approach [22, 23], while being reasonably efficient for directly visible surfaces, is not extremely efficient for secondary visibility when the scenes complexity is high. An alternative proposed by Zhang et al. [41] is to sample a path segment from an edge, and connect that path segment to cameras and light sources (Fig. 11\). When selecting the directions for the path segment, we can make sure the edge is always a silhouette edge by sampling the directions where all points on that directions will recognize the edge as a silhouette (Fig. 11b\). Zhang et al. further improve this by selecting the edge using a hash-grid where the importance of each grid is estimated using photon mapping [18]. This approach simplifies the edge selection process and thus makes it significantly more efficient, since it does not need to select an edge for each shading point. See their paper for more details.
+
+Selecting an edge efficiently for solving the boundary integral is still an unsovled issue. Zhang et al. [41]'s approach, while being shown to be efficient for a variety of scenes, still left some cases unhandled. For example, it is difficult to connect the edge segment to the light sources and cameras when there are highly-specular surfaces, such as mirror or glass, between the segment's endpoints and the target. This connection problem resembles the notorious Specular-Diffuse-Specular light path sampling problem in forward rendering [38]. More future research is required to solve the full differentiable rendering equation efficiently.
+
+4.1.2 Reparameterized Differentiable Path Tracing. One potential concern regarding edge sampling strategies for differentiable rendering is the complexity of finding contributing silhouette edges in an arbitrary integrand. Currently used strategies tend to find high-contribution edge segments with an insufficient density, which leads to gradients with high variance. This issue grows in severity as the geometric complexity of objects in the scene increases.
+
+Interestingly, explicit sampling of discontinuities can be avoided by applying carefully chosen changes of variables that remove the dependence of discontinuities on scene parameters. The resulting integrands of course still contain discontinuities, but they are static in the re-parameterized integral and hence no longer prevent differentiation under the integral sign. This section discusses an alternative way of differentiating edges by performing a suitable change of variables in each integral that is simple to compute using ordinary ray tracing operations.
+
+### 4.1.3 Differentiable Volume Path Tracing.
+
+### 4.2 Automatic Differentiation for Rendering
+
+A substantial amount of the course has been focused on the discontinuities of the rendering integrand, and how to correctly take them into account. However, most differentiable rendering systems will also need to compute the interior integrand. For the interior integrands, the discretization commute with the differentiation, so we can apply existing technique of automatic differentiation [14] to the rendering programs to compute the derivatives.
+
+Widely used deep learning frameworks, such as PyTorch [33] and TensorFlow [1] provide a convenient interface to array-based computation on GPUs with built-in automatic differentiation. These frameworks are designed for linear algebra or neural networks, whose computation graphs typically consist of a few hundred arithmetically intensive operations like matrix-vector multiplications or convolutions. On the flipside, computation graphs
+
+produced by rendering algorithms tend to be highly unstructured and extremely large, containing millions of operations with very low arithmetic intensity (e.g. additions). Implementing a rendering pipeline inside a deep learning framework will be extremely inefficient since data are repeated stored to and read back from the memory buffers. Therefore, we need new automatic differentiation compilers for efficient differentiable rendering.
+
+In this section, we will review how automatic differentiation works, so that the readers can potentially build their own compilers for differentiating their programs, or manually apply the automatic differentiation rules to transform their programs. Most of the contents below in the subsection are adapted from Chapter 2 of Li's thesis [22]. Griewank [14] provide a good introductory text to automatic differentiation. Villard and Monagan's work on Maple's automatic differentiation compiler [39] is a well written example for how to implement a compiler for automatic differentiating imperative programs.
+
+Given a computer program containing control flow, loops, and/or recursion, with some real number inputs and outputs, our goal is to compute the derivatives between the outputs and the inputs. In particular, in differentiable rendering we are especially interested in the gradients, that is, the derivative of a scalar output with respect to the inputs.
+
+4.2.1 Finite differences and symbolic derivatives. Before discussing automatic differentiation algorithms, it is useful to review other ways of generating derivatives, and compare them to automatic differentiation.
+
+A common approximation for derivatives are finite differences, sometimes also called numerical derivatives. Given a function  $f(x)$  and an input  $x$ , we approximate the derivative by perturbing  $x$  by a small amount  $h$ :
+
+$$\frac{df(x)}{dx} \approx \frac{f(x+h) - f(x)}{h} \quad \text{or} \quad (47)$$
+
+$$\frac{df(x)}{dx} \approx \frac{f(x+h) - f(x-h)}{2h}. \quad (48)$$
+
+The problem with this approximation is two-fold. First, the optimal choice of the step size  $h$  in a computer system is problem dependent. If the step size is too small, the rounding error of the floating point representation becomes too large. On the other hand, if the step size is too large, the result becomes a poor approximation to the true derivative. Second, the method is inefficient for multivariate functions. For a function with 100 variables and a scalar output, computing the full gradient vector requires at least 101 evaluations of the original function.
+
+Another alternative is to treat the content of the function  $f$  as a sequence of mathematical operations, and symbolically differentiate the function. Indeed, most of the rules for differentiation are mechanical, and we can apply the rules to generate  $f'(x)$ . However, in our case,  $f(x)$  is usually an algorithm, and symbolic differentiation does not scale well with the number of symbols. Consider the following code:
+
+```
+function f(x):
+    result = x
+    for i = 1 to 8:
+        result = exp(result)
+    return result
+```
+
+Fig. 12. A code example that iteratively computes a nested exponential for demonstrating the difference between symbolic differentiation and automatic differentiation.
+
+Using the symbolic differentiation tools from mathematical software such as Mathematica [16] would result in the following expression:
+
+
+$$\frac{df(x)}{dx} = e^{x+e^{e^{e^{e^{e^{e^{x}}}}}} + e^{e^{e^{e^{e^{e^{x}}}}} + e^{e^{e^{e^{e^{x}}}} + e^{e^{e^{e^{e^{x}}}} + e^{e^{e^{e^{x}}} + e^{e^{e^{x}}} + e^x. \quad (49)$$
+
+The size of derivative expression will become intractable when the size of the loop grows much larger. Using forward-mode automatic differentiation, which will be introduced later, we can generate the following code for computing derivatives:
+
+> function d\_f(x): result = x d\_result = 1 for i = 1 to 8: result = exp(result) d\_result = d\_result \* result return d\_result
+
+The code above outputs the exact same values as the symbolic derivative (Equation 49\), but is significantly more efficient (8 v.s. 37 exponentials). This is due to automatic differentiation's better use of the intermediate values and the careful factorization of common subexpressions.
+
+4.2.2 Algorithms for generating derivatives. We start from programs with only function calls and elementary operations such as addition and multiplication. In particular, we do not allow recursive or circular function calls. Later, we generalize the idea to handle control flow such as loops and branches, and handle recursion. Throughout the chapter, we assume all function calls are side-effect free. To the author's knowledge, there are no known automatic differentiation algorithms for transforming arbitrary functions with side effects.
+
+The key to automatic differentiation is the chain rule. Consider the following code with input x and output z:
+
+y = f(x) z = g(y)
+
+Assume we already know the derivative functions �� �� (��) ���� and ���� (��) ���� , and we are interested in the derivative of the output z with respect to input x. We can compute the derivative by applying the chain rule:
+
+> dydx = dfdx(x) dzdy = dgdy(y) dzdx = dzdy \* dydx
+
+We can recursively apply the rule to generate derivative functions, until the function is an elementary function for which we know the analytical derivatives, such as addition, multiplication, sin(), or exp().
+
+A useful mental model for automatic differentiation is the computational graph. It can be used for representing dependencies between variables. The nodes of the graph are the variables and the edges are the derivatives between the adjacent vertices. In the case above the graph is linear:
+
+
+
+Computing derivatives from a computational graph involves traversal of the graph, and gathering of different paths that connect inputs and outputs.
+
+In practice, most functions are multivariate, and often times we want to have multiple derivatives such as for the gradient vector. In this case, different derivatives may have common paths in the computational graph that can be factored out, which can greatly impact efficiency. Consider the following code example and its computational graph:
+
+There are four derivatives between the two outputs and two inputs. We can obtain them by traversing the four corresponding paths in the computational graph:
+
+
+
+Fig. 13. Code example and computational graph with two inputs  $x_0$ ,  $x_1$  and two outputs  $w_0$ ,  $w_1$ 
+
+
+
+For example, in (a), the derivative of  $w_0$  with respect to  $x_0$  is the product of the three red edges:
+
+$$\frac{\partial w_0}{\partial x_0} = \frac{\partial w_0}{\partial z} \frac{\partial z}{\partial y} \frac{\partial y}{\partial x_0}, \quad (50)$$
+
+and in (b), the derivative of  $w_0$  with respect to  $x_1$  is
+
+$$\frac{\partial w_0}{\partial x_1} = \frac{\partial w_0}{\partial z} \frac{\partial z}{\partial y} \frac{\partial y}{\partial x_1}. \quad (51)$$
+
+We can observe that some of the derivatives share common subpaths in the computational graph. For example the two derivatives above  $\frac{\partial w_0}{\partial x_0}$  and  $\frac{\partial w_0}{\partial x_1}$  share the same subpath  $y$ ,  $z$ ,  $w_0$ . We can therefore factor this subpath out and premultiply  $\frac{\partial w_0}{\partial y} = \frac{\partial w_0}{\partial z} \frac{\partial z}{\partial y}$  for the two derivatives. In a larger computational graph, this factorization can have enormous impact on the performance of the derivative code, even affecting the time complexity in terms of the number of inputs or outputs.
+
+Different automatic differentiation algorithms find common factors in the computational graph in different ways. In the most general case, finding a factorization that results in minimal operations is NP-hard [29]. Fortunately, in many common cases, such as factorization for the gradient vector, there are efficient solutions.
+
+If the input is a scalar variable, no matter how many variables there are in the output, forward-mode automatic differentiation generates derivative code that has the same time complexity as the original algorithm. On the other hand, if the output is a scalar variable, no matter how many input variables there are, reverse-mode automatic differentiation generates derivative code that has the same time complexity as the original algorithm. The latter case is particularly interesting, since it means that we can compute the gradient with the same time complexity (the “cheap gradient principle”), which can be useful for various optimization and sampling algorithms.
+
+4.2.3 Forward-mode differentiation. We start with the simplest algorithm, usually called forward-mode automatic differentiation, and sometimes also called dual number. Forward-mode traverses the computational graph from the inputs to outputs, computing derivatives of the intermediate nodes with respect to all input variables along the way. Forward-mode is efficient when the input dimension is low and the output dimension is high, since for each node in the computational graph, we need to compute the derivatives with respect to every single input variable.
+
+We will describe forward-mode using the previous example in Figure 13. Starting from the inputs, the goal is to propagate the derivatives with respect to the inputs using the chain rule. To handle function calls, for every function f(x) referenced by the output variables, we generate a derivative function df(x, dx), where dx is the derivative of x with respect to the input variables.
+
+We start from the inputs x0, x1 and generate ����0 ����0 = 1 and ����1 ����1 = 1. We use a 2D vector dx0dx to represent the derivatives of x0 with respect to x0 and x1.
+
+> dx0dx = {1, 0} dx1dx = {0, 1} y = f(x0, x1) z = g(y) w0, w1 = h(z)
+
+
+
+We then obtain the derivatives for y with respect to the inputs. We assume we already applied forward-mode automatic differentiation for f, so we have a derivative function df(x0, dx0dx, x1, dx1dx).
+
+> dx0dx = {1, 0} dx1dx = {0, 1} y = f(x0, x1) dydx = df(x0, dx0dx, x1, dx1dx) z = g(y) w0, w1 = h(z)
+
+
+
+Finally, we propagate the derivatives from z to the outputs w0, w1.
+
+dx0dx = {1, 0} dx1dx = {0, 1} y = f(x0, x1) dydx = df(x0, dx0dx, x1, dx1dx) z = g(y) dzdx = dg(y, dydx) w0, w1 = h(z) dw0dx, dw1dx = dh(z, dzdx)
+
+
+
+The time complexity of the code generated by forward-mode automatic differentiation is ��(��) times the time complexity of the original algorithm, where �� is the number of input variables. It is efficient for functions with few input variables.
+
+However, for many applications of derivatives, including differentiable rendering, we need to differentiate functions with thousands or even millions of input variables. Using forward-mode for this would be infeasible, as we need to compute the derivatives with respect to all input variables for every output in the computational graph. Fortunately, there is another algorithm called reverse-mode automatic differentiation that can generate derivative code that has the same time complexity as the original algorithm when there is only a single output, regardless of the number of input variables.
+
+4.2.4 Reverse-mode differentiation. Reverse-mode propagates the derivatives from outputs to inputs, unlike forward-mode, which propagates the derivatives from inputs to outputs. For each node in the computational graph, we compute the derivatives of all outputs with respect to the variable at that node. Therefore reversemode is much more efficient when the input dimension is large and the output dimension is low. Remarkably, reverse-mode can compute gradient in the same time complexity as the original algorithm! However, reverse-mode is also more complicated to implement since it needs to run the original algorithm backward to propagate the derivatives.
+
+We again use the same previous example in Figure 13 to illustrate how reverse-mode works. Similar to forwardmode, we need to handle function calls. For every function y = f(x) referenced by the output variables, we generate a derivative function df(x, dy), where ���� is a vector of derivatives of the final output with respect to the function's output y (in contrast, in forward-mode, the derivative functions take the input derivatives as arguments). Handling control flow and recursion in reverse-mode is more complicated. We discuss them later.
+
+We start from the outputs w0, w1 using ����0 ����0 = 1 and ����1 ����1 = 1. We use a 2D vector dwdw0 to represent the derivatives of w0, w1 with respect to w0.
+
+> y = f(x0, x1) z = g(y) w0, w1 = h(z) dwdw0 = {1, 0} dwdw1 = {0, 1}
+
+
+
+Next, we propagate the derivatives to variable z on which the two outputs depend. We assume we already applied reverse-mode to the function h and have dh(z, dwdw0, dwdw1).
+
+> y = f(x0, x1) z = g(y) w0, w1 = h(z) dwdw0 = {1, 0} dwdw1 = {0, 1} dwdz = dh(z, dwdw0, dwdw1)
+
+
+
+Similarly, we propagate to y from z.
+
+y = f(x0, x1) z = g(y) w0, w1 = h(z) dwdw0 = {1, 0} dwdw1 = {0, 1} dwdz = dh(z, dwdw0, dwdw1) dwdy = dg(y, dwdz)
+
+
+
+Finally we obtain the derivatives of the outputs w with respect to the two inputs.
+
+y = f(x0, x1) z = g(y) w0, w1 = h(z) dwdw0 = {1, 0} dwdw1 = {0, 1} dwdz = dh(z, dwdw0, dwdw1) dwdy = dg(y, dwdz) dwx0, dwx1 = df(x0, x1, dwdy)
+
+
+
+A major difference between reverse-mode and forward-mode that makes the implementation of reverse-mode much more complicated, is that we can only start the differentiation after the final output is computed. This makes it impossible to interleave the derivative code with the original code like in forward-mode. This issue has the most impact when differentiating programs with control flows or recursions.
+
+4.2.5 Beyond forward and reverse modes. As we have discussed, forward-mode generates less operations when the number of inputs is small, while reverse-mode generates less operations when the number of outputs is small.
+
+In general, we can think of derivative computation as a pathfinding problem on the computational graph: We want to find all the paths that connect between inputs and outputs. Many of the paths share common subpaths and it is more computationally efficient to factor out the common subpaths. Forward-mode and reverse-mode are two different greedy approaches that factor out the common subpaths either from the input node or output node.
+
+Sometimes we do not just want to achieve the least number of operations. On modern hardware architectures, reading from and writing to the memory outside of caches is significantly more time-consuming than the arithmetic computation. Sometimes we wish to compute more to trade-offs with less memory traffic. Therefore, it is sometimes worth exploring approaches between the spectrum of forward- and reverse- modes. Mitsuba 2 [30] took this approach and applied a greedy vertex elimination algorithm [13].
+
+4.2.6 Automatic differentiation as program transformation. Typically the implementation of automatic differentiation systems can be categorized as a point in a spectrum, depending on how much is done at compile-time. At one end of the spectrum, the tracing approach, or sometimes called the taping approach, re-compiles the derivatives whenever we evaluate the function. At the other end of the spectrum, the source transformation approach does as much at compile-time as possible by compiling the derivative code only once. The tracing approach has the benefit of simpler implementation, and is easier to incorporate into existing code, while the source transformation approach has better performance, but usually can only handle a subset of a general-purpose language and is much more difficult to implement.
+
+A common misconception is that the tracing approach (PyTorch being a notable example) results in more user-friendly frontend, while the source transformation, or static compilation approach (TensorFlow 1.0 being a popular example) results in a messy meta-programming interface. In fact, the frontend of the compiler does not dictate how a program is compiled. A language can have the exact same syntax/frontend as PyTorch, and statically compiles to highly-optimized code (this is roughly what TorchScript does). On the other hand, a language can also have the exact same syntax/frontend as TensorFlow, and being interpreted directly in a Read–Eval–Print Loop (REPL) environment (the eager-mode of TensorFlow 1.0 does this).
+
+4.2.7 Control flows and recursions. Handling control flow and recursion in forward-mode is trivial. We do not need to modify the flow at all. Since forward-mode propagates from the inputs, for each statement, we can compute its derivative immediately.
+
+In reverse-mode, however, control flow and recursion introduce challenges, since we need to revert the flow. Consider the iterative exponential example from Figure 12. To apply reverse-mode, we need to revert the for loop. We observe an issue here: we need the intermediate exp(result) values for the derivatives. To resolve this, we will need to record the intermediate values during the first pass of the loop:
+
+function d\_f(x): result = x results = [] for i = 1 to 8: results.push(result) result = exp(result) d\_result = 1 for i = 8 to 1: // one−based indexing d\_result = d\_result \* exp(results[i]) return d\_result
+
+The general strategy for transforming loops in reverse-mode is to push intermediate variables into a stack for each loop [39], then pop the items during the reverse loop. Nested loops can be handled in the same way. For efficient code generation, dependency analysis is often required to push only variables that will be used later to the stack (e.g. [37]).
+
+The same strategy of storing intermediate variables in a stack also works for loop continuations, early exits, and conditioned while loops. We can use the size of the stack as the termination criteria. For example, we modify the previous example to a while loop and highlight the derivative code in red:
+
+> function d\_f(x): result = x results = [] while result > 0.1 and result < 10: results.push(result) result = exp(result) d\_result = 1 for i = len(results) to 1: d\_result = d\_result \* exp(results[i]) return d\_result
+
+In general, given a loop, we store all the intermediate variables generated in the loop inside a stack. We then replay the stack from the end to the beginning, and traverse the computational graph backward for the statements inside the loops. For if conditions we can do the same transformation. We will store which condition the forward pass satisfied in the stack, along with the intermediate variables of that particular branch.
+
+Recursion is equally or even more troublesome compared to conditions loops for reverse-mode. Consider the following tail recursion that represents the same function:
+
+> function f(x): if x <= 0.1 or x >= 10: return x result = f(exp(x)) return result
+
+It is tempting to use the reverse-mode rules we developed previously to differentiate the function like the following:
+
+function d\_f(x, d\_result): if x <= 0.1 or x >= 10: return 1 result = f(exp(x)) return d\_f(result, d\_result) \* exp(x)
+
+However, a close inspection reveals that the generated derivative function d\_f has higher time complexity compared to the original function (��(�� 2 ) v.s. ��(��)), since every time we call d\_f we will recompute f(exp(x)), resulting in redundant computation.
+
+A solution to this, similar to the case of loops, is to use the technique of memoization. We can cache the result of recursive function calls in a stack, and traverse the recursion tree in reverse by traversing the stack:
+
+> function d\_f(x, d\_result): if x <= 0.1 or x >= 10: return 1 results = [] result = f(exp(x), results) d\_result = 1 for i = len(results) to 1: d\_result = d\_result \* exp(results[i]) return d\_result
+
+This also works in the case where f recursively calls itself several times. A possible implementation is to use a tree instead of a stack to store the intermediate results.
+
+The transformations above reveal an issue with the reverse-mode approach. While for scalar output, reversemode is efficient in time complexity, it is not efficient in memory complexity, since the memory usage depends on the number of instructions, or the length of the loops. A classical optimization to reduce memory usage is called "checkpointing". The key idea is to only push to, or to checkpoint, the intermediate variable stack sporadically, and recompute the loop from the closest checkpoint every time. Griewank [12] showed that by checkpointing only �� (log (��)) times for a loop with length ��(��), we can achieve memory complexity of �� (log (��)), and time complexity of �� (�� log (��)) for reverse-mode.
+
+4.2.8 Differentiating SIMD-based rendering programs. Differentiating a general parallel program, while preserving the parallelism is not trivial due to the potential race condition. Fortunately, in rendering, most of the parallelism are independent. Most rendering programs can be written inside a parallel for loop, launching threads that do not communicate with each other. In this case, the reverse-mode differentiation can be done with the same strategy above by first executing the parallel for loop and storing the intermediate variables in a stack of arrays, then launch the same parallel for loop again with the statements inside transformed with reverse-mode automatic differentiation. Importantly, any read from external arrays in the original parallel for loop needs to be transformed to an atomic scatter write to avoid race conditions.
+
+Enoki [17], the core of Mitsuba 2, is a just-in-time compiler that specializes at compiling and differentiating parallel programs with independent threads. Enoki takes a C++ or Python frontend of a SIMD program, and automatically generate vectorized CPU or GPU code and the corresponding reverse-mode transformed code.
+
+## 5 PHYSICS-BASED DIFFERENTIABLE RENDERING APPLICATIONS
+
+TBD.
+
+### REFERENCES
+
+- [1] M. Abadi, A. Agarwal, P. Barham, E. Brevdo, Z. Chen, C. Citro, G. S. Corrado, A. Davis, J. Dean, M. Devin, S. Ghemawat, I. Goodfellow,
+  - A. Harp, G. Irving, M. Isard, Y.Jia, R. Jozefowicz, L. Kaiser, M. Kudlur, J. Levenberg, D. Mané, R. Monga, S. Moore, D. Murray, C. Olah,
+- M. Schuster, J. Shlens, B. Steiner, I. Sutskever, K. Talwar, P. Tucker, V. Vanhoucke, V. Vasudevan, F. Viégas, O. Vinyals, P. Warden, M. Wattenberg, M. Wicke, Y. Yu, and X. Zheng. 2015. TensorFlow: Large-Scale Machine Learning on Heterogeneous Systems. [2] James Arvo. 1994. The Irradiance Jacobian for partially occluded polyhedral sources. In SIGGRAPH '94. 343–350. [3] Edwin Catmull. 1978. A Hidden-Surface Algorithm with Anti-Aliasing. Comput. Graph. (Proc. SIGGRAPH) 12, 3 (1978), 6–11. [4] Subrahmanyan Chandrasekhar. 1960. Radiative Transfer. Courier Corporation. [5] Robert L. Cook, Thomas Porter, and Loren Carpenter. 1984. Distributed Ray Tracing. Comput. Graph. (Proc. SIGGRAPH) 18, 3 (1984), 137–145. [6] Franklin C Crow. 1977. The aliasing problem in computer-generated shaded images. Commun. ACM 20, 11 (1977), 799–805. [7] Tomáš Davidovič, Thomas Engelhardt, Iliyan Georgiev, Philipp Slusallek, and Carsten Dachsbacher. 2012. 3D rasterization: a bridge between rasterization and ray casting. In Graphics Interface. 201–208. [8] Martin de La Gorce, David J Fleet, and Nikos Paragios. 2011. Model-based 3D hand pose estimation from monocular video. IEEE Trans. Pattern Anal. Mach. Intell. 33, 9 (2011), 1793–1805. [9] Harley Flanders. 1973. Differentiation under the integral sign. The American Mathematical Monthly 80, 6 (1973), 615–627. [10] Ned Greene and Michael Kass. 1994. Error-bounded antialiased rendering of complex environments. In SIGGRAPH. 59–66. [11] Ned Greene, Michael Kass, and Gavin Miller. 1993. Hierarchical Z-buffer visibility. In SIGGRAPH. ACM, 231–238. [12] Andreas Griewank. 1992. Achieving logarithmic growth of temporal and spatial complexity in reverse automatic differentiation. 1, 1 (1992), 35–54. [13] Andreas Griewank and Shawn Reese. 1991. On the Calculation of Jacobian Matrices by the Markowitz Rule. In Automatic Differentiation of Algorithms: Theory, Implementation, and Application. SIAM, 126–135. [14] Andreas Griewank and Andrea Walther. 2008. Evaluating derivatives: principles and techniques of algorithmic differentiation. Vol. 105. SIAM. [15] Warren Hunt, Michael Mara, and Alex Nankervis. 2018. Hierarchical Visibility for Virtual Reality. ACM Comput. Graph. Interact. Tech. (Proc. I3D) 1, 1 (2018), 1–18. [16] Wolfram Research, Inc. [n.d.]. Mathematica, Version 11.3. Champaign, IL, 2018. [17] Wenzel Jakob. 2019. Enoki: structured vectorization and differentiation on modern processor architectures. https://github.com/mitsubarenderer/enoki. [18] Henrik Wann Jensen. 1995. Importance driven path tracing using the photon map. In Rendering Techniques (Proc. EGWR). Springer, 326–335. [19] James T. Kajiya. 1986. The Rendering Equation. In SIGGRAPH '86. 143–150. [20] Hiroharu Kato, Yoshitaka Ushiku, and Tatsuya Harada. 2018. Neural 3D mesh renderer. In Proceedings of the IEEE Conference on Computer Vision and Pattern Recognition. 3907–3916. [21] L. Gary Leal. 2007. Advanced Transport Phenomena: fluid mechanics and convective transport processes. Vol. 7. Cambridge University Press. [22] Tzu-Mao Li. 2019. Differentiable visual computing. MIT PhD Dissertation. [23] Tzu-Mao Li, Miika Aittala, Frédo Durand, and Jaakko Lehtinen. 2018. Differentiable Monte Carlo ray tracing through edge sampling. ACM Trans. Graph. 37, 6 (2018), 222:1–222:11. [24] Shichen Liu, Tianye Li, Weikai Chen, and Hao Li. 2019. Soft Rasterizer: A Differentiable Renderer for Image-based 3D Reasoning. International Conference on Computer Vision (2019). [25] Matthew M Loper and Michael J Black. 2014. OpenDR: An approximate differentiable renderer. In European Conference on Computer Vision. Springer, 154–169. [26] Morgan McGuire. 2004. Observations on silhouette sizes. J. Graph. Tools 9, 1 (2004), 1–12. [27] Morgan McGuire and Louis Bavoil. 2013. Weighted blended order-independent transparency. Journal of Computer Graphics Techniques 2, 4 (2013). [28] Don P Mitchell and Arun N Netravali. 1988. Reconstruction filters in computer-graphics. Comput. Graph. (Proc. SIGGRAPH) 22, 4 (1988), 221–228. [29] Uwe Naumann. 2008. Optimal Jacobian accumulation is NP-complete. Mathematical Programming 112, 2 (2008), 427–441. [30] Merlin Nimier-David, Delio Vicini, Tizian Zeltner, and Wenzel Jakob. 2019. Mitsuba 2: A retargetable forward and inverse renderer. ACM Trans. Graph. (Proc. SIGGRAPH Asia) 38, 6 (2019), 1–17. [31] Matt Olson and Hao Zhang. 2006. Silhouette extraction in Hough space. Comput. Graph. Forum (Proc. Eurographics) 25, 3 (2006), 273–282. [32] Eric Paquette, Pierre Poulin, and George Drettakis. 1998. A Light Hierarchy for Fast Rendering of Scenes with Many Lights. Comput. Graph. Forum (Proc. Eurographics) (1998), 63–74.
+
+[33] Adam Paszke, Sam Gross, Soumith Chintala, Gregory Chanan, Edward Yang, Zachary DeVito, Zeming Lin, Alban Desmaison, Luca Antiga, and Adam Lerer. 2017. Automatic differentiation in PyTorch. (2017). [34] Thomas Porter and Tom Duff. 1984. Compositing digital images. (1984), 253–259. [35] Ravi Ramamoorthi, Dhruv Mahajan, and Peter Belhumeur. 2007. A First-order Analysis of Lighting, Shading, and Shadows. ACM Trans. Graph. 26, 1 (2007), 2:1–2:21. [36] Pedro V. Sander, Hugues Hoppe, John Snyder, and Steven J. Gortler. 2001. Discontinuity edge overdraw. In Symposium on Interactive 3D Graphics and Games. ACM, 167–174. [37] Michelle Mills Strout and Paul Hovland. 2006. Linearity analysis for automatic differentiation. In International Conference on Computational Science. Springer, 574–581. [38] Eric Veach. 1998. Robust Monte Carlo Methods for Light Transport Simulation. Ph.D. Dissertation. Stanford University. Advisor(s) Guibas, Leonidas J. [39] Dominique Villard and Michael B Monagan. 1999. ADrien: an implementation of automatic differentiation in Maple. In International Symposium on Symbolic and Algebraic Computation. 221–228. [40] Bruce Walter, Sebastian Fernandez, Adam Arbree, Kavita Bala, Michael Donikian, and Donald P. Greenberg. 2005. Lightcuts: A Scalable Approach to Illumination. ACM Trans. Graph. (Proc. SIGGRAPH) 24, 3 (2005), 1098–1107. [41] Cheng Zhang, Bailey Miller, Kai Yan, Ioannis Gkioulekas, and Shuang Zhao. 2020. Path-Space Differentiable Rendering. ACM Trans. Graph. (Proc. SIGGRAPH) 39, 6 (2020), 143:1–143:19. [42] Cheng Zhang, Lifan Wu, Changxi Zheng, Ioannis Gkioulekas, Ravi Ramamoorthi, and Shaung Zhao. 2019. A Differential Theory of Radiative Transfer. ACM Trans. Graph. 38, 6 (2019), 227:1–227:16.

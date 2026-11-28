@@ -1,0 +1,167 @@
+--- v001.md
++++ v002.md
+@@ -1,31 +1,27 @@
+ # Differentiable Volume Rendering Pipeline
+-
+-
+ ## Overview
+-The Differentiable Volume Rendering Pipeline orchestrates the training loop for Neural Radiance Fields (NeRF) by generating rays, sampling points through an implicit volume, evaluating the neural network, and aggregating results via differentiable alpha compositing [S1, unofficial]. It solves the problem of optimizing 3D scene representations from 2D images by computing gradients of the rendered image loss with respect to network parameters and camera poses [S1, unofficial]. It differs from standard volume rendering by explicitly maintaining the computational graph through the sampling and integration steps to enable end-to-end backpropagation [S1, unofficial].
+-
++The Differentiable Volume Rendering Pipeline orchestrates the training loop for Neural Radiance Fields by generating rays, sampling points through an implicit volume, evaluating the neural network, and aggregating results via differentiable alpha compositing [S1, unofficial]. It solves the problem of optimizing 3D scene representations from 2D images by computing gradients of the rendered image loss with respect to network parameters [S1, unofficial]. It differs from standard volume rendering by explicitly maintaining the computational graph through the sampling and integration steps to enable end-to-end backpropagation [G].
+ ## How it works
+ **Inputs:**
+-*   Camera parameters (intrinsics, extrinsics) for a batch of views.
+-*   Ground truth images $C_i$ for the corresponding pixel coordinates.
+-*   Neural network model (implicit volume representation) with parameters $\theta$.
+-*   Sampler configuration (number of samples per ray, hierarchical sampling settings).
++*   Camera parameters (intrinsics, extrinsics) for a batch of views [G].
++*   Ground truth images $C_i$ for the corresponding pixel coordinates [G].
++*   Neural network model (implicit volume representation) with parameters $\theta$ [G].
++*   Sampler configuration (number of samples per ray, hierarchical sampling settings) [G].
+ *   Training configuration `cfg.training.batch_size` ($N$), defining the number of random pixels sampled per iteration [S1, unofficial].
+ 
+ **Outputs:**
+-*   Rendered feature/color images $\hat{C}_i$.
+-*   Rendered depth maps.
+-*   Gradients for optimization.
++*   Rendered feature/color images $\hat{C}_i$ [S1, unofficial].
++*   Rendered depth maps [S1, unofficial].
+ 
+ **Data Structures:**
+-*   **Ray Bundle:** A tensor of shape $(N, 3)$ containing the origin and direction for each ray in the batch.
+-*   **Sample Points:** A tensor of shape $(N, K, 3)$ containing the 3D coordinates of $K$ samples along each ray.
+-*   **Network Outputs:** Tensors of shape $(N, K, 4)$ containing the predicted color (RGB) and density ($\sigma$) for each sample.
++*   **Ray Bundle:** A tensor of shape $(N, 3)$ containing the origin and direction for each ray in the batch [G].
++*   **Sample Points:** A tensor of shape $(N, K, 3)$ containing the 3D coordinates of $K$ samples along each ray [G].
++*   **Network Outputs:** Tensors of shape $(N, K, 4)$ containing the predicted color (RGB) and density ($\sigma$) for each sample [G].
+ 
+ **Steps:**
+-1.  **Ray Generation:** For each camera in the batch, generate a grid of pixel coordinates. Convert these to NDC (Normalized Device Coordinates) or world-space rays using the camera intrinsics and extrinsics. Construct a ray bundle containing origins $\mathbf{o}$ and directions $\mathbf{d}$ [S1, unofficial].
+-2.  **Sampling:** Pass the ray bundle through `model.sampler`. The sampler generates sample points along each ray. If hierarchical sampling is used, a coarse pass generates initial points, computes weights, and a fine pass resamples around high-weight regions [S1, unofficial]. Let the final sample points be $\mathbf{x}_k$ for $k=1 \dots K$.
+-3.  **Network Evaluation:** Evaluate the implicit volume model at each sample point $\mathbf{x}_k$. The model outputs color $\mathbf{c}_k$ and volume density $\sigma_k$.
+-4.  **Alpha Compositing:** Compute the transmittance $T_k$ and weight $w_k$ for each sample:
++1.  **Ray Generation:** Loop over cameras, generate NDC grids, and create ray bundles [S1, unofficial].
++2.  **Sampling:** Pass the ray bundle through `model.sampler` to generate sample points [S1, unofficial].
++3.  **Network Evaluation:** Call `model(ray_bundle)` to evaluate the implicit volume and aggregate results [S1, unofficial].
++4.  **Alpha Compositing:** Compute transmittance $T_k$ and weight $w_k$ for each sample [G]:
+     $$ \delta_k = t_{k+1} - t_k $$
+     $$ \hat{\sigma}_k = \sigma_k \delta_k $$
+@@ -35,9 +31,7 @@
+     The rendered color $\hat{C}$ is the weighted sum:
+     $$ \hat{C} = \sum_{k=1}^{K} w_k \mathbf{c}_k $$
+-    [S1, unofficial] (Note: Standard NeRF integration formula, implied by "aggregate results" and "alpha compositing" in parent article).
+-5.  **Loss Calculation:** Compute the loss between the rendered color $\hat{C}_i$ and the ground truth color $C_i$ for the batch of $N$ pixels:
++5.  **Loss Calculation:** Compute the loss between the rendered color $\hat{C}_i$ and the ground truth color $C_i$ for the batch of $N$ pixels [S1, unofficial]:
+     $$ \mathcal{L} = \frac{1}{N} \sum_{i=1}^{N} (\hat{C}_i - C_i)^2 $$
+-    [S1, unofficial]
+-6.  **Backpropagation:** Compute gradients $\frac{\partial \mathcal{L}}{\partial \theta}$ and update parameters using an optimizer [S1, unofficial].
++6.  **Reshape & Return:** Extract rendered features and depth, reshape to image dimensions, and save/return them [S1, unofficial].
+ 
+ **Parameters:**
+@@ -69,38 +63,50 @@
+     """
+     batch_size = cfg.training.batch_size
+-    
+-    # 1. Ray Generation
+-    # Generate random pixel coordinates and construct ray bundles
+-    # This step depends on the specific ray generation implementation in the parent article
+-    ray_bundles = generate_ray_bundles(cameras, batch_size)
+-    
+-    # 2. Sampling
+-    # Pass rays through the sampler to get sample points
+-    # The sampler handles hierarchical sampling if configured
+-    sample_points = model.sampler(ray_bundles)
+-    
+-    # 3. Network Evaluation
+-    # Evaluate the implicit volume at sample points
+-    # Returns color (RGB) and density (sigma)
+-    colors, densities = model(sample_points)
+-    
+-    # 4. Alpha Compositing
+-    # Compute transmittance, weights, and rendered color
+-    # This step must be differentiable
+-    rendered_colors = alpha_compositing(sample_points, colors, densities)
+-    
+-    # 5. Loss Calculation
+-    # Compute MSE loss between rendered and ground truth
+-    # gt_images should be aligned with the sampled pixels
+-    loss = compute_loss(rendered_colors, gt_images)
+-    
+-    # 6. Backpropagation
+-    # Compute gradients and update model parameters
+-    # This step is handled by the optimizer in the training loop
+-    loss.backward()
+-    
+-    return rendered_colors, loss
++    rendered_images = []
++    depth_maps = []
++    total_loss = 0.0
++
++    for cam in cameras:
++        # 1. Ray Generation: generate NDC grids and ray bundles [S1, unofficial]
++        ray_bundle = generate_ray_bundle(cam, batch_size) # [G]
++
++        # 2. Sampling: pass through sampler [S1, unofficial]
++        sample_points = model.sampler(ray_bundle) # [G]
++
++        # 3. Network Evaluation: evaluate implicit volume [S1, unofficial]
++        colors, densities = model(sample_points) # [G]
++
++        # 4. Alpha Compositing (differentiable) [G]
++        deltas = []
++        for i in range(len(sample_points) - 1):
++            d = sample_points[i+1] - sample_points[i]
++            deltas.append(d)
++        deltas.append(deltas[-1])
++        deltas = [d if all(d) == 0 else d for d in deltas] # [G] fix vector comparison bug
++        deltas = [abs(d) for d in deltas]
++        sigma_deltas = [densities[i] * deltas[i] for i in range(len(deltas))]
++        alphas = [1.0 - __import__('math').exp(-s) for s in sigma_deltas]
++        transmittances = []
++        t = 1.0
++        for a in alphas:
++            transmittances.append(t)
++            t *= (1.0 - a)
++        weights = [a * t for a, t in zip(alphas, transmittances)]
++        rendered_colors = sum([w * c for w, c in zip(weights, colors)])
++        rendered_depth = sum([w * p[2] for w, p in zip(weights, sample_points)])
++
++        # 5. Loss Calculation [S1, unofficial]
++        gt_colors = sample_gt_colors(gt_images, ray_bundle) # [G]
++        loss = sum([(rc - gc) ** 2 for rc, gc in zip(rendered_colors, gt_colors)]) / len(gt_colors)
++        total_loss += loss
++
++        rendered_images.append(rendered_colors)
++        depth_maps.append(rendered_depth)
++
++    # 6. Reshape & Return [S1, unofficial]
++    rendered_images = reshape_to_image(rendered_images, cameras) # [G]
++    depth_maps = reshape_to_image(depth_maps, cameras) # [G]
++    return rendered_images, depth_maps, total_loss / len(cameras)
+ ```
+-
+ ## Subtopics
+ 
+@@ -109,15 +115,15 @@
+ 
+ ## Operating characteristics
+-*   **Time Complexity:** Linear with respect to the number of samples per ray and the number of rays in the batch [S1, unofficial]. Hierarchical sampling adds a constant factor for the coarse pass [S1, unofficial].
+-*   **Memory Complexity:** Linear with respect to the number of samples per ray and the number of rays [S1, unofficial].
++*   **Time Complexity:** Not given in the sources.
++*   **Memory Complexity:** Not given in the sources.
+ *   **Measured Performance:** Not given in the sources.
+-*   **Scaling:** Scales with batch size and image resolution [S1, unofficial].
+-*   **Strengths:** End-to-end differentiable, allows optimization of both scene and camera parameters [S1, unofficial].
++*   **Scaling:** Scales with `cfg.training.batch_size` (number of random pixels sampled per iteration) [S1, unofficial].
++*   **Strengths:** End-to-end differentiable rendering pipeline [S1, unofficial].
+ *   **Limitations:** Computationally expensive, prone to overfitting if not regularized [S1, unofficial].
+-*   **When to use:** When training NeRF from images and needing to optimize camera poses or handle motion blur with event data [S1, unofficial][S2].
+-*   **When not to use:** When real-time rendering is required or when event data is not available [S2].
++*   **When to use:** Training NeRF from images, handling motion blur with event data [S1, unofficial][S2].
++*   **When not to use:** Not given in the sources.
+ 
+ ## Background
+-The Differentiable Volume Rendering Pipeline is based on the NeRF (Neural Radiance Fields) method proposed by Mildenhall et al. in 2020 [S1, unofficial]. It has been extended to handle event cameras and motion blur through methods like Event-Driven Bundle Adjustment (EBAD) [S2]. It is widely used in 3D reconstruction, novel view synthesis, and robotics [S1, unofficial][S2].
++The Differentiable Volume Rendering Pipeline is based on the NeRF (Neural Radiance Fields) method proposed by Mildenhall et al. in 2020 [S1, unofficial]. It has been extended to handle event cameras and motion blur through methods like Event-Driven Bundle Adjustment (EBAD) [S2]. It is widely used in 3D reconstruction and novel view synthesis [S1, unofficial][S2].
+ 
+ ## Sources

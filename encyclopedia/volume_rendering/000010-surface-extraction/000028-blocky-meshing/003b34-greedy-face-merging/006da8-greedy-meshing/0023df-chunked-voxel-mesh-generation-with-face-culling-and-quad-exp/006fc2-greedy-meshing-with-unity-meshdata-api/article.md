@@ -1,0 +1,144 @@
+# Greedy Meshing with Unity MeshData API
+
+Also called: MeshBuildJob
+
+## Overview
+A method to generate optimized voxel meshes using greedy mesher algorithms, executed in parallel via Unity Jobs, and written directly to GPU buffers using the MeshData API to avoid CPU-GPU synchronization overhead [S1, unofficial]. It distinguishes itself from standard `Mesh` modifications by allowing parallel job execution without locking the main thread or causing garbage collection spikes [S1, unofficial]. It builds on [Chunked Voxel Mesh Generation with Face Culling and Quad Expansion](3133-chunked-voxel-mesh-generation-with-face-culling-and-quad-exp.md) by handling the specific data transfer and buffer management required to apply the generated geometry to Unity's rendering pipeline.
+
+## How it works
+**Inputs:**
+- `Jobs`: A `NativeList` of chunk positions to process.
+- `Accessor`: A voxel data accessor providing voxel values for the greedy mesher.
+- `ChunkSize`: The dimensions of the voxel chunk (`int3`).
+- `MeshDataArray`: An array of writable mesh data structures, one per chunk, obtained via `Mesh.AllocateWritableMeshData`.
+- `VertexParams`: A `NativeArray` of 6 `VertexAttributeDescriptor` objects defining the vertex layout [S1, unofficial].
+
+**Outputs:**
+- Updated `MeshDataArray` containing vertex and index data.
+- `Results`: A mapping of chunk positions to their corresponding mesh indices in the `MeshDataArray` [S1, unofficial].
+
+**Data Structures:**
+- `VertexParams`: A `NativeArray` of 6 `VertexAttributeDescriptor` objects, allocated with `Allocator.Persistent` [S1, unofficial]. The layout is fixed as follows:
+    - Index 0: Position, `Float32`, 3 components
+    - Index 1: Normal, `Float32`, 3 components
+    - Index 2: Color, `Float32`, 4 components
+    - Index 3: TexCoord0, `Float32`, 3 components
+    - Index 4: TexCoord1, `Float32`, 2 components
+    - Index 5: TexCoord2, `Float32`, 4 components [S1, unofficial]
+- `meshBuffer`: A temporary structure returned by the greedy mesher, containing:
+    - `VertexBuffer`: A `NativeArray` of vertex data.
+    - `IndexBuffer0`: A `NativeArray` of indices (uint32).
+    - `IndexBuffer1`: A `NativeArray` of indices (uint32), potentially empty.
+
+**Steps:**
+1. Iterate over each `position` in the `Jobs` `NativeList`.
+2. Call `GreedyMesher.GenerateMesh(Accessor, position, ChunkSize)` to produce a `meshBuffer` [S1, unofficial].
+3. Retrieve the `Mesh` object from `MeshDataArray[index]`, where `index` corresponds to the current chunk's position in the array [S1, unofficial].
+4. Set vertex buffer parameters:
+   $$ \text{vertexCount} = \text{meshBuffer.VertexBuffer.Length} $$
+   Call `mesh.SetVertexBufferParams(vertexCount, VertexParams)` [S1, unofficial].
+5. Copy vertex data:
+   $$ \text{mesh.GetVertexData<Vertex>().CopyFrom(meshBuffer.VertexBuffer.AsArray())} $$ [S1, unofficial]
+6. Calculate total index count:
+   $$ \text{index0Count} = \text{meshBuffer.IndexBuffer0.Length} $$
+   $$ \text{index1Count} = \text{meshBuffer.IndexBuffer1.Length} $$
+7. Set index buffer parameters:
+   $$ \text{mesh.SetIndexBufferParams(index0Count + index1Count, IndexFormat.UInt32)} $$ [S1, unofficial]
+8. Get the index data array:
+   $$ \text{indexBuffer} = \text{mesh.GetIndexData<int>()} $$ [S1, unofficial]
+9. Copy the first index buffer:
+   $$ \text{NativeArray<int>.Copy(meshBuffer.IndexBuffer0.AsArray(), 0, indexBuffer, 0, index0Count)} $$ [S1, unofficial]
+10. If `index1Count > 1`, copy the second index buffer:
+    $$ \text{NativeArray<int>.Copy(meshBuffer.IndexBuffer1.AsArray(), 0, indexBuffer, index0Count, index1Count)} $$ [S1, unofficial]
+11. Set submesh count to 2:
+    $$ \text{mesh.subMeshCount} = 2 $$ [S1, unofficial]
+12. Create submesh descriptors:
+    - `descriptor0`: Covers indices `0` to `index0Count`.
+    - `descriptor1`: Covers indices `index0Count` to `index0Count + index1Count` [S1, unofficial].
+13. Set submeshes:
+    $$ \text{mesh.SetSubMesh(0, descriptor0, MeshUpdateFlags.DontRecalculateBounds)} $$
+    $$ \text{mesh.SetSubMesh(1, descriptor1, MeshUpdateFlags.DontRecalculateBounds)} $$ [S1, unofficial]
+14. Record the mapping:
+    $$ \text{Results.TryAdd(position, index)} $$ [S1, unofficial]
+15. Dispose of the temporary mesh buffer:
+    $$ \text{meshBuffer.Dispose()} $$ [S1, unofficial]
+
+**Pseudocode:**
+> **Unverified code.** The code below did not pass a test run against a reference implementation, or no test fits it, so it may contain errors.
+
+```python
+def ProcessChunk(index, position, mesh_data_array, vertex_params, greedy_mesher, accessor, chunk_size, results):
+    # Step 2: Generate mesh using the greedy mesher
+    mesh_buffer = greedy_mesher.GenerateMesh(accessor, position, chunk_size)
+    
+    # Step 3: Retrieve mesh data
+    mesh = mesh_data_array[index]
+    
+    # Step 4: Set vertex buffer parameters
+    vertex_count = mesh_buffer.vertex_buffer.length
+    mesh.set_vertex_buffer_params(vertex_count, vertex_params)
+    
+    # Step 5: Copy vertex data
+    vertex_data = mesh.get_vertex_data() # Assuming generic type handling or specific struct
+    vertex_data.copy_from(mesh_buffer.vertex_buffer.as_array())
+    
+    # Step 6: Calculate index counts and set buffer params
+    index0_count = mesh_buffer.index_buffer0.length
+    index1_count = mesh_buffer.index_buffer1.length
+    mesh.set_index_buffer_params(index0_count + index1_count, IndexFormat.UInt32)
+    
+    # Step 7: Get index data array
+    index_buffer = mesh.get_index_data()
+    
+    # Step 9: Copy first index buffer
+    NativeArray.copy(mesh_buffer.index_buffer0.as_array(), 0, index_buffer, 0, index0_count)
+    
+    # Step 10: Copy second index buffer if present
+    if index1_count > 1:
+        NativeArray.copy(mesh_buffer.index_buffer1.as_array(), 0, index_buffer, index0_count, index1_count)
+    
+    # Step 11: Set submesh count
+    mesh.sub_mesh_count = 2
+    
+    # Step 12: Create descriptors
+    descriptor0 = SubMeshDescriptor(0, index0_count)
+    descriptor1 = SubMeshDescriptor(index0_count, index1_count)
+    
+    # Step 13: Set submeshes
+    mesh.set_sub_mesh(0, descriptor0, MeshUpdateFlags.DontRecalculateBounds)
+    mesh.set_sub_mesh(1, descriptor1, MeshUpdateFlags.DontRecalculateBounds)
+    
+    # Step 14: Record mapping
+    results.try_add(position, index)
+    
+    # Step 15: Dispose temporary buffer
+    mesh_buffer.dispose()
+```
+
+**Parameters:**
+- `ChunkSize`: The dimensions of the voxel chunk, passed as `int3` to the job and the `GreedyMesher` [S1, unofficial].
+- `VertexParams`: An array of 6 `VertexAttributeDescriptor` objects defining the vertex layout, allocated with `Allocator.Persistent` [S1, unofficial].
+
+**Edge Cases and Pitfalls:**
+- **Index Buffer Splitting:** The mesh generation produces two separate index buffers (`IndexBuffer0` and `IndexBuffer1`). The implementation must handle this by concatenating them into a single index buffer array in the `MeshData` API. The second part is only copied if its length is greater than 1 [S1, unofficial].
+- **Garbage Collection:** Using standard `Mesh.SetVertices`/`Mesh.SetIndices` causes garbage collection spikes. This method avoids that by using `MeshData` API [S1, unofficial].
+
+## Subtopics
+
+### [Mesh Build Scheduling and Application](21983-mesh-build-scheduling-and-application.md)
+A scheduler that manages the lifecycle of mesh building jobs, handling job submission, completion, and the application of generated mesh data to Unity Mesh objects, including pool management for mesh instances. It distinguishes itself from its parent method by explicitly handling the synchronization between the asynchronous Unity Job System execution and the synchronous Unity Mesh API, ensuring that generated geometry is correctly mapped to persistent mesh objects via a chunk pool.
+
+## Operating characteristics
+- **Time Complexity:** Linear with respect to the number of chunks processed, as each chunk is processed independently in parallel.
+- **Memory Complexity:** Proportional to the number of chunks and the size of the voxel data. The `VertexParams` are allocated persistently.
+- **Performance:** Avoids CPU-GPU synchronization overhead by writing directly to GPU buffers via `MeshData` API [S1, unofficial].
+- **Strengths:** Parallel execution via Unity Jobs, no main thread locking, reduced garbage collection compared to standard Mesh modifications [S1, unofficial].
+- **Limitations:** Requires careful management of `MeshData` lifecycles and synchronization with the main thread for rendering [S1, unofficial].
+- **When to use:** When generating large voxel worlds with many chunks and needing high performance updates.
+- **When not to use:** For small, static meshes where the overhead of job setup and `MeshData` management outweighs the benefits.
+
+## Background
+This method is part of the Vloxy Engine project, which aims to provide a high-performance voxel engine for Unity [S1, unofficial]. It leverages Unity's Job System and `MeshData` API to achieve efficient mesh generation and update.
+
+## Sources
+[S1] BLaZeKiLL/VloxyEngine, https://github.com/BLaZeKiLL/VloxyEngine, fetched 2026-10-26 (unofficial)

@@ -1,0 +1,118 @@
+# 2D Slice Coordinate Mapping
+
+Also called: Slice indexing, Voxel-to-screen projection
+
+## Overview
+This method maps 2D screen coordinates $(u, v)$ to 3D voxel indices $(x, y, z)$ for a specific perpendicular slice extracted from a 3D volume array, handling axis-specific memory layouts and vertical flip conventions [S1, unofficial]. It differs from [AxisCut](18858-axiscut.md) by explicitly defining the coordinate transformation logic for rendering, and from [Patient-Aligned MPR Plane Construction](21407-patient-aligned-mpr-plane-construction.md) by assuming fixed anatomical axes (x, y, z) rather than arbitrary patient-aligned planes [G].
+
+## How it works
+**Inputs:**
+- `volume`: A 3D array with shape `(D, H, W)` corresponding to dimensions `(0, 1, 2)` [S1, unofficial].
+- `axis`: Integer specifying the extraction axis: `0` (sagittal), `1` (coronal), or `2` (axial) [S1, unofficial].
+- `u, v`: 2D screen coordinates (pixel indices) within the slice image [S1, unofficial].
+- `fixed_index`: The slice index along the fixed axis [S1, unofficial].
+
+**Outputs:**
+- `(x, y, z)`: Clipped 3D voxel indices into the original volume array [S1, unofficial].
+
+**Data Structures:**
+- The volume is stored as a 3D array where dimensions correspond to `(0, 1, 2)` [S1, unofficial]. Not given in the sources.
+
+**Steps:**
+1. Identify the fixed axis and the two varying axes based on `axis` [S1, unofficial].
+2. Map screen coordinates $(u, v)$ to the varying axes, applying a vertical flip for axes 0 and 1 [S1, unofficial].
+3. Assign the `fixed_index` to the fixed axis [S1, unofficial].
+4. Clip all resulting indices to the valid range $[0, \text{dimension\_size} - 1]$ [S1, unofficial].
+
+**Formulas and Logic:**
+Let $D, H, W$ be the sizes of dimensions 0, 1, and 2 respectively [S1, unofficial].
+
+- **Axis 2 (Axial):**
+  - Slice is `volume[z, :, :]` [S1, unofficial].
+  - Mapping: $x = u$, $y = v$, $z = \text{fixed\_index}$ [S1, unofficial].
+  - No flip applied [S1, unofficial].
+
+- **Axis 1 (Coronal):**
+  - Slice is `volume[:, y, :]` flipped vertically [S1, unofficial].
+  - Mapping: $x = u$, $z = D - 1 - v$, $y = \text{fixed\_index}$ [S1, unofficial].
+  - The vertical flip maps screen $v=0$ to the top of the volume (max $z$) [S1, unofficial].
+
+- **Axis 0 (Sagittal):**
+  - Slice is `volume[:, :, x]` flipped vertically [S1, unofficial].
+  - Mapping: $y = u$, $z = D - 1 - v$, $x = \text{fixed\_index}$ [S1, unofficial].
+  - The vertical flip maps screen $v=0$ to the top of the volume (max $z$) [S1, unofficial].
+
+**Pseudocode:**
+> **Unverified code.** The code below did not pass a test run against a reference implementation, or no test fits it, so it may contain errors.
+
+```python
+def map_slice_coordinates(volume, axis, u, v, fixed_index):
+    """
+    Maps 2D screen coordinates (u, v) to 3D voxel indices (x, y, z).
+    
+    Args:
+        volume: 3D array with shape (D, H, W) -> (dim0, dim1, dim2)
+        axis: 0 (sagittal), 1 (coronal), 2 (axial)
+        u: Horizontal screen coordinate
+        v: Vertical screen coordinate
+        fixed_index: Slice index along the fixed axis
+        
+    Returns:
+        tuple: (x, y, z) clipped voxel indices
+    """
+    D, H, W = volume.shape
+    
+    if axis == 2:
+        # Axial: dim0 is fixed, u->dim2(x), v->dim1(y)
+        x = u
+        y = v
+        z = fixed_index
+    elif axis == 1:
+        # Coronal: dim1 is fixed, u->dim2(x), v->dim0(z) flipped
+        x = u
+        z = D - 1 - v
+        y = fixed_index
+    elif axis == 0:
+        # Sagittal: dim2 is fixed, u->dim1(y), v->dim0(z) flipped
+        y = u
+        z = D - 1 - v
+        x = fixed_index
+    else:
+        raise ValueError("Axis must be 0, 1, or 2")
+
+    # Clip to bounds
+    x = max(0, min(x, W - 1))
+    y = max(0, min(y, H - 1))
+    z = max(0, min(z, D - 1))
+    
+    return (x, y, z)
+```
+
+**Edge Cases:**
+- Coordinates outside the volume bounds are clipped to the nearest valid index [S1, unofficial].
+- Vertical flips are applied for axes 0 and 1 to correct for screen coordinate system differences [S1, unofficial].
+- Non-unit cell sizes and physical spacing are not handled by this mapping function [G].
+
+## Subtopics
+
+### [GPU Volume Slicing (Advanced/Transform)](21426-gpu-volume-slicing-advanced-transform.md)
+This method renders a 2D slice from a 3D volume by applying an arbitrary 4x4 transformation matrix to screen coordinates, followed by scaling and centering, before sampling the volume texture [21426-gpu-volume-slicing-advanced-transform.md]. It differs from basic slice extraction by supporting complex spatial transformations (rotation, translation, non-uniform scaling) directly in the pixel shader, rather than relying on pre-computed slice geometries or fixed-axis alignment [21426-gpu-volume-slicing-advanced-transform.md]. Choose it when arbitrary plane orientations or dynamic camera transforms are required [21426-gpu-volume-slicing-advanced-transform.md].
+
+### Export 2D Slice
+Exports the 3D volume as a 2D image with dimensions $(width, height \times depth)$, effectively slicing or projecting the volume [S2]. Choose it for static image generation or data export rather than real-time rendering [S2].
+
+## Operating characteristics
+Time complexity: Not given in the sources.
+Memory complexity: Not given in the sources.
+Strengths: Not given in the sources.
+Limitations: Not given in the sources.
+When to use: Not given in the sources.
+When not to use: Not given in the sources.
+
+## Background
+Origin and development history: Not given in the sources.
+Usage context: Not given in the sources.
+
+## Sources
+[S1] kadmielp/MRI3D, https://github.com/kadmielp/MRI3D, fetched 2026-10-26 (unofficial)
+[S2] MagicaVoxel .vox, https://ephtracy.github.io/, fetched 2026-10-26

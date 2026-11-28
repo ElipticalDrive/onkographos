@@ -1,0 +1,306 @@
+--- v004.md
++++ v005.md
+@@ -1,137 +1,199 @@
+ # Röttger et al. Rendering
+ 
+-Also called: Pre-integration, Pre-integrated Volume Rendering, Texture-based VR, Texture-Based Volume Rendering with Pre/Post-Classification
++Also called: 3D Texture Volume Rendering with Pre-Integration, Texture-Based Volume Rendering with Pre/Post-Classification, Texture-based VR
+ 
+ ## Overview
+-Röttger et al. Rendering is a technique that mitigates the high computational cost of volume integration by approximating the rendering integral and moving the computation to a pre-process [S1, book]. It computes a 3D lookup table of colors and opacities parameterized by front scalar value, back scalar value, and distance, which is stored in a 3D texture for hardware-accelerated lookups during rendering [S1, book][S2, unofficial]. This method builds on [AR mapping to 3D texture](884-ar-mapping-to-3d-texture.md) by storing pre-computed integration results in texture memory to avoid per-voxel evaluation [S1, book]. It is distinguished from standard ray casting by replacing per-step integration with texture lookups, and from pure pre-classification by supporting arbitrary transfer functions including isosurface effects through the parameterization of the lookup table [S2, unofficial].
++Röttger et al. Rendering is an object-order volume rendering technique that utilizes 3D textures and view-port aligned slices to achieve high-quality visualization through pre-integration [S1]. It solves the problem of high computational cost and artifacts associated with integrating arbitrary (non-linear) transfer functions during rendering by approximating the volume rendering integral in a pre-computed 3D lookup table [S2, S3, book]. Unlike its siblings, it specifically enables hardware-accelerated interpolation along the ray within a tetrahedral cell to support arbitrary transfer functions, including isosurface effects, which linear transfer functions cannot handle without artifacts [S3, book][S4, unofficial].
+ 
+ ## How it works
+-The method consists of two phases: a pre-processing phase to generate the lookup table and a rendering phase to use it [G].
+ 
+ ### Inputs and Outputs
+-*   **Inputs:** Volume scalar data, transfer function (mapping scalar to color and opacity), and camera/view parameters [S1, book].
+-*   **Outputs:** A 3D texture containing pre-integrated color and opacity values, and the final rendered image [S1, book].
++**Inputs:**
++*   A scalar volume dataset.
++*   A transfer function mapping scalar values to color and opacity [S2, S3, book].
++*   Camera parameters (position, orientation) [S6, unofficial].
++*   Lighting parameters (ambient, diffuse, specular coefficients, light position, eye position) [S6, unofficial].
++
++**Outputs:**
++*   A rendered 2D image with correct color and opacity composition [S1][S6, unofficial].
+ 
+ ### Data Structures
+-The core data structure is a 3D texture cube [S4, unofficial].
+-*   **Dimensions:** The sources specify a tested limit of $512^3$ voxels [S4, unofficial]. A specific implementation used a $256^3$ cube [S4, unofficial].
+-*   **Format:** 4-component float texture (RGBA) [S4, unofficial].
+-*   **Content:**
+-    *   **X-axis:** Discrete front scalar values [S1, book][S2, unofficial].
+-    *   **Y-axis:** Discrete back scalar values [S1, book][S2, unofficial].
+-    *   **Z-axis:** Distances (thickness) between front and back faces [S1, book][S2, unofficial].
+-    *   **Color Channel:** Stores the pre-integrated color values [S1, book].
+-    *   **Alpha Channel:** Stores the pre-integrated opacity values [S1, book].
+ 
+-### Pre-processing: Lookup Table Generation
+-The lookup table is computed offline or at initialization [S1, book]. For a given transfer function, the integral of the volume rendering equation is computed for all combinations of front scalar, back scalar, and thickness [S2, unofficial].
++**1. Pre-Integration Lookup Table (LUT)**
++A 3D texture map parameterized by three axes [S2, book][S4, unofficial]:
++*   **X-axis:** Front scalar value ($s_f$) at the cell entry point.
++*   **Y-axis:** Back scalar value ($s_b$) at the cell exit point.
++*   **Z-axis:** Distance through the cell ($l$) or thickness [S2, S3, book][S4, unofficial].
++*   **Content:** The texture stores the pre-integrated color and opacity resulting from the volume rendering integral for the given parameters [S2, book][S5, unofficial].
++*   **Note on 2D Transfer Functions:** For transfer functions dependent on both scalar and gradient magnitude, a 4D table is infeasible. Instead, a 3D table is used where each slice corresponds to a constant gradient magnitude, assuming the gradient is constant per ray segment [S1].
+ 
+-1.  Iterate over all discrete values of front scalar (x-axis) [S1, book].
+-2.  Iterate over all discrete values of back scalar (y-axis) [S1, book].
+-3.  Iterate over all discrete distances (z-axis) [S1, book].
+-4.  Compute the integrated color and opacity for the triplet using the current transfer function [S1, book].
+-5.  Store the computed color and opacity in the 3D texture at coordinates corresponding to the triplet [S1, book].
++**2. Volume Data Texture**
++A 3D texture cube storing the volume data for rendering [S6, unofficial]:
++*   **Dimensions:** $256^3 \times 4$ voxels (float type) [S6, unofficial].
++*   **RGB Channels:** Normalized gradient values in range $[0, 1]$ [S6, unofficial].
++*   **Alpha Channel:** Opacity values in range $[0, 1]$ [S6, unofficial].
++*   **Gradient Storage:** Raw gradients can be negative. They are normalized to $[-1, 1]$ via scaling, then shifted to $[0, 1]$ for storage using the equation:
++    $$ \text{stored\_value} = \frac{\nabla f(x) + 1.0}{2.0} $$
++    [S6, unofficial].
+ 
+-*Partial Pre-integration:* To avoid recomputing the table when the transfer function changes, static components (exponentiation of distances) can be stored separately from dynamic components (color and opacity) [S1, book].
++### Numbered Steps
+ 
+-### Rendering Phase
+-During rendering, the pre-computed 3D table is used for lookups at each step in the volume [S1, book]. The method interpolates scalar values and ray segment lengths across the projected geometry to address the 3D texture [S3, unofficial].
++1.  **Data Loading and Gradient Calculation:**
++    *   Obtain opacity values for the volume class [S6, unofficial].
++    *   Calculate the gradient of each volume element using central differences [S6, unofficial].
++    *   Normalize gradients to $[-1, 1]$ and shift to $[0, 1]$ for texture storage [S6, unofficial].
+ 
+-1.  **Projection:** Project the volume cells (e.g., tetrahedra or subdivision polygons) onto the image plane [S2, S3, unofficial].
+-2.  **Interpolation:** For each fragment or pixel covered by a projected cell, interpolate three values across the polygon:
+-    *   $s_f$: The scalar function value on the front face [S3, unofficial].
+-    *   $s_b$: The scalar function value on the back face [S3, unofficial].
+-    *   $l$: The ray segment length (thickness) through the cell [S3, unofficial].
+-3.  **Lookup:** Use the interpolated values $(s_f, s_b, l)$ as texture coordinates (addresses) into the 3D texture [S3, unofficial].
+-4.  **Retrieval:** Sample the 3D texture to retrieve the pre-integrated color and opacity [S1, book][S3, unofficial].
+-5.  **Compositing:** The retrieved color and opacity are blended into the framebuffer using standard alpha blending to simulate the volume composition operator [S4, unofficial].
++2.  **Texture Creation and Loading:**
++    *   Reserve memory space for a 3D texture cube with dimensions being the smallest powers of two that can contain the data [S6, unofficial].
++    *   Fill the space with zeros.
++    *   Load the gradient data into the RGB channels and opacity into the Alpha channel of the 3D texture [S6, unofficial].
++    *   Upload the texture to GPU memory [S6, unofficial].
++
++3.  **Pre-Integration Table Generation (Offline):**
++    *   Compute the 3D table of colors and opacities for discrete front scalar values ($s_f$), back scalar values ($s_b$), and distances ($l$) [S2, book].
++    *   For arbitrary transfer functions, this table allows the hardware to look up the integrated color directly [S3, book][S4, unofficial].
++    *   *Partial Pre-Integration:* To allow interactive changes to the transfer function, store static components (exponentiation of distances) separately from dynamic components (color and opacity) [S2, book].
++
++4.  **Rendering (Object-Order Slicing):**
++    *   Determine the object axis (X, Y, or Z) most parallel to the projection axis [S6, unofficial].
++    *   Select the texture slice furthest from the camera along that axis [S6, unofficial].
++    *   Rotate the camera around the object and draw the texture slices starting from the furthest one [S6, unofficial].
++    *   During rasterization, use a fragment shader to perform shading and blending [S6, unofficial].
++
++5.  **Fragment Shader Processing:**
++    *   Sample the volume data texture at the fragment position [S6, unofficial].
++    *   Expand the stored gradient values from $[0, 1]$ back to $[-1, 1]$ for lighting calculations [S6, unofficial].
++    *   Apply the lighting model (ambient, diffuse, specular) using the expanded normal and the stored opacity [S6, unofficial].
+ 
+ ### Pseudocode
+-The following pseudocode illustrates the rendering lookup and blending process [G]. It assumes the 3D texture `texture` is already populated and parameter ranges are known.
+ 
+ ```python
+-def trilinear_interpolate(texture, u, v, w):
+-    # Performs standard trilinear interpolation over a 3D texture array.
+-    # texture is a 3D array of (color, opacity) tuples.
+-    # u, v, w are normalized coordinates in [0, 1].
+-    # Returns (color, opacity)
+-    u0, u1 = int(u * (texture.shape[0] - 1)), min(int(u * (texture.shape[0] - 1)) + 1, texture.shape[0] - 1)
+-    v0, v1 = int(v * (texture.shape[1] - 1)), min(int(v * (texture.shape[1] - 1)) + 1, texture.shape[1] - 1)
+-    w0, w1 = int(w * (texture.shape[2] - 1)), min(int(w * (texture.shape[2] - 1)) + 1, texture.shape[2] - 1)
++# Fragment Shader Implementation for Röttger et al. Rendering
++# Based on [S6, unofficial]
++
++function expand(v: float3) -> float3:
++    """
++    Reverses the normalization of gradient values stored in [0,1].
++    Returns values in [-1, 1].
++    """
++    return (v - 0.5) * 2.0
++
++function main(
++    texPos0: float3,          # Texture coordinates
++    globalAmbient: float3,    # Ambient light color
++    lightColor: float3,       # Light source color
++    lightPosition: float3,    # Light position
++    eyePosition: float3,      # Camera/Eye position
++    Ka: float3,               # Ambient reflection coefficient
++    Kd: float3,               # Diffuse reflection coefficient
++    Ks: float3,               # Specular reflection coefficient
++    shininess: float,         # Shininess exponent
++    samplerTex0: sampler3D    # 3D texture containing gradient (RGB) and opacity (A)
++) -> float4:
+     
+-    def lerp(a, b, t): return a + t * (b - a)
++    # Initialize output
++    OUT = float4(1.0, 1.0, 1.0, 1.0)
+     
+-    c00 = lerp(texture[u0][v0][w0], texture[u1][v0][w0], u - u0 / (texture.shape[0] - 1))
+-    c01 = lerp(texture[u0][v0][w1], texture[u1][v0][w1], u - u0 / (texture.shape[0] - 1))
+-    c10 = lerp(texture[u0][v1][w0], texture[u1][v1][w0], u - u0 / (texture.shape[0] - 1))
+-    c11 = lerp(texture[u0][v1][w1], texture[u1][v1][w1], u - u0 / (texture.shape[0] - 1))
++    # Sample the volume data texture
++    # RGB: Normalized gradient [0,1]
++    # A: Opacity [0,1]
++    texvalue = tex3D(samplerTex0, texPos0)
+     
+-    c0 = lerp(c00, c01, v - v0 / (texture.shape[1] - 1))
+-    c1 = lerp(c10, c11, v - v0 / (texture.shape[1] - 1))
+-    return lerp(c0, c1, w - w0 / (texture.shape[2] - 1))
+-
+-def render_fragment(s_f, s_b, l, s_f_max, s_b_max, l_max, texture, framebuffer_color, framebuffer_opacity):
+-    # 1. Normalize interpolated parameters to [0, 1] range for texture addressing
+-    u = max(0.0, min(1.0, s_f / s_f_max))
+-    v = max(0.0, min(1.0, s_b / s_b_max))
+-    w = max(0.0, min(1.0, l / l_max))
+-
+-    # 2. Lookup pre-integrated color and opacity
+-    color, opacity = trilinear_interpolate(texture, u, v, w)
+-
+-    # 3. Blend with existing framebuffer color using the over-operator
+-    final_color = color * opacity + framebuffer_color * (1.0 - opacity)
+-    final_opacity = opacity + framebuffer_opacity * (1.0 - opacity)
+-
+-    return final_color, final_opacity
++    # Recover normal vector from stored gradient
++    normal = expand(texvalue.rgb)
++    
++    # Set output alpha to sampled opacity
++    OUT.a = texvalue.a
++    
++    # Only compute lighting if opacity is non-zero
++    if OUT.a > 0.0:
++        # Ambient component
++        ambient = lightColor * Ka
++        
++        # Diffuse component
++        # Note: Source [S6, unofficial] uses dot(lightPosition, normal). 
++        # Standard Phong usually uses dot(normal, light_direction).
++        # We follow the source code exactly.
++        diffuse = max(dot(lightPosition, normal), 0.0) * Kd * lightColor
++        
++        # Specular component
++        # Calculate halfway vector between light and eye
++        halfway = normalize(lightPosition - eyePosition)
++        specular = pow(dot(halfway, normal), shininess) * Ks
++        
++        # Combine lighting components
++        OUT.rgb = ambient + diffuse + specular
++        
++    return OUT
+ ```
+ 
+-### Parameters
+-*   **Transfer Function:** Maps scalar values to color and opacity [S1, book].
+-*   **Lighting Model Components (Variant):** In object-space implementations using gradients, parameters include Ambient ($K_a$), Diffuse ($K_d$), Specular ($K_s$), Shininess, Light Color, Light Position, and Eye Position [S4, unofficial].
++### Parameters and Typical Values
++*   **Transfer Function:** Must be arbitrary; supports non-linear functions and isosurface effects [S3, book][S4, unofficial].
++*   **Lighting Model Components:** Ambient ($K_a$), Diffuse ($K_d$), Specular ($K_s$), Shininess, Light Color, Light Position, Eye Position [S6, unofficial].
++*   **3D Texture Limit:** $512^3$ voxels on tested hardware (GeForce FX) [S6, unofficial].
++*   **Volume Data Texture Size:** $256^3 \times 4$ voxels (float) [S6, unofficial].
+ 
+ ### Edge Cases and Pitfalls
+-*   **Transfer Function Changes:** Recomputing the lookup table is costly [S1, book].
+-*   **Gradient Sign Preservation (Variant):** If gradients are stored in the texture (as in the object-space variant), negative gradients must be normalized to $[-1, 1]$ and shifted to $[0, 1]$ for storage: $\text{stored} = (\nabla f + 1.0) / 2.0$ [S4, unofficial].
+-*   **Texture Access Performance:** 3D texture access is slower than 2D due to irregular memory access patterns and the cost of trilinear interpolation (8 texture accesses vs 4 for bilinear) [S4, unofficial].
+-*   **Fill Rate Limitation:** Performance is primarily limited by fill rate [S4, unofficial].
+-*   **Alpha Test Effectiveness:** The benefit of alpha testing (skipping transparent fragments) is inversely proportional to data density [S4, unofficial].
+-
+-## Subtopics
+-
+-### Object-Space Texture Rendering
+-*   **What it is:** A variant where volume data (gradient and opacity) is loaded into a 3D texture, and rendering is performed by rotating the camera and drawing texture slices (object-space) rather than ray casting.
+-*   **Difference:** Uses hardware interpolation of gradients for shading and blending, rather than pre-integrated color lookup for composition. It supports object-oriented geometry rendering.
+-*   **When to choose:** When shading quality is prioritized over the physical accuracy of volume composition, or when implementing specific lighting models on the GPU.
+-*   **Link:** [Object-Space Texture Rendering](885-object-space-texture-rendering.md)
+-
+-### Partial Pre-integration
+-*   **What it is:** A technique that separates the static, computationally expensive components of the integration (exponentiation of distances) from the dynamic components (color and opacity).
+-*   **Difference:** Allows interactive changes to the transfer function with virtually no overhead, unlike full pre-integration which requires table regeneration.
+-*   **When to choose:** When the user needs to interactively adjust the transfer function during rendering.
+-*   **Link:** [Partial Pre-integration](886-partial-pre-integration.md)
+-
+-### Pre-classification vs Post-classification
+-*   **What it is:** Pre-classification applies the transfer function to voxel samples before interpolation; post-classification interpolates samples first, then applies the transfer function [S4, unofficial].
+-*   **Difference:** Pre-classification results in well-defined images; post-classification results in diffuse images because interpolation is not commutative with the transfer function [S4, unofficial].
+-*   **When to choose:** Use pre-classification for sharp, well-defined boundaries [S4, unofficial].
+-*   **Link:** [Classification Techniques](887-classification-techniques.md)
++*   **Gradient Sign Preservation:** Gradients can be negative. They must be normalized to $[-1, 1]$ and shifted to $[0, 1]$ for storage in the texture [S6, unofficial]. Failure to do so results in incorrect normals.
++*   **Performance Limitation:** 3D texture access is slower than 2D due to irregular memory access patterns and higher computational cost (trilinear interpolation requires 8 texture accesses vs. 4 for bilinear) [S6, unofficial].
++*   **Fill Rate Limit:** Performance is primarily limited by fill rate. High zoom levels decrease FPS significantly because larger primitives generate more fragments [S6, unofficial].
++*   **Alpha Test Effectiveness:** The benefit of alpha testing (skipping transparent fragments) is inversely proportional to data density. Higher density reduces the benefit because more fragments are opaque and require blending [S6, unofficial].
++*   **4D Table Infeasibility:** Standard pre-integration for 2D transfer functions (scalar + gradient) requires a 4D table, which is infeasible. The method uses a 3D table assuming constant gradient per segment [S1].
+ 
+ ## Operating characteristics
+-*   **Time Complexity:** Rendering time is dominated by texture lookups and blending, which is $O(N)$ where $N$ is the number of fragments/pixels [G].
+-*   **Memory Complexity:** The 3D texture requires $D_x \cdot D_y \cdot D_z \cdot 4$ floats [S4, unofficial].
+-*   **Measured Performance:** Performance is primarily limited by fill rate. On a GeForce FX chip (1.6 billion texels/sec), high zoom levels significantly decreased FPS due to increased fragment generation [S4, unofficial].
+-*   **Scaling:** Performance degrades with higher zoom levels and higher data density (for alpha testing benefits) [S4, unofficial].
+-*   **Strengths:** Substantial performance improvements over standard ray casting; supports arbitrary transfer functions including isosurface effects; leverages hardware interpolation [S1, book][S2, unofficial].
+-*   **Limitations:** 3D texture access is slower than 2D; fill rate limited; pre-processing cost for transfer function changes; image quality can suffer from banding if 2D textures are used instead of 3D [S4, unofficial].
+-*   **When to use:** When interactive performance is required and the transfer function is static or can be handled via partial pre-integration [S1, book].
+-*   **When not:** When the transfer function changes frequently without partial pre-integration, or when fill rate is the bottleneck and high zoom levels are expected [S1, book][S4, unofficial].
++
++### Time and Memory Complexity
++*   **Pre-computation:** Computing the lookup table is costly, especially when the transfer function changes [S2, book]. Partial pre-integration mitigates this by separating static and dynamic components [S2, book].
++*   **Rendering:** The rendering step involves texture lookups and fragment shading. The complexity is dominated by the fill rate and the cost of 3D texture sampling [S6, unofficial].
++
++### Measured Performance
++*   **Hardware:** Tested on GeForce FX chip [S6, unofficial].
++*   **Fill Rate:** The GeForce FX has a fill rate of 1.6 billion texels per second [S6, unofficial].
++*   **Zoom Impact:** High zoom levels significantly decrease FPS due to increased fragment generation [S6, unofficial].
++
++### Strengths and Limitations
++*   **Strengths:**
++    *   Substantial performance improvements over standard integration [S2, book].
++    *   Supports arbitrary (non-linear) transfer functions without artifacts [S3, book][S4, unofficial].
++    *   Superior image quality compared to 2D textures due to trilinear interpolation, avoiding banding artifacts [S6, unofficial].
++    *   Allows interactive changes to optical properties with virtually no overhead if partial pre-integration is used [S2, book].
++*   **Limitations:**
++    *   3D texture access is slower than 2D [S6, unofficial].
++    *   Limited by 3D texture size (e.g., $512^3$ voxels) [S6, unofficial].
++    *   Performance degrades with high zoom levels [S6, unofficial].
++    *   Alpha testing benefits diminish with high data density [S6, unofficial].
++
++### When to Use
++*   When high-quality visualization with arbitrary, non-linear transfer functions is required.
++*   When hardware acceleration for volume integration is needed.
++*   When the volume size fits within the 3D texture limits of the target hardware.
++
++### When Not to Use
++*   When the transfer function changes frequently and partial pre-integration is not implemented (due to high LUT recomputation cost) [S2, book].
++*   When the volume data exceeds the 3D texture size limits of the hardware [S6, unofficial].
++*   When fill rate is a critical bottleneck and high zoom levels are expected [S6, unofficial].
+ 
+ ## Background
+-The method was introduced by Röttger et al. [S1, book][S2, S3, unofficial]. It is part of the broader development of texture-based volume rendering techniques that utilize GPU hardware for acceleration [S4, unofficial]. The approach builds on the idea of pre-integration to approximate the volume rendering integral, moving computation from the per-voxel ray casting step to a pre-process [S1, book]. It is often compared with other texture-based methods such as those by Engel, Kraus & Ertl [S4, unofficial][S1, book] and Weiler et al. [S2, S3, unofficial].
++
++### Origin
++The method was introduced by Röttger et al. [272] as an extension of pre-integrated volume rendering [S3, book]. It builds on the concept of pre-integration proposed by Engel et al. [EKE01] for 1D transfer functions using 2D tables [S1][S6, unofficial]. Röttger et al. extended this to allow arbitrary transfer functions by creating a 3D texture map parameterized by front scalar value, back scalar value, and distance [S3, book][S4, unofficial].
++
++### History and Development
++*   **Engel et al. [EKE01]:** Demonstrated pre-integration for 1D transfer functions using 2D tables [S1].
++*   **Röttger et al.:** Introduced the 3D texture map for arbitrary transfer functions, solving artifacts associated with linear transfer functions [S3, book].
++*   **Kniss et al. [KPI* 03]:** Proposed a special type of 2D transfer function representation based on the sum of Gaussians for analytical pre-integration [S1].
++*   **Partial Pre-Integration:** Moreland and Angel [04] proposed storing static components separately to allow interactive transfer function changes [S2, book].
++
++### Applications
++*   **STF Guided Segmentation:** Used for automatic setup of multi-dimensional transfer functions [S1].
++*   **High-Quality Visualization:** Applied in various practical examples for volume visualization [S1].
++*   **Object-Oriented Geometry Rendering:** Supports rendering of structured grids using object-space algorithms [S2, book][S6, unofficial].
+ 
+ ## Sources
+-[S1] PDF Direct Volume Rendering, https://www.sci.utah.edu/~stevec/classes/cs5630/dvr.pdf, fetched 2026-10-27 (book)
+-[S2] (PDF) Image-space visibility ordering for cell projection volume ..., https://www.researchgate.net/publication/8193687_Image-space_visibility_ordering_for_cell_projection_volume_rendering_of_unstructured_data, fetched 2026-10-29 (unofficial)
+-[S3] Cell projection of meshes with nonplanar faces, https://www.sciweavers.org/publications/cell-projection-meshes-non-planar-faces, fetched 2026-10-29 (unofficial)
+-[S4] Texture Mapping Based Volume Rendering, https://www.ciroduran.com/files/Tesis.pdf, fetched 2026-10-29 (unofficial)+
++[S1] Spatialized Transfer Functions, https://doi.org/10.2312/vissym/eurovis05/271-278, fetched 2026-10-26
++[S2] PDF Direct Volume Rendering, https://www.sci.utah.edu/~stevec/classes/cs5630/dvr.pdf, fetched 2026-10-27 (book)
++[S3] PDF Volume Visualization and Volume Graphics, https://www3.cs.stonybrook.edu/~mueller/teaching/cse332/volvisChapter.pdf, fetched 2026-10-28 (book)
++[S4] (PDF) Image-space visibility ordering for cell projection volume ..., https://www.researchgate.net/publication/8193687_Image-space_visibility_ordering_for_cell_projection_volume_rendering_of_unstructured_data, fetched 2026-10-29 (unofficial)
++[S5] Cell projection of meshes with nonplanar faces, https://www.sciweavers.org/publications/cell-projection-meshes-non-planar-faces, fetched 2026-10-29 (unofficial)
++[S6] Texture Mapping Based Volume Rendering, https://www.ciroduran.com/files/Tesis.pdf, fetched 2026-10-29 (unofficial)

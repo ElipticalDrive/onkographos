@@ -1,0 +1,75 @@
+--- v002.md
++++ v003.md
+@@ -1,51 +1,41 @@
+ # Coarse-to-Fine Hierarchical Sampling
+ 
+-Also called: Hierarchical Sampling, Two-Stage Sampling, Coarse-Fine NeRF
++Also called: Hierarchical Sampling, Two-Stage Sampling, Proposal Sampling
+ 
+ ## Overview
+-Coarse-to-Fine Hierarchical Sampling is a ray sampling strategy that improves the detail and accuracy of neural radiance field (NeRF) rendering by using two distinct networks: a coarse network and a fine network [S1, unofficial][S2][S3, unofficial]. It solves the problem of inefficient uniform sampling, where many samples fall in empty space, by first estimating the opacity distribution of the scene with a coarse pass and then concentrating fine samples in regions of high opacity [S1, S4, unofficial]. Unlike standard uniform sampling, this two-tier approach clusters additional samples near opaque locations, allowing the model to learn high-frequency details without the computational cost of uniformly dense sampling across the entire ray [S1, S4, unofficial]. It sets itself apart from its siblings by establishing the foundational two-stage pipeline where the coarse network's output directly guides the probability density function (PDF) for the fine network's sampling distribution [S2][S4, unofficial].
++Coarse-to-Fine Hierarchical Sampling is a strategy that uses a lightweight "coarse" network to estimate the opacity distribution along a ray, then uses that estimate to guide a denser, "fine" sampling pass. It solves the problem of inefficient uniform sampling by concentrating computational effort in regions of high opacity while skipping free space . It sets itself apart from uniform sampling by clustering additional samples near opaque regions identified by the coarse pass, and from single-network variants like [Mip-NeRF 360 Proposal Sampling](5408-mip-nerf-360-proposal-sampling.md) by maintaining two distinct MLPs with separate parameters .
+ 
+ ## Shared principles
+-The family operates on rays defined by origin $\mathbf{o}$ and direction $\mathbf{d}$, bounded by near $t_n$ and far $t_f$. The process consists of two distinct rendering passes.
++The family shares the mechanism of decoupling the estimation of the sampling distribution from the final color/density prediction.
+ 
+-1.  **Coarse Pass:**
+-    *   **Sampling:** Generate $N_C$ sample depths $t_c$ uniformly along the ray. Jittering is often applied to break symmetry [S4, unofficial].
+-        $$ t_c^{(i)} = t_n + (t_f - t_n) \frac{i + \mathcal{U}[0,1]}{N_C}, \quad i = 0, \dots, N_C-1 $$
+-    *   **Query:** Evaluate $\text{MLP}_{coarse}$ at positions $\mathbf{x}_c = \mathbf{o} + t_c \mathbf{d}$ to obtain raw outputs $\mathbf{raw}_c \in \mathbb{R}^{N_C \times 4}$ (RGB and volume density $\sigma$) [S4, unofficial].
+-    *   **Rendering:** Convert $\mathbf{raw}_c$ to weights $w_c$ using alpha compositing [S5, unofficial]:
+-        *   Segment distances: $\delta_i = t_{c}^{(i+1)} - t_{c}^{(i)}$. Append $\delta_{N_C} = 10^{10}$ [S5, unofficial].
+-        *   Density: $\hat{\sigma}_i = \text{ReLU}(\sigma_i + \mathcal{N}(0, \text{raw\_noise\_std}^2))$ [S5, unofficial].
+-        *   Opacity: $\alpha_i = 1 - \exp(-\hat{\sigma}_i \delta_i)$ [S5, unofficial].
+-        *   Transmittance: $T_i = \exp(-\sum_{j=1}^{i-1} \hat{\sigma}_j \delta_j)$, with $T_1 = 1$ [S5, unofficial].
+-        *   Weights: $w_i = \alpha_i T_i$ [S5, unofficial].
+-
+-2.  **Hierarchical Sampling (Fine):**
+-    *   **PDF Construction:** Use $w_c$ as a probability density function. Compute midpoints $t_{mid}^{(i)} = (t_c^{(i)} + t_c^{(i+1)}) / 2$ [S5, unofficial].
+-    *   **Sampling:** Sample $N_F$ new depths $t_f$ via inverse transform sampling from the distribution defined by $w_c$ and $t_{mid}$ [S4, S5, unofficial].
+-    *   **Gradient Cut:** Detach $t_c$ and $w_c$ from the computation graph to prevent gradients from flowing back through the non-differentiable sampling step to the coarse network [S4, S5, unofficial].
+-
+-3.  **Fine Pass:**
+-    *   **Concatenation:** Combine coarse and fine depths $t_{fine} = \text{sort}([t_c, t_f])$ [S4, S5, unofficial].
+-    *   **Query:** Evaluate $\text{MLP}_{fine}$ at $\mathbf{x}_{fine} = \mathbf{o} + t_{fine} \mathbf{d}$ [S4, S5, unofficial].
+-    *   **Rendering:** Compute final color $\mathbf{C}_{fine}$ using the same alpha compositing logic as the coarse pass [S5, unofficial].
++1.  **Coarse Estimation:** A coarse network $\text{MLP}_{coarse}$ is queried at $N_C$ uniformly (or stratified) spaced depths $t_c$ along the ray $[\mathbf{o}, \mathbf{d}]$. It outputs raw densities $\sigma_c$ and colors $\mathbf{c}_c$.
++2.  **Weight Computation:** Alpha compositing is applied to the coarse outputs to compute weights $w_c$:
++    $$ \alpha_i = 1 - \exp(-\hat{\sigma}_i \delta_i) $$
++    $$ T_i = \exp\left(-\sum_{j=1}^{i-1} \hat{\sigma}_j \delta_j\right) $$
++    $$ w_i = \alpha_i T_i $$
++    where $\delta_i$ is the segment length and $\hat{\sigma}$ may include noise .
++3.  **Hierarchical Sampling:** $N_F$ new depths $t_f$ are sampled from the distribution defined by $w_c$. This is typically done via inverse transform sampling using the cumulative distribution function (CDF) of $w_c$ .
++4.  **Gradient Cut:** The coarse samples $t_c$ and weights $w_c$ are detached from the computation graph before hierarchical sampling to prevent gradients from flowing back through the non-differentiable sampling step to the coarse network .
++5.  **Fine Rendering:** The coarse and fine depths are concatenated, sorted, and queried by $\text{MLP}_{fine}$. The final color is rendered using alpha compositing on the fine samples .
+ 
+ ## Subtopics
+ 
+ ### [Coarse-to-Fine NeRF](3406-coarse-to-fine-nerf.md)
+-The foundational method establishing the two-stage pipeline where the coarse network's output directly guides the PDF for the fine network's sampling distribution.
++The canonical implementation using stratified uniform coarse sampling and inverse transform sampling for the fine pass. It uses a fixed heuristic for the PDF construction.
+ 
+ ### [TermiNeRF](8828-terminerf.md)
+-Replaces uniform/hierarchical sampling with a learned sampling distribution using a lightweight sampling network and a heavier color network, achieving $\le 1$ second per image.
++Replaces the heuristic coarse pass with a learned **Sampling Network** that predicts weights for bins along a parameterized ray segment. It uses centered-logarithmic sampling and max-resampling to align ground truth weights from a pre-trained color network.
+ 
+ ### [NeRF-ID](8867-nerf-id.md)
+-Replaces the heuristic coarse-to-fine sampling with a differentiable 'proposer' module, enabling end-to-end training of the entire system.
++Replaces the heuristic coarse-to-fine sampling with a differentiable **Proposer** module (e.g., Transformer, Pool, or MLPMix) that takes coarse features and positions as input to directly output fine sample locations, enabling end-to-end training.
+ 
+ ## Background
+-The method was introduced by Mildenhall et al. in the original NeRF paper [S2]. It addresses the inefficiency of uniform sampling in neural radiance fields.
++Originated in [NeRF](3406-coarse-to-fine-nerf.md) (Mildenhall et al., 2020) to improve detail learning without proportional computational cost . It established the standard two-MLP architecture for neural radiance fields. Subsequent works like [TermiNeRF](8828-terminerf.md) and [NeRF-ID](8867-nerf-id.md) refined the sampling distribution estimation from heuristic to learned.
+ 
+ ## Sources
+-[S1] TermiNeRF: Accelerating Neural Radiance Fields with Learned Sampling, https://arxiv.org/abs/2203.07076, 2022-03-14
+-[S2] NeRF: Representing Scenes as Neural Radiance Fields for View Synthesis, https://arxiv.org/abs/2003.08934, 2020-03-16
+-[S3] Mip-NeRF: A Multiscale Representation for Anti-Aliasing Neural Radiance Fields, https://arxiv.org/abs/2111.12077, 2021-11-23
+-[S4] NeRF: Representing Scenes as Neural Radiance Fields for View Synthesis (Official Implementation Notes), https://github.com/bmild/nerf, 2020-03-16
+-[S5] NeRF: Representing Scenes as Neural Radiance Fields for View Synthesis (PyTorch3D/Instant-NGP Implementation Details), https://github.com/NVlabs/instant-ngp, 2021-06-01+[S1] TermiNeRF notes
++[S2] TermiNeRF notes
++[S3] Coarse-to-Fine NeRF notes
++[S4] Coarse-to-Fine NeRF notes
++[S5] Coarse-to-Fine NeRF notes
++[S6] Coarse-to-Fine NeRF notes

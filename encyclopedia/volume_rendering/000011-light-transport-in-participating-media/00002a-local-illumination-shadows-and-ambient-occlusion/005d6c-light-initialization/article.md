@@ -1,0 +1,197 @@
+# Light Initialization
+
+Also called: Per-Vertex Lighting Initialization, Vertex Shader Lighting Setup, Static Light Parameter Derivation
+
+## Overview
+Light Initialization prepares the lighting state for a scene or volume by defining light sources, their parameters, and the initial geometric context (normals, directions) required for subsequent shading calculations. It solves the problem of establishing a consistent baseline illumination before iterative refinement or real-time rendering begins. It is distinguished from sibling methods like [Direct Illumination with Shadow Rays](2011-direct-illumination-with-shadow-rays.md) by focusing on the *setup* phase—generating light entities and vertex attributes—rather than the per-pixel evaluation of light transport.
+
+## How it works
+The method varies significantly depending on the rendering context (differentiable inverse rendering vs. real-time voxel games vs. procedural terrain). It generally involves two distinct phases: **Scene Light Setup** (defining light sources) and **Vertex Shader Initialization** (preparing per-vertex data for shading).
+
+### Inputs and Outputs
+*   **Inputs:** Scene geometry (mesh or voxel grid), camera parameters, initial light candidates (e.g., ceiling grid, emissive objects), and optionally a single reference rendering or unit radiance test.
+*   **Outputs:** A list of active light sources with defined positions, colors, intensities, and ranges; vertex buffers containing transformed normals and light/view directions.
+
+### Data Structures
+
+#### Light Uniforms (Real-time/Vertex Shader Context)
+Defined in [S2, unofficial], the light state is passed to the shader via a uniform struct:
+*   `ambient_colors`: `vec4`
+*   `diffuse_colors`: `vec4`
+*   `specular_colors`: `vec4`
+*   `coords`: `vec4` (light position/direction)
+
+#### Vertex Attributes (Terrain/Mesh Context)
+Defined in [S2, unofficial], the vertex buffer contains:
+*   `terrain_coordinates`: `vec4` (location 0)
+*   `terrain_color`: `vec4` (location 1)
+*   `terrain_normal`: `vec3` (location 2)
+*   `terrain_shininess`: `float` (location 3)
+
+#### Static Light Parameters (Voxel Context)
+Defined in [S3, unofficial], a `PointLight` structure is constructed with:
+*   `position`: Derived from emitter render position.
+*   `range`: `emit + 2.0`.
+*   `color`: `base_color * intensity`.
+*   `shadows`: `true`.
+*   `suppress`: Tuple `(suppress_scale, emit)` used to cancel flood fill artifacts.
+
+### Steps
+
+#### Phase 1: Scene Light Setup (Differentiable/Offline Context)
+Based on [S1], this phase initializes lights for a room-scale scene:
+1.  **Grid Generation:** Split the room ceiling into a grid of area lights. Scale each light's effective area down by a ratio of 0.8.
+2.  **Frustum Culling:** Remove lights that intersect the camera frustum or are completely behind the camera.
+3.  **Ambient Simulation:** Add one large area light behind the camera. Add one light per invisible wall to simulate an "invisible window" effect.
+4.  **Emissive Conversion:** Turn visible windows and lamps into emissive objects. For windows, add a simple frame geometry. For lamps, make the largest visible rendered part emissive.
+5.  **Radiance Initialization:** Try a number of uniform light radiance values. Perform a single rendering with unit radiance for each candidate. Pick the radiance value that minimizes the down-sampled L1 loss on luminance images compared to a target.
+
+#### Phase 2: Vertex Shader Lighting Setup (Real-time Context)
+Based on [S2, unofficial], this phase prepares per-vertex data:
+1.  **Normal Transformation:** Transform the vertex normal using the normal matrix and normalize it.
+    $$ \mathbf{n}_{world} = \text{normalize}(\mathbf{N} \cdot \mathbf{n}_{local}) $$
+2.  **Light Direction Computation:** Compute the normalized light direction from the light's uniform coordinates.
+    $$ \mathbf{l} = \text{normalize}(\mathbf{c}_{light}) $$
+3.  **View Direction Computation:** Compute the view direction (standard implementation, details cut off in source [S2, unofficial]).
+
+#### Phase 3: Static Light Parameter Derivation (Voxel Context)
+Based on [S3, unofficial], this phase calculates parameters for static emitters (e.g., torches) in a voxel game:
+1.  **Emit Intensity:** Let $E$ be the emitter's peak level (0..15). Clamp to at least 1: $E_{clamp} = \max(E, 1)$.
+2.  **Hue-Normalized Color:** Divide each RGB channel by $E_{clamp}$.
+3.  **Intensity Calculation:** Calculate intensity $I$ using a flicker factor $F$:
+    $$ I = 1.8 \cdot \left(\frac{E_{clamp}}{14.0}\right) \cdot F $$
+4.  **Suppress Scale Calculation:** Calculate $S$ to cancel flood fill artifacts:
+    $$ S = \frac{E_{clamp}}{15.0 \cdot \max(I, 0.01)} $$
+5.  **Light Construction:** Construct a `PointLight` with:
+    *   Position: From emitter render position.
+    *   Range: $E_{clamp} + 2.0$.
+    *   Color: $\mathbf{C}_{base} \cdot I$.
+    *   Shadows: Enabled.
+    *   Suppress: $(S, E_{clamp})$.
+
+### Pseudocode
+
+> **Unverified code.** The code below did not pass a test run against a reference implementation, or no test fits it, so it may contain errors.
+
+```python
+def initialize_lighting_voxel(emitter_emit_level, flicker_factor, base_color, emitter_render_pos):
+    """
+    Initializes static light parameters for a voxel emitter.
+    Based on [S3, unofficial].
+    """
+    # 1. Clamp emit intensity
+    emit = max(emitter_emit_level, 1)
+    
+    # 2. Calculate intensity
+    # intensity = 1.8 * (emit / 14.0) * flicker
+    intensity = 1.8 * (emit / 14.0) * flicker_factor
+    
+    # 3. Calculate suppress scale
+    # suppress_scale = emit / (15.0 * intensity.max(0.01))
+    suppress_scale = emit / (15.0 * max(intensity, 0.01))
+    
+    # 4. Construct Light
+    light = PointLight(
+        position=emitter_render_pos,
+        range=emit + 2.0,
+        color=base_color * intensity,
+        shadows=True,
+        suppress=(suppress_scale, emit)
+    )
+    return light
+
+def initialize_lighting_vertex_shader(terrain_normal, normal_matrix, light_coords):
+    """
+    Prepares lighting vectors for a vertex shader.
+    Based on [S2, unofficial].
+    """
+    # 1. Transform and normalize normal
+    # normal = normalize(normal_matrix * terrain_normal)
+    world_normal = normalize(mat3(normal_matrix) * terrain_normal)
+    
+    # 2. Compute light direction
+    # light_direction = normalize(vec3(light0.coords))
+    light_direction = normalize(vec3(light_coords.x, light_coords.y, light_coords.z))
+    
+    # 3. Compute view direction (standard implementation)
+    # view_direction = normalize(camera_position - vertex_position)
+    # Note: Specific vertex position not provided in source [S2, unofficial]
+    view_direction = normalize(camera_position - vertex_position)
+    
+    return world_normal, light_direction, view_direction
+
+def initialize_lighting_differentiable(scene_geometry, camera, target_luminance):
+    """
+    Initializes lights for differentiable room rendering.
+    Based on [S1].
+    """
+    # 1. Generate ceiling grid lights
+    ceiling_lights = split_ceiling_into_grid(scene_geometry, scale_ratio=0.8)
+    
+    # 2. Cull lights
+    active_lights = []
+    for light in ceiling_lights:
+        if not intersects_frustum(light, camera) and not behind_camera(light, camera):
+            active_lights.append(light)
+            
+    # 3. Add ambient/invisible window lights
+    active_lights.append(add_large_area_light_behind_camera(camera))
+    for wall in invisible_walls:
+        active_lights.append(add_light_per_wall(wall))
+        
+    # 4. Convert emissive objects
+    for obj in visible_windows:
+        obj.make_emissive(add_frame=True)
+    for lamp in visible_lamps:
+        largest_part = get_largest_visible_part(lamp)
+        largest_part.make_emissive()
+        
+    # 5. Optimize radiance
+    best_radiance = None
+    min_loss = infinity
+    
+    for radiance_candidate in uniform_radiance_values:
+        # Single rendering with unit radiance scaled by candidate
+        rendered_image = render(scene_geometry, active_lights, radiance_candidate)
+        
+        # Compute down-sampled L1 loss on luminance
+        loss = l1_loss(downsample(rendered_image.luminance()), target_luminance)
+        
+        if loss < min_loss:
+            min_loss = loss
+            best_radiance = radiance_candidate
+            
+    return active_lights, best_radiance
+```
+
+### Parameters
+*   **Scale Ratio:** 0.8 (for ceiling grid lights) [S1].
+*   **Soft Radius:** 0.15 (default for voxel shadows, overridable via `WILDFORGE_LIGHT_RADIUS`) [S3, unofficial].
+*   **Flicker Factor:** Time-varying factor for voxel light intensity [S3, unofficial].
+
+### Edge Cases and Pitfalls
+*   **Zero Intensity:** In voxel initialization, intensity is clamped to a minimum of 0.01 in the denominator of `suppress_scale` to avoid division by zero [S3, unofficial].
+*   **Frustum Intersection:** Lights intersecting the camera frustum must be explicitly removed to prevent visual artifacts or culling errors [S1].
+*   **Unit Radiance Assumption:** The differentiable method assumes light transport is linear in light intensity, requiring only a single rendering with unit radiance to scale results [S1].
+
+## Subtopics
+
+### Static Light Parameter Derivation
+A variant specific to voxel-based games (e.g., Minecraft-alpha style). It calculates render parameters (position, color, intensity, range, suppression) for static light emitters based on block definitions and a flicker factor. It is chosen when implementing static, deterministic lighting for voxel environments where flood fill artifacts need suppression. It differs from general vertex shader setup by operating on block-level emitter data rather than mesh vertices [S3, unofficial].
+
+## Operating characteristics
+*   **Time Complexity:**
+    *   Vertex Shader Setup: $O(V)$ where $V$ is the number of vertices, as it processes each vertex once [S2, unofficial].
+    *   Differentiable Initialization: $O(N \cdot R)$ where $N$ is the number of radiance candidates and $R$ is the cost of a single rendering [S1].
+    *   Voxel Parameter Derivation: $O(L)$ where $L$ is the number of light emitters, constant time per emitter [S3, unofficial].
+*   **Memory Complexity:** $O(L)$ for storing light uniform data and $O(V)$ for vertex attributes [S2, unofficial].
+*   **Strengths:** Provides a fast, deterministic baseline for lighting. The differentiable approach allows for automatic optimization of light intensity from a single image [S1]. The voxel method handles static lighting efficiently with artifact suppression [S3, unofficial].
+*   **Limitations:** The differentiable method requires a target image and multiple renders for optimization [S1]. The voxel method is limited to static emitters and simple point lights [S3, unofficial]. Vertex shader setup depends on correct normal matrix transformation [S2, unofficial].
+
+## Background
+Light Initialization is a fundamental step in computer graphics pipelines, appearing in various forms across different rendering contexts. The concept of setting up light sources and vertex attributes is standard in real-time rendering [S2, unofficial]. The specific technique of using differentiable rendering to optimize light radiance from a single photo was introduced in the context of room reconstruction [S1]. The voxel-based static light derivation is specific to custom voxel game engines [S3, unofficial].
+
+## Sources
+[S1] PSDR-Room: Single Photo to Scene using Differentiable Rendering, https://doi.org/10.1145/3610548.3618165, fetched 2026-11-08
+[S2] vittoboa/procedural-terrain-generation, https://github.com/vittoboa/procedural-terrain-generation, fetched 2026-10-27 (unofficial)
+[S3] A Minecraft-alpha-style voxel game written in Rust with a custom engine, https://github.com/dollspace-gay/Wildforge, fetched 2026-10-26 (unofficial)

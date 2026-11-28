@@ -1,0 +1,213 @@
+--- v005.md
++++ v006.md
+@@ -4,114 +4,121 @@
+ 
+ ## Overview
+-A volume rendering optimization technique that rasterizes bounding geometry to compute start and end positions for ray marching, skipping empty space by discarding fragments that are not at the minimum depth value [S1, unofficial]. It exploits hardware-accelerated rasterization to skip over empty space by rasterizing bounding geometries, such as bounding boxes of leaf nodes of a tree structure [S2, unofficial]. Unlike standard octree empty space skipping, this method moves the major cost of empty space skipping into a rasterization stage that produces per-pixel lists of non-empty ray segments [S2, unofficial].
++Rasterizing Bounding Geometry for Empty Space Skipping is a volume rendering optimization that replaces hierarchical tree traversal on the GPU with hardware-accelerated rasterization to determine ray marching intervals [S2, unofficial]. It solves the problem of high overhead associated with traversing empty-space skipping data structures (such as octrees) during rendering by generating a coarse bounding geometry and using fragment depth values to clip empty space [S1, unofficial][S2, unofficial]. It sets itself apart from [Min-Max Block Culling](8368-min-max-block-culling.md) by using explicit geometric primitives (quads/boxes) and depth testing rather than scalar min-max values, and from [Early Shader Termination](969-early-shader-termination.md) by performing culling in a dedicated rasterization pass rather than within the ray-casting shader logic.
+ 
+ ## How it works
+-**Inputs:**
+-*   Volume texture `gridTex` containing maximum iso values per voxel [S1, unofficial].
+-*   Threshold iso value for determining active voxels [S1, unofficial].
+-*   Coarse grid dimensions (e.g., $32 \times 32 \times 25$ for a $256 \times 256 \times 200$ volume with $8^3$ voxel cells) [S1, unofficial].
++The method operates in two main phases: geometry generation and a two-pass rendering pipeline.
+ 
+-**Outputs:**
+-*   Ray start and end positions for each pixel [S1, unofficial].
+-*   Rendered volume image [S1, unofficial].
++### Inputs and Outputs
++*   **Input:** A volume texture `gridTex` containing maximum iso values per coarse grid cell, and a threshold iso value defining visibility.
++*   **Output:** A rendered image where rays are marched only between computed start and end depths, skipping empty regions.
+ 
+-**Data Structures:**
+-*   `gridTex`: 3D texture where each voxel stores the maximum iso value of the underlying fine-grained volume region [S1, unofficial].
+-*   Bounding Geometry: A set of quads representing the boundaries between active and inactive regions in the coarse grid [S1, unofficial].
++### Data Structures
++*   **`gridTex`**: A 3D texture where each voxel stores the maximum iso value of the underlying fine-grained volume data. The dimensions are derived from the fine volume dimensions divided by the coarse grid cell size.
++    *   Example: For a $256 \times 256 \times 200$ volume with $8^3$ voxel cells, `gridTex` dimensions are $32 \times 32 \times 25$ [S1, unofficial].
++*   **Bounding Geometry**: A triangle mesh (composed of quads) representing the boundaries between active and inactive coarse grid cells.
++*   **Offscreen Buffer**: Stores minimum and maximum depth values for each fragment.
++*   **Main Buffer**: Stores the final color output.
+ 
+-**Steps:**
++### Steps
++1.  **Initialization**: Generate `gridTex` by sampling the fine volume texture. Each voxel in `gridTex` contains the maximum iso value found within its corresponding coarse grid cell [S1, unofficial].
++2.  **Geometry Generation**:
++    *   Define an active voxel as one where the maximum iso value exceeds the threshold iso value [S1, unofficial].
++    *   Iterate through all pairs of neighboring voxels in `gridTex`.
++    *   If one voxel is active and its neighbor is inactive, generate a quad at the boundary between them [S1, unofficial].
++    *   This process is repeated whenever the threshold iso value changes [S1, unofficial].
++3.  **First Pass (Depth Computation)**:
++    *   Render the generated bounding geometry to an offscreen buffer.
++    *   For each fragment, store the minimum depth ($z_{min}$) and maximum depth ($z_{max}$) of the bounding geometry intersected by the view ray [S1, unofficial][S2, unofficial].
++4.  **Second Pass (Rendering)**:
++    *   Render the front faces of the bounding geometry to the main buffer.
++    *   Discard fragments that are not at the minimum depth value ($z_{min}$) [S1, unofficial]. This ensures only the front-most bounding surface is processed.
++    *   Compute the start and end positions for the ray marching using the stored $z_{min}$ and $z_{max}$ values [S1, unofficial].
++    *   March the ray through the volume texture using these computed bounds [S1, unofficial].
+ 
+-1.  **Initialization:** Generate the volume texture `gridTex` [S1, unofficial]. For each voxel in the coarse grid, compute the maximum iso value from the underlying fine-grained volume data [S1, unofficial].
+-2.  **Generate Bounding Geometry:** Given a threshold iso value, determine active voxels [S1, unofficial]. A grid voxel is active if its value in `gridTex` is above the threshold [S1, unofficial]. For each pair of neighboring voxels in `gridTex`, generate a quad if one voxel is active and the other is inactive [S1, unofficial]. This process must be repeated whenever the iso value changes [S1, unofficial].
+-3.  **First Pass (Depth Buffering):** Render the bounding geometry to an offscreen buffer [S1, unofficial]. Store the minimum and maximum depth values for each fragment covered by the geometry [S1, unofficial].
+-4.  **Second Pass (Rendering):** Render the front faces of the bounding geometry again to the main buffer [S1, unofficial].
+-5.  **Fragment Discard:** In the fragment shader, discard fragments that are not at the minimum depth value [S1, unofficial]. This ensures that only the front-most entry point into a non-empty region is processed [S1, unofficial].
+-6.  **Ray Setup:** Compute the start and end positions for the ray using the minimum and maximum depth values obtained from the first pass [S1, unofficial]. The fragment positions of the front and back faces of the rasterized bounding geometry serve as these start and end points [S2, unofficial].
+-7.  **Ray Marching:** March the ray through the volume using the computed start and end positions [S1, unofficial].
++### Pseudocode
++```python
++# Initialization
++# gridTex dimensions: (W, H, D)
++# volume dimensions: (W*cell_size, H*cell_size, D*cell_size)
++gridTex = create_3d_texture(W, H, D)
++for z in range(D):
++    for y in range(H):
++        for x in range(W):
++            # Compute max iso value in the coarse cell
++            max_val = 0.0
++            for dz in range(cell_size):
++                for dy in range(cell_size):
++                    for dx in range(cell_size):
++                        val = sample_volume(x*cell_size + dx, y*cell_size + dy, z*cell_size + dz)
++                        if val > max_val:
++                            max_val = val
++            gridTex[x, y, z] = max_val
+ 
+-**Pseudocode:**
++# Geometry Generation
++bounding_geometry = []
++for z in range(D):
++    for y in range(H):
++        for x in range(W):
++            if gridTex[x, y, z] <= threshold:
++                continue
++            # Check neighbors to find boundaries
++            neighbors = [
++                (x+1, y, z), (x-1, y, z),
++                (x, y+1, z), (x, y-1, z),
++                (x, y, z+1), (x, y, z-1)
++            ]
++            for nx, ny, nz in neighbors:
++                if is_out_of_bounds(nx, ny, nz) or gridTex[nx, ny, nz] > threshold:
++                    continue
++                # Generate quad at boundary between (x,y,z) and (nx,ny,nz)
++                quad = generate_quad_at_boundary((x,y,z), (nx,ny,nz))
++                bounding_geometry.append(quad)
+ 
+-```python
+-def generate_bounding_geometry(gridTex, threshold, dims):
+-    # dims = (W, H, D)
+-    # gridTex is a list of lists of lists: gridTex[x][y][z]
+-    active = [[[gridTex[x][y][z] > threshold for z in range(dims[2])] for y in range(dims[1])] for x in range(dims[0])]
+-    quads = []
+-    for x in range(dims[0]):
+-        for y in range(dims[1]):
+-            for z in range(dims[2]):
+-                if active[x][y][z]:
+-                    # Check +x neighbor
+-                    if x + 1 >= dims[0] or not active[x + 1][y][z]:
+-                        quads.append(((x, y, z), (x, y + 1, z), (x, y + 1, z + 1), (x, y, z + 1)))
+-                    # Check -x neighbor
+-                    if x - 1 < 0 or not active[x - 1][y][z]:
+-                        quads.append(((x + 1, y, z), (x + 1, y + 1, z), (x + 1, y + 1, z + 1), (x + 1, y, z + 1)))
+-                    # Check +y neighbor
+-                    if y + 1 >= dims[1] or not active[x][y + 1][z]:
+-                        quads.append(((x, y, z), (x + 1, y, z), (x + 1, y, z + 1), (x, y, z + 1)))
+-                    # Check -y neighbor
+-                    if y - 1 < 0 or not active[x][y - 1][z]:
+-                        quads.append(((x, y + 1, z), (x + 1, y + 1, z), (x + 1, y + 1, z + 1), (x, y + 1, z + 1)))
+-                    # Check +z neighbor
+-                    if z + 1 >= dims[2] or not active[x][y][z + 1]:
+-                        quads.append(((x, y, z), (x + 1, y, z), (x + 1, y + 1, z), (x, y + 1, z)))
+-                    # Check -z neighbor
+-                    if z - 1 < 0 or not active[x][y][z - 1]:
+-                        quads.append(((x, y + 1, z + 1), (x + 1, y + 1, z + 1), (x + 1, y, z + 1), (x, y, z + 1)))
+-    return quads
++# First Pass: Compute Depth Bounds
++offscreen_buffer = create_depth_buffer()
++render(bounding_geometry, target=offscreen_buffer)
++# Store min and max depth for each pixel in offscreen_buffer
+ 
+-# First Pass: Render bounding geometry to offscreen buffer
+-# Not given in the sources. Typically uses a depth-only render pass.
+-# Implementation: Bind offscreen framebuffer, set depth test to LESS, draw quads.
+-
+-# Second Pass: Render front faces to main buffer
+-# Not given in the sources. Typically uses a standard fragment shader.
+-# Implementation: Bind main framebuffer, set depth test to EQUAL, draw quads.
+-
+-# Fragment shader logic for second pass
+-def fragment_shader():
+-    # Read depth bounds from offscreen buffer
+-    # Not given in the sources. Requires sampling the depth texture at current fragment coordinates.
+-    min_depth = read_buffer_value(offscreen_buffer, DEPTH_MIN)
+-    max_depth = read_buffer_value(offscreen_buffer, DEPTH_MAX)
+-
+-    # Discard if not at minimum depth
+-    if current_fragment_depth != min_depth:
++# Second Pass: Render Volume
++main_buffer = create_color_buffer()
++for each pixel (u, v):
++    z_min = offscreen_buffer.min_depth[u, v]
++    z_max = offscreen_buffer.max_depth[u, v]
++    
++    # Discard if not at minimum depth (front-most face)
++    if current_depth != z_min:
+         discard()
+-
+-    # Compute ray start and end positions
+-    # Not given in the sources. Requires inverse projection/view matrix multiplication.
+-    ray_start = depth_to_world(min_depth)
+-    ray_end = depth_to_world(max_depth)
+-
++    
++    # Compute ray start and end
++    ray_start = depth_to_world(z_min)
++    ray_end = depth_to_world(z_max)
++    
+     # March ray
+-    # Not given in the sources. Standard ray-marching loop sampling volume_data.
+-    result = ray_march(ray_start, ray_end, volume_data)
+-    return result
++    color = march_ray(ray_start, ray_end)
++    main_buffer[u, v] = color
+ ```
+ 
+-**Parameters:**
+-*   Threshold iso value: Determines which voxels are considered active [S1, unofficial].
+-*   Coarse grid size: Determines the resolution of the bounding geometry [S1, unofficial].
+-
+-**Edge Cases:**
+-*   Changing iso values requires regenerating the bounding geometry [S1, unofficial].
+-*   Precision issues in depth buffering may affect the accuracy of start/end positions [G].
++### Parameters and Edge Cases
++*   **Threshold Iso Value**: Determines which coarse cells are active. Changing this requires regenerating the bounding geometry [S1, unofficial].
++*   **Coarse Grid Cell Size**: Affects the resolution of the empty space skipping. Larger cells reduce geometry complexity but may skip less empty space or include more empty space in the marching interval [S1, unofficial].
++*   **Edge Cases**: If a ray does not intersect any bounding geometry, it implies the entire ray path is empty (or outside the volume bounds), and no marching is performed [G]. Precision issues in depth buffer comparisons may cause incorrect discarding if $z_{min}$ and $z_{max}$ are not stored with sufficient precision [G].
+ 
+ ## Subtopics
+ 
+ ### [SparseLeap Rasterization](5154-sparseleap-rasterization.md)
+-SparseLeap is a method for efficient empty space skipping in very large, sparse volume data, such as terabyte-sized microscopy volumes, by exploiting hardware-accelerated rasterization to avoid hierarchy traversal on the GPU. It solves the problem of fragmented space subdivisions making empty regions hard to skip and the infeasibility of pre-computing well-adapted space subdivisions due to frequent changes in active objects. Unlike standard octree empty space skipping, SparseLeap scales better to large, sparse data by moving the major cost of empty space skipping into a rasterization stage that produces per-pixel lists of non-empty ray segments. It is agnostic of the underlying data structure used for managing volume data, such as page-table hierarchies or octrees.
++SparseLeap is a method for efficient empty space skipping in very large, sparse volume data, such as terabyte-sized microscopy volumes. It solves the problem of fragmented space subdivisions making empty regions hard to skip and the infeasibility of pre-computing well-adapted space subdivisions due to frequent changes in active objects. It sets itself apart from its siblings by exploiting hardware-accelerated rasterization to create per-pixel ray segment lists, thereby avoiding hierarchy traversal on the GPU during the ray-casting stage. Unlike standard octree empty space skipping, SparseLeap scales better to large, sparse data. It is agnostic of the underlying data structure used for managing volume data (e.g., page-table hierarchies or octrees).
++
++### [Texture Box Approximation](13615-texture-box-approximation.md)
++Texture Box Approximation is a method for accelerating volume rendering by approximating the volume data with a set of bounding boxes, called texture boxes, which are rasterized to efficiently clip empty space from the rendering pipeline. It differs from level-of-detail methods that rasterize lower-resolution blocks by focusing on spatial occupancy to discard empty regions entirely before fragment shader execution.
+ 
+ ## Operating characteristics
+-*   **Time Complexity:** Depends on the number of active bounding geometry fragments [S2, unofficial]. Rasterization is hardware-accelerated, potentially faster than CPU/GPU tree traversal [S2, unofficial].
+-*   **Memory Complexity:** Requires storage for `gridTex` and the bounding geometry [S1, unofficial].
+-*   **Performance:** Can lead to fewer look-ups into the empty-space skipping data structure during rendering when compared to octree structures [S2, unofficial].
+-*   **Strengths:** Avoids hierarchy traversal on the GPU [S2, unofficial].
+-*   **Limitations:** Requires regenerating geometry when iso values change [S1, unofficial].
++*   **Time Complexity**: The geometry generation step is $O(N)$ where $N$ is the number of coarse grid cells. The rendering passes are dominated by rasterization, which is generally efficient on modern GPUs. The ray marching step is reduced to only active regions.
++*   **Memory Complexity**: Requires storage for `gridTex`, the bounding geometry mesh, and the offscreen depth buffer. The bounding geometry size depends on the surface area of the active regions [S1, unofficial].
++*   **Performance**: Can lead to fewer look-ups into the empty-space skipping data structure during rendering when compared to octree structures [S2, unofficial]. Hardware-accelerated rasterization is exploited to skip over empty space [S2, unofficial].
++*   **Strengths**: Avoids complex tree traversal logic on the GPU; leverages standard graphics pipeline hardware; effective for dynamic threshold changes if geometry regeneration is fast enough.
++*   **Limitations**: Requires regenerating geometry when the threshold changes; may generate many small primitives if the active region is complex; depth buffer precision may affect accuracy.
+ 
+ ## Background
+-The technique was proposed by Liu et al. [LCDP13] and further utilized by Hadwiger et al. [HAAB+ 18] to avoid hierarchy traversal on the GPU [S2, unofficial]. It is part of the broader field of object-order empty space skipping [S2, unofficial].
++The technique was proposed by Liu et al. [LCDP13] and Hadwiger et al. [HAAB+ 18] as an alternative to GPU-based tree traversal for empty space skipping [S2, unofficial]. It is part of the broader family of object-order empty space skipping methods.
+ 
+ ## Sources

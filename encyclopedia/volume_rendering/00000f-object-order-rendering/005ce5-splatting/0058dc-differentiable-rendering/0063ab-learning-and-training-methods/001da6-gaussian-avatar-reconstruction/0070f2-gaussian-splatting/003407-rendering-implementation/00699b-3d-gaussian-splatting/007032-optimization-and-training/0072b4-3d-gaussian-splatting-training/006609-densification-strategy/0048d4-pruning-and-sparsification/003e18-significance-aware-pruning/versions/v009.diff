@@ -1,0 +1,181 @@
+--- v008.md
++++ v009.md
+@@ -4,104 +4,110 @@
+ 
+ ## Overview
+-Significance-Aware Pruning is a pruning strategy for 3D Gaussian Splatting that removes primitives based on their accumulated contribution to the rendered image, rather than solely on opacity or scale [S2]. It solves the problem of standard opacity pruning removing large, low-opacity Gaussians that are critical for scene structure and transmittance [S2]. Unlike [Pruning and Opacity Management](9314-pruning-and-opacity-management.md) which relies on static opacity thresholds, this method spares Gaussians with low opacity but high alpha-blending significance, improving the trade-off between reconstruction quality and scene compactness [S2].
++Significance-Aware Pruning is a sparsification strategy for 3D Gaussian Splatting that prevents the removal of geometrically large or structurally important Gaussians that happen to have low opacity [S2]. Unlike standard opacity pruning, which risks damaging scene structures by discarding low-opacity primitives, this method evaluates a Gaussian's contribution to the final image by accumulating its alpha blending coefficients ($w_k$) across all training views [S2]. It spares Gaussians with low opacity but high significance, thereby optimizing the trade-off between scene compactness and reconstruction fidelity [S2].
+ 
+ ## How it works
+ **Inputs and Outputs:**
+-*   **Input:** The set of 3D Gaussians $\mathcal{G} = \{g_1, \dots, g_n\}$, where each $g_k$ has opacity $o_k$, and the accumulated alpha blending coefficients $w_k^p$ for each pixel $p$ across all views rendered between the current densification step and the previous one [S2].
+-*   **Output:** A subset of $\mathcal{G}$ with Gaussians marked for removal [S2].
++*   **Input:** The set of active 3D Gaussians $G$, where each Gaussian $g_k$ has an opacity $o_k$ and a covariance matrix defining its spatial extent.
++*   **Output:** A pruned set of Gaussians $G'$ with reduced cardinality.
+ 
+ **Data Structures:**
+-*   $\sigma_k$: A scalar value representing the accumulated significance of Gaussian $k$ [S2].
+-*   $\Sigma$: A list or array of all $\sigma_k$ values for $k \in \{1, \dots, n\}$, i.e., $\Sigma = \{\sigma_1, \dots, \sigma_n\}$ [S2].
++*   **Accumulated Significance ($\sigma_k$):** A scalar value stored per Gaussian, initialized to zero at the start of a pruning interval.
++*   **Significance Set ($\Sigma$):** A collection of all $\sigma_k$ values for the current population of $n$ Gaussians.
+ 
+ **Parameters:**
+ *   $o_{min}$: The minimum opacity threshold. Gaussians with $o_k < o_{min}$ are candidates for pruning [S2].
+-*   $N_{prune}$: The number of Gaussians to prune in the current step [S2]. In practice, the pruning rate or count may decay over iterations (e.g., using a decay factor of 0.7) to gradually reduce the number of pruned Gaussians as training progresses [S3].
+-*   $N_{\text{pixel}}$: The total number of pixels across all views rendered between densification steps [S2].
++*   $N_{prune}$: The number of Gaussians to remove in a single pruning step [S2].
++*   **Pruning Schedule:** In the baseline implementation, pruning is applied 6 times until iteration 22K. The first pruning rate is 60%, with a decay factor of 0.7 for subsequent iterations [S3].
+ 
+-**Steps:**
+-1.  **Accumulate Significance:** For each Gaussian $g_k$, compute its accumulated significance $\sigma_k$ by summing its alpha blending coefficients $w_k^p$ over all pixels $p$ in all views rendered since the last densification step:
+-    $$ \sigma_k = \sum_{p=1}^{N_{\text{pixel}}} w_k^p $$
+-    Here, $w_k^p$ is the alpha blending coefficient of Gaussian $k$ at pixel $p$ [S2].
+-
+-2.  **Build Significance Set:** Construct the set $\Sigma$ containing $\sigma_k$ for all $n$ Gaussians:
+-    $$ \Sigma = \{\sigma_1, \dots, \sigma_n\} $$
+-    [S2]
+-
+-3.  **Identify Candidates:** Select the subset of Gaussians $\mathcal{C}$ where the opacity is below the threshold:
+-    $$ \mathcal{C} = \{ g_k \mid o_k < o_{min} \} $$
+-    [S2]
+-
+-4.  **Select Pruning Targets:** From the candidate set $\mathcal{C}$, identify the $N_{prune}$ Gaussians with the lowest accumulated significance values in $\Sigma$. Let this subset be $\mathcal{P}$:
+-    $$ \mathcal{P} = \text{argmin}_{g_k \in \mathcal{C}} (\sigma_k, N_{prune}) $$
+-    If $|\mathcal{C}| < N_{prune}$, prune all candidates in $\mathcal{C}$ [S2].
+-
+-5.  **Prune:** Remove all Gaussians in $\mathcal{P}$ from $\mathcal{G}$ [S2].
++**Algorithm Steps:**
++1.  **Accumulate Significance:** Between two densification steps, for every pixel $p$ in every training view, compute the alpha blending coefficient $w_k^p$ contributed by Gaussian $k$. Sum these contributions to compute the accumulated significance $\sigma_k$ for each Gaussian $k$:
++    $$
++    \sigma_k = \sum_{p=1}^{N_{\text{pixel}}} w_k^p
++    $$
++    where $N_{\text{pixel}}$ is the total number of pixels across all views [S2].
++2.  **Form Significance Set:** Construct the set $\Sigma$ containing the significance values for all $n$ Gaussians:
++    $$
++    \Sigma = \{\sigma_1, \dots, \sigma_n\}
++    $$
++    [S2].
++3.  **Select Candidates:** Identify the subset of Gaussians with opacity below the threshold:
++    $$
++    C = \{ g_k \in G \mid o_k < o_{min} \}
++    $$
++    [S2].
++4.  **Rank and Prune:** From the candidate set $C$, select the $N_{prune}$ Gaussians with the lowest accumulated significance values in $\Sigma$. Prune these Gaussians from the scene [S2].
+ 
+ **Pseudocode:**
+ ```python
+-def significance_aware_pruning(gaussians, alpha_blending_coeffs, o_min, n_prune):
++def significance_aware_pruning(Gaussians, o_min, N_prune):
+     """
+-    gaussians: List of Gaussian objects, each with attributes 'opacity' and 'id'.
+-    alpha_blending_coeffs: Dict mapping gaussian_id to a list/array of w_k^p for all pixels.
+-    o_min: Float, minimum opacity threshold.
+-    n_prune: Int, number of Gaussians to prune.
+-    Returns: Set of gaussian_ids to prune.
++    Prunes Gaussians based on accumulated alpha blending significance.
++    
++    Args:
++        Gaussians: List of Gaussian objects, each with attributes:
++            - opacity (float): Current opacity o_k.
++            - sigma (float): Accumulated significance sigma_k.
++        o_min (float): Minimum opacity threshold for pruning candidates.
++        N_prune (int): Number of Gaussians to prune.
++        
++    Returns:
++        List of Gaussian objects: The pruned set of Gaussians.
+     """
+-    # Step 1 & 2: Compute significance sigma_k and build set Sigma
+-    sigmas = {}
+-    for g in gaussians:
+-        g_id = g.id
+-        # Sum alpha blending coefficients over all pixels
+-        w_list = alpha_blending_coeffs[g_id]
+-        sigma_k = sum(w_list)
+-        sigmas[g_id] = sigma_k
++    # Step 1: Identify candidates based on opacity
++    candidates = [g for g in Gaussians if g.opacity < o_min]
+     
+-    # Step 3: Identify candidates with low opacity
+-    candidates = []
+-    for g in gaussians:
+-        if g.opacity < o_min:
+-            candidates.append(g)
+-            
+     if not candidates:
+-        return set()
++        return Gaussians
+         
+-    # Step 4: Select n_prune Gaussians with lowest sigma among candidates
+-    # Sort candidates by their sigma value (ascending)
+-    candidates_sorted = sorted(candidates, key=lambda g: sigmas[g.id])
++    # Step 2: Rank candidates by accumulated significance (ascending)
++    # Note: sigma_k must be accumulated over all pixels/views between densification steps
++    candidates.sort(key=lambda g: g.sigma)
+     
+-    # Take the bottom n_prune
+-    prune_count = min(n_prune, len(candidates_sorted))
+-    to_prune_ids = set()
+-    for i in range(prune_count):
+-        to_prune_ids.add(candidates_sorted[i].id)
+-        
+-    # Step 5: Return IDs to prune
+-    return to_prune_ids
++    # Step 3: Select the bottom N_prune to prune
++    # If fewer candidates than N_prune, prune all candidates
++    num_to_prune = min(N_prune, len(candidates))
++    gaussians_to_remove = set(candidates[:num_to_prune])
++    
++    # Step 4: Return pruned list
++    pruned_gaussians = [g for g in Gaussians if g not in gaussians_to_remove]
++    
++    return pruned_gaussians
+ ```
+ 
+ **Edge Cases and Pitfalls:**
+-*   **Large Low-Opacity Gaussians:** Standard opacity pruning removes large Gaussians with low opacity, which can damage scene structure because these Gaussians contribute significantly to transmittance and alpha blending [S2]. Significance-aware pruning avoids this by checking $\sigma_k$ [S2].
+-*   **Size Pruning Interference:** Standard size pruning (removing large Gaussians) can cause an increase in total Gaussian count as multiple small Gaussians replace one large one, harming compactness [S2]. This method focuses on opacity and significance, avoiding the adverse effects of size-based removal [S2].
+-*   **Accumulation Window:** The accumulation of $w_k^p$ must occur between densification steps [S2].
+-*   **Decay of Pruning Rate:** In practice, $N_{prune}$ or the pruning rate may decay over iterations (e.g., using a decay factor of 0.7) to gradually reduce the number of pruned Gaussians as training progresses [S3].
++*   **Standard Opacity Pruning Failure:** Standard opacity pruning ignores spatial extent. A large Gaussian with low opacity may still contribute significantly to alpha blending via high transmittance, yet would be incorrectly removed by opacity-only checks [S2].
++*   **Standard Size Pruning Failure:** Removing large Gaussians often leads to multiple small Gaussians replacing them, increasing the total count and potentially damaging scene structures [S2].
++*   **Precision:** The accumulation of $w_k^p$ must be precise to distinguish between truly insignificant Gaussians and those with low opacity but high structural importance [S2].
+ 
+ ## Subtopics
+ 
+ ### [Quality Feedback Count Adaptation](10207-quality-feedback-count-adaptation.md)
+-A dynamic variant that adjusts the final Gaussian count and pruning aggressiveness based on training PSNR, replacing fixed hyperparameters with a dynamic keep ratio.
++Quality Feedback Count Adaptation is a dynamic pruning mechanism that adjusts the final Gaussian count based on the training PSNR, using a keep ratio function to compress or expand the population relative to the learning allowance. It replaces the fixed keep ratio hyperparameter with a dynamic value computed from training progress, controlling the fraction of Gaussians retained during pruning and final selection.
++
++### Overlap-based Pruning
++A pruning strategy that eliminates Gaussians based on overlap—those with significant overlap with others are considered redundant and removed to reduce overlap without compromising scene accuracy [S4].
++
++### Top-M State and Sparsification
++A sparsity heuristic that retains only the M largest evidence entries per Gaussian to manage memory and ambiguity, breaking conjugacy but maintaining injection bounds [S5, unofficial].
++*   **Step:** Identify the M largest entries of $H_i$. Zero out evidence entries for labels not in $T_i$. Refresh hard label $\ell_i$ based on the new top entry [S5, unofficial].
++*   **Formula:** $T_i = \{j_{i,1}, \dots, j_{i,M}\} \subseteq J$, where $j_{i,m}$ are indices of the M largest entries of $H_i$ in descending order [S5, unofficial]. $\ell_i = j_{i,1}$ if $S_i > 0$, else $0$, where $S_i = \sum_j H_{i,j}$ [S5, unofficial]. $\pi_{i,m} = H_{i, j_{i,m}} / \sum_{j \in T_i} H_{i,j}$ for $m=1,\dots,M$ and $S_i > 0$ [S5, unofficial].
++*   **Parameter:** $M$: Number of retained labels per Gaussian. Value: 3 [S5, unofficial].
++*   **Layout:** Implementation uses a dense $N \times J$ tensor for scatter updates but retains at most $M$ nonzero evidence entries per Gaussian logically [S5, unofficial].
++*   **Pitfall:** Label loss: A label leaving $T_i$ loses its stored evidence permanently. Ambiguity measure: The gap $\pi_{i,1} - \pi_{i,2}$ is a heuristic for ambiguity, not calibrated posterior uncertainty [S5, unofficial].
+ 
+ ## Operating characteristics
+-*   **Time Complexity:** Computing $\sigma_k$ requires iterating over all pixels for all Gaussians between densification steps. This adds overhead to the rendering pass or requires maintaining a buffer of $w_k^p$ [S2].
+-*   **Memory Complexity:** Requires storing $w_k^p$ for all Gaussians and pixels between densification steps, or accumulating $\sigma_k$ incrementally [S2].
+-*   **Performance:** Improves scene compactness by reducing the total number of Gaussians needed for high-quality reconstruction, as it avoids retaining insignificant low-opacity Gaussians while preserving significant ones [S2]. It can reduce storage and potentially improve rendering FPS by reducing the primitive count [S2].
+-*   **Strengths:** More accurately reflects a Gaussian's contribution to the scene by considering both opacity and spatial extent (via alpha blending) [S2]. Prevents the removal of large, structurally important Gaussians with low opacity [S2].
+-*   **Limitations:** Requires additional computation to accumulate and sum alpha blending coefficients [S2].
++*   **Time Complexity:** The accumulation step requires iterating over all pixels in all training views for all Gaussians, which is $O(N_{\text{views}} \cdot N_{\text{pixel}} \cdot N_{\text{gaussians}})$ per pruning interval. However, this is typically done between densification steps, not every frame, mitigating the cost.
++*   **Memory Complexity:** Requires storing an additional scalar $\sigma_k$ per Gaussian.
++*   **Performance:** By sparing low-opacity but high-significance Gaussians, the method improves scene compactness without degrading reconstruction quality [S2]. It effectively reduces the number of Gaussians while maintaining high PSNR and SSIM metrics [S3].
++*   **Strengths:** Prevents the structural damage caused by naive opacity or size pruning [S2]. More accurately reflects a Gaussian's contribution to the scene by considering both opacity and spatial extent (via alpha blending) [S2].
++*   **Limitations:** Requires accumulating coefficients over multiple views, adding overhead to the training loop between densification steps [S2].
+ 
+ ## Background
+-Originated as an improvement to the standard 3D Gaussian Splatting densification algorithm, specifically addressing the limitations of opacity and size pruning [S2]. It was introduced in the context of improving Adaptive Density Control for 3D Gaussian Splatting [S2]. The method integrates the Gaussian's opacity $o_k$ and its alpha blending coefficient $w_k$ into the pruning decision to better evaluate contribution to scene reconstruction [S2].
++Significance-Aware Pruning was introduced to address the limitations of standard pruning in 3D Gaussian Splatting, specifically the adverse effects of size and opacity-only pruning on scene reconstruction and compactness [S2]. It builds on the shared principles of [Densification Strategy](6234-densification-strategy.md). The method was proposed in "Improving Adaptive Density Control for 3D Gaussian Splatting" [S2]. Variants and related approaches include LightGaussian, which uses significance-driven pruning based on ray intersections [S1], and EAGLES, which employs a coarse-to-fine strategy [S1].
+ 
+ ## Sources
+ [S1] Compression in 3D Gaussian Splatting: A Survey of Methods, Trends, and Future Directions, https://doi.org/10.1109/TCSVT.2026.3676048, fetched 2026-10-26
+ [S2] Improving Adaptive Density Control for 3D Gaussian Splatting, https://doi.org/10.5220/0013308500003912, fetched 2026-10-30
+-[S3] Trick-GS: A Balanced Bag of Tricks for Efficient Gaussian Splatting, https://doi.org/10.1109/icassp49660.2025.10889395, fetched 2026-10-30+[S3] Trick-GS: A Balanced Bag of Tricks for Efficient Gaussian Splatting, https://doi.org/10.1109/icassp49660.2025.10889395, fetched 2026-10-30
++[S4] 3DGS.zip: A survey on 3D Gaussian Splatting Compression Methods, https://arxiv.org/abs/2407.09510v5, fetched 2026-10-26
++[S5] DIGS: Distribution-Informed Gaussian Splatting for Training-Free Open-Vocabulary 3D Segmentation, https://doi.org/10.48550/arxiv.2610.16177, fetched 2026-10-26 (unofficial)

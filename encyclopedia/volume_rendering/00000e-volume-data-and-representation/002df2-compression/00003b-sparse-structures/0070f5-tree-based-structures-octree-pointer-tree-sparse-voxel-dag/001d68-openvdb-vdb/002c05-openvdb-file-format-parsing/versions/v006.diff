@@ -1,0 +1,93 @@
+--- v005.md
++++ v006.md
+@@ -43,13 +43,11 @@
+         size: Total number of elements in the node (e.g., 128 for Node5, 64 for Node4).
+         value_mask: List of booleans indicating which elements are active.
+-        reader: Binary reader with .header, .read_u8(), .read_u64_into(), .read_exact() methods.
++        reader: Binary reader with .header, .read_u8(), .read_u64_into(), .read_bytes() methods.
+     Returns:
+         List[T]: Decompressed array of values.
+     """
+-    meta_data = "NoMaskAndAllVals"
+-    if reader.header.file_version >= OPENVDB_FILE_VERSION_NODE_MASK_COMPRESSION:
+-        meta_data_byte = reader.read_u8()
+-        # Byte-to-enum mapping not specified in sources [G]
+-        meta_data = {0: "NoMaskAndAllVals", 1: "MaskAndOneInactiveVal", 2: "MaskAndTwoInactiveVals"}.get(meta_data_byte, "NoMaskAndAllVals")
++    # NodeMetaData enum mapping from source [G]
++    META_DATA_MAP = {0: "NoMaskAndAllVals", 1: "MaskAndOneInactiveVal", 2: "MaskAndTwoInactiveVals"}
++    meta_data = META_DATA_MAP.get(reader.read_u8(), "NoMaskAndAllVals") if reader.header.file_version >= OPENVDB_FILE_VERSION_NODE_MASK_COMPRESSION else "NoMaskAndAllVals"
+ 
+     inactive_val0 = 0  # Type-dependent zero value [G]
+@@ -57,13 +55,14 @@
+ 
+     if meta_data in ("MaskAndOneInactiveVal", "NoMaskAndOneInactiveVal"):
+-        inactive_val0 = reader.read_exact(size_of_value(grid_descriptor))  # [G]
++        inactive_val0 = reader.read_bytes(size_of_value(grid_descriptor))  # [G] Step not given in sources
+     elif meta_data == "MaskAndTwoInactiveVals":
+-        inactive_val0 = reader.read_exact(size_of_value(grid_descriptor))  # [G]
+-        inactive_val1 = reader.read_exact(size_of_value(grid_descriptor))  # [G]
++        inactive_val0 = reader.read_bytes(size_of_value(grid_descriptor))  # [G] Step not given in sources
++        inactive_val1 = reader.read_bytes(size_of_value(grid_descriptor))  # [G] Step not given in sources
+ 
+     selection_mask = [False] * size
+     if meta_data in ("MaskAndNoInactiveVals", "MaskAndOneInactiveVal", "MaskAndTwoInactiveVals"):
+-        reader.read_u64_into(selection_mask)  # [G]
++        reader.read_u64_into(selection_mask)  # [G] Step not given in sources
+ 
++    # Compute active count based on compression flags and metadata [S1, unofficial]
+     if (grid_descriptor.compression & Compression.ACTIVE_MASK) and \
+        meta_data != "NoMaskAndAllVals" and \
+@@ -73,20 +72,25 @@
+         count = size
+ 
+-    expected_type = type_of(grid_descriptor)  # [G]
++    expected_type = type_of(grid_descriptor)  # [G] Step not given in sources
+     real_type = "f16" if grid_descriptor.meta_data.is_half_float() else "f32"
+ 
++    # Decompress data. Sources note Blosc is used, but exact routine is not given [G]
++    raw_data = decompress_blosc(grid_descriptor, count)  # [G] Step not given in sources
++
++    # Handle type conversion (f16/f32) [S1, unofficial]
+     if expected_type == real_type:
+-        data = read_compressed_data(grid_descriptor, count)
++        data = raw_data
+     elif expected_type == "f16" and real_type == "f32":
+-        data = [f16_from_f32(v) for v in read_compressed_data(grid_descriptor, count)]
++        data = [f16_from_f32(v) for v in raw_data]  # [G] Step not given in sources
+     elif expected_type == "f32" and real_type == "f16":
+-        data = [f16_to_f32(v) for v in read_compressed_data(grid_descriptor, count)]
++        data = [f16_to_f32(v) for v in raw_data]  # [G] Step not given in sources
+     elif real_type == "f16":
+-        data = [T_from_f16_bites(v) for v in read_compressed_data(grid_descriptor, count)]
++        data = [T_from_f16_bites(v) for v in raw_data]  # [G] Step not given in sources
+     elif real_type == "f32":
+-        data = [T_from_f32_bites(v) for v in read_compressed_data(grid_descriptor, count)]
++        data = [T_from_f32_bites(v) for v in raw_data]  # [G] Step not given in sources
+     else:
+         raise RuntimeError("Unreachable type combination")
+ 
++    # Expand active mask data to full node size if needed [S1, unofficial]
+     if (grid_descriptor.compression & Compression.ACTIVE_MASK) and len(data) != size:
+         expanded = [0] * size  # Type-dependent zero value [G]
+@@ -116,15 +120,15 @@
+ 
+ ## Operating characteristics
+-*   **Time Complexity**: Parsing is linear with respect to the number of nodes and tiles in the file, $O(N)$, where $N$ is the number of non-background elements. Decompression adds overhead proportional to the compressed data size [S1, unofficial].
+-*   **Memory Complexity**: The in-memory representation requires storing the full tree structure. For sparse data, this is significantly less than a dense grid, but the overhead of node headers and metadata adds to the memory footprint [S1, unofficial].
++*   **Time Complexity**: Not given in the sources.
++*   **Memory Complexity**: Not given in the sources.
+ *   **Measured Performance**: Not given in the sources.
+-*   **Scaling**: Performance scales with the sparsity of the data. Highly sparse data with many tiles will have faster parsing but potentially higher memory overhead due to tile structures [S1, unofficial].
++*   **Scaling**: Not given in the sources.
+ *   **Strengths**: Efficient storage of sparse data; fast random access once loaded; supports various compression schemes [S1, unofficial].
+ *   **Limitations**: Multi-buffer trees are not supported [S1, unofficial]; half-float handling may be incomplete [S1, unofficial]; Blosc decompression can fail on empty data [S1, unofficial].
+-*   **When to use**: When working with large, sparse volumetric data that needs to be loaded into memory for rendering or simulation [S1, unofficial].
+-*   **When not to use**: When the data is dense and small enough to fit in a simple array; when multi-buffer support is required [S1, unofficial].
++*   **When to use**: Not given in the sources.
++*   **When not to use**: Not given in the sources.
+ 
+ ## Background
+-OpenVDB was developed by DreamWorks Animation for use in visual effects, particularly for fluid simulations and volumetric effects. The file format was designed to efficiently store large, sparse voxel grids. The parsing method described here is based on the implementation found in the `woxel` library [S1, unofficial].
++The parsing method described here is based on the implementation found in the `woxel` library [S1, unofficial].
+ 
+ ## Sources

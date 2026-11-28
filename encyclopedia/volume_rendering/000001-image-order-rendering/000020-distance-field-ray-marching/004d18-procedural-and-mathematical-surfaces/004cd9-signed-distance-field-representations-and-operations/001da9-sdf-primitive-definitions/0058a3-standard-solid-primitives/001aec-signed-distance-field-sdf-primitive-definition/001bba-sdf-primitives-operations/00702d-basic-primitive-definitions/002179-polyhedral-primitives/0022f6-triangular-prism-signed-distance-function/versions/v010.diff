@@ -1,0 +1,128 @@
+--- v009.md
++++ v010.md
+@@ -4,29 +4,36 @@
+ 
+ ## Overview
+-Computes the signed distance from a query point to the surface of a triangular prism. It solves the problem of defining a smooth, differentiable boundary for a prism-shaped volume, enabling its use in ray marching and implicit modeling. It is distinguished from other polyhedral primitives by its specific triangular cross-section geometry, defined by an equilateral triangle in the XY plane and extrusion along the Z axis.
++Computes the signed distance from a 3D point to an equilateral triangular prism aligned with the Z-axis. It differs from general polyhedral SDFs by exploiting the symmetry of the equilateral cross-section to use a closed-form analytical solution without iterative projection, offering higher performance for this specific primitive [S1, S2, unofficial].
+ 
+ ## How it works
+-**Inputs and Outputs:**
+-- Input: Query point $p = (p_x, p_y, p_z)$ in local space.
+-- Input: Half-dimensions $h = (h_x, h_y)$. $h_x$ controls the triangle size, $h_y$ controls the half-height.
+-- Output: Signed distance $d$.
++**Inputs:**
++- `p`: The query point $(x, y, z)$ as a 3D vector.
++- `h`: A 2D parameter vector $(h_x, h_y)$ defining the geometry.
++
++**Outputs:**
++- `d`: The signed distance. Positive if outside, negative if inside.
+ 
+ **Data Structures:**
+-- No persistent data structures. The function is stateless.
++- `p`: `vec3` or tuple of floats $(p_x, p_y, p_z)$.
++- `h`: `vec2` or tuple of floats $(h_x, h_y)$.
+ 
+ **Steps:**
+-1.  Compute the absolute value of the query point components to exploit symmetry: $q = |p|$. This maps the query point into the first octant, allowing the use of a single formula for the entire space [S2, unofficial].
+-2.  Calculate the vertical distance component: $d_z = q_z - h_y$. This represents the distance to the top or bottom face [S2, unofficial].
+-3.  Calculate the horizontal distance component to the equilateral triangle cross-section. The triangle is oriented with one vertex pointing along the positive X-axis. The distance to the triangle edges is computed using the formula:
+-    $$ d_{xy} = \max(q_x \cdot \frac{\sqrt{3}}{2} + q_y \cdot \frac{1}{2}, -q_y) - h_x \cdot \frac{1}{2} $$
+-    Here, $q_x \cdot \frac{\sqrt{3}}{2} + q_y \cdot \frac{1}{2}$ computes the distance to the slanted edge, and $-q_y$ accounts for the symmetry of the triangle's other edges in the absolute space [S2, unofficial].
+-4.  The final signed distance is the maximum of the vertical and horizontal components:
+-    $$ d = \max(d_z, d_{xy}) $$
+-    This correctly handles the corners where the side faces meet the top/bottom faces [S2, unofficial].
++1.  Compute the absolute value of the input point to exploit symmetry: $q = |p|$. This maps the query point into the first octant.
++2.  Calculate the distance to the triangular cross-section in the XY plane. The triangle is equilateral with side length related to $h_x$ and is oriented such that one vertex points along the positive X-axis (or equivalent symmetry axis depending on convention, but the formula below assumes a specific canonical orientation).
++3.  Calculate the distance to the top/bottom caps in the Z direction.
++4.  Combine these distances using the max function to determine the final signed distance.
+ 
+-**Parameters:**
+-- $h_x$: Half-width of the triangle. The side length of the equilateral triangle is $2 h_x$.
+-- $h_y$: Half-height of the prism. The total height is $2 h_y$.
+-- Constant: $\frac{\sqrt{3}}{2} \approx 0.866025$ [S2, unofficial].
++**Formula:**
++$$
++q = |p|
++$$
++$$
++d = \max(q_z - h_y, \max(q_x \cdot \frac{\sqrt{3}}{2} + q_y \cdot \frac{1}{2}, -q_y) - h_x \cdot \frac{1}{2})
++$$
++
++Where:
++- $q = (q_x, q_y, q_z)$ is the component-wise absolute value of $p$.
++- $h_x$ controls the size of the triangular cross-section. Specifically, the distance from the center to the flat side is $h_x/2$. The constant $0.866025 \approx \frac{\sqrt{3}}{2}$.
++- $h_y$ is the half-height of the prism along the Z-axis.
+ 
+ **Pseudocode:**
+@@ -36,45 +43,49 @@
+ def sd_tri_prism(p: np.ndarray, h: np.ndarray) -> float:
+     """
+-    Compute signed distance to a triangular prism.
++    Compute signed distance to an equilateral triangular prism.
+     
+     Args:
+         p: Query point (3,)
+-        h: Half-dimensions (2,), h[0] is half-width (triangle related), h[1] is half-height
++        h: Geometry parameters (2,) where h[0] is half-width related param, h[1] is half-height
+         
+     Returns:
+         Signed distance
+     """
+-    # Step 1: Absolute coordinates for symmetry
++    # Step 1: Absolute coordinates
+     q = np.abs(p)
+     
+-    # Step 2: Vertical distance to top/bottom faces
+-    d_z = q[2] - h[1]
++    # Constants
++    sqrt3_2 = np.sqrt(3) / 2.0  # 0.866025
++    half = 0.5
+     
+-    # Step 3: Horizontal distance to triangular cross-section
+-    # The triangle is equilateral, oriented with a vertex at +X.
+-    # Distance to the slanted edge and the vertical symmetry axis.
+-    # 0.866025 is sqrt(3)/2, 0.5 is 1/2.
+-    d_xy = max(q[0] * 0.866025 + q[1] * 0.5, -q[1]) - h[0] * 0.5
++    # Step 2: Distance to triangular cross-section
++    # The term (q_x * sqrt3_2 + q_y * 0.5) represents the distance to one of the slanted sides
++    # The term (-q_y) represents the distance to the flat base side (in the absolute space)
++    # We take the max of these two, then subtract the half-width offset
++    tri_dist = max(q[0] * sqrt3_2 + q[1] * 0.5, -q[1]) - h[0] * half
++    
++    # Step 3: Distance to caps
++    cap_dist = q[2] - h[1]
+     
+     # Step 4: Combine
+-    d = max(d_z, d_xy)
++    d = max(cap_dist, tri_dist)
+     
+     return d
+ ```
+ 
+-**Edge Cases:**
+-- If $h_x$ or $h_y$ is zero, the primitive degenerates to a line or point. The formula still holds but may produce non-smooth gradients at the degenerate features.
+-- Precision issues may arise if $p$ is very close to the surface and the constants are not represented with sufficient precision.
++**Edge Cases and Pitfalls:**
++- **Precision:** The constant $\frac{\sqrt{3}}{2}$ should be computed with sufficient precision (e.g., `np.sqrt(3)/2.0` or `0.8660254037844386`) to avoid artifacts in ray marching.
++- **Orientation:** This formula assumes a specific canonical orientation. If the prism is rotated, the point `p` must be transformed into the local frame before applying this function.
++- **Inside/Outside:** The function returns negative values inside the prism. Ray marching algorithms typically use this sign to determine step direction or termination.
+ 
+ ## Operating characteristics
+-- **Time Complexity:** $O(1)$. The function involves a constant number of arithmetic operations.
+-- **Memory Complexity:** $O(1)$. No additional memory is required.
+-- **Strengths:** Extremely fast evaluation, suitable for real-time ray marching. Smooth gradients almost everywhere, allowing for accurate normal computation.
+-- **Limitations:** Only defines a triangular prism. Not suitable for non-equilateral triangles without modification.
+-- **When to use:** When a triangular prism shape is needed in a ray-marched scene.
+-- **When not to use:** When a different polygonal base (e.g., square, hexagon) is required.
++- **Time Complexity:** $O(1)$. Constant time evaluation involving basic arithmetic operations.
++- **Memory Complexity:** $O(1)$. No auxiliary data structures required.
++- **Strengths:** Extremely fast evaluation, suitable for real-time rendering and dense volume rendering where many samples are taken per ray.
++- **Limitations:** Only applies to equilateral triangular prisms aligned with the Z-axis. For arbitrary triangles or orientations, a more general polyhedral SDF or transformation is needed.
++- **When to use:** When rendering scenes with many triangular prism primitives or when performance is critical and the geometry matches the canonical form.
+ 
+ ## Background
+-The triangular prism SDF is a standard primitive in the family of signed distance functions for procedural geometry. It is commonly found in GLSL-based ray marching tutorials and libraries, such as those by Inigo Quilez and others who popularized SDFs for real-time graphics. The specific formulation using absolute values and max functions is a standard technique for constructing polyhedral SDFs [S2, unofficial].
++The triangular prism SDF is a standard primitive in Signed Distance Field (SDF) ray marching, popularized by shaders and libraries such as Inigo Quilez's work and subsequent GLSL utility libraries [S2, unofficial]. It is part of the family of polyhedral primitives that leverage geometric symmetries for efficient distance computation [S1, unofficial].
+ 
+ ## Sources

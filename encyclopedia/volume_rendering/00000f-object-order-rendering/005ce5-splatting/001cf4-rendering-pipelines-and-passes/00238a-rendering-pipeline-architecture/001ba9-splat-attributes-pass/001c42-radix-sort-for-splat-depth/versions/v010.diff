@@ -1,0 +1,138 @@
+--- v009.md
++++ v010.md
+@@ -8,50 +8,43 @@
+ ## How it works
+ **Inputs and Outputs:**
+-- Input: A list of `projected` splats, where each splat contains a `depth` field (f32).
+-- Output: The `projected` list sorted in ascending order of `depth` (front-to-back).
+-- Auxiliary: `aux` buffer of same size as `projected`; `counts_lo`, `counts_hi` histogram arrays; `offsets` prefix sum array.
++- Input: A list of `projected` splats, where each splat contains a `depth` field (f32) [S1, unofficial].
++- Output: The `projected` list sorted in ascending order of `depth` (front-to-back) [S1, unofficial].
++- Auxiliary: `aux` buffer of same size as `projected`; `counts_lo`, `counts_hi` histogram arrays; `offsets` prefix sum array [G].
+ 
+ **Data Structures:**
+-- `projected`: Array of splat structs. Each struct has `depth: f32`.
+-- `counts_lo`, `counts_hi`: Arrays of `u32` with size 65,536 (2^16).
+-- `offsets`: Array of `u32` with size 65,536.
+-- `aux`: Array of splat structs, same size as `projected`.
++- `projected`: Array of splat structs. Each struct has `depth: f32` [S1, unofficial].
++- `counts_lo`, `counts_hi`: Arrays of `u32` with size 65,536 ($2^{16}$) [S1, unofficial].
++- `offsets`: Array of `u32` with size 65,536 [G].
++- `aux`: Array of splat structs, same size as `projected` [G].
+ 
+ **Parameters:**
+-- Parallel sort threshold: 50,000 splats. If splat count < 50,000 or no thread pool is available, use sequential radix sort. Otherwise, use `par_sort_unstable_by_key` on depth bits [S1, unofficial].
++- Parallel sort threshold: 50,000 splats. If splat count < 50,000 or no thread pool is available, use sequential radix sort. Otherwise, use a parallel unstable sort on depth bit patterns [S1, unofficial].
+ 
+ **Algorithm Steps:**
+-1. **Edge Case:** If the number of splats is $\le 1$, return immediately.
+-2. **Histogram Initialization:** Initialize `counts_lo` and `counts_hi` to zero.
++1. **Edge Case:** If the number of splats is $\le 1$, return immediately [S1, unofficial].
++2. **Histogram Initialization:** Initialize `counts_lo` and `counts_hi` to zero [S1, unofficial].
+ 3. **Histogram Population:** Iterate through each splat in `projected`:
+-   - Let $k$ be the bit pattern of `splat.depth` reinterpreted as a `u32`.
+-   - Increment `counts_lo[(k & 0xFFFF)]`.
+-   - Increment `counts_hi[(k >> 16)]`.
++   - Let $k$ be the bit pattern of `splat.depth` reinterpreted as a `u32` [S1, unofficial].
++   - Increment `counts_lo[(k & 0xFFFF)]` [S1, unofficial].
++   - Increment `counts_hi[(k >> 16)]` [S1, unofficial].
+ 4. **Pass 1 (Low 16 bits):**
+-   - Compute prefix sums of `counts_lo` into `offsets`. The prefix sum at index $i$ represents the starting position for bucket $i$.
+-   - Scatter splats from `projected` to `aux` based on the low 16 bits of their depth bit pattern ($k \& 0xFFFF$). Use `offsets` to determine the destination index, then increment the offset for that bucket.
++   - Compute prefix sums of `counts_lo` into `offsets` [S1, unofficial].
++   - Scatter splats from `projected` to `aux` based on the low 16 bits of their depth bit pattern ($k \& 0xFFFF$) [S1, unofficial].
+ 5. **Pass 2 (High 16 bits):**
+-   - Compute prefix sums of `counts_hi` into `offsets`.
+-   - Scatter splats from `aux` back to `projected` based on the high 16 bits of their depth bit pattern ($k >> 16$). Use `offsets` to determine the destination index, then increment the offset for that bucket.
++   - Compute prefix sums of `counts_hi` into `offsets` [S1, unofficial].
++   - Scatter splats from `aux` back to `projected` based on the high 16 bits of their depth bit pattern ($k >> 16$) [S1, unofficial].
+ 
+ **Pseudocode:**
+ ```python
+-def sort_by_depth(projected: List[Splat], scratch: ScratchBuffers) -> None:
++def sort_by_depth(projected: list, aux: list, counts_lo: list, counts_hi: list, offsets: list) -> None:
+     n = len(projected)
+     if n <= 1:
+         return
+ 
+-    # Check for parallel execution threshold
+-    if n >= 50000 and thread_pool_available():
+-        # Use parallel unstable sort on bit patterns
+-        # This is a library call; implementation details depend on the parallel runtime
+-        par_sort_unstable_by_key(projected, key=lambda s: s.depth.to_bits())
++    # Parallel threshold check
++    if n >= 50000:
++        # Use a parallel unstable sort on depth bit patterns [G]
++        projected.sort(key=lambda s: s.depth.to_bits())
+         return
+-
+-    # Sequential 16-bit Radix Sort
+-    aux = scratch.aux_buffer
+-    counts_lo = scratch.counts_lo  # size 65536
+-    counts_hi = scratch.counts_hi  # size 65536
+-    offsets = scratch.offsets      # size 65536
+ 
+     # Reset histograms
+@@ -62,10 +55,10 @@
+     # Populate histograms
+     for splat in projected:
+-        k = splat.depth.to_bits()  # Reinterpret f32 bits as u32
++        k = splat.depth.to_bits()  # Reinterpret f32 bits as u32 [G]
+         counts_lo[k & 0xFFFF] += 1
+         counts_hi[k >> 16] += 1
+ 
+     # Pass 1: Sort by low 16 bits
+-    # Compute prefix sums for offsets
++    # Compute exclusive prefix sums for offsets
+     offsets[0] = 0
+     for i in range(1, 65536):
+@@ -81,5 +74,5 @@
+ 
+     # Pass 2: Sort by high 16 bits
+-    # Compute prefix sums for offsets
++    # Compute exclusive prefix sums for offsets
+     offsets[0] = 0
+     for i in range(1, 65536):
+@@ -96,5 +89,5 @@
+ 
+ **Edge Cases and Pitfalls:**
+-- **Float Bit Pattern:** This method relies on positive float bit patterns preserving ordering when reinterpreted as `u32`. If negative depths are possible, they must be handled separately (e.g., by flipping the sign bit) to maintain order [S1, unofficial].
++- **Float Bit Pattern:** This method relies on positive float bit patterns preserving ordering when reinterpreted as `u32` [S1, unofficial].
+ - **Precision:** The method uses the full 32-bit float representation. No precision loss occurs during the bit reinterpretation, but sorting stability is not guaranteed unless the secondary key (e.g., original index) is included, which is not done in this basic variant [S1, unofficial].
+ 
+@@ -111,5 +104,5 @@
+ 
+ ### [Default Camera Sort](7960-default-camera-sort.md)
+-Default Camera Sort is a compositing technique for oriented Gaussian ellipses (splats) that sorts them back-to-front relative to a specific camera viewpoint to ensure correct translucent blending. It differs from its siblings by automatically binding the sort order to the active scene camera without requiring explicit provider configuration, whereas [Radix Sort for Splat Depth](1207-radix-sort-for-splat-depth.md) provides the underlying low-level sorting primitive and [Fast Splat Sorting](2953-fast-splat-sorting.md) or [Gaussian Splat Sorting](3372-gaussian-splat-sorting.md) may offer alternative optimization strategies for specific hardware or scene densities.
++Default Camera Sort is a compositing technique for oriented Gaussian ellipses (splats) that sorts them back-to-front relative to a camera viewpoint to ensure correct translucent blending. It differs from its siblings by automatically binding the sort order to the active scene camera without requiring explicit provider configuration.
+ 
+ ### [32-bit Tile-Depth Pair Sorting](9408-32-bit-tile-depth-pair-sorting.md)
+@@ -119,17 +112,21 @@
+ DistWar is a method that accelerates sorting by exploiting hardware-accelerated visibility ordering in the rasterizer to perform a fast depth test and bypass the CUDA radix sort [S2, unofficial].
+ 
++### Float16 to uint16 sorting conversion
++This method converts float16 values to uint16 such that lexicographical comparison of the uint16 representation preserves the original float16 ordering [S3, unofficial]. It operates by viewing the tensor as uint16, casting to int32, XORing with the sign mask `0x8000`, and casting back to uint16 [S3, unofficial]. The constant `0x8000` flips the sign bit to ensure correct unsigned integer sorting [S3, unofficial].
++
+ ## Operating characteristics
+-- **Time Complexity:** $O(n)$ for the radix sort passes, where $n$ is the number of splats. The constant factor is small due to the fixed 2-pass structure.
+-- **Memory Complexity:** $O(n)$ for the auxiliary buffer `aux` and $O(1)$ for the histogram arrays (fixed size 65,536).
++- **Time Complexity:** $O(n)$ for the radix sort passes, where $n$ is the number of splats [S1, unofficial]. The constant factor is small due to the fixed 2-pass structure [S1, unofficial].
++- **Memory Complexity:** $O(n)$ for the auxiliary buffer `aux` and $O(1)$ for the histogram arrays (fixed size 65,536) [S1, unofficial].
+ - **Performance:** Consistently 2 times faster than comparison-based sorts for ~100k–200k elements [S1, unofficial].
+-- **Strengths:** Linear time complexity, predictable performance, no recursion depth issues, efficient use of cache due to sequential memory access in scatter/gather phases.
+-- **Limitations:** Requires positive depth values or explicit handling of negative depths. Not stable by default. Parallelization threshold must be tuned for specific hardware.
+-- **When to Use:** When sorting large numbers of splats for front-to-back rendering where performance is critical and depth values are positive.
+-- **When Not to Use:** When stability is required without additional overhead, or when depth values include negative numbers that are not handled by bit manipulation.
++- **Strengths:** Linear time complexity, predictable performance, no recursion depth issues, efficient use of cache due to sequential memory access in scatter/gather phases [G].
++- **Limitations:** Requires positive depth values. Not stable by default. Parallelization threshold must be tuned for specific hardware [G].
++- **When to Use:** When sorting large numbers of splats for front-to-back rendering where performance is critical and depth values are positive [G].
++- **When Not to Use:** When stability is required without additional overhead, or when depth values include negative numbers that are not handled by bit manipulation [G].
+ 
+ ## Background
+-This method is described in the context of the Tsplat project, which aims to run Gaussian splatting in a terminal environment [S1, unofficial]. It is part of the broader effort to optimize 3D Gaussian Splatting rasterization, as surveyed in recent literature [S2, unofficial]. The use of radix sort for depth sorting in splatting is a common optimization to replace slower comparison-based sorts.
++This method is described in the context of optimizing 3D Gaussian Splatting rasterization pipelines [S1, unofficial]. It is part of the broader effort to accelerate splatting by replacing slower comparison-based sorts with hardware-friendly radix sorts [S2, unofficial]. The use of a 2-pass 16-bit radix sort on float bit patterns is a standard optimization for depth sorting in GPU rendering [G].
+ 
+ ## Sources
+ [S1] Tsplat – Run Gaussian splatting in your terminal, https://github.com/darshanmakwana412/tsplat, fetched 2026-10-26 (unofficial)
+-[S2] 3D Gaussian Splatting Rasterization: A Survey, https://doi.org/10.20944/preprints202607.0776.v2, fetched 2026-10-26 (unofficial)+[S2] 3D Gaussian Splatting Rasterization: A Survey, https://doi.org/10.20944/preprints202607.0776.v2, fetched 2026-10-26 (unofficial)
++[S3] Ingyu-Jeong/EGGS, https://github.com/Ingyu-Jeong/EGGS, fetched 2026-10-26 (unofficial)

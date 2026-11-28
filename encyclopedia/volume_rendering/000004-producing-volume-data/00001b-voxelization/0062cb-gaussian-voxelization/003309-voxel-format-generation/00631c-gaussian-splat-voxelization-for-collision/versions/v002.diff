@@ -1,0 +1,289 @@
+--- v001.md
++++ v002.md
+@@ -4,14 +4,14 @@
+ 
+ ## Overview
+-This method converts 3D Gaussian Splat data into a three-dimensional grid of occupied cells (voxels) to automatically generate a collision structure [S1, unofficial]. It solves the problem of creating watertight collision shells for Gaussian splats, which lack explicit geometry, by allowing the Gaussian density data to build the shell automatically [S1, unofficial]. It differs from manual mesh construction by automating the generation of a collision mesh (e.g., ~10,000 triangles for a 3-million-splat scene) from volumetric data [S1, unofficial].
++This method converts 3D Gaussian Splat data into a three-dimensional grid of occupied cells (voxels) to automatically generate a collision structure [S1, unofficial]. It solves the problem of creating watertight collision shells for Gaussian splats, which lack explicit geometry, by allowing the Gaussian density data to build the shell automatically [S1, unofficial]. It differs from manual mesh construction by automating the generation of a collision mesh (e.g., ~10,000 triangles for a 3-million-splat scene) directly from volumetric data [S1, unofficial].
+ 
+ ## How it works
+ **Inputs and Outputs**
+-*   **Input:** A Gaussian Splat file (e.g., `.ply`) and scene parameters (indoor/outdoor mode, voxel size, opacity threshold).
+-*   **Output:** A collision mesh in GLB format [S1, unofficial]. Intermediate sparse voxel structures may be output as JSON and binary files (`.voxel.json`, `.voxel.bin`) [S1, unofficial].
++*   **Input:** A Gaussian Splat file (e.g., `.ply`) and scene parameters (indoor/outdoor mode, voxel size, opacity threshold) [S1, unofficial].
++*   **Output:** A collision mesh in GLB format [S1, unofficial]. Intermediate sparse voxel structures may be output as JSON and binary files (`.voxel.json`, `.voxel.bin`) for use in viewers like Super Splat [S1, unofficial].
+ 
+ **Data Structures**
+-*   **Voxel Grid:** A 3D grid covering the scene bounds. Each cell stores a density value accumulated from nearby Gaussians [S1, unofficial].
+-*   **Sparse Voxel Structure:** A representation of occupied voxels, stored in JSON (metadata) and binary (data) formats for efficient processing [S1, unofficial].
++*   **Voxel Grid:** A 3D grid covering the scene bounds, where each cell stores a density value accumulated from nearby Gaussians [S1, unofficial].
++*   **Sparse Voxel Structure:** A representation of occupied voxels stored in JSON (metadata) and binary (data) formats for efficient processing and viewer integration [S1, unofficial].
+ 
+ **Parameters**
+@@ -20,17 +20,15 @@
+ 
+ **Algorithm Steps**
+-The process varies slightly based on scene type (Indoor vs. Outdoor).
+-
+ 1.  **Grid Initialization:** Lay a 3D grid over the entire scene bounds [S1, unofficial].
+-2.  **Density Accumulation:** The GPU sweeps through the grid. For each voxel, sum the density contributions of all Gaussians overlapping that voxel [S1, unofficial].
+-3.  **Binary Classification:** Check if the accumulated density exceeds the opacity threshold. If yes, mark the voxel as solid; otherwise, mark it as air [S1, unofficial].
++2.  **Density Accumulation:** The GPU sweeps through the grid, summing the density contributions of all Gaussians overlapping each voxel [S1, unofficial].
++3.  **Binary Classification:** Check if the accumulated density exceeds the opacity threshold; if yes, mark the voxel as solid, otherwise mark it as air [S1, unofficial].
+ 4.  **Cleanup:** Automatically remove isolated voxels floating in air and fill tiny holes in the solid structure [S1, unofficial].
+ 5.  **Scene-Specific Processing:**
+     *   **Indoor Mode:**
+-        1.  **Exterior Fill:** Fluid flows in from outside the scene bounds, turning everything beyond the walls solid. Walls are temporarily thickened to prevent fluid leaking through small caps or openings [S1, unofficial].
+-        2.  **Carving:** A seed point is positioned in free space inside the room. A capsule expands from this seed, carving out reachable space. The capsule only moves through open space; areas it cannot reach (e.g., inside walls, narrow gaps) become solid [S1, unofficial].
++        1.  **Exterior Fill:** Fluid flows in from outside the scene bounds, turning everything beyond the walls solid [S1, unofficial]. Walls are temporarily thickened to prevent fluid leaking through small caps or openings [S1, unofficial].
++        2.  **Carving:** A seed point is positioned in free space inside the room [S1, unofficial]. A capsule expands from this seed, carving out reachable space [S1, unofficial]. The capsule only moves through open space; areas it cannot reach (e.g., inside walls, narrow gaps) become solid [S1, unofficial].
+     *   **Outdoor Mode:**
+-        1.  **Floor Fill:** Use a special floor fill feature. Walk up every column of voxels from below until hitting the first surface. Everything underneath becomes solid ground. Empty columns at the scene edges become invisible walls [S1, unofficial].
+-        2.  **Carving:** A seed point is placed in open space slightly above the ground. A capsule expands from this seed. Everything reached becomes the final collision surface [S1, unofficial].
++        1.  **Floor Fill:** Use a special floor fill feature [S1, unofficial]. Walk up every column of voxels from below until hitting the first surface [S1, unofficial]. Everything underneath becomes solid ground [S1, unofficial]. Empty columns at the scene edges become invisible walls [S1, unofficial].
++        2.  **Carving:** A seed point is placed in open space slightly above the ground [S1, unofficial]. A capsule expands from this seed [S1, unofficial]. Everything reached becomes the final collision surface [S1, unofficial].
+ 6.  **Mesh Generation:** Merge the resulting voxels into larger rectangles to form a simple collision mesh [S1, unofficial].
+ 7.  **Export:** Save the mesh as a GLB file [S1, unofficial].
+@@ -38,139 +36,122 @@
+ **Pseudocode**
+ ```python
++import math
++from collections import deque
++
+ def gaussian_splat_voxelization_for_collision(gaussian_splats, scene_bounds, voxel_size, opacity_threshold, mode='indoor'):
+     """
+     Converts Gaussian splats to a collision mesh via voxelization.
+-    
+     Args:
+-        gaussian_splats: List of Gaussian objects with position, covariance, opacity.
+-        scene_bounds: Bounding box (min, max) for the scene.
++        gaussian_splats: List of dicts with 'pos' (x,y,z), 'cov' (3x3), 'opacity'.
++        scene_bounds: Tuple ((min_x, min_y, min_z), (max_x, max_y, max_z)).
+         voxel_size: Size of each voxel in world units.
+         opacity_threshold: Density threshold for solid voxels.
+         mode: 'indoor' or 'outdoor'.
+-        
+     Returns:
+-        collision_mesh: A mesh object (e.g., GLB structure).
++        collision_mesh: List of triangles (vertices).
+     """
+     # 1. Grid Initialization
+-    grid_resolution = calculate_grid_resolution(scene_bounds, voxel_size)
+-    voxel_grid = create_3d_array(grid_resolution, dtype=float)
++    min_b, max_b = scene_bounds
++    res_x = math.ceil((max_b[0] - min_b[0]) / voxel_size)
++    res_y = math.ceil((max_b[1] - min_b[1]) / voxel_size)
++    res_z = math.ceil((max_b[2] - min_b[2]) / voxel_size)
++    grid = [[[0.0 for _ in range(res_z)] for _ in range(res_y)] for _ in range(res_x)]
+     
+     # 2. Density Accumulation
+-    for voxel in voxel_grid:
+-        voxel.density = 0.0
+-        for gaussian in gaussian_splats:
+-            if gaussian.overlaps(voxel.center, voxel.size):
+-                voxel.density += gaussian.density_at(voxel.center)
+-                
++    for y in range(res_y):
++        for x in range(res_x):
++            for z in range(res_z):
++                center = (min_b[0] + x * voxel_size + voxel_size * 0.5,
++                          min_b[1] + y * voxel_size + voxel_size * 0.5,
++                          min_b[2] + z * voxel_size + voxel_size * 0.5)
++                density = 0.0
++                for g in gaussian_splats:
++                    if gaussian_overlaps_box(g, center, voxel_size):
++                        density += gaussian_density_at(g, center)
++                grid[y][x][z] = density
++
+     # 3. Binary Classification
+-    solid_voxels = []
+-    for voxel in voxel_grid:
+-        if voxel.density > opacity_threshold:
+-            voxel.status = 'solid'
+-            solid_voxels.append(voxel)
+-        else:
+-            voxel.status = 'air'
+-            
++    solid_mask = [[[False for _ in range(res_z)] for _ in range(res_y)] for _ in range(res_x)]
++    for y in range(res_y):
++        for x in range(res_x):
++            for z in range(res_z):
++                if grid[y][x][z] > opacity_threshold:
++                    solid_mask[y][x][z] = True
++
+     # 4. Cleanup
+-    solid_voxels = remove_isolated_voxels(solid_voxels)
+-    solid_voxels = fill_tiny_holes(solid_voxels)
+-    
++    solid_mask = morphological_cleanup(solid_mask)
++
+     # 5. Scene-Specific Processing
+     if mode == 'indoor':
+-        # 5a. Exterior Fill
+-        solid_voxels = exterior_fill(solid_voxels, scene_bounds, voxel_size)
+-        # 5b. Carving
+-        seed_point = find_interior_seed(solid_voxels, scene_bounds)
+-        solid_voxels = carve_interior(solid_voxels, seed_point, capsule_radius=voxel_size * 0.5)
++        solid_mask = exterior_fill(solid_mask, res_x, res_y, res_z)
++        seed = find_interior_seed(solid_mask, min_b, max_b, voxel_size)
++        solid_mask = carve_interior(solid_mask, seed, voxel_size)
+     elif mode == 'outdoor':
+-        # 5a. Floor Fill
+-        solid_voxels = floor_fill(solid_voxels, scene_bounds, voxel_size)
+-        # 5b. Carving
+-        seed_point = find_outdoor_seed(solid_voxels, scene_bounds)
+-        solid_voxels = carve_interior(solid_voxels, seed_point, capsule_radius=voxel_size * 0.5)
+-        
++        solid_mask = floor_fill(solid_mask, min_b, max_b, voxel_size)
++        seed = find_outdoor_seed(solid_mask, min_b, max_b, voxel_size)
++        solid_mask = carve_interior(solid_mask, seed, voxel_size)
++
+     # 6. Mesh Generation
+-    collision_mesh = merge_voxels_to_mesh(solid_voxels)
+-    
+-    # 7. Export
++    collision_mesh = extract_mesh(solid_mask, min_b, voxel_size)
+     return collision_mesh
+ 
+-def exterior_fill(solid_voxels, scene_bounds, voxel_size):
+-    """
+-    Fills space outside the scene boundaries with solid voxels.
+-    Temporarily thickens walls to prevent leakage.
+-    """
+-    # Implementation detail: Flood fill from outside bounds
+-    # Thicken walls by expanding solid voxels by 1-2 voxels in all directions
+-    # Fill all voxels outside the original scene bounds with solid status
+-    pass
++def gaussian_overlaps_box(g, center, size):
++    # [G] Standard Gaussian bounding box overlap check
++    return True  # Placeholder for exact covariance projection logic
+ 
+-def carve_interior(solid_voxels, seed_point, capsule_radius):
+-    """
+-    Carves out reachable space from a seed point using a capsule expansion.
+-    """
+-    # Implementation detail: BFS/DFS from seed_point
+-    # A voxel is 'carved' (marked as air) if it is reachable by a capsule of given radius
+-    # from the seed point without intersecting other solid voxels
+-    reachable_voxels = bfs_reachable(solid_voxels, seed_point, capsule_radius)
+-    for voxel in solid_voxels:
+-        if voxel not in reachable_voxels:
+-            voxel.status = 'solid' # Keep as solid if unreachable
+-        else:
+-            voxel.status = 'air' # Carve if reachable
+-    return solid_voxels
++def gaussian_density_at(g, center):
++    # [G] Standard Gaussian evaluation
++    return g['opacity']  # Simplified for pseudocode clarity
+ 
+-def floor_fill(solid_voxels, scene_bounds, voxel_size):
+-    """
+-    Fills ground from below. Walks up each column until hitting a surface.
+-    """
+-    for x in range(scene_bounds.min.x, scene_bounds.max.x, voxel_size):
+-        for z in range(scene_bounds.min.z, scene_bounds.max.z, voxel_size):
+-            # Walk up y-axis
+-            for y in range(scene_bounds.min.y, scene_bounds.max.y, voxel_size):
+-                voxel = get_voxel(x, y, z)
+-                if voxel.status == 'solid':
+-                    # Mark all voxels below this as solid ground
+-                    for y_below in range(scene_bounds.min.y, y, voxel_size):
+-                        get_voxel(x, y_below, z).status = 'solid'
++def morphological_cleanup(mask):
++    # [G] Remove isolated components and fill small holes
++    return mask
++
++def exterior_fill(mask, rx, ry, rz):
++    # [G] Flood fill from outside bounds, thickening walls by 1-2 voxels
++    return mask
++
++def find_interior_seed(mask, min_b, max_b, vs):
++    # [G] Sample interior points until an air voxel is found
++    return (min_b[0] + vs, min_b[1] + vs, min_b[2] + vs)
++
++def find_outdoor_seed(mask, min_b, max_b, vs):
++    # [G] Sample points above ground level until an air voxel is found
++    return (min_b[0] + vs, max_b[1] - vs, min_b[2] + vs)
++
++def carve_interior(mask, seed, vs):
++    # [G] BFS/DFS capsule expansion from seed
++    reachable = set()
++    queue = deque([seed])
++    reachable.add(seed)
++    while queue:
++        cx, cy, cz = queue.popleft()
++        for dx, dy, dz in [(1,0,0),(-1,0,0),(0,1,0),(0,-1,0),(0,0,1),(0,0,-1)]:
++            nx, ny, nz = cx+dx, cy+dy, cz+dz
++            if 0 <= nx < len(mask[0][0]) and 0 <= ny < len(mask[0]) and 0 <= nz < len(mask):
++                if mask[ny][nx][nz] and (nx, ny, nz) not in reachable:
++                    reachable.add((nx, ny, nz))
++                    queue.append((nx, ny, nz))
++    for y in range(len(mask)):
++        for x in range(len(mask[0])):
++            for z in range(len(mask[0][0])):
++                if (x, y, z) in reachable:
++                    mask[y][x][z] = False
++    return mask
++
++def floor_fill(mask, min_b, max_b, vs):
++    # [G] Walk up each (x,z) column from below
++    for x in range(len(mask[0])):
++        for z in range(len(mask[0][0])):
++            for y in range(len(mask)):
++                if mask[y][x][z]:
++                    for by in range(y):
++                        mask[by][x][z] = True
+                     break
+-    return solid_voxels
++    return mask
+ 
+-def remove_isolated_voxels(solid_voxels):
+-    """
+-    Removes voxels that are not connected to the main structure.
+-    """
+-    # Implementation detail: Connected component analysis
+-    # Keep only the largest connected component
+-    pass
+-
+-def fill_tiny_holes(solid_voxels):
+-    """
+-    Fills small gaps in the solid structure.
+-    """
+-    # Implementation detail: Morphological closing or small component removal
+-    pass
+-
+-def find_interior_seed(solid_voxels, scene_bounds):
+-    """
+-    Finds a point in free space inside the room.
+-    """
+-    # Implementation detail: Sample points inside bounds, check if air
+-    pass
+-
+-def find_outdoor_seed(solid_voxels, scene_bounds):
+-    """
+-    Finds a point in open space above the ground.
+-    """
+-    # Implementation detail: Sample points above ground level, check if air
+-    pass
+-
+-def merge_voxels_to_mesh(solid_voxels):
+-    """
+-    Merges voxels into larger rectangles to form a mesh.
+-    """
+-    # Implementation detail: Marching Cubes or similar surface extraction
+-    # Or direct merging of adjacent voxels into quads/tris
+-    pass
++def extract_mesh(mask, min_b, vs):
++    # [G] Merge adjacent solid voxels into rectangles/triangles
++    return []
+ ```
+ 
+@@ -182,6 +163,6 @@
+ 
+ ## Operating characteristics
+-*   **Time Complexity:** Depends on the number of Gaussians and voxel grid resolution. The GPU sweep is efficient, but cleanup and carving phases add complexity [S1, unofficial].
+-*   **Memory Complexity:** Proportional to the voxel grid size. Sparse voxel structures help mitigate this [S1, unofficial].
++*   **Time Complexity:** Depends on the number of Gaussians and voxel grid resolution [S1, unofficial]. The GPU sweep is efficient, but cleanup and carving phases add complexity [S1, unofficial].
++*   **Memory Complexity:** Proportional to the voxel grid size [S1, unofficial].
+ *   **Performance:** A room with ~3 million Gaussians produces a collision mesh of ~10,000 triangles, less than 200 kilobytes [S1, unofficial].
+ *   **Strengths:** Automates collision shell generation; produces lightweight meshes suitable for game engines [S1, unofficial].

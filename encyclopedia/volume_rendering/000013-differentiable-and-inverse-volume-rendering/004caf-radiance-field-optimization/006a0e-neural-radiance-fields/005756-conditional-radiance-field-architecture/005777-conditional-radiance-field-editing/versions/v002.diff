@@ -1,0 +1,159 @@
+--- v001.md
++++ v002.md
+@@ -4,82 +4,77 @@
+ 
+ ## Overview
+-Conditional Radiance Field Editing modifies a trained conditional radiance field to alter its appearance or geometry without retraining the entire model from scratch. It solves the problem of efficient, targeted scene manipulation by freezing the coarse network and optimizing only the fine network's parameters and associated latent codes. Unlike [Hybrid Updates for Editing](15974-hybrid-updates-for-editing.md), which may involve more complex update strategies, this method relies on a strict separation of coarse and fine networks to isolate the editing domain.
++Conditional Radiance Field Editing modifies a trained conditional radiance field by freezing the coarse network and optimizing only the fine network $F_{fine}$ and its associated latent codes [S1]. It solves the problem of efficient, targeted scene manipulation by requiring only 100 optimization iterations at a learning rate of $10^{-2}$ [S1].
+ 
+ ## How it works
+-The method operates on a conditional radiance field architecture that consists of a coarse network $F_{coarse}$ and a fine network $F_{fine}$, along with latent codes. The editing process targets only the fine network components.
++The method operates on a conditional radiance field architecture that consists of a coarse network $F_{coarse}$ and a fine network $F_{fine}$, along with latent codes [S1]. The editing process targets only the fine network components [S1].
+ 
+ **Inputs:**
+-- A pre-trained conditional radiance field model ($F_{coarse}$, $F_{fine}$, and associated codes).
+-- A target edited view or scene configuration.
+-- Training rays sampled from the target configuration.
++- A pre-trained conditional radiance field model ($F_{coarse}$, $F_{fine}$, and associated codes) [S1].
++- A target edited view or scene configuration [S1].
++- Training rays sampled from the target configuration [S1].
+ 
+ **Outputs:**
+-- Updated parameters for $F_{fine}$ and its associated latent codes.
+-- The coarse network $F_{coarse}$ remains unchanged.
++- Updated parameters for $F_{fine}$ and its associated latent codes [S1].
++- The coarse network $F_{coarse}$ remains unchanged [S1].
+ 
+ **Data Structures:**
+ - The color branch of the fine network accepts an 8-dimensional vector input, which is cached during editing to improve computational feasibility [S1].
+-- Latent codes (shape and color codes) are optimized alongside network weights.
++- Latent codes (shape and color codes) are optimized alongside network weights [S1].
+ 
+ **Steps:**
+-1. **Freeze Coarse Network:** Set all parameters in $F_{coarse}$ to non-trainable (gradient disabled).
+-2. **Initialize Optimizer:** Configure an Adam optimizer for the trainable parameters of $F_{fine}$ and the latent codes.
+-   - Learning rate: $\eta = 10^{-2}$ [S1].
+-   - Beta parameters: $\beta_1 = 0.9$, $\beta_2 = 0.999$ [S1].
+-   - Epsilon: $\epsilon = 10^{-8}$ [S1].
+-3. **Sample Training Rays:**
+-   - Randomly select an edited view of the instance [S1].
+-   - Randomly sample batches of rays from a subsampled set of foreground and background rays corresponding to this view [S1].
++1. **Freeze Coarse Network:** Set all parameters in $F_{coarse}$ to non-trainable (gradient disabled) [S1].
++2. **Initialize Optimizer:** Configure an Adam optimizer for the trainable parameters of $F_{fine}$ and the latent codes with $\eta = 10^{-2}$, $\beta_1 = 0.9$, $\beta_2 = 0.999$, and $\epsilon = 10^{-8}$ [S1].
++3. **Sample Training Rays:** Randomly select an edited view of the instance, then randomly sample batches of rays from the subsampled set of foreground and background rays [S1].
+ 4. **Optimize:** Iterate for 100 iterations [S1].
+-   - Forward pass through $F_{fine}$ using the sampled rays and current latent codes.
+-   - Compute loss against the target rendered image or view.
+-   - Backpropagate gradients to update $F_{fine}$ parameters and latent codes.
+-   - Keep $F_{coarse}$ parameters constant.
++   - Forward pass through $F_{fine}$ using the sampled rays and current latent codes [S1].
++   - Compute loss against the target rendered image or view [S1].
++   - Backpropagate gradients to update $F_{fine}$ parameters and latent codes [S1].
++   - Keep $F_{coarse}$ parameters constant [S1].
+ 
+ **Pseudocode:**
+ ```python
++import math
++
+ def edit_conditional_radiance_field(model, target_view, iterations=100, lr=1e-2):
+-    """
+-    Edit a conditional radiance field by optimizing only the fine network.
+-    
+-    Args:
+-        model: Object containing F_coarse, F_fine, and latent codes.
+-        target_view: The desired edited view configuration.
+-        iterations: Number of optimization steps (default 100).
+-        lr: Learning rate (default 1e-2).
+-    """
+     # 1. Freeze coarse network
+-    model.F_coarse.requires_grad_(False)
+-    
+-    # 2. Initialize optimizer for fine network and codes
+-    # Parameters include F_fine weights and latent codes
++    model.F_coarse.requires_grad = False
++
++    # 2. Collect trainable parameters: F_fine weights and latent codes
+     trainable_params = list(model.F_fine.parameters()) + model.latent_codes
+-    optimizer = Adam(trainable_params, lr=lr, betas=(0.9, 0.999), eps=1e-8)
+-    
+-    # 3. Pre-calculate or cache 8-dim vector for color branch if applicable
+-    # This is handled internally by the model's forward pass structure [S1]
+-    
++
++    # 3. Initialize Adam optimizer state (m, v) for each parameter
++    optimizer_state = {p: {'m': [0.0] * len(p), 'v': [0.0] * len(p)} for p in trainable_params}
++    beta1, beta2, eps = 0.9, 0.999, 1e-8
++
+     for i in range(iterations):
+         # 4. Sample training rays
+-        # Randomly select an edited view
+         view = target_view
+-        # Randomly sample batches of rays from subsampled foreground/background
+-        rays = sample_rays(view)
+-        
++        rays = random_sample_foreground_background_rays(view)
++
+         # 5. Forward pass
+-        # Render using F_fine and current codes
+-        # F_coarse is used but gradients are not computed for it
+         rendered_image = model.render(rays)
+-        
++
+         # 6. Compute loss
+-        # Loss function is not specified in the provided notes [G: Assume standard L1/L2 pixel loss]
+-        loss = compute_loss(rendered_image, target_image)
+-        
++        # Loss function is not specified in the sources [G: Assume standard L2 pixel loss]
++        loss = mean_squared_error(rendered_image, target_view.image)
++
+         # 7. Backpropagate and update
+-        optimizer.zero_grad()
++        model.zero_grad()
+         loss.backward()
+-        optimizer.step()
+-        
++        for p in trainable_params:
++            grad = p.grad
++            state = optimizer_state[p]
++            state['m'] = [beta1 * m + (1 - beta1) * g for m, g in zip(state['m'], grad)]
++            state['v'] = [beta2 * v + (1 - beta2) * g**2 for v, g in zip(state['v'], grad)]
++            m_hat = [m / (1 - beta1 ** (i + 1)) for m in state['m']]
++            v_hat = [v / (1 - beta2 ** (i + 1)) for v in state['v']]
++            p.data = [p_val - lr * m / (math.sqrt(v) + eps) for p_val, m, v in zip(p.data, m_hat, v_hat)]
+     return model
++
++def random_sample_foreground_background_rays(view):
++    return sample_from_subsampled_set(view.foreground_rays, view.background_rays)
++
++def mean_squared_error(rendered, target):
++    return sum((r - t)**2 for r, t in zip(rendered, target)) / len(rendered)
+ ```
+ 
+@@ -90,11 +85,11 @@
+ 
+ **Edge Cases and Pitfalls:**
+-- The method assumes the coarse network provides a stable base; if the coarse network is poorly trained, editing the fine network may not yield satisfactory results.
+-- Precision issues may arise if the latent codes are not properly initialized or if the learning rate is too high for the specific scene complexity, though $10^{-2}$ is empirically set for this method [S1].
++- The method assumes the coarse network provides a stable base; if the coarse network is poorly trained, editing the fine network may not yield satisfactory results [G].
++- Optimization is limited to 100 iterations, which may not converge for highly complex edits [G].
+ 
+ ## Subtopics
+ 
+ ### Scene Editing via Latent Manipulation
+-This variant involves modifying the local latent grid $W$ directly to alter the generated scene, allowing manual control over synthesis beyond random sampling. It enables high-level modifications like mirroring or rearrangement [S2]. The process involves: 1. Obtaining the latent code grid $W$ from a single scene (via inversion or sampling); 2. Manipulating $W$ (e.g., mirroring along the horizontal axis); 3. Rendering the modified $W$ to produce the edited scene [S2]. A key pitfall is that the low resolution of $W$ in current models limits editing to high-level modifications; fine-grained control (e.g., furniture rearrangement) requires training with larger local latent grids [S2]. Additionally, editing results are most convincing when inputs are well-aligned in appearance and geometry; combining multiple scenes requires them to be similar enough [S2].
++This variant involves modifying the local latent grid $W$ directly to alter the generated scene, allowing manual control over synthesis beyond random sampling [S2]. It enables high-level modifications like mirroring or rearrangement [S2]. The process involves: 1. Obtaining the latent code grid $W$ from a single scene (via inversion or sampling); 2. Manipulating $W$ (e.g., mirroring along the horizontal axis); 3. Rendering the modified $W$ to produce the edited scene [S2]. A key pitfall is that the low resolution of $W$ in current models limits editing to high-level modifications; fine-grained control (e.g., furniture rearrangement) requires training with larger local latent grids [S2]. Additionally, editing results are most convincing when inputs are well-aligned in appearance and geometry; combining multiple scenes requires them to be similar enough [S2].
+ 
+ ## Operating characteristics
+@@ -104,9 +99,9 @@
+ - **Strengths:** Efficient, targeted editing without retraining the entire model; allows for manual control via latent manipulation [S2].
+ - **Limitations:** Limited to high-level edits due to latent grid resolution; requires well-aligned inputs for convincing results when combining scenes [S2].
+-- **When to use:** When a user wants to quickly modify a specific aspect of a scene (e.g., rotation, mirroring) without retraining the entire radiance field.
+-- **When not to use:** When fine-grained structural changes are required that exceed the resolution of the latent grid.
++- **When to use:** When a user wants to quickly modify a specific aspect of a scene (e.g., rotation, mirroring) without retraining the entire radiance field [S1, S2].
++- **When not to use:** When fine-grained structural changes are required that exceed the resolution of the latent grid [S2].
+ 
+ ## Background
+-The method originates from the work on Conditional Radiance Fields, specifically detailed in "Editing Conditional Radiance Fields" [S1]. It builds upon the original NeRF architecture [S1] and introduces a bottleneck for feature caching. The concept of editing via latent manipulation is further explored in "Unconstrained Scene Generation with Locally Conditioned Radiance Fields" [S2], which highlights the properties of local latent grids for scene synthesis.
++The method originates from the work on Conditional Radiance Fields, specifically detailed in "Editing Conditional Radiance Fields" [S1]. It builds upon the original NeRF architecture [S1] and introduces a bottleneck for feature caching [S1]. The concept of editing via latent manipulation is further explored in "Unconstrained Scene Generation with Locally Conditioned Radiance Fields" [S2], which highlights the properties of local latent grids for scene synthesis [S2].
+ 
+ ## Sources

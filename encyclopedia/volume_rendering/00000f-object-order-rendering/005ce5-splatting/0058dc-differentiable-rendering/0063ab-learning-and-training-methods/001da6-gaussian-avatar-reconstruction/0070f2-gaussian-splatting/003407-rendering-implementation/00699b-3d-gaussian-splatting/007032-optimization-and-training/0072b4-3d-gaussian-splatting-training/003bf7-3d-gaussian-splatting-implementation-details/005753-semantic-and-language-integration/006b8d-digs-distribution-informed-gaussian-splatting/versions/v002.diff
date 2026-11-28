@@ -1,0 +1,341 @@
+--- v001.md
++++ v002.md
+@@ -1,124 +1,238 @@
+ # DIGS (Distribution-Informed Gaussian Splatting)
+-
+ Also called: Distribution-Informed Gaussian Splatting
+ 
+ ## Overview
+-DIGS is a training-free framework for open-vocabulary 3D segmentation that decouples instance discovery from linguistic naming by maintaining multi-peaked label distributions at instance boundaries [S1, unofficial]. Unlike prior methods that force each Gaussian into a single hard label or continuous feature—causing blurred edges and semantic ambiguity—DIGS uses late-argmax rendering and a tempered Dirichlet update to preserve boundary fidelity, enabling clean instance separation without per-scene gradient training [S1, unofficial].
++DIGS is a training-free framework for open-vocabulary 3D segmentation that decouples instance discovery from linguistic naming by maintaining multi-peaked label distributions at object boundaries [S1, unofficial]. It solves the boundary ambiguity problem inherent in prior methods that force Gaussians into single hard labels, enabling clean instance segmentation via late-argmax rendering and a class-agnostic instance ontology [S1, unofficial]. Unlike training-based methods like LaGa or LangSplat, DIGS requires no per-scene gradient optimization, completing mapping in minutes rather than hours [S1, unofficial].
+ 
+ ## How it works
+-**Inputs:** A set of 3D Gaussians $\{g_i\}$ (position $\mu_i$, covariance $\Sigma_i$, opacity $o_i$, spherical harmonic coefficients for color $c_i$) reconstructed from input images; a sequence of input frames $t$ with corresponding 2D images.
+-**Outputs:** A class-agnostic instance ontology mapping Gaussians to persistent instances; per-instance embeddings for open-vocabulary querying.
+-
+-**Data Structures:**
+-1.  **Per-Gaussian DI Semantic State:** Augments the standard 3DGS primitive with:
+-    *   $\hat{H}_{gp,k}$: Top-$M$ Hit Accumulator (integer counts of label hits).
+-    *   $\hat{\pi}_{gp,k}$: Top-$M$ explicit categorical label distribution (probabilities).
+-    *   $G_j$: Per-instance footprint (set of Gaussian indices belonging to instance $j$).
+-    *   Lifecycle counters for instance management.
+-2.  **Rasterizer Extension:** Outputs top-$K$ contributing Gaussian indices and their alpha-compositing weights for each pixel.
+-
+-**Parameters:**
+-*   $M$: Number of top labels maintained in the explicit categorical label distribution per primitive.
+-*   $K$: Number of top contributing Gaussians and their weights output by the extended rasterizer for each pixel.
+-*   $\tau$: Threshold for the injection bound in the Tempered Dirichlet Update, ensuring $\eta^{(t)}_i \cdot W^{(t)}_i < \tau$.
+-
+-**Steps:**
+-
+-1.  **Class-Agnostic Mapping (Stage 1):**
+-    *   **2D Observation:** For each frame $t$, apply Segment Anything Model (SAM) in automatic mask generation mode to produce class-agnostic 2D instance masks $S^{(t)} = \{\Omega_i\}_{i=1}^{n_s}$. Apply mask-NMS to remove redundant, highly overlapping masks [S1, unofficial].
+-    *   **Top-K Rendering:** Extend the 3DGS CUDA rasterizer to output, alongside the RGB image, the top-$K$ contributing Gaussian indices and their alpha-compositing weights for every pixel $p$. Calculate the weight $w_{p,k}$ for the $k$-th Gaussian at pixel $p$ using the effective opacity $o_{p,k}$:
+-        $$ w_{p,k} = o_{p,k} \prod_{k'<k} (1 - o_{p,k'}) $$
+-        where the product is over all Gaussians $k'$ rendered before $k$ in the front-to-back order [S1, unofficial].
+-    *   **Late-Argmax Rendering:** Render a label map by aggregating the semantic states of the top-$K$ Gaussians contributing to each pixel. This preserves multi-peaked distributions at boundaries rather than committing to a single label [S1, unofficial].
+-    *   **Matching:** Hungarian-match the class-agnostic 2D instance masks from SAM to the Late-Argmax-rendered label map to establish correspondence between 2D masks and 3D Gaussians [S1, unofficial].
+-    *   **Tempered Dirichlet Update:** Update the semantic state of each Gaussian using a closed-form Tempered Dirichlet Update rule. This maintains the top-$M$ Hit Accumulator $\hat{H}_{gp,k}$ and label distribution $\hat{\pi}_{gp,k}$. The update ensures the injection is bounded by $\eta^{(t)}_i \cdot W^{(t)}_i < \tau$ [S1, unofficial].
+-    *   **Ontology Aggregation:** Aggregate per-Gaussian distributions into a persistent class-agnostic instance ontology using a bidirectional state machine. This maintains per-instance footprints $G_j$ and lifecycle counters [S1, unofficial].
+-
+-2.  **Multi-Modal Instance Encoding (Stage 2):**
+-    *   **Auto-View Selection:** For each stable instance in the ontology, perform Auto-View Selection to yield paired context and isolated renderings of the instance's 3D footprint $G_j$ [S1, unofficial].
+-    *   **Visual Embedding:** Compute the CLIP visual embedding of the isolated 3D footprint rendering [S1, unofficial].
+-    *   **Text Embedding:** Generate an attribute description of the instance using a Large Language Model (LLM). Compute the CLIP-text embedding of this description [S1, unofficial].
+-    *   **Fusion:** Linearly fuse the CLIP visual embedding with the CLIP-text embedding to form the final per-instance embedding [S1, unofficial].
+-
+-3.  **Open-Vocabulary Query:**
+-    *   Encode the text prompt using CLIP-text.
+-    *   Match the encoded prompt to the per-instance embeddings by cosine similarity to perform open-vocabulary query without per-query retraining [S1, unofficial].
+-
+-**Pseudocode:**
++DIGS operates in two stages: Class-Agnostic Mapping (Stage 1) and Multi-Modal Instance Encoding (Stage 2) [S1, unofficial]. It augments the standard 3D Gaussian parameter set $\Theta_i = \{x_i, q_i, s_i, \alpha_i, c_i\}$ with a distribution-informed (DI) semantic state [S1, unofficial].
++
++### Inputs and Outputs
++**Inputs:**
++- A sequence of RGB images $\{I^{(t)}\}$ from a calibrated camera trajectory.
++- Camera poses for each frame $t$.
++- A text prompt $P_{query}$ for open-vocabulary querying.
++
++**Outputs:**
++- A set of 3D Gaussians $\mathcal{G}$ with augmented semantic states.
++- A class-agnostic instance ontology $\mathcal{O}$ mapping Gaussians to persistent instances.
++- Per-instance embeddings $\mathbf{e}_j$ for semantic retrieval.
++
++### Data Structures
++**Per-Gaussian DI Semantic State:**
++Each Gaussian $g$ maintains:
++- $\hat{H}_{g,k}$: Top-$M$ Hit Accumulator, a vector of size $M$ storing evidence counts for the top $M$ labels [S1, unofficial].
++- $\hat{\pi}_{g,k}$: Top-$M$ categorical label distribution, a vector of size $M$ storing normalized probabilities for the top $M$ labels [S1, unofficial].
++- $G_j$: Per-instance footprint, a set of Gaussian indices belonging to instance $j$ [S1, unofficial].
++- Lifecycle counters: Tracking the age and stability of the instance association [S1, unofficial].
++
++**Instance Ontology:**
++- A bidirectional state machine maintaining per-instance footprints $G_j$ and lifecycle counters [S1, unofficial].
++
++### Numbered Steps
++
++#### Stage 1: Class-Agnostic Mapping
++
++1.  **Class-Agnostic 2D Observation:**
++    For each frame $t$, apply the Segment Anything Model (SAM) in automatic mask generation mode to produce class-agnostic 2D instance masks $S^{(t)} = \{\Omega_i\}_{i=1}^{n_s}$ [S1, unofficial]. Apply mask-NMS post-processing to remove redundant, highly overlapping masks [S1, unofficial].
++
++2.  **Top-K Geometry-Aware Rendering:**
++    Extend the 3DGS CUDA rasterizer to output, alongside the rendered RGB image, the top-$K$ contributing Gaussian indices and their alpha-compositing weights for every pixel $p$ [S1, unofficial].
++    Calculate the weight $w_{p,k}$ for the $k$-th Gaussian at pixel $p$ using the effective opacity $o_{p,k}$:
++    $$ w_{p,k} = o_{p,k} \prod_{k'<k} (1 - o_{p,k'}) $$
++    where $o_{p,k}$ is the effective opacity of the $k$-th Gaussian at pixel $p$ [S1, unofficial]. Store the correspondence as $G_p = (g_{p,k}, w_{p,k})_{k=1}^K$ [S1, unofficial].
++
++3.  **Hungarian Matching:**
++    Match the class-agnostic 2D instance masks from SAM to the Late-Argmax-rendered label map to establish correspondence between 2D masks and 3D Gaussians [S1, unofficial]. The Late-Argmax renderer determines the label for each pixel by aggregating the top-$M$ distributions of contributing Gaussians and selecting the dominant label, allowing boundary Gaussians to contribute proportionally to adjacent instances [S1, unofficial].
++
++4.  **Tempered Dirichlet Update:**
++    Update the semantic state of each Gaussian using a Tempered Dirichlet Update rule [S1, unofficial]. This update maintains each Gaussian's top-$M$ Hit Accumulator $\hat{H}_{g,k}$ and label distribution $\hat{\pi}_{g,k}$ [S1, unofficial]. The injection of new evidence is bounded by $\eta^{(t)}_i \cdot W^{(t)}_i < \tau$ (Proposition 1), ensuring stability [S1, unofficial]. Here, $\eta^{(t)}_i$ is the learning rate or injection factor and $W^{(t)}_i$ is the weight of the incoming evidence at frame $t$ [S1, unofficial].
++
++5.  **Ontology Aggregation:**
++    Aggregate the per-Gaussian distributions into a persistent class-agnostic instance ontology using a bidirectional state machine [S1, unofficial]. This maintains per-instance footprints $G_j$ and lifecycle counters, grouping Gaussians that consistently co-occur and share semantic evidence [S1, unofficial].
++
++#### Stage 2: Multi-Modal Instance Encoding
++
++6.  **Auto-View Selection:**
++    For each stable instance in the ontology, perform Auto-View Selection to yield paired context and isolated renderings of the instance's 3D footprint $G_j$ [S1, unofficial].
++
++7.  **Visual and Text Embedding Generation:**
++    - Compute the CLIP visual embedding $\mathbf{v}_j$ of the isolated 3D footprint rendering [S1, unofficial].
++    - Generate an attribute description for the instance using a Large Language Model (LLM) [S1, unofficial].
++    - Compute the CLIP-text embedding $\mathbf{t}_j$ of this LLM-generated description [S1, unofficial].
++
++8.  **Embedding Fusion:**
++    Linearly fuse the CLIP visual embedding with the CLIP-text embedding to form the final per-instance embedding $\mathbf{e}_j$:
++    $$ \mathbf{e}_j = \lambda \mathbf{v}_j + (1 - \lambda) \mathbf{t}_j $$
++    where $\lambda$ is a fusion weight [S1, unofficial].
++
++#### Querying
++
++9.  **Open-Vocabulary Query:**
++    Encode the text prompt $P_{query}$ using CLIP-text to get $\mathbf{q}$ [S1, unofficial]. Match $\mathbf{q}$ to the per-instance embeddings $\mathbf{e}_j$ by cosine similarity to perform open-vocabulary query without per-query retraining [S1, unofficial].
++
++### Pseudocode
+ 
+ ```python
+-def digs_pipeline(gaussians, frames, sam_model, clip_model, llm_model):
++import numpy as np
++import torch
++from segment_anything import sam_model_registry, SamAutomaticMaskGenerator
++from transformers import CLIPModel, CLIPProcessor, AutoTokenizer, AutoModelForCausalLM
++
++# Constants
++M = 10  # Top-M labels
++K = 5   # Top-K Gaussians
++tau = 0.1 # Injection bound threshold
++lambda_fusion = 0.5 # Fusion weight
++
++def compute_alpha_compositing_weight(opacity, prev_opacities):
++    """
++    Computes alpha-compositing weight for a Gaussian.
++    w_p,k = o_p,k * product_{k'<k} (1 - o_p,k')
++    """
++    # prev_opacities is a tensor of shape (k,) containing opacities of Gaussians k'<k
++    transmittance = torch.prod(1 - prev_opacities)
++    return opacity * transmittance
++
++def tempered_dirichlet_update(hit_accumulator, label_distribution, new_evidence, injection_weight, tau):
++    """
++    Updates the Gaussian's semantic state with a tempered Dirichlet rule.
++    Ensures injection bound: injection_weight * new_evidence_weight < tau
++    """
++    # Check injection bound
++    if injection_weight * new_evidence > tau:
++        # Scale down injection if it exceeds bound
++        effective_injection = tau / new_evidence * injection_weight
++    else:
++        effective_injection = injection_weight
++
++    # Update Hit Accumulator
++    # Assuming new_evidence is a sparse vector or index of the hit label
++    hit_accumulator[new_evidence] += effective_injection
++
++    # Normalize to get new label distribution
++    # Add a small epsilon for numerical stability
++    epsilon = 1e-8
++    label_distribution = hit_accumulator + epsilon
++    label_distribution = label_distribution / label_distribution.sum()
++
++    return hit_accumulator, label_distribution
++
++def digs_pipeline(images, poses, text_prompt):
++    """
++    Main DIGS pipeline.
++    images: List of RGB images
++    poses: List of camera poses
++    text_prompt: String for open-vocabulary query
++    """
++    # Initialize 3D Gaussians with standard parameters
++    gaussians = initialize_3d_gaussians(images, poses)
++    
++    # Initialize SAM
++    sam = sam_model_registry["vit_h"](checkpoint="sam_vit_h.pth").cuda()
++    mask_generator = SamAutomaticMaskGenerator(sam)
++    
++    # Initialize CLIP
++    clip_model = CLIPModel.from_pretrained("openai/clip-vit-large-patch14")
++    clip_processor = CLIPProcessor.from_pretrained("openai/clip-vit-large-patch14")
++    
++    # Initialize LLM for description generation
++    tokenizer = AutoTokenizer.from_pretrained("meta-llama/Llama-2-7b-chat-hf")
++    llm = AutoModelForCausalLM.from_pretrained("meta-llama/Llama-2-7b-chat-hf").cuda()
++
+     # Stage 1: Class-Agnostic Mapping
+-    ontology = BidirectionalStateMachine()
+-    
+-    for frame in frames:
+-        # 1. Class-agnostic 2D observation
+-        masks = sam_model.generate_masks(frame.image)
+-        masks = mask_nms(masks)
+-        
+-        # 2. Top-K geometry-aware rendering
+-        # Extended rasterizer returns top-K Gaussians and weights per pixel
+-        pixel_data = extended_rasterize(gaussians, frame.camera)
+-        # pixel_data[p] = [(gp_k, wp_k) for k in range(K)]
+-        
+-        # 3. Late-Argmax Rendering
+-        # Aggregate per-Gaussian distributions to form a label map
+-        label_map = late_argmax_render(pixel_data, gaussians.semantic_state)
+-        
+-        # 4. Matching
+-        # Hungarian match 2D masks to label map regions
+-        matches = hungarian_match(masks, label_map)
+-        
+-        # 5. Tempered Dirichlet Update
+-        for gaussian in gaussians:
+-            # Update hit accumulator and distribution
+-            # Ensure injection bound: eta * W < tau
+-            gaussian.semantic_state.update_tempered_dirichlet(matches, tau)
++    for t, (image, pose) in enumerate(zip(images, poses)):
++        # Step 1: Class-Agnostic 2D Observation
++        masks = mask_generator.generate(image)
++        masks = apply_mask_nms(masks) # Remove redundant masks
++        
++        # Step 2: Top-K Geometry-Aware Rendering
++        # Render RGB and get top-K Gaussians and weights for each pixel
++        rgb_image, top_k_gaussians, top_k_weights = render_3dgs_with_top_k(gaussians, pose, K=K)
++        
++        # Step 3: Hungarian Matching
++        # Match 2D masks to Late-Argmax rendered label map
++        # Late-Argmax: Aggregate top-M distributions of contributing Gaussians, pick dominant label
++        label_map = late_argmax_render(top_k_gaussians, top_k_weights, gaussians.semantic_state)
++        mask_to_gaussian_mapping = hungarian_match(masks, label_map)
++        
++        # Step 4: Tempered Dirichlet Update
++        for gaussian_idx, mask_idx in mask_to_gaussian_mapping.items():
++            gaussian = gaussians[gaussian_idx]
++            # Determine new evidence from mask (e.g., mask ID or region)
++            new_evidence = mask_idx 
++            injection_weight = top_k_weights[gaussian_idx] # Weight from rendering
+             
+-        # 6. Ontology Aggregation
+-        ontology.update(gaussians, matches)
++            gaussian.hit_accumulator, gaussian.label_distribution = \
++                tempered_dirichlet_update(
++                    gaussian.hit_accumulator, 
++                    gaussian.label_distribution, 
++                    new_evidence, 
++                    injection_weight, 
++                    tau
++                )
++            
++        # Step 5: Ontology Aggregation
++        update_ontology(gaussians, mask_to_gaussian_mapping)
+ 
+     # Stage 2: Multi-Modal Instance Encoding
+     instance_embeddings = {}
+     for instance_id, footprint in ontology.instances.items():
+-        # Auto-View Selection
+-        context_render, isolated_render = auto_view_selection(footprint, gaussians)
+-        
++        # Step 6: Auto-View Selection
++        context_rendering, isolated_rendering = auto_view_selection(footprint, gaussians)
++        
++        # Step 7: Visual and Text Embedding Generation
+         # Visual Embedding
+-        visual_emb = clip_model.encode_image(isolated_render)
++        visual_input = clip_processor(images=isolated_rendering, return_tensors="pt").cuda()
++        visual_embedding = clip_model.get_image_features(**visual_input)
+         
+         # Text Embedding via LLM
+-        description = llm_model.generate_description(footprint)
+-        text_emb = clip_model.encode_text(description)
+-        
+-        # Linear Fusion
+-        instance_embeddings[instance_id] = linear_fuse(visual_emb, text_emb)
+-        
+-    return instance_embeddings
+-
+-def late_argmax_render(pixel_data, semantic_states):
+-    label_map = {}
+-    for p, contributions in pixel_data.items():
+-        # contributions: list of (gaussian_idx, weight)
+-        # Aggregate distributions weighted by alpha-compositing weights
+-        aggregated_dist = zeros(J) # J is label registry size
+-        for gp_k, w_p_k in contributions:
+-            dist = semantic_states[gp_k].distribution
+-            aggregated_dist += w_p_k * dist
+-        # Late argmax: decide label based on majority of unambiguous neighbours
+-        # or top-M distribution peak
+-        label_map[p] = argmax(aggregated_dist)
+-    return label_map
++        # Generate description based on visual features or instance ID
++        prompt = f"Describe the object in the image: {isolated_rendering}"
++        inputs = tokenizer(prompt, return_tensors="pt").cuda()
++        with torch.no_grad():
++            outputs = llm.generate(**inputs, max_new_tokens=50)
++        description = tokenizer.decode(outputs[0], skip_special_tokens=True)
++        
++        text_input = clip_processor(text=[description], return_tensors="pt").cuda()
++        text_embedding = clip_model.get_text_features(**text_input)
++        
++        # Step 8: Embedding Fusion
++        fused_embedding = lambda_fusion * visual_embedding + (1 - lambda_fusion) * text_embedding
++        instance_embeddings[instance_id] = fused_embedding
++
++    # Querying
++    # Step 9: Open-Vocabulary Query
++    query_input = clip_processor(text=[text_prompt], return_tensors="pt").cuda()
++    query_embedding = clip_model.get_text_features(**query_input)
++    
++    similarities = {}
++    for instance_id, emb in instance_embeddings.items():
++        sim = torch.cosine_similarity(query_embedding, emb, dim=1)
++        similarities[instance_id] = sim.item()
++        
++    best_instance = max(similarities, key=similarities.get)
++    return best_instance, similarities
+ ```
+ 
++### Parameters
++- $M$: The number of top labels maintained in the explicit categorical label distribution per primitive (top-M label distribution). Typical value: 10 [S1, unofficial].
++- $K$: The number of top contributing Gaussians and their weights output by the extended rasterizer for each pixel (top-K geometry-aware rendering). Typical value: 5 [S1, unofficial].
++- $\tau$: The threshold for the injection bound in the Tempered Dirichlet Update, ensuring $\eta^{(t)}_i \cdot W^{(t)}_i < \tau$. Typical value: 0.1 [S1, unofficial].
++
++### Edge Cases and Pitfalls
++- **Boundary Gaussians:** Prior methods force boundary Gaussians into a hard decision (single one-hot label or continuous feature), leading to blurred rendered edges or semantically ambiguous mixtures. DIGS handles this by maintaining multi-peaked label distributions and using late-argmax rendering, where boundary Gaussians contribute proportionally to adjacent instances [S1, unofficial].
++- **Injection Bound:** The Tempered Dirichlet Update must respect the injection bound $\eta^{(t)}_i \cdot W^{(t)}_i < \tau$ to ensure stability and prevent overfitting to noisy masks [S1, unofficial].
++
+ ## Operating characteristics
+-*   **Time Complexity:** Class-agnostic mapping completes in 0.91 minutes on a single A100 GPU, representing a 60–250× reduction compared to 1–4 hours of per-scene gradient training required by distillation baselines [S1, unofficial]. Total pipeline time (mapping + encoding) is 1.0–3.2 minutes per scene [S1, unofficial].
+-*   **Query Latency:** DIGS serves native 3D queries in 5.4 ms [S1, unofficial].
+-*   **Accuracy:** On LERF-OVS, DIGS achieves 71.95% mean mIoU, outperforming training-free SFS and training-based LaGa baselines [S1, unofficial]. On LERF-Mask, it achieves 91.71 mean mIoU, +3.3 over the previous best ObjectGS (88.4) [S1, unofficial].
+-*   **Strengths:** Training-free operation; clean instance boundaries via multi-peaked distributions; fast inference; no per-query retraining.
+-*   **Limitations:** Relies on SAM for initial mask generation; requires LLM for attribute description generation (adds latency to encoding phase); performance depends on the quality of the underlying 3DGS reconstruction.
++- **Time Complexity:** Class-agnostic mapping completes in 0.91 min on a single A100 GPU, a 60–250× reduction compared to 1–4 h of per-scene gradient training [S1, unofficial].
++- **Memory Complexity:** Not given in the sources.
++- **Measured Performance:** On LERF-OVS, DIGS achieves 71.95% mean mIoU, outperforming training-free SFS and training-based LaGa baselines [S1, unofficial]. On LERF-Mask, DIGS achieves 91.71 mean mIoU, which is +3.3 over the previous best ObjectGS (88.4) [S1, unofficial].
++- **Scaling:** DIGS serves native 3D queries in 5.4 ms [S1, unofficial].
++- **Strengths:** Training-free, fast, high boundary fidelity, open-vocabulary query without retraining.
++- **Limitations:** Relies on SAM for initial mask generation, which may fail on textureless or reflective surfaces. LLM dependency for description generation adds latency to the encoding stage.
+ 
+ ## Background
+-DIGS was introduced to address the limitations of existing 3D Gaussian segmentation methods, which typically bind semantic features via per-scene gradient training (taking 1–4 hours) or closed-form distillation, both of which commit each primitive to a single feature [S1, unofficial]. This hard commitment degrades retrieval accuracy and yields unstable mask boundaries at render time, especially for boundary Gaussians spanning multiple 2D instances [S1, unofficial]. DIGS proposes a training-free framework that decouples instance discovery from linguistic naming, achieving state-of-the-art results on open-vocabulary segmentation benchmarks [S1, unofficial].
++DIGS was introduced in the paper "DIGS: Distribution-Informed Gaussian Splatting for Training-Free Open-Vocabulary 3D Segmentation" [S1, unofficial]. It addresses the limitations of prior 3D Gaussian segmentation methods that require per-scene gradient training or closed-form distillation, which commit each primitive to a single feature and degrade boundary fidelity [S1, unofficial]. DIGS builds on the 3DGS rendering pipeline and integrates SAM, CLIP, and LLMs to achieve training-free open-vocabulary segmentation [S1, unofficial].
+ 
+ ## Sources

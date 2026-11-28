@@ -1,0 +1,100 @@
+# Gaussian Primitive Training Schedule
+
+Also called: Reduced Iteration Schedule with Pseudo-View Depth Optimization
+
+## Overview
+This method accelerates the training of 3D Gaussian Splatting by leveraging dense initial point clouds to significantly reduce the required optimization iterations. It distinguishes itself from standard 3D Gaussian Splatting by replacing the long, continuous densification process with a two-phase training loop interrupted by pseudo-view depth optimization, reducing total iterations from ~300,000 to ~6,000 [S1].
+
+## How it works
+**Inputs and Outputs:**
+*   **Input:** A sufficiently dense initial point cloud (e.g., from a structure-from-motion pipeline or generative model), a set of input views, and a target number of iterations.
+*   **Output:** Optimized Gaussian primitives $\mathcal{G}$ with refined positions, scales, opacities, and colors.
+
+**Data Structures:**
+The Gaussian primitives $\mathcal{G} = \{g_i\}_{i=1}^N$ are stored as in standard 3D Gaussian Splatting . Each primitive $g_i$ contains:
+*   Position $\mathbf{p}_i \in \mathbb{R}^3$
+*   Covariance $\Sigma_i$, parameterized by rotation quaternion $\mathbf{q}_i \in \mathbb{R}^4$ and scale vector $\mathbf{s}_i \in \mathbb{R}^3$
+*   Opacity $\alpha_i \in [0, 1]$
+*   Spherical Harmonics coefficients $\mathbf{c}_{i, l}$ for view-dependent color [S1]
+
+**Parameters:**
+*   Total iterations: 6,000 (split into two 3,000-iteration phases) [S1].
+*   Initial densification freeze: First 1,500 iterations [S1].
+*   Densification frequency: Once every 500 iterations after the initial phase [S1].
+*   Optimizer: Adam ($\beta_1 = 0.9, \beta_2 = 0.99$) .
+*   Loss: $\mathcal{L}_{img} = (1 - \lambda) \mathcal{L}_{L1} + \lambda \mathcal{L}_{D-SSIM}$ with $\lambda = 0.2$ .
+
+**Steps:**
+1.  **Initialization:** Initialize Gaussian primitives from the dense point cloud.
+2.  **Phase 1 Training:** Train for 3,000 iterations.
+    *   Disable densification (growing/pruning) for the first 1,500 iterations [S1].
+    *   Apply densification once every 500 iterations for iterations 1,501–3,000, following the strategy from AbsGS [S1].
+3.  **Pseudo-View Generation:** Render RGB images for a set of "pseudo views" (additional camera poses not present in the input dataset) [S1].
+4.  **Depth Optimization:** Perform depth optimization specifically for these pseudo views to refine the geometry and depth consistency [S1].
+5.  **Phase 2 Training:** Continue training for another 3,000 iterations.
+    *   Maintain the densification schedule (once every 500 iterations) [S1].
+
+**Pseudocode:**
+> **Unverified code.** The code below did not pass a test run against a reference implementation, or no test fits it, so it may contain errors.
+
+```python
+def train_gaussian_primitives(points, input_views, pseudo_views, total_iters=6000):
+    # Initialize Gaussians from dense points
+    gaussians = initialize_gaussians(points)
+    
+    # Phase 1: Initial Training
+    for iter in range(3000):
+        # Densification control
+        if iter < 1500:
+            densify = False
+        elif (iter - 1500) % 500 == 0:
+            densify = True
+        else:
+            densify = False
+            
+        # Standard training step with densification if enabled
+        render_image = render(gaussians, input_views)
+        loss = compute_loss(render_image, input_views.gt)
+        optimize(gaussians, loss, densify=densify)
+        
+    # Intermediate Step: Pseudo-View Depth Optimization
+    render_pseudo_rgb = render(gaussians, pseudo_views)
+    optimize_depth(gaussians, pseudo_views, render_pseudo_rgb)
+    
+    # Phase 2: Final Training
+    for iter in range(3000, 6000):
+        # Densification control
+        if (iter - 1500) % 500 == 0:
+            densify = True
+        else:
+            densify = False
+            
+        render_image = render(gaussians, input_views)
+        loss = compute_loss(render_image, input_views.gt)
+        optimize(gaussians, loss, densify=densify)
+        
+    return gaussians
+```
+
+**Edge Cases and Pitfalls:**
+*   **Dense Initialization Dependency:** This schedule relies on "sufficiently dense point clouds" for initialization. If the initial point cloud is sparse, the reduced iteration count may lead to under-converged results [S1].
+*   **Densification Timing:** Applying densification too early (before 1,500 iterations) is explicitly avoided to prevent instability or unnecessary primitive proliferation [S1].
+
+## Subtopics
+
+### [CompGS Training Loop](19915-compgs-training-loop.md)
+The CompGS training loop is the optimization procedure for 3D Gaussian Splatting that incorporates auxiliary parameters and adaptive control mechanisms to refine Gaussian primitives.
+
+## Operating characteristics
+*   **Time Complexity:** Significantly reduced training time. Requires ~6,000 iterations compared to ~300,000 for conventional 3D Gaussian Splatting [S1].
+*   **Memory Complexity:** Similar to standard 3D Gaussian Splatting, as the number of primitives is determined by the initial dense cloud and densification schedule [S1].
+*   **Performance:** Achieves satisfactory results with the reduced iteration budget [S1].
+*   **Hardware:** Experiments conducted on NVIDIA RTX 4090 GPU [S1].
+*   **Strengths:** Drastic reduction in training time; effective for scenes with good initial geometry.
+*   **Limitations:** Relies on high-quality dense initialization; may not generalize well to sparse input scenarios without modification.
+
+## Background
+This method is described in the context of Generative Bundle Refinement (GBR) for high-fidelity Gaussian Splatting with enhanced mesh reconstruction [S1]. It builds on the observation that dense initial point clouds allow for faster convergence, enabling a truncated training schedule with intermediate geometric refinement via pseudo views [S1].
+
+## Sources
+[S1] GBR: Generative Bundle Refinement for High-Fidelity Gaussian Splatting With Enhanced Mesh Reconstruction, https://doi.org/10.1109/tcsvt.2025.3596613, fetched 2026-10-29

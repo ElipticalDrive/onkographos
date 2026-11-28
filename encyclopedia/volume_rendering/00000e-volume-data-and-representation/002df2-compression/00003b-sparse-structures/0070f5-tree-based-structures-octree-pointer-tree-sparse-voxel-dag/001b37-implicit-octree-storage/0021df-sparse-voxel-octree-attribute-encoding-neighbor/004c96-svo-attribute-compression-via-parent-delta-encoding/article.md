@@ -1,0 +1,100 @@
+# SVO Attribute Compression via Parent Delta Encoding
+
+Also called: Parent Delta Encoding
+
+## Overview
+SVO Attribute Compression via Parent Delta Encoding is a method for compressing volumetric attributes (such as color or alpha) stored in Sparse Voxel Octrees (SVOs) by encoding deltas relative to parent node attributes rather than direct spatial neighbors [S1]. It solves the problem of random access complexity and missing neighbors in 3D sparse data, where direct neighbor access requires logarithmic time and potentially loading the entire SVO into memory, unlike the constant-time access available in 2D images [S1]. It sets itself apart from sibling methods like Neighbor-based encoding by leveraging the hierarchical structure of the SVO to ensure streamability and low memory complexity during decoding [S1].
+
+## How it works
+**Inputs and Outputs**
+*   **Input:** A Sparse Voxel Octree (SVO) where leaf nodes contain attribute values (e.g., 24-bit RGB color) and internal nodes represent spatial subdivisions without inherent attribute values [S1].
+*   **Output:** A compressed bitstream of attribute deltas, typically passed to an entropy coder [S1].
+
+**Data Structures**
+The SVO structure consists of:
+*   **Leaf Nodes:** Represent voxels. These hold the original attribute values (e.g., color) [S1]. Geometry existence is typically stored separately (e.g., 1 bit) [S1].
+*   **Internal Nodes:** Represent subdivisions of space [S1]. They do not hold attribute values initially but are populated during the propagation step [S1].
+
+**Steps**
+1.  **Attribute Propagation (Mipmapping):** Propagate attribute values from child leaf nodes to their parent nodes in a mipmapping step before encoding [S1]. For each internal node, compute its attribute value as a function of its children's attributes, such as minimum, maximum, or average [S1]. This step increases the initial model size because parent nodes must store aggregated values, but it prepares the data for delta encoding [S1].
+2.  **Delta Encoding:** For each leaf node, compute the delta between its original attribute value and the attribute value of its parent node (computed in Step 1) [S1]. The parent attribute is located half a voxel away from the child's center, ensuring attributes are typically similar, resulting in small deltas [S1].
+3.  **Entropy Coding:** Pass the sequence of computed deltas to an entropy coder (e.g., DEFLATE/zlib) to produce the final compressed stream [S1]. The entropy coder is treated as a black box and can be swapped out [S1].
+
+**Formulas**
+*   $\Delta = A_{\text{child}} - A_{\text{parent}}$
+    *   $\Delta$: The encoded delta value for a leaf node.
+    *   $A_{\text{child}}$: The original attribute value of the leaf node.
+    *   $A_{\text{parent}}$: The aggregated attribute value of the leaf node's parent, computed during the mipmapping step.
+
+**Parameters**
+*   **Parent Aggregation Function:** Determines how parent attributes are derived from children, such as minimum, maximum, or average [S1].
+*   **Entropy Coder:** The method allows any entropy coder (e.g., zlib/DEFLATE) to be used as a black box [S1].
+
+**Edge Cases and Pitfalls**
+*   **Initial Size Increase:** The mipmapping propagation step initially increases the model size because parent nodes must store aggregated values [S1]. A net benefit is only realized if the children's values are similar enough that the resulting deltas are small [S1].
+*   **Missing Neighbors:** Direct neighbor encoding fails in SVOs because voxels can be surrounded by empty space (missing neighbors) and random access to neighbors has logarithmic complexity [S1]. Parent delta encoding resolves this as every node (except the root) has a parent, and parent access is efficient [S1].
+
+**Pseudocode**
+> **Unverified code.** The code below did not pass a test run against a reference implementation, or no test fits it, so it may contain errors.
+
+```python
+def compute_parent_attribute(children_attributes, aggregation_mode):
+    """Computes the parent attribute from its children based on the aggregation mode."""
+    if aggregation_mode == 'min':
+        return min(children_attributes)
+    elif aggregation_mode == 'max':
+        return max(children_attributes)
+    elif aggregation_mode == 'average':
+        return sum(children_attributes) / len(children_attributes)
+    else:
+        raise ValueError("Unsupported aggregation mode")
+
+def encode_svo_attributes(root_node, aggregation_mode='average'):
+    """
+    Encodes SVO attributes using Parent Delta Encoding.
+    Assumes root_node is the tree root, with standard fields:
+    - is_leaf(): returns True if node is a leaf
+    - attribute: original value for leaves
+    - children: list of child nodes for internal nodes
+    Returns a list of integer/float deltas ready for entropy coding.
+    """
+    deltas = []
+
+    def propagate(node):
+        """Bottom-up pass: computes and stores parent attributes."""
+        if node.is_leaf():
+            return node.attribute
+        child_attrs = [propagate(child) for child in node.children]
+        node.computed_attribute = compute_parent_attribute(child_attrs, aggregation_mode)
+        return node.computed_attribute
+
+    def encode_leaves(node, parent_attr):
+        """Top-down pass: computes deltas for leaves using propagated parent values."""
+        if node.is_leaf():
+            delta = node.attribute - parent_attr
+            deltas.append(delta)
+        else:
+            for child in node.children:
+                encode_leaves(child, node.computed_attribute)
+
+    propagate(root_node)
+    encode_leaves(root_node, 0)  # Root parent attribute is irrelevant for leaf deltas
+    return deltas
+```
+
+## Operating characteristics
+*   **Time Complexity:** Encoding and decoding have low time complexity compared to direct neighbor access in SVOs, which has logarithmic complexity [S1]. Parent access is described as "very easy" and resolves space/time/memory requirements [S1].
+*   **Memory Complexity:** The method supports streamability and does not require reading the entire SVO into memory during decoding, unlike direct neighbor access which would require full memory loading [S1].
+*   **Measured Performance:** Not given in the sources.
+*   **Scaling:** Not given in the sources.
+*   **Compression Ratio:** High compression ratio is achieved when attribute values are similar across hierarchical parent-child nodes, resulting in small deltas [S1].
+*   **Strengths:** Good SVO interoperability, low memory/time complexity, streamability, and high compression ratio for typical models [S1].
+*   **Limitations:** The initial mipmapping step increases model size temporarily; effectiveness depends on attribute similarity [S1].
+*   **When to use:** Use when compressing volumetric attributes in SVOs where streamability, low decoding memory, and hierarchical redundancy are prioritized over direct spatial neighbor access [S1].
+*   **When not to use:** Avoid when attribute values vary significantly across parent-child boundaries, as the resulting large deltas will negate the compression benefit [S1].
+
+## Background
+The method was developed to address the limitations of extending 2D image compression techniques (like PNG filtering) to 3D volumetric data stored in SVOs [S1]. In 2D images, direct spatial neighbors (left, top, top-left) are easily accessible, but in 3D SVOs, random access to neighbors is complex and memory-intensive [S1]. The approach was inspired by the need for good SVO interoperability and streamability while exploiting redundancies in typical voxel models [S1]. It is used in the context of voxel model compression, specifically for attributes like color which comprise the vast majority of information bytes compared to geometry (1 bit vs 24 bits) [S1].
+
+## Sources
+[S1] SVO Attribute Compression, https://eisenwave.github.io/voxel-compression-docs/attribute_compression.html, fetched 2026-10-27

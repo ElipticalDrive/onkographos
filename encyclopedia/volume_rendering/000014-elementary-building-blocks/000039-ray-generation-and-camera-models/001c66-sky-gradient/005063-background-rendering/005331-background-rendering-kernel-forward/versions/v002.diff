@@ -1,0 +1,123 @@
+--- v001.md
++++ v002.md
+@@ -1,71 +1,70 @@
+ # Background Rendering Kernel (Forward)
+ ## Overview
+-A CUDA kernel that renders the background color for rays that have transmitted through the volume [S1, unofficial]. It serves as the final compositing step for rays that do not terminate within the volume, applying procedural sky gradients, sun glow, and other background effects. It is distinct from the volume integration kernel, which handles rays interacting with the medium, by focusing solely on the scene's backdrop [S1, unofficial].
++A CUDA kernel that renders the background color for rays that have transmitted through the volume [S1, unofficial]. It serves as the final compositing stage in the background rendering kernel, accumulating color from the background layers and adding a constant ambient term based on remaining transmission [S1, unofficial]. It differs from standard equirectangular sampling by using concentric spheres to distribute samples, which helps mitigate aliasing and provides a structured traversal of the background layers [S1, unofficial].
+ ## How it works
+ **Inputs and Outputs:**
+-- `grid`: The volume grid data structure.
+-- `ray_spec`: Ray specification containing origins and directions.
+-- `options`: Configuration options for the background rendering (e.g., sky gradient parameters).
+-- `log_transmit`: Logarithmic transmission values for each ray, indicating how much light passed through the volume.
+-- `output`: The output buffer for the background color.
++- `grid`: Background environment data structure (e.g., layered spherical map).
++- `ray_spec`: Ray origins and directions.
++- `options`: Rendering configuration parameters.
++- `log_transmit`: Per-ray logarithmic transmission values.
++- `output`: Buffer for the resulting background color.
+ 
+ **Data Structures:**
+-- `ray_spec`: Contains `origin` (float3) and `direction` (float3) for each ray.
+-- `log_transmit`: A 1D array of floats, where `log_transmit[ray_id]` stores the log of the transmission for the ray with ID `ray_id`.
++- `log_transmit`: Array of floats, indexed by `ray_id`. Stores the natural logarithm of the accumulated transmission along the ray through the volume.
+ 
+ **Steps:**
+-1. **Initialize Ray Specification:** Extract the origin and direction for the current ray from the `ray_spec` structure [S1, unofficial].
+-2. **Find Background Bounds:** Call `ray_find_bounds_bg` to determine the intersection bounds of the ray with the background volume or screen space [S1, unofficial].
+-3. **Early Exit Check:** If `log_transmit[ray_id]` is less than `-25.0f`, the thread returns early, skipping background rendering for highly occluded rays [S1, unofficial]. This optimization avoids unnecessary computation for rays that are effectively blocked by the volume.
+-4. **Render Background Forward:** Call `render_background_forward` with the `grid`, `ray_spec`, `options`, `log_transmit`, and `output` to compute and store the final background color [S1, unofficial].
+-
+-**Pitfalls:**
+-- **Precision:** The threshold `-25.0f` for `log_transmit` is a specific implementation detail. Rays with transmission values below `exp(-25.0)` are considered fully occluded. Using a different threshold may lead to visual artifacts or performance issues [S1, unofficial].
+-- **Boundary Conditions:** Ensure that `ray_find_bounds_bg` correctly handles rays that do not intersect the background volume, returning appropriate default values or skipping rendering [S1, unofficial].
++1. **Initialize Ray Specification**: Extract ray origins and directions from the input buffers for the current thread's `ray_id`.
++2. **Find Background Bounds**: Call `ray_find_bounds_bg` to determine the intersection interval of the ray with the background environment bounds.
++3. **Check Occlusion**: If `log_transmit[ray_id] < -25.0f`, the ray is considered highly occluded. The kernel returns early, skipping background rendering for this ray [S1, unofficial].
++4. **Render Background Forward**: Call `render_background_forward` with the `grid`, `ray_spec`, `options`, `log_transmit`, and `output` buffers. This function samples the background using concentric spheres and composites the result with the transmission [S1, unofficial].
+ 
+ **Pseudocode:**
+ ```python
+-__global__ void background_rendering_kernel_forward(
+-    const RaySpec* ray_spec,
+-    const VolumeGrid* grid,
+-    const BackgroundOptions* options,
+-    const float* log_transmit,
+-    float3* output,
+-    int num_rays) {
+-    
+-    int ray_id = blockIdx.x * blockDim.x + threadIdx.x;
+-    if (ray_id >= num_rays) return;
++@cuda.kernel
++def render_background_kernel_forward(grid, ray_origins, ray_directions, options, log_transmit, output):
++    ray_id = cuda.grid(1)
++    if ray_id >= num_rays:
++        return
+ 
+-    // Step 1: Initialize ray specification
+-    Ray ray = ray_spec[ray_id];
++    # Step 1: Initialize ray specification
++    origin = ray_origins[ray_id]
++    direction = ray_directions[ray_id]
++    ray_spec = Ray(origin, direction)
+ 
+-    // Step 2: Find background bounds
+-    // Implementation details of ray_find_bounds_bg are assumed to be available
+-    BackgroundBounds bounds = ray_find_bounds_bg(ray, grid);
++    # Step 2: Find background bounds
++    t_min, t_max = ray_find_bounds_bg(ray_spec, grid)
+ 
+-    // Step 3: Early exit check for highly occluded rays
+-    if (log_transmit[ray_id] < -25.0f) {
+-        return;
+-    }
++    # Step 3: Check occlusion
++    if log_transmit[ray_id] < -25.0f:
++        return
+ 
+-    // Step 4: Render background forward
+-    // Implementation details of render_background_forward are assumed to be available
+-    float3 bg_color = render_background_forward(ray, bounds, grid, options, log_transmit[ray_id]);
+-    
+-    // Store the result
+-    output[ray_id] = bg_color;
+-}
++    # Step 4: Render background forward
++    render_background_forward(grid, ray_spec, options, log_transmit, output, ray_id)
+ ```
++
++**Parameters:**
++- `log_transmit` threshold: `-25.0f`. Rays with transmission less than $e^{-25}$ are skipped [S1, unofficial].
++
++**Edge Cases and Pitfalls:**
++- **High Occlusion**: Rays with very low transmission (log value < -25) are skipped to save computation. This assumes that the background contribution is negligible for such rays [S1, unofficial].
++- **Precision**: The use of logarithmic transmission requires careful handling of underflow. The threshold of -25 is chosen to balance precision and performance.
++
+ ## Subtopics
++
++### [Background Rendering via Concentric Spheres](15340-background-rendering-via-concentric-spheres.md)
++This method renders the background environment for rays that have transmitted through the volume by sampling a layered spherical map. It differs from standard equirectangular sampling by using concentric spheres to distribute samples, which helps mitigate aliasing and provides a structured traversal of the background layers. It serves as the final compositing stage in the background rendering kernel, accumulating color from the background layers and adding a constant ambient term based on remaining transmission.
++
+ ## Operating characteristics
+-- **Time Complexity:** Linear with respect to the number of rays, $O(N)$, where $N$ is the number of pixels/rays. The early exit optimization can reduce the effective number of rays processed for highly occluded scenes.
+-- **Memory Complexity:** $O(N)$ for storing the output background colors. The `log_transmit` array also requires $O(N)$ memory.
+-- **Performance:** Performance is heavily dependent on the complexity of the `render_background_forward` function and the proportion of rays that pass the early exit check. On modern GPUs, this kernel is typically highly parallelized and efficient.
+-- **Strengths:** Efficiently handles rays that do not interact with the volume, allowing for complex procedural backgrounds without significant performance overhead.
+-- **Limitations:** The early exit threshold is a fixed value and may not be optimal for all scenes. The quality of the background rendering depends on the implementation of `render_background_forward`.
+-- **When to Use:** Use this kernel when rendering scenes with volumetric effects where rays may pass through the volume and require a background to be composited.
+-- **When Not to Use:** Avoid if the background is simple or if the volume occlusion is minimal, as the overhead may not be justified.
++- **Time Complexity**: Linear with respect to the number of rays, $O(N)$, where $N$ is the number of pixels/rays. The cost per ray depends on the number of samples taken in the background rendering step.
++- **Memory Complexity**: $O(N)$ for storing `log_transmit` and output buffers.
++- **Performance**: The early exit for highly occluded rays can significantly reduce computation time in scenes with dense volumes.
++- **Strengths**: Efficient handling of occluded rays; structured sampling reduces aliasing.
++- **Limitations**: Dependent on the efficiency of `ray_find_bounds_bg` and `render_background_forward`.
++- **When to Use**: Suitable for real-time or near-real-time volume rendering where background quality is important but computational resources are limited.
++- **When Not to Use**: Not suitable for offline rendering where maximum quality is required without performance constraints.
++
+ ## Background
+-The `Background Rendering Kernel (Forward)` is part of the `nerf-factory` project by Kakao Brain [S1, unofficial]. It is designed to integrate with neural radiance fields (NeRF) and other volume rendering techniques, providing a flexible and efficient way to render backgrounds. The kernel is implemented in CUDA, leveraging the parallel processing capabilities of GPUs for high-performance rendering.
++The `Background Rendering Kernel (Forward)` is part of the `nerf-factory` project by Kakao Brain [S1, unofficial]. It is designed to integrate background rendering into the volume rendering pipeline, specifically for rays that have passed through the volume. The use of concentric spheres for background sampling is a technique to improve visual quality by reducing aliasing artifacts common in equirectangular sampling.
++
+ ## Sources
+ [S1] kakaobrain/nerf-factory, https://github.com/kakaobrain/nerf-factory, fetched 2026-10-26 (unofficial)

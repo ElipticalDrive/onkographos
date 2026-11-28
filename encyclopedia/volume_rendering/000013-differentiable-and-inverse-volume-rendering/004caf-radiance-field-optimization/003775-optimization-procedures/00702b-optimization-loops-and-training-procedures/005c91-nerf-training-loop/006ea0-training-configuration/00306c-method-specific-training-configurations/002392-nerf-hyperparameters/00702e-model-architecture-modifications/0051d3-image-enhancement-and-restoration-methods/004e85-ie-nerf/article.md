@@ -1,0 +1,85 @@
+# IE-NeRF
+
+Also called: IE-NeRF Pipeline, Image-dependent NeRF with transient mask inpainting, Inpainting Enhanced NeRF
+
+## Overview
+IE-NeRF is a Neural Radiance Field variant designed to enhance novel view synthesis in uncontrolled, "in-the-wild" environments by separating static scene rendering from transient occlusions (e.g., pedestrians, vehicles) using an image-dependent transient mask and an inpainting module [S1]. Unlike sibling methods such as [DeblurNeRF](11964-deblurnerf.md) or [Sharp-NeRF](14270-sharp-nerf.md) which focus on resolution or blur, IE-NeRF specifically addresses dynamic occlusions. It differs from [NeRF-W](3065-nerf-hyperparameters.md) by using a single MLP to predict both static properties and a 2D transient mask, rather than a 3D transient field, and avoids the need for external semantic segmentation priors by learning the mask end-to-end [S1].
+
+## How it works
+**Inputs and Outputs:**
+*   **Inputs:** A set of uncontrolled images $\{I_i\}$ with corresponding camera poses. Each image $I_i$ is pre-filtered (NIMA score > 3, transient objects < 80% area) and downsampled by a factor of 2 [S1].
+*   **Outputs:** A continuous volumetric representation of the static scene, producing static color $\mathbf{c}_s$ and density $\sigma_s$ for novel view synthesis, and a transient mask $M_{ij}$ for each pixel $j$ in image $i$ [S1].
+
+**Data Structures and Layout:**
+1.  **CNN Encoder ($E_E$):** Encodes input image $I_i$ into a feature latent vector $\boldsymbol{\ell}_i \in \mathbb{R}^d$ [S1].
+2.  **NeRF MLPs:**
+    *   **MLP$_{\theta_1}$:** 8 fully connected layers, 256 hidden units. Input: Integrated Positional Encoding (IPE) of ray position $\gamma_x(\mathbf{r}(t))$. Output: Density $\sigma(t)$ and intermediate feature $\mathbf{z}_i(t)$ [S1].
+    *   **MLP$_{\theta_2}$:** Input: Directional encoding $\gamma_d(\mathbf{d})$, intermediate feature $\mathbf{z}_i(t)$, and original position $(x,y,z)$. Output: Image-dependent radiance $\mathbf{c}_i(t)$ and transient mask embedding $\boldsymbol{\ell}_t$ [S1].
+    *   **Transient Mask Head:** A fully connected layer with 128 channels and Sigmoid activation. Input: $\boldsymbol{\ell}_t$ and 2D pixel location $\mathbf{l}_{ij}$. Output: Transient mask probability $M_{ij}$ [S1].
+    *   **Static Color Head:** A fully connected layer with 128 channels and Sigmoid activation. Input: $\mathbf{c}_i(t)$. Output: Static RGB color $\mathbf{c}_s$ [S1].
+3.  **Inpainting Module ($G_\Delta$):** Uses the LaMa model [S1].
+    *   **Architecture:** ResNet-like with 3 downsampling blocks, 12 residual blocks using Fast Fourier Convolution (FFC), and 3 upsampling blocks [S1].
+    *   **Input:** Four-channel tensor $\mathbf{x}' = \text{stack}(\mathbf{x} \odot \mathbf{m}, \mathbf{m})$, where $\mathbf{x}$ is the masked image and $\mathbf{m}$ is the binary thresholded mask [S1].
+    *   **Output:** Restored static image $\hat{I}_{ri}$ and repaired depth map $\hat{D}_{ri}$ [S1].
+
+**Numbered Steps:**
+1.  **Preprocessing:** For each input image $I_i$, encode it into a latent vector $\boldsymbol{\ell}_i$ using $E_E$. Discard images with NIMA score < 3 or transient occupancy > 80% [S1].
+2.  **Ray Sampling:** For each pixel, sample points $t_k$ along the camera ray $\mathbf{r}(t) = \mathbf{o} + t\mathbf{d}$. Apply Integrated Positional Encoding (IPE) [S1].
+3.  **Static Feature Extraction:** Compute $\sigma(t)$ and $\mathbf{z}_i(t)$ via $\text{MLP}_{\theta_1}[\gamma_x(\mathbf{r}(t))]$ [S1].
+4.  **Radiance and Mask Prediction:** Compute image-dependent radiance $\mathbf{c}_i(t)$ and transient embedding $\boldsymbol{\ell}_t$ via $\text{MLP}_{\theta_2}[\gamma_d(\mathbf{d}), \mathbf{z}_i(t)]$ [S1].
+5.  **Transient Mask Generation:** Generate pixel-wise transient mask probability $M_{ij}$ using linear layers $E_\phi$ mapping $\mathbf{l}_{ij}$ and $\boldsymbol{\ell}_t$: $M_{ij} = E_\phi(\mathbf{l}_{ij}, \boldsymbol{\ell}_t)$ [S1].
+6.  **Volumetric Rendering:** Render the static scene image $\hat{C}_i(\mathbf{r})$ and depth $\hat{D}_s(\mathbf{r})$ using the static density $\sigma(t)$ and radiance $\mathbf{c}_i(t)$:
+    $$ \hat{C}_i(\mathbf{r}) = \sum_{k=1}^K T(t_k) \alpha(\sigma(t_k)\delta_k) \mathbf{c}_i(t_k) $$
+    where $T(t_k) = \exp\left(-\sum_{k'=1}^{k-1} \sigma(t_{k'})\delta_{k'}\right)$ [S1].
+7.  **Inpainting:** Threshold $M_{ij}$ to create a binary mask. Apply this mask to the original image $I_i$ and the rendered depth. Feed the masked image and mask into $G_\Delta$ to produce the restored static image $\hat{I}_{ri}$ and repaired depth $\hat{D}_{ri}$ [S1].
+8.  **Optimization:** Minimize the total loss $L$ (defined below) to update $\theta$ and $E_E$ [S1].
+
+**Formulas:**
+*   **NeRF Preliminary:**
+    $$ [\sigma(t), \mathbf{z}_i(t)] = \text{MLP}_{\theta_1}[\gamma_x(\mathbf{r}(t))] $$
+    $$ \mathbf{c}_i(t) = \text{MLP}_{\theta_2}[\gamma_d(\mathbf{d}), \mathbf{z}_i(t)] $$
+    where $\theta = [\theta_1, \theta_2]$ are learnable weights [S1].
+
+*   **Transient Loss ($L_t$):** Balances occlusion and reconstruction errors:
+    $$ L_t = \sum_{ij} (1 - M_{ij}) \|\mathbf{C}(\mathbf{r}_{ij}) - \hat{\mathbf{C}}_s(\mathbf{r}_{ij})\|^2 + \lambda M_{ij} \|\mathbf{C}_s(\mathbf{r}_{ij}) - \hat{\mathbf{C}}_s(\mathbf{r}_{ij})\|^2 $$
+    where $\mathbf{C}(\mathbf{r}_{ij})$ is the observed color, $\hat{\mathbf{C}}_s$ is the rendered static color, and $\lambda$ balances static/transient components [S1].
+
+*   **Depth Loss ($L_{depth}$):**
+    $$ L_{depth} = \frac{1}{|\mathcal{R}|} \sum_{\mathbf{r} \in \mathcal{R}} \|\hat{D}_s(\mathbf{r}) - \hat{D}_r(\mathbf{r})\|^2 $$
+    where $\hat{D}_s$ is rendered static depth and $\hat{D}_r$ is inpainted depth [S1].
+
+*   **Total Loss:**
+    $$ L = \alpha \sum_{ij} L_s + \beta \sum_{ij} L_t + \gamma \sum_i L_{LPIPS} + \rho \sum_i L_{depth} $$
+    where $\alpha, \beta, \gamma, \rho$ are weights [S1].
+
+*   **Frequency Regularization (RegFre-IPE):**
+    $$ \gamma'_L(t, T; \mathbf{x}) = \gamma_L(\mathbf{x}) \odot \omega(t, T, L) $$
+    where $\omega^i(t, T, L)$ is a linearly increasing frequency mask based on current iteration $t$, max iteration $T$, max frequency $L$, and transient mask factor $r$ (ratio of transient pixels):
+    $$ \omega^i(t, T, L) = \begin{cases} \left(1 - \lfloor \frac{t \cdot L}{T} \rfloor \right) \cdot r & \text{if } i \le \lfloor \frac{t \cdot L}{T} \rfloor + 3 \\ 0 & \text{if } i > \lfloor \frac{t \cdot L}{T} \rfloor + 6 \end{cases} $$
+    (Note: The source provides a piecewise definition with a gap; the implementation should follow the source's specific bit-wise logic for $\omega$) [S1].
+
+**Parameters:**
+*   **MLP Architecture:** 8 layers, 256 hidden units for $\sigma$; 128 units for color/mask heads [S1].
+*   **IPE:** Integrated Positional Encoding used instead of single-ray point encoding [S1].
+*   **$\lambda$:** Balances static/transient components in $L_t$ [S1].
+*   **$\alpha, \beta, \gamma, \rho$:** Weights for static, transient, perceptual (LPIPS), and depth losses [S1].
+*   **$L$:** Maximum encoded frequency in positional encoding [S1].
+*   **$r$:** Transient mask factor (ratio of transient pixels to total image area) [S1].
+
+**Pitfalls and Edge Cases:**
+*   **Small Datasets:** The method struggles with sparse inputs because the transient mask lacks sufficient information to guarantee accurate inpainting [S1].
+*   **Blurry Results:** Inpainting modules may produce blurry results or view inconsistencies. Mitigated by using LPIPS loss inside the mask and depth supervision [S1].
+*   **High-Frequency Instability:** High-frequency signals cause instability in transient separation. Mitigated by starting training without positional encoding and incrementally boosting frequency via RegFre-IPE [S1].
+
+## Operating characteristics
+*   **Time and Memory Complexity:** Uses mip-NeRF cone casting, which is more computationally expensive than single-ray sampling but handles multiscale representations better [S1]. The dual MLP strategy (coarse and fine) adds overhead [S1].
+*   **Measured Performance:** On the Phototourism dataset (Brandenburg Gate), IE-NeRF achieved PSNR 25.33, SSIM 0.898, and LPIPS 0.158, outperforming NeRF (18.90/0.816/0.232), NeRF-W (24.17/0.891/0.167), and Ha-NeRF (24.04/0.877/0.139) [S1].
+*   **Scaling:** Performance degrades with sparse inputs or small datasets [S1].
+*   **Strengths:** Effectively separates static and transient components in uncontrolled environments without requiring 3D transient fields or external semantic segmentation models [S1].
+*   **Limitations:** Struggles with small datasets; inpainting artifacts may persist if the mask is inaccurate; camera pose inaccuracies affect performance [S1].
+
+## Background
+IE-NeRF was proposed by Wang et al. from Sun Yat-sen University and Pengcheng Laboratory, published in 2024 [S1]. It builds on the NeRF architecture [Parent](3065-nerf-hyperparameters.md) and addresses the limitations of NeRF-W, which uses a 3D transient field, and prior-assisted methods like SF-NeRF, which rely on semantic segmentation [S1]. It is evaluated on the Phototourism dataset, including scenes like Brandenburg Gate, Sacre Coeur, Trevi Fountain, and Taj Mahal [S1].
+
+## Sources
+[S1] IE-NeRF: Exploring transient mask inpainting to enhance neural radiance fields in the wild, https://doi.org/10.1016/j.neucom.2024.129112, fetched 2026-10-27

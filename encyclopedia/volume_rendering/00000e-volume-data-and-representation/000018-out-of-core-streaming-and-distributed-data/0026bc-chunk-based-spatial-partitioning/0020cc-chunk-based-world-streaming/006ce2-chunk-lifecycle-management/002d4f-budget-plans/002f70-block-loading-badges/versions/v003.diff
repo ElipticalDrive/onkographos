@@ -1,0 +1,91 @@
+--- v002.md
++++ v003.md
+@@ -4,21 +4,21 @@
+ 
+ ## Overview
+-Block Loading Badges provide per-pane visibility into the status of GPU upload queues for chunk-based volume rendering [S1, unofficial]. They solve the problem of opaque streaming progress by tracking the resident count movement of fetched blocks, distinguishing actual data acquisition from planned requests [S1, unofficial]. Unlike general budget plans that shape octree structure, badges specifically monitor the GPU residency cap and upload queue depth, ensuring the UI reflects only the blocks the stream actually requested and fetched [S1, unofficial].
++Block Loading Badges provide per-pane visibility into the status of GPU upload queues for chunk-based volume rendering [S1, unofficial]. They solve the problem of opaque streaming progress by tracking the resident count movement of fetched blocks, distinguishing actual data acquisition from planned requests [S1, unofficial]. Unlike plan budgets that only shape the octree, badges specifically monitor the GPU upload queue depth keyed on resident count movement rather than the plan total [S1, unofficial].
+ 
+ ## How it works
+ **Inputs and Outputs:**
+-- Input: A stream of chunk requests from the renderer (specifically the "asked-for" count per pane), the current set of resident blocks in GPU memory, and a high-water mark tracker.
+-- Output: A badge value representing the current pending upload load, bounded by a per-episode high-water mark.
++- Input: The stream of chunk requests from the renderer (the "asked-for" count per pane) and the current set of resident blocks in GPU memory [S1, unofficial].
++- Output: A badge value representing the current pending upload load, bounded by a per-episode high-water mark [S1, unofficial].
+ 
+ **Data Structures:**
+-- `resident_count`: Integer tracking the number of blocks currently resident in GPU memory for the specific pane.
+-- `high_water_mark`: Integer tracking the maximum `resident_count` observed for the current episode/session.
+-- `badge_value`: Integer representing the current pending load, calculated as `high_water_mark - resident_count` or similar metric derived from movement.
++- `resident_count`: Integer tracking the number of blocks currently resident in GPU memory for the specific pane [G].
++- `high_water_mark`: Integer tracking the maximum `resident_count` observed for the current episode [G].
++- `pending_load`: Integer representing the current GPU upload queue depth, calculated as `high_water_mark - resident_count` [S1, unofficial].
+ 
+ **Steps:**
+-1. **Key on Movement:** The badge state is not derived from the total planned budget but from the movement of the resident count. As blocks are fetched and uploaded to the GPU, the resident count increases [S1, unofficial].
+-2. **Count Actual Requests:** The badge counts against the number of blocks the stream *actually* asked for and fetched, not the total number of blocks defined in the plan [S1, unofficial]. This ensures that absent or empty bricks, which are never fetched, do not inflate the pending load [S1, unofficial].
+-3. **Handle Evictions:** When the GPU memory limit is reached, the Least Recently Used (LRU) eviction policy removes blocks from residency. This decreases the resident count, which the badge interprets as a reduction in pending load or a shift in state, ensuring the badge reflects the active upload queue rather than stale requests [S1, unofficial].
+-4. **Maintain High-Water Mark:** The system maintains a per-episode high-water mark of the resident count. The badge bar or indicator only moves forward (increases) relative to this mark, preventing regression in the UI progress display even if blocks are evicted and re-fetched [S1, unofficial].
++1. **Key on Movement:** The badge state derives from the movement of the resident count rather than the total planned budget [S1, unofficial].
++2. **Count Actual Requests:** The badge counts against the number of blocks the stream actually asked for and fetched, not the plan total [S1, unofficial].
++3. **Handle Evictions:** When the GPU memory limit is reached, the Least Recently Used (LRU) eviction policy removes blocks from residency [S1, unofficial].
++4. **Maintain High-Water Mark:** The system maintains a per-episode high-water mark of the resident count so the progress bar only moves forward [S1, unofficial].
+ 
+ **Pseudocode:**
+@@ -30,43 +30,36 @@
+         self.pending_load = 0
+ 
+-    def on_block_fetched(self, block_id):
+-        """Called when a block is successfully fetched and uploaded to GPU."""
++    def on_block_fetched(self):
+         self.resident_count += 1
+-        # Update high-water mark so the bar only moves forward
+         if self.resident_count > self.high_water_mark:
+             self.high_water_mark = self.resident_count
+-        # Badge reflects the gap between high-water and current,
+-        # or simply the current pending queue size if tracked separately.
+-        # Based on notes, it keys on resident count moving.
+         self.pending_load = self.high_water_mark - self.resident_count
+ 
+-    def on_block_evicted(self, block_id):
+-        """Called when a block is evicted from GPU memory via LRU."""
++    def on_block_evicted(self):
+         self.resident_count -= 1
+-        # The badge does not reset high_water_mark, so the bar stays at the peak
+-        # achieved during the episode, reflecting the maximum load encountered.
+         self.pending_load = self.high_water_mark - self.resident_count
+ 
+     def get_badge_value(self):
+-        """Returns the current badge value for UI display."""
+         return self.pending_load
+ ```
+ 
+ **Edge Cases and Pitfalls:**
+-- **Absent/Empty Bricks:** The system must ensure that requests for non-existent or empty data do not increment the resident count or the badge load, as these are never fetched [S1, unofficial].
+-- **Episode Reset:** The high-water mark is per-episode. If the scene or volume changes significantly, the mark should reset to avoid carrying over load metrics from previous contexts [S1, unofficial].
+-- **Precision:** The badge relies on integer counts of blocks. Sub-block or partial-fetch states are not described; the method assumes atomic block fetches [S1, unofficial].
++- **Absent/Empty Bricks:** Requests for non-existent or empty data are never fetched, so they do not increment the resident count or the badge load [S1, unofficial].
++- **Precision:** The badge relies on integer counts of blocks. Sub-block or partial-fetch states are not described; the method assumes atomic block fetches [G].
+ 
+ ## Subtopics
+ 
++### [GPU-CPU Upstreaming](10091-gpu-cpu-upstreaming.md)
++Prioritizes CPU-to-GPU transfers based on immediate ray-casting visibility rather than resident count movement. Choose when minimizing VRAM usage for active sampling is critical over tracking upload queue depth.
++
+ ## Operating characteristics
+-- **Time Complexity:** O(1) for badge updates per block fetch/eviction, as it involves simple integer arithmetic and comparisons.
+-- **Memory Complexity:** O(1) additional memory for the badge state (two integers).
+-- **Performance:** Verified against a fake clock in isolation and live on both backends (CPU and GPU) [S1, unofficial].
+-- **Strengths:** Provides accurate, real-time feedback on GPU upload queue status without being skewed by planned but unfetched blocks.
+-- **Limitations:** Tied to the specific pane and episode context; not a global volume metric.
++- **Time Complexity:** O(1) for badge updates per block fetch or eviction, involving simple integer arithmetic and comparisons [G].
++- **Memory Complexity:** O(1) additional memory for the badge state (two integers) [G].
++- **Performance:** Verified against a fake clock in isolation, then live on both backends [S1, unofficial].
++- **Strengths:** Provides accurate, real-time feedback on GPU upload queue status without being skewed by planned but unfetched blocks [G].
++- **Limitations:** Tied to the specific pane and episode context; not a global volume metric [G].
+ 
+ ## Background
+-Block Loading Badges were introduced as part of the "feat(niivue): streamed multi-LOD rendering fixes, LOD compensation, budget plans, and block inspection" pull request [S1, unofficial]. They are part of the chunk lifecycle management within the Niivue volume rendering library, specifically designed to work with the new budget plans system that replaces single octree-focused policies [S1, unofficial].
++Block Loading Badges were introduced as part of the Niivue streamed multi-LOD rendering fixes and budget plans implementation [S1, unofficial]. They operate alongside budget plans, which shape the octree structure, while GPU residency is capped separately by the renderer [S1, unofficial].
+ 
+ ## Sources

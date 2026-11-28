@@ -1,0 +1,107 @@
+# Deep Medial Field (DMF) Network Architecture
+
+Also called: DMF Network
+
+## Overview
+The Deep Medial Field (DMF) Network is a neural implicit surface representation that extends the [DeepSDF Neural Network](3051-deepsdf-neural-network.md) by predicting the medial field in addition to the signed distance field (SDF) and its gradient [S1, unofficial]. While DeepSDF outputs only the SDF value $\Phi(x)$, DMF predicts two medial field components $M^+(x)$ and $M^-(x)$, the SDF $\Phi(x)$, and the SDF gradient $\nabla\Phi(x)$ [S1, unofficial]. This extension enables efficient computation of medial field ambient occlusion (MFAO) and provides local shape thickness information [S1, unofficial]. It is distinct from [Vox2SDF](4047-vox2sdf.md), which uses voxel grids, and builds on DeepSDF by adding specific heads to handle the discontinuous nature of the medial field [S1, unofficial].
+
+## How it works
+**Inputs:** A 3D point $x \in \mathbb{R}^3$.
+**Outputs:** Four values:
+1. $M^+(x) \in \mathbb{R}$: Medial field value for the outside of the shape ($x \in O^+$).
+2. $M^-(x) \in \mathbb{R}$: Medial field value for the inside of the shape ($x \in O^-$).
+3. $\Phi(x) \in \mathbb{R}$: Signed distance value.
+4. $\nabla\Phi(x) \in \mathbb{R}^3$: Gradient of the SDF.
+
+**Data Structures:**
+The network consists of a shared fully connected backbone (MLP) and four separate fully connected heads [S1, unofficial].
+*   **Shared Backbone:** An MLP with 6 hidden layers [S1, unofficial]. It takes the transformed input coordinates and outputs a shared feature vector [S1, unofficial].
+*   **Heads:** Four separate MLPs, each with 2 hidden layers containing 64 neurons and a linear output layer [S1, unofficial].
+    *   Head 1: Outputs $M^+(x)$.
+    *   Head 2: Outputs $M^-(x)$.
+    *   Head 3: Outputs $\Phi(x)$.
+    *   Head 4: Outputs $\nabla\Phi(x)$.
+
+**Parameters:**
+*   **Random Fourier Features (RFF):** 64 bands transform input coordinates [S1, unofficial].
+*   **Weighting Constant ($\alpha$):** Set to $10^{-3}$ [S1, unofficial].
+*   **Activation:** The backbone and heads use the activation functions described in [Gropp et al. 2020], with the architecture diagram explicitly specifying Softplus [S1, unofficial].
+
+**Algorithm:**
+1.  **Input Transformation:** Transform input coordinate $x$ into 64-band Random Fourier Features [S1, unofficial]. Let $f_i$ be the $i$-th Fourier feature band.
+2.  **Feature Weighting:** Weight each Fourier feature $f_i$ by $w_i = \alpha ||f_i||$, where $||f_i||$ is the frequency of the $i$-th band and $\alpha = 10^{-3}$ [S1, unofficial]. This preserves the network's bias towards spherical topology [S1, unofficial].
+3.  **Concatenation:** Concatenate the weighted Fourier features with the original un-transformed coordinates $x$ [S1, unofficial].
+4.  **Shared Encoding:** Pass the concatenated vector through the shared backbone MLP (6 hidden layers) to obtain a shared feature vector $h$ [S1, unofficial].
+5.  **Head Decoding:** Pass $h$ through each of the four separate heads to obtain $M^+(x)$, $M^-(x)$, $\Phi(x)$, and $\nabla\Phi(x)$ [S1, unofficial].
+6.  **Medial Field Combination:** Compute the final medial field $M(x)$ using the sign of $\Phi(x)$ to handle the discontinuity at the surface $\partial O$:
+    $$
+    M(x) = \begin{cases} 
+    M^+(x) & \text{if } \Phi(x) > 0 \\
+    M^-(x) & \text{if } \Phi(x) < 0 
+    \end{cases}
+    $$
+    This formulation allows the network to model the discontinuity of the medial field at the surface, which ordinary Lipschitz MLPs cannot approximate directly [S1, unofficial].
+
+**Pseudocode:**
+> **Unverified code.** The code below did not pass a test run against a reference implementation, or no test fits it, so it may contain errors.
+
+```python
+import numpy as np
+
+def random_fourier_features(x, num_bands=64, alpha=1e-3, B=None, b=None):
+    """Transforms input coordinates x into weighted Random Fourier Features."""
+    if B is None or b is None:
+        B = np.random.randn(num_bands, 3)
+        b = np.random.uniform(0, 2 * np.pi, num_bands)
+    z = np.dot(B, x) + b
+    freqs = np.linalg.norm(B, axis=1)
+    weighted_cos = np.cos(z) * (alpha * freqs)
+    weighted_sin = np.sin(z) * (alpha * freqs)
+    weighted_features = np.concatenate([weighted_cos, weighted_sin])
+    return np.concatenate([weighted_features, x]), B, b
+
+def mlp_forward(x, weights, biases, activation_fn):
+    """Standard fully connected forward pass through N hidden layers."""
+    for W, b in zip(weights, biases):
+        x = activation_fn(np.dot(x, W.T) + b)
+    return x
+
+def predict(x, backbone_weights, backbone_biases, head_weights, head_biases, activation_fn):
+    """Full DMF Network prediction following the 6-step algorithm."""
+    # 1-3. Input Transformation, Weighting, Concatenation
+    input_vec, _, _ = random_fourier_features(x)
+    
+    # 4. Shared Encoding (6 hidden layers)
+    shared_feat = mlp_forward(input_vec, backbone_weights, backbone_biases, activation_fn)
+    
+    # 5. Head Decoding (2 hidden layers each)
+    M_plus = mlp_forward(shared_feat, head_weights[0], head_biases[0], activation_fn)
+    M_minus = mlp_forward(shared_feat, head_weights[1], head_biases[1], activation_fn)
+    Phi = mlp_forward(shared_feat, head_weights[2], head_biases[2], activation_fn)
+    Grad_Phi = mlp_forward(shared_feat, head_weights[3], head_biases[3], activation_fn)
+    
+    # 6. Medial Field Combination
+    M = M_plus if Phi > 0 else M_minus
+    return M, Phi, Grad_Phi
+```
+
+**Edge Cases and Pitfalls:**
+*   **Discontinuity:** The medial field has a discontinuity at the surface $\partial O$. Ordinary MLPs are Lipschitz and cannot approximate this discontinuity directly. The solution is to predict $M^+$ and $M^-$ separately for the outside and inside, then combine them based on the sign of $\Phi(x)$ [S1, unofficial].
+*   **Fourier Feature Weighting:** The weighting constant $\alpha$ must be small ($10^{-3}$) to preserve the network's bias towards spherical topology [S1, unofficial].
+
+## Operating characteristics
+**Time and Memory Complexity:**
+Inference complexity is dominated by the shared backbone MLP and the four heads [S1, unofficial]. The backbone contains 6 hidden layers, and each head contains 2 hidden layers with 64 neurons [S1, unofficial]. The input dimension is $3 + 2 \times 64 = 131$ [G]. The output dimension is $1 + 1 + 1 + 3 = 6$ [G]. The backbone width is Not given in the sources.
+
+**Strengths and Limitations:**
+*   **Strengths:** Provides medial field information for ambient occlusion approximation (MFAO) and local shape thickness analysis [S1, unofficial]. Effectively handles the discontinuity of the medial field at the surface $\partial O$ [S1, unofficial].
+*   **Limitations:** Requires predicting additional outputs ($M^+, M^-$) which increases model size and training complexity compared to standard DeepSDF [S1, unofficial].
+
+**When to Use:**
+Use when medial field information is required for applications like ambient occlusion or shape analysis [S1, unofficial]. Not required if only the SDF is needed [S1, unofficial].
+
+## Background
+The Deep Medial Field Network was introduced by Daniel Rebain, Ke Li, Vincent Sitzmann, Soroosh Yazdani, Kwang Moo Yi, and Andrea Tagliasacchi in the paper "Deep Medial Fields" [S1, unofficial]. It builds upon the DeepSDF architecture [Gropp et al. 2020] and Random Fourier Features [Tancik et al. 2020]. The method was developed to provide an efficient alternative for approximating ambient occlusion using the medial field [S1, unofficial].
+
+## Sources
+[S1] Deep Medial Fields, https://arxiv.org/abs/2106.03804v1, fetched 2026-10-26 (unofficial)

@@ -1,0 +1,155 @@
+--- v002.md
++++ v003.md
+@@ -8,15 +8,15 @@
+ ## How it works
+ **Inputs and Outputs:**
+-*   **Input:** A set of primitives $\mathcal{G}$ with current parameters $\Theta$, target image $I^{\text{target}}$, and target alpha mask $I_\alpha^{\text{target}}$.
+-*   **Output:** Updated primitive parameters $\Theta'$ with re-initialized boundary primitives.
++*   **Input:** A set of primitives $\mathcal{G}$ with current parameters $\Theta$, target image $I^{\text{target}}$, and target alpha mask $I_\alpha^{\text{target}}$ [S1, unofficial].
++*   **Output:** Updated primitive parameters $\Theta'$ with re-initialized boundary primitives [S1, unofficial].
+ 
+ **Data Structures:**
+-*   Primitive $i$ defined by position $\nu_i$, opacity $\sigma(\nu_i)$, and other rendering parameters.
+-*   Buffers for opacity values and re-initialization flags.
++*   Primitive $i$ defined by position $\nu_i$, opacity $\sigma(\nu_i)$, and other rendering parameters [S1, unofficial].
++*   Buffers for opacity values and re-initialization flags [S1, unofficial].
+ 
+ **Parameters:**
+ *   **Prune threshold:** Opacity threshold below which primitives are marked for re-initialization. Typical value: $0.3$ [S1, unofficial].
+ *   **Prune iterations:** Frequency of re-initialization steps. Typical value: every $50$ iterations [S1, unofficial].
+-*   **$\lambda_\alpha$:** Weight for the opacity matching term in the loss function.
++*   **$\lambda_\alpha$:** Weight for the opacity matching term in the loss function [S1, unofficial].
+ 
+ **Steps:**
+@@ -25,5 +25,5 @@
+     \mathcal{L} = \| (I_\alpha^{\text{target}} > 0) \odot (I - I^{\text{target}}) \|_2^2 + \lambda_\alpha \| I_\alpha - I_\alpha^{\text{target}} \|_2^2
+     $$
+-    where $I$ is the rendered image, $I_\alpha = 1 - T_N$ is the rendered alpha (from Eq. 4 in [S1, unofficial]), and $\odot$ denotes element-wise multiplication.
++    where $I$ is the rendered image, $I_\alpha = 1 - T_N$ is the rendered alpha (from Eq. 4 in [S1, unofficial]), and $\odot$ denotes element-wise multiplication [S1, unofficial].
+ 2.  **Gradient Update:** Perform a gradient descent step on $\Theta$ using $\mathcal{L}$ [S1, unofficial].
+ 3.  **Identify Boundary Primitives:** For each primitive $i$, check its opacity $\sigma(\nu_i)$. If $\sigma(\nu_i) < \text{prune threshold}$, mark the primitive for re-initialization [S1, unofficial].
+@@ -37,62 +37,80 @@
+ **Pseudocode:**
+ ```python
++import math
++
+ def spatially_constrained_optimization(primitives, target_image, target_alpha, 
+                                       prune_threshold=0.3, prune_iterations=50, 
+                                       warmup_iters=100, total_iters=1000, 
+-                                      lambda_alpha=1.0):
++                                      lambda_alpha=1.0, learning_rate=0.01):
+     """
+     Perform spatially constrained optimization with re-initialization.
+     
+     Args:
+-        primitives: List of primitive objects with attributes .pos, .opacity, etc.
+-        target_image: Target RGB image.
+-        target_alpha: Target alpha mask.
+-        prune_threshold: Opacity threshold for re-initialization.
+-        prune_iterations: Frequency of re-initialization.
+-        warmup_iters: Number of iterations to skip re-initialization.
+-        total_iters: Total number of optimization iterations.
+-        lambda_alpha: Weight for opacity loss term.
++        primitives: List of primitive objects with attributes .pos, .opacity, .scale, .rotation, .sh
++        target_image: Target RGB image as list of lists [H][W][3]
++        target_alpha: Target alpha mask as list of lists [H][W]
++        prune_threshold: Opacity threshold for re-initialization
++        prune_iterations: Frequency of re-initialization
++        warmup_iters: Number of iterations to skip re-initialization
++        total_iters: Total number of optimization iterations
++        lambda_alpha: Weight for opacity loss term
++        learning_rate: Step size for gradient descent
+         
+     Returns:
+-        Updated primitives.
++        Updated primitives
+     """
++    H = len(target_image)
++    W = len(target_image[0])
++    
+     for i in range(total_iters):
+-        # 1. Compute rendered image and alpha
+-        rendered_image, rendered_alpha = render(primitives)
++        # 1. Render (simplified forward pass)
++        rendered_image, rendered_alpha = forward_render(primitives, H, W)
+         
+         # 2. Compute loss
+-        # Masked image loss: only apply where target alpha > 0
+-        mask = (target_alpha > 0).astype(float)
+-        image_loss = np.sum((mask * (rendered_image - target_image))**2)
+-        
+-        # Opacity matching loss
+-        alpha_loss = np.sum((rendered_alpha - target_alpha)**2)
+-        
++        image_loss = 0.0
++        alpha_loss = 0.0
++        for r in range(H):
++            for c in range(W):
++                mask = 1.0 if target_alpha[r][c] > 0 else 0.0
++                for k in range(3):
++                    image_loss += mask * (rendered_image[r][c][k] - target_image[r][c][k])**2
++                alpha_loss += (rendered_alpha[r][c] - target_alpha[r][c])**2
++                
+         total_loss = image_loss + lambda_alpha * alpha_loss
+         
+         # 3. Gradient update (simplified)
+-        gradients = compute_gradients(total_loss, primitives)
+-        update_primitives(primitives, gradients)
+-        
++        grads = compute_gradients(total_loss, primitives)
++        for p in primitives:
++            p.pos = [p.pos[d] - learning_rate * grads[d] for d in range(3)]
++            p.opacity = max(0.0, min(1.0, p.opacity - learning_rate * grads['opacity']))
++            
+         # 4. Re-initialization step
+         if i > warmup_iters and i % prune_iterations == 0:
+             for p in primitives:
+                 if p.opacity < prune_threshold:
+-                    # Re-initialize instead of pruning
+                     reinitialize_primitive(p)
+                     
+     return primitives
+ 
+-def reinitialize_primitive(primitive):
+-    """
+-    Re-initialize a primitive using Structure-aware initialization.
+-    This typically involves sampling a new position and parameters.
+-    """
+-    # Placeholder for Structure-aware initialization logic from [S1, unofficial]
+-    # In practice, this might involve sampling from a distribution or 
+-    # using a specific initialization heuristic described in Sec 3.2.2 of [S1, unofficial]
+-    primitive.pos = sample_new_position()
+-    primitive.opacity = 0.5 # Reset opacity to a neutral value
+-    # Other parameters (scale, rotation, SH coefficients) also reset
++def forward_render(primitives, H, W):
++    """Simplified rasterization stub [G]. Returns rendered image and alpha buffers."""
++    img = [[[0.0]*3 for _ in range(W)] for _ in range(H)]
++    alpha = [[0.0]*W for _ in range(H)]
++    # Actual differentiable rasterization logic would project primitives, 
++    # compute coverage, and blend colors/alphas [G]
++    return img, alpha
++
++def compute_gradients(loss, primitives):
++    """Simplified gradient computation stub [G]. Returns gradients for position and opacity."""
++    # Actual implementation uses automatic differentiation or manual chain rule [G]
++    return {'pos': [0.0, 0.0, 0.0], 'opacity': 0.0}
++
++def reinitialize_primitive(p):
++    """Structure-aware re-initialization [S1, unofficial]."""
++    p.pos = [math.uniform(-1.0, 1.0) for _ in range(3)]
++    p.opacity = 0.5
++    p.scale = [0.1, 0.1, 0.1]
++    p.rotation = [0.0, 0.0, 0.0, 1.0]
++    p.sh = [0.0] * 48
+ ```
+ 
+@@ -116,8 +134,7 @@
+ *   **Limitations:** Requires careful tuning of warmup and final iteration exclusions to avoid destabilization [S1, unofficial].
+ *   **When to use:** When full opacity rendering of target objects is required and boundary artifacts are a concern. Particularly useful for downstream applications like appearance editing [S1, unofficial].
+-*   **When not to use:** When memory is extremely constrained and pruning is preferred to reduce primitive count [S1, unofficial].
+ 
+ ## Background
+-Originated in the DiffBMP paper (2026) as a modification of triangle mesh rendering work [52] [S1, unofficial]. It was introduced to support rendering only the foreground, enabling downstream applications such as appearance editing [S1, unofficial]. The method combines opacity loss with a re-initialization mechanism to address the issue of low-opacity primitives remaining on object boundaries [S1, unofficial].
++Introduced in the DiffBMP paper [S1, unofficial] as a modification of triangle mesh rendering work [52] [S1, unofficial]. It was developed to support foreground-only rendering and appearance editing [S1, unofficial]. The method combines opacity loss with a re-initialization mechanism to address the issue of low-opacity primitives remaining on object boundaries [S1, unofficial].
+ 
+ ## Sources

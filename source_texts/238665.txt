@@ -1,0 +1,145 @@
+A Monte Carlo path tracer written from scratch in C++. Global illumination, GGX materials, a SAH BVH, and a guided denoiser. - Stage 3: replace the acceleration structure by DanKane2029 · Pull Request #3 · DanKane2029/Steradian
+
+Stage 3: replace the acceleration structure by DanKane2029 · Pull Request #3 · DanKane2029/Steradian · GitHub
+Skip to content
+You signed in with another tab or window. Reload to refresh your session.
+You signed out in another tab or window. Reload to refresh your session.
+You switched accounts on another tab or window. Reload to refresh your session.
+Dismiss alert
+Conversation
+DanKane2029
+commented
+Aug 1, 2026
+Copy link
+Copy Markdown
+Owner
+The octree this removes never tested a bounding box while traversing. The test existed in BoundingBox but had no callers, so traversal descended into every node and intersected every primitive on every ray.
+Worse: primitives were assigned to children by centroid while node bounds came from spatial partition planes, so geometry straddling a plane sat outside its own node's box — and the same primitive could land in several children. The measured result was 52,309 primitive tests per ray against 48,918 primitives: more work than a brute-force loop over the scene, plus the cost of walking a tree.
+Results
+Measured at 160×120, 1 spp:
+Scene
+Primitives
+Tests/ray before
+after
+Time before
+after
+two_spheres
+2
+2
+2
+0.015 s
+0.002 s
+test_obj_ball
+960
+1,236
+33
+0.90 s
+0.011 s
+test_man_obj
+48,918
+52,309
+63
+101.4 s
+0.019 s
+5,400× faster on the mesh scene, doing 830× fewer intersection tests.
+What it is now
+A binned-SAH BVH, flattened into one contiguous array (32-byte nodes, left child implicit at the next index). Node bounds are computed from the primitives a node actually contains — that is the fix for the clipping problem above, and the reason culling can now be trusted at all.
+Traversal is iterative with an explicit stack, descends the nearer child first by ray-direction sign, and shrinks the ray's far bound on every hit so subtrees beyond the closest intersection are skipped without being visited. Reciprocal ray direction is hoisted out of the per-node slab test. Build depth is capped and empty-side splits rejected, so coincident centroids cannot recurse forever.
+Shadow rays now use a dedicated occlusion query that returns on first intersection rather than searching for the closest.
+Threading
+Persistent thread pool replaces spawning fresh threads every frame. Work is claimed from a shared atomic counter in small bands rather than divided into equal shares up front — bands differ enormously in cost, and a static division leaves workers idle waiting for the slowest.
+One deliberate trade-off: bands are whole rows, not 2D tiles. Tiles would have better cache locality, but per-row seeding is what makes output independent of thread count, and changing it would have changed every golden image. Keeping the result bit-for-bit identical was worth more than the locality here — especially in the one PR whose whole claim is "this changes nothing but speed."
+Verification
+This stage had to be behaviour-preserving, so that is what I proved:
+All four pre-existing goldens unchanged.
+Byte-identical output at zero tolerance rendering the 48,918-triangle scene with the old code and the new one.
+New bvh_consistency test: for thousands of random rays per scene, the structure must return exactly what a linear scan over every primitive returns, occlusion query included. This guards the exact failure mode the octree had — dropped intersections nobody noticed, because nothing ever checked.
+test_man_obj joins the golden suite. It was unaffordable before at over a minute per render; it now takes 0.17 s.
+ASan, UBSan and TSan clean. Whole suite runs in ~2 s.
+Stage 3: replace the acceleration structure
+…
+e80dac8
+```
+The octree this removes never tested a bounding box while traversing. The test existed
+in BoundingBox but had no callers, so traversal descended into every node and intersected
+every primitive on every ray. Worse, primitives were assigned to children by centroid
+while node bounds came from spatial partition planes, so geometry straddling a plane sat
+outside its own node's box, and the same primitive could land in several children. The
+measured result was 52,309 primitive tests per ray against 48,918 primitives: more work
+than a brute force loop over the scene, plus the cost of walking a tree.
+
+It is now a binned surface area heuristic BVH:
+- Nodes flattened into one contiguous array, 32 bytes each, left child implicit at the
+  next index so only the right child needs storing.
+- Node bounds computed from the primitives a node actually contains, which is the fix for
+  the clipping problem above and the reason culling can now be trusted.
+- Iterative traversal with an explicit stack, descending the nearer child first by ray
+  direction sign, and shrinking the ray's far bound on every hit so subtrees beyond the
+  closest intersection so far are skipped without being visited.
+- Reciprocal ray direction hoisted out of the per-node slab test.
+- Build depth capped, and splits that leave one side empty rejected, so degenerate input
+  such as coincident centroids cannot recurse forever.
+
+Shadow rays use a dedicated occlusion query that returns on the first intersection rather
+than searching for the closest one, since they only need to know whether the light is
+visible.
+
+Threading
+- A persistent thread pool replaces spawning a fresh set of threads every frame.
+- Work is claimed from a shared atomic counter in small bands rather than divided into
+  equal shares up front. Bands differ enormously in cost, and a static division leaves
+  most workers idle waiting for the slowest.
+- Bands are whole rows so that per-row seeding still holds and output stays independent
+  of thread count. Two dimensional tiles would have better cache locality but would
+  change the random sequence, and keeping the image bit-for-bit identical was worth more
+  here than the locality.
+
+Measured at 160x120, 1 spp:
+
+  scene            prims    tests/ray before -> after     time before -> after
+  two_spheres          2       2 ->  2                    0.015 s -> 0.002 s
+  test_obj_ball      960   1,236 -> 33                    0.90 s  -> 0.011 s
+  test_man_obj    48,918  52,309 -> 63                    101.4 s -> 0.019 s
+
+Verification
+- All four pre-existing golden images are unchanged, which is the property this stage had
+  to hold: it is a performance change, not a behaviour change.
+- Rendering the 48,918 triangle scene with the previous code and with this one produces
+  byte-identical output, compared at zero tolerance.
+- New bvh_consistency test: for thousands of random rays per scene, the structure must
+  return exactly what a linear scan over every primitive returns, including agreement
+  from the occlusion query. This directly guards the failure mode the octree had, where
+  dropped intersections went unnoticed because nothing ever checked.
+- test_man_obj joins the golden suite. It was unaffordable as a test before at over a
+  minute per render, and now takes 0.17 s.
+- ASan, UBSan and TSan clean; the whole suite runs in about two seconds.
+```
+DanKane2029
+marked this pull request as ready for review
+August 1, 2026 03:16
+Hide details
+View details
+DanKane2029
+merged commit e77e9bf
+into
+main
+Aug 1, 2026
+4 checks passed
+Uh oh!
+There was an error while loading. Please reload this page.
+DanKane2029
+deleted the
+feat/stage-3-performance
+branch
+August 1, 2026 09:04
+Sign up for free
+to join this conversation on GitHub.
+Already have an account?
+Sign in to comment
+Uh oh!
+There was an error while loading. Please reload this page.
+Labels
+None yet
+1 participant
+Add this suggestion to a batch that can be applied as a single commit.This suggestion is invalid because no changes were made to the code.Suggestions cannot be applied while the pull request is closed.Suggestions cannot be applied while viewing a subset of changes.Only one suggestion per line can be applied in a batch.Add this suggestion to a batch that can be applied as a single commit.Applying suggestions on deleted lines is not supported.You must change the existing code in this line in order to create a valid suggestion.Outdated suggestions cannot be applied.This suggestion has been applied or marked resolved.Suggestions cannot be applied from pending reviews.Suggestions cannot be applied on multi-line comments.Suggestions cannot be applied while the pull request is queued to merge.Suggestion cannot be applied right now. Please check back later.
+You can’t perform that action at this time.

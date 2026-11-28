@@ -1,0 +1,201 @@
+--- v010.md
++++ v011.md
+@@ -4,5 +4,5 @@
+ 
+ ## Overview
+-Primal Grid Marching Cubes is a GPU-accelerated isosurface extraction technique that processes a 3D scalar volume grid using compute shaders to output a triangle mesh [S1, S2, unofficial][S3, unofficial]. It solves the problem of converting discrete volumetric data into a continuous geometric representation suitable for rasterization or ray tracing . Unlike direct volume rendering, which visualizes the volume directly, this method creates an intermediate polygonal mesh [S3, unofficial]. It differs from its parent [GPU Acceleration and Parallel Pipelines](4136-gpu-acceleration-and-parallel-pipelines.md) by explicitly constructing a triangle mesh via lookup tables and atomic counters rather than just traversing the grid, and from [Dual Marching Cubes](906-dual-marching-cubes.md) by operating on primal grid vertices rather than dual grid cell centers .
++Primal Grid Marching Cubes is a GPU-accelerated isosurface extraction technique that processes a 3D scalar volume grid using compute shaders to output a triangle mesh [S1, S2, unofficial][S3, unofficial]. It solves the problem of converting discrete volumetric data into a continuous geometric representation suitable for rasterization or ray tracing [S3, unofficial]. Unlike direct volume rendering, which visualizes the volume directly, this method creates an intermediate polygonal mesh [S3, unofficial]. It differs from its parent [Isosurface extraction](30-isosurface-extraction.md) by explicitly constructing a triangle mesh via lookup tables and atomic counters rather than just traversing the grid [S1, unofficial], and from [Dual Marching Cubes](906-dual-marching-cubes.md) by operating on primal grid vertices rather than dual grid cell centers .
+ 
+ ## How it works
+@@ -22,6 +22,6 @@
+ 1.  **Initialization:** The host allocates the `TriangleTable`, `Counter`, `VertexBuffer`, and `IndexBuffer`. The `Counter` is reset to 0. The `VertexBuffer` and `IndexBuffer` are sized based on a `MaxTriangle` budget [S1, unofficial].
+ 2.  **Dispatch:** A compute shader kernel (`MeshReconstruction`) is launched with a thread group size of `[4, 4, 4]` (or similar), mapping global thread IDs to voxel coordinates $(i, j, k)$ [S1, S2, unofficial][S3, unofficial].
+-3.  **Boundary Check:** Each thread checks if its voxel coordinate is within bounds. If `id + 1` exceeds grid dimensions in any component, the thread returns immediately [S1, unofficial].
+-4.  **Sample Vertices:** For the current voxel cube, sample the scalar values and gradients at the 8 vertices. For vertex index $i \in [0, 7]$, calculate the grid coordinate `id + CubeVertex(i)`. `CubeVertex(i)` returns `uint3(x^y, y, z)` where $x, y, z$ are the bits of $i$. Store results in `float4 samples[8]`, where `xyz` is the gradient and `w` is the scalar value [S1, unofficial].
++3.  **Boundary Check:** Each thread checks if its voxel coordinate is within bounds. If `id` exceeds grid dimensions in any component, the thread returns immediately [S1, unofficial].
++4.  **Sample Vertices:** For the current voxel cube, sample the scalar values and gradients at the 8 vertices. For vertex index $i \in [0, 7]$, calculate the grid coordinate `id + CubeVertex(i)`. `CubeVertex(i)` returns `uint3(x, y, z)` where $x, y, z$ are the bits of $i$. Store results in `float4 samples[8]`, where `xyz` is the gradient and `w` is the scalar value [S1, unofficial].
+ 5.  **Calculate Case Index:** Compute the cube configuration selector (bitmask) $C$. For each vertex $i$, if `samples[i].w < Isovalue`, set bit $i$ in the selector:
+     $$ C = \sum_{i=0}^{7} \mathbb{I}(\text{samples}[i].w < \text{Isovalue}) \cdot 2^i $$
+@@ -30,5 +30,5 @@
+ 7.  **Iterate Edges:** Iterate through the triangle data in steps of 3 ($i = 0, 3, 6, 9, 12$). Extract three edge indices $e_1, e_2, e_3$ using `EdgeIndexFromTriangleTable(tri_data, i)`. If $e_1 == 15$ (or -1), the configuration is exhausted; return [S1, S2, unofficial].
+ 8.  **Compute Intersections:** For each edge index $e \in \{e_1, e_2, e_3\}$:
+-    *   Get the vertex pair using `EdgeVertexPair(e)`.
++    *   Get the vertex pair using `EdgeVertexPair(e)` [S1, unofficial].
+     *   Calculate the interpolation parameter:
+         $$ p = \frac{\text{Isovalue} - \text{samples}[v_1].w}{\text{samples}[v_2].w - \text{samples}[v_1].w} $$
+@@ -46,26 +46,21 @@
+ ```python
+ # Compute Shader Kernel: MeshReconstruction
+-# Thread mapping: one thread per voxel (id)
++# Each thread processes one voxel cube at grid coordinate `id` (uint3)
+ 
+ def MeshReconstruction(id: uint3, Dims: uint3, Isovalue: float, Scale: float, MaxTriangle: uint):
+-    # 1. Boundary Check
+-    if any(id + 1 >= Dims):
++    # 1. Boundary Check: Dims is the number of cells. If id >= Dims, return.
++    if any(id >= Dims):
+         return
+ 
+     # 2. Sample 8 vertices of the cube
+-    samples = [float4(0,0,0,0)] * 8
++    samples = [float4(0.0, 0.0, 0.0, 0.0)] * 8
+     for i in range(8):
+-        # CubeVertex maps bit index i to grid offset
+         x = (i >> 0) & 1
+         y = (i >> 1) & 1
+         z = (i >> 2) & 1
+-        # Note: Source uses x^y for x-coordinate offset, standard MC usually uses x,y,z directly
+-        # Keijiro's source: uint3(x ^ y, y, z)
+-        offset = uint3(x ^ y, y, z)
++        # Standard primal grid vertex mapping
++        offset = uint3(x, y, z)
+         coord = id + offset
+-        
+-        # Clamp coord for gradient calculation if at boundary, though boundary check above handles most
+-        # VoxelValueWithGradient handles clamping internally in source
+-        samples[i] = VoxelValueWithGradient(coord)
++        samples[i] = VoxelValueWithGradient(coord, Dims)
+ 
+     # 3. Calculate Case Index (Selector)
+@@ -100,6 +95,6 @@
+ 
+         # 7. Compute Vertices for this triangle
+-        verts = [float3(0,0,0)] * 3
+-        normals = [float3(0,0,0)] * 3
++        verts = [float3(0.0, 0.0, 0.0)] * 3
++        normals = [float3(0.0, 0.0, 0.0)] * 3
+ 
+         for k in range(3):
+@@ -119,14 +114,7 @@
+                 param = (Isovalue - val1) / denom
+ 
+-            # Lerp positions
+-            pos1 = samples[v1].xyz # Assuming xyz is position in grid? 
+-                                   # Source uses VoxelValueWithGradient which returns gradient in xyz, value in w.
+-                                   # Position must be derived from grid coordinate.
+-            # Correction: Source TransformPoint uses grid coordinate. 
+-            # We need the grid coordinates of v1 and v2.
++            # Lerp positions in grid space
+             coord1 = id + CubeVertex(v1)
+             coord2 = id + CubeVertex(v2)
+-            
+-            # Linear interpolation in grid space
+             grid_pos = lerp(coord1, coord2, param)
+             
+@@ -154,12 +142,23 @@
+         current_tri += 1
+ 
+-def GetEdgeIndex(tri_data: uint2, index: uint):
+-    # index 0-2 -> bits 0-2 of tri_data.x
+-    # index 3-5 -> bits 3-5 of tri_data.x
+-    # ...
+-    # index 12-14 -> bits 12-14 of tri_data.y
+-    # Each edge index is 4 bits (0-15)
+-    
+-    # Determine which uint and bit offset
++# Helper: CubeVertex maps bit index i to grid offset (x, y, z)
++def CubeVertex(i: uint) -> uint3:
++    x = i & 1
++    y = (i >> 1) & 1
++    z = (i >> 2) & 1
++    return uint3(x, y, z)
++
++# Helper: EdgeVertexPair maps edge index to vertex indices
++def EdgeVertexPair(edge_idx: uint) -> tuple:
++    if edge_idx < 4:
++        return edge_idx, (edge_idx + 1) & 3
++    elif edge_idx < 8:
++        return edge_idx, (edge_idx + 1) & 7 if edge_idx < 7 else 4
++    else:
++        v = edge_idx - 8
++        return v, v + 4
++
++# Helper: GetEdgeIndex extracts 4-bit edge index from packed uint2
++def GetEdgeIndex(tri_data: uint2, index: uint) -> int:
+     if index < 8:
+         val = tri_data.x
+@@ -171,32 +170,46 @@
+         return (val >> shift) & 0xF
+ 
+-def EdgeVertexPair(edge_idx: uint):
+-    # Standard MC edge to vertex mapping
+-    # Edges 0-3: bottom face (z=0)
+-    # Edges 4-7: top face (z=1)
+-    # Edges 8-11: vertical edges
+-    if edge_idx < 4:
+-        v1 = edge_idx
+-        v2 = (edge_idx + 1) & 3
+-    elif edge_idx < 8:
+-        v1 = edge_idx
+-        v2 = (edge_idx + 1) & 7 # Top face wraps 4-7
+-        # Correction: Top face vertices are 4,5,6,7. 
+-        # Edge 4 is (4,5), 5 is (5,6), 6 is (6,7), 7 is (7,4)
+-        if edge_idx == 7:
+-            v2 = 4
+-        else:
+-            v2 = edge_idx + 1
+-    else:
+-        # Vertical edges 8-11 connect bottom (0-3) to top (4-7)
+-        v1 = edge_idx - 8
+-        v2 = v1 + 4
+-    return v1, v2
+-
+-def TransformPoint(grid_coord: uint3, Dims: uint3, Scale: float):
+-    # Source: (p + 0.5 - Dims / 2) * Scale
+-    # Assuming grid_coord is integer index
++# Helper: VoxelValueWithGradient samples scalar and gradient
++def VoxelValueWithGradient(coord: uint3, Dims: uint3) -> float4:
++    # Clamp coordinates to grid bounds for gradient calculation
++    c = uint3(max(coord.x, 1) - 1, max(coord.y, 1) - 1, max(coord.z, 1) - 1)
++    p = uint3(min(coord.x + 1, Dims.x - 1), min(coord.y + 1, Dims.y - 1), min(coord.z + 1, Dims.z - 1))
++    # Assume Voxels is a global 3D array
++    v = Voxels[c.x + Dims.x * (c.y + Dims.y * c.z)]
++    v_nx = Voxels[(c.x - 1) + Dims.x * (c.y + Dims.y * c.z)]
++    v_px = Voxels[(p.x - 1) + Dims.x * (c.y + Dims.y * c.z)]
++    v_ny = Voxels[c.x + Dims.x * ((c.y - 1) + Dims.y * c.z)]
++    v_py = Voxels[c.x + Dims.x * ((p.y - 1) + Dims.y * c.z)]
++    v_nz = Voxels[c.x + Dims.x * (c.y + Dims.y * (c.z - 1))]
++    v_pz = Voxels[c.x + Dims.x * (c.y + Dims.y * (p.z - 1))]
++    return float4(v_px - v_nx, v_py - v_ny, v_pz - v_nz, v)
++
++# Helper: TransformPoint maps grid coordinates to object space
++def TransformPoint(grid_coord: uint3, Dims: uint3, Scale: float) -> float3:
+     p = float3(grid_coord)
+     return (p + 0.5 - float3(Dims) / 2.0) * Scale
++
++# Helper: Atomic Counter
++class Counter:
++    _value = 0
++    @staticmethod
++    def IncrementCounter() -> uint:
++        Counter._value += 1
++        return Counter._value - 1
++
++# Helper: WriteVertex
++def WriteVertex(buffer: RWByteAddressBuffer, offset: uint, pos: float3, norm: float3):
++    buffer.Store(offset, pos.x)
++    buffer.Store(offset + 4, pos.y)
++    buffer.Store(offset + 8, pos.z)
++    buffer.Store(offset + 12, norm.x)
++    buffer.Store(offset + 16, norm.y)
++    buffer.Store(offset + 20, norm.z)
++
++# Helper: WriteIndices
++def WriteIndices(buffer: RWByteAddressBuffer, offset: uint, indices: uint3):
++    buffer.Store(offset, indices.x)
++    buffer.Store(offset + 4, indices.y)
++    buffer.Store(offset + 8, indices.z)
+ ```
+ 
+@@ -223,5 +236,5 @@
+ *   **Performance:** Performance scales with the number of voxels and the fraction of intersecting cubes. The use of atomic counters introduces contention, which can reduce throughput at high triangle counts [S1, S2, unofficial].
+ *   **Strengths:** Deterministic memory usage due to fixed-size buffers; GPU-friendly parallelism; supports both precomputed tensors and on-the-fly implicit function evaluation [S1, S2, unofficial].
+-*   **Limitations:** Atomic counter contention; potential for buffer overflow if `MaxTriangle` is underestimated; topological ambiguities in standard MC configurations [S1, unofficial][S7].
++*   **Limitations:** Atomic counter contention and potential for buffer overflow if `MaxTriangle` is underestimated [S1, unofficial]; topological ambiguities in standard MC configurations [S7].
+ *   **When to Use:** When real-time or high-performance isosurface extraction from volumetric data is required on a GPU.
+ *   **When Not to Use:** When memory is extremely constrained and the triangle count is unpredictable (use hierarchical methods); when topological correctness in ambiguous cases is critical (use Dual Marching Cubes or Ambiguous Case Resolvers).
+@@ -237,4 +250,3 @@
+ [S5] learning3d/assignment3, https://github.com/learning3d/assignment3, fetched 2026-10-26
+ [S6] https://github.com/swiftcoder/isosurface, https://github.com/swiftcoder/isosurface, fetched 2026-10-26 (unofficial)
+-[S7] Local hull-based surface construction of volumetric data from silhouettes, https://doi.org/10.1109/tip.2008.926149, fetched 2026-10-30
+-[S8] William E. Lorensen and Harvey E. Cline, "Marching Cubes: A High Resolution 3D Surface Construction Algorithm," SIGGRAPH, 1987.+[S7] Local hull-based surface construction of volumetric data from silhouettes, https://doi.org/10.1109/tip.2008.926149, fetched 2026-10-30

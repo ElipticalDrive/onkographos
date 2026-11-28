@@ -1,0 +1,165 @@
+# Deferred NeRF
+
+Also called: Def-NeRF, Deferred NeRF Variant (Def-NeRF†)
+
+## Overview
+Deferred NeRF is a radiance field optimization method that decouples view-independent geometry and diffuse color from view-dependent specular effects to enable real-time rendering via voxel grid baking [S1]. Unlike standard NeRF which predicts final color directly from position and direction, Deferred NeRF separates the rendering equation into an accumulated diffuse component and a residual specular component predicted by a secondary network, allowing the diffuse properties to be stored in a dense 3D grid [S1].
+
+## How it works
+**Inputs and Outputs**
+*   **Inputs:** Camera rays parameterized by origin $o$ and direction $d$; a pre-trained MLP backbone $\Theta$ (initialized from a non-converged NeRF); background regularization target.
+*   **Outputs:** Final pixel color $\hat{C}(r)$; baked voxel grid containing volume density $\sigma$, diffuse color $c$, and specular feature vector $v$.
+
+**Data Structures**
+The method utilizes two primary data structures during the training phase:
+1.  **MLP Backbone ($\Theta$):** A fully connected network taking encoded position $\mathbf{x}$ and direction $\mathbf{d}$ as input. It outputs three values: diffuse color $c$, volume density $\sigma$, and a feature vector $v$.
+2.  **Tiny MLP ($\Phi$):** A small network taking the accumulated feature vector $V(r)$ and viewing direction $d$ as input to predict the specular color residual.
+
+During the baking phase (Def-NeRF†), the outputs are stored in a 3D voxel grid. Each voxel stores:
+*   Volume density $\sigma$ (scalar).
+*   Diffuse color $c$ (RGB vector).
+*   Specular feature vector $v$ (3-dimensional vector). Note: The base SNeRG formulation uses a 4-dimensional vector, but Def-NeRF† reduces this to 3 dimensions to preserve high-frequency lighting details while reducing memory [S1].
+
+**Numbered Steps**
+1.  **Initialization:** Initialize the opacity/density prediction MLP from a non-converged NeRF model. Fix the parameters of this backbone MLP ($\Theta$) to serve as a geometry and diffuse color prior [S1].
+2.  **Feature Extraction:** For each sample point $i$ along a ray $r$ at location $\mathbf{x}_i$ with viewing direction $\mathbf{d}$, query the fixed backbone MLP to obtain:
+    $$ c_i, \sigma_i, v_i = \text{MLP}_{\Theta}(\mathbf{x}_i, \mathbf{d}) $$
+    where $c_i$ is the diffuse color, $\sigma_i$ is the volume density, and $v_i$ is the feature vector [S1].
+3.  **Accumulation:** Compute the accumulated transmittance $T_i$ and the accumulated diffuse color $\hat{C}_d(r)$ and accumulated feature vector $V(r)$ along the ray using standard volume rendering integration:
+    $$ T_i = \exp\left(-\sum_{j=1}^{i-1} \sigma_j \delta_j\right) $$
+    $$ \hat{C}_d(r) = \sum_{i=1}^{N} T_i (1 - \exp(-\sigma_i \delta_i)) c_i $$
+    $$ V(r) = \sum_{i=1}^{N} T_i (1 - \exp(-\sigma_i \delta_i)) v_i $$
+    where $\delta_i$ is the distance between adjacent samples [S1].
+4.  **Specular Prediction:** Pass the accumulated feature vector $V(r)$ and the viewing direction $\mathbf{d}$ to the tiny MLP $\Phi$ to predict the specular color residual:
+    $$ \hat{C}_{spec}(r) = \text{MLP}_{\Phi}(V(r), \mathbf{d}) $$
+5.  **Final Color Composition:** Combine the diffuse and specular components to produce the final rendered color:
+    $$ \hat{C}(r) = \hat{C}_{spec}(r) + \hat{C}_d(r) $$
+    $$ \hat{C}(r) = \text{MLP}_{\Phi}(V(r), \mathbf{d}) + \sum_{i=1}^{N} T_i (1 - \exp(-\sigma_i \delta_i)) c_i $$
+6.  **Regularization:** Incorporate a background regularization term $\mathcal{L}_{BG}$ to ensure the reconstruction focuses on the object of interest and not the background:
+    $$ \mathcal{L}_{BG} = - \sum (\log(T_{BG}) + \log(1 - T_{BG})) $$
+    where $T_{BG}$ is the background transmittance [S1].
+7.  **Optimization:** Train the parameters of the tiny MLP $\Phi$ and the feature vectors $v$ (if not baked) using the combined loss. In the Def-NeRF† variant, the backbone $\Theta$ is fixed, and only $c$, $\sigma$, and $v$ are learned/updated in the subsequent grid optimization stage [S1].
+
+**Pseudocode**
+> **Unverified code.** The code below did not pass a test run against a reference implementation, or no test fits it, so it may contain errors.
+
+```python
+import torch
+import torch.nn as nn
+import math
+
+class DeferredNeRF:
+    def __init__(self, backbone_mlp, tiny_mlp, num_samples=128):
+        """
+        backbone_mlp: Fixed MLP predicting (c, sigma, v) from (x, d)
+        tiny_mlp: Trainable MLP predicting specular residual from (V, d)
+        num_samples: Number of samples per ray
+        """
+        self.backbone = backbone_mlp
+        self.tiny_mlp = tiny_mlp
+        self.num_samples = num_samples
+        # Freeze backbone parameters
+        for param in self.backbone.parameters():
+            param.requires_grad = False
+
+    def forward(self, ray_origins, ray_directions, near, far):
+        """
+        ray_origins: (B, 3)
+        ray_directions: (B, 3)
+        near: scalar
+        far: scalar
+        Returns: final_color (B, 3), loss_components
+        """
+        B = ray_origins.shape[0]
+        device = ray_origins.device
+        
+        # 1. Sample points along rays
+        t_vals = torch.linspace(0., 1., self.num_samples, device=device)
+        z_vals = near * (1. - t_vals) + far * t_vals
+        # Add noise for anti-aliasing (standard NeRF practice, implied by sampling)
+        mid_z = 0.5 * (z_vals[..., 1:] + z_vals[..., :-1])
+        delta_z = mid_z - z_vals[..., :-1]
+        
+        # Expand for batch
+        z_vals = z_vals.unsqueeze(0).expand(B, -1)
+        mid_z = mid_z.unsqueeze(0).expand(B, -1)
+        delta_z = delta_z.unsqueeze(0).expand(B, -1)
+        
+        # 2. Query Backbone for c, sigma, v
+        # x = o + d * z
+        points = ray_origins.unsqueeze(1) + ray_directions.unsqueeze(1) * mid_z.unsqueeze(2)
+        # points shape: (B, N, 3)
+        # directions shape: (B, 3) -> expand to (B, N, 3)
+        dirs = ray_directions.unsqueeze(1).expand(-1, self.num_samples, -1)
+        
+        # Backbone outputs: c (B,N,3), sigma (B,N,1), v (B,N,3) [using 3D v for Def-NeRF†]
+        # Note: Backbone input requires positional encoding if not handled internally.
+        # Assuming backbone handles encoding or inputs are already encoded.
+        backbone_out = self.backbone(points, dirs) 
+        c = backbone_out[..., :3]
+        sigma = backbone_out[..., 3:4]
+        v = backbone_out[..., 4:7] # 3 dimensions for Def-NeRF†
+
+        # 3. Volume Rendering Accumulation
+        # Alpha: 1 - exp(-sigma * delta)
+        alpha = 1.0 - torch.exp(-sigma * delta_z)
+        # Transmittance: T_i = exp(-sum_{j<i} sigma_j * delta_j)
+        # Compute cumulative sum of sigma * delta
+        sigma_delta = sigma * delta_z
+        cum_sum = torch.cumsum(sigma_delta, dim=1)
+        # T_i = exp(-cum_sum_{i-1})
+        # T shape (B, N). T_0 = 1.0
+        T = torch.cat([torch.ones(B, 1, device=device), torch.exp(-cum_sum[..., :-1])], dim=1)
+        
+        # Weight: w_i = T_i * alpha_i
+        weights = T * alpha
+        
+        # Accumulated Diffuse Color: C_d = sum(w_i * c_i)
+        C_d = torch.sum(weights.unsqueeze(-1) * c, dim=1)
+        
+        # Accumulated Feature Vector: V = sum(w_i * v_i)
+        V = torch.sum(weights.unsqueeze(-1) * v, dim=1)
+        
+        # 4. Predict Specular Residual
+        # tiny_mlp takes V and d
+        C_spec = self.tiny_mlp(V, ray_directions)
+        
+        # 5. Final Color
+        final_color = C_spec + C_d
+        
+        # 6. Background Regularization
+        # T_BG is the transmittance after the last sample (background transmittance)
+        T_BG = T[:, -1:]
+        L_BG = -torch.mean(torch.log(T_BG) + torch.log(1.0 - T_BG))
+        
+        return final_color, L_BG
+```
+
+**Parameters**
+*   **Feature Vector Dimension:** 3 dimensions are used in Def-NeRF† to preserve high-frequency lighting details, reducing memory compared to the 4-dimensional vector in the base SNeRG formulation [S1].
+*   **Training Duration:** Training Def-NeRF† for several epochs is sufficient, as the subsequent Hierarchical Sparse Radiance Grid (HrSRG) optimization stage is robust to imperfect initialization [S1].
+
+**Edge Cases and Pitfalls**
+*   **Initialization:** The method relies on a non-converged NeRF initialization for the backbone. Poor geometry initialization can lead to suboptimal results, although the specular features can sometimes be learned from scratch if geometry is good [S1].
+*   **Background Artifacts:** Without the $\mathcal{L}_{BG}$ term, the model may fail to reconstruct the object of interest, blending it with the background [S1].
+
+## Subtopics
+
+### SNeRG
+The base formulation that introduced the deferred architecture with a 4-dimensional feature vector. Def-NeRF† is a variant that optimizes this for real-time baking [S1].
+
+### HrSRG (Hierarchical Sparse Radiance Grid)
+The data structure used to bake the Deferred NeRF outputs for real-time rendering. It exploits hierarchical voxel spaces to store $\sigma$, $c$, and $v$ [S1].
+
+## Operating characteristics
+*   **Time Complexity:** Training involves two stages: initial MLP training (fixed backbone) and subsequent optimization of the tiny MLP and grid parameters. The baking process requires querying the MLP for every voxel, which is computationally intensive but performed once [S1].
+*   **Memory Complexity:** The baked representation stores $\sigma$, $c$, and a 3D feature vector $v$ per voxel. This is significantly more memory-efficient than storing full NeRF weights for real-time inference, but requires a dense or sparse voxel grid [S1].
+*   **Strengths:** Enables real-time rendering by baking view-independent properties into a grid; separates geometry/diffuse from specular effects for better detail preservation [S1].
+*   **Limitations:** Requires a pre-training step; the quality of the baked grid depends on the accuracy of the initial NeRF geometry [S1].
+*   **When to use:** When real-time view synthesis is required and the scene can be represented by a voxel grid, particularly when high-frequency lighting details need to be preserved [S1].
+
+## Background
+Deferred NeRF, specifically the SNeRG formulation, was introduced to address the difficulty of baking view-dependent colors into a voxel grid, which is non-trivial because standard NeRF relies on viewing direction $(\theta, \phi)$ to encode view-dependent effects [S1]. The method was developed to enable real-time rendering by separating the radiance field into deferred components [S1]. The Def-NeRF† variant was proposed in the context of the "Digging into Radiance Grid for Real-Time View Synthesis with Detail Preservation" paper to optimize this architecture for hierarchical sparse voxel grids [S1].
+
+## Sources
+[S1] Digging into Radiance Grid for Real-Time View Synthesis with Detail Preservation, https://doi.org/10.1007/978-3-031-19784-0_42, fetched 2026-10-26

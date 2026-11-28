@@ -1,0 +1,168 @@
+--- v001.md
++++ v002.md
+@@ -4,122 +4,71 @@
+ 
+ ## Overview
+-Gaussian Splat Sorting is a tile-based sorting method used in 3D Gaussian Splatting (3DGS) to order splats front-to-back within each screen-space tile, ensuring correct alpha blending [S1, unofficial]. It differs from general radix sort approaches by using a single-pass key generation that packs tile ID and quantized clip-space $w$ depth into a 32-bit integer, leveraging the monotonicity of clip-space $w$ as a distance proxy [S1, unofficial].
++Gaussian Splat Sorting sorts projected 3D Gaussian splats front-to-back within screen-space tiles to enable correct alpha blending [S1, unofficial]. It differs from its parent [Radix Sort for Splat Depth](1207-radix-sort-for-splat-depth.md) by operating on a per-tile basis using a combined tile-ID and depth key, and from [Gaussian Sorting](2845-gaussian-sorting.md) by relying on a simple monotonic depth proxy rather than complex geometric comparisons.
+ 
+ ## How it works
+ **Inputs:**
+-- View and projection matrices (via push constants or uniform buffer).
+-- Splat attributes: position, covariance (for projection), and unique ID.
+-- Screen resolution (to determine tile dimensions).
++- `clip_pos`: Clip-space position of the splat center (vec4).
++- `tile_id`: The screen-space tile identifier for the splat (uint).
++- `id`: The unique splat identifier (uint).
+ 
+ **Outputs:**
+-- Two parallel buffers: `sort_keys` (32-bit integers) and `sort_values` (splat IDs).
+-- `sort_keys` contains the composite sort key.
+-- `sort_values` contains the corresponding splat index.
++- `sort_keys`: Array of 32-bit sort keys.
++- `sort_values`: Array of splat IDs corresponding to the keys.
+ 
+ **Data Structures:**
+-- `sort_keys`: Array of `uint32_t`. Layout: `(tile_id << 16) | depth_quantized`.
+-- `sort_values`: Array of `uint32_t` or `uint16_t` (depending on max splat count). Layout: Splat ID.
++- `sort_keys`: `uint` array. Each element is a 32-bit integer where the upper 16 bits are `tile_id` and the lower 16 bits are the quantized depth.
++- `sort_values`: `uint` array. Stores the original splat `id`.
+ 
+ **Steps:**
+-1. **Project Splat:** Transform the 3D Gaussian center to clip space using the view-projection matrix. Let the clip-space position be $p_c = (x_c, y_c, z_c, w_c)$.
+-2. **Calculate View Depth:** Compute a monotonic depth proxy using clip-space $w$. Since $w_c$ increases with distance from the camera in standard right-handed clip space, it serves as a valid depth metric [S1, unofficial].
+-   $$ d_{view} = \max(0.0, w_c) $$
+-3. **Normalize Depth:** Map the view depth to the range $[0, 1)$ to prepare for quantization. The normalization function used is:
++1. **Calculate View Depth:** Extract the clip-space $w$ component. Since reverse-Z projection is used, $w$ increases with distance. Clamp to zero to handle near-plane clipping artifacts.
++   $$ d_{view} = \max(0.0, \text{clip\_pos}.w) $$
++2. **Normalize Depth:** Map the view depth to the range $[0, 1]$ using a rational function that preserves monotonicity and handles large depth values without overflow.
+    $$ d_{01} = \frac{d_{view}}{1.0 + d_{view}} $$
+-   This function maps $[0, \infty)$ to $[0, 1)$ monotonically [S1, unofficial].
+-4. **Quantize Depth:** Convert the normalized depth to a 16-bit unsigned integer.
+-   $$ d_{16} = \text{uint32}(d_{01} \times 65535.0) \ \& \ 0xFFFF $$
+-5. **Determine Tile ID:** Calculate the tile ID for the splat based on its screen-space coordinates (after perspective division) and the tile resolution (e.g., $16 \times 16$ pixels). Let $t_x, t_y$ be the tile coordinates.
+-   $$ t_{id} = t_y \times N_{tiles\_x} + t_x $$
+-6. **Create Sort Key:** Combine the tile ID and quantized depth into a single 32-bit key. The tile ID occupies the upper 16 bits, and the depth occupies the lower 16 bits.
+-   $$ key = (t_{id} \ll 16) \ | \ d_{16} $$
+-   This packing ensures that sorting by `key` first groups splats by tile, then sorts them by depth within each tile [S1, unofficial].
+-7. **Store Results:** Write the key and the splat ID to the respective buffers at the current offset.
+-   $$ sort\_keys[offset] = key $$
+-   $$ sort\_values[offset] = splat\_id $$
++3. **Quantize Depth:** Convert the normalized depth to a 16-bit unsigned integer.
++   $$ d_{16} = \text{uint}(d_{01} \times 65535.0) \ \& \ 0\text{xFFFF} $$
++4. **Create Sort Key:** Combine the tile ID and quantized depth into a single 32-bit key. The tile ID occupies the upper 16 bits, and the depth occupies the lower 16 bits. This ensures that sorting by the key first groups splats by tile, then by depth within each tile.
++   $$ \text{key} = (\text{tile\_id} \ll 16) \ | \ d_{16} $$
++5. **Store Keys and Values:** Write the key and the splat ID to the respective sort buffers at the current offset.
++   $$ \text{sort\_keys}[\text{offset}] = \text{key} $$
++   $$ \text{sort\_values}[\text{offset}] = \text{id} $$
++
++**Parameters:**
++- Depth quantization bits: 16.
++- Depth normalization constant: 1.0 (added to denominator).
++
++**Edge Cases and Pitfalls:**
++- **Reverse-Z:** The method assumes reverse-Z projection where $w$ is monotonic with distance. If forward-Z is used, the depth comparison must be inverted or the projection matrix adjusted.
++- **Near Plane:** Clamping $d_{view}$ to 0 prevents negative depths from causing incorrect sorting or underflow during quantization.
++- **Precision:** The rational normalization $d_{view} / (1.0 + d_{view})$ provides better precision for distant splats compared to linear normalization, but 16-bit quantization may still cause z-fighting artifacts for very distant, overlapping splats.
+ 
+ **Pseudocode:**
+ ```python
+-def gaussian_splat_sort(splats, view_matrix, projection_matrix, tile_size=16):
+-    """
+-    Sorts splats by tile and depth for alpha blending.
+-    splats: list of dicts with 'pos' (vec3), 'id' (int)
+-    Returns: keys (list of uint32), values (list of uint32)
+-    """
+-    keys = []
+-    values = []
++def gaussian_splat_sort(clip_pos_w: float, tile_id: uint, splat_id: uint) -> tuple[uint, uint]:
++    # Step 1: Calculate view depth
++    view_depth = max(0.0, clip_pos_w)
+     
+-    # Pre-calculate combined matrix
+-    vp_matrix = multiply_matrices(projection_matrix, view_matrix)
++    # Step 2: Normalize depth to 0-1 range
++    depth01 = view_depth / (1.0 + view_depth)
+     
+-    # Determine tile grid dimensions (assuming standard viewport)
+-    # Note: Exact viewport dimensions are assumed to be known or passed
+-    # For this implementation, we assume a standard NDC to screen conversion
+-    # is handled implicitly by the tile ID calculation logic below.
++    # Step 3: Quantize depth to 16-bit integer
++    depth16 = uint(depth01 * 65535.0) & 0xFFFF
+     
+-    for splat in splats:
+-        # 1. Project to clip space
+-        pos_h = vec4(splat['pos'], 1.0)
+-        clip_pos = multiply_matrix_vector(vp_matrix, pos_h)
+-        w_c = clip_pos.w
+-        
+-        # 2. Calculate view depth
+-        view_depth = max(0.0, w_c)
+-        
+-        # 3. Normalize depth to 0-1
+-        depth01 = view_depth / (1.0 + view_depth)
+-        
+-        # 4. Quantize to 16-bit
+-        depth16 = uint32(depth01 * 65535.0) & 0xFFFF
+-        
+-        # 5. Calculate Tile ID
+-        # Perspective divide to get NDC
+-        if w_c == 0:
+-            continue # Degenerate case
+-        ndc_x = clip_pos.x / w_c
+-        ndc_y = clip_pos.y / w_c
+-        
+-        # Convert NDC [-1, 1] to screen coordinates [0, width/height]
+-        # Assuming standard OpenGL/DirectX viewport mapping
+-        # width and height are assumed to be known context variables
+-        screen_x = (ndc_x + 1.0) * 0.5 * viewport_width
+-        screen_y = (1.0 - ndc_y) * 0.5 * viewport_height # Y-flip for screen coords
+-        
+-        tile_x = uint32(screen_x) // tile_size
+-        tile_y = uint32(screen_y) // tile_size
+-        
+-        # Calculate total tiles per row
+-        tiles_per_row = viewport_width // tile_size
+-        tile_id = tile_y * tiles_per_row + tile_x
+-        
+-        # 6. Create Key
+-        key = (tile_id << 16) | depth16
+-        
+-        # 7. Store
+-        keys.append(key)
+-        values.append(splat['id'])
+-        
+-    return keys, values
++    # Step 4: Create sort key by combining tile ID and depth
++    key = (tile_id << 16) | depth16
++    
++    # Step 5: Return key and value
++    return key, splat_id
+ ```
+-
+-**Parameters:**
+-- `tile_size`: Typically 16 or 32 pixels. Smaller tiles increase sorting overhead but improve cache locality for blending.
+-- `viewport_width`, `viewport_height`: Screen resolution.
+-
+-**Edge Cases:**
+-- **$w_c \le 0$:** Splat is behind the camera or degenerate. Skip or handle as occluded.
+-- **Precision:** The normalization $d_{view} / (1.0 + d_{view})$ prevents overflow for large $w_c$ but compresses distant depth values. This is acceptable as relative depth ordering is preserved.
+-- **Tile Boundaries:** Ensure tile ID calculation matches the tiling strategy used in the subsequent sorting and blending passes.
+ 
+ ## Subtopics
+ 
+ ## Operating characteristics
+-- **Time Complexity:** $O(N)$ for key generation, where $N$ is the number of splats. The subsequent sorting step (typically radix sort or tile-based sort) is $O(N)$ or $O(N \log N)$ depending on the implementation, but the key generation is linear.
++- **Time Complexity:** $O(N)$ for key generation, where $N$ is the number of splats. Sorting is handled by the parent radix sort method.
+ - **Memory Complexity:** $O(N)$ for storing keys and values.
+-- **Strengths:** Simple key generation; leverages hardware-friendly integer sorting; clip-space $w$ is already computed during projection.
+-- **Limitations:** Uses clip-space $w$ as a proxy for depth, which is monotonic but not linear with Euclidean distance. This is generally acceptable for alpha blending but may cause slight depth inaccuracies in extreme cases. The 16-bit depth quantization may lead to depth collisions for very distant splats.
++- **Strengths:** Simple, hardware-friendly key generation. The combined tile-depth key allows for efficient tile-based sorting without complex data structures.
++- **Limitations:** 16-bit depth quantization may lead to sorting inaccuracies for distant splats. Relies on reverse-Z projection.
+ 
+ ## Background
+-This method is derived from implementations of 3D Gaussian Splatting in real-time renderers, such as the Godot engine port by ReconWorldLab [S1, unofficial]. It adapts the sorting requirements of 3DGS to fit within tile-based rendering architectures, where splats are processed per tile to optimize memory access patterns for alpha blending.
++This method is derived from implementations in real-time 3D Gaussian Splatting renderers, specifically those targeting mobile or constrained hardware where efficient tile-based sorting is critical [S1, unofficial]. It leverages the properties of clip-space $w$ as a monotonic distance proxy in reverse-Z projection systems.
+ 
+ ## Sources

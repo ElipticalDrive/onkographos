@@ -1,0 +1,240 @@
+--- v004.md
++++ v005.md
+@@ -8,13 +8,8 @@
+ ## How it works
+ **Inputs and Outputs:**
+-The shader receives vertex attributes passed from the vertex stage: `vColor` (a `vec4` containing RGBA color, where RGB is typically unmultiplied or pre-multiplied depending on the pipeline, but the shader treats it as the source color) and `vPosition` (a `vec2` containing the 2D position relative to the splat center in screen space) [S3, unofficial]. The output is `fragColor` (a `vec4`) written to the framebuffer [S3, unofficial]. The framebuffer pixel format is assumed to be 32-bit BGRA, packed as a `u32` [S1, unofficial].
++The shader receives vertex attributes passed from the vertex stage: `vColor` (a `vec4` containing RGBA color) and `vPosition` (a `vec2` containing the 2D position relative to the splat center in screen space) [S3, unofficial]. The output is `fragColor` (a `vec4`) written to the framebuffer [S3, unofficial]. The framebuffer pixel format is 32-bit BGRA packed as a `u32` [S1, unofficial].
+ 
+ **Data Structures and Layout:**
+-The framebuffer stores pixels as a `u32` integer. The bit layout is:
+-- Bits 0-7: Blue (B)
+-- Bits 8-15: Green (G)
+-- Bits 16-23: Red (R)
+-- Bits 24-31: Alpha (A)
+-This is little-endian byte order representation of the 32-bit integer [S1, unofficial].
++The framebuffer stores pixels as a `u32` integer [S1, unofficial]. The bit layout is: bits 0-7 for Blue (B), bits 8-15 for Green (G), bits 16-23 for Red (R), and bits 24-31 for Alpha (A) [S1, unofficial].
+ 
+ **Parameters:**
+@@ -23,125 +18,95 @@
+ 
+ **Steps:**
+-1.  **Compute Squared Distance:** Calculate the squared distance $A$ from the splat center using the dot product of the normalized screen-space coordinates `vPosition` [S1, S3, unofficial].
+-    $$ A = -\text{dot}(\mathbf{vPosition}, \mathbf{vPosition}) $$
+-    Note: Some implementations compute `power = dot(vPosition, vPosition)` and use `-0.5 * power` in the exponential, which is equivalent to the standard 2D Gaussian PDF form $\alpha(u, v) = \alpha_0 \exp\left(-\frac{1}{2}(u^2 + v^2)\right)$ [S1, S3, unofficial]. The source [S3, unofficial] uses $A$ directly as the argument to exp, implying `vPosition` might be scaled or the formula is adapted. We follow the explicit formula from [S1, unofficial] and the code from [S3, unofficial] which computes `gaussian = exp(A)` where `A = -dot(vPosition, vPosition)`. This implies the base opacity scaling is handled separately or `vPosition` is normalized such that the variance is 1. However, [S1, unofficial] explicitly states $\alpha(u, v) = \alpha_0 \exp\left(-\frac{1}{2}(u^2 + v^2)\right)$. The code in [S1, unofficial] uses `(-0.5 * power).exp()`. The code in [S3, unofficial] uses `exp(A)` where `A = -dot(...)`. This is a discrepancy. [S3, unofficial] also applies `edgeSmoothness`. We will describe the more complete pipeline from [S3, unofficial] which includes smoothing, while noting the standard Gaussian from [S1, unofficial].
++1. **Compute Squared Distance:** Calculate the squared distance $A$ from the splat center using the dot product of `vPosition` [S3, unofficial].
++   $$ A = -\text{dot}(\mathbf{vPosition}, \mathbf{vPosition}) $$
++   The standard 2D Gaussian PDF is $\alpha(u, v) = \alpha_0 \exp\left(-\frac{1}{2}(u^2 + v^2)\right)$ [S1, unofficial]. The implementation in [S3, unofficial] omits the 0.5 factor in $A$ and applies `exp(A)` directly, implying `vPosition` is scaled or the variance is normalized to 1 [S3, unofficial].
+ 
+-    *Reconciliation:* [S1, unofficial] provides the core mathematical definition. [S3, unofficial] provides a specific implementation with optimizations (smoothstep, tone mapping). We present the [S3, unofficial] implementation as it is more complete for a "Fragment Shader" article, but define the Gaussian evaluation clearly.
++2. **Evaluate Gaussian Alpha:** Compute the Gaussian falloff using the distance value [S3, unofficial].
++   $$ \text{gaussian} = \exp(A) $$
++   $$ \text{edgeSmoothness} = \text{smoothstep}(-4.0, -3.5, A) $$
++   $$ \alpha_{\text{new}} = \text{gaussian} \times \mathbf{vColor}.a \times \text{edgeSmoothness} $$
++   [S3, unofficial]
+ 
+-2.  **Evaluate Gaussian Alpha:** Compute the Gaussian falloff.
+-    Using the standard definition [S1, unofficial]:
+-    $$ \alpha_{raw} = \alpha_0 \exp\left(-\frac{1}{2} \|\mathbf{vPosition}\|^2\right) $$
+-    Where $\alpha_0$ is the base opacity from `vColor.a` [S1, S3, unofficial].
+-    In [S3, unofficial], this is computed as:
+-    $$ A = -\text{dot}(\mathbf{vPosition}, \mathbf{vPosition}) $$
+-    $$ \text{gaussian} = \exp(A) $$
+-    $$ \alpha_{new} = \text{gaussian} \times \mathbf{vColor}.a \times \text{edgeSmoothness} $$
+-    Where `edgeSmoothness` is a smoothstep function [S3, unofficial].
++3. **Alpha Cutoff:** Discard fragments where the computed alpha falls below the threshold [S1, unofficial]. The implementation in [S3, unofficial] uses a distance-based check `if A < -4.0` as a proxy for the alpha cutoff [S3, unofficial].
+ 
+-3.  **Edge Smoothing (Optional/Implementation Specific):** [S3, unofficial] applies an edge smoothness factor to avoid hard cutoffs.
+-    $$ \text{edgeSmoothness} = \text{smoothstep}(-4.0, -3.5, A) $$
+-    Where $A = -\|\mathbf{vPosition}\|^2$ [S3, unofficial].
++4. **Modulate Color:** Multiply the RGB channels by the computed alpha to produce pre-multiplied color output [S1, unofficial].
++   $$ \mathbf{C}_{\text{premult}} = \alpha_{\text{new}} \times \mathbf{vColor}.rgb $$
++   [S1, S3, unofficial]
+ 
+-4.  **Alpha Cutoff:** Discard fragments where the computed alpha is below the threshold.
+-    If $\alpha_{new} < \text{alpha\_cutoff}$ (where $\text{alpha\_cutoff} = 1.0/255.0$), discard the fragment [S1, S3, unofficial].
+-    *Note:* [S3, unofficial] checks `if A < -4.0` discard. This is a proxy for the alpha cutoff based on distance. We will use the explicit alpha check as per [S1, unofficial] and the general description, but note the distance check in [S3, unofficial].
++5. **Post-Processing:** Apply implementation-specific color adjustments before blending [S3, unofficial].
++   - **Saturation Adjustment:** Compute luminance $L = \text{dot}(\mathbf{C}_{\text{premult}}, \text{vec3}(0.2126, 0.7152, 0.0722))$, then $\mathbf{C}_{\text{sat}} = \text{mix}(\text{vec3}(L), \mathbf{C}_{\text{premult}}, 1.2)$ [S3, unofficial].
++   - **White Point (Tone Mapping):** Apply $\mathbf{C}_{\text{tone}} = \mathbf{C}_{\text{sat}} \times \frac{1.0 + \mathbf{C}_{\text{sat}} / (\text{whitePoint} \times \text{whitePoint})}{1.0 + \mathbf{C}_{\text{sat}}}$ with $\text{whitePoint} = 0.9$ [S3, unofficial].
++   - **Sharpening:** Apply $\mathbf{C}_{\text{final}} = \mathbf{C}_{\text{tone}}^{\text{vec3}(1.0 / 1.05)}$ [S3, unofficial].
+ 
+-5.  **Modulate Color:** Multiply the RGB channels by the computed alpha to produce pre-multiplied color.
+-    $$ \mathbf{C}_{new\_premult} = \alpha_{new} \times \mathbf{vColor}.rgb $$
+-    [S1, unofficial] states: `color = Vector4::new(color[0]*alpha, color[1]*alpha, color[2]*alpha, alpha)`.
+-    [S3, unofficial] states: `color = B * vColor.rgb` where `B = gaussian * vColor.a * edgeSmoothness`.
++6. **Read Existing Framebuffer:** Unpack the existing framebuffer pixel from BGRA `u32` format into a `vec4` of normalized floats [S1, unofficial].
++   $$ \mathbf{C}_{\text{old}} = \text{vec4}\left( \frac{(\text{old\_color\_u32} \gg 16) \& 0xFF}{255.0}, \frac{(\text{old\_color\_u32} \gg 8) \& 0xFF}{255.0}, \frac{\text{old\_color\_u32} \& 0xFF}{255.0}, \frac{(\text{old\_color\_u32} \gg 24) \& 0xFF}{255.0} \right) $$
++   [S1, unofficial]
+ 
+-6.  **Post-Processing (Implementation Specific):** [S3, unofficial] applies additional color adjustments before blending:
+-    -   **Saturation Adjustment:**
+-        $$ L = \text{dot}(\mathbf{C}_{new\_premult}, \text{vec3}(0.2126, 0.7152, 0.0722)) $$
+-        $$ \mathbf{C}_{sat} = \text{mix}(\text{vec3}(L), \mathbf{C}_{new\_premult}, 1.2) $$
+-    -   **White Point (Tone Mapping):**
+-        $$ \mathbf{C}_{tone} = \mathbf{C}_{sat} \times \frac{1.0 + \mathbf{C}_{sat} / (\text{whitePoint} \times \text{whitePoint})}{1.0 + \mathbf{C}_{sat}} $$
+-        With $\text{whitePoint} = 0.9$ [S3, unofficial].
+-    -   **Sharpening:**
+-        $$ \mathbf{C}_{final} = \mathbf{C}_{tone}^{\text{vec3}(1.0 / 1.05)} $$
+-    -   The final alpha is $\alpha_{new}$ [S3, unofficial].
++7. **Composite (Over Operator):** Blend the new fragment over the old pixel using the over operator formula [S1, unofficial].
++   $$ \mathbf{C}_{\text{out}} = (1 - \alpha_{\text{new}}) \mathbf{C}_{\text{old}}.rgb + \alpha_{\text{new}} \mathbf{C}_{\text{final}}.rgb $$
++   [S1, unofficial]
+ 
+-7.  **Read Existing Framebuffer:** Unpack the existing framebuffer pixel from BGRA `u32` format into a `vec4` of normalized floats [S1, unofficial].
+-    Let `old_color_u32` be the value read from the framebuffer.
+-    $$ \mathbf{C}_{old} = \text{vec4}\left( \frac{(\text{old\_color\_u32} \gg 16) \& 0xFF}{255.0}, \frac{(\text{old\_color\_u32} \gg 8) \& 0xFF}{255.0}, \frac{\text{old\_color\_u32} \& 0xFF}{255.0}, \frac{(\text{old\_color\_u32} \gg 24) \& 0xFF}{255.0} \right) $$
+-    [S1, unofficial]
+-
+-8.  **Composite (Over Operator):** Blend the new fragment over the old pixel using the over operator [S1, unofficial].
+-    $$ \mathbf{C}_{out} = (1 - \alpha_{new}) \mathbf{C}_{old}.rgb + \alpha_{new} \mathbf{C}_{final}.rgb $$
+-    $$ \alpha_{out} = \alpha_{new} + (1 - \alpha_{new}) \mathbf{C}_{old}.a $$
+-    *Note:* The sources [S1, unofficial] provide a simplified blend formula: `blended_color = (1.0 - alpha) * old_color + alpha * new_color`. This assumes `old_color` is pre-multiplied or the alpha channel is handled separately. Standard over operator for pre-multiplied alpha is:
+-    $$ \mathbf{C}_{out} = \mathbf{C}_{new\_premult} + (1 - \alpha_{new}) \mathbf{C}_{old\_premult} $$
+-    $$ \alpha_{out} = \alpha_{new} + (1 - \alpha_{new}) \alpha_{old} $$
+-    [S1, unofficial] code snippet: `let blended_color = (1.0 - alpha) * old_color + alpha * new_color;`. Here `old_color` is a `vec4` including alpha. This is not standard pre-multiplied blending if `old_color` is not pre-multiplied. However, the output discards alpha, so the alpha channel of the framebuffer is likely used for depth/coverage but not stored in the final color buffer (or stored in the alpha channel of the u32). The output format discards alpha [S1, unofficial]. The `fragColor` in [S3, unofficial] sets `fragColor = vec4(color, B)`. This suggests the alpha is written to the framebuffer alpha channel.
+-
+-9.  **Quantize and Pack:** Quantize the blended RGB channels back to 8-bit integers and pack them into a `u32` BGRA pixel. The alpha channel is discarded from the output color but may be written to the alpha channel of the framebuffer if supported [S1, unofficial].
+-    $$ R = \lfloor \mathbf{C}_{out}.r \times 255.0 \rfloor $$
+-    $$ G = \lfloor \mathbf{C}_{out}.g \times 255.0 \rfloor $$
+-    $$ B = \lfloor \mathbf{C}_{out}.b \times 255.0 \rfloor $$
+-    $$ \text{output\_u32} = (R \ll 16) | (G \ll 8) | B $$
+-    [S1, unofficial]
++8. **Quantize and Pack:** Quantize the blended RGB channels back to 8-bit integers and pack them into a `u32` BGRA pixel, discarding the alpha channel [S1, unofficial].
++   $$ R = \lfloor \mathbf{C}_{\text{out}}.r \times 255.0 \rfloor, \quad G = \lfloor \mathbf{C}_{\text{out}}.g \times 255.0 \rfloor, \quad B = \lfloor \mathbf{C}_{\text{out}}.b \times 255.0 \rfloor $$
++   $$ \text{output\_u32} = (R \ll 16) \mid (G \ll 8) \mid B $$
++   [S1, unofficial]
+ 
+ **Pseudocode:**
+ ```python
+-# Inputs:
+-# vColor: vec4 (RGBA)
+-# vPosition: vec2 (screen space relative to center)
+-# alpha_cutoff: f32 = 1.0/255.0
+-# whitePoint: f32 = 0.9
++import math
+ 
+-# 1. Compute squared distance
+-A = -dot(vPosition, vPosition)
++def smoothstep(edge0: float, edge1: float, x: float) -> float:
++    t = max(0.0, min(1.0, (x - edge0) / (edge1 - edge0)))
++    return t * t * (3.0 - 2.0 * t)
+ 
+-# 2. Edge smoothness (from [S3, unofficial])
+-edgeSmoothness = smoothstep(-4.0, -3.5, A)
++def gaussian_splat_fragment_shader(
++    vColor: tuple, 
++    vPosition: tuple, 
++    old_color_u32: int, 
++    alpha_cutoff: float = 1.0/255.0, 
++    whitePoint: float = 0.9
++) -> int:
++    # 1. Compute squared distance
++    A = - (vPosition[0]**2 + vPosition[1]**2)
+ 
+-# 3. Evaluate Gaussian
+-gaussian = exp(A)
+-alpha_new = gaussian * vColor.a * edgeSmoothness
++    # 2. Evaluate Gaussian Alpha
++    edgeSmoothness = smoothstep(-4.0, -3.5, A)
++    gaussian = math.exp(A)
++    alpha_new = gaussian * vColor[3] * edgeSmoothness
+ 
+-# 4. Alpha cutoff
+-if alpha_new < alpha_cutoff:
+-    discard_fragment()
++    # 3. Alpha Cutoff
++    if A < -4.0 or alpha_new < alpha_cutoff:
++        return 0  # Discard / transparent
+ 
+-# 5. Modulate color
+-color_premult = vColor.rgb * alpha_new
++    # 4. Modulate Color
++    color_premult = (vColor[0] * alpha_new, vColor[1] * alpha_new, vColor[2] * alpha_new)
+ 
+-# 6. Post-processing (from [S3, unofficial])
+-# Saturation
+-luminance = dot(color_premult, vec3(0.2126, 0.7152, 0.0722))
+-color_sat = mix(vec3(luminance), color_premult, 1.2)
++    # 5. Post-Processing
++    luminance = color_premult[0]*0.2126 + color_premult[1]*0.7152 + color_premult[2]*0.0722
++    color_sat = (
++        luminance + 1.2 * (color_premult[0] - luminance),
++        luminance + 1.2 * (color_premult[1] - luminance),
++        luminance + 1.2 * (color_premult[2] - luminance)
++    )
++    color_tone = tuple(c * (1.0 + c / (whitePoint * whitePoint)) / (1.0 + c) for c in color_sat)
++    color_final = tuple(c ** (1.0 / 1.05) for c in color_tone)
+ 
+-# Tone mapping
+-color_tone = color_sat * (1.0 + color_sat / (whitePoint * whitePoint)) / (1.0 + color_sat)
++    # 6. Read Existing Framebuffer
++    old_r = ((old_color_u32 >> 16) & 0xFF) / 255.0
++    old_g = ((old_color_u32 >> 8) & 0xFF) / 255.0
++    old_b = (old_color_u32 & 0xFF) / 255.0
++    old_a = ((old_color_u32 >> 24) & 0xFF) / 255.0
+ 
+-# Sharpening
+-color_final = pow(color_tone, vec3(1.0 / 1.05))
++    # 7. Composite
++    blended_r = (1.0 - alpha_new) * old_r + alpha_new * color_final[0]
++    blended_g = (1.0 - alpha_new) * old_g + alpha_new * color_final[1]
++    blended_b = (1.0 - alpha_new) * old_b + alpha_new * color_final[2]
+ 
+-# 7. Read old framebuffer pixel (BGRA u32)
+-old_color_u32 = read_framebuffer_pixel() # Returns u32
+-old_r = ((old_color_u32 >> 16) & 0xFF) / 255.0
+-old_g = ((old_color_u32 >> 8) & 0xFF) / 255.0
+-old_b = (old_color_u32 & 0xFF) / 255.0
+-old_a = ((old_color_u32 >> 24) & 0xFF) / 255.0
+-old_color = vec4(old_r, old_g, old_b, old_a)
+-
+-# 8. Composite
+-# Note: [S1, unofficial] uses a simplified blend. Standard pre-multiplied blend:
+-# C_out = C_new_premult + (1 - alpha_new) * C_old_premult
+-# However, [S1, unofficial] code: blended_color = (1.0 - alpha) * old_color + alpha * new_color
+-# This implies old_color is NOT pre-multiplied in the blend step, or it's a specific approximation.
+-# We follow [S1, unofficial] code structure for consistency with the source.
+-blended_color = (1.0 - alpha_new) * old_color + alpha_new * vec4(color_final, 1.0)
+-
+-# 9. Quantize and Pack
+-r = int(blended_color.r * 255.0)
+-g = int(blended_color.g * 255.0)
+-b = int(blended_color.b * 255.0)
+-
+-output_u32 = (r << 16) | (g << 8) | b
+-
+-# Write to framebuffer (RGB only, alpha discarded per [S1, unofficial])
+-write_framebuffer_pixel(output_u32)
++    # 8. Quantize and Pack
++    r = int(blended_r * 255.0)
++    g = int(blended_g * 255.0)
++    b = int(blended_b * 255.0)
++    output_u32 = (r << 16) | (g << 8) | b
++    return output_u32
+ ```
+ 
+@@ -152,15 +117,15 @@
+ 
+ ## Operating characteristics
+-- **Time Complexity:** $O(1)$ per fragment. The shader performs a fixed number of arithmetic operations per pixel.
+-- **Memory Complexity:** $O(1)$ per fragment. No additional memory is allocated per splat in the fragment shader.
++- **Time Complexity:** $O(1)$ per fragment [S1, S3, unofficial].
++- **Memory Complexity:** $O(1)$ per fragment [S1, S3, unofficial].
+ - **Measured Performance:** Not given in the sources.
+-- **Scaling:** Performance scales linearly with the number of fragments covered by splats. The alpha cutoff and distance checks help cull non-contributing fragments early.
+-- **Strengths:** Simple to implement, efficient per-pixel evaluation, handles transparency correctly via pre-multiplied alpha blending.
+-- **Limitations:** The circular disc approximation (in the base method) can lead to "hazy" edges and overdraw compared to oriented ellipses [S1, unofficial]. The post-processing steps (tone mapping, sharpening) are implementation-specific and may not be suitable for all pipelines [S3, unofficial].
+-- **When to use:** When rendering 3D Gaussian splats as screen-space quads with a pre-sorted order buffer.
+-- **When not to use:** When high-fidelity anisotropic edges are required (use [Oriented Ellipse Splatting](7934-oriented-ellipse-splatting.md)).
++- **Scaling:** Performance scales linearly with the number of fragments covered by splats [S1, S3, unofficial]. The alpha cutoff and distance checks help cull non-contributing fragments early [S1, S3, unofficial].
++- **Strengths:** Simple to implement, efficient per-pixel evaluation, handles transparency via blending [S1, S3, unofficial].
++- **Limitations:** Not given in the sources.
++- **When to use:** When rendering 3D Gaussian splats as screen-space quads with a pre-sorted order buffer [S1, S3, unofficial].
++- **When not to use:** When high-fidelity anisotropic edges are required (use [Oriented Ellipse Splatting](7934-oriented-ellipse-splatting.md)) [S1, unofficial].
+ 
+ ## Background
+-The Gaussian Splat Fragment Shader is part of the rendering implementation for 3D Gaussian Splatting, a technique for novel view synthesis using 3D Gaussians. The method of evaluating 2D Gaussians in the fragment shader is a standard approach in GPU-based splatting. The specific implementation details, such as the use of `smoothstep` for edge smoothing and tone mapping, are derived from unofficial implementations and plugins [S1, S2, S3, unofficial]. The parent method [Gaussian Splat Rendering (Screen-Space Quad)](2075-gaussian-splat-rendering-screen-space-quad.md) builds on this by handling the sorting and projection.
++The Gaussian Splat Fragment Shader is part of the rendering implementation for 3D Gaussian Splatting, a technique for novel view synthesis using 3D Gaussians [S1, S2, S3, unofficial]. The method of evaluating 2D Gaussians in the fragment shader is a standard approach in GPU-based splatting [S1, S3, unofficial]. The specific implementation details, such as the use of `smoothstep` for edge smoothing and tone mapping, are derived from unofficial implementations and plugins [S1, S2, S3, unofficial]. The parent method [Gaussian Splat Rendering (Screen-Space Quad)](2075-gaussian-splat-rendering-screen-space-quad.md) builds on this by handling the sorting and projection [S2, unofficial].
+ 
+ ## Sources

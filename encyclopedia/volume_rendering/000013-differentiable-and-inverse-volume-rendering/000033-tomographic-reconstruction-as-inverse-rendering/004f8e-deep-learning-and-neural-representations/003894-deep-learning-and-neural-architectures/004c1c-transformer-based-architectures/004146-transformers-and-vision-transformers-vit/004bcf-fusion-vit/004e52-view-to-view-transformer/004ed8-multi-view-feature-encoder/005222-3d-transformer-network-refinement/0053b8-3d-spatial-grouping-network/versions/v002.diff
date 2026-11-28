@@ -1,0 +1,172 @@
+--- v001.md
++++ v002.md
+@@ -4,5 +4,5 @@
+ 
+ ## Overview
+-The 3D Spatial Grouping Network is a Stage 2 refinement module that optimizes the geometric and appearance attributes of 3D Gaussian Splatting (GS) tokens by leveraging local attention mechanisms on sparse 3D points [S1, unofficial]. It builds on [3D Transformer Network Refinement](14648-3d-transformer-network-refinement.md) by explicitly handling the sparsity of 3D Gaussians through space-filling curve serialization and localized grouping, addressing the inefficiency of global attention on unstructured point clouds [S1, unofficial].
++The 3D Spatial Grouping Network is a Stage 2 refinement module that optimizes the geometric and appearance attributes of 3D Gaussian Splatting tokens by leveraging local attention mechanisms on sparse 3D points [S1, unofficial]. It builds on [3D Transformer Network Refinement](14648-3d-transformer-network-refinement.md) by explicitly handling sparsity through space-filling curve serialization and localized grouping [S1, unofficial].
+ 
+ ## How it works
+@@ -33,67 +33,73 @@
+ **Pseudocode:**
+ ```python
+-def spatial_grouping_network(gs_tokens_1024, error_feature_256, scene_bbox):
+-    """
+-    Refines GS tokens using 3D spatial grouping.
+-    
+-    Args:
+-        gs_tokens_1024: Tensor of shape (N, 1024) representing N Gaussian tokens.
+-        error_feature_256: Tensor of shape (N, 256) containing error and image features.
+-        scene_bbox: Bounding box for voxelization.
+-        
+-    Returns:
+-        Updated GS tokens of shape (N, 1024).
+-    """
++def spatial_grouping_network(gs_tokens_1024, error_feature_256, coords, bbox_min, bbox_max):
++    N = gs_tokens_1024.shape[0]
+     # Step 1: Feature Fusion
+-    # Project 1024-dim token to 512-dim
+-    gs_proj = linear_projection(gs_tokens_1024, in_dim=1024, out_dim=512)
+-    
+-    # Concatenate with error feature (256-dim)
+-    combined = concatenate(gs_proj, error_feature_256, axis=-1)
+-    
+-    # Project to 512-dim point feature
+-    point_features = linear_projection(combined, in_dim=768, out_dim=512)
+-    
+-    # Step 2 & 3: Voxelization and Serialization
+-    # Voxelize points onto 384^3 grid
+-    voxelized_points = voxelize(point_features, grid_size=384, bbox=scene_bbox)
+-    
+-    # Define serialization curves
+-    curves = [z_order, hilbert, z_order_transposed, hilbert_transposed]
+-    
+-    # Step 4: Local Attention Blocks
+-    # Initialize output as identity for residual connection
+-    residual_output = point_features
+-    
+-    for i in range(4):
+-        # Serialize points using the i-th curve
+-        serialized_indices = serialize(voxelized_points, curve=curves[i])
+-        
+-        # Group into blocks of S=8
+-        groups = group_consecutive(serialized_indices, group_size=8)
+-        
+-        # Compute local attention within each group
+-        # Self-attention in 256-dim subspace, 16 heads, head dim 16
+-        group_features = local_attention(
+-            inputs=voxelized_points[serialized_indices],
+-            groups=groups,
+-            attention_dim=256,
+-            num_heads=16,
+-            head_dim=16
+-        )
+-        
+-        # Update residual output (simplified: assuming block processes all points)
+-        # In practice, scatter gathered features back to original positions
+-        updated_features = scatter(group_features, serialized_indices, N)
+-        residual_output = residual_output + updated_features
+-        
++    gs_proj = gs_tokens_1024 @ W_1024_to_512.T + b_1024_to_512
++    combined = np.concatenate([gs_proj, error_feature_256], axis=-1)
++    point_features = combined @ W_768_to_512.T + b_768_to_512
++
++    # Step 2: Voxelization
++    grid_size = 384
++    cell_size = (bbox_max - bbox_min) / grid_size
++    grid_indices = np.floor((coords - bbox_min) / cell_size).astype(int)
++    grid_indices = np.clip(grid_indices, 0, grid_size - 1)
++
++    # Step 3: Serialization
++    curves = ['z_order', 'hilbert', 'z_order_transposed', 'hilbert_transposed']
++    residual = point_features
++
++    for block_idx in range(4):
++        # Compute curve index for sorting (standard Morton/Hilbert encoding)
++        curve_indices = compute_curve_index(coords, curves[block_idx])
++        sort_order = np.argsort(curve_indices)
++        sorted_features = point_features[sort_order]
++
++        # Step 4: Local Attention
++        S = 8
++        num_groups = (N + S - 1) // S
++        group_outputs = []
++        for g in range(num_groups):
++            start = g * S
++            end = min(start + S, N)
++            group = sorted_features[start:end]
++            # Self-attention in 256-dim subspace, 16 heads, head dim 16
++            attn_out = multi_head_attention(group, dim=256, num_heads=16, head_dim=16)
++            group_outputs.append(attn_out)
++
++        # Scatter back to original positions
++        updated_features = np.zeros_like(point_features)
++        for g, out in enumerate(group_outputs):
++            start = g * S
++            end = min(start + S, N)
++            updated_features[sort_order[start:end]] = out
++        residual = residual + updated_features
++
+     # Step 5: Final Linear Layer
+-    # Map output to 1024-dim residual
+-    final_residual = linear_projection(residual_output, in_dim=512, out_dim=1024)
+-    
+-    # Apply residual update to original GS tokens
++    final_residual = residual @ W_512_to_1024.T + b_512_to_1024
+     updated_gs_tokens = gs_tokens_1024 + final_residual
+-    
+     return updated_gs_tokens
++
++def compute_curve_index(coords, curve_type):
++    # Standard space-filling curve index computation [G]
++    if curve_type == 'z_order':
++        return morton_encode(coords)
++    elif curve_type == 'hilbert':
++        return hilbert_encode(coords)
++    # Transposed variants apply axis permutation before encoding.
++    # Returns integer array of length N for sorting.
++    ...
++
++def morton_encode(coords):
++    # Bit-interleaving of coordinate indices [G]
++    ...
++
++def hilbert_encode(coords):
++    # Hilbert curve mapping algorithm [G]
++    ...
++
++def multi_head_attention(x, dim, num_heads, head_dim):
++    # Standard MHA: Q,K,V = x @ W, split heads, softmax(QK^T/sqrt(d))V, concat, linear out [G]
++    ...
+ ```
+ 
+@@ -105,5 +111,5 @@
+ *   Feature Dimension: 512 [S1, unofficial].
+ *   Attention Subspace: 256 [S1, unofficial].
+-*   Number of Heads: 16 [S1, unofficial].
++*   Number of Heads (Stage 2): 16 [S1, unofficial].
+ *   Head Dimension: 16 [S1, unofficial].
+ 
+@@ -111,5 +117,4 @@
+ *   **Precision:** Voxelization on a $384^3$ grid may lose precision for very small or widely dispersed Gaussians if the bounding box is not tightly fitted [G].
+ *   **Boundaries:** Points near the boundary of the bounding box may be truncated or incorrectly assigned if voxelization logic does not handle edge cases [G].
+-*   **Serialization Artifacts:** Space-filling curves can introduce discontinuities at block boundaries; however, local attention within groups of 8 mitigates this by limiting the receptive field [S1, unofficial].
+ 
+ ## Subtopics
+@@ -119,11 +124,11 @@
+ 
+ ## Operating characteristics
+-*   **Time Complexity:** Linear with respect to the number of Gaussians $N$ due to local attention within fixed-size groups ($S=8$) [S1, unofficial].
++*   **Time Complexity:** Not given in the sources.
+ *   **Memory Complexity:** Dominated by the $384^3$ voxel grid and the storage of GS tokens and error features [S1, unofficial].
+-*   **Performance:** The network has 13.2M trainable parameters [S1, unofficial]. It is applied with $T=4$ steps with weight sharing, reducing inference time compared to applying distinct networks [S1, unofficial].
++*   **Performance:** The network has 13.2M trainable parameters [S1, unofficial]. It is applied with $T=4$ steps with weight sharing [S1, unofficial].
+ *   **Strengths:** Efficiently handles sparse 3D data by leveraging spatial locality via space-filling curves [S1, unofficial].
+-*   **Limitations:** Performance depends on the quality of the initial voxelization and the choice of space-filling curves [G].
+-*   **When to Use:** When refining 3D Gaussian tokens for high-fidelity novel view synthesis where geometric accuracy is critical [S1, unofficial].
+-*   **When Not to Use:** For scenes with extremely large bounding boxes where voxelization becomes memory-prohibitive [G].
++*   **Limitations:** Not given in the sources.
++*   **When to Use:** Not given in the sources.
++*   **When Not to Use:** Not given in the sources.
+ 
+ ## Background

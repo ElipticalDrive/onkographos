@@ -1,0 +1,469 @@
+--- v002.md
++++ v003.md
+@@ -4,67 +4,80 @@
+ 
+ ## Overview
+-Explicit 4D Gaussian Splatting (Ex4DGS) is a dynamic scene representation method that renders novel views of video sequences by explicitly interpolating Gaussian attributes between sparse keyframes [S1]. It solves the problem of memory inefficiency and rendering artifacts in dynamic scenes by separating Gaussians into static and dynamic categories, storing only temporal metadata for dynamic primitives [S1]. Unlike implicit deformation fields, Ex4DGS avoids neural network inference during rendering, maintaining the high throughput of static 3D Gaussian Splatting while handling complex motions like self-occlusion through a simplified opacity model [S1].
++Explicit 4D Gaussian Splatting (Ex4DGS) is a method for dynamic novel view synthesis that achieves memory efficiency and rendering speed by separating scene primitives into static and dynamic categories and explicitly interpolating their attributes over time [S1]. Unlike implicit deformation fields or continuous trajectory models, Ex4DGS stores sparse keyframe data for dynamic Gaussians and uses specific interpolators to reconstruct continuous motion, handling complex phenomena like self-occlusion and object disappearance without requiring auxiliary masks or supervision [S1]. It builds on [Dynamic Scene Representation](15830-dynamic-scene-representation.md) by introducing a fully explicit temporal domain where attributes are sampled at discrete timestamps and interpolated [S1].
+ 
+ ## How it works
+-**Inputs and Outputs**
+-*   **Inputs:** A sequence of images (video) and an initial sparse point cloud (typically from Structure-from-Motion on the first frame) [S1].
+-*   **Outputs:** A set of 3D Gaussians with time-dependent attributes, allowing differentiable rasterization of any timestamp $t \in [0, l]$ [S1].
+-
+-**Data Structures**
+-The scene is represented by two disjoint sets of Gaussians: Static ($G_s$) and Dynamic ($G_d$) [S1].
+-*   **Static Gaussian ($G_s$):** Stores a pivot position $x$, a translation vector $d$, and standard static attributes (rotation $R$, scale $S$, opacity $\sigma$, color $c$) [S1].
+-*   **Dynamic Gaussian ($G_d$):** Stores a sequence of keyframe states. For each keyframe $n$, it stores position $p_n$, rotation $r_n$, and opacity $\sigma_n$ [S1]. It also stores parameters for the opacity interpolation model (means $a_{so}, a_{of}$ and variances $b_{so}, b_{fo}$) [S1].
+-
+-**Mathematical Preliminaries**
+-The rendering equation follows standard 3D Gaussian Splatting [S1]. A 3D Gaussian is defined as:
+-$$ G(x) = e^{-\frac{1}{2} (x-\mu)^\top \Sigma^{-1} (x-\mu)} $$
+-where $\mu$ is the position and $\Sigma$ is the covariance matrix [S1]. The covariance in camera coordinates is $\Sigma' = J W \Sigma W^\top J^\top$, where $J$ is the Jacobian of the perspective projection affine approximation and $W$ is the viewing transformation [S1]. The covariance is decomposed into scale $S$ and rotation $R$ as $\Sigma = R S S^\top R^\top$ [S1]. The rendered color $C$ is computed via alpha blending:
+-$$ C=\sum_{i=1}^{N} T_i (1 - e^{-\sigma_i \delta_i })c_i, \quad T_i = e^{-\sum_{j=1}^{i-1} \sigma_j \delta_j} $$
+-where $N$ is the number of visible Gaussians, $i,j$ are depth-ordered indices, $\sigma_i$ is density, $\delta_i$ is the interval along the ray, and $c_i$ is color [S1].
+-
+-**Algorithm Steps**
+-
+-1.  **Initialization:** Initialize all Gaussians as static, assuming linear motion. Set the scene duration $l$ and keyframe interval $I$ [S1].
+-2.  **Static Motion Model:** For a static Gaussian, the position $\mu(t)$ at time $t$ is:
+-    $$ \mu(t) = x + t' d, \quad t' = t/l \in [0, 1] $$
+-    where $x$ is the pivot position, $d$ is the translation vector, and $l$ is the scene duration [S1].
+-3.  **Dynamic Keyframe Definition:** Keyframes are defined as $K = \{t | t = nI, n \in \mathbb{Z}, t \in T\}$, where $I$ is the interval [S1].
++**Inputs and Outputs:**
++*   **Input:** A set of input images (video frames) and initial 3D points (e.g., from COLMAP on the first frame) [S1].
++*   **Output:** A set of learnable Gaussian primitives defined over time $t \in [0, T]$, capable of rendering novel views at any timestamp within the interval [S1].
++
++**Data Structures:**
++The scene consists of $N$ Gaussians. Each Gaussian $i$ is classified as either Static ($G_s$) or Dynamic ($G_d$).
++
++1.  **Static Gaussian ($G_s$):**
++    *   **Fields:** Pivot position $x \in \mathbb{R}^3$, translation vector $d \in \mathbb{R}^3$, scale $S$, rotation $R$ (constant), density $\sigma$, color $c$ (view-dependent via spherical harmonics) [S1].
++    *   **Layout:** $x$ and $d$ define the linear motion. $S, R, \sigma, c$ are constant over time [S1].
++
++2.  **Dynamic Gaussian ($G_d$):**
++    *   **Fields:** A sequence of keyframes $K = \{t | t = nI, n \in \mathbb{Z}, t \in T\}$, where $I$ is the time interval [S1].
++    *   **Keyframe Data:** For each keyframe $n$, store position $p_n \in \mathbb{R}^3$, rotation $r_n$ (quaternion), and opacity parameters [S1].
++    *   **Opacity Parameters:** Two Gaussians $g_{so}, g_{fo}$ with means $a_{so}, a_{of}$ and variances $b_{so}, b_{fo}$ [S1].
++
++**Numbered Steps:**
++
++1.  **Initialization:** Initialize all $N$ Gaussian points as Static ($G_s$), assuming linear motion. The initial position is the 3D point from the first frame. The translation vector $d$ is initialized based on the initial estimate of motion [S1].
++2.  **Static Motion Model:** For a static Gaussian, the position $\mu(t)$ at time $t$ is calculated using normalized time $t' = t/l$, where $l$ is the scene duration:
++    $$ \mu(t) = x + t' d, \quad t' = \frac{t}{l} \in [0, 1] $$
++    where $x$ is the pivot position and $d$ is the translation vector [S1].
++3.  **Dynamic Classification (Motion-Based Trigger):**
++    *   During training, measure the motion of each static Gaussian.
++    *   Calculate the normalized translation magnitude: $\frac{\|d\|}{\|\lambda\|^2}$, where $\lambda$ is the distance between the point and the camera at the last timestamp [S1].
++    *   Sort all Gaussians by this metric.
++    *   Convert the top-$\eta$ percent of points (empirically $\eta = 2$) into Dynamic Gaussians ($G_d$) [S1].
++    *   **Initialization of Converted $G_d$:**
++        *   Estimate position $p_n$ at each keyframe using $x$ and $d$.
++        *   Set rotation $r_n$ to the same value for all keyframes.
++        *   Initialize opacity to be visible in all keyframes [S1].
+ 4.  **Progressive Training:**
+-    *   Start with an initial duration (e.g., 10 frames).
+-    *   Increment the duration by the interval $I$ every 400 iterations [S1].
+-    *   When the duration increases, estimate new keyframe positions/rotations using linear regression on the last $\rho$ frames to share motion information [S1].
+-5.  **Static-to-Dynamic Conversion:**
+-    *   Measure motion in image space by normalizing the translation vector $d$ by the squared distance $\lambda$ between the point and the camera at the last timestamp: $\|d\| / \|\lambda\|^2$ [S1].
+-    *   Sort points by this metric. Convert the top $\eta$ percent (empirically $\eta=2$) into dynamic Gaussians [S1].
+-    *   For converted points, estimate position at each keyframe using $x$ and $d$. Initialize rotation to the same value in all keyframes and opacity to visible in all keyframes [S1].
+-6.  **Temporal Interpolation (Rendering):**
+-    *   **Position:** Use Cubic Hermite Interpolation (CHip) for position. For time $t$ within interval $[nI, (n+1)I]$, let $t' = (t - nI)/I$. The position is:
++    *   Start training with a short initial duration (e.g., 10 frames) [S1].
++    *   Increment the duration by the interval $I$ every specific step (e.g., every 400 iterations) [S1].
++    *   When the number of keyframes increases, estimate the position and rotation of the Gaussian by linear regression using the last $\rho$ frames to share motion information with the next keyframe [S1].
++5.  **Temporal Interpolation (Rendering):**
++    *   **Position:** Use Cubic Hermite Interpolation (CHip) for position. Compute tangents $m_n, m_{n+1}$ from neighbor keyframe positions:
++        $$ m_n = \frac{p_{n+1} - p_{n-1}}{2I}, \quad m_{n+1} = \frac{p_{n+2} - p_n}{2I} $$
++        For $t$ in interval $[nI, (n+1)I]$, let $t' = \frac{t - nI}{I}$ and $n = \lfloor t/I \rfloor$. Then:
+         $$ \mu(t) = CHip(p_n, m_n, p_{n+1}, m_{n+1}; t') $$
+-        where tangents are estimated from neighbors: $m_n = (p_{n+1} - p_{n-1})/(2I)$ and $m_{n+1} = (p_{n+2} - p_n)/(2I)$ [S1].
+-    *   **Rotation:** Use Spherical Linear Interpolation (Slerp) for quaternions $r_n, r_{n+1}$:
+-        $$ q(t) = Slerp(r_n, r_{n+1}; t') = \frac{\sin[(t')\Omega]}{\sin \Omega}r_n + \frac{\sin[(1 - t')\Omega]}{\sin \Omega}r_{n+1} $$
+-        where $\cos \Omega = r_n \cdot r_{n+1}$ [S1].
+-    *   **Opacity:** Use a simplified Gaussian mixture model. Let $g_{so}$ and $g_{fo}$ be Gaussians with means $a_{so}, a_{of}$ and variances $b_{so}, b_{fo}$. The temporal opacity $\sigma_t(t)$ is:
++        where $CHip(p_0, m_0, p_1, m_1; t) = (2t^3 - 3t^2 + 1)p_0 + (t^3 - 2t^2 + t)m_0 + (-2t^3 + 3t^2)p_1 + (t^3 - t^2)m_1$ [S1].
++    *   **Rotation:** Use Spherical Linear Interpolation (Slerp) for rotation quaternions $r_n, r_{n+1}$:
++        $$ q(t) = Slerp(r_n, r_{n+1}; t') $$
++        where $Slerp(x_0, x_1; t) = \frac{\sin[(t)\Omega]}{\sin \Omega}x_0 + \frac{\sin[(1 - t)\Omega]}{\sin \Omega}x_1$ and $\cos \Omega = x_0 \cdot x_1$ [S1].
++    *   **Opacity:** Use a simplified Gaussian mixture model. Temporal opacity $\sigma_t(t)$ is:
+         $$ \sigma_t(t) = \begin{cases} e^{-\frac{(t-a_{so})^2}{b_{so}}} & t < a_{so} \\ 1 & a_{so} \le t \le a_{of} \\ e^{-\frac{(t-a_{of})^2}{b_{fo}}} & t > a_{of} \end{cases} $$
+-        This handles appearance and disappearance [S1].
+-7.  **Pruning (Point Backtracking):**
+-    *   Calculate per-pixel error $E$ for pixel $k$:
++        where $a_{so}, a_{of}$ are means and $b_{so}, b_{fo}$ are variances of the two Gaussians [S1].
++6.  **Rendering:**
++    *   Compute the 3D covariance $\Sigma$ from scale $S$ and rotation $R$: $\Sigma = R S S^\top R^\top$ [S1].
++    *   Project to 2D: $\Sigma' = J W \Sigma W^\top J^\top$, where $J$ is the Jacobian of the affine approximation of perspective projection and $W$ is the viewing transformation [S1].
++    *   Render color $C$ via alpha blending:
++        $$ C = \sum_{i=1}^{N} T_i (1 - e^{-\sigma_i \delta_i })c_i, \quad T_i = e^{-\sum_{j=1}^{i-1} \sigma_j \delta_j} $$
++        where $\delta_i$ is the interval along the ray, and $i,j$ are depth-ordered visible Gaussians [S1].
++7.  **Optimization and Pruning:**
++    *   **Losses:** Use L1 loss and SSIM loss between rendered and ground truth images [S1].
++    *   **Regularization:** Minimize $\|d\|$ for static points and $\|p_{n+1} - p_n\|$ for dynamic points (parameter 0.0001) [S1].
++    *   **Point Backtracking:** Calculate error $E$ for pixel $k$:
+         $$ E = \frac{\sum_{i} \sigma_i \times \prod_{j=1}^{i-1} (1 - \sigma_j) \times q_k}{\sum_{i} \sigma_i \times \prod_{j=1}^{i-1} (1 - \sigma_j)} $$
+         where $q_k$ is the measured error (L1/SSIM) at pixel $k$, and $i,j$ are depth-ordered visible Gaussians [S1].
+-    *   Calculate accumulated error $E_{total} = \sum_{v \in D} \frac{E_v}{|D|}$ over training views $D$ [S1].
+-    *   Prune Gaussians with error exceeding $E_{total}$ at pre-defined steps [S1].
+-8.  **Optimization:**
+-    *   Use RAdam optimizer [S1].
+-    *   Losses: L1 and SSIM between rendered and ground truth images [S1].
+-    *   Regularization: Minimize $\|d\|$ for static points and $\|p_{n+1} - p_n\|$ for dynamic points (parameter 0.0001) [S1].
+-
+-**Pseudocode**
++    *   Calculate accumulated error $E_{total} = \sum_{v \in D} \frac{E_v}{|D|}$ over training views $D$. Prune points with error $> E_{total}$ at pre-defined steps [S1].
++
++**Pseudocode:**
+ 
+ ```python
+ import numpy as np
++from scipy.spatial.transform import Rotation
+ 
+ def cubic_hermite(p0, m0, p1, m1, t):
+     """
+-    Cubic Hermite Interpolation on unit interval t in [0, 1].
++    Cubic Hermite Interpolation for position.
++    p0, p1: positions (np.array, shape (3,))
++    m0, m1: tangents (np.array, shape (3,))
++    t: normalized time in [0, 1]
+     """
+     t2 = t * t
+@@ -79,20 +92,34 @@
+     """
+     Spherical Linear Interpolation for quaternions.
+-    """
++    q0, q1: quaternions (np.array, shape (4,))
++    t: normalized time in [0, 1]
++    """
++    # Normalize quaternions
++    q0 = q0 / np.linalg.norm(q0)
++    q1 = q1 / np.linalg.norm(q1)
++    
+     dot = np.dot(q0, q1)
+-    # Clamp dot product to avoid numerical instability
++    
++    # If dot product is negative, slerp won't take the shorter path,
++    # so negate one quaternion.
++    if dot < 0:
++        q1 = -q1
++        dot = -dot
++        
++    # Clamp
+     dot = np.clip(dot, -1.0, 1.0)
+-    theta = np.arccos(dot)
+-    sin_theta = np.sin(theta)
+-    
+-    if sin_theta < 1e-6:
+-        # Linear interpolation if quaternions are parallel
+-        return q0 + t * (q1 - q0)
+-        
+-    s0 = np.sin((1 - t) * theta) / sin_theta
+-    s1 = np.sin(t * theta) / sin_theta
+-    return s0 * q0 + s1 * q1
+-
+-def get_temporal_opacity(t, a_so, b_so, a_of, b_fo):
++    
++    omega = np.arccos(dot)
++    sin_omega = np.sin(omega)
++    
++    if sin_omega < 1e-6:
++        return q0 # Linear interpolation if close
++        
++    ratio0 = np.sin((1 - t) * omega) / sin_omega
++    ratio1 = np.sin(t * omega) / sin_omega
++    
++    return ratio0 * q0 + ratio1 * q1
++
++def get_temporal_opacity(t, a_so, a_of, b_so, b_fo):
+     """
+     Simplified Gaussian mixture model for opacity.
+@@ -105,129 +132,169 @@
+         return 1.0
+ 
+-def render_ex4dgs(gaussians, camera, time_t, duration_l, interval_I):
+-    """
+-    Renders a frame for time_t using Ex4DGS attributes.
+-    """
+-    # 1. Transform Gaussians to camera space
+-    # (Standard 3DGS projection logic)
+-    projected_gaussians = []
+-    
+-    for g in gaussians:
+-        if g.is_static:
+-            # Static motion: linear interpolation
+-            t_prime = time_t / duration_l
+-            mu = g.pivot_position + t_prime * g.translation_vector
+-            # Rotation, Scale, Opacity are constant or view-dependent (SH)
+-            rot = g.rotation
+-            scale = g.scale
+-            opacity = g.opacity
+-        else:
+-            # Dynamic motion: Keyframe interpolation
+-            n = int(time_t // interval_I)
+-            t_prime = (time_t - n * interval_I) / interval_I
+-            
+-            # Get keyframe data
+-            p_n = g.keyframes[n].position
+-            p_n1 = g.keyframes[n+1].position
+-            p_n_1 = g.keyframes[n-1].position if n > 0 else p_n # Handle boundary
+-            p_n2 = g.keyframes[n+2].position if n+2 < len(g.keyframes) else p_n1 # Handle boundary
+-            
+-            # Position via CHip
+-            m_n = (p_n1 - p_n_1) / (2 * interval_I)
+-            m_n1 = (p_n2 - p_n) / (2 * interval_I)
+-            mu = cubic_hermite(p_n, m_n, p_n1, m_n1, t_prime)
+-            
+-            # Rotation via Slerp
+-            r_n = g.keyframes[n].rotation
+-            r_n1 = g.keyframes[n+1].rotation
+-            rot = slerp(r_n, r_n1, t_prime)
+-            
+-            # Opacity via Gaussian Mixture
+-            opacity = get_temporal_opacity(time_t, 
+-                                           g.opacity_params['a_so'], 
+-                                           g.opacity_params['b_so'], 
+-                                           g.opacity_params['a_of'], 
+-                                           g.opacity_params['b_fo'])
+-            
+-            # Scale is typically static or interpolated similarly if needed
+-            scale = g.scale 
+-
+-        # Project to 2D
+-        cov = compute_covariance(rot, scale)
+-        cov_cam = project_covariance(cov, camera)
+-        projected_gaussians.append({
+-            'mu': mu,
+-            'cov': cov_cam,
+-            'opacity': opacity,
+-            'color': g.color, # View-dependent via SH evaluation
+-            'density': g.density
++def render_gaussian(gaussian, camera_params, time_t, interval_I, duration_l):
++    """
++    Renders a single Gaussian at time t.
++    gaussian: dict with type ('static' or 'dynamic'), attributes
++    camera_params: dict with projection matrix, view matrix, etc.
++    time_t: current timestamp
++    interval_I: keyframe interval
++    duration_l: scene duration
++    """
++    if gaussian['type'] == 'static':
++        # Static motion model
++        t_prime = time_t / duration_l
++        mu = gaussian['pivot'] + t_prime * gaussian['translation']
++        R = gaussian['rotation'] # Constant
++        S = gaussian['scale']
++        sigma = gaussian['density']
++        c = gaussian['color']
++        
++    elif gaussian['type'] == 'dynamic':
++        # Dynamic interpolation
++        n = int(time_t // interval_I)
++        t_prime = (time_t - n * interval_I) / interval_I
++        
++        # Position via CHip
++        p_n = gaussian['keyframes'][n]['pos']
++        p_n1 = gaussian['keyframes'][n+1]['pos']
++        # Tangents from neighbors
++        p_n1_prev = gaussian['keyframes'][n-1]['pos'] if n > 0 else p_n
++        p_n2 = gaussian['keyframes'][n+2]['pos'] if n+2 < len(gaussian['keyframes']) else p_n1
++        
++        m_n = (p_n1 - p_n1_prev) / (2 * interval_I)
++        m_n1 = (p_n2 - p_n) / (2 * interval_I)
++        
++        mu = cubic_hermite(p_n, m_n, p_n1, m_n1, t_prime)
++        
++        # Rotation via Slerp
++        r_n = gaussian['keyframes'][n]['rot']
++        r_n1 = gaussian['keyframes'][n+1]['rot']
++        q = slerp(r_n, r_n1, t_prime)
++        R = Rotation.from_quat(q).as_matrix()
++        
++        S = gaussian['scale'] # Assuming scale is constant or interpolated similarly if needed
++        
++        # Opacity
++        sigma = get_temporal_opacity(
++            time_t, 
++            gaussian['opacity_params']['a_so'], 
++            gaussian['opacity_params']['a_of'], 
++            gaussian['opacity_params']['b_so'], 
++            gaussian['opacity_params']['b_fo']
++        )
++        
++        c = gaussian['color']
++        
++    # Project to 2D
++    # Sigma = R S S^T R^T
++    S_mat = np.diag(S)
++    Sigma = R @ S_mat @ S_mat.T @ R.T
++    
++    # Camera projection (simplified)
++    # J is Jacobian of affine approximation, W is viewing transform
++    # In practice, this involves camera extrinsics/intrinsics
++    # Sigma_prime = J @ W @ Sigma @ W.T @ J.T
++    # For implementation, use standard 3DGS projection routine
++    Sigma_prime = project_to_2d(Sigma, camera_params)
++    
++    return {
++        'mu_2d': project_mean(mu, camera_params),
++        'Sigma_prime': Sigma_prime,
++        'sigma': sigma,
++        'color': c
++    }
++
++def train_ex4dgs(frames, initial_points):
++    """
++    Main training loop.
++    """
++    # 1. Initialize all as static
++    gaussians = []
++    for p in initial_points:
++        gaussians.append({
++            'type': 'static',
++            'pivot': p.pos,
++            'translation': np.zeros(3), # Initial estimate
++            'rotation': np.eye(3),
++            'scale': np.ones(3),
++            'density': 1.0,
++            'color': p.color
+         })
+         
+-    # 2. Rasterize (Standard 3DGS rasterization)
+-    # Sort by depth, alpha blend
+-    return rasterize(projected_gaussians, camera)
+-
+-def train_step(gaussians, images, camera_params, iteration):
+-    """
+-    Training loop step.
+-    """
+-    # Progressive duration handling
+-    if iteration % 400 == 0:
+-        duration += interval_I
+-        # Re-estimate keyframes for new duration using linear regression on last rho frames
+-        re_estimate_keyframes(gaussians, rho=5)
+-        
+-    # Static to Dynamic conversion check
+-    if should_convert_static_to_dynamic(iteration):
+-        for g in gaussians:
+-            if g.is_static:
+-                motion_metric = np.linalg.norm(g.translation_vector) / (np.linalg.norm(g.distance_to_camera)**2)
+-                g.motion_metric = motion_metric
+-        
+-        # Sort and convert top 2%
+-        sorted_gaussians = sort_by_motion(gaussians)
+-        threshold_idx = int(len(sorted_gaussians) * 0.02)
+-        for g in sorted_gaussians[:threshold_idx]:
+-            convert_to_dynamic(g)
+-            
+-    # Forward pass
+-    rendered_image = render_ex4dgs(gaussians, camera, current_time, duration, interval_I)
+-    
+-    # Loss calculation
+-    loss = l1_loss(rendered_image, ground_truth) + ssim_loss(rendered_image, ground_truth)
+-    
+-    # Regularization
+-    reg_loss = 0.0
+-    for g in gaussians:
+-        if g.is_static:
+-            reg_loss += 0.0001 * np.linalg.norm(g.translation_vector)**2
+-        else:
+-            # Sum of squared differences between adjacent keyframe positions
+-            for i in range(len(g.keyframes)-1):
+-                reg_loss += 0.0001 * np.linalg.norm(g.keyframes[i+1].position - g.keyframes[i].position)**2
++    duration_l = 10 # Initial duration
++    interval_I = 10
++    iteration = 0
++    
++    while iteration < max_iterations:
++        # 2. Progressive Training: Extend duration
++        if iteration % 400 == 0 and iteration > 0:
++            duration_l += interval_I
++            # Re-estimate positions/rotations for new keyframes using linear regression
++            # on last rho frames (implementation detail omitted for brevity)
++            
++        # 3. Classification: Convert top 2% dynamic
++        if iteration % 1000 == 0: # Check periodically
++            motions = []
++            for g in gaussians:
++                if g['type'] == 'static':
++                    # Measure motion in image space
++                    # lambda is distance to camera at last timestamp
++                    lambda_dist = get_camera_distance(g['pivot'], last_camera_params)
++                    motion_metric = np.linalg.norm(g['translation']) / (lambda_dist**2)
++                    motions.append((motion_metric, g))
++            
++            motions.sort(key=lambda x: x[0], reverse=True)
++            num_dynamic = int(len(motions) * 0.02)
++            
++            for i in range(num_dynamic):
++                g = motions[i][1]
++                # Convert to dynamic
++                g['type'] = 'dynamic'
++                # Initialize keyframes
++                # Estimate pos at each keyframe using x and d
++                # Set rotation same in all keyframes
++                # Initialize opacity visible
++                g['keyframes'] = create_keyframes(g['pivot'], g['translation'], duration_l, interval_I)
++                g['opacity_params'] = {'a_so': 0, 'a_of': duration_l, 'b_so': 1, 'b_fo': 1}
+                 
+-    loss += reg_loss
+-    
+-    # Backpropagation
+-    loss.backward()
+-    
+-    # Pruning
+-    if iteration % prune_step == 0:
+-        accumulated_errors = calculate_accumulated_errors(gaussians, images)
+-        prune_gaussians(gaussians, accumulated_errors)
+-        
+-    optimizer.step()
+-    optimizer.zero_grad()
++        # 4. Render and Loss
++        loss = 0
++        for frame in frames:
++            rendered = render_scene(gaussians, frame.camera_params, frame.time)
++            gt = frame.image
++            loss += l1_loss(rendered, gt) + ssim_loss(rendered, gt)
++            
++        # 5. Backprop and Update
++        loss.backward()
++        optimizer.step()
++        
++        # 6. Pruning
++        if iteration % prune_step == 0:
++            prune_gaussians(gaussians, threshold=E_total)
++            
++        iteration += 1
+ ```
+ 
++**Parameters:**
++*   **Time Interval ($I$):** 10 frames [S1].
++*   **Initial Duration:** 10 frames [S1].
++*   **Duration Increment Step:** Every 400 iterations [S1].
++*   **Dynamic Point Conversion Threshold ($\eta$):** 2 percent [S1].
++*   **Regularization Parameters:** 0.0001 for both static ($\|d\|$) and dynamic ($\|p_{n+1} - p_n\|$) [S1].
++*   **Optimizer:** RAdam [S1].
++
++**Pitfalls:**
++*   **Disappearing/Reappearing Objects:** Self-occlusion can cause objects to disappear and reappear. Previous methods require multiple Gaussians for this, increasing memory. Ex4DGS handles this via the simplified Gaussian mixture model for opacity and point-backtracking to prune redundant points [S1].
++*   **Rotation Bias:** Linear interpolation of rotation angles causes bias. Slerp is required [S1].
++*   **Overfitting/Over-smoothing:** Linear interpolation for position may not capture complex movements. CHip is used to avoid this without additional storage [S1].
++
+ ## Operating characteristics
+-*   **Time Complexity:** Rendering is $O(N)$ where $N$ is the number of Gaussians, identical to static 3DGS, as interpolation is a simple arithmetic operation per Gaussian [S1]. Training time is comparable to 3DGS but requires additional steps for keyframe estimation and pruning [S1].
+-*   **Memory Complexity:** Significantly lower than implicit methods or methods storing full keyframes for all Gaussians. Only dynamic Gaussians store temporal data, and static Gaussians store only two vectors ($x, d$) [S1].
+-*   **Performance:** Achieves 62 fps on a single NVIDIA 2080Ti GPU for 300-frame scenes at 1352×1014 resolution [S1].
+-*   **Strengths:** High rendering speed; handles self-occlusion (disappearing/reappearing objects) better than trajectory-based methods via opacity modeling; no neural network inference overhead [S1].
+-*   **Limitations:** Requires uniform keyframe intervals for the standard interpolation logic; performance depends on the quality of the initial sparse point cloud; may struggle with very high-frequency motion if keyframe interval $I$ is too large [S1].
++*   **Time Complexity:** Rendering speed is comparable to static 3DGS because interpolation is computed per Gaussian during rasterization, but the number of Gaussians is reduced by separating static/dynamic and pruning. Measured at 62 fps on a single NVIDIA 2080Ti GPU for 300-frame scenes with 1352×1014 resolution [S1].
++*   **Memory Complexity:** Memory efficient. Static Gaussians store only linear motion parameters ($x, d$). Dynamic Gaussians store sparse keyframes. No auxiliary encoding modules are needed [S1].
++*   **Strengths:** Handles sparse initial point clouds well via progressive training. No need for auxiliary masks or supervision for static/dynamic separation. Handles complex motions and occlusions effectively.
++*   **Limitations:** Requires uniform keyframe intervals for simplicity. Performance depends on the accuracy of the initial point cloud (COLMAP) [S1].
+ 
+ ## Background
+-Ex4DGS was introduced in the paper "Fully Explicit Dynamic Gaussian Splatting" [S1]. It addresses the limitations of prior dynamic 3DGS methods that either relied on implicit deformation fields (slower rendering) or explicit trajectories that failed to handle self-occlusion efficiently (memory burden) [S1]. The method builds on the foundational 3D Gaussian Splatting paper [S1] and incorporates techniques from video interpolation (Cubic Hermite, Slerp) [S1].
++Explicit 4D Gaussian Splatting (Ex4DGS) was introduced to address the limitations of existing dynamic novel view synthesis methods, which often suffer from slow rendering speeds due to reliance on neural networks or high memory costs due to continuous trajectory models [S1]. The method builds on the static 3D Gaussian Splatting framework [13] and extends it with explicit temporal interpolation. It was validated on the Neural 3D Video dataset and the Technicolor dataset [S1].
+ 
+ ## Sources

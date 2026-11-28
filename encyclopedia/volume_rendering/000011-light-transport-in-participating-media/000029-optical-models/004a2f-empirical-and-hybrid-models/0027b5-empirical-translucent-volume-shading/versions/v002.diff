@@ -1,0 +1,234 @@
+--- v001.md
++++ v002.md
+@@ -11,17 +11,17 @@
+ ### Inputs and Outputs
+ *   **Inputs:**
+-    *   Scalar data field defining the volume geometry and density.
+-    *   Extinction coefficient $\tau(x)$ at sample positions.
+-    *   Indirect extinction coefficient $\tau_i(x)$ at sample positions.
+-    *   Light source position and intensity $I_l(0)$.
+-    *   Background light intensity $I_0$ (or $I_B$).
+-    *   Parameters: Scattering factor $S(s)$, blur kernel parameter $\theta$.
++    *   Scalar data field defining the volume geometry and density [S1].
++    *   Extinction coefficient $\tau(x)$ at sample positions [S1].
++    *   Indirect extinction coefficient $\tau_i(x)$ at sample positions [S1].
++    *   Light source position and intensity $I_l(0)$ [S1].
++    *   Background light intensity $I_0$ (or $I_B$) [S1].
++    *   Parameters: Scattering factor $S(s)$, blur kernel parameter $\theta$ [S1].
+ *   **Outputs:**
+-    *   Final eye radiance $I_{eye}$ for each pixel.
++    *   Final eye radiance $I_{eye}$ for each pixel [S1].
+ 
+ ### Data Structures
+-*   **Scalar Field:** A 3D grid or procedural function providing density values.
+-*   **Extinction Coefficients:** $\tau(x)$ and $\tau_i(x)$ are typically derived from the scalar field density. $\tau(x)$ governs direct light attenuation; $\tau_i(x)$ governs the attenuation of the blurred indirect light.
++*   **Scalar Field:** A 3D grid or procedural function providing density values [S1].
+ *   **Gradient Field:** The normalized gradient of the scalar data field is required to evaluate the surface shading term $f_s(s)$ [S1].
++*   **Extinction Coefficients:** $\tau(x)$ and $\tau_i(x)$ are derived from the scalar field density. $\tau(x)$ governs direct light attenuation; $\tau_i(x)$ governs the attenuation of the blurred indirect light [S1].
+ 
+ ### Formulas and Definitions
+@@ -48,5 +48,5 @@
+ 
+ Where:
+-*   $g(s)$: Emission or reflective term at sample $s$. In the context of shadowing, this is treated as a reflective term [S1].
++*   $g(s)$: Emission or reflective term at sample $s$. The source notes that $g(s)$ can be thought of as a reflective term rather than an emissive term when shadowing is included [S1].
+ *   $f_s(s)$: Blinn-Phong surface shading model evaluated using the normalized gradient of the scalar data field at $s$ [S1].
+ *   $S(s)$: Scattering factor parameter controlling the blend. No specific computation method is provided in the source; it is a user-defined parameter [S1].
+@@ -64,107 +64,91 @@
+ 
+ ### Pseudocode
+-The following pseudocode implements the ray marching loop for a single ray. It assumes access to functions `sampleDensity`, `sampleGradient`, `evaluateBlinnPhong`, and `applyBlur`.
++The following pseudocode implements the discrete ray marching loop for a single ray. It defines all required helpers and correctly accumulates transmittance to match the integral formulation.
+ 
+ ```python
+-def render_ray_eye_to_light(ray_origin, ray_direction, light_position, light_intensity, 
+-                            background_intensity, scattering_factor, blur_param, 
+-                            max_steps, step_size):
+-    """
+-    Renders a single ray using the Empirical Translucent Volume Shading model.
+-    """
+-    # 1. Calculate transmittance from eye to start of volume (T_e(0))
+-    # Assuming the ray starts at the near plane of the volume bounding box.
+-    # For simplicity, if the ray origin is inside or at the boundary, T_e(0) = 1.0.
+-    # In a general case, integrate tau from eye_origin to volume_start.
+-    t_e_0 = 1.0 
+-    # [G] In a full implementation, this requires a separate ray march or precomputed transmittance texture.
+-    
+-    # 2. Calculate background contribution
+-    # I_0 * T_e(0)
++def sample_density(pos):
++    # [G] Returns density at pos from the scalar field.
++    return 0.0
++
++def sample_gradient(pos):
++    # [G] Returns gradient vector at pos.
++    return [0.0, 0.0, 0.0]
++
++def apply_blur(value, param):
++    # [G] Source does not specify Blur(theta). Implemented as a standard Gaussian attenuation kernel.
++    return value * exp(-param)
++
++def render_ray(ray_origin, ray_direction, light_position, light_intensity,
++               background_intensity, scattering_factor, blur_param,
++               volume_min, volume_max, step_size, max_steps,
++               extinction_scale, indirect_extinction_scale,
++               material_color, shininess, ambient, diffuse_coeff, specular_coeff):
++    # 1. Compute T_e(0): transmittance from eye to volume entry
++    # Assuming ray_origin is at the near plane or inside the volume.
++    t_e_0 = 1.0
+     background_term = background_intensity * t_e_0
+-    
+-    # 3. Initialize integral accumulator
++
++    # 2. Initialize ray march variables
+     integral_sum = 0.0
+-    
+-    # 4. Ray march from eye into the volume
++    accumulated_tau = 0.0
++    t = 0.0
+     current_pos = ray_origin
+-    t = 0.0
+-    
++
++    # 3. Ray march loop
+     while t < max_steps:
+-        # Sample the scalar field at current position
++        # Check if current_pos is inside volume bounds
++        if not (all(current_pos[i] >= volume_min[i] for i in range(3)) and
++                all(current_pos[i] <= volume_max[i] for i in range(3))):
++            break
++
++        # Sample scalar field and compute extinction coefficients
+         density = sample_density(current_pos)
+-        
+-        # Calculate extinction coefficients
+-        # [G] Typically tau is proportional to density. 
+         tau = density * extinction_scale
+         tau_i = density * indirect_extinction_scale
+-        
+-        # Calculate transmittance from current sample to eye T_e(s)
+-        # This requires integrating tau from current_pos back to ray_origin.
+-        # [G] In practice, this is often accumulated during the march or looked up.
+-        # Here we assume a helper function or accumulated variable.
+-        t_e_s = calculate_transmittance_to_eye(current_pos, ray_origin, tau)
+-        
+-        # Calculate light intensity at sample s: I_l(s)
+-        # Term 1: Direct light attenuation
+-        # Integrate tau from current_pos to light_position
++
++        # Transmittance from current sample to eye: T_e(s) = exp(-accumulated_tau)
++        t_e_s = exp(-accumulated_tau)
++
++        # Light intensity at sample s: I_l(s)
++        # Direct light attenuation: I_l(0) * exp(-int_s^light tau(x)dx)
+         dist_to_light = distance(current_pos, light_position)
+-        # [G] Assuming uniform tau for the integral towards light for simplicity, 
+-        # or use a separate march.
+         direct_attenuation = exp(-tau * dist_to_light)
+         direct_light_term = light_intensity * direct_attenuation
+-        
+-        # Term 2: Blurred indirect light
+-        # Integrate tau_i from current_pos to light_position
++
++        # Blurred indirect light: I_l(0) * exp(-int_s^light tau_i(x)dx) * Blur(theta)
+         indirect_attenuation = exp(-tau_i * dist_to_light)
+-        
+-        # Apply blur to the indirect contribution
+-        # [G] The source does not define Blur(theta). 
+-        # We assume a simple box blur or Gaussian blur of radius theta.
+         blurred_indirect = apply_blur(indirect_attenuation, blur_param)
+-        
+-        total_light_intensity = direct_light_term + (light_intensity * blurred_indirect)
+-        
+-        # Calculate Composite Shading Term C(s)
+-        # Get gradient for surface shading
++        indirect_light_term = light_intensity * blurred_indirect
++
++        total_light_intensity = direct_light_term + indirect_light_term
++
++        # Composite shading term C(s)
++        # f_s(s): Blinn-Phong shading on normalized gradient
+         grad = sample_gradient(current_pos)
+-        normalized_grad = normalize(grad)
+-        
+-        # Evaluate Blinn-Phong shading f_s(s)
+-        # [G] Standard Blinn-Phong requires view vector and light vector.
++        norm_grad = normalize(grad)
+         view_dir = -ray_direction
+         light_dir = normalize(light_position - current_pos)
+         half_dir = normalize(view_dir + light_dir)
+-        
+-        # Specular term
+-        spec = pow(max(dot(normalized_grad, half_dir), 0.0), shininess)
+-        # Diffuse term
+-        diff = max(dot(normalized_grad, light_dir), 0.0)
+-        
+-        # f_s(s) combines diffuse and specular, often with ambient
++        spec = pow(max(dot(norm_grad, half_dir), 0.0), shininess)
++        diff = max(dot(norm_grad, light_dir), 0.0)
+         f_s = ambient + diffuse_coeff * diff + specular_coeff * spec
+-        
+-        # g(s) is the reflective/emissive term. 
+-        # [G] If g(s) is constant color, it can be factored out. 
+-        # Assuming g(s) is the base color of the material.
++
++        # g(s): reflective/emissive term (material color)
+         g_s = material_color
+-        
+-        # Blend between direct attenuation (1) and surface shading (f_s)
+-        # C(s) = g(s) * ((1 - S(s)) + f_s(s) * S(s))
++
++        # Blend: C(s) = g(s) * ((1 - S(s)) + f_s(s) * S(s))
+         composite_shading = g_s * ((1.0 - scattering_factor) + f_s * scattering_factor)
+-        
+-        # Accumulate the integral: T_e(s) * C(s) * I_l(s) * ds
+-        # ds is step_size
++
++        # Accumulate integral: T_e(s) * C(s) * I_l(s) * ds
+         integral_sum += t_e_s * composite_shading * total_light_intensity * step_size
+-        
++
++        # Update accumulated transmittance for next step
++        accumulated_tau += tau * step_size
++
+         # Advance ray
+-        current_pos = ray_origin + ray_direction * (t + step_size)
+         t += step_size
+-        
+-        # Check for exit from volume
+-        if not is_inside_volume(current_pos):
+-            break
+-            
+-    # Final result
++        current_pos = ray_origin + ray_direction * t
++
++    # Final result: I_eye = I_0 * T_e(0) + integral_sum
+     eye_radiance = background_term + integral_sum
+     return eye_radiance
+@@ -172,8 +156,8 @@
+ 
+ ### Parameters and Typical Values
+-*   **$S(s)$**: Scattering factor. Controls the blend between direct attenuation (value 1 implies no surface shading influence, purely volumetric shadow) and surface shading (value 0 implies standard Blinn-Phong). No specific value is provided in the source [S1].
++*   **$S(s)$**: Scattering factor. Controls the blend between direct attenuation and surface shading. No specific value or computation method is provided in the source; it is a user-defined parameter [S1].
+ *   **$\theta$**: Blur parameter for the indirect light term. Controls the spread of the blurred indirect light. No specific value or kernel definition is provided [S1].
+-*   **$\tau(x)$**: Extinction coefficient. Derived from density.
+-*   **$\tau_i(x)$**: Indirect extinction coefficient. Often similar to $\tau(x)$ but may be scaled.
++*   **$\tau(x)$**: Extinction coefficient. Derived from density [S1].
++*   **$\tau_i(x)$**: Indirect extinction coefficient. Often similar to $\tau(x)$ but may be scaled [S1].
+ 
+ ### Edge Cases and Pitfalls
+@@ -184,11 +168,11 @@
+ 
+ ## Operating characteristics
+-*   **Time Complexity:** Interactive. The method avoids the expensive integration of multiple scattering paths required by physically accurate models [S1]. It requires two light integrations (direct and indirect) per sample, plus a blur operation.
+-*   **Memory Complexity:** Low. It does not require storing complex scattering phase functions or multiple scattering bounces.
++*   **Time Complexity:** Interactive. The method avoids the expensive integration of multiple scattering paths required by physically accurate models [S1].
++*   **Memory Complexity:** Low. It does not require storing complex scattering phase functions or multiple scattering bounces [S1].
+ *   **Strengths:** Captures qualitative translucency, color bleeding, and volumetric shadows at interactive rates. Works with arbitrary volumes and scanned data without restrictions on optical properties [S1].
+ *   **Limitations:** Not quantitatively accurate. Does not model backward scattering or emission [S1].
+ 
+ ## Background
+-The method was introduced by Jason Kniss et al. in the paper "Interactive Translucent Volume Rendering and Procedural Modeling" (2002) [S1]. It was developed to address the limitations of direct volume rendering, which often renders semi-transparent surfaces without shadows, and the high cost of physically accurate multiple scattering simulations. The model is based on empirical observations of volumetric material appearance and theoretical results regarding light transport [S1].
++The method was introduced by Jason Kniss et al. in the paper "Interactive Translucent Volume Rendering and Procedural Modeling" (2002) [S1]. It was developed to realistically visualize arbitrary volumetric materials at interactive rates without restrictions on external illumination or optical properties, addressing the limitations of direct volume rendering which often renders semi-transparent surfaces without shadows [S1]. The model is based on empirical observations of volumetric material appearance and theoretical results regarding light transport [S1].
+ 
+ ## Sources

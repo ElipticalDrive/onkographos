@@ -1,0 +1,160 @@
+# Shear-Image Order Ray Casting
+
+Also called: Shear*-image* order, Shear-image method, Shear-image ray casting, VolumePro 1000 Shear-Image Order Implementation
+
+## Overview
+Shear-Image Order Ray Casting is a direct volume rendering method that achieves image quality equivalent to full image-order (ray-per-pixel) ray casting while retaining the memory access coherence and computational efficiency of shear-warp methods [S1]. It solves the problem of post-warp distortion and polygon embedding difficulties inherent in shear-warp by casting rays directly through image plane pixel centers and sampling at intersections with sheared slices, eliminating the intermediate image and final warp step [S1]. Unlike full image-order methods, it preserves spatial coherence by organizing samples in slices parallel to the volume data, reducing interpolation costs to four multiplications per sample compared to seven for full image-order [S1].
+
+## How it works
+**Inputs and Outputs:**
+*   **Input:** 3D volume data $V$, viewing transformation matrices (Model $M$, View $V$, Projection $P$, Viewport $VP$), Correction transformation $C$ (for anisotropy/shear), sample spacing $\Delta t$, and depth of the near plane $\text{depth}0$.
+*   **Output:** Final image color $\mathbf{C}_{out}$ and accumulated opacity $\alpha_{out}$ for each pixel.
+
+**Data Structures:**
+*   **Volume Data:** Stored as miniblocks of $2 \times 2 \times 2$ voxel values to maximize memory bandwidth [S1].
+*   **Slice Buffer ($B_{zs}$):** A 2D buffer holding z-interpolated sample values and gradients for a single slice in permuted voxel space, passed from `voxelStepper` to `sampleStepper` [S1].
+*   **Coordinate Systems:**
+    *   **Permuted Voxel Space ($x_v, y_v, z_v$):** Axes rearranged so $z_v$ is most nearly parallel to rays [S1].
+    *   **Sample Space ($x_s, y_s, z_s$):** Aligned with image plane pixels ($x_s = x_i, y_s = y_i$) [S1].
+    *   **Image Space ($x_i, y_i, D$):** Standard screen coordinates with depth $D$ [S1].
+
+**Transformation Factorization:**
+The method decomposes the viewing transformation into three matrices: Permutation ($PM$), Resampling ($R$), and Depth ($DW$) [S1]. The relationship is defined by:
+$$ VP \times P \times V \times M \times C \times (PM)^T = DW \times R $$
+Let $M_p = VP \times P \times V \times M \times C \times (PM)^T$. $M_p$ maps permuted voxel space to image space:
+$$ M_p = \begin{bmatrix} dx_i x_v & dx_i y_v & dx_i z_v & X^0_{i,v} \\ dy_i x_v & dy_i y_v & dy_i z_v & Y^0_{i,v} \\ dDx_v & dDy_v & dDz_v & D^0_{i,v} \\ 0 & 0 & 0 & 1 \end{bmatrix} $$
+The Depth transformation $DW$ leaves $x_s, y_s$ unchanged:
+$$ DW = \begin{bmatrix} 1 & 0 & 0 & 0 \\ 0 & 1 & 0 & 0 \\ dDx_s & dDy_s & dDz_s & \text{depth}0 \\ 0 & 0 & 0 & 1 \end{bmatrix} $$
+The Resampling transformation $R$ maps permuted voxel space to sample space:
+$$ R = \begin{bmatrix} dx_s x_v & dx_s y_v & dx_s z_v & X^0_{s,v} \\ dy_s x_v & dy_s y_v & dy_s z_v & Y^0_{s,v} \\ 0 & 0 & dz_s z_v & Z^0_{s,v} \\ 0 & 0 & 0 & 1 \end{bmatrix} $$
+Unknowns in $DW$ and $R$ are solved as follows [S1]:
+$$ \begin{bmatrix} dDx_s \\ dDy_s \end{bmatrix} = \begin{bmatrix} dx_s x_v & dy_s x_v \\ dx_s y_v & dy_s y_v \end{bmatrix}^{-1} \begin{bmatrix} dDx_v \\ dDy_v \end{bmatrix} $$
+$$ dz_s z_v = \frac{dDz_v - (dDx_s \cdot dx_s z_v) - (dDy_s \cdot dy_s z_v)}{dDz_s} $$
+$$ Z^0_{s,v} = \frac{Z^0_{i,v} - (dDx_s \cdot X^0_{s,v}) - (dDy_s \cdot Y^0_{s,v}) - \text{depth}0}{dDz_s} $$
+The stepping increments for the algorithm are the entries of $R^{-1}$:
+$$ R^{-1} = \begin{bmatrix} dx_v x_s & dx_v y_s & dx_v z_s & \text{origin} X_v \\ dy_v x_s & dy_v y_s & dy_v z_s & \text{origin} Y_v \\ 0 & 0 & dz_v z_s & \text{origin} Z_v \\ 0 & 0 & 0 & 1 \end{bmatrix} $$
+
+**Algorithm Steps:**
+The algorithm operates using two co-routines: `voxelStepper` and `sampleStepper` [S1].
+
+1.  **Permutation:** Rearrange volume axes so $z_v$ is parallel to rays to avoid singularities [S1].
+2.  **Gradient Estimation:** Estimate gradients at voxel points using central difference or convolution [S1].
+3.  **Voxel Stepping (`voxelStepper`):**
+    *   Pre-load cache with $k$ voxel slices ahead of the current position [S1].
+    *   Iterate through permuted voxel space in slice-major order ($z_v$).
+    *   For each slice, perform z-interpolation of voxel values and gradients to create $B_{zs}$ [S1].
+    *   Send $B_{zs}$ to `sampleStepper` [S1].
+4.  **Sample Stepping (`sampleStepper`):**
+    *   Iterate through sample space in order: $z_s$ (slowest), $y_s$, $x_s$ (fastest) [S1].
+    *   For each sample point $(x_s, y_s, z_s)$, calculate depth $D(x_s, y_s, z_s) = dDx_s \cdot x_s + dDy_s \cdot y_s + dDz_s \cdot z_s + \text{depth}0$ [S1].
+    *   Perform visibility test: if the sample depth is occluded by previously rendered geometry or volume, skip [S1].
+    *   Derive sample value and gradient from $B_{zs}$ using 2D interpolation (bi-linear in $x_s, y_s$) [S1].
+    *   Apply classification (transfer function) and shading (e.g., Phong) using the gradient [S1].
+    *   Composite the sample into the pixel buffer using front-to-back compositing [S1].
+    *   **Early Ray Termination (ERT):** If all rays in a group reach a opacity threshold, stop processing that group and notify `voxelStepper` to skip remaining voxels [S1].
+5.  **Polygon Embedding (Optional):**
+    *   Render polygons using standard graphics pipeline to capture depth and color buffers [S1].
+    *   **Pass 1:** Cast rays from foreground to captured depth buffer, rendering volume in front of polygons [S1].
+    *   **Blend:** Blend captured polygon color behind the Pass 1 result [S1].
+    *   **Pass 2:** Cast rays from captured depth buffer to background, initializing with blend result, rendering volume behind polygons [S1].
+
+**Pseudocode:**
+> **Unverified code.** The code below did not pass a test run against a reference implementation, or no test fits it, so it may contain errors.
+
+```python
+# Pre-compute transformation matrices and increments
+M_p = VP @ P @ V @ M @ C @ PM.T
+# Solve for DW and R unknowns as per formulas above
+# Compute R_inv entries: dxv_xs, dxv_ys, dxv_zs, originXv, etc.
+
+# Co-routine: voxelStepper
+def voxel_stepper(last_slice, k, origin_zv, dzv_zs, min_xv, max_xv, min_yv, max_yv):
+    # Pre-load cache with k slices
+    cache = load_slices(origin_zv - k, origin_zv + k)
+    
+    zv = origin_zv
+    for zs in range(last_slice):
+        # Read new slice if needed
+        if zv + k not in cache:
+            cache.add(load_slice(zv + k))
+            estimate_gradients_in_slice(cache[zv + k])
+        
+        # Create z-interpolated buffer Bzs
+        Bzs = empty_buffer(min_xv, max_xv, min_yv, max_yv)
+        for yv in range(min_yv, max_yv):
+            for xv in range(min_xv, max_xv):
+                # Interpolate in z using k+1 slices
+                sample_val = interpolate_z(xv, yv, zv, cache)
+                sample_grad = interpolate_z_gradient(xv, yv, zv, cache)
+                Bzs[xv, yv] = (sample_val, sample_grad)
+        
+        yield Bzs
+        zv += dzv_zs
+
+# Co-routine: sampleStepper
+def sample_stepper(last_slice, last_row, last_column, origin_xv, origin_yv, origin_zv, 
+                   dxv_xs, dyv_xs, dD_xs, dxv_ys, dyv_ys, dD_ys, dzv_zs, dD_zs):
+    xv = origin_xv
+    yv = origin_yv
+    Dv = depth0
+    
+    for zs in range(last_slice):
+        Bzs = next(voxel_stepper) # Receive buffer
+        
+        xvv = xv
+        yvv = yv
+        Dvv = Dv
+        
+        for ys in range(last_row):
+            xvvv = xvv
+            yvvv = yvv
+            Dvvv = Dvv
+            
+            for xs in range(last_column):
+                # Visibility test using depth Dvvv
+                if is_visible(xs, ys, Dvvv):
+                    val, grad = Bzs[xvvv, yvvv]
+                    # 2D interpolation in x,y if necessary (Bzs is already z-interpolated)
+                    # Apply transfer function and shading
+                    color, alpha = classify_and_shade(val, grad)
+                    # Front-to-back compositing
+                    composite_pixel(xs, ys, color, alpha)
+                
+                xvvv += dxv_xs
+                yvvv += dyv_xs
+                Dvvv += dD_xs
+            
+            xvv += dxv_ys
+            yvv += dyv_ys
+            Dvv += dD_ys
+        
+        xv += dxv_zs
+        yv += dyv_zs
+        Dv += dD_zs
+```
+
+**Parameters:**
+*   $k$: Number of slices buffered ahead for gradient estimation and z-interpolation [S1].
+*   Sample spacing: Distance between adjacent samples on a ray. A reasonable default is approximately equal to the distance between adjacent rays [S1].
+*   Interpolation cost: 4 multiplications per component per sample [S1].
+
+**Edge Cases and Pitfalls:**
+*   **Singularities:** Avoided by permuting axes so $z_v$ is parallel to rays [S1].
+*   **MPR Accuracy:** Creating accurate Multi-Planar Reconstructions at arbitrary angles is difficult because sample slices are not parallel to the MPR angle; a cut plane with a falloff filter is required [S1].
+*   **Alpha Correction:** Requires view-dependent alpha correction if constant sampling distance is used in permuted $z$ direction [S1].
+*   **Memory Bandwidth:** High memory bandwidth is critical; operational experience suggests at least 50% more bandwidth than provided in VolumePro 1000 is beneficial [S1].
+
+## Operating characteristics
+*   **Time Complexity:** Comparable to shear-warp, significantly faster than full image-order for large volumes due to memory coherence. Interpolation cost is 4 multiplications per sample, vs. 3 for shear-warp and 7 for full image-order [S1].
+*   **Memory Complexity:** Requires storage for volume data and a small slice buffer. Does not require storing volume data three times like 2D texture methods [S1].
+*   **Performance:** VolumePro 1000 ASIC processes $10^9$ samples/sec at 250 MHz [S1]. Memory bandwidth was 4.2-5.3 GB/s [S1].
+*   **Strengths:** High image quality (ray-per-pixel), no post-warp distortion, efficient memory access, supports embedded polygons, true tri-linear interpolation [S1].
+*   **Limitations:** Complex implementation, difficult MPR at arbitrary angles, requires view-dependent alpha correction, high memory bandwidth demand [S1].
+*   **When to use:** Real-time volume rendering requiring high image quality and polygon embedding, especially on hardware optimized for shear-warp-like coherence [S1].
+*   **When not to use:** When arbitrary MPR is a primary requirement, or when memory bandwidth is severely constrained [S1].
+
+## Background
+Shear-Image Order Ray Casting was introduced by Yin Wu, Vishal Bhatia, Hugh Lauer, Larry Seiler, and others from TeraRecon, Inc. and Mitsubishi Electric Research Laboratories [S1]. It was implemented in the VolumePro™ 1000, a single-chip real-time volume rendering engine [S1]. The method addresses limitations of shear-warp (post-warp distortion, polygon embedding issues) and full image-order (memory incoherence, high interpolation cost) [S1].
+
+## Sources
+[S1] Shear-image order ray casting volume rendering, https://doi.org/10.1145/641480.641510, fetched 2026-10-31

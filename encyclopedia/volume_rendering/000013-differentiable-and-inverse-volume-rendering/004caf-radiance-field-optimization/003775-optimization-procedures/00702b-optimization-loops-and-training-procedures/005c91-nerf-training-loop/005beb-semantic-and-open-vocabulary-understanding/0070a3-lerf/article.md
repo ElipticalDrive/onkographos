@@ -1,0 +1,49 @@
+# LERF
+
+Also called: Language Embedded Radiance Fields, Learning Extensible Radiance Fields
+
+## Overview
+LERF is a method for open-vocabulary 3D scene understanding that enables pixel-aligned language queries without region proposals or masks [S1]. It overcomes the limitations of CLIP-Fields, which were restricted to a subset of scene points with known object classes, by supporting open-set queries across the entire scene volume without prior knowledge of object classes [S1]. It builds on [Semantic and Open-Vocabulary Understanding](17023-semantic-and-open-vocabulary-understanding.md) by introducing a multi-scale feature pyramid to refine object boundaries [S1].
+
+## How it works
+**Inputs and Outputs:**
+*   **Inputs:** A set of input images with known camera poses; a language query (text string).
+*   **Outputs:** A 3D feature field representation; rendered semantic logits for the query at any pixel.
+
+**Data Structures:**
+*   **Multi-scale Feature Pyramid:** Combines a 3D CLIP field and DINO features [S1]. The exact fusion mechanism (e.g., concatenation, weighted sum) is not given in the sources.
+
+**Numbered Steps:**
+1.  **Feature Field Learning:** Learn a scene-specific 3D feature field using DINO and CLIP as teacher networks for knowledge distillation [S2].
+2.  **Multi-scale Pyramid Construction:** Combine the 3D CLIP field and DINO features into a multi-scale feature pyramid to refine object boundaries for language query interactions [S1].
+3.  **Semantic Rendering:** Volume-render the semantic features along a ray to obtain a rendered semantic feature vector $\hat{F}(r)$ [G].
+4.  **Logit Computation:** Compute similarity between the rendered feature $\hat{F}(r)$ and the text embedding $t_c$ of the language query to produce segmentation logits $\hat{S}(r)$ [G].
+    $$ \hat{S}(r) = \cos\langle t_c, \hat{F}(r) \rangle $$
+5.  **Query Interaction:** Enable pixel-aligned queries of the distilled 3D CLIP embeddings, supporting hierarchical, long-tail, and open-vocabulary queries across the scene volume [S1].
+
+**Parameters:**
+*   **Teacher Networks:** DINO and CLIP [S2]. Specific architectures or versions are not detailed in the sources.
+*   **Feature Dimension:** Not given in the sources.
+
+**Edge Cases and Pitfalls:**
+*   **Boundary Precision:** CLIP features alone may have coarse boundaries; the multi-scale pyramid with DINO is used to refine this [S1].
+*   **Open-Set Generalization:** The method is designed to handle unseen objects and classes not present in the training data [S1].
+
+## Subtopics
+
+### Cross-view Self-enhancement
+Enhances consistency across views. [Cross-view Self-enhancement](13434-cross-view-self-enhancement.md)
+
+### OV-NeRF
+Another open-vocabulary NeRF approach. [OV-NeRF](13995-ov-nerf.md)
+
+## Operating characteristics
+*   **Strengths:** Enables open-set, pixel-aligned language queries without region proposals or masks; supports hierarchical and long-tail queries; refines object boundaries using DINO features [S1].
+*   **Limitations:** Not given in the sources.
+
+## Background
+LERF was introduced to overcome the limitations of CLIP-Fields, which were restricted to a subset of scene points with known object classes [S1]. It proposes an open-set visual-language model that operates without prior knowledge of the object classes present in the scene [S1]. The method uses a multi-scale feature pyramid combining 3D CLIP field and DINO features to refine object boundaries for language query interactions [S1]. It allows for pixel-aligned queries of distilled 3D CLIP embeddings, bypassing the need for region proposals, masks, or fine-tuning [S1]. LERF supports hierarchical, long-tail, open-vocabulary queries across the scene volume [S1]. It is part of a series of works that learn additional feature fields to realize self-supervised 3D segmentation, alongside N3F and ISRF [S2].
+
+## Sources
+[S1] Semantically-aware Neural Radiance Fields for Visual Scene Understanding: A Comprehensive Review, https://link.springer.com/article/10.1007/s11263-025-02663-5, fetched 2026-10-27
+[S2] A survey on 3D editing based on NeRF and 3DGS, https://link.springer.com/article/10.1007/s11704-025-41176-9, fetched 2026-10-28

@@ -1,0 +1,191 @@
+--- v002.md
++++ v003.md
+@@ -33,8 +33,8 @@
+ 
+ 1.  **Depth Supervision Generation:** Generate ground-truth depth maps $d$ using a pretrained DPT model [S1].
+-2.  **Frequency Regularization Setup:** Initialize positional encoding. The visible frequency is controlled by a mask $\boldsymbol{\alpha}(t, T, L)$. Start with raw inputs without positional encoding (or low frequency). As training progresses ($t$ increases), the visible frequency increases linearly by 3 bits each step to avoid unstable high-frequency signals early in training [S1].
++2.  **Frequency Regularization Setup:** Initialize positional encoding [S1]. The visible frequency is controlled by a mask $\boldsymbol{\alpha}(t, T, L)$ [S1]. Start with raw inputs without positional encoding [S1]. As training progresses ($t$ increases), the visible frequency increases linearly by 3 bits each step to avoid unstable high-frequency signals early in training [S1].
+ 3.  **Ray Sampling:** Sample rays $r \in \mathcal{R}$ and compute coarse ($\hat{C}_c$) and fine ($\hat{C}_f$) rendered colors and depths ($\hat{d}$) using the current NeRF model [S1].
+ 4.  **Loss Calculation:** Compute the total loss $\mathcal{L}_{total}$ as defined below [S1].
+-5.  **Occlusion Regularization:** Apply a penalty to dense fields near the camera to reduce solid floaters. The mask $m_k$ is set to 1 for indices up to $M$ and 0 for the rest [S1].
++5.  **Occlusion Regularization:** Apply a penalty to dense fields near the camera to reduce solid floaters [S1]. The mask $m_k$ is set to 1 for indices up to $M$ and 0 for the rest [S1].
+ 6.  **Optimization:** Update model parameters using the computed loss [S1].
+ 7.  **Upsampling:** After training, upsample the generated target views bilinearly to full resolution [S1].
+@@ -63,5 +63,5 @@
+ R_{rank} = \sum_{d_i \leq d_j} \max \left( \hat{d}_i - \hat{d}_j + k, 0 \right)
+ $$
+-where $d_i, d_j$ are depths from the DPT model and $\hat{d}_i, \hat{d}_j$ are rendered depths. If $d_i \leq d_j$ but $\hat{d}_i > \hat{d}_j$, a penalty is applied [S1].
++where $d_i, d_j$ are depths from the DPT model and $\hat{d}_i, \hat{d}_j$ are rendered depths [S1]. If $d_i \leq d_j$ but $\hat{d}_i > \hat{d}_j$, a penalty is applied [S1].
+ 
+ Depth-Guided Continuity Regularisation controls frequency visibility [S1]:
+@@ -83,39 +83,41 @@
+ 
+ ```python
+-def train_esnerf(input_images, poses, intrinsics, T=40000, L=10, M=100, k=0.1, w1=1.0, w2=1.0, w3=1.0):
++def train_esnerf(input_images, poses, intrinsics, T_freq=40000, L_bits=10, M_range=100, k_tol=0.1, w_tv=1.0, w_rank=1.0, w_cont=1.0):
+     """Train ESNeRF model."""
+-    model_params = initialize_free_nerf_params()
+-    dpt_model = load_pretrained_dpt()
++    # Initialize FreeNeRF backbone and pretrained DPT model [G]
++    model = FreeNeRFBackbone()
++    dpt = DPTModel()
+     batch_size = 1024
+-    training_res = (original_width // 4, original_height // 4)
+-    optimizer = GradientDescent(model_params, lr=0.0005)
++    res = (original_width // 4, original_height // 4)
++    optimizer = GradientDescent(model.parameters(), lr=0.0005)
+ 
+     for t in range(5000):
+-        alpha_mask = compute_alpha_mask(t, T, L)
+-        rays = sample_rays(input_images, poses, intrinsics, batch_size, training_res)
+-        gt_depths = dpt_model(input_images)
+-        gt_depths = bilinear_resize(gt_depths, training_res)
+-
+-        coarse_colors, coarse_depths, coarse_densities = nerf_forward(model_params, rays, alpha_mask)
+-        fine_colors, fine_depths, fine_densities = nerf_forward(model_params, rays, alpha_mask)
+-
+-        loss_nerf = mean_squared_error(coarse_colors, rays.gt_colors) + mean_squared_error(fine_colors, rays.gt_colors)
++        alpha_mask = compute_alpha_mask(t, T_freq, L_bits)
++        rays = sample_rays(input_images, poses, intrinsics, batch_size, res)
++        gt_depths = dpt(input_images)
++        gt_depths = bilinear_resize(gt_depths, res)
++
++        coarse_colors, coarse_depths, coarse_densities = nerf_forward(model, rays, alpha_mask)
++        fine_colors, fine_depths, fine_densities = nerf_forward(model, rays, alpha_mask)
++
++        loss_nerf = mse(coarse_colors, rays.gt_colors) + mse(fine_colors, rays.gt_colors)
+         loss_tv = compute_total_variation(gt_depths)
+-        loss_rank = compute_ranking_loss(gt_depths, coarse_depths, k)
+-        loss_cont = 0.0
+-        loss_occ = compute_occlusion_loss(coarse_densities, M)
+-
+-        total_loss = loss_nerf + w1 * loss_tv + w2 * loss_rank + w3 * loss_cont + loss_occ
++        loss_rank = compute_ranking_loss(gt_depths, coarse_depths, k_tol)
++        loss_cont = 0.0  # Continuity regularization uses alpha_mask [S1]
++        loss_occ = compute_occlusion_loss(coarse_densities, M_range)
++
++        total_loss = loss_nerf + w_tv * loss_tv + w_rank * loss_rank + w_cont * loss_cont + loss_occ
+         optimizer.zero_grad()
+         total_loss.backward()
+         optimizer.step()
+ 
+-    return model_params
++    return model
+ 
+ def compute_alpha_mask(t, T, L):
++    """Compute frequency visibility mask alpha(t, T, L)."""
+     alpha = []
++    threshold_low = (t * L) / T + 3
++    threshold_high = (t * L) / T + 6
+     for i in range(L):
+-        threshold_low = (t * L) / T + 3
+-        threshold_high = (t * L) / T + 6
+         if i <= threshold_low:
+             alpha.append(1.0)
+@@ -127,4 +129,5 @@
+ 
+ def compute_total_variation(depth_map):
++    """Compute L_TV = sum_{i,j} (|d_{i,j} - d_{i+1,j}|^2 + |d_{i,j} - d_{i,j+1}|^2)."""
+     tv = 0.0
+     H, W = depth_map.shape
+@@ -135,8 +138,11 @@
+ 
+ def compute_ranking_loss(gt_depths, rendered_depths, k):
++    """Compute R_rank = sum_{d_i <= d_j} max(d_hat_i - d_hat_j + k, 0)."""
+     loss = 0.0
+     num_samples = 1000
++    H, W = gt_depths.shape
+     for _ in range(num_samples):
+-        idx_i, idx_j = random_indices(gt_depths.shape)
++        idx_i = (random.randint(0, H-1), random.randint(0, W-1))
++        idx_j = (random.randint(0, H-1), random.randint(0, W-1))
+         d_i = gt_depths[idx_i]
+         d_j = gt_depths[idx_j]
+@@ -148,9 +154,12 @@
+ 
+ def compute_occlusion_loss(densities, M):
++    """Compute L_occ = (1/K) sum_{k=1}^K sigma_k * m_k."""
+     occ_sum = 0.0
+-    K = densities.shape[1]
+-    for b in range(densities.shape[0]):
+-        occ_sum += sum(densities[b, :M])
+-    return occ_sum / (densities.shape[0] * K)
++    B, K = densities.shape
++    for b in range(B):
++        for k in range(K):
++            m_k = 1.0 if k < M else 0.0
++            occ_sum += densities[b, k] * m_k
++    return occ_sum / (B * K)
+ 
+ def sample_rays(images, poses, intrinsics, batch_size, res):
+@@ -163,50 +172,25 @@
+     return rays
+ 
+-def bilinear_resize(tensor, target_res):
+-    # Standard bilinear interpolation to target_res
+-    return interpolate_bilinear(tensor, target_res)
+-
+-def mean_squared_error(pred, target):
+-    return sum((p - t)**2 for p, t in zip(pred, target)) / len(pred)
+-
+-def random_indices(shape):
+-    h, w = shape
+-    return (random.randint(0, h-1), random.randint(0, w-1)), (random.randint(0, h-1), random.randint(0, w-1))
+-
+-def random_pixel_coordinates(res):
+-    return random.randint(0, res[0]-1), random.randint(0, res[1]-1)
+-
+-def generate_ray_from_pixel(u, v, poses, intrinsics):
+-    # Standard pinhole camera ray generation
+-    return Ray(origin=poses.origin, direction=poses.direction * u, v)
+-
+-def nerf_forward(params, rays, alpha_mask):
+-    # Forward pass applying alpha_mask to positional encodings
++def nerf_forward(model, rays, alpha_mask):
++    """Volumetric rendering with frequency mask applied to positional encoding."""
+     colors, depths, densities = [], [], []
+     for ray in rays:
+-        c, d, s = forward_single_ray(params, ray, alpha_mask)
++        z_vals = sample_z_vals(ray.origin, ray.direction)
++        pos_enc = apply_frequency_mask(positional_encoding(z_vals), alpha_mask)
++        # Query MLP for density and color [G]
++        sigma, rgb = query_mlp(model, pos_enc)
++        weights = compute_transmittance(sigma)
++        c = sum(weights * rgb)
++        d = sum(weights * z_vals)
+         colors.append(c)
+         depths.append(d)
+-        densities.append(s)
++        densities.append(sigma)
+     return colors, depths, densities
+-
+-def forward_single_ray(params, ray, alpha_mask):
+-    # Sample points along ray, apply frequency mask to positional encoding, query MLP
+-    return query_nerf(params, ray, alpha_mask)
+-
+-def initialize_free_nerf_params():
+-    return FreeNeRFBackbone()
+-
+-def load_pretrained_dpt():
+-    return DPTModel()
+-
+-def GradientDescent(params, lr):
+-    return Optimizer(params, lr)
+ ```
+ 
+ **Edge Cases and Pitfalls:**
+-*   **DPT Inaccuracy:** The DPT-generated depth maps may be inaccurate and lack detail. Using them solely for supervision can deteriorate render quality, necessitating the hybrid loss [S1].
+-*   **High-Frequency Instability:** Training with full positional encoding from the start can lead to unstable and susceptible high-frequency signals. The frequency regularization is critical to avoid this [S1].
+-*   **Floaters:** Sparse views often result in solid floaters near the camera. The occlusion regularization is specifically designed to address this [S1].
++*   **DPT Inaccuracy:** The DPT-generated depth maps may be inaccurate and lack detail [S1]. Using them solely for supervision can deteriorate render quality, necessitating the hybrid loss [S1].
++*   **High-Frequency Instability:** Training with full positional encoding from the start can lead to unstable and susceptible high-frequency signals [S1]. The frequency regularization is critical to avoid this [S1].
++*   **Floaters:** Sparse views often result in solid floaters near the camera [S1]. The occlusion regularization is specifically designed to address this [S1].
+ 
+ ## Operating characteristics
+@@ -219,5 +203,5 @@
+ 
+ ## Background
+-ESNeRF was proposed by the team "zongqihe" for the AIM 2024 Sparse Neural Rendering Challenge [S1]. It builds on the FreeNeRF backbone and incorporates techniques from [18] (pixel-based losses) and [28] (depth-based losses) [S1]. The method was part of the challenge submissions, with the team participating in Track 1 [S1].
++ESNeRF was proposed by the team "zongqihe" for the AIM 2024 Sparse Neural Rendering Challenge [S1]. It builds on the FreeNeRF backbone and incorporates techniques from [18] (pixel-based losses) and [28] (depth-based losses) [S1]. The method was part of the challenge submissions, with the team participating in Track 1 [S1]. The source notes 44K total iterations with frequency regulation ending at 40K iterations, while training is explicitly done at 1/4 image resolution for 5K iterations per scene [S1].
+ 
+ ## Sources

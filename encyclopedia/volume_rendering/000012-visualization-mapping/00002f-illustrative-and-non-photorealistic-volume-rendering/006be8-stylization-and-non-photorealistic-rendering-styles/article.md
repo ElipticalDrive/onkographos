@@ -1,0 +1,47 @@
+# Stylization and Non-Photorealistic Rendering Styles
+
+
+## Overview
+This family encompasses methods that apply non-photorealistic rendering (NPR) techniques to volumetric data to enhance the perception of structure, shape, orientation, and depth [S2]. Unlike traditional physics-based volume rendering, which often results in ambiguous structural interpretation due to the continuous nature of volumetric data, these methods decouple illumination from physical light transport to modulate color and opacity based on local volumetric properties [G]. They are distinguished from surface-based NPR by deriving features from continuous 3D scalar or vector field properties rather than well-defined geometric surfaces [S2].
+
+## Shared principles
+The family shares the goal of enhancing volume visualization through stylized lighting and feature abstraction [G]. All methods operate on fragment-level data, typically utilizing the volume sample gradient as a proxy for surface normal orientation [G]. They decouple illumination from the physical light transport equation, instead using mathematical functions of the view direction, light direction, and scalar field properties to modulate color . Common inputs include the normalized gradient $\nabla f_n$, light vectors $L$, and base colors derived from transfer functions [G]. The output is a final color $c$ that combines ambient/gaseous components with directed illumination effects [G].
+
+The framework utilizes four types of properties for enhancement:
+1. Volume sample location and value .
+2. Local volumetric properties, such as gradient and minimal change direction .
+3. View direction .
+4. Light information .
+
+Volumetric illustration differs from surface-based NPR in several important ways [S2]. In surface NPR, surfaces (features) are well-defined, whereas with volumes, feature areas within the volume must be determined through analysis of local volumetric properties because volumetric features vary continuously throughout three-dimensional space [S2].
+
+## Subtopics
+
+### [Stylization and Pattern Generation](7612-stylization-and-pattern-generation.md)
+Stylization and Pattern Generation applies non-photorealistic rendering techniques to volume data to enhance feature visibility and aesthetic appeal [G]. It solves the ambiguity of internal structures in complex volumes by replacing photorealistic shading with abstract patterns, such as stippling or example-based textures [G]. Unlike [Geometric Buffers](781-geometric-buffers-g-buffers.md) which focus on geometric abstraction, or [Illumination and Tone Shading Models](3857-illumination-and-tone-shading-models.md) which refine lighting, this family explicitly decouples illumination from physical light transport to modulate color and density based on user-defined artistic styles [G].
+
+### [Illustrative and Non-Photorealistic Rendering Styles](19663-illustrative-and-non-photorealistic-rendering-styles.md)
+This family encompasses methods that apply non-photorealistic rendering (NPR) techniques to volumetric data to enhance the perception of structure, shape, orientation, and depth. Unlike traditional physics-based volume rendering, which often results in ambiguous structural interpretation due to the continuous nature of volumetric data, these methods decouple illumination from physical light transport to modulate color and opacity based on local volumetric properties [G]. They are distinguished from surface-based NPR by deriving features from continuous 3D scalar or vector field properties rather than well-defined geometric surfaces.
+
+### [CartoonVolumeStyle](22173-cartoonvolumestyle.md)
+CartoonVolumeStyle is a non-photorealistic volume rendering technique that produces a cel-shaded appearance by mapping surface normal orientations to a discrete set of flat colors. It solves the problem of visualizing volumetric structure without the smooth gradients of photorealistic rendering, instead using distinct color bands to emphasize shape and boundaries. It differs from [Boundary Enhancement Volume Style](10863-boundary-enhancement-volume-style.md) by relying on normal-view angle quantization rather than gradient magnitude, and from [Stylization and Pattern Generation](7612-stylization-and-pattern-generation.md) by using a fixed HSV-based interpolation scheme for its color palette.
+
+### Illustrative Shading Techniques
+This variant applies tone selection based on the distance between the camera and the object [S1, unofficial]. It applies saturation adaptation based on the distance from the ray intersection point to the external contour of the object [S1, unofficial]. It includes silhouettes for neurons that are close to the camera [S1, unofficial]. It highlights bifurcations in dendrites and connection points between dendrites and somas [S1, unofficial]. An ad-hoc ray-casting method is used for computing intersections between rays and dendrites/somas and assigning proper colors according to these illustrative strategies rather than standard shading [S1, unofficial].
+
+### Transition Parameterization
+This variant defines a seamless transition among shader stages using a user parameter $\Gamma \in [0,5]$ [S2]. The transition parameters $T_{S,C,SC,H,P} \in [0,1]$ describe the transition from one rendering style to the next and depend on $\Gamma$ [S2].
+- Silhouettes: $T_S = 1$ [S2].
+- Contours: $T_C = \text{clamp}_{[0,1]}(\Gamma)$ [S2].
+- Suggestive Contours: $T_{SC} = \text{clamp}_{[0,1]}(\Gamma-1)$ [S2].
+- Hatching: $T_H = \text{clamp}_{[0,1]}(\Gamma-2)$ [S2].
+- Phong: $T_P = \text{clamp}_{[0,1]}(\Gamma-3)$ [S2].
+
+Contour width $a$ is defined as $a = \text{width} \cdot T_{S,C}$, where width is a predefined parameter (0.006) controlling the maximal contour width as a fraction of the bounding sphere [S2]. Suggestive contour parameters are set as $t_d = (1 - T_{SC})t_{d,\min} + t_{d,\min}$ and $\theta_{c} = \frac{\pi}{2} - (\frac{\pi}{2} - \theta_{c,\min})T_{SC}$, where $t_{d,\min}$ and $\theta_{c,\min}$ are predefined minimal thresholds [S2]. Hatching threshold is set as $\theta_{c} = \frac{1}{2}\pi(1 - T_H)$ [S2]. Phong shading opacity $O_p$ is calculated using $\theta_{c}(T_P) = \frac{1}{2}\pi(1 - T_P)$, $w_a(T_P) = \text{clamp}_{[0,1]}(\frac{\arccos(-\langle \mathbf{n}, \mathbf{v} \rangle) - \theta_{c}(T_P)}{\frac{1}{2}\pi - \theta_{c}(T_P)})$, $w_k(T_P) = -\langle \mathbf{k}, \mathbf{v} \rangle(1 - T_P) - T_P$, and $O_p = \text{clamp}_{[0,1]}(w_a(T_P) \cdot w_k(T_P))$ [S2]. For $\Gamma > 4$, $T_{S,C,SC,H,P} = 1 - \text{clamp}_{[0,1]}(\Gamma-4)$ and the final Phong opacity is $O_{pm} = T_P \cdot O_p + (1 - T_P)$ [S2].
+
+## Background
+The concept of non-photorealistic rendering (NPR) for volumes emerged to address the ambiguity inherent in standard volume rendering, where continuous scalar fields make feature boundaries difficult to perceive [S2]. Early work focused on adapting surface-based NPR techniques, such as cel-shading and hatching, to volumetric data by estimating surface normals from gradients [S1, unofficial]. The field has developed to include complex transition mechanisms that allow users to seamlessly blend between different illustrative styles, such as silhouettes, contours, and hatching, to highlight specific anatomical or structural features [S2]. These methods are primarily used in biomedical visualization to enhance the interpretability of complex structures like neural cells and internal organs [S1, unofficial][S2].
+
+## Sources
+[S1] Non-Photorealistic Rendering of Neural Cells from their Morphological Description, https://zenodo.org/records/5505327, fetched 2026-10-26 (unofficial)
+[S2] Sline: Seamless Line Illustration for Interactive Biomedical Visualization, https://doi.org/10.2312/vcbm.20161281, fetched 2026-10-29

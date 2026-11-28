@@ -1,0 +1,65 @@
+--- v002.md
++++ v003.md
+@@ -32,16 +32,15 @@
+ ```python
+ import threading
+-
+-# Standard OpenGL context creation with resource sharing [G]
+-def create_shared_gl_context():
+-    # In practice, this calls glXCreateContext or wglCreateContext with a share list.
+-    return {"type": "gl_context", "shared": True}
++import queue
+ 
+ class OverlappedRenderer:
+     def __init__(self):
+-        self.shared_context = create_shared_gl_context()
++        # Create a new OpenGL context with resource sharing for the GPU loader thread [S1]
++        self.shared_gl_context = self.create_shared_gl_context()
++        self.request_queue = queue.Queue()
++        self.loaded_bricks_queue = queue.Queue()
+         self.dhcs_thread = threading.Thread(target=self.dhcs_worker)
+         self.renderer_thread = threading.Thread(target=self.render_worker)
+-        self.gpu_loader_thread = threading.Thread(target=self.gpu_loader_worker, args=(self.shared_context,))
++        self.gpu_loader_thread = threading.Thread(target=self.gpu_loader_worker)
+         self.hdd_async_thread = threading.Thread(target=self.hdd_async_io)
+         self.lan_async_thread = threading.Thread(target=self.lan_async_io)
+@@ -56,5 +55,5 @@
+     def request_bricks(self, brick_ids):
+         # 1. Volume renderer requests bricks from DHCS [S1]
+-        self.dhcs_thread.queue_request(brick_ids)
++        self.request_queue.put(brick_ids)
+ 
+     def dhcs_worker(self):
+@@ -63,5 +62,6 @@
+         # 6. Launch all-to-all communication overlapped with rendering [S1]
+         while True:
+-            brick_ids = self.dhcs_thread.get_request()
++            brick_ids = self.request_queue.get()
++            # Scan cache hierarchy to locate bricks [S1]
+             locations = self.scan_cache_hierarchy(brick_ids)
+             for brick_id, location in locations.items():
+@@ -70,4 +70,5 @@
+                 elif location == 'LAN':
+                     self.lan_async_thread.load(brick_id)
++            # Launch binary all-to-all communication overlapped with rendering [S1]
+             self.launch_all_to_all_communication()
+ 
+@@ -77,13 +78,14 @@
+         while True:
+             proxies = self.compute_proxy_geometries()
+-            for brick in self.get_loaded_bricks():
++            while not self.loaded_bricks_queue.empty():
++                brick = self.loaded_bricks_queue.get()
+                 if brick.ready:
+                     self.render_slice(brick, proxies[brick.id])
+ 
+-    def gpu_loader_worker(self, context):
++    def gpu_loader_worker(self):
+         # GPU loader thread cannot load textures directly in main context [S1]
+-        with context:
++        with self.shared_gl_context:
+             while True:
+-                brick = self.get_bricks_ready_for_gpu()
++                brick = self.loaded_bricks_queue.get()
+                 if brick:
+                     self.upload_texture_to_gpu(brick.data)

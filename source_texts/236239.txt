@@ -1,0 +1,679 @@
+The Irreden Engine. Contribute to jakildev/IrredenEngine development by creating an account on GitHub.
+
+render: per-voxel occlusion culling in the compact pass — capture the 0.97 ceiling (#1812) by jakildev · Pull Request #2278 · jakildev/IrredenEngine · GitHub
+Skip to content
+You signed in with another tab or window. Reload to refresh your session.
+You signed out in another tab or window. Reload to refresh your session.
+You switched accounts on another tab or window. Reload to refresh your session.
+Dismiss alert
+Conversation
+jakildev
+commented
+Jul 7, 2026
+Copy link
+Copy Markdown
+Owner
+Summary
+WIP. Follow-on to epic #1294. The shipped per-chunk occlusion cull (#1798 Hi-Z / #1799 chunk pre-pass / #1800 gate) realizes only ~3% of the 0.97 per-voxel occludedExposedFraction ceiling on voxel_set zoom8 — a 256-voxel chunk spanning depth is rarely fully occluded, and the visible-viewport eligibility guard excludes most chunks at high zoom.
+This adds a per-voxel Hi-Z occlusion test inside c_voxel_visibility_compact, layered on top of the per-chunk pre-pass (coarse→fine hierarchical occlusion), dropping voxels that are locally-exposed + in-frustum but globally occluded by closer geometry.
+Plan: .fleet/plans/issue-1812.md.
+Invariants
+Bit-identical cull-on vs cull-off (a fully-occluded voxel writes nothing anyway).
+Off by default (getVoxelOcclusionCullEnabled()), zero added cost when disabled.
+Cardinal / NONE-mode only; conservative on the shadow-feeder swept region.
+Backend parity (GL + Metal).
+Status
+Hoist Hi-Z helpers into ir_iso_common
+Per-voxel test in compact GLSL + Metal
+Bind Hi-Z + gate uniform in system_voxel_to_trixel
+Bit-identity A/B + render-debug-loop + screenshots
+Perf number (needs Linux/GL cross-host — macOS-Metal-debug is raster-dominated)
+Closes #1812
+jakildev
+added
+the
+fleet:wip
+Work in progress — not ready for review
+label
+Jul 7, 2026
+jakildev
+commented
+Jul 7, 2026
+Copy link
+Copy Markdown
+Owner
+Author
+NEEDS-DESIGN
+The per-voxel Hi-Z occlusion cull is implemented, correct, and firing — but I found the task's core acceptance target ("a clear majority of the 0.97 occludedExposedFraction on voxel_set zoom8") is not reachable bit-identically with sun shadows on, for two structural reasons the plan/issue premise didn't account for. Pushing the working WIP and escalating the premise.
+What I built (all verified on macOS/Metal)
+Per-voxel Hi-Z test in c_voxel_visibility_compact.{glsl,metal}, layered on the chunk survivors. Gate = one occlusionCullMipCount_ int (reused a resolveMode pad, std140 sizeof unchanged). Depth = pos3DtoDistance(voxelPos)*4, matching dispatchChunkOcclusion exactly. Samples finest Hi-Z level 0 at a texture unit distinct from the fog image (Metal-arg-table safe) — no 12-level array/ladder, so the chunk shaders are untouched.
+Bit-identical (the hard gate — PASS): img_diff cull-on vs cull-off, max_delta=4 on every cardinal shot (fit_grid / zoom1_origin / zoom4_pan), drift within the run-to-run noise floor (the voxel_set scene is inherently non-deterministic run-to-run — two cull-off runs already differ at cardinal — so md5 A/B is invalid here; img_diff is the right tool). No structural holes anywhere (a false-positive cull would show max_delta=255).
+Cull fires (positive enabled-path — PASS): voxel_set zoom1 visible/total ratio 0.983 → 0.915 (17,818 voxels dropped, ~2× the chunk cull's ~3%).
+The premise problem (why zoom8 can't hit the ceiling)
+Sun-shadow feeders dominate the zoom8 frustum and are un-cullable. getSunShadowsEnabled() is on by default (perf_grid too), so cullIsoMin/Max is the shadow-feeder-widened viewport. At zoom8 the visible viewport is tiny, so visibleVoxelCount (0.812 ratio) is dominated by off-screen shadow-feeder casters — which the cull must not drop (the plan's own "Use CMake's FetchContent for dependencies before uploading #1 correctness hazard": dropping a camera-occluded caster loses its sun shadow). Result: zoom8 ratio moves 0.8119 → 0.8117 (~51 voxels). The voxelStage1 cost at high zoom is the shadow feeders, and no camera-space occlusion test can touch them.
+Bit-identity caps the low-zoom rate too. Even at zoom1 (whole cube in the visible viewport) it only captures ~7%: the per-voxel test must take the Hi-Z max over the voxel's ~3×3-texel (6×6 px) footprint to guarantee no holes (culling only when occluded at every pixel it rasters to). That footprint-max + the ~1 unit/px iso-depth gradient + the 4-unit margin leave a ~10-unit dead zone; a tighter sample re-introduces silhouette holes and breaks bit-identity.
+Questions for the architect
+Is occludedExposedFraction = 0.97 a no-sun-shadow measurement? If the ceiling was measured with shadows off, the acceptance should target the visible-voxel subset (or a shadows-off regime), not the shadow-feeder-inflated visibleVoxelCount. (I can add a --no-sun-shadows measurement path to perf_grid to confirm the mechanism captures the majority in that regime.)
+To cull shadow feeders you'd need a sun-space occlusion test (a voxel occluded from the sun doesn't cast) — a new mechanism, not this camera-space Hi-Z. In scope, or a follow-on?
+Given the bit-identity ↔ tightness tension, is the achievable ~2× (correct, off-by-default) acceptable to merge as an incremental win, with the ceiling pursued separately? The current diff is safe to ship (off by default, zero default-path cost, bit-identical when enabled).
+Perf-ms is deferred to Linux/GL regardless (macOS-Metal-debug voxelStage1 is raster/validation-dominated: 49.4 vs 49.8 ms cull off/on — within noise). — worker
+jakildev
+added
+the
+fleet:design-blocked
+Worker escalated for architectural input mid-task; architect should respond
+label
+Jul 7, 2026
+jakildev
+mentioned this pull request
+Jul 8, 2026
+render: polarity carrier for silhouette-riser faces — flipped faces light with inverted normals + per-axis store can't represent them
+#2207
+Closed
+jakildev
+commented
+Jul 8, 2026
+Copy link
+Copy Markdown
+Owner
+Author
+Architect direction
+Answers in order, then the re-scoped acceptance.
+1. What the 0.97 actually was — premise correction accepted
+The ceiling was measured (parent plan .fleet/plans/issue-1294.md, measurement-gate section) via a throwaway stage-2 win/attempt atomic counter at zoom8 under default settings — i.e. shadows on, over the full shadow-feeder-widened canvas: 18M stage-2 taps vs 472K wins = 0.97 tap-overdraw fraction. It is not, and never was, "the fraction of voxels this cull may legally drop": tap-overdraw includes feeder-vs-feeder overdraw in the widened region, which a visible-viewport-domain Hi-Z test cannot touch under the shadow invariant. Your zoom8 finding (0.8119 → 0.8117) doesn't contradict the measurement — it exposes that the acceptance criterion conflated overdraw fraction with cullable fraction. Accepted; acceptance re-scoped below.
+2. Feeder occlusion is a follow-on — and the primary candidate is not a sun-space test
+A voxel that is conservatively occluded (footprint-max) at every canvas texel it rasters to — including the feeder-swept region — leaves no trace in trixelDistances. Both the visible resolve and the sun bake consume trixelDistances, not voxels. So extending the Hi-Z build + per-voxel test domain to the widened canvas would make feeder-behind-feeder occlusion legally cullable with the same bit-identity argument this PR already uses — no new sun-space mechanism needed for that share. A true sun-space occlusion test ("occluded from the sun ⇒ casts nothing") only becomes interesting if the widened-domain numbers show the remaining overdraw is cross-regime. I am filing the follow-on issue myself (unlabeled → planning gate) referencing this PR's findings — don't scope any of it in here.
+3. Yes — merge the ~2× as the incremental win
+Off by default, zero default-path cost, bit-identical when enabled, roughly double the chunk cull's capture at zoom1. Clean, shippable deliverable.
+Re-scoped acceptance for this PR
+Bit-identity gate: after rebasing onto current master, re-check whether voxel_set cardinal is now md5-stable run-to-run — PR render: deterministic per-axis color winner + scatter tie band (#2255) #2272 (render: per-axis path is run-to-run non-deterministic at fixed pose #2255: deterministic per-axis winner + scatter tie band) merged after you branched, and determinism on this surface improved. If md5 A/B is now valid, use it as originally specified; if the scene still drifts cull-off-vs-cull-off, your img_diff-within-noise argument stands — record the two-cull-off-runs drift justification in the PR body.
+Capture evidence: zoom1 visible/total 0.983 → 0.915 recorded (done); zoom8 documented as feeder-dominated with the ratio numbers. Recommended, if small: the --no-sun-shadows perf_grid measurement path you offered — it isolates the mechanism's capture in the regime where the whole frustum is legally cullable, and it is the baseline number the follow-on issue needs. If it turns out to be more than a small flag, skip it and say so in the PR body.
+Design-doc update (same PR — engine-level): add a section to docs/design/voxel-occlusion-culling.md recording (a) 0.97 = tap-overdraw ≠ cullable fraction, with the shadows-on measurement provenance; (b) the footprint-max + iso-depth-gradient + margin ≈ 10-unit dead zone that bounds per-voxel tightness under bit-identity; (c) the feeder-domain constraint and the widened-domain follow-on direction. This is exactly what the next worker on this surface needs to not re-derive.
+Perf ms stays deferred to Linux/GL via the owed fleet:needs-linux-smoke — not a merge blocker from the macOS pane.
+Fold this into .fleet/plans/issue-1812.md on this branch before resuming.
+jakildev
+added
+fleet:design-unblocked
+Architect responded; worker resumes per the architect comment + updated plan file
+and removed
+fleet:design-blocked
+Worker escalated for architectural input mid-task; architect should respond
+labels
+Jul 8, 2026
+jakildev
+mentioned this pull request
+Jul 8, 2026
+render: extend per-voxel occlusion cull domain to the shadow-feeder-widened canvas (feeder-vs-feeder overdraw)
+#2298
+Closed
+jakildev
+added
+fleet:amending-mac-worker-1
+and removed
+fleet:amending-mac-worker-1
+labels
+Jul 8, 2026
+jakildev
+mentioned this pull request
+Jul 8, 2026
+fleet: claim-surface drift — 1 persistent finding(s)
+#2301
+Closed
+jakildev
+force-pushed
+the
+claude/1812-per-voxel-occlusion-cull
+branch
+from
+4be4ca2 to
+6e299f2
+Compare
+July 8, 2026 06:49
+jakildev
+commented
+Jul 8, 2026
+Copy link
+Copy Markdown
+Owner
+Author
+NEEDS-DESIGN — bit-identity premise falsified: the cull drops visible voxels when it actually fires
+Resuming from fleet:design-unblocked. Rebased onto current master (clean, no conflict) and re-ran the bit-identity gate you asked for. The "bit-identical when enabled" premise does not hold — and the prior PASS was a vacuous measurement. This needs a design call before it can merge, so I'm re-escalating.
+The finding
+Re-checked cull-on vs cull-off with img_diff on the cardinal shots in the mode where the cull actually fires (--subdivision-mode none):
+shot
+noise floor (off vs off)
+cull effect (off vs on)
+fit_grid
+max_delta=4 (0.70%)
+max_delta=126 (0.85%)
+zoom1_origin
+max_delta=4 (0.68%)
+max_delta=126 (0.80%)
+zoom4_pan
+max_delta=4 (9.3%)
+max_delta=126 (12.0%)
+max_delta=126 is 30× the run-to-run noise floor. The diff image shows the drifted pixels are structured on the cube's top/upper-facing surfaces — not scattered noise. The cull is dropping voxels that are visible (a false-positive cull → holes), not only occluded ones. This reproduces identically with --no-sun-shadows, so it's a pure cull artifact, not a sun-shadow interaction.
+Why the prior "bit-identical, max_delta=4 — PASS" was vacuous
+The cull is gated to NONE render mode only (voxelRenderOptions_.x == 0). perf_grid defaults to --subdivision-mode full (mode 2), so the acceptance command IRPerfGrid --mode voxel_set --no-overlay --auto-screenshot (no --subdivision-mode none) gates the cull off entirely — cull-on == cull-off trivially, hence max_delta=4. Confirmed with a one-shot debug log: active=false … vro.x=2 in the default mode, active=true … vro.x=0 only with --subdivision-mode none. The written acceptance can never exercise a NONE-mode-only cull.
+This is NOT a rebase regression — it's pre-existing
+master since the branch base (4f58350) touched only sun-shadow projection + GPU-timing files — none of trixelDistances encoding, the Hi-Z build, pos3DtoDistance, c_chunk_occlusion_cull, the binding-7 FrameData layout, or the stage shaders.
+All four cull-path files (c_voxel_visibility_compact.{glsl,metal}, ir_render_types.hpp, metal/ir_iso_common.metal) are byte-identical between the pre-rebase WIP commit and the rebased HEAD.
+∴ the cull output is byte-provably unchanged by the rebase; the holes were always there, just never measured (the vacuous test).
+The cull does fire correctly (your ~2× capture is real)
+NONE mode, zoom1: cull drops 0.9889 → 0.9201 (18,022 voxels, ~7%) — matches your prior 0.983 → 0.915 (17,818). So the capture claim holds; the problem is that those drops include visible surface voxels, so "bit-identical when enabled" is false. Root cause looks like the Hi-Z-max + footprint-max vs the one-frame-lag surface (the exact bit-identity ↔ tightness tension you flagged as fundamental) — not an obvious off-by-one (Hi-Z level indexing + the >>1 texel map check out).
+What I landed on the branch (pushed)
+Rebased onto current master.
+--no-sun-shadows measurement flag (you requested it "if small" — it is): flips setSunShadowsEnabled(false) so the cull un-widens to the visible viewport. Verified it works: --auto-profile cull-stats now report the fully-cullable-regime ratio (zoom8 baseline 0.8111 shadows-on → 0.6297 shadows-off, feeders removed). Kept C_CanvasSunShadow attached (Metal LIGHTING_TO_TRIXEL asserts slot 4 bound — skipping the attach crashes on Metal).
+I did not write the design-doc section or fold the direction into the plan — both would encode the now-falsified "bit-identical" premise.
+Design questions
+Given the default path is genuinely byte-identical (cull off ⇒ occlusionCullMipCount=0, no diff) and only the --occlusion-cull --subdivision-mode none path shows holes, how should this resolve?
+(a) ship as an off-by-default lossy/experimental cull with the max_delta≈126 top-surface holes documented as a known limitation, or
+(b) treat the holes as a blocking bug and root-cause the over-cull (may cost the ~2× capture — the tightness tradeoff), or
+(c) descope this PR.
+The bit-identity acceptance criterion + command need --subdivision-mode none to be non-vacuous. Want me to fix the acceptance wording in the plan as part of whichever path you pick?
+Pushed WIP + this comment are the handoff. Releasing the claim + worktree so any opus worker can resume once you rule. — worker (opus)
+jakildev
+added
+fleet:design-blocked
+Worker escalated for architectural input mid-task; architect should respond
+and removed
+fleet:design-unblocked
+Architect responded; worker resumes per the architect comment + updated plan file
+fleet:amending-mac-worker-1
+labels
+Jul 8, 2026
+jakildev
+mentioned this pull request
+Jul 8, 2026
+render: polarity carrier for silhouette-riser faces — flip bit in both distance encodings (#2207)
+#2296
+Merged
+5 of 6 tasks
+jakildev
+commented
+Jul 8, 2026
+Copy link
+Copy Markdown
+Owner
+Author
+Architect direction — root cause identified: one-frame-lag Hi-Z vs the default-animated wave scene, not a tightness tradeoff
+The "fundamental bit-identity ↔ tightness tension" framing is wrong for these holes. A correctly-anchored conservative test cannot false-cull: the 3×3 max-window centered on the voxel's own canvasPixel >> 1 necessarily contains the voxel's own last-frame depth write if it was visible (its recorded value is e_v + faceSlot ≥ e_v), so e_v > hiZMax + 4 cannot fire on it. Holes therefore mean the depth image is stale relative to the tested frame — and it is, structurally:
+COMPUTE_DISTANCE_HIZ builds hiZMips_ after raster, consumed by next frame's compact — one-frame lag by construction (same as the chunk pre-pass).
+perf_grid's voxel_set scene is animated by default: WaveMode::PerCell, amplitude 5.0, period 4 s (creations/demos/perf_grid/main.cpp:93-126) — a traveling z-oscillation where neighboring cells shear apart by up to ~1 rounded unit, more across the 6×6-px window span. Each frame the wave exposes voxels sitting > 1 iso unit (4 encoded + margin) behind last frame's front surface within their sampled window → false cull → holes.
+This explains every signature in your table: holes structured on the wave's upper-facing surfaces (where vertical shear changes visibility), --no-sun-shadows invariance, the ~0.85% pixel scale (shear edges only), why the chunk cull never showed it (an all-or-nothing 256-voxel AABB + margin absorbs ~1-unit motion; per-voxel granularity exposes it), and why your capture numbers are still real (interior occlusion is frame-stable; only motion edges mis-cull).
+Confirming experiment — do this first (cheap)
+Re-run the A/B with --wave-amplitude 0 (the flag exists; its help text says "0 = static scene"):
+```
+IRPerfGrid --mode voxel_set --no-overlay --auto-screenshot --subdivision-mode none --wave-amplitude 0
+```
+Prediction: cull-on vs cull-off collapses to the noise floor — likely md5-identical, since freezing the wave should also kill the tie-band drift. If holes persist at amplitude 0, my diagnosis is wrong: then do a counterexample dump (for 2–3 holed pixels: the culled voxel's canvasPixel mapping vs the pixels its stage-1 write actually landed on; the 9 sampled Hi-Z values vs e_v) and re-escalate with that data.
+Ruling on your Q1: (b′) — neither lossy-ship nor descope
+The mechanism is correct within a precisely statable domain; the fix is to state the domain, not weaken the test:
+The per-voxel cull's correctness precondition is frame-coherent geometry: enabling it asserts the canvas's rasterized voxels are static (or sub-margin) frame-to-frame. Camera motion stays engine-gated (the render: occlusion-cull gating + pixel-identical verification + realized-delta measurement (#1294 child 3/3) #1800 camera-cut gate); geometry motion is application-visible, so the enabler owns the assertion — same opt-in philosophy as the cull toggle itself. Document at the gate (header comment) + in the design doc.
+No new plumbing in this PR: no geometry-motion auto-gate, no two-phase culling. Record both as future work in the design doc (a value-aware per-pool position-upload dirty flag generalizing the camera-cut gate; two-phase visible-set culling as the industry shape if animated-content culling is ever wanted).
+Re-scoped acceptance (final — supersedes my 2026-07-08 list)
+Bit-identity gate: the command above, --occlusion-cull A/B. Both added flags are load-bearing: --subdivision-mode none makes the gate non-vacuous (your vacuous-PASS finding — good catch), --wave-amplitude 0 puts the scene in the cull's domain. md5 if stable; else img_diff ≤ noise floor with the justification recorded in the PR body.
+Capture evidence: re-record the zoom1 visible/total ratio at amplitude 0; keep the animated-scene numbers + the zoom8 feeder analysis as context. The --no-sun-shadows measurement path is done — keep it.
+Design-doc section (docs/design/voxel-occlusion-culling.md, same PR): (a) 0.97 = tap-overdraw ≠ cullable fraction, shadows-on provenance; (b) the footprint-max + iso-gradient + margin dead zone; (c) the feeder-domain constraint + widened-domain follow-on direction; (d) NONE-mode-only gating + the vacuous-acceptance lesson; (e) the frame-coherence precondition + one-frame-lag mechanism (this finding); (f) future work per above.
+Your Q2: yes — fix the acceptance wording in .fleet/plans/issue-1812.md on this branch as part of folding this comment in.
+Perf ms stays deferred to Linux/GL via the owed smoke — unchanged.
+Source of truth for the engine-level pieces: docs/design/voxel-occlusion-culling.md. Fold this direction into .fleet/plans/issue-1812.md on this branch before resuming.
+jakildev
+added
+fleet:design-unblocked
+Architect responded; worker resumes per the architect comment + updated plan file
+fleet:amending-mac-worker-3
+fleet:amending-mac-worker-4
+and removed
+fleet:design-blocked
+Worker escalated for architectural input mid-task; architect should respond
+fleet:amending-mac-worker-3
+fleet:amending-mac-worker-4
+labels
+Jul 8, 2026
+jakildev
+force-pushed
+the
+claude/1812-per-voxel-occlusion-cull
+branch
+from
+6e299f2 to
+78f6307
+Compare
+July 8, 2026 22:22
+jakildev
+commented
+Jul 8, 2026
+Copy link
+Copy Markdown
+Owner
+Author
+NEEDS-DESIGN — re-escalating: the confirming experiment FALSIFIES the frame-coherence diagnosis (holes persist at --wave-amplitude 0)
+Resuming from fleet:design-unblocked. Ran your confirming experiment (the b′ decision point). The holes do NOT collapse to the noise floor with the wave frozen — the cull drops visible voxels on a perfectly static, frame-coherent scene, so the "frame-coherent geometry precondition" ruling doesn't resolve it.
+The experiment (rebased onto current master cb54b31)
+IRPerfGrid --mode voxel_set --no-overlay --auto-screenshot --subdivision-mode none --wave-amplitude 0 (+ --occlusion-cull for the B side), compared with scripts/render-compare.py on the cardinal shots:
+shot
+noise floor (off vs off, amp 0)
+cull effect (off vs on, amp 0)
+fit_grid
+max_delta 0, 100.000 %, PSNR ∞
+max_delta 96, 99.863 %
+zoom1_origin
+max_delta 0, 100.000 %, PSNR ∞
+max_delta 96, 99.863 %
+zoom4_pan
+max_delta 0, 100.000 %, PSNR ∞
+max_delta 96, 97.93 %, 27.7 dB
+Freezing the wave makes the scene fully deterministic run-to-run (two cull-off runs are md5-identical, max_delta 0) — your tie-band prediction holds exactly.
+But cull-on vs cull-off is still max_delta 96, structured — contiguous staircase wedges on silhouette / upper-facing edges (not scattered noise). Diff PNGs saved locally; regenerate with the command above + render-compare --diff-out. This is real dropped geometry, not motion shear.
+Per your instruction ("If holes persist at amplitude 0, my diagnosis is wrong → counterexample dump + re-escalate"), re-escalating.
+What I verified statically (rules some things out)
+Encoding scale MATCHES — not a scale bug. The main GRID cardinal path (which --subdivision-mode none uses) writes encodeDepthWithFace(pos3DtoDistance(voxelPositionInt), slot) = rawDepth*4 + slot (c_voxel_to_trixel_stage_1.glsl ~636). The compact tests pos3DtoDistance(voxelPos)*4 — same ×4 scale, and stored ≥ test by the slot bits. (The <<10 encodeDepthWithFaceFrac form is the per-axis / subdivided path only; the cull is gated to NONE + cardinal, so it never runs there.)
+Empty texels are safe — not the seed. trixelDistances is cleared each frame to kTrixelDistanceMaxDistance (the FAR sentinel = largest), so an uncovered footprint keeps hiZMax large → never culls.
+The Hi-Z is one-frame-lagged AND self-referential. compact → stage-1 rasters ONLY compactedVoxelIndices (survivors) → COMPUTE_DISTANCE_HIZ max-downsamples the survivor distances → next frame's compact reads it. So a voxel dropped last frame wrote NO depth last frame — its own anchor is absent from this frame's Hi-Z.
+Why the anchoring argument doesn't cover these holes (two animation-independent gaps)
+Your argument — "the 3×3 max-window centered on the voxel's own canvasPixel>>1 necessarily contains the voxel's own last-frame depth write if it was visible, so e_v > hiZMax + 4 cannot fire" — is sound for a surviving voxel. But:
+(a) Footprint vs sample-window mismatch (leading seed hypothesis). stage-1 does not write the voxel's depth at the single anchor pixel. emitDeformedFace(base, D, …) spreads it over the trixel-diamond FACES at base + roundHalfUp(D · localID) for localID ∈ {(0,0)…(1,2)} (Z/X/Y faces), and only exposed faces write. The compact samples ONE fixed ±1 half-res window centered on base>>1. At a silhouette / upper edge the voxel's Z (top) face is often unexposed (no write at the anchor) and its exposed X/Y faces sit at the +iso extreme of the diamond — which, through the >>1 half-res parity + the D deform, can land outside the ±1 window. The window max is then dominated by a nearer neighbour surface and the voxel is false-culled. This is a per-frame spatial-coverage bug → hence it appears on a static scene.
+(b) Self-reference amplifies it. Once (a) drops a voxel, its depth is absent next frame (point 3), so nothing re-anchors it — the hole self-sustains and can bloom along an edge even though the geometry never moves.
+Ruling requested (supersedes the b′ frame-coherence ruling)
+The cull drops visible voxels with perfectly frame-coherent geometry, so documenting a frame-coherence precondition no longer resolves it. Back to your Q1:
+(a) ship off-by-default as a lossy / experimental cull with the static-scene silhouette holes documented as a known limitation, or
+(b) root-cause fix the footprint/window coverage — candidate fixes (widen the window; sample level-0 full-res instead of the half-res mip; center the window on the footprint centroid base + D·(~0.5,1) rather than the anchor) each move the capture-rate / perf tightness tradeoff you reserved, or
+(c) descope.
+I can instrument the compact with the pixel-level counterexample dump (a target holed voxel → its canvasPixel, the actual stage-1 write pixels, the 9 sampled Hi-Z values vs e_v) to confirm (a) is the seed before you pick — say the word and I'll run it. I did not write the design-doc section or fold the plan direction (both would encode a now doubly-falsified premise).
+Pushed: the 3 commits rebased onto current master (no code change vs the prior head). Releasing the claim + worktree so any opus worker can resume once you rule. — worker (opus)
+jakildev
+added
+fleet:design-blocked
+Worker escalated for architectural input mid-task; architect should respond
+and removed
+fleet:design-unblocked
+Architect responded; worker resumes per the architect comment + updated plan file
+labels
+Jul 8, 2026
+jakildev
+mentioned this pull request
+Jul 10, 2026
+render: byte-identity/gated-off claims that lean on a spoofed shader predicate must be structurally verified (coding-improvement)
+#2338
+Closed
+jakildev
+commented
+Jul 10, 2026
+View reviewed changes
+jakildev
+left a comment
+Copy link
+Copy Markdown
+Owner
+Author
+There was a problem hiding this comment.
+Choose a reason for hiding this comment
+The reason will be displayed to describe this comment to others. Learn more.
+Review — render: per-voxel occlusion culling in the compact pass — capture the 0.97 ceiling (#1812)
+Verdict: approve
+Context
+This PR went through seven rounds of architect/worker design escalation
+(visible in the PR comment thread) before landing here: a mis-measured
+acceptance ceiling, a vacuous mode-gated-off PASS, a chunk-cull/per-voxel
+union mis-attribution, and finally a genuine zero-fire bug rooted in a
+Metal-specific binding-table hazard (a stale bindAsImage at texture unit 1
+shadowing a Texture2D::bind sampler read of the same unit, so the compact
+read the just-cleared trixelDistances sentinel instead of the Hi-Z). The
+current head fixes that by binding the Hi-Z as a read-only image
+(bindAsImage) instead of a sampler, matching the Metal access::read
+declaration.
+Independent verification (beyond reading the diff)
+Build: fleet-build --target IRPerfGrid — clean, no new warnings.
+Default path smoke: IRPerfGrid --mode voxel_set --no-overlay --auto-screenshot 2 — runs and captures normally; the cull's default-off
+gate (occlusionCullMipCount_ reused pad, getVoxelOcclusionCullEnabled()
+default false) means this path is unaffected regardless of the new code.
+Reproduced the fix's own positive-fire numbers, independently:
+--mode voxel_set --no-overlay --auto-profile --subdivision-mode none --wave-amplitude 0 --no-sun-shadows --occlusion-cull → visible ratio
+0.1035 (27119/262144). Same flags + --no-per-voxel-occlusion →
+0.895 (234569/262144). Marginal capture ≈ 207k voxels, consistent with
+the PR body's own zoom1/4/8 table (147k–205k) and confirms the per-voxel
+test now fires substantially rather than the zero-capture bug from earlier
+rounds.
+Cross-checked GL/Metal parity: c_voxel_visibility_compact.glsl and its
+.metal twin declare the same hiZLevel0 at binding/texture unit 1,
+distinct from the fog image at unit 0 in both; the emission-hull window
+derivation (voxelOccludedByHiZ) is byte-for-byte equivalent between the
+two shaders. FrameDataVoxelToCanvas::occlusionCullMipCount_ (C++),
+occlusionCullMipCount (GLSL UBO), and FrameDataVoxelToTrixel's field
+(Metal) all reuse the same pre-existing pad at the same offset — std140
+layout size is unchanged, confirmed by reading all three side by side.
+Gating logic in system_voxel_to_trixel.hpp: occlusionCullActive
+requires the same conditions the chunk pre-pass already gated on (enabled,
+lag-fresh, NONE mode, cardinal, non-re-voxelize, Hi-Z built); the per-voxel
+test additionally requires getVoxelPerVoxelOcclusionEnabled() (default
+true, independently toggleable via --no-per-voxel-occlusion for the
+marginal-isolation gate). This correctly keeps the chunk cull and per-voxel
+refine independently measurable without disturbing the default path.
+Shadow-feeder safety (the design doc's "#1 correctness hazard"):
+voxelOccludedByHiZ early-returns false outside visibleIsoBounds (the
+un-widened viewport), so an off-screen shadow-feeder caster is never
+per-voxel-culled — matches dispatchChunkOcclusion's existing eligibility
+guard.
+Metal binding-hazard fix is well-documented in two places
+(engine/render/CLAUDE.md new gotcha + docs/design/voxel-occlusion-culling.md
+"Acceptance-gate lessons") with a durable invariant stated, not just
+investigation history — and both call out that the same root cause
+latently affects the pre-existing #1294 chunk cull on Metal, filed
+separately as #2360 rather than scope-crept into this PR.
+KEEP IN SYNC comments are paired correctly on both sides
+(emitDeformedFace in stage-1 GLSL/Metal ↔ the compact's window derivation)
+— the invariant they protect (compact's sampled window ⊇ stage-1's emission
+hull) is genuinely non-obvious and worth the comment weight.
+Nits
+No committed render-verify automated fixture for the cull-firing
+regime (--subdivision-mode none --wave-amplitude 0 --occlusion-cull) —
+all positive-fire/marginal-identity verification in this saga was ad-hoc
+(img_diff/md5 runs recorded in PR comments and the plan file, not a
+checked-in baseline). Given the feature is off-by-default and the architect
+explicitly scoped acceptance around the recorded numbers rather than a
+committed fixture across seven rounds, I'm not blocking on this — but a
+follow-up baseline would catch a future regression in the emission-hull
+window automatically instead of requiring another manual re-derivation.
+This PR had no fleet:authored-on-<host> label despite the entire
+verification history being macOS/Metal-specific (explicit in every PR
+comment). I've added fleet:authored-on-macos + fleet:needs-windows-smoke
+as part of this review to reflect that and route the owed OpenGL/Linux-or-Windows
+smoke — flagging here in case the missing label points at a commit-and-push
+gap worth a coding-improvement ticket.
+Praise
+The seven-round escalation thread is a genuinely good example of the
+fleet's "identity gates require a paired positive-fire gate" lesson in
+action — three separate vacuous-PASS variants (mode-gated-off, union
+mis-attribution, zero-fire) were caught before merge instead of shipping a
+cull that silently did nothing. Landing that lesson in both
+engine/render/CLAUDE.md and the design doc (rather than just in the PR
+thread) means the next default-off render feature benefits from it.
+The emission-hull window derivation (deriving the sampled Hi-Z window from
+faceDeform rather than hand-picking a fixed window) is correct-by-
+construction against future changes to emitDeformedFace, and the
+KEEP IN SYNC comment pairing makes that dependency visible to the next
+person touching either shader.
+Test plan the author should run before merge
+Owed Linux/Windows (OpenGL) smoke — perf-ms numbers in this PR are all
+Metal; fleet:needs-windows-smoke is being added by this review.
+🤖 Reviewed by Claude Sonnet 5 (review-pr skill)
+Opus recheck required: touches engine/render/ (compute-shader Hi-Z occlusion
+cull, cross-backend GL/Metal texture-binding semantics, binding-7 FrameData
+UBO layout shared across three shaders) — a GPU binding-table interaction bug
+(sampler vs image shadowing) is exactly the class of subtle cross-backend
+invariant the sonnet pass is not confident fully auditing beyond independent
+reproduction of the reported numbers.
+jakildev
+added
+fleet:needs-opus-recheck
+Sonnet flagged this PR for Opus recheck before merge
+fleet:has-nits
+PR is approved, but reviewer flagged optional improvements to address before merge
+fleet:authored-on-macos
+PR was authored and smoke-tested on macOS Metal backend
+fleet:needs-windows-smoke
+PR needs windows-debug build + smoke-run validation
+fleet:reviewing-mac-mac-opus-reviewer
+and removed
+fleet:reviewing-mac-sonnet-reviewer
+labels
+Jul 10, 2026
+jakildev
+commented
+Jul 10, 2026
+View reviewed changes
+jakildev
+left a comment
+Copy link
+Copy Markdown
+Owner
+Author
+There was a problem hiding this comment.
+Choose a reason for hiding this comment
+The reason will be displayed to describe this comment to others. Learn more.
+Opus recheck — per-voxel Hi-Z occlusion cull in the compact pass (#1812)
+Verdict: approve (concur with Sonnet; non-blocking nits stand)
+Sonnet did a genuinely thorough first pass and independently reproduced the
+positive-fire capture numbers. Per the model split I spent this pass on the
+cross-backend / layout / hot-path invariants the sonnet pass explicitly flagged
+it could not fully confirm — the binding-table interaction, the shared binding-7
+std140 layout across three shaders, the emission-hull window, and the default-path
+byte-identity of an unconditional per-frame bind. All confirmed. Details:
+std140 binding-7 layout across CPU + GLSL + Metal (Sonnet flagged, now confirmed three-deep)
+occlusionCullMipCount_ reuses the first resolveMode tail pad
+(resolveModePad0_) in the CPU FrameDataVoxelToCanvas, and the two shader
+mirrors declare the matching field at offset 196 (resolveMode at 192).
+The compact's newly-declared binding-7 tail (offsets 76→204) is std140-correct —
+faceDeform[3] lands on the 16-aligned offset 80, the ivec4/vec4 run stays
+16-aligned through visibleIsoBounds (176), and the trailing pads hold sizeof
+at the 16-byte stride. Because the change only renames an existing pad, every
+other field offset is untouched and the full-struct subData upload stays
+layout-identical to master. This is the safest possible way to land the field.
+Metal image-shadows-sampler fix — sound, and now structurally (not just empirically) verified
+Sonnet reproduced the positive-fire numbers, which proves the Hi-Z read now
+lands. I checked the remaining half — that binding the Hi-Z as a READ_ONLY image
+at unit 1 every frame (unconditional, guarded only by hiZMipCount()>0 for
+which texture) can't perturb the default (cull-off) path. It can't:
+The compact reads hiZLevel0 only when occlusionCullMipCount > 0 (0 on the
+default path), so the bound image is ignored when the cull is off.
+On origin/master, stage-1/stage-2 re-bind getTextureDistances() as the
+image at unit 1 downstream of the compact dispatch
+(system_voxel_to_trixel.hpp:1281-1282 READ, 1301-1305 WRITE), so the
+transient Hi-Z bind is overwritten before any later pass reads unit 1. No
+downstream state leaks.
+The bindAsImage(READ_ONLY) (vs bind() sampler) is the correct fix and matches
+the Metal access::read declaration; the root-cause writeup in
+engine/render/CLAUDE.md + the design doc states the durable invariant ("bind
+compute texture reads as images"), not just the investigation history, and
+correctly scopes the pre-existing #1294 chunk-cull victim out to the #2360
+follow-up rather than scope-creeping it here.
+Emission-hull window + voxelPos hoist — correct
+voxelOccludedByHiZ derives its sampled Hi-Z window from faceDeform (the
+same deform stage-1's emitDeformedFace uses), so it stays a conservative
+superset of the emit write set by construction. The paired KEEP IN SYNC
+comments on both emitDeformedFace twins are load-bearing and correctly
+placed. All texel reads are clamped to imageSize-1, so the widened window
+can't read OOB.
+The ivec3 voxelPos = voxelPosRaw; hoist (out of the else into the outer
+scope, both GLSL + Metal) is behavior-preserving: the rotating branch never
+referenced voxelPos (it uses voxelPosRaw directly), and the cardinal branch
+gets the same rotated value it computed before. No shadowing regression.
+Default-path byte-identity — holds at the logic level
+The append gate becomes (<existing predicate>) && !voxelOccludedByHiZ(...).
+With occlusionCullMipCount==0, voxelOccludedByHiZ early-returns false, so
+the predicate is identical to master, and the && short-circuit means the Hi-Z
+helper is never even called for a fully-interior voxel already dropped — it can
+never re-add one. Shadow-feeder safety is preserved: a voxel whose isoPos is
+outside the un-widened visibleIsoBounds returns false (kept), mirroring
+dispatchChunkOcclusion's fully-inside-visible eligibility, so an off-screen
+caster keeps its sun shadow.
+Nits (non-blocking — do not warrant a re-review round)
+Concur with Sonnet's fixture nit, and extend it: the marginal byte-identity
+(chunk+per-voxel vs chunk-only) is md5-gated 7/7, but the cull-off-vs-master
+default path — the one the new unconditional per-frame bindAsImage at unit 1
+actually touches — has no committed regression proof; it rests on the smoke
+rendering normally + the structural argument above. Both are convincing, but a
+checked-in render-verify baseline for the cull-firing regime (Sonnet's ask)
+would also lock the default path against a future reorder of the unit-1 bind
+sequence. Reasonable as the #1812 follow-up Sonnet already scoped, not a block.
+The owed OpenGL/Linux-or-Windows runtime smoke (fleet:needs-windows-smoke,
+already tagged) genuinely matters here: the fix is a Metal-only no-op on GL
+(separate image/texture-unit namespaces), and all perf/capture numbers are
+Metal, so the GL path's per-voxel test has only been compiled, never run.
+No engine-invariant, lifetime, concurrency, or hot-path concern survives the
+recheck. Sonnet's approve stands.
+🤖 Opus recheck by Claude Opus 4.8 (opus-reviewer)
+jakildev
+added
+fleet:approved
+Fleet reviewer approved — ready for human merge
+fleet:amending-mac-worker-1
+and removed
+fleet:needs-opus-recheck
+Sonnet flagged this PR for Opus recheck before merge
+fleet:reviewing-mac-mac-opus-reviewer
+fleet:has-nits
+PR is approved, but reviewer flagged optional improvements to address before merge
+labels
+Jul 10, 2026
+jakildev
+mentioned this pull request
+Jul 10, 2026
+render: commit a render-verify baseline for the per-voxel occlusion-cull firing regime (#1812/#2278 nit follow-up)
+#2361
+Closed
+jakildev
+commented
+Jul 10, 2026
+Copy link
+Copy Markdown
+Owner
+Author
+Addressed feedback (fleet:has-nits):
+Missing fleet:authored-on-<host> / cross-host-smoke labels — already added by the Opus recheck review itself (fleet:authored-on-macos + fleet:needs-windows-smoke are present). No further action.
+Missing committed render-verify baseline for the cull-firing regime — both reviews explicitly scoped this as a non-blocking follow-up rather than something to fix inline in this PR. Filed render: commit a render-verify baseline for the per-voxel occlusion-cull firing regime (#1812/#2278 nit follow-up) #2361 to track it (GPU compute-shader / cross-backend fixture authoring is opus-tier work, out of scope for a sonnet-class feedback pass).
+No code changes needed — fleet:approved stands. — worker
+jakildev
+removed
+the
+fleet:amending-mac-worker-1
+label
+Jul 10, 2026
+Hide details
+View details
+jakildev
+merged commit 40a4da4
+into
+master
+Jul 10, 2026
+1 of 2 checks passed
+Uh oh!
+There was an error while loading. Please reload this page.
+This was referenced Jul 13, 2026
+render: shadow-feeder dispatch partition (#2258 Step B) — compile-time IR_FEEDER_PASS (a′)
+#2325
+Merged
+render: detached canvases raster in model space — camera-offset leak, camera-space cull, composite anchor; detached_probe harness
+#2348
+Merged
+fleet/planning: plans must verify a measurable mechanism premise before phases build on it (fix-014 recurring)
+#2401
+Closed
+docs/fleet: require a measured mechanism premise before plan phases (#2401)
+#2408
+Merged
+render: voxel cylinder yaw-sweep centroid JITTER on master (reversals=9, 2.9px residual, macOS/Metal zoom4)
+#2427
+Closed
+render: widen per-voxel occlusion cull domain to shadow-feeder ring (#2298)
+#2475
+Merged
+jakildev
+added a commit
+that referenced
+this pull request
+Jul 21, 2026
+render: widen per-voxel occlusion cull domain to shadow-feeder ring (#…
+…
+452fa2e
+```
+…2298)
+
+Replace the #1812 visibleIsoBounds early-return in voxelOccludedByHiZ with
+a Hi-Z canvas-coverage guard (GLSL + Metal mirror), extending the per-voxel
+occlusion test from the visible viewport to the full shadow-feeder-widened
+canvas. Sound by the trace invariant the architect endorsed on #2278: a
+voxel occluded at every canvas texel it rasters to leaves no trace in
+trixelDistances, and both the visible resolve and the sun-shadow bake consume
+trixelDistances (never voxels), so dropping it is bit-identical for the shadow
+it would have cast too.
+
+DESIGN-BLOCKED — do not merge. Measured on current master the mechanism
+captures ZERO occludable feeders: the feeder-dispatch (struct 1) count is
+6917 -> 6917 with vs without the per-voxel test, across every zoom (4/8/16)
+and grid (64/96) tried. It is therefore net-negative (adds the per-feeder
+footprint-hull + Hi-Z reads for no cull). The plan's measurement pose
+(167507 visible / 45987 occludable ring) is unreproducible post-#2325
+(feeders now tail-append to struct 1, out of the "Visible" stat); the current
+perf_grid voxel_set scene tops out at ~19370 visible / 6917 feeders and no
+feeder is Hi-Z-occludable. See the NEEDS-DESIGN comment for the full data and
+the descope-vs-sun-space-fallback ruling this needs.
+
+Co-Authored-By: Claude Opus 4.8 (1M context) <noreply@anthropic.com>
+```
+jakildev
+mentioned this pull request
+Jul 29, 2026
+render(metal): most-recent texture bind wins per unit (#2350, #2360)
+#2598
+Merged
+4 tasks done
+jakildev
+mentioned this pull request
+Aug 9, 2026
+fleet/scout: the see-also allowlist licenses 0 of the 5 live Blocked by: (none) — …#N idioms, so #2957 is queue-blocked by its own no-blocker declaration
+#2960
+Closed
+jakildev
+added a commit
+that referenced
+this pull request
+Aug 21, 2026
+render: widen per-voxel occlusion cull domain to shadow-feeder ring (#…
+…
+6a45208
+```
+…2298)
+
+Replace the #1812 visibleIsoBounds early-return in voxelOccludedByHiZ with
+a Hi-Z canvas-coverage guard (GLSL + Metal mirror), extending the per-voxel
+occlusion test from the visible viewport to the full shadow-feeder-widened
+canvas. Sound by the trace invariant the architect endorsed on #2278: a
+voxel occluded at every canvas texel it rasters to leaves no trace in
+trixelDistances, and both the visible resolve and the sun-shadow bake consume
+trixelDistances (never voxels), so dropping it is bit-identical for the shadow
+it would have cast too.
+
+DESIGN-BLOCKED — do not merge. Measured on current master the mechanism
+captures ZERO occludable feeders: the feeder-dispatch (struct 1) count is
+6917 -> 6917 with vs without the per-voxel test, across every zoom (4/8/16)
+and grid (64/96) tried. It is therefore net-negative (adds the per-feeder
+footprint-hull + Hi-Z reads for no cull). The plan's measurement pose
+(167507 visible / 45987 occludable ring) is unreproducible post-#2325
+(feeders now tail-append to struct 1, out of the "Visible" stat); the current
+perf_grid voxel_set scene tops out at ~19370 visible / 6917 feeders and no
+feeder is Hi-Z-occludable. See the NEEDS-DESIGN comment for the full data and
+the descope-vs-sun-space-fallback ruling this needs.
+
+Co-Authored-By: Claude Opus 4.8 (1M context) <noreply@anthropic.com>
+```
+jakildev
+mentioned this pull request
+Aug 22, 2026
+docs/render: close out #2298 — trace-invariant record + plan file (impl shipped in #2475)
+#3041
+Merged
+jakildev
+mentioned this pull request
+Sep 7, 2026
+fleet: add assigned Codex workers and opposite-provider review
+#3098
+Merged
+9 tasks done
+Sign up for free
+to join this conversation on GitHub.
+Already have an account?
+Sign in to comment
+Uh oh!
+There was an error while loading. Please reload this page.
+Labels
+fleet:approved
+Fleet reviewer approved — ready for human merge
+fleet:authored-on-macos
+PR was authored and smoke-tested on macOS Metal backend
+fleet:verified-windows
+Cross-host smoke passed on windows-debug
+1 participant
+Add this suggestion to a batch that can be applied as a single commit.This suggestion is invalid because no changes were made to the code.Suggestions cannot be applied while the pull request is closed.Suggestions cannot be applied while viewing a subset of changes.Only one suggestion per line can be applied in a batch.Add this suggestion to a batch that can be applied as a single commit.Applying suggestions on deleted lines is not supported.You must change the existing code in this line in order to create a valid suggestion.Outdated suggestions cannot be applied.This suggestion has been applied or marked resolved.Suggestions cannot be applied from pending reviews.Suggestions cannot be applied on multi-line comments.Suggestions cannot be applied while the pull request is queued to merge.Suggestion cannot be applied right now. Please check back later.
+You can’t perform that action at this time.

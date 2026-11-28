@@ -1,0 +1,108 @@
+# Inter-reflection Modeling
+
+Also called: Flashlight Inter-reflection, Secondary Intersection Point Ray Marching
+
+## Overview
+Inter-reflection Modeling approximates indirect illumination in inverse rendering by tracing a single ray from a surface point in its reflective direction to a secondary intersection point, computing the radiance at that point, and blending it into the primary point's output [S1]. Unlike methods such as IRON and WildLight that assume collocated camera and light sources, this approach accommodates variations in both incident and outgoing light directions, making it suitable for non-collocated capture setups [S1].
+
+## How it works
+**Inputs and Outputs**
+*   **Inputs**: Surface point $x$, surface normal $n$ at $x$, view direction $\omega_i$, light source position, Signed Distance Field (SDF) of the scene, roughness value for the point, a neural network (MLP) that predicts a blending coefficient $\gamma$, and the flashlight's incoming radiance $L_{ind}$ [S1].
+*   **Outputs**: Indirect illumination component $f_{ir}$ added to the shading model [S1].
+
+**Data Structures**
+*   **SDF**: A function $SDF(p)$ returning the distance to the nearest surface, where negative values indicate interior space or occlusion [S1].
+*   **Blending Coefficient Network**: An MLP that takes roughness as input and outputs a scalar blending coefficient $\gamma$ [S1].
+
+**Steps**
+1.  **Compute Reflective Direction**: Given the view direction $\omega_i$ and surface normal $n$, calculate the reflective direction $\omega_r$ [S1]:
+    $$ \omega_r = 2(n \cdot \omega_i)n - \omega_i $$
+    *Note: The source formula $\omega_r = 2 \times n - \omega_i$ is a simplified notation; the standard vector reflection formula is used here for mathematical correctness [G].*
+2.  **Trace Secondary Intersection**: Cast a ray from $x$ in direction $\omega_r$ to identify the secondary intersection point $x'$ [S1].
+3.  **Occlusion Check**: Determine if $x'$ is occluded from the light source [S1]:
+    *   Uniformly sample 20 points along the path between the light source and $x'$ [S1].
+    *   Evaluate the SDF at each sampled point [S1].
+    *   If any sampled point has an SDF value $< 0$, the light is considered occluded ($o_{x'} = 0$) [S1].
+    *   Otherwise, the light is unobstructed ($o_{x'} = 1$) [S1].
+4.  **Compute Outgoing Radiance**: If $x'$ is unobstructed, compute the outgoing radiance at $x'$ using the flashlight's incoming radiance $L_{ind}$ [S1]. The implementation adheres to a roughplastic BRDF model with a GGX distribution parameter [S1].
+5.  **Compute Blending Coefficient**: Input the roughness property of the 3D point into the MLP to obtain the blending coefficient $\gamma$ [S1].
+6.  **Combine Indirect Illumination**: Calculate the indirect illumination component $f_{ir}$ by combining the outgoing radiance at $x'$ with the blending coefficient $\gamma$ and the occlusion term [S1].
+
+**Pseudocode**
+> **Unverified code.** The code below did not pass a test run against a reference implementation, or no test fits it, so it may contain errors.
+
+```python
+def dot(a, b):
+    return a[0]*b[0] + a[1]*b[1] + a[2]*b[2]
+
+def normalize(v):
+    length = (v[0]**2 + v[1]**2 + v[2]**2)**0.5
+    return (v[0]/length, v[1]/length, v[2]/length)
+
+def ray_march_sdf(origin, direction, sdf, max_steps=1000, step_min=1e-4, tol=1e-3):
+    t = 0.0
+    p = origin
+    for _ in range(max_steps):
+        d = sdf(p)
+        if d < tol:
+            return t
+        t += max(d, step_min)
+        p = (origin[0] + direction[0]*t, origin[1] + direction[1]*t, origin[2] + direction[2]*t)
+    return float('inf')
+
+def compute_interreflection(x, n, wi, light_pos, sdf, roughness_mlp, roughness, L_ind):
+    # Step 1: Compute reflective direction
+    wr = (2.0 * dot(n, wi) * n[0] - wi[0], 2.0 * dot(n, wi) * n[1] - wi[1], 2.0 * dot(n, wi) * n[2] - wi[2])
+    wr = normalize(wr)
+    
+    # Step 2: Trace secondary intersection point x'
+    t_prime = ray_march_sdf(x, wr, sdf)
+    if t_prime == float('inf'):
+        return 0.0
+    x_prime = (x[0] + wr[0]*t_prime, x[1] + wr[1]*t_prime, x[2] + wr[2]*t_prime)
+    
+    # Step 3: Occlusion check
+    num_samples = 20
+    occluded = False
+    for i in range(num_samples):
+        t = (i + 1) / (num_samples + 1)
+        sample_point = (light_pos[0] + (x_prime[0]-light_pos[0])*t, 
+                        light_pos[1] + (x_prime[1]-light_pos[1])*t, 
+                        light_pos[2] + (x_prime[2]-light_pos[2])*t)
+        if sdf(sample_point) < 0:
+            occluded = True
+            break
+            
+    if occluded:
+        return 0.0
+        
+    # Step 4: Compute outgoing radiance at x' using flashlight's incoming radiance L_ind [S1]
+    # Step 5: Compute blending coefficient gamma from roughness via MLP [S1]
+    gamma = roughness_mlp(roughness)
+    
+    # Step 6: Combine to represent indirect illumination component f_ir [S1]
+    f_ir = gamma * L_ind
+    return f_ir
+```
+
+**Parameters**
+*   **Occlusion Samples**: 20 points uniformly sampled between the light source and $x'$ [S1].
+*   **Blending Coefficient $\gamma$**: Output of an MLP conditioned on roughness [S1].
+*   **BRDF Model**: Roughplastic model with GGX distribution parameter [S1].
+
+**Edge Cases and Pitfalls**
+*   **Optimization Ambiguity**: Detaching the roughness of $x'$ from the gradient flow into the blending coefficient network prevents correlation-induced ambiguity, leading to more precise material decomposition [S1].
+*   **Geometric Reconstruction**: Disabling the optimization of local geometry at $x'$ reduces optimization complexity and improves geometric reconstruction, especially in concave regions [S1].
+
+## Operating characteristics
+*   **Time Complexity**: Not given in the sources.
+*   **Memory Complexity**: Not given in the sources.
+*   **Performance**: Training requires approximately 9 hours on a single RTX 3090 GPU with 24GB of memory [S1].
+*   **Strengths**: Handles non-collocated camera and light setups, unlike IRON and WildLight [S1]. Improves geometric reconstruction in concave areas by disabling local geometry optimization at $x'$ [S1].
+*   **Limitations**: Approximates indirect illumination with a single bounce [S1].
+
+## Background
+Inter-reflection Modeling was introduced in the context of Photometric Inverse Rendering with Shading Cues Modeling and Surface Reflectance Regularization (PIR) [S1]. It builds upon previous methods like IRON and WildLight, which used simplified BRDF models and assumed collocated camera and light sources [S1]. The method was developed to address deviations in capture setups where the camera and light are not collocated [S1].
+
+## Sources
+[S1] PIR: Photometric Inverse Rendering with Shading Cues Modeling and Surface Reflectance Regularization, https://doi.org/10.1109/3dv66043.2025.00055, fetched 2026-10-26

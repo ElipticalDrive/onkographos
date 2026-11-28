@@ -1,0 +1,36 @@
+# Hardware-Assisted Projection
+## Overview
+Hardware-Assisted Projection is a family of volume rendering techniques that project 3D geometric primitives onto the 2D image plane to leverage the graphics pipeline's rasterization and blending hardware [S1, book]. It addresses the performance limitations of software-based raycasting for unstructured meshes by sorting cells and utilizing hardware-accelerated compositing [S1, book]. Unlike sibling methods that may use local sorting, additive accumulation, or specific decomposition strategies, this family relies on explicit depth sorting of cells or triangles to ensure correct alpha blending, or additive accumulation in absorption-only regimes [S1, book].
+## Shared principles
+The family shares the core mechanism of projecting 3D cells into screen space and using hardware rasterization to compute optical properties per pixel [G].
+
+1.  **Sorting**: Cells must be sorted in back-to-front order relative to the viewpoint to ensure correct compositing [S1, book]. The resulting semitransparent triangles are sorted in depth order and then rendered and composited [S1, book].
+2.  **Projection**: 3D vertices are projected to 2D screen space [G]. For tetrahedra, the projection is classified into cases consisting of one to four triangles [S1, book].
+3.  **Integration**: The volume rendering integral is approximated along the viewing ray segment passing through the cell [G]. Values for each triangle vertex are approximated using ray integration through the thickest point of the tetrahedron [S1, book].
+4.  **Hardware Compositing**: The resulting color and opacity values are composited using hardware blending operations in back-to-front order [S1, book]. To avoid artifacts from linear interpolation of opacity, texture mapping is utilized to accelerate opacity interpolation and provide correct per-pixel opacity values [S1, book].
+## Subtopics
+
+### [Hardware-Assisted Polyhedron Projection](1453-hardware-assisted-polyhedron-projection.md)
+Hardware-Assisted Polyhedron Projection is a technique for volume rendering arbitrary unstructured grids composed of convex polyhedral cells by projecting 3D cells into 2D screen space and using hardware rasterization to compute optical properties per pixel. It solves the problem of efficiently rendering complex, non-uniform volumetric data by leveraging the graphics pipeline for scan conversion and compositing, avoiding the memory bandwidth bottlenecks of raycasting. Unlike raycasting, which groups connected cells to exploit coherence, this method disperses connected cells widely to achieve static load balancing in parallel environments. It builds on [Hardware-Assisted Projection](5625-hardware-assisted-projection.md) by providing the specific geometric subdivision and data distribution strategies required for arbitrary convex polyhedra.
+
+### [Hardware-Assisted Projected Tetrahedra](1729-hardware-assisted-projected-tetrahedra.md)
+Hardware-Assisted Projected Tetrahedra (HAPT) is a flexible, highly efficient volume rendering method that adapts the original Projected Tetrahedra (PT) algorithm to exploit programmable graphics hardware. It solves the visibility ordering and rendering bottleneck of irregular tetrahedral meshes by streaming sorted tetrahedra as point primitives, decomposing them into triangles in a geometry shader, and evaluating the volume ray integral per fragment during rasterization. Unlike its sibling [PTINT](1861-tetrahedral-projection-with-partial-pre-integration.md), which requires a two-pass approach with GPU read-back, HAPT performs the entire rendering pipeline in a single GPU pass, eliminating auxiliary data structures and reducing GPU memory consumption.
+
+### [GPU-based Projected Tetrahedra](7484-gpu-based-projected-tetrahedra.md)
+GPU-based Projected Tetrahedra is a method for interactive volume rendering of unstructured tetrahedral data that shifts geometric classification and decomposition from the CPU to the GPU using programmable shaders. It solves the performance bottleneck of traditional Projected Tetrahedra by avoiding redundant projections and pre-processing, allowing interactive viewing of large datasets on desktop hardware. The family includes vertex-shader-based classification approaches introduced by Wylie et al. and fragment-shader-based projection variants introduced by Marroquim et al.. It differs from ray-casting approaches by occupying a substantially smaller memory footprint while achieving competitive frame rates.
+
+### [Absorption-Only Radiography via Unsorted Hexahedron Projection](10255-absorption-only-radiography-via-unsorted-hexahedron-projecti.md)
+This method simulates X-ray radiographs for curvilinear hexahedral meshes by accumulating optical thickness additively, thereby eliminating the need for a global back-to-front visibility sort. It differs from its parent [Hardware-Assisted Projection](5625-hardware-assisted-projection.md) by exploiting the commutative property of addition in the absorption-only regime ($J=0$) to allow unsorted rendering, and from [Hardware-Assisted Projected Tetrahedra](1729-hardware-assisted-projected-tetrahedra.md) by supporting direct projection of hexahedral cells to reduce mesh storage and rendering overhead.
+
+### [Pre-integrated Volume Rendering for Tetrahedra](16501-pre-integrated-volume-rendering-for-tetrahedra.md)
+Hardware-Assisted Projected Tetrahedra Rendering is a volume visualization technique for unstructured data that uses hardware-assisted texture mapping to perform interpolation between vertex colors and opacities, integrating color for use with a volume rendering system. It addresses artifacts, specifically Mach bands, caused by the linear interpolation of opacity in the original Shirley-Tuckman algorithm by employing a texture table for the exponential opacity function. It builds on [Projected Tetrahedra](877-projected-tetrahedra.md) by offloading the non-linear opacity integration to the graphics hardware's texture lookup units, allowing for efficient rendering of colored volumes that require back-to-front sorting.
+
+### Pre-sorted Tetrahedral Rendering
+- **Sorting**: Sort the cells before they are split into tetrahedra [S1, book].
+- **Acceleration**: Utilize 2D texture mapping hardware to accelerate opacity interpolation and provide correct per-pixel opacity values to avoid artifacts [S1, book].
+- **Pitfall**: Can only handle linear transfer functions without artifacts [S1, book].
+
+## Background
+The concept of hardware-assisted projection for volume rendering originated with the need to accelerate unstructured grid visualization [G]. Stein et al. sorted cells before splitting them into tetrahedra and utilized 2D texture mapping hardware to accelerate opacity interpolation [S1, book]. Röttger et al. introduced preintegrated volume rendering to allow for arbitrary transfer functions, creating a 3D texture map approximated using two-dimensional texture mapping [S1, book].
+## Sources
+[S1] Volume Visualization and Volume Graphics, https://www3.cs.stonybrook.edu/~mueller/teaching/cse332/volvisChapter.pdf, fetched 2026-10-28 (book)

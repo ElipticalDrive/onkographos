@@ -1,0 +1,415 @@
+--- v001.md
++++ v002.md
+@@ -4,211 +4,227 @@
+ 
+ ## Overview
+-A hardware-optimized parallel implementation of the radix sort algorithm for GPUs that uses a 4-way (2-bit) radix to reduce the number of passes by half compared to binary-radix sort, eliminating restrictions on key space and supporting arbitrary data types [S1, unofficial]. It lifts limitations on element count and precision compared to previous GPU sorters by processing two bits per iteration across four digits simultaneously [S1, unofficial]. Unlike [8-bit Radix Sort](2599-8-bit-radix-sort.md) which processes 8 bits per pass, this method processes 2 bits per pass, requiring more passes but reducing the complexity of the counting and mapping logic per pass, and unlike [Subgroup-based Radix Sort Partition](3368-subgroup-based-radix-sort-partition.md) which relies on hardware subgroup primitives, this method uses a block-based shared memory approach compatible with older GPU architectures [S1, unofficial].
++A hardware-optimized parallel implementation of the radix sort algorithm for GPUs that processes two bits per iteration (radix 4) to sort elements, lifting limitations on element count and precision compared to previous GPU sorters [S1, unofficial]. It reduces the number of passes by half compared to binary-radix sort, eliminating restrictions on key space and supporting arbitrary data types [S1, unofficial]. Unlike [8-bit Radix Sort](2599-8-bit-radix-sort.md) which processes one bit at a time, this method clusters numbers with the same radix combination bits inside a block to enable coalesced memory writing, addressing the non-coalesced scattering bottleneck of element-wise mapping [S1, unofficial].
+ 
+ ## How it works
+-The algorithm is composed of four major subsystems: the order checking function, an implicit four-way radix counting, the prefix sum positioning, and the final mapping [S1, unofficial]. Floating point values are first mapped to integers as proposed by Terdiman [Ter00] before sorting [S1, unofficial]. Sorting is performed in $\lceil n/2 \rceil$ passes, each processing a 2-bit radix pair, from the least significant bit to the most significant one, where $n$ is the number of bits in the key [S1, unofficial].
+-
+-### Inputs and Outputs
+-*   **Input:** An array of $N$ keys (32-bit integers or mapped floats) and an optional array of values/indices to be permuted in parallel.
+-*   **Output:** The keys and associated data sorted in ascending order.
+-
+-### Data Structures
+-*   **Input Array:** Array of $N$ elements.
+-*   **Block Sum Array:** Array of size $\lceil N / \text{blockSize} \rceil \times 4$. Stores the total count of each of the 4 digits (0-3) for each block.
+-*   **Local Prefix Sum Array:** Array of size $N$. Stores the local prefix sum for each element based on its digit. Only one array is used instead of four separate arrays to reduce memory requirements [S1, unofficial].
+-*   **Shared Memory Block:** Size `blockSize` elements. Used for in-block shuffling and local counting.
+-
+-### Parameters
+-*   **Radix width:** 2 bits (4-way) [S1, unofficial].
+-*   **Key type:** 32-bit keys, arbitrary $n$-bit numerical values, negative numbers, floating-point numbers, indices, pointers, and general records [S1, unofficial].
+-*   **blockSize:** 256 elements per block (128 threads, each handling 2 inputs) [S1, unofficial].
+-*   **bit:** Loop variable for radix sort stages, iterating from 0 to 30 in steps of 2 [S1, unofficial].
+-*   **Warp size:** 32 threads (assumed for coalesced access) [S1, unofficial].
+-
+-### Steps
+-1.  **Initialization:** Initialize `blockSize` to 256. Allocate and initialize 4 block-sum arrays on GPU memory [S1, unofficial].
+-2.  **Loop:** Iterate `bit` from 0 to 30 (inclusive), incrementing by 2.
+-3.  **Order Check:** At the beginning of each loop iteration, check if the current input array is already sorted using an optimized reduction operation [S1, unofficial]. If all elements are in order, terminate the loop immediately [S1, unofficial].
+-4.  **Blocking:** Divide the input data into equal blocks of size `blockSize` [S1, unofficial].
+-5.  **Parallel Block Processing:** For all blocks in parallel:
+-    a.  **Counting:** Generate a bit mask for each of the four possible digits (0-3) corresponding to the current 2-bit radix pair extracted from the input data [S1, unofficial].
+-    b.  **Local Scan:** Apply shared-memory parallel optimized prefix sum computation simultaneously on the four counting bit combinations to compute local frequencies [S1, unofficial].
+-    c.  **Store Local Prefix:** Store the total count of every element in a block in global memory using a single 'local prefix sum' array of the same size as the input, outputting the corresponding local prefix for each digit to avoid using four separate arrays [S1, unofficial].
+-    d.  **In-block Shuffle:** Perform in-block shuffling in shared memory to reorder numbers so that those with the same radix combination bits are clustered together in sorted order [S1, unofficial]. This enables coalesced global writing [S1, unofficial].
+-    e.  **Output Block Sums:** Output the total number of each scan path (count of each digit 0-3) to the block sum array [S1, unofficial].
+-6.  **Global Prefix Sum:** Perform scan prefix sum on the block sum array to compute global positions [S1, unofficial].
+-7.  **Mapping:** Compute the new position for elements of radix sort and map the element to the right position using the derived indices [S1, unofficial].
+-    *   The sorted position is calculated as:
+-        $$ \text{Sorted Position} = P_d[n] + m $$
+-        Where $P_d[n]$ is the prefix block sum for digit $d$ at block $n$, and $m$ is the local prefix sum value for the element in that block [S1, unofficial].
+-8.  **Increment:** Increment `bit` by 2.
+-
+-### Pseudocode
++**Inputs and Outputs:**
++- Input: An array of $N$ keys (32-bit integers, floats, or mapped floats) and an optional array of values/indices to be permuted in parallel.
++- Output: The keys and associated data sorted in ascending order.
++
++**Data Structures:**
++- `blockSize`: Integer, typically 256 (128 threads $\times$ 2 elements per thread).
++- `blockSumArray`: Array of size $\lceil N / blockSize \rceil \times 4$. Stores the total count of elements for each of the 4 digits (0-3) per block.
++- `localPrefixSumArray`: Array of size $N$. Stores the local prefix sum for the specific digit of each element.
++- `sharedMemory`: Size sufficient for `blockSize` elements.
++
++**Parameters:**
++- `radixWidth`: 2 bits.
++- `keyBits`: 32 bits (loop runs for bits 0 to 30).
++- `blockSize`: 256.
++- `threadsPerBlock`: 128.
++
++**Algorithm Steps:**
++
++1.  **Preprocessing (Floating Point):** If keys are floating-point numbers, map them to integers using the method by Terdiman [Ter00] to preserve order for negative and positive numbers.
++2.  **Initialization:**
++    - Set `blockSize = 256`.
++    - Allocate `blockSumArray` on GPU memory and initialize to zero.
++    - Allocate `localPrefixSumArray` on GPU memory.
++3.  **Main Loop:** Iterate `bit` from 0 to 30 (inclusive), incrementing by 2.
++    1.  **Order Check:** Perform a parallel reduction to check if the current input array is already sorted. If sorted, terminate the loop immediately [S1, unofficial].
++    2.  **Block Division:** Divide the input data into equal blocks of size `blockSize`.
++    3.  **Parallel Block Processing (for all blocks in parallel):**
++        1.  **Load Data:** Load `blockSize` elements into shared memory (`s_data`).
++        2.  **Bit Extraction:** Each thread extracts the 2-bit radix pair from its assigned elements at the current `bit` position.
++        3.  **Counting:** Initialize four counting arrays `cnt[0..3]` in shared memory. For each element, set the corresponding counter bit to 1 if the extracted radix matches the digit index.
++        4.  **Local Prefix Sum:** Perform a parallel optimized prefix sum (scan) on the four counting combinations simultaneously in shared memory. This computes the local frequency and position of each element within its block relative to its digit [S1, unofficial].
++        5.  **Shuffle:** Reorder elements in shared memory so that elements with the same radix digit are clustered together in sorted order. This ensures that subsequent global writes are coalesced [S1, unofficial].
++        6.  **Store Local Prefix:** Write the local prefix sum value for each element to `localPrefixSumArray` at the element's original global index.
++        7.  **Store Block Sum:** Write the total count of elements for each of the 4 digits to the corresponding entry in `blockSumArray` for this block.
++    4.  **Global Prefix Sum:** Perform a parallel prefix sum (scan) on the `blockSumArray` to compute global starting positions for each block and digit combination.
++    5.  **Mapping:**
++        - For each element, calculate its final sorted position using the formula:
++          $$ \text{Sorted Position} = P_d[n] + m $$
++          Where:
++          - $d$ is the 2-bit radix digit of the element.
++          - $n$ is the block index containing the element.
++          - $P_d[n]$ is the global prefix block sum for digit $d$ at block $n$ (from the global scan of `blockSumArray`).
++          - $m$ is the local prefix sum value for the element (from `localPrefixSumArray`).
++        - Permute the elements from the shared memory shuffle buffer to their calculated global positions in the output array. This mapping is cluster-wise, ensuring coalesced global memory writes [S1, unofficial].
++    6.  **Swap Buffers:** If not the last pass, swap input and output arrays.
++    7.  Increment `bit` by 2.
++
++**Pseudocode:**
+ 
+ ```python
+ def four_way_radix_sort(keys, values, n):
+-    """
+-    Sorts keys and permutes values in parallel using 4-way radix sort.
+-    keys: list of integers (or mapped floats)
+-    values: list of associated data
+-    n: number of elements
+-    """
+     blockSize = 256
++    threadsPerBlock = 128
+     numBlocks = (n + blockSize - 1) // blockSize
+     
+-    # Allocate block-sum array: size numBlocks * 4
+-    # Each block stores counts for digits 0, 1, 2, 3
+-    block_sums = [0] * (numBlocks * 4)
+-    
+-    # Local prefix sum array: size n
+-    local_prefix_sums = [0] * n
+-    
+-    # Loop for each 2-bit radix pair (bits 0-1, 2-3, ..., 30-31)
++    # Allocate memory
++    blockSumArray = allocate_gpu_array(numBlocks * 4, dtype=int)
++    localPrefixSumArray = allocate_gpu_array(n, dtype=int)
++    outputKeys = allocate_gpu_array(n, dtype=int)
++    outputValues = allocate_gpu_array(n, dtype=int)
++    
++    # Initialize blockSumArray to 0
++    clear_gpu_array(blockSumArray)
++    
++    # Current and next buffers
++    currKeys = keys
++    currValues = values
++    nextKeys = outputKeys
++    nextValues = outputValues
++    
+     for bit in range(0, 31, 2):
+-        # 1. Order Checking
+-        if is_sorted(keys, n):
++        # 1. Order Check
++        if is_sorted(currKeys, n):
+             break
+             
+-        # 2. Process Blocks in Parallel
+-        for block_id in range(numBlocks):
+-            start_idx = block_id * blockSize
+-            end_idx = min(start_idx + blockSize, n)
+-            block_size_actual = end_idx - start_idx
+-            
+-            # Shared memory simulation for the block
+-            s_data_keys = keys[start_idx : end_idx]
+-            s_data_vals = values[start_idx : end_idx]
+-            
+-            # Counters for digits 0-3
+-            cnt = [0] * 4
+-            
+-            # Extract digits and count
+-            for i in range(block_size_actual):
+-                # Extract 2 bits from key
+-                digit = (keys[start_idx + i] >> bit) & 0x3
+-                cnt[digit] += 1
++        # 2. Parallel Block Processing
++        for block in range(numBlocks):
++            startIdx = block * blockSize
++            endIdx = min(startIdx + blockSize, n)
++            localSize = endIdx - startIdx
++            
++            # Launch kernel for block processing
++            # Kernel arguments: currKeys, currValues, localPrefixSumArray, 
++            #                   blockSumArray, block, bit, localSize
++            
++            # Pseudo-kernel logic for a single block:
++            # shared s_data[256]
++            # shared cnt[4][128] # 4 counters, 128 threads
++            # shared localPos[128]
++            
++            # Load data to shared memory
++            for i in range(localSize):
++                tid = get_thread_id()
++                if tid < localSize:
++                    s_data[tid] = currKeys[startIdx + tid]
++            
++            sync_threads()
++            
++            # Extract bits and count
++            for tid in range(threadsPerBlock):
++                if tid < localSize:
++                    val = s_data[tid]
++                    radix = (val >> bit) & 3 # Extract 2 bits
++                    
++                    # Initialize counters
++                    for b in range(4):
++                        cnt[b][tid] = 1 if b == radix else 0
++            
++            # Parallel Prefix Sum on counters (shared memory scan)
++            # This computes the rank of each element within its digit group
++            parallel_scan_4way(cnt, localSize)
++            
++            # Store local prefix sum for this element
++            if tid < localSize:
++                localPos[tid] = cnt[radix][tid]
++                localPrefixSumArray[startIdx + tid] = localPos[tid]
+                 
++            # Shuffle data in shared memory based on radix
++            # Elements with same radix are grouped together
++            shuffle_shared_memory(s_data, cnt, radix, localSize)
++            
+             # Store block sums
+-            block_sums[block_id * 4 + 0] = cnt[0]
+-            block_sums[block_id * 4 + 1] = cnt[1]
+-            block_sums[block_id * 4 + 2] = cnt[2]
+-            block_sums[block_id * 4 + 3] = cnt[3]
+-            
+-            # Compute local prefix sums for this block
+-            # We need the cumulative count of digits < current digit within the block
+-            # plus the offset from previous blocks (handled later)
+-            # For now, compute local prefix based on order of appearance
+-            local_offsets = [0] * 4
+-            local_prefix_sums_block = [0] * block_size_actual
+-            
+-            for i in range(block_size_actual):
+-                digit = (keys[start_idx + i] >> bit) & 0x3
+-                local_prefix_sums_block[i] = local_offsets[digit]
+-                local_offsets[digit] += 1
++            # Sum up the last element of each counter array
++            for b in range(4):
++                blockSumArray[block * 4 + b] = cnt[b][localSize - 1]
+                 
+-            # Store local prefix sums in global array
+-            for i in range(block_size_actual):
+-                local_prefix_sums[start_idx + i] = local_prefix_sums_block[i]
++            sync_threads()
++            
++            # Write shuffled data to global memory temporarily or keep in shared for final mapping
++            # The algorithm description implies shuffling happens before global write
++            # to enable coalesced writing.
++            for tid in range(localSize):
++                nextKeys[startIdx + tid] = s_data[tid] # Placeholder for shuffled data
++                # Note: Actual implementation might write to a temporary buffer or 
++                # directly to final positions if global offsets are known.
++                # However, global offsets depend on the global scan of blockSumArray.
+                 
+-            # In-block shuffle: reorder s_data_keys and s_data_vals
+-            # so that elements with same digit are clustered
+-            # Create output buffers for the block
+-            s_out_keys = [0] * block_size_actual
+-            s_out_vals = [0] * block_size_actual
+-            
+-            # Pointers for each digit cluster in the output block
+-            digit_pointers = [0] * 4
+-            # Pre-calculate start positions for each digit in the block output
+-            # This requires knowing the counts, which we have in cnt
+-            current_pos = 0
+-            digit_starts = []
+-            for d in range(4):
+-                digit_starts.append(current_pos)
+-                current_pos += cnt[d]
+-                
+-            # Place elements into their clustered positions
+-            # We need to preserve order within the cluster (stability)
+-            # Use the local prefix sum to determine position within cluster
+-            # Actually, the local prefix sum computed above is the index within the cluster
+-            # So position = digit_starts[digit] + local_prefix_sums_block[i]
+-            
+-            for i in range(block_size_actual):
+-                digit = (keys[start_idx + i] >> bit) & 0x3
+-                pos_in_cluster = local_prefix_sums_block[i]
+-                global_pos_in_block = digit_starts[digit] + pos_in_cluster
+-                s_out_keys[global_pos_in_block] = keys[start_idx + i]
+-                s_out_vals[global_pos_in_block] = values[start_idx + i]
+-                
+-            # Copy back to global memory
+-            for i in range(block_size_actual):
+-                keys[start_idx + i] = s_out_keys[i]
+-                values[start_idx + i] = s_out_vals[i]
+-                
+-        # 3. Global Prefix Sum on Block Sums
+-        # Compute prefix sum over the block_sums array
+-        # block_sums is flat array of size numBlocks * 4
+-        # We need to compute the cumulative sum for each digit across blocks
+-        # P_d[n] is the sum of counts of digit d in blocks 0 to n-1
++        # 3. Global Prefix Sum on blockSumArray
++        # Compute prefix sum over blockSumArray to get global offsets
++        global_scan(blockSumArray, numBlocks * 4)
+         
+-        # Initialize prefix sums for each digit
+-        prefix_sums = [0] * 4
+-        
+-        for block_id in range(numBlocks):
+-            for d in range(4):
+-                # The global offset for digit d in block block_id is prefix_sums[d]
+-                # We will use this to compute the final position
+-                # But first, we need to update prefix_sums with the current block's counts
+-                # However, the mapping step uses P_d[n] which is the prefix sum BEFORE block n
+-                # So we compute the position using the current prefix_sums, then update them
+-                
+-                # Calculate global positions for elements in this block
+-                start_idx = block_id * blockSize
+-                end_idx = min(start_idx + blockSize, n)
+-                
+-                for i in range(start_idx, end_idx):
+-                    digit = (keys[i] >> bit) & 0x3
+-                    m = local_prefix_sums[i]
+-                    sorted_pos = prefix_sums[digit] + m
+-                    # Permute keys and values to sorted_pos
+-                    # Note: This requires a temporary array or careful in-place swap
+-                    # For simplicity, we assume a temporary output array is used
+-                    pass 
+-                
+-                # Update prefix sums
+-                for d in range(4):
+-                    prefix_sums[d] += block_sums[block_id * 4 + d]
+-                    
+-        # Final permutation step would go here, moving elements to their sorted_pos
+-        # This is typically done in a parallel kernel
+-        permute_keys_values(keys, values, n, bit)
+-
+-def is_sorted(keys, n):
+-    """
+-    Check if keys are sorted using a parallel reduction.
+-    Returns True if sorted, False otherwise.
+-    """
+-    # Implementation details omitted, relies on optimized reduction
+-    # Compare keys[i] with keys[i+1] for all i
+-    # Reduce results with AND
+-    return True # Placeholder for actual reduction logic
++        # 4. Final Mapping
++        # Calculate final positions and write to nextKeys/nextValues
++        for i in range(n):
++            val = currKeys[i]
++            radix = (val >> bit) & 3
++            block = i // blockSize
++            offset_in_block = i % blockSize
++            
++            # P_d[n] is the global prefix sum for digit d at block n
++            # Note: blockSumArray stores counts. The global scan result 
++            # gives the starting index for each (block, digit) pair.
++            # Let globalOffsets be the result of the scan.
++            # globalOffsets[block * 4 + radix] is the start position for this digit in this block.
++            
++            # m is the local prefix sum (rank within the digit group in the block)
++            # We need to retrieve this. In the block processing step, we stored it in localPrefixSumArray.
++            m = localPrefixSumArray[i]
++            
++            # The global scan of blockSumArray provides the base index.
++            # However, the blockSumArray contains counts. The prefix sum of counts 
++            # gives the starting index.
++            # We need the prefix sum result. Let's assume a function get_global_offset(block, digit)
++            # which returns the value from the scanned blockSumArray.
++            
++            base = get_global_offset(block, radix)
++            finalPos = base + m
++            
++            nextKeys[finalPos] = val
++            nextValues[finalPos] = currValues[i] # Assuming values are permuted similarly
++            
++        # Swap buffers
++        swap(currKeys, nextKeys)
++        swap(currValues, nextValues)
++
++def is_sorted(arr, n):
++    # Optimized reduction to check if arr[i] <= arr[i+1] for all i
++    # Returns True if sorted, False otherwise
++    pass
++
++def parallel_scan_4way(cnt, localSize):
++    # Perform parallel prefix sum on the 4 counting arrays in shared memory
++    # Standard parallel scan algorithm (e.g., Blelloch or Hillis-Steele)
++    # applied to each of the 4 arrays independently
++    pass
++
++def shuffle_shared_memory(s_data, cnt, radix, localSize):
++    # Reorder s_data such that elements with the same radix are contiguous
++    # and sorted by their local rank (cnt[radix][tid])
++    # This requires a scatter operation in shared memory
++    pass
++
++def get_global_offset(block, digit):
++    # Retrieve the value from the globally scanned blockSumArray
++    # blockSumArray[block * 4 + digit] after scan
++    pass
+ ```
+ 
+-### Edge Cases and Pitfalls
+-*   **Non-coalesced scattering:** Non-coalesced scattering during global shuffle reduces efficiency. This is addressed by in-block shuffling to create clusters that allow coalesced writing [S1, unofficial].
+-*   **General Record Sorting:** To handle general record sorting optimally, the method uses index sorting to avoid moving large data structures, exploiting hardware features like instant thread switching and fast random texture access [S1, unofficial].
+-*   **Memory Requirements:** Using a single local prefix sum array instead of four separate arrays reduces memory requirements [S1, unofficial].
+-*   **Redundancy:** Redundancy is minimized and slow global memory access is minimized by using a merging strategy that exploits fast shared-memory as the computational bridge [S1, unofficial].
++**Edge Cases and Pitfalls:**
++- **Non-coalesced Scattering:** Standard radix sort scatters elements to global memory based on individual indices, causing uncoalesced writes. This method uses in-block shuffling to cluster elements with the same radix, enabling coalesced global writes [S1, unofficial].
++- **Floating Point Mapping:** Floating point numbers must be mapped to integers to preserve order. The Terdiman method is used [S1, unofficial].
++- **Block Size:** The block size (256) is chosen to be a multiple of the warp size (32) to ensure coalesced memory access and to hide global memory latency while fitting in shared memory/cache [S1, unofficial].
++- **Order Checking:** The order check is performed at the start of each pass. If the array is already sorted, the loop terminates early, saving passes [S1, unofficial].
+ 
+ ## Operating characteristics
+-*   **Time Complexity:** $O(n \cdot \lceil n_{bits}/2 \rceil)$, where $n_{bits}$ is the number of bits in the key. For 32-bit keys, this is 16 passes.
+-*   **Memory Complexity:** $O(n)$ for input/output arrays, plus $O(n)$ for local prefix sums and $O(N/blockSize \cdot 4)$ for block sums.
+-*   **Performance:** The algorithm outperforms all known GPU-based sorting systems by about a factor of two at the time of publication [S1, unofficial]. It is almost twice as fast as the fastest known approaches on the GPU (Sintorn/Assarsson, Sengupta, Le Grand) [S1, unofficial].
+-*   **Strengths:** Eliminates restrictions on key space, supports arbitrary data types, early termination if sorted, coalesced memory access via in-block shuffling.
+-*   **Limitations:** Requires more passes than 8-bit radix sort, but each pass is simpler. Relies on shared memory, so block size is limited by hardware constraints (e.g., 16KB shared memory).
+-*   **When to use:** When sorting large datasets on GPUs, especially when data types are arbitrary or when early termination is beneficial (e.g., collision detection in evolving systems).
+-*   **When not to use:** When memory bandwidth is extremely constrained and the overhead of multiple passes is prohibitive compared to a single 8-bit pass, or when hardware supports more efficient subgroup-based operations.
++- **Time Complexity:** $O(N \cdot \frac{B}{R})$, where $N$ is the number of elements, $B$ is the number of bits in the key (32), and $R$ is the radix width (2). This results in 16 passes for 32-bit keys.
++- **Memory Complexity:** $O(N)$ for the input/output arrays, plus $O(N/R)$ for the block sum array and $O(N)$ for the local prefix sum array.
++- **Performance:** Outperforms all known GPU-based sorting systems by about a factor of two at the time of publication [S1, unofficial]. It is almost twice as fast as the fastest known approaches (Sintorn/Assarsson, Sengupta, Le Grand) [S1, unofficial].
++- **Strengths:**
++    - Eliminates restrictions on key space and supports arbitrary data types (floats, negatives, pointers) [S1, unofficial].
++    - Reduces the number of passes by half compared to binary-radix sort [S1, unofficial].
++    - Early termination if the array is already sorted [S1, unofficial].
++    - Coalesced global memory writes via in-block shuffling [S1, unofficial].
++- **Limitations:**
++    - Requires shared memory for the in-block shuffle, limiting the maximum block size [S1, unofficial].
++    - The order check adds a small overhead (approx. 0.1% of sorting time) but is negligible [S1, unofficial].
++- **When to Use:** Ideal for GPU-based sorting of large datasets where performance is critical, especially in physics simulations, collision detection, and scenes with thousands of objects or millions of particles [S1, unofficial].
+ 
+ ## Background
+-The paper was submitted to COMPUTER GRAPHICS Forum in February 2009 by Linh Ha, Jens Krüger, and Cláudio T. Silva from the University of Utah [S1, unofficial]. It was developed to address the need for efficient sorting in physics-based simulations for virtual environments and computer games, such as collision detection for thousands of falling chairs, millions of particles, and n-body galaxy problems [S1, unofficial]. It improves upon previous GPU sorting approaches like those in the CUDPP library which used binary-radix sort, and Sintorn/Assarsson which required atomic counting [S1, unofficial].
++The algorithm was presented by Linh Ha, Jens Krüger, and Cláudio T. Silva from the University of Utah in a paper submitted to COMPUTER GRAPHICS Forum in February 2009 [S1, unofficial]. It addresses the challenge of efficient parallel sorting on GPUs, overcoming limitations of previous approaches like CUDPP (binary-radix sort) and Sintorn/Assarsson (atomic counting) [S1, unofficial]. The work was motivated by the need for fast sorting in physics-based simulations for computer games and virtual environments, such as collision detection for falling chairs, particle systems, and n-body galaxy problems [S1, unofficial].
+ 
+ ## Sources

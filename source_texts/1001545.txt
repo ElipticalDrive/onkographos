@@ -1,0 +1,1126 @@
+A live-streaming and compositing engine in Rust, built to be driven equally by a human or an AI agent over MCP. Streams to YouTube or any RTMP target, and provides a virtual camera. - fix(render): build 3D mip chains from the crop, and rebuild them once per change by jeffmhopkins · Pull Request #687 · jeffmhopkins/JStream
+
+fix(render): build 3D mip chains from the crop, and rebuild them once per change by jeffmhopkins · Pull Request #687 · jeffmhopkins/JStream · GitHub
+Skip to content
+You signed in with another tab or window. Reload to refresh your session.
+You signed out in another tab or window. Reload to refresh your session.
+You switched accounts on another tab or window. Reload to refresh your session.
+Dismiss alert
+Conversation
+jeffmhopkins
+commented
+Oct 18, 2026
+•
+edited
+Loading
+Uh oh!
+There was an error while loading. Please reload this page.
+Copy link
+Copy Markdown
+Owner
+Into wave/m3-3. #624 and #643 have landed there, and this PR has the wave merged in.
+What
+This closes #641, the two follow-ups from #624's review of X1's 3D mips.
+A chain is built from the item's crop, not the whole source.
+mips::Region is the crop in whole source texels.
+Level 0 holds those texels one for one: vs_region in mip.wgsl maps the pass onto the region through a small uniform.
+Shape::remap_uv maps the item's UVs and UV bounds into the chain's coordinates.
+Because the chain holds only the cropped texels, no coarse level averages a texel from past the crop into the item. Clamping to the chain's edge also keeps the anisotropic footprint inside the crop.
+An image keeps one chain per crop, the four most recently used (Image::chain).
+An import's chain is rebuilt only for a new frame.
+feat(render): rebuild 3D mips once per source and frame #643, already in the base, gives each Image a change count (generation, bumped by the public Image::mark_changed), and rewrite_rgba8 and render_into mark uploads and layers. A chain rebuilds only when its image's count has moved.
+feat(render): rebuild 3D mips once per source and frame #643 marked a cached import once per cache frame. This PR replaces that with Image::set_frame: the cache counts a change only when it hands the import a new frame, meaning a frame whose FrameSync hold or info, its presentation time included, differs from the last one's (as GpuFrame's equality has it). A platform may hand out one hold for every frame it writes into a texture, as the Windows capture ring does per slot (round 1 B2). The hold is tracked with a Weak, so a reused allocation can't be mistaken for the same hold. This answers feat(render): rebuild 3D mips once per source and frame #643's open question.
+feat(render): rebuild 3D mips once per source and frame #643's an_import_rebuilds_its_mips_once_per_frame is adapted: it hands the import a new frame (a new hold on the same texture) each cache frame, and still checks one build per new frame across two mixes.
+An import the caller keeps outside the cache is rebuilt only when the caller calls Image::mark_changed, as README step 2 says. The engine imports only through the cache (jstream-core's snapshot.rs).
+Tests (tests/three_d.rs, plus place::tests::a_3d_items_region_is_its_crops_texels):
+a_3d_items_region_is_its_crops_texels: the region is the crop's whole texels, carried as integers from the item's crop (Shape::crop, round 1 B1). At 1920×1080, columns 63..241 and rows 7..69 give (63, 7, 178, 62), and every whole left and top edge comes out as itself.
+golden_3d_a_cropped_item_minified_shows_nothing_past_its_crop: a floor with an off-grid crop of a 512² source, green inside the crop and red outside, minified onto coarse levels. It checks that no covered pixel shows more red than the background. Before the fix it showed red 160.
+a_layer_rebuilds_its_mips_once_per_change: two items and two calls build the chain once, and after render_into changes the layer it rebuilds once and shows the new content.
+an_import_rebuilds_its_mips_only_for_a_new_frame: through the cache, the same frame doesn't rebuild. A new frame in the same texture does, under a new hold and under the same hold with a later presentation time.
+each_crop_gets_its_own_chain.
+The CPU reference's bilinear samples are now clamped to the crop, as the chain is. With that, D cropped measures 2.8 on lavapipe (it was 6.6), and its limit tightens from 8 to 5.
+Docs: the render README's Purpose, Design (step 2 and the resources table) and Testing (the goldens table and the further tests) are updated, and the open question is removed now that this answers it. The ARCH › GPU pipeline sentence is updated too.
+Why
+#641 found two problems in #624. Texels just past a crop bled into a cropped 3D item's edge at coarse levels. And layers and imports were rebuilt on every call that drew them, against decision 5's "once per source and frame".
+Not run / not verified
+Run:
+cargo test -p jstream-render (161 lib tests passed, on lavapipe, after the feat(render): rebuild 3D mips once per source and frame #643 merge);
+cargo clippy -p jstream-render --all-targets --all-features -D warnings;
+cargo fmt, cargo xtask docs check (ok, with the 7 warnings already there).
+Not run:
+any hardware GPU, Windows (D3D12 or WARP) or macOS. The new limits were calibrated on lavapipe only, as feat(render): mips and anisotropic sampling for 3D items (X1 part 2b) #624's were;
+the workspace-wide cargo test;
+the benchmarks. There's no performance claim beyond fewer rebuilds.
+Only if applicable
+Hot-loop change: not measured. Per 3D draw, this adds a short mutex lookup over at most four chains and one Arc clone. Rebuild passes drop from one per call to one per change. Two cases churn, though (fix(render): build 3D mip chains from the crop, and rebuild them once per change #687 round 1 N1). A crop that changes every frame makes a new chain every frame, and five or more distinct crops of one source miss the four-entry list on every lookup. Either way, each draw allocates and builds a chain: a texture with its full mip chain, a uniform buffer, and per-level views and bind groups. The evicted chain is dropped on the render thread. Before this PR, one whole-source chain was reused. Reusing an evicted chain's storage when the region size matches is deferred.
+Bug fix: golden_3d_a_cropped_item_minified_shows_nothing_past_its_crop fails without the crop-built chain (red 160). The rebuild tests were not run against the old per-call rebuild. By reading the old code, a layer drawn by two calls would count two builds, not one.
+https://claude.ai/code/session_011FozW2QGjNvGYbWYwTrPiL
+Generated by Claude Code
+claude
+added 30 commits
+October 17, 2026 23:22
+feat(protocol): the drawn 3D polygon and unplace (X1 part 1, ADR-0050)
+…
+f92c337
+```
+ItemGeometry::drawn_polygon clips the content rectangle to the box and then
+by the near plane w >= 1/256, in the local frame, and returns three to five
+vertices with canvas point, local point, texture coordinate and w, so a
+compositor can interpolate perspective-correctly. ItemGeometry::unplace is
+the inverse map. Pure functions with no wire form; no caller yet.
+
+Co-Authored-By: Claude Opus 5.5 (1M context) <noreply@anthropic.com>
+Claude-Session: https://claude.ai/code/session_011FozW2QGjNvGYbWYwTrPiL
+```
+docs(progress): X1 part 1 is #611
+…
+02bbba0
+```
+Co-Authored-By: Claude Opus 5.5 (1M context) <noreply@anthropic.com>
+Claude-Session: https://claude.ai/code/session_011FozW2QGjNvGYbWYwTrPiL
+```
+Merge remote-tracking branch 'origin/claude/project-thread-b8rnvf-x1-…
+…
+e57beb4
+```
+…3d-polygon' into claude/project-thread-b8rnvf-x1-3d-render
+
+# Conflicts:
+#	README.md
+#	docs/progress.toml
+#	docs/verified.toml
+```
+feat(render): draw 3D items with w and edge coverage (X1 part 2, ADR-…
+…
+ce92f98
+```
+…0050)
+
+The compositor draws a geometry item with non-neutral 3D from
+ItemGeometry::drawn_polygon: clip position (ndc * w, 0, w), so texture
+coordinates interpolate perspective-correctly, and analytic edge coverage
+clamp(d + 0.5, 0, 1) with the polygon pushed out a pixel through unplace.
+2D items keep their quad, w = 1 and no edge lines, so their goldens are
+unchanged. jstream-protocol gains ItemGeometry::drawn_vertex, the vertex of
+one local point, for the pushed-out corners.
+
+Goldens for spike S5's scenarios A, B, D and E against a supersampled CPU
+reference. Mips and anisotropic sampling (scenario C) are a follow-up.
+
+Co-Authored-By: Claude Opus 5.5 (1M context) <noreply@anthropic.com>
+Claude-Session: https://claude.ai/code/session_011FozW2QGjNvGYbWYwTrPiL
+```
+fix(protocol): decide edge-on by the plane's facing, not an area (#611 …
+…
+70fcd7b
+```
+…review)
+
+B1: in f32 a quarter turn leaves a sliver whose area grows with the item,
+so a canvas-sized item turned or tilted exactly 90 degrees returned a
+polygon thousands of pixels tall while unplace returned none.
+drawn_polygon and unplace now both return none when the plane's unit
+normal has |z| under 1e-6, which does not depend on the item's size: the
+plane passes through the viewer with perspective, or is side-on without.
+MIN_AREA only drops polygons too small to see.
+
+Co-Authored-By: Claude Opus 5.5 (1M context) <noreply@anthropic.com>
+Claude-Session: https://claude.ai/code/session_011FozW2QGjNvGYbWYwTrPiL
+```
+Merge branch 'claude/project-thread-b8rnvf-x1-3d-polygon' into claude…
+…
+9cebbe9
+```
+…/project-thread-b8rnvf-x1-3d-render
+
+# Conflicts:
+#	crates/jstream-protocol/src/geometry/drawn/tests.rs
+#	docs/verified.toml
+```
+docs(render): 3D drawing in the render README and ARCH, X1 part 2 is #…
+…
+a2f0817
+```
+…622
+
+Co-Authored-By: Claude Opus 5.5 (1M context) <noreply@anthropic.com>
+Claude-Session: https://claude.ai/code/session_011FozW2QGjNvGYbWYwTrPiL
+```
+feat(render): mips and anisotropic sampling for 3D items (X1 part 2b,…
+…
+1b1eef3
+```
+… ADR-0050)
+
+A source drawn by a 3D item gets a mip chain on its Image, made the
+first time: Rgba16Float premultiplied linear down to 1x1, level 0 copied
+texel for texel (imports converted as the composite shader would), each
+level a linear 2x2 average of the one above. It is rebuilt at most once
+per render call, an upload only after rewrite_rgba8, a layer or an import
+every call that draws it in 3D. 3D items sample it trilinearly with 16x
+anisotropy. Sources never placed in 3D get no chain.
+
+Adds scenario C's golden (a floor tilted 75 degrees from a 512^2 source)
+and a test that a rewritten upload rebuilds its chain.
+
+Co-Authored-By: Claude Opus 5.5 (1M context) <noreply@anthropic.com>
+Claude-Session: https://claude.ai/code/session_011FozW2QGjNvGYbWYwTrPiL
+```
+docs(render): mips in the render README and ARCH, X1 part 2b is #624
+…
+de2b3a5
+```
+Co-Authored-By: Claude Opus 5.5 (1M context) <noreply@anthropic.com>
+Claude-Session: https://claude.ai/code/session_011FozW2QGjNvGYbWYwTrPiL
+```
+docs(protocol): notes that cover the whole drawn-polygon change (#611 …
+…
+8c0c139
+```
+…review r2)
+
+B2: the five sections are re-verified with notes covering the PR's whole
+change, not only the edge-on fix. N3: the README lists the 0.01 px^2
+floor. The facing doc says how close to a quarter turn edge-on is, and the
+edge-on test checks that items near a quarter turn still draw.
+
+Co-Authored-By: Claude Opus 5.5 (1M context) <noreply@anthropic.com>
+Claude-Session: https://claude.ai/code/session_011FozW2QGjNvGYbWYwTrPiL
+```
+fix(render): clamp a 3D item's fringe UVs to its content (#622 review)
+…
+b7f9f9c
+```
+B1: ARCH's still-outside list names decision 5's mips and anisotropic
+sampling instead of 3D. N1: a pushed-out fringe pixel extrapolated its UV
+past the crop or what fill clips; the vertex now carries the unpushed
+polygon's UV bounds and the shader clamps to them, sampling with the
+unclamped UV's gradients. 2D items' bounds never clamp. New golden: a
+cropped item's edges (7.4 with the clamp, 9.3 without, limit 8).
+
+Co-Authored-By: Claude Opus 5.5 (1M context) <noreply@anthropic.com>
+Claude-Session: https://claude.ai/code/session_011FozW2QGjNvGYbWYwTrPiL
+```
+Merge branch 'claude/project-thread-b8rnvf-x1-3d-polygon' into claude…
+…
+08c0048
+```
+…/project-thread-b8rnvf-x1-3d-render
+
+# Conflicts:
+#	docs/verified.toml
+```
+Merge #622 round-1 fixes into part 2b (mips)
+…
+81e02f1
+```
+Brings in the UV clamp, 104-byte vertex, ARCH B1 and the D cropped golden.
+With mips, the fragment samples at the clamped UV with implicit derivatives:
+lavapipe filters textureSampleGrad isotropically, which lost the anisotropy
+(scenario C 18 instead of 6.2). ARCH's still-outside list drops mips;
+render_image's step reference follows the renumbering.
+
+Co-Authored-By: Claude Opus 5.5 (1M context) <noreply@anthropic.com>
+Claude-Session: https://claude.ai/code/session_011FozW2QGjNvGYbWYwTrPiL
+```
+docs(render): mips rebuild per call; note crop bleed (review N1, N2)
+…
+b142490
+```
+Co-Authored-By: Claude Opus 5.5 (1M context) <noreply@anthropic.com>
+Claude-Session: https://claude.ai/code/session_011FozW2QGjNvGYbWYwTrPiL
+```
+docs(render): clamped derivatives also shift the fringe's quad neighb…
+…
+6469b44
+```
+…ours (#624 review N4)
+
+Derivatives are taken across a 2x2 quad, so an inside pixel sharing a quad with a
+clamped fringe pixel also gets a shortened derivative: about one row along a 3D item's
+edge, not the fringe pixels alone. Comment only.
+
+Co-Authored-By: Claude Opus 5.5 (1M context) <noreply@anthropic.com>
+Claude-Session: https://claude.ai/code/session_011FozW2QGjNvGYbWYwTrPiL
+```
+docs: word #624's composite.wgsl stamps against the base, not the N4 …
+…
+f7fcf29
+```
+…comment (review B1)
+
+The N4 restamp's notes said "No shader code changed", true of 6469b44 alone but not of the
+PR, which samples at the clamped UV with implicit derivatives (was textureSampleGrad). The
+three entries are re-verified with notes on the PR's whole change to the file, then N4's
+comment. Done by restoring the ledger from before 6469b44 (only these three entries
+differ) and verifying the three entries it leaves stale: --renote compares against
+wave/m3-3's merge base and would rewrite the whole stack's entries.
+
+Co-Authored-By: Claude Opus 5.5 (1M context) <noreply@anthropic.com>
+Claude-Session: https://claude.ai/code/session_011FozW2QGjNvGYbWYwTrPiL
+```
+fix(render): build 3D mip chains from the crop, and rebuild them once…
+…
+92bbbdf
+```
+… per change
+
+#641, from #624's review. A 3D item's chain was built from the whole
+source, so its coarse levels and the anisotropic footprint pulled texels
+from past the crop into the item's edge. A chain is now of the item's
+crop: level 0 holds the cropped texels one for one (Region, vs_region),
+and the item's UVs and bounds are mapped into it. An image keeps a chain
+per crop, the four most recently used.
+
+A layer's or an import's chain was rebuilt on every call that drew it.
+Images now carry a change count, bumped by rewrite_rgba8, render_into and
+the cache giving an import a new frame, and a chain rebuilds only when
+it moved, as ADR-0050 decision 5 asks (once per source and frame).
+
+The 3D reference now clamps its samples to the crop as the chain does,
+so D cropped measures 2.8 (limit tightened from 8 to 5). New tests: a
+minified cropped floor shows none of a red border past its crop (red 160
+before), a layer builds once for two items and two calls and once more
+per change, an import rebuilds for a new frame only, and two crops get a
+chain each.
+
+Closes #641
+
+Co-Authored-By: Claude Opus 5.5 (1M context) <noreply@anthropic.com>
+Claude-Session: https://claude.ai/code/session_011FozW2QGjNvGYbWYwTrPiL
+```
+Merge remote-tracking branch 'origin/wave/m3-3' into claude/project-t…
+…
+d5d2ca9
+```
+…hread-b8rnvf-x1-3d-polygon
+
+# Conflicts:
+#	README.md
+#	docs/progress.toml
+#	docs/verified.toml
+```
+docs: re-verify the protocol sections after merging wave/m3-3
+…
+7b457aa
+```
+Co-Authored-By: Claude Opus 5.5 (1M context) <noreply@anthropic.com>
+Claude-Session: https://claude.ai/code/session_011FozW2QGjNvGYbWYwTrPiL
+```
+Merge remote-tracking branch 'origin/claude/project-thread-b8rnvf-x1-…
+…
+fb63d88
+```
+…3d-polygon' into claude/project-thread-b8rnvf-x1-3d-render
+
+# Conflicts:
+#	README.md
+#	docs/progress.toml
+#	docs/verified.toml
+```
+Merge remote-tracking branch 'origin/claude/project-thread-b8rnvf-x1-…
+…
+3bea879
+```
+…3d-render' into claude/project-thread-b8rnvf-x1-3d-mips
+
+# Conflicts:
+#	README.md
+#	docs/progress.toml
+```
+Merge remote-tracking branch 'origin/wave/m3-3' into claude/project-t…
+…
+5e97f9b
+```
+…hread-b8rnvf-x1-3d-mips
+```
+Merge remote-tracking branch 'origin/wave/m3-3' into claude/project-t…
+…
+919403d
+```
+…hread-b8rnvf-x1-3d-mips
+
+# Conflicts:
+#	README.md
+#	crates/jstream-protocol/README.md
+#	crates/jstream-protocol/src/geometry/drawn.rs
+#	crates/jstream-protocol/src/geometry/drawn/tests.rs
+#	docs/progress.toml
+#	docs/verified.toml
+```
+docs: re-verify after merging wave/m3-3 into #624
+…
+b16d59e
+```
+Co-Authored-By: Claude Opus 5.5 (1M context) <noreply@anthropic.com>
+Claude-Session: https://claude.ai/code/session_011FozW2QGjNvGYbWYwTrPiL
+```
+Merge remote-tracking branch 'origin/wave/m3-3' into claude/project-t…
+…
+a6949e4
+```
+…hread-b8rnvf-x1-3d-mips
+```
+Merge branch 'claude/project-thread-b8rnvf-x1-3d-mips' into claude/pr…
+…
+f377d56
+```
+…oject-thread-b8rnvf-x1-mips-641
+```
+Merge remote-tracking branch 'origin/wave/m3-3' into claude/project-t…
+…
+d960be1
+```
+…hread-b8rnvf-x1-3d-render
+
+# Conflicts:
+#	README.md
+#	crates/jstream-protocol/README.md
+#	crates/jstream-protocol/src/geometry/drawn.rs
+#	crates/jstream-protocol/src/geometry/drawn/tests.rs
+#	docs/progress.toml
+#	docs/verified.toml
+```
+docs: re-verify after merging wave/m3-3 into #622
+…
+76932b5
+```
+Co-Authored-By: Claude Opus 5.5 (1M context) <noreply@anthropic.com>
+Claude-Session: https://claude.ai/code/session_011FozW2QGjNvGYbWYwTrPiL
+```
+Merge branch 'claude/project-thread-b8rnvf-x1-3d-render' into claude/…
+…
+c493613
+```
+…project-thread-b8rnvf-x1-3d-mips
+
+# Conflicts:
+#	README.md
+#	docs/progress.toml
+#	docs/verified.toml
+```
+docs: re-verify #624's sections after merging #622's head
+…
+e448d7b
+```
+Co-Authored-By: Claude Opus 5.5 (1M context) <noreply@anthropic.com>
+Claude-Session: https://claude.ai/code/session_011FozW2QGjNvGYbWYwTrPiL
+```
+claude
+added 2 commits
+October 24, 2026 12:34
+Merge remote-tracking branch 'origin/wave/m3-3' into claude/project-t…
+…
+812ddc5
+```
+…hread-b8rnvf-x1-mips-641
+
+# Conflicts:
+#	README.md
+#	crates/jstream-render/README.md
+#	crates/jstream-render/src/compositor.rs
+#	crates/jstream-render/src/image.rs
+#	crates/jstream-render/src/mip.wgsl
+#	crates/jstream-render/src/mips.rs
+#	crates/jstream-render/src/place.rs
+#	crates/jstream-render/src/tests/three_d.rs
+#	docs/ARCHITECTURE.md
+#	docs/progress.toml
+#	docs/verified.toml
+```
+docs: verify #687's sections after merging wave/m3-3 (#624's squash)
+…
+9cfd33c
+```
+Co-Authored-By: Claude Opus 5.5 (1M context) <noreply@anthropic.com>
+Claude-Session: https://claude.ai/code/session_011FozW2QGjNvGYbWYwTrPiL
+```
+jeffmhopkins
+enabled auto-merge (squash)
+October 24, 2026 12:37
+jeffmhopkins
+commented
+Oct 24, 2026
+Copy link
+Copy Markdown
+Owner
+Author
+#624 merged as 5873874, so this PR now targets wave/m3-3, with squash auto-merge on.
+The merge commit runs docs merge-main --from wave/m3-3. For the squash, the wave's render, ARCH and progress files are the same as feat(render): mips and anisotropic sampling for 3D items (X1 part 2b) #624's final head 2070a59. I resolved each conflicting file by applying this branch's own diff since feat(render): mips and anisotropic sampling for 3D items (X1 part 2b) #624's bb09025 onto the wave's version with git merge-file, which gave no conflicts. This PR doesn't touch progress.toml.
+The verify commit re-verifies the five sections the merge left stale with --merge. That keeps this PR's notes as they were and adds what the merge changed.
+After the merge, render's lib tests, clippy -D warnings and cargo doc -D warnings are clean, and docs check is ok.
+🤖 Generated with Claude Code
+Generated by Claude Code
+jeffmhopkins
+commented
+Oct 24, 2026
+Copy link
+Copy Markdown
+Owner
+Author
+Review: round 4 at 9cfd33c
+Reviewed the two new commits since round 3 (4bed0b6): 812ddc5, which merges wave/m3-3 at 5873874 (#624's squash), and 9cfd33c, which re-verifies five sections with docs verify --merge. I also re-reviewed the whole diff against the new base wave/m3-3 (merge base 5873874) and read the builder's comment on the retarget. The PR now targets wave/m3-3 and is no longer stacked on #624's branch. 9cfd33c carries session_011FozW2QGjNvGYbWYwTrPiL, as the earlier commits do, and the merge carries no trailer. This reviewer's session isn't among them, so no recusal. No code, README or ADR text changed relative to the base this round, so cargo xtask docs for returns the same rules, sections and ADRs as in rounds 1 to 3. cargo xtask docs check at the head: ok, with the 7 warnings already there.
+Earlier findings:
+B1, B2, B3, B4: still resolved. The code and docs diff against the base is byte for byte the one rounds 2 and 3 passed (below), and B3/B4's ledger cases are covered under the ledger heading.
+N1: still partly addressed (both churn cases documented; reusing evicted storage deferred).
+N4: still open, deferred (README.md:191/:195 of the render crate unchanged).
+N6: still open. --merge keeps the branch's note, so the render#testing body note (docs/verified.toml, ["CRATE-jstream-render#testing"."body"]) still opens with feat(render): draw 3D items with w and edge coverage (X1 part 2) #622's stale lead ("8x8 (16x16 for D)", "C deferred"), labelled as the base's note on tests.rs. Not blocking, for the reasons given in round 3.
+The merge (812ddc5), code: #624's squash changes no render file against the bb09025 this branch was built on. git diff bb09025 5873874 -- crates/jstream-render is empty. Between them only docs/ARCHITECTURE.md (the daemon and macOS crate-map rows, outside gpu-pipeline), crates/jstream-platform/README.md and macOS/Linux/AAC files differ. The merge conflicted in 11 files because the squash isn't an ancestor of bb09025. I read each resolution with git show --remerge-diff 812ddc5: every render conflict keeps this branch's side, root README.md takes the wave's X1 rows (this PR doesn't edit them), and progress.toml and ARCH match the wave outside the PR's own sentence. The decisive check: git diff 5873874 9cfd33c minus docs/verified.toml is identical, apart from index lines, to git diff bb09025 4bed0b6 minus the ledger. So nothing of #624's was dropped, and the PR's change arrives unaltered.
+The merge, semantics: #624's squash brings no render change. What it adds that render's change-count logic depends on is a second producer, not in this branch's earlier base: #606's Linux DMA-BUF ring (jstream-platform-linux/src/gpu/blit.rs:198, :286-292). Like the Windows ring in round 1's B2, it keeps one Arc<QueueOrder> per slot (4 slots) and returns slot.sync.clone() with each frame's pts from spa::frame_pts (stream.rs:613). Image::set_frame (image.rs:176-186) compares the hold and the info, so a new frame in a reused slot carries a new pts and counts as a change. The README's step 2 states the rule generally ("a platform may reuse a hold for every frame it writes into a texture"), so it holds for Linux too. No semantic conflict. The wave has since moved to 4a999c0 (#722, #743, #652). Those touch no render file, and git merge-tree of the head with the current wave is clean.
+Ledger (docs/verified.toml), entry by entry: I compared the head's 1,634 entries with the base's (5873874), round 3's head (4bed0b6) and the old base (bb09025).
+Same-hash inputs (1,606): every one equals the base's entry exactly, by and note included. That includes the ten render entries round 3 listed as differing (composite.wgsl, lib.rs, tests.rs across ARCH#gpu-pipeline, render#design, render#purpose and render#testing). This is what --merge does (DOCS › Hash-bound verification): it takes the merged side's entry for an input whose hash is unchanged. No wave stamp is dropped or relabelled, and no entry appears or disappears (1,634 on each side).
+Changed-hash inputs (28): all are render inputs, ARCH#gpu-pipeline's body and README, and platform#gpu-frames's dep on ARCH#gpu-pipeline. Every hash equals round 3's, so the merge changed no input this PR stamps. 25 of the 28 notes are round 3's note word for word plus one | merge: … text. The other three are cache.rs in ARCH#gpu-pipeline, render#design and render#purpose. The ledger merge didn't touch them, so they keep round 3's entry unchanged. Rounds 2 and 3 found that those notes cover the PR's whole change to each input, and the change is unchanged. So each restamped note still covers the whole change, not only the merge delta.
+What the restamps replace: the base's entries for these inputs carry feat(render): mips and anisotropic sampling for 3D items (X1 part 2b) #624's note plus feat(render): mips and anisotropic sampling for 3D items (X1 part 2b) #624's own addendum on merging feat(render): draw 3D items with w and edge coverage (X1 part 2) #622's squash. The head's notes keep feat(render): mips and anisotropic sampling for 3D items (X1 part 2b) #624's note as their lead. They drop only that addendum, which describes a merge that changed none of these inputs (their hashes are the same at bb09025 and 5873874). Nothing of feat(render): mips and anisotropic sampling for 3D items (X1 part 2b) #624's change is lost, and nothing is misattributed: the lead still names feat(render): mips and anisotropic sampling for 3D items (X1 part 2b) #624.
+The merge text is one sentence on all five sections. It isn't a stock phrase. It names the squash, 2070a59b, the git merge-file method and refactor(platform-macos): share the CVPixelBuffer read lock between capture and webcams #645. It is also true of each section, because the merge changed nothing in any of their inputs. I checked its claims: render and ARCH files at 5873874 equal 2070a59b (git diff --stat shows only macOS files and the ledger), and no merged commit other than feat(render): draw 3D items with w and edge coverage (X1 part 2) #622 and feat(render): mips and anisotropic sampling for 3D items (X1 part 2b) #624 touches a render file.
+Docs re-verifications:
+ARCH#gpu-pipeline, render#purpose, render#design, render#testing, jstream-platform#gpu-frames: their texts and inputs are unchanged since round 3, where they held. The merge's ARCH edits are crate-map rows outside gpu-pipeline. Still hold.
+N7 · non-blocking · pre-existing ledger note · docs/verified.toml (["ARCH#gpu-pipeline"."file:crates/jstream-render/src/tests.rs"], ["CRATE-jstream-render#purpose"."file:crates/jstream-render/src/tests.rs"])
+Taking the base's same-hash entries brings back #622's agent:claude-x1 notes on these two inputs. They say mips and anisotropy "aren't built", which has been false since #624. Round 2 accepted this PR replacing them. --merge now restores them, as DOCS requires for an input the PR doesn't change. A note that claims content not in the tree is blocking when a PR writes it (#245 r11 B5). This one is the wave's, from before this PR, so it's a follow-up: an issue, or a --renote in the next PR that changes those inputs.
+N8 · non-blocking · PR description
+The description still opens "Stacked on #624 (base: its branch, claude/project-thread-b8rnvf-x1-3d-mips). It moves down the stack as #624 and #622 land." Both have landed, and the base is wave/m3-3. The builder's comment says so, but the description should too.
+Governance / security: only the ledger and the merge changed this round. No hash was typed by hand: every changed-hash entry's hash equals round 3's. No covers, lint, deny, CI or rule change, and governance is green.
+Local runs at 9cfd33c: cargo clippy -p jstream-render --all-targets -- -D warnings: clean. cargo test -p jstream-render (lavapipe): 159 passed, 0 failed. Not run here: hardware GPUs, Windows, macOS, the workspace suite.
+CI at 9cfd33c: pass: fmt, clippy (ubuntu-latest), test (ubuntu-latest), docs, pr-title, governance, lint-deps, gate-test, bench. One superseded run of each was cancelled. Skipped as expected on a PR into a wave: deny, doc, wasm.
+✅ No issues found at 9cfd33c (round 4). Non-blocking: N4, N6, N7, N8.
+Generated by Claude Code
+claude
+added 2 commits
+October 24, 2026 12:59
+Merge remote-tracking branch 'origin/wave/m3-3' into claude/project-t…
+…
+86e127d
+```
+…hread-b8rnvf-x1-mips-641
+
+# Conflicts:
+#	crates/jstream-render/README.md
+#	crates/jstream-render/src/cache.rs
+#	crates/jstream-render/src/compositor.rs
+#	crates/jstream-render/src/image.rs
+#	crates/jstream-render/src/mips.rs
+#	docs/ARCHITECTURE.md
+#	docs/verified.toml
+```
+docs: re-verify #687's sections after merging #643
+…
+66fece3
+```
+The merge keeps #643's Image::mark_changed and generation with #687's
+set_frame semantics (a change only for a new frame), so the notes that
+named Image::changes are rewritten to say so.
+
+Co-Authored-By: Claude Opus 5.5 (1M context) <noreply@anthropic.com>
+Claude-Session: https://claude.ai/code/session_011FozW2QGjNvGYbWYwTrPiL
+```
+jeffmhopkins
+commented
+Oct 24, 2026
+Copy link
+Copy Markdown
+Owner
+Author
+Merged wave/m3-3 after #643 landed (86e127d, docs in 66fece3). Both PRs changed when an image's mip chain gets rebuilt, so here is how I resolved it:
+I kept feat(render): rebuild 3D mips once per source and frame #643's public names: Image::mark_changed and Image::generation (pub(crate)). Each chain's claim compares against generation.
+I kept fix(render): build 3D mip chains from the crop, and rebuild them once per change #687's import rule. ResourceCache::import counts a change through Image::set_frame only for a new frame (a different hold, or different info including the presentation time), never for the same frame shown again. I removed feat(render): rebuild 3D mips once per source and frame #643's per-cache-frame fresh mark. This answers feat(render): rebuild 3D mips once per source and frame #643's open question.
+I adapted feat(render): rebuild 3D mips once per source and frame #643's test an_import_rebuilds_its_mips_once_per_frame so each cache frame gets a new GpuFrame (the same texture under a new hold). It now checks one rebuild per new frame, as before.
+rewrite_rgba8 and render_into still mark uploads and layers. I also combined the README Composite and Testing text, and the ARCHITECTURE gpu-pipeline bullet.
+What I ran locally: 161 jstream-render lib tests pass. clippy, fmt, RUSTDOCFLAGS="-D warnings" cargo doc -p jstream-render --no-deps, cargo check -p jstream-core and docs check are all clean. I did not run the workspace-wide tests or the GPU-adapter-dependent CI jobs.
+I re-noted the stale sections with --renote --from wave/m3-3. The two lines that still mention the old wording are the wave's own #624 entries for ARCH#gpu-pipeline. Their hash matches the base, so I left them as they are.
+🤖 Generated with Claude Code
+https://claude.ai/code/session_011FozW2QGjNvGYbWYwTrPiL
+Generated by Claude Code
+jeffmhopkins
+commented
+Oct 24, 2026
+Copy link
+Copy Markdown
+Owner
+Author
+Review: round 5 at 66fece3
+Reviewed the two new commits since round 4 (9cfd33c). 86e127dc5 merges wave/m3-3 at 8059fb8, which is #643's squash. 66fece3 re-notes the five stale sections with docs verify --renote --from wave/m3-3. I read the builder's comment on the merge, and I re-reviewed the whole diff against the base wave/m3-3 (merge base 8059fb8): cache.rs, compositor.rs, image.rs, mip.wgsl, mips.rs, place.rs, tests/three_d.rs, the render README, docs/ARCHITECTURE.md and docs/verified.toml. 66fece3 carries session_011FozW2QGjNvGYbWYwTrPiL, as the earlier commits do. #643 carries the same session, and the merge carries no trailer. This reviewer's session is not among them, so no recusal. cargo xtask docs for returns the same rules, sections and ADRs as in rounds 1 to 4 (R-ARCH-001/004, R-DOC-002/003/004/008, R-GOV-001, R-RS-002..009, R-RT-002..006, R-SEC-001/004, R-TEST-001/004, R-UNSAFE-001; render#purpose/#design/#testing, ARCH#gpu-pipeline). cargo xtask docs check at the head: ok, with the 7 warnings already there.
+Earlier findings:
+B1, B2, B3: still resolved. The crop region (place.rs crop_region), the import rule (Image::set_frame, image.rs:189-199) and the restored base notes all survive the merge (below).
+B4: regressed. The --renote in 66fece3 replaced the render#testing body note that fixed it. See B5.
+N1: still partly addressed (both churn cases documented in the resources row; reusing evicted storage deferred).
+N4: resolved. The merge reflowed step 2 (README.md:176-198), and no line there exceeds 90 columns.
+N6: resolved. The new render#testing note no longer opens with feat(render): draw 3D items with w and edge coverage (X1 part 2) #622's stale tests.rs lead.
+N7: still open (pre-existing). Both tests.rs entries are the base's, unchanged.
+N8: still open, and now wider (see the PR description section).
+The merge (86e127dc5), code. #643 and this PR both replaced #624's per-call rebuild with a change count on Image. I read each of the seven conflicts with git show --remerge-diff 86e127dc5.
+Names: feat(render): rebuild 3D mips once per source and frame #643's generation field, its pub fn mark_changed and its pub(crate) fn generation are kept. This PR's changes()/changed() are gone, and every caller uses the kept names. Mips::claim (mips.rs:300-303) compares built against image.generation().
+One mark per change, none lost:
+rewrite marks an upload once (image.rs:329).
+render_into marks its target once (compositor.rs:314). The conflict there was only changed() against mark_changed().
+An import is marked only in set_frame (image.rs:195), from both cache paths (cache.rs:193, :227).
+feat(render): rebuild 3D mips once per source and frame #643's fresh mark (entry.used != frame_no, or a texture change) is removed with set_sync. Keeping both would have marked a repeated frame once per cache frame and a new frame twice in its first call. That one is harmless, but it isn't the rule the README states.
+No other mark_changed caller exists in the workspace (grep), and jstream-core imports only through the cache.
+The removed texture-change mark:
+A new texture is a new Image with its own count and a NEVER chain, so it is built.
+A kept image swapped back in (cache.rs:196-205) compares the incoming frame with its own last_frame. So its next frame counts as a change whenever the hold or the pts differs. That covers the Windows and Linux rings, which reuse one hold per slot.
+I re-listed the in-tree GpuFrame::new producers. The only ones new since round 4 are an encode target (jstream-platform-linux/src/gpu/export.rs:548) and a test helper (jstream-core/src/runtime/pipeline.rs:2898), and neither is imported.
+Test counters: feat(render): rebuild 3D mips once per source and frame #643 counted builds in claim, and this PR counts them in record (mips.rs:312-313). The resolution keeps only the record count, so nothing is counted twice. feat(render): rebuild 3D mips once per source and frame #643's mip_builds() now sums over the image's chains (image.rs:152-155). That keeps feat(render): rebuild 3D mips once per source and frame #643's layer test meaningful: one floor, one crop, so one chain.
+feat(render): rebuild 3D mips once per source and frame #643's import test (tests/three_d.rs:514): under the merged rule, the same GpuFrame handed out again is not a change. So the adaptation hands a new hold each cache frame (:531-537), and the test still asserts one build per new frame across two mixes. That is the behaviour feat(render): rebuild 3D mips once per source and frame #643's open question asked for, and the README's open question is removed accordingly.
+Whole-PR check: git diff 8059fb8 66fece3 touches the same 10 files as round 4's diff against its base. The root README and progress.toml (both changed by feat(render): rebuild 3D mips once per source and frame #643) equal the base. The new wave head 0c6a484 (feat(plugins): a WASM plugin's bounded event queue and events.dropped notice (WA1, ADR-0069) #725) touches no render or ARCH file, and git merge-tree with it is clean.
+Ledger (docs/verified.toml), entry by entry. I compared the head's 1,636 entries with the base's (8059fb8), the pre-#643 wave (4a999c0), round 4's head (9cfd33c) and the merge commit.
+Same-hash inputs (1,608): each one equals the base's entry exactly, by and note included. No wave stamp is dropped or relabelled, and no entry appears or disappears.
+Changed-hash inputs (28): these are the same 28 render, ARCH and platform#gpu-frames inputs as round 4. feat(render): rebuild 3D mips once per source and frame #643 changed 21 of them. The other seven are mip.wgsl and place.rs in three sections, plus render#purpose's body, which feat(render): rebuild 3D mips once per source and frame #643 left alone and this PR changes. All 28 were restamped in 66fece3 with one note per section. Each note is a shared lead plus a section-specific tail.
+Attribution: the lead reads "This PR (fix(render): build 3D mip chains from the crop, and rebuild them once per change #687, render: 3D mips rebuild per call, and crop bleed at coarse levels #641, on feat(render): mips and anisotropic sampling for 3D items (X1 part 2b) #624 and feat(render): rebuild 3D mips once per source and frame #643 as landed)". It credits feat(render): rebuild 3D mips once per source and frame #643 with mark_changed/generation and the upload and layer marks. It claims for this PR only the crop-built chains and the set_frame import rule. Nothing of feat(render): rebuild 3D mips once per source and frame #643's is misattributed.
+Coverage: the lead covers this PR's whole change to the code inputs: the region, vs_region, the per-crop chains and MAX_CHAINS, and the import rule. The ARCH, purpose, design and platform tails engage their own text. The render#testing body note does not cover the PR's whole change to that body (B5).
+Claims checked against the tree:
+feat(render): rebuild 3D mips once per source and frame #643's open question is gone from the README.
+The "once per frame" test hands a new frame each frame.
+All the tests the testing note names are in the README list and in tests/three_d.rs/place.rs.
+"161 lib tests pass" matches my run.
+Docs re-verifications:
+ARCH#gpu-pipeline (ARCHITECTURE.md:866-870): "a mip chain of its cropped source (rebuilt on the GPU once per change to the source, so at most once per source and frame)" holds against compositor.rs, image.rs and cache.rs after the merge.
+render#purpose: "sampled from a mip chain of its cropped source" holds.
+render#design: step 2 (README.md:176-198) holds. It describes the crop region, the per-crop chains, the change count with each marker, the import rule by hold and info, and mark_changed for imports kept outside the cache. The resources row holds too.
+render#testing: the section holds. The crop-clamped reference, D cropped at 2.8 against limit 5, and the seven further-test items (feat(render): mips and anisotropic sampling for 3D items (X1 part 2b) #624's upload test, feat(render): rebuild 3D mips once per source and frame #643's layer and import tests, and this PR's additions) match tests/three_d.rs and place.rs. The note does not (B5).
+jstream-platform#gpu-frames (dep on ARCH#gpu-pipeline): its own text is unchanged, and it holds.
+B5 · blocking · DOCS › Verification notes / R-DOC-004 · docs/verified.toml (["CRATE-jstream-render#testing"."body"])
+Problem: the body was restamped in 66fece3, and its note no longer covers this PR's whole change to that input. Against the base, the PR changes the 3D goldens text in three places:
+the CPU reference's bilinear is now "clamped to the crop as the chain is" (README.md:641-642);
+the D cropped row now has limit 5 (was 8), measures 2.8 (was 6.6), and gives 6.6 "with the chain built from the whole source" (README.md:651);
+the further-tests list is new.
+The new note covers the crop-built chain, the import rule and the further-tests list. It says nothing about the reference clamp or the D cropped limit and measurement. Round 3's note covered both (it was B4's fix), and --renote replaced it. DOCS says "the last note on each entry must cover the PR's whole change to that input". This is the same case as this PR's B4, #219 r7 B2 and #317 r3 B1.
+Fix: one cargo xtask docs verify CRATE-jstream-render#testing --by … --renote "…". Keep the current note, and add that the reference's bilinear is clamped to the crop and that D cropped measures 2.8 on lavapipe, with its limit tightened from 8 to 5. No hash moves.
+N9 · non-blocking · merge artifact · crates/jstream-render/src/image.rs:83-84
+The generation field's doc comment repeats its first line: "How many times the texels have changed: an upload rewritten, a layer drawn into," appears twice. The remerge diff shows the resolution kept the context line and added the resolved text under it. Delete line 84.
+N10 · non-blocking · ledger note wording · docs/verified.toml (["CRATE-jstream-render#design".*])
+The design note's tail says "Re-read the Composite step's mip paragraph". The mip text is step 2, Mips (README.md:176). Step 3, Composite, has no mip paragraph beyond the sampling it already had. The rest of the note is specific and correct, so this is a wording slip. Fix it with the B5 re-note if convenient.
+N7 · non-blocking · pre-existing ledger note (unchanged from round 4)
+["ARCH#gpu-pipeline"."file:crates/jstream-render/src/tests.rs"] and ["CRATE-jstream-render#purpose"."file:crates/jstream-render/src/tests.rs"] still carry #622's agent:claude-x1 notes saying mips and anisotropy "aren't built". That has been false since #624. They are the base's same-hash entries, so this PR rightly leaves them. The builder's comment calls them "#624 entries", but they are #622's. A note that claims content not in the tree is blocking when a PR writes it (#245 r11 B5). These predate this PR, so this is a follow-up issue.
+Governance / security: only render code, its docs and the ledger changed. No covers, lint, deny, CI or rule change, and governance is green. No hash was typed by hand: every changed-hash entry was written by the verify in 66fece3, and docs check is ok. No unsafe and no new dependency. mark_changed was already public on the base.
+PR description (N8): it still opens "Stacked on #624 (base: its branch …)". The base is wave/m3-3, and #624 and #643 have landed. Item 2 now also credits this PR with work #643 brought to the base: "Each Image has a change count", rewrite_rgba8/render_into bumping it, and "The compositor's per-call counter is gone". Against the base, this PR's part of item 2 is the set_frame import rule, which replaced #643's once-per-cache-frame mark. The description should also say it adapted #643's an_import_rebuilds_its_mips_once_per_frame. "An image imported directly, outside the cache, keeps the chain from its first 3D draw" also needs updating: with #643's public Image::mark_changed, the caller can mark such an import, as README step 2 says. Not run remains honest.
+Local runs at 66fece3: cargo clippy -p jstream-render --all-targets --all-features -- -D warnings: clean. cargo fmt --check -p jstream-render: clean. cargo test -p jstream-render (llvmpipe/lavapipe): 161 passed, 0 failed. Not run here: hardware GPUs, Windows, macOS, the workspace suite.
+CI at 66fece3: pass: fmt, clippy (ubuntu-latest), test (ubuntu-latest), docs, pr-title, governance, lint-deps, gate-test, bench, gate. Skipped as expected on a PR into a wave: deny, doc, wasm.
+❌ 1 blocking issue(s) at 66fece3: B5. Non-blocking: N7, N8, N9, N10.
+Generated by Claude Code
+docs(render): cover #687's goldens changes in the testing note (B5); …
+…
+2ba053a
+```
+…tidy N9, N10
+
+B5: the render#testing body note again covers the crop-clamped CPU
+reference and D cropped's limit (8 to 5) and measurement. N9: drop the
+repeated first line of Image's generation doc. N10: the design note names
+step 2, Mips.
+
+Co-Authored-By: Claude Opus 5.5 (1M context) <noreply@anthropic.com>
+Claude-Session: https://claude.ai/code/session_011FozW2QGjNvGYbWYwTrPiL
+```
+jeffmhopkins
+mentioned this pull request
+Oct 24, 2026
+docs: two tests.rs ledger notes still say 3D mips aren't built
+#762
+Closed
+jeffmhopkins
+commented
+Oct 24, 2026
+Copy link
+Copy Markdown
+Owner
+Author
+Round 5 answered in 2ba053a:
+B5, fixed. I re-read render#testing at the head and checked it against tests/three_d.rs: the reference's bilinear clamps to the crop (:98-107), and D cropped's limit is 5.0 (:402). I then re-noted the body with --renote --from wave/m3-3. The new note keeps the current note and adds both points: the CPU reference is clamped to the crop as the chain is, and D cropped measures 2.8 on lavapipe, with its limit tightened from 8 to 5, against 6.6 with the chain built from the whole source. The hash didn't move. To stop this regressing a third time, the renote script now appends to the existing note instead of replacing it, and refuses to run if the coverage is already there.
+N9, fixed. I removed the repeated first line of the generation doc. That made the image.rs entries in render#purpose, render#design and ARCH#gpu-pipeline stale, so I re-verified each one, keeping its note and adding the N9 clause.
+N10, fixed. The design note now says "step 2, Mips". I applied it with --renote to every entry this branch wrote in render#design.
+N8, fixed. The description now says the PR targets wave/m3-3. Item 2 credits feat(render): rebuild 3D mips once per source and frame #643 with the change count and the upload and layer marks, and claims only the set_frame import rule for this PR. It also says I adapted feat(render): rebuild 3D mips once per source and frame #643's import test, and that a caller can mark an import it keeps outside the cache with Image::mark_changed.
+N7: this is pre-existing, so I filed it as docs: two tests.rs ledger notes still say 3D mips aren't built #762.
+What I ran: cargo fmt --check, RUSTDOCFLAGS="-D warnings" cargo doc -p jstream-render --no-deps and docs check are clean. I did not rerun the tests, because the only code change is one doc-comment line, and 161 passed at 66fece3. Auto-merge stays on.
+🤖 Generated with Claude Code
+https://claude.ai/code/session_011FozW2QGjNvGYbWYwTrPiL
+Generated by Claude Code
+jeffmhopkins
+commented
+Oct 24, 2026
+Copy link
+Copy Markdown
+Owner
+Author
+Review: round 6 at 2ba053a
+Reviewed the one new commit since round 5 (66fece3): 2ba053a, which answers B5, N9 and N10. I read the builder's reply to round 5 and the updated PR description, and re-reviewed the whole diff against the base wave/m3-3 (merge base 8059fb8, unchanged since round 5): cache.rs, compositor.rs, image.rs, mip.wgsl, mips.rs, place.rs, tests/three_d.rs, the render README, docs/ARCHITECTURE.md and docs/verified.toml. 2ba053a carries session_011FozW2QGjNvGYbWYwTrPiL, as the earlier commits do. This reviewer's session is not among them, so no recusal. cargo xtask docs for crates/jstream-render/src/image.rs returns the same rules, sections and ADRs as in rounds 1 to 5. cargo xtask docs check at the head: ok, with the 7 warnings already there.
+Earlier findings:
+B1, B2, B3, B4: still resolved. No code or README text changed this round apart from the one comment line.
+B5: resolved. The render#testing body note now ends with the goldens change: the CPU reference's bilinear "clamped to the crop as the chain is", and D cropped at 2.8 on lavapipe with its mean limit tightened from 8 to 5, against 6.6 with the chain built from the whole source. Each matches the tree: Texels::bilinear clamps to the crop (tests/three_d.rs:98-107), golden_3d_d_a_cropped_item_shows_nothing_past_its_crop checks a mean of 5.0 (:402), and the table row reads | 5 | 2.8 | 6.6 with the chain built from the whole source, … (README.md:651). The earlier part of the note is kept word for word, so it still covers the crop-built chain, the import rule and the further-tests list.
+N1: still partly addressed (both churn cases documented in the resources row; reusing evicted storage deferred).
+N7: resolved as a follow-up: filed as docs: two tests.rs ledger notes still say 3D mips aren't built #762, which is open.
+N8: resolved. The description now says the PR is into wave/m3-3 with feat(render): mips and anisotropic sampling for 3D items (X1 part 2b) #624 and feat(render): rebuild 3D mips once per source and frame #643 landed. Item 2 credits feat(render): rebuild 3D mips once per source and frame #643 with the change count, mark_changed and the upload and layer marks, and claims only the set_frame import rule for this PR. It says feat(render): rebuild 3D mips once per source and frame #643's import test was adapted, and that a caller marks an import kept outside the cache with Image::mark_changed. That matches README step 2 (README.md:192). Its claim that the engine imports only through the cache holds: the only import call in jstream-core is cache.import (snapshot.rs:1126).
+N9: resolved. image.rs:83 now holds the generation doc's first line once.
+N10: resolved. The render#design notes now say "Re-read step 2, Mips, and the resources text".
+The code change (2ba053a): git diff 66fece3 2ba053a touches two files. image.rs loses one line, the duplicated /// line. verified.toml changes 11 stamps. Nothing else in the code moves.
+Ledger (docs/verified.toml), entry by entry. I compared the head's 1,636 entries with the base's (8059fb8) and round 5's head (66fece3).
+Same-hash inputs (1,608): each one still equals the base's entry exactly, by and note included. No entry appears or disappears.
+Changed-hash inputs (28): the same 28 as round 5. 17 of them are byte-identical to round 5, so their coverage is unchanged. The other 11 were rewritten in 2ba053a, each keeping the same by:
+the 3 image.rs entries (ARCH#gpu-pipeline, render#purpose, render#design) have new hashes from the comment change. Each keeps its round 5 note and adds "N9 (round 5): image.rs's generation doc no longer repeats its first line, a comment-only change; re-read; holds";
+the other 7 render#design entries keep their hashes. Their note is round 5's with only the N10 wording change, plus the same N9 tail (see N11);
+the render#testing body keeps its hash. Its note is round 5's with the goldens sentence appended (B5).
+Coverage: in each of the 11, the old note is a prefix of the new one after the N10 substitution, which I checked by script. So every rewritten entry's last note still carries the shared lead (the region, vs_region, the per-crop chains and MAX_CHAINS, and the import rule) and its section tail, and render#testing now also covers the goldens text. No entry lost coverage.
+Claims checked against the tree: every test, line and figure the new text names is in tests/three_d.rs and the README, and "161 lib tests pass" still stands for a comment-only change (round 5 ran it at 66fece3). The one slip is attribution, below.
+Docs re-verifications:
+ARCH#gpu-pipeline, render#purpose, render#design (image.rs inputs): the only change to the input is the doc comment, which now reads as one sentence. Each section's text about the change count still holds.
+render#testing (body, re-noted only): the section holds, as in round 5, and the note now covers it (B5 above).
+N11 · non-blocking · ledger note wording · docs/verified.toml (["CRATE-jstream-render#testing"."body"], ["CRATE-jstream-render#design".*])
+Three small slips in otherwise specific notes (#251 N6):
+the testing note credits "feat(render): rebuild 3D mips once per source and frame #643's upload, layer and per-frame import tests". a_rewritten_upload_rebuilds_its_mips is feat(render): mips and anisotropic sampling for 3D items (X1 part 2b) #624's (git log -S finds it in 5873874), and feat(render): rebuild 3D mips once per source and frame #643's diff doesn't touch it. Round 5's note already had this, and round 5 missed it;
+the appended goldens sentence follows "are all listed; holds" with no separator, so it reads "holds The 3D goldens text…";
+the N9 tail ("image.rs's generation doc no longer repeats its first line…") sits on all eight render#design entries, including the seven whose input isn't image.rs and whose hash didn't move. It's true, but it describes another input's change.
+Fix these with the next re-note if one is needed; on their own, no.
+Governance / security: only a doc comment and ledger notes changed this round. No covers, lint, deny, CI or rule change. No hash was typed by hand: the three moved hashes come from docs verify, and docs check is ok. No unsafe and no new dependency.
+Base and merge: wave/m3-3 is still at 0c6a484 (#725), as in round 5. git merge-tree of the head with it is clean, and docs check on the merged tree is ok (7 warnings). #725 touches no render or ARCH file.
+Local runs at 2ba053a: cargo xtask docs check, at the head and on the merge with the wave: ok. Not run here: cargo test, clippy and fmt (the only code change is a /// line, and CI ran them), hardware GPUs, Windows, macOS, the workspace suite.
+CI at 2ba053a: pass: fmt, clippy (ubuntu-latest), test (ubuntu-latest), docs, pr-title, governance (one superseded run cancelled, the rerun green), lint-deps, gate-test, bench, gate. Skipped as expected on a PR into a wave: deny, doc, wasm.
+✅ No issues found at 2ba053a (round 6). Non-blocking: N1, N11.
+Generated by Claude Code
+Hide details
+View details
+jeffmhopkins
+merged commit 2364182
+into
+wave/m3-3
+Oct 24, 2026
+15 of 16 checks passed
+Uh oh!
+There was an error while loading. Please reload this page.
+jeffmhopkins
+deleted the
+claude/project-thread-b8rnvf-x1-mips-641
+branch
+October 24, 2026 13:37
+This was referenced Oct 24, 2026
+fix(platform-linux): order capture copies and NV12 submits on the context's queue
+#694
+Merged
+feat(graph): accept 3D placements, protocol 0.34 (X1 part 3)
+#629
+Merged
+jeffmhopkins
+pushed a commit
+that referenced
+this pull request
+Oct 24, 2026
+docs: re-verify #694's sections after merging wave/m3-3 (#687), namin…
+…
+5648c74
+```
+…g each merged tip
+
+B3: 29c201c merged wave/m3-3 at 0c6a484 (#725), not 8059fb8. Every
+section this PR stamps now has one short note (N4): its lock claim, and
+both merges with the tips read from the merge commits' parents.
+
+Co-Authored-By: Claude Opus 5.5 (1M context) <noreply@anthropic.com>
+Claude-Session: https://claude.ai/code/session_011FozW2QGjNvGYbWYwTrPiL
+```
+jeffmhopkins
+pushed a commit
+that referenced
+this pull request
+Oct 24, 2026
+docs: re-verify #629's sections after the input bound and the #687 merge
+…
+429e925
+```
+render's Testing names the accepted-means-drawable tests; each section
+this PR stamps gets one note covering the PR's whole change, round 2's
+bound, protocol.snap's title (N6) and, where its inputs moved, the merge
+of wave/m3-3 at 2364182 (#687).
+
+Co-Authored-By: Claude Opus 5.5 (1M context) <noreply@anthropic.com>
+Claude-Session: https://claude.ai/code/session_011FozW2QGjNvGYbWYwTrPiL
+```
+This was referenced Oct 24, 2026
+chore(wave): merge main into wave/m3-3
+#767
+Merged
+progress: X1 note still has #643 in review and leaves out #687
+#768
+Closed
+docs(progress): mark #643 and #687 landed in X1 (#768)
+#771
+Merged
+feat(protocol): plugin command classes, forbidden, plugin.* actions and plugin.state_changed (0.35)
+#642
+Merged
+jeffmhopkins
+added a commit
+that referenced
+this pull request
+Oct 24, 2026
+docs(progress): mark #643 and #687 landed in X1 (#768) (#771)
+…
+7bdf0a2
+```
+X1's note still said part 2c (#643) was in review, though it landed in
+wave/m3-3 (8059fb8), and left out #687 (2364182), which builds the 3D
+mip chains from the crop and rebuilds them once per change. Add 687 to
+`prs`, describe both as landed in wave/m3-3, and regenerate the README
+progress block.
+
+
+Claude-Session: https://claude.ai/code/session_01K4N6DrL8C1KSQcuHTvpBcs
+
+Co-authored-by: Claude <noreply@anthropic.com>
+```
+jeffmhopkins
+pushed a commit
+that referenced
+this pull request
+Oct 24, 2026
+docs: name what #767 brought into each re-verified section; drop the …
+…
+095157e
+```
+…last "engine refuses 3D" comments
+
+Round 4 B5: each section's note now names, per input, what the merge of
+wave/m3-3 at 6764765 (#767, carrying wave/m1-3's #754) brought, crediting
+its PRs, and the dep-only sections say what their targets gained. N7: the
+place.rs text names #687's crop_region, Shape::crop and remap_uv. N8:
+is_neutral_3d's doc and the canvas outline comment no longer say the engine
+refuses 3D, and UI-FEATURES CV-15 no longer says "no 3D yet".
+
+Co-Authored-By: Claude Opus 5.5 (1M context) <noreply@anthropic.com>
+Claude-Session: https://claude.ai/code/session_011FozW2QGjNvGYbWYwTrPiL
+```
+jeffmhopkins
+added a commit
+that referenced
+this pull request
+Oct 24, 2026
+feat(graph): accept 3D placements, protocol 0.34 (X1 part 3) (#629)
+…
+6e8881e
+```
+* feat(protocol): the drawn 3D polygon and unplace (X1 part 1, ADR-0050)
+
+ItemGeometry::drawn_polygon clips the content rectangle to the box and then
+by the near plane w >= 1/256, in the local frame, and returns three to five
+vertices with canvas point, local point, texture coordinate and w, so a
+compositor can interpolate perspective-correctly. ItemGeometry::unplace is
+the inverse map. Pure functions with no wire form; no caller yet.
+
+Co-Authored-By: Claude Opus 5.5 (1M context) <noreply@anthropic.com>
+Claude-Session: https://claude.ai/code/session_011FozW2QGjNvGYbWYwTrPiL
+
+* docs(progress): X1 part 1 is #611
+
+Co-Authored-By: Claude Opus 5.5 (1M context) <noreply@anthropic.com>
+Claude-Session: https://claude.ai/code/session_011FozW2QGjNvGYbWYwTrPiL
+
+* feat(render): draw 3D items with w and edge coverage (X1 part 2, ADR-0050)
+
+The compositor draws a geometry item with non-neutral 3D from
+ItemGeometry::drawn_polygon: clip position (ndc * w, 0, w), so texture
+coordinates interpolate perspective-correctly, and analytic edge coverage
+clamp(d + 0.5, 0, 1) with the polygon pushed out a pixel through unplace.
+2D items keep their quad, w = 1 and no edge lines, so their goldens are
+unchanged. jstream-protocol gains ItemGeometry::drawn_vertex, the vertex of
+one local point, for the pushed-out corners.
+
+Goldens for spike S5's scenarios A, B, D and E against a supersampled CPU
+reference. Mips and anisotropic sampling (scenario C) are a follow-up.
+
+Co-Authored-By: Claude Opus 5.5 (1M context) <noreply@anthropic.com>
+Claude-Session: https://claude.ai/code/session_011FozW2QGjNvGYbWYwTrPiL
+
+* fix(protocol): decide edge-on by the plane's facing, not an area (#611 review)
+
+B1: in f32 a quarter turn leaves a sliver whose area grows with the item,
+so a canvas-sized item turned or tilted exactly 90 degrees returned a
+polygon thousands of pixels tall while unplace returned none.
+drawn_polygon and unplace now both return none when the plane's unit
+normal has |z| under 1e-6, which does not depend on the item's size: the
+plane passes through the viewer with perspective, or is side-on without.
+MIN_AREA only drops polygons too small to see.
+
+Co-Authored-By: Claude Opus 5.5 (1M context) <noreply@anthropic.com>
+Claude-Session: https://claude.ai/code/session_011FozW2QGjNvGYbWYwTrPiL
+
+* docs(render): 3D drawing in the render README and ARCH, X1 part 2 is #622
+
+Co-Authored-By: Claude Opus 5.5 (1M context) <noreply@anthropic.com>
+Claude-Session: https://claude.ai/code/session_011FozW2QGjNvGYbWYwTrPiL
+
+* feat(render): mips and anisotropic sampling for 3D items (X1 part 2b, ADR-0050)
+
+A source drawn by a 3D item gets a mip chain on its Image, made the
+first time: Rgba16Float premultiplied linear down to 1x1, level 0 copied
+texel for texel (imports converted as the composite shader would), each
+level a linear 2x2 average of the one above. It is rebuilt at most once
+per render call, an upload only after rewrite_rgba8, a layer or an import
+every call that draws it in 3D. 3D items sample it trilinearly with 16x
+anisotropy. Sources never placed in 3D get no chain.
+
+Adds scenario C's golden (a floor tilted 75 degrees from a 512^2 source)
+and a test that a rewritten upload rebuilds its chain.
+
+Co-Authored-By: Claude Opus 5.5 (1M context) <noreply@anthropic.com>
+Claude-Session: https://claude.ai/code/session_011FozW2QGjNvGYbWYwTrPiL
+
+* docs(render): mips in the render README and ARCH, X1 part 2b is #624
+
+Co-Authored-By: Claude Opus 5.5 (1M context) <noreply@anthropic.com>
+Claude-Session: https://claude.ai/code/session_011FozW2QGjNvGYbWYwTrPiL
+
+* feat(graph): accept non-neutral 3D placements, protocol 0.34 (X1 part 3, ADR-0050)
+
+ADR-0050 decision 8: with the compositor drawing 3D, the engine and the
+control mock stop rejecting a non-neutral tilt_deg, turn_deg, depth_px or
+perspective_px. Earlier minors answered it with invalid_argument. The wire
+form is unchanged. PROTOCOL_VERSION is 0.34, the minor the protocol queue
+assigned, after #317's 0.33.
+
+Co-Authored-By: Claude Opus 5.5 (1M context) <noreply@anthropic.com>
+Claude-Session: https://claude.ai/code/session_011FozW2QGjNvGYbWYwTrPiL
+
+* docs: 3D is accepted from protocol 0.34, X1 part 3 is #629
+
+Co-Authored-By: Claude Opus 5.5 (1M context) <noreply@anthropic.com>
+Claude-Session: https://claude.ai/code/session_011FozW2QGjNvGYbWYwTrPiL
+
+* docs(protocol): notes that cover the whole drawn-polygon change (#611 review r2)
+
+B2: the five sections are re-verified with notes covering the PR's whole
+change, not only the edge-on fix. N3: the README lists the 0.01 px^2
+floor. The facing doc says how close to a quarter turn edge-on is, and the
+edge-on test checks that items near a quarter turn still draw.
+
+Co-Authored-By: Claude Opus 5.5 (1M context) <noreply@anthropic.com>
+Claude-Session: https://claude.ai/code/session_011FozW2QGjNvGYbWYwTrPiL
+
+* fix(render): clamp a 3D item's fringe UVs to its content (#622 review)
+
+B1: ARCH's still-outside list names decision 5's mips and anisotropic
+sampling instead of 3D. N1: a pushed-out fringe pixel extrapolated its UV
+past the crop or what fill clips; the vertex now carries the unpushed
+polygon's UV bounds and the shader clamps to them, sampling with the
+unclamped UV's gradients. 2D items' bounds never clamp. New golden: a
+cropped item's edges (7.4 with the clamp, 9.3 without, limit 8).
+
+Co-Authored-By: Claude Opus 5.5 (1M context) <noreply@anthropic.com>
+Claude-Session: https://claude.ai/code/session_011FozW2QGjNvGYbWYwTrPiL
+
+* docs(render): mips rebuild per call; note crop bleed (review N1, N2)
+
+Co-Authored-By: Claude Opus 5.5 (1M context) <noreply@anthropic.com>
+Claude-Session: https://claude.ai/code/session_011FozW2QGjNvGYbWYwTrPiL
+
+* feat(render): rebuild 3D mips once per source and frame
+
+Every Image now counts its changes: rewrite_rgba8 marks an upload,
+render_into the layer it drew into, ResourceCache::import an import the
+first time a frame hands it out, and Image::mark_changed an import kept
+outside the cache. A chain is rebuilt only when its source changed, so a
+source drawn in 3D by several mixes or nested scenes is rebuilt once per
+frame (ADR-0050 decision 5). The per-call counter is gone.
+
+Co-Authored-By: Claude Opus 5.5 (1M context) <noreply@anthropic.com>
+Claude-Session: https://claude.ai/code/session_011FozW2QGjNvGYbWYwTrPiL
+
+* docs: X1 part 2c in progress, re-verify render and ARCH sections
+
+Co-Authored-By: Claude Opus 5.5 (1M context) <noreply@anthropic.com>
+Claude-Session: https://claude.ai/code/session_011FozW2QGjNvGYbWYwTrPiL
+
+* docs(render): clamped derivatives also shift the fringe's quad neighbours (#624 review N4)
+
+Derivatives are taken across a 2x2 quad, so an inside pixel sharing a quad with a
+clamped fringe pixel also gets a shortened derivative: about one row along a 3D item's
+edge, not the fringe pixels alone. Comment only.
+
+Co-Authored-By: Claude Opus 5.5 (1M context) <noreply@anthropic.com>
+Claude-Session: https://claude.ai/code/session_011FozW2QGjNvGYbWYwTrPiL
+
+* docs: word #624's composite.wgsl stamps against the base, not the N4 comment (review B1)
+
+The N4 restamp's notes said "No shader code changed", true of 6469b44 alone but not of the
+PR, which samples at the clamped UV with implicit derivatives (was textureSampleGrad). The
+three entries are re-verified with notes on the PR's whole change to the file, then N4's
+comment. Done by restoring the ledger from before 6469b44 (only these three entries
+differ) and verifying the three entries it leaves stale: --renote compares against
+wave/m3-3's merge base and would rewrite the whole stack's entries.
+
+Co-Authored-By: Claude Opus 5.5 (1M context) <noreply@anthropic.com>
+Claude-Session: https://claude.ai/code/session_011FozW2QGjNvGYbWYwTrPiL
+
+* docs: re-verify the protocol sections after merging wave/m3-3
+
+Co-Authored-By: Claude Opus 5.5 (1M context) <noreply@anthropic.com>
+Claude-Session: https://claude.ai/code/session_011FozW2QGjNvGYbWYwTrPiL
+
+* docs: re-verify the data model and UI summary after merging #643 (wave/m3-3)
+
+Co-Authored-By: Claude Opus 5.5 (1M context) <noreply@anthropic.com>
+Claude-Session: https://claude.ai/code/session_011FozW2QGjNvGYbWYwTrPiL
+
+* docs: re-verify after merging wave/m3-3 into #624
+
+Co-Authored-By: Claude Opus 5.5 (1M context) <noreply@anthropic.com>
+Claude-Session: https://claude.ai/code/session_011FozW2QGjNvGYbWYwTrPiL
+
+* docs: re-verify after merging wave/m3-3 into #629
+
+Co-Authored-By: Claude Opus 5.5 (1M context) <noreply@anthropic.com>
+Claude-Session: https://claude.ai/code/session_011FozW2QGjNvGYbWYwTrPiL
+
+* docs: re-verify after merging wave/m3-3 into #622
+
+Co-Authored-By: Claude Opus 5.5 (1M context) <noreply@anthropic.com>
+Claude-Session: https://claude.ai/code/session_011FozW2QGjNvGYbWYwTrPiL
+
+* docs: re-verify #624's sections after merging #622's head
+
+Co-Authored-By: Claude Opus 5.5 (1M context) <noreply@anthropic.com>
+Claude-Session: https://claude.ai/code/session_011FozW2QGjNvGYbWYwTrPiL
+
+* docs: re-verify #643's sections after merging #624's head
+
+Co-Authored-By: Claude Opus 5.5 (1M context) <noreply@anthropic.com>
+Claude-Session: https://claude.ai/code/session_011FozW2QGjNvGYbWYwTrPiL
+
+* docs: re-note render#design's tests.rs entry with the 104-byte vertex (#622 B2)
+
+Co-Authored-By: Claude Opus 5.5 (1M context) <noreply@anthropic.com>
+Claude-Session: https://claude.ai/code/session_011FozW2QGjNvGYbWYwTrPiL
+
+* docs: carry #622's B2 note fix into #624's render#design entries
+
+Co-Authored-By: Claude Opus 5.5 (1M context) <noreply@anthropic.com>
+Claude-Session: https://claude.ai/code/session_011FozW2QGjNvGYbWYwTrPiL
+
+* docs: carry #622's B2 note fix into #643's render#design entries
+
+Co-Authored-By: Claude Opus 5.5 (1M context) <noreply@anthropic.com>
+Claude-Session: https://claude.ai/code/session_011FozW2QGjNvGYbWYwTrPiL
+
+* docs: carry #622's B2 note fix into #629's render#design entries
+
+Co-Authored-By: Claude Opus 5.5 (1M context) <noreply@anthropic.com>
+Claude-Session: https://claude.ai/code/session_011FozW2QGjNvGYbWYwTrPiL
+
+* docs: re-verify #629's sections after merging wave/m3-3
+
+Co-Authored-By: Claude Opus 5.5 (1M context) <noreply@anthropic.com>
+Claude-Session: https://claude.ai/code/session_011FozW2QGjNvGYbWYwTrPiL
+
+* fix(protocol): accept only 3D geometry the compositor can draw (#629 B1, B2)
+
+B1: ItemGeometry::check_drawable, shared by the engine's check_geometry
+and the mock's geometry_view, also requires the polygon the whole box
+draws to have finite vertices within MAX_DRAWN_PX (1e15) of the origin
+(new GeometryError::TooFar). A huge tilted item clipped at the near
+plane, or one centred near f32::MAX, used to be stored and then failed
+every frame of its mix. Tests: protocol (the cases and the bound), graph
+(both review cases rejected), parity (TooFar on engine and mock), render
+(every accepted geometry in a sweep gives a shape).
+
+B2: UI-FEATURES' Total row is 60 to build and 41 blocked, as the rows sum.
+N3: the generators' comments say a tilt is valid now.
+
+Co-Authored-By: Claude Opus 5.5 (1M context) <noreply@anthropic.com>
+Claude-Session: https://claude.ai/code/session_011FozW2QGjNvGYbWYwTrPiL
+
+* docs: re-verify #629's sections with one accurate note each (B2, B3, N1)
+
+Every section this PR stamps gets one note covering the PR's whole change
+to its inputs, including round 1's drawability check; the UI-FEATURES
+summary note names IN-05's move and both totals, and the gpu-pipeline note
+no longer credits this PR with #622's still-outside change. The remaining
+'any 3D' sentences say 'any 3D it can draw'.
+
+Co-Authored-By: Claude Opus 5.5 (1M context) <noreply@anthropic.com>
+Claude-Session: https://claude.ai/code/session_011FozW2QGjNvGYbWYwTrPiL
+
+* docs(progress): X1 needs only its wave once #629 lands (#629 N4)
+
+ROADMAP M3 defines X1 as full 3D transforms and WGSL effect packs with
+hot reload, and ADR-0050 decision 8 scopes 3D to the engine accepting
+it; the editor UI's IN-05 is tracked in UI-FEATURES, not under X1.
+
+Co-Authored-By: Claude Opus 5.5 (1M context) <noreply@anthropic.com>
+Claude-Session: https://claude.ai/code/session_011FozW2QGjNvGYbWYwTrPiL
+
+* fix(protocol): bound a 3D item's inputs by MAX_DRAWN_PX (#629 B4)
+
+check_drawable also refuses non-neutral 3D whose centre, size, depth or
+perspective is past MAX_DRAWN_PX: in f32 the whole box's polygon doesn't
+bound a thin source's, so a huge item on an 8192x1 source was accepted
+and then failed every frame. Tests: the review's two cases are TooFar; a
+place::shape sweep over every source size (8192x1, 1x8192 and 16384-wide
+ones included) and a frame of the most extreme accepted items through
+Compositor::render both pass, and both fail with the input bound removed.
+
+Co-Authored-By: Claude Opus 5.5 (1M context) <noreply@anthropic.com>
+Claude-Session: https://claude.ai/code/session_011FozW2QGjNvGYbWYwTrPiL
+
+* docs: re-verify #629's sections after the input bound and the #687 merge
+
+render's Testing names the accepted-means-drawable tests; each section
+this PR stamps gets one note covering the PR's whole change, round 2's
+bound, protocol.snap's title (N6) and, where its inputs moved, the merge
+of wave/m3-3 at 2364182 (#687).
+
+Co-Authored-By: Claude Opus 5.5 (1M context) <noreply@anthropic.com>
+Claude-Session: https://claude.ai/code/session_011FozW2QGjNvGYbWYwTrPiL
+
+* docs: re-verify #629's sections after merging #767, X1 in review into the wave
+
+Co-Authored-By: Claude Opus 5.5 (1M context) <noreply@anthropic.com>
+Claude-Session: https://claude.ai/code/session_011FozW2QGjNvGYbWYwTrPiL
+
+* docs: name what #767 brought into each re-verified section; drop the last "engine refuses 3D" comments
+
+Round 4 B5: each section's note now names, per input, what the merge of
+wave/m3-3 at 6764765 (#767, carrying wave/m1-3's #754) brought, crediting
+its PRs, and the dep-only sections say what their targets gained. N7: the
+place.rs text names #687's crop_region, Shape::crop and remap_uv. N8:
+is_neutral_3d's doc and the canvas outline comment no longer say the engine
+refuses 3D, and UI-FEATURES CV-15 no longer says "no 3D yet".
+
+Co-Authored-By: Claude Opus 5.5 (1M context) <noreply@anthropic.com>
+Claude-Session: https://claude.ai/code/session_011FozW2QGjNvGYbWYwTrPiL
+
+* docs: credit #695's program-preview gating in the canvas sections' notes
+
+Round 5 B6: the five canvas/mod.rs entries (ui #purpose, #design and
+#canvas, UI-FEATURES #canvas and #keyboard) now name what #695 brought:
+main's U4p live program preview (#302) gated by on_program and
+preview_message, the alive flag cleared on cleanup and its N2 comment
+moves. CV-03's change is credited to #695, and #495's part is its theme
+colours. N9: ARCH #gpu-pipeline's body list names the flips (#321) and
+a capture's opaque alpha (#592, #451).
+
+Co-Authored-By: Claude Opus 5.5 (1M context) <noreply@anthropic.com>
+Claude-Session: https://claude.ai/code/session_011FozW2QGjNvGYbWYwTrPiL
+
+---------
+
+Co-authored-by: Claude <noreply@anthropic.com>
+```
+This was referenced Oct 24, 2026
+chore(wave): land wave/m3-3
+#786
+Merged
+docs(progress): wave/m3-3 landed (#786)
+#793
+Merged
+docs: list #682 in LNX1 and say what #642 built in the threat model (#783, #640)
+#797
+Merged
+render: 3D mips rebuild per call, and crop bleed at coarse levels
+#641
+Closed
+Sign up for free
+to join this conversation on GitHub.
+Already have an account?
+Sign in to comment
+Uh oh!
+There was an error while loading. Please reload this page.
+Labels
+None yet
+2 participants
+Add this suggestion to a batch that can be applied as a single commit.This suggestion is invalid because no changes were made to the code.Suggestions cannot be applied while the pull request is closed.Suggestions cannot be applied while viewing a subset of changes.Only one suggestion per line can be applied in a batch.Add this suggestion to a batch that can be applied as a single commit.Applying suggestions on deleted lines is not supported.You must change the existing code in this line in order to create a valid suggestion.Outdated suggestions cannot be applied.This suggestion has been applied or marked resolved.Suggestions cannot be applied from pending reviews.Suggestions cannot be applied on multi-line comments.Suggestions cannot be applied while the pull request is queued to merge.Suggestion cannot be applied right now. Please check back later.
+You can’t perform that action at this time.

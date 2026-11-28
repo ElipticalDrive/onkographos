@@ -1,0 +1,290 @@
+--- v001.md
++++ v002.md
+@@ -4,5 +4,5 @@
+ 
+ ## Overview
+-This method converts a watertight 3D mesh into a voxelized Signed Distance Field (SDF) volume. It solves the problem of creating a continuous implicit representation from discrete triangle data for use in volume rendering or differentiable rendering pipelines. It is distinguished from naive CPU-based generation by its use of GPU-accelerated ray tracing for initial occupancy and fast sweeping for redistancing, often followed by a surface refinement pass to reduce discretization error [S1, unofficial]. It differs from TSDF fusion methods by relying on a single static mesh instance rather than multi-view sensor fusion [S2, unofficial].
++This method converts a watertight 3D mesh into a voxelized Signed Distance Field (SDF) volume [S1, unofficial][S2, unofficial]. It solves the problem of creating a continuous implicit representation from discrete triangle data for use in volume rendering or differentiable rendering pipelines [S1, unofficial]. It is distinguished from naive CPU-based generation by its use of GPU-accelerated ray tracing for initial occupancy and fast sweeping for redistancing, often followed by a surface refinement pass to reduce discretization error [S1, unofficial]. It differs from TSDF fusion methods by relying on a single static mesh instance rather than multi-view sensor fusion [S2, unofficial].
+ 
+ ## How it works
+@@ -10,5 +10,5 @@
+ - A watertight manifold 3D mesh (e.g., STL, OBJ) [S1, unofficial][S2, unofficial].
+ - Grid resolution `res` (integer, e.g., 64, 128) [S1, unofficial].
+-- Grid bounds: typically normalized to $[-0.5, 0.5]$ in each dimension, or defined by mesh bounding box [S1, unofficial].
++- Grid bounds normalized to $[-0.5, 0.5]$ in each dimension [S1, unofficial].
+ - Boolean flag `refine_surface` (default `true`) [S1, unofficial].
+ - Angular resolution `angular_res` for refinement (default 16) [S1, unofficial].
+@@ -19,5 +19,5 @@
+ 
+ **Data Structures:**
+-- `mi.TensorXf`: A multi-dimensional tensor structure holding the grid values. Layout is `(res, res, res)` [S1, unofficial].
++- `mi.TensorXf`: A multi-dimensional tensor structure holding the grid values with layout `(res, res, res)` [S1, unofficial].
+ - `mi.Ray3f`: Ray structure containing origin `o` and direction `d` [S1, unofficial].
+ - `si` (Surface Interaction): Intersection result containing validity flag, hit distance `t`, and surface normal `n` [S1, unofficial].
+@@ -26,9 +26,8 @@
+ 
+ 1. **Grid Initialization:**
+-   Create a 3D grid of ray origins covering the volume bounds. For a resolution `res` and bounds $[-0.5, 0.5]$, origins are spaced by $1/res$. Rays are cast in the $+Y$ direction ($\vec{d} = (0, 1, 0)$) [S1, unofficial].
++   Create a 3D grid of ray origins covering the volume bounds using `dr.meshgrid` and `dr.linspace` over the range $[-0.5, 0.5]$ with resolution `res` [S1, unofficial]. Rays are cast in the $+Y$ direction ($\vec{d} = (0, 1, 0)$) [S1, unofficial].
+ 
+ 2. **Ray-Mesh Intersection & Occupancy:**
+-   For each voxel center, cast a ray in the $+Y$ direction. Intersect with the mesh.
+-   Compute binary occupancy value $v$:
++   For each voxel center, cast a ray in the $+Y$ direction and intersect with the mesh [S1, unofficial]. Compute binary occupancy value $v$:
+    $$
+    v = \begin{cases} 
+@@ -37,15 +36,11 @@
+    \end{cases}
+    $$
+-   where $\vec{n}$ is the surface normal at the hit point and $\vec{d}$ is the ray direction. The condition $\vec{n} \cdot \vec{d} > 0$ ensures front-face culling, assuming the mesh normals point outward [S1, unofficial].
++   where $\vec{n}$ is the surface normal at the hit point and $\vec{d}$ is the ray direction [S1, unofficial]. The condition $\vec{n} \cdot \vec{d} > 0$ ensures front-face culling [S1, unofficial].
+ 
+ 3. **Initial SDF Estimation:**
+-   Invert the occupancy to get an initial signed distance approximation. The value $0.5$ represents the surface (halfway between inside 0 and outside 1).
+-   $$
+-   \text{initial\_values} = 0.5 - v
+-   $$
+-   This results in values of $0.5$ (surface), $0.5$ (outside, if $v=0$), and $-0.5$ (inside, if $v=1$). Note: The source code uses `0.5 - values`, implying $v=1$ (inside) yields $-0.5$ and $v=0$ (outside) yields $0.5$. This assumes the ray hits the *first* surface from $-Y$ or that the geometry is convex/simple enough that a single ray determines inside/outside correctly relative to the camera/view direction. *Correction*: Standard ray casting for SDF usually requires checking if the ray origin is inside or outside. The provided code snippet implies a specific convention where $v=1$ means "hit front face", which might imply the ray originated from outside and hit the front face, or it's a specific differentiable rendering setup. We follow the source exactly: `values = 0.5 - values` [S1, unofficial].
++   Invert the occupancy to get an initial signed distance approximation using $\text{initial\_values} = 0.5 - v$ [S1, unofficial]. This results in values of $0.5$ (outside, if $v=0$) and $-0.5$ (inside, if $v=1$) [S1, unofficial].
+ 
+ 4. **Fast Sweeping Redistancing:**
+-   Apply a fast sweeping algorithm to propagate the signed distance from the initial binary grid to a true Euclidean distance field.
++   Apply a fast sweeping algorithm to propagate the signed distance from the initial binary grid to a true Euclidean distance field [S1, unofficial].
+    $$
+    \text{grid} = \text{redistance}(\text{initial\_values})
+@@ -56,6 +51,6 @@
+    If `refine_surface` is true:
+    a. Identify voxels close to the surface where $|\text{grid}[i]| < 1.0 / \text{res}$ [S1, unofficial].
+-   b. For each such voxel center $\vec{o}$, generate `angular_res^2` rays uniformly distributed over the sphere. Directions are computed using `square_to_uniform_sphere` mapping from a 2D grid of UV coordinates [S1, unofficial].
+-   c. Trace these rays against the mesh. Find the minimum hit distance $d_{min}$ for each voxel center across all angular samples [S1, unofficial].
++   b. For each such voxel center $\vec{o}$, generate `angular_res^2` rays uniformly distributed over the sphere using `square_to_uniform_sphere` [S1, unofficial].
++   c. Trace these rays against the mesh and find the minimum hit distance $d_{min}$ for each voxel center across all angular samples [S1, unofficial].
+    d. Preserve the sign of the existing SDF value:
+       $$
+@@ -66,152 +61,98 @@
+ 
+ 6. **Atlas Texture Update (Alternative Output):**
+-   If using an atlas texture approach, initialize the texture with resolution, origin, and voxel size. Update the texture by invoking a mesh sampler function with world coordinates for each voxel [S2, unofficial].
++   If using an atlas texture approach, initialize the texture with resolution, origin, and voxel size using `volumeRenderer.createAtlasTexture` [S2, unofficial]. Update the texture by invoking a mesh sampler function with world coordinates for each voxel [S2, unofficial].
+ 
+ **Pseudocode:**
+ 
+ ```python
+-import mitsuba as mi
+-import drjit as dr
+ import numpy as np
+ 
+ def mesh_to_sdf(mesh, res, refine_surface=True, angular_res=16):
+-    """
+-    Convert a mesh to an SDF volume using ray tracing and fast sweeping.
+-    
+-    Args:
+-        mesh: Mitsuba mesh object.
+-        res: Grid resolution (integer).
+-        refine_surface: Boolean, whether to refine near-surface voxels.
+-        angular_res: Resolution for angular sampling during refinement.
+-        
+-    Returns:
+-        mi.TensorXf: The SDF grid.
+-    """
+-    # Step 1: Create grid of ray origins
+-    # Bounds [-0.5, 0.5]
+-    coords = dr.linspace(mi.Float, -0.5, 0.5, res)
+-    x, y, z = dr.meshgrid(coords, coords, coords)
+-    
+-    # Flatten to 1D array of origins
+-    origins = dr.flatten(mi.Point3f(x, y, z))
+-    
+-    # Step 2: Cast rays in +Y direction
+-    ray_d = mi.Vector3f(0, 1, 0)
+-    rays = mi.Ray3f(origins, ray_d)
+-    
+-    # Intersect with mesh
+-    si = mesh.ray_intersect(rays)
+-    
+-    # Compute occupancy: 1.0 if hit front-face, 0.0 otherwise
+-    # Front-face: normal dot direction > 0
+-    is_valid = si.is_valid()
+-    front_face = dr.dot(si.n, ray_d) > 0
+-    values = dr.select(is_valid & front_face, 1.0, 0.0)
+-    
+-    # Step 3: Initial SDF estimation
+-    # Invert occupancy: 0.5 - value
+-    # Inside (hit front face) -> 0.5 - 1.0 = -0.5
+-    # Outside (no hit or back face) -> 0.5 - 0.0 = 0.5
++    # Step 1: Grid Initialization
++    coords = np.linspace(-0.5, 0.5, res)
++    x, y, z = np.meshgrid(coords, coords, coords, indexing='ij')
++    origins = np.stack([x.ravel(), y.ravel(), z.ravel()], axis=-1)
++    ray_directions = np.array([0.0, 1.0, 0.0])
++    rays = list(zip(origins, [ray_directions] * len(origins)))
++
++    # Step 2: Ray-Mesh Intersection & Occupancy
++    intersections = mesh.ray_intersect_batch(rays)
++    values = np.zeros(len(intersections))
++    for i, si in enumerate(intersections):
++        if si.is_valid and np.dot(si.n, ray_directions) > 0:
++            values[i] = 1.0
++        else:
++            values[i] = 0.0
++
++    # Step 3: Initial SDF Estimation
+     initial_values = 0.5 - values
+-    
+-    # Reshape to 3D tensor (res, res, res)
+-    grid_tensor = mi.TensorXf(initial_values, (res, res, res))
+-    
+-    # Step 4: Fast sweeping redistancing
+-    grid = mi.TensorXf(mi.redistancing.redistance(grid_tensor))
+-    
+-    # Step 5: Surface refinement
++
++    # Step 4: Fast Sweeping Redistancing
++    grid = initial_values.reshape(res, res, res)
++    grid = fast_sweep_redistance(grid)  # [G] Standard fast sweeping algorithm
++
++    # Step 5: Surface Refinement
+     if refine_surface:
+-        # Identify voxels close to surface
+-        indices = dr.arange(mi.UInt32, res ** 3)
+-        # Gather current grid values
+-        current_vals = dr.gather(mi.Float, grid.array, indices)
+-        near_surface_mask = dr.abs(current_vals) < 1.0 / res
++        indices = np.arange(res ** 3)
++        near_surface_mask = np.abs(grid.ravel()) < 1.0 / res
+         near_surface_indices = indices[near_surface_mask]
+-        
+-        if dr.size(near_surface_indices) > 0:
+-            # Get world space origins for near-surface voxels
+-            ray_o_near = dr.gather(mi.Point3f, grid.o, near_surface_indices) # Assuming grid.o stores origins? 
+-            # Note: In the source, ray.o is used. We need to reconstruct origins or store them.
+-            # Reconstructing origins for simplicity in this pseudocode:
+-            # Map index back to 3D coordinates
+-            idx = near_surface_indices
+-            x_idx = idx % res
+-            y_idx = (idx // res) % res
+-            z_idx = idx // (res * res)
+-            
+-            # Convert indices to world coordinates [-0.5, 0.5]
+-            # Assuming uniform grid from -0.5 to 0.5
+-            step = 1.0 / res
+-            ox = -0.5 + (x_idx + 0.5) * step
+-            oy = -0.5 + (y_idx + 0.5) * step
+-            oz = -0.5 + (z_idx + 0.5) * step
+-            
+-            ray_o_near = mi.Point3f(ox, oy, oz)
+-            
+-            # Generate angular samples
++
++        if len(near_surface_indices) > 0:
++            # Reconstruct origins for near-surface voxels
++            x_idx = near_surface_indices % res
++            y_idx = (near_surface_indices // res) % res
++            z_idx = near_surface_indices // (res * res)
++            step = 1.0 / (res - 1)  # Spacing from linspace
++            ray_o_near = np.stack([
++                -0.5 + (x_idx + 0.5) * step,
++                -0.5 + (y_idx + 0.5) * step,
++                -0.5 + (z_idx + 0.5) * step
++            ], axis=-1)
++
+             n_angle_samples = angular_res ** 2
+-            r = dr.arange(mi.Float, angular_res)
+-            u, v = dr.meshgrid((r + 0.5) / angular_res, (r + 0.5) / angular_res)
+-            uv = dr.tile(mi.Vector2f(u, v), dr.size(ray_o_near))
+-            
+-            # Create refined rays
+-            rays_refined = mi.Ray3f(dr.repeat(ray_o_near, n_angle_samples), 
+-                                    mi.warp.square_to_uniform_sphere(uv))
+-            
+-            # Intersect refined rays
+-            si_refined = mesh.ray_intersect(rays_refined)
+-            
+-            # Find minimum distance for each voxel
+-            # si_refined.t contains distances for all angular samples
+-            # We need to gather min distance per voxel
+-            min_dist = dr.full(mi.Float, 100.0, dr.size(near_surface_indices))
+-            
+-            # Loop over angular samples to find min
+-            # This is a simplified loop; in practice, use dr.minimum over the flattened array
+-            # Reshape si_refined.t to (n_near, n_angles)
+-            t_flat = si_refined.t
+-            # Reshape to (n_near_surface_indices, n_angle_samples)
+-            t_reshaped = dr.reshape(t_flat, (dr.size(near_surface_indices), n_angle_samples))
+-            
+-            # Find min along the angular dimension
+-            # Note: dr.minimum.reduce might be needed depending on drjit version
+-            # Assuming dr.minimum.reduce exists or using a loop for clarity
+-            min_dists = dr.full(mi.Float, 100.0, dr.size(near_surface_indices))
++            r = np.arange(angular_res)
++            u, v = np.meshgrid((r + 0.5) / angular_res, (r + 0.5) / angular_res)
++            uv = np.stack([u.ravel(), v.ravel()], axis=-1)
++            uv = np.tile(uv, (len(ray_o_near), 1))
++
++            # Generate refined rays
++            refined_origins = np.repeat(ray_o_near, n_angle_samples, axis=0)
++            refined_dirs = uniform_sphere_samples(uv)  # [G] Maps UV to sphere directions
++            refined_rays = list(zip(refined_origins, refined_dirs))
++
++            # Trace refined rays
++            si_refined = mesh.ray_intersect_batch(refined_rays)
++            t_values = np.array([si.t if si.is_valid else 100.0 for si in si_refined])
++
++            # Find minimum distance per voxel
++            min_dist = np.full(len(near_surface_indices), 100.0)
+             for i in range(n_angle_samples):
+-                col = dr.gather(mi.Float, t_reshaped, i) # This syntax is illustrative
+-                # Correct drjit way:
+-                col = t_reshaped[:, i]
+-                min_dists = dr.minimum(min_dists, col)
+-            
+-            # Modulate by sign of existing SDF
+-            existing_vals = dr.gather(mi.Float, grid.array, near_surface_indices)
+-            signs = dr.sign(existing_vals)
+-            min_dist = min_dists * signs
+-            
+-            # Scatter back to grid
+-            dr.scatter(grid.array, min_dist, near_surface_indices)
+-            
+-            # Re-redistance
+-            grid = mi.TensorXf(mi.redistancing.redistance(grid))
+-            
++                col = t_values[i::n_angle_samples]
++                min_dist = np.minimum(min_dist, col)
++
++            # Preserve sign
++            existing_vals = grid.ravel()[near_surface_indices]
++            signs = np.sign(existing_vals)
++            min_dist = min_dist * signs
++
++            # Scatter back
++            grid.ravel()[near_surface_indices] = min_dist
++            grid = fast_sweep_redistance(grid)  # [G] Re-redistance
++
+     return grid
+ ```
+ 
+ **Edge Cases and Pitfalls:**
+-- **Non-watertight meshes:** The method assumes a watertight mesh. Non-watertight meshes may result in incorrect inside/outside classification [S1, unofficial].
+-- **Precision:** Floating-point precision issues may arise in the redistancing step for very large grids or complex geometries [S1, unofficial].
+-- **Boundary Conditions:** The grid bounds must encompass the entire mesh. Voxels outside the mesh bounds will have incorrect distances if not handled [S1, unofficial].
+-- **Angular Sampling:** The number of angular samples (`angular_res^2`) affects the accuracy of the surface refinement. Too few samples may miss the closest surface point [S1, unofficial].
++- **Non-watertight meshes:** The method assumes a watertight mesh [S1, unofficial].
+ 
+ ## Operating characteristics
+-- **Time Complexity:** $O(N \cdot A)$, where $N$ is the number of voxels and $A$ is the number of angular samples per voxel during refinement. The redistancing step is typically $O(N)$ with a small constant factor [S1, unofficial].
+-- **Memory Complexity:** $O(N)$ for storing the grid and intermediate ray intersection data [S1, unofficial].
+-- **Performance:** GPU-accelerated ray tracing allows for fast generation of large grids (e.g., 128^3) in seconds [S1, unofficial].
+-- **Strengths:** High accuracy with surface refinement; differentiable (if using differentiable rendering framework) [S1, unofficial].
+-- **Limitations:** Requires a watertight mesh; refinement step can be computationally expensive for high resolutions [S1, unofficial].
++- **Time Complexity:** Not given in the sources.
++- **Memory Complexity:** Not given in the sources.
++- **Performance:** Not given in the sources.
++- **Strengths:** Not given in the sources.
++- **Limitations:** Not given in the sources.
+ 
+ ## Background
+-The method is derived from differentiable SDF rendering techniques, specifically those implemented in the Mitsuba 3 renderer [S1, unofficial]. It leverages the differentiable nature of ray tracing and redistancing to create SDFs that can be optimized or used in gradient-based pipelines. The atlas texture approach is associated with volume rendering in web-based contexts using Three.js [S2, unofficial].
++The method is derived from differentiable SDF rendering techniques, specifically those implemented in the Mitsuba 3 renderer [S1, unofficial]. It leverages the differentiable nature of ray tracing and redistancing to create SDFs that can be optimized or used in gradient-based pipelines [S1, unofficial]. The atlas texture approach is associated with volume rendering in web-based contexts using Three.js [S2, unofficial].
+ 
+ ## Sources

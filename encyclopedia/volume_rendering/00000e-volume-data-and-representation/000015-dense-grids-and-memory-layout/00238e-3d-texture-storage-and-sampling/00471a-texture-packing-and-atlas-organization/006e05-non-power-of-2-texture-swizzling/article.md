@@ -1,0 +1,102 @@
+# Non-Power-of-2 Texture Swizzling
+
+Also called: Swizzled Texture Addressing with Bitwise Carry Propagation (for non-power-of-2)
+
+## Overview
+Non-Power-of-2 Texture Swizzling is a method for computing memory offsets in swizzled textures where dimensions are not powers of two, by padding the texture to tile boundaries and treating the remaining higher bits as a row-major tile index [S1, unofficial]. It differs from standard power-of-2 swizzling by requiring explicit carry propagation logic when transitioning between tile rows, as the tile stride is not a power of two and cannot be handled by simple bitwise masking [S1, unofficial]. This builds on [Texture Packing and Atlas Organization](11925-texture-packing-and-atlas-organization.md) by extending the swizzle pattern to accommodate irregular dimensions.
+
+## How it works
+**Inputs and Outputs:**
+- Input: Logical texture coordinates $(x, y)$, texture width $W$, texture height $H$, tile width $T_x$, tile height $T_y$ (powers of two), and swizzle functions $swizzle_x, swizzle_y$.
+- Output: Linear byte offset $offs$ in the texture memory.
+
+**Data Structures:**
+- `U32`: 32-bit unsigned integer for offsets and masks.
+- `swizzle_x(v)`, `swizzle_y(v)`: Functions that permute the bits of $v$ according to the hardware's swizzle pattern for the x and y dimensions respectively. These are typically precomputed or computed once per frame.
+
+**Steps:**
+1. **Padding:** The texture dimensions $W$ and $H$ are padded to the nearest multiples of $T_x$ and $T_y$ respectively. Let $W_{pad}$ and $H_{pad}$ be the padded dimensions.
+2. **Tile Index Calculation:** The number of tiles per row is $TilesPerRow = W_{pad} / T_x$.
+3. **Offset Initialization:**
+   - Compute initial x-offset: $offs\_x0 = swizzle\_x(x)$. This offset includes the swizzled x-coordinate and the tile index bits.
+   - Compute initial y-offset: $offs\_y = swizzle\_y(y)$. This offset includes only the swizzled y-coordinate bits, excluding the tile index.
+4. **Mask Setup:**
+   - $x\_mask = swizzle\_x(\sim 0u)$. This mask covers all bits relevant to the x-dimension, including the tile index bits.
+   - $y\_mask = swizzle\_y(\sim 0u)$. This mask covers only the swizzled y-bits, excluding the tile index bits.
+5. **Increment Logic:**
+   - The inner loop increments $offs\_x$ and $offs\_y$ using bitwise operations.
+   - When $offs\_y$ wraps to zero (indicating a row transition), the tile index must be incremented by $TilesPerRow$.
+   - Since $TilesPerRow$ is not a power of two, it cannot be added via the standard carry trick. Instead, upon detecting $offs\_y == 0$, add $TilesPerRow \ll \text{shift}$ to $offs\_x0$, where $\text{shift}$ is the number of bits used for the swizzled y-coordinate. This advances the tile index in the x-offset to the correct row.
+
+**Formulas:**
+- $TilesPerRow = \lceil W / T_x \rceil$
+- $offs\_x0 = swizzle\_x(x)$
+- $offs\_y = swizzle\_y(y)$
+- $x\_mask = swizzle\_x(\sim 0u)$
+- $y\_mask = swizzle\_y(\sim 0u)$
+- If $offs\_y == 0$: $offs\_x0 += TilesPerRow \ll \text{bits\_y}$
+
+**Parameters:**
+- $T_x, T_y$: Typically 4, 8, or 16 pixels, depending on hardware.
+- $swizzle\_x, swizzle\_y$: Hardware-specific bit permutation functions.
+
+**Edge Cases and Pitfalls:**
+- **Precision:** Ensure that the offset calculation does not overflow 32-bit integers for large textures.
+- **Boundaries:** The padding must be consistent across all dimensions.
+- **Degenerate Input:** If $W$ or $H$ is zero, the method is undefined.
+
+**Pseudocode:**
+> **Unverified code.** The code below did not pass a test run against a reference implementation, or no test fits it, so it may contain errors.
+
+```python
+def compute_offset(x, y, W, H, Tx, Ty, swizzle_x, swizzle_y):
+    # Pad dimensions to tile boundaries
+    W_pad = (W + Tx - 1) // Tx * Tx
+    H_pad = (H + Ty - 1) // Ty * Ty
+    
+    # Calculate tiles per row
+    tiles_per_row = W_pad // Tx
+    
+    # Determine bit shifts for swizzle
+    # Assuming swizzle_x and swizzle_y handle the bit permutation
+    # The number of bits used for y-swizzle is needed to shift the tile index
+    # This is a simplification; in practice, the shift amount is derived from the swizzle function's structure
+    bits_y = Ty.bit_length() # Approximation; actual shift depends on swizzle implementation
+    
+    # Initial offsets
+    offs_x0 = swizzle_x(x)
+    offs_y = swizzle_y(y)
+    
+    # Masks
+    x_mask = swizzle_x(~0)
+    y_mask = swizzle_y(~0)
+    
+    # Base offset calculation
+    offset = offs_x0 + offs_y
+    
+    # Handle row wrap
+    # If the y-offset wraps to zero, we need to advance the tile index
+    # This is typically handled in the loop, but for a single pixel:
+    if offs_y == 0:
+        offset += tiles_per_row << bits_y
+        
+    return offset
+```
+
+## Subtopics
+
+### Variable Step Swizzling
+A generalization of the swizzling loop that allows stepping by powers of 2 (e.g., processing 8x4 tiles) or non-powers of 2 by modifying the mask initialization or increment formula [S1, unofficial]. For power-of-2 steps, initialize $x\_mask$ by shifting the all-1s value before swizzling: $x\_mask = swizzle\_x(\sim 0u \ll 3)$ or $swizzle\_x((U32) -8)$ [S1, unofficial]. For non-power-of-2 steps (e.g., 5 pixels in x), use the formula $offs\_x = (offs\_x - swizzle\_x(-5)) \& swizzle\_x(-1)$ and require an extra register for constants [S1, unofficial].
+
+## Operating characteristics
+- **Time Complexity:** $O(1)$ per pixel for offset calculation, assuming swizzle functions are $O(1)$.
+- **Memory Complexity:** $O(1)$ additional memory for masks and constants.
+- **Performance:** The method adds a few bitwise operations per pixel. It is most effective when combined with optimized loops that write whole destination cache lines [S1, unofficial].
+- **Strengths:** Handles arbitrary texture dimensions without requiring power-of-2 padding in the shader logic, reducing memory waste compared to full power-of-2 padding.
+- **Limitations:** Requires explicit handling of tile row transitions, which can be complex to implement correctly. The swizzle functions must be known and consistent.
+
+## Background
+The method was described by Romain Guy (ryg) in a blog post on texture tiling and swizzling [S1, unofficial]. It extends the concept of swizzled addressing to non-power-of-2 dimensions by treating the higher bits as a tile index in row-major order [S1, unofficial].
+
+## Sources
+[S1] Texture tiling and swizzling | The ryg blog, https://fgiesen.wordpress.com/2011/01/17/texture-tiling-and-swizzling/, fetched 2026-10-26 (unofficial)

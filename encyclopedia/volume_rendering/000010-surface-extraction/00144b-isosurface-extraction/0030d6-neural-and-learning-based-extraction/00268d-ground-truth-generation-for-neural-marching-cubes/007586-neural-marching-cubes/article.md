@@ -1,0 +1,180 @@
+# Neural Marching Cubes
+
+Also called: NMC
+
+## Overview
+Neural Marching Cubes (NMC) is a data-driven isosurface extraction method that recovers triangle meshes from discrete implicit fields (signed distance or occupancy grids) by using a 3D convolutional neural network to predict local mesh topology and vertex positions [S1]. Unlike classical Marching Cubes (MC) variants that rely on heuristic assumptions like trilinearity, NMC learns contextual dependencies from neighboring cubes to preserve sharp features and complex topologies without requiring gradient or normal inputs [S1]. It addresses the inability of classical MC to recover sharp features by replacing isolated cube processing with a learned model that accounts for local geometric context [S1].
+
+## How it works
+**Inputs and Outputs:**
+*   **Input:** A uniform 3D grid of scalar values representing a discretized implicit field (signed distances or occupancies) of size $N \times N \times N$ [S1].
+*   **Output:** A triangle mesh extracted from the zero-isosurface of the field [S1].
+
+**Data Structures:**
+The method defines a per-cube representation vector consisting of a "boolean part" for topology and a "float part" for vertex positions [S1].
+
+1.  **Per-Cube Boolean Representation (15 binary values):**
+    *   8 values: Signs of the 8 corner vertices.
+    *   6 values: Signs of the 6 faces.
+    *   1 value: Tunnel flag (binary). Indicates if a tunnel connects two connected components of the same sign on the cube surface. Assumed to be at most one tunnel [S1].
+2.  **Per-Cube Float Representation (84 floats):**
+    *   12 floats: Positions of 12 edge vertices (1 degree of freedom each, typically parameterized along the edge).
+    *   48 floats: Positions of 24 face vertices (2 degrees of freedom each, typically parameterized on the face plane).
+    *   24 floats: Positions of 8 interior vertices (3 degrees of freedom each, 3D coordinates).
+3.  **Global Grid Representation (for CNN output):**
+    To avoid redundancy (corners shared by 8 cubes, edges by 4, faces by 2), the global output per grid cell is reduced:
+    *   **Global Boolean (5 values):** Sign of corner vertex $v_1$, signs of faces $f_1, f_3, f_5$, and the tunnel flag [S1].
+    *   **Global Float (51 values):** Positions of 3 edge vertices (on edges $e_1, e_4, e_9$), 12 face vertices (on faces $f_1, f_3, f_5$), and all 8 interior vertices [S1].
+    *   Total output channel count per grid cell: $5 + 51 = 56$ [S1].
+
+**Tessellation Principles:**
+The resulting mesh must satisfy:
+1.  Contain only triangles [S1].
+2.  Completely separate vertices with different signs (any path connecting vertices of different signs must intersect the mesh) [S1].
+3.  No non-manifold edges or vertices [S1].
+4.  Only use vertices present in the defined cube representation (corner, edge, face, interior) [S1].
+
+**Network Architecture:**
+A 3D variant of ResNet [He et al. 2016] is used [S1].
+*   **Input Layer:** Takes the $N \times N \times N$ implicit field values.
+*   **Receptive Field:** Limited to local features to ensure generalization to new shapes and datasets, rather than using global features [S1].
+*   **Output Layer:** Produces an $N \times N \times N \times 56$ tensor [S1].
+
+**Training:**
+*   **Ground Truth Generation:** An optimization-based approach generates ground truth meshes from raw 3D shapes based on the defined representation and tessellation design [S1].
+*   **Loss Functions:**
+    *   Topological loss: Operates on the binary part of the vector.
+    *   Geometric loss: Operates on the float part of the vector [S1].
+
+**Pseudocode:**
+
+> **Unverified code.** The code below did not pass a test run against a reference implementation, or no test fits it, so it may contain errors.
+
+```python
+import numpy as np
+
+def neural_marching_cubes(implicit_field: np.ndarray, model) -> Mesh:
+    """
+    Extracts a mesh from an implicit field using a trained NMC model.
+    
+    Args:
+        implicit_field: 3D numpy array of shape (N, N, N) containing signed distances or occupancies.
+        model: A trained 3D ResNet model that outputs a tensor of shape (N, N, N, 56).
+        
+    Returns:
+        A Mesh object containing vertices and triangles.
+    """
+    # 1. Predict per-cube parameters
+    # The model takes the implicit field and outputs the global representation
+    # for every grid cell.
+    # Output shape: (N, N, N, 56)
+    # Channels: [v1_sign, f1_sign, f3_sign, f5_sign, tunnel_flag, 
+    #             e1_pos, e4_pos, e9_pos, 
+    #             f1_v1, f1_v2, ..., f5_v1, ..., 
+    #             int_v1_x, int_v1_y, int_v1_z, ...]
+    predicted_params = model(implicit_field)
+    
+    # 2. Parse the global representation into a mesh
+    # This involves resolving shared vertices and applying tessellation rules
+    # based on the boolean flags and float positions.
+    mesh = parse_global_representation(predicted_params)
+    
+    return mesh
+
+def parse_global_representation(params: np.ndarray) -> Mesh:
+    """
+    Converts the global grid representation into a triangle mesh.
+    
+    Args:
+        params: Tensor of shape (N, N, N, 56).
+        
+    Returns:
+        Mesh object.
+    """
+    vertices = []
+    triangles = []
+    
+    # Note: The exact parsing logic depends on the specific indexing of 
+    # edges (e1, e4, e9) and faces (f1, f3, f5) defined in the source.
+    # Below is a conceptual representation of the parsing process.
+    
+    N = params.shape[0]
+    
+    # Iterate over all grid cells to collect vertices and triangles
+    # In practice, this requires handling shared vertices across cube boundaries
+    # to ensure manifold connectivity.
+    
+    for z in range(N):
+        for y in range(N):
+            for x in range(N):
+                # Extract local parameters for the cube at (x, y, z)
+                # The global representation stores only unique vertices per cell
+                # to minimize redundancy.
+                local_params = params[x, y, z]
+                
+                # Extract boolean flags
+                v1_sign = local_params[0] > 0
+                f1_sign = local_params[1] > 0
+                f3_sign = local_params[2] > 0
+                f5_sign = local_params[3] > 0
+                tunnel_flag = local_params[4] > 0
+                
+                # Extract float positions
+                # Edges e1, e4, e9
+                e1_pos = local_params[5:8]
+                e4_pos = local_params[8:11]
+                e9_pos = local_params[11:14]
+                
+                # Faces f1, f3, f5 (4 vertices each, 2 DOF each -> 8 floats per face)
+                # Assuming a specific ordering of face vertices
+                f1_verts = local_params[14:30].reshape(4, 2) # 4 vertices, 2 coords each
+                f3_verts = local_params[30:46].reshape(4, 2)
+                f5_verts = local_params[46:62].reshape(4, 2)
+                
+                # Interior vertices (8 vertices, 3 coords each)
+                int_verts = local_params[62:86].reshape(8, 3)
+                
+                # Determine tessellation case based on boolean flags
+                # The 15-bit boolean vector defines the topology.
+                # The specific mapping from flags to triangle connectivity
+                # is defined by the 37 unique topological cases derived from
+                # symmetries and validity checks [S1].
+                
+                # For each valid case, connect the relevant vertices (edge, face, interior)
+                # to form triangles.
+                # This step is complex and relies on the pre-defined tessellation templates.
+                
+                # Example: If the case corresponds to a simple edge intersection,
+                # connect the relevant edge vertices.
+                # If face vertices are present, connect them to form refined patches.
+                
+                # The exact triangle indices depend on the global vertex buffer
+                # management to handle shared vertices.
+                
+                pass # Detailed tessellation logic is implementation-specific 
+                     # based on the 37 cases and vertex sharing rules.
+
+    return Mesh(vertices, triangles)
+```
+
+**Edge Cases and Pitfalls:**
+*   **Sharp Features:** Classical MC fails near sharp features due to trilinearity assumptions. NMC addresses this by learning from data, but requires sufficient training data covering such features [S1].
+*   **Ambiguity Resolution:** When two connected components with the same sign exist on the cube surface, the method assumes at most one tunnel connects them. This simplification reduces the boolean representation to 15 bits [S1].
+*   **Non-Manifold Geometry:** The tessellation principles explicitly forbid non-manifold edges or vertices, ensuring a valid manifold mesh [S1].
+*   **Receptive Field:** Using a limited receptive field is crucial for generalization. Global features (as used in DMC/MeshSDF) do not generalize well to unseen shape categories [S1].
+
+## Operating characteristics
+*   **Time Complexity:** Depends on the 3D CNN inference time, which is generally faster than iterative optimization-based methods but slower than classical MC (which is $O(N)$ with a small constant). The parsing step is also $O(N)$.
+*   **Memory Complexity:** The input is $N^3$ scalars. The output tensor is $56 \times N^3$ floats. The resulting mesh size is proportional to the surface area.
+*   **Measured Performance:** NMC is evaluated on signed distance and binary voxel inputs. It outperforms classical MC variants in reconstruction quality and feature preservation, particularly for sharp features [S1].
+*   **Scaling:** The method generalizes to new shapes and datasets due to the limited receptive field [S1].
+*   **Strengths:** Recovers sharp features without additional inputs (gradients/normals); handles complex topologies; learns contextual dependencies.
+*   **Limitations:** Requires training data; inference is more computationally expensive than classical MC; relies on the quality of the implicit field input.
+*   **When to use:** When extracting meshes from neural implicit representations or voxel grids where sharp features are important and gradients are not available.
+*   **When not to use:** When real-time performance is critical and classical MC suffices; when the input is not a uniform grid of scalar values.
+
+## Background
+Neural Marching Cubes was introduced by Zhiqin Chen and Hao Zhang from Simon Fraser University [S1]. It builds upon the classical Marching Cubes algorithm [Lorensen and Cline 1987] and addresses its long-standing issue of failing to recover sharp features [S1]. The method is part of the emerging field of learning neural implicit representations [Chen and Zhang 2019; Mescheder et al. 2019; Park et al. 2019]. It differs from Deep Marching Cubes (DMC) and MeshSDF by focusing on reconstructing geometry and topology from a discrete implicit field rather than end-to-end differentiability from raw inputs [S1].
+
+## Sources
+[S1] Neural marching cubes, https://doi.org/10.1145/3478513.3480518, fetched 2026-10-26

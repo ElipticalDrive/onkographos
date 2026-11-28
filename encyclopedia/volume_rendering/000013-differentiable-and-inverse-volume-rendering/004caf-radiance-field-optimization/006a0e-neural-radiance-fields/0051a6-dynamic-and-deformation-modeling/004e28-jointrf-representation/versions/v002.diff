@@ -1,0 +1,281 @@
+--- v001.md
++++ v002.md
+@@ -1,145 +1,161 @@
+ # JointRF Representation
+-
+-Also called: JointRF
++Also called: JointRF, Joint Optimization for Dynamic Neural Radiance Field Representation and Compression
+ 
+ ## Overview
+-JointRF is a compact residual feature grid representation designed for dynamic Neural Radiance Fields (NeRF) to handle large motions and long sequences without compromising quality [S1]. It decomposes the radiance field into a long-reference basis feature grid and a coefficient feature grid, using residual grids to capture temporal variations [S1]. Unlike canonical space warping methods which are fragile to large motions, JointRF uses residual grids to diminish temporal redundancy and support efficient compression [S1].
++JointRF is a compact residual feature grid representation for dynamic Neural Radiance Fields (NeRFs) that handles large motions and long sequences by decomposing the radiance field into a long-reference basis feature grid and a coefficient feature grid [S1]. Unlike canonical space methods that warp features back to a static canonical space—making them fragile to large motions and topological changes—JointRF uses residual grids to capture temporal variations, thereby diminishing temporal redundancy and improving compression efficiency [S1].
+ 
+ ## How it works
+ **Inputs and Outputs:**
+-*   **Input:** A sequence of dynamic radiance fields over time, organized into Groups of Feature grids (GOF).
+-*   **Output:** A set of feature grids (Basis $B$, Coefficient $C$, Residual $R$) that reconstruct the radiance field for any frame $t$ in the sequence.
++*   **Input:** A sequence of dynamic radiance fields over time, represented as a set of frames.
++*   **Output:** A compressed representation consisting of a keyframe basis grid, a keyframe coefficient grid, and a sequence of residual grids and coefficient grids for subsequent frames.
+ 
+ **Data Structures:**
+-The representation relies on 3D feature grids. The exact resolution and dimensionality of these grids are not specified in the sources [G: Implementers must define grid resolution $D \times D \times D$ and feature dimension $F$ based on scene complexity and hardware constraints].
++The representation is organized into Groups of Feature grids (GOF). Each GOF $G = \{f_t\}_{t=1}^N$ contains:
++1.  **Keyframe ($t=1$):**
++    *   $B_1$: Long-reference basis feature grid. Captures signal commonality across the sequence.
++    *   $C_1$: Coefficient feature grid. Depicts spatial variations for the keyframe.
++2.  **Subsequent Frames ($1 < t \le N$):**
++    *   $R_t$: Compact residual feature grid. Represents the compensation for errors and newly observed regions between the keyframe's basis grid and the current frame's basis grid.
++    *   $C_t$: Coefficient feature grid for frame $t$.
+ 
+-1.  **Basis Feature Grid ($B$):** A long-reference grid capturing signal commonality across the sequence.
+-2.  **Coefficient Feature Grid ($C$):** A grid depicting spatial variations, used in conjunction with $B$ via Hadamard product.
+-3.  **Residual Feature Grid ($R_t$):** A compact grid representing the difference between the current frame's basis and the keyframe's basis.
++**Formulas:**
++The radiance field for any frame is reconstructed using a tiny Multi-Layer Perceptron (MLP) $\Phi$ [S1]:
++$$
++(c, \sigma) = \Phi(\text{interp}(x, C) \circ \text{interp}(x, B), d)
++$$
++where:
++*   $x$ is the 3D spatial coordinate.
++*   $d$ is the viewing direction.
++*   $\text{interp}(\cdot)$ is the interpolation function on the grids (e.g., trilinear interpolation).
++*   $\circ$ denotes the Hadamard (element-wise) product.
++*   $c$ is the color and $\sigma$ is the density.
++
++For $t > 1$, the basis grid $B_t$ is calculated as:
++$$
++B_t = B_1 + R_t
++$$
++The coefficient grid $C_t$ is learned directly for frame $t$, but the sources note that learning residuals for $C_t$ holds no physical significance; only the basis grid residuals are modeled [S1].
+ 
+ **Numbered Steps:**
++1.  Divide the long sequence of dynamic radiance fields into multiple continuous Groups of Feature grids (GOF) [S1].
++2.  For the first frame (keyframe) of each GOF, initialize a long-reference basis feature grid $B_1$ and a coefficient feature grid $C_1$ [S1].
++3.  For each subsequent frame $t$ ($1 < t \le N$) in the GOF:
++    a. Learn a compact residual feature grid $R_t$ [S1].
++    b. Learn a coefficient feature grid $C_t$ [S1].
++    c. Compute the current frame's basis grid: $B_t = B_1 + R_t$ [S1].
++4.  To render a ray $\mathbf{r}$ at frame $t$:
++    a. Sample points along the ray.
++    b. For each sample point $x_i$, retrieve features from $B_t$ and $C_t$ using interpolation: $f_{B} = \text{interp}(x_i, B_t)$ and $f_{C} = \text{interp}(x_i, C_t)$ [S1].
++    c. Compute the combined feature vector: $f_i = f_{C} \circ f_{B}$ [S1].
++    d. Pass $f_i$ and the viewing direction $d_i$ through the MLP $\Phi$ to obtain density $\sigma_i$ and color $c_i$ [S1].
++5.  Compute the final color $\hat{c}(\mathbf{r})$ using the standard volume rendering equation [S1]:
++    $$
++    \hat{c}(\mathbf{r}) = \sum_{i=1}^{N} T_i (1 - \exp(-\sigma_i \delta_i)) c_i
++    $$
++    where $T_i = \exp(-\sum_{j=1}^{i-1} \sigma_j \delta_j)$, $\delta_i$ is the distance between adjacent samples, $c_i$ is color, and $\sigma_i$ is density [S1].
+ 
+-1.  **Grouping:** Divide the long sequence of dynamic radiance fields into multiple continuous Groups of Feature grids (GOF). Each GOF $G = \{f_t\}_{t=1}^N$ consists of $N$ successive frames [S1].
+-2.  **Keyframe Initialization:** For the first frame (keyframe) $f_1$ of a GOF, initialize a long-reference basis feature grid $B_1$ and a coefficient feature grid $C_1$ [S1].
+-3.  **Residual and Coefficient Generation:** For each subsequent frame $t$ ($1 < t \le N$) in the GOF:
+-    *   Compute a compact residual feature grid $R_t$ [S1].
+-    *   Compute a coefficient feature grid $C_t$ [S1].
+-    *   Note: Learning residuals for $C_t$ holds no physical significance; only the basis grid residuals are modeled [S1].
+-4.  **Basis Reconstruction:** Calculate the basis feature grid for frame $t$ by adding the residual compensation to the keyframe's basis grid:
+-    $$
+-    B_t = B_1 + R_t
+-    $$
+-5.  **Radiance Field Recovery:** Recover the radiance field for frame $t$ using the reconstructed basis $B_t$ and coefficient $C_t$. The color $\mathbf{c}$ and density $\sigma$ are computed by passing interpolated features through a tiny MLP $\Phi$:
+-    $$
+-    (\mathbf{c}, \sigma) = \Phi(\text{interp}(\mathbf{x}, C_t) \circ \text{interp}(\mathbf{x}, B_t), \mathbf{d})
+-    $$
+-    where $\text{interp}(\cdot)$ is the trilinear interpolation function on the grids, $\circ$ denotes the Hadamard (element-wise) product, $\mathbf{x}$ is the 3D position, and $\mathbf{d}$ is the view direction [S1].
+-6.  **Volume Rendering:** Render the final color $\hat{c}(r)$ for a ray $r$ using standard volume rendering:
+-    $$
+-    \hat{c}(r) = \sum_{i=1}^{N_s} T_i (1 - \exp(-\sigma_i \delta_i)) c_i
+-    $$
+-    where $T_i = \exp(-\sum_{j=1}^{i-1} \sigma_j \delta_j)$, $\delta_i$ is the distance between adjacent samples, $c_i$ is the color, and $\sigma_i$ is the density [S1].
++**Parameters:**
++*   **GOF Size:** Not given in the sources.
++*   **Grid Resolution:** Not given in the sources.
++*   **MLP Architecture:** Described as a "tiny MLP" [S1]. Specific layer sizes are not given in the sources.
++
++**Edge Cases and Pitfalls:**
++*   **Large Motions:** Canonical space warping methods fail under large motions; JointRF handles them by using residual grids [S1].
++*   **Coefficient Residuals:** Learning residuals for the coefficient grid $C_t$ is physically insignificant and should not be done; only basis grid residuals $R_t$ are modeled [S1].
++*   **Temporal Redundancy:** The method is designed to minimize redundancy by leveraging the commonality in the basis grid [S1].
+ 
+ **Pseudocode:**
+-
+ ```python
+-def jointrf_render(ray, keyframe_grids, residual_grids, coefficient_grids, t_index):
++def jointrf_render(ray_origin, ray_direction, time_index, gof_data):
+     """
+-    Renders a frame using the JointRF representation.
++    Renders a single ray for a specific time index using JointRF representation.
+     
+     Args:
+-        ray: Ray origin and direction.
+-        keyframe_grids: Tuple (B1, C1) for the keyframe (t=1).
+-        residual_grids: List of residual grids R_t for t > 1.
+-        coefficient_grids: List of coefficient grids C_t for t > 1.
+-        t_index: Current frame index (1-based).
++        ray_origin: 3D vector, origin of the ray.
++        ray_direction: 3D vector, direction of the ray.
++        time_index: int, index of the frame within the GOF (0-based).
++        gof_data: dict containing:
++            - 'B1': Tensor, long-reference basis feature grid for the keyframe.
++            - 'C1': Tensor, coefficient feature grid for the keyframe.
++            - 'R': List of Tensors, residual grids for frames 1 to N-1.
++            - 'C': List of Tensors, coefficient grids for frames 1 to N-1.
++            - 'mlp': Function, the tiny MLP Phi.
++            - 'interp': Function, interpolation on grids.
++            
++    Returns:
++        color: 3D vector, rendered color.
++    """
++    # 1. Determine the basis and coefficient grids for the current time index
++    if time_index == 0:
++        # Keyframe
++        B_t = gof_data['B1']
++        C_t = gof_data['C1']
++    else:
++        # Subsequent frame
++        # B_t = B1 + R_t
++        R_t = gof_data['R'][time_index - 1]
++        B_t = gof_data['B1'] + R_t
++        C_t = gof_data['C'][time_index - 1]
+         
+-    Returns:
+-        Rendered color.
+-    """
+-    # 1. Retrieve or reconstruct Basis Grid B_t
+-    if t_index == 1:
+-        B_t = keyframe_grids.B1
+-    else:
+-        # B_t = B_1 + R_t
+-        R_t = residual_grids[t_index - 2] # Assuming list is 0-indexed for t=2
+-        B_t = add_grids(keyframe_grids.B1, R_t)
++    # 2. Sample points along the ray
++    # Assume N_samples is a predefined constant
++    t_vals = linspace(0, max_dist, N_samples)
++    points = ray_origin + outer(t_vals, ray_direction) # Shape: (N_samples, 3)
++    
++    # 3. Interpolate features from grids
++    # interp(grid, points) returns features for each point
++    features_B = gof_data['interp'](B_t, points) # Shape: (N_samples, feature_dim)
++    features_C = gof_data['interp'](C_t, points) # Shape: (N_samples, feature_dim)
++    
++    # 4. Hadamard product
++    combined_features = features_C * features_B # Element-wise multiplication
++    
++    # 5. MLP to get density and color
++    # directions repeated for each sample
++    directions = repeat(ray_direction, N_samples)
++    
++    # Phi(combined_features, directions) -> (sigma, color)
++    # Assuming mlp returns a tuple or concatenated tensor
++    output = gof_data['mlp'](combined_features, directions)
++    
++    # Extract sigma and color based on MLP output structure
++    # Note: Exact MLP output structure is not specified, assuming standard NeRF output
++    sigma = output[:, 0] # Assuming first channel is density
++    color = output[:, 1:4] # Assuming next 3 channels are color
++    
++    # 6. Volume Rendering
++    # Compute transmittance
++    # delta_t is the distance between adjacent samples
++    delta_t = t_vals[1] - t_vals[0]
++    
++    # Alpha values
++    alpha = 1.0 - exp(-sigma * delta_t)
++    
++    # Transmittance T_i = exp(-sum_{j=1}^{i-1} sigma_j * delta_j)
++    # We can compute this iteratively or using cumulative sum
++    # T_0 = 1.0
++    # T_i = T_{i-1} * (1 - alpha_{i-1})
++    
++    transmittance = ones(N_samples)
++    for i in range(1, N_samples):
++        transmittance[i] = transmittance[i-1] * (1.0 - alpha[i-1])
+         
+-    # 2. Retrieve Coefficient Grid C_t
+-    if t_index == 1:
+-        C_t = keyframe_grids.C1
+-    else:
+-        C_t = coefficient_grids[t_index - 2]
+-        
+-    # 3. Sample along ray and compute radiance
+-    samples = sample_ray(ray)
+-    colors = []
+-    transmittance = 1.0
++    # Weighted sum
++    weights = transmittance * alpha
++    rendered_color = sum(weights * color, axis=0)
+     
+-    for sample in samples:
+-        x = sample.position
+-        d = sample.direction
+-        
+-        # Interpolate features from grids
+-        # interp(x, Grid) performs trilinear interpolation
+-        feat_c = interpolate_grid(C_t, x)
+-        feat_b = interpolate_grid(B_t, x)
+-        
+-        # Hadamard product
+-        combined_feat = elementwise_multiply(feat_c, feat_b)
+-        
+-        # Tiny MLP Phi to get color and density
+-        # Phi takes combined_feat and view direction d
+-        c_i, sigma_i = tiny_mlp_phi(combined_feat, d)
+-        
+-        # Volume rendering step
+-        delta = sample.distance_to_next
+-        alpha = 1.0 - exp(-sigma_i * delta)
+-        weight = transmittance * alpha
+-        colors.append(weight * c_i)
+-        transmittance *= (1.0 - alpha)
+-        
+-    return sum(colors) + transmittance * background_color
+-
+-def add_grids(grid_a, grid_b):
+-    """Element-wise addition of two feature grids."""
+-    return grid_a + grid_b
+-
+-def interpolate_grid(grid, point):
+-    """Trilinear interpolation of a 3D feature grid at a point."""
+-    # Implementation depends on specific grid library, 
+-    # but conceptually retrieves weighted average of 8 neighbors.
+-    pass
+-
+-def tiny_mlp_phi(features, direction):
+-    """
+-    A small Multi-Layer Perceptron.
+-    Input: Feature vector (from Hadamard product) + Direction vector.
+-    Output: Color (3 floats) and Density (1 float).
+-    """
+-    # Standard MLP forward pass
+-    pass
++    return rendered_color
+ ```
+ 
+-**Parameters:**
+-*   **GOF Size ($N$):** The number of frames in a Group of Feature grids. Not given in the sources.
+-*   **Grid Resolution:** Not given in the sources.
+-*   **Feature Dimension:** Not given in the sources.
+-
+-**Edge Cases and Pitfalls:**
+-*   **Large Motions:** Canonical space warping methods fail under large motions; JointRF handles this via residual grids [S1].
+-*   **Coefficient Residuals:** Learning residuals for the coefficient grid $C_t$ is physically meaningless and should be avoided; only basis grid residuals are modeled [S1].
+-*   **Temporal Redundancy:** The method relies on short-term similarity; if temporal coherence is low, residual compression efficiency may drop [S1].
+-
+ ## Operating characteristics
+-*   **Time Complexity:** Rendering requires interpolating from two grids ($B_t, C_t$) and passing through a tiny MLP per sample. The reconstruction of $B_t$ is $O(1)$ per frame if $R_t$ is precomputed. Parallel rendering of non-keyframes is supported since only one keyframe is needed during rendering [S1].
+-*   **Memory Complexity:** Significantly reduced compared to storing full feature grids for every frame. Only $B_1, C_1$ and compact residuals $R_t$ and coefficients $C_t$ are stored. The compactness of $R_t$ facilitates compression [S1].
+-*   **Strengths:** Handles large motions without quality loss; diminishes temporal redundancy; supports efficient compression; enables parallel rendering of non-keyframes [S1].
+-*   **Limitations:** Requires grouping frames into GOFs; performance depends on the effectiveness of residual compression for the specific motion patterns [S1].
+-*   **When to use:** Dynamic scenes with large motions and long durations where compression efficiency is critical [S1].
+-*   **When not to use:** Static scenes (simpler representations suffice) or scenes with extreme topological changes that break the assumption of residual compactness [S1].
++*   **Time Complexity:** Rendering complexity is similar to standard NeRF, $O(N \cdot S)$ where $N$ is the number of rays and $S$ is the number of samples per ray, plus the cost of grid interpolation. The representation allows simultaneous rendering of multiple non-keyframes because it relies on only one keyframe during rendering, facilitating parallel computation [S1].
++*   **Memory Complexity:** The representation is compact. It stores one long-reference basis grid $B_1$ and one coefficient grid $C_1$ for the keyframe, plus residual grids $R_t$ and coefficient grids $C_t$ for subsequent frames. The residual grids are compact, reducing memory usage compared to storing full feature grids for every frame [S1].
++*   **Strengths:** Handles large motions without compromising quality; diminishes temporal redundancy; supports streamable dynamic and long-sequence radiance fields; enables efficient sequential feature modeling [S1].
++*   **Limitations:** Learning residuals for the coefficient grid $C_t$ is physically insignificant and should be avoided [S1]. The method requires a sequential feature compression subnetwork for optimal compression, which adds complexity to the training pipeline [S1].
++*   **When to use:** When representing dynamic scenes with large motions and long durations where canonical space warping methods fail [S1].
++*   **When not to use:** For static scenes or scenes with very small motions where simpler representations might suffice.
+ 
+ ## Background
+-JointRF was proposed in 2024 by researchers including Qiang Hu and Xiaoyun Zhang [S1]. It addresses challenges in storing and transmitting volumetric video using NeRF, particularly for sequences with arbitrary motions and long durations [S1]. It builds on the idea of residual radiance fields (e.g., ReRF) but introduces a joint optimization scheme for representation and compression [S1].
++JointRF was proposed in 2024 by authors from Shanghai Jiao Tong University, supported by the National Natural Science Foundation of China and STCSM [S1]. It addresses the challenges of storing and transmitting volumetric video using NeRF, particularly for sequences involving arbitrary motions and long durations [S1]. The method builds on the idea of residual radiance field techniques, similar to ReRF, but introduces a joint optimization scheme for representation and compression [S1]. It decomposes the static scene radiance field into coefficient and basis feature grids via basis expansion, extending this to dynamic scenes by using residual grids for temporal variations [S1].
+ 
+ ## Sources

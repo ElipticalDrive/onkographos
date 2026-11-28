@@ -1,0 +1,246 @@
+--- v003.md
++++ v004.md
+@@ -3,5 +3,5 @@
+ 
+ ## Overview
+-Surface detection determines whether a voxel or particle lies on the boundary of a solid or fluid volume. In voxel-based representations, it identifies voxels that have at least one non-solid neighbor in the 6-connected neighborhood [S1, unofficial]. In particle-based fluid simulations, it identifies boundary particles by estimating occlusion on a spherical screen cover, distinguishing interior particles (shadowed by neighbors) from boundary particles (with unshadowed screen areas) [S2]. It differs from general solidity checks by specifically evaluating the *neighborhood* state rather than the local occupancy, serving as a prerequisite for surface tension, boundary rendering, or collision detection.
++Surface detection determines whether a voxel or particle lies on the boundary of a solid or fluid volume [S1, unofficial][S2]. In voxel-based representations, it identifies voxels that have at least one non-solid neighbor in the 6-connected neighborhood [S1, unofficial]. In particle-based fluid simulations, it identifies boundary particles by estimating occlusion on a spherical screen cover, distinguishing interior particles (shadowed by neighbors) from boundary particles (with unshadowed screen areas) [S2].
+ 
+ ## How it works
+@@ -20,5 +20,5 @@
+     size_t width, height, depth;
+     struct libvxl_chunk* chunks;
+-    size_t* geometry; // Bitmask array for occupancy/solidity
++    size_t* geometry; // Occupancy data array
+     size_t streamed;
+ };
+@@ -34,12 +34,11 @@
+ };
+ ```
+-The `geometry` array acts as a bitmask where each bit represents the solidity of a voxel. The function `libvxl_map_issolid` checks these bits [S1, unofficial].
+ 
+ **Algorithm Steps**
+-1.  **Null Check**: If the map pointer is null, return `false` [S1, unofficial].
+-2.  **Boundary Check**: Ensure $(x, y, z)$ is within map bounds $[0, width) \times [0, height) \times [0, depth)$. If out of bounds, the voxel is considered on the surface (or the behavior is undefined; standard practice treats out-of-bounds as empty/non-solid) [G].
+-3.  **Neighbor Evaluation**: Check the 6-connected neighbors: $(x, y+1, z)$, $(x, y-1, z)$, $(x+1, y, z)$, $(x-1, y, z)$, $(x, y, z+1)$, $(x, y, z-1)$ [S1, unofficial].
+-4.  **Solidity Query**: For each neighbor, call `libvxl_map_issolid`.
+-5.  **Result**: If *any* neighbor returns `false` (is not solid), return `true` (is on surface). If all 6 neighbors are solid, return `false` [S1, unofficial].
++1. **Null Check**: If the map pointer is null, return `false` [S1, unofficial].
++2. **Boundary Check**: Ensure $(x, y, z)$ is within map bounds $[0, width) \times [0, height) \times [0, depth)$ [G].
++3. **Neighbor Evaluation**: Check the 6-connected neighbors: $(x, y+1, z)$, $(x, y-1, z)$, $(x+1, y, z)$, $(x-1, y, z)$, $(x, y, z+1)$, $(x, y, z-1)$ [S1, unofficial].
++4. **Solidity Query**: For each neighbor, determine if it is solid [S1, unofficial].
++5. **Result**: If *any* neighbor is not solid, return `true` (is on surface). If all 6 neighbors are solid, return `false` [S1, unofficial].
+ 
+ **Formula**
+@@ -52,29 +51,23 @@
+     if map is None:
+         return False
+-    
+-    # Check bounds. Out of bounds is treated as non-solid.
+     if not (0 <= x < map.width and 0 <= y < map.height and 0 <= z < map.depth):
+         return True
+-
+-    # Define 6-connected neighbors
+     neighbors = [
+-        (x, y + 1, z),
+-        (x, y - 1, z),
+-        (x + 1, y, z),
+-        (x - 1, y, z),
+-        (x, y, z + 1),
+-        (x, y, z - 1)
++        (x, y + 1, z), (x, y - 1, z),
++        (x + 1, y, z), (x - 1, y, z),
++        (x, y, z + 1), (x, y, z - 1)
+     ]
+-
+     for nx, ny, nz in neighbors:
+-        # Check if neighbor is out of bounds (treated as non-solid)
+         if not (0 <= nx < map.width and 0 <= ny < map.height and 0 <= nz < map.depth):
+             return True
+-        
+-        # Check if neighbor is solid
+-        if not libvxl_map_issolid(map, nx, ny, nz):
++        if not is_solid(map, nx, ny, nz):
+             return True
++    return False
+ 
+-    return False
++def is_solid(map, x, y, z):
++    if not (0 <= x < map.width and 0 <= y < map.height and 0 <= z < map.depth):
++        return False
++    # Check occupancy in geometry array or chunk blocks [G]
++    return True
+ ```
+ 
+@@ -83,12 +76,35 @@
+ 
+ **Steps**
+-1.  **Bounds Check**: Verify $(x, y, z)$ is within bounds [S1, unofficial].
+-2.  **Record Previous State**: For each of the 6 neighbors, record `surface_prev[i]`. A neighbor is considered "previously on surface" if it is not solid OR if it is solid but already on surface [S1, unofficial].
+-3.  **Set Air**: Call internal function `libvxl_map_setair_internal` to set the voxel to air and reset the geometry bit to 0 [S1, unofficial].
+-4.  **Update Neighbors**: For each neighbor $i$:
+-    -   If `!surface_prev[i]` (was not on surface) AND the neighbor is now on surface (due to the air voxel), call `libvxl_map_set_internal` with `DEFAULT_COLOR` to update its state [S1, unofficial].
++1. **Bounds Check**: Verify $(x, y, z)$ is within bounds [S1, unofficial].
++2. **Record Previous State**: For each of the 6 neighbors, record `surface_prev[i]`. A neighbor is considered "previously on surface" if it is not solid OR if it is solid but already on surface [S1, unofficial].
++3. **Set Air**: Call internal function `libvxl_map_setair_internal` to set the voxel to air and reset the geometry bit to 0 [S1, unofficial].
++4. **Update Neighbors**: For each neighbor $i$: if `!surface_prev[i]` (was not on surface) AND the neighbor is now on surface (due to the air voxel), call `libvxl_map_set_internal` with `DEFAULT_COLOR` to update its state [S1, unofficial].
+ 
+ **Pitfall**
+ `surface_prev` defaults to `true` if the neighbor is not solid. This prevents false restoration of air blocks for neighbors that were already empty/non-solid [S1, unofficial].
++
++**Pseudocode**
++```python
++def libvxl_map_setair_and_update(map, x, y, z):
++    if not (0 <= x < map.width and 0 <= y < map.height and 0 <= z < map.depth):
++        return
++    neighbors = [
++        (x, y + 1, z), (x, y - 1, z),
++        (x + 1, y, z), (x - 1, y, z),
++        (x, y, z + 1), (x, y, z - 1)
++    ]
++    surface_prev = [True] * 6
++    for i, (nx, ny, nz) in enumerate(neighbors):
++        if not is_solid(map, nx, ny, nz):
++            surface_prev[i] = True
++        else:
++            surface_prev[i] = libvxl_map_onsurface(map, nx, ny, nz)
++    # Set voxel to air and clear geometry bit
++    libvxl_map_setair_internal(map, x, y, z)
++    map.geometry[...] = 0 # Clear bit for [x,y,z] [G]
++    for i, (nx, ny, nz) in enumerate(neighbors):
++        if not surface_prev[i] and libvxl_map_onsurface(map, nx, ny, nz):
++            libvxl_map_set_internal(map, nx, ny, nz, DEFAULT_COLOR)
++```
+ 
+ ### Particle-Based Surface Tension Detection
+@@ -96,21 +112,21 @@
+ 
+ **Inputs and Outputs**
+-- **Input**: Particle position $p_i$, neighbor positions $p_j$, particle radius $R$, distance threshold $d_0$.
++- **Input**: Particle position $p_i$, neighbor positions $p_j$, particle radius $R$, distance threshold $d_0$, occlusion threshold.
+ - **Output**: Boolean indicating if particle $i$ is on the surface.
+ 
+ **Data Structures**
+--   **Screen**: Parameterized as an $18 \times 36$ environment map. Each column corresponds to 18 bits of an integer. 36 integers are used to mask the screen [S2].
++- **Screen**: Parameterized as an $18 \times 36$ environment map. Each column corresponds to 18 bits of an integer. 36 integers are used to mask the screen [S2].
+ 
+ **Algorithm Steps**
+-1.  **Encapsulation**: Encapsulate particle $i$ with a spherical cover of radius $R$ [S2].
+-2.  **Projection**: For each neighboring particle $j$, calculate the vector $\Delta p = p_j - p_i$ [S2].
+-3.  **Angle Calculation**: Calculate projection angles $\phi$ and $\theta$ on the spherical screen [S2]:
+-    -   $\phi = \tan^{-1}\left(\frac{\Delta p_y}{\sqrt{\Delta p_x^2 + \Delta p_z^2}}\right)$
+-    -   $\theta = \tan^{-1}\left(\frac{\Delta p_z}{\Delta p_x}\right)$
+-    -   $\Delta \theta = \tan^{-1}\left(\frac{R}{\sqrt{\|\Delta p\|^2 - R^2}}\right)$
+-    -   $\Delta \phi = \Delta \theta$ [S2]
+-4.  **Masking**: The occluding area on the screen is $[\theta - \Delta \theta, \theta + \Delta \theta] \times [\phi - \Delta \phi, \phi + \Delta \phi]$. Mask the corresponding bits in the 36 integers representing the environment map [S2].
+-5.  **Counting**: Count the mask ratio (shadowed area) [S2].
+-6.  **Decision**: If the total projection area from neighbors is below a given threshold, the particle is considered on the fluid surface [S2].
++1. **Encapsulation**: Encapsulate particle $i$ with a spherical cover of radius $R$ [S2].
++2. **Projection**: For each neighboring particle $j$, calculate the vector $\Delta p = p_j - p_i$ [S2].
++3. **Angle Calculation**: Calculate projection angles $\phi$ and $\theta$ on the spherical screen [S2]:
++   - $\phi = \tan^{-1}\left(\frac{\Delta p_y}{\sqrt{\Delta p_x^2 + \Delta p_z^2}}\right)$
++   - $\theta = \tan^{-1}\left(\frac{\Delta p_z}{\Delta p_x}\right)$
++   - $\Delta \theta = \tan^{-1}\left(\frac{R}{\sqrt{\|\Delta p\|^2 - R^2}}\right)$
++   - $\Delta \phi = \Delta \theta$ [S2]
++4. **Masking**: The occluding area on the screen is $[\theta - \Delta \theta, \theta + \Delta \theta] \times [\phi - \Delta \phi, \phi + \Delta \phi]$. Mask the corresponding bits in the 36 integers representing the environment map [S2].
++5. **Counting**: Count the mask ratio (shadowed area) [S2].
++6. **Decision**: If the total projection area from neighbors is below a given threshold, the particle is considered on the fluid surface [S2].
+ 
+ **Formula**
+@@ -124,50 +140,25 @@
+ **Pseudocode**
+ ```python
+-def detect_surface_particle(p_i, neighbors, R, d0):
+-    # Initialize 36 integers for the 18x36 environment map
++def detect_surface_particle(p_i, neighbors, R, threshold):
+     screen_mask = [0] * 36
+-    
+     for p_j in neighbors:
+         dx = p_j.x - p_i.x
+         dy = p_j.y - p_i.y
+         dz = p_j.z - p_i.z
+-        
+         dist_sq = dx*dx + dy*dy + dz*dz
+-        
+-        # Avoid division by zero or invalid geometry
+         if dist_sq <= R*R:
+             continue
+-            
+-        # Calculate angles
+         phi = atan2(dy, sqrt(dx*dx + dz*dz))
+         theta = atan2(dz, dx)
+-        
+-        # Calculate angular radius of the neighbor's projection
+         delta_theta = atan2(R, sqrt(dist_sq - R*R))
+         delta_phi = delta_theta
+-        
+-        # Map angles to screen coordinates
+-        # Assuming phi in [-pi/2, pi/2] maps to 0..17
+-        # Assuming theta in [-pi, pi] maps to 0..35
+         row = int((phi + pi/2) / pi * 18)
+         col = int((theta + pi) / (2*pi) * 36)
+-        
+-        # Clamp row/col to 0..17 and 0..35
+         row = max(0, min(17, row))
+         col = max(0, min(35, col))
+-        
+-        # Mask the bit in the integer for this column
+-        # Each integer holds 18 bits (rows)
+-        bit_pos = row
+-        screen_mask[col] |= (1 << bit_pos)
+-        
+-    # Count mask ratio (shadowed area)
+-    total_bits = 18 * 36
++        screen_mask[col] |= (1 << row)
+     masked_bits = sum(bin(m).count('1') for m in screen_mask)
+-    ratio = masked_bits / total_bits
+-    
+-    # Threshold check (value not specified in source, assume generic threshold)
+-    # If ratio is low, particle is on surface
+-    return ratio < 0.5 # Placeholder threshold
++    ratio = masked_bits / (18 * 36)
++    return ratio < threshold
+ ```
+ 
+@@ -175,29 +166,29 @@
+ 
+ ### Voxel Air Setting
+-Sets a voxel to air, updates the geometry bit, and restores surface status to previously covered neighbors. It differs from standard surface detection by actively modifying the map state and propagating surface updates to neighbors. Choose this when dynamically modifying voxel geometry and maintaining consistent surface flags is required. [S1, unofficial]
++Sets a voxel to air, updates the geometry bit, and restores surface status to previously covered neighbors [S1, unofficial]. Choose this when dynamically modifying voxel geometry and maintaining consistent surface flags is required.
+ 
+ ### Surface Tension Detection
+-Detects fluid surface particles by estimating occlusion on a spherical screen cover. It differs from voxel-based detection by operating on unstructured particles and using geometric projection rather than grid adjacency. Choose this for particle-based fluid simulations (PBD/SPH) where surface tension forces need to be applied only to boundary particles. [S2]
++Detects fluid surface particles by estimating occlusion on a spherical screen cover [S2]. Choose this for particle-based fluid simulations (PBD/SPH) where surface tension forces need to be applied only to boundary particles.
+ 
+ ## Operating characteristics
+ **Time Complexity**:
+--   Voxel-based: $O(1)$ per voxel, as it checks exactly 6 neighbors [S1, unofficial].
+--   Particle-based: $O(N)$ per particle, where $N$ is the number of neighbors, due to the loop over neighbors and spherical projection calculations [S2].
++- Voxel-based: $O(1)$ per voxel, as it checks exactly 6 neighbors [S1, unofficial].
++- Particle-based: $O(N)$ per particle, where $N$ is the number of neighbors, due to the loop over neighbors and spherical projection calculations [S2].
+ 
+ **Memory Complexity**:
+--   Voxel-based: Depends on the map structure. The `libvxl_map` stores chunks and a geometry bitmask [S1, unofficial].
+--   Particle-based: Requires storing neighbor lists and temporary screen masks (36 integers) per particle [S2].
++- Voxel-based: Depends on the map structure. The `libvxl_map` stores chunks and a geometry bitmask [S1, unofficial].
++- Particle-based: Requires storing neighbor lists and temporary screen masks (36 integers) per particle [S2].
+ 
+ **Performance**:
+--   Voxel-based detection is highly parallelizable and efficient on GPUs, as each voxel's surface status is independent [S1, unofficial].
+--   Particle-based detection can also be parallelized on the GPU, as the occlusion calculation for each particle is independent of others [S2].
++- Voxel-based detection is highly parallelizable and efficient on GPUs, as each voxel's surface status is independent [S1, unofficial].
++- Particle-based detection can also be parallelized on the GPU, as the occlusion calculation for each particle is independent of others [S2].
+ 
+ **Strengths**:
+--   Voxel-based: Simple, robust, and fast for grid-based data.
+--   Particle-based: Accurate for fluid dynamics, captures surface curvature via spherical projection.
++- Voxel-based: Simple, robust, and fast for grid-based data.
++- Particle-based: Accurate for fluid dynamics, captures surface curvature via spherical projection.
+ 
+ **Limitations**:
+--   Voxel-based: Discrete nature may lead to jagged surfaces; requires careful handling of boundary conditions.
+--   Particle-based: Computationally more expensive due to trigonometric functions and neighbor searches; sensitive to particle distribution.
++- Voxel-based: Discrete nature may lead to jagged surfaces; requires careful handling of boundary conditions.
++- Particle-based: Computationally more expensive due to trigonometric functions and neighbor searches; sensitive to particle distribution.
+ 
+ ## Background

@@ -1,0 +1,293 @@
+First off, thank you for providing this project. It's incredible. Looks great. Technical marvel. I am working on adding buoyancy to a sample project following this video. The provided code for the floating cube requires a function get_he...
+
+How to sample wave height for a given pixel (add buoyancy)? · Issue #6 · 2Retr0/GodotOceanWaves · GitHub
+Skip to content
+You signed in with another tab or window. Reload to refresh your session.
+You signed out in another tab or window. Reload to refresh your session.
+You switched accounts on another tab or window. Reload to refresh your session.
+Dismiss alert
+How to sample wave height for a given pixel (add buoyancy)? #6
+New issue
+Copy link
+New issue
+Copy link
+Open
+Open
+How to sample wave height for a given pixel (add buoyancy)?#6
+Copy link
+Description
+jonandrewdavis
+opened on Oct 17, 2024
+Issue body actions
+First off, thank you for providing this project. It's incredible. Looks great. Technical marvel.
+I am working on adding buoyancy to a sample project following this video.
+The provided code for the floating cube requires a function get_height which samples the noise map of a simple water shader at a given point (or points).
+```
+func _physics_process(delta):
+	submerged = false
+	for p in probes:
+		var depth = water.get_height(p.global_position) - p.global_position.y 
+		if depth > 0:
+			submerged = true
+			apply_force(Vector3.UP * float_force * gravity * depth, p.global_position - global_position)
+```
+The shader in this project is much more complex, but it should still be possible to accomplish this. I'm curious what method I can use to access height info.
+My basic approach was going to be similar to the code in the video:
+Get the shader ShaderMaterial
+Get the sampler2DArray displacements and map_scales using get_shader_parameter( )
+Implement a new get_height function in water.gd that would mirror the shader's vertex func by:
+Iterating over the displacements, creating images or textures texture.get_image() or something
+Not sure how to do this conversion in gdscript texture(displacements, vec3(UV*scales.xy, float(i))).xyz * scales.z;
+Add up the displacement displacement += for each
+return the pixel's height like: global_position.y + noise.get_pixelv(pixel_pos).r * height_scale;
+Here's the sample:
+```
+func get_height(world_position: Vector3) -> float:
+	var uv_x = wrapf(world_position.x / noise_scale + time * wave_speed, 0, 1)
+	var uv_y = wrapf(world_position.z / noise_scale + time * wave_speed, 0, 1)
+
+	var pixel_pos = Vector2(uv_x * noise.get_width(), uv_y * noise.get_height())
+	return global_position.y + noise.get_pixelv(pixel_pos).r * height_scale;
+```
+For my code, I couldn't get very far. I first tried collecting the information I needed via get_shader_parameter() and found many were null.
+```
+var water_shader:ShaderMaterial  
+
+func _ready() -> void:
+	RenderingServer.global_shader_parameter_set(&'water_color', water_color.srgb_to_linear())
+	RenderingServer.global_shader_parameter_set(&'foam_color', foam_color.srgb_to_linear())
+	
+        // Added new code to test:
+	water_shader = material_override
+	print('water shader', water_shader)
+	
+	print('get_shader_parameter, roughness: ', water_shader.get_shader_parameter('roughness'))
+	print('get_shader_parameter: normal_strength: ', water_shader.get_shader_parameter('normal_strength'))
+	print('get_shader_parameter: map_scales: ', water_shader.get_shader_parameter('map_scales'))
+	print('-----------')
+	print('RenderingServer.get_shader_parameter_list: ', '[&"displacements", &"foam_color", &"normals", &"num_cascades", &"water_color"]')
+	print('-----------')
+	print('get_shader_parameter: water_color: ', water_shader.get_shader_parameter('water_color'))
+	print('get_shader_parameter: displacements: ', water_shader.get_shader_parameter('displacements'))
+	print('get_shader_parameter: &"displacements": ', water_shader.get_shader_parameter(&"displacements"))
+```
+Which yields the output:
+```
+water shader<ShaderMaterial#-9223372007175879383>
+get_shader_parameter, roughness: 0.65
+get_shader_parameter: normal_strength: 1
+get_shader_parameter: map_scales: [(0.011364, 0.011364, 1, 1), (0.017544, 0.017544, 0.75, 1), (0.0625, 0.0625, 0, 0.25)]
+-----------
+RenderingServer.get_shader_parameter_list: [&"displacements", &"foam_color", &"normals", &"num_cascades", &"water_color"]
+-----------
+get_shader_parameter: water_color: <null>
+get_shader_parameter: displacements: <null>
+get_shader_parameter: &"displacements": <null>
+```
+The displacements are null, as are all of the ones in the get_shader_parameter_list. I think that may be because global, so they could be tough to access. Ones I can get do not have global.
+```
+uniform float roughness : hint_range(0.0, 1.0) = 0.4;
+uniform float normal_strength : hint_range(0.0, 1.0) = 1.0; // Global normal strength
+
+group_uniforms cascade_data;
+uniform vec4 map_scales[MAX_CASCADES];               // Scales for displacement/normal maps. Packed: [uv scale, displacement scale, normal scale]
+global uniform uint num_cascades;
+global uniform sampler2DArray displacements;         // Each layer represents one wave cascade.
+global uniform sampler2DArray normals : hint_normal; // Each layer represents one wave cascade.
+```
+roughness is available but water_color is not. I can also get map_scales which seems useful for what I want to do eventually.
+So far, I am stuck trying to figure out how to get displacements. Even if I could access it, it's probably likely that I'd have trouble unpacking it.
+Next, I tried to access the displacement_map created in water.gd, hoping it might be passed in by reference (unlikely, but possible) and be updated with the water shader and I could query for a pixel's height on those images by sampling it.
+```
+var displacement_maps := Texture2DArrayRD.new()
+var normal_maps := Texture2DArrayRD.new()
+```
+Can count them, but I tried to see if I could get an image according to the Texture2DArrayRD docs:
+```
+displacement_maps.get_layer_data(0)
+```
+I got:
+```
+E 0:00:01:0221   water.gd:91 @ _ready(): Texture requires the `RenderingDevice.TEXTURE_USAGE_CAN_COPY_FROM_BIT` to be set to 
+```
+Which of course led me into res://assets/render_context.gd, which is likely not something I'm able to change.
+Several open questions:
+Is this approach fundamentally flawed?
+Is there a way to expose a more simplistic deformed noise map that's "roughly" in sync with the cascades?
+Maybe also provide a new noise map that can be updated with wave height and queried easily by buoyant objects
+So, if anyone has suggestions on how best to add basic bouncy please let me know. Happy to take this discussion elsewhere if there's a better place for it. Thanks again for the project.
+👍React with 👍4Reacted by FireRun, Red Terminator, Daniel Garcia and Robo
+Activity
+jonandrewdavis
+changed the title [-]How to sample height for a given pixel?[/-] [+]How to sample wave height for a given pixel (add buoyancy)?[/+] on Oct 17, 2024
+ViWalkerDev commented on Nov 2, 2024
+ViWalkerDev
+on Nov 2, 2024
+Last edited by ViWalkerDev
+More actions
+Hi there!
+I wanted to do the same and after spending a day wrapping my head around the shader code I worked out a solution that more or less achieves what I wanted. I doubt it's the best way to do it, and there are likely plenty potential optimisations. I don't have the time to do a full write up right now, but I'll probably do a blog post on it at some point. But basically I just wrote another compute shader that runs after the fft_unpack shader that takes the updated displacement map, displacement scales for each cascade, and a "wave_height" buffer, and populates the wave_height buffer by combining the y components of each layer of the displacement map at each xz position in the map, applying the necessary cascade displacement scale values.
+Then it's a matter of copying the buffer back to the CPU. Currently working out how to reliably index the calculated heights into the world, but that's more just an issue for me because of my lack of experience in godot.
+Here's an example of a cube using the height data to "float" (it needs a lot of work, but it hasn't been my focus).
+https://youtu.be/olCr-f8Q10c
+When I've got it working nicely I'll commit it through to my fork if you want to use it.
+jonandrewdavis commented on Nov 8, 2024
+jonandrewdavis
+on Nov 8, 2024
+Author
+More actions
+It took me 2 days to get something looking only half as good as the example you posted, so I'd definitely be interested in a branch.
+I am not sure what the displacement map you ended up with looks like or if I'm able to help tune that part, but yours certainly looks quite good! Let me know when you commit to a fork and I can help out / take a look. No rush, as this is just a side project of a side project for me.
+👍React with 👍1Reacted by FireRun
+kblaedel commented on Jan 27, 2025
+kblaedel
+on Jan 27, 2025
+More actions
+Hi there!
+I wanted to do the same and after spending a day wrapping my head around the shader code I worked out a solution that more or less achieves what I wanted. I doubt it's the best way to do it, and there are likely plenty potential optimisations. I don't have the time to do a full write up right now, but I'll probably do a blog post on it at some point. But basically I just wrote another compute shader that runs after the fft_unpack shader that takes the updated displacement map, displacement scales for each cascade, and a "wave_height" buffer, and populates the wave_height buffer by combining the y components of each layer of the displacement map at each xz position in the map, applying the necessary cascade displacement scale values.
+Then it's a matter of copying the buffer back to the CPU. Currently working out how to reliably index the calculated heights into the world, but that's more just an issue for me because of my lack of experience in godot.
+Here's an example of a cube using the height data to "float" (it needs a lot of work, but it hasn't been my focus).
+https://youtu.be/olCr-f8Q10c
+When I've got it working nicely I'll commit it through to my fork if you want to use it.
+Did you manage to calculate the hight correctly using your compute shader? I have only been able to make it work by implementing the vertex shader code in gscript and then calculating the height of a given pixel there. This, unfortunately, seems to be pretty expensive to calculate if need to do it for multiple locations in the same frame.
+Lucactus22 commented on Feb 11, 2025
+Lucactus22
+on Feb 11, 2025
+More actions
+Hi @jonandrewdavis,
+I made an implementation of buoyancy work in my fork: link
+It isn't super performant, as it copies the displacement map generated on the GPU to the cpu x times every second. But it is a starting point.
+Hope it is useful for someone.
+krautdev commented on Feb 18, 2025
+krautdev
+on Feb 18, 2025
+Last edited by krautdev
+More actions
+Hi @jonandrewdavis,
+I made an implementation of buoyancy work in my fork: link
+It isn't super performant, as it copies the displacement map generated on the GPU to the cpu x times every second. But it is a starting point.
+Hope it is useful for someone.
+This is very cool! I made a fork with very similar adustments as well: https://github.com/krautdev/GodotOceanWaves Maybe we can copy & paste the best stuff from one another. I'm currently trying to make the GPU to CPU readback in a separate thread, to minimize the main thread stall. There are some other (visual) features as well. I have a basic buyancy system like you do, with springy physics, but maybe we can also make another appraoch work: https://www.gamedeveloper.com/programming/water-interaction-model-for-boats-in-video-games and https://www.gamedeveloper.com/programming/water-interaction-model-for-boats-in-video-games-part-2. That would be super cool, right? 💃 You can watch a little presentation of my fork here: https://youtu.be/zmSou_y_LEY
+❤️React with ❤️5Reacted by Lucas, jottomadai, Kristoffer Laustsen Blædel, Lemonsqueezy and Bradley Morris
+antzGames commented on Feb 27, 2025
+antzGames
+on Feb 27, 2025
+Last edited by antzGames
+More actions
+I based my solution on https://github.com/krautdev/GodotOceanWaves but I added Archimedes force, damper, buoyancy power and min/max rotation to the force calculation. I also sample at least 4 points per ship.
+Here is a quick video on my result: https://youtube.com/shorts/DmeIdv2c5ok
+❤️React with ❤️5Reacted by Henry, jottomadai, Andrew Davis, SepVeneto and Bradley Morris
+kblaedel commented on Feb 28, 2025
+kblaedel
+on Feb 28, 2025
+Last edited by kblaedel
+More actions
+I like the amount of activity on this. The way I made it work was to clone the repo from @krautdev and open it with a self-compiled version of godot where the Hydro module (https://github.com/benbot/hydro) was added.
+This module includes simulation of buoyancy on each triangle of a collider and uses a given mesh for calculating the actual volume of the boats. It is written in C++ for performance reasons. It took me quite a bit of time to fully understand the module and actually make it work. I had to play around with the center of mass, gravity scale and weight quite a bit to make the ships behave realisticly.
+I am very happy with the result (ignore the sudden stops - most obvious on the big ship. I am still playing around with the propulsion system): https://youtu.be/e6yCDlS0m5M
+antzGames commented on May 22, 2025
+antzGames
+on May 22, 2025
+More actions
+I also used the Dutch Fluyt, with propulsion and rough waves. Still to reactive imo.
+Video link: https://www.youtube.com/shorts/7-H4DWtoV0E
+jonandrewdavis commented on May 22, 2025
+jonandrewdavis
+on May 22, 2025
+Author
+More actions
+All of these look pretty great! Much better than what I was able to do.
+Did anyone have a fork or the code commited somewhere to learn from?
+antzGames commented on May 22, 2025
+antzGames
+on May 22, 2025
+More actions
+So I am not going to have a public fork of this repo until its fixed for Godot 4.4.
+A PR for the Godot 4.4 fix is in this repo for more than 6 weeks.
+At 2.5k stars this repo should be more active, but its not.
+👍React with 👍1Reacted by Andrew Davis
+jonandrewdavis commented on Oct 13, 2025
+jonandrewdavis
+on Oct 13, 2025
+Author
+More actions
+I am still working on this on and off. I am having some success with @krautdev's solution https://github.com/krautdev/GodotOceanWaves updated to Godot version 4.5
+Two notes I wanted to share:
+Works in 4.5 via: (patching the pipeline crash fix from Unusable: Error at (30, 68): Identifier "ImGui" not declared in current scope #10
+This new feature texture_get_data_async might help Implement RD::buffer_get_data_async() and RD::texture_get_data_async() godotengine/godot#100110
+From an issue here: RenderingDevice - texture functions are no longer allowed in background threads due to thread guards. godotengine/godot#99750
+For number 2: krautdev has this box unchecked:
+Write async readback from GPU. The displacement textures are loaded from GPU via RenderingServer.texture_get_data passing the RID of the textures which is saved in wave_generator.descriptors[&'displacement_map'].rid. I'm still figuring out how a separate thread can be used to read back the textures from GPU to CPU without additional waiting times due to mutexes blocking each other.
+I think they could benefit from something called texture_get_data_async. This line location: https://github.com/krautdev/GodotOceanWaves/blob/main/assets/water/water.gd#L198. I was getting errors here
+```
+func _setup_cpu_displacement_textures() -> void:
+	# load first_n_cascades_for_collision_detection textures
+	var _actually_used_textures_idx:Array = []
+	for i in range(len(parameters)):
+		var cascade = parameters[i]
+		if cascade.displacement_scale > 0.001:
+			_actually_used_textures_idx.append(i)
+	
+	var rid_displacement_map = wave_generator.descriptors[&'displacement_map'].rid
+	var device:RenderingDevice = RenderingServer.get_rendering_device()
+	for i in range(len(parameters)):
+		if i in _actually_used_textures_idx:
+			var tex = device.texture_get_data(rid_displacement_map, i) # layer is the texture of the cascade with the same index
+			var img:Image = Image.create_from_data(wave_generator.map_size, wave_generator.map_size, false, Image.FORMAT_RGBAH, tex)
+			#_cpu_displacement_textures_buffer[i] = img
+			_cpu_displacement_textures[i] = img
+	mutex = Mutex.new()
+```
+My error was:
+```
+E 0:00:00:994   water.gd:208 @ _update_cpu_displacement_textures(): This function (texture_get_data) can only be called from the render thread. 
+  <C++ Error>   Condition "render_thread_id != Thread::get_caller_id()" is true. Returning: (Vector<uint8_t>())
+  <C++ Source>  servers/rendering/rendering_device.cpp:1970 @ texture_get_data()
+  <Stack Trace> water.gd:208 @ _update_cpu_displacement_textures()
+```
+because this is called in a new thread
+```
+		thread = Thread.new()
+		_img_async_image_idx = _cpu_displacement_textures_indeces[_texture_loading_index]
+		thread.start(_update_cpu_displacement_textures)
+		#_update_cpu_displacement_textures()
+		if not _buffer_img:
+			thread.wait_to_finish()
+```
+So I used the commented out #_update_cpu_displacement_textures() non threaded version and got it somewhat working, though probably unperformant. I say all this because I still think it would be fun to use this for a game, though I am still a relative beginner. Keep up the good work ya'll and good luck!
+👍React with 👍1Reacted by SepVeneto
+kblaedel commented on Oct 14, 2025
+kblaedel
+on Oct 14, 2025
+More actions
+This is interesting @jonandrewdavis. I wonder how impactful the delay is. Would be lovely if it is only a single or very few frames. Do you have any numbers in this regard you can share?
+For now I am happy with the implementation by @krautdev. I am able to maintain ~150 FPS with a 512x512 map size on the water, some decent buoyancy calculations, and expanded shader for the water (added refractions, reflections and other goodies). I might switch over to an async way at a later stage if I need the performance.
+I made a short clip to show my current progress, including temporarily adding a box to the raft so the weight distribution moves a bit off-center. In my game, you will be transporting goods between harbors: https://www.youtube.com/watch?v=K7KvoaF_yAU
+jonandrewdavis commented on Oct 14, 2025
+jonandrewdavis
+on Oct 14, 2025
+Last edited by jonandrewdavis
+Author
+More actions
+@kblaedel Well done! Your video looks excellent. Best I've seen so far!
+I am not sure that the texture_get_data_async is necessary. I just saw the threaded version caused an error on Mac & saw it mentioned in krautdev's README. If you have fine performance and functionality with your system, then, all good!
+Any chance you'd be able to share back your demo project? Does it work in Godot 4.5? I am simply not skilled enough to get all of this working, but, such is life. I'll keep trying.
+Sign up for free to join this conversation on GitHub. Already have an account? Sign in to comment
+Metadata
+Metadata
+Assignees
+No one assigned
+Labels
+No labels
+No labels
+Projects
+No projects
+Milestone
+No milestone
+Relationships
+None yet
+Development
+No branches or pull requests
+Issue actions
+Open in GitHub Copilot app
+You can’t perform that action at this time.

@@ -1,0 +1,1231 @@
+Gaussian On-the-Fly Splatting: A Progressive Framework for Robust
+Near Real-Time 3DGS Optimization
+arXiv:2503.13086v2 [cs.CV] 30 Jul 2025
+Yiwei Xu, Yifei Yu, Wentian Gan, Tengfei Wang, Zongqian Zhan, Hao Cheng and Xin Wang
+Abstract— 3D Gaussian Splatting (3DGS) achieves highfidelity rendering with fast real-time performance, but existing
+methods rely on offline training after full Structure-fromMotion (SfM) processing. In contrast, this work introduces
+Gaussian on-the-fly Splatting (abbreviated as On-the-Fly GS),
+a progressive framework enabling near real-time 3DGS optimization during image capture. As each image arrives, its pose
+and sparse points are updated via on-the-fly SfM [1]1 , and
+newly optimized Gaussians are immediately integrated into the
+3DGS field. To achieve this, we propose a progressive Local
+& Semi-Global optimization to prioritize the new image and
+its neighbors by their corresponding overlapping relationship,
+allowing the new image and its overlapping images to get more
+training. To further stabilize training across previous and new
+images, an adaptive learning rate schedule balances the iterations and the learning rate. Extensive experiments on multiple
+benchmarks show that our On-the-Fly GS reduces training
+time significantly, optimizing each new image in seconds with
+minimal rendering loss, offering one of the first practical steps
+toward rapid, progressive 3DGS reconstruction.
+I. INTRODUCTION
+Novel View Synthesis (NVS) aims to generate realistic
+images of novel views based on a set of input images [2].
+Recently, Kerbl et al. [3] introduced a novel 3D representation technique known as 3D Gaussian Splatting (3DGS),
+which employs a large number of 3D Gaussian kernels to
+represent a 3D scene. Subsequent research has made notable
+advancements in improving the 3DGS field in terms of
+training efficiency [4]–[9], rendering speed [10], [11], and
+output quality [12]–[16]. However, most existing approaches
+rely on an offline training solution, which means that 3DGS
+can only be optimized after all images are processed by
+COLMAP [17], preventing immediate synthesis of novel
+views upon completion of data acquisition [18]. Some recent
+works [18]–[21] have made progress towards real-time/near
+real-time training of 3DGS by integrating SLAM, such as
+GS-SLAM [19], RTG-SLAM [18]. They take indoor video
+frames with inherent spatial and temporal continuity as input,
+which might degenerate in some practical applications [1],
+[22]. More detailed differences between SLAM-based 3DGS
+methods and our On-the-Fly GS are discussed in Sect.II.
+*This work was supported by the National Natural Science Foundation of
+China (No.42301507) and Natural Science Foundation of Hubei Province,
+China (No. 2022CFB727).
+1 Yiwei Xu, Yifei Yu, Wentian Gan, Tengfei Wang, Zongqian Zhan, Xin
+Wang are with the School of Geodesy and Geomatics, Wuhan University,
+China PR. (Corresponding Author: Xin Wang, xwang@sgg.whu.edu.cn)
+2 Hao Cheng is with the Department of Earth Observation Science at
+ITC Faculty Geo-Information Science and Earth Observation, University of
+Twente, the Netherlands.
+1 See more at https://yifeiyu225.github.io/on-the-flySfMv2.github.io/
+Fig. 1.
+Our online On-the-Fly GS vs. Offline Training Method
+To address these limitations, we propose On-the-Fly GS, a
+progressive framework for near real-time 3DGS field training
+that enables 3D Gaussian training during discrete image
+capturing. As shown in Fig. 1, in our work, a new image can
+be acquired in an arbitrary manner. Its pose and relevant new
+point clouds are estimated online by the On-the-Fly SfM [1],
+which are then input into our On-the-Fly GS to optimize the
+corresponding local 3DGS field in near real time and update
+the entire 3DGS field.
+In contrast to the original 3DGS, which focuses on reconstructing a static scenario using a fixed set of images
+and their corresponding poses, our On-the-Fly GS targets a
+dynamically expanding scenario, where images are progressively captured over time. This shift necessitates a different
+training strategy tailored for the incremental expansion of
+the 3DGS field. One key challenge in training dynamically
+extended scenes lies in the inconsistency of local quality
+within the 3DGS field. Images captured earlier undergo more
+training iterations, resulting in higher rendering quality, while
+newly acquired images, having undergone fewer training
+iterations, exhibit lower rendering quality. Consequently, the
+learning rate decay strategy of the original 3DGS based
+on complete 3DGS field quality is no longer applicable.
+Instead, On-the-Fly GS calculates the learning rate for each
+image based on the number of iterations it has undergone.
+Images with fewer training iterations are assigned higher
+learning rates, while images with more iterations receive
+lower learning rates.
+Furthermore, in the Local & Semi-Global optimization,
+based on the overlapping relationships, each local connected
+image is assigned a weight that determines the number of
+training iterations it will undergo. This weight encourages
+prioritizing training the newly added images and their local
+overlapping images, thereby accelerating the rendering qual-
+ity in regions captured more recently. To further enhance
+training efficiency and near real-time performance for each
+image, two strategies have been integrated into On-theFly GS: inspired by Adr-Gaussian [5], a load-balancing
+strategy is incorporated to mitigate the over-accumulation
+of 3D Gaussians, while simultaneously ensuring fast training of newly added regions; Drawing from insights from
+Taming-3DGS [7], we re-implement the back-propagation
+by transitioning from pixel-based parallelism to splattingbased parallel computation. In summary, this work makes
+the following contributions:
+• We propose On-the-Fly GS, a novel progressive solution
+for near real-time 3DGS field optimization that enables
+robust online training during image acquisition.
+• To achieve robust and near real-time progressive 3DGS
+training, a Local & Semi-Global optimization strategy
+is designed, and self-adaptive methods are presented to
+determine the training iteration number of each image
+and to update the learning rate during each iteration.
+• Our On-the-Fly GS reduces training time significantly
+on several benchmark datasets, offering one of the first
+practical steps toward rapid 3DGS optimization during
+image capturing.
+II. RELATED WORKS
+Novel View Synthesis (NVS). Traditional photogrammetry
+method takes unposed images as input data, generates a
+mesh model of the current scene through a complex pipeline,
+and renders images from arbitrary viewpoints using backprojection [23]. In recent years, the advent of Neural Radiance Fields (NeRF) [24] and 3D Gaussian Splatting (3DGS)
+[3] has introduced novel paradigms for NVS. NeRF, based
+on volumetric rendering, leverages a multi-layer perceptron
+(MLP) to implicitly represent a 3D scene. Although NeRF
+has demonstrated strong rendering capabilities, it still requires substantial computational resources when facing significant challenges in complex, unbounded outdoor scenes,
+where achieving high-quality, high-resolution rendering. To
+address these limitations, Kerbl et al. [3] introduced 3DGS
+to explicitly represent 3D scenes. 3DGS offers faster training
+and rendering speeds for novel views while maintaining
+acceptable rendering quality, which has led to widespread
+attention since its introduction.
+3DGS fast training. Although 3DGS delivers high-quality
+and real-time rendering, its training process remains computationally intensive, making it difficult to directly meet the
+demands of near real-time or real-time applications. Consequently, extensive research has been dedicated to accelerating
+the 3DGS optimization.
+Several studies have sought to expedite 3DGS training by
+reducing the number of Gaussians in the scene representation. Panagiotis et al. [4] proposed an efficient and resolutionaware Gaussian pruning strategy along with an adaptive adjustment method for the degree of spherical harmonic coefficients. It reduces the number of Gaussians by more than 50%
+and saves memory. EfficientGS [6] and LightGaussian [25]
+evaluate the contribution of each Gaussian, only retaining
+the critical Gaussians and removing the redundant ones. AdrGaussian [5] introduced a load balancing strategy to optimize
+the distribution of Gaussians and prevent their excessive
+accumulation in specific regions while also avoiding too
+few Gaussians in other areas. Since 3DGS training requires
+optimizing the parameters of a large number of Gaussians,
+reducing 3D Gaussians can significantly enhance training
+speed and decrease memory overhead.
+Unlike methods that focus on reducing the number of
+Gaussians, some studies also focused on refining training strategies to improve computational efficiency. Taming
+3DGS [7] implements a Gaussian-based parallel strategy
+for gradient accumulation and optimizes the computation
+of spherical harmonics and differentiable loss functions,
+thereby enhancing back-propagation efficiency. Facing the
+challenge of large-scale scenes and high-resolution image
+data, RetinaGS [8] and DOGS [9] propose a parallel training
+method that divides the whole scene into several overlapping
+blocks, enabling parallel and accelerating training for largescale scenes.
+3DGS real-time training. Recent studies have explored
+real-time training of 3DGS. Before 3DGS, through integration with SLAM, NICE-SLAMM [20] and Vox-Fusion
+[21] successfully achieved real-time NeRF training. More
+recently, 3DGS has also achieved real-time training via
+similar integration with SLAM. GS-SLAM [19] predicts
+and continuously refines the poses of keyframes. Based on
+depth priors, it adds a certain number of Gaussians to the
+3DGS field, only focusing the optimization primarily on
+newly added and recently added keyframes. RTG-SLAM
+[18] also leverages depth to support 3DGS training and
+further improves the strategies for both Gaussian addition
+and optimization. Compared to GS-SLAM, it achieves significantly better training efficiency and novel view rendering
+quality. Subsequently, numerous efforts have been made
+to further improve SLAM-based 3DGS methods. Deng et
+al. [26] propose a sliding window-based masking strategy
+to reduce redundant Gaussians, thereby improving training
+efficiency and reducing memory consumption. GSFusion
+[27] incorporates each Gaussian into a volumetric mapping system to leverage geometric information, significantly
+accelerating the training process while maintaining high
+rendering quality. However, their reliance on depth sensors
+would be limited when dealing with large-scale outdoor
+scenes or UAV images. Although some existing methods take
+RGB-only data as input (such as GS-SLAM [19], WildGSSLAM [28], DROID-Splat [29], On-the-Fly NVS [30]), they
+still struggle to handle discrete images that are not spatially
+and temporally continuous.
+In contrast, our On-the-Fly GS, which can deal with
+images captured in an arbitrary way without spatiotemporal
+continuity, employs a progressive framework for near realtime 3DGS training. It only requires that the newly fly-in
+image has a certain degree of overlap with all previously
+registered images, and does not rely on depth priors for
+3DGS field expansion. It addresses the limitations of existing
+SLAM-based 3DGS methods and extends the applicability of
+3DGS training to more general use cases.
+III. PRELIMINARIES
+In this section, two key preliminaries of 3DGS [3] and
+On-the-fly SfM [1] are introduced.
+3D Gaussian Splatting. 3DGS employs a large number of
+Gaussians to represent a real 3D scene [3]. Given the rotation
+matrix R and the scaling matrix S, the geometric properties
+of each Gaussian are defined by a covariance matrix Σ =
+RSS T RT centered at point X0 :
+1
+T
+−1
+G(X) = e− 2 (X−X0 ) Σ
+(X−X0 )
+(1)
+Furthermore, 3DGS uses spherical harmonics (SH) and
+opacity σ to reveal the material properties. Given the
+splatting opacities αi estimated based on Gaussian-to-Pixel
+distance and color ci calculated from SH of N Gaussians
+associated with the specific pixel, 3DGS calculates the color
+of the pixel cp by alpha blending, as follows:
+
+
+N
+i−1
+X
+Y
+ci ai
+cpixel =
+(1 − aj )
+(2)
+i=1
+j=1
+On-the-Fly SfM. Traditional SfM frameworks (e.g.,
+COLMAP [17]) are incapable of processing images in an
+online manner. To overcome this limitation, we rely on the
+On-the-Fly SfM [1] for our subsequent implementation. Onthe-Fly SfM employs a Hierarchical Weighted Local Bundle
+Adjustment (BA), in which only neighboring connected and
+registered images are incorporated into BA after acquiring a
+new image. Unlike COLMAP’s BA, which incurs a substantial computational cost as the number of images increases,
+Hierarchical Weighted Local BA significantly reduces time
+complexity, ensuring efficient processing. Additionally, Onthe-Fly SfM can achieve online feature matching via global
+feature retrieval on HNSW (Hierarchical Navigable Small
+World) [31], enabling efficient dynamic updates for the
+matching matrix. On-the-fly SfM allows for near real-time
+pose estimation and sparse point cloud generation immediately after capturing a new image, ensuring a continuous and
+timely input for our approach.
+IV. METHODOLOGY
+A. Overview of on-the-fly GS
+To achieve near real-time 3DGS field optimization, we
+propose a progressive training framework. As illustrated in
+Fig. 2, our training process is structured into three distinct
+phases:
+Phase 1: Initial 3DGS Training. Training the 3DGS field
+with a limited number of images risks overfitting to the initial
+few images (e.g., 2 or 3 images) [32]. To mitigate this, we
+begin by training an initial 3DGS field after On-the-Fly SfM
+has estimated the poses and generated the sparse point cloud
+for N0 initial images. This initial 3DGS field serves as the
+foundation for subsequent progressive training. In this phase,
+we adopt the original 3DGS training method, but a stricter
+limit was imposed on the number of training iterations to
+prevent overfitting to these initial images.
+Phase 2: Progressive 3DGS Training. As a new image is
+acquired, On-the-Fly SfM continuously updates the camera
+poses of both the newly acquired and previously registered
+images, while refining the sparse point cloud. Based on
+the updated sparse point cloud, some new Gaussians are
+appended to the previous 3DGS field. The updated 3DGS
+field will then be optimized. During the optimization, the
+new fly-in image and its neighboring images are prioritized
+for training to accelerate the optimization of newly expanded
+regions. Meanwhile, some of the other images are randomly
+selected as training targets to avoid degrading the entire
+scene, including the very previous 3DGS field.
+Phase 3: Final Optimization. Once all images have been
+acquired and the progressive training is complete, On-theFly SfM further performs global BA on the estimated poses.
+Subsequently, a rapid additional optimization is applied to
+the current 3DGS field, enabling a rapid improvement in
+overall rendering quality within a short period of time.
+B. 3D Gaussian field Update with newly fly-in images
+For the newly fly-in image, On-the-Fly SfM estimates
+the pose of the new image and optimizes the pose of its
+neighboring connected images via an improved local BA
+[1], simultaneously updating the sparse point cloud. Before
+updating the previously trained 3DGS field, a search tree is
+constructed for the existing sparse point cloud. The sparse
+points from the new image are then queried against this
+search tree using a predefined threshold. Points in the new
+image whose shortest distance from the existing points
+exceeds the threshold are classified as newly added points.
+These newly added points are then initialized as newly
+added Gaussians and directly incorporated into the current
+3DGS field, facilitating the 3DGS field training on the newly
+expanded region.
+C. Self-adaptive Training Iteration Allocation via Hierarchical Image Weighting
+Hierarchical Image Weighting. Newly added images often
+introduce novel, unexplored regions or correspond to areas
+where the current 3DGS field exhibits poor rendering quality.
+To ensure that more training is allocated to the new image
+and its neighboring connected images during optimization,
+we propose an image hierarchical weighting strategy, which
+can be used to adaptively allocate training iterations for each
+image. The weight is determined by the overlap relationship
+between the newly fly-in image and the already registered
+images, as depicted in Fig. 3.
+Assuming that there are n − 1 registered images, when
+the image n (I11 , l = 1) is newly added, the weight of the
+newly added image is fixed as ω11 = 1. The weights of
+the remaining registered images are calculated based on the
+match matrix online, estimated by On-the-Fly SfM. In the
+match matrix, the overlapping degree of any two images is
+calculated based on the number of matched feature points
+shared between them. If the overlapping degree of any two
+Fig. 2. Workflow of the proposed On-the-Fly GS. We first initialize the 3DGS field. Then, for each new fly-in image, we update the current 3DGS field
+and perform the optimization on it. Finally, after a final global BA of previous SfM results, we further refine the 3DGS field to enhance rendering quality.
+Fig. 3. Hierarchical Image Weighting. The already solved images are
+clustered into hierarchical layers using their overlap relationships, assigning
+higher weights to those that exhibit closer relationship with the new image.
+images is Mi,j , for images I2i that have a direct overlapping
+relationship (Mi,n ̸= 0, l = 2) with the newly fly-in image,
+their weights ω2i are calculated using the following equation:
+ω2i = ω11 × Mi,n = Mi,n .
+(3)
+For images Ili that have an indirect overlapping relationship
+(Mi,n = 0, l ≥ 3) with the newly added image, their weights
+are determined by their overlapping relationship with images
+in the previous layer and the weights of those images. If the
+layer k − 1 contains Nk−1 images, the weight of the image j
+in the layer k −1 is ω(k−1)j , the weight of the corresponding
+image i in layer k will be calculated as follows:
+PNk−1
+ωki =
+j=1
+ω(k−1)j × M(k−1)j,ki
+Nk−1
+(4)
+Local & Semi-Global optimization. After the addition of
+any new fly-in image, we perform TI training iterations
+to optimize the current 3DGS field. The training process
+is structured into two parts of local and semi-global ones,
+with each performing TI /2 training iterations. 1) Local
+optimization: The top Nm images with the highest weights
+will be selected as key training images. For one key training
+image i with corresponding weight ωk (k = 1, 2, ..., Nm ), it is
+supposed to be trained for Tim iterations, which is determined
+by Eq 5. 2) Semi-Global optimization: For the other images
+with low weights, the remaining half training iterations are
+evenly distributed among these images. This strategy ensures
+that more training is performed on the new fly-in image and
+its neighbor images, while avoiding forgetting the 3DGS field
+of the very previous scene.
+Tim =
+1 − e−ωi
+× TI
+PNm
+2 j=1 (1 − e−ωj )
+(5)
+D. Adaptively Learning Rate Updating
+The progressive training in On-the-Fly GS may result in
+inconsistency in local quality within the 3DGS field. To
+address this issue, we dynamically update the learning rate
+based on the rendering quality of each image, instead of
+updating the learning rate based on the overall quality of
+the 3DGS field (this was applied in the original 3DGS).
+Specifically, for image j, if it has been trained for Tj
+iterations, with the initial learning rate ηj0 and the final
+learning rate ηjf , the current learning rate ηjc can be calculated
+as follows:
+f
+0
+ηjc = eln(ηj )×(1−ti )+ln(ηj )×ti ,
+
+ti =
+1,
+Tj
+Ta ,
+Tj > Ta
+,
+Tj ≤ Ta
+(6)
+(7)
+where Ta is a predefined parameter that represents the
+number of training iterations required for an image to
+achieve satisfactory rendering quality. However, determining
+the learning rate based on the already trained iterations
+of a single image is not rigorous. This is because other
+images overlapping with image j might already achieve
+satisfactory rendering quality. Thus, when determining the
+current learning rate, it makes sense to also consider the
+overlapping images among the registered images. If the set
+of overlapping images I for the current image j contains NI
+images (i.e., for any i ∈ I, Mi,j > 0). The learning rate ηjI
+for image j can be calculated as follows:
+PNI
+Mi,j × ηic
+ηjc + i=1
+I
+.
+(8)
+ηj =
+NI + 1
+The proposed learning rate updating method considers
+the rendering quality of the 3DGS field within the local
+scene. If the local scene corresponding to the current image
+j has achieved high rendering quality, the learning rate ηjI is
+supposed to be lower. This is because multiple images overlapping with image j have been trained for more iterations
+(even if image j is newly added), as shown in Fig. 4 (left).
+If the local scene corresponding to the image j performs
+poor rendering quality, which indicates that both image j
+and its neighboring connected images are only trained for
+fewer iterations, the learning rate ηjI should be higher, as
+shown in Fig. 4 (right).
+Fig. 4.
+Adaptively Learning Rate Updating
+E. Load Balancing and 3DGS Runtime Optimization
+Some local areas may undergo excessive Gaussian accumulation due to being visible across multiple images,
+while newly introduced scenes may suffer from insufficient
+Gaussian kernels. To address this uneven distribution of
+Gaussians, inspired by Adr-Gaussian [5], we employ a loadbalancing training. For the current training image i, we
+record the number of Gaussians Gp associated with each
+pixel p in image i. Using the standard deviation of the
+Gaussian distribution within the visible range of the image,
+we define a Load-Balancing-Loss Lload as follows:
+Lload = std (Gp ) , p ∈ i.
+(9)
+With L1-Loss and SSIM-Loss, the total loss is as follows:
+Ltotal = λ1 L1 + λssim Lssim + λload Lload .
+(10)
+Subsequent experiments demonstrate that the loadbalancing strategy not only prevents the abnormal accumulation of Gaussians in some specific regions but also
+effectively reduces the total number of Gaussians in the
+3DGS field, thereby accelerating the overall training process.
+Furthermore, it facilitates the densification of Gaussians in
+newly added regions, promoting faster 3DGS training.
+To further accelerate the training of the 3DGS field, we
+integrate the strategy proposed by Taming 3DGS [7]. Taming
+3DGS identifies that the per-pixel gradient accumulation
+method used in the original 3DGS leads to multiple threads
+contending for accessing the same locations and thus serialized atomic operations. To address this, we implemented
+the corresponding Splatting-based parallelism in the gradient
+accumulation method. In this implementation, gradients are
+accumulated directly for each Gaussian, significantly reducing training time by eliminating contention and enhancing
+parallel processing efficiency.
+V. EXPERIMENT
+A. Experimental Settings
+Datasets and Metrics. To validate the efficacy of our Onthe-Fly GS, we utilizes several datasets from the 3DGS
+(RGB) [3], Mip-NeRF 360 (RGB) [33], On-the-Fly SfM
+(RGB) [1], [22], and Replica (RGB-D) [34]. These contain
+three indoor scenes, three small-scale outdoor scenes, three
+UAV datasets and eight VSLAM datasets, which are dynamically processed as simulated sequential inputs according
+to the original stored order. Based on these datasets, the
+corresponding performance is evaluated from three aspects:
+Training efficiency, Rendering quality, and Model size. All
+experiments are conducted under the same hardware configuration (Single NVIDIA RTX 4090 GPU).
+Implementation details. The optimization process of our
+On-the-Fly GS includes three stages (see Fig. 2). In phase
+1 of initialization, after On-the-Fly SfM completes pose
+estimation and sparse point cloud generation for the first
+N0 = 30 images, we perform 2,000 training iterations on
+these images. In phase 2, for each newly acquired image, we
+choose the top Nm = 10 images with the highest weights as
+key training targets, and TI = 200 iterations of optimization
+will be performed on the current 3DGS field. Since each
+new fly-in image triggers 200 iterations of optimization on
+the current 3DGS field, the average number of training
+iterations per image will approach 200 as the total number
+of images increases. Therefore, the parameter Ta is set to
+200. Additionally, the preset parameter η 0 is 1.6e − 4 and
+η f is 1.6e − 6. The weights of Load-Balancing-Loss λload ,
+L1-Loss λ1 , and SSIM-Loss λssim are set to 0.41, 0.47, and
+0.12, respectively. All other settings are consistent with the
+original 3DGS configuration.
+B. Comparisons with other SOTA methods
+We compare On-the-Fly GS with two efficient offlinetraining solutions (Adr-Gaussian [5] and Taming-3DGS [7])
+and two popular SLAM-based 3DGS methods (GS-SLAM
+[19] and RTG-SLAM [18]). Since RTG-SLAM only accepts
+RGB-D input, comparisons on RGB datasets are conducted
+solely among the offline training solutions and GS-SLAM.
+TABLE I
+C OMPARISON ON RGB DATASETS . B EST AND SECOND - BEST ARE HIGHLIGHTED IN BOLD AND UNDERLINED .
+Type
+Datasets
+Image Number
+Pose Estimation (s)
+Indoor
+Outdoor
+UAV
+skfx
+60
+95.48
+kitchen
+279
+1037.27
+counter
+240
+615.67
+train
+301
+813.98
+Temple
+302
+1068.51
+JYYL
+390
+1373.87
+WHU
+242
+820.06
+npu
+300
+808.21
+phantom3
+399
+1183.37
+Avg.
+Adr-Gaussian
+(7k)
+PSNR (dB)
+SSIM
+LPIPS
+Model Size (MB)
+Ad-Opt Time (s)
+31.07
+0.87
+0.28
+323.4
+176.36
+28.45
+0.89
+0.15
+192.5
+245.96
+26.81
+0.86
+0.24
+104.5
+207.96
+19.94
+0.69
+0.36
+63.2
+109.36
+18.68
+0.67
+0.57
+21.3
+208.59
+19.85
+0.69
+0.47
+92.8
+280.58
+24.99
+0.82
+0.17
+839.2
+268.09
+26.85
+0.81
+0.29
+895.5
+268.98
+26.83
+0.83
+0.26
+809.1
+279.15
+24.83
+0.79
+0.31
+371.3
+227.23
+Taming-3DGS
+(7k)
+PSNR (dB)
+SSIM
+LPIPS
+Model Size (MB)
+Ad-Opt Time (s)
+32.43
+0.89
+0.22
+652.7
+113.65
+29.41
+0.90
+0.13
+386.9
+155.67
+27.52
+0.88
+0.21
+217.6
+123.87
+20.57
+0.72
+0.33
+149.7
+75.34
+19.39
+0.69
+0.54
+63.1
+88.39
+20.16
+0.71
+0.44
+241.8
+103.47
+25.33
+0.84
+0.14
+1648.4
+245.62
+27.25
+0.83
+0.26
+1784.8
+236.58
+27.16
+0.84
+0.23
+1596.7
+240.92
+25.47
+0.81
+0.28
+749.1
+153.72
+Taming-3DGS
+(30k)
+PSNR (dB)
+SSIM
+LPIPS
+Model Size (MB)
+Ad-opt Time (s)
+37.84
+0.95
+0.09
+950.4
+950.34
+33.01
+0.94
+0.08
+417.7
+953.09
+30.16
+0.92
+0.15
+250.2
+475.13
+25.35
+0.86
+0.15
+233.1
+350.17
+22.58
+0.77
+0.37
+122.6
+343.09
+23.93
+0.82
+0.25
+504.8
+612.72
+\
+\
+\
+\
+\
+\
+\
+\
+\
+\
+\
+\
+\
+\
+\
+28.81
+0.88
+0.18
+413.1
+614.09
+Ours
+PSNR (dB)
+SSIM
+LPIPS
+Model Size (MB)
+Ad-Opt Time (s)
+FPS
+31.93
+0.86
+0.29
+113.1
+53.74
+0.63
+30.39
+0.91
+0.11
+176.4
+66.06
+0.27
+28.97
+0.89
+0.19
+115.9
+46.45
+0.39
+22.82
+0.80
+0.21
+137.4
+46.67
+0.37
+21.72
+0.75
+0.39
+133.1
+58.24
+0.31
+22.71
+0.79
+0.28
+416.9
+76.81
+0.28
+27.93
+0.87
+0.11
+534.4
+91.61
+0.30
+33.29
+0.93
+0.11
+672.3
+105.97
+0.37
+31.46
+0.92
+0.12
+831.9
+114.55
+0.34
+27.91
+0.86
+0.20
+347.9
+73.34
+0.36
+GS-SLAM
+(RGB)
+PSNR (dB)
+SSIM
+LPIPS
+Model Size (MB)
+FPS
+Finish Tracking
+\
+\
+\
+\
+\
+✗
+17.59
+0.48
+0.76
+43.6
+0.19
+!
+18.19
+0.63
+0.74
+22.6
+0.19
+!
+16.34
+0.49
+0.72
+23.7
+0.37
+!
+\
+\
+\
+\
+\
+✗
+18.25
+0.66
+0.62
+26.1
+0.26
+!
+20.01
+0.48
+0.58
+44.6
+0.23
+!
+21.48
+0.65
+0.68
+38.2
+0.21
+!
+20.57
+0.66
+0.75
+29.9
+0.26
+!
+18.92
+0.58
+0.69
+32.67
+0.24
+\
+RTG-SLAM is included in the comparison only when using RGB-D datasets. Unless otherwise specified, all offline
+training solutions and SLAM-based solutions are evaluated
+using their default parameter settings. ‘
+Results on RGB Datasets. To conduct a fair evaluation,
+the offline-training solutions also use the SfM results from
+On-the-Fly SfM, but after all images are solved. The time
+consumption for online SfM is reported in Table I. As Onthe-Fly GS and the offline-training solutions undergo the
+same pose estimation process, we only record the cost time
+from the completion of pose estimation to the completion
+of 3DGS field optimization (Ad-Opt Time). Since On-theFly GS performs training concurrently with the online SfM,
+in fact, only the cost time for the additional optimization
+in Phase 3 is recorded. In contrast, the offline solutions
+report their total execution time. For GS-SLAM, we report
+its FPS using the default setting. In our On-the-Fly GS, the
+reported FPS takes the entire duration of both online SfM and
+3DGS field optimization into account. Moreover, since the
+degree of overlap between image pairs in the RGB datasets
+is significantly lower than that of typical SLAM datasets,
+each image is regarded as a keyframe when training GSSLAM. Table I and Fig. 5 show the comparison results on
+RGB datasets.
+Compared to the offline solutions with 7K iterations,
+our On-the-Fly GS achieves significantly higher rendering
+quality as well as explicitly less cost time. This indicates
+Fig. 5. Rendering Results of On-the-Fly GS and other solutions with
+default settings
+TABLE II
+C OMPARISON ON RGB-D DATASETS . B EST AND SECOND - BEST ARE HIGHLIGHTED IN BOLD AND UNDERLINED .
+Method
+GS-SLAM
+RTG-SLAM
+Ours
+Modality
+Metric
+room0
+room1
+room2
+office0
+office1
+office2
+office3
+office4
+Avg.
+RGB
+PSNR (dB)
+SSIM
+LPIPS
+FPS
+ATE-MSE (m)
+29.31
+0.89
+0.24
+0.89
+0.0849
+27.58
+0.84
+0.32
+0.92
+0.4468
+29.24
+0.89
+0.23
+0.93
+0.1897
+33.88
+0.93
+0.18
+0.95
+0.2014
+35.51
+0.94
+0.16
+1.05
+0.2144
+25.24
+0.88
+0.28
+0.89
+0.5454
+28.79
+0.89
+0.18
+0.93
+0.1664
+27.89
+0.91
+0.24
+0.91
+0.8466
+29.89
+0.89
+0.22
+0.93
+0.1869
+RGB-D
+PSNR (dB)
+SSIM
+LPIPS
+FPS
+ATE-MSE (m)
+26.45
+0.92
+0.28
+2.71
+0.0019
+30.04
+0.94
+0.22
+2.94
+0.0019
+31.31
+0.95
+0.19
+2.73
+0.0011
+36.82
+0.98
+0.10
+2.71
+0.0015
+37.37
+0.99
+0.11
+3.05
+0.0013
+30.05
+0.96
+0.19
+3.13
+0.0024
+30.18
+0.97
+0.18
+2.94
+0.0023
+33.28
+0.97
+0.16
+2.94
+0.0025
+31.94
+0.96
+0.18
+2.89
+0.0019
+RGB
+PSNR (dB)
+SSIM
+LPIPS
+FPS
+ATE-MSE (m)
+31.79
+0.94
+0.12
+2.01
+0.0035
+33.67
+0.95
+0.11
+2.23
+0.0054
+34.65
+0.96
+0.11
+1.99
+0.0025
+39.44
+0.97
+0.09
+3.25
+0.0057
+38.77
+0.96
+0.14
+3.56
+0.0053
+34.03
+0.95
+0.13
+1.86
+0.0070
+35.38
+0.96
+0.09
+1.88
+0.0024
+36.65
+0.96
+0.10
+2.12
+0.0075
+35.55
+0.96
+0.11
+2.36
+0.0049
+that, thanks to the proposed Local & Semi-Global training
+strategy, our On-the-Fly GS can quickly achieve high-quality
+rendering with just a small number of additional iterations. Furthermore, On-the-Fly GS exhibits a pronounced
+advantage on the UAV dataset, significantly outperforming
+other solutions in both training efficiency and rendering
+quality. These results underscore the strong potential of
+the proposed approach for large-scale UAV image dataset
+applications. With 30K training iterations, Taming-3DGS is
+unable to complete training on the UAV image datasets due
+to excessive memory consumption. As for other scenes, Onthe-Fly GS consistently achieves over 80% of the rendering
+quality delivered by Taming-3DGS, while exhibiting clear
+advantages in terms of model size and cost time.
+Due to the significantly low overlapping degree between
+consecutive image pairs in the datasets presented in Table
+I, GS-SLAM exhibits extremely poor camera tracking performance across all the scenes, and even fails to track on
+some datasets (skfx and Temple). Additionally, the tested
+RGB datasets have high resolutions and very complex scene
+content, which leads to an increase in the training time
+for GS-SLAM and a substantially lower rendering quality
+compared to other methods. These results reveal the potential
+limitations of SLAM-based 3DGS methods on handling
+datasets without a reliable depth map or containing consecutive image pairs of low overlapping degree.
+Results on RGB-D Datasets. To compare the performance of SLAM-based 3DGS method, the Replica dataset
+with depth priors is tested on the two popular pipelines - GSSLAM [19] and RTG-SLAM [18]. Since these two methods’
+solutions perform 3DGS field optimization using only the
+selected keyframes, we retain the selected keyframes from
+GS-SLAM, which are subsequently used as input for our
+On-the-Fly GS.
+Table II shows the comparison results on the RGB-D
+dataset. It can be seen that, despite only RGB information
+from keyframes is used as input, the proposed On-the-Fly
+GS achieves the best or the second-best rendering quality
+among all evaluated methods and datasets. Although On-theFly GS is slightly inferior to RTG-SLAM in terms of time
+TABLE III
+A BLATION EXPERIMENT OF THE PROPOSAL COMPONENTS IN THE
+O N - THE -F LY GS METHOD .
+Methods
+Ad-Opt Time (s)
+Model Size (MB)
+PSNR
+SSIM
+LPIPS
+No FU
+No IW
+No GO
+No Load
+No SPB
+Ours
+110.31
+116.76
+161.83
+252.04
+213.59
+105.97
+541.1
+575.7
+860.3
+1315.4
+674.5
+672.3
+30.35
+31.99
+32.17
+34.13
+33.14
+33.29
+0.88
+0.91
+0.92
+0.95
+0.93
+0.93
+0.21
+0.15
+0.13
+0.09
+0.11
+0.11
+efficiency and tracking accuracy, our method attains superior
+rendering quality without requiring depth and does not rely
+on sequential video frames as input. Instead, it only requires
+that newly added images have a certain degree of overlap
+with any previously registered views. These characteristics
+make On-the-Fly GS more broadly applicable than existing
+SLAM-based solutions.
+C. Ablation Studies
+To explore the efficacy of each component proposed in this
+work, an extensive ablation study is conducted. Based on the
+npu dataset, we first turn on all the proposed component (as
+Ours) and then sequentially switch off one of the following
+strategies: 1) 3DGS Field Update (No FU). 2) Image Weighting and Training Iteration Allocation (No IW). 3) SemiGlobal Optimization (No GO): only train new fly-in image
+and its neighbors for NI = 200 iterations, and no training for
+the very previous images. 4) Load Balancing (No Load). 5)
+Splatting-based Parallelism in Backpropagation (No SPB).
+The corresponding quantitative results are presented in
+Table III. We can see that, removing any of the proposed
+components can negatively impact the 3DGS training, proving their corresponding effectiveness: 1) Disabling 3DGS
+Field Update prevents the addition of new Gaussians during
+scene expansion, resulting in few Gaussians allocated in the
+newly observed region. 2) Image Weighting and Training
+Iteration Allocation guide the training process to focus more
+on the newly expanded region. The optimization of the newly
+observed region proceeds slowly without this strategy. 3)
+Removing Global Optimization makes the 3DGS training
+over-emphasize the optimization on newly observed regions,
+leading to an excessive accumulation of Gaussians while
+neglecting rendering quality in previous regions. 4) Load
+Balancing optimizes the spatial distribution of Gaussians
+and removes redundant ones, effectively reducing model size
+while improving training efficiency. 5) Splatting-based Parallelism in Backpropagation accelerates the optimization of the
+3DGS field by significantly accelerating the backpropagation
+operation.
+VI. CONCLUSION
+In this paper, we propose On-the-Fly GS, a novel near
+real-time 3DGS training framework via a progressive optimization manner, which can dynamically output 3DGS
+field during image capturing. First, we introduce an selfadaptive method for allocating different training iterations
+to each newly captured image and its neighboring images
+during 3DGS optimization, enabling fast training for the
+newly expanded region. Second, we present a new learning
+rate updating solution based on image rendering quality,
+adaptively estimating the learning rate for each training
+iteration based on the training progress of the current image
+and its neighboring connected images. Finally, inspired by
+Adr-Gaussian and Taming 3DGS, we further control the
+number of Gaussians and improve the training efficiency.
+The experimental results demonstrate that our On-the-Fly
+GS can successfully achieve near real-time 3DGS training
+and considerable rendering performance, even when the
+input images lack temporal and spatial continuity or are not
+accompanied by depth. Compared to existing SLAM-based
+3DGS methods, On-the-Fly GS exhibits greater versatility
+and is feasible for a wider range of practical applications.
+R EFERENCES
+[1] Z. Zhan, Y. Yu, R. Xia, et al., “Sfm on-the-fly: Get better 3d from
+what you capture,” ISPRS Journal of Photogrammetry and Remote
+Sening, vol. 224, pp. 202–221, 2025.
+[2] Y. Chen, Z. Chen, C. Zhang, et al., “Gaussianeditor: Swift and
+controllable 3d editing with gaussian splatting,” in Proceedings of the
+IEEE/CVF conference on computer vision and pattern recognition,
+2024, pp. 21 476–21 485.
+[3] B. Kerbl, G. Kopanas, T. Leimkühler, and G. Drettakis, “3d gaussian
+splatting for real-time radiance field rendering.” ACM Trans. Graph.,
+vol. 42, no. 4, pp. 139–1, 2023.
+[4] P. Papantonakis, G. Kopanas, B. Kerbl, A. Lanvin, and G. Drettakis,
+“Reducing the memory footprint of 3d gaussian splatting,” Proceedings of the ACM on Computer Graphics and Interactive Techniques,
+vol. 7, no. 1, pp. 1–17, 2024.
+[5] X. Wang, R. Yi, and L. Ma, “Adr-gaussian: Accelerating gaussian
+splatting with adaptive radius,” in SIGGRAPH Asia 2024 Conference
+Papers, 2024, pp. 1–10.
+[6] Z. Fan, K. Wang, K. Wen, Z. Zhu, D. Xu, Z. Wang, et al., “Lightgaussian: Unbounded 3d gaussian compression with 15x reduction and
+200+ fps,” Advances in neural information processing systems, vol. 37,
+pp. 140 138–140 158, 2025.
+[7] S. S. Mallick, R. Goel, B. Kerbl, et al., “Taming 3dgs: High-quality
+radiance fields with limited resources,” in SIGGRAPH Asia 2024
+Conference Papers, 2024, pp. 1–11.
+[8] B. Li, S. Chen, L. Wang, et al., “Retinags: Scalable training for
+dense scene rendering with billion-scale 3d gaussians,” arXiv preprint
+arXiv:2406.11836, 2024.
+[9] Y. Chen and G. H. Lee, “Dogs: Distributed-oriented gaussian splatting
+for large-scale 3d reconstruction via gaussian consensus,” Advances in
+Neural Information Processing Systems, vol. 37, pp. 34 487–34 512,
+2025.
+[10] J. Jo, H. Kim, and J. Park, “Identifying unnecessary 3d gaussians using
+clustering for fast rendering of 3d gaussian splatting,” arXiv preprint
+arXiv:2402.13827, 2024.
+[11] J. Lee, S. Lee, J. Lee, J. Park, and J. Sim, “Gscore: Efficient
+radiance field rendering via architectural support for 3d gaussian
+splatting,” in Proceedings of the 29th ACM International Conference
+on Architectural Support for Programming Languages and Operating
+Systems, Volume 3, 2024, pp. 497–511.
+[12] K. Cheng, X. Long, K. Yang, et al., “Gaussianpro: 3d gaussian
+splatting with progressive propagation,” in Forty-first International
+Conference on Machine Learning, 2024.
+[13] J. Zhang, F. Zhan, M. Xu, S. Lu, and E. Xing, “Fregs: 3d gaussian
+splatting with progressive frequency regularization,” in Proceedings of
+the IEEE/CVF Conference on Computer Vision and Pattern Recognition, 2024, pp. 21 424–21 433.
+[14] Z. Yu, A. Chen, B. Huang, T. Sattler, and A. Geiger, “Mip-splatting:
+Alias-free 3d gaussian splatting,” in Proceedings of the IEEE/CVF
+conference on computer vision and pattern recognition, 2024, pp.
+19 447–19 456.
+[15] Y. Jiang, J. Tu, Y. Liu, et al., “Gaussianshader: 3d gaussian splatting
+with shading functions for reflective surfaces,” in Proceedings of the
+IEEE/CVF Conference on Computer Vision and Pattern Recognition,
+2024, pp. 5322–5332.
+[16] X. Wu, J. Xu, C. Wang, et al., “Local gaussian density mixtures
+for unstructured lumigraph rendering,” in SIGGRAPH Asia 2024
+Conference Papers, 2024, pp. 1–11.
+[17] J. L. Schonberger and J.-M. Frahm, “Structure-from-motion revisited,”
+in Proceedings of the IEEE conference on computer vision and pattern
+recognition, 2016, pp. 4104–4113.
+[18] Z. Peng, T. Shao, Y. Liu, et al., “Rtg-slam: Real-time 3d reconstruction
+at scale using gaussian splatting,” in ACM SIGGRAPH 2024 Conference Papers, 2024, pp. 1–11.
+[19] H. Matsuki, R. Murai, P. H. Kelly, and A. J. Davison, “Gaussian
+splatting slam,” in Proceedings of the IEEE/CVF Conference on
+Computer Vision and Pattern Recognition, 2024, pp. 18 039–18 048.
+[20] Z. Zhu, S. Peng, V. Larsson, et al., “Nice-slam: Neural implicit scalable encoding for slam,” in Proceedings of the IEEE/CVF conference
+on computer vision and pattern recognition, 2022, pp. 12 786–12 796.
+[21] X. Yang, H. Li, H. Zhai, et al., “Vox-fusion: Dense tracking and
+mapping with voxel-based neural implicit representation,” in 2022
+IEEE International Symposium on Mixed and Augmented Reality
+(ISMAR). IEEE, 2022, pp. 499–507.
+[22] Z. Zhan, R. Xia, Y. Yu, et al., “On-the-fly sfm: What you capture is
+what you get,” ISPRS Annals of the Photogrammetry, Remote Sensing
+and Spatial Information Sciences, vol. X-1-2024, pp. 297–304, 2024.
+[23] Z. Ma and S. Liu, “A review of 3d reconstruction techniques in civil
+engineering and their applications,” Advanced Engineering Informatics, vol. 37, pp. 163–174, 2018.
+[24] B. Mildenhall, P. P. Srinivasan, M. Tancik, J. T. Barron, R. Ramamoorthi, and R. Ng, “Nerf: Representing scenes as neural radiance fields
+for view synthesis,” Communications of the ACM, vol. 65, no. 1, pp.
+99–106, 2021.
+[25] J. C. Lee, D. Rho, X. Sun, J. H. Ko, and E. Park, “Compact 3d gaussian
+representation for radiance field,” in Proceedings of the IEEE/CVF
+Conference on Computer Vision and Pattern Recognition, 2024, pp.
+21 719–21 728.
+[26] T. Deng, Y. Chen, L. Zhang, J. Yang, S. Yuan, J. Liu, D. Wang,
+H. Wang, and W. Chen, “Compact 3d gaussian splatting for dense
+visual slam,” arXiv preprint arXiv:2403.11247, 2024.
+[27] J. Wei and S. Leutenegger, “Gsfusion: Online rgb-d mapping where
+gaussian splatting meets tsdf fusion,” IEEE Robotics and Automation
+Letters, 2024.
+[28] J. Zheng, Z. Zhu, V. Bieri, M. Pollefeys, S. Peng, and I. Armeni,
+“Wildgs-slam: Monocular gaussian splatting slam in dynamic environments,” in Proceedings of the Computer Vision and Pattern
+Recognition Conference, 2025, pp. 11 461–11 471.
+[29] C. Homeyer, L. Begiristain, and C. Schnörr, “Droid-splat: Combining end-to-end slam with 3d gaussian splatting,” arXiv preprint
+arXiv:2411.17660, 2024.
+[30] A. Meuleman, I. Shah, A. Lanvin, B. Kerbl, and G. Drettakis, “On-thefly reconstruction for large-scale novel view synthesis from unposed
+images,” arXiv preprint arXiv:2506.05558, 2025.
+[31] Y. A. Malkov and D. A. Yashunin, “Efficient and robust approximate
+nearest neighbor search using hierarchical navigable small world
+graphs,” IEEE transactions on pattern analysis and machine intelligence, vol. 42, no. 4, pp. 824–836, 2018.
+[32] H. Xiong, SparseGS: Real-time 360° sparse view synthesis using
+Gaussian splatting. University of California, Los Angeles, 2024.
+[33] J. T. Barron, B. Mildenhall, D. Verbin, P. P. Srinivasan, and P. Hedman,
+“Mip-nerf 360: Unbounded anti-aliased neural radiance fields,” in
+Proceedings of the IEEE/CVF conference on computer vision and
+pattern recognition, 2022, pp. 5470–5479.
+[34] J. Straub, T. Whelan, L. Ma, Y. Chen, E. Wijmans, S. Green, J. J.
+Engel, R. Mur-Artal, C. Ren, S. Verma, et al., “The replica dataset:
+A digital replica of indoor spaces,” arXiv preprint arXiv:1906.05797,
+2019.

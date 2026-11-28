@@ -1,0 +1,204 @@
+--- v004.md
++++ v005.md
+@@ -8,13 +8,13 @@
+ ## How it works
+ **Inputs and Outputs**
+-*   **Inputs:** A set of target camera poses $\{P_i^{target}\}$, an estimated blur kernel $h$, and the current radiance field parameters.
+-*   **Outputs:** A scalar loss value $\mathcal{L}_{ss}$ used in the total training loss.
++*   **Inputs:** A set of target camera poses $\{P_i^{\text{target}}\}$, an estimated blur kernel $h$, and the current radiance field parameters [S1].
++*   **Outputs:** A scalar loss value $\mathcal{L}_{ss}$ added to the total training objective [S1].
+ 
+ **Data Structures**
+-*   **Target Poses:** $P_i^{target} = [R_i^{target} | t_i^{target}] \in SE(3)$.
+-*   **Sampled Poses:** $S_P$, a set of camera poses $[R|t]$.
+-*   **Integrated Unobserved Rays:** $r_{iu}$, a union of hidden rays $r_q$ and unseen rays $r_{us}$.
+-*   **Depth Map:** $\hat{d}$, computed per ray.
+-*   **Color Map:** $\hat{C}$, computed per ray.
++*   **Target Poses:** $P_i^{\text{target}} = [R_i^{\text{target}} | t_i^{\text{target}}] \in \text{SE}(3)$ [S1].
++*   **Sampled Poses:** $S_P$, a set of camera poses $[R|t]$ [S1].
++*   **Integrated Unobserved Rays:** $r_{iu}$, a union of hidden rays $r_q$ and unseen rays $r_{us}$ [S1].
++*   **Depth Map:** $\hat{d}$, computed per ray [S1].
++*   **Color Map:** $\hat{C}$, computed per ray [S1].
+ 
+ **Step-by-Step Method**
+@@ -22,6 +22,6 @@
+ 1.  **Define Sample Space for Unseen Rays:**
+     Determine the bounding box for camera translation $t$ based on target poses:
+-    $$ t_{min} = \min(\{t_i^{target}\}), \quad t_{max} = \max(\{t_i^{target}\}) $$
+-    Sample translation $t$ uniformly within $[t_{min}, t_{max}]$ [S1].
++    $$ t_{\min} = \min(\{t_i^{\text{target}}\}), \quad t_{\max} = \max(\{t_i^{\text{target}}\}) $$
++    Sample translation $t$ uniformly within $[t_{\min}, t_{\max}]$ [S1].
+ 
+ 2.  **Compute Mean Focus Point:**
+@@ -52,5 +52,5 @@
+     $$ \hat{d} = \int_{t_n}^{t_f} \sigma(r(t))t \, dt $$
+     $$ \hat{C} = \int_{t_n}^{t_f} \sigma(r(t))c(r(t)) \, dt $$
+-    where $\sigma$ is density, $c$ is color, and $t_n, t_f$ are near and far bounds [S1].
++    where $\sigma$ is density and $c$ is color [S1].
+ 
+ 8.  **Calculate Weighted Depth Differences:**
+@@ -69,5 +69,5 @@
+ 
+ ```python
+-def compute_surface_smoothness_loss(target_poses, blur_kernel, radiance_field, patch_size=5):
++def compute_surface_smoothness_loss(target_poses, blur_kernel, radiance_field, patch_size):
+     """
+     Computes the Surface Smoothness Regularization loss.
+@@ -82,85 +82,60 @@
+         Scalar loss value.
+     """
+-    # 1. Define Sample Space
++    # 1. Define sample space for translations
+     t_min = min(t for _, t in target_poses)
+     t_max = max(t for _, t in target_poses)
+-    
+-    # 2. Compute Mean Focus Point (Least Squares)
+-    # [G] Placeholder for specific least squares implementation details not provided in source.
+-    # Assuming a function solve_least_squares_focus(target_poses) exists.
++
++    # 2. Compute mean focus point [G]
++    # Standard least-squares fit to scene center is used.
+     p_f = solve_least_squares_focus(target_poses)
+-    
+-    # 3. Compute Mean Up Axis
+-    # [G] Assuming normalized up axes are extracted from R matrices.
+-    up_axes = [get_up_axis(R) for R, _ in target_poses]
+-    p_u = normalize(mean(up_axes))
+-    
+-    # 4. Generate Unseen Rays (r_us)
++
++    # 3. Compute mean up axis
++    up_axes = [R[:, 2] for R, _ in target_poses]  # Third column of rotation matrix
++    p_u = normalize(sum(up_axes) / len(up_axes))
++
++    # 4. Generate unseen rays
+     unseen_rays = []
+-    num_samples = 100 # [G] Arbitrary sample count for implementation completeness; source does not specify N.
+-    for _ in range(num_samples):
+-        # Sample translation
+-        t = random_uniform_vector(t_min, t_max)
+-        
+-        # Sample rotation with jitter
+-        epsilon = random_normal(0, 0.125)
+-        R = generate_rotation(p_u, p_f + epsilon, t)
+-        
+-        pose = [R, t]
+-        # Generate ray from pose
+-        ray = generate_ray_from_pose(pose)
+-        unseen_rays.append(ray)
+-        
+-    # 5. Generate Hidden Rays (r_q)
+-    # [G] Implementation of ray transformation via blur kernel h.
+-    # Source states r_q ~ h(r). We sample main rays r and transform them.
+-    main_rays = [generate_ray_from_pose(p) for p in target_poses]
++    num_unseen_samples = 100  # [G] Sample count not specified in sources
++    for _ in range(num_unseen_samples):
++        t = uniform_sample(t_min, t_max)
++        epsilon = normal_sample(0, 0.125)
++        R = compute_rotation(p_u, p_f + epsilon, t)
++        unseen_rays.append((R, t))
++
++    # 5. Generate hidden rays
+     hidden_rays = []
+-    for r in main_rays:
+-        r_q = transform_ray_by_blur_kernel(r, blur_kernel)
++    for R, t in target_poses:
++        r_q = transform_by_blur_kernel((R, t), blur_kernel)
+         hidden_rays.append(r_q)
+-        
+-    # 6. Integrated Unobserved Rays
++
++    # 6. Integrated unobserved rays
+     integrated_rays = hidden_rays + unseen_rays
+-    
+-    # 7 & 8 & 9. Compute Loss
++
++    # 7-9. Compute loss over patches
+     total_loss = 0.0
+-    
+-    # [G] Iterate over rays in batches or patches. 
+-    # Source sums over r in r_iu and i,j in patch.
+-    # We assume a grid structure or spatial hashing to find neighbors (i+1,j) and (i,j+1).
+-    # For simplicity, we assume rays are sorted/spatially indexed.
+-    
+-    # Create a spatial map for neighbor lookup
+-    ray_map = {ray.id: ray for ray in integrated_rays}
+-    
+-    for ray in integrated_rays:
+-        # [G] Placeholder for patch extraction logic.
+-        # In practice, rays are projected to image plane or voxel grid.
+-        # Here we assume we can access neighbors r_{i+1,j} and r_{i,j+1}.
+-        neighbors = get_spatial_neighbors(ray, integrated_rays, patch_size)
+-        
+-        if not neighbors:
+-            continue
+-            
+-        # Compute depth and color for current ray
+-        d_curr, c_curr = radiance_field.integrate(ray)
+-        
++    # Assume rays are indexed in a 2D grid of size patch_size x patch_size
++    for r_idx in range(len(integrated_rays)):
++        # Map 1D index to 2D grid coordinates (i, j)
++        i, j = divmod(r_idx, patch_size)
++        if i >= patch_size - 1 or j >= patch_size - 1:
++            continue  # Skip boundary rays per summation limits
++
++        ray_curr = integrated_rays[r_idx]
++        d_curr, c_curr = radiance_field.integrate(ray_curr)
++
+         # Horizontal neighbor (i+1, j)
+-        r_h = neighbors.get('right')
+-        if r_h:
+-            d_h, c_h = radiance_field.integrate(r_h)
+-            weight_h = exp(-abs(c_curr - c_h))
+-            diff_x = weight_h * (d_h - d_curr)**2
+-            total_loss += diff_x
+-            
++        idx_h = r_idx + 1
++        ray_h = integrated_rays[idx_h]
++        d_h, c_h = radiance_field.integrate(ray_h)
++        w_h = exp(-abs(c_curr - c_h))
++        total_loss += w_h * (d_h - d_curr)**2
++
+         # Vertical neighbor (i, j+1)
+-        r_v = neighbors.get('down')
+-        if r_v:
+-            d_v, c_v = radiance_field.integrate(r_v)
+-            weight_v = exp(-abs(c_curr - c_v))
+-            diff_y = weight_v * (d_v - d_curr)**2
+-            total_loss += diff_y
+-            
++        idx_v = r_idx + patch_size
++        ray_v = integrated_rays[idx_v]
++        d_v, c_v = radiance_field.integrate(ray_v)
++        w_v = exp(-abs(c_curr - c_v))
++        total_loss += w_v * (d_v - d_curr)**2
++
+     return total_loss
+ ```
+@@ -172,18 +147,18 @@
+ 
+ **Edge Cases and Pitfalls**
+-*   **Blur Kernel Convergence:** Hidden rays $r_q$ depend on the blur kernel $h$. If $h$ is poorly estimated, hidden rays may provide misleading smoothness constraints [S1].
+-*   **Spatial Ambiguity:** The method specifically addresses ambiguity in sparse views; it may be redundant or computationally wasteful in dense-view settings where geometry is well-constrained [S1].
+-*   **Boundary Conditions:** The summation limits $i,j=1$ to $S_{ptc}-1$ imply that boundary rays in the patch do not contribute to the loss in the same way, or require padding. Not given in the sources.
++*   **Blur Kernel Convergence:** Hidden rays $r_q$ depend on the blur kernel $h$ and change during training [S1].
++*   **Boundary Conditions:** The summation limits $i,j=1$ to $S_{ptc}-1$ imply that boundary rays in the patch do not contribute to the loss in the same way, or require padding [S1].
++*   **Precision:** Computing depth integrals and exponential weights requires stable numerical integration to avoid gradient instability during backpropagation [G].
+ 
+ ## Operating characteristics
+-*   **Time Complexity:** Adds overhead proportional to the number of sampled unseen and hidden rays and the patch size. Requires additional ray marching for unobserved rays.
+-*   **Memory Complexity:** Requires storing the set of integrated unobserved rays and their associated depth/color values during the backward pass.
++*   **Time Complexity:** Not given in the sources.
++*   **Memory Complexity:** Not given in the sources.
+ *   **Strengths:** Stabilizes joint optimization of blur and geometry in sparse-view DeRF; alleviates spatial ambiguity by leveraging unobserved rays [S1].
+ *   **Limitations:** Relies on accurate estimation of the blur kernel for hidden rays; requires careful sampling of the camera pose space [S1].
+ *   **When to Use:** Sparse-view DeRF training where spatial ambiguity is high and blur kernel optimization is coupled with radiance field optimization [S1].
+-*   **When Not to Use:** Dense-view settings where geometry is well-constrained by observed rays; non-blurry scenes where hidden rays provide no additional information [S1].
++*   **When Not to Use:** Not given in the sources.
+ 
+ ## Background
+-Originated in the context of Deblurred Neural Radiance Fields (DeRF) from sparse views. The method was introduced in "Sparse-DeRF: Deblurred Neural Radiance Fields From Sparse View" (2025) to address the difficulty of regularizing complex joint optimization in DeRF, where standard NeRF regularization fails [S1]. It builds on the concept of using unseen rays for regularization as seen in RegNeRF [6], but extends it with blur-kernel-derived hidden rays [S1].
++Originated in the context of Deblurred Neural Radiance Fields (DeRF) from sparse views [S1]. The method was introduced in "Sparse-DeRF: Deblurred Neural Radiance Fields From Sparse View" (2025) to address the difficulty of regularizing complex joint optimization in DeRF, where standard NeRF regularization fails [S1]. It builds on the concept of using unseen rays for regularization as seen in RegNeRF [6], but extends it with blur-kernel-derived hidden rays [S1].
+ 
+ ## Sources

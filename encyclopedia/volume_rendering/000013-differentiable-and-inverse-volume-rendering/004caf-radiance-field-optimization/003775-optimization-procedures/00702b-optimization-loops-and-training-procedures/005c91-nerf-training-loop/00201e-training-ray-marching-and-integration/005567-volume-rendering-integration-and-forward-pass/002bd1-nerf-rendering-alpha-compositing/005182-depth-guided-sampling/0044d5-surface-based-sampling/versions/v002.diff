@@ -1,0 +1,140 @@
+--- v001.md
++++ v002.md
+@@ -4,72 +4,71 @@
+ 
+ ## Overview
+-Surface-Based Sampling is a ray sampling strategy that restricts 3D sample points to a narrow region surrounding the estimated surface of an object, rather than sampling uniformly throughout the entire volume or free space [S1]. It solves the problem of quality degradation caused by wasting samples in irrelevant free space or occluded regions, which is common in standard NeRF [S1]. Unlike standard NeRF, it leverages external depth information to concentrate computational resources where the radiance field is most active [S1].
++Surface-Based Sampling is a ray sampling strategy that restricts 3D point evaluation to a narrow volume surrounding the estimated surface of an object, rather than sampling uniformly across the entire ray segment or free space [S1]. It solves the problem of quality degradation caused by evaluating the neural radiance field in irrelevant regions (free space or occluded areas) by leveraging depth information to focus computational resources on the geometry [S1]. It differs from standard NeRF by eliminating sampling in empty space, and from hierarchical methods like [Coarse-to-Fine NeRF](3406-coarse-to-fine-nerf.md) by using explicit depth priors rather than a secondary network to determine sampling density [S1].
+ 
+ ## How it works
+ **Inputs:**
+-*   Camera ray parameters (origin and direction).
+-*   Depth value $d$ for the ray, representing the distance to the object surface.
+-*   Sampling range parameter $\alpha$ (half-width of the sampling interval).
+-*   Number of samples $N$.
++- A depth value $d$ for each pixel/ray, representing the distance to the object surface [S1].
++- A total number of sample points per ray $N$ [S1].
++- A sampling range parameter $\alpha$, which defines the half-width of the sampling interval around the surface [S1].
++- A random number $\gamma$ for stratified sampling [S1].
+ 
+ **Outputs:**
+-*   A set of $N$ 3D sample points $\{S_{r,1}, ..., S_{r,N}\}$ located near the surface along the ray.
++- A set of 3D sample locations $\{S_{r,1}, \dots, S_{r,N}\}$ along the ray, concentrated near the surface [S1].
+ 
+ **Data Structures:**
+-*   The method assumes access to a depth image or a pre-generated point cloud from which depth values $d$ can be retrieved for any given ray direction.
+-*   No complex data structures are required for the sampling calculation itself, only scalar values.
++- The method does not define complex persistent data structures for the sampling step itself. However, the source notes an offline stage where a point cloud is generated from training depth images and saved for inference [S1]. At test time, this point cloud is used to generate depth images for novel views, which are then refined via hole filling [S1].
+ 
+ **Parameters:**
+-*   $\alpha$: Half of the specified sampling range. Controls sampling density. Typical values: $1/2$, $1/16$ [S1].
+-*   $N$: Number of sample points per ray. Typical value: 8 [S1].
+-*   $d$: Depth value (distance from camera to surface).
+-*   $\gamma$: Random jitter for stratified sampling.
++- $\alpha$: Half of the specified sampling range. Controls sampling density. As $\alpha$ decreases, sampling density near the surface increases [S1]. Typical values: $1/2$, $1/16$ [S1].
++- $N$: Number of sample points for each ray. Typical value: $8$ [S1].
++- $\gamma$: Random number generated uniformly between $0$ and $2\alpha/N$ [S1].
+ 
+ **Steps:**
+-1.  **Retrieve Depth:** For a given ray, obtain the depth value $d$ to the object surface. This is typically derived from depth images of the training set or a generated point cloud [S1].
+-2.  **Calculate Start Point:** Compute the location of the sample point nearest to the camera within the sampling range, $S_{r,0}$, using the formula:
++1.  **Depth Acquisition:** Obtain or estimate the depth $d$ to the object surface for the current ray. During training, this is assumed to be available from the training set. During inference, it is generated from a saved point cloud and refined [S1].
++2.  **Calculate Start Point:** Compute the location of the sample point nearest to the camera ($S_{r,0}$) using the formula:
+     $$S_{r,0} = d - \alpha$$
+-3.  **Generate Samples:** Compute the location of the $n$-th sample, $S_{r,n}$, for $n = 1, ..., N$, using stratified sampling within the interval $[S_{r,0}, S_{r,0} + 2\alpha]$:
++    where $d$ is the depth value and $\alpha$ is half the sampling range [S1].
++3.  **Calculate Sample Locations:** For each sample index $n$ from $1$ to $N$, compute the location $S_{r,n}$ using stratified sampling within the interval $[S_{r,0}, S_{r,0} + 2\alpha]$:
+     $$S_{r,n} = S_{r,0} + (n - 1) \frac{2\alpha}{N} + \gamma$$
+-    where $\gamma$ is a random number uniformly generated between $0$ and $\frac{2\alpha}{N}$ [S1].
+-4.  **Train/Render:** Use the resulting sample points to train the NeRF model or render novel views [S1].
++    where $\gamma$ is a random number in $[0, 2\alpha/N]$ [S1].
++4.  **NeRF Evaluation:** Train or render the NeRF model using the calculated sample points $\{S_{r,1}, \dots, S_{r,N}\}$ [S1].
+ 
+ **Pseudocode:**
+ ```python
+-def surface_based_sampling(ray_origin, ray_direction, depth_d, alpha, N):
++def surface_based_sampling(depth_d, num_samples_N, alpha):
+     """
+-    Generates N sample points near the surface defined by depth_d.
++    Generates sample locations along a ray concentrated near the surface.
+     
+     Args:
+-        ray_origin: 3D vector, camera origin.
+-        ray_direction: 3D vector, normalized ray direction.
+-        depth_d: float, distance to the surface along the ray.
+-        alpha: float, half-width of the sampling range.
+-        N: int, number of samples.
++        depth_d (float): Depth value to the object surface.
++        num_samples_N (int): Number of sample points per ray.
++        alpha (float): Half of the specified sampling range.
+         
+     Returns:
+-        samples: list of 3D vectors, the N sample points.
++        list: List of sample distances from the camera origin.
+     """
+-    # Step 1 & 2: Calculate the start of the sampling interval
+-    # S_r,0 is the distance from the camera origin to the nearest sample point
+-    start_distance = depth_d - alpha
++    # Step 2: Calculate the start of the sampling range
++    # S_r,0 = d - alpha
++    start_point = depth_d - alpha
+     
+     # The total length of the sampling interval is 2 * alpha
+-    interval_length = 2 * alpha
++    interval_length = 2.0 * alpha
+     
+-    # Step 3: Generate stratified samples
++    # Step 3: Generate N samples using stratified sampling
+     samples = []
+-    for n in range(1, N + 1):
+-        # Generate random jitter gamma for stratified sampling
+-        # Gamma is uniform in [0, interval_length / N]
+-        gamma = random.uniform(0, interval_length / N)
++    for n in range(1, num_samples_N + 1):
++        # Calculate the deterministic part of the position
++        # (n - 1) * (2 * alpha / N)
++        deterministic_offset = (n - 1) * (interval_length / num_samples_N)
+         
+-        # Calculate distance of the nth sample from the camera origin
+-        # Formula: S_r,n = S_r,0 + (n - 1) * (2*alpha / N) + gamma
+-        sample_distance = start_distance + (n - 1) * (interval_length / N) + gamma
++        # Generate random jitter gamma in [0, 2*alpha/N]
++        # Note: In a real implementation, this would be drawn from a uniform distribution
++        # For the purpose of the formula definition, we assume gamma is provided or drawn.
++        # Here we simulate the draw for completeness, though the source defines gamma as a variable.
++        gamma = random.uniform(0, interval_length / num_samples_N)
+         
+-        # Convert distance to 3D point
+-        sample_point = ray_origin + ray_direction * sample_distance
+-        samples.append(sample_point)
++        # S_r,n = S_r,0 + (n - 1) * (2*alpha / N) + gamma
++        sample_location = start_point + deterministic_offset + gamma
++        samples.append(sample_location)
+         
+     return samples
+@@ -77,17 +76,16 @@
+ 
+ **Edge Cases and Pitfalls:**
+-*   **Depth Accuracy:** If the depth $d$ is poorly estimated, using a small $\alpha$ degrades rendering quality significantly [S1]. The parameter $\alpha$ must be set considering the accuracy of the depth images [S1].
+-*   **Free Space Sampling:** Standard NeRF samples in free space and occluded regions, which may degrade quality. Surface-based sampling avoids this by restricting samples to the surface vicinity [S1].
++- **Depth Accuracy:** If the depth $d$ is poorly estimated, using a small $\alpha$ will degrade rendering quality because the sampling range will miss the actual surface [S1]. The parameter $\alpha$ must be set considering the accuracy of the depth images [S1].
++- **Free Space Sampling:** Standard NeRF samples in free space and occluded regions, which may degrade quality. This method avoids that by restricting sampling to the near-surface area [S1].
+ 
+ ## Operating characteristics
+-*   **Complexity:** The sampling calculation is $O(N)$ per ray, identical to standard uniform or stratified sampling in terms of computational cost for generating coordinates. However, it requires an additional lookup or estimation step for depth $d$.
+-*   **Performance:** Improves rendering accuracy (PSNR) by avoiding samples in irrelevant free space or occluded regions [S1].
+-*   **Strengths:** Prevents quality degradation from sampling in empty space; allows for denser sampling near the surface with fewer total samples if $\alpha$ is small [S1].
+-*   **Limitations:** Heavily dependent on the accuracy of the input depth images. Poor depth estimates lead to poor sampling locations [S1]. Requires depth images for training views and depth estimation/refinement for novel views [S1].
+-*   **When to use:** When accurate depth information (from sensors or estimation) is available for the training set.
+-*   **When not to use:** When depth accuracy is low or unavailable, as small $\alpha$ will degrade quality [S1].
++- **Time Complexity:** Reduces the number of unnecessary MLP evaluations in free space compared to uniform sampling, potentially improving rendering quality for a fixed computational budget or allowing faster convergence [S1].
++- **Memory Complexity:** Requires storage for depth images or a point cloud generated from training data [S1].
++- **Strengths:** Prevents quality degradation caused by sampling in irrelevant regions (free space/occluded areas) [S1]. Can improve rendering performance without requiring a fine sampling process if the depth is accurate [S1].
++- **Limitations:** Heavily dependent on the accuracy of the depth estimates. Poor depth estimation with small $\alpha$ leads to poor results [S1].
++- **When to use:** When accurate depth information (from sensors or estimation) is available and the scene contains significant empty space or occlusions that standard NeRF samples inefficiently [S1].
+ 
+ ## Background
+-Surface-Based Sampling (also known as Near-Surface Sampling) was introduced in the paper "Improving Neural Radiance Fields Using Near-Surface Sampling with Point Cloud Generation" [S1]. The method addresses the inefficiency of standard NeRF, which samples uniformly along the entire ray length, including free space. By leveraging depth images to generate a point cloud and subsequently refining depth for novel views, the method focuses sampling near the object surface [S1].
++Surface-Based Sampling was introduced in the paper "Improving Neural Radiance Fields Using Near-Surface Sampling with Point Cloud Generation" [S1]. The method addresses the inefficiency of standard NeRF, which samples uniformly along rays regardless of whether the ray passes through empty space or the object [S1]. By leveraging depth images to generate a point cloud and subsequently refining depth for novel views, the method focuses the neural network's capacity on the object's surface [S1].
+ 
+ ## Sources

@@ -1,0 +1,270 @@
+--- v004.md
++++ v005.md
+@@ -4,12 +4,12 @@
+ 
+ ## Overview
+-CPU Sparse Voxel Octree Traversal is a real-time ray traversal algorithm for sparse voxel octrees that uses a stack-based approach to navigate from the root to leaf voxels, calculating intersections with node boundaries to determine the next octant [S1, S2, unofficial]. It solves the problem of efficiently rendering large sparse voxel datasets on the CPU by avoiding the overhead of recursive function calls and leveraging explicit state management for cache-friendly memory access [S1, S2, unofficial]. It sets itself apart from [Recursive Octree Traversal](2632-recursive-octree-traversal.md) by using an explicit stack instead of the call stack, and from [Parametric Octree Traversal](2361-parametric-octree-traversal.md) by often relying on discrete slab boundaries or DDA steps rather than parametric intervals for child selection [S2, S4, unofficial].
++CPU Sparse Voxel Octree Traversal is a real-time ray traversal algorithm for sparse voxel octrees that uses a stack-based approach to navigate from the root to leaf voxels, calculating intersections with node boundaries to determine the next octant [S1, S2, unofficial]. It solves the problem of efficiently rendering large sparse voxel datasets on the CPU by avoiding the overhead of recursive function calls and leveraging explicit state management for cache-friendly memory access [S1, S2, unofficial]. It sets itself apart from [Recursive Octree Traversal](2632-recursive-octree-traversal.md) by using an explicit stack instead of the call stack, and from [Parametric Octree Traversal](2361-parametric-octree-traversal.md) by relying on discrete slab boundaries or DDA steps rather than parametric intervals for child selection [S2, unofficial].
+ 
+ ## How it works
+-The method traverses a Sparse Voxel Octree (SVO) stored in a linear block structure. It initializes a ray for each pixel, pushes the root node onto a stack, and iteratively processes nodes until a leaf voxel is hit or the stack is empty.
++The method traverses a Sparse Voxel Octree (SVO) stored in a linear block structure. It initializes a ray for each pixel, pushes the root node onto a stack, and iteratively processes nodes until a leaf voxel is hit or the stack is empty [S1, S2, unofficial].
+ 
+ ### Inputs and Outputs
+-*   **Input**: A Sparse Voxel Octree (SVO) stored in a linear array of nodes/leaves; a camera position and direction (or per-pixel ray); screen dimensions (`WIDTH`, `HEIGHT`); field of view factor (`fov`).
+-*   **Output**: A rendered pixel color (e.g., RGBA buffer).
++*   **Input**: A Sparse Voxel Octree root node; a camera position; per-pixel ray directions; screen dimensions (`WIDTH`, `HEIGHT`); field of view factor (`fov`).
++*   **Output**: A rendered pixel color buffer.
+ 
+ ### Data Structures
+@@ -20,22 +20,12 @@
+     *   `valid_masks`: `uint32_t`, 8-bit bitmask indicating which children exist (are not empty).
+     *   `child_pointers`: `uint32_t[8]`, indices into the root array for the 8 children.
+-    *   *Note*: Some implementations use a union with `Leaf` and a boolean flag `is_leaf` [S2, unofficial].
+-
+-2.  **Leaf Node**:
+-    *   Contains color/intensity data.
+-    *   *Note*: In some implementations, the leaf is accessed via an address offset from the block base [S2, unofficial].
+-
+-3.  **Stack Entry** (for Iterative/Stack-based traversal):
++2.  **Stack Entry** (for Iterative/Stack-based traversal):
+     *   `voxel`: Pointer or index to the current node in the linear block.
+     *   `octant`: The octant index (0-7) of the child being visited within the parent node.
+-    *   `ray`: The current ray state (origin, direction).
+-    *   `box_size`: The size of the bounding box at the current stack level.
+-    *   `corner`: The corner coordinate of the current bounding box.
++    *   `ray_origin`: `float[3]`, current ray origin.
++    *   `ray_direction`: `float[3]`, current ray direction.
++    *   `box_size`: `float`, size of the bounding box at the current stack level.
++    *   `corner`: `float[3]`, corner coordinate of the current bounding box.
+     *   *Note*: The stack itself is an array of `StackEntry` with a `top` index [S2, unofficial].
+-
+-4.  **Ray State**:
+-    *   `origin`: `Vector3` (x, y, z).
+-    *   `direction`: `Vector3` (x, y, z).
+-    *   `square_distance()`: Computes the squared distance from the ray origin to the current intersection point [S2, unofficial].
+ 
+ ### Numbered Steps
+@@ -46,42 +36,36 @@
+     *   $direction = (screen\_x \times scale.x, -1 \times scale.y, screen\_y \times scale.z)$ [S2, unofficial].
+     *   Set ray origin to camera position.
+-
+ 2.  **Push Root**: Push the root node of the octree onto the stack.
+     *   Set initial `box_size` to the root box size.
+     *   Set initial `corner` to the root box corner (e.g., $(-1, -1, -1)$) [S2, unofficial].
+-    *   Set initial `octant` to 0 (or the first valid child) [S2, unofficial].
+-
++    *   Set initial `octant` to 0.
+ 3.  **Traversal Loop**: While the stack is not empty:
+-    a.  **Pop/Peek**: Get the current stack entry. Let `node` be the current voxel, `oct` be the current octant.
++    a.  **Peek**: Get the current stack entry. Let `node` be the current voxel, `oct` be the current octant.
+     b.  **Check Validity**: Check if the child at `oct` exists.
+-        *   If using bitmasks: `valid = (node.valid_masks >> oct) & 1` [S1, unofficial].
+-        *   If using union/flags: `valid = node.is_valid` and check child existence [S2, unofficial].
++        *   `valid = (node.valid_masks >> oct) & 1` [S1, unofficial].
+     c.  **If Invalid**:
+-        *   Compute the child corner: `child_corner = corner`. Adjust `child_corner` by `child_size` and `oct` [S2, unofficial].
+         *   Compute `child_size = box_size * 0.5`.
+-        *   Compute ray-box intersection for the child's bounding box.
+-            *   Mirror ray and corner if necessary based on `octant_mask` [S2, unofficial].
+-            *   Compute intersection distances $t_x, t_y, t_z$.
+-            *   Find smallest positive $t$ and hit face [S2, unofficial].
+-        *   March ray by $t$: `ray.march(t)` [S2, unofficial].
+-        *   Transfer to sibling: Update `octant` to the next valid child (e.g., `octant ^= hit_face`) [S2, unofficial].
++        *   Compute `child_corner` by adjusting `corner` by `child_size` and `oct` [S2, unofficial].
++        *   Mirror ray and corner for intersection: `mask = octant_mask(oct)`, `mirror_origin = mirror(ray.origin, mask)`, `mirror_direction = mirror(ray.direction, mask)`, `mirror_corner = mirror(child_corner, mask)`, `mirror_corner.adjust_corner(-child_size, mask)` [S2, unofficial].
++        *   Compute intersection distances: $t_x = (mirror\_corner.x - mirror\_origin.x) / mirror\_direction.x$, $t_y = (mirror\_corner.y - mirror\_origin.y) / mirror\_direction.y$, $t_z = (mirror\_corner.z - mirror\_origin.z) / mirror\_direction.z$ [S2, unofficial].
++        *   Find smallest positive $t$ and hit face: Initialize $t = \infty$, $hit\_face = 0$. If $t_x > 0$, $t = t_x$, $hit\_face = 4$. If $t_y > 0$ and $t_y < t$, $t = t_y$, $hit\_face = 2$. If $t_z > 0$ and $t_z < t$, $t = t_z$, $hit\_face = 1$ [S2, unofficial].
++        *   March ray: `ray_origin += ray_direction * t` [S2, unofficial].
++        *   Transfer to sibling: `octant ^= hit_face` [S2, unofficial].
+         *   Continue loop.
+     d.  **If Valid**:
+-        *   Check if Leaf: `leaf = (node.leaf_mask >> oct) & 1` [S1, unofficial] or `node.is_leaf` [S2, unofficial].
++        *   Check if Leaf: `is_leaf = (node.leaf_mask >> oct) & 1` [S1, unofficial].
+         *   **If Leaf**:
+             *   Retrieve leaf data.
+-            *   Compute lighting/color. Example: `lightness = 1 / (ray.square_distance() + 1)` [S2, unofficial].
+-            *   Set pixel color. Example: `pixel[1] += (0xff - pixel[1]) / 64` [S2, unofficial].
+-            *   Break loop (ray hit).
++            *   Compute lighting: `lightness = 1.0 / (ray.square_distance() + 1.0)` [S2, unofficial].
++            *   Set pixel color: `pixel[1] += (0xff - pixel[1]) / 64` [S2, unofficial].
++            *   Break loop.
+         *   **If Internal Node**:
+             *   Push child node to stack.
+             *   Update `box_size *= 0.5`.
+             *   Update `corner` by adding `half_size` if `octant` bit is set [S1, unofficial].
+-            *   Update `ray` origin to current intersection point.
+-            *   Set `octant` to 0 (or first valid child of new node).
++            *   Set `octant` to 0.
+             *   Continue loop.
+-
+ 4.  **Exit Condition**:
+-    *   If stack is empty and no voxel hit, return default color (e.g., `0xFF000000` or background color) [S1, S2, unofficial].
++    *   If stack is empty and no voxel hit, return default color `0xFF000000` [S1, unofficial].
+ 
+ ### Formulas
+@@ -91,5 +75,4 @@
+     *   $t_z = (mirror\_corner.z - mirror\_origin.z) / mirror\_direction.z$
+     *   $t = \min(t_x, t_y, t_z)$ where $t > 0$ [S2, unofficial].
+-
+ *   **Octant Masking**:
+     *   $mask = ray.octant\_mask()$ [S2, unofficial].
+@@ -105,59 +88,53 @@
+ *   **Empty Stack**: If the stack becomes empty before a leaf is hit, the ray has exited the octree. Return a default background color [S1, S2, unofficial].
+ *   **Precision**: Floating-point precision issues may cause rays to miss voxels or intersect incorrectly. Use epsilon values for comparisons if necessary [G].
+-*   **Degenerate Input**: Empty octrees or invalid nodes should be handled gracefully [S1, unofficial].
++*   **Zero Direction Components**: Division by zero in ray-box intersection occurs if a ray direction component is exactly zero. Clamp or add a small epsilon to the denominator [G].
+ 
+ ### Pseudocode
+ ```python
+-def cpu_svo_traversal(octree, camera, width, height, fov):
++def cpu_svo_traversal(root, camera_pos, width, height, fov):
+     buffer = [0] * (width * height)
++    scale = (1.0, 1.0, 1.0)
+     
+     for j in range(height):
+         for i in range(width):
+-            # Initialize Ray
+             screen_x = (i * fov) / width - 0.5
+             screen_y = (j * fov) / height - 0.5
+-            direction = Vector(screen_x * scale.x, -scale.y, screen_y * scale.z)
+-            ray_origin = camera.position
+-            ray = Ray(ray_origin, direction)
++            direction = (screen_x * scale[0], -scale[1], screen_y * scale[2])
++            ray_origin = list(camera_pos)
++            ray_direction = list(direction)
+             
+-            # Push Root
+-            stack = Stack()
+-            stack.push(
+-                voxel=octree.root,
+-                octant=0,
+-                ray=ray,
+-                box_size=octree.root_box_size,
+-                corner=octree.root_box_corner
+-            )
++            stack = [{'voxel': root, 'octant': 0, 'ray_origin': ray_origin, 'ray_direction': ray_direction, 'box_size': 2.0, 'corner': (-1.0, -1.0, -1.0)}]
+             
+             hit = False
+-            while not stack.empty():
+-                entry = stack.peek()
+-                node = entry.voxel
+-                oct = entry.octant
+-                ray = entry.ray
+-                box_size = entry.box_size
+-                corner = entry.corner
++            while stack:
++                entry = stack[-1]
++                node = entry['voxel']
++                oct = entry['octant']
++                ray_origin = entry['ray_origin']
++                ray_direction = entry['ray_direction']
++                box_size = entry['box_size']
++                corner = list(entry['corner'])
+                 
+-                # Check Validity
+-                valid = (node.valid_masks >> oct) & 1
++                valid = (node['valid_masks'] >> oct) & 1
+                 if not valid:
+-                    # Compute child corner
+                     child_size = box_size * 0.5
+-                    child_corner = corner.adjust_corner(child_size, oct)
+-                    
+-                    # Mirror for intersection
+-                    mask = ray.octant_mask()
+-                    mirror_origin = ray.origin.mirror(mask)
+-                    mirror_direction = ray.direction.mirror(mask)
+-                    mirror_corner = child_corner.mirror(mask)
+-                    mirror_corner.adjust_corner(-child_size, mask)
+-                    
+-                    # Intersection
+-                    tx = (mirror_corner.x - mirror_origin.x) / mirror_direction.x
+-                    ty = (mirror_corner.y - mirror_origin.y) / mirror_direction.y
+-                    tz = (mirror_corner.z - mirror_origin.z) / mirror_direction.z
+-                    
+-                    t = infinity
++                    child_corner = list(corner)
++                    if oct & 1: child_corner[0] += child_size
++                    if oct & 2: child_corner[1] += child_size
++                    if oct & 4: child_corner[2] += child_size
++                    
++                    mask = oct
++                    mirror_origin = [ray_origin[k] if not (mask & (1<<k)) else -ray_origin[k] for k in range(3)]
++                    mirror_direction = [ray_direction[k] if not (mask & (1<<k)) else -ray_direction[k] for k in range(3)]
++                    mirror_corner = [child_corner[k] if not (mask & (1<<k)) else -child_corner[k] for k in range(3)]
++                    for k in range(3):
++                        if mask & (1<<k):
++                            mirror_corner[k] -= child_size
++                    
++                    tx = (mirror_corner[0] - mirror_origin[0]) / mirror_direction[0]
++                    ty = (mirror_corner[1] - mirror_origin[1]) / mirror_direction[1]
++                    tz = (mirror_corner[2] - mirror_origin[2]) / mirror_direction[2]
++                    
++                    t = float('inf')
+                     hit_face = 0
+                     if tx > 0:
+@@ -171,43 +148,37 @@
+                         hit_face = 1
+                     
+-                    if t == infinity:
++                    if t == float('inf'):
+                         stack.pop()
+                         continue
+                     
+-                    ray.march(t)
+-                    entry.octant ^= hit_face
+-                    stack.update(entry)
++                    ray_origin[0] += ray_direction[0] * t
++                    ray_origin[1] += ray_direction[1] * t
++                    ray_origin[2] += ray_direction[2] * t
++                    
++                    entry['octant'] ^= hit_face
+                     continue
+                 
+-                # Check Leaf
+-                is_leaf = (node.leaf_mask >> oct) & 1
++                is_leaf = (node['leaf_mask'] >> oct) & 1
+                 if is_leaf:
+-                    leaf = octree.get_leaf(node.child_pointers[oct])
+-                    lightness = 1.0 / (ray.square_distance() + 1.0)
+-                    pixel_index = j * width + i
+-                    buffer[pixel_index] = compute_color(leaf, lightness)
++                    leaf = node['child_pointers'][oct]
++                    dist_sq = sum((ray_origin[k] - leaf['pos'][k])**2 for k in range(3))
++                    lightness = 1.0 / (dist_sq + 1.0)
++                    pixel_idx = j * width + i
++                    buffer[pixel_idx] = (0, int((0xff - buffer[pixel_idx]) / 64 + buffer[pixel_idx]), 0, 0xff)
+                     hit = True
+                     break
+                 else:
+-                    # Push Child
+-                    child_node = octree.get_node(node.child_pointers[oct])
+                     half_size = box_size * 0.5
+-                    new_corner = corner
+-                    if oct & 1: new_corner.x += half_size
+-                    if oct & 2: new_corner.y += half_size
+-                    if oct & 4: new_corner.z += half_size
+-                    
+-                    stack.push(
+-                        voxel=child_node,
+-                        octant=0,
+-                        ray=ray,
+-                        box_size=half_size,
+-                        corner=new_corner
+-                    )
++                    new_corner = list(corner)
++                    if oct & 1: new_corner[0] += half_size
++                    if oct & 2: new_corner[1] += half_size
++                    if oct & 4: new_corner[2] += half_size
++                    
++                    child_node = node['child_pointers'][oct]
++                    stack.append({'voxel': child_node, 'octant': 0, 'ray_origin': ray_origin, 'ray_direction': ray_direction, 'box_size': half_size, 'corner': new_corner})
+             
+             if not hit:
+-                pixel_index = j * width + i
+-                buffer[pixel_index] = 0xFF000000 # Default color
+-    
++                pixel_idx = j * width + i
++                buffer[pixel_idx] = 0xFF000000
+     return buffer
+ ```

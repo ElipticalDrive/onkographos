@@ -1,0 +1,198 @@
+# Overlap-Add Stereogram (OLAS)
+Also called: Overlap-Add method
+
+## Overview
+Overlap-Add Stereogram (OLAS) is a holographic stereogram algorithm that encodes a light field into a hologram by treating the stereogram as an inverse Short-Time Fourier Transform (STFT), allowing hogels to overlap and coherently add in the complex domain [S1]. It solves the spatio-angular resolution tradeoff inherent in traditional Holographic Stereogram (HS) methods, where increasing hogel size improves angular resolution but degrades spatial resolution [S1]. Unlike its sibling [Phase-Added Stereogram (PAS)](19254-phase-added-stereogram-pas.md), which requires precise phase alignment across non-overlapping or tiled hogels, OLAS allows large hogels to overlap and shift by a single pixel, breaking the spatial-angular resolution tradeoff and producing image quality independent of hogel size [S1].
+
+## How it works
+**Inputs:**
+*   Light field $L(x, y, u_x, u_y)$: Angular radiance distribution, where $(x, y)$ are spatial coordinates and $(u_x, u_y)$ are spatial frequencies ($u_{x,y} = \sin(\theta_{x,y})/\lambda$).
+*   Depth field $D(x, y, u_x, u_y)$: Depth information corresponding to the light field samples [S1].
+*   Hogel dimensions $m, n$: Width and height of the local hogel in pixels [S1].
+*   Window function $w(s, t)$: Typically a Hann window [S1].
+*   Wavelength $\lambda$ [S1].
+
+**Outputs:**
+*   Complex-valued hologram buffer $h(x, y)$ [S1].
+
+**Data Structures:**
+*   $L$: 4D array or tensor of shape $(H_L, W_L, H_A, W_A)$, where $H_L, W_L$ are light field spatial dimensions and $H_A, W_A$ are angular dimensions.
+*   $D$: 4D array of same spatial/angular dimensions as $L$.
+*   $h$: 2D complex array of shape $(H_H, W_H)$, initialized to zero.
+*   $w$: 2D real array of shape $(m, n)$.
+
+**Parameters:**
+*   Hogel size $m, n$: In OLAS, the method is invariant to this choice, unlike previous methods where optimal size varies with object depth [S1]. However, a minimum effective hogel size is determined by the farthest plane: $hogel\_size \ge z_{max} \tan(\theta_{max}) / p$, where $z_{max}$ is max depth, $\theta_{max}$ is max diffraction angle, and $p$ is pixel pitch [S1].
+*   Window function $w$: Hann window is used [S1].
+
+**Steps:**
+1.  For each pixel $(x_0, y_0)$ in the output hologram coordinates (which correspond to spatial centers in the light field domain):
+2.  Extract the angular radiance distribution $a = L(x_0, y_0, u_x, u_y)$ from the input light field.
+3.  Compute the phase $\phi = \frac{2\pi}{\lambda} D(x_0, y_0, u_x, u_y)$ using the depth field [S1].
+4.  Compute the local hogel by taking the Fourier transform over angular coordinates $(u_x, u_y)$ of $a \cdot \exp(i \cdot \phi)$. Let $s, t$ be local hogel coordinates:
+    $$ \text{hogel}(s, t) = \mathcal{F}_{u_x, u_y} \left[ a(u_x, u_y) \cdot \exp\left(i \frac{2\pi}{\lambda} D(x_0, y_0, u_x, u_y)\right) \right] $$
+    Note: The Fourier transform maps angular frequencies to spatial hogel coordinates [S1].
+5.  Multiply the computed hogel by the window function $w(s, t)$.
+6.  Add the windowed hogel to the hologram buffer $h$ at the appropriate spatial location $(x_0, y_0)$ with offsets based on hogel dimensions $m, n$. Specifically, for local coordinates $s \in [-m/2, m/2]$ and $t \in [-n/2, n/2]$:
+    $$ h\left(x_0 + s, y_0 + t\right) \leftarrow h\left(x_0 + s, y_0 + t\right) + w(s, t) \cdot \text{hogel}(s, t) $$
+
+**Pseudocode:**
+> **Unverified code.** The code below did not pass a test run against a reference implementation, or no test fits it, so it may contain errors.
+
+```python
+def compute_olas(L, D, m, n, lambda_wavelength):
+    """
+    Compute Overlap-Add Stereogram hologram.
+    
+    Args:
+        L: Light field array of shape (H_L, W_L, H_A, W_A).
+           L[x, y, ux_idx, uy_idx] corresponds to L(x, y, ux, uy).
+        D: Depth field array of shape (H_L, W_L, H_A, W_A).
+        m: Hogel width in pixels.
+        n: Hogel height in pixels.
+        lambda_wavelength: Wavelength of light.
+        
+    Returns:
+        h: Complex hologram array of shape (H_H, W_H).
+    """
+    H_L, W_L, H_A, W_A = L.shape
+    
+    # Determine hologram size. 
+    # In OLAS, hogels overlap by 1 pixel. The hologram covers the spatial extent.
+    # Assuming L is sampled on a grid that maps directly to hologram pixels.
+    H_H, W_H = H_L, W_L
+    
+    # Initialize hologram buffer
+    h = np.zeros((H_H, W_H), dtype=np.complex128)
+    
+    # Create Hann window
+    # w(s, t) for s in [-m/2, m/2), t in [-n/2, n/2)
+    # Note: Standard Hann window definition usually 0 to M-1. 
+    # We need to center it.
+    s = np.arange(-m // 2, m // 2 + (1 if m % 2 == 0 else 0))
+    t = np.arange(-n // 2, n // 2 + (1 if n % 2 == 0 else 0))
+    S, T = np.meshgrid(s, t, indexing='ij')
+    
+    # Hann window: 0.5 * (1 - cos(2*pi*k/(N-1)))
+    # Adjust indices to be 0..m-1 for standard formula
+    s_norm = (S + m // 2) / (m - 1) if m > 1 else 0.5
+    t_norm = (T + n // 2) / (n - 1) if n > 1 else 0.5
+    
+    w = 0.5 * (1 - np.cos(2 * np.pi * s_norm)) * (1 - np.cos(2 * np.pi * t_norm))
+    
+    # Precompute angular frequency coordinates if needed for FFT shift/centering
+    # The FFT output order corresponds to frequencies [0, ..., N/2, -N/2, ..., -1]
+    # We assume L is sampled uniformly in angular space.
+    
+    for x0 in range(H_H):
+        for y0 in range(W_H):
+            # 1. Extract angular radiance
+            # L[x0, y0, :, :] is the angular slice at spatial location (x0, y0)
+            a = L[x0, y0, :, :]
+            
+            # 2. Extract depth
+            d_slice = D[x0, y0, :, :]
+            
+            # 3. Compute phase
+            # phi = (2*pi / lambda) * D
+            phi = (2 * np.pi / lambda_wavelength) * d_slice
+            
+            # 4. Modulate amplitude with phase
+            # a * exp(i * phi)
+            modulated = a * np.exp(1j * phi)
+            
+            # 5. Compute local hogel via Fourier Transform over angular coordinates
+            # F{u_x, u_y}
+            # The result is a 2D array of size (H_A, W_A)
+            # We need to map this to the hogel coordinates s, t.
+            # The hogel size m, n might differ from angular sampling H_A, W_A.
+            # The source implies the hogel is the FT of the angular slice.
+            # If m != H_A, interpolation or zero-padding is required. 
+            # Assuming m=H_A and n=W_A for direct mapping as per "hogel dimensions"
+            # If not, we assume the hogel is defined on the angular grid.
+            
+            hogel = np.fft.fft2(modulated)
+            
+            # 6. Multiply by window and add to hologram
+            # The hogel is centered at (x0, y0).
+            # We add w(s,t) * hogel(s,t) to h(x0+s, y0+t)
+            
+            # Ensure shapes match for broadcasting/addition
+            # hogel shape: (H_A, W_A)
+            # w shape: (m, n)
+            # If m != H_A or n != W_A, we must resize or assume they are equal.
+            # The source says "hogel dimensions m, n". It also says "shift by a single pixel".
+            # This implies the hogel is evaluated on a grid of size m x n.
+            # If H_A != m, we assume the hogel is interpolated or the angular sampling matches the hogel size.
+            # Given the complexity, we assume H_A == m and W_A == n for the core definition.
+            
+            if m != H_A or n != W_A:
+                # Resize hogel to m x n if necessary. 
+                # This is a gap filler [G]. Standard interpolation (e.g., bilinear) 
+                # or zero-padding in frequency domain would be used.
+                # For simplicity in this generic implementation, we assume m=H_A, n=W_A.
+                pass 
+            
+            # Add to hologram
+            # h[x0 + s, y0 + t] += w[s, t] * hogel[s, t]
+            # Vectorized addition:
+            # Create offset grid
+            # This loop is slow, but represents the algorithm.
+            for s_idx in range(m):
+                for t_idx in range(n):
+                    h_x = x0 + s - (m // 2) # Adjust for centering
+                    h_y = y0 + t - (n // 2)
+                    
+                    # Boundary check
+                    if 0 <= h_x < H_H and 0 <= h_y < W_H:
+                        h[h_x, h_y] += w[s_idx, t_idx] * hogel[s_idx, t_idx]
+                        
+    return h
+```
+
+**Edge Cases and Pitfalls:**
+*   **Undersampling:** If the light field is undersampled angularly such that the spatial shift of a point between views exceeds the hogel size, reconstruction artifacts occur [S1]. The minimum effective hogel size is determined by the farthest plane: $hogel\_size \ge z_{max} \tan(\theta_{max}) / p$ [S1].
+*   **Phase Misalignment:** Unlike PAS, OLAS uses depth to align phases across overlapping hogels, avoiding the phase misalignment issues of traditional HS [S1].
+*   **Information Loss:** Unlike APAS, OLAS does not crop the hogels, preserving more information of the target light field [S1].
+
+## Subtopics
+
+### Depth-free Overlap-Add Stereogram (dfOLAS)
+A depth-free variant of the Overlap-Add Stereogram (OLAS) method that allows adjacent hogel shifts to constructively overlap and add without requiring accurate depth information, similar to how the Holographic Stereogram (HS) relates to the Phase-Added Stereogram (PAS) [S1]. It computes the phase factor for each spatial frequency based on the relative phase shift for each pixel to the next, rather than using depth-dependent propagation [S1]. It is used to encode specularities and other view-dependent effects with poorly defined depth [S1].
+
+## Operating characteristics
+**Time and Memory Complexity:**
+*   Traditional HS algorithms have $O(m^2 \log n)$ complexity, where $n$ is the hogel size and $m$ is the hologram resolution [S1].
+*   OLAS has algorithmic complexity roughly $O(m^2 n^2 \log n)$, where $m$ is hologram resolution and $n$ is hogel size. For $n^2$ hogels, each requires $n^2 \log n$ operations for the Fourier transform [S1].
+*   The computation is comparable to concurrent work by Park and Askari [2019] [S1].
+
+**Measured Performance:**
+*   OLAS produces images with much higher spatial resolution than other stereogram algorithms (like HS) because it overlaps instead of tiles hogels [S1].
+*   OLAS produces more accurate occlusions and parallax compared to the Fresnel method [S1].
+*   OLAS provides higher image quality and natively supports view-dependent effects (occlusions, reflections), whereas Fresnel holograms do not natively support these effects [S1]. However, Fresnel holograms have higher computation complexity [S1].
+
+**Strengths and Limitations:**
+*   **Strengths:**
+    *   Invariant to hogel size: Does not degrade spatial resolution with increasing hogel size [S1].
+    *   Scene-invariant: Does not require different fringe pattern sizes for different depths, unlike Fresnel holograms [S1].
+    *   Coherent addition: Adds hogels coherently in the complex domain to take full advantage of hologram degrees of freedom, achieving maximum image quality [S1].
+    *   Avoids parallax error: Unlike methods using non-overlapping hogels with wavefront propagation (e.g., Shi et al. [2017]), OLAS avoids parallax error on the order of the hogel size [S1].
+*   **Limitations:**
+    *   Requires depth information: Standard OLAS requires dense light field depth information $D(x, y, u_x, u_y)$ [S1].
+    *   Undersampling artifacts: If the underlying light field is too sparsely sampled angularly, reconstruction artifacts occur [S1].
+    *   Computational cost: While more efficient than Fresnel for view-dependent effects, it is more complex than basic HS [S1].
+
+**When to use:**
+*   Use OLAS when high spatial and angular resolution are both required, and view-dependent effects (occlusions, reflections) are important.
+*   Use OLAS when the scene contains objects at varying depths, as it is depth-invariant.
+*   Use dfOLAS when depth information is unavailable or poorly defined (e.g., specularities) [S1].
+
+**When not to use:**
+*   Do not use if the light field is severely undersampled angularly, as artifacts will occur [S1].
+*   Do not use if computational resources are extremely limited and view-dependent effects are not critical, as Fresnel or basic HS might be simpler (though lower quality for view-dependent effects) [S1].
+
+## Background
+The first Holographic Stereogram (HS) was optically recorded in 1967 by Benton [1983]. Computer-generated stereograms were proposed shortly after by Yatagai [1976], and real-time implementations were demonstrated by Lucente and Galyean [1995]. Traditional HS algorithms suffer from a spatio-angular resolution tradeoff because hogels are treated as independent and out of phase. Phase-Added Stereograms (PAS) were introduced to keep hogels in phase [Yamaguchi et al. 1993], with improvements like APAS, CPAS, and FPAS [Kang et al. 2016, 2008]. OLAS was proposed by Padmanaban, Peng, and Wetzstein in 2019 [S1]. It is used in holographic near-eye displays for VR/AR applications to encode view-dependent lighting effects of a light field into a hologram [S1].
+
+## Sources
+[S1] Holographic near-eye displays based on overlap-add stereograms, https://doi.org/10.1145/3355089.3356517, fetched 2026-11-01

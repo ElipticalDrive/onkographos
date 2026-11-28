@@ -1,0 +1,253 @@
+# SPW (Semantic Priors in Weights)
+
+## Overview
+SPW is a reparameterization method that encodes semantic priors into the weights of an Implicit Neural Representation (INR) model to enhance its representational capacity without increasing inference cost [S1]. It differs from standard INR training by decoupling semantic feature extraction from the implicit function learning, using a pre-trained Semantic Neural Network (SNN) to generate a semantic vector that conditions a Weight Generation Network (WGN) [S1]. Unlike [VC-INR Meta-Training](19798-vc-inr-meta-training.md) which learns task-specific meta-initializations, SPW injects specific semantic context into the weights for a given target signal [S1]. Unlike [WIRE (Wavelet Implicit Neural Representations)](20126-wire-wavelet-implicit-neural-representations.md) which modifies the activation function to improve high-frequency fitting, SPW modifies the weight initialization and structure based on semantic content [S1].
+
+## How it works
+**Inputs:**
+- Target visual signal (e.g., image $I \in \mathbb{R}^{W \times H \times 3}$) [S1].
+- INR architecture definition (number of layers, hidden dimensions $C_m$) [S1].
+- Pre-trained SNN (e.g., EfficientNet-B7) [S1].
+
+**Outputs:**
+- Semantic weights $W^s$ for the INR layers [S1].
+- The INR model parameterized by $W^s$ [S1].
+
+**Data Structures:**
+1.  **Semantic Vector ($v_s$):** A 1D vector of size $1 \times (C_1 + C_2 + \dots + C_7)$, where $C_n$ is the channel count of stage $n$ in the SNN [S1].
+2.  **Weight Generation Network (WGN):** A multi-layer perceptron (MLP) with an inverted residual bottleneck structure. For the $m$-th INR layer, the WGN takes $v_s$ as input and outputs a vector of size $1 \times (C_{m-1} \times C_m)$ [S1].
+3.  **INR Weights ($W^s$):** A set of matrices $\{W^s_1, W^s_2, \dots, W^s_L\}$, where $W^s_m \in \mathbb{R}^{C_{m-1} \times C_m}$ [S1].
+
+**Parameters:**
+-   **Expansion factor ($E$):** Multiplier for hidden channels in the first two layers of the WGN. Default: 6 [S1].
+-   **PE-MLP Fourier bases:** 10 [S1].
+-   **SIREN frequency parameter ($\omega_0$):** 30 [S1].
+-   **WIRE frequency parameter ($\omega$):** 20 [S1].
+-   **WIRE spread parameter ($s$):** 10 [S1].
+-   **Optimizer:** Adam [S1].
+-   **Initial learning rate:** $2 \times 10^{-4}$ [S1].
+-   **Training iterations:** 50,000 [S1].
+-   **WGN Initialization:** LeCun random initialization [S1].
+
+**Steps:**
+
+1.  **Extract Semantic Features:**
+    Pass the target visual signal through the fixed SNN (e.g., EfficientNet-B7) [S1].
+    Extract feature maps from the final layer of each of the 7 stages of the SNN [S1].
+    For stage $n$, let the feature maps be $F_n \in \mathbb{R}^{H_n \times W_n \times C_n}$ [S1].
+
+2.  **Compute Semantic Vector:**
+    Globally average-pool $F_n$ along the spatial dimensions ($H_n, W_n$) to obtain a vector $p_n \in \mathbb{R}^{1 \times C_n}$ [S1]:
+    $$ p_n = \text{GAP}(F_n) $$
+    Concatenate $p_1, p_2, \dots, p_7$ to form the Semantic Vector $v_s \in \mathbb{R}^{1 \times (C_1 + \dots + C_7)}$ [S1]:
+    $$ v_s = \text{Concat}(p_1, p_2, \dots, p_7) $$
+    Compute $v_s$ once at the beginning of training [S1].
+
+3.  **Initialize WGNs:**
+    For each layer $m$ of the INR (where $m=1 \dots L$), initialize a WGN $G_m$ [S1].
+    The WGN $G_m$ consists of three fully connected layers [S1]:
+    -   Layer 1: Input size $D_{in} = \sum_{i=1}^7 C_i$. Output size $D_{mid} = E \times C_{m-1} \times C_m$.
+    -   Layer 2: Input size $D_{mid}$. Output size $D_{mid}$.
+    -   Layer 3: Input size $D_{mid}$. Output size $D_{out} = C_{m-1} \times C_m$.
+    Initialize weights using LeCun random initialization [S1].
+
+4.  **Train WGNs:**
+    The SNN is frozen. The INR backbone weights are not directly optimized; instead, the WGN parameters are optimized [S1].
+    For each training iteration:
+    a.  For each INR layer $m$, compute the generated weight vector $u_m = G_m(v_s)$ [S1].
+    b.  Reshape $u_m$ into the weight matrix $W^s_m \in \mathbb{R}^{C_{m-1} \times C_m}$ [S1].
+    c.  Construct the INR forward pass using $W^s_m$ for all layers [S1].
+    d.  Compute the loss (e.g., MSE) between the INR output and the target signal values at sampled coordinates [S1].
+    e.  Back-propagate the gradient through the WGNs to update their parameters [S1].
+
+5.  **Inference Preparation:**
+    After training, the SNN and WGNs are fixed [S1].
+    Compute the final semantic weights $W^s_m$ for all layers $m$ by passing $v_s$ through the trained WGNs $G_m$ [S1].
+    Discard the SNN and WGNs [S1].
+    Store only the matrices $W^s_m$ [S1].
+
+6.  **Inference:**
+    Use the INR model with weights $W^s$ to map coordinates to signal values [S1]. No additional computational or memory cost compared to a standard INR with the same architecture [S1].
+
+**Pseudocode:**
+
+> **Unverified code.** The code below did not pass a test run against a reference implementation, or no test fits it, so it may contain errors.
+
+```python
+import torch
+import torch.nn as nn
+import torch.optim as optim
+from torchvision import models
+
+class WeightGenerationNetwork(nn.Module):
+    """
+    WGN with inverted residual bottleneck structure.
+    """
+    def __init__(self, semantic_dim, out_channels, expansion_factor=6):
+        super(WeightGenerationNetwork, self).__init__()
+        self.expansion_factor = expansion_factor
+        mid_channels = expansion_factor * out_channels
+        
+        self.fc1 = nn.Linear(semantic_dim, mid_channels)
+        self.fc2 = nn.Linear(mid_channels, mid_channels)
+        self.fc3 = nn.Linear(mid_channels, out_channels)
+        
+        # LeCun initialization
+        for m in self.modules():
+            if isinstance(m, nn.Linear):
+                nn.init.kaiming_uniform_(m.weight, a=0, mode='fan_in')
+                if m.bias is not None:
+                    fan_in, _ = nn.init._calculate_fan_in_and_fan_out(m.weight)
+                    bound = 1 / (fan_in ** 0.5)
+                    nn.init.uniform_(m.bias, -bound, bound)
+
+    def forward(self, v_s):
+        x = torch.relu(self.fc1(v_s))
+        x = torch.relu(self.fc2(x))
+        out = self.fc3(x)
+        return out
+
+class SPW_INR_Trainer:
+    def __init__(self, inr_model_class, inr_config, semantic_model_name='efficientnet_b7'):
+        """
+        inr_model_class: Class defining the INR architecture (e.g., SIREN, PE-MLP).
+        inr_config: Dict containing hidden layers and features.
+        semantic_model_name: Name of the pre-trained SNN.
+        """
+        self.inr_config = inr_config
+        self.inr_model_class = inr_model_class
+        
+        # Load SNN
+        self.snn = models.efficientnet_b7(pretrained=True)
+        self.snn.eval()
+        # Remove the classifier/head to get feature maps from stages
+        # Note: EfficientNet-B7 stages correspond to specific blocks. 
+        # For implementation, one must hook the outputs of the 7 stages.
+        # This is a placeholder for the specific feature extraction logic.
+        self.snn_features = None 
+        
+        # Initialize WGNs
+        # EfficientNet-B7 stage channel sizes: [C1, C2, C3, C4, C5, C6, C7]
+        # These are typically [32, 24, 64, 160, 448, 1536, 2560] for B7.
+        # We assume these are known or extracted from the model.
+        self.stage_channels = [32, 24, 64, 160, 448, 1536, 2560] 
+        self.semantic_dim = sum(self.stage_channels)
+        
+        self.wgns = nn.ModuleList()
+        layers = inr_config['layers']
+        hidden_features = inr_config['features']
+        
+        for m in range(1, layers + 1):
+            prev_c = hidden_features if m > 1 else 3 # Assuming 3 channels for input image
+            curr_c = hidden_features
+            wgn = WeightGenerationNetwork(self.semantic_dim, prev_c * curr_c, expansion_factor=6)
+            self.wgns.append(wgn)
+            
+        self.optimizer = optim.Adam(self.wgns.parameters(), lr=2e-4)
+
+    def extract_semantic_vector(self, image):
+        """
+        Extracts semantic vector from image using SNN.
+        image: Tensor of shape (1, 3, H, W)
+        """
+        self.snn.eval()
+        with torch.no_grad():
+            # Hooking stages is required. Here we assume a helper function
+            # that returns feature maps from the 7 stages.
+            feature_maps = self._get_efficientnet_b7_stages(image)
+            
+        pooled_vectors = []
+        for fm in feature_maps:
+            # Global Average Pooling along H and W
+            pooled = torch.mean(fm, dim=(2, 3), keepdim=True)
+            pooled_vectors.append(pooled)
+            
+        v_s = torch.cat(pooled_vectors, dim=1)
+        return v_s
+
+    def _get_efficientnet_b7_stages(self, x):
+        # Placeholder for actual EfficientNet-B7 stage extraction.
+        # In practice, one would use forward hooks or modify the model
+        # to return intermediate features.
+        # This function returns a list of 7 tensors.
+        return [] 
+
+    def train(self, target_image, num_iterations=50000):
+        v_s = self.extract_semantic_vector(target_image)
+        
+        for i in range(num_iterations):
+            self.optimizer.zero_grad()
+            
+            # Generate weights for all layers
+            generated_weights = []
+            layers = self.inr_config['layers']
+            hidden_features = self.inr_config['features']
+            
+            for m in range(1, layers + 1):
+                prev_c = hidden_features if m > 1 else 3
+                curr_c = hidden_features
+                wgn = self.wgns[m-1]
+                
+                # Generate weight vector
+                w_vec = wgn(v_s)
+                # Reshape to matrix
+                w_mat = w_vec.view(prev_c, curr_c)
+                generated_weights.append(w_mat)
+                
+            # Create INR instance with generated weights
+            # The INR model class must accept weights or be constructed dynamically
+            inr = self.inr_model_class(weights=generated_weights, config=self.inr_config)
+            
+            # Sample coordinates (e.g., random pixels from target image)
+            coords = self.sample_coordinates(target_image)
+            target_values = self.sample_values(target_image, coords)
+            
+            # Forward pass
+            pred_values = inr(coords)
+            
+            # Loss
+            loss = nn.MSELoss()(pred_values, target_values)
+            loss.backward()
+            self.optimizer.step()
+            
+            if i % 1000 == 0:
+                print(f"Iteration {i}, Loss: {loss.item()}")
+
+    def get_inference_model(self):
+        """
+        Returns an INR model with the final semantic weights.
+        """
+        # This method is not fully defined in sources, but implies
+        # saving the weights W^s.
+        # We assume the trainer has access to the final v_s and wgns.
+        # In practice, one would re-run the forward pass of WGNs
+        # to get the final weights and save them.
+        pass
+
+    def sample_coordinates(self, image):
+        # Placeholder for coordinate sampling
+        return torch.randn(1000, 2)
+
+    def sample_values(self, image, coords):
+        # Placeholder for value sampling
+        return torch.randn(1000, 3)
+```
+
+**Edge Cases and Pitfalls:**
+-   **SNN Compatibility:** The method relies on the SNN providing feature maps from multiple stages. If the SNN does not expose intermediate features, the semantic vector cannot be constructed [S1].
+-   **WGN Capacity:** The WGN must be sufficiently large to map the semantic vector to the INR weights. The expansion factor $E=6$ is recommended [S1].
+-   **Training Stability:** The WGNs are trained via back-propagation through the INR. If the INR architecture is sensitive to weight initialization, the WGN must learn to stabilize the weights [S1].
+-   **Inference Cost:** While SPW adds no cost at inference, the training cost is higher due to the WGNs and the need to compute $v_s$ [S1].
+
+## Operating characteristics
+-   **Time Complexity:** Training time is increased compared to standard INR due to the WGNs and the SNN feature extraction. However, inference time is identical to standard INR [S1].
+-   **Memory Complexity:** Training memory includes the SNN, WGNs, and INR weights. Inference memory is only the INR weights $W^s$, identical to standard INR [S1].
+-   **Performance:** On the Kodak dataset (24 RGB images, 768x512 resolution), SPW improved PSNR by up to 1.4dB for image fitting tasks compared to original INR models [S1]. Specifically, for the [10x28] architecture, SPW SIREN achieved 26.61 PSNR vs 25.52 for standard SIREN [S1].
+-   **Strengths:** Enhances representational capacity without inference overhead; generalizable to various INR models (SIREN, PE-MLP, MFN, WIRE) [S1].
+-   **Limitations:** Requires a pre-trained SNN; training is more complex due to the two-stage process (SNN fixed, WGN trained) [S1].
+
+## Background
+SPW was proposed by Qiu Shen et al. in 2024 [S1]. It addresses the limitation that standard INR coordinates contain no semantic information, which can hinder performance in tasks where semantic context is beneficial [S1]. The method builds on the idea that semantic features extracted from pre-trained networks can guide the learning of implicit representations [S1]. It is applicable to 2D image fitting, compression, CT reconstruction, MRI reconstruction, and novel view synthesis [S1].
+
+## Sources
+[S1] Encoding Semantic Priors into the Weights of Implicit Neural Representation, https://doi.org/10.1109/icme57554.2024.10688197, fetched 2026-10-26

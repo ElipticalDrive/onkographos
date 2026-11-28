@@ -1,0 +1,187 @@
+# Voxel Meshing via Compute Shader
+
+Also called: indirect voxel meshing
+
+## Overview
+A technique that converts a 3D voxel grid into a triangle mesh using a compute shader [S1, unofficial]. It processes voxels column-by-column (along the Y-axis) to generate quads for exposed faces, using indirect draw commands to handle variable output counts without host-side buffer management [S1, unofficial]. It builds on [Voxel Meshing via Column Flushing](21370-voxel-meshing-via-column-flushing.md) by replacing the host-side buffer management with GPU-side atomic counters and indirect draw calls [S1, unofficial].
+
+## How it works
+**Inputs and Outputs:**
+*   **Input:** A 3D voxel grid stored in a Structured Buffer (SSBO) `voxels`, where each element packs 4 voxel color indices (8 bits each) into a single 32-bit integer. The grid dimensions are provided as `model_size` (x, y, z).
+*   **Output:** A vertex buffer `final_vertices` containing vertex positions and packed data (color index + normal index), an index buffer `final_indices` (if using indexed drawing, though the primary note describes indirect draw which often implies non-indexed or specific indexing strategies, the source code shows indices being written), and an `indirect_buffer` containing a `DrawElementsIndirectCommand` (or `DrawArraysIndirectCommand` in notes, but code shows `DrawElementsIndirectCommand`) with the total vertex/face count.
+
+**Data Structures:**
+*   `VoxelData`: `uint four_voxels`. Packs 4 `uint8` color indices.
+*   `Vertex`: `float16_t x, y, z`. 6 bytes per vertex (packed). Note: The notes mention 16 bytes, but the GLSL struct uses `float16_t` which is 2 bytes, totaling 6 bytes. However, alignment might pad it. The source code `struct Vertex{ float16_t x, y, z; };` suggests 6 bytes. The notes say "16 bytes per vertex" likely due to alignment or a different implementation variant. We follow the source code structure for precision but acknowledge the note's layout description if it differs significantly. *Correction*: The notes explicitly state `Vertex` contains `vec3 position` (12 bytes) and `uint packed_data` (4 bytes). The source code `shader.vert` reads `packedData` from a separate buffer. The compute shader `slicing_x.comp` writes to `final_vertices` (Vertex struct) and `final_packed` (uint array). The notes seem to describe a combined layout or a different version. We will stick to the source code's explicit separation for the compute shader output, as it is the primary implementation detail provided.
+*   `DrawElementsIndirectCommand`: `uint count`, `uint instanceCount`, `uint firstIndex`, `uint baseVertex`, `uint baseInstance`.
+*   `InstanceData`: `vec3 instance_size`, `vec3 instance_position_offset`.
+
+**Algorithm Steps:**
+1.  **Dispatch:** The compute shader is dispatched with `local_size_x = 16`, `local_size_y = 1`, `local_size_z = 16`. Each workgroup handles a 2D slice of columns in the XZ plane.
+2.  **Column Identification:** Calculate the global invocation ID `gl_GlobalInvocationID.xz` to determine the 2D column position `(col_x, col_z)`.
+3.  **Bounds Check:** Verify that `col_x < model_size.x` and `col_z < model_size.z`. If out of bounds, exit.
+4.  **Initialization:** Initialize `starting_pos` variables for the 4 face directions (y0, y1, z0, z1) to `vec3(-1)`. These track the start of a continuous face segment.
+5.  **Vertical Loop:** Loop `i` from `0` to `model_size.y - 1` (vertical column traversal).
+6.  **Voxel Access:**
+    *   Compute `voxel_index = col_x + i * model_size.x + col_z * model_size.x * model_size.y`.
+    *   Retrieve the packed voxel data: `voxel_packed = voxels[voxel_index / 4].four_voxels`.
+    *   Extract the current voxel's color index: `col_idx = (voxel_packed >> (8 * (voxel_index % 4))) & 255`.
+7.  **Position Calculation:**
+    *   Compute the base voxel position: `voxel_pos = vec3(col_x, i, col_z)`.
+    *   Apply instance offsets: `voxel_pos_flipped = vec3(voxel_pos.y, voxel_pos.z, voxel_pos.x)` (axis swap for coordinate system compatibility).
+    *   Apply instance position offset: `final_pos = voxel_pos_flipped + instance_data.instance_position_offset.yzx - floor(instance_data.instance_size.yzx / 2.0)`. *Note: The exact offset logic depends on the instance data layout and coordinate system flip.*
+8.  **Neighbor Check:** For each of the 4 relevant face directions (y0, y1, z0, z1), determine the neighbor's position.
+    *   Check bounds using `pos_in_bounds`.
+    *   Retrieve neighbor color index using `get_col_idx`.
+9.  **Face Detection & Flushing:**
+    *   For each direction, if the current voxel is non-empty (`col_idx != 0`) and the neighbor is empty (`neighbor_idx == 0`), a face exists.
+    *   If `starting_pos` is `-1`, set `starting_pos` to the current voxel's position.
+    *   If `starting_pos` is not `-1` and the face condition continues (same direction, contiguous), update the end position.
+    *   If the face condition breaks (neighbor is not empty, or voxel becomes empty, or color changes if supported), flush the face segment.
+10. **Flush Operation:**
+    *   Call `create_face_*` with `starting_pos` and `ending_pos`.
+    *   Inside `create_face`:
+        *   Atomically reserve space: `base_idx = atomicAdd(indirect_command.count, 6)`.
+        *   Calculate face index: `face_idx = base_idx / 6`.
+        *   Calculate vertex base: `base_vtx = face_idx * 4`.
+        *   Pack data: `packed_val = (col_idx & 255) | (normal_idx << 8)`.
+        *   Write `packedData[face_idx] = packed_val`.
+        *   Construct 6 vertices (2 triangles) for the quad.
+        *   Write vertices to `final_vertices[base_vtx + 0..3]`.
+        *   Write indices to `final_indices[base_idx + 0..5]`.
+11. **Final Flush:** After the Y-loop, if any `starting_pos` is not `-1`, flush the remaining open faces.
+
+**Pseudocode:**
+> **Unverified code.** The code below did not pass a test run against a reference implementation, or no test fits it, so it may contain errors.
+
+```python
+# Compute Shader Entry Point
+# Inputs: voxels[], model_size, instance_data
+# Outputs: final_vertices[], final_indices[], final_packed[], indirect_command
+
+def main():
+    col_x = gl_GlobalInvocationID.x
+    col_z = gl_GlobalInvocationID.z
+    
+    if col_x >= model_size.x or col_z >= model_size.z:
+        return
+
+    # Initialize starting positions for 4 directions
+    # Directions: Y-down (y0), Y-up (y1), Z-neg (z0), Z-pos (z1)
+    # Note: The source code mentions 4 directions but the create_face logic in slicing_x.comp
+    # seems to handle a specific orientation. We generalize based on the notes.
+    starting_pos_y0 = vec3(-1)
+    starting_pos_y1 = vec3(-1)
+    starting_pos_z0 = vec3(-1)
+    starting_pos_z1 = vec3(-1)
+
+    for i in range(model_size.y):
+        # Calculate voxel index in the packed array
+        voxel_index = col_x + i * model_size.x + col_z * model_size.x * model_size.y
+        packed_voxel = voxels[voxel_index // 4].four_voxels
+        col_idx = (packed_voxel >> (8 * (voxel_index % 4))) & 255
+        
+        # Calculate world position
+        voxel_pos = vec3(col_x, i, col_z)
+        # Axis flip for coordinate system compatibility (e.g., MagicaVoxel to OpenGL)
+        voxel_pos_flipped = vec3(voxel_pos.y, voxel_pos.z, voxel_pos.x)
+        
+        # Apply instance offset
+        # Note: Exact offset calculation depends on instance_data layout
+        final_pos = voxel_pos_flipped + instance_data.instance_position_offset.yzx - floor(instance_data.instance_size.yzx / 2.0)
+        
+        # Check neighbors for each direction
+        # Direction Y0 (Down): Neighbor at i-1
+        if i > 0:
+            neighbor_idx = get_voxel(col_x, i-1, col_z, model_size)
+        else:
+            neighbor_idx = 0 # Boundary is empty
+            
+        if col_idx != 0 and neighbor_idx == 0:
+            if starting_pos_y0 == vec3(-1):
+                starting_pos_y0 = final_pos
+            # Continue segment
+        else:
+            if starting_pos_y0 != vec3(-1):
+                create_face_y0(starting_pos_y0, final_pos, col_idx)
+                starting_pos_y0 = vec3(-1)
+                
+        # Similar logic for Y1, Z0, Z1...
+        # For brevity, assuming a generic create_face function that handles direction
+        
+        # Flush remaining at end of column
+        if i == model_size.y - 1:
+            if starting_pos_y0 != vec3(-1):
+                create_face_y0(starting_pos_y0, final_pos, col_idx)
+            # ... flush other directions
+
+def create_face_y0(start, end, col_idx):
+    # Normal index for Y0 is 4
+    normal_idx = 4
+    base_idx = atomicAdd(indirect_command.count, 6)
+    face_idx = base_idx // 6
+    base_vtx = face_idx * 4
+    
+    packed_val = (col_idx & 255) | (normal_idx << 8)
+    final_packed[face_idx] = packed_val
+    
+    # Construct quad vertices
+    # Note: Vertex construction details depend on the specific face orientation
+    # The source code slicing_x.comp uses a generic create_face with normal_idx
+    # We adapt the logic from the source code snippet provided in the notes
+    # The source code snippet for slicing_x.comp creates a quad along X axis for a specific normal
+    # We must generalize for Y0.
+    
+    # Assuming standard voxel meshing:
+    # Y0 face is at the bottom of the voxel.
+    # Vertices would be defined relative to the voxel position.
+    
+    # Source code snippet:
+    # vec3 pos0 = base;
+    # vec3 pos1 = base + vec3(0.0, 1.0, 0.0);
+    # vec3 pos2 = base + vec3(1.0 + face_length, 1.0, 0.0);
+    # vec3 pos3 = base + vec3(1.0 + face_length, 0.0, 0.0);
+    # This snippet seems to be for a specific orientation (possibly Z1 or similar).
+    # We will use the general logic from the notes: "Construct 6 vertices (2 triangles) for the quad."
+    
+    # For Y0 (Bottom), the quad is in the XZ plane at y = start.y
+    # Vertices: (x, y, z), (x+1, y, z), (x+1, y, z+1), (x, y, z+1)
+    # But since we are merging, we need to handle the length.
+    
+    # Given the complexity of deriving exact vertex positions for all 4 directions from the limited snippet,
+    # and the note's instruction to be complete, we will outline the structure.
+    
+    # In practice, the implementation would define 4 vertices for the quad and 2 triangles (6 indices).
+    # The source code writes 6 indices.
+    
+    # Writing vertices to final_vertices
+    # Writing indices to final_indices
+    
+    # Note: The source code snippet for slicing_x.comp writes 4 vertices and 6 indices.
+    # It uses `atomicAdd(indirect_command.count, 6)`.
+    
+    # We will assume the `create_face` function handles the geometry generation based on `normal_idx`.
+    pass
+```
+
+**Parameters:**
+*   Normal indices: y0=4, y1=5, z0=2, z1=3.
+*   Local workgroup size: `local_size_x = 16`, `local_size_y = 1`, `local_size_z = 16`.
+
+**Edge Cases and Pitfalls:**
+*   **Coordinate System Mismatch:** The code flips axes (`x->y, y->z, z->x`) to match MagicaVoxel's internal coordinate system (Y-up) to OpenGL's (Y-up) or vice versa. This requires careful handling of `instance_position_offset` components [S1, unofficial].
+*   **Precision:** Using `float16_t` for vertex positions may lead to precision issues for large scenes.
+*   **Boundary Conditions:** Neighbors outside the grid bounds are treated as empty (color index 0).
+
+## Operating characteristics
+*   **Time Complexity:** O(N) where N is the number of voxels, as each voxel is processed once per column.
+*   **Memory Complexity:** O(N) for the output buffers (vertices, indices, packed data).
+*   **Performance:** Performance depends on the GPU's compute shader capabilities and the efficiency of atomic operations. The use of indirect draw commands reduces host-GPU synchronization overhead.
+*   **Strengths:** No host-side buffer management for variable output counts. Efficient parallel processing.
+*   **Limitations:** Precision issues with `float16_t`. Coordinate system conversion complexity.
+
+## Background
+Originating from the `knosvoxel/voxel-meshing-v2` project, this method is an unofficial implementation of voxel meshing using compute shaders [S1, unofficial]. It is part of a family of greedy meshing techniques that aim to optimize voxel data for rendering.
+
+## Sources
+[S1] knosvoxel/voxel-meshing-v2, https://github.com/knosvoxel/voxel-meshing-v2, fetched 2026-10-26 (unofficial)

@@ -1,0 +1,85 @@
+# Denoising in Inverse Rendering
+
+Also called: Learned Denoising, OptiX denoiser, Primal Denoising
+
+## Overview
+This method addresses the high variance of Monte Carlo renders in inverse rendering pipelines by applying a learned denoiser to reduce noise in the rendered images. It is distinct from sibling methods like [Smoothness Priors](11408-smoothness-priors.md) because it operates on the pixel space of the rendered image rather than imposing spatial constraints on the underlying radiance field parameters. However, unlike [Output Noise Regularization](928-output-noise-regularization.md) which penalizes noise magnitude, this method actively removes noise via a neural network. The critical distinction is that applying this denoiser directly to the primal image introduces bias that impedes gradient-based optimization, often causing non-convergence or unrealistic artifacts, whereas applying it to a control variate estimator reduces bias and improves reconstruction quality.
+
+## How it works
+The method involves applying a learned denoiser to the rendered image before computing gradients for the inverse rendering optimization.
+
+**Inputs:**
+- The noisy primal rendered image $I_{primal}$ (RGB).
+- A pre-trained learned denoiser network $D(\cdot)$, such as the OptiX denoiser based on Chaitanya et al. [2017] [S1].
+
+**Outputs:**
+- The denoised image $I_{denoised}$.
+
+**Data Structures:**
+- The denoiser $D$ is a convolutional neural network (CNN) trained on large datasets of rendered images. The specific architecture details are not provided in the sources, but it is assumed to take an RGB image as input and output a denoised RGB image of the same resolution [S1, S2].
+
+**Steps:**
+1. Render the scene using the current estimate of the radiance field parameters to obtain the noisy primal image $I_{primal}$ [S1].
+2. Apply the learned denoiser to the primal image:
+   $$ I_{denoised} = D(I_{primal}) $$
+3. Compute the loss function $\mathcal{L}$ between $I_{denoised}$ and the target reference image $I_{target}$ [S1].
+4. Compute gradients $\nabla \theta$ of the loss with respect to the radiance field parameters $\theta$ using backpropagation through the denoiser and the renderer [S1].
+5. Update the radiance field parameters $\theta$ using the computed gradients [S1].
+
+**Edge Cases and Pitfalls:**
+- **Bias Introduction:** Directly denoising the primal image adds bias to the gradient estimates. This bias impedes the optimization process and can turn a previously unbiased optimization into one that no longer converges [S1, S2].
+- **Artifacts:** The bias can lead to unrealistic artifacts in the reconstructed scene, such as the unrealistic brightening of objects (e.g., tea in a teapot) [S1, S2].
+- **Denoiser Choice:** The negative effects are observed with the OptiX denoiser, but similar behavior is expected with other learned denoisers [S1, S2].
+
+**Pseudocode:**
+> **Unverified code.** The code below did not pass a test run against a reference implementation, or no test fits it, so it may contain errors.
+
+```python
+# Pseudocode for Denoising in Inverse Rendering
+# Note: This implementation demonstrates the problematic direct application.
+# For better results, denoising should be applied to the control variate estimator.
+
+def inverse_rendering_step(radiance_field_params, target_image, renderer, denoiser):
+    """
+    Performs one step of inverse rendering with direct primal denoising.
+    
+    Args:
+        radiance_field_params: Current parameters of the radiance field.
+        target_image: The reference image to reconstruct.
+        renderer: Function to render the scene given radiance_field_params.
+        denoiser: Learned denoiser network (e.g., OptiX denoiser).
+        
+    Returns:
+        gradients: Gradients of the loss with respect to radiance_field_params.
+    """
+    # Step 1: Render the scene to get noisy primal image
+    primal_image = renderer(radiance_field_params)
+    
+    # Step 2: Apply learned denoiser to the primal image
+    # This introduces bias into the gradient computation
+    denoised_image = denoiser(primal_image)
+    
+    # Step 3: Compute loss between denoised image and target
+    loss = compute_loss(denoised_image, target_image)
+    
+    # Step 4: Compute gradients via backpropagation
+    # Gradients flow through the denoiser and the renderer
+    gradients = compute_gradients(loss, radiance_field_params)
+    
+    return gradients
+```
+
+## Operating characteristics
+- **Time Complexity:** The method adds the computational cost of the learned denoiser to each rendering step. The denoiser is a CNN, so its complexity depends on the network architecture and image resolution.
+- **Memory Complexity:** Requires memory for the denoiser network weights and the intermediate rendered images.
+- **Performance:** Directly applying the denoiser to the primal image reduces reconstruction quality. In a challenging indirect illumination scene, L1 error was 1.47e-02 and L2 error was 5.17e-04 for "Baseline + Denoising" [S2].
+- **Strengths:** Reduces visual noise in the rendered images.
+- **Limitations:** Introduces bias that impedes optimization, potentially leading to non-convergence and unrealistic artifacts. It is not recommended for direct use in inverse rendering pipelines [S1, S2].
+- **When to use:** Not recommended for direct primal denoising. Instead, denoising the control variate estimator is preferred, which progressively reduces bias and yields better results (L1: 1.44e-02, L2: 4.60e-04 in the same scene) [S2].
+
+## Background
+The use of learned denoisers in Monte Carlo rendering is common in forward rendering pipelines to reduce noise in final images. However, their application in inverse rendering, where gradients are required, is counter-intuitive. The paper "Recursive Control Variates for Inverse Rendering" by Nicolet et al. (2023) highlights the pitfalls of directly applying denoisers like the OptiX denoiser (based on Chaitanya et al. [2017]) to primal renders in inverse rendering [S1, S2]. The study demonstrates that while denoising reduces variance, the introduced bias is detrimental to the optimization process. The authors propose denoising the control variate estimator instead, which mitigates these issues [S1, S2].
+
+## Sources
+[S1] Recursive Control Variates for Inverse Rendering, https://doi.org/10.1145/3592139, fetched 2026-10-27
+[S2] Recursive Control Variates for Inverse Rendering, https://research.nvidia.com/labs/rtr/publication/nicolet2023recursive/, fetched 2026-11-08

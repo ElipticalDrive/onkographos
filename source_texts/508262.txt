@@ -1,0 +1,113 @@
+quantitative electron microscopy analysis toolkit. Contribute to cedriclim1/quantem development by creating an account on GitHub.
+
+tomography: gradient accumulation and chunked volume rendering by cedriclim1 · Pull Request #27 · cedriclim1/quantem · GitHub
+Skip to content
+You signed in with another tab or window. Reload to refresh your session.
+You signed out in another tab or window. Reload to refresh your session.
+You switched accounts on another tab or window. Reload to refresh your session.
+Dismiss alert
+Conversation
+cedriclim1
+commented
+Oct 27, 2026
+Copy link
+Copy Markdown
+Owner
+Summary
+Lets frozen INR configurations run at large volume sizes on 40 GB A100s without changing batch size or optimization.
+Tomography.reconstruct(grad_accum_steps=k) (default 1 = the unchanged single-pass path)
+Each batch's ray samples are evaluated in k chunks under no_grad; the full-batch loss (consistency + every soft term) is built on the detached densities, so batch-coupled terms are exact: S3IM, the distortion eps normaliser, ragged box-mode sample means, and the TV subsampling and RNG stream all see the whole batch exactly as with k = 1. Ray-independent terms (plane TV, l21, pose TV) are counted once.
+The loss backward gives the direct parameter/pose gradients and the density (and volume-TV tap) gradient. Each chunk is then re-evaluated with a graph and backpropagated with its slice of that gradient, and the accumulated coordinate gradient is pushed through the pose graph.
+One clip, optimizer step, scheduler step and pose-gradient sync per batch. Under DDP the loss backward and all chunks but the last run inside no_sync(). Grad-step counting, snapshots, max_grad_steps, snapshot_steps, epoch losses and overhead windows are per optimizer step, as before.
+Cost: one extra no-grad forward per step, about 1.3x step time (measured below).
+Holdout validation is also evaluated in k chunks when k > 1.
+ObjectINR.create_volume(chunk_size=None)
+Grid coordinates are built per chunk on the device, so the full N**3 x 3 grid is never materialised on the host (about 24 GB at n=1024).
+Chunks are min(5 * N**2, VOLUME_CHUNK_SIZE = 2**19) points. Below the cap (N <= 323) this is the previous chunking, and the output is bitwise identical to the old meshgrid path. Above it, results differ only by BLAS float rounding (about 1e-6).
+Tests
+tests/tomography/test_grad_accumulation.py (22 tests, CPU):
+k = 2 and k = 4 vs k = 1 for HSiren/ObjectINR and KPlanesTILTED/ObjectTensorDecomp, with box-mode rays, pose refinement, pose TV and every soft term on. Per-step clipped gradients and final parameters match within rtol 1e-4 / atol 1e-6 (SGD). Epoch and soft-term losses match within rtol 1e-5, and grad-step and snapshot counts are identical.
+Chunked validation matches.
+The default volume matches the meshgrid path bitwise, and other chunk sizes match within 1e-5.
+tests/tomography --runslow:
+CPU: 294 passed, 35 skipped.
+1 GPU: 327 passed, with 1 failure (test_reconstruct_pose_warmup_activation_and_reference_exclusion). It fails the same way on bench/consolidated.
+GPU check (1x A100-40GB, phantom scaling, frozen configs, batch 4096/rank, 50 exact steps, snapshots every 25)
+run
+k
+peak alloc (GiB)
+step_s
+HSiren n256
+1
+21.4
+0.365
+HSiren n256
+2
+10.6
+0.481
+HSiren n512 (was OOM at k=1)
+2
+21.4
+0.955
+KPlanesTILTED n768 (snapshot was OOM)
+1
+32.4
+0.488
+KPlanesTILTED n768
+2
+22.0
+0.625
+KPlanesTILTED n1024 (was OOM at k=1)
+2
+35.9
+0.922
+KPlanesTILTED n1024
+4
+33.5
+1.089
+The KPlanes n1024 k=2 run finished training, snapshots and the final volume. It then failed at the run harness's closing NCCL barrier, because with 38.6 GiB reserved NCCL could not allocate. k=4 has enough headroom.
+tomography: gradient accumulation and chunked volume rendering
+…
+55b25a0
+```
+Tomography.reconstruct gains grad_accum_steps (default 1, the unchanged
+single-pass path). With k > 1 each batch's ray samples are evaluated in k
+chunks without a graph, the full-batch loss is built on the detached
+densities (so S3IM, the distortion normaliser, ragged box-mode means and
+TV subsampling see the whole batch exactly as with k = 1), and each chunk
+is re-evaluated and backpropagated with its slice of the density gradient
+before the pose path is pushed through the ray coordinates. One clip,
+optimizer step, scheduler step and pose sync per batch; DDP syncs on the
+last chunk only. Holdout validation is evaluated in k chunks as well.
+
+ObjectINR.create_volume builds grid coordinates per chunk on the device
+and caps chunks at VOLUME_CHUNK_SIZE (2**19) points, keeping the previous
+5 * N**2 chunks below the cap, so snapshots no longer allocate the full
+grid or multi-GiB feature tensors at n >= 768.
+```
+Hide details
+View details
+cedriclim1
+merged commit a8d0fa4
+into
+bench/consolidated
+Oct 28, 2026
+0 of 4 checks passed
+Uh oh!
+There was an error while loading. Please reload this page.
+cedriclim1
+deleted the
+feat/grad-accum
+branch
+October 28, 2026 18:24
+Sign up for free
+to join this conversation on GitHub.
+Already have an account?
+Sign in to comment
+Uh oh!
+There was an error while loading. Please reload this page.
+Labels
+None yet
+1 participant
+Add this suggestion to a batch that can be applied as a single commit.This suggestion is invalid because no changes were made to the code.Suggestions cannot be applied while the pull request is closed.Suggestions cannot be applied while viewing a subset of changes.Only one suggestion per line can be applied in a batch.Add this suggestion to a batch that can be applied as a single commit.Applying suggestions on deleted lines is not supported.You must change the existing code in this line in order to create a valid suggestion.Outdated suggestions cannot be applied.This suggestion has been applied or marked resolved.Suggestions cannot be applied from pending reviews.Suggestions cannot be applied on multi-line comments.Suggestions cannot be applied while the pull request is queued to merge.Suggestion cannot be applied right now. Please check back later.
+You can’t perform that action at this time.

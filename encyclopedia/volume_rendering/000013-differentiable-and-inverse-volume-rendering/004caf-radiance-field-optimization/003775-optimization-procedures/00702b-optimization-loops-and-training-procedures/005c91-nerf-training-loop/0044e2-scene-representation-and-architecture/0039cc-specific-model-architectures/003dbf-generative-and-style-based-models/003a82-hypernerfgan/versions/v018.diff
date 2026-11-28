@@ -1,0 +1,276 @@
+--- v017.md
++++ v018.md
+@@ -63,43 +63,21 @@
+ 
+ class FMMLayer(nn.Module):
+-    """
+-    Factorized Multiplicative Modulation layer.
+-    W, b are shared parameters. A, B are modulation matrices from Generator.
+-    """
++    """Factorized Multiplicative Modulation layer. W, b are shared. A, B are modulation matrices from Generator."""
+     def __init__(self, n_in, n_out, k):
+         super().__init__()
+-        self.n_in = n_in
+-        self.n_out = n_out
+-        self.k = k
+-        # Shared parameters
+         self.W = nn.Parameter(torch.randn(n_out, n_in))
+         self.b = nn.Parameter(torch.zeros(n_out))
+-        # Modulation matrices dimensions
+-        # A: n_out x k, B: k x n_in
+-        
++        self.k = k
++
+     def forward(self, x_in, A, B):
+         # x_in: (batch, n_in)
+-        # A: (batch, n_out, k)
+-        # B: (batch, k, n_in)
+-        
+-        # Compute modulation weight matrix: W_tilde = W o (A x B)
+-        # A x B results in (batch, n_out, n_in)
+-        modulation = torch.bmm(A, B) 
+-        W_tilde = self.W * modulation # Element-wise multiplication
+-        
+-        # Linear transformation with modulation
+-        # y = W_tilde @ x_in + b
+-        # Note: Broadcasting handles batch dimensions if x_in is (batch, n_in)
+-        # and W_tilde is (batch, n_out, n_in)
++        # A: (batch, n_out, k), B: (batch, k, n_in)
++        modulation = torch.bmm(A, B)  # (batch, n_out, n_in)
++        W_tilde = self.W * modulation  # (batch, n_out, n_in) via broadcasting
+         y = torch.bmm(W_tilde, x_in.unsqueeze(-1)).squeeze(-1) + self.b
+         return y
+ 
+ class TargetNeRF(nn.Module):
+-    """
+-    Simplified NeRF target network.
+-    Input: 3D position x.
+-    Output: Color c, Density sigma.
+-    Uses FMM layers.
+-    """
++    """Simplified NeRF target network. Input: 3D position x. Output: Color c, Density sigma. Uses FMM layers."""
+     def __init__(self, n_in=3, n_out_color=3, n_out_sigma=1, hidden_dim=128, num_layers=4, k=10):
+         super().__init__()
+@@ -107,31 +85,19 @@
+         self.hidden_dim = hidden_dim
+         self.k = k
+-        
+-        # Layers
+         self.layers = nn.ModuleList()
+         for i in range(num_layers):
+             in_dim = n_in if i == 0 else hidden_dim
+-            out_dim = hidden_dim
+-            self.layers.append(FMMLayer(in_dim, out_dim, k))
+-            
+-        # Heads
++            self.layers.append(FMMLayer(in_dim, hidden_dim, k))
+         self.color_head = nn.Linear(hidden_dim, n_out_color)
+         self.sigma_head = nn.Linear(hidden_dim, n_out_sigma)
+ 
+     def forward(self, x, A_list, B_list):
+-        """
+-        x: (batch, 3)
+-        A_list: list of A matrices, each (batch, hidden_dim, k)
+-        B_list: list of B matrices, each (batch, k, hidden_dim)
+-        """
++        # x: (batch, 3)
++        # A_list: list of A matrices, each (batch, hidden_dim, k)
++        # B_list: list of B matrices, each (batch, k, hidden_dim)
+         h = x
+         for i, layer in enumerate(self.layers):
+-            # Apply FMM layer
+             h = layer(h, A_list[i], B_list[i])
+-            # Activation (ReLU is standard for NeRF hidden layers, though not explicitly 
+-            # specified for FMM, standard NeRF uses ReLU. [G] Assuming ReLU activation 
+-            # after each FMM layer as per standard MLP structure in NeRF)
+             h = F.relu(h)
+-            
+         c = self.color_head(h)
+         sigma = self.sigma_head(h)
+@@ -139,10 +105,5 @@
+ 
+ class Generator(nn.Module):
+-    """
+-    Hypernetwork Generator.
+-    Input: Noise z.
+-    Output: Weights (A, B matrices) for TargetNeRF.
+-    Based on StyleGAN2 backbone [S1, unofficial].
+-    """
++    """Hypernetwork Generator. Input: Noise z. Output: Weights (A, B matrices) for TargetNeRF. Based on StyleGAN2 backbone [S1, unofficial]."""
+     def __init__(self, z_dim, n_layers, hidden_dim, k):
+         super().__init__()
+@@ -150,61 +111,26 @@
+         self.hidden_dim = hidden_dim
+         self.k = k
+-        
+-        # StyleGAN2-like mapping network to map z to intermediate latent w
+-        # [G] Simplified mapping network structure. 
+-        # In practice, this involves multiple linear layers with AdaIN or similar.
+-        # For the purpose of this article, we assume it outputs the modulation matrices.
+-        
+-        # We need to generate A and B for each layer.
+-        # A: (batch, hidden_dim, k)
+-        # B: (batch, k, hidden_dim)
+-        
+-        # [G] Placeholder for StyleGAN2 generator logic. 
+-        # The generator produces A and B matrices from z.
+-        self.mapping_net = nn.Sequential(
++        # [G] Simplified mapping network replacing StyleGAN2 backbone for weight generation
++        self.mapping = nn.Sequential(
+             nn.Linear(z_dim, hidden_dim),
+             nn.ReLU(),
+-            nn.Linear(hidden_dim, hidden_dim),
+-            nn.ReLU(),
++            nn.Linear(hidden_dim, hidden_dim)
+         )
+-        
+-        # Projection to generate A and B parameters
+-        # Total parameters needed: n_layers * (hidden_dim * k + k * hidden_dim)
+         self.proj = nn.Linear(hidden_dim, n_layers * 2 * hidden_dim * k)
+ 
+     def forward(self, z):
+-        w = self.mapping_net(z)
++        w = self.mapping(z)
+         params = self.proj(w)
+-        
+-        # Reshape params into A and B lists
+-        # params shape: (batch, n_layers * 2 * hidden_dim * k)
+-        # Split into A and B parts
+-        # A part: n_layers * hidden_dim * k
+-        # B part: n_layers * k * hidden_dim
+-        
+         # Reshape to (batch, n_layers, 2, hidden_dim, k)
+         params = params.view(z.shape[0], self.n_layers, 2, self.hidden_dim, self.k)
+-        
+-        A = params[:, :, 0, :, :] # (batch, n_layers, hidden_dim, k) -> need (batch, hidden_dim, k) per layer?
+-        # Wait, A is n_out x k. n_out is hidden_dim. So A is (hidden_dim, k).
+-        # B is k x n_in. n_in is hidden_dim. So B is (k, hidden_dim).
+-        
+-        # Reshape A to (batch, n_layers, hidden_dim, k)
+-        # Reshape B to (batch, n_layers, k, hidden_dim)
+-        
+-        A = A.view(z.shape[0], self.n_layers, self.hidden_dim, self.k)
+-        B = params[:, :, 1, :, :].view(z.shape[0], self.n_layers, self.k, self.hidden_dim)
+-        
++        A = params[:, :, 0, :, :]  # (batch, n_layers, hidden_dim, k)
++        B = params[:, :, 1, :, :]  # (batch, n_layers, k, hidden_dim)
+         return A, B
+ 
+ class Discriminator(nn.Module):
+-    """
+-    Standard 2D Discriminator.
+-    Input: 2D Image.
+-    Output: Real/Fake score.
+-    """
++    """Standard 2D Discriminator. Input: 2D Image. Output: Real/Fake score."""
+     def __init__(self, channels=3):
+         super().__init__()
+-        # [G] Standard CNN discriminator structure.
++        # [G] Standard CNN discriminator structure
+         self.net = nn.Sequential(
+             nn.Conv2d(channels, 64, 4, stride=2, padding=1),
+@@ -223,41 +149,48 @@
+         return self.net(x)
+ 
+-def render_ray(target_nerf, ray_origins, ray_directions, A_list, B_list):
+-    """
+-    Renders a ray using the target NeRF.
+-    [G] Simplified volumetric rendering. Assumes fixed number of samples.
+-    """
+-    # Sample points along ray
+-    # t_vals = torch.linspace(0, 1, N_samples)
+-    # xyz = ray_origins + ray_directions * t_vals.unsqueeze(-1)
+-    # [G] Full volumetric rendering logic involves alpha, transmittance, etc.
+-    # This is a placeholder for the rendering step described in the parent article.
+-    pass
+-
+-def train_step(generator, discriminator, target_nerf, optimizer_g, optimizer_d, images, camera_poses):
+-    """
+-    One training iteration.
+-    """
+-    # 1. Sample noise
+-    z = torch.randn(images.shape[0], generator.z_dim)
+-    
+-    # 2. Generate weights
++def render_batch(nerf, A_list, B_list, origins, directions, near, far, N_samples):
++    """Renders a batch of images using the target NeRF via standard volumetric rendering."""
++    batch_size, H, W, _ = origins.shape
++    t_vals = torch.linspace(0.0, 1.0, N_samples, device=origins.device)
++    z_vals = near * (1.0 - t_vals) + far * t_vals
++    xyz = origins.unsqueeze(1) + directions.unsqueeze(1) * z_vals.unsqueeze(2)
++    xyz = xyz.reshape(batch_size * H * W, N_samples, 3)
++
++    c_list, sigma_list = [], []
++    for i in range(N_samples):
++        c, sigma = nerf(xyz[:, i, :], A_list, B_list)
++        c_list.append(c)
++        sigma_list.append(sigma)
++    c_all = torch.stack(c_list, dim=1)  # (batch*H*W, N_samples, 3)
++    sigma_all = torch.stack(sigma_list, dim=1)  # (batch*H*W, N_samples, 1)
++
++    deltas = z_vals[:, 1:] - z_vals[:, :-1]
++    delta = torch.cat([deltas, torch.tensor([1e10], device=origins.device).expand_as(deltas)], dim=1)
++    alpha = 1.0 - torch.exp(-sigma_all * delta)
++    T = torch.cumprod(1.0 - alpha + 1e-10, dim=1)
++    T = torch.cat([torch.ones_like(T[:, :1]), T[:, :-1]], dim=1)
++
++    weights = alpha * T
++    color = torch.sum(weights.unsqueeze(-1) * c_all, dim=1)
++    depth = torch.sum(weights * z_vals, dim=1)
++
++    return color.reshape(batch_size, H, W, 3), depth.reshape(batch_size, H, W, 1)
++
++def train_step(generator, discriminator, target_nerf, optimizer_g, optimizer_d, images, camera_poses, near, far, N_samples):
++    """One training iteration."""
++    z = torch.randn(images.shape[0], generator.mapping[0].weight.shape[0], device=images.device)
+     A_list, B_list = generator(z)
+-    
+-    # 3. Render images using target NeRF
+-    # [G] This step requires ray casting based on camera_poses.
+-    # For each pixel, cast a ray, sample points, query target_nerf, and integrate.
+-    generated_images = render_images_from_nerf(target_nerf, camera_poses, A_list, B_list)
+-    
+-    # 4. Discriminator update
++
++    origins = camera_poses["origins"]
++    directions = camera_poses["directions"]
++    generated_images, _ = render_batch(target_nerf, A_list, B_list, origins, directions, near, far, N_samples)
++
+     optimizer_d.zero_grad()
+     real_score = discriminator(images)
+     fake_score = discriminator(generated_images.detach())
+-    
+     d_loss = -torch.mean(torch.log(real_score + 1e-8) + torch.log(1 - fake_score + 1e-8))
+     d_loss.backward()
+     optimizer_d.step()
+-    
+-    # 5. Generator update
++
+     optimizer_g.zero_grad()
+     fake_score_gen = discriminator(generated_images)
+@@ -265,5 +198,5 @@
+     g_loss.backward()
+     optimizer_g.step()
+-    
++
+     return d_loss.item(), g_loss.item()
+ ```
+@@ -276,15 +209,11 @@
+ 
+ **Edge Cases and Pitfalls:**
+-*   **Viewing Directions:** Standard NeRF requires viewing directions, which are often unavailable. HyperNeRFGAN solves this by removing viewing directions from the NeRF input [S1, unofficial].
+-*   **Fine Network:** Standard NeRF uses a 'fine' network for multi-scale rendering. HyperNeRFGAN rejects the larger 'fine' network and employs only the smaller 'coarse' network to reduce training cost [S1, unofficial].
++*   **Viewing Directions:** Standard NeRF requires viewing directions, which are often unavailable; HyperNeRFGAN solves this by removing viewing directions from the NeRF input [S1, unofficial].
++*   **Fine Network:** Standard NeRF uses a 'fine' network for multi-scale rendering; HyperNeRFGAN rejects the larger 'fine' network and employs only the smaller 'coarse' network to reduce training cost [S1, unofficial].
+ *   **Rank $k$:** Higher values of $k$ increase expressiveness but also increase memory usage [S1, unofficial].
+ 
+ ## Operating characteristics
+ *   **Time and Memory Complexity:** The use of a hypernetwork adds complexity to the generator, but the target NeRF is simplified (single network, no fine network, reduced channels/layers) to reduce computational expense [S1, unofficial].
+-*   **Measured Performance:**
+-    *   **ShapeNet Car:** FID 29.6 (vs Point2NeRF 82.1) [S1, unofficial].
+-    *   **CARLA Dataset:** FID 20.5, KID 0.78, IS 4.20 (outperforming HoloGAN FID 67.5, GRAF FID 41.7, π-GAN FID 29.2) [S1, unofficial].
+-    *   **CelebA Dataset:** FID 15.04, KID 0.66, IS 2.63 (comparable to π-GAN FID 14.7, KID 0.39, IS 2.62) [S1, unofficial].
+-    *   **Medical (DRR):** Superior performance compared to MedNeRF and UMedNeRF in FID and KID metrics [S1, unofficial].
++*   **Measured Performance:** On ShapeNet Car, HyperNeRFGAN achieves FID 29.6 compared to Point2NeRF's 82.1 [S1, unofficial]. On the CARLA dataset, HyperNeRFGAN achieves FID 20.5, KID 0.78, and IS 4.20, outperforming HoloGAN (FID 67.5), GRAF (FID 41.7), and $\pi$-GAN (FID 29.2) [S1, unofficial]. On the CelebA dataset, HyperNeRFGAN achieves FID 15.04, KID 0.66, and IS 2.63, comparable to $\pi$-GAN (FID 14.7, KID 0.39, IS 2.62) [S1, unofficial]. On medical Digitally Reconstructed Radiographs (DRR) of chests and knees, it achieves superior FID and KID metrics compared to MedNeRF and UMedNeRF [S1, unofficial].
+ *   **Strengths:** Does not require camera position information; suitable for datasets where camera estimation is challenging (e.g., medical data, single-view objects); superior performance on datasets with limited views [S1, unofficial].
+ *   **Limitations:** Cannot model view-dependent effects (e.g., reflections) as viewing directions are omitted [S1, unofficial].

@@ -1,0 +1,68 @@
+# Lookup Table and Configuration
+
+Also called: Marching Cubes Lookup Tables, MC LUTs, Case Tables
+
+## Overview
+Lookup Table and Configuration provides the static data structures and mapping logic that determine how a voxel's scalar field sign configuration is converted into mesh geometry. It solves the combinatorial problem of isosurface extraction by replacing runtime conditional branching with direct array indexing, enabling $O(1)$ determination of triangle topology per voxel. It differs from symmetry-based approaches by handling all 256 cases explicitly (or via symmetry reduction) and from dynamic ambiguity resolution methods by using fixed triangulations for ambiguous cases, which may produce topological artifacts if adjacent cells resolve ambiguities inconsistently.
+
+## Shared principles
+The core mechanism relies on two precomputed data structures derived from the 256 possible binary configurations of a voxel's eight corner signs relative to an isovalue.
+
+1.  **Edge Intersection Table (`edgeTable`)**: An array of 256 integers (or shorts). Each entry is a 12-bit bitmask. Bit $k$ ($0 \le k \le 11$) is set to 1 if the isosurface intersects the $k$-th edge of the cube, and 0 otherwise. The standard edge numbering convention is:
+    *   Bottom face ($z=0$): $e_0=(0,1), e_1=(1,2), e_2=(2,3), e_3=(3,0)$
+    *   Top face ($z=1$): $e_4=(4,5), e_5=(5,6), e_6=(6,7), e_7=(7,4)$
+    *   Vertical edges: $e_8=(0,4), e_9=(1,5), e_{10}=(2,6), e_{11}=(3,7)$ [S4, S12, unofficial].
+
+2.  **Triangle Connection Table (`triangleTable`)**: A 2D array of size $256 \times 16$ [S8, S12, unofficial].
+    *   Rows are indexed by the case index $C \in [0, 255]$.
+    *   Columns store integer indices. Indices $0–11$ refer to the 12 cube edges.
+    *   Indices are grouped in triplets $(a, b, c)$ to form triangles.
+    *   The sequence is terminated by the value `-1` [S8, S12, unofficial].
+    *   The maximum number of triangles per voxel is 5, requiring 15 indices plus 1 terminator [S8, S12, unofficial].
+
+**Case Index Calculation**: For each voxel, the 8-bit case index $C$ is determined by the scalar field values $V$ at the 8 vertices $v_i$ ($i=0..7$). If $V(v_i) < I$ (or $> I$, depending on convention), bit $i$ of $C$ is set to 1; otherwise 0 [S7, S8, S12, unofficial]. The bit assignment must strictly match the vertex ordering assumed by the LUT generation [S12, unofficial].
+
+**Ambiguity**: Cases 46, 47, 98, 99, 210, 213, 214, 215 contain saddle points where the topology is ambiguous (the isosurface passes through the cube center) [S7, S8, unofficial]. The standard LUT uses a fixed triangulation for these, which can cause cracks or holes if adjacent voxels resolve the ambiguity differently [S7, S8, unofficial].
+
+## Subtopics
+
+### [Symmetry Mapping](869-symmetry-mapping.md)
+Symmetry Mapping reduces the 256 possible voxel configurations to a smaller set of canonical base cases by exploiting geometric symmetries. It maps each configuration index to a specific base case and a rotation transformation, allowing triangle generation logic to be implemented for only the unique cases. This approach simplifies the lookup table structure and reduces code complexity compared to handling all 256 cases individually. See [Symmetry Mapping](869-symmetry-mapping.md).
+
+### [Marching Cubes Lookup Table](4800-marching-cubes-lookup-table.md)
+The standard Marching Cubes Lookup Table (MC LUT) is a precomputed data structure that maps the 256 possible binary configurations directly to the specific sequence of triangle vertices or edges required to triangulate the isosurface within that voxel. It solves the problem of runtime topological ambiguity by replacing conditional branching logic with a direct array index, enabling $O(1)$ determination of mesh geometry per voxel. Unlike dynamic topology resolution methods, the standard MC LUT uses a fixed triangulation for ambiguous cases, which may produce artifacts if adjacent cells resolve ambiguities inconsistently. See [Marching Cubes Lookup Table](4800-marching-cubes-lookup-table.md).
+
+### Sparse Dual Marching Cubes
+See [Sparse Dual Marching Cubes](3801-sparse-dual-marching-cubes.md).
+
+### GPU Acceleration and Parallel Pipelines
+See [GPU Acceleration and Parallel Pipelines](4136-gpu-acceleration-and-parallel-pipelines.md).
+
+### Marching Cubes Vertex List Generation
+See [Marching Cubes Vertex List Generation](4447-marching-cubes-vertex-list-generation.md).
+
+### Marching Cubes with Disjoint Patch Decomposition
+See [Marching Cubes with Disjoint Patch Decomposition](5004-marching-cubes-with-disjoint-patch-decomposition.md).
+
+### CPU Immediate Mode Marching Cubes
+See [CPU Immediate Mode Marching Cubes](2463-cpu-immediate-mode-marching-cubes.md).
+
+### SDF to PLY Conversion
+See [SDF to PLY Conversion](2343-sdf-to-ply-conversion.md).
+
+### Marching Cubes Triangulation
+See [Marching Cubes Triangulation](3682-marching-cubes-triangulation.md).
+
+#### Patch Boundary Detection
+**Definition**: Process to detect patch boundaries as groups of rings of linear contours on cell faces for automatic construction of look-up tables [S1].
+**Steps**:
+1.  Construct a single ring using face-tracing: starting from a cell edge with a sign change, facing the positive end, look for the next edge with a sign change by turning counter-clockwise on the face boundary [S1].
+2.  Repeat the search process until it returns to the starting edge, forming a closed ring [S1].
+3.  Orient the linear contour on the cell face so that the negative region on that face lies to its left when looking from outside [S1].
+4.  Group rings constructed around the same edge-connected component of positive corners to form the boundary of a single patch [S1].
+
+## Background
+The standard Marching Cubes lookup tables were introduced by William E. Lorensen and Harvey E. Cline in their 1987 paper "Marching Cubes: A High Resolution 3D Surface Construction Algorithm" [S7, S12, unofficial]. The tables were derived from the 256 possible sign configurations of a cube's vertices. Later work by Jutao Yang et al. described an automatic construction process for look-up tables that detects patch boundaries as groups of rings of linear contours on cell faces to handle ambiguous cases more robustly [S1]. This method constructs a single ring for each patch boundary using face-tracing and groups rings to form the boundary of multiple-genus patches [S1]. The look-up tables generated by this method are available online [S1].
+
+## Sources
+[S1] Convex contouring of volumetric data, https://doi.org/10.1007/s00371-003-0216-0, fetched 2026-10-28

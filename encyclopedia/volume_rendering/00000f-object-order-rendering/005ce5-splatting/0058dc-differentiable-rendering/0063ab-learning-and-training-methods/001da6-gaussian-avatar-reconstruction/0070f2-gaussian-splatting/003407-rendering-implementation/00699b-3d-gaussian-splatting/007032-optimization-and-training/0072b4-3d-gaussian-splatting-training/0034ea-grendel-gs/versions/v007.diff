@@ -1,0 +1,79 @@
+--- v006.md
++++ v007.md
+@@ -4,52 +4,49 @@
+ 
+ ## Overview
+-Grendel-GS is a distributed optimization framework for 3D Gaussian Splatting (3DGS) that partitions the Gaussian primitive list across multiple GPUs to overcome single-device memory limits [S1, unofficial]. Unlike [TideGS](7350-tidegs.md), which streams data from disk on a single machine, Grendel-GS distributes the parameter table across a GPU cluster, enabling training on scenes with billions of primitives by leveraging inter-GPU communication [S1, unofficial]. It builds on the differentiable rasterization core defined in [Optimization and Training Efficiency](9264-optimization-and-training-efficiency.md) but modifies the data flow to support multi-GPU parallelism.
++Grendel-GS is a distributed optimization framework for 3D Gaussian Splatting (3DGS) that partitions the Gaussian primitive list across multiple GPUs to overcome single-device memory limits [S1, unofficial]. Unlike [TideGS](7350-tidegs.md), which streams data from disk on a single machine, Grendel-GS distributes the parameter table across a GPU cluster, enabling training on scenes with billions of primitives by leveraging inter-GPU communication [S1, unofficial]. It builds on the differentiable rasterization core defined in [Optimization and Training Efficiency](9264-optimization-and-training-efficiency.md) but modifies the data flow to support multi-GPU parallelism [G].
+ 
+ ## How it works
+ **Inputs and Outputs:**
+-- Input: A 3D scene represented by a large set of 3D Gaussians $\mathcal{G} = \{\mathbf{g}_i\}_{i=1}^N$, where each Gaussian $\mathbf{g}_i$ is defined by position $\mathbf{p}_i$, covariance $\mathbf{\Sigma}_i$ (or scale/rotation), opacity $\alpha_i$, and spherical harmonics coefficients $\mathbf{c}_i$.
+-- Output: Optimized Gaussian parameters $\mathcal{G}'$ that minimize the rendering loss $\mathcal{L}$ against ground-truth images.
++- Input: A 3D scene represented by a large set of 3D Gaussians $\mathcal{G} = \{\mathbf{g}_i\}_{i=1}^N$, where each Gaussian $\mathbf{g}_i$ is defined by position $\mathbf{p}_i$, covariance $\mathbf{\Sigma}_i$ (or scale/rotation), opacity $\alpha_i$, and spherical harmonics coefficients $\mathbf{c}_i$ [G].
++- Output: Optimized Gaussian parameters $\mathcal{G}'$ that minimize the rendering loss $\mathcal{L}$ against ground-truth images [G].
+ 
+ **Data Structures:**
+-The Gaussian list $\mathcal{G}$ is partitioned into $K$ subsets $\mathcal{G}_1, \dots, \mathcal{G}_K$, one for each GPU $k \in \{1, \dots, K\}$.
+-- Each GPU $k$ stores a local subset $\mathcal{G}_k$ in its VRAM.
+-- The total number of Gaussians $N$ is distributed such that $\sum_{k=1}^K |\mathcal{G}_k| = N$.
+-- [G] To ensure correct alpha blending across partitions, a global depth sort or a hierarchical z-buffer is required. The sources do not specify the exact synchronization mechanism for the depth buffer across GPUs.
++The Gaussian list $\mathcal{G}$ is partitioned into $K$ subsets $\mathcal{G}_1, \dots, \mathcal{G}_K$, one for each GPU $k \in \{1, \dots, K\}$ [S1, unofficial]. Each GPU $k$ stores a local subset $\mathcal{G}_k$ in its VRAM [S1, unofficial]. The total number of Gaussians $N$ is distributed such that $\sum_{k=1}^K |\mathcal{G}_k| = N$ [G]. To ensure correct alpha blending across partitions, a global depth sort or a hierarchical z-buffer is required [G]. The sources do not specify the exact synchronization mechanism for the depth buffer across GPUs [G].
+ 
+ **Numbered Steps:**
+-1. **Partitioning:** The initial Gaussian list is divided among $K$ GPUs. This can be done spatially (e.g., by bounding box) or arbitrarily. [G] Spatial partitioning is preferred to minimize inter-GPU communication for occluded primitives.
+-2. **Local Rasterization:** Each GPU $k$ renders its subset $\mathcal{G}_k$ independently. For each pixel, it computes the partial color $\mathbf{c}_k$ and accumulated opacity $\alpha_k$ using the standard 3DGS rasterizer [9264-optimization-and-training-efficiency.md].
+-3. **Inter-GPU Communication:** The partial results (color and opacity contributions) from all GPUs are aggregated. [S1, unofficial] states that results are combined via inter-GPU communication at partition boundaries. [G] This typically involves a collective operation (e.g., `AllReduce` or `AllGather`) to compute the final pixel color $\mathbf{c} = \sum_{k=1}^K \mathbf{c}_k$ and total opacity $\alpha = 1 - \prod_{k=1}^K (1 - \alpha_k)$.
+-4. **Loss Computation:** The final rendered image is compared to the ground truth to compute the loss $\mathcal{L}$.
+-5. **Gradient Distribution:** The gradient $\frac{\partial \mathcal{L}}{\partial \mathbf{g}_i}$ is computed for each Gaussian. Since the loss depends on the global render, gradients for Gaussians in $\mathcal{G}_k$ depend on the contributions from all other partitions. [G] The gradient for a Gaussian $\mathbf{g}_i \in \mathcal{G}_k$ is scaled by the derivative of the global alpha-blending equation with respect to the local contribution.
+-6. **Parameter Update:** Each GPU updates its local subset $\mathcal{G}_k$ using an optimizer (e.g., Adam). [G] If the partitioning is static, no further communication is needed for the update. If dynamic splitting/merging occurs (as in standard 3DGS), Gaussians may need to be migrated between GPUs, requiring explicit data transfer.
++1. **Partitioning:** The initial Gaussian list is divided among $K$ GPUs [S1, unofficial]. [G] Spatial or arbitrary partitioning strategies can be used, with spatial partitioning often preferred to minimize inter-GPU communication for occluded primitives.
++2. **Local Rasterization:** Each GPU $k$ renders its subset $\mathcal{G}_k$ independently [S1, unofficial]. For each pixel, it computes the partial color $\mathbf{c}_k$ and accumulated opacity $\alpha_k$ using the standard 3DGS rasterizer [G].
++3. **Inter-GPU Communication:** The partial results (color and opacity contributions) from all GPUs are aggregated [S1, unofficial]. [G] This typically involves a collective operation (e.g., `AllReduce` or `AllGather`) to combine the partial renderings into a final pixel color and total opacity, respecting the depth-sorted alpha-blending order across partitions.
++4. **Loss Computation:** The final rendered image is compared to the ground truth to compute the loss $\mathcal{L}$ [G].
++5. **Gradient Distribution:** The gradient $\frac{\partial \mathcal{L}}{\partial \mathbf{g}_i}$ is computed for each Gaussian [G]. Since the loss depends on the global render, gradients for Gaussians in $\mathcal{G}_k$ depend on the contributions from all other partitions [G]. [G] The gradient for a Gaussian $\mathbf{g}_i \in \mathcal{G}_k$ is scaled by the derivative of the global alpha-blending equation with respect to the local contribution.
++6. **Parameter Update:** Each GPU updates its local subset $\mathcal{G}_k$ using an optimizer (e.g., Adam) [G]. [G] If the partitioning is static, no further communication is needed for the update. If dynamic splitting/merging occurs (as in standard 3DGS), Gaussians may need to be migrated between GPUs, requiring explicit data transfer [G].
+ 
+ **Formulas:**
+-The final pixel color is:
+-$$ \mathbf{c} = \sum_{k=1}^K \sum_{j \in \mathcal{G}_k} \mathbf{c}_j \alpha_j \prod_{m=1}^{j-1} (1 - \alpha_m) $$
+-where the product term accounts for depth sorting across all partitions. [G] The exact ordering of Gaussians across partitions must be consistent.
++The final pixel color is computed via depth-sorted alpha blending across all partitions:
++$$ \mathbf{c} = \sum_{j \in \mathcal{G}_{\text{sorted}}} \mathbf{c}_j \alpha_j \prod_{m=1}^{j-1} (1 - \alpha_m) $$
++where $\mathcal{G}_{\text{sorted}}$ represents the globally depth-sorted union of all partition subsets [G]. The exact ordering of Gaussians across partitions must be consistent to preserve correct occlusion [G].
+ 
+ **Parameters:**
+-- $K$: Number of GPUs. Typical values depend on scene size and available hardware.
++- $K$: Number of GPUs. Typical values depend on scene size and available hardware [G].
+ - Partitioning strategy: Spatial or arbitrary. Not given in the sources.
+ 
+ **Edge Cases and Pitfalls:**
+-- **Occlusion:** If a Gaussian in one GPU is occluded by a Gaussian in another, the alpha-blending order must be respected. Incorrect ordering leads to visual artifacts.
+-- **Communication Bottleneck:** Inter-GPU communication (e.g., NVLink or PCIe) can become a bottleneck if the partition boundaries are not optimized.
+-- **Load Imbalance:** If the scene geometry is uneven, some GPUs may render more pixels or Gaussians than others, leading to idle time.
++- **Occlusion:** If a Gaussian in one GPU is occluded by a Gaussian in another, the alpha-blending order must be respected [G]. Incorrect ordering leads to visual artifacts [G].
++- **Communication Bottleneck:** Inter-GPU communication (e.g., NVLink or PCIe) can become a bottleneck if the partition boundaries are not optimized [G].
++- **Load Imbalance:** If the scene geometry is uneven, some GPUs may render more pixels or Gaussians than others, leading to idle time [G].
+ 
+ ## Subtopics
+ 
+ ## Operating characteristics
+-- **Time Complexity:** $O(N \cdot P / K)$ for rendering, where $P$ is the number of pixels, assuming perfect load balancing. Communication overhead adds $O(K \cdot P)$ or more depending on the aggregation method.
+-- **Memory Complexity:** $O(N / K)$ per GPU, allowing training on scenes with $N \gg$ VRAM capacity.
++- **Time Complexity:** $O(N \cdot P / K)$ for rendering, where $P$ is the number of pixels, assuming perfect load balancing [G]. Communication overhead adds $O(K \cdot P)$ or more depending on the aggregation method [G].
++- **Memory Complexity:** $O(N / K)$ per GPU, allowing training on scenes with $N \gg$ VRAM capacity [G].
+ - **Measured Performance:** Not given in the sources.
+-- **Strengths:** Scales to billions of primitives; overcomes single-GPU VRAM limits.
+-- **Limitations:** Requires multi-GPU setup; communication overhead; complex implementation.
+-- **When to use:** Large-scale scenes (e.g., urban environments, large indoor spaces) that exceed single-GPU memory.
+-- **When not to use:** Small scenes; single-GPU environments; when communication latency is high.
++- **Strengths:** Scales to billions of primitives; overcomes single-GPU VRAM limits [S1, unofficial].
++- **Limitations:** Requires multi-GPU setup; communication overhead; complex implementation [G].
++- **When to use:** Large-scale scenes (e.g., urban environments, large indoor spaces) that exceed single-GPU memory [G].
++- **When not to use:** Small scenes; single-GPU environments; when communication latency is high [G].
+ 
+ ## Background
+-Grendel-GS was introduced as part of the broader effort to scale 3D Gaussian Splatting to larger scenes. It is cited in the survey "3D Gaussian Splatting Rasterization: A Survey" [S1, unofficial]. The method addresses the memory bottleneck of standard 3DGS by distributing the Gaussian list across multiple GPUs.
++Grendel-GS was introduced as part of the broader effort to scale 3D Gaussian Splatting to larger scenes [S1, unofficial]. It is cited in the survey "3D Gaussian Splatting Rasterization: A Survey" [S1, unofficial]. The method addresses the memory bottleneck of standard 3DGS by distributing the Gaussian list across multiple GPUs [S1, unofficial].
+ 
+ ## Sources

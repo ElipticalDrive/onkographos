@@ -1,0 +1,106 @@
+# Sinusoidal Temporal Encoding
+
+Also called: Sinusoidal timestamp expansion, TimeMLP input encoding
+
+## Overview
+Sinusoidal Temporal Encoding is a method for representing a scalar input timestamp $t$ with high precision by expanding it into a high-dimensional vector $\gamma(t)$ using sinusoidal functions, which is then processed by a shallow neural module (TimeMLP) to yield a high-level temporal feature $f_{time}$ [S1]. It sets itself apart from sibling methods like [Coordinate-Time Encoding](5105-coordinate-time-encoding.md) by relying exclusively on fixed-frequency sinusoidal bases rather than learned or coordinate-specific mappings, and differs from [Conditional NeRF with Sinusoidal Positional Encoding](16765-conditional-nerf-with-sinusoidal-positional-encoding.md) by focusing specifically on the temporal dimension's integration via a dedicated TimeMLP rather than general spatial positional encoding [S1].
+
+## How it works
+**Inputs and Outputs:**
+*   Input: A scalar timestamp $t$.
+*   Output: A high-level temporal feature vector $f_{time}$.
+
+**Data Structures:**
+*   The encoding produces a vector of size $1 + 2L$, where $L$ is the number of frequency bands.
+*   The vector consists of the original timestamp followed by interleaved sine and cosine components for each frequency band.
+
+**Parameters:**
+*   $L$: The total number of frequency bands used in the sinusoidal encoding [S1]. Typical values are not specified in the sources.
+
+**Steps:**
+1.  **Frequency Generation:** Compute the frequency $f_l$ for each band $l \in \{1, \dots, L\}$ using the formula:
+    $$f_l = 2^{l-1}$$
+2.  **Sinusoidal Expansion:** Construct the encoded vector $\gamma(t)$ by concatenating the timestamp $t$ with the sinusoidal components for each band:
+    $$\gamma(t) = \left[ t, \sin(2\pi f_1 t), \cos(2\pi f_1 t), \dots, \sin(2\pi f_L t), \cos(2\pi f_L t) \right]$$
+    This corresponds to the formula:
+    $$\gamma(t) = \left[ t, \sin(2\pi f_l t), \cos(2\pi f_l t) \right]_{l=1}^{L}$$
+    [S1]
+3.  **TimeMLP Processing:** Pass the vector $\gamma(t)$ through a shallow neural module (TimeMLP) to produce the final temporal feature $f_{time}$ [S1]. The specific architecture of the TimeMLP is not detailed in the sources, but it is described as "shallow" [S1].
+
+**Pseudocode:**
+> **Unverified code.** The code below did not pass a test run against a reference implementation, or no test fits it, so it may contain errors.
+
+```python
+import math
+
+def sinusoidal_temporal_encoding(t: float, L: int) -> list:
+    """
+    Expands a scalar timestamp t into a high-dimensional vector using sinusoidal functions.
+    
+    Args:
+        t: Scalar timestamp.
+        L: Total number of frequency bands.
+        
+    Returns:
+        A list representing the encoded vector gamma(t).
+    """
+    encoded = [t]
+    for l in range(1, L + 1):
+        # Frequency of the l-th band
+        f_l = 2 ** (l - 1)
+        # Sinusoidal components
+        sin_val = math.sin(2 * math.pi * f_l * t)
+        cos_val = math.cos(2 * math.pi * f_l * t)
+        encoded.append(sin_val)
+        encoded.append(cos_val)
+    return encoded
+
+def time_mlp_process(encoded_vector: list) -> list:
+    """
+    Processes the encoded vector through a shallow neural module (TimeMLP).
+    Note: The specific weights and architecture of the TimeMLP are not defined in the sources.
+    This function represents the placeholder for the neural network inference.
+    """
+    # [G] Placeholder for TimeMLP inference. 
+    # In implementation, this would be a forward pass through a defined MLP.
+    # The output is the high-level temporal feature f_time.
+    return encoded_vector # Placeholder return
+```
+
+**Edge Cases and Pitfalls:**
+*   **Precision:** The method relies on high-precision representation of the timestamp $t$. If $t$ is not normalized or scaled appropriately, the high-frequency components may suffer from numerical instability or aliasing effects, though specific normalization ranges are not provided in the sources [S1].
+*   **Band Selection:** The choice of $L$ determines the highest frequency captured. Insufficient $L$ may fail to capture rapid temporal changes, while excessive $L$ may introduce high-frequency noise or require more complex TimeMLP capacity [S1].
+
+## Subtopics
+
+### Feature-wise Linear Modulation (FiLM) for Spatiotemporal Fusion
+A mechanism to integrate temporal features with spatial features retrieved from a grid, ensuring temporal dynamics condition the underlying spatial structure explicitly via affine modulation rather than naive concatenation [S1]. It is chosen when explicit conditioning of spatial structure by time is required, as opposed to simple concatenation.
+
+**Definition:**
+The FiLM mechanism projects voxel features into a latent space and modulates them using scale and shift vectors generated from the temporal feature $f_{time}$ [S1].
+
+**Steps:**
+1.  **Spatial Projection:** Project the voxel feature $f_{voxel}$ into a latent space via a linear transformation to obtain the spatial hidden state $h_{spatial}$:
+    $$h_{spatial} = W_s f_{voxel} + b_s$$
+    [S1]
+2.  **FiLM Generator:** A compact FiLM generator network takes the temporal feature $f_{time}$ as input and regresses channel-wise scale $\tilde{\gamma}(f_{time})$ and shift $\tilde{\beta}(f_{time})$ vectors [S1].
+3.  **Affine Modulation:** Compute the unified spatiotemporal feature $f_{ST}$:
+    $$f_{ST} = \tilde{\gamma}(f_{time}) \odot h_{spatial} + \tilde{\beta}(f_{time})$$
+    where $\odot$ denotes element-wise multiplication [S1].
+
+**Pitfalls:**
+*   **Training Stability:** The network must be initialized with $\tilde{\gamma}$ near unity and $\tilde{\beta}$ near zero to begin training as a quasi-static model, progressively learning to selectively amplify or suppress spatial channels [S1].
+
+## Operating characteristics
+*   **Time Complexity:** The encoding step is $O(L)$, where $L$ is the number of frequency bands. The TimeMLP processing complexity depends on its specific architecture, which is not detailed in the sources.
+*   **Memory Complexity:** The encoding vector size is $1 + 2L$. The memory overhead is minimal compared to the spatial features.
+*   **Strengths:** Provides high-precision temporal representation using fixed sinusoidal bases, allowing the TimeMLP to learn complex temporal dynamics without needing to encode low-level frequency information itself [S1].
+*   **Limitations:** The fixed frequency bands may not adapt to the specific temporal characteristics of the data as effectively as learned positional encodings. The specific performance metrics are not provided in the sources.
+*   **When to Use:** When integrating temporal information into spatial representations (e.g., in dynamic Gaussian Splatting or voxel-based methods) and explicit conditioning via FiLM is desired [S1].
+*   **When Not to Use:** When computational resources are extremely limited and $L$ must be very small, or when the temporal dynamics are best captured by learned embeddings rather than sinusoidal bases.
+
+## Background
+Sinusoidal Temporal Encoding, in the context of the Voxel Reuse module and TimeMLP, originates from the CC-4DGS method (Computational Deformation and Point-Cloud Compression for Storage-Efficient Dynamic Gaussian Splatting) [S1]. It is used to effectively synthesize spatiotemporal context by integrating temporal features with spatial features retrieved from a grid, driving the Deformation Field Estimation Network to predict the time-dependent evolution of Gaussian primitives [S1].
+
+## Sources
+[S1] CC-4DGS: Computational Deformation and Point-Cloud Compression for Storage-Efficient Dynamic Gaussian Splatting., https://doi.org/10.1109/tvcg.2026.3721136, fetched 2026-10-27

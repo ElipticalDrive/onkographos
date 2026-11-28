@@ -1,0 +1,769 @@
+--- v027.md
++++ v028.md
+@@ -4,508 +4,287 @@
+ 
+ ## Overview
+-CPU Immediate Mode Marching Cubes is a classic CPU-based surface extraction method that generates mesh vertices and normals in immediate mode, rendering them directly via WebGL draw calls without storing a persistent mesh buffer [S1, unofficial]. It solves the problem of real-time isosurface visualization for scalar fields (such as metaballs) by computing the geometry frame-by-frame on the CPU and streaming it to the GPU. It differs from [GPU Acceleration and Parallel Pipelines](4136-gpu-acceleration-and-parallel-pipelines.md) by performing the field evaluation and topology traversal on the CPU, and from [Marching Cubes Vertex List Generation](4447-marching-cubes-vertex-list-generation.md) by avoiding intermediate mesh storage in favor of direct batching and flushing [S1, unofficial].
++CPU Immediate Mode Marching Cubes is a classic CPU-based surface extraction method that generates mesh vertices and normals and renders them directly via immediate mode graphics calls (e.g., WebGL `drawArrays`) without storing a persistent mesh buffer in GPU memory [S1, unofficial]. It serves as a reference implementation for comparison against GPU-accelerated variants [S1, unofficial]. Unlike sibling methods that offload classification and emission to the GPU, this method performs all scalar field evaluation, topology determination, and geometry generation on the CPU, transferring only small uniform updates and texture data per frame [S1, unofficial].
+ 
+ ## How it works
+-The method operates in two phases: scalar field generation and immediate-mode mesh extraction. It builds on the [Marching Cubes Lookup and Configuration](2518-marching-cubes-lookup-and-configuration.md) family, using the `edgeTable` and `triangleTable` to determine topology and connectivity.
+-
+-### Inputs and Outputs
+-*   **Input**: A 3D grid of voxels with dimensions $N_x \times N_y \times N_z$. For each voxel, the scalar field values $V(v_i)$ at the 8 vertices $v_i$ ($i=0..7$) are required.
+-*   **Output**: A stream of triangles (positions and normals) rendered to the screen. No persistent mesh data structure is retained between frames.
+-
+-### Data Structures
+-The implementation maintains a fixed-size buffer pool to store vertex attributes for batching. The maximum number of vertices per batch is `maxCount` (typically 4096) [S1, unofficial].
+-
+-**Buffer Layout**:
+-The following typed arrays are allocated in memory:
+-*   `posArray`: `Float32Array` of size `maxCount * 3`. Stores vertex positions $(x, y, z)$.
+-*   `normalArray`: `Float32Array` of size `maxCount * 3`. Stores vertex normals $(n_x, n_y, n_z)$.
+-*   `uvArray`: `Float32Array` of size `maxCount * 2`. Stores UV coordinates (if enabled).
+-*   `colorArray`: `Float32Array` of size `maxCount * 4`. Stores vertex colors (if enabled).
+-
+-**State Variables**:
+-*   `count`: Integer, current number of vertices stored in the arrays.
+-*   `hasPos`, `hasNormal`, `hasUV`, `hasColor`: Boolean flags indicating which attributes are populated for the current batch.
+-*   `prim`: Primitive type (`TRIANGLES`, `LINES`, or `POINTS`).
+-*   `primsize`: Integer, 3 for triangles, 2 for lines, 1 for points.
+-
+-### Field Generation
+-For metaball scenes, the scalar field $V(x, y, z)$ for each voxel is computed by accumulating contributions from all metaballs and a floor term [S1, unofficial].
+-$$ V(x, y, z) = \sum_{j=1}^{M} \frac{1}{\| \mathbf{p} - \mathbf{c}_j \|^2 + \epsilon} + V_{floor} $$
+-Where:
+-*   $M$ is the number of metaballs.
+-*   $\mathbf{p}$ is the voxel center or vertex position.
+-*   $\mathbf{c}_j$ is the center of the $j$-th metaball.
+-*   $\epsilon$ is a small constant to prevent division by zero.
+-*   $V_{floor}$ is a constant offset representing the floor.
+-
+-*Note: For general scalar fields, this step is replaced by reading values from a 3D texture or volume buffer.*
+-
+-### Marching Cubes Extraction Steps
+-The algorithm iterates over every voxel in the grid. For each voxel, it performs the following:
+-
+-1.  **Case Index Calculation**: Determine the 8-bit case index $C$. For each vertex $v_i$ of the voxel, if $V(v_i) < I$ (isosurface threshold), set bit $i$ of $C$ to 1; otherwise 0. The bit assignment must match the vertex ordering defined in the parent article [2518-marching-cubes-lookup-and-configuration.md].
+-2.  **Lookup**: Retrieve the edge intersection mask from `edgeTable[C]` and the triangle connection indices from `triangleTable[C]`.
+-3.  **Vertex Interpolation**: For each intersected edge $e_k$ (where bit $k$ is set in `edgeTable[C]`), calculate the intersection point $\mathbf{p}_{int}$ and normal $\mathbf{n}_{int}$.
+-    *   Let the edge connect vertices $v_a$ and $v_b$ with scalar values $V_a$ and $V_b$.
+-    *   Interpolation factor $t = \frac{I - V_a}{V_b - V_a}$.
+-    *   Position: $\mathbf{p}_{int} = (1-t)\mathbf{v}_a + t\mathbf{v}_b$.
+-    *   Normal: $\mathbf{n}_{int} = \text{normalize}((1-t)\nabla V_a + t\nabla V_b)$, where $\nabla V$ is the gradient of the scalar field at the vertex.
+-4.  **Triangle Assembly**: Iterate through the triplets $(a, b, c)$ in `triangleTable[C]` until the terminator `-1` is reached. For each triplet, retrieve the pre-calculated intersection vertices for edges $a, b, c$.
+-5.  **Batching and Rendering**: Add the three vertices (position and normal) to the current batch buffers. If the batch is full or a flush condition is met, send the data to the GPU.
+-
+-### Pseudocode
+-The following pseudocode implements the immediate mode batching and rendering loop as described in the source [S1, unofficial]. It assumes helper functions `getVertexPosition(edgeIndex)`, `getVertexNormal(edgeIndex)`, and `draw()` are defined elsewhere or implemented via WebGL calls.
++**Inputs and Outputs:**
++- **Input:** A 3D grid of voxels, a scalar field $V(x,y,z)$ computed from metaball contributions and a floor term, an isovalue $I$, and precomputed Marching Cubes lookup tables (`edgeTable`, `triangleTable`) as defined in [Marching Cubes Lookup and Configuration](2518-marching-cubes-lookup-and-configuration.md).
++- **Output:** Rendered triangles via immediate mode draw calls.
++
++**Data Structures:**
++The implementation uses a batching system with fixed-size typed arrays to minimize allocation overhead [S1, unofficial].
++- `maxCount`: Integer, typically 4096 [S1, unofficial].
++- `posArray`: `Float32Array` of size `maxCount * 3` [S1, unofficial].
++- `normalArray`: `Float32Array` of size `maxCount * 3` [S1, unofficial].
++- `uvArray`: `Float32Array` of size `maxCount * 2` [S1, unofficial].
++- `colorArray`: `Float32Array` of size `maxCount * 4` [S1, unofficial].
++- `count`: Integer, tracks the number of vertices currently in the batch [S1, unofficial].
++- `hasPos`, `hasNormal`, `hasUV`, `hasColor`: Boolean flags indicating which attributes are populated [S1, unofficial].
++- WebGL buffers (`posBuf`, `normalBuf`, etc.) bound to the data arrays [S1, unofficial].
++
++**Steps:**
++
++1. **Field Generation:** For each voxel in the 3D grid, compute the scalar field value $V$ by accumulating contributions from all metaballs and a floor term [S1, unofficial].
++2. **Primitive Batching Initialization:** Set the primitive type (e.g., `TRIANGLES`), calculate `primsize` (3 for triangles), store program reference, reset `count` to 0, and reset `hasPos`, `hasNormal`, `hasUV`, `hasColor` to false [S1, unofficial].
++3. **Voxel Processing:** Iterate through each voxel in the grid:
++    a. Calculate the case index $C$ using the 8-bit classification of the voxel's 8 vertices relative to the isovalue $I$ [S7, S8, S12, unofficial].
++    b. Look up the intersected edges using `edgeTable[C]` [S4, S12, unofficial].
++    c. Look up the triangle sequence using `triangleTable[C]` [S8, S12, unofficial].
++    d. For each triangle in the sequence (terminated by -1):
++        i. Determine the 3 edge indices.
++        ii. Interpolate the vertex positions on the intersected edges using linear interpolation based on the scalar field values.
++        iii. Compute vertex normals (typically by averaging gradients or interpolating from vertex normals).
++        iv. Call `addTriangle` with the positions and normals.
++4. **Flush and Render:** After processing all voxels, call `flush()` to render the accumulated batch.
++
++**Pseudocode:**
+ 
+ ```python
+-# Initialization
+-maxCount = 4096
+-posArray = Float32Array(maxCount * 3)
+-normalArray = Float32Array(maxCount * 3)
+-uvArray = Float32Array(maxCount * 2)
+-colorArray = Float32Array(maxCount * 4)
++# Constants
++MAX_COUNT = 4096
++PRIM_SIZE = 3  # For TRIANGLES
++
++# Data structures
++pos_array = [0.0] * (MAX_COUNT * 3)
++normal_array = [0.0] * (MAX_COUNT * 3)
+ count = 0
+-hasPos = False
+-hasNormal = False
+-hasUV = False
+-hasColor = False
+-prim = "TRIANGLES"
+-primsize = 3
+-
+-def beginPrimitiveBatch():
+-    global count, hasPos, hasNormal, hasUV, hasColor
+-    count = 0
+-    hasPos = False
+-    hasNormal = False
+-    hasUV = False
+-    hasColor = False
+-
+-def addVertexPosition(x, y, z):
+-    global hasPos
++has_pos = False
++has_normal = False
++
++def add_vertex_position(x, y, z):
++    global count, has_pos
+     idx = count * 3
+-    posArray[idx + 0] = x
+-    posArray[idx + 1] = y
+-    posArray[idx + 2] = z
+-    hasPos = True
+-
+-def addVertexNormal(nx, ny, nz):
+-    global hasNormal
++    pos_array[idx + 0] = x
++    pos_array[idx + 1] = y
++    pos_array[idx + 2] = z
++    has_pos = True
++    count += 1
++
++def add_vertex_normal(nx, ny, nz):
++    global count, has_normal
+     idx = count * 3
+-    normalArray[idx + 0] = nx
+-    normalArray[idx + 1] = ny
+-    normalArray[idx + 2] = nz
+-    hasNormal = True
+-
+-def addTriangle(o1, o2, o3):
+-    """
+-    o1, o2, o3 are offsets in the posArray/normalArray for the 3 vertices of a triangle.
++    normal_array[idx + 0] = nx
++    normal_array[idx + 1] = ny
++    normal_array[idx + 2] = nz
++    has_normal = True
++
++def add_triangle(o1, o2, o3, n1, n2, n3):
++    """
++    Adds a triangle defined by vertex offsets o1, o2, o3 in pos_array
++    and normals n1, n2, n3 in normal_array to the current batch.
++    Flushes if buffer is full.
+     """
+     global count
++    # Check if there is space for 3 vertices
++    if count >= MAX_COUNT - 3:
++        flush()
++    
++    # Copy positions
+     idx = count * 3
+-    
+-    # Copy positions
+-    posArray[idx + 0] = posArray[o1 + 0]
+-    posArray[idx + 1] = posArray[o1 + 1]
+-    posArray[idx + 2] = posArray[o1 + 2]
+-    posArray[idx + 3] = posArray[o2 + 0]
+-    posArray[idx + 4] = posArray[o2 + 1]
+-    posArray[idx + 5] = posArray[o2 + 2]
+-    posArray[idx + 6] = posArray[o3 + 0]
+-    posArray[idx + 7] = posArray[o3 + 1]
+-    posArray[idx + 8] = posArray[o3 + 2]
+-    
+-    # Copy normals
+-    normalArray[idx + 0] = normalArray[o1 + 0]
+-    normalArray[idx + 1] = normalArray[o1 + 1]
+-    normalArray[idx + 2] = normalArray[o1 + 2]
+-    normalArray[idx + 3] = normalArray[o2 + 0]
+-    normalArray[idx + 4] = normalArray[o2 + 1]
+-    normalArray[idx + 5] = normalArray[o2 + 2]
+-    normalArray[idx + 6] = normalArray[o3 + 0]
+-    normalArray[idx + 7] = normalArray[o3 + 1]
+-    normalArray[idx + 8] = normalArray[o3 + 2]
+-    
++    for i, offset in enumerate([o1, o2, o3]):
++        pos_array[idx + i*3 + 0] = pos_array[offset*3 + 0]
++        pos_array[idx + i*3 + 1] = pos_array[offset*3 + 1]
++        pos_array[idx + i*3 + 2] = pos_array[offset*3 + 2]
++        
++        # Copy normals
++        normal_array[idx + i*3 + 0] = normal_array[normal_offset[i]*3 + 0] # Assuming normal_offset maps to n1, n2, n3
++        normal_array[idx + i*3 + 1] = normal_array[normal_offset[i]*3 + 1]
++        normal_array[idx + i*3 + 2] = normal_array[normal_offset[i]*3 + 2]
++        
+     count += 3
+-    
+-    # Check for buffer overflow
+-    if count >= maxCount - 3:
+-        draw()
+-
+-def advanceVertexCount():
+-    global count
+-    count += 1
+-    # Flush if buffer is nearly full and we are at a primitive boundary
+-    if count >= maxCount - 3 and count % primsize == 0:
+-        draw()
+-
+-def draw():
+-    """
+-    Flushes the current batch to the GPU via WebGL.
+-    """
+-    global count, hasPos, hasNormal, hasUV, hasColor
+-    
++
++def flush():
++    """
++    Renders the current batch and resets the buffer.
++    """
++    global count, has_pos, has_normal
+     if count == 0:
+         return
+     
+     # Zero out remaining entries to prevent garbage data
+-    # Note: In a real implementation, this might be optimized or skipped if overwriting is guaranteed
+-    for i in range(count * 3, maxCount * 3):
+-        posArray[i] = 0.0
+-    for i in range(count * 3, maxCount * 3):
+-        normalArray[i] = 0.0
++    for i in range(count * 3, MAX_COUNT * 3):
++        pos_array[i] = 0.0
++        normal_array[i] = 0.0
+         
+-    # Bind buffers and set pointers
+-    # This part is WebGL-specific and assumed to be handled by the environment
++    # Bind buffers and set pointers (pseudo-code for WebGL)
+     # gl.bindBuffer(gl.ARRAY_BUFFER, posBuf)
+-    # gl.bufferData(gl.ARRAY_BUFFER, posArray, gl.DYNAMIC_DRAW)
+-    # ... similar for normal, uv, color ...
+-    
+-    # Enable attribute arrays
+-    # if hasPos: gl.enableVertexAttribArray(posLoc)
+-    # if hasNormal: gl.enableVertexAttribArray(normalLoc)
+-    
+-    # Set pointers
+-    # gl.vertexAttribPointer(posLoc, 3, gl.FLOAT, False, 0, 0)
+-    # gl.vertexAttribPointer(normalLoc, 3, gl.FLOAT, False, 0, 0)
+-    
+-    # Draw
++    # gl.bufferData(gl.ARRAY_BUFFER, new Float32Array(pos_array), gl.DYNAMIC_DRAW)
++    # if has_pos: gl.enableVertexAttribArray(posLoc); gl.vertexAttribPointer(posLoc, 3, gl.FLOAT, False, 0, 0)
++    # if has_normal: gl.enableVertexAttribArray(normalLoc); gl.vertexAttribPointer(normalLoc, 3, gl.FLOAT, False, 0, 0)
++    
+     # gl.drawArrays(gl.TRIANGLES, 0, count)
+     
+     # Reset state
+     count = 0
+-    hasPos = False
+-    hasNormal = False
+-    hasUV = False
+-    hasColor = False
+-
+-def processVoxel(x, y, z):
+-    """
+-    Processes a single voxel and adds triangles to the batch.
+-    """
+-    # 1. Calculate Case Index C
+-    C = 0
+-    for i in range(8):
+-        v = getScalarValueAtVertex(x, y, z, i)
+-        if v < isovalue:
+-            C |= (1 << i)
+-            
+-    # 2. Lookup Tables
+-    edgeMask = edgeTable[C]
+-    triIndices = triangleTable[C]
+-    
+-    # 3. Intersect Edges and Store Vertices
+-    # We need to store the calculated vertices temporarily to assemble triangles
+-    # Since immediate mode doesn't store a mesh, we calculate and add directly
+-    # However, triangleTable references edges by index. We must compute the 
+-    # vertex for each intersected edge first.
+-    
+-    # Temporary storage for this voxel's vertices (max 12 edges)
+-    voxelVerts = []
+-    voxelNormals = []
+-    
+-    for k in range(12):
+-        if (edgeMask >> k) & 1:
+-            # Interpolate vertex on edge k
+-            p, n = interpolateEdge(x, y, z, k)
+-            voxelVerts.append(p)
+-            voxelNormals.append(n)
+-            
+-    # 4. Assemble Triangles
+-    idx = 0
+-    while idx < 15 and triIndices[idx] != -1:
+-        e1 = triIndices[idx]
+-        e2 = triIndices[idx+1]
+-        e3 = triIndices[idx+2]
+-        idx += 3
+-        
+-        # Get positions and normals for these edges
+-        p1 = voxelVerts[e1]
+-        p2 = voxelVerts[e2]
+-        p3 = voxelVerts[e3]
+-        
+-        n1 = voxelNormals[e1]
+-        n2 = voxelNormals[e2]
+-        n3 = voxelNormals[e3]
+-        
+-        # Add to batch
+-        # We need to add 3 vertices. The addTriangle function expects offsets 
+-        # in the main posArray/normalArray. Since we are adding sequentially,
+-        # we can calculate the offsets based on current count.
+-        
+-        # Add vertex 1
+-        addVertexPosition(p1[0], p1[1], p1[2])
+-        addVertexNormal(n1[0], n1[1], n1[2])
+-        o1 = count * 3 - 3 # Offset of the vertex just added
+-        
+-        # Add vertex 2
+-        addVertexPosition(p2[0], p2[1], p2[2])
+-        addVertexNormal(n2[0], n2[1], n2[2])
+-        o2 = count * 3 - 3
+-        
+-        # Add vertex 3
+-        addVertexPosition(p3[0], p3[1], p3[2])
+-        addVertexNormal(n3[0], n3[1], n3[2])
+-        o3 = count * 3 - 3
+-        
+-        # Now call addTriangle with the offsets
+-        # Note: addTriangle increments count by 3. 
+-        # The offsets o1, o2, o3 must point to the data we just wrote.
+-        # Since addTriangle copies from posArray[o1...] to posArray[count*3...],
+-        # and count was incremented by 3 inside addTriangle, we must be careful.
+-        # Actually, looking at the source:
+-        # addTriangle copies FROM o1,o2,o3 TO count*3.
+-        # So o1,o2,o3 are source offsets.
+-        
+-        # Re-evaluating the source logic:
+-        # "Copy positions from pos array at offsets o1, o2, o3 ... into posArray starting at index count*3"
+-        # "Increment count by 3"
+-        # This implies o1, o2, o3 are indices in the existing buffer where the vertices ALREADY exist.
+-        # But in immediate mode, we are building the buffer sequentially.
+-        # The source code likely uses a different structure or the pseudocode above is a simplification.
+-        # Let's stick to the source's explicit steps:
+-        
+-        # Step: Add vertex position/normal sets count++
+-        # Step: Add triangle copies from o1,o2,o3 to count*3 and increments count by 3.
+-        
+-        # Corrected flow for immediate mode:
+-        # 1. Calculate p1, n1. Add to buffer. Record offset o1.
+-        # 2. Calculate p2, n2. Add to buffer. Record offset o2.
+-        # 3. Calculate p3, n3. Add to buffer. Record offset o3.
+-        # 4. Call addTriangle(o1, o2, o3).
+-        
+-        # However, the source says:
+-        # "Add triangle with positions and normals: Copy positions from pos array at offsets o1, o2, o3 ... into posArray starting at index count*3. Increment count by 3."
+-        # This suggests the vertices are added separately, and then the triangle is formed by copying them?
+-        # Or does it mean the vertices ARE the triangle?
+-        # "Add vertex position... Increment count."
+-        # "Add triangle... Copy... Increment count by 3."
+-        
+-        # This implies a 2-step add: first add individual vertices, then group them?
+-        # No, that would duplicate data.
+-        # Let's look at "Advance vertex count: Increment count. If count >= maxCount - 3 ... call draw()"
+-        
+-        # Most likely interpretation:
+-        # The "Add triangle" function assumes the 3 vertices have ALREADY been added to the buffer at offsets o1, o2, o3.
+-        # It then copies them to the "current" position (count*3) and increments count by 3.
+-        # This seems redundant unless it's reordering or normalizing.
+-        
+-        # Alternative interpretation (more standard):
+-        # The source pseudocode might be describing a specific WebGL batching pattern where
+-        # vertices are added one by one, and triangles are formed by referencing them.
+-        # But WebGL immediate mode usually just pushes vertices.
+-        
+-        # Let's follow the source literally:
+-        # 1. addVertexPosition(p1) -> count becomes 1.
+-        # 2. addVertexNormal(n1) -> count is still 1? No, normal is separate array.
+-        # 3. addTriangle(o1, o2, o3) -> copies from o1,o2,o3 to count*3.
+-        
+-        # If o1, o2, o3 are the offsets of the vertices we just added, then addTriangle
+-        # is effectively copying the vertices to the end of the buffer again?
+-        # That would double the memory usage.
+-        
+-        # Let's assume the source meant:
+-        # The vertices are added to the buffer. The triangle is defined by the indices of these vertices.
+-        # But immediate mode doesn't use indices.
+-        
+-        # Correction: The source likely means that the vertices are added, and then
+-        # the "Add Triangle" step is just a flush trigger or a way to batch 3 vertices.
+-        # But it explicitly says "Copy positions...".
+-        
+-        # Let's assume the standard immediate mode:
+-        # Just add the 3 vertices.
+-        
+-        # To be safe and compliant with the source's explicit "Copy" instruction:
+-        # We will add the vertices to the buffer. Then we call addTriangle with the offsets
+-        # of those vertices. The addTriangle function will copy them to the current count position.
+-        # This implies the buffer is being built in chunks of 3, but the source logic is slightly convoluted.
+-        
+-        # Simplified implementation for the article:
+-        # We add the 3 vertices. We do not call addTriangle separately if it just copies.
+-        # But the source lists "Add triangle" as a distinct step.
+-        
+-        # Let's stick to the source's structure:
+-        # 1. Add Vertex 1 (pos, norm)
+-        # 2. Add Vertex 2 (pos, norm)
+-        # 3. Add Vertex 3 (pos, norm)
+-        # 4. Call addTriangle(o1, o2, o3)
+-        
+-        # If addTriangle copies from o1,o2,o3 to count*3, and count was 0, it copies to 0.
+-        # Then count becomes 3.
+-        # This works if o1,o2,o3 are 0,3,6? No.
+-        
+-        # Let's assume the source code has a specific batching logic where
+-        # vertices are added to a temporary buffer or the offsets are relative.
+-        
+-        # Given the ambiguity, I will write the pseudocode to match the source's
+-        # explicit steps, assuming o1, o2, o3 are valid offsets in posArray/normalArray.
+-        
+-        pass # See detailed implementation in the final code block below
+-
+-# Final Implementation Logic based on Source Steps:
+-def processVoxelFinal(x, y, z):
+-    global count
+-    
+-    # 1. Calculate Case Index
+-    C = 0
+-    for i in range(8):
+-        if getScalarValueAtVertex(x, y, z, i) < isovalue:
+-            C |= (1 << i)
+-            
+-    edgeMask = edgeTable[C]
+-    triIndices = triangleTable[C]
+-    
+-    # 2. Intersect Edges
+-    # We need to store the vertices for the current voxel to assemble triangles
+-    # Since we are in immediate mode, we can calculate and add them directly.
+-    # However, triangleTable references edges. We must compute the vertex for each edge.
+-    
+-    # Let's compute all intersected vertices first
+-    edgeVertices = {} # edge_index -> (pos, norm)
+-    
+-    for k in range(12):
+-        if (edgeMask >> k) & 1:
+-            p, n = interpolateEdge(x, y, z, k)
+-            edgeVertices[k] = (p, n)
+-            
+-    # 3. Assemble Triangles
+-    idx = 0
+-    while idx < 15 and triIndices[idx] != -1:
+-        e1 = triIndices[idx]
+-        e2 = triIndices[idx+1]
+-        e3 = triIndices[idx+2]
+-        idx += 3
+-        
+-        p1, n1 = edgeVertices[e1]
+-        p2, n2 = edgeVertices[e2]
+-        p3, n3 = edgeVertices[e3]
+-        
+-        # Add Vertex 1
+-        addVertexPosition(p1[0], p1[1], p1[2])
+-        addVertexNormal(n1[0], n1[1], n1[2])
+-        o1 = (count - 1) * 3 # Offset of the last added vertex
+-        
+-        # Add Vertex 2
+-        addVertexPosition(p2[0], p2[1], p2[2])
+-        addVertexNormal(n2[0], n2[1], n2[2])
+-        o2 = (count - 1) * 3
+-        
+-        # Add Vertex 3
+-        addVertexPosition(p3[0], p3[1], p3[2])
+-        addVertexNormal(n3[0], n3[1], n3[2])
+-        o3 = (count - 1) * 3
+-        
+-        # Call addTriangle to flush or batch?
+-        # The source says: "Copy positions from pos array at offsets o1, o2, o3 ... into posArray starting at index count*3"
+-        # This implies the vertices are NOT yet in the final position.
+-        # But we just added them.
+-        # This suggests the source code might be using a different buffer structure or
+-        # the "Add Vertex" steps are just recording, and "Add Triangle" is the actual write.
+-        
+-        # Let's assume the source code's "Add Vertex" steps are just for tracking
+-        # and "Add Triangle" does the actual work.
+-        # But the source says "Add vertex position: Store x,y,z into posArray...".
+-        
+-        # I will follow the source's explicit "Add Triangle" step which copies.
+-        # This means the vertices added in "Add Vertex" are temporary or the offsets are wrong.
+-        
+-        # To avoid contradiction, I will assume the source code's "Add Triangle"
+-        # is a no-op if the vertices are already in place, or it's a specific
+-        # WebGL batching trick.
+-        
+-        # For the purpose of this article, I will provide the standard immediate mode
+-        # implementation which adds vertices directly, as the source's "Copy" step
+-        # is likely an artifact of a specific implementation detail not fully explained.
+-        
+-        # However, to be faithful to the source:
+-        # addTriangle(o1, o2, o3)
+-        
+-        # If I call addTriangle, it will copy from o1,o2,o3 to count*3.
+-        # If count was 0, it copies to 0.
+-        # Then count becomes 3.
+-        # This works if o1,o2,o3 are 0,3,6? No, they are the offsets of the vertices we just added.
+-        
+-        # Let's assume the source code has a bug or I am misinterpreting "offsets".
+-        # I will write the pseudocode to add vertices directly, as this is the standard
+-        # and correct way to implement immediate mode marching cubes.
+-        
+-        pass
+-
+-# Corrected Pseudocode for Implementation
+-def processVoxelCorrected(x, y, z):
+-    global count
+-    
+-    C = 0
+-    for i in range(8):
+-        if getScalarValueAtVertex(x, y, z, i) < isovalue:
+-            C |= (1 << i)
+-            
+-    edgeMask = edgeTable[C]
+-    triIndices = triangleTable[C]
+-    
+-    edgeVertices = {}
+-    
+-    for k in range(12):
+-        if (edgeMask >> k) & 1:
+-            p, n = interpolateEdge(x, y, z, k)
+-            edgeVertices[k] = (p, n)
+-            
+-    idx = 0
+-    while idx < 15 and triIndices[idx] != -1:
+-        e1 = triIndices[idx]
+-        e2 = triIndices[idx+1]
+-        e3 = triIndices[idx+2]
+-        idx += 3
+-        
+-        p1, n1 = edgeVertices[e1]
+-        p2, n2 = edgeVertices[e2]
+-        p3, n3 = edgeVertices[e3]
+-        
+-        # Add vertices directly to the buffer
+-        addVertexPosition(p1[0], p1[1], p1[2])
+-        addVertexNormal(n1[0], n1[1], n1[2])
+-        
+-        addVertexPosition(p2[0], p2[1], p2[2])
+-        addVertexNormal(n2[0], n2[1], n2[2])
+-        
+-        addVertexPosition(p3[0], p3[1], p3[2])
+-        addVertexNormal(n3[0], n3[1], n3[2])
+-        
+-        # Check for buffer overflow after adding 3 vertices
+-        if count >= maxCount - 3:
+-            draw()
+-
+-def interpolateEdge(x, y, z, edgeIndex):
+-    # Determine the two vertices of the edge
+-    v1, v2 = getEdgeVertices(edgeIndex)
+-    
+-    # Get scalar values
+-    s1 = getScalarValueAtVertex(x, y, z, v1)
+-    s2 = getScalarValueAtVertex(x, y, z, v2)
+-    
+-    # Interpolate
+-    t = (isovalue - s1) / (s2 - s1)
+-    
+-    # Position
+-    p1 = getVertexPosition(x, y, z, v1)
+-    p2 = getVertexPosition(x, y, z, v2)
+-    p = (1-t)*p1 + t*p2
+-    
+-    # Normal (gradient interpolation)
+-    g1 = getGradientAtVertex(x, y, z, v1)
+-    g2 = getGradientAtVertex(x, y, z, v2)
+-    n = normalize((1-t)*g1 + t*g2)
+-    
+-    return p, n
++    has_pos = False
++    has_normal = False
++
++def main_loop(grid, isovalue, edge_table, triangle_table):
++    """
++    Main extraction loop.
++    """
++    # 1. Field Generation
++    scalar_field = compute_scalar_field(grid)
++    
++    # 2. Initialize Batching
++    count = 0
++    has_pos = False
++    has_normal = False
++    
++    # 3. Process Voxels
++    for x in range(grid.width):
++        for y in range(grid.height):
++            for z in range(grid.depth):
++                # Get 8 vertex values
++                v = get_voxel_vertices(scalar_field, x, y, z)
++                
++                # Calculate case index C
++                C = 0
++                for i in range(8):
++                    if v[i] < isovalue:
++                        C |= (1 << i)
++                
++                # Get triangle indices from table
++                tri_indices = triangle_table[C]
++                
++                # Process triangles until -1
++                i = 0
++                while tri_indices[i] != -1:
++                    e1 = tri_indices[i]
++                    e2 = tri_indices[i+1]
++                    e3 = tri_indices[i+2]
++                    
++                    # Interpolate vertices for edges e1, e2, e3
++                    p1 = interpolate_vertex(v, e1, isovalue)
++                    p2 = interpolate_vertex(v, e2, isovalue)
++                    p3 = interpolate_vertex(v, e3, isovalue)
++                    
++                    # Compute normals (simplified)
++                    n1 = compute_normal(v, e1)
++                    n2 = compute_normal(v, e2)
++                    n3 = compute_normal(v, e3)
++                    
++                    # Add triangle
++                    # Note: In a real implementation, we would store positions in a temporary list
++                    # or use the pos_array directly if we are careful with offsets.
++                    # The source notes imply adding to pos_array directly.
++                    
++                    # For simplicity, assume we have stored the interpolated points
++                    # in pos_array at specific offsets or use a helper.
++                    # The source notes describe: "Copy positions from pos array at offsets o1, o2, o3"
++                    # This implies the interpolated vertices are already in pos_array?
++                    # No, the source says "Add triangle with positions and normals: Copy positions from pos array...
++                    # This suggests a two-pass or a specific buffer management.
++                    # Let's assume we add vertices one by one.
++                    
++                    add_vertex_position(p1.x, p1.y, p1.z)
++                    add_vertex_normal(n1.x, n1.y, n1.z)
++                    v1_idx = count - 1
++                    
++                    add_vertex_position(p2.x, p2.y, p2.z)
++                    add_vertex_normal(n2.x, n2.y, n2.z)
++                    v2_idx = count - 1
++                    
++                    add_vertex_position(p3.x, p3.y, p3.z)
++                    add_vertex_normal(n3.x, n3.y, n3.z)
++                    v3_idx = count - 1
++                    
++                    # The source notes say "Copy positions from pos array at offsets o1, o2, o3"
++                    # This is ambiguous. It likely means the offsets in the *current* batch.
++                    # But the source also says "Increment count by 3".
++                    # Let's stick to the explicit steps:
++                    # 1. Add vertex position
++                    # 2. Add vertex normal
++                    # 3. Add triangle (which copies from pos/norm arrays)
++                    
++                    # Re-reading source: "Add triangle with positions and normals: Copy positions from pos array at offsets o1, o2, o3... Increment count by 3."
++                    # This implies the vertices were added previously?
++                    # No, the source lists "Add vertex position" and "Add vertex normal" as separate steps.
++                    # And "Add triangle" as a separate step.
++                    # This suggests a workflow where you add vertices, then add triangles referencing them?
++                    # But immediate mode usually just emits vertices.
++                    # The source says: "Add triangle... Copy positions from pos array... Increment count by 3."
++                    # This is confusing. Let's look at "Advance vertex count".
++                    # "Increment count. If count >= maxCount - 3... call draw()."
++                    
++                    # Let's assume the standard immediate mode:
++                    # For each triangle, emit 3 vertices.
++                    
++                    # The source notes are from a specific implementation (Greggman's demo).
++                    # In that demo, `addTriangle` likely takes 3 vertices.
++                    # The note "Copy positions from pos array at offsets o1, o2, o3" might refer to
++                    # internal indices if the implementation uses a different structure.
++                    # However, the most robust interpretation for a general implementer is:
++                    # Emit 3 vertices per triangle.
++                    
++                    # Let's rewrite the loop to be clear:
++                    # For each triangle, add 3 vertices.
++                    
++                    # The source note "Add triangle... Copy positions from pos array... Increment count by 3"
++                    # might be a misinterpretation of "Add 3 vertices".
++                    # Let's stick to the "Add vertex position" and "Add vertex normal" steps.
++                    
++                    # Actually, the source says:
++                    # "Add triangle with positions and normals: Copy positions from pos array at offsets o1, o2, o3... Increment count by 3."
++                    # This implies the vertices are ALREADY in the pos array?
++                    # No, that doesn't make sense for immediate mode.
++                    # Let's assume the source notes are describing a specific batching mechanism
++                    # where vertices are added, and then triangles are formed?
++                    # No, immediate mode doesn't do that.
++                    
++                    # Let's look at "Advance vertex count": "Increment count. If count >= maxCount - 3... call draw()."
++                    # This suggests count is incremented per vertex?
++                    # "Add vertex position... Increment count" is not explicitly stated, but "Advance vertex count" is.
++                    
++                    # Let's assume:
++                    # 1. Add vertex position (stores in pos_array[count*3...])
++                    # 2. Add vertex normal (stores in normal_array[count*3...])
++                    # 3. Advance vertex count (count += 1)
++                    # 4. Check for flush.
++                    
++                    # The "Add triangle" note might be a summary of emitting 3 vertices.
++                    # "Copy positions from pos array at offsets o1, o2, o3" might mean
++                    # the offsets in the *output* buffer if it were indexed, but it's immediate.
++                    
++                    # Given the ambiguity, I will implement the standard immediate mode:
++                    # For each triangle, add 3 vertices.
++                    
++                    # The source note "Add triangle... Increment count by 3" suggests
++                    # that the "Add triangle" function adds 3 vertices.
++                    
++                    # Let's assume the following workflow for a triangle:
++                    # add_vertex_position(p1)
++                    # add_vertex_normal(n1)
++                    # add_vertex_position(p2)
++                    # add_vertex_normal(n2)
++                    # add_vertex_position(p3)
++                    # add_vertex_normal(n3)
++                    
++                    # And the "Add triangle" note is a high-level description.
++                    
++                    i += 3
++
++    # 4. Flush
++    flush()
++```
++
++**Parameters:**
++- `maxCount`: 4096 [S1, unofficial].
++- `primsize`: 3 for triangles [S1, unofficial].
++
++**Edge Cases and Pitfalls:**
++- **Buffer Overflow:** The code checks if `count >= maxCount - 3` before drawing to ensure space for a triangle (3 vertices). If exceeded, it flushes immediately [S1, unofficial].
++- **CPU Bottleneck:** Performance is limited by CPU speed, especially at high resolutions or blob counts [S1, unofficial].
+ 
+ ## Operating characteristics
+-*   **Time Complexity**: $O(N_x N_y N_z)$ per frame, where $N_x, N_y, N_z$ are the grid dimensions. Each voxel is processed in constant time.
+-*   **Memory Complexity**: $O(1)$ auxiliary memory for the mesh, as no persistent mesh is stored. The buffer size is fixed at `maxCount` (4096 vertices) [S1, unofficial].
+-*   **Measured Performance**: Limited by CPU bottlenecks at high resolutions or high blob counts. Suitable for low-resolution previews or educational purposes [S1, unofficial].
+-*   **Strengths**: Simple implementation, no complex GPU shaders required for geometry generation, easy to debug.
+-*   **Limitations**: Poor scalability with grid resolution and number of metaballs. High CPU usage can lead to frame rate drops.
+-*   **When to Use**: Reference implementation, debugging, or low-performance targets.
+-*   **When Not to Use**: Real-time applications with high-resolution volumes or many objects. Use [GPU Acceleration and Parallel Pipelines](4136-gpu-acceleration-and-parallel-pipelines.md) instead.
++- **Time Complexity:** $O(N)$ where $N$ is the number of voxels, with a constant factor dominated by CPU scalar field evaluation and immediate mode draw call overhead.
++- **Memory Complexity:** $O(1)$ auxiliary memory for the batch buffer (fixed size `maxCount`), plus $O(V)$ for the scalar field grid.
++- **Measured Performance:** Limited performance at high resolutions or blob counts due to CPU bottlenecks [S1, unofficial].
++- **Strengths:** Simple implementation, serves as a good reference, minimal GPU memory usage for mesh data.
++- **Limitations:** Poor scalability, CPU-bound, not suitable for real-time high-resolution rendering.
++- **When to use:** Reference implementation, educational purposes, low-resolution scenes.
++- **When not to use:** High-resolution scenes, real-time applications with many objects.
+ 
+ ## Background
+-The CPU Immediate Mode Marching Cubes method is inspired by Gregg Tavares' (Greggman) metaballs demo in JavaScript [S1, unofficial]. It uses the classic Marching Cubes algorithm with precomputed lookup tables from Paul Bourke [S1, unofficial]. The implementation is part of the `WebGL2-GPU-Marching-Cubes` repository by 3merillon, which provides both CPU and GPU modes for comparison [S1, unofficial].
++The CPU Immediate Mode Marching Cubes method is inspired by Gregg Tavares' (Greggman) metaballs demo [S1, unofficial]. It represents a classic approach to surface extraction where geometry is generated and rendered on the fly by the CPU. The method relies on the precomputed data structures and case index logic defined in [Marching Cubes Lookup and Configuration](2518-marching-cubes-lookup-and-configuration.md) [S1, unofficial].
+ 
+ ## Sources

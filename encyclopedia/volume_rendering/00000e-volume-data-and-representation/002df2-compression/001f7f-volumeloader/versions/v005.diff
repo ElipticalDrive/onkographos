@@ -1,0 +1,261 @@
+--- v004.md
++++ v005.md
+@@ -4,35 +4,38 @@
+ 
+ ## Overview
+-VolumeLoader is a generic volumetric data ingestion method that supports various medical imaging formats, handling the loading, optional resampling, and coordinate system alignment of 3D scalar fields [S1, unofficial]. It solves the problem of converting heterogeneous raw storage formats into a unified, device-ready tensor representation suitable for downstream rendering pipelines [S1, unofficial]. It differs from specialized readers like [Raw Volume Data Reader](2259-raw-volume-data-reader.md) or [DICOM Volume Loading and Coordinate Reconstruction](2574-dicom-volume-loading-and-coordinate-reconstruction.md) by providing a high-level, configurable interface that abstracts format-specific parsing (e.g., `.nii`, `.npy`) behind a common API, while offering built-in mechanisms for downscaling and overflow protection [S1, unofficial].
++VolumeLoader is a generic volumetric data ingestion and normalization component that handles loading, optional resampling, and coordinate system alignment for various medical imaging formats [S1, unofficial]. It solves the problem of converting heterogeneous raw volume data into a standardized, device-ready tensor format suitable for downstream rendering or optimization pipelines [S1, unofficial]. Unlike format-specific readers like [Raw Volume Data Reader](2259-raw-volume-data-reader.md) or [DICOM Volume Loading and Coordinate Reconstruction](2574-dicom-volume-loading-and-coordinate-reconstruction.md), VolumeLoader provides a unified interface with configurable storage precision and automatic overflow protection, abstracting the underlying file parsing logic behind a high-level API [S1, unofficial].
+ 
+ ## How it works
+ **Inputs and Outputs:**
+-*   **Input:** File path(s) to volumetric data (supported: `.nii`, `.nii.gz`, `.npy`) [S1, unofficial].
+-*   **Output:** A PyTorch tensor (or equivalent device tensor) containing the normalized volumetric data on the specified device [S1, unofficial].
++*   **Input:** A path to a volumetric data file (supported formats include `.nii`, `.gz`, and `.npy`) [S1, unofficial].
++*   **Output:** A PyTorch tensor (or equivalent device tensor) containing the normalized volume data, with shape determined by `target_shape` or the original dimensions, and dtype determined by `storage_dtype` [S1, unofficial].
+ 
+ **Data Structures:**
+-The method is implemented as a class `VolumeLoader` with the following configuration fields:
+-*   `target_shape`: `Optional[Tuple[int, int, int]]`. The desired output dimensions. If `None`, the original dimensions are preserved [S1, unofficial].
+-*   `device`: `torch.device`. The target device for the output tensor (e.g., `cuda:0`, `cpu`) [S1, unofficial].
+-*   `downscale_factor`: `int`. An integer factor applied to reduce resolution. Volumes are resampled to `(D//factor, H//factor, W//factor)` [S1, unofficial].
+-*   `storage_dtype`: `str`. The data type of the output tensor. Must be one of `{'fp32', 'fp16', 'bf16'}` [S1, unofficial].
+-*   `enable_overflow_guard`: `bool`. When `True`, automatically triggers resampling for very large volumes to prevent downstream failures [S1, unofficial].
++The loader maintains internal state for configuration parameters but does not persist complex data structures during initialization. The primary data structure is the loaded numpy array (for `.npy`) or nibabel image object (for `.nii`/`.gz`) before conversion to the final tensor [S1, unofficial].
++
++**Parameters:**
++*   `target_shape`: Optional tuple `(D, H, W)`. If `None`, the original dimensions are preserved [S1, unofficial].
++*   `device`: The target device for the output tensor (e.g., `cpu`, `cuda`) [S1, unofficial].
++*   `downscale_factor`: Integer factor $f > 1$. If provided, the volume is resampled to $(D//f, H//f, W//f)$ [S1, unofficial].
++*   `storage_dtype`: String specifying the output precision. Must be one of `{'fp32', 'fp16', 'bf16'}` [S1, unofficial].
++*   `enable_overflow_guard`: Boolean. If `True`, automatically resamples volumes exceeding ~16 million voxels to prevent downstream failures [S1, unofficial].
+ 
+ **Steps:**
+-1.  **Initialization:** Validate `storage_dtype`. If it is not in `{'fp32', 'fp16', 'bf16'}`, raise a `ValueError` [S1, unofficial].
+-2.  **Format Detection and Raw Loading:**
+-    *   If the file extension is `.nii` or `.nii.gz`: Load the file using `nibabel` and convert the result to a `float32` NumPy array [S1, unofficial].
+-    *   If the file extension is `.npy`: Load the file using `numpy.load` [S1, unofficial].
+-    *   *Note:* The sources do not specify handling for other formats in the core `VolumeLoader` class, though variants exist for DICOM, VTK, etc. [S1, unofficial].
+-3.  **Overflow Guard Check:** If `enable_overflow_guard` is `True`, check the total voxel count. If the count exceeds approximately 16 million ($1.6 \times 10^7$), set `target_shape` to a downsampled version of the current shape to ensure the volume fits within the limit [S1, unofficial].
++1.  **Initialization:** Validate that `storage_dtype` is in `{'fp32', 'fp16', 'bf16'}`. Raise `ValueError` if invalid [S1, unofficial].
++2.  **File Detection and Loading:**
++    *   If the file extension is `.nii` or `.gz`, load the data using `nibabel` and convert to a `float32` NumPy array [S1, unofficial].
++    *   If the file extension is `.npy`, load the data using `numpy.load` [S1, unofficial].
++    *   *Note:* The source notes mention "Peek raw range" but do not specify a separate peak-reading step distinct from the initial load; the load itself provides the range [S1, unofficial].
++3.  **Overflow Guard Check:** If `enable_overflow_guard` is `True`, check if the total number of voxels $V = D \times H \times W$ exceeds 16,000,000. If $V > 16,000,000$, set `downscale_factor` to a value that reduces $V$ below the threshold (implementation detail: calculate minimal integer factor $f$ such that $V/f^3 \le 16,000,000$) [S1, unofficial].
+ 4.  **Resampling:**
+-    *   If `target_shape` is not `None` (either explicitly set or set by the overflow guard), resample the loaded NumPy array to `target_shape`. The specific interpolation method (e.g., linear, nearest) is not detailed in the sources [S1, unofficial].
+-    *   If `downscale_factor` is provided and greater than 1, apply this factor to the original dimensions to determine the target shape, overriding other shape settings if necessary [S1, unofficial].
+-5.  **Normalization:** The sources indicate that `VolumeLoader` handles loading and alignment, but do not explicitly detail a min-max normalization step within the core `VolumeLoader` class itself, unlike its child [Volume Data Loading and Normalization](2157-volume-data-loading-and-normalization.md) which applies min-subtraction [S1, unofficial]. *Implementation Note [G]:* Standard practice suggests normalizing to $[0, 1]$ or $[-1, 1]$ before device transfer if the renderer expects it. The core `VolumeLoader` as described returns the raw loaded values unless a specific normalization variant is used.
+-6.  **Device Transfer:** Convert the final NumPy array to a tensor and move it to the specified `device` [S1, unofficial].
+-7.  **Type Casting:** Cast the tensor to `storage_dtype` (`fp32`, `fp16`, or `bf16`) [S1, unofficial].
++    *   If `target_shape` is provided, resample the volume to `target_shape`.
++    *   If `downscale_factor` is provided and $> 1$, resample the volume to $(D//f, H//f, W//f)$.
++    *   If neither is provided, keep original dimensions [S1, unofficial].
++5.  **Normalization:** Apply min-subtraction normalization. Let $v_{min}$ be the minimum value in the volume and $v$ be a voxel value. The normalized value $v'$ is:
++    $$ v' = v - v_{min} $$
++    *Note:* The source explicitly states this uses min-subtraction rather than standard min-max scaling to $[0, 1]$ [S1, unofficial].
++6.  **Device Transfer and Casting:** Convert the NumPy array to a tensor on the specified `device`. Cast the tensor to `storage_dtype` [S1, unofficial].
+ 
+ **Pseudocode:**
+-
+ ```python
+ import numpy as np
+@@ -40,90 +43,83 @@
+ import torch
+ 
+-class VolumeLoader:
+-    def __init__(self, target_shape=None, device='cpu', downscale_factor=1, storage_dtype='fp32', enable_overflow_guard=False):
+-        if storage_dtype not in {'fp32', 'fp16', 'bf16'}:
+-            raise ValueError(f"storage_dtype must be one of {{'fp32', 'fp16', 'bf16'}}, got {storage_dtype}")
++def load_volume(file_path, target_shape=None, device='cpu', downscale_factor=None, storage_dtype='fp32', enable_overflow_guard=True):
++    # 1. Validate storage_dtype
++    valid_dtypes = {'fp32', 'fp16', 'bf16'}
++    if storage_dtype not in valid_dtypes:
++        raise ValueError(f"storage_dtype must be one of {valid_dtypes}, got {storage_dtype}")
++
++    # 2. Load data based on extension
++    if file_path.endswith('.nii') or file_path.endswith('.gz'):
++        # Load with nibabel, convert to float32 numpy array
++        img = nib.load(file_path)
++        volume = img.get_fdata().astype(np.float32)
++    elif file_path.endswith('.npy'):
++        # Load with numpy
++        volume = np.load(file_path).astype(np.float32)
++    else:
++        raise ValueError(f"Unsupported file format: {file_path}")
++
++    original_shape = volume.shape
++    D, H, W = original_shape
++    total_voxels = D * H * W
++
++    # 3. Overflow Guard
++    if enable_overflow_guard and total_voxels > 16_000_000:
++        # Calculate minimal downscale factor to fit within 16M voxels
++        # V_new = V_old / f^3 <= 16_000_000 => f >= (V_old / 16_000_000)^(1/3)
++        import math
++        required_factor = math.ceil((total_voxels / 16_000_000) ** (1/3))
++        if downscale_factor is None:
++            downscale_factor = required_factor
++        else:
++            downscale_factor = max(downscale_factor, required_factor)
++
++    # 4. Resampling
++    if target_shape is not None:
++        # Resample to target_shape (implementation depends on library, e.g., scipy.ndimage.zoom)
++        # For the purpose of this article, we assume a generic resample function exists
++        volume = resample_volume(volume, target_shape)
++    elif downscale_factor is not None and downscale_factor > 1:
++        new_shape = (D // downscale_factor, H // downscale_factor, W // downscale_factor)
++        volume = resample_volume(volume, new_shape)
++    
++    # 5. Normalization (Min-subtraction)
++    v_min = np.min(volume)
++    volume = volume - v_min
++
++    # 6. Device Transfer and Casting
++    tensor = torch.from_numpy(volume).to(device)
++    
++    if storage_dtype == 'fp32':
++        tensor = tensor.float()
++    elif storage_dtype == 'fp16':
++        tensor = tensor.half()
++    elif storage_dtype == 'bf16':
++        tensor = tensor.bfloat16()
+         
+-        self.target_shape = target_shape
+-        self.device = device
+-        self.downscale_factor = downscale_factor
+-        self.storage_dtype = storage_dtype
+-        self.enable_overflow_guard = enable_overflow_guard
++    return tensor
++```
+ 
+-    def load(self, filepath):
+-        # Step 2: Format Detection and Raw Loading
+-        if filepath.endswith('.nii') or filepath.endswith('.nii.gz'):
+-            # Load with nibabel and convert to float32 numpy array
+-            nii_img = nib.load(filepath)
+-            data = nii_img.get_fdata().astype(np.float32)
+-        elif filepath.endswith('.npy'):
+-            # Load with numpy
+-            data = np.load(filepath).astype(np.float32)
+-        else:
+-            raise ValueError(f"Unsupported file format: {filepath}")
+-
+-        original_shape = data.shape
+-        total_voxels = np.prod(original_shape)
+-
+-        # Step 3: Overflow Guard Check
+-        if self.enable_overflow_guard and total_voxels > 16_000_000:
+-            # Automatically resample very large volumes
+-            # Calculate downscale factor needed to fit ~16M voxels
+-            # Note: Exact formula not given, assuming uniform scaling
+-            scale = (16_000_000 / total_voxels) ** (1/3)
+-            new_shape = tuple(int(dim * scale) for dim in original_shape)
+-            self.target_shape = new_shape
+-
+-        # Step 4: Resampling
+-        if self.downscale_factor > 1:
+-            self.target_shape = (
+-                original_shape[0] // self.downscale_factor,
+-                original_shape[1] // self.downscale_factor,
+-                original_shape[2] // self.downscale_factor
+-            )
+-
+-        if self.target_shape is not None:
+-            # Resample data to target_shape
+-            # Implementation detail [G]: scipy.ndimage.zoom or similar is typically used
+-            # Here we assume a placeholder function for resampling
+-            data = self._resample(data, self.target_shape)
+-
+-        # Step 6 & 7: Device Transfer and Type Casting
+-        tensor = torch.from_numpy(data).to(self.device)
+-        
+-        dtype_map = {
+-            'fp32': torch.float32,
+-            'fp16': torch.float16,
+-            'bf16': torch.bfloat16
+-        }
+-        tensor = tensor.to(dtype_map[self.storage_dtype])
+-        
+-        return tensor
+-
+-    def _resample(self, data, target_shape):
+-        # Placeholder for resampling logic
+-        # Note: The sources do not provide the specific interpolation algorithm
+-        # A common approach is using scipy.ndimage.zoom
+-        from scipy import ndimage
+-        zoom_factors = [t / s for t, s in zip(target_shape, data.shape)]
+-        return ndimage.zoom(data, zoom_factors)
+-```
++**Edge Cases and Pitfalls:**
++*   **Unsupported Formats:** The loader explicitly supports `.nii`, `.gz`, and `.npy`. Other formats are not handled by this specific class [S1, unofficial].
++*   **Overflow:** Without `enable_overflow_guard`, very large volumes may cause memory errors in downstream operations that cannot handle >16M voxels [S1, unofficial].
++*   **Normalization Scope:** The normalization is min-subtraction only. It does not scale to $[0, 1]$, which may require downstream components to handle unbounded positive values if the original data had a large dynamic range above the minimum [S1, unofficial].
+ 
+ ## Subtopics
+ 
+ ### [Volume Data Loading and Normalization](2157-volume-data-loading-and-normalization.md)
+-This method implements a C++ class for loading 3D and 4D volumetric data from `.npy` files, normalizing the scalar values, and managing frame indices for time-varying volumes. It strictly relies on the NumPy binary format and applies a min-subtraction normalization strategy ($v' = v - v_{min}$) rather than standard min-max scaling to $[0, 1]$. It ingests pre-saved NumPy volume arrays into a rendering pipeline while ensuring consistent data types and value ranges.
++Implements a C++ class for loading 3D and 4D volumetric data from `.npy` files, normalizing scalar values, and managing frame indices for time-varying volumes. It strictly relies on the NumPy binary format and applies a min-subtraction normalization strategy rather than standard min-max scaling to $[0, 1]$. It is chosen when the pipeline requires explicit frame index management for time-series data and strict NumPy compatibility.
+ 
+ ### [Raw Volume Data Reader](2259-raw-volume-data-reader.md)
+-The Raw Volume Data Reader ingests raw binary volume data (typically from CT scanners or specific model formats) into memory, applying domain-specific quantization to reduce precision, and preparing the data for GPU transfer or further processing. It solves the problem of converting high-precision raw sensor data (e.g., 12-bit Hounsfield units) into a format suitable for real-time raycasting or sparse voxel octree construction, often involving thresholding and bit-depth reduction. It differs from generic loaders by embedding specific quantization logic (scaling and thresholding) directly into the loading pipeline rather than treating data as opaque bytes.
++Ingests raw binary volume data (typically from CT scanners) into memory, applying domain-specific quantization to reduce precision, and preparing the data for GPU transfer. It solves the problem of converting high-precision raw sensor data (e.g., 12-bit Hounsfield units) into a format suitable for real-time raycasting or sparse voxel octree construction, often involving thresholding and bit-depth reduction. It differs from generic loaders by embedding specific quantization logic (scaling and thresholding) directly into the loading pipeline rather than treating data as opaque bytes.
+ 
+ ### [DICOM Volume Loading and Coordinate Reconstruction](2574-dicom-volume-loading-and-coordinate-reconstruction.md)
+-This method loads a 3D volumetric dataset from a series of DICOM image files, reconstructs the physical voxel grid by resolving coordinate system conventions, and converts raw pixel values into physical density. It specifically addresses the discrepancy between DICOM's pixel-center coordinate convention and the corner-point convention required by downstream volume rendering engines, while handling the non-cubic nature of medical voxels. It differs from generic volume loaders by explicitly managing DICOM-specific metadata (Rescale Slope/Intercept, Pixel Spacing, Slice Thickness) and orientation flips (rot90) necessary for correct anatomical alignment.
++Loads a 3D volumetric dataset from a series of DICOM image files, reconstructs the physical voxel grid by resolving coordinate system conventions, and converts raw pixel values into physical density. It specifically addresses the discrepancy between DICOM's pixel-center coordinate convention and the corner-point convention required by downstream volume rendering engines, while handling the non-cubic nature of medical voxels. It differs from generic volume loaders by explicitly managing DICOM-specific metadata (Rescale Slope/Intercept, Pixel Spacing, Slice Thickness) and orientation flips (rot90) necessary for correct anatomical alignment.
+ 
+ ### [VTK Volume Loading & Normalization](2620-vtk-volume-loading-normalization.md)
+-This method parses VTK Structured Points files, extracts voxel data, and normalizes scalar values to an 8-bit unsigned integer range $[0, 255]$. It converts arbitrary-precision medical or scientific volume data into a standardized format suitable for GPU-based raycasting or texture upload. It is distinguished from generic loaders by its specific reliance on the VTK Structured Points header format and its mandatory min-max normalization step, unlike [Raw Volume Data Reader](2259-raw-volume-data-reader.md) which assumes raw binary continuity, or [DICOM Volume Loading and Coordinate Reconstruction](2574-dicom-volume-loading-and-coordinate-reconstruction.md) which handles multi-frame DICOM series.
++Parses VTK Structured Points files, extracts voxel data, and normalizes scalar values to an 8-bit unsigned integer range $[0, 255]$. It converts arbitrary-precision medical or scientific volume data into a standardized format suitable for GPU-based raycasting or texture upload. It is distinguished from generic loaders by its specific reliance on the VTK Structured Points header format and its mandatory min-max normalization step, unlike [Raw Volume Data Reader](2259-raw-volume-data-reader.md) which assumes raw binary continuity, or [DICOM Volume Loading and Coordinate Reconstruction](2574-dicom-volume-loading-and-coordinate-reconstruction.md) which handles multi-frame DICOM series.
+ 
+ ### [Volume Loading and Preprocessing](2623-volume-loading-and-preprocessing.md)
+-This method ingests volumetric data from medical imaging formats and raw files, performing normalization, coordinate alignment, and memory preparation for downstream rendering. It distinguishes itself by combining MONAI-based tensor pipelines for spacing and intensity scaling with brick-based out-of-core loading that includes thread-level pre-processing and empty-brick optimization.
++Handles the ingestion, coordinate alignment, and intensity normalization of volumetric data, specifically targeting medical imaging formats like CT scans. It solves the problem of converting raw, device-specific metadata (such as IJK-to-RAS affine transforms) into a standardized, GPU-ready tensor format. It differs from [Raw Volume Data Reader](2259-raw-volume-data-reader.md) by handling structured medical metadata and from [DICOM Volume Loading and Coordinate Reconstruction](2574-dicom-volume-loading-and-coordinate-reconstruction.md) by focusing on the post-loading transform application and intensity scaling rather than the initial file parsing and geometry extraction.
+ 
+ ### [SOG Volume Reader](3580-sog-volume-reader.md)
+@@ -131,22 +127,32 @@
+ 
+ ### AVS FLD Volume Loader
+-Parses legacy AVS FLD format to extract 3D scalar volume data and dimensions [S2, unofficial]. It reads the first 16 bytes to verify the magic string `# AVS field file`, scans for the `\f` byte to determine header length, and decodes header key-value pairs using regex `\s*=\s*|\s*#\s*` [S2, unofficial]. It validates that `ndim == 3`, `veclen == 1`, and `data == "uniform"` [S2, unofficial]. It maps data types `"byte"` to 1 and `"short"` to 2, reads `dim_x * dim_y * dim_z * data_type` bytes, unpacks them using `struct` (`'B'` for type 1, `'H'` for type 2), and reshapes to `(dim_x, dim_y, dim_z)` with Fortran order [S2, unofficial]. Pitfall: Only data types 1 (byte) and 2 (short) are supported; other types raise an exception [S2, unofficial].
++Parses legacy AVS FLD format to extract 3D scalar volume data and dimensions [S2, unofficial]. It reads the first 16 bytes to verify the magic string "# AVS field file", scans for the `\f` byte to determine header length, and decodes header key-value pairs using regex splitting [S2, unofficial]. It validates that `ndim == 3`, `veclen == 1`, and `data == "uniform"`, then maps data types ("byte" to 1, "short" to 2) and unpacks the data using Fortran column-major order [S2, unofficial]. Pitfall: Only data types 1 (byte) and 2 (short) are supported; other types raise an exception [S2, unofficial].
+ 
+ ### DICOM Node
+-A node that loads DICOM data, handles mesh escalation to match stored scale, interpolates voxel values, and applies jittering to improve quality during ray casting with few steps [S3, unofficial]. It escalates the mesh according to DICOM data specifications to ensure visualization scale matches storage scale [S3, unofficial]. It considers three different types of data based on the number of bytes in which the data was stored [S3, unofficial]. It interpolates the value between the nearest voxels to improve quality [S3, unofficial]. It applies jittering to improve quality when working with low quality (very few steps in the Ray Casting iteration) by making rays not start at the same distance every time [S3, unofficial]. Parameter: Node color is Grey if empty, Orange if a DICOM file is uploaded [S3, unofficial].
++A node that loads DICOM data, handles mesh escalation to match stored scale, interpolates voxel values, and applies jittering to improve quality during ray casting with few steps [S3, unofficial]. It escalates the mesh according to DICOM data specifications, considers three different types of data based on storage byte count, interpolates values between nearest voxels, and applies jittering (varying ray start distances) to improve quality in low-step scenarios [S3, unofficial]. Parameter: Node color is Grey if empty, Orange if a DICOM file is uploaded [S3, unofficial].
+ 
+ ### NeXus to NRRD/NPZ Conversion
+-A method to load volume data from a NeXus HDF5 file, handling NXdata groups and axis attributes, and save it as NRRD or NPZ format with normalized float32 data and spatial metadata [S4, unofficial]. It opens the NeXus file using `h5py.File(nxs)` [S4, unofficial]. If volume is None (not NXdata or signal not found), it loads `volume = g[data_name][...]` [S4, unofficial]. It returns `vol_data` containing `'volume'` and optionally `'axes'` [S4, unofficial]. For saving as NRRD, it extracts spacings `= [ np.round(i[1]-i[0],15) for i in axes.values() ]` and origin `= [ np.round(i[0],15) for i in axes.values() ]` [S4, unofficial]. It creates an NRRD header with `space="right-anterior-superior"`, `labels=list(axes.keys())`, `spacings=spacings`, and `space origin=origin` [S4, unofficial]. Parameters: `group` (default `"processed/reciprocal_space"`), `data_name` (default `"volume"`), `out_dtype` (default `np.float32`) [S4, unofficial]. Pitfall: If `v_max` equals `v_min` during normalization, division by zero occurs; the code does not handle this, potentially resulting in NaN values [S4, unofficial].
++A method to load volume data from a NeXus HDF5 file, handling NXdata groups and axis attributes, and save it as NRRD or NPZ format with normalized float32 data and spatial metadata [S4, unofficial]. It opens the NeXus file using `h5py`, loads the volume from the specified group (default "processed/reciprocal_space") and data name (default "volume"), and extracts spacings and origin for NRRD headers [S4, unofficial]. Pitfall: If $v_{max}$ equals $v_{min}$ during normalization, division by zero occurs, potentially resulting in NaN values [S4, unofficial].
+ 
+ ## Operating characteristics
+-*   **Time Complexity:** Dominated by I/O and format-specific parsing (e.g., `nibabel` for NIfTI, `numpy` for `.npy`). Resampling adds a factor proportional to the number of voxels and the interpolation kernel size.
+-*   **Memory Complexity:** Proportional to the size of the loaded volume in `storage_dtype`. The `enable_overflow_guard` feature mitigates memory spikes by reducing the target shape for very large inputs.
+-*   **Strengths:** High-level abstraction for common medical formats; built-in protection against out-of-memory errors for extremely large volumes; flexible output data types (`fp16`, `bf16`) for GPU efficiency.
+-*   **Limitations:** Limited to specific formats (NIfTI, NPY) in the core class; lacks explicit normalization logic in the base class (requires variant or post-processing); does not handle coordinate system reconstruction natively (requires variant or external step).
+-*   **When to use:** When a quick, robust loader for NIfTI/NPY volumes is needed for prototyping or when memory constraints require automatic downscaling.
+-*   **When not to use:** When specific medical coordinate systems (DICOM) or legacy formats (AVS FLD, SOG) are required; use the specific variants instead.
++**Time and Memory Complexity:**
++*   **Time:** Dominated by file I/O and initial parsing. Resampling adds a complexity proportional to the number of voxels in the output grid. Normalization is linear $O(N)$ where $N$ is the number of voxels [S1, unofficial].
++*   **Memory:** Requires memory proportional to the size of the loaded volume in `float32` (or `storage_dtype`) during the loading and normalization phase. The overflow guard mitigates memory exhaustion for very large inputs by reducing the grid size before full allocation [S1, unofficial].
++
++**Measured Performance:**
++Not given in the sources.
++
++**Scaling:**
++Scales with the resolution of the input volume. The `downscale_factor` and `enable_overflow_guard` parameters allow the method to handle arbitrarily large source files by reducing the effective resolution to fit within memory constraints (specifically ~16M voxels) [S1, unofficial].
++
++**Strengths and Limitations:**
++*   **Strengths:** Unified interface for multiple formats (NIfTI, NumPy); automatic overflow protection; configurable output precision (fp16/bf16) for GPU efficiency; simple min-subtraction normalization [S1, unofficial].
++*   **Limitations:** Limited format support (no native DICOM or VTK parsing in the core class); normalization does not standardize range to $[0, 1]$; resampling implementation details are abstracted [S1, unofficial].
++
++**When to use it and when not:**
++Use when the input data is in NIfTI or NumPy format and a simple, robust loader with overflow protection is needed. Do not use when specific medical metadata (DICOM tags, affine transforms) or other formats (VTK, AVS) are required; use the specialized subtopics instead [S1, S2, S3, S4, unofficial].
+ 
+ ## Background
+-VolumeLoader originates from the `vgs` project (Valentin Kraft), an unofficial implementation of volumetric graphics tools [S1, unofficial]. It is designed to integrate with modern deep learning and rendering pipelines that require flexible input handling for 3D data.
++VolumeLoader originates from the `vgs` project by Valentin Kraft, an unofficial repository focused on volumetric graphics and optimization [S1, unofficial]. It was developed to provide a standardized data ingestion layer for training and rendering pipelines that handle medical imaging data, addressing the variability in file formats and precision requirements [S1, unofficial].
+ 
+ ## Sources

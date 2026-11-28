@@ -1,0 +1,2982 @@
+### buffersCreateDelete.h
+```
+/********************************************************************* 
+ * Copyrights (c) Marwan Abdellah. All rights reserved.  
+ * This code is part of my Master's Thesis Project entitled "High 
+ * Performance Fourier Volume Rendering on Graphics Processing Units 
+ * (GPUs)" and submitted to the Systems & Biomedical Engineering 
+ * Department, Faculty of Engineering, Cairo University. 
+ * Please, don't use or distribute without authors' permission. 
+ 
+ * File			: fourierVolumeRenderer.h
+ * Author(s)	: Marwan Abdellah <abdellah.marwan@gmail.com> 
+ * Created		: April 2011
+ * Description	: Main header file for the project. 
+ * Note(s)		: 
+ *********************************************************************/ 
+
+#include "fourierVolumeRenderer.h"
+
+// Creating Extracted Projection-Slice Input Texture to CUDA 
+void CreateTextureSrc(GLuint* fTextureID, unsigned int sizeX, unsigned int sizeY)
+{
+	// Generating Texture ID 
+	glGenTextures(1, fTextureID);
+	
+	// Binding Texture 
+	glBindTexture(GL_TEXTURE_2D, *fTextureID);
+	
+	// Texture Parameters 
+	glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_S, GL_CLAMP_TO_EDGE);
+	glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_T, GL_CLAMP_TO_EDGE);
+	
+	glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MIN_FILTER, GL_LINEAR);
+	glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MAG_FILTER, GL_LINEAR);
+	
+	// Allocate 2D 2-Component Texture on the GPU 
+	glTexImage2D(GL_TEXTURE_2D, 0, RG32F, sizeX, sizeY, 0, RG, GL_FLOAT, NULL);
+
+	// Check for CUDA / OpenGL Errors
+	// CUT_CHECK_ERROR_GL2(); 
+
+	// Register Texture with CUDA
+	cudaGraphicsGLRegisterImage
+	(&CUDASliceResourceBuffer, *fTextureID, GL_TEXTURE_2D, cudaGraphicsMapFlagsReadOnly);              
+}  
+
+// Create Destination Texture to Render the Image to
+void CreateTextureDst(GLuint* fTextureID, unsigned int sizeX, unsigned int sizeY)
+{
+	// Getting Texture ID 
+	glGenTextures(1, fTextureID);
+	
+	// Binding Texture 
+	glBindTexture(GL_TEXTURE_2D, *fTextureID);
+	
+	// Texture Parameters 
+	glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_S, GL_CLAMP_TO_EDGE);
+	glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_T, GL_CLAMP_TO_EDGE);
+	
+	glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MIN_FILTER, GL_LINEAR);
+	glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MAG_FILTER, GL_LINEAR);
+
+	// Allocating Texture on the GPU (OpenGL Side)
+	glTexImage2D(GL_TEXTURE_2D, 0, GL_LUMINANCE, sizeX, sizeY, 0, GL_LUMINANCE, GL_FLOAT, NULL);
+    	
+	// Check OpenGL/CUDA Errors
+	// CUT_CHECK_ERROR_GL2();
+
+	// Registering Texture with CUDA
+	cudaGraphicsGLRegisterImage
+	(&CUDA_ResultingTextureBufferResource, *fTextureID, GL_TEXTURE_2D, cudaGraphicsMapFlagsWriteDiscard);
+}
+
+// Create Destination Texture for the 3D Spectral Volume 
+void CreateVolumeTextureDst(GLuint* fTextureID, unsigned int sizeX, unsigned int sizeY)
+{	
+	// Getting Texture ID 
+	glGenTextures(1, fTextureID);
+	
+	// Binding Texture 
+	glBindTexture(GL_TEXTURE_3D, *fTextureID);
+	
+	// Texture Parameters (Wrapping)
+	glTexParameteri(GL_TEXTURE_3D, GL_TEXTURE_WRAP_S, GL_REPEAT);
+	glTexParameteri(GL_TEXTURE_3D, GL_TEXTURE_WRAP_T, GL_REPEAT);
+	glTexParameteri(GL_TEXTURE_3D, GL_TEXTURE_WRAP_R, GL_REPEAT);
+	
+	// Texture Parameters (Interpolation)
+	glTexParameteri(GL_TEXTURE_3D, GL_TEXTURE_MAG_FILTER, GL_LINEAR);
+	glTexParameteri(GL_TEXTURE_3D, GL_TEXTURE_MIN_FILTER, GL_LINEAR);
+	
+	// For Automatic Texture Coordinate Generation
+	glTexGeni(GL_S, GL_TEXTURE_GEN_MODE, GL_EYE_LINEAR);
+	glTexGeni(GL_T, GL_TEXTURE_GEN_MODE, GL_EYE_LINEAR);
+	glTexGeni(GL_R, GL_TEXTURE_GEN_MODE, GL_EYE_LINEAR);
+
+	// Allocating Texture on the GPU (OpenGL Side)
+	glTexImage3D(GL_TEXTURE_3D, 0, RG32F, mVolWidth, mVolHeight, mVolDepth, 0, RG, GL_FLOAT, NULL);
+    	
+	// Check OpenGL/CUDA Errors
+	// CUT_CHECK_ERROR_GL2();
+
+	// Registering Texture with CUDA
+	//cudaGraphicsGLRegisterImage
+	//(&CUDA_VolumeTextureBufferResource, *fTextureID, GL_TEXTURE_3D, cudaGraphicsMapFlagsWriteDiscard);
+}
+
+// Creating cuFFT Buffers on CUDA 
+void CreateBuffersFFT()
+{
+	cutilSafeCall(cudaMalloc((void**)&cuFFT_Input, sizeof(cufftComplex) * mSliceWidth * mSliceHeight));
+	cutilSafeCall(cudaMalloc((void**)&cuFFT_Output, sizeof(cufftComplex) * mSliceWidth * mSliceHeight));
+	cutilSafeCall(cudaMalloc((void**)&TempArray, sizeof(float) * mSliceWidth * mSliceHeight));
+}
+
+// Deleting Texture
+void DeleteTexture(GLuint* fTextureID)
+{
+	glDeleteTextures(1, fTextureID);
+	// CUT_CHECK_ERROR_GL2();
+	*fTextureID = 0;
+}
+
+
+void CreateFrameBuffer(GLuint* fFBO_ID, GLuint fColor)
+{
+	// Get FBO ID
+	glGenFramebuffersEXT(1, fFBO_ID);
+	
+	// Bind FBO
+	glBindFramebufferEXT(GL_FRAMEBUFFER_EXT, *fFBO_ID);
+
+	// Attach Images
+	glFramebufferTexture2DEXT(GL_FRAMEBUFFER_EXT, GL_COLOR_ATTACHMENT0_EXT, GL_TEXTURE_2D, fColor, 0);
+	
+	// Unbind that FrameBuffer  
+	glBindFramebufferEXT(GL_FRAMEBUFFER_EXT, 0);
+	
+	// Check OpenGL/CUDA Errors 
+	// CUT_CHECK_ERROR_GL2();
+}
+
+void DeleteFrameBuffer(GLuint* fFBO_ID)
+{
+	glDeleteFramebuffersEXT(1, fFBO_ID);
+	// CUT_CHECK_ERROR_GL2();
+	*fFBO_ID = 0;
+}
+
+// OpenGL Buffers Initialization 
+void InitOpenGLBuffers()
+{
+	// Create PBO
+	CreatePBO(&PBODestinationBuffer, &CUDA_PBODestinationBufferResource); 
+	
+	// Create Texture that will Receive the Result of CUDA
+	CreateTextureDst(&ImgTextureID, mImageWidth, mImageHeight);
+
+	// Create Texture for Blitting onto the Screen
+	CreateTextureSrc(&SliceTextureID, mImageWidth, mImageHeight);
+	
+	// Create CUDA FFT Arrays on the GPU
+	CreateBuffersFFT(); 
+
+	// Create a FrameBuffer for Off-Screen Rendering
+	CreateFrameBuffer(&FrameBufferID, SliceTextureID);
+
+	// Check OpenGL/CUDA Errors 
+    // CUT_CHECK_ERROR_GL2();
+}
+
+// Creating PBO
+void CreatePBO(GLuint* fPBO, struct cudaGraphicsResource **fPBO_Resource)
+{
+	// Setup Fragment Data Parameters
+	mNumTexels = mWindowWidth * mWindowHeight;
+	mNumValues = mNumTexels * 1;
+	mSizeTextureData = sizeof(float) * mNumValues;
+	void *data = malloc(mSizeTextureData);
+
+	// Create Buffer Object
+	glGenBuffers(1, fPBO);
+	glBindBuffer(GL_ARRAY_BUFFER, *fPBO);
+	glBufferData(GL_ARRAY_BUFFER, mSizeTextureData, data, GL_DYNAMIC_DRAW);
+	free(data);
+
+	// Release Buffer
+	glBindBuffer(GL_ARRAY_BUFFER, 0);
+
+	// Register this Buffer Object with CUDA
+	cutilSafeCall(cudaGraphicsGLRegisterBuffer(fPBO_Resource, *fPBO, cudaGraphicsMapFlagsNone));
+	// CUT_CHECK_ERROR_GL2();
+}
+
+// Deleting PBO
+void DeletePBO(GLuint* fPBO)
+{
+	// Delete the Buffer 
+	glDeleteBuffers(1, fPBO);
+	
+	// Check OpenGL/CUDA Errors 
+	// CUT_CHECK_ERROR_GL2();
+	
+	// No Dangling Pointers 
+	*fPBO = 0;
+}
+```
+
+### contextCUDA.h
+```
+/********************************************************************* 
+ * Copyrights (c) Marwan Abdellah. All rights reserved.  
+ * This code is part of my Master's Thesis Project entitled "High 
+ * Performance Fourier Volume Rendering on Graphics Processing Units 
+ * (GPUs)" and submitted to the Systems & Biomedical Engineering
+ * Department, Faculty of Engineering, Cairo University. 
+ * Please, don't use or distribute without authors' permission. 
+ 
+ * File			: contextCUDA.h
+ * Author(s)	: Marwan Abdellah <abdellah.marwan@gmail.com> 
+ * Created		: April 2011
+ * Description	: 
+ * Note(s)		: 
+ *********************************************************************/ 
+
+#include "fourierVolumeRenderer.h"
+
+/********************************************************************
+ * Name: 
+ * InitCUDAContext
+ *
+ * Description: 
+ * Initializing CUDA/OpenGL contexts and setting them to the device "GPU" .    
+ *
+ * Formal Parameters:
+ * argc (int) : Number of arguments, 
+ * argv (char **) : Arguments' strings, 
+ * UseGL (bool) : Using OpenGL or not.  
+ *
+ * Returns:
+ * (bool) : If correct initialization.  
+ * 
+ * Note(s):
+ ********************************************************************/
+bool InitCUDAContext(int argc, char **argv, bool UseGL)
+{
+    if (UseGL)
+    {
+        if (cutCheckCmdLineFlag(argc, (const char **)argv, "device"))
+            cutilGLDeviceInit(argc, argv);
+        else 
+            cudaGLSetGLDevice (cutGetMaxGflopsDeviceId());
+    } 
+    else 
+    {
+        if (cutCheckCmdLineFlag(argc, (const char **)argv, "device"))
+            cutilDeviceInit(argc, argv);
+        else 
+            cudaSetDevice (cutGetMaxGflopsDeviceId());
+    }
+
+	return true;
+}
+
+/********************************************************************
+ * Name: 
+ * TransferSliceToCUDA
+ *
+ * Description: 
+ * Processing slice on CUDA.    
+ *
+ * Formal Parameters:
+ * fImgWidth (int) : Projection slice width, 
+ * fImgHeight (int) : Projection slice height. 
+ *
+ * Returns:
+ * void.  
+ * 
+ * Note(s):
+ ********************************************************************/
+void TransferSliceToCUDA(int fImgWidth, int fImgHeight)
+{
+    /* Extracted projection-slice from 3D spectrum texture is sent to CUDA 
+	 * for processing */
+    cudaArray *fExtractedTextureSlice; 
+    
+    /* Reconstructed image after CUDA processing & inverse cuFFT 2D */ 
+    float* fReconstructedImage;
+    
+    /* Reservation - Linking PBO to CUDA Context */ 
+    cutilSafeCall(cudaGraphicsMapResources(1, &CUDA_PBODestinationBufferResource, 0));    
+    
+    /* Size (in bytes) for the reconstructed image at which PBO size 
+	 * shall be allocated */ 
+    size_t fSizeRecImageBytes; 
+    
+    /* Actual mapping - map the reconstructed image from CUDA context 
+	 * to the PBO destination resource that be accessed by OpenGL to 
+	 * render the texture */ 
+    cutilSafeCall
+    (cudaGraphicsResourceGetMappedPointer
+    ((void **) &fReconstructedImage, &fSizeRecImageBytes, CUDA_PBODestinationBufferResource));
+
+    /* Reservation - linking slice texture to CUDA context */ 
+    /* Map buffer objects to get CUDA device pointers */ 
+    cutilSafeCall
+    (cudaGraphicsMapResources(1, &CUDASliceResourceBuffer, 0));
+    
+    /* Link extracted slice from OpenGL context to CUDA context */  
+    cutilSafeCall
+    (cudaGraphicsSubResourceGetMappedArray(&fExtractedTextureSlice, CUDASliceResourceBuffer, 0, 0));
+
+    /* Block size */ 
+    dim3 block(16, 16, 1);
+    
+    /* Grid size */ 
+    dim3 grid(fImgWidth / block.x, fImgHeight / block.y, 1); 
+
+    /* Execute CUDA kernel on the extratced projection-slice */ 
+	LaunchProcessingCUDA(grid, block, fExtractedTextureSlice, fReconstructedImage, fImgWidth, fImgHeight, cuFFT_Input, cuFFT_Output, TempArray, mScaleFactor);
+    
+    /* Unlink all buffers connected to CUDA contexts to be used by OpenGL */ 
+    cudaGraphicsUnmapResources(1, &CUDASliceResourceBuffer, 0);
+    cudaGraphicsUnmapResources(1, &CUDA_PBODestinationBufferResource, 0);
+}
+
+/********************************************************************
+ * Name: 
+ * TransferSliceToCUDA
+ *
+ * Description: 
+ * Copy image & process it on CUDA device .    
+ *
+ * Formal Parameters:
+ * void. 
+ *
+ * Returns:
+ * void.  
+ * 
+ * Note(s):
+ ********************************************************************/
+// 
+void ProcessSlice()
+{
+    /* Run the CUDA kernel */ 
+    TransferSliceToCUDA(mImageWidth, mImageHeight);
+	
+    /* Bind image to PBO */ 
+    glBindBuffer(GL_PIXEL_UNPACK_BUFFER_ARB, PBODestinationBuffer);
+
+    /* Bind texture image to buffer */ 
+    glBindTexture(GL_TEXTURE_2D, ImgTextureID);
+
+    // Replace the old image with the new reconstructed one
+    glTexSubImage2D(GL_TEXTURE_2D, 0, 0, 0, mImageWidth, mImageHeight, GL_LUMINANCE, GL_FLOAT, NULL);
+
+    // Ceck for OpenGL/CUDA Errors
+    // CUT_CHECK_ERROR_GL();
+
+    /* Release buffers */ 
+    glBindBuffer(GL_PIXEL_PACK_BUFFER_ARB, 0);
+    glBindBuffer(GL_PIXEL_UNPACK_BUFFER_ARB, 0);
+}
+```
+
+### contextClean.h
+```
+/********************************************************************* 
+ * Copyrights (c) Marwan Abdellah. All rights reserved.  
+ * This code is part of my Master's Thesis Project entitled "High 
+ * Performance Fourier Volume Rendering on Graphics Processing Units 
+ * (GPUs)" and submitted to the Systems & Biomedical Engineering
+ * Department, Faculty of Engineering, Cairo University. 
+ * Please, don't use or distribute without authors' permission. 
+ 
+ * File			: contextClean.h
+ * Author(s)	: Marwan Abdellah <abdellah.marwan@gmail.com> 
+ * Created		: April 2011
+ * Description	: 
+ * Note(s)		: 
+ *********************************************************************/  
+
+#include "fourierVolumeRenderer.h"
+
+/********************************************************************
+ * Name: 
+ * CleanUp
+ *
+ * Description: 
+ * Cleanning context stuff and exit contexts safely.    
+ *
+ * Formal Parameters:
+ * iExitCode (int) : Exit code. 
+ *
+ * Returns:
+ * void. 
+ * 
+ * Note(s):
+ ********************************************************************/
+void CleanUp(int iExitCode)
+{
+	/* Releasing CUDA timer */  
+	cutilCheckError(cutDeleteTimer(mTimer));
+
+	/* Unregister buffer object with CUDA */ 
+	cutilSafeCall(cudaGraphicsUnregisterResource(CUDASliceResourceBuffer));
+	cutilSafeCall(cudaGraphicsUnregisterResource(CUDA_PBODestinationBufferResource));
+	
+	/* Delete all OpenGL buffers */ 
+	DeletePBO(&PBODestinationBuffer);
+	DeleteTexture(&SliceTextureID);
+	DeleteTexture(&ImgTextureID);
+	DeleteFrameBuffer(&FrameBufferID);
+	
+	/* Exitting CUDA context safely */ 
+	cudaThreadExit();
+	
+	/* Destroy GLUT window if still exisiting */ 
+	if(iGLUTWindowHandle)
+		glutDestroyWindow(iGLUTWindowHandle);
+
+	/* Exiting */
+	exit (iExitCode);
+}
+```
+
+### contextOpenGL.h
+```
+/********************************************************************* 
+ * Copyrights (c) Marwan Abdellah. All rights reserved.  
+ * This code is part of my Master's Thesis Project entitled "High 
+ * Performance Fourier Volume Rendering on Graphics Processing Units 
+ * (GPUs)" and submitted to the Systems & Biomedical Engineering
+ * Department, Faculty of Engineering, Cairo University. 
+ * Please, don't use or distribute without authors' permission. 
+ 
+ * File			: contextOpenGL.h
+ * Author(s)	: Marwan Abdellah <abdellah.marwan@gmail.com> 
+ * Created		: April 2011
+ * Description	: 
+ * Note(s)		: 
+ *********************************************************************/  
+
+#include "fourierVolumeRenderer.h"
+
+/* Debugging */
+// #define _DEBUG_ALL_ 
+
+
+float mImageScale = 2; 
+
+/********************************************************************
+ * Name: 
+ * InitOpenGLContext
+ *
+ * Description: 
+ * OpenGL context initialization 
+ * 
+ * Formal Parameters:
+ * argc (int) : Number of inout arguments, 
+ * argv size (char*) : Arguments. 
+ *
+ * Returns:
+ * (bool) : True if initialization was valid. 
+ * 
+ * Note(s):
+ ********************************************************************/ 
+bool InitOpenGLContext(int *argc, char **argv )
+{
+	printf("--------------------------- \n");
+	printf("Creating OpenGL Context ... \n");
+	printf("--------------------------- \n");
+
+	if (IsOpenGLAvailable(sSDKname)) 
+		printf("    OpenGL Device is Available & Ready for Usage \n");
+	else 
+	{
+		printf("    OpenGL Device is NOT Available, Exiting \n\n");
+		return false;
+	}
+
+	/* GLUT initialization */
+	glutInit(argc, argv);
+	glutInitDisplayMode(GLUT_RGBA | GLUT_DOUBLE);
+	glutInitWindowSize(mWindowWidth, mWindowHeight);
+
+	/* GLUT window creation */  
+	iGLUTWindowHandle = glutCreateWindow(" Fourier Volume Rendering on CUDA");
+
+	printf("    GLUT Initialized Successfully \n");
+	printf("    GLUT Double Buffering \n");
+	printf("    GLUT Window Dimensions = [%d] x [%d] Pixels \n\n", mWindowWidth, mWindowHeight);
+	
+	/* Initialize necessary OpenGL extensions via GLEW library */ 
+	glewInit();
+
+	printf("    GLEW Initialized Successfully \n");
+	
+	/* Required OpenGL extensions*/
+	if (! glewIsSupported("GL_VERSION_2_0 " 
+						  "GL_ARB_pixel_buffer_object " 
+						  "GL_EXT_framebuffer_object "))
+	{
+		printf("    ERROR: Support for Necessary OpenGL Extensions Missing \n\n");
+		fflush(stderr);
+		return CUTFalse;
+	}
+	
+	return CUTTrue;
+}
+
+/********************************************************************
+ * Name: 
+ * ExtractSlice
+ *
+ * Description: 
+ * Extract projection-slice from OpenGL 3D spectral texture. This 
+ * function runs in the off-screen OpenGL context.
+ * 
+ * Formal Parameters:
+ * void. 
+ *
+ * Returns:
+ * void. 
+ * 
+ * Note(s): 
+ ********************************************************************/
+void ExtractSlice()
+{
+#ifdef _DEBUG_ALL_
+	printf("Extracting Central Slice from the 3D Spectrum \n");
+#endif
+
+	/* Clear buffer */ 
+	glClear(GL_COLOR_BUFFER_BIT);
+
+	/* Enable 3D texturing */ 
+	glEnable(GL_TEXTURE_3D);
+
+	/* Replacing the old projection-slice */ 
+	glTexEnvf(GL_TEXTURE_ENV, GL_TEXTURE_ENV_MODE, GL_REPLACE);
+	
+	/* Bind the 3D spectral texture */
+	glBindTexture(GL_TEXTURE_3D, mVolTexureID);
+	
+	/* Adjust OpenGL view-port - Marawanism :) */
+	glViewport(-(mUniDim / 2),-(mUniDim / 2),(mUniDim * 2),(mUniDim * 2));
+	
+	/* Texture corrdinate generation */ 
+	glEnable(GL_TEXTURE_GEN_S);
+	glEnable(GL_TEXTURE_GEN_T);
+	glEnable(GL_TEXTURE_GEN_R);
+	
+	/* Loading identity to projection matrix */ 
+	glMatrixMode(GL_PROJECTION);
+	glLoadIdentity();
+
+	/* Loading identity to model-view matrix */
+	glMatrixMode(GL_MODELVIEW);
+	glLoadIdentity();
+
+	/* Define the main six clip planes */
+	static GLdouble eqx0[4] = { 1.0, 0.0, 0.0, 0.0};
+	static GLdouble eqx1[4] = {-1.0, 0.0, 0.0, 1.0};
+	static GLdouble eqy0[4] = {0.0,  1.0, 0.0, 0.0};
+	static GLdouble eqy1[4] = {0.0, -1.0, 0.0, 1.0};
+	static GLdouble eqz0[4] = {0.0, 0.0,  1.0, 0.0};
+	static GLdouble eqz1[4] = {0.0, 0.0, -1.0, 1.0};
+
+	/* Automatic texture coordinate generation */
+	static GLfloat x[] = {1.0, 0.0, 0.0, 0.0};
+	static GLfloat y[] = {0.0, 1.0, 0.0, 0.0};
+	static GLfloat z[] = {0.0, 0.0, 1.0, 0.0};
+
+	/* Saving scene state */ 
+	glPushMatrix ();
+	
+	 
+	/* Transform (Rotation Only) the Viewing Direction
+	 * We don't need except the - 0.5 translation in each dimension to adjust 
+	 * the Texture in the center of the scene i.e. (3D k-space)
+	 */ 
+	glRotatef(-mXrot, 0.0, 0.0, 1.0);
+	glRotatef(-mYrot, 0.0, 1.0, 0.0);
+	glRotatef(-mZrot, 1.0, 0.0, 0.0);
+	glTranslatef(-0.5, -0.5, -0.5);
+	
+	/* Automatic texture coordinates generation */
+	glTexGenfv(GL_S, GL_EYE_PLANE, x);
+	glTexGenfv(GL_T, GL_EYE_PLANE, y);
+	glTexGenfv(GL_R, GL_EYE_PLANE, z);
+
+	/* Define the main six clip planes */
+	glClipPlane(GL_CLIP_PLANE0, eqx0);
+	glClipPlane(GL_CLIP_PLANE1, eqx1);
+	glClipPlane(GL_CLIP_PLANE2, eqy0);
+	glClipPlane(GL_CLIP_PLANE3, eqy1);
+	glClipPlane(GL_CLIP_PLANE4, eqz0);
+	glClipPlane(GL_CLIP_PLANE5, eqz1);
+
+	/* Restore the State */ 
+	glPopMatrix ();
+
+	/* Enable Clip Planes */
+	glEnable(GL_CLIP_PLANE0);
+	glEnable(GL_CLIP_PLANE1);
+	glEnable(GL_CLIP_PLANE2);
+	glEnable(GL_CLIP_PLANE3);
+	glEnable(GL_CLIP_PLANE4);
+	glEnable(GL_CLIP_PLANE5);
+
+	/* Render enclosing rectangle at (0,0) that represents the 
+	 * extracted projection-slice */
+	glCallList(mDiaplayList);
+	glPopMatrix();  
+
+	/* Disable texturing */  
+	glDisable(GL_TEXTURE_3D);
+	glDisable(GL_TEXTURE_GEN_S);
+	glDisable(GL_TEXTURE_GEN_T);
+	glDisable(GL_TEXTURE_GEN_R);
+	
+	/* Unloading clip-planes */ 
+	glDisable(GL_CLIP_PLANE0);
+	glDisable(GL_CLIP_PLANE1);
+	glDisable(GL_CLIP_PLANE2);
+	glDisable(GL_CLIP_PLANE3);
+	glDisable(GL_CLIP_PLANE4);
+	glDisable(GL_CLIP_PLANE5);
+	
+	/* Unbind 3D spectral texture texture */  
+	glBindTexture(GL_TEXTURE_3D, 0);
+
+#ifdef _DEBUG_ALL_
+	printf("    Central Slice Extracted Successfully \n"); 
+#endif
+}
+
+/********************************************************************
+ * Name: 
+ * DisplayGLImage
+ *
+ * Description: 
+ * Display reconstructed image as Textured Quad.
+ * 
+ * Formal Parameters:
+ * fTexture (GLuint) : Texture ID. 
+ *
+ * Returns:
+ * void. 
+ * 
+ * Note(s): 
+ ********************************************************************/
+// 
+void DisplayGLImage(GLuint fTexture)
+{
+	/* Clearing color buffer */ 	
+	glClear(GL_COLOR_BUFFER_BIT);
+
+	/* Bind Texture to Target */
+	glBindTexture(GL_TEXTURE_2D, fTexture);
+	
+	/* Enable texturing */ 
+	glEnable(GL_TEXTURE_2D);
+	
+	/* Diable depth buffering & lighting */ 
+	glDisable(GL_DEPTH_TEST);
+	glDisable(GL_LIGHTING);
+	
+	/* Replace the old image with the new one */ 
+	glTexEnvf(GL_TEXTURE_ENV, GL_TEXTURE_ENV_MODE, GL_REPLACE);
+
+	/* Adjust OpenGL viewport again */
+	glViewport(0, 0, mWindowWidth, mWindowWidth); 
+
+	/* Loading identity to projection matrix */ 
+	glMatrixMode(GL_PROJECTION);
+	glLoadIdentity();
+	
+	/* Loading identity to model-view matrix */
+	glMatrixMode(GL_MODELVIEW);
+	glLoadIdentity();
+	
+	/* Saving state */
+	glPushMatrix ();
+
+	/* Scale the reconstructed image to fit on the GLUT window */
+	glScalef(mImageScale, mImageScale, 1); 
+	glTranslatef(-0.5, -0.5, 0.0);
+	
+	/* Plot or map the reconstructed image on the QUAD */ 
+	glBegin(GL_QUADS);
+		glTexCoord2f(0.0, 0.0); glVertex3f(0, 0, 0);
+		glTexCoord2f(1.0, 0.0); glVertex3f(1.0, 0, 0);
+		glTexCoord2f(1.0, 1.0); glVertex3f(1.0, 1.0, 0);
+		glTexCoord2f(0.0, 1.0); glVertex3f(0.0, 1.0, 0);
+	glEnd();
+	
+	/* Restore the scene state */ 
+	glPopMatrix();
+	
+	/* Disable 2D texturing */ 
+	glDisable(GL_TEXTURE_2D);
+
+	/* Unbind texture */
+	glBindTexture(GL_TEXTURE_2D, 0);
+}
+
+/********************************************************************
+ * Name: 
+ * DisplayGL
+ *
+ * Description: 
+ * OpenGL display callback. 
+ * 
+ * Formal Parameters:
+ * void. 
+ *
+ * Returns:
+ * void. 
+ * 
+ * Note(s): 
+ ********************************************************************/
+void DisplayGL()
+{
+	/* Starting CUDA timer */ 
+	cutStartTimer(mTimer);
+	
+	/* Enable CUDA prjection-slice processing or not */
+    if (EnableCUDA) 
+    {
+        /* Bind frame buffer and render to attached texture */
+		glBindFramebufferEXT(GL_FRAMEBUFFER_EXT, FrameBufferID);
+        
+		/* Extract projection-slice from 3D spectrum */  
+		ExtractSlice();
+
+		/* Interpolate the projection-slice */
+        ProcessSlice();
+		
+		/* Unbind the frame buffer */ 
+        glBindFramebufferEXT(GL_FRAMEBUFFER_EXT, 0);
+        
+		/* Diaply the reconstructed image */  
+		DisplayGLImage(ImgTextureID);
+    }
+    else
+	{
+        /* Just make the slice extraction & draw the normal spectrum */  
+		ExtractSlice();
+	}
+    
+	/* CUDA synchronization */ 
+	cudaThreadSynchronize();
+	
+	/* Stop timer & profile */
+	cutStopTimer(mTimer);
+
+    /* Flip back-buffer */
+    glutSwapBuffers();
+    
+    /* Update fps counter, fps/title DisplayGL */
+    if (++mFPSCount == mFPSLimit)
+	{
+        char cTitle[256];
+        float fps = 1000.0f / cutGetAverageTimerValue(mTimer);
+        sprintf(cTitle, "CUDA Fourier Volume Rendering (%d x %d): %.1f fps", mWindowWidth, mWindowHeight, fps);  
+        glutSetWindowTitle(cTitle);
+        
+        mFPSCount = 0; 
+        mFPSLimit = (int)((fps > 1.0f) ? fps : 1.0f);
+        cutResetTimer(mTimer);  
+    }
+}
+
+/********************************************************************
+ * Name: 
+ * IdleGL
+ *
+ * Description: 
+ * OpenGL idle function. 
+ * 
+ * Formal Parameters:
+ * void. 
+ *
+ * Returns:
+ * void. 
+ * 
+ * Note(s): 
+ ********************************************************************/
+void IdleGL()
+{
+    glutPostRedisplay();
+}
+
+/********************************************************************
+ * Name: 
+ * KeyBoardGL
+ *
+ * Description: 
+ * OpenGL keybord function. 
+ * 
+ * Formal Parameters:
+ * key (unsigned char) : Input key, (int), (int). 
+ *
+ * Returns:
+ * void. 
+ * 
+ * Note(s): 
+ ********************************************************************/
+void KeyBoardGL(unsigned char key, int, int)
+{
+	switch(key) 
+	{
+		/* Escape */
+		case(27) : CleanUp(EXIT_SUCCESS);
+			break; 
+		
+		/* Switching between GPU-based render and the hybrid one */
+		case ' ' : EnableCUDA ^= 1;
+			break;
+		
+		/* X-axis rotation increment */
+		case 'q' : mXrot += 5.0; 
+			break; 
+		
+		/* X-axis rotation decrement */
+		case 'Q' : mXrot -= 5.0; 
+			break;
+		
+		/* Y-axis rotation increment */
+		case 'w' : mYrot += 5.0; 
+			break; 
+		
+		/* Y-axis rotation decrement */
+		case 'W' : mYrot -= 5.0; 
+			break;
+		
+		/* Z-axis rotation increment */
+		case 'e' : mZrot += 5.0; 
+			break; 
+		
+		/* Z-axis rotation decrement */
+		case 'E' : mZrot -= 5.0; 
+			break;
+
+		/* Intensity scale factor scaling up (* 5)*/
+		case 'a' : mScaleFactor *= 5.0; 
+			break;
+
+		/* Intensity scale factor scaling down (/ 5)*/
+		case 'A' : mScaleFactor /= 5.0; 
+			break;
+			
+		/* Intensity scale factor increment (+ 10) */
+		case 's' : mScaleFactor += 10.0; 
+			break;
+			
+		/* Intensity scale factor decrement (- 10) */
+		case 'S' : mScaleFactor -= 10.0; 
+			break;
+		
+		/* Image size scale up */
+		case 'z' : mImageScale += 0.5; 
+			break;
+		
+		/* Image size scale down */
+		case 'Z' : mImageScale -= 0.5; 
+			break;
+		
+	}
+	
+	/* GLUT re-draw */
+	glutPostRedisplay(); 
+}
+
+/********************************************************************
+ * Name: 
+ * ReshapeGL
+ *
+ * Description: 
+ * OpenGL reshape function. 
+ * 
+ * Formal Parameters:
+ * fWinWidth (int) : GLUT window width, 
+ * fWinHeight (int) : GLUT window height. 
+ *
+ * Returns:
+ * void. 
+ * 
+ * Note(s): 
+ ********************************************************************/ 
+void ReshapeGL(int fWinWidth, int fWinHeight)
+{
+    mWindowWidth 	= fWinWidth;
+    mWindowHeight 	= fWinHeight;
+}
+```
+
+### cuda3D.h
+```
+/********************************************************************* 
+ * Copyrights (c) Marwan Abdellah. All rights reserved.  
+ * This code is part of my Master's Thesis Project entitled "High 
+ * Performance Fourier Volume Rendering on Graphics Processing Units 
+ * (GPUs)" and submitted to the Systems & Biomedical Engineering
+ * Department, Faculty of Engineering, Cairo University. 
+ * Please, don't use or distribute without authors' permission. 
+ 
+ * File			: cuda3D.h
+ * Author(s)	: Marwan Abdellah <abdellah.marwan@gmail.com> 
+ * Created		: April 2011
+ * Description	: 
+ * Note(s)		: 
+ *********************************************************************/ 
+
+#include "fourierVolumeRenderer.h"
+
+/* Controling the size of the final volume to be processed */
+int sDataSize = 256; 
+
+/** CUDA FFT arrays **/
+cufftComplex* sHostComplexArray;		/* Host cufftComplex array */
+cufftComplex* sDeviceComplexArray;		/* Device cufftComplex array */
+cufftComplex* sDeviceComplexArrayTemp;	/* Temporary device cufftComplex array */
+
+int sSizeComplex;	/* Size of complex arrays */
+int sSizeFloat;		/* Size of single precisoin real arrays */
+
+
+/********************************************************************
+ * Name: 
+ * CUDA_Way
+ *
+ * Description: 
+ * Loading the raw volume and returning a pointer to the containing 
+ * array. 
+ *
+ * Formal Parameters:
+ * File name (char*) : Name of the loaded file, 
+ * File size (size_t) : Size of the loaded file. 
+ *
+ * Returns:
+ * Volume Data (char*) : Pointer to the loaded volume. 
+ * 
+ * Note(s):
+ * fVolumeData is internal. 
+ ********************************************************************/
+extern "C"
+void CUDA_Way()
+{
+	
+	/* Sizes of the complex and real data "in bytes" used for 
+	 * memory allocation */
+	sSizeComplex = sizeof(cufftComplex) * sDataSize * sDataSize * sDataSize; 
+	sSizeFloat = sizeof(float) * sDataSize * sDataSize * sDataSize; 
+
+	/* Allocation of the complex array on the host side */
+	sHostComplexArray = (cufftComplex*) malloc(sSizeComplex);
+
+	/* Filling the spatial volume in the real part of the complex 
+	 * array */   
+	printf("	Packing Volume Array for Single Precision Format ... \n"); 
+	for (int i = 0; i < mVolumeSize; i++)
+	{
+		sHostComplexArray[i].x = mExtractedVolumeData[i]; 
+		sHostComplexArray[i].y = 0;
+	}
+	printf("	Packing Done Successfully \n\n");
+
+	/* Allocation of the complex arrays on the device side */
+	cudaMalloc((void**)(&sDeviceComplexArray), sSizeComplex);
+	cudaMalloc((void**)(&sDeviceComplexArrayTemp), sSizeComplex);
+	
+	/* */ 
+	cutilSafeCall(cudaMalloc((void**)(&sDevice1DFloatArray), sSizeFloat * 2));
+
+	/* Uploading the complex array from the CPU to the GPU */
+	cutilSafeCall(cudaMemcpy(sDeviceComplexArray, sHostComplexArray, sSizeComplex, cudaMemcpyHostToDevice));
+	cutilSafeCall(cudaMemcpy(sDeviceComplexArrayTemp, sHostComplexArray, sSizeComplex, cudaMemcpyHostToDevice));
+	 
+    /* Reservation - Linking PBO to CUDA Context */ 
+    // cutilSafeCall(cudaGraphicsMapResources(1, &volTextureResource, 0));    
+    
+    /* Size (in bytes) for reconstructed image at which PBO size 
+	 * shall be allocated */
+	size_t Size3DBytes = sDataSize * sDataSize * sDataSize * 2 * sizeof(float); 
+   
+	// Now I have the Data on the GPU Side, Let's Do It
+	// Sne a pointer to the device complex array 
+	LaunchVolumeProcessingCUDA(sDeviceComplexArray, sDeviceComplexArrayTemp, sDataSize, sDevice1DFloatArray);
+	
+	cutilSafeCall(cudaMemcpy(mTextureArray, sDevice1DFloatArray,Size3DBytes, cudaMemcpyDeviceToHost));
+
+	
+	/*
+	printf("fsddf \n"); 
+	for (int i = (sDataSize * sDataSize * sDataSize) - 100; i < sDataSize * sDataSize * sDataSize; i++)
+		printf("%f \n", mTextureArray[i] ); 
+	printf("------------------------------------------------ \n" );
+	 */ 
+	 
+
+
+	 
+ 
+	
+
+
+
+}
+```
+
+### cuda3DKernel.cu
+```
+/********************************************************************* 
+ * Copyrights (c) Marwan Abdellah. All rights reserved.  
+ * This code is part of my Master's Thesis Project entitled "High 
+ * Performance Fourier Volume Rendering on Graphics Processing Units 
+ * (GPUs)" and submitted to the Systems & Biomedical Engineering
+ * Department, Faculty of Engineering, Cairo University. 
+ * Please, don't use or distribute without authors' permission. 
+ 
+ * File			: cuda3DKernel.cu
+ * Author(s)	: Marwan Abdellah <abdellah.marwan@gmail.com> 
+ * Created		: April 2011
+ * Description	: This module handles volume processing on the device. 
+ * Note(s)		: 
+ *********************************************************************/ 
+
+/* CUDA utilities & system includes */ 
+/* #include <shrUtils.h> */
+#include <cutil_inline.h>
+
+/** Kernel globals **/
+
+/* CUDA FFT plan */
+cufftHandle fftPlan3D;
+
+/* Host array to validate GPU implementation results */
+cufftComplex* CPU_ARRAY; 
+
+/********************************************************************
+ * Name: 
+ * __global__ fftShift3D_cufftComplex_i
+ *
+ * Description: 
+ * Loading the raw volume and returning a pointer to the containing 
+ * array.
+ * 
+ * Formal Parameters:
+ * devArrayInput (cufftComplex*) : Input array, 
+ * devArrayOutput (cufftComplex*) : Output array, 
+ * arrSize1D (int) : Size of the volume in 1D assumming unified 
+					 dimensionality, 
+ * zIndex (int) : To complete indexing an element in the volume. 
+ *
+ * Returns:
+ * void.  
+ * 
+ * Note(s):
+ * This kernel executes in coordination with the function fftShift3D_i. 
+ * This kernel executes on the device and callable from the host.
+ * "zIndex" does all the magic, try it yourself to believe it.  
+ ********************************************************************/
+__global__
+void fftShift3D_cufftComplex_i( cufftComplex* devArrayInput, 
+								cufftComplex* devArrayOutput, 
+								int arrSize1D, 
+								int zIndex )
+{
+	/* 3D volume & 2D slice & 1D line */ 
+	int sLine = arrSize1D; 
+	int sSlice = arrSize1D * arrSize1D; 
+	int sVolume = arrSize1D * arrSize1D * arrSize1D; 
+	
+	/* Transformation equations */ 
+	int sEq1 = ( sVolume + sSlice + sLine ) / 2;
+	int sEq2 = ( sVolume + sSlice - sLine ) / 2; 
+	int sEq3 = ( sVolume - sSlice + sLine ) / 2;
+	int sEq4 = ( sVolume - sSlice - sLine ) / 2; 
+	
+	/* Thread index */
+	int xThreadIdx = threadIdx.x;
+	int yThreadIdx = threadIdx.y;
+
+	/* Block width & height */
+	int blockWidth = blockDim.x;
+	int blockHeight = blockDim.y;
+
+	/* Thread index 2D */  
+	int xIndex = blockIdx.x * blockWidth + xThreadIdx;
+	int yIndex = blockIdx.y * blockHeight + yThreadIdx;
+	
+	// Thread index converted into 1D index
+	int index = ( zIndex * sSlice ) + ( yIndex * sLine ) + xIndex;
+	
+	if ( zIndex < arrSize1D / 2 )
+	{
+		if ( xIndex < arrSize1D / 2 )
+		{
+			if ( yIndex < arrSize1D / 2 )
+			{
+				/* First Quad */
+				devArrayOutput[index] = devArrayInput[index + sEq1]; 
+			}
+			else 
+			{
+				/* Third Quad */ 
+				devArrayOutput[index] = devArrayInput[index + sEq3]; 
+			}
+		}
+		else 
+		{
+			if ( yIndex < arrSize1D / 2 )
+			{
+				/* Second Quad */ 
+				devArrayOutput[index] = devArrayInput[index + sEq2];
+			}
+			else 
+			{
+				/* Fourth Quad */
+				devArrayOutput[index] = devArrayInput[index + sEq4]; 
+			}
+		}
+	}
+	else 
+	{
+		if ( xIndex < arrSize1D / 2 )
+		{
+			if ( yIndex < arrSize1D / 2 )
+			{
+				/* First Quad */ 
+				devArrayOutput[index] = devArrayInput[index - sEq4]; 
+			}
+			else 
+			{
+				/* Third Quad */ 
+				devArrayOutput[index] = devArrayInput[index - sEq2]; 
+			}
+		}
+		else 
+		{
+			if ( yIndex < arrSize1D / 2 )
+			{
+				/* Second Quad */ 
+				devArrayOutput[index] = devArrayInput[index - sEq3];
+			}
+			else 
+			{
+				/* Fourth Quad */
+				devArrayOutput[index] = devArrayInput[index - sEq1]; 
+			}
+		}
+	}
+}
+
+/********************************************************************
+ * Name: 
+ * fftShift3D_i
+ *
+ * Description: 
+ * Loading the raw volume and returning a pointer to the containing 
+ * array. 
+ *
+ * Formal Parameters:
+ * _arrayDeviceInput (cufftComplex*) : Input array, 
+ * _arrayDeviceOutput (cufftComplex*) : Output array, 
+ * _arraySize1D (int) : Size of the volume in 1D assumming unified 
+						dimensionality, 
+ * _block (dim3) : CUDA block configuration,
+ * _grid (dim3) : CUDA grid configuration. 
+ 
+ * Returns:
+ * void. 
+ * 
+ * Note(s):
+ * This function is callable from the CPU and executes on the device.
+ * This function is to be treated exactly as CUDA __global__ one.
+ * This function executes in coordination with the kernel 
+   fftShift3D_cufftComplex_i.  
+ ********************************************************************/
+void fftShift3D_i( cufftComplex* _arrayDeviceInput, 
+				   cufftComplex* _arrayDeviceOutput, 
+				   int _arraySize1D, 
+				   dim3 _block, 
+				   dim3 _grid )
+{
+	for ( int i = 0; i < _arraySize1D; i++ )
+		fftShift3D_cufftComplex_i <<< _grid, _block >>> 
+		( _arrayDeviceInput, _arrayDeviceOutput, _arraySize1D, i );
+}
+
+/********************************************************************
+ * Name: 
+ * __global__ Pack1DComplexArray
+ *
+ * Description: 
+ * Packing complex array of 2 float compoenets into 1D float sorted in 
+ * consecutive fashion, i.e. real value at odd indicies and imaginary 
+ * values at even indicies. 
+ *
+ * Formal Parameters:
+ * complexArray (cufftComplex*) : Input complex array, 
+ * array1D (float*) : Resulting float array, 
+ * arrSize1D (int) : Size of the volume in 1D assumming unified 
+ *					 dimensionality.
+ *
+ * Returns:
+ * void. 
+ * 
+ * Note(s):
+ ********************************************************************/
+__global__
+void Pack1DComplexArray( cufftComplex* complexArray, 
+						 float* array1D, 
+						 int arrSize1D )
+{
+	// Index (1D) 
+	int index = blockIdx.x * blockDim.x + threadIdx.x;
+	
+	if (i ndex < ( arrSize1D * arrSize1D * arrSize1D ) )
+	{
+		/* Real value */
+		array1D[(2 * index)    ]	= complexArray[index].x;
+		
+		/* Imaginary value */
+		array1D[(2 * index) + 1]	= complexArray[index].y; 
+	}
+
+}
+
+/********************************************************************
+ * Name: 
+ * LaunchVolumeProcessingCUDA
+ *
+ * Description: 
+ * Volume processing on the GPU that includes shifting the spatial and
+ * the spectral volumes, doing the 3D FFT with cuFFT, repacking the 
+ * resulting shifted spectral volume into 1D array sto suit a 2-component 
+ * (RG) OpenGL 3D texture.     
+ *
+ * Formal Parameters:
+ * MainComplexArray (cufftComplex*) : Main complex array residing on 
+									  the GPU, 
+ * TempComplexArray (cufftComplex*) : Temporary complex array used on 
+									  the fly, 
+ * fDataSize (int) : Size of the volume in 1D assumming unified 
+ *					 dimensionality, 
+ * ptrTo1DArray (float*) : OpenGL-compatiable array containg the shifted 
+						   spectral volume. 
+ *
+ * Returns:
+ * void. 
+ * 
+ * Note(s):
+ * Some testing code is commented to reduce their overhead. Uncomment 
+ * them if needed. 
+ ********************************************************************/
+extern "C" 
+void LaunchVolumeProcessingCUDA( cufftComplex* MainComplexArray, 
+								 cufftComplex* TempComplexArray, 
+								 int fDataSize, 
+								 float* ptrTo1DArray )
+{
+	/* In this point, I have a pointer to the complex array residing 
+	* in the GPU memory. This complex array will carry the spatial 
+	* and the spectral volumes alternatively */
+	
+	/* CUDA volume processing configuration */
+	dim3 sBlock(16, 16, 1);
+	dim3 sGrid((fDataSize / 16), (fDataSize / 16), 1);
+
+	/* Wrapping-around the spatial volume */
+	fftShift3D_i(TempComplexArray,  MainComplexArray, fDataSize, sBlock, sGrid);
+	
+	/* Allocating a CPU array to receive resulting volumes on the GPU
+	 * for validation */
+	CPU_ARRAY = (cufftComplex*) malloc 
+			(fDataSize * fDataSize * fDataSize * sizeof(cufftComplex));
+			 
+	/* Copy the final volume from the device to the host and test it */
+	cutilSafeCall(
+	cudaMemcpy( CPU_ARRAY, MainComplexArray, 
+				fDataSize * fDataSize * fDataSize * sizeof( cufftComplex ), 
+				cudaMemcpyDeviceToHost ) );
+	
+	/* Testing the last 100 elements of the spatial volume on the GPU */  
+	/* 
+	printf("Testing the spatial volume before doing the cuFFT \n"); 
+	for (int i = ( fDataSize * fDataSize * fDataSize) - 100; i < fDataSize * fDataSize * fDataSize; i++ )
+		printf("%f \n", CPU_ARRAY[i].x); 
+	*/
+	 
+	/* Setup for 3D cuFFT plan */
+	cufftPlan3d(&fftPlan3D, fDataSize, fDataSize, fDataSize, CUFFT_C2C);
+	cufftExecC2C(fftPlan3D, MainComplexArray, TempComplexArray, CUFFT_FORWARD);
+	
+	/* Copy the resulting spectrum from the cuFFT operation to the host 
+	 * and test it */
+	/* cutilSafeCall(cudaMemcpy(CPU_ARRAY, 
+					 TempComplexArray, 
+					 (fDataSize * fDataSize * fDataSize * sizeof(cufftComplex)), 
+					 cudaMemcpyDeviceToHost)); */ 
+	
+	/* Testing the last 100 elements of the spectral volume on the GPU */
+	/*
+	printf("Testing the resulting spectral volume after doing the cuFFT \n"); 
+	for (int i = ( fDataSize * fDataSize * fDataSize) - 100; i < fDataSize * fDataSize * fDataSize; i++ )
+		printf("%f \n", CPU_ARRAY[i].x); 
+	*/
+	 
+	// Do 3D FFT Shift for the Generated Spectrum
+	// Save the Output in the Temp Array
+	// fftShift3D_cufftComplex <<< sGrid, sBlock >>>(TempComplexArray, MainComplexArray, fDataSize);
+	
+	/* Wrapping-around the spectral volume to center its DC component */
+	fftShift3D_i( TempComplexArray, MainComplexArray, fDataSize, sBlock, sGrid );
+
+	/* Copy the resulting shifted spectrum from the "fftShift3D_i operation" to 
+	 * the host and test it */
+	/* cutilSafeCall(cudaMemcpy(CPU_ARRAY, 
+					 TempComplexArray, 
+					 (fDataSize * fDataSize * fDataSize * sizeof(cufftComplex)), 
+					 cudaMemcpyDeviceToHost)); */ 
+	
+	/* Testing the last 100 elements of the shifted spectral volume on the GPU */
+	/*
+	printf("Testing the resulting shifted spectral volume after wrapping it around \n"); 
+	for (int i = ( fDataSize * fDataSize * fDataSize) - 100; i < fDataSize * fDataSize * fDataSize; i++ )
+		printf("%f \n", CPU_ARRAY[i].x); 
+	*/
+	
+	/* Garbbage */  
+	/*
+	cutilSafeCall(cudaMemcpy(CPU_ARRAY, MainComplexArray, 128 * 128 * 128 * sizeof(cufftComplex), cudaMemcpyDeviceToHost)); */
+	printf("Testing for a specific volume of 128 * 128 * 128 \n"); 
+	for (int i = 0; i < (128 * 128 * 128 / 2); i++)
+		printf("%f \n", CPU_ARRAY[i].x);
+	*/
+
+	/* Now, I have the spectral volume in cufftComlpex array. Save this 
+	 * spectrum to 1D array on the device & link this array to OpenGL Via 
+	 * cudaGraphics Resource */ 
+
+	/* GPU configuration for the packing kernel */
+	dim3 sBlock1D( 512,1,1 ); 
+	dim3 sGrid1D( ( fDataSize * fDataSize * fDataSize ) / 512, 1, 1 ); 
+
+	/* Run 1D packing for texture array */
+	Pack1DComplexArray <<< sGrid1D, sBlock1D >>> ( MainComplexArray, ptrTo1DArray, fDataSize );   
+}
+```
+
+### displayList.h
+```
+/********************************************************************* 
+ * Copyrights (c) Marwan Abdellah. All rights reserved.  
+ * This code is part of my Master's Thesis Project entitled "High 
+ * Performance Fourier Volume Rendering on Graphics Processing Units 
+ * (GPUs)" and submitted to the Systems & Biomedical Engineering
+ * Department, Faculty of Engineering, Cairo University. 
+ * Please, don't use or distribute without authors' permission. 
+ 
+ * File			: displayList.h
+ * Author(s)	: Marwan Abdellah <abdellah.marwan@gmail.com> 
+ * Created		: April 2011
+ * Description	: Display list contains the coordinates of the 
+				  interecting polygon with the 3D spectral texture to 
+				  extract the projection-slice (k-space 2D slice).  
+ * Note(s)		: We are just interested in the central slice (Z = 0)
+ *********************************************************************/ 
+
+#include "fourierVolumeRenderer.h"
+
+/********************************************************************
+ * Name: 
+ * SetDisplayList
+ *
+ * Description: 
+ * This function creates the central polygon (QUAD) that will intersect 
+ * with the 3D spectral slice to get the projection-slice and updates a 
+ * vertex array with the result. 
+ * Attributes: Center (Z = 0), Side Lenght = 1. 
+ *			   Just 1 Slice, 4 Vertices, 3 Coordinates.
+ *
+ * Formal Parameters:
+ * void. 
+ *
+ * Returns:
+ * void. 
+ ********************************************************************/
+void SetDisplayList(void)
+{
+	printf("Creating Display List ... \n"); 
+	
+	/* Central slice */ 
+	float mCenter		= 0;
+	
+	/* Left & right sides */  
+	float mSide			= 0.5;
+	
+	/* Central slice */ 
+	int nSlices			= 1;  
+	
+	/* Number of verticies */ 
+	int nElements		= 4 * nSlices; 
+	
+	/* Coordinates */ 
+	GLfloat *vPoints	= new GLfloat [3 * nElements]; 
+	GLfloat *ptr		= vPoints;
+
+	/* Fill the Display List with Vertecies */
+	*(ptr++) = -mSide;
+	*(ptr++) = -mSide;
+	*(ptr++) =  mCenter;
+
+	*(ptr++) =  mSide;
+	*(ptr++) = -mSide;
+	*(ptr++) =  mCenter;
+
+	*(ptr++) =  mSide;
+	*(ptr++) =  mSide;
+	*(ptr++) =  mCenter;
+
+	*(ptr++) = -mSide;
+	*(ptr++) =  mSide;
+	*(ptr++) =  mCenter;
+
+	/* Fill the Display List (VERTEX_ARRAY) with Vertecies */ 
+	glEnableClientState(GL_VERTEX_ARRAY);
+	glVertexPointer(3, GL_FLOAT, 0, vPoints);
+	mDiaplayList = glGenLists(1);
+	glNewList(mDiaplayList, GL_COMPILE);
+	glDrawArrays(GL_QUADS, 0, nElements); 
+	glEndList();
+	delete [] vPoints;
+	
+	printf("	Display List Created Successfully \n\n"); 
+}
+```
+
+### fftShift.h
+```
+/********************************************************************* 
+ * Copyrights (c) Marwan Abdellah. All rights reserved.  
+ * This code is part of my Master's Thesis Project entitled "High 
+ * Performance Fourier Volume Rendering on Graphics Processing Units 
+ * (GPUs)" and submitted to the Systems & Biomedical Engineering
+ * Department, Faculty of Engineering, Cairo University. 
+ * Please, don't use or distribute without authors' permission. 
+ 
+ * File			: fftShift.h
+ * Author(s)	: Marwan Abdellah <abdellah.marwan@gmail.com> 
+ * Created		: April 2011
+ * Description	: 
+ * Note(s)		: 
+ *********************************************************************/ 
+
+#include "fourierVolumeRenderer.h"
+
+/********************************************************************
+ * Name: 
+ * FFT_Shift_2D
+ *
+ * Description: 
+ * Loading the raw volume and returning a pointer to the containing 
+ * array. 
+ *
+ * Formal Parameters:
+ * File name (char*) : Name of the loaded file, 
+ * File size (size_t) : Size of the loaded file. 
+ *
+ * Returns:
+ * Volume Data (char*) : Pointer to the loaded volume. 
+ * 
+ * Note(s):
+ * fVolumeData is internal. 
+ ********************************************************************/
+float** FFT_Shift_2D(float** iArr, float** oArr, int N)
+{	  
+	for (int i = 0; i < N/2; i++)
+		for(int j = 0; j < N/2; j++)
+		{
+			oArr[(N/2) + i][(N/2) + j] = iArr[i][j];
+			oArr[i][j] = iArr[(N/2) + i][(N/2) + j];
+			
+			oArr[i][(N/2) + j] = iArr[(N/2) + i][j];
+			oArr[(N/2) + i][j] = iArr[i][(N/2) + j];
+		}
+	
+	return oArr;
+}
+
+/********************************************************************
+ * Name: 
+ * Repack_2D
+ *
+ * Description: 
+ * Loading the raw volume and returning a pointer to the containing 
+ * array. 
+ *
+ * Formal Parameters:
+ * File name (char*) : Name of the loaded file, 
+ * File size (size_t) : Size of the loaded file. 
+ *
+ * Returns:
+ * Volume Data (char*) : Pointer to the loaded volume. 
+ * 
+ * Note(s):
+ * fVolumeData is internal. 
+ ********************************************************************/
+float* Repack_2D(float** Input_2D, float* Input_1D, int N)
+{
+	int ctr = 0; 
+	for (int i = 0; i < N; i++)
+		for(int j = 0; j < N; j++)
+		{
+			Input_1D[ctr] = Input_2D[i][j];
+			ctr++;
+		}
+	
+	return Input_1D;
+}
+
+/********************************************************************
+ * Name: 
+ * FFT_Shift_3D
+ *
+ * Description: 
+ * Loading the raw volume and returning a pointer to the containing 
+ * array. 
+ *
+ * Formal Parameters:
+ * Input (float*) : Input 1D array, 
+ * N : Each dimension in the array. 
+ *
+ * Returns:
+ * oArr (float***) : 3D array for the shifted volume. 
+ * 
+ * Note(s):
+ * Number of elemnts in the array is (N * N * N), ctr is internal. 
+ ********************************************************************/
+float*** FFT_Shift_3D(float* Input, int N)
+{
+	/* 3D input and output arrays */
+	float ***iArr, ***oArr;;
+	
+	/* Alloacting iArr (3D) */
+	iArr = (float***) malloc(N * sizeof(float**));
+	for (int y = 0; y < N; y++)
+	{
+		iArr[y] = (float**) malloc (N * sizeof(float*));
+		for (int x = 0; x < N; x++)
+		{
+			iArr[y][x] = (float*) malloc( N * sizeof(float));
+		}
+	}
+	
+	/* Allocating oArr (3D) */
+	oArr = (float***) malloc(N * sizeof(float**));
+	for (int y = 0; y < N; y++)
+	{
+		oArr[y] = (float**) malloc (N * sizeof(float*));
+		for (int x = 0; x < N; x++)
+		{
+			oArr[y][x] = (float*) malloc( N * sizeof(float));
+		}
+	}
+	
+	/* Moving the input 1D array into the 3D iArr array */
+	int ctr = 0; 
+	for (int k = 0; k < N; k++)
+		for (int i = 0; i < N; i++)
+			for(int j = 0; j < N; j++)
+			{
+				iArr[i][j][k] = Input[ctr];
+				oArr[i][j][k] = 0;
+				ctr++;
+			}
+	
+	/* Doing the 3D fft shift operation */
+	for (int k = 0; k < N/2; k++)
+		for (int i = 0; i < N/2; i++)
+			for(int j = 0; j < N/2; j++)
+			{
+				oArr[(N/2) + i][(N/2) + j][(N/2) + k] = iArr[i][j][k];
+				oArr[i][j][k] = iArr[(N/2) + i][(N/2) + j][(N/2) + k];
+				
+				oArr[(N/2) + i][j][(N/2) + k] = iArr[i][(N/2) + j][k];
+				oArr[i][(N/2) + j][k] = iArr[(N/2) + i][j][(N/2) + k];
+				
+				oArr[i][(N/2) + j][(N/2) + k] = iArr[(N/2) + i][j][k]; 
+				oArr[(N/2) + i][j][k] = iArr[i][(N/2) + j][(N/2) + k]; 
+				
+				
+				oArr[i][j][(N/2) + k] = iArr[(N/2) + i][(N/2) + j][k];
+				oArr[(N/2) + i][(N/2) + j][k] = iArr[i][j][(N/2) + k]; 
+			}
+	
+	/* Dellocating iArr */
+	delete [] iArr;
+	return oArr;
+}
+
+/********************************************************************
+ * Name: 
+ * Repack_3D
+ *
+ * Description: 
+ * Reapcking 3D array contetnts into 1D array.  
+ *
+ * Formal Parameters:
+ * Input_3D (float***) : Input 3D array,  
+ * Input_1D (float* ) : Input 1D array, 
+ * N : Number of elements in each dimension.   
+ *
+ * Returns:
+ * Input_1D (float*) : Pointer to the 1D array containg the volume. 
+ * 
+ * Note(s):
+ * ctr is internal.  
+ ********************************************************************/
+float* Repack_3D(float*** Input_3D, float* Input_1D, int N)
+{
+	/* Repacking the 3D volume into 1D array */
+	int ctr = 0; 
+	for (int k = 0; k < N; k++)
+		for (int i = 0; i < N; i++)
+			for(int j = 0; j < N; j++)
+			{
+				Input_1D[ctr] = Input_3D[i][j][k];
+				ctr++;
+			}
+	
+	return Input_1D;
+}
+```
+
+### fourierVolumeRenderer.cpp
+```
+/********************************************************************* 
+ * Copyrights (c) Marwan Abdellah. All rights reserved.  
+ * This code is part of my Master's Thesis Project entitled "High 
+ * Performance Fourier Volume Rendering on Graphics Processing Units 
+ * (GPUs)" and submitted to the Systems & Biomedical Engineering
+ * Department, Faculty of Engineering, Cairo University. 
+ * Please, don't use or distribute without authors' permission. 
+ 
+ * File			: fourierVolumeRenderer.cpp
+ * Author(s)	: Marwan Abdellah <abdellah.marwan@gmail.com> 
+ * Created		: April 2011
+ * Description	: 
+ * Note(s)		: 
+ *********************************************************************/ 
+
+#include "fourierVolumeRenderer.h"
+#include "contextCUDA.h"
+#include "contextOpenGL.h"
+#include "buffersCreateDelete.h"
+#include "contextClean.h"
+#include "initVariables.h"
+#include "loadData.h"
+#include "wrappingAround.h"
+#include "fftShift.h"
+#include "displayList.h"
+#include "cuda3D.h"
+
+/* If GPU, run the pure GPU-based renderer, else run the hybrid one. 
+ * Toggle with SPACE */
+bool GPU = true;
+
+/********************************************************************
+ * Name: 
+ * main
+ *
+ * Description: 
+ * Project entry. 
+ *
+ * Formal Parameters:
+ * argc (int) : Name of input arguments, 
+ * argv (char*) : Argumetns. 
+ *
+ * Returns:
+ * 0 (int) : main return.  
+ * 
+ * Note(s):
+ ********************************************************************/
+int main(int argc, char** argv)
+{	
+	printf("--------------------------------------------- \n");
+	printf("Starting Fourier Volume Rendering On CUDA ... \n");
+	printf("--------------------------------------------- \n\n");
+	
+	/* Initializing necessary variables */ 
+	InitVars(); 
+	
+	/* Initializing OpenGL & CUDA contexts */ 
+	/* First initialize OpenGL context, so we can properly set the 
+	 * GL for CUDA.
+	 * This is necessary in order to achieve optimal performance with 
+	 * OpenGL/CUDA interop. */ 
+	if( false == InitOpenGLContext(&argc, argv))
+	{
+		printf("OpenGL Context Not Created Successfully \n");
+		exit (0);
+	}
+	else 
+	{
+		printf("    OpenGL Context Created Successfully - Moving to CUDA Context \n\n"); 
+		printf("------------------------------------------------------------------------------ \n\n");
+	}
+	
+	/* Initialize CUDA context (GL context has been created already) */ 
+	InitCUDAContext(argc, argv, true);
+	
+	/* Reading & initializing volume data */ 	
+	InitData(); 
+	
+	/* Creating float volume & releasing byte data */ 	
+	CreateFloatData();
+
+	/* CUDA or Hybrid pipeline */
+	if (!GPU)
+	{
+		/* Wrapping around spatial volume */  
+		WrapAroundVolume(); 
+
+		/* Creating spectrum complex arrays */ 
+		CreateSpectrum(); 
+		
+		/* Wrapping around spectral volume */  
+		WrapAroundSpectrum(); 
+		
+		/* Packing spectrum complex data into texture array to 
+		 * be sent to OpenGL */ 
+		PackingSpectrumTexture(); 	
+	}
+	else 
+	{
+		/* Spectral texture for OpenGL compatability */
+		mTextureArray = (float*) malloc (mVolumeSize * 2 * sizeof(float)); 
+		
+		/* Run the FVR on the CUDA pipeine */
+		CUDA_Way();
+	}
+
+	/* Uploading spectrum texture to GPU for slicing */
+	SendSpectrumTextureToGPU(); 
+	
+	/* We don't need float data ayn more as it resides in the 
+	 * GPU texture memory */ 	
+	delete [] mVolumeDataFloat; 
+	
+	/* Intersecting QUAD with the texture */  
+	SetDisplayList();
+	
+	/* CUDA timer */ 
+	cutCreateTimer(&mTimer);
+	cutResetTimer(mTimer);
+
+	/* Register OpenGL callbacks */ 
+	glutDisplayFunc(DisplayGL);
+	glutKeyboardFunc(KeyBoardGL);
+	glutReshapeFunc(ReshapeGL);
+	glutIdleFunc(IdleGL);
+	
+	/* Initializing OpenGL buffers */ 
+	InitOpenGLBuffers();
+	
+	/* Start main rendering loop */ 
+	glutMainLoopß();
+
+	/* Clean Up */ 
+	CleanUp(EXIT_FAILURE);
+
+	/* Exiting ... */ 
+	// shrEXIT(argc, (const char**)argv);
+}
+```
+
+### fourierVolumeRenderer.h
+```
+/********************************************************************* 
+ * Copyrights (c) Marwan Abdellah. All rights reserved.  
+ * This code is part of my Master's Thesis Project entitled "High 
+ * Performance Fourier Volume Rendering on Graphics Processing Units 
+ * (GPUs)" and submitted to the Systems & Biomedical Engineering
+ * Department, Faculty of Engineering, Cairo University. 
+ * Please, don't use or distribute without authors' permission. 
+ 
+ * File			: fourierVoumeRenderer.h.h
+ * Author(s)	: Marwan Abdellah <abdellah.marwan@gmail.com> 
+ * Created		: April 2011
+ * Description	: 
+ * Note(s)		: 
+ *********************************************************************/  
+ 
+#ifndef _FOURIER_VOLUME_RENDERER_H
+#define _FOURIER_VOLUME_RENDERER_H
+
+#ifdef _WIN32
+	#define WINDOWS_LEAN_AND_MEAN
+	#define NOMINMAX
+	#include <windows.h>
+	#pragma warning(disable:4996)
+#endif
+
+/***************************************
+ * OpenGL includes
+ ***************************************/
+#include <GL/glew.h>
+#include <GL/glu.h>
+
+#if defined(__APPLE__) || defined(MACOSX)
+	#include <GLUT/glut.h>
+	#define USE_TEXSUBIMAGE2D
+#else
+	#include <GL/glut.h>
+#endif
+
+/***************************************
+ * Utilities & System includes
+ ***************************************/
+#ifdef CUDA_SHR
+	#include <shrUtils.h>
+#endif 
+#include <cutil_inline.h>
+
+/***************************************
+ * CUDA / OpenGL includes
+ ***************************************/
+#include <cuda_runtime_api.h>
+#include <cutil_inline.h>
+#include <cutil_gl_inline.h>
+#include <cutil_gl_error.h>
+#include <cudaGL.h>
+
+/***************************************
+ * FFTW (3) Library includes
+ ***************************************/ 
+#include "fftw3.h"
+
+/***************************************
+ * CUDA FFT includes 
+ ***************************************/
+#include "cufft.h"
+
+// Shall be Removed Later ! 
+#define USE_TEXSUBIMAGE2D
+
+/***************************************
+ * OpenGL Checking Macros 
+ ***************************************/
+#ifdef WIN32
+     bool IsOpenGLAvailable(const char *appName) { return true; }
+#else
+  #if (defined(__APPLE__) || defined(MACOSX))
+     bool IsOpenGLAvailable(const char *appName) { return true; }
+  #else
+     // Linux Machine
+     #include <X11/Xlib.h>
+
+     bool IsOpenGLAvailable(const char *appName)
+     {
+        Display *XDisplayGL = XOpenDisplay(NULL);
+        if (XDisplayGL == NULL)
+           return false;
+        else
+        {
+           XCloseDisplay(XDisplayGL);
+           printf("OpenGL Diaply is Assigned");  
+           return true;
+        }
+     }
+  #endif
+#endif
+
+/***************************************
+ * Type Definitions  
+ ***************************************/
+typedef unsigned int 	uint;
+typedef unsigned char 	uchar;
+typedef unsigned char 	mVolumeType;  
+
+/***************************************
+ * Globals   
+ ***************************************/
+
+bool EnableCUDA = true;
+
+float* sDevice1DFloatArray; 
+
+float* TempArray; 
+
+
+/** FFT globals **/
+
+cufftComplex *cuFFT_Input;		/* Input array to cuFFT */
+cufftComplex *cuFFT_Output;		/* Output array from cuFFT */
+
+/** OpenGL globals **/
+/* Framebuffer object resource for the projection-slice */ 
+GLuint FBOSourceBuffer;
+struct cudaGraphicsResource *CUDASliceResourceBuffer;
+
+
+
+
+ 
+
+// Resulting Image Texture Buffer for CUDA
+
+GLuint ImgTextureID;			/* Reconstruced image testure ID */
+GLuint PBODestinationBuffer;	/* PBO destination buffer ID */
+struct cudaGraphicsResource *CUDA_PBODestinationBufferResource;	
+struct cudaGraphicsResource *CUDA_ResultingTextureBufferResource;
+
+// 3D Texture 
+GLuint mVolTexureID;			// 3D Spectrum Texture ID
+GLuint PBOVolumeBuffer; 
+struct cudaGraphicsResource *volTextureBufferResource;
+struct cudaGraphicsResource *volumePBOBufferResource; 
+
+float* Texture3D_1DArrayPointer; 
+
+/** GLUT Globals **/
+int mWindowWidth			= 512;	/* Window width */
+int mWindowHeight			= 512;	/* Window height */
+unsigned int mImageWidth 	= 0;	/* Reconstructed image width */
+unsigned int mImageHeight	= 0;	/* Reconstructed image height */
+int iGLUTWindowHandle		= 0;	/* OpenGL window handle */
+
+
+
+char* mPath = "F:/Microsoft Projects/Data/CTHead_1/CTData.img"; /* Volume file path */ 
+const char *sSDKname = "fourierVolumeRenderer";		
+
+
+/** Dimensions of the final volume **/    
+int mVolWidth			= 0;	/* Volume width	*/
+int mVolHeight			= 0;	/* Volume height */
+int mVolDepth			= 0;	/* Volume depth	*/
+int mUniDim 			= 0;	/* Volume Unified dimension in X, Y, and Z */
+int mVolArea 			= 0;	/* Area of cross-section in the volume */
+int mVolumeSize			= 0;	/* Size of the final volume = width x height x depth */
+int mVolumeSizeBytes	= 0;	/* Size of the final volume in bytes */
+
+/** Dimensions of the loaded volume dataset "_DS" **/  
+int mVolWidth_DS		= 0;	/* Volume width	*/
+int mVolHeight_DS		= 0;	/* Volume height */
+int mVolDepth_DS		= 0;	/* Volume depth	*/
+int mVolumeSize_DS		= 0;	/* Size of the loaded volume = width x height x depth */
+int mVolumeSizeBytes_DS	= 0;	/* Size of the loaded volume in bytes */
+
+char ***volIn3D, ***volOut3D;
+char* mExtractedVolumeData; 
+
+/** Projection-slice parameters **/
+int mSliceWidth 		= 0;	/* projcetion-slice width */
+int mSliceHeight 		= 0;	/* projection-slice height */
+int mSliceSize			= 0;	/* projection-slice size = width x height */
+
+
+int mScaleFactor		= 1000;
+
+
+
+// Slice Attributes ________________________________________________________*/
+
+
+// FFTW Globals ____________________________________________________________*/ 
+fftwf_complex* 	mVolumeArrayComplex;
+fftwf_complex* 	mSliceArrayComplex;
+fftwf_plan 	mFFTWPlan;  
+
+/** Wrapping Around Globals **/
+float** 	mImg_2D; 
+float** 	mImg_2D_Temp; 
+float***	mVol_3D;  
+
+
+// OpenGL Texture Arrays
+float* 		mTextureArray;
+float* 		mFrameBufferArray;
+
+/* OpenGL projection-slice texture globals */ 
+GLuint mSliceTextureID; 		/* Extracted slice ID */ 
+GLuint mSliceTextureSrcID; 		/* Input texture to CUDA ID */ 
+GLuint mSliceTextureResID;		/* Destination of CUDA results ID */ 
+int mNumTexels 			= 0;	/* Number of textels in the texture slice */ 
+int mNumValues 			= 0;	/* Twice as the number of texels (complex component) */ 
+int mTextureDataSize 	= 0;	/* Size of the texture slice = width * height */ 
+unsigned int mSizeTextureData;	/* Texture slice size in bytes */
+
+
+GLuint FrameBufferID;			// FrameBuffer
+GLuint SliceTextureID;			// Spectrum slice texture
+
+
+
+/** Framebufer object targets **/
+const GLenum fbo_targets[] = {  GL_COLOR_ATTACHMENT0_EXT, 
+								GL_COLOR_ATTACHMENT1_EXT, 
+								GL_COLOR_ATTACHMENT2_EXT, 
+								GL_COLOR_ATTACHMENT3_EXT  };
+
+/* Timer globals */
+static int mFPSCount 	= 0;
+static int mFPSLimit 	= 1;
+unsigned int mTimer		= 0;
+
+/** OpenGL globals **/ 
+int mXrot				= 0;	/* Rotation around x-axis */
+int mYrot				= 0;	/* Rotation around y-axis */
+int mZrot				= 0;	/* Rotation around z-axis */
+int mScalingFactor 		= 50;	/* Scaling factor */
+GLuint mDiaplayList;			/* Display list ID */
+
+
+/** Volume & image globals **/
+char* 		mVolumeData;					/* Loaded input volume */
+uchar*		mRecImage;						/* Reconstructed image */
+float* 		mVolumeDataFloat;				/* Loaded volume in single precision */
+float*	 	mAbsoluteReconstructedImage;	/* Absolute of the reconstructed image */
+
+/***************************************
+ * Forward declarations 
+ ***************************************/
+/* Loading volume & data initialization */
+void InitVars(); 
+void InitData(); 
+char* LoadRawFile(char* fFileName, size_t fSize); 
+
+/* Memory allocation and processing */
+void PrepareArrays();
+void CreateFloatData(); 	
+void WrapAroundVolume(); 
+void CreateSpectrum(); 
+void WrapAroundSpectrum(); 	
+void CreateSpectrumTexture(); 
+void GetSpectrumSlice(); 
+void PackingSpectrumTexture(); 
+void SendSpectrumTextureToGPU(); 
+void SetDisplayList(); 	
+
+/* Wrapping-around & repacking on CPU */
+float**  FFT_Shift_2D(float** inputArr, float** outputArr, int N);
+float*** FFT_Shift_3D(float* inputArray, int N);
+float* 	Repack_2D(float** Input_2D, float* Input_1D, int N);
+float* 	Repack_3D(float*** Input_3D, float* Input_1D, int N);
+
+/* CUDA slice-rocessing "high-order reconstruction" */ 
+extern "C"
+void LaunchProcessingCUDA (dim3 fGrid, dim3 fBlock, cudaArray* fInputSlice, float* fOutputImage, int fImgWidth, int fImgHeight, cufftComplex* fInputComplexData, cufftComplex *fOutputComplexData, float* TempArray, int ScaleFactor);
+
+/* CUDA renderer */
+extern "C"
+void CUDA_Way(); 
+
+/* CUDA volume processing */
+extern "C" 
+void LaunchVolumeProcessingCUDA(cufftComplex* sDeviceComplexArray, cufftComplex* sDeviceComplexArrayTemp, int sDataSize, float* Dev1DArray); 
+
+/* CUDA context functions */ 
+void ProcessSlice();
+
+/* Context cleanning */ 
+void CleanUp(int fExitCode);
+
+/* Initializaion of CUDA/GL functionality */ 
+bool InitCUDAContext(int argc, char **argv, bool fUseOpenGL);
+bool InitOpenGLContext(int *argc, char** argv);
+void InitOpenGLBuffers();
+
+/* Creating / deleting OpenGL pixel buffer objects */ 
+void CreatePBO(GLuint* fPBO, struct cudaGraphicsResource **fPBO_Resource);
+void DeletePBO(GLuint* fPBO);
+
+/* Creating / deleting OpenGL textures */ 
+void CreatetextureDst(GLuint* fTextureID, unsigned int xSize, unsigned int ySize);
+void CreateTextureSrc(GLuint* fTextureID, unsigned int xSize, unsigned int ySize);
+void DeleteTexture(GLuint* fTex);
+
+/* Creating / deleting OpenGL framebuffer object */ 
+void CreateFrameBuffer(GLuint* fFBO, GLuint fColor);
+void DeleteFrameBuffer(GLuint* fFBO);
+
+/* OpenGL callBacks */ 
+void DisplayGL();
+void IdleGL();
+void KeyBoardGL(unsigned char fKey, int x, int y);
+void ReshapeGL(int fWisth, int fHeight);
+void MainMenuGL(int iSelection);
+
+#endif // _FOURIER_VOLUME_RENDERER_H
+```
+
+### fourierVolumeRendererKernel.cu
+```
+/********************************************************************* 
+ * Copyrights (c) Marwan Abdellah. All rights reserved.  
+ * This code is part of my Master's Thesis Project entitled "High 
+ * Performance Fourier Volume Rendering on Graphics Processing Units 
+ * (GPUs)" and submitted to the Systems & Biomedical Engineering
+ * Department, Faculty of Engineering, Cairo University. 
+ * Please, don't use or distribute without authors' permission. 
+ 
+ * File			: fourierVolumeRendererKernel.cu
+ * Author(s)	: Marwan Abdellah <abdellah.marwan@gmail.com> 
+ * Created		: April 2011
+ * Description	: 
+ * Note(s)		: 
+ *********************************************************************/
+
+/* Utilities & System Includes */ 
+// #include <shrUtils.h>
+#include <cutil_inline.h>
+
+
+/* GPU profiling */ 
+// #define GPU_PROFILING
+
+/* */
+texture < float2, 2, cudaReadModeElementType > inTex;
+
+/* cuda FFT Plan */
+cufftHandle fftPlan;
+
+/********************************************************************
+ * Name: 
+ * __device__ GetPixelFloat
+ *
+ * Description: 
+ * Returns the complex value of the 2D spectal slice texture at (x,y).   
+ *
+ * Formal Parameters:
+ * x (int), y (int): Texel position in the input texture. 
+ *
+ * Returns:
+ * valTex (float2) : Complex value of the textule at (x,y). 
+ * 
+ * Note(s):
+ * This function executes on device and callable only from the device.
+ * inTex is global.
+ ********************************************************************/ 
+__device__ 
+float2 GetPixelFloat(int x, int y)
+{
+	float2 valTex = tex2D(inTex, x, y);
+	return valTex;
+}
+
+/********************************************************************
+ * Name: 
+ * __global__ fftShift2D_Kernel
+ *
+ * Description: 
+ * Wrapping around a 2D input array.   
+ *
+ * Formal Parameters:
+ * devArrayOutput (float*) : Output shifted array, 
+ * devArrayInput (float*) : Input array, 
+ * arrSize1D (int) : Size of the projection-slice in 1D. 
+ *
+ * Returns:
+ * void. 
+ * 
+ * Note(s):
+ * This function executes on device and callable from the host.
+ ********************************************************************/
+__global__
+void fftShift2D_Kernel(float* devArrayOutput, float* devArrayInput, int arrSize1D)
+{
+	/* 1D Line */  
+	int sLine = arrSize1D; 
+	
+	/* 2D Slice */
+	int sSlice = arrSize1D * arrSize1D; 
+	
+	/* Transformations Equations */
+	int sEq1 = (sSlice + sLine) / 2;
+	int sEq2 = (sSlice - sLine) / 2; 
+	
+	/* Thread index (1D) */
+	int xThreadIdx = threadIdx.x;
+	int yThreadIdx = threadIdx.y;
+
+	/* Block width & height */
+	int blockWidth = blockDim.x;
+	int blockHeight = blockDim.y;
+
+	/* Thread index (2D) */  
+	int xIndex = blockIdx.x * blockWidth + xThreadIdx;
+	int yIndex = blockIdx.y * blockHeight + yThreadIdx;
+	
+	/* Thread (x,y) index converted into 1D index */
+	int index = (yIndex * arrSize1D) + xIndex;
+	
+	if (xIndex < arrSize1D / 2)
+	{
+		if (yIndex < arrSize1D / 2)
+		{
+			/* First Quad */
+			devArrayOutput[index] = devArrayInput[index + sEq1]; 
+		}
+		else 
+		{
+			/* Third Quad */
+			devArrayOutput[index] = devArrayInput[index - sEq2]; 
+		}
+	}
+	else 
+	{
+		if (yIndex < arrSize1D / 2)
+		{
+			/* Second Quad */
+			devArrayOutput[index] = devArrayInput[index + sEq2];
+		}
+		else 
+		{
+			/* Fourth Quad */
+			devArrayOutput[index] = devArrayInput[index - sEq1]; 
+		}
+	}
+}
+
+/********************************************************************
+ * Name: 
+ * __global__ TransferData
+ *
+ * Description: 
+ * Transfering projection-slice data from into texture array.     
+ *
+ * Formal Parameters:
+ * devArrayOutput (float*) : Output shifted array, 
+ * devArrayInput (float*) : Input array, 
+ * arrSize1D (int) : Size of the projection-slice in 1D.  
+ *
+ * Returns:
+ * void. 
+ * 
+ * Note(s):
+ ********************************************************************/ 
+__global__
+void TransferData(cufftComplex* fftResult, float* outputTextureImage, float* TempArray, int imgWidth, int imgHeight, int fScaleFactor)
+{
+	/* Thread ID */
+	int xThreadID = threadIdx.x;
+	int yThreadID = threadIdx.y;
+
+	/* Block width & height */
+	int blockWidth = blockDim.x;
+	int blockHeight = blockDim.y;
+
+	/* Thread index 2D */  
+	int xIndex = blockIdx.x * blockWidth + xThreadID;
+	int yIndex = blockIdx.y * blockHeight + yThreadID;
+	
+	/* Thread Index Converted into 1D Index */
+	int index = ((yIndex * imgWidth) + xIndex); 
+	
+	float realVal = fftResult[index].x / (imgWidth * imgHeight * fScaleFactor); 
+	float imgVal  = fftResult[index].y / (imgWidth * imgHeight * fScaleFactor);
+	
+	/* Save the complex value to the output texture array */ 
+ 	float varTemp = sqrt((realVal * realVal) + (imgVal * imgVal)) / 1;
+ 	outputTextureImage[index] =  varTemp; 
+ 	
+	/* Save the compex value to the TempArray to be used later ! */
+	TempArray[index] = varTemp; 
+ } 
+
+/********************************************************************
+ * Name: 
+ * __global__ ProcessCUDA
+ *
+ * Description: 
+ * Processing CUDA.     
+ *
+ * Formal Parameters:
+ * imgWidth (int) : Reconstructed image width,
+ * imgHeight (int) : Reconstructed image height, 
+ * fftInput (cufftComplex*) : Input projection-slice to 2D iFFT.    
+ *
+ * Returns:
+ * void. 
+ * 
+ * Note(s): 
+ ********************************************************************/
+__global__ 
+void ProcessCUDA(int imgWidth, int imgHeight, cufftComplex* fftInput)
+{
+	/* Thread ID */
+	int xThreadID = threadIdx.x;
+	int yThreadID = threadIdx.y;
+
+	/* Block width/height */
+	int blockWidth = blockDim.x;
+	int blockHeight = blockDim.y;
+
+	/* Thread index */ 
+	int x = blockIdx.x * blockWidth + xThreadID;
+	int y = blockIdx.y * blockHeight + yThreadID;
+	
+	/* Fetching pixel value from input texture */ 
+	float2 pixelVal = GetPixelFloat(x, y); 
+
+	/* Save opixel in the complex array */   
+	fftInput[(y * imgWidth) + x].x = pixelVal.x;
+	fftInput[(y * imgWidth) + x].y = pixelVal.y;
+}
+
+/********************************************************************
+ * Name: 
+ * LaunchProcessingCUDA
+ *
+ * Description: 
+ * Transfering projection-slice data from into texture array.     
+ *
+ * Formal Parameters:
+ * fGrid (dim3) : CUDA grid , 
+ * fBlock (dim3) : CUDA block , 
+ * inputSpectSlice (cudaArray*) : Input spectral projection-slice, 
+ * outputImage (float*) : Output reconstructed image, 
+ * imgWidth (int) : Reconstructed image width, 
+ * imgHeight (int) : Reconstructed image height,
+ * fftInput (cufftComplex*) : Input array to CUFFT, 
+ * fftOutput (cufftComplex*) : Output array from the CUFFT, 
+ * TempArray (float*) : Temporary array used during the 2D FFT shift, 
+ * ScaleFactor (int) : Scaling factor to normalize the output image.  
+ *
+ * Returns:
+ * void. 
+ * 
+ * Note(s): For "channle descriptor", see CUDA manual. 
+ ********************************************************************/ 
+extern "C" 
+void LaunchProcessingCUDA ( dim3 fGrid, 
+							dim3 fBlock, 
+							cudaArray* inputSpectSlice, 
+							float* outputImage, 
+							int imgWidth, 
+							int imgHeight, 
+							cufftComplex* fftInput, 
+							cufftComplex* fftOutput, 
+							float* TempArray, 
+							int ScaleFactor )
+{
+	/* Bind input projection-slice (CUDA Array) into inTex Texture */
+	cutilSafeCall(cudaBindTextureToArray(inTex, inputSpectSlice));
+
+	/* Get texture format (or channle descriptor) */ 
+	struct cudaChannelFormatDesc formatTexture; 
+	cutilSafeCall(cudaGetChannelDesc(&formatTexture, inputSpectSlice));
+
+#ifdef GPU_PROFILING
+	/* Profiling timer */
+	unsigned int timerGPU = 0;
+	
+	/* Creating timer */
+	cutilCheckError(cutCreateTimer(&timerGPU));
+	
+	/* Number of iterations */
+	int numIterations = 30;
+	for(int i = -1; i < numIterations; ++i) 
+	{
+		if(i == 0)
+		cutilCheckError(cutStartTimer(timerGPU));
+#endif  
+		/* Resample input slice on CUDA */ 
+		ProcessCUDA <<< fGrid, fBlock >>> (imgWidth, imgHeight, fftInput); 
+	
+		/* Doing inverse 2D cuFFT */
+		cufftPlan2d(&fftPlan, imgWidth, imgHeight, CUFFT_C2C);
+		cufftExecC2C(fftPlan, fftInput, fftOutput, CUFFT_INVERSE);
+
+		/* Getting real image & transfer data to texture */
+		TransferData <<< fGrid, fBlock >>> (fftOutput, outputImage, TempArray, imgWidth, imgHeight, ScaleFactor); 
+		
+		dim3 dimBlock(4,4,1);
+		dim3 dimGrid(imgWidth / 4, imgHeight / 4, 1); 
+
+		/* Wrap-around */
+		fftShift2D_Kernel <<< dimGrid, dimBlock >>> (outputImage, TempArray, imgWidth); 
+			
+#ifdef GPU_PROFILING
+	}
+	
+	/* Synchronization */ 
+	cudaThreadSynchronize();
+	
+	/* Stop timer */
+	cutilCheckError(cutStopTimer(timerGPU));
+
+	/* Profiling benchmarks */ 
+	double secondsGPU = cutGetTimerValue(timerGPU) / ((double) numIterations * 1000.0);
+	double numTexels = (double) imgWidth * (double) imgHeight;
+	double numTexPerSec = 1.0e-6 * (numTexels / secondsGPU);
+	
+#endif
+}
+```
+
+### initVariables.h
+```
+/********************************************************************* 
+ * Copyrights (c) Marwan Abdellah. All rights reserved.  
+ * This code is part of my Master's Thesis Project entitled "High 
+ * Performance Fourier Volume Rendering on Graphics Processing Units 
+ * (GPUs)" and submitted to the Systems & Biomedical Engineering, 
+ * Faculty of Engineering, Cairo University. 
+ * Please, don't use or distribute without authors' permission. 
+ 
+ * File			: fourierVolumeRenderer.h
+ * Author(s)	: Marwan Abdellah <abdellah.marwan@gmail.com> 
+ * Created		: April 2011
+ * Description	: Main header file for the project. 
+ *********************************************************************/ 
+
+#include "fourierVolumeRenderer.h"
+void InitVars()
+{
+	printf("-------------------------- \n"); 
+	printf("Initializing Variables ... \n");
+	printf("-------------------------- \n\n"); 
+	
+
+
+	// Volume Attributes
+	mVolWidth_DS			= 256;
+	mVolHeight_DS			= 256;
+	mVolDepth_DS			= 256;
+
+	mVolumeSize_DS 		= mVolWidth_DS * mVolHeight_DS * mVolDepth_DS;
+	mVolumeSizeBytes_DS	= mVolumeSize_DS * sizeof(mVolumeType);
+
+	
+	// Volume Attributes
+	mVolWidth			= 256;
+	mVolHeight			= 256;
+	mVolDepth			= 256;
+	mUniDim 			= 256;
+
+	mVolArea 			= mVolWidth * mVolHeight;
+	mVolumeSize 		= mVolWidth * mVolHeight * mVolDepth;
+	mVolumeSizeBytes	= mVolumeSize * sizeof(mVolumeType);
+	
+	printf("Loaded Volume Attributes  \n\n"); 
+	printf("    Volume Width        : [%d] \n", mVolWidth);
+	printf("    Volume Height       : [%d] \n", mVolHeight);
+	printf("    Volume Depth        : [%d] \n", mVolDepth);
+	printf("    Volume Unified Dim. : [%d] \n", mUniDim);
+	printf("    Volume Size         : [%d] x [%d] x [%d] = [%d] Voxels\n", mVolWidth, mVolHeight, mVolDepth, mVolumeSize);
+	printf("    Volume Cross-Sec.   : [%d] x [%d] = [%d] Pixels  \n\n", mVolWidth, mVolHeight, mVolArea);
+	
+	printf("    Volume Size (Bytes)    : [%d] Bytes \n", mVolumeSizeBytes);
+	if ((mVolumeSizeBytes / (1024)) != 0)
+	printf("    Volume Size (kBytes)   : [%d] kBytes \n", mVolumeSizeBytes / 1024);
+	if ((mVolumeSizeBytes / (1024 * 1024)) != 0)
+	printf("    Volume Size (MBytes)   : [%d] MBytes \n\n", mVolumeSizeBytes / (1024 * 1024));
+	
+	printf("    Complex 3D Spectrum Size (kBytes) : [%d] kBytes \n", mVolumeSizeBytes  * (sizeof(float) * 8 ) * 2 / (1024));
+	if ((mVolumeSizeBytes  * (sizeof(float) * 8 ) * 2 / (1024 * 1024)) != 0)
+	printf("    Complex 3D Spectrum Size (MBytes) : [%d] MBytes \n\n", mVolumeSizeBytes  * (sizeof(float) * 8 ) * 2 / (1024 * 1024));
+	printf("------------------------------------------------------------------------------ \n\n"); 
+	
+	// Slice & Image Attributes
+	mSliceWidth 	= mVolWidth; 
+	mSliceHeight 	= mVolHeight;
+	mSliceSize 		= mSliceWidth * mSliceHeight;
+
+	mImageWidth 	= mVolWidth;
+	mImageHeight	= mVolHeight;
+	
+	printf("Extracted Slice & Reconstructed Image Attributes  \n\n"); 
+	printf("    (Slice / Image) Width    : [%d] \n", mSliceWidth);
+	printf("    (Slice / Image) Height   : [%d] \n", mSliceHeight);
+	printf("    (Slice / Image) Area     : [%d] x [%d] = [%d] Pixels / Texels \n\n", mSliceWidth, mSliceHeight, mSliceSize);
+	
+	printf("    Complex Slice Size (Bytes)  : [%d] Bytes \n", mSliceSize * (sizeof(float) * 8) * 2);
+	if ((mSliceSize * (sizeof(float) * 8) * 2 / 1024) != 0)
+	printf("    Complex Slice Size (kBytes) : [%d] kBytes \n\n", mSliceSize * (sizeof(float) * 8) * 2 / 1024);
+	
+	printf("    Image Size (Bytes)  : [%d] Bytes \n", mSliceSize * (sizeof(float) * 8));
+	printf("    Image Size (kBytes) : [%d] kBytes \n\n", mSliceSize * (sizeof(float) * 8) / 1024);
+	printf("------------------------------------------------------------------------------ \n\n"); 
+
+	// Texture Attributes
+	mNumTexels 			= mSliceSize;
+	mNumValues 			= mSliceSize * 1;
+	mTextureDataSize 	= mNumValues * sizeof(float);
+	
+	printf("Texture Parameters  \n"); 
+	printf("	Number of Texels in Slice	: %d \n", mNumTexels);
+	printf("	Number of Color Components  	: %d \n", mNumValues);
+	printf("	Texture Data Size 		: %d \n \n", mTextureDataSize); 
+}
+```
+
+### loadData.h
+```
+/********************************************************************* 
+ * Copyrights (c) Marwan Abdellah. All rights reserved.  
+ * This code is part of my Master's Thesis Project entitled "High 
+ * Performance Fourier Volume Rendering on Graphics Processing Units 
+ * (GPUs)" and submitted to the Systems & Biomedical Engineering
+ * Department, Faculty of Engineering, Cairo University. 
+ * Please, don't use or distribute without authors' permission. 
+ 
+ * File			: loadData.h
+ * Author(s)	: Marwan Abdellah <abdellah.marwan@gmail.com> 
+ * Created		: April 2011
+ * Description	: 
+ * Note(s)		: 
+ *********************************************************************/
+
+#include "fourierVolumeRenderer.h"
+
+/********************************************************************
+ * Name: 
+ * LoadRawFile
+ *
+ * Description: 
+ * Loading the raw volume and returning a pointer to the containing 
+ * array. 
+ *
+ * Formal Parameters:
+ * File name (char*) : Name of the loaded file, 
+ * File size (size_t) : Size of the loaded file. 
+ *
+ * Returns:
+ * Volume Data (char*) : Pointer to the loaded volume. 
+ * 
+ * Note(s):
+ * fVolumeData is internal. 
+ ********************************************************************/ 
+char* LoadRawFile(char* fFileName, size_t fSize)
+{
+	/* Pointer to the file */
+	FILE* fPtrFile; 
+	
+	/* Open the file */
+	fPtrFile = fopen(fFileName, "rb"); 
+	
+	/* Check for a valid file */
+	if (!fPtrFile)
+	{
+		fprintf(stderr, "Error Opening File '%s' ... \n", fFileName); 
+		exit(0); 
+	}
+	
+	/* Volume array */   
+	char* fVolumeData = (char*) malloc (fSize); 
+	
+	/* Read the volume file into the array */
+	size_t fFileSizeBytes = fread(fVolumeData, 1, fSize, fPtrFile); 
+	
+	/* Volume array */
+	return fVolumeData; 
+}
+
+/********************************************************************
+ * Name: 
+ * InitData
+ *
+ * Description: 
+ * Heigher level function for loading the volume.   
+ *
+ * Formal Parameters:
+ * void. 
+ *
+ * Returns:
+ * void. 
+ *
+ * Note(s): 
+ * mVolumeData is global. 
+ * mPath is global. 
+ ********************************************************************/
+void InitData()
+{
+	printf("Loading DataSet ... \n"); 
+	
+	/* Path checking */
+	if (mPath == 0) 
+	{
+		printf("Error Finding File '%s' ... \n", mPath); 
+		exit(0); 
+	}
+	 
+	/* Loading Data from the file specified by the mPath */  
+	mVolumeData = LoadRawFile(mPath, mVolumeSizeBytes_DS); 
+	
+	printf("	DataSet Loaded Successfully \n\n");
+}
+
+
+/********************************************************************
+ * Name: 
+ * AllocateVolumeArrays
+ *
+ * Description: 
+ * 
+ *
+ * Formal Parameters:
+ * void. 
+ *
+ * Returns:
+ * void.
+ *
+ * Note(s):
+ * volIn3D, volOut3D, mExtractedVolumeData are globals.
+ ********************************************************************/
+void AllocateVolumeArrays()
+{ 
+	/* Allocating input volume 3D array */
+	volIn3D = (char***) malloc(mVolWidth_DS * sizeof(char**));
+	for (int y = 0; y < mVolWidth_DS; y++)
+	{
+		volIn3D[y] = (char**) malloc (mVolHeight_DS * sizeof(char*));
+		for (int x = 0; x < mVolHeight_DS; x++)
+		{
+			volIn3D[y][x] = (char*) malloc(mVolDepth_DS * sizeof(char));
+		}
+	}
+	
+	/* Allocating output volume 3D array */
+	volOut3D = (char***) malloc(mVolWidth * sizeof(char**));
+	for (int y = 0; y < mVolWidth; y++)
+	{
+		volOut3D[y] = (char**) malloc (mVolHeight * sizeof(char*));
+		for (int x = 0; x < mVolHeight; x++)
+		{
+			volOut3D[y][x] = (char*) malloc(mVolDepth * sizeof(char));
+		}
+	}
+	
+	/* Allocating extracted volume array */
+	mExtractedVolumeData = (char*) malloc ( mVolumeSize * sizeof(char)); 
+}
+
+/********************************************************************
+ * Name: 
+ * ExtractVolume
+ *
+ * Description: 
+ * Allocating 3D arrays for the loaded input volume, the extracted 
+ * subvolume, and 1D array for the extracted subvolume. 
+ * Extracting the subvolume from the loaded volume.
+ * Repacking the subvolume in 1D array. 
+ *
+ * Formal Parameters:
+ * void. 
+ *
+ * Returns:
+ * void.
+ *
+ * Note(s):
+ * mVolumeData, volIn3D, volOut3D, mExtractedVolumeData are globals.
+ ********************************************************************/
+void ExtractVolume()
+{	
+	/* Allocating input volume, output volume, extracted volume arrays */ 
+	AllocateVolumeArrays(); 
+
+	/* Moving the 3D volume from the input 1D array mVolumeData to the 
+	 * 3D array volIn3D */ 
+	int ctr = 0; 
+	for (int i = 0; i < mVolWidth_DS; i++)
+	{
+		for (int j = 0; j < mVolHeight_DS; j++)
+		{
+			for (int k = 0; k < mVolDepth_DS; k++)
+			{
+				volIn3D[i][j][k] = mVolumeData[ctr]; 
+				ctr++; 
+			}
+		}
+	}
+
+	/* Starting point (X, Y, Z) to extract the smaller subvolume */
+	int startX = 0;
+	int startY = 0;
+	int startZ = 0;
+
+	/* Extract smaller subvolume from the original loaded dataset */ 
+	for (int i = 0; i < mVolWidth; i++)
+	{
+		for (int j = 0; j < mVolHeight; j++)
+		{
+			for (int k = 0; k < mVolDepth; k++)
+			{
+				volOut3D[i][j][k] = volIn3D[(startX) + i][(startY) + j][(startZ) + k];
+				
+			}
+		}
+	}
+
+	/* Repack the extracted Volume in 1D array for later usage */ 
+	ctr = 0;
+	for (int i = 0; i < mVolWidth; i++)
+	{
+		for (int j = 0; j < mVolHeight; j++)
+		{
+			for (int k = 0; k < mVolDepth; k++)
+			{
+				mExtractedVolumeData[ctr] = volOut3D[i][j][k]; 
+				ctr++; 
+			}
+		}
+	}
+} 
+
+/********************************************************************
+ * Name: 
+ * CreateFloatData
+ *
+ * Description: 
+ * Allocating 3D arrays for the loaded input volume, the extracted 
+ * subvolume, and 1D array for the extracted subvolume. 
+ * Extracting the subvolume from the loaded volume.
+ * Repacking the subvolume in 1D array. 
+ *
+ * Formal Parameters:
+ * void. 
+ *
+ * Returns:
+ * void.
+ *
+ * Note(s):
+ ********************************************************************/
+void CreateFloatData()
+{
+	/* Allocate float array for the input volume to increase 
+	 * precision */
+	mVolumeDataFloat = (float*) malloc ( mVolumeSize * sizeof(float)); 
+	
+	/* Extract the subvolume from the loaded volume */
+	ExtractVolume(); 
+	
+	/* Packing the extracted volume in the float 1D array */ 
+	printf("Packing Data in a Float Array ... \n"); 
+	for (int i = 0; i < mVolumeSize; i++)
+		mVolumeDataFloat[i] = (float) (unsigned char) mExtractedVolumeData[i];
+	printf("	Packing is Done  \n");
+	
+	/* Realeasing volume in char array */  
+	printf("	Releasing Byte Data 	\n\n");
+	delete [] mVolumeData; 
+}
+
+
+/********************************************************************
+ * Name: 
+ * CreateSpectrum
+ *
+ * Description: 
+ * 
+ *
+ * Formal Parameters:
+ * void. 
+ *
+ * Returns:
+ * void.
+ *
+ * Note(s):
+ * mVolumeData, volIn3D, volOut3D, mExtractedVolumeData are globals.
+ ********************************************************************/
+void CreateSpectrum()
+{
+	printf("Creating Complex Spectrum ... \n"); 	
+	
+	/* Allocating single precision complex array for the created 
+	 * spectrum */  
+	mVolumeArrayComplex = (fftwf_complex*) fftwf_malloc (mVolWidth * mVolHeight * mVolDepth * sizeof(fftwf_complex)); 
+	
+	/* Packing the final volume in the complex array 
+	 * Real component only, the imaginary one is left untill getting 
+	 * the spectrum */  
+	printf("	Packing Volume Array for Single Precision Format ... \n"); 
+	for (int i = 0; i < mVolumeSize; i++)
+	{
+		mVolumeArrayComplex[i][0] = mVolumeDataFloat[i]; 
+		mVolumeArrayComplex[i][1] = 0;
+	}
+	printf("	Packing Done Successfully \n\n"); 
+	
+	/* Fourier transforming the spatial volume and getting the spectral 
+	 * one */ 
+	printf("	Executing 3D Forward FFT  ... \n"); 
+	mFFTWPlan = fftwf_plan_dft_3d(mVolWidth, mVolHeight, mVolDepth, mVolumeArrayComplex, mVolumeArrayComplex, FFTW_FORWARD, FFTW_ESTIMATE);
+	fftwf_execute(mFFTWPlan);
+	printf("	3D Forward FFT Done Successfully  \n\n");	
+}
+
+/********************************************************************
+ * Name: 
+ * PackingSpectrumTexture
+ *
+ * Description: 
+ * 
+ *
+ * Formal Parameters:
+ * void. 
+ *
+ * Returns:
+ * void.
+ *
+ * Note(s):
+ * mVolumeData, volIn3D, volOut3D, mExtractedVolumeData are globals.
+ ********************************************************************/
+void PackingSpectrumTexture()
+{
+	/* Allocating a texture array to suit a 3D OpenGL 32 bit texture 
+	 * with 2 components RG */
+	mTextureArray = (float*) malloc (mVolumeSize * 2 * sizeof(float)); 
+	
+	printf("Packing Spectrum into Texture Array ... \n");
+	int ctr = 0; 
+	for (int i = 0; i < (mVolumeSize * 2); i += 2)
+	{	
+		mTextureArray[i]		= mVolumeArrayComplex[ctr][0];
+		mTextureArray[i + 1]	= mVolumeArrayComplex[ctr][1];
+		ctr++; 
+	}
+	
+	printf("	Packing Spectrum Into Texture Done Successfully \n\n");
+}
+
+/********************************************************************
+ * Name: 
+ * SendSpectrumTextureToGPU
+ *
+ * Description: 
+ * 
+ *
+ * Formal Parameters:
+ * void. 
+ *
+ * Returns:
+ * void.
+ *
+ * Note(s):
+ * mVolumeData, volIn3D, volOut3D, mExtractedVolumeData are globals.
+ ********************************************************************/
+void SendSpectrumTextureToGPU(void)
+{
+	printf("Creating & Binding Spectrum Texture To GPU ... \n"); 
+
+	/* 3D OpenGL texture creation & binding */  
+	glGenTextures(1, &mVolTexureID);
+	glBindTexture(GL_TEXTURE_3D, mVolTexureID);
+	
+	/* Texture parameters */
+	glTexParameteri(GL_TEXTURE_3D, GL_TEXTURE_WRAP_S, GL_REPEAT);
+	glTexParameteri(GL_TEXTURE_3D, GL_TEXTURE_WRAP_T, GL_REPEAT);
+	glTexParameteri(GL_TEXTURE_3D, GL_TEXTURE_WRAP_R, GL_REPEAT);
+	glTexParameteri(GL_TEXTURE_3D, GL_TEXTURE_MAG_FILTER, GL_LINEAR);
+	glTexParameteri(GL_TEXTURE_3D, GL_TEXTURE_MIN_FILTER, GL_LINEAR);
+	
+	/* For Automatic Texture Coordinate Generation */
+	glTexGeni(GL_S, GL_TEXTURE_GEN_MODE, GL_EYE_LINEAR);
+	glTexGeni(GL_T, GL_TEXTURE_GEN_MODE, GL_EYE_LINEAR);
+	glTexGeni(GL_R, GL_TEXTURE_GEN_MODE, GL_EYE_LINEAR);
+	 
+	/* Upload the spectrum array to GPU texture memory */  
+	printf("	Transfer Spectrum to GPU Memory ... \n");
+	glTexImage3D(GL_TEXTURE_3D, 0, RG32F, mVolWidth, mVolHeight, mVolDepth, 0, RG, GL_FLOAT, mTextureArray );
+	printf("	Transfering Data to GPU Memory Done Successfully \n\n"); 
+
+	
+	/*
+	 cudaError_t err = cudaGraphicsGLRegisterImage
+	(&volTextureBufferResource, mVolTexureID, GL_TEXTURE_3D, cudaGraphicsMapFlagsNone);
+
+	 printf("cudaGraphicsGLRegisterImage error [%d]:",err);
+	 if ( err==cudaSuccess) printf( "cudaSuccess" ); 
+	 if ( err==cudaErrorInvalidDevice) printf( "cudaErrorInvalidDevice" ); 
+	 if ( err==cudaErrorInvalidValue) printf( "cudaErrorInvalidValue" ); 
+	 if ( err==cudaErrorInvalidResourceHandle) printf( "cudaErrorInvalidResourceHandle" ); 
+	 if ( err==cudaErrorUnknown) printf( "cudaErrorUnknown" ); 
+	 printf("\n");
+	 */
+}
+```
+
+### wrappingAround.h
+```
+/********************************************************************* 
+ * Copyrights (c) Marwan Abdellah. All rights reserved.  
+ * This code is part of my Master's Thesis Project entitled "High 
+ * Performance Fourier Volume Rendering on Graphics Processing Units 
+ * (GPUs)" and submitted to the Systems & Biomedical Engineering
+ * Department, Faculty of Engineering, Cairo University. 
+ * Please, don't use or distribute without authors' permission. 
+ 
+ * File			: wrappingAround.h
+ * Author(s)	: Marwan Abdellah <abdellah.marwan@gmail.com> 
+ * Created		: April 2011
+ * Description	: 
+ * Note(s)		: 
+ *********************************************************************/
+
+#include "fourierVolumeRenderer.h"
+
+/********************************************************************
+ * Name: 
+ * WrapAroundVolume
+ *
+ * Description: 
+ * Wrapping around or FFT-SHIFTing the "spatial" volume.    
+ *
+ * Formal Parameters:
+ * void.  
+ *
+ * Returns:
+ * void.  
+ * 
+ * Note(s):
+ * mVol_3D and mVolumeDataFloat are globals. 
+ ********************************************************************/ 
+void WrapAroundVolume()
+{
+	printf("Wrapping Around Spatial Volume ... \n"); 
+	
+	/* Shifting the 3D input volume */
+	mVol_3D = FFT_Shift_3D(mVolumeDataFloat, mUniDim);
+	
+	/* Repacking the resulting 3D array into 1D array */
+	mVolumeDataFloat = Repack_3D(mVol_3D, mVolumeDataFloat, mUniDim);
+	
+	printf("	Wrapping Around Spatial Volume Done Successfully \n\n");
+}
+
+/********************************************************************
+ * Name: 
+ * WrapAroundSpectrum
+ *
+ * Description: 
+ * Wrapping around or FFT-SHIFTing the "spectral" volume.    
+ *
+ * Formal Parameters:
+ * void.  
+ *
+ * Returns:
+ * void.  
+ * 
+ * Note(s):
+ * mVolumeDataFloat, mVolumeArrayComplex, mVol_3D are globals.  
+ ********************************************************************/ 
+void WrapAroundSpectrum()
+{
+	printf("Wrapping Around Spectrum Data ... \n");
+	
+	/* Wrapping around the "real" part of the spectrum */
+	printf("	Real Part .... \n");
+	for (int i = 0; i < mVolumeSize; i++)
+		mVolumeDataFloat[i] =  mVolumeArrayComplex[i][0]; 
+	
+	mVol_3D = FFT_Shift_3D(mVolumeDataFloat, mUniDim);
+	mVolumeDataFloat = Repack_3D(mVol_3D, mVolumeDataFloat, mUniDim);
+	
+	for (int i = 0; i < mVolumeSize; i++)
+		mVolumeArrayComplex[i][0] = mVolumeDataFloat[i]; 
+	
+	/* Wrapping around the "imaginary" part of the spectrum */
+	printf("	Imaginary Part .... \n");
+	
+	for (int i = 0; i < mVolumeSize; i++)
+		mVolumeDataFloat[i] =  mVolumeArrayComplex[i][1]; 
+	
+	mVol_3D = FFT_Shift_3D(mVolumeDataFloat, mUniDim);
+	mVolumeDataFloat = Repack_3D(mVol_3D, mVolumeDataFloat, mUniDim);
+	
+	for (int i = 0; i < mVolumeSize; i++)
+		mVolumeArrayComplex[i][1] = mVolumeDataFloat[i];
+	
+	printf("	Wrapping Around Spectrum Data Done Successfully \n\n");
+	
+	
+}
+```

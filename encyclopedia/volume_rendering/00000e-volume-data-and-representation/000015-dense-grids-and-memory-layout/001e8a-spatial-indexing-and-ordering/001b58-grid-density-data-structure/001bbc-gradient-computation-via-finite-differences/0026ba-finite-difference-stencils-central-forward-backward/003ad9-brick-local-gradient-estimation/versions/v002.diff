@@ -1,0 +1,268 @@
+--- v001.md
++++ v002.md
+@@ -4,141 +4,160 @@
+ 
+ ## Overview
+-Brick-local gradient estimation computes the 3D gradient vector for each voxel in a scalar volume using central differences, specifically optimized for brick-based out-of-core rendering architectures [S1, unofficial][S2]. It avoids indirection lookups in the hot rendering loop by computing gradients relative to the current brick's atlas slot, clamping sample positions to the brick's valid sampleable range to handle boundaries [S1, unofficial]. Unlike global gradient maps that require pre-computation of the entire volume, this method computes gradients on-the-fly or per-brick, trading off some boundary consistency for reduced memory bandwidth and simpler data structures [S1, unofficial][S2].
++Brick-local gradient estimation computes the isosurface gradient for volume rendering by applying central differences strictly within the bounds of a single data brick [S1, unofficial]. It solves the problem of indirection overhead and boundary errors when accessing neighbor voxels that may reside in adjacent bricks or lie outside the valid sampleable region [S1, unofficial]. Unlike global central difference methods that require cross-brick lookups or padding, this method clamps sample coordinates to the brick's internal `sampleMin` and `sampleMax` bounds, ensuring all accesses remain local to the current brick's memory slot [S1, unofficial].
+ 
+ ## How it works
+-**Inputs:**
+-- `voxel`: The 3D integer coordinates $(x, y, z)$ of the current voxel within the brick.
+-- `brick`: The current brick object containing metadata such as `lodScale` (step size $h$), `sampleMin`, and `sampleMax` (clamping bounds).
+-- `sampleAtlasAffine`: A function that samples the scalar value from the brick's texture/atlas using affine filtering at a given 3D position.
+-
+-**Outputs:**
+-- `gradient`: A 3D vector $(g_x, g_y, g_z)$ representing the gradient at `voxel`.
++**Inputs and Outputs:**
++*   **Input:** A 3D scalar field $V$ stored in a brick structure; the brick's spatial scale factor $h$ (often `brick.lodScale`); the current voxel position $\mathbf{p}$ (integer indices relative to the brick).
++*   **Output:** A 3D gradient vector $\mathbf{G} = (G_x, G_y, G_z)$.
+ 
+ **Data Structures:**
+-- `brick`: Contains fields:
+-  - `lodScale`: A scalar $h$ representing the step size in finest-level voxels for the current LOD.
+-  - `sampleMin`: A `vec3f` defining the minimum valid sample coordinate within the brick.
+-  - `sampleMax`: A `vec3f` defining the maximum valid sample coordinate within the brick.
++The method operates on a `brick` object containing:
++*   `sampleMin`: A 3D integer vector defining the inclusive lower bound of valid sample indices within the brick.
++*   `sampleMax`: A 3D integer vector defining the inclusive upper bound of valid sample indices within the brick.
++*   `lodScale`: A scalar $h$ representing the voxel spacing at the current level of detail.
++*   `data`: The array of scalar values $V$.
+ 
+ **Algorithm Steps:**
+-1. Initialize `gradient` as a zero vector.
+-2. For each axis $i \in \{x, y, z\}$:
+-   a. Define the offset vector `offset` with $h$ in the $i$-th component and 0 elsewhere.
+-   b. Compute the gradient component using the `brickSlope` function:
+-      $$ g_i = \text{brickSlope}(\text{voxel}, \text{offset}, h, \text{brick}) $$
+-   c. Assign $g_i$ to the corresponding component of `gradient`.
+-3. Return `gradient`.
++For each axis $i \in \{x, y, z\}$, the gradient component $G_i$ is computed using a helper function `brickSlope`.
+ 
+-**Helper Function: `brickSlope`**
+-Given `voxel`, `offset`, `h`, and `brick`:
+-1. Calculate the high and low sample positions by adding/subtracting the offset and clamping to the brick's valid range:
+-   $$ \text{hi} = \text{clamp}(\text{voxel} + \text{offset}, \text{brick.sampleMin}, \text{brick.sampleMax}) $$
+-   $$ \text{lo} = \text{clamp}(\text{voxel} - \text{offset}, \text{brick.sampleMin}, \text{brick.sampleMax}) $$
+-2. Calculate the span in finest-level voxels to ensure a non-zero denominator and correct magnitude near boundaries:
+-   $$ \text{span} = \max\left(\frac{\text{dot}(\text{hi} - \text{lo}, \text{offset})}{h}, 0.001\right) $$
+-3. Sample the scalar values at the clamped positions:
+-   $$ v_{\text{hi}} = \text{sampleAtlasAffine}(\text{hi}, \dots) $$
+-   $$ v_{\text{lo}} = \text{sampleAtlasAffine}(\text{lo}, \dots) $$
+-4. Return the slope:
+-   $$ \text{slope} = \frac{v_{\text{hi}} - v_{\text{lo}}}{\text{span}} $$
++1.  **Define Offset Vector:** Create an offset vector $\mathbf{o}_i$ with magnitude $h$ along axis $i$ and zero elsewhere. For example, for the x-axis: $\mathbf{o}_x = (h, 0, 0)$.
++2.  **Calculate Sample Positions:** Determine the high and low sample indices for the central difference stencil:
++    $$ \mathbf{p}_{hi} = \text{clamp}(\mathbf{p} + \mathbf{o}_i, \text{sampleMin}, \text{sampleMax}) $$
++    $$ \mathbf{p}_{lo} = \text{clamp}(\mathbf{p} - \mathbf{o}_i, \text{sampleMin}, \text{sampleMax}) $$
++    Here, `clamp` restricts each coordinate of the vector to the range $[\text{sampleMin}_k, \text{sampleMax}_k]$ for each dimension $k$.
++3.  **Compute Effective Span:** Calculate the projected distance between the clamped positions along the direction of the offset to handle boundary cases where the stencil is truncated:
++    $$ \text{span} = \max \left( \frac{\mathbf{o}_i \cdot (\mathbf{p}_{hi} - \mathbf{p}_{lo})}{h}, 0.001 \right) $$
++    The term $\mathbf{o}_i \cdot (\mathbf{p}_{hi} - \mathbf{p}_{lo})$ simplifies to $h \cdot (\mathbf{p}_{hi,i} - \mathbf{p}_{lo,i})$ because $\mathbf{o}_i$ is non-zero only in dimension $i$. The denominator $h$ normalizes this to voxel units. The minimum value $0.001$ prevents division by zero.
++4.  **Sample Values:** Retrieve the scalar values at the clamped positions using affine interpolation if necessary (e.g., `sampleAtlasAffine`), or direct indexing if the positions are integer-aligned:
++    $$ V_{hi} = V(\mathbf{p}_{hi}) $$
++    $$ V_{lo} = V(\mathbf{p}_{lo}) $$
++5.  **Compute Slope:** Calculate the gradient component:
++    $$ G_i = \frac{V_{hi} - V_{lo}}{\text{span}} $$
+ 
+ **Pseudocode:**
+ ```python
+-def compute_brick_local_gradient(voxel, brick):
++def compute_brick_local_gradient(brick, voxel_pos):
+     """
+-    Computes the 3D gradient for a voxel within a brick using clamped central differences.
++    Computes the gradient at voxel_pos within a single brick.
+     
+     Args:
+-        voxel (vec3i): Integer coordinates of the voxel within the brick.
+-        brick (Brick): Object containing lodScale, sampleMin, sampleMax, and sampleAtlasAffine.
+-        
++        brick: Object containing 'data' (3D array), 'sampleMin' (vec3), 
++               'sampleMax' (vec3), and 'lodScale' (float h).
++        voxel_pos: Tuple (x, y, z) integer indices.
++    
+     Returns:
+-        vec3f: The computed gradient vector.
++        Tuple (gx, gy, gz) of float gradient components.
+     """
+-    gradient = vec3f(0.0, 0.0, 0.0)
+     h = brick.lodScale
++    sample_min = brick.sampleMin
++    sample_max = brick.sampleMax
++    data = brick.data
+     
+-    # Define unit vectors for each axis scaled by h
++    gx, gy, gz = 0.0, 0.0, 0.0
++    
++    # Define axis offsets
+     offsets = [
+-        vec3f(h, 0.0, 0.0),
+-        vec3f(0.0, h, 0.0),
+-        vec3f(0.0, 0.0, h)
++        (h, 0.0, 0.0),
++        (0.0, h, 0.0),
++        (0.0, 0.0, h)
+     ]
+     
+-    for i in range(3):
+-        offset = offsets[i]
+-        gradient[i] = brick_slope(voxel, offset, h, brick)
++    for i, (dx, dy, dz) in enumerate(offsets):
++        # Step 2: Clamp positions
++        # Calculate potential high and low indices
++        px, py, pz = voxel_pos
+         
+-    return gradient
++        # High position: voxel + offset
++        hi_x = clamp(px + (1 if dx > 0 else -1), sample_min.x, sample_max.x)
++        hi_y = clamp(py + (1 if dy > 0 else -1), sample_min.y, sample_max.y)
++        hi_z = clamp(pz + (1 if dz > 0 else -1), sample_min.z, sample_max.z)
++        
++        # Low position: voxel - offset
++        lo_x = clamp(px - (1 if dx > 0 else -1), sample_min.x, sample_max.x)
++        lo_y = clamp(py - (1 if dy > 0 else -1), sample_min.y, sample_max.y)
++        lo_z = clamp(pz - (1 if dz > 0 else -1), sample_min.z, sample_max.z)
++        
++        # Step 3: Compute effective span
++        # The dot product of offset and (hi - lo) is simply h * (hi_axis - lo_axis)
++        # because offset is non-zero only in one dimension.
++        # We use the absolute difference in indices scaled by h, but the formula 
++        # in source uses dot product directly.
++        # hi - lo vector
++        diff_x = hi_x - lo_x
++        diff_y = hi_y - lo_y
++        diff_z = hi_z - lo_z
++        
++        # Dot product: dx*diff_x + dy*diff_y + dz*diff_z
++        # Since only one component of (dx,dy,dz) is non-zero (equal to +/- h),
++        # this equals h * (diff_axis).
++        dot_product = dx * diff_x + dy * diff_y + dz * diff_z
++        
++        # Span calculation
++        span = dot_product / h
++        if span < 0.001:
++            span = 0.001
++            
++        # Step 4: Sample values
++        # Assuming direct indexing for integer voxel positions. 
++        # If affine sampling is needed, replace with sampleAtlasAffine.
++        val_hi = data[hi_x, hi_y, hi_z]
++        val_lo = data[lo_x, lo_y, lo_z]
++        
++        # Step 5: Compute slope
++        slope = (val_hi - val_lo) / span
++        
++        if i == 0:
++            gx = slope
++        elif i == 1:
++            gy = slope
++        else:
++            gz = slope
++            
++    return (gx, gy, gz)
+ 
+-def brick_slope(voxel, offset, h, brick):
+-    """
+-    Computes the slope along a specific axis for a voxel in a brick.
+-    
+-    Args:
+-        voxel (vec3i): Current voxel coordinates.
+-        offset (vec3f): Offset vector for the difference calculation.
+-        h (float): Step size (lodScale).
+-        brick (Brick): Brick metadata.
+-        
+-    Returns:
+-        float: The computed slope.
+-    """
+-    # Clamp sample positions to the brick's valid sample range
+-    hi = clamp(voxel + offset, brick.sampleMin, brick.sampleMax)
+-    lo = clamp(voxel - offset, brick.sampleMin, brick.sampleMax)
+-    
+-    # Calculate span in finest-level voxels
+-    # dot(hi - lo, offset) gives the distance along the offset direction
+-    # Dividing by h normalizes it, but we take max with 0.001 to avoid division by zero
+-    # and correct magnitude when hi == lo (e.g., at boundaries)
+-    span = max(dot(hi - lo, offset) / h, 0.001)
+-    
+-    # Sample values using affine filtering
+-    val_hi = sample_atlas_affine(hi, brick)
+-    val_lo = sample_atlas_affine(lo, brick)
+-    
+-    return (val_hi - val_lo) / span
++def clamp(value, min_val, max_val):
++    if value < min_val:
++        return min_val
++    elif value > max_val:
++        return max_val
++    else:
++        return value
++```
+ 
+-def clamp(v, min_val, max_val):
+-    """Clamps vector v component-wise between min_val and max_val."""
+-    return vec3f(
+-        max(min(v.x, max_val.x), min_val.x),
+-        max(min(v.y, max_val.y), min_val.y),
+-        max(min(v.z, max_val.z), min_val.z)
+-    )
++**Parameters:**
++*   `0.001`: Minimum span value to prevent division by zero. [S1, unofficial]
++*   `sampleMin`/`sampleMax`: Defined by the brick's geometry and LOD level. [S1, unofficial]
+ 
+-def dot(v1, v2):
+-    """Dot product of two 3D vectors."""
+-    return v1.x * v2.x + v1.y * v2.y + v1.z * v2.z
+-
+-def sample_atlas_affine(pos, brick):
+-    """
+-    Samples the scalar value from the brick's atlas using affine filtering.
+-    Implementation details depend on the specific graphics API (e.g., WebGL2, Vulkan).
+-    This is a placeholder for the actual texture sampling operation.
+-    """
+-    # [G] In a real implementation, this would call a texture sampler function
+-    # provided by the graphics API, using the brick's texture handle and pos.
+-    # For the purpose of this algorithm description, we assume it returns a float.
+-    pass
+-```
++**Edge Cases and Pitfalls:**
++*   **Boundary Truncation:** At the edges of a brick, the central difference stencil is truncated. The `span` calculation dynamically adjusts the denominator to reflect the actual distance between the sampled points, preventing artificially large gradients [S1, unofficial].
++*   **Zero Span:** If a voxel is at the boundary and both neighbors are clamped to the same value (e.g., at a corner where all neighbors are clamped to the same voxel), the span would be zero. The minimum threshold `0.001` handles this [S1, unofficial].
+ 
+ ## Subtopics
+ 
+ ### Gradient Cache
+-A caching mechanism on a per-brick basis to store computed gradients, avoiding redundant calculations for gradients computed in the derivative-first manner [S2]. It uses two data structures: the gradient cache itself and a bit list indicating if a particular gradient has already been computed and is in the cache [S2]. The cache size equals the number of voxels in the brick [S2]. When a gradient needs to be computed, the corresponding presence bit is checked; if not set, the gradient is calculated and stored [S2]. After processing the brick, the cache is flushed for the next brick [S2]. Gradients on the border of a brick are calculated up to eight times (once per adjacent brick), but this is rare and causes no significant performance loss [S2]. An average speedup factor of approximately 2.2 can be expected [S2]. However, this high speedup is only expected with orthogonal projection; in perspective rendering, ray divergence for distant bricks increases neighbor distance, lowering cache reuse ratio [S2].
++A caching mechanism applied on a per-brick basis to store computed gradients, avoiding redundant calculations for gradients computed in the derivative-first manner [S2].
++
++*   **Definition:** Stores previously computed gradient vectors for voxels within a brick to reuse them for subsequent rays or samples [S2].
++*   **Data Structures:**
++    1.  **Gradient Cache:** A 3D array of gradient vectors, sized equal to the number of voxels in the brick [S2].
++    2.  **Bit List:** A bitmask or boolean array of the same size as the cache, indicating whether the gradient at each voxel has already been computed and stored [S2].
++*   **Steps:**
++    1.  When a gradient is required for a voxel, check the corresponding bit in the bit list [S2].
++    2.  If the bit indicates the gradient is not in the cache, compute it using the brick-local estimation method and store it in the cache [S2].
++    3.  After processing all rays for the current brick, flush the cache (clear the bit list) before moving to the next brick [S2].
++*   **Pitfalls:**
++    *   **Border Recalculation:** Gradients on the border of a brick may be calculated up to eight times (once for each adjacent brick that shares the boundary), though this is rare and causes negligible performance loss [S2].
++    *   **Perspective Divergence:** High speedup is primarily observed with orthogonal projection. In perspective rendering, rays diverge for distant bricks, increasing the distance between neighboring rays and lowering the cache reuse ratio [S2].
++*   **Performance:** Average speedup factor of approximately 2.2 [S2].
+ 
+ ## Operating characteristics
+-- **Time Complexity:** $O(1)$ per voxel for gradient computation, assuming constant-time texture sampling and clamping. With the gradient cache, the average time is reduced by a factor of approximately 2.2 under orthogonal projection [S2].
+-- **Memory Complexity:** $O(N)$ per brick, where $N$ is the number of voxels in the brick, for the gradient cache and bit list [S2].
+-- **Measured Performance:** Average speedup of 2.2x with gradient cache under orthogonal projection [S2]. Performance degrades in perspective rendering due to lower cache reuse [S2].
+-- **Strengths:** Avoids indirection lookups in the hot loop [S1, unofficial]; reduces redundant calculations via caching [S2]; handles brick boundaries gracefully via clamping [S1, unofficial].
+-- **Limitations:** Gradients at brick boundaries may be inconsistent if not cached/shared [S1, unofficial]; cache effectiveness drops significantly in perspective rendering [S2]; requires additional memory for cache and bit list [S2].
+-- **When to use:** When rendering brick-based volumes with orthogonal projection and memory bandwidth is a bottleneck [S2].
+-- **When not to use:** When perspective rendering is required and cache reuse is low [S2]; when global gradient consistency is critical and pre-computation is feasible [S2].
++*   **Time Complexity:** $O(1)$ per voxel for gradient computation, assuming constant-time array access and clamping. With the Gradient Cache, the amortized cost decreases for rays that traverse multiple voxels within the same brick, particularly under orthogonal projection.
++*   **Memory Complexity:** $O(N)$ per brick for the gradient cache, where $N$ is the number of voxels in the brick. This adds significant memory overhead compared to on-the-fly computation.
++*   **Strengths:** Eliminates cross-brick memory indirection, improving cache locality and reducing latency in the hot loop [S1, unofficial]. Handles brick boundaries robustly without external padding [S1, unofficial].
++*   **Limitations:** The Gradient Cache variant is less effective in perspective rendering due to reduced spatial coherence of rays across distant bricks [S2]. The clamping strategy may introduce slight inaccuracies in gradient magnitude at brick boundaries compared to a global stencil with proper padding, though the span correction mitigates this [S1, unofficial].
++*   **When to Use:** Use when rendering large out-of-core datasets divided into bricks where memory bandwidth and cache locality are critical bottlenecks [S1, unofficial]. Use the Gradient Cache variant when rendering orthogonal views or when the scene allows for high ray coherence within bricks [S2].
+ 
+ ## Background
+-Brick-local gradient estimation was developed as part of interactive volume rendering techniques for out-of-core datasets, specifically to optimize gradient computation in ray casting [S1, unofficial][S2]. The method leverages the spatial locality of rays within a brick to minimize memory access overhead [S1, unofficial]. The gradient cache variant was proposed by Grimm et al. [GBKG04] and discussed in the context of interactive volume rendering with ray tracing by Marmitt et al. [S2]. It is used in systems like Kiln for webGPU-native out-of-core volume rendering [S1, unofficial].
++The method was introduced in the context of interactive volume rendering with ray tracing, specifically to optimize the gradient computation step in derivative-first rendering approaches [S2]. The specific implementation details involving `brickSlope` and clamping to `sampleMin`/`sampleMax` are documented in the Kiln renderer project, which targets web-based, out-of-core volume rendering [S1, unofficial]. The concept of caching gradients per brick was proposed by Grimm et al. [GBKG04] and discussed in the Eurographics State of the Art Report on Interactive Volume Rendering [S2].
+ 
+ ## Sources

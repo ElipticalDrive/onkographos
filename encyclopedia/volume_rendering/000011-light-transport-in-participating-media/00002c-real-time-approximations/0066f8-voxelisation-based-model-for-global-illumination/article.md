@@ -1,0 +1,72 @@
+# Voxelisation based model for global illumination
+
+Also called: Unreal Technologies Voxel GI
+
+## Overview
+A global illumination technique presented by Unreal Technologies that utilizes a voxel-based scene representation to approximate light transport [S1]. It distinguishes itself by integrating voxelization directly into a deferred rendering pipeline, making it suitable for real-time applications in modern computer games [S1].
+
+## How it works
+**Inputs and Outputs:**
+*   **Input:** A 3D scene represented as a voxel grid (volume) rather than a polygon mesh [S1].
+*   **Output:** A rendered image with global illumination effects [S1].
+
+**Data Structures:**
+*   **Voxel Grid:** A 3D array of voxels. The specific resolution, bit-depth, and field layout are not given in the sources [S1].
+
+**Steps:**
+1.  **Voxelization:** Convert the scene geometry into a voxel representation [S1].
+2.  **Deferred Rendering Pipeline:** Apply the deferred rendering technique to the voxel data [S1].
+3.  **Global Illumination Calculation:** Compute lighting contributions within the voxel structure [S1].
+
+**Pseudocode:**
+> **Unverified code.** The code below did not pass a test run against a reference implementation, or no test fits it, so it may contain errors.
+
+```python
+# Pseudocode based on [S1]
+# Note: Specific algorithms for voxelization and GI calculation are not provided in the source.
+
+def voxel_gi_pipeline(scene):
+    # Step 1: Voxelize the scene
+    # The source mentions the model builds a 3D model from voxels instead of polygon meshes [S1].
+    voxel_grid = voxelize(scene.geometry)
+    
+    # Step 2: Apply Deferred Rendering
+    # The method applies deferred rendering [S1].
+    # In a standard deferred pipeline, this would involve:
+    # 1. Rendering geometry to G-buffers (position, normal, albedo, etc.).
+    # 2. Lighting pass using these buffers.
+    # However, the source implies the voxel grid itself is the primary data structure for this process.
+    apply_deferred_rendering(voxel_grid)
+    
+    # Step 3: Compute Global Illumination
+    # The source states this is a model for global illumination [S1].
+    # Specific tracing or integration steps are not detailed.
+    compute_global_illumination(voxel_grid)
+    
+    return final_image
+```
+
+**Parameters:**
+*   Voxel resolution: Not given in the sources [S1].
+*   Deferred rendering settings: Not given in the sources [S1].
+
+**Edge Cases and Pitfalls:**
+*   The source notes that defining the term "voxel" can be difficult and literature varies [S1].
+*   Precision issues related to voxel discretization are not discussed [S1].
+
+## Subtopics
+
+### Voxel Model Rendering
+A method for representing participating media using a voxel model [S2, unofficial]. Rendering is separated into two stages: (1) calculation of radiance arriving at each voxel from all light sources, and (2) solving eye radiance using intermediate results by an illumination model [S2, unofficial]. This approach fits only polygonal objects [S2, unofficial].
+
+## Operating characteristics
+*   **Performance:** The method can give large performance improvements over CPU methods by utilizing GPU tracing [S1].
+*   **Applicability:** The technology is described as ready for modern computer games [S1].
+*   **Limitations:** The source does not provide specific memory complexity, scaling behavior, or measured performance metrics [S1].
+
+## Background
+The technique was presented by Unreal Technologies [S1]. It is part of the evolving field of voxel-based image synthesis, which is predicted to become common on average computer screens [S1]. The approach is situated within the broader context of modern lighting trends aiming for realistic scene illumination [S1]. Other papers [7, 8] also approach modern lighting using voxel-based technology [S1].
+
+## Sources
+[S1] Simplified voxel based visualization, https://ojs.uni-miskolc.hu/index.php/psaie/article/view/3824, fetched 2026-10-31
+[S2] A Review On Light Shafts Rendering For Indoor Scenes, https://doi.org/10.5281/zenodo.1125510, fetched 2026-10-26 (unofficial)

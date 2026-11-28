@@ -1,0 +1,81 @@
+# Thrust Scan
+Also called: StreamCompaction::Thrust::scan, Thrust Exclusive Scan, Thrust exclusive scan wrapper
+## Overview
+Thrust Scan is a GPU-accelerated exclusive prefix sum wrapper that delegates computation to the NVIDIA Thrust library [S1, unofficial][S2]. It solves the problem of efficiently computing cumulative sums for large datasets on the GPU by abstracting kernel launch and memory management details [S2]. It is distinguished from custom CUDA implementations by its reliance on a highly optimized, library-based approach rather than hand-written kernels [S1, unofficial][S2].
+## How it works
+**Inputs and Outputs:**
+- Input: A pointer to an array of $n$ elements on the host (`idata`) and a pointer to an output array (`odata`) of size $n$ [S1, unofficial].
+- Output: The exclusive prefix sum of `idata` stored in `odata`. For an input array $A$, the output $B$ satisfies $B[i] = \sum_{j=0}^{i-1} A[j]$ for $i > 0$, and $B[0] = 0$ [S1, unofficial].
+
+**Data Structures:**
+- `thrust::device_vector<T>`: A container that manages memory on the GPU device. It is used to ensure that the data resides in device memory before the scan operation begins, thereby excluding memory transfer times from the performance measurement of the scan itself [S2].
+
+**Steps:**
+1. **Initialization**: Create a `thrust::device_vector<int>` `dv_in` initialized with the input range `idata` to `idata + n`, and a `thrust::device_vector<int>` `dv_out` initialized with the output range `odata` to `odata + n` [S1, unofficial]. Alternatively, construct `dv_in` via a temporary `thrust::host_vector` cast to guarantee GPU allocation [S2].
+2. **Execution**: Call `thrust::exclusive_scan(dv_in.begin(), dv_in.end(), dv_out.begin())` to perform the exclusive prefix sum on the device [S1, unofficial][S2].
+3. **Result Retrieval**: Copy the results from `dv_out` back to the host output array `odata` using `thrust::copy` [S1, unofficial].
+
+**Pseudocode:**
+> **Unverified code.** The code below did not pass a test run against a reference implementation, or no test fits it, so it may contain errors.
+
+```python
+def thrust_scan(n, idata, odata):
+    """
+    Performs exclusive prefix sum on idata using Thrust.
+    idata: list or array of n integers (host)
+    odata: list or array of n integers (host, for results)
+    """
+    if n <= 0:
+        return
+
+    # Step 1: Initialize device vectors on GPU
+    dv_in = thrust.device_vector(n)
+    for i in range(n):
+        dv_in[i] = idata[i]
+        
+    dv_out = thrust.device_vector(n)
+
+    # Step 2: Perform exclusive scan on device
+    # thrust::exclusive_scan(first, last, result)
+    thrust.exclusive_scan(dv_in.begin(), dv_in.end(), dv_out.begin())
+
+    # Step 3: Copy results back to host
+    for i in range(n):
+        odata[i] = dv_out[i]
+```
+
+**Parameters:**
+- $n$: The number of elements to scan.
+- `thrust::exclusive_scan`: The specific Thrust function used. It performs an exclusive scan by default [S1, unofficial][S2].
+
+**Edge Cases and Pitfalls:**
+- **Zero Elements**: If $n \le 0$, the function should return immediately without performing any operations [S1, unofficial].
+- **Timing**: To accurately measure the performance of the scan algorithm itself, memory transfer operations (host-to-device and device-to-host) should be excluded from timing measurements [S2].
+
+**Subtopics:**
+- [Log-space Exclusive Cumulative Sum for Transmittance](4819-log-space-exclusive-cumulative-sum-for-transmittance.md): A specialized scan variant for volume rendering transmittance, handling floating-point precision issues.
+- [CPU Stream Compaction with Scan](10375-cpu-stream-compaction-with-scan.md): A CPU-based implementation of stream compaction using scan, contrasting with the GPU-based Thrust approach.
+
+## Operating characteristics
+**Time and Memory Complexity:**
+- Time Complexity: $O(n)$ operations, with parallel efficiency dependent on hardware and input size [G].
+- Memory Complexity: $O(n)$ for storing the input and output arrays, plus overhead for the `thrust::device_vector` management [G].
+
+**Measured Performance:**
+- Thrust outperforms other methods, including CPU scan, naive parallel scan, and custom work-efficient algorithms, on large input data [S1, unofficial].
+- The performance advantage becomes more significant as the input size $n$ increases [S1, unofficial].
+
+**Strengths and Limitations:**
+- **Strengths**: High performance on large datasets [S1, unofficial].
+- **Limitations**: Not given in the sources.
+
+**When to Use:**
+- Use Thrust Scan when performance is critical and the input size is large [S1, unofficial].
+- Avoid when fine-grained control over memory layout or kernel execution is required, or when the input size is small and the overhead of Thrust management outweighs the benefits [S2].
+
+## Background
+Thrust is a C++ template library for CUDA that provides a high-level interface for parallel programming [S1, unofficial][S2]. The `thrust::exclusive_scan` function is part of this library, offering a standardized way to perform prefix sum operations on the GPU [S1, unofficial][S2]. The use of Thrust in stream compaction projects highlights its role as a foundational tool for GPU-accelerated data processing tasks [S1, unofficial][S2].
+
+## Sources
+[S1] GitHub - shineyruan/CUDA-Stream-Compaction, https://github.com/shineyruan/CUDA-Stream-Compaction, fetched 2026-10-29 (unofficial)
+[S2] Project2-Stream-Compaction/INSTRUCTION.md at main, https://github.com/CIS565-Fall-2022/Project2-Stream-Compaction/blob/main/INSTRUCTION.md, fetched 2026-10-29

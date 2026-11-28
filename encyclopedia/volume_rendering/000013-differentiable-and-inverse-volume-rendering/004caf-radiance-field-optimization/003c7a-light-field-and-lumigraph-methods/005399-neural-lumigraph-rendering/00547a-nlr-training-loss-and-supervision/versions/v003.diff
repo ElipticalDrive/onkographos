@@ -1,0 +1,119 @@
+--- v002.md
++++ v003.md
+@@ -35,15 +35,15 @@
+     \mathcal{L}_R(\hat{I}_t, \{I_t, M_t\}) = \frac{1}{P} \sum_{p | M_t[p]=1} |I_t[p] - \hat{I}_t[p]|
+     $$
+-    where $P$ is the number of pixels where $M_t[p]=1$.
++    where $P$ is the number of pixels where $M_t[p]=1$ [S1, unofficial].
+ 
+ 2.  **Soft Mask Loss ($\mathcal{L}_M$):** Applied to bootstrap neural shape learning from object masks [S1, unofficial]:
+     $$
+-    \mathcal{L}_M(\Phi_\theta, M_t) = \frac{1}{\alpha \sum_{p | M_t[p]=0 \lor \Phi_{\min}[p]<\tau} M_t[p]} \sum_{p | M_t[p]=0 \lor \Phi_{\min}[p]<\tau} \text{BCE}(\text{sigmoid}(-\alpha \Phi_{\min}[p]), M_t[p])
++    \mathcal{L}_M(\Phi_\theta, M_t) = \frac{1}{\alpha \cdot N_{\text{valid}}} \sum_{p \in \mathcal{P}_{\text{valid}}} \text{BCE}(\text{sigmoid}(-\alpha \Phi_{\min}[p]), M_t[p])
+     $$
+-    where:
+-    *   $\Phi_{\min}[p]$ is the minimum SDF value along the ray traced from pixel $p$.
+-    *   $\tau$ is a threshold for whether the zero level set $L_0(\Phi_\theta)$ has been intersected.
+-    *   $\alpha$ is a softness hyperparameter.
+-    *   $\text{BCE}(y, \hat{y}) = -[y \log(\hat{y}) + (1-y) \log(1-\hat{y})]$ is the Binary Cross Entropy.
++    where $\mathcal{P}_{\text{valid}} = \{p \mid M_t[p]=0 \lor \Phi_{\min}[p]<\tau\}$ and $N_{\text{valid}} = |\mathcal{P}_{\text{valid}}|$ [G].
++    *   $\Phi_{\min}[p]$ is the minimum SDF value along the ray traced from pixel $p$ [S1, unofficial].
++    *   $\tau$ is a threshold for whether the zero level set $L_0(\Phi_\theta)$ has been intersected [S1, unofficial].
++    *   $\alpha$ is a softness hyperparameter [S1, unofficial].
++    *   $\text{BCE}(y, \hat{y}) = -[y \log(\hat{y}) + (1-y) \log(1-\hat{y})]$ is the Binary Cross Entropy [G].
+ 
+ 3.  **Eikonal Regularization ($\mathcal{L}_E$):** Enforces the eikonal constraint on randomly sampled points $p_i \in \mathbb{R}^3$ in a unit cube containing the scene [S1, unofficial]:
+@@ -63,6 +63,8 @@
+ **Pseudocode**
+ ```python
++import math
++
+ def train_nlr_plus_plus(batch_images, batch_masks, batch_cameras, 
+-                        model_params, optimizer, hyperparams):
++                        model_params, optimizer, hyperparams, current_iter):
+     """
+     Performs one training step for NLR++.
+@@ -74,4 +76,5 @@
+         optimizer: Adam optimizer instance
+         hyperparams: Dict containing alpha, tau, lambda1, lambda2, t1, t2, l, P_eikonal
++        current_iter: Global iteration counter
+     Returns:
+         loss_value: Scalar loss value
+@@ -81,5 +84,4 @@
+     t1 = hyperparams['t1']
+     t2 = hyperparams['t2']
+-    current_iter = get_current_iteration() # [G] Global iteration counter
+     alpha = hyperparams['alpha']
+     tau = hyperparams['tau']
+@@ -97,9 +99,12 @@
+         
+         # Synthesis: generate synthesized target image and mask [S1, unofficial]
+-        I_hat_t, M_hat_t = synthesize_image(C_t, batch_images, model_params)
++        # [G] NLR++ image formation model uses context images excluding the target itself
++        context = [img for i, img in enumerate(batch_images) if i != idx]
++        I_hat_t, M_hat_t = synthesize_image(C_t, context, model_params)
+         
+         # Image Reconstruction Loss (Masked L1) [S1, unofficial]
+         mask_pixels = [p for p in range(len(I_t)) if M_t[p] == 1]
+-        lr_loss = sum(abs(I_t[p] - I_hat_t[p]) for p in mask_pixels) / len(mask_pixels) if mask_pixels else 0.0
++        num_mask_pixels = len(mask_pixels)
++        lr_loss = sum(abs(I_t[p] - I_hat_t[p]) for p in mask_pixels) / num_mask_pixels if num_mask_pixels > 0 else 0.0
+         
+         # Scheduled Shape Supervision [S1, unofficial]
+@@ -110,15 +115,16 @@
+             valid_pixels = []
+             for p in range(len(M_t)):
+-                ray = get_ray_from_pixel(p, C_t) # [G]
+-                phi_min = find_min_sdf_along_ray(ray, model_params.phi) # [G]
++                ray_origin = C_t.origin
++                ray_direction = C_t.direction
++                phi_min = find_min_sdf_along_ray(ray_origin, ray_direction, model_params.phi)
+                 if M_t[p] == 0 or phi_min < tau:
+                     valid_pixels.append((p, phi_min))
+             
+-            denom = sum(M_t[p] for p, _ in valid_pixels)
++            denom = len(valid_pixels)
+             num = sum(binary_cross_entropy(sigmoid(-alpha * phi_min), M_t[p]) for p, phi_min in valid_pixels)
+             lm_loss = num / (alpha * denom) if denom > 0 else 0.0
+             
+             # Eikonal Regularization [S1, unofficial]
+-            points = sample_random_points(P_eikonal, bounds=[-1, 1]) # [G]
++            points = sample_random_points(P_eikonal, bounds=[-1, 1])
+             le_loss = sum((norm(compute_gradient(model_params.phi, p_i))**2 - 1)**2 for p_i in points) / len(points)
+             
+@@ -134,13 +140,27 @@
+ 
+ # Standard math/vector operations [G]
+-def sigmoid(x): return 1.0 / (1.0 + exp(-x))
+-def binary_cross_entropy(y_pred, y_true): return -(y_true * log(y_pred) + (1 - y_true) * log(1 - y_pred))
+-def norm(v): return sqrt(sum(x**2 for x in v))
+-def compute_gradient(phi, p): return [phi(p + eps * d) - phi(p - eps * d) for d in [1, 0, 0, 0, 1, 0, 0, 0, 1]] # Central difference
++def sigmoid(x): return 1.0 / (1.0 + math.exp(-x))
++def binary_cross_entropy(y_pred, y_true): return -(y_true * math.log(y_pred + 1e-8) + (1 - y_true) * math.log(1 - y_pred + 1e-8))
++def norm(v): return math.sqrt(sum(x**2 for x in v))
++def compute_gradient(phi, p, eps=1e-5):
++    grad = [0.0, 0.0, 0.0]
++    for i in range(3):
++        p_plus = [p[j] + (eps if j == i else 0.0) for j in range(3)]
++        p_minus = [p[j] - (eps if j == i else 0.0) for j in range(3)]
++        grad[i] = (phi(p_plus) - phi(p_minus)) / (2 * eps)
++    return grad
+ def sample_random_points(n, bounds): return [[uniform(bounds[0], bounds[1]) for _ in range(3)] for _ in range(n)]
+-def get_ray_from_pixel(p, C): return [C.origin + p * C.direction] # [G]
+-def find_min_sdf_along_ray(ray, phi): return min(phi(pt) for pt in ray) # [G]
+-def synthesize_image(C, context, params): return render_image(C, context, params) # [G]
+-def get_current_iteration(): return 0 # [G] Placeholder for external state
++def get_ray_from_pixel(p, C): return [C.origin[i] + p * C.direction[i] for i in range(3)]
++def find_min_sdf_along_ray(ray_origin, ray_direction, phi, num_samples=64, t_min=0.0, t_max=2.0):
++    min_val = float('inf')
++    for t in [t_min + (t_max - t_min) * i / num_samples for i in range(num_samples + 1)]:
++        pt = [ray_origin[i] + t * ray_direction[i] for i in range(3)]
++        val = phi(pt)
++        if val < min_val:
++            min_val = val
++    return min_val
++def synthesize_image(C, context, params):
++    # [G] NLR++ image formation model: renders image from viewpoint C using context images and network params
++    pass
+ ```
+ 

@@ -1,0 +1,140 @@
+--- v001.md
++++ v002.md
+@@ -4,112 +4,45 @@
+ 
+ ## Overview
+-3D Vision-Language GS projects vision-language models into the 3D Gaussian Splatting (3DGS) framework to enable 3D visual question answering and zero-shot semantic reasoning via natural language queries on rendered feature maps [S1, unofficial]. It builds on [Semantic and Language Embeddings](8130-semantic-and-language-embeddings.md) by training a joint embedding space where the differentiable alpha-blending accumulation produces feature vectors directly comparable to text embeddings. Unlike [Language Embedded 3D Gaussians](8103-language-embedded-3d-gaussians.md) which encode object-level embeddings for phrase grounding, this method focuses on querying the continuous feature field with natural language to perform open-vocabulary segmentation and reasoning [S1, unofficial].
++3D Vision-Language GS projects vision-language models (VLMs) into the 3D Gaussian Splatting (3DGS) framework to create a joint embedding space where rendered feature maps can be queried with natural language [S1, unofficial]. It enables tasks such as 3D visual question answering and zero-shot semantic reasoning by leveraging the differentiable alpha-blending accumulation of feature vectors defined in [Semantic and Language Embeddings](8130-semantic-and-language-embeddings.md). Unlike methods that only encode pixel-level features, this approach supports object-level embeddings for phrase grounding and complex semantic queries [S1, unofficial].
+ 
+ ## How it works
++The method relies on the parent's shared principle of differentiable alpha-blending. The core innovation lies in the training of a joint embedding space where the rendered feature map $\mathbf{V}(p)$ aligns with the semantic space of a VLM (e.g., CLIP) [S1, unofficial].
++
+ **Inputs and Outputs:**
+-*   **Input:** A set of 3D Gaussians $\mathcal{G}$ with attributes (position, covariance, opacity, color) and a natural language query $q$.
+-*   **Output:** A segmentation mask or semantic label map corresponding to the query $q$.
++*   **Input:** A set of 3D Gaussians $\mathcal{G}$ with attributes including position, covariance, opacity $\alpha$, and a feature vector $\mathbf{f} \in \mathbb{R}^d$ representing the VLM embedding.
++*   **Output:** A rendered feature map $\mathbf{V}$ per pixel, which can be queried against text embeddings to produce semantic masks or answers.
+ 
+ **Data Structures:**
+-*   **Gaussian Set $\mathcal{G}$:** Each Gaussian $i$ has opacity $\alpha_i$, position $\mathbf{p}_i$, and a feature vector $\mathbf{f}_i$ in the joint vision-language embedding space.
+-*   **Instance Index $I_{stable}$:** A subset of Gaussians or clusters identified as stable semantic instances.
++*   **Gaussian Attributes:** Each Gaussian $i$ stores $\mathbf{f}_i$ (feature vector), $\alpha_i$ (opacity), and geometric parameters (position, scale, rotation).
++*   **VLM Embeddings:** Text prompts are encoded into $\mathbf{t} \in \mathbb{R}^d$ using the VLM's text encoder.
+ 
+-**Algorithm Steps:**
+-1.  **Instance Filtering:** Identify stable instances $I_{stable}$ using match and miss thresholds:
+-    $$ I_{stable} = \{ j : \text{match}_j \ge \theta_{match} \land \text{miss}_j \le \theta_{miss} \} $$
+-    [S2, unofficial]
+-2.  **Isolated Rendering:** For each instance $j \in I_{stable}$, render the Gaussian $G_j$ alone from its top-$B$ training views $V_j$ (ranked by projected area). All other Gaussians are set to zero opacity to prevent neighboring-instance leakage [S2, unofficial].
+-3.  **Cropping:** Crop the rendered image to the instance's bounding box.
+-4.  **Embedding Extraction:** Compute the CLIP image embedding for each crop:
+-    $$ \mathbf{c}_{j,t} = \text{CLIP}_{\text{img}}(\text{Crop}(I_{\text{isoRender}}(G_j, \text{cam}_t))) $$
+-    where $t \in V_j$ [S2, unofficial].
+-5.  **Aggregation:** Average the embeddings across views to get $\bar{\mathbf{c}}_j$:
+-    $$ \bar{\mathbf{c}}_j = \frac{1}{|V_j|} \sum_{t \in V_j} \mathbf{c}_{j,t} $$
+-    [S2, unofficial]
+-6.  **Normalization:** L2-normalize to obtain the instance embedding $\mathbf{e}_j$:
+-    $$ \mathbf{e}_j = \frac{\bar{\mathbf{c}}_j}{\|\bar{\mathbf{c}}_j\|_2} $$
+-    [S2, unofficial]
+-7.  **Query Matching:** At query time, encode the prompt $q$ using CLIP text encoder $\text{CLIP}_{\text{text}}(q)$. Find the best matching instance $j^*$:
+-    $$ j^* = \arg \max_{j \in I_{stable}} \cos(\mathbf{e}_j, \text{CLIP}_{\text{text}}(q)) $$
+-    [S2, unofficial]
+-8.  **Mask Generation:** Render the label map $\hat{L}_{\text{test}}$ at the test viewpoint. The predicted mask is:
+-    $$ M_q = \mathbb{I}[\hat{L}_{\text{test}} = j^*] $$
+-    [S2, unofficial]
++**Training Procedure:**
++1.  **Initialization:** Initialize feature vectors $\mathbf{f}_i$ randomly or via distillation from a teacher network (e.g., a pretrained NeRF or VLM) [S1, unofficial].
++2.  **Rendering:** For each training view, render the feature map $\mathbf{V}(p)$ using the alpha-blending formula from the parent article.
++3.  **Loss Computation:** Compute a distillation loss or contrastive loss between the rendered feature map $\mathbf{V}(p)$ and the ground-truth or teacher VLM embeddings for the corresponding image region.
++4.  **Optimization:** Update Gaussian attributes (including $\mathbf{f}_i$) via gradient descent to minimize the loss, aligning the 3DGS representation with the VLM semantic space [S1, unofficial].
+ 
+-**Pseudocode:**
+-```python
+-def query_3d_vision_language(gs_model, query_text, test_viewpoint):
+-    """
+-    gs_model: Object containing 3D Gaussians and rendering functions.
+-    query_text: String, the natural language query.
+-    test_viewpoint: Camera parameters for the test view.
+-    Returns: Binary mask M_q.
+-    """
+-    # 1. Encode Query
+-    query_emb = clip_text_encoder(query_text)
+-    
+-    # 2. Retrieve Stable Instances
+-    # Assumes I_stable is pre-computed or computed via match/miss scores
+-    stable_instances = get_stable_instances(gs_model)
+-    
+-    best_match_score = -1
+-    best_instance_id = None
+-    
+-    # 3. Match against Instance Embeddings
+-    for inst_id in stable_instances:
+-        # Retrieve pre-computed or compute on-the-fly instance embedding e_j
+-        # Note: In training-free inference, e_j is often pre-computed or cached.
+-        # If computing on-the-fly:
+-        #   crops = []
+-        #   for view in inst_id.top_B_views:
+-        #       # Render G_inst alone
+-        #       img = render_single_gaussian(gs_model, inst_id, view, zero_out_others=True)
+-        #       # Crop to bounding box
+-        #       crop = crop_to_bbox(img, inst_id.bbox)
+-        #       # Get CLIP embedding
+-        #       emb = clip_image_encoder(crop)
+-        #       crops.append(emb)
+-        #   e_j = normalize(mean(crops))
+-        
+-        e_j = get_instance_embedding(inst_id)
+-        
+-        # Cosine similarity
+-        score = cosine_similarity(e_j, query_emb)
+-        
+-        if score > best_match_score:
+-            best_match_score = score
+-            best_instance_id = inst_id
+-            
+-    # 4. Generate Mask
+-    # Render full label map for test viewpoint
+-    label_map = render_label_map(gs_model, test_viewpoint)
+-    
+-    # Create mask where label matches best instance
+-    mask = (label_map == best_instance_id).astype(float)
+-    
+-    return mask
+-```
++**Inference/Querying:**
++1.  Encode a natural language query $q$ into a text embedding $\mathbf{t}_q$ using the VLM text encoder.
++2.  Render the feature map $\mathbf{V}(p)$ for the target viewpoint.
++3.  Compute similarity (e.g., cosine similarity) between $\mathbf{V}(p)$ and $\mathbf{t}_q$ to generate a semantic mask or answer [S1, unofficial].
+ 
+-**Parameters:**
+-*   $\theta_{match}, \theta_{miss}$: Thresholds for instance stability. Not given in the sources.
+-*   $B$: Number of top training views for instance embedding computation. Not given in the sources.
+-
+-**Edge Cases:**
+-*   **Instance Leakage:** Rendering all Gaussians simultaneously can cause neighboring-instance leakage into the embedding. Isolated rendering (zeroing other Gaussians) is required [S2, unofficial].
+-*   **Empty Query Match:** If no instance exceeds a similarity threshold, the query may return no segmentation.
++**Edge Cases and Pitfalls:**
++*   **Feature Leakage:** In instance-based retrieval, features from neighboring instances may leak into the rendered view if not handled. Isolated rendering (setting other Gaussians to zero opacity) is required for accurate instance embeddings [S2, unofficial].
++*   **Precision:** The alignment between the 3DGS feature space and the VLM space must be precise; misalignment leads to poor zero-shot performance.
+ 
+ ## Subtopics
+ 
+ ### CLIP Visual Retrieval
+-A variant that uses CLIP image embeddings from isolated renders of individual Gaussians or clusters to match against CLIP text embeddings. It relies on L2-normalized average embeddings from multiple views to form a robust instance representation [S2, unofficial].
++A specific application variant where 3D Vision-Language GS is used for open-vocabulary 3D segmentation via CLIP embeddings [S2, unofficial]. It involves filtering stable instances based on match/miss thresholds, rendering each instance in isolation to compute CLIP image embeddings, and matching them against text prompts via cosine similarity. This allows for training-free open-vocabulary segmentation by indexing the rendered label map based on the best-matching instance embedding [S2, unofficial].
+ 
+ ## Operating characteristics
+-*   **Time Complexity:** Query time is $O(|I_{stable}|)$ cosine similarities per prompt [S2, unofficial]. Rendering is linear in the number of Gaussians.
+-*   **Memory Complexity:** Requires storing instance embeddings and label maps.
+-*   **Strengths:** Enables real-time open-vocabulary semantic segmentation and 3D visual question answering [S1, unofficial].
+-*   **Limitations:** Relies on the quality of the joint embedding space and the stability of instance detection.
++*   **Time Complexity:** Rendering is $O(N)$ per pixel where $N$ is the number of Gaussians, same as standard 3DGS. Querying is $O(|I_{stable}|)$ for cosine similarity against stable instances [S2, unofficial].
++*   **Memory Complexity:** Requires storing feature vectors $\mathbf{f}_i$ for each Gaussian, increasing memory usage proportional to the embedding dimension $d$.
++*   **Strengths:** Enables real-time open-vocabulary semantic segmentation and 3D visual question answering [S1, unofficial]. Supports zero-shot reasoning without task-specific retraining [S1, unofficial].
++*   **Limitations:** Performance depends on the quality of the VLM and the alignment during training. Isolated rendering for instance retrieval can be computationally expensive if many instances are present [S2, unofficial].
+ 
+ ## Background
+-3D Vision-Language GS, also known as SplatTalk, was introduced to extend 3DGS with vision-language capabilities [S1, unofficial]. It builds on earlier work like Language Embedded 3D Gaussians [104] and projects vision-language models into the 3DGS framework to enable zero-shot semantic reasoning [S1, unofficial].
++The concept of projecting vision-language models into the 3DGS framework was introduced to enable 3D visual question answering and zero-shot semantic reasoning [S1, unofficial]. SplatTalk [105] and 3D Vision-Language GS [106] are key works in this area, building on earlier methods like Language Embedded 3D Gaussians [104] which encoded object-level embeddings for phrase grounding [S1, unofficial]. The approach has been extended to robotics simulation (Fast-SegSim [108]) and digital plant assets (LeafFit [109]) [S1, unofficial].
+ 
+ ## Sources

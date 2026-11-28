@@ -1,0 +1,131 @@
+Why Motion blur today is camera-only: engine/shaders/postfx.wgsl's motion_blur rebuilds each pixel's world position from depth and reprojects it with last frame's prev_view_proj. Anything that moves while the camera is still (an enemy sp...
+
+Per-object motion vectors: a velocity buffer from each draw's current and previous transform (incl. skinned) · Issue #1435 · MatthewLacerda2/rusty · GitHub
+Skip to content
+You signed in with another tab or window. Reload to refresh your session.
+You signed out in another tab or window. Reload to refresh your session.
+You switched accounts on another tab or window. Reload to refresh your session.
+Dismiss alert
+Per-object motion vectors: a velocity buffer from each draw's current and previous transform (incl. skinned) #1435
+New issue
+Copy link
+New issue
+Copy link
+Closed
+#1456
+Closed
+Per-object motion vectors: a velocity buffer from each draw's current and previous transform (incl. skinned)#1435
+#1456
+Copy link
+Assignees
+Labels
+foundationGroundworks for game developmentGroundworks for game development
+Description
+MatthewLacerda2
+opened on Oct 26, 2026
+Issue body actions
+Why
+Motion blur today is camera-only: engine/shaders/postfx.wgsl's motion_blur rebuilds each pixel's world position from depth and reprojects it with last frame's prev_view_proj. Anything that moves while the camera is still (an enemy sprinting past, a melee swing, a door slamming, ragdolls) never blurs. Worse for a first-person game, the viewmodel blurs with the world. Post-FX runs once over the composited camera stack (render::draw::stack::run_post_fx), so when the player turns, the gun, which is fixed to the camera, is smeared as if it were world geometry. Trepang2 and every modern shooter keep the weapon crisp and blur the world and the enemies.
+The gold-standard fix is a per-object motion-vector buffer: each opaque draw writes its own screen-space velocity, built from this frame's and last frame's transforms. This issue is that groundwork. #1436 is the blur that reads it. (TAA, the other usual consumer, is deliberately out: the operator prefers FXAA, 2026-10-25.)
+What
+Previous-frame state per drawn instance. The renderer keeps each entity's previous model matrix (keyed by entity id, per view, so render-texture cameras keep their own), plus the previous bone palette for skinned meshes (Animator + skinning). An entity drawn for the first time, or teleported, has no usable history: its object motion is zero and only camera motion applies (Unity's behaviour for a renderer with no last-frame data). A Transform set directly (not interpolated) counts as a teleport only when a script asks for it (e.g. a reset hook, decided in the PR, following Unity's Renderer.ResetMotionVectors / camera resetMotionVectors idea, not a distance heuristic).
+A velocity target, Rg16Float at full view resolution, written as a second colour attachment of the opaque forward pass: ndc_now.xy - ndc_prev.xy, using prev_model × prev_view_proj vs model × view_proj. Cutout surfaces write it too. Transparent surfaces, particles, decals, trails and UI don't (Unity's default). Sky pixels are camera-only, from depth = far.
+Per camera in a stack. Each camera in the stack writes velocity with its own matrices, so an overlay viewmodel camera writes its gun's motion relative to its camera (≈0 when only the player turns) and the world camera writes the world's. The composite keeps the nearest camera's velocity, exactly as the depth it composites. (The blur must read the view's own camera: Post-FX reads the scene's first active volume and camera, not the view's own camera #1434.)
+Camera cuts. On the first frame of a view, after a resize, a scene load, or a camera switch, prev_view_proj and the per-entity history reset, so there's no one-frame smear.
+Cost and gating. The target is allocated and written only when the view will run motion blur (quality tier ≥ Medium and the camera has it on). Otherwise the pipeline variant without the second attachment runs, so Low pays nothing. Debug.Stats reports whether the velocity pass ran.
+Not in scope
+The blur itself (#1436), TAA, per-renderer "motion vector mode" overrides (add only when a game asks).
+Acceptance
+A headless GPU test (lavapipe): a cube translating across a static camera writes non-zero velocity on its pixels and zero on the background; a static scene under a rotating camera writes velocity that matches camera-only reprojection; a skinned mesh whose bone moves writes velocity on the moved vertices only.
+A viewmodel test: world camera + overlay camera with a child cube; rotating the camera rig gives the overlay cube ≈0 velocity.
+The first frame after a scene load writes zero object velocity.
+Code: render::postfx, render::draw::stack, render::passes (the forward pass), engine/shaders/ (the forward shaders' outputs), the skinning path. Read src/render/CLAUDE.md first.
+Activity
+MatthewLacerda2
+added
+foundationGroundworks for game developmentGroundworks for game development
+on Oct 26, 2026
+MatthewLacerda2
+marked this as blocking on Oct 26, 2026
+Per-object motion blur: reconstruction filter (TileMax/NeighborMax) over the velocity buffer #1436
+MatthewLacerda2
+marked this as blocked on Oct 26, 2026
+Post-FX reads the scene's first active volume and camera, not the view's own camera #1434
+MatthewLacerda2
+marked this as blocking on Oct 26, 2026
+Post Processing: depth of field (Gaussian and Bokeh) #1445
+MatthewLacerda2
+added a parent issue on Oct 26, 2026
+[Tracking] Post Processing: a complete per-camera stack with player options #1446
+MatthewLacerda2 commented on Oct 26, 2026
+MatthewLacerda2
+on Oct 26, 2026
+OwnerAuthor
+More actions
+Brief
+Branch: 1435-motion-vectors.
+Builds on: PR #1447 merged. Each view now knows its base camera (StackPass carries it; scene::camera::main_camera; PostSource borrows the camera and its volume once per view). PR #1448 merged (CameraComponent::{MIN,MAX}_MOTION_BLUR_SAMPLES, 2/32). Check git rev-parse --short origin/main against GitHub's main before branching.
+Siblings in flight: 1437-rename-post-processing renames VisualCorrectionComponent → PostProcessingComponent everywhere (accessors, modules, docs). It should merge before you finish: fetch and rebase onto main before readying, and use the new names. Until then avoid renaming or moving anything that says visual_correction. Stay out of Cargo.toml / Cargo.lock.
+Decisions: the issue's shape (per-entity previous model matrix and previous bone palette per view; an Rg16Float velocity attachment on the opaque pass, gated so Low pays nothing; transparent/particles/decals/UI write none; camera cuts reset history). The motion-blur pass itself is #1436, so leave postfx.wgsl's motion_blur as it is, except where the velocity target must be bound. On the "teleport" question, follow Unity: no distance heuristic; a reset only on first draw, scene load, a camera cut, or an explicit reset. If adding a script-facing reset (Renderer.ResetMotionVectors-like) would touch the API surface, leave it out and say so in the PR. Read src/render/CLAUDE.md first. Record the per-frame cost on lavapipe in the PR, and say a real-GPU number is a For a human item.
+Model: Opus.
+MatthewLacerda2
+self-assigned this
+on Oct 26, 2026
+MatthewLacerda2
+added 2 commits that reference this issue on Oct 26, 2026
+Per-object motion vectors: a velocity target from each draw's current…
+...
+7c9d7ba
+Motion vectors: clippy's arity and length caps, the lazy-pipeline cou…
+...
+8c9bd80
+MatthewLacerda2 commented on Oct 26, 2026
+MatthewLacerda2
+on Oct 26, 2026
+OwnerAuthor
+More actions
+Brief
+Branch: 1435-motion-vectors (PR #1456; force-push authorised). Fetch origin/main and rebase first.
+Builds on: current main.
+Siblings in flight: PR #1457 (#1438, player graphics options) → render::postfx::params (effect_runs, GraphicsSettings), stack.rs (self.quality → self.graphics()), ssao. If #1457 has merged when you rebase, route motion::wanted / motion_blur_enabled through effect_runs(graphics, GraphicsOption::MotionBlur, camera_on), so a player who turned motion blur off pays for no velocity pass. If it hasn't, leave the predicate as it is. Stay out of Cargo.toml / Cargo.lock.
+Decisions: the independent review of PR #1456 found these. Fix them in this branch:
+Remove the "baked before Per-object motion vectors: a velocity buffer from each draw's current and previous transform (incl. skinned) #1435" fallback (gpu::pipelines::specs::velocity_spec(false), the has("vs_velocity") branch in SurfaceShaders::build). It is a compatibility shim (CLAUDE.md, No backward compatibility), and it leaves an opaque wall's pixels holding the velocity of whatever was drawn behind it. A variant without the velocity entries is treated like one without fs_main: logged once, drawn with the standard pipeline.
+Docs: docs/api/Graphics.md's Motion vectors paragraph says particles write none, but mesh particles ride the opaque pass and write camera-only velocity. Say so.
+Stop is a cut. SceneSnapshot::restore keeps the SceneId, the ids and the base camera, so the first edit frame after Stop reprojects from the last Play pose. Reset the motion history on every play-state change (Play and Stop), as Unity's scene reload does, and add a test.
+Docs: StackPass::base_id and HistoryKey::base say None means the editor's free camera. build_camera_stack gives Some(main camera) in either mode. Correct both.
+Docs: render::motion's module doc names common::sky_velocity (it is sky::motion::sky_velocity). Shadergen still says blocks splice into fs_main (shadergen/assemble/mod.rs module doc and SURFACE_RETURN, shadergen/blocks/surface.rs, shadergen/assemble/depth.rs); they now splice into surface_color.
+Per-camera history by entity, not stack index (MotionHistory::begin). A weapon switch that swaps viewmodel cameras at the same stack position must not hand camera B camera A's last matrix. Add a test.
+Per-frame cost: MotionHistory::end uses std::mem::swap(&mut self.prev, &mut self.next) (begin already clears next), and track is skipped for an entity with no opaque draw.
+Add one line under Decisions: a surface variant's velocity pipeline is built on first use, not warmed. Turning motion blur on mid-game compiles one per variant on screen.
+Model: Opus.
+MatthewLacerda2
+added 3 commits that reference this issue on Oct 26, 2026
+Motion vectors: review fixes — no velocity shim, Play/Stop cut, per-e…
+...
+6464cbf
+Motion vectors: has_opaque_run keeps solid_draw_items under clippy's …
+...
+bd129d9
+Per-object motion vectors: a velocity target from each draw's current…
+...
+ffa3949
+MatthewLacerda2
+closed this as completedin #1456on Oct 26, 2026
+Sign up for free to join this conversation on GitHub. Already have an account? Sign in to comment
+Metadata
+Metadata
+Assignees
+MatthewLacerda2
+Labels
+foundationGroundworks for game developmentGroundworks for game development
+Projects
+No projects
+Milestone
+No milestone
+Relationships
+None yet
+Development
+No branches or pull requests
+Issue actions
+Open in GitHub Copilot app
+You can’t perform that action at this time.

@@ -1,0 +1,4700 @@
+# svo-rs
+
+> :warning: **Work in progress** I would call it almost feature complete. It's however untested in real world scenarios. :warning:
+
+Sparse Voxel Octree (SVO) implementation in Rust based on [3D Flight Navigation Using
+Sparse Voxel Octrees](https://www.gameaipro.com/GameAIPro3/GameAIPro3_Chapter21_3D_Flight_Navigation_Using_Sparse_Voxel_Octrees.pdf) with integration for the [Bevy engine](https://bevyengine.org/) under the `bevy` feature.
+
+This crate contains only the SVO data structure with a builder and an algorithm to voxelize meshes from Bevy. It does not contain any pathfinding code as there are much better crates for that. Also depending on your 3D environment you might want to use different pathfinding algorithms.
+
+## Usage
+
+Example using the [pathfinding crate](https://crates.io/crates/pathfinding).
+
+```rust
+let mut builder = svo_rs::SparseVoxelOctreeBuilder::new(voxel_size);
+builder.add_mesh(VoxelizedMesh::sphere(1.0, voxel_size, IVec3::ZERO));
+
+let tree = builder.build()
+
+let start = tree
+    .find_node(Vec3::new(...))
+    .unwrap();
+let end = tree
+    .find_node(Vec3::new(...))
+    .unwrap();
+
+let solution = pathfinding::prelude::astar(
+    &start,
+    |n| {
+        tree.successors(*n)
+            .into_iter()
+            .map(|s| (s, 1))
+            .collect::<Vec<_>>()
+    },
+    |n| n.manhattan_distance(&end, &tree),
+    |n| *n == end,
+);
+```
+
+For more examples see the examples directory or the benches directory.
+
+## Credit and References
+
+### 3D Flight Navigation Using Sparse Voxel Octrees
+
+```
+https://www.gameaipro.com/GameAIPro3/GameAIPro3_Chapter21_3D_Flight_Navigation_Using_Sparse_Voxel_Octrees.pdf
+```
+
+### Morton Code library
+
+The library was not used directly it was rather used as a reference for the implementation of the morton code generation.
+
+```
+@Misc{libmorton18,
+author = "Jeroen Baert",
+title = "Libmorton: C++ Morton Encoding/Decoding Library",
+howpublished = "\url{https://github.com/Forceflow/libmorton}",
+year = "2018"}
+```
+
+### AABB Triangle intersection
+
+```
+https://gdbooks.gitbooks.io/3dcollisions/content/Chapter4/aabb-triangle.html
+```
+
+### benches/pathing_around_sphere.rs
+```
+use std::collections::HashSet;
+use std::hint::black_box;
+
+use bevy_math::{IVec3, Vec3};
+use criterion::{criterion_group, criterion_main, BenchmarkId, Criterion};
+use svo_rs::{ManhattanDistance, SparseVoxelOctree, VoxelizedMesh};
+
+fn compute_path_hashset(points: &HashSet<IVec3>, voxel_size: f32, area_haf_size: f32) {
+    let start = (Vec3::new(-area_haf_size, -area_haf_size, -area_haf_size) / voxel_size).as_ivec3();
+    let end = (Vec3::new(area_haf_size, area_haf_size, area_haf_size) / voxel_size).as_ivec3();
+
+    let solution = pathfinding::prelude::astar(
+        &start,
+        |n| {
+            vec![
+                *n + IVec3::new(1, 0, 0),
+                *n + IVec3::new(-1, 0, 0),
+                *n + IVec3::new(0, 1, 0),
+                *n + IVec3::new(0, -1, 0),
+                *n + IVec3::new(0, 0, 1),
+                *n + IVec3::new(0, 0, -1),
+            ]
+            .into_iter()
+            .filter(|p| !points.contains(p))
+            .map(|s| (s, s.manhattan_distance(n)))
+            .collect::<Vec<_>>()
+        },
+        |n| end.manhattan_distance(n),
+        |n| *n == end,
+    );
+
+    if solution.is_none() {
+        println!("No path found");
+        println!("Start: {start:?}");
+        println!("Destination: {end:?}");
+    }
+}
+
+fn compute_path_octree(tree: &SparseVoxelOctree, area_haf_size: f32) {
+    let start = tree
+        .find_node(Vec3::new(-area_haf_size, -area_haf_size, -area_haf_size))
+        .unwrap();
+    let end = tree
+        .find_node(Vec3::new(area_haf_size, area_haf_size, area_haf_size))
+        .unwrap();
+
+    let solution = pathfinding::prelude::astar(
+        &start,
+        |n| {
+            tree.successors(*n)
+                .into_iter()
+                .map(|s| (s, 1))
+                .collect::<Vec<_>>()
+        },
+        |n| n.manhattan_distance(&end, tree),
+        |n| *n == end,
+    );
+
+    if solution.is_none() {
+        println!("No path found");
+        println!("Start: {start:?}");
+        println!("Destination: {end:?}");
+    }
+}
+
+fn create_tree(voxel_size: f32, area_haf_size: f32) -> SparseVoxelOctree {
+    let mut builder = svo_rs::SparseVoxelOctreeBuilder::new(voxel_size);
+
+    builder.add_mesh(VoxelizedMesh::sphere(1.0, voxel_size, IVec3::ZERO));
+    builder.set_bounds(
+        Vec3::new(-area_haf_size, -area_haf_size, -area_haf_size) * 1.2,
+        Vec3::new(area_haf_size, area_haf_size, area_haf_size) * 1.2,
+    );
+
+    builder.build()
+}
+
+fn create_hashset(voxel_size: f32) -> HashSet<IVec3> {
+    let mut set = HashSet::new();
+    for voxel in VoxelizedMesh::sphere(1.0, voxel_size, IVec3::ZERO).voxels() {
+        set.insert(voxel);
+    }
+
+    set
+}
+
+fn from_elem(c: &mut Criterion) {
+    let voxel_sizes = [0.1, 0.05, 0.01];
+    let area_haf_sizes = [2.0, 4.0, 40.0, 400.0];
+
+    for voxel_size in &voxel_sizes {
+        for area_haf_size in &area_haf_sizes {
+            let tree = create_tree(*voxel_size, *area_haf_size);
+            let hash_set = create_hashset(*voxel_size);
+
+            let mut group = c.benchmark_group("Compute path");
+            group.bench_with_input(
+                BenchmarkId::new("octree", format!("{voxel_size} {area_haf_size}")),
+                &tree,
+                |b, t| {
+                    b.iter(|| compute_path_octree(black_box(t), *area_haf_size));
+                },
+            );
+            group.bench_with_input(
+                BenchmarkId::new("hashset", format!("{voxel_size} {area_haf_size}")),
+                &hash_set,
+                |b, hs| {
+                    b.iter(|| compute_path_hashset(black_box(hs), *voxel_size, *area_haf_size));
+                },
+            );
+            group.finish();
+        }
+    }
+}
+
+criterion_group!(benches, from_elem);
+criterion_main!(benches);
+```
+
+### examples/bevy_sphere.rs
+```
+use bevy::prelude::*;
+use bevy_inspector_egui::{bevy_egui::EguiPlugin, quick::WorldInspectorPlugin};
+use svo_rs::{SparseVoxelOctree, SparseVoxelOctreeBuilder, VoxelizedMesh};
+
+fn main() {
+    App::new()
+        .insert_resource(ClearColor(Color::srgb(0.2, 0.2, 0.2)))
+        .add_plugins(DefaultPlugins)
+        .add_plugins(EguiPlugin { enable_multipass_for_primary_context: true })
+        .add_plugins(WorldInspectorPlugin::new())
+        .add_systems(Startup, setup)
+        .add_systems(Update, draw_gizmos)
+        .run();
+}
+
+const VOXEL_SIZE: f32 = 0.1;
+
+#[derive(Resource)]
+struct SVOResource {
+    tree: SparseVoxelOctree,
+}
+
+fn setup(
+    mut commands: Commands,
+    mut meshes: ResMut<Assets<Mesh>>,
+    mut materials: ResMut<Assets<StandardMaterial>>,
+) {
+    commands.spawn((
+        Camera3d::default(),
+        Transform::from_xyz(5.0, 5.0, 5.0).looking_at(Vec3::ZERO, Vec3::Y),
+    ));
+
+    let sphere = Sphere::new(1.0).mesh().uv(32, 18);
+
+    let mut builder = SparseVoxelOctreeBuilder::new(VOXEL_SIZE);
+    builder.add_mesh(
+        VoxelizedMesh::from_mesh(&sphere, Transform::IDENTITY.compute_matrix(), VOXEL_SIZE)
+            .expect("Failed to voxelize mesh"),
+    );
+
+    commands.insert_resource(SVOResource {
+        tree: builder.build(),
+    });
+
+    commands.spawn((
+        Mesh3d(meshes.add(sphere)),
+        MeshMaterial3d(materials.add(Color::srgb(0.5, 0.4, 0.3))),
+        Transform::from_xyz(0.0, 0.0, 0.0),
+    ));
+
+    commands.spawn((
+        DirectionalLight {
+            color: Color::WHITE,
+            illuminance: 1500.0,
+            shadows_enabled: true,
+            ..default()
+        },
+        Transform::from_xyz(4.0, 8.0, 4.0).looking_at(Vec3::ZERO, Vec3::Y), // Point directly at sphere
+    ));
+}
+
+fn draw_gizmos(mut gizmos: Gizmos, svo: Res<SVOResource>) {
+    svo.tree.draw_gizmos(&mut gizmos, false);
+}
+```
+
+### examples/bevy_sphere_path.rs
+```
+use bevy::prelude::*;
+use bevy_inspector_egui::{bevy_egui::EguiPlugin, quick::WorldInspectorPlugin};
+use svo_rs::{SparseVoxelOctree, SparseVoxelOctreeBuilder, SparseVoxelOctreeLink, VoxelizedMesh};
+
+fn main() {
+    App::new()
+        .insert_resource(ClearColor(Color::srgb(0.2, 0.2, 0.2)))
+        .add_plugins(DefaultPlugins)
+        .add_plugins(EguiPlugin { enable_multipass_for_primary_context: true })
+        .add_plugins(WorldInspectorPlugin::new())
+        .add_systems(Startup, setup)
+        .add_systems(
+            Update,
+            (
+                calculate_path,
+                follow_path,
+                rotate_camera_around_center,
+                draw_gizmos,
+            ),
+        )
+        .run();
+}
+
+const VOXEL_SIZE: f32 = 0.2;
+const AREA_HALF_SIZE: f32 = 3.0;
+
+#[derive(Resource)]
+struct SVOResource {
+    tree: SparseVoxelOctree,
+}
+
+#[derive(Component)]
+struct Agent;
+
+#[derive(Component)]
+struct CalculatedPath {
+    path: Vec<Vec3>,
+    current: usize,
+    progress: f32,
+    visited_nodes: Vec<SparseVoxelOctreeLink>,
+}
+
+fn setup(
+    mut commands: Commands,
+    mut meshes: ResMut<Assets<Mesh>>,
+    mut materials: ResMut<Assets<StandardMaterial>>,
+) {
+    commands.spawn((
+        Camera3d::default(),
+        Transform::from_xyz(5.0, 5.0, 5.0).looking_at(Vec3::ZERO, Vec3::Y),
+        RotateCamera {
+            distance: AREA_HALF_SIZE * 4.0,
+        },
+    ));
+
+    let sphere = Sphere::new(1.0).mesh().uv(32, 18);
+
+    let mut builder = SparseVoxelOctreeBuilder::new(VOXEL_SIZE);
+
+    builder.set_bounds(
+        Vec3::new(-AREA_HALF_SIZE, -AREA_HALF_SIZE, -AREA_HALF_SIZE),
+        Vec3::new(AREA_HALF_SIZE, AREA_HALF_SIZE, AREA_HALF_SIZE),
+    );
+    builder.add_mesh(
+        VoxelizedMesh::from_mesh(&sphere, Transform::IDENTITY.compute_matrix(), VOXEL_SIZE)
+            .expect("Failed to voxelize mesh"),
+    );
+
+    commands.insert_resource(SVOResource {
+        tree: builder.build(),
+    });
+
+    let sphere_handle = meshes.add(sphere);
+
+    commands.spawn((
+        Mesh3d(sphere_handle.clone()),
+        MeshMaterial3d(materials.add(Color::srgb(0.0, 1.0, 0.0))),
+        Transform::from_xyz(0.0, 0.0, 0.0),
+    ));
+
+    commands.spawn((
+        PointLight {
+            intensity: 1500.0,
+            shadows_enabled: true,
+            ..default()
+        },
+        Transform::from_xyz(4.0, 8.0, 4.0),
+    ));
+
+    commands
+        .spawn((
+            Mesh3d(sphere_handle.clone()),
+            MeshMaterial3d(materials.add(Color::srgb(1.0, 0.0, 0.0))),
+            Transform::from_xyz(
+                AREA_HALF_SIZE * 0.9,
+                AREA_HALF_SIZE * 0.9,
+                AREA_HALF_SIZE * 0.9,
+            )
+            .with_scale(Vec3::ONE * 0.1),
+            Agent,
+        ));
+}
+
+#[must_use]
+pub fn subdivide_path(link: Vec<Vec3>, n: usize) -> Vec<Vec3> {
+    let mut result = Vec::new();
+
+    for i in 0..link.len() - 1 {
+        let start = link[i];
+        let end = link[i + 1];
+
+        for j in 0..n {
+            result.push(start + (end - start) * (j as f32 / n as f32));
+        }
+    }
+
+    result.push(link[link.len() - 1]);
+
+    result
+}
+
+#[must_use]
+pub fn string_pulling_path(link: Vec<Vec3>, tree: &SparseVoxelOctree) -> Vec<Vec3> {
+    let mut result = Vec::new();
+
+    let mut current = link[0];
+
+    (1..link.len()).for_each(|i| {
+        let next = link[i];
+
+        if tree.is_in_line_of_sight(current, next) {
+            return;
+        }
+
+        result.push(current);
+        current = next;
+    });
+
+    result.push(current);
+
+    result
+}
+
+#[allow(clippy::type_complexity)]
+fn calculate_path(
+    agents: Query<(Entity, &Transform), (Without<CalculatedPath>, With<Agent>)>,
+    mut commands: Commands,
+    svo: Res<SVOResource>,
+) {
+    for (entity, transform) in agents.iter() {
+        let destination = (-transform.translation).normalize() * AREA_HALF_SIZE * 0.9;
+
+        let start_point: Vec3 = transform.translation;
+        let end_point: Vec3 = destination;
+
+        let start = svo.tree.find_node(start_point).unwrap();
+        let end = svo.tree.find_node(end_point).unwrap();
+
+        if start == end {
+            continue;
+        }
+
+        let mut visited_nodes = Vec::new();
+
+        let solution = pathfinding::prelude::astar(
+            &start,
+            |n| {
+                visited_nodes.push(*n);
+                svo.tree
+                    .successors(*n)
+                    .into_iter()
+                    .map(|s| (s, 1))
+                    .collect::<Vec<_>>()
+            },
+            |n| n.distance_squared(&end, &svo.tree),
+            |n| *n == end,
+        );
+
+        if solution.is_none() {
+            println!("No path found");
+            println!("Start: {start:?}");
+            println!("Destination: {end:?}");
+            continue;
+        }
+
+        let solution = solution.unwrap();
+
+        let mut path = vec![start_point];
+
+        for i in 0..solution.0.len() - 1 {
+            let start = solution.0[i];
+            let end = solution.0[i + 1];
+
+            let face = svo
+                .tree
+                .face_position_between(start, end)
+                .unwrap_or_else(|| panic!("Failed to find face between nodes {start:?} {end:?}"));
+
+            path.push(face);
+        }
+
+        path.push(end_point);
+
+        let path = subdivide_path(path, 4);
+        let path = string_pulling_path(path, &svo.tree);
+
+        commands.entity(entity).insert(CalculatedPath {
+            path: path.into_iter().map(std::convert::Into::into).collect(),
+            current: 0,
+            progress: 0.0,
+            visited_nodes,
+        });
+    }
+}
+
+fn follow_path(
+    mut agents: Query<(Entity, &mut Transform, &mut CalculatedPath), With<Agent>>,
+    mut commands: Commands,
+    svo: Res<SVOResource>,
+    mut gizmos: Gizmos,
+    time: Res<Time>,
+) {
+    for (entity, mut transform, mut path) in &mut agents {
+        if !path.path.is_empty() {
+            if path.current >= path.path.len() - 1 {
+                commands.entity(entity).remove::<CalculatedPath>();
+                continue;
+            }
+
+            let current = path.path[path.current];
+            let next = path.path[path.current + 1];
+            let distance = (next - current).length();
+
+            transform.translation = current.lerp(next, path.progress / distance);
+
+            let speed = AREA_HALF_SIZE;
+            if path.progress > distance {
+                path.progress = 0.0;
+                path.current += 1;
+                if path.current >= path.path.len() - 1 {
+                    commands.entity(entity).remove::<CalculatedPath>();
+                }
+            }
+
+            path.progress += time.delta_secs() * speed;
+
+            for i in 0..path.path.len() - 1 {
+                gizmos.line(path.path[i], path.path[i + 1], Color::srgb(1.0, 1.0, 1.0));
+            }
+
+            for node in &path.visited_nodes {
+                svo.tree.draw_node_gizmo(&mut gizmos, *node, Color::srgb(0.0, 1.0, 0.0));
+            }
+            // gizmos.line(path.start, path.end, Color::rgb(1.0, 0.0, 0.0));
+        }
+    }
+}
+
+#[derive(Component)]
+struct RotateCamera {
+    distance: f32,
+}
+
+fn rotate_camera_around_center(
+    agents: Query<&Transform, (With<Agent>, Without<Camera>)>,
+    mut camera: Query<(&mut Transform, &RotateCamera), With<Camera>>,
+) {
+    let agent_transform = agents.single();
+    if agent_transform.is_err() {
+        return;
+    }
+
+    let agent_transform = agent_transform.unwrap();
+
+    let camera = camera.single_mut();
+
+    if camera.is_err() {
+        return;
+    }
+
+    let (mut camera_transform, rotate_camera) = camera.unwrap();
+
+    let direction = agent_transform.translation.normalize();
+
+    camera_transform.translation = agent_transform.translation + direction * rotate_camera.distance;
+    camera_transform.look_at(Vec3::ZERO, Vec3::Y);
+}
+
+fn draw_gizmos(mut _gizmos: Gizmos, _svo: Res<SVOResource>) {
+    // svo.tree.draw_gizmos(&mut gizmos, false);
+}
+```
+
+### src/cohen_sutherland.rs
+```
+#[derive(Debug, PartialEq, Eq, Copy, Clone)]
+pub enum LineClippingResult {
+    Inside,
+    Outside,
+    Clip,
+}
+
+/// Cohen-Sutherland line clipping algorithm
+///
+/// Given two points `l1` and `l2` that define a line segment, and a bounding box defined by `min` and `max`,
+/// returns a `LineClippingResult` that indicates whether the line segment is inside, outside, or needs to be clipped.
+pub fn cohen_sutherland<T>(
+    l1: &[T; 3],
+    l2: &[T; 3],
+    min: &[T; 3],
+    max: &[T; 3],
+) -> LineClippingResult
+where
+    T: PartialOrd + Copy,
+{
+    let code1 = assign_region_code(l1, min, max);
+    let code2 = assign_region_code(l2, min, max);
+
+    if code1 == 0 && code2 == 0 {
+        LineClippingResult::Inside
+    } else if code1 & code2 != 0 {
+        LineClippingResult::Outside
+    } else {
+        LineClippingResult::Clip
+    }
+}
+
+const LEFT: u8 = 0b0001;
+const RIGHT: u8 = 0b0010;
+const BOTTOM: u8 = 0b0100;
+const TOP: u8 = 0b1000;
+const NEAR: u8 = 0b0001_0000;
+const FAR: u8 = 0b0010_0000;
+
+/// Assigns a region code to a point based on its position relative to a bounding box.
+fn assign_region_code<T>(p: &[T; 3], min: &[T; 3], max: &[T; 3]) -> u8
+where
+    T: PartialOrd,
+{
+    let mut code = 0;
+    if p[0] < min[0] {
+        code |= LEFT;
+    } else if p[0] > max[0] {
+        code |= RIGHT;
+    }
+    if p[1] < min[1] {
+        code |= BOTTOM;
+    } else if p[1] > max[1] {
+        code |= TOP;
+    }
+    if p[2] < min[2] {
+        code |= NEAR;
+    } else if p[2] > max[2] {
+        code |= FAR;
+    }
+    code
+}
+
+#[cfg(test)]
+mod tests {
+    use bevy_math::Vec3;
+
+    use super::*;
+
+    #[test]
+    fn test_assign_region_code() {
+        let min = Vec3::new(-1.0, -1.0, -1.0).to_array();
+        let max = Vec3::new(1.0, 1.0, 1.0).to_array();
+
+        let p1 = Vec3::new(-2.0, 0.0, 0.0).to_array();
+        let p2 = Vec3::new(0.0, 2.0, 0.0).to_array();
+        let p3 = Vec3::new(0.0, 0.0, 2.0).to_array();
+
+        assert_eq!(assign_region_code(&p1, &min, &max), LEFT);
+        assert_eq!(assign_region_code(&p2, &min, &max), TOP);
+        assert_eq!(assign_region_code(&p3, &min, &max), FAR);
+    }
+
+    #[test]
+    fn test_cohen_sutherland() {
+        let l1 = Vec3::new(0.0, 0.0, 0.0).to_array();
+        let l2 = Vec3::new(1.0, 1.0, 1.0).to_array();
+
+        let min = Vec3::new(-1.0, -1.0, -1.0).to_array();
+        let max = Vec3::new(1.0, 1.0, 1.0).to_array();
+
+        let result = cohen_sutherland(&l1, &l2, &min, &max);
+
+        assert_eq!(result, LineClippingResult::Inside);
+    }
+}
+```
+
+### src/compound_node.rs
+```
+use std::ops::Deref;
+
+use crate::morton_code::MortonCode;
+
+/// Represents data in a leaf node as a 4x4x4 cube.
+///
+/// Encodes 64 booleans in a single u64. Each of them represents is a voxel at a specific position is filed.
+/// Positions are encoded using Morton code, where the resulting index is the index of the bit in the u64.
+pub struct CompoundNode(u64);
+
+impl CompoundNode {
+    /// Top face indexes in a 4x4x4 cube encoded into a u64.
+    const TOP_FACE_POSITIONS: u64 = 0b11_0011_0011_0011_0000_0000_0000_0000_0011_0011_0011_0011;
+
+    /// Bottom face indexes in a 4x4x4 cube encoded into a u64.
+    const BOTTOM_FACE_POSITIONS: u64 =
+        0b1100_1100_1100_1100_0000_0000_0000_0000_1100_1100_1100_1100_0000_0000_0000_0000;
+
+    /// Left face indexes in a 4x4x4 cube encoded into a u64.
+    const LEFT_FACE_POSITIONS: u64 =
+        0b101_0101_0000_0000_0101_0101_0000_0000_0101_0101_0000_0000_0101_0101;
+
+    /// Right face indexes in a 4x4x4 cube encoded into a u64.
+    const RIGHT_FACE_POSITIONS: u64 =
+        0b1010_1010_0000_0000_1010_1010_0000_0000_1010_1010_0000_0000_1010_1010_0000_0000;
+
+    /// Front face indexes in a 4x4x4 cube encoded into a u64.
+    const FRONT_FACE_POSITIONS: u64 = 0b1111_0000_1111_0000_1111_0000_1111;
+
+    /// Back face indexes in a 4x4x4 cube encoded into a u64.
+    const BACK_FACE_POSITIONS: u64 =
+        0b1111_0000_1111_0000_1111_0000_1111_0000_0000_0000_0000_0000_0000_0000_0000_0000;
+
+    /// All face indexes in a 4x4x4 cube encoded into an array of u64s.
+    const FACE_POSITIONS: [u64; 6] = [
+        Self::RIGHT_FACE_POSITIONS,
+        Self::BACK_FACE_POSITIONS,
+        Self::LEFT_FACE_POSITIONS,
+        Self::FRONT_FACE_POSITIONS,
+        Self::BOTTOM_FACE_POSITIONS,
+        Self::TOP_FACE_POSITIONS,
+    ];
+
+    /// Creates a new empty node.
+    #[inline]
+    pub fn new() -> Self {
+        Self(0)
+    }
+
+    /// Returns true if the `node_index` is part of a cube's face defined by `face_index`.
+    #[inline]
+    pub fn is_face(node_index: u8, face_index: usize) -> bool {
+        Self::FACE_POSITIONS[face_index] & (1 << node_index) != 0
+    }
+
+    /// Return true if the compound node is empty.
+    #[inline]
+    pub fn is_empty(&self) -> bool {
+        self.0 == 0
+    }
+
+    /// Return true if the compound node is full.
+    #[inline]
+    pub fn is_full(&self) -> bool {
+        self.0 == u64::MAX
+    }
+
+    /// Sets voxel at a specific position (`x`, `y`, `z`) to `value` (true = filled, false = empty)
+    #[inline]
+    pub fn set(&mut self, x: u32, y: u32, z: u32, value: bool) {
+        let index = MortonCode::encode_xyz(x, y, z).as_u64();
+
+        if value {
+            self.0 |= 1 << index;
+        } else {
+            self.0 &= !(1 << index);
+        }
+    }
+
+    /// Gets voxel at a specific position (`x`, `y`, `z`)
+    ///
+    /// Returns true if the voxel is filled, false if it is empty.
+    #[allow(dead_code)]
+    #[inline]
+    pub fn get(&self, x: u32, y: u32, z: u32) -> bool {
+        let index = MortonCode::encode_xyz(x, y, z).as_u64();
+
+        self.0 & (1 << index) != 0
+    }
+
+    /// Gets voxel at a specific Morton code index `index`
+    ///
+    /// Returns true if the voxel is filled, false if it is empty.
+    #[inline]
+    pub fn get_by_index(&self, index: u8) -> bool {
+        self.0 & (1 << index) != 0
+    }
+
+    /// Gets all indexes of filled voxels.
+    #[inline]
+    pub fn get_occupied_indexes(&self) -> Vec<u8> {
+        let mut indexes = Vec::with_capacity(64);
+
+        for i in 0..64 {
+            if self.0 & (1 << i) != 0 {
+                indexes.push(i);
+            }
+        }
+
+        indexes
+    }
+}
+
+impl Deref for CompoundNode {
+    type Target = u64;
+
+    fn deref(&self) -> &Self::Target {
+        &self.0
+    }
+}
+```
+
+### src/consts.rs
+```
+/// Table for quick lookup of position offsets for Morton codes from 0 to 7.
+pub const OFFSETS_IN_MORTON_CODE_ORDER: [(u8, u8, u8); 8] = [
+    (0, 0, 0),
+    (1, 0, 0),
+    (0, 1, 0),
+    (1, 1, 0),
+    (0, 0, 1),
+    (1, 0, 1),
+    (0, 1, 1),
+    (1, 1, 1),
+];
+
+/// Table for quick lookup of neighbor connections between two split nodes.
+///
+/// There are 6 possible faces on a cube and they are indexed as follows:
+/// 0 = Right (1, 0, 0)
+/// 1 = Back (0, 0, 1)
+/// 2 = Left (-1, 0, 0)
+/// 3 = Front (0, 0, -1)
+/// 4 = Bottom (0, 1, 0)
+/// 5 = Top (0, -1, 0)
+///
+/// The first array contains Morton codes for all 4 subnodes on the indexed face.
+/// The second array contains Morton codes for all 4 subnodes on the neighboring face of the other node.
+///
+/// The resulting Morton codes are relative to the parent node. So if knowing the
+/// index of a first child node, these offsets can be used to determine all other 7
+pub const NEIGHBOR_CONNECTIONS: [([usize; 4], [usize; 4]); 6] = [
+    ([1, 5, 3, 7], [0, 4, 2, 6]),
+    ([4, 6, 5, 7], [0, 2, 1, 3]),
+    ([0, 4, 2, 6], [1, 5, 3, 7]),
+    ([0, 2, 1, 3], [4, 6, 5, 7]),
+    ([2, 6, 3, 7], [0, 4, 1, 5]),
+    ([0, 4, 1, 5], [2, 6, 3, 7]),
+];
+
+/// Table for quick lookup of subnode positions and indexes for each face
+///
+/// There are 6 possible faces on a cube and they are indexed as follows:
+/// 0 = Right (1, 0, 0)
+/// 1 = Back (0, 0, 1)
+/// 2 = Left (-1, 0, 0)
+/// 3 = Front (0, 0, -1)
+/// 4 = Bottom (0, 1, 0)
+/// 5 = Top (0, -1, 0)
+///
+/// The first 3 values of the resulting array are the position of the subnode
+/// relative to the parent node neighboring the indexed face.
+/// The last value is the Morton code index of the subnode.
+pub const NEIGHBOR_SUBNODES: [[(u8, u8, u8, u8); 16]; 6] = [
+    [
+        (0, 0, 0, 0),
+        (0, 0, 1, 4),
+        (0, 0, 2, 32),
+        (0, 0, 3, 36),
+        (0, 1, 0, 2),
+        (0, 1, 1, 6),
+        (0, 1, 2, 34),
+        (0, 1, 3, 38),
+        (0, 2, 0, 16),
+        (0, 2, 1, 20),
+        (0, 2, 2, 48),
+        (0, 2, 3, 52),
+        (0, 3, 0, 18),
+        (0, 3, 1, 22),
+        (0, 3, 2, 50),
+        (0, 3, 3, 54),
+    ],
+    [
+        (0, 0, 0, 0),
+        (1, 0, 0, 1),
+        (2, 0, 0, 8),
+        (3, 0, 0, 9),
+        (0, 1, 0, 2),
+        (1, 1, 0, 3),
+        (2, 1, 0, 10),
+        (3, 1, 0, 11),
+        (0, 2, 0, 16),
+        (1, 2, 0, 17),
+        (2, 2, 0, 24),
+        (3, 2, 0, 25),
+        (0, 3, 0, 18),
+        (1, 3, 0, 19),
+        (2, 3, 0, 26),
+        (3, 3, 0, 27),
+    ],
+    [
+        (3, 0, 0, 9),
+        (3, 0, 1, 13),
+        (3, 0, 2, 41),
+        (3, 0, 3, 45),
+        (3, 1, 0, 11),
+        (3, 1, 1, 15),
+        (3, 1, 2, 43),
+        (3, 1, 3, 47),
+        (3, 2, 0, 25),
+        (3, 2, 1, 29),
+        (3, 2, 2, 57),
+        (3, 2, 3, 61),
+        (3, 3, 0, 27),
+        (3, 3, 1, 31),
+        (3, 3, 2, 59),
+        (3, 3, 3, 63),
+    ],
+    [
+        (0, 0, 3, 36),
+        (1, 0, 3, 37),
+        (2, 0, 3, 44),
+        (3, 0, 3, 45),
+        (0, 1, 3, 38),
+        (1, 1, 3, 39),
+        (2, 1, 3, 46),
+        (3, 1, 3, 47),
+        (0, 2, 3, 52),
+        (1, 2, 3, 53),
+        (2, 2, 3, 60),
+        (3, 2, 3, 61),
+        (0, 3, 3, 54),
+        (1, 3, 3, 55),
+        (2, 3, 3, 62),
+        (3, 3, 3, 63),
+    ],
+    [
+        (0, 0, 0, 0),
+        (1, 0, 0, 1),
+        (2, 0, 0, 8),
+        (3, 0, 0, 9),
+        (0, 0, 1, 4),
+        (1, 0, 1, 5),
+        (2, 0, 1, 12),
+        (3, 0, 1, 13),
+        (0, 0, 2, 32),
+        (1, 0, 2, 33),
+        (2, 0, 2, 40),
+        (3, 0, 2, 41),
+        (0, 0, 3, 36),
+        (1, 0, 3, 37),
+        (2, 0, 3, 44),
+        (3, 0, 3, 45),
+    ],
+    [
+        (0, 3, 0, 18),
+        (1, 3, 0, 19),
+        (2, 3, 0, 26),
+        (3, 3, 0, 27),
+        (0, 3, 1, 22),
+        (1, 3, 1, 23),
+        (2, 3, 1, 30),
+        (3, 3, 1, 31),
+        (0, 3, 2, 50),
+        (1, 3, 2, 51),
+        (2, 3, 2, 58),
+        (3, 3, 2, 59),
+        (0, 3, 3, 54),
+        (1, 3, 3, 55),
+        (2, 3, 3, 62),
+        (3, 3, 3, 63),
+    ],
+];
+
+/// The 12 connections between the 8 subnodes of a node.
+///
+/// The first value is a face index through which the first subnode is connected.
+/// The second value is a face index through which the second subnode is connected.
+///
+/// The second two values are the offsets to the subnodes that are connected. These offsets are
+/// in Morton order relative to the parent node.
+pub const SIBLING_CONNECTIONS: [(usize, usize, usize, usize); 12] = [
+    (0, 2, 0, 1),
+    (4, 5, 0, 2),
+    (1, 3, 0, 4),
+    (4, 5, 1, 3),
+    (1, 3, 1, 5),
+    (0, 2, 2, 3),
+    (1, 3, 2, 6),
+    (1, 3, 3, 7),
+    (0, 2, 4, 5),
+    (4, 5, 4, 6),
+    (4, 5, 5, 7),
+    (0, 2, 6, 7),
+];
+
+/// Lookup table containing the 6 neighbors of each subnode.
+///
+/// The array is indexed in Morton order.
+/// The values in the neighbors array indexes of the
+/// neighboring subnodes in Morton order.
+pub const SUBNODE_NEIGHBORS: [[u8; 6]; 64] = [
+    [1, 4, 9, 36, 2, 18],
+    [8, 5, 0, 37, 3, 19],
+    [3, 6, 11, 38, 16, 0],
+    [10, 7, 2, 39, 17, 1],
+    [5, 32, 13, 0, 6, 22],
+    [12, 33, 4, 1, 7, 23],
+    [7, 34, 15, 2, 20, 4],
+    [14, 35, 6, 3, 21, 5],
+    [9, 12, 1, 44, 10, 26],
+    [0, 13, 8, 45, 11, 27],
+    [11, 14, 3, 46, 24, 8],
+    [2, 15, 10, 47, 25, 9],
+    [13, 40, 5, 8, 14, 30],
+    [4, 41, 12, 9, 15, 31],
+    [15, 42, 7, 10, 28, 12],
+    [6, 43, 14, 11, 29, 13],
+    [17, 20, 25, 52, 18, 2],
+    [24, 21, 16, 53, 19, 3],
+    [19, 22, 27, 54, 0, 16],
+    [26, 23, 18, 55, 1, 17],
+    [21, 48, 29, 16, 22, 6],
+    [28, 49, 20, 17, 23, 7],
+    [23, 50, 31, 18, 4, 20],
+    [30, 51, 22, 19, 5, 21],
+    [25, 28, 17, 60, 26, 10],
+    [16, 29, 24, 61, 27, 11],
+    [27, 30, 19, 62, 8, 24],
+    [18, 31, 26, 63, 9, 25],
+    [29, 56, 21, 24, 30, 14],
+    [20, 57, 28, 25, 31, 15],
+    [31, 58, 23, 26, 12, 28],
+    [22, 59, 30, 27, 13, 29],
+    [33, 36, 41, 4, 34, 50],
+    [40, 37, 32, 5, 35, 51],
+    [35, 38, 43, 6, 48, 32],
+    [42, 39, 34, 7, 49, 33],
+    [37, 0, 45, 32, 38, 54],
+    [44, 1, 36, 33, 39, 55],
+    [39, 2, 47, 34, 52, 36],
+    [46, 3, 38, 35, 53, 37],
+    [41, 44, 33, 12, 42, 58],
+    [32, 45, 40, 13, 43, 59],
+    [43, 46, 35, 14, 56, 40],
+    [34, 47, 42, 15, 57, 41],
+    [45, 8, 37, 40, 46, 62],
+    [36, 9, 44, 41, 47, 63],
+    [47, 10, 39, 42, 60, 44],
+    [38, 11, 46, 43, 61, 45],
+    [49, 52, 57, 20, 50, 34],
+    [56, 53, 48, 21, 51, 35],
+    [51, 54, 59, 22, 32, 48],
+    [58, 55, 50, 23, 33, 49],
+    [53, 16, 61, 48, 54, 38],
+    [60, 17, 52, 49, 55, 39],
+    [55, 18, 63, 50, 36, 52],
+    [62, 19, 54, 51, 37, 53],
+    [57, 60, 49, 28, 58, 42],
+    [48, 61, 56, 29, 59, 43],
+    [59, 62, 51, 30, 40, 56],
+    [50, 63, 58, 31, 41, 57],
+    [61, 24, 53, 56, 62, 46],
+    [52, 25, 60, 57, 63, 47],
+    [63, 26, 55, 58, 44, 60],
+    [54, 27, 62, 59, 45, 61],
+];
+
+/// Position offsets of the 6 neighbors of a node.
+///
+/// The indexes are:
+///
+/// 0 = Right side
+/// 1 = Back side
+/// 2 = Left side
+/// 3 = Front side
+/// 4 = Bottom side
+/// 5 = Top side
+pub const NEIGHBOR_POSITION_OFFSETS: [(i32, i32, i32); 6] = [
+    (1, 0, 0),
+    (0, 0, 1),
+    (-1, 0, 0),
+    (0, 0, -1),
+    (0, 1, 0),
+    (0, -1, 0),
+];
+
+pub const SUBNODE_POSITIONS: [(u8, u8, u8); 64] = [
+    (0, 0, 0),
+    (1, 0, 0),
+    (0, 1, 0),
+    (1, 1, 0),
+    (0, 0, 1),
+    (1, 0, 1),
+    (0, 1, 1),
+    (1, 1, 1),
+    (2, 0, 0),
+    (3, 0, 0),
+    (2, 1, 0),
+    (3, 1, 0),
+    (2, 0, 1),
+    (3, 0, 1),
+    (2, 1, 1),
+    (3, 1, 1),
+    (0, 2, 0),
+    (1, 2, 0),
+    (0, 3, 0),
+    (1, 3, 0),
+    (0, 2, 1),
+    (1, 2, 1),
+    (0, 3, 1),
+    (1, 3, 1),
+    (2, 2, 0),
+    (3, 2, 0),
+    (2, 3, 0),
+    (3, 3, 0),
+    (2, 2, 1),
+    (3, 2, 1),
+    (2, 3, 1),
+    (3, 3, 1),
+    (0, 0, 2),
+    (1, 0, 2),
+    (0, 1, 2),
+    (1, 1, 2),
+    (0, 0, 3),
+    (1, 0, 3),
+    (0, 1, 3),
+    (1, 1, 3),
+    (2, 0, 2),
+    (3, 0, 2),
+    (2, 1, 2),
+    (3, 1, 2),
+    (2, 0, 3),
+    (3, 0, 3),
+    (2, 1, 3),
+    (3, 1, 3),
+    (0, 2, 2),
+    (1, 2, 2),
+    (0, 3, 2),
+    (1, 3, 2),
+    (0, 2, 3),
+    (1, 2, 3),
+    (0, 3, 3),
+    (1, 3, 3),
+    (2, 2, 2),
+    (3, 2, 2),
+    (2, 3, 2),
+    (3, 3, 2),
+    (2, 2, 3),
+    (3, 2, 3),
+    (2, 3, 3),
+    (3, 3, 3),
+];
+
+#[cfg(test)]
+mod tests {
+    use std::collections::HashSet;
+
+    use crate::morton_code::MortonCode;
+
+    use super::*;
+
+    #[test]
+    fn test_offsets_in_morton_code_order() {
+        (0_u8..6_u8).for_each(|i| {
+            let offset_from_table = OFFSETS_IN_MORTON_CODE_ORDER[i as usize];
+            let offset_from_morton_code = MortonCode::from_u8(i).decode().unwrap();
+            let offset_from_morton_code = (
+                offset_from_morton_code.x.try_into().unwrap(),
+                offset_from_morton_code.y.try_into().unwrap(),
+                offset_from_morton_code.z.try_into().unwrap(),
+            );
+
+            assert_eq!(offset_from_table, offset_from_morton_code);
+        });
+    }
+
+    #[test]
+    fn test_neighbor_connections() {
+        // Check right face
+        {
+            let mut from_nodes = Vec::new();
+            let mut to_nodes = Vec::new();
+
+            for y in 0..2 {
+                for z in 0..2 {
+                    let from_node = MortonCode::encode_xyz(1, y, z).as_usize().unwrap();
+                    let to_node = MortonCode::encode_xyz(0, y, z).as_usize().unwrap();
+                    from_nodes.push(from_node);
+                    to_nodes.push(to_node);
+                }
+            }
+
+            assert_eq!(NEIGHBOR_CONNECTIONS[0].0, from_nodes.as_slice());
+            assert_eq!(NEIGHBOR_CONNECTIONS[0].1, to_nodes.as_slice());
+        }
+
+        // Check back face
+        {
+            let mut from_nodes = Vec::new();
+            let mut to_nodes = Vec::new();
+
+            for x in 0..2 {
+                for y in 0..2 {
+                    let from_node = MortonCode::encode_xyz(x, y, 1).as_usize().unwrap();
+                    let to_node = MortonCode::encode_xyz(x, y, 0).as_usize().unwrap();
+                    from_nodes.push(from_node);
+                    to_nodes.push(to_node);
+                }
+            }
+
+            assert_eq!(NEIGHBOR_CONNECTIONS[1].0, from_nodes.as_slice());
+            assert_eq!(NEIGHBOR_CONNECTIONS[1].1, to_nodes.as_slice());
+        }
+
+        // Check left face
+        {
+            let mut from_nodes = Vec::new();
+            let mut to_nodes = Vec::new();
+
+            for y in 0..2 {
+                for z in 0..2 {
+                    let from_node = MortonCode::encode_xyz(0, y, z).as_usize().unwrap();
+                    let to_node = MortonCode::encode_xyz(1, y, z).as_usize().unwrap();
+                    from_nodes.push(from_node);
+                    to_nodes.push(to_node);
+                }
+            }
+
+            assert_eq!(NEIGHBOR_CONNECTIONS[2].0, from_nodes.as_slice());
+            assert_eq!(NEIGHBOR_CONNECTIONS[2].1, to_nodes.as_slice());
+        }
+
+        // Check front face
+        {
+            let mut from_nodes = Vec::new();
+            let mut to_nodes = Vec::new();
+
+            for x in 0..2 {
+                for y in 0..2 {
+                    let from_node = MortonCode::encode_xyz(x, y, 0).as_usize().unwrap();
+                    let to_node = MortonCode::encode_xyz(x, y, 1).as_usize().unwrap();
+                    from_nodes.push(from_node);
+                    to_nodes.push(to_node);
+                }
+            }
+
+            assert_eq!(NEIGHBOR_CONNECTIONS[3].0, from_nodes.as_slice());
+            assert_eq!(NEIGHBOR_CONNECTIONS[3].1, to_nodes.as_slice());
+        }
+
+        // Check bottom face
+        {
+            let mut from_nodes = Vec::new();
+            let mut to_nodes = Vec::new();
+
+            for x in 0..2 {
+                for z in 0..2 {
+                    let from_node = MortonCode::encode_xyz(x, 1, z).as_usize().unwrap();
+                    let to_node = MortonCode::encode_xyz(x, 0, z).as_usize().unwrap();
+                    from_nodes.push(from_node);
+                    to_nodes.push(to_node);
+                }
+            }
+
+            assert_eq!(NEIGHBOR_CONNECTIONS[4].0, from_nodes.as_slice());
+            assert_eq!(NEIGHBOR_CONNECTIONS[4].1, to_nodes.as_slice());
+        }
+
+        // Check top face
+        {
+            let mut from_nodes = Vec::new();
+            let mut to_nodes = Vec::new();
+
+            for x in 0..2 {
+                for z in 0..2 {
+                    let from_node = MortonCode::encode_xyz(x, 0, z).as_usize().unwrap();
+                    let to_node = MortonCode::encode_xyz(x, 1, z).as_usize().unwrap();
+                    from_nodes.push(from_node);
+                    to_nodes.push(to_node);
+                }
+            }
+
+            assert_eq!(NEIGHBOR_CONNECTIONS[5].0, from_nodes.as_slice());
+            assert_eq!(NEIGHBOR_CONNECTIONS[5].1, to_nodes.as_slice());
+        }
+    }
+
+    #[test]
+    fn test_neighbor_subnodes() {
+        // Check right face
+        {
+            let mut subnodes = Vec::new();
+
+            for y in 0_u8..4_u8 {
+                for z in 0_u8..4_u8 {
+                    let subnode = MortonCode::encode_xyz(0, y.into(), z.into())
+                        .as_u8()
+                        .unwrap();
+                    subnodes.push((0_u8, y, z, subnode));
+                }
+            }
+
+            assert_eq!(NEIGHBOR_SUBNODES[0], subnodes.as_slice());
+        }
+
+        // Check back face
+        {
+            let mut subnodes = Vec::new();
+
+            for y in 0_u8..4_u8 {
+                for x in 0_u8..4_u8 {
+                    let subnode = MortonCode::encode_xyz(x.into(), y.into(), 0)
+                        .as_u8()
+                        .unwrap();
+                    subnodes.push((x, y, 0, subnode));
+                }
+            }
+
+            assert_eq!(NEIGHBOR_SUBNODES[1], subnodes.as_slice());
+        }
+
+        // Check left face
+        {
+            let mut subnodes = Vec::new();
+
+            for y in 0_u8..4_u8 {
+                for z in 0_u8..4_u8 {
+                    let subnode = MortonCode::encode_xyz(3, y.into(), z.into())
+                        .as_u8()
+                        .unwrap();
+                    subnodes.push((3, y, z, subnode));
+                }
+            }
+
+            assert_eq!(NEIGHBOR_SUBNODES[2], subnodes.as_slice());
+        }
+
+        // Check front face
+        {
+            let mut subnodes = Vec::new();
+
+            for y in 0_u8..4_u8 {
+                for x in 0_u8..4_u8 {
+                    let subnode = MortonCode::encode_xyz(x.into(), y.into(), 3)
+                        .as_u8()
+                        .unwrap();
+                    subnodes.push((x, y, 3, subnode));
+                }
+            }
+
+            assert_eq!(NEIGHBOR_SUBNODES[3], subnodes.as_slice());
+        }
+
+        // Check bottom face
+        {
+            let mut subnodes = Vec::new();
+
+            for z in 0_u8..4_u8 {
+                for x in 0_u8..4_u8 {
+                    let subnode = MortonCode::encode_xyz(x.into(), 0, z.into())
+                        .as_u8()
+                        .unwrap();
+                    subnodes.push((x, 0, z, subnode));
+                }
+            }
+
+            assert_eq!(NEIGHBOR_SUBNODES[4], subnodes.as_slice());
+        }
+
+        // Check top face
+        {
+            let mut subnodes = Vec::new();
+
+            for z in 0_u8..4_u8 {
+                for x in 0_u8..4_u8 {
+                    let subnode = MortonCode::encode_xyz(x.into(), 3, z.into())
+                        .as_u8()
+                        .unwrap();
+                    subnodes.push((x, 3, z, subnode));
+                }
+            }
+
+            assert_eq!(NEIGHBOR_SUBNODES[5], subnodes.as_slice());
+        }
+    }
+
+    #[test]
+    fn test_sibling_connections() {
+        const RIGHT_FACE: usize = 0;
+        const BACK_FACE: usize = 1;
+        const LEFT_FACE: usize = 2;
+        const FRONT_FACE: usize = 3;
+        const BOTTOM_FACE: usize = 4;
+        const TOP_FACE: usize = 5;
+
+        let mut duplicity_check = HashSet::new();
+        let mut result = Vec::new();
+
+        for x in 0_u8..2_u8 {
+            for y in 0_u8..2_u8 {
+                for z in 0_u8..2_u8 {
+                    let node = MortonCode::encode_xyz(x.into(), y.into(), z.into())
+                        .as_u8()
+                        .unwrap();
+
+                    for (face, subnode) in NEIGHBOR_POSITION_OFFSETS.iter().enumerate() {
+                        let nx = i32::from(x) + subnode.0;
+                        let ny = i32::from(y) + subnode.1;
+                        let nz = i32::from(z) + subnode.2;
+
+                        if !(0..=1).contains(&nx)
+                            || !(0..=1).contains(&ny)
+                            || !(0..=1).contains(&nz)
+                        {
+                            continue;
+                        }
+
+                        let opposite_face = {
+                            if face == RIGHT_FACE {
+                                LEFT_FACE
+                            } else if face == BACK_FACE {
+                                FRONT_FACE
+                            } else if face == LEFT_FACE {
+                                RIGHT_FACE
+                            } else if face == FRONT_FACE {
+                                BACK_FACE
+                            } else if face == BOTTOM_FACE {
+                                TOP_FACE
+                            } else if face == TOP_FACE {
+                                BOTTOM_FACE
+                            } else {
+                                unreachable!()
+                            }
+                        };
+
+                        let sibling = MortonCode::encode_xyz(
+                            u32::try_from(nx).unwrap(),
+                            u32::try_from(ny).unwrap(),
+                            u32::try_from(nz).unwrap(),
+                        )
+                        .as_u8()
+                        .unwrap();
+
+                        if duplicity_check.contains(&(node, sibling)) {
+                            continue;
+                        }
+
+                        result.push((face, opposite_face, node as usize, sibling as usize));
+
+                        duplicity_check.insert((node, sibling));
+                        duplicity_check.insert((sibling, node));
+                    }
+                }
+            }
+        }
+
+        result.sort_by(|a, b| a.2.cmp(&b.2).then_with(|| a.3.cmp(&b.3)));
+
+        assert_eq!(SIBLING_CONNECTIONS, result.as_slice());
+    }
+
+    #[test]
+    fn test_subnode_neighbors() {
+        let mut neighbors = Vec::new();
+
+        for x in 0..4_u8 {
+            for y in 0..4_u8 {
+                for z in 0..4_u8 {
+                    let node = MortonCode::encode_xyz(x.into(), y.into(), z.into())
+                        .as_u8()
+                        .unwrap();
+                    let mut arr = [0; 6];
+
+                    for (i, neighbor) in NEIGHBOR_POSITION_OFFSETS.iter().enumerate() {
+                        let nx = u32::try_from((i32::from(x) + neighbor.0 + 4) % 4).unwrap();
+                        let ny = u32::try_from((i32::from(y) + neighbor.1 + 4) % 4).unwrap();
+                        let nz = u32::try_from((i32::from(z) + neighbor.2 + 4) % 4).unwrap();
+
+                        let neighbor = MortonCode::encode_xyz(nx, ny, nz).as_u8().unwrap();
+
+                        arr[i] = neighbor;
+                    }
+
+                    neighbors.push((node, arr));
+                }
+            }
+        }
+
+        neighbors.sort_by(|a, b| a.0.cmp(&b.0));
+
+        let neighbors = neighbors
+            .into_iter()
+            .map(|(_, arr)| arr)
+            .collect::<Vec<_>>();
+
+        assert_eq!(SUBNODE_NEIGHBORS, neighbors.as_slice());
+    }
+
+    #[test]
+    fn test_subnode_positions() {
+        let mut positions = Vec::new();
+
+        for x in 0..4_u8 {
+            for y in 0..4_u8 {
+                for z in 0..4_u8 {
+                    positions.push((x, y, z));
+                }
+            }
+        }
+
+        positions.sort_by(|a, b| {
+            let a = MortonCode::encode_xyz(a.0.into(), a.1.into(), a.2.into())
+                .as_u8()
+                .unwrap();
+            let b = MortonCode::encode_xyz(b.0.into(), b.1.into(), b.2.into())
+                .as_u8()
+                .unwrap();
+
+            a.cmp(&b)
+        });
+
+        assert_eq!(SUBNODE_POSITIONS, positions.as_slice());
+    }
+}
+```
+
+### src/lib.rs
+```
+//! Sparse Voxel Octree (SVO) implementation in Rust based on `3D Flight Navigation Using Sparse Voxel Octrees`
+//! with integration for the Bevy engine under the bevy feature.
+//!
+//! [`3D Flight Navigation Using Sparse Voxel Octrees`]: https://www.gameaipro.com/GameAIPro3/GameAIPro3_Chapter21_3D_Flight_Navigation_Using_Sparse_Voxel_Octrees.pdf
+
+#![warn(clippy::pedantic)]
+
+mod cohen_sutherland;
+mod compound_node;
+mod consts;
+mod morton_code;
+mod point;
+mod sparse_voxel_octree;
+mod sparse_voxel_octree_builder;
+mod sparse_voxel_octree_link;
+mod sparse_voxel_octree_node;
+mod voxelized_mesh;
+
+#[cfg(not(feature = "bevy"))]
+mod bevy_vec {
+    pub use bevy_math::{IVec3, UVec3, Vec3};
+}
+
+#[cfg(feature = "bevy")]
+mod bevy_vec {}
+
+pub use bevy_vec::*;
+pub use point::DistanceSquared;
+pub use point::ManhattanDistance;
+pub use sparse_voxel_octree::SparseVoxelOctree;
+pub use sparse_voxel_octree_builder::SparseVoxelOctreeBuilder;
+pub use sparse_voxel_octree_link::SparseVoxelOctreeLink;
+pub use voxelized_mesh::VoxelizeError;
+pub use voxelized_mesh::VoxelizedMesh;
+```
+
+### src/morton_code.rs
+```
+/*
+@Misc{libmorton18,
+author = "Jeroen Baert",
+title = "Libmorton: C++ Morton Encoding/Decoding Library",
+howpublished = "\url{https://github.com/Forceflow/libmorton}",
+year = "2018"}
+*/
+
+use std::num::TryFromIntError;
+
+use bevy_math::UVec3;
+
+/// Morton code is a way of encoding 2D coordinates into a single number.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct MortonCode(u64);
+
+impl PartialOrd for MortonCode {
+    fn partial_cmp(&self, other: &Self) -> Option<std::cmp::Ordering> {
+        Some(self.cmp(other))
+    }
+}
+
+impl Ord for MortonCode {
+    fn cmp(&self, other: &Self) -> std::cmp::Ordering {
+        self.0.cmp(&other.0)
+    }
+}
+
+const MORTON_256_X: [u64; 256] = [
+    0x0000_0000,
+    0x0000_0001,
+    0x0000_0008,
+    0x0000_0009,
+    0x0000_0040,
+    0x0000_0041,
+    0x0000_0048,
+    0x0000_0049,
+    0x0000_0200,
+    0x0000_0201,
+    0x0000_0208,
+    0x0000_0209,
+    0x0000_0240,
+    0x0000_0241,
+    0x0000_0248,
+    0x0000_0249,
+    0x0000_1000,
+    0x0000_1001,
+    0x0000_1008,
+    0x0000_1009,
+    0x0000_1040,
+    0x0000_1041,
+    0x0000_1048,
+    0x0000_1049,
+    0x0000_1200,
+    0x0000_1201,
+    0x0000_1208,
+    0x0000_1209,
+    0x0000_1240,
+    0x0000_1241,
+    0x0000_1248,
+    0x0000_1249,
+    0x0000_8000,
+    0x0000_8001,
+    0x0000_8008,
+    0x0000_8009,
+    0x0000_8040,
+    0x0000_8041,
+    0x0000_8048,
+    0x0000_8049,
+    0x0000_8200,
+    0x0000_8201,
+    0x0000_8208,
+    0x0000_8209,
+    0x0000_8240,
+    0x0000_8241,
+    0x0000_8248,
+    0x0000_8249,
+    0x0000_9000,
+    0x0000_9001,
+    0x0000_9008,
+    0x0000_9009,
+    0x0000_9040,
+    0x0000_9041,
+    0x0000_9048,
+    0x0000_9049,
+    0x0000_9200,
+    0x0000_9201,
+    0x0000_9208,
+    0x0000_9209,
+    0x0000_9240,
+    0x0000_9241,
+    0x0000_9248,
+    0x0000_9249,
+    0x0004_0000,
+    0x0004_0001,
+    0x0004_0008,
+    0x0004_0009,
+    0x0004_0040,
+    0x0004_0041,
+    0x0004_0048,
+    0x0004_0049,
+    0x0004_0200,
+    0x0004_0201,
+    0x0004_0208,
+    0x0004_0209,
+    0x0004_0240,
+    0x0004_0241,
+    0x0004_0248,
+    0x0004_0249,
+    0x0004_1000,
+    0x0004_1001,
+    0x0004_1008,
+    0x0004_1009,
+    0x0004_1040,
+    0x0004_1041,
+    0x0004_1048,
+    0x0004_1049,
+    0x0004_1200,
+    0x0004_1201,
+    0x0004_1208,
+    0x0004_1209,
+    0x0004_1240,
+    0x0004_1241,
+    0x0004_1248,
+    0x0004_1249,
+    0x0004_8000,
+    0x0004_8001,
+    0x0004_8008,
+    0x0004_8009,
+    0x0004_8040,
+    0x0004_8041,
+    0x0004_8048,
+    0x0004_8049,
+    0x0004_8200,
+    0x0004_8201,
+    0x0004_8208,
+    0x0004_8209,
+    0x0004_8240,
+    0x0004_8241,
+    0x0004_8248,
+    0x0004_8249,
+    0x0004_9000,
+    0x0004_9001,
+    0x0004_9008,
+    0x0004_9009,
+    0x0004_9040,
+    0x0004_9041,
+    0x0004_9048,
+    0x0004_9049,
+    0x0004_9200,
+    0x0004_9201,
+    0x0004_9208,
+    0x0004_9209,
+    0x0004_9240,
+    0x0004_9241,
+    0x0004_9248,
+    0x0004_9249,
+    0x0020_0000,
+    0x0020_0001,
+    0x0020_0008,
+    0x0020_0009,
+    0x0020_0040,
+    0x0020_0041,
+    0x0020_0048,
+    0x0020_0049,
+    0x0020_0200,
+    0x0020_0201,
+    0x0020_0208,
+    0x0020_0209,
+    0x0020_0240,
+    0x0020_0241,
+    0x0020_0248,
+    0x0020_0249,
+    0x0020_1000,
+    0x0020_1001,
+    0x0020_1008,
+    0x0020_1009,
+    0x0020_1040,
+    0x0020_1041,
+    0x0020_1048,
+    0x0020_1049,
+    0x0020_1200,
+    0x0020_1201,
+    0x0020_1208,
+    0x0020_1209,
+    0x0020_1240,
+    0x0020_1241,
+    0x0020_1248,
+    0x0020_1249,
+    0x0020_8000,
+    0x0020_8001,
+    0x0020_8008,
+    0x0020_8009,
+    0x0020_8040,
+    0x0020_8041,
+    0x0020_8048,
+    0x0020_8049,
+    0x0020_8200,
+    0x0020_8201,
+    0x0020_8208,
+    0x0020_8209,
+    0x0020_8240,
+    0x0020_8241,
+    0x0020_8248,
+    0x0020_8249,
+    0x0020_9000,
+    0x0020_9001,
+    0x0020_9008,
+    0x0020_9009,
+    0x0020_9040,
+    0x0020_9041,
+    0x0020_9048,
+    0x0020_9049,
+    0x0020_9200,
+    0x0020_9201,
+    0x0020_9208,
+    0x0020_9209,
+    0x0020_9240,
+    0x0020_9241,
+    0x0020_9248,
+    0x0020_9249,
+    0x0024_0000,
+    0x0024_0001,
+    0x0024_0008,
+    0x0024_0009,
+    0x0024_0040,
+    0x0024_0041,
+    0x0024_0048,
+    0x0024_0049,
+    0x0024_0200,
+    0x0024_0201,
+    0x0024_0208,
+    0x0024_0209,
+    0x0024_0240,
+    0x0024_0241,
+    0x0024_0248,
+    0x0024_0249,
+    0x0024_1000,
+    0x0024_1001,
+    0x0024_1008,
+    0x0024_1009,
+    0x0024_1040,
+    0x0024_1041,
+    0x0024_1048,
+    0x0024_1049,
+    0x0024_1200,
+    0x0024_1201,
+    0x0024_1208,
+    0x0024_1209,
+    0x0024_1240,
+    0x0024_1241,
+    0x0024_1248,
+    0x0024_1249,
+    0x0024_8000,
+    0x0024_8001,
+    0x0024_8008,
+    0x0024_8009,
+    0x0024_8040,
+    0x0024_8041,
+    0x0024_8048,
+    0x0024_8049,
+    0x0024_8200,
+    0x0024_8201,
+    0x0024_8208,
+    0x0024_8209,
+    0x0024_8240,
+    0x0024_8241,
+    0x0024_8248,
+    0x0024_8249,
+    0x0024_9000,
+    0x0024_9001,
+    0x0024_9008,
+    0x0024_9009,
+    0x0024_9040,
+    0x0024_9041,
+    0x0024_9048,
+    0x0024_9049,
+    0x0024_9200,
+    0x0024_9201,
+    0x0024_9208,
+    0x0024_9209,
+    0x0024_9240,
+    0x0024_9241,
+    0x0024_9248,
+    0x0024_9249,
+];
+
+/// pre-shifted table for Y coordinates (1 bit to the left)
+const MORTON_256_Y: [u64; 256] = [
+    0x0000_0000,
+    0x0000_0002,
+    0x0000_0010,
+    0x0000_0012,
+    0x0000_0080,
+    0x0000_0082,
+    0x0000_0090,
+    0x0000_0092,
+    0x0000_0400,
+    0x0000_0402,
+    0x0000_0410,
+    0x0000_0412,
+    0x0000_0480,
+    0x0000_0482,
+    0x0000_0490,
+    0x0000_0492,
+    0x0000_2000,
+    0x0000_2002,
+    0x0000_2010,
+    0x0000_2012,
+    0x0000_2080,
+    0x0000_2082,
+    0x0000_2090,
+    0x0000_2092,
+    0x0000_2400,
+    0x0000_2402,
+    0x0000_2410,
+    0x0000_2412,
+    0x0000_2480,
+    0x0000_2482,
+    0x0000_2490,
+    0x0000_2492,
+    0x0001_0000,
+    0x0001_0002,
+    0x0001_0010,
+    0x0001_0012,
+    0x0001_0080,
+    0x0001_0082,
+    0x0001_0090,
+    0x0001_0092,
+    0x0001_0400,
+    0x0001_0402,
+    0x0001_0410,
+    0x0001_0412,
+    0x0001_0480,
+    0x0001_0482,
+    0x0001_0490,
+    0x0001_0492,
+    0x0001_2000,
+    0x0001_2002,
+    0x0001_2010,
+    0x0001_2012,
+    0x0001_2080,
+    0x0001_2082,
+    0x0001_2090,
+    0x0001_2092,
+    0x0001_2400,
+    0x0001_2402,
+    0x0001_2410,
+    0x0001_2412,
+    0x0001_2480,
+    0x0001_2482,
+    0x0001_2490,
+    0x0001_2492,
+    0x0008_0000,
+    0x0008_0002,
+    0x0008_0010,
+    0x0008_0012,
+    0x0008_0080,
+    0x0008_0082,
+    0x0008_0090,
+    0x0008_0092,
+    0x0008_0400,
+    0x0008_0402,
+    0x0008_0410,
+    0x0008_0412,
+    0x0008_0480,
+    0x0008_0482,
+    0x0008_0490,
+    0x0008_0492,
+    0x0008_2000,
+    0x0008_2002,
+    0x0008_2010,
+    0x0008_2012,
+    0x0008_2080,
+    0x0008_2082,
+    0x0008_2090,
+    0x0008_2092,
+    0x0008_2400,
+    0x0008_2402,
+    0x0008_2410,
+    0x0008_2412,
+    0x0008_2480,
+    0x0008_2482,
+    0x0008_2490,
+    0x0008_2492,
+    0x0009_0000,
+    0x0009_0002,
+    0x0009_0010,
+    0x0009_0012,
+    0x0009_0080,
+    0x0009_0082,
+    0x0009_0090,
+    0x0009_0092,
+    0x0009_0400,
+    0x0009_0402,
+    0x0009_0410,
+    0x0009_0412,
+    0x0009_0480,
+    0x0009_0482,
+    0x0009_0490,
+    0x0009_0492,
+    0x0009_2000,
+    0x0009_2002,
+    0x0009_2010,
+    0x0009_2012,
+    0x0009_2080,
+    0x0009_2082,
+    0x0009_2090,
+    0x0009_2092,
+    0x0009_2400,
+    0x0009_2402,
+    0x0009_2410,
+    0x0009_2412,
+    0x0009_2480,
+    0x0009_2482,
+    0x0009_2490,
+    0x0009_2492,
+    0x0040_0000,
+    0x0040_0002,
+    0x0040_0010,
+    0x0040_0012,
+    0x0040_0080,
+    0x0040_0082,
+    0x0040_0090,
+    0x0040_0092,
+    0x0040_0400,
+    0x0040_0402,
+    0x0040_0410,
+    0x0040_0412,
+    0x0040_0480,
+    0x0040_0482,
+    0x0040_0490,
+    0x0040_0492,
+    0x0040_2000,
+    0x0040_2002,
+    0x0040_2010,
+    0x0040_2012,
+    0x0040_2080,
+    0x0040_2082,
+    0x0040_2090,
+    0x0040_2092,
+    0x0040_2400,
+    0x0040_2402,
+    0x0040_2410,
+    0x0040_2412,
+    0x0040_2480,
+    0x0040_2482,
+    0x0040_2490,
+    0x0040_2492,
+    0x0041_0000,
+    0x0041_0002,
+    0x0041_0010,
+    0x0041_0012,
+    0x0041_0080,
+    0x0041_0082,
+    0x0041_0090,
+    0x0041_0092,
+    0x0041_0400,
+    0x0041_0402,
+    0x0041_0410,
+    0x0041_0412,
+    0x0041_0480,
+    0x0041_0482,
+    0x0041_0490,
+    0x0041_0492,
+    0x0041_2000,
+    0x0041_2002,
+    0x0041_2010,
+    0x0041_2012,
+    0x0041_2080,
+    0x0041_2082,
+    0x0041_2090,
+    0x0041_2092,
+    0x0041_2400,
+    0x0041_2402,
+    0x0041_2410,
+    0x0041_2412,
+    0x0041_2480,
+    0x0041_2482,
+    0x0041_2490,
+    0x0041_2492,
+    0x0048_0000,
+    0x0048_0002,
+    0x0048_0010,
+    0x0048_0012,
+    0x0048_0080,
+    0x0048_0082,
+    0x0048_0090,
+    0x0048_0092,
+    0x0048_0400,
+    0x0048_0402,
+    0x0048_0410,
+    0x0048_0412,
+    0x0048_0480,
+    0x0048_0482,
+    0x0048_0490,
+    0x0048_0492,
+    0x0048_2000,
+    0x0048_2002,
+    0x0048_2010,
+    0x0048_2012,
+    0x0048_2080,
+    0x0048_2082,
+    0x0048_2090,
+    0x0048_2092,
+    0x0048_2400,
+    0x0048_2402,
+    0x0048_2410,
+    0x0048_2412,
+    0x0048_2480,
+    0x0048_2482,
+    0x0048_2490,
+    0x0048_2492,
+    0x0049_0000,
+    0x0049_0002,
+    0x0049_0010,
+    0x0049_0012,
+    0x0049_0080,
+    0x0049_0082,
+    0x0049_0090,
+    0x0049_0092,
+    0x0049_0400,
+    0x0049_0402,
+    0x0049_0410,
+    0x0049_0412,
+    0x0049_0480,
+    0x0049_0482,
+    0x0049_0490,
+    0x0049_0492,
+    0x0049_2000,
+    0x0049_2002,
+    0x0049_2010,
+    0x0049_2012,
+    0x0049_2080,
+    0x0049_2082,
+    0x0049_2090,
+    0x0049_2092,
+    0x0049_2400,
+    0x0049_2402,
+    0x0049_2410,
+    0x0049_2412,
+    0x0049_2480,
+    0x0049_2482,
+    0x0049_2490,
+    0x0049_2492,
+];
+
+/// Pre-shifted table for z (2 bits to the left)
+const MORTON_256_Z: [u64; 256] = [
+    0x0000_0000,
+    0x0000_0004,
+    0x0000_0020,
+    0x0000_0024,
+    0x0000_0100,
+    0x0000_0104,
+    0x0000_0120,
+    0x0000_0124,
+    0x0000_0800,
+    0x0000_0804,
+    0x0000_0820,
+    0x0000_0824,
+    0x0000_0900,
+    0x0000_0904,
+    0x0000_0920,
+    0x0000_0924,
+    0x0000_4000,
+    0x0000_4004,
+    0x0000_4020,
+    0x0000_4024,
+    0x0000_4100,
+    0x0000_4104,
+    0x0000_4120,
+    0x0000_4124,
+    0x0000_4800,
+    0x0000_4804,
+    0x0000_4820,
+    0x0000_4824,
+    0x0000_4900,
+    0x0000_4904,
+    0x0000_4920,
+    0x0000_4924,
+    0x0002_0000,
+    0x0002_0004,
+    0x0002_0020,
+    0x0002_0024,
+    0x0002_0100,
+    0x0002_0104,
+    0x0002_0120,
+    0x0002_0124,
+    0x0002_0800,
+    0x0002_0804,
+    0x0002_0820,
+    0x0002_0824,
+    0x0002_0900,
+    0x0002_0904,
+    0x0002_0920,
+    0x0002_0924,
+    0x0002_4000,
+    0x0002_4004,
+    0x0002_4020,
+    0x0002_4024,
+    0x0002_4100,
+    0x0002_4104,
+    0x0002_4120,
+    0x0002_4124,
+    0x0002_4800,
+    0x0002_4804,
+    0x0002_4820,
+    0x0002_4824,
+    0x0002_4900,
+    0x0002_4904,
+    0x0002_4920,
+    0x0002_4924,
+    0x0010_0000,
+    0x0010_0004,
+    0x0010_0020,
+    0x0010_0024,
+    0x0010_0100,
+    0x0010_0104,
+    0x0010_0120,
+    0x0010_0124,
+    0x0010_0800,
+    0x0010_0804,
+    0x0010_0820,
+    0x0010_0824,
+    0x0010_0900,
+    0x0010_0904,
+    0x0010_0920,
+    0x0010_0924,
+    0x0010_4000,
+    0x0010_4004,
+    0x0010_4020,
+    0x0010_4024,
+    0x0010_4100,
+    0x0010_4104,
+    0x0010_4120,
+    0x0010_4124,
+    0x0010_4800,
+    0x0010_4804,
+    0x0010_4820,
+    0x0010_4824,
+    0x0010_4900,
+    0x0010_4904,
+    0x0010_4920,
+    0x0010_4924,
+    0x0012_0000,
+    0x0012_0004,
+    0x0012_0020,
+    0x0012_0024,
+    0x0012_0100,
+    0x0012_0104,
+    0x0012_0120,
+    0x0012_0124,
+    0x0012_0800,
+    0x0012_0804,
+    0x0012_0820,
+    0x0012_0824,
+    0x0012_0900,
+    0x0012_0904,
+    0x0012_0920,
+    0x0012_0924,
+    0x0012_4000,
+    0x0012_4004,
+    0x0012_4020,
+    0x0012_4024,
+    0x0012_4100,
+    0x0012_4104,
+    0x0012_4120,
+    0x0012_4124,
+    0x0012_4800,
+    0x0012_4804,
+    0x0012_4820,
+    0x0012_4824,
+    0x0012_4900,
+    0x0012_4904,
+    0x0012_4920,
+    0x0012_4924,
+    0x0080_0000,
+    0x0080_0004,
+    0x0080_0020,
+    0x0080_0024,
+    0x0080_0100,
+    0x0080_0104,
+    0x0080_0120,
+    0x0080_0124,
+    0x0080_0800,
+    0x0080_0804,
+    0x0080_0820,
+    0x0080_0824,
+    0x0080_0900,
+    0x0080_0904,
+    0x0080_0920,
+    0x0080_0924,
+    0x0080_4000,
+    0x0080_4004,
+    0x0080_4020,
+    0x0080_4024,
+    0x0080_4100,
+    0x0080_4104,
+    0x0080_4120,
+    0x0080_4124,
+    0x0080_4800,
+    0x0080_4804,
+    0x0080_4820,
+    0x0080_4824,
+    0x0080_4900,
+    0x0080_4904,
+    0x0080_4920,
+    0x0080_4924,
+    0x0082_0000,
+    0x0082_0004,
+    0x0082_0020,
+    0x0082_0024,
+    0x0082_0100,
+    0x0082_0104,
+    0x0082_0120,
+    0x0082_0124,
+    0x0082_0800,
+    0x0082_0804,
+    0x0082_0820,
+    0x0082_0824,
+    0x0082_0900,
+    0x0082_0904,
+    0x0082_0920,
+    0x0082_0924,
+    0x0082_4000,
+    0x0082_4004,
+    0x0082_4020,
+    0x0082_4024,
+    0x0082_4100,
+    0x0082_4104,
+    0x0082_4120,
+    0x0082_4124,
+    0x0082_4800,
+    0x0082_4804,
+    0x0082_4820,
+    0x0082_4824,
+    0x0082_4900,
+    0x0082_4904,
+    0x0082_4920,
+    0x0082_4924,
+    0x0090_0000,
+    0x0090_0004,
+    0x0090_0020,
+    0x0090_0024,
+    0x0090_0100,
+    0x0090_0104,
+    0x0090_0120,
+    0x0090_0124,
+    0x0090_0800,
+    0x0090_0804,
+    0x0090_0820,
+    0x0090_0824,
+    0x0090_0900,
+    0x0090_0904,
+    0x0090_0920,
+    0x0090_0924,
+    0x0090_4000,
+    0x0090_4004,
+    0x0090_4020,
+    0x0090_4024,
+    0x0090_4100,
+    0x0090_4104,
+    0x0090_4120,
+    0x0090_4124,
+    0x0090_4800,
+    0x0090_4804,
+    0x0090_4820,
+    0x0090_4824,
+    0x0090_4900,
+    0x0090_4904,
+    0x0090_4920,
+    0x0090_4924,
+    0x0092_0000,
+    0x0092_0004,
+    0x0092_0020,
+    0x0092_0024,
+    0x0092_0100,
+    0x0092_0104,
+    0x0092_0120,
+    0x0092_0124,
+    0x0092_0800,
+    0x0092_0804,
+    0x0092_0820,
+    0x0092_0824,
+    0x0092_0900,
+    0x0092_0904,
+    0x0092_0920,
+    0x0092_0924,
+    0x0092_4000,
+    0x0092_4004,
+    0x0092_4020,
+    0x0092_4024,
+    0x0092_4100,
+    0x0092_4104,
+    0x0092_4120,
+    0x0092_4124,
+    0x0092_4800,
+    0x0092_4804,
+    0x0092_4820,
+    0x0092_4824,
+    0x0092_4900,
+    0x0092_4904,
+    0x0092_4920,
+    0x0092_4924,
+];
+
+impl MortonCode {
+    /// Converts u8 into a morton code wrapper struct
+    #[inline]
+    pub fn from_u8(x: u8) -> Self {
+        Self(u64::from(x))
+    }
+
+    /// Creates a new morton code by encoding x, y, z
+    #[inline]
+    pub fn encode_xyz(x: u32, y: u32, z: u32) -> Self {
+        Self::encode(UVec3::new(x, y, z))
+    }
+
+    /// Creates a new morton code by encoding `UVec3`
+    #[inline]
+    pub fn encode(point: UVec3) -> Self {
+        let mut answer = MORTON_256_Z[(point.z >> 16) as usize & 0xFF] // we start by shifting the third byte, since we only look at the first 21 bits
+            | MORTON_256_Y[(point.y >> 16) as usize & 0xFF]
+            | MORTON_256_X[(point.z >> 16) as usize & 0xFF];
+
+        answer = answer << 48 | MORTON_256_Z[(point.z >> 8) as usize & 0xFF] // shifting second byte
+            | MORTON_256_Y[(point.y >> 8) as usize & 0xFF]
+            | MORTON_256_X[(point.x >> 8) as usize & 0xFF];
+
+        answer = answer << 24 | MORTON_256_Z[(point.z) as usize & 0xFF] // first byte
+            | MORTON_256_Y[(point.y) as usize & 0xFF]
+            | MORTON_256_X[(point.x) as usize & 0xFF];
+
+        Self(answer)
+    }
+
+    /// Returns the morton code as a u64
+    #[inline]
+    pub fn as_u64(self) -> u64 {
+        self.0
+    }
+
+    /// Returns the morton code as a usize
+    #[allow(dead_code)]
+    #[inline]
+    pub fn as_usize(self) -> Result<usize, TryFromIntError> {
+        usize::try_from(self.0)
+    }
+
+    /// Returns the morton code as a u8
+    #[inline]
+    pub fn as_u8(self) -> Result<u8, TryFromIntError> {
+        u8::try_from(self.0)
+    }
+
+    /// Decodes the morton code into a `UVec3`
+    #[inline]
+    pub fn decode(self) -> Result<UVec3, TryFromIntError> {
+        let mut x = 0;
+        let mut y = 0;
+        let mut z = 0;
+
+        for i in 0..(std::mem::size_of::<u64>() * 8) / 3 {
+            x |= (self.0 & (1 << (3 * i))) >> ((3 * i) - i);
+            y |= (self.0 & (1 << ((3 * i) + 1))) >> (((3 * i) + 1) - i);
+            z |= (self.0 & (1 << ((3 * i) + 2))) >> (((3 * i) + 2) - i);
+        }
+
+        let x = u32::try_from(x)?;
+        let y = u32::try_from(y)?;
+        let z = u32::try_from(z)?;
+
+        Ok(UVec3::new(x, y, z))
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_morton_code() {
+        for x in 0..256 {
+            for y in 0..256 {
+                for z in 0..256 {
+                    let morton_code = MortonCode::encode_xyz(x, y, z);
+                    let p = morton_code.decode().unwrap();
+
+                    assert_eq!(x, p.x);
+                    assert_eq!(y, p.y);
+                    assert_eq!(z, p.z);
+                }
+            }
+        }
+    }
+}
+```
+
+### src/point.rs
+```
+use bevy_math::{IVec3, UVec3, Vec3};
+
+pub trait DistanceSquared<T> {
+    fn distance_squared(&self, other: &Self) -> T;
+}
+
+pub trait ManhattanDistance<T> {
+    fn manhattan_distance(&self, other: &Self) -> T;
+}
+
+impl DistanceSquared<f32> for Vec3 {
+    #[inline]
+    fn distance_squared(&self, other: &Self) -> f32 {
+        (self.x - other.x).powi(2) + (self.y - other.y).powi(2) + (self.z - other.z).powi(2)
+    }
+}
+
+impl DistanceSquared<i32> for IVec3 {
+    #[inline]
+    fn distance_squared(&self, other: &Self) -> i32 {
+        (self.x - other.x).pow(2) + (self.y - other.y).pow(2) + (self.z - other.z).pow(2)
+    }
+}
+
+impl DistanceSquared<u32> for UVec3 {
+    #[inline]
+    fn distance_squared(&self, other: &Self) -> u32 {
+        let diff_x = if self.x > other.x {
+            self.x - other.x
+        } else {
+            other.x - self.x
+        };
+
+        let diff_y = if self.y > other.y {
+            self.y - other.y
+        } else {
+            other.y - self.y
+        };
+
+        let diff_z = if self.z > other.z {
+            self.z - other.z
+        } else {
+            other.z - self.z
+        };
+
+        diff_x.pow(2) + diff_y.pow(2) + diff_z.pow(2)
+    }
+}
+
+impl ManhattanDistance<f32> for Vec3 {
+    #[inline]
+    fn manhattan_distance(&self, other: &Self) -> f32 {
+        (self.x - other.x).abs() + (self.y - other.y).abs() + (self.z - other.z).abs()
+    }
+}
+
+impl ManhattanDistance<i32> for IVec3 {
+    #[inline]
+    fn manhattan_distance(&self, other: &Self) -> i32 {
+        (self.x - other.x).abs() + (self.y - other.y).abs() + (self.z - other.z).abs()
+    }
+}
+
+impl ManhattanDistance<u32> for UVec3 {
+    #[inline]
+    fn manhattan_distance(&self, other: &Self) -> u32 {
+        let diff_x = if self.x > other.x {
+            self.x - other.x
+        } else {
+            other.x - self.x
+        };
+
+        let diff_y = if self.y > other.y {
+            self.y - other.y
+        } else {
+            other.y - self.y
+        };
+
+        let diff_z = if self.z > other.z {
+            self.z - other.z
+        } else {
+            other.z - self.z
+        };
+
+        diff_x + diff_y + diff_z
+    }
+}
+```
+
+### src/sparse_voxel_octree.rs
+```
+// Resource: https://www.gameaipro.com/GameAIPro3/GameAIPro3_Chapter21_3D_Flight_Navigation_Using_Sparse_Voxel_Octrees.pdf
+
+use bevy_math::{IVec3, UVec3, Vec3};
+
+use crate::{
+    cohen_sutherland::{cohen_sutherland, LineClippingResult},
+    compound_node::CompoundNode,
+    consts::{
+        NEIGHBOR_CONNECTIONS, NEIGHBOR_POSITION_OFFSETS, NEIGHBOR_SUBNODES,
+        OFFSETS_IN_MORTON_CODE_ORDER, SUBNODE_NEIGHBORS, SUBNODE_POSITIONS,
+    },
+    morton_code::MortonCode,
+    sparse_voxel_octree_link::SparseVoxelOctreeLink,
+    sparse_voxel_octree_node::SparseVoxelOctreeNode,
+};
+
+/// Implementation of a sparse voxel octree.
+///
+/// The sparse voxel octree is a data structure that is used to represent a 3D space.
+/// It is a tree structure where each node represents a cubic volume in space.
+///
+/// The tree is sparse, meaning that not every node is present in the tree.
+/// Only nodes that contain geometry are present in the tree.
+///
+/// It is structured in layers where layer zero is the root layer containing all the leaf nodes
+/// and each layer above it contains the parent nodes of the layer below it.
+///
+/// Each leaf node is a 4x4x4 cube and each parent node is a 2x2x2 cube.
+/// Leaf nodes are aggregated into compound nodes that are of type u64
+/// where each bit represents a distinct position of a single voxel. The bit 1 means that the voxel is filled
+/// and the bit 0 means that the voxel is empty.
+///
+/// Absolute position of a node is calculated by multiplying the position of the node by the size of the node and
+/// the voxel size and then by adding the origin of the octree.
+///
+/// Each node has a position in space, parent, children and a list of neighbors to allow
+/// for easy navigation through the tree.
+///
+/// # Example
+///
+/// ```
+/// use svo_rs::{SparseVoxelOctreeBuilder, VoxelizedMesh};
+/// use bevy_math::{IVec3, UVec3};
+///
+/// let mut builder = SparseVoxelOctreeBuilder::new(1.0);
+///
+/// builder.add_mesh(VoxelizedMesh::new(vec![UVec3::new(0, 3, 0)], 1.0, IVec3::ZERO));
+///
+/// let octree = builder.build();
+/// ```
+pub struct SparseVoxelOctree {
+    /// Size of a single voxel in worldspace units.
+    ///
+    /// Voxel size defines the resolution of the octree.
+    pub(crate) voxel_size: f32,
+
+    /// Origin of the octree.
+    pub(crate) origin: IVec3,
+
+    /// Layers containing the nodes of the octree.
+    ///
+    /// layer[0] contains all the leaf nodes.
+    /// layer[1] contains all the parent nodes of the leaf nodes.
+    /// ...
+    /// layer[n] contains all the parent nodes of the layer[n-1].
+    ///
+    /// the layer[layer.len() - 1] contains the root node.
+    pub(crate) layers: Vec<Vec<SparseVoxelOctreeNode>>,
+
+    /// Compound nodes containing information about single voxels.
+    /// A single compound node is a 4x4x4 cube of voxels.
+    ///
+    /// It has the same ordering as the layer[0] so you can use the same index
+    /// to access both.
+    pub(crate) leafs: Vec<CompoundNode>,
+}
+
+impl SparseVoxelOctree {
+    /// Retrieves all neighbors of a node.
+    ///
+    /// Takes into account also if the neighboring node is subdivided or a leaf node,
+    /// returning the children is available.
+    ///
+    /// # Arguments
+    ///
+    /// * `link` - Link to the node.
+    ///
+    /// # Returns
+    ///
+    /// A vector containing all the neighbors of the node.
+    ///
+    /// # Example
+    ///
+    /// ```
+    /// use svo_rs::{SparseVoxelOctreeBuilder, VoxelizedMesh};
+    /// use bevy_math::{IVec3, UVec3, Vec3};
+    ///
+    /// let mut builder = SparseVoxelOctreeBuilder::new(1.0);
+    ///
+    /// builder.add_mesh(VoxelizedMesh::new(vec![UVec3::new(0, 3, 0)], 1.0, IVec3::ZERO));
+    /// builder.set_bounds(Vec3::new(-4.0, -4.0, -4.0), Vec3::new(4.0, 4.0, 4.0));
+    ///
+    /// let octree = builder.build();
+    ///
+    /// let link = octree.find_node(Vec3::new(0.0, 0.0, 0.0)).unwrap();
+    ///
+    /// let neighbors = octree.successors(link);
+    ///
+    /// assert_eq!(neighbors.len(), 3);
+    /// ```
+    #[must_use]
+    pub fn successors(&self, link: SparseVoxelOctreeLink) -> Vec<SparseVoxelOctreeLink> {
+        let mut result = Vec::with_capacity(16);
+
+        let node = &self.layers[link.layer_index][link.node_index];
+
+        for i in 0..6 {
+            if let Some(neighbor) = &node.neighbors[i] {
+                let neighbor_node = &self.layers[neighbor.layer_index][neighbor.node_index];
+
+                if let Some(subnode) = link.subnode_index {
+                    if !CompoundNode::is_face(subnode, i) {
+                        let neighbor_index = SUBNODE_NEIGHBORS[subnode as usize][i];
+                        let leaf_node = &self.leafs[link.node_index];
+                        if !leaf_node.get_by_index(neighbor_index) {
+                            result.push(SparseVoxelOctreeLink::new(
+                                link.layer_index,
+                                link.node_index,
+                                Some(neighbor_index),
+                            ));
+                        }
+                    } else if neighbor_node.first_child.is_some() {
+                        result.append(&mut self.expand_to_neighboring_children(i, neighbor));
+                    } else if neighbor_node.is_leaf {
+                        if let Some(neighbor) =
+                            self.find_neighboring_subnode_for_subnode(i, neighbor, subnode)
+                        {
+                            result.push(neighbor);
+                        }
+                    } else {
+                        result.push(*neighbor);
+                    }
+                } else if neighbor_node.first_child.is_some() {
+                    result.append(&mut self.expand_to_neighboring_children(i, neighbor));
+                } else if neighbor_node.is_leaf {
+                    result.append(&mut self.expand_to_neighboring_subnodes(i, neighbor));
+                } else {
+                    result.push(*neighbor);
+                }
+            }
+        }
+
+        result
+    }
+
+    fn find_neighboring_subnode_for_subnode(
+        &self,
+        neighbor_index: usize,
+        neighbor: &SparseVoxelOctreeLink,
+        subnode: u8,
+    ) -> Option<SparseVoxelOctreeLink> {
+        let leaf = &self.leafs[neighbor.node_index];
+
+        if leaf.is_empty() {
+            return Some(*neighbor);
+        }
+
+        if leaf.is_full() {
+            return None;
+        }
+
+        let neighbor_index = SUBNODE_NEIGHBORS[subnode as usize][neighbor_index];
+
+        if !leaf.get_by_index(neighbor_index) {
+            return Some(SparseVoxelOctreeLink::new(
+                neighbor.layer_index,
+                neighbor.node_index,
+                Some(neighbor_index),
+            ));
+        }
+
+        None
+    }
+
+    #[inline]
+    fn expand_to_neighboring_subnodes(
+        &self,
+        neighbor_index: usize,
+        neighbor: &SparseVoxelOctreeLink,
+    ) -> Vec<SparseVoxelOctreeLink> {
+        let leaf = &self.leafs[neighbor.node_index];
+
+        if leaf.is_empty() {
+            return vec![*neighbor];
+        }
+
+        if leaf.is_full() {
+            return vec![];
+        }
+
+        let mut result = Vec::with_capacity(16);
+
+        let neighboring_nodes = &NEIGHBOR_SUBNODES[neighbor_index];
+
+        for node in neighboring_nodes {
+            if leaf.get_by_index(node.3) {
+                continue;
+            }
+
+            result.push(SparseVoxelOctreeLink::new(
+                neighbor.layer_index,
+                neighbor.node_index,
+                Some(node.3),
+            ));
+        }
+
+        result
+    }
+
+    fn expand_to_neighboring_children(
+        &self,
+        neighbor_index: usize,
+        neighbor: &SparseVoxelOctreeLink,
+    ) -> Vec<SparseVoxelOctreeLink> {
+        let mut close = Vec::new();
+        let mut open = vec![*neighbor];
+
+        while let Some(neighbor) = open.pop() {
+            let node = &self.layers[neighbor.layer_index][neighbor.node_index];
+            let first_child = node.first_child.unwrap();
+
+            let neighboring_nodes = &NEIGHBOR_CONNECTIONS[neighbor_index].1;
+            for node in neighboring_nodes.iter().take(4) {
+                let child = SparseVoxelOctreeLink::new(
+                    first_child.layer_index,
+                    first_child.node_index + node,
+                    None,
+                );
+                let child_node = &self.layers[child.layer_index][child.node_index];
+
+                if child_node.first_child.is_some() {
+                    open.push(child);
+                } else if child_node.is_leaf {
+                    close.append(&mut self.expand_to_neighboring_subnodes(neighbor_index, &child));
+                } else {
+                    close.push(child);
+                }
+            }
+        }
+
+        close
+    }
+
+    /// Finds a node based on a worldspace position.
+    ///
+    /// # Example
+    ///
+    /// ```
+    /// use svo_rs::{SparseVoxelOctreeBuilder, VoxelizedMesh};
+    /// use bevy_math::{IVec3, UVec3, Vec3};
+    ///
+    /// let mut builder = SparseVoxelOctreeBuilder::new(1.0);
+    ///
+    /// builder.add_mesh(VoxelizedMesh::new(vec![UVec3::new(0, 3, 0)], 1.0, IVec3::ZERO));
+    ///
+    /// let octree = builder.build();
+    ///
+    /// let link = octree.find_node(Vec3::new(0.0, 3.0, 0.0));
+    ///
+    /// assert!(link.is_some());
+    /// ```
+    #[must_use]
+    pub fn find_node(&self, position: Vec3) -> Option<SparseVoxelOctreeLink> {
+        let voxel_position = (position / self.voxel_size).as_ivec3();
+        let voxel_position = (voxel_position - self.origin).as_uvec3();
+
+        let mut current_node = SparseVoxelOctreeLink::new(self.layers.len() - 1, 0, None);
+
+        loop {
+            let node = &self.layers[current_node.layer_index][current_node.node_index];
+
+            if node.is_leaf {
+                let leaf = &self.leafs[current_node.node_index];
+                if leaf.is_empty() {
+                    return Some(SparseVoxelOctreeLink::new(
+                        current_node.layer_index,
+                        current_node.node_index,
+                        None,
+                    ));
+                }
+
+                let node_position: UVec3 = node.position;
+                let local_coords = UVec3::new(voxel_position.x, voxel_position.y, voxel_position.z)
+                    - node_position;
+                let voxel_index = MortonCode::encode(local_coords).as_u8();
+
+                if let Ok(voxel_index) = voxel_index {
+                    return Some(SparseVoxelOctreeLink::new(
+                        current_node.layer_index,
+                        current_node.node_index,
+                        Some(voxel_index),
+                    ));
+                }
+            }
+
+            if let Some(first_child) = node.first_child {
+                let mut found = false;
+
+                let offset = (voxel_position - node.position) / (node.size / 2);
+
+                for (i, item) in OFFSETS_IN_MORTON_CODE_ORDER.iter().enumerate() {
+                    if offset.x == Into::<u32>::into(item.0)
+                        && offset.y == Into::<u32>::into(item.1)
+                        && offset.z == Into::<u32>::into(item.2)
+                    {
+                        current_node = first_child;
+                        current_node.node_index += i;
+                        found = true;
+                        break;
+                    }
+                }
+
+                if !found {
+                    break;
+                }
+            } else {
+                return Some(current_node);
+            }
+        }
+
+        None
+    }
+
+    /// Draw lines between the node and all of its neighbors using bevy gizmos.
+    #[cfg(feature = "bevy")]
+    pub fn draw_connected_nodes(
+        &self,
+        node: SparseVoxelOctreeLink,
+        gizmos: &mut bevy_gizmos::prelude::Gizmos,
+    ) {
+        let from = self.node_position(node);
+
+        let successors = self.successors(node);
+
+        for successor in successors {
+            gizmos.line(
+                from,
+                self.node_position(successor),
+                bevy_color::Color::srgb(0.0, 1.0, 0.0),
+            );
+        }
+    }
+
+    /// Returns a boolean indicating whether two points are in line of sight.
+    ///
+    /// Uses Cohen-Sutherland line clipping algorithm.
+    ///
+    /// # Example
+    ///
+    /// ```
+    /// use svo_rs::{SparseVoxelOctreeBuilder, VoxelizedMesh};
+    /// use bevy_math::{IVec3, UVec3, Vec3};
+    ///
+    /// let mut builder = SparseVoxelOctreeBuilder::new(1.0);
+    ///
+    /// builder.add_mesh(VoxelizedMesh::new(vec![UVec3::new(0, 1, 0)], 1.0, IVec3::ZERO));
+    /// builder.set_bounds(Vec3::new(-4.0, -4.0, -4.0), Vec3::new(4.0, 4.0, 4.0));
+    ///
+    /// let octree = builder.build();
+    ///
+    /// assert_eq!(octree.is_in_line_of_sight(Vec3::new(0.0, 0.0, 0.0), Vec3::new(0.0, 3.0, 0.0)), false);
+    /// assert_eq!(octree.is_in_line_of_sight(Vec3::new(0.0, 0.0, 0.0), Vec3::new(3.0, 0.0, 0.0)), true);
+    /// ```
+    #[must_use]
+    pub fn is_in_line_of_sight(&self, from: Vec3, to: Vec3) -> bool {
+        let from = ((from / self.voxel_size).as_ivec3() - self.origin)
+            .max(IVec3::ZERO)
+            .as_uvec3();
+
+        let to = ((to / self.voxel_size).as_ivec3() - self.origin)
+            .max(IVec3::ZERO)
+            .as_uvec3();
+
+        let mut open = vec![SparseVoxelOctreeLink::new(self.layers.len() - 1, 0, None)];
+
+        while let Some(link) = open.pop() {
+            let node = &self.layers[link.layer_index][link.node_index];
+            if let Some(first_child) = node.first_child {
+                for i in 0..8 {
+                    let child_node =
+                        &self.layers[first_child.layer_index][first_child.node_index + i];
+
+                    if cohen_sutherland(
+                        &from.to_array(),
+                        &to.to_array(),
+                        &child_node.position.to_array(),
+                        &(child_node.position + node.size).to_array(),
+                    ) == LineClippingResult::Outside
+                    {
+                        continue;
+                    }
+
+                    if child_node.is_leaf {
+                        let leaf = &self.leafs[first_child.node_index + i];
+
+                        if leaf.is_empty() {
+                            continue;
+                        }
+
+                        if leaf.is_full() {
+                            return false;
+                        }
+
+                        let occupied = leaf.get_occupied_indexes();
+
+                        for index in occupied {
+                            if let Ok(local_coords) = MortonCode::from_u8(index).decode() {
+                                if cohen_sutherland(
+                                    &from.to_array(),
+                                    &to.to_array(),
+                                    &(child_node.position + local_coords).to_array(),
+                                    &(child_node.position + local_coords + 1).to_array(),
+                                ) != LineClippingResult::Outside
+                                {
+                                    return false;
+                                }
+                            }
+                        }
+                    } else {
+                        open.push(SparseVoxelOctreeLink::new(
+                            first_child.layer_index,
+                            first_child.node_index + i,
+                            None,
+                        ));
+                    }
+                }
+            }
+        }
+
+        true
+    }
+
+    /// Returns position of the center of the face between two neighboring nodes.
+    /// Returns None if the nodes are not neighbors.
+    #[must_use]
+    pub fn face_position_between(
+        &self,
+        a: SparseVoxelOctreeLink,
+        b: SparseVoxelOctreeLink,
+    ) -> Option<Vec3> {
+        if a.layer_index == b.layer_index {
+            let a = self.node_position(a);
+            let b = self.node_position(b);
+
+            return Some((a + b) / 2.0);
+        }
+
+        if a.layer_index > b.layer_index {
+            return self.face_position_between(b, a);
+        }
+
+        // a is now always the lower layer
+        for (i, neighbor_offset) in NEIGHBOR_POSITION_OFFSETS
+            .iter()
+            .enumerate()
+            .take(self.layers[a.layer_index][a.node_index].neighbors.len())
+        {
+            if let Some(n) = self.layers[a.layer_index][a.node_index].neighbors[i] {
+                if n == b {
+                    let node = &self.layers[n.layer_index][n.node_index];
+                    #[allow(clippy::cast_precision_loss)]
+                    return Some(
+                        self.node_position(n)
+                            + Vec3::new(
+                                neighbor_offset.0 as f32 * node.size as f32 / 2.0 * self.voxel_size,
+                                neighbor_offset.1 as f32 * node.size as f32 / 2.0 * self.voxel_size,
+                                neighbor_offset.2 as f32 * node.size as f32 / 2.0 * self.voxel_size,
+                            ),
+                    );
+                }
+            }
+        }
+
+        None
+    }
+
+    /// Returns position of the center of a node in world space.
+    #[must_use]
+    pub fn node_position(&self, link: SparseVoxelOctreeLink) -> Vec3 {
+        let node = &self.layers[link.layer_index][link.node_index];
+        let position = (node.position.as_vec3() + self.origin.as_vec3()) * self.voxel_size;
+
+        #[allow(clippy::cast_precision_loss)]
+        let scale_f32 =
+            Vec3::new(node.size as f32, node.size as f32, node.size as f32) * self.voxel_size;
+
+        if let Some(subnode) = link.subnode_index {
+            let point = SUBNODE_POSITIONS[subnode as usize];
+            #[allow(clippy::cast_precision_loss)]
+            let position = position
+                + Vec3::new(
+                    f32::from(point.0) * self.voxel_size,
+                    f32::from(point.1) * self.voxel_size,
+                    f32::from(point.2) * self.voxel_size,
+                )
+                + Vec3::new(
+                    self.voxel_size / 2.0,
+                    self.voxel_size / 2.0,
+                    self.voxel_size / 2.0,
+                );
+
+            return position;
+        }
+
+        position + scale_f32 / 2.0
+    }
+
+    #[cfg(feature = "bevy")]
+    #[allow(clippy::cast_precision_loss)]
+    pub fn draw_node_gizmo(
+        &self,
+        gizmos: &mut bevy_gizmos::prelude::Gizmos,
+        link: SparseVoxelOctreeLink,
+        color: bevy_color::Color,
+    ) {
+        let position = self.node_position(link);
+        let size = if link.subnode_index.is_some() {
+            self.voxel_size
+        } else {
+            let node = &self.layers[link.layer_index][link.node_index];
+            node.size as f32 * self.voxel_size
+        };
+        gizmos.cuboid(
+            bevy_transform::prelude::Transform::from_translation(position)
+                .with_scale(Vec3::ONE * size),
+            color,
+        );
+    }
+
+    /// Draws cubes for each node in the octree.
+    #[cfg(feature = "bevy")]
+    #[allow(clippy::cast_precision_loss)]
+    pub fn draw_gizmos(&self, gizmos: &mut bevy_gizmos::prelude::Gizmos, draw_connections: bool) {
+        for layer in &self.layers {
+            for node in layer {
+                let position = (node.position.as_vec3() + self.origin.as_vec3()) * self.voxel_size;
+                let scale_f32 = Vec3::ONE * (node.size as f32) * self.voxel_size;
+                let position = position + scale_f32 / 2.0;
+
+                if node.is_leaf {
+                    gizmos.cuboid(
+                        bevy_transform::prelude::Transform::from_translation(position)
+                            .with_scale(scale_f32),
+                        bevy_color::Color::srgb(1.0, 0.0, 0.0),
+                    );
+                } else {
+                    gizmos.cuboid(
+                        bevy_transform::prelude::Transform::from_translation(position)
+                            .with_scale(scale_f32),
+                        bevy_color::Color::srgb(1.0, 1.0, 0.0),
+                    );
+                }
+
+                if draw_connections {
+                    for neighbor in node.neighbors.iter().flatten() {
+                        let neighbor = &self.layers[neighbor.layer_index][neighbor.node_index];
+
+                        let neighbor_position =
+                            (neighbor.position.as_vec3() + self.origin.as_vec3()) * self.voxel_size;
+
+                        #[allow(clippy::cast_precision_loss)]
+                        let neighbor_scale_f32 = Vec3::new(
+                            neighbor.size as f32,
+                            neighbor.size as f32,
+                            neighbor.size as f32,
+                        ) * self.voxel_size;
+
+                        let neighbor_position = neighbor_position + neighbor_scale_f32 / 2.0;
+
+                        gizmos.line(
+                            position,
+                            neighbor_position,
+                            bevy_color::Color::srgb(1.0, 0.0, 0.0),
+                        );
+                    }
+                }
+            }
+        }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use bevy_math::{IVec3, UVec3, Vec3};
+
+    use crate::{compound_node::CompoundNode, SparseVoxelOctreeBuilder, VoxelizedMesh};
+
+    use super::*;
+
+    #[test]
+    #[ignore]
+    fn test_compound_node_assignments() {
+        let mut node = CompoundNode::new();
+
+        node.set(0, 0, 0, true);
+
+        assert!(node.get(0, 0, 0));
+
+        for x in 0..4 {
+            for y in 0..4 {
+                for z in 0..4 {
+                    if x == 0 && y == 0 && z == 0 {
+                        continue;
+                    }
+
+                    assert!(!node.get(x, y, z));
+                }
+            }
+        }
+
+        for x in 0..4 {
+            for y in 0..4 {
+                for z in 0..4 {
+                    node.set(x, y, z, true);
+                }
+            }
+        }
+
+        for x in 0..4 {
+            for y in 0..4 {
+                for z in 0..4 {
+                    assert!(node.get(x, y, z));
+                }
+            }
+        }
+
+        assert_eq!(*node, u64::MAX);
+    }
+
+    #[test]
+    fn test_find_node() {
+        let voxels = vec![
+            UVec3::new(4, 4, 4),
+            UVec3::new(5, 5, 5),
+            UVec3::new(6, 6, 6),
+            UVec3::new(0, 0, 0),
+            UVec3::new(1, 1, 1),
+            UVec3::new(2, 2, 2),
+            UVec3::new(3, 3, 3),
+            UVec3::new(26, 25, 17),
+            UVec3::new(80, 80, 80),
+            UVec3::new(41, 41, 41),
+        ];
+
+        let mut builder = SparseVoxelOctreeBuilder::new(1.0);
+        builder.add_mesh(VoxelizedMesh::new(voxels, 1.0, IVec3::ZERO));
+
+        let tree = builder.build();
+
+        let node = tree
+            .find_node(Vec3::new(42.0, 41.0, 41.0))
+            .expect("node not found");
+
+        assert_eq!(node.layer_index, 0);
+        assert_eq!(node.node_index, 16);
+        assert_eq!(
+            node.subnode_index.unwrap(),
+            MortonCode::encode_xyz(2, 1, 1).as_u8().unwrap()
+        );
+    }
+
+    #[test]
+    fn test_successors_air_node() {
+        let voxels = vec![UVec3::new(4, 4, 4), UVec3::new(80, 80, 80)];
+
+        let mut builder = SparseVoxelOctreeBuilder::new(1.0);
+        builder.add_mesh(VoxelizedMesh::new(voxels, 1.0, IVec3::ZERO));
+
+        let tree = builder.build();
+
+        let node_link = tree
+            .find_node(Vec3::new(40.0, 40.0, 40.0))
+            .expect("node not found");
+
+        let node = &tree.layers[node_link.layer_index][node_link.node_index];
+        assert_eq!(node.position, UVec3::new(32, 32, 32));
+
+        let successors = tree.successors(node_link);
+
+        assert_eq!(successors.len(), 6);
+
+        let successor_0 = &tree.layers[successors[0].layer_index][successors[0].node_index];
+        assert_eq!(successor_0.position, UVec3::new(64, 0, 0));
+
+        let successor_1 = &tree.layers[successors[1].layer_index][successors[1].node_index];
+        assert_eq!(successor_1.position, UVec3::new(0, 0, 64));
+
+        let successor_2 = &tree.layers[successors[2].layer_index][successors[2].node_index];
+        assert_eq!(successor_2.position, UVec3::new(0, 32, 32));
+
+        let successor_3 = &tree.layers[successors[3].layer_index][successors[3].node_index];
+        assert_eq!(successor_3.position, UVec3::new(32, 32, 0));
+
+        let successor_4 = &tree.layers[successors[4].layer_index][successors[4].node_index];
+        assert_eq!(successor_4.position, UVec3::new(0, 64, 0));
+
+        let successor_5 = &tree.layers[successors[5].layer_index][successors[5].node_index];
+        assert_eq!(successor_5.position, UVec3::new(32, 0, 32));
+    }
+
+    #[test]
+    fn test_successors_from_low_resolution_to_higher_resolution() {
+        let voxels = vec![UVec3::new(4, 4, 4), UVec3::new(80, 80, 80)];
+
+        let mut builder = SparseVoxelOctreeBuilder::new(1.0);
+        builder.add_mesh(VoxelizedMesh::new(voxels, 1.0, IVec3::ZERO));
+
+        let tree = builder.build();
+
+        let node_link = tree
+            .find_node(Vec3::new(12.0, 24.0, 12.0))
+            .expect("node not found");
+
+        let node = &tree.layers[node_link.layer_index][node_link.node_index];
+        assert_eq!(node.position, UVec3::new(0, 16, 0));
+
+        let successors = tree.successors(node_link);
+
+        assert_eq!(successors.len(), 7);
+
+        let successor_0 = &tree.layers[successors[0].layer_index][successors[0].node_index];
+        assert_eq!(successor_0.position, UVec3::new(16, 16, 0));
+
+        let successor_1 = &tree.layers[successors[1].layer_index][successors[1].node_index];
+        assert_eq!(successor_1.position, UVec3::new(0, 16, 16));
+
+        let successor_2 = &tree.layers[successors[2].layer_index][successors[2].node_index];
+        assert_eq!(successor_2.position, UVec3::new(0, 32, 0));
+
+        let successor_3 = &tree.layers[successors[3].layer_index][successors[3].node_index];
+        assert_eq!(successor_3.position, UVec3::new(0, 8, 0));
+
+        let successor_4 = &tree.layers[successors[4].layer_index][successors[4].node_index];
+        assert_eq!(successor_4.position, UVec3::new(0, 8, 8));
+
+        let successor_5 = &tree.layers[successors[5].layer_index][successors[5].node_index];
+        assert_eq!(successor_5.position, UVec3::new(8, 8, 0));
+
+        let successor_6 = &tree.layers[successors[6].layer_index][successors[6].node_index];
+        assert_eq!(successor_6.position, UVec3::new(8, 8, 8));
+    }
+
+    #[test]
+    #[allow(clippy::similar_names)]
+    #[allow(clippy::too_many_lines)]
+    fn test_successors_from_low_resolution_to_leaf_nodes() {
+        let voxels = vec![
+            UVec3::new(4, 4, 4),
+            UVec3::new(4, 11, 4),
+            UVec3::new(80, 80, 80),
+        ];
+
+        let mut builder = SparseVoxelOctreeBuilder::new(1.0);
+        builder.add_mesh(VoxelizedMesh::new(voxels, 1.0, IVec3::ZERO));
+
+        let tree = builder.build();
+
+        let node_link = tree
+            .find_node(Vec3::new(8.0, 16.0, 8.0))
+            .expect("node not found");
+
+        let node = &tree.layers[node_link.layer_index][node_link.node_index];
+        assert_eq!(node.position, UVec3::new(0, 8, 0));
+
+        let successors = tree.successors(node_link);
+
+        assert_eq!(successors.len(), 21);
+
+        let successor_0 = &tree.layers[successors[0].layer_index][successors[0].node_index];
+        assert_eq!(successor_0.position, UVec3::new(8, 8, 0));
+
+        let successor_1 = &tree.layers[successors[1].layer_index][successors[1].node_index];
+        assert_eq!(successor_1.position, UVec3::new(0, 8, 8));
+
+        let successor_2 = &tree.layers[successors[2].layer_index][successors[2].node_index];
+        assert_eq!(successor_2.position, UVec3::new(0, 16, 0));
+
+        // Subnodes
+        let successor_3 = &tree.layers[successors[3].layer_index][successors[3].node_index];
+        assert_eq!(successor_3.position, UVec3::new(0, 4, 0));
+        assert!(successor_3.is_leaf);
+        assert_eq!(
+            MortonCode::from_u8(successors[3].subnode_index.unwrap())
+                .decode()
+                .unwrap(),
+            UVec3::new(1, 3, 0)
+        );
+
+        let successor_4 = &tree.layers[successors[4].layer_index][successors[4].node_index];
+        assert_eq!(successor_4.position, UVec3::new(0, 4, 0));
+        assert!(successor_4.is_leaf);
+        assert_eq!(
+            MortonCode::from_u8(successors[4].subnode_index.unwrap())
+                .decode()
+                .unwrap(),
+            UVec3::new(2, 3, 0)
+        );
+
+        let successor_5 = &tree.layers[successors[5].layer_index][successors[5].node_index];
+        assert_eq!(successor_5.position, UVec3::new(0, 4, 0));
+        assert!(successor_5.is_leaf);
+        assert_eq!(
+            MortonCode::from_u8(successors[5].subnode_index.unwrap())
+                .decode()
+                .unwrap(),
+            UVec3::new(3, 3, 0)
+        );
+
+        let successor_6 = &tree.layers[successors[6].layer_index][successors[6].node_index];
+        assert_eq!(successor_6.position, UVec3::new(0, 4, 0));
+        assert!(successor_6.is_leaf);
+        assert_eq!(
+            MortonCode::from_u8(successors[6].subnode_index.unwrap())
+                .decode()
+                .unwrap(),
+            UVec3::new(0, 3, 1)
+        );
+
+        let successor_7 = &tree.layers[successors[7].layer_index][successors[7].node_index];
+        assert_eq!(successor_7.position, UVec3::new(0, 4, 0));
+        assert!(successor_7.is_leaf);
+        assert_eq!(
+            MortonCode::from_u8(successors[7].subnode_index.unwrap())
+                .decode()
+                .unwrap(),
+            UVec3::new(1, 3, 1)
+        );
+
+        let successor_8 = &tree.layers[successors[8].layer_index][successors[8].node_index];
+        assert_eq!(successor_8.position, UVec3::new(0, 4, 0));
+        assert!(successor_8.is_leaf);
+        assert_eq!(
+            MortonCode::from_u8(successors[8].subnode_index.unwrap())
+                .decode()
+                .unwrap(),
+            UVec3::new(2, 3, 1)
+        );
+
+        let successor_9 = &tree.layers[successors[9].layer_index][successors[9].node_index];
+        assert_eq!(successor_9.position, UVec3::new(0, 4, 0));
+        assert!(successor_9.is_leaf);
+        assert_eq!(
+            MortonCode::from_u8(successors[9].subnode_index.unwrap())
+                .decode()
+                .unwrap(),
+            UVec3::new(3, 3, 1)
+        );
+
+        let successor_10 = &tree.layers[successors[10].layer_index][successors[10].node_index];
+        assert_eq!(successor_10.position, UVec3::new(0, 4, 0));
+        assert!(successor_10.is_leaf);
+        assert_eq!(
+            MortonCode::from_u8(successors[10].subnode_index.unwrap())
+                .decode()
+                .unwrap(),
+            UVec3::new(0, 3, 2)
+        );
+
+        let successor_11 = &tree.layers[successors[11].layer_index][successors[11].node_index];
+        assert_eq!(successor_11.position, UVec3::new(0, 4, 0));
+        assert!(successor_11.is_leaf);
+        assert_eq!(
+            MortonCode::from_u8(successors[11].subnode_index.unwrap())
+                .decode()
+                .unwrap(),
+            UVec3::new(1, 3, 2)
+        );
+
+        let successor_12 = &tree.layers[successors[12].layer_index][successors[12].node_index];
+        assert_eq!(successor_12.position, UVec3::new(0, 4, 0));
+        assert!(successor_12.is_leaf);
+        assert_eq!(
+            MortonCode::from_u8(successors[12].subnode_index.unwrap())
+                .decode()
+                .unwrap(),
+            UVec3::new(2, 3, 2)
+        );
+
+        let successor_13 = &tree.layers[successors[13].layer_index][successors[13].node_index];
+        assert_eq!(successor_13.position, UVec3::new(0, 4, 0));
+        assert!(successor_13.is_leaf);
+        assert_eq!(
+            MortonCode::from_u8(successors[13].subnode_index.unwrap())
+                .decode()
+                .unwrap(),
+            UVec3::new(3, 3, 2)
+        );
+
+        let successor_14 = &tree.layers[successors[14].layer_index][successors[14].node_index];
+        assert_eq!(successor_14.position, UVec3::new(0, 4, 0));
+        assert!(successor_14.is_leaf);
+        assert_eq!(
+            MortonCode::from_u8(successors[14].subnode_index.unwrap())
+                .decode()
+                .unwrap(),
+            UVec3::new(0, 3, 3)
+        );
+
+        let successor_15 = &tree.layers[successors[15].layer_index][successors[15].node_index];
+        assert_eq!(successor_15.position, UVec3::new(0, 4, 0));
+        assert!(successor_15.is_leaf);
+        assert_eq!(
+            MortonCode::from_u8(successors[15].subnode_index.unwrap())
+                .decode()
+                .unwrap(),
+            UVec3::new(1, 3, 3)
+        );
+
+        let successor_16 = &tree.layers[successors[16].layer_index][successors[16].node_index];
+        assert_eq!(successor_16.position, UVec3::new(0, 4, 0));
+        assert!(successor_16.is_leaf);
+        assert_eq!(
+            MortonCode::from_u8(successors[16].subnode_index.unwrap())
+                .decode()
+                .unwrap(),
+            UVec3::new(2, 3, 3)
+        );
+
+        let successor_17 = &tree.layers[successors[17].layer_index][successors[17].node_index];
+        assert_eq!(successor_17.position, UVec3::new(0, 4, 0));
+        assert!(successor_17.is_leaf);
+        assert_eq!(
+            MortonCode::from_u8(successors[17].subnode_index.unwrap())
+                .decode()
+                .unwrap(),
+            UVec3::new(3, 3, 3)
+        );
+
+        let successor_18 = &tree.layers[successors[18].layer_index][successors[18].node_index];
+        assert_eq!(successor_18.position, UVec3::new(0, 4, 4));
+
+        let successor_19 = &tree.layers[successors[19].layer_index][successors[19].node_index];
+        assert_eq!(successor_19.position, UVec3::new(4, 4, 0));
+
+        let successor_20 = &tree.layers[successors[20].layer_index][successors[20].node_index];
+        assert_eq!(successor_20.position, UVec3::new(4, 4, 4));
+    }
+}
+```
+
+### src/sparse_voxel_octree_builder.rs
+```
+use std::collections::HashMap;
+
+use bevy_math::{IVec3, UVec3, Vec3};
+
+use crate::{
+    compound_node::CompoundNode,
+    consts::{NEIGHBOR_CONNECTIONS, OFFSETS_IN_MORTON_CODE_ORDER, SIBLING_CONNECTIONS},
+    morton_code::MortonCode,
+    sparse_voxel_octree_link::SparseVoxelOctreeLink,
+    sparse_voxel_octree_node::SparseVoxelOctreeNode,
+    voxelized_mesh::VoxelizedMesh,
+    SparseVoxelOctree,
+};
+
+/// A builder for a sparse voxel octree.
+///
+/// This builder accepts voxelized meshes and builds a sparse voxel octree from them.
+///
+/// # Example
+///
+/// ```
+/// use svo_rs::{SparseVoxelOctreeBuilder, VoxelizedMesh};
+/// use bevy_math::{IVec3, UVec3};
+///
+/// let mut builder = SparseVoxelOctreeBuilder::new(1.0);
+///
+/// builder.add_mesh(VoxelizedMesh::new(vec![UVec3::new(0, 3, 0)], 1.0, IVec3::ZERO));
+///
+/// let octree = builder.build();
+/// ```
+pub struct SparseVoxelOctreeBuilder {
+    voxel_size: f32,
+    meshes: Vec<VoxelizedMesh>,
+    min: IVec3,
+    max: IVec3,
+}
+
+impl SparseVoxelOctreeBuilder {
+    /// Creates a new builder.
+    ///
+    /// The voxel size is the size of a single voxel in world space.
+    ///
+    /// # Example
+    ///
+    /// ```
+    /// use svo_rs::SparseVoxelOctreeBuilder;
+    ///
+    /// let builder = SparseVoxelOctreeBuilder::new(1.0);
+    /// ```
+    #[must_use]
+    pub fn new(voxel_size: f32) -> Self {
+        Self {
+            meshes: Vec::new(),
+            voxel_size,
+            min: IVec3::MAX,
+            max: IVec3::MIN,
+        }
+    }
+
+    /// Adds a voxelized mesh to the builder.
+    ///
+    /// # Example
+    ///
+    /// ```
+    /// use svo_rs::{SparseVoxelOctreeBuilder, VoxelizedMesh};
+    /// use bevy_math::{IVec3, UVec3};
+    ///
+    /// let mut builder = SparseVoxelOctreeBuilder::new(1.0);
+    ///
+    /// builder.add_mesh(VoxelizedMesh::new(vec![UVec3::new(0, 3, 0)], 1.0, IVec3::ZERO));
+    /// ```
+    pub fn add_mesh(&mut self, mesh: VoxelizedMesh) {
+        self.meshes.push(mesh);
+    }
+
+    /// Sets the minimal bounds of the octree Bounds are specified in world space.
+    /// If some of the meshes are outside of the bounds, then the bounds will be expanded to include them.
+    /// The final bounds of the octree will be also extended to be a power of two.
+    ///
+    /// The bounds are specified in world space.
+    ///
+    /// # Example
+    ///
+    /// ```
+    /// use svo_rs::{SparseVoxelOctreeBuilder, VoxelizedMesh};
+    /// use bevy_math::{IVec3, UVec3, Vec3};
+    ///
+    /// let mut builder = SparseVoxelOctreeBuilder::new(1.0);
+    ///
+    /// builder.add_mesh(VoxelizedMesh::new(vec![UVec3::new(0, 3, 0)], 1.0, IVec3::ZERO));
+    /// builder.set_bounds(Vec3::new(-10.0, -10.0, -10.0), Vec3::new(10.0, 10.0, 10.0));
+    /// ```
+    pub fn set_bounds(&mut self, min: Vec3, max: Vec3) {
+        self.min = (min / self.voxel_size).floor().as_ivec3();
+        self.max = (max / self.voxel_size).ceil().as_ivec3();
+    }
+
+    /// Builds the sparse voxel octree.
+    ///
+    /// # Example
+    ///
+    /// ```
+    /// use svo_rs::{SparseVoxelOctreeBuilder, VoxelizedMesh};
+    /// use bevy_math::{IVec3, UVec3};
+    ///
+    /// let mut builder = SparseVoxelOctreeBuilder::new(1.0);
+    ///
+    /// builder.add_mesh(VoxelizedMesh::new(vec![UVec3::new(0, 3, 0)], 1.0, IVec3::ZERO));
+    ///
+    /// let octree = builder.build();
+    /// ```
+    #[must_use]
+    pub fn build(self) -> SparseVoxelOctree {
+        let mut voxels = Vec::new();
+
+        for mesh in self.meshes {
+            voxels.append(&mut mesh.voxels());
+        }
+
+        let (min, max) = Self::get_min_max(&voxels);
+        let min = self.min.min(min);
+        let max = self.max.max(max);
+
+        let (origin, size) = Self::get_origin_and_size(min, max);
+
+        let (layer_zero, leafs) = Self::collect_leafs_and_zero_layer_nodes(&voxels, origin);
+
+        let mut current_node_size: u32 = 4;
+
+        let mut layers = vec![layer_zero];
+
+        while current_node_size < size {
+            let (next_node_size, layer) =
+                Self::create_next_layer(&mut layers, current_node_size, size);
+
+            layers.push(layer);
+            current_node_size = next_node_size;
+        }
+
+        Self::fill_parents(&mut layers);
+        Self::fill_neighbors(&mut layers);
+
+        SparseVoxelOctree {
+            origin,
+            layers,
+            leafs,
+            voxel_size: self.voxel_size,
+        }
+    }
+
+    /// Assigns parents to all nodes in the octree.
+    fn fill_parents(layers: &mut [Vec<SparseVoxelOctreeNode>]) {
+        for i in (0..layers.len()).rev() {
+            for y in 0..layers[i].len() {
+                if let Some(first_child) = layers[i][y].first_child {
+                    let layer = &mut layers[first_child.layer_index];
+
+                    for z in 0..8_usize {
+                        let node_index = first_child.node_index + z;
+                        let node = &mut layer[node_index];
+                        node.parent = Some(SparseVoxelOctreeLink::new(i, y, None));
+                    }
+                }
+            }
+        }
+    }
+
+    /// When the octree is built, the nodes are not connected to their neighbors
+    /// (nodes that share a face).
+    fn fill_neighbors(layers: &mut [Vec<SparseVoxelOctreeNode>]) {
+        if layers.is_empty() {
+            return;
+        }
+
+        if layers[0].is_empty() {
+            return;
+        }
+
+        let mut nodes = vec![SparseVoxelOctreeLink::new(layers.len() - 1, 0, None)];
+
+        while let Some(node) = nodes.pop() {
+            // interconnect children
+            if let Some(first_child) = layers[node.layer_index][node.node_index].first_child {
+                for i in 0..8 {
+                    nodes.push(SparseVoxelOctreeLink::new(
+                        first_child.layer_index,
+                        first_child.node_index + i,
+                        None,
+                    ));
+                }
+
+                for (neighbor_index_1, neighbor_index_2, offset_1, offset_2) in &SIBLING_CONNECTIONS
+                {
+                    layers[first_child.layer_index][first_child.node_index + offset_1].neighbors
+                        [*neighbor_index_1] = Some(SparseVoxelOctreeLink::new(
+                        first_child.layer_index,
+                        first_child.node_index + offset_2,
+                        None,
+                    ));
+
+                    layers[first_child.layer_index][first_child.node_index + offset_2].neighbors
+                        [*neighbor_index_2] = Some(SparseVoxelOctreeLink::new(
+                        first_child.layer_index,
+                        first_child.node_index + offset_1,
+                        None,
+                    ));
+                }
+
+                // interconnect children with own neighbors
+                for (from_neighbor_index, (from_nodes, to_nodes)) in
+                    NEIGHBOR_CONNECTIONS.iter().enumerate()
+                {
+                    if let Some(neighbor) =
+                        layers[node.layer_index][node.node_index].neighbors[from_neighbor_index]
+                    {
+                        if let Some(own_first_child) =
+                            layers[node.layer_index][node.node_index].first_child
+                        {
+                            if let Some(neighbor_first_child) =
+                                layers[neighbor.layer_index][neighbor.node_index].first_child
+                            {
+                                for i in 0..4 {
+                                    layers[own_first_child.layer_index]
+                                        [own_first_child.node_index + from_nodes[i]]
+                                        .neighbors[from_neighbor_index] =
+                                        Some(SparseVoxelOctreeLink::new(
+                                            neighbor_first_child.layer_index,
+                                            neighbor_first_child.node_index + to_nodes[i],
+                                            None,
+                                        ));
+                                }
+                            } else {
+                                for node in from_nodes.iter().take(4) {
+                                    layers[own_first_child.layer_index]
+                                        [own_first_child.node_index + node]
+                                        .neighbors[from_neighbor_index] = Some(neighbor);
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+        }
+    }
+
+    fn validate_all_children_present(nodes: &[SparseVoxelOctreeNode], node_size: u32) -> bool {
+        if nodes.len() % 8 != 0 {
+            return false;
+        }
+
+        for i in (0..nodes.len()).step_by(8) {
+            let first_position = nodes[i].position / node_size;
+            for y in 0..8 {
+                let node_pos = nodes[i + y].position / node_size;
+                let diff = node_pos - first_position;
+                if diff.x != OFFSETS_IN_MORTON_CODE_ORDER[y].0.into()
+                    || diff.y != OFFSETS_IN_MORTON_CODE_ORDER[y].1.into()
+                    || diff.z != OFFSETS_IN_MORTON_CODE_ORDER[y].2.into()
+                {
+                    return false;
+                }
+            }
+        }
+
+        true
+    }
+
+    fn collect_leafs_and_zero_layer_nodes(
+        voxels: &[IVec3],
+        origin: IVec3,
+    ) -> (Vec<SparseVoxelOctreeNode>, Vec<CompoundNode>) {
+        let mut leafs = HashMap::new();
+        let mut layer_zero = HashMap::new();
+
+        // create 4x4 leafs
+        for voxel in voxels {
+            let offset = (*voxel - origin).as_uvec3();
+            let leaf_parent_coords = offset >> 3 << 3;
+
+            for x in 0..2 {
+                for y in 0..2 {
+                    for z in 0..2 {
+                        let leaf_coords = UVec3::new(x * 4, y * 4, z * 4);
+                        let leaf_coords: UVec3 = leaf_parent_coords + leaf_coords;
+
+                        leafs.entry(leaf_coords).or_insert_with(CompoundNode::new);
+                        layer_zero
+                            .entry(leaf_coords)
+                            .or_insert_with(|| SparseVoxelOctreeNode::leaf(leaf_coords));
+                    }
+                }
+            }
+        }
+
+        for voxel in voxels {
+            let offset = (*voxel - origin).as_uvec3();
+            let leaf_coords: UVec3 = offset >> 2 << 2;
+
+            let layer_zero = layer_zero
+                .get_mut(&leaf_coords)
+                .expect("layer zero node not found");
+
+            let leafs = leafs.get_mut(&leaf_coords).expect("leaf node not found");
+
+            let local_coords = offset - leaf_coords;
+            leafs.set(local_coords.x, local_coords.y, local_coords.z, true);
+
+            layer_zero.is_leaf = true;
+        }
+
+        let mut leafs = leafs
+            .into_iter()
+            .map(|(position, node)| (node, MortonCode::encode(position)))
+            .collect::<Vec<_>>();
+
+        leafs.sort_by(|(_, a), (_, b)| a.cmp(b));
+
+        let leafs = leafs.into_iter().map(|(node, _)| node).collect();
+
+        let mut layer_zero: Vec<_> = layer_zero.into_values().collect();
+
+        layer_zero.sort();
+
+        (layer_zero, leafs)
+    }
+
+    fn get_origin_and_size(min: IVec3, max: IVec3) -> (IVec3, u32) {
+        if min == max {
+            return (min, 1);
+        }
+
+        let size = max - min;
+
+        #[allow(clippy::cast_sign_loss)]
+        let mut size = size.max_element() as u32;
+
+        if !size.is_power_of_two() {
+            size = size.next_power_of_two();
+        }
+
+        (min, size)
+    }
+
+    fn get_min_max(voxels: &[IVec3]) -> (IVec3, IVec3) {
+        if voxels.is_empty() {
+            return (IVec3::ZERO, IVec3::ZERO);
+        }
+
+        let mut min = IVec3::MAX;
+        let mut max = IVec3::MIN;
+
+        for voxel in voxels {
+            min = min.min(*voxel);
+            max = max.max(*voxel);
+        }
+
+        (min, max)
+    }
+
+    fn create_next_layer(
+        layers: &mut Vec<Vec<SparseVoxelOctreeNode>>,
+        current_node_size: u32,
+        size: u32,
+    ) -> (u32, Vec<SparseVoxelOctreeNode>) {
+        let next_layer_index = layers.len();
+        let next_node_size = current_node_size * 2;
+        let last_layer = layers.last_mut().unwrap();
+
+        assert!(
+            Self::validate_all_children_present(last_layer, current_node_size),
+            "not all children present"
+        );
+
+        let mut layer = Vec::new();
+
+        for i in (0..last_layer.len()).step_by(8) {
+            let position = last_layer[i].position;
+            let mut node = SparseVoxelOctreeNode::node(position, next_node_size);
+
+            node.first_child = Some(SparseVoxelOctreeLink::new(next_layer_index - 1, i, None));
+
+            layer.push(node);
+        }
+
+        if next_node_size < size {
+            // There will be next iteration so we need to fill empty children spots
+            let mut i = 0;
+            loop {
+                let first_position = {
+                    if layer.len() <= i {
+                        UVec3::ZERO
+                    } else {
+                        (layer[i].position / (next_node_size * 2)) * next_node_size * 2
+                    }
+                };
+
+                for (y, item) in OFFSETS_IN_MORTON_CODE_ORDER.iter().enumerate() {
+                    Self::fill_node_if_it_doesnt_exist(
+                        &mut layer,
+                        i + y,
+                        first_position,
+                        next_node_size,
+                        UVec3::new(item.0.into(), item.1.into(), item.2.into()),
+                    );
+                }
+
+                i += 8;
+
+                if i >= layer.len() {
+                    break;
+                }
+            }
+        }
+
+        (next_node_size, layer)
+    }
+
+    fn fill_node_if_it_doesnt_exist(
+        layer: &mut Vec<SparseVoxelOctreeNode>,
+        node_index: usize,
+        first_position: UVec3,
+        node_size: u32,
+        offset: UVec3,
+    ) {
+        let node_1_exists = {
+            if layer.len() > node_index {
+                let node_1_pos = layer[node_index].position;
+
+                if first_position.x > node_1_pos.x
+                    || first_position.y > node_1_pos.y
+                    || first_position.z > node_1_pos.z
+                {
+                    false
+                } else {
+                    (node_1_pos - first_position) / node_size == offset
+                }
+            } else {
+                false
+            }
+        };
+
+        if !node_1_exists {
+            let pos = first_position + offset * node_size;
+
+            let node = SparseVoxelOctreeNode::node(pos, node_size);
+            layer.insert(node_index, node);
+        }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use bevy_math::{IVec3, UVec3};
+
+    use super::*;
+
+    #[test]
+    fn test_get_min_max() {
+        let voxels = vec![
+            IVec3::new(0, 0, 0),
+            IVec3::new(1, 1, 1),
+            IVec3::new(2, 2, 2),
+            IVec3::new(3, 3, 3),
+        ];
+
+        let (min, max) = SparseVoxelOctreeBuilder::get_min_max(&voxels);
+
+        assert_eq!(min, IVec3::new(0, 0, 0));
+        assert_eq!(max, IVec3::new(3, 3, 3));
+    }
+
+    #[test]
+    fn test_get_min_max_no_voxels() {
+        let (min, max) = SparseVoxelOctreeBuilder::get_min_max(&[]);
+
+        assert_eq!(min, IVec3::new(0, 0, 0));
+        assert_eq!(max, IVec3::new(0, 0, 0));
+    }
+
+    #[test]
+    fn test_get_origin_and_size() {
+        let voxels = vec![
+            IVec3::new(0, 0, 0),
+            IVec3::new(1, 1, 1),
+            IVec3::new(2, 2, 2),
+            IVec3::new(3, 3, 3),
+        ];
+
+        let (min, max) = SparseVoxelOctreeBuilder::get_min_max(&voxels);
+        let (origin, size) = SparseVoxelOctreeBuilder::get_origin_and_size(min, max);
+
+        assert_eq!(origin, IVec3::new(0, 0, 0));
+        assert_eq!(size, 4);
+    }
+
+    #[test]
+    fn test_get_origin_and_size_no_voxels() {
+        let (min, max) = SparseVoxelOctreeBuilder::get_min_max(&[]);
+        let (origin, size) = SparseVoxelOctreeBuilder::get_origin_and_size(min, max);
+
+        assert_eq!(origin, IVec3::new(0, 0, 0));
+        assert_eq!(size, 1);
+    }
+
+    #[test]
+    fn test_collect_leafs_and_zero_layer_nodes() {
+        let voxels = vec![
+            IVec3::new(4, 4, 4),
+            IVec3::new(5, 5, 5),
+            IVec3::new(6, 6, 6),
+            IVec3::new(0, 0, 0),
+            IVec3::new(1, 1, 1),
+            IVec3::new(2, 2, 2),
+            IVec3::new(3, 3, 3),
+        ];
+
+        let (min, max) = SparseVoxelOctreeBuilder::get_min_max(&voxels);
+        let (origin, _size) = SparseVoxelOctreeBuilder::get_origin_and_size(min, max);
+
+        let (layer_zero, leafs) =
+            SparseVoxelOctreeBuilder::collect_leafs_and_zero_layer_nodes(&voxels, origin);
+
+        assert_eq!(layer_zero.len(), 8);
+        assert_eq!(leafs.len(), 8);
+
+        assert_eq!(layer_zero[0].position, UVec3::new(0, 0, 0));
+        assert_eq!(layer_zero[0].size, 4);
+        assert!(leafs[0].get(0, 0, 0));
+        assert!(leafs[0].get(1, 1, 1));
+        assert!(leafs[0].get(2, 2, 2));
+        assert!(leafs[0].get(3, 3, 3));
+
+        assert_eq!(layer_zero[1].position, UVec3::new(4, 0, 0));
+        assert_eq!(layer_zero[1].size, 4);
+        assert_eq!(*leafs[1], 0);
+
+        assert_eq!(layer_zero[2].position, UVec3::new(0, 4, 0));
+        assert_eq!(layer_zero[2].size, 4);
+        assert_eq!(*leafs[2], 0);
+
+        assert_eq!(layer_zero[3].position, UVec3::new(4, 4, 0));
+        assert_eq!(layer_zero[3].size, 4);
+        assert_eq!(*leafs[3], 0);
+
+        assert_eq!(layer_zero[4].position, UVec3::new(0, 0, 4));
+        assert_eq!(layer_zero[4].size, 4);
+        assert_eq!(*leafs[4], 0);
+
+        assert_eq!(layer_zero[5].position, UVec3::new(4, 0, 4));
+        assert_eq!(layer_zero[5].size, 4);
+        assert_eq!(*leafs[5], 0);
+
+        assert_eq!(layer_zero[6].position, UVec3::new(0, 4, 4));
+        assert_eq!(layer_zero[6].size, 4);
+        assert_eq!(*leafs[6], 0);
+
+        assert_eq!(layer_zero[7].position, UVec3::new(4, 4, 4));
+        assert_eq!(layer_zero[7].size, 4);
+        assert!(leafs[7].get(0, 0, 0));
+        assert!(leafs[7].get(1, 1, 1));
+        assert!(leafs[7].get(2, 2, 2));
+        assert!(!leafs[7].get(3, 3, 3));
+    }
+
+    #[test]
+    fn test_build_octree_with_no_voxels() {
+        let mut builder = SparseVoxelOctreeBuilder::new(1.0);
+        builder.set_bounds(Vec3::new(-4.0, -4.0, -4.0), Vec3::new(4.0, 4.0, 4.0));
+        let octree = builder.build();
+
+        assert_eq!(octree.layers.len(), 2);
+    }
+}
+```
+
+### src/sparse_voxel_octree_link.rs
+```
+use bevy_math::UVec3;
+
+use crate::{
+    consts::SUBNODE_POSITIONS, point::ManhattanDistance, DistanceSquared, SparseVoxelOctree,
+};
+
+/// A link to a node in the sparse voxel octree.
+///
+/// # Examples
+///
+/// ```
+/// use svo_rs::{SparseVoxelOctreeLink, SparseVoxelOctreeBuilder, VoxelizedMesh};
+/// use bevy_math::{IVec3, UVec3, Vec3};
+///
+/// let mut builder = SparseVoxelOctreeBuilder::new(1.0);
+///
+/// builder.add_mesh(VoxelizedMesh::new(vec![UVec3::new(0, 0, 0), UVec3::new(0, 3, 0)], 1.0, IVec3::ZERO));
+///
+/// let octree = builder.build();
+/// let node = octree.find_node(Vec3::new(0.0, 3.0, 0.0)).unwrap();
+///
+/// assert_eq!(node, SparseVoxelOctreeLink::new(0, 0, Some(18)));
+/// ```
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub struct SparseVoxelOctreeLink {
+    /// The index of the layer the node is in.
+    pub(crate) layer_index: usize,
+    /// The index of the node in the layer.
+    pub(crate) node_index: usize,
+    /// The index of the subnode in a 4x4x4 cube in a Morton code. This is applicable only for leaf nodes.
+    pub(crate) subnode_index: Option<u8>,
+}
+
+impl SparseVoxelOctreeLink {
+    /// Creates a new link to a node in the sparse voxel octree.
+    ///
+    /// # Arguments
+    ///
+    /// * `layer_index` - The index of the layer the node is in.
+    /// * `node_index` - The index of the node in the layer.
+    /// * `subnode_index` - The index of the subnode in a 4x4x4 cube in a Morton code. This is applicable only for leaf nodes.
+    ///
+    /// # Examples
+    ///
+    /// ```
+    /// use svo_rs::SparseVoxelOctreeLink;
+    ///
+    /// let link = SparseVoxelOctreeLink::new(0, 0, None);
+    /// ```
+    #[must_use]
+    pub fn new(layer_index: usize, node_index: usize, subnode_index: Option<u8>) -> Self {
+        Self {
+            layer_index,
+            node_index,
+            subnode_index,
+        }
+    }
+
+    /// Manhattan distance between two nodes. This distance does not take voxel size into account.
+    ///
+    /// # Arguments
+    ///
+    /// * `other` - The other node.
+    /// * `tree` - The sparse voxel octree.
+    ///
+    /// # Examples
+    ///
+    /// ```
+    /// use svo_rs::{SparseVoxelOctreeBuilder, VoxelizedMesh};
+    /// use bevy_math::{IVec3, UVec3, Vec3};
+    ///
+    /// let mut builder = SparseVoxelOctreeBuilder::new(1.0);
+    ///
+    /// builder.add_mesh(VoxelizedMesh::new(vec![UVec3::new(0, 0, 0), UVec3::new(0, 3, 0)], 1.0, IVec3::ZERO));
+    ///
+    /// let octree = builder.build();
+    /// let node = octree.find_node(Vec3::new(0.0, 3.0, 0.0)).unwrap();
+    /// let other = octree.find_node(Vec3::new(0.0, 0.0, 0.0)).unwrap();
+    ///
+    /// assert_eq!(node.manhattan_distance(&other, &octree), 3);
+    #[must_use]
+    pub fn manhattan_distance(&self, other: &Self, tree: &SparseVoxelOctree) -> u32 {
+        let node = &tree.layers[self.layer_index][self.node_index];
+        let other_node = &tree.layers[other.layer_index][other.node_index];
+
+        let mut node_position = node.position * 4;
+        if let Some(subnode_index) = self.subnode_index {
+            let subnode_position = UVec3::new(
+                SUBNODE_POSITIONS[subnode_index as usize].0.into(),
+                SUBNODE_POSITIONS[subnode_index as usize].1.into(),
+                SUBNODE_POSITIONS[subnode_index as usize].2.into(),
+            );
+            node_position += subnode_position;
+        }
+
+        let mut other_node_position = other_node.position * 4;
+        if let Some(subnode_index) = other.subnode_index {
+            let subnode_position = UVec3::new(
+                SUBNODE_POSITIONS[subnode_index as usize].0.into(),
+                SUBNODE_POSITIONS[subnode_index as usize].1.into(),
+                SUBNODE_POSITIONS[subnode_index as usize].2.into(),
+            );
+            other_node_position += subnode_position;
+        }
+
+        node_position.manhattan_distance(&other_node_position)
+    }
+
+    /// Euclidean distance squared between two nodes. This distance does not take voxel size into account.
+    ///
+    /// # Arguments
+    ///
+    /// * `other` - The other node.
+    /// * `tree` - The sparse voxel octree.
+    ///
+    /// # Examples
+    ///
+    /// ```
+    /// use svo_rs::{SparseVoxelOctreeBuilder, VoxelizedMesh};
+    /// use bevy_math::{IVec3, UVec3, Vec3};
+    ///
+    /// let mut builder = SparseVoxelOctreeBuilder::new(1.0);
+    ///
+    /// builder.add_mesh(VoxelizedMesh::new(vec![UVec3::new(0, 0, 0), UVec3::new(0, 3, 0)], 1.0, IVec3::ZERO));
+    ///
+    /// let octree = builder.build();
+    /// let node = octree.find_node(Vec3::new(0.0, 3.0, 0.0)).unwrap();
+    /// let other = octree.find_node(Vec3::new(0.0, 0.0, 0.0)).unwrap();
+    ///
+    /// assert_eq!(node.distance_squared(&other, &octree), 9);
+    /// ```
+    #[must_use]
+    pub fn distance_squared(&self, other: &Self, tree: &SparseVoxelOctree) -> u32 {
+        let node = &tree.layers[self.layer_index][self.node_index];
+        let other_node = &tree.layers[other.layer_index][other.node_index];
+
+        let mut node_position = node.position * 4;
+        if let Some(subnode_index) = self.subnode_index {
+            let subnode_position = UVec3::new(
+                SUBNODE_POSITIONS[subnode_index as usize].0.into(),
+                SUBNODE_POSITIONS[subnode_index as usize].1.into(),
+                SUBNODE_POSITIONS[subnode_index as usize].2.into(),
+            );
+            node_position += subnode_position;
+        }
+
+        let mut other_node_position = other_node.position * 4;
+        if let Some(subnode_index) = other.subnode_index {
+            let subnode_position = UVec3::new(
+                SUBNODE_POSITIONS[subnode_index as usize].0.into(),
+                SUBNODE_POSITIONS[subnode_index as usize].1.into(),
+                SUBNODE_POSITIONS[subnode_index as usize].2.into(),
+            );
+            other_node_position += subnode_position;
+        }
+
+        (node_position).distance_squared(&other_node_position)
+    }
+}
+```
+
+### src/sparse_voxel_octree_node.rs
+```
+use bevy_math::UVec3;
+
+use crate::{morton_code::MortonCode, sparse_voxel_octree_link::SparseVoxelOctreeLink};
+
+#[derive(Debug)]
+pub struct SparseVoxelOctreeNode {
+    pub(crate) position: UVec3,
+    pub(crate) size: u32,
+    pub(crate) parent: Option<SparseVoxelOctreeLink>,
+    pub(crate) first_child: Option<SparseVoxelOctreeLink>,
+    pub(crate) is_leaf: bool,
+    pub(crate) neighbors: [Option<SparseVoxelOctreeLink>; 6],
+}
+
+impl PartialEq for SparseVoxelOctreeNode {
+    fn eq(&self, other: &Self) -> bool {
+        self.position == other.position
+    }
+}
+
+impl Eq for SparseVoxelOctreeNode {}
+
+impl PartialOrd for SparseVoxelOctreeNode {
+    fn partial_cmp(&self, other: &Self) -> Option<std::cmp::Ordering> {
+        Some(self.cmp(other))
+    }
+}
+
+impl Ord for SparseVoxelOctreeNode {
+    fn cmp(&self, other: &Self) -> std::cmp::Ordering {
+        let self_morton = MortonCode::encode(self.position);
+        let other_morton = MortonCode::encode(other.position);
+
+        self_morton.cmp(&other_morton)
+    }
+}
+
+impl SparseVoxelOctreeNode {
+    pub fn node(position: UVec3, size: u32) -> Self {
+        Self {
+            position,
+            parent: None,
+            first_child: None,
+            is_leaf: false,
+            size,
+            neighbors: [None; 6],
+        }
+    }
+
+    pub fn leaf(position: UVec3) -> Self {
+        Self {
+            position,
+            parent: None,
+            first_child: None,
+            is_leaf: true,
+            size: 4,
+            neighbors: [None; 6],
+        }
+    }
+}
+```
+
+### src/voxelized_mesh.rs
+```
+use std::error::Error;
+
+use bevy_math::{IVec3, UVec3};
+
+/// Collection of voxels that represent a mesh
+pub struct VoxelizedMesh {
+    voxels: Vec<UVec3>,
+    voxel_size: f32,
+    left_top_corner: IVec3,
+}
+
+impl VoxelizedMesh {
+    /// Creates a new voxelized mesh
+    ///
+    /// # Example
+    ///
+    /// ```
+    /// use svo_rs::{VoxelizedMesh};
+    /// use bevy_math::{IVec3, UVec3};
+    ///
+    /// let voxels = vec![
+    ///  UVec3::new(0, 0, 0),
+    ///  UVec3::new(1, 0, 0),
+    ///  UVec3::new(0, 1, 0),
+    ///  UVec3::new(0, 0, 1),
+    /// ];
+    ///
+    /// let voxelized_mesh = VoxelizedMesh::new(voxels, 1.0, IVec3::new(0, 0, 0));
+    /// ```
+    #[must_use]
+    pub fn new(voxels: Vec<UVec3>, voxel_size: f32, left_top_corner: IVec3) -> Self {
+        Self {
+            voxels,
+            voxel_size,
+            left_top_corner,
+        }
+    }
+
+    /// Returns the voxel size of each voxel in the mesh
+    #[must_use]
+    pub fn voxel_size(&self) -> f32 {
+        self.voxel_size
+    }
+
+    /// Create a sphere voxelized mesh
+    ///
+    /// # Example
+    ///
+    /// ```
+    /// use svo_rs::{VoxelizedMesh};
+    /// use bevy_math::IVec3;
+    ///
+    /// let voxelized_mesh = VoxelizedMesh::sphere(1.0, 1.0, IVec3::new(0, 0, 0));
+    /// ```
+    #[must_use]
+    pub fn sphere(radius: f32, voxel_size: f32, position: IVec3) -> Self {
+        let mut voxels = Vec::new();
+        #[allow(clippy::cast_possible_truncation)]
+        let radius = (radius / voxel_size).ceil() as i32;
+
+        let left_top_corner = position - radius;
+
+        let mut x = -radius;
+        while x <= radius {
+            let mut y = -radius;
+            while y <= radius {
+                let mut z = -radius;
+                while z <= radius {
+                    if (x * x + y * y + z * z) <= (radius * radius) {
+                        #[allow(clippy::cast_sign_loss)]
+                        voxels.push(UVec3::new(
+                            (x - left_top_corner.x) as u32,
+                            (y - left_top_corner.y) as u32,
+                            (z - left_top_corner.z) as u32,
+                        ));
+                    }
+
+                    z += 1;
+                }
+
+                y += 1;
+            }
+
+            x += 1;
+        }
+
+        Self::new(voxels, voxel_size, left_top_corner)
+    }
+
+    /// Converts a bevy mesh to a voxelized mesh
+    ///
+    /// # Examples
+    ///
+    /// ```
+    /// use bevy::prelude::*;
+    /// use svo_rs::{VoxelizedMesh};
+    ///
+    /// let sphere = Sphere::new(1.0).mesh().uv(32, 18);
+    /// let mesh = VoxelizedMesh::from_mesh(&sphere, Transform::IDENTITY.compute_matrix(), 1.0)
+    ///     .expect("Failed to voxelize mesh");
+    /// ```
+    ///
+    /// # Errors
+    /// Returns an error if the mesh has no indices or vertices
+    ///
+    #[cfg(feature = "bevy")]
+    pub fn from_mesh(
+        mesh: &bevy_render::prelude::Mesh,
+        transform: bevy_math::Mat4,
+        voxel_size: f32,
+    ) -> Result<VoxelizedMesh, VoxelizeError> {
+        let indices = mesh
+            .indices()
+            .ok_or(VoxelizeError("Mesh has no indices".to_string()))?;
+        let vertices = mesh
+            .attribute(bevy_render::prelude::Mesh::ATTRIBUTE_POSITION)
+            .ok_or(VoxelizeError("Mesh has no vertices".to_string()))?
+            .as_float3()
+            .ok_or(VoxelizeError(
+                "Error converting to float3 vertices".to_string(),
+            ))?;
+
+        let triangles = {
+            let mut result = Vec::with_capacity(indices.len() / 3);
+            for i in (0..indices.len()).step_by(3) {
+                result.push(match indices {
+                    bevy_render::mesh::Indices::U16(indices) => [
+                        transform.transform_point3(vertices[indices[i] as usize].into()),
+                        transform.transform_point3(vertices[indices[i + 1] as usize].into()),
+                        transform.transform_point3(vertices[indices[i + 2] as usize].into()),
+                    ],
+                    bevy_render::mesh::Indices::U32(indices) => [
+                        transform.transform_point3(vertices[indices[i] as usize].into()),
+                        transform.transform_point3(vertices[indices[i + 1] as usize].into()),
+                        transform.transform_point3(vertices[indices[i + 2] as usize].into()),
+                    ],
+                });
+            }
+
+            result
+        };
+
+        let triangle_min = triangles.iter().fold(
+            bevy_math::Vec3::new(f32::MAX, f32::MAX, f32::MAX),
+            |min, v| min.min(v[0]).min(v[1]).min(v[2]),
+        );
+
+        let mut voxels = std::collections::HashSet::new();
+
+        #[allow(clippy::cast_possible_truncation)]
+        let left_top_corner = IVec3::new(
+            (triangle_min.x / voxel_size).round() as i32 - 1,
+            (triangle_min.y / voxel_size).round() as i32 - 1,
+            (triangle_min.z / voxel_size).round() as i32 - 1,
+        );
+
+        for triangle in &triangles {
+            let triangle_voxels = triangle_to_voxels(triangle, voxel_size, left_top_corner);
+
+            for voxel in triangle_voxels {
+                voxels.insert(voxel);
+            }
+        }
+
+        Ok(VoxelizedMesh {
+            voxels: voxels.into_iter().collect(),
+            voxel_size,
+            left_top_corner,
+        })
+    }
+
+    /// Draws the voxelized mesh using bevy gizmos
+    #[cfg(feature = "bevy")]
+    #[allow(clippy::cast_precision_loss)]
+    pub fn draw_gizmos(&self, gizmos: &mut bevy_gizmos::prelude::Gizmos) {
+        for voxel in &self.voxels {
+            let voxel = voxel.as_vec3() * self.voxel_size;
+            let left_top_corner = self.left_top_corner.as_vec3() * self.voxel_size;
+            let half_size = bevy_math::Vec3::ONE * self.voxel_size / 2.0;
+
+            gizmos.cuboid(
+                bevy_transform::prelude::Transform::from_translation(
+                    left_top_corner + voxel + half_size,
+                )
+                .with_scale(bevy_math::Vec3::ONE * self.voxel_size),
+                bevy_color::Color::srgb(1.0, 0.0, 0.0),
+            );
+        }
+    }
+
+    /// Returns the voxels of the mesh
+    #[must_use]
+    pub fn voxels(&self) -> Vec<IVec3> {
+        self.voxels
+            .iter()
+            .map(|v| v.as_ivec3() + self.left_top_corner)
+            .collect()
+    }
+}
+
+#[derive(Debug)]
+pub struct VoxelizeError(String);
+
+impl Error for VoxelizeError {}
+
+impl std::fmt::Display for VoxelizeError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "Voxelize error: {:#?}", self.0)
+    }
+}
+
+#[cfg(feature = "bevy")]
+#[allow(clippy::cast_precision_loss)]
+fn triangle_to_voxels(
+    triangle: &[bevy_math::Vec3; 3],
+    voxel_size: f32,
+    left_top_corner: IVec3,
+) -> Vec<UVec3> {
+    let mut result = Vec::new();
+    let left_top_corner = bevy_math::Vec3::new(
+        left_top_corner.x as f32,
+        left_top_corner.y as f32,
+        left_top_corner.z as f32,
+    ) * voxel_size
+        + (bevy_math::Vec3::ONE * voxel_size / 2.0);
+
+    let min = triangle.iter().fold(
+        bevy_math::Vec3::new(f32::MAX, f32::MAX, f32::MAX),
+        |min, v| bevy_math::Vec3::new(min.x.min(v.x), min.y.min(v.y), min.z.min(v.z)),
+    ) - left_top_corner;
+
+    let max = triangle.iter().fold(
+        bevy_math::Vec3::new(f32::MIN, f32::MIN, f32::MIN),
+        |max, v| bevy_math::Vec3::new(max.x.max(v.x), max.y.max(v.y), max.z.max(v.z)),
+    ) - left_top_corner;
+
+    let min = (min / voxel_size).floor().as_uvec3();
+    let max = (max / voxel_size).ceil().as_uvec3();
+
+    for x in min.x..=max.x {
+        for y in min.y..=max.y {
+            for z in min.z..=max.z {
+                let cube = bevy_math::Vec3::new(x as f32, y as f32, z as f32) * voxel_size
+                    + left_top_corner;
+
+                if cube_triangle_intersection(cube, voxel_size / 2.0, triangle) {
+                    result.push(UVec3::new(x, y, z));
+                }
+            }
+        }
+    }
+
+    result
+}
+
+#[cfg(feature = "bevy")]
+// Algorithm obtained from https://gdbooks.gitbooks.io/3dcollisions/content/Chapter4/aabb-triangle.html
+fn cube_triangle_intersection(
+    cube: bevy_math::Vec3,
+    cube_size: f32,
+    triangle: &[bevy_math::Vec3; 3],
+) -> bool {
+    // Get the triangle points as vectors
+    let mut v0 = triangle[0];
+    let mut v1 = triangle[1];
+    let mut v2 = triangle[2];
+
+    // Convert AABB to center-extents form
+    let c = cube;
+    let e = bevy_math::Vec3::ONE * cube_size;
+
+    // Translate the triangle as conceptually moving the AABB to origin
+    // This is the same as we did with the point in triangle test
+    v0 -= c;
+    v1 -= c;
+    v2 -= c;
+
+    // Compute the edge vectors of the triangle  (ABC)
+    // That is, get the lines between the points as vectors
+    let f0 = v1 - v0; // B - A
+    let f1 = v2 - v1; // C - B
+    let f2 = v0 - v2; // A - C
+
+    // Compute the face normals of the AABB, because the AABB
+    // is at center, and of course axis aligned, we know that
+    // it's normals are the X, Y and Z axis.
+    let u0 = bevy_math::Vec3::new(1.0, 0.0, 0.0);
+    let u1 = bevy_math::Vec3::new(0.0, 1.0, 0.0);
+    let u2 = bevy_math::Vec3::new(0.0, 0.0, 1.0);
+
+    // There are a total of 13 axis to test!
+
+    // We first test against 9 axis, these axis are given by
+    // cross product combinations of the edges of the triangle
+    // and the edges of the AABB. You need to get an axis testing
+    // each of the 3 sides of the AABB against each of the 3 sides
+    // of the triangle. The result is 9 axis of seperation
+    // https://awwapp.com/b/umzoc8tiv/
+
+    // Compute the 9 axis
+    let axis_u0_f0 = u0.cross(f0);
+    let axis_u0_f1 = u0.cross(f1);
+    let axis_u0_f2 = u0.cross(f2);
+
+    let axis_u1_f0 = u1.cross(f0);
+    let axis_u1_f1 = u1.cross(f1);
+    let axis_u1_f2 = u2.cross(f2);
+
+    let axis_u2_f0 = u2.cross(f0);
+    let axis_u2_f1 = u2.cross(f1);
+    let axis_u2_f2 = u2.cross(f2);
+
+    if !sat_test(v0, v1, v2, u0, u1, u2, e, axis_u0_f0) {
+        return false;
+    }
+
+    if !sat_test(v0, v1, v2, u0, u1, u2, e, axis_u0_f1) {
+        return false;
+    }
+
+    if !sat_test(v0, v1, v2, u0, u1, u2, e, axis_u0_f2) {
+        return false;
+    }
+
+    if !sat_test(v0, v1, v2, u0, u1, u2, e, axis_u1_f0) {
+        return false;
+    }
+
+    if !sat_test(v0, v1, v2, u0, u1, u2, e, axis_u1_f1) {
+        return false;
+    }
+
+    if !sat_test(v0, v1, v2, u0, u1, u2, e, axis_u1_f2) {
+        return false;
+    }
+
+    if !sat_test(v0, v1, v2, u0, u1, u2, e, axis_u2_f0) {
+        return false;
+    }
+
+    if !sat_test(v0, v1, v2, u0, u1, u2, e, axis_u2_f1) {
+        return false;
+    }
+
+    if !sat_test(v0, v1, v2, u0, u1, u2, e, axis_u2_f2) {
+        return false;
+    }
+
+    // Next, we have 3 face normals from the AABB
+    // for these tests we are conceptually checking if the bounding box
+    // of the triangle intersects the bounding box of the AABB
+    // that is to say, the seperating axis for all tests are axis aligned:
+    // axis1: (1, 0, 0), axis2: (0, 1, 0), axis3 (0, 0, 1)
+
+    // Test the 3 face normals from the AABB
+    if !sat_test(v0, v1, v2, u0, u1, u2, e, u0) {
+        return false;
+    }
+
+    if !sat_test(v0, v1, v2, u0, u1, u2, e, u1) {
+        return false;
+    }
+
+    if !sat_test(v0, v1, v2, u0, u1, u2, e, u2) {
+        return false;
+    }
+
+    // Do the SAT given the 3 primary axis of the AABB
+    // You already have vectors for this: u0, u1 & u2
+
+    // Finally, we have one last axis to test, the face normal of the triangle
+    // We can get the normal of the triangle by crossing the first two line segments
+    let triangle_normal = f0.cross(f1);
+
+    // Test the face normal of the triangle
+    if !sat_test(v0, v1, v2, u0, u1, u2, e, triangle_normal) {
+        return false;
+    }
+
+    // Passed testing for all 13 seperating axis that exist!
+    true
+}
+
+#[cfg(feature = "bevy")]
+#[allow(clippy::too_many_arguments)]
+fn sat_test(
+    v0: bevy_math::Vec3,
+    v1: bevy_math::Vec3,
+    v2: bevy_math::Vec3,
+    u0: bevy_math::Vec3,
+    u1: bevy_math::Vec3,
+    u2: bevy_math::Vec3,
+    e: bevy_math::Vec3,
+    axis: bevy_math::Vec3,
+) -> bool {
+    // Testing axis: axis_u0_f0
+    // Project all 3 vertices of the triangle onto the Seperating axis
+    let p0 = v0.dot(axis);
+    let p1 = v1.dot(axis);
+    let p2 = v2.dot(axis);
+    // Project the AABB onto the seperating axis
+    // We don't care about the end points of the prjection
+    // just the length of the half-size of the AABB
+    // That is, we're only casting the extents onto the
+    // seperating axis, not the AABB center. We don't
+    // need to cast the center, because we know that the
+    // aabb is at origin compared to the triangle!
+    let r = e.x * (u0.dot(axis)).abs() + e.y * (u1.dot(axis)).abs() + e.z * (u2.dot(axis)).abs();
+    // Now do the actual test, basically see if either of
+    // the most extreme of the triangle points intersects r
+    // You might need to write Min & Max functions that take 3 arguments
+    if p0.min(p1).min(p2).max(-(p0.max(p1).max(p2))) > r {
+        // This means BOTH of the points of the projected triangle
+        // are outside the projected half-length of the AABB
+        // Therefore the axis is seperating and we can exit
+        return false;
+    }
+
+    true
+}
+```

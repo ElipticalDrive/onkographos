@@ -1,0 +1,613 @@
+Gaussian Splat Renderer for the Godot Engine. Contribute to klausi3D/godotGS development by creating an account on GitHub.
+
+gaussian_splatting: HLOD route draws the world and node instances in one frame (PR1b) by klausi3D · Pull Request #1308 · klausi3D/godotGS · GitHub
+Skip to content
+You signed in with another tab or window. Reload to refresh your session.
+You signed out in another tab or window. Reload to refresh your session.
+You switched accounts on another tab or window. Reload to refresh your session.
+Dismiss alert
+Conversation
+klausi3D
+commented
+Nov 4, 2026
+•
+edited
+Loading
+Uh oh!
+There was an error while loading. Please reload this page.
+Copy link
+Copy Markdown
+Owner
+What
+A streamed HLOD world, including V4 paged worlds, and N movable GaussianSplatNode3D instances now draw in the same frame, in one draw list, one depth sort and one byte ledger. Until now, a single node next to a paged world made the world draw nothing.
+Director: the exclusivity check is removed (has_hlod_world_submission). A row builder produces row 0 = world and rows 1..N = visible nodes.
+Publisher:
+Each node asset is packed once after the world and charged to the ledger before allocation.
+Instance draw records use the offset T − camera, computed in double.
+A world that is still loading keeps drawing the instances.
+Moving nodes take PR1a's row re-upload path, so they cause no rebuild.
+Budget rule as in ADR §5: objects first, the world keeps a floor, and refusals are per object, deterministic and explicit.
+Two fixes the GPU runs forced:
+A renderer-wide full-fidelity fallback turned off LOD whenever node assets existed. It no longer applies on the HLOD route.
+The overlap-record storage now grows to hold the objects' estimate.
+Evidence (local RTX 3090, exe mtime checked)
+Check
+Result
+CPU HLOD / SceneDirector / Resident / InstancePipeline lanes
+291/291
+WorldIO
+120/120
+GPU *HLOD* doctests
+242/242
+Full GPU harness
+159/159
+run_runtime_validation.py --profile streaming-gpu-ci --fail-on-skip
+5/5 pass
+New world + instances runtime cases, base binary
+[RUNTIME_FAIL] … hlod_paged_not_exclusive_world_submission
+Same cases, this branch
+[RUNTIME_PASS], paged and whole-tree
+World-only scene vs PR1a, 24 SHA-256 frame and stat digests
+identical
+Mutation: restoring the is_empty() exclusivity
+the CPU routing test and the runtime case go red
+run_module_tests.py --guard-only
+exit 0
+Screenshots of the probe (front instances over the world, behind ones hidden, the order swapping) were looked at, but they are synthetic and still need maintainer eyes.
+Base: master (PR1a #1307 merged as e24efc5). Head 4288a281261.
+Refs #788, #1131. Implements PR1b of docs/architecture/adr-one-route-many-producers.md (PR0, #1306).
+Risk class: R2 (renderer, plus director changes that alter what the renderer draws). The PR touches no
+.github/**, io/** or servers/**, registers no new runtime scenario, adds no ProjectSetting and binds no API.
+The world floor F
+F = 1/2 of each performance cap of a view:
+the view's splat cap C_view: the world's max_splats before the world contract clamps it to the world's data count;
+the overlap-record cap: the configured hard cap, or the overlap storage when none is configured.
+How the caps split:
+The visible objects reserve R from C_view first, at most C_view − F.
+The world cut gets min(W_need, C_view − R), where W_need is the world's own cap (≤ its data count).
+So when the world and the objects fit under C_view, the world is not degraded at all. When they do not, the
+world keeps F and the objects are refused whole, in screen-importance order, ties broken by the instance key.
+The overlap storage grows to hold the objects' record estimate next to the world's seed, priced against the
+route's ledger headroom. The world's record budget is unchanged when that growth fits.
+Why one half:
+Decision 3 requires a fixed floor so objects can never starve the world. Half is the largest object share that
+still guarantees the world never gets less than the objects.
+The HLOD selector refines in priority order, so a world cut under half of its caps is the same refinement
+sequence stopped earlier. It is coarser, but it never drops a region (complete-or-nothing, BV I-4).
+With the default view caps (millions of splats), objects get far more than a typical object set needs, so
+refusals are rare in practice. When they happen, they are explicit: the reason
+hlod_instance_reserve_exceeds_object_share and the counters hlod_instance_refused_objects and
+hlod_instance_reserve_refusal_frames.
+F is an internal constant (renderer/hlod_world_instances.h). A project setting would be R3 (F3).
+The draw list is not a performance cap. It is sized for the world's nodes plus every row's chunks, so it never
+refuses an object.
+Byte ledger: the instance region is charged to the same device ledger and, on streamed or paged worlds, to the
+atlas page budget, as ADR 4.5 states. If the atlas byte cap cannot hold the world's cut and the objects, the world's
+page budget shrinks (the cut gets coarser). The world-floor rule covers the view caps, not bytes.
+GPU evidence
+tests/runtime/test_hlod_resident_main_view.gd (already registered in streaming-gpu-ci and release-ci; no new
+registration) gains a world + 8 moving instances proof, run on a V4 paged world and on a whole-tree resident world.
+It is fail-closed:
+every stat it reads must exist;
+every frame, both sources draw, there is exactly one depth sort, and no *not_exclusive* reason appears;
+front and behind pixel verdicts flip when the instances swap sides;
+moving the nodes causes 0 rebuilds and takes the row re-upload path;
+a budget phase (the view cap lowered) admits 3 of the 8 objects and refuses 5 whole; the refusal counters move,
+there is still one sort, and the world keeps drawing within the cap minus the reserve;
+a 30-frame stationary phase after warm-up fails if hlod_instance_overlap_growths or hlod_overlap_capacity_records moves (Codex P1: the overlap storage regrew every frame; the world's record need is now tracked apart from the storage, gs_hlod_bundle::world_overlap_need; CPU doctest 'a stationary view with objects grows the overlap storage once, not every frame', red on the old rule);
+every wait loop checks its deadline right after frame_post_draw, before accepting an observation.
+It is red on base and green on this branch. A C++ [RequiresGPU] doctest is not possible: the doctest harness
+renders through RasterizerDummy, which has no render target.
+Deferred follow-ups (not in this PR)
+A visibility change still rebuilds the bundle: it moves the director's asset-set generation.
+Instance assets are re-packed on every frame the route is not prepared (warm-up, or a persistent refusal).
+Shadow and extra views still refuse the HLOD route (F5).
+A byte-ledger floor: the world has no guaranteed share of the atlas page budget against the instance region.
+Refs #788, #1131
+🤖 Generated with Claude Code
+https://claude.ai/code/session_016Cyd8MpY6kncfNpmWRPgoc
+klausi3D
+and others
+added 2 commits
+November 4, 2026 20:35
+gaussian_splatting: HLOD route draws the world and node instances in …
+…
+78d80bd
+```
+…one frame (Refs #788, #1131)
+
+PR1b of docs/architecture/adr-one-route-many-producers.md (stacked on PR1a,
+#1307). A streamed, paged (V4) or whole-tree HLOD world and N movable
+GaussianSplatNode3D instances now draw in one frame: one draw list, one
+depth sort and one byte ledger. Row 0 is the world; rows 1..N are the
+visible node instances.
+
+Director
+- has_exclusive_hlod_world_submission -> has_hlod_world_submission: no
+  instance_store.is_empty() term (a hidden node no longer removes the world
+  either).
+- build_hlod_instance_rows_for_renderer(): row 0 = the world identity row,
+  then the visible node rows built exactly as the canonical builder builds
+  them (shared _fill_world_identity_row / _fill_instance_row), with parallel
+  64-bit asset ids and stable instance keys (node ObjectIDs).
+  build_instance_buffer_for_renderer is unchanged (canonical routes keep
+  their behaviour until F1).
+
+Publisher (renderer/resident_instance_contract_publisher.cpp)
+- Every distinct node asset is packed once, whole, after the world (atlas
+  tail, chunk tables [node_count, +K), one AssetMetaGPU per asset), in both
+  the canonical and the relative bundle; the ledger charges it before
+  allocation; a streamed atlas's page budget shrinks by exactly it.
+- Per view, the admitted rows get one DrawnNodeGPU per chunk after the
+  world's records, offset T - camera formed in double against the same
+  origin revision. An idle (loading) streamed world still draws them (ADR 4.4).
+- The single-row assumptions and the *_not_exclusive_* refusals are gone;
+  reason keys hlod_world_submission_inactive / _lost replace them.
+- Moving nodes take PR1a's row re-upload path; no rebuild.
+- prepare_hlod_frame no longer reports a lost world submission as
+  deformation_or_instance_domain (DESIGN E5).
+
+Budget rule (ADR 4.5, renderer/hlod_world_instances.h)
+- The world keeps a floor F = 1/2 of each performance cap (splats, overlap
+  records); visible objects reserve their need first from the other half,
+  in screen-importance order with ties broken by the instance key. An
+  object that does not fit is refused whole: reason
+  hlod_instance_reserve_exceeds_object_share, counters
+  hlod_instance_refused_objects / hlod_instance_reserve_refusal_frames; the
+  node can query it (GaussianSplatNode3D::get_hlod_instance_refusal_reason,
+  internal, unbound). F is an internal constant, not a setting.
+- The overlap storage grows to hold the objects' record estimate next to
+  the world's seed (priced against the route headroom).
+- The conservative full-fidelity fallback no longer disables LOD (and with
+  it the HLOD cut) because node assets are registered on a world that is on
+  the HLOD route; an explicit full-fidelity request still wins.
+
+Telemetry: per-producer draw records, admission counters, bundle builds /
+row re-uploads, and sort_dispatches_frame / sort_dispatch_frame (depth sorts
+per renderer frame). No shader, GPU layout, format, setting or bound API
+change.
+
+Tests: test_hlod_world_instances.cpp (6 CPU cases: routing and rows with 0,
+1 and 8 nodes, generations, ledger, admission order and determinism,
+per-object refusal, world floor, view demand, draw records and offsets at
+1 km / 100 km). The runtime test's exclusive-world comment is corrected.
+
+Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
+Claude-Session: https://claude.ai/code/session_016Cyd8MpY6kncfNpmWRPgoc
+```
+gaussian_splatting: HLOD instances reserve from the view cap, not the…
+…
+1e68020
+```
+… world's splat count; world + instances runtime proof (Refs #788, #1131)
+
+PR1b follow-up (ADR one-route-many-producers 4.5).
+
+- The world contract clamps max_splats to the world's data count. That clamp
+  bounds what the world draws; it is not the pool node instances reserve
+  from. The contract now also carries the pre-clamp view cap
+  (WorldSubmissionContract::view_max_splats, kept through the runtime
+  snapshot/restore). The renderer serves it as C_view
+  (get_hlod_view_splat_cap) while max_splats still holds the contract's
+  clamped value; an explicit set_max_splats wins.
+- Budget: objects reserve R from C_view (at most C_view - F); the world cut
+  gets min(W_need, C_view - R), W_need being today's world cap. World plus
+  objects under C_view: the world cut is unchanged. Over: the world keeps F,
+  objects are refused in order. Overlap records likewise: the share is
+  bounded by the configured record cap and by what the grown storage holds
+  beyond the world's need. The relative bundle, sort and ledger are sized
+  for the total.
+- tests/runtime/test_hlod_resident_main_view.gd (already registered in
+  streaming-gpu-ci and release-ci; no new registration): world + 8 moving
+  GaussianSplatNode3D instances on a V4 paged and a whole-tree world.
+  Fail-closed: every stat present; every frame both sources draw, one depth
+  sort, no *not_exclusive* reason; front/behind pixel verdicts flip on the
+  swap; motion takes the row re-upload path with 0 rebuilds; a budget phase
+  refuses whole objects with the counters moving while the world draws.
+- CPU tests: fits under the view cap (world unchanged), over the cap
+  (floor kept, refusals in order), a resident world's contract (clamped
+  max_splats, unclamped view cap).
+
+Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
+Claude-Session: https://claude.ai/code/session_016Cyd8MpY6kncfNpmWRPgoc
+```
+chatgpt-codex-connector
+Bot
+commented
+Nov 4, 2026
+•
+edited
+Loading
+Uh oh!
+There was an error while loading. Please reload this page.
+Copy link
+Copy Markdown
+Codex Review Summary
+This comment shows the latest Codex review activity on this pull request.
+Review
+Status
+Commit
+Review trigger
+📝 Code Review
+✅ Completed 2026-11-05T09:03:40.905427Z
+1d9392b
+Manual request
+ℹ️ About Codex in GitHub
+Your team has set up Codex to review pull requests in this repo. Reviews are triggered when you
+Open a pull request for review
+Mark a draft as ready
+Comment "@codex review" or "@codex security review".
+Codex reacts with 👀 while any review is running, comments if it has suggestions, and reacts with 👍 once all reviews finish with no findings.
+chatgpt-codex-connector
+Bot
+reviewed
+Nov 4, 2026
+View reviewed changes
+chatgpt-codex-connector
+Bot
+left a comment
+Copy link
+Copy Markdown
+There was a problem hiding this comment.
+Choose a reason for hiding this comment
+The reason will be displayed to describe this comment to others. Learn more.
+💡 Codex Review
+Here are some automated review suggestions for this pull request.
+Reviewed commit: 1e68020cfe
+ℹ️ About Codex in GitHub
+Your team has set up Codex to review pull requests in this repo. Reviews are triggered when you
+Open a pull request for review
+Mark a draft as ready
+Comment "@codex review".
+If Codex has suggestions, it will comment; otherwise it will react with 👍.
+Codex can also answer questions or update the PR. Try commenting "@codex address that feedback".
+Comment thread
+modules/gaussian_splatting/renderer/resident_instance_contract_publisher.cpp
+Resolved
+Uh oh!
+There was an error while loading. Please reload this page.
+Comment thread
+tests/runtime/test_hlod_resident_main_view.gd
+Resolved
+Uh oh!
+There was an error while loading. Please reload this page.
+This was referenced Nov 4, 2026
+gaussian_splatting: a world with an HLOD tree takes the HLOD route automatically (behaviour change, R3)
+#1309
+Merged
+Close-range mesh/splat ordering: mesh character in front of splat foliage is covered by splats (GS-COMBINED-1 C2)
+#1310
+Open
+Intermittent: first frame of a frozen-scene segment differs; sorted_splats changes by one with identical inputs (GS-COMBINED-1 T1)
+#1311
+Open
+Picking/raycast against splat objects and the world is a stub (pick() returns no hit)
+#1312
+Open
+Renderer does not publish per-source draw counters (world/object drawn splats, sort sources, dropped sources, lights dropped, per-light casters, ledger bytes)
+#1313
+Open
+V4 paged save rejects worlds whose splat centres are not exactly reconstructable (hlod_center_reconstruction_not_exact)
+#1314
+Open
+tests/ci: GS-COMBINED-1 game-scene gate - fail-closed harness, verdict and guarded workflow (R3)
+#1315
+Open
+Base automatically changed from
+feat/hlod-multirow-bundle
+to
+master
+November 5, 2026 00:04
+klausi3D
+closed this
+Nov 5, 2026
+klausi3D
+reopened this
+Nov 5, 2026
+klausi3D
+commented
+Nov 5, 2026
+Copy link
+Copy Markdown
+Owner
+Author
+@codex review
+chatgpt-codex-connector
+Bot
+commented
+Nov 5, 2026
+Copy link
+Copy Markdown
+Codex Review: Didn't find any major issues. Nice work!
+Reviewed commit: 1e68020cfe
+ℹ️ About Codex in GitHub
+Your team has set up Codex to review pull requests in this repo. Reviews are triggered when you
+Open a pull request for review
+Mark a draft as ready
+Comment "@codex review".
+If Codex has suggestions, it will comment; otherwise it will react with 👍.
+Codex can also answer questions or update the PR. Try commenting "@codex address that feedback".
+klausi3D
+mentioned this pull request
+Nov 5, 2026
+gaussian_splatting: HLOD world and node instances cast real directional splat shadows (Refs #1095, #1163)
+#1316
+Open
+gaussian_splatting: HLOD overlap storage holds the objects' estimate …
+…
+4288a28
+```
+…once; world+instances waits fail past the deadline (Refs #788, #1131)
+
+Codex P1 on #1308 (publisher): the world's overlap-record need was read
+from the allocated storage, which already held the previous frame's
+object reservation, and the objects' estimate was added on top again. A
+stationary view with visible node instances regrew the overlap storage
+(reallocating the buffers and rebuilding the sorter) on every frame until
+the record cap or the ledger headroom stopped it.
+
+The world's need is now tracked apart from the storage
+(gs_hlod_bundle::world_overlap_need): while the storage is the one the
+route last sized, the tracked need is used; any other storage (first
+frame, measured-overflow growth, new device) is read whole as the
+world's, once. The requirement is absolute: world need + this view's
+estimate, counted once (world_plus_objects_overlap_records). When it
+exceeds the storage, the route grows to the world need + 3/2 of the
+estimate (world_plus_objects_overlap_growth, the slack the measured
+overflow growth uses) and falls back to the exact requirement if the
+slack does not fit the headroom, so moving objects do not reallocate on
+every small rise. The same tracked need feeds the objects' record share.
+
+New render stats: hlod_overlap_capacity_records (the storage the last
+prepared view drew with) and hlod_instance_overlap_growths (cumulative
+growths for the objects' estimate).
+
+Tests:
+- CPU doctest "a stationary view with objects grows the overlap storage
+  once, not every frame" drives the publisher's sequence over frames
+  (stationary, leave/return, rising estimate, two alternating views,
+  foreign storage growth).
+- test_hlod_resident_main_view.gd: a stationary phase after warm-up
+  (30 frames, both modes) fails if either new stat moves.
+
+Codex P1 on #1308 (test): the world+instances budget loop accepted an
+observation from a frame that ended past the deadline. The warm-up and
+budget loops now check the deadline right after frame_post_draw and fail
+explicitly (tests/AGENTS.md: the deadline binds the pass). The motion
+phase loop already did; the pre-PR1b loops in the file already did.
+
+Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
+Claude-Session: https://claude.ai/code/session_016Cyd8MpY6kncfNpmWRPgoc
+```
+klausi3D
+commented
+Nov 5, 2026
+Copy link
+Copy Markdown
+Owner
+Author
+@codex review
+chatgpt-codex-connector
+Bot
+reviewed
+Nov 5, 2026
+View reviewed changes
+chatgpt-codex-connector
+Bot
+left a comment
+Copy link
+Copy Markdown
+There was a problem hiding this comment.
+Choose a reason for hiding this comment
+The reason will be displayed to describe this comment to others. Learn more.
+💡 Codex Review
+Here are some automated review suggestions for this pull request.
+Reviewed commit: 4288a28126
+ℹ️ About Codex in GitHub
+Your team has set up Codex to review pull requests in this repo. Reviews are triggered when you
+Open a pull request for review
+Mark a draft as ready
+Comment "@codex review".
+If Codex has suggestions, it will comment; otherwise it will react with 👍.
+Codex can also answer questions or update the PR. Try commenting "@codex address that feedback".
+Comment thread
+modules/gaussian_splatting/renderer/resident_instance_contract_publisher.cpp
+Resolved
+Uh oh!
+There was an error while loading. Please reload this page.
+gaussian_splatting: a streamed HLOD page budget reserves the instance…
+…
+2e7eddf
+```
+… region's frame scratch (Refs #788, #1131)
+
+Codex P1 on #1308: prepare_hlod_frame() admits the frame scratch for
+the relative atlas it draws from, world pages plus the node instances'
+region at the atlas tail (total_gaussians = stream records +
+region.records); prepare_hlod_scratch() sizes the subpixel history and
+the SH colour cache from that combined count. The streamed page budget
+reserved per-record scratch for the world's pages only. With a
+ledger-bound budget and a large instance region the scratch admission
+then refused every frame (tile_capacity_warmup_or_memory_limit), and
+the prepared bundle kept the same page count, so it never recovered.
+
+ResidentAtlasBudget::hlod_stream_page_budget_with_instances() takes the
+region's records: their atlas bytes come off the atlas limit (as the
+publisher did inline) and their per-record scratch is added to the
+fixed scratch before the ledger term is computed. Overflowing products
+refuse (0 pages) instead of wrapping. The publisher calls it in place of
+the inline subtraction.
+
+Other per-record charges on that path were checked: the bundle's fixed
+bytes already hold the region's atlas records and chunk tables
+(gs_hlod_bundle::bundle_bytes), and the visible-sized scratch
+(projection, visibility, history floor) is sized from relative_capacity,
+which already includes the objects' share.
+
+Test: "a ledger-bound page budget reserves the instance region's frame
+scratch too" (test_resident_atlas_budget.h) checks, for regions of 0 to
+5M records, that the headroom left after the bundle still admits the
+scratch prepare_hlod_scratch() asks for; that without instances it is
+the world-only budget; and the atlas-bound, exhausted and overflow cases.
+
+Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
+Claude-Session: https://claude.ai/code/session_016Cyd8MpY6kncfNpmWRPgoc
+```
+klausi3D
+commented
+Nov 5, 2026
+Copy link
+Copy Markdown
+Owner
+Author
+@codex review
+klausi3D
+mentioned this pull request
+Nov 5, 2026
+HLOD whole-tree admission reserves no frame scratch (world or instance region)
+#1317
+Open
+chatgpt-codex-connector
+Bot
+reviewed
+Nov 5, 2026
+View reviewed changes
+chatgpt-codex-connector
+Bot
+left a comment
+Copy link
+Copy Markdown
+There was a problem hiding this comment.
+Choose a reason for hiding this comment
+The reason will be displayed to describe this comment to others. Learn more.
+💡 Codex Review
+Here are some automated review suggestions for this pull request.
+Reviewed commit: 2e7eddf9ff
+ℹ️ About Codex in GitHub
+Your team has set up Codex to review pull requests in this repo. Reviews are triggered when you
+Open a pull request for review
+Mark a draft as ready
+Comment "@codex review".
+If Codex has suggestions, it will comment; otherwise it will react with 👍.
+Codex can also answer questions or update the PR. Try commenting "@codex address that feedback".
+Comment thread
+modules/gaussian_splatting/renderer/resident_instance_contract_publisher.cpp
+Resolved
+Uh oh!
+There was an error while loading. Please reload this page.
+gaussian_splatting: HLOD frame ledger order - mandatory world allocat…
+…
+1d9392b
+```
+…ions first, optional overlap growth from the rest (Refs #788, #1131)
+
+Codex P1 on #1308 (the fourth finding of one class): every step of
+prepare_hlod_frame() allocates from the same headroom, route_limit -
+route_bytes. The two overlap growths (the measured-overflow growth and
+the growth for the objects' record estimate) ran on the full headroom,
+before the view grid and the frame scratch were provisioned. On a
+ledger-bound streamed bundle whose scratch was not allocated yet they
+could spend the bytes the page budget reserved for that scratch, and
+every frame was refused with tile_capacity_warmup_or_memory_limit.
+Nothing shrinks again (neither the grown storage nor the page count),
+so the world stayed blank.
+
+The order is now explicit (ResidentAtlasBudget, resident_atlas_budget.h):
+- hlod_mandatory_outstanding_bytes(): what the world still owes this
+  frame. That is the view's tile grid (hlod_view_grid_outstanding_bytes,
+  the rule hlod_view_grid_action now admits by), the frame scratch
+  (TileRenderer::get_hlod_scratch_outstanding_bytes, from the same plan
+  prepare_hlod_scratch admits by, via the new _plan_hlod_scratch()) and
+  the ViewSet charge of the views (history and draw records per view,
+  charged against the same headroom on every frame). The sum saturates.
+- hlod_optional_growth_headroom(): the headroom minus that. Both overlap
+  growths get only this. A refused optional growth leaves the storage as
+  it is and blocks nothing.
+The scratch request is built once, before the growths, and reused by
+the admission.
+
+Test: "optional overlap growth never spends the world's mandatory frame
+allocations" (test_resident_atlas_budget.h) runs the frame's sequence:
+with a ledger that admits the growth only from the full headroom, the
+growth is refused and the scratch and the view are admitted; with room
+for both, both happen. It also covers the steady state, saturation, and
+grid outstanding == grid action.
+
+Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
+Claude-Session: https://claude.ai/code/session_016Cyd8MpY6kncfNpmWRPgoc
+```
+klausi3D
+commented
+Nov 5, 2026
+Copy link
+Copy Markdown
+Owner
+Author
+@codex review
+chatgpt-codex-connector
+Bot
+commented
+Nov 5, 2026
+Copy link
+Copy Markdown
+Codex Review: Didn't find any major issues. More of your lovely PRs please.
+Reviewed commit: 1d9392b698
+ℹ️ About Codex in GitHub
+Your team has set up Codex to review pull requests in this repo. Reviews are triggered when you
+Open a pull request for review
+Mark a draft as ready
+Comment "@codex review".
+If Codex has suggestions, it will comment; otherwise it will react with 👍.
+Codex can also answer questions or update the PR. Try commenting "@codex address that feedback".
+Hide details
+View details
+klausi3D
+merged commit f46b44f
+into
+master
+Nov 5, 2026
+27 of 28 checks passed
+Uh oh!
+There was an error while loading. Please reload this page.
+klausi3D
+deleted the
+feat/hlod-world-plus-instances
+branch
+November 5, 2026 09:38
+klausi3D
+added a commit
+that referenced
+this pull request
+Nov 5, 2026
+Merge master (PR1b #1308) into feat/splat-shadow-casters
+…
+9837b44
+```
+Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
+Claude-Session: https://claude.ai/code/session_016Cyd8MpY6kncfNpmWRPgoc
+```
+klausi3D
+added a commit
+that referenced
+this pull request
+Nov 5, 2026
+Merge remote-tracking branch 'origin/master' into feat/hlod-auto-route
+…
+3ee8353
+```
+Brings in the merged PR1b #1308 head (f46b44f). No conflicts.
+
+Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
+Claude-Session: https://claude.ai/code/session_016Cyd8MpY6kncfNpmWRPgoc
+```
+Sign up for free
+to join this conversation on GitHub.
+Already have an account?
+Sign in to comment
+Uh oh!
+There was an error while loading. Please reload this page.
+Labels
+None yet
+1 participant
+Add this suggestion to a batch that can be applied as a single commit.This suggestion is invalid because no changes were made to the code.Suggestions cannot be applied while the pull request is closed.Suggestions cannot be applied while viewing a subset of changes.Only one suggestion per line can be applied in a batch.Add this suggestion to a batch that can be applied as a single commit.Applying suggestions on deleted lines is not supported.You must change the existing code in this line in order to create a valid suggestion.Outdated suggestions cannot be applied.This suggestion has been applied or marked resolved.Suggestions cannot be applied from pending reviews.Suggestions cannot be applied on multi-line comments.Suggestions cannot be applied while the pull request is queued to merge.Suggestion cannot be applied right now. Please check back later.
+You can’t perform that action at this time.

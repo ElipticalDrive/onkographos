@@ -1,0 +1,60 @@
+# Shared G-MLP
+
+Also called: NeRF-Det
+
+## Overview
+The Shared G-MLP is a component of the NeRF-Det architecture that links the Neural Radiance Field (NeRF) branch with the 3D object detection branch using a shared geometry-based Multi-Layer Perceptron [S1]. It solves the problem of decoupled training in joint NeRF-and-detection systems by enabling gradient flow from the NeRF branch to the detection branch, thereby propagating multi-view consistency constraints to the detector [S2]. This distinguishes it from "NeRF-to-Det" approaches where the NeRF and detection modules are trained independently or where consistency constraints do not reach the detection backbone [S1].
+
+## How it works
+**Inputs and Outputs:**
+*   **Input:** 3D spatial coordinates $(x, y, z)$ sampled along rays or within the voxel grid.
+*   **Output:** A geometry-aware feature representation (opacity/density signal) used by both the volume rendering loss and the detection head [S1, S2].
+
+**Data Structures:**
+*   **Shared G-MLP:** A standard Multi-Layer Perceptron. The specific layer dimensions, activation functions, and weight initialization are not specified in the provided sources [G]. The MLP takes 3D coordinates as input and outputs a scalar geometry value (typically density or opacity) [S1, S2].
+
+**Steps:**
+1.  **Coordinate Sampling:** Sample 3D points along rays or within the 3D volume feature grid [S1, S2].
+2.  **Geometry Encoding:** Pass the 3D coordinates through the Shared G-MLP to obtain a geometry-aware feature/density value [S1, S2].
+3.  **Joint Optimization:**
+    *   The geometry output is used by the NeRF branch to compute volume rendering losses (e.g., photometric loss) [S1].
+    *   The same geometry output is used by the detection branch to estimate opacity fields for 3D bounding box regression [S1].
+    *   Gradients from both the NeRF loss and the detection loss flow back through the Shared G-MLP weights [S2].
+4.  **Free Space Masking:** The shared geometry signal effectively masks out free space in the feature volume, reducing ambiguity for the detection head [S1].
+
+**Formulas:**
+Not given in the sources. The specific mathematical formulation of the G-MLP (e.g., $f(x) = W_n \sigma(... \sigma(W_1 x + b_1) ... + b_n)$) is not provided [G].
+
+**Parameters:**
+*   **MLP Depth/Width:** Not given in the sources.
+*   **Activation Function:** Not given in the sources.
+
+**Edge Cases and Pitfalls:**
+*   **Performance Degradation:** Removing the shared G-MLP causes a drastic performance drop in 3D object detection. Specifically, mAP@.25 decreases from 50.1 to 48.1 [S2]. This occurs because the influence of multi-view consistency is restricted to the image backbone rather than the volumetric representation [S2].
+
+## Subtopics
+
+### NeRF-Det
+The parent method that utilizes the Shared G-MLP for joint NeRF and detection training. It explicitly models scene geometry as an opacity field to improve indoor 3D object detection from posed RGB images. [Link](15549-nerf-det.md)
+
+## Operating characteristics
+**Time and Memory Complexity:**
+Not given in the sources.
+
+**Measured Performance:**
+*   On the KITTI dataset (implied by the source context of NeRF-Det), the method achieves an mAP@.25 of 50.1 and mAP@.50 of 24.4 when using the Shared G-MLP with multi-view 2D feature sampling [S2].
+*   Without the Shared G-MLP, performance drops to 48.1 mAP@.25 and 23.8 mAP@.50 [S2].
+
+**Strengths and Limitations:**
+*   **Strengths:** Enables direct gradient flow from NeRF to the detection branch, effectively masking free space and reducing feature volume ambiguity [S1]. Propagates multi-view consistency constraints to the detection module [S2].
+*   **Limitations:** Requires joint training of NeRF and detection branches, which may increase training complexity compared to sequential approaches [S1].
+
+**When to Use:**
+Use when performing joint NeRF-and-detection tasks where multi-view consistency is critical for accurate 3D bounding box regression and free-space suppression [S1, S2].
+
+## Background
+The Shared G-MLP was introduced in the NeRF-Det paper [S2]. It addresses limitations in previous "NeRF-to-Det" approaches where the NeRF branch did not sufficiently influence the detection branch [S1]. The method builds on the concept of using neural volumetric features for direct 3D bounding box regression [S1].
+
+## Sources
+[S1] Semantically-aware Neural Radiance Fields for Visual Scene Understanding: A Comprehensive Review, https://link.springer.com/article/10.1007/s11263-025-02663-5, fetched 2026-10-27
+[S2] NeRF-Det: Learning Geometry-Aware Volumetric Representation for Multi-View 3D Object Detection, https://doi.org/10.1109/iccv51070.2023.02131, fetched 2026-10-30

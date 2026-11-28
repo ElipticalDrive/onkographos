@@ -1,0 +1,175 @@
+--- v001.md
++++ v002.md
+@@ -4,5 +4,5 @@
+ 
+ ## Overview
+-Single-Event Upset (SEU) fault injection in 3D Gaussian Splatting (3DGS) simulates transient bit flips in GPU memory to measure the rendering corruption caused by hardware errors [S1, unofficial]. It differs from neural network weight perturbation because 3DGS primitives are spatially localized and redundant, whereas network weights are shared globally; this method quantifies whether such redundancy provides robustness or concentrates risk into rare catastrophic failures [S1, unofficial].
++Single-Event Upset (SEU) fault injection in 3D Gaussian Splatting (3DGS) simulates transient bit flips in GPU memory to measure rendering corruption from hardware errors [S1, unofficial]. It differs from neural network weight perturbation because 3DGS primitives are spatially localized and redundant, whereas network weights are shared globally; this method quantifies whether such redundancy provides robustness or concentrates risk into rare catastrophic failures [S1, unofficial].
+ 
+ ## How it works
+@@ -12,11 +12,11 @@
+ 
+ **Data Structures**
+-A trained 3DGS model consists of $N$ primitives. Primitive $i$ stores six fields in memory [S1, unofficial]:
++A trained 3DGS model consists of $N$ primitives [S1, unofficial]. Primitive $i$ stores six fields in memory [S1, unofficial]:
+ 1.  Mean $\mu_i \in \mathbb{R}^3$
+-2.  Logarithmic scale $s_i \in \mathbb{R}^3$ (renderer applies $\exp$)
+-3.  Quaternion $q_i \in \mathbb{R}^4$ (normalized at render time)
+-4.  Opacity logit $o_i \in \mathbb{R}$ (renderer applies logistic $\sigma$)
++2.  Logarithmic scale $s_i \in \mathbb{R}^3$ (renderer applies $\exp$) [S1, unofficial]
++3.  Quaternion $q_i \in \mathbb{R}^4$ (normalized at render time) [S1, unofficial]
++4.  Opacity logit $o_i \in \mathbb{R}$ (renderer applies logistic $\sigma$) [S1, unofficial]
+ 5.  DC color term $c_{0i} \in \mathbb{R}^3$
+-6.  Higher-order spherical harmonic coefficients $c_{Ni} \in \mathbb{R}^{((\ell+1)^2-1) \times 3}$
++6.  Higher-order spherical harmonic coefficients $c_{Ni} \in \mathbb{R}^{((\ell+1)^2-1) \times 3}$ [S1, unofficial]
+ 
+ **IEEE-754 Bit Layouts**
+@@ -27,96 +27,64 @@
+ 
+ **Algorithm Steps**
+-1.  **Reinterpret:** Cast the stored floating-point value at the fault site to an unsigned integer of the matching width.
+-2.  **Flip:** XOR the integer with a mask having a single bit set at the target position.
+-3.  **Restore:** Reinterpret the modified integer back to the original floating-point format.
+-4.  **Render:** Render the $K$ held-out views using the corrupted parameter.
+-5.  **Measure:** Compute metrics on the GPU.
+-6.  **Cleanup:** Restore the original value to the working copy.
++1.  **Reinterpret:** Cast the stored floating-point value at the fault site to an unsigned integer of the matching width [S1, unofficial].
++2.  **Flip:** XOR the integer with a mask having a single bit set at the target position [S1, unofficial].
++3.  **Restore:** Reinterpret the modified integer back to the original floating-point format [S1, unofficial].
++4.  **Render:** Render the $K$ held-out views using the corrupted parameter [S1, unofficial].
++5.  **Measure:** Compute metrics on the GPU [S1, unofficial].
++6.  **Cleanup:** Restore the original value to the working copy [S1, unofficial].
+ 
+ **Pseudocode**
+ ```python
++import struct
+ import numpy as np
+-import struct
+ 
+-def flip_bit_fp32(value: float, bit_index: int) -> float:
+-    """Flip a single bit in an fp32 value.
+-    
+-    Args:
+-        value: The original floating-point value.
+-        bit_index: The bit position to flip (0-31).
++def flip_bit(value: float, bit_index: int, width_bits: int) -> float:
++    # Reinterpret float as unsigned integer of matching width
++    if width_bits == 32:
++        bits = struct.unpack('I', struct.pack('f', value))[0]
++    elif width_bits == 16:
++        bits = struct.unpack('H', struct.pack('e', value))[0]
++    else:
++        raise ValueError("Unsupported width")
+         
+-    Returns:
+-        The value with the specified bit flipped.
+-    """
+-    # Reinterpret float as unsigned 32-bit integer
+-    # struct.unpack returns a tuple, so we take the first element
+-    bits = struct.unpack('I', struct.pack('f', value))[0]
+-    
+     # Flip the bit using XOR
+     bits ^= (1 << bit_index)
+     
+     # Reinterpret back to float
+-    return struct.unpack('f', struct.pack('I', bits))[0]
++    if width_bits == 32:
++        return struct.unpack('f', struct.pack('I', bits))[0]
++    else:
++        return struct.unpack('e', struct.pack('H', bits))[0]
+ 
+-def inject_seu_and_render(model, fault_site, cameras, renderer):
+-    """Inject a single-bit upset and render metrics.
++def inject_seu(model_params, fault_site, cameras, renderer, clean_images):
++    field_name, prim_idx, comp_idx, bit_idx = fault_site
++    width_bits = 32 if model_params.dtype == 'fp32' else 16
+     
+-    Args:
+-        model: Object containing primitive parameters in GPU memory.
+-        fault_site: Tuple (field_name, primitive_index, component_index, bit_index).
+-        cameras: List of K camera poses.
+-        renderer: Function that renders primitives to images given cameras.
+-        
+-    Returns:
+-        Dictionary of metrics.
+-    """
+-    field_name, prim_idx, comp_idx, bit_idx = fault_site
+-    
+-    # 1. Get clean value from model
+-    # [G] Assuming model.params[field_name][prim_idx][comp_idx] accesses the value
+-    clean_value = model.params[field_name][prim_idx][comp_idx]
++    # 1. Get clean value
++    clean_value = model_params[field_name][prim_idx][comp_idx]
+     
+     # 2. Inject fault
+-    corrupted_value = flip_bit_fp32(clean_value, bit_idx)
++    corrupted_value = flip_bit(clean_value, bit_idx, width_bits)
+     
+     # 3. Write to working copy
+-    model.params[field_name][prim_idx][comp_idx] = corrupted_value
++    model_params[field_name][prim_idx][comp_idx] = corrupted_value
+     
+-    # 4. Render K views
+-    # [G] Assuming renderer returns a list of images or a batched tensor
+-    corrupted_images = renderer(model.params, cameras)
++    # 4. Render K views in a single batched call
++    corrupted_images = renderer(model_params, cameras)
+     
+-    # 5. Render clean views (or use cached clean render)
+-    # [G] Assuming clean_images are pre-computed or re-rendered
+-    clean_images = renderer(model.params, cameras) 
+-    # Note: In practice, clean_images should be from the uncorrupted model state.
+-    # The pseudocode above re-reads from model.params which is now corrupted.
+-    # Correct approach: Store clean_value, render clean once, then swap.
++    # 5. Compute metrics on GPU
++    diff = corrupted_images - clean_images
++    peak_error = np.max(np.abs(diff))
++    footprint = np.mean(np.abs(diff) > (1.0 / 255.0))
++    psnr = 10 * np.log10(1.0 / np.mean(diff**2))
++    is_non_finite = np.any(np.isnan(corrupted_images)) or np.any(np.isinf(corrupted_images))
+     
+-    # 6. Compute metrics
+-    metrics = compute_metrics(corrupted_images, clean_images)
+-    
+-    # 7. Restore value
+-    model.params[field_name][prim_idx][comp_idx] = clean_value
+-    
+-    return metrics
+-
+-def compute_metrics(corrupted_imgs, clean_imgs):
+-    """Compute corruption metrics."""
+-    # [G] Standard image processing functions assumed available
+-    peak_error = np.max(np.abs(corrupted_imgs - clean_imgs))
+-    psnr = 10 * np.log10(1.0 / np.mean((corrupted_imgs - clean_imgs)**2))
+-    
+-    # Corruption footprint: fraction of pixels changing > 1/255
+-    diff = np.abs(corrupted_imgs - clean_imgs)
+-    footprint = np.mean(diff > (1.0/255.0))
+-    
+-    # Non-finite check
+-    is_non_finite = np.any(np.isnan(corrupted_imgs)) or np.any(np.isinf(corrupted_imgs))
++    # 6. Restore value
++    model_params[field_name][prim_idx][comp_idx] = clean_value
+     
+     return {
+         'peak_error': peak_error,
++        'footprint': footprint,
+         'psnr': psnr,
+-        'footprint': footprint,
+         'non_finite': is_non_finite
+     }
+@@ -136,5 +104,5 @@
+ 
+ ### Perturbation Bound Analysis
+-Analyzes the mathematical impact of bit flips on specific fields. For the scale field, the relative change is $|\Delta s|/s = |\Delta \theta|$, meaning a mantissa flip changes scale by a fixed relative amount $2^{b-p}$ independent of the exponent $e$ [S1, unofficial]. For a normal fp32 value $\theta = (-1)^\epsilon 2^e (1+m)$, flipping mantissa bit $b$ changes the value by $|\Delta \theta| = 2^{e+b-p}$ [S1, unofficial]. Flipping the sign bit gives $\Delta \theta = -2\theta$, and flipping exponent bit $j$ multiplies magnitude by $2^{\pm 2^j}$ [S1, unofficial].
++Analyzes the mathematical impact of bit flips on specific fields [S1, unofficial]. For the scale field, the relative change is $|\Delta s|/s = |\Delta \theta|$, meaning a mantissa flip changes scale by a fixed relative amount $2^{b-p}$ independent of the exponent $e$ [S1, unofficial]. For a normal fp32 value $\theta = (-1)^\epsilon 2^e (1+m)$, flipping mantissa bit $b$ changes the value by $|\Delta \theta| = 2^{e+b-p}$ [S1, unofficial]. Flipping the sign bit gives $\Delta \theta = -2\theta$, and flipping exponent bit $j$ multiplies magnitude by $2^{\pm 2^j}$ [S1, unofficial].
+ 
+ ## Operating characteristics
+@@ -152,6 +120,5 @@
+ 
+ **When to Use**
+-*   Use for evaluating robustness of 3DGS deployments against hardware errors.
+-*   Do not use for optimizing model accuracy; use for safety-critical validation [S1, unofficial].
++*   Use for evaluating robustness of 3DGS deployments against hardware errors [S1, unofficial].
+ 
+ ## Background

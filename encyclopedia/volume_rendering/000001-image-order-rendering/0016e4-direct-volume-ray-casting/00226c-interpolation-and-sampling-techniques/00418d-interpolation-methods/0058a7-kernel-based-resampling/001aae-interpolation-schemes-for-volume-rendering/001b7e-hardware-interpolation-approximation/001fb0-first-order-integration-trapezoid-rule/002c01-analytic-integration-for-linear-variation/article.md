@@ -1,0 +1,59 @@
+# Analytic Integration for Linear Variation
+
+Also called: Williams and Max method
+
+## Overview
+Analytic Integration for Linear Variation computes the exact volume rendering integral for optical properties that vary linearly along a ray segment [S1, book]. It solves the approximation errors of numerical quadrature (such as the Trapezoid Rule) when the scalar field is interpolated linearly (e.g., from tetrahedron vertices) and transfer functions are linear [S1, book]. Unlike [First Order Integration (Trapezoid Rule)](2077-first-order-integration-trapezoid-rule.md), which assumes constant or linearly averaged values, this method derives a closed-form solution for the exponential integral of a linear function, providing higher accuracy for linearly interpolated data [S1, book].
+
+## How it works
+**Inputs:**
+- Ray segment defined by start point $\mathbf{r}_0$, direction $\mathbf{d}$, and length $L$.
+- Scalar field values $s_i$ at the vertices of the primitive (e.g., tetrahedron) intersected by the ray.
+- Linear transfer functions mapping scalar $s$ to extinction coefficient $\tau(s) = a_\tau s + b_\tau$ and color $c(s) = a_c s + b_c$.
+
+**Outputs:**
+- Accumulated color $C$ and opacity $\alpha$ for the segment.
+
+**Data Structures:**
+- No complex data structures required beyond standard scalar values and ray parameters. The method relies on precomputed coefficients or direct evaluation of the analytic formula.
+
+**Steps:**
+1. **Parameterize the Ray:** Define the position along the ray as $\mathbf{r}(t) = \mathbf{r}_0 + t\mathbf{d}$ for $t \in [0, L]$.
+2. **Evaluate Scalar Field:** Determine the scalar value $s(t)$ at any point $t$. If the scalar field is linearly interpolated from tetrahedron vertices, $s(t)$ is a linear function of $t$: $s(t) = s_0 + t \cdot \Delta s$, where $s_0$ is the scalar at $\mathbf{r}_0$ and $\Delta s$ is the rate of change along the ray.
+3. **Define Optical Properties:** Substitute $s(t)$ into the linear transfer functions to get extinction $\tau(t)$ and color $c(t)$ as linear functions of $t$:
+   $$ \tau(t) = \tau_0 + t \cdot \Delta \tau $$
+   $$ c(t) = c_0 + t \cdot \Delta c $$
+   where $\tau_0 = \tau(s_0)$, $\Delta \tau = \Delta s \cdot a_\tau$, etc.
+4. **Compute Analytic Integral:** Evaluate the volume rendering integral for the segment. The transmittance $T(L)$ and accumulated color $C(L)$ are given by closed-form expressions involving exponentials of $\tau(t)$. For a linear extinction $\tau(t) = \tau_0 + t \Delta \tau$, the transmittance is:
+   $$ T(L) = \exp\left(-\int_0^L \tau(t) dt\right) = \exp\left(-\tau_0 L - \frac{1}{2}\Delta \tau L^2\right) $$
+   The accumulated color requires integrating $c(t) T(t)$. If $\Delta \tau \neq 0$:
+   $$ C(L) = \int_0^L c(t) \exp\left(-\int_0^t \tau(u) du\right) dt $$
+   This integral has a known analytic solution involving terms like $\frac{e^{-\tau_0 t - \frac{1}{2}\Delta \tau t^2}}{\Delta \tau}$ and error functions or specific polynomial-exponential combinations depending on the exact formulation [S1, book].
+5. **Handle Piecewise Linear Transfer Functions:** If the transfer function is piecewise linear, divide the tetrahedron into sub-polyhedra where the transfer function is linear, and sum the contributions [S1, book].
+
+**Parameters:**
+- None specific to the method itself; depends on the transfer function coefficients.
+
+**Edge Cases:**
+- **Zero Extinction Change:** If $\Delta \tau = 0$, the formula simplifies to the constant extinction case.
+- **Numerical Stability:** The original formulation by Williams and Max was complex and prone to numerical instability. Improved formulations [59] address stability, particularly for large extinction values or small segment lengths [S1, book].
+- **Visibility Sorting:** When applied to tetrahedral meshes, a visibility sort is required to process primitives back-to-front. Cycles in tetrahedron overlap can make sorting impossible [S1, book].
+
+## Subtopics
+
+### [Analytic Integration for Trilinear Variation](18308-analytic-integration-for-trilinear-variation.md)
+Computes the exact integral for trilinearly varying scalar fields, accounting for cubic polynomial structures. Choose this when using trilinear interpolation on voxel grids instead of tetrahedral linear interpolation.
+
+## Operating characteristics
+- **Time Complexity:** $O(1)$ per segment, but involves expensive exponential and potentially error function evaluations. More complex than the Trapezoid Rule.
+- **Memory Complexity:** $O(1)$ if evaluated directly. Moreland and Angel [43] used GPU precomputed texture tables to accelerate evaluation, trading memory for speed [S1, book].
+- **Strengths:** Exact integration for linearly varying optical properties; reduces aliasing and approximation errors compared to numerical quadrature.
+- **Limitations:** Computationally expensive due to transcendental functions; visibility sorting for tetrahedral meshes can be a bottleneck or impossible due to cycles [S1, book].
+- **When to Use:** High-quality rendering with tetrahedral data and linear transfer functions where accuracy is critical.
+- **When Not to Use:** Real-time applications with limited GPU power, or when data is not linearly interpolated (e.g., trilinear voxel data).
+
+## Background
+First presented by Williams and Max [58], this method was improved for numerical stability in [59]. Moreland and Angel [43] implemented it on the GPU using precomputed texture tables [S1, book]. It is a foundational technique for volume rendering with tetrahedral meshes and linear transfer functions.
+
+## Sources
+[S1] Local and Global Illumination in the Volume Rendering Integral, https://avishek.net/assets/papers/nerfs/local-and-global-illumination-rendering-integral.pdf, fetched 2026-10-27 (book)

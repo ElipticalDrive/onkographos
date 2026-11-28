@@ -1,0 +1,363 @@
+# UltraGauss: Ultrafast Gaussian Reconstruction of 3D Ultrasound Volumes
+
+Mark C. Eid 1,2, Ana I.L. Namburete2
+
+Joao F. Henriques ˜ 1
+
+1Visual Geometry Group, University of Oxford
+
+2Oxford Machine Learning in NeuroImaging Lab, University of Oxford
+
+[markeid@robots.ox.ac.uk](mailto:markeid@robots.ox.ac.uk)
+
+## Abstract
+
+
+
+Ultrasound imaging is widely used due to its safety, affordability, and real-time capabilities, but its 2D interpretation is highly operator-dependent, leading to variability and increased cognitive demand. 2D-to-3D reconstruction mitigates these challenges by providing standardized volumetric views, yet existing methods are often computationally expensive, memory-intensive, or incompatible with ultrasound physics. We introduce UltraGauss: the first ultrasound-specific Gaussian Splatting framework, extending view synthesis techniques to ultrasound wave propagation. Unlike conventional perspective-based splatting, UltraGauss models probe-plane intersections in 3D, aligning with acoustic image formation. We derive an efficient rasterization boundary formulation for GPU parallelization and introduce a numerically stable covariance parametrization, improving computational efficiency and reconstruction accuracy. On real clinical ultrasound data, UltraGauss achieves state-of-the-art reconstructions in 5 minutes, and reaching 0.99 SSIM within 20 minutes on a single GPU. A survey of expert clinicians confirms Ultra-Gauss' reconstructions are the most realistic among competing methods. Our CUDA implementation will be released upon publication.
+
+## 1. Introduction
+
+Ultrasound (US) is one of the most widely used medical imaging modalities due to its real-time capabilities, portability, and safety (thanks to its non-ionizing nature). However, clinical interpretation relies on sonographers mentally reconstructing 3D anatomies from 2D cross-sectional views – a process that demands significant expertise [2, 15]. This cognitive process, while effective for experienced sonographers, introduces observer-dependent variability and subjectivity, thus limiting reproducibility and standardization in clinical assessments. 3D US probes would be ideal, how-
+
+Figure 1. Input images of the fetal brain are acquired (blue Input Video frames) and their poses estimated (blue probes/planes). UltraGauss then uses these to form a total 3D reconstruction within 5 minutes. A few of the 3D gaussians are shown as grey ellipses. Cross-sectional views at previously unseen poses can then be sampled from the reconstructed 3D volume to form a complete cinesweep or be viewed individually. These can be seen in the green Output Video cinefilm frames.
+
+ever they are around 10× more expensive than conventional 2D US probes, and require additional operator training, so their clinical use is extremely limited [11]. Automated 2Dto-3D ultrasound reconstruction is therefore essential to enhance spatial understanding, quantitative volumetric analysis, and improve diagnostic consistency.
+
+
+
+Figure 2. Reconstruction results for 5 different models (ours in bold) applied on 3 different training datasets, and shown at 3 time points over the duration of reconstruction. Higher SSIM is better. Errors bars show ±1 standard deviation amongst fetuses
+
+Existing 2D-to-3D reconstruction methods suffer from computational inefficiency, memory constraints, or incompatibility with ultrasound physics. Traditional techniques rely on segmentation, registration, and interpolation [21], but struggle with irregular sampling and require extensive manual intervention. More recent deep learning-based methods, such as ImplicitVol [27] and RapidVol [7], leverage implicit, NeRF-like neural representations for higher fidelity reconstructions. However, fully implicit methods are computationally expensive, while explicit voxel-based methods suffer from memory overhead and resolution constraints. Moreover, state-of-the-art methods often assume light-based ray accumulation, which is a fundamental mismatch with ultrasound physics, where wave propagation dictates image formation [1, 16].
+
+In this work we introduce UltraGauss: a novel volumetric ultrasound reconstruction framework designed to align with ultrasound wave physics rather than optical raybased rendering. Unlike conventional Gaussian Splatting (GS), which projects 3D Gaussians onto a 2D camera image plane for view-dependent rendering [10], UltraGauss leverages anisotropic Gaussians to efficiently model ultrasoundspecific wave propagation [24]. This fundamental distinction necessitates an in-plane approach, where GS is optimized to represent reconstructed wave reflections, as the ultrasound signal traverses and interacts with heterogeneous tissues. This enables faster and more memory-efficient reconstruction while preserving high-fidelity volumetric representations.
+
+We demonstrate the versatility of UltraGauss in multiple scenarios, achieving high-fidelity 3D reconstructions from axial slices, and delivering consistent structural accuracy across orthogonal axial, coronal, and sagittal views. Additionally, we benchmark it against prior neural reconstruction methods for ultrasound, validate its robustness using noisy and partially sampled slices, and assess its real-world applicability by reconstructing volumes from real 2D cinesweep videos (Fig. 1\). Our method achieves an SSIM of 0.91 on unseen video frames, with expert clinicians (mean = 18 years of medical experience) confirming its reconstructions are visually indistinguishable from the ground truth (that is, native 3D acquisitions). UltraGauss achieves realtime rendering speeds, and can obtain a SOTA reconstruction in 5 minutes on a single GPU, making it highly suitable for clinical and research applications.
+
+In summary, our technical contributions are:
+
+- An ultrasound-specific 2D-to-3D reconstruction framework, adapting and optimising anisotropic gaussians for wave-based ultrasound physics rather than light-based projection techniques.
+- An efficient triangular covariance parametrization, which is more numerically stable than that used in prior work, and which facilitates efficient inversion and factorization, operations that are frequently used during reconstruction.
+- A load-balancing scheme to optimally distribute computation across parallel threads, while simultaneously rejecting gaussians that do not contribute to rendering.
+- A comprehensive validation of clinical ultrasound datasets, demonstrating significant speed improvements over state-of-the-art methods while maintaining highfidelity volumetric reconstructions.
+- A qualitative survey with expert clinicians, which shows that our reconstructions are deemed more realistic in a clinically-relevant setting.
+
+### 2. Related Work
+
+2D-to-3D reconstruction in medical imaging: 2D-to-3D reconstruction is a fundamental problem in medical imaging, enabling volumetric representation from crosssectional slices acquired by X-ray, ultrasound, CT, or conventional cameras. Traditional approaches include segmentation-based methods, where 2D slices are first segmented (e.g., via pixel thresholding), spatially registered using B-splines, and then interpolated into a 3D volume [21]. However, these methods require extensive manual intervention, struggle with irregular sampling, and scale poorly to high-resolution datasets.
+
+More recently, deep learning approaches have transformed 3D reconstruction by leveraging CNN-based segmentation and implicit neural representations [3]. Specifically, volumetric representations have evolved from regular voxel grids and octrees to more memory-efficient point clouds and implicit neural fields [5, 31]. Classical methods such as Structure-from-Motion (e.g., COLMAP [22]) reconstruct 3D surfaces by triangulating depth from multiple geometrically distinct views. Although ultrasound can be collected from different angles, it is often impractical to acquire the broad range of precisely registered viewpoints required for accurate SfM-based 3D reconstruction. Furthermore, SfM assumes photometric consistency, which does not hold for ultrasound due to wave-based interactions, such as refractions and signal attenuation.
+
+NeRFs and Gaussian Splatting: NeRFs [12] introduced a paradigm shift in 3D reconstruction by encoding volumetric scenes within a neural network. In brief, NeRFs represent 3D space as a learnable function FΘ(x, y, z, θ, ϕ) that maps spatial coordinates and viewing directions to color and density values. While NeRFs enable high-fidelity novel view synthesis, they rely on ray marching and volume accumulation, making them computationally intensive and unsuited for ultrasound [1].
+
+A breakthrough came with Gaussian Splatting [10], which replaces implicit NeRF-based volume rendering with explicit 3D Gaussian representations. Instead of marching rays through a neural field, GS represents a scene as a collection of 3D Gaussians, which are rasterized ("splatted") onto the 2D image plane, accumulating color and opacity in a differentiable manner. This approach has led to medical imaging applications in endoscopy, where it enables dynamic 3D scene reconstruction from monocular endoscopic videos using depth-guided optimization [8], and CT-based reconstruction, where it facilitates sparse-view tomographic reconstruction by improving volume estimation through learned 3D Gaussian representations [32]. However, these methods remain projection-based, assuming light transport. Ultrasound-specific challenges: Unlike optical imaging, ultrasound does not accumulate intensity along a ray but instead propagates as (mechanical) sound waves that interact with biological tissues [1, 16]. This makes NeRF-style ray tracing and projection-based GS fundamentally unsuitable for ultrasound reconstruction. Traditional explicit voxel grids are memory-intensive and resolution-limited [23], while implicit representations such as ImplicitVol [27] and RapidVol [7] improve scalability but remain computationally expensive.
+
+To the best of our knowledge, no ultrasound-adapted GS method exists for 2D-to-3D reconstruction. Our proposed approach, UltraGauss, extends GS to volumetric ultrasound by replacing projection-based rendering with a model that aligns with ultrasound wave propagation. By leveraging anisotropic Gaussians, UltraGauss enables faster, memoryefficient, and clinically relevant 3D ultrasound reconstruction, without requiring external probe tracking systems.
+
+### 3. Background
+
+For cameras in the visible spectrum, one can render the color cRGB for a given pixel by evaluating a volumetric
+
+
+
+Figure 3. Illustration of the occlusion mechanism in gaussian splatting, for images in the visual spectrum. The rendering equation (Eq. 1\) accumulates transmittance T over a pixel's ray, and this is used to model occluding gaussians (in this example, the blue gaussian occludes the yellow one).
+
+model along the corresponding ray, sampling the model's opacities αˆ(x) and colors cˆ(x) at m ordered sampled points xj on the ray:
+
+
+$$c_{\text{RGB}} = \sum_{j=1}^m T_j \hat{\alpha}(x_j) \hat{c}(x_j), \quad T_j = \prod_{k=1}^{j-1} (1 - \hat{\alpha}(x_k)), \quad (1)$$
+
+where Tj denotes the accumulated transmittance of the material. The main purpose of the accumulated transmittance is to model occlusions (see Fig. 3\). In the case of gaussian splatting [10], the volumetric model is a weighted sum of n gaussian functions with means µi , covariances Σi , colors ci , and coefficients (maximum opacities) αi . In contrast to NeRFs [12], the sampled points xj can now be reduced to the projections of close gaussians on to the ray, which can be made more efficient. The opacity of the ith gaussian at a 2D (image-space) point x is then calculated as
+
+
+$$\hat{\alpha}_i(x) = \alpha_i \exp \left( -\frac{1}{2} \underbrace{\left( x - \mu_i^{2D} \right)^T \left( \Sigma_i^{2D} \right)^{-1} \left( x - \mu_i^{2D} \right)}_{2D \text{ squared Mahalanobis distance}} \right), \quad (2)$$
+
+with the mean µ 2D i and covariance Σ 2D i projected to the 2D image. To achieve this, the 3D parameters (µi , Σi) are translated and rotated to the camera's reference frame by a view transformation (extrinsic camera matrix) W, and projected to 2D with the affine approximation of a projective transformation (using intrinsic camera matrix K) [34]. We can express this formally with operators to convert to and from homogenous coordinates, ℏ(u) = [u1, . . . , uD, 1]T and ℏ −1 (u) = [u1/uD, . . . , uD−1/uD] respectively:
+
+$$\mu_i^{2D} = \text{proj}(\mu_i) = \hbar^{-1} (KW\hbar(\mu_i)) \quad (3)$$
+
+$$\Sigma_i^{\text{2D}} = J_i W \Sigma_i W^T J_i^T, \quad J_i = \frac{\partial \text{proj}(\mu_i)}{\partial \mu_i} \quad (4)$$
+
+
+
+Figure 4. Illustration of the proposed gaussian rendering mechanism for ultrasound (Sec. 4.1\). Instead of raycasting, the image formation model is based on the intersection of the gaussians with the probe plane (which maps 1:1 to the captured ultrasound pixel grid). This means that occlusions do not play as large a role as for the visual spectrum (Fig. 5\), and so are not modeled.
+
+We now opt to include an additional uniform component (background) with color cBG and coefficient αBG, which improves numerical stability by avoiding a division by zero. We can then combine the opacities and colors of all components to obtain the rendered opacity αˆ (x) and color cˆ(x) for Eq. 1:
+
+$$\hat{\alpha}(x) = \sum_i^n \hat{\alpha}_i(x) + \alpha_{\text{BG}} \quad (5)$$
+
+$$\hat{c}(x) = \frac{1}{\hat{\alpha}(x)} \left( \sum_i^n \hat{\alpha}_i(x) c_i + \alpha_{\text{BG}} c_{\text{BG}} \right) \quad (6)$$
+
+In this summary we leave out spherical harmonics, which support directionally-dependent colors [17, 29].
+
+#### 3.1. Optimization
+
+While Eqs. 1-6 can be used to render a gaussian model, in practice several optimizations are necessary to avoid the costly nested iterations that they imply. Namely, the gaussians are assigned to tiles and sorted by depth, and distributed across GPU threads for rasterizing into each pixel [10]. Depth sorting and cut-off distances for the gaussians in the image plane make the rendering process only approximate [9]. Finally, several heuristics are necessary to remove or resample gaussians in areas that are too sparse or too dense [19, 30].
+
+### 4. Method
+
+#### 4.1. Image formation model – ultrasound vs. visual spectrum
+
+While fast gaussian splatting is well-developed for RGB image cameras, there are important differences in the image formation model of ultrasound data that require rethinking many of the design choices. The main reason is that ultrasound probes use reflected ultrasound waves to measure the response of materials at a dense range of depths from the probe (Fig. 4\). Image cameras, in contrast, measure reflected light that typically bounces off solid objects, and thus are more affected by occlusions and most often measure surfaces (Fig. 3\).
+
+This means that the accumulated transmittance Tj in Eq. 1 is incorrect, since it will treat opaque volumes as occlusions (see T(x) subplot in Fig. 3\). Instead, the main rendering mechanism for ultrasound images must be to detect intersections with the probe plane (Fig. 4\), not projections.
+
+Formally, we can have a simpler rendering equation for ultrasound images, by reusing the definition of cˆ(x) from Eqs. 5-6 to combine the gaussian and background components at a 2D point (pixel) x:
+
+| $cU_{\text{trasound}}(x) = \hat{c}(x)$ | (7) |
+|----------------------------------------|-----|
+|----------------------------------------|-----|
+
+A large conceptual difference from rendering the visual spectrum is that, instead of projecting the gaussian parameters to 2D, we need them to intersect the probe plane in 3D. The opacity αˆi (x) of the ith gaussian at a 2D point x (necessary for Eqs. 5-6\) is then evaluated as a Mahalanobis distance in 3D space, by lifting the 2D image point to 3D in the coordinate-frame of the probe:
+
+
+$$\hat{\alpha}_i(x) = \alpha_i \exp \left( -\frac{1}{2} \underbrace{\left( x_{|0} - \mu_i^{3D} \right)^T \left( \Sigma_i^{3D} \right)^{-1} \left( x_{|0} - \mu_i^{3D} \right)}_{3D \text{ squared Mahalanobis distance}} \right), \quad (8)$$
+
+where x|0 = [x1, x2, 0]T and the gaussian's parameters are moved to the probe's coordinate-frame using its inverse transform matrix W:
+
+$$\mu_i^{\text{3D}} = \hbar^{-1} (W\hbar (\mu_i)), \quad \Sigma_i^{\text{3D}} = W\Sigma_i W^T. \quad (9)$$
+
+Contrast Eq. 2 to Eq. 8: despite the similarities, the former (for RGB images) evaluates a 2D gaussian after projecting it to image-space, while the later evaluates a 3D gaussian by doing the reverse operation (for ultrasound images). Using this model, we can now design a fast splatting strategy to avoid the computational expense of simply evaluating Eqs. 5-6 and Eq. 8 (which would result in nested iterations over all pixels and all gaussians).
+
+#### 4.2. Triangular covariance parameterization for efficient inversion and gaussian sampling
+
+One challenge in optimizing representations with covariance matrices Σ (omitting the subscript i for conciseness) is that they must remain positive-definite (PD, all eigenvalues strictly positive), while gradient-based optimization methods typically only support unconstrained optimization. Kerbl et al. [10] achieved this by reparameterizing the covariances as a product of a scaling vector s and a quaternion-derived rotation matrix R, as Σ = R diag s 2 RT . However, empirically we found that, for our setting, the normalization of the quaternion (which must be unit-norm to represent a 3D rotation) resulted in numerical instabilities. Instead, we can ensure a matrix is PD by parameterizing it as a product of a matrix M with itself (which is positive-semidefinite) and adding a small multiple of the identity I to ensure positive eigenvalues (with β > 0):
+
+| $\Sigma'^{-1} = MM^T + \beta I,$ | $M =$ | $\begin{bmatrix} M_{11} & M_{12} & M_{13} \\ M_{12} & M_{23} & M_{23} \\ M_{13} & M_{23} & M_{33} \end{bmatrix}$ | (10) |
+|----------------------------------|-------|------------------------------------------------------------------------------------------------------------------|------|
+|                             |       |                                                                                                                  |      |
+
+Note that M itself is symmetric, to achieve the minimal number of degrees of freedom of a 3D covariance (6). No normalization is needed. A remaining challenge is that, in addition to requiring the inverse covariance Σ −1 frequently to render pixels (Eq. 8\), we also occasionally (e.g. every 100 iterations) must perform heuristic resampling of some gaussians. This operation requires inverting Σ −1 explicitly to obtain the original covariance Σ, as well as factorizing it to draw a sample from the multivariate gaussian (Sec. 3.1\). Both operations can be numerically unstable for ill-conditioned Σ −1 . Therefore, we propose instead a more efficient parameterization, as a product of a lower-triangular matrix L:
+
+
+$$\Sigma^{-1} = LL^T, \quad L = \begin{bmatrix} L_{11}^2 + \beta & 0 & 0 \\ L_{12} & L_{22}^2 + \beta & 0 \\ L_{13} & L_{12} & L_{33}^2 + \beta \end{bmatrix}. \quad (11)$$
+
+Eq. 11 guarantees that Σ −1 is PD, since a triangular matrix's eigenvalues are its diagonal elements, and it can be seen that these are strictly positive (with β > 0). Moreover, a lowertriangular matrix is extremely efficient to invert via forward substitution, which is implemented in most numerical packages. This allows easily computing Σ = L −1 T L −1 . Finally, another advantage is that this factorization allows sampling from a gaussian (for the resampling heuristic, Sec. 3.1\), by simply projecting a standard normal sample z with the (efficiently) inverted L:
+
+$$y = \mu + L^{-T}z, \quad z \sim \mathcal{N}(0, 1).$$
+
+Even though Eq. 11 supports efficient calculation of the opacity αˆi (x) (Eq. 8\) and resampling heuristics, for most pixel-gaussian pairs the opacity will be close to 0 and can be ignored. The next section will focus on this aspect.
+
+#### 4.3. Rasterization boundaries
+
+To avoid evaluating Eq. 8 when it is known to yield opacities close to 0, we compute it only inside a bounding box for each gaussian. The bounding box is defined around the ellipsoid that encompasses p% of the gaussian's probability density. This ellipsoid can be expressed as a function of the 3D squared Mahalanobis distance from Eq. 8, and
+
+
+
+Figure 5. Side view of the gaussian bounding box intersection and projection (Sec. 4.3\). Boxes that do not intersect with the probe plane are rejected early (Sec. 4.4\). Those that intersect it are rasterized only within the intersecting 2D bounding box. In this example, pixels that are not iterated over are marked with crosses.
+
+the chi-squared distribution value for 3 degrees of freedom (omitting the subscript i for clarity):
+
+
+$$(\chi_{|0} - \mu^{3\text{D}})^T (\Sigma^{3\text{D}})^{-1} (x_{|0} - \mu^{3\text{D}}) \leq \chi_{3,1-p}^2 \quad (12)$$
+
+which evaluates to χ 2 3,1−p = 7.815 for p = 95% (note that it is a bound on a squared distance). Now to calculate the bounding box of this ellipsoid, its minimum and maximum coordinates are the 3D vectors b min and b max:
+
+
+$$b^{\min/\max} = \mu^{3D} \pm \sqrt{\lambda v}, \quad \lambda = \frac{\lambda_{3,1-p}^2}{\det(\Sigma^{3D})}, \quad (13)$$
+
+using Σ 3D jk to index the (j, k)th element of a matrix. Eq. 13 can be obtained by writing Eq. 12 as a function of each element of δ = x|0 − µ 3D. Fig. 5 illustrates these bounds.
+
+### 4.4. Load balancing across rendering threads
+
+Note that the bounding box (Eq. 13\) can be partitioned into 2 components:
+
+- 1. The 2D bounding box in the probe plane (first two elements of b min / max, i.e. b min / max 1:2 ).
+- 2. The 1D segment orthogonal to the probe plane (the third element, b min / max 3 ). This suggests a two-phase process for efficient rendering:
+- 1. Reject any gaussians whose cut-off boundaries do not intersect with the probe plane: b min 3 > 0 or b max 3 < 0.
+- 2. For each accepted gaussian, only iterate over 2D pixels x inside the bounding box of the plane: b min 1 ≤ x1 ≤ b max 1 and b min 2 ≤ x2 ≤ b max 2 .
+
+This process is visualized in Fig. 5.
+
+This provides a natural mechanism for load balancing across parallel threads of computation. Phase 1 requires iterating through all the gaussians (but not the pixels), marking them as accepted or rejected based on the perpendicular projection, which can be equally partitioned between all the threads. A standard operation of buffer compaction [4] can then reduce this list of gaussians to only the accepted ones.
+
+Phase 2 then requires iterating through the compacted list of accepted gaussians, and rasterizing each one only onto the corresponding bounding box of the image buffer, by atomically adding to pixel accumulators for color cˆ(x) and opacity αˆ (x) (implementing Eqs. 5-6\). The compacted list in Phase 2 can be equally partitioned among the threads, to ensure optimal throughput.
+
+### 4.5. Optimization
+
+Like gaussian splatting for light-based images, we use backpropagation and stochastic gradient descent to optimize the gaussian parameters (µi , Σi , ci , αi) [10]. Unlike this prior work, we do not have access to a COLMAP-derived point cloud for initialization, which would only cover surfaces, not the interior of a full volume. Instead, we initialize the gaussians' means µi uniformly at random within the imaged volume boundaries, with ci = 0.5 and αi = 0.731. Lij in Eq. 11 are uniformly randomly initialized between 4, 5), corresponding to a variance between 0.0017 and 0.0043. We follow the original paper in all other training details, incorporating the same heuristics for sparsification and densification after some slight modification due to the lack of covariance "splatting"/projection in UltraGauss. We avoid repeating the exact methods here for brevity, and refer interested readers to [[10, 26] for more details. Noteworthy however is the starting number of gaussians. Due to the efficiency of our method and CUDA kernels, we are able to have up to 2 million gaussians (possibly even more) with still very respectable reconstruction times. As is to be expected, less gaussians leads to a slightly lower final accuracy, but results in a speed up. We thus try 3 different variants of our model in Sec. 5, having either {100×103 , 200×103 , 2×106} gaussians. We optimize (train) all reconstruction models on a single NVIDIA RTX A4000 GPU, with Adam optimizers and learning rates (lr) of 0.05 for all gaussian parameters, except for the means µi which have an exponential decay scheduler (as in [10, 29]) and a starting lr of 0.00016. Like Kerbl et al. [10] we use a sigmoid activation function to constrain αi to the range 0, 1). We implemented our method in PyTorch, with custom CUDA kernels for rasterization and its gradients. We will make our code available as open-source upon publication.
+
+#### 5. Experiments
+
+#### 5.1. Datasets
+
+Two clinical datasets were curated to validate UltraGauss in different ultrasound acquisition settings. Dataset A consists of volumetric ultrasound scans, allowing assessment of reconstruction fidelity across multiple orthogonal views. Dataset B comprises freehand ultrasound video sequences, evaluating reconstruction quality in the absence of full 3D coverage, mimicking real-world fetal monitoring scenarios.
+
+Dataset A: 3D Ultrasound Volumes This dataset includes twelve 3D fetal brain ultrasound volumes (160 × 160×160 voxels, 0.6×0.6×0.6 mm3 resolution), obtained from the INTERGROWTH-21st study. Acquisitions were performed between 14 and 26 gestational weeks: spanning a critical period of brain maturation [[13, 14], and the standard time for fetal anomaly screening [20]. During this stage, rapid developmental changes result in varying structural appearance and composition across images [14]. The scans were collected using a Philips HD9 curvilinear probe (2.5 MHz wave frequency) by multiple sonographers, which introduces variability in probe positioning and image appearance. Image dimensions varied across acquisitions, ranging from 117 × 126 × 126 to 271 × 343 × 337 voxels, with resolutions between 0.27 × 0.69 × 1.08 mm and 0.46 × 0.99 × 1.83 mm per voxel. To ensure consistency, all volumes were resampled to an isotropic resolution of 0.6×0.6×0.6 mm3 and resized to 160×160×160 voxels.
+
+Dataset B: 2D Freehand Video Sequences Three freehand 2D ultrasound videos of fetal brain acquisitions were collected at 19 and 20 weeks' gestational age at Leiden University Medical Center using a GE Voluson E10 ultrasound scanner. Each video consists of ∼100 frames, with each frame cropped and resized to 160 × 160 pixels, and resampled to a resolution of 0.6 × 0.6 mm2 .
+
+#### 5.2. Evaluation of Reconstruction Quality and Speed
+
+To investigate the maximum potential of UltraGauss, we first evaluate it in "ideal" conditions, namely when given 160 linearly spaced axial slices sampled from a 3D Volume in Dataset A. This means that theoretically the entire 160 × 160 × 160 voxel volume has been seen, so in theory perfect accuracy should be possible. When presented with a 3D US volume, whether acquired with a 3D US probe or reconstructed from a 2D probe, the standard way clinicians view it is by looking at a series of linearly spaced axial, coronal and sagittal cross-sections. We therefore evaluate our reconstruction in a similar manner, and sample 160 linearly spaced axial, coronal and sagittal views. As we have a native 3D US scan from Dataset A, we can also sample from that, giving us a ground truth to compare against. We then quantitively evaluate the quality of the reconstructed images using SSIM (↑) [25], PSNR (↑) and LPIPS (↓) [33]. As the end-goal is for near real-time reconstruction, training time t must be taken into account, and so we evaluate the quality of the reconstructions at t = 5 and t = 20 minutes as well as once convergence has reached (denoted with t = ∞). We repeat the above when only 50% of the volume is given, by firstly reconstructing on only 80 linearly spaced axial slices, and then with a random amount of rotation about the x axis and y axis (θ ∼ U(−5 ◦ , +5◦ )) added, mimicking the unsteady hand of the sonographer and the movement of the fetus as an ultrasound sweep is acquired in practice. We also benchmark all this against two SOTA ultrasound reconstruction models: RapidVol [7], a hybrid implicit-explicit model, and ImplicitVol [27], a fully implicit NeRF-like model.
+
+#### 5.3. Clinicians' Survey of Reconstruction Quality
+
+To evaluate the clinical realism and fidelity of Ultra-Gauss' reconstructions, we conducted a survey with expert sonographers, comparing natively acquired 3D ultrasound images with reconstructions from RapidVol, ImplicitVol, and UltraGauss. This study focused on 3 axial planes (mid-axial, transthalamic, transventricular) and one midcoronal plane, which are routinely assessed during the midgestation anomaly scan (20 weeks, ISUOG guidelines [20]). Survey data was de-identified, for patient confidentiality.
+
+
+
+Study design: Participants were presented with randomized image pairs and asked to select the most realistic scan, or indicate "no preference" if indistinguishable. To capture variations in expertise, respondents provided details on speciality training, years in practice, and confidence in fetal brain assessment.
+
+The survey evaluated five different reconstruction models (ImplicitVol, RapidVol, UltraGauss-100K, UltraGauss-300K, UltraGauss-2M), on four fetal brain scans, and at three training time points (t = {5, 20, ∞}). Each participant reviewed 10 randomized image pairs, with both question and image order shuffled to mitigate bias.
+
+Additionally, we assessed how UltraGauss' reconstructions compare to real ultrasound scans over training time. A separate survey presented participants with nine versions of a mid-coronal image generated at t = {0.5, 1, 2, 3, 4, 5, 10, 15, 20} minutes, alongside two identical ground-truth images. The input set consisted of 80 axial slices, covering only 50% of the full 3D volume and completely orthogonal to the generated image. Participants were asked to classify each image as either a real ultrasound scan or an AI reconstruction. The randomized inclusion of two identical ground-truth images served as a control to assess the inherent variability in sonographer judgment.
+
+
+
+Figure 6. Results to the 2nd part of the Clinicians' Survey, asking whether each of the presented images was a real US scan or an "AI Generated" (i.e. UltraGauss-generated) scan.
+
+Figure 7. Left: Ground Truth Mid-Coronal Scan, Centre: Ultra-Gauss @ t = 4 mins, Right: UltraGauss @ t = 15 mins
+
+#### 5.4. UltraGauss in an end-to-end clinical pipeline
+
+A key application of UltraGauss is enabling clinicians to capture a freehand video (cinesweep) with a standard sensorless 2D probe, and then reconstruct a full 3D volume. This enables retrospective visualization of poses missed or not explicitly captured during scanning. The acquired frames would first have their poses predicted using an ultrasound pose-estimation model (e.g. [6, 18, 28]), and then both the frames and predicted poses are fed into a suitable 3D reconstruction model. We attempt this end-toend pipeline, by using QAERTS [18] for pose estimation, and then UltraGauss for reconstruction. We also benchmark against RapidVol. Since ground-truth 3D scans of the fetus in the cinesweeps are unavailable, direct quantitative evaluation is not possible. Instead, we adopt a crossvalidation strategy, randomly partitioning the video into training (80%) and testing (20%) frames. After reconstruction, we retrieve frames at the predicted poses of the heldout test slices and compare them to the actual frames. Any observed error reflects both pose estimation and reconstruction inaccuracies. We test this pipeline on all three fetal cinesweeps in Dataset B.
+
+
+
+Figure 8. Summary of Survey Results. Actively choosing a model gave it 1 point, not choosing it -1, and choosing "no preference" 0 points. Each model's score was then divided by the total number of possible points to be gained, giving a percentage. Thus +100% means that all participants actively selected and preferred that model, -100% that all participants actively disliked this model (and selected the other one), and 0% that the model was neither liked nor disliked, as the participant selected "no preference".
+
+
+
+Figure 9. Test accuracy over the course of reconstruction/training for UltraGauss - 300K (ours) and RapidVol, reported on 3 ultrasound cinesweeps. Higher SSIM is better.
+
+#### 6. Results
+
+### 6.1. Quality and Speed Evaluation
+
+We extensively tested using 3 different test sets, each getting progressively harder and more life-like. The full results table can be found in Appendix A, however the table is nicely summarised in Fig. 2. One can clearly see that UltraGauss is more accurate than current SOTA regardless of the test set, and at all 3 timepoints. If near real-time
+
+Table 1. Quantitative results of reconstruction performance on cinesweep videos. The SSIM scores shown are the average across all the frames held-out for testing/used in training at t = ∞. Best scores are highlighted in bold. ↑ indicates higher is better.
+
+|              | Model      | Video 1 | Video 2 | Video 3 | Avg.  | Std.  |
+|--------------|------------|---------|---------|---------|-------|-------|
+| Test SSIM ↑  |            |         |         |         |       |       |
+|              | RapidVol   | 0.745   | 0.799   | 0.760   | 0.768 | 0.028 |
+|              | UltraGauss | 0.928   | 0.905   | 0.910   | 0.914 | 0.012 |
+| Train SSIM ↑ |            |         |         |         |       |       |
+|              | RapidVol   | 0.871   | 0.884   | 0.880   | 0.878 | 0.007 |
+|              | UltraGauss | 0.959   | 0.957   | 0.939   | 0.952 | 0.011 |
+
+reconstruction/training is desired, then UltraGauss greatly surpasses current state of the art (by at least 0.2 SSIM at t = 5). It also has near perfect accuracy, with UltraGauss - 2M achieveing an average SSIM of 0.995 upon completion. The cross-age variance is also much smaller (at least 10× so) than RapidVol and ImplicitVol. One important conclusion is that at each time point, there is an optimum number of gaussians to be had. For example if it is know that recosntruction can only take t = 5 minutes, then it is preferable to have 100K gaussians, whilst if t = O(hours) than 2M gaussians would lead to a slightly higher accuracy. However we found that UltraGauss-300K is a good all-round model.
+
+#### 6.2. Clinicians' survey
+
+Survey participation: The survey was distributed to 12 expert sonographers specializing in fetal, pediatric, and general ultrasound imaging, from hospitals in four countries (UK, Ghana, Denmark, and the NL). Ten experts who regularly interpret ultrasound scans responded, including consultant fetal surgeons and senior sonographers, with an average of 18 years of medical experience (range: 7–30 years).
+
+Comparison of reconstruction methods: UltraGauss consistently outperformed RapidVol and ImplicitVol across all training time points, with all clinicians actively preferring UltraGauss over RapidVol or ImplicitVol (see Fig. 8\), especially when quick reconstructions are needed (i.e. t ≤ 20). As training progressed, UltraGauss-2M became preferred over UltraGauss-100K and UltraGauss-300K. This indicates that higher-capacity UltraGauss models produce more realistic reconstructions.
+
+Realism of UltraGauss' reconstructions over time: In the progressive reconstruction experiment, 70% of the experts rated UltraGauss-generated images as more realistic than the ground-truth after just 4 minutes of training. This percentage increased to 80% after 15 minutes, demonstrating the rapid convergence of UltraGauss towards clinically realistic ultrasound textures (Fig. 6\). These images can be seen and compared to the ground truth, just as the clinicians had to do, in Fig. 7. The inclusion of two identical groundtruth images, one of which was not identified as being real by 40% of the participants, confirmed that even expert clinicians exhibit variability in assessing ultrasound realism, re-
+
+- inforcing the robustness of UltraGauss' ratings. 6.3. End-to-end pipeline results Tab. 1 shows the quantitative results of the images generated at the predicted poses of the video frames withheld for testing, and Fig. 9 over time. It is evident from both that UltraGauss greatly outperforms SOTA, especially if reconstructions are needed very quickly. Such cases could be in emergency situations, or if consultations have to be kept short. For a task which is as close to real-world usage as it can get, and considering the error is the sum of the pose prediction and reconstruction error, an overall average test SSIM of 0.91 is highly respectable. Appendix C shows this qualitatively.
+- 7. Conclusion We proposed UltraGauss, a method for 3D reconstruction of ultrasound volumes based on gaussian splatting. We explored the differences in image formation models between light-based imaging and ultrasound imaging, and proposed an intersection-based gaussian rasterization to better suit this setting. We mathematically derive efficient rasterization boundaries, with an associated parallelization scheme, and a new parametrization of covariances with several appealing properties. Our experiments demonstrate that gaussian splatting, with the appropriate changes, is an extremely fast and accurate model for ultrasound volumes, with clinical relevance checked by a survey of expert clinicians. We hope that this work forms the basis for more accessible ultrasound imaging, through 3D reconstruction tools that lower the barrier to interpretation. We also hope that it facilitates future research into diagnosis and prognosis using the gaussian-based 3D modality. References [1] John E. Aldrich. Basic physics of ultrasound imaging:. Critical Care Medicine, 35(Suppl):S131–S137, 2007. [2] Beryl R. Benacerraf. Three-dimensional fetal sonography. Journal of Ultrasound in Medicine, 21(10):1063–1067, 2002. [3] Xiaohuan Cao, Jingfan Fan, Pei Dong, Sahar Ahmad, Pew-Thian Yap, and Dinggang Shen. Image registration using machine and deep learning. In Handbook of Medical Image Computing and Computer Assisted Intervention, pages 319–
+- 342. Elsevier, 2020. [4] Nvidia Corp. Thrust library. [https://github.com/](https://github.com/NVIDIA/thrust?tab=readme-ov-file) [NVIDIA/thrust?tab=readme-ov-file](https://github.com/NVIDIA/thrust?tab=readme-ov-file), 2020. [5] Anurag Dalal, Daniel Hagen, Kjell G. Robbersmyr, and Kristian Muri Knausgard. Gaussian Splatting: 3D Reconstruc- ˚ tion and Novel View Synthesis: A Review. IEEE Access, 12: 96797–96820, 2024. Conference Name: IEEE Access. [6] Chiara Di Vece, Maela Le Lous, Brian Dromey, Francisco Vasconcelos, Anna L. David, Donald Peebles, and Danail Stoyanov. Ultrasound Plane Pose Regression: Assessing Generalized Pose Coordinates in the Fetal Brain. IEEE Transactions on Medical Robotics and Bionics, 6(1):41–52, 2024. Conference Name: IEEE Transactions on Medical Robotics and Bionics. [7] Mark C. Eid, Pak-Hei Yeung, Madeleine K. Wyburd, Joao F. ˜ Henriques, and Ana I. L. Namburete. RapidVol: Rapid Reconstruction of 3D Ultrasound Volumes from Sensorless 2D Scans, 2024. arXiv:2404.10766 [cs, eess]. [8] Jiaxin Guo, Jiangliu Wang, Di Kang, Wenzhen Dong, Wenting Wang, and Yun-hui Liu. Free-SurGS: SfM-Free 3D Gaussian Splatting for Surgical Scene Reconstruction. In Medical Image Computing and Computer Assisted Intervention – MICCAI 2024, pages 350–360. Springer Nature Switzerland, Cham, 2024. Series Title: Lecture Notes in Computer Science. [9] Binbin Huang, Zehao Yu, Anpei Chen, Andreas Geiger, and Shenghua Gao. 2d gaussian splatting for geometrically accurate radiance fields. In SIGGRAPH 2024 Conference Papers. Association for Computing Machinery, 2024. [10] Bernhard Kerbl, Georgios Kopanas, Thomas Leimkuehler, and George Drettakis. 3D Gaussian Splatting for Real-Time Radiance Field Rendering. ACM Transactions on Graphics, 42(4):1–14, 2023. [11] E. Merz and C. Welter. 2D and 3D Ultrasound in the evaluation of normal and abnormal fetal anatomy in the second and third trimesters in a level III center. Ultraschall in Der Medizin (Stuttgart, Germany: 1980), 26(1):9–16, 2005. [12] Ben Mildenhall, Pratul P. Srinivasan, Matthew Tancik, Jonathan T. Barron, Ravi Ramamoorthi, and Ren Ng. NeRF: Representing Scenes as Neural Radiance Fields for View Synthesis, 2020. arXiv:2003.08934 [cs]. [13] Ana I.L. Namburete, Richard V. Stebbing, Bryn Kemp, Mohammad Yaqub, Aris T. Papageorghiou, and J. Alison Noble. Learning-based prediction of gestational age from ultrasound images of the fetal brain. Medical Image Analysis, 21 (1):72–86, 2015. [14] Ana I. L. Namburete, Bartłomiej W. Papiez, Michelle Fer- ˙ nandes, Madeleine K. Wyburd, Linde S. Hesse, Felipe A. Moser, Leila Cheikh Ismail, Robert B. Gunier, Waney Squier, Eric O. Ohuma, Maria Carvalho, Yasmin Jaffer, Michael Gravett, Qingqing Wu, Ann Lambert, Adele Winsey, Mar´ıa C. Restrepo-Mendez, Enrico Bertino, Manorama ´ Purwar, Fernando C. Barros, Alan Stein, J. Alison Noble, Zoltan Moln ´ ar, Mark Jenkinson, Zulfiqar A. Bhutta, Aris T. ´ Papageorghiou, Jose Villar, and Stephen H. Kennedy. Nor- ´ mative spatiotemporal fetal brain maturation with satisfactory development at 2 years. Nature, pages 1–9, 2023. Publisher: Nature Publishing Group. [15] Thomas R. Nelson and Dolores H. Pretorius. Threedimensional ultrasound imaging. Ultrasound in Medicine and Biology, 24(9):1243–1270, 1998. [16] Alexander Ej. Powles, David J. Martin, Irving Tp. Wells, and Christopher R. Goodwin. Physics of ultrasound. Anaesthesia & Intensive Care Medicine, 19(4):202–205, 2018. [17] Ravi Ramamoorthi. MODELING ILLUMINATION VARI-ATION WITH SPHERICAL HARMONICS. In Face Processing, pages 385–424. Elsevier, 2006. [18] Jayroop Ramesh, Nicola Dinsdale, Pak-Hei Yeung, and Ana
+  - I. L. Namburete. Geometric Transformation Uncertainty for
+
+
+
+- Improving 3D Fetal Brain Pose Prediction from Freehand 2D Ultrasound Videos. In Medical Image Computing and Computer Assisted Intervention – MICCAI 2024, pages 419–429. Springer Nature Switzerland, Cham, 2024. Series Title: Lecture Notes in Computer Science. [19] Samuel Rota Bulo, Lorenzo Porzi, and Peter Kontschieder. ` Revising Densification in Gaussian Splatting. In Computer Vision – ECCV 2024, pages 347–362, Cham, 2025. Springer Nature Switzerland. [20] L. J. Salomon, Z. Alfirevic, V. Berghella, C. M. Bilardo,
+  - G. E. Chalouhi, F. Da Silva Costa, E. Hernandez-Andrade,
+- G. Malinger, H. Munoz, D. Paladini, F. Prefumo, A. Sotiriadis, A. Toi, and W. Lee. ISUOG Practice Guidelines (updated): performance of the routine mid-trimester fetal ultrasound scan. Ultrasound in Obstetrics & Gynecology, 59(6): 840–856, 2022. [21] Mriganka Sarmah, Arambam Neelima, and Heisnam Rohen Singh. Survey of methods and principles in threedimensional reconstruction from two-dimensional medical images. Visual Computing for Industry, Biomedicine, and Art, 6(1):15, 2023. [22] Johannes Lutz Schonberger and Jan-Michael Frahm. ¨ Structure-from-motion revisited. In Conference on computer vision and pattern recognition (CVPR), 2016. [23] Ole Vegard Solberg, Frank Lindseth, Hans Torp, Richard E. Blake, and Toril A. Nagelhus Hernes. Freehand 3D Ultrasound Reconstruction Algorithms—A Review. Ultrasound in Medicine & Biology, 33(7):991–1009, 2007. [24] Thomas L. Szabo. Diagnostic ultrasound imaging : inside out. Academic Press, Amsterdam, 2nd ed. edition, 2014. Includes bibliographical references and index. [25] Z. Wang, A.C. Bovik, H.R. Sheikh, and E.P. Simoncelli. Image Quality Assessment: From Error Visibility to Structural Similarity. IEEE Transactions on Image Processing, 13(4): 600–612, 2004. [26] Vickie Ye, Ruilong Li, Justin Kerr, Matias Turkulainen, Brent Yi, Zhuoyang Pan, Otto Seiskari, Jianbo Ye, Jeffrey Hu, Matthew Tancik, and Angjoo Kanazawa. gsplat: An Open-Source Library for Gaussian Splatting, 2024. arXiv:2409.06765 [cs]. [27] Pak-Hei Yeung, Linde Hesse, Moska Aliasi, Monique Haak, the INTERGROWTH-21st Consortium, Weidi Xie, and Ana
+- I. L. Namburete. ImplicitVol: Sensorless 3D Ultrasound Reconstruction with Deep Implicit Representation, 2021. arXiv:2109.12108 [cs, eess]. [28] Pak-Hei Yeung, Moska Aliasi, Monique Haak, The INTERGROWTH-21st Consortium, Weidi Xie, and Ana
+- I. L. Namburete. Adaptive 3D Localization of 2D Freehand Ultrasound Brain Images, 2022. arXiv:2209.05477 [cs, eess]. [29] Alex Yu, Sara Fridovich-Keil, Matthew Tancik, Qinhong Chen, Benjamin Recht, and Angjoo Kanazawa. Plenoxels: Radiance Fields without Neural Networks, 2021. arXiv:2112.05131 [cs]. [30] Zehao Yu, Anpei Chen, Binbin Huang, Torsten Sattler, and Andreas Geiger. Mip-Splatting: Alias-free 3D Gaussian Splatting, 2023. arXiv:2311.16493 [cs]. [31] Anny Yuniarti and Nanik Suciati. A Review of Deep Learning Techniques for 3D Reconstruction of 2D Images. In 2019 12th International Conference on Information & Communication Technology and System (ICTS), pages 327–331, 2019. [32] Ruyi Zha, Tao Jun Lin, Yuanhao Cai, Jiwen Cao, Yanhao Zhang, and Hongdong Li. Rˆ2-gaussian: Rectifying radiative gaussian splatting for tomographic reconstruction. In Advances in neural information processing systems, pages 44907–44934. Curran Associates, Inc., 2024. [33] Richard Zhang, Phillip Isola, Alexei A. Efros, Eli Shechtman, and Oliver Wang. The Unreasonable Effectiveness of Deep Features as a Perceptual Metric. In 2018 IEEE/CVF Conference on Computer Vision and Pattern Recognition, pages 586–595, Salt Lake City, UT, 2018. IEEE. [34] M. Zwicker, H. Pfister, J. Van Baar, and M. Gross. EWA volume splatting. In Proceedings Visualization, 2001. VIS '01., pages 29–538, San Diego, CA, USA, 2001. IEEE.
+
+#### AppendixA:Experiment5.2ResultsTable
+
+| Input Set Time t              | Test Slices . 160 Linearly Spaced: Average Across all 3 views Training SSIM ( ↑ ) Model Axial Coronal Sagittal SSIM ( ) PSNR ( ) LPIPS ( ) SSIM ( ) PSNR ( ) LPIPS ( ) SSIM ( ) PSNR ( ) LPIPS ( ) SSIM ( ) PSNR ( ) LPIPS ( ) ↑ ↑ ↑ ↑ ↑ ↑ ↑ ↑ ↓ ↓ ↓ ↓ |
+|-------------------------------|--------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------|
+| ImplicitVol                   | 0 .850 ± 0 .043 0 .793 ± 0 .058 2 .644 ± 0 .407 0 .203 ± 0 .056 0 .698 ± 0 .052 2 .307 ± 0 .204 0 .286 ± 0 .056 0 .707 ± 0 .056 2 .578 ± 0 .299 0 .298 ± 0 .066 0 .732 ± 0 .055 2 .510 ± 0 .303 0 .262 ± 0 .060                                        |
+| RapidVol 5 mins               | 0 .240 ± 0 .047 0 .240 ± 0 .051 1 .596 ± 0 .139 0 .648 ± 0 .039 0 .235 ± 0 .052 1 .583 ± 0 .129 0 .661 ± 0 .036 0 .258 ± 0 .052 1 .630 ± 0 .174 0 .647 ± 0 .051 0 .244 ± 0 .052 1 .603 ± 0 .147 0 .652 ± 0 .042                                        |
+| UltraGauss                    | - 100K                                                                                                                                                                                                                                                 |
+|                               | 0 .985 ± 0 .003 0 .986 ± 0 .003 4.307 ± 0 .292 0 .013 ± 0 .002 0 .982 ± 0 .004 4.085 ± 0 .171 0 .028 ± 0 .005 0 .979 ± 0 .004 4.425 ± 0 .275 0 .036 ± 0 .007 0 .982 ± 0 .004 4.272 ± 0 .246 0 .026 ± 0 .005                                            |
+| UltraGauss                    | - 300K                                                                                                                                                                                                                                                 |
+|                               | 0 .981 ± 0 .003 0 .982 ± 0 .003 4 .073 ± 0 .175 0 .031 ± 0 .003 0 .978 ± 0 .004 3 .896 ± 0 .120 0 .050 ± 0 .005 0 .978 ± 0 .004 4 .210 ± 0 .189 0 .055 ± 0 .006 0 .980 ± 0 .004 4 .060 ± 0 .162 0 .045 ± 0 .005                                        |
+| UltraGauss                    | - 2M                                                                                                                                                                                                                                                   |
+|                               | 0 .986 ± 0 .002 0 .987 ± 0 .002 4 .117 ± 0 .185 0 .024 ± 0 .003 0 .983 ± 0 .003 3 .931 ± 0 .129 0 .042 ± 0 .005 0 .983 ± 0 .003 4 .211 ± 0 .208 0 .049 ± 0 .006 0 .985 ± 0 .003 4 .086 ± 0 .174 0 .038 ± 0 .005                                        |
+| ImplicitVol                   | 0 .901 ± 0 .032 0 .855 ± 0 .051 2 .957 ± 0 .419 0 .140 ± 0 .046 0 .704 ± 0 .047 2 .347 ± 0 .155 0 .265 ± 0 .052 0 .708 ± 0 .051 2 .622 ± 0 .290 0 .273 ± 0 .064 0 .756 ± 0 .050 2 .642 ± 0 .288 0 .226 ± 0 .054                                        |
+| RapidVol 160 Linearly 20 mins | 0 .807 ± 0 .080 0 .808 ± 0 .087 2 .467 ± 0 .488 0 .225 ± 0 .106 0 .789 ± 0 .087 2 .396 ± 0 .384 0 .261 ± 0 .096 0 .789 ± 0 .086 2 .961 ± 0 .413 0 .227 ± 0 .077 0 .795 ± 0 .086 2 .608 ± 0 .428 0 .238 ± 0 .093                                        |
+| UltraGauss spaced Axial       | - 100K                                                                                                                                                                                                                                                 |
+|                               | 0 .990 ± 0 .002 0 .991 ± 0 .002 4 .537 ± 0 .322 0 .005 ± 0 .001 0 .987 ± 0 .003 4 .224 ± 0 .159 0 .016 ± 0 .003 0 .979 ± 0 .004 4.591 ± 0 .388 0 .028 ± 0 .005 0 .986 ± 0 .003 4 .451 ± 0 .290 0 .016 ± 0 .003                                         |
+| UltraGauss Slices             | - 300K                                                                                                                                                                                                                                                 |
+|                               | 0 .994 ± 0 .001 0 .995 ± 0 .001 4.661 ± 0 .288 0 .003 ± 0 .000 0 .991 ± 0 .002 4.344 ± 0 .179 0 .012 ± 0 .002 0 .986 ± 0 .003 4 .551 ± 0 .319 0 .021 ± 0 .004 0 .991 ± 0 .002 4.519 ± 0 .262 0 .012 ± 0 .002                                           |
+| UltraGauss                    | - 2M                                                                                                                                                                                                                                                   |
+|                               | 0 .986 ± 0 .002 0 .987 ± 0 .002 4 .117 ± 0 .185 0 .024 ± 0 .003 0 .983 ± 0 .003 3 .931 ± 0 .129 0 .042 ± 0 .005 0 .983 ± 0 .003 4 .211 ± 0 .208 0 .049 ± 0 .006 0 .985 ± 0 .003 4 .086 ± 0 .174 0 .038 ± 0 .005                                        |
+| ImplicitVol                   | 0 .960 ± 0 .015 0 .960 ± 0 .016 3 .936 ± 0 .438 0 .041 ± 0 .014 0 .687 ± 0 .046 2 .369 ± 0 .142 0 .243 ± 0 .041 0 .685 ± 0 .052 2 .679 ± 0 .329 0 .245 ± 0 .053 0 .778 ± 0 .038 2 .995 ± 0 .303 0 .176 ± 0 .036                                        |
+| RapidVol                      | 0 .982 ± 0 .004 0 .982 ± 0 .004 4 .201 ± 0 .372 0 .013 ± 0 .003 0 .975 ± 0 .005 4 .063 ± 0 .241 0 .022 ± 0 .003 0 .974 ± 0 .006 4 .582 ± 0 .345 0 .027 ± 0 .006 0 .977 ± 0 .005 4 .282 ± 0 .319 0 .021 ± 0 .004                                        |
+| UltraGauss Convergence        | - 100K                                                                                                                                                                                                                                                 |
+|                               | 0 .991 ± 0 .002 0 .992 ± 0 .002 4 .575 ± 0 .322 0 .004 ± 0 .001 0 .988 ± 0 .003 4 .248 ± 0 .165 0 .015 ± 0 .003 0 .977 ± 0 .004 4 .570 ± 0 .409 0 .030 ± 0 .006 0 .986 ± 0 .003 4 .464 ± 0 .298 0 .016 ± 0 .003                                        |
+| UltraGauss                    | - 300K                                                                                                                                                                                                                                                 |
+|                               | 0 .998 ± 0 .000 0 .998 ± 0 .000 5 .038 ± 0 .359 0 .001 ± 0 .000 0 .993 ± 0 .002 4 .450 ± 0 .179 0 .009 ± 0 .001 0 .979 ± 0 .004 4 .669 ± 0 .441 0 .023 ± 0 .004 0 .990 ± 0 .002 4 .719 ± 0 .326 0 .011 ± 0 .002                                        |
+| UltraGauss                    | - 2M                                                                                                                                                                                                                                                   |
+|                               | 0 .999 ± 0 .000 1 .000 ± 0 .000 5 .426 ± 0 .286 0 .000 ± 0 .000 0 .995 ± 0 .001 4.629 ± 0 .168 0 .007 ± 0 .001 0 .990 ± 0 .002 4.963 ± 0 .352 0 .011 ± 0 .002 0 .995 ± 0 .001 5 .006 ± 0 .269 0 .006 ± 0 .001                                          |
+| ImplicitVol                   | 0 .855 ± 0 .033 0 .752 ± 0 .031 2 .472 ± 0 .223 0 .227 ± 0 .034 0 .654 ± 0 .037 2 .283 ± 0 .170 0 .358 ± 0 .026 0 .660 ± 0 .034 2 .537 ± 0 .200 0 .346 ± 0 .025 0 .688 ± 0 .034 2 .431 ± 0 .198 0 .310 ± 0 .028                                        |
+| RapidVol 5 mins               | 0 .248 ± 0 .055 0 .248 ± 0 .059 1 .588 ± 0 .139 0 .646 ± 0 .042 0 .242 ± 0 .060 1 .575 ± 0 .127 0 .661 ± 0 .042 0 .265 ± 0 .060 1 .625 ± 0 .179 0 .653 ± 0 .055 0 .252 ± 0 .060 1 .596 ± 0 .148 0 .653 ± 0 .046                                        |
+| UltraGauss                    | - 100K                                                                                                                                                                                                                                                 |
+|                               | 0 .990 ± 0 .002 0 .980 ± 0 .004 3 .999 ± 0 .299 0 .015 ± 0 .003 0 .970 ± 0 .007 3 .760 ± 0 .209 0 .030 ± 0 .006 0 .965 ± 0 .008 4.137 ± 0 .313 0 .037 ± 0 .007 0 .972 ± 0 .007 3 .965 ± 0 .274 0 .027 ± 0 .005                                         |
+| UltraGauss                    | - 300K                                                                                                                                                                                                                                                 |
+|                               | 0 .992 ± 0 .001 0 .985 ± 0 .003 4.099 ± 0 .234 0 .014 ± 0 .002 0 .977 ± 0 .006 3 .803 ± 0 .220 0 .025 ± 0 .004 0 .974 ± 0 .006 4 .070 ± 0 .285 0 .033 ± 0 .005 0 .978 ± 0 .005 3 .990 ± 0 .247 0 .024 ± 0 .004                                         |
+| UltraGauss                    | - 2M                                                                                                                                                                                                                                                   |
+|                               | 0 .986 ± 0 .002 0 .981 ± 0 .003 3 .963 ± 0 .191 0 .032 ± 0 .004 0 .974 ± 0 .005 3 .736 ± 0 .182 0 .050 ± 0 .005 0 .975 ± 0 .005 4 .028 ± 0 .241 0 .056 ± 0 .006 0 .977 ± 0 .004 3 .909 ± 0 .205 0 .046 ± 0 .005                                        |
+| ImplicitVol                   | 0 .929 ± 0 .013 0 .769 ± 0 .039 2 .609 ± 0 .263 0 .172 ± 0 .020 0 .659 ± 0 .052 2 .334 ± 0 .175 0 .341 ± 0 .031 0 .659 ± 0 .050 2 .648 ± 0 .264 0 .331 ± 0 .037 0 .695 ± 0 .047 2 .530 ± 0 .234 0 .281 ± 0 .029                                        |
+| RapidVol 80 Linearly 20 mins  | 0 .762 ± 0 .153 0 .745 ± 0 .168 2 .388 ± 0 .507 0 .261 ± 0 .119 0 .723 ± 0 .169 2 .306 ± 0 .390 0 .306 ± 0 .111 0 .721 ± 0 .171 2 .717 ± 0 .656 0 .289 ± 0 .127 0 .730 ± 0 .169 2 .471 ± 0 .518 0 .285 ± 0 .119                                        |
+| UltraGauss sliced Axial       | - 100K                                                                                                                                                                                                                                                 |
+|                               | 0 .994 ± 0 .001 0 .974 ± 0 .005 3 .859 ± 0 .316 0 .019 ± 0 .003 0 .961 ± 0 .009 3 .622 ± 0 .181 0 .051 ± 0 .010 0 .949 ± 0 .010 4 .099 ± 0 .400 0 .061 ± 0 .010 0 .961 ± 0 .008 3 .860 ± 0 .299 0 .043 ± 0 .007                                        |
+| UltraGauss Slices             | - 300K                                                                                                                                                                                                                                                 |
+|                               | 0 .998 ± 0 .000 0 .985 ± 0 .003 4.145 ± 0 .309 0 .009 ± 0 .002 0 .975 ± 0 .006 3 .862 ± 0 .210 0 .023 ± 0 .005 0 .965 ± 0 .008 4.212 ± 0 .331 0 .032 ± 0 .006 0 .975 ± 0 .006 4.073 ± 0 .283 0 .021 ± 0 .004                                           |
+| UltraGauss                    | - 2M                                                                                                                                                                                                                                                   |
+|                               | 0 .986 ± 0 .002 0 .981 ± 0 .003 3 .963 ± 0 .191 0 .032 ± 0 .004 0 .974 ± 0 .005 3 .736 ± 0 .182 0 .050 ± 0 .005 0 .975 ± 0 .005 4 .028 ± 0 .241 0 .056 ± 0 .006 0 .977 ± 0 .004 3 .909 ± 0 .205 0 .046 ± 0 .005                                        |
+| ImplicitVol                   | 0 .969 ± 0 .008 0 .745 ± 0 .042 2 .613 ± 0 .260 0 .171 ± 0 .020 0 .632 ± 0 .054 2 .297 ± 0 .177 0 .353 ± 0 .030 0 .632 ± 0 .052 2 .636 ± 0 .277 0 .353 ± 0 .039 0 .670 ± 0 .049 2 .515 ± 0 .238 0 .292 ± 0 .029                                        |
+| RapidVol                      | 0 .956 ± 0 .012 0 .924 ± 0 .014 3 .213 ± 0 .323 0 .073 ± 0 .019 0 .899 ± 0 .018 3 .060 ± 0 .253 0 .137 ± 0 .023 0 .895 ± 0 .020 3 .581 ± 0 .305 0 .134 ± 0 .020 0 .906 ± 0 .017 3 .285 ± 0 .294 0 .115 ± 0 .021                                        |
+| UltraGauss Convergence        | - 100K                                                                                                                                                                                                                                                 |
+|                               | 0 .994 ± 0 .001 0 .974 ± 0 .005 3 .859 ± 0 .316 0 .019 ± 0 .003 0 .961 ± 0 .009 3 .622 ± 0 .181 0 .051 ± 0 .010 0 .949 ± 0 .010 4 .099 ± 0 .400 0 .061 ± 0 .010 0 .961 ± 0 .008 3 .860 ± 0 .299 0 .043 ± 0 .007                                        |
+| UltraGauss                    | - 300K                                                                                                                                                                                                                                                 |
+|                               | 0 .999 ± 0 .000 0 .982 ± 0 .004 4 .086 ± 0 .364 0 .012 ± 0 .002 0 .971 ± 0 .007 3 .771 ± 0 .216 0 .032 ± 0 .006 0 .957 ± 0 .009 4 .223 ± 0 .374 0 .042 ± 0 .007 0 .970 ± 0 .007 4 .027 ± 0 .318 0 .029 ± 0 .005                                        |
+| UltraGauss                    | - 2M                                                                                                                                                                                                                                                   |
+|                               | 1 .000 ± 0 .000 0 .991 ± 0 .002 4.440 ± 0 .336 0 .005 ± 0 .001 0 .984 ± 0 .004 4.024 ± 0 .217 0 .014 ± 0 .003 0 .980 ± 0 .004 4.589 ± 0 .391 0 .018 ± 0 .003 0 .985 ± 0 .003 4.351 ± 0 .315 0 .012 ± 0 .002                                            |
+| ImplicitVol                   | 0 .893 ± 0 .018 0 .801 ± 0 .038 2 .698 ± 0 .281 0 .203 ± 0 .026 0 .786 ± 0 .042 2 .648 ± 0 .184 0 .217 ± 0 .028 0 .794 ± 0 .042 2 .992 ± 0 .250 0 .237 ± 0 .033 0 .794 ± 0 .041 2 .779 ± 0 .238 0 .219 ± 0 .029                                        |
+| RapidVol 5 mins               | 0 .265 ± 0 .056 0 .253 ± 0 .060 1 .600 ± 0 .142 0 .640 ± 0 .042 0 .246 ± 0 .061 1 .587 ± 0 .130 0 .659 ± 0 .041 0 .268 ± 0 .062 1 .636 ± 0 .181 0 .645 ± 0 .052 0 .256 ± 0 .061 1 .608 ± 0 .151 0 .648 ± 0 .045                                        |
+| UltraGauss                    | - 100K                                                                                                                                                                                                                                                 |
+|                               | 0 .994 ± 0 .001 0 .939 ± 0 .007 3 .334 ± 0 .128 0 .070 ± 0 .008 0 .931 ± 0 .009 3 .098 ± 0 .101 0 .065 ± 0 .007 0 .934 ± 0 .009 3 .160 ± 0 .105 0 .064 ± 0 .006 0 .935 ± 0 .008 3 .197 ± 0 .111 0 .066 ± 0 .007                                        |
+| UltraGauss                    | - 300K                                                                                                                                                                                                                                                 |
+|                               | 0 .994 ± 0 .001 0 .969 ± 0 .007 3 .723 ± 0 .275 0 .044 ± 0 .005 0 .964 ± 0 .008 3 .692 ± 0 .167 0 .043 ± 0 .004 0 .969 ± 0 .007 3 .920 ± 0 .244 0 .039 ± 0 .004 0 .967 ± 0 .007 3 .778 ± 0 .229 0 .042 ± 0 .004                                        |
+| UltraGauss                    | - 2M                                                                                                                                                                                                                                                   |
+|                               | 0 .990 ± 0 .001 0 .965 ± 0 .006 3 .639 ± 0 .252 0 .067 ± 0 .008 0 .961 ± 0 .008 3 .608 ± 0 .152 0 .074 ± 0 .006 0 .967 ± 0 .007 3 .855 ± 0 .230 0 .067 ± 0 .006 0 .964 ± 0 .007 3 .700 ± 0 .212 0 .069 ± 0 .006                                        |
+| ImplicitVol 80 Linearly       | 0 .950 ± 0 .011 0 .855 ± 0 .028 2 .947 ± 0 .295 0 .134 ± 0 .019 0 .835 ± 0 .032 2 .902 ± 0 .181 0 .155 ± 0 .025 0 .838 ± 0 .031 3 .235 ± 0 .314 0 .171 ± 0 .031 0 .843 ± 0 .031 3 .028 ± 0 .263 0 .154 ± 0 .025                                        |
+| RapidVol spaced Axial 20 mins | 0 .853 ± 0 .051 0 .817 ± 0 .056 2 .494 ± 0 .470 0 .225 ± 0 .091 0 .796 ± 0 .056 2 .437 ± 0 .358 0 .266 ± 0 .082 0 .795 ± 0 .056 2 .970 ± 0 .380 0 .229 ± 0 .063 0 .803 ± 0 .056 2 .634 ± 0 .403 0 .240 ± 0 .079                                        |
+| UltraGauss                    | - 100K                                                                                                                                                                                                                                                 |
+| Slices with ±5°               | 0 .997 ± 0 .001 0 .929 ± 0 .007 3 .182 ± 0 .094 0 .078 ± 0 .006 0 .917 ± 0 .010 2 .955 ± 0 .048 0 .088 ± 0 .008 0 .918 ± 0 .010 2 .998 ± 0 .054 0 .092 ± 0 .009 0 .921 ± 0 .009 3 .045 ± 0 .065 0 .086 ± 0 .008                                        |
+| UltraGauss                    | - 300K                                                                                                                                                                                                                                                 |
+| Jitter                        | 0 .999 ± 0 .000 0 .936 ± 0 .005 3 .250 ± 0 .121 0 .066 ± 0 .007 0 .930 ± 0 .007 2 .894 ± 0 .080 0 .057 ± 0 .006 0 .932 ± 0 .006 2 .948 ± 0 .076 0 .061 ± 0 .005 0 .933 ± 0 .006 3 .031 ± 0 .092 0 .061 ± 0 .006                                        |
+| UltraGauss                    | - 2M                                                                                                                                                                                                                                                   |
+|                               | 0 .990 ± 0 .001 0 .965 ± 0 .006 3 .639 ± 0 .252 0 .067 ± 0 .008 0 .961 ± 0 .008 3 .608 ± 0 .152 0 .074 ± 0 .006 0 .967 ± 0 .007 3 .855 ± 0 .230 0 .067 ± 0 .006 0 .964 ± 0 .007 3 .700 ± 0 .212 0 .069 ± 0 .006                                        |
+| ImplicitVol                   | 0 .977 ± 0 .007 0 .864 ± 0 .028 3 .042 ± 0 .299 0 .102 ± 0 .019 0 .842 ± 0 .033 3 .007 ± 0 .187 0 .143 ± 0 .025 0 .841 ± 0 .033 3 .372 ± 0 .319 0 .161 ± 0 .032 0 .849 ± 0 .031 3 .141 ± 0 .268 0 .135 ± 0 .025                                        |
+| RapidVol                      | 0 .973 ± 0 .006 0 .925 ± 0 .016 3 .228 ± 0 .370 0 .074 ± 0 .014 0 .905 ± 0 .021 3 .192 ± 0 .253 0 .127 ± 0 .019 0 .903 ± 0 .022 3 .609 ± 0 .349 0 .119 ± 0 .022 0 .911 ± 0 .019 3 .343 ± 0 .324 0 .107 ± 0 .018                                        |
+| UltraGauss Convergence        | - 100K                                                                                                                                                                                                                                                 |
+|                               | 0 .997 ± 0 .001 0 .929 ± 0 .007 3 .182 ± 0 .094 0 .078 ± 0 .006 0 .917 ± 0 .010 2 .955 ± 0 .048 0 .088 ± 0 .008 0 .918 ± 0 .010 2 .998 ± 0 .054 0 .092 ± 0 .009 0 .921 ± 0 .009 3 .045 ± 0 .065 0 .086 ± 0 .008                                        |
+| UltraGauss                    | - 300K                                                                                                                                                                                                                                                 |
+|                               | 0 .999 ± 0 .000 0 .934 ± 0 .006 3 .234 ± 0 .126 0 .064 ± 0 .008 0 .927 ± 0 .008 2 .913 ± 0 .095 0 .059 ± 0 .007 0 .929 ± 0 .008 2 .955 ± 0 .093 0 .065 ± 0 .006 0 .930 ± 0 .007 3 .034 ± 0 .105 0 .063 ± 0 .007                                        |
+| UltraGauss                    | - 2M                                                                                                                                                                                                                                                   |
+|                               | 1 .000 ± 0 .000 0 .942 ± 0 .004 3 .321 ± 0 .122 0 .064 ± 0 .007 0 .937 ± 0 .004 2 .912 ± 0 .078 0 .054 ± 0 .006 0 .941 ± 0 .004 2 .979 ± 0 .091 0 .056 ± 0 .005 0 .940 ± 0 .004 3 .071 ± 0 .097 0 .058 ± 0 .006                                        |
+
+Figure10.Reconstructionresultsfor5differentmodels3differenttrainingsets,shownat3timepoints.↑indicateshigherisbetter."UltraGaussN"indicatesUltraGausswithNstartinggaussians.
+
+## Appendix B: Experiment 5.3 - Clinicians' Survey Extra Results
+
+
+
+Figure 11. Survey results: Comparison of all 5 models at each time point. Actively choosing a model gave it 1 point, not choosing it -1, and choosing "no preference" gave it 0 points. Each model's score was then divided by the total number of points it could have gained, to give a percentage. Thus +100% means that all participants actively selected and preferred that model. -100% means that all participants actively disliked this model (and selected the other one). 0% means that the model is neither liked or disliked, as the participant chose the "no preference" option.
+
+
+
+Figure 12. Survey results: Comparison of ImplicitVol, RapidVol and the better of the three UltraGauss Models, at each time point. The same scoring system applies as Fig. 11
+
+## Appendix C: Experiment 5.4 - Visual Comparison of Reconstructed Images from Cinesweeps
+
+|            | V1 I1 V1 I2 V2 I1 V2 I2 V3 I1 V3 I2 |
+|------------|-------------------------------------|
+| Ground     | Truth                               |
+| RapidVol   | Diff.                               |
+| UltraGauss | Diff.                               |
+
+Figure 13. For each video (Vn), two ground truth images (Ij) from the test set are shown, alongside the corresponding image generated by RapidVol and UltraGauss - 300K (ours). The absolute difference between the predicted and ground truth image is also shown. A pure black diff. image means perfect similarity and so the darker the Diff image, the better.
+
+.

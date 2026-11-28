@@ -1,0 +1,185 @@
+--- v001.md
++++ v002.md
+@@ -7,12 +7,12 @@
+ 
+ ## How it works
+-**Inputs:** Ray origin, ray direction, maximum ray length ($t_{max}$), coarse mesh structure, macrocell density values, transfer function (TF), and scalar field data.
+-**Outputs:** Final pixel color.
++**Inputs:** Ray origin, ray direction, current ray parameter $t$, maximum ray length $t_{\text{max}}$, coarse mesh structure, macrocell density values, transfer function parameters, and scalar field data [S1, unofficial].
++**Outputs:** Final pixel color [S1, unofficial].
+ 
+ **Data Structures:**
+-*   **Coarse Mesh:** A hierarchy of coarse tetrahedra. Each coarse element has an associated `macrocellMajorant` value.
+-*   **Macrocell Values:** An array or map where `macrocellValues[coarseID]` stores the maximum macrocell density for that coarse element.
+-*   **Transfer Function:** Provides `tf.opacity` (scalar to opacity mapping) and `tf.getColor(scalar)` (scalar to RGBA color).
+-*   **Refinement Tree:** Used to locate the specific fine tetrahedron within a coarse element.
++*   **Coarse Mesh:** A hierarchy of coarse tetrahedra [S1, unofficial]. Each coarse element has an associated `macrocellMajorant` value [S1, unofficial].
++*   **Macrocell Values:** An array or map where `macrocellValues[coarseID]` stores the maximum macrocell density for that coarse element [S1, unofficial].
++*   **Transfer Function:** Provides a constant opacity scaling factor `tf.opacity` for the element, a color lookup `tf.getColor(scalar)`, and a range check `tf.inRange(scalar)` [S1, unofficial].
++*   **Refinement Tree:** Used to locate the specific fine tetrahedron within a coarse element [S1, unofficial].
+ 
+ **Algorithm Steps:**
+@@ -26,19 +26,19 @@
+     Call `WoodcockElem` with this majorant [S1, unofficial].
+     *   Inside `WoodcockElem`, calculate the effective majorant:
+-        $$ \sigma_{max} = \text{tf.opacity} \times \text{macrocellMajorant} $$
+-    *   If $\sigma_{max} \le 0$, return `false` (no emission/absorption possible) [S1, unofficial].
++        $$ \sigma_{\text{max}} = \text{tf.opacity} \times \text{macrocellMajorant} $$
++    *   If $\sigma_{\text{max}} \le 0$, return `false` (no emission/absorption possible) [S1, unofficial].
+ 
+ 3.  **Free Path Sampling:**
+-    Sample a free path length using the majorant $\sigma_{max}$:
+-    $$ t_{step} = -\frac{\log(1 - \text{rand}())}{\sigma_{max}} $$
++    Sample a free path length using the majorant $\sigma_{\text{max}}$:
++    $$ t_{\text{step}} = -\frac{\log(1 - \text{rand}())}{\sigma_{\text{max}}} $$
+     Update the ray position:
+-    $$ t_{ray} = t_{ray} + t_{step} $$
+-    *   If $t_{ray} \ge t_{max}$, return `false` [S1, unofficial].
++    $$ t_{\text{ray}} = t_{\text{ray}} + t_{\text{step}} $$
++    *   If $t_{\text{ray}} \ge t_{\text{max}}$, return `false` [S1, unofficial].
+ 
+ 4.  **Tetrahedron Location:**
+     Calculate the sample point:
+-    $$ P = \text{ray.org} + t_{ray} \times \text{ray.dir} $$
++    $$ P = \text{ray.org} + t_{\text{ray}} \times \text{ray.dir} $$
+     If the sample point is outside the current tetrahedron (checked against `tExit`), traverse the refinement tree to find the specific fine tetrahedron (`sampleTetID`) and its vertices (`tetVertices`) [S1, unofficial].
+-    *   Update `tExit` to the distance to the exit face of the new tetrahedron [S1, unofficial].
++    *   Update `tExit` to the distance to the exit face of the new tetrahedron, computed by intersecting the ray with the tetrahedron's faces [S1, unofficial].
+ 
+ 5.  **Scalar Sampling and Acceptance:**
+@@ -47,5 +47,5 @@
+     *   Get the color: `color = tf.getColor(scalar)` [S1, unofficial].
+     *   Perform the null-collision acceptance test:
+-        $$ \text{color.opacity} \times \text{tf.opacity} \ge \text{rand}() \times \sigma_{max} $$
++        $$ \text{color.opacity} \times \text{tf.opacity} \ge \text{rand}() \times \sigma_{\text{max}} $$
+     *   If accepted, return `color` [S1, unofficial].
+     *   Otherwise, treat as a null collision and continue the loop [S1, unofficial].
+@@ -57,4 +57,7 @@
+ 
+ ```python
++import math
++import random
++
+ def woodcock_coarse(ray, macrocell_values, tf, t_max):
+     """
+@@ -62,18 +65,14 @@
+     ray: object with .org, .dir, .t (current t)
+     macrocell_values: dict mapping coarse_id to max macrocell density
+-    tf: transfer function object with .opacity(scalar), .get_color(scalar), .in_range(scalar)
++    tf: transfer function object with .opacity (constant factor), .get_color(scalar), .in_range(scalar)
+     t_max: maximum ray length
+     """
+     while True:
+-        # 1. Traverse coarse mesh
+         coarse_id, t_back, t_next_face = traverse_coarse_mesh(ray)
+         
+         if coarse_id == -1:
+-            return background_color
++            return (0.0, 0.0, 0.0, 0.0)  # background color
+         
+-        # 2. Get macrocell majorant
+         macrocell_majorant = macrocell_values[coarse_id]
+-        
+-        # 3. Process element
+         color = woodcock_elem(ray, t_back, coarse_id, macrocell_majorant, tf, t_max)
+         
+@@ -81,8 +80,6 @@
+             return color
+         
+-        # 4. Handle boundary crossing
+-        # If we exited the element, reset t to just after the next face to prevent overstepping
+-        # due to density changes between elements
+-        ray.t = t_next_face + epsilon
++        # Prevent overstepping into next element due to density changes
++        ray.t = t_next_face
+ 
+ def woodcock_elem(ray, t_exit, coarse_tet_id, macrocell_majorant, tf, t_max):
+@@ -91,29 +88,4 @@
+     t_exit: distance to the exit face of the current tetrahedron
+     """
+-    # Calculate effective majorant
+-    # Note: tf.opacity is typically the opacity at the specific scalar, 
+-    # but here it seems to refer to a scaling factor or the max opacity for the element.
+-    # Based on source: majorant = tf.opacity * macrocellMajorant
+-    # We assume tf.opacity here refers to the opacity scaling factor for the element 
+-    # or is evaluated per sample. The source code snippet suggests:
+-    # majorant <- tf.opacity * macrocellMajorant
+-    # However, tf.opacity is usually scalar-dependent. 
+-    # Looking at Algorithm 12 line 2: majorant <- tf.opacity * macrocellMajorant
+-    # And line 24: color.opacity * tf.opacity >= rand() * majorant
+-    # This implies tf.opacity might be a constant for the element or the source 
+-    # uses tf.opacity as a global scaling factor. 
+-    # Let's follow the source literally: majorant is calculated once per element?
+-    # No, line 24 uses color.opacity * tf.opacity. 
+-    # If majorant is constant, then the acceptance test compares against it.
+-    # Let's assume tf.opacity in line 2 is a constant for the element, 
+-    # or the source implies the majorant is based on the max opacity.
+-    # Given "maximum macrocell density ... scaled with the opacity of the transfer function",
+-    # it likely means: sigma_max = max_tf_opacity * max_macrocell_density.
+-    
+-    # Re-reading Algorithm 12:
+-    # 2: majorant <- tf.opacity * macrocellMajorant
+-    # This line is outside the while loop. So majorant is constant for the element.
+-    # This implies tf.opacity is a constant for the element (e.g., max opacity).
+-    
+     sigma_max = tf.opacity * macrocell_majorant
+     
+@@ -121,5 +93,6 @@
+         return None
+     
+-    # Initialize tetrahedron info
++    # Initialize tExit to just before current ray.t to force traversal on first sample
++    t_exit = ray.t - 1e-9
+     sample_tet_id = 0
+     tet_vertices = []
+@@ -127,5 +100,5 @@
+     while True:
+         # Sample free path
+-        ray.t = ray.t - log(1 - rand()) / sigma_max
++        ray.t = ray.t - math.log(1.0 - random.random()) / sigma_max
+         
+         if ray.t >= t_max:
+@@ -134,9 +107,7 @@
+         sample_point = ray.org + ray.t * ray.dir
+         
+-        # Check if we are still in the current tetrahedron
++        # Check if we crossed a tetrahedron boundary
+         if ray.t > t_exit:
+-            # Traverse refinement tree to find the fine tetrahedron
+             sample_tet_id, tet_vertices = traverse_refinement_tree(sample_point, coarse_tet_id)
+-            # Update t_exit to the exit face of the new tetrahedron
+             t_exit = intersect_faces(ray.t, sample_point, ray.dir, tet_vertices)
+         
+@@ -150,10 +121,27 @@
+         
+         # Acceptance test
+-        # Source: color.opacity * tf.opacity >= rand() * majorant
+-        # Note: tf.opacity here is the same constant used for sigma_max?
+-        # If so, this simplifies to: color.opacity >= rand() * macrocell_majorant
+-        # But let's stick to the source formula.
+-        if color.opacity * tf.opacity >= rand() * sigma_max:
++        if color.opacity * tf.opacity >= random.random() * sigma_max:
+             return color
++
++# Helper definitions (standard geometric operations)
++def traverse_coarse_mesh(ray):
++    """Returns (coarse_id, t_back, t_next_face) for the coarse element intersected by ray."""
++    # Standard coarse mesh traversal logic
++    pass
++
++def traverse_refinement_tree(point, coarse_tet_id):
++    """Returns (sample_tet_id, tet_vertices) for the fine tetrahedron containing point."""
++    # Standard AMR refinement tree traversal
++    pass
++
++def intersect_faces(t_current, point, direction, vertices):
++    """Returns distance to exit face of the tetrahedron containing point."""
++    # Ray-tetrahedron intersection calculation
++    pass
++
++def sample_data(point, tet_id, vertices):
++    """Returns scalar value at point via barycentric interpolation within the tetrahedron."""
++    # Barycentric coordinate calculation and scalar lookup
++    pass
+ ```
+ 

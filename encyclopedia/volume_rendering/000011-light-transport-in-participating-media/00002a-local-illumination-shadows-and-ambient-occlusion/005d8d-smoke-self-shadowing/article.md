@@ -1,0 +1,105 @@
+# Smoke Self-Shadowing
+
+Also called: emLightsSelfShadow
+
+## Overview
+Smoke Self-Shadowing is a technique for calculating the illumination of smoke volumes by their own internal fire sources, specifically addressing how smoke obstructs light propagation from the fire to itself [S1]. It solves the problem of realistic self-occlusion in participating media where the smoke density attenuates the light emitted by the fire, preventing the "brightly lit" but physically incorrect appearance of non-obstructing smoke [S1]. It is distinct from general scene shadowing because it focuses on the interaction between the fire light sources and the smoke volume, offering a trade-off between physical accuracy (ray-traced) and performance/smoothness (grid-based) [S1].
+
+## How it works
+The method provides three modes for calculating self-illumination: None, Ray-traced, and Grid-based [S1].
+
+**Inputs:**
+*   Smoke volume density field (from Phoenix for Maya simulator) [S1].
+*   Fire light sources (emitted by the fire simulation) [S1].
+*   Self-Shadowing mode selection (None, Ray-traced, Grid-based) [S1].
+*   Light Grid Resolution (%) parameter (for Grid-based mode) [S1].
+
+**Outputs:**
+*   Illuminated smoke appearance, where density affects light transmission [S1].
+
+**Data Structures:**
+*   **Light Grid:** A 3D grid used in Grid-based mode to store illumination data. The resolution is controlled by the `Light Grid Resolution (%)` parameter [S1].
+*   **Fire Lights:** Light sources generated within the bright parts of the fire simulation [S1].
+
+**Modes:**
+
+1.  **None:**
+    *   Smoke does not obstruct light propagation [S1].
+    *   Smoke is brightly lit without self-shadowing [S1].
+
+2.  **Ray-traced:**
+    *   Uses precise ray-tracing to illuminate smoke from fire light sources [S1].
+    *   Physically correct; accounts for non-transparent obstacles inside the Phoenix volume [S1].
+    *   Fire lights always illuminate the rest of the scene using ray-tracing [S1].
+    *   Can produce noise and requires intense computation [S1].
+
+3.  **Grid-based:**
+    *   Calculates self-illumination separately from the light cast on the scene using an approximate fast formula [S1].
+    *   Always smooth (no noise) [S1].
+    *   Ignores obstacles inside the Phoenix volume; they do not cast shadows on the smoke from the simulator's own light [S1].
+    *   Requires additional memory, with high RAM usage for high-resolution grids or many instanced volumes [S1].
+
+**Parameters:**
+*   **Light Grid Resolution (%):** Lowers the resolution of the light grid to speed up illumination. Reducing the grid produces smoother self-illumination and reduces the number of generated lights [S1].
+
+**Pitfalls:**
+*   Ray-traced mode can take considerable time to render and clear noise [S1].
+*   Grid-based mode ignores internal obstacles for shadow casting [S1].
+*   High memory usage in Grid-based mode with high resolution or many instances [S1].
+*   V-Ray GPU ignores all Fire Lights options; Global Illumination must be enabled separately [S1].
+
+**Pseudocode:**
+> **Unverified code.** The code below did not pass a test run against a reference implementation, or no test fits it, so it may contain errors.
+
+```python
+# Pseudocode for Smoke Self-Shadowing logic based on mode selection
+# Note: Specific implementation details of the "approximate fast formula" 
+# for Grid-based mode are not given in the sources [S1].
+
+def calculate_smoke_illumination(volume, fire_lights, mode, light_grid_resolution):
+    if mode == "None":
+        # Smoke does not obstruct light propagation
+        return brightly_lit_appearance()
+    
+    elif mode == "Ray-traced":
+        # Precise but slow ray-tracing
+        # Accounts for non-transparent obstacles inside the volume
+        # May produce noise
+        illumination = 0.0
+        for light in fire_lights:
+            # Ray trace from smoke point to light
+            # Integrate extinction along path
+            transmittance = ray_trace_transmittance(volume, light.position)
+            illumination += light.intensity * transmittance
+        return illumination
+    
+    elif mode == "Grid-based":
+        # Approximate fast formula
+        # No noise, always smooth
+        # Ignores obstacles inside the volume
+        # Uses Light Grid Resolution (%) to control grid size
+        grid = create_light_grid(light_grid_resolution)
+        # Populate grid with fire light contributions
+        # This step uses an "approximate fast formula" not detailed in sources [S1]
+        for light in fire_lights:
+            populate_light_grid(grid, light)
+        
+        # Sample grid for illumination
+        illumination = sample_light_grid(grid, volume.position)
+        return illumination
+    
+    else:
+        raise ValueError("Unknown self-shadowing mode")
+```
+
+## Operating characteristics
+*   **Performance:** Ray-traced mode is physically correct but requires intense computation and can take considerable time to render [S1]. Grid-based mode is faster and avoids noise but requires additional memory [S1].
+*   **Memory:** Grid-based mode requires additional memory, with high RAM usage possible with high resolution grids or many copied/instanced volumes [S1].
+*   **Quality:** Ray-traced mode is physically correct and accounts for obstacles [S1]. Grid-based mode is always smooth but ignores internal obstacles [S1]. None mode is unrealistic but fastest [S1].
+*   **Hardware/Software Constraints:** All Fire Lights options are ignored when rendering with V-Ray GPU; Global Illumination must be enabled separately in V-Ray Settings [S1].
+
+## Background
+This method is part of the Phoenix for Maya software suite, specifically within the Voxel Shader component [S1]. It is used to control the illumination of smoke by the simulator's own fire, enhancing realism by allowing smoke to obstruct light from the fire [S1]. The feature is associated with the parameter `emLightsSelfShadow` [S1].
+
+## Sources
+[S1] Voxel Shader - Phoenix for Maya, https://documentation.chaos.com/space/PHX4MAYA/125768009, fetched 2026-10-29

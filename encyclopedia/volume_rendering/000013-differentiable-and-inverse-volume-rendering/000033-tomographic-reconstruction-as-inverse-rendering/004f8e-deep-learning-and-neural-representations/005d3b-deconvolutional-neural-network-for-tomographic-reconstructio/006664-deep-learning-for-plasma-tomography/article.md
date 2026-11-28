@@ -1,0 +1,175 @@
+# Deep Learning for Plasma Tomography
+
+Also called: CNN-based Tomography, Neural Network Tomography
+
+## Overview
+Reconstructs a 3D plasma emissivity volume from 2D bolometer projection data using a fully convolutional neural network trained end-to-end [S1, unofficial]. It differs from traditional algebraic reconstruction techniques by learning the inverse mapping directly from data, bypassing the explicit inversion of the line-integral forward model [S1, unofficial].
+
+## How it works
+**Inputs and Outputs:**
+*   **Input:** A 1D vector of 56 bolometer readings (counts), shape `(56,)`, dtype `float32` [S1, unofficial].
+*   **Output:** A 3D tensor representing the reconstructed emissivity volume, shape `(196, 117, 1)` after slicing, dtype `float32` [S1, unofficial].
+
+**Data Structures:**
+*   **Training Data:** Pairs of `(X, Y)` where `X` is the bolometer vector and `Y` is the ground truth emissivity volume. Data is stored in HDF5 format [S1, unofficial].
+*   **Normalization:** Input and target values are clipped to non-negative values and divided by $10^6$ to convert from raw counts to MW m$^{-3}$ [S1, unofficial].
+
+**Algorithm Steps:**
+1.  **Preprocessing:** Load bolometer data `bolo`. Clip negative values to zero and normalize: `bolo = np.clip(bolo, 0., None) / 1e6` [S1, unofficial].
+2.  **Encoding:** Pass the input vector through two Dense layers. Each layer has 750 units with ReLU activation [S1, unofficial].
+3.  **Reshaping:** Reshape the output of the second Dense layer into a 3D tensor of shape `(25, 15, 20)` [S1, unofficial].
+4.  **Upsampling:** Apply three `Conv2DTranspose` layers sequentially. Each layer uses:
+    *   Kernel size: `(3, 3)`
+    *   Stride: `(2, 2)`
+    *   Padding: `'same'`
+    *   Filters: 20
+    *   Activation: ReLU [S1, unofficial].
+5.  **Final Convolution:** Apply a `Conv2D` layer with:
+    *   Kernel size: `(3, 3)`
+    *   Stride: `(1, 1)`
+    *   Padding: `'same'`
+    *   Filters: 1
+    *   Activation: ReLU [S1, unofficial].
+6.  **Slicing:** Slice the output tensor `t` using `t[:, 2:-2, 2:-3, 0]` to produce the final volume of shape `(196, 117, 1)` [S1, unofficial].
+
+**Training:**
+*   **Loss Function:** Mean Absolute Error (MAE) [S1, unofficial]:
+    $$ L = \frac{1}{N} \sum_{i=1}^{N} |Y_{valid} - Y_{pred}| $$
+    where $Y_{valid}$ is the ground truth and $Y_{pred}$ is the network output [S1, unofficial].
+*   **Optimizer:** Adam [S1, unofficial].
+*   **Learning Rate:** $1 \times 10^{-4}$ [S1, unofficial].
+*   **Batch Size:** 2632 samples [S1, unofficial].
+
+**Pseudocode:**
+> **Unverified code.** The code below did not pass a test run against a reference implementation, or no test fits it, so it may contain errors.
+
+```python
+import numpy as np
+import tensorflow as tf
+
+def build_model():
+    """
+    Constructs the Deep Learning for Plasma Tomography model.
+    Input: (56,)
+    Output: (196, 117, 1)
+    """
+    inputs = tf.keras.layers.Input(shape=(56,), dtype=tf.float32)
+    
+    # Step 2: Two Dense layers
+    x = tf.keras.layers.Dense(750, activation='relu')(inputs)
+    x = tf.keras.layers.Dense(750, activation='relu')(x)
+    
+    # Step 3: Reshape to (25, 15, 20)
+    # Note: 750 = 25 * 15 * 20
+    x = tf.keras.layers.Reshape((25, 15, 20))(x)
+    
+    # Step 4: Three Conv2DTranspose layers
+    # The input to Conv2DTranspose is 4D: (batch, height, width, channels)
+    # We assume the 20 channels are treated as the channel dimension for 2D convolutions
+    # or the reshape implies a specific spatial layout. Based on standard Keras Conv2DTranspose,
+    # the input shape is (H, W, C). Here H=25, W=15, C=20.
+    
+    # Layer 1
+    x = tf.keras.layers.Conv2DTranspose(
+        filters=20, 
+        kernel_size=(3, 3), 
+        strides=(2, 2), 
+        padding='same', 
+        activation='relu'
+    )(x)
+    
+    # Layer 2
+    x = tf.keras.layers.Conv2DTranspose(
+        filters=20, 
+        kernel_size=(3, 3), 
+        strides=(2, 2), 
+        padding='same', 
+        activation='relu'
+    )(x)
+    
+    # Layer 3
+    x = tf.keras.layers.Conv2DTranspose(
+        filters=20, 
+        kernel_size=(3, 3), 
+        strides=(2, 2), 
+        padding='same', 
+        activation='relu'
+    )(x)
+    
+    # Step 5: Final Conv2D layer
+    x = tf.keras.layers.Conv2D(
+        filters=1, 
+        kernel_size=(3, 3), 
+        strides=(1, 1), 
+        padding='same', 
+        activation='relu'
+    )(x)
+    
+    # Step 6: Slicing
+    # The output shape before slicing is (H_out, W_out, 1).
+    # The source code uses t[:, 2:-2, 2:-3, 0].
+    # This implies the tensor has 4 dimensions: (batch, H, W, C).
+    # The slicing removes 2 rows from top/bottom and 3 cols from right (and 2 from left).
+    # Output shape: (196, 117, 1)
+    
+    # To implement slicing in Keras, we use Lambda or a custom layer
+    def slice_output(t):
+        # t shape: (batch, H, W, 1)
+        # Slice dimensions: [:, 2:-2, 2:-3, 0]
+        # This extracts the first channel (index 0) and slices spatial dims
+        return t[:, 2:-2, 2:-3, 0]
+
+    outputs = tf.keras.layers.Lambda(slice_output)(x)
+    
+    model = tf.keras.Model(inputs=inputs, outputs=outputs)
+    return model
+
+def preprocess_bolo(bolo_raw):
+    """
+    Preprocess bolometer data.
+    Input: raw counts (can be negative)
+    Output: normalized emissivity (MW m^-3)
+    """
+    # Clip negative values to 0
+    bolo_clipped = np.clip(bolo_raw, 0.0, None)
+    # Normalize by 1e6
+    bolo_normalized = bolo_clipped / 1e6
+    return bolo_normalized
+
+def train_step(model, X_batch, Y_batch, optimizer):
+    """
+    Single training step.
+    """
+    with tf.GradientTape() as tape:
+        Y_pred = model(X_batch, training=True)
+        # Loss: Mean Absolute Error
+        loss = tf.reduce_mean(tf.abs(Y_batch - Y_pred))
+    
+    gradients = tape.gradient(loss, model.trainable_variables)
+    optimizer.apply_gradients(zip(gradients, model.trainable_variables))
+    return loss
+```
+
+**Parameters:**
+*   Learning rate: $10^{-4}$ [S1, unofficial].
+*   Batch size: 2632 [S1, unofficial].
+*   Optimizer: Adam [S1, unofficial].
+
+**Pitfalls:**
+*   Bolometer readings can be negative due to noise or calibration. These must be clipped to zero before normalization to prevent invalid inputs [S1, unofficial].
+*   The slicing operation `t[:, 2:-2, 2:-3, 0]` is specific to the output dimensions produced by the upsampling layers. Incorrect kernel/stride choices will break the final spatial alignment [S1, unofficial].
+
+## Operating characteristics
+*   **Time Complexity:** Inference is fast, dominated by the forward pass of the CNN. Training time depends on the number of epochs and batch size (2632 samples) [S1, unofficial].
+*   **Memory Complexity:** The model parameters are relatively small (two Dense layers of 750 units, three Conv2DTranspose layers with 20 filters, one Conv2D layer). The input/output tensors are small (56 floats input, ~23,000 floats output) [S1, unofficial].
+*   **Performance:** Applied to JET tokamak data. Specific accuracy metrics (e.g., RMSE) are not provided in the source, only training/validation loss plots [S1, unofficial].
+*   **Strengths:** End-to-end learning avoids manual feature engineering and explicit inversion of the projection matrix [S1, unofficial].
+*   **Limitations:** Requires large amounts of labeled training data (ground truth emissivity volumes) which may be simulated or from high-fidelity diagnostics [S1, unofficial]. Generalization to unseen plasma scenarios may be limited [S1, unofficial].
+
+## Background
+*   **Origin:** Developed by diogoff for plasma tomography using bolometer data from the JET tokamak [S1, unofficial].
+*   **Application:** Used for plasma tomography and disruption prediction [S1, unofficial].
+*   **Data Source:** JET tokamak bolometer data [S1, unofficial].
+
+## Sources
+[S1] diogoff/plasma-tomography, https://github.com/diogoff/plasma-tomography, fetched 2026-10-27 (unofficial)

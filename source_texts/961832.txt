@@ -1,0 +1,169 @@
+VEAcom DICOM viewer. Contribute to veacom-viewer/veacom development by creating an account on GitHub.
+
+Move clinical sampling and desktop GPU rendering into Rust by ainergiz · Pull Request #10 · veacom-viewer/veacom · GitHub
+Skip to content
+You signed in with another tab or window. Reload to refresh your session.
+You signed out in another tab or window. Reload to refresh your session.
+You switched accounts on another tab or window. Reload to refresh your session.
+Dismiss alert
+Conversation
+ainergiz
+commented
+Nov 8, 2026
+•
+edited
+Loading
+Uh oh!
+There was an error while loading. Please reload this page.
+Copy link
+Copy Markdown
+Contributor
+Rust renders acquired images, reconstructed planes, PET fusion and surgical 3D on Metal and Direct3D 12. Electron displays the completed frame. The engine also measures ROIs, SUVpeak, MTV and surgical surfaces using source voxels, and writes STL in patient coordinates.
+This is the native imaging branch from the private repository, squashed onto this main. Its review history stays there, and it stays a draft here as it was there. The four small fixes taken from it went in first, as #9.
+Ported onto public main
+Main had moved under the branch: catalog revisions and source-file checks, Copy for the report, and SUV only with the engine's calibration. Fifteen files conflicted. Each resolution keeps both changes.
+Revisions. Pixel requests carry the catalog revision from main and the source revision from this branch, and the broker checks both. The engine's frame and volume replies check the catalog revision and report the source revision.
+Changed files. The viewer's frame request reads the file, as on main, instead of the shared frame cache. A file changed since its import is refused with file.sourceChanged instead of shown from memory. Measurement and GPU uploads still use the cache. Two of main's protocol tests failed without this.
+PET records. Main's storage keys and older-record locations stay. This branch saves after native measurement, so a restored older record moves with that first save, taking its glucose and limited-view flag, and its old location is removed then.
+Copy for the report. It reads the lesion table's sphere measurements (useMeasuredSpheres), so a PET without pixels in the renderer still has values. The button waits while a sphere is being measured.
+SUV. Native sphere, region, probe and window values go through the engine's Normalization::quantity and stored_unit, which already need the engine's SUV factor. Fusion's relative scale follows petHasSuv.
+Cancel. Main's wake_cancelled from Keep video size, cancel waiting measurements, and harden picture export and test gates #9 also wakes this branch's GPU and mesh queues on macOS and Windows, as this branch's own cancel hooks did.
+Windows workflow. Both inputs stay: keep_installer from main and benchmark_base from this branch. The branch's tag-run installer upload now runs only on tag pushes, so a dispatch on a tag with keep_installer doesn't upload the same artifact twice.
+.gitleaksignore stays removed, as on main. The fuzzer cache key is a plain version.
+Cargo.lock holds every version either side pinned, normalised by cargo. tools/dependency-names.txt and the usage schema take both sides' names.
+Dependencies
+Against main, this PR adds 66 distinct Rust registry package names. Of these, 63 appear in the app workspace lock and three only in the DICOM fuzz lock. Both npm lockfiles match main. There are 10 newly direct Rust crates, including cc, which main already compiled transitively. Mac normal/build adds 42 names and Windows normal/build adds 51. CI builds the pinned cargo-fuzz executable separately and caches it.
+bytemuck — Casts typed vertex, voxel, and uniform slices into bytes with checked layout requirements.
+cc — Builds the repository’s Metal and Mach receive-right bridge using the system compiler. Already present transitively on main.
+libfuzzer-sys — Instrumented mutation engine for the DICOM input and codec guard fuzz target.
+naga — Parses and validates WGSL. Direct test code validates every checked-in shader without a GPU.
+napi-sys — Declares Node-API functions for a tagged receiver and a Node-owned handle buffer. Electron main and the compositor release each native surface exactly once.
+objc2 — Retains the Objective-C Metal texture while Rust imports it.
+objc2-metal — Declares the exact MTLTexture protocol and texture kind wgpu accepts.
+pollster — Waits for wgpu futures on the engine worker. It has zero enabled registry dependencies here.
+wgpu — Single rendering API used for source frames, MPR, fusion and 3D on Metal and D3D12.
+windows — Typed Windows COM/D3D12 calls create the shared resource and duplicate the handle into Electron.
+No standalone FFmpeg executable or Playwright recorder is installed. MP4 export uses WebCodecs. The stock Electron Mac runtime contains Chromium’s libffmpeg.dylib.
+Before and after (measured before the port)
+Main → this branch on the Apple M4 Pro, in the private repository. Four alternating pairs and 64 consecutive pages per plane. Each value is the median across launches. Timings include a compositor capture. RSS is the process tree after paging and excludes dedicated GPU memory. OS memory pressure affects RSS.
+Study
+First frame, ms
+Visible middle slice, ms
+Process RSS, MiB
+First coronal draw, ms
+Source p95, ms
+Coronal p95, ms
+CT, 100 slices
+642.6 → 770.0
+668.2 → 791.3
+597.3 → 575.9
+24.3 → 37.0
+20.5 → 31.4
+18.3 → 26.0
+CT, 1,000 slices
+1,244.2 → 673.1
+1,290.1 → 700.3
+780.5 → 632.0
+713.6 → 825.5
+20.5 → 28.4
+24.3 → 26.9
+The 1,000-slice CT removes a 500 MiB copy from the Electron renderer. On this run the first visible middle slice arrived sooner, while steady source paging took about 8 ms longer at p95. The small CT took longer to open. The native renderer can allocate one scalar texture up to 512 MiB and a separate carving mask up to 512 MiB.
+With the bitmap driver and the 1,000-slice CT used in review, the first reconstructed plane took 1,480 ms (862 ms on the reviewed build). Subsequent coronal frames were 2–5 ms over 64 pages, including tile boundaries where the reviewed build took 561–585 ms. Full-volume 1024×768 repeated 3D took 31 ms (previously 1,436 ms), and 1600×1000 took 66 ms (previously 2,929 ms). These 3D draws follow the reconstructed-plane upload. These timings are separate from the end-to-end desktop results.
+On the PET follow-up fixture, the first sphere measurement took 6.70 → 5.11 ms and the median of 30 warm measurements took 0.227 → 0.141 ms. Main additionally transferred the volume in 9.00 ms. Both builds measured the same 228 voxels, mean SUV 7 and MTV 14.592 mL.
+Checks
+On the port, after merging main with #9 (macOS, Apple Silicon):
+pnpm exec tsc --noEmit, node tools/check-repository.mjs, node tools/check-react-memo.mjs: pass.
+pnpm test: 800 passed, 1 skipped.
+cargo test --locked: 286 passed.
+Before the port, the branch passed the repository's verification script, the packaged DICOM, clinical render and installer smoke tests on macOS, the Linux checks with 30,000 fuzz inputs, and a Windows run that predates its last review fixes. Current Windows performance and driver stability still need a run.
+🤖 Generated with Claude Code
+Move clinical sampling and desktop GPU rendering into Rust
+…
+a9b42bb
+```
+Rust renders acquired images, reconstructed planes, PET fusion and surgical
+3D on Metal and Direct3D 12, and Electron displays the finished frame. The
+engine also measures ROIs, SUVpeak, MTV and surgical surfaces from source
+voxels, and writes STL in patient coordinates.
+
+Ported onto this repository's main from the private native imaging branch as
+one commit. Where main had moved, both changes stay:
+- Pixel requests carry the catalog revision and the source revision.
+- The viewer's frame requests read the file, not the shared frame cache, so
+  a file changed since its import is refused.
+- PET records keep main's storage keys; a restored older record moves with
+  the first save after native measurement.
+- Copy for the report reads the lesion table's sphere measurements.
+- The tag-run Windows installer upload runs only on tag pushes, beside the
+  dispatch input that keeps the installer.
+
+Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
+```
+ainergiz
+mentioned this pull request
+Nov 8, 2026
+Keep video size, cancel waiting measurements, and harden picture export and test gates
+#9
+Merged
+ainergiz
+and others
+added 2 commits
+November 8, 2026 16:51
+Read the lesion table's sphere measurements in Copy for the report
+…
+ab0aa52
+```
+A native PET volume has no pixels in the renderer, so the report could not
+measure its spheres there. It now reads the same measurements as the lesion
+table (useMeasuredSpheres) and waits while one is being measured. The port's
+first commit left these two files out.
+
+Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
+```
+Merge main into the native imaging port
+…
+31deef6
+```
+Main now has the four small fixes taken from this branch (#9). Where this
+branch had its own copy of them, main's version stays. Main's shared
+wake_cancelled also wakes this branch's GPU and mesh queues on macOS and
+Windows, as this branch's own cancel hooks did.
+
+Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
+```
+coderabbitai
+Bot
+commented
+Nov 8, 2026
+Copy link
+Copy Markdown
+Important
+Draft PR not reviewed
+Draft PRs are not automatically reviewed by default.
+Trigger a manual review
+To automatically review draft PRs, update your CodeRabbit configuration:
+```
+reviews:
+  auto_review:
+    drafts: true
+```
+Autofix · Keep fixing CodeRabbit findings and required CI, and resolving merge conflicts
+ainergiz
+closed this
+Nov 8, 2026
+ainergiz
+deleted the
+codex/native-imaging
+branch
+November 8, 2026 17:24
+Sign up for free
+to join this conversation on GitHub.
+Already have an account?
+Sign in to comment
+Uh oh!
+There was an error while loading. Please reload this page.
+Labels
+None yet
+1 participant
+Add this suggestion to a batch that can be applied as a single commit.This suggestion is invalid because no changes were made to the code.Suggestions cannot be applied while the pull request is closed.Suggestions cannot be applied while viewing a subset of changes.Only one suggestion per line can be applied in a batch.Add this suggestion to a batch that can be applied as a single commit.Applying suggestions on deleted lines is not supported.You must change the existing code in this line in order to create a valid suggestion.Outdated suggestions cannot be applied.This suggestion has been applied or marked resolved.Suggestions cannot be applied from pending reviews.Suggestions cannot be applied on multi-line comments.Suggestions cannot be applied while the pull request is queued to merge.Suggestion cannot be applied right now. Please check back later.
+You can’t perform that action at this time.

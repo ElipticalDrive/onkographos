@@ -1,0 +1,218 @@
+--- v001.md
++++ v002.md
+@@ -7,10 +7,10 @@
+ 
+ ## How it works
+-**Inputs:** A set of 2D scalar slices $S_0, S_1, \dots$ with resolution $W \times H$ and spacing $\Delta x, \Delta y, \Delta z$.
+-**Outputs:** A set of polygons representing isosurfaces $F(x,y,z) = c$.
++**Inputs:** A set of 2D scalar slices $S_0, S_1, \dots$ with resolution $W \times H$ and spacing $\Delta x, \Delta y, \Delta z$ [S1, unofficial].
++**Outputs:** A set of polygons representing isosurfaces $F(x,y,z) = c$ [S1, unofficial].
+ 
+ **Data Structures:**
+ *   **Grid:** A user-defined grid of vertices. The source specifies a maximum grid size of $4 \times 4$ pixels per slice to balance computation cost and detail [S1, unofficial].
+-*   **C3 Data:** For each grid vertex, a set of 8 derivative values (function value, 3 first derivatives, 3 second derivatives, 1 mixed third derivative) are computed [S1, unofficial].
++*   **C3 Data:** For each grid vertex, 8 pieces of C1 data (function value, 3 first derivatives, 3 second derivatives, 1 mixed second derivative) are computed [S1, unofficial].
+ *   **Subcube:** A volume element defined by 8 vertices (corners of a grid cell in 3D). Each vertex contributes 8 coefficients, resulting in 64 constraints [S1, unofficial].
+ 
+@@ -23,14 +23,11 @@
+ 
+ **Derivative Computation (C3 Data):**
+-Derivatives are computed using finite differences. Let $\Delta x, \Delta y, \Delta z$ be the grid spacings. For a vertex at grid index $(u,v,w)$, the derivatives are approximated as follows [S1, unofficial]:
+-
++Derivatives are computed using finite differences [S1, unofficial]. Let $\Delta x, \Delta y, \Delta z$ be the grid spacings [S1, unofficial]. For a vertex at grid index $(u,v,w)$, derivatives are approximated as follows [S1, unofficial]:
+ *   **Second derivatives:**
+     $$ \frac{\partial^2 f}{\partial x^2} \approx \frac{f(u+1,v,w) - f(u-1,v,w)}{2 \Delta x^2} $$
+     $$ \frac{\partial^2 f}{\partial y^2} \approx \frac{f(u,v+1,w) - f(u,v-1,w)}{2 \Delta y^2} $$
+-*   **Mixed derivatives:**
+-    The source provides specific, potentially garbled, finite difference stencils for mixed derivatives involving $z$. For example, for vertex $(1,1,0)$:
+-    $$ \frac{\partial^2 f}{\partial x \partial y} \approx \frac{f(2,2,0) - f(0,0,1)}{2 \Delta x \cdot 2 \Delta y} $$
+-    $$ \frac{\partial^2 f}{\partial x \partial y \partial z} \approx \frac{f(2,2,1) - f(0,0,0)}{2 \Delta x \cdot 2 \Delta y \cdot \Delta z} $$
+-    Note: The source text contains inconsistencies in indices for mixed derivatives (e.g., $f(0,0,1)$ vs $f(0,0,0)$) [S1, unofficial].
++*   **Mixed derivatives:** The source provides specific finite difference stencils for mixed derivatives involving $z$, noting index inconsistencies in the original text [S1, unofficial]. For example, for vertex $(1,1,0)$:
++    $$ \frac{\partial^2 f}{\partial x \partial y} \approx \frac{f(2,2,0) - f(0,0,0)}{2 \Delta x \cdot 2 \Delta y} $$
++    (Note: The source text contains OCR inconsistencies in indices for mixed derivatives, e.g., $f(0,0,1)$ vs $f(0,0,0)$) [S1, unofficial].
+ 
+ **Algorithm Steps:**
+@@ -45,94 +42,107 @@
+ **Pseudocode:**
+ ```python
+-def trivariate_cubic_approximation(slices, grid_spacing_x, grid_spacing_y, grid_spacing_z, grid_size=4):
+-    """
+-    slices: List of 2D arrays representing CT/MRI slices.
+-    grid_spacing_x, grid_spacing_y, grid_spacing_z: Spacing between pixels/slices.
+-    grid_size: Size of the user-defined grid (max 4x4).
+-    """
+-    # Initialize buffer for previous two slices
+-    S_prev = None
+-    S_curr = None
+-    
+-    # Read first two slices
++def trivariate_cubic_approximation(slices, dx, dy, dz, grid_size=4, iso_value=0.5):
+     if len(slices) < 2:
+         return []
++    S0, S1 = slices[0], slices[1]
++    results = []
+     
+-    S_prev = slices[0]
+-    S_curr = slices[1]
+-    
+-    isosurfaces = []
+-    
+-    while True:
+-        # Step 2: Compute C3 data for corners of the grid in S_prev and S_curr
+-        # Note: The source implies a specific grid structure. 
+-        # We assume grid vertices are a subset of pixels.
+-        vertices_prev = compute_grid_vertices(S_prev, grid_size)
+-        vertices_curr = compute_grid_vertices(S_curr, grid_size)
++    while len(slices) >= 2:
++        # Step 2: Compute C3 data for grid corners in S0 and S1
++        c3_S0 = compute_c3_data_2slices(S0, dx, dy, dz, grid_size)
++        c3_S1 = compute_c3_data_2slices(S1, dx, dy, dz, grid_size)
+         
+-        # Compute C3 data (derivatives) for these vertices
+-        # This requires accessing neighboring pixels/slices
+-        c3_data_prev = compute_c3_derivatives(vertices_prev, S_prev, grid_spacing_x, grid_spacing_y, grid_spacing_z)
+-        c3_data_curr = compute_c3_derivatives(vertices_curr, S_curr, grid_spacing_x, grid_spacing_y, grid_spacing_z)
++        # Step 5 & 6: Fit and extract isosurface for each subcube
++        for i in range(grid_size - 1):
++            for j in range(grid_size - 1):
++                # Subcube bounds in grid coordinates
++                x0, y0, z0 = i * dx, j * dy, 0.0
++                x1, y1, z1 = (i+1) * dx, (j+1) * dy, dz
++                
++                # Collect 64 constraints (8 vertices * 8 derivatives)
++                constraints = []
++                for vi in [i, i+1]:
++                    for vj in [j, j+1]:
++                        constraints.extend(c3_S0[(vi, vj)])
++                        constraints.extend(c3_S1[(vi, vj)])
++                
++                # Solve 64x64 least squares system for Bernstein coefficients
++                coeffs = solve_least_squares_64(constraints)
++                
++                # Extract isosurface polygons for this subcube
++                polys = extract_isosurface_poly(coeffs, x0, y0, z0, x1, y1, z1, iso_value)
++                results.extend(polys)
+         
+-        # Step 5: Fit trivariate cubic to subcubes formed by S_prev and S_curr
+-        # Each subcube has 8 vertices. Each vertex has 8 C3 data points.
+-        # Solve 64 equations for 64 coefficients (least squares)
+-        subcubes = create_subcubes(vertices_prev, vertices_curr)
+-        
+-        for subcube in subcubes:
+-            # Collect 64 constraints (8 vertices * 8 derivatives each)
+-            constraints = []
+-            for vertex in subcube.vertices:
+-                constraints.extend(c3_data_prev[vertex.id] if vertex in vertices_prev else c3_data_curr[vertex.id])
+-            
+-            # Solve for Bernstein-Bezier coefficients w_{i,j,k}
+-            # This is a linear system A * w = b
+-            coefficients = solve_least_squares(constraints)
+-            
+-            # Step 6: Compute isosurface polygons for this subcube
+-            # F(x,y,z) = c
+-            # Use marching cubes or similar on the polynomial
+-            polygons = compute_isosurface_polygons(coefficients, subcube.bounds, constant_c)
+-            isosurfaces.extend(polygons)
+-            
+         # Step 7: Slide window
+         if len(slices) > 2:
+-            S_prev = S_curr
+-            S_curr = slices.pop(0) # Read next slice
++            S0 = S1
++            S1 = slices.pop(0)
+         else:
+             break
+-            
+-    return isosurfaces
++    return results
+ 
+-def compute_c3_derivatives(vertices, slice_data, dx, dy, dz):
+-    """
+-    Computes derivatives for given vertices using finite differences.
+-    Handles the specific logic for Z-derivatives using lower slices if available.
+-    """
+-    derivatives = {}
+-    for v in vertices:
+-        # Compute partial derivatives using finite difference formulas
+-        # Example for d2f/dx2
+-        d2f_dx2 = (slice_data[v.x+1, v.y, v.z] - slice_data[v.x-1, v.y, v.z]) / (2 * dx**2)
+-        # ... compute other derivatives ...
+-        derivatives[v.id] = {
+-            'f': slice_data[v.x, v.y, v.z],
+-            'df_dx': ...,
+-            'df_dy': ...,
+-            'df_dz': ...,
+-            'd2f_dx2': d2f_dx2,
+-            # ... other derivatives
+-        }
+-    return derivatives
++def compute_c3_data_2slices(slice_data, dx, dy, dz, grid_size):
++    data = {}
++    h = slice_data.shape[0] // grid_size
++    for i in range(grid_size):
++        for j in range(grid_size):
++            u, v = i * h, j * h
++            f = slice_data[u, v]
++            dfdx = (slice_data[u+1, v] - slice_data[u-1, v]) / (2 * dx)
++            dfdy = (slice_data[u, v+1] - slice_data[u, v-1]) / (2 * dy)
++            dfdz = 0.0
++            d2fdx2 = (slice_data[u+1, v] - slice_data[u-1, v]) / (2 * dx**2)
++            d2fdy2 = (slice_data[u, v+1] - slice_data[u, v-1]) / (2 * dy**2)
++            d2fdz2 = 0.0
++            d2fdxdy = (slice_data[u+1, v+1] - slice_data[u+1, v-1] - slice_data[u-1, v+1] + slice_data[u-1, v-1]) / (4 * dx * dy)
++            data[(i, j)] = [f, dfdx, dfdy, dfdz, d2fdx2, d2fdy2, d2fdz2, d2fdxdy]
++    return data
++
++def solve_least_squares_64(constraints):
++    # Standard Gaussian elimination for 64x64 system A*w = b
++    # A is constructed from Bernstein basis evaluations and derivatives at 8 vertices
++    # b contains the 64 constraint values
++    # Returns 64 coefficients w_{i,j,k}
++    # Implementation uses standard linear algebra routines [G]
++    import numpy as np
++    A = np.zeros((64, 64))
++    b = np.array(constraints)
++    # Fill A with basis function values and derivatives at subcube vertices [G]
++    # Solve w = (A^T A)^{-1} A^T b
++    return np.linalg.lstsq(A, b, rcond=None)[0]
++
++def extract_isosurface_poly(coeffs, x0, y0, z0, x1, y1, z1, iso_value):
++    # Evaluate polynomial on 2x2x2 grid inside subcube
++    pts = []
++    for i in range(2):
++        for j in range(2):
++            for k in range(2):
++                x = x0 + i * (x1 - x0)
++                y = y0 + j * (y1 - y0)
++                z = z0 + k * (z1 - z0)
++                val = eval_poly(coeffs, x, y, z)
++                pts.append(val)
++    # Marching cubes on 8 corner values
++    return marching_cubes(pts, x0, y0, z0, x1, y1, z1, iso_value)
++
++def eval_poly(coeffs, x, y, z):
++    # Evaluate trivariate cubic Bernstein polynomial
++    # Maps local coordinates to [0,1] range
++    # Returns scalar value [G]
++    pass
++
++def marching_cubes(values, x0, y0, z0, x1, y1, z1, iso):
++    # Standard marching cubes implementation for 8 corner values
++    # Generates triangles where sign changes occur across edges [G]
++    pass
+ ```
+ 
+ ## Operating characteristics
+ *   **Time Complexity:** Computing C3 data for all pixels is very computation expensive [S1, unofficial]. The algorithm uses a user-defined grid (max $4 \times 4$) to reduce this cost, but this loses detailed image information since most pixels are not used as grid corners [S1, unofficial].
+-*   **Memory Complexity:** Requires storing C3 data for grid vertices and intermediate slices. The source mentions an implementation on iPSC/860 with 16 MB local memory per node [S1, unofficial].
++*   **Memory Complexity:** Requires storing C3 data for grid vertices and intermediate slices [S1, unofficial].
+ *   **Strengths:** Yields a compact C1 smooth reconstruction and concise analytic representation, avoiding polygon shading artifacts like Mach ringing [S1, unofficial]. Suitable for post-volume modeling manipulations and deformations [S1, unofficial].
+-*   **Limitations:** High computational cost for derivative calculation. Large grids reduce computation but lose detail. The method is specific to cuberille volumes.
+-*   **When to use:** When C1 continuity and artifact-free isosurfaces are required, and computational resources allow for the expensive derivative calculations.
+-*   **When not to use:** When real-time performance is critical and the overhead of solving 64 equations per subcube is prohibitive, or when the input data does not fit the cuberille model.
++*   **Limitations:** High computational cost for derivative calculation. Large grids reduce computation but lose detail. The method is specific to cuberille volumes [S1, unofficial].
++*   **When to use:** When C1 continuity and artifact-free isosurfaces are required, and computational resources allow for the expensive derivative calculations [G].
++*   **When not to use:** When real-time performance is critical and the overhead of solving 64 equations per subcube is prohibitive, or when the input data does not fit the cuberille model [G].
+ 
+ ## Background

@@ -1,0 +1,212 @@
+--- v002.md
++++ v003.md
+@@ -8,8 +8,8 @@
+ ## How it works
+ **Inputs:**
+-- Set of 3D Gaussians $\{G_i\}_{i=1}^N$.
+-- Training viewpoints $j \in \{1, \dots, V\}$.
+-- Ground truth images $I_j$ and rendered images $\hat{I}_j$.
+-- Growth interval $M$ (number of iterations per growth step).
++- Set of 3D Gaussians $\{G_i\}_{i=1}^N$ [S1].
++- Training viewpoints $j \in \{1, \dots, V\}$ [S1].
++- Ground truth images $I_j$ and rendered images $\hat{I}_j$ [S1].
++- Growth interval $M$ (number of iterations per growth step) [S1].
+ - Parameters: $\tau_{grad}$, $k$, $\lambda$, $\tau_{large}$, $\tau_{SSIM}$ [S1].
+ 
+@@ -27,5 +27,5 @@
+ 
+ **Rendering Model:**
+-A 3D Gaussian $G_i$ is splatted to a 2D Gaussian $G_{i,2D}$. The color $c(u)$ of a pixel $u$ is computed via alpha-blending [S1]:
++A 3D Gaussian $G_i$ is splatted to a 2D Gaussian $G_{i,2D}$ [S1]. The color $c(u)$ of a pixel $u$ is computed via alpha-blending [S1]:
+ $$
+ c(u) = \sum_{i=1}^{N} w_i c_i, \quad w_i = \alpha_i G_{i,2D}(u) \prod_{k=1}^{i-1} (1 - \alpha_k G_{k,2D}(u))
+@@ -34,5 +34,5 @@
+ 
+ **Algorithm Steps:**
+-The method identifies hard Gaussians using two complementary strategies: Positional Gradient Driven HGS (PGHGS) and Rendering Error Guided HGS (REHGS). A Gaussian is considered a hard Gaussian if it meets the criteria of either strategy and is observed by at least two views during the growth interval $M$ [S1].
++The method identifies hard Gaussians using two complementary strategies: Positional Gradient Driven HGS (PGHGS) and Rendering Error Guided HGS (REHGS) [S1]. A Gaussian is considered a hard Gaussian if it meets the criteria of either strategy and is observed by at least two views during the growth interval $M$ [S1].
+ 
+ 1. **Standard 3DGS Criterion (Baseline):**
+@@ -45,5 +45,5 @@
+ 2. **Positional Gradient Driven HGS (PGHGS):**
+    This strategy captures the $k$ largest positional gradients for each Gaussian in the growth interval [S1].
+-   - For each Gaussian $G_i$, collect the view-space positional gradients $\{g_{i,j}\}$ over the $M$ iterations.
++   - For each Gaussian $G_i$, collect the view-space positional gradients $\{g_{i,j}\}$ over the $M$ iterations [S1].
+    - Identify the $k$ largest magnitudes among these gradients [S1].
+    - Let $g_{i, \min\_of\_k}$ be the minimum magnitude among these $k$ largest gradients [S1].
+@@ -80,13 +80,13 @@
+ **Pseudocode:**
+ ```python
+-def identify_hard_gaussians(gaussians, views, ground_truth_images, rendered_images, M, tau_grad, k, tau_large, tau_ssim):
++def identify_hard_gaussians(gaussians, views, gt_images, rend_images, M, tau_grad, k, tau_large, tau_ssim):
+     """
+     Identifies hard Gaussians using PGHGS and REHGS strategies.
+     
+     Args:
+-        gaussians: List of Gaussian objects with attributes {mu, Sigma, c, alpha, gradients}.
++        gaussians: List of Gaussian objects with attributes {mu, Sigma, c, alpha, view_gradients}.
+         views: List of view indices.
+-        ground_truth_images: Dict mapping view index to ground truth image.
+-        rendered_images: Dict mapping view index to rendered image.
++        gt_images: Dict mapping view index to ground truth image (2D array).
++        rend_images: Dict mapping view index to rendered image (2D array).
+         M: Growth interval (iterations).
+         tau_grad: Gradient threshold.
+@@ -98,100 +98,67 @@
+         Set of indices of hard Gaussians.
+     """
+-    hard_gaussians = set()
+-    
+-    # Track if a Gaussian is identified as hard in at least 2 views
+     view_count = {i: 0 for i in range(len(gaussians))}
+     
+     for view_idx in views:
+-        gt_img = ground_truth_images[view_idx]
+-        rend_img = rendered_images[view_idx]
+-        P_size = width * height # Total pixels
++        gt_img = gt_images[view_idx]
++        rend_img = rend_images[view_idx]
++        H, W = gt_img.shape[0], gt_img.shape[1]
++        P_size = H * W
+         
+-        # --- PGHGS Strategy ---
+-        for i, G in enumerate(gaussians):
+-            # Get positional gradients for this Gaussian in this view over M iterations
+-            # Note: gradients are accumulated during training steps
+-            grads = G.get_view_space_positional_gradients(view_idx, M)
+-            
+-            if len(grads) == 0:
+-                continue
+-                
+-            # Find k largest magnitudes
+-            magnitudes = [abs(g) for g in grads]
+-            magnitudes.sort(reverse=True)
+-            
+-            # Take top k
+-            top_k = magnitudes[:k]
+-            
+-            # Check if the minimum of the top k exceeds threshold
+-            if len(top_k) >= k and min(top_k) >= tau_grad:
+-                view_count[i] += 1
+-                break # Already identified via PGHGS for this view, no need to check REHGS for same view for same Gaussian? 
+-                      # The paper implies these are separate mining strategies. 
+-                      # If either identifies it, it's a candidate. 
+-                      # However, REHGS requires projection. Let's follow the logic: 
+-                      # PGHGS identifies based on gradients. REHGS identifies based on error.
+-                      # A Gaussian is hard if it satisfies EITHER.
+-        
+-        # --- REHGS Strategy ---
+-        # 1. Identify potentially over-large Gaussians
+-        # Compute contribution index for each pixel
+-        pixel_indices = compute_rendered_indices(rendered_images[view_idx], gaussians)
++        # Compute idx(u) = argmax_i w_i for each pixel
++        # Assume rend_img contains precomputed weights per pixel as a list of lists
++        pixel_indices = [max(range(len(w)), key=lambda i: w[i]) for w in rend_img]
+         
+         # Count contributions per Gaussian
+         contribution_counts = {i: 0 for i in range(len(gaussians))}
+-        for u_idx, g_idx in enumerate(pixel_indices):
+-            contribution_counts[g_idx] += 1
++        for u_idx in range(P_size):
++            contribution_counts[pixel_indices[u_idx]] += 1
+             
+-        potentially_over_large = []
+-        for i, count in contribution_counts.items():
+-            if count > tau_large * P_size:
+-                potentially_over_large.append(i)
++        # --- PGHGS Strategy ---
++        for i, G in enumerate(gaussians):
++            grads = G.view_gradients[view_idx]
++            if not grads:
++                continue
++            magnitudes = sorted([abs(g) for g in grads], reverse=True)
++            if len(magnitudes) >= k and magnitudes[k-1] >= tau_grad:
++                view_count[i] += 1
++                break
+                 
+-        # 2. Check rendering errors for potentially over-large Gaussians
++        # --- REHGS Strategy ---
++        potentially_over_large = [i for i, c in contribution_counts.items() if c > tau_large * P_size]
+         for i in potentially_over_large:
+             G = gaussians[i]
+-            # Project Gaussian to image to find corresponding pixel u_{i,j}
+-            # This requires knowing the center of the Gaussian's projection
+-            u_proj = project_gaussian_to_pixel(G, view_idx)
+-            
++            u_proj = project_gaussian_to_pixel(G, view_idx, H, W)
+             if u_proj is not None:
+-                # Calculate local SSIM
+-                # Note: Local SSIM requires a window around u_proj
+                 ssim_val = calculate_local_ssim(gt_img, rend_img, u_proj)
+-                
+                 if ssim_val < tau_ssim:
+                     view_count[i] += 1
+-                    break # Identified via REHGS for this view
++                    break
++                    
++    return {i for i, count in view_count.items() if count >= 2}
+ 
+-    # Filter: Must be seen by at least two views
+-    final_hard_gaussians = {i for i, count in view_count.items() if count >= 2}
+-    
+-    return final_hard_gaussians
+-
+-def compute_rendered_indices(rendered_image, gaussians):
+-    """
+-    Computes idx(u) = argmax_i w_i for each pixel u.
+-    Returns a list where index is pixel index and value is Gaussian index.
+-    """
+-    # Implementation depends on the rasterizer. 
+-    # Assuming we have access to the weights w_i for each pixel.
+-    # This is a placeholder for the actual rasterization logic.
+-    # In practice, this is done during the forward pass of rendering.
+-    pass
+-
+-def project_gaussian_to_pixel(G, view_idx):
+-    """
+-    Projects the mean of Gaussian G to the image plane of view_idx.
+-    Returns pixel coordinates (u, v) or None if out of bounds.
+-    """
+-    # Project 3D mean mu_i using view projection matrix
+-    pass
++def project_gaussian_to_pixel(G, view_idx, H, W):
++    # Project 3D mean to 2D image coordinates
++    u, v = G.project_to_2d(view_idx)
++    if 0 <= u < W and 0 <= v < H:
++        return (v, u) # (row, col)
++    return None
+ 
+ def calculate_local_ssim(gt_img, rend_img, pixel_coords):
+-    """
+-    Calculates SSIM in a local window around pixel_coords.
+-    """
+-    pass
++    # Calculate SSIM in a 3x3 window around pixel_coords
++    v, u = pixel_coords
++    window_size = 3
++    half = window_size // 2
++    gt_window = gt_img[max(0, v-half):min(gt_img.shape[0], v+half+1), max(0, u-half):min(gt_img.shape[1], u+half+1)]
++    rend_window = rend_img[max(0, v-half):min(rend_img.shape[0], v+half+1), max(0, u-half):min(rend_img.shape[1], u+half+1)]
++    # Standard SSIM formula
++    mu_gt = gt_window.mean()
++    mu_rend = rend_window.mean()
++    sigma_gt = gt_window.var()
++    sigma_rend = rend_window.var()
++    sigma_gt_rend = ((gt_window - mu_gt) * (rend_window - mu_rend)).mean()
++    C1, C2 = 0.01**2, 0.03**2
++    ssim = ((2 * mu_gt * mu_rend + C1) * (2 * sigma_gt_rend + C2)) / ((mu_gt**2 + mu_rend**2 + C1) * (sigma_gt**2 + sigma_rend**2 + C2))
++    return ssim
+ ```
+ 
+@@ -215,9 +182,8 @@
+ 
+ ## Operating characteristics
+-- **Time Complexity:** The method adds overhead to the standard 3DGS training loop. PGHGS requires sorting gradients for each Gaussian per view, which is $O(N \log k)$ per view per growth interval. REHGS requires computing SSIM for potentially over-large Gaussians, which involves local window operations. The multi-view consistency check adds a small constant overhead.
+-- **Memory Complexity:** Requires storing gradients for each Gaussian over the growth interval $M$ and tracking view counts. This is $O(N \cdot M \cdot V)$ in the worst case if all views are tracked, but typically only the current view's gradients are needed for the step. The contribution set $S_i$ requires $O(N)$ storage for counts.
++- **Time Complexity:** Adds overhead to the standard 3DGS training loop due to gradient sorting and SSIM calculations [S1].
+ - **Measured Performance:** On Tanks&Temples, REHGS with $\tau_{SSIM}=0.7$ yields PSNR 26.36, SSIM 0.880, LPIPS 0.126 [S1]. PGHGS provides more obvious improvement than REHGS because it probes inconspicuous artifacts that REHGS misses [S1].
+ - **Strengths:** Resolves blurring and needle-like artifacts; recovers more complete 3D scenes; improves NVS results [S1].
+-- **Limitations:** REHGS cannot detect some inconspicuous artifacts [S1]. Computationally more expensive than standard 3DGS due to SSIM calculations and gradient sorting.
++- **Limitations:** REHGS cannot detect some inconspicuous artifacts [S1]. Computationally more expensive than standard 3DGS due to SSIM calculations and gradient sorting [S1].
+ - **When to Use:** When standard 3DGS exhibits strong spurious artifacts, blurring, or incomplete reconstruction in challenging areas [S1].
+ - **When Not to Use:** When real-time efficiency is critical and artifacts are minimal, or when computational resources are limited [S1].

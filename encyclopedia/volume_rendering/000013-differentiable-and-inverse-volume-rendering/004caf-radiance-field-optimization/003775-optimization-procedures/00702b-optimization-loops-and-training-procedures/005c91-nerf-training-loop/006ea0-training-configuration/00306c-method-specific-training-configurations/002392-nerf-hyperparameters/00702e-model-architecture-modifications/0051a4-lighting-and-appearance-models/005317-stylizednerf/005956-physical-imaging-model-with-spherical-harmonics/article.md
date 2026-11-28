@@ -1,0 +1,149 @@
+# Physical Imaging Model with Spherical Harmonics
+
+Also called: Lambertian reflectance-based physical imaging model
+
+## Overview
+This method integrates a physically constrained imaging model into the NeRF optimization loop to decompose illumination into direct sunlight and ambient skylight, using spherical harmonics to model the latter [S1]. It differs from standard NeRF by explicitly separating albedo, surface normals, and lighting to provide auxiliary supervision, thereby reducing lighting ambiguity and improving reconstruction fidelity in shadowed or radiometrically inconsistent regions [S1].
+
+## How it works
+**Inputs and Outputs**
+*   **Inputs:**
+    *   Density field $\sigma(P)$ and its gradient $\nabla\sigma(P)$ at a 3D point $P=(x,y,z)$ [S1].
+    *   Camera origin $o_p$ for the current view [S1].
+    *   Surface albedo $\rho_i$ (RGB) at point $i$ [S1].
+    *   Illumination coefficients $L_k$ for $k=0..8$ [S1].
+*   **Outputs:**
+    *   Synthesized image intensity $I_{p2}^i$ at point $i$ [S1].
+
+**Data Structures**
+*   **Illumination Coefficients:** A vector of 9 coefficients $L = [L_0, L_1, ..., L_8]$ representing the second-order spherical harmonic expansion of the ambient skylight field [S1].
+*   **Basis Functions:** A vector of 9 values $b = [b_0, ..., b_8]$ computed from the surface normal components [S1].
+
+**Steps**
+1.  **Extract Density Gradient:** Calculate the gradient of the density field $\sigma$ at point $P$ [S1]:
+    $$ \nabla\sigma(P) = \left[ \frac{\partial\sigma}{\partial x}, \frac{\partial\sigma}{\partial y}, \frac{\partial\sigma}{\partial z} \right] $$
+2.  **Normalize Gradient:** Compute the unit normal vector $n(P)$ [S1]:
+    $$ n(P) = \frac{\nabla\sigma(P)}{\|\nabla\sigma(P)\|} $$
+3.  **Constrain Normal Direction:**
+    *   Calculate the ray direction from the surface point $P$ to the camera origin $o_p$:
+        $$ d_{obs} = \text{normalize}(P - o_p) $$
+    *   Compute the inner product $n(P) \cdot d_{obs}$ [S1].
+    *   If $n(P) \cdot d_{obs} < 0$, reverse the normal vector: $n(P) \leftarrow -n(P)$ [S1].
+    *   Otherwise, retain $n(P)$ [S1]. This ensures the normal faces the camera (angle $< 90^\circ$) [S1].
+4.  **Compute Spherical Harmonic Basis Functions:** Evaluate the second-order basis functions $b_k$ using the components $n_x, n_y, n_z$ of the constrained unit normal $n(P)$ [S1]:
+    $$ b_0 = \sqrt{\frac{1}{4\pi}} $$
+    $$ b_1 = \sqrt{\frac{3}{4\pi}} n_z $$
+    $$ b_2 = \sqrt{\frac{3}{4\pi}} n_x $$
+    $$ b_3 = \sqrt{\frac{3}{4\pi}} n_y $$
+    $$ b_4 = \sqrt{\frac{5}{12\pi}} (3n_z^2 - 1) $$
+    $$ b_5 = \sqrt{\frac{15}{4\pi}} n_x n_z $$
+    $$ b_6 = \sqrt{\frac{15}{4\pi}} n_y n_z $$
+    $$ b_7 = \sqrt{\frac{15}{4\pi}} (n_x^2 - n_y^2) $$
+    $$ b_8 = \sqrt{\frac{15}{4\pi}} n_x n_y $$
+5.  **Synthesize Intensity:** Compute the intensity $I_{p2}^i$ for each RGB channel [S1]:
+    $$ I_{p2}^i = \rho_i \sum_{k=0}^{8} L_k b_k $$
+    Here, $\rho_i$ is the surface albedo (RGB), $L_k$ are the illumination coefficients, and $b_k$ are the basis functions [S1].
+
+**Pseudocode**
+> **Unverified code.** The code below did not pass a test run against a reference implementation, or no test fits it, so it may contain errors.
+
+```python
+def compute_physical_imaging_intensity(density_gradient, camera_origin, point_p, albedo, illumination_coeffs):
+    """
+    Computes synthesized intensity using physical imaging model with spherical harmonics.
+    
+    Args:
+        density_gradient: Array [dx, dy, dz] representing nabla sigma(P).
+        camera_origin: Array [ox, oy, oz] representing o_p.
+        point_p: Array [x, y, z] representing P.
+        albedo: Array [r, g, b] representing rho_i.
+        illumination_coeffs: Array [L0, ..., L8] of length 9.
+        
+    Returns:
+        intensity: Array [r, g, b] representing I_p2^i.
+    """
+    # Step 1 & 2: Normalize gradient to get unit normal
+    norm_magnitude = sqrt(density_gradient[0]**2 + density_gradient[1]**2 + density_gradient[2]**2)
+    if norm_magnitude == 0:
+        # [G] Guard against zero gradient; return zero intensity or handle as degenerate case.
+        return [0.0, 0.0, 0.0]
+    
+    nx = density_gradient[0] / norm_magnitude
+    ny = density_gradient[1] / norm_magnitude
+    nz = density_gradient[2] / norm_magnitude
+    
+    # Step 3: Constrain normal direction
+    # Calculate ray direction from surface point to camera origin
+    dx = point_p[0] - camera_origin[0]
+    dy = point_p[1] - camera_origin[1]
+    dz = point_p[2] - camera_origin[2]
+    ray_len = sqrt(dx**2 + dy**2 + dz**2)
+    
+    if ray_len == 0:
+        # [G] Guard against point coincident with camera origin
+        return [0.0, 0.0, 0.0]
+        
+    dobs_x = dx / ray_len
+    dobs_y = dy / ray_len
+    dobs_z = dz / ray_len
+    
+    # Inner product
+    dot_product = nx * dobs_x + ny * dobs_y + nz * dobs_z
+    
+    # If negative, reverse normal
+    if dot_product < 0:
+        nx = -nx
+        ny = -ny
+        nz = -nz
+        
+    # Step 4: Compute Spherical Harmonic Basis Functions (Second Order, k=0..8)
+    sqrt_4pi = sqrt(4 * 3.141592653589793)
+    sqrt_12pi = sqrt(12 * 3.141592653589793)
+    
+    b0 = sqrt(1 / (4 * 3.141592653589793))
+    b1 = sqrt(3 / (4 * 3.141592653589793)) * nz
+    b2 = sqrt(3 / (4 * 3.141592653589793)) * nx
+    b3 = sqrt(3 / (4 * 3.141592653589793)) * ny
+    b4 = sqrt(5 / (12 * 3.141592653589793)) * (3 * nz**2 - 1)
+    b5 = sqrt(15 / (4 * 3.141592653589793)) * nx * nz
+    b6 = sqrt(15 / (4 * 3.141592653589793)) * ny * nz
+    b7 = sqrt(15 / (4 * 3.141592653589793)) * (nx**2 - ny**2)
+    b8 = sqrt(15 / (4 * 3.141592653589793)) * nx * ny
+    
+    basis_functions = [b0, b1, b2, b3, b4, b5, b6, b7, b8]
+    
+    # Step 5: Synthesize Intensity
+    # Sum over k=0 to 8 of L_k * b_k
+    total_irradiance = 0.0
+    for k in range(9):
+        total_irradiance += illumination_coeffs[k] * basis_functions[k]
+        
+    # Apply albedo
+    intensity = [albedo[0] * total_irradiance, 
+                 albedo[1] * total_irradiance, 
+                 albedo[2] * total_irradiance]
+                 
+    return intensity
+```
+
+**Parameters**
+*   **Spherical Harmonic Order:** Second-order, resulting in 9 coefficients ($k=0$ to $8$) [S1].
+
+**Edge Cases and Pitfalls**
+*   **Zero Gradient:** If $\nabla\sigma(P)$ is zero, the normal cannot be normalized [G].
+*   **Camera Coincidence:** If $P = o_p$, the ray direction is undefined [G].
+*   **Normal Ambiguity:** Without the camera-view constraint, NeRF-predicted density gradients may point in the opposite direction of the actual surface normal [S1]. The inner product check resolves this [S1].
+
+## Operating characteristics
+*   **Time Complexity:** The computation involves a constant number of operations (gradient, normalization, 9 basis evaluations, dot product, and sum) per sample point, making it $O(1)$ per sample relative to scene size, but adds overhead to the per-point shading calculation during training [S1].
+*   **Memory Complexity:** Requires storing 9 illumination coefficients $L_k$ per view or globally, and the basis functions are computed on the fly [S1].
+*   **Strengths:** Reduces lighting ambiguity and improves reconstruction fidelity in shadowed or radiometrically inconsistent regions by separating illumination from albedo [S1].
+*   **Limitations:** Relies on the accuracy of the density gradient for normal estimation; assumes distant illumination sources (sunlight and skylight) [S1].
+*   **When to Use:** Satellite imaging conditions with complex lighting where radiometric decomposition is needed for accurate 3D reconstruction [S1].
+*   **When Not to Use:** Scenes with complex local lighting or non-distant light sources where spherical harmonics may not adequately capture the illumination field [S1].
+
+## Background
+This method was introduced in the context of NeRF reconstruction for multi-view satellite images, specifically to handle radiometric decomposition under complex satellite imaging conditions [S1]. It was proposed by researchers publishing in *Remote Sensing* in 2026 [S1]. The approach integrates the physical imaging module directly into the NeRF optimization process rather than applying it post-reconstruction [S1].
+
+## Sources
+[S1] Shading and Geometric Constraint Neural Radiance Field for DSM Reconstruction from Multi-View Satellite Images, https://doi.org/10.3390/rs18071091, fetched 2026-11-05

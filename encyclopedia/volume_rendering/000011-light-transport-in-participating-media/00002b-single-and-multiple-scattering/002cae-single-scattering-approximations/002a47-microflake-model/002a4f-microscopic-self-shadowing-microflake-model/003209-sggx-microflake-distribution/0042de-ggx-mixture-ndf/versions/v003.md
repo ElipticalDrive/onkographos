@@ -1,0 +1,56 @@
+# GGX Mixture NDF
+
+Also called: SGGX Mixture, Surface NDF, Surface Normal Distribution Function (NDF) Mixture with SGGX
+
+## Overview
+The GGX Mixture NDF is a compact representation of the marginal distribution of surface normals, $p_N(n)$, used to model glossiness and anisotropy in participating media and microflake models. It approximates the surface NDF as a weighted sum of Single Scattering GGX (SGGX) distributions. This method sets itself apart from single-lobe SGGX models by allowing the representation of complex, multi-modal normal distributions, and from aggregated microfacet convolutions by providing the base component that is subsequently convolved with isotropic spherical distributions to model surface roughness effects [S1, unofficial].
+
+## How it works
+**Inputs and Outputs:**
+*   **Input:** A target surface normal distribution $p_N(n)$ (derived from geometry or measurement) and a desired number of lobes $k$.
+*   **Output:** A set of $k$ SGGX parameters $\{ (w_i, R_i, \alpha_i) \}_{i=1}^k$ defining the mixture.
+
+**Data Structures:**
+The mixture is defined by three arrays of size $k$:
+1.  `weights`: Array of $k$ floats $w_i$, where $w_i > 0$ and $\sum_{i=1}^k w_i = 1$.
+2.  `rotations`: Array of $k$ rotation matrices $R_i$ (or equivalent quaternion/eigenbasis representations) mapping the local SGGX frame to the world frame. Each $R_i$ is defined by an orthonormal basis $(\omega_1, \omega_2, \omega_3)$ [S1, unofficial].
+3.  `roughness`: Array of $k$ 2D vectors $\alpha_i = (\alpha_{x,i}, \alpha_{y,i})$, representing the anisotropic roughness parameters for each lobe.
+
+**Formulas:**
+The surface NDF is computed as:
+$$
+p_N(n) = \sum_{i=1}^{k} w_i D_{i\text{sggx}}(n)
+$$
+where $D_{i\text{sggx}}(n)$ is the SGGX distribution for the $i$-th lobe, parameterized by $R_i$ and $\alpha_i$ [S1, unofficial].
+
+**Parameters:**
+*   $k$: The number of SGGX lobes. Typical value not specified in sources; determined by the fitting process [S1, unofficial].
+
+**Steps:**
+1.  **Parameterization:** Define the SGGX distribution $D_{\text{sggx}}(\omega; R, \alpha)$ using its eigenbasis $R = (\omega_1, \omega_2, \omega_3)$ and anisotropic roughness $\alpha = (\alpha_x, \alpha_y)$. The exact functional form of $D_{\text{sggx}}$ is detailed in the supplemental document of the source [S1, unofficial].
+2.  **Fitting:** Determine the weights $w_i$, rotations $R_i$, and roughness $\alpha_i$ such that the mixture approximates the target $p_N(n)$. The specific optimization or fitting algorithm is described in §7.1 of the source [S1, unofficial].
+3.  **Evaluation:** To evaluate $p_N(n)$ for a normal $n$, compute the weighted sum of the individual SGGX lobes evaluated at $n$.
+
+**Edge Cases and Pitfalls:**
+*   **Normalization:** The weights must strictly sum to 1 to ensure $p_N(n)$ is a valid probability density function [S1, unofficial].
+*   **Precision:** The fitting process (§7.1) must handle potential numerical instability when lobes become nearly identical or weights approach zero [S1, unofficial].
+
+## Subtopics
+
+### [SGGX Convolution Approximation](10869-sggx-convolution-approximation.md)
+Approximates the convolution of a single SGGX lobe with an isotropic spherical distribution by a roughened SGGX. Use when modeling surface roughness blur on a single microflake orientation.
+
+### [Convolution of Aggregated Microfacet and Surface NDF](10871-convolution-of-aggregated-microfacet-and-surface-ndf.md)
+Computes the effective NDF by convolving an aggregated microfacet distribution with the surface NDF mixture. Use when modeling the joint effect of surface roughness and microflake orientation.
+
+## Operating characteristics
+*   **Complexity:** Evaluation is $O(k)$, where $k$ is the number of lobes. Fitting complexity is not specified [S1, unofficial].
+*   **Memory:** Requires storing $k$ sets of rotation matrices and roughness parameters, plus weights.
+*   **Strengths:** Compact representation of complex anisotropic and multi-modal normal distributions. Enables efficient convolution approximations [S1, unofficial].
+*   **Limitations:** Requires a fitting step to determine parameters. Accuracy depends on $k$ and the fitting quality [S1, unofficial].
+
+## Background
+The method was introduced by Heitz et al. in the context of efficient scene appearance aggregation for level-of-detail rendering. It builds upon the SGGX distribution [Heitz et al. 2015] to provide a flexible representation for surface normals in participating media [S1, unofficial].
+
+## Sources
+[S1] Efficient Scene Appearance Aggregation for Level-of-Detail Rendering, https://core.ac.uk/works/391729893, fetched 2026-11-01 (unofficial)

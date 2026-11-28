@@ -1,0 +1,146 @@
+--- v005.md
++++ v006.md
+@@ -8,40 +8,24 @@
+ ## How it works
+ **Inputs:**
+-- A set of VOI definitions, each associated with a unique Material ID (mtId) and a priority value.
+-- Clipping meshes (optional, used to define view frustum or user-defined boundaries).
+-- Multi-Planar Reformation (MPR) meshes (optional, representing explicit planar data).
+-- A depth-peeling renderer that outputs fragments with depth, facing (front/back), and mesh ID.
++- A set of VOI definitions, each associated with a unique Material ID (mtId) and a priority value [S1].
++- Clipping meshes (optional, used to define view frustum or user-defined boundaries) [S1].
++- Multi-Planar Reformation (MPR) meshes (optional, representing explicit planar data) [S1].
++- A depth-peeling renderer that outputs fragments with depth, facing (front/back), and mesh ID [S1].
+ 
+ **Outputs:**
+-- A ray-layer buffer: an array of entries per ray (pixel), where each entry contains a depth, a material ID, and potentially other metadata required for ray casting.
++- A ray-layer buffer: an array of entries per ray (pixel), where each entry contains a depth, a material ID, and potentially other metadata required for ray casting [S1].
+ 
+ **Data Structures:**
+-- `insideFlag` array: An array indexed by Material ID. It stores the net count of front-facing minus back-facing fragments for each VOI.
+-- `rayLayerBuffer`: The output structure storing the sequence of layers for each ray.
++- `insideFlag` array: An array indexed by Material ID [S1]. It stores the net count of front-facing minus back-facing fragments for each VOI [S1].
++- `rayLayerBuffer`: The output structure storing the sequence of layers for each ray [S1].
+ 
+ **Algorithm Steps:**
+-1. **Peeling:** Render the scene using a depth-peeling algorithm [Eve01]. For each pass $k$, render only fragments with depth greater than the $k$-th peeled depth.
+-2. **Inside Flag Update:** For every fragment generated (even if discarded by the peeling depth test), update the `insideFlag` array for its associated Material ID:
+-   - If the fragment is front-facing, increment `insideFlag[mtId]`.
+-   - If the fragment is back-facing, decrement `insideFlag[mtId]`.
+-   This count represents the winding number or enclosure status of the fragment relative to the VOI [S1].
+-3. **Determine Current Material:** Scan the `insideFlag` array to find the Material ID of the enclosing VOI with the highest priority. Let this be `currentId`.
+-   - A VOI is considered enclosing if its `insideFlag` is non-zero (indicating the ray is inside the volume defined by that VOI).
+-   - Priority determines which VOI takes precedence if multiple VOIs enclose the same point [S1].
+-4. **Layer Buffer Writing:**
+-   - Compare `currentId` with the material ID of the previous layer in the `rayLayerBuffer` for the current ray.
+-   - If `currentId` differs from the previous layer's ID, write a new entry to the buffer with `currentId` and the current fragment's depth.
+-   - Note: A back-facing fragment indicates the exit of a contributing VOI. Consequently, `currentId` will change (e.g., from the VOI's ID to the background or a different enclosing VOI) [S1].
+-5. **Clipping Mesh Handling:**
+-   - If the fragment belongs to a clipping mesh:
+-     - If front-facing: Clear all previous layers in the `rayLayerBuffer` for this ray (resetting the state).
+-     - If back-facing: Mark layer generation as finished for this ray (no further layers are added for this ray).
+-6. **MPR Mesh Handling:**
+-   - If the fragment belongs to an MPR mesh:
+-     - Write the MPR layer directly to the buffer.
+-     - If the MPR is inside a non-empty layer (i.e., `currentId` is not background), append an entry with the same depth as the MPR but using the previous material ID. This ensures the intersected layer continues after the MPR [S1].
+-7. **Optimization (Empty Space Merging):**
+-   - After generating layers, scan for empty segments between adjacent `mtIdVolume` layers.
+-   - If the depth distance between two adjacent volume layers is shorter than a given threshold, merge them into a single layer to reduce buffer complexity [S1].
++1. **Peeling:** Render the scene using a depth-peeling algorithm [Eve01]. For each pass $k$, render only fragments with depth greater than the $k$-th peeled depth [S1].
++2. **Inside Flag Update:** For every fragment generated (even if discarded by the peeling depth test), update the `insideFlag` array for its associated Material ID [S1]. If the fragment is front-facing, increment `insideFlag[mtId]` [S1]. If the fragment is back-facing, decrement `insideFlag[mtId]` [S1].
++3. **Determine Current Material:** Scan the `insideFlag` array to find the Material ID of the enclosing VOI with the highest priority, denoted as `currentId` [S1]. A VOI is considered enclosing if its `insideFlag` is non-zero, indicating the ray is inside the volume defined by that VOI [S1]. Priority determines which VOI takes precedence if multiple VOIs enclose the same point [S1].
++4. **Layer Buffer Writing:** Compare `currentId` with the material ID of the previous layer in the `rayLayerBuffer` for the current ray [S1]. If `currentId` differs from the previous layer's ID, write a new entry to the buffer with `currentId` and the current fragment's depth [S1]. A back-facing fragment indicates the exit of a contributing VOI, so `currentId` will differ from the ID of the VOI being exited [S1].
++5. **Clipping Mesh Handling:** If the fragment belongs to a clipping mesh: if front-facing, clear all previous layers in the `rayLayerBuffer` for this ray [S1]. If back-facing, mark layer generation as finished for this ray [S1].
++6. **MPR Mesh Handling:** If the fragment belongs to an MPR mesh: write the MPR layer directly to the buffer [S1]. If the MPR is inside a non-empty layer, append an entry with the same depth as the MPR but using the previous material ID to continue the intersected layer [S1].
++7. **Optimization (Empty Space Merging):** After generating layers, scan for empty segments between adjacent `mtIdVolume` layers [S1]. If the depth distance between two adjacent volume layers is shorter than a given threshold, merge them into a single layer to reduce buffer complexity [S1].
+ 
+ **Pseudocode:**
+@@ -49,12 +33,18 @@
+ ```python
+ # Initialization
++all_material_ids = [...] # List of all known material IDs from VOI definitions
++background_id = 0 # ID representing empty/background space
+ insideFlags = {mtId: 0 for mtId in all_material_ids}
+ rayLayerBuffer = [] # List of layers for the current ray
+-previousLayerId = None
++previousLayerId = background_id
++layer_generation_finished = False
+ 
+ # Called for each peeled fragment in depth order
+ def process_fragment(fragment):
+-    global previousLayerId
++    global previousLayerId, layer_generation_finished
+     
++    if layer_generation_finished:
++        return
++
+     # 1. Update inside flags for the fragment's material ID
+     mtId = fragment.mesh_id
+@@ -66,5 +56,12 @@
+     # 2. Determine current enclosing material ID
+     # Find mtId with non-zero insideFlag and highest priority
+-    currentId = find_highest_priority_enclosing_id(insideFlags)
++    currentId = background_id
++    best_priority = -float('inf')
++    for id in all_material_ids:
++        if insideFlags[id] != 0: # Enclosing
++            priority = get_priority(id) # Lookup priority from VOI definitions
++            if priority > best_priority:
++                best_priority = priority
++                currentId = id
+ 
+     # 3. Handle Clipping Meshes
+@@ -73,9 +70,8 @@
+             # Clear previous layers
+             rayLayerBuffer.clear()
+-            previousLayerId = None
++            previousLayerId = background_id
+         else:
+             # Mark generation as finished
+-            return # Stop processing further fragments for this ray
+-        
++            layer_generation_finished = True
+         return
+ 
+@@ -83,9 +79,9 @@
+     if fragment.is_mpr_mesh:
+         # Write MPR layer
+-        add_layer_to_buffer(fragment.depth, fragment.mpr_material_id)
++        rayLayerBuffer.append({'depth': fragment.depth, 'material_id': fragment.mpr_material_id})
+         
+         # If inside a non-empty layer, append continuation entry
+-        if previousLayerId is not None and previousLayerId != background_id:
+-            add_layer_to_buffer(fragment.depth, previousLayerId)
++        if previousLayerId != background_id:
++            rayLayerBuffer.append({'depth': fragment.depth, 'material_id': previousLayerId})
+         
+         previousLayerId = fragment.mpr_material_id
+@@ -95,20 +91,6 @@
+     # If currentId differs from previous layer, write new layer
+     if currentId != previousLayerId:
+-        add_layer_to_buffer(fragment.depth, currentId)
++        rayLayerBuffer.append({'depth': fragment.depth, 'material_id': currentId})
+         previousLayerId = currentId
+-
+-def add_layer_to_buffer(depth, material_id):
+-    rayLayerBuffer.append({'depth': depth, 'material_id': material_id})
+-
+-def find_highest_priority_enclosing_id(flags):
+-    best_id = background_id
+-    best_priority = -infinity
+-    for mtId, count in flags.items():
+-        if count != 0: # Enclosing
+-            priority = get_priority(mtId)
+-            if priority > best_priority:
+-                best_priority = priority
+-                best_id = mtId
+-    return best_id
+ ```
+ 
+@@ -123,5 +105,5 @@
+ 
+ ## Operating characteristics
+-- **Time Complexity:** Proportional to the number of depth peeling passes ($N$) times the number of pixels, plus the cost of scanning `insideFlags` per fragment. The number of passes depends on the maximum number of overlapping VOIs [S1].
++- **Time Complexity:** Proportional to the number of depth peeling passes times the number of pixels, plus the cost of scanning `insideFlags` per fragment.
+ - **Memory Complexity:** Requires storage for `insideFlags` (size proportional to number of material IDs) and the ray-layer buffer (size proportional to number of layers per ray).
+ - **Strengths:** Correctly handles nested, self-intersecting VOIs and preserves material priority information which hardware stencil buffers cannot [S1]. Supports clipping and MPR meshes explicitly [S1].

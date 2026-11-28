@@ -1,0 +1,172 @@
+--- v001.md
++++ v002.md
+@@ -14,4 +14,5 @@
+ - Scheduled parameters: valid depth threshold $\epsilon_t^m$ and valid depth offset $\epsilon_o^m$ [S1].
+ - Gaussian width parameter $\epsilon_n$ for the line-of-sight prior [S1].
++- Sampling interval boundaries $t_{i-1}$ and $t_i$ for each discretization step [G].
+ 
+ **Outputs:**
+@@ -33,6 +34,6 @@
+     $$ D_{reliable}^m = \{ D_i \mid D_i \le \epsilon_t^m, \ D_i \le \hat{D}_i + \epsilon_o^m, \ D_i \in D \} $$
+     The parameters $\epsilon_t^m$ and $\epsilon_o^m$ are scheduled as follows [S1]:
+-    $$ \epsilon_t^m = \min \{ \alpha_t \epsilon_t^{m-1}, \ \epsilon_t^{max} \} \quad \text{with } \alpha_t > 1 $$
+-    $$ \epsilon_o^m = \max \{ \alpha_o \epsilon_o^{m-1}, \ \epsilon_o^{min} \} \quad \text{with } \alpha_o < 1 $$
++    $$ \epsilon_t^m = \min \{ \alpha_t \epsilon_t^{m-1}, \epsilon_t^{max} \} \quad \text{with } \alpha_t > 1 $$
++    $$ \epsilon_o^m = \max \{ \alpha_o \epsilon_o^{m-1}, \epsilon_o^{min} \} \quad \text{with } \alpha_o < 1 $$
+     $\epsilon_t^m$ filters out depth samples exceeding the threshold, prioritizing nearer samples less likely to be occluded, and increases exponentially [S1]. $\epsilon_o^m$ omits samples with depth values far larger than the predicted depth $\hat{D}_i$ (likely occluded), and decays exponentially [S1].
+ 
+@@ -66,5 +67,5 @@
+     rendered_depth: np.ndarray,
+     rendered_weights: np.ndarray,
+-    sampling_intervals: np.ndarray,
++    interval_boundaries: np.ndarray,
+     iteration: int,
+     epsilon_t_prev: float,
+@@ -72,4 +73,6 @@
+     alpha_t: float,
+     alpha_o: float,
++    epsilon_t_max: float,
++    epsilon_o_min: float,
+     epsilon_n: float
+ ) -> float:
+@@ -81,5 +84,5 @@
+         rendered_depth: Array of rendered depths D_hat.
+         rendered_weights: Array of weights w_i for each sampling interval per pixel.
+-        sampling_intervals: Array of t values for sampling intervals.
++        interval_boundaries: Array of t values defining interval edges [t_0, t_1, ..., t_K].
+         iteration: Current training iteration m.
+         epsilon_t_prev: epsilon_t from iteration m-1.
+@@ -87,4 +90,6 @@
+         alpha_t: Growth rate for epsilon_t (alpha_t > 1).
+         alpha_o: Decay rate for epsilon_o (alpha_o < 1).
++        epsilon_t_max: Maximum cap for epsilon_t.
++        epsilon_o_min: Minimum cap for epsilon_o.
+         epsilon_n: Width parameter for the Gaussian line-of-sight prior.
+         
+@@ -96,13 +101,10 @@
+     # Here we assume 'ground_truth_depth' is already processed to be the 
+     # front-most value from multiple acquisitions [S2].
+-    # If raw multi-sample data were available:
+-    # robust_depth = np.min(multi_sample_depths, axis=0)
+-    # D = robust_depth
+     D = ground_truth_depth
+     
+     # Step 2: Identify Reliable Subset
+     # Schedule parameters [S1]
+-    epsilon_t_curr = min(alpha_t * epsilon_t_prev, float('inf')) # Cap not specified, assume max or no cap
+-    epsilon_o_curr = max(alpha_o * epsilon_o_prev, 0.0)          # Cap not specified, assume min or no cap
++    epsilon_t_curr = min(alpha_t * epsilon_t_prev, epsilon_t_max)
++    epsilon_o_curr = max(alpha_o * epsilon_o_prev, epsilon_o_min)
+     
+     # Reliability criteria [S1]
+@@ -126,87 +128,20 @@
+     # Calculate N_i using CDF for each interval
+     # N_i is the probability mass of N(D_hat, epsilon_n) within interval i
+-    # Assuming sampling_intervals are the centers or boundaries? 
+-    # The source says "discretized based on point sampling intervals" and "Ni indicates the probability mass within the i-th interval" [S1].
+-    # We need the boundaries of the intervals. If sampling_intervals are points, we assume uniform spacing or use adjacent points.
+-    # For simplicity, assume sampling_intervals defines the centers, and we approximate interval width or use CDF difference.
+-    # Exact implementation using CDF [S1]:
+-    # If intervals are defined by boundaries t_i and t_{i+1}, N_i = CDF(t_{i+1}) - CDF(t_i).
+-    # If only points are given, we might assume symmetric intervals or use the provided points as boundaries for adjacent segments.
+-    # Let's assume sampling_intervals are the sample points t_i.
+-    # We need interval boundaries. Let's assume uniform delta_t or derive from adjacent points.
+-    # For robustness, we calculate N_i as the integral over the interval surrounding t_i.
+-    # If not provided, we assume the interval is [t_i - dt/2, t_i + dt/2] or similar.
+-    # However, the source emphasizes CDF over mid-point. 
+-    # Let's assume we have interval boundaries or can derive them.
+-    # If only points are available, a common discretization is:
+-    # N_i = CDF(t_{i+1}) - CDF(t_{i-1})? No, that's for cell-centered.
+-    # Let's assume we have a function get_interval_boundaries or uniform spacing.
+-    # Since the source doesn't specify interval boundaries, we assume standard discretization where N_i is computed via CDF difference.
++    # interval_boundaries shape: (K+1,)
++    # rendered_depth shape: (H, W)
++    # rendered_weights shape: (H, W, K)
+     
+-    # Placeholder for interval boundaries if not explicitly provided in inputs
+-    # In a real implementation, sampling_intervals would likely come with step sizes or boundaries.
+-    # We will assume uniform spacing for the sake of the example, or that the caller provides boundaries.
+-    # To be strictly compliant with "no placeholders", we must define how N_i is derived.
+-    # The source says "discretized based on point sampling intervals".
+-    # Let's assume the intervals are defined by the midpoints between samples or fixed step.
+-    # We will use the CDF to compute the mass for each sample's contribution.
+-    # A precise implementation would require interval boundaries.
+-    # Let's assume `sampling_intervals` are the centers and we have a `step_size`.
+-    # If step_size is not given, we cannot compute exact N_i.
+-    # However, the source contrasts with "mid-point approximation".
+-    # Mid-point approx: N_i approx w(t_i) * dt.
+-    # Exact: N_i = CDF(t_i + dt/2) - CDF(t_i - dt/2).
++    # Compute interval centers and widths for broadcasting if needed, 
++    # but CDF only needs boundaries.
++    t_lower = interval_boundaries[:-1]  # (K,)
++    t_upper = interval_boundaries[1:]   # (K,)
+     
+-    # We need dt. If not provided, we can't implement exactly.
+-    # But we can implement the CDF logic.
+-    # Let's assume we have `interval_widths` or can infer them.
+-    # For the purpose of this article, we assume the existence of interval boundaries or a method to get them.
+-    # If not, we note it as a missing detail in sources.
+-    
+-    # Let's assume `sampling_intervals` are sorted and we compute N_i using adjacent points as boundaries.
+-    # For the first and last, we might need t_near and t_far.
+-    
+-    # Re-reading [S1]: "Ni indicates the probability mass within the i-th interval."
+-    # "discretized to sum (wi - Ni)^2"
+-    
+-    # Implementation of N_i using CDF:
+-    # Assuming we have boundaries t_start and t_end for each interval i.
+-    # If not provided, we assume uniform spacing `dt` derived from `sampling_intervals`.
+-    
+-    dt = np.diff(sampling_intervals)
+-    # Handle edge cases for dt
+-    dt = np.append(dt, dt[-1]) # Approximate last interval
+-    
+-    # Boundaries for each interval (centered at sampling_intervals)
+-    t_lower = sampling_intervals - dt / 2
+-    t_upper = sampling_intervals + dt / 2
++    # Expand dims for broadcasting: D_hat -> (H, W, 1)
++    D_hat_expanded = rendered_depth[:, :, np.newaxis]
+     
+     # Compute N_i using CDF [S1]
+     # N_i = CDF(t_upper) - CDF(t_lower) for Gaussian N(D_hat, epsilon_n)
+-    # Note: D_hat is the mean.
+-    
+-    # Vectorized computation for all pixels and intervals
+-    # rendered_depth shape: (H, W)
+-    # sampling_intervals shape: (K,)
+-    # rendered_weights shape: (H, W, K)
+-    
+-    # Expand dims for broadcasting
+-    # D_hat: (H, W, 1)
+-    # t_lower: (1, 1, K)
+-    # t_upper: (1, 1, K)
+-    
+-    D_hat_expanded = rendered_depth[:, :, np.newaxis]
+-    epsilon_n_expanded = np.full_like(D_hat_expanded, epsilon_n)
+-    
+-    # CDF of Gaussian
+-    # scipy.stats.norm.cdf(x, loc, scale)
+-    # We need to compute CDF for each pixel's D_hat
+-    
+-    # Efficiently compute N_i
+-    # N_i = norm.cdf(t_upper, loc=D_hat, scale=epsilon_n) - norm.cdf(t_lower, loc=D_hat, scale=epsilon_n)
+-    
+-    # Using scipy's vectorized cdf
+-    N_i = norm.cdf(t_upper, loc=D_hat_expanded, scale=epsilon_n_expanded) - \
+-          norm.cdf(t_lower, loc=D_hat_expanded, scale=epsilon_n_expanded)
++    N_i = norm.cdf(t_upper, loc=D_hat_expanded, scale=epsilon_n) - \
++          norm.cdf(t_lower, loc=D_hat_expanded, scale=epsilon_n)
+           
+     # Compute L_sight for reliable pixels
+@@ -215,5 +150,4 @@
+     
+     # Filter weights and N_i by reliable mask
+-    # reliable_mask_expanded: (H, W, 1)
+     reliable_mask_expanded = reliable_mask[:, :, np.newaxis]
+     
+@@ -248,5 +182,4 @@
+ - **Limitations:** Requires multiple depth map acquisitions (e.g., 10 times) to generate the robust depth map [S2]. The scheduling parameters $\epsilon_t^m$ and $\epsilon_o^m$ require careful tuning of $\alpha_t$ and $\alpha_o$ [S1].
+ - **When to use:** When training neural radiance fields with depth supervision in scenes with significant defocus blur and occlusions, particularly in autonomous driving or street scenes where Lidar data is available [S1].
+-- **When not to use:** If computational resources are limited and multiple depth acquisitions are not feasible [S2]. If the scene is uniformly in focus and defocus blur is not a concern, standard depth losses may suffice.
+ 
+ ## Background

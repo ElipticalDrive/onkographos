@@ -1,0 +1,236 @@
+--- v003.md
++++ v004.md
+@@ -1,111 +1,155 @@
+ # Convex Object Optimization
+ 
+-Also called: Convex bounding volume optimization, Inverse ray tracing for convex objects
++Also called: Convex Shape Optimization for Internal Origins, Convex bounding volume optimization, Internal Ray Optimization, Inverse ray tracing for convex objects
+ 
+ ## Overview
+-Convex Object Optimization accelerates sphere tracing through objects represented by a signed distance bound enclosed by a convex bounding volume [S1][S2, unofficial]. It solves the problem of expensive interior traversal by avoiding costly marching through the inside of the object, which typically requires many iterations and gradient computations [S1][S2, unofficial]. It sets itself apart from standard sphere tracing by using the bounding volume to determine entry and exit points, thereby reducing the number of iterations required to find a ray-surface intersection [S1][S2, unofficial].
++Convex Object Optimization is a technique for accelerating sphere tracing through convex objects represented by a signed distance field (SDF) enclosed by a convex bounding volume. It solves the problem of inefficient ray marching when the ray origin lies inside the object, where standard sphere tracing requires many small steps to traverse the interior. It sets itself apart from standard sphere tracing by avoiding internal steps entirely for internal origins, and from gradient-based optimizations by relying only on the bounding volume geometry rather than per-step gradient computations [S1][S3, unofficial].
+ 
+ ## How it works
+-The method evaluates the ray origin's position relative to the convex bounding volume and the object to select the appropriate traversal strategy [S1]. 
++The method assumes the object is enclosed by a convex bounding volume (e.g., a sphere, box, or convex polyhedron) for which ray intersection can be computed efficiently. It categorizes the ray origin $o$ relative to the bounding volume and the object surface into three cases.
+ 
+-**Inputs:**
+-- Ray origin $\mathbf{o}$ and direction $\mathbf{d}$ (normalized) [G].
+-- Object signed distance bound function $f(\mathbf{x})$ [S1].
+-- Convex bounding volume signed distance bound function $g(\mathbf{x})$ [S1].
+-- Maximum ray distance $t_{max}$ [G].
++### Inputs and Outputs
++- **Inputs**: Ray origin $o$, ray direction $d$ (normalized), object SDF function $f(p)$, bounding volume geometry $B$.
++- **Outputs**: Intersection distance $t$ along the ray, or null if no intersection.
+ 
+-**Outputs:**
+-- Intersection distance $t$ along the ray, or null if no intersection [G].
++### Data Structures
++- **Bounding Volume $B$**: A convex shape supporting an analytic ray intersection test. For a sphere, this is defined by center $c$ and radius $r$. For other convex shapes, an intersection function `intersect(ray, B)` returning the smallest positive $t$ is required.
++- **SDF $f(p)$**: A function returning the signed distance to the object surface. $f(p) < 0$ indicates inside, $f(p) > 0$ outside.
+ 
+-**Data Structures:**
+-- No persistent data structures are required [G]. The method relies on evaluating $f$ and $g$ at specific points [S1].
++### Steps
+ 
+-**Steps:**
++1. **Detect Case**: Determine the position of the ray origin $o$ relative to the bounding volume $B$ and the object $f$.
++   - Compute $t_b = \text{intersect}(Ray(o, d), B)$. If $t_b$ is null, the ray does not intersect the bounding volume; return null.
++   - Check if $o$ is inside the object: $inside\_obj = (f(o) < 0)$.
++   - Check if $o$ is inside the bounding volume: $inside\_bound = (t_b < 0 \text{ or } o \text{ is inside } B)$. Note: Standard ray intersection returns positive $t$ for forward direction. If the origin is inside, the intersection with the boundary in the forward direction is positive, but the origin is geometrically inside. A robust check is: if $f(o) < 0$, the origin is inside the object. If $f(o) \ge 0$, check if $o$ is inside $B$ using a point-in-convex-volume test.
+ 
+-1. **Evaluate Bounding Volume:** Compute the distance from the ray origin to the bounding volume: $t_g = g(\mathbf{o})$ [S1].
+-2. **Determine Case:**
+-   - **Case 1:** $t_g > 0$. The ray origin is outside the bounding volume [S1].
+-   - **Case 2:** $t_g \le 0$ and $f(\mathbf{o}) > 0$. The ray origin is inside the bounding volume but outside the object [S1].
+-   - **Case 3:** $t_g \le 0$ and $f(\mathbf{o}) \le 0$. The ray origin is inside both the bounding volume and the object [S1].
+-3. **Handle Case 1 (Outside Bounding Volume):**
+-   - Find the intersection of the ray with the bounding volume using sphere tracing [S1].
+-   - If no intersection with the bounding volume is found within $t_{max}$, return null [G].
+-   - Set the current position $\mathbf{p} = \mathbf{o} + t_{entry} \mathbf{d}$ [S1].
+-   - Perform standard sphere tracing using $f(\mathbf{x})$ starting from $\mathbf{p}$ to find the object intersection [S1].
+-4. **Handle Case 2 (Inside Bounding Volume, Outside Object):**
+-   - Perform standard sphere tracing using $f(\mathbf{x})$ starting from the ray origin $\mathbf{o}$ to find the object intersection [S1].
+-5. **Handle Case 3 (Inside Bounding Volume, Inside Object):**
+-   - Advance the ray to its intersection with the bounding geometry in the forward direction [S1].
+-   - If no intersection with the bounding volume is found within $t_{max}$, return null [G].
+-   - Set the starting point for inverse tracing: $\mathbf{p}_{inv} = \mathbf{o} + t_{exit\_bound} \mathbf{d}$ [S1].
+-   - Perform sphere tracing in the **inverse ray direction** (i.e., direction $-\mathbf{d}$) starting from $\mathbf{p}_{inv}$ using the object function $f(\mathbf{x})$ [S1].
+-   - The intersection found in the inverse direction corresponds to the object intersection [S1].
++   The three cases are:
++   - **Case 1**: Origin outside bounding volume ($o \notin B$).
++   - **Case 2**: Origin inside bounding volume but outside object ($o \in B$ and $f(o) \ge 0$).
++   - **Case 3**: Origin inside bounding volume and inside object ($o \in B$ and $f(o) < 0$).
+ 
+-**Pseudocode:**
++2. **Handle Case 1 (Origin outside bounding volume)**:
++   - The ray enters the bounding volume at $t_b$.
++   - Set new origin $o' = o + t_b \cdot d$.
++   - Perform standard sphere tracing starting from $o'$ using $f(p)$ [S1][S3, unofficial].
++   - Return the result.
++
++3. **Handle Case 2 (Origin inside bounding volume, outside object)**:
++   - The ray is already inside the bounding volume but outside the object.
++   - Perform standard sphere tracing starting from $o$ using $f(p)$ [S1][S3, unofficial].
++   - Return the result.
++
++4. **Handle Case 3 (Origin inside bounding volume and inside object)**:
++   - This is the optimization case. Tracing forward through the interior is costly.
++   - Find the intersection of the ray with the bounding volume in the forward direction. Let this distance be $t_{exit\_bound}$.
++     - $t_{exit\_bound} = \text{intersect}(Ray(o, d), B)$.
++   - Compute the point on the bounding volume boundary: $p_{bound} = o + t_{exit\_bound} \cdot d$.
++   - Perform sphere tracing in the **inverse** ray direction starting from $p_{bound}$.
++     - Inverse ray: origin $p_{bound}$, direction $-d$.
++     - Trace using $f(p)$ until an intersection is found. Let the distance along the inverse ray be $t_{inv}$.
++     - The intersection point in world space is $p_{hit} = p_{bound} - t_{inv} \cdot d$.
++   - The intersection distance for the original ray is $t = t_{exit\_bound} - t_{inv}$ [S1][S3, unofficial].
++   - Return $t$.
++
++### Pseudocode
+ 
+ ```python
+-def convex_object_optimization(ray_o, ray_d, f, g, t_max):
+-    # Evaluate bounding volume at origin
+-    t_g = g(ray_o)
++def convex_optimized_sphere_trace(o, d, f, B):
++    """
++    o: vec3, ray origin
++    d: vec3, normalized ray direction
++    f: function, signed distance field
++    B: object, convex bounding volume with intersect(ray) method
++    """
++    # Step 1: Check if ray intersects bounding volume at all
++    t_b = B.intersect(Ray(o, d))
++    if t_b is None:
++        return None
++
++    # Step 2: Determine if origin is inside the object
++    inside_obj = f(o) < 0
+     
++    # Step 3: Determine if origin is inside the bounding volume
++    # Point-in-convex-volume test
++    inside_bound = B.contains_point(o)
++
+     # Case 1: Origin outside bounding volume
+-    if t_g > 0:
+-        t_entry_bound = sphere_trace(ray_o, ray_d, g, t_max)
+-        if t_entry_bound is None:
+-            return None
+-        p_start = ray_o + t_entry_bound * ray_d
+-        t_obj = sphere_trace(p_start, ray_d, f, t_max - t_entry_bound)
+-        if t_obj is None:
+-            return None
+-        return t_entry_bound + t_obj
++    if not inside_bound:
++        # Advance to bounding volume entry
++        o_prime = o + t_b * d
++        # Standard sphere trace from entry point
++        return sphere_trace(o_prime, d, f)
+ 
+     # Case 2: Origin inside bounding volume, outside object
+-    if t_g <= 0 and f(ray_o) > 0:
+-        t_obj = sphere_trace(ray_o, ray_d, f, t_max)
+-        return t_obj
++    if not inside_obj:
++        # Standard sphere trace from origin
++        return sphere_trace(o, d, f)
+ 
+     # Case 3: Origin inside bounding volume and inside object
+-    if t_g <= 0 and f(ray_o) <= 0:
+-        t_exit_bound = sphere_trace(ray_o, ray_d, g, t_max)
+-        if t_exit_bound is None:
++    # Find exit point from bounding volume
++    t_exit_bound = B.intersect(Ray(o, d))
++    p_bound = o + t_exit_bound * d
++    
++    # Trace backwards from boundary
++    # Inverse ray: origin p_bound, direction -d
++    t_inv = sphere_trace(p_bound, -d, f)
++    
++    if t_inv is None:
++        return None
++        
++    # Calculate original intersection distance
++    # The hit point is p_bound - t_inv * d
++    # Original ray: o + t * d = p_bound - t_inv * d
++    # o + t * d = (o + t_exit_bound * d) - t_inv * d
++    # t * d = (t_exit_bound - t_inv) * d
++    # t = t_exit_bound - t_inv
++    t = t_exit_bound - t_inv
++    
++    return t
++
++def sphere_trace(o, d, f):
++    """
++    Standard sphere tracing loop.
++    """
++    max_steps = 1000
++    max_dist = 100.0
++    t = 0.0
++    
++    for i in range(max_steps):
++        p = o + t * d
++        dist = f(p)
++        
++        if dist < 1e-4: # Hit threshold
++            return t
++        if t > max_dist:
+             return None
+-        p_inv_start = ray_o + t_exit_bound * ray_d
+-        t_inv = sphere_trace(p_inv_start, -ray_d, f, t_exit_bound)
+-        if t_inv is None:
+-            return None
+-        return t_exit_bound - t_inv
+-
+-def sphere_trace(origin, direction, sdf, max_t):
+-    t = 0.0
+-    while t < max_t:
+-        p = origin + t * direction
+-        dist = sdf(p)
+-        if dist < 1e-4:
+-            return t
+-        t += max(dist, 1e-4)
++            
++        t += dist
++        
+     return None
+ ```
+ 
+-**Parameters:**
+-- Threshold for intersection: Not given in the sources. [G] A small epsilon (e.g., $10^{-4}$) is typically used.
+-- Maximum iterations: Not given in the sources. [G] Determined by `t_max` and step size.
++### Parameters
++- **Hit Threshold**: $10^{-4}$ is typical for sphere tracing [S1].
++- **Max Steps**: Not given in the sources. [G] A value of 1000 is standard for sphere tracing.
++- **Max Distance**: Not given in the sources. [G] Scene-dependent.
+ 
+-**Edge Cases and Pitfalls:**
+-- Precision: The inverse trace relies on accurate intersection with the bounding volume. [G] Floating point errors may cause the ray to be slightly outside the bounding volume at the start of the inverse trace.
+-- Degenerate Input: If the bounding volume is not strictly convex, the sphere tracing may fail or produce incorrect results [S1].
+-- Tightness: The optimization is most effective when the bounding volume is tight to the object.
++### Edge Cases and Pitfalls
++- **Precision**: When $t_{exit\_bound} \approx t_{inv}$, the result $t$ may suffer from cancellation errors. However, since $t_{inv}$ is the distance from the boundary to the surface, and the origin is inside, $t_{inv}$ is generally small compared to $t_{exit\_bound}$ unless the origin is very close to the boundary.
++- **Degenerate Bounding Volume**: If the bounding volume is not strictly convex, the intersection test may fail or return incorrect results.
++- **Origin on Boundary**: If $f(o) \approx 0$, the case classification may be unstable. [G] Treat as outside object (Case 2) if $f(o) \ge 0$.
+ 
+ ## Operating characteristics
+-- **Time Complexity:** Reduces the number of iterations for Case 3 by avoiding interior traversal of the object SDB [S1][S2, unofficial].
+-- **Memory Complexity:** No additional memory required [G].
+-- **Measured Performance:** In a test scene with 3 spheres, a ground plane, and a dodecahedron with a bounding sphere, using two reflection bounces and eight refraction bounces, the convex optimization provided a speedup of around 10% (2.73 ms with optimization vs. 3.03 ms without) [S1][S2, unofficial].
+-- **Strengths:** Avoids costly marching through the inside of the object, requiring far fewer iterations [S1][S2, unofficial]. Avoids the often costly computation of the gradient per iteration step, which is not feasible in real-time applications [S1][S2, unofficial].
+-- **Limitations:** Requires a convex bounding volume that encloses the object. The optimization is specific to convex objects [S1].
+-- **When to use:** Real-time rendering of scene representations with a signed distance bound where objects are convex and enclosed by a convex bounding volume [S1][S2, unofficial].
++- **Time Complexity**: Reduces the number of iterations for internal origins from $O(D)$ where $D$ is the diameter of the object, to $O(1)$ for the bounding volume intersection plus $O(d_{exit})$ where $d_{exit}$ is the distance from the boundary to the surface. This is significantly faster for large objects.
++- **Memory Complexity**: $O(1)$ additional memory for the bounding volume intersection.
++- **Measured Performance**: In a test scene with 3 spheres, a ground plane, and a dodecahedron with a bounding sphere, using two reflection bounces and eight refraction bounces, the convex optimization provided a speedup of around 10% (2.73 ms with optimization vs. 3.03 ms without) [S1].
++- **Strengths**: Avoids costly marching through the interior of the object. Avoids the often costly computation of the gradient per iteration step, which is not feasible in real-time applications [S1][S3, unofficial].
++- **Limitations**: Requires a convex bounding volume that supports efficient ray intersection. Not applicable to non-convex objects without decomposition.
+ 
+ ## Background
+-The optimization is based on work by Hart et al. [Har96], who proposed various optimizations for sphere tracing convex objects [S1][S2, unofficial]. Most of these optimizations involve the often costly computation of the gradient per iteration step, which is not feasible in real-time applications [S1][S2, unofficial]. The specific method described here focuses on accelerating tracing through an object represented by a signed distance bound enclosed by a convex bounding object [S1][S2, unofficial].
++The optimization was proposed by Hart et al. [Har96] for sphere tracing convex objects. However, many of the original optimizations involved the often costly computation of the gradient per iteration step, which is not feasible in real-time applications [S1][S3, unofficial]. The specific implementation described here, which uses inverse ray tracing from a bounding volume, is presented in the context of Enhanced Sphere Tracing [S1][S3, unofficial].
+ 
+ ## Sources
+ [S1] Enhanced Sphere Tracing, https://doi.org/10.2312/stag.20141233, fetched 2026-10-26
+-[S2] Enhanced Sphere Tracing, https://kev.town/raymarching-toolkit/media/enhanced_sphere_tracing.pdf, fetched 2026-10-27 (unofficial)+[S2] 要約EnhancedSphereTracing～より良いレイマーチングに向けて～, https://qiita.com/Hirai0827/items/eddcb73a1976c3088b88, fetched 2026-10-26 (unofficial)
++[S3] Enhanced Sphere Tracing, https://kev.town/raymarching-toolkit/media/enhanced_sphere_tracing.pdf, fetched 2026-10-27 (unofficial)

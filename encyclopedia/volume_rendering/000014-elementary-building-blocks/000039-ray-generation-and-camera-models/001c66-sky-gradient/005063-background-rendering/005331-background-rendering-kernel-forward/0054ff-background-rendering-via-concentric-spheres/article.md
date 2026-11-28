@@ -1,0 +1,208 @@
+# Background Rendering via Concentric Spheres
+
+Also called: Background Ray Marching
+
+## Overview
+This method renders the background environment for rays that have transmitted through the volume by sampling a layered spherical map [S1, unofficial]. It differs from standard equirectangular sampling by using concentric spheres to distribute samples, which helps mitigate aliasing and provides a structured traversal of the background layers [S1, unofficial]. It serves as the final compositing stage in the background rendering kernel, accumulating color from the background layers and adding a constant ambient term based on remaining transmission [S1, unofficial].
+
+## How it works
+### Inputs and Outputs
+**Inputs:**
+- `ray.origin`: 3D vector, ray origin [S1, unofficial].
+- `ray.dir`: 3D vector, ray direction [S1, unofficial].
+- `grid.background_links`: Array of integers defining the connectivity or structure of the background data layers [S1, unofficial].
+- `grid.background_data`: Array of floats containing the background density ($\sigma$) and color values [S1, unofficial].
+- `grid.background_reso`: Integer, resolution of the background spherical map ($W \times H$) [S1, unofficial].
+- `grid.background_nlayers`: Integer, number of layers in the background representation [S1, unofficial].
+- `opt.step_size`: Float, control parameter for step count calculation [S1, unofficial].
+- `opt.stop_thresh`: Float, termination threshold for transmission [S1, unofficial].
+- `opt.background_brightness`: Float, constant color added at the end [S1, unofficial].
+
+**Outputs:**
+- `outv[3]`: Accumulated background color (RGB) [S1, unofficial].
+- `log_transmit`: Logarithmic transmission factor updated during the loop [S1, unofficial].
+- `out[3]`: Final output color updated after the loop [S1, unofficial].
+
+### Data Structures
+The background data is stored in a 3D lattice structure implied by `grid.background_data` [S1, unofficial]. The interpolation function `trilerp_bg_one` assumes a layout where the first two dimensions correspond to the equirectangular map ($W \times H$) and the third dimension corresponds to the layers ($N_{layers}$) [S1, unofficial]. The exact memory layout (e.g., row-major vs column-major) is not specified in the sources [S1, unofficial].
+
+### Parameters
+- `grid.background_reso`: Resolution of the background spherical map [S1, unofficial].
+- `grid.background_nlayers`: Number of layers in the background representation [S1, unofficial].
+- `opt.background_brightness`: Constant color added at the end of the ray based on remaining transmission [S1, unofficial].
+
+### Steps
+1. **Initialization**: Create `ConcentricSpheresIntersector csi` with `ray.origin` and `ray.dir` [S1, unofficial]. Calculate `inner_radius = max(_dist_ray_to_origin(ray.origin, ray.dir) + 1e-3, 1.0)` [S1, unofficial]. Calculate `n_steps = int(grid.background_nlayers / opt.step_size) + 2` [S1, unofficial]. Initialize `outv[3] = {0, 0, 0}` [S1, unofficial]. Initialize `log_transmit = 0.0` [G]. Initialize `invr_last = 1.0 / inner_radius` [G].
+2. **Loop**: For `i` from 0 to `n_steps - 1`: Calculate radius `r = n_steps / (n_steps - i - 0.5)` [S1, unofficial]. If `r < inner_radius` or `!csi.intersect(r, &t)`, continue to next iteration [S1, unofficial]. Calculate position `ray.pos = ray.origin + t * ray.dir` [S1, unofficial]. Calculate `invr_mid = 1.0 / length(ray.pos)` [S1, unofficial]. Normalize position: `ray.pos *= invr_mid` [S1, unofficial]. Convert to equirectangular coordinates: `_unitvec2equirect(ray.pos, grid.background_reso, ray.pos)` [S1, unofficial]. Calculate layer index `ray.pos[2] = clamp((1.0 - invr_mid) * grid.background_nlayers - 0.5, 0.0, grid.background_nlayers - 1)` [S1, unofficial]. Convert to integer lattice `ray.l[j] = floor(ray.pos[j])` for $j \in \{0, 1, 2\}$ [S1, unofficial]. Clamp `ray.l[0]` to `grid.background_reso * 2 - 1`, `ray.l[1]` to `grid.background_reso - 1`, `ray.l[2]` to `grid.background_nlayers - 2` [S1, unofficial]. Calculate fractional part `ray.pos[j] -= ray.l[j]` for $j \in \{0, 1, 2\}$ [S1, unofficial]. Trilinearly interpolate sigma: `sigma = trilerp_bg_one(grid.background_links, grid.background_data, grid.background_reso, grid.background_nlayers, 4, ray.l, ray.pos, 3)` [S1, unofficial]. If `sigma > 0.0`, calculate `pcnt = (invr_last - invr_mid) * ray.world_step * sigma` [S1, unofficial]. Calculate `weight = exp(log_transmit) * (1.0 - exp(-pcnt))` [S1, unofficial]. Update `log_transmit -= pcnt` [S1, unofficial]. For each color channel `i`, interpolate color `color = trilerp_bg_one(...) * C0` [S1, unofficial]. Accumulate `outv[i] += weight * max(color + 0.5, 0.0)` [S1, unofficial]. Check termination: `if (exp(log_transmit) < opt.stop_thresh) break;` [S1, unofficial]. Update `invr_last = invr_mid` [S1, unofficial].
+3. **Finalization**: After loop, add final transmission and background brightness: `out[i] += outv[i] + exp(log_transmit) * opt.background_brightness` [S1, unofficial].
+
+### Pseudocode
+> **Unverified code.** The code below did not pass a test run against a reference implementation, or no test fits it, so it may contain errors.
+
+```python
+import math
+
+def render_background_concentric_spheres(ray_origin, ray_dir, grid, opt):
+    # Helper: distance from ray origin to sphere center (assumed origin)
+    def _dist_ray_to_origin(origin, _dir):
+        return math.sqrt(origin[0]**2 + origin[1]**2 + origin[2]**2)
+
+    # Helper: Ray-sphere intersection for sphere centered at origin with radius r
+    class ConcentricSpheresIntersector:
+        def __init__(self, origin, direction):
+            self.o = origin
+            self.d = direction
+        def intersect(self, r):
+            ox, oy, oz = self.o
+            dx, dy, dz = self.d
+            a = dx*dx + dy*dy + dz*dz
+            b = 2*(ox*dx + oy*dy + oz*dz)
+            c = ox*ox + oy*oy + oz*oz - r*r
+            disc = b*b - 4*a*c
+            if disc < 0: return None
+            sqrt_disc = math.sqrt(disc)
+            t1 = (-b - sqrt_disc) / (2*a)
+            t2 = (-b + sqrt_disc) / (2*a)
+            t = t1 if t1 > 1e-6 else t2
+            return t if t > 1e-6 else None
+
+    # Helper: Unit vector to equirectangular coordinates
+    def _unitvec2equirect(v, reso):
+        x, y, z = v
+        u = (math.atan2(x, z) / (2.0 * math.pi) + 0.5) * (reso * 2)
+        v_coord = (math.acos(max(-1.0, min(1.0, y))) / math.pi) * reso
+        return [u, v_coord]
+
+    # Helper: Trilinear interpolation
+    def trilerp_bg_one(links, data, reso_w, reso_h, n_layers, lattice, frac, dims):
+        # Simplified trilinear interpolation assuming data is flat array
+        # lattice: [l0, l1, l2], frac: [f0, f1, f2]
+        l0, l1, l2 = lattice
+        f0, f1, f2 = frac
+        # Compute indices for 8 corners
+        def idx(x, y, z):
+            return ((x * reso_h + y) * n_layers + z) * 4
+        # Fetch 8 values (RGBA)
+        vals = []
+        for dx in (0, 1):
+            for dy in (0, 1):
+                for dz in (0, 1):
+                    i = idx(l0+dx, l1+dy, l2+dz)
+                    vals.append(data[i:i+4])
+        # Interpolate
+        res = [0.0, 0.0, 0.0, 0.0]
+        for k in range(4):
+            v000, v100, v010, v110, v001, v101, v011, v111 = vals
+            c00 = v000 + f0*(v100 - v000)
+            c10 = v010 + f0*(v110 - v010)
+            c01 = v001 + f0*(v101 - v001)
+            c11 = v011 + f0*(v111 - v011)
+            c0 = c00 + f1*(c10 - c00)
+            c1 = c01 + f1*(c11 - c01)
+            res[k] = c0 + f2*(c1 - c0)
+        return res
+
+    # Initialize
+    csi = ConcentricSpheresIntersector(ray_origin, ray_dir)
+    dist_to_center = _dist_ray_to_origin(ray_origin, ray_dir)
+    inner_radius = max(dist_to_center + 1e-3, 1.0)
+    n_steps = int(grid.background_nlayers / opt.step_size) + 2
+    outv = [0.0, 0.0, 0.0]
+    log_transmit = 0.0
+    invr_last = 1.0 / inner_radius  # [G] Standard initialization
+    C0 = 1.0  # [G] Standard scaling factor
+    ray_world_step = opt.step_size  # [G] Mapped from opt.step_size
+
+    for i in range(n_steps):
+        r = n_steps / (n_steps - i - 0.5)
+        if r < inner_radius:
+            continue
+        t = csi.intersect(r)
+        if t is None:
+            continue
+
+        # Calculate position
+        ray_pos = [ray_origin[j] + t * ray_dir[j] for j in range(3)]
+        invr_mid = 1.0 / math.sqrt(ray_pos[0]**2 + ray_pos[1]**2 + ray_pos[2]**2)
+        
+        # Normalize to unit sphere
+        ray_pos = [ray_pos[j] * invr_mid for j in range(3)]
+        
+        # Convert to equirectangular coordinates (overwrites ray_pos[0], ray_pos[1])
+        eq = _unitvec2equirect(ray_pos, grid.background_reso)
+        ray_pos[0] = eq[0]
+        ray_pos[1] = eq[1]
+        
+        # Calculate layer index
+        layer_float = (1.0 - invr_mid) * grid.background_nlayers - 0.5
+        ray_pos[2] = max(0.0, min(layer_float, grid.background_nlayers - 1))
+        
+        # Integer lattice
+        l0 = int(math.floor(ray_pos[0]))
+        l1 = int(math.floor(ray_pos[1]))
+        l2 = int(math.floor(ray_pos[2]))
+        
+        # Clamp indices
+        l0 = max(0, min(l0, grid.background_reso * 2 - 1))
+        l1 = max(0, min(l1, grid.background_reso - 1))
+        l2 = max(0, min(l2, grid.background_nlayers - 2))
+        
+        # Fractional part
+        f0 = ray_pos[0] - l0
+        f1 = ray_pos[1] - l1
+        f2 = ray_pos[2] - l2
+        
+        # Trilinear interpolation for sigma
+        sigma_vec = trilerp_bg_one(
+            grid.background_links,
+            grid.background_data,
+            grid.background_reso,
+            grid.background_nlayers,
+            4,
+            [l0, l1, l2],
+            [f0, f1, f2],
+            3
+        )
+        sigma = sigma_vec[0]  # Assuming sigma is first channel or extracted separately
+        
+        if sigma > 0.0:
+            pcnt = (invr_last - invr_mid) * ray_world_step * sigma
+            weight = math.exp(log_transmit) * (1.0 - math.exp(-pcnt))
+            log_transmit -= pcnt
+            
+            # Interpolate color (RGB)
+            color = [c * C0 for c in sigma_vec[1:4]]
+            
+            for ch in range(3):
+                outv[ch] += weight * max(color[ch] + 0.5, 0.0)
+                
+        if math.exp(log_transmit) < opt.stop_thresh:
+            break
+            
+        invr_last = invr_mid
+        
+    # Finalize
+    out = [0.0, 0.0, 0.0]
+    for i in range(3):
+        out[i] += outv[i] + math.exp(log_transmit) * opt.background_brightness
+        
+    return out
+```
+
+### Edge Cases and Pitfalls
+- **Precision**: Floating point precision issues may arise when calculating `r` and `t` [S1, unofficial].
+- **Boundaries**: Clamping indices is crucial to avoid out-of-bounds access [S1, unofficial].
+- **Degenerate Input**: If `ray.dir` is zero, the ray is invalid [G]. If `grid.background_nlayers` is 0, no samples are taken [S1, unofficial].
+- **Initialization of `invr_last`**: The source does not specify the initial value of `invr_last` [S1, unofficial]. We assume `1.0 / inner_radius` [G].
+
+## Operating characteristics
+- **Time Complexity**: $O(N_{steps})$, where $N_{steps} = \lceil N_{layers} / step\_size \rceil + 2$ [S1, unofficial].
+- **Memory Complexity**: $O(1)$ auxiliary space, plus the size of the background data grid [S1, unofficial].
+- **Strengths**: Structured sampling of the background, potentially better anti-aliasing than random sampling [S1, unofficial].
+- **Limitations**: Depends on the concentric sphere intersection logic, which may be complex to implement [S1, unofficial].
+
+## Background
+This method is part of the JNeRF project, which uses Jittor for neural rendering [S1, unofficial]. It is used in the background rendering stage to handle rays that have passed through the volume [S1, unofficial].
+
+## Sources
+[S1] Jittor/JNeRF, https://github.com/Jittor/JNeRF, fetched 2026-10-27 (unofficial)

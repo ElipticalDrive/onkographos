@@ -1,0 +1,328 @@
+Godot Engine – Multi-platform 2D and 3D game engine - Improve SSR raymarching performance by Flarkk · Pull Request #99693 · godotengine/godot
+
+Improve SSR raymarching performance by Flarkk · Pull Request #99693 · godotengine/godot · GitHub
+Skip to content
+You signed in with another tab or window. Reload to refresh your session.
+You signed out in another tab or window. Reload to refresh your session.
+You switched accounts on another tab or window. Reload to refresh your session.
+Dismiss alert
+Conversation
+Flarkk
+commented
+Nov 25, 2024
+•
+edited
+Loading
+Uh oh!
+There was an error while loading. Please reload this page.
+Copy link
+Copy Markdown
+Contributor
+This PR brings a major rewrite of the Screen Space Reflection raymarching code, targetting performance optimization :
+Implements a DDA algorithm that marches the ray simultaneously in ndc and homogeneous view space, as described in "Efficient GPU Screen-Space Ray Tracing" (Morgan McGuire and al.).
+Produces a linear depth buffer during the scale pre-pass (this was actually already the case for the single-eye setup, but not for VR). In conjunction with homogeneous view space marching, this removes the need for any reprojection in the ray marching loop.
+Removes normal-roughness buffer fetches during marching, utilized to perform backface culling. Backface culling is now performed by comparing the current and previous samples' depth and rejecting hits when the ray exits the volume, instead of fetching the normal-roughness buffer.
+[Edit] normal-roughness buffer fetches are repurposed to perform holes filling at sharp angles and/or long distances.
+Solves 2 issues :
+rays didn't pass behind objects resulting in long hollow trails (see captures below). These are now gone and in the worst case replaced by smaller holes corresponding to the object footprint on the surface behind
+SSR code doesn't depend anymore on any camera attributes reconstruction method (like Projection::get_z_far() or Projection::is_orthogonal()). These can break under certain circumstances, typically when the zfar / znear ratio is very large, the projection matrix becomes infinite and it's not possible to extract zfar anymore from it
+Hopefully improves code readability and establishes a good foundation for further improvements. A few ideas I leave to further PRs :
+Ray striding and jittering, as described in the above paper. This allows marching farther with the same number of samples without deteriorating image quality too much
+Add a binary search pass to refine the hit points as suggested here
+Hierarchical-Z approaches involving pre-computed z-buffer mip-maps to speed up marching even further
+Visual differences
+Cube roughness is 0.2, floor roughness is 0.0.
+Depth threshold is 0.1.
+Raymarching 512 steps.
+This is the single-eye case. Any help to test it in VR is welcome.
+Also, any test with more complex scenes would be appreciated.
+Before
+With this PR
+Performance improvements
+Warning
+These benchmaks needs an update. This PR has evolved since its inception. The performance improvements should now be less aggressive than what's described below, but visual quality is now on-par with master.
+These should be material for both single-eye and VR setups. Although I couldn't get it statistically measured (I couldn't sort out yet the render graph messing up debug markers, despite active support from @clayjohn @Ansraer and @DarioSamo), the GPU traces below show clues of a ~20% compute time reduction.
+In this context, please take the below with a grain of salt as it is my interpretation (also please ignore the markers) :
+might be the scale pass, left pretty much unchanged in single-eye setup
+is likely the core ray marching logic, optimized by ~50% after this PR
+looks like the filter pass, although it's pretty much left untouched by this PR and I don't get why it would be longer
+Any help on making this analysis stronger is welcome.
+Top chart : before
+Bottom chart : with this PR
+Flarkk
+requested a review
+from a team
+as a code owner
+November 25, 2024 21:07
+tetrapod00
+added
+enhancement
+topic:rendering
+labels
+Nov 25, 2024
+tetrapod00
+added this to the
+4.x milestone
+Nov 25, 2024
+tetrapod00
+added
+the
+topic:3d
+label
+Nov 25, 2024
+hsvfan-jan
+commented
+Nov 25, 2024
+Copy link
+Copy Markdown
+The white highlight beneath the cube seems to be accentuated by the new algorithm. Is it possible to turn that down to a similar level as before where it wasn't as obvious? Perhaps the reflection is just mistakenly offset by a few pixels and that's what's causing the highlight look
+Flarkk
+force-pushed
+the
+optimize_ssr
+branch
+from
+b4e8bfd to
+8ce6f6f
+Compare
+November 26, 2024 08:46
+Flarkk
+commented
+Nov 26, 2024
+•
+edited
+Loading
+Uh oh!
+There was an error while loading. Please reload this page.
+Copy link
+Copy Markdown
+Contributor
+Author
+Just fixed the white contact line.
+Backface culling logic was rejecting all hits on the first marching iteration, hence the missed reflections close to contact areas.
+This is not the case anymore now.
+RPicster
+commented
+Nov 26, 2024
+•
+edited
+Loading
+Uh oh!
+There was an error while loading. Please reload this page.
+Copy link
+Copy Markdown
+Contributor
+I gave it a test and it doesn't improve perceived quality for me and the PR introduced new artifacts. The artifacts are mostly visible at the dark side of the cube.
+Flarkk
+commented
+Nov 26, 2024
+Copy link
+Copy Markdown
+Contributor
+Author
+@RPicster thanks for testing. Can you share the project files ?
+The artifacts might be related to the Depth tolerance parameter in Environment being used slightly differently in the new implementation. Will see how I can make it work exactly as before to prevent users having to adjust it.
+Also this PR is mostly focused on performance, so don't expect quality improvements in most cases.
+Flarkk
+changed the title
+Improve SSR raymarching performance and quality
+Improve SSR raymarching performance
+Nov 26, 2024
+RPicster
+commented
+Nov 26, 2024
+Copy link
+Copy Markdown
+Contributor
+ssr-test.zip
+I adjusted it a bit, I hope it helps
+mrjustaguy
+commented
+Nov 26, 2024
+Copy link
+Copy Markdown
+Contributor
+I think the issue you're seeing is actually from a quality improvement of this PR, resulting in more accurate reflections, while current SSR would tend to elongate things, filling those gaps you're seeing.
+The effect can be seen in the before and after screen shots of the PR
+Calinou
+commented
+Nov 28, 2024
+•
+edited
+Loading
+Uh oh!
+There was an error while loading. Please reload this page.
+Copy link
+Copy Markdown
+Member
+See also godotengine/godot-proposals#3919. This PR may warrant a new default value for SSR Depth Tolerance.
+This was referenced Dec 3, 2024
+Enable rendering with unbounded far distance
+#99986
+Open
+[TRACKER] Rendering issues at very long distances (numerical precision)
+#98655
+Open
+Flarkk
+mentioned this pull request
+Jul 12, 2025
+Camera frustum offset makes voxel GI, SDFGI, SSR render incorrectly
+#108508
+Open
+Calinou
+added
+the
+performance
+label
+Jul 15, 2025
+Flarkk
+commented
+Jul 16, 2025
+•
+edited
+Loading
+Uh oh!
+There was an error while loading. Please reload this page.
+Copy link
+Copy Markdown
+Contributor
+Author
+This PR may warrant a new default value for SSR Depth Tolerance
+I'm in favor of setting a new default value for Depth Tolerance.
+It's not clear to me however why it'd be more of a breaking change than merging this PR as is :
+those using the default value would actually see less disruption with a new default
+users who set a custom Depth Tolerance would experience the new behavior in both cases and would likely have to tune it
+Zireael07
+commented
+Jul 17, 2025
+Copy link
+Copy Markdown
+Contributor
+What's the holdup here anyway?
+mrjustaguy
+commented
+Jul 17, 2025
+Copy link
+Copy Markdown
+Contributor
+I think probably the Beta stage sadly..
+Flarkk
+commented
+Jul 17, 2025
+Copy link
+Copy Markdown
+Contributor
+Author
+I think probably the Beta stage sadly..
+It hasn't got any review yet either way.
+mrjustaguy
+commented
+Aug 7, 2025
+Copy link
+Copy Markdown
+Contributor
+I just ran the test scene that has the issue and it's simply the depth tolerance being too low (lower then Godot's default even), and increasing the depth tolerance to Godot's Default resolves the problem
+this PR test depth of the scene provided (0.1)
+this PR test depth set to Godot Default (0.2)
+4.4 stable test depth of the scene provided (0.1)
+4.4 stable test depth set to Godot Default (0.2)
+mrjustaguy
+commented
+Aug 7, 2025
+Copy link
+Copy Markdown
+Contributor
+One Side effect of the PR I've noticed, under a sharper angle with godot default tolerance these stripes appear and disappear as you move away or to the cubes, which doesn't happen without the PR unless the tolerance is set to 0, when it only SLIGHTLY happens, with much smaller stripes and much less frequently
+This comment has been minimized.
+Sign in to view
+mrjustaguy
+commented
+Aug 8, 2025
+Copy link
+Copy Markdown
+Contributor
+After some extensive testing in my projects it does occasionally become VERY noticeable, but more often I haven't really been able to casually spot the issue.. really it depends on how extensively they're (SSR) used and how much the content is prone to regular SSR artifacts disocclusion artifacts or not, which is likely why I at first didn't notice the issue as I was running in my projects and not such simple environments.
+Improve SSR raymarching performance
+8535a1c
+Flarkk
+force-pushed
+the
+optimize_ssr
+branch
+from
+8ce6f6f to
+8535a1c
+Compare
+August 15, 2025 09:28
+Flarkk
+commented
+Aug 15, 2025
+•
+edited
+Loading
+Uh oh!
+There was an error while loading. Please reload this page.
+Copy link
+Copy Markdown
+Contributor
+Author
+I found a way to iron out most of the stripes and cracks mentioned above.
+This is leveraging a normal check at each marching step to fill in holes when they're happening on the same surface than the step before.
+It comes with a cost of 1 image read at each step. However bottom line should still be a net performance improvement although less that the ~20% cut initially announced. Will do the benchmarks again when I find some time.
+Test scene : ssr-test.zip
+Screenshots taken with 0.2 Tolerance (default) and 512 marching steps.
+This PR
+Master
+ettiSurreal
+commented
+Oct 3, 2025
+•
+edited
+Loading
+Uh oh!
+There was an error while loading. Please reload this page.
+Copy link
+Copy Markdown
+Contributor
+Potentially superseded by #111210? (seems to overhaul the whole thing)
+Flarkk
+closed this
+Oct 22, 2025
+Flarkk
+commented
+Oct 22, 2025
+Copy link
+Copy Markdown
+Contributor
+Author
+Superseded by #111210
+Flarkk
+deleted the
+optimize_ssr
+branch
+October 22, 2025 07:29
+AThousandShips
+added
+the
+archived
+label
+Oct 22, 2025
+AThousandShips
+removed this from the
+4.x milestone
+Oct 22, 2025
+Sign up for free
+to join this conversation on GitHub.
+Already have an account?
+Sign in to comment
+Uh oh!
+There was an error while loading. Please reload this page.
+Labels
+archived
+enhancement
+performance
+topic:rendering
+topic:3d
+9 participants
+Add this suggestion to a batch that can be applied as a single commit.This suggestion is invalid because no changes were made to the code.Suggestions cannot be applied while the pull request is closed.Suggestions cannot be applied while viewing a subset of changes.Only one suggestion per line can be applied in a batch.Add this suggestion to a batch that can be applied as a single commit.Applying suggestions on deleted lines is not supported.You must change the existing code in this line in order to create a valid suggestion.Outdated suggestions cannot be applied.This suggestion has been applied or marked resolved.Suggestions cannot be applied from pending reviews.Suggestions cannot be applied on multi-line comments.Suggestions cannot be applied while the pull request is queued to merge.Suggestion cannot be applied right now. Please check back later.
+You can’t perform that action at this time.

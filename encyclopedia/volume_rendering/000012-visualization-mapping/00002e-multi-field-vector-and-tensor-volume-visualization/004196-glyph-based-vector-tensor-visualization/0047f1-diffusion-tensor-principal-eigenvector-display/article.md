@@ -1,0 +1,111 @@
+# Diffusion Tensor Principal Eigenvector Display
+
+Also called: principal eigenvector display, rank 1 tensor display
+
+## Overview
+This method simplifies the diffusion tensor model by displaying only the principal eigenvector for each voxel to represent local connectivity and anisotropy [S1, unofficial]. It serves as a foundational step for vector field visualization, such as identifying blood flow streamlines or neural connectivity, by reducing the full tensor information to a dominant directional component [S1, unofficial]. Unlike full tensor glyphs (e.g., ellipsoids) which show shape and orientation, this method focuses exclusively on the primary direction of diffusion, often modulated by a scalar measure of anisotropy [S1, unofficial][S2, unofficial].
+
+## How it works
+**Inputs:** A diffusion tensor field $T(\vec{r})$ defined over a 3D volume, where each voxel contains a $3 \times 3$ symmetric positive-definite tensor.
+**Outputs:** A derived vector field $\vec{v}(\vec{r})$ suitable for rendering or tracking.
+
+**Data Structures:**
+*   **Input Tensor:** Stored as a $3 \times 3$ matrix or 6 unique components per voxel.
+*   **Eigen Decomposition:** Yields three eigenvalues $\lambda_1, \lambda_2, \lambda_3$ (sorted such that $\lambda_1 \ge \lambda_2 \ge \lambda_3 \ge 0$) and corresponding orthogonal eigenvectors $\vec{e}_1, \vec{e}_2, \vec{e}_3$.
+*   **Output Vector:** A 3D vector $\vec{v}$ per voxel.
+
+**Steps:**
+1.  **Eigen Decomposition:** For each voxel, compute the eigenvalues and eigenvectors of the diffusion tensor $T$.
+2.  **Select Principal Component:** Identify the principal eigenvector $\vec{e}_1$ corresponding to the largest eigenvalue $\lambda_1$. This vector represents the direction of maximum diffusion [S1, unofficial].
+3.  **Compute Scalar Modulator:** Calculate a scalar measure $f(\vec{r})$ to weight the vector magnitude. Common choices include:
+    *   The largest eigenvalue $\lambda_1$.
+    *   The trace of the tensor: $\text{Tr}(T) = \sum_{i=1}^3 \lambda_i$ [S1, unofficial].
+    *   Fractional Anisotropy (FA) or other anisotropy metrics [S2, unofficial].
+4.  **Construct Vector Field:** Compute the display vector $\vec{v}(\vec{r})$ using the formula:
+    $$ \vec{v}(\vec{r}) = f(\vec{r}) \vec{e}_1(\vec{r}) $$
+    This effectively treats the tensor as a rank-1 tensor aligned with $\vec{e}_1$ [S1, unofficial].
+
+**Pseudocode:**
+> **Unverified code.** The code below did not pass a test run against a reference implementation, or no test fits it, so it may contain errors.
+
+```python
+def compute_principal_eigenvector_display(tensor_field):
+    """
+    Computes the principal eigenvector display vector field from a diffusion tensor field.
+    
+    Args:
+        tensor_field: A 3D array of shape (Nx, Ny, Nz, 6) or (Nx, Ny, Nz, 3, 3) 
+                      representing the symmetric diffusion tensors.
+    
+    Returns:
+        vector_field: A 3D array of shape (Nx, Ny, Nz, 3) containing the display vectors.
+    """
+    Nx, Ny, Nz = tensor_field.shape[:3]
+    vector_field = np.zeros((Nx, Ny, Nz, 3))
+    
+    for x in range(Nx):
+        for y in range(Ny):
+            for z in range(Nz):
+                # Extract tensor T at voxel (x,y,z)
+                # Assuming input is stored as 6 components: [Txx, Tyy, Tzz, Txy, Txz, Tyz]
+                T_comp = tensor_field[x, y, z]
+                T = np.array([
+                    [T_comp[0], T_comp[3], T_comp[4]],
+                    [T_comp[3], T_comp[1], T_comp[5]],
+                    [T_comp[4], T_comp[5], T_comp[2]]
+                ])
+                
+                # Eigen decomposition
+                eigenvalues, eigenvectors = np.linalg.eigh(T)
+                
+                # Sort eigenvalues and eigenvectors in descending order
+                # eigh returns sorted ascending, so reverse
+                idx = np.argsort(eigenvalues)[::-1]
+                eigenvalues = eigenvalues[idx]
+                eigenvectors = eigenvectors[:, idx]
+                
+                # Principal eigenvector e1
+                e1 = eigenvectors[:, 0]
+                
+                # Scalar measure f(r)
+                # Option 1: Trace (sum of eigenvalues)
+                f = np.sum(eigenvalues)
+                
+                # Option 2: Largest eigenvalue lambda1
+                # f = eigenvalues[0]
+                
+                # Construct display vector
+                v = f * e1
+                
+                vector_field[x, y, z] = v
+                
+    return vector_field
+```
+
+**Edge Cases and Pitfalls:**
+*   **Degenerate Tensors:** In regions where fibers cross or branch, the tensor may be rank 2 or 3. The principal eigenvector display cannot optimally handle these points, as it assumes a single dominant direction [S1, unofficial].
+*   **Precision:** Numerical stability in eigen decomposition should be ensured, particularly for near-isotropic tensors where eigenvalues are close.
+*   **Boundary Conditions:** At volume boundaries, tensor estimation may be unreliable, leading to noisy eigenvectors.
+
+## Subtopics
+
+### Eigenvector Color Maps
+A visualization technique that maps the spatial direction of the principal eigenvector directly to RGB colors [S2, unofficial].
+*   **Definition:** The X, Y, and Z components of the principal eigenvector $\vec{e}_1$ are mapped to the Red, Green, and Blue color channels, respectively [S2, unofficial].
+*   **Modulation:** The saturation of the resulting RGB color is modulated by an anisotropic metric (e.g., Fractional Anisotropy, or CL/CP/CS metrics) to indicate the strength of anisotropy [S2, unofficial].
+*   **Usage:** Useful for displaying spatial patterns of coherence, as the principal eigenvector aligns with coherent fibers [S2, unofficial].
+
+## Operating characteristics
+*   **Time Complexity:** $O(N)$ where $N$ is the number of voxels, dominated by the eigen decomposition of each $3 \times 3$ matrix.
+*   **Memory Complexity:** $O(N)$ to store the resulting vector field.
+*   **Strengths:** Computationally efficient compared to full tensor rendering (e.g., ellipsoids). It simplifies the visual clutter of tensor data and is a direct prerequisite for streamline tractography [S1, unofficial].
+*   **Limitations:** Loses information about the shape of diffusion (e.g., planar vs. linear anisotropy) and cannot resolve crossing fibers [S1, unofficial]. Structural boundaries may be harder to distinguish compared to anatomical or MIP images [S1, unofficial].
+*   **When to use:** When the primary goal is to visualize connectivity or dominant flow directions, or as an intermediate step for tracking algorithms.
+*   **When not to use:** When detailed microstructural information (shape of the diffusion ellipsoid) or crossing fiber resolution is required.
+
+## Background
+The diffusion tensor model was introduced to characterize water diffusion in biological tissues, particularly white matter [S1, unofficial]. The simplification to principal eigenvector display emerged as a practical approach for visualizing connectivity, moving away from complex ellipsoid representations which were computationally expensive and visually dense [S1, unofficial]. This method is widely used in medical imaging software (e.g., AngioTool) for interactive visualization of MRI vector and tensor fields [S1, unofficial].
+
+## Sources
+[S1] Angiotool : a tool for interactive visualization of MRI vector and tensor fields, https://doi.org/10.82444/warw.33642268, fetched 2026-10-26 (unofficial)
+[S2] PDF Tensor Visualization, http://www.csc.lsu.edu/~karki/courses/SV/19-TensorVis.pdf, fetched 2026-10-28 (unofficial)

@@ -1,0 +1,647 @@
+Train, inspect, edit, automate, and export 3D Gaussian Splatting scenes from a single native application. - Add optional selection outlines for splat objects by francescofugazzi · Pull Request #3689 · MrNeRF/LichtFeld-Studio
+
+Add optional selection outlines for splat objects by francescofugazzi · Pull Request #3689 · MrNeRF/LichtFeld-Studio · GitHub
+Skip to content
+You signed in with another tab or window. Reload to refresh your session.
+You signed out in another tab or window. Reload to refresh your session.
+You switched accounts on another tab or window. Reload to refresh your session.
+Dismiss alert
+Conversation
+francescofugazzi
+commented
+Oct 18, 2026
+•
+edited
+Loading
+Uh oh!
+There was an error while loading. Please reload this page.
+Copy link
+Copy Markdown
+Collaborator
+Summary
+Add an optional screen-space outline for splat objects selected in the scene tree, making their visible silhouettes easier to identify in dense scenes. The option is disabled by default and uses a continuous contour.
+The outline follows accumulated selected opacity, rather than an individual Gaussian's footprint. Its object ID and occlusion depth are assigned at the coverage crossing, so a selected object's faint halo cannot claim pixels inside another selected object.
+How to enable and configure it
+Open Rendering > Selection.
+Enable Selection outline.
+Select a splat object, multiple objects, or a group containing splat objects in the scene tree.
+The appearance controls are shown only while the outline is enabled:
+| Control | Behavior | Default |
+| --- | --- | --- |
+| Outline color | Dedicated color picker, independent of the Center Marker color | Blue/cyan (0.0, 0.604, 0.733) |
+| Opacity | Separate alpha control, from transparent to opaque | 1.0 |
+| Width | Antialiased width from 1 to 12 render pixels | 2.0 |
+| Coverage threshold | Accumulated opacity required to form the silhouette, from 0.05 to 0.95 | 0.5 |
+| Interior contours | Include boundaries of fully enclosed holes | Enabled |
+A higher coverage threshold excludes more transparent regions; it does not change the source splats. Width is measured in render pixels, not world units. Disabling Interior contours suppresses enclosed holes, while indentations connected to the exterior remain part of the outline.
+The color picker uses the existing color-picker infrastructure. The controls use the existing rendering settings, scrubbing, project serialization and viewport-defaults paths. Labels and tooltips are translated in all ten supported languages.
+Settings are saved with the project. Use the existing Save as Defaults action, or Preferences > Viewport > New Project Defaults, to configure defaults for new projects. Existing projects retain their saved settings unless defaults are explicitly applied. Projects predating selection outlines load with the feature disabled; the pre-existing custom Center Marker color is retained as the initial outline color when a project has no dedicated outline color.
+Python example:
+```
+import lichtfeld as lf
+
+s = lf.get_render_settings()
+
+s.selection_outline = True
+
+s.selection_outline_color = (0.0, 0.604, 0.733)
+
+s.selection_outline_opacity = 1.0
+
+s.selection_outline_width = 2.0
+
+s.selection_outline_threshold = 0.5
+
+s.selection_outline_holes = True
+```
+The same settings are exposed through the existing MCP render_settings_get and render_settings_set tools, including input validation.
+Selection and visibility
+The mask tracks scene objects, not individual Gaussian boundaries. Group selection uses the existing selected-descendant mask.
+Scene opacity and selected opacity are accumulated separately as coverage += (1 - coverage) * alpha, including across depth waves.
+The selected object ID and selected depth are committed when selected coverage reaches the configured threshold. The scene occlusion depth is likewise chosen at its coverage crossing. Sub-threshold candidates do not appear in the resolved silhouette.
+For overlapping selected objects, the coverage-crossing surface determines ownership. A nearer but visually negligible Gaussian does not take ownership. HiGS equal-depth ordering is stabilized with an object-ID tie break.
+Unselected foreground geometry does not clip the selected silhouette. Occluded contour portions are dimmed to 35% of the configured outline opacity.
+Selection changes, deselection, imports and toggles invalidate the relevant cached mask. When neither the current nor previous frame has an active object outline, selection-only changes can use the existing cached-selection path.
+The outline changes display color/transmittance without changing scene geometry or depth. It is gated off during training, point-cloud mode, depth views and selections without applicable splat objects.
+Rendering and cost
+Both 3DGS and 3DGUT are supported, including the dedicated RAD variants and HiGS selection-mask path. The merged RAD fix #3675 is included through the upstream master merges. This branch also includes master's global MSVC /bigobj fix #3708.
+With outlines disabled, the existing color shaders and their early termination remain unchanged. Both legacy 3DGS and 3DGUT retain separate mask-only dispatches; HiGS keeps its dedicated mask pass without repeating SH color evaluation. The shared color/outline 3DGUT dispatch from b03f80b has been reverted following the reviewer's RTX 4080 regression measurements. The resulting tracked source tree is identical to 0bccd6a.
+A selected-tile classification skips tiles untouched by selected splats and records each tile's final selected rank in the canonical global raster order. The dedicated mask paths stop fetching batches once the first entry exceeds that rank, using a uniform workgroup exit before barriers. This preserves hidden selections while avoiding traversal of irrelevant tails whose selected coverage can never reach the threshold. The existing classification dispatch writes inverse ranks into the tail of its existing scratch buffer; this adds 4 bytes per declared projection slot while the mask path is active, with existing allocation/reuse/destruction handling.
+HiGS additionally rejects macro-list entries outside the current render tile using the existing conservative projection rectangle. Wrapped equirectangular cameras retain the previous conservative macro-list path. After scene coverage crosses the threshold, unselected entries no longer need alpha evaluation. The ordinary HiGS alpha cutoff logarithm is calculated once per Gaussian batch entry rather than per pixel, adding 1 KiB of shared memory per workgroup. Color/training alpha helpers remain unchanged. No new dispatch or per-pixel rank lookup is introduced. Per-pixel mask work still stops when both coverages and ownership are settled, and HiGS groups stop fetching batches when no lanes remain active.
+For the guarded, unfiltered single-node case with no unrelated raster overlays, the outline reuses rendered opacity instead of rerasterizing the selected splats. Multi-object, filtered and overlay cases retain the general coverage-mask path. 3DGUT reuses the existing LOD bindings instead of binding the index buffers twice. The dedicated mask dispatches do not write the normal color/depth outputs.
+The default 1-2 pixel resolve uses the small-neighborhood path. Widths above 2 add two separable nearest-boundary passes and two reusable 32-bit buffers, totaling 8 bytes per render pixel (about 15.8 MiB at 1920x1080 or 63.3 MiB at 3840x2160). Suppressing interior contours adds GPU background-component classification and scratch storage; keeping interior contours enabled avoids that classification. These optional costs are described in the tooltips.
+The maintainer measured the retained rank-bound implementation (0bccd6a) on Linux with an RTX 4080, a 9M-splat garden plus the ornament scan, a 200-frame orbit at 920x668, using RasterizeForward GPU timestamp medians:
+Case
+Previous round
+Retained rank-bound implementation
+3DGS, outline off
+5.40 ms
+5.41 ms
+3DGS, ornament selected
+18.75 ms
+11.62 ms
+3DGS, whole garden selected
+22.0 ms
+14.92 ms
+3DGUT, outline off
+11.2 ms
+10.8-11.2 ms
+3DGUT, ornament selected
+17.3 ms
+16.0 ms
+3DGUT, whole garden selected
+Not reported
+20.1 ms
+These are the maintainer's measurements, not a local reproduction of that Linux workload. The subsequent shared-dispatch experiment improved some local RTX 5060 Ti cases but regressed the maintainer's 3DGUT ornament case from 16.0 to 22.8 ms, so it is excluded. The general outline path still has material overhead; UI frame intervals are not used as GPU speedup evidence.
+The maintainer also verified the retained implementation against all 34 round-3 captures: outline-on output matched 396aedc, apart from the transient viewport pivot marker. Small outline-off 3DGS differences were limited to a few channel levels. All six outline-off legacy color shader binaries compile byte-identically to the original published head 396aedc.
+Validation
+Validation of the retained implementation:
+Synthetic two-object RAD/LOD selected/deselected smoke checks also pass on both renderers; no exhaustive streamed-parent or multi-page RAD validation is claimed.
+Full Windows Release build, including Python-stub generation/consistency, and native selection_outline_contract.
+54 local Windows GPU integration cases, covering both renderers, single/multiple/group selection, faint halos across selected objects, accumulated-opacity thresholds, selection cache refresh, occlusion, filters, appearance, enclosed/open holes and widths through 12. Six cases cover long irrelevant depth tails, opaque foreground, selection changes and thresholds 0.2/0.5/0.8 on both renderers.
+61 CPU Rendering/Preferences/storage regression cases on Windows and Ubuntu under WSL.
+14 Slang shader configurations compiled and passed SPIR-V validation, including RAD, HiGS, tile classification, coverage, boundary expansion and resolve variants.
+Targeted MSVC Debug compilation of the Vulkan renderer.
+clang-format 18 with the repository configuration; localization completeness/contracts; hardcoded-UI audit; error-debt gate/tests; Windows source/build/path contracts; git diff --check.
+GitHub Windows and Ubuntu workflows include the CPU settings/persistence contract. These changes do not add the local GPU integration suite to ordinary GPU-less CI. The contract explicitly links CUDA::cuda_driver for the Ubuntu toolkit-stub link case. CI for the updated head must run again. Ubuntu CPU tests ran under WSL; no physical Linux desktop/GPU run is claimed. The Vulkan validation layer is unavailable on this local installation, so successful runtime tests do not constitute a validation-layer run.
+The latest local investigation also tested a smaller shared-selection-flag cache: 54 GPU cases passed, but its measured 3DGUT gain was only about 1.4% on the local GPU, so that experiment was not retained. After discarding it, the final Windows Release build passed and the tracked source tree was verified identical to 0bccd6a. Local benchmark captures and experimental files are not included in the PR.
+francescofugazzi
+added 4 commits
+October 18, 2026 19:47
+Add optional splat selection contours and dashed object boundaries
+…
+2e67243
+```
+Keep the visible selection silhouette solid and distinguish selected splat objects with antialiased dashed seams. Preserve per-object occlusion, group selection, existing color settings and opt-in project/preferences persistence. Include all locale tooltips and plain/full overlay raster variants.
+
+Validated locally on Windows with a full Release build, 8 GPU outline cases over four camera rolls and both raster backends, 121 Python regressions, the native outline contract, five SPIR-V shader variants and project quality gates. RAD/3DGUT integration follows its separate pending correction. Not published.
+```
+Use continuous visible object selection contours
+092d2d1
+Match selected splat visibility and optimize HiGS outline masks
+f0a90fd
+Run selection outline contracts in Windows and Ubuntu CI
+50ea52f
+Copilot
+AI
+balanced review requested due to automatic review settings
+October 18, 2026 17:53
+Copilot
+AI
+reviewed
+Oct 18, 2026
+Copilot
+AI
+left a comment
+Copy link
+Copy Markdown
+Contributor
+There was a problem hiding this comment.
+Choose a reason for hiding this comment
+The reason will be displayed to describe this comment to others. Learn more.
+Copilot was unable to review this pull request because the user who requested the review has reached their quota limit.
+MrNeRF
+requested changes
+Oct 18, 2026
+View reviewed changes
+MrNeRF
+left a comment
+Copy link
+Copy Markdown
+Owner
+There was a problem hiding this comment.
+Choose a reason for hiding this comment
+The reason will be displayed to describe this comment to others. Learn more.
+Thank you! The default path looks safe: with the outline off, renders of a 3M splat scene are pixel-identical to master and the render times are the same. On Linux the outline contract and all 16 runtime cases pass, and both renderers draw the outline.
+One thing before merging: on a real scan the contour follows single faint Gaussians, not the visible silhouette.
+Any selected Gaussian above 0.1 alpha marks the pixel as selected (see inline). Large low-opacity Gaussians (glow, halo, floaters) then draw big outline loops through space that looks empty, and small ones add speckle along the edges. I see this on an isolated object scan with both 3DGS and 3DGUT.
+Could the mask use the selected object's accumulated opacity instead, for example mark a pixel once the selected splats reach 50% coverage? Then the line should follow what the user actually sees, and floaters stop drawing their own outlines.
+Comment thread
+src/rendering/rasterizer/vulkan/shader/src/slang/alphablend_shader.slang
+Outdated
+// Blender's outline prepass contains selected objects only. An
+// unselected foreground footprint dims the selected silhouette;
+// it must neither clip it nor terminate the outline search.
+if (outline_active && gauss_rgba.a >= 0.1f) {
+MrNeRF
+Oct 18, 2026
+Copy link
+Copy Markdown
+Owner
+There was a problem hiding this comment.
+Choose a reason for hiding this comment
+The reason will be displayed to describe this comment to others. Learn more.
+This per-Gaussian threshold is where faint, large Gaussians enter the mask. Accumulating the selected splats' opacity per pixel (and testing that) would follow the visible silhouette instead.
+Comment thread
+src/rendering/rasterizer/vulkan/shader/src/slang/selection_outline_mask.slang
+Outdated
+float alpha = (uniforms.lod_enabled & 4u) != 0u
+? evaluate_splat_spark_rad(splat, coordinate).a
+: evaluate_splat_for_profile(splat, coordinate, uniforms.splat_render_profile).a;
+if (alpha < 0.1f)
+MrNeRF
+Oct 18, 2026
+Copy link
+Copy Markdown
+Owner
+There was a problem hiding this comment.
+Choose a reason for hiding this comment
+The reason will be displayed to describe this comment to others. Learn more.
+Same here for the HiGS mask pass.
+francescofugazzi
+added 5 commits
+October 18, 2026 20:53
+Build splat selection contours from accumulated opacity
+6cec76e
+Link outline contract to the CUDA driver on GPU-less CI
+e9e2c79
+Fix MSVC Debug section limit in project session state
+2208dcf
+Merge master and integrate RAD outline pipelines
+7aff29f
+Merge remote-tracking branch 'upstream/master' into feat/selection-ou…
+…
+fdbecfe
+```
+…tline
+```
+francescofugazzi
+commented
+Oct 19, 2026
+Copy link
+Copy Markdown
+Collaborator
+Author
+Thanks for the review. Both mask paths now use accumulated selected opacity per pixel instead of a per-Gaussian alpha threshold.
+Review changes
+The legacy 3DGS/3DGUT path and the dedicated HiGS mask use coverage = 1 - product(1 - alpha) and emit the silhouette once selected coverage reaches 50%.
+Scene coverage and selected coverage are tracked independently across depth waves. Unselected splats cannot contribute to the selected silhouette, and a faint foreground footprint alone does not mark the selected contour as occluded.
+Candidate object IDs remain pending until selected coverage reaches the threshold. The nearest selected object ID and stable equal-depth tie break are retained.
+Regression cases cover a single 20% floater, eight overlapping 8% contributions below 50% coverage, sixteen overlapping 8% contributions above it, unselected coverage, and a detached faint halo around a solid selected model.
+Integration and CI follow-ups
+Integrated the merged RAD fix Fix RAD LOD decoding and rendering in 3DGUT #3675. Dedicated RAD 3DGUT outline variants preserve master's shader specialization. Host bindings and pipeline layouts include the upstream LOD index, logical-index and weight buffers, followed by the outline buffers without collisions; both RAD variants are registered with the viewport renderer.
+Fixed the Windows Debug C1128 failure by adding project/session_state.cpp to the existing MSVC-only /bigobj source list. Compiling that translation unit in Debug reproduced C1128 without the flag and passed with it.
+Fixed the GPU-less Ubuntu contract link by explicitly linking CUDA::cuda_driver. The native outline contract tests CPU settings/persistence behavior; GPU rendering tests are not enabled in GitHub CI.
+The subsequent Windows Release/Debug failures were in the existing viewport layout test, due to the scrub-field drag handles introduced in Drag number fields to scrub transform and crop values #3687. The upstream test fix Let the layout test reach scrub fields through their drag handles #3697 is now merged into this branch through master at 412d5715f. No separate copy of that fix was added to this PR.
+Windows and Ubuntu workflow selections retain both the outline contract and the upstream drag-axis/X11 contracts.
+Verification
+After the RAD integration: full Windows Release build, native outline contract, all 18 local GPU integration cases, and selected/deselected RAD LOD smoke comparisons on both 3DGS and 3DGUT passed. All eight outline shader variants compiled and passed SPIR-V validation. The 30 Rendering panel regression tests, project gates and clang-format 18 also passed.
+The RAD smoke test uses a synthetic single-node fixture; it is not exhaustive validation of large streamed multi-page scenes. No physical Linux desktop test is claimed.
+The latest master merge completed without conflicts. Localization completeness/contracts, UI string audit, error-debt checks, Windows source/build contracts and path-boundary checks were rerun after that merge. The updated Windows and Ubuntu CI runs remain the final validation of this latest head; the earlier successful local build/GPU results above were obtained before this last upstream-only merge.
+MrNeRF
+requested changes
+Oct 20, 2026
+View reviewed changes
+MrNeRF
+left a comment
+Copy link
+Copy Markdown
+Owner
+There was a problem hiding this comment.
+Choose a reason for hiding this comment
+The reason will be displayed to describe this comment to others. Learn more.
+Thanks Francesco! Round 1 is fixed for a single selected object. On the scan, the outline now sits exactly on the 50% coverage edge with both 3DGS and 3DGUT: no loops through the halo and no speckle in the glow. Here is what else I checked:
+Occlusion dimming, groups, deselect, the marker colour and the panel toggle all behave.
+With the option off, renders match master pixel for pixel, at the same speed.
+Projects round-trip, including old projects.
+Two things before this can go in:
+Several selected objects still follow faint Gaussians. The 50% threshold decides whether a pixel is selected, but the object id and the dimming depth still come from the nearest selected splat above 0.5/255. So one object's invisible halo draws a contour through another selected object. Repro: two copies of a scan side by side, one a bit behind the other. Select the right one and its outline is clean; select both and a line runs through the middle of the right one, where the left one's coverage is below 0.2%. It happens on both 3DGS and 3DGUT. Could the id and depth come from the selected splat where accumulated selected coverage crosses 50%?
+The cost with the option on. On the default 3DGS renderer, the raster pass goes from about 5.4 ms to about 40 ms, and the frame from 11 to about 45 ms (around 12 fps while orbiting, 9M splats at 920x668 on an RTX 4080), even when only a small object is selected. The HiGS mask pass makes every 16x16 block walk the whole macro-tile list on each depth wave. On 3DGUT, outline_active never clears, so early termination is lost for the whole frame (+58% raster). Could the mask pass stop once both coverages pass 50% and the id is settled, and only run on tiles touched by selected splats?
+Take them or leave them:
+With the option on, selection updates always take the full re-render path, even with nothing selected.
+render_settings_get/set in the MCP tools doesn't expose selection_outline.
+The 3DGUT variants bind the LOD index buffers twice, and read pixel_depth in the same dispatch that writes it. It's worth a Windows Debug run.
+Thanks!
+Comment thread
+src/rendering/rasterizer/vulkan/shader/src/slang/alphablend_shader.slang
+Outdated
+#else
+uint outline_flags = read_byte(gaussian_overlay_flags, splat_id);
+#endif
+if ((outline_flags & OVERLAY_FLAG_OUTLINE_SELECTED) != 0u) {
+MrNeRF
+Oct 20, 2026
+Copy link
+Copy Markdown
+Owner
+There was a problem hiding this comment.
+Choose a reason for hiding this comment
+The reason will be displayed to describe this comment to others. Learn more.
+The id and depth chosen here come from the nearest selected splat above 0.5/255, not from where selected coverage reaches 50%. With two selected objects, one object's faint halo decides the id at pixels inside the other, which draws a contour through it.
+Comment thread
+src/rendering/rasterizer/vulkan/shader/src/slang/selection_outline_mask.slang
+Outdated
+if (inside) {
+for (uint j = 0u; j < min(256u, end - base); ++j) {
+uint node_id = batch_nodes[j] + 2u;
+bool nearer_selected = batch_selected[j] != 0u &&
+MrNeRF
+Oct 20, 2026
+Copy link
+Copy Markdown
+Owner
+There was a problem hiding this comment.
+Choose a reason for hiding this comment
+The reason will be displayed to describe this comment to others. Learn more.
+Same for the HiGS mask: the id and depth should come from the coverage crossing, not the first faint splat.
+Comment thread
+src/rendering/rasterizer/vulkan/src/gs_renderer.cpp
+Outdated
+compose_pipeline[buffers.is_unsorted_1],
+compose_bindings);
+}
+if (outline_transform_indices) {
+MrNeRF
+Oct 20, 2026
+Copy link
+Copy Markdown
+Owner
+There was a problem hiding this comment.
+Choose a reason for hiding this comment
+The reason will be displayed to describe this comment to others. Learn more.
+This mask pass runs on every depth wave, and every 16x16 block walks the whole 64x32 macro-tile list without an early exit. That is where 3DGS goes from ~5.4 ms to ~40 ms raster with the option on, even for a small selected object.
+Comment thread
+src/rendering/rasterizer/vulkan/shader/src/slang/alphablend_shader.slang
+outline_id = 1u;
+}
+}
+if (!thread_active) {
+MrNeRF
+Oct 20, 2026
+Copy link
+Copy Markdown
+Owner
+There was a problem hiding this comment.
+Choose a reason for hiding this comment
+The reason will be displayed to describe this comment to others. Learn more.
+outline_active stays set for the whole tile, so 3DGUT loses early termination across the frame with the option on (+58% raster).
+francescofugazzi
+added 3 commits
+October 20, 2026 09:38
+Merge master and use global MSVC bigobj configuration
+3690fe1
+Fix outline coverage ownership and localize mask rendering
+…
+10e3900
+```
+Choose object IDs and occlusion depths at the selected coverage crossing. Stabilize HiGS equal-depth ordering, classify selected tiles before depth waves, and terminate settled mask work. Separate legacy color and outline dispatches and reuse rendered coverage for an unfiltered single selected node. Reuse LOD bindings, expose the setting through MCP, and allow cached selection rendering when no outline is present. Add multi-object halo, MCP and filtered single-node GPU regressions.
+```
+Add selection outline appearance controls and exterior contours
+396aedc
+francescofugazzi
+commented
+Oct 20, 2026
+Copy link
+Copy Markdown
+Collaborator
+Author
+Thanks for the second review. Pushed the coverage/ownership and rendering-cost fixes in 10e390020, followed by the final appearance controls in 396aedc1a. The branch also includes upstream master's global MSVC /bigobj fix (#3708). The PR description has been rewritten to describe the current implementation and validation rather than retaining the earlier benchmark figures.
+Responses to the blocking findings
+1. Object ID and dimming depth must come from the coverage crossing
+Fixed in both alphablend_shader.slang and the HiGS selection_outline_mask.slang path.
+Selected coverage and scene coverage are independent accumulators and remain valid across depth waves.
+The selected object ID and depth are now assigned only when selected coverage reaches the threshold, defaulting to 50%. They no longer come from the nearest individually faint selected Gaussian.
+Scene occlusion depth is also captured at the scene-coverage crossing. Coverage below the threshold stays hidden from the contour resolve.
+HiGS equal-depth sorting has a stable object-ID tie break.
+The GPU regressions now include multiple selected objects where one object's faint halo overlaps another object's opaque interior. They check that the halo does not introduce an interior contour, on both renderers. The previous individual-floater and accumulated-opacity tests remain.
+2. HiGS should skip unrelated tiles and stop settled mask work
+Added selected-tile classification before the depth waves. Untouched 16x16 tiles return before walking a macro-tile list. Within selected tiles, each pixel stops once scene coverage, selected coverage and ownership are settled. Group-wide activity checks stop shared-batch loads when no lanes need further work. The mask still reuses the existing projected/binning data and does not repeat SH evaluation.
+The guarded, unfiltered single-node case can derive the mask from rendered coverage instead of running the general selected-splat mask pass. This fast path is excluded when other scene nodes, relevant filters or unrelated raster overlays could invalidate that equivalence. Filtered single-node regressions exercise the general path.
+3. 3DGUT should preserve color-raster early termination
+Separated the normal color raster from an outline-only mask dispatch. The color shader retains its normal early termination and register path; it no longer stays alive solely because an outline is enabled. The mask-only dispatch is restricted to selected tiles and ends its per-pixel work once coverage/ownership is settled.
+Responses to the additional points
+Selection-only updates with nothing selected: cache eligibility now checks whether an object outline is active in either the current request or the previous rendered frame. Merely enabling the preference does not force the full path when there is no applicable outline. Keeping the previous-frame check still invalidates the mask correctly when the last outlined object is deselected.
+MCP: render_settings_get/set now expose selection_outline, the dedicated outline color, opacity, width, coverage threshold and interior-contour option. GPU integration checks exercise the MCP route and invalid values as well as the Python settings route.
+Duplicate LOD bindings and depth access: 3DGUT outline variants reuse the existing LOD index/logical-index bindings. Mask-only dispatches do not write the normal color/depth outputs; they use dedicated outline state. The targeted MSVC Debug renderer compilation and shader/SPIR-V checks pass. This is not a claim of a full local Windows Debug application run or Vulkan validation-layer coverage.
+Additional controls in this update
+Under Rendering > Selection, enabling Selection outline reveals:
+A dedicated color picker using the existing picker infrastructure, independent of Center Marker color.
+A separate opacity control, default 1.0.
+Antialiased width from 1 to 12 render pixels, default 2.
+Accumulated-opacity threshold from 0.05 to 0.95, default 0.5. This adjusts silhouette sensitivity without modifying the source splats.
+Interior contours, enabled by default. Turning it off removes fully enclosed hole boundaries; cavities connected to the exterior remain outlined.
+These settings use the existing rendering properties, project persistence and viewport-defaults system. All ten languages are updated. The feature remains disabled by default, with a continuous blue/cyan outline when enabled. Projects without a dedicated outline color retain their previous custom Center Marker color as the initial outline color.
+The default thin resolve retains its small-neighborhood path. Widths above 2 add two separable passes and 8 bytes of reusable scratch per render pixel. Disabling interior contours adds background-component classification. The tooltips describe these optional costs.
+Performance evidence and limits
+On a local 2,997,954-Gaussian single-node scene at 600x908, the short RasterizeForward GPU-timer samples were approximately 4.097 ms off / 4.148 ms on for 3DGS and 11.862 ms off / 11.659 ms on for 3DGUT, at width 2. A separate width sweep measured roughly +0.046 ms for 3DGS and +0.101 ms for 3DGUT from width 2 to width 12.
+These samples exercise the single-node fast path, are subject to timing noise and do not demonstrate a general speedup. I have not reproduced your 9M multi-object scan here, so I cannot claim your reported 40 ms / +58% regressions are eliminated on that workload. The tile pruning, ownership crossing and termination changes are in place for retesting it. Presentation-limited UI frame intervals are not treated as GPU performance evidence.
+Final-head verification
+Full Windows Release build and native outline settings/persistence contract passed.
+All 48 local Windows GPU cases passed, including multi-object faint-halo ownership, filters, cache invalidation, both renderers, opacity/color/threshold, enclosed and open cavities, and thickness through 12.
+All 52 CPU regression cases passed on both Windows and Ubuntu under WSL.
+All 14 shader configurations compiled and passed SPIR-V validation.
+Targeted MSVC Debug renderer compilation, clang-format 18, localization checks, hardcoded-UI audit, error-debt gate/tests, Windows source/build/path checks and whitespace checks passed.
+The previous published head's Windows/Ubuntu Release and Debug CI jobs were green. The new head needs its own CI result. Ordinary GitHub CI still runs the CPU outline contract, not the GPU integration suite; no physical Linux GPU test is claimed for this update.
+MrNeRF
+requested changes
+Oct 20, 2026
+View reviewed changes
+MrNeRF
+left a comment
+Copy link
+Copy Markdown
+Owner
+There was a problem hiding this comment.
+Choose a reason for hiding this comment
+The reason will be displayed to describe this comment to others. Learn more.
+Thanks a lot, Francesco! The ownership fix works. I rebuilt 396aedc on Linux (RTX 4080) and re-ran the round-2 rig on the same 9M-splat garden plus two copies of the ornament scan, and also tried two other trained scenes (bonsai and room):
+Faint halo: the halo repro is clean now. With both copies selected, the line through the right copy is gone on 3DGS and on 3DGUT. Overlapping copies, occlusion dimming, groups, deselect, and the separate marker colour all behave.
+New controls: colour, opacity, width 6/12, threshold 0.2/0.8 and interior contours off all do what the tooltips say. On a whole-scene selection, interior contours off cleanly removes the window and lawn contours.
+MCP: render_settings_get/set expose all six settings and reject out-of-range values.
+Outline off: renders still match master. 3DGUT is bit-identical, and on 3DGS 4 of 614,560 pixels differ by 1/255. The raster time is unchanged at 5.40 ms.
+One thing left before merge: the cost with the outline on. Here is the raster stage median over 200 orbit frames at 920x668, GPU timestamps from --log-level perf:
+round 2
+round 3
+3DGS, outline off
+5.42 ms
+5.40 ms
+3DGS, on, ornament (137k splats) selected
+40.1 ms
+18.75 ms
+3DGS, on, whole garden selected
+45.5 ms
+22.0 ms
+3DGUT, outline off
+13.0 ms
+11.2 ms
+3DGUT, on, ornament selected
+19.4 ms
+17.3 ms
+The 3DGS cost is halved, thanks for that! But a small selected object still makes the raster pass 3.5x slower, and the frame goes from about 11 to 25 ms. All of the extra time is inside RasterizeForward; the sort stages only go from about 0.5 to 0.9 ms. My guess is the pixels inside selected tiles that the object doesn't actually cover: their selected coverage never reaches the threshold, so they would still walk every depth wave behind it. Could such a pixel stop once selected_coverage + transmittance < threshold, after the scene crossing is recorded, because it can no longer cross? 3DGUT is still about +55% with a small selection, so I'm wondering whether the same bound would help the mask-only dispatch there too.
+Thanks again, this is close!
+Bound outline traversal by the final selected raster rank
+0bccd6a
+francescofugazzi
+commented
+Oct 20, 2026
+Copy link
+Copy Markdown
+Collaborator
+Author
+Follow-up in 0bccd6a12.
+Thanks for the new measurements. This follow-up reduces mask work without using scene transmittance as a bound on the independent selected opacity.
+Coverage bound and traversal
+selected_coverage + scene_transmittance < threshold would not preserve the current hidden-outline behavior: an opaque unselected foreground can leave almost no scene transmittance while the selected object behind it still reaches the selected-only coverage threshold. That silhouette must remain visible with occlusion dimming.
+Instead, the existing tile prepass records the final selected rank per render tile in the canonical global raster sort, and an inverse-rank table in the same scratch buffer. Both mask paths uniformly stop before loading a batch whose first rank is beyond that bound. The check is per workgroup/batch, not per pixel, and occurs before shared-memory barriers. It also covers pixels that never cross selected coverage and subsequent depth waves with no remaining selected entries. The bound uses the actual global sort rank rather than projected depth, since the raster order is radial.
+For HiGS, macro-list entries are rejected against the existing projected render-tile rectangle before expensive fetch/evaluation. Wrapped equirectangular projection keeps its previous conservative traversal. Unselected alpha work is skipped once scene coverage is settled, and the ordinary alpha cutoff logarithm is hoisted from every pixel to each shared Gaussian entry. Shared color/training helpers are unchanged.
+The inverse ranks add 4 bytes of logical scratch per declared projection slot, reusing the existing buffer and its lifecycle; the cached HiGS cutoff adds 1 KiB shared memory per workgroup. There is no new dispatch, per-pixel rank lookup or new buffer lifetime to manage.
+Measured result
+RTX 5060 Ti, 600x908, 2,997,954-Gaussian background plus a selected 608,704-Gaussian scan scaled/placed in front of it. This exercises the general multi-object mask. Approximately 82-84 RasterizeForward GPU timestamp samples per case, first 10 discarded:
+Renderer
+396aedc off
+Updated off
+396aedc on
+Updated on
+3DGS
+4.940 ms
+4.940 ms
+21.334 ms
+15.029 ms
+3DGUT
+14.128 ms
+14.104 ms
+24.138 ms
+23.524 ms
+This is about 30% less total raster time with the outline on for this 3DGS case. The 3DGUT improvement is small; I do not consider these numbers proof that the remaining cost concern is fully resolved. Your RTX 4080/Linux garden orbit workload still needs retesting. These are GPU timestamps, not UI frame intervals.
+Fixed-camera outline-on captures match 396aedc byte-for-byte on both renderers. Outline-off 3DGUT is identical; 3DGS differs in 21 channels by at most 1/255. All six outline-off legacy color shader binaries remain byte-identical.
+Verification
+Full Windows Release build and native selection_outline_contract pass.
+All 54 Windows GPU integration cases pass. Six new cases exercise long background tails, opaque foreground, selection changes and thresholds 0.2/0.5/0.8 on both renderers.
+61 CPU Rendering/Preferences/storage cases pass on Windows and Ubuntu under WSL.
+14 Slang configurations compile and pass SPIR-V validation; targeted MSVC Debug renderer compilation passes.
+Repository clang-format 18, localization completeness/contracts, hardcoded UI audit, error-debt checks, Windows source/build/path contracts and diff whitespace checks pass.
+No physical Linux GPU run or Vulkan validation-layer run is claimed: the latter is unavailable locally. Ordinary GitHub CI remains CPU-only. The PR description now documents the traversal change, scratch cost, current measurements and remaining limits.
+Share 3DGUT color evaluation with bounded selection outlines
+b03f80b
+francescofugazzi
+commented
+Oct 20, 2026
+Copy link
+Copy Markdown
+Collaborator
+Author
+Follow-up in b03f80bc5.
+I continued profiling the remaining 3DGUT cost. This follow-up shares the expensive ray/Gaussian evaluation between ordinary color and outline, using the existing outline pipeline rather than running the ordinary color dispatch first.
+The selected-rank bound added in 0bccd6a now clears outline activity once no selected contribution can remain. Ordinary color work continues independently if needed. Per-pixel color termination and the independent selected-opacity/scene-opacity accumulators are retained, including hidden contours and depth waves. The 3DGS/HiGS paths remain unchanged.
+This removes one 3DGUT dispatch per depth wave and adds no buffer, shader variant, scratch allocation or pass. Outline-off uses the unchanged color pipelines.
+Comparison against 0bccd6a
+RTX 5060 Ti, 600x908, 2,997,954-Gaussian background plus a 608,704-Gaussian scan. Medians of 82 RasterizeForward GPU timestamp samples per case, first 10 discarded:
+3DGUT case
+Before off
+After off
+Before on
+After on
+Selected scan in front
+14.112 ms
+14.107 ms
+24.075 ms
+20.976 ms
+Selected scan behind, same angular size
+14.041 ms
+14.086 ms
+24.328 ms
+20.976 ms
+Both scans selected
+14.067 ms
+14.033 ms
+31.825 ms
+21.587 ms
+That is approximately 13-32% less total raster time with outlines on in these local cases. 3DGS remains around 15 ms. The general outline path still has overhead; your Linux/RTX 4080 garden orbit workload remains the important external retest.
+Front/behind outline-on captures match the previous head byte-for-byte on both backends. Outline-off 3DGUT is identical too; 3DGS changes are limited to a few channels by 1/255. All six outline-off legacy color shader binaries are byte-identical to 396aedc.
+Verification
+Full Windows Release build and native outline contract.
+58 Windows GPU integration cases. Four new cases specifically compare full scene color with outlines off versus transparent outlines, covering plain/emphasized 3DGUT, thresholds 0.2/0.8 and an unselected 2048-splat tail, so the outline bound cannot accidentally terminate ordinary color.
+61 CPU Rendering/Preferences/storage cases on Windows and Ubuntu/WSL.
+All 14 Slang/SPIR-V configurations, MSVC Debug renderer compilation, clang-format 18 and project localization/UI/debt/Windows/path checks.
+The synthetic two-object RAD/LOD selected/deselected smoke checks also pass on both renderers; these do not constitute exhaustive streamed-parent or multi-page RAD validation.
+No new physical Linux GPU or Vulkan validation-layer run is claimed. Ordinary CI remains CPU-only. The PR description includes the current pipeline behavior and measurements.
+MrNeRF
+requested changes
+Oct 20, 2026
+View reviewed changes
+MrNeRF
+left a comment
+•
+edited
+Loading
+Uh oh!
+There was an error while loading. Please reload this page.
+Copy link
+Copy Markdown
+Owner
+There was a problem hiding this comment.
+Choose a reason for hiding this comment
+The reason will be displayed to describe this comment to others. Learn more.
+Thanks, Francesco, and you're right about my bound: selected coverage builds up regardless of what's in front, so selected_coverage + transmittance would have cut off outlines of occluded selections. Sorry for the detour!
+I rebuilt both 0bccd6a and b03f80b on Linux (RTX 4080) and re-ran the same rig: the 9M-splat garden plus the ornament scan, a 200-frame orbit at 920x668, and RasterizeForward medians from --log-level perf:
+round 3
+0bccd6a
+b03f80b
+3DGS, outline off
+5.40 ms
+5.41 ms
+5.39 ms
+3DGS, on, ornament selected
+18.75 ms
+11.62 ms
+11.59 ms
+3DGS, on, whole garden selected
+22.0 ms
+14.92 ms
+14.95 ms
+3DGUT, outline off
+11.2 ms
+10.8–11.2 ms
+11.0–11.2 ms
+3DGUT, on, ornament selected
+17.3 ms
+16.0 ms
+22.8 ms
+3DGUT, on, whole garden selected
+20.1 ms
+23.8 ms
+The rank bound in 0bccd6a is a nice win: another 38% off 3DGS. Rendering is right on both heads. I re-captured all 34 round-3 shots, and every outline-on capture is byte-identical to 396aedc on both renderers: halo repro, groups, deselect, all the controls. The only differences are the transient pivot marker at the viewport centre and a few pixels off by 1–3 levels on 3DGS outline-off, as you saw.
+The one thing: on this GPU, b03f80b makes 3DGUT with the outline on about 42% slower than 0bccd6a (22.8 vs 16.0 ms, measured back to back, twice each with tight spreads). Your 5060 Ti shows the opposite, so I guess the shared dispatch trades occupancy or warp-level early exit differently on Ada than on Blackwell. Could you drop b03f80b and keep the separate mask dispatch? It's the better trade overall: b03f80b saves about 13% for you but costs 42% here. With 0bccd6a as the head, I'm happy to approve.
+Thanks for all the iterations, this is close!
+Revert "Share 3DGUT color evaluation with bounded selection outlines"
+…
+5d9a6d9
+```
+This reverts commit b03f80b.
+```
+francescofugazzi
+commented
+Oct 20, 2026
+Copy link
+Copy Markdown
+Collaborator
+Author
+Thanks for the back-to-back measurements. I have reverted b03f80b in 5d9a6d9 and kept the separate 3DGUT mask dispatch, as requested. The resulting tracked source tree is byte-for-byte identical to 0bccd6a; the selected-rank bound and the existing HiGS optimizations remain in place.
+I also investigated a smaller alternative that cached the selected-object flag in the existing shared index, without merging dispatches or adding buffers. On the local RTX 5060 Ti, the controlled comparison was 22.813 versus 22.487 ms for 3DGUT and 15.392 versus 15.369 ms for 3DGS. That is too small a gain to justify another architecture-sensitive change, so I discarded it. Its outline-on captures were identical and all 54 GPU contracts passed, but none of that experimental code is included here.
+Verification:
+The final Windows Release build passes.
+The retained source tree matches 0bccd6a exactly.
+All 14 checked Slang configurations compile and pass SPIR-V validation.
+The six outline-off color shader variants remain byte-identical to the original published head.
+The local GPU suite contains 54 cases again; the four tests specific to the reverted shared-dispatch implementation were removed with that revert.
+I have updated the PR description to describe the separate mask path and your RTX 4080 results, and removed the superseded shared-dispatch performance claims. No physical Linux GPU run or validation-layer run is claimed.
+Compact settled outline mask batches on HiGS
+…
+b43dc40
+```
+Once every pixel in a render tile has settled its scene coverage, only
+selected splats can change the outline mask. Compact each mask batch to
+the selected entries that touch the tile, in raster order, so pixels
+around a selection no longer loop over every unselected or off-tile
+macro-list entry.
+```
+MrNeRF
+approved these changes
+Oct 20, 2026
+View reviewed changes
+MrNeRF
+left a comment
+Copy link
+Copy Markdown
+Owner
+There was a problem hiding this comment.
+Choose a reason for hiding this comment
+The reason will be displayed to describe this comment to others. Learn more.
+Thanks for the revert, Francesco! 5d9a6d9 checks out: its tree matches 0bccd6a, so the round-4 captures and numbers still apply.
+Before approving, I looked at where the remaining 3DGS outline cost goes at a larger viewport, and I pushed one small follow-up so we can land this: b43dc40 compacts the HiGS mask batches.
+Once every pixel in a render tile has settled its scene coverage, only selected splats can still change the mask.
+So each batch is now compacted to the selected entries that touch the tile, in raster order.
+Pixels around a selection that never reach the threshold no longer loop over every unselected or off-tile macro-list entry.
+Here is the frame GPU time (all stages) on an RTX 4080 at a 1880x1388 viewport, with the same garden and ornament scene. Each value is a median over 200 orbit frames, from two interleaved rounds that agree within 0.05 ms:
+5d9a6d9
+b43dc40
+3DGS, outline off
+11.88 ms
+11.90 ms
+3DGS, ornament selected
+16.35 ms
+14.99 ms
+3DGS, whole garden selected
+21.70 ms
+19.05 ms
+3DGS, both selected
+21.51 ms
+19.01 ms
+3DGUT, off and on
+17.97–27.43 ms
+unchanged
+What I checked:
+Only selection_outline_mask.spv changes; every other shader binary is byte-identical.
+All 54 cases of test_selection_outline_runtime.py pass on Linux: 43 with the owned app, and the 11 endpoint cases (including the six batch-pruning ones) against a running instance.
+Every outline-on capture from the round-4 set is byte-identical to 5d9a6d9 apart from the pivot marker.
+Two things I tried and dropped:
+Running the stable depth sort only for two or more outlined objects saved another 0.9 ms per frame. But it made the open-cavity single-node contracts flaky, so the stable sort stays.
+Skipping settled unselected entries in the 3DGUT/legacy mask variant made 3DGUT 0.4–1.2 ms slower here, so that path is unchanged.
+Thanks for sticking with this through all the rounds, approving!
+Hide details
+View details
+MrNeRF
+merged commit a3f959d
+into
+MrNeRF:master
+Oct 20, 2026
+9 checks passed
+Uh oh!
+There was an error while loading. Please reload this page.
+francescofugazzi
+mentioned this pull request
+Oct 21, 2026
+Add label double-click reset for settings defaults
+#3716
+Merged
+Sign up for free
+to join this conversation on GitHub.
+Already have an account?
+Sign in to comment
+Uh oh!
+There was an error while loading. Please reload this page.
+Labels
+None yet
+3 participants
+Add this suggestion to a batch that can be applied as a single commit.This suggestion is invalid because no changes were made to the code.Suggestions cannot be applied while the pull request is closed.Suggestions cannot be applied while viewing a subset of changes.Only one suggestion per line can be applied in a batch.Add this suggestion to a batch that can be applied as a single commit.Applying suggestions on deleted lines is not supported.You must change the existing code in this line in order to create a valid suggestion.Outdated suggestions cannot be applied.This suggestion has been applied or marked resolved.Suggestions cannot be applied from pending reviews.Suggestions cannot be applied on multi-line comments.Suggestions cannot be applied while the pull request is queued to merge.Suggestion cannot be applied right now. Please check back later.
+You can’t perform that action at this time.

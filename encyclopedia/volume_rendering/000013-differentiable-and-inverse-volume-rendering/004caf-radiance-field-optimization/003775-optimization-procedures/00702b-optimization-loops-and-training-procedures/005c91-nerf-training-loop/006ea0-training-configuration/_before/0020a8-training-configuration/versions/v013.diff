@@ -1,0 +1,267 @@
+--- v012.md
++++ v013.md
+@@ -4,144 +4,176 @@
+ 
+ ## Overview
+-Training Configuration defines the hyperparameters, optimization schedules, and architectural constraints required to train specific Neural Radiance Field (NeRF) variants. While the parent [NeRF Training Loop](970-nerf-training-loop.md) establishes the generic execution flow, this method diverges in sampling strategies, loss functions, and network activations to address specific challenges such as anti-aliasing, computational efficiency, or generative control. It encompasses the initialization of the training environment, data loading, and the specific settings for the optimizer and learning rate scheduler [S1][S14, unofficial].
++Training Configuration defines the hyperparameters, optimization schedules, and architectural constraints required to stabilize convergence and maximize reconstruction quality in neural radiance field (NeRF) optimization. It solves the problem of disparate convergence speeds among geometric, appearance, and latent parameters by specifying learning rates, batch sizes, sampling strategies, and regularization strengths. Unlike [Scene Representation and Architecture](11368-scene-representation-and-architecture.md), which defines the model structure, or [Regularization and Loss Functions](8586-regularization-and-loss-functions.md), which defines the objective, Training Configuration controls the *process* of optimization, including learning rate scheduling, mixed precision, and view sampling strategies.
+ 
+ ## How it works
+-The method configures the optimization state through the following components:
++The training configuration orchestrates the optimization loop by defining the optimizer state, data sampling parameters, and iterative updates. It typically involves initializing an optimizer (e.g., Adam) with specific hyperparameters, setting up a learning rate scheduler, and configuring the batch composition (e.g., rays per iteration).
+ 
+-**Inputs and Outputs**
+-*   **Inputs:** Scene data (images, poses), network architecture definition, and hyperparameter configuration (learning rates, batch sizes, iteration counts).
+-*   **Outputs:** Trained model weights (MLP parameters, voxel grids, hash tables) and optimization state (optimizer momentum, learning rate schedule state).
++### Inputs and Outputs
++*   **Inputs:** Model parameters (weights, grids, latent codes), training images, camera poses, and configuration hyperparameters (learning rates, batch sizes, iteration counts).
++*   **Outputs:** Updated model parameters, training metrics (loss, PSNR), and optionally checkpoints.
+ 
+-**Data Structures**
+-*   **Optimizer State:** Maintains per-parameter first and second moment estimates for Adam [S6].
+-*   **Scheduler State:** Tracks current iteration for exponential or lambda-based decay [S14, unofficial].
+-*   **Training Batch:** A collection of rays or pixels sampled from training images. Common sizes include 512 points [S1], 8,192 rays [S2], 25,000 rays [S13], or $2^{16}$ pixels [S6].
++### Data Structures
++*   **Optimizer State:** Maintains per-parameter moment estimates (mean $m$, variance $v$) for Adam.
++*   **Scheduler State:** Tracks current iteration $t$ and total iterations $T$ for dynamic adjustments.
++*   **Batch:** A collection of rays or pixels sampled from training images.
+ 
+-**Numbered Steps**
+-1.  **Initialization:**
+-    *   Set random seed [S14, unofficial].
+-    *   Initialize model parameters. For voxel grids, base learning rates are typically 0.1 [S2][S14, unofficial]. For MLPs, base learning rates are typically $10^{-3}$ [S2][S14, unofficial].
+-    *   Initialize optimizer (e.g., Adam with $\beta_1=0.9, \beta_2=0.99, \epsilon=10^{-15}$) [S6][S14, unofficial].
+-    *   Initialize learning rate scheduler (e.g., LambdaLR decaying to 0.1 * init_lr at last iteration) [S14, unofficial].
+-2.  **Sampling:**
+-    *   Sample rays or pixels for the current batch. Strategies include uniform sampling [S1], hierarchical sampling [S10], or patch-based sampling [S14, unofficial].
+-    *   For dynamic scenes, sample past task rays with batch size $m_p$ relative to current task rays $m_c$ (typically $m_p = m_c/2$) [S17].
+-3.  **Forward Pass:**
+-    *   Render images using the current radiance field representation [S14, unofficial].
+-    *   Apply dynamic frequency masking if configured (see [Dynamic Frequency Masking](#dynamic-frequency-masking)) [S15, unofficial].
+-4.  **Loss Computation:**
+-    *   Compute photometric loss (e.g., L2) [S5].
+-    *   Compute perceptual loss (e.g., SSIM) [S5].
+-    *   Apply regularization terms (e.g., weight decay on hash grids) [S6].
+-5.  **Backward Pass and Update:**
+-    *   Compute gradients. For Gaussian Splatting variants, replace 2D screen space gradients with 3D positional gradients divided by half the distance to the camera [S5].
+-    *   Update parameters using the optimizer [S14, unofficial].
+-    *   Update learning rate based on the scheduler [S14, unofficial].
+-6.  **Periodic Operations:**
+-    *   Perform densification/pruning every 300 iterations [S5].
+-    *   Upsample voxel resolutions at specified iteration steps (e.g., every 40k iterations) [S13].
+-    *   Perform block-guided pruning at specified epochs for sparse representations [S12].
++### Numbered Steps
++1.  **Initialization:** Initialize model parameters. Initialize optimizer with base learning rates (e.g., $lr_0$ for embeddings, $lr_1$ for networks) and betas (e.g., $\beta_1=0.9, \beta_2=0.99$) [S6][S14, unofficial]. Initialize learning rate scheduler (e.g., LambdaLR) [S14, unofficial].
++2.  **Sampling:** Sample a batch of rays or pixels. Common strategies include:
++    *   Random pixel sampling from all training images [S6].
++    *   Hierarchical sampling with coarse and fine stages [S2].
++    *   Point distribution split (e.g., 2:2:1 surface, near, uniform) [S1].
++3.  **Forward Pass:** Render the batch using the current model state. This may involve ray marching [2199-training-ray-marching-and-integration.md] and feature extraction [11368-scene-representation-and-architecture.md].
++4.  **Loss Computation:** Calculate the loss function (e.g., L2, SSIM, perceptual) [S5]. Apply regularization terms if configured [8586-regularization-and-loss-functions.md].
++5.  **Backward Pass:** Compute gradients. If using mixed precision [2766-mixed-precision-training.md], scale gradients to prevent underflow.
++6.  **Update:** Update model parameters using the optimizer. Apply learning rate decay based on the scheduler [S14, unofficial].
++7.  **Iteration:** Repeat until convergence or max iterations reached. Apply periodic actions like densification/pruning [S5], upsampling [S13], or pruning [S12].
+ 
+-**Formulas**
+-*   **Loss Function:** $L = L_2 + 0.2 \cdot L_{SSIM}$ [S5].
+-*   **Dynamic Frequency Mask:** For tensor component length $L$, current iteration $t$, and total iterations $T$, the mask value $\alpha_i(t, T, L)$ for the $i$-th bit is:
+-    $$
+-    \alpha_i (t, T, L) =
+-    \begin{cases}
+-    1 & \text{if } i \le \lfloor \frac{t \cdot L}{T} \rfloor \\
+-    \frac{t \cdot L}{T} - \lfloor \frac{t \cdot L}{T} \rfloor & \text{if } \lfloor \frac{t \cdot L}{T} \rfloor < i \le \lfloor \frac{t \cdot L}{T} \rfloor + 3 \\
+-    0 & \text{if } i > \lfloor \frac{t \cdot L}{T} \rfloor + 6
+-    \end{cases}
+-    $$
+-    If $t \ge T$, the mask is a tensor of ones [S15, unofficial].
+-*   **Learning Rate Decay:** Exponential decay or LambdaLR: $lr_{new} = lr_{init} \cdot 0.1^{\min(iter/iters, 1)}$ [S14, unofficial].
++### Formulas
++*   **Adam Update:**
++    $$ \theta_{t+1} = \theta_t - \frac{\eta \cdot \hat{m}_t}{\sqrt{\hat{v}_t} + \epsilon} $$
++    where $\eta$ is the learning rate, $\hat{m}_t$ and $\hat{v}_t$ are bias-corrected moment estimates [S6].
++*   **Dynamic Frequency Masking (FreeNeRF):**
++    $$ \alpha_i(t, T, L) = \begin{cases} 1 & \text{if } i \le \lfloor \frac{t \cdot L}{T} \rfloor \\ \frac{t \cdot L}{T} - \lfloor \frac{t \cdot L}{T} \rfloor & \text{if } \lfloor \frac{t \cdot L}{T} \rfloor < i \le \lfloor \frac{t \cdot L}{T} \rfloor + 3 \\ 0 & \text{otherwise} \end{cases} $$
++    for $t < T$; returns 1 if $t \ge T$ [S15, unofficial].
++*   **Learning Rate Decay (LambdaLR):**
++    $$ \eta_t = \eta_0 \cdot 0.1^{\min(t/T, 1)} $$
++    [S14, unofficial].
+ 
+-**Parameters with Typical Values**
+-*   **Optimizer:** Adam [S1, S2, S6, S12, S13][S14, unofficial].
+-*   **Learning Rate:** $10^{-3}$ for MLPs [S2][S14, unofficial]; $0.1$ for voxel grids [S2][S14, unofficial]; $5 \times 10^{-4}$ for camera trajectory [S13].
+-*   **Batch Size:** 512 points [S1]; 8,192 rays [S2, S11]; 25,000 rays [S13]; $2^{16}$ pixels [S6].
+-*   **Iterations:** 10k/20k (coarse/fine) [S2]; 25k [S6]; 30k [S5]; 200k [S13].
+-*   **Weight Decay:** $0.1$ on hash grid values [S6]; $2 \times 10^{-5}$ [S12].
++### Parameters and Typical Values
++*   **Optimizer:** Adam [S1, S6][S14, unofficial].
++    *   $\beta_1 = 0.9, \beta_2 = 0.99, \epsilon = 10^{-15}$ [S6][S14, unofficial].
++    *   Learning Rate: $10^{-3}$ to $10^{-2}$ for grids/MLPs [S2, S6][S14, unofficial].
++    *   Weight Decay: $0.1$ for hash grids [S6], $2 \times 10^{-5}$ for MLPs [S12].
++*   **Batch Size:**
++    *   Rays: 8,192 [S2, S11], 4,096 [S10][S14, unofficial], 25,000 [S13].
++    *   Pixels: $2^{16}$ [S6].
++*   **Iterations:**
++    *   Standard: 20,000–30,000 [S3, S5, S9][S14, unofficial].
++    *   High-res/Complex: 200,000 [S8, S13].
++    *   Progressive: Coarse 10k, Fine 20k [S2].
++*   **Learning Rate Scheduling:**
++    *   Warm-up: First 100 iterations, $10^{-4}$ to $10^{-2}$ [S6].
++    *   Decay: Exponential [S2, S6], LambdaLR [S14, unofficial], Logarithmic [S3].
++*   **Sampling:**
++    *   Step size: Half voxel size $\delta = 0.5s$ [S2].
++    *   Shift: Random shift $p \cdot \delta \cdot d/\|d\|_2$ with $p \sim U[0,1]$ [S2].
+ 
+-**Edge Cases and Pitfalls**
+-*   **Precision:** Mixed precision training (FP16) requires dynamic loss scaling to prevent gradient underflow .
+-*   **Boundaries:** Adaptive ray marching parameters (e.g., `dt_gamma`) must be set carefully; setting to 0 disables acceleration [S14, unofficial].
+-*   **Degenerate Input:** In sparse-view or few-shot scenarios, models may struggle with intricate details and hidden angles, leading to artifacts (e.g., in the 'Drums' scene) [S15, unofficial].
+-*   **Overfitting:** High-frequency details may require dynamic masking or regularization to prevent overfitting in later training stages [S15, unofficial].
++### Edge Cases and Pitfalls
++*   **Gradient Underflow:** In mixed precision, use dynamic loss scaling [2766-mixed-precision-training.md].
++*   **Overfitting:** Use regularization (weight decay, dropout) and early stopping [S6, S12].
++*   **Disparate Convergence:** Use different learning rates for different parameter types (e.g., geometry vs. color) [S8, S3093-adam-optimisation-with-adaptive-scaling.md].
++*   **Boundary Artifacts:** Apply boundary mitigation CNNs or specific pruning thresholds [S12].
++
++### Pseudocode
++```python
++# Initialization
++optimizer = Adam(model.parameters(), lr=lr0, betas=(0.9, 0.99), eps=1e-15)
++scheduler = LambdaLR(optimizer, lambda iter: 0.1 ** min(iter / max_iters, 1))
++# Optional: Warmup scheduler for first 100 iters
++
++for iteration in range(max_iters):
++    # 1. Sampling
++    rays = sample_rays(batch_size, training_images, camera_poses)
++    
++    # 2. Forward Pass
++    rendered_colors, alphas = render(rays, model)
++    gt_colors = get_gt_pixels(rays, training_images)
++    
++    # 3. Loss Computation
++    loss = L2_loss(rendered_colors, gt_colors)
++    loss += 0.2 * SSIM_loss(rendered_colors, gt_colors) # Example weights [S5]
++    loss += weight_decay * hash_grid_values # Example regularization [S6]
++    
++    # 4. Backward Pass
++    optimizer.zero_grad()
++    loss.backward()
++    
++    # 5. Update
++    optimizer.step()
++    scheduler.step()
++    
++    # 6. Periodic Actions
++    if iteration % 300 == 0:
++        densify_and_prune(model, rays) # Example [S5]
++    if iteration in upsample_steps:
++        upsample_voxel_grids(model) # Example [S13]
++```
+ 
+ ## Subtopics
+ 
+ ### [Training Loop Setup](1522-training-loop-setup.md)
+-The Training Loop Setup defines the execution of a single optimization iteration for a radiance field, encompassing data loading, forward rendering, loss computation, and parameter updates. It also covers the initialization of the training environment, including random seed fixing, data loading, log directory creation, and checkpoint reloading logic.
++Defines the execution of a single optimization iteration, including data loading, forward rendering, loss computation, and parameter updates. It also covers initialization of the training environment (random seed, log directory, checkpoint reloading).
+ 
+ ### [Learning Rate Scheduling](2701-learning-rate-scheduling.md)
+-Learning rate scheduling adjusts the optimizer's step size during the training of radiance fields to balance convergence speed and stability. It prevents overshooting during fine-tuning phases and manages the trade-off between rapid initial geometric alignment and precise detail refinement. Unlike [Training Schedule](3154-training-schedule.md), which modifies the active set of losses and structural representation states, learning rate scheduling specifically controls the magnitude of parameter updates [G].
++Adjusts the optimizer's step size during training to balance convergence speed and stability. It prevents overshooting and manages the trade-off between rapid geometric alignment and precise detail refinement. It specifically controls the magnitude of parameter updates, unlike [Training Schedule](3154-training-schedule.md) which modifies loss sets [G].
+ 
+ ### [Randomized Background Colors](2736-randomized-background-colors.md)
+-Randomized Background Colors is a training-time regularization technique that replaces the fixed background color with a random sample from a uniform distribution during the compositing step. This method solves the problem of semi-transparent background artifacts and "stuck" primitives that fail to cover regions matching the background color, thereby encouraging the model to reconstruct a fully opaque scene background. It is distinct from fixed-background approaches (e.g., the Blender dataset standard) by forcing the neural field to explicitly model the background geometry rather than relying on a known constant.
++Replaces the fixed background color with a random sample from a uniform distribution during compositing. This solves semi-transparent background artifacts and "stuck" primitives by forcing the model to explicitly model background geometry rather than relying on a known constant.
+ 
+ ### [Mixed Precision Training](2766-mixed-precision-training.md)
+-Mixed Precision Training (MPT) accelerates neural radiance field (NeRF) optimization on CUDA-capable hardware by utilizing lower-precision floating-point formats (typically FP16) for forward and backward passes while maintaining a master copy of weights in higher precision (FP32) for updates. This method reduces memory bandwidth requirements and increases throughput on Tensor Cores, enabling larger batch sizes or faster convergence without significant loss in rendering quality. It is distinguished from full FP32 training by its dynamic loss scaling mechanism, which prevents gradient underflow, and from pure FP16 training by its fallback to FP32 for numerically sensitive operations.
++Accelerates optimization on CUDA hardware by using FP16 for forward/backward passes and FP32 for weight updates. It reduces memory bandwidth and increases throughput on Tensor Cores. It uses dynamic loss scaling to prevent gradient underflow.
+ 
+ ### [Adam Optimisation with Adaptive Scaling](3093-adam-optimisation-with-adaptive-scaling.md)
+-Adam Optimisation with Adaptive Scaling is a parameterized training configuration for radiance-field optimization that applies component-specific learning rate multipliers to the standard Adam optimizer to address the disparate convergence speeds of geometric, shape, and amplitude parameters in Gaussian Splatting. It differs from standard Adam by scaling the base learning rate based on the dimensionality of the splat parameters and applying fixed multipliers to positions and amplitudes, while variants like Fused Adam eliminate memory overhead by integrating the update step into the rendering kernel.
++Applies component-specific learning rate multipliers to the Adam optimizer to address disparate convergence speeds of geometric, shape, and amplitude parameters. It scales base learning rates based on dimensionality and applies fixed multipliers to positions and amplitudes.
+ 
+ ### [Checkpoint Loading and Resume Training](3118-checkpoint-loading-and-resume-training.md)
+-Checkpoint Loading and Resume Training enables the restoration of a neural radiance field's optimization state from disk to continue training or perform evaluation without restarting from scratch. It differs from [Training Loop Setup](1522-training-loop-setup.md) by handling state persistence and recovery rather than initial environment configuration, and from [Checkpoint Serialization](#checkpoint-serialization) by focusing on the ingestion and restoration of those states.
++Enables restoration of the optimization state from disk to continue training or evaluate without restarting. It handles state persistence and recovery, distinct from initial setup.
+ 
+ ### [View Sampler](3864-view-sampler.md)
+-The View Sampler is an abstract base class that defines the interface for selecting context and target camera views during the training or inference of neural radiance fields. It solves the problem of determining which subset of available scene cameras should be used to render images for gradient computation at each training step. It differs from sibling components like [Learning Rate Scheduling](2701-learning-rate-scheduling.md) or [Randomized Background Colors](2736-randomized-background-colors.md) by specifically managing the spatial and temporal selection of input geometry (cameras) rather than hyperparameters or rendering artifacts.
++Abstract base class for selecting context and target camera views during training/inference. It manages the spatial and temporal selection of input geometry (cameras) for gradient computation.
+ 
+ ### [Training Objective for Fine Representation](4686-training-objective-for-fine-representation.md)
+-The training objective for the fine representation defines the loss function used to optimize the high-resolution radiance field or voxel grid after the coarse stage has converged. It addresses the problem of refining geometric details and texture fidelity while preventing over-regularization that can blur fine structures. It differs from the coarse stage objective primarily by reducing the weight of regularization terms, a modification empirically shown to yield slightly better visual quality.
++Defines the loss function for optimizing the high-resolution radiance field after the coarse stage. It reduces regularization weights to prevent blurring of fine structures.
+ 
+ ### [Method-Specific Training Configurations](6267-method-specific-training-configurations.md)
+-This family defines the hyperparameters, optimization schedules, and architectural constraints required to train specific Neural Radiance Field (NeRF) variants. While the parent [Training Configuration](2332-training-configuration.md) establishes the generic loop, these methods diverge in sampling strategies, loss functions, and network activations to address specific challenges such as anti-aliasing, computational efficiency, or generative control. Key distinctions include Mip-NeRF’s use of Integrated Positional Encoding (IPE) and shifted activations, DONeRF’s dual-network depth oracle, and AR-NeRF’s integration of aperture parameters into a GAN framework.
++Defines hyperparameters for specific NeRF variants (e.g., Mip-NeRF’s IPE, DONeRF’s dual-network) to address challenges like anti-aliasing or efficiency.
+ 
+ ### [Regularization and Priors](6281-regularization-and-priors.md)
+-Regularization and Priors in NeRF training apply constraints to the optimization process to enforce physical plausibility, stability, or structural coherence that the photometric reconstruction loss alone cannot guarantee. This family addresses issues such as scale ambiguity in intrinsic decomposition, overfitting to sparse samples, and instability in dynamically growing networks. It is distinct from sibling methods like [Learning Rate Scheduling](2701-learning-rate-scheduling.md) or [Mixed Precision Training](2766-mixed-precision-training.md) because it modifies the loss landscape or network outputs directly via explicit penalty terms or weighted combinations, rather than adjusting the optimizer's state or numerical precision.
++Applies constraints to enforce physical plausibility and stability. It modifies the loss landscape via penalty terms, distinct from optimizer state adjustments.
+ 
+ ### [PixelNeRF](7471-pixelnerf.md)
+-PixelNeRF is a neural radiance field method that synthesizes novel views from one or a few input images by conditioning a standard NeRF renderer on image features extracted via a pretrained CNN. Unlike vanilla NeRF, which requires many views for training and relies solely on positional encoding, PixelNeRF projects camera rays onto the source image plane to extract spatial features for each query point, enabling sparse-view reconstruction. It differs from sibling methods like MVSNeRF by operating in view-space with direct ray-to-pixel feature extraction rather than canonical-space voxelization.
++Conditions a NeRF renderer on image features extracted via a pretrained CNN for sparse-view synthesis. It differs from vanilla NeRF by operating in view-space with direct ray-to-pixel feature extraction.
+ 
+ ### [Warm-start Encoding](8751-warm-start-encoding.md)
+-Warm-start encoding accelerates the training of neural volume representations for animated sparse volumes by initializing the network weights for each frame with the converged weights from the previous frame. It solves the problem of flickering artifacts caused by weight discontinuities in high-frequency details (e.g., thin smoke layers) when using naive cold-start training, while simultaneously reducing encoding time by a factor of 1.5–2.5 compared to independent frame training. Unlike standard cold-start methods, it leverages temporal coherency to preserve smooth transitions across frames.
++Initializes network weights for each frame with converged weights from the previous frame to reduce flickering and encoding time in animated sparse volumes.
+ 
+ ### [Attenuation Field](9639-attenuation-field.md)
+-The Attenuation Field method maps 3D coordinates $\mathbf{X}$ to attenuation coefficients $\mu$ rather than color values, modeling X-ray beam decay through diverse structures to a flat-panel detector. It solves transmission-based imaging reconstruction by adhering to the Beer–Lambert Law, differing from natural-image NeRFs that model emitted radiance.
++Maps 3D coordinates to attenuation coefficients $\mu$ modeling X-ray beam decay, adhering to the Beer–Lambert Law, differing from natural-image NeRFs.
+ 
+ ### [Surface Smoothness Regularization](12970-surface-smoothness-regularization.md)
+-Surface Smoothness Regularization imposes geometric constraints on rendered depth from unobserved rays to alleviate spatial ambiguity and stabilize the joint optimization of blur kernels and radiance fields in sparse-view Deblurred Neural Radiance Fields (DeRF). It distinguishes itself from standard NeRF regularization by integrating "hidden rays" derived from the estimated blur kernel alongside traditional "unseen rays" sampled from constrained camera poses, specifically targeting the coupled optimization problem of deblurring and scene reconstruction.
++Imposes geometric constraints on rendered depth from unobserved rays to stabilize joint optimization of blur kernels and radiance fields in sparse-view DeRF.
+ 
+ ### [Training Setup and Baselines](13740-training-setup-and-baselines.md)
+-This family defines the hyperparameter configurations, optimization loops, and baseline protocols used to train neural radiance field representations. It establishes the standard reference for photometric convergence (NeRF-GT), adapts adversarial dynamics for high-fidelity synthesis (StyleGAN2), and introduces efficient feature-volume or basis-function representations to reduce memory and compute costs (NeRF with Feature Volumes, NLR). It differs from generic training articles by specifying the exact architectural inputs (e.g., feature volumes vs. raw coordinates) and loss formulations required for these specific representation types.
++Defines hyperparameter configurations and baseline protocols to stabilize convergence across diverse architectures, focusing on configuration rather than architecture or loss functions.
+ 
+ ### [Perceptual Distillation Module](13792-perceptual-distillation-module.md)
+-The Perceptual Distillation Module addresses the 3D geometric inconsistency inherent in independently deblurred multi-view images by using pre-deblurred images as a perceptual prior to transfer texture information to the implicit clean radiance fields. It sets itself apart from standard reconstruction losses by enforcing feature-level consistency between rendered patches and pre-deblurred patches, rather than pixel-level consistency, thereby overcoming the artifacts caused by applying 2D deblurring independently to each view.
++Uses pre-deblurred images as a perceptual prior to transfer texture information to implicit clean radiance fields, enforcing feature-level consistency.
+ 
+ ### [Anchor-Based RPN Configuration](13809-anchor-based-rpn-configuration.md)
+-This method configures the Region Proposal Network (RPN) for object detection within NeRFs by defining a structured set of 3D bounding box anchors and a sampling strategy for loss computation. It differs from anchor-free variants by explicitly generating proposals from a predefined grid of aspect ratios and scales, requiring a positive/negative sampling ratio to balance the optimization signal.
++Configures the Region Proposal Network (RPN) for object detection in NeRFs by defining 3D bounding box anchors and sampling strategies.
+ 
+-### Dynamic Frequency Masking
+-A technique to mask tensor components (density or appearance feature) based on training iteration to enhance high-frequency details in later training stages and mitigate overfitting [S15, unofficial]. It calculates mask values using integer and fractional parts for smooth transition during training ($t < T$) and returns a tensor of ones after training ($t \ge T$) [S15, unofficial]. Introduced in FreeNeRF [4] and used in Few TensoRF [S15, unofficial]. Pitfall: May struggle with intricate details and hidden angles in complex scenes like 'Drums', leading to artifacts [S15, unofficial].
++#### Dynamic Frequency Masking
++A technique to mask tensor components (density or appearance feature) based on training iteration to enhance high-frequency details in later stages and mitigate overfitting. It calculates mask values using integer and fractional parts for smooth transition during training ($t < T$) and returns ones after training ($t \ge T$) [S15, unofficial].
+ 
+-### NeRF-RPN Training Augmentation and Optimization
+-Configures the Region Proposal Network (RPN) for object detection. Training involves random flips along x/y axes (prob 0.5), random rotations along z-axis by $\pi/2$ (prob 0.5), and small rotations $\alpha \in [-\pi/18, \pi/18]$ (prob 0.5) [S16]. Optimizer: AdamW with LR 0.0003 and weight decay 0.001. Loss weights: $\lambda = 5.0$ for Eq. (3) and $\lambda = 1.0$ for Eq. (6) [S16].
++#### NeRF-RPN Training Augmentation and Optimization
++Applies random flips (x, y axes, prob 0.5), random z-axis rotations ($\pi/2$, prob 0.5), and slight z-axis rotations ($\alpha \in [-\pi/18, \pi/18]$, prob 0.5). Uses AdamW with lr=0.0003, weight decay=0.001, and loss weights $\lambda=5.0$ and $\lambda=1.0$ [S16].
+ 
+-### Batch Size Configuration for Past Rays
+-Configures the batch size for past task rays ($m_p$) relative to current task rays ($m_c$) in incremental learning. Performance generally increases with $m_p$, but computational efficiency decreases. $m_p = m_c/2$ is chosen as the optimal trade-off, yielding PSNR 22.14 / MS-SSIM 0.836 on Tanks and Temples/Barn with $m_c=4096$ [S17].
++#### Batch Size Configuration for Past Rays
++Evaluates performance across ratios of $m_p$ (past task rays) to $m_c$ (current task rays). $m_p = m_c/2$ is chosen as the optimal trade-off between performance and efficiency, yielding PSNR 22.14 / MS-SSIM 0.836 on Tanks and Temples/Barn with $m_c=4096$ [S17].
+ 
+-### Particle Removal and Re-sampling
+-A training procedure for dynamic scenes that alternately removes and re-samples particles to manage particle count and convergence behavior. The count of re-sampled particles gradually decreases to zero as the model converges (e.g., after 10K steps on D-NeRF) [S18].
++#### Particle Removal and Re-sampling
++Alternately removes and re-samples particles to manage count and convergence. The count of re-sampled particles gradually decreases to zero as the model converges (e.g., after 10K steps on D-NeRF) [S18].
+ 
+ ## Operating characteristics
+-*   **Time Complexity:** Training time varies significantly by method and hardware. Generalizable NeRF modules take about 2 days [S10]. Fine-tuning ranges from 30 to 90 minutes depending on video frames [S10]. Neural appearance refinement takes 1-2 days [S10]. Some methods converge in ~15 minutes per scene [S2].
+-*   **Memory Complexity:** Depends on representation (voxel grid size, hash table entries, particle count). Mixed precision training reduces memory bandwidth requirements .
+-*   **Hardware:** Commonly uses NVIDIA GPUs (V100, A100, RTX 3090, A5000, RTX 6000 Ada) [S1, S7, S8, S9, S10, S11, S13].
+-*   **Strengths:** Configurable hyperparameters allow balancing between convergence speed, visual quality, and computational cost.
+-*   **Limitations:** Poorly chosen hyperparameters can lead to overfitting, slow convergence, or artifacts. Sparse-view scenarios are particularly sensitive to configuration [S15, unofficial].
++*   **Time Complexity:** Linear with respect to the number of training iterations and batch size. Convergence speed varies by method (e.g., 15 minutes for Direct Voxel Grid [S2] vs. hours for complex dynamic scenes [S12]).
++*   **Memory Complexity:** Proportional to the number of model parameters and batch size. Mixed precision [2766-mixed-precision-training.md] reduces memory bandwidth requirements.
++*   **Performance:** Measured in PSNR, SSIM, and LPIPS. High-resolution training (e.g., 200k iterations) yields higher quality but requires more time [S8, S13].
++*   **Strengths:** Flexible configuration allows tuning for specific datasets (static, dynamic, sparse-view).
++*   **Limitations:** Hyperparameter sensitivity; poor configuration can lead to divergence or overfitting.
++*   **When to Use:** Standard for all NeRF training. Specific configurations (e.g., Dynamic Frequency Masking) for few-shot or high-frequency detail enhancement [S15, unofficial].
+ 
+ ## Background
+-Training configuration is a fundamental aspect of neural radiance field optimization, evolving from the original NeRF implementation [37] to include specialized schedules for various representations (voxel grids, hash tables, Gaussian splats). Key developments include the introduction of dynamic frequency masking in FreeNeRF [4] and Few TensoRF [S15, unofficial], and adaptive sampling strategies in methods like Zip-NeRF [S3] and MERF [S6].
++Training configuration has evolved from the original NeRF paper [37] which used a simple Adam optimizer with a fixed learning rate. Subsequent works introduced adaptive learning rates [S2], mixed precision [S1], and method-specific configurations for dynamic scenes [S12], sparse views [S15, unofficial], and object detection [S16]. The field has moved towards more sophisticated scheduling and regularization to handle complex scenes and limited data.
+ 
+ ## Sources

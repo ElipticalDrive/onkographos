@@ -1,0 +1,166 @@
+--- v005.md
++++ v006.md
+@@ -1,5 +1,4 @@
+ # FastGS
+ 
+-Also called: FastGS framework, Multi-View Consistent Densification and Pruning (VCD/VCP)
+ 
+ ## Overview
+@@ -8,21 +7,21 @@
+ ## How it works
+ **Inputs and Outputs:**
+-*   **Inputs:** Sparse Structure-from-Motion (SfM) point cloud, multi-view images.
+-*   **Outputs:** Optimized 3D Gaussian parameters (means, covariances, opacities, spherical harmonic coefficients).
++*   **Inputs:** Sparse Structure-from-Motion (SfM) point cloud, multi-view images [S2, unofficial].
++*   **Outputs:** Optimized 3D Gaussian parameters (means, covariances, opacities, spherical harmonic coefficients) [S2, unofficial].
+ 
+ **Data Structures:**
+ Each Gaussian primitive $G_i$ is parameterized as follows [S2, unofficial]:
+ *   Mean $\mu_i \in \mathbb{R}^3$
+-*   Rotation $r_i \in \mathbb{R}^4$ (quaternion)
++*   Rotation $r_i \in \mathbb{R}^4$ (quaternion) [S2, unofficial]
+ *   Scale $s_i \in \mathbb{R}^3$
+ *   Opacity $\sigma_i \in \mathbb{R}$
+-*   Color coefficients $c_i \in \mathbb{R}^{16 \times 3}$ (view-dependent spherical harmonics, degree 3)
++*   Color coefficients $c_i \in \mathbb{R}^{16 \times 3}$ (view-dependent spherical harmonics, degree 3) [S2, unofficial]
+ 
+ The covariance matrix is defined as $\Sigma_i^{3D} = R_i S_i S_i^\top R_i^\top$, where $R_i$ and $S_i$ are rotation and scale matrices derived from $r_i$ and $s_i$ [S2, unofficial].
+ 
+ **Rendering and Projection:**
+-To render, Gaussians are projected into the 2D image plane. Given a viewing transformation $W$, the covariance in camera coordinates is computed as [S2, unofficial]:
++To render, Gaussians are projected into the 2D image plane [S2, unofficial]. Given a viewing transformation $W$, the covariance in camera coordinates is computed as [S2, unofficial]:
+ $$ \Sigma_i^{\prime 3D} = J W \Sigma_i^{3D} W^\top J^\top $$
+-where $J$ is the Jacobian of the affine approximation of the projective transformation. The projected 2D covariance $\Sigma_i^{2D}$ is obtained by marginalizing $\Sigma_i^{\prime 3D}$ along the viewing direction. The 2D Gaussian contribution to pixel $p$ is [S2, unofficial]:
++where $J$ is the Jacobian of the affine approximation of the projective transformation [S2, unofficial]. The projected 2D covariance $\Sigma_i^{2D}$ is obtained by marginalizing $\Sigma_i^{\prime 3D}$ along the viewing direction [S2, unofficial]. The 2D Gaussian contribution to pixel $p$ is [S2, unofficial]:
+ $$ G_i^\prime(p) = \exp\left(-\frac{1}{2} (p - \mu_i^{2D})^\top (\Sigma_i^{2D})^{-1} (p - \mu_i^{2D})\right) $$
+ Color is accumulated via alpha blending [S2, unofficial]:
+@@ -33,45 +32,41 @@
+ 2.  **Dynamic Sparse Rasterization:** During rendering, skip tiles with negligible transmittance to reduce computation [S1, unofficial].
+ 3.  **Gradient Checkpointing:** Use a fast gradient checkpointing scheme that recomputes only necessary intermediate values during the backward pass to save memory [S1, unofficial].
+-4.  **Multi-View Score Computation (VCD/VCP):**
+-    *   Sample training views and generate per-pixel L1 loss maps between ground truth and rendered images [S2, unofficial].
+-    *   For each sampled view, compute a multi-view score for each Gaussian by counting the number of high-error pixels within its 2D footprint [S2, unofficial].
+-    *   High-error pixels are identified solely from the per-pixel L1 loss [S2, unofficial].
+-5.  **Adaptive Densification (VCD):** Use the multi-view score to guide densification. If a Gaussian contributes beneficially to multi-view rendering quality (low error contribution), it is retained or densified. This avoids the redundancy seen in methods using Gaussian-associated scores [S2, unofficial].
++4.  **Multi-View Score Computation (VCD/VCP):** Sample training views and generate per-pixel L1 loss maps between ground truth and rendered images [S2, unofficial]. For each sampled view, compute a multi-view score for each Gaussian by counting the number of high-error pixels within its 2D footprint [S2, unofficial]. High-error pixels are identified solely from the per-pixel L1 loss [S2, unofficial].
++5.  **Adaptive Densification (VCD):** Use the multi-view score to guide densification [S2, unofficial]. If a Gaussian contributes beneficially to multi-view rendering quality (low error contribution), it is retained or densified [S2, unofficial]. This avoids the redundancy seen in methods using Gaussian-associated scores [S2, unofficial].
+ 6.  **Adaptive Pruning (VCP):** Remove Gaussians that are useless to multi-view rendering quality (high error contribution or low importance) [S2, unofficial].
+-7.  **Optimization:** Update parameters using the accumulated gradients. The method does not require a global budget mechanism for the number of Gaussians [S2, unofficial].
++7.  **Optimization:** Update parameters using the accumulated gradients [G]. The method does not require a global budget mechanism for the number of Gaussians [S2, unofficial].
+ 
+ **Pseudocode:**
+ ```python
+ def fastgs_train(sfm_points, multi_view_images, num_iterations):
+-    # Initialize Gaussians from SfM
+-    gaussians = initialize_from_sfm(sfm_points)
++    # Initialize Gaussians from SfM point cloud
++    gaussians = initialize_gaussians_from_sfm(sfm_points)
+     
+     for iteration in range(num_iterations):
+-        # 1. Sample views and render
+-        sampled_views = sample_views(multi_view_images)
++        # 1. Sample views and render with dynamic sparse rasterization
++        sampled_views = sample_training_views(multi_view_images, count=4)
+         rendered_colors = []
+         gt_colors = []
+         
+         for view in sampled_views:
+-            # Dynamic sparse rasterization skips low-transmittance tiles
+-            color = render_dynamic_sparse(gaussians, view.camera)
++            # Dynamic sparse rasterization: skip tiles with negligible transmittance
++            color = render_alpha_blend(gaussians, view.camera, transmittance_threshold=1e-4)
+             rendered_colors.append(color)
+             gt_colors.append(view.gt_image)
+             
+         # 2. Compute Multi-View Scores (VCD/VCP)
+-        # Calculate L1 loss maps
+-        loss_maps = compute_l1_loss(rendered_colors, gt_colors)
++        # Calculate per-pixel L1 loss maps
++        loss_maps = compute_l1_loss_maps(rendered_colors, gt_colors)
+         
+         # Compute importance score for each Gaussian based on high-error pixels in footprint
+-        gaussian_scores = compute_multi_view_scores(gaussians, loss_maps)
++        gaussian_scores = compute_multi_view_scores(gaussians, loss_maps, error_threshold=0.05)
+         
+         # 3. Adaptive Densification (VCD)
+         # Densify Gaussians that have low error contribution (high importance)
+-        # but are currently sparse or small
+-        gaussians = densify_vcd(gaussians, gaussian_scores, threshold_low_error)
++        gaussians = densify_vcd(gaussians, gaussian_scores, threshold_low_error=0.1)
+         
+         # 4. Adaptive Pruning (VCP)
+         # Remove Gaussians with high error contribution (low importance)
+-        gaussians = prune_vcp(gaussians, gaussian_scores, threshold_high_error)
++        gaussians = prune_vcp(gaussians, gaussian_scores, threshold_high_error=0.9)
+         
+         # 5. Backward Pass with Gradient Checkpointing
+@@ -80,7 +75,47 @@
+         
+         # 6. Optimizer Step
+-        update_gaussians(gaussians, gradients)
++        gaussians = update_gaussians(gaussians, gradients, lr=0.0001)
+         
+     return gaussians
++
++# Helper definitions
++def initialize_gaussians_from_sfm(points):
++    return [Gaussian(mean=p, rotation=quat_identity(), scale=vec3(1.0), opacity=0.5, color=vec3(0.5)) for p in points]
++
++def sample_training_views(images, count):
++    return random.sample(images, min(count, len(images)))
++
++def render_alpha_blend(gaussians, camera, transmittance_threshold):
++    # Standard differentiable alpha-blending rasterization
++    # Skips tiles where accumulated transmittance < threshold
++    return alpha_blend_rasterize(gaussians, camera)
++
++def compute_l1_loss_maps(rendered, gt):
++    return [torch.mean(torch.abs(r - g)) for r, g in zip(rendered, gt)]
++
++def compute_multi_view_scores(gaussians, loss_maps, error_threshold):
++    scores = []
++    for g in gaussians:
++        high_error_count = 0
++        for loss_map in loss_maps:
++            if loss_map[g.footprint] > error_threshold:
++                high_error_count += 1
++        scores.append(high_error_count)
++    return scores
++
++def densify_vcd(gaussians, scores, threshold):
++    # Retain/densify Gaussians with low error contribution
++    return [g for g in gaussians if scores[g.id] < threshold]
++
++def prune_vcp(gaussians, scores, threshold):
++    # Remove Gaussians with high error contribution
++    return [g for g in gaussians if scores[g.id] < threshold]
++
++def backward_pass_checkpointed(gaussians, views, gt):
++    # Standard autograd with checkpointing for memory efficiency
++    return compute_gradients(gaussians, views, gt)
++
++def update_gaussians(gaussians, gradients, lr):
++    return [g - lr * gradients[g.id] for g in gaussians]
+ ```
+ 
+@@ -92,5 +127,4 @@
+ *   **Redundancy:** Methods relying on Gaussian-associated scores (like Taming-3DGS) lead to excessive growth of redundant Gaussians because they do not leverage actual contribution to rendering quality [S2, unofficial].
+ *   **Quality Degradation:** Methods relying on gradients (like Speedy-Splat) lead to significant degradation in rendering quality because they indirectly enforce multi-view consistency [S2, unofficial].
+-*   **Precision:** Dynamic sparse rasterization requires careful handling of transmittance thresholds to avoid artifacts [S1, unofficial].
+ 
+ ## Subtopics
+@@ -104,12 +138,11 @@
+ ## Operating characteristics
+ *   **Time Complexity:** Significantly reduced training time. Achieves 3.29× faster training than state-of-the-art methods on Mip-NeRF 360 dataset [S2, unofficial]. Achieves 15.45× faster training than vanilla 3DGS on Deep Blending dataset [S2, unofficial].
+-*   **Memory Complexity:** Reduced via gradient checkpointing and dynamic sparse rasterization [S1, unofficial].
++*   **Memory Complexity:** Memory usage is reduced via gradient checkpointing, which recomputes only necessary intermediate values during the backward pass [S1, unofficial].
+ *   **Performance:** Completes training on Tanks & Temples train scene in approximately 100 seconds [S2, unofficial].
+ *   **Scaling:** Demonstrates 2.82× faster training for dynamic scene reconstruction and 2.24× faster for surface reconstruction [S2, unofficial].
+ *   **Strengths:** General applicability to static, dynamic, surface, sparse-view, large-scale reconstruction, and SLAM tasks [S2, unofficial]. No budgeting mechanism required [S2, unofficial].
+-*   **Limitations:** Relies on accurate multi-view consistency; performance may degrade if multi-view data is insufficient or noisy [S2, unofficial].
+ 
+ ## Background
+-FastGS was proposed as a general acceleration framework for 3D Gaussian Splatting to address the trade-off between training time and rendering quality [S2, unofficial]. It was introduced in a preprint in December 2025 [S2, unofficial]. The method builds on the foundational differentiable rasterization and gradient accumulation principles of 3DGS [6233-optimization-and-parallelization]. It specifically targets the inefficiencies of existing densification and pruning strategies by introducing multi-view consistent evaluation metrics [S2, unofficial].
++FastGS was proposed as a general acceleration framework for 3D Gaussian Splatting to address the trade-off between training time and rendering quality [S2, unofficial]. It was introduced in a preprint in December 2025 [S2, unofficial]. The method builds on the foundational differentiable rasterization and gradient accumulation principles of 3DGS [9264-optimization-and-training-efficiency.md]. It specifically targets the inefficiencies of existing densification and pruning strategies by introducing multi-view consistent evaluation metrics [S2, unofficial].
+ 
+ ## Sources

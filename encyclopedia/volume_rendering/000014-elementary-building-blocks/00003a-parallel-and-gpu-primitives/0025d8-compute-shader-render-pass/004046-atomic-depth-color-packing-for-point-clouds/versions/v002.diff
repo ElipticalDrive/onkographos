@@ -1,0 +1,183 @@
+--- v001.md
++++ v002.md
+@@ -1,5 +1,5 @@
+ # Atomic Depth-Color Packing for Point Clouds
+ 
+-Also called: Atomic point rendering, Basic Approach, Basic Compute Shader Point Cloud Rendering, Basic Compute Shader Point Rendering, Compute-based point rendering, Single-pass atomicMin rendering
++Also called: Atomic point rendering, Basic Compute Shader Point Cloud Rendering, Basic Compute Shader Point Rendering, Compute-based point rendering, Single-pass atomicMin rendering
+ 
+ ## Overview
+@@ -8,50 +8,33 @@
+ ## How it works
+ **Inputs and Outputs:**
+-*   **Input:** Point cloud data (positions in world space, colors).
+-*   **Input:** World-View-Projection matrix ($M_{wvp}$).
+-*   **Input:** Image dimensions ($W \times H$).
+-*   **Output:** An OpenGL texture containing the final RGB color for each pixel.
++*   **Input:** Point cloud data (positions in world space, colors) [S1].
++*   **Input:** World-View-Projection matrix ($M_{wvp}$) [S1].
++*   **Input:** Image dimensions ($W \times H$) [S1].
++*   **Output:** An OpenGL texture containing the final RGB color for each pixel [S1].
+ 
+ **Data Structures:**
+-*   **Framebuffer Storage Buffer:** A 1D array of 64-bit integers (`int64_t` or `uint64_t`), one entry per pixel.
+-    *   **Layout:**
+-        *   Bits 0–23 (Lower 24 bits): RGB color (8 bits per channel).
+-        *   Bits 24–55 (Next 32 bits): Linear depth value (32-bit integer representation of float).
+-        *   Bits 56–63: Unused/Reserved.
++*   **Framebuffer Storage Buffer:** A 1D array of 64-bit integers, one entry per pixel [S1].
++    *   **Layout:** Bits 0–23 store the RGB color (8 bits per channel) [S1]. Bits 24–55 store the linear depth value as a 32-bit integer representation of the float [S1]. Bits 56–63 are unused [S1].
+ 
+ **Numbered Steps:**
+ 
+ 1.  **Render Pass:** For each point in the cloud:
+-    1.  Transform the point position to clip space:
+-        $$ pos = M_{wvp} \times position $$
+-    2.  Calculate the pixel ID from the screen position. Assuming $pos$ is in normalized device coordinates (NDC) where $x, y \in [-1, 1]$, and the image has width $W$ and height $H$:
+-        $$ pixelID = \left\lfloor \frac{pos.x + 1}{2} \times W \right\rfloor + \left\lfloor \frac{pos.y + 1}{2} \times H \right\rfloor \times W $$
+-        *Note: The source uses a helper `toPixelID(pos)` [S1]. The exact mapping depends on the coordinate system, but standard NDC to pixel conversion is implied.*
+-    3.  Extract the linear depth from the $w$-component of the clip-space position. The source uses `pos.w` directly as the linear depth [S1]. Convert this floating-point depth to an integer for packing:
+-        $$ depth = \text{floatBitsToInt}(pos.w) $$
+-        *Note: `floatBitsToInt` interprets the bit pattern of the float as an integer. Since `atomicMin` compares integers, and depth increases with distance, this relies on the monotonicity of the float-to-int bit representation for positive depths or specific depth ranges. The source explicitly states using linear depth `pos.w` [S1].*
+-    4.  Pack the depth and RGB color into a 64-bit integer. The RGB value is assumed to be an integer where R is in the lowest 8 bits, G in the next 8, and B in the highest 8 of the 24-bit color field (or packed similarly).
+-        $$ point = (depth \ll 24) \mid rgb $$
+-        Here, `rgb` is the 24-bit color integer. `depth` is shifted left by 24 bits [S1].
+-    5.  Perform an atomic minimum update on the framebuffer storage buffer at `pixelID`:
+-        $$ \text{atomicMin}(\text{framebuffer}[pixelID], point) $$
+-        This ensures that only the point with the smallest depth value (closest to the camera) updates the buffer for that pixel [S1].
++    1.  Transform the point position to clip space: `pos = worldViewProj * position` [S1].
++    2.  Calculate the pixel ID from the screen position: `pixelID = toPixelID(pos)` [S1].
++    3.  Extract the linear depth from the $w$-component of the clip-space position and convert it to an integer: `depth = floatBitsToInt(pos.w)` [S1].
++    4.  Pack the depth and RGB color into a 64-bit integer: `point = (depth << 24) | rgb` [S1].
++    5.  Perform an atomic minimum update on the framebuffer storage buffer: `atomicMin(framebuffer[pixelID], point)` [S1].
+ 
+ 2.  **Resolve Pass:** For each pixel $(x, y)$ in the image:
+-    1.  Calculate the linear index in the storage buffer:
+-        $$ pixelID = x + y \times W $$
+-    2.  Read the 64-bit integer from the framebuffer:
+-        $$ packed = \text{framebuffer}[pixelID] $$
+-    3.  Extract the RGB color component. The source uses `colorAt(pixelID)` which implies extracting the lower 24 bits [S1]:
+-        $$ rgb = packed \ \& \ 0xFFFFFF $$
+-    4.  Write the RGB color to the output OpenGL texture:
+-        $$ \text{imageStore}(\text{texture}, \text{ivec2}(x, y), \text{uvec4}(rgb, 1.0)) $$
++    1.  Calculate the linear index in the storage buffer: `pixelID = x + y * imageSize.x` [S1].
++    2.  Read the packed value from the framebuffer: `packed = framebuffer[pixelID]` [S1].
++    3.  Extract the RGB component: `icolor = colorAt(pixelID)` [S1].
++    4.  Write the result into an OpenGL texture: `imageStore(texture, ivec2(x, y), icolor)` [S1].
+ 
+ **Pseudocode:**
+ 
+ ```python
+-# Render Pass (Compute Shader)
+-# Globals: worldViewProj (mat4), framebuffer (buffer<int64_t>), W, H
+-# Input: position (vec4), rgb (uint) # rgb is 24-bit packed color
++# Globals/Inputs: W (int), H (int), worldViewProj (mat4), framebuffer (array[int64]), texture (image2D)
++# Standard operations: floatBitsToInt(f) -> int64 (bit-cast), atomicMin(addr, val) -> None
+ 
+ def render_pass(position, rgb):
+@@ -59,38 +42,24 @@
+     pos = worldViewProj * position
+     
+-    # 2. Calculate pixel ID
+-    # Assuming pos is in NDC [-1, 1]
+-    # Convert to pixel coordinates [0, W-1], [0, H-1]
++    # 2. Calculate pixel ID (maps NDC [-1,1] to pixel coordinates)
+     px = int((pos.x + 1.0) * 0.5 * W)
+     py = int((pos.y + 1.0) * 0.5 * H)
++    pixelID = px + py * W
+     
+-    # Check bounds
+-    if px < 0 or px >= W or py < 0 or py >= H:
++    # Bounds check
++    if pixelID < 0 or pixelID >= W * H:
+         return
+ 
+-    pixelID = px + py * W
++    # 3. Extract linear depth and convert to int
++    depth = floatBitsToInt(pos.w)
+     
+-    # 3. Extract linear depth and convert to int
+-    # Source uses pos.w directly as linear depth
+-    depth_float = pos.w
+-    depth_int = float_bits_to_int(depth_float)
+-    
+-    # 4. Pack depth and color
+-    # Depth occupies upper 32 bits (shifted left by 24)
+-    # RGB occupies lower 24 bits
+-    point = (depth_int << 24) | rgb
++    # 4. Pack depth and color (depth << 24 | rgb)
++    point = (depth << 24) | rgb
+     
+     # 5. Atomic minimum update
+-    # atomicMin ensures the smallest depth (closest point) wins
+-    atomic_min(framebuffer[pixelID], point)
++    atomicMin(framebuffer[pixelID], point)
+ 
+-# Resolve Pass (Compute Shader or similar)
+-# Globals: framebuffer (buffer<int64_t>), texture (image2D), W
+-# Input: globalInvocationID (uvec3)
+-
+-def resolve_pass():
+-    x = globalInvocationID.x
+-    y = globalInvocationID.y
+-    
++def resolve_pass(x, y):
++    # Bounds check
+     if x >= W or y >= H:
+         return
+@@ -103,18 +72,15 @@
+     # Extract RGB (lower 24 bits)
+     rgb = packed & 0xFFFFFF
++    r = rgb & 0xFF
++    g = (rgb >> 8) & 0xFF
++    b = (rgb >> 16) & 0xFF
+     
+     # Write to texture
+-    # Assuming uvec4 format for texture
+-    color = uvec4(rgb & 0xFF, (rgb >> 8) & 0xFF, (rgb >> 16) & 0xFF, 1)
+-    imageStore(texture, ivec2(x, y), color)
+-
+-# Helper: float_bits_to_int
+-# In GLSL: intBitsToFloat(floatBitsToInt(...)) is inverse.
+-# floatBitsToInt(float) returns the integer representation of the float bits.
++    texture[ivec2(x, y)] = uvec4(r, g, b, 1.0)
+ ```
+ 
+ **Parameters:**
+ *   **Storage Buffer Format:** Interleaved depth and color buffer, one 64-bit integer per pixel [S1].
+-*   **Depth Representation:** Linear depth value (`pos.w`) is used directly [S1].
++*   **Depth Representation:** Linear depth value (`pos.w`) is used directly, avoiding hyperbolic transformations and precision loss associated with standard hardware depth buffers [S1].
+ 
+ **Edge Cases and Pitfalls:**
+@@ -122,23 +88,17 @@
+ *   **Dense Point Clouds:** The method is thread-safe and handles dense point clouds without artifacts, unlike Lukac et al. [Lpa14] which is not thread-safe [S1].
+ *   **Holes:** If point density is not high enough, holes may appear as the method renders at most one pixel per point [S1].
+-*   **Atomic Contention:** High contention on `atomicMin` can occur if many points map to the same pixel. Optimizations like subgroup-based deduplication can mitigate this [S1].
++*   **Atomic Contention:** High contention on `atomicMin` can occur if many points map to the same pixel [S1].
+ 
+ ## Subtopics
+ 
+-### High-Quality Rendering (HQS)
+-Extends the basic approach by adding a depth map pass and blending overlapping points to reduce aliasing, similar to mipmapping [S1].
+-
+-### Early-Z Optimization
+-Uses early-z culling to discard points that are occluded by previously rendered points, reducing the number of atomic operations [S1].
+-
+-### Subgroup Deduplication
+-Uses warp-level primitives to reduce contention by ensuring only one thread per subgroup updates a pixel if multiple threads target the same pixel [S1].
++### Compute Shader with Early-Z and Local Reduction
++An optimization of the basic compute shader that incorporates early-z testing and group-wide reduction of points using warp-level primitives to reduce contention in global GPU memory [S1]. The method performs early-z testing to discard fragments that are occluded before writing to memory, and uses warp-level primitives to perform group-wide reduction of points, minimizing global memory contention [S1]. This method outperforms the hardware pipeline by up to an order of magnitude and achieves significantly better frame times than previous compute-based methods [S1].
+ 
+ ## Operating characteristics
+-*   **Time Complexity:** $O(N + P)$, where $N$ is the number of points and $P$ is the number of pixels. The render pass processes each point once, and the resolve pass processes each pixel once [S1].
+-*   **Memory Complexity:** $O(P)$ for the framebuffer storage buffer, where $P$ is the number of pixels [S1].
+-*   **Performance:** Faster than `GL_POINTS` for dense point clouds due to reduced overhead and efficient use of atomic operations [S1].
+-*   **Strengths:** Thread-safe, handles dense point clouds, avoids hardware depth buffer precision issues, simple implementation [S1].
+-*   **Limitations:** Aliasing artifacts if points are sparse, potential atomic contention in dense regions, requires 64-bit atomic support [S1].
++*   **Time Complexity:** $O(N + P)$, where $N$ is the number of points and $P$ is the number of pixels [S1].
++*   **Memory Complexity:** $O(P)$ for the framebuffer storage buffer [S1].
++*   **Performance:** The method outperforms the hardware pipeline by up to an order of magnitude and achieves significantly better frame times than previous compute-based methods [S1]. Observed peak performance reached 796 million points (12.7GB) at rates of 62 to 64 frames per second [S1].
++*   **Strengths:** Thread-safe, handles dense point clouds, avoids hardware depth buffer precision issues, and uses a single atomic instruction instead of a busy-loop [S1].
++*   **Limitations:** Aliasing artifacts if points are sparse, potential atomic contention in dense regions, and requires 64-bit atomic support [S1].
+ *   **When to Use:** When rendering large, dense point clouds on hardware with compute shader support and 64-bit atomics [S1].
+ *   **When Not to Use:** When sparse point clouds are used (holes may appear) or when hardware lacks 64-bit atomic support [S1].

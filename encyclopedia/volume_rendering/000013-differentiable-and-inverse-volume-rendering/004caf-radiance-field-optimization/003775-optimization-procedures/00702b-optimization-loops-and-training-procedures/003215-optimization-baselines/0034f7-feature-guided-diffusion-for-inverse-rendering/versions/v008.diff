@@ -1,0 +1,110 @@
+--- v007.md
++++ v008.md
+@@ -34,5 +34,5 @@
+ 
+ ### Numbered Steps
+-1.  **Initialization**: Set $\boldsymbol{\mu} = \mathbf{0}_d$, $\boldsymbol{\Sigma} = \sigma_0 \mathbf{I}_{d \times d}$. Initialize diffusion weights $\theta$ [S1, unofficial]. Normalize all task parameters to $[0, 1]$ and initialize at $0.5$ [S1, unofficial].
++1.  **Initialization**: Set $\boldsymbol{\mu} = \mathbf{0}_d$, $\boldsymbol{\Sigma} = \sigma_0 \mathbf{I}_{d \times d}$ [S1, unofficial]. Initialize diffusion weights $\theta$ [S1, unofficial]. Normalize all task parameters to $[0, 1]$ and initialize at $0.5$ [S1, unofficial].
+ 2.  **Iteration Loop** (for $i = 1$ to $N$):
+     1.  **Sampling**: Draw $k$ candidates $\{\mathbf{x}_j\}_{j=0}^{k-1} \sim \mathcal{N}(\boldsymbol{\mu}, \boldsymbol{\Sigma})$ [S1, unofficial].
+@@ -80,6 +80,12 @@
+     mu = np.zeros(d)
+     Sigma = sigma_0 * np.eye(d)
+-    # Diffusion model weights theta initialized to zeros [G]
+-    theta = np.zeros(1) 
++    # Diffusion model weights theta initialized as a dictionary of numpy arrays [G]
++    theta = {
++        'W_z': np.random.randn(d, d), 'b_z': np.zeros(d),
++        'W_gamma': np.random.randn(d, d), 'b_gamma': np.zeros(d),
++        'W_beta': np.random.randn(d, d), 'b_beta': np.zeros(d),
++        'W_Q': np.random.randn(d, d), 'W_K': np.random.randn(d, d), 'W_V': np.random.randn(d, d),
++        'W_out': np.random.randn(d, d), 'b_out': np.zeros(d)
++    }
+     # Pre-compute target features
+     target_features = feature_extractor(target_image)
+@@ -97,7 +103,5 @@
+         
+         # Denoise using diffusion model conditioned on target features
+-        # x_denoised = f_theta^-1(noisy_params, target_features, Sigma)
+-        # This involves solving the reverse-time ODE with Euler's method (3 steps)
+-        denoised_candidates = reverse_ode_step(noisy_params, target_features, timestep_proxy, steps=3)
++        denoised_candidates = reverse_ode_step(noisy_params, target_features, timestep_proxy, steps=3, theta=theta)
+         
+         # Combine denoised and undenoised candidates
+@@ -113,5 +117,4 @@
+         # Generate noisy versions for training: z ~ N(x, sigma(s)^2)
+         noise = np.random.normal(0, 1, size=candidates.shape)
+-        # sigma(s) approximated by timestep_proxy for simplicity [G]
+         z = candidates + noise * timestep_proxy
+         
+@@ -126,5 +129,5 @@
+             # Backpropagate and update theta (standard optimizer step) [G]
+             grad = np.gradient(loss, theta)
+-            theta = theta - lr * grad
++            theta = {k: v - lr * g for k, v, g in zip(theta.keys(), theta.values(), grad)}
+             
+         # 7. CMA-ES Update
+@@ -151,25 +154,27 @@
+     return mu
+ 
+-def reverse_ode_step(z, features, timestep, steps=3):
+-    # Simplified Euler reverse ODE solver for diffusion [G]
++def diffusion_forward(z, features, timestep, theta):
++    # Linear projection of parameters to tokens
++    param_tokens = np.dot(z, theta['W_z']) + theta['b_z']
++    # FiLM modulation of image features
++    gamma = np.dot(timestep, theta['W_gamma']) + theta['b_gamma']
++    beta = np.dot(timestep, theta['W_beta']) + theta['b_beta']
++    feat_tokens = features * np.exp(gamma) + beta
++    # Simplified cross-attention (param queries, feat keys/values)
++    Q = np.dot(param_tokens, theta['W_Q'])
++    K = np.dot(feat_tokens, theta['W_K'])
++    V = np.dot(feat_tokens, theta['W_V'])
++    attn = np.exp(Q @ K.T) / np.sum(np.exp(Q @ K.T), axis=1, keepdims=True)
++    out = np.dot(attn, V)
++    # Project back to d
++    return np.dot(out, theta['W_out']) + theta['b_out']
++
++def reverse_ode_step(z, features, timestep, steps=3, theta=None):
+     current = z.copy()
+     schedule = [0.3, 0.2, 0.1]
+     for i in range(steps):
+-        # Predict clean parameters
+-        pred = diffusion_forward(current, features, timestep, theta_placeholder)
+-        # Euler step towards prediction
++        pred = diffusion_forward(current, features, timestep, theta)
+         current = current + schedule[i] * (pred - current)
+     return current
+-
+-def diffusion_forward(z, features, timestep, theta):
+-    # Placeholder for transformer architecture:
+-    # 1. Flatten features to tokens with pos embeddings
+-    # 2. Project z to tokens via linear layer
+-    # 3. 4 self-attention blocks on param tokens
+-    # 4. Cross-attention with image tokens
+-    # 5. FiLM conditioning with timestep
+-    # 6. Concat and project back to d
+-    # Returns predicted parameters [G]
+-    return np.zeros_like(z)
+ 
+ def compute_loss(rendered, target):
+@@ -187,8 +192,8 @@
+ 
+ ### Edge Cases and Pitfalls
+--   **Mode Averaging**: Naïve inverse predictors return the numerical average of multiple valid solutions, which is invalid. FIDE avoids this by using a diffusion model to represent the multi-modal posterior [S1, unofficial].
+--   **Mode Collapse**: Relying exclusively on denoising predictions risks the network overfitting to current estimates. FIDE mitigates this by denoising only half the candidates and passing the rest through unmodified [S1, unofficial].
+--   **Non-Injectivity**: Inverse rendering is often non-injective (e.g., lighting/material ambiguity). FIDE handles this by sampling distinct valid solutions rather than collapsing to a mean [S1, unofficial].
+--   **Scalability**: CMA-ES has quadratic memory complexity, and the diffusion model has quadratic self-attention over parameters. This limits the method to small-to-medium problems (up to ~100 parameters) [S1, unofficial].
++-   **Mode Averaging**: Naïve inverse predictors return the numerical average of multiple valid solutions, which is invalid [S1, unofficial]. FIDE avoids this by using a diffusion model to represent the multi-modal posterior [S1, unofficial].
++-   **Mode Collapse**: Relying exclusively on denoising predictions risks the network overfitting to current estimates [S1, unofficial]. FIDE mitigates this by denoising only half the candidates and passing the rest through unmodified [S1, unofficial].
++-   **Non-Injectivity**: Inverse rendering is often non-injective (e.g., lighting/material ambiguity) [S1, unofficial]. FIDE handles this by sampling distinct valid solutions rather than collapsing to a mean [S1, unofficial].
++-   **Scalability**: CMA-ES has quadratic memory complexity, and the diffusion model has quadratic self-attention over parameters [S1, unofficial]. This limits the method to small-to-medium problems (up to ~100 parameters) [S1, unofficial].
+ 
+ ## Operating characteristics
+@@ -203,5 +208,5 @@
+ 
+ ## Background
+-FIDE was introduced by Andrei-Timotei Ardelean, Michael Fischer, Tim Weyrich, and Tomáš Iser in 2026 [S1, unofficial]. It builds on the principles of CMA-ES [Hansen 2006] and diffusion models [Li and He 2025], addressing the limitations of black-box optimization methods that rely on scalar loss values. The method was validated across diverse inverse problems including camera pose estimation, robot arm estimation, path tracing, vector splines, and Voronoi shaders [S1, unofficial].
++FIDE was introduced by Andrei-Timotei Ardelean, Michael Fischer, Tim Weyrich, and Tomáš Iser in 2026 [S1, unofficial]. It builds on the principles of CMA-ES [Hansen 2006] and diffusion models [Li and He 2025], addressing the limitations of black-box optimization methods that rely on scalar loss values [S1, unofficial]. The method was validated across diverse inverse problems including camera pose estimation, robot arm estimation, path tracing, vector splines, and Voronoi shaders [S1, unofficial].
+ 
+ ## Sources

@@ -1,0 +1,92 @@
+--- v014.md
++++ v015.md
+@@ -1,19 +1,32 @@
+ # Multi-Pass and Sequential Stage Architectures
+-
+-
+ ## Overview
+-Multi-pass and sequential stage architectures decompose volume rendering into distinct, ordered computational phases to manage complexity, memory bandwidth, or specific visual effects that cannot be achieved in a single rasterization pass. Unlike single-pass splatting or ray-marching methods, these architectures explicitly separate data traversal, shading, compositing, or post-processing into separate GPU passes, often utilizing intermediate Framebuffer Objects (FBOs) or fragment lists [S1, unofficial][S2]. They are chosen when the rendering workload requires decoupling geometry processing from shading logic, managing complex fragment storage for accurate transparency, or integrating screen-space effects like ambient occlusion [S1, unofficial][S2].
++Multi-pass and sequential stage architectures decompose volume rendering into distinct, ordered computational phases to manage complexity, memory bandwidth, or specific visual effects that cannot be achieved in a single rasterization pass [G]. Unlike single-pass splatting or ray-marching methods, these architectures explicitly separate data traversal, shading, compositing, or post-processing into separate GPU passes, often utilizing intermediate Framebuffer Objects (FBOs) or fragment lists [S1, unofficial][S2]. They are chosen when the rendering workload requires decoupling geometry processing from shading logic, managing complex fragment storage for accurate transparency, or integrating screen-space effects like ambient occlusion [S1, unofficial][S2].
+ 
+ ## Shared principles
+-The family shares the fundamental mechanism of treating volumetric data as a set of geometric or parametric primitives that are transformed and rasterized [G].
++The family shares the fundamental mechanism of decomposing the rendering workload into sequential, ordered stages that communicate via intermediate buffers or lists [G]. Each stage performs a specific transformation or accumulation step, allowing complex lighting, transparency, and post-processing effects to be computed without re-rasterizing geometry or recomputing ray samples [G]. Common implementation patterns include:
++1. **Stage Separation:** Geometry traversal, shading, compositing, and post-processing are isolated into distinct shader programs or pipeline states [S1, unofficial][S3].
++2. **Intermediate Storage:** Results are written to dedicated buffers (e.g., FBOs, fragment lists, or texture arrays) and read back in subsequent passes [S1, unofficial][S3].
++3. **Sequential Execution:** Passes execute in a strict order, with later stages depending on the accumulated or filtered data from earlier stages [S4, unofficial].
++4. **Hardware Utilization:** Stages leverage GPU rasterization pipelines, z-buffers, and parallel fragment processing to maintain real-time performance [S5].
+ 
+-1.  **Primitive Representation:** The volume is decomposed into primitives [G]. Each primitive $k$ is defined by its position $\mathbf{p}_k$, density/extinction coefficient $g_k$ or $\rho_k$, and a reconstruction kernel $h$ (typically a Gaussian) [S1, unofficial].
+-2.  **Transformation:** Primitives are transformed from volume space to screen space using the Model-View-Projection (MVP) matrix or specific factorizations (e.g., shear-warp) [S2]. For perspective projections, the kernel shape may be distorted (e.g., EWA splatting) to account for foreshortening .
+-3.  **Rasterization:** The transformed primitives are projected onto the 2D image plane [G]. The contribution of a voxel $D$ to a screen point $(x,y)$ is determined by the footprint function $F(x,y)$, which is the integral of the 3D kernel along the view direction [S2]:
+-    $$ F(x,y) = \int h(x-x_D, y-y_D, z) \, dz $$
+-    The intensity written to the pixel is modulated by the voxel density:
+-    $$ P(x,y) = \text{weight}(x,y) \cdot \rho(D) $$
+-4.  **Compositing:** Contributions are accumulated to form the final image [G]. This is typically done using alpha blending in back-to-front or front-to-back order to handle transparency correctly [S1, unofficial][S2]. Splatting compositing is performed along sheets (all pixels at once for a set of voxels), whereas ray-casting composites along rays (one sample at a time) .
+-5.  **Hardware Acceleration:** Most methods in this family rely on GPU rasterization pipelines for performance, enabling real-time interactivity [S1, unofficial][S2].
++```python
++def execute_multi_pass_pipeline(stages, buffers):
++    """
++    Executes a sequence of rendering passes, writing intermediate results
++    to dedicated buffers and synchronizing memory between stages.
++    """
++    for stage in stages:
++        bind_framebuffer(stage.output_buffer)
++        clear_buffer(stage.output_buffer)
++        stage.shader_program.bind()
++        stage.shader_program.set_uniforms(stage.uniforms)
++        if stage.requires_geometry:
++            draw_geometry(stage.geometry)
++        else:
++            draw_fullscreen_quad()
++        unbind_framebuffer()
++        # Memory barrier ensures subsequent stages see written data
++        sync_memory(stage.output_buffer)
++```
+ 
+ ## Subtopics
+@@ -31,7 +44,7 @@
+ - **Definition:** Renders volumetric data in three sequential passes: eye pass (direct lighting/color), light pass (opacity accumulation for shadows), and composite pass (blends results) [S1, unofficial].
+ - **Steps:**
+-    1.  **Eye pass:** Render volume to `m_eyeBuffer` with direct lighting, using `m_eyePipeline` and `m_eyeSet` [S1, unofficial].
+-    2.  **Light pass:** Accumulate opacity into `m_lightBuffer` using `m_lightPipeline` and `m_volSet`, transitioning layout from `ColorAttachmentOptimal` to `ShaderReadOnlyOptimal` [S1, unofficial].
+-    3.  **Composite pass:** Bind `m_compositePipeline` and `m_compSet`, draw 3 triangles (full-screen quad) using `m_eyeBuffer` as a sampled texture [S1, unofficial].
++    1. **Eye pass:** Render volume to `m_eyeBuffer` with direct lighting, using `m_eyePipeline` and `m_eyeSet` [S1, unofficial].
++    2. **Light pass:** Accumulate opacity into `m_lightBuffer` using `m_lightPipeline` and `m_volSet`, transitioning layout from `ColorAttachmentOptimal` to `ShaderReadOnlyOptimal` [S1, unofficial].
++    3. **Composite pass:** Bind `m_compositePipeline` and `m_compSet`, draw 3 triangles (full-screen quad) using `m_eyeBuffer` as a sampled texture [S1, unofficial].
+ - **Layout:** Buffers include `m_eyeBuffer` (eye pass output), `m_lightBuffer` (light pass opacity accumulation), `m_volumeTex` (3D volume data, R8G8Unorm), and `m_tfTex` (transfer function) [S1, unofficial].
+ 
+@@ -41,8 +54,32 @@
+ - **Usage:** Supports surface rendering for 3D meshes and volume rendering for 3D volumes. Supports PBR materials and shading effects such as soft shadows, ambient occlusions, subsurface scattering, and global illumination [S2].
+ 
++### Label Pass
++- **Definition:** A pass that renders scene labels into the framebuffer produced by the previous pass, utilizing existing depth information for depth testing [S3].
++- **Steps:** Render all labels into the framebuffer from the previous pass [S3].
++- **Pitfall:** Depth testing can be enabled for labels because the framebuffer still contains depth information from previous passes [S3].
++
++### Historical Order Overlap
++- **Definition:** A method using historical order to overlap stages [S4, unofficial].
++- **Steps:** Reuses previously computed order to avoid sorting every list from scratch, locally reordering previous frame’s lists to reduce sorting work and list storage [S4, unofficial].
++
++### DepthCube Rendering Pipeline
++- **Definition:** A GPU-accelerated rendering method for multiplanar volumetric displays that maps Cartesian geometry to the GPU, leverages the GPU z-buffer for per-pixel depth, and projects synchronized 2D slices onto a stack of liquid crystal panels [S5].
++- **Steps:**
++    1. Render scene to GPU frame buffer using 3D texture maps, vertex/fragment shaders, and multiple passes [S5].
++    2. Read rendered frame buffer contents back to main memory [S5].
++    3. Transfer data to DepthCube via API or GLInterceptor [S5].
++    4. High-speed digital projector illuminates successive planar regions of the multiplanar optical element (MOE) [S5].
++    5. MOE driver synchronizes projector to the single light-scattering panel at the target depth [S5].
++    6. Process repeats 50 times per second in noninterlaced mode [S5].
++- **Parameters:** Frame rate: 50 Hz in noninterlaced mode. Resolution: 1,024 × 768 × 20 voxels. Color depth: 15-bit per voxel. Update rate: <15 Hz for images containing single 3D surfaces [S5].
++- **Layout:** Dual-volume buffer in computer subsystem holds sequence; digital projector relays sequence into MOE; each relayed image corresponds to single liquid crystal panel [S5].
++
+ ## Background
+-The concept of multi-pass rendering in volume visualization evolved from the need to handle complex lighting and transparency effects that single-pass rasterization could not efficiently support. Early direct volume rendering methods, such as the Shading and Classification Pipeline, established the separation of opacity and color assignment to improve visual fidelity [S2]. As GPU architectures advanced, fragment list-based approaches emerged to handle complex smoke and fire simulations by decoupling fragment storage from evaluation, addressing issues like self-intersection in ray-tracing [S1, unofficial]. Deferred rendering techniques, originally developed for surface rendering, were adapted for volume rendering to integrate screen-space effects like ambient occlusion and shadows without the performance penalty of explicit ray casting [S1, unofficial]. The rise of differentiable rendering has further refined these pipelines, allowing for gradient computation through the entire multi-stage process for applications in computer vision and optimization [S2].
++Multi-pass rendering in volume visualization evolved to handle complex lighting and transparency effects that single-pass rasterization could not efficiently support [G]. Early direct volume rendering methods established the separation of opacity and color assignment to improve visual fidelity [G]. As GPU architectures advanced, fragment list-based approaches emerged to handle complex smoke and fire simulations by decoupling fragment storage from evaluation, addressing issues like self-intersection in ray-tracing [S1, unofficial]. Deferred rendering techniques were adapted for volume rendering to integrate screen-space effects like ambient occlusion and shadows without the performance penalty of explicit ray casting [S1, unofficial]. The rise of differentiable rendering has further refined these pipelines, allowing for gradient computation through the entire multi-stage process for applications in computer vision and optimization [S2]. Modern implementations also leverage historical order overlap to reduce sorting overhead in tile-based splatting pipelines [S4, unofficial], and specialized hardware pipelines like DepthCube utilize multi-pass GPU rendering to drive multiplanar volumetric displays at 50 Hz [S5].
+ 
+ ## Sources
+ [S1] sho3la/GPUGemsVolumeRendering, https://github.com/sho3la/GPUGemsVolumeRendering, fetched 2026-10-26 (unofficial)
+-[S2] Jrender: An efficient differentiable rendering library based on Jittor, https://www.sciencedirect.com/science/article/pii/S1524070323000322, fetched 2026-11-01+[S2] Jrender: An efficient differentiable rendering library based on Jittor, https://www.sciencedirect.com/science/article/pii/S1524070323000322, fetched 2026-11-01
++[S3] Rendering, https://met3d.readthedocs.io/en/latest/05_developer_manual/04_rendering/index.html, fetched 2026-10-27
++[S4] From Splats to Silicon: Rethinking Computational Efficiency of 3DGS, https://arxiv.org/abs/2609.06157, fetched 2026-10-29 (unofficial)
++[S5] Volumetric 3D displays and application infrastructure, https://doi.org/10.1109/mc.2005.276, fetched 2026-11-01

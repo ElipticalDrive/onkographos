@@ -1,0 +1,181 @@
+# Difference Planes for View-Dependent Radiance Fields
+
+Also called: Difference planes, Specular planes
+
+## Overview
+Difference Planes is a method for handling view-dependent information in radiance fields to mitigate the shape-radiance ambiguity, where high angular resolution of view-dependent colors leads to incorrect geometry [S1, unofficial]. It separates view-dependent and Lambertian components during training by associating a difference plane with each camera to capture deviations from the integrated Lambertian content of rays sent through the volume [S1, unofficial]. Unlike sibling methods that rely on explicit spherical harmonics or neural networks for view-dependence, this approach uses lightweight per-camera planes and optional non-stored voxel constraints to isolate specular highlights and view-dependent lighting, enabling reconstruction of scenes with highly specular components without explicit view-dependence handling [S1, unofficial].
+
+## How it works
+**Inputs and Outputs**
+*   **Inputs:** A set of camera images (reference colors $r_i$), a voxel grid storing color ($c_j$) and density ($\sigma_j$) per cell, and a hierarchical shell of environment maps for foreground/background segmentation [S1, unofficial].
+*   **Outputs:** Optimized voxel grid parameters (color, density) and difference plane values ($\alpha_{si}$) that minimize the reconstruction error [S1, unofficial].
+
+**Data Structures**
+1.  **Voxel Grid:** Stores color $c_j$ and density $\sigma_j$ for each voxel $j$ [S1, unofficial].
+2.  **Difference Planes:** One plane per camera image, with identical resolution to the image. Each plane stores one float value $\alpha_{si}$ per pixel $i$ [S1, unofficial].
+3.  **Environment Maps:** A hierarchical shell surrounding the scene for segmentation [S1, unofficial].
+
+**Parameters**
+*   $\sigma_s$: A constant weight parameter that tunes how readily values are pushed into the specular planes. Value: $0.002$ [S1, unofficial].
+*   $\alpha_{si}$: The difference plane variable for pixel $i$ in camera $s$. Initialized to $0$. Grows during optimization if no acceptable solution is found using only Lambertian values [S1, unofficial].
+
+**Formulas**
+The volume rendering integrates color along a ray [S1, unofficial]:
+$$ H = \sum_t T(t)(1 - e^{(-\sigma(t)\delta(t))})c(t) $$
+where $T(t) = e^{(-\sum_{n}^{t} \sigma(t)\delta(t))}$ is accumulated throughput, $\sigma$ is density, $\delta$ is step distance, and $c$ is color [S1, unofficial].
+
+The Lambertian part of the color accumulated from the ray traversing the volume through voxels $j$ is [S1, unofficial]:
+$$ H_{di} = \sum_j e^{-V_j}(1.0 - e^{(-\sigma_j \delta_j)})c_j $$
+where $V_j = \sum_{k=0}^{j-1} \sigma_k \delta_k$ [S1, unofficial].
+
+The final accumulated color for a pixel is computed as [S1, unofficial]:
+$$ \hat{H}_i = (1.0 - e^{(-\alpha_{si} \sigma_s)})(r_i - H_{di}) + H_{di} $$
+where $r_i$ is the reference color and $\sigma_s$ is the constant weight [S1, unofficial].
+
+The objective function to minimize is [S1, unofficial]:
+$$ \hat{F} = 0.5 \sum_i \sum_{k=1}^3 (\hat{H}_{i,k} - r_{i,k})^2 $$
+for all pixels $i$ and color channels $k$ [S1, unofficial].
+
+**Algorithm Steps**
+1.  **Initialize:** Set all difference plane values $\alpha_{si}$ to zero. Initialize voxel grid color and density parameters [S1, unofficial].
+2.  **Render Lambertian Component:** For each pixel $i$, traverse the ray through the voxel grid and compute the Lambertian accumulated color $H_{di}$ using the formula above [S1, unofficial].
+3.  **Compute Final Color:** Calculate the final rendered color $\hat{H}_i$ using the difference plane value $\alpha_{si}$, the reference color $r_i$, and the Lambertian component $H_{di}$ [S1, unofficial].
+4.  **Compute Loss:** Calculate the squared difference loss $\hat{F}$ between $\hat{H}_i$ and $r_i$ [S1, unofficial].
+5.  **Compute Gradients:**
+    *   For voxel colors $c_j$:
+        $$ \frac{\partial F}{\partial c_j} = \sum_i (H_i - r_i) \frac{\partial H_i}{\partial c_j} $$
+        where
+        $$ \frac{\partial H_i}{\partial c_j} = e^{(-\alpha_{si} \sigma_s)} \frac{\partial H_{di}}{\partial c_j} $$
+        [S1, unofficial].
+    *   For difference plane variables $\alpha_{si}$:
+        $$ \frac{\partial H_i}{\partial \alpha_{si}} = -\sigma_s e^{(-\alpha_{si} \sigma_s)} (r_i - H_{di}) $$
+        [S1, unofficial].
+6.  **Update:** Update voxel parameters and difference plane values using gradient descent [S1, unofficial].
+7.  **Non-Highlight Constraint (Optional):** If separation is difficult, compute a small view-dependent function per voxel to increase or decrease density per voxel to aid convergence. These parameters are not stored [S1, unofficial].
+
+**Pseudocode**
+> **Unverified code.** The code below did not pass a test run against a reference implementation, or no test fits it, so it may contain errors.
+
+```python
+import numpy as np
+
+def render_lambertian(ray, voxel_grid, sigma_s):
+    """
+    Computes the Lambertian component H_di for a ray.
+    ray: list of voxels traversed by the ray, each with density sigma and color c
+    sigma_s: constant weight (0.002)
+    Returns: H_di (float), V_j (float, accumulated optical depth)
+    """
+    H_di = 0.0
+    V_j = 0.0
+    for j, voxel in enumerate(ray):
+        sigma_j = voxel.density
+        c_j = voxel.color
+        delta_j = voxel.step_distance
+        
+        # V_j is sum of sigma_k * delta_k for k < j
+        # H_di term: exp(-V_j) * (1 - exp(-sigma_j * delta_j)) * c_j
+        term = np.exp(-V_j) * (1.0 - np.exp(-sigma_j * delta_j)) * c_j
+        H_di += term
+        
+        V_j += sigma_j * delta_j
+        
+    return H_di, V_j
+
+def compute_difference_plane_color(H_di, r_i, alpha_si, sigma_s):
+    """
+    Computes the final color H_hat_i using the difference plane.
+    H_di: Lambertian component
+    r_i: Reference color
+    alpha_si: Difference plane value for this pixel
+    sigma_s: Constant weight (0.002)
+    Returns: H_hat_i
+    """
+    # H_hat_i = (1 - exp(-alpha_si * sigma_s)) * (r_i - H_di) + H_di
+    factor = 1.0 - np.exp(-alpha_si * sigma_s)
+    H_hat_i = factor * (r_i - H_di) + H_di
+    return H_hat_i
+
+def compute_gradients(H_di, r_i, alpha_si, sigma_s, dH_di_dc_j, dH_di_d_alpha_j):
+    """
+    Computes gradients for voxel colors and difference plane values.
+    H_di: Lambertian component
+    r_i: Reference color
+    alpha_si: Difference plane value
+    sigma_s: Constant weight
+    dH_di_dc_j: Gradient of H_di with respect to voxel color c_j
+    dH_di_d_alpha_j: Gradient of H_di with respect to voxel density alpha_j (if applicable)
+    Returns: grad_c_j, grad_alpha_si
+    """
+    # Gradient for difference plane alpha_si
+    # dH_i / d_alpha_si = -sigma_s * exp(-alpha_si * sigma_s) * (r_i - H_di)
+    grad_alpha_si = -sigma_s * np.exp(-alpha_si * sigma_s) * (r_i - H_di)
+    
+    # Gradient for voxel color c_j
+    # dH_i / d_c_j = exp(-alpha_si * sigma_s) * dH_di / d_c_j
+    grad_c_j = np.exp(-alpha_si * sigma_s) * dH_di_dc_j
+    
+    return grad_c_j, grad_alpha_si
+
+def optimize_step(voxel_grid, difference_planes, reference_images, rays, sigma_s, learning_rate):
+    """
+    One optimization step.
+    """
+    # Initialize gradients
+    voxel_grads = {v: 0.0 for v in voxel_grid}
+    diff_plane_grads = {p: 0.0 for p in difference_planes}
+    
+    for camera_idx, (ref_image, diff_plane, rays_for_camera) in enumerate(zip(reference_images, difference_planes, rays)):
+        for pixel_idx, (ray, r_i) in enumerate(zip(rays_for_camera, ref_image.flatten())):
+            # 1. Render Lambertian component
+            H_di, _ = render_lambertian(ray, voxel_grid, sigma_s)
+            
+            # 2. Compute final color
+            alpha_si = diff_plane[pixel_idx]
+            H_hat_i = compute_difference_plane_color(H_di, r_i, alpha_si, sigma_s)
+            
+            # 3. Compute loss (for debugging/monitoring, not strictly needed for gradient if using auto-diff)
+            # loss = 0.5 * (H_hat_i - r_i)**2
+            
+            # 4. Compute gradients
+            # Note: dH_di/dc_j and dH_di/d_alpha_j must be computed from the volume rendering step
+            # This is a placeholder for the actual derivative computation from the volume rendering
+            # In practice, this is done via backpropagation through the volume rendering function
+            dH_di_dc_j = ... # Placeholder for actual derivative
+            dH_di_d_alpha_j = ... # Placeholder for actual derivative
+            
+            grad_c_j, grad_alpha_si = compute_gradients(H_di, r_i, alpha_si, sigma_s, dH_di_dc_j, dH_di_d_alpha_j)
+            
+            # Accumulate gradients
+            for voxel in ray:
+                voxel_grads[voxel] += grad_c_j
+            diff_plane_grads[diff_plane] += grad_alpha_si
+            
+    # Update parameters
+    for voxel, grad in voxel_grads.items():
+        voxel.density -= learning_rate * grad
+        voxel.color -= learning_rate * grad
+        
+    for diff_plane, grad in diff_plane_grads.items():
+        diff_plane -= learning_rate * grad
+```
+
+**Edge Cases and Pitfalls**
+*   **Shape-Radiance Ambiguity:** If view-dependent colors are not separated, the geometry may become incorrect [S1, unofficial].
+*   **Initialization:** $\alpha_{si}$ is initialized to zero. If no acceptable solution is found with only Lambertian values, $\alpha_{si}$ grows [S1, unofficial].
+*   **Non-Highlight Lighting:** For view-dependent lighting that does not behave like a highlight, a small view-dependent function per voxel is computed to aid convergence. These parameters are not stored [S1, unofficial].
+
+## Operating characteristics
+*   **Time Complexity:** Not given in the sources.
+*   **Memory Complexity:** Adds one float value per pixel per camera for the difference planes. The non-highlight view-dependent function parameters are not stored [S1, unofficial].
+*   **Performance:** Small impact on performance and memory usage [S1, unofficial].
+*   **Strengths:** Enables reconstruction of scenes with highly specular components without explicit handling of view-dependence such as Spherical Harmonics [S1, unofficial].
+*   **Limitations:** May require additional constraints for NERF and other methods built on view-dependent radiance fields to work as an end-to-end pipeline for 3D reconstruction [S1, unofficial].
+*   **When to use:** When dealing with scenes with highly specular components and shape-radiance ambiguity [S1, unofficial].
+*   **When not to use:** When computational resources are extremely limited and the overhead of difference planes is unacceptable, or when view-dependence is not a significant factor [S1, unofficial].
+
+## Background
+The method was proposed by Uffe Kjaerulff from Chalmers University of Technology, Gothenburg, Sweden [S1, unofficial]. It addresses the shape-radiance ambiguity in radiance fields, a problem where high angular resolution of view-dependent colors leads to incorrect geometry [S1, unofficial]. The method builds on previous work such as NERF, Plenoxels, DirectVoxGo, and PERF [S1, unofficial].
+
+## Sources
+[S1] Addressing the Shape-Radiance Ambiguity in View-Dependent Radiance Fields, https://doi.org/10.48550/arxiv.2203.01553, fetched 2026-10-29 (unofficial)

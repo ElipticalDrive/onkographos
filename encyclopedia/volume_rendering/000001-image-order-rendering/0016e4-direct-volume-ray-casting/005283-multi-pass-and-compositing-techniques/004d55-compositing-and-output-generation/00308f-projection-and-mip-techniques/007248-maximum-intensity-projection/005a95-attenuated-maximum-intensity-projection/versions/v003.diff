@@ -1,0 +1,177 @@
+--- v002.md
++++ v003.md
+@@ -1,7 +1,6 @@
+ # Attenuated Maximum-Intensity Projection
+ 
+-
+ ## Overview
+-Attenuated Maximum-Intensity Projection (AMIP) is a CPU-emulated volume rendering technique that enhances the visibility of high-intensity structures by suppressing background noise and weaker signals that typically obscure details in standard Maximum-Intensity Projection (MIP) [S1, unofficial]. Unlike standard MIP, which simply selects the highest intensity value along a ray regardless of depth, AMIP weights samples by an exponential falloff based on the accumulated intensity encountered so far, ensuring that only strong, isolated peaks survive while dimmer, deeper contributions are attenuated [S1, unofficial]. This method is particularly useful for visualizing dense volumetric data where background haze would otherwise bleed over and obscure critical features [S1, unofficial].
++Attenuated Maximum-Intensity Projection (AMIP) is a CPU-emulated volume rendering technique that enhances the visibility of high-intensity structures by suppressing background noise and weaker signals that typically obscure details in standard Maximum-Intensity Projection (MIP) [S1, unofficial]. Unlike standard MIP, which simply selects the highest intensity value along a ray regardless of depth, AMIP weights samples by an exponential falloff based on the accumulated intensity encountered so far, ensuring that only strong, isolated peaks survive while dimmer, deeper contributions are attenuated [S1, unofficial]. This method prevents background haze from bleeding over everything by dimming deeper or weaker samples [S1, unofficial].
+ 
+ ## How it works
+@@ -22,5 +21,5 @@
+ ### Data Structures
+ *   `out_val`: An array of shape $(H, W)$ initialized to $-\infty$, storing the running maximum attenuated intensity for each pixel [S1, unofficial].
+-*   `acc`: A scalar accumulator initialized to $0.0$, storing the sum of normalized intensities encountered along the ray [S1, unofficial].
++*   `acc`: An array of shape $(H, W)$ initialized to $0.0$, storing the sum of normalized intensities encountered along each ray [G].
+ *   `inv_span`: A scalar calculated as $1.0 / (hi - lo)$. If $hi \le lo$, $hi$ is set to $lo + 1.0$ to prevent division by zero [S1, unofficial].
+ 
+@@ -45,5 +44,5 @@
+     $$
+     Determine valid voxels where $0 \le f_x \le n_x-1$, $0 \le f_y \le n_y-1$, and $0 \le f_z \le n_z-1$ [S1, unofficial].
+-4.  **Trilinear Interpolation**: For valid voxels, compute integer floor $(x_0, y_0, z_0)$ and ceiling $(x_1, y_1, z_1)$ coordinates, clamped to the volume dimensions. Compute fractional parts $d_x = f_x - x_0$, $d_y = f_y - y_0$, $d_z = f_z - z_0$. Perform trilinear interpolation of the 8 surrounding voxels:
++4.  **Trilinear Interpolation**: For valid voxels, compute integer floor $(x_0, y_0, z_0)$ and ceiling $(x_1, y_1, z_1)$ coordinates, clamped to the volume dimensions [S1, unofficial]. Compute fractional parts $d_x = f_x - x_0$, $d_y = f_y - y_0$, $d_z = f_z - z_0$ [S1, unofficial]. Perform trilinear interpolation of the 8 surrounding voxels:
+     $$
+     \begin{aligned}
+@@ -62,5 +61,5 @@
+     nval = \text{clip}\left( (V_{interp} - lo) \cdot inv\_span, 0.0, 1.0 \right)
+     $$
+-    For invalid voxels, $nval$ is ignored or treated as non-contributing [S1, unofficial].
++    For invalid voxels, the normalized value is set to $0.0$ so it does not contribute to accumulation or candidate calculation [S1, unofficial].
+ 6.  **Weighting and Accumulation**:
+     *   Calculate the attenuation weight:
+@@ -70,5 +69,8 @@
+     *   Calculate the candidate value:
+         $$
+-        cand = nval \cdot w
++        cand = \begin{cases} 
++        nval \cdot w & \text{for valid voxels} \\
++        -\infty & \text{for invalid voxels}
++        \end{cases}
+         $$
+     *   Update the running maximum for the pixel:
+@@ -90,5 +92,5 @@
+         idx = \text{clip}\left( \text{int32}(norm \cdot 255.0), 0, 255 \right)
+         $$
+-    *   Lookup colors from the colormap using $idx$. If no colormap is specified, use grayscale $[norm, norm, norm]$. Convert to uint8 RGB [S1, unofficial].
++    *   Lookup colors from the colormap using $idx$ [S1, unofficial]. If no colormap is specified, use grayscale $[norm, norm, norm]$ [S1, unofficial]. Convert to uint8 RGB [S1, unofficial].
+ 
+ ### Pseudocode
+@@ -120,4 +122,5 @@
+     # Initialize output arrays
+     out_val = np.full((H, W), -np.inf)
++    acc = np.zeros((H, W))  # Per-pixel accumulator [G]
+     
+     # Handle value range
+@@ -135,5 +138,4 @@
+     ox, oy, oz = origin
+     
+-    # Pre-compute ray directions and lengths if needed, but here we iterate samples
+     # Loop over samples
+     for s in range(n_samples):
+@@ -145,5 +147,4 @@
+             
+         # Calculate world point P for all pixels
+-        # P = near + (far - near) * t
+         P = near_pts + (far_pts - near_pts) * t
+         
+@@ -153,8 +154,8 @@
+         fz = (P[:, :, 2] - oz) / sz
+         
+-        # Determine valid voxels
+-        valid = (fx >= 0) & (fx < nx - 1) & \
+-                (fy >= 0) & (fy < ny - 1) & \
+-                (fz >= 0) & (fz < nz - 1)
++        # Determine valid voxels (0 <= coord <= max_index)
++        valid = (fx >= 0) & (fx <= nx - 1) & \
++                (fy >= 0) & (fy <= ny - 1) & \
++                (fz >= 0) & (fz <= nz - 1)
+         
+         if not np.any(valid):
+@@ -176,5 +177,4 @@
+         
+         # Trilinear interpolation
+-        # Get voxel values at corners
+         v000 = volume[x0, y0, z0]
+         v100 = volume[x1, y0, z0]
+@@ -186,5 +186,4 @@
+         v111 = volume[x1, y1, z1]
+         
+-        # Interpolate
+         c00 = v000 * (1 - dx) + v100 * dx
+         c10 = v010 * (1 - dx) + v110 * dx
+@@ -200,39 +199,12 @@
+         nval = np.clip((interp - lo) * inv_span, 0.0, 1.0)
+         
+-        # For invalid voxels, nval should not contribute. 
+-        # We can mask it out or set to 0. Since we take max, 
+-        # and out_val starts at -inf, we need to be careful.
+-        # The source says "cand = nval * weight for valid voxels, else -np.inf"
+-        # But nval is computed for all. Let's mask nval for invalid.
+-        nval_valid = np.where(valid, nval, 0.0)
+-        
+-        # Calculate weight based on accumulator
+-        # Note: acc is global in the source description, but logically 
+-        # it should be per-ray (per-pixel). The source says "accumulator acc with 0.0"
+-        # and "Update accumulator: acc += nval". This implies a single global accumulator?
+-        # That would be incorrect for ray casting. 
+-        # Re-reading S1: "Initialize ... accumulator acc with 0.0." 
+-        # "Update accumulator: acc += nval."
+-        # This suggests acc is per-pixel. Let's assume acc is (H, W) array.
+-        # The source pseudocode snippet is not provided, but the description 
+-        # "running maximum" and "accumulator" implies per-pixel state.
+-        # If acc were global, all rays would share the same attenuation history, 
+-        # which is physically wrong. We assume acc is per-pixel.
+-        
+-        # However, the source text says "accumulator acc with 0.0" (singular).
+-        # Let's look at the update: "acc += nval". If acc is scalar, 
+-        # then weight = exp(-att * acc) is same for all pixels. 
+-        # This is likely a simplification or error in the source description 
+-        # or implementation. Given "running maximum" is per pixel, 
+-        # acc must be per pixel.
+-        
+-        # Let's assume acc is (H, W) initialized to 0.0.
+-        # We need to initialize acc outside the loop.
+-        
+-        # Calculate weight
++        # Invalidate contribution for out-of-bounds voxels
++        nval[~valid] = 0.0
++        
++        # Calculate weight based on per-pixel accumulator
+         weight = np.exp(-attenuation * acc)
+         
+-        # Candidate value
+-        cand = np.where(valid, nval_valid * weight, -np.inf)
++        # Candidate value: valid voxels contribute, invalid get -inf
++        cand = np.where(valid, nval * weight, -np.inf)
+         
+         # Update running maximum
+@@ -240,5 +212,5 @@
+         
+         # Update accumulator
+-        acc = acc + nval_valid
++        acc += nval
+         
+     # Post-processing
+@@ -250,12 +222,13 @@
+         out_rgb = np.stack([norm, norm, norm], axis=-1)
+     else:
+-        # Resolve colormap to RGB array. 
+-        # Assuming a function _cmap_rgb(colormap) returns (256, 3) array.
+-        cmap_rgb = _cmap_rgb(colormap) # [G] Helper function not defined in source
++        cmap_rgb = _cmap_rgb(colormap)  # [G] Standard colormap table resolution
+         out_rgb = cmap_rgb[idx]
+         
+     return out_rgb.astype(np.uint8)
+ 
+-# Note: acc must be initialized as np.zeros((H, W)) before the sample loop.
++def _cmap_rgb(name):
++    """Resolve colormap name to a (256, 3) uint8 array [G]."""
++    # Standard implementation placeholder for colormap resolution
++    return np.zeros((256, 3), dtype=np.uint8)
+ ```
+ 
+@@ -268,5 +241,5 @@
+ *   **Zero Spacing**: If any axis spacing is $< 10^{-12}$, it is replaced with $1.0$ [S1, unofficial].
+ *   **NaN Values**: The input volume must be NaN-free [S1, unofficial].
+-*   **Accumulator Scope**: The source describes `acc` as a single variable, but physically it must be per-pixel to correctly attenuate rays independently. The implementation assumes per-pixel accumulation [S1, unofficial].
++*   **Accumulator Scope**: The source describes `acc` as a single variable, but physically it must be per-pixel to correctly attenuate rays independently [G].
+ 
+ ## Operating characteristics
+@@ -275,5 +248,5 @@
+ *   **Strengths**: Effectively suppresses background noise and haze, highlighting strong intensity peaks [S1, unofficial].
+ *   **Limitations**: Computationally more expensive than standard MIP due to the accumulation and weighting step [S1, unofficial].
+-*   **When to Use**: When visualizing dense volumes where background structures obscure high-intensity features [S1, unofficial].
++*   **When to Use**: When visualizing dense volumes where background haze would otherwise bleed over everything [S1, unofficial].
+ *   **When Not to Use**: When real-time performance is critical and background haze is not a significant issue [S1, unofficial].
+ 

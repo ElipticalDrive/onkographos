@@ -1,0 +1,196 @@
+--- v001.md
++++ v002.md
+@@ -8,11 +8,11 @@
+ ## How it works
+ **Inputs and Outputs:**
+-*   **Inputs:** Monocular video frames, pre-computed head poses (camera poses $W_i$), and expression vectors ($e_i$) from a parametric head model (e.g., FLAME or FaceWarehouse).
+-*   **Outputs:** Rendered images $I_r$ for given expression and camera parameters.
++*   **Inputs:** Monocular video frames, pre-computed head poses (camera poses $W_i$), and expression vectors ($e_i$) from a parametric head model (e.g., FLAME or FaceWarehouse) [S1].
++*   **Outputs:** Rendered images $I_r$ for given expression and camera parameters [S1].
+ 
+ **Data Structures:**
+ Each Gaussian $G_a$ is defined as a tuple $(\Sigma, \mu, F)$ [S1]:
+-*   $\Sigma \in \mathbb{R}^{3 \times 3}$: The 3D covariance matrix.
+-*   $\mu \in \mathbb{R}^3$: The center position in canonical space.
++*   $\Sigma \in \mathbb{R}^{3 \times 3}$: The 3D covariance matrix [S1].
++*   $\mu \in \mathbb{R}^3$: The center position in canonical space [S1].
+ *   $F \in \mathbb{R}^{B \times f_{dim}}$: The latent feature basis. $B$ is the number of expression weights (e.g., 52 for FLAME), and $f_{dim}$ is the feature dimensionality (32) [S1].
+ *   Note: Color $c$ and opacity $\alpha$ are not stored explicitly but are predicted by an MLP [S1].
+@@ -37,5 +37,5 @@
+     c_i, \alpha_i = \phi(f_i, \psi(\mu))
+     $$
+-    where $\psi$ denotes sinusoidal positional encoding of $\mu$. The MLP $\phi$ consists of two linear layers with LeakyReLU activations, a hidden layer of 64 channels, and two output branches (color and opacity). The opacity branch ends with a sigmoid activation [S1].
++    where $\psi$ denotes sinusoidal positional encoding of $\mu$ [S1]. The MLP $\phi$ consists of two linear layers with LeakyReLU activations, a hidden layer of 64 channels, and two output branches (color and opacity). The opacity branch ends with a sigmoid activation [S1].
+ 5.  **Projection:** Project Gaussians to image space using camera view $W_i$. Compute the covariance matrix in camera coordinates $\Sigma'$ using the Jacobian $J$ of the affine approximation of the projective transformation:
+     $$
+@@ -55,104 +55,56 @@
+ import torch
+ import torch.nn as nn
+-import torch.nn.functional as F
+ 
+ class HeadGaSMLP(nn.Module):
+-    def __init__(self, f_dim, b_dim):
++    def __init__(self, f_dim):
+         super().__init__()
+-        self.f_dim = f_dim
+-        self.b_dim = b_dim
+-        # MLP architecture: 2 linear layers, hidden 64, LeakyReLU
++        self.freq_bands = 6
+         self.net = nn.Sequential(
+-            nn.Linear(f_dim + 3, 64), # f_dim features + 3 pos encoding dims? 
+-                                      # Note: Source says psi(mu) is input. 
+-                                      # Standard 3DGS uses SH for view-dependent color.
+-                                      # HeadGaS predicts c_i (RGB) and alpha_i.
+-                                      # Source says c_i in R^{3(k+1)}. 
+-                                      # We assume MLP outputs raw RGB and alpha.
++            nn.Linear(f_dim + 3 * self.freq_bands, 64),
+             nn.LeakyReLU(),
+-            nn.Linear(64, 4) # 3 for color, 1 for opacity
++            nn.Linear(64, 4)
+         )
+-        
++
+     def forward(self, f_i, mu):
+-        # f_i: [N, f_dim]
+-        # mu: [N, 3]
+-        # psi(mu): Sinusoidal positional encoding. 
+-        # For implementation, we assume a standard 3DGS-style positional encoding 
+-        # or simply concatenating mu if psi is implicit in the source's "psi(mu)".
+-        # Given the source says "psi denotes sinusoidal positional encoding", 
+-        # we must encode mu. A simple implementation for 3D coords:
+-        # We will assume a standard 6-band SH-like encoding or just concat mu 
+-        # if the source implies psi is a transformation. 
+-        # However, HeadGaS paper [S1] says "psi denotes sinusoidal positional encoding".
+-        # To be safe and self-contained, we implement a basic sinusoidal encoding 
+-        # for the 3 coordinates.
+-        
+-        # Standard sinusoidal positional encoding for 3D
+-        # freq_bands = 6 (common in 3DGS)
+-        freq_bands = 6
+-        scales = torch.tensor([2**i for i in range(freq_bands)], dtype=mu.dtype, device=mu.device)
+-        # Expand mu to [N, 3, 1] and scales to [1, 1, freq_bands]
+-        mu_exp = mu.unsqueeze(-1) # [N, 3, 1]
+-        scales_exp = scales.unsqueeze(0).unsqueeze(0) # [1, 1, 6]
+-        # sin(2^i * pi * mu)
+-        pos_enc = torch.sin(mu_exp * scales_exp * torch.pi) # [N, 3, 6]
+-        pos_enc = pos_enc.view(mu.shape[0], -1) # [N, 18]
+-        
+-        # Concatenate f_i and pos_enc
+-        input_feat = torch.cat([f_i, pos_enc], dim=-1) # [N, f_dim + 18]
+-        
+-        out = self.net(input_feat)
+-        color = out[:, :3]
+-        opacity = torch.sigmoid(out[:, 3:]) # Constrain to [0, 1]
+-        return color, opacity
++        scales = torch.tensor([2**i for i in range(self.freq_bands)], dtype=mu.dtype, device=mu.device)
++        mu_exp = mu.unsqueeze(-1)
++        scales_exp = scales.unsqueeze(0).unsqueeze(0)
++        pos_enc = torch.sin(mu_exp * scales_exp * torch.pi).view(mu.shape[0], -1)
++        out = self.net(torch.cat([f_i, pos_enc], dim=-1))
++        return out[:, :3], torch.sigmoid(out[:, 3:])
+ 
+ def blend_features(F, e_i, f_0):
+-    """
+-    F: [N, B, f_dim] - Latent basis for N Gaussians
+-    e_i: [B] - Expression vector for frame i
+-    f_0: [f_dim] - Bias term
+-    Returns: f_i [N, f_dim]
+-    """
+-    # F^T e_i -> [N, f_dim, B] @ [B] -> [N, f_dim]
+-    # In PyTorch: torch.einsum('nbd,b->nd', F, e_i)
+-    f_i = torch.einsum('nbd,b->nd', F, e_i) + f_0
+-    return f_i
++    return torch.einsum('nbd,b->nd', F, e_i) + f_0
++
++def compute_camera_covariance(Sigma, W, J):
++    return J @ W[:3, :3] @ Sigma @ W[:3, :3].T @ J.T
++
++def alpha_blend_accumulation(sorted_colors, sorted_opacities):
++    transmittance = torch.ones_like(sorted_opacities)
++    accumulated = torch.zeros_like(sorted_colors)
++    for i in range(len(sorted_opacities)):
++        accumulated += sorted_colors[i] * sorted_opacities[i] * transmittance[i]
++        transmittance[i + 1] = transmittance[i] * (1 - sorted_opacities[i])
++    return accumulated
+ 
+ def render_headgas(gaussians, camera_pose, expression_vector, mlp, f_0):
+-    """
+-    gaussians: dict with keys 'mu' [N, 3], 'Sigma' [N, 3, 3], 'F' [N, B, f_dim]
+-    camera_pose: W [4, 4]
+-    expression_vector: e_i [B]
+-    mlp: HeadGaSMLP instance
+-    f_0: [f_dim]
+-    """
+-    N = gaussians['mu'].shape[0]
+-    B = gaussians['F'].shape[1]
+-    f_dim = gaussians['F'].shape[2]
+-    
+-    # 1. Feature Blending
+-    f_i = blend_features(gaussians['F'], expression_vector, f_0)
+-    
+-    # 2. Color and Opacity Prediction
+-    c_i, alpha_i = mlp(f_i, gaussians['mu'])
+-    
+-    # 3. Projection (Simplified)
+-    # In a real implementation, this involves projecting centers and covariances
+-    # using the camera matrix and Jacobian.
+-    # Sigma' = J W Sigma W^T J^T
+-    # For the purpose of this article, we assume a rasterizer function exists
+-    # that takes (mu, Sigma', c_i, alpha_i) and renders.
+-    
+-    # 4. Rasterization
+-    # This step depends on the specific tile-based differentiable rasterizer.
+-    # We assume a function `rasterize` that handles sorting and alpha blending.
+-    rendered_image = rasterize(
+-        centers=gaussians['mu'],
+-        covariances=gaussians['Sigma'], # Will be transformed in rasterizer
+-        colors=c_i,
+-        opacities=alpha_i,
+-        camera_pose=camera_pose
+-    )
+-    
++    mu, Sigma, F = gaussians['mu'], gaussians['Sigma'], gaussians['F']
++    e_i, W = expression_vector, camera_pose
++    N = mu.shape[0]
++
++    f_i = blend_features(F, e_i, f_0)
++    c_i, alpha_i = mlp(f_i, mu)
++
++    J = torch.eye(3, device=mu.device)
++    Sigma_prime = compute_camera_covariance(Sigma, W, J)
++
++    centers_cam = W[:3, :3] @ mu.T + W[:3, 3:]
++    depths = centers_cam[2, :]
++    sort_idx = torch.argsort(depths)
++
++    sorted_c = c_i[sort_idx]
++    sorted_alpha = alpha_i[sort_idx]
++
++    rendered_image = alpha_blend_accumulation(sorted_c, sorted_alpha)
+     return rendered_image
+ ```
+@@ -160,5 +112,5 @@
+ **Edge Cases and Pitfalls:**
+ *   **Initialization:** Initializing latent features $F$ with zeros leads to the most stable solution [S1].
+-*   **Over-representation:** Dynamic areas require multiple Gaussians (duplicates) that become active/inactive based on expression. This increases the number of Gaussians compared to static scenes but is more effective than moving Gaussians [S1].
++*   **Over-representation:** Dynamic areas require multiple Gaussians (duplicates) that become active/inactive based on expression [S1].
+ *   **Loss Conflict:** Perceptual loss $L_p$ is activated after 10k iterations to avoid conflict with photometric loss at early stages [S1].
+ 
+@@ -166,5 +118,5 @@
+ 
+ ### HeadGaS Ablation (Delta Position and Rotation)
+-An ablation variant where Gaussians are transformed using deltas for position ($\mu$) and rotation ($R$) predicted by an MLP $\phi'$ [S1]. The MLP outputs 3 values of position shift and 4 values of rotation (quaternion) [S1]. The static Gaussian position is updated as $\mu' = \mu + \Delta \mu$ and rotation as $R' = R_t R$ [S1]. A regularization term $\lambda_\mu L_1(\Delta \mu)$ is added to the loss to encourage small position shifts [S1]. This variant requires significantly more Gaussians (234k) than the proposed HeadGaS (28k) because the proposed model's over-representation is more effective and easier to learn [S1]. Performance on INSTA dataset: 234k Gaussians, 0.019s rendering time, 29.83 PSNR [S1].
++An ablation variant where Gaussians are transformed using deltas for position ($\mu$) and rotation ($R$) predicted by an MLP $\phi'$ [S1]. The MLP outputs 3 values of position shift and 4 values of rotation (quaternion) [S1]. The static Gaussian position is updated as $\mu' = \mu + \Delta \mu$ and rotation as $R' = R_t R$ [S1]. A regularization term $\lambda_\mu \mathcal{L}_1(\Delta \mu)$ is added to the loss to encourage small position shifts [S1]. This variant requires significantly more Gaussians (234k) than the proposed HeadGaS (28k) because the proposed model's over-representation is more effective and easier to learn [S1]. Performance on INSTA dataset for this variant: 234k Gaussians, 0.019s rendering time, 29.83 PSNR [S1].
+ 
+ ## Operating characteristics
+@@ -177,8 +129,8 @@
+ *   **Scaling:** Rendering speed accelerated by over 10x compared to interactive NeRF-based baselines [S1].
+ *   **Strengths:** Real-time inference, state-of-the-art results (up to 2 dB PSNR improvement over baselines), simple and effective blending in latent space [S1].
+-*   **Limitations:** Requires pre-computed head poses and expression weights. Over-representation increases Gaussian count compared to static scenes [S1].
++*   **Limitations:** Requires pre-computed head poses and expression weights [S1].
+ 
+ ## Background
+-HeadGaS was proposed by H. Dhamo et al. in the paper "HeadGaS: Real-Time Animatable Head Avatars via 3D Gaussian Splatting" [S1]. It extends the explicit 3DGS representation with a base of learnable latent features, inspired by traditional blendshape 3DMMs [S1]. The method allows reconstruction in real-time of animatable heads from monocular video [S2, unofficial]. It supports various 3DMM representations, including FLAME and FaceWarehouse [S1].
++HeadGaS was proposed by H. Dhamo et al. in the paper "HeadGaS: Real-Time Animatable Head Avatars via 3D Gaussian Splatting" [S1]. It extends the explicit 3DGS representation with a base of learnable latent features, inspired by traditional blendshape 3DMMs [S1]. The method allows reconstruction in real-time of animatable heads [S2, unofficial]. It supports various 3DMM representations, including FLAME and FaceWarehouse [S1].
+ 
+ ## Sources

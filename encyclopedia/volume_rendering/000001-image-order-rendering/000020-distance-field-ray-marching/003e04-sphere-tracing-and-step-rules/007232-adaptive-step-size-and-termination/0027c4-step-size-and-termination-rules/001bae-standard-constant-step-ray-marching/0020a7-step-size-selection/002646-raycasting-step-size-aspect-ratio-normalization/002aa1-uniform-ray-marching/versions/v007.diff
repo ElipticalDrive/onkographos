@@ -1,0 +1,131 @@
+--- v006.md
++++ v007.md
+@@ -39,5 +39,5 @@
+         $$ C = \sum (rays\_o^2) - \rho^2 $$
+         where $\rho = r_{max\_rsun} / aabb\_scale$ [S4, unofficial].
+-    *   Solve for intersection times $t_{in}$ and $t_{out}$ using the quadratic formula. Handle numerical safety by clamping $A$ to $10^{-20}$ and the discriminant $disc = B^2 - 4AC$ to $0.0$ [S4, unofficial].
++    *   Solve for intersection times $t_{in}$ and $t_{out}$ using the quadratic formula [S4, unofficial]. Handle numerical safety by clamping $A$ to $10^{-20}$ and the discriminant $disc = B^2 - 4AC$ to $0.0$ [S4, unofficial].
+     *   Update interval bounds: $t_{min} = \max(t_{min}, t_{in})$ and $t_{max} = \min(t_{max}, t_{out})$ [S4, unofficial].
+     *   Update valid mask: `ok = ok & hit` [S4, unofficial].
+@@ -46,6 +46,6 @@
+     *   If using `numSteps`: Calculate `stepSize = rayLength / numSteps` [S1, unofficial].
+ 5.  **Sample Generation:** Generate uniform sample points along the valid intervals [S2, S3, S4, unofficial].
+-    *   **Method A (Edge-based):** Create linearly spaced points $u$ in $[0, 1]$. Compute edge coordinates $edges = t_{min} + (t_{max} - t_{min}) \cdot u$. Flatten to get start times $t_s$ and end times $t_e$ [S4, unofficial].
+-    *   **Method B (Offset-based):** Generate delta offsets scaled by `MARCH_SIZE` (or `render_step_size`). Add deterministic noise ($0.5$) or uniform noise $[0.01, 0.99]$ if required [S3, unofficial]. Compute sampled depths and sort them [S3, unofficial].
++    *   **Method A (Edge-based):** Create linearly spaced points $u$ in $[0, 1]$ [S4, unofficial]. Compute edge coordinates $edges = t_{min} + (t_{max} - t_{min}) \cdot u$ [S4, unofficial]. Flatten to get start times $t_s$ and end times $t_e$ [S4, unofficial].
++    *   **Method B (Offset-based):** Generate delta offsets scaled by `MARCH_SIZE` (or `render_step_size`) [S3, unofficial]. Add deterministic noise ($0.5$) or uniform noise $[0.01, 0.99]$ if required [S3, unofficial]. Compute sampled depths and sort them [S3, unofficial].
+ 6.  **Position Computation:** Compute 3D positions as $pos = ori + t \cdot dir$ [S2, S4, unofficial].
+     *   For atlas debugging: Compute UV coordinates as $atlasUV = (pos / normalizedSize) + 0.5$ [S1, unofficial].
+@@ -61,5 +61,5 @@
+ import torch
+ 
+-def uniform_ray_marching(rays_o, rays_d, aabb_min, aabb_max, render_step_size, r_max_rsun=None, aabb_scale=1.0):
++def uniform_ray_marching(rays_o, rays_d, aabb_min, aabb_max, render_step_size=None, num_steps=None, r_max_rsun=None, aabb_scale=1.0):
+     """
+     Generates uniform samples along rays within an AABB.
+@@ -69,18 +69,10 @@
+     aabb_max: (3,)
+     """
+-    rays_o = torch.as_tensor(rays_o, dtype=torch.float32)
+-    rays_d = torch.as_tensor(rays_d, dtype=torch.float32)
+-    aabb_min = torch.as_tensor(aabb_min, dtype=torch.float32)
+-    aabb_max = torch.as_tensor(aabb_max, dtype=torch.float32)
+-    
+     N = rays_o.shape[0]
+     
+-    # 1. AABB Intersection
+-    # Handle zero direction components to avoid division by zero
+-    inv_dir = torch.where(rays_d.abs() > 1e-8, 1.0 / rays_d, 0.0)
+-    
++    # 1. AABB Intersection (Slab method)
++    inv_dir = torch.ones_like(rays_d) / rays_d
+     t1 = (aabb_min - rays_o) * inv_dir
+     t2 = (aabb_max - rays_o) * inv_dir
+-    
+     t_min = torch.maximum(t1, t2).min(dim=1).values
+     t_max = torch.minimum(t1, t2).max(dim=1).values
+@@ -112,29 +104,42 @@
+         
+     # 3. Step Size and Count
+-    ray_lengths = t_max - t_min
+-    n_steps = torch.ceil(ray_lengths / render_step_size).long()
+-    n_steps = torch.maximum(n_steps, torch.ones_like(n_steps))
+-    max_steps = n_steps.max().item()
+-    
+-    idx = torch.arange(max_steps, device=rays_o.device).unsqueeze(0)
+-    n_steps_exp = n_steps.unsqueeze(1)
+-    step_mask = idx < n_steps_exp
+-    
+-    t_s = t_min.unsqueeze(1) + idx.float() * render_step_size
+-    t_s = t_s.masked_fill(~step_mask, 0.0)
+-    
+-    t_e = t_s + render_step_size
+-    t_e = torch.minimum(t_e, t_max.unsqueeze(1))
+-    
+-    t_s_flat = t_s[step_mask]
+-    t_e_flat = t_e[step_mask]
+-    
+-    ray_indices = torch.arange(N, device=rays_o.device).repeat_interleave(n_steps)
+-    
++    if render_step_size is not None:
++        ray_lengths = t_max - t_min
++        n_steps = torch.ceil(ray_lengths / render_step_size).long()
++        n_steps = torch.maximum(n_steps, torch.ones_like(n_steps))
++        max_steps = n_steps.max().item()
++        
++        idx = torch.arange(max_steps, device=rays_o.device).unsqueeze(0)
++        n_steps_exp = n_steps.unsqueeze(1)
++        step_mask = idx < n_steps_exp
++        
++        t_s = t_min.unsqueeze(1) + idx.float() * render_step_size
++        t_s = t_s.masked_fill(~step_mask, 0.0)
++        
++        t_e = t_s + render_step_size
++        t_e = torch.minimum(t_e, t_max.unsqueeze(1))
++        
++        t_s_flat = t_s[step_mask]
++        t_e_flat = t_e[step_mask]
++        
++        ray_indices = torch.arange(N, device=rays_o.device).repeat_interleave(n_steps)
++    else:
++        # Fallback to num_steps mode (S1)
++        if num_steps is not None:
++            ray_lengths = t_max - t_min
++            step_size = ray_lengths / num_steps
++            steps = torch.arange(num_steps, device=rays_o.device).float()
++            t_s = t_min.unsqueeze(1) + steps.unsqueeze(0) * step_size.unsqueeze(1)
++            t_e = t_s + step_size.unsqueeze(1)
++            t_s_flat = t_s.flatten()
++            t_e_flat = t_e.flatten()
++            ray_indices = torch.arange(N, device=rays_o.device).repeat(num_steps)
++        else:
++            raise ValueError("Either render_step_size or num_steps must be provided")
++
+     # 4. Compute Positions
+     dirs_norm = rays_d / rays_d.norm(dim=1, keepdim=True)
+     ori_flat = rays_o[ray_indices]
+     dir_flat = dirs_norm[ray_indices]
+-    
+     positions = ori_flat + t_s_flat.unsqueeze(1) * dir_flat
+     
+@@ -150,5 +155,5 @@
+ *   **Invalid Depths:** Depths outside the AABB or sphere are masked with `MAX_DEPTH` and sorted to the end to allow trimming to the maximum valid steps per ray [S3, unofficial].
+ *   **Numerical Stability:** The discriminant in sphere intersection must be clamped to $0.0$ to avoid NaNs from negative values due to precision errors [S4, unofficial].
+-*   **Zero Direction Components:** Division by zero in inverse direction calculation must be guarded, typically by clamping the denominator or using a safe division function [G].
++*   **Aspect Ratio:** Builds on [Raycasting Step Size & Aspect Ratio Normalization](3734-raycasting-step-size-aspect-ratio-normalization.md) to handle arbitrary volume dimensions [Parent].
+ 
+ ## Subtopics
+@@ -164,5 +169,5 @@
+ 
+ ## Operating characteristics
+-*   **Time Complexity:** $O(N \cdot S)$, where $N$ is the number of rays and $S$ is the number of steps per ray. The calculation is highly parallelizable as each ray's samples are independent [S3, S4, unofficial].
++*   **Time Complexity:** $O(N \cdot S)$, where $N$ is the number of rays and $S$ is the number of steps per ray [S3, S4, unofficial].
+ *   **Memory Complexity:** $O(N \cdot S)$ to store sample positions, depths, and indices [S4, unofficial].
+ *   **Strengths:** Simple to implement, deterministic (with fixed noise), no dependency on custom CUDA extensions (PyTorch-native fallback) [S3, S4, unofficial].
+@@ -171,5 +176,5 @@
+ 
+ ## Background
+-Uniform Ray Marching is a fundamental technique in volume rendering, often used as a baseline or fallback implementation [G]. It appears in various contexts: as a debug mode for direct atlas sampling in webGPU-native renderers [S1, unofficial], as a JAX-based volumetric renderer component [S2, unofficial], as a PyTorch fallback in Neural Sparse Voxel Fields (NSVF) [S3, unofficial], and in coronal NeRF rendering for solar physics [S4, unofficial]. The method relies on basic ray-AABB intersection and linear interpolation, forming the basis for more complex adaptive strategies [G].
++Uniform Ray Marching appears in various contexts: as a debug mode for direct atlas sampling in webGPU-native renderers [S1, unofficial], as a JAX-based volumetric renderer component [S2, unofficial], as a PyTorch fallback in Neural Sparse Voxel Fields (NSVF) [S3, unofficial], and in coronal NeRF rendering for solar physics [S4, unofficial].
+ 
+ ## Sources

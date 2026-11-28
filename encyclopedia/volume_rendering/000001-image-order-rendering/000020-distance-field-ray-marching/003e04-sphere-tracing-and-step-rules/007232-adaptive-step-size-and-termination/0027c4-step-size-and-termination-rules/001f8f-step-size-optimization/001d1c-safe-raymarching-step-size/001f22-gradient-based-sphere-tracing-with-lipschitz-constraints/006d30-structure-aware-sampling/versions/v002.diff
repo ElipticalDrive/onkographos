@@ -1,0 +1,136 @@
+--- v001.md
++++ v002.md
+@@ -12,5 +12,5 @@
+ 
+ **Data Structures:**
+-*   **Ray State:** Current position $\mathbf{x}(t_i)$, current ray parameter $t_i$, current SDF value $s_i$, current scale $\beta_i$, current filtered slope $m$, current transmittance $T$.
++*   **Ray State:** Current position $\mathbf{x}(t_i)$, current ray parameter $t_i$, current SDF value $s_i$, current scale $\beta_i$, current filtered slope $m$, current transmittance $T$ [S1].
+ *   **Occupancy Map:** A data structure mapping 3D space to visibility status, used to skip free space [S1].
+ 
+@@ -30,9 +30,11 @@
+ 9.  Filter Gradient: $m = \gamma m + (1 - \gamma) M$ [S1].
+ 10. Record Sample: Store $(t_i, m_i) = (t_{i+1}, m)$ [S1].
+-11. If the stability check failed (step 6), revert: set $m = -1$ and do not advance the ray parameter $t$ (effectively retrying with a smaller implicit step or handling the uncertainty) [S1].
+-12. Update state for next iteration: $t_i = t_{i+1}$, $s_i = s_{i+1}$, $\beta_i = \beta_{i+1}$ [S1].
++11. If the stability check failed (step 6), revert: set $m = -1$ and do not update the ray parameter $t_i$ (the loop repeats at the current position) [S1].
++12. Update state for next iteration: $t_i = t_{i+1}$, $s_i = s_{i+1}$, $\beta_i = \beta_{i+1}$ only occur inside the successful step branch [S1].
+ 
+ **Pseudocode:**
+ ```python
++import math
++
+ def structure_aware_sampling(camera_origin, direction, neural_field, occupancy_map, epsilon_T=0.001, gamma=0.7):
+     """
+@@ -57,101 +59,30 @@
+     T = 1.0
+     
+-    # Loop while outside surface (s > 0) or transmittance is high
+     while s > 0 or T > epsilon_T:
+-        # Adaptive step size calculation
+-        # Note: m is initialized to -1, so (1 - (-1))/2 = 1, step = |s|
+         delta = abs(s) * (1 - m) / 2
+-        
+-        # Advance ray
+         t_next = t + delta
+         x_next = camera_origin + t_next * direction
+-        
+-        # Query neural field at new position
+         s_next, beta_next = neural_field(x_next)
+         
+-        # Stability check: ensure space between steps is intersected
+-        # Condition: delta <= |s_i| + |s_{i+1}| + 3*beta_i
+         if delta <= abs(s) + abs(s_next) + 3 * beta:
+-            # Update transmittance
+-            # sigma is derived from s, beta, and m to avoid expensive gradients
+-            sigma = compute_density(s, beta, m)
+-            T = T * exp(-sigma * delta)
+-            
+-            # Estimate gradient slope M
++            # [G] Exact SDF-to-density formula not given in sources; standard conversion applied here.
++            sigma = max(0.0, -s / beta) if beta > 0 else 0.0
++            T = T * math.exp(-sigma * delta)
+             M = (s_next - s) / delta
+-            
+-            # Filter gradient m
+             m = gamma * m + (1 - gamma) * M
+-            
+-            # Record sample
+             samples.append((t_next, m))
+-            
+-            # Update state
+             t = t_next
+             s = s_next
+             beta = beta_next
+         else:
+-            # Revert step to handle unconverged NDF or instability
+             m = -1.0
+-            # Do not advance t, effectively retrying or stopping depending on implementation
+-            # The source implies reverting the state to avoid false reverts in unconverged NDF
+-            # by taking beta into account. If the check fails, we reset m.
+-            # To prevent infinite loops in unstable regions, one might break or reduce step.
+-            # Based on Alg 1, it just sets m=-1 and continues the loop with current t?
+-            # No, Alg 1 shows "else m := -1" inside the loop, but t is updated in the "if" block?
+-            # Let's re-read Alg 1 carefully.
+-            # Line 4: t_{i+1} := t_i + delta
+-            # Line 5: query
+-            # Line 6: if check
+-            # Line 7-9: update T, M, m, append sample
+-            # Line 13: else m := -1
+-            # The loop continues. If we revert, do we keep t_{i+1}?
+-            # Usually, a revert means the step was too large.
+-            # However, the source says "false revert steps ... are avoided by taking predicted scale".
+-            # This implies the check prevents *unnecessary* reverts.
+-            # If the check fails, it IS a revert.
+-            # The pseudocode in the source does not explicitly reset t.
+-            # But logically, if the step is invalid, you shouldn't advance.
+-            # Let's look at "ensure that the space between two adjacent steps is maintained".
+-            # If the condition fails, the step is invalid.
+-            # We will assume t is NOT updated if the check fails, to avoid skipping geometry.
+-            # [G] Guard against infinite loop: if delta is very small, break.
+-            if delta < 1e-6:
+-                break
+-            # Reset m to -1 for next attempt with same t? Or keep t_next?
+-            # The source Alg 1 line 13 is "m := -1". It does not show t reset.
+-            # But line 9 updates t_i to t_{i+1}.
+-            # If we fall into else, we don't execute line 9.
+-            # So t remains t_i? No, t_{i+1} is calculated in line 4.
+-            # The variable t_i is updated in line 9.
+-            # So if we hit else, t_i is NOT updated.
+-            # So we stay at t_i.
+-            # But we already queried x_next.
+-            # We need to re-evaluate at t_i?
+-            # Let's stick to the source structure: t is only updated in the 'if' block.
+-            pass 
+-            
+     return samples
+-
+-def compute_density(s, beta, m):
+-    """
+-    Computes density sigma from SDF, scale, and filtered slope.
+-    The exact formula for sigma is not provided in the source text,
+-    but it is stated to use the estimated filtered slope M (stored in m)
+-    to avoid expensive analytical or numerical gradient calculations.
+-    [G] Standard SDF-to-density conversion often uses: sigma = max(0, -s / beta) or similar.
+-    The source mentions using m in the transition.
+-    A common form in such contexts is sigma = (1 - m) / (2 * beta) or similar.
+-    However, without the explicit formula, we cannot implement this precisely.
+-    [G] Placeholder for density calculation based on s, beta, m.
+-    """
+-    # Not given in the sources.
+-    return 0.0
+ ```
+ 
+ **Edge Cases and Pitfalls:**
+-*   **False Reverts:** In unconverged Neural Distance Fields (NDFs), standard sphere tracing might trigger false reverts. This method avoids this by including the predicted scale $\beta_i$ in the intersection check condition ($\delta_i \le |s_i| + |s_{i+1}| + 3\beta_i$) [S1].
++*   **False Reverts:** In unconverged Neural Distance Fields (NDFs), standard sphere tracing might trigger false reverts [S1]. This method avoids this by including the predicted scale $\beta_i$ in the intersection check condition ($\delta_i \le |s_i| + |s_{i+1}| + 3\beta_i$) [S1].
+ *   **Local Minima:** The algorithm continues marching even behind surfaces (when $s_i < 0$) to avoid getting stuck in poor local minima, terminating only when transmittance $T$ falls below $\epsilon_T$ [S1].
+ *   **Gradient Estimation:** The filtered slope $m$ is used in the SDF-to-density transition to avoid expensive analytical or numerical gradient calculations [S1].
++*   **Precision and Boundaries:** Not given in the sources.
+ 
+ ## Subtopics
+@@ -169,5 +100,4 @@
+ *   **Limitations:** Relies on the quality of the neural field $f_S$ and the occupancy map; requires tuning of $\gamma$ and $\epsilon_T$ [S1].
+ *   **When to Use:** Rendering scenes with LiDAR data and neural surface representations where free-space skipping and robust handling of learned SDFs are beneficial [S1].
+-*   **When Not to Use:** When analytical gradients are available and preferred, or when the neural field is fully converged and stable without needing scale-based stability checks [S1].
+ 
+ ## Background

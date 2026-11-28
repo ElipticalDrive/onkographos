@@ -1,0 +1,154 @@
+# 3D Gaussian Splitting via Moment Conservation
+
+Also called: new split algorithm for 3D Gaussian splatting
+
+## Overview
+This method decomposes a single $d$-dimensional Gaussian primitive into two $d$-dimensional Gaussians to resolve scale and structural inhomogeneities in 3D Gaussian Splatting (3DGS) models [S1, unofficial]. Unlike the original 3DGS approach which duplicates Gaussians with naive scaling and random translation, this method uses a closed-form solution based on moment conservation to ensure the resulting models are more uniform and surface-bounded [S1, unofficial]. It addresses the problems of blurred boundaries caused by scale inhomogeneity and needle-like artifacts caused by structural inhomogeneity [S1, unofficial].
+
+## How it works
+**Inputs and Outputs**
+*   **Input:** A single 3D Gaussian primitive $G$ defined by position $\mu$, opacity $\alpha$, covariance $\Sigma$, and spherical harmonic coefficients $\mathbf{c}$.
+*   **Output:** Two new 3D Gaussian primitives $G_1$ and $G_2$ with parameters $(\mu_1, \alpha_1, \Sigma_1)$ and $(\mu_2, \alpha_2, \Sigma_2)$, and color coefficients $\mathbf{c}_1, \mathbf{c}_2$.
+
+**Data Structures**
+The Gaussian is represented using the standard 3DGS parameters:
+*   Position $\mu \in \mathbb{R}^3$
+*   Opacity $\alpha \in [0, 1]$ (excluding the PDF normalization coefficient)
+*   Covariance $\Sigma \in \mathbb{R}^{3 \times 3}$, decomposed into rotation $R$ (stored as quaternion $q$) and scale $S$ (diagonal matrix).
+*   Color coefficients $\mathbf{c}$ (Spherical Harmonics)
+
+**Mathematical Foundation**
+The opacity at a point $\mathbf{x}$ for Gaussian $k$ is defined as [S1, unofficial]:
+$$ \alpha(\mathbf{x}) = \alpha_k \text{pdf}_k(\mathbf{x}) $$
+where $\text{pdf}_k$ is the probability density function:
+$$ \text{pdf}_k(\mathbf{x}) = \frac{1}{(2\pi)^{3/2}|\Sigma_k|} \exp\left(-\frac{1}{2}(\mathbf{x} - \mu_k)^T \Sigma_k^{-1} (\mathbf{x} - \mu_k)\right) $$
+The covariance matrix $\Sigma$ is decomposed via eigenvalue decomposition as [S1, unofficial]:
+$$ \Sigma = R\Lambda R^T $$
+where $\Lambda$ is a diagonal matrix of principal component squared scales, and columns of $R$ are mutually perpendicular unit vectors representing principal component directions. $R$ is stored as a normalized quaternion $q$.
+
+**Conservation Constraints**
+The splitting problem is modeled via a set of integral tensor equations derived from conserving the zero-, first-, and second-moments of the original Gaussian [S1, unofficial]:
+1.  **Zero-moment conservation:** The sum of the opacities of the two resulting Gaussians must equal the opacity of the original Gaussian:
+    $$ \alpha_1 + \alpha_2 = \alpha $$
+2.  **First-moment conservation:** The weighted sum of the positions must equal the original position:
+    $$ \alpha_1 \mu_1 + \alpha_2 \mu_2 = \alpha \mu $$
+3.  **Second-moment conservation:** The weighted sum of the second moments (covariance plus outer product of means) must equal the second moment of the original Gaussian:
+    $$ \alpha_1 (\Sigma_1 + \mu_1 \mu_1^T) + \alpha_2 (\Sigma_2 + \mu_2 \mu_2^T) = \alpha (\Sigma + \mu \mu^T) $$
+
+**Algorithm Steps**
+1.  Compute the eigenvalue decomposition of the input covariance $\Sigma = R\Lambda R^T$ to obtain principal directions and squared scales [S1, unofficial].
+2.  Determine the split axis. Typically, this is the principal direction with the largest scale to address scale inhomogeneity, or a specific direction to address structural inhomogeneity [S1, unofficial].
+3.  Solve the conservation equations for $\alpha_1, \alpha_2, \mu_1, \mu_2, \Sigma_1, \Sigma_2$. The source states a "concise and efficient closed-form solution" exists but does not provide the explicit algebraic derivation in the provided text [S1, unofficial]. [G] In typical implementations of this method, the split is performed along the principal axis with the largest variance. The new positions are offset along this axis, and opacities are distributed to maintain the first moment. The new covariances are adjusted to maintain the second moment, often by reducing the scale along the split axis and keeping other scales similar or adjusted based on the specific conservation constraints.
+4.  Assign color coefficients. The color coefficients $\mathbf{c}_1$ and $\mathbf{c}_2$ are typically set to the original $\mathbf{c}$ to preserve appearance similarity [S1, unofficial].
+5.  Normalize the quaternions $q_1$ and $q_2$ to ensure valid unit quaternions [S1, unofficial].
+
+**Pseudocode**
+> **Unverified code.** The code below did not pass a test run against a reference implementation, or no test fits it, so it may contain errors.
+
+```python
+def split_gaussian_via_moments(gaussian):
+    """
+    Splits a single 3D Gaussian into two using moment conservation.
+    
+    Args:
+        gaussian: Object with attributes .mu (3,), .alpha (float), 
+                  .q (4,), .s (3,), .c (SH coefficients).
+    
+    Returns:
+        Two Gaussian objects: g1, g2.
+    """
+    # 1. Decompose covariance to find principal directions
+    # Sigma = R * Lambda * R^T
+    # R is rotation matrix from quaternion q
+    R = quaternion_to_rotation_matrix(gaussian.q)
+    Lambda = np.diag(gaussian.s ** 2)
+    Sigma = R @ Lambda @ R.T
+    
+    # Eigenvalue decomposition to get principal components
+    eigenvalues, eigenvectors = np.linalg.eigh(Sigma)
+    # eigenvalues are squared scales, eigenvectors are principal directions
+    
+    # 2. Determine split axis
+    # Choose the principal direction with the largest scale (largest eigenvalue)
+    # to address scale inhomogeneity.
+    largest_eig_idx = np.argmax(eigenvalues)
+    split_axis = eigenvectors[:, largest_eig_idx]
+    split_scale = np.sqrt(eigenvalues[largest_eig_idx])
+    
+    # 3. Solve for new parameters
+    # [G] The exact closed-form solution is not detailed in the source.
+    # A common approach for moment-conserving split along axis 'a':
+    # Offset positions along the split axis.
+    # Distribute opacity.
+    # Adjust covariances to conserve second moment.
+    
+    # Example heuristic for split (must be replaced with exact closed-form if available):
+    # Let delta be a small offset along the split axis.
+    delta = split_scale * 0.5  # Heuristic value
+    
+    # New positions
+    mu1 = gaussian.mu + delta * split_axis
+    mu2 = gaussian.mu - delta * split_axis
+    
+    # New opacities (equal split for simplicity, conserving zero-moment)
+    alpha1 = gaussian.alpha / 2.0
+    alpha2 = gaussian.alpha / 2.0
+    
+    # Check first-moment conservation: alpha1*mu1 + alpha2*mu2 = alpha*mu
+    # With equal alpha and symmetric mu, this holds.
+    
+    # New covariances
+    # [G] The source states a closed-form solution exists for Sigma1, Sigma2.
+    # A simple approach is to reduce the scale along the split axis.
+    new_scales1 = gaussian.s.copy()
+    new_scales2 = gaussian.s.copy()
+    new_scales1[largest_eig_idx] = gaussian.s[largest_eig_idx] / np.sqrt(2)
+    new_scales2[largest_eig_idx] = gaussian.s[largest_eig_idx] / np.sqrt(2)
+    
+    # Reconstruct covariances
+    Sigma1 = R @ np.diag(new_scales1**2) @ R.T
+    Sigma2 = R @ np.diag(new_scales2**2) @ R.T
+    
+    # 4. Create new Gaussians
+    g1 = Gaussian()
+    g1.mu = mu1
+    g1.alpha = alpha1
+    g1.q = gaussian.q # Rotation remains same for split along principal axis
+    g1.s = new_scales1
+    g1.c = gaussian.c
+    
+    g2 = Gaussian()
+    g2.mu = mu2
+    g2.alpha = alpha2
+    g2.q = gaussian.q
+    g2.s = new_scales2
+    g2.c = gaussian.c
+    
+    return g1, g2
+```
+
+**Parameters**
+*   Opacity $\alpha$: Represents the part of the opacity except for the Gaussian distribution normalization coefficient [S1, unofficial].
+*   Rotation $R$: Stored as a quaternion $q$, which must be normalized to obtain a valid unit quaternion [S1, unofficial].
+
+**Edge Cases and Pitfalls**
+*   **Scale Inhomogeneity:** If not resolved, some Gaussians have much greater values in every principal component of covariance than others, causing huge bulges during editing and huge voids during point cloud extraction [S1, unofficial].
+*   **Structural Inhomogeneity:** If not resolved, some Gaussians have much greater values in some principal components than others, causing needle-like objects near the surface [S1, unofficial].
+*   **Quaternion Normalization:** The quaternion $q$ must be normalized to ensure a valid rotation matrix [S1, unofficial].
+
+## Operating characteristics
+*   **Time Complexity:** The algorithm has a concise and efficient closed-form solution, making it readily applicable to any 3D Gaussian model without further training [S1, unofficial].
+*   **Memory Complexity:** Not given in the sources.
+*   **Strengths:** Produces more uniform and surface-bounded 3D Gaussian splatting models, suitable for explicit editing, point cloud extraction, and physical simulation [S1, unofficial]. It eliminates the need for further training after splitting [S1, unofficial].
+*   **Limitations:** The exact closed-form solution details are not provided in the source, which may hinder implementation without additional derivation or reference to the full paper [S1, unofficial].
+*   **When to use:** When the 3DGS model exhibits scale or structural inhomogeneity, leading to blurred boundaries or needle-like artifacts, and when explicit editing or point cloud extraction is required [S1, unofficial].
+*   **When not to use:** When the model is already uniform and surface-bounded, or when further training is acceptable to refine the model [S1, unofficial].
+
+## Background
+*   **Origin:** Proposed by Qiyuan Feng, Gengchen Cao, Haoxiang Chen, Tai-Jiang Mu, Ralph R. Martin, and Shi-Min Hu from Tsinghua University and Cardiff University [S1, unofficial].
+*   **Paper:** "A New Split Algorithm for 3D Gaussian Splatting" [S1, unofficial].
+*   **History:** The method addresses limitations in the original 3D Gaussian Splatting method, which uses naive scaling and random translation for densification, leading to non-uniform models [S1, unofficial].
+*   **Applications:** Gaussian-based explicit editing, physical simulation, 3D geometry generation, and point cloud extraction [S1, unofficial].
+
+## Sources
+[S1] A New Split Algorithm for 3D Gaussian Splatting, https://arxiv.org/abs/2403.09143v1, fetched 2026-10-26 (unofficial)

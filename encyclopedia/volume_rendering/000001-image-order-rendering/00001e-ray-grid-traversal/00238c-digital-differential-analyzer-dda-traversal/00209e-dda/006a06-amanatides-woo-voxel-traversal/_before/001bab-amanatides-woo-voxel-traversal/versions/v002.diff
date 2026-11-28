@@ -1,0 +1,183 @@
+--- v001.md
++++ v002.md
+@@ -7,12 +7,12 @@
+ 
+ ## How it works
+-**Inputs:** Ray origin $P = (P_x, P_y, P_z)$, ray direction $D = (D_x, D_y, D_z)$ (normalized or unnormalized, but non-zero magnitude), voxel grid bounds $[x_{min}, x_{max}] \times [y_{min}, y_{max}] \times [z_{min}, z_{max}]$, and voxel size $V$ (assumed uniform, typically $V=1$ for unit grids).
+-**Outputs:** A sequence of voxel indices $(i, j, k)$ visited in order of increasing ray parameter $t$, optionally with the entry point and normal for the first hit.
++**Inputs:** Ray origin $P = (P_x, P_y, P_z)$, ray direction $D = (D_x, D_y, D_z)$ (non-zero magnitude), voxel grid bounds $[x_{min}, x_{max}] \times [y_{min}, y_{max}] \times [z_{min}, z_{max}]$, and voxel size $V$ (assumed uniform, typically $V=1$ for unit grids) [S1, S2, unofficial].
++**Outputs:** A sequence of voxel indices $(i, j, k)$ visited in order of increasing ray parameter $t$, optionally with the entry point and normal for the first hit [S2, unofficial].
+ 
+ **Data Structures:**
+-*   `voxel`: Integer tuple $(i, j, k)$ representing the current cell index.
+-*   `step`: Integer tuple $(s_x, s_y, s_z)$ where $s \in \{-1, 0, 1\}$.
+-*   `t_delta`: Float tuple $(\Delta t_x, \Delta t_y, \Delta t_z)$ representing the $t$-distance between successive grid plane crossings on each axis.
+-*   `t_max`: Float tuple $(T_x, T_y, T_z)$ representing the ray parameter $t$ at which the ray crosses the *next* grid boundary on each axis.
++*   `voxel`: Integer tuple $(i, j, k)$ representing the current cell index [S1, unofficial].
++*   `step`: Integer tuple $(s_x, s_y, s_z)$ where $s \in \{-1, 0, 1\}$ [S1, unofficial].
++*   `t_delta`: Float tuple $(\Delta t_x, \Delta t_y, \Delta t_z)$ representing the $t$-distance between successive grid plane crossings on each axis [S1, unofficial].
++*   `t_max`: Float tuple $(T_x, T_y, T_z)$ representing the ray parameter $t$ at which the ray crosses the *next* grid boundary on each axis [S1, unofficial].
+ 
+ **Parameters:**
+@@ -35,5 +35,5 @@
+ 3.  **Determine Starting Voxel and Initial $t_{max}$:**
+     *   Calculate the starting voxel index: $i = \lfloor \frac{P_x - x_{min}}{V} \rfloor$, $j = \lfloor \frac{P_y - y_{min}}{V} \rfloor$, $k = \lfloor \frac{P_z - z_{min}}{V} \rfloor$ [S1, S2, unofficial].
+-    *   Calculate the fractional distance into the current voxel: $f_a = \frac{P_a - (i \cdot V + x_{min})}{V}$ for $a \in \{x, y, z\}$ [S2, unofficial].
++    *   Calculate the fractional distance into the current voxel: $f_a = \frac{P_a - x_{min,a}}{V} - i_a$ for $a \in \{x, y, z\}$ [S2, unofficial].
+     *   Calculate the distance to the next boundary in $t$:
+         $$ T_a = \begin{cases} (1.0 - f_a) \cdot \Delta t_a & \text{if } D_a > 0 \\ f_a \cdot \Delta t_a & \text{if } D_a < 0 \\ \infty & \text{if } D_a = 0 \end{cases} $$
+@@ -41,5 +41,5 @@
+ 
+ 4.  **Traverse:**
+-    While the current voxel $(i, j, k)$ is within the grid bounds and $t < t_{max, ray}$:
++    While the current voxel $(i, j, k)$ is within the grid bounds and $\min(T_x, T_y, T_z) \le t_{max, ray}$:
+     1.  Visit voxel $(i, j, k)$ [S1, S2, unofficial].
+     2.  Identify the axis with the smallest $T_a$.
+@@ -51,84 +51,64 @@
+ 
+ ```python
+-def amanatides_woo_traverse(origin, direction, grid_min, grid_max, voxel_size=1.0, max_t=float('inf')):
++import math
++
++def amanatides_woo(origin, direction, grid_min, grid_max, voxel_size=1.0, max_t=float('inf')):
+     """
+-    Traverses a uniform voxel grid along a ray.
+-    
+-    Args:
+-        origin: (x, y, z) ray origin
+-        direction: (dx, dy, dz) ray direction
+-        grid_min: (xmin, ymin, zmin) minimum bounds of the grid
+-        grid_max: (xmax, ymax, zmax) maximum bounds of the grid
+-        voxel_size: size of each voxel (default 1.0)
+-        max_t: maximum ray parameter to traverse
+-        
+-    Yields:
+-        (i, j, k): voxel indices visited in order
++    Traverses a uniform voxel grid along a ray in front-to-back order.
++    Assumes origin is already clipped to the grid's AABB if outside.
+     """
+-    # 1. Initialize step signs and handle zero direction components
+-    step = []
+-    t_delta = []
+-    t_max = []
+-    
+-    for axis_idx, (p, d) in enumerate(zip(origin, direction)):
++    step = [0, 0, 0]
++    t_delta = [0.0, 0.0, 0.0]
++    t_max = [0.0, 0.0, 0.0]
++    current_voxel = [0, 0, 0]
++
++    for i in range(3):
++        d = direction[i]
++        p = origin[i]
++        g_min = grid_min[i]
++
++        # 1. Initialize step signs
+         if d > 0:
+-            step.append(1)
++            step[i] = 1
+         elif d < 0:
+-            step.append(-1)
++            step[i] = -1
+         else:
+-            step.append(0)
+-            
+-        # Calculate delta t: distance in t between grid crossings
++            step[i] = 0
++
++        # 2. Calculate t_delta: t-distance between successive grid plane crossings
+         if d != 0:
+-            t_delta.append(voxel_size / abs(d))
++            t_delta[i] = voxel_size / abs(d)
+         else:
+-            t_delta.append(float('inf'))
+-            
+-        # Calculate initial t_max: distance to the first grid boundary
+-        # Determine the coordinate of the first boundary
+-        if d > 0:
+-            boundary_coord = (floor((p - grid_min[axis_idx]) / voxel_size) + 1) * voxel_size + grid_min[axis_idx]
+-        elif d < 0:
+-            boundary_coord = floor((p - grid_min[axis_idx]) / voxel_size) * voxel_size + grid_min[axis_idx]
++            t_delta[i] = float('inf')
++
++        # 3. Determine starting voxel index
++        current_voxel[i] = int(math.floor((p - g_min) / voxel_size))
++
++        # 4. Calculate t_max: distance to the next boundary crossing
++        if d != 0:
++            # Fractional distance into the current voxel
++            fract = (p - g_min) / voxel_size - current_voxel[i]
++            if d > 0:
++                t_max[i] = (1.0 - fract) * t_delta[i]
++            else:
++                t_max[i] = fract * t_delta[i]
+         else:
+-            boundary_coord = p # Never crosses
+-            
+-        # Calculate t to reach that boundary
+-        if d != 0:
+-            t_max.append((boundary_coord - p) / d)
+-        else:
+-            t_max.append(float('inf'))
++            t_max[i] = float('inf')
+ 
+-    # 2. Determine starting voxel index
+-    # Using floor for positive direction logic consistent with boundary calculation above
+-    # Note: Implementation must ensure consistency with the boundary calculation logic
+-    current_voxel = []
+-    for axis_idx, (p, g_min) in enumerate(zip(origin, grid_min)):
+-        # Calculate index of the voxel containing the origin
+-        # This must match the logic used to derive t_max
+-        idx = floor((p - g_min) / voxel_size)
+-        current_voxel.append(idx)
+-
+-    # 3. Traverse loop
++    # 5. Traverse loop
+     while True:
+-        # Check bounds
++        # Check if current voxel is inside grid bounds
+         if not (grid_min[0] <= current_voxel[0] * voxel_size + grid_min[0] < grid_max[0] and
+                 grid_min[1] <= current_voxel[1] * voxel_size + grid_min[1] < grid_max[1] and
+                 grid_min[2] <= current_voxel[2] * voxel_size + grid_min[2] < grid_max[2]):
+             break
+-            
+-        # Check max_t
+-        # We need to know the current t. In this simple traversal, we can track it 
+-        # or just rely on t_max values. The loop condition usually checks if the 
+-        # smallest t_max is within max_t.
+-        min_t_max = min(t_max)
+-        if min_t_max > max_t:
++
++        # Check if we have exceeded the maximum ray parameter
++        if min(t_max) > max_t:
+             break
+-            
++
+         yield tuple(current_voxel)
+-        
+-        # Find which axis has the smallest t_max
+-        # Tie-breaking: The original paper suggests deterministic handling. 
+-        # Here we pick the first minimum found.
++
++        # Find the axis with the smallest t_max
+         min_axis = 0
+         if t_max[1] < t_max[min_axis]:
+@@ -136,9 +116,8 @@
+         if t_max[2] < t_max[min_axis]:
+             min_axis = 2
+-            
+-        # Step in that axis
++
++        # Step in that axis and update t_max
+         current_voxel[min_axis] += step[min_axis]
+         t_max[min_axis] += t_delta[min_axis]
+-
+ ```
+ 
+@@ -155,5 +134,5 @@
+ *   **Limitations:** Only suitable for uniform grids; performance degrades if the ray traverses many empty cells (though better than marching); requires careful handling of ties and boundaries [S1, unofficial].
+ *   **When to use:** Volume rendering, voxel-based collision detection, and any scenario requiring efficient traversal of a uniform spatial grid [S1, S2, unofficial].
+-*   **When not to use:** Non-uniform grids (use hierarchical methods like [Hierarchical Traversal](896-hierarchical-traversal.md) or [HDDA](1122-hierarchical-digital-differential-analyzer-hdda.md)), or when sparse data structures are preferred [S1, unofficial].
++*   **When not to use:** Non-uniform grids (the algorithm assumes uniform voxel sizes) [S1, unofficial].
+ 
+ ## Background

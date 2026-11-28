@@ -1,0 +1,147 @@
+# Hierarchy Optimization
+
+Also called: Hierarchical 3DGS Optimization, Hierarchical Optimization, Tree-based Optimization
+
+## Overview
+Hierarchy optimization improves visual quality by treating intermediate nodes of the 3D Gaussian hierarchy as optimizable primitives, propagating gradients through them to refine appearance [S2]. Unlike standard 3D Gaussian Splatting which only optimizes leaf nodes, this method simultaneously optimizes parent and child nodes across different levels of detail (LOD) to handle large-scale scenes efficiently [S1, S2]. It distinguishes itself by explicitly managing gradient flow through interpolation weights and handling opacity clamping artifacts that arise from hierarchical alpha-blending [S1, S2].
+
+## How it works
+**Inputs and Outputs**
+*   **Input:** A pre-constructed 3D Gaussian hierarchy (tree structure with leaf and intermediate nodes), a set of training views, and a target granularity range $[\tau_{min}, \tau_{max})$.
+*   **Output:** Optimized attributes (position, scale, rotation, color, opacity) for intermediate nodes, while leaf node attributes remain frozen.
+
+**Data Structures**
+The hierarchy is a tree where each node $n$ represents a 3D Gaussian primitive.
+*   **Leaf Nodes:** Generated from initial 3DGS optimization. Attributes are frozen during this phase.
+*   **Intermediate Nodes:** Aggregated geometric primitives. Attributes are optimized.
+*   **Granularity $\tau_\epsilon$:** A scalar defining the target level of detail, sampled from a canonical random variable.
+
+**Numbered Steps**
+1.  **Load Hierarchy:** Initialize the hierarchy structure.
+2.  **Sample Granularity:** Randomly select a target granularity $\tau_\epsilon$ from the range $[\tau_{min}, \tau_{max})$ using a canonical random variable $\xi \in [0, 1)$ [S2]:
+    $$ \tau_\epsilon = \tau_{max} \tau_{min}^{\frac{1-\xi}{\xi}} $$
+3.  **Select View and Cut:** Randomly select one training view. Determine the corresponding cut in the hierarchy based on the selected granularity $\tau_\epsilon$ and the view's projected screen area [S2].
+4.  **Freeze Leaves:** Apply the `stop_gradient` operator to all Gaussians corresponding to leaf nodes in the selected cut. This prevents leaf attributes from changing, avoiding quality degradation due to interpolation from higher LOD levels [S1, S2].
+5.  **Cut Selection and Interpolation:** Perform cut selection and interpolation as defined in the hierarchy's rendering logic (Sec 4.2 of [S1]). This involves blending between parent and child nodes based on the granularity [S2].
+6.  **Gradient Propagation:** Propagate gradients through the interpolation weights and the opacity expression $\alpha'$ (Eq. 12 in [S1]) to optimize both child and parent nodes simultaneously [S2].
+    *   Use automatic differentiation (e.g., PyTorch) for most gradients.
+    *   Manually derive gradients for Eq. 12 (opacity blending) [S1].
+7.  **Handle Opacity Clamping:** Account for internal clamping of alpha-blending values to 0.99. If a Gaussian's opacity gradient is affected by this clamping, zero out that gradient to ensure robustness [S1].
+8.  **Anti-Aliasing:** Use the EWA filtering solution (Yu et al. [2023]) for correct anti-aliasing, as hierarchies operate at different scales [S2].
+9.  **Post-Optimization Activation:** After optimization, apply an absolute value activation function for opacity. The original exponential activation is inapplicable because intermediate nodes may generate alpha values $> 1$ [S1].
+
+**Pseudocode**
+> **Unverified code.** The code below did not pass a test run against a reference implementation, or no test fits it, so it may contain errors.
+
+```python
+import torch
+import torch.nn.functional as F
+
+def optimize_hierarchy(hierarchy, training_views, tau_min, tau_max, num_steps):
+    """
+    Optimizes intermediate nodes of the 3D Gaussian hierarchy.
+    
+    Args:
+        hierarchy: Tree structure containing nodes with attributes (pos, scale, rot, color, opacity).
+        training_views: List of camera poses and intrinsics.
+        tau_min: Minimum target granularity.
+        tau_max: Maximum target granularity.
+        num_steps: Number of optimization steps.
+    """
+    optimizer = torch.optim.Adam([node.attributes for node in hierarchy.intermediate_nodes], lr=1e-3)
+    
+    for step in range(num_steps):
+        # 1. Sample granularity
+        xi = torch.rand(1).item()
+        tau_epsilon = tau_max * (tau_min ** ((1 - xi) / xi))
+        
+        # 2. Select random training view
+        view_idx = torch.randint(0, len(training_views), (1,)).item()
+        view = training_views[view_idx]
+        
+        # 3. Determine cut based on tau_epsilon and view
+        # This function identifies which nodes are active and their interpolation weights
+        cut_nodes, interpolation_weights = get_cut_and_weights(hierarchy, view, tau_epsilon)
+        
+        # 4. Forward pass with stop_gradient on leaves
+        # Create a copy of attributes to apply stop_gradient selectively
+        optimized_attrs = {}
+        for node in hierarchy.all_nodes:
+            if node.is_leaf:
+                # Freeze leaf nodes
+                optimized_attrs[node.id] = node.attributes.detach().requires_grad_(False)
+            else:
+                # Intermediate nodes require gradients
+                optimized_attrs[node.id] = node.attributes.clone().requires_grad_(True)
+        
+        # 5. Render using cut and interpolation
+        # This involves blending parent and child contributions
+        rendered_image = render_with_hierarchy(
+            optimized_attrs, 
+            cut_nodes, 
+            interpolation_weights, 
+            view
+        )
+        
+        # 6. Compute loss (e.g., L1 + D-SSIM)
+        target_image = get_target_image(view)
+        loss = compute_loss(rendered_image, target_image)
+        
+        # 7. Backward pass
+        # Note: Gradients for Eq. 12 (opacity blending) must be handled manually if not supported by autograd
+        # For standard PyTorch, we assume manual gradient override for specific ops if needed
+        loss.backward()
+        
+        # 8. Handle opacity clamping artifacts
+        # Zero gradients where alpha-blending was clamped to 0.99
+        handle_clamping_gradients(optimized_attrs, hierarchy)
+        
+        optimizer.step()
+        optimizer.zero_grad()
+
+def handle_clamping_gradients(attributes, hierarchy):
+    """
+    Zeros opacity gradients for Gaussians where alpha-blending clamped to 0.99.
+    """
+    for node in hierarchy.intermediate_nodes:
+        if node.opacity_gradient_was_clamped:
+            node.attributes.grad['opacity'] = 0.0
+
+def render_with_hierarchy(attributes, cut_nodes, weights, view):
+    """
+    Renders the scene using the selected cut and interpolation weights.
+    Implements EWA filtering for anti-aliasing [S2].
+    """
+    # Project Gaussians to screen space
+    # Apply EWA filtering [S2]
+    # Blend contributions based on weights
+    # Return rendered image
+    pass
+```
+
+**Parameters**
+*   $\tau_{min}, \tau_{max}$: Target granularity range. Values not given in the sources.
+*   $\xi$: Canonical random variable in $[0, 1)$.
+
+**Edge Cases and Pitfalls**
+*   **Leaf Degradation:** Optimizing higher LOD levels can degrade leaf quality due to interpolation. Mitigated by freezing leaf nodes [S2].
+*   **Opacity > 1:** Intermediate nodes may generate alpha values $> 1$, making the original exponential activation inapplicable. Use absolute value activation post-optimization [S1].
+*   **Clamping Artifacts:** Alpha-blending values are internally clamped to 0.99. Gradients must be zeroed when this occurs to prevent instability [S1].
+*   **Anti-Aliasing:** Hierarchies operate at different scales; standard 3DGS rasterization does not handle anti-aliasing properly. Use EWA filtering [S2].
+
+## Operating characteristics
+*   **Time Complexity:** Depends on the number of intermediate nodes and the depth of the hierarchy. Optimization is performed per training view and granularity sample.
+*   **Memory Complexity:** Adds overhead for storing intermediate node attributes. Sparsification is used to compact the hierarchy and avoid redundant parent-child settings [S2].
+*   **Strengths:** Improves visual quality for large scenes by refining intermediate representations. Allows for aggressive LOD strategies while maintaining detail [S2].
+*   **Limitations:** Increased complexity in gradient computation (manual derivation for Eq. 12). Risk of leaf degradation if not properly frozen [S2].
+*   **When to use:** Large-scale scenes where standard 3DGS is insufficient or memory-constrained. When real-time rendering of very large datasets is required [S1].
+*   **When not to use:** Small scenes where standard 3DGS suffices. When computational resources for manual gradient derivation are unavailable.
+
+## Background
+*   **Origin:** Introduced in "A Hierarchical 3D Gaussian Representation for Real-Time Rendering of Very Large Datasets" by [S1].
+*   **Development:** Builds on 3D Gaussian Splatting [Parent] and addresses its limitations in large-scale rendering by introducing a hierarchical structure.
+*   **Usage:** Applied to large outdoor scenes (SmallCity, BigCity, Campus, Wayve) captured with multi-camera rigs [S1].
+
+## Sources
+[S1] A Hierarchical 3D Gaussian Representation for Real-Time Rendering of Very Large Datasets, https://inria.hal.science/hal-04568786v1, fetched 2026-10-27
+[S2] A Hierarchical 3D Gaussian Representation for Real-Time Rendering of Very Large Datasets, https://www.youtube.com/watch?v=p-mb2TzVJZk, fetched 2026-10-31

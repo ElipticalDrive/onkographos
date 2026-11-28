@@ -1,0 +1,110 @@
+# Cellular Automata Cloud Animation
+
+Also called: Dobashi et al. CA method
+
+## Overview
+A method employing cellular automata for cloud growth and extinction using a 3D grid and Boolean transition rules [S1]. It differs from physics-based solvers (like Navier-Stokes) by using discrete state transitions rather than differential equations, allowing for real-time performance through simple bit operations [S2, unofficial]. It builds on [Cellular Automata Simulation](13499-cellular-automata-simulation.md).
+
+## How it works
+**Inputs:**
+- A 3D simulation grid of size $W \times H \times D$.
+- A wind field (mean flow and turbulence) to advect clouds [S1].
+- Ellipsoid parameters to control physical properties, shapes, and sizes [S1].
+
+**Outputs:**
+- Updated grid state at time $t+1$.
+- Rendered cloud image (via point sprites or volume rendering) [S2, unofficial].
+
+**Data Structures:**
+The simulation space is a 3D grid. Each grid cell stores three physical variables, each being a Boolean state (0 or 1) [S1]:
+1. `hum` (humidity): Indicates if the cell has sufficient moisture.
+2. `cld` (cloud): Indicates if a cloud is present.
+3. `act` (phase transition): Indicates if a phase transition (growth/extinction) is occurring.
+
+**Algorithm:**
+1. **Initialization:** Initialize the grid. Empty regions with extinguished clouds are reinitialized with new values (e.g., resetting `hum` or `cld`) to allow cloud regeneration [S1].
+2. **Advection:** Apply the content-aware wind field to move cloud structures across the grid [S1].
+3. **State Update:** For each cell, evolve the variables `hum`, `cld`, and `act` from time $t$ to $t+1$ using simple Boolean transition rules [S1]. These rules determine cloud growth, extinction, and movement based on neighbor states and environmental factors [S1].
+4. **Shape Control:** Use ellipsoids to modulate the physical properties and constrain the shapes and sizes of the cloud formations [S1].
+5. **Rendering:** Render the resulting cloud distribution. A common implementation renders a point sprite in each voxel containing a cloud, alpha-blending sprites that are slightly larger than the voxel to ensure smooth blending [S2, unofficial].
+
+**Pseudocode:**
+> **Unverified code.** The code below did not pass a test run against a reference implementation, or no test fits it, so it may contain errors.
+
+```python
+def update_cloud_grid(grid, wind_field, ellipsoids, t):
+    """
+    Evolve the cellular automata cloud simulation for one time step.
+    grid: 3D array of shape (W, H, D), where each element is a dict or tuple (hum, cld, act)
+    wind_field: function or data structure providing velocity at each grid point
+    ellipsoids: list of ellipsoid definitions for shape/size control
+    t: current time step
+    """
+    next_grid = create_empty_grid_like(grid)
+    
+    for x in range(grid.width):
+        for y in range(grid.height):
+            for z in range(grid.depth):
+                cell = grid[x, y, z]
+                neighbors = get_neighbors(grid, x, y, z)
+                
+                # 1. Determine wind influence
+                velocity = wind_field.get_velocity(x, y, z)
+                
+                # 2. Apply Boolean transition rules
+                # Note: Exact Boolean rules are not specified in sources [S1][S2, unofficial]
+                # [G] Typical CA rules might involve:
+                # - If neighbor has cloud and wind blows here, propagate cloud.
+                # - If humidity is high and conditions met, grow cloud.
+                # - If conditions not met, extinguish cloud.
+                new_hum, new_cld, new_act = apply_boolean_rules(cell, neighbors, velocity)
+                
+                # 3. Reinitialize empty/extinguished regions
+                if not new_cld and not new_hum:
+                    # Reinitialize with new values to allow regeneration
+                    new_hum, new_cld, new_act = reinitialize_cell()
+                
+                # 4. Apply ellipsoid constraints for shape/size
+                # [G] Check if cell is within any ellipsoid; if so, enforce presence or modify state
+                for ellipsoid in ellipsoids:
+                    if is_inside_ellipsoid(ellipsoid, x, y, z):
+                        new_cld = enforce_ellipsoid_shape(new_cld, ellipsoid)
+                
+                next_grid[x, y, z] = (new_hum, new_cld, new_act)
+    
+    return next_grid
+
+def render_clouds(grid):
+    """
+    Render clouds using point sprites.
+    """
+    for x in range(grid.width):
+        for y in range(grid.height):
+            for z in range(grid.depth):
+                hum, cld, act = grid[x, y, z]
+                if cld:
+                    # Render a point sprite at (x, y, z)
+                    # Sprite size slightly larger than voxel for blending
+                    render_point_sprite(x, y, z, size=1.1 * voxel_size)
+```
+
+## Subtopics
+
+### Finite State Machine Cloud Animation
+A variant representing the atmosphere as a voxel grid where each voxel is associated with a finite state machine (FSM) to determine cloud presence [S2, unofficial]. It uses simple bit operations to handle the FSMs, minimizing computational effort and making animation speedy [S2, unofficial]. The FSM determines the presence of clouds in a voxel [S2, unofficial].
+
+## Operating characteristics
+- **Time Complexity:** Linear with respect to the number of grid cells, $O(W \times H \times D)$, due to per-cell Boolean updates [S1][S2, unofficial].
+- **Memory Complexity:** $O(W \times H \times D)$ to store the grid state [S1].
+- **Performance:** Capable of real-time results when simulation and rendering are combined [S1]. The use of bit operations makes it very speedy [S2, unofficial].
+- **Strengths:** Simple implementation, low computational cost, real-time capability [S1][S2, unofficial].
+- **Limitations:** Limited variation between frames compared to physics-based methods [S1]. Lacks detailed physical accuracy of fluid dynamics [S1].
+- **When to use:** Real-time cloud animation where performance is critical and physical accuracy is secondary [S1][S2, unofficial].
+- **When not to use:** When realistic, physically accurate cloud dynamics are required [S1].
+
+## Background
+The method was first employed by Dobashi et al. for cloud growth and extinction using cellular automata [S1]. It builds on the idea of grid-based models, similar to Stam's unconditionally stable fluid model, but applies discrete rules instead of differential equations [S1]. The method is cited in surveys of cloud modeling and rendering [S1].
+
+## Sources
+[S1] A survey of modeling, rendering and animation of clouds in computer graphics, https://doi.org/10.1007/s00371-020-01953-y, fetched 2026-10-26
+[S2] Cloud Animation and Rendering, Final Project for CSC570 by Kendall Merriman, http://users.csc.calpoly.edu/~zwood/teaching/csc570/final07/kmerrima/, fetched 2026-10-30 (unofficial)

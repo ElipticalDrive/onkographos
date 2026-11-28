@@ -1,0 +1,119 @@
+# Interactive UI for Volume Rendering
+
+Also called: Dear ImGui UI for Volume Rendering, Interactive IV Decomposition Interface, Interactive Panes and Gizmos, Interactive UI, Peeling IVs interface, Smooth viewpoint transition
+
+## Overview
+This method provides a structured graphical user interface for interacting with volume rendering parameters, specifically focusing on the interactive decomposition of isovolume (IV) layers and the dynamic adjustment of the camera viewpoint. It solves the problem of navigating complex, multi-layered volumetric structures by allowing users to "peel" IVs from outside to inside while simultaneously optimizing the viewing angle to maximize information visibility. It sets itself apart from general clipping or cropping methods by integrating a specific **IV decomposition workflow** with an **entropy-based viewpoint optimization** system, where the camera position is automatically adjusted via smooth interpolation to reflect the new structural state [S2, book].
+
+## How it works
+The method implements a feedback loop where user selection of an IV triggers a visual preview, a structural update, and a camera transition. The interface is typically composed of three coordinated windows [S2, book].
+
+### Inputs and Outputs
+*   **Inputs:** User mouse clicks/selections on UI elements; current volume dataset; current transfer function; current camera state (position/orientation).
+*   **Outputs:** Updated rendering image; updated camera position; updated UI state (highlighted/grayed elements).
+
+### Data Structures
+The interface maintains three synchronized views [S2, book]:
+1.  **Left Window (Level-set Graph):** Displays the hierarchical inclusion relationships of IVs. Each IV is represented as a node/link.
+2.  **Middle Window (Peeling View):** Renders the decomposed feature IVs. Supports transparency for previewing inner structures.
+3.  **Right Window (Entropy Distribution):** Displays a color-coded distribution of viewpoint entropy on the viewing sphere, calculated from the remaining combinations of IVs.
+
+### Parameters
+*   **IV Status:** Boolean flag indicating if an IV is active, transparent (preview), or removed.
+*   **Viewpoint Entropy:** A scalar value representing the information content of a specific viewpoint given the current set of visible IVs.
+*   **Quaternion:** Used to represent the camera orientation for smooth interpolation.
+
+### Steps
+1.  **Initialization:** Render the initial volume with all IVs active. Calculate the initial optimal viewpoint based on the full set of IVs and display the entropy distribution in the right window [S2, book].
+2.  **Selection:** User selects an IV via the Left Window (Level-set graph) or Middle Window.
+    *   The interface changes the status of the selected IV to "transparent" in the Middle Window, allowing the user to see the interior structure [S2, book].
+    *   The corresponding link in the Left Window is emphasized (highlighted) [S2, book].
+3.  **Confirmation:** User confirms the selection (e.g., via a button or double-click).
+    *   The selected IV is removed from the active rendering set in the Middle Window.
+    *   Silhouettes of the removed IV are left in its place to maintain spatial context [S2, book].
+    *   The corresponding link in the Left Window is grayed out [S2, book].
+4.  **Recalculation:** The interface recalculates the viewpoint entropy distribution for the updated combination of remaining IVs [S2, book].
+5.  **Viewpoint Transition:**
+    *   Identify the new optimal viewpoint (often marked as a black spot on the projection of the upper viewing hemisphere) [S2, book].
+    *   Move the viewpoint smoothly from the previous best viewpoint to the next optimal position.
+    *   This movement is achieved using **Spherical Linear Interpolation (SLERP)** based on quaternion representations of the camera orientation [S2, book].
+
+### Pseudocode
+> **Unverified code.** The code below did not pass a test run against a reference implementation, or no test fits it, so it may contain errors.
+
+```python
+# State management
+current_ivs = set(all_ivs)
+current_viewpoint_quaternion = initial_optimal_quaternion(current_ivs)
+entropy_map = calculate_entropy_distribution(current_ivs)
+
+def on_iv_selected(iv_id):
+    """User selects an IV for peeling."""
+    # Step 2: Preview
+    set_iv_transparency(iv_id, alpha=0.5) # Render transparently
+    highlight_link_in_left_window(iv_id)
+    return "preview"
+
+def on_iv_confirmed(iv_id):
+    """User confirms removal of the IV."""
+    # Step 3: Remove
+    remove_iv_from_rendering(iv_id)
+    render_iv_silhouette(iv_id) # Leave silhouette
+    gray_out_link_in_left_window(iv_id)
+    
+    # Update state
+    current_ivs.remove(iv_id)
+    
+    # Step 4: Recalculate
+    new_entropy_map = calculate_entropy_distribution(current_ivs)
+    new_optimal_quaternion = find_best_viewpoint_quaternion(current_ivs)
+    
+    # Step 5: Smooth Transition
+    old_quaternion = current_viewpoint_quaternion
+    current_viewpoint_quaternion = slerp(old_quaternion, new_optimal_quaternion, t=0.0)
+    
+    # Animation loop would interpolate t from 0 to 1
+    return new_entropy_map, new_optimal_quaternion
+
+def render_loop():
+    while running:
+        render_middle_window(current_ivs)
+        render_left_window(current_ivs)
+        render_right_window(entropy_map)
+        update_camera_orientation(current_viewpoint_quaternion)
+```
+
+### Edge Cases and Pitfalls
+*   **Degenerate IVs:** If an IV has no volume or is fully occluded, its removal may not change the entropy distribution significantly. The system should handle cases where the "next optimal viewpoint" is identical to the current one to avoid unnecessary camera jitter.
+*   **Precision in SLERP:** When the previous and next viewpoints are nearly identical or opposite (antipodal), quaternion interpolation can become unstable. A guard condition should check for the dot product of the quaternions; if close to -1, use an alternative interpolation path or normalize carefully [S2, book].
+*   **Synchronization:** The three windows must update in lockstep. A delay in updating the entropy map (Right Window) while the volume (Middle Window) is already modified can confuse the user.
+
+## Subtopics
+
+### [Interactive Editing with Proxy Plane Manipulation](19238-interactive-editing-with-proxy-plane-manipulation.md)
+This method enables interactive editing of volumetric data by mapping 2D user input to 3D space using a proxy plane. It solves the ambiguity of depth selection in volumetric displays or 3D Gaussian splatting where a fixed projection plane is not naturally available or intuitive. It sets itself apart from [Focus Marker with Smooth Interpolation](22729-focus-marker-with-smooth-interpolation.md) by using an explicit geometric proxy for input rather than implicit field interpolation, and from [Omniview View Volume Control](22730-omniview-view-volume-control.md) by focusing on editing operations rather than view volume navigation.
+
+### [Focus Marker with Smooth Interpolation](22729-focus-marker-with-smooth-interpolation.md)
+This method provides a system to maintain a visible focus marker in 3D volume rendering and linked 2D slices, using fractional coordinates for interpolation and smooth animation between target positions. It sets itself apart from sibling methods like [Interactive Editing with Proxy Plane Manipulation](19238-interactive-editing-with-proxy-plane-manipulation.md) by decoupling the logical position (fractional) from the display coordinate (world mm), ensuring alignment during orbit, zoom, resize, and PNG export, whereas proxy planes typically manipulate the view volume directly.
+
+### [Omniview View Volume Control](22730-omniview-view-volume-control.md)
+Omniview View Volume Control is a user interface technique for a true 3-D display device that allows users to control the position and size (radius) of the 3D view volume using a mouse tracking window and a joystick. It provides a direct manipulation alternative to the indirect WIMP (Windows, Icons, Menus, Pointer) interface, enabling rapid large-scale movements to a desired display area. While the WIMP interface offers finer control, it requires the user to be 3-4 feet from the display, whereas the direct manipulation methods allow for more immersive interaction.
+
+### VTK.js Volume Rendering
+A method for interactive 3D visualization using the VTK.js library, supporting camera rotation, zooming, and spatial exploration of the volume representation [S3, unofficial]. It renders the 3D volume using VTK.js to allow interactive camera rotation, zooming, and spatial exploration [S3, unofficial]. The surface and volume appearance depends on the configuration of the transfer function and image density [S3, unofficial].
+
+## Operating characteristics
+*   **Time Complexity:** The recalculation of viewpoint entropy is the most expensive operation. It depends on the number of IV combinations and the resolution of the viewing sphere discretization. SLERP is $O(1)$.
+*   **Memory Complexity:** Requires storing the level-set graph, IV data, and the entropy map. The entropy map size depends on the discretization of the viewing sphere.
+*   **Strengths:** Provides an intuitive way to explore nested volumetric structures ("peeling"). The automatic viewpoint adjustment ensures the user always has an informative view of the remaining data.
+*   **Limitations:** The "peeling" workflow is specific to IV decomposition and may not be suitable for all volume visualization tasks. The reliance on entropy calculation assumes that information content correlates with visual clarity, which may not always hold for all datasets.
+*   **When to use:** When analyzing complex, multi-layered volumetric data (e.g., scientific simulations with multiple isovolumes) where understanding the internal structure is critical.
+*   **When not to use:** For simple volume visualization where only the outer surface is of interest, or when real-time performance is critical and entropy calculation is too slow.
+
+## Background
+The method originates from research on interactive volume decomposition and optimal viewpoint selection. The specific implementation using Dear ImGui and OpenGL for auxiliary elements is described in the context of NeRFshop [S1]. The core algorithm for IV decomposition and entropy-based viewpoint selection was introduced in "Previewing Volume Decomposition Through Optimal Viewpoints" [S2, book]. The VTK.js variant represents a web-based implementation of interactive volume rendering [S3, unofficial].
+
+## Sources
+[S1] NeRFshop, https://doi.org/10.1145/3585499, fetched 2026-10-26
+[S2] Previewing Volume Decomposition Through Optimal Viewpoints, https://doi.org/10.4230/dfu.vol2.sciviz.2011.346, fetched 2026-10-26 (book)
+[S3] sarfrazkhan66003/sinus-3d-viewer-pro, https://github.com/sarfrazkhan66003/sinus-3d-viewer-pro, fetched 2026-10-26 (unofficial)

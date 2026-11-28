@@ -1,0 +1,112 @@
+# Piecewise Quadratic Volume Rendering
+
+Also called: Piecewise Quadratic Model, Quadratic Opacity Interpolation
+
+## Overview
+Piecewise Quadratic Volume Rendering is a method for computing the integral of opacity along a ray by interpolating the opacity function $\tau(s)$ using piecewise quadratic polynomials between sample points [S1]. It solves the problem of approximating the continuous volume rendering integral with higher-order accuracy than linear methods, at the cost of introducing rational functions into the opacity integral [S1]. Unlike its sibling [Piecewise Linear Mapping and Integration](9000-piecewise-linear-mapping-and-integration.md), which yields polynomial integrals, this method results in a rational function due to denominators dependent on sample spacing, leading to potential numerical instability [S1].
+
+## How it works
+**Inputs:**
+*   Ray parameter samples $s_j, s_{j+1}, s_{j+2}$ in increasing order.
+*   Opacity values $\tau_j, \tau_{j+1}, \tau_{j+2}$ at these samples, where $\tau_i \in [0, 1]$.
+
+**Outputs:**
+*   The integral of opacity $\int \tau(s) ds$ over the intervals $[s_j, s_{j+1}]$ and $[s_{j+1}, s_{j+2}]$.
+
+**Data Structures:**
+*   No persistent data structures are required beyond the current triplet of samples and opacities.
+
+**Parameters:**
+*   Sample spacing is determined by the sampling strategy (e.g., uniform, stratified). No fixed parameters are defined for the interpolation itself.
+
+**Steps:**
+
+1.  **Compute Interval Parameters:**
+    Calculate the distances between adjacent samples:
+    $$ \alpha_j = s_{j+1} - s_j $$
+    $$ \beta_j = s_{j+2} - s_{j+1} $$
+    $$ \gamma_j = s_{j+2} - s_j = \alpha_j + \beta_j $$
+
+2.  **Compute Opacity Integral for Interval $[s_j, s_{j+1}]$:**
+    Using quadratic Lagrange interpolation, the integral of opacity over the first interval is:
+    $$ I_1 = \int_{s_j}^{s_{j+1}} \tau(s) ds = \frac{\tau_j}{\gamma_j} \left[ \frac{\alpha_j^2}{3} + \frac{\alpha_j \beta_j}{2} \right] - \frac{\tau_{j+1}}{\beta_j} \left[ \frac{\alpha_j^2}{3} - \frac{\alpha_j \gamma_j}{2} \right] + \frac{\tau_{j+2}}{\beta_j \gamma_j} \left[ -\frac{\alpha_j^3}{6} \right] $$
+
+3.  **Compute Opacity Integral for Interval $[s_{j+1}, s_{j+2}]$:**
+    The integral of opacity over the second interval is:
+    $$ I_2 = \int_{s_{j+1}}^{s_{j+2}} \tau(s) ds = \frac{\tau_j}{\alpha_j \gamma_j} \left[ \frac{-\beta_j^3}{6} \right] - \frac{\tau_{j+1}}{\alpha_j} \left[ \frac{\beta_j^2}{3} - \frac{\beta_j \gamma_j}{2} \right] + \frac{\tau_{j+2}}{\gamma_j} \left[ \frac{\beta_j^2}{3} + \frac{\beta_j \alpha_j}{2} \right] $$
+
+4.  **Compute Transmittance:**
+    The transmittance $T$ is computed as the exponential of the negative accumulated opacity. For a segment spanning $[s_j, s_{j+2}]$, the total opacity integral is $I_{total} = I_1 + I_2$. The transmittance from $s_j$ to $s_{j+2}$ is $e^{-I_{total}}$.
+
+**Pseudocode:**
+
+> **Unverified code.** The code below did not pass a test run against a reference implementation, or no test fits it, so it may contain errors.
+
+```python
+def piecewise_quadratic_opacity_integral(s_j, s_j1, s_j2, tau_j, tau_j1, tau_j2):
+    """
+    Computes the opacity integrals for two adjacent intervals [s_j, s_j1] and [s_j1, s_j2]
+    using piecewise quadratic interpolation.
+    
+    Args:
+        s_j, s_j1, s_j2: Floats representing ray parameter positions, strictly increasing.
+        tau_j, tau_j1, tau_j2: Floats representing opacity values at the sample positions.
+        
+    Returns:
+        I1: Float, integral of opacity over [s_j, s_j1].
+        I2: Float, integral of opacity over [s_j1, s_j2].
+    """
+    # Step 1: Compute interval parameters
+    alpha_j = s_j1 - s_j
+    beta_j = s_j2 - s_j1
+    gamma_j = s_j2 - s_j  # Equivalent to alpha_j + beta_j
+    
+    # Step 2: Compute integral for [s_j, s_j1]
+    # Term 1: tau_j / gamma_j * [alpha_j^2 / 3 + alpha_j * beta_j / 2]
+    term1_1 = (tau_j / gamma_j) * ((alpha_j ** 2) / 3.0 + (alpha_j * beta_j) / 2.0)
+    
+    # Term 2: - tau_j1 / beta_j * [alpha_j^2 / 3 - alpha_j * gamma_j / 2]
+    term1_2 = -(tau_j1 / beta_j) * ((alpha_j ** 2) / 3.0 - (alpha_j * gamma_j) / 2.0)
+    
+    # Term 3: tau_j2 / (beta_j * gamma_j) * [-alpha_j^3 / 6]
+    term1_3 = (tau_j2 / (beta_j * gamma_j)) * (-(alpha_j ** 3) / 6.0)
+    
+    I1 = term1_1 + term1_2 + term1_3
+    
+    # Step 3: Compute integral for [s_j1, s_j2]
+    # Term 1: tau_j / (alpha_j * gamma_j) * [-beta_j^3 / 6]
+    term2_1 = (tau_j / (alpha_j * gamma_j)) * (-(beta_j ** 3) / 6.0)
+    
+    # Term 2: - tau_j1 / alpha_j * [beta_j^2 / 3 - beta_j * gamma_j / 2]
+    term2_2 = -(tau_j1 / alpha_j) * ((beta_j ** 2) / 3.0 - (beta_j * gamma_j) / 2.0)
+    
+    # Term 3: tau_j2 / gamma_j * [beta_j^2 / 3 + beta_j * alpha_j / 2]
+    term2_3 = (tau_j2 / gamma_j) * ((beta_j ** 2) / 3.0 + (beta_j * alpha_j) / 2.0)
+    
+    I2 = term2_1 + term2_2 + term2_3
+    
+    return I1, I2
+```
+
+**Edge Cases and Pitfalls:**
+*   **Negative Opacity:** Due to negative terms in the rational functions (Eqs. 28 and 29 in [S1]), if denominators ($\alpha_j, \beta_j, \gamma_j$) approach zero or if sample spacing is highly uneven (e.g., $\beta_j \ll \alpha_j$), the integral $I_1$ or $I_2$ can become negative [S1]. This implies negative opacity, which is physically implausible.
+*   **Transmittance > 1:** When the opacity integral is negative, the transmittance $T = e^{-\int \tau}$ becomes $e^{\text{positive}}$, potentially exceeding 1. This violates the physical interpretation of transmittance as a probability [S1].
+*   **Instability from Sample Proximity:** As samples $s_{j+1}$ and $s_{j+2}$ become close ($\beta_j \to 0$), terms with $\beta_j$ in the denominator cause the opacity integral to explode, leading to exploding gradients during training, especially in stratified or importance sampling [S1].
+*   **Limit Behavior:** If $s_{j+2} \to s_{j+1}^+$, the integral over $[s_j, s_{j+1}]$ approaches $\frac{\tau_j \alpha_j}{3} + \frac{2\tau_{j+1} \alpha_j}{3} - \frac{\alpha_j^2}{6} h'(s_{j+1})$, where $h$ is the network function outputting opacity. If $h'(s_{j+1}) > \frac{2\tau_j + 4\tau_{j+1}}{\alpha_j}$, the integral becomes negative [S1].
+*   **Importance Sampling Complexity:** For piecewise quadratic opacity, transmittance is the exponential of a cubic polynomial. Inverse transform sampling requires solving a cubic equation. While solvable, the formulae are complex and numerically unstable during gradient computation [S1].
+
+## Operating characteristics
+*   **Time Complexity:** The computation of the opacity integral is $O(1)$ per sample triplet, involving a constant number of arithmetic operations. However, the complexity of importance sampling is significantly higher than linear methods due to the need to solve cubic equations for inverse transmittance [S1].
+*   **Memory Complexity:** $O(1)$ auxiliary memory per ray segment.
+*   **Measured Performance:** Not given in the sources.
+*   **Scaling:** The method scales poorly with uneven sampling. As sample spacing becomes non-uniform (common in stratified or importance sampling), the rational terms cause numerical instability and gradient explosion [S1].
+*   **Strengths:** Higher-order interpolation provides a more accurate approximation of the opacity function than linear methods when samples are dense and evenly spaced.
+*   **Limitations:** The resulting opacity integral is a rational function, not a polynomial, leading to numerical instability when sample distances are small. It can produce negative opacity and transmittance > 1, violating physical constraints. It is unsuitable for training neural radiance fields with adaptive sampling strategies [S1].
+*   **When to use:** Rarely recommended for modern neural volume rendering due to instability. May be used in static, uniformly sampled scenes where high-order accuracy is critical and stability is not a concern.
+*   **When not to use:** Do not use with stratified sampling, importance sampling, or neural network training where gradients must be stable. Avoid when sample spacing is uneven.
+
+## Background
+The piecewise quadratic model was analyzed in the context of fixing quadrature instability in volume rendering, specifically highlighting the drawbacks of higher-order polynomial interpolation for opacity [S1]. The analysis demonstrates that while higher-order interpolation ($d \ge 2$) yields rational functions for the opacity integral, this introduces numerical instability that is problematic for differentiable rendering and training [S1].
+
+## Sources
+[S1] NeRF Revisited: Fixing Quadrature Instability in Volume Rendering, https://doi.org/10.52202/075280-1139, fetched 2026-10-26

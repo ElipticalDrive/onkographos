@@ -1,0 +1,188 @@
+# Lorenz Predictor with Arithmetic Coding
+
+Also called: Lorenzo, Lorenz预测与算术编码, n-dimensional Lorenzo predictor, n-dimensional parallelogram predictor
+
+## Overview
+The Lorenz Predictor with Arithmetic Coding is a lossless compression method for $n$-dimensional scalar fields that estimates the value of a sample from its $2^n - 1$ previously visited neighbors in a regular grid to generate residuals, which are then encoded using arithmetic coding [S1, unofficial]. It is distinguished from anisotropic scanline predictors by being isotropic, exploiting data coherence in all dimensions, and is the simplest isotropic predictor capable of exactly reconstructing all polynomials of degree less than $n$ [S1, unofficial].
+
+## How it works
+**Inputs and Outputs:**
+- Input: An $n$-dimensional scalar field $F$ with dimensions $X_M, Y_M, \dots, T_M$ [S1, unofficial].
+- Output: A bitstream of encoded residuals [S1, unofficial].
+
+**Data Structures:**
+- **Footprint Buffer:** A circular FIFO vector storing the values of the $2^n - 1$ neighbors required for prediction [G].
+  - Size in $R^4$: $X_M \cdot Y_M \cdot Z_M + X_M \cdot Y_M + X_M + 1$ [S1, unofficial].
+  - Generalizing to $R^n$, the buffer stores the current slice and all lower-dimensional footprints required for the recursive traversal [G].
+- **Coordinate System:** A local coordinate system is used where the current sample $v$ has coordinates $(1, 1, \dots, 1)$ and its previously visited neighbors have coordinates in $\{0, 1\}^n$ [S1, unofficial].
+
+**Prediction Formula:**
+The predicted value $P(v)$ for a sample $v$ is the weighted sum of the values $F(u)$ at the other corners $u$ of the unit hypercube $\{0, 1\}^n$:
+$$ P(v) = \sum_{u \in \{0,1\}^n \setminus \{(1,\dots,1)\}} (-1)^{g(u)} F(u) $$
+where $g(u)$ is the number of coordinates of $u$ that equal 0 (i.e., the Hamming distance from $v$ if $v=(1,\dots,1)$) [S1, unofficial].
+- If $g(u)$ is even, the weight is $+1$.
+- If $g(u)$ is odd, the weight is $-1$ [S1, unofficial].
+
+**Residual Calculation:**
+The residual $R$ is computed as:
+$$ R = F(v) - P(v) $$
+In lossless contexts, the residual is encoded without quantization [G].
+
+**Encoding:**
+The residuals are encoded using a context arithmetic encoder where the context is the actual prediction $P(v)$ [S1, unofficial]. This provides a 25% gain over an adaptive arithmetic encoder [S1, unofficial].
+
+**Algorithm Steps (Recursive Scanline Order):**
+The data is processed in a specific recursive order defined by the function `Lorenzo(d, x_1, \dots, x_n)`, where $d$ is the current dimension being processed, $x_i$ are the coordinates, and $d_{\text{max}}$ is the size of dimension $d$ [S1, unofficial].
+
+1. **Initialization:** Start with `Lorenzo(n, -1, \dots, -1)` [S1, unofficial].
+2. **Recursive Step:**
+   - If all coordinates $x_1, \dots, x_n$ are not $-1$ (i.e., we are at a valid sample point):
+     1. Compute prediction $p = \text{LorenzoPredictor}(d, x_1, \dots, x_n)$ using the formula above.
+     2. Encode the residual $F[x_1, \dots, x_n] - p$ using the context arithmetic encoder.
+   - Else (we are at a boundary or need to move to the next dimension):
+     1. Call `Lorenzo(d - 1, x_1, \dots, x_{d-1}, 0, x_{d+1}, \dots, x_n)` to initialize the next lower dimension.
+     2. Loop $i$ from 1 to $d_{\text{max}}$:
+        - Call `Lorenzo(d, x_1, \dots, x_{d-1}, i, x_{d+1}, \dots, x_n)` [S1, unofficial].
+
+**Pseudocode:**
+
+> **Unverified code.** The code below did not pass a test run against a reference implementation, or no test fits it, so it may contain errors.
+
+```python
+def lorenzo_predictor(coords, footprint):
+    """
+    Computes the Lorenzo prediction for a sample at coords (1,1,...,1)
+    using footprint values at neighbors in {0,1}^n \ {(1,...,1)}.
+    
+    Args:
+        coords: Tuple of integers (1, 1, ..., 1) representing the current sample.
+        footprint: Dictionary mapping neighbor coordinate tuples to F(u).
+        
+    Returns:
+        The predicted value P(v).
+    """
+    n = len(coords)
+    prediction = 0.0
+    # Iterate over all 2^n corners of the hypercube
+    for i in range(1 << n):
+        # Construct coordinate tuple u from binary representation of i
+        u = tuple(1 if (i >> j) & 1 else 0 for j in range(n))
+        
+        # Skip the current sample v itself (1,1,...,1)
+        if u == coords:
+            continue
+            
+        # Calculate g(u): number of coordinates equal to 0
+        g_u = sum(1 for coord in u if coord == 0)
+        
+        # Weight is (-1)^g(u)
+        weight = 1 if g_u % 2 == 0 else -1
+        
+        # Add weighted value to prediction
+        prediction += weight * footprint[u]
+        
+    return prediction
+
+def encode_residual(residual, context_prediction):
+    """
+    Encodes the residual using a context arithmetic encoder.
+    The context is the predicted value.
+    """
+    # Context arithmetic encoding implementation is external.
+    # This function represents the step: Encode(F[v] - p)
+    pass
+
+def lorenzo_compress(d, coords, field, footprint, d_maxs):
+    """
+    Recursive function to traverse the n-dimensional grid and compress data.
+    
+    Args:
+        d: Current dimension index (1 to n).
+        coords: Tuple of current coordinates. -1 indicates uninitialized dimension.
+        field: The full n-dimensional scalar field (for reading F[v]).
+        footprint: Dictionary storing necessary neighbor values.
+        d_maxs: Tuple of sizes for each dimension.
+    """
+    n = len(coords)
+    
+    # Base case: dimension index 0 means recursion finished
+    if d == 0:
+        return
+        
+    # Check if all coordinates are initialized (not -1)
+    if all(c != -1 for c in coords):
+        # We are at a valid sample point
+        # 1. Retrieve neighbor values from footprint
+        neighbor_values = {u: footprint[u] for u in footprint if u != coords}
+        
+        # 2. Compute prediction
+        p = lorenzo_predictor(coords, neighbor_values)
+        
+        # 3. Compute residual
+        v_val = field[coords]
+        residual = v_val - p
+        
+        # 4. Encode residual
+        encode_residual(residual, p)
+        
+        # 5. Store current value in footprint for future samples
+        # In production, footprint is a circular FIFO buffer [G]
+        footprint[coords] = v_val
+        
+    else:
+        # Find the first dimension that is -1 (this is dimension d)
+        # coords[d-1] is -1
+        new_coords = list(coords)
+        new_coords[d-1] = 0
+        new_coords = tuple(new_coords)
+        
+        # Initialize this dimension to 0 and recurse to lower dimensions
+        lorenzo_compress(d - 1, new_coords, field, footprint, d_maxs)
+        
+        # Loop for i = 1 to d_max
+        for i in range(1, d_maxs[d-1] + 1):
+            new_coords_loop = list(coords)
+            new_coords_loop[d-1] = i
+            new_coords_loop = tuple(new_coords_loop)
+            lorenzo_compress(d, new_coords_loop, field, footprint, d_maxs)
+
+# Initial call for n-dimensional data
+# Lorenzo(n, -1, -1, ..., -1)
+```
+
+**Parameters:**
+- $n$: Dimension of the data [S1, unofficial].
+- $d_{\text{max}}$: Number of samples in the current dimension [S1, unofficial].
+- Context Arithmetic Encoder: Provides 25% gain over adaptive arithmetic encoder [S1, unofficial].
+
+**Edge Cases and Pitfalls:**
+- **Precision:** The predictor is exact for polynomials of degree $< n$. For a 3D predictor on cubic functions, error is 3-8% (L-infinity). For 4D on quartic, error < 1% [S1, unofficial].
+- **Memory:** The footprint buffer size is critical for out-of-core implementations. In $R^4$, it is $X_M Y_M Z_M + X_M Y_M + X_M + 1$ [S1, unofficial].
+- **Boundary Conditions:** The recursive structure handles boundaries by initializing dimensions to 0 and looping [S1, unofficial].
+
+## Subtopics
+
+### [Lorenzo Predictor](10120-lorenzo-predictor.md)
+The Lorenzo predictor is an isotropic predictive coding method for $n$-dimensional scalar fields that estimates a sample value from its $2^n - 1$ immediate neighbors in a regular grid to generate residuals for compression. It is distinguished from anisotropic scanline predictors by exploiting data coherence in all dimensions and is the simplest isotropic predictor capable of exactly reconstructing all polynomials of degree less than $n$.
+
+### [SZ-L/R](11010-sz-l-r.md)
+SZ-L/R is a block-based lossless/lossy compression algorithm for volumetric data that employs Lorenzo and linear regression predictors. It partitions input data into independent 6×6×6 blocks, allowing for cache-friendly processing and random access without inter-block dependencies. Unlike global interpolation methods such as [SZ-Interp](52-sz-interp.md), SZ-L/R prioritizes local feature preservation, making it suitable for unsmooth and irregular datasets, though it may introduce block-wise artifacts.
+
+## Operating characteristics
+- **Time Complexity:** The predictor is of the highest possible order among all predictors attempting to predict the value at one corner of a cube from the other $2^n - 1$ corners [S1, unofficial]. The computational cost per sample is $O(2^n)$ for the prediction sum [S1, unofficial].
+- **Memory Complexity:** The memory footprint is small, proportional to the size of one slice plus lower-dimensional footprints. In $R^4$, the buffer size is $X_M Y_M Z_M + X_M Y_M + X_M + 1$ [S1, unofficial]. This makes it well-suited for out-of-core implementations [S1, unofficial].
+- **Measured Performance:**
+  - On a 3D model of a house on fire (43,202,395 bytes uncompressed), 4D Lorenzo compression reduced the size to 524,768 bytes (1.21% of total), outperforming 3D slice compression (1,076,587 bytes, 2.49%) by 50% [S1, unofficial].
+  - On a fluid mixing simulation dataset, 3D time slice predictor produced 304,937,058 bytes (1.77 bits/symbol) and 4D Lorenzo produced 318,871,620 bytes (1.85 bits/symbol) [S1, unofficial].
+  - Context arithmetic encoder gives a 25% gain over adaptive arithmetic encoder for encoding residuals [S1, unofficial].
+- **Strengths:** Isotropic prediction, exact reconstruction of polynomials of degree $< n$, small memory footprint, suitable for out-of-core processing [S1, unofficial].
+- **Limitations:** For data with high-frequency components or noise, the residuals may not be as compressible as with wavelet transforms. In lossless compression of 4D datasets, cubic wavelets are slightly better than the Lorenzo predictor in terms of residual entropy (Table 1 in [S1, unofficial]).
+- **When to use:** When data has high coherence in all dimensions and memory is constrained (out-of-core). When exact reconstruction of low-degree polynomial trends is beneficial [S1, unofficial].
+- **When not to use:** When maximum lossless compression ratio is required for 4D data and memory is not a constraint (wavelets may be slightly better). When data is highly irregular or noisy without smooth trends [S1, unofficial].
+
+## Background
+The Lorenz Predictor (named Lorenzo) was introduced by S. Mennon and M. Rizk in the paper "Out-of-Core Compression and Decompression of Large n-Dimensional Scalar Fields" [S1, unofficial]. It extends the simple two-dimensional parallelogram predictor to higher dimensions [S1, unofficial]. The method was developed to handle large $n$-dimensional scalar fields that exceed available memory, requiring out-of-core processing capabilities [S1, unofficial]. It has been applied to scientific datasets such as fluid mixing simulations and fire models [S1, unofficial].
+
+## Sources
+[S1] Out-of-Core Compression and Decompression of Large n-Dimensional Scalar Fields, https://digital.library.unt.edu/ark:/67531/metadc1404787/?q=volume data compression rendering, fetched 2026-10-28 (unofficial)
+[S2] 体数据压缩技术综述, https://www.jcad.cn/article/id/9d3ce9cd-c97c-4fab-9291-a72fbe7ba37e, fetched 2026-10-30 (unofficial)

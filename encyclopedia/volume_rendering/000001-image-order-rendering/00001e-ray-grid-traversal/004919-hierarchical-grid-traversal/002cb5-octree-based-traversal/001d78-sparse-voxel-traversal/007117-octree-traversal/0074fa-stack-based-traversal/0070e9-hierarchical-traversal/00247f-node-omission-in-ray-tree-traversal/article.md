@@ -1,0 +1,145 @@
+# Node Omission in Ray-Tree Traversal
+Also called: Omisión de nodos no intersecables, Pruning non-intersectable nodes
+
+## Overview
+Node omission is an optimization for hierarchical ray-tree traversal that prevents adding child nodes to the traversal stack if it is known they will not intersect the current ray, reducing the number of intersection tests [S1, unofficial]. It sets itself apart from sibling methods like [Leaf Collection](899-leaf-collection.md) and [Point Plane Test Traversal](982-point-plane-test-traversal.md) by operating on the spatial relationship between the ray's entry/exit parameters and the node's bounding box midpoints, rather than relying on leaf-level data structures or plane-based splitting planes [S1, unofficial].
+
+## How it works
+The method determines which of the eight children of a current octree node are intersected by a ray by analyzing the ray's intersection interval with the parent node's axis-aligned bounding box (AABB) [S1, unofficial].
+
+**Inputs and Outputs:**
+- Input: Ray $r$, current node $n$ [S1, unofficial].
+- Output: A list of valid child node indices to be added to the traversal stack [S1, unofficial].
+
+**Data Structures:**
+- Child nodes are indexed 1 through 8 [S1, unofficial]. The pruning logic relies on set membership of children relative to the midpoint planes, assuming a standard octree indexing convention where $\{1,2,3,4\}$ and $\{5,6,7,8\}$ occupy opposite halves along each axis [S1, unofficial].
+
+**Parameters:**
+- $tx_0, ty_0, tz_0$: The entry intersection factors of the ray with the node's bounding box along the x, y, and z axes, respectively [S1, unofficial].
+- $tx_1, ty_1, tz_1$: The exit intersection factors of the ray with the node's bounding box along the x, y, and z axes, respectively [S1, unofficial].
+- $tx_m, ty_m, tz_m$: The midpoint factors separating the children, calculated as $((tx_0, ty_0, tz_0) + (tx_1, ty_1, tz_1)) \times 0.5$ [S1, unofficial].
+- $t_{min}$: The entry point of the intersection between the ray and the node, calculated as $\max(tx_0, ty_0, tz_0)$ [S1, unofficial].
+- $t_{max}$: The exit point of the intersection between the ray and the node, calculated as $\min(tx_1, ty_1, tz_1)$ [S1, unofficial].
+
+**Steps:**
+1. Calculate the intersection factors $(tx_0, ty_0, tz_0)$ and $(tx_1, ty_1, tz_1)$ for the node's bounding box with respect to the ray [S1, unofficial].
+2. Calculate the midpoint factors:
+   $$tx_m = (tx_0 + tx_1) \times 0.5$$
+   $$ty_m = (ty_0 + ty_1) \times 0.5$$
+   $$tz_m = (tz_0 + tz_1) \times 0.5$$
+3. Calculate the effective entry and exit distances for the node:
+   $$t_{min} = \max(tx_0, ty_0, tz_0)$$
+   $$t_{max} = \min(tx_1, ty_1, tz_1)$$
+4. Initialize a list $l$ containing the indices of all 8 children, sorted by their traversal order [S1, unofficial].
+5. Apply pruning rules based on the comparison of midpoint factors ($tx_m, ty_m, tz_m$) against $t_{min}$ and $t_{max}$ [S1, unofficial]:
+   - If $tx_m < t_{min}$: Mark children $\{5, 6, 7, 8\}$ as invalid [S1, unofficial].
+   - If $tx_m > t_{max}$: Mark children $\{1, 2, 3, 4\}$ as invalid [S1, unofficial].
+   - If $ty_m < t_{min}$: Mark children $\{3, 4, 7, 8\}$ as invalid [S1, unofficial].
+   - If $ty_m > t_{max}$: Mark children $\{1, 2, 5, 6\}$ as invalid [S1, unofficial].
+   - If $tz_m < t_{min}$: Mark children $\{2, 4, 6, 8\}$ as invalid [S1, unofficial].
+   - If $tz_m > t_{max}$: Mark children $\{1, 3, 5, 7\}$ as invalid [S1, unofficial].
+6. Filter the list $l$ to remove all entries marked as invalid (typically represented by setting their value to -1) [S1, unofficial].
+7. Return the filtered list of valid child indices [S1, unofficial].
+
+**Pseudocode:**
+> **Unverified code.** The code below did not pass a test run against a reference implementation, or no test fits it, so it may contain errors.
+
+```python
+def node_omission(ray_origin, ray_direction, box_min, box_max):
+    """
+    Determines which children of a node are intersected by a ray.
+    
+    Args:
+        ray_origin: (x, y, z) origin of the ray.
+        ray_direction: (x, y, z) direction of the ray.
+        box_min: (x, y, z) minimum corner of the node's AABB.
+        box_max: (x, y, z) maximum corner of the node's AABB.
+        
+    Returns:
+        List of valid child indices (1-8) to traverse, or empty list if no intersection.
+    """
+    # 1. Calculate intersection factors for the node box
+    def compute_factors(origin, direction, bmin, bmax):
+        # Handle zero direction components and compute per-axis entry/exit factors
+        if direction[0] == 0:
+            if not (bmin[0] <= origin[0] <= bmax[0]): return None
+            tx0, tx1 = float('-inf'), float('inf')
+        else:
+            tx0 = (bmin[0] - origin[0]) / direction[0]
+            tx1 = (bmax[0] - origin[0]) / direction[0]
+            if tx0 > tx1: tx0, tx1 = tx1, tx0
+            
+        if direction[1] == 0:
+            if not (bmin[1] <= origin[1] <= bmax[1]): return None
+            ty0, ty1 = float('-inf'), float('inf')
+        else:
+            ty0 = (bmin[1] - origin[1]) / direction[1]
+            ty1 = (bmax[1] - origin[1]) / direction[1]
+            if ty0 > ty1: ty0, ty1 = ty1, ty0
+            
+        if direction[2] == 0:
+            if not (bmin[2] <= origin[2] <= bmax[2]): return None
+            tz0, tz1 = float('-inf'), float('inf')
+        else:
+            tz0 = (bmin[2] - origin[2]) / direction[2]
+            tz1 = (bmax[2] - origin[2]) / direction[2]
+            if tz0 > tz1: tz0, tz1 = tz1, tz0
+            
+        t_min = max(tx0, ty0, tz0)
+        t_max = min(tx1, ty1, tz1)
+        # Standard ray-box intersection guard [G]
+        if t_min > t_max or t_max < 0: return None
+        return tx0, ty0, tz0, tx1, ty1, tz1
+
+    factors = compute_factors(ray_origin, ray_direction, box_min, box_max)
+    if factors is None:
+        return []
+        
+    tx0, ty0, tz0, tx1, ty1, tz1 = factors
+    
+    # 2. Calculate midpoints
+    txm = (tx0 + tx1) * 0.5
+    tym = (ty0 + ty1) * 0.5
+    tzm = (tz0 + tz1) * 0.5
+    
+    # 3. Set tmin and tmax for the current node
+    tmin = max(tx0, ty0, tz0)
+    tmax = min(tx1, ty1, tz1)
+    
+    # 4. Initialize list with all 8 children, sorted by traversal order [G]
+    children = [1, 2, 3, 4, 5, 6, 7, 8]
+    
+    # 5. Apply pruning rules
+    if txm < tmin:
+        children = [c for c in children if c not in {5, 6, 7, 8}]
+    if txm > tmax:
+        children = [c for c in children if c not in {1, 2, 3, 4}]
+    if tym < tmin:
+        children = [c for c in children if c not in {3, 4, 7, 8}]
+    if tym > tmax:
+        children = [c for c in children if c not in {1, 2, 5, 6}]
+    if tzm < tmin:
+        children = [c for c in children if c not in {2, 4, 6, 8}]
+    if tzm > tmax:
+        children = [c for c in children if c not in {1, 3, 5, 7}]
+        
+    return children
+```
+
+**Edge Cases and Pitfalls:**
+- **Non-intersection:** If $t_{min} > t_{max}$ or the ray origin is behind the box ($t_{max} < 0$), the ray does not intersect the node's bounding box [G]. The algorithm returns an empty list.
+- **Precision:** The source uses exact comparisons for midpoint factors against $t_{min}$ and $t_{max}$ without epsilon tolerance [S1, unofficial]. Implementers should be aware that floating-point precision errors near the midpoint boundaries may lead to incorrect pruning in degenerate cases [G].
+- **Child Indexing:** The specific set of children marked invalid depends on the octree's child indexing scheme [S1, unofficial]. The source assumes a specific mapping where $\{1,2,3,4\}$ are on one side of the x-midplane and $\{5,6,7,8\}$ on the other [S1, unofficial]. Implementers must verify their octree's indexing convention matches the sets used in the pruning rules [S1, unofficial].
+
+## Operating characteristics
+- **Time Complexity:** The pruning step involves a constant number of comparisons and list filtering operations, making it $O(1)$ per node visited [S1, unofficial].
+- **Memory Complexity:** $O(1)$ auxiliary space for the list of children [S1, unofficial].
+- **Measured Performance:** On the scene in Figure 17 of the source, adding this optimization (referred to as "Evasion" or "Omission") alongside sorting increased FPS from ~16 to ~30 and reduced peak intersection tests from ~150 to ~85 [S1, unofficial].
+- **Strengths:** Significantly reduces the number of intersection tests and stack operations by eliminating branches that are geometrically impossible to intersect [S1, unofficial].
+- **Limitations:** Requires calculating intersection factors for the parent node's box [S1, unofficial]. The benefit is highest when the ray passes through many empty or non-intersecting branches of the tree [S1, unofficial].
+
+## Background
+This optimization is described in the context of Sparse Voxel Octree (SVO) traversal for global illumination calculations [S1, unofficial]. It is presented as a follow-up to sorting optimizations, referred to as "Omisión de nodos no intersecables" or "Evasion" [S1, unofficial]. The method was implemented and tested as part of a thesis on SVO compression and efficiency for global illumination [S1, unofficial].
+
+## Sources
+[S1] Estudio de la compresión y la eficiencia del Sparse Voxel Octree en el cálculo de la Iluminación Global, https://hdl.handle.net/2117/445971, fetched 2026-10-26 (unofficial)

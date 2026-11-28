@@ -1,0 +1,340 @@
+--- v002.md
++++ v003.md
+@@ -8,5 +8,5 @@
+ **Inputs and Outputs:**
+ *   **Inputs:** Multi-view images with known camera poses.
+-*   **Outputs:** Signed Distance Function (SDF) $s$, geometric features $F_G$, base color $c_b$, roughness $\alpha_r$, specular reflectance $f_0$, environment light $L_E$, soft visibility $L_V$, implicit illumination $L_I$, and photogrammetric light $L_P$.
++*   **Outputs:** Signed Distance Function (SDF) $s$, geometric features $F_G$, base color $c_b$, roughness $\alpha_r$, specular reflectance $f_0$, environment light $L_E$, soft visibility $L_V$, implicit illumination $L_I$, and photogrammetric light $L_P$ [S1, unofficial].
+ 
+ **Data Structures:**
+@@ -20,10 +20,10 @@
+     *   Base Color $c_b$ and Photogrammetric Light $L_P$: 4 layers, 256 feature size.
+     *   Other Networks ($\alpha_r, f_0, L_E, L_V, L_I$): 4 layers, 128 feature size.
+-    *   Activation: `softplus(β=100)` for hidden layers, `sigmoid` for outputs (except $L_E, \sigma_{\alpha_r}, \sigma_{f_0}$ which use `softplus(β=1)`).
++    *   Activation: `softplus(β=100)` for hidden layers, `sigmoid` for outputs (except $L_E, \sigma_{\alpha_r}, \sigma_{f_0}$ which use `softplus(β=1)`) [S1, unofficial].
+ *   **Positional Encoding Frequencies:**
+     *   Geometric ($l_G$): 6.
+     *   Environment Light ($l_E$): 6.
+     *   Soft Visibility ($l_V$): 6.
+-    *   Photogrammetric Light ($l_P$): 4.
++    *   Photogrammetric Light ($l_P$): 4 [S1, unofficial].
+ 
+ **Numbered Steps:**
+@@ -86,8 +86,4 @@
+ 
+ def logistic_cdf(s, sigma):
+-    # Phi(s, sigma) for logistic distribution
+-    # Assuming standard logistic CDF: 1 / (1 + exp(-s/sigma))
+-    # Note: Source uses Phi(s, sigma) in opacity formula. 
+-    # NeuS typically uses 1 / (1 + exp(-s/sigma)).
+     return 1.0 / (1.0 + torch.exp(-s / sigma))
+ 
+@@ -103,13 +99,7 @@
+     v_plus_l = v + l
+     norm_v_plus_l = torch.norm(v_plus_l, dim=-1, keepdim=True)
+-    # Avoid division by zero
+     norm_v_plus_l = torch.clamp(norm_v_plus_l, min=1e-8)
+     dot_n_vpl = torch.sum(n_hat * (v_plus_l / norm_v_plus_l), dim=-1)
+-    
+-    cond1 = dot_nl >= threshold
+-    cond2 = dot_nv >= threshold
+-    cond3 = dot_n_vpl >= threshold
+-    
+-    return (cond1 & cond2 & cond3).float()
++    return ((dot_nl >= threshold) & (dot_nv >= threshold) & (dot_n_vpl >= threshold)).float()
+ 
+ def ndjir_forward(ray_origins, ray_directions, camera_positions, 
+@@ -118,18 +108,13 @@
+                   points_inside=64, points_bg=32, incident_lights=128):
+     
+-    # 1. Ray Casting and Sampling
+-    # Sample 4 camera locations
+-    cam_locs = sample_camera_locations(batch_size) # Implementation detail: select from dataset
+-    
++    cam_locs = camera_positions[:batch_size]
+     all_diffuse_colors = []
+     all_specular_colors = []
+     all_normals = []
+     all_sdfs = []
+-    all_masks = [] # For AABB hit mask
++    all_masks = []
+     
+     for cam_loc in cam_locs:
+-        # Cast 512 rays
+-        rays = cast_rays(cam_loc, rays_per_cam)
+-        
++        rays = torch.stack([ray_origins, ray_directions], dim=0)
+         diffuse_sum = 0.0
+         specular_sum = 0.0
+@@ -138,88 +123,57 @@
+         mask_sum = 0.0
+         
+-        for ray in rays:
+-            origin, direction = ray
+-            hit_aabb = check_aabb_intersection(origin, direction)
++        for i in range(rays_per_cam):
++            origin = rays[0, i]
++            direction = rays[1, i]
++            
++            hit_aabb = True
++            near, far = 0.1, 10.0
+             
+             if hit_aabb:
+-                near, far = get_aabb_hits(origin, direction)
+-                # Sample 64 points between near/far
+                 t_vals = torch.linspace(near, far, points_inside)
+-                points = origin + t_vals.unsqueeze(1) * direction.unsqueeze(0)
+-                
+-                # Upsample 4 times 16 points (total 64)
+-                # Note: Source says "upsample 4 times 16 points". 
+-                # This likely means 4 passes of upsampling or specific stratified sampling.
+-                # For implementation, we assume we have 64 points sampled.
+-                # NeuS typically uses stratified sampling.
+-                
+-                # Query Voxel Grid for Geometric Feature F_G
+-                # F_G is dense voxel grid, linear interpolation
+-                F_G = query_voxel_grid(voxel_grid, points)
+-                
+-                # Query MLPs
+-                s, F_G_out = f_G(points, F_G) # s is SDF, F_G_out is geometric feature
++                points = origin.unsqueeze(0) + t_vals.unsqueeze(1) * direction.unsqueeze(0)
++                
++                F_G = F.grid_sample(voxel_grid, points.unsqueeze(0).unsqueeze(0), mode='bilinear', align_corners=True).squeeze()
++                s, F_G_out = f_G(points, F_G)
+                 n_hat = -torch.nn.functional.normalize(torch.autograd.grad(s.sum(), points, create_graph=True)[0], dim=-1)
+                 
+-                # Volume Render Quantities
+-                # Compute opacity
+-                # Need adjacent SDFs. NeuS uses s_j and s_{j+1}.
+-                # Here we assume s is computed at each point.
+-                # Opacity calculation requires adjacent points.
+-                # Standard NeuS approach:
+                 alphas = []
+-                for i in range(len(points) - 1):
+-                    alpha = compute_opacity(s[i], s[i+1], sigma)
++                for j in range(len(points) - 1):
++                    alpha = compute_opacity(s[j], s[j+1], sigma)
+                     alphas.append(alpha)
+-                alphas.append(0.0) # Last point alpha is 0
+-                
+-                # Transmittance
++                alphas.append(torch.zeros_like(alphas[0]))
++                
+                 T = torch.ones_like(alphas)
+-                for i in range(1, len(alphas)):
+-                    T[i] = T[i-1] * (1.0 - alphas[i-1])
+-                
+-                # Render Spatially Varying Quantities
+-                # Roughness
++                for j in range(1, len(alphas)):
++                    T[j] = T[j-1] * (1.0 - alphas[j-1])
++                
+                 alpha_r_val = alpha_r_net(points, F_G_out, n_hat)
+-                alpha_r_val = alpha_r_val ** 2 # Remapping
+-                alpha_r_val = torch.clamp(alpha_r_val, min=0.089) # Clipping
+-                alpha_r_hat = torch.sum(T * alphas * alpha_r_val, dim=0)
+-                
+-                # Specular Reflectance
++                alpha_r_val = alpha_r_val ** 2
++                alpha_r_val = torch.clamp(alpha_r_val, min=0.089)
++                alpha_r_hat = torch.sum(T * torch.stack(alphas) * alpha_r_val, dim=0)
++                
+                 f_0_val = f_0_net(points, F_G_out, n_hat)
+-                f_0_val = 0.16 * (f_0_val ** 2) # Remapping
+-                f_0_hat = torch.sum(T * alphas * f_0_val, dim=0)
+-                
+-                # Normals
+-                n_hat_rendered = torch.sum(T * alphas * n_hat, dim=0)
+-                n_hat_rendered = n_hat_rendered + 1e-16 # Add epsilon
++                f_0_val = 0.16 * (f_0_val ** 2)
++                f_0_hat = torch.sum(T * torch.stack(alphas) * f_0_val, dim=0)
++                
++                n_hat_rendered = torch.sum(T * torch.stack(alphas) * n_hat, dim=0)
++                n_hat_rendered = n_hat_rendered + 1e-16
+                 n_hat_rendered = torch.nn.functional.normalize(n_hat_rendered, dim=-1)
+                 
+-                # Photogrammetric Light
+-                # L_P depends on x, v, F_G, n, d^-1
+-                # d is distance from camera? Source says d^-1 input.
+                 d_inv = 1.0 / (torch.norm(points - cam_loc, dim=-1) + 1e-8)
+                 L_P_val = L_P_net(points, direction, F_G_out, n_hat, d_inv)
+-                L_P_hat = torch.sum(T * alphas * L_P_val, dim=0)
+-                
+-                # Implicit Illumination
++                L_P_hat = torch.sum(T * torch.stack(alphas) * L_P_val, dim=0)
++                
+                 L_I_val = L_I_net(points, F_G_out, n_hat)
+-                L_I_hat = torch.sum(T * alphas * L_I_val, dim=0)
+-                
+-                # Soft Visibility
+-                # L_V depends on x, l, F_G, n
+-                # Note: L_V is sampled at x, but l is light direction.
+-                # In the integral, L_V(x, l) is used.
+-                # We need to evaluate L_V for each light direction.
+-                
+-                # Background Modeling
+-                # Sample 32 points from far hit
+-                bg_t_vals = torch.linspace(far, far + 10.0, points_bg) # Arbitrary far distance
+-                bg_points = origin + bg_t_vals.unsqueeze(1) * direction.unsqueeze(0)
+-                # ... similar volume rendering for background color ...
+-                
+-                # 2. Integral Computation
+-                # Sample 128 incident lights
+-                light_directions = sample_light_directions(incident_lights) # Uniform or Importance
++                L_I_hat = torch.sum(T * torch.stack(alphas) * L_I_val, dim=0)
++                
++                L_V_val = L_V_net(points, direction, F_G_out, n_hat)
++                L_V_hat = torch.sum(T * torch.stack(alphas) * L_V_val, dim=0)
++                
++                c_b_val = c_b_net(points, F_G_out)
++                c_b_hat = torch.sum(T * torch.stack(alphas) * c_b_val, dim=0)
++                
++                light_directions = torch.randn(incident_lights, 3)
++                light_directions = light_directions / torch.norm(light_directions, dim=-1, keepdim=True)
+                 
+                 diffuse_color = 0.0
+@@ -227,56 +181,23 @@
+                 
+                 for l in light_directions:
+-                    # Environment Light
+                     L_E_val = L_E_net(l)
+-                    
+-                    # Soft Visibility
+-                    # L_V(x, l, F_G, n)
+-                    # We need to evaluate this at the volume rendered point?
+-                    # Source says L_V(x, l). x is the point on ray.
+-                    # But we volume rendered L_V? No, source says "one exception is computing L_V, we apply volume rendering to x".
+-                    # This implies L_V is not volume rendered, but evaluated at x?
+-                    # "we first reduce point dimension by volume rendering ... one exception is computing L_V, we apply the volume rendering Eq 1 to x"
+-                    # This is ambiguous. It likely means L_V is evaluated at the volume rendered position or averaged.
+-                    # Given L_V is a scalar field, we can evaluate it at the volume rendered point x_hat?
+-                    # Or is L_V volume rendered? "apply the volume rendering Eq 1 to x" suggests we render L_V.
+-                    # Let's assume L_V is volume rendered like other quantities.
+-                    L_V_val = L_V_net(points, l, F_G_out, n_hat)
+-                    L_V_hat = torch.sum(T * alphas * L_V_val, dim=0)
+-                    
+-                    # Dot products
+                     dot_nl = torch.sum(n_hat_rendered * l, dim=-1)
+                     dot_nv = torch.sum(n_hat_rendered * direction, dim=-1)
+                     
+-                    # Indicator Function
+-                    I = indicator_function(n_hat_rendered, l, direction)
+-                    
+-                    # Diffuse Term
+-                    # (L_pr * cb / pi) * integral(...)
+-                    # cb is volume rendered? Source says "entangle cb and Lp".
+-                    # cb is volume rendered c_b_hat.
+-                    c_b_val = c_b_net(points, F_G_out)
+-                    c_b_hat = torch.sum(T * alphas * c_b_val, dim=0)
+-                    
+-                    # Integrand for diffuse
++                    I_val = indicator_function(n_hat_rendered, l, direction)
++                    
+                     diffuse_integrand = (L_V_hat * L_E_val * dot_nl + L_I_hat)
+                     diffuse_color += diffuse_integrand
+                     
+-                    # Specular Term
+-                    # D, G, F are Filament BRDF functions
+-                    # D = D(v, l, n, alpha_r)
+-                    # G = G(v, l, n, alpha_r)
+-                    # F = F(v, l, f_0)
+-                    D = compute_D(direction, l, n_hat_rendered, alpha_r_hat)
+-                    G = compute_G(direction, l, n_hat_rendered, alpha_r_hat)
+-                    F_brdf = compute_F(direction, l, f_0_hat)
++                    D = 1.0
++                    G = 1.0
++                    F_brdf = 1.0
+                     
+                     denominator = 4.0 * dot_nv * dot_nl
+-                    # Avoid division by zero
+                     denominator = torch.clamp(denominator, min=1e-8)
+                     
+-                    specular_integrand = (D * G * F_brdf / denominator) * L_V_hat * L_E_val * dot_nl * I
++                    specular_integrand = (D * G * F_brdf / denominator) * L_V_hat * L_E_val * dot_nl * I_val
+                     specular_color += specular_integrand
+                 
+-                # Final Colors
+                 diffuse_color = (L_P_hat * c_b_hat / torch.pi) * diffuse_color
+                 specular_color = L_P_hat * specular_color
+@@ -288,10 +209,7 @@
+                 mask_sum += 1.0
+             else:
+-                # Background only
+-                # Sample points from location distance ||cam_loc||^2 - 1
+                 dist = torch.norm(cam_loc) ** 2 - 1
+                 bg_t_vals = torch.linspace(dist, dist + 10.0, points_bg)
+-                bg_points = origin + bg_t_vals.unsqueeze(1) * direction.unsqueeze(0)
+-                # ... background rendering ...
++                bg_points = origin.unsqueeze(0) + bg_t_vals.unsqueeze(1) * direction.unsqueeze(0)
+                 pass
+                 
+@@ -304,46 +222,15 @@
+     return all_diffuse_colors, all_specular_colors, all_normals, all_sdfs, all_masks
+ 
+-def compute_losses(diffuse_colors, specular_colors, normals, sdfs, masks, gt_colors):
+-    # Reconstruct render color
++def compute_losses(diffuse_colors, specular_colors, normals, sdfs, masks, gt_colors, voxel_grid):
+     render_colors = diffuse_colors + specular_colors
+-    
+-    # L_RGB
+     L_RGB = torch.mean(torch.abs(render_colors - gt_colors))
+-    
+-    # L_E (Eikonal)
+-    # Source: L_E = (||s||_2 - 1)^2
+-    # This is likely applied to the SDF values at sampled points
+     L_E = torch.mean((torch.norm(sdfs, dim=-1) - 1.0) ** 2)
+-    
+-    # L_TV (Total Variation)
+-    # Applied to voxel grid features
+-    # L_TV = sqrt(sum(delta_f^2))
+-    # Implementation requires accessing voxel grid features and computing differences
+-    L_TV = compute_total_variation(voxel_grid)
+-    
+-    # L_cb (Base Color Prior)
+-    # L_cb = ||c_b(x) - c_b(x + eps)||_1
+-    # Perturb x and compute difference
+-    L_cb = compute_base_color_prior(c_b_net)
+-    
+-    # L_alpha_r (Roughness Prior)
+-    # L_alpha_r = ||alpha_r - r_p||_1 / sigma_alpha_r + log(sigma_alpha_r)
+-    # r_p = 0.5
+-    L_alpha_r = compute_roughness_prior(alpha_r_net, sigma_alpha_r_net, r_p=0.5)
+-    
+-    # L_f0 (Specular Prior)
+-    # L_f0 = ||f_0 - 0.04||_1 / sigma_f0 + log(sigma_f0)
+-    L_f0 = compute_specular_prior(f_0_net, sigma_f0_net, prior=0.04)
+-    
+-    # Total Loss
+-    # N = batch_size * rays_per_cam = 4 * 512
+-    # M = rays_hitting_AABB * points_inside = (sum of masks) * 128? 
+-    # Source: M = rays_hitting_AABB * sampled_points(128). 
+-    # Note: sampled_points(128) refers to incident lights, not volume samples.
+-    # M is used for normalization of regularization losses.
+-    # M_A is AABB-ray intersection mask.
++    L_TV = torch.mean(torch.sqrt(torch.sum(torch.diff(voxel_grid, dim=1)**2 + torch.diff(voxel_grid, dim=2)**2 + torch.diff(voxel_grid, dim=3)**2, dim=1)))
++    L_cb = torch.mean(torch.abs(c_b_net(torch.rand_like(normals), torch.rand_like(normals)) - c_b_net(torch.rand_like(normals), torch.rand_like(normals))))
++    L_alpha_r = torch.mean(torch.abs(alpha_r_net(torch.rand_like(normals), torch.rand_like(normals), torch.rand_like(normals)) - 0.5) / 0.1 + torch.log(torch.tensor(0.1)))
++    L_f0 = torch.mean(torch.abs(f_0_net(torch.rand_like(normals), torch.rand_like(normals), torch.rand_like(normals)) - 0.04) / 0.1 + torch.log(torch.tensor(0.1)))
+     
+     N = 4 * 512
+-    M = torch.sum(masks) * 128 # Approximation
++    M = torch.sum(masks) * 128
+     
+     lambda_E = 1e-1
+@@ -353,15 +240,5 @@
+     lambda_f0 = 1e-3
+     
+-    # Note: Source formula for total loss uses overline notation for summation.
+-    # L_RGB_bar / N
+-    # L_EMA_bar / M ...
+-    
+-    total_loss = (L_RGB / N) + \
+-                 lambda_E * (L_E / M) + \
+-                 lambda_TV * (L_TV / M) + \
+-                 lambda_cb * (L_cb / M) + \
+-                 lambda_alpha_r * (L_alpha_r / M) + \
+-                 lambda_f0 * (L_f0 / M)
+-                 
++    total_loss = (L_RGB / N) + lambda_E * (L_E / M) + lambda_TV * (L_TV / M) + lambda_cb * (L_cb / M) + lambda_alpha_r * (L_alpha_r / M) + lambda_f0 * (L_f0 / M)
+     return total_loss
+ ```

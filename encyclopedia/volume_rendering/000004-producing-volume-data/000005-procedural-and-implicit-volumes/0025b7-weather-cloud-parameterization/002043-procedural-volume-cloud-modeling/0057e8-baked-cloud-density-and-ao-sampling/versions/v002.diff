@@ -1,0 +1,100 @@
+--- v001.md
++++ v002.md
+@@ -7,5 +7,5 @@
+ 
+ ## How it works
+-The method consists of two phases: Baking (precomputation) and Raymarching (runtime sampling).
++The method consists of two phases: Baking (precomputation) and Raymarching (runtime sampling) [S1, S2, unofficial].
+ 
+ ### Inputs and Outputs
+@@ -14,5 +14,5 @@
+     *   Alpha channel (`A`) stores analytical physical density [S1, S2, unofficial].
+     *   Blue channel (`B`) stores the 3D SDF [S1, unofficial].
+-    *   (Note: [S2, unofficial] mentions `baseAlbedo` and `baseDensity` channels for density, and `B` channel for shadow transmittance/AO. The primary density/SDF bake uses Alpha for density and Blue for SDF [S1, unofficial].)
++    *   (Note: [S2, unofficial] also references `baseAlbedo` and `baseDensity` channels for density, and `B` channel for shadow transmittance/AO during the shadow bake pass. The primary density/SDF bake uses Alpha for density and Blue for SDF [S1, unofficial].)
+ 
+ ### Data Structures
+@@ -29,10 +29,7 @@
+ 
+ #### 1. Baking Analytical Density and SDF
+-The baking process evaluates analytical functions and writes them to the 3D texture.
++The baking process evaluates analytical functions and writes them to the 3D texture [S1, unofficial].
+ 
+-1.  **Evaluate Analytical Cloud 3D:** Call `getAnalyticalCloud3D` at each voxel position. This function evaluates:
+-    *   Tileable 3D Worley cells.
+-    *   3D SDF.
+-    *   Physical density with vertical layer boundaries [S1, unofficial].
++1.  **Evaluate Analytical Cloud 3D:** Call `getAnalyticalCloud3D` at each voxel position. This function evaluates tileable 3D Worley cells, 3D SDF, and physical density with vertical layer boundaries [S1, unofficial].
+ 2.  **Scale SDF:** Inside `getAnalyticalCloud3D`, divide the cellular SDF value (`cell_sdf`) by the cellular frequency (`freq = 4.0`) to match meters correctly [S1, unofficial].
+     $$ SDF_{scaled} = \frac{cell\_sdf}{4.0} $$
+@@ -42,5 +39,5 @@
+ 
+ #### 2. Raymarching with Space Skipping
+-During rendering, the raymarcher queries the precomputed 3D texture.
++During rendering, the raymarcher queries the precomputed 3D texture [S1, unofficial].
+ 
+ 1.  **Query SDF:** Call `getCloud3DSDF` to query the precomputed 3D texture SDF with internal advection support [S1, unofficial].
+@@ -51,5 +48,5 @@
+ 3.  **Advance Ray:**
+     *   If outside the cloud mass (`d3d > 0.0`), advance the ray by `step`. This skips directly to the exact boundary of the cloud mass [S1, unofficial].
+-    *   If inside the cloud mass, use `baseStepSize` or appropriate internal step size [S1, unofficial].
++    *   If inside the cloud mass, use `baseStepSize` for standard volumetric stepping [G].
+ 4.  **Sample Density:** Read the precomputed physical density and local AO directly from the 3D volume texture (Alpha channel) [S1, S2, unofficial].
+     *   Bypass old multi-octave 2D-based heightmap evaluation in `calculateCloudDensity` and `calculateCloudDensityMinimal` [S1, unofficial].
+@@ -58,5 +55,4 @@
+ 
+ ```python
+-# Baking Phase
+ def bake_cloud_volume(texture, props):
+     """
+@@ -92,10 +88,8 @@
+     pass
+ 
+-# Raymarching Phase
+-def raymarch_cloud(ray_origin, ray_direction, texture, props):
++def raymarch_cloud(ray_origin, ray_direction, texture, props, baseStepSize=0.5, MAX_DISTANCE=10000.0, THRESHOLD=0.001):
+     """
+     Raymarches through the baked cloud volume using SDF space skipping.
+     """
+-    baseStepSize = 10.0 # Example base step
+     maxStepCap = 2000.0 * props.worldScale
+     sdf_multiplier = 0.4
+@@ -103,13 +97,18 @@
+     t = 0.0
+     color = vec3(0.0)
++    transmittance = 1.0
+     
+-    while t < MAX_DISTANCE:
++    while t < MAX_DISTANCE and transmittance > 0.01:
+         # 1. Query SDF from texture (with advection)
+-        # Note: No distY threshold check is applied here
+         pos = ray_origin + ray_direction * t
+         d3d = get_cloud_3d_sdf(pos, texture)
+         
+         # 2. Compute step size
+-        step = max(baseStepSize, sdf_multiplier * d3d)
++        # Outside cloud mass (d3d > 0.0): skip using SDF
++        # Inside cloud mass (d3d <= 0.0): use fixed base step
++        if d3d > 0.0:
++            step = max(baseStepSize, sdf_multiplier * d3d)
++        else:
++            step = baseStepSize
+         step = min(step, maxStepCap)
+         
+@@ -118,10 +117,13 @@
+         
+         # 4. Sample density and AO
+-        # Read from Alpha channel (density) and potentially other channels for AO
++        pos = ray_origin + ray_direction * t
+         density = texture[pos].a
+-        ao = texture[pos].b # Or separate AO channel if stored differently
++        ao = texture[pos].b
+         
+         # Accumulate color/transmittance based on density and AO
+-        # ...
++        # Sources do not specify the exact accumulation formula [G]
++        alpha = 1.0 - exp(-density * step)
++        color += alpha * transmittance * vec3(1.0) # Simplified color contribution
++        transmittance *= (1.0 - alpha)
+         
+         if density < THRESHOLD:

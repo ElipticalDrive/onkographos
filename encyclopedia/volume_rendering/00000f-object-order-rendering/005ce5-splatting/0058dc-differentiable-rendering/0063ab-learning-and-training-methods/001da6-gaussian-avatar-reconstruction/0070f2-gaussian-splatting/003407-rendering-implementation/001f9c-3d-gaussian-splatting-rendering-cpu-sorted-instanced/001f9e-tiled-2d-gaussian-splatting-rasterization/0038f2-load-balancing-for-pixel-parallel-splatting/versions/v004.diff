@@ -1,0 +1,185 @@
+--- v003.md
++++ v004.md
+@@ -4,84 +4,99 @@
+ 
+ ## Overview
+-A strategy to address uneven computational load across pixel threads in Gaussian rasterization by reducing the number of Gaussians rendered for heavy-load pixels and increasing it for light-load pixels [S1]. Uneven load across GPU threads leads to lower rendering efficiency due to thread waiting [S1]. Unlike hardware-centric tile/block distribution methods, this approach operates as a software-level loss function and adaptive rendering count adjustment within the pixel-parallel execution model [S1].
++A strategy to address uneven computational load across pixel threads in Gaussian rasterization by reducing the number of Gaussians rendered for heavy-load pixels and increasing it for light-load pixels [S1]. It sets itself apart from sibling methods like [Tiled 2D Gaussian Splatting Rasterization](2061-tiled-2d-gaussian-splatting-rasterization.md) by explicitly optimizing the *count* of splats per pixel to balance GPU thread utilization, rather than just spatially partitioning the image [S1].
+ 
+ ## How it works
+-**Inputs and Outputs:**
+-*   **Input:** The set of $N$ 3D Gaussians, camera parameters, and the image grid [S1].
+-*   **Output:** A modified rendering process where the number of Gaussians processed per pixel is adjusted to minimize load variance, potentially at the cost of slight quality changes in light-load areas [S1].
++**Inputs:**
++- Set of $N$ 3D Gaussians.
++- Camera parameters (view/projection matrices).
++- Image resolution (width $W$, height $H$).
++- Threshold for opacity contribution (implicit in the indicator function).
++
++**Outputs:**
++- Modified set of Gaussians to be rendered per pixel, or a loss value guiding training to achieve this distribution.
+ 
+ **Data Structures:**
+-*   **Pixel Load Count ($\ell_i$):** An integer value representing the number of Gaussians contributing to pixel $i$ [S1].
+-*   **Indicator Function ($1_{G_j, p_i}$):** A binary value (1 if Gaussian $j$ contributes to pixel $i$, 0 otherwise) [S1].
++- `Gaussian`: Standard 3DGS representation (mean, covariance, opacity, SH coefficients).
++- `PixelLoad`: Integer count of Gaussians contributing to a specific pixel.
+ 
+-**Method Steps:**
+-1.  **Compute Pixel Loads:** Calculate the load $\ell_i$ for each pixel $i$ by summing the contributions of all Gaussians:
+-    $$
+-    \ell_i = \sum_{j \in N} 1_{G_j, p_i}
+-    $$
+-    where $N$ is the total number of Gaussians [S1].
+-2.  **Identify Load Imbalance:** Determine heavy-load pixels (high $\ell_i$) and light-load pixels (low $\ell_i$) [S1]. The rendering efficiency is bottlenecked by the heavy-load threads [S1].
+-3.  **Apply Load Balancing Loss:** Optimize the Gaussian attributes (such as opacity or radius) using a load balancing loss term [S1]. The goal is to reduce $\ell_i$ for heavy-load pixels and increase $\ell_i$ for light-load pixels [S1]. The loss function utilizes the standard deviation of the pixel loads to quantify imbalance [S1]. The weight of the load balancing loss term is denoted as $\lambda_{load}$ [S1].
+-4.  **Adjust Rendering Count:** During rasterization, the actual number of Gaussians rendered is dynamically adjusted based on the learned attributes [S1]. Heavy-load pixels render fewer Gaussians, while light-load pixels render more, effectively balancing the thread execution time [S1].
++**Steps:**
++1. **Compute Pixel Loads:** For each pixel $i$ in the image, determine the number of Gaussians $\ell_i$ that contribute to it. A Gaussian $j$ contributes to pixel $i$ if it projects within the pixel's bounds and its opacity is significant.
++   $$ \ell_i = \sum_{j \in N} \mathbb{1}_{G_j, p_i} $$
++   where $\mathbb{1}_{G_j, p_i}$ is an indicator function equal to 1 if Gaussian $j$ contributes to pixel $i$, and 0 otherwise [S1].
++2. **Identify Load Imbalance:** Calculate the standard deviation of $\ell_i$ across all pixels. High standard deviation indicates uneven load, causing GPU thread waiting [S1].
++3. **Apply Load Balancing Strategy:**
++   - For **heavy-load pixels** (where $\ell_i$ is high), reduce the number of Gaussians rendered. This can be done by culling Gaussians with low opacity or small contribution to the pixel's color/transmittance.
++   - For **light-load pixels** (where $\ell_i$ is low), increase the number of Gaussians rendered. This may involve relaxing culling thresholds or including Gaussians that were previously discarded.
++4. **Training Integration (Load Balancing Loss):** During training, a loss term $\lambda_{load}$ is added to the optimization objective to encourage this balanced distribution. The weight $\lambda_{load}$ is typically set to 0.45, while the sum of weights for remaining losses (e.g., L1, SSIM) is reduced to 0.55 [S1].
+ 
+ **Parameters:**
+-*   **$\lambda_{load}$:** Weight for the load balancing loss term. Typical value: 0.45 [S1].
+-*   **$\lambda_{L1} + \lambda_{ssim}$:** Sum of weights for remaining losses (L1 and SSIM). Typical value: 0.55 [S1].
+-*   **Opacity Threshold ($\alpha_{low}$):** A threshold for opacity. A typical value is 255, though higher values could further accelerate rendering [S1].
++- $\lambda_{load}$: Weight for the load balancing loss term. Typical value: 0.45 [S1].
++- $\lambda_{remaining}$: Sum of weights for other loss terms (L1, SSIM). Typical value: 0.55 [S1].
++- Opacity threshold: Used to determine if a Gaussian contributes to a pixel. Higher values accelerate rendering but may reduce quality [S1].
+ 
+ **Edge Cases and Pitfalls:**
+-*   **Quality Degradation:** Reducing the number of Gaussians for heavy-load pixels may cause a decrease in rendering quality [S1]. The method attempts to mitigate this by increasing Gaussians for light-load pixels, but this is a trade-off [S1].
+-*   **Thread Waiting:** If the load balancing is not effective, GPU thread waiting persists, reducing efficiency [S1].
++- **Quality Degradation:** Aggressively reducing Gaussians for heavy-load pixels can lead to visible artifacts or loss of detail [S1].
++- **Overhead:** Computing exact pixel loads for every Gaussian can be expensive. Approximations or hierarchical methods may be needed for large scenes.
++- **Thread Divergence:** If load balancing is not effective, GPU threads may still diverge, reducing efficiency [S1].
+ 
+ **Pseudocode:**
+ ```python
+-def compute_pixel_loads(gaussians, pixels):
+-    loads = [0] * len(pixels)
+-    for i, pixel in enumerate(pixels):
+-        for j, gaussian in enumerate(gaussians):
+-            # [G] Standard operation: evaluate 2D Gaussian PDF at pixel coordinates
+-            # and check if it exceeds the opacity threshold
+-            if gaussian_contributes_to_pixel(gaussian, pixel):
+-                loads[i] += 1
++def compute_pixel_loads(gaussians, image_width, image_height):
++    """
++    Computes the number of Gaussians contributing to each pixel.
++    Returns a 2D array of loads.
++    """
++    loads = np.zeros((image_height, image_width), dtype=np.int32)
++    for g in gaussians:
++        # Project Gaussian center to screen space
++        center_2d = project_to_screen(g.mean, g.view_matrix, g.proj_matrix)
++        # Determine bounding box of Gaussian in screen space
++        bbox = get_gaussian_bbox(center_2d, g.covariance)
++        # Iterate over pixels in bounding box
++        for y in range(bbox.y_min, bbox.y_max):
++            for x in range(bbox.x_min, bbox.x_max):
++                if is_within_pixel_bounds(center_2d, g.covariance, x, y):
++                    # Check if opacity contribution is significant
++                    if get_opacity_at_pixel(g, x, y) > THRESHOLD:
++                        loads[y, x] += 1
+     return loads
+ 
+-def gaussian_contributes_to_pixel(gaussian, pixel):
+-    # [G] Standard operation: compute Mahalanobis distance using 2D covariance
+-    # and return True if the contribution is non-negligible
+-    pass
+-
+-def compute_load_balancing_loss(loads):
+-    mean_load = sum(loads) / len(loads)
+-    variance = sum((l - mean_load) ** 2 for l in loads) / len(loads)
+-    return variance ** 0.5
+-
+-def optimize_gaussian_attributes(gaussians, pixels, lambda_load=0.45, lambda_other=0.55):
+-    # The specific gradient update rule for Gaussian attributes is not given in the sources.
+-    pass
+-
+-def render_with_load_balancing(gaussians, pixels, loads):
+-    for i, pixel in enumerate(pixels):
+-        target_count = loads[i]
+-        if target_count > threshold:
+-            target_count = max(1, target_count - reduction_factor)
+-        elif target_count < threshold:
+-            target_count = min(max_gaussians, target_count + increase_factor)
+-        # [G] Standard operation: accumulate color and transmittance for the selected Gaussians
+-        render_pixel(pixel, gaussians[:target_count])
+-
+-def render_pixel(pixel, selected_gaussians):
+-    # [G] Standard operation: evaluate and blend selected Gaussians at pixel coordinates
+-    pass
++def apply_load_balancing(gaussians, loads, lambda_load, lambda_remaining):
++    """
++    Adjusts Gaussian rendering based on pixel loads.
++    Returns modified Gaussians or loss value.
++    """
++    # Calculate mean and standard deviation of loads
++    mean_load = np.mean(loads)
++    std_load = np.std(loads)
++    
++    # Define heavy and light load thresholds
++    heavy_threshold = mean_load + std_load
++    light_threshold = mean_load - std_load
++    
++    # Identify heavy and light pixels
++    heavy_pixels = np.where(loads > heavy_threshold)
++    light_pixels = np.where(loads < light_threshold)
++    
++    # For heavy pixels, reduce Gaussian count (e.g., by increasing opacity threshold)
++    # For light pixels, increase Gaussian count (e.g., by decreasing opacity threshold)
++    # This part is typically handled during training via the loss function
++    
++    # Load Balancing Loss
++    # Encourage uniform load distribution
++    load_loss = std_load
++    
++    # Total Loss
++    total_loss = lambda_load * load_loss + lambda_remaining * other_losses
++    return total_loss
+ ```
+ 
+ ## Subtopics
+ 
++### [Gradient-Constrained Load Balancing Loss](21475-gradient-constrained-load-balancing-loss.md)
++Gradient-Constrained Load Balancing Loss (LGC-load) is a regularization term used during the training of 3D Gaussian Splatting models to optimize computational efficiency by balancing the rendering workload across parallel pixel threads. It addresses the problem of uneven Gaussian distribution, where complex scene regions require more Gaussians for fidelity while simple regions do not, causing thread idle time in pixel-parallel rasterization. Unlike rigid load balancing that enforces uniform Gaussian counts, LGC-load adapts the allowed variance in Gaussian density per pixel based on local image gradients, thereby preserving reconstruction quality in intricate areas while reducing redundancy in simple areas. It builds on [Load Balancing for Pixel-parallel Splatting](8373-load-balancing-for-pixel-parallel-splatting.md).
++
+ ### Load Distribution Unit (LDU) Workload Balancing
+-A workload distribution strategy to address severe imbalance in tile workloads, using early stopping depth prediction and Morton-order traversal to balance load across rasterization blocks [S2]. It differs from the pixel-parallel approach by operating at the tile/block level in hardware [S2].
+-*   **Preprocessing:** Discard Gaussians beyond predicted early stopping depth. Remaining Gaussians constitute the tile’s effective workload [S2].
+-*   **Workload Assignment:** Compute ideal average workload $W$. Assign approximately $N$ tiles per block sequentially [S2]. If cumulative Gaussian-tile pairs in current block exceed $(1 + 1/N)W$, defer current tile to next block [S2].
+-*   **Memory Optimization:** Employ Morton-order (Z-order) traversal to group spatially adjacent tiles into the same block, reducing memory access overhead [S2].
+-*   **Intra-block Sorting:** Sort tiles within each block from light to heavy workload. Reuse Gaussian Sorting Unit (GSU) for this task [S2].
+-*   **Pitfall:** Rasterization bubbles occur if high-workload tiles take longer to sort than light tiles take to rasterize. Light-to-heavy ordering ensures sorting finishes before rasterization of heavy tiles begins [S2].
++A workload distribution strategy to address severe imbalance in tile workloads, using early stopping depth prediction and Morton-order traversal to balance load across rasterization blocks [S2]. It involves preprocessing by discarding Gaussians beyond predicted early stopping depth, computing an ideal average workload $W$, and assigning tiles to blocks sequentially, deferring tiles if the cumulative Gaussian-tile pairs exceed $(1 + 1/N)W$. It employs Morton-order traversal to group spatially adjacent tiles, reducing memory access overhead, and sorts tiles within each block from light to heavy to prevent rasterization bubbles [S2].
+ 
+ ### LS-Gaussian
+@@ -89,13 +104,14 @@
+ 
+ ## Operating characteristics
+-*   **Time Complexity:** Not given in the sources [S1].
+-*   **Memory Complexity:** Not given in the sources [S1].
+-*   **Measured Performance:** The method is validated on standard datasets and aims to accelerate rendering by improving GPU utilization [S1].
+-*   **Scaling:** Not given in the sources [S1].
+-*   **Strengths:** Improves rendering efficiency by reducing GPU thread waiting caused by uneven loads [S1].
+-*   **Limitations:** May cause a decrease in rendering quality for heavy-load pixels due to fewer Gaussians being rendered [S1].
++- **Time Complexity:** Depends on the number of Gaussians $N$ and image resolution $W \times H$. Computing pixel loads is $O(N \cdot A)$ where $A$ is the average area of a Gaussian in pixels. Load balancing adjustments are $O(W \cdot H)$.
++- **Memory Complexity:** $O(W \cdot H)$ for storing pixel loads.
++- **Performance:** Improves rendering efficiency by reducing GPU thread waiting time due to load imbalance [S1]. Can lead to significant speedups in scenes with high variance in Gaussian density.
++- **Strengths:** Simple to implement, directly addresses GPU thread divergence.
++- **Limitations:** May reduce rendering quality if not carefully tuned. Requires accurate estimation of pixel loads.
++- **When to Use:** In scenes with highly uneven Gaussian distribution, where some pixels are much more complex than others.
++- **When Not to Use:** In scenes with uniform Gaussian distribution, where load balancing provides little benefit.
+ 
+ ## Background
+-Originated in the paper "AdR-Gaussian: Accelerating Gaussian Splatting with Adaptive Radius" [S1]. The method addresses the issue of uneven load distribution in Gaussian Splatting rasterization, which leads to inefficient GPU utilization [S1].
++Originated from the need to improve the efficiency of 3D Gaussian Splatting rendering on GPUs, where thread divergence due to uneven workload is a major bottleneck [S1]. The method was proposed to balance the number of Gaussians rendered per pixel, ensuring that all GPU threads finish their work at approximately the same time [S1].
+ 
+ ## Sources

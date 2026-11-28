@@ -1,0 +1,95 @@
+# SDF Cloud Rendering
+
+
+## Overview
+SDF Cloud Rendering is a fragment-shader-based technique for rendering volumetric cloud-like structures using Signed Distance Fields (SDFs) and ray marching [S1, unofficial]. It solves the problem of generating complex, organic volumetric shapes without explicit mesh data by composing simple geometric primitives (spheres) via smooth unions and fractal warping [S1, unofficial]. It differs from standard ray marching by relying on procedural noise-based warping of the coordinate space to create "cloudy" topology, rather than sampling a 3D texture or voxel grid [S1, unofficial].
+
+## How it works
+The method operates in a single-pass fragment shader [S1, unofficial]. It defines a scene using a hierarchy of warped spheres, marches a ray to find the intersection with the implicit surface, and computes lighting via a shadow ray [S1, unofficial].
+
+### Inputs and Outputs
+*   **Inputs**: Fragment coordinates (`gl_FragCoord`), screen resolution (`screenSize`), camera field of view (45.0 degrees), and a random seed (`seed`) [S1, unofficial].
+*   **Outputs**: A final color vector (`gl_FragColor`) in the range [0, 1] [S1, unofficial].
+
+### Data Structures
+No complex data structures are used. The state is maintained via local variables in the shader [S1, unofficial]. Constants define the scene bounds and marching parameters [S1, unofficial].
+
+### Numbered Steps
+1.  Calculate the ray direction from fragment coordinates, screen size, and field of view [S1, unofficial].
+2.  Initialize ray depth to `MIN_DIST` and iterate up to `MAX_MARCHING_STEPS` [S1, unofficial].
+3.  Evaluate the scene SDF at the current ray position; if the returned distance is less than `EPSILON`, return the current depth as a surface hit [S1, unofficial].
+4.  Advance the ray depth by `dist * STEP_SCALE`; if the new depth exceeds `MAX_DIST`, terminate and return `MAX_DIST` [S1, unofficial].
+5.  If a hit occurs, compute a shadow ray along the light direction and blend between dark and light colors; otherwise, render a sky gradient [S1, unofficial].
+6.  Apply Hable tone mapping and exposure scaling to output the final color [S1, unofficial].
+
+### Formulas
+
+**1. Sphere SDF**
+The distance from a point $p$ to a sphere centered at $c$ with radius $r$:
+$$ d_{sphere}(p) = \|p - c\| - r $$
+where $p$ is the query point, $c$ is the sphere center, and $r$ is the radius [S1, unofficial].
+
+**2. Smooth Union**
+Blends two SDFs $d_1$ and $d_2$ with a blending factor $k$:
+$$ h = \text{clamp}\left(0.5 + 0.5 \frac{d_2 - d_1}{k}, 0.0, 1.0\right) $$
+$$ d_{union} = \text{mix}(d_2, d_1, h) - k \cdot h \cdot (1.0 - h) $$
+where $d_1$ and $d_2$ are the input SDF values, and $k$ controls the smoothness of the blend [S1, unofficial].
+
+**3. Jitter (Fractal Noise)**
+Generates a pseudo-random offset based on a seed and coordinate:
+$$ \text{jitter}(mixAmount, offset, seed) = 0.09 \sum_{i=0}^{2} \frac{\sin((offset \cdot 1234.0 + mixAmount) \cdot 2^i)}{2^i} $$
+where the loop runs three times, scaling the sine argument and divisor by powers of two [S1, unofficial].
+
+**4. Warp**
+Distorts the input vector $v$ using jittered offsets:
+$$ \text{warp}(v, scale, seed) = v + scale \cdot \text{vec3}(\text{jitter}(v.x, 0.0, seed), \text{jitter}(v.y, 0.2, seed), \text{jitter}(v.z, 0.5, seed)) $$
+where $scale$ controls the intensity of the coordinate distortion [S1, unofficial].
+
+**5. Hable Tone Mapping**
+Maps linear color $x$ to [0, 1]:
+$$ \text{toneMap}(x) = \frac{x(Ax + CB) + DE}{x(Ax + B) + DF} - \frac{E}{F} $$
+where $A=0.15, B=0.50, C=0.10, D=0.20, E=0.02, F=0.30$ [S1, unofficial].
+
+### Parameters
+*   `MAX_MARCHING_STEPS`: 100 [S1, unofficial].
+*   `MIN_DIST`: 0.0 [S1, unofficial].
+*   `MAX_DIST`: 100.0 [S1, unofficial].
+*   `EPSILON`: 0.0001 [S1, unofficial].
+*   `STEP_SCALE`: 0.67 [S1, unofficial].
+*   `EXPOSURE`: 1.0 [S1, unofficial].
+*   `WHITE`: 200.0 [S1, unofficial].
+*   `LIGHT_POS`: `vec3(-10.0, 10.0, 3.0)` [S1, unofficial].
+*   `LIGHT_COLOR`: `vec3(100.0, 100.0, 100.0)` [S1, unofficial].
+*   `DARK_COLOR`: `vec3(5.0, 8.0, 20.0)` [S1, unofficial].
+
+### Edge Cases and Pitfalls
+*   **Precision**: The source shader uses `mediump` float precision [S1, unofficial]. Lower precision may lead to jittering artifacts or incorrect SDF evaluations in high-resolution renders [S1, unofficial].
+*   **Seed Dependency**: The visual appearance is deterministic based on the `seed` parameter [S1, unofficial]. Changing the seed alters the cloud shape significantly due to the fractal warping [S1, unofficial].
+*   **Step Scaling**: `STEP_SCALE` is set to 0.67 to prevent overshooting caused by coordinate warping [S1, unofficial].
+
+## Subtopics
+
+### Ray Marching with Single Scattering
+Computes lighting by sampling volumetric density along the ray and applying a single-scattering phase function [G]. It sets itself apart by modeling light absorption and emission within the volume rather than just surface reflection [G]. Choose it when rendering semi-transparent volumetric media like fog or smoke [G]. See [Ray-marched Shadows](1087-ray-marched-shadows.md).
+
+### Volume Ray Marching with Temporal Accumulation
+Renders volumetric data over multiple frames and blends results to reduce noise and stabilize animated sequences [G]. It differs from single-frame marching by leveraging temporal coherence to lower per-frame sample counts [G]. Choose it for real-time animated volumetric effects where performance is constrained [G]. See [Volumetric and Atmospheric Rendering](4968-volumetric-and-atmospheric-rendering.md).
+
+### Atmospheric Ray Marching
+Simulates large-scale light transport in planetary atmospheres using phase functions and density profiles [G]. It distinguishes itself by integrating density variations over long ray segments and accounting for multiple scattering approximations [G]. Choose it for planetary or skybox rendering [G]. See [Volumetric and Atmospheric Rendering](4968-volumetric-and-atmospheric-rendering.md).
+
+### X-Ray Visualization
+Accumulates density and transparency along rays to produce projection-like images of internal structures [G]. It differs from surface-focused SDF marching by integrating transmittance rather than stopping at the first hit [G]. Choose it for medical or industrial inspection visualizations [G]. See [WebGL2 Volume Raycasting](15994-webgl2-volume-raycasting.md).
+
+## Operating characteristics
+*   **Time Complexity**: Not given in the sources [S1, unofficial].
+*   **Memory Complexity**: Not given in the sources [S1, unofficial].
+*   **Performance**: Not given in the sources [S1, unofficial].
+*   **Strengths**: Not given in the sources [S1, unofficial].
+*   **Limitations**: Not given in the sources [S1, unofficial].
+
+## Background
+SDF Cloud Rendering was developed by Dave Pagurek as a small experiment for Graphics Interface 2019 [S1, unofficial]. It demonstrates the capability of Signed Distance Fields to create organic, volumetric-looking structures through procedural warping and smooth unions, rather than traditional mesh or voxel representations [S1, unofficial].
+
+## Sources
+[S1] davepagurek/sdf-clouds, https://github.com/davepagurek/sdf-clouds, fetched 2026-10-27 (unofficial)

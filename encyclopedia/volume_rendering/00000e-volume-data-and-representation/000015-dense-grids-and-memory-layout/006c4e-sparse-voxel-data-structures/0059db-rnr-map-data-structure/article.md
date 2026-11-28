@@ -1,0 +1,90 @@
+# RNR-Map Data Structure
+
+Also called: Global Map, Local Map
+
+## Overview
+The RNR-Map is a dense 3D tensor used to store averaged latent feature vectors for visual navigation and rendering, mapping 2D spatial positions to high-dimensional latent codes [S1]. It aggregates pixel features into a fixed-resolution grid to enable efficient decoder-based image reconstruction [S1].
+
+## How it works
+**Inputs:**
+- Registered 2D pixel features with normalized coordinates and feature vectors [S1].
+- Map resolution parameters: grid dimensions $U \times V$ and latent dimension $D$ [S1].
+
+**Outputs:**
+- An RNR-Map tensor $m \in \mathbb{R}^{U \times V \times D}$ containing the aggregated latent features [S1].
+
+**Data Structures:**
+- **RNR-Map ($m$):** A 3D tensor of size $U \times V \times D$. Each cell $(u, v)$ stores a latent feature vector $c_{u,v} \in \mathbb{R}^D$ [S1].
+- **Map Struct (Variant):** In specific optimization contexts, the map is implemented as an array of 8-byte structs instead of 4-byte pointers [S2, unofficial]. Each struct contains a 4-byte tile pointer and 4 bytes of additional data, which includes a single 32-bit 'boat bit' flag [S2, unofficial].
+
+**Steps:**
+1. **Normalization:** For each input pixel, normalize its position using the map resolution $s$ to determine the grid coordinates $(u, v)$ [S1].
+2. **Aggregation:** Collect all pixel features that map to the same grid position $(u, v)$ [S1].
+3. **Averaging:** Compute the average of the aggregated features for each grid cell to produce the final latent vector $c_{u,v}$ [S1].
+4. **Storage:** Store $c_{u,v}$ in the tensor $m$ at index $(u, v)$ [S1].
+
+**Formulas:**
+The map position $(u, v)$ is derived from the normalized position using the map resolution $s$ [S1]. The latent vector for a cell is:
+$$ c_{u,v} = \frac{1}{N_{u,v}} \sum_{i \in \text{pixels mapping to } (u,v)} f_i $$
+where $f_i$ is the feature vector of pixel $i$, and $N_{u,v}$ is the count of pixels mapping to $(u, v)$ [S1].
+
+**Parameters:**
+- $U, V$: Grid dimensions (height and width in grid cells) [S1].
+- $D$: Latent dimension (channel size) [S1].
+- Map Size (Variant): Doubled from 64 KB to 128 KB to accommodate the 8-byte structs instead of 4-byte pointers [S2, unofficial].
+
+**Edge Cases and Pitfalls:**
+- **Cache Performance:** Doubling map size to store auxiliary data may reduce cache hit rates for pointer traversal, but arbitrary traversal directions already make cache hits slim, so the impact is negligible [S2, unofficial].
+- **Memory Access:** Embedding static per-frame data (e.g., boat position) directly in the map structure avoids repeated memory access during the rendering loop [S2, unofficial].
+
+**Pseudocode:**
+> **Unverified code.** The code below did not pass a test run against a reference implementation, or no test fits it, so it may contain errors.
+
+```python
+def zeros(shape):
+    """Initialize a multi-dimensional array with zeros."""
+    if len(shape) == 1:
+        return [0.0] * shape[0]
+    return [zeros(shape[1:]) for _ in range(shape[0])]
+
+def build_rnr_map(pixels, U, V, D):
+    m = zeros((U, V, D))
+    counts = zeros((U, V))
+    for u_norm, v_norm, f in pixels:
+        u = int(u_norm * U)
+        v = int(v_norm * V)
+        u = max(0, min(u, U - 1))
+        v = max(0, min(v, V - 1))
+        for d in range(D):
+            m[u][v][d] += f[d]
+        counts[u][v] += 1
+    for u in range(U):
+        for v in range(V):
+            if counts[u][v] > 0:
+                for d in range(D):
+                    m[u][v][d] /= counts[u][v]
+    return m
+
+def update_boat_flags(map_structs, boat_tiles):
+    for tile_idx in boat_tiles:
+        map_structs[tile_idx].data |= 1
+```
+
+## Subtopics
+
+### Map Struct Expansion for Boat Optimization
+A variant where the map stores 8-byte structs (4-byte tile pointer + 4-byte auxiliary data) instead of 4-byte pointers [S2, unofficial]. The auxiliary data includes a single 32-bit 'boat bit' marking the four tiles the boat currently touches [S2, unofficial]. Before rendering, the map is updated to set this flag for the occupied tiles [S2, unofficial]. During rendering, if the 'boat bit' is zero, the loop skips grabbing additional boat data, avoiding repeated memory access for static per-frame data [S2, unofficial]. The map size is doubled (e.g., 64 KB to 128 KB) to accommodate the larger structs [S2, unofficial]. Cache impact is negligible due to arbitrary traversal patterns [S2, unofficial].
+
+## Operating characteristics
+- **Time Complexity:** Building the map requires a single pass over the input pixels to aggregate and average features [S1].
+- **Memory Complexity:** $O(U \times V \times D)$ for the standard RNR-Map [S1]. For the struct variant, memory usage is doubled compared to a pointer-only map [S2, unofficial].
+- **Performance:** The struct variant reduces rendering loop overhead by embedding static per-frame data (boat position) directly in the map structure, avoiding repeated memory accesses [S2, unofficial].
+- **Strengths:** Efficient aggregation of visual information into a fixed grid [S1]. Reduced memory access penalties in specific rendering loops [S2, unofficial].
+- **Limitations:** Fixed resolution limits detail [S1]. Doubling map size for auxiliary data increases memory usage [S2, unofficial].
+
+## Background
+The RNR-Map was introduced in the paper "Renderable Neural Radiance Map for Visual Navigation" [S1]. It is used for visual navigation tasks, reconstructing RGBD images from latent codes using a decoder similar to the Generative Scene Network (GSN) [S1]. The struct expansion variant is described in a developer log about building a 3D engine for the Playdate platform [S2, unofficial].
+
+## Sources
+[S1] Renderable Neural Radiance Map for Visual Navigation, https://doi.org/10.1109/cvpr52729.2023.00878, fetched 2026-10-26
+[S2] Building yet another 3D engine -- a devlog, of sorts - Playdate Developer Forum, https://devforum.play.date/t/building-yet-another-3d-engine-a-devlog-of-sorts/19197, fetched 2026-10-29 (unofficial)

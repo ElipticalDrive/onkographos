@@ -1,0 +1,344 @@
+Summary
+
+add a first forward-renderer volume raymarch pipeline and WGSL shader for volume residency items
+composite SDF and volume raymarch passes with alpha blending and cover the new path in renderer/headless tests
+update README and rendering capability docs to reflect forward volume execution
+
+Closes #15
+
+Add first volume raymarch pass by disjukr · Pull Request #45 · disjukr/goldlight · GitHub
+Skip to content
+You signed in with another tab or window. Reload to refresh your session.
+You signed out in another tab or window. Reload to refresh your session.
+You switched accounts on another tab or window. Reload to refresh your session.
+Dismiss alert
+Add first volume raymarch pass
+#45
+New issue
+Have a question about this project? Sign up for a free GitHub account to open an issue and contact its maintainers and the community.
+Sign up for GitHub
+By clicking “Sign up for GitHub”, you agree to our terms of service and
+privacy statement. We’ll occasionally send you account related emails.
+Already on GitHub?
+Sign in
+to your account
+Merged
+disjukr
+merged 2 commits into
+main
+from
+automation/issue-15-volume-pass
+Mar 17, 2026
+Uh oh!
+There was an error while loading. Please reload this page.
+Merged
+Add first volume raymarch pass
+#45
+Show file tree
+Hide file tree
+Changes from 1 commit
+Commits
+Show all changes
+2 commits
+Select commit
+Hold shift + click to select a range
+f333b06
+Add first volume raymarch pass
+disjukr Mar 17, 2026
+b3c63ba
+Preserve rotated volume raymarch bounds
+disjukr Mar 17, 2026
+File filter
+Clear filters
+Conversations
+Failed to load comments. Retry
+Loading
+Uh oh!
+There was an error while loading. Please reload this page.
+Jump to
+Jump to file
+Failed to load files. Retry
+Loading
+Uh oh!
+There was an error while loading. Please reload this page.
+Diff view
+Diff view
+Prev
+Previous commit
+Next
+Preserve rotated volume raymarch bounds
+Loading branch information
+Uh oh!
+There was an error while loading. Please reload this page.
+disjukr
+committed
+Mar 17, 2026
+commit b3c63bad6de61f86056e33e74f068493c11f95fe
+Some comments aren't visible on the classic Files Changed page.
+There are no files selected for viewing
+96 changes: 78 additions & 18 deletions
+96
+packages/renderer/src/renderer.ts
+Show comments
+View file
+Edit file
+Delete file
+Open in desktop
+Original file line number
+Diff line number
+Diff line change
+Expand Up
+@@ -543,6 +543,83 @@ const getMatrixScale = (worldMatrix: readonly number[]): readonly [number, numbe
+return [scaleX, scaleY, scaleZ];
+};
+const invertAffineMatrix = (worldMatrix: readonly number[]): readonly number[] => {
+const m00 = worldMatrix[0] ?? 0;
+const m01 = worldMatrix[1] ?? 0;
+const m02 = worldMatrix[2] ?? 0;
+const m10 = worldMatrix[4] ?? 0;
+const m11 = worldMatrix[5] ?? 0;
+const m12 = worldMatrix[6] ?? 0;
+const m20 = worldMatrix[8] ?? 0;
+const m21 = worldMatrix[9] ?? 0;
+const m22 = worldMatrix[10] ?? 0;
+const tx = worldMatrix[12] ?? 0;
+const ty = worldMatrix[13] ?? 0;
+const tz = worldMatrix[14] ?? 0;
+const c00 = (m11 * m22) - (m12 * m21);
+const c01 = -((m10 * m22) - (m12 * m20));
+const c02 = (m10 * m21) - (m11 * m20);
+const c10 = -((m01 * m22) - (m02 * m21));
+const c11 = (m00 * m22) - (m02 * m20);
+const c12 = -((m00 * m21) - (m01 * m20));
+const c20 = (m01 * m12) - (m02 * m11);
+const c21 = -((m00 * m12) - (m02 * m10));
+const c22 = (m00 * m11) - (m01 * m10);
+const determinant = (m00 * c00) + (m01 * c01) + (m02 * c02);
+if (Math.abs(determinant) < 1e-8) {
+return [
+1,
+0,
+0,
+0,
+0,
+1,
+0,
+0,
+0,
+0,
+1,
+0,
+0,
+0,
+0,
+1,
+];
+}
+const inverseDeterminant = 1 / determinant;
+const i00 = c00 * inverseDeterminant;
+const i01 = c10 * inverseDeterminant;
+const i02 = c20 * inverseDeterminant;
+const i10 = c01 * inverseDeterminant;
+const i11 = c11 * inverseDeterminant;
+const i12 = c21 * inverseDeterminant;
+const i20 = c02 * inverseDeterminant;
+const i21 = c12 * inverseDeterminant;
+const i22 = c22 * inverseDeterminant;
+return [
+i00,
+i01,
+i02,
+0,
+i10,
+i11,
+i12,
+0,
+i20,
+i21,
+i22,
+0,
+-((i00 * tx) + (i10 * ty) + (i20 * tz)),
+-((i01 * tx) + (i11 * ty) + (i21 * tz)),
+-((i02 * tx) + (i12 * ty) + (i22 * tz)),
+1,
+];
+};
+export const extractSdfPassItems = (
+evaluatedScene: EvaluatedScene,
+): readonly SdfPassItem[] =>
+Expand Down
+Expand Up
+@@ -726,24 +803,7 @@ const createSdfUniformData = (items: readonly SdfPassItem[]): Float32Array => {
+};
+const createVolumeUniformData = (item: VolumePassItem): Float32Array => {
+const center = getMatrixTranslation(item.worldMatrix);
+const [scaleX, scaleY, scaleZ] = getMatrixScale(item.worldMatrix);
+const halfExtent = [
+Math.max(scaleX * 0.5, 0.001),
+Math.max(scaleY * 0.5, 0.001),
+Math.max(scaleZ * 0.5, 0.001),
+] as const;
+return Float32Array.from([
+center[0],
+center[1],
+center[2],
+0,
+halfExtent[0],
+halfExtent[1],
+halfExtent[2],
+0,
+]);
+return Float32Array.from(invertAffineMatrix(item.worldMatrix));
+};
+const createMeshTransformUniformData = (worldMatrix: readonly number[]): Float32Array =>
+Expand Down
+23 changes: 16 additions & 7 deletions
+23
+packages/renderer/src/shaders/built_in_volume_raymarch.wgsl
+Show comments
+View file
+Edit file
+Delete file
+Open in desktop
+Original file line number
+Diff line number
+Diff line change
+@@ -1,6 +1,5 @@
+struct VolumeUniforms {
+center: vec4<f32>,
+halfExtent: vec4<f32>,
+worldToLocal: mat4x4<f32>,
+};
+struct VsOut {
+Expand Down
+Expand Up
+@@ -43,13 +42,23 @@ fn intersectBox(
+return vec2<f32>(enter, exit);
+}
+fn transformPoint(matrix: mat4x4<f32>, point: vec3<f32>) -> vec3<f32> {
+return (matrix * vec4<f32>(point, 1.0)).xyz;
+}
+fn transformVector(matrix: mat4x4<f32>, vector: vec3<f32>) -> vec3<f32> {
+return (matrix * vec4<f32>(vector, 0.0)).xyz;
+}
+@fragment
+fn fsMain(in: VsOut) -> @location(0) vec4<f32> {
+let cameraOrigin = vec3<f32>(0.0, 0.0, 2.5);
+let rayDirection = normalize(vec3<f32>(in.uv.x, -in.uv.y, -1.75));
+let boxMin = volume.center.xyz - volume.halfExtent.xyz;
+let boxMax = volume.center.xyz + volume.halfExtent.xyz;
+let hit = intersectBox(cameraOrigin, rayDirection, boxMin, boxMax);
+let localOrigin = transformPoint(volume.worldToLocal, cameraOrigin);
+let localDirection = transformVector(volume.worldToLocal, rayDirection);
+let boxMin = vec3<f32>(-0.5, -0.5, -0.5);
+let boxMax = vec3<f32>(0.5, 0.5, 0.5);
+let hit = intersectBox(localOrigin, localDirection, boxMin, boxMax);
+if (hit.x >= hit.y) {
+return vec4<f32>(0.0);
+Expand All
+@@ -61,8 +70,8 @@ fn fsMain(in: VsOut) -> @location(0) vec4<f32> {
+for (var step: u32 = 0u; step < 24u; step = step + 1u) {
+let travel = hit.x + (stepSize * (f32(step) + 0.5));
+let point = cameraOrigin + (rayDirection * travel);
+let uvw = ((point - boxMin) / (boxMax - boxMin));
+let point = localOrigin + (localDirection * travel);
+let uvw = point + vec3<f32>(0.5, 0.5, 0.5);
+let density = textureSampleLevel(volumeTexture, volumeSampler, uvw, 0.0).r;
+let opacity = density * 0.2;
+let color = vec3<f32>(density * 0.35, density * 0.75, density);
+Expand Down
+39 changes: 37 additions & 2 deletions
+39
+tests/forward_render_test.ts
+Show comments
+View file
+Edit file
+Delete file
+Open in desktop
+Original file line number
+Diff line number
+Diff line change
+Expand Up
+@@ -281,7 +281,7 @@ Deno.test('renderForwardFrame encodes a dedicated sdf raymarch pass for supporte
+);
+});
+Deno.test('renderForwardFrame encodes a dedicated volume raymarch pass for volume nodes with residency', () => {
+Deno.test('renderForwardFrame keeps rotated volume nodes in local raymarch space', () => {
+const mocks = createRenderMocks();
+const runtimeResidency = createRuntimeResidency();
+let scene = createSceneIr('scene');
+Expand All
+@@ -294,7 +294,17 @@ Deno.test('renderForwardFrame encodes a dedicated volume raymarch pass for volum
+format: 'density:r8unorm',
+}],
+};
+scene = appendNode(scene, createNode('volume-node', { volumeId: 'volume-0' }));
+scene = appendNode(
+scene,
+createNode('volume-node', {
+volumeId: 'volume-0',
+transform: {
+translation: { x: 1, y: 2, z: 3 },
+rotation: { x: 0, y: 0, z: 0.70710678, w: 0.70710678 },
+scale: { x: 2, y: 4, z: 6 },
+},
+}),
+);
+runtimeResidency.volumes.set('volume-0', {
+volumeId: 'volume-0',
+Expand Down
+Expand Up
+@@ -328,6 +338,31 @@ Deno.test('renderForwardFrame encodes a dedicated volume raymarch pass for volum
+);
+assertEquals(mocks.bindGroupEntries.length, 1);
+assertEquals(mocks.bindGroupEntries[0].map((entry) => entry.binding), [0, 1, 2]);
+const volumeUniformData = mocks.writeBufferCalls
+.filter((call) => call.bytes.byteLength === 64)
+.map((call) => new Float32Array(call.bytes.buffer.slice(0)));
+assertEquals(volumeUniformData.length, 1);
+const expected = [
+0,
+-0.25,
+0,
+0,
+0.5,
+0,
+0,
+0,
+0,
+0,
+1 / 6,
+0,
+-1,
+0.25,
+-0.5,
+1,
+];
+volumeUniformData[0].forEach((value, index) => {
+assertAlmostEquals(value, expected[index], 1e-5);
+});
+});
+Deno.test('material registry resolves built-in and custom WGSL programs', () => {
+Expand Down
+Loading
+Oops, something went wrong.
+Retry
+Uh oh!
+There was an error while loading. Please reload this page.
+Toggle all file notes
+Toggle all file annotations
+Add this suggestion to a batch that can be applied as a single commit.
+This suggestion is invalid because no changes were made to the code.
+Suggestions cannot be applied while the pull request is closed.
+Suggestions cannot be applied while viewing a subset of changes.
+Only one suggestion per line can be applied in a batch.
+Add this suggestion to a batch that can be applied as a single commit.
+Applying suggestions on deleted lines is not supported.
+You must change the existing code in this line in order to create a valid suggestion.
+Outdated suggestions cannot be applied.
+This suggestion has been applied or marked resolved.
+Suggestions cannot be applied from pending reviews.
+Suggestions cannot be applied on multi-line comments.
+Suggestions cannot be applied while the pull request is queued to merge.
+Suggestion cannot be applied right now. Please check back later.
+You can’t perform that action at this time.

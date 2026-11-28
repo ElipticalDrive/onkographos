@@ -1,0 +1,98 @@
+# Surface Noise via Slice-Projection Theorem
+Also called: Slice-Projection Theorem Application for Surface Noise
+## Overview
+Surface noise via the slice-projection theorem is a method to generate band-pass noise on a curved surface by integrating a 3D band-pass solid noise field perpendicular to that surface [S1]. It solves the problem that naively sampling (slicing) a 3D band-pass noise function along a 2D surface results in a non-band-pass power spectrum, causing visual artifacts such as low-frequency drift or aliasing [S1]. Unlike solid texturing, which creates the illusion of an object sculpted from solid matter, this method allows anisotropic textures to flow around the object's topology, adapting to curvature changes [S2]. It differs from planar parametrization by avoiding the distortions and seams inherent in mapping 2D noise directly onto complex surfaces [S2].
+
+## How it works
+**Inputs:**
+1. A 3D band-pass noise function $N(x, y, z)$ with a known band-pass power spectrum [S1].
+2. A surface defined by a position function $\mathbf{S}(u, v)$ and a unit normal vector field $\mathbf{n}(u, v)$ [S1].
+
+**Outputs:**
+1. A 2D noise field $N_{\text{surf}}(u, v)$ defined on the surface parameter domain, which exhibits band-pass characteristics [S1].
+
+**Data Structures:**
+- The 3D noise function $N$ is typically implemented as a procedural function or a sparse convolution grid [S1]. Explicit noise implementations may rely on pre-computed tables [S1].
+- The surface is represented by its parametric coordinates $(u, v)$, position $\mathbf{S}$, and normal $\mathbf{n}$ [S1].
+
+**Method Steps:**
+1. Evaluate the 3D noise function along the surface, which corresponds to slicing the spatial domain [S1].
+2. Recognize that slicing in the spatial domain corresponds to projection (integration) in the frequency domain, which destroys the band-pass property of the power spectrum [S1].
+3. Integrate the solid noise field along the direction perpendicular to the surface (along the normal $\mathbf{n}$) [S1].
+4. This operation corresponds to slicing the frequency spectrum, which preserves the band-pass nature of the power spectrum [S1].
+
+**Formulas:**
+The slice-projection theorem states that slicing in one domain corresponds to projection or integration in the other domain [S1].
+Let $P_{3D}(f_x, f_y, f_z)$ be the power spectrum of the 3D noise.
+Evaluating the noise on the surface corresponds to slicing the spatial domain, which results in projecting (integrating) the frequency domain: $P_{\text{surf}} \propto \int P_{3D} \, df_z$. This integration accumulates energy and breaks the band-pass property [S1].
+To restore the band-pass property, the method integrates the solid noise perpendicular to the surface, which corresponds to slicing the frequency domain:
+$$ N_{\text{surf}}(u, v) = \int_{-\infty}^{\infty} N(\mathbf{S}(u, v) + t \cdot \mathbf{n}(u, v)) \, dt $$
+The resulting power spectrum remains band-pass [S1].
+
+**Parameters:**
+- Integration range: Not given in the sources.
+- Kernel width: Not given in the sources.
+
+**Edge Cases and Pitfalls:**
+- **Precision:** Numerical integration must be performed accurately to maintain the band-pass property [S1].
+- **Boundary Conditions:** The method assumes an infinite or periodic domain for the 3D noise [S1].
+- **Degenerate Input:** If the surface normal is undefined, the integration direction is ambiguous [S1].
+
+**Pseudocode:**
+> **Unverified code.** The code below did not pass a test run against a reference implementation, or no test fits it, so it may contain errors.
+
+```python
+def surface_noise_via_slice_projection(surface_position, surface_normal, noise_3d, integration_range, num_samples):
+    """
+    Computes surface noise by integrating 3D noise along the surface normal.
+    
+    Args:
+        surface_position: (u, v) -> (x, y, z) function returning 3D position.
+        surface_normal: (u, v) -> (nx, ny, nz) function returning unit normal.
+        noise_3d: (x, y, z) -> float function returning 3D noise value.
+        integration_range: float, half-width of the integration interval along the normal.
+        num_samples: int, number of discrete samples for numerical integration.
+        
+    Returns:
+        (u, v) -> float function returning surface noise value.
+    """
+    def compute_noise(u, v):
+        pos = surface_position(u, v)
+        nrm = surface_normal(u, v)
+        
+        # Numerical integration of the 3D noise along the normal direction
+        # The exact range and sampling strategy are not specified in the sources [G].
+        integral_sum = 0.0
+        step = (2.0 * integration_range) / num_samples
+        for i in range(num_samples):
+            t = -integration_range + i * step
+            sample_point = (pos[0] + t * nrm[0], pos[1] + t * nrm[1], pos[2] + t * nrm[2])
+            integral_sum += noise_3d(sample_point[0], sample_point[1], sample_point[2])
+            
+        # Approximate the integral using the rectangle rule
+        return integral_sum * step
+
+    return compute_noise
+```
+
+## Subtopics
+
+### Surface Noise via Planar Parametrization
+This variant maps 2D noise onto surfaces using planar parametrization, similar to regular texture maps [S2]. It differs from the slice-projection method by avoiding volumetric integration but introducing potential distortions and seams [S2]. It compensates for mapping distortions by locally adapting noise band weights to approximate a pre-distorted spectrum [S2]. Choose it when computational resources are limited or when GPU shader implementation is preferred, though it cannot hide seams [S2]. See [Fourier Spectral Synthesis](16451-fourier-spectral-synthesis.md).
+
+## Operating characteristics
+- **Time Complexity:** Not given in the sources.
+- **Memory Complexity:** Not given in the sources.
+- **Measured Performance:** Not given in the sources.
+- **Scaling:** Not given in the sources.
+- **Strengths:** Produces band-pass noise on surfaces, allowing anisotropic textures to flow around objects and adapt to topology changes [S2]. Avoids the "sculpted from solid matter" look of solid texturing, which is desirable for fiber-like materials [S2].
+- **Limitations:** Requires integration of 3D noise, which can be computationally expensive [S1].
+- **When to Use:** When anisotropic textures need to flow around complex curved surfaces without distortion [S2].
+- **When Not to Use:** When the "solid texturing" effect is desired [S2].
+
+## Background
+The method is based on the slice-projection theorem, which states that slicing in one domain corresponds to projection or integration in the other [S1]. Cook and DeRose [CD05] observed that sampling solid band-pass noise along a surface does not result in band-pass noise on the surface, and proposed using the slice-projection theorem to solve this by integrating the noise perpendicular to the surface [S1]. The theorem is attributed to [Bra99, Mal93] [S1]. This approach contrasts with solid texturing, introduced by Perlin [Per85] and Peachy [Pea85], which samples 3D noise directly on the surface [S2].
+
+## Sources
+[S1] A Survey of Procedural Noise Functions, https://doi.org/10.1111/j.1467-8659.2010.01827.x, fetched 2026-10-27
+[S2] PDF A Survey of Procedural Noise Functions, https://www.cs.umd.edu/~zwicker/publications/SurveyProceduralNoise-CGF10.pdf, fetched 2026-10-27

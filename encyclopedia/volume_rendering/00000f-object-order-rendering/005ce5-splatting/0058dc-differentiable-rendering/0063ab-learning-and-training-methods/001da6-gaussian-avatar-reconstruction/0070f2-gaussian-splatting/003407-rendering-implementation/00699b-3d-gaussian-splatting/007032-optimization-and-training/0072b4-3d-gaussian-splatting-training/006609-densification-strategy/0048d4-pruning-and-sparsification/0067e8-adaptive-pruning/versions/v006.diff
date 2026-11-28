@@ -1,0 +1,183 @@
+--- v005.md
++++ v006.md
+@@ -4,126 +4,87 @@
+ 
+ ## Overview
+-Adaptive Pruning is a sparsification technique used in triangle-based volume rendering to eliminate "floaters" and reduce overfitting by removing primitives that contribute negligibly to the final image [S1]. It distinguishes itself from opacity-only methods by evaluating the actual volume rendering blending weight ($T \cdot o$) accumulated across training views, ensuring that only primitives with significant visual impact are retained [S1][S2, unofficial].
++Adaptive Pruning is a sparsification technique that reduces floaters and overfitting by removing primitives that explain only small amounts of data within a single training view [S1]. It distinguishes itself from opacity-only methods by evaluating the actual volume rendering blending weight ($T \cdot o$) accumulated across all training views, ensuring that only primitives with significant visual impact are retained [S1].
+ 
+ ## How it works
+ **Inputs and Outputs:**
+-*   **Input:** A set of 3D primitives (triangles or Gaussians) $\mathcal{P}$, their current parameters (position, covariance/shape, opacity), and the set of training views.
+-*   **Output:** A filtered set of primitives $\mathcal{P}'$ with corresponding updated buffers.
++*   **Input:** A set of $N$ primitives (triangles or splats) with attributes (position, shape, opacity, color) and a set of training views [S1][S2, unofficial].
++*   **Output:** A filtered set of primitives $\mathcal{P}'$ with compacted attribute buffers [S2, unofficial].
+ 
+ **Data Structures:**
+-The method operates on buffers storing primitive attributes. For triangle splatting, these include vertex positions, face indices, and per-triangle opacity values. For Gaussian splatting, these include mean position $\mu$, covariance $\Sigma$, opacity $\alpha$, and color coefficients. The implementation requires a boolean mask `alive` of size $N$ (number of primitives) to track validity.
++Primitive attributes are stored in contiguous arrays of size $N$ [G]. Tracking arrays of size $N$ store `max_weight` (initialized to $0$) and `view_count` (initialized to $0$) [G]. A boolean `alive` mask of size $N$ determines primitive validity [S2, unofficial].
+ 
+ **Steps:**
+-1.  **Accumulate Rendering Weights:** During rasterization for each training view, calculate the volume rendering blending weight for each primitive. For triangle splatting, this is the product of transmittance $T$ and opacity $o$ [S1]. For Gaussian splatting, this is often derived from the sigmoid of the stored opacity parameter [S2, unofficial].
+-2.  **Determine Pruning Criteria:**
+-    *   **Weight Threshold:** Identify primitives where the maximum accumulated weight across all training views is less than a user-defined threshold $\tau_{prune}$ [S1].
+-    *   **Coverage Constraint:** Identify primitives that are not rendered in at least two distinct training views with more than one pixel of coverage [S1].
+-3.  **Generate Alive Mask:** Create a boolean mask `alive` where `alive[i]` is true if primitive $i$ satisfies the criteria (i.e., max weight $\ge \tau_{prune}$ AND rendered in $\ge 2$ views with sufficient coverage) [S1][S2, unofficial].
+-4.  **Filter Buffers:** Apply the `alive` mask to filter all primitive buffers (positions, opacities, colors, normals, etc.) to remove invalid primitives [S2, unofficial].
+-5.  **Reset Optimization State:** Re-initialize the optimizers and learning rate schedulers for the remaining primitives to prevent stale gradient states from affecting training [S2, unofficial].
++1.  Initialize `max_weight` and `view_count` arrays to zero for all $N$ primitives [G].
++2.  For each training view, rasterize the primitives to compute the volume rendering blending weight $w = T \cdot o$ (transmittance times opacity) and the pixel coverage count for each primitive [S1].
++3.  Update `max_weight[i] = max(max_weight[i], w_i)` and increment `view_count[i]` if the primitive covers more than one pixel in the current view [S1].
++4.  After processing all views, construct the `alive` mask where `alive[i]` is true if `max_weight[i] >= τ_prune` AND `view_count[i] >= 2` [S1].
++5.  If the number of alive primitives is less than $N$, filter all attribute buffers using the `alive` mask to remove invalid primitives [S2, unofficial].
++6.  Re-initialize the optimizers and learning rate scheduler for the remaining primitives to align gradient states with the new buffer indices [S2, unofficial].
+ 
+ **Parameters:**
+-*   $\tau_{prune}$: A user-defined threshold for the maximum volume rendering blending weight. Primitives with a maximum weight below this value are pruned [S1]. Typical values are not explicitly given in the sources but are described as "user-defined" [S1].
+-*   Pruning Frequency: Pruning is executed periodically, specifically every 200 steps if the current step is greater than 0 and divisible by 200, and if `prune_threshold` is active [S2, unofficial].
++*   $\tau_{prune}$: A user-defined threshold for the maximum volume rendering blending weight below which a primitive is pruned [S1].
++*   Pruning Frequency: Pruning executes every 200 steps if `step > 0`, `step % 200 == 0`, and `prune_threshold > 0` [S2, unofficial].
+ 
+ **Pseudocode:**
+ ```python
+ def adaptive_pruning(primitives, training_views, tau_prune, step, prune_threshold):
+-    """
+-    Prunes primitives based on volume rendering weight and coverage.
+-    
+-    Args:
+-        primitives: Object containing buffers for all primitives (e.g., positions, opacities).
+-        training_views: List of training camera poses and images.
+-        tau_prune: Threshold for maximum blending weight.
+-        step: Current training step.
+-        prune_threshold: Boolean flag or value indicating if pruning is active.
+-        
+-    Returns:
+-        primitives: Filtered primitives object.
+-        optimizer: Re-initialized optimizer.
+-    """
+-    # Check if pruning should be executed
++    # Step 0: Check execution condition from [S2, unofficial]
+     if step <= 0 or step % 200 != 0 or prune_threshold <= 0:
+-        return primitives, optimizer
++        return primitives
+ 
+-    alive_mask = torch.zeros(len(primitives), dtype=torch.bool)
+-    
+-    # Initialize counters for coverage
+-    view_count = torch.zeros(len(primitives), dtype=torch.int)
+-    max_weight = torch.zeros(len(primitives), dtype=torch.float32)
++    N = len(primitives['positions'])
++    max_weight = [0.0] * N
++    view_count = [0] * N
+ 
+-    # Step 1: Accumulate weights and coverage during rasterization
++    # Step 1-3: Accumulate weights and coverage across all training views [S1]
+     for view in training_views:
+-        # Render the scene with current primitives
+-        # This returns per-primitive contribution weights and visibility masks
+-        weights, visibility = rasterize(primitives, view)
+-        
+-        # Update max weight for each primitive
+-        # weights[i] is the blending weight T*o for primitive i in this view
+-        max_weight = torch.maximum(max_weight, weights)
+-        
+-        # Count views where primitive was rendered with >1 pixel coverage
+-        # visibility[i] is a boolean or count of pixels covered
+-        if is_covered(visibility): # Helper: checks if coverage > 1 pixel
+-            view_count += 1
++        # [G] Standard volume rendering rasterization.
++        # Returns arrays of size N: blending weights (T*o) and pixel coverage counts.
++        weights, coverage = compute_rasterization_weights(primitives, view)
++        for i in range(N):
++            if weights[i] > max_weight[i]:
++                max_weight[i] = weights[i]
++            if coverage[i] > 1:
++                view_count[i] += 1
+ 
+-    # Step 2: Determine alive primitives
+-    # Condition 1: Max weight >= tau_prune
+-    weight_condition = max_weight >= tau_prune
+-    
+-    # Condition 2: Rendered in at least 2 views with sufficient coverage
+-    coverage_condition = view_count >= 2
+-    
+-    # Combine conditions
+-    alive_mask = weight_condition & coverage_condition
++    # Step 4: Generate alive mask [S1]
++    alive = [max_weight[i] >= tau_prune and view_count[i] >= 2 for i in range(N)]
++    num_alive = sum(alive)
+ 
+-    # Step 3: Filter buffers
+-    num_alive = alive_mask.sum().item()
+-    if num_alive < len(primitives):
+-        for key in primitives.buffers:
+-            primitives.buffers[key] = primitives.buffers[key][alive_mask]
+-            
+-        # Update normals if present
+-        if 'normals' in primitives.buffers:
+-            primitives.buffers['normals'] = primitives.buffers['normals'][alive_mask]
++    # Step 5: Filter buffers [S2, unofficial]
++    if num_alive < N:
++        for key in primitives:
++            primitives[key] = [primitives[key][i] for i in range(N) if alive[i]]
++        # Step 6: Reset optimization state [S2, unofficial]
++        # [G] Clears optimizer buffers (momentum/variance) and resets scheduler
++        # to align gradient states with the new compacted primitive indices.
++        reinitialize_optimizers(primitives)
+ 
+-    # Step 4: Re-initialize optimizers
+-    # This is critical to reset momentum and state for remaining primitives
+-    optimizer = reinitialize_optimizer(primitives, optimizer)
++    return primitives
+ 
+-    return primitives, optimizer
++def compute_rasterization_weights(primitives, view):
++    # [G] Standard volume rendering pass. Returns arrays of size N:
++    # blending weights (T*o) and pixel coverage counts.
++    pass
+ 
+-def is_covered(visibility):
+-    """
+-    [G] Helper to check if a primitive has more than one pixel of coverage.
+-    Assumes visibility is a tensor of pixel indices or a boolean mask per primitive.
+-    """
+-    # If visibility is a boolean mask of pixels covered by the primitive
+-    if visibility.dim() == 1:
+-        return visibility.sum() > 1
+-    # If visibility is a count
+-    elif visibility.dim() == 0:
+-        return visibility > 1
+-    else:
+-        # Fallback: assume if it's rendered at all, check specific logic
+-        # In triangle splatting, this might be based on the rasterizer's output
+-        return True # Placeholder for specific rasterizer logic
++def reinitialize_optimizers(primitives):
++    # [G] Re-initializes optimizer state and learning rate scheduler
++    # for the remaining primitives.
++    pass
+ ```
+ 
+ **Edge Cases and Pitfalls:**
+-*   **Precision:** The calculation of $T \cdot o$ must be numerically stable, especially when $T$ is very small (deep occlusion) or $o$ is near zero [S1].
+-*   **Boundary Conditions:** The "more than one pixel" coverage check must handle edge cases where a primitive is rendered but only partially covers a single pixel, which should not count as significant coverage [S1].
+-*   **Optimizer Reset:** Failing to re-initialize the optimizer after pruning can lead to incorrect gradient updates for the remaining primitives, as the optimizer state indices may no longer align with the primitive indices [S2, unofficial].
++*   **Optimizer State Mismatch:** Failing to re-initialize the optimizer after pruning leaves stale gradient states (e.g., momentum buffers) indexed to removed primitives, causing incorrect updates for remaining primitives [S2, unofficial].
++*   **Degenerate Coverage:** The "more than one pixel" coverage check must correctly handle primitives that project to sub-pixel areas or single pixels, which should not count as significant coverage [S1].
+ 
+ ## Operating characteristics
+-*   **Time Complexity:** $O(N \cdot V)$, where $N$ is the number of primitives and $V$ is the number of training views, due to the need to rasterize all views to accumulate weights and coverage counts.
+-*   **Memory Complexity:** $O(N)$ for storing the `alive` mask, `max_weight`, and `view_count` arrays.
+-*   **Strengths:** Effectively removes "floaters" and overfitted primitives that have low visual impact, improving reconstruction quality and reducing memory usage [S1].
+-*   **Limitations:** Requires multiple rasterization passes (one per training view) to accumulate accurate weights and coverage, which can be computationally expensive during training [S1].
+-*   **When to Use:** Use when the scene contains significant noise or overfitting, leading to the emergence of spurious primitives (floaters) that do not correspond to real geometry [S1].
++*   **Time Complexity:** Not given in the sources.
++*   **Memory Complexity:** Not given in the sources.
++*   **Strengths:** Effectively removes floaters and overfitted primitives that have low visual impact, improving reconstruction quality and reducing memory usage [S1].
++*   **Limitations:** Requires processing all training views to accumulate accurate weights and coverage counts, which adds computational overhead during training [S1].
++*   **When to Use:** Use when the scene contains significant noise or overfitting, leading to the emergence of spurious primitives that do not correspond to real geometry [S1].
+ 
+ ## Background
+-Adaptive Pruning was introduced in the context of Triangle Splatting for Real-Time Radiance Field Rendering [S1]. It was developed as an alternative to manual heuristics for densification and pruning, aiming to automatically reduce representation power where it is not needed. The method is also implemented in unofficial repositories such as `SpaceCollectors/dust3r-3dgs` [S2, unofficial].
++Adaptive Pruning was introduced in the context of Triangle Splatting for Real-Time Radiance Field Rendering [S1]. It was developed as an alternative to manual heuristics for densification and pruning, aiming to automatically reduce representation power where it is not needed [S1].
+ 
+ ## Sources

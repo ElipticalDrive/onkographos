@@ -1,0 +1,177 @@
+--- v001.md
++++ v002.md
+@@ -4,8 +4,8 @@
+ 
+ ## Overview
+-USD Voxel Asset Authoring is a method for exporting discrete voxel data as a USD asset using `UsdGeom.PointInstancer` to represent individual voxel instances. It solves the problem of persisting voxelized point cloud data (such as 3D Gaussian Splatting outputs) into a standardized, metadata-rich format that supports live updates, collision detection, and cross-application interoperability. It differs from direct array-based voxelization methods by leveraging USD's instancing capabilities to store sparse voxel positions and attributes efficiently, rather than dense grid arrays.
++USD Voxel Asset Authoring exports discrete voxel data as a USD asset using `UsdGeom.PointInstancer` to represent individual voxel instances [S1, unofficial]. It persists voxelized point cloud data into a standardized, metadata-rich format that supports live updates, collision detection, and metadata persistence [S1, unofficial]. It differs from direct array-based voxelization methods by leveraging USD's instancing capabilities to store sparse voxel positions and attributes efficiently, rather than dense grid arrays [S1, unofficial].
+ 
+ ## How it works
+-The method takes a point cloud (positions, colors, opacities) and a set of generation parameters, voxelizes the points into a grid, and authors a USD stage containing a `PointInstancer` prim where each instance represents a voxel.
++The method takes a point cloud (positions, colors, opacities) and a set of generation parameters, voxelizes the points into a grid, and authors a USD stage containing a `PointInstancer` prim where each instance represents a voxel [S1, unofficial].
+ 
+ ### Inputs and Outputs
+@@ -51,5 +51,5 @@
+ 3.  **Author USD Stage**:
+     -   Create root Xform at `root_path` [S1, unofficial].
+-    -   Set metadata: `customDataByKey` with key `danciVoxelizer` and value dict(params) [S1, unofficial].
++    -   Set metadata: `customDataByKey` with key `danciVoxelizer` and value `dict(params)` [S1, unofficial].
+     -   Apply root transform: Set scale on `XformCommonAPI`. If `flip_axes[i]` is true, scale component is $-unit\_scale$, else $unit\_scale$ [S1, unofficial].
+     -   Create prototype:
+@@ -74,5 +74,4 @@
+ from typing import Tuple, Dict, Any, Optional
+ 
+-# Constants
+ SH_C0 = 0.28209479177387814
+ _SPZ_MAGIC = 0x5053474E
+@@ -88,7 +87,9 @@
+ 
+ def load_ply(filepath: str) -> PointCloud:
+-    # Simplified PLY loader assuming standard format
+-    # In practice, use a library or detailed parsing
+-    # This is a placeholder for the logic described in [S1, unofficial]
++    # Parse PLY header and vertex data
++    # Extract positions (x,y,z), colors (r,g,b), opacities
++    # If f_dc_0 exists, recover RGB: colors = clip((0.5 + SH_C0 * dc) * 255.0, 0, 255)
++    # If opacity exists, apply sigmoid: opacities = 1.0 / (1.0 + exp(-opacity))
++    # Return PointCloud object
+     raise NotImplementedError("Detailed PLY parsing omitted for brevity; see [S1, unofficial]")
+ 
+@@ -99,13 +100,7 @@
+             raise ValueError("SPZ file too small")
+         magic, version, n, sh_degree, frac_bits, _, _ = struct.unpack("<IIIBBBB", header)
+-        if magic != _SPZ_MAGIC:
+-            raise ValueError(f"Not an SPZ file (magic 0x{magic:08X})")
+-        if version not in (2, 3):
+-            raise ValueError(f"Unsupported SPZ version {version}")
+-        if n == 0:
+-            raise ValueError("SPZ file declares zero splats")
+-        
++        if magic != _SPZ_MAGIC or version not in (2, 3) or n == 0:
++            raise ValueError(f"Invalid SPZ file (magic 0x{magic:08X}, version {version}, n={n})")
+         data = f.read()
+-        
+         # Positions: 24-bit signed fixed-point
+         b = np.frombuffer(data, dtype=np.uint8, count=n * 9).reshape(n * 3, 3)
+@@ -113,13 +108,10 @@
+         vals = np.where(vals >= 0x800000, vals - 0x1000000, vals)
+         positions = (vals.astype(np.float32) / float(1 << frac_bits)).reshape(n, 3)
+-        
+         # Alphas: u8
+         opacities = (np.frombuffer(data, dtype=np.uint8, count=n, offset=n * 9).astype(np.float32) / 255.0)
+-        
+         # Colors: u8 SH DC
+         dc_u8 = np.frombuffer(data, dtype=np.uint8, count=n * 3, offset=n * 10).reshape(n, 3)
+         f_dc = (dc_u8.astype(np.float32) / 255.0 - 0.5) / _SPZ_COLOR_SCALE
+         colors = np.clip((0.5 + SH_C0 * f_dc) * 255.0, 0, 255).astype(np.uint8)
+-        
+         return PointCloud(positions=positions, colors=colors, opacities=opacities, is_3dgs=True)
+ 
+@@ -130,45 +122,32 @@
+ 
+ def voxelize(pc: PointCloud, resolution: float, min_opacity: float = 0.0, density_threshold: int = 1, origin: Optional[np.ndarray] = None) -> Tuple[np.ndarray, np.ndarray, np.ndarray]:
+-    positions = pc.positions
+-    colors = pc.colors
+-    opacities = pc.opacities
+-    
++    positions, colors, opacities = pc.positions, pc.colors, pc.opacities
+     if opacities is not None and min_opacity > 0.0:
+         keep = opacities >= min_opacity
+-        positions = positions[keep]
+-        if colors is not None:
+-            colors = colors[keep]
+-    
++        positions, colors = positions[keep], colors[keep] if colors is not None else None
+     if len(positions) == 0:
+         raise ValueError("Every point was removed by the opacity filter")
+-    
+     if colors is None:
+         z = positions[:, 2]
+         t = (z - z.min()) / max(float(np.ptp(z)), 1e-8)
+         colors = np.repeat((t[:, None] * 255).astype(np.uint8), 3, axis=1)
+-    
+     if origin is None:
+         origin = positions.min(axis=0)
+     origin = np.asarray(origin, dtype=np.float32)
+-    
+     grid = np.floor((positions - origin) / resolution).astype(np.int64)
+     grid_offset = grid.min(axis=0)
+     grid -= grid_offset
+     dims = grid.max(axis=0) + 1
+-    
+     keys = (grid[:, 0] * dims[1] + grid[:, 1]) * dims[2] + grid[:, 2]
+     order = np.argsort(keys)
+     keys_sorted = keys[order]
+     unique_keys, start, counts = np.unique(keys_sorted, return_index=True, return_counts=True)
+-    
+     csum = np.cumsum(colors[order].astype(np.float64), axis=0)
+     csum = np.vstack([np.zeros(3), csum])
+     color_sums = csum[start + counts] - csum[start]
+     avg_colors = (color_sums / counts[:, None]).astype(np.float32) / 255.0
+-    
+     if density_threshold > 1:
+         keep = counts >= density_threshold
+         unique_keys, avg_colors = unique_keys[keep], avg_colors[keep]
+-    
+     gz = unique_keys % dims[2]
+     gy = (unique_keys // dims[2]) % dims[1]
+@@ -176,11 +155,42 @@
+     cells = np.column_stack([gx, gy, gz]) + grid_offset
+     centers = (cells.astype(np.float32) + 0.5) * resolution + origin
+-    
+     return centers, avg_colors, origin
+ 
+ def author_usd(centers: np.ndarray, avg_colors: np.ndarray, origin: np.ndarray, params: Dict[str, Any], out_path: str):
+-    # Placeholder for USD authoring logic described in [S1, unofficial]
+-    # This involves creating Usd.Stage, defining prototypes, PointInstancer, etc.
+-    raise NotImplementedError("USD authoring logic omitted for brevity; see [S1, unofficial]")
++    stage = {}
++    root_path = params.get("root_path", "/voxels")
++    root = {"path": root_path, "type": "Xform"}
++    metadata_key = "danciVoxelizer"
++    root["customDataByKey"][metadata_key] = dict(params)
++    unit_scale = params.get("unit_scale", 1.0)
++    flip_axes = params.get("flip_axes", [False, False, False])
++    scale = [-unit_scale if flip_axes[i] else unit_scale for i in range(3)]
++    root["XformCommonAPI"]["scale"] = scale
++    shape = params.get("shape", "cube")
++    proto_path = root_path + "/prototype"
++    if shape == "cube":
++        pts = [(-1,-1,-1), (-1,1,-1), (1,1,-1), (1,-1,-1), (-1,-1,1), (1,-1,1), (1,1,1), (-1,1,1), (-1,-1,-1), (1,-1,-1), (1,-1,1), (-1,-1,1), (-1,1,-1), (-1,1,1), (1,1,1), (1,1,-1), (-1,-1,-1), (-1,-1,1), (-1,1,1), (-1,1,-1), (1,-1,-1), (1,1,-1), (1,1,1), (1,1,-1)]
++        normals = [(0,0,-1)]*4 + [(0,0,1)]*4 + [(0,-1,0)]*4 + [(0,1,0)]*4 + [(-1,0,0)]*4 + [(1,0,0)]*4
++        proto = {"path": proto_path, "type": "Mesh", "points": pts, "faceVertexCounts": [4]*6, "faceVertexIndices": list(range(24)), "normals": normals, "normalsInterpolation": "faceVarying", "subdivisionScheme": "none"}
++    else:
++        proto = {"path": proto_path, "type": "Mesh", "vertices": 12, "faces": 20, "subdivisionScheme": "catmull_clark"}
++    mat_path = root_path + "/material"
++    shader = {"id": "UsdPreviewSurface", "inputs": {"roughness": 0.6, "metallic": 0.0, "diffuseColor": {"source": "DisplayColorReader", "output": "result"}}}
++    reader = {"id": "UsdPrimvarReader_float3", "inputs": {"varname": "displayColor"}}
++    material = {"path": mat_path, "surfaceOutput": {"source": "PreviewSurface", "output": "surface"}}
++    instancer_path = root_path + "/instancer"
++    n = len(centers)
++    half = params.get("resolution", 1.0) / 2.0
++    instancer = {"path": instancer_path, "protoIndices": [0]*n, "positions": centers, "scales": np.full((n, 3), half), "displayColor": avg_colors, "extent": [np.min(centers, axis=0) - half, np.max(centers, axis=0) + half]}
++    if params.get("enable_collision", False):
++        instancer["proto_prim"]["CollisionAPI"] = {"approximation": "boundingCube"}
++    else:
++        if "CollisionAPI" in instancer["proto_prim"]: del instancer["proto_prim"]["CollisionAPI"]
++    flatten(stage)
++    copy_subtree(stage, root_path, "/name")
++    set_default_prim(stage, "/name")
++    set_up_axis(stage, "Y")
++    set_meters_per_unit(stage, 1.0)
++    export(stage, out_path)
+ ```
+ 
+@@ -221,9 +231,9 @@
+ -   **Strengths**: Standardized USD output, supports metadata, collision, and instancing. Round-trips with NVIDIA's reader [S1, unofficial].
+ -   **Limitations**: Only supports sparse voxel representation via instancing. Not suitable for dense volume rendering without additional processing. Limited to `.ply` and `.spz` input formats [S1, unofficial].
+--   **When to Use**: When you need to export voxelized 3DGS or point cloud data to USD for use in USD-based pipelines (e.g., Omniverse).
+--   **When Not to Use**: When you need dense volume data for ray marching or when your source is a mesh.
++-   **When to Use**: When you need to export voxelized 3DGS or point cloud data to USD for use in USD-based pipelines (e.g., Omniverse) [S1, unofficial].
++-   **When Not to Use**: When you need dense volume data for ray marching or when your source is a mesh [S1, unofficial].
+ 
+ ## Background
+-The method is part of the `3dgs-voxelizer-Omni` tool, an unofficial implementation for converting 3D Gaussian Splatting data into USD voxel assets. It was developed to facilitate the use of 3DGS in USD-based environments, leveraging USD's PointInstancer for efficient sparse voxel representation. The tool ensures compatibility with NVIDIA's reader for round-tripping [S1, unofficial].
++The method is part of the `3dgs-voxelizer-Omni` tool, an unofficial implementation for converting 3D Gaussian Splatting data into USD voxel assets [S1, unofficial]. It was developed to facilitate the use of 3DGS in USD-based environments, leveraging USD's PointInstancer for efficient sparse voxel representation [S1, unofficial]. The tool ensures compatibility with NVIDIA's reader for round-tripping [S1, unofficial].
+ 
+ ## Sources

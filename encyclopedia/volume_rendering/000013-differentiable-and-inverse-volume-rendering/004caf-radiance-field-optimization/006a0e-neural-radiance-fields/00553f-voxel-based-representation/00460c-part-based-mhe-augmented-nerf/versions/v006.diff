@@ -1,0 +1,248 @@
+--- v005.md
++++ v006.md
+@@ -4,19 +4,19 @@
+ 
+ ## Overview
+-Part-based MHE-augmented NeRF is a method for learning neural volumetric videos of dynamic humans from sparse view videos in minutes with competitive visual quality [S1]. It addresses the challenge of quickly reconstructing free-viewpoint videos of dynamic humans by decomposing the canonical human body into multiple anatomical parts, assigning each part its own Multiresolution Hash Encoding (MHE)-augmented NeRF network [S1]. This approach efficiently distributes representational power to handle varying shape and texture complexity across different body parts (e.g., face vs. torso) and accelerates training convergence compared to a single unified NeRF [S1]. It builds on [Voxel-based Representation](10852-voxel-based-representation.md) by using a structured set of voxelized NeRF networks rather than a single global field.
++Part-based MHE-augmented NeRF is a method for learning neural volumetric videos of dynamic humans from sparse view videos in minutes with competitive visual quality [S1]. It addresses the challenge of quickly reconstructing free-viewpoint videos of dynamic humans by decomposing the canonical human body into multiple anatomical parts, assigning each part its own Multiresolution Hash Encoding (MHE)-augmented NeRF network [S1]. This approach efficiently distributes representational power to handle varying shape and texture complexity across different body parts (e.g., face vs. torso) and accelerates training convergence compared to a single unified NeRF [S1]. It builds on [Voxel-based Representation](10852-voxel-based-representation.md) by using a structured set of voxelized NeRF networks rather than a single global field [G].
+ 
+ ## How it works
+ **Inputs:**
+-*   Sparse multi-view video frames of a dynamic human.
+-*   SMPL parameters for each frame: pose $\rho$, shape $\beta$, and camera extrinsics/intrinsics.
+-*   For each query point $\mathbf{x}$ at frame $t$, the method requires finding the nearest surface point on the posed SMPL mesh.
++*   Sparse multi-view video frames of a dynamic human [S1].
++*   SMPL parameters for each frame: pose $\rho$, shape $\beta$, and camera extrinsics/intrinsics [S1].
++*   For each query point $\mathbf{x}$ at frame $t$, the method requires finding the nearest surface point on the posed SMPL mesh [S1].
+ 
+ **Outputs:**
+-*   Density $\sigma$ and color $\mathbf{c}$ for any query point $\mathbf{x}$ in space and time $t$.
+-*   Rendered novel view images via volume rendering.
++*   Density $\sigma$ and color $\mathbf{c}$ for any query point $\mathbf{x}$ in space and time $t$ [S1].
++*   Rendered novel view images via volume rendering [G].
+ 
+ **Data Structures:**
+-1.  **SMPL Model:** Parametric human model $M=(V, E)$ with vertices $V$ and edges $E$. Contains blend weights $w_i$ for each vertex $v_i$ and UV coordinates $(u_i, v_i)$ for the template mesh.
+-2.  **Part Decomposition:** The body is divided into $K$ parts. For each part $k$, a subset of bones $\Omega_k$ is defined. The mesh for part $k$ is $M_k = (V_k, E_k)$, where $V_k = \{v_i \mid \arg\max w_i \in \Omega_k\}$ [S1].
++1.  **SMPL Model:** Parametric human model $M=(V, E)$ with vertices $V$ and edges $E$ [S1]. Contains blend weights $w_i$ for each vertex $v_i$ and UV coordinates $(u_i, v_i)$ for the template mesh [S1].
++2.  **Part Decomposition:** The body is divided into $K$ parts [S1]. For each part $k$, a subset of bones $\Omega_k$ is defined [S1]. The mesh for part $k$ is $M_k = (V_k, E_k)$, where $V_k = \{v_i \mid \arg\max w_i \in \Omega_k\}$ [S1].
+ 3.  **MHE Tables:** Each part $k$ has its own multiresolution hash table with size $T_k$ adapted to the local complexity of that part [S1].
+ 4.  **Networks:**
+@@ -66,5 +66,5 @@
+     [S1]
+ 
+-6.  **Rendering:** Use the standard volume rendering equation [44-radiance-field-optimization.md] to compute the pixel color from the sampled points along the ray.
++6.  **Rendering:** Use the standard volume rendering equation [44-radiance-field-optimization.md] to compute the pixel color from the sampled points along the ray [G].
+ 
+ **Pseudocode:**
+@@ -74,139 +74,86 @@
+ import torch.nn as nn
+ 
++class MHE:
++    """Standard multiresolution hash encoding [G]."""
++    def __init__(self, num_levels, level_dim, resolution):
++        self.num_levels = num_levels
++        self.level_dim = level_dim
++        self.resolutions = [resolution * (2**i) for i in range(num_levels)]
++        self.embeddings = nn.ModuleList([
++            nn.Embedding(res * res * res, level_dim) for res in self.resolutions
++        ])
++
++    def forward(self, coords):
++        features = []
++        for i, emb in enumerate(self.embeddings):
++            scaled = coords * self.resolutions[i]
++            grid = torch.floor(scaled).long() % self.resolutions[i]
++            idx = grid[:, 0] * (self.resolutions[i]**2) + grid[:, 1] * self.resolutions[i] + grid[:, 2]
++            features.append(emb(idx))
++        return torch.cat(features, dim=-1)
++
+ class PartBasedMHENeRF:
+-    def __init__(self, num_parts, smpl_model, hash_table_sizes, mhe_config):
+-        """
+-        Initialize the part-based MHE-augmented NeRF.
+-        
+-        Args:
+-            num_parts (int): Number of anatomical parts (K).
+-            smpl_model: SMPL model instance providing mesh, blend weights, and UVs.
+-            hash_table_sizes (list): List of hash table sizes T_k for each part.
+-            mhe_config: Configuration for Multiresolution Hash Encoding.
+-        """
++    def __init__(self, num_parts, hash_sizes, mhe_levels, mhe_dim, mhe_res, latent_dim):
+         self.K = num_parts
+-        self.smpl = smpl_model
++        self.latent_embeddings = nn.Embedding(100, latent_dim)
+         self.parts = []
+-        
+-        # Initialize part-specific networks and MHE tables
+-        for k in range(self.K):
+-            # Create MHE table for part k with specific size
+-            mhe_table = create_mhe_table(size=hash_table_sizes[k], config=mhe_config)
+-            
+-            # Density network: Input -> Density + Feature Vector
+-            density_net = nn.Sequential(
+-                # ... layers taking MHE output ...
+-                nn.Linear(mhe_output_dim, 1), # Density
+-                nn.Linear(mhe_output_dim, 256) # Feature vector z
+-            )
+-            
+-            # Color network: Feature Vector + View Dir + Latent -> Color
+-            color_net = nn.Sequential(
+-                # ... layers taking z, d, l_t ...
+-                nn.Linear(256 + 3 + 32, 3) # Color RGB
+-            )
+-            
+-            # Residual deformation network: UV + Time -> Delta X
+-            res_mhe_table = create_mhe_table(size=hash_table_sizes[k], config=mhe_config)
+-            res_net = nn.Sequential(
+-                # ... layers taking res_mhe output ...
+-                nn.Linear(mhe_output_dim, 3) # Residual translation
+-            )
+-            
++        for k in range(num_parts):
+             self.parts.append({
+-                'mhe': mhe_table,
+-                'density_net': density_net,
+-                'color_net': color_net,
+-                'res_mhe': res_mhe_table,
+-                'res_net': res_net
++                'mhe': MHE(mhe_levels, mhe_dim, mhe_res),
++                'density_net': nn.Sequential(nn.Linear(mhe_dim, 256), nn.ReLU(), nn.Linear(256, 1)),
++                'feature_net': nn.Sequential(nn.Linear(mhe_dim, 256), nn.ReLU(), nn.Linear(256, 256)),
++                'color_net': nn.Sequential(nn.Linear(256 + 3 + latent_dim, 256), nn.ReLU(), nn.Linear(256, 3)),
++                'res_mhe': MHE(mhe_levels, mhe_dim, mhe_res),
++                'res_net': nn.Sequential(nn.Linear(mhe_dim, 256), nn.ReLU(), nn.Linear(256, 3))
+             })
+-            
+-        # Latent embeddings for each frame
+-        self.latent_embeddings = nn.Embedding(num_frames, 32)
+ 
+-    def get_nearest_surface_point(self, query_point, part_mesh):
+-        """
+-        Find the nearest surface point on a specific part's mesh.
+-        Returns: surface_point, blend_weight, uv_coords
+-        """
+-        # Implementation depends on nearest neighbor search on mesh
+-        # Using SMPL model's precomputed data or efficient spatial search
+-        pass
++    def inverse_lbs(self, x, w, pose_matrices):
++        T = torch.zeros_like(pose_matrices[0])
++        for j in range(pose_matrices.shape[0]):
++            T += w[:, j:j+1] * pose_matrices[j]
++        T_inv = torch.inverse(T)
++        x_hom = torch.cat([x, torch.ones_like(x[:, :1])], dim=1)
++        return (T_inv @ x_hom.unsqueeze(-1)).squeeze(-1)[:, :3]
+ 
+-    def inverse_lbs(self, query_point, blend_weight, pose):
+-        """
+-        Compute inverse LBS transformation.
+-        x0 = (sum(w_j * G_j))^-1 * x
+-        """
+-        # Get bone transformation matrices G_j from pose
+-        # Compute weighted sum of matrices
+-        # Invert the matrix
+-        # Apply to query_point
+-        pass
+-
+-    def forward(self, query_points, frame_indices, poses, view_directions):
+-        """
+-        Forward pass for a batch of query points.
+-        
+-        Args:
+-            query_points: Tensor of shape (N, 3)
+-            frame_indices: Tensor of shape (N,) indicating frame t for each point
+-            poses: Tensor of shape (N, pose_dim)
+-            view_directions: Tensor of shape (N, 3)
+-            
+-        Returns:
+-            densities: Tensor of shape (N,)
+-            colors: Tensor of shape (N, 3)
+-        """
++    def forward(self, query_points, frame_indices, poses, view_directions, part_meshes, smpl_data):
+         densities = []
+         colors = []
+-        
+         for k in range(self.K):
+             part = self.parts[k]
++            # Find nearest surface point on part k's mesh
++            blend_weights, uvs = self._nearest_surface(query_points, part_meshes[k], smpl_data[k])
+             
+-            # 1. Find nearest surface point on part k's mesh
+-            # Note: In practice, this is done efficiently for all points
+-            # For simplicity, assuming we have precomputed nearest points for this part
+-            # surface_points, blend_weights, uvs = self.get_nearest_surface_point_for_part(query_points, k)
++            # Inverse LBS
++            x0 = self.inverse_lbs(query_points, blend_weights, poses)
+             
+-            # 2. Inverse LBS
+-            # x0 = inverse_lbs(query_points, blend_weights, poses)
++            # Residual Deformation
++            t_coords = (frame_indices.float() / 100.0).unsqueeze(1).expand(-1, 2)
++            res_encoded = part['res_mhe'](torch.cat([uvs, t_coords], dim=1))
++            delta_x = part['res_net'](res_encoded)
++            x_can = x0 + delta_x
+             
+-            # 3. Residual Deformation
+-            # Encode (u, v, t)
+-            # t_coords = frame_indices to time values
+-            # res_encoded = part['res_mhe'](uvs, t_coords)
+-            # delta_x = part['res_net'](res_encoded)
++            # Density & Feature
++            encoded_x = part['mhe'](x_can)
++            sigma_k = part['density_net'](encoded_x).squeeze(-1)
++            z = part['feature_net'](encoded_x)
+             
+-            # 4. Canonical Point
+-            # x_can = x0 + delta_x
++            # Color
++            latent = self.latent_embeddings(frame_indices)
++            c_k = part['color_net'](torch.cat([z, view_directions, latent], dim=1))
+             
+-            # 5. Density Prediction
+-            # encoded_x = part['mhe'](x_can)
+-            # density_out, z = part['density_net'](encoded_x)
+-            # densities_k = density_out
+-            
+-            # 6. Color Prediction
+-            # latent = self.latent_embeddings(frame_indices)
+-            # colors_k = part['color_net'](z, view_directions, latent)
+-            
+-            # Store results for selection
+-            # densities.append(densities_k)
+-            # colors.append(colors_k)
+-            
+-            # Placeholder for actual implementation logic
+-            # densities.append(torch.zeros_like(query_points[:, 0]))
+-            # colors.append(torch.zeros_like(query_points))
+-            pass
+-            
+-        # 7. Select max density
+-        # densities_stack = torch.stack(densities, dim=1) # (N, K)
+-        # max_density_indices = torch.argmax(densities_stack, dim=1) # (N,)
+-        # final_densities = densities_stack.gather(1, max_density_indices.unsqueeze(1)).squeeze(1)
++            densities.append(sigma_k)
++            colors.append(c_k)
+         
+-        # colors_stack = torch.stack(colors, dim=1) # (N, K, 3)
+-        # final_colors = colors_stack.gather(1, max_density_indices.unsqueeze(1).unsqueeze(2).expand(-1, -1, 3)).squeeze(1)
+-        
++        densities_stack = torch.stack(densities, dim=1)
++        k_star = torch.argmax(densities_stack, dim=1)
++        final_densities = densities_stack.gather(1, k_star.unsqueeze(1)).squeeze(1)
++        colors_stack = torch.stack(colors, dim=1)
++        final_colors = colors_stack.gather(1, k_star.unsqueeze(1).unsqueeze(2).expand(-1, -1, 3)).squeeze(1)
+         return final_densities, final_colors
++
++    def _nearest_surface(self, query_points, mesh, smpl_data):
++        # Standard nearest-neighbor search on mesh vertices
++        # Returns blend weights and UV coordinates for the nearest vertices
++        pass
+ ```
+ 
+@@ -226,5 +173,5 @@
+ *   **Measured Performance:** On the ZJU-MoCap dataset, the method achieves competitive PSNR. Ablation studies show that the part-based approach (286M params) yields higher PSNR than a single MHE-augmented NeRF (302M params) [S1]. Removing the UV-based residual deformation reduces PSNR from 32.09dB to 31.40dB [S1].
+ *   **Strengths:** Fast convergence (minutes vs. hours), efficient distribution of representational power, competitive visual quality.
+-*   **Limitations:** Requires SMPL parameters and sparse multi-view videos. Performance may degrade if the human model is not well-aligned with the SMPL template [S1].
++*   **Limitations:** Requires SMPL parameters and sparse multi-view videos.
+ 
+ ## Background

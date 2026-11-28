@@ -1,0 +1,155 @@
+--- v003.md
++++ v004.md
+@@ -4,5 +4,5 @@
+ 
+ ## Overview
+-Lighting Transfer Function (LTF) with Gradient Aligned Sampling is a direct volume rendering technique that enhances material boundaries by decoupling illumination from opacity [S1, unofficial][S2]. Unlike methods that attenuate lighting based on gradient magnitude [S1, unofficial], this method uses a 2D transfer function indexed by two scalar samples taken along the normalized gradient direction (one in the gradient direction, one opposite) to modulate specular and diffuse lighting coefficients [S1, unofficial][S2]. This allows independent control of surface lighting and opacity, enabling the illustration of translucent material boundaries that would otherwise be obscured by uniform absorption [S1, unofficial][S2].
++Lighting Transfer Function (LTF) with Gradient Aligned Sampling is a direct volume rendering technique that enhances material boundaries by decoupling illumination from opacity [S1, unofficial][S2]. Unlike methods that attenuate lighting based solely on gradient magnitude [S1, unofficial], this method indexes a 2D transfer function with two scalar samples taken along the normalized gradient direction (one forward, one opposite) to modulate specular and diffuse lighting coefficients [S1, unofficial][S2]. This enables independent control of surface lighting and opacity, allowing translucent material boundaries to be illustrated without being obscured by uniform absorption [S1, unofficial][S2].
+ 
+ ## How it works
+@@ -10,19 +10,20 @@
+ ### Inputs and Outputs
+ **Inputs:**
+-*   Volume scalar field data $V$.
+-*   Precomputed volume gradients $\nabla V$.
+-*   1D Color Transfer Function (ColorTF) mapping scalar values to base color and opacity.
+-*   2D Lighting Transfer Functions (LTFs): Three separate 2D lookup tables (textures) for ambient ($LTF_{ka}$), diffuse ($LTF_{kd}$), and specular ($LTF_{ks}$) coefficients.
+-*   Light direction vector $L$ and view direction vector $V_{dir}$.
++*   Volume scalar field data $V$ [S1, unofficial][S2].
++*   Precomputed volume gradients $\nabla V$ [S1, unofficial].
++*   1D Color Transfer Function (ColorTF) mapping scalar values to base color and opacity [S1, unofficial].
++*   Three 2D Lighting Transfer Functions (LTFs) for ambient ($LTF_{ka}$), diffuse ($LTF_{kd}$), and specular ($LTF_{ks}$) coefficients [S2].
++*   Light direction vector $L$ and view direction vector $V_{dir}$ [S2].
+ *   Light scaling factor $S_{light}$ (typically $>1$ for high dynamic range) [S1, unofficial][S2].
+ *   Sample pair distance $d$ (typically 1 voxel) [S2].
++*   Current sample position $P$ in voxel coordinates [G].
+ 
+ **Outputs:**
+-*   Final fragment color $C$ and opacity $\alpha$.
++*   Final fragment color $C$ and opacity $\alpha$ [S2].
+ 
+ ### Data Structures
+ 
+ **1. 2D Lighting Transfer Function (LTF)**
+-Implemented as 2D texture lookups indexed by the pair of scalar values $(S_1, S_2)$ sampled along the gradient. Three separate textures are used:
++Implemented as 2D texture lookups indexed by the pair of scalar values $(S_1, S_2)$ sampled along the gradient [S1, unofficial]. Three separate textures store the coefficients:
+ *   $LTF_{ka}(S_1, S_2)$: Ambient coefficient.
+ *   $LTF_{kd}(S_1, S_2)$: Diffuse coefficient.
+@@ -30,5 +31,5 @@
+ 
+ **Hybrid Gradient Sign Storage:**
+-To handle gradient direction flipping, the alpha channel of the LTF texture (or a separate auxiliary texture) stores a precomputed sign value. This value indicates the sign of the difference between post-classified sample densities at the two sample points, used to determine if the gradient should be flipped to point toward maximum variation in post-classified density [S1, unofficial].
++The alpha channel of the LTF texture stores a precomputed sign value indicating the difference between post-classified sample densities at the two sample locations [S1, unofficial]. This sign determines whether the pre-classified gradient should be flipped to point toward maximum variation in post-classified density [S1, unofficial].
+ 
+ ### Parameters
+@@ -42,14 +43,13 @@
+     *   Precompute gradients $\nabla V$ of the original scalar field [S1, unofficial].
+     *   Precompute the hybrid gradient sign for the LTF lookup tables based on the sign of the difference between post-classified sample densities [S1, unofficial].
+-
+ 2.  **Per-Sample Rendering (Fragment Program):**
+     1.  Read the current sample's scalar value $S$ and gradient $\nabla V$ from the volume data [S1, unofficial][S2].
+     2.  Normalize the gradient to obtain the unit vector $N = \frac{\nabla V}{\|\nabla V\|}$ [S1, unofficial][S2].
+-    3.  **Hybrid Gradient Flipping:**
+-        *   Determine the sign of the difference between post-classified densities at the two potential sample locations.
+-        *   If the pre-classified gradient points opposite to the direction of maximum variation in post-classified density, flip $N$ to $-N$ [S1, unofficial].
+-    4.  **Gradient Aligned Sampling:**
++    3.  **Gradient Aligned Sampling:**
+         *   Calculate the positions for two additional samples: $P_1 = P + d \cdot N$ and $P_2 = P - d \cdot N$ [S2].
+-        *   Linearly interpolate and read the scalar values $S_1$ and $S_2$ from the volume data at $P_1$ and $P_2$ [S1, unofficial][S2].
++        *   Linearly interpolate and read the scalar values $S_1$ and $S_2$ from the volume data along the normalized gradient direction [S1, unofficial][S2].
++    4.  **Hybrid Gradient Flipping:**
++        *   Query the precomputed sign from the alpha channel of the LTF texture at indices $(S_1, S_2)$ [S1, unofficial].
++        *   If the sign indicates the pre-classified gradient points opposite to the direction of maximum variation in post-classified density, flip $N$ to $-N$ [S1, unofficial].
+     5.  **Color and Opacity Lookup:**
+         *   Use the center sample value $S$ to lookup base color $C_{base}$ and opacity $\alpha$ from the 1D ColorTF [S1, unofficial][S2].
+@@ -65,10 +65,10 @@
+         *   Apply the light scaling factor: $C = C \cdot S_{light}$ [S1, unofficial][S2].
+     8.  **Alpha Modulation:**
+-        *   Perform alpha modulation of the source color in the fragment program (rather than framebuffer blending) to handle cases where RGB color exceeds alpha [S1, unofficial][S2].
++        *   Perform alpha modulation of the source color in the fragment program rather than in the framebuffer blending stage to handle cases where RGB color exceeds alpha [S1, unofficial][S2].
+ 
+ ### Pseudocode
+ 
+ ```python
+-def render_fragment(S, grad_V, L, V_dir, n, d, S_light, ColorTF, LTF_ka, LTF_kd, LTF_ks, VolumeData, HybridSignTexture):
++def render_fragment(S, grad_V, L, V_dir, n, d, S_light, ColorTF, LTF_ka, LTF_kd, LTF_ks, VolumeData, P):
+     """
+     Renders a single volume sample using Lighting Transfer Function with Gradient Aligned Sampling.
+@@ -78,5 +78,5 @@
+         grad_V: Gradient vector at current sample point.
+         L: Normalized light direction vector.
+-        V_dir: Normalized view direction vector.
++        V_dir: Normalized view direction vector (pointing from eye to surface).
+         n: Specular exponent.
+         d: Distance between sample pairs (e.g., 1.0 voxel).
+@@ -85,5 +85,5 @@
+         LTF_ka, LTF_kd, LTF_ks: 2D textures for lighting coefficients.
+         VolumeData: Volume scalar field for interpolation.
+-        HybridSignTexture: Texture storing precomputed sign of density difference for gradient flipping.
++        P: Current sample position in voxel coordinates.
+         
+     Returns:
+@@ -93,30 +93,25 @@
+     
+     # 1. Normalize gradient
+-    N = normalize(grad_V)
++    N = grad_V / math.sqrt(dot(grad_V, grad_V))
+     
+-    # 2. Hybrid Gradient Flipping
+-    # Determine if gradient should be flipped based on post-classified density variation
+-    # Note: The sign is precomputed and stored in the LTF's alpha channel or auxiliary texture
+-    # based on the difference between post-classified densities at P+d*N and P-d*N.
+-    # If the sign indicates the pre-classified gradient points away from max variation, flip N.
+-    # For implementation simplicity, we assume a function `should_flip_gradient` exists
+-    # which queries the precomputed sign data.
+-    if should_flip_gradient(S, N, HybridSignTexture):
++    # 2. Gradient Aligned Sampling
++    # Sample points displaced along the normalized gradient direction
++    P1 = P + d * N
++    P2 = P - d * N
++    
++    # Read scalar values at displaced points via trilinear interpolation
++    S1 = trilinear(VolumeData, P1)
++    S2 = trilinear(VolumeData, P2)
++    
++    # 3. Hybrid Gradient Flipping
++    # Query precomputed sign from the alpha channel of the LTF texture at (S1, S2)
++    sign = LTF_ka.get_alpha(S1, S2)
++    if sign < 0:
+         N = -N
+         
+-    # 3. Gradient Aligned Sampling
+-    # Sample points displaced along the normalized gradient
+-    P1 = sample_point + d * N
+-    P2 = sample_point - d * N
+-    
+-    # Read scalar values at displaced points (linear interpolation)
+-    S1 = VolumeData.interpolate(P1)
+-    S2 = VolumeData.interpolate(P2)
+-    
+     # 4. Color and Opacity Lookup
+     base_color, alpha = ColorTF.lookup(S)
+     
+     # 5. Lighting Coefficient Lookup
+-    # Use S1 and S2 as indices into 2D LTFs
+     ka = LTF_ka.lookup(S1, S2)
+     kd = LTF_kd.lookup(S1, S2)
+@@ -124,8 +119,6 @@
+     
+     # 6. Lighting Computation (Phong Model)
+-    # Compute reflection vector R
+-    # R = 2 * dot(N, -V_dir) * N + V_dir  (assuming V_dir points from eye to surface)
+-    # Or standard: R = reflect(-V_dir, N)
+-    R = reflect(-V_dir, N)
++    # Compute reflection vector R = 2 * dot(N, -V_dir) * N + V_dir
++    R = 2.0 * dot(N, -V_dir) * N + V_dir
+     
+     diffuse_term = kd * max(dot(N, L), 0.0)
+@@ -137,4 +130,7 @@
+     # 7. Apply Light Scaling Factor for HDR
+     C = C * S_light
++    
++    # 8. Alpha Modulation (performed in fragment program, not framebuffer)
++    # C = C * alpha  (standard alpha modulation if required by compositing pipeline)
+     
+     return C, alpha

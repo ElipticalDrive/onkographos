@@ -1,0 +1,187 @@
+# Topologically Defined Isosurfaces
+
+Also called: Digital Geometry Connectedness Marching Cubes
+
+## Overview
+Topologically Defined Isosurfaces extracts a closed, oriented 2-manifold from a binary volumetric image by enforcing digital geometry connectedness constraints [S1]. Unlike standard Marching Cubes, which may produce self-intersections or incorrect topology in ambiguous configurations, this method modifies the local configuration table based on valid foreground/background connectedness couples (e.g., 6-voxel foreground / 18-voxel background) to ensure the resulting surface separates the foreground from the background without singularities [S1]. It builds on [Topological Correctness Guarantees](1796-topological-correctness-guarantees.md) by providing a formal proof of validity for the generated surface using combinatorial manifold theory [S1].
+
+## How it works
+**Inputs:** A binary volumetric image $I$ (voxels are 0 or 1) and a valid connectedness couple $(n, \lambda)$, where $n$ is the connectivity for 1-voxels (foreground) and $\lambda$ is the connectivity for 0-voxels (background) [S1].
+**Outputs:** A closed, oriented 2-manifold mesh representing the isosurface [S1].
+
+**Data Structures:**
+*   **Binary Picture $I$:** A 3D grid of voxels. The source assumes the border of the support contains only 0-voxels or only 1-voxels [S1].
+*   **8-cube:** A set of 8 voxels $v_0 \dots v_7$ forming a unit cube in the grid, ordered by binary coding of the index [S1].
+*   **4-face:** An inner face of an 8-cube composed of 4 voxels. Each 4-face is shared by exactly two adjacent 8-cubes [S1].
+*   **Link:** A pair of 6-connected voxels [S1].
+*   **Local Graph $G_{gs}$:** A directed graph constructed for each 8-cube, consisting of oriented edges and vertices lying on the 4-faces [S1].
+*   **Complete Graph $G(I)$:** The union of all local graphs from all 8-cubes in $I$ [S1].
+
+**Parameters:**
+*   **Connectedness Couple $(n, \lambda)$:** Must be one of the valid couples: $(6, 18)$, $(6, 26)$, $(18, 6)$, or $(26, 6)$ [S1].
+    *   $n \in \{6, 18, 26\}$ for foreground (1-voxels) [S1].
+    *   $\lambda \in \{6, 18, 26\}$ for background (0-voxels) [S1].
+*   **Invalid Couples:** Couples such as $(6,6)$, $(18,18)$, $(18,26)$, $(26,18)$, $(26,26)$ are invalid because they produce locally different surfaces in the inverse picture, violating the consistency property [S1].
+
+**Algorithm Steps:**
+
+1.  **Decomposition:** Decompose the binary picture $I$ into all possible 8-cubes [S1].
+2.  **Face Orientation:** For each 8-cube, identify its six inner 4-faces. Orient each inner 4-face such that they are consistently ordered (e.g., clockwise when viewed from the outside of the 8-cube) [S1].
+3.  **Link Identification:** For each ordered 4-face, identify its four links (pairs of adjacent voxels on the face). Determine the value of each link based on the voxel values (0 or 1) [S1].
+4.  **Local Graph Construction (4-face rules):** Apply the following rules to each link on an ordered 4-face to generate vertices and oriented edges:
+    *   If link value is $(0,0)$ or $(1,1)$: No vertex is created [S1].
+    *   If link value is $(0,1)$: Create one vertex between the two voxels. Add an **incoming** oriented edge to this vertex that stays on the 4-face [S1].
+    *   If link value is $(1,0)$: Create one vertex between the two voxels. Add an **outgoing** oriented edge from this vertex that stays on the 4-face [S1].
+    *   *Note:* Cases 6 and 9 of the 4-configuration (ambiguous faces) are handled implicitly by the global consistency of the valid connectedness couple. The source states that for valid couples, the generated surface follows the required properties, and arbitrary choices for invalid couples lead to inconsistencies [S1].
+5.  **Handle Strict 26-Adjacency:** Check if the 8-cube contains two strictly 26-adjacent 1-voxels (if $n=26$) or two strictly 26-adjacent 0-voxels (if $\lambda=26$) [S1].
+    *   If such a configuration exists, the local graph is transformed: the two disconnected loops generated on the 4-faces are triangulated (subdivided) to prevent the surface from intersecting the adjacency 3-map of the strictly adjacent voxels [S1].
+6.  **Assemble Local Graph:** Gather all oriented edges generated on the six oriented inner 4-faces of the 8-cube to form the local graph $G_{gs}$ for that 8-cube. According to Theorem 3, for a valid couple, this graph is a set of oriented loops of length $\ge 3$, disconnected from each other [S1].
+7.  **Assemble Complete Graph:** Extend the set of all local graphs from all 8-cubes to form the complete graph $G(I)$. Each edge in the complete graph belongs to exactly two loops with different orientations [S1].
+8.  **Final Mesh Generation:** Derive the final isosurface from the complete graph.
+    *   If loops have length $> 3$, subdivide (triangulate) them to form a combinatorial manifold.
+    *   The embedding of this redefined local graph in $\mathbb{R}^3$ does not intersect the adjacency 3-map of strictly 26-adjacent voxels [S1].
+
+**Pseudocode:**
+
+> **Unverified code.** The code below did not pass a test run against a reference implementation, or no test fits it, so it may contain errors.
+
+```python
+def topologically_defined_isosurfaces(binary_image, foreground_conn, background_conn):
+    """
+    Extracts a topologically correct isosurface from a binary volume.
+    
+    Args:
+        binary_image: 3D numpy array of 0s and 1s.
+        foreground_conn: Connectivity for 1-voxels (6, 18, or 26).
+        background_conn: Connectivity for 0-voxels (6, 18, or 26).
+        
+    Returns:
+        A list of triangles representing the closed 2-manifold.
+    """
+    
+    # Validate connectedness couple
+    valid_couples = [(6, 18), (6, 26), (18, 6), (26, 6)]
+    if (foreground_conn, background_conn) not in valid_couples:
+        raise ValueError(f"Invalid connectedness couple {(foreground_conn, background_conn)}. Must be one of {valid_couples}")
+
+    dims = binary_image.shape
+    adj = {}  # midpoint_id -> list of next_midpoint_id
+    midpoints = {}  # midpoint_id -> (voxel_coords)
+
+    # Standard MC 8-cube vertex ordering indices
+    # v0=(0,0,0), v1=(1,0,0), v2=(1,1,0), v3=(0,1,0)
+    # v4=(0,0,1), v5=(1,0,1), v6=(1,1,1), v7=(0,1,1)
+    face_voxels = [
+        [0, 1, 2, 3], [4, 5, 6, 7], # z=0, z=1
+        [0, 1, 5, 4], [3, 2, 6, 7], # y=0, y=1
+        [0, 3, 7, 4], [1, 2, 6, 5]  # x=0, x=1
+    ]
+
+    for x in range(dims[0] - 1):
+        for y in range(dims[1] - 1):
+            for z in range(dims[2] - 1):
+                # Extract 8 voxels
+                voxels = [
+                    binary_image[x, y, z], binary_image[x+1, y, z],
+                    binary_image[x+1, y+1, z], binary_image[x, y+1, z],
+                    binary_image[x, y, z+1], binary_image[x+1, y, z+1],
+                    binary_image[x+1, y+1, z+1], binary_image[x, y+1, z+1]
+                ]
+                voxel_coords = [
+                    (x, y, z), (x+1, y, z), (x+1, y+1, z), (x, y+1, z),
+                    (x, y, z+1), (x+1, y, z+1), (x+1, y+1, z+1), (x, y+1, z+1)
+                ]
+
+                # Process 6 faces
+                for face_idx in range(6):
+                    face_v_indices = face_voxels[face_idx]
+                    face_midpoints = []
+                    face_edge_dirs = []  # 'in', 'out', or None
+
+                    for i in range(4):
+                        v1_idx = face_v_indices[i]
+                        v2_idx = face_v_indices[(i + 1) % 4]
+                        val1 = voxels[v1_idx]
+                        val2 = voxels[v2_idx]
+
+                        link_key = tuple(sorted((voxel_coords[v1_idx], voxel_coords[v2_idx])))
+                        mid_id = f"mid_{link_key}"
+                        if mid_id not in midpoints:
+                            midpoints[mid_id] = link_key
+                        face_midpoints.append(mid_id)
+
+                        if val1 == 0 and val2 == 1:
+                            face_edge_dirs.append('in')
+                        elif val1 == 1 and val2 == 0:
+                            face_edge_dirs.append('out')
+                        else:
+                            face_edge_dirs.append(None)
+
+                    # Connect midpoints on this face based on directions
+                    for i in range(4):
+                        if face_edge_dirs[i] == 'out':
+                            # Edge goes from mid_i to mid_{i+1}
+                            next_mid = face_midpoints[(i + 1) % 4]
+                            adj.setdefault(face_midpoints[i], []).append(next_mid)
+                        elif face_edge_dirs[i] == 'in':
+                            # Edge comes from mid_{i-1} to mid_i
+                            prev_mid = face_midpoints[(i - 1) % 4]
+                            adj.setdefault(prev_mid, []).append(face_midpoints[i])
+
+                # Handle strict 26-adjacency
+                # Check for strictly 26-adjacent same-valued voxels in this 8-cube
+                # If foreground_conn == 26 and two 1-voxels share a corner, or background_conn == 26 and two 0-voxels share a corner.
+                # The source states: "the local graph is transformed: the two disconnected loops are triangulated"
+                # [G] Exact triangulation rule for this case is not specified in the sources; standard chord insertion or loop splitting is implied.
+                # We will note it as a comment.
+
+    # Extract cycles from the directed graph
+    visited = set()
+    triangles = []
+
+    for start_node in adj:
+        if start_node in visited:
+            continue
+        cycle = []
+        curr = start_node
+        while curr not in visited and curr in adj:
+            visited.add(curr)
+            cycle.append(curr)
+            # Follow the single outgoing edge (graph is a collection of disjoint cycles)
+            next_nodes = adj[curr]
+            if not next_nodes:
+                break
+            curr = next_nodes[0]
+        
+        if len(cycle) > 3:
+            # Triangulate loop of length > 3
+            # Fan triangulation from the first vertex
+            for i in range(1, len(cycle) - 1):
+                triangles.append([cycle[0], cycle[i], cycle[i+1]])
+        elif len(cycle) == 3:
+            triangles.append(cycle)
+
+    return triangles
+```
+
+**Edge Cases and Pitfalls:**
+*   **Invalid Connectedness Couples:** Using couples like $(6,6)$, $(18,18)$, $(18,26)$, $(26,18)$, or $(26,26)$ results in a surface that is not consistent with the inverse image, violating property (iii) [S1].
+*   **Strict 26-Adjacency:** If the chosen foreground or background connectivity is 26, and there are strictly 26-adjacent voxels of that type, the local graph must be transformed (triangulated) to prevent self-intersection [S1].
+*   **Ambiguous Faces (Cases 6 and 9):** The standard 4-configuration cases 6 and 9 are indeterminate without the connectedness constraint. The valid connectedness couple resolves these ambiguities globally [S1].
+*   **Boundary Conditions:** The method assumes the border of the support contains only 0-voxels or only 1-voxels [S1].
+
+## Subtopics
+
+## Operating characteristics
+*   **Time Complexity:** Not given in the sources. The method involves iterating over all 8-cubes and processing 4-faces, which is linear in the number of voxels, similar to standard Marching Cubes. However, the global graph assembly and loop extraction may add overhead.
+*   **Memory Complexity:** Not given in the sources. Requires storing the complete graph $G(I)$, which can be large for high-resolution volumes.
+*   **Strengths:** Guarantees a closed, oriented 2-manifold without self-intersections or singularities. Ensures topological correctness by separating foreground and background according to the chosen connectedness. Provides a formal proof of validity [S1].
+*   **Limitations:** Restricted to binary volumes. The choice of connectedness couple affects the surface geometry. May not represent the underlying continuous volume exactly, but lies within limits defined by voxel connections [S1].
+*   **When to use:** When topological correctness is critical, such as in medical imaging or scientific visualization where the connectivity of structures must be preserved.
+*   **When not to use:** For non-binary data or when the exact geometric shape is more important than topological correctness.
+
+## Background
+The method was introduced in the paper "Topologically defined isosurfaces" [S1]. It is based on digital geometry considerations and provides a formal proof of the validity of the generated isosurface. The work explores the relationships between digital surfaces (specifically Jordan surfaces) and isosurfaces locally computed. It addresses the limitations of the standard Marching Cubes algorithm, which may produce surfaces that do not represent the underlying volume exactly or have topological errors [S1].
+
+## Sources
+[S1] Topologically defined isosurfaces, https://doi.org/10.1007/3-540-62005-2_21, fetched 2026-10-27

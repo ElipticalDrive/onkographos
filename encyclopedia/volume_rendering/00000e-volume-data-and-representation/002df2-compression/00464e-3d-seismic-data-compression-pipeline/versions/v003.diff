@@ -1,0 +1,83 @@
+--- v002.md
++++ v003.md
+@@ -23,13 +23,13 @@
+ 
+ **Steps:**
+-1. Read Input: Load the SEG-Y dataset. Determine `traceCount` and `samplesPerTrace`. Calculate `segyBytes` (raw file size) and `rawDataBytes` (`traceCount * samplesPerTrace * 4` bytes, assuming 32-bit floats) [S1, unofficial].
++1. Read Input: Load the SEG-Y dataset. Determine `traceCount` and `samplesPerTrace` [S1, unofficial]. Calculate `segyBytes` (raw file size) and `rawDataBytes` (`traceCount * samplesPerTrace * 4` bytes, assuming 32-bit floats) [S1, unofficial].
+ 2. Partition into Blocks: Divide the 3D volume into non-overlapping blocks of size `blockInline x blockXline x blockTime` [S1, unofficial].
+ 3. Process Each Block:
+    a. Calculate Min/Max: Iterate over all samples in the block to find global `min` and `max` [S1, unofficial].
+    b. Normalize: Map samples to `[-1, 1]`. If `max == min` (degenerate case), set all normalized values to `0f` to avoid division by zero [S1, unofficial]. Otherwise: $norm = \frac{v - min}{max - min} \times 2 - 1$ [S1, unofficial].
+-   c. Closed-Loop DPCM with Quantization: Apply 3D differential encoding based on the `bitDepth` [S1, unofficial]. Predict the current sample based on previously processed neighbors. Calculate the difference $diff = v_{norm} - v_{pred}$. Quantize the difference. Crucially, use the *quantized* reconstructed value for subsequent predictions (closed-loop), not the original normalized value, ensuring decoder synchronization without transmitting original floats [S1, unofficial].
+-   d. Compress Payload: Create a self-describing payload by storing bit depth information and compressing the quantized data using Deflate with the `compressionLevel`. Store `min`, `max`, and the compressed `payload` in a `CompressedVolumeBlock3D` structure [S1, unofficial].
++   c. Closed-Loop DPCM with Quantization: Apply 3D differential encoding based on the `bitDepth` [S1, unofficial]. Predict the current sample based on previously processed neighbors [S1, unofficial]. Calculate the difference $diff = v_{norm} - v_{pred}$ [S1, unofficial]. Quantize the difference. Crucially, use the *quantized* reconstructed value for subsequent predictions (closed-loop), not the original normalized value, ensuring decoder synchronization without transmitting original floats [S1, unofficial].
++   d. Compress Payload: Create a self-describing payload by storing bit depth information and compressing the quantized data using Deflate with the `compressionLevel` [S1, unofficial]. Store `min`, `max`, and the compressed `payload` in a `CompressedVolumeBlock3D` structure [S1, unofficial].
+ 4. Write SDC3D File: Write the header, volume/block dimensions, index table, and compressed payloads [S1, unofficial].
+-5. Reconstruct and Evaluate: Read the SDC3D file. Reconstruct traces from the volume. Iterate traces, compute PSNR per trace. Track min, max, mean PSNR [S1, unofficial].
++5. Reconstruct and Evaluate: Read the SDC3D file [S1, unofficial]. Reconstruct traces from the volume. Iterate traces, compute PSNR per trace. Track min, max, mean PSNR [S1, unofficial].
+ 6. Return Result: Return `CompressionResult` with metrics [S1, unofficial].
+ 
+@@ -40,6 +40,6 @@
+ **Pseudocode:**
+ ```python
++import struct
+ import zlib
+-import math
+ 
+ def compress_segy_to_sdc3d(segy_data, profile, block_inline=8, block_xline=8, block_time=None):
+@@ -51,5 +51,5 @@
+     xline_count = len(segy_data[0][0][0]) if segy_data else 0
+     
+-    segy_bytes = len(segy_data) * samples_per_trace * 4
++    segy_bytes = trace_count * samples_per_trace * 4
+     raw_data_bytes = trace_count * samples_per_trace * 4
+     
+@@ -72,6 +72,15 @@
+                 k_len = k_end - k_start
+                 
+-                # Extract block data
+-                block_data = [[[segy_data[i][j][k] for k in range(k_start, k_end)] for j in range(j_start, j_end)] for i in range(i_start, i_end)]
++                # Extract block data, handling missing traces (traceIdx < 0)
++                block_data = []
++                for i in range(i_start, i_end):
++                    row = []
++                    for j in range(j_start, j_end):
++                        trace_idx = i * xline_count + j # simplified mapping
++                        if trace_idx < 0:
++                            row.append([0.0] * k_len)
++                        else:
++                            row.append(segy_data[i][j][k_start:k_end])
++                    block_data.append(row)
+                 
+                 # Step 3a: Calculate Min/Max
+@@ -87,5 +96,5 @@
+                 
+                 # Step 3c: Closed-Loop DPCM with Quantization
+-                quantized_diffs = [[[0.0 for _ in range(k_len)] for _ in range(j_len)] for _ in range(i_len)]
++                quantized_diffs = [[[0 for _ in range(k_len)] for _ in range(j_len)] for _ in range(i_len)]
+                 reconstructed = [[[0.0 for _ in range(k_len)] for _ in range(j_len)] for _ in range(i_len)]
+                 
+@@ -98,5 +107,5 @@
+                             v_norm = norm_data[i][j][k]
+                             
+-                            # Predict based on neighbors (closed-loop uses reconstructed values)
++                            # Predict based on neighbors (closed-loop uses reconstructed values) [G]
+                             pred = 0.0
+                             neighbors = 0
+@@ -121,5 +130,7 @@
+                 # Step 3d: Compress Payload
+                 flat_diffs = [quantized_diffs[i][j][k] for i in range(i_len) for j in range(j_len) for k in range(k_len)]
+-                payload_bytes = zlib.compress(bytes(flat_diffs), profile.compression_level)
++                # Pack quantized diffs as 4-byte floats for Deflate [G]
++                packed_data = struct.pack('<' + 'f' * len(flat_diffs), *flat_diffs)
++                payload_bytes = zlib.compress(packed_data, profile.compression_level)
+                 
+                 block_meta = {'inlineStartIndex': i_start, 'xlineStartIndex': j_start, 'timeStartIndex': k_start,
+@@ -168,5 +179,5 @@
+ - **Time Complexity**: $O(N)$ where $N$ is the total number of samples, as each sample is processed once for normalization, DPCM, and quantization [S1, unofficial]. Deflate compression is also roughly linear in practice [S1, unofficial].
+ - **Memory Complexity**: $O(B)$ where $B$ is the block size, as only one block is processed at a time [S1, unofficial].
+-- **Measured Performance**: Not given in the sources.
++- **Measured Performance**: Not given in the sources [S1, unofficial].
+ - **Scaling**: Scales well with block size; larger blocks may yield better compression due to more spatial redundancy but increase memory usage per block [S1, unofficial].
+ - **Strengths**: Preserves trace integrity (important for seismic interpretation), lossy but controllable via bit depth, efficient for large 3D volumes [S1, unofficial].

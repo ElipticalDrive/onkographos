@@ -1,0 +1,222 @@
+--- v003.md
++++ v004.md
+@@ -1,5 +1,5 @@
+ # Static Contiguous Image-Based Partitioning
+ 
+-Also called: Image Order Volume Rendering, Image-order distribution, Sort-first
++Also called: Static image-based partitioning, Image-based partitioning
+ 
+ ## Overview
+@@ -8,94 +8,48 @@
+ ## How it works
+ **Inputs and Outputs:**
+-*   **Input:** A 3D volume dataset $V$, a camera configuration (view matrix, projection matrix), and a target image resolution $W \times H$.
+-*   **Output:** A final composite image $I$ of resolution $W \times H$.
++*   **Input:** A 3D volume dataset $V$, a camera configuration (view matrix, projection matrix), and a target image resolution $W \times H$ [G].
++*   **Output:** A final composite image $I$ of resolution $W \times H$ [G].
+ 
+ **Data Structures:**
+-*   **Volume Data:** Distributed across $P$ processors. Each processor $p$ holds a subset of the volume data $V_p$ responsible for rendering its tile.
++*   **Volume Data:** Distributed across $P$ processors. Each processor $p$ holds a subset of the volume data $V_p$ responsible for rendering its tile [S4, unofficial].
+ *   **Image Partition:** The image is divided into $P$ contiguous blocks. If adaptive sampling is used, the image is conceptually divided into square sample regions of size $I_{max} \times I_{max}$ pixels [S3, unofficial]. These regions are grouped into $P$ contiguous large blocks with roughly equal amounts of work [S3, unofficial].
+ *   **Shared Memory/Communication:** In shared-memory architectures, processors communicate via shared memory. In distributed-memory systems, processors communicate via message passing [S4, unofficial].
+ 
+ **Steps:**
+-1.  **Data Distribution:**
+-    *   Volume data is distributed arbitrarily across processors initially [S4, unofficial].
+-    *   Each processor determines the ownership of the subvolume required for its assigned tile [S4, unofficial].
+-    *   Processors keep the data they are responsible for and send all other data to the corresponding processor in charge [S4, unofficial]. This redistribution may happen at the beginning of every frame computation [S4, unofficial].
+-    *   *Note:* In shared-memory systems, this step may be simplified if data is already accessible, but logical ownership must be established [S2, unofficial].
+-
+-2.  **Tile Assignment:**
+-    *   The image is partitioned into $P$ contiguous blocks [S3, unofficial].
+-    *   Each processor $p$ is assigned one block $B_p$ [S3, unofficial].
+-
+-3.  **Rendering (Scanline Order):**
+-    *   Each processor renders its assigned block $B_p$ in scanline order from top to bottom [S3, unofficial].
+-    *   For each pixel (or sample region) in the block, the processor casts rays into the volume data it owns ($V_p$) and composites the result [S1].
+-    *   If adaptive sampling is employed, the processor calculates sample regions within its block [S3, unofficial].
+-
+-4.  **Handling Shared Pixels (Boundary Condition):**
+-    *   Pixels shared by image sections processed by different processors are located only in the square sample regions at the top and bottom of each image section [S3, unofficial].
+-    *   **Top Regions:** Each processor calculates the shared pixels in the top sample regions of its section [S2, unofficial].
+-    *   **Bottom Regions:** When a processor reaches the bottom sample regions, it does *not* cast rays for shared pixels. Instead, it uses the shared pixel values already available in shared memory (or received from lower neighbors), which were calculated by its lower neighboring processors [S2, unofficial].
+-    *   This mechanism avoids replicated ray casting for shared pixels [S3, unofficial].
+-
+-5.  **Result Collection:**
+-    *   The sub-images from all processors are collected onto one processor (or composited in a shared frame buffer) to produce the final image [S1].
++1.  **Data Distribution:** Volume data is distributed arbitrarily across processors initially [S4, unofficial]. Each processor determines the ownership of the subvolume required for its assigned tile [S4, unofficial]. Processors keep the data they are responsible for and send all other data to the corresponding processor in charge [S4, unofficial]. This redistribution may happen at the beginning of every frame computation [S4, unofficial].
++2.  **Tile Assignment:** The image is partitioned into $P$ contiguous blocks [S3, unofficial]. Each processor $p$ is assigned one block $B_p$ [S3, unofficial].
++3.  **Rendering (Scanline Order):** Each processor renders its assigned block $B_p$ in scanline order from top to bottom [S3, unofficial]. For each pixel (or sample region) in the block, the processor casts rays into the volume data it owns ($V_p$) and composites the result [S1]. If adaptive sampling is employed, the processor calculates sample regions within its block [S3, unofficial].
++4.  **Handling Shared Pixels (Boundary Condition):** Pixels shared by image sections processed by different processors are located only in the square sample regions at the top and bottom of each image section [S3, unofficial]. **Top Regions:** Each processor calculates the shared pixels in the top sample regions of its section [S2, unofficial]. **Bottom Regions:** When a processor reaches the bottom sample regions, it uses the shared pixel values already available in shared memory (or received from lower neighbors), which were calculated by its lower neighboring processors [S2, unofficial]. This mechanism avoids replicated ray casting for shared pixels [S3, unofficial].
++5.  **Result Collection:** The sub-images from all processors are collected onto one processor (or composited in a shared frame buffer) to produce the final image [S1].
+ 
+ **Pseudocode:**
+ ```python
+-def static_contiguous_partitioning_rendering(volume_data, camera, image_width, image_height, num_processors, processor_id):
+-    """
+-    Renders a portion of the image using static contiguous partitioning.
+-    
+-    Args:
+-        volume_data: The full 3D volume dataset (accessible locally or via communication).
+-        camera: Camera parameters (view and projection matrices).
+-        image_width: Width of the final image in pixels.
+-        image_height: Height of the final image in pixels.
+-        num_processors: Total number of processors P.
+-        processor_id: ID of the current processor (0 to P-1).
+-        
+-    Returns:
+-        sub_image: The rendered portion of the image for this processor's tile.
+-    """
+-    
+-    # Step 1: Data Distribution (Simplified for single-process simulation)
+-    # In a real distributed system, volume_data would be filtered to only include
+-    # cells contributing to this processor's tile.
+-    local_volume = redistribute_volume(volume_data, processor_id, num_processors)
++def static_contiguous_partitioning(volume_data, camera, image_width, image_height, num_processors, processor_id):
++    # Step 1: Data Distribution
++    # [G] In a real system, volume_data is filtered to cells contributing to this tile.
++    local_volume = filter_volume_to_tile(volume_data, processor_id, num_processors, image_width, image_height)
+     
+     # Step 2: Tile Assignment
+-    # Divide image into P contiguous blocks.
+-    # Assuming equal height distribution for simplicity.
+     tile_height = image_height // num_processors
+     tile_start_y = processor_id * tile_height
+-    tile_end_y = (processor_id + 1) * tile_height if processor_id < num_processors - 1 else image_height
++    tile_end_y = image_height if processor_id == num_processors - 1 else (processor_id + 1) * tile_height
+     
+-    sub_image = empty_image(image_width, tile_end_y - tile_start_y)
++    sub_image = [[0.0, 0.0, 0.0, 0.0] for _ in range(tile_end_y - tile_start_y)]
+     
+     # Step 3 & 4: Rendering with Shared Pixel Handling
+-    # Iterate through the tile in scanline order (top to bottom)
+     for y in range(tile_start_y, tile_end_y):
+-        for x in range(0, image_width):
+-            
+-            # Determine if this pixel is a "shared" pixel at the boundary
++        for x in range(image_width):
+             is_top_boundary = (y == tile_start_y) and (processor_id > 0)
+             is_bottom_boundary = (y == tile_end_y - 1) and (processor_id < num_processors - 1)
+             
+             if is_top_boundary:
+-                # Calculate shared pixels in the top sample regions
+-                # Cast rays and composite
+                 pixel_value = cast_ray_and_composite(local_volume, camera, x, y)
+                 sub_image[y - tile_start_y][x] = pixel_value
+-                # Store in shared memory for lower neighbors
+-                store_in_shared_memory(x, y, pixel_value)
+-                
++                # [G] Store in shared memory for lower neighbors
+             elif is_bottom_boundary:
+-                # Use shared pixel values from lower neighbors
+-                # These were calculated by the processor with ID (processor_id + 1)
+-                pixel_value = retrieve_from_shared_memory(x, y)
++                # [G] Retrieve from shared memory, calculated by lower neighbor
++                pixel_value = retrieve_shared_pixel(x, y)
+                 sub_image[y - tile_start_y][x] = pixel_value
+-                
+             else:
+-                # Standard pixel rendering
+                 pixel_value = cast_ray_and_composite(local_volume, camera, x, y)
+                 sub_image[y - tile_start_y][x] = pixel_value
+@@ -103,33 +57,59 @@
+     return sub_image
+ 
+-def redistribute_volume(full_volume, processor_id, num_processors):
+-    """
+-    Distributes volume data based on tile ownership.
+-    In a real system, this involves MPI_Send/MPI_Recv or shared memory allocation.
+-    """
+-    # Determine which cells contribute to the tile assigned to processor_id
+-    # This is a placeholder for the actual geometric culling and redistribution logic.
+-    # [G] In practice, this requires projecting the volume cells onto the image plane
+-    # to determine which cells fall within the tile's screen-space bounds.
+-    local_cells = []
+-    for cell in full_volume.cells:
+-        if cell_contributes_to_tile(cell, processor_id, num_processors):
+-            local_cells.append(cell)
+-    return VolumeData(local_cells)
++def filter_volume_to_tile(volume, pid, P, W, H):
++    # [G] Projects volume cells to screen space and keeps those within the tile's y-range
++    tile_h = H // P
++    y_min = pid * tile_h
++    y_max = (pid + 1) * tile_h if pid < P - 1 else H
++    return [cell for cell in volume if y_min <= cell.screen_y <= y_max]
+ 
+ def cast_ray_and_composite(volume, camera, x, y):
+-    """
+-    Casts a ray from the camera through pixel (x, y) into the volume and composites.
+-    """
+-    # [G] Standard ray casting loop
++    # [G] Standard front-to-back volume rendering
+     ray_origin = camera.unproject(x, y)
+-    ray_direction = camera.get_direction(x, y)
++    ray_dir = camera.get_direction(x, y)
++    ray_dir = normalize(ray_dir)
++    
++    # [G] Compute step size based on voxel size or fixed value
++    step_size = 0.5 
++    ray_length = compute_ray_length_in_volume(ray_origin, ray_dir, volume.bounds)
++    
+     color = [0.0, 0.0, 0.0, 0.0]
+     t = 0.0
+     while t < ray_length:
+-        sample = volume.sample(ray_origin + t * ray_direction)
+-        color = composite_step(color, sample)
++        sample = volume.sample(ray_origin + t * ray_dir)
++        alpha = sample[3]
++        color = [
++            color[0] + (1.0 - color[3]) * sample[0] * alpha,
++            color[1] + (1.0 - color[3]) * sample[1] * alpha,
++            color[2] + (1.0 - color[3]) * sample[2] * alpha,
++            color[3] + (1.0 - color[3]) * alpha
++        ]
++        if color[3] >= 0.99:
++            break
+         t += step_size
+     return color
++
++def compute_ray_length_in_volume(origin, direction, bounds):
++    # [G] Standard ray-box intersection to find t_max
++    t_min = -float('inf')
++    t_max = float('inf')
++    for i in range(3):
++        if direction[i] == 0:
++            if origin[i] < bounds.min[i] or origin[i] > bounds.max[i]:
++                return 0.0
++        else:
++            t1 = (bounds.min[i] - origin[i]) / direction[i]
++            t2 = (bounds.max[i] - origin[i]) / direction[i]
++            t_min = max(t_min, min(t1, t2))
++            t_max = min(t_max, max(t1, t2))
++    return max(0.0, t_max)
++
++def normalize(v):
++    mag = (v[0]**2 + v[1]**2 + v[2]**2)**0.5
++    return [v[0]/mag, v[1]/mag, v[2]/mag]
++
++def retrieve_shared_pixel(x, y):
++    # [G] Reads from a shared memory array populated by the processor with ID (processor_id + 1)
++    return shared_pixel_buffer[y][x]
+ ```
+ 
+@@ -140,5 +120,5 @@
+ **Edge Cases and Pitfalls:**
+ *   **Load Imbalance:** Image order does not guarantee equal cell distribution. If one tile contains more cells (e.g., due to uneven cell sizes in unstructured data or camera focus on a specific region), its processor performs more work, causing load imbalance [S1].
+-*   **Replicated Loading:** Cells covering more than one tile result in replicated loading of those cells across multiple processors, increasing memory usage and communication costs [S1].
++*   **Replicated Loading:** Cells covering more than one tile result in replicated loading of those cells across multiple processors [S1].
+ *   **Scalability Limits:** In distributed memory systems, as $P$ increases, the image space grows into too many pieces, causing data redistribution and boundary data redundancy to become serious scalability limitations [S4, unofficial].
+ *   **Per-Frame Coherence:** In real-time volume rendering, user interaction can cause sudden scene changes, breaking per-frame coherence and preventing the use of retained-mode optimizations that reduce transferred data [S4, unofficial].
+@@ -164,5 +144,5 @@
+ 
+ ## Background
+-Static Contiguous Image-Based Partitioning, also known as Sort-first rendering, is a parallelization strategy for volume rendering that divides the image into contiguous blocks assigned to processors [S3, S4, unofficial]. It was proposed as a simpler and more effective solution than dynamic image-based partitioning (e.g., Nieh and Levoy [2]) to avoid the cost of replicated ray casting associated with pixel sharing in adaptive image sampling [S3, unofficial]. The method is compatible with standard APIs like OpenGL, which lack high-performance access to intermediate rendering results, making sort-middle impractical [S4, unofficial]. It has been used in various parallel volume rendering schemes, including those for unstructured volume data [S1].
++Static Contiguous Image-Based Partitioning, also known as static image-based partitioning or image-based partitioning, is a parallelization strategy for volume rendering that divides the image into contiguous blocks assigned to processors [S3, S4, unofficial]. It was proposed as a simpler and more effective solution than dynamic image-based partitioning (e.g., Nieh and Levoy) to avoid the cost of replicated ray casting associated with pixel sharing in adaptive image sampling [S3, unofficial]. The method is compatible with standard APIs like OpenGL, which lack high-performance access to intermediate rendering results, making sort-middle impractical [S4, unofficial]. It has been used in various parallel volume rendering schemes, including those for unstructured volume data [S1]. The underlying sequential renderer can be the Scanline Z-Buffer algorithm, which requires no connectivity information, only a set of unconnected polygons [S5, unofficial].
+ 
+ ## Sources
+@@ -170,3 +150,4 @@
+ [S2] Time-Critical Volume Rendering, https://ntrs.nasa.gov/api/citations/19990040407/downloads/19990040407.pdf, fetched 2026-10-26 (unofficial)
+ [S3] NASA Technical Reports Server (NTRS) 19990040407: Time-Critical Volume Rendering, https://archive.org/details/NASA_NTRS_Archive_19990040407, fetched 2026-10-26 (unofficial)
+-[S4] Volume Visualization and Compositing on Large-Scale Displays Using Handheld Touchscreen Interaction, https://doi.org/10.25781/kaust-d5m7l, fetched 2026-10-26 (unofficial)+[S4] Volume Visualization and Compositing on Large-Scale Displays Using Handheld Touchscreen Interaction, https://doi.org/10.25781/kaust-d5m7l, fetched 2026-10-26 (unofficial)
++[S5] ;Г, ,1:. 'i f ,3 Ψ |'̂*i, ̂ t ѴУ t ̂ -.̂ 'j f'\ ' ‘'̂ '· îM. Vl ■I ·' !■' Í; 1 ! é .1 li ifi; .· '̂'■ '’(■H ' ■'“' ’"ΐ ΐ'-ΐ ...., https://repository.bilkent.edu.tr/server/api/core/bitstreams/a7dc03c6-3640-4028-b1b3-d6296aa2d23c/content, fetched 2026-10-30 (unofficial)

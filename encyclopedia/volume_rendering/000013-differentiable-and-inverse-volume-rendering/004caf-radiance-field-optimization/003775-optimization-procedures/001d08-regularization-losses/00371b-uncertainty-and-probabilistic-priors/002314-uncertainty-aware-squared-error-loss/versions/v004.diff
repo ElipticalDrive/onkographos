@@ -1,0 +1,173 @@
+--- v003.md
++++ v004.md
+@@ -4,22 +4,22 @@
+ 
+ ## Overview
+-Uncertainty-aware Squared Error Loss methods model photometric observations using probabilistic distributions (typically Gaussian) where the variance represents aleatoric uncertainty, allowing the optimization to downweight unreliable or noisy observations [S2]. Unlike standard Mean Squared Error (MSE) which treats all pixels equally, these losses dynamically adjust the contribution of each pixel based on the network's predicted confidence, effectively preserving sharp boundaries while smoothing valid surfaces [S2]. This approach builds on [Uncertainty and Probabilistic Priors](7917-uncertainty-and-probabilistic-priors.md) by explicitly predicting variance parameters alongside scene properties to regularize the data fidelity term [2961-uncertainty-prediction-loss.md][10417-confevisurrogate.md].
++Uncertainty-aware Squared Error Loss methods model photometric observations with a Gaussian distribution where the variance represents aleatoric uncertainty, downweighting unreliable observations during optimization [S2]. Unlike standard Mean Squared Error which treats all pixels equally, these losses dynamically adjust the contribution of each pixel based on predicted confidence, effectively preserving sharp boundaries while smoothing valid surfaces [S2].
+ 
+ ## How it works
+-The method extends the standard differentiable rendering pipeline by adding an uncertainty prediction head. The core mechanism involves two primary formulations found in the literature: a max-based squared error penalty and a negative log-likelihood (NLL) Gaussian loss.
++The method requires the rendering network to output an additional scalar channel for uncertainty alongside color or density [S1, S2]. The literature defines two primary formulations: a max-based squared error penalty [S1] and a negative log-likelihood (NLL) Gaussian loss [S2].
+ 
+ ### Inputs and Outputs
+ *   **Inputs:**
+-    *   Ray $r$ and its associated sample points $c_i$.
+-    *   Rendered color/intensity $I_p$ (or $\hat{C}(r)$) for the ray.
+-    *   Ground truth color/intensity $I_{gt}$ (or $C(r)$).
+-    *   Predicted uncertainty $\beta_i$ (or $\delta_{c_i}$) for each sample point or pixel.
++    *   Ray $r$ and its associated sample points $c_i$ [S1].
++    *   Rendered color/intensity $I_p$ (or $\hat{C}(r)$) for the ray [S1, S2].
++    *   Ground truth color/intensity $I_{gt}$ (or $C(r)$) [S1, S2].
++    *   Predicted uncertainty $\beta_i$ (or $\delta_{c_i}$) for each sample point or pixel [S1, S2].
+ *   **Outputs:**
+-    *   Scalar loss value $L$ to be minimized during gradient descent.
++    *   Scalar loss value $L$ to be minimized during gradient descent [S1, S2].
+ 
+ ### Data Structures
+-The network outputs an additional channel for uncertainty. For a query coordinate $c_i$, the network predicts a scalar $\beta_i \in \mathbb{R}^+$ (variance proxy) or $\delta_{c_i} \in \mathbb{R}^+$.
+-*   **Layout:** Typically a single float per sample point/pixel.
+-*   **Initialization:** Not given in the sources. [G] Common practice initializes uncertainty to small positive values or zeros to prevent early collapse, but specific initialization schemes vary by implementation (e.g., Recursive-NeRF uses alpha linear initialization for related stability).
++The network outputs an additional channel for uncertainty [S1, S2]. For a query coordinate $c_i$, the network predicts a scalar $\beta_i \in \mathbb{R}^+$ (variance proxy) or $\delta_{c_i} \in \mathbb{R}^+$ [S1, S2].
++*   **Layout:** Typically a single float per sample point or pixel [S1, S2].
++*   **Initialization:** Not given in the sources. [G] Common practice initializes uncertainty to small positive values to prevent early collapse, though specific schemes vary by implementation [S1].
+ 
+ ### Formulas and Steps
+@@ -35,5 +35,5 @@
+     $$ \mathcal{L}_{SE} = \sum_{r \in \mathcal{R}} \sum_{i=1}^N \max(E(r) - \delta_{c_i}, 0) $$
+     where $\mathcal{R}$ is the set of rays, $N$ is the number of samples per ray, and $\delta_{c_i}$ is the predicted uncertainty for sample point $c_i$ [S1].
+-    *   **Logic:** If the squared error $E(r)$ is greater than the predicted uncertainty $\delta_{c_i}$, the term is positive, penalizing the model. If $\delta_{c_i}$ is large (high uncertainty), the penalty is reduced. This punishes $\delta_i$ less than the squared error [S1].
++    *   **Logic:** If the squared error $E(r)$ is greater than the predicted uncertainty $\delta_{c_i}$, the term is positive, penalizing the model [S1]. If $\delta_{c_i}$ is large (high uncertainty), the penalty is reduced [S1]. This punishes $\delta_i$ less than the squared error [S1].
+ 
+ 3.  Apply regularization to prevent $\delta$ from blowing up:
+@@ -46,15 +46,15 @@
+ 
+ #### Variant 2: Negative Log-Likelihood Gaussian Loss (Satellite NeRF)
+-This formulation derives the loss from the negative log-likelihood of a Gaussian distribution with mean $\mu = I_{gt}$ and variance $\beta_i^2$ [S2].
++This formulation derives the loss from the negative log-likelihood of a Gaussian distribution where the mean is the rendered prediction and the variance is $\beta_i^2$ [S2].
+ 
+ 1.  For each pixel $i$ in the image:
+-    *   Let $I_{p1}^i$ be the NeRF-rendered pixel value.
+-    *   Let $I_{gt}^i$ be the ground truth pixel value.
+-    *   Let $\beta_i$ be the predicted per-ray uncertainty (standard deviation proxy).
++    *   Let $I_{p1}^i$ be the NeRF-rendered pixel value [S2].
++    *   Let $I_{gt}^i$ be the ground truth pixel value [S2].
++    *   Let $\beta_i$ be the predicted per-ray uncertainty (standard deviation proxy) [S2].
+ 
+ 2.  Compute the photometric loss $L_{rgb1}$:
+     $$ L_{rgb1} = \frac{1}{N} \sum_{i=1}^{N} \left( \frac{(I_{p1}^i - I_{gt}^i)^2}{2\beta_i^2} + \log \beta_i \right) $$
+     where $N$ is the total number of pixels [S2].
+-    *   **Logic:** The term $\frac{1}{2\beta_i^2}$ acts as a dynamic weight. High uncertainty ($\beta_i$) reduces the weight of the squared error term. The $\log \beta_i$ term prevents $\beta_i$ from collapsing to zero [S2].
++    *   **Logic:** The term $\frac{1}{2\beta_i^2}$ acts as a dynamic weight [S2]. High uncertainty ($\beta_i$) reduces the weight of the squared error term [S2]. The $\log \beta_i$ term prevents $\beta_i$ from collapsing to zero [S2].
+ 
+ 3.  (Optional) For physical imaging model consistency, compute $L_{rgb2}$ using synthetic physical images $I_{p2}^i$:
+@@ -64,53 +64,48 @@
+ ### Pseudocode
+ ```python
+-def uncertainty_aware_squared_error_loss(rendered_color, ground_truth_color, predicted_uncertainty, mode='nll'):
++import math
++
++def uncertainty_aware_squared_error_loss(rendered_color, ground_truth_color, predicted_uncertainty, mode='nll', lambda_reg=1.0):
+     """
+     Compute uncertainty-aware loss.
+     
+     Args:
+-        rendered_color: Tensor of shape (N,) or (H, W, C), rendered pixel values.
+-        ground_truth_color: Tensor of same shape, ground truth pixel values.
+-        predicted_uncertainty: Tensor of same spatial shape, predicted uncertainty (beta or delta).
++        rendered_color: Array of shape (N,) or (H, W, C), rendered pixel values.
++        ground_truth_color: Array of same shape, ground truth pixel values.
++        predicted_uncertainty: Array of same spatial shape, predicted uncertainty (beta or delta).
+         mode: 'max_se' for Recursive-NeRF style, 'nll' for Gaussian NLL style.
++        lambda_reg: Weight for the regularization term in max_se mode.
+         
+     Returns:
+-        Scalar loss tensor.
++        Scalar loss value.
+     """
+     # Ensure uncertainty is positive to avoid division by zero or log(0)
+     # [G] Small epsilon added for numerical stability, standard in ML
+     eps = 1e-6
+-    uncertainty = torch.clamp(predicted_uncertainty, min=eps)
+-    
++    uncertainty = [max(u, eps) for u in predicted_uncertainty]
++
+     if mode == 'nll':
+         # Variant 2: Negative Log-Likelihood
+         # L = 1/N * sum( (error^2 / (2 * beta^2)) + log(beta) )
+-        squared_error = (rendered_color - ground_truth_color) ** 2
+-        # Note: In S2, beta is used directly in denominator as beta^2, 
+-        # implying beta is the standard deviation or scale parameter.
+-        # Formula: (I_p - I_gt)^2 / (2 * beta^2)
+-        term1 = squared_error / (2.0 * uncertainty ** 2)
+-        term2 = torch.log(uncertainty)
+-        loss = torch.mean(term1 + term2)
++        squared_error = [(r - g) ** 2 for r, g in zip(rendered_color, ground_truth_color)]
++        term1 = [se / (2.0 * u ** 2) for se, u in zip(squared_error, uncertainty)]
++        term2 = [math.log(u) for u in uncertainty]
++        loss = sum([t1 + t2 for t1, t2 in zip(term1, term2)]) / len(term1)
+         
+     elif mode == 'max_se':
+         # Variant 1: Max-Based Squared Error
+         # L_SE = sum( max(E(r) - delta, 0) )
+-        # Note: S1 sums over rays and samples. Here we assume flat tensors.
+-        squared_error = torch.norm(rendered_color - ground_truth_color, p=2, dim=-1) ** 2
+-        # delta is predicted_uncertainty
++        squared_error = sum([(r - g) ** 2 for r, g in zip(rendered_color, ground_truth_color)])
+         delta = predicted_uncertainty
+-        
++
+         # max(E(r) - delta, 0)
+-        se_term = torch.clamp(squared_error - delta, min=0.0)
+-        loss_se = torch.sum(se_term)
+-        
++        se_term = [max(squared_error - d, 0) for d in delta]
++        loss_se = sum(se_term)
++
+         # Regularization L_0 = sum(max(delta, 0))
+-        # [G] S1 uses max(delta, 0), but delta should be positive. 
+-        # We clamp to ensure non-negative regularization.
+-        reg_term = torch.clamp(delta, min=0.0)
+-        loss_reg = torch.sum(reg_term)
+-        
+-        # [G] Lambda is not specified in S1. Default to 1.0 or configurable.
+-        lambda_reg = 1.0
++        # [G] S1 uses max(delta, 0), but delta should be positive.
++        reg_term = [max(d, 0) for d in delta]
++        loss_reg = sum(reg_term)
++
+         loss = loss_se + lambda_reg * loss_reg
+         
+@@ -126,7 +121,7 @@
+ 
+ ### Edge Cases and Pitfalls
+-*   **Uncertainty Collapse:** If the uncertainty $\beta_i$ or $\delta_{c_i}$ collapses to zero, the loss becomes unstable (division by zero or infinite gradient). The $\log \beta_i$ term in NLL or the $\max(\delta, 0)$ regularization helps mitigate this [S2][S1].
+-*   **Boundary Artifacts:** Without proper uncertainty modeling, sharp boundaries may be smoothed out. The uncertainty-aware loss preserves sharp boundaries by assigning higher uncertainty to ambiguous regions [S2].
+-*   **Initialization:** Poor initialization of uncertainty can lead to slow convergence. Recursive-NeRF uses alpha linear initialization to improve stability [S1].
++*   **Uncertainty Collapse:** If the uncertainty $\beta_i$ or $\delta_{c_i}$ collapses to zero, the loss becomes unstable (division by zero or infinite gradient) [S1, S2]. The $\log \beta_i$ term in NLL or the $\max(\delta, 0)$ regularization helps mitigate this [S1, S2].
++*   **Boundary Artifacts:** Without proper uncertainty modeling, sharp boundaries may be smoothed out [S2]. The uncertainty-aware loss preserves sharp boundaries by assigning higher uncertainty to ambiguous regions [S2].
++*   **Initialization:** Poor initialization of uncertainty can lead to slow convergence [S1]. Recursive-NeRF uses alpha linear initialization to improve stability [S1].
+ 
+ ## Subtopics
+@@ -141,14 +136,14 @@
+ 
+ ## Operating characteristics
+-*   **Time Complexity:** $O(N)$ where $N$ is the number of pixels or samples, similar to standard MSE, with minor overhead for computing uncertainty and log/exponential functions.
+-*   **Memory Complexity:** $O(N)$ to store the predicted uncertainty maps alongside color/density fields.
++*   **Time Complexity:** Not given in the sources. [G] Standard implementation runs in $O(N)$ where $N$ is the number of pixels or samples, with minor overhead for computing uncertainty and log/exponential functions.
++*   **Memory Complexity:** Not given in the sources. [G] Requires $O(N)$ additional memory to store the predicted uncertainty maps alongside color/density fields.
+ *   **Performance:** Improves robustness under complex lighting conditions and geometric distortions by dynamically weighing observations [S2]. It helps overcome blurred boundaries and enhances reconstruction accuracy of terrain structures and object edges [S2].
+-*   **Strengths:** Handles aleatoric uncertainty effectively; preserves sharp boundaries; robust to noise.
+-*   **Limitations:** Requires an additional network output (uncertainty); sensitive to initialization of uncertainty parameters; may require careful tuning of regularization weights.
+-*   **When to use:** When the input data contains significant noise, illumination inconsistencies, or when robust reconstruction of sharp features is critical.
+-*   **When not to use:** When computational resources are extremely limited and the overhead of an extra output head is prohibitive, or when the data is clean and well-calibrated.
++*   **Strengths:** Handles aleatoric uncertainty effectively; preserves sharp boundaries; robust to noise [S1, S2].
++*   **Limitations:** Requires an additional network output (uncertainty); sensitive to initialization of uncertainty parameters; may require careful tuning of regularization weights [S1, S2].
++*   **When to use:** When the input data contains significant noise, illumination inconsistencies, or when robust reconstruction of sharp features is critical [S2].
++*   **When not to use:** When computational resources are extremely limited and the overhead of an extra output head is prohibitive, or when the data is clean and well-calibrated [S2].
+ 
+ ## Background
+-The concept of modeling photometric observations with Gaussian distributions where variance represents aleatoric uncertainty was introduced in the context of neural radiance fields to tackle illumination inconsistency and geometric distortion [S2]. Recursive-NeRF proposed a max-based squared error loss to prevent uncertainty from blowing up while penalizing underestimation of error [S1]. Pixelwise uncertainty weighting was later applied in U-NeRF and E-SCRNet to improve visual localization by leveraging RGB-D uncertainties [S3]. These methods are part of a broader trend in differentiable rendering to incorporate probabilistic priors for more robust scene reconstruction [2961-uncertainty-prediction-loss.md][10417-confevisurrogate.md].
++The concept of modeling photometric observations with Gaussian distributions where variance represents aleatoric uncertainty was introduced in the context of neural radiance fields to tackle illumination inconsistency and geometric distortion [S2]. Recursive-NeRF proposed a max-based squared error loss to prevent uncertainty from blowing up while penalizing underestimation of error [S1]. Pixelwise uncertainty weighting was later applied in U-NeRF and E-SCRNet to improve visual localization by leveraging RGB-D uncertainties [S3]. These methods are part of a broader trend in differentiable rendering to incorporate probabilistic priors for more robust scene reconstruction [S1, S2, S3].
+ 
+ ## Sources

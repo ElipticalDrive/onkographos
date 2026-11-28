@@ -1,0 +1,126 @@
+--- v006.md
++++ v007.md
+@@ -28,5 +28,5 @@
+ **Numbered Steps:**
+ 
+-1.  **Part Decomposition:** Manually divide the human body into $K$ parts based on the SMPL model's blend weights. Define $\Omega_k$ as the set of bones for part $k$ [S1].
++1.  **Part Decomposition:** Manually divide the human body into $K$ parts based on the SMPL model's blend weights [S1].
+ 
+ 2.  **Query Processing (Per Part):** For a query point $\mathbf{x}$ at frame $t$:
+@@ -35,10 +35,10 @@
+ 
+ 3.  **Motion Parameterization (Canonical Space Mapping):**
+-    a. **Inverse LBS:** Transform the query point $\mathbf{x}$ to the unposed space using inverse Linear Blend Skinning (LBS). Given pose $\rho$, blend weight $w_k$, and query point $\mathbf{x}$, the transformed point $\mathbf{x}_0$ is calculated as [S1]:
++    a. **Inverse LBS:** Transform the query point $\mathbf{x}$ to the unposed space using inverse Linear Blend Skinning (LBS) [S1]. Given pose $\rho$, blend weight $w_k$, and query point $\mathbf{x}$, the transformed point $\mathbf{x}_0$ is calculated as [S1]:
+        $$
+        \mathbf{x}_0 = \Phi_{LBS}(\mathbf{x}, w_k, \rho) = \left( \sum_{j=1}^{J} w_{k,j} G_j \right)^{-1} \mathbf{x}
+        $$
+        where $\rho$ denotes the human pose, $\{G_j\}_{j=1}^J$ are the transformation matrices for the bones, and $w_{k,j}$ is the weight of bone $j$ for the part [S1].
+-    b. **Residual Deformation:** Apply Multiresolution Hash Encoding (MHE) $\psi_{res}$ to the 2D UV coordinates and time $(u_k, v_k, t)$. Feed the encoded point to the residual deformation MLP to regress the residual translation $\Delta \mathbf{x}$ [S1].
++    b. **Residual Deformation:** Apply Multiresolution Hash Encoding (MHE) $\psi_{res}$ to the 2D UV coordinates and time $(u_k, v_k, t)$ [S1]. Feed the encoded point to the residual deformation MLP to regress the residual translation $\Delta \mathbf{x}$ [S1].
+     c. **Canonical Point:** Add the residual translation to the inverse LBS output to obtain the canonical point $\mathbf{x}_{can}$ [S1]:
+        $$
+@@ -48,5 +48,5 @@
+ 
+ 4.  **Density and Color Prediction (Per Part):**
+-    a. Predefine the MHE function $\psi_k$ for part $k$. Apply $\psi_k$ to the canonical point $\mathbf{x}_{can}$ to get the encoded point [S1].
++    a. Predefine the MHE function $\psi_k$ for part $k$ [S1]. Apply $\psi_k$ to the canonical point $\mathbf{x}_{can}$ to get the encoded point [S1].
+     b. Feed $\psi_k(\mathbf{x}_{can})$ to the density network $MLP_{\sigma_k}$ to predict density $\sigma_k$ and feature vector $\mathbf{z}$ [S1]:
+        $$
+@@ -75,5 +75,5 @@
+ 
+ class MHE:
+-    """Standard multiresolution hash encoding [G]."""
++    """Multiresolution hash encoding [G]."""
+     def __init__(self, num_levels, level_dim, resolution):
+         self.num_levels = num_levels
+@@ -109,5 +109,6 @@
+ 
+     def inverse_lbs(self, x, w, pose_matrices):
+-        T = torch.zeros_like(pose_matrices[0])
++        # x: (N, 3), w: (N, J), pose_matrices: (J, 4, 4)
++        T = torch.zeros(x.shape[0], 4, 4, device=x.device)
+         for j in range(pose_matrices.shape[0]):
+             T += w[:, j:j+1] * pose_matrices[j]
+@@ -115,4 +116,11 @@
+         x_hom = torch.cat([x, torch.ones_like(x[:, :1])], dim=1)
+         return (T_inv @ x_hom.unsqueeze(-1)).squeeze(-1)[:, :3]
++
++    def _nearest_surface(self, query_points, mesh_vertices, mesh_uv, mesh_weights):
++        # Standard nearest-neighbor search on mesh vertices [G]
++        # Returns blend weights and UV coordinates for the nearest vertices
++        dists = torch.cdist(query_points, mesh_vertices)
++        nearest_idx = torch.argmin(dists, dim=1)
++        return mesh_weights[nearest_idx], mesh_uv[nearest_idx]
+ 
+     def forward(self, query_points, frame_indices, poses, view_directions, part_meshes, smpl_data):
+@@ -122,27 +130,27 @@
+             part = self.parts[k]
+             # Find nearest surface point on part k's mesh
+-            blend_weights, uvs = self._nearest_surface(query_points, part_meshes[k], smpl_data[k])
+-            
++            blend_weights, uvs = self._nearest_surface(query_points, part_meshes[k]['vertices'], smpl_data[k]['uv'], smpl_data[k]['weights'])
++
+             # Inverse LBS
+             x0 = self.inverse_lbs(query_points, blend_weights, poses)
+-            
++
+             # Residual Deformation
+-            t_coords = (frame_indices.float() / 100.0).unsqueeze(1).expand(-1, 2)
++            t_coords = (frame_indices.float() / 100.0).unsqueeze(1)
+             res_encoded = part['res_mhe'](torch.cat([uvs, t_coords], dim=1))
+             delta_x = part['res_net'](res_encoded)
+             x_can = x0 + delta_x
+-            
++
+             # Density & Feature
+             encoded_x = part['mhe'](x_can)
+             sigma_k = part['density_net'](encoded_x).squeeze(-1)
+             z = part['feature_net'](encoded_x)
+-            
++
+             # Color
+             latent = self.latent_embeddings(frame_indices)
+             c_k = part['color_net'](torch.cat([z, view_directions, latent], dim=1))
+-            
++
+             densities.append(sigma_k)
+             colors.append(c_k)
+-        
++
+         densities_stack = torch.stack(densities, dim=1)
+         k_star = torch.argmax(densities_stack, dim=1)
+@@ -151,13 +159,8 @@
+         final_colors = colors_stack.gather(1, k_star.unsqueeze(1).unsqueeze(2).expand(-1, -1, 3)).squeeze(1)
+         return final_densities, final_colors
+-
+-    def _nearest_surface(self, query_points, mesh, smpl_data):
+-        # Standard nearest-neighbor search on mesh vertices
+-        # Returns blend weights and UV coordinates for the nearest vertices
+-        pass
+ ```
+ 
+ **Parameters:**
+-*   **Hash Table Size:** Adapted per part based on complexity. Uniformly large tables (e.g., $2^{20}$) increase memory and training time without quality gains [S1].
++*   **Hash Table Size:** Adapted per part based on complexity [S1]. Uniformly large tables (e.g., $2^{20}$) increase memory and training time without quality gains [S1].
+ *   **Learning Rate:** $5 \times 10^{-4}$ (Adam optimizer) [S1].
+ *   **Training Time:** Approximately 5 minutes on a single RTX 3090 GPU for a 512x512 video with 100 frames [S1].
+@@ -166,12 +169,12 @@
+ *   **Uniform Hash Table Size:** Using a uniformly large hash table across all parts increases memory consumption and per-iteration training time without guaranteed quality gains [S1].
+ *   **Equal Complexity Assumption:** Treating all parts as equally complex wastes representational power on simple regions and degrades PSNR (e.g., by 1.98dB) [S1].
+-*   **Motion Parameterization:** Human motion occurs around a surface; points near the surface projected to neighboring regions on a parametric model have similar motion behavior. Ignoring this 2D structure (e.g., using 3D coordinates) reduces convergence rate [S1].
++*   **Motion Parameterization:** Human motion occurs around a surface; points near the surface projected to neighboring regions on a parametric model have similar motion behavior [S1]. Ignoring this 2D structure (e.g., using 3D coordinates) reduces convergence rate [S1].
+ 
+ ## Operating characteristics
+-*   **Time Complexity:** Training time is significantly reduced compared to prior methods. It is approximately 100 times faster than Neural Body [58], which typically requires more than 10 hours of training [S1].
+-*   **Memory Complexity:** Memory usage is optimized by adapting hash table sizes per part. Uniformly large tables increase memory consumption [S1].
+-*   **Measured Performance:** On the ZJU-MoCap dataset, the method achieves competitive PSNR. Ablation studies show that the part-based approach (286M params) yields higher PSNR than a single MHE-augmented NeRF (302M params) [S1]. Removing the UV-based residual deformation reduces PSNR from 32.09dB to 31.40dB [S1].
+-*   **Strengths:** Fast convergence (minutes vs. hours), efficient distribution of representational power, competitive visual quality.
+-*   **Limitations:** Requires SMPL parameters and sparse multi-view videos.
++*   **Time Complexity:** Training time is significantly reduced compared to prior methods [S1]. It is approximately 100 times faster than Neural Body [58], which typically requires more than 10 hours of training [S1].
++*   **Memory Complexity:** Memory usage is optimized by adapting hash table sizes per part [S1]. Uniformly large tables increase memory consumption [S1].
++*   **Measured Performance:** On the ZJU-MoCap dataset, the method achieves competitive PSNR [S1]. Ablation studies show that the part-based approach (286M params) yields higher PSNR than a single MHE-augmented NeRF (302M params) [S1]. Removing the UV-based residual deformation reduces PSNR from 32.09dB to 31.40dB [S1].
++*   **Strengths:** Fast convergence (minutes vs. hours), efficient distribution of representational power, competitive visual quality [S1].
++*   **Limitations:** Requires SMPL parameters and sparse multi-view videos [S1].
+ 
+ ## Background

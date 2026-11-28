@@ -1,0 +1,188 @@
+--- v001.md
++++ v002.md
+@@ -4,99 +4,124 @@
+ 
+ ## Overview
+-Opacity Decay is a regularization step in 3D Gaussian Splatting training that reduces Gaussian opacity to prevent over-saturation and stabilize the optimization landscape [S1, unofficial]. It serves as the core mechanism for gradually pruning low-confidence primitives, building on the smoother pruning approach of [Smooth Opacity Decay](15326-smooth-opacity-decay.md) by applying a controlled reduction to the opacity parameters during training iterations [S1, unofficial].
++Opacity Decay is a regularization technique applied during the training of 3D Gaussian Splatting models to prevent Gaussian primitives from becoming over-saturated (opacity approaching 1.0) or persisting as redundant, semi-transparent artifacts. It operates by systematically reducing the opacity values of Gaussians, either through a sigmoid-based scaling mechanism or direct subtraction, ensuring that only geometrically relevant primitives retain high opacity. This method distinguishes itself from hard pruning by allowing gradual adjustment of opacity parameters, which stabilizes gradient flow and prevents sudden loss of scene coverage, while differing from visibility-aware variants by applying decay uniformly based on training strategy rather than per-frame visibility metrics.
+ 
+ ## How it works
+-**Inputs and Outputs:**
+-- Input: Current Gaussian splatting data structure (`splats`), containing an `opacities` tensor (logits), the current learning rate (`lr`), and a strategy configuration (`strategy_name`).
+-- Output: Updated `splats['opacities']` tensor with reduced opacity values.
++The method modifies the learnable opacity parameter of each Gaussian primitive. In standard 3D Gaussian Splatting, opacity is stored as a logit (unbounded real number) and converted to alpha via a sigmoid function during rendering. Decay operates on this logit representation or the resulting alpha, depending on the specific strategy employed.
+ 
+-**Data Structures:**
+-- `splats['opacities']`: A 1D tensor of shape $(N,)$ containing the logit-space opacity values for $N$ Gaussians. The actual probability opacity is $\sigma(x) = \frac{1}{1 + e^{-x}}$.
++### Inputs and Outputs
++- **Input**: The current set of Gaussian splats, specifically the `opacities` tensor (logits), learning rate `lr`, and strategy configuration.
++- **Output**: Updated `opacities` tensor with reduced values.
+ 
+-**Parameters:**
+-- `strategy_name`: String identifier for the decay method. Typical value: `'mrnf'` or other strategy names [S1, unofficial].
+-- `opacity_decay`: Float multiplier for the decay magnitude. Typical value: Not given in the sources [S1, unofficial].
+-- `lr`: Current learning rate for the opacity parameter [S1, unofficial].
++### Data Structures
++- **Splats**: A collection of Gaussian primitives. Each primitive $k$ has a learnable opacity logit $\tilde{o}_k$.
++- **Tensor Layout**: `splats['opacities']` is a 1D tensor of shape $(N,)$ containing $\tilde{o}_k$ for $N$ Gaussians.
+ 
+-**Steps:**
+-1. Retrieve the current opacity logits: `opa = splats['opacities'].data`.
+-2. If `strategy_name` is `'mrnf'`:
+-   a. Convert logits to probabilities: `opa_sig = sigmoid(opa)`.
+-   b. Apply decay factor (implicit in the source as a multiplication, though the specific factor value is not explicitly named, the operation is defined as multiplying by a decay factor): `opa_sig_decayed = opa_sig * decay_factor`. [S1, unofficial]
+-   c. Convert back to logit space: `opa_new = log(opa_sig_decayed / (1.0 - opa_sig_decayed + 1e-8))`.
+-   d. Update `splats['opacities'].data = opa_new`.
+-3. Else if `opacity_decay > 0`:
+-   a. Subtract the decay amount from the logits: `opa_new = opa - opacity_decay * lr`.
+-   b. Update `splats['opacities'].data = opa_new`.
++### Parameters
++- **`opacity_decay`**: A scalar multiplier for the decay rate. Typical values are small positive numbers (e.g., $10^{-4}$ to $10^{-3}$) relative to the learning rate. [S1, unofficial]
++- **`decay_factor`**: The multiplicative factor applied to the sigmoid opacity in the 'mrnf' strategy. [S1, unofficial]
++- **`lr`**: The current learning rate for the opacity parameter. [S1, unofficial]
+ 
+-**Pseudocode:**
++### Steps
++The application of opacity decay depends on the selected strategy name.
++
++1. **Strategy: 'mrnf' (Sigmoid Scaling)**
++   This strategy applies a multiplicative decay to the alpha value, then converts back to logit space.
++   1. Compute the current alpha: $\alpha_k = \sigma(\tilde{o}_k) = \frac{1}{1 + e^{-\tilde{o}_k}}$.
++   2. Apply decay: $\alpha'_k = \alpha_k \times \text{decay\_factor}$.
++   3. Clip $\alpha'_k$ to a safe range $[\epsilon, 1-\epsilon]$ to avoid numerical instability in the logit conversion, where $\epsilon = 10^{-8}$.
++   4. Convert back to logit: $\tilde{o}'_k = \log\left(\frac{\alpha'_k}{1 - \alpha'_k}\right)$.
++   5. Update the logit: $\tilde{o}_k \leftarrow \tilde{o}'_k$.
++
++2. **Strategy: Subtractive (Direct Decay)**
++   This strategy directly subtracts a value from the logit opacity.
++   1. Compute the decay amount: $\Delta = \text{opacity\_decay} \times \text{lr}$.
++   2. Update the logit: $\tilde{o}_k \leftarrow \tilde{o}_k - \Delta$.
++   3. [G] Ensure the logit does not drop below a minimum bound (e.g., -60) to prevent underflow during rendering, though the source notes do not explicitly specify a lower bound for this specific step. [S1, unofficial]
++
++### Pseudocode
+ ```python
+ import torch
+-import torch.nn.functional as F
++import math
+ 
+-def apply_opacity_decay(splats, strategy_name, opacity_decay, lr, decay_factor=0.9):
++def apply_opacity_decay(splats_opacities_logit: torch.Tensor, 
++                        strategy_name: str, 
++                        opacity_decay: float, 
++                        decay_factor: float, 
++                        lr: float) -> torch.Tensor:
+     """
+-    Applies opacity decay to 3D Gaussians.
++    Applies opacity decay to Gaussian splats.
+     
+     Args:
+-        splats: Object containing 'opacities' tensor (logits).
+-        strategy_name: String, e.g., 'mrnf'.
+-        opacity_decay: Float, decay multiplier for non-mrnf strategies.
+-        lr: Float, current learning rate.
+-        decay_factor: Float, factor to multiply sigmoid opacity by (default 0.9).
++        splats_opacities_logit: Tensor of shape (N,) containing logit opacities.
++        strategy_name: 'mrnf' or 'subtractive'.
++        opacity_decay: Scalar decay multiplier for subtractive strategy.
++        decay_factor: Multiplicative factor for mrnf strategy.
++        lr: Current learning rate.
+         
+     Returns:
+-        Updated splats object.
++        Updated tensor of logit opacities.
+     """
+-    opa = splats['opacities'].data.clone()
++    eps = 1e-8
++    new_opacities = splats_opacities_logit.clone()
+     
+     if strategy_name == 'mrnf':
+-        # Convert logits to probabilities
+-        opa_sig = torch.sigmoid(opa)
++        # 1. Convert logit to alpha
++        alpha = torch.sigmoid(new_opacities)
+         
+-        # Apply decay factor
+-        # Note: The source [S1, unofficial] mentions multiplying by decay_factor but does not specify
+-        # where this factor is defined. We assume a standard decay factor like 0.9.
+-        opa_sig_decayed = opa_sig * decay_factor
++        # 2. Multiply by decay factor
++        alpha_decayed = alpha * decay_factor
+         
+-        # Clip to avoid log(0) or log(1) issues
+-        opa_sig_decayed = torch.clamp(opa_sig_decayed, min=1e-8, max=1-1e-8)
++        # 3. Clip to valid range for logit conversion
++        alpha_clipped = torch.clamp(alpha_decayed, min=eps, max=1.0 - eps)
+         
+-        # Convert back to logits
+-        opa_new = torch.log(opa_sig_decayed / (1.0 - opa_sig_decayed))
++        # 4. Convert back to logit
++        # logit = log(alpha / (1 - alpha))
++        new_opacities = torch.log(alpha_clipped / (1.0 - alpha_clipped + eps))
+         
+-        splats['opacities'].data = opa_new
+-    elif opacity_decay > 0:
+-        # Direct subtraction from logits
+-        opa_new = opa - opacity_decay * lr
+-        splats['opacities'].data = opa_new
++    else:
++        # Subtractive strategy
++        # 1. Compute decay amount
++        decay_amount = opacity_decay * lr
+         
+-    return splats
++        # 2. Subtract from logit
++        new_opacities = new_opacities - decay_amount
++        
++        # [G] Optional: Clip to prevent extreme negative values if required by renderer
++        # new_opacities = torch.clamp(new_opacities, min=-60.0)
++        
++    return new_opacities
+ ```
+ 
+-**Edge Cases and Pitfalls:**
+-- **Sigmoid Saturation:** When using the `'mrnf'` strategy, if `opa_sig` is very close to 0 or 1, the logit conversion can result in extreme values or NaNs if not clamped. A small epsilon ($1e-8$) is added to the denominator to prevent division by zero [S1, unofficial].
+-- **Logit Space vs Probability Space:** The subtraction method operates directly on logits, which is computationally cheaper but may have different convergence properties than probability space decay.
+-- **Strategy Selection:** The choice between `'mrnf'` and direct subtraction depends on the specific training pipeline configuration [S1, unofficial].
++### Edge Cases and Pitfalls
++- **Numerical Stability**: When converting back to logit in the 'mrnf' strategy, division by zero or log of zero must be avoided. Clamping alpha to $[\epsilon, 1-\epsilon]$ is critical. [S1, unofficial]
++- **Over-decay**: If `opacity_decay` or `decay_factor` is too large, Gaussians may become effectively invisible (alpha $\approx$ 0) prematurely, leading to holes in the rendered scene.
++- **Strategy Mismatch**: Applying the wrong formula for the chosen strategy name will result in incorrect opacity values. The 'mrnf' strategy involves a non-linear transformation (sigmoid-logit), while subtractive is linear in logit space.
+ 
+ ## Subtopics
+ 
+ ### Visibility-Aware Decay
+-A variant of opacity decay that selectively reduces evidence only for sufficiently visible Gaussians to prevent the erosion of occluded primitives [S2, unofficial]. It operates on the evidence tensor $H_{i,j}$ rather than Gaussian opacity logits.
+-- **Definition:** Decay is applied to evidence $H_{i,j}$ only if the total weight $W^{(t)}_i$ of the Gaussian exceeds a threshold $w_{min}$ [S2, unofficial].
+-- **Formula:** $H_{i,j} \leftarrow \gamma \cdot H_{i,j}$ if $W^{(t)}_i > w_{min}$, else $H_{i,j}$ [S2, unofficial].
+-- **Parameters:** $\gamma$ (decay factor, typically 0.95), $w_{min}$ (visibility threshold) [S2, unofficial].
+-- **Pitfall:** If $0 < W^{(t)}_i \le w_{min}$, no decay occurs. In streams with small, consistent votes, evidence can grow without bound because the state is not uniformly bounded [S2, unofficial].
++A variant that decays evidence only for substantially visible Gaussians, preserving occluded primitives. It checks if the total weight $W_i^{(t)}$ of Gaussian $i$ exceeds a threshold $w_{min}$. If visible, evidence $H_{i,j}$ is multiplied by decay rate $\gamma$ ($H_{i,j} \leftarrow \gamma \cdot H_{i,j}$); otherwise, it remains unchanged. This prevents erosion of occluded primitives. Parameter $\gamma$ is typically 0.95. A pitfall is that if $0 < W_i^{(t)} \le w_{min}$, no decay occurs, and evidence can grow without bound if votes are small and consistent. [S2, unofficial]
++
++### Gaussian Opacity Scaling
++Scales the opacity of selected Gaussians by a weight factor and converts back to logit space. It clips the logit to $[-60, 60]$, converts to alpha, multiplies by the selection weight, clips alpha to $[10^{-6}, 1-10^{-6}]$, and computes the new logit as $o_{new} = \log(\alpha_{new}) - \log(1 - \alpha_{new})$. Parameters include `opacity_weight_floor` and `opacity_weight_min`. [S3, unofficial]
++
++### Gaussian Opacity Regularization
++A regularization term that penalizes low-opacity Gaussians using an entropy loss $L_{ent} = \lambda_6 \sum_k (-o_k \ln(o_k))$ to drive opacities toward binary values (0 or 1). Opacity is parameterized as $o_k = \sigma(\tilde{o}_k)$. Gaussians with opacity below a threshold $\tau = 0.05$ are periodically pruned. This ensures centroids align with object surfaces for accurate SDF learning. Parameter $\lambda_6$ is typically 0.01. [S4]
+ 
+ ## Operating characteristics
+-- **Time Complexity:** $O(N)$ per iteration, where $N$ is the number of Gaussians, as it involves element-wise operations on the opacity tensor [S1, unofficial].
+-- **Memory Complexity:** $O(N)$ for storing the opacity tensor [S1, unofficial].
+-- **Strengths:** Prevents over-saturation of Gaussian opacities, leading to more stable training and better final reconstruction quality by pruning low-confidence primitives [S1, unofficial].
+-- **Limitations:** The choice of strategy (`'mrnf'` vs. direct subtraction) and parameters ($\gamma$, $w_{min}$) can significantly impact convergence speed and final model sparsity [S1, unofficial][S2, unofficial].
++- **Time Complexity**: $O(N)$ per update step, where $N$ is the number of Gaussians. The operations are element-wise tensor operations.
++- **Memory Complexity**: $O(1)$ additional memory, as updates are performed in-place or on a clone of the existing opacity tensor.
++- **Performance**: Reduces the number of redundant, semi-transparent Gaussians, potentially speeding up rendering by allowing earlier culling of low-opacity primitives. It stabilizes training by preventing opacity saturation.
++- **Strengths**: Prevents over-saturation; stabilizes training gradients; reduces redundancy.
++- **Limitations**: Requires careful tuning of decay rates; aggressive decay can lead to under-reconstruction (holes).
++- **When to use**: During the training phase of 3D Gaussian Splatting, particularly when Gaussians tend to become overly opaque or when redundancy needs to be managed without hard pruning shocks.
++- **When not to use**: During inference/rendering only (unless for post-processing); not suitable for methods requiring precise preservation of semi-transparent structures (use Visibility-Aware Decay instead).
+ 
+ ## Background
+-Opacity Decay is a technique used in the training of 3D Gaussian Splatting models, particularly in pipelines that involve densification and pruning strategies. It was introduced as part of the optimization process to manage the opacity parameters of Gaussians, preventing them from becoming too large or too small, which can hinder the learning process [S1, unofficial]. The visibility-aware variant was proposed in the context of open-vocabulary 3D segmentation to handle occlusion and evidence accumulation [S2, unofficial].
++Opacity Decay originated as a regularization technique in the optimization of 3D Gaussian Splatting models. It was introduced to address the issue of Gaussian primitives becoming over-saturated (opacity $\approx$ 1) or persisting as redundant artifacts. The 'mrnf' strategy and subtractive decay are documented in unofficial implementations and adaptations of 3DGS training pipelines. [S1, unofficial] Variants like Visibility-Aware Decay were developed for open-vocabulary segmentation tasks to handle occlusion. [S2, unofficial] Gaussian Opacity Regularization was introduced in the context of learning Signed Distance Fields (SDFs) from splatting, where surface alignment is critical. [S4]
+ 
+ ## Sources
+ [S1] SpaceCollectors/dust3r-3dgs, https://github.com/SpaceCollectors/dust3r-3dgs, fetched 2026-10-27 (unofficial)
+-[S2] DIGS: Distribution-Informed Gaussian Splatting for Training-Free Open-Vocabulary 3D Segmentation, https://doi.org/10.48550/arxiv.2610.16177, fetched 2026-10-26 (unofficial)+[S2] DIGS: Distribution-Informed Gaussian Splatting for Training-Free Open-Vocabulary 3D Segmentation, https://doi.org/10.48550/arxiv.2610.16177, fetched 2026-10-26 (unofficial)
++[S3] zjllllllllll/SplatMend, https://github.com/zjllllllllll/SplatMend, fetched 2026-10-27 (unofficial)
++[S4] GSurf: Learning signed distance fields from splatting opaque Gaussians for high-quality 3D reconstruction, https://doi.org/10.1016/j.cad.2026.104106, fetched 2026-10-26

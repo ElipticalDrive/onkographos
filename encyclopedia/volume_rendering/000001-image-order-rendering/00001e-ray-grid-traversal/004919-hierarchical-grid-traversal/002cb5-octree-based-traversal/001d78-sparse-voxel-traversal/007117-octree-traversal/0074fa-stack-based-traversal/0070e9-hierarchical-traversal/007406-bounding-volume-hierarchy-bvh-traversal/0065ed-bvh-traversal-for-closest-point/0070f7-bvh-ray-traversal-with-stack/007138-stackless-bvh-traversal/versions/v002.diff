@@ -1,0 +1,230 @@
+--- v001.md
++++ v002.md
+@@ -4,104 +4,117 @@
+ 
+ ## Overview
+-Stackless BVH Traversal is a ray traversal algorithm for Axis-Aligned Bounding Box (AABB) hierarchies that avoids explicit stack allocation by using a linear pointer-based approach, suitable for GPU execution where stack depth is limited or unavailable [S1, unofficial]. It differs from stack-based BVH traversal [BVH Ray Traversal with Stack](22168-bvh-ray-traversal-with-stack.md) by eliminating the need for dynamic memory allocation or fixed-size stack buffers, relying instead on a pre-ordered linear array of nodes where traversal order is encoded in the node structure itself.
++Stackless BVH Traversal is a ray traversal algorithm for Axis-Aligned Bounding Box (AABB) hierarchies that avoids explicit stack allocation by using a linear pointer-based approach, suitable for GPU execution where stack depth is limited or unavailable [S1, unofficial]. It sets itself apart from [BVH Ray Traversal with Stack](22168-bvh-ray-traversal-with-stack.md) by eliminating the need for dynamic memory allocation or fixed-size stack buffers, instead relying on a pre-serialized linear array of nodes where traversal order is encoded in the node structure itself.
+ 
+ ## How it works
+ **Inputs and Outputs:**
+-*   **Input:** A ray defined by origin $O$ and direction $D$, a linear array of BVH nodes `BVHNodes`, a linear array of triangle data `BVHTris`, a starting index `NodeStartIndex` (typically 0), and a maximum traversal distance $T_{max}$ (initially $\infty$).
+-*   **Output:** The closest intersection distance $t$, the triangle index, and the mesh identifier.
++*   **Input:** A linear array of `BVHNodes`, a ray defined by origin and direction, `TMin` (near clip), `TMax` (far clip/current closest hit), and `NodeStartIndex` (offset for leaf node pointers).
++*   **Output:** The closest intersection distance `ClosestTraversal`, the associated `Mesh` ID, and the `TriangleIndex`.
+ 
+ **Data Structures:**
+-Each node in `BVHNodes` is 32 bytes, packed into two `vec4` structures (`Min` and `Max`).
+-*   `Min` (vec4):
+-    *   `x, y, z`: AABB minimum coordinates.
+-    *   `w`: Packed integer.
+-        *   If the node is a **leaf**: Lower 4 bits (`& 0xF`) store the triangle count (`Length`). Upper bits (`>> 4`) store the starting index into the `BVHTris` array.
+-        *   If the node is **internal**: This field is not used for traversal logic in this specific implementation.
+-*   `Max` (vec4):
+-    *   `x, y, z`: AABB maximum coordinates.
+-    *   `w`: Packed integer.
+-        *   If the node is a **leaf**: This field is not used for traversal logic.
+-        *   If the node is **internal**: Stores the index of the next node to visit in the linear array. A value of -1 indicates the end of traversal for that branch.
++The BVH is stored in a flat array of nodes. Each node is 32 bytes, packed into two `vec4` (or equivalent 128-bit) structures: `Min` and `Max`.
++
++*   **Internal Node:**
++    *   `Min.xyz`: AABB minimum bounds.
++    *   `Min.w`: Unused or reserved.
++    *   `Max.xyz`: AABB maximum bounds.
++    *   `Max.w`: Unused or reserved.
++    *   *Note:* Internal nodes do not store explicit left/right child pointers. The traversal assumes children are stored sequentially in the linear array.
++
++*   **Leaf Node:**
++    *   `Min.xyz`: AABB minimum bounds.
++    *   `Min.w`: Packed integer.
++        *   Upper bits (`>> 4`): Starting index into the `BVHTris` array (triangle indices).
++        *   Lower 4 bits (`& 0xF`): Triangle count (`Length`).
++    *   `Max.xyz`: AABB maximum bounds.
++    *   `Max.w`: Packed integer.
++        *   Contains the index of the next node to visit in the linear array. If the value is -1 (bit pattern `0xFFFFFFFF` interpreted as signed int), it signifies the end of the traversal branch.
+ 
+ **Algorithm Steps:**
+-1.  Initialize `Pointer` to `NodeStartIndex`.
+-2.  Initialize `ClosestTraversal` to -1.0f and `TMax` to the initial maximum distance.
+-3.  Initialize `Iterations` to 0.
+-4.  Loop while `Pointer >= 0` and `Iterations < MaxIterations` (1024):
++1.  Initialize `Pointer` to `NodeStartIndex` (typically 0 or the root index) and `ClosestTraversal` to `-1.0f`. Initialize `Iterations` to 0.
++2.  Loop while `Pointer >= 0` and `Iterations < MaxIterations` (1024) [S1, unofficial]:
+     a.  Fetch `CurrentNode = BVHNodes[Pointer]`.
+-    b.  Compute `BoxTraversal` (intersection of ray with AABB defined by `CurrentNode.Min.xyz` and `CurrentNode.Max.xyz`).
++    b.  Compute `BoxTraversal` (ray-AABB intersection test) using `RayBounds` with `t_min = 0.0001f` and `t_max = TMax`.
+     c.  If `BoxTraversal > 0.0f` and `BoxTraversal < TMax`:
+-        i.  Check if `CurrentNode` is a leaf: `IsLeaf = (floatBitsToInt(CurrentNode.Min.w) != -1)`.
+-        ii. If `IsLeaf`:
+-            1.  Extract `StartIndex = CurrentNode.Min.w >> 4`.
+-            2.  Extract `Length = CurrentNode.Min.w & 0xF`.
+-            3.  Iterate `i` from `StartIndex` to `StartIndex + Length - 1`:
+-                *   Compute ray-triangle intersection for triangle `BVHTris[i]`.
+-                *   If hit distance $t < TMax$:
+-                    *   Update `TMax = t`.
+-                    *   Update `ClosestTraversal = t`.
+-                    *   Store mesh and triangle index.
+-            4.  Set `Pointer = floatBitsToInt(CurrentNode.Max.w)`.
+-        iii. If not `IsLeaf`:
++        i.  Check if `CurrentNode` is a leaf: `IsLeaf = (floatBitsToInt(CurrentNode.Min.w) != -1)` [S1, unofficial].
++        ii. If Leaf:
++            1.  Decode `Packed = floatBitsToInt(CurrentNode.Min.w)`.
++            2.  `StartIndex = Packed >> 4`.
++            3.  `Length = Packed & 0xF`.
++            4.  Iterate `i` from `StartIndex` to `StartIndex + Length - 1`.
++            5.  For each triangle, compute ray-triangle intersection.
++            6.  If hit `t < TMax`:
++                *   Update `TMax = t`.
++                *   Update `ClosestTraversal = t`.
++                *   Update `Mesh` and `TriangleIndex` from the triangle data.
++            7.  Set `Pointer = floatBitsToInt(CurrentNode.Max.w)`.
++            8.  If `Pointer < 0`, break loop.
++            9.  Else, `Pointer += NodeStartIndex` and continue loop.
++        iii. If Not Leaf:
+             1.  Increment `Pointer` by 1 (`Pointer++`).
+-    d.  Else (node did not intersect or intersection is beyond $T_{max}$):
++            2.  Continue loop.
++    d.  Else (Node did not intersect or intersection was beyond `TMax`):
+         i.  Set `Pointer = floatBitsToInt(CurrentNode.Max.w)`.
+-    e.  If `Pointer < 0`, break loop.
+-    f.  Else, `Pointer += NodeStartIndex` (if `NodeStartIndex` is non-zero, otherwise this is a no-op).
+-    g.  Increment `Iterations`.
++        ii. If `Pointer < 0`, break loop.
++        iii. Else, `Pointer += NodeStartIndex` and continue loop.
+ 
+ **Pseudocode:**
+ ```python
+-def stackless_bvh_traverse(ray_origin, ray_dir, bvh_nodes, bvh_tris, node_start_index=0, t_max=float('inf'), t_min=0.0001f, max_iterations=1024):
+-    pointer = node_start_index
+-    closest_t = -1.0
+-    current_t_max = t_max
++def stackless_bvh_traverse(BVHNodes, ray_origin, ray_dir, TMin, TMax, NodeStartIndex, BVHTris):
++    Pointer = NodeStartIndex
++    ClosestTraversal = -1.0
++    Mesh = -1
++    TriangleIndex = -1
++    MaxIterations = 1024
++    Iterations = 0
+     
+-    for iteration in range(max_iterations):
+-        if pointer < 0:
+-            break
+-            
+-        current_node = bvh_nodes[pointer]
++    # TMin for ray-AABB test to avoid precision issues at origin
++    ray_t_min = 0.0001
++    
++    while Pointer >= 0 and Iterations < MaxIterations:
++        Iterations += 1
++        CurrentNode = BVHNodes[Pointer]
+         
+-        # Compute AABB intersection
+-        box_t_min = ray_bounds(ray_origin, ray_dir, current_node.min.xyz, current_node.max.xyz, t_min, current_t_max)
++        # Ray-AABB intersection test
++        # Returns t_hit if ray intersects box within [ray_t_min, TMax], else <= 0
++        BoxTraversal = ray_bounds_intersect(ray_origin, ray_dir, CurrentNode.Min.xyz, CurrentNode.Max.xyz, ray_t_min, TMax)
+         
+-        if box_t_min > 0.0 and box_t_min < current_t_max:
+-            # Check if leaf: Min.w != -1 indicates leaf in this specific packing
+-            is_leaf = (float_bits_to_int(current_node.min.w) != -1)
++        if BoxTraversal > 0.0 and BoxTraversal < TMax:
++            # Check if leaf: Min.w != -1 (0xFFFFFFFF)
++            is_leaf = (float_bits_to_int(CurrentNode.Min.w) != -1)
+             
+             if is_leaf:
+-                # Leaf processing
+-                packed_min_w = current_node.min.w
+-                start_index = packed_min_w >> 4
+-                length = packed_min_w & 0xF
++                Packed = float_bits_to_int(CurrentNode.Min.w)
++                StartIndex = Packed >> 4
++                Length = Packed & 0xF
+                 
+-                for i in range(start_index, start_index + length):
+-                    tri = bvh_tris[i]
+-                    hit_t = ray_triangle_intersect(ray_origin, ray_dir, tri)
++                # Iterate triangles
++                for i in range(StartIndex, StartIndex + Length):
++                    tri = BVHTris[i]
++                    t_hit = ray_triangle_intersect(ray_origin, ray_dir, tri)
+                     
+-                    if hit_t is not None and hit_t < current_t_max:
+-                        current_t_max = hit_t
+-                        closest_t = hit_t
+-                        # Store mesh/triangle index here
+-                        pass
++                    if t_hit is not None and t_hit < TMax:
++                        TMax = t_hit
++                        ClosestTraversal = t_hit
++                        Mesh = tri.mesh_id
++                        TriangleIndex = tri.index
+                 
+-                # Move to next node specified in Max.w
+-                pointer = float_bits_to_int(current_node.max.w)
++                # Move to next node
++                NextPointer = float_bits_to_int(CurrentNode.Max.w)
++                if NextPointer < 0:
++                    break
++                else:
++                    Pointer = NextPointer + NodeStartIndex
+             else:
+-                # Internal node: advance to next sequential node
+-                pointer += 1
++                # Internal node: children are sequential, just advance
++                Pointer += 1
+         else:
+-            # Node did not intersect or was too far; move to next node specified in Max.w
+-            pointer = float_bits_to_int(current_node.max.w)
+-            
+-        if pointer < 0:
+-            break
+-            
+-        # Adjust pointer if start index is non-zero (implementation detail from source)
+-        if node_start_index != 0:
+-            pointer += node_start_index
+-            
+-    return closest_t
++            # Node missed or was too far, skip to next node encoded in Max.w
++            NextPointer = float_bits_to_int(CurrentNode.Max.w)
++            if NextPointer < 0:
++                break
++            else:
++                Pointer = NextPointer + NodeStartIndex
++                
++    return ClosestTraversal, Mesh, TriangleIndex
+ ```
+ 
+@@ -112,17 +125,24 @@
+ **Edge Cases and Pitfalls:**
+ *   The traversal assumes a linearized BVH where children are stored sequentially. Non-leaf nodes simply advance to the next index (`Pointer++`), implying the BVH is built in a specific depth-first or breadth-first order that allows linear traversal without explicit left/right child pointers for internal nodes [S1, unofficial].
+-*   Malformed BVHs with cycles or incorrect `Max.w` pointers can cause infinite loops; `MaxIterations` acts as a safeguard.
+-*   Precision errors near `TMin` are mitigated by the clamping value.
++*   If the BVH is not built in the expected linear order, the traversal will fail to visit all nodes or visit incorrect nodes.
++*   `MaxIterations` must be sufficient to cover the maximum possible depth of the BVH. If the BVH is deeper than 1024 nodes, the traversal will terminate prematurely.
++
++## Subtopics
++
++### Stackless BVH Traversal with Transparency Filtering
++This variant skips entities marked as transparent during traversal. It checks the entity's alpha value and ignores entities with alpha < 0.99 [S1, unofficial]. For opaque entities, it calls the standard `IntersectBVHStackless` function. If a hit `T > 0` and `T < TMax` is found, it updates `TMax`, `ClosestT`, `Mesh`, `TriangleIdx`, and `Entity_` [S1, unofficial]. This is useful for visibility checks where transparent objects should not occlude opaque ones.
++
++### [Stackless BVH Ray Traversal for Occlusion](22324-stackless-bvh-ray-traversal-for-occlusion.md)
++This method performs global scene intersection by iterating over all entities in a scene to find the first entity hit by a ray, effectively serving as an occlusion culling primitive. Unlike standard closest-hit algorithms that search for the minimum distance across all geometry, this approach returns immediately upon finding any valid intersection with an entity's BVH, prioritizing speed for visibility checks over precise depth sorting. It builds on [Stackless BVH Traversal](22227-stackless-bvh-traversal.md) by wrapping its traversal logic in a linear entity loop [22324-stackless-bvh-ray-traversal-for-occlusion.md].
+ 
+ ## Operating characteristics
+-*   **Time Complexity:** $O(N)$ in the worst case for traversal, where $N$ is the number of nodes visited. The linear scan avoids stack push/pop overhead but may visit nodes in a less optimal order than a stack-based approach if the BVH is not built for linear traversal.
+-*   **Memory Complexity:** $O(1)$ auxiliary memory. No stack allocation is required, making it ideal for GPU shaders with limited stack space.
+-*   **Strengths:** No stack overflow risk; simple implementation; low memory footprint.
+-*   **Limitations:** Relies on a specific BVH build order (linearization); potentially less efficient culling if the linear order does not align with spatial locality as well as a stack-based DFS/BFS.
+-*   **When to use:** GPU ray tracing where stack size is constrained or dynamic allocation is prohibited.
+-*   **When not to use:** CPU ray tracing where stack allocation is cheap and BVHs are not pre-linearized for this specific traversal pattern.
++*   **Time Complexity:** $O(N)$ in the worst case for a linear scan, but typically $O(\log N)$ for balanced BVHs, where $N$ is the number of nodes. The linear pointer approach adds minimal overhead compared to stack-based traversal.
++*   **Memory Complexity:** $O(1)$ auxiliary space, as no stack is required. The BVH itself is stored in $O(N)$ memory.
++*   **Performance:** Suitable for GPU execution where stack depth is limited or unavailable [S1, unofficial]. It avoids the overhead of stack allocation and management.
++*   **Strengths:** No stack overflow risk, simple implementation, low memory footprint.
++*   **Limitations:** Requires a specific BVH build order (linearized). Less flexible than stack-based traversal for complex traversal strategies (e.g., early termination based on complex criteria).
+ 
+ ## Background
+-This method is derived from implementations found in unofficial graphics repositories, specifically designed for GPU-based rendering where traditional stack-based recursion is impractical [S1, unofficial]. It represents a variation of linear BVH traversal techniques adapted for specific node packing schemes.
++Stackless BVH Traversal is a technique developed for GPU ray tracing to overcome the limitations of stack-based traversal in hardware with limited stack space. It is commonly used in real-time ray tracing applications and global illumination algorithms where performance and memory efficiency are critical.
+ 
+ ## Sources

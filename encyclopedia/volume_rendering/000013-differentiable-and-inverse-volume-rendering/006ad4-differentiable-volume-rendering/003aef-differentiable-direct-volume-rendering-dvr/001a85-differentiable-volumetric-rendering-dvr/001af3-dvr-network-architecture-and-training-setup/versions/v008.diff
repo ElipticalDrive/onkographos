@@ -1,0 +1,234 @@
+--- v007.md
++++ v008.md
+@@ -4,5 +4,5 @@
+ 
+ ## Overview
+-This article details the neural network architecture, ray sampling strategy, and training configuration required to implement Differentiable Direct Volume Rendering (DVR) as described in [S4, unofficial]. It solves the problem of configuring the multi-layer perceptron (MLP) and its associated query pipeline to map 3D spatial coordinates and view directions to volumetric density and color, enabling gradient-based optimization of implicit surface representations. It sets apart from siblings like [Direct Voxel Grid Optimization (DVGO)](2184-direct-voxel-grid-optimization-dvgo.md) by relying on a continuous MLP representation queried via hierarchical sampling rather than a discrete voxel grid, requiring explicit setup of positional encoders and coarse/fine network pairs for importance sampling.
++This article details the neural network architecture, ray sampling strategy, and training configuration required to implement Differentiable Direct Volume Rendering (DVR) as described in [S4, unofficial]. It solves the problem of configuring the multi-layer perceptron (MLP) and its associated query pipeline to map 3D spatial coordinates and view directions to volumetric density and color, enabling gradient-based optimization of implicit surface representations [G]. It sets apart from siblings like [Direct Voxel Grid Optimization (DVGO)](2184-direct-voxel-grid-optimization-dvgo.md) by relying on a continuous MLP representation queried via hierarchical sampling rather than a discrete voxel grid, requiring explicit setup of positional encoders and coarse/fine network pairs for importance sampling [G].
+ 
+ ## How it works
+@@ -10,13 +10,13 @@
+ ### Inputs and Outputs
+ **Inputs:**
+-*   Ray origins $\mathbf{r}_0$ and directions $\mathbf{d}$ for a batch of pixels.
+-*   Camera parameters $\mathbf{c}$ (e.g., view direction or latent code).
+-*   Training iteration count $it$ (optional, for adaptive sampling).
+-*   Decoder network parameters $\theta$.
++*   Ray origins $\mathbf{r}_0$ and directions $\mathbf{d}$ for a batch of pixels [G].
++*   Camera parameters $\mathbf{c}$ (e.g., view direction or latent code) [S4, unofficial].
++*   Training iteration count $it$ (optional, for adaptive sampling) [S1, unofficial].
++*   Decoder network parameters $\theta$ [G].
+ 
+ **Outputs:**
+-*   Rendered color tensor $C \in \mathbb{R}^{N \times 3}$.
+-*   Depth tensor $D \in \mathbb{R}^{N \times 1}$.
+-*   Transmittance and density tensors for loss computation.
++*   Rendered color tensor $C \in \mathbb{R}^{N \times 3}$ [S2, unofficial].
++*   Depth tensor $D \in \mathbb{R}^{N \times 1}$ [S2, unofficial].
++*   Transmittance and density tensors for loss computation [G].
+ 
+ ### Data Structures
+@@ -41,29 +41,28 @@
+ 
+ 1.  **Initialization:** Initialize `DepthModule` with parameters listed in Data Structures. Set transmittance $T$ as a tensor of ones with shape $(N, 1)$ for the first segment [S2, unofficial].
+-2.  **Ray Sampling Schedule:** Determine the number of steps $n$.
+-    *   If `schedule_ray_sampling` is False, use `n_steps`.
++2.  **Ray Sampling Schedule:** Determine the number of steps $n$ [S4, unofficial].
++    *   If `schedule_ray_sampling` is False, use `n_steps` [S1, unofficial].
+     *   If True, call `get_sampling_accuracy(it)`:
+-        *   If `schedule_milestones` is empty, return `[128, 129]`.
++        *   If `schedule_milestones` is empty, return `[128, 129]` [S1, unofficial].
+         *   Initialize `res = init_resolution`.
+-        *   Iterate through milestones: if $it <$ milestone, return `[res, res + 1]`. Otherwise, double `res` (`res = res * 2`) and continue.
++        *   Iterate through milestones: if $it <$ milestone, return `[res, res + 1]` [S1, unofficial]. Otherwise, double `res` (`res = res * 2`) and continue [S1, unofficial].
+         *   Return `[res, res + 1]` after the loop [S1, unofficial].
+ 3.  **Coarse Sampling:** Sample $n$ points along the ray at equal intervals $\Delta s$. The coordinates are computed as:
+     $$ \mathbf{p}_j^{\text{ray}} = \mathbf{r}_0 + (j \Delta s + s_0) \mathbf{d}, \quad j = 0, \dots, n-1 $$
+     where $s_0$ is the start of the ray sampling interval [S4, unofficial].
+-4.  **Implicit Function Evaluation:** Query the decoder network $f_\theta(\mathbf{p}, \mathbf{c})$ for occupancy logits at all sampled points.
++4.  **Implicit Function Evaluation:** Query the decoder network $f_\theta(\mathbf{p}, \mathbf{c})$ for occupancy logits at all sampled points [S4, unofficial].
+ 5.  **Surface Intersection (Secant Method):**
+     *   Identify the interval $[d_{low}, d_{high}]$ where the occupancy logit crosses the threshold $\tau$. Specifically, find $j$ such that $f_\theta(\mathbf{p}_j) < \tau$ and $f_\theta(\mathbf{p}_{j+1}) \geq \tau$ [S4, unofficial].
+     *   Apply the secant method for `n_secant_steps` iterations to refine the depth $\hat{d}$:
+-        1.  Initialize $d_{pred} = (d_{low} + d_{high}) / 2$.
++        1.  Initialize $d_{pred} = (d_{low} + d_{high}) / 2$ [S1, unofficial].
+         2.  For $i$ in range `n_secant_steps`:
+-            *   Compute midpoint $\mathbf{p}_{mid} = \mathbf{r}_0 + d_{pred} \mathbf{d}$.
+-            *   Compute $f_{mid} = f_\theta(\mathbf{p}_{mid}, \mathbf{c}) - \tau$.
+-            *   If $f_{mid} < 0$, set $d_{low} = d_{pred}$; else set $d_{high} = d_{pred}$.
++            *   Compute midpoint $\mathbf{p}_{mid} = \mathbf{r}_0 + d_{pred} \mathbf{d}$ [S1, unofficial].
++            *   Compute $f_{mid} = f_\theta(\mathbf{p}_{mid}, \mathbf{c}) - \tau$ [S1, unofficial].
++            *   If $f_{mid} < 0$, set $d_{low} = d_{pred}$; else set $d_{high} = d_{pred}$ [S1, unofficial].
+             *   Update $d_{pred} = 0.5 (d_{low} + d_{high})$ [S1, unofficial].
+-6.  **Fine Sampling:** Sample additional points around the refined depth $\hat{d}$ (implementation detail: typically using the same $n$ or a finer grid, but sources specify using the refined depth to define the integration range) [S4, unofficial]. *Note: The provided notes describe the coarse-to-fine transition primarily through the adaptive sampling schedule and the secant refinement, rather than explicit fine-grained stratified sampling steps in the pseudocode.*
+-7.  **Density and Color Extraction:** Convert occupancy logits to density $\sigma$ and extract color $\mathbf{c}_i$.
++6.  **Density and Color Extraction:** Convert occupancy logits to density $\sigma$ and extract color $\mathbf{c}_i$.
+     *   Density: $\sigma_i = \text{ReLU}(y_i)$ or similar mapping from the network output [S2, unofficial].
+-    *   Color: $\mathbf{c}_i = \text{Sigmoid}(y_{i+1:4})$ [S2, unofficial].
+-8.  **Alpha Compositing:**
++    *   Color: $\mathbf{c}_i = \text{Sigmoid}(y_{:, 1:})$ [S2, unofficial].
++7.  **Alpha Compositing:**
+     *   Compute segment lengths $\delta_i$ by subtracting adjacent depth values. Append a large value ($10^{10}$) for the last segment to handle ray termination [S2, unofficial].
+     *   Compute transmittance: $T_i = T_{i-1} \cdot \exp(-\sigma_{i-1} \delta_{i-1} + \epsilon)$ [S2, unofficial].
+@@ -71,5 +70,5 @@
+     *   Aggregate color: $C = \sum w_i \mathbf{c}_i$ [S2, unofficial].
+     *   Aggregate depth: $D = \sum w_i z_i$, where $z_i$ is the depth of the $i$-th sample [S2, unofficial].
+-9.  **Chunk Processing:** To manage memory, iterate over rays in batches of `chunk_size`, process steps 2-8, and concatenate results [S2, unofficial].
++8.  **Chunk Processing:** To manage memory, iterate over rays in batches of `chunk_size`, process steps 2-7, and concatenate results [S2, unofficial].
+ 
+ ### Pseudocode
+@@ -81,59 +80,56 @@
+ class DepthFunction(torch.autograd.Function):
+     @staticmethod
++    def run_Bisection_method(d_low, d_high, n_secant_steps, ray0_masked, ray_direction_masked, decoder, c, logit_tau):
++        d_pred = (d_low + d_high) / 2.
++        for i in range(n_secant_steps):
++            p_mid = ray0_masked + d_pred.unsqueeze(-1) * ray_direction_masked
++            with torch.no_grad():
++                f_mid = decoder(p_mid, c, batchwise=False, only_occupancy=True) - logit_tau
++            ind_low = f_mid < 0
++            d_low[ind_low] = d_pred[ind_low]
++            d_high[ind_low == 0] = d_pred[ind_low == 0]
++            d_pred = 0.5 * (d_low + d_high)
++        return d_pred
++
++    @staticmethod
+     def forward(ctx, ray0, ray_direction, decoder, c, n_steps, n_secant_steps, tau, 
+                 depth_range, method, check_cube_intersection, max_points, eps=1e-4):
+-        """
+-        ray0: (N, 3)
+-        ray_direction: (N, 3)
+-        decoder: callable f(p, c) -> (occupancy, color)
+-        c: camera parameters (N, D_c)
+-        n_steps: tuple (n_min, n_max)
+-        """
+-        # 1. Determine number of steps
+-        n = n_steps[0] # Simplified; in practice, use schedule_ray_logic if enabled
+-        
+-        # 2. Coarse Sampling
+-        # Generate n points along the ray
+-        # s0 = depth_range[0]
+-        # ds = (depth_range[1] - depth_range[0]) / n
+-        # depths = torch.linspace(s0, depth_range[1], n).unsqueeze(0) # (1, n)
+-        # points = ray0.unsqueeze(1) + depths.unsqueeze(2) * ray_direction.unsqueeze(1) # (N, n, 3)
+-        
+-        # 3. Evaluate Decoder
+-        # occupancy_logits, colors = decoder(points, c) # (N, n), (N, n, 3)
+-        
+-        # 4. Find Interval
+-        # Find j where occupancy crosses tau
+-        # This requires finding the first index where occupancy >= tau
+-        # In practice, this is done via torch.searchsorted or similar
+-        
+-        # 5. Secant Refinement
+-        # d_low, d_high = depths[j], depths[j+1]
+-        # d_pred = (d_low + d_high) / 2
+-        # for _ in range(n_secant_steps):
+-        #     p_mid = ray0 + d_pred.unsqueeze(-1) * ray_direction
+-        #     with torch.no_grad():
+-        #         f_mid = decoder(p_mid, c, only_occupancy=True) - tau
+-        #     d_low[f_mid < 0] = d_pred[f_mid < 0]
+-        #     d_high[f_mid >= 0] = d_pred[f_mid >= 0]
+-        #     d_pred = 0.5 * (d_low + d_high)
+-        
+-        # 6. Fine Sampling around d_pred
+-        # Sample n points around d_pred with smaller step size or same n
+-        # Re-evaluate decoder
+-        
+-        # 7. Alpha Compositing
+-        # Compute deltas, transmittance, weights
+-        # T_i = T_{i-1} * exp(-sigma_{i-1} * delta_{i-1} + eps)
+-        # w_i = T_i * (1 - exp(-sigma_i * delta_i + eps))
+-        # C = sum(w_i * color_i)
+-        # D = sum(w_i * depth_i)
+-        
+-        # Return C, D
+-        pass
++        n = n_steps[0]
++        s0 = depth_range[0]
++        ds = (depth_range[1] - depth_range[0]) / n
++        depths = torch.linspace(s0, depth_range[1], n).unsqueeze(0)
++        points = ray0.unsqueeze(1) + depths.unsqueeze(2) * ray_direction.unsqueeze(1)
++        
++        occupancy_logits, colors = decoder(points, c)
++        
++        crossing_mask = occupancy_logits >= tau
++        j = torch.argmax(crossing_mask.int(), dim=1)
++        
++        d_low = depths[0, j]
++        d_high = depths[0, j+1]
++        d_pred = DepthFunction.run_Bisection_method(d_low, d_high, n_secant_steps, ray0, ray_direction, decoder, c, tau)
++        
++        fine_depths = torch.linspace(d_pred - ds, d_pred + ds, n).unsqueeze(1)
++        fine_points = ray0.unsqueeze(1) + fine_depths * ray_direction.unsqueeze(1)
++        fine_occupancy, fine_colors = decoder(fine_points, c)
++        
++        deltas = torch.diff(fine_depths, dim=1).squeeze(-1)
++        deltas = torch.cat([deltas, torch.full((ray0.shape[0], 1), 1e10)], dim=1)
++        sigma = torch.relu(fine_occupancy[:, :-1])
++        T = torch.ones(ray0.shape[0], 1).to(ray0.device)
++        C = torch.zeros(ray0.shape[0], 3).to(ray0.device)
++        D = torch.zeros(ray0.shape[0], 1).to(ray0.device)
++        
++        for i in range(n):
++            if i > 0:
++                T = T * torch.exp(-sigma[:, i-1] * deltas[:, i-1] + eps)
++            w = T * (1 - torch.exp(-sigma[:, i] * deltas[:, i] + eps))
++            C += w.unsqueeze(1) * fine_colors[:, i]
++            D += w.unsqueeze(1) * fine_depths[:, i]
++            
++        return C, D
+ 
+     @staticmethod
+     def backward(ctx, grad_output):
+-        # Gradients are computed via autograd through the decoder and compositing
+         pass
+ 
+@@ -141,24 +137,14 @@
+     def __init__(self, cfg):
+         super().__init__()
+-        # Combined Network: 5 ResNet blocks
+         self.decoder = self._build_decoder()
+-        # Encoder for single-view (optional)
+         if cfg.single_view:
+-            self.encoder = nn.Sequential(
+-                nn.Conv2d(3, 64, 7, stride=2, padding=3),
+-                nn.ReLU(),
+-                # ... ResNet-18 structure ...
+-                nn.AdaptiveAvgPool2d(1),
+-                nn.Flatten(),
+-                nn.Linear(512, 256) # Output 256-dim latent code
+-            )
++            # Not given in the sources.
++            self.encoder = nn.Sequential()
+     
+     def _build_decoder(self):
+-        # 5 fully-connected ResNet blocks
+-        # Output: 4 channels (1 occupancy, 3 color)
++        # Not given in the sources.
+         pass
+ 
+     def forward(self, ray0, ray_direction, c, iteration=None):
+-        # 1. Get n_steps based on schedule
+         if self.schedule_ray_sampling and iteration is not None:
+             n_steps = self.get_sampling_accuracy(iteration)
+@@ -166,5 +152,4 @@
+             n_steps = self.n_steps
+             
+-        # 2. Render using DepthFunction
+         color, depth = DepthFunction.apply(
+             ray0, ray_direction, self.decoder, c, 
+@@ -211,5 +196,5 @@
+ 
+ ## Operating characteristics
+-*   **Time Complexity:** $O(N \cdot n \cdot d)$, where $N$ is the number of rays, $n$ is the number of samples per ray, and $d$ is the MLP depth. The secant method adds $O(N \cdot n_{secant} \cdot d)$ [S4, unofficial].
++*   **Time Complexity:** $O(N \cdot n \cdot d)$, where $N$ is the number of rays, $n$ is the number of samples per ray, and $d$ is the MLP depth [G].
+ *   **Memory Complexity:** $O(N \cdot n \cdot d_{out})$ for storing intermediate activations, where $d_{out}$ is the output dimension of the MLP. Chunking reduces peak memory to $O(chunk\_size \cdot n \cdot d_{out})$ [S2, unofficial].
+ *   **Measured Performance:** Trained on a single NVIDIA V100 GPU with a batch size of 64 images with 1024 random pixels each [S4, unofficial].
+@@ -221,5 +206,5 @@
+ 
+ ## Background
+-The method originates from the work of Mescheder et al. on Occupancy Networks (CVPR 2019) and Niemeyer et al. on Differentiable Volumetric Rendering (CVPR 2020) [S4, unofficial]. It was developed to enable learning 3D implicit representations without explicit 3D supervision, using only RGB images. The DVR approach integrates color and density along rays using alpha compositing, computing the final pixel color as a weighted sum of sampled features [S2, unofficial]. It is used in 3D reconstruction, shape editing, and generative modeling of 3D objects.
++The method was developed to enable learning 3D implicit representations without explicit 3D supervision, using only RGB images [S4, unofficial]. The DVR approach integrates color and density along rays using alpha compositing, computing the final pixel color as a weighted sum of sampled features [S2, unofficial]. It is used in 3D reconstruction, shape editing, and generative modeling of 3D objects [S4, unofficial].
+ 
+ ## Sources

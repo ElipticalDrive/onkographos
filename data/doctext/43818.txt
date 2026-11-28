@@ -1,0 +1,562 @@
+vol_display
+===========
+Code for a spinning 3D volumetric display running off of an Arduino.
+
+<b>Computer-End (interpreter.cpp)</b><br>
+Converts 3D shapes "drawn" in a text file into strings of bytes (chars) to be sent to the Arduino through a serial port.
+
+<b>Arduino-End (vol_display.ino)</b><br>
+Reads the values sent by the computer and relays them to the spinning LEDs (connected to the Arduino through daisy-chained shift registers).
+
+### arduino-serial-lib.cpp
+```
+//
+// arduino-serial-lib -- simple library for reading/writing serial ports
+//
+// 2006-2013, Tod E. Kurt, http://todbot.com/blog/
+//
+
+#include "arduino-serial-lib.h"
+
+#include <stdio.h>    // Standard input/output definitions 
+#include <unistd.h>   // UNIX standard function definitions 
+#include <fcntl.h>    // File control definitions 
+#include <errno.h>    // Error number definitions 
+#include <termios.h>  // POSIX terminal control definitions 
+#include <string.h>   // String function definitions 
+#include <sys/ioctl.h>
+
+// uncomment this to debug reads
+//#define SERIALPORTDEBUG 
+
+// takes the string name of the serial port (e.g. "/dev/tty.usbserial","COM1")
+// and a baud rate (bps) and connects to that port at that speed and 8N1.
+// opens the port in fully raw mode so you can send binary data.
+// returns valid fd, or -1 on error
+int serialport_init(const char* serialport, int baud)
+{
+    struct termios toptions;
+    int fd;
+    
+    //fd = open(serialport, O_RDWR | O_NOCTTY | O_NDELAY);
+    fd = open(serialport, O_RDWR | O_NONBLOCK );
+    
+    if (fd == -1)  {
+        perror("serialport_init: Unable to open port ");
+        return -1;
+    }
+    
+    //int iflags = TIOCM_DTR;
+    //ioctl(fd, TIOCMBIS, &iflags);     // turn on DTR
+    //ioctl(fd, TIOCMBIC, &iflags);    // turn off DTR
+
+    if (tcgetattr(fd, &toptions) < 0) {
+        perror("serialport_init: Couldn't get term attributes");
+        return -1;
+    }
+    speed_t brate = baud; // let you override switch below if needed
+    switch(baud) {
+    case 4800:   brate=B4800;   break;
+    case 9600:   brate=B9600;   break;
+#ifdef B14400
+    case 14400:  brate=B14400;  break;
+#endif
+    case 19200:  brate=B19200;  break;
+#ifdef B28800
+    case 28800:  brate=B28800;  break;
+#endif
+    case 38400:  brate=B38400;  break;
+    case 57600:  brate=B57600;  break;
+    case 115200: brate=B115200; break;
+    }
+    cfsetispeed(&toptions, brate);
+    cfsetospeed(&toptions, brate);
+
+    // 8N1
+    toptions.c_cflag &= ~PARENB;
+    toptions.c_cflag &= ~CSTOPB;
+    toptions.c_cflag &= ~CSIZE;
+    toptions.c_cflag |= CS8;
+    // no flow control
+    toptions.c_cflag &= ~CRTSCTS;
+
+    //toptions.c_cflag &= ~HUPCL; // disable hang-up-on-close to avoid reset
+
+    toptions.c_cflag |= CREAD | CLOCAL;  // turn on READ & ignore ctrl lines
+    toptions.c_iflag &= ~(IXON | IXOFF | IXANY); // turn off s/w flow ctrl
+
+    toptions.c_lflag &= ~(ICANON | ECHO | ECHOE | ISIG); // make raw
+    toptions.c_oflag &= ~OPOST; // make raw
+
+    // see: http://unixwiz.net/techtips/termios-vmin-vtime.html
+    toptions.c_cc[VMIN]  = 0;
+    toptions.c_cc[VTIME] = 0;
+    //toptions.c_cc[VTIME] = 20;
+    
+    tcsetattr(fd, TCSANOW, &toptions);
+    if( tcsetattr(fd, TCSAFLUSH, &toptions) < 0) {
+        perror("init_serialport: Couldn't set term attributes");
+        return -1;
+    }
+
+    return fd;
+}
+
+//
+int serialport_close( int fd )
+{
+    return close( fd );
+}
+
+//
+int serialport_writebyte( int fd, uint8_t b)
+{
+    int n = write(fd,&b,1);
+    if( n!=1)
+        return -1;
+    return 0;
+}
+
+//
+int serialport_write(int fd, const char* str)
+{
+    int len = strlen(str);
+    int n = write(fd, str, len);
+    if( n!=len ) {
+        perror("serialport_write: couldn't write whole string\n");
+        return -1;
+    }
+    return 0;
+}
+
+//
+int serialport_read_until(int fd, char* buf, char until, int buf_max, int timeout)
+{
+    char b[1];  // read expects an array, so we give it a 1-byte array
+    int i=0;
+    do { 
+        int n = read(fd, b, 1);  // read a char at a time
+        if( n==-1) return -1;    // couldn't read
+        if( n==0 ) {
+            usleep( 1 * 1000 );  // wait 1 msec try again
+            timeout--;
+            continue;
+        }
+#ifdef SERIALPORTDEBUG  
+        printf("serialport_read_until: i=%d, n=%d b='%c'\n",i,n,b[0]); // debug
+#endif
+        buf[i] = b[0]; 
+        i++;
+    } while( b[0] != until && i < buf_max && timeout>0 );
+
+    buf[i] = 0;  // null terminate the string
+    return 0;
+}
+
+//
+int serialport_flush(int fd)
+{
+    sleep(2); //required to make flush work, for some reason
+    return tcflush(fd, TCIOFLUSH);
+}
+```
+
+### arduino-serial-lib.h
+```
+//
+// arduino-serial-lib -- simple library for reading/writing serial ports
+//
+// 2006-2013, Tod E. Kurt, http://todbot.com/blog/
+//
+
+
+#ifndef __ARDUINO_SERIAL_LIB_H__
+#define __ARDUINO_SERIAL_LIB_H__
+
+#include <stdint.h>   // Standard types 
+
+int serialport_init(const char* serialport, int baud);
+int serialport_close(int fd);
+int serialport_writebyte( int fd, uint8_t b);
+int serialport_write(int fd, const char* str);
+int serialport_read_until(int fd, char* buf, char until, int buf_max,int timeout);
+int serialport_flush(int fd);
+
+#endif
+```
+
+### coord-lib.cpp
+```
+#include <cstdio>
+#include <cmath>
+
+#include "coord-lib.h"
+extern int vol_slices;
+extern int vol_radius;
+
+/* -----------------------CARTESIAN COORDINATE POINT----------------------- */
+CartPnt::CartPnt(int height_, int x_, int y_) {
+	height = height_;
+	x = x_;
+	y = y_;
+}
+
+int CartPnt::getHeight() const {return height;}
+int CartPnt::getX() const {return x;}
+int CartPnt::getY() const {return y;}
+
+void CartPnt::setHeight(int height_) {height = height_;}
+void CartPnt::setX(int x_) {x = x_;}
+void CartPnt::setY(int y_) {y = y_;}
+
+void CartPnt::printCoord() const {
+	printf("(Cartesian) height: %d, x: %d, y: %d", height, x, y);
+}
+
+// Convets Cartesian Coordinates to Polar Coordinates
+PolPnt * CartPnt::toPolar() const {
+	int slice = (int)(atan2(y,x) * 180 / M_PI) * (vol_slices/360.0);
+	if(slice < 0) slice += vol_slices;
+	int radius = (int)round((sqrt(pow(x,2)+pow(y,2))));
+	
+	PolPnt *p = new PolPnt(height, slice, radius);
+	return p;
+}
+
+/* -------------------------POLAR COORDINATE POINT------------------------- */
+PolPnt::PolPnt(int height_, int slice_, int radius_) {
+	height = height_;
+	slice = slice_;
+	radius = radius_;
+	deg = (int)slice * (360.0/vol_slices);
+}
+
+int PolPnt::getHeight() const {return height;}
+int PolPnt::getSlice() const {return slice;}
+int PolPnt::getDeg() const {return deg;}
+int PolPnt::getRadius() const {return radius;}
+
+void PolPnt::setHeight(int height_) {height = height_;}
+void PolPnt::setSlice(int slice_) {slice = slice_;}
+void PolPnt::setRadius(int radius_) {radius = radius_;}
+
+void PolPnt::printCoord() const {
+	printf("(Polar) height: %d, slice: %d, deg: %d, radius: %d", height, slice, deg, radius);
+}
+
+int PolPnt::toData() const {
+	return (int) pow(2, vol_radius - (radius-1));
+}
+```
+
+### coord-lib.h
+```
+#ifndef LIBRARY_H
+#define LIBRARY_H
+
+class CartPnt;
+class PolPnt;
+
+/* -----------------------CARTESIAN COORDINATE POINT----------------------- */
+class CartPnt {
+	private:
+		int height;
+		int x;
+		int y;
+		
+	public:
+		CartPnt(int height_, int x_, int y_);
+		int getHeight() const;
+		int getX() const;
+		int getY() const;
+		
+		void setHeight(int height_);
+		void setX(int x_);
+		void setY(int y_);
+		
+		void printCoord() const;
+		
+		PolPnt * toPolar() const;	
+};
+
+/* -------------------------POLAR COORDINATE POINT------------------------- */
+class PolPnt {
+	private:
+		int height;
+		int slice;
+		int deg;
+		int radius;
+		
+	public:
+		PolPnt(int height_, int slice_, int radius_);
+		int getHeight() const;
+		int getSlice() const;
+		int getDeg() const;
+		int getRadius() const;
+		
+		void setHeight(int height_);
+		void setSlice(int slice_);
+		void setRadius(int radius_);
+		
+		void printCoord() const;
+		
+		int toData() const;
+};
+
+#endif /* LIBRARY_H */
+```
+
+### interpreter.cpp
+```
+#include <cstdio>
+#include <cstdlib>
+#include <cstring>
+#include <cmath>
+#include <unistd.h>   // UNIX standard function definitions 
+#include <cstdint>
+
+#include "coord-lib.h"
+#include "arduino-serial-lib.h"
+
+#define CONFIGFILE "config.txt"
+
+int scanConfigFile();
+int scanPatternFile(FILE *fp, CartPnt *(**cArr), PolPnt *(**pArr));
+void printCoordinates(int numCoords, CartPnt **cArr, PolPnt **pArr);
+
+uint16_t **createSerialData(int numCoords, PolPnt **pArr);
+void printSerialData(uint16_t **serialData);
+void sendSerialData(uint16_t **serialData);
+
+// TODO LIST
+
+// GLOBAL VARIABLES
+char FILENAME[32];
+int display_wipe;
+
+int vol_slices;
+int vol_layers;
+int vol_radius;	// not counting center point
+
+char serialport[32];
+int baudrate;
+
+// MAIN FUNCTION
+int main() {
+	FILE *fp;
+	int numCoords;
+	CartPnt **cArr;
+	PolPnt **pArr;
+	uint16_t **serialData;
+	
+	if(scanConfigFile()) {
+		printf("ERROR: Could not read Config file\n\n");
+		return 1;
+	}
+	
+	// file selection would occur here
+	char patternfile[32] = "patterns/";
+	strcat(patternfile, FILENAME);
+
+	if((fp = fopen(patternfile, "r")) == NULL) {
+		printf("ERROR: File \"%s\" could not be opened\n\n", patternfile);
+		return 1;
+	}
+	
+	numCoords = scanPatternFile(fp, &cArr, &pArr);
+	printf("Pattern file scanned! %d coordinates found!\n", numCoords);
+	
+	printCoordinates(numCoords, cArr, pArr);
+	
+	serialData = createSerialData(numCoords, pArr);
+	printSerialData(serialData);
+	
+	sendSerialData(serialData);
+	
+	return 0;
+}
+
+int scanConfigFile() {
+	FILE *fp = fopen(CONFIGFILE, "r");
+	char parser[32];
+	
+	int intBuffer;
+	char strBuffer[32];
+
+	while(!feof(fp)) {
+		fscanf(fp, "%s ", parser);
+		if(strcmp(parser, "FILE:") == 0) {
+			fscanf(fp, "%s ", FILENAME);
+		}
+		if(strcmp(parser, "DISPLAY_WIPE:") == 0) {
+			if(fscanf(fp, "%d ", &display_wipe) != 1) return 1;
+		}
+		if(strcmp(parser, "vol_slices:") == 0) {
+			if(fscanf(fp, "%d ", &vol_slices) != 1) return 1;
+		}
+		if(strcmp(parser, "vol_layers:") == 0) {
+			if(fscanf(fp, "%d ", &vol_layers) != 1) return 1;
+		}
+		if(strcmp(parser, "vol_radius:") == 0) {
+			if(fscanf(fp, "%d ", &vol_radius) != 1) return 1;
+		}
+		if(strcmp(parser, "serialport:") == 0) {
+			fscanf(fp, "%s ", serialport);
+		}
+		if(strcmp(parser, "baudrate:") == 0) {
+			if(fscanf(fp, "%d ", &baudrate) != 1) return 1;
+		}
+	}
+	return 0;
+}
+
+// READS PATTERN FILE AND CONVERTS TO CARTESIAN AND POLAR CORDINATES
+int scanPatternFile(FILE *fp, CartPnt *(**cArr), PolPnt *(**pArr)) {
+	char type[16];
+	int numCoords = 0;
+	int height, x, y, slice, radius;
+	char parser;
+	
+	fscanf(fp, "%s", type);
+	// CARTESIAN COORDINATE PATTERNS
+	if(strcmp(type, "TOPDOWN") == 0|| strcmp(type, "FRONTBACK") == 0) {
+		// initializing cArr to maximum possible number of coordinates
+		*cArr = new CartPnt *[vol_layers * (int)pow(2*vol_radius+1, 2)];
+		while(!feof(fp)) {
+			if(strcmp(type, "TOPDOWN") == 0) {
+				fscanf(fp, "%d", &height);
+				if(height == -100) break;
+				
+				for(y = vol_radius; y >= vol_radius*-1; y--) {
+					for(x = vol_radius*-1; x <= vol_radius; x++) {
+						fscanf(fp, " %c", &parser);
+						if(parser == '0' && round(sqrt(pow(x, 2)+pow(y,2))) <= vol_radius)	//IF MARKED AND WITHIN MAXIMUM RADIUS
+							(*cArr)[numCoords++] = new CartPnt(height, x, y);
+					}
+				}
+			}
+			if(strcmp(type, "FRONTBACK") == 0) {			
+				fscanf(fp, "%d", &y);
+				if(y == -100) break;
+				
+				for(height = vol_layers-1; height >= 0; height--) {
+					for(x = vol_radius*-1; x <= vol_radius; x++) {
+						fscanf(fp, " %c", &parser);
+						if(parser == 'E') break;
+						if(parser == '0' && round(sqrt(pow(x, 2)+pow(y,2))) <= vol_radius)	//MARKED AND WITHIN MAXIMUM RADIUS
+							(*cArr)[numCoords++] = new CartPnt(height, x, y);
+					}
+				}
+			}
+		}
+		*pArr = new PolPnt *[numCoords];
+		for(int i=0; i<numCoords; i++) (*pArr)[i] = (*cArr)[i]->toPolar();
+	}
+	
+	//POLAR COORDINATE PATTERNS
+	if(strcmp(type, "OUTSIDEIN") == 0) {
+		*cArr = new CartPnt *[1];
+		*pArr = new PolPnt *[vol_slices * vol_layers * vol_radius];
+		while(!feof(fp)) {
+		printf("Test2\n");
+			if(strcmp(type, "OUTSIDEIN") == 0) {
+				fscanf(fp, "%d", &radius);
+				if(radius == -100) break;
+				
+				printf("Radius: %d\n", radius);
+				for(int half = 0; half < 2; half++) {
+					for(height = 0; height < vol_layers; height++) {
+						for(slice = vol_slices/2*(half+1); slice >= (1-half)*(vol_slices/2); slice--) {
+						
+							fscanf(fp, " %c", &parser);
+							if(parser == '0') {
+								(*pArr)[numCoords++] = new PolPnt(height, slice, radius);
+							}
+						}
+					}
+				}
+			}
+		}
+	}
+	return numCoords;
+}
+
+// PRINTS CARTESIAN AND POLAR COORDINATES
+void printCoordinates(int numCoords, CartPnt **cArr, PolPnt **pArr) {
+	for(int i=0; i<numCoords; i++) {
+		if(*cArr == NULL) {
+			printf("(Cartesian) N/A");
+		} else {
+			cArr[i]->printCoord();
+		}
+		printf(" | ");
+		pArr[i]->printCoord();
+		printf("\n\n");
+	}
+	
+	printf("Number of coordinates: %d\n\n", numCoords);
+}
+
+
+// READS POLAR COORDINATES AND CONVERTS TO DATA TO SEND TO ARDUINO
+uint16_t **createSerialData(int numCoords, PolPnt **pArr) {
+	
+	// creates 2D array to hold bytes
+	uint16_t **serialData = new uint16_t*[360];
+	for(int i=0; i<360; i++)
+		serialData[i] = new uint16_t[vol_layers];
+
+	// fills 2D array with byte values from pArr
+	for(int i=0; i<numCoords; i++) {
+		serialData[pArr[i]->getSlice()][pArr[i]->getHeight()] |= pArr[i]->toData();
+	}
+	return serialData;
+}
+
+void printSerialData(uint16_t **serialData) {
+	int count = 0;
+	for(int i=0; i<vol_slices; i++) {
+		for(int j=0; j<vol_layers; j++) {
+			if(serialData[i][j] != 0) {
+				printf("Data at slice %d and layer %d is: %d\n", i, j, serialData[i][j]);
+				count++;
+			}
+		}
+	}
+	printf("\nNumber of data packages created: %d\n\n", count);
+}
+
+
+void sendSerialData(uint16_t **serialData) {
+	int bytecount = 0;
+	int fd = serialport_init(serialport, baudrate);
+	if(fd == -1) return;
+	
+	// clears the display if display_wipe equals 1
+	printf("display_wipe: %d\n", display_wipe);
+	write(fd, &display_wipe, 1);
+	
+	
+	printf("Sending serial data...\n");
+	for(int i=0; i<vol_slices; i++) {
+		for(int j=0; j<vol_layers; j++) {
+			if(serialData[i][j] != 0) {
+				bytecount += write(fd, &serialData[i][j], 2);
+				bytecount += write(fd, &i, 1);
+				bytecount += write(fd, &j, 1);
+				
+				if(bytecount % (5 * 4) == 0) sleep(1);
+			}
+		}
+	}
+	printf("Data transfer complete\n");
+	printf("Bytes transfered: %d\n\n", bytecount);
+	
+	printf("Number of data packages sent: %d\n\n", bytecount / 4);
+}
+```
+
+### main_cmd.cpp
+```
+
+```

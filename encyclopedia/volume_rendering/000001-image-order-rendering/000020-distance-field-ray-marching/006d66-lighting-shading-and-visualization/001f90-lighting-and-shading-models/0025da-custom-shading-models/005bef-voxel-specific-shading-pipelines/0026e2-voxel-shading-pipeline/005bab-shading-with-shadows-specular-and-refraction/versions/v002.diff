@@ -1,0 +1,346 @@
+--- v001.md
++++ v002.md
+@@ -1,8 +1,7 @@
+ # Shading with Shadows, Specular, and Refraction
+ 
+-Also called: Voxel Shading with Shadows, Specular, and Refraction
+ 
+ ## Overview
+-This method computes the final color of a hit voxel by combining diffuse and specular lighting from multiple light sources, handling shadow casting to occlude lights, and managing refraction through volumetric structures. It extends the basic voxel shading pipeline by adding shadow ray casting, Phong-like specular highlights, and recursive or discrete refraction bounces. It is distinguished from simpler shading models by its support for recursive light transport through semi-transparent volumes and its specific handling of voxel-space coordinate offsets for shadow and refraction ray origins.
++This method computes the final color of a hit voxel by combining diffuse and specular lighting from multiple light sources, handling shadow casting to occlude lights, and managing refraction through volumetric structures [S1, unofficial]. It extends the basic voxel shading pipeline by adding shadow ray casting, Phong-like specular highlights, and recursive or discrete refraction bounces [S1, unofficial]. It is distinguished from simpler shading models by its support for recursive light transport through semi-transparent volumes and its specific handling of voxel-space coordinate offsets for shadow and refraction ray origins [S1, unofficial].
+ 
+ ## How it works
+@@ -10,164 +9,218 @@
+ ### Inputs and Outputs
+ **Inputs:**
+-- `rendering_attributes`: Contains `light_count`, array of light sources (each with `diffuse` and `specular` color), `ambient_colour`, and flags for shadow/refraction enablement.
+-- `hit`: The hit point structure from the ray marcher, containing `hit_pos` (world position), `hit_scale` (log2 of voxel size or similar scale factor), and `hit_t` (distance along ray).
+-- `shading_attributes`: Contains `normal` (surface normal at hit point), `colour` (RGBA color sampled from voxel, where `a` is alpha), `refractive_index` (material refractive index).
+-- `eye_ray`: The primary ray, containing `direction` (view direction).
+-- `tree`: The volume data structure for ray casting.
+-- `stack`: Auxiliary stack for recursive ray casting.
+-- `recursions`: Current recursion depth counter.
++- `rendering_attributes`: Contains `light_count`, array of light sources (each with `diffuse` and `specular` color), `ambient_colour`, and flags for shadow/refraction enablement [S1, unofficial].
++- `hit`: The hit point structure from the ray marcher, containing `hit_pos` (world position), `hit_scale` (log2 of voxel size or similar scale factor), and `hit_t` (distance along ray) [S1, unofficial].
++- `shading_attributes`: Contains `normal` (surface normal at hit point), `colour` (RGBA color sampled from voxel, where `a` is alpha), and `refractive_index` (material refractive index) [S1, unofficial].
++- `eye_ray`: The primary ray, containing `direction` (view direction) [S1, unofficial].
++- `tree`: The volume data structure for ray casting [S1, unofficial].
++- `stack`: Auxiliary stack for recursive ray casting [S1, unofficial].
++- `incident_refractive_index`: Refractive index of the medium the ray is currently traveling through [S1, unofficial].
++- `recursions`: Current recursion depth counter [S1, unofficial].
++- `shadows_enabled`, `refraction_enabled`, `refraction_mode`, `refraction_discrete_steps_max`, `refraction_discrete_step`: Configuration flags and parameters controlling shadow casting, refraction mode (`CONTINUOUS` or `DISCRETE`), and discrete stepping limits [S1, unofficial].
+ 
+ **Outputs:**
+-- `out`: A `vec4` representing the final computed color (RGB + alpha, though alpha handling in output is implicit in the accumulation logic).
++- `out`: A `vec4` representing the final computed color (RGB + alpha, though alpha handling in output is implicit in the accumulation logic) [S1, unofficial].
+ 
+ ### Data Structures
+-The method relies on structures defined in the parent [Voxel Shading Pipeline](3898-voxel-shading-pipeline.md) and the ray marcher. Key fields include:
+-- `hit.hit_scale`: Used to compute geometric offsets. `MAX_SCALE` is a constant defining the maximum scale (smallest voxel). `HALF_SQRT_2` is a constant $\frac{\sqrt{2}}{2}$.
+-- `shading_attributes.colour.a`: Alpha value of the hit voxel.
+-- `refraction_mode`: Enum indicating `CONTINUOUS` or `DISCRETE` refraction.
+-- `refraction_discrete_steps_max`: Maximum number of steps for discrete refraction.
+-- `refraction_discrete_step`: Step size for discrete refraction.
++The method relies on structures defined in the parent [Voxel Shading Pipeline](3898-voxel-shading-pipeline.md) and the ray marcher [S1, unofficial]. Key fields include:
++- `hit.hit_scale`: Used to compute geometric offsets. `MAX_SCALE` is a constant defining the maximum scale (smallest voxel). `HALF_SQRT_2` is a constant $\frac{\sqrt{2}}{2}$ [S1, unofficial].
++- `shading_attributes.colour.a`: Alpha value of the hit voxel [S1, unofficial].
++- `refraction_mode`: Enum indicating `CONTINUOUS` or `DISCRETE` refraction [S1, unofficial].
++- `refraction_discrete_steps_max`: Maximum number of steps for discrete refraction [S1, unofficial].
++- `refraction_discrete_step`: Step size for discrete refraction [S1, unofficial].
+ 
+ ### Pseudocode
+ 
+ ```python
+-def shade(rendering_attributes, eye_ray, hit, stack, tree, refractive_index, recursions):
++import math
++
++class Vec3:
++    def __init__(self, x, y, z): self.x, self.y, self.z = x, y, z
++    def __add__(self, v): return Vec3(self.x+v.x, self.y+v.y, self.z+v.z)
++    def __sub__(self, v): return Vec3(self.x-v.x, self.y-v.y, self.z-v.z)
++    def __mul__(self, s): return Vec3(self.x*s, self.y*s, self.z*s)
++    def __rmul__(self, s): return self.__mul__(s)
++    def dot(self, v): return self.x*v.x + self.y*v.y + self.z*v.z
++    def length(self): return math.sqrt(self.dot(self))
++    def normalize(self): 
++        l = self.length()
++        return Vec3(self.x/l, self.y/l, self.z/l) if l > 1e-8 else self
++
++class Vec4:
++    def __init__(self, x, y, z, w): self.x, self.y, self.z, self.w = x, y, z, w
++    def __add__(self, v): return Vec4(self.x+v.x, self.y+v.y, self.z+v.z, self.w+v.w)
++    def __mul__(self, s): return Vec4(self.x*s, self.y*s, self.z*s, self.w*s)
++
++class Hit:
++    def __init__(self, hit_pos, hit_scale, hit_t, normal):
++        self.hit_pos = hit_pos
++        self.hit_scale = hit_scale
++        self.hit_t = hit_t
++        self.normal = normal
++
++class Attachment:
++    def __init__(self, refractive_index):
++        self.refractive_index = refractive_index
++
++class Ray:
++    def __init__(self, origin, direction):
++        self.origin = origin
++        self.direction = direction
++
++def exp2f(x): return 2.0 ** x
++def max_val(a, b): return a if a > b else b
++def dot(a, b): return a.x*b.x + a.y*b.y + a.z*b.z
++def normalize(v): return v.normalize()
++def reflect(I, N): return I - N * (2.0 * dot(I, N))
++def refract(I, N, eta):
++    cos_theta = min_val(dot(-I, N), 1.0)
++    r_out_perp = eta * (I + N * cos_theta)
++    r_out_parallel = -N * math.sqrt(max_val(1.0 - r_out_perp.dot(r_out_perp), 0.0))
++    return r_out_perp + r_out_parallel
++
++def min_val(a, b): return a if a < b else b
++
++def raycast(tree, origin, direction, stack):
++    # Standard volume ray traversal returning a Hit structure [G]
++    pass
++
++def lookup_attachment(tree, hit):
++    # Unpacks voxel data at hit position to retrieve material properties [G]
++    pass
++
++def shade(rendering_attributes, eye_ray, hit, shading_attributes, stack, tree, incident_refractive_index, recursions):
++    MAX_SCALE = 23.0
++    HALF_SQRT_2 = 0.7071067811865476
++    MIN_FLOAT = exp2f(-MAX_SCALE)
++
+     # 1. Normalize normal
+     normal = normalize(shading_attributes.normal)
+-    
++
+     # 2. Initialize output and view direction
+-    out = vec4(0.0, 0.0, 0.0, 0.0)
++    out = Vec4(0.0, 0.0, 0.0, 0.0)
+     view_dir = eye_ray.direction
+-    
++
+     # 3. Iterate over lights
+     for i in range(rendering_attributes.light_count):
+         light = rendering_attributes.lights[i]
+-        light_dir = normalize(light.position - hit.hit_pos) # Assuming point light; adjust for directional
+-        light_distance = exp2f(23.0) # Large number representing infinity
++        light_dir = normalize(light.position - hit.hit_pos)
++        light_distance = exp2f(23.0)
+         attenuation = 1.0
+-        
++
+         # 4. Shadow Ray Casting
+         if shadows_enabled and dot(light_dir, normal) < 0.0:
+-            # Cast shadow ray
+-            shadow_ray_origin = hit.hit_pos + (-light_dir) * (HALF_SQRT_2 * exp2f(hit.hit_scale - MAX_SCALE))
+-            shadow_ray = Ray(shadow_ray_origin, -light_dir)
+-            shadow_hit = raycast(tree, shadow_ray, stack)
+-            
+-            # If shadow ray hits something closer than the light, skip this light
++            shadow_ray_dir = -light_dir
++            shadow_ray_origin = hit.hit_pos + shadow_ray_dir * (HALF_SQRT_2 * exp2f(hit.hit_scale - MAX_SCALE))
++            shadow_hit = raycast(tree, shadow_ray_origin, shadow_ray_dir, stack)
++
+             if shadow_hit.hit_scale < MAX_SCALE and shadow_hit.hit_t < light_distance:
+                 continue
+-        
++
+         # 5. Diffuse Contribution
+-        diffuse_factor = attenuation * max(0.0, dot(normal, -light_dir))
++        diffuse_factor = attenuation * max_val(0.0, dot(normal, -light_dir))
+         diffuse_colour = shading_attributes.colour.rgb * light.diffuse
+-        out += vec4(diffuse_factor * diffuse_colour, 0.0)
+-        
++        out += Vec4(diffuse_factor * diffuse_colour.x, diffuse_factor * diffuse_colour.y, diffuse_factor * diffuse_colour.z, 0.0)
++
+         # 6. Specular Contribution
+         if dot(normal, light_dir) < 0.0:
+             reflection = reflect(light_dir, normal)
+-            specular_factor = pow(max(0.0, dot(reflection, view_dir)), 32.0)
+-            out += vec4(specular_factor * (shading_attributes.colour.rgb * light.specular), 0.0)
+-            
++            specular_factor = pow(max_val(0.0, dot(reflection, view_dir)), 32.0)
++            out += Vec4(specular_factor * (shading_attributes.colour.rgb * light.specular).x, 
++                        specular_factor * (shading_attributes.colour.rgb * light.specular).y, 
++                        specular_factor * (shading_attributes.colour.rgb * light.specular).z, 0.0)
++
+     # 7. Refraction Handling
+     if refraction_enabled and shading_attributes.colour.a < 1.0:
+         one_minus_alpha = 1.0 - shading_attributes.colour.a
+-        out *= shading_attributes.colour.a # Modulate existing color by alpha
+-        
+-        # Determine surface normal for refraction (reverse if entering)
++        out = out * shading_attributes.colour.a
++
+         refract_normal = normal
+         if dot(normal, eye_ray.direction) > 0.0:
+-            refract_normal = -normal
+-            
+-        # Calculate refraction ray
+-        eta = refractive_index / shading_attributes.refractive_index
++            refract_normal = -normal * Vec3(1, 1, 1)
++
++        eta = incident_refractive_index / shading_attributes.refractive_index
+         refract_dir = refract(eye_ray.direction, refract_normal, eta)
+         refract_ray_origin = hit.hit_pos + refract_dir * (HALF_SQRT_2 * exp2f(hit.hit_scale - MAX_SCALE))
+-        refract_ray = Ray(refract_ray_origin, refract_dir)
+-        
++
+         if refraction_mode != CONTINUOUS:
+             # Discrete Refraction
+             current_refractive_index = shading_attributes.refractive_index
+             discrete_ray_origin = refract_ray_origin + refract_dir * (HALF_SQRT_2 * exp2f(hit.hit_scale - MAX_SCALE))
+-            discrete_ray = Ray(discrete_ray_origin, -refract_dir) # Note: direction negated in source logic
++            discrete_ray_dir = -refract_dir
+             refracted_times = 0
+-            
++
+             for step in range(refraction_discrete_steps_max):
+-                refraction_hit = raycast(tree, discrete_ray, stack)
+-                
+-                # Check for exit or invalid hit
+-                min_float = exp2f(-MAX_SCALE)
+-                if refraction_hit.hit_scale == MAX_SCALE or refraction_hit.hit_t <= min_float:
++                refraction_hit = raycast(tree, discrete_ray_origin, discrete_ray_dir, stack)
++
++                if refraction_hit.hit_scale == MAX_SCALE or refraction_hit.hit_t <= MIN_FLOAT:
+                     break
+-                    
+-                # Look up attachment (voxel data)
++
+                 refraction_attachment = lookup_attachment(tree, refraction_hit)
+-                
++
+                 if refraction_attachment.refractive_index != current_refractive_index:
+                     refracted_times += 1
+                     eta = current_refractive_index / refraction_attachment.refractive_index
+-                    
+-                    # Update normal
++
+                     ref_normal = normalize(refraction_hit.normal)
+                     if dot(ref_normal, refract_dir) > 0.0:
+-                        ref_normal = -ref_normal
+-                        
+-                    # Update refraction direction
++                        ref_normal = -ref_normal * Vec3(1, 1, 1)
++
+                     refract_dir = refract(refract_dir, ref_normal, eta)
+-                    discrete_ray.direction = -refract_dir # Negate as per source logic
+-                    
++                    discrete_ray_dir = -refract_dir
+                     current_refractive_index = refraction_attachment.refractive_index
+-                
+-                # Advance discrete ray
+-                discrete_ray.origin += refract_dir * refraction_discrete_step
++
++                discrete_ray_origin = discrete_ray_origin + refract_dir * refraction_discrete_step
+         else:
+-            # Continuous Refraction (Recursive)
++            # Continuous Refraction
++            refraction_hit = raycast(tree, refract_ray_origin, refract_dir, stack)
++
+             if refraction_hit.hit_scale >= MAX_SCALE:
+-                # Hit background or empty space
+-                out += vec4(one_minus_alpha * rendering_attributes.ambient_colour, 0.0)
++                out = out + Vec4(one_minus_alpha * rendering_attributes.ambient_colour.x, 
++                                 one_minus_alpha * rendering_attributes.ambient_colour.y, 
++                                 one_minus_alpha * rendering_attributes.ambient_colour.z, 0.0)
+             else:
+-                # Hit another voxel
+                 refraction_attachment = lookup_attachment(tree, refraction_hit)
+-                
+-                # Update normal
++
+                 ref_normal = normalize(refraction_hit.normal)
+                 if dot(ref_normal, refract_dir) > 0.0:
+-                    ref_normal = -ref_normal
+-                    
+-                # Calculate new refraction direction
+-                eta = refraction_attachment.refractive_index / refractive_index
++                    ref_normal = -ref_normal * Vec3(1, 1, 1)
++
++                eta = refraction_attachment.refractive_index / incident_refractive_index
+                 refract_dir = refract(refract_dir, ref_normal, eta)
+-                
+-                # Set new origin
++
+                 refract_ray_origin = refraction_hit.hit_pos + refract_dir * (HALF_SQRT_2 * exp2f(refraction_hit.hit_scale - MAX_SCALE))
+-                refract_ray = Ray(refract_ray_origin, refract_dir)
+-                
+-                # Recursive call
++                refraction_hit = raycast(tree, refract_ray_origin, refract_dir, stack)
++
+                 if refraction_hit.hit_scale < MAX_SCALE:
+-                    recursive_result = shade(rendering_attributes, refract_ray, refraction_hit, stack, tree, refraction_attachment.refractive_index, recursions + 1)
+-                    out += recursive_result
+-                    
++                    out = out + shade(rendering_attributes, refract_ray_origin, refraction_hit, shading_attributes, stack, tree, refraction_attachment.refractive_index, recursions + 1)
++
+     return out
+ ```
+ 
+ ### Parameters and Typical Values
+-- `MAX_SCALE`: Constant defining the smallest voxel scale. `exp2f(MAX_SCALE)` is the minimum voxel size.
+-- `HALF_SQRT_2`: Constant $\frac{\sqrt{2}}{2} \approx 0.7071$.
+-- `32.0f`: Exponent for specular highlight (Shininess).
+-- `exp2f(23)`: Approximation for infinity in shadow ray distance checks.
+-- `refraction_discrete_steps_max`: Number of steps for discrete refraction. Not given in sources.
+-- `refraction_discrete_step`: Step size for discrete refraction. Not given in sources.
++- `MAX_SCALE`: Constant defining the smallest voxel scale. `exp2f(MAX_SCALE)` is the minimum voxel size [S1, unofficial].
++- `HALF_SQRT_2`: Constant $\frac{\sqrt{2}}{2} \approx 0.7071$ [S1, unofficial].
++- `32.0`: Exponent for specular highlight (Shininess) [S1, unofficial].
++- `exp2f(23)`: Approximation for infinity in shadow ray distance checks [S1, unofficial].
++- `refraction_discrete_steps_max`: Number of steps for discrete refraction. Not given in the sources.
++- `refraction_discrete_step`: Step size for discrete refraction. Not given in the sources.
+ 
+ ### Edge Cases and Pitfalls
+-- **Precision**: The use of `exp2f` for scale calculations requires careful handling of floating-point precision, especially for very small or large scales.
+-- **Boundary Conditions**: The check `shadow_hit.hit_scale < MAX_SCALE` ensures that only valid voxel hits are considered for occlusion. Hits at `MAX_SCALE` (empty space) are ignored.
+-- **Normal Orientation**: The normal must be reversed if the dot product with the view/refraction direction is positive, indicating the ray is exiting the surface.
+-- **Recursion Depth**: The method supports recursive bounces up to a template parameter. Deep recursion can lead to performance issues or stack overflow.
+-- **Discrete Refraction Logic**: The source code negates the direction in discrete refraction (`discrete_refraction_ray.direction = -refraction_ray.direction`). This appears to be a specific implementation detail that may need verification against the intended physics.
++- **Precision**: The use of `exp2f` for scale calculations requires careful handling of floating-point precision, especially for very small or large scales [S1, unofficial].
++- **Boundary Conditions**: The check `shadow_hit.hit_scale < MAX_SCALE` ensures that only valid voxel hits are considered for occlusion. Hits at `MAX_SCALE` (empty space) are ignored [S1, unofficial].
++- **Normal Orientation**: The normal must be reversed if the dot product with the view/refraction direction is positive, indicating the ray is exiting the surface [S1, unofficial].
++- **Recursion Depth**: The method supports recursive bounces up to a template parameter. Deep recursion can lead to performance issues or stack overflow [S1, unofficial].
++- **Discrete Refraction Logic**: The source code negates the direction in discrete refraction (`discrete_refraction_ray.direction = -refraction_ray.direction`). This appears to be a specific implementation detail that may need verification against the intended physics [S1, unofficial].
++
++## Subtopics
++
++### [Volumetric Ray Marching with Glass Refraction and Denoising Guides](21080-volumetric-ray-marching-with-glass-refraction-and-denoising-.md)
++A recursive ray marching loop for volumetric rendering that handles opaque surfaces, diffuse irradiance caching, GGX specular microfacet reflection, and glass refraction, including a specific guide generation step for denoising refracted pixels. It differs from standard volumetric shading by explicitly decoupling the denoising guide computation from the radiance accumulation, tracing refracted rays through glass blocks to find the first surface behind them to provide accurate albedo and normal data to the denoiser.
+ 
+ ## Operating characteristics
+ 
+ ### Time and Memory Complexity
+-- **Time Complexity**: $O(L \cdot (1 + R))$, where $L$ is the number of lights and $R$ is the number of refraction bounces. Each light requires a shadow ray cast. Refraction adds recursive ray casts.
+-- **Memory Complexity**: $O(R)$ for the recursion stack, where $R$ is the maximum refraction depth.
++- **Time Complexity**: $O(L \cdot (1 + R))$, where $L$ is the number of lights and $R$ is the number of refraction bounces. Each light requires a shadow ray cast. Refraction adds recursive ray casts [S1, unofficial].
++- **Memory Complexity**: $O(R)$ for the recursion stack, where $R$ is the maximum refraction depth [S1, unofficial].
+ 
+ ### Measured Performance
+@@ -175,15 +228,15 @@
+ 
+ ### Scaling
+-Performance scales linearly with the number of lights and refraction depth. High refraction depths can significantly impact performance.
++Performance scales linearly with the number of lights and refraction depth. High refraction depths can significantly impact performance [S1, unofficial].
+ 
+ ### Strengths and Limitations
+-- **Strengths**: Supports complex lighting effects including shadows, specular highlights, and refraction. Handles semi-transparent volumes.
+-- **Limitations**: Recursive refraction can be computationally expensive. Discrete refraction logic is complex and may not accurately model continuous refraction.
++- **Strengths**: Supports complex lighting effects including shadows, specular highlights, and refraction. Handles semi-transparent volumes [S1, unofficial].
++- **Limitations**: Recursive refraction can be computationally expensive. Discrete refraction logic is complex and may not accurately model continuous refraction [S1, unofficial].
+ 
+ ### When to Use
+-Use when realistic lighting with shadows and refraction is required for volumetric data. Avoid for real-time applications with strict performance constraints and high refraction depths.
++Use when realistic lighting with shadows and refraction is required for volumetric data. Avoid for real-time applications with strict performance constraints and high refraction depths [S1, unofficial].
+ 
+ ## Background
+-This method is part of the `catchouli/VolumeRender` project [S1, unofficial]. It extends basic voxel shading to include more advanced lighting effects.
++This method is part of the `catchouli/VolumeRender` project [S1, unofficial]. It extends basic voxel shading to include more advanced lighting effects [S1, unofficial].
+ 
+ ## Sources

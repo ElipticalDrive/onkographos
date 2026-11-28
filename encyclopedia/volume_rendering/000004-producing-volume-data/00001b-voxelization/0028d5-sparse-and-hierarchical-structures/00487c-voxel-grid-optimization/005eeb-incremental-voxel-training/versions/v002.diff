@@ -1,0 +1,113 @@
+--- v001.md
++++ v002.md
+@@ -1,5 +1,4 @@
+ # Incremental Voxel Training
+ 
+-Also called: Expanding Bounding Box Strategy, Peripheral Voxel Suppression
+ 
+ ## Overview
+@@ -36,19 +35,17 @@
+ 
+ **Steps:**
+-1.  Initialize the voxel grid $V$ and set iteration counter $i = 0$.
++1.  Initialize the voxel grid $V$ and set iteration counter $i = 0$ [S1].
+ 2.  Calculate $r(i)$ using the current iteration $i$ and max iterations $M$ [S1].
+ 3.  Compute the bounding box corners $P_{min}$ and $P_{max}$ using the formulas above [S1].
+ 4.  During the optimization step (e.g., gradient descent), only update the features of voxels whose coordinates fall within the bounding box defined by $P_{min}$ and $P_{max}$ [S1].
+-5.  Increment $i$ and repeat until convergence or $i \ge M$ [S1].
++5.  Increment $i$ and repeat until convergence or $i \ge M$, at which point the bounding box covers the full grid [S1].
+ 
+ **Pseudocode:**
+ ```python
+-def incremental_voxel_training_step(voxel_grid, iteration, max_iterations, 
+-                                    p_min_init, p_max_init, grid_dims):
++def compute_voxel_mask(iteration, max_iterations, p_min_init, p_max_init, grid_dims):
+     """
+-    Computes the active voxel mask for the current training step.
++    Computes the active voxel indices for the current training step.
+     
+     Args:
+-        voxel_grid: The full voxel grid tensor.
+         iteration: Current training iteration index i.
+         max_iterations: Pre-defined max iteration steps M.
+@@ -58,8 +55,7 @@
+         
+     Returns:
+-        A boolean mask or indices indicating which voxels to optimize.
++        A list of (x, y, z) indices for voxels inside the bounding box.
+     """
+     # 1. Calculate expansion factor r(i)
+-    # r(i) = min(i / M, 1)
+     r_i = min(iteration / max_iterations, 1.0)
+     
+@@ -67,24 +63,13 @@
+     # P_min = (P_min_init * (1 - r(i))) * (Nx, Ny, Nz)
+     # P_max = (P_max_init * (1 - r(i)) + r(i)) * (Nx, Ny, Nz)
++    p_min = [p_min_init[j] * (1 - r_i) * grid_dims[j] for j in range(3)]
++    p_max = [(p_max_init[j] * (1 - r_i) + r_i) * grid_dims[j] for j in range(3)]
+     
+-    p_min = [p_min_init[j] * (1 - r_i) * grid_dims[j] for j in range(3)]
+-    p_max = [p_max_init[j] * (1 - r_i) + r_i) * grid_dims[j] for j in range(3)]
+-    
+-    # 3. Create mask for voxels inside the bounding box
+-    # Only voxels with coordinates (x, y, z) such that P_min <= coord <= P_max are optimized
+-    mask = torch.zeros_like(voxel_grid, dtype=torch.bool)
+-    
+-    # Iterate over grid dimensions to set mask
+-    # Note: In implementation, this is typically done via tensor slicing or broadcasting
+-    # to avoid explicit Python loops for performance.
+-    
+-    # Extract ranges
+-    x_range = range(int(p_min[0]), int(p_max[0]) + 1)
+-    y_range = range(int(p_min[1]), int(p_max[1]) + 1)
+-    z_range = range(int(p_min[2]), int(p_max[2]) + 1)
+-    
+-    # Apply mask (pseudocode logic for clarity)
+-    # mask[x_range, y_range, z_range] = True
+-    
++    # 3. Generate mask indices for voxels inside the bounding box
++    mask = []
++    for x in range(int(p_min[0]), int(p_max[0]) + 1):
++        for y in range(int(p_min[1]), int(p_max[1]) + 1):
++            for z in range(int(p_min[2]), int(p_max[2]) + 1):
++                mask.append((x, y, z))
+     return mask
+ ```
+@@ -92,22 +77,20 @@
+ **Edge Cases and Pitfalls:**
+ *   **Sparse Inputs:** In sparse input scenarios, peripheral voxels close to the camera near planes may acquire high density values at the initial stage, hindering the optimization of inner voxels [S1]. This strategy specifically addresses this by freezing those peripheral voxels initially [S1].
+-*   **Boundary Precision:** The bounding box coordinates are continuous ratios scaled to integer grid dimensions. Implementation must handle the conversion from float ratios to integer indices carefully to ensure voxels on the boundary are included or excluded consistently [S1].
++*   **Boundary Precision:** The bounding box coordinates are continuous ratios scaled to integer grid dimensions [S1]. Implementation must handle the conversion from float ratios to integer indices carefully to ensure voxels on the boundary are included or excluded consistently [S1].
+ 
+ ## Subtopics
+ 
+-### Hybrid Regularization and Training Strategy
+-A variant that combines incremental voxel training with a two-stage optimization process to further prevent overfitting [S2]. It addresses the pitfall that deterministic integration is prone to overfitting at certain voxels when features are explicitly trained [S2].
+-*   **Coarse Geometry Search:** Train a low-resolution voxel grid with a single region and one single-density decoder for 5 epochs to extract an unsupervised occupancy mask from density outputs, then discard weights/features [S2].
+-*   **Implicit Optimization Stage:** Train an implicit MLP (1 input, 8 hidden layers of 512 neurons, 1 output layer of 32 neurons) for 1000 epochs. Positional encoding of vertex coordinates is concatenated to the output of the fourth hidden layer [S2].
+-*   **Explicit Optimization Stage:** Discard the implicit MLP and explicitly optimize the feature grid for 1000 epochs [S2].
+-*   **Sparsity Regularization:** Uses the loss $L_{sparsity} = \lambda_s \sum_i \frac{\sigma_i^2}{\log(1 + \frac{\sigma_i^2}{0.5})}$, where $\sigma_i$ is the ith accumulated density and $\lambda_s$ is the regularization weight (set to $1e-5$) [S2].
+-*   **Parameters:** Optimizer is Adam with learning rate $1e-3$ for coarse geometry searching and $5e-4$ for the fine stage. Batch size is 16384 for NeRF-synthetic dataset and 8192 for Tanks and Temples [S2].
++### [Hybrid Regularization and Training Strategy](17808-hybrid-regularization-and-training-strategy.md)
++A two-stage optimization method for voxel-based neural radiance fields that mitigates overfitting in explicit feature grids by leveraging an implicit neural network for initialization. It solves the problem of deterministic integration prone to overfitting at specific voxels when features are directly optimized, which leads to degenerate solutions like floaters or holes in sparse input scenarios. It sets itself apart from pure explicit regularization by using an intermediate implicit phase to provide a powerful initialization, and from pure implicit methods by discarding the network to allow direct grid optimization for higher final quality. Choose it when sparse inputs cause overfitting in explicit grids but pure implicit methods lack final quality. [Hybrid Regularization and Training Strategy](17808-hybrid-regularization-and-training-strategy.md)
+ 
+ ## Operating characteristics
+-*   **Time Complexity:** The method adds negligible computational overhead per iteration, as it primarily involves calculating the bounding box indices and masking the gradient updates [S1]. The total training time is dominated by the voxel optimization itself [S1].
+-*   **Memory Complexity:** No additional memory is required beyond the voxel grid and the bounding box parameters [S1].
+-*   **Performance:** Improves rendering quality at novel views for sparse inputs by preventing degenerate solutions (holes/floaters) [S1].
++*   **Time Complexity:** Not given in the sources.
++*   **Memory Complexity:** Not given in the sources.
++*   **Measured Performance:** Not given in the sources.
++*   **Scaling:** Not given in the sources.
+ *   **Strengths:** Simple to implement; effectively mitigates overfitting in sparse scenarios without complex architectural changes [S1].
+-*   **Limitations:** Requires tuning of $M$, $P_{min\_init}$, and $P_{max\_init}$ based on scene type (inward-facing vs. forward-facing) [S1]. Not given in the sources.
++*   **Limitations:** Requires tuning of $M$, $P_{min\_init}$, and $P_{max\_init}$ based on scene type (inward-facing vs. forward-facing) [S1].
++*   **When to use:** Sparse input scenarios where standard voxel optimization leads to overfitting and degenerate geometry [S1].
++*   **When not to use:** Dense input scenarios where peripheral voxels do not cause early overfitting, making the expanding box constraint unnecessary overhead [S1].
+ 
+ ## Background
+@@ -115,4 +98,3 @@
+ 
+ ## Sources
+-[S1] VGOS: Voxel Grid Optimization for View Synthesis from Sparse Inputs, https://doi.org/10.24963/ijcai.2023/157, fetched 2026-10-26
+-[S2] NeRFLight: Fast and Light Neural Radiance Fields using a Shared Feature Grid, https://openaccess.thecvf.com/content/CVPR2023/html/Rivas-Manzaneque_NeRFLight_Fast_and_Light_Neural_Radiance_Fields_Using_a_Shared_CVPR_2023_paper.html, fetched 2026-10-27+[S1] VGOS: Voxel Grid Optimization for View Synthesis from Sparse Inputs, https://doi.org/10.24963/ijcai.2023/157, fetched 2026-10-26

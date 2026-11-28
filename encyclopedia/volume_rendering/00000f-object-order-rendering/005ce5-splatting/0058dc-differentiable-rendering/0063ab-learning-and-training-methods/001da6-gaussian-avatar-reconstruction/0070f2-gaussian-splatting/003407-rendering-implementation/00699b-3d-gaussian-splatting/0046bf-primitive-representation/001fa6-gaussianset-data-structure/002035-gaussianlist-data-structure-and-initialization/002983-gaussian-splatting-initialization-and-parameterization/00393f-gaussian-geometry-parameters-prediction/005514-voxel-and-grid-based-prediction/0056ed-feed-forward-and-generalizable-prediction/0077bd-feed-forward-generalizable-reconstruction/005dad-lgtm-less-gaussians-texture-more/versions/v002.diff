@@ -1,0 +1,187 @@
+--- v001.md
++++ v002.md
+@@ -8,5 +8,5 @@
+ ## How it works
+ **Inputs and Outputs:**
+-The network $f$ takes a set of input images $\{I^v\}_{v=1}^N$ and their low-resolution counterparts $\{I^v_{low}\}_{v=1}^N$ as input. It outputs a set of textured 2D Gaussians:
++The network $f$ takes a set of input images $\{I^v\}_{v=1}^N$ and their low-resolution counterparts $\{I^v_{low}\}_{v=1}^N$ as input [S1, unofficial]. It outputs a set of textured 2D Gaussians:
+ $$ f : (I^v, I^v_{low}) \rightarrow \{\mu_i, s_i, r_i, c_i, T^i_c, T^i_\alpha\} $$
+ where $\mu_i$ is the mean, $s_i$ is the scale, $r_i$ is the rotation, $c_i$ are the spherical harmonics (SH) coefficients, $T^i_c$ is the color texture map, and $T^i_\alpha$ is the alpha texture map for primitive $i$ [S1, unofficial].
+@@ -15,6 +15,6 @@
+ *   **Primitive Grid:** The primitive network predicts a grid of $h \times w$ 2DGS primitives, where $h \times w$ corresponds to the resolution of the low-resolution input $I^v_{low}$ [S1, unofficial].
+ *   **Per-primitive Texture Maps:** Each primitive $i$ has two texture maps:
+-    *   Color texture: $T^i_c \in \mathbb{R}^{T \times T \times 3}$
+-    *   Alpha texture: $T^i_\alpha \in \mathbb{R}^{T \times T}$
++    *   Color texture: $T^i_c \in \mathbb{R}^{T \times T \times 3}$ [S1, unofficial].
++    *   Alpha texture: $T^i_\alpha \in \mathbb{R}^{T \times T}$ [S1, unofficial].
+     *   $T$ is the texture resolution, a tunable parameter trading off primitive size and texture size [S1, unofficial].
+     *   $T^i_c$ is zero-initialized [S1, unofficial].
+@@ -22,6 +22,6 @@
+ **Architecture:**
+ The architecture consists of two submodules:
+-1.  **Primitive Network ($f_{prim}$):** Processes low-resolution images $I^v_{low}$ to predict compact geometric primitives ($\mu, s, r, c$) and base opacity $o_i$. It uses a Vision Transformer (ViT) encoder-decoder to produce a grid of primitives and shared feature maps $F^{v}_{prim}$ [S1, unofficial].
+-2.  **Texture Network ($f_{texture}$):** Processes high-resolution images $I^v$ and the geometric features $F^{v}_{prim}$ to predict per-primitive texture maps $T^i_\alpha$ and $T^i_c$. It extracts features via:
++1.  **Primitive Network ($f_{prim}$):** Processes low-resolution images $I^v_{low}$ to predict compact geometric primitives ($\mu, s, r, c$) and base opacity $o_i$ [S1, unofficial]. It uses a Vision Transformer (ViT) encoder-decoder to produce a grid of primitives and shared feature maps $F^{v}_{prim}$ [S1, unofficial].
++2.  **Texture Network ($f_{texture}$):** Processes high-resolution images $I^v$ and the geometric features $F^{v}_{prim}$ to predict per-primitive texture maps $T^i_\alpha$ and $T^i_c$ [S1, unofficial]. It extracts features via:
+     *   **Patch Features ($F^{v}_{patch}$):** Computed from $I^v$ via image patchification and convolutions [S1, unofficial].
+     *   **Projective Features ($F^{v}_{proj}$):** Computed by mapping source image pixels back to primitive local coordinates using the inverse transformation $M_{i,v}^{-1}$ [S1, unofficial].
+@@ -43,6 +43,6 @@
+ 
+ **Training Strategy:**
+-1.  **Stage 1 (Primitive Pre-training):** Train $f_{prim}$ in isolation. Input $I^v_{low}$ predicts primitives, but rendering and supervision occur at full resolution $H \times W$ to enforce high-frequency detail learning and anti-aliasing [S1, unofficial].
+-2.  **Stage 2 (Joint Training):** Jointly train $f_{prim}$ and $f_{texture}$. The learning rate of $f_{prim}$ is reduced by 0.1x to maintain geometric stability [S1, unofficial].
++1.  **Stage 1 (Primitive Pre-training):** Train $f_{prim}$ in isolation [S1, unofficial]. Input $I^v_{low}$ predicts primitives, but rendering and supervision occur at full resolution $H \times W$ to enforce high-frequency detail learning and anti-aliasing [S1, unofficial].
++2.  **Stage 2 (Joint Training):** Jointly train $f_{prim}$ and $f_{texture}$ [S1, unofficial]. The learning rate of $f_{prim}$ is reduced by 0.1x to maintain geometric stability [S1, unofficial].
+ 3.  **Loss:** Standard photometric losses (MSE + LPIPS) are used in both stages [S1, unofficial].
+ 
+@@ -50,79 +50,93 @@
+ 
+ ```python
++import numpy as np
++
+ def lgtm_forward(input_images, low_res_images, camera_poses):
+-    """
+-    Forward pass of LGTM.
+-    input_images: List of RGB images [N, H, W, 3]
+-    low_res_images: List of low-res RGB images [N, h, w, 3]
+-    camera_poses: Camera poses for each view
+-    Returns: List of Gaussian primitives and texture maps
+-    """
+     # Stage 1: Primitive Network
+-    # f_prim takes low-res images and predicts geometry and base appearance
+-    primitives, shared_features = f_prim(low_res_images, camera_poses)
+-    # primitives contains: mu, s, r, c (SH coeffs), o (base opacity)
+-    # shared_features: F_prim from ViT decoder
++    # Process low-res images through ViT encoder-decoder
++    # to predict primitive grid (h x w) and shared features F_prim
++    F_enc = ViTEncoder(low_res_images)
++    primitives, F_prim = ViTDecoder(F_enc, camera_poses)
++    # primitives: {mu, s, r, c, o} for each of h*w locations
+ 
+     # Stage 2: Texture Network
+-    # f_texture takes high-res images and shared features to predict textures
+-    texture_maps = f_texture(input_images, shared_features, primitives)
+-    # texture_maps contains: T_c (color texture), T_alpha (alpha texture)
++    # Extract patch features from high-res images
++    F_patch = PatchifyAndConv(input_images)
++    # Compute projective features via inverse homography
++    F_proj = ProjectiveMapping(input_images, primitives)
++    # Aggregate F_prim, F_patch, F_proj to predict texture maps
++    T_alpha, T_c = AggregateAndPredictTextures(F_prim, F_patch, F_proj)
++    # Initialize T_c to zero before aggregation if not done in network
++    T_c = np.zeros_like(T_c) # [G] Standard practice for additive residual textures
+ 
+-    return primitives, texture_maps
++    return primitives, {"T_c": T_c, "T_alpha": T_alpha}
++
++def ProjectiveMapping(images, primitives):
++    F_proj = []
++    for i, prim in enumerate(primitives):
++        # Compute inverse transformation M_inv mapping local u to image pixel x
++        M_inv = np.linalg.inv(prim.M)
++        # Map local coordinates u to image coordinates x
++        x = M_inv @ prim.local_coords
++        # Sample RGB color from high-res image at x
++        T_proj = SampleImage(images[prim.view_index], x)
++        # Extract features from T_proj
++        F_proj.append(ConvLayers(T_proj))
++    return F_proj
+ 
+ def lgtm_render(primitives, texture_maps, camera_poses, image_resolution):
+-    """
+-    Render the predicted textured Gaussians.
+-    primitives: List of Gaussian parameters
+-    texture_maps: List of texture maps per primitive
+-    camera_poses: Camera poses
+-    image_resolution: (H, W) of the output image
+-    Returns: Rendered image
+-    """
+-    # Initialize output buffer
+-    color_buffer = zeros(image_resolution)
+-    alpha_buffer = zeros(image_resolution)
++    H, W = image_resolution
++    color_buffer = np.zeros((H, W, 3))
++    alpha_buffer = np.zeros((H, W))
+ 
+     # Sort primitives by depth for each pixel
+-    sorted_primitives = sort_primitives_by_depth(primitives, camera_poses, image_resolution)
++    sorted_prims = SortPrimitivesByDepth(primitives, camera_poses, image_resolution)
+ 
+-    for primitive in sorted_primitives:
++    for prim in sorted_prims:
+         # Find ray-splat intersection points u for each pixel covered by this primitive
+-        # u is in local coordinates of the primitive plane
+-        u = compute_intersection(primitive, camera_poses)
+-        
+-        # Sample alpha and color from texture maps
+-        # T_alpha[u] and T_c[u] use bilinear sampling
+-        a = primitive.o * sample_texture(primitive.T_alpha, u)
+-        c = sample_texture(primitive.T_c, u) + evaluate_sh(primitive.c, primitive.view_direction)
+-        
++        u = ComputeIntersection(prim, camera_poses)
++
++        # Sample alpha and color from texture maps using bilinear sampling
++        a = prim.o * BilinearSample(texture_maps["T_alpha"], u)
++        c = BilinearSample(texture_maps["T_c"], u) + EvaluateSH(prim.c, prim.view_direction)
++
+         # Alpha blending
+-        # C_new = C_old * (1 - a) + c * a
+-        # A_new = A_old * (1 - a) + a
+-        # Note: Standard 3DGS blending logic applies here with textured alpha/color
+-        update_buffer(color_buffer, alpha_buffer, u, c, a)
++        color_buffer[u] = color_buffer[u] * (1 - a) + c * a
++        alpha_buffer[u] = alpha_buffer[u] * (1 - a) + a
+ 
+     return color_buffer
+ 
+-def compute_projective_features(high_res_image, primitive, camera_pose):
+-    """
+-    Compute projective features for a primitive.
+-    """
+-    # Compute inverse transformation M_inv mapping local u to image pixel x
+-    M_inv = inverse_homography(primitive.M, camera_pose)
+-    
+-    # Map local coordinates u to image coordinates x
+-    x = apply_homography(M_inv, primitive.local_coordinates)
+-    
+-    # Sample RGB color from high-res image at x
+-    T_proj = sample_image(high_res_image, x)
+-    
+-    # Extract features from T_proj
+-    F_proj = conv_network(T_proj)
+-    return F_proj
++def ComputeIntersection(prim, camera_poses):
++    # Compute ray-splat intersection using 2D homography M
++    # Returns local coordinates u on the primitive plane
++    return ApplyHomography(prim.M, camera_poses[prim.view_index].pixel_coords)
++
++def SortPrimitivesByDepth(primitives, camera_poses, image_resolution):
++    # Sort primitives by depth relative to camera for each pixel
++    return sorted(primitives, key=lambda p: p.depth)
++
++def BilinearSample(texture, u):
++    # Bilinear interpolation at coordinates u
++    return texture[u]
++
++def EvaluateSH(coeffs, direction):
++    # Evaluate spherical harmonics at direction
++    return SHEvaluate(coeffs, direction)
++
++def SampleImage(image, x):
++    # Sample RGB color from image at pixel coordinates x
++    return image[x]
++
++def ConvLayers(tensor):
++    # Apply convolutional layers to extract features
++    return ConvNet(tensor)
++
++def AggregateAndPredictTextures(F_prim, F_patch, F_proj):
++    # Aggregate features and predict per-primitive texture maps
++    return AlphaNet(F_prim, F_patch, F_proj), ColorNet(F_prim, F_patch, F_proj)
+ ```
+ 
+ **Edge Cases and Pitfalls:**
+-*   **Memory Constraints:** Standard feed-forward methods fail at 2K+ resolutions due to memory (e.g., NoPoSplat requires >61 GB at 1024x576). LGTM uses <30 GB [S1, unofficial].
++*   **Memory Constraints:** Standard feed-forward methods fail at 2K+ resolutions due to memory (e.g., NoPoSplat requires >61 GB at 1024x576) [S1, unofficial]. LGTM uses <30 GB [S1, unofficial].
+ *   **Holes in Rendering:** Without high-resolution supervision in Stage 1, predicted Gaussians may result in holes as they are not anti-aliased [S1, unofficial].
+ *   **Geometric Stability:** In Stage 2, the primitive network must be trained with a reduced learning rate (0.1x) to prevent destabilizing the geometric foundation [S1, unofficial].

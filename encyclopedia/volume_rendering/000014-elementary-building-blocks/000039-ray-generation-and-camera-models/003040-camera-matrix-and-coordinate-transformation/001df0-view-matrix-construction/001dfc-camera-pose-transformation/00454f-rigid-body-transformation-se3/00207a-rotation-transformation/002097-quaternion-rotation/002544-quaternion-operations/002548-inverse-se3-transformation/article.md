@@ -1,0 +1,149 @@
+# Inverse SE3 Transformation
+
+Also called: Inverse Rigid Body Transformation, SE3 Inverse, Taichi Inverse SE3 [S1, unofficial]
+
+## Overview
+Computes the inverse of an SE3 transformation given either a $4 \times 4$ homogeneous matrix or a quaternion-translation pair, returning the corresponding inverse transform [S1, unofficial]. It differs from generic matrix inversion by exploiting the orthogonal structure of the rotation submatrix, using a transpose or quaternion conjugate instead of a full $4 \times 4$ inversion [S1, unofficial].
+
+## How it works
+**Inputs:**
+1. **Matrix Form:** A $4 \times 4$ homogeneous transformation matrix $T$ [S1, unofficial].
+2. **Quaternion Form:** A quaternion $q$ representing rotation and a 3D vector $t$ representing translation [S1, unofficial].
+
+**Outputs:**
+1. **Matrix Form:** The inverse $4 \times 4$ matrix $T^{-1}$ [S1, unofficial].
+2. **Quaternion Form:** The inverse quaternion $q_{inv}$ and inverse translation vector $t_{inv}$ [S1, unofficial].
+
+**Data Structures:**
+* **Matrix:** $4 \times 4$ floating-point array. Layout:
+$$
+T = \begin{bmatrix}
+R_{00} & R_{01} & R_{02} & t_x \\
+R_{10} & R_{11} & R_{12} & t_y \\
+R_{20} & R_{21} & R_{22} & t_z \\
+0 & 0 & 0 & 1
+\end{bmatrix}
+$$
+Where $R$ is the $3 \times 3$ rotation submatrix and $t$ is the $3 \times 1$ translation vector [S1, unofficial].
+* **Quaternion:** $q = [w, x, y, z]$ (scalar-first) [G].
+* **Vector:** $t = [t_x, t_y, t_z]$ [S1, unofficial].
+
+**Steps:**
+
+1. **Extract Components (Matrix Input):**
+Extract the rotation matrix $R$ from the top-left $3 \times 3$ elements and translation $t$ from the top-right $3 \times 1$ elements of $T$ [S1, unofficial].
+$$
+R = T[0:3, 0:3], \quad t = T[0:3, 3]
+$$
+
+2. **Compute Inverse Rotation:**
+The inverse of a rotation matrix is its transpose [S1, unofficial].
+$$
+R_{inv} = R^T
+$$
+For quaternion input, the inverse rotation is the conjugate quaternion $q^*$ [S1, unofficial].
+$$
+q_{inv} = q^* = [w, -x, -y, -z]
+$$
+
+3. **Compute Inverse Translation:**
+The inverse translation is the negative of the original translation vector multiplied by the inverse rotation matrix [S1, unofficial].
+$$
+t_{inv} = -R_{inv} t = -R^T t
+$$
+For quaternion input, apply the inverse quaternion rotation to $t$ and negate the result [S1, unofficial].
+$$
+t_{inv} = -\text{rotate}(q_{inv}, t)
+$$
+Where $\text{rotate}(q, v)$ transforms vector $v$ by quaternion $q$ [S1, unofficial].
+
+4. **Construct Output (Matrix Input):**
+Assemble $T^{-1}$ using $R_{inv}$ and $t_{inv}$ [S1, unofficial].
+$$
+T^{-1} = \begin{bmatrix}
+R_{inv} & t_{inv} \\
+0 & 1
+\end{bmatrix}
+$$
+
+**Pseudocode (Matrix Input):**
+> **Unverified code.** The code below did not pass a test run against a reference implementation, or no test fits it, so it may contain errors.
+
+```python
+def inverse_se3_matrix(T):
+    # T is a 4x4 matrix of floats
+    R = [[T[0][0], T[0][1], T[0][2]],
+         [T[1][0], T[1][1], T[1][2]],
+         [T[2][0], T[2][1], T[2][2]]]
+    t = [T[0][3], T[1][3], T[2][3]]
+
+    # Inverse rotation: transpose
+    R_inv = [[R[0][0], R[1][0], R[2][0]],
+             [R[0][1], R[1][1], R[2][1]],
+             [R[0][2], R[1][2], R[2][2]]]
+
+    # Inverse translation: -R_inv @ t
+    t_inv = [-sum(R_inv[i][j] * t[j] for j in range(3)) for i in range(3)]
+
+    # Assemble output
+    T_inv = [[0.0, 0.0, 0.0, 0.0],
+             [0.0, 0.0, 0.0, 0.0],
+             [0.0, 0.0, 0.0, 0.0],
+             [0.0, 0.0, 0.0, 0.0]]
+    for i in range(3):
+        for j in range(3):
+            T_inv[i][j] = R_inv[i][j]
+        T_inv[i][3] = t_inv[i]
+    T_inv[3][3] = 1.0
+    return T_inv
+```
+
+**Pseudocode (Quaternion Input):**
+> **Unverified code.** The code below did not pass a test run against a reference implementation, or no test fits it, so it may contain errors.
+
+```python
+def inverse_se3_quaternion(q, t):
+    # q = [w, x, y, z], t = [x, y, z]
+    q_inv = [q[0], -q[1], -q[2], -q[3]]
+
+    # rotate q_inv by t: v' = v + 2*q_w*(q_v x v) + 2*q_v x (q_v x v)
+    qw, qx, qy, qz = q_inv
+    vx, vy, vz = t
+    ix = qw*vx + qy*vz - qz*vy
+    iy = qw*vy + qz*vx - qx*vz
+    iz = qw*vz + qx*vy - qy*vx
+    wx = -qx*vx - qy*vy - qz*vz
+    t_rot = [vx + 2*(qz*iy - qy*iz),
+             vy + 2*(qx*iz - qz*ix),
+             vz + 2*(qy*ix - qx*iy)]
+
+    t_inv = [-t_rot[0], -t_rot[1], -t_rot[2]]
+    return q_inv, t_inv
+```
+
+**Parameters:**
+* None. The method is deterministic [S1, unofficial].
+
+**Edge Cases and Pitfalls:**
+* **Non-unit Quaternion:** If $q$ is not normalized, $q^*$ is not the true inverse rotation. The input quaternion must be normalized before conjugation [G].
+* **Homogeneous Coordinate:** The bottom row $[0, 0, 0, 1]$ must be preserved in the matrix output to maintain valid homogeneous coordinates [G].
+
+### Quaternion Rotation
+Applies a quaternion to a 3D vector. Sets itself apart from matrix rotation by using four parameters instead of nine. Choose it when memory or computational cost of a $3 \times 3$ matrix is prohibitive. [Quaternion Rotation](3473-quaternion-rotation.md)
+
+### Quaternion Conjugate
+Computes the conjugate of a quaternion. Sets itself apart from inversion by only negating vector components while preserving the scalar part. Choose it when computing inverse rotations for unit quaternions. [Quaternion Operations](3474-quaternion-operations.md)
+
+## Operating characteristics
+* **Time Complexity:** $O(1)$. Fixed number of arithmetic operations for $3 \times 3$ transpose and $3 \times 1$ matrix-vector multiplication [G].
+* **Memory Complexity:** $O(1)$. Requires storage for one $4 \times 4$ matrix or one quaternion and one vector [G].
+* **Strengths:** Avoids expensive $4 \times 4$ matrix inversion; numerically stable for orthogonal rotations [G].
+* **Limitations:** Assumes valid SE3 input (orthogonal rotation matrix or unit quaternion); does not handle scaling or shearing [G].
+* **Measured Performance:** Not given in the sources [S1, unofficial].
+* **When to use:** Converting coordinates between camera/world and local/object frames in ray generation or rasterization pipelines [S1, unofficial].
+
+## Background
+The SE3 inverse is a fundamental operation in computer graphics and robotics for coordinate transformation [G]. The specific implementation details, including the Taichi kernel syntax and the use of `torchImage2tiImage` for data transfer, originate from the 3D Gaussian Splatting visualization project by wanmeihuali [S1, unofficial]. This project adapts 3D Gaussian Splatting for real-time visualization using the Taichi programming language, requiring efficient GPU-accelerated coordinate transformations for camera pose updates [S1, unofficial].
+
+## Sources
+[S1] wanmeihuali/taichi_3d_gaussian_splatting, https://github.com/wanmeihuali/taichi_3d_gaussian_splatting, fetched 2026-10-27 (unofficial)

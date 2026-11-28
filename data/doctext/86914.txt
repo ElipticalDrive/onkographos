@@ -1,0 +1,1424 @@
+# VoxelReach Rewrite
+
+VoxelReach is a voxel game built using Java and LibGDX for a school project.
+This repository is a rewritten and improved version of my original code, where I'm focusing on better structure, cleaner code, and improved performance.
+
+![Screenshot of the current progress](https://raw.githubusercontent.com/azetheon/voxelreach-rewrite/refs/heads/main/screenshots/newscreenshot.png)
+
+---
+
+## 🎮 Current Features
+
+- Player camera and movement system
+- UI system for debugging
+- Easy system for adding new blocks
+- Block placing and breaking system
+
+---
+
+## 🎯 Roadmap
+The roadmap is a list of features I want to get done in the pre-alpha versions of this game
+
+### Optimization
+- Face culling ✔️
+- Greedy meshing
+- Frustum culling
+- Texture atlas
+- Compact block storage
+
+### Core Gameplay
+- Basic block placing and breaking system ✔️
+- Inventory system (working on this right now)
+- Hotbar ✔️
+- Survival mechanics
+
+### World System
+- World saving/loading
+- Terrain generation
+
+### Polish
+- Sound effects
+- UI improvements
+- Environment improvements
+
+---
+
+## 🛠️ Software used
+
+- Java
+- libGDX
+- Gradle
+- IntelliJ IDEA
+
+---
+
+## 📁 Project Structure
+
+- `core/` – Main game logic
+- `lwjgl3/` – Window Launcher
+- `assets/` – Textures
+
+---
+
+## 🚀 How to Run
+
+1. Clone the repository:
+   ```bash
+   git clone https://github.com/azetheon/voxelreach-rewrite.git
+2. Open the project in IntelliJ IDEA or an IDE of your choice
+3. Import as a Gradle project
+4. Run the "Lwjgl3Launcher.java" file in "lwjgl3/src/main/java/aze.games.voxelreach.lwjgl3"
+
+### core/src/main/java/aze/games/voxelreach/Main.java
+```
+package aze.games.voxelreach;
+
+import aze.games.voxelreach.player.TextInput;
+import com.badlogic.gdx.ApplicationAdapter;
+import com.badlogic.gdx.Gdx;
+import com.badlogic.gdx.graphics.GL20;
+import com.badlogic.gdx.graphics.g2d.BitmapFont;
+import com.badlogic.gdx.graphics.g2d.SpriteBatch;
+import com.badlogic.gdx.Input;
+import com.badlogic.gdx.graphics.glutils.ShapeRenderer;
+
+import aze.games.voxelreach.player.Camera;
+import aze.games.voxelreach.world.AvailableBlocks;
+import aze.games.voxelreach.world.WorldEnvironment;
+import aze.games.voxelreach.world.ChunkGeneration;
+import aze.games.voxelreach.player.UserInterface;
+import aze.games.voxelreach.player.Raycast;
+
+public class Main extends ApplicationAdapter {
+    SpriteBatch spriteBatch;
+    BitmapFont font;
+    ShapeRenderer shapeRenderer;
+
+    @Override
+    public void create() {
+        spriteBatch = new SpriteBatch();
+        font = new BitmapFont();
+        shapeRenderer = new ShapeRenderer();
+        Gdx.input.setCursorCatched(true);
+
+        Gdx.input.setInputProcessor(new TextInput());
+
+        Camera.prepareCamera();
+        Camera.prepareOverlayCamera();
+        WorldEnvironment.prepareEnvironment();
+        AvailableBlocks.loadBlocks();
+        ChunkGeneration.makeChunk();
+    }
+
+    @Override
+    public void render() {
+        Camera.cameraMovement();
+        Camera.playerMovement();
+        Camera.getOverlay().update();
+        UserInterface.update();
+
+        Raycast.HitResult hit = Raycast.raycast(Camera.getCamera(),5f);
+
+        Gdx.gl.glViewport(0, 0, Gdx.graphics.getWidth(), Gdx.graphics.getHeight());
+        Gdx.gl.glClearColor(0.53f, 0.81f, 0.92f, 1f);
+        Gdx.gl.glClear(GL20.GL_COLOR_BUFFER_BIT | GL20.GL_DEPTH_BUFFER_BIT);
+
+        Gdx.gl.glEnable(GL20.GL_CULL_FACE);
+        Gdx.gl.glCullFace(GL20.GL_BACK);
+
+        ChunkGeneration.renderChunks();
+        UserInterface.drawDebug(spriteBatch, font);
+        UserInterface.drawHotbar(shapeRenderer, font, spriteBatch);
+        UserInterface.drawConsole(shapeRenderer, font, spriteBatch);
+
+        if (hit.hit) {
+            if (Gdx.input.isButtonJustPressed(Input.Buttons.LEFT)) {
+                AvailableBlocks.Block broken = ChunkGeneration.getBlock(hit.x, hit.y, hit.z);
+                if (broken != null) {
+                    UserInterface.giveBlock(broken.getName());
+                }
+                ChunkGeneration.setBlock(hit.x, hit.y, hit.z, null);
+                ChunkGeneration.rebuildChunk();
+            }
+            if (Gdx.input.isButtonJustPressed(Input.Buttons.RIGHT)) {
+                String selectedBlock = UserInterface.getSelectedBlockName();
+                if (selectedBlock != null) {
+                    ChunkGeneration.setBlock(hit.faceX, hit.faceY, hit.faceZ, AvailableBlocks.getBlock(selectedBlock));
+                    UserInterface.consumeSelectedBlock();
+                    ChunkGeneration.rebuildChunk();
+                }
+            }
+        }
+    }
+
+    @Override
+    public void dispose() {
+        spriteBatch.dispose();
+        font.dispose();
+        ChunkGeneration.cleanup();
+        AvailableBlocks.cleanupTextures();
+
+        /*
+         * release cursor just in case i need it later on
+         * before i go insane debugging and realizing it's just the cursor
+         */
+
+        Gdx.input.setCursorCatched(false);
+    }
+}
+```
+
+### core/src/main/java/aze/games/voxelreach/player/Camera.java
+```
+package aze.games.voxelreach.player;
+
+import com.badlogic.gdx.Gdx;
+import com.badlogic.gdx.Input;
+import com.badlogic.gdx.graphics.PerspectiveCamera;
+import com.badlogic.gdx.graphics.OrthographicCamera;
+import com.badlogic.gdx.math.Vector3;
+
+import aze.games.voxelreach.player.UserInterface;
+
+public class Camera {
+    private static PerspectiveCamera camera;
+    private static OrthographicCamera overlayCamera;
+
+    private static int mouseX = Gdx.input.getX();
+    private static int mouseY = Gdx.input.getY();
+    private static int resolutionWidth = Gdx.graphics.getWidth();
+    private static int resolutionHeight = Gdx.graphics.getHeight();
+
+    public static void prepareCamera() {
+        camera = new PerspectiveCamera(80, resolutionWidth, resolutionHeight);
+        camera.position.set(3f, 3f, 3f); // spawn point
+        camera.near = 0.1f;
+        camera.far = 500f;
+        camera.update(); // update where i look at
+    }
+
+    public static void cameraMovement() {
+        if (UserInterface.getChatStatus()) return; // if chat is open i don't want the camera to move around
+
+        int screenX = Gdx.input.getX();
+        int screenY = Gdx.input.getY();
+
+
+        // magnitude is needed for smoother moving instead of instant flicks
+        int magnitudeX = Math.abs(mouseX - screenX);
+        int magnitudeY = Math.abs(mouseY - screenY);
+
+        /*
+         * Explanation for myself cuz im still learning 3d game development:
+         *
+         * if mouseX goes over screenX move towards the right cuz if the mouse's x position is higher
+         * than screen's x position we logically move right
+         * same principle but opposite side for left
+         *
+         * same with y but camera has a maximum y rotation to not do barrel rolls
+         * i set it as -0.999 and 0.999 instead of 1 cuz setting it to 1 gives weird results
+         * i'll call it "half-barrel-rolls", it basically tries to roll but stops and glitches
+         *
+         * */
+
+        float sensitivity = 0.1f;
+        if (mouseX > screenX)
+            camera.rotate(Vector3.Y, 1f * magnitudeX * sensitivity);
+        if (mouseX < screenX)
+            camera.rotate(Vector3.Y, -1f * magnitudeX * sensitivity);
+
+        if (mouseY < screenY && camera.direction.y > -0.999)
+            camera.rotate(camera.direction.cpy().crs(Vector3.Y), -1f * magnitudeY * sensitivity);
+        if (mouseY > screenY && camera.direction.y < 0.999)
+            camera.rotate(camera.direction.cpy().crs(Vector3.Y), 1f * magnitudeY * sensitivity);
+
+        mouseX = screenX;
+        mouseY = screenY;
+
+        camera.update();
+    }
+
+    public static void prepareOverlayCamera() {
+        overlayCamera = new OrthographicCamera(Gdx.graphics.getWidth(), Gdx.graphics.getHeight());
+        overlayCamera.position.set(
+            overlayCamera.viewportWidth / 2f,
+            overlayCamera.viewportHeight / 2f,
+            1f
+        );
+        overlayCamera.update();
+    }
+
+    public static void playerMovement() {
+        if (UserInterface.getChatStatus()) return; // don't move while chat is open
+
+        float delta = Gdx.graphics.getDeltaTime();
+        float movementSpeed;
+
+        /*
+         * another note to myself:
+         *
+         * .nor() is "normalize"
+         * normalizing the vector keeps only
+         * the direction which lets me have consistent movement speeds
+         *
+         * .crs(something) is "cross product"
+         * it gives a vector at a right angle to this and (something)
+         * it allows me to go left and right
+         *
+         */
+
+        Vector3 forward = new Vector3(camera.direction.x, 0, camera.direction.z).nor();
+        Vector3 backward = new Vector3(-camera.direction.x, 0, -camera.direction.z).nor();
+        Vector3 right = new Vector3(Vector3.Y).crs(forward).nor();
+        Vector3 left = new Vector3(Vector3.Y).crs(backward).nor();
+
+        if (Gdx.input.isKeyPressed(Input.Keys.CONTROL_LEFT)) {
+            movementSpeed = 20f;
+        }
+        else {
+            movementSpeed = 10f;
+        }
+
+        if (Gdx.input.isKeyPressed(Input.Keys.W)) {
+            camera.position.add(forward.scl(movementSpeed * delta));
+        }
+        if (Gdx.input.isKeyPressed(Input.Keys.S)) {
+            camera.position.add(backward.scl(movementSpeed * delta));
+        }
+        if (Gdx.input.isKeyPressed(Input.Keys.A)) {
+            camera.position.add(right.scl(movementSpeed * delta));
+        }
+        if (Gdx.input.isKeyPressed(Input.Keys.D)) {
+            camera.position.add(left.scl(movementSpeed * delta));
+        }
+        if (Gdx.input.isKeyPressed(Input.Keys.SPACE)) {
+            camera.position.y += movementSpeed * delta;
+        }
+        if (Gdx.input.isKeyPressed(Input.Keys.SHIFT_LEFT)) {
+            camera.position.y -= movementSpeed * delta;
+        }
+    }
+
+    public static PerspectiveCamera getCamera() {
+        return camera;
+    }
+
+    public static OrthographicCamera getOverlay() {
+        return overlayCamera;
+    }
+}
+```
+
+### core/src/main/java/aze/games/voxelreach/player/Raycast.java
+```
+package aze.games.voxelreach.player;
+
+import aze.games.voxelreach.world.ChunkGeneration;
+import com.badlogic.gdx.math.Vector3;
+import com.badlogic.gdx.graphics.Camera;
+
+public class Raycast {
+    public static class HitResult {
+        public int x, y, z;
+        public int faceX, faceY, faceZ; // face of the block i wanna place block on (very good english ik)
+        public boolean hit;
+    }
+
+    public static HitResult raycast(Camera camera, float maxDistance) {
+        Vector3 origin = new Vector3(camera.position);
+        Vector3 direction = new Vector3(camera.direction).nor();
+        HitResult result = new HitResult();
+
+        float step = 0.1f;
+        Vector3 position = new Vector3(origin);
+
+        for (float i = 0; i < maxDistance; i += step) {
+            position.add(direction.x * step, direction.y * step, direction.z * step);
+
+            int x = (int)Math.floor(position.x + 0.5f);
+            int y = (int)Math.floor(position.y + 0.5f);
+            int z = (int)Math.floor(position.z + 0.5f);
+
+            if (isSolid(x, y, z)) {
+                result.hit = true;
+                result.x = x;
+                result.y = y;
+                result.z = z;
+
+                result.faceX = (int)Math.floor(position.x - direction.x * step + 0.5f);
+                result.faceY = (int)Math.floor(position.y - direction.y * step + 0.5f);
+                result.faceZ = (int)Math.floor(position.z - direction.z * step + 0.5f);
+
+                return result;
+            }
+        }
+
+        result.hit = false;
+        return result;
+    }
+
+    private static boolean isSolid(int x, int y, int z) {
+        return ChunkGeneration.getBlock(x, y, z) != null;
+    }
+}
+```
+
+### core/src/main/java/aze/games/voxelreach/player/TextInput.java
+```
+package aze.games.voxelreach.player;
+
+import com.badlogic.gdx.InputProcessor;
+
+public class TextInput implements InputProcessor {
+
+    @Override
+    public boolean keyTyped(char character) {
+        if (!UserInterface.getChatStatus()) return false;
+
+        if (character == '\b' && UserInterface.consoleInput.length() > 0) {
+            UserInterface.consoleInput.deleteCharAt(UserInterface.consoleInput.length() - 1);
+            return true;
+        }
+
+        if (character == '\n') {
+            UserInterface.executeConsoleCommand();
+            return true;
+        }
+
+        if (character >= 32) { // settings this to only 32 and above prevents some weird characters from appearing
+            UserInterface.consoleInput.append(character);
+        }
+
+        return true;
+    }
+
+    // taken from https://github.com/libgdx/libgdx/blob/master/gdx/src/com/badlogic/gdx/InputProcessor.java
+    // just returns false cuz i don't use it
+    @Override public boolean keyDown(int keycode) { return false; }
+    @Override public boolean keyUp(int keycode) { return false; }
+    @Override public boolean touchDown(int x, int y, int pointer, int button) { return false; }
+    @Override public boolean touchUp(int x, int y, int pointer, int button) { return false; }
+    @Override public boolean touchDragged(int x, int y, int pointer) { return false; }
+    @Override public boolean mouseMoved(int x, int y) { return false; }
+    @Override public boolean scrolled(float amountX, float amountY) { return false; }
+
+    // return false i don't use it but it errors otherwise
+    @Override
+    public boolean touchCancelled(int screenX, int screenY, int pointer, int button) {
+        return false;
+    }
+}
+```
+
+### core/src/main/java/aze/games/voxelreach/player/UserInterface.java
+```
+package aze.games.voxelreach.player;
+
+import aze.games.voxelreach.world.AvailableBlocks;
+import aze.games.voxelreach.world.ChunkGeneration;
+import com.badlogic.gdx.Gdx;
+import com.badlogic.gdx.graphics.g2d.BitmapFont;
+import com.badlogic.gdx.graphics.g2d.SpriteBatch;
+import com.badlogic.gdx.Input;
+import com.badlogic.gdx.graphics.glutils.ShapeRenderer;
+
+public class UserInterface {
+    private static boolean showDebug = true;
+    private static boolean showConsole = false;
+    private static float screenCenterX = Gdx.graphics.getWidth() / 2f;
+    private static float screenCenterY = Gdx.graphics.getHeight() / 2f;
+
+    public static int selectedSlot = 0;
+
+    private static String[] hotbarBlockNames = new String[4];
+    private static int[] hotbarBlockCounts = new int[4];
+
+    static StringBuilder consoleInput = new StringBuilder();
+
+    public static String getSelectedBlockName() {
+        int blockIndex = slotToBlockIndex(selectedSlot);
+        if (blockIndex < 0 || blockIndex >= 4) return null;
+        return hotbarBlockNames[blockIndex];
+    }
+
+    public static void consumeSelectedBlock() {
+        int blockIndex = slotToBlockIndex(selectedSlot);
+        if (blockIndex < 0 || blockIndex >= 4) return;
+        if (hotbarBlockCounts[blockIndex] <= 0) return;
+        hotbarBlockCounts[blockIndex]--;
+        if (hotbarBlockCounts[blockIndex] == 0) {
+            hotbarBlockNames[blockIndex] = null;
+        }
+    }
+
+    public static boolean getChatStatus() {
+        return showConsole;
+    }
+
+    public static boolean giveBlock(String blockName) {
+        if (AvailableBlocks.getBlock(blockName) == null)
+            return false;
+        for (int i = 0; i < 4; i++) {
+            if (blockName.equals(hotbarBlockNames[i]) && hotbarBlockCounts[i] < 99) {
+                hotbarBlockCounts[i]++;
+                return true;
+            }
+        }
+
+        for (int i = 0; i < 4; i++) {
+            if (hotbarBlockNames[i] == null) {
+                hotbarBlockNames[i] = blockName;
+                hotbarBlockCounts[i] = 1;
+                return true;
+            }
+        }
+
+        return false; // all slots full, don't do anything
+    }
+
+    // Slots 0 and 1 are tool slots, skip them
+    // 2-3 are a visual gap, skip them
+    private static int slotToBlockIndex(int slot) {
+        return slot - 4;
+    }
+
+    public static void update() {
+        if (Gdx.input.isKeyJustPressed(Input.Keys.F1)) {
+            showDebug = !showDebug;
+        }
+        if (Gdx.input.isKeyJustPressed(Input.Keys.T) && !showConsole) {
+            showConsole = true;
+            consoleInput.setLength(0);
+            Gdx.input.setCursorCatched(false);
+        }
+        if (Gdx.input.isKeyJustPressed(Input.Keys.ESCAPE) && showConsole) {
+            showConsole = false;
+            Gdx.input.setCursorCatched(true);
+        }
+
+        int[] slotMapping = {0, 1, 4, 5, 6, 7}; // 2 and 3 are empty space so skip those
+        int[] numKeys = {
+            Input.Keys.NUM_1, Input.Keys.NUM_2, Input.Keys.NUM_3,
+            Input.Keys.NUM_4, Input.Keys.NUM_5, Input.Keys.NUM_6
+        };   // i can add 7 8 9 later but currently I don't need them
+        for (int i = 0; i < numKeys.length; i++) {
+            if (Gdx.input.isKeyJustPressed(numKeys[i])) {
+                selectedSlot = slotMapping[i];
+            }
+        }
+    }
+
+    public static void executeConsoleCommand() {
+        String input = consoleInput.toString().trim();
+        showConsole = false;
+        consoleInput.setLength(0);
+        Gdx.input.setCursorCatched(true);
+
+        if (input.startsWith(".give ")) {
+            String[] parts = input.split(" ");
+
+            if (parts.length < 2) {
+                System.out.println("[Console] Usage: .give <block> [amount]");
+                return;
+            }
+
+            String blockName = parts[1].toLowerCase();
+            int amount = 1;
+
+            if (parts.length >= 3) {
+                try {
+                    amount = Integer.parseInt(parts[2]);
+                } catch (NumberFormatException e) {
+                    System.out.println("[Console] Invalid amount!");
+                    return;
+                }
+            }
+
+            boolean success = false;
+
+            for (int i = 0; i < amount; i++) {
+                if (giveBlock(blockName)) {
+                    success = true;
+                } else {
+                    break; // stop if inventory is full
+                }
+            }
+
+            if (!success) {
+                System.out.println("[Console] Failed to give block!");
+            } else {
+                System.out.println("[Console] Added " + amount + " " + blockName + " to hotbar.");
+            }
+        }
+        // more commands can go here later
+    }
+
+    public static String getSelectedBlockLabel() {
+        String name = getSelectedBlockName();
+        if (name == null) return "Tool slot";
+        int blockIndex = slotToBlockIndex(selectedSlot);
+        int count = (blockIndex >= 0 && blockIndex < 4) ? hotbarBlockCounts[blockIndex] : 0;
+        return Character.toUpperCase(name.charAt(0)) + name.substring(1) + " x" + count;
+    }
+
+    public static void drawDebug(SpriteBatch spriteBatch, BitmapFont font) {
+        if (!showDebug) return;
+
+        spriteBatch.setProjectionMatrix(Camera.getOverlay().combined);
+        spriteBatch.begin();
+
+        // after extensive testing by which I mean changing the number up by 5, I have decided that 15 is a good amount of spacing between the lines
+        float y = Camera.getOverlay().viewportHeight - 10;
+        float lineHeight = 15;
+
+        long usedMemory = (Runtime.getRuntime().totalMemory() - Runtime.getRuntime().freeMemory()) / (1024 * 1024);
+        long maxMemory = Runtime.getRuntime().maxMemory() / (1024 * 1024);
+
+        font.draw(spriteBatch, "VoxelReach Pre-Alpha v0.1.0", 10, y); y -= lineHeight;
+        font.draw(spriteBatch, "FPS: " + Gdx.graphics.getFramesPerSecond(), 10, y); y -= lineHeight;
+        font.draw(spriteBatch, "Selected Block: " + getSelectedBlockLabel(), 10, y); y -= lineHeight;
+        font.draw(spriteBatch, "Voxel Count: " + ChunkGeneration.getVoxelCount(), 10, y); y -= lineHeight;
+        font.draw(spriteBatch, "Chunk Count: " + ChunkGeneration.getChunkCount(), 10, y); y -= lineHeight;
+        font.draw(spriteBatch, "Chunk Rebuilds: " + ChunkGeneration.getChunkRebuildsCounter(), 10, y); y -= lineHeight;
+
+        font.draw(spriteBatch,
+            "Coordinates: " +
+                (int)Camera.getCamera().position.x + ", " +
+                (int)Camera.getCamera().position.y + ", " +
+                (int)Camera.getCamera().position.z,
+            10, y); y -= lineHeight;
+
+        font.draw(spriteBatch,
+            "Camera Direction: " +
+                String.format("%.2f, %.2f, %.2f",
+                    Camera.getCamera().direction.x,
+                    Camera.getCamera().direction.y,
+                    Camera.getCamera().direction.z),
+            10, y); y -= lineHeight;
+
+        font.draw(spriteBatch,"Memory: " + usedMemory + "MB / " + maxMemory + "MB",10, y); y -= lineHeight;
+        font.draw(spriteBatch, "+", screenCenterX - 3, screenCenterY + 5);
+
+        spriteBatch.end();
+    }
+
+    public static void drawHotbar(ShapeRenderer shapeRenderer, BitmapFont font, SpriteBatch spriteBatch) {
+        shapeRenderer.setProjectionMatrix(Camera.getOverlay().combined);
+
+        float slotSize = 42f;
+        float slotMargin = 8f;
+        float padding = 10f;
+        int totalSlots = Math.max(2, 8);
+
+        float totalWidth = (totalSlots * slotSize) + ((totalSlots - 1) * slotMargin) + (padding * 2);
+        float startX = (Gdx.graphics.getWidth() - totalWidth) / 2f;
+        float hotbarY = 20f;
+        float hotbarHeight = slotSize + (padding * 2);
+
+        shapeRenderer.begin(ShapeRenderer.ShapeType.Filled);
+        shapeRenderer.setColor(26/255f, 16/255f, 8/255f, 0.92f);
+        shapeRenderer.rect(startX, hotbarY, totalWidth, hotbarHeight);
+        shapeRenderer.end();
+
+        shapeRenderer.begin(ShapeRenderer.ShapeType.Line);
+        Gdx.gl.glLineWidth(2f);
+        shapeRenderer.setColor(92/255f, 58/255f, 30/255f, 1f);
+        shapeRenderer.rect(startX, hotbarY, totalWidth, hotbarHeight);
+        shapeRenderer.end();
+
+        float slotsStartX = startX + padding;
+
+        for (int i = 0; i < totalSlots; i++) {
+            if (i == 2 || i == 3) continue;
+            float slotX = slotsStartX + i * (slotSize + slotMargin);
+            float slotY = hotbarY + padding;
+            boolean isSelected = (i == selectedSlot);
+
+            shapeRenderer.begin(ShapeRenderer.ShapeType.Filled);
+            shapeRenderer.setColor(isSelected
+                ? new com.badlogic.gdx.graphics.Color(61/255f, 40/255f, 20/255f, 1f)
+                : new com.badlogic.gdx.graphics.Color(42/255f, 26/255f, 12/255f, 1f));
+            shapeRenderer.rect(slotX, slotY, slotSize, slotSize);
+            shapeRenderer.end();
+
+            shapeRenderer.begin(ShapeRenderer.ShapeType.Line);
+            Gdx.gl.glLineWidth(isSelected ? 2.5f : 1.5f);
+            shapeRenderer.setColor(isSelected
+                ? new com.badlogic.gdx.graphics.Color(200/255f, 147/255f, 74/255f, 1f)
+                : new com.badlogic.gdx.graphics.Color(122/255f, 92/255f, 63/255f, 0.85f));
+            shapeRenderer.rect(slotX, slotY, slotSize, slotSize);
+            shapeRenderer.end();
+
+            if (isSelected) {
+                shapeRenderer.begin(ShapeRenderer.ShapeType.Filled);
+                shapeRenderer.setColor(200/255f, 147/255f, 74/255f, 1f);
+                float dotSize = 5f;
+                shapeRenderer.rect(slotX + (slotSize / 2f) - (dotSize / 2f), hotbarY + 3f, dotSize, dotSize);
+                shapeRenderer.end();
+            }
+        }
+
+        // here we draw block icons cuz it looks fancy yeaaaaaaa
+        spriteBatch.setProjectionMatrix(Camera.getOverlay().combined);
+        spriteBatch.begin();
+
+        float iconPadding = 5f;
+        float iconSize = slotSize - (iconPadding * 2);
+
+        for (int i = 4; i < totalSlots; i++) {
+            int blockIndex = slotToBlockIndex(i);
+            if (blockIndex < 0 || blockIndex >= 4) continue;
+            if (hotbarBlockNames[blockIndex] == null) continue;
+
+            AvailableBlocks.Block block = AvailableBlocks.getBlock(hotbarBlockNames[blockIndex]);
+            if (block == null) continue;
+
+            float slotX = slotsStartX + i * (slotSize + slotMargin);
+            float slotY = hotbarY + padding;
+
+            spriteBatch.draw(block.getSideTexture(),
+                slotX + iconPadding,
+                slotY + iconPadding,
+                iconSize,
+                iconSize);
+
+            if (hotbarBlockCounts[blockIndex] > 1) {
+                font.draw(spriteBatch, String.valueOf(hotbarBlockCounts[blockIndex]),
+                    slotX + slotSize - iconPadding - 8,
+                    slotY + iconPadding + 10);
+            }
+        }
+
+        spriteBatch.end();
+
+        Gdx.gl.glLineWidth(1f);
+    }
+
+    public static void drawConsole(ShapeRenderer shapeRenderer, BitmapFont font, SpriteBatch spriteBatch) {
+        if (!showConsole) return;
+        shapeRenderer.setProjectionMatrix(Camera.getOverlay().combined);
+
+        float consoleX = 10.f;
+        float consoleY = 20.f;
+        float consoleWidth = 350.f;
+        float consoleHeight = 20.f;
+
+        shapeRenderer.begin(ShapeRenderer.ShapeType.Filled);
+        shapeRenderer.setColor(26/255f, 16/255f, 8/255f, 0.92f);
+        shapeRenderer.rect(consoleX, consoleY, consoleWidth, consoleHeight);
+        shapeRenderer.end();
+
+        shapeRenderer.begin(ShapeRenderer.ShapeType.Line);
+        Gdx.gl.glLineWidth(2f);
+        shapeRenderer.setColor(92/255f, 58/255f, 30/255f, 1f);
+        shapeRenderer.rect(consoleX, consoleY, consoleWidth, consoleHeight);
+        shapeRenderer.end();
+
+        spriteBatch.setProjectionMatrix(Camera.getOverlay().combined);
+        spriteBatch.begin();
+        font.draw(spriteBatch, consoleInput.toString(), consoleX + 5, consoleY + 15);
+        spriteBatch.end();
+    }
+}
+```
+
+### core/src/main/java/aze/games/voxelreach/world/AvailableBlocks.java
+```
+package aze.games.voxelreach.world;
+
+import com.badlogic.gdx.graphics.Texture;
+
+import java.util.Collection;
+import java.util.Collections;
+import java.util.HashMap;
+import java.util.Map;
+
+public class AvailableBlocks {
+    private static Map<String, Texture> textureCache = new HashMap<>();
+    private static Map<String, Block> blocks = new HashMap<>();
+
+    public static class Block {
+        private String name;
+        private Texture top, bottom, side;
+        private String attribute;
+
+        // i don't use attributes rn but it's for future block attrtibutes
+        // like the opacity for water or interactability for workshop blocks
+
+        public Block(String name, String top, String bottom, String side, String attribute) {
+            this.name = name;
+            this.top = getTexture(top);
+            this.bottom = getTexture(bottom);
+            this.side = getTexture(side);
+            this.attribute = attribute;
+        }
+
+        public String getName() { return name; }
+
+        // the fix for everything being stone bruh
+        public Texture getTopTexture() {
+            return top;
+        }
+        public Texture getBottomTexture() {
+            return bottom;
+        }
+        public Texture getSideTexture() {
+            return side;
+        }
+    }
+
+    private static Texture getTexture(String path) {
+        if (!textureCache.containsKey(path)) {
+            textureCache.put(path, new Texture(path));
+        }
+        return textureCache.get(path);
+    }
+
+    public static void cleanupTextures() {
+        for (Texture texture : textureCache.values()) {
+            texture.dispose();
+        }
+        textureCache.clear();
+    }
+
+    public static void loadBlocks() {
+        blocks.put("grass", new Block(
+            "grass",
+            "grass.png",
+            "grass_bottom.png",
+            "grass_side.png",
+            "none"));
+        blocks.put("stone", new Block(
+            "stone",
+            "stone.png",
+            "stone.png",
+            "stone.png",
+            "none"));
+        blocks.put("sand", new Block(
+            "sand",
+            "sand.png",
+            "sand.png",
+            "sand.png",
+            "none"));
+        blocks.put("dirt", new Block(
+            "dirt",
+            "dirt.png",
+            "dirt.png",
+            "dirt.png",
+            "none"));
+    }
+
+    public static Block getBlock(String name) {
+        return blocks.get(name);
+    }
+
+    public static Collection<Block> getAllBlocks() {
+        return Collections.unmodifiableCollection(blocks.values());
+    }
+
+}
+```
+
+### core/src/main/java/aze/games/voxelreach/world/ChunkGeneration.java
+```
+package aze.games.voxelreach.world;
+
+import java.util.ArrayList;
+import java.util.List;
+
+import com.badlogic.gdx.graphics.GL20;
+import com.badlogic.gdx.graphics.VertexAttributes;
+import com.badlogic.gdx.graphics.g3d.*;
+import com.badlogic.gdx.graphics.g3d.attributes.TextureAttribute;
+import com.badlogic.gdx.graphics.g3d.utils.ModelBuilder;
+
+import aze.games.voxelreach.player.Camera;
+import aze.games.voxelreach.world.AvailableBlocks.Block;
+
+public class ChunkGeneration {
+
+    private static final int chunkSize = 16;
+
+    private static int voxelCounter = 0;
+    private static int currentChunkCounter = 0;
+    private static int chunkRebuildsCounter = 0;
+
+    private static ModelBatch modelBatch;
+    private static List<ModelInstance> chunks = new ArrayList<>();
+    private static List<Model> chunkModels = new ArrayList<>();
+
+    private static Block[][][] blocks = new Block[chunkSize][chunkSize][chunkSize];
+
+    public static void makeChunk() {
+        Block grass = AvailableBlocks.getBlock("grass");
+        Block dirt = AvailableBlocks.getBlock("dirt");
+        Block stone = AvailableBlocks.getBlock("stone");
+
+        modelBatch = new ModelBatch();
+
+        for (int x = 0; x < chunkSize; x++) {
+            for (int z = 0; z < chunkSize; z++) {
+                for (int y = 0; y < chunkSize; y++) {
+
+                    voxelCounter++;
+
+                    if (y == 15) {
+                        blocks[x][y][z] = grass;
+                    } else if (y >= 11) {
+                        blocks[x][y][z] = dirt;
+                    } else {
+                        blocks[x][y][z] = stone;
+                    }
+                }
+            }
+        }
+
+        ModelBuilder builder = new ModelBuilder();
+        builder.begin();
+
+        float s = 1f;
+
+        for (int x = 0; x < chunkSize; x++) {
+            for (int y = 0; y < chunkSize; y++) {
+                for (int z = 0; z < chunkSize; z++) {
+
+                    Block block = blocks[x][y][z];
+                    if (block == null) continue;
+
+                    if (isAir(x, y, z + 1)) {
+                        builder.part("front", GL20.GL_TRIANGLES,
+                                VertexAttributes.Usage.Position | VertexAttributes.Usage.Normal | VertexAttributes.Usage.TextureCoordinates,
+                                new Material(TextureAttribute.createDiffuse(block.getSideTexture())))
+                            .rect(
+                                x - s/2, y - s/2, z + s/2,
+                                x + s/2, y - s/2, z + s/2,
+                                x + s/2, y + s/2, z + s/2,
+                                x - s/2, y + s/2, z + s/2,
+                                0, 0, 1);
+                    }
+
+                    if (isAir(x, y, z - 1)) {
+                        builder.part("back", GL20.GL_TRIANGLES,
+                                VertexAttributes.Usage.Position | VertexAttributes.Usage.Normal | VertexAttributes.Usage.TextureCoordinates,
+                                new Material(TextureAttribute.createDiffuse(block.getSideTexture())))
+                            .rect(
+                                x + s/2, y - s/2, z - s/2,
+                                x - s/2, y - s/2, z - s/2,
+                                x - s/2, y + s/2, z - s/2,
+                                x + s/2, y + s/2, z - s/2,
+                                0, 0, -1);
+                    }
+
+                    if (isAir(x - 1, y, z)) {
+                        builder.part("left", GL20.GL_TRIANGLES,
+                                VertexAttributes.Usage.Position | VertexAttributes.Usage.Normal | VertexAttributes.Usage.TextureCoordinates,
+                                new Material(TextureAttribute.createDiffuse(block.getSideTexture())))
+                            .rect(
+                                x - s/2, y - s/2, z - s/2,
+                                x - s/2, y - s/2, z + s/2,
+                                x - s/2, y + s/2, z + s/2,
+                                x - s/2, y + s/2, z - s/2,
+                                -1, 0, 0);
+                    }
+
+                    if (isAir(x + 1, y, z)) {
+                        builder.part("right", GL20.GL_TRIANGLES,
+                                VertexAttributes.Usage.Position | VertexAttributes.Usage.Normal | VertexAttributes.Usage.TextureCoordinates,
+                                new Material(TextureAttribute.createDiffuse(block.getSideTexture())))
+                            .rect(
+                                x + s/2, y - s/2, z + s/2,
+                                x + s/2, y - s/2, z - s/2,
+                                x + s/2, y + s/2, z - s/2,
+                                x + s/2, y + s/2, z + s/2,
+                                1, 0, 0);
+                    }
+
+                    if (isAir(x, y + 1, z)) {
+                        builder.part("top", GL20.GL_TRIANGLES,
+                                VertexAttributes.Usage.Position | VertexAttributes.Usage.Normal | VertexAttributes.Usage.TextureCoordinates,
+                                new Material(TextureAttribute.createDiffuse(block.getTopTexture())))
+                            .rect(
+                                x - s/2, y + s/2, z + s/2,
+                                x + s/2, y + s/2, z + s/2,
+                                x + s/2, y + s/2, z - s/2,
+                                x - s/2, y + s/2, z - s/2,
+                                0, 1, 0);
+                    }
+
+                    if (isAir(x, y - 1, z)) {
+                        builder.part("bottom", GL20.GL_TRIANGLES,
+                                VertexAttributes.Usage.Position | VertexAttributes.Usage.Normal | VertexAttributes.Usage.TextureCoordinates,
+                                new Material(TextureAttribute.createDiffuse(block.getBottomTexture())))
+                            .rect(
+                                x - s/2, y - s/2, z - s/2,
+                                x + s/2, y - s/2, z - s/2,
+                                x + s/2, y - s/2, z + s/2,
+                                x - s/2, y - s/2, z + s/2,
+                                0, -1, 0);
+                    }
+                }
+            }
+        }
+
+        Model chunkModel = builder.end();
+        chunkModels.add(chunkModel);
+
+        ModelInstance instance = new ModelInstance(chunkModel);
+        chunks.add(instance);
+
+        currentChunkCounter++;
+    }
+
+    public static void rebuildChunk() {
+        // plz no memory leak i beg
+        for (Model model : chunkModels) {
+            model.dispose();
+        }
+
+        chunkModels.clear();
+        chunks.clear();
+
+        ModelBuilder builder = new ModelBuilder();
+        builder.begin();
+
+        float s = 1f;
+
+        for (int x = 0; x < chunkSize; x++) {
+            for (int y = 0; y < chunkSize; y++) {
+                for (int z = 0; z < chunkSize; z++) {
+
+                    Block block = blocks[x][y][z];
+                    if (block == null) continue;
+
+                    if (isAir(x, y, z + 1)) {
+                        builder.part("front", GL20.GL_TRIANGLES,
+                                VertexAttributes.Usage.Position |
+                                    VertexAttributes.Usage.Normal |
+                                    VertexAttributes.Usage.TextureCoordinates,
+                                new Material(TextureAttribute.createDiffuse(block.getSideTexture())))
+                            .rect(
+                                x - s/2, y - s/2, z + s/2,
+                                x + s/2, y - s/2, z + s/2,
+                                x + s/2, y + s/2, z + s/2,
+                                x - s/2, y + s/2, z + s/2,
+                                0, 0, 1);
+                    }
+
+                    if (isAir(x, y, z - 1)) {
+                        builder.part("back", GL20.GL_TRIANGLES,
+                                VertexAttributes.Usage.Position |
+                                    VertexAttributes.Usage.Normal |
+                                    VertexAttributes.Usage.TextureCoordinates,
+                                new Material(TextureAttribute.createDiffuse(block.getSideTexture())))
+                            .rect(
+                                x + s/2, y - s/2, z - s/2,
+                                x - s/2, y - s/2, z - s/2,
+                                x - s/2, y + s/2, z - s/2,
+                                x + s/2, y + s/2, z - s/2,
+                                0, 0, -1);
+                    }
+
+                    if (isAir(x - 1, y, z)) {
+                        builder.part("left", GL20.GL_TRIANGLES,
+                                VertexAttributes.Usage.Position |
+                                    VertexAttributes.Usage.Normal |
+                                    VertexAttributes.Usage.TextureCoordinates,
+                                new Material(TextureAttribute.createDiffuse(block.getSideTexture())))
+                            .rect(
+                                x - s/2, y - s/2, z - s/2,
+                                x - s/2, y - s/2, z + s/2,
+                                x - s/2, y + s/2, z + s/2,
+                                x - s/2, y + s/2, z - s/2,
+                                -1, 0, 0);
+                    }
+
+                    if (isAir(x + 1, y, z)) {
+                        builder.part("right", GL20.GL_TRIANGLES,
+                                VertexAttributes.Usage.Position |
+                                    VertexAttributes.Usage.Normal |
+                                    VertexAttributes.Usage.TextureCoordinates,
+                                new Material(TextureAttribute.createDiffuse(block.getSideTexture())))
+                            .rect(
+                                x + s/2, y - s/2, z + s/2,
+                                x + s/2, y - s/2, z - s/2,
+                                x + s/2, y + s/2, z - s/2,
+                                x + s/2, y + s/2, z + s/2,
+                                1, 0, 0);
+                    }
+
+                    if (isAir(x, y + 1, z)) {
+                        builder.part("top", GL20.GL_TRIANGLES,
+                                VertexAttributes.Usage.Position |
+                                    VertexAttributes.Usage.Normal |
+                                    VertexAttributes.Usage.TextureCoordinates,
+                                new Material(TextureAttribute.createDiffuse(block.getTopTexture())))
+                            .rect(
+                                x - s/2, y + s/2, z + s/2,
+                                x + s/2, y + s/2, z + s/2,
+                                x + s/2, y + s/2, z - s/2,
+                                x - s/2, y + s/2, z - s/2,
+                                0, 1, 0);
+                    }
+
+                    if (isAir(x, y - 1, z)) {
+                        builder.part("bottom", GL20.GL_TRIANGLES,
+                                VertexAttributes.Usage.Position |
+                                    VertexAttributes.Usage.Normal |
+                                    VertexAttributes.Usage.TextureCoordinates,
+                                new Material(TextureAttribute.createDiffuse(block.getBottomTexture())))
+                            .rect(
+                                x - s/2, y - s/2, z - s/2,
+                                x + s/2, y - s/2, z - s/2,
+                                x + s/2, y - s/2, z + s/2,
+                                x - s/2, y - s/2, z + s/2,
+                                0, -1, 0);
+                    }
+                }
+            }
+        }
+
+        chunkRebuildsCounter += 1;
+
+        Model model = builder.end();
+        chunkModels.add(model);
+
+        ModelInstance instance = new ModelInstance(model);
+        chunks.add(instance);
+    }
+
+    private static boolean isAir(int x, int y, int z) {
+        if (x < 0 || y < 0 || z < 0 || x >= chunkSize || y >= chunkSize || z >= chunkSize) {
+            return true;
+        }
+        return blocks[x][y][z] == null;
+    }
+
+    public static Block getBlock(int x, int y, int z) {
+        if (x < 0 || y < 0 || z < 0 || x >= chunkSize || y >= chunkSize || z >= chunkSize)
+            return null;
+
+        return blocks[x][y][z];
+    }
+
+    public static void setBlock(int x, int y, int z, Block block) {
+        if (x < 0 || y < 0 || z < 0 || x >= chunkSize || y >= chunkSize || z >= chunkSize)
+            return;
+
+        if (block != null && blocks[x][y][z] != null) {
+            return;
+        }
+
+        blocks[x][y][z] = block;
+    }
+
+    public static void renderChunks() {
+        modelBatch.begin(Camera.getCamera());
+        for (ModelInstance instance : chunks) {
+            modelBatch.render(instance, WorldEnvironment.getEnvironment());
+        }
+        modelBatch.end();
+    }
+
+    public static void cleanup() {
+        modelBatch.dispose();
+        for (Model model : chunkModels) {
+            model.dispose();
+        }
+    }
+
+    public static int getVoxelCount() {
+        return voxelCounter;
+    }
+
+    public static int getChunkCount() {
+        return currentChunkCounter;
+    }
+
+    public static int getChunkRebuildsCounter() {
+        return chunkRebuildsCounter;
+    }
+}
+```
+
+### core/src/main/java/aze/games/voxelreach/world/WorldEnvironment.java
+```
+package aze.games.voxelreach.world;
+
+import com.badlogic.gdx.graphics.g3d.Environment;
+import com.badlogic.gdx.graphics.g3d.environment.DirectionalLight;
+
+public class WorldEnvironment {
+    private static Environment environment;
+
+    public static void prepareEnvironment() {
+        environment = new Environment();
+        environment.add(new DirectionalLight().set(1f, 1f, 1f, -1f, -1f, -1f));
+        environment.add(new DirectionalLight().set(0.3f, 0.3f, 0.35f, 1f, -0.5f, 1f));
+    }
+
+    public static Environment getEnvironment() {
+        return environment;
+    }
+}
+```
+
+### lwjgl3/src/main/java/aze/games/voxelreach/lwjgl3/Lwjgl3Launcher.java
+```
+package aze.games.voxelreach.lwjgl3;
+
+import com.badlogic.gdx.backends.lwjgl3.Lwjgl3Application;
+import com.badlogic.gdx.backends.lwjgl3.Lwjgl3ApplicationConfiguration;
+import aze.games.voxelreach.Main;
+
+public class Lwjgl3Launcher {
+    public static void main(String[] args) {
+        if (StartupHelper.startNewJvmIfRequired()) return;
+        createApplication();
+    }
+
+    private static Lwjgl3Application createApplication() {
+        return new Lwjgl3Application(new Main(), getDefaultConfiguration());
+    }
+
+    private static Lwjgl3ApplicationConfiguration getDefaultConfiguration() {
+        Lwjgl3ApplicationConfiguration configuration = new Lwjgl3ApplicationConfiguration();
+        configuration.setTitle("VoxelReach");
+        configuration.useVsync(true);
+        configuration.setForegroundFPS(Lwjgl3ApplicationConfiguration.getDisplayMode().refreshRate);
+        configuration.setWindowedMode(1152, 864);
+        configuration.setWindowIcon("icon128.png", "icon64.png", "icon32.png", "icon16.png");
+        return configuration;
+    }
+}
+```
+
+### lwjgl3/src/main/java/aze/games/voxelreach/lwjgl3/StartupHelper.java
+```
+/*
+ * Copyright 2020 damios
+ *
+ * Licensed under the Apache License, Version 2.0 (the "License");
+ * you may not use this file except in compliance with the License.
+ * You may obtain a copy of the License at:
+ * https://www.apache.org/licenses/LICENSE-2.0
+ *
+ * Unless required by applicable law or agreed to in writing, software
+ * distributed under the License is distributed on an "AS IS" BASIS,
+ * WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+ * See the License for the specific language governing permissions and
+ * limitations under the License.
+ */
+// Note, the above license and copyright applies to this file only.
+package aze.games.voxelreach.lwjgl3;
+
+import com.badlogic.gdx.Version;
+import com.badlogic.gdx.backends.lwjgl3.Lwjgl3NativesLoader;
+
+import org.lwjgl.system.JNI;
+import org.lwjgl.system.linux.UNISTD;
+import org.lwjgl.system.macosx.LibC;
+import org.lwjgl.system.macosx.ObjCRuntime;
+
+import java.io.File;
+import java.lang.management.ManagementFactory;
+import java.util.ArrayList;
+import java.util.List;
+import java.util.Locale;
+
+/**
+ * A helper object for game startup, featuring three utilities related to LWJGL3 on various operating systems.
+ * <p>
+ * The utilities are as follows:
+ * <ul>
+ *  <li> Windows: Prevents a common crash related to LWJGL3's extraction of shared library files.</li>
+ *  <li> macOS: Spawns a child JVM process with {@code -XstartOnFirstThread} in the JVM args (if it was not already).
+ *  This is required for LWJGL3 to work on macOS.</li>
+ *  <li> Linux (NVIDIA GPUs only): Spawns a child JVM process with the {@code __GL_THREADED_OPTIMIZATIONS}
+ *  {@link System#getenv(String) Environment Variable} set to {@code 0} (if it was not already). This is required for
+ *  LWJGL3 to work on Linux with NVIDIA GPUs.</li>
+ * </ul>
+ * <a href="https://jvm-gaming.org/t/starting-jvm-on-mac-with-xstartonfirstthread-programmatically/57547">Based on this java-gaming.org post by kappa</a>
+ * @author damios
+ */
+public class StartupHelper {
+
+	private StartupHelper() {}
+
+	private static final String JVM_RESTARTED_ARG = "jvmIsRestarted";
+
+	/**
+	 * Must only be called on Linux. Check OS first (or use short-circuit evaluation)!
+	 * @return whether NVIDIA drivers are present on Linux.
+	 */
+	public static boolean isLinuxNvidia() {
+		String[] drivers = new File("/proc/driver").list(
+			(dir, path) -> path.toUpperCase(Locale.ROOT).contains("NVIDIA")
+		);
+		if (drivers == null) return false;
+		return drivers.length > 0;
+	}
+
+	/**
+	 * Applies the utilities as described by {@link StartupHelper}'s Javadoc.
+	 * <p>
+	 * All {@link System#getenv() Environment Variables} are copied to the child JVM process (if it is spawned), as
+	 * specified by {@link ProcessBuilder#environment()}; the same applies for
+	 * {@link System#getProperties() System Properties}.
+	 * <p>
+	 * <b>Usage:</b>
+	 * <pre><code>
+	 * public static void main(String[] args) {
+	 * 	 if (StartupHelper.startNewJvmIfRequired()) return;
+	 * 	 // ... The rest of main() goes here, as normal.
+	 * }
+	 * </code></pre>
+	 * @return whether a child JVM process was spawned or not.
+	 */
+	public static boolean startNewJvmIfRequired() {
+		return startNewJvmIfRequired(true);
+	}
+
+	/**
+	 * Applies the utilities as described by {@link StartupHelper}'s Javadoc.
+	 * <p>
+	 * All {@link System#getenv() Environment Variables} are copied to the child JVM process (if it is spawned), as
+	 * specified by {@link ProcessBuilder#environment()}; the same applies for
+	 * {@link System#getProperties() System Properties}.
+	 * <p>
+	 * <b>Usage:</b>
+	 * <pre><code>
+	 * public static void main(String[] args) {
+	 *   // The parameter on the next line could instead be false if you don't want to inherit IO.
+	 * 	 if (StartupHelper.startNewJvmIfRequired(true)) return;
+	 * 	 // ... The rest of main() goes here, as normal.
+	 * }
+	 * </code></pre>
+	 * @param inheritIO whether I/O should be inherited in the child JVM process. Please note that enabling this will
+	 *                  block the thread until the child JVM process stops executing.
+	 * @return whether a child JVM process was spawned or not.
+	 */
+	public static boolean startNewJvmIfRequired(boolean inheritIO) {
+		String osName = System.getProperty("os.name").toLowerCase(Locale.ROOT);
+		if (osName.contains("mac")) return startNewJvm0(/*isMac =*/ true, inheritIO);
+		if (osName.contains("windows")) {
+			// Here, we are trying to work around an issue with how LWJGL3 loads its extracted .dll files.
+			// By default, LWJGL3 extracts to the directory specified by "java.io.tmpdir": usually, the user's home.
+			// If the user's name has non-ASCII (or some non-alphanumeric) characters in it, that would fail.
+			// By extracting to the relevant "ProgramData" folder, which is usually "C:\ProgramData", we avoid this.
+			// We also temporarily change the "user.name" property to one without any chars that would be invalid.
+			// We revert our changes immediately after loading LWJGL3 natives.
+			String programData = System.getenv("ProgramData");
+			if (programData == null) programData = "C:\\Temp"; // if ProgramData isn't set, try some fallback.
+			String prevTmpDir = System.getProperty("java.io.tmpdir", programData);
+			String prevUser = System.getProperty("user.name", "libGDX_User");
+			System.setProperty("java.io.tmpdir", programData + "\\libGDX-temp");
+			System.setProperty(
+				"user.name",
+				("User_" + prevUser.hashCode() + "_GDX" + Version.VERSION).replace('.', '_')
+			);
+			Lwjgl3NativesLoader.load();
+			System.setProperty("java.io.tmpdir", prevTmpDir);
+			System.setProperty("user.name", prevUser);
+			return false;
+		}
+		return startNewJvm0(/*isMac =*/ false, inheritIO);
+	}
+
+	private static final String MAC_JRE_ERR_MSG = "A Java installation could not be found. If you are distributing this app with a bundled JRE, be sure to set the '-XstartOnFirstThread' argument manually!";
+	private static final String LINUX_JRE_ERR_MSG = "A Java installation could not be found. If you are distributing this app with a bundled JRE, be sure to set the environment variable '__GL_THREADED_OPTIMIZATIONS' to '0'!";
+	private static final String CHILD_LOOP_ERR_MSG = "The current JVM process is a spawned child JVM process, but StartupHelper has attempted to spawn another child JVM process! This is a broken state, and should not normally happen! Your game may crash or not function properly!";
+
+	/**
+	 * Spawns a child JVM process if on macOS, or on Linux with NVIDIA drivers.
+	 * <p>
+	 * All {@link System#getenv() Environment Variables} are copied to the child JVM process (if it is spawned), as
+	 * specified by {@link ProcessBuilder#environment()}; the same applies for
+	 * {@link System#getProperties() System Properties}.
+	 * @param isMac whether the current OS is macOS. If this is `false` then the current OS is assumed to be Linux (and
+	 *             an immediate check for NVIDIA drivers is performed).
+	 * @param inheritIO whether I/O should be inherited in the child JVM process. Please note that enabling this will
+	 *                 block the thread until the child JVM process stops executing.
+	 * @return whether a child JVM process was spawned or not.
+	 */
+	public static boolean startNewJvm0(boolean isMac, boolean inheritIO) {
+		long processID = getProcessID(isMac);
+		if (!isMac) {
+			// No need to restart non-NVIDIA Linux
+			if (!isLinuxNvidia()) return false;
+			// check whether __GL_THREADED_OPTIMIZATIONS is already disabled
+			if ("0".equals(System.getenv("__GL_THREADED_OPTIMIZATIONS"))) return false;
+		} else {
+			// There is no need for -XstartOnFirstThread on Graal native image
+			if (!System.getProperty("org.graalvm.nativeimage.imagecode", "").isEmpty()) return false;
+
+			// Checks if we are already on the main thread, such as from running via Construo.
+			long objcMsgSend = ObjCRuntime.getLibrary().getFunctionAddress("objc_msgSend");
+			long nsThread = ObjCRuntime.objc_getClass("NSThread");
+			long currentThread = JNI.invokePPP(nsThread, ObjCRuntime.sel_getUid("currentThread"), objcMsgSend);
+			boolean isMainThread = JNI.invokePPZ(currentThread, ObjCRuntime.sel_getUid("isMainThread"), objcMsgSend);
+			if (isMainThread) return false;
+
+			if ("1".equals(System.getenv("JAVA_STARTED_ON_FIRST_THREAD_" + processID))) return false;
+		}
+
+		// Check whether this JVM process is a child JVM process already.
+		// This state shouldn't usually be reachable, but this stops us from endlessly spawning new child JVM processes.
+		if ("true".equals(System.getProperty(JVM_RESTARTED_ARG))) {
+			System.err.println(CHILD_LOOP_ERR_MSG);
+			return false;
+		}
+
+		// Spawn the child JVM process with updated environment variables or JVM args
+		List<String> jvmArgs = new ArrayList<>();
+		// The following line is used assuming you target Java 8, the minimum for LWJGL3.
+		String javaExecPath = System.getProperty("java.home") + "/bin/java";
+		// If targeting Java 9 or higher, you could use the following instead of the above line:
+		//String javaExecPath = ProcessHandle.current().info().command().orElseThrow()
+		if (!(new File(javaExecPath).exists())) {
+			System.err.println(getJreErrMsg(isMac));
+			return false;
+		}
+
+		jvmArgs.add(javaExecPath);
+		if (isMac) jvmArgs.add("-XstartOnFirstThread");
+		jvmArgs.add("-D" + JVM_RESTARTED_ARG + "=true");
+		jvmArgs.addAll(ManagementFactory.getRuntimeMXBean().getInputArguments());
+		jvmArgs.add("-cp");
+		jvmArgs.add(System.getProperty("java.class.path"));
+		String mainClass = System.getenv("JAVA_MAIN_CLASS_" + processID);
+		if (mainClass == null) {
+			StackTraceElement[] trace = Thread.currentThread().getStackTrace();
+			if (trace.length > 0) mainClass = trace[trace.length - 1].getClassName();
+			else {
+				System.err.println("The main class could not be determined.");
+				return false;
+			}
+		}
+		jvmArgs.add(mainClass);
+
+		try {
+			ProcessBuilder processBuilder = new ProcessBuilder(jvmArgs);
+			if (!isMac) processBuilder.environment().put("__GL_THREADED_OPTIMIZATIONS", "0");
+
+			if (!inheritIO) processBuilder.start();
+			else processBuilder.inheritIO().start().waitFor();
+		} catch (Exception e) {
+			System.err.println("There was a problem restarting the JVM.");
+			// noinspection CallToPrintStackTrace
+			e.printStackTrace();
+		}
+
+		return true;
+	}
+
+	private static String getJreErrMsg(boolean isMac) {
+		if (isMac) return MAC_JRE_ERR_MSG;
+		else return LINUX_JRE_ERR_MSG;
+	}
+
+	private static long getProcessID(boolean isMac) {
+		if (isMac) return LibC.getpid();
+		else return UNISTD.getpid();
+	}
+}
+```

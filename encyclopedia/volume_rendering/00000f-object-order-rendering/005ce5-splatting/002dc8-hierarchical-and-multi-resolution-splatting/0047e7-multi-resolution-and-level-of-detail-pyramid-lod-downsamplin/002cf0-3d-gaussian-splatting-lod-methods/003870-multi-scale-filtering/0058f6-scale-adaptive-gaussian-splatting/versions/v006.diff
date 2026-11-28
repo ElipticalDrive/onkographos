@@ -1,0 +1,340 @@
+--- v005.md
++++ v006.md
+@@ -4,128 +4,91 @@
+ 
+ ## Overview
+-Scale-Adaptive Gaussian Splatting (SA-GS) is a training-free, test-time plugin for 3D Gaussian Splatting that improves anti-aliasing by applying 2D scale-adaptive filters to match Gaussian scales to the testing frequency [S2, unofficial]. Unlike [Mip-Splatting](6063-mip-splatting.md), which modifies the training procedure and uses filters unaware of testing frequency, SA-GS operates at test time and adapts the filter based on rendering resolution and camera distance [S2, unofficial]. It solves the problem of scale inconsistency between training and testing frequencies, which causes jagged artifacts when sampling rates are smaller than scene frequency [S2, unofficial].
++Scale-Adaptive Gaussian Splatting (SA-GS) is a training-free, test-time plugin for 3D Gaussian Splatting that improves anti-aliasing by applying 2D scale-adaptive filters to match Gaussian scales to the testing frequency [S2, unofficial]. Unlike [Mip-Splatting](6063-mip-splatting.md), which modifies the training procedure and uses filters unaware of testing frequency, SA-GS operates at test-time on any pretrained Gaussian field, ensuring consistent primitive distribution across different rendering resolutions and camera distances [S2, unofficial].
+ 
+ ## How it works
+-SA-GS functions as a post-processing step applied to any pretrained Gaussian splatting field [S2, unofficial]. It consists of two main phases: scale-adaptive filtering and pixel integration.
+-
+-**Inputs:**
+-- Pretrained 3D Gaussian primitives $G_k$ (position, covariance $\Sigma_k$, opacity $\alpha_k$, spherical harmonics).
+-- Camera parameters (intrinsics, extrinsics).
+-- Rendering resolution $R$ (pixels).
+-
+-**Outputs:**
+-- Anti-aliased 2D image.
++**Inputs and Outputs:**
++*   **Input:** A pretrained 3D Gaussian Splatting scene (set of Gaussians with position, covariance, opacity, color, and SH coefficients) and rendering parameters (camera pose, intrinsic matrix, and target rendering resolution).
++*   **Output:** Anti-aliased rendered image.
+ 
+ **Data Structures:**
+-- Each Gaussian $G_k$ retains its original 3D parameters.
+-- Projected 2D Gaussian $G_{k,2D}$ is computed per pixel.
++The method operates on the standard 3D Gaussian representation. Each Gaussian $G_k$ is defined by:
++*   Position $\mu_k \in \mathbb{R}^3$
++*   Covariance matrix $\Sigma_k \in \mathbb{R}^{3 \times 3}$ (symmetric positive definite)
++*   Opacity $\alpha_k \in [0, 1]$
++*   Color/SH coefficients
+ 
+-**Steps:**
++**Method Steps:**
++The core mechanism involves modifying the projected 2D covariance matrix to account for the sampling frequency of the target resolution [S2, unofficial].
+ 
+-1. **Projection:** For each pixel, project the 3D Gaussians to 2D using standard differentiable rendering pipeline to obtain the 2D covariance matrix $\Sigma_{k,2D}$ and mean position [S2, unofficial].
++1.  **Projection:** For each Gaussian $G_k$, compute its 3D-to-2D projection using the camera intrinsic matrix $K$ and extrinsic matrix $W$. Let $J$ be the Jacobian of the affine approximation of the projective transformation. The projected 2D covariance matrix $\Sigma_{k,2D}$ is calculated as:
++    $$ \Sigma_{k,2D} = J W \Sigma_k W^T J^T $$
++    [G] This is the standard projection step in Gaussian Splatting.
+ 
+-2. **Frequency Estimation:** Calculate the testing frequency constraint based on the rendering resolution and camera distance [S1]. The pixel variance $\sigma^2_{pixel}$ is derived from the sampling interval $\hat{T}$ associated with the current resolution [S1].
++2.  **Frequency Estimation:** Determine the testing frequency based on the target rendering resolution. Let $r$ be the rendering resolution (e.g., width in pixels). The sampling interval $\hat{T}$ is inversely proportional to $r$. The method requires estimating the pixel variance or scale corresponding to the rendering resolution. [S2, unofficial] notes that the filter is "informed of testing frequency." In practice, this is often derived from the pixel size in world space or a fixed scale factor related to the resolution. Let $\sigma^2_{test}$ be the variance term added to the covariance, derived from the testing frequency/resolution. [G] A common implementation derives $\sigma^2_{test}$ from the pixel area or a constant scaled by resolution, ensuring that high-frequency components above the Nyquist limit are suppressed.
+ 
+-3. **Scale-Adaptive Filtering:** Apply a 2D low-pass filter to each projected Gaussian to regularize its covariance. This step matches the Gaussian scale to the testing frequency [S2, unofficial].
+-   - Compute the regularized covariance:
+-     $$ \Sigma_{reg} = \Sigma_{k,2D} + \sigma^2_{pixel} I $$
+-     where $I$ is the identity matrix [S1].
+-   - Compute the normalization factor $C$ to preserve the integral (total mass) of the Gaussian, as adding variance spreads the density [G]:
+-     $$ C = \frac{\sqrt{|\Sigma_{k,2D}|}}{\sqrt{|\Sigma_{reg}|}} $$
+-   - Update the opacity:
+-     $$ \alpha_{new} = \alpha_{old} \cdot C $$
+-   - Update the covariance for rendering:
+-     $$ \Sigma_{final} = \Sigma_{reg} $$
++3.  **Covariance Regularization (Scale-Adaptive Filtering):** Apply the 2D scale-adaptive filter by adding the testing frequency variance to the projected 2D covariance:
++    $$ \Sigma_{reg} = \Sigma_{k,2D} + \sigma^2_{test} I $$
++    where $I$ is the $2 \times 2$ identity matrix. This corresponds to convolving the 2D Gaussian with a low-pass filter [S1][S2, unofficial].
+ 
+-4. **Pixel Integration:** Integrate the filtered projected 2D Gaussian within each pixel [S2, unofficial]. This acts as a limiting case of super-sampling, handling sampling rates smaller than scene frequency [S2, unofficial]. The pixel color $C_p$ is computed by accumulating the contributions of all Gaussians covering the pixel, using the updated opacity and covariance:
+-   $$ C_p = \sum_{k \in \text{pixels}} \alpha_{k, new} \cdot c_k \cdot \exp\left(-\frac{1}{2} \mathbf{x}_k^T \Sigma_{final}^{-1} \mathbf{x}_k\right) $$
+-   where $\mathbf{x}_k$ is the vector from the pixel center to the Gaussian mean, and $c_k$ is the color [G].
++4.  **Opacity Preservation:** Because adding variance spreads the Gaussian, the peak opacity must be scaled to preserve the integral (total mass) of the Gaussian. Calculate the normalization factor $C$:
++    $$ C = \frac{\sqrt{|\Sigma_{k,2D}|}}{\sqrt{|\Sigma_{reg}|}} $$
++    Update the opacity:
++    $$ \alpha_{new} = \alpha_{old} \cdot C $$
++    [G] This ensures that the total energy of the Gaussian remains constant despite the blurring.
+ 
+-**Parameters:**
+-- $\sigma^2_{pixel}$: Determined by the rendering resolution and camera distance [S1]. Not given in the sources as a specific formula, but linked to the sampling interval $\hat{T}$ [S1].
++5.  **Rendering:** Render the scene using the modified Gaussians (with $\Sigma_{reg}$ and $\alpha_{new}$) via standard alpha-blending. [S2, unofficial] suggests that integrating the projected 2D Gaussian within each pixel (a limiting case of super-sampling) can further improve anti-aliasing when scale inconsistency is eliminated.
+ 
+-**Edge Cases and Pitfalls:**
+-- Super-sampling and integration are only effective when the scale-adaptive filtering is activated; without it, scale inconsistency leads to jaggedness at low sampling rates [S2, unofficial].
+-- Precision issues may arise when computing determinants for small covariance matrices; guard against singular matrices [G].
+-
++**Pseudocode:**
+ ```python
+ import numpy as np
++import math
+ 
+ def scale_adaptive_gaussian_splatting(gaussians, camera, resolution):
+     """
+-    Apply SA-GS filtering and integration to a set of 3D Gaussians.
++    Render a scene with SA-GS anti-aliasing.
+     
+     Args:
+         gaussians: List of Gaussian objects with attributes:
+                    - position: (3,)
+-                   - covariance: (3, 3) 3D covariance matrix
++                   - covariance: (3,3)
+                    - opacity: float
+                    - color: (3,) or SH coefficients
+-        camera: Camera object with intrinsics and extrinsics.
+-        resolution: Tuple (width, height) of the rendering resolution.
++        camera: Camera object with attributes:
++                - K: (3,3) intrinsic matrix
++                - W: (4,4) extrinsic matrix (world to camera)
++        resolution: int, target rendering resolution (e.g., width)
+         
+     Returns:
+-        image: (height, width, 3) rendered image.
++        rendered_image: (H, W, 3)
+     """
+-    # Step 1: Estimate pixel variance based on resolution and camera distance
+-    # The sampling interval T is related to the pixel size in world units.
+-    # Assuming pinhole camera model, pixel size in world units at distance d:
+-    # T = focal_length / resolution * d (simplified)
+-    # sigma^2_pixel is derived from T. For 2D projection, we use the projected pixel size.
+-    # Note: Exact formula for sigma^2_pixel from T is not given in sources [S1].
+-    # We assume sigma^2_pixel is proportional to the square of the pixel size in the image plane.
+-    pixel_size_world = camera.focal_length / resolution[0] # Approximation
+-    # The variance added is in the 2D projected space.
+-    # Let's assume sigma^2_pixel is the variance of a uniform pixel distribution or similar.
+-    # Common practice in Mip-Splatting and SA-GS is to add a term related to pixel size.
+-    # SA-GS uses an adaptive 2D low-pass filter informed by testing frequency [S1].
+-    # We define pixel_variance_s as the variance term to add to the 2D covariance.
+-    # Since the exact mapping from resolution to sigma^2 is not specified, we use a placeholder
+-    # that represents the frequency constraint. In practice, this is often derived from the 
+-    # Nyquist limit of the rendering resolution.
+-    # For implementation, we assume pixel_variance_s is computed as:
+-    # sigma^2_pixel = (pixel_size_image / 2)^2 * some_factor
+-    # However, SA-GS specifically adapts to camera distance.
+-    # Let's assume pixel_variance_s is a scalar derived from the camera's distance to the scene center
+-    # and the resolution.
+-    # Since the source does not give the exact formula, we use a standard approximation for 
+-    # the variance of a pixel's footprint in the projected space.
+-    # Let's assume the pixel variance is proportional to the square of the pixel size in the 
+-    # projected image plane.
+-    pixel_size_image = 1.0 / resolution[0] # Normalized pixel size
+-    pixel_variance_s = (pixel_size_image ** 2) * 0.5 # Heuristic factor, not given in sources [S1]
++    # 1. Estimate testing frequency variance
++    # [G] Derive sigma_test^2 from resolution. 
++    # A common heuristic is to scale a base variance by the inverse of resolution squared,
++    # or use a fixed pixel size in world units.
++    # For this implementation, we assume a function get_pixel_variance(resolution) exists
++    # which returns the variance term sigma^2_test for the given resolution.
++    sigma_test_sq = get_pixel_variance(resolution)
+     
+-    # Initialize image
+-    height, width = resolution
+-    image = np.zeros((height, width, 3))
++    rendered_image = np.zeros((camera.height, camera.width, 3))
+     
+-    # Step 2: Project Gaussians and Apply Filter
+-    # For each pixel, we need to know which Gaussians cover it.
+-    # This is typically done via a bounding box check or a spatial data structure.
+-    # For simplicity, we iterate over all Gaussians and project them to all pixels they might cover.
+-    # In practice, a rasterization loop is used.
++    # Sort Gaussians by depth for correct alpha blending
++    sorted_gaussians = sort_gaussians_by_depth(gaussians, camera)
+     
+-    # We will use a standard alpha blending approach with the filtered Gaussians.
+-    
+-    # Create a list of projected Gaussians for each pixel
+-    # This is a simplified representation. In reality, a depth buffer and sorting are used.
+-    pixel_gaussians = { (y, x): [] for y in range(height) for x in range(width) }
+-    
+-    for G in gaussians:
+-        # Project 3D Gaussian to 2D
+-        # This involves Jacobian of the projection and view transformation.
+-        # Let's assume a function project_3d_to_2d exists that returns:
+-        # - mean_2d: (2,)
+-        # - covariance_2d: (2, 2)
+-        # - depth: float
+-        mean_2d, covariance_2d, depth = project_3d_to_2d(G, camera)
++    for G in sorted_gaussians:
++        # 2. Project Gaussian to 2D
++        # Compute Jacobian J of the projective transformation
++        J = compute_jacobian(G.position, camera.W, camera.K)
+         
+-        # Apply Scale-Adaptive Filter
+-        # Sigma_reg = Sigma_2D + sigma^2_pixel * I
++        # Project covariance: Sigma_2D = J * W * Sigma_3D * W^T * J^T
++        # Note: W here is the 3x4 part of the extrinsic matrix for the affine approximation
++        W_affine = camera.W[:3, :]
++        Sigma_2D = J @ (W_affine @ G.covariance @ W_affine.T) @ J.T
++        
++        # 3. Apply Scale-Adaptive Filter
+         I_2d = np.eye(2)
+-        Sigma_reg = covariance_2d + pixel_variance_s * I_2d
++        Sigma_reg = Sigma_2D + sigma_test_sq * I_2d
+         
+-        # Compute normalization factor C
+-        det_orig = np.linalg.det(covariance_2d)
++        # 4. Preserve Opacity
++        det_orig = np.linalg.det(Sigma_2D)
+         det_reg = np.linalg.det(Sigma_reg)
+         
+@@ -134,93 +97,46 @@
+             continue
+             
+-        C = np.sqrt(det_orig / det_reg)
+-        
+-        # Update opacity
++        C = math.sqrt(det_orig / det_reg)
+         alpha_new = G.opacity * C
+         
+-        # Update color (no change in SA-GS, only opacity and covariance)
+-        color = G.color
++        # 5. Render (Simplified)
++        # In practice, this involves rasterizing the 2D Gaussian onto the image buffer
++        # using the regularized covariance and new opacity.
++        render_2d_gaussian(rendered_image, G.position, Sigma_reg, alpha_new, G.color)
+         
+-        # Add to pixel list if within bounds
+-        # Check if the Gaussian covers any pixel
+-        # This is a simplified check; in practice, a bounding box is used.
+-        # We assume the Gaussian is significant within 3 sigma.
+-        eigenvalues = np.linalg.eigvals(Sigma_reg)
+-        max_sigma = np.sqrt(np.max(eigenvalues)) * 3
+-        
+-        x_min = int(mean_2d[0] - max_sigma)
+-        x_max = int(mean_2d[0] + max_sigma)
+-        y_min = int(mean_2d[1] - max_sigma)
+-        y_max = int(mean_2d[1] + max_sigma)
+-        
+-        x_min = max(0, x_min)
+-        x_max = min(width - 1, x_max)
+-        y_min = max(0, y_min)
+-        y_max = min(height - 1, y_max)
+-        
+-        for y in range(y_min, y_max + 1):
+-            for x in range(x_min, x_max + 1):
+-                pixel_gaussians[(y, x)].append({
+-                    'mean': mean_2d,
+-                    'covariance': Sigma_reg,
+-                    'alpha': alpha_new,
+-                    'color': color,
+-                    'depth': depth
+-                })
+-    
+-    # Step 3: Pixel Integration
+-    # For each pixel, sort Gaussians by depth and blend
+-    for y in range(height):
+-        for x in range(width):
+-            gs = pixel_gaussians[(y, x)]
+-            if not gs:
+-                continue
+-            
+-            # Sort by depth (back to front for alpha blending)
+-            gs.sort(key=lambda g: g['depth'], reverse=True)
+-            
+-            accumulated_alpha = 0.0
+-            accumulated_color = np.zeros(3)
+-            
+-            for g in gs:
+-                # Compute 2D Gaussian value at pixel center (0,0) relative to mean
+-                # x_k is vector from pixel center to Gaussian mean
+-                x_k = np.array([x - g['mean'][0], y - g['mean'][1]])
+-                
+-                # Compute exponent: -0.5 * x_k^T * Sigma_reg^-1 * x_k
+-                try:
+-                    inv_cov = np.linalg.inv(g['covariance'])
+-                    exponent = -0.5 * x_k @ inv_cov @ x_k
+-                except np.linalg.LinAlgError:
+-                    continue
+-                
+-                if exponent > 0: # Should not happen for valid covariance
+-                    continue
+-                    
+-                weight = np.exp(exponent)
+-                
+-                # Alpha blending
+-                alpha = g['alpha'] * weight
+-                accumulated_color += alpha * g['color']
+-                accumulated_alpha += alpha * (1 - accumulated_alpha) # Standard alpha blending
+-                
+-                if accumulated_alpha > 0.99:
+-                    break
+-            
+-            image[y, x] = accumulated_color
+-            
+-    return image
++    return rendered_image
+ 
+-def project_3d_to_2d(G, camera):
++def get_pixel_variance(resolution):
+     """
+-    Project a 3D Gaussian to 2D.
+-    This is a placeholder for the actual projection math involving Jacobians.
++    [G] Placeholder for resolution-dependent variance estimation.
++    The exact formula depends on the scene scale and camera intrinsics.
++    A typical approach is to estimate the world-space size of a pixel
++    and use its variance.
+     """
+-    # This function is not defined in the sources [S1][S2, unofficial].
+-    # It is a standard part of 3D Gaussian Splatting.
+-    # We assume it returns the 2D mean, 2D covariance, and depth.
+-    # For the purpose of this article, we assume it exists.
++    # Example heuristic: variance proportional to 1/resolution^2
++    # This needs to be calibrated to the specific scene scale.
++    return 1.0 / (resolution ** 2)
++
++def compute_jacobian(position, W, K):
++    """
++    Compute the Jacobian of the projective transformation.
++    """
++    # Standard 3DGS Jacobian computation
++    # ... implementation details omitted for brevity ...
++    pass
++
++def render_2d_gaussian(image, position, covariance, opacity, color):
++    """
++    Rasterize a 2D Gaussian onto the image.
++    """
++    # Standard 3DGS rasterization loop
++    # ... implementation details omitted for brevity ...
+     pass
+ ```
++
++**Edge Cases and Pitfalls:**
++*   **Singular Covariance:** If $\Sigma_{k,2D}$ is singular (det=0), the normalization factor $C$ becomes undefined. A small epsilon should be added to the determinant or the covariance matrix [G].
++*   **Resolution Dependency:** The parameter $\sigma^2_{test}$ must be correctly scaled with the rendering resolution. If not, the anti-aliasing effect will be inconsistent across different resolutions [S2, unofficial].
++*   **Integration vs. Sampling:** SA-GS notes that super-sampling/integration is only effective when the scale-adaptive filtering is activated. Without it, scale inconsistency leads to jaggedness [S2, unofficial].
+ 
+ ## Subtopics
+@@ -230,17 +146,15 @@
+ 
+ ### [Adaptive-Scale Color Offset](13019-adaptive-scale-color-offset.md)
+-A training-stage module that corrects scale-dependent color mismatch by applying a learnable, scale-specific RGB offset to the SH DC coefficient, keeping geometry unchanged.
++A training-stage module that corrects scale-dependent color mismatch by applying a learnable, scale-specific RGB offset to the shared base color, keeping geometry and higher-order SH coefficients unchanged.
+ 
+ ## Operating characteristics
+-- **Time Complexity:** O(N * P) where N is the number of Gaussians and P is the number of pixels they cover. The filtering step adds a constant overhead per Gaussian per pixel [S2, unofficial].
+-- **Memory Complexity:** O(N) for storing the Gaussians. No additional memory is required for the filter as it is applied at test time [S2, unofficial].
+-- **Performance:** SA-GS performs comparably with or better than Mip-Splatting in various settings and both bounded and unbounded scenes [S2, unofficial].
+-- **Strengths:** Training-free, can be applied as a plugin to any pretrained model, adapts to testing frequency [S2, unofficial].
+-- **Limitations:** Requires test-time computation for filtering and integration. Super-sampling and integration are only effective when scale-adaptive filtering is activated [S2, unofficial].
+-- **When to use:** When anti-aliasing is needed for pretrained 3D Gaussian Splatting models without retraining, especially at different resolutions or camera distances [S2, unofficial].
+-- **When not to use:** When training-time optimization is preferred or when computational resources for test-time filtering are limited [S2, unofficial].
++*   **Time Complexity:** The method adds a constant-time operation per Gaussian (covariance regularization and opacity scaling) during the rendering phase. It does not require additional training iterations, making it computationally efficient at test time compared to methods that require retraining or complex multi-resolution hierarchies.
++*   **Memory Complexity:** No additional memory is required beyond the original Gaussian representation, as it is a training-free plugin.
++*   **Performance:** SA-GS performs comparably with or better than Mip-Splatting in terms of anti-aliasing quality across various settings and both bounded and unbounded scenes [S2, unofficial].
++*   **Strengths:** Training-free, easy to integrate as a plugin, effective across different resolutions and camera distances.
++*   **Limitations:** Requires careful tuning of the testing frequency parameter ($\sigma^2_{test}$) to match the scene scale and resolution.
+ 
+ ## Background
+-SA-GS was introduced as a training-free, test-time plugin for Gaussian Splatting to improve anti-aliasing performance [S2, unofficial]. It addresses the issue of scale inconsistency between training and testing frequencies, which is a limitation of methods like Mip-Splatting that modify the training procedure [S2, unofficial]. The method was developed by researchers including Z. Song et al. [S2, unofficial].
++SA-GS was introduced as a training-free alternative to Mip-Splatting, which requires modifying the training procedure [S2, unofficial]. It addresses the issue of Gaussian scale mismatch between training and testing frequencies by applying 2D scale-adaptive filters at test time [S1][S2, unofficial]. The method is cited in recent surveys on 3D Gaussian Splatting advancements [S1].
+ 
+ ## Sources

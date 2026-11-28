@@ -1,0 +1,210 @@
+--- v001.md
++++ v002.md
+@@ -4,109 +4,105 @@
+ 
+ ## Overview
+-This method generates the initial positions for Gaussian splats directly from volumetric data, balancing edge fidelity with smooth region coverage [S1, unofficial]. It solves the problem of sparse or redundant splat placement by combining gradient-based sampling for high-frequency details with uniform grid sampling for low-frequency areas [S1, unofficial]. Unlike methods that rely on fixed voxel grids or purely random initialization, this approach adapts seed density to local data complexity [S1, unofficial].
++This method generates initial splat positions directly from volumetric data by combining gradient-based sampling for edges (60% of the seed budget) with uniform grid sampling for smooth regions (40% of the budget) [S1, unofficial]. It solves sparse or redundant splat placement by targeting high-frequency details while guaranteeing coverage of low-frequency areas [S1, unofficial].
+ 
+ ## How it works
+ **Inputs:**
+-- Volume data $V$ with dimensions $N_x \times N_y \times N_z$.
+-- Total voxel count $N_{vox}$.
+-- Dimensionality $D$ (typically 3).
+-- Target seed count limit (default cap).
++- Volume data $V$ with dimensions $N_x \times N_y \times N_z$ [G].
++- Total voxel count $N_{vox}$ [G].
++- Dimensionality $D$ (typically 3) [G].
+ 
+ **Outputs:**
+-- A list of 3D coordinates $\{\mathbf{p}_k\}$ representing initial splat centers.
+-
+-**Data Structures:**
+-- **Gradient Volume:** A 3D array of the same size as $V$, storing gradient magnitudes.
+-- **Seed List:** A dynamic array of 3D vectors.
+-- **Exclusion Grid:** A spatial hash or grid structure to enforce Poisson-disk constraints during sampling.
++- A list of 3D coordinates $\{\mathbf{p}_k\}$ representing initial splat centers [S1, unofficial].
+ 
+ **Parameters:**
+ - Gradient threshold: $\tau = 0.1$ (normalized magnitude) [S1, unofficial].
+-- Poisson-disk radius: $r = 2$ voxels [S1, unofficial].
++- Poisson-disk exclusion radius: $r = 2$ voxels [S1, unofficial].
+ - Uniform grid minimum spacing: $s_{min} = 2$ voxels [S1, unofficial].
+ - Seed target: $N_{target} = \max(100, \lfloor N_{vox} / 2^{1/D} \rfloor)$, capped at 10,000 [S1, unofficial].
+-- Edge share: 60% of $N_{target}$ [S1, unofficial].
+-- Uniform share: 40% of $N_{target}$ [S1, unofficial].
++- Edge share: $0.6 \times N_{target}$ [S1, unofficial].
++- Uniform share: $0.4 \times N_{target}$ [S1, unofficial].
+ 
+ **Steps:**
+-
+-1.  **Compute Gradients:** Calculate Sobel gradients across all dimensions for the volume $V$. Compute the normalized gradient magnitude $g(\mathbf{x})$ for each voxel $\mathbf{x}$.
+-2.  **Filter High-Gradient Voxels:** Identify voxels where $g(\mathbf{x}) > \tau$.
+-3.  **Gradient-Based Seeding (Edge):**
+-    - Perform gradient-weighted Poisson-disk sampling on the filtered voxels.
+-    - Weight the probability of selection by $g(\mathbf{x})$.
+-    - Enforce an exclusion radius of $r=2$ voxels: no two selected seeds can be closer than $2r$ in Manhattan or Euclidean distance (implementation dependent, typically Euclidean for Poisson-disk).
+-    - Continue until the edge budget ($0.6 \times N_{target}$) is filled or no more valid voxels exist.
+-4.  **Uniform Grid Seeding (Smooth Regions):**
+-    - Calculate grid spacing $s$ such that the number of grid points equals the uniform budget ($0.4 \times N_{target}$).
+-    - Formula: $s = \max(2, \lfloor (N_{vox} / N_{uniform})^{1/D} \rfloor)$, where $N_{uniform} = 0.4 \times N_{target}$ [S1, unofficial].
+-    - Generate a regular 3D grid with spacing $s$.
+-    - For each grid point, find the nearest voxel in $V$ and add it to the seed list if not already covered by a gradient seed (optional overlap check).
+-5.  **Combine and Cull:** Merge the two sets. If the total exceeds $N_{target}$, randomly sample down to $N_{target}$.
++1. **Compute Gradients:** Calculate Sobel gradients across all dimensions for $V$ and normalize the magnitude to $[0, 1]$ [S1, unofficial][G].
++2. **Filter High-Gradient Voxels:** Identify voxels where the normalized gradient magnitude $g(\mathbf{x}) > \tau$ [S1, unofficial].
++3. **Gradient-Based Seeding (Edges):** Perform gradient-weighted Poisson-disk sampling on the filtered voxels, using $g(\mathbf{x})$ as selection probability weights and enforcing a $2$-voxel exclusion radius [S1, unofficial]. Continue until the edge budget ($0.6 \times N_{target}$) is filled or no valid voxels remain [S1, unofficial].
++4. **Uniform Grid Seeding (Smooth Regions):** Calculate grid spacing $s = \max(2, \lfloor (N_{vox} / N_{grid})^{1/D} \rfloor)$, where $N_{grid} = 0.4 \times N_{target}$, so the grid tiles the volume [S1, unofficial]. Generate a regular 3D grid with spacing $s$ and map each grid point to the nearest voxel center [S1, unofficial][G].
++5. **Combine and Cull:** Merge the edge and uniform seed sets. If the total exceeds $N_{target}$, randomly sample down to $N_{target}$ [S1, unofficial].
+ 
+ **Pseudocode:**
++```python
++def generate_seeds(volume_dims, N_vox, D=3):
++    # Parameters from [S1, unofficial]
++    N_target = min(10000, max(100, int(N_vox / (2 ** (1/D)))))
++    N_edge = int(0.6 * N_target)
++    N_grid = int(0.4 * N_target)
++    seeds = []
+ 
+-```python
+-def generate_seeds(volume, N_vox, D=3):
+-    # 1. Compute normalized gradient magnitude
+-    # Assuming Sobel operator implementation exists
+-    grad_mag = compute_sobel_gradient_magnitude(volume)
+-    grad_mag = normalize(grad_mag)
+-    
+-    # 2. Define targets
+-    N_target = min(10000, max(100, floor(N_vox / (2 ** (1/D)))))
+-    N_edge = floor(0.6 * N_target)
+-    N_uniform = N_target - N_edge
+-    
+-    seeds = []
+-    
+-    # 3. Gradient-based seeding
+-    # Filter voxels above threshold
+-    high_grad_voxels = [v for v in volume.voxels if grad_mag[v] > 0.1]
+-    
+-    # Poisson-disk sampling with gradient weighting
+-    # Implementation note: Use a spatial hash grid for exclusion checks
+-    exclusion_radius = 2
+-    edge_seeds = poisson_disk_sample(
+-        points=high_grad_voxels,
+-        weights=[grad_mag[v] for v in high_grad_voxels],
+-        radius=exclusion_radius,
+-        max_samples=N_edge
+-    )
++    # 1. Compute normalized gradient magnitude [S1, unofficial][G]
++    grad_mag = compute_sobel_and_normalize(volume_dims)
++    # 2. Filter voxels above threshold [S1, unofficial]
++    high_grad_voxels = [v for v in volume_dims if grad_mag[v] > 0.1]
++
++    # 3. Gradient-weighted Poisson-disk sampling [S1, unofficial][G]
++    edge_seeds = poisson_disk_sample(high_grad_voxels, grad_mag, radius=2, max_samples=N_edge)
+     seeds.extend(edge_seeds)
+-    
+-    # 4. Uniform grid seeding
+-    # Calculate spacing
+-    if N_uniform > 0:
+-        # Formula: (N_vox / N_grid)^(1/D)
+-        spacing_raw = (N_vox / N_uniform) ** (1/D)
+-        spacing = max(2, floor(spacing_raw))
+-        
+-        # Generate grid points
+-        grid_points = generate_uniform_grid(volume.dimensions, spacing)
+-        
+-        # Map grid points to nearest voxel centers
+-        uniform_seeds = []
+-        for gp in grid_points:
+-            voxel = find_nearest_voxel(gp, volume)
+-            if voxel is not None:
+-                uniform_seeds.append(voxel)
+-        
+-        # Add to seeds (allow overlap with edge seeds if needed, 
+-        # or filter if strict separation is required)
++
++    # 4. Uniform grid seeding [S1, unofficial][G]
++    if N_grid > 0:
++        spacing = max(2, int((N_vox / N_grid) ** (1/D)))
++        grid_points = generate_regular_grid(volume_dims, spacing)
++        uniform_seeds = [nearest_voxel_center(gp, volume_dims) for gp in grid_points]
+         seeds.extend(uniform_seeds)
+-    
+-    # 5. Final culling to N_target
++
++    # 5. Combine and cull to target [S1, unofficial]
+     if len(seeds) > N_target:
+-        seeds = random_sample(seeds, N_target)
+-        
++        seeds = random.sample(seeds, N_target)
+     return seeds
++
++# Standard implementation helpers [G]
++def compute_sobel_and_normalize(volume_dims):
++    # 3D Sobel kernel convolution across x, y, z followed by L2 norm and scaling to [0,1]
++    grad_x = convolve(volume_dims, SOBEL_X)
++    grad_y = convolve(volume_dims, SOBEL_Y)
++    grad_z = convolve(volume_dims, SOBEL_Z)
++    mag = sqrt(grad_x**2 + grad_y**2 + grad_z**2)
++    return mag / max(mag) if max(mag) > 0 else mag
++
++def poisson_disk_sample(points, weights, radius, max_samples):
++    # Bridson's algorithm adapted for weighted selection and spatial hashing
++    active_queue = [points[0]]
++    selected = []
++    spatial_hash = SpatialHash(cell_size=radius)
++    while active_queue and len(selected) < max_samples:
++        idx = random.randint(0, len(active_queue)-1)
++        candidate = active_queue.pop(idx)
++        if not spatial_hash.has_neighbor(candidate, radius):
++            selected.append(candidate)
++            spatial_hash.insert(candidate)
++            for _ in range(30):
++                new_pt = candidate + random_unit_vector() * radius * random.uniform(1, 2)
++                if in_bounds(new_pt, points) and not spatial_hash.has_neighbor(new_pt, radius):
++                    active_queue.append(new_pt)
++    return selected
++
++def generate_regular_grid(dims, spacing):
++    # Returns list of 3D coordinates stepping by spacing within dims
++    pts = []
++    for x in range(0, dims[0], spacing):
++        for y in range(0, dims[1], spacing):
++            for z in range(0, dims[2], spacing):
++                pts.append((x, y, z))
++    return pts
++
++def nearest_voxel_center(grid_pt, dims):
++    # Clamps grid_pt to volume bounds and rounds to nearest integer voxel index
++    return tuple(max(0, min(d, int(round(p)))) for d, p in zip(dims, grid_pt))
+ ```
+ 
+ **Edge Cases and Pitfalls:**
+-- **Empty Volume:** If $N_{vox} = 0$, return empty list.
+-- **Low Gradient:** If few voxels exceed $\tau$, the edge budget may not be filled. The uniform grid ensures coverage.
+-- **Precision:** Normalized gradient magnitude must be computed carefully to avoid saturation in low-intensity regions.
+-- **GPU Implementation:** Seeding runs on GPU (CUDA/MPS) when available for performance [S1, unofficial].
++- **Empty Volume:** If $N_{vox} = 0$, return an empty list [G].
++- **Low Gradient:** If few voxels exceed $\tau$, the edge budget may not be filled; the uniform grid guarantees baseline coverage [S1, unofficial].
++- **Precision:** Normalized gradient magnitude must be computed carefully to avoid saturation in low-intensity regions [G].
++- **GPU Execution:** Seeding runs on GPU (CUDA/MPS) when available for performance [S1, unofficial].
+ 
+ ## Subtopics
+@@ -116,12 +112,12 @@
+ 
+ ## Operating characteristics
+-- **Time Complexity:** Dominated by gradient computation ($O(N_{vox})$) and Poisson-disk sampling ($O(N_{edge} \log N_{edge})$ or $O(N_{edge})$ with spatial hashing). Uniform grid generation is $O(N_{uniform})$.
+-- **Memory Complexity:** $O(N_{vox})$ for gradient storage and spatial structures.
+-- **Performance:** Single-pass seeding has a wall-time ratio of 0.70–1.75× compared to two-pass methods, with a median of 1.07× [S1, unofficial]. Single-pass also has lower worst-case error on 12 out of 12 tested conditions [S1, unofficial].
+-- **Strengths:** Ensures coverage of smooth regions (via uniform grid) and edges (via gradient sampling). Scalable to large volumes via tiled fitting [S1, unofficial].
+-- **Limitations:** Requires gradient computation. May produce redundant seeds if gradient and uniform regions overlap significantly.
++- **Time Complexity:** Dominated by gradient computation ($O(N_{vox})$) and Poisson-disk sampling ($O(N_{edge})$ with spatial hashing) [G]. Uniform grid generation is $O(N_{uniform})$ [G].
++- **Memory Complexity:** $O(N_{vox})$ for gradient storage and spatial structures [G].
++- **Performance:** Single-pass seeding has a wall-time ratio of 0.70–1.75× compared to two-pass methods, with a median of 1.07× [S1, unofficial]. Single-pass also exhibits lower worst-case error on 12 out of 12 tested conditions [S1, unofficial].
++- **Strengths:** Ensures coverage of smooth regions via uniform grids and edges via gradient sampling; scales to large volumes via tiled fitting [S1, unofficial].
++- **Limitations:** Requires gradient computation; may produce redundant seeds if gradient and uniform regions overlap significantly [G].
+ 
+ ## Background
+-Originated in the Luxar framework for Gaussian splatting of microscopy and scientific data [S1, unofficial]. The method was designed to provide a robust, automated initialization for splat fitting, avoiding manual seed placement. It combines established techniques (Sobel gradients, Poisson-disk sampling, uniform grids) into a unified pipeline optimized for GPU execution [S1, unofficial].
++Originated in the Luxar framework for Gaussian splatting of microscopy and scalable interactive web visualisation of multidimensional scientific data [S1, unofficial]. The method was designed to provide a robust, automated initialization for splat fitting, avoiding manual seed placement by combining established techniques (Sobel gradients, Poisson-disk sampling, uniform grids) into a unified pipeline optimized for GPU execution [S1, unofficial].
+ 
+ ## Sources

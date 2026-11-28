@@ -1,0 +1,512 @@
+--- v004.md
++++ v005.md
+@@ -4,143 +4,87 @@
+ 
+ ## Overview
+-OPONeRF is a neural rendering method that personalizes the parameters of the plenoptic mapping function for each sampled 3D point, rather than using a single shared set of parameters for the entire scene [S1, unofficial]. It solves the problem of handling test-time scene changes, such as motion, illumination variations, or contamination, by conditioning the renderer's weights on a global scene representation and a local point feature [S1, unofficial]. Unlike generalizable NeRFs that concatenate geometry-aware features with fixed parameters, OPONeRF dynamically generates candidate parameters and selects from them based on the point's context, allowing for discriminative response to local variations [S1, unofficial].
++OPONeRF is a neural rendering method that personalizes the parameters of the plenoptic mapping function for each sampled 3D point to handle test-time scene changes and robustness [S1, unofficial]. Unlike vanilla NeRFs where parameters are shared and fixed, or generalizable NeRFs which condition fixed parameters on a latent code, OPONeRF dynamically conditions the network weights on the sampled point's representation and the overall scene geometry [S1, unofficial]. This approach subdivides the scene and discriminatively responds to local variations, such as motion, illumination, or contamination, from a single frozen training timeframe [S1, unofficial].
+ 
+ ## How it works
+-OPONeRF consists of a Geometry Encoder that extracts a global scene representation, a set of Parameter Candidate Decoders (PCD) that generate layer-specific parameter pools, and a personalized renderer that selects parameters for each point using probabilistic modeling [S1, unofficial].
++OPONeRF extends the standard NeRF mapping by introducing an overall scene representation $\mathbf{F}$ and a point-wise feature $f_\mathbf{x}$ as inputs, conditioning the renderer's parameters $\Theta$ on these values [S1, unofficial]. The method consists of a Geometry Encoder to extract $\mathbf{F}$, a Point Feature Interpolation step to get $f_\mathbf{x}$, and a Personalized Renderer that generates layer-specific parameters for each point using Parameter Candidate Decoders (PCDs) and discriminative fusion [S1, unofficial].
+ 
+ ### Inputs and Outputs
+ **Inputs:**
+-*   A set of $K$ posed support images $\{I_k\}_{k=1}^K$ [S1, unofficial].
+-*   For each ray, a set of sampled 3D points $\mathbf{x}$ and viewing directions $\mathbf{d}$ [S1, unofficial].
++*   Posed support images $\{I_k\}_{k=1}^K$.
++*   Ray parameters: 3D coordinate $\mathbf{x} \in \mathbb{R}^3$ and viewing direction $\mathbf{d} \in \mathbb{R}^3$.
+ 
+ **Outputs:**
+-*   Predicted radiance $\mathbf{c}$ and volume density $\sigma$ for each point, which are integrated via volume rendering to produce pixel colors [S1, unofficial].
+-
+-### Data Structures and Layouts
+-
+-**1. Overall Scene Representation ($\mathbf{F}$)**
+-*   **Source:** Extracted from support images via the Geometry Encoder [S1, unofficial].
+-*   **Layout:** A 3D feature grid [S1, unofficial].
+-*   **Construction:**
+-    1.  Extract 2D feature maps $F_k$ from each support image $I_k$ using a shared CNN $T(\cdot)$ [S1, unofficial].
+-    2.  Construct a cost volume by warping $F_k$ to a reference view ($k=1$) using homographic warping matrix $H_k(z)$ at depth $z$ [S1, unofficial].
+-    3.  Compute the view-wise variance of these warped features [S1, unofficial].
+-    4.  Pass the cost volume through a 3D CNN $B(\cdot)$ to obtain $\mathbf{F}$ [S1, unofficial].
+-    $$
+-    \begin{aligned}
+-    F_k &= T(I_k) \\
+-    F_{k,z}(u,v) &= W_k\bigl(\mathcal{H}_k(z)[u,v,1]^T\bigr) \\
+-    \mathbf{F} &= B\Bigl(\text{Var}\bigl(\{F_{k,z}(u,v)\}\bigr)\Bigr)
+-    \end{aligned}
+-    $$
+-    [S1, unofficial]
+-
+-**2. Point-wise Feature ($f_\mathbf{x}$)**
+-*   **Source:** Interpolated from the gridded scene representation $\mathbf{F}$ at the location of sampled point $\mathbf{x}$ [S1, unofficial].
+-*   **Layout:** A feature vector associated with $\mathbf{x}$ [S1, unofficial].
+-*   **Probabilistic Modeling:** $f_\mathbf{x}$ is modeled as a Gaussian distribution with mean $\mu_\mathbf{x}$ and variance $\sigma_\mathbf{x}$ [S1, unofficial]. These are predicted by MLPs ($\mu$ MLP, $\Sigma$ MLP) taking $f_\mathbf{x}$ as input [S1, unofficial].
+-    $$
+-    \mathcal{L}_{\mu_\mathbf{x}, \sigma_\mathbf{x}}(f_\mathbf{x}) \approx \frac{1}{B}\sum_{i=1}^B \ln p_\theta(f_\mathbf{x}^i|f_\mathbf{x}^{Vi}) + \frac{1}{2B}\sum_{i=1}^B\sum_{j=1}^D \left(1 + \ln((\sigma^{(j)}_{\mathbf{x}_i})^2) - (\mu^{(j)}_{\mathbf{x}_i})^2 - (\sigma^{(j)}_{\mathbf{x}_i})^2\right)
+-    $$
+-    [S1, unofficial]
+-
+-**3. Parameter Candidate Decoders (PCD)**
+-*   **Structure:** For each target layer $l$ (where $l=1, \dots, L$), a PCD consists of two parallel decoders [S1, unofficial]:
+-    *   **Parameter Decoder $D^l_w(\cdot)$:** Outputs base parameter matrix $\mathbf{W}^l_d \in \mathbb{R}^{C_i^l \times C_o^l}$ [S1, unofficial].
+-    *   **Mask Decoder $D^l_m(\cdot)$:** Outputs a soft mask, which is quantized to a hard binary mask $M^l \in \{0,1\}^{C_i^l \times C_o^l}$ [S1, unofficial].
+-*   **Layer-Variant Codes:** Learnable matrices $\mathbf{Z}^l \in \mathbb{R}^{C_i^l \times C_o^l}$, initialized randomly and updated during training [S1, unofficial].
+-*   **Candidate Parameters $\mathbf{W}^l_a$:**
+-    $$
+-    \mathbf{W}^l_a = (J - M^l) * \mathbf{W}^l_d + M^l * \mathbf{Z}^l
+-    $$
+-    where $J$ is an all-ones matrix and $*$ denotes the Hadamard product [S1, unofficial].
+-
+-**4. Adaptiveness Factor ($A_\mathbf{x}$)**
+-*   **Source:** A vector of length $L$ (number of target layers) computed for each point $\mathbf{x}$ [S1, unofficial].
+-*   **Function:** Determines how to fuse the parameter candidates $\mathbf{W}^l_a$ for each layer $l$ [S1, unofficial]. It allows the renderer to select from the parameter pool in a layer-wise manner rather than element-wise [S1, unofficial].
++*   Radiance $\mathbf{c} \in \mathbb{R}^3$ and volume density $\sigma \in \mathbb{R}$.
++
++### Data Structures
++1.  **Overall Scene Representation ($\mathbf{F}$):** A 3D feature grid extracted by the Geometry Encoder. It encodes geometric consistency across support views.
++2.  **Point-wise Feature ($f_\mathbf{x}$):** A feature vector interpolated from $\mathbf{F}$ at location $\mathbf{x}$.
++3.  **Parameter Candidate Pool ($\mathbf{W}^l_a$):** For each target layer $l$, a matrix of shape $\mathbb{R}^{C_i^l \times C_o^l}$ containing candidate weights.
++4.  **Layer-Variant Codes ($\mathbf{Z}^l$):** Randomly initialized matrices of shape $\mathbb{R}^{C_i^l \times C_o^l}$, updated during training, providing layer-specific variations.
++5.  **Binary Mask ($M^l$):** A hard binary mask of shape $\mathbb{R}^{C_i^l \times C_o^l}$ generated by the mask decoder, determining which weights come from the base decoder or the layer-variant codes.
++6.  **Adaptiveness Factor ($A_\mathbf{x}$):** A vector of length $L$ (number of target layers) that weights the parameter candidates for point $\mathbf{x}$.
+ 
+ ### Numbered Steps
+ 
+-1.  **Geometry Encoding:**
+-    *   Input: Posed support images $\{I_k\}_{k=1}^K$ [S1, unofficial].
+-    *   Process: Extract features $F_k$, warp to reference view, compute variance, and pass through 3D CNN $B(\cdot)$ to get $\mathbf{F}$ [S1, unofficial].
+-    *   Output: Global scene representation $\mathbf{F}$ [S1, unofficial].
++1.  **Geometry Encoder:**
++    *   Extract 2D feature maps $F_k$ from each support image $I_k$ using a shared CNN $T(\cdot)$.
++    *   Construct a cost volume by warping features $F_k$ to a reference view ($k=1$) using homographic warping matrix $H_k(z)$ at depth $z$. The warped feature at pixel $(u,v)$ and depth $z$ is $F_{k,z}(u,v)$.
++    *   Compute the view-wise variance of these warped features.
++    *   Pass the cost volume through a 3D CNN $B(\cdot)$ to obtain the overall scene representation $\mathbf{F}$ [S1, unofficial].
+ 
+ 2.  **Point Feature Interpolation:**
+-    *   Input: Sampled 3D point $\mathbf{x}$ [S1, unofficial].
+-    *   Process: Interpolate $f_\mathbf{x}$ from $\mathbf{F}$ [S1, unofficial].
+-    *   Output: Point-wise feature $f_\mathbf{x}$ [S1, unofficial].
+-
+-3.  **Parameter Candidate Generation:**
+-    *   Input: Global scene representation $\mathbf{F}$ [S1, unofficial].
+-    *   Process: For each target layer $l$:
+-        *   Compute $\mathbf{W}^l_d = D^l_w(\mathbf{F})$ [S1, unofficial].
+-        *   Compute soft mask, quantize to hard binary mask $M^l = D^l_m(\mathbf{F})$ [S1, unofficial].
+-        *   Compute candidate parameters $\mathbf{W}^l_a = (J - M^l) * \mathbf{W}^l_d + M^l * \mathbf{Z}^l$ [S1, unofficial].
+-    *   Output: Pool of candidate parameters $\{\mathbf{W}^l_a\}_{l=1}^L$ [S1, unofficial].
++    *   For a sampled 3D point $\mathbf{x}$, interpolate its point-wise feature $f_\mathbf{x}$ from the gridded representation $\mathbf{F}$ [S1, unofficial].
++
++3.  **Parameter Candidate Generation (PCD):**
++    *   For each target layer $l$ ($l=1, \dots, L$), decode $\mathbf{F}$ into a base parameter matrix $\mathbf{W}^l_d$ using a decoder $D^l_w(\cdot)$:
++        $$ \mathbf{W}^l_d = D^l_w(\mathbf{F}) $$
++    *   Decode $\mathbf{F}$ into a hard binary mask $M^l$ using a mask decoder $D^l_m(\cdot)$:
++        $$ M^l = D^l_m(\mathbf{F}) $$
++    *   Fuse the base parameters with layer-variant codes $\mathbf{Z}^l$ using the mask $M^l$ and an all-ones matrix $J$:
++        $$ \mathbf{W}^l_a = (J - M^l) * \mathbf{W}^l_d + M^l * \mathbf{Z}^l $$
++        where $*$ denotes the Hadamard product [S1, unofficial].
+ 
+ 4.  **Discriminative Parameter Personalization:**
+-    *   Input: Point-wise feature $f_\mathbf{x}$, candidate parameters $\{\mathbf{W}^l_a\}$ [S1, unofficial].
+-    *   Process:
+-        *   Compute adaptiveness factor $A_\mathbf{x}$ from $f_\mathbf{x}$ (details of $A_\mathbf{x}$ calculation are not fully specified in the provided text) [S1, unofficial].
+-        *   Use $A_\mathbf{x}$ to select/fuse parameters from $\mathbf{W}^l_a$ for each layer $l$ [S1, unofficial].
+-    *   Output: Personalized layer weights for point $\mathbf{x}$ [S1, unofficial].
++    *   Compute the adaptiveness factor $A_\mathbf{x} \in \mathbb{R}^L$ for point $\mathbf{x}$ using probabilistic modeling (see Formulas).
++    *   Use $A_\mathbf{x}$ to select/weight the parameter candidates $\mathbf{W}^l_a$ for the target layers. The target layers in the renderer are the Query (Q), Key (K), Value (V) projection MLPs and the feedforward layer of the Ray Transformer [S1, unofficial].
+ 
+ 5.  **Rendering:**
+-    *   Input: Personalized weights, point $\mathbf{x}$, direction $\mathbf{d}$ [S1, unofficial].
+-    *   Process: The renderer (Ray Transformer) uses the personalized weights for target layers (Q, K, V projection MLPs and feedforward layer) and shared weights for others [S1, unofficial]. Output $(\mathbf{c}, \sigma)$ [S1, unofficial].
+-    *   Process: Volume rendering integrates $(\mathbf{c}, \sigma)$ along rays [S1, unofficial].
+-    *   Output: Pixel colors [S1, unofficial].
+-
+-### Formulas and Definitions
+-
+-*   **Mapping Function:**
+-    $$
+-    \mathcal{M}_\Theta^{opo}(\mathbf{x}): (\mathbf{x}, f_\mathbf{x}, \mathbf{d}, \mathbf{F}) \longrightarrow (\mathbf{c}, \sigma)
+-    $$
+-    [S1, unofficial]
+-
+-*   **Reconstruction Loss:**
+-    $$
+-    \mathcal{L}_{rec} = \frac{1}{B}\sum_{i=1}^B ||Enc(f_\mathbf{x}^i) - Dec(F_\mathbf{x}^i)||_2
+-    $$
+-    where $Enc$ and $Dec$ are encoder/decoder MLPs mapping to latent space [S1, unofficial].
+-
+-*   **Diversity Loss:**
+-    $$
+-    \mathcal{L}_{div} = -\frac{1}{|R|}\sum_{r=1}^{|R|} ||\mu_{r,\cdot} - \tilde{\mu}_{r,\cdot}|| - \frac{1}{N}\sum_{s=1}^N ||\mu_{\cdot,s} - \tilde{\mu}_{\cdot,s}||
+-    $$
+-    where $\mu_{r,\cdot} = \frac{1}{N}\sum_{s=1}^N a_{r,s}(x)$, $\mu_{\cdot,s} = \frac{1}{|R|}\sum_{r=1}^{|R|} a_{r,s}(x)$, and $\tilde{\mu}$ are randomly shuffled versions to suppress trivial solutions [S1, unofficial].
+-
+-*   **Gradient Approximation for Binary Quantization:**
+-    The step function $S(x)$ for binary mask quantization is non-differentiable. Its gradient is approximated by a long-tailed estimator $H(x)$ [S1, unofficial]:
+-    $$
+-    \frac{d}{dx}S(x) \approx H(x) = \begin{cases} 
+-    2-4|x|, & -0.4 \le x \le 0.4 \\
+-    0.4, & 0.4 < |x| \le 1 \\
+-    0, & \text{otherwise}
+-    \end{cases}
+-    $$
+-    [S1, unofficial]
+-
+-*   **Total Loss:**
+-    $$
+-    \mathcal{L}_{opo} = \mathcal{L}_{pho} + \mathcal{L}_{appr} + \gamma \mathcal{L}_{rec} + 1e^{-5}\mathcal{L}_{div}
+-    $$
+-    where $\mathcal{L}_{pho}$ is the photometric loss [S1, unofficial].
+-
+-### Parameters and Typical Values
+-
+-*   **$L$:** Number of target layers in the OPONeRF renderer. Typically all linear layers except the last regression heads [S1, unofficial].
+-*   **$\mathbf{Z}^l$:** Layer-variant codes for layer $l$, shape $\mathbb{R}^{C_i^l \times C_o^l}$. Initialized randomly [S1, unofficial].
+-*   **$\mathbf{W}^l_a$:** Candidate parameters for layer $l$, shape $\mathbb{R}^{C_i^l \times C_o^l}$ [S1, unofficial].
+-*   **Threshold Matrix:** A learnable threshold matrix is used for binary quantization instead of a fixed scalar [S1, unofficial].
+-
+-### Edge Cases and Pitfalls
+-
+-*   **Computational Cost of PCD:** Generating full-sized output matrices for large layer widths ($C_i^l, C_o^l > 1000$) is expensive [S1, unofficial].
+-    *   *Mitigation:* Generate a down-sized output, apply linear layers to upscale dimensions, then element-wise multiply with randomly initialized full-sized matrices that are iteratively optimized [S1, unofficial].
+-*   **Non-differentiability of Binary Quantization:** The step function $S(x)$ is non-differentiable [S1, unofficial].
+-    *   *Mitigation:* Use the long-tailed estimator $H(x)$ for gradient computation [S1, unofficial].
++    *   Pass $\mathbf{x}$, $\mathbf{d}$, and the personalized parameters through the renderer to obtain $(\mathbf{c}, \sigma)$.
++    *   Integrate along the ray using standard volume rendering equations [G].
++
++### Formulas
++
++**Mapping Function:**
++$$ \mathcal{M}_\Theta^{opo}(\mathbf{x}): (\mathbf{x}, f_\mathbf{x}, \mathbf{d}, \mathbf{F}) \longrightarrow (\mathbf{c}, \sigma) $$
++where $\mathbf{F}$ is the overall scene representation and $f_\mathbf{x}$ is the point-wise feature [S1, unofficial].
++
++**Probabilistic Modeling Loss (ELBO):**
++To determine the adaptiveness factor, OPONeRF models $f_\mathbf{x}$ probabilistically. The loss is approximated as:
++$$ \mathcal{L}_{\mu_x, \sigma_x}(f_\mathbf{x}) \approx \frac{1}{B}\sum_{i=1}^B \ln p_\theta(f_\mathbf{x}^i | f_\mathbf{x}^{Vi}) + \frac{1}{2B}\sum_{i=1}^B\sum_{j=1}^D \left( 1 + \ln((\sigma^{(j)}_{x_i})^2) - (\mu^{(j)}_{x_i})^2 - (\sigma^{(j)}_{x_i})^2 \right) $$
++where $B$ is batch size, $D$ is dimension, and $\mu, \sigma$ are parameters of the approximate posterior [S1, unofficial].
++
++**Reconstruction Loss:**
++$$ \mathcal{L}_{rec} = \frac{1}{B}\sum_{i=1}^B ||Enc(f_\mathbf{x}^i) - Dec(F_\mathbf{x}^i)||_2 $$
++where $Enc$ and $Dec$ are encoder/decoder MLPs mapping to latent space [S1, unofficial].
++
++**Diversity Loss:**
++To suppress trivial solutions in the adaptiveness factors:
++$$ \mathcal{L}_{div} = -\frac{1}{|R|}\sum_{r=1}^{|R|} ||\mu_{r,\cdot} - \tilde{\mu}_{r,\cdot}|| - \frac{1}{N}\sum_{s=1}^N ||\mu_{\cdot,s} - \tilde{\mu}_{\cdot,s}|| $$
++where $\mu_{r,\cdot}$ and $\mu_{\cdot,s}$ are row/column means of the adaptiveness matrix, and $\tilde{\mu}$ are randomly shuffled versions [S1, unofficial].
++
++**Gradient Approximation for Binary Quantization:**
++The step function $S(x)$ for mask generation is non-differentiable. Its gradient is approximated by a long-tailed estimator $H(x)$:
++$$ \frac{d}{dx}S(x) \approx H(x) = \begin{cases} 2-4|x|, & -0.4 \le x \le 0.4 \\ 0.4, & 0.4 < |x| \le 1 \\ 0, & \text{otherwise} \end{cases} $$
++[S1, unofficial].
++
++**Total Loss:**
++$$ \mathcal{L}_{opo} = \mathcal{L}_{pho} + \mathcal{L}_{appr} + \gamma \mathcal{L}_{rec} + 10^{-5}\mathcal{L}_{div} $$
++where $\mathcal{L}_{pho}$ is the photometric loss [S1, unofficial].
++
++### Parameters
++*   **$L$:** Number of target layers in the renderer. Typically all linear layers except the last regression heads [S1, unofficial].
++*   **$\mathbf{Z}^l$:** Layer-variant codes, shape $\mathbb{R}^{C_i^l \times C_o^l}$, initialized randomly [S1, unofficial].
++*   **$\mathbf{W}^l_a$:** Candidate parameters, shape $\mathbb{R}^{C_i^l \times C_o^l}$ [S1, unofficial].
++*   **$\gamma$:** Weight for reconstruction loss (value not specified in sources) [S1, unofficial].
+ 
+ ### Pseudocode
+@@ -151,165 +95,151 @@
+ import torch.nn.functional as F
+ 
+-class GeometryEncoder(nn.Module):
+-    """Extracts global scene representation F from support images [S1, unofficial]."""
+-    def __init__(self, shared_cnn, cost_volume_cnn):
+-        super().__init__()
+-        self.shared_cnn = shared_cnn
+-        self.cost_volume_cnn = cost_volume_cnn
+-
+-    def forward(self, support_images, poses):
+-        K = support_images.shape[0]
+-        features = [self.shared_cnn(support_images[k]) for k in range(K)]
+-        cost_volume = self._warp_and_variance(features, poses)
+-        F = self.cost_volume_cnn(cost_volume)
++class OPONeRF:
++    def __init__(self, support_images, num_target_layers, layer_dims):
++        """
++        support_images: List of tensors [K, H, W, C]
++        num_target_layers: L
++        layer_dims: List of tuples (C_in, C_out) for each target layer
++        """
++        self.K = len(support_images)
++        self.L = num_target_layers
++        self.layer_dims = layer_dims
++        
++        # Geometry Encoder
++        self.shared_cnn = nn.Conv2d(...) # Shared CNN T(.)
++        self.cnn_3d = nn.Conv3d(...)     # 3D CNN B(.)
++        
++        # Parameter Candidate Decoders (PCDs)
++        # Each PCD has a weight decoder Dw and mask decoder Dm
++        self.pcds = nn.ModuleList()
++        for l in range(self.L):
++            # Dw and Dm are 3 consecutive fully-connected layers
++            dw = nn.Sequential(
++                nn.Linear(...), nn.ReLU(),
++                nn.Linear(...), nn.ReLU(),
++                nn.Linear(...)
++            )
++            dm = nn.Sequential(
++                nn.Linear(...), nn.ReLU(),
++                nn.Linear(...), nn.ReLU(),
++                nn.Linear(...)
++            )
++            self.pcds.append((dw, dm))
++            
++            # Layer-variant codes Z^l
++            # Optimized via element-wise multiplication with up-scaled output
++            # to handle large dimensions (C > 1000)
++            self.register_buffer(f'Z_{l}', torch.randn(layer_dims[l][0], layer_dims[l][1]))
++            
++        # Renderer (Ray Transformer)
++        self.renderer = RayTransformer()
++
++    def geometry_encoder(self, support_images):
++        # Extract 2D features
++        features = [self.shared_cnn(img) for img in support_images]
++        
++        # Construct cost volume via homographic warping and variance
++        # Reference view is k=0
++        ref_feat = features[0]
++        cost_volume = []
++        for k in range(1, self.K):
++            # Warp features from view k to reference view at depth z
++            # H_k(z) is homographic warping matrix
++            warped = warp_homography(features[k], H_k(z))
++            cost_volume.append(warped)
++        
++        # View-wise variance
++        var_cost = torch.var(torch.stack(cost_volume), dim=0)
++        
++        # 3D CNN to get overall scene representation F
++        F = self.cnn_3d(var_cost)
+         return F
+ 
+-    def _warp_and_variance(self, features, poses):
+-        # Homographic warping and variance computation [G]
+-        # Warps features to reference view and computes variance across views
+-        ref_feat = features[0]
+-        warped_feats = [ref_feat]
+-        for k in range(1, len(features)):
+-            # Standard homographic warping using grid_sample [G]
+-            grid = self._compute_homography_grid(poses[k], poses[0], ref_feat.shape[2:])
+-            warped = F.grid_sample(features[k], grid, align_corners=True)
+-            warped_feats.append(warped)
+-        # Variance across views [G]
+-        stacked = torch.stack(warped_feats, dim=0)
+-        cost_volume = torch.var(stacked, dim=0)
+-        return cost_volume
+-
+-    def _compute_homography_grid(self, pose_src, pose_ref, size):
+-        # Simplified homography grid generation [G]
+-        # Returns normalized grid for grid_sample
+-        pass # Standard MVS grid computation [G]
+-
+-class ParameterCandidateDecoder(nn.Module):
+-    """Generates parameter candidates W_a and masks M for a target layer [S1, unofficial]."""
+-    def __init__(self, in_channels, out_channels, layer_id):
+-        super().__init__()
+-        self.layer_id = layer_id
+-        # Three consecutive fully-connected layers for Dw and Dm [S1, unofficial]
+-        self.Dw = nn.Sequential(
+-            nn.Linear(in_channels, 512), nn.ReLU(),
+-            nn.Linear(512, 512), nn.ReLU(),
+-            nn.Linear(512, out_channels)
+-        )
+-        self.Dm = nn.Sequential(
+-            nn.Linear(in_channels, 512), nn.ReLU(),
+-            nn.Linear(512, 512), nn.ReLU(),
+-            nn.Linear(512, out_channels)
+-        )
+-        # Layer-variant codes Z^l [S1, unofficial]
+-        self.Z = nn.Parameter(torch.randn(out_channels))
+-        # Learnable threshold for binary quantization [S1, unofficial]
+-        self.threshold = nn.Parameter(torch.zeros(out_channels))
+-
+-    def forward(self, F):
+-        W_d = self.Dw(F)
+-        soft_mask = self.Dm(F)
+-        M = binary_quantize(soft_mask, self.threshold)
+-        J = torch.ones_like(W_d)
+-        W_a = (J - M) * W_d + M * self.Z
+-        return W_a, M
+-
+-def binary_quantize(x, threshold):
+-    """Binary quantization with long-tailed gradient estimator [S1, unofficial]."""
+-    M = (x > threshold).float()
+-    return M
+-
+-class LongTailedEstimator(torch.autograd.Function):
+-    @staticmethod
+-    def forward(ctx, x):
+-        return (x > 0).float()
+-
+-    @staticmethod
+-    def backward(ctx, grad_output):
+-        abs_x = torch.abs(x)
+-        grad = torch.zeros_like(x)
+-        mask1 = (abs_x <= 0.4)
+-        mask2 = (abs_x > 0.4) & (abs_x <= 1.0)
+-        grad[mask1] = 2 - 4 * abs_x[mask1]
+-        grad[mask2] = 0.4
+-        return grad_output * grad
+-
+-class OPONeRFRenderer(nn.Module):
+-    """Personalized renderer using Ray Transformer architecture [S1, unofficial]."""
+-    def __init__(self, num_target_layers, layer_dims, F_dim):
+-        super().__init__()
+-        self.num_target_layers = num_target_layers
+-        self.layer_dims = layer_dims
+-        self.pcds = nn.ModuleList()
+-        for l in range(num_target_layers):
+-            C_in, C_out = layer_dims[l]
+-            self.pcds.append(ParameterCandidateDecoder(F_dim, C_in * C_out, l))
+-        # Ray Transformer backbone [S1, unofficial]
+-        self.transformer = RayTransformer(layer_dims)
+-
+-    def forward(self, x, d, F, f_x):
+-        # x: [N, 3], d: [N, 3], F: [H, W, D, C], f_x: [N, C_f]
+-        F_x = interpolate_3d_grid(F, x)
+-        candidates = []
+-        masks = []
+-        for l in range(self.num_target_layers):
+-            W_a, M = self.pcds[l](F_x)
+-            candidates.append(W_a)
+-            masks.append(M)
+-        # Adaptiveness factor A_x computation [S1, unofficial]
+-        A_x = compute_adaptiveness(f_x)
+-        # Personalize weights for the transformer [S1, unofficial]
+-        personalized_weights = fuse_candidates(candidates, A_x)
+-        sigma, c = self.transformer(x, d, personalized_weights)
+-        return sigma, c
+-
+-def compute_adaptiveness(f_x):
+-    # Source does not specify exact computation of A_x; typically an MLP from f_x [G]
+-    return torch.randn(f_x.shape[0], 1)
+-
+-def fuse_candidates(candidates, A_x):
+-    # Source does not specify exact fusion; typically weighted selection per layer [G]
+-    return candidates[0]
+-
+-def interpolate_3d_grid(grid, points):
+-    # Trilinear interpolation of 3D grid at point coordinates [G]
+-    # Normalize points to [-1, 1] for grid_sample
+-    pts_norm = points * 2.0 - 1.0
+-    pts_norm = pts_norm.unsqueeze(0).unsqueeze(0).unsqueeze(0)
+-    grid_norm = grid.permute(0, 3, 1, 2).unsqueeze(0)
+-    out = F.grid_sample(grid_norm, pts_norm, align_corners=True)
+-    return out.squeeze().squeeze()
+-
+-class RayTransformer(nn.Module):
+-    # Ray Transformer architecture from Wang et al. 2021 [S1, unofficial]
+-    def __init__(self, layer_dims):
+-        super().__init__()
+-        pass
+-    def forward(self, x, d, weights):
+-        # Simplified rendering output [G]
+-        return torch.randn(x.shape[0], 1), torch.randn(x.shape[0], 3)
++    def interpolate_point_feature(self, F, x):
++        # Interpolate f_x from gridded F at coordinate x
++        f_x = trilinear_interpolate(F, x)
++        return f_x
++
++    def generate_candidates(self, F, l):
++        dw, dm = self.pcds[l]
++        
++        # Decode base parameters
++        W_d = dw(F)
++        
++        # Decode mask
++        mask_logits = dm(F)
++        # Apply straight-through estimator with long-tailed gradient
++        M = straight_through_binary(mask_logits)
++        
++        # Layer-variant code
++        Z = getattr(self, f'Z_{l}')
++        
++        # Fuse: W_a = (J - M) * W_d + M * Z
++        J = torch.ones_like(M)
++        W_a = (J - M) * W_d + M * Z
++        
++        return W_a
++
++    def compute_adaptiveness(self, f_x):
++        # Probabilistic modeling to get adaptiveness factor A_x
++        # Uses ELBO loss components to determine weights
++        # Returns vector of length L
++        # Implementation details for A_x calculation are implicit in the ELBO optimization
++        # [G]: Assuming a small MLP maps f_x to log-weights for L layers
++        adaptiveness_mlp = nn.Linear(f_x.shape[-1], self.L)
++        A_x = torch.softmax(adaptiveness_mlp(f_x), dim=-1)
++        return A_x
++
++    def forward(self, x, d, support_images):
++        F = self.geometry_encoder(support_images)
++        f_x = self.interpolate_point_feature(F, x)
++        
++        # Get personalized parameters for target layers
++        personalized_params = []
++        for l in range(self.L):
++            W_a = self.generate_candidates(F, l)
++            personalized_params.append(W_a)
++            
++        # Compute adaptiveness factor
++        A_x = self.compute_adaptiveness(f_x)
++        
++        # Apply adaptiveness to personalize the renderer layers
++        # [G]: The renderer uses these parameters for Q, K, V, FF layers
++        # The exact fusion of A_x into the Ray Transformer layers is not detailed
++        # in the provided text, but A_x weights the candidates.
++        # Assuming A_x selects/weights the candidates for the specific point x.
++        
++        # Render
++        c, sigma = self.renderer(x, d, personalized_params)
++        return c, sigma
+ ```
+ 
++### Edge Cases and Pitfalls
++*   **Computational Cost:** Generating full-sized parameter outputs for PCDs is expensive when layer widths $C_i^l, C_o^l > 1000$. Mitigation: Generate a down-sized output, apply linear layers to upscale dimensions, then element-wise multiply with randomly initialized full-sized matrices that are iteratively optimized [S1, unofficial].
++*   **Binary Quantization:** The step function $S(x)$ for mask generation is non-differentiable. Mitigation: Use the long-tailed estimator $H(x)$ for gradient computation [S1, unofficial].
++*   **Trivial Solutions:** The adaptiveness factors may converge to trivial solutions. Mitigation: Use diversity loss $\mathcal{L}_{div}$ with randomly shuffled versions of the adaptiveness matrix [S1, unofficial].
++
+ ## Subtopics
+ 
++### Ray Transformer
++The backbone architecture for the renderer, where points attend to other points along the ray. OPONeRF personalizes the Q, K, V projection MLPs and the feedforward layer [S1, unofficial].
++
+ ### Generalizable NeRFs
+-Concatenate geometry-agnostic $[\mathbf{x}, \mathbf{d}]$ with geometry-aware $f_\mathbf{x}$ but keep parameters $\Theta$ fixed [S1, unofficial]. OPONeRF conditions parameters on $\mathbf{x}$ and $\mathbf{F}$ [S1, unofficial].
++Methods that condition fixed parameters on a latent code or geometry-aware features. OPONeRF differs by conditioning the parameters themselves on the point representation [S1, unofficial].
+ 
+ ### StochasticNeRF
+-Models static appearance as stochastic variables [S1, unofficial]. OPONeRF targets the sampled point itself, subdividing the scene and personalizing point-wise parameters [S1, unofficial].
++Models static appearance as stochastic variables. OPONeRF targets the sampled point itself, subdividing the scene and personalizing point-wise parameters [S1, unofficial].
+ 
+ ## Operating characteristics
+-
+-*   **Time Complexity:** The computational cost of the Parameter Candidate Decoders (PCD) is high for full-sized outputs, especially when layer widths are large ($C_i^l, C_o^l > 1000$) [S1, unofficial]. The mitigation strategy (down-sized output + linear upscaling + element-wise multiplication) reduces this cost but adds complexity [S1, unofficial].
+-*   **Memory Complexity:** Requires storing the global scene representation $\mathbf{F}$, layer-variant codes $\mathbf{Z}^l$, and candidate parameters $\mathbf{W}^l_a$ for all target layers [S1, unofficial].
+-*   **Strengths:** Handles test-time scene changes (motion, illumination, contamination) robustly by personalizing parameters per point [S1, unofficial]. More expressive and flexible than fixed-parameter NeRFs [S1, unofficial].
+-*   **Limitations:** High computational overhead due to the need to generate and select parameters for each point [S1, unofficial]. The probabilistic modeling and diversity loss add to the training complexity [S1, unofficial].
+-*   **When to use:** When robustness to test-time perturbations is critical and computational resources allow for the overhead of per-point parameter generation [S1, unofficial].
+-*   **When not to use:** When real-time performance is required and scene changes are minimal or non-existent [S1, unofficial].
++*   **Time Complexity:** Higher than standard NeRF due to the Geometry Encoder (3D CNN) and the generation of parameter candidates for each point. The PCDs add significant overhead, mitigated by the down-sized output technique.
++*   **Memory Complexity:** Increased memory usage for storing the overall scene representation $\mathbf{F}$, layer-variant codes $\mathbf{Z}^l$, and the adaptiveness factors.
++*   **Strengths:** Robustness to test-time scene perturbations (motion, illumination, contamination). Personalized representation allows for more expressiveness and flexibility in handling local variations.
++*   **Limitations:** Computational cost of PCDs. Complexity of training due to multiple loss terms and probabilistic modeling.
++*   **When to Use:** When robustness to dynamic or changing scenes is required, and computational resources allow for the overhead of point-wise parameter generation.
++*   **When Not to Use:** For static scenes where standard NeRF or generalizable NeRFs are sufficient and more efficient.
+ 
+ ## Background
+-
+-OPONeRF (One-Point-One NeRF) was introduced by Yu Zheng, Yueqi Duan, Kangfu Zheng, Hongru Yan, Jiwen Lu, and Jie Zhou [S1, unofficial]. The method addresses the limitations of standard NeRFs and generalizable NeRFs in handling dynamic or perturbed scenes [S1, unofficial]. It builds on the Ray Transformer architecture and incorporates ideas from probabilistic modeling and parameter-efficient fine-tuning [S1, unofficial]. The method was presented in the paper "OPONeRF: One-Point-One NeRF for Robust Neural Rendering" [S1, unofficial].
++OPONeRF (One-Point-One NeRF) was introduced to address the limitations of fixed-parameter NeRFs and generalizable NeRFs in handling test-time scene changes. It builds on the idea of personalizing neural renderers for each sampled point, drawing inspiration from probabilistic modeling and cost volume construction in multi-view stereo (MVS) [S1, unofficial]. The method uses a geometry encoder based on MVSNet to extract scene representations and incorporates a Ray Transformer for rendering [S1, unofficial].
+ 
+ ## Sources
+-
+ [S1] OPONeRF: One-Point-One NeRF for Robust Neural Rendering, https://doi.org/10.48550/arXiv.2409.20043, fetched 2026-10-27 (unofficial)

@@ -1,0 +1,82 @@
+--- v001.md
++++ v002.md
+@@ -1,7 +1,8 @@
+ # Volumetric Shadow Sampling and Ray Casting
+ 
++Also called: Volumetric Ray Casting with Shadows, Volumetric Shadow Ray Casting
+ 
+ ## Overview
+-This family encompasses methods for computing shadows and local illumination within participating media by evaluating visibility along rays cast from shading points toward light sources. It solves the problem of determining how much light is attenuated by the volume density between a point and the light, enabling realistic shadowing in fog, smoke, or particle systems. It differs from global illumination methods by focusing exclusively on direct visibility attenuation (often via stochastic sampling or slice-based accumulation) rather than simulating full light transport bounces, and from hard shadow techniques by approximating penumbrae through density-weighted sampling or spatial sorting.
++This family of methods computes local illumination and shadows for participating media by evaluating visibility along rays cast toward light sources or environment directions [G]. Unlike sibling methods that may rely on precomputed lookup tables, recursive tracing, or geometric shadow volumes, this family focuses on direct sampling strategies—either stochastic soft shadow estimation or geometric slice-based accumulation—to approximate the attenuation of light within the volume [S1, book]. It addresses the high computational cost of volumetric shadowing by providing efficient approximations suitable for real-time or interactive visualization [S1, book].
+ 
+ ## Shared principles
+@@ -12,5 +13,5 @@
+     In discrete implementations, this integral is approximated by summing $\sigma_t \cdot \Delta s$ over samples along the ray [G].
+ 
+-2.  **Local Shading Models:** For surface-like appearance in volumes, normals are approximated from the volume gradient $\mathbf{g} = \nabla V$ [G]. Usually, a simple absorption and emission model is used because it is relatively cheap to evaluate and gives good enough results [S1, unofficial].
++2.  **Local Shading Models:** For surface-like appearance in volumes, normals are approximated from the volume gradient $\mathbf{g} = \nabla V$ [G]. Usually, a simple absorption and emission model is used because it is relatively cheap to evaluate and gives good enough results [G].
+ 
+ 3.  **Shadowing Approximation:** Shadows are computed by testing occlusion along the direction to the light source [G].
+@@ -20,24 +21,53 @@
+     where $D_{up}$ is the integrated density along an upward ray [G].
+ 
++**Pseudocode:**
++```python
++def compute_transmittance(origin, direction, volume_sampler, num_samples):
++    """Computes transmittance T = exp(-sum(sigma_t * delta_s)) along a ray."""
++    delta_s = 1.0 / num_samples
++    optical_depth = 0.0
++    for i in range(num_samples):
++        pos = origin + direction * (i * delta_s)
++        sigma_t = volume_sampler.extinction_at(pos)
++        optical_depth += sigma_t * delta_s
++    return math.exp(-optical_depth)
++```
++
+ ## Subtopics
+ 
+ ### [Volumetric Soft Shadowing](4507-volumetric-soft-shadowing.md)
+-Estimates soft shadows by sampling random directions towards the light, weighting by local density and distance. It differs from hard shadow techniques by approximating the penumbra through stochastic sampling, and from global illumination methods by focusing solely on direct visibility attenuation without simulating indirect bounces.
++Volumetric Soft Shadowing estimates soft shadows in participating media by sampling random directions towards the light source, weighting samples by local density and distance. It approximates the penumbra through stochastic sampling rather than geometric hard edges. Choose this method when soft, noisy shadows are acceptable and the volume density field is accessible via a sampling function.
+ 
+ ### [Half-Angle Slice Rendering](9979-half-angle-slice-rendering.md)
+-Adds volumetric shadowing to particle systems by rendering particles as slices perpendicular to a half-angle vector (between view and light directions), allowing simultaneous accumulation of shadowing and blending using a single 2D shadow buffer. It solves the problem of efficiently computing soft volumetric shadows for large numbers of particles without the memory overhead of 3D voxelization. Unlike volume rendering approaches that require voxelization and 3D textures, this method uses only a single 2D shadow buffer and particle sorting.
++Half-Angle Slice Rendering is a technique for computing volumetric shadows in particle-based media by rendering the volume as a series of slices perpendicular to a "half-angle" vector between the view and light directions. It solves the problem of efficiently accumulating shadowing information while blending the volume, allowing both operations to occur simultaneously using a single 2D shadow buffer. Unlike voxel-based volume rendering methods that require 3D textures and complex ray marching, this method relies on sorting particles and 2D blending, making it suitable for real-time particle systems. Choose this method for particle-based volumes where performance is critical and hard shadows with correct front-to-back accumulation are required.
+ 
+ ### Half-Angle Shadow Opacity Sampling
+-**Step**
+-- [S1, unofficial] In the render vertex shader, compute light-space texture coordinates for opacity lookup: `lightTextureCoordinates = (uLightViewProjection * vec4(position, 1.0)) * 0.5 + 0.5`.
+-- [S1, unofficial] Sample opacity from `uOpacityTexture` using the light-space coordinates: `vOpacity = texture(uOpacityTexture, lightTextureCoordinates).a`.
+-- [S1, unofficial] In the floor fragment shader, compute light-space coordinates for the floor position and sample opacity. If coordinates are outside [0,1], set opacity to 0.
++A method that computes light-space texture coordinates for opacity lookup in the vertex shader and samples opacity from a texture in the fragment shader to determine shadow intensity [S2, unofficial].
++*   **Steps:** In the vertex shader, compute `lightTextureCoordinates = (uLightViewProjection * vec4(position, 1.0)) * 0.5 + 0.5`. Sample opacity `vOpacity = texture(uOpacityTexture, lightTextureCoordinates).a`. In the fragment shader, compute light-space coordinates for the floor position and sample opacity; if coordinates are outside [0,1], set opacity to 0 [S2, unofficial].
++*   **Formula:** Final floor shadow color: `FragColor = vec4(0.0, 0.0, 0.0, opacity * 0.5)` [S2, unofficial].
+ 
+-**Formula**
+-- [S1, unofficial] Final floor shadow color: `FragColor = vec4(0.0, 0.0, 0.0, opacity * 0.5)`.
++### Volumetric Cloud Shadow Quality Adjustment
++A configuration workflow for Unreal Engine's volumetric cloud system to improve shadow definition on directional lights [S3].
++*   **Steps:** Increase the Volumetric Cloud property `Trace Sample Count Scale`. Increase the Directional Light property `Cloud Shadow Ray Sample Count Scale`. Adjust console variables `r.SkyAtmosphere.FastSkyLUT.Width` and `r.SkyAtmosphere.FastSkyLUT.Height` to compensate for low default resolution, with a recommended starting value of 256 for both [S3].
++
++### Low-pass Filtered Volumetric Shadows
++A method to compute volumetric soft shadows for interactive direct volume visualization by convolving the classified data set with a low-pass filter, avoiding hard shadow edges and noise-like visual patterns [S4, unofficial].
++*   **Definition:** Uses a three-dimensional summed area table (3D SAT) aligned with the light source to evaluate soft shadows in constant time, avoiding expensive shadow ray marching [S4, unofficial].
++*   **Pitfall:** Hard shadows and vortex features can visually interfere with each other due to similar scale, hampering perception of depth; this method reduces distracting streak patterns [S4, unofficial].
++*   **Parameters:** Softness of the shadows, which can be controlled interactively [S4, unofficial].
++
++### Volumetric Shadow Bake Shader for Clouds
++A compute shader approach that populates local ambient occlusion and computes voxel-specific shadow transmittance for a 3D cloud volume [S5, unofficial].
++*   **Definition:** Processes computation in a performance-optimal, staggered 2x2 Bayer-aligned fashion [S5, unofficial].
++*   **Steps:** Populate local ambient occlusion (G channel) based on neighbor evaluated densities from the A channel. March towards the sun direction (`u_primaryLightDir`) to compute voxel-specific shadow transmittance. Store the computed shadow transmittance in the B channel [S5, unofficial].
++*   **Layout:** The 3D texture channels are: A = baseDensity (input for AO), G = local ambient occlusion, B = shadow transmittance [S5, unofficial].
+ 
+ ## Background
+-Origin: The specific implementations described, particularly Half-Angle Slice Rendering for particle systems, originate from the GitHub repository `zk8085454/VolumeParticleShadows` [S1, unofficial]. This technique addresses the performance bottleneck of 3D voxelization for large-scale particle effects by projecting shadows onto 2D buffers aligned with the half-angle vector between view and light directions.
++The inclusion of volumetric shadows, where light received at a sample point $s$ is attenuated by volume densities on its path from the light source to $s$, produces greater realism in volume visualization [S1, book]. The term for this attenuation is $C_l(s) = C_L \exp\left(-\int_s^T \mu(t) dt\right)$, where $C_L$ is the light source color and $T$ is the distance from $s$ to the light source [S1, book]. In practice, applications that compute volumetric shadows are less common due to added computational complexity, but interactive hardware-based approaches have been proposed [S1, book]. The technique of low-pass filtered volumetric shadows was published in a conference paper at IEEE SciVis 2014 and won the Computer Graphics Forum Cover Image Contest 2014 [S4, unofficial].
+ 
+ ## Sources
+-[S1] GitHub - zk8085454/VolumeParticleShadows: Half angle slicing technique ..., https://github.com/zk8085454/VolumeParticleShadows/, fetched 2026-10-28 (unofficial)+[S1] Volume Visualization and Volume Graphics, https://www3.cs.stonybrook.edu/~mueller/teaching/cse332/volvisChapter.pdf, fetched 2026-10-28 (book)
++[S2] GitHub - zk8085454/VolumeParticleShadows: Half angle slicing technique ..., https://github.com/zk8085454/VolumeParticleShadows/, fetched 2026-10-28 (unofficial)
++[S3] Volumetric Cloud Component in Unreal Engine  | Unreal Engine 5.8 Documentation | Epic Developer Community, https://dev.epicgames.com/documentation/en-us/unreal-engine/volumetric-cloud-component-in-unreal-engine, fetched 2026-10-30
++[S4] Volume Rendering, https://cg.ivd.kit.edu/publications/2015/marco/VolumeRendering.pdf, fetched 2026-10-28 (unofficial)
++[S5] Enhance volumetric clouds system with precomputed density, 3D AO and shadow transmittance, https://github.com/ricecake/boidsish/pull/708, fetched 2026-10-27 (unofficial)

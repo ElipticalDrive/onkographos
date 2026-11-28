@@ -1,0 +1,561 @@
+Preview and lint Godot .tscn scenes in VS Code or the browser, no Godot install required. react-three-fiber renderer, scene-tree inspector, and a .tscn linter. - feat(renderer): draw FogVolume and FogMaterial into the volumetric fog by Vortiago · Pull Request #732 · Vortiago/textscene-inspector
+
+feat(renderer): draw FogVolume and FogMaterial into the volumetric fog by Vortiago · Pull Request #732 · Vortiago/textscene-inspector · GitHub
+Skip to content
+You signed in with another tab or window. Reload to refresh your session.
+You signed out in another tab or window. Reload to refresh your session.
+You switched accounts on another tab or window. Reload to refresh your session.
+Dismiss alert
+Conversation
+Vortiago
+commented
+Oct 14, 2026
+•
+edited
+Loading
+Uh oh!
+There was an error while loading. Please reload this page.
+Copy link
+Copy Markdown
+Owner
+What changes
+Before: a FogVolume drew nothing, so its local fog, and the fog a negative density carves out, were missing from the volumetric fog. A texture saved as its own .tres, and an ImageTexture or ImageTexture3D with its pixels saved inline, drew nothing either.
+After: each FogVolume adds its FogMaterial's density, albedo and emission to the froxels its shape covers, as Godot 4.6.3's volume pass does (volumetric_fog.glsl:165-278, fog_material.cpp:149-163). Every shape works: box, ellipsoid, cone, cylinder and world. Height falloff, edge fade, negative density and Godot's default fog shader for a volume without a material work too. A FogMaterial density_texture shapes the density. It can be a NoiseTexture3D or an ImageTexture3D, inline or saved as its own .tres, or an image its import sidecar imports as a 3D texture.
+How:
+godot/fogVolume.ts ports the froxel range of a volume's pass (fog.cpp:551-718). r3f/fog/fogVolumeRows.ts packs each visible, unculled volume into a row texture, and fogVolumeShader.ts adds the volumes' fixed-point sums in the light pass, with Godot's packed-colour overflow.
+nodes/3d/fogvolume/ gains a parser and a Component, and resources/materials/fogmaterial/ decodes FogMaterial.
+The new resources/textures/noisetexture3d/ slice builds the texture as a worker job. Its texels and seamless blend match Godot byte for byte. r3f/fog/fogDensityAtlas.ts stacks every density texture in depth into one 3D texture, because a WebGL2 shader cannot index a sampler array in a loop. The stack holds floats once a density texture does.
+An imported 3D texture is cut into slices as Godot's layered importer cuts it (resource_importer_layered_texture.cpp:370-386).
+The new resources/textures/imagetexture3d/ slice and resources/textures/image/decode.ts read an Image sub-resource in every uncompressed format: 8-bit, 16-bit, half, float, RGBA4444, RGB565 and RGBE9995, unpacked as Image::_get_color_at_ofs does (image.cpp:3382-3406, :3451-3525). A float texel uploads raw as a half float, because Godot gives a float format no sRGB view and WebGL2 always filters a half float. An atlas crop of a half-float sheet stays half float, and a canvas read of one converts it to bytes.
+useTextResourceSlot reads a slot that names a .tres as that file's [resource] in the file's own tables. Every Texture2D and Texture3D slot uses it, so a .tres AtlasTexture now takes the inline route.
+Found on the way:
+The colour ramp shared with NoiseTexture2D reads the luminance in float and truncates each channel, as Godot does (color.h:106-108, image.cpp:3577-3580).
+The Gradient sampler and channelToByte run in float, as Gradient::get_color_at_offset and Color::get_r8 do (gradient.h:151-235, color.h:228). Godot-measured ramp bytes off by one drop from 1212 to 0 of 2244.
+A GradientTexture2D with use_hdr keeps a channel above 1 (gradient_texture.cpp:239-270).
+The ArrayMesh byte reader now narrows a listed -1 to 255, as Godot does (variant_parser.cpp:650).
+NoiseTexture2D and NoiseTexture3D apply the FastNoiseLite domain warp, as get_noise_2d and get_noise_3d do (fastnoise_lite.cpp:318-338). patches/fastnoise-lite@1.1.1.patch exports the port's Vector2 and Vector3, which its DomainWrap requires.
+fogVolumePass.ts and fogVolumeShaders.ts are now volumetricFogPass.ts and volumetricFogShaders.ts, because the glossary keeps "fog volume" for the node.
+FogMaterial, NoiseTexture3D, ImageTexture3D and CompressedTexture3D declare validators. Texture3D joins the undeclared-resource list as a record: it is an abstract tier with no properties of its own.
+Goldens
+fog-volume (new): the issue's 3×3×3 box at (0, 1, −5). Against converged Godot 4.6.3, the mean error drops from 3.476/255 (no volume) to 0.205/255.
+fog-volume-density-image, fog-volume-density-volume-tres and fog-volume-density-half-tres (new): an imported 3D texture, an 8-bit ImageTexture3D .tres and a half-float one whose density passes 1.
+sprite2d-imagetexture-tres and sprite2d-imagetexture-half-tres (new): an RGB8 and an RGBAHalf ImageTexture .tres.
+noisetexture2d-domain-warp (new): a progressive, reduced-simplex domain warp.
+Moved, all closer to Godot:
+noisetexture2d: max 1/255 from the ramp fix, mean 0.776/255 → 0.735/255.
+sprite3d-gradienttexture: mean 1.887/255 → 1.882/255.
+texturerect-gradienttexture: 682816 → 682496 pixels off Godot.
+isometric-dungeon: 2 px at 1/255 from the point light's gradient. Pixel (367, 584) goes from 5 to 4 in red, and Godot draws 4. The other pixel sits on an edge where the frame's mean error against Godot is unchanged.
+Every other fog, gradient, noise and atlas golden is unchanged.
+Value check
+pnpm ref:diff, mean error over the pixels the volume changes in Godot, before → after:
+Scene
+Before
+After
+box
+13.05
+0.40
+ellipsoid
+10.66
+0.22
+cone
+8.90
+0.40
+cylinder
+15.67
+0.41
+world shape
+14.07
+0.25
+negative density
+3.65
+0.26
+height falloff 2
+9.58
+0.24
+edge fade 0
+14.21
+0.40
+edge fade 4
+2.55
+0.08
+no material (default fog)
+13.21
+0.35
+albedo and emission
+32.91
+1.13
+density 8
+23.92
+0.45
+rotated and scaled
+13.73
+0.30
+spot and sun lights
+24.70
+0.60
+NoiseTexture3D box
+6.54
+0.81
+NoiseTexture3D world
+7.90
+0.26
+NoiseTexture3D colour ramp
+6.67
+0.82
+NoiseTexture3D seamless ellipsoid
+5.13
+0.13
+NoiseTexture3D inverted, unnormalised
+6.58
+0.80
+pnpm ref:diff, mean error over the whole frame, before → after:
+Scene
+Before
+After
+imported 3D texture
+3.554
+0.209
+ImageTexture3D .tres, Lum8
+4.459
+0.206
+NoiseTexture3D .tres
+5.418
+0.196
+ImageTexture3D .tres, RHalf
+2.227
+0.215
+ImageTexture3D .tres, RFloat
+2.229
+0.216
+ImageTexture3D .tres, R16
+1.153
+0.184
+ImageTexture3D .tres, RGBE9995
+2.229
+0.215
+NoiseTexture3D warp, simplex
+0.714
+0.194
+NoiseTexture3D warp, reduced simplex, progressive
+0.683
+0.199
+NoiseTexture3D warp, basic grid, independent
+0.496
+0.196
+ImageTexture .tres sprite, RGB8
+0.596
+0.000
+NoiseTexture2D .tres sprite
+7.455
+0.019
+ImageTexture sprite, RGBAHalf
+0.581
+0.002
+ImageTexture sprite, RGBAFloat
+0.581
+0.002
+ImageTexture sprite, RGBA4444
+0.595
+0.002
+ImageTexture sprite, RGB565
+0.845
+0.000
+ImageTexture sprite, RGBA16
+0.621
+0.002
+GradientTexture2D use_hdr sprite
+6.880
+0.007
+Each sprite scene modulates by 0.4, so a channel above 1 shows. With the Environment's fog off, a volume adds nothing, in both engines.
+A NoiseTexture2D sprite with each warp drops from a maximum error of 143 to 187/255 to 1 to 3/255. Its whole-frame mean stays at 0.72/255, because main clears the 2D background to grey 77 where Godot clears to 76. A separate thread fixes that.
+Known limitations
+These are in the comparison sheets:
+A fog ShaderMaterial runs no fog shader. That needs a shading-language runtime: Run a fog ShaderMaterial on a FogVolume #734.
+An Image in a block-compressed format draws nothing: Decode the block-compressed Image formats an ImageTexture or ImageTexture3D saves #736. An Image in an integer format draws nothing too, since a float sampler cannot read it.
+A NoiseTexture3D shows even density until its build lands.
+Past 2048 stacked density slices, further textures leave the density even.
+A 3D colour slot still decodes every texture as sRGB. Godot reads a format without an sRGB view raw, so a Lum8 or grey-noise albedo draws too dark. This predates this pull request and touches every 3D material path: #737.
+How you checked it
+pnpm check passes.
+pnpm test:unit passes, run by directory.
+pnpm test:visual passes on every fog, gradient, noise, atlas and sprite scene, and on isometric-dungeon.
+pnpm docs:lint-sections, pnpm docs:index and pnpm docs:gallery pass with --check.
+Closes #665
+claude
+added 2 commits
+October 14, 2026 08:44
+feat(renderer): draw FogVolume and FogMaterial into the volumetric fog
+…
+62c87a1
+```
+A FogVolume now adds its FogMaterial's density, albedo and emission to
+the froxels its shape covers, as Godot 4.6.3's volume pass does: the
+box, ellipsoid, cone, cylinder and world shapes, height falloff, edge
+fade, negative density and Godot's default fog shader. A FogMaterial's
+inline NoiseTexture3D density_texture builds as a worker job and the
+light pass samples it from one stacked 3D texture.
+
+The NoiseTexture3D slice matches Godot's texels and seams exactly. The
+colour ramp shared with NoiseTexture2D now reads the luminance in float
+and truncates each channel, as Godot does, which moves the
+noisetexture2d golden closer to Godot.
+
+FogMaterial and NoiseTexture3D declare validators. Texture3D joins the
+undeclared-resource record as an abstract tier with no properties of
+its own. FogVolume gains its own parser, so the property-grammar sweep
+counts one more swept slice and one fewer base-parser reuser.
+
+Closes #665
+```
+Merge remote-tracking branch 'origin/main' into claude/fog-665-e8p6j2
+…
+6356c84
+```
+# Conflicts:
+#	packages/textscene-core/src/r3f/fog/volumetricFogShaders.ts
+```
+github-actions
+Bot
+commented
+Oct 14, 2026
+•
+edited
+Loading
+Uh oh!
+There was an error while loading. Please reload this page.
+Copy link
+Copy Markdown
+Goldens touched
+11 goldens: 7 added, 4 changed
+Golden
+Change
+Image diff
+This branch
+Main
+fog-volume-density-half-tres
+added
+diff
+preview
+fog-volume-density-image
+added
+diff
+preview
+fog-volume-density-volume-tres
+added
+diff
+preview
+fog-volume
+added
+diff
+preview
+isometric-dungeon
+changed
+diff
+preview
+main
+noisetexture2d-domain-warp
+added
+diff
+preview
+noisetexture2d
+changed
+diff
+preview
+main
+sprite2d-imagetexture-half-tres
+added
+diff
+preview
+sprite2d-imagetexture-tres
+added
+diff
+preview
+sprite3d-gradienttexture
+changed
+diff
+preview
+main
+texturerect-gradienttexture
+changed
+diff
+preview
+main
+github-actions
+Bot
+added
+documentation
+Improvements or additions to documentation
+goldens
+Changes a golden baseline image in scripts/visual/baselines
+parser
+Changes the .tscn parser or a resource decoder
+renderer
+Changes the react-three-fiber rendering in core
+linter
+Changes lint rules or the CLI linter
+core
+Changes the rest of the core package or the dev kit
+scenes
+Changes a scene fixture or a vendored demo
+ci
+Changes workflows, git hooks, agent config or repo scripts
+labels
+Oct 14, 2026
+Vortiago
+self-assigned this
+Oct 14, 2026
+github-actions
+Bot
+reviewed
+Oct 14, 2026
+View reviewed changes
+github-actions
+Bot
+left a comment
+Copy link
+Copy Markdown
+There was a problem hiding this comment.
+Choose a reason for hiding this comment
+The reason will be displayed to describe this comment to others. Learn more.
+Claude review
+Claude review: 0 Important, 0 Nit, 0 Pre-existing. I read the core of the change: the froxel range in godot/fogVolume.ts, the row packing, the fog shader terms, the density atlas, the FogMaterial and NoiseTexture3D decode and validators, and the FogVolume parser and Component. I found no defect that clears the REVIEW.md bar. I did not read every line of the diff. I skipped the test files and the colour-ramp change in the NoiseTexture2D files. I ran no commands or tests. Any parity with Godot rests on the PR's own measurements.
+cloudflare-workers-and-pages
+Bot
+commented
+Oct 14, 2026
+•
+edited
+Loading
+Uh oh!
+There was an error while loading. Please reload this page.
+Copy link
+Copy Markdown
+Deploying textscene-inspector with Cloudflare Pages
+Latest commit:
+738fdea
+Status: ✅ Deploy successful!
+Preview URL:
+https://21b2fdc4.textscene-inspector.pages.dev
+Branch Preview URL:
+https://claude-fog-665-e8p6j2.textscene-inspector.pages.dev
+View logs
+claude
+added 2 commits
+October 14, 2026 09:04
+refactor(renderer): share the noise image code and the fog row buffer
+…
+df03dc5
+```
+Move the Noise image layer (sampler, image, seam blend, colour ramp) to
+resources/noise/image, which NoiseTexture2D and NoiseTexture3D both read.
+Resolve both textures' noise and ramp through one helper.
+
+Give each fog view its own density atlas, compared as a set, so two views
+never restack each other's. Share the row buffer of the light and volume
+rows, and grow the row texture instead of reallocating it per count.
+
+Mount FogVolumeObject through extend(), name the FogVolume shapes once
+for the linter, clamp the size in one helper, and list the abstract
+resource tiers apart from the unvalidated slices.
+```
+feat(renderer): load imported 3D density textures
+…
+38ab2b7
+```
+A FogVolume's FogMaterial can name an image that Godot's layered importer
+imports as a CompressedTexture3D. The new image3d slice reads the image's
+Import sidecar, cuts the decoded pixels into its slices
+(resource_importer_layered_texture.cpp:370-386) and builds a Data3DTexture
+on the texture3d bus. useTexture3D resolves an inline NoiseTexture3D or
+this imported image for the fog density.
+```
+github-actions
+Bot
+added
+the
+web
+Changes the web previewer
+label
+Oct 14, 2026
+claude
+added 4 commits
+October 14, 2026 10:29
+Merge remote-tracking branch 'origin/main' into claude/fog-665-e8p6j2
+…
+6dadd9f
+```
+# Conflicts:
+#	GLOSSARY.md
+#	packages/textscene-core/src/r3f/fog/fogLights.ts
+#	packages/textscene-core/src/r3f/fog/volumetricFogPass.test.ts
+#	packages/textscene-core/src/r3f/fog/volumetricFogShaders.test.ts
+#	packages/textscene-core/src/r3f/testing/glslScalar.ts
+```
+fix(renderer): sample a Gradient in float, as Godot does
+…
+71d05db
+```
+Gradient::get_color_at_offset runs in float, and a Color and a Point store
+float32 (gradient.h:55, :151-235, color.h:42-45). The sampler ran in double,
+so 138 of 2244 bytes of the NoiseTexture2D colour ramp sat 1/255 off Godot.
+The decoder now stores float32 offsets and colours, and the sampler rounds
+each step as the float lerp and cubic_interpolate overloads do
+(math_funcs.h:339-356). channelToByte multiplies in float, as get_r8 does
+(color.h:228), so a float32 0.9 rounds to 230. The ramp now matches Godot
+byte for byte.
+```
+test(goldens): rebaseline the goldens the float Gradient moves
+…
+f3128c0
+```
+Each moves at most 2/255 and each is closer to Godot 4.6.3 (pnpm ref:diff,
+before → after):
+- noisetexture2d: 630841 → 629678 differing pixels, mean 0.735/255 both.
+- sprite3d-gradienttexture: mean 1.887 → 1.882/255.
+- texturerect-gradienttexture: 682816 → 682496 differing pixels, mean
+  0.903/255 both.
+```
+feat(renderer): draw a texture saved as its own .tres
+…
+3ac6e5a
+```
+A Texture2D or Texture3D slot can name a .tres that holds a NoiseTexture2D,
+GradientTexture2D, NoiseTexture3D, ImageTexture or ImageTexture3D. The file
+loads on the resource bus, and textResourceTexture names its [resource] as a
+sub-resource of the file's own tables, so the inline resolvers read it.
+
+An ImageTexture or ImageTexture3D saves its pixels as Image sub-resources
+(image.cpp:3335-3358, image_texture.cpp:467-505). decodeImage reads the
+8-bit formats to RGBA8, and the new imagetexture3d slice stacks the slices.
+A Control also gets the declared size of a NoiseTexture2D, inline or saved.
+
+resolveExtAtlasTexturePath is now resolveExtTextResourcePath, since it
+returns any text resource, and extResourceAtlasTextureSize is now
+extResourceTexture2DSize.
+```
+Vortiago
+mentioned this pull request
+Oct 14, 2026
+Decode the block-compressed Image formats an ImageTexture or ImageTexture3D saves
+#736
+Open
+claude
+added 7 commits
+October 14, 2026 11:59
+feat(renderer): decode the float, half, 16-bit and packed Image formats
+…
+d3bfa21
+```
+An ImageTexture or ImageTexture3D now draws in every uncompressed format
+Image::format_names lists: the float, half and 16-bit unorm formats,
+RGBA4444, RGB565 and RGBE9995, unpacked as Image::_get_color_at_ofs does
+(image.cpp:3382-3406, :3451-3525). A float texel can pass 1. It uploads raw
+as a half float, which WebGL2 always filters, as Godot gives a float format
+no sRGB view (texture_storage.cpp:754, material_storage.cpp:1073). A
+GradientTexture2D with use_hdr now keeps its float colour too, and the fog
+density stack holds floats once a density texture does. The integer formats
+and the block-compressed formats still draw nothing.
+
+Every texture slot now reads a saved .tres through useTextResourceSlot, so a
+.tres AtlasTexture takes the inline route and decodeExtAtlasTextureRef goes.
+A Control gets an ImageTexture's size from its Image. The PackedByteArray
+body parser moves to godot/packedBytes.ts, where the ArrayMesh reader shares
+it, so a listed -1 now stores 255 there as Godot does. The float Math::lerp
+and Math::cubic_interpolate ports move to godot/math.ts.
+
+The import sidecar allowlist names the 3d_texture importer's keys, and two
+sheet sentences are shorter, which the unit tests asked for.
+```
+Merge remote-tracking branch 'origin/main' into claude/fog-665-e8p6j2
+2768ad0
+fix(renderer): read half-float texture pixels as bytes and crop them …
+…
+91c8683
+```
+…as half floats
+
+An atlas crop of a half-float sheet keeps HalfFloatType and the linear colour
+space. readImagePixels converts half floats to bytes for the canvas. The sidecar
+allowlist test reads the 3d_texture keys only under the 3d_texture importer.
+```
+test(goldens): rebaseline isometric-dungeon for the float gradient sa…
+…
+96389ca
+```
+…mpler
+
+The point light's GradientTexture2D now samples in single precision as Godot
+does. Pixel 367,584 moves from 5 to 4 in red, which matches Godot's 4.
+```
+docs(comparison): refresh the dungeon, 2D platformer and Truck Town s…
+…
+a56201e
+```
+…heets
+
+The recaptured previewer images show the goblin's drop shadow, the dungeon's
+light pass, the platformer's full level and the town's ground matching Godot.
+The sheets drop those limitations and name the gaps that remain: tile seams,
+candle sparks, smoothed platformer sprites and the crab pose.
+```
+feat(renderer): apply the FastNoiseLite domain warp to noise textures
+…
+0f830da
+```
+get_noise_2d and get_noise_3d warp the offset position through a second
+generator before sampling (fastnoise_lite.cpp:318-338). A pnpm patch exports
+the port's Vector2 and Vector3, which its DomainWrap requires. A warped sample
+agrees with Godot to 5 digits, and the new noisetexture2d-domain-warp golden
+covers the warp.
+```
+Merge remote-tracking branch 'origin/main' into claude/fog-665-e8p6j2
+…
+738fdea
+```
+# Conflicts:
+#	scripts/import-sidecar-allowlist.test.mjs
+```
+Hide details
+View details
+Vortiago
+merged commit 38d0c03
+into
+main
+Oct 14, 2026
+37 checks passed
+Uh oh!
+There was an error while loading. Please reload this page.
+Vortiago
+deleted the
+claude/fog-665-e8p6j2
+branch
+October 14, 2026 15:13
+Sign up for free
+to join this conversation on GitHub.
+Already have an account?
+Sign in to comment
+Uh oh!
+There was an error while loading. Please reload this page.
+Labels
+ci
+Changes workflows, git hooks, agent config or repo scripts
+core
+Changes the rest of the core package or the dev kit
+documentation
+Improvements or additions to documentation
+goldens
+Changes a golden baseline image in scripts/visual/baselines
+linter
+Changes lint rules or the CLI linter
+parser
+Changes the .tscn parser or a resource decoder
+renderer
+Changes the react-three-fiber rendering in core
+scenes
+Changes a scene fixture or a vendored demo
+web
+Changes the web previewer
+2 participants
+Add this suggestion to a batch that can be applied as a single commit.This suggestion is invalid because no changes were made to the code.Suggestions cannot be applied while the pull request is closed.Suggestions cannot be applied while viewing a subset of changes.Only one suggestion per line can be applied in a batch.Add this suggestion to a batch that can be applied as a single commit.Applying suggestions on deleted lines is not supported.You must change the existing code in this line in order to create a valid suggestion.Outdated suggestions cannot be applied.This suggestion has been applied or marked resolved.Suggestions cannot be applied from pending reviews.Suggestions cannot be applied on multi-line comments.Suggestions cannot be applied while the pull request is queued to merge.Suggestion cannot be applied right now. Please check back later.
+You can’t perform that action at this time.

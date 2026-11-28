@@ -1,0 +1,317 @@
+MobilityDB is a geospatial trajectory data management & analysis platform, built on PostgreSQL and PostGIS. - Index boxes of every structure in the GiST and SP-GiST operator classes by estebanzimanyi · Pull Request #3419 · MobilityDB/MobilityDB
+
+Index boxes of every structure in the GiST and SP-GiST operator classes by estebanzimanyi · Pull Request #3419 · MobilityDB/MobilityDB · GitHub
+Skip to content
+You signed in with another tab or window. Reload to refresh your session.
+You signed out in another tab or window. Reload to refresh your session.
+You switched accounts on another tab or window. Reload to refresh your session.
+Dismiss alert
+Conversation
+estebanzimanyi
+commented
+Nov 4, 2026
+Copy link
+Copy Markdown
+Member
+Index boxes of every structure in the in-memory trees
+An R-tree, a quad-tree or a k-d tree partitions its boxes on the axes they
+carry and compares them on those axes, so a tree holds boxes of one
+structure: the same axes and, where they carry a value or a spatial axis, the
+same span type, SRID and geodetic flag, bbox_same_structure states it. A point
+cloud box has the structure of the spatiotemporal box it begins with, its SRID
+the one of its schema. An index keeps the boxes of each structure in a tree of
+their own, chained from the one its constructor returns, and every entry point
+walks them: an insertion goes to the tree of the structure of its box, a load
+builds one tree per structure, a join pairs the trees of the two indexes, a
+nearest-neighbour cursor orders the entries of every tree in one heap, and the
+counts, the size, the height and the release cover every tree. A
+space-partitioning tree keeps a box of its structure as received, since a
+point cloud tree holds its boxes projected.
+A search answers as its operation applied to every stored box does, as a scan
+of the boxes would. Whether the operation raises an error on a pair of boxes
+depends on their structures alone, and index_op_is_valid tests it without
+raising: it is the conjunction of the non-raising halves of the validators the
+operation calls, tbox_tbox_is_valid, stbox_stbox_is_valid,
+tpcbox_tpcbox_is_valid, span_type_is_same, srid_is_same, geodetic_is_same and
+dimension_is_common, each ensure_* reporting its error when its half fails.
+Where the test fails for a tree, the search applies the operation to a box
+stored in it through index_op_apply, which raises the error a scan raises, and
+answers -1; elsewhere the tree is searched on the query projected onto the
+axes the tree carries by index_query_project, the node predicates reading
+those axes. index_strategy_is_valid reads the operation of a strategy of a
+PostgreSQL index for its operator classes. An operation the box type does not
+order is refused by ensure_index_op: a span orders its single axis to the left
+and to the right, whether it holds values or times, a temporal box orders its
+value to the left and to the right and its time before and after, and a
+spatiotemporal or point cloud box orders also its other spatial axes. A
+temporal insertion answers the insertion it makes.
+A nearest-neighbour cursor answers the distances a scan computes, in their
+order. Whether the distance raises on a pair of boxes is tested by
+index_distance_is_valid from the same halves, with has_X and
+same_spatial_dimensionality: a span of another type, a temporal box without
+a value span or of another value type, a spatiotemporal box without space or
+of another dimensionality. Where it fails for a tree, the opening applies the
+distance to a box stored in it through index_distance_apply, which raises the
+error of a scan, and answers NULL.
+Witness: over 240 boxes cycling through every set of axes of the temporal box
+(3), the spatiotemporal box (5) and the point cloud box (3), every search
+operation asked with four queries of every set of axes, the index answered
+otherwise than the scan on 2332 of the 2340 cells of the nine trees, seven of
+which aborted on an assertion, and the nearest-neighbour cursors on 44 of 132
+arms, the 12 of the temporal box R-tree aborting on an assertion; every cell
+and every arm now answers as the scan.
+Measured: meos/test/index_structure_test.c asserts the 2340 cells, and checks
+index_op_is_valid against the operation itself on every ordered pair of boxes
+of different structures, value span types, SRIDs, geodetic flags and schemas
+included: 325 temporal box pairs, 1701 spatiotemporal box pairs and 425 point
+cloud box pairs answer as the operation. Its nearest-neighbour arms open a
+cursor of each tree with queries of every set of axes, 12 per tree for the
+temporal box and 20 for the spatiotemporal box, and compare the distances
+with those of every stored box sorted, or the error with the error; they also
+check index_distance_is_valid against the distance on 25 and 81 pairs. The
+programs of the in-memory trees pass unchanged and the library builds with no
+warning. No timing was taken:
+the test is read once per tree and search, and the projection once per search.
+Why: a tree compares its boxes on the axes they carry, so a box of another
+structure inserted in it was compared on axes it lacks, which aborted on an
+assertion or answered otherwise than the scan. Testing whether the operation
+raises from the halves of its own validators states each condition once, so
+the index cannot drift from the operator it answers for.
+Index boxes of every structure in the GiST and SP-GiST operator classes
+A column of temporal, spatiotemporal or point cloud boxes holds boxes of
+several structures, as bbox_same_structure states them, and the operator
+classes keep the boxes of each structure apart as the in-memory trees do. A
+GiST key over boxes of several structures carries MEOS_FLAG_PARTS: the union
+sets it, the penalty prefers a key of the structure of the box, the split
+separates the structures first, the consistent methods descend such a key for
+every query and the distance methods visit it first. An SP-GiST inner tuple
+whose prefix carries the flag sends the boxes of its structure to its first
+node and the others to its second without adding a level, and a box reaching
+an inner tuple of another structure splits it. A point cloud box is indexed as
+the spatiotemporal box it begins with.
+No consistent method raises an error. Where index_strategy_is_valid states
+that the operator raises on the boxes under a key or a centroid, the entry is
+a candidate with the recheck set and the operator applied to the row raises
+the error a sequential scan raises; elsewhere an SP-GiST query is compared on
+the axes its tree carries, projected by index_query_project. Where
+index_distance_is_valid states that the distance raises on a key, a centroid
+or a node, the distance method answers minus infinity, so the entries under it
+are visited first, and a leaf the executor rechecks answers the same, the
+distance applied to its row raising the error of the scan. The exact leaf of a
+GiST index over a column of boxes is the value, which an index-only scan
+returns without a recheck and PostgreSQL refuses to recheck there, so its
+distance method applies the distance to it through index_distance_apply,
+which raises the error of the scan: the one place an index raises, on a stored
+value and never on a key. The design note
+doc/contributing/index_design_notes.md states the contract and the one
+mechanism the MEOS trees and the operator classes share.
+Witness: in the probes of the index lane, a column cycling through boxes of
+every set of axes, through value spans of integers and floats with and
+without time, or through planar boxes of SRIDs 3857 and 5676, a geodetic box
+and a box with time only, crashed the server at CREATE INDEX for the
+temporal box GiST, quad-tree and k-d tree and the spatiotemporal k-d tree, and
+the spatiotemporal quad-tree answered && with a query with X and T on 44 rows
+where the scan answers 564. Ordered by |=| with the search fixed, the
+temporal box quad-tree and k-d tree crashed the server, and the
+spatiotemporal quad-tree and k-d tree answered 25 distances 0 on 3 queries
+where the scan raises. Every index now answers as the scan.
+Measured: index_structures() of 044_temporal_indexes_tbl,
+074_tpoint_indexes_tbl and 439_tpc_gist_tbl asks every operator, |=|
+included, with a query of every structure, 14 x 5, 22 x 7 and 22 x 4 answers
+per operator class, and each of the nine operator classes reads the index and
+differs from the scan on none. Where the boxes of several structures raise
+different errors the error is the one of the first box a plan meets, which no
+plan orders, so two errors agree. The probes of the index lane answer as the
+scan for every column of temporal and spatiotemporal boxes, searched and
+ordered by |=|. Over two point cloud schemas sharing an SRID the scan raises
+the schema error, the quad-tree and k-d tree answer 0 on 6 cells of @> and ~=,
+and ordered by |=| the index raises another error than the scan on 11
+queries: an index of point cloud boxes is the index of their spatiotemporal
+boxes. The extension builds with no warning.
+Why: an index answering otherwise than its operator answers a query
+differently because the index exists. Raising in the recheck makes the error
+the operator's own on a row the query reads, as the consistent functions of
+PostgreSQL and PostGIS never raise; only an index-only scan, which has no
+recheck of a distance, meets the error on the stored value itself.
+estebanzimanyi
+added 2 commits
+November 4, 2026 02:11
+Index boxes of every structure in the in-memory trees
+…
+c73e6f7
+```
+An R-tree, a quad-tree or a k-d tree partitions its boxes on the axes they
+carry and compares them on those axes, so a tree holds boxes of one
+structure: the same axes and, where they carry a value or a spatial axis, the
+same span type, SRID and geodetic flag, bbox_same_structure states it. A point
+cloud box has the structure of the spatiotemporal box it begins with, its SRID
+the one of its schema. An index keeps the boxes of each structure in a tree of
+their own, chained from the one its constructor returns, and every entry point
+walks them: an insertion goes to the tree of the structure of its box, a load
+builds one tree per structure, a join pairs the trees of the two indexes, a
+nearest-neighbour cursor orders the entries of every tree in one heap, and the
+counts, the size, the height and the release cover every tree. A
+space-partitioning tree keeps a box of its structure as received, since a
+point cloud tree holds its boxes projected.
+
+A search answers as its operation applied to every stored box does, as a scan
+of the boxes would. Whether the operation raises an error on a pair of boxes
+depends on their structures alone, and index_op_is_valid tests it without
+raising: it is the conjunction of the non-raising halves of the validators the
+operation calls, tbox_tbox_is_valid, stbox_stbox_is_valid,
+tpcbox_tpcbox_is_valid, span_type_is_same, srid_is_same, geodetic_is_same and
+dimension_is_common, each ensure_* reporting its error when its half fails.
+Where the test fails for a tree, the search applies the operation to a box
+stored in it through index_op_apply, which raises the error a scan raises, and
+answers -1; elsewhere the tree is searched on the query projected onto the
+axes the tree carries by index_query_project, the node predicates reading
+those axes. index_strategy_is_valid reads the operation of a strategy of a
+PostgreSQL index for its operator classes. An operation the box type does not
+order is refused by ensure_index_op: a span orders its single axis to the left
+and to the right, whether it holds values or times, a temporal box orders its
+value to the left and to the right and its time before and after, and a
+spatiotemporal or point cloud box orders also its other spatial axes. A
+temporal insertion answers the insertion it makes.
+
+A nearest-neighbour cursor answers the distances a scan computes, in their
+order. Whether the distance raises on a pair of boxes is tested by
+index_distance_is_valid from the same halves, with has_X and
+same_spatial_dimensionality: a span of another type, a temporal box without
+a value span or of another value type, a spatiotemporal box without space or
+of another dimensionality. Where it fails for a tree, the opening applies the
+distance to a box stored in it through index_distance_apply, which raises the
+error of a scan, and answers NULL.
+
+Witness: over 240 boxes cycling through every set of axes of the temporal box
+(3), the spatiotemporal box (5) and the point cloud box (3), every search
+operation asked with four queries of every set of axes, the index answered
+otherwise than the scan on 2332 of the 2340 cells of the nine trees, seven of
+which aborted on an assertion, and the nearest-neighbour cursors on 44 of 132
+arms, the 12 of the temporal box R-tree aborting on an assertion; every cell
+and every arm now answers as the scan.
+
+Measured: meos/test/index_structure_test.c asserts the 2340 cells, and checks
+index_op_is_valid against the operation itself on every ordered pair of boxes
+of different structures, value span types, SRIDs, geodetic flags and schemas
+included: 325 temporal box pairs, 1701 spatiotemporal box pairs and 425 point
+cloud box pairs answer as the operation. Its nearest-neighbour arms open a
+cursor of each tree with queries of every set of axes, 12 per tree for the
+temporal box and 20 for the spatiotemporal box, and compare the distances
+with those of every stored box sorted, or the error with the error; they also
+check index_distance_is_valid against the distance on 25 and 81 pairs. The
+programs of the in-memory trees pass unchanged and the library builds with no
+warning. No timing was taken:
+the test is read once per tree and search, and the projection once per search.
+
+Why: a tree compares its boxes on the axes they carry, so a box of another
+structure inserted in it was compared on axes it lacks, which aborted on an
+assertion or answered otherwise than the scan. Testing whether the operation
+raises from the halves of its own validators states each condition once, so
+the index cannot drift from the operator it answers for.
+```
+Index boxes of every structure in the GiST and SP-GiST operator classes
+…
+de96740
+```
+A column of temporal, spatiotemporal or point cloud boxes holds boxes of
+several structures, as bbox_same_structure states them, and the operator
+classes keep the boxes of each structure apart as the in-memory trees do. A
+GiST key over boxes of several structures carries MEOS_FLAG_PARTS: the union
+sets it, the penalty prefers a key of the structure of the box, the split
+separates the structures first, the consistent methods descend such a key for
+every query and the distance methods visit it first. An SP-GiST inner tuple
+whose prefix carries the flag sends the boxes of its structure to its first
+node and the others to its second without adding a level, and a box reaching
+an inner tuple of another structure splits it. A point cloud box is indexed as
+the spatiotemporal box it begins with.
+
+No consistent method raises an error. Where index_strategy_is_valid states
+that the operator raises on the boxes under a key or a centroid, the entry is
+a candidate with the recheck set and the operator applied to the row raises
+the error a sequential scan raises; elsewhere an SP-GiST query is compared on
+the axes its tree carries, projected by index_query_project. Where
+index_distance_is_valid states that the distance raises on a key, a centroid
+or a node, the distance method answers minus infinity, so the entries under it
+are visited first, and a leaf the executor rechecks answers the same, the
+distance applied to its row raising the error of the scan. The exact leaf of a
+GiST index over a column of boxes is the value, which an index-only scan
+returns without a recheck and PostgreSQL refuses to recheck there, so its
+distance method applies the distance to it through index_distance_apply,
+which raises the error of the scan: the one place an index raises, on a stored
+value and never on a key. The design note
+doc/contributing/index_design_notes.md states the contract and the one
+mechanism the MEOS trees and the operator classes share.
+
+Witness: in the probes of the index lane, a column cycling through boxes of
+every set of axes, through value spans of integers and floats with and
+without time, or through planar boxes of SRIDs 3857 and 5676, a geodetic box
+and a box with time only, crashed the server at CREATE INDEX for the
+temporal box GiST, quad-tree and k-d tree and the spatiotemporal k-d tree, and
+the spatiotemporal quad-tree answered && with a query with X and T on 44 rows
+where the scan answers 564. Ordered by |=| with the search fixed, the
+temporal box quad-tree and k-d tree crashed the server, and the
+spatiotemporal quad-tree and k-d tree answered 25 distances 0 on 3 queries
+where the scan raises. Every index now answers as the scan.
+
+Measured: index_structures() of 044_temporal_indexes_tbl,
+074_tpoint_indexes_tbl and 439_tpc_gist_tbl asks every operator, |=|
+included, with a query of every structure, 14 x 5, 22 x 7 and 22 x 4 answers
+per operator class, and each of the nine operator classes reads the index and
+differs from the scan on none. Where the boxes of several structures raise
+different errors the error is the one of the first box a plan meets, which no
+plan orders, so two errors agree. The probes of the index lane answer as the
+scan for every column of temporal and spatiotemporal boxes, searched and
+ordered by |=|. Over two point cloud schemas sharing an SRID the scan raises
+the schema error, the quad-tree and k-d tree answer 0 on 6 cells of @> and ~=,
+and ordered by |=| the index raises another error than the scan on 11
+queries: an index of point cloud boxes is the index of their spatiotemporal
+boxes. The extension builds with no warning.
+
+Why: an index answering otherwise than its operator answers a query
+differently because the index exists. Raising in the recheck makes the error
+the operator's own on a row the query reads, as the consistent functions of
+PostgreSQL and PostGIS never raise; only an index-only scan, which has no
+recheck of a distance, meets the error on the stored value itself.
+```
+estebanzimanyi
+added a commit
+to estebanzimanyi/MobilityDB
+that referenced
+this pull request
+Nov 4, 2026
+Name MobilityDB#3419 in row G102
+b984462
+Hide details
+View details
+estebanzimanyi
+merged commit 7ca94ff
+into
+MobilityDB:master
+Nov 4, 2026
+49 checks passed
+Uh oh!
+There was an error while loading. Please reload this page.
+estebanzimanyi
+deleted the
+meos/index-boxes-of-every-structure
+branch
+November 4, 2026 08:56
+estebanzimanyi
+added a commit
+to estebanzimanyi/MobilityDB
+that referenced
+this pull request
+Nov 4, 2026
+State the merge of MobilityDB#3419 and MobilityDB#3421 on master
+093088d
+Sign up for free
+to join this conversation on GitHub.
+Already have an account?
+Sign in to comment
+Uh oh!
+There was an error while loading. Please reload this page.
+Labels
+None yet
+1 participant
+Add this suggestion to a batch that can be applied as a single commit.This suggestion is invalid because no changes were made to the code.Suggestions cannot be applied while the pull request is closed.Suggestions cannot be applied while viewing a subset of changes.Only one suggestion per line can be applied in a batch.Add this suggestion to a batch that can be applied as a single commit.Applying suggestions on deleted lines is not supported.You must change the existing code in this line in order to create a valid suggestion.Outdated suggestions cannot be applied.This suggestion has been applied or marked resolved.Suggestions cannot be applied from pending reviews.Suggestions cannot be applied on multi-line comments.Suggestions cannot be applied while the pull request is queued to merge.Suggestion cannot be applied right now. Please check back later.
+You can’t perform that action at this time.

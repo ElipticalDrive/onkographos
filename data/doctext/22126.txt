@@ -1,0 +1,3075 @@
+# DeepScan3D-Single-X-ray-to-3D-CT-Reconstruction-using-Neural-Radiance-Fields-
+A NeRF-based framework in PyTorch to reconstruct high-fidelity 3D CT-like volumes  from a single 2D X-ray image. Integrated components include learned latent code representation, differentiable volume rendering using  the Lambert-Beer law, and a GAN training loop with SSIM and reconstruction losses.
+
+### gan_training.py
+```
+import torch
+import numpy as np
+import os
+from tqdm import tqdm
+
+from submodules.GAN_stability.gan_training.train import toggle_grad, Trainer as TrainerBase
+from submodules.GAN_stability.gan_training.eval import Evaluator as EvaluatorBase
+from submodules.GAN_stability.gan_training.metrics import FIDEvaluator, KIDEvaluator
+
+from .utils import save_video, color_depth_map
+
+
+class Trainer(TrainerBase):
+    def __init__(self, *args, use_amp=False, **kwargs):
+        super(Trainer, self).__init__(*args, **kwargs)
+        self.use_amp = use_amp
+        if self.use_amp:
+            self.scaler = torch.cuda.amp.GradScaler()
+
+    def generator_trainstep(self, y, z):
+        if not self.use_amp:
+            return super(Trainer, self).generator_trainstep(y, z)
+        assert (y.size(0) == z.size(0))
+        toggle_grad(self.generator, True)
+        toggle_grad(self.discriminator, False)
+        self.generator.train()
+        self.discriminator.train()
+        self.g_optimizer.zero_grad()
+
+        with torch.cuda.amp.autocast():
+            x_fake = self.generator(z, y)
+            d_fake = self.discriminator(x_fake, y)
+            gloss = self.compute_loss(d_fake, 1)
+        self.scaler.scale(gloss).backward()
+
+        self.scaler.step(self.g_optimizer)
+        self.scaler.update()
+
+        return gloss.item()
+
+    def discriminator_trainstep(self, x_real, y, z, data_aug):
+        return super(Trainer, self).discriminator_trainstep(x_real, y, z, data_aug)       # spectral norm raises error for when using amp
+
+
+class Evaluator(EvaluatorBase):
+    def __init__(self, eval_fid_kid, *args, **kwargs):
+        super(Evaluator, self).__init__(*args, **kwargs)
+        if eval_fid_kid:
+            self.inception_eval = FIDEvaluator(
+              device=self.device,
+              batch_size=self.batch_size,
+              resize=True,
+              n_samples=20000,
+              n_samples_fake=1000,
+            )
+
+    def get_rays(self, pose):
+        return self.generator.val_ray_sampler(self.generator.H, self.generator.W,
+                                              self.generator.focal, pose)[0]
+
+    def create_samples(self, z, poses=None):
+        self.generator.eval()
+        N_samples = len(z)
+        device = self.generator.device
+        if self.batch_size > 1:
+            z = z.to(device).split(self.batch_size)
+        if poses is None:
+            rays = [None] * len(z)
+        else:
+            rays = torch.stack([self.get_rays(poses[i].to(device)) for i in range(N_samples)])
+            rays = rays.split(self.batch_size)
+
+        rgb, disp, acc = [], [], []
+        with torch.no_grad():
+            if self.batch_size > 1:
+                for z_i, rays_i in tqdm(zip(z, rays), total=len(z), desc='Create samples...'):
+                    bs = len(z_i)
+                    if rays_i is not None:
+                        rays_i = rays_i.permute(1, 0, 2, 3).flatten(1, 2)       # Bx2x(HxW)xC -> 2x(BxHxW)x3
+                    rgb_i, disp_i, acc_i, _ = self.generator(z_i, rays=rays_i)
+
+                    reshape = lambda x: x.view(bs, self.generator.H, self.generator.W, x.shape[1]).permute(0, 3, 1, 2)  # (NxHxW)xC -> NxCxHxW
+                    rgb.append(reshape(rgb_i).cpu())
+                    disp.append(reshape(disp_i).cpu())
+                    acc.append(reshape(acc_i).cpu())
+            else:
+                for rays_i in rays:
+                    bs = len(z)
+                    if rays_i is not None:
+                        rays_i = rays_i.permute(1, 0, 2, 3).flatten(1, 2)       # Bx2x(HxW)xC -> 2x(BxHxW)x3
+                    rgb_i, disp_i, acc_i, _ = self.generator(z, rays=rays_i)
+
+                    reshape = lambda x: x.view(bs, self.generator.H, self.generator.W, x.shape[1]).permute(0, 3, 1, 2)  # (NxHxW)xC -> NxCxHxW
+                    rgb.append(reshape(rgb_i).cpu())
+                    disp.append(reshape(disp_i).cpu())
+                    acc.append(reshape(acc_i).cpu())
+
+        rgb = torch.cat(rgb)
+        disp = torch.cat(disp)
+        acc = torch.cat(acc)
+
+        depth = self.disp_to_cdepth(disp)
+
+        return rgb, depth, acc
+
+    def make_video(self, basename, z, poses, as_gif=True):
+        """ Generate images and save them as video.
+        z (N_samples, zdim): latent codes
+        poses (N_frames, 3 x 4): camera poses for all frames of video
+        """
+        N_samples, N_frames = len(z), len(poses)
+
+        # reshape inputs
+        z = z.unsqueeze(1).expand(-1, N_frames, -1).flatten(0, 1)  # (N_samples x N_frames) x z_dim
+        poses = poses.unsqueeze(0) \
+            .expand(N_samples, -1, -1, -1).flatten(0, 1)  # (N_samples x N_frames) x 3 x 4
+
+        rgbs, depths, accs = self.create_samples(z, poses=poses)
+
+        reshape = lambda x: x.view(N_samples, N_frames, *x.shape[1:])
+        rgbs = reshape(rgbs)
+        depths = reshape(depths)
+        print('Done, saving', rgbs.shape)
+
+        fps = min(int(N_frames / 2.), 25)          # aim for at least 2 second video
+        for i in range(N_samples):
+            save_video(rgbs[i], basename + '{:04d}_rgb.mp4'.format(i), as_gif=as_gif, fps=fps)
+            save_video(depths[i], basename + '{:04d}_depth.mp4'.format(i), as_gif=as_gif, fps=fps)
+
+    def disp_to_cdepth(self, disps):
+        """Convert depth to color values"""
+        if (disps == 2e10).all():           # no values predicted
+            return torch.ones_like(disps)
+
+        near, far = self.generator.render_kwargs_test['near'], self.generator.render_kwargs_test['far']
+
+        disps = disps / 2 + 0.5  # [-1, 1] -> [0, 1]
+
+        depth = 1. / torch.max(1e-10 * torch.ones_like(disps), disps)  # disparity -> depth
+        depth[disps == 1e10] = far  # set undefined values to far plane
+
+        # scale between near, far plane for better visualization
+        depth = (depth - near) / (far - near)
+
+        depth = np.stack([color_depth_map(d) for d in depth[:, 0].detach().cpu().numpy()])  # convert to color
+        depth = (torch.from_numpy(depth).permute(0, 3, 1, 2) / 255.) * 2 - 1  # [0, 255] -> [-1, 1]
+
+        return depth
+
+    def compute_fid_kid(self, sample_generator=None):
+        if sample_generator is None:
+            def sample():
+                while True:
+                    z = self.zdist.sample((self.batch_size,))
+                    rgb, _, _ = self.create_samples(z)
+                    # convert to uint8 and back to get correct binning
+                    rgb = (rgb / 2 + 0.5).mul_(255).clamp_(0, 255).to(torch.uint8).to(torch.float) / 255. * 2 - 1
+                    yield rgb.cpu()
+            
+            sample_generator = sample()
+
+        fid, (kids, vars) = self.inception_eval.get_fid_kid(sample_generator)
+        kid = np.mean(kids)
+        return fid, kid
+```
+
+### graf-main/eval.py
+```
+import argparse
+import os
+from os import path
+import numpy as np
+import time
+import copy
+import csv
+import torch
+import math
+torch.set_default_tensor_type('torch.cuda.FloatTensor')
+from torchvision.utils import save_image
+from torchvision import transforms
+from PIL import Image
+
+
+from mpl_toolkits.mplot3d import Axes3D  # noqa: F401 unused import
+import matplotlib
+matplotlib.use('Agg')
+
+# import ssl          # enable if downloading models gives CERTIFICATE_VERIFY_FAILED error
+# ssl._create_default_https_context = ssl._create_unverified_context
+
+import sys
+sys.path.append('submodules')        # needed to make imports work in GAN_stability
+
+from graf.gan_training import Evaluator as Evaluator
+from graf.config import get_data, build_models, update_config, get_render_poses
+from graf.utils import count_trainable_parameters, to_phi, to_theta, get_nsamples, InfiniteSamplerWrapper
+from graf.transforms import ImgToPatch
+
+from submodules.GAN_stability.gan_training.checkpoints import CheckpointIO
+from submodules.GAN_stability.gan_training.distributions import get_ydist, get_zdist
+from submodules.GAN_stability.gan_training.config import (
+    load_config,
+)
+
+from external.colmap.filter_points import filter_ply
+
+
+def get_noisy_img(image_size=0):
+    ops = []
+    if image_size > 0:
+        ops.append(transforms.Resize(image_size))
+        ops.extend(
+            [transforms.ToTensor(),
+             transforms.Normalize((0.5), (0.5)),
+             transforms.Lambda(lambda x : x + torch.randn_like(x))])
+    return transforms.Compose(ops)
+
+
+if __name__ == '__main__':
+    # Arguments
+    parser = argparse.ArgumentParser(
+        description='Train a GAN with different regularization strategies.'
+    )
+    parser.add_argument('config', type=str, help='Path to config file.')
+    parser.add_argument('--fid_kid', action='store_true', help='Evaluate FID and KID.')
+    parser.add_argument('--rotation_elevation', action='store_true', help='Generate videos with changing camera pose.')
+    parser.add_argument('--shape_appearance', action='store_true', help='Create grid image showing shape/appearance variation.')
+    parser.add_argument('--pretrained', action='store_true', help='Load pretrained model.')
+    parser.add_argument('--reconstruction', action='store_true', help='Generate images and run COLMAP for 3D reconstruction.')
+    parser.add_argument('--real_xray', type=str, default='None', help='Path to conditional xray image')
+
+    args, unknown = parser.parse_known_args()
+    config = load_config(args.config, 'configs/default.yaml')
+    config['data']['fov'] = float(config['data']['fov'])
+    config = update_config(config, unknown)
+
+    # Short hands
+    batch_size = config['training']['batch_size']
+    out_dir = os.path.join(config['training']['outdir'], config['expname'])
+    if args.pretrained:
+        config['expname'] = '%s_%s' % (config['data']['type'], config['data']['imsize'])
+        out_dir = os.path.join(config['training']['outdir'], config['expname'] + '_from_pretrained')
+    checkpoint_dir = path.join(out_dir, 'chkpts')
+    eval_dir = os.path.join(out_dir, 'eval-xray')
+    os.makedirs(eval_dir, exist_ok=True)
+    fid_kid = int(args.fid_kid)
+
+    config['training']['nworkers'] = 0
+
+    # Logger
+    checkpoint_io = CheckpointIO(
+        checkpoint_dir=checkpoint_dir
+    )
+
+    device = torch.device("cuda:0")
+
+    # Dataset
+    train_dataset, hwfr, render_poses = get_data(config)
+    # in case of orthographic projection replace focal length by far-near
+    if config['data']['orthographic']:
+        hw_ortho = (config['data']['far']-config['data']['near'], config['data']['far']-config['data']['near'])
+        hwfr[2] = hw_ortho
+
+    config['data']['hwfr'] = hwfr         # add for building generator
+    print(train_dataset, hwfr, render_poses.shape)
+    
+    val_dataset = train_dataset                 # evaluate on training dataset for GANs
+    if args.fid_kid:
+        val_loader = iter(torch.utils.data.DataLoader(
+                val_dataset,
+                batch_size=batch_size,
+                num_workers=config['training']['nworkers'],
+                shuffle=False, pin_memory=False, sampler=InfiniteSamplerWrapper(val_dataset), drop_last=False 
+        ))
+
+    # Create models
+    generator, _ = build_models(config, disc=False)
+    print('Generator params: %d' % count_trainable_parameters(generator))
+
+    # Put models on gpu if needed
+    generator = generator.to(device)
+
+    # input transform
+    img_to_patch = ImgToPatch(generator.ray_sampler, hwfr[:3])
+
+    # Register modules to checkpoint
+    checkpoint_io.register_modules(
+        **generator.module_dict  # treat NeRF specially
+    )
+
+    # Get model file
+    if args.pretrained:
+        config_pretrained = load_config('configs/pretrained_models.yaml', 'configs/pretrained_models.yaml')
+        model_file = config_pretrained[config['data']['type']][config['data']['imsize']]
+    else:
+        model_file = 'model_best.pt'
+
+    # Distributions
+    ydist = get_ydist(1, device=device)         # Dummy to keep GAN training structure in tact
+    y = torch.zeros(batch_size)                 # Dummy to keep GAN training structure in tact
+    zdist = get_zdist(config['z_dist']['type'], config['z_dist']['dim'],
+                      device=device)
+    
+    # Test generator, use model average
+    generator_test = copy.deepcopy(generator)
+    generator_test.parameters = lambda: generator_test._parameters
+    generator_test.named_parameters = lambda: generator_test._named_parameters
+    checkpoint_io.register_modules(**{k + '_test': v for k, v in generator_test.module_dict.items()})
+
+    # Evaluator
+    evaluator = Evaluator(fid_kid, generator_test, zdist, ydist,
+                          batch_size=batch_size, device=device)
+
+    # Train
+    tstart = t0 = time.time()
+    
+    # Load checkpoint
+    print('load %s' % os.path.join(checkpoint_dir, model_file))
+    load_dict = checkpoint_io.load(model_file)
+    it = load_dict.get('it', -1)
+    epoch_idx = load_dict.get('epoch_idx', -1)
+
+    # Evaluation loop
+    if args.fid_kid:
+        # Specifically generate samples that can be saved
+        n_samples = 1000
+        ztest = zdist.sample((n_samples,))
+
+        samples, _, _ = evaluator.create_samples(ztest.to(device))
+        samples = (samples / 2 + 0.5).mul_(255).clamp_(0, 255).to(torch.uint8)      # convert to unit8
+
+        filename = 'samples_fid_kid_{:06d}.npy'.format(n_samples)
+        outpath = os.path.join(eval_dir, filename)
+        np.save(outpath, samples.numpy())
+        print('Saved {} samples to {}.'.format(n_samples, outpath))
+
+        samples = samples.to(torch.float) / 255
+
+        n_vis = 8
+        filename = 'fake_samples.png'
+        outpath = os.path.join(eval_dir, filename)
+        save_image(samples[:n_vis**2].clone(), outpath, nrow=n_vis)
+        print('Plot examples under {}.'.format(outpath))
+
+        filename = 'real_samples.png'
+        outpath = os.path.join(eval_dir, filename)
+        real = get_nsamples(val_loader, n_vis**2) / 2 + 0.5
+        save_image(real[:n_vis ** 2].clone(), outpath, nrow=n_vis)
+        print('Plot examples under {}.'.format(outpath))
+
+        # Compute FID and KID
+        fid_cache_file = os.path.join(out_dir, 'fid_cache_train.npz')
+        kid_cache_file = os.path.join(out_dir, 'kid_cache_train.npz')
+        evaluator.inception_eval.initialize_target(val_loader, cache_file=fid_cache_file, act_cache_file=kid_cache_file)
+
+        samples = samples * 2 - 1
+        sample_loader = torch.utils.data.DataLoader(
+            samples,
+            batch_size=evaluator.batch_size, num_workers=config['training']['nworkers'],
+            shuffle=False, pin_memory=False, sampler=None, drop_last=False
+        )
+        fid, kid = evaluator.compute_fid_kid(sample_loader)
+
+        filename = 'fid_kid.csv'
+        outpath = os.path.join(eval_dir, filename)
+        with open(outpath, mode='w') as csv_file:
+            fieldnames = ['fid', 'kid']
+            writer = csv.DictWriter(csv_file, fieldnames=fieldnames)
+
+            writer.writeheader()
+            writer.writerow({'fid': fid, 'kid': kid})
+
+        print('Saved FID ({:.1f}) and KIDx100 ({:.2f}) to {}.'.format(fid, kid*100, outpath))
+
+    if args.rotation_elevation:
+        N_samples = 8
+        N_poses = 20            # corresponds to number of frames
+        render_radius = config['data']['radius']
+        if isinstance(render_radius, str):  # use maximum radius
+            render_radius = float(render_radius.split(',')[1])
+        
+        # compute render poses
+        def get_render_poses_rotation_elevation(N_poses=float('inf')):
+            """Compute equidistant render poses varying azimuth and polar angle, respectively."""
+            range_theta = (to_theta(config['data']['vmin']), to_theta(config['data']['vmax']))
+            range_phi = (to_phi(config['data']['umin']), to_phi(config['data']['umax']))
+
+            theta_mean = 0.5 * sum(range_theta)
+            phi_mean = 0.5 * sum(range_phi)
+
+            N_theta = min(int(range_theta[1] - range_theta[0]), N_poses)  # at least 1 frame per degree
+            N_phi = min(int(range_phi[1] - range_phi[0]), N_poses)  # at least 1 frame per degree
+
+            render_poses_rotation = get_render_poses(render_radius, angle_range=range_phi, theta=theta_mean, N=N_phi)
+            render_poses_elevation = get_render_poses(render_radius, angle_range=range_theta, theta=phi_mean, N=N_theta,
+                                                      swap_angles=True)
+
+            return {'rotation': render_poses_rotation, 'elevation': render_poses_elevation}
+
+        if args.real_xray != 'None':
+            to_latent = get_noisy_img(int(math.sqrt(config['z_dist']['dim'])))
+            xray_img = Image.open(args.real_xray)
+            noisy_img = to_latent(xray_img)
+            z = torch.unsqueeze(torch.flatten(noisy_img), 0)
+        else:
+            z = zdist.sample((N_samples,))
+
+        for name, poses in get_render_poses_rotation_elevation(N_poses).items():
+            outpath = os.path.join(eval_dir, '{}/'.format(name))
+            os.makedirs(outpath, exist_ok=True)
+            evaluator.make_video(outpath, z, poses, as_gif=False)
+            torch.cuda.empty_cache()
+
+    if args.shape_appearance:
+        N_shapes = 5
+        N_appearances = 5
+
+        # constant pose
+        pose = render_poses[len(render_poses) // 2]
+        pose = pose.unsqueeze(0).expand(N_shapes * N_appearances, -1, -1)
+
+        # sample shape latent codes
+        z_shape = zdist.sample((N_shapes, 1))[..., :config['z_dist']['dim'] - config['z_dist']['dim_appearance']]
+        z_shape = z_shape.expand(-1, N_appearances, -1)
+
+        z_appearance = zdist.sample((1, N_appearances,))[..., config['z_dist']['dim_appearance']:]
+        z_appearance = z_appearance.expand(N_shapes, -1, -1)
+
+        z_grid = torch.cat([z_shape, z_appearance], dim=-1).flatten(0, 1)
+
+        rgbs, _, _ = evaluator.create_samples(z_grid, poses=pose)
+        rgbs = rgbs / 2 + 0.5
+
+        outpath = os.path.join(eval_dir, 'shape_appearance.png')
+        save_image(rgbs, outpath, nrow=N_shapes, padding=0)
+
+    if args.reconstruction:
+
+        N_samples = 8
+        N_poses = 400            # corresponds to number of frames
+        ztest = zdist.sample((N_samples,))
+
+        # sample from mean radius
+        radius_orig = generator_test.radius
+        if isinstance(radius_orig, tuple):
+            generator_test.radius = 0.5 * (radius_orig[0]+radius_orig[1])
+
+        # output directories
+        rec_dir = os.path.join(eval_dir, 'reconstruction')
+        image_dir = os.path.join(rec_dir, 'images')
+        colmap_dir = os.path.join(rec_dir, 'models')
+
+        # generate samples and run reconstruction
+        for i, z_i in enumerate(ztest):
+            outpath = os.path.join(image_dir, 'object_{:04d}'.format(i))
+            os.makedirs(outpath, exist_ok=True)
+
+            # create samples
+            z_i = z_i.reshape(1,-1).repeat(N_poses, 1)
+            rgbs, _, _ = evaluator.create_samples(z_i.to(device))
+            rgbs = rgbs / 2 + 0.5
+            for j, rgb in enumerate(rgbs):
+                save_image(rgb.clone(), os.path.join(outpath, '{:04d}.png'.format(j)))
+
+            # run COLMAP for 3D reconstruction
+            colmap_input_dir = os.path.join(image_dir, 'object_{:04d}'.format(i))
+            colmap_output_dir = os.path.join(colmap_dir, 'object_{:04d}'.format(i))
+            colmap_cmd = './external/colmap/run_colmap_automatic.sh {} {}'.format(colmap_input_dir, colmap_output_dir)
+            print(colmap_cmd)
+            os.system(colmap_cmd)
+
+            # filter out white points
+            filter_ply(colmap_output_dir)
+
+        # reset radius for generator
+        generator_test.radius = radius_orig
+```
+
+### graf-main/render_xray_G.py
+```
+from ignite.engine import Engine
+from ignite.metrics import PSNR, SSIM
+from torchvision import transforms
+from tqdm import tqdm
+from torch.autograd import Variable
+from PIL import Image
+
+import sys
+import copy
+import argparse
+import os
+import glob
+from os import path
+import torch
+import torch.optim as optim
+import torch.nn.functional as F
+torch.set_default_tensor_type('torch.cuda.FloatTensor')
+
+sys.path.append('submodules')        # needed to make imports work in GAN_stability
+
+from graf.config import get_data, build_models, update_config, get_render_poses
+from graf.utils import to_phi, to_theta, save_video
+
+from submodules.GAN_stability.gan_training.checkpoints import CheckpointIO
+from submodules.GAN_stability.gan_training.distributions import get_ydist, get_zdist
+from submodules.GAN_stability.gan_training.config import (
+    load_config
+)
+
+from submodules.GAN_stability.gan_training import lpips
+percept = lpips.PerceptualLoss(model='net-lin', net='alex', use_gpu=True)
+
+# to keep ignite pytorch format
+def get_output(metrics_engine, output):
+    return output[0], output[1]
+
+
+def get_rays(pose, generator, img_size):
+    return generator.val_ray_sampler(img_size, img_size,
+                                     generator.focal, pose)[0]
+
+def test(range_phi, render_radius, theta_mean,
+         z, generator_test, N_samples, iteration,
+         img_size):
+    fps = min(int(72 / 2.), 25)          # aim for at least 2 second video
+    with torch.no_grad():
+        phi_rot = min(int(range_phi[1] - range_phi[0]), 72)  # at least 1 frame per degree
+
+        poses_rot = get_render_poses(render_radius, angle_range=range_phi, theta=theta_mean, N=phi_rot)
+        zrot = z[0].clone().unsqueeze(1).expand(-1, 72, -1).flatten(0, 1)
+        zrot = zrot.split(batch_size)
+        samples = len(zrot)
+
+        poses_rot = poses_rot.unsqueeze(0) \
+                             .expand(samples, -1, -1, -1).flatten(0, 1)
+
+        rays = torch.stack([get_rays(poses_rot[i].to(device), generator_test, img_size) for i in range(samples)])
+        rays = rays.split(batch_size)
+
+        rgb, depth = [], []
+
+        for z_i, rays_i in tqdm(zip(zrot, rays), total=len(zrot), desc='Create samples...'):
+            bs = len(z_i)
+            if rays_i is not None:
+                rays_i = rays_i.permute(1, 0, 2, 3).flatten(1, 2)       # Bx2x(HxW)xC -> 2x(BxHxW)x3
+            rgb_i, depth_i, _, _ = generator_test(z_i, rays=rays_i)
+
+            reshape = lambda x: x.view(bs, img_size, img_size, x.shape[1]).permute(0, 3, 1, 2)  # (NxHxW)xC -> NxCxHxW
+            rgb.append(reshape(rgb_i).cpu())
+            depth.append(reshape(depth_i).cpu())
+
+        rgb = torch.cat(rgb)
+        depth = torch.cat(depth)
+
+        reshape = lambda x: x.view(N_samples, 72, *x.shape[1:])
+        rgb = reshape(rgb)
+        for i in range(N_samples):
+            save_video(rgb[i], os.path.join(eval_dir,
+                                            'generated_' + '{:04d}_rgb.mp4'.format(iteration)),
+                       as_gif=False, fps=fps)
+
+            
+def reconstruct(args, config_file):
+    device = torch.device("cuda:0")
+
+    _, hwfr, _ = get_data(config_file)
+    config_file['data']['hwfr'] = hwfr
+    
+    # Create models
+    generator, _ = build_models(config_file, disc=False)
+    generator = generator.to(device)
+
+    # Test generator, use model average
+    generator_test = copy.deepcopy(generator)
+    generator_test.parameters = lambda: generator_test._parameters
+    generator_test.named_parameters = lambda: generator_test._named_parameters
+    checkpoint_io.register_modules(**{k + '_test': v for k, v in generator_test.module_dict.items()})
+    
+    g_optim = optim.RMSprop(generator_test.parameters(), lr=0.0005, alpha=0.99, eps=1e-8)
+
+    
+    # Register modules to checkpoint
+    checkpoint_io.register_modules(
+        g_optimizer=g_optim
+    )
+
+    generator_test.eval()
+
+    # Distributions
+    ydist = get_ydist(1, device=device)         # Dummy to keep GAN training structure in tact
+    y = torch.zeros(batch_size)
+    zdist = get_zdist(config_file['z_dist']['type'], config_file['z_dist']['dim'],
+                      device=device)
+
+    # Load checkpoint
+    model_file = args.model
+    print('load %s' % os.path.join(checkpoint_dir, model_file))
+    load_dict = checkpoint_io.load(model_file)
+
+    psnr_engine = Engine(get_output)
+    psnr = PSNR(data_range=2.)
+    psnr.attach(psnr_engine, "psnr")
+    ssim_engine = Engine(get_output)
+    ssim = SSIM(data_range=2.)
+    ssim.attach(ssim_engine, "ssim")
+
+    N_samples = batch_size
+    N_poses = 1           # corresponds to number of frames
+    img_size = args.img_size
+
+    render_radius = config_file['data']['radius']
+    if isinstance(render_radius, str):  # use maximum radius
+        render_radius = float(render_radius.split(',')[1])
+
+    transform_list = [
+        transforms.Resize((img_size, img_size)),
+        transforms.ToTensor(),
+        transforms.Normalize(mean=[0.5, 0.5, 0.5], std=[0.5, 0.5, 0.5])
+    ]
+    trans = transforms.Compose(transform_list)
+
+    target_xray = glob.glob(os.path.join(args.xray_img_path, '*.png'))
+    target_xray = torch.unsqueeze(trans(Image.open(target_xray[0]).convert('RGB')),0)
+
+    #    target_xray = target_xray.repeat(N_samples,1,1,1)
+
+    range_theta = (to_theta(config_file['data']['vmin']), to_theta(config_file['data']['vmax']))
+    range_phi = (to_phi(0), to_phi(1))
+
+    theta_mean = 0.5 * sum(range_theta)
+    phi_mean = 0.5 * sum(range_phi)
+
+    N_phi = min(int(range_phi[1] - range_phi[0]), N_poses)  # at least 1 frame per degree
+
+    poses = get_render_poses(render_radius, angle_range=range_phi, theta=theta_mean, N=N_phi)
+
+    z = zdist.sample((N_samples,))
+
+    N_samples, N_frames = len(z), len(poses)
+
+    z = z.unsqueeze(1).expand(-1, N_poses, -1).flatten(0, 1)
+
+    poses = poses.unsqueeze(0) \
+            .expand(N_samples, -1, -1, -1).flatten(0, 1)
+
+    z = z.split(batch_size)
+    
+    log_rec_loss = 0.
+    ssim_value = 0.
+    psnr_value = 0.
+
+    pbar = tqdm(total=5000)
+    for iteration in range(5000):
+        g_optim.zero_grad()
+
+        n_samples = len(z)
+            
+        rays = torch.stack([get_rays(poses[i].to(device), generator_test, img_size) for i in range(n_samples)])
+        rays = rays.split(batch_size)
+
+        rgb, depth = [], []
+
+        for z_i, rays_i in zip(z, rays):
+            bs = len(z_i)
+            if rays_i is not None:
+                rays_i = rays_i.permute(1, 0, 2, 3).flatten(1, 2)       # Bx2x(HxW)xC -> 2x(BxHxW)x3
+            rgb_i, depth_i, _, _ = generator_test(z_i, rays=rays_i)
+
+            reshape = lambda x: x.view(bs, img_size, img_size, x.shape[1]).permute(0, 3, 1, 2)  # (NxHxW)xC -> NxCxHxW
+            rgb.append(reshape(rgb_i).cpu())
+            depth.append(reshape(depth_i).cpu())
+            
+        rgb = torch.cat(rgb)
+        depth = torch.cat(depth)
+
+        
+        reshape = lambda x: x.view(N_samples, N_frames, *x.shape[1:])
+        xray_recons = reshape(rgb)
+
+        rec_loss = 0.3 * percept(torch.unsqueeze(xray_recons[0][0],0),
+                    target_xray).sum() +\
+                    0.1 * F.mse_loss(torch.unsqueeze(xray_recons[0][0],0), target_xray)
+        
+        rec_loss.backward()
+
+        g_optim.step()
+
+        log_rec_loss += rec_loss.item()
+
+        data = torch.unsqueeze(torch.stack([xray_recons[0][0].unsqueeze(0),
+                                                target_xray],0),0)
+        psnr_state = psnr_engine.run(data)
+        psnr_value += psnr_state.metrics['psnr']
+        ssim_state = ssim_engine.run(data)
+        ssim_value += ssim_state.metrics['ssim']
+        pbar.set_description(
+            f"SSIM: {ssim_value:.4f} "
+            f"PSNR: {psnr_value:.4f} "
+            f"Reconstruction loss g: {log_rec_loss:.4f}")
+        pbar.update(1)
+
+        if iteration % args.save_every == args.save_every - 1:
+            test(range_phi, render_radius, theta_mean,
+                 z, generator_test, N_samples, iteration,
+                 img_size)
+
+        if psnr_value > args.psnr_stop:
+            break
+
+        ssim_value = 0.
+        psnr_value = 0.
+        log_rec_loss = 0
+        
+if __name__ == "__main__":
+    # Arguments
+    parser = argparse.ArgumentParser(
+        description='Finetune the latent code to reconstruct the CT given an xray projection.'
+    )
+    parser.add_argument('config_file', type=str, help='Path to config file.')
+    parser.add_argument('--xray_img_path', type=str, default='None', help='Path to real xray')
+    parser.add_argument('--save_dir', type=str, help='Name of dir to save results')
+    parser.add_argument('--model', type=str, default='model_best.pt', help='model.pt to use for eval')
+    parser.add_argument("--save_every", default=50, type=int, help="save video of projections every number of iterations")
+    parser.add_argument("--psnr_stop", default=25, type=float, help="stop at this psnr value")
+    parser.add_argument('--img_size', type=int, default=64, help='Use a size of 64 if GPU size <=10GB ')
+
+    args, unknown = parser.parse_known_args()
+    device = torch.device("cuda:0")
+        
+    config_file = load_config(args.config_file, 'configs/default.yaml')
+    config_file['data']['fov'] = float(config_file['data']['fov'])
+    config_file = update_config(config_file, unknown)
+
+    batch_size = 1
+    out_dir = os.path.join(config_file['training']['outdir'], config_file['expname'])
+    checkpoint_dir = path.join(out_dir, 'chkpts')
+    eval_dir = os.path.join(out_dir, args.save_dir)
+    os.makedirs(eval_dir, exist_ok=True)
+
+    config_file['training']['nworkers'] = 0
+
+    # Logger
+    checkpoint_io = CheckpointIO(
+        checkpoint_dir=checkpoint_dir
+    )
+
+    reconstruct(args, config_file)
+```
+
+### graf-main/render_xray_G_Z.py
+```
+from ignite.engine import Engine
+from ignite.metrics import PSNR, SSIM
+from torchvision import transforms
+from tqdm import tqdm
+from torch.autograd import Variable
+from PIL import Image
+import numpy as np
+import torchvision.utils as vutils
+
+import sys
+import copy
+import argparse
+import os
+import glob
+from os import path
+import torch
+import torch.optim as optim
+import torch.nn.functional as F
+from tqdm import tqdm
+torch.set_default_tensor_type('torch.cuda.FloatTensor')
+
+sys.path.append('submodules')        # needed to make imports work in GAN_stability
+
+from graf.config import get_data, build_models, update_config, get_render_poses
+from graf.utils import to_phi, to_theta, save_video
+
+from submodules.GAN_stability.gan_training.checkpoints import CheckpointIO
+from submodules.GAN_stability.gan_training.distributions import get_ydist, get_zdist
+from submodules.GAN_stability.gan_training.config import (
+    load_config
+)
+
+from submodules.GAN_stability.gan_training import lpips
+percept = lpips.PerceptualLoss(model='net-lin', net='alex', use_gpu=True)
+
+# to keep ignite pytorch format
+def get_output(metrics_engine, output):
+    return output[0], output[1]
+
+
+def get_rays(pose, generator, img_size):
+    return generator.val_ray_sampler(img_size, img_size,
+                                     generator.focal, pose)[0]
+
+def test(config, z, generator_test, N_poses, iteration, img_size):
+    fps = min(int(N_poses / 2.), 25)          # aim for at least 2 second video
+    render_radius = config['data']['radius']
+    if isinstance(render_radius, str):  # use maximum radius
+            render_radius = float(render_radius.split(',')[1])
+        
+    # compute render poses
+    def get_render_poses_rotation(N_poses=float('inf')):
+        """Compute equidistant render poses varying azimuth and polar angle, respectively."""
+        range_theta = (to_theta(config['data']['vmin']), to_theta(config['data']['vmax']))
+        range_phi = (to_phi(config['data']['umin']), to_phi(config['data']['umax']))
+
+        theta_mean = 0.5 * sum(range_theta)
+
+        N_phi = min(int(range_phi[1] - range_phi[0]), N_poses)  # at least 1 frame per degree
+
+        render_poses_rotation = get_render_poses(render_radius, angle_range=range_phi, theta=theta_mean, N=N_phi)
+        return render_poses_rotation
+
+    zrot = z.clone().unsqueeze(1).expand(-1, N_poses, -1).flatten(0, 1)
+    zrot = zrot.split(1)
+    poses_rot = get_render_poses_rotation(N_poses)
+    poses_rot = poses_rot.unsqueeze(0) \
+                         .expand(72, -1, -1, -1).flatten(0, 1)
+
+    rays = torch.stack([get_rays(poses_rot[i].to(device), generator_test, img_size) for i in range(N_poses)])
+    rays = rays.split(1)
+    rgb = []
+
+    generator_test.eval()
+    
+    for z_i, rays_i in tqdm(zip(zrot, rays), total=len(zrot), desc='Create samples...'):
+        bs = len(z_i)
+        if rays_i is not None:
+            rays_i = rays_i.permute(1, 0, 2, 3).flatten(1, 2)       # Bx2x(HxW)xC -> 2x(BxHxW)x3
+        rgb_i, _, _, _ = generator_test(z_i, rays=rays_i)
+
+        reshape = lambda x: x.view(bs, img_size, img_size, x.shape[1]).permute(0, 3, 1, 2)  # (NxHxW)xC -> NxCxHxW
+        rgb.append(reshape(rgb_i).cpu())
+
+    rgb = torch.cat(rgb)
+
+    reshape = lambda x: x.view(1, 72, *x.shape[1:])
+    rgb = reshape(rgb)
+
+    save_video(rgb[0], os.path.join(eval_dir, 'generated_' + '{:04d}_rgb.mp4'.format(iteration)), as_gif=False, fps=fps)
+
+
+
+def reconstruct(args, config_file):
+    device = torch.device("cuda:0")
+
+    _, hwfr, _ = get_data(config_file)
+    config_file['data']['hwfr'] = hwfr
+    
+    # Create models
+    generator, _ = build_models(config_file, disc=False)
+    generator = generator.to(device)
+    g_optim = optim.RMSprop(generator.parameters(), lr=0.0005, alpha=0.99, eps=1e-8)
+    
+    # Register modules to checkpoint
+    checkpoint_io.register_modules(
+        g_optimizer=g_optim
+    )
+
+    # Distributions
+    ydist = get_ydist(1, device=device)         # Dummy to keep GAN training structure in tact
+    y = torch.zeros(batch_size)
+    zdist = get_zdist(config_file['z_dist']['type'], config_file['z_dist']['dim'],
+                      device=device)
+
+    # Load checkpoint
+    model_file = args.model
+    print('load %s' % os.path.join(checkpoint_dir, model_file))
+    load_dict = checkpoint_io.load(model_file)
+
+    psnr_engine = Engine(get_output)
+    psnr = PSNR(data_range=2.)
+    psnr.attach(psnr_engine, "psnr")
+    ssim_engine = Engine(get_output)
+    ssim = SSIM(data_range=2.)
+    ssim.attach(ssim_engine, "ssim")
+
+    N_samples = batch_size
+    N_poses = 1           # corresponds to number of frames
+
+    render_radius = config_file['data']['radius']
+    if isinstance(render_radius, str):  # use maximum radius
+        render_radius = float(render_radius.split(',')[1])
+
+    transform_list = [
+        transforms.Resize((args.img_size, args.img_size)),
+        transforms.ToTensor(),
+        transforms.Normalize(mean=[0.5, 0.5, 0.5], std=[0.5, 0.5, 0.5])
+    ]
+    trans = transforms.Compose(transform_list)
+
+    target_xray = glob.glob(os.path.join(args.xray_img_path, '*.png'))
+    target_xray = torch.unsqueeze(trans(Image.open(target_xray[0]).convert('RGB')),0)
+
+    range_theta = (to_theta(config_file['data']['vmin']), to_theta(config_file['data']['vmax']))
+    range_phi = (to_phi(0), to_phi(1))
+
+    theta_mean = 0.5 * sum(range_theta)
+
+    N_phi = min(int(range_phi[1] - range_phi[0]), N_poses)  # at least 1 frame per degree
+    poses = get_render_poses(render_radius, angle_range=range_phi, theta=theta_mean, N=N_phi)
+    z = zdist.sample((N_samples,))
+
+    N_samples, N_frames = len(z), len(poses)
+
+    z = Variable(z, requires_grad=True)
+
+    z_optim = optim.Adam([z], lr=0.0005, betas=(0., 0.999))
+
+    log_rec_loss = 0.
+    ssim_value = 0.
+    psnr_value = 0.
+
+    pbar = tqdm(total=5000)
+    for iteration in range(5000):
+        generator.train()
+        rays = torch.stack([get_rays(poses[0].to(device), generator, args.img_size)])
+        rays = rays.permute(1, 0, 2, 3).flatten(1, 2)       # Bx2x(HxW)xC -> 2x(BxHxW)x3
+
+        z_optim.zero_grad()
+        g_optim.zero_grad()
+        rgb = generator(z, rays=rays)
+
+        reshape = lambda x: x.view(1, args.img_size, args.img_size, x.shape[1]).permute(0, 3, 1, 2)  # (NxHxW)xC -> NxCxHxW
+        rgb = reshape(rgb).cpu()
+        reshape = lambda x: x.view(N_samples, N_frames, *x.shape[1:])
+        xray_recons = reshape(rgb)
+
+        nll = z**2 / 2
+        nll = nll.mean()
+        rec_loss = 0.3 * percept(xray_recons[0], target_xray).sum() +\
+            0.1 * F.mse_loss(xray_recons[0], target_xray) +\
+            0.3 * nll
+        rec_loss.backward()
+        z_optim.step()
+        g_optim.step()
+
+        log_rec_loss += rec_loss.item()
+
+        data = torch.stack([xray_recons[0],
+                            target_xray],0).unsqueeze(0)
+        psnr_state = psnr_engine.run(data)
+        psnr_value += psnr_state.metrics['psnr']
+        ssim_state = ssim_engine.run(data)
+        ssim_value += ssim_state.metrics['ssim']
+        pbar.set_description(
+            f"SSIM: {ssim_value:.4f} "
+            f"PSNR: {psnr_value:.4f} "
+            f"NLL: {nll:.4f} "
+            f"Reconstructionloss g: {log_rec_loss:.4f}")
+        pbar.update(1)
+
+        if iteration % args.save_every == args.save_every - 1:
+            with torch.no_grad():
+                test(config_file, z, generator, 72,
+                     iteration, args.img_size)
+
+        if psnr_value > args.psnr_stop:
+            break
+
+        ssim_value = 0.
+        psnr_value = 0.
+        log_rec_loss = 0
+        
+if __name__ == "__main__":
+    # Arguments
+    parser = argparse.ArgumentParser(
+        description='Finetune the latent code to reconstruct the CT given an xray projection.'
+    )
+    parser.add_argument('config_file', type=str, help='Path to config file.')
+    parser.add_argument('--xray_img_path', type=str, default='None', help='Path to real xray')
+    parser.add_argument('--save_dir', type=str, help='Name of dir to save results')
+    parser.add_argument('--model', type=str, default='model_best.pt', help='model.pt to use for eval')
+    parser.add_argument("--save_every", default=25, type=int, help="save video of projections every number of iterations")
+    parser.add_argument("--psnr_stop", default=25, type=float, help="stop at this psnr value")
+    parser.add_argument('--img_size', type=int, default=64, help='Use a size of 64 if GPU size <=10GB ')
+
+    args, unknown = parser.parse_known_args()
+    device = torch.device("cuda:0")
+        
+    config_file = load_config(args.config_file, 'configs/default.yaml')
+    config_file['data']['fov'] = float(config_file['data']['fov'])
+    config_file = update_config(config_file, unknown)
+
+    batch_size = 1
+    out_dir = os.path.join(config_file['training']['outdir'], config_file['expname'])
+    checkpoint_dir = path.join(out_dir, 'chkpts')
+    eval_dir = os.path.join(out_dir, args.save_dir)
+    os.makedirs(eval_dir, exist_ok=True)
+
+    config_file['training']['nworkers'] = 0
+
+    # Logger
+    checkpoint_io = CheckpointIO(
+        checkpoint_dir=checkpoint_dir
+    )
+
+    reconstruct(args, config_file)
+```
+
+### graf-main/test-cuda.py
+```
+import torch
+print(torch.cuda.is_available())  # Should return True
+print(torch.version.cuda)         # Should print 12.1
+```
+
+### graf-main/train.py
+```
+import argparse
+import os
+import gc
+from os import path
+import time
+import copy
+import torch
+torch.set_default_tensor_type('torch.cuda.FloatTensor')
+
+from mpl_toolkits.mplot3d import Axes3D  # noqa: F401 unused import
+import matplotlib
+matplotlib.use('Agg')
+
+import sys
+sys.path.append('submodules')        # needed to make imports work in GAN_stability
+
+from graf.gan_training import Trainer, Evaluator
+from graf.config import get_data, build_models, save_config, update_config, build_lr_scheduler
+from graf.utils import count_trainable_parameters, get_nsamples, InfiniteSamplerWrapper
+from graf.transforms import ImgToPatch
+
+from GAN_stability.gan_training import utils
+from GAN_stability.gan_training.train import update_average
+from GAN_stability.gan_training.logger import Logger
+from GAN_stability.gan_training.checkpoints import CheckpointIO
+from GAN_stability.gan_training.distributions import get_ydist, get_zdist
+from GAN_stability.gan_training.config import (
+    load_config, build_optimizers,
+)
+
+
+if __name__ == '__main__':
+    # Arguments
+    parser = argparse.ArgumentParser(
+        description='Train a GAN with different regularization strategies.'
+    )
+    parser.add_argument('config', type=str, help='Path to config file.')
+
+    args, unknown = parser.parse_known_args() 
+    config = load_config(args.config, 'configs/default.yaml')
+    config['data']['fov'] = float(config['data']['fov'])
+    config = update_config(config, unknown)
+
+    # Short hands
+    batch_size = config['training']['batch_size']
+    restart_every = config['training']['restart_every']
+    fid_every = config['training']['fid_every']
+    save_every = config['training']['save_every']
+    backup_every = config['training']['backup_every']
+    save_best = config['training']['save_best']
+    assert save_best=='fid' or save_best=='kid', 'Invalid save best metric!'
+
+    out_dir = os.path.join(config['training']['outdir'], config['expname'])
+    checkpoint_dir = path.join(out_dir, 'chkpts')
+
+    # Create missing directories
+    if not path.exists(out_dir):
+        os.makedirs(out_dir)
+    if not path.exists(checkpoint_dir):
+        os.makedirs(checkpoint_dir)
+
+    # Save config file
+    save_config(os.path.join(out_dir, 'config.yaml'), config)
+
+    # Logger
+    checkpoint_io = CheckpointIO(
+        checkpoint_dir=checkpoint_dir
+    )
+
+    device = torch.device("cuda:0")
+
+    # Dataset
+    train_dataset, hwfr, render_poses = get_data(config)
+    # in case of orthographic projection replace focal length by far-near
+    if config['data']['orthographic']:
+        hw_ortho = (config['data']['far']-config['data']['near'], config['data']['far']-config['data']['near'])
+        hwfr[2] = hw_ortho
+
+    config['data']['hwfr'] = hwfr         # add for building generator
+    print(train_dataset, hwfr, render_poses.shape)
+
+    train_loader = iter(torch.utils.data.DataLoader(
+        train_dataset,
+        batch_size=batch_size,
+        num_workers=config['training']['nworkers'],
+        shuffle=False, pin_memory=True, sampler=InfiniteSamplerWrapper(train_dataset)
+    ))
+
+    val_dataset = train_dataset
+    val_loader = train_loader
+    hwfr_val = hwfr
+
+    # Create models
+    generator, discriminator = build_models(config)
+    print('Generator params: %d' % count_trainable_parameters(generator))
+    print('Discriminator params: %d, channels: %d' % (count_trainable_parameters(discriminator), discriminator.nc))
+    print(generator.render_kwargs_train['network_fn'])
+    print(discriminator)
+
+    # Put models on gpu if needed
+    generator = generator.to(device)
+    discriminator = discriminator.to(device)
+
+    g_optimizer, d_optimizer = build_optimizers(
+        generator, discriminator, config
+    )
+
+    # input transform
+    img_to_patch = ImgToPatch(generator.ray_sampler, hwfr[:3])
+
+    # Register modules to checkpoint
+    checkpoint_io.register_modules(
+        discriminator=discriminator,
+        g_optimizer=g_optimizer,
+        d_optimizer=d_optimizer,
+        **generator.module_dict     # treat NeRF specially
+    )
+    
+    # Get model file
+    model_file = config['training']['model_file']
+    stats_file = 'stats_00049999.p'
+
+    # Logger
+    logger = Logger(
+        log_dir=path.join(out_dir, 'logs'),
+        img_dir=path.join(out_dir, 'imgs'),
+        monitoring=config['training']['monitoring'],
+        monitoring_dir=path.join(out_dir, 'monitoring')
+    )
+
+    # Distributions
+    ydist = get_ydist(1, device=device)         # Dummy to keep GAN training structure in tact
+    y = torch.zeros(batch_size)                 # Dummy to keep GAN training structure in tact
+    zdist = get_zdist(config['z_dist']['type'], config['z_dist']['dim'],
+                      device=device)
+
+    # Save for tests
+    n_test_samples_with_same_shape_code = config['training']['n_test_samples_with_same_shape_code']
+    ntest = batch_size
+    x_real = get_nsamples(train_loader, ntest)
+    ytest = torch.zeros(ntest).to(device)
+    ztest = zdist.sample((ntest,)).to(device)
+    ptest = torch.stack([generator.sample_pose() for i in range(ntest)]).to(device)
+    if n_test_samples_with_same_shape_code > 0:
+        ntest *= n_test_samples_with_same_shape_code
+        ytest = ytest.repeat(n_test_samples_with_same_shape_code)
+        ptest = ptest.unsqueeze_(1).expand(-1, n_test_samples_with_same_shape_code, -1, -1).flatten(0, 1)       # (ntest x n_same_shape) x 3 x 4
+
+        zdim_shape = config['z_dist']['dim'] - config['z_dist']['dim_appearance']
+        # repeat shape code
+        zshape = ztest[:, :zdim_shape].unsqueeze(1).expand(-1, n_test_samples_with_same_shape_code, -1).flatten(0, 1)
+        zappearance = zdist.sample((ntest,))[:, zdim_shape:]
+        ztest = torch.cat([zshape, zappearance], dim=1)
+
+    utils.save_images(x_real, path.join(out_dir, 'real.png'))
+
+    # Test generator
+    if config['training']['take_model_average']:
+        generator_test = copy.deepcopy(generator)
+        # we have to change the pointers of the parameter function in nerf manually
+        generator_test.parameters = lambda: generator_test._parameters
+        generator_test.named_parameters = lambda: generator_test._named_parameters
+        checkpoint_io.register_modules(**{k+'_test': v for k, v in generator_test.module_dict.items()})
+    else:
+        generator_test = generator
+
+    # Evaluator
+    evaluator = Evaluator(fid_every > 0, generator_test, zdist, ydist,
+                          batch_size=batch_size, device=device, inception_nsamples=33)
+
+    # Initialize fid+kid evaluator
+    if fid_every > 0:
+        fid_cache_file = os.path.join(out_dir, 'fid_cache_train.npz')
+        kid_cache_file = os.path.join(out_dir, 'kid_cache_train.npz')
+        evaluator.inception_eval.initialize_target(val_loader, cache_file=fid_cache_file, act_cache_file=kid_cache_file)
+
+    # Train
+    tstart = t0 = time.time()
+
+    # Load checkpoint if it exists
+    try:
+        load_dict = checkpoint_io.load(model_file)
+    except FileNotFoundError:
+        it = epoch_idx = -1
+        fid_best = float('inf')
+        kid_best = float('inf')
+    else:
+        it = load_dict.get('it', -1)
+        epoch_idx = load_dict.get('epoch_idx', -1)
+        fid_best = load_dict.get('fid_best', float('inf'))
+        kid_best = load_dict.get('kid_best', float('inf'))
+        logger.load_stats(stats_file)
+
+    # Reinitialize model average if needed
+    if (config['training']['take_model_average']
+      and config['training']['model_average_reinit']):
+        update_average(generator_test, generator, 0.)
+
+    # Learning rate anneling
+    d_lr = d_optimizer.param_groups[0]['lr']
+    g_lr = g_optimizer.param_groups[0]['lr']
+    g_scheduler = build_lr_scheduler(g_optimizer, config, last_epoch=it)
+    d_scheduler = build_lr_scheduler(d_optimizer, config, last_epoch=it)
+    # ensure lr is not decreased again
+    d_optimizer.param_groups[0]['lr'] = d_lr
+    g_optimizer.param_groups[0]['lr'] = g_lr
+
+    # Trainer
+    trainer = Trainer(
+        generator, discriminator, g_optimizer, d_optimizer,
+        use_amp=config['training']['use_amp'],
+        gan_type=config['training']['gan_type'],
+        reg_type=config['training']['reg_type'],
+        reg_param=config['training']['reg_param'],
+        aug_policy=config['training']['aug_policy']
+    )
+
+    print('it {}: start with LR:\n\td_lr: {}\tg_lr: {}'.format(it, d_optimizer.param_groups[0]['lr'], g_optimizer.param_groups[0]['lr']))
+
+    # Training loop
+    print('Start training...')
+    while True:
+        epoch_idx += 1
+        print('Start epoch %d...' % epoch_idx)
+
+        for x_real in train_loader:
+            t_it = time.time()
+            it += 1
+            generator.ray_sampler.iterations = it   # for scale annealing
+
+            # Sample patches for real data
+            rgbs = img_to_patch(x_real.to(device))          # N_samples x C
+
+            # Discriminator updates
+            z = zdist.sample((batch_size,))
+            dloss, reg = trainer.discriminator_trainstep(rgbs, y=y, z=z, data_aug=config['data']['augmentation'])
+            logger.add('losses', 'discriminator', dloss, it=it)
+            logger.add('losses', 'regularizer', reg, it=it)
+
+            # Generators updates
+            if config['nerf']['decrease_noise']:
+              generator.decrease_nerf_noise(it)
+
+            z = zdist.sample((batch_size,))
+            gloss = trainer.generator_trainstep(y=y, z=z)
+            logger.add('losses', 'generator', gloss, it=it)
+
+            if config['training']['take_model_average']:
+                update_average(generator_test, generator,
+                               beta=config['training']['model_average_beta'])
+
+            # Update learning rate
+            g_scheduler.step()
+            d_scheduler.step()
+
+            d_lr = d_optimizer.param_groups[0]['lr']
+            g_lr = g_optimizer.param_groups[0]['lr']
+
+            logger.add('learning_rates', 'discriminator', d_lr, it=it)
+            logger.add('learning_rates', 'generator', g_lr, it=it)
+
+            dt = time.time() - t_it
+            # Print stats
+            if ((it + 1) % config['training']['print_every']) == 0:
+                g_loss_last = logger.get_last('losses', 'generator')
+                d_loss_last = logger.get_last('losses', 'discriminator')
+                d_reg_last = logger.get_last('losses', 'regularizer')
+                print('[%s epoch %0d, it %4d, t %0.3f] g_loss = %.4f, d_loss = %.4f, reg=%.4f'
+                      % (config['expname'], epoch_idx, it + 1, dt, g_loss_last, d_loss_last, d_reg_last))
+
+            # (ii) Sample if necessary
+            if ((it % config['training']['sample_every']) == 0) or ((it < 500) and (it % 100 == 0)):
+                rgb, depth, acc = evaluator.create_samples(ztest.to(device), poses=ptest)
+                logger.add_imgs(rgb, 'rgb', it)
+                logger.add_imgs(depth, 'depth', it)
+                logger.add_imgs(acc, 'acc', it)
+
+            # (v) Compute fid if necessary
+            if fid_every > 0 and ((it + 1) % fid_every) == 0:
+                fid, kid = evaluator.compute_fid_kid()
+                logger.add('validation', 'fid', fid, it=it)
+                logger.add('validation', 'kid', kid, it=it)
+                torch.cuda.empty_cache()
+                gc.collect()
+                # save best model
+                if save_best=='fid' and fid < fid_best:
+                    fid_best = fid
+                    print('Saving best model...')
+                    checkpoint_io.save('model_best.pt', it=it, epoch_idx=epoch_idx, fid_best=fid_best, kid_best=kid_best)
+                    logger.save_stats('stats_best.p')
+                    torch.cuda.empty_cache()
+                    gc.collect()
+                elif save_best=='kid' and kid < kid_best:
+                    kid_best = kid
+                    print('Saving best model...')
+                    checkpoint_io.save('model_best.pt', it=it, epoch_idx=epoch_idx, fid_best=fid_best, kid_best=kid_best)
+                    logger.save_stats('stats_best.p')
+                    torch.cuda.empty_cache()
+                    gc.collect()
+
+            # (vi) Create video if necessary
+            if ((it+1) % config['training']['video_every']) == 0:
+                N_samples = 4
+                zvid = zdist.sample((N_samples,))
+
+                basename = os.path.join(out_dir, '{}_{:06d}_'.format(os.path.basename(config['expname']), it))
+                evaluator.make_video(basename, zvid, render_poses, as_gif=False)
+
+            # (i) Backup if necessary
+            if ((it + 1) % backup_every) == 0:
+                print('Saving backup...')
+                checkpoint_io.save('model_%08d.pt' % it, it=it, epoch_idx=epoch_idx, fid_best=fid_best, kid_best=kid_best)
+                logger.save_stats('stats_%08d.p' % it)
+
+            # (vi) Save checkpoint if necessary
+            if time.time() - t0 > save_every:
+                print('Saving checkpoint...')
+                checkpoint_io.save(model_file, it=it, epoch_idx=epoch_idx, fid_best=fid_best, kid_best=kid_best)
+                logger.save_stats('stats.p')
+                t0 = time.time()
+
+                if (restart_every > 0 and t0 - tstart > restart_every):
+                    exit(3)
+```
+
+### graf-main/data/generate_drr.py
+```
+# ------------------------------------------------------------------------------
+# Ref: https://github.com/kylekma/X2CT/blob/master/CT2XRAY/xraypro.py
+# modified to create multiple xray views
+# plastimatch used v 1.9.3 - download: http://plastimatch.org/
+#
+# Generate xrays (Digitally Reconstructed Radiographs - DRR)
+# from CT scan (e.g. dicom files .dcm / or raw .mha raw)
+# 
+# ------------------------------------------------------------------------------
+import os
+import cv2
+import re
+import numpy as np
+import matplotlib.pyplot as plt
+import SimpleITK as sitk
+from subprocess import check_output as qx
+from pydicom import dcmread
+
+
+# input could be .mhd/.mha format
+def load_scan_mhda(path):
+    img_itk = sitk.ReadImage(path)
+    img = sitk.GetArrayFromImage(img_itk)
+    return img_itk, img, img_itk.GetOrigin(), img_itk.GetSize(), img_itk.GetSpacing()
+
+# .dcm to .mha / .mhd
+def dicom2raw(dicom_folder, output_file):
+    reader = sitk.ImageSeriesReader()
+
+    dicom_names = reader.GetGDCMSeriesFileNames(dicom_folder)
+    reader.SetFileNames(dicom_names)
+
+    image = reader.Execute()
+
+    size = image.GetSize()
+    print("Image size:", size[0], size[1], size[2])
+
+    print("Writing image:", output_file)
+
+    sitk.WriteImage(image, output_file)
+
+# compute xray source center in world coordinate
+def get_center(origin, size, spacing):
+    origin = np.array(origin)
+    size = np.array(size)
+    spacing = np.array(spacing)
+    center = origin + (size - 1) / 2 * spacing
+    return center
+
+# convert a ndarray to string
+def array2string(ndarray):
+    ret = ""
+    for i in ndarray:
+        ret = ret + str(i) + " "
+    return ret[:-2]
+
+# save a .pfm file as a .png file
+def savepng(filename, direction, idx):
+    file = open(filename, 'rb') 
+    color = None
+    width = None
+    height = None
+    scale = None
+    endian = None
+
+    header = file.readline().rstrip()
+    if header.decode('ascii') == 'PF':
+        color = True    
+    elif header.decode('ascii') == 'Pf':
+        color = False
+    else:
+        raise Exception('Not a PFM file.')
+
+    dim_match = re.search(r'(\d+)\s(\d+)', file.readline().decode('ascii'))
+    
+    if dim_match:
+        width, height = map(int, dim_match.groups())
+    else:
+        raise Exception('Malformed PFM header.')
+
+    scale = float(file.readline().rstrip())
+    if scale < 0: # little-endian
+        endian = '<'
+        scale = -scale
+    else:
+        endian = '>' # big-endian
+
+    data = np.fromfile(file, endian + 'f')
+    shape = (height, width, 3) if color else (height, width)
+    raw_data = np.reshape(data, shape)
+    max_value = raw_data.max()
+    im = (raw_data / max_value * 255).astype(np.uint8)
+    # PA view should do additional left-right flip
+    if direction == 1:
+        im = np.fliplr(im)
+    
+    savedir, _ = os.path.split(filename)
+    outfile = os.path.join(savedir, f"xray{idx:04}.png".format(direction))
+    # plt.imshow(im, cmap=plt.cm.gray)
+    plt.imsave(outfile, im, cmap=plt.cm.gray)
+    # plt.imsave saves an image with 32bit per pixel, but we only need one channel
+    image = cv2.imread(outfile)
+    gray = cv2.split(image)[0]
+    cv2.imwrite(outfile, gray)
+
+
+
+if __name__ == '__main__':
+    input_path = '/media/newuser/AprilsDrive/phd/datasets/knee006/Knee'
+    save_root_path = '/media/newuser/AprilsDrive/phd/datasets/xrays/knee/knee_006'
+    plasti_path = '/home/newuser/Documents/PhD/plastimatch-build'
+    output_raw_name = 'raw_file'
+    # False: single xray output
+    multiple_view_mode = True
+    # True: dicom conversion & HU adjustment
+    # False: output xray from given .mha (i.e., raw_input_file)
+    preprocessing = True
+    raw_input_file = '/media/newuser/AprilsDrive/phd/datasets/xrays/knee/knee_006/raw_file.mha'
+    # Use "500 500" for chest
+    # use "350 350" for knee
+    detector_size = "350 350"
+    # Black bg: "0 255", white bg: "255 0"
+    bg_color = "0 255"
+    # If single view, choose frontal or lateral view
+    frontal_dir = True
+    resolution = "128 128"
+    # If multiple view:
+    num_xrays = "72"
+    angle = "5"
+    ds = dcmread(os.path.join(input_path, os.listdir(input_path)[0]))
+    # Note that the following values are sometimes missing from the CT
+    # if missing, use sad=541, sid=949 for chest
+    # DistanceSourceToPatient in mm
+    sad = str(ds.DistanceSourceToPatient)
+    # DistanceSourceToDetector in mm
+    sid = str(ds.DistanceSourceToDetector)
+
+    if preprocessing:
+        # Converting dicom files to .mha for plastimatch processing
+        raw_input_file = os.path.join(save_root_path, '{}.mha'.format(output_raw_name))
+        dicom2raw(input_path, raw_input_file)
+        # truncates the inputs to the range of [-1000,+1000]
+        adjust_lst = [plasti_path+'/plastimatch', "adjust", "--input",
+                      raw_input_file, "--output", raw_input_file,
+                      "--pw-linear", "-inf,0,-1000,-1000,+1000,+1000,inf,0"]
+        #"-inf,0,-1000,-1000,+1000,+1000,inf,0"
+        output = qx(adjust_lst)
+
+    ct_itk, ct_scan, ori_origin, ori_size, ori_spacing = load_scan_mhda(raw_input_file)
+    # compute isocenter
+    print("input_size: ", ori_size)
+    center = get_center(ori_origin, ori_size, ori_spacing)
+    print("center: ", center)
+
+    if multiple_view_mode:
+        o_path = os.path.join(save_root_path, 'xray')
+        drr_lst = [plasti_path+'/plastimatch', "drr", "-t", "pfm",
+                   "--algorithm", "uniform", "--gantry-angle", "0",
+                   "-N", angle, "-a", num_xrays, "--sad", sad, "--sid", sid,
+                   "--autoscale", "--autoscale-range", bg_color,
+                   "-r", resolution, "-o", array2string(center),
+                   "-z", detector_size, "-P", "preprocess",
+                   "-I", raw_input_file, "-O", o_path]
+        output = qx(drr_lst)
+    else:
+        if frontal_dir:
+            dir = "0 1 0"
+        else:
+            dir = "1 0 0"
+        o_path = os.path.join(save_root_path, 'xray')
+        drr_lst = [plasti_path+'/plastimatch', "drr", "-t", "pfm",
+                   "--algorithm", "uniform", "--gantry-angle", "0",
+                   "-n", dir, "--sad", sad, "--sid", sid,
+                   "--autoscale", "--autoscale-range", bg_color,
+                   "-r", resolution, "-o", array2string(center),
+                   "-z", detector_size, "-P", "preprocess",
+                   "-I", raw_input_file, "-O", o_path]
+        output = qx(drr_lst)
+
+    file_paths = []
+    to_delete = []
+    files = os.listdir(save_root_path)
+    for f in files:
+        if f.endswith(".pfm"):
+            file_paths.append(os.path.join(save_root_path, f))
+            to_delete.append(os.path.join(save_root_path, f))
+        elif f.endswith(".mha"):
+            to_delete.append(os.path.join(save_root_path, f))
+    file_paths.sort()
+    for i in range(len(file_paths)):
+        savepng(file_paths[i], 1, i)
+
+    # Deleting unnecessary files
+    for f in to_delete:
+        os.remove(f)
+```
+
+### graf-main/data/generate_drr_multiple_dirs.py
+```
+# ------------------------------------------------------------------------------
+# Ref: https://github.com/kylekma/X2CT/blob/master/CT2XRAY/xraypro.py
+# modified to create multiple xray views
+# plastimatch used v 1.9.3 - download: http://plastimatch.org/
+#
+# Generate xrays (Digitally Reconstructed Radiographs - DRR)
+# from CT scan (e.g. dicom files .dcm / or raw .mha raw)
+# 
+# ------------------------------------------------------------------------------
+import os
+import cv2
+import re
+import numpy as np
+import matplotlib.pyplot as plt
+import SimpleITK as sitk
+from subprocess import check_output as qx
+from pydicom import dcmread
+from glob import glob
+
+# input could be .mhd/.mha format
+def load_scan_mhda(path):
+    img_itk = sitk.ReadImage(path)
+    img = sitk.GetArrayFromImage(img_itk)
+    return img_itk, img, img_itk.GetOrigin(), img_itk.GetSize(), img_itk.GetSpacing()
+
+# .dcm to .mha / .mhd
+def dicom2raw(dicom_folder, output_file):
+    reader = sitk.ImageSeriesReader()
+
+    dicom_names = reader.GetGDCMSeriesFileNames(dicom_folder)
+    reader.SetFileNames(dicom_names)
+
+    image = reader.Execute()
+
+    size = image.GetSize()
+    print("Image size:", size[0], size[1], size[2])
+
+    print("Writing image:", output_file)
+
+    sitk.WriteImage(image, output_file)
+
+# compute xray source center in world coordinate
+def get_center(origin, size, spacing):
+    origin = np.array(origin)
+    size = np.array(size)
+    spacing = np.array(spacing)
+    center = origin + (size - 1) / 2 * spacing
+    return center
+
+# convert a ndarray to string
+def array2string(ndarray):
+    ret = ""
+    for i in ndarray:
+        ret = ret + str(i) + " "
+    return ret[:-2]
+
+# save a .pfm file as a .png file
+def savepng(filename, direction, idx):
+    file = open(filename, 'rb') 
+    color = None
+    width = None
+    height = None
+    scale = None
+    endian = None
+
+    header = file.readline().rstrip()
+    if header.decode('ascii') == 'PF':
+        color = True    
+    elif header.decode('ascii') == 'Pf':
+        color = False
+    else:
+        raise Exception('Not a PFM file.')
+
+    dim_match = re.search(r'(\d+)\s(\d+)', file.readline().decode('ascii'))
+    
+    if dim_match:
+        width, height = map(int, dim_match.groups())
+    else:
+        raise Exception('Malformed PFM header.')
+
+    scale = float(file.readline().rstrip())
+    if scale < 0: # little-endian
+        endian = '<'
+        scale = -scale
+    else:
+        endian = '>' # big-endian
+
+    data = np.fromfile(file, endian + 'f')
+    shape = (height, width, 3) if color else (height, width)
+    raw_data = np.reshape(data, shape)
+    max_value = raw_data.max()
+    im = (raw_data / max_value * 255).astype(np.uint8)
+    # PA view should do additional left-right flip
+    if direction == 1:
+        im = np.fliplr(im)
+    
+    savedir, _ = os.path.split(filename)
+    outfile = os.path.join(savedir, f"xray{idx:04}.png".format(direction))
+    # plt.imshow(im, cmap=plt.cm.gray)
+    plt.imsave(outfile, im, cmap=plt.cm.gray)
+    # plt.imsave saves an image with 32bit per pixel, but we only need one channel
+    image = cv2.imread(outfile)
+    gray = cv2.split(image)[0]
+    cv2.imwrite(outfile, gray)
+
+
+if __name__ == '__main__':
+    global_path = '/media/abrilcf/AprilsDrive/phd/datasets/MIDRC-RICORD-1B'
+    save_path = '/media/abrilcf/899f2142-a79b-460e-b428-d45e0930f90b/extra/lap/PhD/DataSets/medical/chest'
+    # get dir names
+    dirs = [f.path for f in os.scandir(global_path) if f.is_dir()]
+
+    # False: single xray output
+    multiple_view_mode = True
+    # True: dicom conversion & HU adjustment
+    # False: output xray from given .mha (i.e., raw_input_file)
+    preprocessing = True
+    # Use "500 500" for chest
+    # use "350 350" for knee
+    detector_size = "500 500"
+    # Black bg: "0 255", white bg: "255 0"
+    bg_color = "0 255"
+    # If single view, choose frontal or lateral view
+    frontal_dir = "0 1 0"
+    lateral_dir = "1 0 0"
+    resolution = "256 256"
+    # If multiple view:
+    num_xrays = "2"
+    angle = "90"
+
+    for i in range(len(dirs)):
+        ct_files = [y for x in os.walk(dirs[i]) for y in glob(os.path.join(x[0], '*.dcm'))]
+        ds = dcmread(ct_files[0])
+        # Note that the following values are sometimes missing from the CT
+        # if missing, use sad="541", sid="949" for: chest & head-neck
+        # DistanceSourceToPatient in mm
+        sad = str(ds.DistanceSourceToPatient)
+        sid = str(ds.DistanceSourceToDetector)
+
+        save_name = f"{i+1:04}_chest"
+        save_dir = os.path.join(save_path, save_name)
+        try:
+            os.makedirs(save_dir)
+        except OSError:
+            pass
+            
+        if preprocessing:
+            # Converting dicom files to .mha for plastimatch processing
+            raw_input_file = os.path.join(save_dir, '{}.mha'.format(save_name))
+            dicom2raw(os.path.abspath(os.path.join(ct_files[0], '..')),
+                      raw_input_file)
+            # truncates the inputs to the range of [-1000,+1000]
+            adjust_lst = ['plastimatch', "adjust", "--input",
+                          raw_input_file, "--output", raw_input_file,
+                          "--pw-linear", "-inf,0,-1000,-1000,+1000,+1000,inf,0"]
+            #"-inf,0,-1000,-1000,+1000,+1000,inf,0"
+            #-inf,0,-1000,-1000,+3000,+3000,inf,
+            output = qx(adjust_lst)
+    #        set_bone_threshold = [plasti_path+'/plastimatch', "threshold", "--input",
+    #                              mha_adjust, "--output", mha_bone,
+    #                              "--above", "-1000"]
+    #        output = qx(set_bone_threshold)
+
+        ct_itk, ct_scan, ori_origin, ori_size, ori_spacing = load_scan_mhda(raw_input_file)
+        # compute isocenter
+        print("input_size: ", ori_size)
+        center = get_center(ori_origin, ori_size, ori_spacing)
+        print("center: ", center)
+
+        if multiple_view_mode:
+            o_path = os.path.join(save_dir, 'xray_')
+            drr_lst = ['plastimatch', "drr", "-A", "cuda", "-t", "pfm",
+                       "--algorithm", "uniform", "--gantry-angle", "0",
+                       "-N", angle, "-a", num_xrays, "--sad", sad, "--sid", sid,
+                       "--autoscale", "--autoscale-range", bg_color,
+                       "-r", resolution, "-o", array2string(center),
+                       "-z", detector_size, "-P", "preprocess",
+                       "-I", raw_input_file, "-O", o_path]
+            output = qx(drr_lst)
+        else:
+            o_path = os.path.join(save_dir, 'xray_')
+            drr_lst = ['plastimatch', "drr", "-t", "pfm",
+                       "-i", "exact", "-P", "preprocess",
+                       "--autoscale-range", "0 255",
+                       "--gantry-angle", "0",
+                       "-n", lateral_dir, "--sad", sad, "--sid", sid,
+                       "-r", resolution, "-o", array2string(center),
+                       "-z", detector_size, "-e",
+                       "-O", o_path]
+            #"--autoscale", "--autoscale-range", bg_color,
+            output = qx(drr_lst)
+
+        print("sad: ", sad, " sid: ", sid, " -o: ", array2string(center))
+
+        file_paths = []
+        to_delete = []
+        files = os.listdir(save_dir)
+        for f in files:
+            if f.endswith(".pfm"):
+                file_paths.append(os.path.join(save_dir, f))
+                to_delete.append(os.path.join(save_dir, f))
+            elif f.endswith(".txt"):
+                to_delete.append(os.path.join(save_dir, f))
+        file_paths.sort()
+        for i in range(len(file_paths)):
+            savepng(file_paths[i], 1, i)
+
+        # Deleting unnecessary files
+        for f in to_delete:
+            os.remove(f)
+```
+
+### graf-main/data/preprocess_cats.py
+```
+### adapted from https://github.com/AlexiaJM/RelativisticGAN/blob/master/code/preprocess_cat_dataset.py
+### original code from https://github.com/microe/angora-blue/blob/master/cascade_training/describe.py by Erik Hovland
+import argparse
+import cv2
+import glob
+import math
+import os
+from tqdm import tqdm
+
+
+def rotateCoords(coords, center, angleRadians):
+    # Positive y is down so reverse the angle, too.
+    angleRadians = -angleRadians
+    xs, ys = coords[::2], coords[1::2]
+    newCoords = []
+    n = min(len(xs), len(ys))
+    i = 0
+    centerX = center[0]
+    centerY = center[1]
+    cosAngle = math.cos(angleRadians)
+    sinAngle = math.sin(angleRadians)
+    while i < n:
+        xOffset = xs[i] - centerX
+        yOffset = ys[i] - centerY
+        newX = xOffset * cosAngle - yOffset * sinAngle + centerX
+        newY = xOffset * sinAngle + yOffset * cosAngle + centerY
+        newCoords += [newX, newY]
+        i += 1
+    return newCoords
+
+
+def preprocessCatFace(coords, image):
+    leftEyeX, leftEyeY = coords[0], coords[1]
+    rightEyeX, rightEyeY = coords[2], coords[3]
+    mouthX = coords[4]
+    if leftEyeX > rightEyeX and leftEyeY < rightEyeY and \
+            mouthX > rightEyeX:
+        # The "right eye" is in the second quadrant of the face,
+        # while the "left eye" is in the fourth quadrant (from the
+        # viewer's perspective.) Swap the eyes' labels in order to
+        # simplify the rotation logic.
+        leftEyeX, rightEyeX = rightEyeX, leftEyeX
+        leftEyeY, rightEyeY = rightEyeY, leftEyeY
+
+    eyesCenter = (0.5 * (leftEyeX + rightEyeX),
+                  0.5 * (leftEyeY + rightEyeY))
+
+    eyesDeltaX = rightEyeX - leftEyeX
+    eyesDeltaY = rightEyeY - leftEyeY
+    eyesAngleRadians = math.atan2(eyesDeltaY, eyesDeltaX)
+    eyesAngleDegrees = eyesAngleRadians * 180.0 / math.pi
+
+    # Straighten the image and fill in gray for blank borders.
+    rotation = cv2.getRotationMatrix2D(
+        eyesCenter, eyesAngleDegrees, 1.0)
+    imageSize = image.shape[1::-1]
+    straight = cv2.warpAffine(image, rotation, imageSize,
+                              borderValue=(128, 128, 128))
+
+    # Straighten the coordinates of the features.
+    newCoords = rotateCoords(
+        coords, eyesCenter, eyesAngleRadians)
+
+    # Make the face as wide as the space between the ear bases.
+    w = abs(newCoords[16] - newCoords[6])
+    # Make the face square.
+    h = w
+    # Put the center point between the eyes at (0.5, 0.4) in
+    # proportion to the entire face.
+    minX = eyesCenter[0] - w / 2
+    if minX < 0:
+        w += minX
+        minX = 0
+    minY = eyesCenter[1] - h * 2 / 5
+    if minY < 0:
+        h += minY
+        minY = 0
+
+    # Crop the face.
+    crop = straight[int(minY):int(minY + h), int(minX):int(minX + w)]
+    # Return the crop.
+    return crop
+
+
+def describePositive(root, outdir):
+    filenames = glob.glob('%s/CAT_*/*.jpg' % root)
+
+    for imagePath in tqdm(filenames, total=len(filenames), desc='Process images...'):
+        # Open the '.cat' annotation file associated with this
+        # image.
+        if not os.path.isfile('%s.cat' % imagePath):
+            print('.cat file missing at %s' % imagePath)
+            continue
+        input = open('%s.cat' % imagePath, 'r')
+        # Read the coordinates of the cat features from the
+        # file. Discard the first number, which is the number
+        # of features.
+        coords = [int(i) for i in input.readline().split()[1:]]
+        # Read the image.
+        image = cv2.imread(imagePath)
+        # Straighten and crop the cat face.
+        crop = preprocessCatFace(coords, image)
+        if crop is None:
+            print('Failed to preprocess image at %s' % imagePath)
+            continue
+        # Save the crop to folders based on size
+        h, w, colors = crop.shape
+        if min(h, w) >= 64:
+            Path1 = imagePath.replace(root, outdir)
+            os.makedirs(os.path.dirname(Path1), exist_ok=True)
+            resized_crop = cv2.resize(crop, (64, 64))
+            cv2.imwrite(Path1, resized_crop)
+
+
+if __name__ == '__main__':
+    # Arguments
+    parser = argparse.ArgumentParser(
+        description='Crop cats from the CatDataset.'
+    )
+    parser.add_argument('root', type=str, help='Path to data directory containing "CAT_00" - "CAT_06" folders.')
+    args = parser.parse_args()
+
+    outdir = './cats'
+    os.makedirs(outdir, exist_ok=True)
+
+    describePositive(args.root, outdir)
+    print('Preprocessed {} images.'.format(len(glob.glob(os.path.join(outdir, '*/*.jpg')))))
+```
+
+### graf-main/data/preprocess_cub.py
+```
+import argparse
+import os
+from tqdm import tqdm
+from PIL import Image
+import numpy as np
+import glob
+from torchvision.transforms import CenterCrop
+
+
+if __name__ == '__main__':
+    # Arguments
+    parser = argparse.ArgumentParser(
+        description='Select split from CUB200-2011 and crop birds from images.'
+    )
+    parser.add_argument('root', type=str,
+                        help='Path to data directory containing bounding box file and "images" folder.')
+    parser.add_argument('maskdir', type=str, help='Path to data directory containing the segmentation masks.')
+    args = parser.parse_args()
+
+    imdir = os.path.join(args.root, 'images')
+    bboxfile = os.path.join(args.root, 'bounding_boxes.txt')
+    maskdir = args.maskdir
+    namefile = './cub/filtered_files.txt'
+    outdir = './cub'
+    os.makedirs(outdir, exist_ok=True)
+
+    # load files
+    with open(namefile, 'r') as f:
+        id_filename = [line.split(' ') for line in f.read().splitlines()]
+
+    # load bounding boxes
+    boxes = {}
+    with open(bboxfile, 'r') as f:
+        for line in f.read().splitlines():
+            k, x, y, w, h = line.split(' ')
+            box = float(x), float(y), float(x) + float(w), float(y) + float(h)  # (left, up, right, down)
+            boxes[k] = box
+
+    for i, (id, filename) in tqdm(enumerate(id_filename), total=len(id_filename)):
+        path = os.path.join(imdir, filename)
+        img = Image.open(path).convert('RGBA')
+
+        # load alpha
+        path = os.path.join(maskdir, filename.replace('.jpg', '.png'))
+        alpha = Image.open(path)
+        if alpha.mode == 'RGBA':
+            alpha = alpha.split()[-1]
+        alpha = alpha.convert('L')
+        img.putalpha(alpha)
+
+        # crop square images using bbox
+        img = img.crop(boxes[id])
+        s = max(img.size)
+        img = CenterCrop(s)(img)             # CenterCrop pads image to square using zeros (also for alpha)
+
+        # composite
+        img = np.array(img)
+        alpha = (img[..., 3:4]) > 127   # convert to binary mask
+        bg = np.array(255 * (1. - alpha), np.uint8)
+        img = img[..., :3] * alpha + bg
+        img = Image.fromarray(img)
+
+        img.save(os.path.join(outdir, '%06d.png' % i))
+
+    print('Preprocessed {} images.'.format(len(glob.glob(os.path.join(outdir, '*.png')))))
+```
+
+### graf-main/graf/config.py
+```
+import numpy as np
+import torch
+from torchvision.transforms import *
+
+from .datasets import *
+from .transforms import FlexGridRaySampler
+from .utils import polar_to_cartesian, look_at, to_phi, to_theta
+
+
+def save_config(outpath, config):
+    from yaml import safe_dump
+    with open(outpath, 'w') as f:
+        safe_dump(config, f)
+
+
+def update_config(config, unknown):
+    # update config given args
+    for idx,arg in enumerate(unknown):
+        if arg.startswith("--"):
+            if (':') in arg:
+                k1,k2 = arg.replace("--","").split(':')
+                argtype = type(config[k1][k2])
+                if argtype == bool:
+                    v = unknown[idx+1].lower() == 'true'
+                else:
+                    if config[k1][k2] is not None:
+                        v = type(config[k1][k2])(unknown[idx+1])
+                    else:
+                        v = unknown[idx+1]
+                print(f'Changing {k1}:{k2} ---- {config[k1][k2]} to {v}')
+                config[k1][k2] = v
+            else:
+                k = arg.replace('--','')
+                v = unknown[idx+1]
+                argtype = type(config[k])
+                print(f'Changing {k} ---- {config[k]} to {v}')
+                config[k] = v
+
+    return config
+
+
+def get_data(config):
+    H = W = imsize = config['data']['imsize']
+    dset_type = config['data']['type']
+    fov = config['data']['fov']
+
+    transforms = Compose([
+        Resize(imsize),
+        ToTensor(),
+        Lambda(lambda x: x * 2 - 1),
+    ])
+
+    kwargs = {
+        'data_dirs': config['data']['datadir'],
+        'transforms': transforms
+    }
+
+    if dset_type == 'carla':
+        dset = Carla(**kwargs)
+
+    elif dset_type == 'drr':
+        dset = DRR(**kwargs)
+
+    elif dset_type == 'celebA':
+        assert imsize <= 128, 'cropped GT data has lower resolution than imsize, consider using celebA_hq instead'
+        transforms.transforms.insert(0, RandomHorizontalFlip())
+        transforms.transforms.insert(0, CenterCrop(108))
+
+        dset = CelebA(**kwargs)
+
+    elif dset_type == 'celebA_hq':
+        transforms.transforms.insert(0, RandomHorizontalFlip())
+        transforms.transforms.insert(0, CenterCrop(650))
+
+        dset = CelebAHQ(**kwargs)
+
+    elif dset_type == 'cats':
+      transforms.transforms.insert(0, RandomHorizontalFlip())
+      dset = Cats(**kwargs)
+  
+    elif dset_type == 'cub':
+        dset = CUB(**kwargs)
+
+    dset.H = dset.W = imsize
+    dset.focal = W/2 * 1 / np.tan((.5 * fov * np.pi/180.))
+    radius = config['data']['radius']
+    render_radius = radius
+    if isinstance(radius, str):
+        radius = tuple(float(r) for r in radius.split(','))
+        render_radius = max(radius)
+    dset.radius = radius
+
+    # compute render poses
+    N = 40
+    theta = 0.5 * (to_theta(config['data']['vmin']) + to_theta(config['data']['vmax']))
+    angle_range = (to_phi(config['data']['umin']), to_phi(config['data']['umax']))
+    render_poses = get_render_poses(render_radius, angle_range=angle_range, theta=theta, N=N)
+
+    print('Loaded {}'.format(dset_type), imsize, len(dset), render_poses.shape, [H,W,dset.focal,dset.radius], config['data']['datadir'])
+    return dset, [H,W,dset.focal,dset.radius], render_poses
+
+
+def get_render_poses(radius, angle_range=(0, 360), theta=0, N=40, swap_angles=False):
+    poses = []
+    theta = max(0.1, theta)
+    for angle in np.linspace(angle_range[0],angle_range[1],N+1)[:-1]:
+        angle = max(0.1, angle)
+        if swap_angles:
+            loc = polar_to_cartesian(radius, theta, angle, deg=True)
+        else:
+            loc = polar_to_cartesian(radius, angle, theta, deg=True)
+        R = look_at(loc)[0]
+        RT = np.concatenate([R, loc.reshape(3, 1)], axis=1)
+        poses.append(RT)
+    return torch.from_numpy(np.stack(poses))
+
+
+def build_models(config, disc=True):
+    from argparse import Namespace
+    from submodules.nerf_pytorch.run_nerf_mod import create_nerf
+    from .models.generator import Generator
+    from .models.discriminator import Discriminator
+
+    config_nerf = Namespace(**config['nerf'])
+    # Update config for NERF
+    config_nerf.chunk = min(config['training']['chunk'], 1024*config['training']['batch_size'])     # let batch size for training with patches limit the maximal memory
+    config_nerf.netchunk = config['training']['netchunk']
+    config_nerf.white_bkgd = config['data']['white_bkgd']
+    config_nerf.feat_dim = config['z_dist']['dim']
+    config_nerf.feat_dim_appearance = config['z_dist']['dim_appearance']
+
+    render_kwargs_train, render_kwargs_test, params, named_parameters = create_nerf(config_nerf)
+
+    bds_dict = {'near': config['data']['near'], 'far': config['data']['far']}
+    render_kwargs_train.update(bds_dict)
+    render_kwargs_test.update(bds_dict)
+
+    ray_sampler = FlexGridRaySampler(N_samples=config['ray_sampler']['N_samples'],
+                                     min_scale=config['ray_sampler']['min_scale'],
+                                     max_scale=config['ray_sampler']['max_scale'],
+                                     scale_anneal=config['ray_sampler']['scale_anneal'],
+                                     orthographic=config['data']['orthographic'])
+
+    H, W, f, r = config['data']['hwfr']
+    generator = Generator(H, W, f, r,
+                          ray_sampler=ray_sampler,
+                          render_kwargs_train=render_kwargs_train, render_kwargs_test=render_kwargs_test,
+                          parameters=params, named_parameters=named_parameters,
+                          chunk=config_nerf.chunk,
+                          range_u=(float(config['data']['umin']), float(config['data']['umax'])),
+                          range_v=(float(config['data']['vmin']), float(config['data']['vmax'])),
+                          orthographic=config['data']['orthographic'],
+                          )
+
+    discriminator = None
+    if disc:
+        disc_kwargs = {'nc': 3,       # channels for patch discriminator
+                       'ndf': config['discriminator']['ndf'],
+                       'imsize': int(np.sqrt(config['ray_sampler']['N_samples']))}
+
+        discriminator = Discriminator(**disc_kwargs)
+
+    return generator, discriminator
+
+
+def build_lr_scheduler(optimizer, config, last_epoch=-1):
+    import torch.optim as optim
+    step_size = config['training']['lr_anneal_every']
+    if isinstance(step_size, str):
+        milestones = [int(m) for m in step_size.split(',')]
+        lr_scheduler = optim.lr_scheduler.MultiStepLR(
+            optimizer,
+            milestones=milestones,
+            gamma=config['training']['lr_anneal'],
+            last_epoch=last_epoch)
+    else:
+        lr_scheduler = optim.lr_scheduler.StepLR(
+            optimizer,
+            step_size=step_size,
+            gamma=config['training']['lr_anneal'],
+            last_epoch=last_epoch
+        )
+    return lr_scheduler
+```
+
+### graf-main/graf/datasets.py
+```
+import glob
+import numpy as np
+from PIL import Image
+
+from torchvision.datasets.vision import VisionDataset
+
+
+class ImageDataset(VisionDataset):
+    """
+    Load images from multiple data directories.
+    Folder structure: data_dir/filename.png
+    """
+
+    def __init__(self, data_dirs, transforms=None):
+        # Use multiple root folders
+        if not isinstance(data_dirs, list):
+            data_dirs = [data_dirs]
+
+        # initialize base class
+        VisionDataset.__init__(self, root=data_dirs, transform=transforms)
+
+        self.filenames = []
+        root = []
+
+        for ddir in self.root:
+            filenames = self._get_files(ddir)
+            self.filenames.extend(filenames)
+            root.append(ddir)
+
+    def __len__(self):
+        return len(self.filenames)
+
+    @staticmethod
+    def _get_files(root_dir):
+        return glob.glob(f'{root_dir}/*.png') + glob.glob(f'{root_dir}/*.jpg')
+
+    def __getitem__(self, idx):
+        filename = self.filenames[idx]
+        img = Image.open(filename).convert('RGB')
+        if self.transform is not None:
+            img = self.transform(img)
+        return img
+
+
+class DRR(ImageDataset):
+    def __init__(self, *args, **kwargs):
+        super(DRR, self).__init__(*args, **kwargs)
+
+
+class Carla(ImageDataset):
+    def __init__(self, *args, **kwargs):
+        super(Carla, self).__init__(*args, **kwargs)
+
+
+class CelebA(ImageDataset):
+    def __init__(self, *args, **kwargs):
+        super(CelebA, self).__init__(*args, **kwargs)
+
+
+class CUB(ImageDataset):
+    def __init__(self, *args, **kwargs):
+        super(CUB, self).__init__(*args, **kwargs)
+        
+
+class Cats(ImageDataset):
+    def __init__(self, *args, **kwargs):
+      super(Cats, self).__init__(*args, **kwargs)
+    
+    @staticmethod
+    def _get_files(root_dir):
+      return glob.glob(f'{root_dir}/CAT_*/*.jpg')
+
+
+class CelebAHQ(ImageDataset):
+    def __init__(self, *args, **kwargs):
+        super(CelebAHQ, self).__init__(*args, **kwargs)
+    
+    def _get_files(self, root):
+        return glob.glob(f'{root}/*.npy')
+    
+    def __getitem__(self, idx):
+        img = np.load(self.filenames[idx]).squeeze(0).transpose(1,2,0)
+        if img.dtype == np.uint8:
+            pass
+        elif img.dtype == np.float32:
+            img = (img * 255).astype(np.uint8)
+        else:
+            raise NotImplementedError
+        img = Image.fromarray(img).convert('RGB')
+        if self.transform is not None:
+            img = self.transform(img)
+        
+        return img
+```
+
+### graf-main/graf/gan_training.py
+```
+import torch
+import numpy as np
+import os
+from tqdm import tqdm
+
+from submodules.GAN_stability.gan_training.train import toggle_grad, Trainer as TrainerBase
+from submodules.GAN_stability.gan_training.eval import Evaluator as EvaluatorBase
+from submodules.GAN_stability.gan_training.metrics import FIDEvaluator, KIDEvaluator
+
+from .utils import save_video, color_depth_map
+
+
+class Trainer(TrainerBase):
+    def __init__(self, *args, use_amp=False, **kwargs):
+        super(Trainer, self).__init__(*args, **kwargs)
+        self.use_amp = use_amp
+        if self.use_amp:
+            self.scaler = torch.cuda.amp.GradScaler()
+
+    def generator_trainstep(self, y, z):
+        if not self.use_amp:
+            return super(Trainer, self).generator_trainstep(y, z)
+        assert (y.size(0) == z.size(0))
+        toggle_grad(self.generator, True)
+        toggle_grad(self.discriminator, False)
+        self.generator.train()
+        self.discriminator.train()
+        self.g_optimizer.zero_grad()
+
+        with torch.cuda.amp.autocast():
+            x_fake = self.generator(z, y)
+            d_fake = self.discriminator(x_fake, y)
+            gloss = self.compute_loss(d_fake, 1)
+        self.scaler.scale(gloss).backward()
+
+        self.scaler.step(self.g_optimizer)
+        self.scaler.update()
+
+        return gloss.item()
+
+    def discriminator_trainstep(self, x_real, y, z, data_aug):
+        return super(Trainer, self).discriminator_trainstep(x_real, y, z, data_aug)       # spectral norm raises error for when using amp
+
+
+class Evaluator(EvaluatorBase):
+    def __init__(self, eval_fid_kid, *args, **kwargs):
+        super(Evaluator, self).__init__(*args, **kwargs)
+        if eval_fid_kid:
+            self.inception_eval = FIDEvaluator(
+              device=self.device,
+              batch_size=self.batch_size,
+              resize=True,
+              n_samples=20000,
+              n_samples_fake=1000,
+            )
+
+    def get_rays(self, pose):
+        return self.generator.val_ray_sampler(self.generator.H, self.generator.W,
+                                              self.generator.focal, pose)[0]
+
+    def create_samples(self, z, poses=None):
+        self.generator.eval()
+        N_samples = len(z)
+        device = self.generator.device
+        if self.batch_size > 1:
+            z = z.to(device).split(self.batch_size)
+        if poses is None:
+            rays = [None] * len(z)
+        else:
+            rays = torch.stack([self.get_rays(poses[i].to(device)) for i in range(N_samples)])
+            rays = rays.split(self.batch_size)
+
+        rgb, disp, acc = [], [], []
+        with torch.no_grad():
+            if self.batch_size > 1:
+                for z_i, rays_i in tqdm(zip(z, rays), total=len(z), desc='Create samples...'):
+                    bs = len(z_i)
+                    if rays_i is not None:
+                        rays_i = rays_i.permute(1, 0, 2, 3).flatten(1, 2)       # Bx2x(HxW)xC -> 2x(BxHxW)x3
+                    rgb_i, disp_i, acc_i, _ = self.generator(z_i, rays=rays_i)
+
+                    reshape = lambda x: x.view(bs, self.generator.H, self.generator.W, x.shape[1]).permute(0, 3, 1, 2)  # (NxHxW)xC -> NxCxHxW
+                    rgb.append(reshape(rgb_i).cpu())
+                    disp.append(reshape(disp_i).cpu())
+                    acc.append(reshape(acc_i).cpu())
+            else:
+                for rays_i in rays:
+                    bs = len(z)
+                    if rays_i is not None:
+                        rays_i = rays_i.permute(1, 0, 2, 3).flatten(1, 2)       # Bx2x(HxW)xC -> 2x(BxHxW)x3
+                    rgb_i, disp_i, acc_i, _ = self.generator(z, rays=rays_i)
+
+                    reshape = lambda x: x.view(bs, self.generator.H, self.generator.W, x.shape[1]).permute(0, 3, 1, 2)  # (NxHxW)xC -> NxCxHxW
+                    rgb.append(reshape(rgb_i).cpu())
+                    disp.append(reshape(disp_i).cpu())
+                    acc.append(reshape(acc_i).cpu())
+
+        rgb = torch.cat(rgb)
+        disp = torch.cat(disp)
+        acc = torch.cat(acc)
+
+        depth = self.disp_to_cdepth(disp)
+
+        return rgb, depth, acc
+
+    def make_video(self, basename, z, poses, as_gif=True):
+        """ Generate images and save them as video.
+        z (N_samples, zdim): latent codes
+        poses (N_frames, 3 x 4): camera poses for all frames of video
+        """
+        N_samples, N_frames = len(z), len(poses)
+
+        # reshape inputs
+        z = z.unsqueeze(1).expand(-1, N_frames, -1).flatten(0, 1)  # (N_samples x N_frames) x z_dim
+        poses = poses.unsqueeze(0) \
+            .expand(N_samples, -1, -1, -1).flatten(0, 1)  # (N_samples x N_frames) x 3 x 4
+
+        rgbs, depths, accs = self.create_samples(z, poses=poses)
+
+        reshape = lambda x: x.view(N_samples, N_frames, *x.shape[1:])
+        rgbs = reshape(rgbs)
+        depths = reshape(depths)
+        print('Done, saving', rgbs.shape)
+
+        fps = min(int(N_frames / 2.), 25)          # aim for at least 2 second video
+        for i in range(N_samples):
+            save_video(rgbs[i], basename + '{:04d}_rgb.mp4'.format(i), as_gif=as_gif, fps=fps)
+            save_video(depths[i], basename + '{:04d}_depth.mp4'.format(i), as_gif=as_gif, fps=fps)
+
+    def disp_to_cdepth(self, disps):
+        """Convert depth to color values"""
+        if (disps == 2e10).all():           # no values predicted
+            return torch.ones_like(disps)
+
+        near, far = self.generator.render_kwargs_test['near'], self.generator.render_kwargs_test['far']
+
+        disps = disps / 2 + 0.5  # [-1, 1] -> [0, 1]
+
+        depth = 1. / torch.max(1e-10 * torch.ones_like(disps), disps)  # disparity -> depth
+        depth[disps == 1e10] = far  # set undefined values to far plane
+
+        # scale between near, far plane for better visualization
+        depth = (depth - near) / (far - near)
+
+        depth = np.stack([color_depth_map(d) for d in depth[:, 0].detach().cpu().numpy()])  # convert to color
+        depth = (torch.from_numpy(depth).permute(0, 3, 1, 2) / 255.) * 2 - 1  # [0, 255] -> [-1, 1]
+
+        return depth
+
+    def compute_fid_kid(self, sample_generator=None):
+        if sample_generator is None:
+            def sample():
+                while True:
+                    z = self.zdist.sample((self.batch_size,))
+                    rgb, _, _ = self.create_samples(z)
+                    # convert to uint8 and back to get correct binning
+                    rgb = (rgb / 2 + 0.5).mul_(255).clamp_(0, 255).to(torch.uint8).to(torch.float) / 255. * 2 - 1
+                    yield rgb.cpu()
+            
+            sample_generator = sample()
+
+        fid, (kids, vars) = self.inception_eval.get_fid_kid(sample_generator)
+        kid = np.mean(kids)
+        return fid, kid
+```
+
+### graf-main/graf/transforms.py
+```
+import torch
+from math import sqrt, exp
+
+from submodules.nerf_pytorch.run_nerf_helpers_mod import get_rays, get_rays_ortho
+
+
+class ImgToPatch(object):
+    def __init__(self, ray_sampler, hwf):
+        self.ray_sampler = ray_sampler
+        self.hwf = hwf      # camera intrinsics
+
+    def __call__(self, img):
+        rgbs = []
+        for img_i in img:
+            pose = torch.eye(4)         # use dummy pose to infer pixel values
+            _, selected_idcs, pixels_i = self.ray_sampler(H=self.hwf[0], W=self.hwf[1], focal=self.hwf[2], pose=pose)
+            if selected_idcs is not None:
+                rgbs_i = img_i.flatten(1, 2).t()[selected_idcs]
+            else:
+                rgbs_i = torch.nn.functional.grid_sample(img_i.unsqueeze(0), 
+                                     pixels_i.unsqueeze(0), mode='bilinear', align_corners=True)[0]
+                rgbs_i = rgbs_i.flatten(1, 2).t()
+            rgbs.append(rgbs_i)
+
+        rgbs = torch.cat(rgbs, dim=0)       # (B*N)x3
+
+        return rgbs
+
+
+class RaySampler(object):
+    def __init__(self, N_samples, orthographic=False):
+        super(RaySampler, self).__init__()
+        self.N_samples = N_samples
+        self.scale = torch.ones(1,).float()
+        self.return_indices = True
+        self.orthographic = orthographic
+
+    def __call__(self, H, W, focal, pose):
+        if self.orthographic:
+            size_h, size_w = focal      # Hacky
+            rays_o, rays_d = get_rays_ortho(H, W, pose, size_h, size_w)
+        else:
+            rays_o, rays_d = get_rays(H, W, focal, pose)
+
+        select_inds = self.sample_rays(H, W)
+
+        if self.return_indices:
+            rays_o = rays_o.view(-1, 3)[select_inds]
+            rays_d = rays_d.view(-1, 3)[select_inds]
+
+            h = (select_inds // W) / float(H) - 0.5
+            w = (select_inds %  W) / float(W) - 0.5
+
+            hw = torch.stack([h,w]).t()
+
+        else:
+            rays_o = torch.nn.functional.grid_sample(rays_o.permute(2,0,1).unsqueeze(0), 
+                                 select_inds.unsqueeze(0), mode='bilinear', align_corners=True)[0]
+            rays_d = torch.nn.functional.grid_sample(rays_d.permute(2,0,1).unsqueeze(0), 
+                                 select_inds.unsqueeze(0), mode='bilinear', align_corners=True)[0]
+            rays_o = rays_o.permute(1,2,0).view(-1, 3)
+            rays_d = rays_d.permute(1,2,0).view(-1, 3)
+
+            hw = select_inds
+            select_inds = None
+
+        return torch.stack([rays_o, rays_d]), select_inds, hw
+
+    def sample_rays(self, H, W):
+        raise NotImplementedError
+
+
+class FullRaySampler(RaySampler):
+    def __init__(self, **kwargs):
+        super(FullRaySampler, self).__init__(N_samples=None, **kwargs)
+
+    def sample_rays(self, H, W):
+        return torch.arange(0, H*W)
+
+
+class FlexGridRaySampler(RaySampler):
+    def __init__(self, N_samples, random_shift=True, random_scale=True, min_scale=0.25, max_scale=1., scale_anneal=-1,
+                 **kwargs):
+        self.N_samples_sqrt = int(sqrt(N_samples))
+        super(FlexGridRaySampler, self).__init__(self.N_samples_sqrt**2, **kwargs)
+
+        self.random_shift = random_shift
+        self.random_scale = random_scale
+
+        self.min_scale = min_scale
+        self.max_scale = max_scale
+
+        # nn.functional.grid_sample grid value range in [-1,1]
+        self.w, self.h = torch.meshgrid([torch.linspace(-1,1,self.N_samples_sqrt),
+                                         torch.linspace(-1,1,self.N_samples_sqrt)])
+        self.h = self.h.unsqueeze(2)
+        self.w = self.w.unsqueeze(2)
+
+        # directly return grid for grid_sample
+        self.return_indices = False
+
+        self.iterations = 0
+        self.scale_anneal = scale_anneal
+
+    def sample_rays(self, H, W):
+
+        if self.scale_anneal>0:
+            k_iter = self.iterations // 1000 * 3
+            min_scale = max(self.min_scale, self.max_scale * exp(-k_iter*self.scale_anneal))
+            min_scale = min(0.9, min_scale)
+        else:
+            min_scale = self.min_scale
+
+        scale = 1
+        if self.random_scale:
+            scale = torch.Tensor(1).uniform_(min_scale, self.max_scale)
+            h = self.h * scale 
+            w = self.w * scale 
+
+        if self.random_shift:
+            max_offset = 1-scale.item()
+            h_offset = torch.Tensor(1).uniform_(0, max_offset) * (torch.randint(2,(1,)).float()-0.5)*2
+            w_offset = torch.Tensor(1).uniform_(0, max_offset) * (torch.randint(2,(1,)).float()-0.5)*2
+
+            h += h_offset
+            w += w_offset
+
+        self.scale = scale
+
+        return torch.cat([h, w], dim=2)
+```
+
+### graf-main/graf/utils.py
+```
+import numpy as np
+import torch
+import imageio
+import os
+import glob
+from torch.utils import data
+from torch.utils.data import Dataset
+from PIL import Image
+
+
+class  ImageFolder(Dataset):
+    """docstring for ArtDataset"""
+    def __init__(self, root, transform=None):
+        super( ImageFolder, self).__init__()
+        assert os.path.exists(root), f"Error: {root} not found!"
+        self.root = root
+
+        self.frame = self._parse_frame()
+        self.transform = transform
+
+    def _parse_frame(self):
+        frame = []
+        folders = glob.glob(os.path.join(self.root, '*'))
+        for folder in folders:
+            for f in glob.glob(os.path.join(folder, '*.png')):
+                frame.append(f)
+        return frame
+
+    def __len__(self):
+        return len(self.frame)
+
+    def __getitem__(self, idx):
+        file = self.frame[idx]
+        img = Image.open(file).convert('RGB')
+
+        if self.transform:
+            img = self.transform(img)
+
+        return img
+
+def InfiniteSampler(n):
+    """Data sampler"""
+    i = n - 1
+    order = np.random.permutation(n)
+    while True:
+        yield order[i]
+        i += 1
+        if i >= n:
+            np.random.seed()
+            order = np.random.permutation(n)
+            i = 0
+
+class InfiniteSamplerWrapper(data.sampler.Sampler):
+    """Data sampler wrapper"""
+    def __init__(self, data_source):
+        self.num_samples = len(data_source)
+
+    def __iter__(self):
+        return iter(InfiniteSampler(self.num_samples))
+
+    def __len__(self):
+        return 2 ** 15
+
+def get_nsamples(data_loader, N):
+  x = []
+  n = 0
+  while n < N:
+    x_next = next(data_loader)
+    x_next = x_next.cuda(non_blocking=True)
+    x.append(x_next)
+    n += x_next.size(0)
+  x = torch.cat(x, dim=0)[:N]
+  return x
+
+
+def count_trainable_parameters(model):
+  model_parameters = filter(lambda p: p.requires_grad, model.parameters())
+  return sum([np.prod(p.size()) for p in model_parameters])
+
+
+def save_video(imgs, fname, as_gif=False, fps=24, quality=8):
+    # convert to np.uint8
+    imgs = (255 * np.clip(imgs.permute(0, 2, 3, 1).detach().cpu().numpy() / 2 + 0.5, 0, 1)).astype(np.uint8)
+    imageio.mimwrite(fname, imgs, fps=fps, quality=quality)
+    
+    if as_gif:  # save as gif, too
+        os.system(f'ffmpeg -i {fname} -r 15 '
+                  f'-vf "scale=512:-1,split[s0][s1];[s0]palettegen[p];[s1][p]paletteuse" {os.path.splitext(fname)[0] + ".gif"}')
+
+
+def color_depth_map(depths, scale=None):
+    """
+    Color an input depth map.
+
+    Arguments:
+        depths -- HxW numpy array of depths
+        [scale=None] -- scaling the values (defaults to the maximum depth)
+
+    Returns:
+        colored_depths -- HxWx3 numpy array visualizing the depths
+    """
+
+    _color_map_depths = np.array([
+      [0, 0, 0],  # 0.000
+      [0, 0, 255],  # 0.114
+      [255, 0, 0],  # 0.299
+      [255, 0, 255],  # 0.413
+      [0, 255, 0],  # 0.587
+      [0, 255, 255],  # 0.701
+      [255, 255, 0],  # 0.886
+      [255, 255, 255],  # 1.000
+      [255, 255, 255],  # 1.000
+    ]).astype(float)
+    _color_map_bincenters = np.array([
+      0.0,
+      0.114,
+      0.299,
+      0.413,
+      0.587,
+      0.701,
+      0.886,
+      1.000,
+      2.000,  # doesn't make a difference, just strictly higher than 1
+    ])
+  
+    if scale is None:
+      scale = depths.max()
+  
+    values = np.clip(depths.flatten() / scale, 0, 1)
+    # for each value, figure out where they fit in in the bincenters: what is the last bincenter smaller than this value?
+    lower_bin = ((values.reshape(-1, 1) >= _color_map_bincenters.reshape(1, -1)) * np.arange(0, 9)).max(axis=1)
+    lower_bin_value = _color_map_bincenters[lower_bin]
+    higher_bin_value = _color_map_bincenters[lower_bin + 1]
+    alphas = (values - lower_bin_value) / (higher_bin_value - lower_bin_value)
+    colors = _color_map_depths[lower_bin] * (1 - alphas).reshape(-1, 1) + _color_map_depths[
+      lower_bin + 1] * alphas.reshape(-1, 1)
+    return colors.reshape(depths.shape[0], depths.shape[1], 3).astype(np.uint8)
+
+
+# Virtual camera utils
+
+
+def to_sphere(u, v):
+    theta = 2 * np.pi * u
+    phi = np.arccos(1 - 2 * v)
+    cx = np.sin(phi) * np.cos(theta)
+    cy = np.sin(phi) * np.sin(theta)
+    cz = np.cos(phi)
+    s = np.stack([cx, cy, cz])
+    return s
+
+
+def polar_to_cartesian(r, theta, phi, deg=True):
+    if deg:
+        phi = phi * np.pi / 180
+        theta = theta * np.pi / 180
+    cx = np.sin(phi) * np.cos(theta)
+    cy = np.sin(phi) * np.sin(theta)
+    cz = np.cos(phi)
+    return r * np.stack([cx, cy, cz])
+
+
+def to_uv(loc):
+    # normalize to unit sphere
+    loc = loc / loc.norm(dim=1, keepdim=True)
+
+    cx, cy, cz = loc.t()
+    v = (1 - cz) / 2
+
+    phi = torch.acos(cz)
+    sin_phi = torch.sin(phi)
+
+    # ensure we do not divide by zero
+    eps = 1e-8
+    sin_phi[sin_phi.abs() < eps] = eps
+
+    theta = torch.acos(cx / sin_phi)
+
+    # check for sign of phi
+    cx_rec = sin_phi * torch.cos(theta)
+    if not np.isclose(cx.numpy(), cx_rec.numpy(), atol=1e-5).all():
+        sin_phi = -sin_phi
+
+    # check for sign of theta
+    cy_rec = sin_phi * torch.sin(theta)
+    if not np.isclose(cy.numpy(), cy_rec.numpy(), atol=1e-5).all():
+        theta = -theta
+
+    u = theta / (2 * np.pi)
+    assert np.isclose(to_sphere(u, v).detach().cpu().numpy(), loc.t().detach().cpu().numpy(), atol=1e-5).all()
+
+    return u, v
+
+
+def to_phi(u):
+    return 360 * u  # 2*pi*u*180/pi
+
+
+def to_theta(v):
+    return np.arccos(1 - 2 * v) * 180. / np.pi
+
+
+def sample_on_sphere(range_u=(0, 1), range_v=(0, 1)):
+    u = np.random.uniform(*range_u)
+    v = np.random.uniform(*range_v)
+    return to_sphere(u, v)
+
+
+def look_at(eye, at=np.array([0, 0, 0]), up=np.array([0, 0, 1]), eps=1e-5):
+    at = at.astype(float).reshape(1, 3)
+    up = up.astype(float).reshape(1, 3)
+
+    eye = eye.reshape(-1, 3)
+    up = up.repeat(eye.shape[0] // up.shape[0], axis=0)
+    eps = np.array([eps]).reshape(1, 1).repeat(up.shape[0], axis=0)
+
+    z_axis = eye - at
+    z_axis /= np.max(np.stack([np.linalg.norm(z_axis, axis=1, keepdims=True), eps]))
+
+    x_axis = np.cross(up, z_axis)
+    x_axis /= np.max(np.stack([np.linalg.norm(x_axis, axis=1, keepdims=True), eps]))
+
+    y_axis = np.cross(z_axis, x_axis)
+    y_axis /= np.max(np.stack([np.linalg.norm(y_axis, axis=1, keepdims=True), eps]))
+
+    r_mat = np.concatenate((x_axis.reshape(-1, 3, 1), y_axis.reshape(-1, 3, 1), z_axis.reshape(-1, 3, 1)), axis=2)
+
+    return r_mat
+```
+
+### graf-main/graf/models/discriminator.py
+```
+import torch
+import torch.nn as nn
+from torch.nn.utils import spectral_norm
+import torch.nn.functional as F
+import random
+
+
+def conv2d(*args, **kwargs):
+    return spectral_norm(nn.Conv2d(*args, **kwargs))
+
+
+def batchNorm2d(*args, **kwargs):
+    return nn.BatchNorm2d(*args, **kwargs)
+
+
+class Swish(nn.Module):
+    def forward(self, feat):
+        return feat * torch.sigmoid(feat)
+
+
+class GLU(nn.Module):
+    def forward(self, x):
+        nc = x.size(1)
+        assert nc % 2 == 0, 'channels dont divide 2!'
+        nc = int(nc/2)
+        return x[:, :nc] * torch.sigmoid(x[:, nc:])
+
+
+class DownBlockComp(nn.Module):
+    def __init__(self, in_planes, out_planes):
+        super(DownBlockComp, self).__init__()
+
+        self.main = nn.Sequential(
+            conv2d(in_planes, out_planes, 4, 2, 1, bias=False),
+            batchNorm2d(out_planes), nn.LeakyReLU(0.2, inplace=True),
+            conv2d(out_planes, out_planes, 3, 1, 1, bias=False),
+            batchNorm2d(out_planes), nn.LeakyReLU(0.2)
+            )
+
+        self.direct = nn.Sequential(
+            nn.AvgPool2d(2, 2),
+            conv2d(in_planes, out_planes, 1, 1, 0, bias=False),
+            batchNorm2d(out_planes), nn.LeakyReLU(0.2))
+
+    def forward(self, feat):
+        return (self.main(feat) + self.direct(feat)) / 2
+
+
+class SEBlock(nn.Module):
+    def __init__(self, ch_in, ch_out):
+        super().__init__()
+
+        self.main = nn.Sequential(  nn.AdaptiveAvgPool2d(4), 
+                                    conv2d(ch_in, ch_out, 4, 1, 0, bias=False), Swish(),
+                                    conv2d(ch_out, ch_out, 1, 1, 0, bias=False), nn.Sigmoid() )
+
+    def forward(self, feat_small, feat_big):
+        return feat_big * self.main(feat_small)
+
+
+class DownBlock(nn.Module):
+    def __init__(self, in_planes, out_planes):
+        super(DownBlock, self).__init__()
+
+        self.main = nn.Sequential(
+            conv2d(in_planes, out_planes, 4, 2, 1, bias=False),
+            batchNorm2d(out_planes), nn.LeakyReLU(0.2, inplace=True),
+            )
+
+    def forward(self, feat):
+        return self.main(feat)
+
+
+class SimpleDecoder(nn.Module):
+    """docstring for CAN_SimpleDecoder"""
+    def __init__(self, nfc_in=64, nc=3):
+        super(SimpleDecoder, self).__init__()
+
+        nfc_multi = {4:16, 8:8, 16:4, 32:2, 64:2, 128:1, 256:0.5, 512:0.25, 1024:0.125}
+        nfc = {}
+        for k, v in nfc_multi.items():
+            nfc[k] = int(v*32)
+
+        def upBlock(in_planes, out_planes):
+            block = nn.Sequential(
+                nn.Upsample(scale_factor=2, mode='nearest'),
+                conv2d(in_planes, out_planes*2, 3, 1, 1, bias=False),
+                batchNorm2d(out_planes*2), GLU())
+            return block
+
+        self.main = nn.Sequential(  nn.AdaptiveAvgPool2d(8),
+                                    upBlock(nfc_in, nfc[16]),
+                                    upBlock(nfc[16], nfc[32]),
+                                    upBlock(nfc[32], nfc[64]),
+                                    upBlock(nfc[64], nfc[128]),
+                                    conv2d(nfc[128], nc, 3, 1, 1, bias=False),
+                                    nn.Tanh() )
+
+    def forward(self, input):
+        # input shape: c x 4 x 4
+        return self.main(input)
+
+
+class Discriminator(nn.Module):
+    def __init__(self, nc=3, ndf=64, imsize=64):
+        super(Discriminator, self).__init__()
+        self.nc = nc
+        assert(imsize==32 or imsize==64 or imsize==128)
+        self.im_size = imsize
+
+        nfc_multi = {4:16, 8:16, 16:8, 32:4, 64:2, 128:1, 256:0.5, 512:0.25, 1024:0.125}
+        nfc = {}
+        for k, v in nfc_multi.items():
+            nfc[k] = int(v*ndf)
+
+        self.down_from_big = nn.Sequential( 
+                                    conv2d(nc, nfc[512], 3, 1, 1, bias=False), 
+                                    nn.LeakyReLU(0.2, inplace=True) )
+
+        self.down_4  = DownBlockComp(nfc[512], nfc[256])
+        self.down_8  = DownBlockComp(nfc[256], nfc[128])
+
+        sequence = [conv2d(nfc[128] , nfc[32], 1, 1, 0, bias=False),
+                       batchNorm2d(nfc[32]),
+                       nn.LeakyReLU(0.2, inplace=True)]
+
+        self.dag_heads = []
+        for i in range(4):
+            head = sequence + [conv2d(nfc[32], 1, 4, 1, 0, bias=False)]
+            self.dag_heads.append(nn.Sequential(*head))
+        self.dag_heads = nn.ModuleList(self.dag_heads)
+
+        self.se_2_16 = SEBlock(nfc[512], nfc[256])
+        self.se_4_32 = SEBlock(nfc[256], nfc[128])
+        
+        self.decoder_big = SimpleDecoder(nfc[128], nc)
+        self.decoder_part = SimpleDecoder(nfc[256], nc)
+
+    def forward(self, input, y=None):
+        feat_2 = self.down_from_big(input)    
+        feat_4 = self.down_4(feat_2)
+        feat_16 = self.se_2_16(feat_2, feat_4)
+        
+        feat_8 = self.down_8(feat_16)
+        feat_last = self.se_4_32(feat_4, feat_8)
+
+        dag_outputs = []
+        for i in range(4):
+            dag_outputs.append(self.dag_heads[i](feat_last).view(-1))
+
+        if y[0] == 1:    
+            rec_img_big = self.decoder_big(feat_last)
+
+            part = random.randint(0, 3)
+            rec_img_part = None
+            if part==0:
+                rec_img_part = self.decoder_part(feat_16[:,:,:8,:8])
+            if part==1:
+                rec_img_part = self.decoder_part(feat_16[:,:,:8,8:])
+            if part==2:
+                rec_img_part = self.decoder_part(feat_16[:,:,8:,:8])
+            if part==3:
+                rec_img_part = self.decoder_part(feat_16[:,:,8:,8:])
+
+            return dag_outputs, [rec_img_big, rec_img_part], part, input
+
+        return dag_outputs
+```
+
+### graf-main/graf/models/generator.py
+```
+import numpy as np
+import torch
+from ..utils import sample_on_sphere, look_at, to_sphere
+from ..transforms import FullRaySampler
+from submodules.nerf_pytorch.run_nerf_mod import render, run_network            # import conditional render
+from functools import partial
+
+
+class Generator(object):
+    def __init__(self, H, W, focal, radius, ray_sampler, render_kwargs_train, render_kwargs_test, parameters, named_parameters,
+                 range_u=(0,1), range_v=(0.01,0.49), chunk=None, device='cuda', orthographic=False):
+        self.device = device
+        self.H = int(H)
+        self.W = int(W)
+        self.focal = focal
+        self.radius = radius
+        self.range_u = range_u
+        self.range_v = range_v
+        self.chunk = chunk
+        coords = torch.from_numpy(np.stack(np.meshgrid(np.arange(H), np.arange(W), indexing='ij'), -1))
+        self.coords = coords.view(-1, 2)
+
+        self.ray_sampler = ray_sampler
+        self.val_ray_sampler = FullRaySampler(orthographic=orthographic)
+        self.render_kwargs_train = render_kwargs_train
+        self.render_kwargs_test = render_kwargs_test
+        self.initial_raw_noise_std = self.render_kwargs_train['raw_noise_std']
+        self._parameters = parameters
+        self._named_parameters = named_parameters
+        self.module_dict = {'generator': self.render_kwargs_train['network_fn']}
+        for name, module in [('generator_fine', self.render_kwargs_train['network_fine'])]:
+            if module is not None:
+                self.module_dict[name] = module
+        
+        for k, v in self.module_dict.items():
+            if k in ['generator', 'generator_fine']:
+                continue       # parameters already included
+            self._parameters += list(v.parameters())
+            self._named_parameters += list(v.named_parameters())
+        
+        self.parameters = lambda: self._parameters           # save as function to enable calling model.parameters()
+        self.named_parameters = lambda: self._named_parameters           # save as function to enable calling model.named_parameters()
+        self.use_test_kwargs = False
+
+        self.render = partial(render, H=self.H, W=self.W, focal=self.focal, chunk=self.chunk)
+
+    def __call__(self, z, y=None, rays=None):
+        bs = z.shape[0]
+        if rays is None:
+            rays = torch.cat([self.sample_rays() for _ in range(bs)], dim=1)
+
+        render_kwargs = self.render_kwargs_test if self.use_test_kwargs else self.render_kwargs_train
+        render_kwargs = dict(render_kwargs)        # copy
+    
+        # in the case of a variable radius
+        # we need to adjust near and far plane for the rays
+        # so they stay within the bounds defined wrt. maximal radius
+        # otherwise each camera samples within its own near/far plane (relative to this camera's radius)
+        # instead of the absolute value (relative to maximum camera radius)
+        if isinstance(self.radius, tuple):
+            assert self.radius[1] - self.radius[0] <= render_kwargs['near'], 'Your smallest radius lies behind your near plane!'
+    
+            rays_radius = rays[0].norm(dim=-1)
+            shift = (self.radius[1] - rays_radius).view(-1, 1).float()      # reshape s.t. shape matches required shape in run_nerf
+            render_kwargs['near'] = render_kwargs['near'] - shift
+            render_kwargs['far'] = render_kwargs['far'] - shift
+            assert (render_kwargs['near'] >= 0).all() and (render_kwargs['far'] >= 0).all(), \
+                (rays_radius.min(), rays_radius.max(), shift.min(), shift.max())
+            
+
+        render_kwargs['features'] = z
+        rgb, disp, acc, extras = render(self.H, self.W, self.focal, chunk=self.chunk, rays=rays,
+                                        **render_kwargs)
+
+        rays_to_output = lambda x: x.view(len(x), -1) * 2 - 1      # (BxN_samples)xC
+    
+        if self.use_test_kwargs:               # return all outputs
+            return rays_to_output(rgb), \
+                   rays_to_output(disp), \
+                   rays_to_output(acc), extras
+
+        rgb = rays_to_output(rgb)
+        return rgb
+
+    def decrease_nerf_noise(self, it):
+        end_it = 5000
+        if it < end_it:
+            noise_std = self.initial_raw_noise_std - self.initial_raw_noise_std/end_it * it
+            self.render_kwargs_train['raw_noise_std'] = noise_std
+
+    def sample_pose(self):
+        # sample location on unit sphere
+        loc = sample_on_sphere(self.range_u, self.range_v)
+        
+        # sample radius if necessary
+        radius = self.radius
+        if isinstance(radius, tuple):
+            radius = np.random.uniform(*radius)
+
+        loc = loc * radius
+        R = look_at(loc)[0]
+
+        RT = np.concatenate([R, loc.reshape(3, 1)], axis=1)
+        RT = torch.Tensor(RT.astype(np.float32))
+        return RT
+
+    def sample_rays(self):
+        pose = self.sample_pose()
+        sampler = self.val_ray_sampler if self.use_test_kwargs else self.ray_sampler
+        batch_rays, _, _ = sampler(self.H, self.W, self.focal, pose)
+        return batch_rays
+
+    def to(self, device):
+        self.render_kwargs_train['network_fn'].to(device)
+        if self.render_kwargs_train['network_fine'] is not None:
+            self.render_kwargs_train['network_fine'].to(device)
+        self.device = device
+        return self
+
+    def train(self):
+        self.use_test_kwargs = False
+        self.render_kwargs_train['network_fn'].train()
+        if self.render_kwargs_train['network_fine'] is not None:
+            self.render_kwargs_train['network_fine'].train()
+
+    def eval(self):
+        self.use_test_kwargs = True
+        self.render_kwargs_train['network_fn'].eval()
+        if self.render_kwargs_train['network_fine'] is not None:
+            self.render_kwargs_train['network_fine'].eval()
+```

@@ -1,0 +1,63 @@
+# CG-SLAM
+## Overview
+CG-SLAM is a SLAM and mapping method for 3D Gaussian Splatting that integrates an uncertainty map derived from rendered depth into the training process. It addresses the reconstruction quality issues common in standard Gaussian Splatting SLAM by weighting optimization based on depth confidence. It sets itself apart from siblings like [CP-SLAM](11948-cp-slam.md) and [iMAP](11979-imap.md) by explicitly leveraging rendered depth uncertainty to guide the Gaussian optimization, leveraging the explicit geometry of 3DGS for flexible reprojection [S1].
+## How it works
+Inputs: A sequence of RGB-D or RGB images with associated camera poses (initially estimated or refined), and an initial set of 3D Gaussians.
+Outputs: A refined set of 3D Gaussians (position, covariance, opacity, color) and improved camera poses.
+
+Data Structures:
+- 3D Gaussian: Position $\mathbf{p}$, Covariance $\mathbf{\Sigma}$ (or rotation $\mathbf{R}$ and scale $\mathbf{S}$), Opacity $\alpha$, Color $c$ (SH coefficients).
+- Uncertainty Map: A 2D image $U$ of the same resolution as the input images, where each pixel $u_{ij}$ represents the depth uncertainty for that pixel.
+
+Steps:
+1. **Rendering**: Render the current set of 3D Gaussians to generate a depth map $D_{rendered}$ and an RGB image $I_{rendered}$ for the current camera view.
+2. **Uncertainty Estimation**: Compute the uncertainty map $U$ based on the rendered depth $D_{rendered}$. The specific formula for deriving $U$ from $D_{rendered}$ is not detailed in the provided sources [S1]. [G: Typically, this involves analyzing the variance of depth values or the consistency of depth estimates across neighboring pixels or frames.]
+3. **Loss Calculation**: Compute the reconstruction loss (e.g., L1 or SSIM) between $I_{rendered}$ and the ground truth image $I_{gt}$.
+4. **Uncertainty Weighting**: Modulate the loss or the gradient updates using the uncertainty map $U$. Pixels with higher uncertainty (lower confidence in depth) are likely to contribute less to the optimization or are treated with specific regularization to prevent overfitting to noisy depth data. The sources state that introducing this map "greatly improves the reconstruction quality" [S1].
+5. **Optimization**: Update the Gaussian parameters (positions, covariances, opacities, colors) and potentially camera poses using the weighted loss via gradient descent.
+6. **Adaptive Control**: (Standard 3DGS SLAM step, implied by context of SLAM) Perform Gaussian splitting, cloning, or pruning based on opacity and position criteria to maintain representation fidelity.
+
+Pseudocode:
+> **Unverified code.** The code below did not pass a test run against a reference implementation, or no test fits it, so it may contain errors.
+
+```python
+def cg_slam_step(gaussians, camera_pose, gt_image, gt_depth):
+    # 1. Render current Gaussians
+    rendered_depth, rendered_image = render(gaussians, camera_pose)
+    
+    # 2. Compute uncertainty map from rendered depth
+    # Formula not specified in sources [S1]
+    uncertainty_map = compute_uncertainty_from_depth(rendered_depth)
+    
+    # 3. Compute standard reconstruction loss
+    rgb_loss = compute_rgb_loss(rendered_image, gt_image)
+    
+    # 4. Apply uncertainty weighting
+    # The exact weighting function is not specified in sources [S1]
+    weighted_loss = apply_uncertainty_weight(rgb_loss, uncertainty_map)
+    
+    # 5. Backpropagate and update Gaussians and Pose
+    update_parameters(gaussians, camera_pose, weighted_loss)
+    
+    # 6. Adaptive Gaussian management (splitting/pruning)
+    gaussians = adaptive_gaussian_management(gaussians)
+    
+    return gaussians, camera_pose
+```
+
+## Operating characteristics
+Time and memory complexity: Not given in the sources.
+Measured performance: The method "greatly improves the reconstruction quality" compared to standard approaches [S1].
+Strengths: Leverages explicit geometry of 3DGS for flexible reprojection, alleviating misalignment between viewpoints [S1]. Real-time rendering capability makes it applicable for robotics tasks like relocalization, navigation, and 6D pose estimation [S1].
+Limitations: Not given in the sources.
+When to use: When high-quality reconstruction is critical and depth uncertainty is a significant factor in SLAM accuracy.
+When not: When computational resources are extremely limited and the uncertainty estimation overhead is prohibitive (though real-time rendering is claimed).
+
+## Background
+Origin: CG-SLAM is cited in the context of recent advances in 3D Gaussian Splatting [S1]. The specific authors and year are not provided in the text, only the citation number [189] which corresponds to the source [S1].
+History: It is part of the evolution of neural-based SLAM methods, building on the real-time rendering and explicit geometry advantages of 3D Gaussian Splatting over NeRF-based methods [S1].
+Usage: Used in robotics for relocalization, navigation, 6D pose estimation, multi-sensor calibration, and manipulation [S1].
+
+## Sources
+[S1] Recent advances in 3D Gaussian splatting, https://doi.org/10.1007/s41095-024-0436-y, fetched 2026-10-26
+[S2] PDF Recent advances in 3D Gaussian splatting - Springer, https://link.springer.com/content/pdf/10.1007/s41095-024-0436-y.pdf, fetched 2026-10-29 (unofficial)

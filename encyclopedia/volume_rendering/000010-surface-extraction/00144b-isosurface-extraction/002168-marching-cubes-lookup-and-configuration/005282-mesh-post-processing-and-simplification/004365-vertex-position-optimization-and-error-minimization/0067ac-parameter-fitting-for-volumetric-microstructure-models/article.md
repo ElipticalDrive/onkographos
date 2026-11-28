@@ -1,0 +1,195 @@
+# Parameter Fitting for Volumetric Microstructure Models
+
+Also called: Fitting template model to surface points, Optimization of FRep parameters
+
+## Overview
+This method fits the parameters of a procedural microstructure template model (a Function Representation or FRep) to a set of 3D points scattered on an object's surface by minimizing an objective function [S1]. It differs from sibling methods like [Marching Cubes with QEF Vertex Optimization](3831-marching-cubes-with-qef-vertex-optimization.md) by optimizing the underlying mathematical definition of the volume rather than just the vertex positions of a mesh, allowing for compact, analytically defined models that support operations like blending and offsetting [S1].
+
+## How it works
+**Inputs:**
+*   $P_s$: A set of $N$ 3D points scattered on the target surface.
+*   $f(p, x)$: The microstructure template model function, parameterized by $p$ and evaluated at point $x$.
+*   $p_{init}$: Initial parameter vector (randomly selected).
+
+**Outputs:**
+*   $p_{opt}$: The optimized parameter vector that best fits the surface points.
+
+**Data Structures:**
+*   $p$: Vector of model parameters. For a 7-parameter slab model, $p \in \mathbb{R}^7$. For a 14-parameter cellular model, $p \in \mathbb{R}^{14}$ [S1].
+*   $T$: Current temperature in the simulated annealing process.
+*   $G_{OPT}$: Best objective function value found so far.
+*   $G_0$: Current objective function value.
+
+**Objective Functions:**
+Two types of objective functions are defined to measure the fit between the model $f$ and the point set $P_s$ [S1]:
+
+1.  **Least Square Error (Minimization):**
+    $$g(p) = \sum_{i} f(p_s[i], p)^2$$
+    This measures the squared distance of points from the implicit surface $f=0$ [S1].
+
+2.  **Decreasing Exponential (Maximization):**
+    $$g(p) = \sum_{i} e^{\frac{-f^2 (p_s[i],p)}{\sigma^2}}$$
+    This acts similarly to counting points within a distance $\sigma$ to the surface $f=0$. When using this function, the algorithm must maximize $g(p)$ instead of minimizing it [S1].
+
+**Parameters:**
+*   $\sigma$: Width of the exponential function. Default: $10^{-3}$ [S1].
+*   $T_{min}$: Minimum temperature for termination. Default: $10^{-5}$ [S1].
+*   $\epsilon$: Convergence tolerance for the objective function. Default: $100$ [S1].
+*   $T_0$: Initial temperature. Default: $1000$ [S1].
+*   $r_T$: Cooling schedule reduction factor. Default: $0.85$ [S1].
+*   $N_T$: Cooling schedule step interval. Default: $200$ [S1] [G].
+
+**Algorithm Steps:**
+1.  Initialize parameters $p$ randomly. Example initial values for a 7-parameter model: $[5.624, 2.581, 1.921, 3.254, 4.743, 0.941, 3.541]$ [S1].
+2.  Set initial temperature $T = T_0$.
+3.  Calculate the initial objective function value $G_0 = g(p)$ [S1].
+4.  Set $G_{OPT} = G_0$.
+5.  Loop while $T > T_{min}$:
+    a. Generate a new candidate parameter set $p'$ by perturbing $p$ [G].
+    b. Calculate $G' = g(p')$ [S1].
+    c. Determine acceptance probability. If minimizing (Least Square): accept if $G' < G_0$ or with probability $e^{-(G' - G_0)/T}$. If maximizing (Exponential): accept if $G' > G_0$ or with probability $e^{-(G_0 - G')/T}$ [S1] [G].
+    d. If accepted, set $p = p'$ and $G_0 = G'$ [G].
+    e. If $G_0 > G_{OPT}$ (for maximization) or $G_0 < G_{OPT}$ (for minimization), update $G_{OPT} = G_0$ [G].
+    f. Check termination criteria:
+        i. If $T < T_{min}$, terminate [S1].
+        ii. If $|G_{OPT} - G_0| < \epsilon$ AND the difference between $G_0$ and the last five best values of $G_0$ do not exceed $\epsilon$, terminate [S1].
+    g. Update temperature: $T = T \times r_T$ every $N_T$ iterations [S1].
+
+**Pseudocode:**
+> **Unverified code.** The code below did not pass a test run against a reference implementation, or no test fits it, so it may contain errors.
+
+```python
+def fit_microstructure(points, model_func, objective_type='minimize', sigma=1e-3, 
+                       t_min=1e-5, epsilon=100, t_0=1000, r_t=0.85, n_t=200):
+    """
+    Fits microstructure parameters to surface points using Simulated Annealing.
+    
+    Args:
+        points: List of 3D points (Nx3).
+        model_func: Function f(p, x) returning the scalar value of the microstructure model.
+        objective_type: 'minimize' for least square, 'maximize' for exponential.
+        sigma: Parameter for exponential objective function.
+        t_min: Minimum temperature.
+        epsilon: Convergence tolerance.
+        t_0: Initial temperature.
+        r_t: Cooling factor.
+        n_t: Steps between cooling.
+        
+    Returns:
+        p_opt: Optimized parameter vector.
+    """
+    import random
+    import math
+    
+    # Initialize parameters randomly [S1]
+    # Assuming 7 parameters for this example; size depends on model
+    num_params = 7 
+    p = [random.uniform(-2, 10) for _ in range(num_params)]
+    
+    # Helper to calculate objective function [S1]
+    def calculate_objective(p_params, pts):
+        total = 0.0
+        for pt in pts:
+            f_val = model_func(p_params, pt)
+            if objective_type == 'minimize':
+                total += f_val ** 2
+            elif objective_type == 'maximize':
+                total += math.exp(-(f_val ** 2) / (sigma ** 2))
+        return total
+
+    # Initial evaluation [S1]
+    g_0 = calculate_objective(p, points)
+    g_opt = g_0
+    
+    # Track last 5 best values for convergence check [S1]
+    # For minimization, best values are low; for maximization, high.
+    # We store the last 5 g_0 values encountered.
+    history = []
+    
+    t = t_0
+    iteration = 0
+    
+    while t > t_min:
+        # Generate new candidate [G]
+        # Perturb current parameters with a step size related to temperature
+        p_new = [p[i] + random.gauss(0, t * 0.1) for i in range(num_params)]
+        
+        g_new = calculate_objective(p_new, points)
+        
+        # Acceptance criterion [G]
+        accepted = False
+        if objective_type == 'minimize':
+            if g_new < g_0:
+                accepted = True
+            else:
+                prob = math.exp(-(g_new - g_0) / t)
+                if random.random() < prob:
+                    accepted = True
+        elif objective_type == 'maximize':
+            if g_new > g_0:
+                accepted = True
+            else:
+                prob = math.exp(-(g_0 - g_new) / t)
+                if random.random() < prob:
+                    accepted = True
+        
+        if accepted:
+            p = p_new
+            g_0 = g_new
+            
+            # Update best solution [G]
+            if objective_type == 'minimize':
+                if g_0 < g_opt:
+                    g_opt = g_0
+            else:
+                if g_0 > g_opt:
+                    g_opt = g_0
+            
+            # Update history for convergence check [S1]
+            history.append(g_0)
+            if len(history) > 5:
+                history.pop(0)
+                
+            # Check convergence [S1]
+            # Condition 1: Difference between best and current is small
+            diff_current = abs(g_opt - g_0)
+            if diff_current < epsilon:
+                # Condition 2: Difference between current and last 5 best is small
+                # Note: The source says "difference between G0 and the last five best values of G0"
+                # This implies comparing the current G0 to the history of G0s.
+                # If history has fewer than 5, we might skip or treat as satisfied.
+                if len(history) >= 5:
+                    all_close = True
+                    for h_val in history:
+                        if abs(g_0 - h_val) >= epsilon:
+                            all_close = False
+                            break
+                    if all_close:
+                        return p
+        
+        # Cooling schedule [S1]
+        iteration += 1
+        if iteration % n_t == 0:
+            t = t * r_t
+            
+    return p
+```
+
+**Edge Cases and Pitfalls:**
+*   **Blending Operations:** Fitting parameters for blending operations is difficult because the parameter space is extremely flat, making optimization hard [S1].
+*   **Cooling Schedule Sensitivity:** If the cooling schedule is too slow, the running time is long; if too fast, the algorithm converges to a local optimum [S1]. Lower starting temperatures (e.g., 100) and smaller $N_T$ worked for simple models but failed for blended cellular models [S1].
+*   **Exponential Objective:** When using the decreasing exponential objective function, the problem becomes a maximization problem, requiring sign changes in the acceptance criteria compared to minimization [S1].
+
+## Operating characteristics
+*   **Time Complexity:** The algorithm's performance depends on the number of points and parameters. For a 7-parameter slab model with 385,535 points, it took ~20 min (42 iterations) on a Sun workstation with 2.8Ghz Intel Xeon processors [S1]. For a 14-parameter cellular model with 53,400 points, it took ~10 min (35 iterations) [S1]. For a 14-parameter cellular model with blending, it took ~20 min (35 iterations) [S1].
+*   **Memory Complexity:** Linear with respect to the number of surface points and parameters.
+*   **Strengths:** The resulting models are extremely compact (10-20 lines in HyperFun or 30-40 lines in C) and provide precise, spatially coherent representations [S1]. Lattice models offer C1-continuity, allowing blending without surface artifacts [S1].
+*   **Limitations:** Optimization can be slow for complex models with many parameters or blending operations due to flat parameter spaces [S1]. The cooling schedule parameters are sensitive and may need adjustment per model [S1].
+*   **When to use:** When a compact, procedural representation of a microstructure is needed for further geometric operations (blending, offsetting) or ray-tracing [S1].
+*   **When not to use:** When high-fidelity surface approximation of arbitrary, non-procedural geometry is required without the constraints of a template model [S1].
+
+## Background
+This method was introduced in the context of procedural function-based modelling of volumetric microstructures [S1]. It utilizes Function Representations (FRep) to define microstructures, which are more robust and dynamic than Boundary Representations (BRep) for parameter-dependent topological changes [S1]. The approach is implemented in HyperFun and C, leveraging the independence of point evaluations for parallelization on multi-core systems [S1].
+
+## Sources
+[S1] Procedural function-based modelling of volumetric microstructures, https://doi.org/10.1016/j.gmod.2011.03.001, fetched 2026-10-26

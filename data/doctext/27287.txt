@@ -1,0 +1,5199 @@
+Volumetric Clouds
+=================
+
+Originally created in 2009, this program first reads a text file containing initialization variables, then uses those variables to create a voxel grid data structure and uses ray marching to read lighting and density information from the grid in order to render fluffy clouds. The program was updated in 2010: the code was completely rewritten to improve efficiency, several new algorithms were implemented for voxel grid traversal, Perlin Noise was implemented to generate random clouds, and a GUI was created to make it more user-friendly (for the few users that actually stumble across it, that is).
+
+Features
+--------
+
+- Generates volumetric clouds with ray marching on a voxel density grid
+- Trilinear interpolation to produce more realistic results
+- Random cloud generator using Perlin noise
+- Can read in custom-made cloud configuration files or output current cloud as a new configuration file
+- GUI that allows the user to move the camera and see rendering progress
+- Optimized for faster speed
+
+### VolumetricClouds/Camera.cpp
+```
+// Camera.cpp: implementation of the Camera class.
+//
+//////////////////////////////////////////////////////////////////////
+//#include "stdafx.h" // Only needed for MFC
+
+#include "Camera.h"
+
+//////////////////////////////////////////////////////////////////////
+// Construction/Destruction
+//////////////////////////////////////////////////////////////////////
+const float floorSize = 400.0f;
+const float gridSize = 20.0f;
+const float lightGrid[] = {0.4f, 0.4f, 0.4f, 1.0f};
+const float darkGrid[] = {0.8f, 0.8f, 0.8f, 1.0f};
+const float specularGrid[] = {1.0f, 1.0f, 1.0f, 1.0f};
+
+const vec3 axisX(1.0f, 0.0f, 0.0f);
+const vec3 axisY(0.0f, 1.0f, 0.0f);
+const vec3 axisZ(0.0f, 0.0f, 1.0f);
+const vec3 vec3Zero(0.0f, 0.0f, 0.0f);
+
+Camera::Camera()
+{
+	Reset();
+}
+
+Camera::~Camera()
+{
+
+}
+
+void Camera::Reset()
+{
+	// Default positions
+	m_eye = vec3(20.0f, 20.0f, 20.0f);
+	m_center = vec3(0.0f, 1.0f, 0.0f);
+	// Default fovy, nearP and farP
+	m_fovy = 40.0f;
+	m_nearP = 0.1f;
+	m_farP = 1000.0f;
+
+	// Compute upVec
+	m_frontVec = m_center - m_eye;
+	m_dist = m_frontVec.length();
+	m_frontVec.normalize();
+	m_rightVec = vec3(1.0f, 0.0f, 0.0f);
+	//m_upVec = m_rightVec.cross(m_frontVec);
+	//m_upVec.normalize();
+	m_upVec = vec3(0.0f, 1.0f, 0.0f);
+	
+	// Update Projection Matrix
+	glMatrixMode(GL_PROJECTION);
+	glLoadIdentity();
+	Perspective();
+}
+
+void Camera::SetCamera(const vec3& eye, const vec3& center)
+{
+	m_eye = eye;
+	m_center = center;
+	m_frontVec = m_center - m_eye;
+	m_dist = m_frontVec.length();
+	m_frontVec.normalize();
+	m_upVec = vec3(0.0f, 1.0f, 0.0f);
+	m_rightVec = m_frontVec.cross(m_upVec);
+	m_rightVec.normalize();
+	m_upVec = m_rightVec.cross(m_frontVec);
+	m_upVec.normalize(); 
+}
+
+const vec3& Camera::GetEye(void) const
+{
+	return m_eye;
+}
+
+const vec3& Camera::GetCenter(void) const
+{
+	return m_center;
+}
+
+const vec3& Camera::GetFrontVector(void) const
+{
+	return m_frontVec;
+}
+
+const vec3& Camera::GetRightVector(void) const
+{
+	return m_rightVec;
+}
+
+const vec3& Camera::GetUpVector(void) const
+{
+	return m_upVec;
+}
+
+const double& Camera::GetFovY(void) const
+{
+	return m_fovy;
+}
+
+void Camera::UpdateAll(void)
+{
+	// Know eye, center and upVec to compute frontVec, rightVec and distance.
+	m_frontVec = m_center - m_eye;
+	m_dist = m_frontVec.length();
+	m_frontVec.normalize();
+
+	m_rightVec = m_frontVec.cross(m_upVec);
+	m_rightVec.normalize();
+}
+
+void Camera::LookAt()
+{
+	gluLookAt(m_eye[0], m_eye[1], m_eye[2],					// eye position
+			  m_center[0], m_center[1], m_center[2],		// center where eye is looking at
+			  m_upVec[0], m_upVec[1], m_upVec[2]);			// up vector of camera system
+}
+
+void Camera::MoveSWD(float dx, float dy) // move side way (left right up and down)
+{
+	GLint viewport[4];
+	glGetIntegerv(GL_VIEWPORT,viewport);
+	if (viewport[3] == 0){
+		viewport[3] = 1;
+	}
+	float ty = tan(m_fovy / 180.0 * M_PI);
+	float tx = ty * float(viewport[2]) / float(viewport[3]);
+
+	float ly = viewport[3] / ty;
+	float lx = viewport[2] / tx;
+
+	dx = dx / lx * m_dist;
+	dy = dy / ly * m_dist;
+
+	vec3 tmp = m_rightVec * dx + m_upVec * dy;
+	m_eye = m_eye + tmp;
+	m_center = m_center + tmp;
+
+	UpdateAll();
+}
+
+void Camera::RotateCenter(float dx, float dy)
+{
+	GLint viewport[4];
+	glGetIntegerv(GL_VIEWPORT,viewport);
+	vec3 tmp;
+	mat3 rotMat;
+	float unitx = M_PI / viewport[2] * 2.0f;
+	float unity = M_PI / viewport[3] * 2.0f;
+
+	if (unitx > 0.6f)
+		unitx = 0.6f;
+	if (unity > 0.6f)
+		unity = 0.6f;
+
+	dx = unitx * dx;
+	dy = unity * dy;
+
+	//compute the rotation matrix for dx and dy
+	rotMat = rotation3Drad(axisY, dx) * rotation3Drad(m_rightVec, dy);
+	//compute the new eye location
+	tmp = m_eye - m_center;
+	tmp = rotMat * tmp;
+	m_eye = m_center + tmp;
+	//compute the new upVec
+	m_upVec = rotMat * m_upVec;
+
+	UpdateAll();
+}
+
+void Camera::Zoom(float dx)
+{
+	GLint viewport[4];
+	glGetIntegerv(GL_VIEWPORT,viewport);
+	float total = viewport[3];
+	if (dx > 0){//zoom in
+		if (m_dist < 0.1)
+			return;
+		dx = dx / total * m_dist;
+		if (dx > m_dist)
+			return;
+	}
+	else{//zoom out
+		dx = dx / total * m_dist;
+	}
+
+	m_eye = m_eye + m_frontVec * dx;
+
+	UpdateAll();
+}
+
+void Camera::Perspective( void )
+{
+	GLint viewport[4];
+	glGetIntegerv(GL_VIEWPORT,viewport);
+	if (viewport[3] == 0){
+		viewport[3] = 1;
+	}
+	gluPerspective(60.0f,float(viewport[2]+0.0f) / float(viewport[3]),m_nearP,m_farP);
+}
+```
+
+### VolumetricClouds/Camera.h
+```
+// Camera.h: interface for the Camera class.
+// Author: Liming Zhao
+// University of Pennsylvania
+//////////////////////////////////////////////////////////////////////
+
+#pragma once
+
+#include <windows.h>
+#include <GL/Glu.h>
+#include <math.h>
+#include "algebra3.h"
+
+class Camera
+{
+public:
+	Camera(void);
+	~Camera(void);
+
+	const vec3& GetEye(void) const;
+	const vec3& GetCenter(void) const;
+	const vec3& GetFrontVector(void) const;
+	const vec3& GetRightVector(void) const;
+	const vec3& GetUpVector(void) const;
+	const double& GetFovY(void) const;
+	void SetCamera(const vec3& eye, const vec3& center);
+	void Zoom(float dx);
+	void RotateCenter(float dx, float dy);
+	void MoveSWD(float dx, float dy);
+	void LookAt();
+	void Reset();
+	void Perspective(void);
+	
+private:
+	void UpdateAll(void);
+	double m_fovy, m_nearP, m_farP;
+	vec3 m_eye, m_center;		
+	vec3 m_upVec, m_frontVec, m_rightVec;
+	double m_dist;
+};
+```
+
+### VolumetricClouds/Noise.cpp
+```
+#include "Noise.h"
+
+Noise::Noise(float per, int oct, int seed)
+{
+	persistence = per;
+	octaves = oct;
+	
+	// Add more randomness
+	srand((unsigned int)time(NULL));
+	seed = seed + rand()%100;
+
+	seed1 = seed*3; // *0.3
+	seed2 = seed*7; // *0.7
+}
+
+float Noise::Noise1(int x)
+{
+	int n = x;
+	n = (n<<13)^n;
+	float noise = 1.0 - ((n*(n*n*15731 + 789221) + 1376312589) &0x7fffffff)/1073741824.0; // [-1.0, 1.0]
+	return noise;
+}
+
+float Noise::Noise2(int x, int y)
+{
+	int n = x + y*seed1;
+	n = (n<<13)^n;
+    float noise = 1.0 - ((n*(n*n*15731 + 789221) + 1376312589) &0x7fffffff)/1073741824.0; // [-1.0, 1.0]
+	return noise;
+}
+
+float Noise::Noise3(int x, int y, int z)
+{
+	int n = x + y*seed1 + z*seed2;
+	n = (n<<13)^n;
+    float noise = 1.0 - ((n*(n*n*15731 + 789221) + 1376312589) &0x7fffffff)/1073741824.0; // [-1.0, 1.0]
+	return noise;
+}
+
+float Noise::SmoothNoise1(int x)
+{
+    float edges = (Noise1(x - 1)  +  Noise1(x + 1))*0.25; // /4
+    float center = Noise1(x)*0.5; // /2
+
+	return center + edges;
+}
+
+float Noise::SmoothNoise2(int x, int y)
+{
+	float corners = (Noise2(x - 1, y - 1) + Noise2(x + 1, y - 1) +
+					 Noise2(x - 1, y + 1) + Noise2(x + 1, y + 1))*0.0625; // /16
+    float edges = (Noise2(x - 1, y) + Noise2(x + 1, y) + Noise2(x, y - 1) + Noise2(x, y + 1))*0.125; // /8
+    float center = Noise2(x, y)*0.25; // /4
+
+    return corners + edges + center;
+}
+
+float Noise::SmoothNoise3(int x, int y, int z)
+{
+	float corners = (Noise3(x + 1, y + 1, z + 1) + Noise3(x + 1, y + 1, z - 1) +
+					 Noise3(x + 1, y - 1, z + 1) + Noise3(x + 1, y - 1, z - 1) + 
+					 Noise3(x - 1, y + 1, z + 1) + Noise3(x - 1, y + 1, z - 1) +
+					 Noise3(x - 1, y - 1, z + 1) + Noise3(x - 1, y - 1, z - 1))*0.015625; // /64
+	float edges = (Noise3(x + 1, y + 1, z) + Noise3(x + 1, y - 1, z) +
+				   Noise3(x - 1, y + 1, z) + Noise3(x - 1, y - 1, z) + 
+				   Noise3(x, y + 1, z + 1) + Noise3(x, y + 1, z - 1) +
+				   Noise3(x, y - 1, z + 1) + Noise3(x, y - 1, z - 1) + 
+				   Noise3(x + 1, y, z + 1) + Noise3(x + 1, y, z - 1) +
+				   Noise3(x - 1, y, z + 1) + Noise3(x - 1, y, z - 1))*0.03125; // /32
+	float faces = (Noise3(x + 1, y, z) + Noise3(x - 1, y, z) + Noise3(x, y + 1, z) +
+				   Noise3(x, y - 1, z) + Noise3(x, y, z + 1) + Noise3(x, y, z - 1))*0.0625; // /16
+	float center = Noise3(x, y, z)*0.125; // /8
+
+    return corners + edges + faces + center;
+}
+
+float Noise::LinearInterpolate(float a, float b, float x)
+{
+	return a*(1 - x) + b*x;
+}
+
+float Noise::CosineInterpolate(float a, float b, float x)
+{
+	float ft = x*3.14159265358979323846;
+	float f=(1 - cos(ft))*0.5;
+
+	return  a*(1 - f) + b*f;
+}
+
+float Noise::CubicInterpolate(float v0, float v1, float v2, float v3, float x)
+{
+	float p = (v3 - v2) - (v0 - v1);
+	float q = (v0 - v1) - p;
+	float r = v2 - v0;
+	float s = v1;
+
+	return p*x*x*x + q*x*x + r*x + s;
+}
+
+float Noise::InterpolateNoise1(float x)
+{
+	int i_x = int(x);
+	float f_x = x - i_x;
+
+	float u[2];
+
+	u[0] = SmoothNoise1(i_x);
+	u[1] = SmoothNoise1(i_x + 1);
+
+	return CosineInterpolate(u[0], u[1], f_x);
+}
+
+float Noise::InterpolateNoise2(float x, float y)
+{
+	int i_x = int(x);
+	int i_y = int(x);
+	float f_x = x - i_x;
+	float f_y = y - i_y;
+
+	float u[4], v[2];
+
+	u[0] = SmoothNoise2(i_x, i_y);
+	u[1] = SmoothNoise2(i_x + 1, i_y);
+	u[3] = SmoothNoise2(i_x, i_y + 1);
+	u[4] = SmoothNoise2(i_x + 1, i_y + 1);
+
+    v[0] = CosineInterpolate(u[0], u[1], f_x);
+    v[1] = CosineInterpolate(u[2], u[3], f_x);
+
+    return CosineInterpolate(v[0], v[1], f_y);
+}
+
+float Noise::InterpolateNoise3(float x, float y, float z)
+{
+	int i_x = int(x);
+	int i_y = int(y);
+	int i_z = int(z);
+	float f_x = x - i_x;
+	float f_y = y - i_y;
+	float f_z = z - i_z;
+
+	float u[8], v[4], w[2];
+
+	u[0] = SmoothNoise3(i_x, i_y, i_z);
+	u[1] = SmoothNoise3(i_x + 1, i_y, i_z);
+	u[2] = SmoothNoise3(i_x, i_y + 1, i_z);
+	u[3] = SmoothNoise3(i_x + 1, i_y + 1, i_z);
+	u[4] = SmoothNoise3(i_x, i_y, i_z + 1);
+	u[5] = SmoothNoise3(i_x + 1, i_y, i_z + 1);
+	u[6] = SmoothNoise3(i_x, i_y + 1, i_z + 1);
+	u[7] = SmoothNoise3(i_x + 1, i_y + 1, i_z + 1);
+
+	v[0] = CosineInterpolate(u[0], u[1], f_x);
+	v[1] = CosineInterpolate(u[2], u[3], f_x);
+	v[2] = CosineInterpolate(u[4], u[5], f_x);
+	v[3] = CosineInterpolate(u[6], u[7], f_x);
+
+	w[0] = CosineInterpolate(v[0], v[1], f_y);
+	w[1] = CosineInterpolate(v[2], v[3], f_y);
+
+	return CosineInterpolate(w[0], w[1], f_z);
+}
+
+float Noise::PerlinNoise1(float x)
+{
+	float total = 0;
+	float p = persistence;
+	int n = octaves - 1;
+	float frequency, amplitude;
+
+	for (int ii = 0; ii < n; ii++) {
+		frequency = powf(2, ii);
+        amplitude = powf(p, ii);
+
+		total = total + InterpolateNoise1(x*frequency)*amplitude;
+	}
+	
+	// [0.0, 1.0] (need positive density)
+	if (total < 0) total = total + 1.0;
+    if (total > 1) total = total - 1.0;
+
+	return total;
+}
+
+float Noise::PerlinNoise2(float x, float y)
+{
+	float total = 0;
+	float p = persistence;
+	int n = octaves - 1;
+	float frequency, amplitude;
+
+	for (int ii = 0; ii < n; ii++) {
+		frequency = powf(2, ii);
+        amplitude = powf(p, ii);
+
+		total = total + InterpolateNoise2(x*frequency, y*frequency)*amplitude;
+	}
+	
+	// [0.0, 1.0] (need positive density)
+	if (total < 0) total = total + 1.0;
+    if (total > 1) total = total - 1.0;
+
+	return total;
+}
+
+float Noise::PerlinNoise3(float x, float y, float z)
+{
+	float total = 0;
+	float p = persistence;
+	int n = octaves - 1;
+	float frequency, amplitude;
+
+	for (int ii = 0; ii < n; ii++) {
+		frequency = powf(2, ii);
+        amplitude = powf(p, ii);
+
+		total = total + InterpolateNoise3(x*frequency, y*frequency, z*frequency)*amplitude;
+	}
+
+	// [0.0, 1.0] (need positive density)
+	if (total < 0) total = total + 1.0;
+    if (total > 1) total = total - 1.0;
+
+	return total;
+}
+```
+
+### VolumetricClouds/Noise.h
+```
+// Implemented algorithm described in http://freespace.virgin.net/hugo.elias/models/m_perlin.htm
+
+#ifndef NOISE_H_
+#define NOISE_H_
+
+#include <math.h>
+#include <time.h>
+#include <stdlib.h>
+
+class Noise
+{
+public:
+	Noise() { persistence = 0.5; octaves = 5; seed1 = 57, seed2 = 131; }
+	~Noise() { }
+	Noise(float persistence, int octaves, int seed);
+
+	float PerlinNoise1(float x); // Generate 1D Perlin Noise
+	float PerlinNoise2(float x, float y); // Generate 2D Perlin Noise
+	float PerlinNoise3(float x, float y, float z); // Generate 3D Perlin Noise
+
+private:
+	float Noise1(int x); // Generate 1D noise
+	float Noise2(int x, int y); // Generate 2D noise
+	float Noise3(int x, int y, int z); // Generate 3D noise
+
+	float SmoothNoise1(int x); // Create 1D smooth noise
+	float SmoothNoise2(int x, int y); // Create 3D smooth noise
+	float SmoothNoise3(int x, int y, int z); // Create 3D smooth noise
+
+	float LinearInterpolate(float a, float b, float x); // Linear interpolation
+	float CosineInterpolate(float a, float b, float x); // Cosine interpolation
+	float CubicInterpolate(float v0, float v1, float v2, float v3, float x); // Cubic interpolation
+
+	float InterpolateNoise1(float x); // Create 1D interpolated noise
+	float InterpolateNoise2(float x, float y); // Create 2D interpolated noise
+	float InterpolateNoise3(float x, float y, float z); // Create 3D interpolated noise
+	
+	float persistence;
+	int octaves;
+	int seed1, seed2;
+};
+
+#endif
+```
+
+### VolumetricClouds/ProgressBar.h
+```
+#pragma once
+
+#include <stdio.h>
+#include <string>
+
+#ifdef __APPLE__
+#include <GLUT/GLUT.h>
+#else
+#include <GL/glut.h>
+#endif
+
+// Displays a progress bar on-screen
+void renderProgress(int progress_flag, int progress_bar)
+{
+	// Clearing the depth buffer 
+	glClear(GL_DEPTH_BUFFER_BIT);
+
+	glMatrixMode(GL_PROJECTION);
+	glPushMatrix();
+		glLoadIdentity();
+		gluOrtho2D(0, 640, 0, 480);	
+		glScalef(1, -1, 1); // Invert the y axis, down is positive
+		glTranslatef(0, -480, 0); // Move the origin from the bottom left corner to the upper left corner
+		glMatrixMode(GL_MODELVIEW);
+
+		glPushMatrix();
+			glLoadIdentity();
+			glDisable(GL_LIGHTING);
+			glColor4f(1.0, 1.0, 1.0, 1.0);
+			char progress_txt[1024];
+			
+			if (progress_flag == 0) {
+				glRasterPos2f(480, 450);
+				sprintf(progress_txt, "Generating...%d%%", progress_bar);
+				for (unsigned int ii = 0; ii < strlen(progress_txt); ii++)
+					glutBitmapCharacter(GLUT_BITMAP_HELVETICA_12, progress_txt[ii]);
+			}
+			else if (progress_flag == 1) {
+				glRasterPos2f(480, 450);
+				sprintf(progress_txt, "Saving...%d%%", progress_bar);
+				for (unsigned int ii = 0; ii < strlen(progress_txt); ii++)
+					glutBitmapCharacter(GLUT_BITMAP_HELVETICA_12, progress_txt[ii]);
+			}
+			else if (progress_flag == 2) {
+				glRasterPos2f(480, 450);
+				sprintf(progress_txt, "Importing...%d%%", progress_bar);
+				for (unsigned int ii = 0; ii < strlen(progress_txt); ii++)
+					glutBitmapCharacter(GLUT_BITMAP_HELVETICA_12, progress_txt[ii]);
+			}
+			else if (progress_flag == 3) {
+				glRasterPos2f(480, 450);
+				sprintf(progress_txt, "Initializing...%d%%", progress_bar);
+				for (unsigned int ii = 0; ii < strlen(progress_txt); ii++)
+					glutBitmapCharacter(GLUT_BITMAP_HELVETICA_12, progress_txt[ii]);
+				//cout << progress_bar << endl;
+			}
+			else if (progress_flag == 4) {
+				glRasterPos2f(480, 450);
+				sprintf(progress_txt, "Rendering...%d%%", progress_bar);
+				for (unsigned int ii = 0; ii < strlen(progress_txt); ii++)
+					glutBitmapCharacter(GLUT_BITMAP_HELVETICA_12, progress_txt[ii]);
+			}
+			
+			glColor4f(0.9,0.9,0.9,1.0);
+			glBegin(GL_QUADS); 
+				glVertex2i(480, 463); 
+				glVertex2i(480, 467); 
+				glVertex2i(480 + (int)(progress_bar*0.01*135), 467); 
+				glVertex2i(480 + (int)(progress_bar*0.01*135), 463);
+			glEnd();
+			
+			glEnable(GL_LIGHTING);
+			glColor4f(0.3, 0.3, 0.3, 0.2);
+			glRectf(470.0, 435.0, 630.0, 475.0);
+		glPopMatrix();
+		
+		glMatrixMode(GL_PROJECTION);
+	glPopMatrix();
+	glMatrixMode(GL_MODELVIEW);
+
+	glutSwapBuffers();
+}
+```
+
+### VolumetricClouds/RayMarch.h
+```
+#ifndef RAYMARCH_H_
+#define RAYMARCH_H_
+
+#include "algebra3.h"
+#include "VoxelGrid.h"
+
+double RayCubeSlabsIntersection(vec3 const& ro, vec3 const& rd, mat4 const& t_inv, mat4 const& tstar_inv);
+
+void MarchRay(vec3 orig, vec3 dir, VoxelGrid *grid, double step, vector<vec3> &points)
+{
+	double t = RayCubeSlabsIntersection(orig, dir, grid->getTInv(), grid->getTStarInv());
+
+	// Check if ray hits the grid
+	if (t < EPSILON) {
+		points.push_back(vec3(-1, -1, -1));
+		return;
+	}
+
+	// If ray is outside of grid
+	if (!grid->isInsideGrid(orig)) {
+		orig = orig + (t + EPSILON)*dir;
+	}
+
+	// Ray is in the grid
+	while (grid->isInsideGrid(orig)) {
+		points.push_back(orig);
+		orig = orig + step*dir;
+	}
+}
+
+void MarchRayVoxel(vec3 orig, vec3 dir, VoxelGrid *grid, vector<vec3> &points)
+{
+	double t = RayCubeSlabsIntersection(orig, dir, grid->getTInv(), grid->getTStarInv());
+
+	// Check if ray hits the grid
+	if (t < EPSILON) {
+		points.push_back(vec3(-1, -1, -1));
+		return;
+	}
+
+	vec3 start, end;
+
+	// Get entering and exiting points
+	if (!grid->isInsideGrid(orig)) {
+		start = orig + (t + EPSILON)*dir;
+		end = orig + (RayCubeSlabsIntersection(start, dir, grid->getTInv(), grid->getTStarInv()) + EPSILON)*dir;
+	}
+	else {
+		start = orig;
+		end = orig + (t + EPSILON)*dir;
+	}
+
+	vec3 point = start;
+
+	double voxelSize = grid->getVoxelSize();
+		
+	// Ratio to decrease number of division
+	double dirX, dirY, dirZ;
+	if (dir[0] != 0) dirX = 1/dir[0];
+	if (dir[1] != 0) dirY = 1/dir[1];
+	if (dir[2] != 0) dirZ = 1/dir[2];
+
+	// Get root position of current voxel in world coordinate
+	vec3 voxel = grid->world2voxel(point);
+	vec3 voxel0 = grid->voxel2world(voxel);
+	vec3 voxel1 = grid->voxel2world(voxel + vec3(1, 1, 1));
+
+	// Distance to reach the next voxel in x, y, z direction
+	double tMaxX = 1000000;	double tMaxY = 1000000;	double tMaxZ = 1000000;
+	if (dir[0] < 0.0) tMaxX = (voxel0[0] - point[0])*dirX;
+	if (dir[0] > 0.0) tMaxX = (voxel1[0] - point[0])*dirX;
+	if (dir[1] < 0.0) tMaxY = (voxel0[1] - point[1])*dirY;
+	if (dir[1] > 0.0) tMaxY = (voxel1[1] - point[1])*dirY;
+	if (dir[2] < 0.0) tMaxZ = (voxel0[2] - point[2])*dirZ;
+	if (dir[2] > 0.0) tMaxZ = (voxel1[2] - point[2])*dirZ;
+
+	// Step size in x, y, z direction
+	double stepX = (dir[0] < 0.0) ? -voxelSize : voxelSize;
+	double stepY = (dir[1] < 0.0) ? -voxelSize : voxelSize;
+	double stepZ = (dir[2] < 0.0) ? -voxelSize : voxelSize;
+
+	// Distance to move one voxel width in x, y, z direction
+	double tDeltaX = voxelSize*fabs(dirX);
+	double tDeltaY = voxelSize*fabs(dirY);
+	double tDeltaZ = voxelSize*fabs(dirZ);
+	
+	do { // Take steps in the smallest of x, y, z at each iteration until out of voxel space
+		points.push_back(point);
+
+		if (tMaxX < tMaxY) {
+			if (tMaxX < tMaxZ) {
+				point[0] = point[0] + stepX;
+				tMaxX = tMaxX + tDeltaX;
+			}
+			else {
+				point[2] = point[2] + stepZ;
+				tMaxZ = tMaxZ + tDeltaZ;
+			}
+		}
+		else {
+			if (tMaxY < tMaxZ) {
+				point[1] = point[1] + stepY;
+				tMaxY = tMaxY + tDeltaY;
+			}
+			else {
+				point[2] = point[2] + stepZ;
+				tMaxZ = tMaxZ + tDeltaZ;
+			}
+		}
+	} while ((grid->isInsideGrid(point)));
+}
+
+void MarchRayVoxelBresenham(vec3 orig, vec3 dir, VoxelGrid *grid, vector<vec3> &points)
+{
+	double t = RayCubeSlabsIntersection(orig, dir, grid->getTInv(), grid->getTStarInv());
+
+	// Check if ray hits the grid
+	if (t < EPSILON) {
+		points.push_back(vec3(-1, -1, -1));
+		return;
+	}
+
+	vec3 start, end;
+
+	// Get entering and exiting points
+	if (!grid->isInsideGrid(orig)) {
+		start = orig + (t + EPSILON)*dir;
+		end = orig + (RayCubeSlabsIntersection(start, dir, grid->getTInv(), grid->getTStarInv()) + EPSILON)*dir;
+	}
+	else {
+		start = orig;
+		end = orig + (t + EPSILON)*dir;
+	}
+
+	vec3 point = start;
+	double err_1, err_2;
+
+	// Delta x, y, z
+	double dx = end[0] - start[0];
+	double dy = end[1] - start[1];
+	double dz = end[2] - start[2];
+
+	double inc = grid->getVoxelSize(); // Voxel size
+	double x_inc = (dx < 0) ? -inc : inc; // Get x direction
+	double y_inc = (dy < 0) ? -inc : inc; // Get y direction
+	double z_inc = (dz < 0) ? -inc : inc; // Get z direction
+
+	// Get total x, y, z, length to travel
+	double x_length = fabs(dx);
+	double y_length = fabs(dy);
+	double z_length = fabs(dz);
+
+	// Multiply by 2 from original integral algorithm
+    double dx2 = dx*2;
+    double dy2 = dy*2;
+    double dz2 = dz*2;
+
+	// If x distance is largest
+    if ((x_length >= y_length) && (x_length >= z_length)) {
+        err_1 = dy2 - x_length;
+        err_2 = dz2 - x_length;
+		// Step through total x length one voxel at a time
+        for (double ii = 0; ii < x_length; ii += inc) {
+			points.push_back(point);
+            if (err_1 > 0) {
+                point[1] += y_inc;
+                err_1 -= dx2;
+            }
+            if (err_2 > 0) {
+                point[2] += z_inc;
+                err_2 -= dx2;
+            }
+            err_1 += dy2;
+            err_2 += dz2;
+            point[0] += x_inc;
+        }
+    }
+	// If y distance is largest
+	else if ((y_length >= x_length) && (y_length >= z_length)) {
+        err_1 = dx2 - y_length;
+        err_2 = dz2 - y_length;
+		// Step through total y length one voxel at a time
+        for (double ii = 0; ii < y_length; ii += inc) {
+			points.push_back(point);
+            if (err_1 > 0) {
+                point[0] += x_inc;
+                err_1 -= dy2;
+            }
+            if (err_2 > 0) {
+                point[2] += z_inc;
+                err_2 -= dy2;
+            }
+            err_1 += dx2;
+            err_2 += dz2;
+            point[1] += y_inc;
+        }
+    }
+	// If z distance is largest
+	else {
+        err_1 = dy2 - z_length;
+        err_2 = dx2 - z_length;
+		// Step through total z length one voxel at a time
+        for (double ii = 0; ii < z_length; ii += inc) {
+			points.push_back(point);
+            if (err_1 > 0) {
+                point[1] += y_inc;
+                err_1 -= dz2;
+            }
+            if (err_2 > 0) {
+                point[0] += x_inc;
+                err_2 -= dz2;
+            }
+            err_1 += dy2;
+            err_2 += dx2;
+            point[2] += z_inc;
+        }
+    }
+	// Get last point
+	points.push_back(point);
+}
+
+double RayCubeSlabsIntersection(vec3 const& ro, vec3 const& rd, mat4 const& t_inv, mat4 const& tstar_inv)
+{
+	vec3 o = t_inv*ro;
+	vec3 d = tstar_inv*rd;
+	vec3 dn = d.normalized();
+	
+	double t = -1.0;
+
+	double t_min = -100000;
+	double t_max = 100000;
+	int nside; // To check which side the normal is pointing out of
+
+	vec3 ac = vec3(0, 0, 0);
+	vec3 p = ac - o;
+
+	for (int ii = 0; ii < 3; ii++) {
+		double e = p[ii];
+		double f = dn[ii];
+		// Check if ray direction is perpendicular to the normal direction of the slab
+		if (fabs(f) > EPSILON) {
+			double fdiv = 1/f; // Division optimization
+			double t1 = (e + 0.5)*fdiv;
+			double t2 = (e - 0.5)*fdiv;
+			// Ensures the minimum of t1 and t2 is stored in t1
+			if (t1 > t2) swap(t1, t2);
+			if (t1 > t_min) { t_min = t1; nside = (ii + 1); }
+			if (t2 < t_max) { t_max = t2; }
+			if (t_min > t_max || t_max < 0) return t; // Ray misses the box or box is behind ray
+		}
+		// If ray is parallel to the slab
+		else if (-e - 0.5 > 0 || -e + 0.5 < 0) return t;
+	}
+	
+	if (t_min > EPSILON) { t = t_min/d.length(); nside *= 1; }
+	else { t = t_max/d.length(); nside *= -1; }
+	
+	// Get the normal in world coordinate
+	vec3 n3o(0, 0, 0);
+	switch (nside) {
+		case  1: n3o = vec3( 1, 0, 0); break;
+		case -1: n3o = vec3(-1, 0, 0); break;
+		case  2: n3o = vec3(0,  1, 0); break;
+		case -2: n3o = vec3(0, -1, 0); break;
+		case  3: n3o = vec3(0, 0,  1); break;
+		case -3: n3o = vec3(0, 0, -1); break;
+		default: break;
+	}
+
+	return t;
+}
+
+#endif
+```
+
+### VolumetricClouds/VolumeRender.cpp
+```
+#include "VolumeRender.h"
+
+#include "ProgressBar.h"
+#include "RayMarch.h"
+
+VolumeRender::VolumeRender()
+{
+	vGrid = new VoxelGrid();
+	rcGrid = new VoxelGrid();
+	gcGrid = new VoxelGrid();
+	bcGrid = new VoxelGrid();
+
+	// Set output image resolution and step size
+	reso_x = 640.0;
+	reso_y = 480.0;
+	step = 0.1;
+	kapa = 1.0;
+}
+
+VolumeRender::~VolumeRender()
+{
+	delete vGrid;
+	delete rcGrid;
+	delete gcGrid;
+	delete bcGrid;
+}
+
+void VolumeRender::initLighting(vec3 lp, vec3 lc, vec3 bc, int qt, int bg)
+{
+	lpos = lp; // Point light
+	lcol = lc; // Point light color
+	bcol = bc; // Background color
+	quality = qt; // Render quality
+	background = bg; // Background color
+
+	computeLightTransmittance(); // Pre-compute light transmittance
+}
+
+void VolumeRender::initCamera(vec3 ep, vec3 vd, vec3 uv, double fy)
+{
+	eyep = ep; // Eye position
+	vdir = vd; // Viewing direction
+	uvec = uv; // World space up vector
+	fovy = fy; // Total field of view in Y
+	
+	vec3 a = vdir^uvec; // Be sure this is well defined
+	vec3 b = vdir^a; // B is now in the correct plane
+	midpoint = eyep + vdir; // Now have midpoint of screen
+	h_px = (double)(reso_x/reso_y)*vdir.length()*tan((fovy*0.5)*Deg2Rad)*a.normalized(); // Rescale A to H
+	v_px = vdir.length()*tan((fovy*0.5)*Deg2Rad)*b.normalized(); // Rescale B to V
+}
+
+void VolumeRender::generateVoxelGridRandom(int seed)
+{
+	VoxelGrid *grid = new VoxelGrid(0.1, 50, 50, 50, 0);
+	Noise *noise = new Noise(0.5, 5, seed); // Seed = 188
+	
+	// Get max length from grid center to grid surface
+	vec3 center(grid->getMaxX()*0.5, grid->getMaxY()*0.5, grid->getMaxZ()*0.5);
+	double max_distance = (vec3(0 + 0.5, 0 + 0.5, 0 + 0.5) - center).length();
+	double max_ratio = 1/max_distance;
+
+	// Generate random density
+	for (int kk = 0; kk < grid->getMaxZ(); kk++) {
+		for (int jj = 0; jj < grid->getMaxY(); jj++) {
+			for (int ii = 0; ii < grid->getMaxX(); ii++) {
+				double cloud = noise->PerlinNoise3(ii*grid->getVoxelSize(), jj*grid->getVoxelSize(), kk*grid->getVoxelSize());
+				
+				vec3 voxel(vec3(ii + 0.5, jj + 0.5, kk + 0.5));
+				double distance = (voxel - center).length(); // Distance from current voxel to grid center
+				double cover = distance*max_ratio + 0.3; // Amount of cloud (0.93)
+				double sharpness = 0.5; // Cloud fuzziness and sharpness
+				double density = 5; // Cloud density
+
+				cloud = cloud - cover;
+				if (cloud < 0) cloud = 0; cloud = cloud*density;
+				cloud = 1.0 - powf(sharpness, cloud);
+
+				grid->setVoxelDensity(ii, jj, kk, cloud);
+
+				vec3 color(1, 1, 1);
+				grid->setVoxelColor(ii, jj, kk, color);
+			}
+		}
+		// Render progress 0%-99%
+		renderProgress(0, ((double)kk/(grid->getMaxZ() - 1))*100.0);
+	}
+
+	vGrid = grid; // Set voxel grid
+	// Render progress 100%
+	for (int ii = 0; ii < 100; ii++ ) { renderProgress(0, 100); }
+}
+
+void VolumeRender::generateVoxelGridFromFile(string filename)
+{
+	// Render progress 0%-60%
+	renderProgress(2, 0);
+
+	vGrid = new VoxelGrid(filename);
+	// Render progress 60%-99%
+	renderProgress(2, 80);
+
+	for (int kk = 0; kk < vGrid->getMaxZ(); kk++) {
+		for (int jj = 0; jj < vGrid->getMaxY(); jj++) {
+			for (int ii = 0; ii < vGrid->getMaxX(); ii++) {
+				vec3 color(1, 1, 1);
+				vGrid->setVoxelColor(ii, jj, kk, color);
+			}
+		}
+	}
+	// Render progress 100%
+	for (int ii = 0; ii < 100; ii++ ) { renderProgress(2, 100); }
+}
+
+void VolumeRender::generateVoxelGridRed(string filename)
+{
+	// Render progress 0%-60%
+	renderProgress(2, 0);
+	
+	rcGrid = new VoxelGrid(filename);
+	// Render progress 60%-99%
+	renderProgress(2, 80);
+
+	for (int kk = 0; kk < vGrid->getMaxZ(); kk++) {
+		for (int jj = 0; jj < vGrid->getMaxY(); jj++) {
+			for (int ii = 0; ii < vGrid->getMaxX(); ii++) {
+				vec3 rc = rcGrid->voxel2world(vec3(ii, jj, kk));
+				vec3 rgb(rcGrid->getVoxelDensity(rc[0], rc[1], rc[2]),
+						 vGrid->getVoxelColor(ii, jj, kk)[1],
+						 vGrid->getVoxelColor(ii, jj, kk)[2]);
+				vGrid->setVoxelColor(ii, jj, kk, rgb);
+			}
+		}
+	}
+	// Render progress 100%
+	for (int ii = 0; ii < 100; ii++ ) { renderProgress(2, 100); }
+}
+
+void VolumeRender::generateVoxelGridGreen(string filename)
+{
+	// Render progress 0%-60%
+	renderProgress(2, 0);
+	
+	gcGrid = new VoxelGrid(filename);
+	// Render progress 60%-99%
+	renderProgress(2, 80);
+
+	for (int kk = 0; kk < vGrid->getMaxZ(); kk++) {
+		for (int jj = 0; jj < vGrid->getMaxY(); jj++) {
+			for (int ii = 0; ii < vGrid->getMaxX(); ii++) {
+				vec3 gc = gcGrid->voxel2world(vec3(ii, jj, kk));
+				vec3 rgb(vGrid->getVoxelColor(ii, jj, kk)[0],
+						 gcGrid->getVoxelDensity(gc[0], gc[1], gc[2]),
+						 vGrid->getVoxelColor(ii, jj, kk)[2]);
+				vGrid->setVoxelColor(ii, jj, kk, rgb);
+			}
+		}
+	}
+	// Render progress 100%
+	for (int ii = 0; ii < 100; ii++ ) { renderProgress(2, 100); }
+}
+
+void VolumeRender::generateVoxelGridBlue(string filename)
+{
+	// Render progress 0%
+	renderProgress(2, 0);
+	
+	bcGrid = new VoxelGrid(filename);
+	// Render progress 80%
+	renderProgress(2, 80);
+
+	for (int kk = 0; kk < vGrid->getMaxZ(); kk++) {
+		for (int jj = 0; jj < vGrid->getMaxY(); jj++) {
+			for (int ii = 0; ii < vGrid->getMaxX(); ii++) {
+				vec3 bc = bcGrid->voxel2world(vec3(ii, jj, kk));
+				vec3 rgb(vGrid->getVoxelColor(ii, jj, kk)[0],
+						 vGrid->getVoxelColor(ii, jj, kk)[1],
+						 bcGrid->getVoxelDensity(bc[0], bc[1], bc[2]));
+				vGrid->setVoxelColor(ii, jj, kk, rgb);
+			}
+		}
+	}
+	// Render progress 100%
+	for (int ii = 0; ii < 100; ii++ ) { renderProgress(2, 100); }
+}
+
+void VolumeRender::computeLightTransmittance()
+{
+	for (int kk = 0; kk < vGrid->getMaxZ(); kk++) {
+		for (int jj = 0; jj < vGrid->getMaxY(); jj++) {
+			for (int ii = 0; ii < vGrid->getMaxX(); ii++) {
+				// Get the vectors from center of each voxel to light
+				vec3 orig(vGrid->voxel2world(vec3(ii + 0.5, jj + 0.5, kk + 0.5)));
+				vec3 dir = (lpos - orig).normalized();
+
+				vector<vec3> points;
+				
+				switch (quality) {
+					case 0: MarchRay(orig, dir, vGrid, step, points); break; // Step-step no interp
+					case 1:	MarchRay(orig, dir, vGrid, step, points); break; // Step-voxel no interp
+					case 2: MarchRayVoxel(orig, dir, vGrid, points); break; // Voxel-voxel no interp
+					case 3: MarchRay(orig, dir, vGrid, step, points); break; // Step-step interp
+					case 4:	MarchRayVoxel(orig, dir, vGrid, points); break; // Voxel-step interp
+				}
+				
+				double transmittance = 1.0;
+				for (int n = 0; n < points.size(); n++) {
+					double rho = vGrid->getVoxelDensity(points[n]);
+					if (rho > 0) {
+						transmittance *= exp(-kapa*step*rho);
+					}
+				}
+
+				// Set transmittance values
+				vGrid->setVoxelTransmissivity(ii, jj, kk, transmittance);
+			}
+		}
+		// Render progress 0%-99%
+		renderProgress(3, ((double)kk/(vGrid->getMaxZ() - 1))*100.0);
+	}
+	// Render progress 100%
+	for (int ii = 0; ii < 100; ii++ ) { renderProgress(3, 100); }
+}
+
+void VolumeRender::render()
+{
+	int size = 3*reso_x*reso_y;
+	unsigned char *output = new unsigned char[size]; // Output file
+	char *outfile = new char();	outfile = "output.bmp"; // Output filename
+	
+	// Set background color
+	vec3 bg_gradient;
+	double bg_ratio = 1.0/480.0;
+	switch (background) {
+		case 0: bg_gradient = vec3(0, 0, 0); break; // Light blue
+		case 1:	bg_gradient = vec3(0.3, 0.4, 0.2); break; // Blue gradient
+	}
+
+	// Generate rays for every pixel on screen
+	for (int y = 0; y < reso_y; y++) {
+		for (int x = 0; x < reso_x; x++) {
+			// Any point in NDC is (Sx, Sy)
+			vec3 orig = midpoint + (2.0*(double)(x/(reso_x - 1)) - 1)*h_px + (2.0*(double)(y/(reso_y - 1)) - 1)*v_px;
+			vec3 dir = (orig - eyep).normalize();
+			vec3 color(0.0, 0.0, 0.0);
+
+			vector<vec3> points;
+
+			// March, my little rays, MARCH!
+			switch (quality) {
+				case 0: MarchRay(orig, dir, vGrid, step, points); break; // Step-step no interp
+				case 1:	MarchRayVoxel(orig, dir, vGrid, points); break; // Step-voxel no interp
+				case 2: MarchRayVoxel(orig, dir, vGrid, points); break; // Voxel-voxel no interp
+				case 3: MarchRay(orig, dir, vGrid, step, points); break; // Step-step interp
+				case 4:	MarchRay(orig, dir, vGrid, step, points); break; // Voxel-step interp
+			}
+
+			// Volumetric rendering
+			if (points.size() > 1) {
+				double transmittance = 1;
+				for (int n = 0; n < points.size(); n++) {
+					double rho; // Density
+					if (quality < 3) rho = vGrid->getVoxelDensity(points[n]);
+					else rho = vGrid->interpVoxelDensity(points[n]);
+
+					if (rho > 0) {
+						vec3 rgb; // Color
+						if (quality < 3) rgb = prod(vGrid->getVoxelColor(points[n]), lcol);
+						else rgb = prod(vGrid->interpVoxelColor(points[n]), lcol);
+						
+						double deltaT = exp(-kapa*step*rho);
+						transmittance *= deltaT;
+
+						// When transmittance becomes close to zero
+						if (transmittance < 1e-6)
+							break;
+						
+						double q; // Transmittance
+						if (quality < 3) q = vGrid->getVoxelTransmissivity(points[n]);
+						else q = vGrid->interpVoxelTransmissivity(points[n]);
+
+						// Rendering equation
+						color += (1 - deltaT)/kapa*rgb*transmittance*q;
+					}
+				}
+
+				// Fills the rest with background color
+				color += bcol*transmittance;
+			}
+			else {
+				color = bcol;
+			}
+	
+			// Check if any color goes over 1 (255)
+			if(color[0] > 1) color[0] = 1;
+			if(color[1] > 1) color[1] = 1;
+			if(color[2] > 1) color[2] = 1;
+
+			// Stores the color
+			int index = (reso_x*y + x)*3;
+			output[index + 0] = color[0]*255.0;
+			output[index + 1] = color[1]*255.0;
+			output[index + 2] = color[2]*255.0;
+		}
+		// Render progress 0%-99%
+		if (y%10 == 0) { renderProgress(4, (y/reso_y)*100.0); }
+		
+		bcol += bg_gradient*bg_ratio; // Update background
+	}
+	// Render progress 100%
+	for (int ii = 0; ii < 100; ii++ ) { renderProgress(4, 100); }
+
+	// Saves the data to a BMP image
+	SOIL_save_image(outfile, SOIL_SAVE_TYPE_BMP, reso_x, reso_y, 3, output);
+
+	delete output;
+}
+
+void VolumeRender::setCloudColor(int rgb, double value)
+{
+	for (int kk = 0; kk < vGrid->getMaxZ(); kk++) {
+		for (int jj = 0; jj < vGrid->getMaxY(); jj++) {
+			for (int ii = 0; ii < vGrid->getMaxX(); ii++) {
+				vec3 col = vGrid->getVoxelColor(ii, jj, kk);
+				col[rgb] += value;
+				
+				// Check if any color goes below or over 0/1 (0/255)
+				if(col[0] < 0) col[0] = 0; if(col[1] < 0) col[1] = 0; if(col[2] < 0) col[2] = 0;
+				if(col[0] > 1) col[0] = 1; if(col[1] > 1) col[1] = 1; if(col[2] > 1) col[2] = 1;
+				vGrid->setVoxelColor(ii, jj, kk, col);
+			}
+		}
+	}
+}
+
+void VolumeRender::outputCloud()
+{
+	// Output to file
+	ofstream outfile("output.txt");
+	outfile << vGrid->getVoxelSize() << endl;
+	outfile << vGrid->getMaxX() << " "<< vGrid->getMaxY() << " " << vGrid->getMaxZ() << endl;
+	outfile << vGrid->getDefaultDensity() << endl;
+			
+	for (int kk = 0; kk < vGrid->getMaxZ(); kk++) {
+		for (int jj = 0; jj < vGrid->getMaxY(); jj++) {
+			for (int ii = 0; ii < vGrid->getMaxX(); ii++) {
+				outfile << vGrid->getVoxelDensity(ii, jj, kk) << endl;
+			}
+		}
+		// Render progress 0%-99%
+		renderProgress(1, ((double)kk/(vGrid->getMaxZ() - 1))*100.0);
+	}
+
+	outfile.close(); // Close file
+	// Render progress 100%
+	for (int ii = 0; ii < 100; ii++ ) { renderProgress(1, 100); }
+}
+
+VoxelGrid* VolumeRender::getGrid()
+{
+	return vGrid;
+}
+```
+
+### VolumetricClouds/VolumeRender.h
+```
+#ifndef VOLUMERENDER_H
+#define VOLUMERENDER_H
+
+#include <fstream>
+
+#include "VoxelGrid.h"
+#include "noise.h"
+
+#ifdef __APPLE__
+#include <GLUT/GLUT.h>
+#else
+#include <GL/glut.h>
+#endif
+#include <SOIL/SOIL.h>
+
+class VolumeRender {
+public:
+	// Constructor and destructor
+	VolumeRender();
+	~VolumeRender();
+	
+	void initLighting(vec3 lpos, vec3 lcol, vec3 bcol, int quality, int bg); // Set up the lights
+	void initCamera(vec3 eyep, vec3 vdir, vec3 uvec, double fovy); // Set up the camera for rendering
+
+	void generateVoxelGridRandom(int seed); // Generate a voxel grid with random clouds
+	void generateVoxelGridFromFile(string filename); // Read input from configuration files
+	
+	void generateVoxelGridRed(string filename); // Set red component of cloud color
+	void generateVoxelGridGreen(string filename); // Set green component of cloud color
+	void generateVoxelGridBlue(string filename); // Set blue component of cloud color
+
+	void computeLightTransmittance();
+	void render();
+
+	void setCloudColor(int rgb, double value);
+	void outputCloud();
+	VoxelGrid* getGrid();
+
+private:
+	VoxelGrid *vGrid;
+
+	VoxelGrid *rcGrid;
+	VoxelGrid *gcGrid;
+	VoxelGrid *bcGrid;
+
+	double reso_x, reso_y; // Screen resolution
+	vec3 midpoint, h_px, v_px; // Midpoint, width and height of screen in terms of pixel
+	vec3 eyep; // Eye position
+	vec3 vdir; // Viewing direction
+	vec3 uvec; // World space up vector
+	double fovy; // Total field of view in Y
+	vec3 lpos; // Light position
+	vec3 lcol; // Light color
+	vec3 bcol; // Background color
+	double step; // Step size
+	double kapa; // Kapa for light computation
+
+	int quality; // Quality of render
+	int background; // Background color
+};
+
+#endif
+```
+
+### VolumetricClouds/VoxelGrid.cpp
+```
+#include "VoxelGrid.h"
+
+VoxelGrid::VoxelGrid()
+{
+	voxelSize = 0.0;
+	xCount = 0;
+	yCount = 0;
+	zCount = 0;
+	defaultDensity = 0.0;
+}
+
+VoxelGrid::VoxelGrid(double size, int x, int y, int z, double d)
+{
+	voxelSize = size;
+	xCount = x;
+	yCount = y;
+	zCount = z;
+	defaultDensity = d;
+	
+	// Create voxel grid
+	for (double kk = 0; kk < zCount; kk++) {
+		for (double jj = 0; jj < yCount; jj++) {
+			for (double ii = 0; ii < xCount; ii++) {
+				Voxel *voxel = new Voxel();
+				voxel->density = defaultDensity;
+				voxelGrid.push_back(voxel);
+			}
+		}
+	}
+
+	mat4 mat;	
+	mat[0][0] = (double)xCount*voxelSize; mat[0][1] = 0; mat[0][2] = 0; mat[0][3] = (double)xCount*voxelSize*0.5;
+	mat[1][0] = 0; mat[1][1] = (double)yCount*voxelSize; mat[1][2] = 0; mat[1][3] = (double)yCount*voxelSize*0.5;
+	mat[2][0] = 0; mat[2][1] = 0; mat[2][2] = (double)zCount*voxelSize; mat[2][3] = (double)zCount*voxelSize*0.5;
+	mat[3][0] = 0; mat[3][1] = 0; mat[3][2] = 0; mat[3][3] = 1;
+	t_inv = mat.inverse();
+	mat4 tstar = mat;
+	tstar[0][3] = 0.0; tstar[1][3] = 0.0; tstar[2][3] = 0.0;
+	tstar_inv = tstar.inverse();
+}
+
+VoxelGrid::VoxelGrid(string filename)
+{
+	string line; // Temporary storage
+	ifstream infile(filename.c_str()); // Open as stream
+	if (infile.fail()) {
+		cout << "Failed to open file!" << endl;
+		return;
+	}
+
+	getline(infile, line); // Get voxel size
+	voxelSize = atof(line.c_str());
+	getline(infile, line); // Get voxel grid x, y, z length
+	stringstream ssrc(line); ssrc >> xCount >> yCount >> zCount;
+	getline(infile, line); // Get default density
+	defaultDensity = atof(line.c_str());
+	
+	while (!infile.eof()) {
+		getline(infile, line);
+		if (line.empty()) break;
+		Voxel *voxel = new Voxel();
+		voxel->density = atof(line.c_str());
+		voxelGrid.push_back(voxel);
+	}
+
+	infile.close();
+
+	mat4 mat;	
+	mat[0][0] = (double)xCount*voxelSize; mat[0][1] = 0; mat[0][2] = 0; mat[0][3] = (double)xCount*voxelSize*0.5;
+	mat[1][0] = 0; mat[1][1] = (double)yCount*voxelSize; mat[1][2] = 0; mat[1][3] = (double)yCount*voxelSize*0.5;
+	mat[2][0] = 0; mat[2][1] = 0; mat[2][2] = (double)zCount*voxelSize; mat[2][3] = (double)zCount*voxelSize*0.5;
+	mat[3][0] = 0; mat[3][1] = 0; mat[3][2] = 0; mat[3][3] = 1;
+	t_inv = mat.inverse();
+	mat4 tstar = mat;
+	tstar[0][3] = 0.0; tstar[1][3] = 0.0; tstar[2][3] = 0.0;
+	tstar_inv = tstar.inverse();
+}
+
+VoxelGrid::~VoxelGrid()
+{
+	voxelGrid.clear();
+}
+
+void VoxelGrid::setVoxelColor(int x, int y, int z, vec3 rgb)
+{
+	// If outside of grid
+	if ((x >= xCount) || (y >= yCount) || (z >= zCount) || (x < 0) || (y < 0) || (z < 0)) {
+		return;
+	}
+	
+	// Get array index
+	int index = getVoxelIndex(x, y, z);
+	voxelGrid[index]->color = rgb;
+}
+
+void VoxelGrid::setVoxelColor(vec3 xyz, vec3 rgb)
+{
+	vec3 ijk = world2voxel(xyz);
+	return setVoxelColor(ijk[0], ijk[1], ijk[2], rgb);
+}
+
+void VoxelGrid::setVoxelDensity(int x, int y, int z, double d)
+{
+	// If outside of grid
+	if ((x >= xCount) || (y >= yCount) || (z >= zCount) || (x < 0) || (y < 0) || (z < 0)) {
+		return;
+	}
+	
+	// Get array index
+	int index = getVoxelIndex(x, y, z);
+	voxelGrid[index]->density = d;
+}
+
+void VoxelGrid::setVoxelDensity(vec3 xyz, double d)
+{
+	vec3 ijk = world2voxel(xyz);
+	return setVoxelDensity(ijk[0], ijk[1], ijk[2], d);
+}
+
+void VoxelGrid::setVoxelTransmissivity(int x, int y, int z, double q)
+{
+	// If outside of grid
+	if ((x >= xCount) || (y >= yCount) || (z >= zCount) || (x < 0) || (y < 0) || (z < 0)) {
+		return;
+	}
+	
+	// Get array index
+	int index = getVoxelIndex(x, y, z);
+	voxelGrid[index]->transmissivity = q;
+}
+
+void VoxelGrid::setVoxelTransmissivity(vec3 xyz, double q)
+{
+	vec3 ijk = world2voxel(xyz);
+	return setVoxelTransmissivity(ijk[0], ijk[1], ijk[2], q);
+}
+
+vec3 VoxelGrid::getVoxelColor(int x, int y, int z)
+{
+	// If outside of grid
+	if ((x >= xCount) || (y >= yCount) || (z >= zCount) || (x < 0) || (y < 0) || (z < 0)) {
+		return vec3(0, 0, 0);
+	}
+
+	// Get array index
+	int index = getVoxelIndex(x, y, z);
+	return voxelGrid[index]->color;
+}
+
+vec3 VoxelGrid::getVoxelColor(vec3 xyz)
+{
+	vec3 ijk = world2voxel(xyz);
+	return getVoxelColor(ijk[0], ijk[1], ijk[2]);
+}
+
+double VoxelGrid::getVoxelDensity(int x, int y, int z)
+{
+	// If outside of grid
+	if ((x >= xCount) || (y >= yCount) || (z >= zCount) || (x < 0) || (y < 0) || (z < 0)) {
+		return defaultDensity;
+	}
+
+	// Get array index
+	int index = getVoxelIndex(x, y, z);
+	return voxelGrid[index]->density;
+}
+
+double VoxelGrid::getVoxelDensity(vec3 xyz)
+{
+	vec3 ijk = world2voxel(xyz);
+	return getVoxelDensity(ijk[0], ijk[1], ijk[2]);
+}
+
+double VoxelGrid::getVoxelTransmissivity(int x, int y, int z)
+{
+	// If outside of grid
+	if ((x >= xCount) || (y >= yCount) || (z >= zCount) || (x < 0) || (y < 0) || (z < 0)) {
+		return 0;
+	}
+
+	// Get array index
+	int index = getVoxelIndex(x, y, z);
+	return voxelGrid[index]->transmissivity;
+}
+
+double VoxelGrid::getVoxelTransmissivity(vec3 xyz)
+{
+	vec3 ijk = world2voxel(xyz);
+	return getVoxelTransmissivity(ijk[0], ijk[1], ijk[2]);
+}
+
+vec3 VoxelGrid::interpVoxelColor(double x, double y, double z)
+{
+	vec3 interpColor(0, 0, 0);
+	double sizeRatio = 1/voxelSize;
+
+	// Convert from coordinate to index
+	int x_index = floor(x*sizeRatio);
+	int y_index = floor(y*sizeRatio);
+	int z_index = floor(z*sizeRatio);
+
+	// If outside of grid
+	if ((x_index >= xCount) || (y_index >= yCount) || (z_index >= zCount) || (x_index < 0) || (y_index < 0) || (z_index < 0)) {
+		return vec3(0, 0, 0);
+	}
+
+	// Tri-linear interpolation
+	for (double kk = z_index; kk <= z_index + 1; kk++) {
+		for (double jj = y_index; jj <= y_index + 1; jj++) {
+			for (double ii = x_index; ii <= x_index + 1; ii++) {
+				double wx = (voxelSize - fabs(x - ii*voxelSize))*sizeRatio;
+				double wy = (voxelSize - fabs(y - jj*voxelSize))*sizeRatio;
+				double wz = (voxelSize - fabs(z - kk*voxelSize))*sizeRatio;
+
+				double weight = wx*wy*wz;
+				interpColor += weight*getVoxelColor(ii, jj, kk);
+			}
+		}
+	}
+	
+	return interpColor;
+}
+
+vec3 VoxelGrid::interpVoxelColor(vec3 xyz)
+{
+	return interpVoxelColor(xyz[0], xyz[1], xyz[2]);
+}
+
+double VoxelGrid::interpVoxelDensity(double x, double y, double z)
+{
+	double interpDensity = 0;
+	double sizeRatio = 1/voxelSize;
+
+	// Convert from coordinate to index
+	int x_index = floor(x*sizeRatio);
+	int y_index = floor(y*sizeRatio);
+	int z_index = floor(z*sizeRatio);
+
+	// If outside of grid
+	if ((x_index >= xCount) || (y_index >= yCount) || (z_index >= zCount) || (x_index < 0) || (y_index < 0) || (z_index < 0)) {
+		return defaultDensity;
+	}
+
+	// Tri-linear interpolation
+	for (double kk = z_index; kk <= z_index + 1; kk++) {
+		for (double jj = y_index; jj <= y_index + 1; jj++) {
+			for (double ii = x_index; ii <= x_index + 1; ii++) {
+				double wx = (voxelSize - fabs(x - ii*voxelSize))*sizeRatio;
+				double wy = (voxelSize - fabs(y - jj*voxelSize))*sizeRatio;
+				double wz = (voxelSize - fabs(z - kk*voxelSize))*sizeRatio;
+
+				double weight = wx*wy*wz;
+				interpDensity += weight*getVoxelDensity(ii, jj, kk);
+			}
+		}
+	}
+	
+	return interpDensity;
+}
+
+double VoxelGrid::interpVoxelDensity(vec3 xyz)
+{
+	return interpVoxelDensity(xyz[0], xyz[1], xyz[2]);
+}
+
+double VoxelGrid::interpVoxelTransmissivity(double x, double y, double z)
+{
+	double interpTransmissivity = 0;
+	double sizeRatio = 1/voxelSize;
+
+	// Convert from coordinate to index
+	int x_index = floor(x*sizeRatio);
+	int y_index = floor(y*sizeRatio);
+	int z_index = floor(z*sizeRatio);
+
+	// If outside of grid
+	if ((x_index >= xCount) || (y_index >= yCount) || (z_index >= zCount) || (x_index < 0) || (y_index < 0) || (z_index < 0)) {
+		return 0;
+	}
+
+	// Tri-linear interpolation
+	for (double kk = z_index; kk <= z_index + 1; kk++) {
+		for (double jj = y_index; jj <= y_index + 1; jj++) {
+			for (double ii = x_index; ii <= x_index + 1; ii++) {
+				double wx = (voxelSize - fabs(x - ii*voxelSize))*sizeRatio;
+				double wy = (voxelSize - fabs(y - jj*voxelSize))*sizeRatio;
+				double wz = (voxelSize - fabs(z - kk*voxelSize))*sizeRatio;
+
+				double weight = wx*wy*wz;
+				interpTransmissivity += weight*getVoxelTransmissivity(ii, jj, kk);
+			}
+		}
+	}
+	
+	return interpTransmissivity;
+}
+
+double VoxelGrid::interpVoxelTransmissivity(vec3 xyz)
+{
+	return interpVoxelTransmissivity(xyz[0], xyz[1], xyz[2]);
+}
+
+int VoxelGrid::getVoxelIndex(int x, int y, int z)
+{
+	// Return index of voxel in array based on its x, y, z index
+	return x + y*xCount + z*xCount*yCount;
+}
+
+vector<Voxel*> VoxelGrid::getVoxelGrid() { return voxelGrid; }
+double VoxelGrid::getVoxelSize() { return voxelSize; }
+double VoxelGrid::getDefaultDensity() { return defaultDensity; }
+int VoxelGrid::getMaxX() { return xCount; }
+int VoxelGrid::getMaxY() { return yCount; }
+int VoxelGrid::getMaxZ() { return zCount; }
+mat4 VoxelGrid::getTInv() { return t_inv; }
+mat4 VoxelGrid::getTStarInv() { return tstar_inv; }
+
+bool VoxelGrid::isInsideGrid(vec3 xyz)
+{
+	double x_max = xCount*voxelSize;
+	double y_max = yCount*voxelSize;
+	double z_max = zCount*voxelSize;
+
+	if (xyz[0] < x_max && xyz[1] < y_max && xyz[2] < z_max && xyz[0] >= 0 && xyz[1] >= 0 && xyz[2] >= 0) {
+		return true;
+	}
+
+	return false;
+}
+
+vec3 VoxelGrid::world2voxel(vec3 world)
+{
+	vec3 grid_root(0.0, 0.0, 0.0);
+	vec3 ijk = (world - grid_root)/voxelSize; // component-wise division
+	ijk = floor(ijk);
+	return ijk;
+}
+
+vec3 VoxelGrid::voxel2world(vec3 ijk)
+{
+	vec3 grid_root(0.0, 0.0, 0.0);
+	vec3 world = ijk*voxelSize + grid_root;
+	return world;
+}
+```
+
+### VolumetricClouds/VoxelGrid.h
+```
+#ifndef VOXELGRID_H
+#define VOXELGRID_H
+
+#include <vector>
+#include <fstream>
+#include <sstream>
+
+#include "algebra3.h"
+
+struct Voxel {
+	vec3 color;
+	double density;
+	double transmissivity;
+};
+
+class VoxelGrid {
+public:
+	// Constructors and destructor
+	VoxelGrid();
+	VoxelGrid(double size, int x, int y, int z, double d);
+	VoxelGrid(string filename);
+	~VoxelGrid();
+	
+	void setVoxelColor(int x, int y, int z, vec3 rgb); // Set color of voxel given grid coordinate
+	void setVoxelColor(vec3 xyz, vec3 rgb); // Set color of voxel given x, y, z coordinate
+	void setVoxelDensity(int x, int y, int z, double q); // Set density of voxel given grid coordinate
+	void setVoxelDensity(vec3 xyz, double q); // Set density of voxel given x, y, z coordinate
+	void setVoxelTransmissivity(int x, int y, int z, double q); // Set transmittance of voxel given grid coordinate
+	void setVoxelTransmissivity(vec3 xyz, double q); // Set transmittance of voxel given x, y, z coordinate
+		
+	vec3 getVoxelColor(int x, int y, int z); // Get color of voxel given grid coordinate
+	vec3 getVoxelColor(vec3 xyz); // Get color of voxel given x, y, z coordinate
+	double getVoxelDensity(int x, int y, int z); // Get density of voxel given grid coordinate
+	double getVoxelDensity(vec3 xyz); // Get density of voxel given x, y, z coordinate
+	double getVoxelTransmissivity(int x, int y, int z); // Get transmittance of voxel given grid coordinate
+	double getVoxelTransmissivity(vec3 xyz); // Get transmittance of voxel given x, y, z coordinate
+	
+	vec3 interpVoxelColor(double x, double y, double z); // Interpolate color of voxel given grid coordinate
+	vec3 interpVoxelColor(vec3 xyz); // Interpolate color of voxel given x, y, z coordinate
+	double interpVoxelDensity(double x, double y, double z); // Interpolate density using tri-linear interpolation
+	double interpVoxelDensity(vec3 xyz); // Interpolate density using tri-linear interpolation
+	double interpVoxelTransmissivity(double x, double y, double z); // Interpolate transmittance using tri-linear interpolation
+	double interpVoxelTransmissivity(vec3 xyz); // Interpolate transmittance using tri-linear interpolation
+	
+	int getVoxelIndex(int x, int y, int z); // Get array index of voxel given grid index
+	vector<Voxel*> getVoxelGrid(); // Get voxel grid
+	double getVoxelSize(); // Get voxel size
+	double getDefaultDensity();	// Get default density
+	int getMaxX(); int getMaxY(); int getMaxZ(); // Get X/Y/Z count
+	mat4 getTInv(); mat4 getTStarInv(); // Get transformation matrices for intersection test
+
+	bool isInsideGrid(vec3 xyz); // Check if point is inside the voxel grid
+	vec3 world2voxel(vec3 world); // World coordinate to voxel coordinate
+	vec3 voxel2world(vec3 voxel); // Voxel coordinate to world coordinate
+
+private:
+	double voxelSize;
+	int xCount, yCount, zCount;
+	double defaultDensity;
+	vector<Voxel*> voxelGrid;
+
+	mat4 t_inv;
+	mat4 tstar_inv;
+
+	friend class VolumeRender;
+};
+
+#endif
+```
+
+### VolumetricClouds/algebra3.h
+```
+/****************************************************************
+*																*
+* C++ Vector and Matrix Algebra routines						*
+* Author: Jean-Francois DOUE									*
+* Version 3.1 --- October 1993									*
+*																*
+****************************************************************/
+//
+//	From "Graphics Gems IV / Edited by Paul S. Heckbert
+//	Academic Press, 1994, ISBN 0-12-336156-9
+//	"You are free to use and modify this code in any way
+//	you like." (p. xv)
+//
+//	Modified by J. Nagle, March 1997
+//	-	All functions are inline.
+//	-	All functions are const-correct.
+//	-	All checking is via the standard "assert" macro.
+//	-	Stream I/O is disabled for portability, but can be
+//		re-enabled by defining ALGEBRA3IOSTREAMS.
+//
+//	Modified by Paul Rademacher, 1998
+//	- Added set, swap_row/swap_col functions
+//
+//	Modified by Aline N, 2009
+//	- Add divide by zero length check to Length()
+//
+//	Modified by slsdo, 2010
+//	- Added Cross Product operator
+//	- Added rotation3Drad by Liming Zhao
+//	- Added normalized to return a copy of a normalized vec3
+//	- Added mat4*vec3
+//  - Added mat3 and mat4 determinant
+//  - Added vector floor and ceil
+
+#ifndef ALGEBRA3H
+#define ALGEBRA3H
+
+#include <stdlib.h>
+#include <assert.h>
+#include <math.h>
+
+// this line defines a new type: pointer to a function which returns a
+// double and takes as argument a double
+typedef double (*V_FCT_PTR)(double);
+
+// min-max macros
+#define MIN(A,B) ((A) < (B) ? (A) : (B))
+#define MAX(A,B) ((A) > (B) ? (A) : (B))
+
+#undef min					// allow as function names
+#undef max
+
+#define ALGEBRA3IOSTREAMS
+#include <iostream>
+using namespace std;
+
+// error handling macro
+#define ALGEBRA_ERROR(E) { assert(false); }
+
+class vec2;
+class vec3;
+class vec4;
+class mat3;
+class mat4;
+
+enum {VX, VY, VZ, VW};		    // axes
+enum {PA, PB, PC, PD};		    // planes
+enum {RED, GREEN, BLUE};	    // colors
+enum {KA, KD, KS, ES};		    // phong coefficients
+//
+//	PI
+//
+const double M_PI = (double) 3.14159265358979323846;		// per CRC handbook, 14th. ed.
+const double M_PI_2 = (M_PI/2.0);				// PI/2
+const double M2_PI = (M_PI*2.0);				// PI*2
+const double Rad2Deg = double(180.0f / M_PI);			// Rad to Degree
+const double Deg2Rad = double(M_PI / 180.0f);			// Degree to Rad
+
+#define EPSILON 0.00001
+#define INF 1000000.0
+
+
+/****************************************************************
+*																*
+*			    2D Vector										*
+*																*
+****************************************************************/
+
+class vec2
+{
+protected:
+
+	double n[2];
+
+public:
+
+	// Constructors
+
+	vec2();
+	vec2(const double x, const double y);
+	vec2(const double d);
+	vec2(const vec2& v);				// copy constructor
+	vec2(const vec3& v);				// cast v3 to v2
+	vec2(const vec3& v, int dropAxis);	// cast v3 to v2
+
+	// Assignment operators
+
+	vec2& operator	= ( const vec2& v );	// assignment of a vec2
+	vec2& operator += ( const vec2& v );	// incrementation by a vec2
+	vec2& operator -= ( const vec2& v );	// decrementation by a vec2
+	vec2& operator *= ( const double d );	// multiplication by a constant
+	vec2& operator /= ( const double d );	// division by a constant
+	double& operator [] ( int i);			// indexing
+	double vec2::operator [] ( int i) const;// read-only indexing
+
+	// special functions
+
+	double length() const;			// length of a vec2
+	double length2() const;			// squared length of a vec2
+	vec2& normalize() ;				// normalize a vec2 in place
+	vec2& apply(V_FCT_PTR fct);		// apply a func. to each component
+	void set( float x, float y );	// set vector
+
+	// friends
+
+	friend vec2 operator - (const vec2& v);						// -v1
+	friend vec2 operator + (const vec2& a, const vec2& b);	    // v1 + v2
+	friend vec2 operator - (const vec2& a, const vec2& b);	    // v1 - v2
+	friend vec2 operator * (const vec2& a, const double d);	    // v1 * 3.0
+	friend vec2 operator * (const double d, const vec2& a);	    // 3.0 * v1
+	friend vec2 operator * (const mat3& a, const vec2& v);	    // M . v
+	friend vec2 operator * (const vec2& v, const mat3& a);		// v . M
+	friend double operator * (const vec2& a, const vec2& b);    // dot product
+	friend vec2 operator / (const vec2& a, const double d);	    // v1 / 3.0
+	friend vec3 operator ^ (const vec2& a, const vec2& b);	    // cross product
+	friend int operator == (const vec2& a, const vec2& b);	    // v1 == v2 ?
+	friend int operator != (const vec2& a, const vec2& b);	    // v1 != v2 ?
+
+#ifdef ALGEBRA3IOSTREAMS
+	friend ostream& operator << (ostream& s, const vec2& v);	// output to stream
+	friend istream& operator >> (istream& s, vec2& v);	    // input from strm.
+#endif ALGEBRA3IOSTREAMS
+
+	friend void swap(vec2& a, vec2& b);						// swap v1 & v2
+	friend vec2 min(const vec2& a, const vec2& b);		    // min(v1, v2)
+	friend vec2 max(const vec2& a, const vec2& b);		    // max(v1, v2)
+	friend vec2 prod(const vec2& a, const vec2& b);		    // term by term *
+	friend vec2 floor(const vec2& v);						// term by term floor
+	friend vec2 ceil(const vec2& v);						// term by term ceil
+
+	// necessary friend declarations
+
+	friend class vec3;
+};
+
+/****************************************************************
+*																*
+*			    3D Vector										*
+*																*
+****************************************************************/
+
+class vec3
+{
+protected:
+
+	double n[3];
+
+public:
+
+	// Constructors
+
+	vec3();
+	vec3(const double x, const double y, const double z);
+	vec3(const double d);
+	vec3(const vec3& v);					// copy constructor
+	vec3(const vec2& v);					// cast v2 to v3
+	vec3(const vec2& v, double d);		    // cast v2 to v3
+	vec3(const vec4& v);					// cast v4 to v3
+	vec3(const vec4& v, int dropAxis);	    // cast v4 to v3
+
+	// Assignment operators
+
+	vec3& operator	= ( const vec3& v );	    // assignment of a vec3
+	vec3& operator += ( const vec3& v );	    // incrementation by a vec3
+	vec3& operator -= ( const vec3& v );	    // decrementation by a vec3
+	vec3& operator *= ( const double d );	    // multiplication by a constant
+	vec3& operator /= ( const double d );	    // division by a constant
+	double& operator [] ( int i);				// indexing
+	double operator[] (int i) const;			// read-only indexing
+
+	// special functions
+
+	double length() const;				// length of a vec3
+	double length2() const;				// squared length of a vec3
+	vec3& normalize();					// normalize a vec3 in place
+	vec3 normalized();					// return a normalized vec3
+	vec3 cross(vec3 &v) const;			// cross product
+	vec3& apply(V_FCT_PTR fct);		    // apply a func. to each component
+	void set( float x, float y, float z );		// set vector
+
+	// friends
+
+	friend vec3 operator - (const vec3& v);						// -v1
+	friend vec3 operator + (const vec3& a, const vec3& b);	    // v1 + v2
+	friend vec3 operator - (const vec3& a, const vec3& b);	    // v1 - v2
+	friend vec3 operator * (const vec3& a, const double d);	    // v1 * 3.0
+	friend vec3 operator * (const double d, const vec3& a);	    // 3.0 * v1
+	friend vec3 operator * (const mat4& a, const vec3& v);	    // M . v
+	friend vec3 operator * (const vec3& v, const mat4& a);		// v . M
+	friend double operator * (const vec3& a, const vec3& b);    // dot product
+	friend vec3 operator / (const vec3& a, const double d);	    // v1 / 3.0
+	friend vec3 operator ^ (const vec3& a, const vec3& b);	    // cross product
+	friend int operator == (const vec3& a, const vec3& b);	    // v1 == v2 ?
+	friend int operator != (const vec3& a, const vec3& b);	    // v1 != v2 ?
+
+#ifdef ALGEBRA3IOSTREAMS
+	friend ostream& operator << (ostream& s, const vec3& v);	   // output to stream
+	friend istream& operator >> (istream& s, vec3& v);	    // input from strm.
+#endif // ALGEBRA3IOSTREAMS
+
+	friend void swap(vec3& a, vec3& b);						// swap v1 & v2
+	friend vec3 min(const vec3& a, const vec3& b);		    // min(v1, v2)
+	friend vec3 max(const vec3& a, const vec3& b);		    // max(v1, v2)
+	friend vec3 prod(const vec3& a, const vec3& b);		    // term by term *
+	friend vec3 floor(const vec3& v);						// term by term floor
+	friend vec3 ceil(const vec3& v);						// term by term ceil
+
+	// necessary friend declarations
+
+	friend class vec2;
+	friend class vec4;
+	friend class mat3;
+	friend vec2 operator * (const mat3& a, const vec2& v);	// linear transform
+	friend vec3 operator * (const mat3& a, const vec3& v);
+	friend mat3 operator * (const mat3& a, const mat3& b);	// matrix 3 product
+};
+
+/****************************************************************
+*																*
+*			    4D Vector										*
+*																*
+****************************************************************/
+
+class vec4
+{
+protected:
+
+	double n[4];
+
+public:
+
+	// Constructors
+
+	vec4();
+	vec4(const double x, const double y, const double z, const double w);
+	vec4(const double d);
+	vec4(const vec4& v);			    // copy constructor
+	vec4(const vec3& v);			    // cast vec3 to vec4
+	vec4(const vec3& v, const double d);	    // cast vec3 to vec4
+
+	// Assignment operators
+
+	vec4& operator	= ( const vec4& v );	    // assignment of a vec4
+	vec4& operator += ( const vec4& v );	    // incrementation by a vec4
+	vec4& operator -= ( const vec4& v );	    // decrementation by a vec4
+	vec4& operator *= ( const double d );	    // multiplication by a constant
+	vec4& operator /= ( const double d );	    // division by a constant
+	double& operator [] ( int i);				// indexing
+	double operator[] (int i) const;			// read-only indexing
+
+	// special functions
+
+	double length() const;			// length of a vec4
+	double length2() const;			// squared length of a vec4
+	vec4& normalize();			    // normalize a vec4 in place
+	vec4& apply(V_FCT_PTR fct);		// apply a func. to each component
+	void set( float x, float y, float z, float a );	// set vector
+
+	// friends
+
+	friend vec4 operator - (const vec4& v);						// -v1
+	friend vec4 operator + (const vec4& a, const vec4& b);	    // v1 + v2
+	friend vec4 operator - (const vec4& a, const vec4& b);	    // v1 - v2
+	friend vec4 operator * (const vec4& a, const double d);	    // v1 * 3.0
+	friend vec4 operator * (const double d, const vec4& a);	    // 3.0 * v1
+	friend vec4 operator * (const mat4& a, const vec4& v);	    // M . v
+	friend vec4 operator * (const vec4& v, const mat4& a);	    // v . M
+	friend double operator * (const vec4& a, const vec4& b);    // dot product
+	friend vec4 operator / (const vec4& a, const double d);	    // v1 / 3.0
+	friend int operator == (const vec4& a, const vec4& b);	    // v1 == v2 ?
+	friend int operator != (const vec4& a, const vec4& b);	    // v1 != v2 ?
+
+#ifdef ALGEBRA3IOSTREAMS
+	friend ostream& operator << (ostream& s, const vec4& v);	// output to stream
+	friend istream& operator >> (istream& s, vec4& v);	    // input from strm.
+#endif //  ALGEBRA3IOSTREAMS
+
+	friend void swap(vec4& a, vec4& b);						// swap v1 & v2
+	friend vec4 min(const vec4& a, const vec4& b);		    // min(v1, v2)
+	friend vec4 max(const vec4& a, const vec4& b);		    // max(v1, v2)
+	friend vec4 prod(const vec4& a, const vec4& b);		    // term by term *
+	friend vec4 floor(const vec4& v);						// term by term floor
+	friend vec4 ceil(const vec4& v);						// term by term ceil
+
+	// necessary friend declarations
+
+	friend class vec3;
+	friend class mat4;
+	friend vec3 operator * (const mat4& a, const vec3& v);	// linear transform
+	friend mat4 operator * (const mat4& a, const mat4& b);	// matrix 4 product
+};
+
+/****************************************************************
+*																*
+*			   3x3 Matrix										*
+*																*
+****************************************************************/
+
+class mat3
+{
+protected:
+
+	vec3 v[3];
+
+public:
+
+	// Constructors
+
+	mat3();
+	mat3(const vec3& v0, const vec3& v1, const vec3& v2);
+	mat3(const double d);
+	mat3(const mat3& m);
+
+	// Assignment operators
+
+	mat3& operator	= ( const mat3& m );	    // assignment of a mat3
+	mat3& operator += ( const mat3& m );	    // incrementation by a mat3
+	mat3& operator -= ( const mat3& m );	    // decrementation by a mat3
+	mat3& operator *= ( const double d );	    // multiplication by a constant
+	mat3& operator /= ( const double d );	    // division by a constant
+	vec3& operator [] ( int i);					// indexing
+	const vec3& operator [] ( int i) const;		// read-only indexing
+
+	// special functions
+
+	mat3 transpose() const;			    // transpose
+	mat3 inverse() const;				// inverse
+	mat3& apply(V_FCT_PTR fct);		    // apply a func. to each element
+	void set(const vec3& v0, const vec3& v1, const vec3& v2);	// set matrix
+	double det() const;					// determinant
+
+	// friends
+
+	friend mat3 operator - (const mat3& a);						// -m1
+	friend mat3 operator + (const mat3& a, const mat3& b);	    // m1 + m2
+	friend mat3 operator - (const mat3& a, const mat3& b);	    // m1 - m2
+	friend mat3 operator * (const mat3& a, const mat3& b);		// m1 * m2
+	friend mat3 operator * (const mat3& a, const double d);	    // m1 * 3.0
+	friend mat3 operator * (const double d, const mat3& a);	    // 3.0 * m1
+	friend mat3 operator / (const mat3& a, const double d);	    // m1 / 3.0
+	friend int operator == (const mat3& a, const mat3& b);	    // m1 == m2 ?
+	friend int operator != (const mat3& a, const mat3& b);	    // m1 != m2 ?
+
+#ifdef ALGEBRA3IOSTREAMS
+	friend ostream& operator << (ostream& s, const mat3& m);	// output to stream
+	friend istream& operator >> (istream& s, mat3& m);	    // input from strm.
+#endif //  ALGEBRA3IOSTREAMS
+
+	friend void swap(mat3& a, mat3& b);			    // swap m1 & m2
+
+	// necessary friend declarations
+
+	friend vec3 operator * (const mat3& a, const vec3& v);	    // linear transform
+	friend vec2 operator * (const mat3& a, const vec2& v);	    // linear transform
+};
+
+/****************************************************************
+*																*
+*			   4x4 Matrix										*
+*																*
+****************************************************************/
+
+class mat4
+{
+protected:
+
+	vec4 v[4];
+
+public:
+
+	// Constructors
+
+	mat4();
+	mat4(const vec4& v0, const vec4& v1, const vec4& v2, const vec4& v3);
+	mat4(const double d);
+	mat4(const mat4& m);
+
+	// Assignment operators
+
+	mat4& operator	= ( const mat4& m );	    // assignment of a mat4
+	mat4& operator += ( const mat4& m );	    // incrementation by a mat4
+	mat4& operator -= ( const mat4& m );	    // decrementation by a mat4
+	mat4& operator *= ( const double d );	    // multiplication by a constant
+	mat4& operator /= ( const double d );	    // division by a constant
+	vec4& operator [] ( int i);					// indexing
+	const vec4& operator [] ( int i) const;		// read-only indexing
+
+	// special functions
+
+	mat4 transpose() const;						// transpose
+	mat4 inverse() const;						// inverse
+	mat4& apply(V_FCT_PTR fct);					// apply a func. to each element
+	void swap_rows( int i, int j );             // swap rows i and j
+	void swap_cols( int i, int j );             // swap cols i and j
+	double det() const;							// determinant
+
+	// friends
+
+	friend mat4 operator - (const mat4& a);						// -m1
+	friend mat4 operator + (const mat4& a, const mat4& b);	    // m1 + m2
+	friend mat4 operator - (const mat4& a, const mat4& b);	    // m1 - m2
+	friend mat4 operator * (const mat4& a, const mat4& b);		// m1 * m2
+	friend mat4 operator * (const mat4& a, const double d);	    // m1 * 4.0
+	friend mat4 operator * (const double d, const mat4& a);	    // 4.0 * m1
+	friend mat4 operator / (const mat4& a, const double d);	    // m1 / 3.0
+	friend int operator == (const mat4& a, const mat4& b);	    // m1 == m2 ?
+	friend int operator != (const mat4& a, const mat4& b);	    // m1 != m2 ?
+
+#ifdef ALGEBRA3IOSTREAMS
+	friend ostream& operator << (ostream& s, const mat4& m);	// output to stream
+	friend istream& operator >> (istream& s, mat4& m);			// input from strm.
+#endif //  ALGEBRA3IOSTREAMS
+
+	friend void swap(mat4& a, mat4& b);							// swap m1 & m2
+
+	// necessary friend declarations
+
+	friend vec4 operator * (const mat4& a, const vec4& v);	    // linear transform
+	friend vec3 operator * (const mat4& a, const vec3& v);	    // linear transform
+};
+
+/****************************************************************
+*																*
+*	       2D functions and 3D functions						*
+*																*
+****************************************************************/
+
+mat3 identity2D();								// identity 2D
+mat3 translation2D(const vec2& v);				// translation 2D
+mat3 rotation2Ddeg(const vec2& Center, const double angleDeg);	// rotation 2D
+mat3 rotation3Drad(const vec3& axis, const float angleRad);	// rotation 3D
+mat3 scaling2D(const vec2& scaleVector);		// scaling 2D
+mat4 identity3D();								// identity 3D
+mat4 translation3D(const vec3& v);				// translation 3D
+mat4 rotation3Ddeg(vec3 Axis, const double angleDeg);	// rotation 3D
+mat4 scaling3D(const vec3& scaleVector);		// scaling 3D
+mat4 perspective3D(const double d);			    // perspective 3D
+
+//
+//	Implementation
+//
+
+/****************************************************************
+*																*
+*		    vec2 Member functions								*
+*																*
+****************************************************************/
+
+// CONSTRUCTORS
+
+inline vec2::vec2() {}
+
+inline vec2::vec2(const double x, const double y)
+{
+	n[VX] = x; n[VY] = y; 
+}
+
+inline vec2::vec2(const double d)
+{ 
+	n[VX] = n[VY] = d;
+}
+
+inline vec2::vec2(const vec2& v)
+{ 
+	n[VX] = v.n[VX]; n[VY] = v.n[VY]; 
+}
+
+inline vec2::vec2(const vec3& v) // it is up to caller to avoid divide-by-zero
+{ 
+	n[VX] = v.n[VX]/v.n[VZ]; n[VY] = v.n[VY]/v.n[VZ]; 
+};
+
+inline vec2::vec2(const vec3& v, int dropAxis) 
+{
+	switch (dropAxis) {
+	case VX: n[VX] = v.n[VY]; n[VY] = v.n[VZ]; break;
+	case VY: n[VX] = v.n[VX]; n[VY] = v.n[VZ]; break;
+	default: n[VX] = v.n[VX]; n[VY] = v.n[VY]; break;
+	}
+}
+
+
+// ASSIGNMENT OPERATORS
+
+inline vec2& vec2::operator = (const vec2& v)
+{ 
+	n[VX] = v.n[VX]; n[VY] = v.n[VY]; return *this;
+}
+
+inline vec2& vec2::operator += ( const vec2& v )
+{ 
+	n[VX] += v.n[VX]; n[VY] += v.n[VY]; return *this;
+}
+
+inline vec2& vec2::operator -= ( const vec2& v )
+{
+	n[VX] -= v.n[VX]; n[VY] -= v.n[VY]; return *this; 
+}
+
+inline vec2& vec2::operator *= ( const double d )
+{ 
+	n[VX] *= d; n[VY] *= d; return *this; 
+}
+
+inline vec2& vec2::operator /= ( const double d )
+{
+	double d_inv = 1./d; n[VX] *= d_inv; n[VY] *= d_inv; return *this; 
+}
+
+inline double& vec2::operator [] ( int i) 
+{
+	assert(!(i < VX || i > VY));		// subscript check
+	return n[i];
+}
+
+inline double vec2::operator [] ( int i) const 
+{
+	assert(!(i < VX || i > VY));
+	return n[i];
+}
+
+
+// SPECIAL FUNCTIONS
+
+inline double vec2::length() const
+{ 
+	return sqrt(length2());
+}
+
+inline double vec2::length2() const
+{ 
+	return n[VX]*n[VX] + n[VY]*n[VY]; 
+}
+
+inline vec2& vec2::normalize() // it is up to caller to avoid divide-by-zero
+{ 
+	double len = length();
+	if (len > 0.000001) *this /= len; 
+	return *this; 
+}
+
+inline vec2& vec2::apply(V_FCT_PTR fct)
+{ 
+	n[VX] = (*fct)(n[VX]); n[VY] = (*fct)(n[VY]); return *this; 
+}
+
+inline void vec2::set( float x, float y )
+{ 
+	n[VX] = x;   n[VY] = y;
+}
+
+
+// FRIENDS
+
+inline vec2 operator - (const vec2& a)
+{ 
+	return vec2(-a.n[VX],-a.n[VY]); 
+}
+
+inline vec2 operator + (const vec2& a, const vec2& b)
+{ 
+	return vec2(a.n[VX]+ b.n[VX], a.n[VY] + b.n[VY]); 
+}
+
+inline vec2 operator - (const vec2& a, const vec2& b)
+{ 
+	return vec2(a.n[VX]-b.n[VX], a.n[VY]-b.n[VY]); 
+}
+
+inline vec2 operator * (const vec2& a, const double d)
+{ 
+	return vec2(d*a.n[VX], d*a.n[VY]);
+}
+
+inline vec2 operator * (const double d, const vec2& a)
+{ 
+	return a*d; 
+}
+
+inline vec2 operator * (const mat3& a, const vec2& v) 
+{
+	vec3 av;
+
+	av.n[VX] = a.v[0].n[VX]*v.n[VX] + a.v[0].n[VY]*v.n[VY] + a.v[0].n[VZ];
+	av.n[VY] = a.v[1].n[VX]*v.n[VX] + a.v[1].n[VY]*v.n[VY] + a.v[1].n[VZ];
+	av.n[VZ] = a.v[2].n[VX]*v.n[VX] + a.v[2].n[VY]*v.n[VY] + a.v[2].n[VZ];
+	return av;
+}
+
+inline vec2 operator * (const vec2& v, const mat3& a)
+{ 
+	return a.transpose() * v; 
+}
+
+inline double operator * (const vec2& a, const vec2& b)
+{ 
+	return (a.n[VX]*b.n[VX] + a.n[VY]*b.n[VY]); 
+}
+
+inline vec2 operator / (const vec2& a, const double d)
+{ 
+	double d_inv = 1./d; return vec2(a.n[VX]*d_inv, a.n[VY]*d_inv); 
+}
+
+inline vec3 operator ^ (const vec2& a, const vec2& b)
+{ 
+	return vec3(0.0, 0.0, a.n[VX] * b.n[VY] - b.n[VX] * a.n[VY]); 
+}
+
+inline int operator == (const vec2& a, const vec2& b)
+{ 
+	return (a.n[VX] == b.n[VX]) && (a.n[VY] == b.n[VY]); 
+}
+
+inline int operator != (const vec2& a, const vec2& b)
+{ 
+	return !(a == b);
+}
+
+#ifdef ALGEBRA3IOSTREAMS
+inline ostream& operator << (ostream& s, const vec2& v)
+{ 
+	return s << "| " << v.n[VX] << ' ' << v.n[VY] << " |"; 
+}
+inline istream& operator >> (istream& s, vec2& v) 
+{
+	vec2	v_tmp;
+	char	c = ' ';
+
+	while (isspace(c))
+		s >> c;
+	// The vectors can be formatted either as x y or | x y |
+	if (c == '|') {
+		s >> v_tmp[VX] >> v_tmp[VY];
+		while (s >> c && isspace(c)) ;
+		if (c != '|')
+			s.setstate(ios::badbit);
+	}
+	else {
+		s.putback(c);
+		s >> v_tmp[VX] >> v_tmp[VY];
+	}
+	if (s)
+		v = v_tmp;
+	return s;
+}
+#endif // ALGEBRA3IOSTREAMS
+
+inline void swap(vec2& a, vec2& b)
+{ 
+	vec2 tmp(a); a = b; b = tmp; 
+}
+
+inline vec2 min(const vec2& a, const vec2& b)
+{ 
+	return vec2(MIN(a.n[VX], b.n[VX]), MIN(a.n[VY], b.n[VY])); 
+}
+
+inline vec2 max(const vec2& a, const vec2& b)
+{ 
+	return vec2(MAX(a.n[VX], b.n[VX]), MAX(a.n[VY], b.n[VY]));
+}
+
+inline vec2 prod(const vec2& a, const vec2& b)
+{
+	return vec2(a.n[VX] * b.n[VX], a.n[VY] * b.n[VY]); 
+}
+
+inline vec2 floor(const vec2& v)
+{ 
+	return vec2(floor(v.n[VX]), floor(v.n[VY]));
+}
+
+inline vec2 ceil(const vec2& v)
+{ 
+	return vec2(ceil(v.n[VX]), ceil(v.n[VY]));
+}
+
+/****************************************************************
+*																*
+*		    vec3 Member functions								*
+*																*
+****************************************************************/
+
+// CONSTRUCTORS
+
+inline vec3::vec3() {}
+
+inline vec3::vec3(const double x, const double y, const double z)
+{
+	n[VX] = x; n[VY] = y; n[VZ] = z;
+}
+
+inline vec3::vec3(const double d)
+{ 
+	n[VX] = n[VY] = n[VZ] = d;
+}
+
+inline vec3::vec3(const vec3& v)
+{ 
+	n[VX] = v.n[VX]; n[VY] = v.n[VY]; n[VZ] = v.n[VZ]; 
+}
+
+inline vec3::vec3(const vec2& v)
+{
+	n[VX] = v.n[VX]; n[VY] = v.n[VY]; n[VZ] = 1.0; 
+}
+
+inline vec3::vec3(const vec2& v, double d)
+{ 
+	n[VX] = v.n[VX]; n[VY] = v.n[VY]; n[VZ] = d; 
+}
+
+inline vec3::vec3(const vec4& v) // it is up to caller to avoid divide-by-zero
+{ 
+	n[VX] = v.n[VX] / v.n[VW]; n[VY] = v.n[VY] / v.n[VW];
+	n[VZ] = v.n[VZ] / v.n[VW]; 
+}
+
+inline vec3::vec3(const vec4& v, int dropAxis) 
+{
+	switch (dropAxis) {
+	case VX: n[VX] = v.n[VY]; n[VY] = v.n[VZ]; n[VZ] = v.n[VW]; break;
+	case VY: n[VX] = v.n[VX]; n[VY] = v.n[VZ]; n[VZ] = v.n[VW]; break;
+	case VZ: n[VX] = v.n[VX]; n[VY] = v.n[VY]; n[VZ] = v.n[VW]; break;
+	default: n[VX] = v.n[VX]; n[VY] = v.n[VY]; n[VZ] = v.n[VZ]; break;
+	}
+}
+
+
+// ASSIGNMENT OPERATORS
+
+inline vec3& vec3::operator = (const vec3& v)
+{ 
+	n[VX] = v.n[VX]; n[VY] = v.n[VY]; n[VZ] = v.n[VZ]; return *this; 
+}
+
+inline vec3& vec3::operator += ( const vec3& v )
+{
+	n[VX] += v.n[VX]; n[VY] += v.n[VY]; n[VZ] += v.n[VZ]; return *this; 
+}
+
+inline vec3& vec3::operator -= ( const vec3& v )
+{ 
+	n[VX] -= v.n[VX]; n[VY] -= v.n[VY]; n[VZ] -= v.n[VZ]; return *this; 
+}
+
+inline vec3& vec3::operator *= ( const double d )
+{ 
+	n[VX] *= d; n[VY] *= d; n[VZ] *= d; return *this; 
+}
+
+inline vec3& vec3::operator /= ( const double d )
+{ 
+	double d_inv = 1./d; n[VX] *= d_inv; n[VY] *= d_inv; n[VZ] *= d_inv; return *this; 
+}
+
+inline double& vec3::operator [] ( int i) 
+{
+	assert(! (i < VX || i > VZ));
+	return n[i];
+}
+
+inline double vec3::operator [] ( int i) const 
+{
+	assert(! (i < VX || i > VZ));
+	return n[i];
+}
+
+
+// SPECIAL FUNCTIONS
+
+inline double vec3::length() const
+{  
+	return sqrt(length2());
+}
+
+inline double vec3::length2() const
+{  
+	return n[VX]*n[VX] + n[VY]*n[VY] + n[VZ]*n[VZ]; 
+}
+
+inline vec3& vec3::normalize() // it is up to caller to avoid divide-by-zero
+{
+	double len = length();
+	if (len > 0.000001) *this /= len; 
+	return *this; 
+}
+
+inline vec3 vec3::normalized()
+{
+	vec3 tmp = *this;
+	tmp.normalize();
+	return tmp;
+}
+
+inline vec3 vec3::cross(vec3 &v) const
+{
+	vec3 tmp;
+	tmp[0] = n[1] * v.n[2] - n[2] * v.n[1];
+	tmp[1] = n[2] * v.n[0] - n[0] * v.n[2];
+	tmp[2] = n[0] * v.n[1] - n[1] * v.n[0];
+	return tmp;
+}
+
+inline vec3& vec3::apply(V_FCT_PTR fct)
+{
+	n[VX] = (*fct)(n[VX]); n[VY] = (*fct)(n[VY]); n[VZ] = (*fct)(n[VZ]);
+	return *this; 
+}
+
+inline void  vec3::set( float x, float y, float z )
+{
+	n[VX] = x; n[VY] = y; n[VZ] = z;  
+}
+
+
+// FRIENDS
+
+inline vec3 operator - (const vec3& a)
+{ 
+	return vec3(-a.n[VX],-a.n[VY],-a.n[VZ]); 
+}
+
+inline vec3 operator + (const vec3& a, const vec3& b)
+{
+	return vec3(a.n[VX]+ b.n[VX], a.n[VY] + b.n[VY], a.n[VZ] + b.n[VZ]); 
+}
+
+inline vec3 operator - (const vec3& a, const vec3& b)
+{ 
+	return vec3(a.n[VX]-b.n[VX], a.n[VY]-b.n[VY], a.n[VZ]-b.n[VZ]); 
+}
+
+inline vec3 operator * (const vec3& a, const double d)
+{ 
+	return vec3(d*a.n[VX], d*a.n[VY], d*a.n[VZ]); 
+}
+
+inline vec3 operator * (const double d, const vec3& a)
+{ 
+	return a*d; 
+}
+
+inline vec3 operator * (const mat3& a, const vec3& v) 
+{
+#define ROWCOL(i) a.v[i].n[0]*v.n[VX] + a.v[i].n[1]*v.n[VY] \
+				+ a.v[i].n[2]*v.n[VZ]
+				return vec3(ROWCOL(0), ROWCOL(1), ROWCOL(2));
+#undef ROWCOL // (i)
+}
+
+inline vec3 operator * (const mat4& a, const vec3& v)
+{ 
+	return a * vec4(v); 
+}
+
+inline vec3 operator * (const vec3& v, const mat4& a)
+{ 
+	return a.transpose() * v;
+}
+
+inline double operator * (const vec3& a, const vec3& b)
+{ 
+	return (a.n[VX]*b.n[VX] + a.n[VY]*b.n[VY] + a.n[VZ]*b.n[VZ]); 
+}
+
+inline vec3 operator / (const vec3& a, const double d)
+{ 
+	double d_inv = 1./d; return vec3(a.n[VX]*d_inv, a.n[VY]*d_inv, a.n[VZ]*d_inv); 
+}
+
+inline vec3 operator ^ (const vec3& a, const vec3& b) 
+{
+	return vec3(a.n[VY]*b.n[VZ] - a.n[VZ]*b.n[VY],
+				a.n[VZ]*b.n[VX] - a.n[VX]*b.n[VZ],
+				a.n[VX]*b.n[VY] - a.n[VY]*b.n[VX]);
+}
+
+inline int operator == (const vec3& a, const vec3& b)
+{ 
+	return (a.n[VX] == b.n[VX]) && (a.n[VY] == b.n[VY]) && (a.n[VZ] == b.n[VZ]);
+}
+
+inline int operator != (const vec3& a, const vec3& b)
+{ 
+	return !(a == b); 
+}
+
+#ifdef ALGEBRA3IOSTREAMS
+inline ostream& operator << (ostream& s, const vec3& v)
+{ 
+	return s << "| " << v.n[VX] << ' ' << v.n[VY] << ' ' << v.n[VZ] << " |"; 
+}
+
+inline istream& operator >> (istream& s, vec3& v) 
+{
+	vec3	v_tmp;
+	char	c = ' ';
+
+	while (isspace(c))
+		s >> c;
+	// The vectors can be formatted either as x y z or | x y z |
+	if (c == '|') {
+		s >> v_tmp[VX] >> v_tmp[VY] >> v_tmp[VZ];
+		while (s >> c && isspace(c)) ;
+		if (c != '|')
+			s.setstate(ios::badbit);
+	}
+	else {
+		s.putback(c);
+		s >> v_tmp[VX] >> v_tmp[VY] >> v_tmp[VZ];
+	}
+	if (s)
+		v = v_tmp;
+	return s;
+}
+#endif // ALGEBRA3IOSTREAMS
+
+inline void swap(vec3& a, vec3& b)
+{ 
+	vec3 tmp(a); a = b; b = tmp; 
+}
+
+inline vec3 min(const vec3& a, const vec3& b)
+{ 
+	return vec3(MIN(a.n[VX], b.n[VX]), MIN(a.n[VY], b.n[VY]), MIN(a.n[VZ], b.n[VZ])); 
+}
+
+inline vec3 max(const vec3& a, const vec3& b)
+{ 
+	return vec3(MAX(a.n[VX], b.n[VX]), MAX(a.n[VY], b.n[VY]), MAX(a.n[VZ], b.n[VZ])); 
+}
+
+inline vec3 prod(const vec3& a, const vec3& b)
+{ 
+	return vec3(a.n[VX] * b.n[VX], a.n[VY] * b.n[VY], a.n[VZ] * b.n[VZ]);
+}
+
+inline vec3 floor(const vec3& v)
+{ 
+	return vec3(floor(v.n[VX]), floor(v.n[VY]), floor(v.n[VZ]));
+}
+
+inline vec3 ceil(const vec3& v)
+{ 
+	return vec3(ceil(v.n[VX]), ceil(v.n[VY]), ceil(v.n[VZ]));
+}
+
+
+/****************************************************************
+*																*
+*		    vec4 Member functions								*
+*																*
+****************************************************************/
+
+// CONSTRUCTORS
+
+inline vec4::vec4() {}
+
+inline vec4::vec4(const double x, const double y, const double z, const double w)
+{ 
+	n[VX] = x; n[VY] = y; n[VZ] = z; n[VW] = w;
+}
+
+inline vec4::vec4(const double d)
+{ 
+	n[VX] = n[VY] = n[VZ] = n[VW] = d; 
+}
+
+inline vec4::vec4(const vec4& v)
+{
+	n[VX] = v.n[VX]; n[VY] = v.n[VY]; n[VZ] = v.n[VZ]; n[VW] = v.n[VW]; 
+}
+
+inline vec4::vec4(const vec3& v)
+{
+	n[VX] = v.n[VX]; n[VY] = v.n[VY]; n[VZ] = v.n[VZ]; n[VW] = 1.0;
+}
+
+inline vec4::vec4(const vec3& v, const double d)
+{
+	n[VX] = v.n[VX]; n[VY] = v.n[VY]; n[VZ] = v.n[VZ];  n[VW] = d;
+}
+
+
+// ASSIGNMENT OPERATORS
+
+inline vec4& vec4::operator = (const vec4& v)
+{ 
+	n[VX] = v.n[VX]; n[VY] = v.n[VY]; n[VZ] = v.n[VZ]; n[VW] = v.n[VW];	return *this; 
+}
+
+inline vec4& vec4::operator += ( const vec4& v )
+{ 
+	n[VX] += v.n[VX]; n[VY] += v.n[VY]; n[VZ] += v.n[VZ]; n[VW] += v.n[VW];	return *this; 
+}
+
+inline vec4& vec4::operator -= ( const vec4& v )
+{ 
+	n[VX] -= v.n[VX]; n[VY] -= v.n[VY]; n[VZ] -= v.n[VZ]; n[VW] -= v.n[VW];	return *this; 
+}
+
+inline vec4& vec4::operator *= ( const double d )
+{ 
+	n[VX] *= d; n[VY] *= d; n[VZ] *= d; n[VW] *= d; return *this; 
+}
+
+inline vec4& vec4::operator /= ( const double d )
+{ 
+	double d_inv = 1./d; n[VX] *= d_inv; n[VY] *= d_inv; n[VZ] *= d_inv; n[VW] *= d_inv; return *this;
+}
+
+inline double& vec4::operator [] ( int i)
+{
+	assert(! (i < VX || i > VW));
+	return n[i];
+}
+
+inline double vec4::operator [] ( int i) const 
+{
+	assert(! (i < VX || i > VW));
+	return n[i];
+}
+
+// SPECIAL FUNCTIONS
+
+inline double vec4::length() const
+{ 
+	return sqrt(length2());
+}
+
+inline double vec4::length2() const
+{ 
+	return n[VX]*n[VX] + n[VY]*n[VY] + n[VZ]*n[VZ] + n[VW]*n[VW];
+}
+
+inline vec4& vec4::normalize() // it is up to caller to avoid divide-by-zero
+{ 
+	double len = length();
+	if (len > 0.000001) *this /= len; 
+	return *this; 
+}
+
+inline vec4& vec4::apply(V_FCT_PTR fct)
+{ 
+	n[VX] = (*fct)(n[VX]); n[VY] = (*fct)(n[VY]); n[VZ] = (*fct)(n[VZ]);
+	n[VW] = (*fct)(n[VW]); return *this;
+}
+
+inline void vec4::set( float x, float y, float z, float a )
+{
+	n[0] = x; n[1] = y; n[2] = z; n[3] = a;
+}
+
+
+// FRIENDS
+
+inline vec4 operator - (const vec4& a)
+{ 
+	return vec4(-a.n[VX],-a.n[VY],-a.n[VZ],-a.n[VW]); 
+}
+
+inline vec4 operator + (const vec4& a, const vec4& b)
+{
+	return vec4(a.n[VX] + b.n[VX], a.n[VY] + b.n[VY], a.n[VZ] + b.n[VZ], a.n[VW] + b.n[VW]); 
+}
+
+inline vec4 operator - (const vec4& a, const vec4& b)
+{  
+	return vec4(a.n[VX] - b.n[VX], a.n[VY] - b.n[VY], a.n[VZ] - b.n[VZ], a.n[VW] - b.n[VW]); 
+}
+
+inline vec4 operator * (const vec4& a, const double d)
+{ 
+	return vec4(d*a.n[VX], d*a.n[VY], d*a.n[VZ], d*a.n[VW]); 
+}
+
+inline vec4 operator * (const double d, const vec4& a)
+{ 
+	return a*d; 
+}
+
+inline vec4 operator * (const mat4& a, const vec4& v) 
+{
+#define ROWCOL(i) a.v[i].n[0]*v.n[VX] + a.v[i].n[1]*v.n[VY] \
+				+ a.v[i].n[2]*v.n[VZ] + a.v[i].n[3]*v.n[VW]
+				return vec4(ROWCOL(0), ROWCOL(1), ROWCOL(2), ROWCOL(3));
+#undef ROWCOL // (i)
+}
+
+inline vec4 operator * (const vec4& v, const mat4& a)
+{
+	return a.transpose() * v;
+}
+
+inline double operator * (const vec4& a, const vec4& b)
+{ 
+	return (a.n[VX]*b.n[VX] + a.n[VY]*b.n[VY] + a.n[VZ]*b.n[VZ] + a.n[VW]*b.n[VW]); 
+}
+
+inline vec4 operator / (const vec4& a, const double d)
+{ 
+	double d_inv = 1./d; return vec4(a.n[VX]*d_inv, a.n[VY]*d_inv, a.n[VZ]*d_inv, a.n[VW]*d_inv); 
+}
+
+inline int operator == (const vec4& a, const vec4& b)
+{ 
+	return (a.n[VX] == b.n[VX]) && (a.n[VY] == b.n[VY]) && (a.n[VZ] == b.n[VZ]) && (a.n[VW] == b.n[VW]); 
+}
+
+inline int operator != (const vec4& a, const vec4& b)
+{
+	return !(a == b); 
+}
+
+#ifdef ALGEBRA3IOSTREAMS
+inline ostream& operator << (ostream& s, const vec4& v)
+{ 
+	return s << "| " << v.n[VX] << ' ' << v.n[VY] << ' ' << v.n[VZ] << ' ' << v.n[VW] << " |"; 
+}
+
+inline istream& operator >> (istream& s, vec4& v) 
+{
+	vec4	v_tmp;
+	char	c = ' ';
+
+	while (isspace(c))
+		s >> c;
+	// The vectors can be formatted either as x y z w or | x y z w |
+	if (c == '|') {
+		s >> v_tmp[VX] >> v_tmp[VY] >> v_tmp[VZ] >> v_tmp[VW];
+		while (s >> c && isspace(c)) ;
+		if (c != '|')
+			s.setstate(ios::badbit);
+	}
+	else {
+		s.putback(c);
+		s >> v_tmp[VX] >> v_tmp[VY] >> v_tmp[VZ] >> v_tmp[VW];
+	}
+	if (s)
+		v = v_tmp;
+	return s;
+}
+#endif // ALGEBRA3IOSTREAMS
+
+inline void swap(vec4& a, vec4& b)
+{ 
+	vec4 tmp(a); a = b; b = tmp; 
+}
+
+inline vec4 min(const vec4& a, const vec4& b)
+{ 
+	return vec4(MIN(a.n[VX], b.n[VX]), MIN(a.n[VY], b.n[VY]), MIN(a.n[VZ], b.n[VZ]), MIN(a.n[VW], b.n[VW])); 
+}
+
+inline vec4 max(const vec4& a, const vec4& b)
+{
+	return vec4(MAX(a.n[VX], b.n[VX]), MAX(a.n[VY], b.n[VY]), MAX(a.n[VZ], b.n[VZ]), MAX(a.n[VW], b.n[VW]));
+}
+
+inline vec4 prod(const vec4& a, const vec4& b)
+{ 
+	return vec4(a.n[VX] * b.n[VX], a.n[VY] * b.n[VY], a.n[VZ] * b.n[VZ], a.n[VW] * b.n[VW]); 
+}
+
+inline vec4 floor(const vec4& v)
+{ 
+	return vec4(floor(v.n[VX]), floor(v.n[VY]), floor(v.n[VZ]), floor(v.n[VW]));
+}
+
+inline vec4 ceil(const vec4& v)
+{ 
+	return vec4(ceil(v.n[VX]), ceil(v.n[VY]), ceil(v.n[VZ]), ceil(v.n[VW]));
+}
+
+
+/****************************************************************
+*																*
+*		    mat3 member functions								*
+*																*
+****************************************************************/
+
+// CONSTRUCTORS
+
+inline mat3::mat3() {}
+
+inline mat3::mat3(const vec3& v0, const vec3& v1, const vec3& v2)
+{ 
+	v[0] = v0; v[1] = v1; v[2] = v2; 
+}
+
+inline mat3::mat3(const double d)
+{
+	v[0] = v[1] = v[2] = vec3(d); 
+}
+
+inline mat3::mat3(const mat3& m)
+{
+	v[0] = m.v[0]; v[1] = m.v[1]; v[2] = m.v[2]; 
+}
+
+
+// ASSIGNMENT OPERATORS
+
+inline mat3& mat3::operator = ( const mat3& m )
+{
+	v[0] = m.v[0]; v[1] = m.v[1]; v[2] = m.v[2]; return *this;
+}
+
+inline mat3& mat3::operator += ( const mat3& m )
+{ 
+	v[0] += m.v[0]; v[1] += m.v[1]; v[2] += m.v[2]; return *this;
+}
+
+inline mat3& mat3::operator -= ( const mat3& m )
+{
+	v[0] -= m.v[0]; v[1] -= m.v[1]; v[2] -= m.v[2]; return *this;
+}
+
+inline mat3& mat3::operator *= ( const double d )
+{
+	v[0] *= d; v[1] *= d; v[2] *= d; return *this; 
+}
+
+inline mat3& mat3::operator /= ( const double d )
+{ 
+	v[0] /= d; v[1] /= d; v[2] /= d; return *this; 
+}
+
+inline vec3& mat3::operator [] ( int i) 
+{
+	assert(! (i < VX || i > VZ));
+	return v[i];
+}
+
+inline const vec3& mat3::operator [] ( int i) const 
+{
+	assert(!(i < VX || i > VZ));
+	return v[i];
+}
+
+// SPECIAL FUNCTIONS
+
+inline mat3 mat3::transpose() const 
+{
+	return mat3(vec3(v[0][0], v[1][0], v[2][0]),
+				vec3(v[0][1], v[1][1], v[2][1]),
+				vec3(v[0][2], v[1][2], v[2][2]));
+}
+
+inline mat3 mat3::inverse()	const    // Gauss-Jordan elimination with partial pivoting
+{
+	mat3 a(*this),	    // As a evolves from original mat into identity
+		b(identity2D());   // b evolves from identity into inverse(a)
+	int	 i, j, i1;
+
+	// Loop over cols of a from left to right, eliminating above and below diag
+	for (j=0; j<3; j++) {   // Find largest pivot in column j among rows j..2
+		i1 = j;		    // Row with largest pivot candidate
+		for (i=j+1; i<3; i++)
+			if (fabs(a.v[i].n[j]) > fabs(a.v[i1].n[j]))
+				i1 = i;
+
+		// Swap rows i1 and j in a and b to put pivot on diagonal
+		swap(a.v[i1], a.v[j]);
+		swap(b.v[i1], b.v[j]);
+
+		// Scale row j to have a unit diagonal
+		if (a.v[j].n[j]==0.)
+			ALGEBRA_ERROR("mat3::inverse: singular matrix; can't invert\n")
+			b.v[j] /= a.v[j].n[j];
+			a.v[j] /= a.v[j].n[j];
+
+		// Eliminate off-diagonal elems in col j of a, doing identical ops to b
+		for (i=0; i<3; i++)
+			if (i!=j) {
+				b.v[i] -= a.v[i].n[j]*b.v[j];
+				a.v[i] -= a.v[i].n[j]*a.v[j];
+			}
+	}
+	return b;
+}
+
+inline mat3& mat3::apply(V_FCT_PTR fct) 
+{
+	v[VX].apply(fct);
+	v[VY].apply(fct);
+	v[VZ].apply(fct);
+	return *this;
+}
+
+inline void mat3::set( const vec3& v0, const vec3& v1, const vec3& v2 ) 
+{
+	v[0] = v0; v[1] = v1; v[2] = v2; 
+}
+
+inline double mat3::det() const
+{
+	mat3 a(*this);
+
+	return a[0][0] * (a[1][1] * a[2][2] - a[1][2] * a[2][1]) +
+           a[0][1] * (a[1][2] * a[2][0] - a[1][0] * a[2][2]) +
+           a[0][2] * (a[1][0] * a[2][1] - a[1][1] * a[2][0]);
+}
+
+
+// FRIENDS
+
+inline mat3 operator - (const mat3& a)
+{ 
+	return mat3(-a.v[0], -a.v[1], -a.v[2]);
+}
+
+inline mat3 operator + (const mat3& a, const mat3& b)
+{
+	return mat3(a.v[0] + b.v[0], a.v[1] + b.v[1], a.v[2] + b.v[2]);
+}
+
+inline mat3 operator - (const mat3& a, const mat3& b)
+{ 
+	return mat3(a.v[0] - b.v[0], a.v[1] - b.v[1], a.v[2] - b.v[2]);
+}
+
+inline mat3 operator * (const mat3& a, const mat3& b) 
+{
+#define ROWCOL(i, j) \
+	a.v[i].n[0]*b.v[0][j] + a.v[i].n[1]*b.v[1][j] + a.v[i].n[2]*b.v[2][j]
+	return mat3(vec3(ROWCOL(0,0), ROWCOL(0,1), ROWCOL(0,2)),
+				vec3(ROWCOL(1,0), ROWCOL(1,1), ROWCOL(1,2)),
+				vec3(ROWCOL(2,0), ROWCOL(2,1), ROWCOL(2,2)));
+#undef ROWCOL // (i, j)
+}
+
+inline mat3 operator * (const mat3& a, const double d)
+{ 
+	return mat3(a.v[0] * d, a.v[1] * d, a.v[2] * d);
+}
+
+inline mat3 operator * (const double d, const mat3& a)
+{ 
+	return a*d;
+}
+
+inline mat3 operator / (const mat3& a, const double d)
+{ 
+	return mat3(a.v[0] / d, a.v[1] / d, a.v[2] / d); 
+}
+
+inline int operator == (const mat3& a, const mat3& b)
+{ 
+	return (a.v[0] == b.v[0]) && (a.v[1] == b.v[1]) && (a.v[2] == b.v[2]); 
+}
+
+inline int operator != (const mat3& a, const mat3& b)
+{ 
+	return !(a == b);
+}
+
+#ifdef ALGEBRA3IOSTREAMS
+inline ostream& operator << (ostream& s, const mat3& m)
+{
+	return s << m.v[VX] << '\n' << m.v[VY] << '\n' << m.v[VZ]; 
+}
+
+inline istream& operator >> (istream& s, mat3& m)
+{
+	mat3    m_tmp;
+
+	s >> m_tmp[VX] >> m_tmp[VY] >> m_tmp[VZ];
+	if (s)
+		m = m_tmp;
+	return s;
+}
+#endif // ALGEBRA3IOSTREAMS
+
+inline void swap(mat3& a, mat3& b)
+{ 
+	mat3 tmp(a); a = b; b = tmp; 
+}
+
+
+/****************************************************************
+*																*
+*		    mat4 member functions								*
+*																*
+****************************************************************/
+
+// CONSTRUCTORS
+
+inline mat4::mat4() {}
+
+inline mat4::mat4(const vec4& v0, const vec4& v1, const vec4& v2, const vec4& v3)
+{ 
+	v[0] = v0; v[1] = v1; v[2] = v2; v[3] = v3; 
+}
+
+inline mat4::mat4(const double d)
+{ 
+	v[0] = v[1] = v[2] = v[3] = vec4(d);
+}
+
+inline mat4::mat4(const mat4& m)
+{ 
+	v[0] = m.v[0]; v[1] = m.v[1]; v[2] = m.v[2]; v[3] = m.v[3];
+}
+
+
+// ASSIGNMENT OPERATORS
+
+inline mat4& mat4::operator = ( const mat4& m )
+{ 
+	v[0] = m.v[0]; v[1] = m.v[1]; v[2] = m.v[2]; v[3] = m.v[3];
+	return *this;
+}
+
+inline mat4& mat4::operator += ( const mat4& m )
+{ 
+	v[0] += m.v[0]; v[1] += m.v[1]; v[2] += m.v[2]; v[3] += m.v[3];
+	return *this; 
+}
+
+inline mat4& mat4::operator -= ( const mat4& m )
+{ 
+	v[0] -= m.v[0]; v[1] -= m.v[1]; v[2] -= m.v[2]; v[3] -= m.v[3];
+	return *this;
+}
+
+inline mat4& mat4::operator *= ( const double d )
+{
+	v[0] *= d; v[1] *= d; v[2] *= d; v[3] *= d; return *this;
+}
+
+inline mat4& mat4::operator /= ( const double d )
+{ 
+	v[0] /= d; v[1] /= d; v[2] /= d; v[3] /= d; return *this;
+}
+
+inline vec4& mat4::operator [] ( int i)
+{
+	assert(! (i < VX || i > VW));
+	return v[i];
+}
+
+inline const vec4& mat4::operator [] ( int i) const 
+{
+	assert(! (i < VX || i > VW));
+	return v[i];
+}
+
+// SPECIAL FUNCTIONS;
+
+inline mat4 mat4::transpose() const
+{
+	return mat4(vec4(v[0][0], v[1][0], v[2][0], v[3][0]),
+				vec4(v[0][1], v[1][1], v[2][1], v[3][1]),
+				vec4(v[0][2], v[1][2], v[2][2], v[3][2]),
+				vec4(v[0][3], v[1][3], v[2][3], v[3][3]));
+}
+
+inline mat4 mat4::inverse()	const    // Gauss-Jordan elimination with partial pivoting
+{
+	mat4 a(*this),	    // As a evolves from original mat into identity
+		b(identity3D());   // b evolves from identity into inverse(a)
+	int i, j, i1;
+
+	// Loop over cols of a from left to right, eliminating above and below diag
+	for (j=0; j<4; j++) {   // Find largest pivot in column j among rows j..3
+		i1 = j;		    // Row with largest pivot candidate
+		for (i=j+1; i<4; i++)
+			if (fabs(a.v[i].n[j]) > fabs(a.v[i1].n[j]))
+				i1 = i;
+
+		// Swap rows i1 and j in a and b to put pivot on diagonal
+		swap(a.v[i1], a.v[j]);
+		swap(b.v[i1], b.v[j]);
+
+		// Scale row j to have a unit diagonal
+		if (a.v[j].n[j]==0.)
+			ALGEBRA_ERROR("mat4::inverse: singular matrix; can't invert\n");
+		b.v[j] /= a.v[j].n[j];
+		a.v[j] /= a.v[j].n[j];
+
+		// Eliminate off-diagonal elems in col j of a, doing identical ops to b
+		for (i=0; i<4; i++)
+			if (i!=j) {
+				b.v[i] -= a.v[i].n[j]*b.v[j];
+				a.v[i] -= a.v[i].n[j]*a.v[j];
+			}
+	}
+	return b;
+}
+
+inline mat4& mat4::apply(V_FCT_PTR fct)
+{ 
+	v[VX].apply(fct); v[VY].apply(fct); v[VZ].apply(fct); v[VW].apply(fct);
+	return *this;
+}
+
+inline void mat4::swap_rows( int i, int j )
+{
+	vec4 t;
+
+	t = v[i];
+	v[i] = v[j];
+	v[j] = t;
+}
+
+inline void mat4::swap_cols( int i, int j )
+{
+	float t;
+	int k;
+
+	for(k=0; k<4; k++ ) {
+		t       = v[k][i];
+		v[k][i] = v[k][j];
+		v[k][j] = t;
+	}
+}
+
+inline double mat4::det() const
+{
+	mat4 a(*this);
+
+	return a[0][0] * (a[1][1] * (a[2][2] * a[3][3] - a[3][2] * a[2][3]) -
+					  a[1][2] * (a[2][1] * a[3][3] - a[3][1] * a[2][3]) +
+					  a[1][3] * (a[2][1] * a[3][2] - a[3][1] * a[2][2])) -
+           a[0][1] * (a[1][0] * (a[2][2] * a[3][3] - a[3][2] * a[2][3]) -
+					  a[1][2] * (a[2][0] * a[3][3] - a[3][0] * a[2][3]) +
+					  a[1][3] * (a[2][0] * a[3][2] - a[3][0] * a[2][2])) +
+           a[0][2] * (a[1][0] * (a[2][1] * a[3][3] - a[3][1] * a[2][3]) -
+					  a[1][1] * (a[2][0] * a[3][3] - a[3][0] * a[2][3]) +
+					  a[1][3] * (a[2][0] * a[3][1] - a[3][0] * a[2][1])) -
+           a[0][3] * (a[1][0] * (a[2][1] * a[3][2] - a[3][1] * a[2][2]) -
+					  a[1][1] * (a[2][0] * a[3][2] - a[3][0] * a[2][2]) +
+					  a[1][2] * (a[2][0] * a[3][1] - a[3][0] * a[2][1]));
+}
+
+
+// FRIENDS
+
+inline mat4 operator - (const mat4& a)
+{ 
+	return mat4(-a.v[0], -a.v[1], -a.v[2], -a.v[3]);
+}
+
+inline mat4 operator + (const mat4& a, const mat4& b)
+{ 
+	return mat4(a.v[0] + b.v[0], a.v[1] + b.v[1], a.v[2] + b.v[2], a.v[3] + b.v[3]);
+}
+
+inline mat4 operator - (const mat4& a, const mat4& b)
+{ 
+	return mat4(a.v[0] - b.v[0], a.v[1] - b.v[1], a.v[2] - b.v[2], a.v[3] - b.v[3]);
+}
+
+inline mat4 operator * (const mat4& a, const mat4& b)
+{
+#define ROWCOL(i, j) a.v[i].n[0]*b.v[0][j] + a.v[i].n[1]*b.v[1][j] + \
+					 a.v[i].n[2]*b.v[2][j] + a.v[i].n[3]*b.v[3][j]
+					 return mat4(
+						 vec4(ROWCOL(0,0), ROWCOL(0,1), ROWCOL(0,2), ROWCOL(0,3)),
+						 vec4(ROWCOL(1,0), ROWCOL(1,1), ROWCOL(1,2), ROWCOL(1,3)),
+						 vec4(ROWCOL(2,0), ROWCOL(2,1), ROWCOL(2,2), ROWCOL(2,3)),
+						 vec4(ROWCOL(3,0), ROWCOL(3,1), ROWCOL(3,2), ROWCOL(3,3))
+						 );
+#undef ROWCOL
+}
+
+inline mat4 operator * (const mat4& a, const double d)
+{ 
+	return mat4(a.v[0] * d, a.v[1] * d, a.v[2] * d, a.v[3] * d); 
+}
+
+inline mat4 operator * (const double d, const mat4& a)
+{ 
+	return a*d; 
+}
+
+inline mat4 operator / (const mat4& a, const double d)
+{ 
+	return mat4(a.v[0] / d, a.v[1] / d, a.v[2] / d, a.v[3] / d); 
+}
+
+inline int operator == (const mat4& a, const mat4& b)
+{ 
+	return ((a.v[0] == b.v[0]) && (a.v[1] == b.v[1]) && (a.v[2] == b.v[2]) && (a.v[3] == b.v[3]));
+}
+
+inline int operator != (const mat4& a, const mat4& b)
+{ 
+	return !(a == b);
+}
+
+#ifdef ALGEBRA3IOSTREAMS
+inline ostream& operator << (ostream& s, const mat4& m)
+{
+	return s << m.v[VX] << '\n' << m.v[VY] << '\n' << m.v[VZ] << '\n' << m.v[VW]; 
+}
+
+inline istream& operator >> (istream& s, mat4& m)
+{
+	mat4    m_tmp;
+
+	s >> m_tmp[VX] >> m_tmp[VY] >> m_tmp[VZ] >> m_tmp[VW];
+	if (s)
+		m = m_tmp;
+	return s;
+}
+#endif // ALGEBRA3IOSTREAMS
+
+inline void swap(mat4& a, mat4& b)
+{ 
+	mat4 tmp(a); a = b; b = tmp;
+}
+
+
+/****************************************************************
+*																*
+*	       2D functions and 3D functions						*
+*																*
+****************************************************************/
+
+inline mat3 identity2D()
+{  
+	return mat3(vec3(1.0, 0.0, 0.0),
+				vec3(0.0, 1.0, 0.0),
+				vec3(0.0, 0.0, 1.0));
+}
+
+inline mat3 translation2D(const vec2& v)
+{  
+	return mat3(vec3(1.0, 0.0, v[VX]),
+				vec3(0.0, 1.0, v[VY]),
+				vec3(0.0, 0.0, 1.0));
+}
+
+inline mat3 rotation2Ddeg(const vec2& Center, const double angleDeg)
+{
+	double  angleRad = angleDeg * M_PI / 180.0,
+			c = cos(angleRad),
+			s = sin(angleRad);
+
+	return mat3(vec3(c, -s, Center[VX] * (1.0-c) + Center[VY] * s),
+				vec3(s, c, Center[VY] * (1.0-c) - Center[VX] * s),
+				vec3(0.0, 0.0, 1.0));
+}
+
+inline mat3 rotation3Drad(const vec3& axis, const float angleRad)
+{
+	float c = cos(angleRad), s = sin(angleRad), t = 1.0f - c;
+	vec3 Axis = axis;
+	Axis.normalize();
+	return mat3(vec3(t * Axis[VX] * Axis[VX] + c,
+					 t * Axis[VX] * Axis[VY] - s * Axis[VZ],
+					 t * Axis[VX] * Axis[VZ] + s * Axis[VY]),
+					 vec3(t * Axis[VX] * Axis[VY] + s * Axis[VZ],
+					 t * Axis[VY] * Axis[VY] + c,
+					 t * Axis[VY] * Axis[VZ] - s * Axis[VX]),
+					 vec3(t * Axis[VX] * Axis[VZ] - s * Axis[VY],
+					 t * Axis[VY] * Axis[VZ] + s * Axis[VX],
+					 t * Axis[VZ] * Axis[VZ] + c)
+					 );
+}
+
+inline mat3 scaling2D(const vec2& scaleVector)
+{   
+	return mat3(vec3(scaleVector[VX], 0.0, 0.0),
+				vec3(0.0, scaleVector[VY], 0.0),
+				vec3(0.0, 0.0, 1.0));
+}
+
+inline mat4 identity3D()
+{  
+	return mat4(vec4(1.0, 0.0, 0.0, 0.0),
+				vec4(0.0, 1.0, 0.0, 0.0),
+				vec4(0.0, 0.0, 1.0, 0.0),
+				vec4(0.0, 0.0, 0.0, 1.0)); 
+}
+
+inline mat4 translation3D(const vec3& v)
+{  
+	return mat4(vec4(1.0, 0.0, 0.0, v[VX]),
+				vec4(0.0, 1.0, 0.0, v[VY]),
+				vec4(0.0, 0.0, 1.0, v[VZ]),
+				vec4(0.0, 0.0, 0.0, 1.0));
+}
+
+inline mat4 rotation3Ddeg(vec3 Axis, const double angleDeg) 
+{
+	double  angleRad = angleDeg * M_PI / 180.0,
+			c = cos(angleRad),
+			s = sin(angleRad),
+			t = 1.0 - c;
+
+	Axis.normalize();
+	return mat4(vec4(t * Axis[VX] * Axis[VX] + c,
+					 t * Axis[VX] * Axis[VY] - s * Axis[VZ],
+					 t * Axis[VX] * Axis[VZ] + s * Axis[VY],
+					 0.0),
+				vec4(t * Axis[VX] * Axis[VY] + s * Axis[VZ],
+					 t * Axis[VY] * Axis[VY] + c,
+					 t * Axis[VY] * Axis[VZ] - s * Axis[VX],
+					 0.0),
+				vec4(t * Axis[VX] * Axis[VZ] - s * Axis[VY],
+					 t * Axis[VY] * Axis[VZ] + s * Axis[VX],
+					 t * Axis[VZ] * Axis[VZ] + c,
+					 0.0),
+				vec4(0.0, 0.0, 0.0, 1.0));
+}
+
+inline mat4 scaling3D(const vec3& scaleVector)
+{  
+	return mat4(vec4(scaleVector[VX], 0.0, 0.0, 0.0),
+				vec4(0.0, scaleVector[VY], 0.0, 0.0),
+				vec4(0.0, 0.0, scaleVector[VZ], 0.0),
+				vec4(0.0, 0.0, 0.0, 1.0));
+}
+
+inline mat4 perspective3D(const double d)
+{
+	return mat4(vec4(1.0, 0.0, 0.0, 0.0),
+				vec4(0.0, 1.0, 0.0, 0.0),
+				vec4(0.0, 0.0, 1.0, 0.0),
+				vec4(0.0, 0.0, 1.0/d, 0.0));
+}
+
+
+#endif // ALGEBRA3H
+```
+
+### VolumetricClouds/main.cpp
+```
+#include <iostream>
+#include <stdio.h>
+
+#include "Camera.h"
+#include "VoxelGrid.h"
+#include "VolumeRender.h"
+
+#ifdef __APPLE__
+#include <GLUT/GLUT.h>
+#else
+#include <GL/glut.h>
+#endif
+
+using namespace std;
+
+// Camera
+Camera camera; 
+int	lastMouseX = -1, lastMouseY = -1;
+int theButtonState = 0;
+int theModifierState = 0;
+int dx, dy;
+
+// String input
+string input = "";
+bool input_flag = false;
+int input_type;
+
+// Display flags
+bool showInfo = true;
+bool showHelp = false;
+bool showRenderMenu = false;
+
+// Colors
+const float red[] = { 1.0f, 0.0f, 0.0f, 1.0f };
+const float green[] = { 0.0f, 1.0f, 0.0f, 1.0f };
+const float blue[] = { 0.0f, 0.0f, 1.0f, 1.0f };
+const float text[] = { 1.0f, 1.0f, 1.0f, 1.0f };
+const float textbg[] = { 1.0f, 1.0f, 1.0f, 0.2f };
+
+// Cache to speed up rendering in window
+vector<vec3> cloudPosCache;
+vector<vec3> cloudColCache;
+
+// Useful variables
+int rgb_edit = 0;
+int quality = 1;
+int seed;
+double bg[4] = { 0.6, 0.8, 0.9, 0 };
+
+VolumeRender *generateCloud = new VolumeRender();
+
+void initDisplay(void); // Initialize OpenGL settings
+
+void renderInfo(void); // Render information
+void renderHelp(void); // Render help
+void renderInput(void); // Render file input
+void renderMenu(void); // Render menu
+void renderCloud(void); // Render cloud
+void renderDisplay(void); // Render display
+void changeSize(int, int); // Change window size
+void cacheCloud(); // Cache cloud for rendering
+void processKeyboard(unsigned char, int, int); // Keyboard keys
+void processKeyboardSpecial(int, int, int);	// Special keys for the arrow keys
+void processMouse(int, int, int, int); // Mouse motion
+void processMouseMotion(int, int); // Mouse motion action
+
+int main(int argc, char **argv)
+{
+	glutInit(&argc, argv);
+	glutInitDisplayMode(GLUT_DOUBLE | GLUT_RGBA | GLUT_DEPTH);
+	glutInitWindowSize(640, 480);
+	glutInitWindowPosition(200, 200);
+	glutCreateWindow("Volumetric Clouds");
+	
+	glutDisplayFunc(renderDisplay);
+	glutIdleFunc(renderDisplay);
+
+	glutKeyboardFunc(processKeyboard);
+	glutSpecialFunc(processKeyboardSpecial);
+	glutMouseFunc(processMouse);
+	glutMotionFunc(processMouseMotion);
+
+	glutReshapeFunc(changeSize);
+
+	initDisplay();
+
+	glutMainLoop();
+
+	return 0;
+}
+
+void initDisplay(void)
+{
+	float l0_dif[] = {1.0f, 1.0f, 1.0f, 1.0f};
+	float l0_amb[] = {0.2f, 0.2f, 0.2f, 0.2f};
+	float l0_pos[] = {0.5f, 0.6f, 0.624f, 0.0f};
+
+	glClearColor(0.1, 0.1, 0.1, 1.0);
+
+	glEnable(GL_BLEND);
+	glEnable(GL_ALPHA_TEST);
+	glBlendFunc(GL_SRC_ALPHA, GL_ONE_MINUS_SRC_ALPHA);
+
+	glEnable(GL_DEPTH_TEST);
+	glEnable(GL_NORMALIZE);
+	glEnable(GL_LIGHTING);
+	glEnable(GL_LIGHT0);
+	glLightfv(GL_LIGHT0, GL_DIFFUSE, l0_dif);
+	glLightfv(GL_LIGHT0, GL_AMBIENT, l0_amb);
+	glEnable(GL_COLOR_MATERIAL);
+	// glEnable(GL_CULL_FACE);
+	
+	glMatrixMode(GL_MODELVIEW);
+	glLoadIdentity();
+	glLightfv(GL_LIGHT0, GL_POSITION, l0_pos);
+}
+
+void renderInfo()
+{
+	// Display information
+	glMatrixMode(GL_PROJECTION);
+	glPushMatrix();
+		glLoadIdentity();
+		gluOrtho2D(0, 640, 0, 480);	
+		glScalef(1, -1, 1); // Invert the y axis, down is positive
+		glTranslatef(0, -480, 0); // Move the origin from the bottom left corner to the upper left corner
+		glMatrixMode(GL_MODELVIEW);
+
+		glPushMatrix();
+			glLoadIdentity();
+			glDisable(GL_LIGHTING);
+			glColor4fv(text);
+			char info[1024];
+			
+			glRasterPos2f(520, 20);
+			sprintf(info, "F1 (help) / F2 (info)");
+			for (unsigned int ii = 0; ii < strlen(info); ii++)
+				glutBitmapCharacter(GLUT_BITMAP_HELVETICA_12, info[ii]);
+
+			if (showInfo) {
+				glRasterPos2f(10, 20);
+				sprintf(info, "Grid size: %2.0f x %2.0f x %2.0f", generateCloud->getGrid()->getMaxX()*generateCloud->getGrid()->getVoxelSize(),
+																  generateCloud->getGrid()->getMaxY()*generateCloud->getGrid()->getVoxelSize(),
+																  generateCloud->getGrid()->getMaxZ()*generateCloud->getGrid()->getVoxelSize());
+				for (unsigned int ii = 0; ii < strlen(info); ii++)
+					glutBitmapCharacter(GLUT_BITMAP_HELVETICA_12, info[ii]);
+			
+				glRasterPos2f(10, 35);
+				sprintf(info, "Voxel size: %.2f", generateCloud->getGrid()->getVoxelSize());
+				for (unsigned int ii = 0; ii < strlen(info); ii++)
+					glutBitmapCharacter(GLUT_BITMAP_HELVETICA_12, info[ii]);
+			
+				glRasterPos2f(10, 50);
+				sprintf(info, "Default density: %.2f", generateCloud->getGrid()->getDefaultDensity());
+				for (unsigned int ii = 0; ii < strlen(info); ii++)
+					glutBitmapCharacter(GLUT_BITMAP_HELVETICA_12, info[ii]);
+			
+				glRasterPos2f(10, 65);
+				switch (rgb_edit) {
+					case 0:	{ sprintf(info, "Edit color: Red %.2f", generateCloud->getGrid()->getVoxelColor(0, 0, 0)[0]*255); break; }
+					case 1:	{ sprintf(info, "Edit color: Green %.2f", generateCloud->getGrid()->getVoxelColor(0, 0, 0)[1]*255); break; }
+					case 2:	{ sprintf(info, "Edit color: Blue %.2f", generateCloud->getGrid()->getVoxelColor(0, 0, 0)[2]*255); break; }
+				}
+				for (unsigned int ii = 0; ii < strlen(info); ii++)
+					glutBitmapCharacter(GLUT_BITMAP_HELVETICA_12, info[ii]);
+			
+				glRasterPos2f(10, 80);
+				if (bg[3] == 0)	{ sprintf(info, "Background: Light blue"); }
+				if (bg[3] == 1) { sprintf(info, "Background: Blue gradient"); }
+				for (unsigned int ii = 0; ii < strlen(info); ii++)
+					glutBitmapCharacter(GLUT_BITMAP_HELVETICA_12, info[ii]);
+			
+				glRasterPos2f(10, 95);
+				switch (quality) {
+					case 0:	{ sprintf(info, "Quality: Minimum"); break; }
+					case 1:	{ sprintf(info, "Quality: Low"); break; }
+					case 2:	{ sprintf(info, "Quality: Medium"); break; }
+					case 3:	{ sprintf(info, "Quality: High"); break; }
+					case 4:	{ sprintf(info, "Quality: Maximum"); break; }
+				}
+				for (unsigned int ii = 0; ii < strlen(info); ii++)
+					glutBitmapCharacter(GLUT_BITMAP_HELVETICA_12, info[ii]);
+			
+				glRasterPos2f(10, 125);
+				sprintf(info, "Eyep: X: %.2f Y: %.2f Z: %.2f", camera.GetEye()[0], camera.GetEye()[1], camera.GetEye()[2]);
+				for (unsigned int ii = 0; ii < strlen(info); ii++)
+					glutBitmapCharacter(GLUT_BITMAP_HELVETICA_12, info[ii]);
+			
+				glRasterPos2f(10, 140);
+				sprintf(info, "Vdir: X: %.2f Y: %.2f Z: %.2f", camera.GetFrontVector()[0], camera.GetFrontVector()[1], camera.GetFrontVector()[2]);
+				for (unsigned int ii = 0; ii < strlen(info); ii++)
+					glutBitmapCharacter(GLUT_BITMAP_HELVETICA_12, info[ii]);
+			
+				glRasterPos2f(10, 155);
+				sprintf(info, "Uvec: X: %.2f Y: %.2f Z: %.2f", camera.GetUpVector()[0], camera.GetUpVector()[1], camera.GetUpVector()[2]);
+				for (unsigned int ii = 0; ii < strlen(info); ii++)
+					glutBitmapCharacter(GLUT_BITMAP_HELVETICA_12, info[ii]);
+			
+				glRasterPos2f(10, 170);
+				sprintf(info, "Fovy: %.2f", camera.GetFovY());
+				for (unsigned int ii = 0; ii < strlen(info); ii++)
+					glutBitmapCharacter(GLUT_BITMAP_HELVETICA_12, info[ii]);
+			}
+
+			glEnable(GL_LIGHTING);
+		glPopMatrix();
+
+		glMatrixMode(GL_PROJECTION);
+	glPopMatrix();
+	glMatrixMode(GL_MODELVIEW);
+}
+
+void renderHelp()
+{
+	glMatrixMode(GL_PROJECTION);
+	glPushMatrix();
+		glLoadIdentity();
+		gluOrtho2D(0, 640, 0, 480);	
+		glScalef(1, -1, 1); // Invert the y axis, down is positive
+		glTranslatef(0, -480, 0); // Move the origin from the bottom left corner to the upper left corner
+		glMatrixMode(GL_MODELVIEW);
+
+		glPushMatrix();
+			glLoadIdentity();
+			glDisable(GL_LIGHTING);
+			glColor4fv(text);
+			char help_txt[1024];
+			
+			glRasterPos2f(220, 60);
+			sprintf(help_txt, "'enter' - render scene");
+			for (unsigned int ii = 0; ii < strlen(help_txt); ii++)
+				glutBitmapCharacter(GLUT_BITMAP_HELVETICA_12, help_txt[ii]);
+			
+			glRasterPos2f(220, 75);
+			sprintf(help_txt, "'space' - reset scene");
+			for (unsigned int ii = 0; ii < strlen(help_txt); ii++)
+				glutBitmapCharacter(GLUT_BITMAP_HELVETICA_12, help_txt[ii]);
+			
+			glRasterPos2f(220, 90);
+			sprintf(help_txt, "'esc' - quit");
+			for (unsigned int ii = 0; ii < strlen(help_txt); ii++)
+				glutBitmapCharacter(GLUT_BITMAP_HELVETICA_12, help_txt[ii]);
+			
+			glRasterPos2f(220, 105);
+			sprintf(help_txt, "'alt + mouse' - move/rotate/zoom camera");
+			for (unsigned int ii = 0; ii < strlen(help_txt); ii++)
+				glutBitmapCharacter(GLUT_BITMAP_HELVETICA_12, help_txt[ii]);
+
+			glRasterPos2f(220, 120);
+			sprintf(help_txt, "'r' - open render menu");
+			for (unsigned int ii = 0; ii < strlen(help_txt); ii++)
+				glutBitmapCharacter(GLUT_BITMAP_HELVETICA_12, help_txt[ii]);
+
+			glRasterPos2f(220, 135);
+			sprintf(help_txt, "'up/down' - select rgb color to edit");
+			for (unsigned int ii = 0; ii < strlen(help_txt); ii++)
+				glutBitmapCharacter(GLUT_BITMAP_HELVETICA_12, help_txt[ii]);
+			
+			glRasterPos2f(220, 150);
+			sprintf(help_txt, "'left/right' - edit selected rgb color");
+			for (unsigned int ii = 0; ii < strlen(help_txt); ii++)
+				glutBitmapCharacter(GLUT_BITMAP_HELVETICA_12, help_txt[ii]);
+
+			glRasterPos2f(220, 165);
+			sprintf(help_txt, "'q' - change quality");
+			for (unsigned int ii = 0; ii < strlen(help_txt); ii++)
+				glutBitmapCharacter(GLUT_BITMAP_HELVETICA_12, help_txt[ii]);
+
+			glRasterPos2f(220, 180);
+			sprintf(help_txt, "'o' - output cloud data");
+			for (unsigned int ii = 0; ii < strlen(help_txt); ii++)
+				glutBitmapCharacter(GLUT_BITMAP_HELVETICA_12, help_txt[ii]);
+
+			glRasterPos2f(220, 195);
+			sprintf(help_txt, "'b' - change background color");
+			for (unsigned int ii = 0; ii < strlen(help_txt); ii++)
+				glutBitmapCharacter(GLUT_BITMAP_HELVETICA_12, help_txt[ii]);
+			
+			glEnable(GL_LIGHTING);
+			glColor4fv(textbg);
+			glRectf(210.0, 35.0, 505.0, 205.0);
+		glPopMatrix();
+		
+		glMatrixMode(GL_PROJECTION);
+	glPopMatrix();
+	glMatrixMode(GL_MODELVIEW);
+}
+
+void renderInput()
+{
+	glMatrixMode(GL_PROJECTION);
+	glPushMatrix();
+		glLoadIdentity();
+		gluOrtho2D(0, 640, 0, 480);	
+		glScalef(1, -1, 1); // Invert the y axis, down is positive
+		glTranslatef(0, -480, 0); // Move the origin from the bottom left corner to the upper left corner
+		glMatrixMode(GL_MODELVIEW);
+
+		glPushMatrix();
+			glLoadIdentity();
+			glDisable(GL_LIGHTING);
+			glColor4fv(text);
+			char input_txt[1024];
+
+			glRasterPos2f(480, 450);
+			if (input_type == 0) sprintf(input_txt, "Enter seed (integer):");
+			else if (input_type > 0) sprintf(input_txt, "Enter file name:");
+			for (unsigned int ii = 0; ii < strlen(input_txt); ii++)
+				glutBitmapCharacter(GLUT_BITMAP_HELVETICA_12, input_txt[ii]);
+			glRasterPos2f(480, 465);
+			sprintf(input_txt, ">> %s_", input.c_str());
+			for (unsigned int ii = 0; ii < strlen(input_txt); ii++)
+				glutBitmapCharacter(GLUT_BITMAP_HELVETICA_12, input_txt[ii]);
+			
+			glEnable(GL_LIGHTING);
+			glColor4fv(textbg);
+			glRectf(470.0, 435.0, 630.0, 475.0);
+		glPopMatrix();
+		
+		glMatrixMode(GL_PROJECTION);
+	glPopMatrix();
+	glMatrixMode(GL_MODELVIEW);
+}
+
+void renderMenu()
+{
+	glMatrixMode(GL_PROJECTION);
+	glPushMatrix();
+		glLoadIdentity();
+		gluOrtho2D(0, 640, 0, 480);	
+		glScalef(1, -1, 1); // Invert the y axis, down is positive
+		glTranslatef(0, -480, 0); // Move the origin from the bottom left corner to the upper left corner
+		glMatrixMode(GL_MODELVIEW);
+
+		glPushMatrix();
+			glLoadIdentity();
+			glDisable(GL_LIGHTING);
+			glColor4fv(text);
+			char menu_txt[1024];
+
+			glRasterPos2f(220, 90);
+			sprintf(menu_txt, "'1' - create random cloud");
+			for (unsigned int ii = 0; ii < strlen(menu_txt); ii++)
+				glutBitmapCharacter(GLUT_BITMAP_HELVETICA_12, menu_txt[ii]);
+				
+			glRasterPos2f(220, 105);
+			sprintf(menu_txt, "'2' - read from file");
+			for (unsigned int ii = 0; ii < strlen(menu_txt); ii++)
+				glutBitmapCharacter(GLUT_BITMAP_HELVETICA_12, menu_txt[ii]);
+				
+			glRasterPos2f(220, 120);
+			sprintf(menu_txt, "'3' - read red from file");
+			for (unsigned int ii = 0; ii < strlen(menu_txt); ii++)
+				glutBitmapCharacter(GLUT_BITMAP_HELVETICA_12, menu_txt[ii]);
+				
+			glRasterPos2f(220, 135);
+			sprintf(menu_txt, "'4' - read green from file");
+			for (unsigned int ii = 0; ii < strlen(menu_txt); ii++)
+				glutBitmapCharacter(GLUT_BITMAP_HELVETICA_12, menu_txt[ii]);
+				
+			glRasterPos2f(220, 150);
+			sprintf(menu_txt, "'5' - read blue from file");
+			for (unsigned int ii = 0; ii < strlen(menu_txt); ii++)
+				glutBitmapCharacter(GLUT_BITMAP_HELVETICA_12, menu_txt[ii]);
+				
+			glRasterPos2f(220, 165);
+			sprintf(menu_txt, "'enter' - render scene");
+			for (unsigned int ii = 0; ii < strlen(menu_txt); ii++)
+				glutBitmapCharacter(GLUT_BITMAP_HELVETICA_12, menu_txt[ii]);
+
+			glRasterPos2f(220, 180);
+			sprintf(menu_txt, "'esc' - exit menu");
+			for (unsigned int ii = 0; ii < strlen(menu_txt); ii++)
+				glutBitmapCharacter(GLUT_BITMAP_HELVETICA_12, menu_txt[ii]);
+			
+			glEnable(GL_LIGHTING);
+			glColor4fv(textbg);
+			glRectf(210.0, 65.0, 505.0, 195.0);
+		glPopMatrix();
+		
+		glMatrixMode(GL_PROJECTION);
+	glPopMatrix();
+	glMatrixMode(GL_MODELVIEW);
+}
+
+void renderCloud()
+{
+	// Draw the XYZ axis
+	glPushAttrib(GL_LIGHTING_BIT | GL_LINE_BIT);
+		glDisable(GL_LIGHTING);
+		glLineWidth(1.0);
+		glBegin(GL_LINES);
+		
+		glColor4fv(red);
+		glVertex3f(0.0, 0.0, 0.0);
+		glVertex3f(1000.0, 0.0, 0.0);
+		
+		glColor4fv(green);
+		glVertex3f(0.0, 0.0, 0.0);
+		glVertex3f(0.0, 1000.0, 0.0);
+		
+		glColor4fv(blue);
+		glVertex3f(0.0, 0.0, 0.0);
+		glVertex3f(0.0, 0.0, 1000.0);
+
+		glEnd();
+		glEnable(GL_LIGHTING);
+	glPopAttrib();
+
+	if (!cloudPosCache.empty()) {
+		glPushMatrix();
+			glColor4f(0.7, 0.7, 0.7, 1.0);
+			glTranslatef(generateCloud->getGrid()->getMaxX()*generateCloud->getGrid()->getVoxelSize()*0.5,
+						 generateCloud->getGrid()->getMaxY()*generateCloud->getGrid()->getVoxelSize()*0.5,
+						 generateCloud->getGrid()->getMaxZ()*generateCloud->getGrid()->getVoxelSize()*0.5);
+			glScalef(generateCloud->getGrid()->getMaxX()*generateCloud->getGrid()->getVoxelSize(),
+					 generateCloud->getGrid()->getMaxY()*generateCloud->getGrid()->getVoxelSize(),
+					 generateCloud->getGrid()->getMaxZ()*generateCloud->getGrid()->getVoxelSize());
+			glutWireCube(1.0f);
+			glColor4f(0.0, 1.0, 1.0, 1.0);
+		glPopMatrix();
+	}
+
+	int inc = (cloudPosCache.size() > 100000) ? 100 : 1;
+	for (int ii = 0; ii < cloudPosCache.size(); ii += inc) {
+		glPushMatrix();
+			glColor4f(cloudColCache[ii][0], cloudColCache[ii][1], cloudColCache[ii][2], 0.5);
+			glBegin(GL_POINTS);
+			glVertex3f(cloudPosCache[ii][0], cloudPosCache[ii][1], cloudPosCache[ii][2]);
+			glEnd( );
+		glPopMatrix();
+	}
+}
+
+void renderDisplay(void)
+{
+	glClearColor(0.0, 0.0, 0.0, 1);
+	// Clearing the depth buffer 
+	glClear(GL_COLOR_BUFFER_BIT | GL_DEPTH_BUFFER_BIT);
+
+	glMatrixMode(GL_PROJECTION);
+	glLoadIdentity();
+	gluPerspective(45.0, 1.0, 10.0, 200.0);
+
+	glMatrixMode(GL_MODELVIEW);
+	glLoadIdentity();
+
+	camera.LookAt();
+	
+	renderCloud(); // Render cloud
+	renderInfo(); // Display info
+	if (input_flag) { renderInput(); } // Display file input
+	if (showHelp) { renderHelp(); } // Display help
+	if (showRenderMenu) { renderMenu(); } // Display menu
+	
+	// swapping the buffers causes the rendering above to be shown
+	glutSwapBuffers();
+}
+
+void changeSize(int width, int height)
+{
+	// Update viewport
+	glViewport(0, 0, width, height);
+}
+
+void cacheCloud()
+{
+	cloudPosCache.clear();
+	cloudColCache.clear();
+
+	// Cache the cloud for render
+	for (int kk = 0; kk < generateCloud->getGrid()->getMaxZ(); kk++) {
+		for (int jj = 0; jj < generateCloud->getGrid()->getMaxY(); jj++) {
+			for (int ii = 0; ii < generateCloud->getGrid()->getMaxZ(); ii++) {
+				if (generateCloud->getGrid()->getVoxelDensity(ii, jj, kk) > 0) {
+					cloudPosCache.push_back(generateCloud->getGrid()->voxel2world(vec3(ii + 0.5, jj + 0.5, kk + 0.5)));
+					cloudColCache.push_back(generateCloud->getGrid()->getVoxelColor(ii, jj, kk));
+				}
+			}
+		}
+	}
+}
+
+void processKeyboard(unsigned char key, int x, int y)
+{
+	if (input_flag && key == 13) { // Enter key
+		if (input_type == 0) {
+			int seed = atoi(input.c_str());
+			if (seed < 1) seed = 18;
+			generateCloud->generateVoxelGridRandom(seed);
+			cacheCloud();
+			input_flag = false;
+			input = "";
+		}
+		else if (input_type == 1) {
+			generateCloud->generateVoxelGridFromFile("data/" + input);
+			cacheCloud();
+			input_flag = false;
+			input = "";
+		}
+		else if (input_type == 2) {
+			generateCloud->generateVoxelGridRed("data/" + input);
+			cacheCloud();
+			input_flag = false;
+			input = "";
+		}
+		else if (input_type == 3) {
+			generateCloud->generateVoxelGridGreen("data/" + input);
+			cacheCloud();
+			input_flag = false;
+			input = "";
+		}
+		else if (input_type == 4) {
+			generateCloud->generateVoxelGridBlue("data/" + input);
+			cacheCloud();
+			input_flag = false;
+			input = "";
+		}
+	}
+	else if (input_flag && key == 27) { // Esc key
+		input_flag = false;
+		input = "";
+	}
+	else if (input_flag && key == 8) { // Backspace key
+		input = input.substr(0, input.length() - 1);
+	}
+	else if (input_flag) {
+		input += key;
+	}
+	else if (showRenderMenu) {
+		switch (key) {
+			case '1': { showRenderMenu = false; input_flag = true; input_type = 0; } break; // Create random cloud
+			case '2': { showRenderMenu = false; input_flag = true; input_type = 1; } break; // Create cloud from config file
+			case '3': { showRenderMenu = false; input_flag = true; input_type = 2; } break; // Create red color from config file
+			case '4': { showRenderMenu = false; input_flag = true; input_type = 3; } break; // Create green color from config file
+			case '5': { showRenderMenu = false; input_flag = true; input_type = 4; } break; // Create blue color from config file
+			case 27:  { showRenderMenu = false; } break; // Esc key
+			default: break;
+		}
+	}
+	else {
+		switch (key) {
+			case 'r': { showRenderMenu = !showRenderMenu; showHelp = false; } break; // Show cloud menu
+			case 'q': { if (quality == 4) quality = 0; else quality++; } break; // Change quality
+			case 'o': { generateCloud->outputCloud(); } break; // Output cloud data
+			case 'b': { if (bg[3] == 1) bg[3] = 0; else bg[3]++;
+						if (bg[3] == 0) { bg[0] = 0.6; bg[1] = 0.8; bg[2] = 0.9; }
+						if (bg[3] == 1) { bg[0] = 0.1; bg[1] = 0.2; bg[2] = 0.5; }
+					  } break; // Change sky background
+			case '1': { generateCloud->generateVoxelGridFromFile("data/lowres.txt"); cacheCloud(); } break; // Create low density test cloud
+			case '2': { generateCloud->generateVoxelGridFromFile("data/highres.txt"); cacheCloud(); } break; // Create high density test cloud
+			case 13:  { generateCloud->initLighting(vec3(10, 3, 3), vec3(1, 1, 1), vec3(bg[0], bg[1], bg[2]), quality, bg[3]);
+					    generateCloud->initCamera(camera.GetEye(), camera.GetFrontVector(), camera.GetUpVector(), camera.GetFovY());
+					    generateCloud->render();
+					  } break; // Enter key
+			case ' ': { generateCloud = new VolumeRender(); camera.Reset(); cloudPosCache.clear(); cloudColCache.clear();} break; // Reset everything
+			case 27:  { exit(0); } break; // Esc key
+			default: break;
+		}
+	}
+
+	glutPostRedisplay();
+}
+
+void processKeyboardSpecial(int key, int x, int y)
+{
+	switch (key) {
+		case GLUT_KEY_LEFT: {
+			generateCloud->setCloudColor(rgb_edit, -0.05);
+			cacheCloud();
+			break;
+		}
+		case GLUT_KEY_RIGHT: {
+			generateCloud->setCloudColor(rgb_edit, 0.05);
+			cacheCloud();
+			break;
+		}
+		case GLUT_KEY_UP: {
+			if (rgb_edit == 2) rgb_edit = 0;
+			else rgb_edit++;
+			break;
+		}
+		case GLUT_KEY_DOWN: {
+			if (rgb_edit == 0) rgb_edit = 2;
+			else rgb_edit--;
+			break;
+		}
+		case GLUT_KEY_F1: {
+			if (!showRenderMenu)
+				showHelp = !showHelp;
+			break;
+		}
+		case GLUT_KEY_F2: {
+			showInfo = !showInfo;
+			break;
+		}
+		default: break;
+	}
+}
+
+void processMouse(int button, int state, int x, int y)
+{
+	theButtonState = button;
+	theModifierState = glutGetModifiers();
+
+	if (state == GLUT_DOWN) {
+		processMouseMotion(x, y);
+	}
+	else {
+		lastMouseX = -1;
+		lastMouseY = -1;
+	}
+}
+
+void processMouseMotion(int x, int y)
+{
+	// Rotate camera
+	if (theButtonState == GLUT_LEFT_BUTTON && theModifierState == GLUT_ACTIVE_ALT) {
+		if (lastMouseX != -1) {
+			dy = y - lastMouseY;
+			dx = x - lastMouseX;
+			camera.RotateCenter(-dx, -dy);
+			renderDisplay();
+		}
+		lastMouseX = x;
+		lastMouseY = y;
+	}
+	// Move camera
+	else if (theButtonState == GLUT_MIDDLE_BUTTON && theModifierState == GLUT_ACTIVE_ALT) {
+		if (lastMouseX != -1) {
+			dx = (x - lastMouseX);
+			dy = (y - lastMouseY);
+
+			camera.MoveSWD(-dx, dy);
+			renderDisplay();
+		}
+		lastMouseX = x;
+		lastMouseY = y;
+	}
+	// Zoom camera
+	else if (theButtonState == GLUT_RIGHT_BUTTON && theModifierState == GLUT_ACTIVE_ALT) {
+		if (lastMouseY != -1) {			
+			camera.Zoom(((y - lastMouseY) + (x - lastMouseX)) / 2.0f);
+			renderDisplay();
+		}
+		lastMouseY = y;
+		lastMouseX = x;
+	}
+	else {
+		lastMouseX = -1;
+		lastMouseY = -1;
+	}
+}
+```
+
+### VolumetricClouds/GL/glut.h
+```
+#ifndef __glut_h__
+#define __glut_h__
+
+/* Copyright (c) Mark J. Kilgard, 1994, 1995, 1996, 1998. */
+
+/* This program is freely distributable without licensing fees  and is
+   provided without guarantee or warrantee expressed or  implied. This
+   program is -not- in the public domain. */
+
+#if defined(_WIN32)
+
+/* GLUT 3.7 now tries to avoid including <windows.h>
+   to avoid name space pollution, but Win32's <GL/gl.h> 
+   needs APIENTRY and WINGDIAPI defined properly. */
+# if 0
+#  define  WIN32_LEAN_AND_MEAN
+#  include <windows.h>
+# else
+   /* XXX This is from Win32's <windef.h> */
+#  ifndef APIENTRY
+#   define GLUT_APIENTRY_DEFINED
+#   if (_MSC_VER >= 800) || defined(_STDCALL_SUPPORTED)
+#    define APIENTRY    __stdcall
+#   else
+#    define APIENTRY
+#   endif
+#  endif
+   /* XXX This is from Win32's <winnt.h> */
+#  ifndef CALLBACK
+#   if (defined(_M_MRX000) || defined(_M_IX86) || defined(_M_ALPHA) || defined(_M_PPC)) && !defined(MIDL_PASS)
+#    define CALLBACK __stdcall
+#   else
+#    define CALLBACK
+#   endif
+#  endif
+   /* XXX This is from Win32's <wingdi.h> and <winnt.h> */
+#  ifndef WINGDIAPI
+#   define GLUT_WINGDIAPI_DEFINED
+#   define WINGDIAPI __declspec(dllimport)
+#  endif
+   /* XXX This is from Win32's <ctype.h> */
+#  ifndef _WCHAR_T_DEFINED
+typedef unsigned short wchar_t;
+#   define _WCHAR_T_DEFINED
+#  endif
+# endif
+
+#pragma comment (lib, "winmm.lib")     /* link with Windows MultiMedia lib */
+#pragma comment (lib, "opengl32.lib")  /* link with Microsoft OpenGL lib */
+#pragma comment (lib, "glu32.lib")     /* link with OpenGL Utility lib */
+#pragma comment (lib, "glut32.lib")    /* link with Win32 GLUT lib */
+
+#pragma warning (disable:4244)	/* Disable bogus conversion warnings. */
+#pragma warning (disable:4305)  /* VC++ 5.0 version of above warning. */
+
+#endif
+
+#include <GL/gl.h>
+#include <GL/glu.h>
+
+/* define APIENTRY and CALLBACK to null string if we aren't on Win32 */
+#if !defined(_WIN32)
+#define APIENTRY
+#define GLUT_APIENTRY_DEFINED
+#define CALLBACK
+#endif
+
+#ifdef __cplusplus
+extern "C" {
+#endif
+
+/**
+ GLUT API revision history:
+ 
+ GLUT_API_VERSION is updated to reflect incompatible GLUT
+ API changes (interface changes, semantic changes, deletions,
+ or additions).
+ 
+ GLUT_API_VERSION=1  First public release of GLUT.  11/29/94
+
+ GLUT_API_VERSION=2  Added support for OpenGL/GLX multisampling,
+ extension.  Supports new input devices like tablet, dial and button
+ box, and Spaceball.  Easy to query OpenGL extensions.
+
+ GLUT_API_VERSION=3  glutMenuStatus added.
+
+ GLUT_API_VERSION=4  glutInitDisplayString, glutWarpPointer,
+ glutBitmapLength, glutStrokeLength, glutWindowStatusFunc, dynamic
+ video resize subAPI, glutPostWindowRedisplay, glutKeyboardUpFunc,
+ glutSpecialUpFunc, glutIgnoreKeyRepeat, glutSetKeyRepeat,
+ glutJoystickFunc, glutForceJoystickFunc (NOT FINALIZED!).
+**/
+#ifndef GLUT_API_VERSION  /* allow this to be overriden */
+#define GLUT_API_VERSION		3
+#endif
+
+/**
+ GLUT implementation revision history:
+ 
+ GLUT_XLIB_IMPLEMENTATION is updated to reflect both GLUT
+ API revisions and implementation revisions (ie, bug fixes).
+
+ GLUT_XLIB_IMPLEMENTATION=1  mjk's first public release of
+ GLUT Xlib-based implementation.  11/29/94
+
+ GLUT_XLIB_IMPLEMENTATION=2  mjk's second public release of
+ GLUT Xlib-based implementation providing GLUT version 2 
+ interfaces.
+
+ GLUT_XLIB_IMPLEMENTATION=3  mjk's GLUT 2.2 images. 4/17/95
+
+ GLUT_XLIB_IMPLEMENTATION=4  mjk's GLUT 2.3 images. 6/?/95
+
+ GLUT_XLIB_IMPLEMENTATION=5  mjk's GLUT 3.0 images. 10/?/95
+
+ GLUT_XLIB_IMPLEMENTATION=7  mjk's GLUT 3.1+ with glutWarpPoitner.  7/24/96
+
+ GLUT_XLIB_IMPLEMENTATION=8  mjk's GLUT 3.1+ with glutWarpPoitner
+ and video resize.  1/3/97
+
+ GLUT_XLIB_IMPLEMENTATION=9 mjk's GLUT 3.4 release with early GLUT 4 routines.
+
+ GLUT_XLIB_IMPLEMENTATION=11 Mesa 2.5's GLUT 3.6 release.
+
+ GLUT_XLIB_IMPLEMENTATION=12 mjk's GLUT 3.6 release with early GLUT 4 routines + signal handling.
+
+ GLUT_XLIB_IMPLEMENTATION=13 mjk's GLUT 3.7 release with GameGLUT support.
+**/
+#ifndef GLUT_XLIB_IMPLEMENTATION  /* Allow this to be overriden. */
+#define GLUT_XLIB_IMPLEMENTATION	13
+#endif
+
+/* Display mode bit masks. */
+#define GLUT_RGB			0
+#define GLUT_RGBA			GLUT_RGB
+#define GLUT_INDEX			1
+#define GLUT_SINGLE			0
+#define GLUT_DOUBLE			2
+#define GLUT_ACCUM			4
+#define GLUT_ALPHA			8
+#define GLUT_DEPTH			16
+#define GLUT_STENCIL			32
+#if (GLUT_API_VERSION >= 2)
+#define GLUT_MULTISAMPLE		128
+#define GLUT_STEREO			256
+#endif
+#if (GLUT_API_VERSION >= 3)
+#define GLUT_LUMINANCE			512
+#endif
+
+/* Mouse buttons. */
+#define GLUT_LEFT_BUTTON		0
+#define GLUT_MIDDLE_BUTTON		1
+#define GLUT_RIGHT_BUTTON		2
+
+/* Mouse button  state. */
+#define GLUT_DOWN			0
+#define GLUT_UP				1
+
+#if (GLUT_API_VERSION >= 2)
+/* function keys */
+#define GLUT_KEY_F1			1
+#define GLUT_KEY_F2			2
+#define GLUT_KEY_F3			3
+#define GLUT_KEY_F4			4
+#define GLUT_KEY_F5			5
+#define GLUT_KEY_F6			6
+#define GLUT_KEY_F7			7
+#define GLUT_KEY_F8			8
+#define GLUT_KEY_F9			9
+#define GLUT_KEY_F10			10
+#define GLUT_KEY_F11			11
+#define GLUT_KEY_F12			12
+/* directional keys */
+#define GLUT_KEY_LEFT			100
+#define GLUT_KEY_UP			101
+#define GLUT_KEY_RIGHT			102
+#define GLUT_KEY_DOWN			103
+#define GLUT_KEY_PAGE_UP		104
+#define GLUT_KEY_PAGE_DOWN		105
+#define GLUT_KEY_HOME			106
+#define GLUT_KEY_END			107
+#define GLUT_KEY_INSERT			108
+#endif
+
+/* Entry/exit  state. */
+#define GLUT_LEFT			0
+#define GLUT_ENTERED			1
+
+/* Menu usage  state. */
+#define GLUT_MENU_NOT_IN_USE		0
+#define GLUT_MENU_IN_USE		1
+
+/* Visibility  state. */
+#define GLUT_NOT_VISIBLE		0
+#define GLUT_VISIBLE			1
+
+/* Window status  state. */
+#define GLUT_HIDDEN			0
+#define GLUT_FULLY_RETAINED		1
+#define GLUT_PARTIALLY_RETAINED		2
+#define GLUT_FULLY_COVERED		3
+
+/* Color index component selection values. */
+#define GLUT_RED			0
+#define GLUT_GREEN			1
+#define GLUT_BLUE			2
+
+/* Layers for use. */
+#define GLUT_NORMAL			0
+#define GLUT_OVERLAY			1
+
+#if defined(_WIN32)
+/* Stroke font constants (use these in GLUT program). */
+#define GLUT_STROKE_ROMAN		((void*)0)
+#define GLUT_STROKE_MONO_ROMAN		((void*)1)
+
+/* Bitmap font constants (use these in GLUT program). */
+#define GLUT_BITMAP_9_BY_15		((void*)2)
+#define GLUT_BITMAP_8_BY_13		((void*)3)
+#define GLUT_BITMAP_TIMES_ROMAN_10	((void*)4)
+#define GLUT_BITMAP_TIMES_ROMAN_24	((void*)5)
+#if (GLUT_API_VERSION >= 3)
+#define GLUT_BITMAP_HELVETICA_10	((void*)6)
+#define GLUT_BITMAP_HELVETICA_12	((void*)7)
+#define GLUT_BITMAP_HELVETICA_18	((void*)8)
+#endif
+#else
+/* Stroke font opaque addresses (use constants instead in source code). */
+extern void *glutStrokeRoman;
+extern void *glutStrokeMonoRoman;
+
+/* Stroke font constants (use these in GLUT program). */
+#define GLUT_STROKE_ROMAN		(&glutStrokeRoman)
+#define GLUT_STROKE_MONO_ROMAN		(&glutStrokeMonoRoman)
+
+/* Bitmap font opaque addresses (use constants instead in source code). */
+extern void *glutBitmap9By15;
+extern void *glutBitmap8By13;
+extern void *glutBitmapTimesRoman10;
+extern void *glutBitmapTimesRoman24;
+extern void *glutBitmapHelvetica10;
+extern void *glutBitmapHelvetica12;
+extern void *glutBitmapHelvetica18;
+
+/* Bitmap font constants (use these in GLUT program). */
+#define GLUT_BITMAP_9_BY_15		(&glutBitmap9By15)
+#define GLUT_BITMAP_8_BY_13		(&glutBitmap8By13)
+#define GLUT_BITMAP_TIMES_ROMAN_10	(&glutBitmapTimesRoman10)
+#define GLUT_BITMAP_TIMES_ROMAN_24	(&glutBitmapTimesRoman24)
+#if (GLUT_API_VERSION >= 3)
+#define GLUT_BITMAP_HELVETICA_10	(&glutBitmapHelvetica10)
+#define GLUT_BITMAP_HELVETICA_12	(&glutBitmapHelvetica12)
+#define GLUT_BITMAP_HELVETICA_18	(&glutBitmapHelvetica18)
+#endif
+#endif
+
+/* glutGet parameters. */
+#define GLUT_WINDOW_X			100
+#define GLUT_WINDOW_Y			101
+#define GLUT_WINDOW_WIDTH		102
+#define GLUT_WINDOW_HEIGHT		103
+#define GLUT_WINDOW_BUFFER_SIZE		104
+#define GLUT_WINDOW_STENCIL_SIZE	105
+#define GLUT_WINDOW_DEPTH_SIZE		106
+#define GLUT_WINDOW_RED_SIZE		107
+#define GLUT_WINDOW_GREEN_SIZE		108
+#define GLUT_WINDOW_BLUE_SIZE		109
+#define GLUT_WINDOW_ALPHA_SIZE		110
+#define GLUT_WINDOW_ACCUM_RED_SIZE	111
+#define GLUT_WINDOW_ACCUM_GREEN_SIZE	112
+#define GLUT_WINDOW_ACCUM_BLUE_SIZE	113
+#define GLUT_WINDOW_ACCUM_ALPHA_SIZE	114
+#define GLUT_WINDOW_DOUBLEBUFFER	115
+#define GLUT_WINDOW_RGBA		116
+#define GLUT_WINDOW_PARENT		117
+#define GLUT_WINDOW_NUM_CHILDREN	118
+#define GLUT_WINDOW_COLORMAP_SIZE	119
+#if (GLUT_API_VERSION >= 2)
+#define GLUT_WINDOW_NUM_SAMPLES		120
+#define GLUT_WINDOW_STEREO		121
+#endif
+#if (GLUT_API_VERSION >= 3)
+#define GLUT_WINDOW_CURSOR		122
+#endif
+#define GLUT_SCREEN_WIDTH		200
+#define GLUT_SCREEN_HEIGHT		201
+#define GLUT_SCREEN_WIDTH_MM		202
+#define GLUT_SCREEN_HEIGHT_MM		203
+#define GLUT_MENU_NUM_ITEMS		300
+#define GLUT_DISPLAY_MODE_POSSIBLE	400
+#define GLUT_INIT_WINDOW_X		500
+#define GLUT_INIT_WINDOW_Y		501
+#define GLUT_INIT_WINDOW_WIDTH		502
+#define GLUT_INIT_WINDOW_HEIGHT		503
+#define GLUT_INIT_DISPLAY_MODE		504
+#if (GLUT_API_VERSION >= 2)
+#define GLUT_ELAPSED_TIME		700
+#endif
+#if (GLUT_API_VERSION >= 4 || GLUT_XLIB_IMPLEMENTATION >= 13)
+#define GLUT_WINDOW_FORMAT_ID		123
+#endif
+
+#if (GLUT_API_VERSION >= 2)
+/* glutDeviceGet parameters. */
+#define GLUT_HAS_KEYBOARD		600
+#define GLUT_HAS_MOUSE			601
+#define GLUT_HAS_SPACEBALL		602
+#define GLUT_HAS_DIAL_AND_BUTTON_BOX	603
+#define GLUT_HAS_TABLET			604
+#define GLUT_NUM_MOUSE_BUTTONS		605
+#define GLUT_NUM_SPACEBALL_BUTTONS	606
+#define GLUT_NUM_BUTTON_BOX_BUTTONS	607
+#define GLUT_NUM_DIALS			608
+#define GLUT_NUM_TABLET_BUTTONS		609
+#endif
+#if (GLUT_API_VERSION >= 4 || GLUT_XLIB_IMPLEMENTATION >= 13)
+#define GLUT_DEVICE_IGNORE_KEY_REPEAT   610
+#define GLUT_DEVICE_KEY_REPEAT          611
+#define GLUT_HAS_JOYSTICK		612
+#define GLUT_OWNS_JOYSTICK		613
+#define GLUT_JOYSTICK_BUTTONS		614
+#define GLUT_JOYSTICK_AXES		615
+#define GLUT_JOYSTICK_POLL_RATE		616
+#endif
+
+#if (GLUT_API_VERSION >= 3)
+/* glutLayerGet parameters. */
+#define GLUT_OVERLAY_POSSIBLE           800
+#define GLUT_LAYER_IN_USE		801
+#define GLUT_HAS_OVERLAY		802
+#define GLUT_TRANSPARENT_INDEX		803
+#define GLUT_NORMAL_DAMAGED		804
+#define GLUT_OVERLAY_DAMAGED		805
+
+#if (GLUT_API_VERSION >= 4 || GLUT_XLIB_IMPLEMENTATION >= 9)
+/* glutVideoResizeGet parameters. */
+#define GLUT_VIDEO_RESIZE_POSSIBLE	900
+#define GLUT_VIDEO_RESIZE_IN_USE	901
+#define GLUT_VIDEO_RESIZE_X_DELTA	902
+#define GLUT_VIDEO_RESIZE_Y_DELTA	903
+#define GLUT_VIDEO_RESIZE_WIDTH_DELTA	904
+#define GLUT_VIDEO_RESIZE_HEIGHT_DELTA	905
+#define GLUT_VIDEO_RESIZE_X		906
+#define GLUT_VIDEO_RESIZE_Y		907
+#define GLUT_VIDEO_RESIZE_WIDTH		908
+#define GLUT_VIDEO_RESIZE_HEIGHT	909
+#endif
+
+/* glutUseLayer parameters. */
+#define GLUT_NORMAL			0
+#define GLUT_OVERLAY			1
+
+/* glutGetModifiers return mask. */
+#define GLUT_ACTIVE_SHIFT               1
+#define GLUT_ACTIVE_CTRL                2
+#define GLUT_ACTIVE_ALT                 4
+
+/* glutSetCursor parameters. */
+/* Basic arrows. */
+#define GLUT_CURSOR_RIGHT_ARROW		0
+#define GLUT_CURSOR_LEFT_ARROW		1
+/* Symbolic cursor shapes. */
+#define GLUT_CURSOR_INFO		2
+#define GLUT_CURSOR_DESTROY		3
+#define GLUT_CURSOR_HELP		4
+#define GLUT_CURSOR_CYCLE		5
+#define GLUT_CURSOR_SPRAY		6
+#define GLUT_CURSOR_WAIT		7
+#define GLUT_CURSOR_TEXT		8
+#define GLUT_CURSOR_CROSSHAIR		9
+/* Directional cursors. */
+#define GLUT_CURSOR_UP_DOWN		10
+#define GLUT_CURSOR_LEFT_RIGHT		11
+/* Sizing cursors. */
+#define GLUT_CURSOR_TOP_SIDE		12
+#define GLUT_CURSOR_BOTTOM_SIDE		13
+#define GLUT_CURSOR_LEFT_SIDE		14
+#define GLUT_CURSOR_RIGHT_SIDE		15
+#define GLUT_CURSOR_TOP_LEFT_CORNER	16
+#define GLUT_CURSOR_TOP_RIGHT_CORNER	17
+#define GLUT_CURSOR_BOTTOM_RIGHT_CORNER	18
+#define GLUT_CURSOR_BOTTOM_LEFT_CORNER	19
+/* Inherit from parent window. */
+#define GLUT_CURSOR_INHERIT		100
+/* Blank cursor. */
+#define GLUT_CURSOR_NONE		101
+/* Fullscreen crosshair (if available). */
+#define GLUT_CURSOR_FULL_CROSSHAIR	102
+#endif
+
+/* GLUT initialization sub-API. */
+extern void APIENTRY glutInit(int *argcp, char **argv);
+extern void APIENTRY glutInitDisplayMode(unsigned int mode);
+#if (GLUT_API_VERSION >= 4 || GLUT_XLIB_IMPLEMENTATION >= 9)
+extern void APIENTRY glutInitDisplayString(const char *string);
+#endif
+extern void APIENTRY glutInitWindowPosition(int x, int y);
+extern void APIENTRY glutInitWindowSize(int width, int height);
+extern void APIENTRY glutMainLoop(void);
+
+/* GLUT window sub-API. */
+extern int APIENTRY glutCreateWindow(const char *title);
+extern int APIENTRY glutCreateSubWindow(int win, int x, int y, int width, int height);
+extern void APIENTRY glutDestroyWindow(int win);
+extern void APIENTRY glutPostRedisplay(void);
+#if (GLUT_API_VERSION >= 4 || GLUT_XLIB_IMPLEMENTATION >= 11)
+extern void APIENTRY glutPostWindowRedisplay(int win);
+#endif
+extern void APIENTRY glutSwapBuffers(void);
+extern int APIENTRY glutGetWindow(void);
+extern void APIENTRY glutSetWindow(int win);
+extern void APIENTRY glutSetWindowTitle(const char *title);
+extern void APIENTRY glutSetIconTitle(const char *title);
+extern void APIENTRY glutPositionWindow(int x, int y);
+extern void APIENTRY glutReshapeWindow(int width, int height);
+extern void APIENTRY glutPopWindow(void);
+extern void APIENTRY glutPushWindow(void);
+extern void APIENTRY glutIconifyWindow(void);
+extern void APIENTRY glutShowWindow(void);
+extern void APIENTRY glutHideWindow(void);
+#if (GLUT_API_VERSION >= 3)
+extern void APIENTRY glutFullScreen(void);
+extern void APIENTRY glutSetCursor(int cursor);
+#if (GLUT_API_VERSION >= 4 || GLUT_XLIB_IMPLEMENTATION >= 9)
+extern void APIENTRY glutWarpPointer(int x, int y);
+#endif
+
+/* GLUT overlay sub-API. */
+extern void APIENTRY glutEstablishOverlay(void);
+extern void APIENTRY glutRemoveOverlay(void);
+extern void APIENTRY glutUseLayer(GLenum layer);
+extern void APIENTRY glutPostOverlayRedisplay(void);
+#if (GLUT_API_VERSION >= 4 || GLUT_XLIB_IMPLEMENTATION >= 11)
+extern void APIENTRY glutPostWindowOverlayRedisplay(int win);
+#endif
+extern void APIENTRY glutShowOverlay(void);
+extern void APIENTRY glutHideOverlay(void);
+#endif
+
+/* GLUT menu sub-API. */
+extern int APIENTRY glutCreateMenu(void (*)(int));
+extern void APIENTRY glutDestroyMenu(int menu);
+extern int APIENTRY glutGetMenu(void);
+extern void APIENTRY glutSetMenu(int menu);
+extern void APIENTRY glutAddMenuEntry(const char *label, int value);
+extern void APIENTRY glutAddSubMenu(const char *label, int submenu);
+extern void APIENTRY glutChangeToMenuEntry(int item, const char *label, int value);
+extern void APIENTRY glutChangeToSubMenu(int item, const char *label, int submenu);
+extern void APIENTRY glutRemoveMenuItem(int item);
+extern void APIENTRY glutAttachMenu(int button);
+extern void APIENTRY glutDetachMenu(int button);
+
+/* GLUT window callback sub-API. */
+extern void APIENTRY glutDisplayFunc(void (*func)(void));
+extern void APIENTRY glutReshapeFunc(void (*func)(int width, int height));
+extern void APIENTRY glutKeyboardFunc(void (*func)(unsigned char key, int x, int y));
+extern void APIENTRY glutMouseFunc(void (*func)(int button, int state, int x, int y));
+extern void APIENTRY glutMotionFunc(void (*func)(int x, int y));
+extern void APIENTRY glutPassiveMotionFunc(void (*func)(int x, int y));
+extern void APIENTRY glutEntryFunc(void (*func)(int state));
+extern void APIENTRY glutVisibilityFunc(void (*func)(int state));
+extern void APIENTRY glutIdleFunc(void (*func)(void));
+extern void APIENTRY glutTimerFunc(unsigned int millis, void (*func)(int value), int value);
+extern void APIENTRY glutMenuStateFunc(void (*func)(int state));
+#if (GLUT_API_VERSION >= 2)
+extern void APIENTRY glutSpecialFunc(void (*func)(int key, int x, int y));
+extern void APIENTRY glutSpaceballMotionFunc(void (*func)(int x, int y, int z));
+extern void APIENTRY glutSpaceballRotateFunc(void (*func)(int x, int y, int z));
+extern void APIENTRY glutSpaceballButtonFunc(void (*func)(int button, int state));
+extern void APIENTRY glutButtonBoxFunc(void (*func)(int button, int state));
+extern void APIENTRY glutDialsFunc(void (*func)(int dial, int value));
+extern void APIENTRY glutTabletMotionFunc(void (*func)(int x, int y));
+extern void APIENTRY glutTabletButtonFunc(void (*func)(int button, int state, int x, int y));
+#if (GLUT_API_VERSION >= 3)
+extern void APIENTRY glutMenuStatusFunc(void (*func)(int status, int x, int y));
+extern void APIENTRY glutOverlayDisplayFunc(void (*func)(void));
+#if (GLUT_API_VERSION >= 4 || GLUT_XLIB_IMPLEMENTATION >= 9)
+extern void APIENTRY glutWindowStatusFunc(void (*func)(int state));
+#endif
+#if (GLUT_API_VERSION >= 4 || GLUT_XLIB_IMPLEMENTATION >= 13)
+extern void APIENTRY glutKeyboardUpFunc(void (*func)(unsigned char key, int x, int y));
+extern void APIENTRY glutSpecialUpFunc(void (*func)(int key, int x, int y));
+extern void APIENTRY glutJoystickFunc(void (*func)(unsigned int buttonMask, int x, int y, int z), int pollInterval);
+#endif
+#endif
+#endif
+
+/* GLUT color index sub-API. */
+extern void APIENTRY glutSetColor(int, GLfloat red, GLfloat green, GLfloat blue);
+extern GLfloat APIENTRY glutGetColor(int ndx, int component);
+extern void APIENTRY glutCopyColormap(int win);
+
+/* GLUT state retrieval sub-API. */
+extern int APIENTRY glutGet(GLenum type);
+extern int APIENTRY glutDeviceGet(GLenum type);
+#if (GLUT_API_VERSION >= 2)
+/* GLUT extension support sub-API */
+extern int APIENTRY glutExtensionSupported(const char *name);
+#endif
+#if (GLUT_API_VERSION >= 3)
+extern int APIENTRY glutGetModifiers(void);
+extern int APIENTRY glutLayerGet(GLenum type);
+#endif
+
+/* GLUT font sub-API */
+extern void APIENTRY glutBitmapCharacter(void *font, int character);
+extern int APIENTRY glutBitmapWidth(void *font, int character);
+extern void APIENTRY glutStrokeCharacter(void *font, int character);
+extern int APIENTRY glutStrokeWidth(void *font, int character);
+#if (GLUT_API_VERSION >= 4 || GLUT_XLIB_IMPLEMENTATION >= 9)
+extern int APIENTRY glutBitmapLength(void *font, const unsigned char *string);
+extern int APIENTRY glutStrokeLength(void *font, const unsigned char *string);
+#endif
+
+/* GLUT pre-built models sub-API */
+extern void APIENTRY glutWireSphere(GLdouble radius, GLint slices, GLint stacks);
+extern void APIENTRY glutSolidSphere(GLdouble radius, GLint slices, GLint stacks);
+extern void APIENTRY glutWireCone(GLdouble base, GLdouble height, GLint slices, GLint stacks);
+extern void APIENTRY glutSolidCone(GLdouble base, GLdouble height, GLint slices, GLint stacks);
+extern void APIENTRY glutWireCube(GLdouble size);
+extern void APIENTRY glutSolidCube(GLdouble size);
+extern void APIENTRY glutWireTorus(GLdouble innerRadius, GLdouble outerRadius, GLint sides, GLint rings);
+extern void APIENTRY glutSolidTorus(GLdouble innerRadius, GLdouble outerRadius, GLint sides, GLint rings);
+extern void APIENTRY glutWireDodecahedron(void);
+extern void APIENTRY glutSolidDodecahedron(void);
+extern void APIENTRY glutWireTeapot(GLdouble size);
+extern void APIENTRY glutSolidTeapot(GLdouble size);
+extern void APIENTRY glutWireOctahedron(void);
+extern void APIENTRY glutSolidOctahedron(void);
+extern void APIENTRY glutWireTetrahedron(void);
+extern void APIENTRY glutSolidTetrahedron(void);
+extern void APIENTRY glutWireIcosahedron(void);
+extern void APIENTRY glutSolidIcosahedron(void);
+
+#if (GLUT_API_VERSION >= 4 || GLUT_XLIB_IMPLEMENTATION >= 9)
+/* GLUT video resize sub-API. */
+extern int APIENTRY glutVideoResizeGet(GLenum param);
+extern void APIENTRY glutSetupVideoResizing(void);
+extern void APIENTRY glutStopVideoResizing(void);
+extern void APIENTRY glutVideoResize(int x, int y, int width, int height);
+extern void APIENTRY glutVideoPan(int x, int y, int width, int height);
+
+/* GLUT debugging sub-API. */
+extern void APIENTRY glutReportErrors(void);
+#endif
+
+#if (GLUT_API_VERSION >= 4 || GLUT_XLIB_IMPLEMENTATION >= 13)
+/* GLUT device control sub-API. */
+/* glutSetKeyRepeat modes. */
+#define GLUT_KEY_REPEAT_OFF		0
+#define GLUT_KEY_REPEAT_ON		1
+#define GLUT_KEY_REPEAT_DEFAULT		2
+
+/* Joystick button masks. */
+#define GLUT_JOYSTICK_BUTTON_A		1
+#define GLUT_JOYSTICK_BUTTON_B		2
+#define GLUT_JOYSTICK_BUTTON_C		4
+#define GLUT_JOYSTICK_BUTTON_D		8
+
+extern void APIENTRY glutIgnoreKeyRepeat(int ignore);
+extern void APIENTRY glutSetKeyRepeat(int repeatMode);
+extern void APIENTRY glutForceJoystickFunc(void);
+
+/* GLUT game mode sub-API. */
+/* glutGameModeGet. */
+#define GLUT_GAME_MODE_ACTIVE           0
+#define GLUT_GAME_MODE_POSSIBLE         1
+#define GLUT_GAME_MODE_WIDTH            2
+#define GLUT_GAME_MODE_HEIGHT           3
+#define GLUT_GAME_MODE_PIXEL_DEPTH      4
+#define GLUT_GAME_MODE_REFRESH_RATE     5
+#define GLUT_GAME_MODE_DISPLAY_CHANGED  6
+
+extern void APIENTRY glutGameModeString(const char *string);
+extern int APIENTRY glutEnterGameMode(void);
+extern void APIENTRY glutLeaveGameMode(void);
+extern int APIENTRY glutGameModeGet(GLenum mode);
+#endif
+
+#ifdef __cplusplus
+}
+
+#endif
+
+#ifdef GLUT_APIENTRY_DEFINED
+# undef GLUT_APIENTRY_DEFINED
+# undef APIENTRY
+#endif
+
+#ifdef GLUT_WINGDIAPI_DEFINED
+# undef GLUT_WINGDIAPI_DEFINED
+# undef WINGDIAPI
+#endif
+
+#endif                  /* __glut_h__ */
+```
+
+### VolumetricClouds/SOIL/SOIL.h
+```
+/**
+	@mainpage SOIL
+
+	Jonathan Dummer
+	2007-07-26-10.36
+
+	Simple OpenGL Image Library
+
+	A tiny c library for uploading images as
+	textures into OpenGL.  Also saving and
+	loading of images is supported.
+
+	I'm using Sean's Tool Box image loader as a base:
+	http://www.nothings.org/
+
+	I'm upgrading it to load TGA and DDS files, and a direct
+	path for loading DDS files straight into OpenGL textures,
+	when applicable.
+
+	Image Formats:
+	- BMP		load & save
+	- TGA		load & save
+	- DDS		load & save
+	- PNG		load
+	- JPG		load
+
+	OpenGL Texture Features:
+	- resample to power-of-two sizes
+	- MIPmap generation
+	- compressed texture S3TC formats (if supported)
+	- can pre-multiply alpha for you, for better compositing
+	- can flip image about the y-axis (except pre-compressed DDS files)
+
+	Thanks to:
+	* Sean Barret - for the awesome stb_image
+	* Dan Venkitachalam - for finding some non-compliant DDS files, and patching some explicit casts
+	* everybody at gamedev.net
+**/
+
+#ifndef HEADER_SIMPLE_OPENGL_IMAGE_LIBRARY
+#define HEADER_SIMPLE_OPENGL_IMAGE_LIBRARY
+
+#ifdef __cplusplus
+extern "C" {
+#endif
+
+/**
+	The format of images that may be loaded (force_channels).
+	SOIL_LOAD_AUTO leaves the image in whatever format it was found.
+	SOIL_LOAD_L forces the image to load as Luminous (greyscale)
+	SOIL_LOAD_LA forces the image to load as Luminous with Alpha
+	SOIL_LOAD_RGB forces the image to load as Red Green Blue
+	SOIL_LOAD_RGBA forces the image to load as Red Green Blue Alpha
+**/
+enum
+{
+	SOIL_LOAD_AUTO = 0,
+	SOIL_LOAD_L = 1,
+	SOIL_LOAD_LA = 2,
+	SOIL_LOAD_RGB = 3,
+	SOIL_LOAD_RGBA = 4
+};
+
+/**
+	Passed in as reuse_texture_ID, will cause SOIL to
+	register a new texture ID using glGenTextures().
+	If the value passed into reuse_texture_ID > 0 then
+	SOIL will just re-use that texture ID (great for
+	reloading image assets in-game!)
+**/
+enum
+{
+	SOIL_CREATE_NEW_ID = 0
+};
+
+/**
+	flags you can pass into SOIL_load_OGL_texture()
+	and SOIL_create_OGL_texture().
+	(note that if SOIL_FLAG_DDS_LOAD_DIRECT is used
+	the rest of the flags with the exception of
+	SOIL_FLAG_TEXTURE_REPEATS will be ignored while
+	loading already-compressed DDS files.)
+
+	SOIL_FLAG_POWER_OF_TWO: force the image to be POT
+	SOIL_FLAG_MIPMAPS: generate mipmaps for the texture
+	SOIL_FLAG_TEXTURE_REPEATS: otherwise will clamp
+	SOIL_FLAG_MULTIPLY_ALPHA: for using (GL_ONE,GL_ONE_MINUS_SRC_ALPHA) blending
+	SOIL_FLAG_INVERT_Y: flip the image vertically
+	SOIL_FLAG_COMPRESS_TO_DXT: if the card can display them, will convert RGB to DXT1, RGBA to DXT5
+	SOIL_FLAG_DDS_LOAD_DIRECT: will load DDS files directly without _ANY_ additional processing
+	SOIL_FLAG_NTSC_SAFE_RGB: clamps RGB components to the range [16,235]
+	SOIL_FLAG_CoCg_Y: Google YCoCg; RGB=>CoYCg, RGBA=>CoCgAY
+	SOIL_FLAG_TEXTURE_RECTANGE: uses ARB_texture_rectangle ; pixel indexed & no repeat or MIPmaps or cubemaps
+**/
+enum
+{
+	SOIL_FLAG_POWER_OF_TWO = 1,
+	SOIL_FLAG_MIPMAPS = 2,
+	SOIL_FLAG_TEXTURE_REPEATS = 4,
+	SOIL_FLAG_MULTIPLY_ALPHA = 8,
+	SOIL_FLAG_INVERT_Y = 16,
+	SOIL_FLAG_COMPRESS_TO_DXT = 32,
+	SOIL_FLAG_DDS_LOAD_DIRECT = 64,
+	SOIL_FLAG_NTSC_SAFE_RGB = 128,
+	SOIL_FLAG_CoCg_Y = 256,
+	SOIL_FLAG_TEXTURE_RECTANGLE = 512
+};
+
+/**
+	The types of images that may be saved.
+	(TGA supports uncompressed RGB / RGBA)
+	(BMP supports uncompressed RGB)
+	(DDS supports DXT1 and DXT5)
+**/
+enum
+{
+	SOIL_SAVE_TYPE_TGA = 0,
+	SOIL_SAVE_TYPE_BMP = 1,
+	SOIL_SAVE_TYPE_DDS = 2
+};
+
+/**
+	Defines the order of faces in a DDS cubemap.
+	I recommend that you use the same order in single
+	image cubemap files, so they will be interchangeable
+	with DDS cubemaps when using SOIL.
+**/
+#define SOIL_DDS_CUBEMAP_FACE_ORDER "EWUDNS"
+
+/**
+	The types of internal fake HDR representations
+
+	SOIL_HDR_RGBE:		RGB * pow( 2.0, A - 128.0 )
+	SOIL_HDR_RGBdivA:	RGB / A
+	SOIL_HDR_RGBdivA2:	RGB / (A*A)
+**/
+enum
+{
+	SOIL_HDR_RGBE = 0,
+	SOIL_HDR_RGBdivA = 1,
+	SOIL_HDR_RGBdivA2 = 2
+};
+
+/**
+	Loads an image from disk into an OpenGL texture.
+	\param filename the name of the file to upload as a texture
+	\param force_channels 0-image format, 1-luminous, 2-luminous/alpha, 3-RGB, 4-RGBA
+	\param reuse_texture_ID 0-generate a new texture ID, otherwise reuse the texture ID (overwriting the old texture)
+	\param flags can be any of SOIL_FLAG_POWER_OF_TWO | SOIL_FLAG_MIPMAPS | SOIL_FLAG_TEXTURE_REPEATS | SOIL_FLAG_MULTIPLY_ALPHA | SOIL_FLAG_INVERT_Y | SOIL_FLAG_COMPRESS_TO_DXT | SOIL_FLAG_DDS_LOAD_DIRECT
+	\return 0-failed, otherwise returns the OpenGL texture handle
+**/
+unsigned int
+	SOIL_load_OGL_texture
+	(
+		const char *filename,
+		int force_channels,
+		unsigned int reuse_texture_ID,
+		unsigned int flags
+	);
+
+/**
+	Loads 6 images from disk into an OpenGL cubemap texture.
+	\param x_pos_file the name of the file to upload as the +x cube face
+	\param x_neg_file the name of the file to upload as the -x cube face
+	\param y_pos_file the name of the file to upload as the +y cube face
+	\param y_neg_file the name of the file to upload as the -y cube face
+	\param z_pos_file the name of the file to upload as the +z cube face
+	\param z_neg_file the name of the file to upload as the -z cube face
+	\param force_channels 0-image format, 1-luminous, 2-luminous/alpha, 3-RGB, 4-RGBA
+	\param reuse_texture_ID 0-generate a new texture ID, otherwise reuse the texture ID (overwriting the old texture)
+	\param flags can be any of SOIL_FLAG_POWER_OF_TWO | SOIL_FLAG_MIPMAPS | SOIL_FLAG_TEXTURE_REPEATS | SOIL_FLAG_MULTIPLY_ALPHA | SOIL_FLAG_INVERT_Y | SOIL_FLAG_COMPRESS_TO_DXT | SOIL_FLAG_DDS_LOAD_DIRECT
+	\return 0-failed, otherwise returns the OpenGL texture handle
+**/
+unsigned int
+	SOIL_load_OGL_cubemap
+	(
+		const char *x_pos_file,
+		const char *x_neg_file,
+		const char *y_pos_file,
+		const char *y_neg_file,
+		const char *z_pos_file,
+		const char *z_neg_file,
+		int force_channels,
+		unsigned int reuse_texture_ID,
+		unsigned int flags
+	);
+
+/**
+	Loads 1 image from disk and splits it into an OpenGL cubemap texture.
+	\param filename the name of the file to upload as a texture
+	\param face_order the order of the faces in the file, any combination of NSWEUD, for North, South, Up, etc.
+	\param force_channels 0-image format, 1-luminous, 2-luminous/alpha, 3-RGB, 4-RGBA
+	\param reuse_texture_ID 0-generate a new texture ID, otherwise reuse the texture ID (overwriting the old texture)
+	\param flags can be any of SOIL_FLAG_POWER_OF_TWO | SOIL_FLAG_MIPMAPS | SOIL_FLAG_TEXTURE_REPEATS | SOIL_FLAG_MULTIPLY_ALPHA | SOIL_FLAG_INVERT_Y | SOIL_FLAG_COMPRESS_TO_DXT | SOIL_FLAG_DDS_LOAD_DIRECT
+	\return 0-failed, otherwise returns the OpenGL texture handle
+**/
+unsigned int
+	SOIL_load_OGL_single_cubemap
+	(
+		const char *filename,
+		const char face_order[6],
+		int force_channels,
+		unsigned int reuse_texture_ID,
+		unsigned int flags
+	);
+
+/**
+	Loads an HDR image from disk into an OpenGL texture.
+	\param filename the name of the file to upload as a texture
+	\param fake_HDR_format SOIL_HDR_RGBE, SOIL_HDR_RGBdivA, SOIL_HDR_RGBdivA2
+	\param reuse_texture_ID 0-generate a new texture ID, otherwise reuse the texture ID (overwriting the old texture)
+	\param flags can be any of SOIL_FLAG_POWER_OF_TWO | SOIL_FLAG_MIPMAPS | SOIL_FLAG_TEXTURE_REPEATS | SOIL_FLAG_MULTIPLY_ALPHA | SOIL_FLAG_INVERT_Y | SOIL_FLAG_COMPRESS_TO_DXT
+	\return 0-failed, otherwise returns the OpenGL texture handle
+**/
+unsigned int
+	SOIL_load_OGL_HDR_texture
+	(
+		const char *filename,
+		int fake_HDR_format,
+		int rescale_to_max,
+		unsigned int reuse_texture_ID,
+		unsigned int flags
+	);
+
+/**
+	Loads an image from RAM into an OpenGL texture.
+	\param buffer the image data in RAM just as if it were still in a file
+	\param buffer_length the size of the buffer in bytes
+	\param force_channels 0-image format, 1-luminous, 2-luminous/alpha, 3-RGB, 4-RGBA
+	\param reuse_texture_ID 0-generate a new texture ID, otherwise reuse the texture ID (overwriting the old texture)
+	\param flags can be any of SOIL_FLAG_POWER_OF_TWO | SOIL_FLAG_MIPMAPS | SOIL_FLAG_TEXTURE_REPEATS | SOIL_FLAG_MULTIPLY_ALPHA | SOIL_FLAG_INVERT_Y | SOIL_FLAG_COMPRESS_TO_DXT | SOIL_FLAG_DDS_LOAD_DIRECT
+	\return 0-failed, otherwise returns the OpenGL texture handle
+**/
+unsigned int
+	SOIL_load_OGL_texture_from_memory
+	(
+		const unsigned char *const buffer,
+		int buffer_length,
+		int force_channels,
+		unsigned int reuse_texture_ID,
+		unsigned int flags
+	);
+
+/**
+	Loads 6 images from memory into an OpenGL cubemap texture.
+	\param x_pos_buffer the image data in RAM to upload as the +x cube face
+	\param x_pos_buffer_length the size of the above buffer
+	\param x_neg_buffer the image data in RAM to upload as the +x cube face
+	\param x_neg_buffer_length the size of the above buffer
+	\param y_pos_buffer the image data in RAM to upload as the +x cube face
+	\param y_pos_buffer_length the size of the above buffer
+	\param y_neg_buffer the image data in RAM to upload as the +x cube face
+	\param y_neg_buffer_length the size of the above buffer
+	\param z_pos_buffer the image data in RAM to upload as the +x cube face
+	\param z_pos_buffer_length the size of the above buffer
+	\param z_neg_buffer the image data in RAM to upload as the +x cube face
+	\param z_neg_buffer_length the size of the above buffer
+	\param force_channels 0-image format, 1-luminous, 2-luminous/alpha, 3-RGB, 4-RGBA
+	\param reuse_texture_ID 0-generate a new texture ID, otherwise reuse the texture ID (overwriting the old texture)
+	\param flags can be any of SOIL_FLAG_POWER_OF_TWO | SOIL_FLAG_MIPMAPS | SOIL_FLAG_TEXTURE_REPEATS | SOIL_FLAG_MULTIPLY_ALPHA | SOIL_FLAG_INVERT_Y | SOIL_FLAG_COMPRESS_TO_DXT | SOIL_FLAG_DDS_LOAD_DIRECT
+	\return 0-failed, otherwise returns the OpenGL texture handle
+**/
+unsigned int
+	SOIL_load_OGL_cubemap_from_memory
+	(
+		const unsigned char *const x_pos_buffer,
+		int x_pos_buffer_length,
+		const unsigned char *const x_neg_buffer,
+		int x_neg_buffer_length,
+		const unsigned char *const y_pos_buffer,
+		int y_pos_buffer_length,
+		const unsigned char *const y_neg_buffer,
+		int y_neg_buffer_length,
+		const unsigned char *const z_pos_buffer,
+		int z_pos_buffer_length,
+		const unsigned char *const z_neg_buffer,
+		int z_neg_buffer_length,
+		int force_channels,
+		unsigned int reuse_texture_ID,
+		unsigned int flags
+	);
+
+/**
+	Loads 1 image from RAM and splits it into an OpenGL cubemap texture.
+	\param buffer the image data in RAM just as if it were still in a file
+	\param buffer_length the size of the buffer in bytes
+	\param face_order the order of the faces in the file, any combination of NSWEUD, for North, South, Up, etc.
+	\param force_channels 0-image format, 1-luminous, 2-luminous/alpha, 3-RGB, 4-RGBA
+	\param reuse_texture_ID 0-generate a new texture ID, otherwise reuse the texture ID (overwriting the old texture)
+	\param flags can be any of SOIL_FLAG_POWER_OF_TWO | SOIL_FLAG_MIPMAPS | SOIL_FLAG_TEXTURE_REPEATS | SOIL_FLAG_MULTIPLY_ALPHA | SOIL_FLAG_INVERT_Y | SOIL_FLAG_COMPRESS_TO_DXT | SOIL_FLAG_DDS_LOAD_DIRECT
+	\return 0-failed, otherwise returns the OpenGL texture handle
+**/
+unsigned int
+	SOIL_load_OGL_single_cubemap_from_memory
+	(
+		const unsigned char *const buffer,
+		int buffer_length,
+		const char face_order[6],
+		int force_channels,
+		unsigned int reuse_texture_ID,
+		unsigned int flags
+	);
+
+/**
+	Creates a 2D OpenGL texture from raw image data.  Note that the raw data is
+	_NOT_ freed after the upload (so the user can load various versions).
+	\param data the raw data to be uploaded as an OpenGL texture
+	\param width the width of the image in pixels
+	\param height the height of the image in pixels
+	\param channels the number of channels: 1-luminous, 2-luminous/alpha, 3-RGB, 4-RGBA
+	\param reuse_texture_ID 0-generate a new texture ID, otherwise reuse the texture ID (overwriting the old texture)
+	\param flags can be any of SOIL_FLAG_POWER_OF_TWO | SOIL_FLAG_MIPMAPS | SOIL_FLAG_TEXTURE_REPEATS | SOIL_FLAG_MULTIPLY_ALPHA | SOIL_FLAG_INVERT_Y | SOIL_FLAG_COMPRESS_TO_DXT
+	\return 0-failed, otherwise returns the OpenGL texture handle
+**/
+unsigned int
+	SOIL_create_OGL_texture
+	(
+		const unsigned char *const data,
+		int width, int height, int channels,
+		unsigned int reuse_texture_ID,
+		unsigned int flags
+	);
+
+/**
+	Creates an OpenGL cubemap texture by splitting up 1 image into 6 parts.
+	\param data the raw data to be uploaded as an OpenGL texture
+	\param width the width of the image in pixels
+	\param height the height of the image in pixels
+	\param channels the number of channels: 1-luminous, 2-luminous/alpha, 3-RGB, 4-RGBA
+	\param face_order the order of the faces in the file, and combination of NSWEUD, for North, South, Up, etc.
+	\param reuse_texture_ID 0-generate a new texture ID, otherwise reuse the texture ID (overwriting the old texture)
+	\param flags can be any of SOIL_FLAG_POWER_OF_TWO | SOIL_FLAG_MIPMAPS | SOIL_FLAG_TEXTURE_REPEATS | SOIL_FLAG_MULTIPLY_ALPHA | SOIL_FLAG_INVERT_Y | SOIL_FLAG_COMPRESS_TO_DXT | SOIL_FLAG_DDS_LOAD_DIRECT
+	\return 0-failed, otherwise returns the OpenGL texture handle
+**/
+unsigned int
+	SOIL_create_OGL_single_cubemap
+	(
+		const unsigned char *const data,
+		int width, int height, int channels,
+		const char face_order[6],
+		unsigned int reuse_texture_ID,
+		unsigned int flags
+	);
+
+/**
+	Captures the OpenGL window (RGB) and saves it to disk
+	\return 0 if it failed, otherwise returns 1
+**/
+int
+	SOIL_save_screenshot
+	(
+		const char *filename,
+		int image_type,
+		int x, int y,
+		int width, int height
+	);
+
+/**
+	Loads an image from disk into an array of unsigned chars.
+	Note that *channels return the original channel count of the
+	image.  If force_channels was other than SOIL_LOAD_AUTO,
+	the resulting image has force_channels, but *channels may be
+	different (if the original image had a different channel
+	count).
+	\return 0 if failed, otherwise returns 1
+**/
+unsigned char*
+	SOIL_load_image
+	(
+		const char *filename,
+		int *width, int *height, int *channels,
+		int force_channels
+	);
+
+/**
+	Loads an image from memory into an array of unsigned chars.
+	Note that *channels return the original channel count of the
+	image.  If force_channels was other than SOIL_LOAD_AUTO,
+	the resulting image has force_channels, but *channels may be
+	different (if the original image had a different channel
+	count).
+	\return 0 if failed, otherwise returns 1
+**/
+unsigned char*
+	SOIL_load_image_from_memory
+	(
+		const unsigned char *const buffer,
+		int buffer_length,
+		int *width, int *height, int *channels,
+		int force_channels
+	);
+
+/**
+	Saves an image from an array of unsigned chars (RGBA) to disk
+	\return 0 if failed, otherwise returns 1
+**/
+int
+	SOIL_save_image
+	(
+		const char *filename,
+		int image_type,
+		int width, int height, int channels,
+		const unsigned char *const data
+	);
+
+/**
+	Frees the image data (note, this is just C's "free()"...this function is
+	present mostly so C++ programmers don't forget to use "free()" and call
+	"delete []" instead [8^)
+**/
+void
+	SOIL_free_image_data
+	(
+		unsigned char *img_data
+	);
+
+/**
+	This function resturn a pointer to a string describing the last thing
+	that happened inside SOIL.  It can be used to determine why an image
+	failed to load.
+**/
+const char*
+	SOIL_last_result
+	(
+		void
+	);
+
+
+#ifdef __cplusplus
+}
+#endif
+
+#endif /* HEADER_SIMPLE_OPENGL_IMAGE_LIBRARY	*/
+```

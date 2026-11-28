@@ -1,0 +1,311 @@
+Contribute to arbobendik/FlexCudaPT development by creating an account on GitHub.
+
+fix(volumes): start a camera's paths in the volume it sits in, which absorbs the light reaching it from the first hit by arbobendik · Pull Request #22 · arbobendik/FlexCudaPT · GitHub
+Skip to content
+You signed in with another tab or window. Reload to refresh your session.
+You signed out in another tab or window. Reload to refresh your session.
+You switched accounts on another tab or window. Reload to refresh your session.
+Dismiss alert
+Conversation
+arbobendik
+commented
+Oct 23, 2026
+•
+edited
+Loading
+Uh oh!
+There was an error while loading. Please reload this page.
+Copy link
+Copy Markdown
+Owner
+A camera inside a volume saw none of its absorption, so its renders came out too bright. This restores what flex-cuda-pt
+did before 9747462, as a fix-forward on the rewritten main (one commit).
+Cause
+9747462 (homogeneous scattering media) replaced the per-segment Beer–Lambert rule, which attenuated every segment ending
+at a volume's back face, the camera's own included, with media tracked along the path. That tracking starts as "none at
+the camera" (walk, renderer.cu:997 and renderer.slang:1050). walk also starts at the camera's first hit, so nothing
+ever attenuated the segment from the camera to it.
+Measured with an absorbing slab (IOR-1 glass, 4 × 4 × 1, Volume Absorption (0.5, 0.8, 1), density 1, white world,
+camera 0.75 below its top face looking up; .agent/volprobe.py):
+build
+camera inside, exact 0.687 / 0.861 / 1
+7de0339 (before 9747462)
+0.687 / 0.861 / 1
+9747462 and main
+1 / 1 / 1
+From outside the slab both are exact.
+Fix
+Export: start() keeps a BVH of the world-space triangles of each instance whose material has a linked Volume
+output, and refreshes it for moved instances on updates.
+Request: trace() finds the volume containing the camera by ray parity (inside(): a ray up from the camera
+crosses that mesh an odd number of times). It sends that instance's first triangle of a material filling the volume
+(a linked Volume output) as the new Settings.medium, or NONE. This runs per request, so a moving viewport camera is covered.
+Renderer, both backends:
+walk starts with that volume's medium, shaded from the triangle, so a textured volume works too.
+It multiplies the throughput by the camera segment's absorption, exp((scatter − extinction) · distance) =
+exp(−σa · distance). The first hit's emission (seen) takes it as well.
+RECORD_STRIDE 544 → 560 on both backends: Settings grows by one field, and the SBT record by 16 bytes.
+Known approximations
+Camera-segment scattering is not sampled. The camera segment is attenuated by absorption alone: out-scattering is
+not removed and in-scattering is not added there. That's exact for absorbing media and in a furnace, where the two
+cancel. Outside a furnace, fog seen from inside shows neither its haze nor its glow along that segment. Main has no
+camera medium at all, so this is strictly closer to the truth. A single-scattering estimator for the camera segment
+(lit fog from inside) is a separate decision for Bendik. Sampling it the way walk does after each hit would move the path's first vertex
+off the ReSTIR domain's hit (dom.hit), which the reuse passes are built on. That's out of scope for this fix-forward.
+Segments after the first hit scatter as before.
+One material stands for the volume. The instance's first triangle of a volume-filling material stands for its
+volume. An instance with several different volume materials reads the first one's medium; nested volumes aren't
+tracked, as before.
+Tests (make test)
+camera in a volume: the camera inside the slab sees the sky at exp(color − 1)^0.25.
+camera in a volume around an emitter: an emitter 0.15 below the camera, inside the slab, reads exp(color − 1)^0.15.
+This is the case where the camera's first hit is not a volume face.
+camera in a volume of a later slot: the slab's first face takes a copy of its glass without a volume, the camera
+inside still reads exp(color − 1)^0.25. An earlier revision sent the instance's first triangle and read no absorption.
+camera in a scattering volume: the slab with a white Volume Scatter instead, under the white world, a furnace: mean
+within 2% of 1. Attenuating by the full extinction, as an earlier revision did, loses light here.
+tree
+make test
+this commit, 5d0d07a
+exit 0, every assert
+main 6ac6388 + the tests
+fails at camera in a volume
+main 6ac6388 + the emitter test alone
+fails at camera in a volume around an emitter
+bbc0409 (full extinction on the camera segment) + the furnace test
+fails at camera in a scattering volume
+abbb6cc (the instance's first triangle) + the later-slot test
+fails at camera in a volume of a later slot
+ws1's exactness scenes (slab of IOR-1 glass with Principled's default base color 0.8, camera inside, white world; 64 px,
+256 spp; OptiX and Vulkan alike, ReSTIR off / on):
+scene
+exact
+5d0d07a
+absorb, Volume Absorption (0.5, 0.8, 1)
+0.8·exp(−(1−c)·0.75) = 0.549 / 0.689 / 0.800
+0.5494 / 0.6882 / 0.7998 · 0.5499 / 0.6889 / 0.8006
+emitter inside, 0.4 away
+exp(−(1−c)·0.4) = 0.819 / 0.923 / 1
+0.8185 / 0.9230 / 1.0000
+scatter, white Volume Scatter (furnace)
+0.8
+0.7998 · 0.8006
+slots: absorb with its first face on a non-volume slot
+0.549 / 0.689 / 0.800
+0.5494 / 0.6882 / 0.7998 · 0.5499 / 0.6889 / 0.8006
+Both backends build with the same 5 warnings as main. Evidence in flex-cuda-pt-4/.agent/ev: test-rfix.log, test-cmt.log,
+test-cmt2.log, volprobe.log; audit row: .agent/evict/AUDIT-ws4.md.
+arbobendik
+force-pushed
+the
+fix/camera-medium
+branch
+from
+bbc0409 to
+abbb6cc
+Compare
+October 23, 2026 12:18
+arbobendik
+commented
+Oct 23, 2026
+•
+edited
+Loading
+Uh oh!
+There was an error while loading. Please reload this page.
+Copy link
+Copy Markdown
+Owner
+Author
+Verification of abbb6cc (ws1): two items to settle before merging
+Everything physical passes on both backends. Two gates don't pass as stated:
+Identity: OptiX is not bit-identical to main. The difference is at ulp level and comes from compilation, not behaviour.
+First-triangle limit: this limit is worse than before 9747462 when a volume's mesh has more than one material slot. The fix is about 3 lines and a test.
+Exactness against Beer–Lambert
+The scene is a 4 × 4 × 1 slab of clear IOR-1 glass (Principled base 0.8) under a white sky. The camera sits inside at z −0.25, looking up through 0.75 of the medium. Renders are 64 px at 256 spp; the value is the mean of the centre 16 × 16. OptiX and Vulkan read the same, with ReSTIR off and on.
+Scene
+Exact
+abbb6cc
+bbc0409
+main 6ac6388
+Volume Absorption (0.5, 0.8, 1), density 1
+0.5496 / 0.6888 / 0.8
+0.5494 / 0.6882 / 0.7998 ✔
+the same ✔
+0.7998 grey ✘
+The same, with an emitter of strength 1 at z 0.15 facing down
+0.8187 / 0.9231 / 1
+0.8185 / 0.9230 / 1.0 ✔
+the same ✔
+1.0 ✘
+Volume Scatter, white, density 1
+0.8
+0.7998 (ReSTIR 0.8006) ✔
+0.384 ✘
+0.7998 ✔
+The scattering regression in bbc0409 is fixed.
+Tests
+make test on abbb6cc: exit 0.
+'camera in a volume': fails on main 6ac6388, run with the head's test.py.
+'camera in a volume around an emitter': fails on main 6ac6388, run alone. The text of both tests is unchanged since bbc0409.
+'camera in a scattering volume': fails on bbc0409, run with the head's test.py. It passes on main, which has no camera medium, so it guards against bbc0409's regression rather than main's.
+Review
+Form: one commit, 82 changed lines. Bendik's identity as author and committer, a single-line message.
+RECORD_STRIDE: 544 → 560 in both renderer.h and renderer.slang. Settings gains medium, padded to 16.
+No fallbacks.
+Identity against main (occluder, cornell, the showcase scene, tokyo; 256 px, 64 spp)
+Vulkan: bit-identical on all four scenes.
+OptiX: not bit-identical.
+occluder: 5259 of 147456 floats differ, by at most 1.4e-6.
+cornell: 12318 differ, by at most 1.9e-6.
+the showcase scene and tokyo: paths diverge, but the image means agree: 0.643136 against 0.643135, and 0.322442 against 0.322516.
+Where it comes from: a build of abbb6cc with only walk()'s camera lines reverted renders occluder and cornell bit-identical to main. Those are the Medium medium = … line, the throughput = exponential(…) line and seen = throughput * surface.emissive. The Settings field, the stride and the exporter are not involved.
+Why it isn't behaviour: with no camera medium, these lines compute expf(0). Under --use_fast_math I measured that as exactly 1 (0x3f800000) on this GPU. Vulkan is bit-identical, so the values are the same and only nvcc's code for them differs.
+For the manager: decide whether ulp-level differences on OptiX are acceptable. If bit-identity is required, the same lines would need to be skipped when settings.medium == NONE.
+ABBA (OptiX, 1280 × 720, 20 frames, ReSTIR, denoise and decorrelation off, one hold per scene)
+the showcase scene: median 76.5 ms on the head against 80.4 ms on main.
+tokyo: median 154.0 ms against 156.2 ms.
+No regression. The small speedup probably comes from the same change in compiled code.
+The stated limits, against the code before 9747462
+Scattering on the camera segment: not sampled, so out-scattering is taken to be balanced by in-scattering. This is the same as before 9747462, which had absorption only. Exact in the white furnace above.
+One triangle stands for the volume: worse than before 9747462 when the instance has several material slots.
+Instances are flagged as volumes if any slot's material has a Volume output. The exporter then sends the instance's first triangle, whatever its material.
+Test case: the absorbing slab above, with its first face (a side face the camera never sees) given the same glass without a volume. It reads 0.7998 grey on abbb6cc and on main, on both backends; the exact value is 0.5496 / 0.6888 / 0.8.
+Before 9747462, the camera segment took the material of the face it left through: here the absorbing top face, so the result was correct.
+Fix: send the first triangle whose slot's material fills the volume. In the exporter's loop, that is the first index entry whose material has a linked Volume output, instead of self.slots[i][0]; about 3 lines. Add a test 'camera in a volume whose first face has none', which fails on abbb6cc.
+Nested volumes: the first containing instance in instance order is used, not the innermost. Before 9747462, the face the ray left through decided. Narrow, but worth stating in the body.
+fix(volumes): start a camera's paths in the volume it sits in, which …
+…
+5d0d07a
+```
+…absorbs the light reaching it from the first hit
+```
+arbobendik
+commented
+Oct 23, 2026
+•
+edited
+Loading
+Uh oh!
+There was an error while loading. Please reload this page.
+Copy link
+Copy Markdown
+Owner
+Author
+Addendum (ws1): OptiX differences are below the seed floor
+The manager accepts abbb6cc's ulp-level OptiX differences as codegen, with no NONE guard, on condition that they lie within the seed floor. They do, by a factor of at least 70 on every metric.
+Setup: the showcase scene and tokyo on OptiX, 512 px, 1024 spp, ReSTIR and denoise off. abbb6cc and main 6ac6388 are each compared against main. The floor is a build of main tracing another stream of random numbers (scene.frame = 1u << 20 in main.cpp).
+Scene
+mean |Δ|/mean
+p99 tonemapped
+bias
+block-RMS
+worst 8×8 block
+the showcase scene
+abbb6cc
+0.000%
+0.0000
++0.000%
+0.001%
+0.4%
+the showcase scene
+seed floor
+4.829%
+0.1887
+−0.087%
+4.520%
+56.4%
+tokyo
+abbb6cc
+0.008%
+0.0003
++0.000%
+0.009%
+3.8%
+tokyo
+seed floor
+1.975%
+0.0284
++0.001%
+0.545%
+78.2%
+tokyo's worst block, 3.8%, is above the plan's absolute 2% bound. The floor's worst block is 78.2%, so that bound doesn't apply at this sample count.
+Status: the identity item is closed. The first-triangle limit still waits on ws4's amendment, which I will re-verify with the mixed-slot scene.
+arbobendik
+force-pushed
+the
+fix/camera-medium
+branch
+from
+abbb6cc to
+5d0d07a
+Compare
+October 23, 2026 13:53
+arbobendik
+commented
+Oct 23, 2026
+Copy link
+Copy Markdown
+Owner
+Author
+Re-verification of 5d0d07a (ws1): PASS
+The amendment changes only the exporter and test.py. For a volume instance, the exporter now sends its first triangle of a material with a linked Volume output, not the instance's first triangle. index is the per-triangle material index, in the same order as the exported triangles, so slots[i][0] + first names the right triangle. My builds of 5d0d07a and abbb6cc produce bit-identical PTX and SPIR-V, so the ABBA and seed-floor results above still apply.
+Exactness
+Centre 16 × 16, 64 px, 256 spp. OptiX and Vulkan are identical.
+Scene
+Exact
+5d0d07a, ReSTIR off / on
+absorb
+0.5496 / 0.6888 / 0.8
+0.5494 / 0.6882 / 0.7998, and 0.5499 / 0.6889 / 0.8006 ✔
+emitter
+0.8187 / 0.9231 / 1
+0.8185 / 0.9230 / 1.0 ✔
+scatter
+0.8
+0.7998, and 0.8006 ✔
+slots (absorb, its first face a slot without a volume)
+0.5496 / 0.6888 / 0.8
+0.5494 / 0.6882 / 0.7998, and 0.5499 / 0.6889 / 0.8006 ✔ (abbb6cc: 0.7998 grey)
+Tests
+make test on 5d0d07a: exit 0.
+The new test: abbb6cc, run with 5d0d07a's test.py, fails at the new 'camera in a volume of a later slot'.
+The earlier tests: unchanged, and their failures on main and on bbc0409, reported above, stand.
+Identity
+occluder and cornell on both backends are bit-identical to abbb6cc. Against main, Vulkan is bit-identical, and OptiX lies within the seed floor, accepted above.
+Review
+One commit, 93 changed lines. Bendik's identity as author and committer, a single-line message.
+No fallbacks.
+The limits section now reads "one material stands for the volume". Nested volumes are still resolved by instance order, as stated.
+Hide details
+View details
+arbobendik
+merged commit 5d0d07a
+into
+main
+Oct 23, 2026
+1 check passed
+Uh oh!
+There was an error while loading. Please reload this page.
+arbobendik
+deleted the
+fix/camera-medium
+branch
+October 23, 2026 14:21
+arbobendik
+mentioned this pull request
+Oct 23, 2026
+chore(test): check a white metal sphere of roughness 0.5 in a white furnace against GGX's exact single-scatter albedo
+#21
+Merged
+Sign up for free
+to join this conversation on GitHub.
+Already have an account?
+Sign in to comment
+Uh oh!
+There was an error while loading. Please reload this page.
+Labels
+None yet
+1 participant
+Add this suggestion to a batch that can be applied as a single commit.This suggestion is invalid because no changes were made to the code.Suggestions cannot be applied while the pull request is closed.Suggestions cannot be applied while viewing a subset of changes.Only one suggestion per line can be applied in a batch.Add this suggestion to a batch that can be applied as a single commit.Applying suggestions on deleted lines is not supported.You must change the existing code in this line in order to create a valid suggestion.Outdated suggestions cannot be applied.This suggestion has been applied or marked resolved.Suggestions cannot be applied from pending reviews.Suggestions cannot be applied on multi-line comments.Suggestions cannot be applied while the pull request is queued to merge.Suggestion cannot be applied right now. Please check back later.
+You can’t perform that action at this time.

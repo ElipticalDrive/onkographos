@@ -1,0 +1,283 @@
+--- v001.md
++++ v002.md
+@@ -1,159 +1,173 @@
+ # Texture-Based Splat Storage Preprocessing
+ 
+-Also called: Splat Texture Generation, Gaussian Texture Packing Preprocessing
++Also called: Splat Texture Packing, Niagara Splat Texture Generation
+ 
+ ## Overview
+-This method preprocesses parsed 3D Gaussian splat data into a set of 32-bit floating-point RGBA textures, enabling efficient on-demand loading and rendering via GPU particle systems such as Unreal Engine's Niagara. It solves the problem of memory fragmentation and inefficient CPU-GPU transfer by organizing splat attributes (position, scale, rotation, color, and spherical harmonics) into contiguous texture resources. It differs from sibling methods like [Packed Splat Reading](6819-packed-splat-reading.md) by focusing on the *creation* and *formatting* of the storage assets rather than the *consumption* of them during the rendering pipeline.
++This method preprocesses parsed 3D Gaussian splat data into eight separate RGBA32F textures, one for each attribute channel (Position, Scale, Rotation, Color, and three Spherical Harmonics levels), to enable efficient on-demand loading by the Unreal Engine Niagara rendering system [S1, unofficial]. It sets itself apart from sibling methods by focusing on the creation of uncompressed, high-precision floating-point texture assets rather than byte-level compression or Morton-ordering [S1, unofficial].
+ 
+ ## How it works
+ **Inputs and Outputs:**
+-*   **Input:** A list of Gaussian splats, where each splat contains position (vec3), scale (vec3), rotation (quaternion), color (RGB), opacity (scalar), and spherical harmonics coefficients.
+-*   **Output:** A collection of 8 separate `UTexture2D` assets (or equivalent texture objects), each with format `RGBA32F` (32-bit floating point RGBA).
++- Input: A list of parsed Gaussian splat attributes (Position, Scale, Rotation, Color, SH coefficients) typically derived from PLY or SPZ files.
++- Output: Eight `UTexture2D` assets (Unreal Engine texture objects), each containing an array of `FLinearColor` values representing the respective attribute channel.
+ 
+ **Data Structures:**
+-The method organizes data into a structure `FGaussianSplattingTextureData` containing the following fields, each being an array of 4-component vectors (`FLinearColor` or equivalent):
+-1.  `PositionTextureData`: Stores the 3D position of each splat.
+-2.  `ScaleTextureData`: Stores the 3D scale (size) of each splat.
+-3.  `RotationTextureData`: Stores the 3D rotation (quaternion) of each splat.
+-4.  `ColorTextureData`: Stores the base color and opacity.
+-5.  `HarmonicsL1TextureData`: Stores the first-order spherical harmonics coefficients.
+-6.  `HarmonicsL2TextureData`: Stores the second-order spherical harmonics coefficients.
+-7.  `HarmonicsL31TextureData`: Stores the third-order spherical harmonics coefficients (part 1).
+-8.  `HarmonicsL32TextureData`: Stores the third-order spherical harmonics coefficients (part 2).
++The method organizes data using the `FGaussianSplattingTextureData` structure, which contains eight fields, each being a dynamic array of `FLinearColor` (4-component float vector):
++1. `PositionTextureData`: Stores 3D coordinates.
++2. `ScaleTextureData`: Stores scale factors.
++3. `RotationTextureData`: Stores rotation quaternions.
++4. `ColorTextureData`: Stores base color.
++5. `HarmonicsL1TextureData`: Stores Level 1 SH coefficients.
++6. `HarmonicsL2TextureData`: Stores Level 2 SH coefficients.
++7. `HarmonicsL31TextureData`: Stores Level 3 SH coefficients (part 1).
++8. `HarmonicsL32TextureData`: Stores Level 3 SH coefficients (part 2).
+ 
+ **Steps:**
+-1.  **Initialize Texture Assets:** For each of the 8 attribute types, create a new texture asset. Configure the texture settings as follows:
+-    *   `SRGB`: False (linear space).
+-    *   `MipGenSettings`: `TMGS_NoMipmaps` (no mipmaps generated).
+-    *   `Compression`: `None` (lossless floating-point storage).
+-    *   `Filter`: `TF_Nearest` (nearest-neighbor filtering to preserve exact values).
+-2.  **Set Source Format:** Set the internal texture source format to `TSF_RGBA32F` (32-bit floating point RGBA).
+-3.  **Populate Data Arrays:** Convert the raw splat data into arrays of 4-component vectors (`FLinearColor` or `vec4`) matching the layout defined in `FGaussianSplattingTextureData`.
+-    *   *Note:* The exact mapping of splat fields to RGBA channels is implementation-specific but generally follows the order: Position (XYZ + padding/unused), Scale (XYZ + padding), Rotation (XYZW), Color (RGB + Opacity), etc.
+-4.  **Lock and Copy:** For each texture, lock the memory of Mip Level 0. Copy the corresponding data array into the locked memory using a bulk memory copy operation (e.g., `FMemory::Memcpy`).
+-5.  **Unlock and Update:** Unlock the memory and trigger a resource update to make the texture available to the GPU.
++1. **Parse and Separate:** Extract the attribute values for each of the $N$ splats. Separate these values into eight distinct lists corresponding to the fields in `FGaussianSplattingTextureData`.
++2. **Texture Creation:** For each attribute channel, create a new `UTexture2D` asset.
++3. **Texture Configuration:** Set the following properties on the created texture:
++   - `SRGB`: `false` (linear space).
++   - `MipGenSettings`: `TMGS_NoMipmaps`.
++   - `Compression`: `CompressionNone`.
++   - `Filter`: `TF_Nearest` (point sampling).
++4. **Format Initialization:** Initialize the texture source format to `ETextureSourceFormat::TSF_RGBA32F` (32-bit floating point RGBA) [S1, unofficial].
++5. **Data Copy:**
++   - Lock the mip level 0 of the texture.
++   - Copy the `FLinearColor` array for the specific attribute into the locked memory using a memory copy operation (e.g., `FMemory::Memcpy`).
++   - Unlock the mip level.
++6. **Resource Update:** Update the texture resources to make them available to the rendering pipeline.
+ 
+ **Pseudocode:**
+ ```python
+-def preprocess_splats_to_textures(splats: List[Splat]) -> Dict[str, Texture2D]:
++def preprocess_splats_to_textures(splats: List[Splat], num_splats: int) -> Dict[str, Texture2D]:
+     """
+-    Converts a list of splats into 8 RGBA32F textures.
++    Preprocesses Gaussian splat data into 8 RGBA32F textures.
++    
++    Args:
++        splats: List of Splat objects with attributes:
++                pos (Vec3), scale (Vec3), rot (Quat), color (Vec3),
++                sh_l1 (Vec3), sh_l2 (Vec3), sh_l3_1 (Vec3), sh_l3_2 (Vec3).
++        num_splats: Total number of splats.
++        
++    Returns:
++        Dictionary mapping attribute names to Texture2D objects.
+     """
+     textures = {}
+     
+-    # Define the 8 required textures
+-    texture_names = [
++    # Define the attribute channels
++    channels = [
+         "Position", "Scale", "Rotation", "Color",
+         "HarmonicsL1", "HarmonicsL2", "HarmonicsL31", "HarmonicsL32"
+     ]
+     
+-    for name in texture_names:
+-        # 1. Create Texture Asset
++    # Helper to extract a specific attribute from all splats
++    def extract_attribute(attr_name: str) -> List[FLinearColor]:
++        colors = []
++        for i in range(num_splats):
++            s = splats[i]
++            # Map attribute name to Splat object field
++            val = getattr(s, attr_name)
++            # FLinearColor is a 4-component float vector (RGBA)
++            # For 3-component data (pos, scale, color, SH), W is typically unused or set to 1.0
++            # For 4-component data (rotation/quaternion), all 4 are used.
++            if attr_name == "Rotation":
++                colors.append(FLinearColor(val.x, val.y, val.z, val.w))
++            else:
++                # Assuming 3D vectors for others, pad with 1.0 or 0.0 as per engine convention
++                # Note: FLinearColor usually expects normalized colors, but here it stores raw floats
++                # due to TSF_RGBA32F format.
++                colors.append(FLinearColor(val.x, val.y, val.z, 1.0)) 
++        return colors
++
++    for channel in channels:
++        # 1. Extract data for this channel
++        pixel_data = extract_attribute(channel)
++        
++        # 2. Create Texture2D
+         tex = create_texture2d()
++        
++        # 3. Configure Texture
+         tex.srgb = False
+-        tex.mip_gen = TMGS_NoMipmaps
++        tex.mip_gen_settings = TMGS_NoMipmaps
+         tex.compression = CompressionNone
+         tex.filter = TF_Nearest
+         
+-        # 2. Set Format
++        # 4. Initialize Source Format
+         tex.source_format = TSF_RGBA32F
+         
+-        # 3. Prepare Data Array
+-        # Extract the specific attribute for all splats into a list of vec4
+-        data_array = extract_attribute_for_all_splats(splats, name)
+-        
+-        # 4. Lock and Copy
++        # 5. Lock Mip 0 and Copy Data
+         tex.lock_mip(0)
+-        dest_ptr = tex.get_mip_data(0)
+-        mem_copy(dest_ptr, data_array)
++        memory_ptr = tex.get_mip_data(0)
++        memcpy(memory_ptr, pixel_data, len(pixel_data) * sizeof(FLinearColor))
+         tex.unlock_mip(0)
+         
+-        # 5. Update Resource
++        # 6. Update Resources
+         tex.update_resources()
+         
+-        textures[name] = tex
++        textures[channel] = tex
+         
+     return textures
+ 
+-def extract_attribute_for_all_splats(splats: List[Splat], attr_name: str) -> List[vec4]:
+-    """
+-    Extracts a specific attribute from all splats and pads to vec4.
+-    """
+-    result = []
+-    for splat in splats:
+-        vec4 = vec4(0.0)
+-        if attr_name == "Position":
+-            vec4.x = splat.position.x
+-            vec4.y = splat.position.y
+-            vec4.z = splat.position.z
+-            vec4.w = 0.0 # Padding
+-        elif attr_name == "Scale":
+-            vec4.x = splat.scale.x
+-            vec4.y = splat.scale.y
+-            vec4.z = splat.scale.z
+-            vec4.w = 0.0 # Padding
+-        elif attr_name == "Rotation":
+-            vec4.x = splat.rotation.x
+-            vec4.y = splat.rotation.y
+-            vec4.z = splat.rotation.z
+-            vec4.w = splat.rotation.w
+-        elif attr_name == "Color":
+-            vec4.x = splat.color.r
+-            vec4.y = splat.color.g
+-            vec4.z = splat.color.b
+-            vec4.w = splat.opacity
+-        elif attr_name == "HarmonicsL1":
+-            # Map SH L1 coefficients to RGBA
+-            vec4.x = splat.sh_l1[0]
+-            vec4.y = splat.sh_l1[1]
+-            vec4.z = splat.sh_l1[2]
+-            vec4.w = 0.0
+-        elif attr_name == "HarmonicsL2":
+-            # Map SH L2 coefficients to RGBA
+-            vec4.x = splat.sh_l2[0]
+-            vec4.y = splat.sh_l2[1]
+-            vec4.z = splat.sh_l2[2]
+-            vec4.w = 0.0
+-        elif attr_name == "HarmonicsL31":
+-            # Map first part of SH L3 coefficients
+-            vec4.x = splat.sh_l3_1[0]
+-            vec4.y = splat.sh_l3_1[1]
+-            vec4.z = splat.sh_l3_1[2]
+-            vec4.w = 0.0
+-        elif attr_name == "HarmonicsL32":
+-            # Map second part of SH L3 coefficients
+-            vec4.x = splat.sh_l3_2[0]
+-            vec4.y = splat.sh_l3_2[1]
+-            vec4.z = splat.sh_l3_2[2]
+-            vec4.w = 0.0
+-        result.append(vec4)
+-    return result
++class FLinearColor:
++    def __init__(self, r, g, b, a):
++        self.r = r
++        self.g = g
++        self.b = b
++        self.a = a
++
++class Splat:
++    def __init__(self, pos, scale, rot, color, sh_l1, sh_l2, sh_l3_1, sh_l3_2):
++        self.pos = pos
++        self.scale = scale
++        self.rot = rot
++        self.color = color
++        self.sh_l1 = sh_l1
++        self.sh_l2 = sh_l2
++        self.sh_l3_1 = sh_l3_1
++        self.sh_l3_2 = sh_l3_2
++
++class Vec3:
++    def __init__(self, x, y, z):
++        self.x = x
++        self.y = y
++        self.z = z
++
++class Quat:
++    def __init__(self, x, y, z, w):
++        self.x = x
++        self.y = y
++        self.z = z
++        self.w = w
+ ```
+ 
+ **Parameters:**
+-*   **Texture Format:** `TSF_RGBA32F` (32-bit floating point per channel) [S1, unofficial].
+-*   **Filtering:** `TF_Nearest` to prevent interpolation artifacts in attribute data [S1, unofficial].
+-*   **Mipmaps:** Disabled (`TMGS_NoMipmaps`) as splats are sampled at specific indices, not via texture filtering [S1, unofficial].
++- Texture Format: `TSF_RGBA32F` (32-bit floating point per channel) [S1, unofficial].
++- Texture Size: $N \times 1$ or $1 \times N$ depending on engine implementation, where $N$ is the number of splats.
++- Filtering: `TF_Nearest` (Point sampling) [S1, unofficial].
+ 
+ **Edge Cases and Pitfalls:**
+-*   **Precision:** Using `RGBA32F` ensures no quantization error for position, scale, and rotation, which is critical for accurate rendering [S1, unofficial].
+-*   **Memory Usage:** Storing 8 textures for 2 million splats requires significant VRAM. Each texture is $N \times 4 \times 4$ bytes. For $N=2,000,000$, one texture is ~32 MB, totaling ~256 MB for all 8 [S1, unofficial].
+-*   **Transformations:** Moving, rotating, or scaling the parent actor in the world may break rendering if the texture data is not updated or if the engine does not support dynamic texture updates efficiently [S1, unofficial].
+-*   **Spherical Harmonics:** Support for SH may be limited or incomplete in some implementations [S1, unofficial].
++- **Precision:** Using `RGBA32F` ensures high precision for SH coefficients and rotations, avoiding quantization errors present in lower-precision formats [S1, unofficial].
++- **Memory Usage:** Storing 8 full-precision textures for millions of splats consumes significant VRAM. For example, 2 million splats require $2 \times 10^6 \times 8 \times 16$ bytes $\approx 256$ MB per texture, totaling ~2 GB for all 8 textures [S1, unofficial].
++- **Transformations:** Moving, rotating, or scaling the splat actor in the world is not fully supported and may break rendering, as the textures store static world-space attributes [S1, unofficial].
++- **SH Support:** Support for Spherical Harmonics may be limited or incomplete in early versions, requiring careful handling of empty or zeroed SH data [S1, unofficial].
+ 
+ ## Subtopics
+ 
+ ### [Chunked Bounding Box Computation and Normalization](17031-chunked-bounding-box-computation-and-normalization.md)
+-A preprocessing step that divides a list of Gaussian splats into chunks of size `kChunkSize`, computes the bounding box (min/max) for position, scale, color (DC0 + opacity), and spherical harmonics (SH coefficients) for each chunk, and normalizes the splat data within that chunk to the range [0, 1] based on these bounds.
++Preprocesses splats by dividing them into fixed-size chunks, computing per-chunk bounding boxes, and normalizing data to $[0, 1]$ for efficient storage in 8 separate RGBA32F textures.
++
++### [Gaussian Splat Data Packing and Compression](17062-gaussian-splat-data-packing-and-compression.md)
++Converts raw splat data into a compressed, GPU-ready byte buffer layout using Morton ordering and aggressive quantization (Norm11/16/8) for real-time rendering.
+ 
+ ## Operating characteristics
+-*   **Time Complexity:** $O(N)$ where $N$ is the number of splats, as each splat's attributes are copied once into the texture memory.
+-*   **Memory Complexity:** $O(N)$, specifically $8 \times N \times 16$ bytes for 8 RGBA32F textures.
+-*   **Performance:** Designed for real-time applications, including VR and interactive walkthroughs [S1, unofficial]. Supports models with up to 2 million splats [S1, unofficial].
+-*   **Strengths:** Efficient on-demand loading by Niagara; high performance due to contiguous memory layout; integration with Unreal Engine's VFX pipeline [S1, unofficial].
+-*   **Limitations:** Static model support is primary; dynamic transformations (move/rotate/scale of the actor) are not fully supported and may break rendering [S1, unofficial]. SH support may be incomplete [S1, unofficial].
++- **Time Complexity:** $O(N)$, where $N$ is the number of splats, as each attribute is processed once per splat.
++- **Memory Complexity:** $O(N)$, with a constant factor of 8 for the 8 separate textures. Each texture stores $N$ `FLinearColor` (16 bytes) values.
++- **Measured Performance:** Designed for real-time applications, including VR and interactive walkthroughs, supporting models with up to 2 million splats [S1, unofficial].
++- **Strengths:** High precision due to 32-bit floating point format; simple integration with Unreal Engine's Niagara system; on-demand loading reduces initial load times.
++- **Limitations:** High memory footprint compared to compressed formats; lack of support for dynamic transformations of the splat actor; potential instability with large SH datasets [S1, unofficial].
++- **When to Use:** When high precision is required for SH coefficients and rotations, and the target platform has sufficient VRAM. Ideal for static scenes or pre-baked splat data in Unreal Engine.
++- **When Not to Use:** When memory bandwidth or VRAM is constrained, or when dynamic transformations of the splat cloud are required.
+ 
+ ## Background
+-This method is part of the "unreal-splat" plugin by JI20, which provides a pipeline for rendering 3D Gaussian Splatting in Unreal Engine using Niagara for GPU acceleration [S1, unofficial]. It was developed to address the need for efficient large-scale splat rendering in real-time engines, leveraging texture-based storage for optimal memory and performance [S1, unofficial].
++This method originates from the `unreal-splat` plugin by JI20, which integrates 3D Gaussian Splatting into Unreal Engine's Niagara VFX pipeline [S1, unofficial]. It was developed to address the need for efficient, high-performance rendering of large-scale Gaussian splat models within the Unreal Engine ecosystem, leveraging the engine's texture system for data storage and retrieval.
+ 
+ ## Sources

@@ -1,0 +1,229 @@
+--- v001.md
++++ v002.md
+@@ -4,18 +4,18 @@
+ 
+ ## Overview
+-Standard Gaussian Blur is a post-processing technique applied to the final image or intermediate buffers in volume ray casting to reduce high-frequency aliasing artifacts and smooth visual noise [S1, S2, unofficial]. It differs from its parent, Two-pass Weighted Gaussian Blur, by using a fixed, pre-defined set of Gaussian weights rather than dynamically computed weights based on local variance or depth [S1, S2, unofficial]. While the parent method adapts to scene complexity, this method provides a consistent, low-cost smoothing pass suitable for static or moderately moving scenes where adaptive filtering is unnecessary [S1, S2, unofficial].
++Standard Gaussian Blur applies a spatially separable Gaussian filter to an input tensor to smooth visual data [S2, unofficial]. It implements either a fixed 11-tap alpha-weighted kernel [S1, unofficial] or a dynamically computed 2D Gaussian kernel [S2, unofficial]. Unlike its parent method which adapts weights to local variance or depth, this method uses a predetermined weight set [S1, S2, unofficial].
+ 
+ ## How it works
+-The method applies a spatially separable Gaussian filter to the input tensor. Two distinct implementations exist in the source literature: one using a hardcoded 11-tap alpha-weighted kernel [S1, unofficial], and another using a standard 2D Gaussian kernel with separable convolution logic [S2, unofficial].
++The method processes an input tensor through two distinct implementation paths documented in the sources.
+ 
+ ### Inputs and Outputs
+-- **Input**: A tensor of shape $(B, D, H, W)$ representing batch, depth/channel, height, and width [S2, unofficial]. In the context of volume rendering, this is typically the accumulated color and alpha buffer [S1, S2, unofficial].
++- **Input**: A tensor of shape $(B, D, H, W)$ representing batch, depth/channel, height, and width [S2, unofficial].
+ - **Output**: A blurred tensor of the same shape $(B, D, H, W)$ [S2, unofficial].
+ 
+ ### Data Structures
+-1. **Gaussian Weights (Fixed)**: A 1D array of 9 float values used for the 11-tap implementation [S1, unofficial].
++1. **Fixed Weights**: A 1D array of 9 float values used for the 11-tap implementation [S1, unofficial].
+    - Layout: `float G_WEIGHTS[9]`
+    - Values: `{1.0, 0.8, 0.65, 0.5, 0.4, 0.2, 0.1, 0.05, 0.025}` [S1, unofficial].
+-2. **Gaussian Weights (Dynamic)**: A 2D grid of shape $(N, N)$ generated from a standard deviation $\sigma$ [S2, unofficial].
++2. **Dynamic Weights**: A 2D grid of shape $(N, N)$ generated from a standard deviation $\sigma$ [S2, unofficial].
+    - Layout: `float kernel[N][N]`
+    - Formula: $w_{i,j} = \exp\left(-\frac{x_i^2 + y_j^2}{2\sigma^2}\right)$ where $x, y$ are coordinates centered at 0 [S2, unofficial].
+@@ -23,131 +23,103 @@
+ ### Steps
+ 1. **Weight Generation**:
+-   - If using the fixed kernel [S1, unofficial]: Load `G_WEIGHTS`.
+-   - If using the dynamic kernel [S2, unofficial]: Create meshgrids for $x$ and $y$ over kernel size $N$. Compute unnormalized weights $w = \exp(-(x^2 + y^2) / (2\sigma^2))$. Normalize by dividing by $\sum w$, clamping the denominator to a minimum of $10^{-4}$ to avoid division by zero [S2, unofficial]. Reshape to $(1, 1, N, N)$ [S2, unofficial].
+-
++   - If using the dynamic kernel [S2, unofficial]: Create meshgrids $x, y$ for kernel size $N$ centered at 0. Compute unnormalized weights $w = \exp(-(x^2 + y^2) / (2\sigma^2))$. Normalize by dividing by $\sum w$, clamping the denominator to a minimum of $10^{-4}$ to avoid division by zero [S2, unofficial]. Reshape to $(1, 1, N, N)$ [S2, unofficial].
++   - If using the fixed kernel [S1, unofficial]: Load the predefined 9-element array.
+ 2. **Sampling and Accumulation**:
+-   - For each pixel $(u, v)$ in the output image:
+-     - Initialize `sum_color = 0`, `sum_alpha = 0`, `sum_weight = 0` [S1, S2, unofficial].
+-     - Iterate over the kernel offsets $(dx, dy)$ within the kernel radius [S1, S2, unofficial].
+-     - Sample the input pixel at $(u+dx, v+dy)$ to get color $C$ and alpha $A$ [S1, S2, unofficial].
+-     - Calculate the weight $W$:
+-       - Fixed method [S1, unofficial]: $W = A \times G\_WEIGHTS[k]$ where $k$ is the index corresponding to the offset distance [S1, unofficial].
+-       - Dynamic method [S2, unofficial]: $W = \text{kernel}[dx][dy]$ [S2, unofficial].
+-     - Accumulate: `sum_color += C * W`, `sum_alpha += A * W`, `sum_weight += W` [S1, S2, unofficial].
+-
++   - For each output pixel, sample input pixels within the kernel radius [S1, S2, unofficial].
++   - Fixed method [S1, unofficial]: Weight each sample by its alpha value multiplied by the corresponding Gaussian weight: $w = \text{sample}.a \times G\_WEIGHTS[k]$.
++   - Dynamic method [S2, unofficial]: Weight by the precomputed kernel value.
++   - Accumulate weighted color and alpha values [S1, S2, unofficial].
+ 3. **Normalization**:
+-   - Compute the final alpha: $A_{out} = \text{sum\_alpha} / (\text{sum\_weight} + 10^{-4})$ [S1, S2, unofficial].
+-   - Compute the final color: $C_{out} = \text{sum\_color} / (\text{sum\_weight} + 10^{-4})$ [S1, S2, unofficial].
+-   - Note: The normalization factor is clamped to a minimum of $10^{-4}$ [S1, S2, unofficial].
+-
++   - Divide the accumulated sums by the total weight plus $10^{-4}$ to prevent division by zero [S1, S2, unofficial].
+ 4. **Output**:
+-   - Write $C_{out}$ and $A_{out}$ to the output buffer [S2, unofficial].
++   - Write the normalized color and alpha values to the output buffer [S2, unofficial].
+ 
+ ### Pseudocode
+ ```python
+-def standard_gaussian_blur(input_tensor, kernel_size=11, sigma=1.0, use_fixed_weights=True):
++import math
++
++def standard_gaussian_blur(input_tensor, kernel_size, sigma, use_fixed_weights):
+     """
+     Applies Standard Gaussian Blur to input_tensor of shape (B, D, H, W).
+     """
+-    B, D, H, W = input_tensor.shape
+-    output_tensor = torch.zeros_like(input_tensor)
+-    
+-    # Step 1: Generate Weights
++    B, D, H, W = len(input_tensor), len(input_tensor[0]), len(input_tensor[0][0]), len(input_tensor[0][0][0])
++    output_tensor = [[[[0.0]*W for _ in range(H)] for _ in range(D)] for _ in range(B)]
++    half_k = kernel_size // 2
++
+     if use_fixed_weights:
+         # Fixed 11-tap weights from [S1, unofficial]
+-        # Note: The array has 9 elements, implying a specific mapping of offsets to indices
+-        # or a simplified kernel. We assume a 1D radial mapping for demonstration.
+         fixed_weights = [1.0, 0.8, 0.65, 0.5, 0.4, 0.2, 0.1, 0.05, 0.025]
+-        # Map offset distance to weight index (simplified logic for implementation)
+-        def get_weight(dist):
+-            idx = min(int(dist), len(fixed_weights) - 1)
+-            return fixed_weights[idx]
++        for b in range(B):
++            for d in range(D):
++                for h in range(H):
++                    for w in range(W):
++                        sum_color = [0.0, 0.0, 0.0]
++                        sum_alpha = 0.0
++                        sum_weight = 0.0
++                        for kh in range(-half_k, half_k + 1):
++                            for kw in range(-half_k, half_k + 1):
++                                nh, nw = h + kh, w + kw
++                                if nh < 0 or nh >= H or nw < 0 or nw >= W: continue
++                                sample = input_tensor[b][d][nh][nw]
++                                color, alpha = sample[:3], sample[3]
++                                dist = math.sqrt(kh**2 + kw**2)
++                                idx = min(int(dist), len(fixed_weights) - 1)
++                                weight = alpha * fixed_weights[idx]
++                                sum_color = [sum_color[i] + color[i] * weight for i in range(3)]
++                                sum_alpha += weight
++                                sum_weight += weight
++                        norm = sum_weight + 1e-4
++                        output_tensor[b][d][h][w] = [c / norm for c in sum_color] + [sum_alpha / norm]
+     else:
+         # Dynamic 2D Gaussian weights from [S2, unofficial]
+-        x = torch.arange(-(kernel_size // 2), kernel_size // 2 + 1, dtype=torch.float32)
+-        y = torch.arange(-(kernel_size // 2), kernel_size // 2 + 1, dtype=torch.float32)
+-        xx, yy = torch.meshgrid(x, y)
+-        weights = torch.exp(-(xx**2 + yy**2) / (2 * sigma**2))
+-        weights = weights / (torch.sum(weights) + 1e-4)
+-        weights = weights.unsqueeze(0).unsqueeze(0) # Shape (1, 1, N, N)
+-
+-    # Step 2 & 3: Convolve
+-    # Using PyTorch conv2d for the dynamic case as per [S2, unofficial]
+-    if not use_fixed_weights:
+-        # Reshape input to (B*D, 1, H, W) for conv2d
+-        input_reshaped = input_tensor.view(B * D, 1, H, W)
+-        # Apply 2D convolution with padding
+-        blurred = torch.nn.functional.conv2d(
+-            input_reshaped, 
+-            weights, 
+-            padding=kernel_size // 2
+-        )
+-        # Reshape back to (B, D, H, W)
+-        output_tensor = blurred.view(B, D, H, W)
+-        return output_tensor
+-
+-    # For fixed weights, manual loop implementation is required as per [S1, unofficial] logic
+-    half_k = kernel_size // 2
+-    for b in range(B):
+-        for d in range(D):
++        x = list(range(-half_k, half_k + 1))
++        y = list(range(-half_k, half_k + 1))
++        weights = [[math.exp(-(xi**2 + yi**2) / (2 * sigma**2)) for xi in x] for yi in y]
++        total = sum(sum(row) for row in weights)
++        weights = [[w / max(total, 1e-4) for w in row] for row in weights]
++        
++        # Reshape input to (B*D, 1, H, W) and apply 2D convolution with padding=N//2 [S2, unofficial]
++        input_reshaped = [input_tensor[b][d] for b in range(B) for d in range(D)]
++        blurred = []
++        for img in input_reshaped:
++            blurred_img = [[0.0]*W for _ in range(H)]
+             for h in range(H):
+-                for w_idx in range(W):
+-                    sum_color = torch.zeros(D)
+-                    sum_alpha = 0.0
+-                    sum_weight = 0.0
+-                    
+-                    for kh in range(-half_k, half_k + 1):
+-                        for kw in range(-half_k, half_k + 1):
+-                            nh = h + kh
+-                            nw = w_idx + kw
+-                            
+-                            # Boundary check [G]
+-                            if nh < 0 or nh >= H or nw < 0 or nw >= W:
+-                                continue
+-                                
+-                            sample = input_tensor[b, d, nh, nw]
+-                            color = sample[:3]
+-                            alpha = sample[3]
+-                            
+-                            # Calculate distance for fixed weight lookup
+-                            dist = math.sqrt(kh**2 + kw**2)
+-                            weight = get_weight(dist)
+-                            
+-                            # Alpha-weighted contribution [S1, unofficial]
+-                            w_contrib = alpha * weight
+-                            
+-                            sum_color += color * w_contrib
+-                            sum_alpha += w_contrib
+-                            sum_weight += w_contrib
+-                    
+-                    # Normalization [S1, S2, unofficial]
+-                    norm = sum_weight + 1e-4
+-                    final_alpha = sum_alpha / norm
+-                    final_color = sum_color / norm
+-                    
+-                    output_tensor[b, d, h, w_idx] = torch.cat([final_color, torch.tensor([final_alpha])])
+-                    
++                for w in range(W):
++                    acc = [0.0, 0.0, 0.0, 0.0]
++                    for kh in range(kernel_size):
++                        for kw in range(kernel_size):
++                            nh, nw = h - half_k + kh, w - half_k + kw
++                            if 0 <= nh < H and 0 <= nw < W:
++                                for c in range(4):
++                                    acc[c] += img[nh][nw][c] * weights[kh][kw]
++                    blurred_img[h][w] = acc
++            blurred.append(blurred_img)
++            
++        # Reshape output back to (B, D, H, W) [S2, unofficial]
++        for b in range(B):
++            for d in range(D):
++                output_tensor[b][d] = blurred[b * D + d]
+     return output_tensor
+ ```
+ 
+ ### Parameters
+-- **Kernel Size**: 11 for the fixed method [S1, unofficial]; $N$ (typically odd) for the dynamic method [S2, unofficial].
+-- **Sigma ($\sigma$)**: Standard deviation for the Gaussian distribution. Not given in the sources for the fixed method [S1, unofficial]; typical values range from 1.0 to 2.0 for anti-aliasing [S2, G, unofficial].
++- **Kernel Size**: $N$ (typically odd) [S2, unofficial].
++- **Sigma ($\sigma$)**: Standard deviation for the Gaussian distribution [S2, unofficial].
+ - **Normalization Epsilon**: $10^{-4}$ [S1, S2, unofficial].
+ 
+ ### Edge Cases and Pitfalls
+-- **Boundary Conditions**: The fixed method [S1, unofficial] implies sampling neighbors; boundary pixels require clamping or replication [G]. The dynamic method [S2, unofficial] uses padding in `conv2d`, which defaults to zero-padding [G].
++- **Boundary Conditions**: The fixed method implies sampling neighbors; boundary pixels require clamping or replication [G]. The dynamic method uses zero-padding via `padding=N//2` [S2, unofficial].
+ - **Alpha Handling**: The fixed method explicitly weights by alpha before accumulation [S1, unofficial]. The dynamic method treats the input as a tensor without explicit alpha weighting in the convolution step, potentially requiring alpha to be a separate channel or handled in post-processing [S2, unofficial].
+ - **Precision**: Division by zero is prevented by the epsilon clamp [S1, S2, unofficial].
+ 
+ ## Operating characteristics
+-- **Time Complexity**: $O(H \cdot W \cdot K^2)$ where $K$ is the kernel size. The separable implementation reduces this to $O(H \cdot W \cdot K)$ if implemented as two 1D passes, but the sources describe a 2D convolution [S2, unofficial].
+-- **Memory Complexity**: $O(H \cdot W)$ for the input and output buffers. The dynamic method requires temporary storage for the kernel [S2, unofficial].
+-- **Performance**: The fixed method [S1, unofficial] is lightweight and deterministic. The dynamic method [S2, unofficial] leverages optimized GPU convolution kernels (`F.conv2d`), making it efficient for large kernels but dependent on the deep learning framework's overhead.
+-- **Strengths**: Simple to implement; effective at removing high-frequency noise; consistent visual result [S1, S2, unofficial].
+-- **Limitations**: Blurs edges uniformly, potentially reducing sharpness of volume boundaries; the fixed weights may not adapt to varying density levels [S1, S2, unofficial].
++- **Time Complexity**: Not given in the sources.
++- **Memory Complexity**: Not given in the sources.
++- **Performance**: Not given in the sources.
++- **Strengths**: Not given in the sources.
++- **Limitations**: Not given in the sources.
+ 
+ ## Background
+-The method originates from post-processing techniques in real-time rendering to mitigate aliasing in ray-casted volumes. The fixed-weight variant is associated with the "metaballs" project [S1, unofficial], while the tensor-based variant is part of the "GPS_plus" framework for 3D reconstruction and visualization [S2, unofficial]. It serves as a foundational smoothing step in the anti-aliasing pipeline for volume rendering.
++The fixed-weight variant originates from the metaballs project [S1, unofficial]. The tensor-based variant originates from the GPS_plus framework for 3D reconstruction [S2, unofficial].
+ 
+ ## Sources

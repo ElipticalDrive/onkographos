@@ -1,0 +1,152 @@
+# Projective Texture Backprojection
+
+Also called: Projective Texture Method
+
+## Overview
+Projective Texture Backprojection is a GPU-based algorithm for tomographic reconstruction that simulates the projection of volume slices onto the image plane using projective texture mapping to guide reverse texture mapping [S1, unofficial]. It solves the problem of efficiently computing the adjoint of the forward projection operator (backprojection) by leveraging graphics hardware capabilities. It sets itself apart from sibling methods like [GPU Backprojection with Global Memory Buffer](4991-gpu-backprojection-with-global-memory-buffer.md) by avoiding explicit memory writes to global buffers in favor of texture sampling, though it requires managing two distinct volume slice stacks in video memory [S1, unofficial].
+
+## How it works
+**Inputs and Outputs:**
+*   **Input:** A set of 2D projection images (sinogram data) and a target 3D volume grid of size $N \times N \times N$.
+*   **Output:** A reconstructed 3D volume density field.
+
+**Data Structures:**
+*   **Volume Slice Stacks:** Two stacks of 2D textures (or render targets) representing slices of the volume.
+    *   **X-Set Stack:** Slices perpendicular to the X-axis.
+    *   **Z-Set Stack:** Slices perpendicular to the Z-axis.
+    *   *Note:* The Y-axis is the axis of rotation for the projections [S1, unofficial].
+*   **Projection Sets:**
+    *   **X-Set Projections:** Projections more perpendicular to the X-axis.
+    *   **Z-Set Projections:** Projections more perpendicular to the Z-axis.
+
+**Steps:**
+1.  **Initialization:** Allocate two stacks of volume slices in GPU memory. One stack handles slices aligned with the X-axis, the other with the Z-axis [S1, unofficial].
+2.  **Projection Classification:** Divide the input projection images into two sets based on their viewing angle relative to the volume axes. Projections are classified as belonging to the X-set or Z-set depending on which axis they are more perpendicular to [S1, unofficial].
+3.  **Transformation Matrix Computation:** For each projection in a set, compute the transformation matrix that maps the projection plane coordinates to the coordinates of the corresponding volume slice [S1, unofficial].
+4.  **Reverse Texture Mapping:**
+    *   Use the computed transformation matrix as the texture matrix for the GPU's projective texture unit.
+    *   Render the projection image onto the corresponding volume slice texture. This effectively "backprojects" the pixel values from the 2D image into the 3D slice space [S1, unofficial].
+    *   Repeat this for all projections in the X-set against the X-stack, and all projections in the Z-set against the Z-stack.
+5.  **Merging:** After all projections have been processed, merge the two stacks of volume slices to produce the final 3D reconstructed volume [S1, unofficial].
+
+**Pseudocode:**
+> **Unverified code.** The code below did not pass a test run against a reference implementation, or no test fits it, so it may contain errors.
+
+```python
+# Assume volume_slices_x and volume_slices_z are lists of GPU textures
+# Assume projections_x and projections_z are lists of projection images
+
+def projective_texture_backprojection(projections, volume_size):
+    # 1. Classify projections
+    projections_x, projections_z = classify_projections(projections)
+    
+    # 2. Initialize stacks
+    # Each stack contains N textures representing slices along the respective axis
+    stack_x = create_volume_stack(volume_size, axis='x')
+    stack_z = create_volume_stack(volume_size, axis='z')
+    
+    # 3. Backproject X-set
+    for proj in projections_x:
+        # Compute transformation from projection plane to volume slice
+        # T maps projection UV to volume slice local coordinates
+        T = compute_transformation_matrix(proj, axis='x')
+        
+        # For each slice in the X-stack
+        for slice_idx, slice_texture in enumerate(stack_x):
+            # Set projective texture matrix
+            set_texture_matrix(T)
+            
+            # Render projection onto slice
+            # This performs reverse texture mapping: 
+            # sampling the projection image and writing to the slice texture
+            render_projection_onto_slice(proj, slice_texture)
+            
+    # 4. Backproject Z-set
+    for proj in projections_z:
+        T = compute_transformation_matrix(proj, axis='z')
+        
+        for slice_idx, slice_texture in enumerate(stack_z):
+            set_texture_matrix(T)
+            render_projection_onto_slice(proj, slice_texture)
+            
+    # 5. Merge stacks
+    final_volume = merge_volume_stacks(stack_x, stack_z)
+    return final_volume
+
+def classify_projections(projections):
+    """
+    Divides projections into two sets based on the angle relative to 
+    the X and Z axes. Y is the rotation axis.
+    """
+    proj_x = []
+    proj_z = []
+    for proj in projections:
+        angle = get_projection_angle(proj)
+        if is_more_perpendicular_to_x(angle):
+            proj_x.append(proj)
+        else:
+            proj_z.append(proj)
+    return proj_x, proj_z
+
+def compute_transformation_matrix(projection, axis):
+    """
+    Computes the 4x4 transformation matrix between the projection plane
+    and the volume slice.
+    """
+    # Implementation depends on specific camera geometry (e.g., FDK)
+    # Returns matrix T such that T * projection_coords = slice_coords
+    pass
+
+def render_projection_onto_slice(projection_image, slice_texture):
+    """
+    Renders the projection image onto the slice texture using 
+    the currently set projective texture matrix.
+    """
+    # GPU-specific rendering call
+    # Binds projection_image as texture
+    # Binds slice_texture as render target
+    # Draws a quad with projective texture coordinates
+    pass
+
+def merge_volume_stacks(stack_x, stack_z):
+    """
+    Combines the two stacks into a single 3D volume.
+    """
+    # Interpolate or average overlapping regions
+    # Not given in the sources. [G] Typically involves summing or averaging
+    # the contributions from both stacks at each voxel.
+    pass
+```
+
+**Parameters:**
+*   **Volume Resolution ($N$):** The grid size of the reconstructed volume.
+*   **Number of Projections:** Must provide two orthogonal half-orbits of projections, equally spaced in angle, to satisfy Tuy’s condition for exact 3D reconstruction [S1, unofficial].
+
+**Edge Cases and Pitfalls:**
+*   **Memory Usage:** The method requires two copies of the volume slices to remain in GPU memory simultaneously, occupying precious video memory [S1, unofficial].
+*   **Merging Artifacts:** The final merge step must handle the intersection of the two stacks correctly to avoid discontinuities.
+
+## Subtopics
+
+### Projective Texture Shuffling
+A data transfer operation on the GPU to swap partially reconstructed volume data between viewing (V) and support (S) stacks [S1, unofficial]. It sets itself apart by optimizing memory usage through shuffling rather than maintaining two full stacks throughout the entire process. Choose this variant when video memory is constrained.
+1.  **Rotation:** Rotate volume proxy polygons so one slice set is perpendicular (V-stack) and the other is orthogonal (S-stack) to the viewing vector [S1, unofficial].
+2.  **Classification:** Divide projections into V-set and S-set based on which stack they are more perpendicular to [S1, unofficial].
+3.  **Initial Reconstruction:** Reconstruct the S-stack from projections from the S-set [S1, unofficial].
+4.  **Shuffling:** Shuffle the partially reconstructed volume into the V-stack. This is implemented by repeatedly rendering different columns of a source texture from one stack to the same column on all target textures from the other stack [S1, unofficial].
+5.  **Final Reconstruction:** Use the V-stack to fully accumulate/reconstruct the volume, then shade and composite [S1, unofficial].
+
+## Operating characteristics
+*   **Time Complexity:** Depends on the number of projections and volume slices. Each projection is rendered onto a subset of slices.
+*   **Memory Complexity:** High. Requires storing two full stacks of volume slices in GPU memory [S1, unofficial].
+*   **Performance:** Fast data transfer during shuffling operations [S1, unofficial].
+*   **Strengths:** Leverages GPU texture hardware for efficient coordinate transformation and sampling.
+*   **Limitations:** High video memory consumption; requires merging two stacks at the end [S1, unofficial].
+*   **When to use:** When GPU texture units are available and video memory is sufficient.
+*   **When not to use:** When video memory is extremely limited (consider Projective Texture Shuffling or other variants).
+
+## Background
+The method was introduced in the context of GPU-accelerated D2VR (Direct 3D Volume Rendering) [S1, unofficial]. It builds on the concept of projective textures [SKv*92] and was extended to cone-beam geometry [MX06]. It is related to the work by [CM03] on parallel-beam projection using texture spreading [S1, unofficial]. The method adheres to Tuy’s condition for exact 3D reconstruction [Tuy83] by requiring two orthogonal half-orbits of projections [S1, unofficial].
+
+## Sources
+[S1] GPU-Accelerated D2VR, https://doi.org/10.2312/vg/vg06/023-030, fetched 2026-10-26 (unofficial)

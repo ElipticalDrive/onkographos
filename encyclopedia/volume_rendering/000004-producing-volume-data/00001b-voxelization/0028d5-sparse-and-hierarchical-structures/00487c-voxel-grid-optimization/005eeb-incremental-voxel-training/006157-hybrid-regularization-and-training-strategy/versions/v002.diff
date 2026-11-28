@@ -1,0 +1,290 @@
+--- v001.md
++++ v002.md
+@@ -4,5 +4,5 @@
+ 
+ ## Overview
+-Hybrid Regularization and Training Strategy is a two-stage optimization method for voxel-based neural radiance fields that mitigates overfitting in explicit feature grids by leveraging an implicit neural network for initialization [S1, S2]. It solves the problem of deterministic integration prone to overfitting at specific voxels when features are directly optimized, which leads to degenerate solutions like floaters or holes in sparse input scenarios [S1, S2]. It sets itself apart from pure explicit regularization by using an intermediate implicit phase to provide a powerful initialization, and from pure implicit methods by discarding the network to allow direct grid optimization for higher final quality [S1, S2].
++Hybrid Regularization and Training Strategy is a two-stage optimization method for voxel-based neural radiance fields that mitigates overfitting in explicit feature grids by leveraging an implicit neural network for initialization [S1, S2]. It solves the problem of deterministic integration being prone to overfitting at specific voxels when features are directly optimized, which leads to degenerate solutions like floaters or holes in sparse input scenarios [S1, S2]. It sets itself apart from pure explicit regularization by using an intermediate implicit phase to provide a powerful initialization, and from pure implicit methods by discarding the network to allow direct grid optimization for higher final quality [S1, S2].
+ 
+ ## How it works
+@@ -11,5 +11,5 @@
+ ### Inputs and Outputs
+ **Inputs:**
+-*   Training images and camera poses.
++*   Training images and camera poses [S1, S2].
+ *   Target voxel grid resolution $R$ (e.g., $128^3$ or $160^3$) [S1].
+ *   Sparsity regularization weight $\lambda_s = 1e-5$ [S1, S2].
+@@ -17,7 +17,7 @@
+ 
+ **Outputs:**
+-*   Optimized feature grid values for occupied voxels.
+-*   Binary occupancy mask.
+-*   Weights for density and color decoders.
++*   Optimized feature grid values for occupied voxels [S1, S2].
++*   Binary occupancy mask [S1, S2].
++*   Weights for density and color decoders [S1, S2].
+ 
+ ### Data Structures
+@@ -25,5 +25,5 @@
+     *   Architecture: 1 input layer, 8 hidden layers (512 neurons each), 1 output layer (32 neurons) [S1, S2].
+     *   Activations: ReLU for all layers except the last one (linear) [S1, S2].
+-    *   Input: Vertex coordinates.
++    *   Input: Vertex coordinates [S1, S2].
+     *   Modification: Positional encoding of vertex coordinates is concatenated to the output of the 4th hidden layer [S1, S2].
+ 2.  **Density Decoder:**
+@@ -32,5 +32,5 @@
+ 3.  **Color Decoder:**
+     *   Architecture: 1 input layer (32 neurons), 1 output layer (3 neurons) [S1].
+-    *   Activations: ReLU for input (implied by architecture description, though typically input is just data), sigmoid for output [S1].
++    *   Activations: ReLU for input layer, sigmoid for output [S1].
+ 4.  **Voxel Grid:**
+     *   Stores feature vectors (dimension 32) for occupied voxels [S1].
+@@ -43,5 +43,5 @@
+ 1.  Initialize a low-resolution voxel grid with resolution $R/4$ (e.g., $32^3$ if target is $128^3$) [S1, S2].
+ 2.  Initialize features randomly [S1].
+-3.  Train the model for 5 epochs using explicit regularization [S1, S2].
++3.  Train the coarse model for 5 epochs using a single density decoder [S1, S2].
+ 4.  Extract an unsupervised occupancy mask from the density outputs of the coarse model [S1, S2].
+ 5.  Discard the weights and features of the coarse model [S1, S2].
+@@ -49,18 +49,17 @@
+ 
+ **Phase 2: Implicit Optimization**
+-1.  Initialize the implicit MLP with random weights [S1].
++1.  Initialize the implicit MLP with random weights [S1, S2].
+ 2.  Train the implicit MLP for 1000 epochs [S1, S2].
+-3.  During training, use the Adam optimizer with learning rate $1e-3$ (if in coarse phase) or $5e-4$ (fine stage) [S1, S2]. *Note: Sources specify $1e-3$ for coarse and $5e-4$ for fine. The implicit stage is part of the fine stage setup, so $5e-4$ is used [S1, S2].*
++3.  Use the Adam optimizer with learning rate $5e-4$ for the fine stage [S1, S2].
+ 4.  Sample rays with batch size 16384 (NeRF-synthetic) or 8192 (Tanks and Temples) [S1, S2].
+ 5.  Compute photometric loss and sparsity regularization loss [S1, S2].
+ 
+ **Phase 3: Explicit Optimization**
+-1.  Extract feature values from the trained implicit MLP for the corners of the voxel grid [S1].
+-2.  Initialize the explicit feature grid using these extracted corner values [S1].
+-3.  Discard the implicit MLP [S1, S2].
+-4.  Train the explicit feature grid for 1000 epochs [S1, S2].
+-5.  Use the Adam optimizer with learning rate $5e-4$ [S1, S2].
+-6.  Apply sparsity regularization loss [S1, S2].
+-7.  Prune voxels again using $\tau_\alpha = 0.01$ after the fine stage [S1, S2].
++1.  Initialize the explicit feature grid using values from the trained implicit MLP [S1, S2].
++2.  Discard the implicit MLP [S1, S2].
++3.  Train the explicit feature grid for 1000 epochs [S1, S2].
++4.  Use the Adam optimizer with learning rate $5e-4$ [S1, S2].
++5.  Apply sparsity regularization loss [S1, S2].
++6.  Prune voxels again using $\tau_\alpha = 0.01$ after the fine stage [S1, S2].
+ 
+ ### Formulas
+@@ -90,108 +89,131 @@
+ 
+ ### Pseudocode
+-
+ ```python
+-def hybrid_regularization_training(training_images, camera_poses, target_resolution):
+-    """
+-    Implements the Hybrid Regularization and Training Strategy.
+-    """
++import math
++import numpy as np
++
++def positional_encoding(x, num_freq_bands=10):
++    """Standard positional encoding for coordinates [G]."""
++    scales = [2**i for i in range(num_freq_bands)]
++    xb = np.reshape((x * scales), (-1, int(num_freq_bands * x.shape[1])))
++    freq_bands = np.sin(xb)
++    return np.concatenate([x, freq_bands], axis=1)
++
++def mlp_forward(params, x):
++    """Forward pass for the implicit MLP [S1, S2]."""
++    h = x
++    for i in range(8):
++        h = params['W'][i] @ h + params['b'][i]
++        if i < 7:  # ReLU for hidden layers
++            h = np.maximum(0, h)
++        if i == 3:  # Concatenate positional encoding to 4th hidden layer output
++            pe = positional_encoding(x)
++            h = np.concatenate([h, pe], axis=1)
++    # Output layer: linear
++    h = params['W_out'] @ h + params['b_out']
++    return h
++
++def density_decoder_forward(params, features):
++    """Forward pass for density decoder [S1]."""
++    h = params['W_d1'] @ features + params['b_d1']
++    h = np.maximum(0, h)  # ReLU
++    density = params['W_d2'] @ h + params['b_d2']  # Linear output
++    return density
++
++def color_decoder_forward(params, features):
++    """Forward pass for color decoder [S1]."""
++    h = params['W_c1'] @ features + params['b_c1']
++    h = np.maximum(0, h)  # ReLU
++    color = 1.0 / (1.0 + np.exp(-params['W_c2'] @ h - params['b_c2']))  # Sigmoid output
++    return color
++
++def compute_sparsity_loss(densities, lambda_s):
++    """Computes sparsity regularization loss [S1, S2]."""
++    term = (densities ** 2) / np.log(1 + (densities ** 2) / 0.5)
++    return lambda_s * np.sum(term)
++
++def extract_occupancy_mask(densities, threshold):
++    """Extracts unsupervised occupancy mask from density outputs [S1, S2]."""
++    return densities > threshold
++
++def prune_voxels(grid, mask, threshold):
++    """Prunes voxels based on occupancy mask and threshold [S1, S2]."""
++    grid.occupied = mask
++    grid.features = grid.features[mask]
++
++def hybrid_regularization_training(training_data, target_resolution):
++    """Implements the Hybrid Regularization and Training Strategy [S1, S2]."""
+     # Phase 1: Coarse Geometry Search
+-    coarse_resolution = target_resolution // 4
+-    coarse_grid = initialize_voxel_grid(coarse_resolution)
+-    coarse_features = random_initialize_features(coarse_grid)
+-    
+-    # Train coarse model for 5 epochs
++    coarse_res = target_resolution // 4
++    coarse_grid = VoxelGrid(resolution=coarse_res)
++    coarse_features = np.random.randn(coarse_grid.num_voxels, 32)
++    coarse_mlp_params = init_random_mlp_params()
++    coarse_decoder_params = init_random_decoder_params()
++    
+     for epoch in range(5):
+-        rays = sample_rays(training_images, camera_poses, batch_size=16384)
+-        # Use coarse grid and random features
+-        densities = compute_density(coarse_grid, coarse_features, rays)
+-        # Extract occupancy mask unsupervised
++        rays = sample_rays(training_data, batch_size=16384)
++        features = coarse_features[rays.voxel_indices]
++        densities = density_decoder_forward(coarse_decoder_params, features)
+         occupancy_mask = extract_occupancy_mask(densities, threshold=0.01)
+-        # Prune empty voxels
+-        prune_voxels(coarse_grid, occupancy_mask)
+-    
+-    # Discard coarse model weights and features
++        prune_voxels(coarse_grid, occupancy_mask, threshold=0.01)
++        # Backpropagate photometric loss with lr=1e-3
++        coarse_mlp_params = adam_update(coarse_mlp_params, loss, lr=1e-3)
++        
++    # Discard coarse model
+     coarse_features = None
++    coarse_mlp_params = None
++    coarse_decoder_params = None
+     
+     # Phase 2: Implicit Optimization
+-    # Initialize Implicit MLP
+-    implicit_mlp = initialize_implicit_mlp(
+-        input_dim=3, 
+-        hidden_layers=8, 
+-        hidden_neurons=512, 
+-        output_dim=32
+-    )
+-    
+-    # Train Implicit MLP for 1000 epochs
++    implicit_mlp_params = init_random_mlp_params()
++    fine_decoder_params = init_random_decoder_params()
++    
+     for epoch in range(1000):
+-        rays = sample_rays(training_images, camera_poses, batch_size=16384)
+-        # Get features from implicit MLP
+-        features = implicit_mlp(rays.vertex_coordinates)
+-        # Concatenate positional encoding to 4th hidden layer output (handled inside MLP)
+-        
+-        # Compute losses
+-        densities = compute_density_from_features(features)
+-        colors = compute_color_from_features(features)
+-        photometric_loss = compute_photometric_loss(colors, rays.target_colors)
++        rays = sample_rays(training_data, batch_size=16384)
++        features = mlp_forward(implicit_mlp_params, rays.vertex_coordinates)
++        densities = density_decoder_forward(fine_decoder_params, features)
++        colors = color_decoder_forward(fine_decoder_params, features)
++        photometric_loss = np.mean((colors - rays.target_colors) ** 2)
+         sparsity_loss = compute_sparsity_loss(densities, lambda_s=1e-5)
+         total_loss = photometric_loss + sparsity_loss
+-        
+-        # Update implicit MLP weights
+-        implicit_mlp.update_weights(total_loss, lr=5e-4, optimizer='Adam')
+-    
+-    # Extract features from implicit MLP for voxel grid corners
+-    voxel_grid = initialize_voxel_grid(target_resolution)
+-    voxel_features = extract_features_from_mlp(implicit_mlp, voxel_grid.corners)
+-    
++        implicit_mlp_params = adam_update(implicit_mlp_params, total_loss, lr=5e-4)
++        fine_decoder_params = adam_update(fine_decoder_params, total_loss, lr=5e-4)
++        
+     # Phase 3: Explicit Optimization
+-    # Discard implicit MLP
+-    implicit_mlp = None
+-    
+-    # Train explicit grid for 1000 epochs
++    explicit_grid = VoxelGrid(resolution=target_resolution)
++    explicit_features = mlp_forward(implicit_mlp_params, explicit_grid.corners)
++    implicit_mlp_params = None  # Discard MLP
++    
+     for epoch in range(1000):
+-        rays = sample_rays(training_images, camera_poses, batch_size=16384)
+-        # Interpolate features from voxel grid
+-        features = interpolate_features(voxel_features, rays.vertex_coordinates)
+-        
+-        # Compute losses
+-        densities = compute_density_from_features(features)
+-        colors = compute_color_from_features(features)
+-        photometric_loss = compute_photometric_loss(colors, rays.target_colors)
++        rays = sample_rays(training_data, batch_size=16384)
++        features = interpolate_features(explicit_features, rays.vertex_coordinates)
++        densities = density_decoder_forward(fine_decoder_params, features)
++        colors = color_decoder_forward(fine_decoder_params, features)
++        photometric_loss = np.mean((colors - rays.target_colors) ** 2)
+         sparsity_loss = compute_sparsity_loss(densities, lambda_s=1e-5)
+         total_loss = photometric_loss + sparsity_loss
+-        
+-        # Update voxel features directly
+-        voxel_features.update_gradients(total_loss, lr=5e-4, optimizer='Adam')
+-        
+-        # Prune empty voxels
+-        prune_voxels(voxel_features, occupancy_mask, threshold=0.01)
+-        
+-    return voxel_features, occupancy_mask
+-
+-def compute_sparsity_loss(densities, lambda_s):
+-    """
+-    Computes the sparsity regularization loss.
+-    L_sparsity = lambda_s * sum(sigma_i^2 / log(1 + sigma_i^2 / 0.5))
+-    """
+-    loss = 0.0
+-    for sigma in densities:
+-        term = (sigma ** 2) / math.log(1 + (sigma ** 2) / 0.5)
+-        loss += term
+-    return lambda_s * loss
++        explicit_features = adam_update(explicit_features, total_loss, lr=5e-4)
++        fine_decoder_params = adam_update(fine_decoder_params, total_loss, lr=5e-4)
++        
++        # Prune after fine stage
++        occupancy_mask = extract_occupancy_mask(densities, threshold=0.01)
++        prune_voxels(explicit_grid, occupancy_mask, threshold=0.01)
++        
++    return explicit_features, explicit_grid.occupancy_mask
+ ```
+ 
+ ## Subtopics
+ 
+-### Feature Grid Optimization (Explicit vs Implicit Regularization)
+-Explicit regularization directly optimizes grid values via gradient-based methods, requiring less time and GPU memory but producing lower quality metrics [S1]. Implicit regularization uses an MLP auto-encoder to predict features from spatial coordinates, offering higher quality but requiring more resources [S1]. Hybrid regularization combines both: it starts with explicit initialization, moves to implicit optimization for 1000 epochs, extracts corner features, and then returns to explicit optimization [S1]. On the Lego scene, explicit regularization took 16 hours with 22GB peak GPU memory, while hybrid regularization required 60 hours and 40GB [S1].
++### [Feature Grid Optimization (Explicit vs Implicit Regularization)](18380-feature-grid-optimization-explicit-vs-implicit-regularizatio.md)
++Explicit regularization directly optimizes grid values via gradient-based methods, requiring less time and GPU memory but producing lower quality metrics. Implicit regularization uses an MLP to predict features from spatial coordinates, offering higher quality but requiring more resources. Hybrid regularization combines both: the implicit stage provides a powerful initialization to avoid overfitting, and the explicit stage yields better final quality.
+ 
+ ## Operating characteristics
+-*   **Time Complexity:** The method is computationally expensive due to the two-stage training process. On the Lego scene, hybrid regularization took 60 hours compared to 16 hours for explicit regularization [S1].
+-*   **Memory Complexity:** Peak GPU memory usage is approximately 40 GB on an NVIDIA A100 GPU [S1, S2]. This is significantly higher than explicit regularization (22 GB) [S1].
+-*   **Performance:** The method achieves high-quality results, superior to explicit regularization [S1]. It enables real-time rendering by leveraging sparsity and half-precision storage [S1, S2].
++*   **Time Complexity:** The method requires two sequential training stages (implicit and explicit), each running for 1000 epochs [S1, S2].
++*   **Memory Complexity:** Peak GPU memory usage is approximately 40 GB on an NVIDIA A100 GPU during training [S1, S2].
++*   **Performance:** The method achieves high-quality results and enables real-time rendering by leveraging sparsity and half-precision storage [S1, S2].
+ *   **Strengths:** Prevents overfitting in explicit grids, handles sparse inputs well, and enables real-time rendering through sparsity [S1, S2].
+-*   **Limitations:** High computational cost and memory usage compared to explicit methods [S1].
+-*   **When to use:** When high-quality novel view synthesis is required and computational resources are sufficient [S1].
+-*   **When not to use:** When training time or GPU memory is constrained [S1].
++*   **Limitations:** Requires two distinct training phases and significant GPU memory [S1, S2].
++*   **When to use:** When high-quality novel view synthesis is required and computational resources are sufficient [S1, S2].
++*   **When not to use:** When training time or GPU memory is constrained [S1, S2].
+ 
+ ## Background

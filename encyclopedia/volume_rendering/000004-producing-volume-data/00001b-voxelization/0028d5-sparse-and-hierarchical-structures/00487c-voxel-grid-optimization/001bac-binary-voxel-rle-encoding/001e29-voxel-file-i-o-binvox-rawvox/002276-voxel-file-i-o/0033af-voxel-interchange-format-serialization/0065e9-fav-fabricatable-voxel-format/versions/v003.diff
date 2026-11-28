@@ -1,0 +1,254 @@
+--- v002.md
++++ v003.md
+@@ -4,10 +4,10 @@
+ 
+ ## Overview
+-FAV (Fabricatable Voxel) is a voxel-based 3D data format that represents models as a 3D buildup of volume cells (voxels) on a grid, allowing free design of internal structures, materials, colors, and connection intensities [S1]. Unlike mesh-based formats (STL, AMF, 3MF) which are limited to surface definitions, FAV enables intensive 3D structure modeling and seamless data flow to 3D printers by retaining optimized information for fabrication [S1]. It is described in XML with a tree structure, defining models through a palette of geometries and materials, voxel definitions referencing these, and a grid-based structure mapping voxels to 3D space [S1].
++FAV (Fabricatable Voxel) is a voxel-based 3D data format that represents models as a 3D buildup of volume cells (voxels) on a grid, allowing free design of internal structures, materials, colors, and connection intensities [S1]. Unlike mesh-based formats (STL, AMF, 3MF) which are limited to surface definitions, FAV enables intensive 3D structure modeling and seamless data flow to 3D printers by retaining optimized information for fabrication [S1].
+ 
+ ## How it works
+ **Inputs and Outputs:**
+-*   **Input:** None explicitly defined for the format itself; it is a storage/transport format.
+-*   **Output:** An XML document representing a 3D voxel model.
++*   **Input:** None explicitly defined for the format itself; it is a storage/transport format [S1].
++*   **Output:** An XML document representing a 3D voxel model [S1].
+ 
+ **Data Structures:**
+@@ -58,125 +58,94 @@
+ **Pseudocode:**
+ ```python
+-# Pseudocode for parsing/constructing a FAV XML structure
+-# Note: This is a logical representation of the XML tree and data mapping.
+-
+-class FAVModel:
+-    def __init__(self):
+-        self.metadata = {}
+-        self.geometries = {} # ID -> {Name, Shape, Scale}
+-        self.materials = {}  # ID -> {Name, Info}
+-        self.voxels = {}     # ID -> {GeometryID, MaterialIDs, Ratios, Properties}
+-        self.objects = {}    # ID -> Grid
+-
+-    def add_geometry(self, geo_id, name, shape, scale):
+-        self.geometries[geo_id] = {'Name': name, 'Shape': shape, 'Scale': scale}
+-
+-    def add_material(self, mat_id, name, info):
+-        self.materials[mat_id] = {'Name': name, 'Info': info}
+-
+-    def add_voxel(self, voxel_id, name, geo_id, materials, properties=None):
+-        # materials is a list of (material_id, ratio) tuples
+-        self.voxels[voxel_id] = {
+-            'Name': name,
+-            'GeometryID': geo_id,
+-            'Materials': materials,
+-            'Properties': properties or {}
+-        }
+-
+-    def add_object(self, obj_id, name, origin, unit, dimension, structure_layers):
+-        # structure_layers is a list of layer dicts
+-        grid = {
+-            'Origin': origin,
+-            'Unit': unit,
+-            'Dimension': dimension,
+-            'Layers': structure_layers
+-        }
+-        self.objects[obj_id] = grid
+-
+-    def parse_voxel_map_layer(self, layer_data, dimension_x, dimension_y, bit_per_voxel=8):
+-        """
+-        Parses the voxel_map for a single layer.
+-        layer_data: string of hex characters (2 chars per voxel)
+-        dimension_x: width of the grid
+-        dimension_y: height of the grid
+-        Returns a 2D array of voxel IDs: [dimension_x][dimension_y]
+-        """
+-        bytes_data = bytes.fromhex(layer_data)
+-        voxel_ids = []
+-        byte_index = 0
+-        for x in range(dimension_x):
+-            line = []
+-            for y in range(dimension_y):
+-                if byte_index < len(bytes_data):
+-                    vid = bytes_data[byte_index]
+-                    byte_index += 1
+-                    line.append(vid)
++def parse_fav_layer(voxel_hex: str, color_hex: str, link_hex: str, dim_x: int, dim_y: int, neighbors: int = 6) -> dict:
++    """
++    Parses a single layer's structure from FAV hex streams.
++    voxel_hex: hex string for voxel_map (2 chars/voxel)
++    color_hex: hex string for color_map (6 chars/voxel for RGB, omitted for 0 voxels)
++    link_hex:  hex string for link_map (12 chars/voxel for 6 neighbors, omitted for 0 voxels)
++    dim_x, dim_y: grid dimensions
++    neighbors: 6, 18, or 26 (determines link data size)
++    Returns a dict with 'voxels', 'colors', 'links' as 2D lists [dim_x][dim_y].
++    """
++    voxels = []
++    colors = []
++    links = []
++    
++    # Decode voxel map (fixed size: 1 byte per voxel)
++    voxel_bytes = bytes.fromhex(voxel_hex)
++    voxel_idx = 0
++    
++    for x in range(dim_x):
++        row_v = []
++        row_c = []
++        row_l = []
++        for y in range(dim_y):
++            if voxel_idx < len(voxel_bytes):
++                vid = voxel_bytes[voxel_idx]
++                voxel_idx += 1
++                row_v.append(vid)
++                if vid == 0:
++                    row_c.append(None)
++                    row_l.append(None)
+                 else:
+-                    line.append(0) # Default to 0 if data short
+-            voxel_ids.append(line)
+-        return voxel_ids
+-
+-    def parse_color_map_layer(self, layer_data, dimension_x, dimension_y, color_mode='RGB'):
+-        """
+-        Parses the color_map for a single layer.
+-        layer_data: string of hex characters (6 chars per voxel for RGB)
+-        dimension_x: width
+-        dimension_y: height
+-        Returns a 2D array of color values (or None if omitted).
+-        """
+-        chars_per_voxel = 6 if color_mode == 'RGB' else 6 # Sources do not specify exact hex count for Grayscale/CYMK [G]
+-        bytes_data = bytes.fromhex(layer_data)
+-        colors = []
+-        byte_index = 0
+-        for x in range(dimension_x):
+-            line = []
+-            for y in range(dimension_y):
+-                start_idx = byte_index
+-                end_idx = start_idx + chars_per_voxel
+-                if end_idx <= len(bytes_data):
+-                    color_hex = bytes_data[start_idx:end_idx]
+-                    byte_index = end_idx
+-                    line.append(color_hex)
++                    # Read color data (3 bytes for RGB)
++                    c_start = len(bytes.fromhex(color_hex)) - len(bytes.fromhex(color_hex[6:])) # Simplified stream tracking
++                    # In practice, parsers maintain a single byte pointer per stream
++                    pass 
++            else:
++                row_v.append(0)
++                row_c.append(None)
++                row_l.append(None)
++        voxels.append(row_v)
++        colors.append(row_c)
++        links.append(row_l)
++        
++    # Correct stream-based parsing for variable-length maps:
++    voxels = []
++    colors = []
++    links = []
++    
++    voxel_bytes = bytes.fromhex(voxel_hex)
++    color_bytes = bytes.fromhex(color_hex)
++    link_bytes = bytes.fromhex(link_hex)
++    
++    v_ptr, c_ptr, l_ptr = 0, 0, 0
++    c_bytes_per_voxel = 3  # RGB = 6 hex chars
++    l_bytes_per_voxel = neighbors // 2  # 12 hex chars = 6 bytes for 6 neighbors
++    
++    for x in range(dim_x):
++        row_v = []
++        row_c = []
++        row_l = []
++        for y in range(dim_y):
++            if v_ptr < len(voxel_bytes):
++                vid = voxel_bytes[v_ptr]
++                v_ptr += 1
++                row_v.append(vid)
++                if vid == 0:
++                    row_c.append(None)
++                    row_l.append(None)
+                 else:
+-                    line.append(None) # Omitted if voxel is 0
+-            colors.append(line)
+-        return colors
+-
+-    def parse_link_map_layer(self, layer_data, dimension_x, dimension_y, neighbors=6):
+-        """
+-        Parses the link_map for a single layer.
+-        layer_data: string of hex characters (12 chars per voxel for 6 neighbors)
+-        dimension_x: width
+-        dimension_y: height
+-        Returns a 2D array of link values.
+-        """
+-        chars_per_voxel = 12
+-        bytes_data = bytes.fromhex(layer_data)
+-        links = []
+-        byte_index = 0
+-        for x in range(dimension_x):
+-            line = []
+-            for y in range(dimension_y):
+-                start_idx = byte_index
+-                end_idx = start_idx + chars_per_voxel
+-                if end_idx <= len(bytes_data):
+-                    link_hex = bytes_data[start_idx:end_idx]
+-                    byte_index = end_idx
+-                    line.append(link_hex)
+-                else:
+-                    line.append(None) # Omitted if voxel is 0
+-            links.append(line)
+-        return links
+-
+-# Example usage logic
+-# 1. Create FAVModel
+-# 2. Add geometries and materials to palette
+-# 3. Define voxels referencing palette
+-# 4. Define object with grid dimensions
+-# 5. For each layer in structure:
+-#    - Parse voxel_map (hex string) -> 2D voxel ID array
+-#    - Parse color_map (hex string) -> 2D color array (if present)
+-#    - Parse link_map (hex string) -> 2D link array (if present)
+-#    - Store in object's grid layers
++                    # Read color
++                    if c_ptr + c_bytes_per_voxel <= len(color_bytes):
++                        row_c.append(color_bytes[c_ptr:c_ptr + c_bytes_per_voxel])
++                        c_ptr += c_bytes_per_voxel
++                    else:
++                        row_c.append(None)
++                    # Read link
++                    if l_ptr + l_bytes_per_voxel <= len(link_bytes):
++                        row_l.append(link_bytes[l_ptr:l_ptr + l_bytes_per_voxel])
++                        l_ptr += l_bytes_per_voxel
++                    else:
++                        row_l.append(None)
++            else:
++                row_v.append(0)
++                row_c.append(None)
++                row_l.append(None)
++        voxels.append(row_v)
++        colors.append(row_c)
++        links.append(row_l)
++        
++    return {'voxels': voxels, 'colors': colors, 'links': links}
+ ```
+ 
+@@ -195,17 +164,17 @@
+ 
+ ### Hierarchical Sparse Voxel Format (glTF-based)
+-A glTF-based format for sparse voxels. Choose when interoperability with web-based 3D viewers and glTF ecosystems is required. [Hierarchical Sparse Voxel Format (glTF-based)](13799-hierarchical-sparse-voxel-format-gltf-based.md)
++A glTF-based format for sparse voxels. Choose when interoperability with web-based 3D viewers and glTF ecosystems is required [G]. [Hierarchical Sparse Voxel Format (glTF-based)](13799-hierarchical-sparse-voxel-format-gltf-based.md)
+ 
+ ### Comparison
+-FAV is XML-based and designed for intensive 3D structure modeling and 3D printing, allowing free internal structure design [S1]. Hierarchical Sparse Voxel Format is glTF-based, likely optimized for sparse data and web rendering.
++FAV is XML-based and designed for intensive 3D structure modeling and 3D printing, allowing free internal structure design [S1]. Hierarchical Sparse Voxel Format is glTF-based, likely optimized for sparse data and web rendering [G].
+ 
+ ## Operating characteristics
+-*   **Time Complexity:** Not given in the sources.
+-*   **Memory Complexity:** Not given in the sources.
+-*   **Measured Performance:** Not given in the sources.
++*   **Time Complexity:** Not given in the sources [S1].
++*   **Memory Complexity:** Not given in the sources [S1].
++*   **Measured Performance:** Not given in the sources [S1].
+ *   **Strengths:** Allows free design of internal structures, materials, colors, and connection intensities at each voxel position [S1]. Enables complex microstructures and varied material distributions [S1]. Seamless data flow to 3D printers [S1]. Retains optimized information for fabrication [S1].
+ *   **Limitations:** XML-based, which may be verbose. Limited to voxel-based representation.
+ *   **When to Use:** Intensive 3D structure modeling, seamless data flow to 3D printers, 3D half-toning, enhancing expressiveness of 3D printers [S1].
+-*   **When Not to Use:** When surface-only representation is sufficient (use STL/AMF/3MF). When sparse data efficiency is critical and glTF interoperability is needed.
++*   **When Not to Use:** When surface-only representation is sufficient (use STL/AMF/3MF) [S1]. When sparse data efficiency is critical and glTF interoperability is needed [G].
+ 
+ ## Background

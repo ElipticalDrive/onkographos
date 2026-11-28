@@ -1,0 +1,105 @@
+--- v004.md
++++ v005.md
+@@ -11,5 +11,5 @@
+ 
+ **Data Structures:**
+-1.  **Block Grid:** A 2D or 3D grid partitioning the scene bounding box into square tiles. Each tile $T_i$ has a defined spatial extent (bbox) and an overlap region with neighbors [S1, S2, unofficial].
++1.  **Block Grid:** A 2D or 3D grid partitioning the scene bounding box into square tiles [G]. Each tile $T_i$ has a defined spatial extent (bbox) and an overlap region with neighbors [G].
+ 2.  **Per-Block Model:** Standard 3DGS primitives for each block [G].
+     *   Position: $\mathbf{p} \in \mathbb{R}^3$ [G]
+@@ -24,29 +24,36 @@
+     *   *CityGaussian:* Uses depth regularization and visibility-aware training to ensure geometric consistency within the block [S2, unofficial].
+ 3.  **Merging:** At render time, collect all Gaussians from all blocks [S1, unofficial].
+-    *   *Overlap Handling:* In regions where blocks overlap, Gaussians from multiple blocks exist. VastGaussian uses "feathered overlap" to blend contributions [S2, unofficial]. CityGaussian relies on the hierarchical LoD structure to select the appropriate level of detail, implicitly handling overlaps by prioritizing closer or higher-resolution blocks [S2, unofficial].
++    *   *Overlap Handling:* In regions where blocks overlap, Gaussians from multiple blocks exist [G]. VastGaussian uses "feathered overlap" to blend contributions [S2, unofficial]. CityGaussian relies on the hierarchical LoD structure to select the appropriate level of detail, implicitly handling overlaps by prioritizing closer or higher-resolution blocks [S2, unofficial].
+ 4.  **Hierarchical LoD (CityGaussian V2):** To support streaming and large-scale rendering, CityGaussian V2 builds a LoD pyramid [S2, unofficial]. Clusters of Gaussians within each block are merged into coarser representations [S2, unofficial]. Rendering selects the appropriate LoD based on view distance, streaming only necessary blocks [S2, unofficial].
+ 
+ **Parameters:**
+-*   Block Size: Typically determined by GPU memory limits and scene scale. Not given in the sources.
+-*   Overlap Width: Sufficient to cover aliasing artifacts at tile boundaries. Not given in the sources.
+-*   LoD Levels: Number of pyramid levels. Not given in the sources.
++*   Block Size: Not given in the sources.
++*   Overlap Width: Not given in the sources.
++*   LoD Levels: Not given in the sources.
+ 
+ **Pseudocode:**
+ ```python
+ def train_city_gaussian(scene_images, bounding_box, block_size, overlap):
+-    # 1. Partition scene into blocks
++    # 1. Partition scene into overlapping blocks
+     blocks = []
+-    step = block_size
+-    for x in range(bounding_box.min.x, bounding_box.max.x, step):
+-        for y in range(bounding_box.min.y, bounding_box.max.y, step):
+-            for z in range(bounding_box.min.z, bounding_box.max.z, step):
+-                bbox = {'min': (x, y, z), 'max': (x + step, y + step, z + step)}
++    step = block_size - overlap  # Step size ensures overlap between adjacent tiles
++    x = bounding_box.min.x
++    while x < bounding_box.max.x:
++        y = bounding_box.min.y
++        while y < bounding_box.max.y:
++            z = bounding_box.min.z
++            while z < bounding_box.max.z:
++                bbox = {'min': (x, y, z), 'max': (x + block_size, y + block_size, z + block_size)}
+                 blocks.append({'id': len(blocks), 'bbox': bbox})
+-    
++                z += step
++            y += step
++        x += step
++
+     models = {}
+     for block in blocks:
+         # 2. Identify images overlapping this block
+-        relevant_images = [img for img in scene_images if frustum_intersects_box(img.camera, block.bbox)]
+-        
++        # [G] Standard view frustum vs AABB intersection test
++        relevant_images = [img for img in scene_images if img.camera.frustum_intersects_aabb(block.bbox)]
++
+         # 3. Train independent 3DGS model for this block
+         # VastGaussian: decoupled appearance handling per block
+@@ -55,11 +62,15 @@
+         model = {'gaussians': [], 'bbox': block.bbox}
+         models[block['id']] = model
+-        
++
+     return models
+ 
+ def render_city_gaussian(models, camera, lod_level):
+     # 4. Collect Gaussians from relevant blocks
+-    visible_blocks = [bid for bid, m in models.items() if frustum_intersects_box(camera, m.bbox)]
+-    
++    visible_blocks = []
++    for block_id, model in models.items():
++        # [G] Standard view frustum vs AABB intersection test
++        if camera.frustum_intersects_aabb(model.bbox):
++            visible_blocks.append(block_id)
++
+     all_gaussians = []
+     for block_id in visible_blocks:
+@@ -69,8 +80,16 @@
+         # CityGaussian: hierarchical LoD selection prioritizes closer blocks
+         all_gaussians.extend(block_gaussians)
+-        
++
+     # 6. Rasterize all collected Gaussians
+-    # [G] Standard 3DGS rasterization: sort Gaussians by depth, project to screen, alpha composite
+-    return alpha_composite_projected_gaussians(all_gaussians, camera)
++    # [G] Standard 3DGS rasterization: sort Gaussians by depth, project to screen space, compute 2D covariance, alpha composite
++    projected = []
++    for g in all_gaussians:
++        # [G] Project 3D Gaussian center and covariance to screen space
++        screen_pos = camera.project(g.position)
++        screen_cov = compute_screen_covariance(g.covariance, camera)
++        projected.append({'pos': screen_pos, 'cov': screen_cov, 'alpha': g.alpha, 'color': g.color})
++    projected.sort(key=lambda g: g.depth)
++    # [G] Alpha composite projected Gaussians onto image plane
++    return alpha_composite(projected, camera.image_width, camera.image_height)
+ ```
+ 
+@@ -85,5 +104,5 @@
+ ## Operating characteristics
+ *   **Memory:** Scales linearly with the number of blocks, allowing training on hardware with limited memory by processing blocks independently [S1, unofficial]. Total memory is the sum of per-block models [G].
+-*   **Training Time:** Parallelizable across blocks/nodes. DoGaussian specifically enables distributed training across multiple nodes [S2, unofficial].
++*   **Training Time:** Parallelizable across blocks/nodes [S2, unofficial].
+ *   **Rendering:** Standard 3DGS rasterization complexity, but requires managing multiple block sources and overlap blending [S1, S2, unofficial].
+ *   **Strengths:** Enables city-scale training (square kilometers) which is impossible with monolithic 3DGS [S2, unofficial]. Handles varying lighting through decoupled appearance handling per block [S2, unofficial].

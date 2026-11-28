@@ -1,0 +1,256 @@
+--- v013.md
++++ v014.md
+@@ -4,15 +4,14 @@
+ 
+ ## Overview
+-Distance-based Gaussian Splatting is a method for integrating 3D Gaussian Splatting (3DGS) with explicit mesh representations to improve rendering quality and memory efficiency in large-scale scenes [S1]. It solves the problem of redundant Gaussian splats occupying GPU memory and degrading rendering fidelity when initialized on high-resolution meshes by classifying splats based on their distance to the mesh surface [S1]. Unlike sibling methods that extract meshes from trained Gaussians, this approach builds a connection between a pre-existing mesh and Gaussian splats, masking occluded splats and distinguishing between tightly-bound splats (aligned with the surface) and loosely-bound splats (capturing artifacts or details) [S1].
++Distance-based Gaussian Splatting integrates 3D Gaussian Splatting with explicit mesh representations to improve rendering quality and memory efficiency in large-scale scenes [S1]. It solves the problem of redundant Gaussian splats occupying GPU memory and degrading rendering fidelity when initialized on high-resolution meshes by classifying splats based on their distance to the mesh surface [S1]. Unlike sibling methods that extract meshes from trained Gaussians, this approach builds a connection between a pre-existing mesh and Gaussian splats, masking occluded splats and distinguishing between tightly-bound splats (aligned with the surface) and loosely-bound splats (capturing artifacts or details) [S1].
+ 
+ ## How it works
+ **Inputs:**
+ - A trained 3D Gaussian splatting model $\mathcal{G} = \{G_i\}_{i=1}^M$ [S1].
+-- A 3D mesh $M$ consisting of triangles $f_j$ and vertices $m_j$ [S1].
+-- Training views defined by camera poses $P_k$ [S1].
++- A 3D mesh $M$ consisting of triangles $f_j$ and centers $m_j$ [S1].
++- Training viewpoints $P_i$ [S1].
+ 
+ **Outputs:**
+ - A refined set of Gaussian splats $\mathcal{G}'$ classified as tightly-bound ($G_t$) or loosely-bound ($G_l$) [S1].
+-- Rendered images with improved geometric consistency and reduced memory usage [S1].
+ 
+ **Data Structures:**
+@@ -25,10 +24,10 @@
+ **Numbered Steps:**
+ 
+-1.  **Initialization**: Initialize a 3D Gaussian splat $G_i$ at the center $\mathbf{m}_j$ of each triangle $f_j$ of the mesh $M$ [S1].
++1.  **Initialization**: Initialize a 3D Gaussian splat at the center $\mathbf{m}_j$ of each triangle $f_j$ of the mesh $M$ [S1].
+ 
+ 2.  **Depth Rendering and Occlusion Masking**:
+-    - For each training viewpoint $P_k$, render a depth map $D_k$ [S1].
+-    - Add a small offset to the depth: $D_k \leftarrow D_k + 0.01$ [S1].
+-    - Assume the mesh surface is entirely opaque. Mask out Gaussian splats that are occluded by the mesh surface using the rendered depth map [S1]. Specifically, if a Gaussian splat's depth is greater than the mesh depth at that pixel, it is considered occluded and excluded from rendering [S1].
++    - Render a depth $D_i$ from a given viewpoint $P_i$ [S1].
++    - Add 0.01 to the depth $D_i$ [S1].
++    - Assume the mesh surface is entirely opaque. Mask out Gaussian splats occluded by the surface using the corresponding viewpoint depth map [S1]. Specifically, if a Gaussian splat's depth is greater than the mesh depth at that pixel, it is considered occluded and excluded from rendering [S1].
+ 
+ 3.  **Visibility Assessment and Pruning**:
+@@ -40,10 +39,10 @@
+     - Calculate the distance $d_i$ between each Gaussian splat’s center $\mathbf{p}_i$ and the corresponding mesh face $f_j$ [S1].
+     - Classify Gaussian splats into two categories based on the distance threshold $d_{th} = 0.01$ [S1]:
+-        - **Tightly-bound splats ($G_t$)**: If $d_i < d_{th}$ [S1].
+-        - **Loosely-bound splats ($G_l$)**: If $d_i > d_{th}$ [S1].
++        - **Tightly-bound splats ($G_{ti}$)**: If $d_i < d_{th}$ [S1].
++        - **Loosely-bound splats ($G_{li}$)**: If $d_i > d_{th}$ [S1].
+ 
+ 5.  **Alignment and Rendering**:
+-    - Flatten and align the tightly-bound splats $G_t$ with the mesh surface [S1].
+-    - For rendering, transform camera space into ray space using the affine transformation $\mathbf{J}_i \in \mathbb{R}^{2\times3}$ defined by the camera position $\mathbf{p}_{ci}$ [S1].
++    - Flatten $G_{ti}$ and align these splats with the mesh surface [S1].
++    - Transform camera space into ray space using the affine transformation $\mathbf{J}_i \in \mathbb{R}^{2\times3}$ defined by the camera position $\mathbf{p}_{ci}$ [S1].
+     - Compute the 2D covariance in ray space: $\mathbf{\Sigma}'_i = \mathbf{J}_i \mathbf{\Sigma}_{ic} \mathbf{J}_i^T$ [S1].
+     - Render the image using alpha blending:
+@@ -54,63 +53,39 @@
+ 
+ ```python
+-def distance_based_gaussian_splatting(mesh, gaussians, training_views, d_th=0.01, prune_interval=500):
+-    """
+-    Implements Distance-based Gaussian Splatting.
+-    
+-    Args:
+-        mesh: 3D mesh object with triangles f_j and vertices m_j.
+-        gaussians: List of 3D Gaussian splats G_i.
+-        training_views: List of camera poses P_k.
+-        d_th: Distance threshold for classification (default 0.01).
+-        prune_interval: Iteration interval for pruning (default 500).
+-        
+-    Returns:
+-        refined_gaussians: List of refined Gaussian splats.
+-    """
++def distance_based_gaussian_splatting(mesh, gaussians, training_views, d_th=0.01, prune_interval=500, max_iterations=30000):
+     # Step 1: Initialization
+     # Initialize a 3D Gaussian splat at the center m_j of each triangle f_j of the mesh M.
+-    # Note: This assumes gaussians are initialized based on mesh triangles.
+-    # In practice, this step happens before training starts.
+     for triangle in mesh.triangles:
+-        center = triangle.center
+-        # Create Gaussian G_i at center with initial covariance and opacity
+-        gaussians.append(create_gaussian(center, mesh))
++        gaussians.append(Gaussian(center=triangle.center, covariance=compute_triangle_covariance(triangle), opacity=1.0))
+ 
+     # Step 2: Depth Rendering and Occlusion Masking
+     for view in training_views:
+-        # Render depth map D_k from viewpoint P_k
+-        depth_map = render_depth(view, mesh)
+-        
+-        # Add offset to depth
++        # Render a depth D_i from a given viewpoint P_i
++        depth_map = rasterize_mesh_depth(view, mesh)
++        # Add 0.01 to the depth D_i
+         depth_map = depth_map + 0.01
+-        
+         # Mask out Gaussian splats occluded by the surface
+-        for gaussian in gaussians:
+-            if is_occluded(gaussian, depth_map, view):
+-                gaussian.occluded = True
++        for g in gaussians:
++            p_2d = project_to_2d(g.center, view)
++            if depth_map[p_2d.y, p_2d.x] < g.depth_in_camera_space:
++                g.occluded = True
+             else:
+-                gaussian.occluded = False
++                g.occluded = False
+ 
+     # Step 3: Visibility Assessment and Pruning
+     current_iteration = 0
+     while current_iteration < max_iterations:
+-        # Assess visibility across all training views
+         visible_splats = []
+-        for gaussian in gaussians:
+-            is_visible = False
++        for g in gaussians:
++            is_observed = False
+             for view in training_views:
+-                if not gaussian.occluded and is_observed(gaussian, view):
+-                    is_visible = True
++                if not g.occluded and is_within_image_bounds(g.center, view):
++                    is_observed = True
+                     break
+-            if is_visible:
+-                visible_splats.append(gaussian)
+-            else:
+-                # Identify splats behind mesh never observed
+-                pass
+-        
+-        # Prune redundant splats every 500 iterations
++            if is_observed:
++                visible_splats.append(g)
++        # Remove all redundant Gaussian splats situated behind the mesh surface at specific training iterations
+         if current_iteration % prune_interval == 0:
+-            gaussians = [g for g in gaussians if g in visible_splats]
+-        
++            gaussians = visible_splats
+         current_iteration += 1
+ 
+@@ -118,50 +93,84 @@
+     tightly_bound = []
+     loosely_bound = []
+-    
+-    for gaussian in gaussians:
+-        # Calculate distance d_i between Gaussian center p_i and mesh face f_j
+-        distance = calculate_distance_to_mesh(gaussian.center, mesh)
+-        
++    for g in gaussians:
++        # Calculate the distance d_i between each Gaussian splat’s center p_i and corresponding mesh faces f_j
++        distance = compute_point_to_mesh_distance(g.center, mesh)
+         if distance < d_th:
+-            gaussian.type = "tightly_bound"
+-            tightly_bound.append(gaussian)
++            g.type = "tightly_bound"
++            tightly_bound.append(g)
+         else:
+-            gaussian.type = "loosely_bound"
+-            loosely_bound.append(gaussian)
+-            
++            g.type = "loosely_bound"
++            loosely_bound.append(g)
++
+     # Step 5: Alignment and Rendering
+-    # Flatten and align tightly-bound splats with mesh surface
+-    for gaussian in tightly_bound:
+-        align_with_mesh_surface(gaussian, mesh)
+-        
+-    # Rendering is performed using the standard 3DGS pipeline with the refined splats
++    # Flatten Gti and align these splats with the mesh surface
++    for g in tightly_bound:
++        align_gaussian_to_mesh_surface(g, mesh)
++
++    # Transform camera space into ray space using affine transformation Ji
++    for g in gaussians:
++        p_cam = view.rotation @ g.center + view.translation
++        J_i = compute_ray_space_jacobian(p_cam)
++        g.covariance_ray = J_i @ g.covariance @ J_i.T
++
++    # Rendering is performed using the standard 3DGS alpha blending pipeline
+     return gaussians
+ 
+-def is_occluded(gaussian, depth_map, view):
+-    """
+-    Check if a Gaussian is occluded by the mesh surface.
+-    """
+-    # Project Gaussian center to 2D
+-    p_2d = project_to_2d(gaussian.center, view)
+-    
+-    # Get depth of Gaussian
+-    depth_gaussian = gaussian.center.z # In camera space
+-    
+-    # Get depth of mesh at p_2d
+-    depth_mesh = depth_map[p_2d.y][p_2d.x]
+-    
+-    # If Gaussian depth is greater than mesh depth, it is occluded
+-    return depth_gaussian > depth_mesh
+-
+-def calculate_distance_to_mesh(point, mesh):
+-    """
+-    Calculate the minimum distance from a point to the mesh surface.
+-    """
+-    min_dist = infinity
+-    for triangle in mesh.triangles:
+-        dist = point_to_triangle_distance(point, triangle)
++def compute_triangle_covariance(triangle):
++    # [G] Standard initialization scales covariance to triangle dimensions
++    scale = triangle.bounding_box.diagonal() / 2.0
++    return np.diag(scale**2)
++
++def rasterize_mesh_depth(view, mesh):
++    # [G] Standard depth buffer rasterization of mesh triangles
++    depth_map = np.full((view.height, view.width), np.inf)
++    for tri in mesh.triangles:
++        depth_map = rasterize_triangle_to_buffer(depth_map, tri, view)
++    return depth_map
++
++def project_to_2d(point, view):
++    # [G] Standard perspective projection to normalized device coordinates
++    p_cam = view.rotation @ point + view.translation
++    p_ndc = view.projection @ p_cam
++    return (p_ndc.x / p_ndc.w, p_ndc.y / p_ndc.w)
++
++def is_within_image_bounds(point, view):
++    # [G] Check if projected point lies within image dimensions
++    p_2d = project_to_2d(point, view)
++    return 0 <= p_2d.x < view.width and 0 <= p_2d.y < view.height
++
++def compute_point_to_mesh_distance(point, mesh):
++    min_dist = float('inf')
++    for tri in mesh.triangles:
++        dist = point_to_triangle_distance(point, tri)
+         if dist < min_dist:
+             min_dist = dist
+     return min_dist
++
++def point_to_triangle_distance(point, tri):
++    # [G] Standard point-to-triangle distance using barycentric projection
++    v0, v1, v2 = tri.vertices
++    e1, e2 = v1 - v0, v2 - v0
++    p1 = point - v0
++    dot00 = np.dot(e1, e1)
++    dot01 = np.dot(e1, e2)
++    dot02 = np.dot(e1, p1)
++    dot11 = np.dot(e2, e2)
++    dot12 = np.dot(e2, p1)
++    inv_denom = 1.0 / (dot00 * dot11 - dot01 * dot01)
++    u = (dot11 * dot02 - dot01 * dot12) * inv_denom
++    v = (dot00 * dot12 - dot01 * dot02) * inv_denom
++    if u < 0.0 or v < 0.0 or u + v > 1.0:
++        return np.linalg.norm(point - tri.closest_point(point))
++    return np.linalg.norm(point - (v0 + u * e1 + v * e2))
++
++def align_gaussian_to_mesh_surface(g, mesh):
++    # [G] Flatten covariance along mesh normal and rotate to align with surface tangent plane
++    normal = mesh.get_normal_at_point(g.center)
++    g.covariance = flatten_covariance(g.covariance, normal)
++
++def compute_ray_space_jacobian(p_cam):
++    # [G] Standard affine approximation of projection for ray space covariance
++    return np.eye(2, 3) * p_cam.z  # Simplified for pseudocode
+ ```
+ 

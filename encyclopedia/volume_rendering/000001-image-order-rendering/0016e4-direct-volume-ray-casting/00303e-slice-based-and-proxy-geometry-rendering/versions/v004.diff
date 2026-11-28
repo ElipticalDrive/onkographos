@@ -1,0 +1,79 @@
+--- v003.md
++++ v004.md
+@@ -4,46 +4,33 @@
+ 
+ ## Overview
+-Slice-based and Proxy Geometry Rendering is an image-order technique that renders volumetric data by rasterizing a set of 2D polygon primitives (proxy geometry) through the volume, which are textured with the volumetric data and composited in sorted order using fragment shaders [S1, S3, S4, S5, unofficial]. It solves the problem of efficiently mapping 3D scalar fields to 2D screens by leveraging the graphics pipeline's texture sampling and alpha blending hardware, avoiding the need for explicit ray-marching loops in shaders [S2, unofficial][S4, unofficial]. It is distinguished from direct ray casting by replacing per-pixel ray integration with parallel rasterization of view-aligned or object-aligned slices, trading memory efficiency for rendering speed [S1][S2, unofficial].
++Slice-based and Proxy Geometry Rendering solves the performance bottleneck of per-pixel ray marching by rasterizing 2D geometric primitives (slices) through the volume data, leveraging the graphics pipeline's texture sampling and alpha blending hardware [S1, S3, S4, S5, unofficial]. It is distinguished from direct ray casting by replacing the iterative per-pixel integration loop with parallel rasterization of view-aligned or object-aligned slices, trading memory efficiency for rendering speed [S1][S2, unofficial].
+ 
+ ## Shared principles
+-The method implements the emission-absorption optical model, computing the light intensity reaching the eye by integrating radiative energy along a ray through the scalar volume [S1, S5, S9, unofficial]. The process follows a strict pipeline for each pixel: ray generation, sampling, classification (transfer function application), shading, and compositing [S4, S34, unofficial].
++All methods in this family replace the ray-marching loop with a rasterization pipeline that processes a set of proxy polygons (slices) intersecting the volume. The core mechanism consists of three stages:
+ 
+-### Ray Generation and Discretization
+-For each pixel, a ray $r(t) = \mathbf{o} + t\mathbf{d}$ is defined, where $\mathbf{o}$ is the camera origin and $\mathbf{d}$ is the direction [S1, S2, S3, S4, S5, S6, S7, S8, S9, S10, S11, S12, S13, S14, S15, S16, S17, S18, S19, S20, S21, S22, S23, S24, S25, S26, S27, S28, S29, S30, S31, S32, S33, S34, S35, S36, S37, S38, S39, S40, S41, S42, S43, S44, S45, S46, S47, S48, S49, S50, S51, S52, S53, S54, S55, S56, S57, S58, S59, S60, S61, S62, S63, S64, S65, S66, S67, S68, S69, S70, S71, S72, S73, S74, S75, S76, S77, S78, S79, S80, S81, S82, S83, S84, S85, S86, S87, S88, S89, S90, S91, S92, S93, S94, S95, S96, S97, S98, S99, S100]. The ray is intersected with the volume domain (typically an axis-aligned bounding box) to determine the entry parameter $t_{start}$ and exit parameter $t_{end}$ [S1, S7, S15, S22, S33, S55, unofficial]. The segment $[t_{start}, t_{end}]$ is discretized into $N$ samples at equidistant intervals $\Delta t$ [S4, S8, S9, S16, S33, S40, unofficial]. The step size $\Delta t$ is often chosen to ensure at least one sample per voxel along the fastest axis to minimize aliasing, though adaptive stepping is also used [S36, unofficial][S46, abstract only, unofficial].
+-
+-### Sampling and Interpolation
+-At each sample point $\mathbf{p}_i = r(t_i)$, the scalar volume value $V(\mathbf{p}_i)$ is reconstructed from the discrete voxel grid [S6, S7, S33, unofficial][S44, book]. Trilinear interpolation is the standard reconstruction filter for high-quality rendering, combining the eight surrounding voxels [S6, S7, S33, S40, unofficial]. Nearest-neighbor interpolation is used for performance or specific artifact styles [S43, unofficial][S44, book]. The interpolated value represents the local density or material property [S9, S18, unofficial].
+-
+-### Classification (Transfer Function)
+-The scalar value $d_i = V(\mathbf{p}_i)$ is mapped to optical properties: color $C_i$ and opacity $\alpha_i$ [S2, S5, S11, S12, S25, S29, S31, S34, unofficial]. This mapping is defined by a transfer function $T(d_i)$ [S2, S5, S2789]. Pre-classification maps scalar values to RGBA before interpolation, while post-classification interpolates scalars first and then applies the transfer function [S4, unofficial][S44, book]. The opacity $\alpha_i$ determines the fraction of light absorbed or scattered at the sample [S18, S23, S51, unofficial].
+-
+-### Compositing (Front-to-Back Integration)
+-The final pixel color $C_{final}$ is computed by integrating contributions from all samples along the ray from front to back ($t_{start}$ to $t_{end}$) [S1, S12, S16, S23, S24, S43, S50, S51, unofficial]. The standard compositing equation (over operator) updates the accumulated color $C'$ and accumulated opacity $\alpha'$ for each sample $i$:
+-
+-$$
+-C'_{i} = C'_{i-1} + (1 - \alpha'_{i-1}) \alpha_i C_i
+-$$
+-$$
+-\alpha'_{i} = \alpha'_{i-1} + (1 - \alpha'_{i-1}) \alpha_i
+-$$
+-
+-where $C'_0 = 0$ and $\alpha'_0 = 0$ [S12, S43, S50, unofficial]. The term $(1 - \alpha'_{i-1})$ represents the transmittance (light reaching the current sample) [S1, S51, unofficial]. If $\alpha'$ reaches 1 (or a threshold close to it), the ray can be terminated early, as subsequent samples are fully occluded [S9, S12, S27, unofficial].
+-
+-### Shading
+-Shading models are applied to enhance depth perception. Common techniques include Phong or Blinn-Phong shading, which use the gradient of the volume data $\nabla V$ to compute surface normals for lighting calculations [S14, S15, S30, unofficial][S54]. The gradient is typically estimated using central differences or Sobel operators on the interpolated scalar field [S14, S30, unofficial][S54].
++1.  **Proxy Geometry Generation**: The volume bounding box is intersected with a series of parallel planes. These planes define 2D polygonal primitives (quads or triangle fans) that represent slices through the volume. The vertices of these polygons are assigned 3D texture coordinates that map the volume data space to the polygon surface [S2, unofficial][S6].
++2.  **Texture Sampling**: The volumetric scalar data is stored in GPU memory as a 3D texture or a stack of 2D textures. During rasterization, the fragment shader samples the scalar value $v$ at the interpolated texture coordinates [S2, unofficial][S6].
++3.  **Hardware Compositing**: The sampled scalar values are mapped to color and opacity via a transfer function (often stored in a 1D texture). The resulting fragments are composited into the frame buffer using hardware alpha blending. For back-to-front rendering, the blend function is typically `GL_ONE` for source and `GL_ONE_MINUS_SRC_ALPHA` for destination, implementing the over operator:
++    $$
++    C_{out} = C_{src} + (1 - \alpha_{src}) C_{dst}
++    $$
++    $$
++    \alpha_{out} = \alpha_{src} + (1 - \alpha_{src}) \alpha_{dst}
++    $$
++    [S1][S2, unofficial]
+ 
+ ## Subtopics
+ 
+ ### [2D Visualization from 3D Grid (Slow)](1507-2d-visualization-from-3d-grid-slow.md)
+-This method generates a 2D projection of a 3D scalar volume by processing the data as a series of 2D slices, applying a transfer function to each slice, and compositing them into a 2D image using the over operator. It solves the problem of visualizing medical, scientific, or natural volumetric data (such as fluids, smoke, or fire) without extracting explicit surface geometry. Unlike its sibling [Hybrid Ray Tracer](2308-hybrid-ray-tracer.md) which may use geometry acceleration, or [Texture-Based Volume Rendering](4707-texture-based-volume-rendering.md) which leverages hardware texture units, this approach explicitly iterates through slices or rays in a software-defined or less-optimized manner, often referred to as "slow" due to the lack of hardware-accelerated ray marching or pre-integration. It builds on the parent [Slice-based and Proxy Geometry Rendering](6225-slice-based-and-proxy-geometry-rendering.md) by relying on the volume rendering integral discretized into a summation over sample points along a ray.
++This method generates a 2D projection by treating the volume as a series of 2D slices, applying a transfer function, and compositing them using the over operator. It is distinguished by its explicit reliance on a CPU-side or software-based iterative slice processing loop, often involving specific data transformations like logarithmic scaling, rather than optimized GPU rasterization.
+ 
+ ### [Hybrid Ray Tracer](2308-hybrid-ray-tracer.md)
+-The Hybrid Ray Tracer is a method for rendering mixtures of volumetric sample arrays and polygonal databases by simultaneously tracing rays through both data structures. It resamples volumetric data at equally spaced intervals and computes polygon intersections independently, then composites the resulting colors and opacities in depth-sorted order to handle the visibility between geometric and volumetric elements. It sets itself apart from pure volume ray casting by explicitly handling embedded polygons as occluders and occluded entities within the volumetric gel, and from pure polygon rendering by integrating continuous volumetric attenuation.
++The Hybrid Ray Tracer renders mixtures of volumetric sample arrays and polygonal databases by simultaneously tracing rays through both data structures. It resamples volumetric data at equally spaced intervals and computes polygon intersections independently, then composites the results in depth-sorted order. It sets itself apart by explicitly handling embedded polygons as occluders within the volumetric gel, integrating continuous volumetric attenuation with discrete geometric visibility.
+ 
+ ### [Mixed Geometry Rendering](3442-mixed-geometry-rendering.md)
+-Mixed Geometry Rendering combines direct volume ray casting with explicit geometric primitives (such as wireframes or surfaces) to provide structural context to volumetric data. It solves the problem of depth perception and structural clarity in scalar fields by rendering the volume's internal density while simultaneously displaying an external or internal geometric skeleton. Unlike pure volume rendering, which relies solely on shading and opacity for shape cues, this method uses a standard Z-buffer to render geometry that occludes the volume behind it, while the volume correctly transmits light from geometry rendered in front.
++Mixed Geometry Rendering combines direct volume ray casting with explicit geometric primitives (such as wireframes) to provide structural context. It solves the problem of depth perception by rendering the volume's internal density while simultaneously displaying an external or internal geometric skeleton. Unlike pure volume rendering, it uses a standard Z-buffer to render geometry that occludes the volume behind it, while the volume correctly transmits light from geometry rendered in front.
+ 
+ ### [Texture-Based Volume Rendering](4707-texture-based-volume-rendering.md)
+-Texture-Based Volume Rendering (TBVR) is a GPU-accelerated technique that renders volumetric data by rasterizing a set of 2D polygon primitives (proxy geometry) through the volume, which are textured with the volumetric data and composited in sorted order using fragment shaders. It solves the problem of efficiently mapping 3D scalar fields to 2D screens by leveraging the graphics pipeline's texture sampling and alpha blending hardware, avoiding the need for explicit ray-marching loops in shaders. It is distinguished from direct ray casting by replacing per-pixel ray integration with parallel rasterization of view-aligned or object-aligned slices, trading memory efficiency for rendering speed.
++Texture-Based Volume Rendering (TBVR) is a GPU-accelerated technique that rasterizes 2D polygon primitives (proxy geometry) through the volume, which are textured with the volumetric data and composited in sorted order using fragment shaders. It is distinguished from direct ray casting by replacing per-pixel ray integration with parallel rasterization of view-aligned or object-aligned slices, trading memory efficiency for rendering speed.
+ 
+ ### [View-Aligned Slicing](6530-view-aligned-slicing.md)
+@@ -54,5 +41,5 @@
+ 
+ ### [Vector Icon Volume Rendering](7693-vector-icon-volume-rendering.md)
+-Vector Icon Volume Rendering is a 3D raster resampling technique that integrates flow direction and magnitude into volume rendering by embedding small billboard images containing vector icons within splat footprints. It solves the problem of visualizing vector fields (such as wind velocity) within scalar volumes (such as density clouds) by creating an illusion of coherent flow through stochastic placement and compositing of these icons. Unlike standard direct volume ray casting which relies on scalar opacity and color, this method modifies the volume integral to include the rendering of tiny cylinders or icons, oriented parallel to the projected vector direction. It sets itself apart from sibling methods like [Texture-Based Volume Rendering](4707-texture-based-volume-rendering.md) by using discrete, billboard-oriented icons rather than continuous anisotropic textures, and from [View-Aligned Slicing](6530-view-aligned-slicing.md) by explicitly embedding vector geometry into the splat footprint rather than just slicing the volume.
++Vector Icon Volume Rendering is a 3D raster resampling technique that integrates flow direction and magnitude into volume rendering by embedding small billboard images containing vector icons within splat footprints. It solves the problem of visualizing vector fields within scalar volumes by creating an illusion of coherent flow through stochastic placement and compositing of these icons. It sets itself apart from sibling methods by using discrete, billboard-oriented icons rather than continuous anisotropic textures, and from View-Aligned Slicing by explicitly embedding vector geometry into the splat footprint rather than just slicing the volume.
+ 
+ ### 2D Slice Replication Approach
+@@ -70,5 +57,5 @@
+ 
+ ## Background
+-The technique was popularized by Krüger and Westermann in 2003 as an "Acceleration Technique for GPU-Based Volume Rendering" [S2, unofficial]. It leverages the graphics hardware's ability to rasterize textured polygons, effectively treating volume slices as proxy geometry. This approach allows for interactive frame rates by offloading the integration work to the GPU's fixed-function pipeline (alpha blending) and texture units, rather than using programmable shaders for ray marching [S2, unofficial].
++Originating from the need to accelerate volume rendering on early graphics hardware, this family of techniques leveraged the emerging 3D texture capabilities of GPUs. The approach was popularized in the early 2000s as a way to bypass the limitations of software ray casting and the lack of hardware ray-tracing support. Key developments included the use of 3D textures for interpolation [S1] and the optimization of slice ordering to minimize overdraw and artifacts [S2, unofficial]. It is widely used in medical imaging and scientific visualization where interactive frame rates are required for large datasets.
+ 
+ ## Sources

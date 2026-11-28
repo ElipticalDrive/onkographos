@@ -1,0 +1,210 @@
+# Sorted Rasterization of Projected Tetrahedra
+
+Also called: CUDA tetrahedra projection, GPU-based cell projection
+
+## Overview
+Projected Tetrahedra with CUDA is an interactive volume rendering method for scalar data on unstructured tetrahedral grids that offloads the computationally intensive projection and sorting stages to the GPU using CUDA, while retaining OpenGL/GLSL for rasterization and compositing [S1, unofficial]. It solves the bottleneck of CPU-based tetrahedron classification and sorting, enabling the visualization of tens of millions of cells at interactive frame rates [S1, unofficial]. Unlike its sibling [On-the-fly Shell Geometry Construction](13927-on-the-fly-shell-geometry-construction.md), which constructs explicit shell geometry, this method projects tetrahedra directly into screen-space triangles. It differs from [Sorted Rasterization of Projected Tetrahedra](3018-sorted-rasterization-of-projected-tetrahedra.md) by using a dedicated CUDA kernel for sorting via the Thrust library rather than relying solely on GPU rasterization order or CPU sorting.
+
+## How it works
+The algorithm is divided into four distinct stages: Projection (CUDA), Sorting (Thrust), Index Formation (CUDA), and Rendering (OpenGL/GLSL) [S1, unofficial]. All data preparation occurs on the GPU to avoid CPU-GPU memory transfers [S1, unofficial].
+
+### Inputs and Outputs
+*   **Inputs:**
+    *   Tetrahedral mesh: Array of node coordinates $(x, y, z)$ and scalar field values $s$ at each node.
+    *   Camera parameters: View and projection matrices defining the screen space.
+    *   Transfer function: Mapping from scalar values to color and opacity.
+*   **Outputs:**
+    *   Final composited image in the color screen buffer.
+
+### Data Structures
+The method utilizes several arrays and buffers in GPU global memory:
+
+1.  **Node Data:** Struct containing coordinates $(x, y, z)$ and scalar value $s$ for each mesh node.
+2.  **Tetrahedron Data:** Struct containing indices to the four nodes of each tetrahedron.
+3.  **Projection Output:** For each tetrahedron, an array storing:
+    *   Classification class (determining the number of vertices in the projected primitive).
+    *   Depth of the tetrahedron center (used for sorting).
+    *   Vertex indices for the resulting `GL_TRIANGLE_FAN`.
+    *   Scalar values and ray length parameters for the "thick" vertex.
+4.  **Index Arrays for Rendering:**
+    *   `count` array: Stores the number of vertices for each `GL_TRIANGLE_FAN` primitive. Copied to CPU memory after each frame.
+    *   `indices` array: Stores the vertex indices for each primitive. Stored in a GPU Vertex Buffer Object (VBO).
+    *   `pindices` array: Pointers/offsets into the `indices` array for `glMultiDrawElements`. Filled once during initialization.
+5.  **Vertex Buffers (VBOs):**
+    *   Buffer 1: Vertex coordinates.
+    *   Buffer 2: Scalar field values and tetrahedron thickness (ray length) at each vertex.
+    *   Buffer 3: Indices referencing Buffers 1 and 2.
+
+### Definitions
+*   **Thick Vertex:** The vertex of the projected tetrahedron where the ray length passing through the original tetrahedron is maximal [S1, unofficial]. For this vertex, the entry and exit point coordinates, the ray length $l$, and the scalar values at the front ($s_f$) and back ($s_b$) faces are computed [S1, unofficial].
+*   **Thin Vertices:** Vertices where the ray length is zero. These correspond to the original cell nodes. Their scalar values and coordinates are known directly from the mesh data [S1, unofficial].
+
+### Numbered Steps
+
+#### Stage 1: Projection (CUDA Kernel)
+Each CUDA thread processes one tetrahedron. The kernel performs the following actions:
+1.  Load the coordinates of the four tetrahedron nodes from global memory.
+2.  Project node coordinates to screen space.
+3.  Compute the depth of the tetrahedron center.
+4.  Classify the tetrahedron based on its position relative to the observer. Classification determines the number of resulting triangles and vertices in the projection [S1, unofficial].
+5.  Sort the projection vertices.
+6.  Compute intersection parameters of the projected faces.
+7.  Compute the coordinates of the "thick" vertex and the ray length $l$ at that point.
+8.  Compute the scalar values $s_f$ and $s_b$ for the "thick" vertex.
+9.  Form the output data structure containing the classification, depth, and vertex indices.
+
+#### Stage 2: Sorting (Thrust Library)
+To correctly handle semi-transparent objects, tetrahedra must be sorted back-to-front (near-to-far) [S1, unofficial].
+1.  Create a key array containing the depth of the center of each tetrahedron.
+2.  Create a value array containing the ordinal indices (original IDs) of the tetrahedra.
+3.  Use `thrust::sort_by_key` to sort the keys (depths) in ascending order (near to far).
+4.  Permute the value array (indices) according to the sorted keys. This reorders the tetrahedron data for the subsequent stages.
+
+#### Stage 3: Index Formation (CUDA Kernel)
+A CUDA kernel generates the index arrays required for `glMultiDrawElements`. For each output primitive (corresponding to one sorted tetrahedron):
+1.  Select the tetrahedron index from the sorted array.
+2.  Read the tetrahedron's classification info.
+3.  Write the number of vertices for the corresponding `GL_TRIANGLE_FAN` primitive to the `count` array.
+4.  Write the vertex indices to the `indices` array according to the projection class.
+
+#### Stage 4: Rendering (OpenGL/GLSL)
+1.  Copy the `count` array to CPU memory.
+2.  Update the `indices` array in the GPU VBO.
+3.  Bind Vertex Buffer Objects:
+    *   VBO 1: Vertex coordinates.
+    *   VBO 2: Scalar values and thickness ($l$) at vertices.
+    *   VBO 3: Indices.
+4.  Execute `glMultiDrawElements` with `GL_TRIANGLE_FAN`.
+5.  **Vertex Shader:** Performs standard transformation and interpolation of scalar values ($s_f, s_b$) and thickness ($l$) across the triangle.
+6.  **Fragment Shader:**
+    *   Interpolate $s_f, s_b, l$ for the current fragment.
+    *   Sample color from a 1D texture palette based on scalar values.
+    *   Compute fragment color and transparency using the radiation intensity integral.
+    *   Composite the result into the screen buffer using the blending equation:
+        $$I_{new} = Color + (1 - Alpha) \times I$$
+        where $I$ is the current color value in the buffer, and $Color$ and $Alpha$ are the calculated color and transparency for the current fragment [S1, unofficial].
+
+### Pseudocode
+
+> **Unverified code.** The code below did not pass a test run against a reference implementation, or no test fits it, so it may contain errors.
+
+```python
+# Stage 1: Projection Kernel
+@cuda.kernel
+def project_tetrahedra(nodes, scalars, view_proj_matrix, output_data):
+    tid = cuda.grid(1)
+    if tid >= num_tetrahedra:
+        return
+    
+    # 1. Load node coordinates
+    node_indices = tetrahedra[tid].node_indices
+    coords = [nodes[i].coord for i in node_indices]
+    scalars_vals = [scalars[i].value for i in node_indices]
+    
+    # 2. Project to screen space
+    screen_coords = [project_to_screen(c, view_proj_matrix) for c in coords]
+    
+    # 3. Compute center depth
+    center = sum(coords) / 4.0
+    depth = project_depth(center, view_proj_matrix)
+    
+    # 4. Classify tetrahedron
+    # Classification logic determines the number of vertices and their order
+    # based on the position relative to the observer.
+    classification = classify_tetrahedron(screen_coords, coords)
+    num_vertices = classification.num_vertices
+    vertex_order = classification.vertex_indices
+    
+    # 5. Sort projection vertices
+    # Sort vertices based on screen-space position or depth as required by classification
+    sorted_vertices = sort_vertices(screen_coords, vertex_order)
+    
+    # 6. Compute thick vertex parameters
+    # Identify the vertex with max ray length
+    thick_vertex_idx = find_thick_vertex(coords, view_proj_matrix)
+    thick_coord = coords[thick_vertex_idx]
+    
+    # Compute ray entry/exit points and length l
+    ray_entry, ray_exit = compute_ray_intersection(thick_coord, view_direction)
+    ray_length = distance(ray_entry, ray_exit)
+    
+    # 7. Compute scalar values for thick vertex
+    # Interpolate or sample scalars at entry/exit points
+    s_front = interpolate_scalar(ray_entry, coords, scalars_vals)
+    s_back = interpolate_scalar(ray_exit, coords, scalars_vals)
+    
+    # 8. Form output data
+    output_data[tid].depth = depth
+    output_data[tid].classification = classification
+    output_data[tid].thick_vertex_scalar_front = s_front
+    output_data[tid].thick_vertex_scalar_back = s_back
+    output_data[tid].thick_vertex_length = ray_length
+    output_data[tid].vertex_indices = sorted_vertices
+
+# Stage 2: Sorting
+def sort_tetrahedra_by_depth(output_data):
+    depths = [d.depth for d in output_data]
+    indices = list(range(len(output_data)))
+    
+    # Use Thrust sort_by_key
+    # keys: depths, values: indices
+    sorted_keys, sorted_indices = thrust.sort_by_key(depths, indices)
+    
+    # Reorder output_data based on sorted_indices
+    sorted_output_data = [output_data[i] for i in sorted_indices]
+    return sorted_output_data
+
+# Stage 3: Index Formation Kernel
+@cuda.kernel
+def form_indices(sorted_output_data, count_array, indices_array):
+    tid = cuda.grid(1)
+    if tid >= len(sorted_output_data):
+        return
+    
+    tet = sorted_output_data[tid]
+    classification = tet.classification
+    
+    # Write count
+    count_array[tid] = classification.num_vertices
+    
+    # Write indices
+    indices_array[tid * max_vertices : tid * max_vertices + classification.num_vertices] = \
+        classification.vertex_indices
+
+# Stage 4: Rendering (Conceptual)
+def render_frame(count_array, indices_vbo, vbo_coords, vbo_scalars):
+    # Bind VBOs
+    bind_vbo(0, vbo_coords)
+    bind_vbo(1, vbo_scalars)
+    bind_vbo(2, indices_vbo)
+    
+    # Draw
+    glMultiDrawElements(GL_TRIANGLE_FAN, count_array, indices_vbo, pindices, num_primitives)
+```
+
+### Parameters
+*   **Sorting Direction:** Near-to-far (back-to-front). This is required for the additive blending equation $I_{new} = Color + (1 - Alpha) \times I$ to correctly composite semi-transparent objects [S1, unofficial].
+*   **Primitive Type:** `GL_TRIANGLE_FAN`. Each tetrahedron is converted into a fan of triangles defined by vertices $v_1, v_2, \dots, v_n$. The triangles are formed as: 1st: $v_1, v_2, v_3$; 2nd: $v_1, v_3, v_4$; $i$-th: $v_1, v_{i+1}, v_{i+2}$ [S1, unofficial].
+
+### Edge Cases and Pitfalls
+*   **CUDA-only Rendering:** An alternative implementation that replaces OpenGL/GLSL with a CUDA kernel for primitive drawing was tested but resulted in performance one order of magnitude lower than the OpenGL/GLSL approach [S1, unofficial].
+*   **Precision:** Ray intersection calculations for the "thick" vertex require careful handling of floating-point precision to avoid artifacts in the scalar interpolation.
+*   **Boundary Conditions:** Vertices on the boundary of the view frustum must be correctly clipped or handled to prevent invalid projections.
+
+## Operating characteristics
+*   **Performance:** The method achieves approximately 23 million tetrahedra/cells per second on an NVIDIA GeForce GTX 570 (1280MB) with a Pentium IV 3.0 GHz CPU and 4GB RAM [S1, unofficial].
+    *   Set 1 (4374k cells): 23.072 M cells/sec.
+    *   Set 2 (10764k cells): 23.574 M cells/sec.
+    *   Set 3 (5760k cells): 23.693 M cells/sec.
+    *   Set 4 (3198.5k cells): 22.465 M cells/sec.
+    *   Set 5 (533k cells): 19.389 M cells/sec [S1, unofficial].
+*   **Time Complexity:** The projection and sorting stages are $O(N)$ and $O(N \log N)$ respectively, where $N$ is the number of tetrahedra. The sorting is performed on the GPU using Thrust.
+*   **Memory Complexity:** Requires storage for node data, tetrahedron data, projection output, and index arrays. All data is kept in GPU memory to avoid CPU-GPU transfers.
+*   **Strengths:** High performance for large unstructured grids; interactive frame rates; efficient use of GPU parallelism for projection and sorting.
+*   **Limitations:** Relies on OpenGL for rendering, which may limit portability to non-OpenGL environments; performance drops significantly if CUDA-only rendering is attempted.
+
+## Background
+The method was proposed by V.V. Titov from GDT Software Group, Tula, in a 2012 paper titled "Volume Visualization of Gas Dynamics Modeling Results by the Projected Tetrahedra Method Using CUDA Technology" [S1, unofficial]. It extends the traditional Projected Tetrahedra algorithm by leveraging CUDA for the parallel projection and sorting stages, addressing the limitations of CPU-based approaches for interactive visualization of large-scale gas dynamics simulation results.
+
+## Sources
+[S1] объемная визуализация результатов, https://hpc-education.unn.ru/files/conference_hpc/2012/files/411.pdf, fetched 2026-10-30 (unofficial)

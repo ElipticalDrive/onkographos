@@ -1,0 +1,563 @@
+--- v002.md
++++ v003.md
+@@ -4,262 +4,320 @@
+ 
+ ## Overview
+-NeuMesh++ is a mesh-based neural radiance field representation that encodes scene geometry and appearance into disentangled latent codes anchored to the vertices of a mesh scaffold [S2]. It solves the problem of high-frequency detail preservation and efficient, fine-grained editing (geometry deformation, texture swapping, painting) in unbounded scenes, where standard volume rendering requires excessive sampling and traditional mesh representations lack view-dependent appearance [S2]. Unlike its predecessor NeuMesh, which relied on a pre-trained teacher model for stability, NeuMesh++ introduces a novel local space parameterization and a decoder-free modification color to achieve stable training without distillation, while supporting unbounded backgrounds via hybrid blending with an implicit hash grid [S2].
++NeuMesh++ is a mesh-based neural radiance field representation that encodes a scene using disentangled geometry, texture, and semantic codes attached to a mesh scaffold [S2]. It solves the problem of high-fidelity novel view synthesis while enabling efficient, fine-grained 3D editing (geometry deformation, texture swapping, painting, and semantic-guided editing) without the need for UV mapping or pre-trained teacher models [S1, S2]. Unlike its predecessor NeuMesh, which relied on distillation from an implicit SDF field and suffered from spatial ambiguity on single-layer vertex codes, NeuMesh++ introduces a novel local space parameterization and a decoder-free modification color to stabilize training and improve editing fidelity [S2]. It extends to unbounded scenes by blending the mesh-based foreground with an implicit hash grid background [S2].
+ 
+ ## How it works
+-**Inputs and Outputs:**
+-*   **Inputs:** A set of calibrated images with known camera poses; optionally, foreground masks for scenes with empty backgrounds.
+-*   **Outputs:** A rendered color image $\hat{C}(\mathbf{r})$ for a given camera ray $\mathbf{r}$; editable mesh geometry and per-vertex latent codes.
+-
+-**Data Structures:**
+-1.  **Mesh Scaffold:** A triangle mesh $M$ extracted from an external reconstruction method (e.g., Neuralangelo [S2]) or an SDF field (e.g., NeuS [S1]). The mesh defines the spatial domain.
+-2.  **Per-Vertex Codes:** For each vertex $v$ on the mesh, the following learnable parameters are stored:
+-    *   Geometry code $\mathbf{l}_g \in \mathbb{R}^{d_g}$ (dimension not explicitly specified in [S2], but implied by decoder input).
+-    *   Texture code $\mathbf{l}_t \in \mathbb{R}^{d_t}$ (dimension not explicitly specified in [S2]).
+-    *   Modification color $\mathbf{c}_m \in \mathbb{R}^3$ (RGB, view-independent).
+-    *   Semantic code $\mathbf{l}_s \in \mathbb{R}^{d_s}$ (used for semantic-guided editing [S2]).
+-3.  **Occupancy Grid:** A 3D grid used to guide ray sampling, initialized from the mesh scaffold and updated during geometry editing [S2].
+-
+-**Numbered Steps:**
+-
+-1.  **Mesh Acquisition:** Extract a foreground mesh $M$ from a source (e.g., Neuralangelo) using Marching Cubes with a voxel resolution of 256 and spatial range $[-1, 1]$ [S1, S2].
+-2.  **Ray Casting and Sampling:**
+-    *   Cast a ray $\mathbf{r}$ from the camera.
+-    *   Use the occupancy grid to identify occupied regions, bypassing empty space [S2].
+-    *   Sample $N$ points along the ray within the occupied bounds. The standard configuration uses 64 coarse points and 64 fine points (128 total) [S1, S2].
+-    *   Pre-compute near-far bounds for each ray by finding the minimum and maximum distances of ray-to-mesh intersections to accelerate sampling [S1].
+-3.  **Local Space Parameterization (for each query point $\mathbf{x}$ on the ray):**
+-    *   Find the $K$ nearest vertices $\{v_k\}_{k=1}^K$ from the mesh scaffold within a fixed radius. The standard value is $K=8$ [S1, S2].
+-    *   For each neighbor $v_k$, calculate:
+-        *   The Euclidean distance: $d_k = \|\mathbf{v}_k - \mathbf{x}\|$.
+-        *   The projection distance along the vertex normal $\mathbf{n}_k$: $p_k = (\mathbf{v}_k - \mathbf{x}) \cdot \mathbf{n}_k$ [S2].
+-        *   The normalized inverse distance: $w_k = \frac{d_k}{\sum_{i=1}^K d_i}$ [S2].
+-    *   Form the local indicator vector $\mathbf{h}_k = (p_k, w_k)$ [S2].
+-4.  **Decoding Geometry and Radiance:**
+-    *   Forward the local geometry code $\mathbf{l}_g^k$, local texture code $\mathbf{l}_t^k$, and local indicator $\mathbf{h}_k$ to the decoders.
+-    *   **Geometry Decoder ($F_G$):** A Multi-Layer Perceptron (MLP) with 3 hidden layers, 256 hidden size, and SoftPlus activation [S1]. It takes positional encoding of $\mathbf{h}_k$ and $\mathbf{l}_g^k$ as input.
+-        *   Output: Density $\sigma_k$ [S2].
+-    *   **Radiance Decoder ($F_R$):** An MLP with 4 hidden layers, 256 hidden size, and ReLU activation [S1]. It takes positional encoding of $\mathbf{h}_k$, $\mathbf{l}_t^k$, viewing direction $\mathbf{d}$, and normal $\mathbf{n}_k$ as input.
+-        *   Output: Base color contribution $\mathbf{c}_k^{base}$ [S2].
+-    *   **Final Color:** The color contribution from vertex $k$ is computed as:
+-        $$ \mathbf{c}_k = \mathbf{c}_k^{base} + \mathbf{c}_m^k $$
+-        where $\mathbf{c}_m^k$ is the modification color interpolated from the $K$ nearest vertices [S2].
+-5.  **Volume Rendering:**
+-    *   Aggregate contributions from all $N$ samples along the ray using standard volume rendering [S2]:
+-        $$ \hat{C}(\mathbf{r}) = \sum_{i=1}^N T_i \alpha_i \mathbf{c}_i $$
+-        $$ T_i = \prod_{j=1}^{i-1} (1 - \alpha_j), \quad \alpha_i = 1 - \exp(-\sigma_i \delta_i) $$
+-        where $\delta_i$ is the distance between adjacent samples [S2].
+-6.  **Unbounded Background Blending (Optional):**
+-    *   If the scene is unbounded, render a background color $\hat{C}(\mathbf{r})_{\text{bg}}$ using an implicit hash grid (following the NeuS approach) [S2].
+-    *   Blend the foreground NeuMesh++ color with the background color weighted by the accumulated transmittance $T$ of the foreground:
+-        $$ \hat{C}(\mathbf{r})_{\text{comp}} = \hat{C}(\mathbf{r}) \cdot T + \hat{C}(\mathbf{r})_{\text{bg}} \cdot (1 - T) $$
+-        where $T$ is the accumulated transmittance of NeuMesh++ [S2].
+-
+-**Pseudocode:**
++
++### Inputs and Outputs
++**Inputs:**
++- A set of calibrated images with known camera poses.
++- Optional foreground masks for scenes with empty backgrounds.
++- A foreground mesh scaffold (typically extracted from Neuralangelo and Marching Cubes) [S2].
++- For editing: User interactions (vertex selection, painting masks, semantic clicks) [S2].
++
++**Outputs:**
++- Volume-rendered color images for novel views.
++- Editable latent codes (geometry, texture, modification color, semantic) stored on mesh vertices.
++
++### Data Structures
++
++**Per-Vertex Storage (on mesh scaffold):**
++Each vertex $v$ stores a set of learnable parameters [S2]:
++1.  **Geometry Code ($l_g$):** Latent vector for geometry.
++2.  **Texture Code ($l_t$):** Latent vector for appearance.
++3.  **Modification Color ($c_m$):** View-independent, decoder-free color attribute for editing [S2].
++4.  **Semantic Code ($l_s$):** Latent vector storing semantic attributes (aggregated from open-vocabulary segmentation) [S2].
++
++**Query Point Interpolated Attributes:**
++For a query point $x$, the system retrieves interpolated values from $K$ nearest vertices [S1, S2]:
++-   Interpolated Geometry Code ($l_g(x)$): 32 dimensions [S1].
++-   Interpolated Texture Code ($l_t(x)$): 32 dimensions [S1].
++-   Local Indicator Vector ($h(x)$): Computed from spatial relationships (see Formulas).
++
++**Decoders:**
++Two separate Multi-Layer Perceptrons (MLPs) [S1, S2]:
++1.  **Geometry Decoder ($F_G$):** Decodes density $\sigma$.
++2.  **Radiance Decoder ($F_R$):** Decodes base color $c$.
++
++### Numbered Steps
++
++1.  **Mesh Acquisition:** Extract a foreground mesh from an external reconstruction method (e.g., Neuralangelo) using Marching Cubes [S2]. The mesh serves as the scaffold for latent codes [S2].
++2.  **Occupancy Grid Initialization:** Initialize an occupancy grid using the mesh scaffold to guide ray sampling, bypassing unoccupied space [S2]. Update this grid if the mesh is deformed [S2].
++3.  **Ray Casting and Sampling:** Cast rays from camera viewpoints. Sample $N$ points along each ray. NeuMesh++ uses 64 coarse points and 64 fine points (progressive up-sampling), totaling 128 samples per ray [S1]. Pre-compute near-far bounds based on ray-mesh intersections to accelerate this step [S1].
++4.  **Nearest Neighbor Search:** For each query point $x$ along a ray, find the $K$ nearest vertices $\{v_k\}_{k=1}^K$ from the mesh scaffold within a fixed radius [S2]. Default $K=8$ [S1].
++5.  **Local Indicator Calculation:** For each neighbor $v_k$, calculate the local indicator vector $h_k$ to resolve spatial ambiguity (inner/outer distinction) [S2]:
++    -   Calculate normalized inverse distance: $w_k = \frac{\|v_k - x\|}{\sum_{i=1}^K \|v_i - x\|}$ [S2].
++    -   Calculate projection distance: $p_k = (v_k - x) \cdot n_k$, where $n_k$ is the normal of vertex $v_k$ [S2].
++    -   Form local indicator: $h_k = (p_k, w_k)$ [S2].
++6.  **Interpolation:** Interpolate the vertex codes ($l_g, l_t$) and local indicators ($h_k$) based on the distances to form inputs for the decoders [S1, S2].
++7.  **Decoding:**
++    -   Feed $l_g$ and $h$ into the Geometry Decoder $F_G$ to obtain density $\sigma$ [S2].
++    -   Feed $l_t$, $h$, viewing direction $d$, and vertex normal $n$ into the Radiance Decoder $F_R$ to obtain base color $c$ [S2].
++    -   Add the vertex-specific modification color $c_m$ to the decoded color: $c_{final} = c + c_m$ [S2].
++8.  **Volume Rendering:** Aggregate densities and colors using standard volume rendering equations [S2]:
++    -   Opacity: $\alpha_i = 1 - \exp(-\sigma_i \delta_i)$, where $\delta_i$ is the distance between adjacent samples.
++    -   Transmittance: $T_i = \prod_{j=1}^{i-1} (1 - \alpha_j)$.
++    -   Color: $\hat{C}(r) = \sum_{i=1}^N T_i \alpha_i c_i$.
++9.  **Background Blending (Unbounded Scenes):** For unbounded scenes, render a background color $\hat{C}(r)_{bg}$ using an implicit hash grid (following NeuS approach) [S2]. Blend foreground and background:
++    -   $\hat{C}(r)_{comp} = \hat{C}(r) * T + \hat{C}(r)_{bg} * (1 - T)$, where $T$ is the accumulated transmittance of the NeuMesh++ foreground [S2].
++10. **Training (Distillation-Free):** NeuMesh++ does not require a pre-trained teacher model. It optimizes latent codes and decoders directly using photometric loss and regularization [S2].
++
++### Formulas
++
++**Rendering Equation:**
++$$ \hat{C}(\mathbf{r}) = \sum_{i=1}^N T_i \alpha_i \mathbf{c}_i, \quad T_i = \prod_{j=1}^{i-1} (1 - \alpha_j), \quad \alpha_i = 1 - \exp(-\sigma_i \delta_i) $$
++where $\mathbf{r}$ is the ray, $N$ is the number of samples, $\sigma_i$ is density, $\mathbf{c}_i$ is color, and $\delta_i$ is sample spacing [S2].
++
++**Local Indicator:**
++$$ w_k = \frac{\|v_k - x\|}{\sum_{i=1}^K \|v_i - x\|}, \quad p_k = (v_k - x) \cdot n_k, \quad h_k = (p_k, w_k) $$
++where $v_k$ is the $k$-th nearest vertex, $n_k$ is its normal, and $x$ is the query point [S2].
++
++**Decoder Outputs:**
++$$ \sigma_k = F_G(\mathbf{l}_k^g, \mathbf{h}_k) $$
++$$ \mathbf{c}_k = F_R(\mathbf{l}_k^t, \mathbf{h}_k, \mathbf{d}, \mathbf{n}_k) + \mathbf{c}_k^m $$
++where $\mathbf{d}$ is the viewing direction and $\mathbf{c}_k^m$ is the modification color [S2].
++
++**Loss Functions:**
++1.  **Photometric Loss:**
++    $$ \mathcal{L}_f = \sum_{\mathbf{r} \in R} \|\hat{C}(\mathbf{r}) - C(\mathbf{r})\|_2^2 + 0.01 \cdot \sum_{\mathbf{r} \in R} \|\hat{C}^m(\mathbf{r}) - C(\mathbf{r})\|_2^2 $$
++    where $C(\mathbf{r})$ is the ground truth color, and $\hat{C}^m(\mathbf{r})$ is the accumulated modification color [S2].
++2.  **Mask Loss (for empty backgrounds):**
++    $$ M_m = \sum_{\mathbf{r} \in R} \text{BCE}(\hat{M}(\mathbf{r}), M(\mathbf{r})) $$
++    where $\hat{M}(\mathbf{r}) = \sum_{i=1}^N T_i \alpha_i$ and $M(\mathbf{r})$ is the ground truth mask [S2].
++3.  **Total Variation Loss:**
++    $$ \mathcal{L}_t = \sum_{i=1}^N \sum_{j \in \text{NR}(i)} |l_i - l_j| $$
++    where $\text{NR}(i)$ contains the indices of the $K_{tv}$ closest vertices to $v_i$ [S2].
++
++### Parameters
++
++-   **K (Nearest Neighbors):** Number of vertices used for interpolation. Default: 8 [S1].
++-   **K_tv:** Number of closest vertices for Total Variation loss. Not given in the sources.
++-   **Mesh Resolution:** Marching Cubes voxel resolution 256, spatial range $[-1, 1]$ [S1].
++-   **Positional Encoding Frequencies:**
++    -   Signed distances/Local indicators: 8 frequencies [S1].
++    -   Interpolated codes: 2 frequencies [S1].
++    -   Viewing directions: 4 frequencies [S1].
++-   **Geometry Decoder:** 3 hidden layers, 256 hidden size, SoftPlus activation [S1].
++-   **Radiance Decoder:** 4 hidden layers, 256 hidden size, ReLU activation [S1].
++-   **Samples per Ray:** 128 total (64 coarse + 64 fine) [S1].
++-   **Loss Weight:** 0.01 for modification color photometric loss term [S2].
++-   **Rendering Resolution:** 800 × 800 for performance benchmarks; 1600 × 1200 for DTU dataset training [S2].
++
++### Edge Cases and Pitfalls
++
++-   **Spatial Distinguishability:** Naive trilinear interpolation of single-layer vertex codes fails to distinguish inner/outer queries perpendicular to the surface [S1, S2]. NeuMesh++ resolves this with the local indicator vector $h_k$ (projection distance and normalized inverse distance) [S2].
++-   **Training Stability:** Vertex-bounded representations lack the spatial continuity of MLP-based methods, risking unstable training [S1]. NeuMesh++ avoids the need for a teacher model (used in NeuMesh) by using the local space parameterization and Total Variation loss [S2].
++-   **View-Dependent Editing:** Standard neural decoders limit the range of modifiable colors due to fixed weights and view conditioning [S2]. NeuMesh++ introduces a decoder-free, view-independent **modification color** ($c_m$) per vertex to allow high-fidelity texture painting and swapping [S2].
++-   **Overfitting in Editing:** Fine-tuning texture codes with a single image can cause artifacts in other views [S1]. NeuMesh++ uses a **spatial-aware optimization strategy**: it selects only the modification colors of vertices intersected by probing rays from painted pixels, fine-tuning only those to preserve other regions [S2].
++-   **Non-Watertight Meshes:** The representation is agnostic to mesh topology (non-watertight, non-manifold) because it relies on local vertex neighborhoods rather than global surface continuity [S2].
++
++### Pseudocode
+ 
+ ```python
+ import numpy as np
+ 
+-def neu_mesh_plus_plus_render(ray_origin, ray_direction, mesh, vertex_codes, 
+-                              occupancy_grid, background_model, K=8):
+-    """
+-    Renders a single ray using NeuMesh++.
++def neu_mesh_plus_plus_render(mesh, camera_poses, images, masks, 
++                              geometry_decoder, radiance_decoder, 
++                              K=8, num_coarse=64, num_fine=64):
++    """
++    NeuMesh++ Rendering and Training Loop.
+     
+     Args:
+-        ray_origin: (3,) array, camera ray origin.
+-        ray_direction: (3,) array, camera ray direction.
+-        mesh: Mesh object containing vertices V, normals N, and connectivity.
+-        vertex_codes: Dictionary or array containing l_g, l_t, c_m, l_s for each vertex.
+-        occupancy_grid: 3D grid for sampling guidance.
+-        background_model: Function or model to render background color.
+-        K: Number of nearest vertices to consider.
++        mesh: Object containing vertices V, normals N, and latent codes 
++              (l_g, l_t, c_m, l_s).
++        camera_poses: List of camera extrinsics/intrinsics.
++        images: Ground truth images.
++        masks: Ground truth foreground masks (optional).
++        geometry_decoder: MLP F_G.
++        radiance_decoder: MLP F_R.
++        K: Number of nearest neighbors.
++        num_coarse: Number of coarse samples.
++        num_fine: Number of fine samples.
+         
+     Returns:
+-        color: (3,) array, final rendered color.
+-    """
+-    
+-    # 1. Determine sampling bounds
+-    # Pre-compute near-far bounds based on ray-mesh intersection
+-    t_min, t_max = compute_ray_mesh_bounds(ray_origin, ray_direction, mesh)
+-    
+-    # 2. Sample points along the ray
+-    # Use occupancy grid to filter or guide sampling
+-    # Standard: 64 coarse + 64 fine points
+-    num_samples = 128
+-    t_values = np.linspace(t_min, t_max, num_samples)
+-    points = ray_origin + ray_direction * t_values[:, np.newaxis]
+-    
+-    accumulated_transmittance = 1.0
+-    accumulated_color = np.zeros(3)
+-    
+-    for i, x in enumerate(points):
+-        # Skip if transmittance is negligible
+-        if accumulated_transmittance < 1e-5:
+-            break
++        Rendered images, losses.
++    """
++    
++    # 1. Initialize Occupancy Grid from Mesh
++    occupancy_grid = init_occupancy_grid_from_mesh(mesh)
++    
++    # 2. Pre-compute Near-Far Bounds for Rays
++    near_far_bounds = compute_ray_mesh_intersections(mesh, camera_poses)
++    
++    rendered_images = []
++    total_loss = 0
++    
++    for pose, gt_image, gt_mask in zip(camera_poses, images, masks):
++        ray_origins, ray_directions = generate_rays(pose, gt_image.shape)
++        N = len(ray_origins)
++        rendered_ray_colors = np.zeros((N, 3))
++        
++        # Combine coarse and fine samples
++        # Note: Progressive up-sampling is used for fine samples based on coarse results
++        # For simplicity, we assume N_total samples per ray
++        N_total = num_coarse + num_fine
++        sample_distances = sample_along_ray(ray_origins, ray_directions, 
++                                            near_far_bounds, N_total)
++        
++        # 3. Volume Rendering Loop
++        for i in range(N):
++            origin = ray_origins[i]
++            direction = ray_directions[i]
+             
+-        # 3. Find K nearest vertices
+-        # Calculate distances from x to all mesh vertices
+-        # Optimization: Use spatial hashing or KD-tree for efficiency
+-        dists = np.linalg.norm(mesh.vertices - x, axis=1)
+-        k_indices = np.argsort(dists)[:K]
+-        v_k = mesh.vertices[k_indices]
+-        n_k = mesh.normals[k_indices]
+-        
+-        # 4. Calculate local indicators
+-        # Vector from vertex to query point
+-        v_to_x = v_k - x # Shape (K, 3)
+-        
+-        # Projection distance p_k = (v_k - x) . n_k
+-        p_k = np.sum(v_to_x * n_k, axis=1) # Shape (K,)
+-        
+-        # Euclidean distance d_k
+-        d_k = np.linalg.norm(v_to_x, axis=1) # Shape (K,)
+-        
+-        # Normalized inverse distance w_k
+-        sum_d = np.sum(d_k)
+-        if sum_d == 0:
+-            w_k = np.ones(K) / K
+-        else:
+-            w_k = d_k / sum_d
++            # Get sample points along ray
++            points = origin + sample_distances[i][:, None] * direction
+             
+-        # Local indicator vector h_k = (p_k, w_k)
+-        # Note: w_k is scalar per vertex in the formula, but normalized by sum.
+-        # The formula in [S2] defines w_k = ||v_k - x|| / sum(||v_i - x||)
+-        
+-        # 5. Decode Geometry and Radiance for each neighbor
+-        # Interpolate vertex codes for the K neighbors
+-        l_g_k = vertex_codes['l_g'][k_indices]
+-        l_t_k = vertex_codes['l_t'][k_indices]
+-        c_m_k = vertex_codes['c_m'][k_indices]
+-        
+-        # Prepare inputs for decoders
+-        # Positional encoding is applied to h_k and codes
+-        # h_k consists of p_k and w_k
+-        h_k_input = np.stack([p_k, w_k], axis=1) # Shape (K, 2)
+-        
+-        # Decode Density
+-        # F_G takes l_g_k and h_k
+-        # Assuming MLP structure: 3 hidden layers, 256 size, SoftPlus
+-        sigma_k = geometry_decoder(l_g_k, h_k_input) # Shape (K,)
+-        
+-        # Decode Color
+-        # F_R takes l_t_k, h_k, viewing direction d, normal n_k
+-        # c_base = F_R(...)
+-        # c_k = c_base + c_m_k
+-        d_view = ray_direction
+-        n_k_input = n_k
+-        
+-        c_base_k = radiance_decoder(l_t_k, h_k_input, d_view, n_k_input) # Shape (K, 3)
+-        c_k = c_base_k + c_m_k # Shape (K, 3)
+-        
+-        # 6. Fuse contributions from K neighbors
+-        # The paper states: "fuse the densities and radiance ... under the condition of their latent codes and local indicators"
+-        # Standard approach in such vertex-bounded fields is weighted averaging based on distance or indicator.
+-        # [S2] defines w_k as normalized inverse distance.
+-        # However, volume rendering usually aggregates per-sample.
+-        # Here, each sample x gets a single sigma and c from the K neighbors.
+-        # We aggregate the K contributions into one sigma and one c for the sample x.
+-        
+-        # Weighted average for density
+-        # Using w_k as weights? Or uniform? 
+-        # [S2] Eq 2 implies c_k is derived from neighbor k. 
+-        # The rendering equation sums over samples i.
+-        # For sample i, we have K neighbors. We need to combine them.
+-        # Let's assume weighted average using w_k (normalized inverse distance)
+-        # Note: w_k in [S2] is defined as d_k / sum(d_i). This is proportional to distance, not inverse.
+-        # Wait, [S2] says "normalized inverse distance w_k = ||v_k - x|| / sum...". 
+-        # This is actually proportional to distance. Usually inverse distance weighting uses 1/d.
+-        # Let's stick to the formula: w_k = d_k / sum(d_i).
+-        
+-        # Aggregate sigma
+-        sigma_sample = np.sum(w_k * sigma_k)
+-        
+-        # Aggregate color
+-        c_sample = np.sum(w_k[:, np.newaxis] * c_k, axis=0)
+-        
+-        # 7. Volume Rendering Step
+-        # Calculate opacity alpha
+-        # delta_i is distance to next sample. For last sample, use a large delta or 0?
+-        # Standard NeRF: delta_i = t_{i+1} - t_i.
+-        if i < num_samples - 1:
+-            delta = t_values[i+1] - t_values[i]
+-        else:
+-            delta = t_values[i] - t_values[i-1] # Approximation
++            # Initialize accumulation variables
++            T_acc = 1.0
++            color_acc = np.zeros(3)
++            mod_color_acc = np.zeros(3)
+             
+-        alpha = 1.0 - np.exp(-sigma_sample * delta)
+-        
+-        # Accumulate color
+-        weight = accumulated_transmittance * alpha
+-        accumulated_color += weight * c_sample
+-        accumulated_transmittance *= (1.0 - alpha)
+-        
+-    # 8. Background Blending
+-    # Render background
+-    c_bg = background_model(ray_origin, ray_direction)
+-    
+-    # Blend
+-    final_color = accumulated_color + c_bg * accumulated_transmittance
+-    
+-    return final_color
+-
+-def geometry_decoder(l_g, h):
+-    """
+-    Simplified geometry decoder.
+-    Input: l_g (K, d_g), h (K, 2)
+-    Output: sigma (K,)
+-    """
+-    # Concatenate and apply positional encoding
+-    # Then pass through MLP: Linear -> SoftPlus -> Linear -> SoftPlus -> Linear -> SoftPlus -> Linear
+-    # Output dimension 1 (sigma)
+-    # Implementation details of MLP omitted for brevity, assumed standard PyTorch/TF module
+-    pass
+-
+-def radiance_decoder(l_t, h, d, n):
+-    """
+-    Simplified radiance decoder.
+-    Input: l_t (K, d_t), h (K, 2), d (3,), n (K, 3)
+-    Output: c_base (K, 3)
+-    """
+-    # Concatenate and apply positional encoding
+-    # Then pass through MLP: Linear -> ReLU -> ... -> Linear
+-    # Output dimension 3 (RGB)
+-    pass
++            for j, x in enumerate(points):
++                # 4. Find K nearest vertices
++                neighbors = find_k_nearest_vertices(x, mesh.vertices, K)
++                
++                # 5. Calculate Local Indicators and Interpolate
++                densities = []
++                colors = []
++                mod_colors = []
++                
++                for v_idx in neighbors:
++                    v = mesh.vertices[v_idx]
++                    n = mesh.normals[v_idx]
++                    
++                    # Local Indicator Calculation
++                    dist_vec = v - x
++                    dist_norm = np.linalg.norm(dist_vec)
++                    
++                    # Normalized inverse distance
++                    # Sum of distances to all K neighbors
++                    sum_dists = sum(np.linalg.norm(mesh.vertices[k] - x) for k in neighbors)
++                    w_k = dist_norm / sum_dists if sum_dists > 0 else 0
++                    
++                    # Projection distance
++                    p_k = np.dot(dist_vec, n)
++                    
++                    h_k = np.array([p_k, w_k])
++                    
++                    # Interpolate Codes (Weighted by inverse distance or similar)
++                    # Simplified: using weights derived from distances
++                    weight = 1.0 / (dist_norm + 1e-8)
++                    # Normalize weights for interpolation
++                    total_weight = sum(1.0 / (np.linalg.norm(mesh.vertices[k] - x) + 1e-8) for k in neighbors)
++                    w_interp = weight / total_weight
++                    
++                    l_g_interp = mesh.l_g[v_idx] * w_interp # Simplified interpolation
++                    l_t_interp = mesh.l_t[v_idx] * w_interp
++                    c_m_interp = mesh.c_m[v_idx] * w_interp
++                    
++                    # Positional Encoding
++                    # PE applied to h_k, l_g, l_t, direction
++                    h_pe = positional_encoding(h_k, freqs=8)
++                    l_g_pe = positional_encoding(l_g_interp, freqs=2)
++                    l_t_pe = positional_encoding(l_t_interp, freqs=2)
++                    d_pe = positional_encoding(direction, freqs=4)
++                    
++                    # 6. Decode
++                    sigma = geometry_decoder.forward(np.concatenate([l_g_pe, h_pe]))
++                    base_color = radiance_decoder.forward(np.concatenate([l_t_pe, h_pe, d_pe, n]))
++                    
++                    # Add modification color
++                    final_color = base_color + c_m_interp
++                    
++                    densities.append(sigma)
++                    colors.append(final_color)
++                    mod_colors.append(c_m_interp)
++                
++                # Fuse densities and colors from neighbors
++                # Using the weights from interpolation or a specific fusion strategy
++                # NeuMesh++ fuses under condition of latent codes and local indicators
++                # Simplified weighted sum based on neighbor weights
++                sigma_final = sum(d * w for d, w in zip(densities, [1.0/np.linalg.norm(mesh.vertices[k]-x) for k in neighbors]))
++                color_final = sum(c * w for c, w in zip(colors, [1.0/np.linalg.norm(mesh.vertices[k]-x) for k in neighbors]))
++                mod_color_final = sum(m * w for m, w in zip(mod_colors, [1.0/np.linalg.norm(mesh.vertices[k]-x) for k in neighbors]))
++                
++                # 7. Volume Rendering Step
++                delta = sample_distances[i][j+1] - sample_distances[i][j] if j < N_total-1 else 0
++                alpha = 1.0 - np.exp(-sigma_final * delta)
++                
++                T_acc *= (1.0 - alpha)
++                color_acc += T_acc * alpha * color_final
++                mod_color_acc += T_acc * alpha * mod_color_final
++                
++                if T_acc < 1e-4:
++                    break
++            
++            rendered_ray_colors[i] = color_acc
++            # Store mod_color_acc for loss calculation if needed
++        
++        rendered_images.append(rendered_ray_colors)
++        
++        # 8. Loss Calculation
++        # Photometric Loss
++        loss_f = np.mean((rendered_ray_colors - gt_image) ** 2)
++        # Accumulated modification color loss
++        # Note: mod_color_acc needs to be accumulated similarly to color_acc
++        # Simplified: assume mod_color_acc is available
++        loss_mod = 0.01 * np.mean((mod_color_acc - gt_image) ** 2)
++        
++        # Mask Loss
++        # M_hat = sum(T_i * alpha_i)
++        # M_m = BCE(M_hat, M)
++        loss_mask = 0 # Placeholder for BCE calculation
++        
++        # Total Variation Loss (on latent codes)
++        loss_tv = compute_total_variation_loss(mesh, K_tv=10)
++        
++        total_loss += loss_f + loss_mod + loss_mask + loss_tv
++        
++    return rendered_images, total_loss
++
++def compute_total_variation_loss(mesh, K_tv=10):
++    """
++    Computes Total Variation loss on latent codes.
++    """
++    loss = 0
++    for i, v_i in enumerate(mesh.vertices):
++        neighbors = find_k_nearest_vertices(v_i, mesh.vertices, K_tv)
++        for j in neighbors:
++            l_i = mesh.l_g[i] # Or l_t, or combined
++            l_j = mesh.l_g[j]
++            loss += np.sum(np.abs(l_i - l_j))
++    return loss
++
++def find_k_nearest_vertices(query_point, vertices, K):
++    """
++    Finds K nearest vertices to query_point.
++    """
++    dists = np.linalg.norm(vertices - query_point, axis=1)
++    indices = np.argsort(dists)[:K]
++    return indices
+ ```
+ 
+-**Parameters:**
+-*   $K$: Number of nearest vertices. Default: 8 [S1, S2].
+-*   $K_{tv}$: Number of closest vertices for Total Variation loss. Not given in the sources.
+-*   Positional Encoding Frequencies: Signed distances (part of $h$) use 8 frequencies; interpolated codes use 2 frequencies; viewing directions use 4 frequencies [S1].
+-*   Geometry Decoder: 3 hidden layers, 256 hidden size, SoftPlus activation [S1].
+-*   Radiance Decoder: 4 hidden layers, 256 hidden size, ReLU activation [S1].
+-*   Loss Weight for Modification Color: 0.01 [S2].
+-*   Rendering Resolution: 800 × 800 [S2].
+-*   Training Images: 1600 × 1200 (DTU) [S2].
+-
+-**Edge Cases and Pitfalls:**
+-*   **Spatial Distinguishability:** Naive trilinear interpolation of codes on a single-layer mesh fails to distinguish inner/outer queries perpendicular to the surface [S1, S2]. NeuMesh++ solves this with the local indicator $\mathbf{h}_k$ (projection distance $p_k$) [S2].
+-*   **Training Stability:** Vertex-bounded representations lack the spatial continuity of global MLPs, risking unstable training [S1]. NeuMesh++ avoids the need for a teacher model (used in NeuMesh) by using the local space parameterization and modification color [S2].
+-*   **Texture Overfitting:** Fine-tuning texture codes with a single image can cause view-dependent artifacts [S1]. NeuMesh++ uses a spatial-aware optimization strategy, selecting only affected modification colors via probing rays, to prevent this [S1, S2].
+-*   **Non-Watertight Meshes:** The method is agnostic to mesh topology (non-watertight, non-manifold) because it relies on local vertex neighborhoods rather than global surface definitions [S1, S2].
+-
+ ## Operating characteristics
+-*   **Time Complexity:** Rendering speed is approximately 15 fps on an Nvidia GTX 4070 GPU for 800 × 800 images [S2]. This is attributed to compact latent codes and lightweight decoders [S2].
+-*   **Memory Complexity:** Memory usage is proportional to the number of mesh vertices ($V$) times the code dimensions ($d_g + d_t + d_s + 3$). The occupancy grid adds a small constant overhead.
+-*   **Editing Efficiency:**
+-    *   Geometry editing (mesh deformation + occupancy grid update): ~1 second [S2].
+-    *   Texture painting (fine-tuning modification colors): ~1 second [S2].
+-    *   Semantic-guided editing (3D semantic propagation): ~2 seconds [S2].
+-    *   Texture swapping/filling: Immediate, no fine-tuning required [S2].
+-*   **Strengths:**
+-    *   High-fidelity rendering of high-frequency details (e.g., text, fur) compared to SDF-based methods like NeuS [S2].
+-    *   Efficient, fine-grained editing capabilities (geometry, texture, semantics) [S2].
+-    *   No need for UV mapping [S1].
+-    *   Stable training without a pre-trained teacher model [S2].
+-*   **Limitations:**
+-    *   Requires an initial mesh scaffold (e.g., from Neuralangelo or NeuS) [S1, S2].
+-    *   Performance depends on mesh quality and vertex density [S1].
+-    *   Unbounded scenes require an additional background model (hash grid) [S2].
++
++-   **Time Complexity:** Rendering speed is approximately 15 fps on an Nvidia GTX 4070 GPU for 800×800 images [S2]. This is achieved by using compact latent codes, lightweight decoders, and an occupancy grid to skip unoccupied space [S2].
++-   **Memory Complexity:** Memory usage is dominated by the storage of latent codes per vertex. For a mesh with 50K–150K vertices, this is significantly less than storing a dense voxel grid or a large hash grid for the entire scene [S1, S2].
++-   **Performance:** Outperforms BakedSDF quantitatively on the Mip-NeRF 360 dataset, particularly in high-frequency details [S2].
++-   **Editing Efficiency:**
++    -   Geometry editing: ~1 second to update the occupancy grid after mesh deformation [S2].
++    -   Texture painting: ~1 second for fine-tuning modification colors [S2].
++    -   Semantic-guided editing: ~2 seconds for 3D semantic propagation [S2].
++    -   Texture swapping/filling: Immediate rendering without fine-tuning [S2].
++-   **Strengths:**
++    -   Enables fine-grained, mesh-guided editing (geometry, texture, semantics) [S2].
++    -   No need for UV mapping [S1].
++    -   Agnostic to mesh topology (non-watertight) [S2].
++    -   High-fidelity rendering of complex geometry and textures [S2].
++    -   Training stability without a pre-trained teacher model [S2].
++-   **Limitations:**
++    -   Requires an initial mesh scaffold (e.g., from Neuralangelo) [S2].
++    -   Performance depends on mesh quality and vertex density [S1].
++    -   May suffer from artifacts if editing is not spatially aware (mitigated by the proposed strategy) [S1].
+ 
+ ## Background
+-NeuMesh++ is an extension of NeuMesh [S1], published in 2022. NeuMesh introduced a mesh-based neural implicit field with disentangled geometry and texture codes but relied on a distillation process from a pre-trained teacher model (NeuS) for stable training [S1]. NeuMesh++, published in 2025, rebuilds the representation on the neural radiance field directly, eliminating the need for distillation [S2]. It introduces a novel local space parameterization (using projection and normalized inverse distance) to improve spatial distinguishability and training stability [S2]. It also adds a decoder-free modification color for better texture editing fidelity and semantic codes for semantic-guided editing [S2]. The method is evaluated on the DTU dataset and NeRF 360° Synthetic dataset [S2].
++
++-   **Origin:** NeuMesh++ is an extension of NeuMesh [S1], published in TPAMI in 2025 [S2]. NeuMesh was originally presented in ECCV 2022 [S1].
++-   **Development:** NeuMesh used a distillation approach from a pre-trained implicit SDF field (NeuS) to stabilize training but suffered from spatial ambiguity and limited editing fidelity [S1, S2]. NeuMesh++ rebuilds the representation on the neural radiance field directly, introducing local space parameterization and modification colors to remove the need for distillation and improve editing [S2].
++-   **Usage:** Evaluated on the DTU dataset (15 scenes) and NeRF 360 Synthetic dataset [S2]. Used for applications requiring interactive 3D editing, such as texture swapping, filling, painting, and semantic-guided manipulation [S2].
+ 
+ ## Sources

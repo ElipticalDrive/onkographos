@@ -1,0 +1,19 @@
+# Framework and Baseline Implementations
+## Overview
+This family defines the software architectures and training protocols for executing differentiable volume rendering optimization [S1]. It is distinct from its siblings by specifying the low-level execution model (e.g., graph-based Vulkan submission vs. eager-mode) and high-level training schedules (e.g., distractor separation, multi-stage optimization) rather than the mathematical loss functions or camera models themselves [G].
+## Shared principles
+## Subtopics
+
+### [DressiAD Optimization Loop](10728-dressiad-optimization-loop.md)
+A define-and-run differentiable rendering optimization framework that constructs a computational graph, marks variables for gradient tracking, and executes forward/backward passes using Stochastic Gradient Descent (SGD). It distinguishes itself from standard AD libraries by packing the computational graph into Vulkan command buffers for execution, allowing for hardware-agnostic differentiable rendering. Unlike general-purpose AD which may suffer from high memory usage due to storing intermediate states, DressiAD manages graph staticity and rebuilds stages only when necessary, optimizing for the specific constraints of GPU-based rendering. Choose this method when hardware-agnostic execution and explicit graph staticity management are required for GPU-based rendering pipelines.
+
+### [Training & Optimization Protocol](12939-training-optimization-protocol.md)
+A protocol that defines the training loop, parameter initialization, and optimization hyperparameters for decomposed Gaussian splatting methods, specifically targeting distractor-free rendering. It distinguishes itself from standard Gaussian Splatting by explicitly modeling and optimizing distractor elements alongside static scene Gaussians to improve background reconstruction and reduce artifacts, using specific learning rate schedules and regularization weights. Choose this method when distractor elements degrade background reconstruction and require joint optimization with static geometry.
+
+### 4DGS Baseline Implementation
+This variant optimizes multi-view video sequences using a two-stage process [S1]. First, the first frame is optimized for 3,000 iterations [S1]. Second, the full multi-view video sequence is optimized for 14,000 iterations [S1].
+
+## Background
+Not given in the sources.
+## Sources
+[S1] Learning Efficient Fuse-and-Refine for Feed-Forward 3D Gaussian Splatting, https://arxiv.org/abs/2503.14698v2, fetched 2026-10-27

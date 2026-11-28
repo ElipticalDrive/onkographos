@@ -1,0 +1,171 @@
+--- v003.md
++++ v004.md
+@@ -4,10 +4,10 @@
+ 
+ ## Overview
+-A mesh-native voxelizer that produces an occupancy grid or a signed-distance field (SDF) over a Piecewise Linear Complex (PLC)'s bounding box, using exact-predicate classification to avoid epsilon-ray speckle [S1, unofficial]. It sets itself apart from its siblings by relying on Shewchuk's exact geometric predicates for robust inside/outside determination, ensuring watertight meshes classify correctly in single precision without the artifacts common in epsilon-based ray casting [S2]. Unlike [Fake Voxelization via Triangle-Cube Intersection](6951-fake-voxelization-via-triangle-cube-intersection.md) which approximates intersections, this method provides exact topological classification for the input tessellation [S1, unofficial].
++A mesh-native voxelizer that produces an occupancy grid or a signed-distance field (SDF) over a Piecewise Linear Complex (PLC)'s bounding box, using exact-predicate classification to avoid epsilon-ray speckle [S1, unofficial]. It sets itself apart from its siblings by relying on Shewchuk's exact geometric predicates for robust inside/outside determination, ensuring watertight meshes classify correctly in single precision without the artifacts common in epsilon-based ray casting [S2]. Unlike B-Rep CAD kernels such as OCCT which classify against exact analytic surfaces, this method classifies against the input tessellation, meaning its fidelity is bounded by the input faceting accuracy [S1, unofficial][S2].
+ 
+ ## How it works
+ **Inputs and Outputs:**
+ *   **Input:** A Piecewise Linear Complex (PLC), defined as a triangle mesh [S2].
+-*   **Output:** A `VoxelGrid` data structure containing origin, spacing, dimensions, and data fields. The data is exposed as a NumPy array of shape $(n_x, n_y, n_z)$ with `uint8` for occupancy or `float32` for SDF, along with origin and spacing metadata [S1, unofficial].
++*   **Output:** A `VoxelGrid` data structure containing origin, spacing, dimensions, and data fields [S2]. The data is exposed as a NumPy array of shape $(n_x, n_y, n_z)$ with `uint8` for occupancy or `float32` for SDF, along with origin and spacing metadata [S1, unofficial].
+ 
+ **Data Structures:**
+@@ -22,14 +22,7 @@
+ **Algorithm Steps:**
+ 1.  **Spatial Indexing:** Bucket triangles by their xy-projection into the `CarveGrid` to optimize queries, achieving approximately $O(\text{cells} + \text{triangles})$ complexity [S1, unofficial].
+-2.  **Grid Iteration:** Iterate over each voxel cell $(i, j, k)$ within the PLC's bounding box.
+-3.  **Classification (Occupancy):**
+-    *   Cast a vertical scanline (along the z-axis) through the center of the voxel cell's xy-projection [S1, unofficial].
+-    *   Count the number of crossings with the fan-triangulated boundary triangles that lie above the voxel center [S1, unofficial].
+-    *   Use `cmg::robust::orient3d` (Shewchuk's exact predicate) to determine plane-side sign changes and matching edge orientations for each intersection [S1, unofficial].
+-    *   **Grazing Case:** If `orient3d` returns exactly 0 (grazing), apply a deterministic $(x, y)$ nudge to the scanline to ensure robustness [S1, unofficial].
+-    *   The cell is **inside** if the number of crossings is odd [S1, unofficial].
+-4.  **SDF Calculation (if mode is "sdf"):**
+-    *   Compute the exact point-to-triangle distance using Ericson's algorithm [S1, unofficial].
+-    *   Sign the distance: negative if the voxel center is inside (odd parity), positive if outside (even parity) [S1, unofficial].
++2.  **Grid Iteration:** Iterate over each xy-column $(i, j)$ within the bounding box.
++3.  **Classification:** Cast a vertical scanline per xy-column through the grid [S1, unofficial]. Count the number of crossings with the fan-triangulated boundary triangles that lie above the voxel center [S1, unofficial]. Use `cmg::robust::orient3d` (Shewchuk's exact predicate) to determine plane-side sign changes and matching edge orientations for each intersection [S1, unofficial]. If `orient3d` returns exactly 0 (grazing), apply a deterministic $(x, y)$ nudge to the scanline to ensure robustness [S1, unofficial]. The cell is **inside** if the number of crossings is odd [S1, unofficial].
++4.  **SDF Calculation (if mode is "sdf"):** Compute the exact point-to-triangle distance using Ericson's algorithm [S1, unofficial]. Sign the distance: negative if the voxel center is inside (odd parity), positive if outside (even parity) [S1, unofficial].
+ 5.  **Output Generation:** Populate the `VoxelGrid` data array with the computed values [S2].
+ 
+@@ -38,8 +31,9 @@
+ def voxelize(plc, resolution=64, mode="occupancy", pad=1):
+     # 1. Setup grid parameters
+-    bbox = plc.bounding_box()
+-    dims = compute_dims(bbox, resolution, pad)
+-    spacing = compute_spacing(bbox, dims)
+-    origin = bbox.min - spacing * pad
++    bbox_min = plc.bounding_box_min()
++    bbox_max = plc.bounding_box_max()
++    spacing = (bbox_max - bbox_min) / resolution
++    dims = [int(resolution + 2 * pad) for _ in range(3)]
++    origin = bbox_min - spacing * pad
+     
+     # 2. Build spatial index (CarveGrid)
+@@ -49,54 +43,49 @@
+         
+     # 3. Initialize output grid
+-    if mode == "occupancy":
+-        grid = numpy.zeros(dims, dtype=numpy.uint8)
+-    else:
+-        grid = numpy.zeros(dims, dtype=numpy.float32)
+-        
+-    # 4. Iterate over voxels
+-    for k in range(dims.z):
+-        for j in range(dims.y):
+-            for i in range(dims.x):
+-                # Voxel center in world space
+-                center = origin + numpy.array([i, j, k]) * spacing
+-                
+-                # Get candidate triangles for this xy-column
+-                candidates = carve_grid.query_xy(center.x, center.y)
+-                
+-                # Count crossings using exact predicates
+-                crossings = 0
+-                for tri in candidates:
+-                    # Determine if the vertical ray from center intersects the triangle
+-                    # and if the intersection point is above the center
+-                    # Use orient3d for robustness
+-                    is_crossing = classify_vertical_ray(center, tri)
+-                    if is_crossing:
+-                        crossings += 1
+-                        
+-                # Determine occupancy
+-                is_inside = (crossings % 2 == 1)
+-                
++    grid = [[[[0.0 for _ in range(dims[2])] for _ in range(dims[1])] for _ in range(dims[0])]
++    
++    # 4. Iterate over xy-columns
++    for j in range(dims[1]):
++        for i in range(dims[0]):
++            # Voxel center in world space (using first k for ray origin)
++            center = [origin[k] + (k + pad) * spacing for k in range(3)]
++            
++            # Get candidate triangles for this xy-column
++            candidates = carve_grid.query_xy(center[0], center[1])
++            
++            # Count crossings using exact predicates
++            crossings = 0
++            for tri in candidates:
++                # Determine if vertical ray intersects triangle above center
++                # Use orient3d for robustness [G]
++                is_crossing, z_int = classify_vertical_ray(center, tri)
++                if is_crossing and z_int > center[2]:
++                    crossings += 1
++                    
++            # Determine occupancy
++            is_inside = (crossings % 2 == 1)
++            
++            # Fill k-dimension
++            for k in range(dims[2]):
+                 if mode == "occupancy":
+-                    grid[i, j, k] = 1 if is_inside else 0
++                    grid[i][j][k] = 1 if is_inside else 0
+                 else:
+                     # Compute SDF
+-                    dist = compute_point_triangle_distance(center, plc.triangles)
+-                    if is_inside:
+-                        grid[i, j, k] = -dist
+-                    else:
+-                        grid[i, j, k] = dist
+-                        
++                    dist = point_triangle_distance(center, plc.triangles)
++                    grid[i][j][k] = -dist if is_inside else dist
++                    
+     return VoxelGrid(origin=origin, spacing=spacing, dims=dims, data=grid)
+ 
+ def classify_vertical_ray(center, tri):
+     # Cast vertical ray from center upwards
+-    # Use orient3d to check intersection robustly
+-    # Apply deterministic nudge if orient3d is 0
+-    # Return True if intersection exists and z_intersect > center.z
++    # Use orient3d to check intersection robustly [G]
++    # Apply deterministic (x,y) nudge if orient3d is 0
++    # Return (True/False, intersection_z)
++    # Standard exact ray-triangle intersection logic [G]
+     pass
+ 
+-def compute_point_triangle_distance(point, triangles):
+-    # Ericson's exact point-to-triangle distance algorithm
+-    min_dist = infinity
++def point_triangle_distance(point, triangles):
++    # Ericson's exact point-to-triangle distance algorithm [G]
++    min_dist = float('inf')
+     for tri in triangles:
+         d = distance_point_triangle(point, tri)
+@@ -104,4 +93,25 @@
+             min_dist = d
+     return min_dist
++
++def distance_point_triangle(point, tri):
++    # Standard point-to-triangle distance computation [G]
++    pass
++
++class CarveGrid:
++    def __init__(self):
++        self.buckets = {}
++    def insert(self, tri):
++        # Bucket triangles by xy-projection bounding box
++        pass
++    def query_xy(self, x, y):
++        # Return triangles in overlapping xy-buckets
++        pass
++
++class VoxelGrid:
++    def __init__(self, origin, spacing, dims, data):
++        self.origin = origin
++        self.spacing = spacing
++        self.dims = dims
++        self.data = data
+ ```
+ 
+@@ -114,5 +124,5 @@
+ 
+ ### [Bolt](15747-bolt.md)
+-An optimization for solid mesh voxelization that skips expensive BVH distance queries for exterior voxels by leveraging parity check results. Choose this when performance is critical for solid meshes and you can accept placeholder infinite distances for exterior points.
++An optimization for solid mesh voxelization that skips expensive BVH distance queries for exterior voxels by leveraging parity check results. It sets itself apart from standard solid voxelization by avoiding the computation of the exact Signed Distance Field (SDF) for points that are guaranteed to be discarded by the interiority filter, provided no narrow band is required. Choose this when performance is critical for solid meshes and you can accept placeholder infinite distances for exterior points.
+ 
+ ## Operating characteristics

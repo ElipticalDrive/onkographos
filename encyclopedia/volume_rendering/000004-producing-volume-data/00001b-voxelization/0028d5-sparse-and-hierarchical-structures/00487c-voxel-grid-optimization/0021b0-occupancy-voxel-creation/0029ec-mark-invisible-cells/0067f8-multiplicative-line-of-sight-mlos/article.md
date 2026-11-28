@@ -1,0 +1,110 @@
+# Multiplicative Line Of Sight (MLOS)
+
+
+## Overview
+MLOS is a voxel filtering method used to isolate non-zero voxels in sparse volume reconstruction by leveraging calibration mapping and pixel intensities [S1, unofficial]. It sets apart from additive or algebraic initialization methods by using the product of pixel intensities across multiple views to determine voxel significance, effectively reducing the reconstruction domain to only those voxels with non-negligible intensity [S1, unofficial].
+
+## How it works
+**Inputs:**
+- A 3D voxel grid.
+- $N$ calibration matrices, one for each camera.
+- $N$ projection images (pixel intensities).
+
+**Outputs:**
+- A binary mask or filtered volume containing only voxels with non-negligible intensity.
+
+**Data Structures:**
+- Voxel grid: 3D array of floats.
+- Calibration matrices: $N \times 4 \times 4$ matrices mapping 3D world coordinates to 2D image coordinates.
+
+**Steps:**
+1. For each voxel $v$ in the 3D grid:
+2.   Determine the corresponding pixel coordinates $(u_i, v_i)$ for each camera $i \in \{1, \dots, N\}$ using the camera calibration matrices.
+3.   Retrieve the intensity $I_i$ of the pixel at $(u_i, v_i)$ from the $i$-th projection image.
+4.   Compute the product of intensities: $P_v = \prod_{i=1}^{N} I_i$.
+5.   If $P_v > 0$, the voxel is considered significant.
+6.   Compute the initial voxel value: $V_v = P_v^{1/N}$.
+7.   Assign $V_v$ to the voxel. If $P_v = 0$, the voxel is marked as negligible (or zero).
+
+**Formulas:**
+$$ P_v = \prod_{i=1}^{N} I_i $$
+$$ V_v = P_v^{1/N} $$
+Where:
+- $P_v$ is the product of pixel intensities for voxel $v$.
+- $I_i$ is the intensity of the pixel corresponding to voxel $v$ in camera $i$'s image.
+- $N$ is the number of cameras.
+- $V_v$ is the initial value assigned to voxel $v$.
+
+**Parameters:**
+- $N$: Number of cameras. Typical value: 4 [S1, unofficial].
+
+**Edge Cases and Pitfalls:**
+- If any pixel intensity is zero, the product is zero, and the voxel is discarded. This assumes that background subtraction has been performed to ensure non-zero intensities only correspond to particles [S1, unofficial].
+- Precision issues may arise if intensities are very small, leading to underflow in the product.
+- Calibration errors can lead to incorrect pixel mapping, causing false negatives or positives.
+
+**Pseudocode:**
+> **Unverified code.** The code below did not pass a test run against a reference implementation, or no test fits it, so it may contain errors.
+
+```python
+def mlos_reconstruct(voxel_grid, calibration_matrices, images):
+    """
+    Reconstructs a sparse volume using Multiplicative Line Of Sight.
+    
+    Args:
+        voxel_grid: 3D numpy array representing the voxel grid.
+        calibration_matrices: List of N 4x4 numpy arrays, one per camera.
+        images: List of N 2D numpy arrays, one per camera image.
+        
+    Returns:
+        Reconstructed 3D volume with initial values.
+    """
+    N = len(calibration_matrices)
+    volume = np.zeros_like(voxel_grid)
+    
+    for x in range(voxel_grid.shape[0]):
+        for y in range(voxel_grid.shape[1]):
+            for z in range(voxel_grid.shape[2]):
+                product = 1.0
+                for i in range(N):
+                    # Map 3D voxel center to 2D image coordinates
+                    # Assuming calibration_matrices[i] maps world to image
+                    # This step requires implementing the projection logic
+                    # based on the specific calibration format (e.g., pinhole model)
+                    world_coords = np.array([x, y, z, 1.0])
+                    image_coords = calibration_matrices[i] @ world_coords
+                    u, v = image_coords[0] / image_coords[2], image_coords[1] / image_coords[2]
+                    
+                    # Check if pixel is within image bounds
+                    if 0 <= u < images[i].shape[1] and 0 <= v < images[i].shape[0]:
+                        intensity = images[i][int(v), int(u)]
+                        product *= intensity
+                    else:
+                        product = 0.0
+                        break
+                
+                if product > 0:
+                    volume[x, y, z] = product ** (1.0 / N)
+                else:
+                    volume[x, y, z] = 0.0
+                    
+    return volume
+```
+
+## Subtopics
+
+### MinLOS
+MinLOS is a variant of MLOS that initializes the 3D particle volume by assigning each voxel the minimum value of the pixels corresponding to it in the projection images [S1, unofficial]. Proposed by Maas et al. in 2009, it offers an alternative initialization strategy compared to the multiplicative approach of MLOS [S1, unofficial].
+
+## Operating characteristics
+- **Time Complexity:** $O(V \cdot N)$, where $V$ is the number of voxels and $N$ is the number of cameras. Each voxel requires $N$ lookups and a product computation.
+- **Memory Complexity:** $O(V)$ for storing the volume and intermediate products.
+- **Performance:** For a typical installation of four cameras, approximately 95% of voxels have negligible intensity [S1, unofficial]. This allows algebraic reconstruction to be limited to approximately 5% of the volume's voxels, significantly reducing computational cost [S1, unofficial].
+- **Strengths:** Efficiently reduces the search space for reconstruction algorithms by filtering out empty or background voxels.
+- **Limitations:** Relies heavily on accurate calibration and background subtraction. Sensitive to noise if not properly pre-processed.
+
+## Background
+MLOS was proposed by Atkinson and Soria in 2009 [S1, unofficial]. It is based on the concept of sparse volumes and initial particle location estimation [S1, unofficial]. The method is used in Tomo-PIV (Tomographic Particle Image Velocimetry) to improve the efficiency of volume reconstruction by focusing computational resources on regions with actual particle presence [S1, unofficial].
+
+## Sources
+[S1] Élaboration d'une méthode tomographique de reconstruction 3D en vélocimétrie par image de particules basée sur les processus ponctuels marqués, https://hal.science/tel-01292656v3, fetched 2026-10-26 (unofficial)

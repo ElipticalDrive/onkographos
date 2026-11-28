@@ -1,0 +1,401 @@
+--- v007.md
++++ v008.md
+@@ -4,78 +4,86 @@
+ 
+ ## Overview
+-DDIM Sampling with Classifier-Free Guidance (CFG) is a deterministic (or stochastic with $\eta > 0$) reverse diffusion algorithm that generates samples or refines existing ones by iteratively denoising latent variables [S1, S2, unofficial]. It sets itself apart from standard DDPM sampling by skipping intermediate noise steps to allow for fewer sampling iterations, and by combining unconditional and conditional model predictions via a guidance scale to enhance fidelity [S2, unofficial]. In the context of radiance field optimization, it serves as a denoising mechanism to refine NeRF renderings or guide 3D generation by leveraging 2D diffusion priors [S1, unofficial].
++DDIM Sampling with Classifier-Free Guidance (CFG) is a deterministic (or stochastic) reverse diffusion algorithm that generates samples or refines existing representations by iteratively denoising a latent variable $x_t$ to estimate the clean latent $x_0$ [S1, S2, unofficial]. It builds on [DDIM Sampling and Denoising Mechanisms](14430-diffusion-sampling-and-denoising-mechanisms.md) by skipping intermediate noise steps to allow for fewer sampling iterations than standard DDPM while maintaining sample quality [S2, unofficial]. It differs from its sibling [DDPM Denoise Function Network](11102-ddpm-denoise-function-network.md) by using a fixed noise schedule and deterministic transition equations, and it incorporates CFG to steer generation towards conditional inputs (e.g., text or image features) by combining unconditional and conditional model predictions [S1, S2, unofficial].
+ 
+ ## How it works
+-**Inputs and Outputs:**
+-- **Inputs:**
+-  - $x_T$: Initial latent tensor (random noise if generating; existing latent if refining). Shape: $(B, C, H, W)$.
+-  - $c$: Conditional embedding (e.g., text or image features). Shape: $(B, D)$.
+-  - $timesteps$: Sequence of timesteps to traverse, typically reversed from $T$ to $0$ [S2, unofficial].
+-  - $unconditional\_guidance\_scale$: Scalar multiplier for CFG (default 1.0) [S2, unofficial].
+-  - $ddim\_eta$: Stochasticity parameter (default 0.0) [S2, unofficial].
+-  - $mask$: Optional inpainting mask tensor.
+-  - $x_0$: Optional original image for inpainting [S2, unofficial].
+-- **Outputs:**
+-  - $x_0$: Final denoised latent tensor.
+-  - Intermediates: Optional list of $x_t$ and predicted $\hat{x}_0$ at logging intervals [S2, unofficial].
++**Inputs:**
++- Current latent $x_t$ at timestep $t$.
++- Conditioning information $c$ (e.g., embeddings).
++- Unconditional conditioning $c_{uncond}$ (e.g., empty string or null vector).
++- Timestep $t$ (integer).
++- Schedule parameters: $\alpha_t, \bar{\alpha}_t$ (cumulative alphas), $\sigma_t$ (noise scale).
++- Guidance scale $s$ (scalar, typically $>1$).
++- Stochasticity parameter $\eta$ (scalar, typically $0$ for deterministic).
++
++**Outputs:**
++- Previous latent $x_{t-1}$.
++- Predicted clean latent $\hat{x}_0$.
+ 
+ **Data Structures:**
+-The scheduler maintains several precomputed buffers registered as CUDA tensors (float32) indexed by timestep [S2, unofficial]:
+-- `alphas_cumprod` ($\alpha_t$): Cumulative product of $\alpha$ values.
+-- `alphas_cumprod_prev` ($\alpha_{t-1}$): Previous cumulative alpha.
+-- `sqrt_alphas_cumprod` ($\sqrt{\alpha_t}$): Square root of cumulative alpha.
+-- `sqrt_one_minus_alphas_cumprod` ($\sqrt{1-\alpha_t}$): Square root of one minus cumulative alpha.
+-- `ddim_sigmas` ($\sigma_t$): DDIM-specific noise scale.
+-- `ddim_alphas` ($\alpha_t^{DDIM}$): Adjusted alphas for the DDIM schedule.
+-- `ddim_alphas_prev` ($\alpha_{t-1}^{DDIM}$): Previous adjusted alphas.
+-- `ddim_sqrt_one_minus_alphas`: $\sqrt{1-\alpha_t^{DDIM}}$.
+-
+-**Numbered Steps:**
++The scheduler maintains buffers on the device (e.g., CUDA) for the diffusion schedule [S2, unofficial]:
++- `alphas`: Tensor of shape $(T)$, $\alpha_t$.
++- `alphas_prev`: Tensor of shape $(T)$, $\alpha_{t-1}$ (or $\alpha_{t-1}$ mapped to the subsampled timestep).
++- `ddim_sigmas`: Tensor of shape $(T)$, $\sigma_t$.
++- Derived buffers: `sqrt_alphas_cumprod`, `sqrt_one_minus_alphas_cumprod`, etc., all `torch.float32` [S2, unofficial].
++
++**Parameters:**
++- `num_inference_steps`: Number of sampling steps. Default: 50 [S1, unofficial].
++- `unconditional_guidance_scale` (or `guidance_scale`): CFG multiplier. Default: 1.0 (disables guidance), typical values 7.5–100 [S1, S2, unofficial].
++- `ddim_eta`: Controls stochasticity. Default: 0.0 [S2, unofficial].
++- `temperature`: Scales injected noise. Default: 1.0 [S2, unofficial].
++- `noise_dropout`: Dropout probability for noise. Default: 0.0 [S2, unofficial].
++- `parameterization`: Either `"eps"` (noise prediction) or `"v"` (v-prediction) [S2, unofficial].
++
++**Algorithm Steps:**
+ 
+ 1. **Initialization:**
+-   - If $x_T$ is not provided, sample $x_T \sim \mathcal{N}(0, I)$ with shape $(B, C, H, 8, W, 8)$ [S1, unofficial].
+-   - Initialize the schedule: Compute `ddim_timesteps` using `make_ddim_timesteps` (default discretization: uniform) [S2, unofficial].
+-   - Calculate derived buffers (`sqrt_alphas_cumprod`, etc.) from the model's DDPM parameters [S2, unofficial].
+-   - Set the scheduler timesteps: `scheduler.set_timesteps(num_inference_steps)` [S1, unofficial].
+-
+-2. **Conditioning Preparation:**
+-   - Concatenate positive and negative embeddings for CFG:
+-     $$ \text{embeddings} = \text{concat}([\text{embeddings}_{pos}, \text{embeddings}_{neg}]) $$
+-     where each is expanded to batch size $B$ [S1, unofficial].
+-   - If `unconditional_guidance_scale` > 1, prepare conditional and unconditional inputs for the model [S2, unofficial].
+-
+-3. **Iteration Loop:**
+-   - Iterate through `timesteps` in reverse order (from $T$ to $0$) [S2, unofficial]. Let $i$ be the index in the reversed list, and $t$ be the current timestep value [S2, unofficial].
+-   - **Dynamic Guidance (Optional):** If `ucg_schedule` is provided, set `unconditional_guidance_scale` to `ucg_schedule[i]` [S2, unofficial].
+-   - **Inpainting Mask (Optional):** If `mask` is not None, assert $x_0$ is provided [S2, unofficial]. Compute $img_{orig} = q\_sample(x_0, t)$ [S2, unofficial]. Update current image: $img = img_{orig} \cdot mask + (1 - mask) \cdot img$ [S2, unofficial].
+-   - **Model Prediction:**
+-     - Duplicate latents for CFG: $x_{in} = \text{cat}([x_t, x_t])$ [S2, unofficial].
+-     - Duplicate timesteps: $t_{in} = \text{cat}([t, t])$ [S2, unofficial].
+-     - Pass through UNet to get predictions for unconditional and conditional branches:
+-       $$ [e_{t, uncond}, e_{t, cond}] = \text{chunk}(\text{model}(x_{in}, t_{in}, c_{in}), 2) $$
+-     - Apply Classifier-Free Guidance:
+-       $$ e_t = e_{t, uncond} + \text{unconditional\_guidance\_scale} \cdot (e_{t, cond} - e_{t, uncond}) $$
+-     - If `parameterization == "v"`, convert model output to noise prediction:
+-       $$ e_t = \text{model.predict\_eps\_from\_z\_and\_v}(x_t, t, \text{model\_output}) $$
+-       Otherwise, $e_t$ is the direct noise prediction [S2, unofficial].
+-   - **Score Correction (Optional):** If `score_corrector` is not None, modify $e_t$ (requires `parameterization == "eps"`) [S2, unofficial].
+-   - **Select Timestep Parameters:** Retrieve $a_t, a_{prev}, \sigma_t, \sqrt{1-a_t}$ from the precomputed buffers at index $i$ [S2, unofficial].
+-   - **Predict Clean Image ($\hat{x}_0$):**
+-     - If `parameterization == "eps"`:
+-       $$ \hat{x}_0 = \frac{x_t - \sqrt{1-a_t} \cdot e_t}{\sqrt{a_t}} $$
+-     - If `parameterization == "v"`:
+-       $$ \hat{x}_0 = \text{model.predict\_start\_from\_z\_and\_v}(x_t, t, \text{model\_output}) $$
+-     - If `quantize_denoised` is True, quantize $\hat{x}_0$ via the first stage model [S2, unofficial].
+-   - **Compute Direction to $x_{t-1}$:**
+-     $$ \text{dir\_xt} = \sqrt{1 - a_{prev} - \sigma_t^2} \cdot e_t $$
+-   - **Sample Noise:**
+-     $$ \text{noise} = \sigma_t \cdot \mathcal{N}(0, I) \cdot \text{temperature} $$
+-     Apply dropout if `noise_dropout` > 0 [S2, unofficial].
+-   - **Update Latent ($x_{t-1}$):**
+-     $$ x_{t-1} = \sqrt{a_{prev}} \cdot \hat{x}_0 + \text{dir\_xt} + \text{noise} $$
+-   - **Record Intermediates:** If $i \% \text{log\_every\_t} == 0$ or $i$ is the last step, append $x_{t-1}$ and $\hat{x}_0$ to intermediates [S2, unofficial].
+-
+-4. **Final Output:**
+-   - Return the final $x_0$ (or $x_{t-1}$ after the last step).
++   If $x_T$ is not provided, sample $x_T \sim \mathcal{N}(0, I)$ [S1, S2, unofficial].
++   Set timesteps $T$ using a discretization strategy (e.g., uniform or linear) [S2, unofficial].
++   Calculate schedule buffers $\alpha_t, \sigma_t$ for the selected timesteps [S2, unofficial].
++
++2. **Iterate backwards through timesteps:**
++   For each timestep $t$ in reversed order from $T$ to $1$:
++   
++   a. **Prepare Model Input:**
++      Concatenate the current latent $x_t$ for both conditional and unconditional branches:
++      $$ x_{in} = [x_t, x_t] $$
++      Concatenate conditioning embeddings:
++      $$ c_{in} = [c, c_{uncond}] $$
++      (If CFG is disabled ($s=1$), skip concatenation and use only $c$) [S2, unofficial].
++
++   b. **Predict Noise/Output:**
++      Pass $x_{in}$ and $c_{in}$ through the denoiser network $f_\theta$:
++      $$ \text{output} = f_\theta(x_{in}, t, c_{in}) $$
++      Split output into conditional prediction $e_t^{cond}$ and unconditional prediction $e_t^{uncond}$ [S2, unofficial].
++
++   c. **Apply Classifier-Free Guidance:**
++      Compute the guided prediction $e_t$:
++      $$ e_t = e_t^{uncond} + s \cdot (e_t^{cond} - e_t^{uncond}) $$
++      If `parameterization == "v"`, convert the v-prediction output to noise estimate $\epsilon_t$ using the model's helper function (e.g., `predict_eps_from_z_and_v`) [S2, unofficial].
++
++   d. **Compute Predicted Clean Latent $\hat{x}_0$:**
++      - If `parameterization == "eps"`:
++        $$ \hat{x}_0 = \frac{x_t - \sqrt{1 - \alpha_t} \cdot e_t}{\sqrt{\alpha_t}} $$
++      - If `parameterization == "v"`:
++        Use model-specific function `predict_start_from_z_and_v` [S2, unofficial].
++
++   e. **Quantize (Optional):**
++      If `quantize_denoised` is true, quantize $\hat{x}_0$ via the first-stage model's quantizer [S2, unofficial].
++
++   f. **Compute Direction to $x_t$:**
++      $$ \text{dir\_xt} = \sqrt{1 - \alpha_{t-1} - \sigma_t^2} \cdot e_t $$
++      (Note: $\alpha_{t-1}$ corresponds to the previous timestep in the subsampled schedule) [S2, unofficial].
++
++   g. **Sample Noise:**
++      Generate standard normal noise $\epsilon \sim \mathcal{N}(0, I)$.
++      Apply dropout if `noise_dropout > 0` [S2, unofficial].
++      $$ \text{noise} = \sigma_t \cdot \epsilon \cdot \text{temperature} $$
++      (If $\eta > 0$, $\sigma_t$ is scaled by $\eta$; if $\eta=0$, $\sigma_t=0$ for deterministic DDIM) [S2, unofficial].
++
++   h. **Update Latent:**
++      $$ x_{t-1} = \sqrt{\alpha_{t-1}} \cdot \hat{x}_0 + \text{dir\_xt} + \text{noise} $$
++
++3. **Final Output:**
++   Return $x_0$ after the final step [S2, unofficial].
+ 
+ **Pseudocode:**
+@@ -83,148 +91,126 @@
+ ```python
+ import torch
+-
+-def ddim_sample_with_cfg(model, scheduler, x_T, c, timesteps, unconditional_guidance_scale=7.5, 
+-                         ddim_eta=0.0, parameterization="eps", temperature=1.0, noise_dropout=0.0,
+-                         mask=None, x0=None, ucg_schedule=None):
++import math
++
++def ddim_step_with_cfg(x_t, t, t_prev, alpha_t, alpha_prev, sigma_t, 
++                       model, cond, uncond_cond, guidance_scale, 
++                       parameterization="eps", temperature=1.0, noise_dropout=0.0):
+     """
+-    Perform DDIM sampling with Classifier-Free Guidance.
++    Single step of DDIM sampling with Classifier-Free Guidance.
+     
+     Args:
+-        model: UNet model with apply_model method.
+-        scheduler: Scheduler object with precomputed buffers (alphas, sigmas, etc.).
+-        x_T: Initial latent tensor (B, C, H, W).
+-        c: Conditional embedding tensor (B, D).
+-        timesteps: List of timesteps to traverse (reversed order).
+-        unconditional_guidance_scale: CFG scale.
+-        ddim_eta: Stochasticity parameter.
++        x_t: Current latent tensor (B, C, H, W).
++        t: Current timestep integer.
++        t_prev: Previous timestep integer (for indexing alphas).
++        alpha_t: Cumulative alpha at current step.
++        alpha_prev: Cumulative alpha at previous step.
++        sigma_t: Noise scale at current step.
++        model: Denoiser network.
++        cond: Conditional conditioning tensor.
++        uncond_cond: Unconditional conditioning tensor.
++        guidance_scale: CFG scale s.
+         parameterization: "eps" or "v".
+         temperature: Noise scaling factor.
+         noise_dropout: Probability of zeroing noise.
+-        mask: Optional inpainting mask.
+-        x0: Optional original image for inpainting.
+-        ucg_schedule: Optional list of guidance scales per step.
+         
+     Returns:
+-        x_0: Final denoised latent.
++        x_prev: Previous latent tensor.
++        pred_x0: Predicted clean latent.
+     """
+-    device = x_T.device
+-    b = x_T.shape[0]
+-    
+-    x = x_T.clone()
+-    intermediates = {'x_inter': [], 'pred_x0': []}
+-    
+-    # 1. Prepare conditioning for CFG
+-    c_in = torch.cat([c, c]) # [2B, D]
+-    
+-    for i, t in enumerate(timesteps):
+-        ts = torch.full((b,), t, device=device, dtype=torch.long)
+-        
+-        # Dynamic guidance scale
+-        if ucg_schedule is not None:
+-            current_guidance = ucg_schedule[i]
+-        else:
+-            current_guidance = unconditional_guidance_scale
+-            
+-        # Inpainting mask application
+-        if mask is not None:
+-            assert x0 is not None, "x0 must be provided for inpainting"
+-            # q_sample adds noise to x0 at timestep t
+-            sqrt_alpha = scheduler.sqrt_alphas_cumprod[t]
+-            sqrt_one_minus_alpha = scheduler.sqrt_one_minus_alphas_cumprod[t]
+-            noise_x0 = torch.randn_like(x0)
+-            img_orig = sqrt_alpha * x0 + sqrt_one_minus_alpha * noise_x0
+-            x = img_orig * mask + (1. - mask) * x
+-            
+-        # 2. Model Prediction with CFG
+-        x_in = torch.cat([x, x]) # Duplicate for unconditional/conditional
+-        t_in = torch.cat([ts, ts])
+-        
+-        # Get raw predictions for unconditional and conditional branches
+-        model_output = model.apply_model(x_in, t_in, c_in)
+-        noise_pred_uncond, noise_pred_cond = torch.chunk(model_output, 2)
+-        
+-        # Apply CFG formula
+-        noise_pred = noise_pred_uncond + current_guidance * (noise_pred_cond - noise_pred_uncond)
+-        
+-        # Handle v-parameterization
+-        if parameterization == "v":
+-            noise_pred = model.predict_eps_from_z_and_v(x, ts, model_output)
+-            
+-        # 3. Select timestep parameters
+-        a_t = scheduler.alphas[i]
+-        a_prev = scheduler.alphas_prev[i]
+-        sigma_t = scheduler.sigmas[i]
+-        sqrt_one_minus_at = scheduler.sqrt_one_minus_alphas[i]
+-        
+-        # 4. Predict x0
+-        if parameterization == "eps":
+-            pred_x0 = (x - sqrt_one_minus_at * noise_pred) / a_t.sqrt()
+-        else: # v
+-            pred_x0 = model.predict_start_from_z_and_v(x, ts, model_output)
+-            
+-        # Quantize if needed
+-        if getattr(scheduler, 'quantize_denoised', False):
+-            pred_x0 = model.first_stage_model.quantize(pred_x0)
+-            
+-        # 5. Compute direction
+-        dir_xt = (1. - a_prev - sigma_t**2).sqrt() * noise_pred
+-        
+-        # 6. Sample noise
+-        noise = sigma_t * torch.randn_like(x) * temperature
+-        if noise_dropout > 0:
+-            mask_noise = torch.bernoulli(torch.ones_like(noise) * (1 - noise_dropout))
+-            noise = noise * mask_noise
+-            
+-        # 7. Update x
+-        x_prev = a_prev.sqrt() * pred_x0 + dir_xt + noise
+-        
+-        # 8. Record intermediates
+-        if i % 10 == 0 or i == len(timesteps) - 1:
+-            intermediates['x_inter'].append(x_prev)
+-            intermediates['pred_x0'].append(pred_x0)
+-            
+-        x = x_prev
+-        
+-    return x, intermediates
++    b = x_t.shape[0]
++    
++    # 1. Prepare inputs for CFG
++    if guidance_scale > 1.0:
++        x_in = torch.cat([x_t, x_t], dim=0)
++        c_in = torch.cat([cond, uncond_cond], dim=0)
++    else:
++        x_in = x_t
++        c_in = cond
++        
++    # 2. Forward pass
++    model_output = model(x_in, t, c_in)
++    
++    # 3. Split and apply CFG
++    if guidance_scale > 1.0:
++        e_t_uncond, e_t_cond = torch.chunk(model_output, 2, dim=0)
++        e_t = e_t_uncond + guidance_scale * (e_t_cond - e_t_uncond)
++    else:
++        e_t = model_output
++        
++    # 4. Handle parameterization
++    if parameterization == "v":
++        # Convert v-prediction to noise estimate
++        # e_t = predict_eps_from_z_and_v(x_t, t, model_output)
++        # Simplified: assuming model_output is already converted or handled by model
++        # For strict implementation, this requires model-specific logic.
++        # Here we assume e_t is the noise residual epsilon_t.
++        pass 
++        
++    # 5. Compute predicted x0
++    sqrt_alpha_t = math.sqrt(alpha_t)
++    sqrt_one_minus_alpha_t = math.sqrt(1.0 - alpha_t)
++    
++    if parameterization == "eps":
++        pred_x0 = (x_t - sqrt_one_minus_alpha_t * e_t) / sqrt_alpha_t
++    else:
++        # v-parameterization: use model helper or derived formula
++        # pred_x0 = predict_start_from_z_and_v(x_t, t, model_output)
++        # Placeholder for model-specific v-to-x0 conversion
++        pred_x0 = x_t # [G] Placeholder: In practice, call model.predict_start_from_z_and_v
++        
++    # 6. Compute direction
++    sqrt_alpha_prev = math.sqrt(alpha_prev)
++    sigma_sq = sigma_t ** 2
++    dir_xt_coeff = math.sqrt(max(1.0 - alpha_prev - sigma_sq, 0.0)) # Guard against negative due to precision
++    dir_xt = dir_xt_coeff * e_t
++    
++    # 7. Sample noise
++    noise = torch.randn_like(x_t)
++    if noise_dropout > 0.0 and torch.rand(1).item() < noise_dropout:
++        noise = torch.zeros_like(noise)
++    noise = sigma_t * noise * temperature
++    
++    # 8. Update x_prev
++    x_prev = sqrt_alpha_prev * pred_x0 + dir_xt + noise
++    
++    return x_prev, pred_x0
+ ```
+ 
+-**Parameters:**
+-- `num_inference_steps`: Number of sampling steps. Default: 50 [S1, unofficial].
+-- `unconditional_guidance_scale`: CFG scale. Default: 1.0 (disables guidance). Typical values: 7.5 for sampling, 100 for refinement [S1, S2, unofficial].
+-- `ddim_eta`: Controls stochasticity. Default: 0.0 [S2, unofficial].
+-- `temperature`: Scales injected noise. Default: 1.0 [S2, unofficial].
+-- `noise_dropout`: Dropout probability for noise. Default: 0.0 [S2, unofficial].
+-- `quantize_denoised`: Quantize $\hat{x}_0$. Default: False [S2, unofficial].
+-- `use_original_steps`: Use DDPM timesteps instead of DDIM timesteps. Default: False [S2, unofficial].
+-
+ **Edge Cases and Pitfalls:**
+-- **Masking Requires $x_0$:** Inpainting requires the original image $x_0$ to compute the noisy version via $q\_sample$ [S2, unofficial].
+-- **Dynamic Thresholding:** Not implemented; raises `NotImplementedError` if enabled [S2, unofficial].
+-- **Score Corrector:** Only supports `eps` parameterization; raises assertion error otherwise [S2, unofficial].
+-- **UCG Schedule Length:** Must exactly match the length of `time_range` [S2, unofficial].
++- **Masking:** If inpainting is used, the original image $x_0$ must be provided to compute the masked noisy image $x_{orig} = q(x_0, t)$, and the result is blended: $x = x_{orig} \cdot \text{mask} + x_{prev} \cdot (1 - \text{mask})$ [S2, unofficial].
++- **Conditioning Shape:** If conditioning is a dict/list, ensure batch sizes match; otherwise, warnings or errors may occur [S2, unofficial].
++- **Dynamic Thresholding:** Not implemented in standard DDIM; raises `NotImplementedError` if enabled [S2, unofficial].
++- **Score Corrector:** Only supports `"eps"` parameterization; raises assertion error otherwise [S2, unofficial].
++- **UCG Schedule:** If using a dynamic guidance schedule, its length must exactly match the number of timesteps [S2, unofficial].
+ 
+ ## Subtopics
+ 
+ ### NeRF Interpolation via DDIM and SLERP
+-A procedure to generate smooth transitions between 3D samples by interpolating in the diffusion latent space before deterministic decoding [S3]. It samples two initial latents $x^{(T)} \sim \mathcal{N}(0, I)$, interpolates them using spherical linear interpolation (SLERP), and passes them through a deterministic solver [S3]. Standard Gaussian diffusion models often yield non-smooth interpolation; however, models trained with early stopping for sparse-view reconstruction (as in SSDNeRF) preserve a smoother prior, yielding better generalization and smoother transitions than long unconditional training schedules [S3]. Used in SSDNeRF for interpolating generated 3D samples [S3].
++A procedure to generate smooth transitions between 3D samples by interpolating in the diffusion latent space before deterministic decoding [S3]. It samples two initial diffusion latents $x^{(T)} \sim \mathcal{N}(0, I)$, interpolates them using spherical linear interpolation (SLERP), and passes the result through a deterministic solver [S3]. Standard Gaussian diffusion models often produce non-smooth interpolation; however, models trained with early stopping for sparse-view reconstruction yield smoother transitions than those trained with long unconditional schedules [S3]. Used in SSDNeRF [S3].
+ 
+ ### DDIM Stochastic Encode
+-Adds noise to an initial image $x_0$ according to the diffusion process at timestep $t$, using either DDPM or DDIM schedule parameters [S2, unofficial]. It selects schedule parameters based on `use_original_steps` (DDPM vs DDIM alphas), generates noise, and computes the noisy latent: $x_t = \sqrt{\alpha_t} x_0 + \sqrt{1-\alpha_t} \epsilon$ [S2, unofficial].
++Adds noise to an initial image $x_0$ according to the diffusion process at timestep $t$, using either DDPM or DDIM schedule parameters [S2, unofficial]. It selects schedule parameters based on `use_original_steps` (DDPM vs DDIM alphas), generates noise $\epsilon \sim \mathcal{N}(0, I)$, and computes $x_t = \sqrt{\bar{\alpha}_t} x_0 + \sqrt{1 - \bar{\alpha}_t} \epsilon$ [S2, unofficial].
+ 
+ ### DDIM Decode
+-Decodes a latent representation $x_{latent}$ into a sample by running the DDIM sampling process from a starting timestep $t_{start}$ down to 0 [S2, unofficial]. It selects timesteps (DDPM or DDIM based on `use_original_steps`), reverses them, and iteratively calls `p_sample_ddim` to update the latent [S2, unofficial].
++Decodes a latent representation $x_{latent}$ into a sample by running the DDIM sampling process from a starting timestep $t_{start}$ down to 0 [S2, unofficial]. It selects timesteps (either original DDPM steps or subsampled DDIM steps), reverses the order, and iteratively calls `p_sample_ddim` to update the latent [S2, unofficial].
++
++### DDIM Sampling for Interpolation
++Uses DDIM to sample shapes for interpolation [S4]. Typical settings include 25 steps for cars and planes, and 250 steps for chairs [S4]. Note: DDIM setting may produce visually worse-quality meshes compared to DDPM setting in some contexts [S4].
+ 
+ ## Operating characteristics
+-- **Time Complexity:** $O(N \cdot T)$, where $N$ is the number of sampling steps and $T$ is the cost of one UNet forward pass.
+-- **Memory Complexity:** $O(C \cdot H \cdot W)$ for latents, plus $O(T)$ for precomputed schedule buffers [S2, unofficial].
+-- **Measured Performance:** With `num_inference_steps=50` and `guidance_scale=7.5`, it produces high-quality images suitable for NeRF refinement [S1, unofficial].
+-- **Strengths:** Deterministic sampling (when $\eta=0$) allows for reproducible results and fewer steps. CFG enhances conditional fidelity [S2, unofficial].
+-- **Limitations:** Stochasticity ($\eta > 0$) can introduce variance. Inpainting requires $x_0$. Dynamic thresholding is not supported [S2, unofficial].
++- **Time Complexity:** $O(N \cdot C)$, where $N$ is the number of sampling steps and $C$ is the cost of one denoiser forward pass. DDIM allows $N$ to be significantly smaller than DDPM (e.g., 50 vs 1000) while maintaining quality [S2, unofficial].
++- **Memory Complexity:** $O(H \cdot W \cdot C)$ for the latent tensor, plus $O(T)$ for schedule buffers [S2, unofficial].
++- **Performance:** Deterministic sampling (eta=0) is faster and reproducible. Stochastic sampling (eta>0) adds variance but may improve diversity [S2, unofficial].
++- **Strengths:** Fewer steps than DDPM; supports CFG for conditional generation; deterministic option for stable training/refinement [S1, S2, unofficial].
++- **Limitations:** Quality may degrade with very few steps compared to DDPM; interpolation can be discontinuous if the model is over-trained [S3, S4].
++- **When to Use:** When fast sampling is required, or when conditional guidance is needed for 3D generation/refinement [S1, S2, unofficial].
++- **When Not to Use:** When maximum sample diversity is required (use DDPM with eta>0) or when high-fidelity mesh generation is critical and DDPM interpolation is preferred [S4].
+ 
+ ## Background
+-DDIM (Denoising Diffusion Implicit Models) was introduced as a deterministic sampling method for diffusion models that skips intermediate noise steps, allowing for fewer sampling steps than DDPM while maintaining sample quality [S2, unofficial]. It has been adapted for classifier-free guidance to enhance conditional generation [S1, unofficial]. In the context of volume rendering, it is used in frameworks like GaussianObject for refining 3D Gaussians and in SSDNeRF for 3D interpolation and generation [S2, unofficial][S3].
++DDIM (Denoising Diffusion Implicit Models) was introduced as a deterministic sampling method for diffusion models [S2, unofficial]. It allows for fewer sampling steps by skipping intermediate timesteps and using a fixed noise schedule [S2, unofficial]. Classifier-Free Guidance (CFG) was later integrated to allow conditional generation without a separate classifier [S1, S2, unofficial]. In the context of volume rendering and NeRFs, DDIM with CFG is used for 3D generation, interpolation, and refinement of radiance fields [S1, unofficial][S3].
+ 
+ ## Sources
+ [S1] dreamgaussian/dreamgaussian, https://github.com/dreamgaussian/dreamgaussian, fetched 2026-10-27 (unofficial)
+ [S2] chensjtu/GaussianObject, https://github.com/chensjtu/GaussianObject, fetched 2026-10-27 (unofficial)
+-[S3] Single-Stage Diffusion NeRF: A Unified Approach to 3D Generation and Reconstruction, https://doi.org/10.1109/iccv51070.2023.00229, fetched 2026-10-29+[S3] Single-Stage Diffusion NeRF: A Unified Approach to 3D Generation and Reconstruction, https://doi.org/10.1109/iccv51070.2023.00229, fetched 2026-10-29
++[S4] 3D Neural Field Generation Using Triplane Diffusion, https://doi.org/10.1109/cvpr52729.2023.02000, fetched 2026-10-26

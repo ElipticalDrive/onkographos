@@ -1,0 +1,96 @@
+# Phong BRDF Model
+Also called: Phong shading model
+## Overview
+The Phong BRDF Model is a parametric surface reflectance model that approximates the reflection of light using diffuse and specular components [S1]. It is primarily distinguished from its siblings by its explicit parameterization for differentiable rendering, allowing gradients of a loss function to be computed with respect to material properties (diffuse albedo, specular intensity, and shininess) to optimize material appearance [S1]. Unlike physically based models that derive parameters from microfacet theory, the Phong model uses empirical exponents to control highlight sharpness, making it computationally efficient but not strictly energy-conserving without normalization adjustments [S1].
+
+## How it works
+**Inputs and Outputs**
+*   **Inputs**: Incident direction $\vec{\omega}_i$, outgoing (view) direction $\vec{\omega}_o$, surface normal $\vec{n}$, diffuse albedo $k_d$, specular intensity $k_s$, shininess exponent $\alpha$.
+*   **Output**: Bidirectional Reflectance Distribution Function value $f_r(\vec{\omega}_i, \vec{\omega}_o, \vec{n})$.
+
+**Data Structures**
+No complex data structures are required. The model relies on scalar parameters and vector dot products.
+
+**Formulas**
+The Phong BRDF is defined as the sum of a diffuse term and a specular term [S1]:
+
+$$f_r(\vec{\omega}_i, \vec{\omega}_o, \vec{n}) = k_d \frac{1}{\pi} + k_s \frac{\alpha+2}{2\pi} (\vec{\omega}_i \cdot \vec{n})^\alpha$$
+
+Where:
+*   $k_d$: Diffuse albedo, controlling the base color and diffuse reflection intensity [S1].
+*   $k_s$: Specular intensity, controlling the intensity of the specular highlight [S1].
+*   $\alpha$: Shininess exponent, controlling the bright appearance and sharpness of the specular highlight [S1].
+*   $\vec{\omega}_i$: Incident light direction.
+*   $\vec{\omega}_o$: Outgoing view direction.
+*   $\vec{n}$: Surface normal.
+*   The term $(\vec{\omega}_i \cdot \vec{n})$ represents the cosine of the angle between the incident light and the normal. Note: In standard Phong shading, the specular term often uses $(\vec{r} \cdot \vec{\omega}_o)^\alpha$ where $\vec{r}$ is the reflection vector. However, the source [S1] explicitly defines the specular term using $(\vec{\omega}_i \cdot \vec{n})^\alpha$. This formulation is atypical for standard Phong (which uses the reflection vector) and resembles a simplified or specific variant used in the cited differentiable rendering context. We follow the source [S1] exactly.
+
+**Parameters**
+*   $k_d \in [0, 1]$
+*   $k_s \in [0, 1]$
+*   $\alpha > 0$ (Typically large values produce sharp highlights)
+
+**Pseudocode**
+> **Unverified code.** The code below did not pass a test run against a reference implementation, or no test fits it, so it may contain errors.
+
+```python
+def phong_brdf(omega_i, omega_o, normal, k_d, k_s, alpha):
+    """
+    Computes the Phong BRDF value based on the definition in [S1].
+    
+    Args:
+        omega_i: Incident light direction vector (normalized).
+        omega_o: Outgoing view direction vector (normalized).
+        normal: Surface normal vector (normalized).
+        k_d: Diffuse albedo scalar.
+        k_s: Specular intensity scalar.
+        alpha: Shininess exponent scalar.
+        
+    Returns:
+        BRDF value f_r.
+    """
+    # Compute cosine of incident angle
+    cos_theta_i = dot(omega_i, normal)
+    
+    # Clamp to ensure valid range for power operation if necessary
+    # Note: Source [S1] uses (omega_i . n)^alpha directly.
+    # In standard rendering, if cos_theta_i < 0, the light is behind the surface.
+    # We assume valid incident directions where cos_theta_i >= 0.
+    if cos_theta_i < 0:
+        return 0.0
+        
+    # Diffuse term: k_d / pi
+    diffuse_term = k_d / pi
+    
+    # Specular term: k_s * (alpha + 2) / (2 * pi) * (omega_i . n)^alpha
+    # Note: Source [S1] formula uses (omega_i . n)^alpha for specular.
+    # This differs from the classic Phong model which uses (reflection . view)^alpha.
+    # We adhere strictly to the source [S1].
+    specular_term = k_s * (alpha + 2) / (2 * pi) * (cos_theta_i ** alpha)
+    
+    return diffuse_term + specular_term
+```
+
+**Edge Cases and Pitfalls**
+*   **Non-Physical Specular Term**: The source [S1] defines the specular component using $(\vec{\omega}_i \cdot \vec{n})^\alpha$. This is unusual; standard Phong shading uses the reflection vector $\vec{r} = 2(\vec{n} \cdot \vec{\omega}_i)\vec{n} - \vec{\omega}_i$ and computes $(\vec{r} \cdot \vec{\omega}_o)^\alpha$. Implementers should verify if the specific application requires the source's variant or the standard variant. The source's variant does not depend on the view direction $\vec{\omega}_o$ for the specular term's shape, which is a significant deviation from standard Phong [S1].
+*   **Energy Conservation**: The model is not inherently energy-conserving. The factor $\frac{\alpha+2}{2\pi}$ is a normalization attempt, but $k_s$ and $k_d$ are independent and can sum to more than 1, leading to energy creation [S1].
+*   **Gradient Computation**: When used in differentiable rendering, gradients with respect to $k_d$, $k_s$, and $\alpha$ must be computed carefully, especially for $\alpha$ in the exponent [S1].
+
+## Subtopics
+
+### [Phong BRDF with Precomputed Integrals](23029-phong-brdf-with-precomputed-integrals.md)
+A shading method using a Phong BRDF model where integrals over incoming radiance are precomputed and tabulated to avoid slow per-pixel integration.
+
+## Operating characteristics
+*   **Time Complexity**: $O(1)$ per surface point evaluation. It involves a few dot products, a power operation, and basic arithmetic.
+*   **Memory Complexity**: $O(1)$ for parameters. No lookup tables are required unless using the precomputed variant.
+*   **Strengths**: Simple to implement; computationally inexpensive; widely supported in graphics pipelines; suitable for differentiable optimization of material parameters [S1].
+*   **Limitations**: Not physically based; the specific formulation in [S1] decouples specular highlight from view direction, which may not match real-world observations; not energy-conserving by default.
+*   **When to use**: Real-time rendering where performance is critical; differentiable rendering tasks where material parameters need to be optimized from images [S1].
+*   **When not to use**: Physically based rendering requiring accurate energy conservation or view-dependent specular highlights (standard Phong or Cook-Torrance models are preferred).
+
+## Background
+The Phong BRDF model originates from the Phong shading model introduced by Bui Tuong Phong in 1975 [S1, G]. It was designed to approximate the way light reflects off surfaces, specifically highlighting the specular highlights. The specific formulation cited in [S1] is adapted for differentiable rendering, where the parameters $k_d$, $k_s$, and $\alpha$ are treated as optimization variables to minimize a loss function between rendered and target images [S1]. This approach allows for the automatic tuning of material properties in inverse rendering problems.
+
+## Sources
+[S1] Physics Based Differentiable Rendering for Inverse Problems and Beyond, https://doi.org/10.52783/jes.7210, fetched 2026-10-26

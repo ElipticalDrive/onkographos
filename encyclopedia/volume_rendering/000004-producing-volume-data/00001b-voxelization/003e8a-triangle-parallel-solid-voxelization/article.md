@@ -1,0 +1,171 @@
+# Triangle-Parallel Solid Voxelization
+
+Also called: Facet-based Voxelization, Triangle-based parallelization
+
+## Overview
+Triangle-Parallel Solid Voxelization is a data-parallel algorithm that maps a triangular mesh to a discrete 3D voxel grid by dedicating one processing thread (or work-item) to each triangle [S1, S2]. It solves the problem of efficiently determining which voxels are enclosed by a surface without iterating over the entire voxel grid [S2]. Unlike sibling methods that parallelize over voxels (e.g., [Per-Pixel Linked List Voxelization](1187-per-pixel-linked-list-voxelization.md) or [Parallel CPU Voxelization](7135-parallel-cpu-voxelization.md)), this method skips voxels outside the triangle's Axis-Aligned Bounding Box (AABB), reducing intersection tests by orders of magnitude [S2]. It differs from [Compute Shader Triangle Voxelization](12867-compute-shader-triangle-voxelization.md) by explicitly utilizing atomic operations to flip voxel states in a global grid, whereas the compute shader variant iterates over a 2D footprint to solve plane equations for precise solid filling without necessarily relying on global atomic flips in the same manner [S1].
+
+## How it works
+**Inputs:** A triangular mesh defined by vertices $\mathbf{v}_0, \mathbf{v}_1, \mathbf{v}_2$ and a 3D voxel grid of resolution $(N_x, N_y, N_z)$ with voxel size 1 in voxel space [S1, S2].
+**Outputs:** A 3D boolean grid (or bit-field) where each voxel $(i, j, k)$ indicates whether it is inside the mesh [S1].
+
+**Data Structures:**
+*   **Voxel Grid:** A 3D array or flattened buffer of bits/booleans [S1]. Access is via atomic XOR operations [S1].
+*   **Triangle Data:** Local storage for vertex coordinates $\mathbf{v}_i = (x_i, y_i, z_i)$ and derived normal $\mathbf{n}$ [S2].
+
+**Algorithm Steps:**
+1.  **Thread Assignment:** Assign one thread/work-item to each triangle in the mesh [S1, S2].
+2.  **AABB Calculation:** Compute the Axis-Aligned Bounding Box (AABB) of the triangle in the voxel grid space [S2]. Determine the range of voxel indices $(j, k)$ in the $yz$-plane that overlap with the triangle's projection [S2].
+3.  **Voxel Column Iteration:** Loop over all voxel columns $(j, k)$ within the AABB range [S1].
+4.  **Early Exit / Validity Check:** For each voxel column, perform a fast rejection test to determine if the triangle intersects the voxel slab [S2].
+    *   Calculate the facet normal $\mathbf{n}$ and the critical point $\mathbf{c}$ [S2].
+    *   The critical point $\mathbf{c}$ is defined component-wise based on the normal $\mathbf{n} = (n_x, n_y, n_z)$ and the extreme corner of the voxel $\mathbf{p}$ (where $\mathbf{p} + \Delta\mathbf{p}$ is the opposite corner) [S2]:
+        $$
+        c_x = \begin{cases} p_x & \text{if } n_x > 0 \\ 0 & \text{if } n_x \le 0 \end{cases}, \quad
+        c_y = \begin{cases} p_y & \text{if } n_y > 0 \\ 0 & \text{if } n_y \le 0 \end{cases}, \quad
+        c_z = \begin{cases} p_z & \text{if } n_z > 0 \\ 0 & \text{if } n_z \le 0 \end{cases}
+        $$
+    *   Compute $a_1 = \langle \mathbf{n}, \mathbf{c} - \mathbf{v}_0 \rangle$ and $a_2 = \langle \mathbf{n}, \Delta\mathbf{p} - \mathbf{c} - \mathbf{v}_0 \rangle$ [S2].
+    *   If $(\langle \mathbf{n}, \mathbf{p} \rangle + a_1)(\langle \mathbf{n}, \mathbf{p} \rangle + a_2) > 0$, the triangle and voxel are separated; skip this voxel [S2].
+5.  **Projection Tests:** If the validity check passes, test for intersection on the principal planes (e.g., $yz$, $xy$, $xz$) [S2].
+    *   **YZ Plane Test:** Test the voxel center against the triangle's $yz$ projection using edge functions [S1].
+        *   Calculate edge vectors $\mathbf{e}_i = \mathbf{v}_{i+1 \pmod 3} - \mathbf{v}_i$ [S1].
+        *   Calculate edge normals $\mathbf{n}_{yz}^{e_i}$ [S1].
+        *   Calculate $d_{yz}^{e_i} = -\langle \mathbf{n}_{yz}^{e_i}, \mathbf{v}_{i,yzi} \rangle$ [S1].
+        *   Apply the **Top-Left Fill Rule** to handle shared edges/vertices consistently [S1]. Define a correction term $f_{yz}^{e_i}$:
+            $$
+            f_{yz}^{e_i} = \begin{cases} \epsilon & \text{if } (n_{yz}^{e_i, y} > 0) \lor (n_{yz}^{e_i, y} = 0 \land n_{yz}^{e_i, z} < 0) \\ 0 & \text{otherwise} \end{cases}
+            $$
+            where $\epsilon$ is the smallest positive floating-point number [S1].
+        *   The test passes if:
+            $$
+            \bigwedge_{i=0}^2 \left( (\langle \mathbf{n}_{\mathbf{e}_i}^{\text{YZ}}, \mathbf{p}_{\text{YZ}} \rangle + d_{\mathbf{e}_i}^{\text{YZ}}) + f_{\mathbf{e}_i}^{\text{YZ}} > 0 \right)
+            $$
+            where $\mathbf{p}_{\text{YZ}}$ is the voxel center projected onto the $yz$ plane [S1].
+    *   **Other Planes:** Similar projection tests are performed for $xy$ and $xz$ planes to ensure 3D intersection [S2]. For the $xy$ plane, the edge normal $\mathbf{n}_{e_i}^{xy}$ is determined by:
+        $$
+        \mathbf{n}_{e_i}^{xy} = \begin{cases} (-e_{i,y}, e_{i,x}) & \text{if } n_z \ge 0 \\ (e_{i,y}, -e_{i,x}) & \text{if } n_z < 0 \end{cases}
+        $$
+        And the test is:
+        $$
+        \langle \mathbf{n}_{e_i}^{xy}, \mathbf{p}_{xy} \rangle + a_{e_i} \ge 0, \quad \forall i \in \{0, 1, 2\}
+        $$
+        where $a_{e_i} = -\langle \mathbf{n}_{e_i}^{xy}, \mathbf{v}_{i,xy} \rangle + \max\{0, \Delta p_x n_{e_i,x}^{xy}\} + \max\{0, \Delta p_y n_{e_i,y}^{xy}\}$ [S2].
+6.  **X-Range Calculation:** If the voxel column intersects the triangle, project the voxel center along the $x$-axis onto the triangle's plane to find the intersection $x$-coordinate $q$ [S1].
+7.  **Atomic Flip:** Determine the range of voxel indices in the $x$-direction that are inside the triangle [S1]. Flip the bits for these voxels using an atomic XOR operation [S1].
+    *   The range is derived from $q$. If the triangle spans multiple voxels in $x$, all voxels from the entry point to the exit point are flipped [S1].
+
+**Pseudocode:**
+> **Unverified code.** The code below did not pass a test run against a reference implementation, or no test fits it, so it may contain errors.
+
+```python
+import math
+import sys
+
+def triangle_parallel_voxelization(triangles, grid_dims):
+    # grid_dims: (Nx, Ny, Nz)
+    # grid: 1D array of size Nx*Ny*Nz, initialized to 0
+    Nx, Ny, Nz = grid_dims
+    grid = [0] * (Nx * Ny * Nz)
+    
+    def atomic_xor(arr, idx, val):
+        arr[idx] ^= val
+        return arr[idx]
+
+    for tri in triangles:
+        v0, v1, v2 = tri.vertices
+        # Compute edge vectors
+        e0 = (v1[0]-v0[0], v1[1]-v0[1], v1[2]-v0[2])
+        e1 = (v2[0]-v1[0], v2[1]-v1[1], v2[2]-v1[2])
+        e2 = (v0[0]-v2[0], v0[1]-v2[1], v0[2]-v2[2])
+        edges = [e0, e1, e2]
+        verts = [v0, v1, v2]
+        
+        # Compute normal
+        n = (e0[1]*e2[2]-e0[2]*e2[1], e0[2]*e2[0]-e0[0]*e2[2], e0[0]*e2[1]-e0[1]*e2[0])
+        n_len = math.sqrt(n[0]**2 + n[1]**2 + n[2]**2)
+        if n_len == 0: continue
+        n = (n[0]/n_len, n[1]/n_len, n[2]/n_len)
+        
+        # Determine AABB in YZ plane
+        min_y = min(v0[1], v1[1], v2[1])
+        max_y = max(v0[1], v1[1], v2[1])
+        min_z = min(v0[2], v1[2], v2[2])
+        max_z = max(v0[2], v1[2], v2[2])
+        
+        start_j = math.floor(min_y)
+        end_j = math.floor(max_y)
+        start_k = math.floor(min_z)
+        end_k = math.floor(max_z)
+        
+        for j in range(start_j, end_j + 1):
+            for k in range(start_k, end_k + 1):
+                # Voxel center in YZ
+                p_yz = (j + 0.5, k + 0.5)
+                
+                # YZ Projection Test with Top-Left Fill Rule
+                yz_inside = True
+                for i in range(3):
+                    ex, ey = edges[i][1], edges[i][2]
+                    vx, vz = verts[i][1], verts[i][2]
+                    
+                    # Edge normal in YZ plane (perpendicular to edge, pointing inward for CCW)
+                    ny, nz = -ey, ex
+                    
+                    # d value
+                    d_yz = -(ny * vx + nz * vz)
+                    
+                    # Top-Left Fill Rule correction
+                    f_yz = 0.0
+                    if (nz > 0) or (nz == 0 and ny < 0):
+                        f_yz = sys.float_info.epsilon
+                    
+                    val = (ny * p_yz[0] + nz * p_yz[1]) + d_yz + f_yz
+                    if val <= 0:
+                        yz_inside = False
+                        break
+                
+                if not yz_inside:
+                    continue
+                
+                # X-Range Calculation
+                # Project voxel center (j+0.5, k+0.5) along X onto triangle plane
+                if abs(n[0]) < 1e-9:
+                    continue
+                    
+                # Plane equation: n . (X - v0) = 0 => n.x * X + n.y * (j+0.5) + n.z * (k+0.5) = n . v0
+                # X = (n.v0 - n.y*(j+0.5) - n.z*(k+0.5)) / n.x
+                q = (n[0]*v0[0] + n[1]*v0[1] + n[2]*v0[2] - n[1]*(j + 0.5) - n[2]*(k + 0.5)) / n[0]
+                
+                # Determine voxel range in X
+                # Source [S1] specifies range ⌊q + 2⌋ (known typo for ⌊q + 0.5⌋) to Nx-1
+                start_x = math.floor(q + 0.5)
+                start_x = max(0, min(start_x, Nx - 1))
+                
+                for x in range(start_x, Nx):
+                    idx = x * Ny * Nz + j * Nz + k
+                    atomic_xor(grid, idx, 1)
+```
+
+## Subtopics
+
+### [Compute Shader Triangle Voxelization](12867-compute-shader-triangle-voxelization.md)
+A compute shader technique for voxelizing large triangles by iterating over a 2D bounding box in the plane of the triangle and testing for collisions, designed to handle triangles that span many voxels more efficiently than per-voxel rasterization. It differs from standard rasterization-based voxelization by explicitly solving the plane equation for every candidate voxel within the triangle's 2D footprint, allowing for precise solid voxelization and texture coordinate interpolation without relying on hardware rasterization pipelines.
+
+## Operating characteristics
+**Time Complexity:** $O(T \cdot C)$, where $T$ is the number of triangles and $C$ is the average number of voxel columns intersected by a triangle [S1].
+**Memory Complexity:** $O(N_x N_y N_z)$ for the voxel grid [S1]. Local memory usage per work-item is minimal, storing only vertex coordinates [S2].
+**Performance:**
+*   Reduces intersection tests by more than four orders of magnitude compared to Voxel-Based (VB) parallelization [S2].
+*   On the Stanford Bunny model at 3mm voxel size, FB reduces tests from 1,767,431 (VB) to 93 (FB) [S2]. At 0.5mm, from 368,832,950 to 5,874 [S2].
+*   **Weaknesses:**
+    *   **Warp Divergence:** The number of relevant voxel columns varies significantly among triangles in a warp, leading to underutilization [S1].
+    *   **Memory Bandwidth:** Flipping voxels in large grids requires high memory bandwidth [S1]. Atomic XOR operations may be sequentialized, negatively affecting performance [S1].
+*   **Strengths:** Efficient for sparse meshes or when the voxel grid is much larger than the mesh extent, as it skips empty space [S2].
+
+## Background
+The method was introduced as a data-parallel approach for solid voxelization on GPUs [S1]. It was developed to address the inefficiencies of voxel-based parallelization, where every voxel must be tested against the mesh [S2]. The facet-based (FB) approach was shown to be significantly faster than voxel-based (VB) methods due to reduced intersection tests and better memory locality [S2].
+
+## Sources
+[S1] Fast parallel surface and solid voxelization on GPUs, https://doi.org/10.1145/1882261.1866201, fetched 2026-11-03
+[S2] Fast and cross-vendor OpenCL-based implementation for voxelization of triangular mesh models, https://www.tandfonline.com/doi/abs/10.1080/16864360.2018.1486961, fetched 2026-10-31

@@ -1,0 +1,108 @@
+--- v009.md
++++ v010.md
+@@ -4,49 +4,60 @@
+ 
+ ## Overview
+-Adaptive Step Size Control is a family of techniques that dynamically adjusts the ray marching interval $\Delta t$ during volume rendering or ray tracing to balance computational cost against visual fidelity. Unlike fixed-step methods, which enforce a uniform trade-off between quality and efficiency, these methods vary the sampling density based on local scene properties (such as density gradients, transtransmittance, or statistical variance) or global constraints (such as target frame rates) [S1, S2, S3, unofficial]. This family is distinct from its siblings: [Safe Raymarching Step Size](1462-safe-raymarching-step-size.md) focuses on geometric safety bounds, [Compute Minimal Sample Distance Per Pixel](2684-compute-minimal-sample-distance-per-pixel.md) on resolution limits, [Error Estimate](2768-error-estimate.md) on local error metrics, [Gap-Limited Ray Marching](4412-gap-limited-ray-marching.md) on feature gaps, and [Adaptive Volume Rendering Integration](9817-adaptive-volume-rendering-integration.md) on integration accuracy.
++Adaptive Step Size Control is a family of techniques that dynamically adjusts the ray marching interval $\Delta t$ during volume rendering or ray tracing to balance computational cost against visual fidelity. [G] Unlike fixed-step methods, which enforce a uniform trade-off between quality and efficiency, these methods vary the sampling density based on local scene properties (such as density gradients, transmittance, or statistical variance) or global constraints (such as target frame rates) [S1, S2, S3, unofficial]. This family is distinct from its siblings: [Safe Raymarching Step Size](1462-safe-raymarching-step-size.md) focuses on geometric safety bounds, [Compute Minimal Sample Distance Per Pixel](2684-compute-minimal-sample-distance-per-pixel.md) on resolution limits, [Error Estimate](2768-error-estimate.md) on local error metrics, [Gap-Limited Ray Marching](4412-gap-limited-ray-marching.md) on feature gaps, and [Adaptive Volume Rendering Integration](9817-adaptive-volume-rendering-integration.md) on integration accuracy. [G]
+ 
+ ## Shared principles
+-All methods in this family operate on a ray defined by origin $\mathbf{o}$ and normalized direction $\mathbf{d}$, parameterized by distance $t$. The core loop evaluates a scene function (SDF, density field, or volume texture) at the current position $\mathbf{p} = \mathbf{o} + t\mathbf{d}$ to determine the next step size $\Delta t$ and check for termination.
++All methods in this family operate on a ray defined by origin $\mathbf{o}$ and normalized direction $\mathbf{d}$, parameterized by distance $t$. [G] The core loop evaluates a scene function (SDF, density field, or volume texture) at the current position $\mathbf{p} = \mathbf{o} + t\mathbf{d}$ to determine the next step size $\Delta t$ and check for termination. [G]
+ 
+ **Termination Conditions:**
+-1.  **Surface Hit:** The ray has intersected the target geometry. For SDFs, this is typically $|f(\mathbf{p})| < \epsilon$ or $f(\mathbf{p}) \le 0$. For volumes, this may be a density threshold or opacity accumulation [S1, unofficial].
+-2.  **Escape/Miss:** The ray has traveled beyond a maximum distance $t_{max}$ or exceeded a maximum iteration count $N_{max}$.
+-3.  **Early Termination (Volumes):** Accumulated opacity $\alpha_{acc}$ exceeds a threshold (e.g., $1 - \epsilon$), or accumulated transmission falls below a minimum threshold, allowing the ray to stop early as further contributions are negligible [S1, unofficial].
++1.  **Surface Hit:** The ray has intersected the target geometry. [G] For SDFs, this is typically $|f(\mathbf{p})| < \epsilon$ or $f(\mathbf{p}) \le 0$. [G] For volumes, this may be a density threshold or opacity accumulation. [G]
++2.  **Escape/Miss:** The ray has traveled beyond a maximum distance $t_{max}$ or exceeded a maximum iteration count $N_{max}$. [G]
++3.  **Early Termination (Volumes):** Accumulated opacity $\alpha_{acc}$ exceeds a threshold (e.g., $1 - \epsilon$), or accumulated transmission falls below a minimum threshold, allowing the ray to stop early as further contributions are negligible. [G]
+ 
+ **Step Size Determination:**
+ The step size $\Delta t$ is computed based on the local scene properties:
+-*   **SDF-based:** $\Delta t$ is often derived from the SDF value $f(\mathbf{p})$, potentially scaled by a relaxation factor or Lipschitz constant $\lambda$ [S2, unofficial].
+-*   **Volume-based:** $\Delta t$ may be fixed, adaptive based on density gradients, or constrained by minimum/maximum bounds to prevent aliasing or excessive computation [S2, unofficial].
+-*   **Safety:** Steps must be chosen to ensure the ray does not penetrate the surface or skip over significant volumetric features, often requiring conservative clamping.
++*   **SDF-based:** $\Delta t$ is often derived from the SDF value $f(\mathbf{p})$, potentially scaled by a relaxation factor or Lipschitz constant. [G]
++*   **Volume-based:** $\Delta t$ may be fixed, adaptive based on density gradients, or constrained by minimum/maximum bounds to prevent aliasing or excessive computation. [G]
++*   **Safety:** Steps must be chosen to ensure the ray does not penetrate the surface or skip over significant volumetric features, often requiring conservative clamping. [G]
+ 
+ **Pseudocode Structure:**
+ ```python
+-def ray_march_loop(ray_origin, ray_direction, scene_func, max_dist, max_steps, epsilon):
++def ray_march_loop(ray_origin, ray_direction, scene_func, max_dist, max_steps, epsilon, min_step=1e-4, max_step=1.0):
++    """
++    Generic adaptive ray marching loop implementing shared principles.
++    scene_func(p) returns (val, alpha) where val is SDF/density and alpha is opacity.
++    """
+     t = 0.0
++    alpha_acc = 0.0
++    
+     for i in range(max_steps):
+-        if t > max_dist:
+-            return False, t
++        # Escape/Miss check
++        if t >= max_dist:
++            return False, t, alpha_acc
+         
++        # Evaluate scene
+         p = ray_origin + ray_direction * t
+-        val = scene_func(p)
++        val, alpha = scene_func(p)
+         
+-        # Termination: Hit
+-        if is_hit(val, epsilon):
+-            return True, t
++        # Surface Hit check (SDF)
++        if abs(val) < epsilon:
++            return True, t, alpha_acc
++            
++        # Early Exit check (Volume)
++        if alpha_acc >= 1.0 - epsilon:
++            return False, t, alpha_acc
++            
++        # Adaptive Step Calculation
++        # Use SDF/density magnitude as base step, fallback to max_step if negative/zero
++        step = abs(val) if val > 0 else max_step
++        step = max(min_step, min(step, max_step))
+         
+-        # Termination: Early Exit (Volume specific)
+-        if is_early_exit(val, t):
+-            return False, t # Or handle partial contribution
++        # Guard against zero/negative steps to prevent infinite loops
++        if step <= 0:
++            step = min_step
+             
+-        # Step Size Calculation
+-        step = compute_step_size(val, t, i)
++        t += step
++        alpha_acc += alpha * (1.0 - alpha_acc)
+         
+-        # Safety Clamp
+-        step = max(step, min_step)
+-        step = min(step, max_step)
+-        
+-        t += step
+-        
+-    return False, t
++    return False, t, alpha_acc
+ ```
+ 
+@@ -54,8 +65,8 @@
+ 
+ ### [Adaptive Step Size Ray Marching](2312-adaptive-step-size-ray-marching.md)
+-Adaptive Step Size Ray Marching optimizes computational cost by varying the sampling interval along a ray based on local density changes and transmittance. It uses fine steps in high-density regions and coarse steps in empty space or at distance. It distinguishes itself from siblings like [Dynamic Sampling Step Adjustment](2442-dynamic-sampling-step-adjustment.md) by explicitly coupling step size to density gradients and transmittance thresholds, and from [Variance-based Step Size Adaptation](13161-variance-based-step-size-adaptation.md) by relying on deterministic density thresholds rather than statistical variance.
++Adaptive Step Size Ray Marching is a volume rendering technique that optimizes computational cost by varying the sampling interval along a ray based on local density changes and transmittance. Unlike fixed-step linear sampling, which forces a trade-off between quality and efficiency, this method uses fine steps in high-density regions and coarse steps in empty space or at distance. It distinguishes itself from siblings like [Dynamic Sampling Step Adjustment](2442-dynamic-sampling-step-adjustment.md) by explicitly coupling step size to density gradients and transmittance thresholds, and from [Variance-based Step Size Adaptation](13161-variance-based-step-size-adaptation.md) by relying on deterministic density thresholds rather than statistical variance.
+ 
+ ### [Dynamic Sampling Step Adjustment](2442-dynamic-sampling-step-adjustment.md)
+-Dynamic Sampling Step Adjustment accelerates traversal through empty or homogeneous regions of a volume by exponentially increasing the step size when no density is detected. It solves the problem of redundant sampling in sparse areas, such as the sky in atmospheric rendering, by skipping large distances until a feature is encountered. It distinguishes itself from sibling methods like [Adaptive Step Size Ray Marching](2312-adaptive-step-size-ray-marching.md) by using a binary "empty/non-empty" heuristic rather than continuous gradient or variance metrics to drive step changes, and from [Variance-based Step Size Adaptation](13161-variance-based-step-size-adaptation.md) by relying on mip-level offsets rather than statistical error bounds.
++Dynamic Sampling Step Adjustment is a ray marching optimization technique that accelerates traversal through empty or homogeneous regions of a volume by exponentially increasing the step size when no density is detected. It solves the problem of redundant sampling in sparse areas, such as the sky in atmospheric rendering, by skipping large distances until a feature is encountered. It distinguishes itself from sibling methods like [Adaptive Step Size Ray Marching](2312-adaptive-step-size-ray-marching.md) by using a binary "empty/non-empty" heuristic rather than continuous gradient or variance metrics to drive step changes, and from [Variance-based Step Size Adaptation](13161-variance-based-step-size-adaptation.md) by relying on mip-level offsets rather than statistical error bounds.
+ 
+ ### [Adaptive Step Size for Interaction](6615-adaptive-step-size-for-interaction.md)
+@@ -111,5 +122,5 @@
+ 
+ ## Background
+-Adaptive step size control originated from the need to optimize ray marching in volumetric data, where fixed sampling rates lead to either aliasing in dense regions or wasted computation in empty space. Early methods focused on density-gradient-based adaptation for cloud rendering . The field expanded to include statistical variance-based precomputation for sparse traversal [S1, unofficial] and dynamic mip-level skipping for empty space culling [S1, unofficial]. More recently, the focus has shifted towards performance-aware adaptation, using predictive models like ENTIRE to proactively adjust step sizes for target frame rates, avoiding the lag of reactive PID controllers [S3, unofficial]. These techniques are widely used in interactive volume visualization, medical imaging, and real-time cloud/atmospheric rendering.
++Adaptive step size control originated from the need to optimize ray marching in volumetric data, where fixed sampling rates lead to either aliasing in dense regions or wasted computation in empty space. [G] Early methods focused on density-gradient-based adaptation for cloud rendering. [G] More recently, the focus has shifted towards performance-aware adaptation, using predictive models like ENTIRE to proactively adjust step sizes for target frame rates, avoiding the lag of reactive PID controllers [S3, unofficial]. These techniques are widely used in interactive volume visualization, medical imaging, and real-time cloud/atmospheric rendering. [G]
+ 
+ ## Sources

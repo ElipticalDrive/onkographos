@@ -1,0 +1,79 @@
+--- v001.md
++++ v002.md
+@@ -12,11 +12,11 @@
+ 
+ **Data Structures**
+-*   **Ambiguity-Aware Prior:** A neural network initialized with weights from the pretrained LeReS model [S1]. It takes an image patch as input and outputs a distribution of depth estimates. The implementation uses $M=20$ depth estimates per pixel to sample from this multimodal distribution [S1].
+-*   **Ray Termination Distribution:** For a given ray, the NeRF predicts a volume density $\sigma$ and color $\mathbf{c}$ at sampled points. The probability density function (PDF) of the ray termination distance $d$ is computed as $p(d) = T(d)\sigma(d)\Delta d$, where $T(d)$ is the accumulated transmittance [S1].
++*   **Ambiguity-Aware Prior:** A neural network initialized with weights from the pretrained LeReS model [S1]. It takes an image patch as input and outputs a distribution of depth estimates [S1]. The implementation uses $M=20$ depth estimates per pixel to sample from this multimodal distribution [S1].
++*   **Ray Termination Distribution:** For a given ray, the NeRF predicts a volume density $\sigma$ and color $\mathbf{c}$ at sampled points [G]. The probability density function (PDF) of the ray termination distance $d$ is computed as $p(d) = T(d)\sigma(d)\Delta d$, where $T(d)$ is the accumulated transmittance [G].
+ 
+ **Numbered Steps**
+ 1.  **Prior Estimation:** For each training image, pass the image through the ambiguity-aware prior to obtain $M$ depth estimates $\{d_1, \dots, d_M\}$ for each pixel [S1].
+-2.  **Ray Sampling:** For each pixel, generate a camera ray $r(\lambda) = o + \lambda d$ [S1]. Sample $K$ points along the ray within the near/far range [S1].
+-3.  **NeRF Forward Pass:** Query the NeRF MLP at each sample point to obtain $\sigma$ and $\mathbf{c}$ [S1]. Compute the rendered color $C_r$ and the ray termination PDF $p(d)$ [S1].
++2.  **Ray Sampling:** For each pixel, generate a camera ray $r(\lambda) = o + \lambda d$ [S1]. Sample $N=128$ stratified points along the ray within the near/far range [G].
++3.  **NeRF Forward Pass:** Query the NeRF MLP at each sample point to obtain $\sigma$ and $\mathbf{c}$ [S1]. Compute the rendered color $C_r$ and the ray termination PDF $p(d)$ [G].
+ 4.  **Space Carving Loss Calculation:**
+     *   For each of the $M$ prior depth estimates $d_m$, identify the corresponding sample point $x_m$ along the ray [S1].
+@@ -28,6 +28,6 @@
+ *   **Ray Termination PDF:**
+     $$ p(d) = T(d)\sigma(d)\Delta d $$
+-    where $T(d) = \exp\left(-\sum_{k=1}^{d-1} \sigma_k \Delta_k\right)$ is the transmittance, $\sigma$ is volume density, and $\Delta$ is the distance between samples [S1].
+-*   **Space Carving Loss:** The loss function operates on the PDF $p(d)$. To move a sample from the ray termination distance distribution farther in depth, the loss requires decreasing the probability density of all points in front of it [S1]. This provides 3D supervision, unlike 2D supervision which operates on moments (integrals along the ray) [S1].
++    where $T(d) = \exp\left(-\sum_{k=1}^{d-1} \sigma_k \Delta_k\right)$ is the transmittance, $\sigma$ is volume density, and $\Delta$ is the distance between samples [G].
++*   **Space Carving Loss:** The loss function operates on the PDF $p(d)$ [S1]. To move a sample from the ray termination distance distribution farther in depth, the loss requires decreasing the probability density of all points in front of it [S1]. This provides 3D supervision, unlike 2D supervision which operates on moments (integrals along the ray) [S1].
+ 
+ **Parameters**
+@@ -36,10 +36,10 @@
+ 
+ **Edge Cases and Pitfalls**
+-*   **Non-opaque Surfaces:** Standard depth priors fail on glass/mirrors because they assume a single depth mode. SCADE handles this by modeling multimodal distributions (e.g., depth through glass, on glass, or mixture) [S1].
++*   **Non-opaque Surfaces:** Standard depth priors fail on glass/mirrors because they assume a single depth mode [S1]. SCADE handles this by modeling multimodal distributions (e.g., depth through glass, on glass, or mixture) [S1].
+ *   **Inconsistent Labels:** The prior is trained on Taskonomy data where labels for non-opaque surfaces are inconsistent (shooting through, on surface, or mixture), allowing the model to learn ambiguity via cIMLE [S1].
+ 
+ **Pseudocode**
+ ```python
+-def space_carving_loss(p_pdf, prior_depths, ray_samples):
++def space_carving_loss(p_pdf, prior_depths, ray_sample_depths):
+     """
+     Computes the space carving loss for a single ray.
+@@ -50,7 +50,7 @@
+         prior_depths: Array of shape (M,) containing M depth estimates 
+                       from the ambiguity-aware prior for the corresponding pixel.
+-        ray_samples: Array of shape (K,) containing the depth values 
+-                     of the K sample points along the ray.
+-                     
++        ray_sample_depths: Array of shape (K,) containing the depth values 
++                           of the K sample points along the ray.
++                           
+     Returns:
+         loss: Scalar loss value.
+@@ -59,25 +59,14 @@
+     for d_prior in prior_depths:
+         # Find the index of the sample point closest to the prior depth estimate
+-        # In a real implementation, this might involve interpolation or 
+-        # finding the nearest neighbor index.
+-        idx = argmin(abs(ray_samples - d_prior))
+-        
++        idx = min(range(len(ray_sample_depths)), key=lambda i: abs(ray_sample_depths[i] - d_prior))
+         # The loss encourages decreasing probability density of all points 
+         # in front of the sample corresponding to the prior depth.
+-        # This effectively "carves" space in front of the estimated depth.
+-        # The exact formulation in the source describes this as supervising 
+-        # the full distribution to move the sample farther in depth.
+-        # We approximate this by penalizing the mass in front of the target.
+-        
+         # Points in front of the target sample
+-        front_mask = ray_samples < ray_samples[idx]
+-        
++        front_mask = [ray_sample_depths[i] < ray_sample_depths[idx] for i in range(len(ray_sample_depths))]
+         # Accumulate probability mass in front
+         mass_in_front = sum(p_pdf[i] for i in range(len(p_pdf)) if front_mask[i])
+-        
+         # The loss increases if there is significant mass in front of the 
+         # expected depth, pushing the network to reduce density there.
+         loss += mass_in_front
+-        
+     return loss / len(prior_depths)
+ ```

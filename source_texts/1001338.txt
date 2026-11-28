@@ -1,0 +1,169 @@
+SDF and Voxel sculpting library. Contribute to CyberdyneCorp/ClayCore development by creating an account on GitHub.
+
+Clone and bulk-read a voxel grid, and state its threading (ABI 0.123.0) by leonardoaraujosantos · Pull Request #682 · CyberdyneCorp/ClayCore · GitHub
+Skip to content
+You signed in with another tab or window. Reload to refresh your session.
+You signed out in another tab or window. Reload to refresh your session.
+You switched accounts on another tab or window. Reload to refresh your session.
+Dismiss alert
+Conversation
+leonardoaraujosantos
+commented
+Oct 4, 2026
+Copy link
+Copy Markdown
+Contributor
+Problem
+A voxel layer's grid is only reachable as a borrow of its document (clay_document_voxel_layer_by_id). The ABI had no call that copies a grid and no bulk read of its cells. ClaySpaceDesktop#285 moves grid-to-field to a worker, and to do that it had to read every cell of the occupied box through clay_voxel_get, empty cells included, then rebuild the grid on the worker. That snapshot cost 17–46 ms on the interface thread for 5k–100k cells. It captured only the active level and dropped the sculpt layers.
+The threading contract was also unwritten. clay_mesh_sculptor_create says which calls may run on a worker. clay_item_volume_from_voxels and clay_voxel_to_layer said nothing.
+Root cause, and what the suggested fix got wrong
+The issue suggests new VoxelGrid(*g) behind a handle. VoxelGrid is copyable, but that member-wise copy is itself a defect, because it also copies three pieces of the source's session state:
+change_sink_: a pointer into the document's undo journal (History::open_cells_).
+pass_capture_: a pointer to the document's open sculpt-layer pass record.
+recording_: the flag that says the next edit belongs to the open sculpt layer.
+An edit made to such a copy is written into the source's history. Through the C ABI the sink and the capture are installed only for the length of one call (VoxelStep), so a copy made at the boundary would not carry them today. The recording flag is live between calls, though, and the copy does carry it.
+Fix
+VoxelGrid::clone() (include/clay/voxel/grid.h, src/voxel/grid.cpp) does the member-wise copy, then:
+nulls the sink and the capture and closes the recording. The open sculpt layer arrives closed, with its record intact.
+sets the change count to 0.
+leaves the bounds cache cold.
+marks every occupied chunk dirty, the same as a grid read back from a file, because nothing has drawn the clone yet.
+VoxelGrid::occupied_cells(level) walks material_chunk_keys, covering both stored and inherited chunks. It returns every occupied cell with its palette index, sorted by z, then y, then x.
+New ABI calls:
+```
+clay_result clay_voxel_grid_clone(const clay_voxel_grid* src, clay_voxel_grid** out_owned);
+clay_result clay_voxel_get_occupied(const clay_voxel_grid* grid, int32_t* out_xyz, int32_t* out_index,
+                                    size_t capacity, size_t* out_count);
+```
+The clone takes an owned or a borrowed source and always returns an owned handle.
+The bulk read reads the active level and uses the size-query pattern. With both buffers NULL it returns the count from the per-chunk counters. A short buffer returns CLAY_ERROR_BUFFER_TOO_SMALL with the needed count and writes nothing.
+clay.h now has THREADING notes beside the clone, the bulk read, clay_item_volume_from_voxels and clay_voxel_to_layer, worded like the clay_mesh_sculptor_create note:
+On an owned grid these reads touch no document and may run on any thread.
+On a borrowed grid they are reads of the document. They are safe against a const document and not safe concurrently with a mutating clay_document_* / clay_voxel_* call.
+Two readers of a cold grid race in the lazily filled bounds cache (the HAZARD note in grid.h). The clone note says so and gives two remedies: warm the cache with clay_voxel_bounds first, or clone on the interface thread.
+to_field never reads the bounds cache, so the conversion itself is a pure read.
+Measured
+Apple M-series, -O2, in-process through libclay_shared, on a borrowed layer holding a 3-cell-thick sphere shell, median of 15 runs:
+cells
+box
+box walk (clay_voxel_get)
+clone
+get_occupied
+4,184
+25³
+0.16 ms
+0.008 ms
+0.31 ms
+10,408
+37³
+0.51 ms
+0.008 ms
+0.49 ms
+30,880
+61³
+2.27 ms
+0.007 ms
+1.12 ms
+89,048
+101³
+10.96 ms
+0.074 ms
+4.12 ms
+Here a box-walk call costs about 10 ns because it runs in-process. A host paying FFI per cell pays the 17–46 ms the issue reports. The clone is the route off the interface thread.
+About two thirds of the bulk read is its sort: 1.67 ms without the sort at 89k cells. An ordered chunk walk would remove the sort, but I did not build it. It would be five nested loops for a call that is off the interface-thread path once a host clones, so I kept the simpler design. The proposal records this.
+Regression tests, and proof they fail
+tests/unit/test_c_voxel.cpp, "c voxel: a clone of a borrowed layer is the whole grid and none of its document". It sets up a borrowed document layer with undo enabled, two levels, the finer level active, a four-entry palette and an open sculpt layer. It checks:
+the clone's level count, active level, per-level occupied counts and voxel sizes, palette colours, cells and sculpt layer match the source, and no layer is recording in the clone;
+after editing the clone (set, fill_box, erase), the document's grid, its sculpt-layer record and clay_document_undo_state depth are unchanged;
+destroying the clone succeeds while destroying the borrowed source is still refused;
+null arguments are refused.
+tests/unit/test_c_voxel.cpp, "c voxel: the bulk read is the box walk, without the box". It reads a sparse grid with cells in four far-apart chunks plus a fill, then a partially refined level with inherited cells. In both cases the result must equal a clay_voxel_get box walk element for element and match clay_voxel_occupied_count. It also checks a short buffer, reading either buffer alone, and null arguments.
+tests/unit/test_voxel.cpp has two engine cases:
+The clone is taken with a live sink and pass capture installed, then the clone is edited. The test asserts that the sink and the capture received nothing.
+The bulk-read order, including inherited cells.
+Against main (ca5883b9) the C cases do not compile: clay_voxel_grid_clone and clay_voxel_get_occupied are undeclared.
+Mutation results:
+clone() replaced by the issue's naive copy (return VoxelGrid(*this)): the C case fails on recording == 0. The engine case fails 5 assertions: sink copied, recording copied, change count copied, the clone's edit appended to the source's sink, and the clone's rewrite of a pass cell noted in the source's capture.
+Skipping inherited chunks: both bulk-read cases fail.
+Dropping the sort: both bulk-read cases fail on order.
+One limitation: the C-level undo-depth assertion alone could not catch a copied sink, because the sink is null between C calls. The engine test covers that case directly.
+Verification
+cmake --preset cpu-only -DCLAY_BUILD_TESTS=ON -DCLAY_BUILD_PYTHON=ON, full build. ctest --preset cpu-only: 11/11 passed, covering the four unit shards, pyclay pytest and the C ABI smoke.
+python3 tools/check_c_abi.py build/cpu-only/libclay_shared.dylib: OK. The FFI exercise now clones a borrowed grid and reads it back through ctypes. I checked with nm that the dylib exports both new symbols.
+npx -y @fission-ai/openspec@1.12.0 validate --all --strict: 74 passed.
+The touched sources were compiled with GCC 16 using -Wall -Wextra -Wpedantic -Wshadow -Werror -fsyntax-only, to cover the Ubuntu leg's flags. All clean.
+python3 tools/release_check.py --skip-slow: every code gate passed. That covers version (0.123.0 in all three files), configure, build, tests (11/11), parity, layering, dialect, licenses, task-symbols, bindings (it imported a built pyclay), kernels, abi and openspec.
+Five release-only rows fail, and they fail on main too: device (main's engine has changed in 45 files since the gate ran at 7f6cf38) and the four hardware/* waivers (include/clay/eval/bake_volume.h changed on main in Widen a squashed placement's bound before the per-brick cull (#649) #680 after the waiver at 59e42cc). None of them is touched here, and they are re-run when a release is cut.
+Docs / spec
+OpenSpec change clone-and-bulk-read-a-voxel-grid (proposal, design, tasks) with ADDED requirements in c-abi and voxel-engine.
+docs/05-claycore-library.md: new paragraph in the C ABI section.
+README.md: the Voxel → SDF paragraph now points at the clone for off-thread conversion.
+pyclay is unchanged. The parity gate checks that C reaches what pyclay reaches, and this PR only adds to C.
+ABI 0.122.0 -> 0.123.0 (CMakeLists.txt, bindings/c/clay.h, pyproject.toml).
+Closes #658
+leonardoaraujosantos
+added 2 commits
+October 4, 2026 02:43
+Add clay_voxel_grid_clone and clay_voxel_get_occupied (ABI 0.122.0 ->…
+…
+280395e
+```
+… 0.123.0)
+
+A document's voxel grid was reachable only as a borrow, so a host moving
+grid-to-field to a worker rebuilt it from one clay_voxel_get per cell of
+the occupied box: empty cells included, the active level only, sculpt
+layers lost (#658).
+
+VoxelGrid::clone() copies every level, the palette, the active level and
+the sculpt layers, and drops what belongs to the source's session: the
+member-wise copy also carries change_sink_ and pass_capture_, pointers
+into the owner's undo journal, and the recording flag, so an edit to a
+plain copy lands in the source's history. The clone starts undrawn
+(every occupied chunk dirty), with a zero change count and a cold
+bounds cache.
+
+VoxelGrid::occupied_cells() walks the material chunks of a level,
+inherited ones included, sorted by z, y, x. clay_voxel_get_occupied
+exposes it on the active level with the size-query pattern and
+CLAY_ERROR_BUFFER_TOO_SMALL for a short buffer.
+
+clay.h now states the threading footing of the clone, the bulk read,
+clay_item_volume_from_voxels and clay_voxel_to_layer, including the
+race two readers of a cold grid hit in the lazily filled bounds cache.
+```
+Document the voxel grid clone, bulk read and threading contract (#658)
+…
+59a9db7
+```
+OpenSpec change clone-and-bulk-read-a-voxel-grid with c-abi and
+voxel-engine deltas and the measurements; docs/05 C ABI section and the
+README voxel-to-SDF paragraph point hosts at the clone for an
+off-thread conversion.
+```
+Hide details
+View details
+leonardoaraujosantos
+merged commit ab2458a
+into
+main
+Oct 4, 2026
+16 checks passed
+Uh oh!
+There was an error while loading. Please reload this page.
+leonardoaraujosantos
+deleted the
+feat/658-voxel-grid-clone
+branch
+October 4, 2026 06:53
+Sign up for free
+to join this conversation on GitHub.
+Already have an account?
+Sign in to comment
+Uh oh!
+There was an error while loading. Please reload this page.
+Labels
+None yet
+1 participant
+Add this suggestion to a batch that can be applied as a single commit.This suggestion is invalid because no changes were made to the code.Suggestions cannot be applied while the pull request is closed.Suggestions cannot be applied while viewing a subset of changes.Only one suggestion per line can be applied in a batch.Add this suggestion to a batch that can be applied as a single commit.Applying suggestions on deleted lines is not supported.You must change the existing code in this line in order to create a valid suggestion.Outdated suggestions cannot be applied.This suggestion has been applied or marked resolved.Suggestions cannot be applied from pending reviews.Suggestions cannot be applied on multi-line comments.Suggestions cannot be applied while the pull request is queued to merge.Suggestion cannot be applied right now. Please check back later.
+You can’t perform that action at this time.

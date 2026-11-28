@@ -1,0 +1,114 @@
+# Coarse-to-Fine Training Strategy
+
+Also called: Coarse-to-Fine TDBS
+
+## Overview
+A training strategy that progressively improves depth precision to circumvent local minima and refine depth geometry [S1]. It sets itself apart from standard single-stage training by decoupling optimization into distinct phases: an initial phase focused on global convergence using robust priors, followed by a phase focused on local precision or error correction [S1]. This approach accelerates the convergence of pose optimization and enhances the precision of pose estimation [S1], while the Gaussian Splatting variant improves global consistency and manages large-scale scenes [S2].
+
+## How it works
+The strategy manifests in two distinct variants depending on the underlying representation: a NeRF variant using Truncated Depth-Based Sampling (TDBS) [S1], and a Gaussian Splatting variant (CAG-GS) using a divide-and-conquer approach [S2]. Both variants share the core principle of dividing training into a "coarse" stage for global stability and a "fine" stage for local refinement [S1, S2].
+
+### Inputs and Outputs
+*   **Inputs:** Training images, initial camera poses, monocular depth priors (TDBS variant) [S1], or initial anchor positions and semantic features (CAG-GS variant) [S2].
+*   **Outputs:** Optimized radiance field and refined camera poses (TDBS variant) [S1], or optimized 3D Gaussians/anchors and final rendered images (CAG-GS variant) [S2].
+
+### Data Structures
+*   **TDBS Variant:** Epoch counter, threshold epoch $T_s$ [S1].
+*   **CAG-GS Variant:** Scene bounding box derived from coarse model anchors [S2], block grid partitioning the bounding box (e.g., $4 \times 4$ or $2 \times 4$) [S2], local models per block containing MLP decoders and semantic mapping modules [S2], anchor list with positions, features, and importance scores [S2], and view assignment map [S2].
+
+### Numbered Steps
+
+#### Variant 1: Coarse-to-Fine TDBS (for NeRF) [S1]
+This variant uses TDBS to converge density values and Uniform Sampling to recompute erroneous depth values.
+
+1.  **Initialize:** Set up the NeRF model and training loop. Define threshold epoch $T_s$ [S1].
+2.  **Coarse Stage (Epoch $< T_s$):**
+    *   For each training iteration, sample points along rays using **Truncated Depth-Based Sampling (TDBS)** [S1].
+    *   TDBS utilizes monocular depth priors informed by a truncated normal distribution to optimize ray point sampling [S1].
+    *   Render the image and compute loss (photometric, depth, pose constraints) [S1].
+    *   Update model parameters [S1].
+3.  **Transition:** Check if current epoch $\ge T_s$ [S1].
+4.  **Fine Stage (Epoch $\ge T_s$):**
+    *   For each training iteration, sample points along rays using **Uniform Sampling** [S1].
+    *   The purpose is to recompute erroneous depth values based on the already optimized majority of points, avoiding local minima caused by noisy depth priors [S1].
+    *   Render the image and compute loss [S1].
+    *   Update model parameters [S1].
+
+#### Variant 2: Coarse-to-Fine Training Strategy for CAG-GS (for Gaussian Splatting) [S2]
+This variant consists of three stages: coarse global model training, scene division, and block-wise local fine-tuning.
+
+1.  **Coarse Global Model Training:**
+    *   Optimize a single global model for **60,000 iterations** using the combined loss function (photometric, semantic feature alignment, normal consistency) [S2].
+    *   This stage establishes a rough global consistency and provides anchor positions for scene division [S2].
+2.  **Scene Division:**
+    *   **Estimate Bounding Box:** Determine the scene bounding box based on the positions of anchors in the trained coarse model [S2].
+    *   **Divide Scene:** Sequentially divide the scene along the two axes of the bounding box into blocks. Ensure each block contains an approximately equal number of training views to balance optimization workload [S2].
+        *   *Typical Grid:* SmallCity scene divided into $4 \times 4$ blocks; other scenes (Building, Rubble, Residence, Sci-Art) divided into $2 \times 4$ blocks [S2].
+    *   **Assign Views:**
+        *   Initially assign training views within each block boundary to the corresponding block [S2].
+        *   **Blending Weight Calculation:** Compute the blending weight $\hat{\alpha}_i(x')$ for Gaussian $G_i$ when querying pixel $x'$:
+            $$ \hat{\alpha}_i(x') = \sigma_i G'_i(x') \prod_{k=1}^{i-1} (1 - \sigma_t G'_t(x')) $$
+            where $\sigma_i$ is density, $G'_i$ is the Gaussian contribution, and the product term represents opacity accumulation [S2].
+        *   **Importance Score:** Compute the importance score $s(A_j)$ for anchor $A_j$ by accumulating blending weights over all pixels $x'$ and Gaussians $i \in I_j$ constructed by $A_j$:
+            $$ s(A_j) = \sum_{i \in I_j} \sum_{x' \in X} \hat{\alpha}_i(x') $$
+        *   **Threshold Check:** Compute the ratio of the sum of importance scores of anchors within the block boundary to the total importance score. If this ratio exceeds threshold $\epsilon$ (set to **0.1**), assign the training view to the target block [S2].
+3.  **Block-wise Local Fine-Tuning:**
+    *   **Instantiate Local Models:** Create a local model for each block. Initialize modules and anchors from the coarse model [S2].
+        *   Inherit parameters of MLP decoders and semantic mapping modules from the coarse model [S2].
+    *   **Initialize Anchors:** Iterate over assigned training views. Select anchors with positive importance scores as initial anchors. This process may introduce out-of-boundary anchors, which help provide reliable estimates for neighboring regions [S2].
+    *   **Fine-Tune:** Optimize each local model for another **60,000 iterations** [S2].
+4.  **Block Merging:**
+    *   **Discard Outliers:** Discard anchors falling outside the block boundaries [S2].
+    *   **Merge Borders:** Merge remaining anchors along shared borders [S2].
+    *   **Fuse Features:** Fuse features of merged anchors with semantic features queried from their corresponding semantic mapping modules [S2].
+    *   **Finalize:** Discard semantic mapping modules of all local models. Retain MLP decoders for predicting Gaussian attributes [S2].
+
+### Formulas
+*   **Sampling Strategy Switch (TDBS Variant):**
+    $$ S(r) = \begin{cases} S_{TDBS}(r) & \text{if epoch} < T_s \\ S_{uni}(r) & \text{if epoch} \ge T_s \end{cases} $$
+    Where $S_{TDBS}(r)$ is TDBS, $S_{uni}(r)$ is Uniform Sampling, and $T_s$ is the threshold epoch [S1].
+*   **Blending Weight (CAG-GS Variant):**
+    $$ \hat{\alpha}_i(x') = \sigma_i G'_i(x') \prod_{k=1}^{i-1} (1 - \sigma_t G'_t(x')) $$
+    Where $x'$ is the queried pixel, $I(x')$ represents sorted indices of contributing Gaussians [S2].
+*   **Importance Score (CAG-GS Variant):**
+    $$ s(A_j) = \sum_{i \in I_j} \sum_{x' \in X} \hat{\alpha}_i(x') $$
+    Where $I_j$ is the set of indices of Gaussians constructed by anchor $A_j$ [S2].
+
+### Parameters
+*   **$T_s$ (Threshold Epoch):** Set to **1000 epochs** (corresponding to the epoch at which learning rate begins to schedule) [S1].
+*   **$\epsilon$ (Importance Score Ratio Threshold):** Set to **0.1** [S2].
+*   **Iterations:** 60,000 iterations for coarse stage, 60,000 iterations for fine stage per block [S2].
+*   **Block Grid Dimensions:** $4 \times 4$ for SmallCity; $2 \times 4$ for other scenes (Building, Rubble, Residence, Sci-Art) [S2].
+*   **Loss Weighting (CAG-GS):** $\lambda = 0.2$ (photometric), $\lambda_1 = 1.0$, $\lambda_2 = 100.0$, $\lambda_3 = 0.015$ [S2].
+*   **Semantic Feature Dimension ($d$):** 32 [S2].
+*   **Number of Gaussians per Anchor ($K$):** 10 [S2].
+
+### Edge Cases and Pitfalls
+*   **Noisy Depth Priors:** If monocular depth priors are inaccurate, full-stage TDBS can degrade rendering quality. The coarse-to-fine strategy mitigates this by switching to Uniform Sampling in the fine stage to correct erroneous depth values [S1].
+*   **Out-of-Boundary Anchors:** In the CAG-GS variant, initial anchor selection may include anchors outside the block boundary. These are intentionally kept during fine-tuning to provide reliable estimates for neighboring regions but must be discarded during the final merge [S2].
+*   **View Assignment Imbalance:** If views are not assigned based on blending weights, some blocks may lack sufficient supervision. The threshold $\epsilon$ controls the importance score ratio to assign additional views outside boundaries, ensuring adequate supervision per block [S2].
+
+## Subtopics
+
+### Coarse-to-fine Training Strategy for TDBS
+A two-stage training strategy for NeRF that uses TDBS in the coarse stage to converge density values and Uniform Sampling in the fine stage to recompute erroneous depth values and avoid local minima [S1]. It is chosen when using monocular depth priors that may contain noise, requiring a transition from prior-guided sampling to uniform sampling for refinement. The threshold $T_s$ is set to 1000 epochs [S1].
+
+### Coarse-to-Fine Sampling
+A sampling strategy to capture ground truth depth by starting with a large interval around current depth estimation and gradually reducing it, keeping sampling density constant [S3]. It iterates over rays corresponding to foreground pixels and samples points uniformly in $[d_{ij} - o, d_{ij} + o]$ [S3]. The offset parameter $o$ defines the interval size [S3]. If the real depth falls outside this interval, appearance cannot guide geometry optimization effectively [S3].
+
+## Operating characteristics
+*   **Time Complexity:** The CAG-GS variant increases total training time due to the multi-stage process (60,000 + 60,000 iterations) and scene division overhead, though block fine-tuning can be parallelized across GPUs [S2]. The TDBS variant follows standard NeRF training iteration costs, with sampling determined by the epoch threshold [S1].
+*   **Memory Complexity:** The CAG-GS variant requires memory for multiple local models during fine-tuning but enables large-scale scene processing by partitioning the scene [S2]. The TDBS variant maintains memory complexity proportional to the number of sampled points per ray [S1].
+*   **Performance:** Accelerates pose optimization convergence and enhances pose estimation precision [S1]. Improves global consistency and manages large-scale scenes effectively [S2].
+*   **Strengths:** Circumvents local minima, refines depth geometry, handles noisy depth priors, scales to large scenes.
+*   **Limitations:** Increased implementation complexity, requires tuning of thresholds ($T_s$, $\epsilon$), additional overhead for scene division and merging.
+*   **When to Use:** When using noisy monocular depth priors (TDBS variant) or rendering large-scale scenes requiring high global consistency (CAG-GS variant).
+*   **When Not to Use:** For small scenes with high-quality depth priors where standard training suffices, or when computational resources are extremely limited.
+
+## Background
+The Coarse-to-Fine Training Strategy was introduced in the context of TD-NeRF (Truncated Depth Prior for Joint Camera Pose and Neural Radiance Field Optimization) to improve the joint optimization of camera poses and radiance fields using monocular depth priors [S1]. It was proposed to address the issue of noisy depth priors degrading rendering quality by progressively improving depth precision [S1]. A separate variant was introduced in CAG-GS (Consistent Anchor Guided Gaussian Splatting) to incorporate semantic guidance and improve global consistency under a divide-and-conquer strategy for large-scale scene rendering [S2].
+
+## Sources
+[S1] TD-NeRF: Novel Truncated Depth Prior for Joint Camera Pose and Neural Radiance Field Optimization, https://doi.org/10.1109/iros58592.2024.10802634, fetched 2026-10-26
+[S2] CAG-GS: Consistent Anchor Guided Gaussian Splatting for Large-scale Scene Rendering, https://doi.org/10.1609/aaai.v40i14.38120, fetched 2026-10-29
+[S3] Multi-View Reconstruction Using Signed Ray Distance Functions (SRDF), https://doi.org/10.1109/cvpr52729.2023.01602, fetched 2026-10-26

@@ -1,0 +1,158 @@
+Issue description In standard (32-bit Real) builds, the camera view snaps in small fixed steps when the camera rotates slowly a few hundred metres from the world origin. The camera's position and orientation are smooth; the rounding happ...
+
+[Bug]: Camera view direction is rounded to ~0.2° steps far from the origin in 32-bit builds (`Camera::GetMatrices` builds the LookAt target as `position + direction`) · Issue #4312 · FlaxEngine/FlaxEngine · GitHub
+Skip to content
+You signed in with another tab or window. Reload to refresh your session.
+You signed out in another tab or window. Reload to refresh your session.
+You switched accounts on another tab or window. Reload to refresh your session.
+Dismiss alert
+[Bug]: Camera view direction is rounded to ~0.2° steps far from the origin in 32-bit builds (Camera::GetMatrices builds the LookAt target as position + direction) #4312
+New issue
+Copy link
+New issue
+Copy link
+Open
+#4356
+Open
+[Bug]: Camera view direction is rounded to ~0.2° steps far from the origin in 32-bit builds (Camera::GetMatrices builds the LookAt target as position + direction)#4312
+#4356
+Copy link
+Labels
+bugSomething isn't workingSomething isn't workinggraphics
+Milestone
+1.14
+Description
+odunov
+opened on Oct 17, 2026
+Issue body actions
+Issue description
+In standard (32-bit Real) builds, the camera view snaps in small fixed steps when the camera rotates slowly a few hundred metres from the world origin. The camera's position and orientation are smooth; the rounding happens while the view matrix is built.
+Camera::GetMatrices (Source/Engine/Level/Actors/Camera.cpp, unchanged on master):
+```
+const Vector3 direction = Vector3::Transform(Vector3::Forward, GetOrientation());
+const Vector3 position = _transform.Translation - origin;
+const Vector3 target = position + direction;
+...
+Real4x4::LookAt(position, target, up, viewResult);
+```
+LookAt recovers the view direction as target - position. When position is large, position + direction is rounded to the float spacing of position, so the recovered direction is quantized:
+distance from origin
+float spacing
+direction step
+on screen (60° vertical FOV, 1032 px)
+550 m (55 000 units)
+2⁻⁸ ≈ 0.0039
+≈ 0.0039 rad ≈ 0.22°
+≈ 2–4 px
+1 km (100 000 units)
+2⁻⁷ ≈ 0.0078
+≈ 0.45°
+≈ 4–8 px
+Positions themselves are still precise at these distances (0.004–0.008 units), so this is much larger than the inherent 32-bit limit. It explains the "camera movement (or probably rotation) is jumpy when far from the center, from about 1 km" report in #740, which was closed as a normal 32-bit limitation; it is mostly this avoidable round trip.
+What it looks like: while a camera eases its rotation toward a target (e.g. a chase camera settling behind a car after a turn), the view holds still, jumps one step, holds longer, jumps again, and finally snaps when it stops. Straight-line motion shows nothing (constant direction). A top-down camera whose yaw is carried in up shows nothing either, because only the look direction goes through position + direction.
+The same pattern is used in:
+RenderView::SetProjector (Source/Engine/Graphics/RenderView.cpp) and RenderView.SetProjector (RenderView.cs)
+EditorViewport.CreateViewMatrix (Source/Editor/Viewport/EditorViewport.cs), so the editor viewport camera is affected too
+Camera::ProjectPoint / UnprojectPoint use GetMatrices, so screen projections inherit the steps
+(RenderView::SetFace also adds Position + Direction, but its axis-aligned unit directions round exactly, so it is not affected.)
+Large Worlds builds (64-bit Real and a camera-near origin) do not show this.
+Suggested fix
+Build the rotation part with the eye at zero, so no large number is involved, then add the translation:
+```
+// Create view matrix
+const Vector3 direction = Vector3::Transform(Vector3::Forward, GetOrientation());
+const Vector3 position = _transform.Translation - origin;
+Vector3 up;
+Vector3::Transform(Vector3::Up, GetOrientation(), up);
+Real4x4 viewResult;
+Real4x4::LookAt(Vector3::Zero, direction, up, viewResult); // rotation only: avoids rounding position + direction
+viewResult.M41 = -Vector3::Dot(position, Vector3(viewResult.M11, viewResult.M21, viewResult.M31));
+viewResult.M42 = -Vector3::Dot(position, Vector3(viewResult.M12, viewResult.M22, viewResult.M32));
+viewResult.M43 = -Vector3::Dot(position, Vector3(viewResult.M13, viewResult.M23, viewResult.M33));
+view = Matrix(viewResult);
+```
+This gives the same matrix as before (LookAt puts the axes in the columns and -dot(axis, eye) in the translation row), minus the rounding. The same change applies to SetProjector and EditorViewport.CreateViewMatrix.
+We verified the approach in game code (C#, building the view in MainRenderTask.Begin and clearing the task's camera for that frame): with the same steering-and-settle sequence, back-and-forth jumps of the car's on-screen outline dropped from 179 to 7 at 550 m, the same as near the origin. A matching screen projection agreed with Camera.ProjectPoint to within 0.01 px near the origin.
+Steps to reproduce
+Standard (non-Large-Worlds) build, empty scene with a directional light and sky.
+Camera at (55000, 200, 0), a cube about 6 m in front of it.
+Rotate the camera's yaw slowly, e.g. +0.02° per frame, or ease it toward a target.
+The cube and background move in visible steps of a few pixels. Repeat at (0, 200, 0): smooth.
+Minimal script (attach to the camera):
+```
+public class SlowYaw : Script
+{
+    public float DegreesPerSecond = 2f;
+    public override void OnUpdate()
+    {
+        Actor.Orientation = Quaternion.Euler(10f, (float)(Time.GameTime * DegreesPerSecond), 0f);
+    }
+}
+```
+Version
+1.12.6912 (also present on master as of 2026-10-17). Windows 11, DirectX 12, standard (32-bit) build.
+How this was found
+I (@odunov) noticed the jitter while testing a vehicle-handling prototype. I described when it happened: only far from the start point, only after small turns while the chase camera settled, not in a top-down view, with jumps that got rarer until a final snap. The root-cause analysis, the measurements and the suggested code above were done by Claude (Anthropic's AI coding assistant) working with me; I did not write the code myself. Happy to test a fix.
+Activity
+cNori commented on Oct 19, 2026
+cNori
+on Oct 19, 2026
+Contributor
+More actions
+floats will start rounding when u are past 10k units away float units to be clear from 0, unity engine has warning in editor on transform for it and with good reason
+at araund 8k depending how much math has been done of loat u can some times say goobaye to .0001 decimal
+also Suggested fix AI have kinda pached the float with float and will like to pull bits for eather
+also source of what the Real4x4::LookAt maps to
+FlaxEngine/Source/Engine/Core/Math/Matrix.cpp
+Line 487
+in
+0cbc4be
+void Matrix::LookAt(const Float3& eye, const Float3& target, const Float3& up, Matrix& result)
+parts of errors are for position it self before they actually get to Look At can't pull bits for void
+there will be loss from math also along the way
+main loss in in final matrix construcion
+it is less a bug more engine needs a warning on transform same as unity
+👍React with 👍1Reacted by odunov
+mafiesto4
+added
+bugSomething isn't workingSomething isn't working
+core
+graphics
+and removed
+bugSomething isn't workingSomething isn't working
+core
+graphics
+on Oct 20, 2026
+mafiesto4
+added this to the 1.14 milestone on Oct 20, 2026
+mafiesto4
+added
+bugSomething isn't workingSomething isn't working
+graphics
+on Oct 20, 2026
+meet-brad-ch
+added a commit that references this issue on Oct 23, 2026
+Fix the view direction rounding far from the origin
+...
+This issue will close once commit a4daf9e is merged into the 'master' branch.
+a4daf9e
+Sign up for free to join this conversation on GitHub. Already have an account? Sign in to comment
+Metadata
+Metadata
+Assignees
+No one assigned
+Labels
+bugSomething isn't workingSomething isn't workinggraphics
+Type
+No type
+Projects
+No projects
+Milestone
+1.14No due date
+Relationships
+None yet
+Development
+No branches or pull requests
+Issue actions
+Open in GitHub Copilot app
+You can’t perform that action at this time.

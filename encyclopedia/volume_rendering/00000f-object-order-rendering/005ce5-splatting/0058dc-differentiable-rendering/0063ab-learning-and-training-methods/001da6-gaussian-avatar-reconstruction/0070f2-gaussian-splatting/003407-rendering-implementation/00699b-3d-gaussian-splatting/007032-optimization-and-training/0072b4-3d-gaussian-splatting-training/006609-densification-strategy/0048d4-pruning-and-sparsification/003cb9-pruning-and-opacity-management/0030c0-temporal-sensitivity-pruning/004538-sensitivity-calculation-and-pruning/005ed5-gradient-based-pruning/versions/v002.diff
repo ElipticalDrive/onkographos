@@ -1,0 +1,149 @@
+--- v001.md
++++ v002.md
+@@ -4,88 +4,83 @@
+ 
+ ## Overview
+-Gradient-based Pruning removes 3D Gaussians that contribute minimally to the optimization process by evaluating the magnitude of gradients associated with each Gaussian during training [S1]. It distinguishes itself from opacity-based methods by targeting Gaussians that are structurally redundant or poorly aligned with scene geometry, rather than those that are simply transparent [S1]. This method is a core component of several efficient 3D Gaussian Splatting variants, including EfficientGS, GDGS, Trimming the Fat, and ELMGS [S1].
++Gradient-based Pruning is a training-time sparsification technique for 3D Gaussian Splatting that removes Gaussians contributing minimally to the optimization process by evaluating the magnitude of their associated gradients [S1]. It distinguishes itself from sibling methods, such as [Statistical Sensitivity-Driven Online Sparsification](14437-statistical-sensitivity-driven-online-sparsification.md), by directly measuring the gradient signal intensity rather than statistical variance or opacity thresholds, allowing for efficient GPU implementation while effectively eliminating visual artifacts like floaters [S1].
+ 
+ ## How it works
+-**Inputs and Outputs**
+-*   **Input:** The set of 3D Gaussians $\mathcal{G}$, their current parameters (position, covariance, opacity, spherical harmonics coefficients), and the accumulated gradient information from the most recent training iterations.
+-*   **Output:** A pruned subset of Gaussians $\mathcal{G}' \subset \mathcal{G}$ with low gradient magnitudes removed.
++**Inputs and Outputs:**
++- **Input:** The set of 3D Gaussians $\mathcal{G}$ currently active in the scene, their parameters (position $\mathbf{t}$, covariance $\mathbf{\Sigma}$, opacity $\alpha$, spherical harmonics coefficients $\mathbf{c}$), and the accumulated gradient magnitudes $\mathbf{g}$ for each Gaussian during the current training phase.
++- **Output:** A pruned set of Gaussians $\mathcal{G}' \subset \mathcal{G}$ with redundant entries removed.
+ 
+-**Data Structures**
+-*   **Gradient Accumulator:** A vector or scalar value stored per Gaussian, tracking the cumulative gradient magnitude. In EfficientGS, this is specifically a cumulative gradient sum [S1].
+-*   **Threshold:** A scalar value determining the cutoff for removal. The sources do not specify a fixed universal threshold, noting that implementations like Trimming the Fat and ELMGS remove a fixed percentage (75%) [S1].
++**Data Structures:**
++- **Gradient Accumulator:** A vector or array of size $|\mathcal{G}|$ storing the cumulative gradient magnitude for each Gaussian. For EfficientGS [S1], this is a cumulative sum. For Kim et al. [S1], it may include separate components for position and SH coefficients.
++- **Threshold:** A scalar value $\tau$ determining the minimum gradient magnitude required to retain a Gaussian.
+ 
+-**Steps**
+-1.  **Gradient Calculation:** During the standard backpropagation step of training, compute the gradient of the loss function with respect to the parameters of each Gaussian.
+-    *   Standard implementations use positional gradients [S1].
+-    *   Kim et al. [30] extend this by incorporating Spherical Harmonics (SH) gradients alongside positional gradients to refine the pruning process [S1].
+-2.  **Magnitude Aggregation:** Calculate the magnitude of the gradients for each Gaussian.
+-    *   EfficientGS utilizes cumulative gradient sum analysis to aggregate these values over time [S1].
+-    *   GDGS models scene gradients to reduce Gaussian density [S1].
+-3.  **Pruning Decision:** Compare the calculated gradient magnitude against a threshold or rank order the Gaussians.
+-    *   If the magnitude is below the threshold (or in the lowest percentile), the Gaussian is marked for removal.
+-    *   Specific implementations like Trimming the Fat [25] and ELMGS [18] remove 75% of Gaussians based on this criterion [S1].
+-4.  **Removal:** Delete the marked Gaussians from the scene representation.
++**Steps:**
++1. **Gradient Accumulation:** During each training iteration, after the backward pass, compute the gradient magnitude for each Gaussian.
++   - For position-based pruning, calculate the Euclidean norm of the positional gradient $\nabla_{\mathbf{t}_i} L$ for Gaussian $i$.
++   - For SH-based pruning (Kim et al. [S1]), calculate the norm of the gradient with respect to spherical harmonics coefficients $\nabla_{\mathbf{c}_i} L$.
++   - Accumulate these magnitudes over time. EfficientGS [S1] uses a cumulative sum:
++     $$ G_i^{(t)} = G_i^{(t-1)} + \|\nabla_{\mathbf{p}_i} L\| $$
++     where $\mathbf{p}_i$ represents the parameters of interest (position or SH).
++2. **Thresholding:** Compare the accumulated gradient magnitude $G_i$ against a threshold $\tau$.
++   - If $G_i < \tau$, the Gaussian is marked for removal.
++   - The threshold $\tau$ can be static or adaptive based on the distribution of gradient magnitudes in the current batch.
++3. **Pruning:** Remove all marked Gaussians from the scene representation.
++   - Trimming the Fat [S1] and ELMGS [S1] apply this to remove up to 75% of Gaussians.
++4. **Optional: Opacity Reset:** When a Gaussian is pruned, its opacity may be reset or redistributed to neighboring Gaussians to alleviate interference with residual distribution tracking [S1].
+ 
+-**Pseudocode**
++**Parameters:**
++- **Threshold $\tau$:** Not given in the sources. Typically determined empirically or via percentile-based selection (e.g., remove bottom 10-25% of Gaussians by gradient magnitude).
++- **Accumulation Window:** The number of iterations over which gradients are summed. EfficientGS [S1] uses cumulative sums, implying a long-term or epoch-spanning window.
++
++**Edge Cases and Pitfalls:**
++- **Precision:** Gradient magnitudes can vary significantly across scenes. Normalization or adaptive thresholds are necessary to avoid removing too many or too few Gaussians.
++- **Degenerate Input:** Gaussians with zero gradient (e.g., occluded or static background) may be pruned prematurely if the threshold is too low.
++- **SH Gradients:** Incorporating SH gradients (Kim et al. [S1]) adds complexity but refines pruning by considering color/appearance contribution, not just geometry.
++
++**Pseudocode:**
+ ```python
+-def gradient_based_pruning(gaussians, cumulative_gradients, pruning_ratio=0.75):
++def gradient_based_pruning(gaussians, accumulated_gradients, threshold):
+     """
+-    Prunes Gaussians with low cumulative gradient magnitudes.
++    Prunes Gaussians with accumulated gradient magnitude below threshold.
+     
+     Args:
+         gaussians: List of Gaussian objects with attributes:
+-                   - id: Unique identifier
+-                   - pos_grad_norm: Norm of positional gradient
+-                   - sh_grad_norm: Norm of SH gradient (optional, if using Kim et al. extension)
+-        cumulative_gradients: Dictionary mapping Gaussian id to accumulated gradient magnitude.
+-        pruning_ratio: Fraction of Gaussians to remove (e.g., 0.75 for Trimming the Fat/ELMGS).
++            - id: Unique identifier
++            - accumulated_grad: Current cumulative gradient magnitude
++        accumulated_gradients: List of floats, same length as gaussians, 
++                               representing the accumulated gradient magnitude for each Gaussian.
++        threshold: Float, the minimum accumulated gradient magnitude to keep a Gaussian.
+         
+     Returns:
+-        List of Gaussian objects that are kept.
++        pruned_gaussians: List of Gaussian objects that survived pruning.
+     """
+-    # Step 1: Aggregate gradient magnitude for each Gaussian
+-    # Note: In standard implementations, this is done during backprop.
+-    # Here we assume cumulative_gradients is pre-populated.
+-    
+-    # If SH gradients are used (Kim et al. [30]), combine them.
+-    # For standard gradient-based pruning, only positional gradients are used [S1].
+-    
+-    # Step 2: Rank Gaussians by cumulative gradient magnitude
+-    # Sort in ascending order (lowest gradient first)
+-    sorted_gaussians = sorted(gaussians, key=lambda g: cumulative_gradients.get(g.id, 0))
+-    
+-    # Step 3: Determine number of Gaussians to remove
+-    num_to_remove = int(len(sorted_gaussians) * pruning_ratio)
+-    
+-    # Step 4: Remove the bottom N Gaussians
+-    # The sources state Trimming the Fat and ELMGS remove 75% [S1]
+-    # EfficientGS uses cumulative sum analysis to halt densification and prune [S1]
+-    
+-    pruned_gaussians = sorted_gaussians[num_to_remove:]
+-    
++    pruned_gaussians = []
++    for i, gaussian in enumerate(gaussians):
++        grad_mag = accumulated_gradients[i]
++        if grad_mag >= threshold:
++            pruned_gaussians.append(gaussian)
++        else:
++            # Gaussian is pruned. 
++            # Optional: Reset opacity or redistribute weight [S1]
++            pass
+     return pruned_gaussians
+ ```
+ 
+-**Edge Cases and Pitfalls**
+-*   **Precision:** Accumulating gradients over many iterations may lead to numerical overflow or underflow if not normalized. EfficientGS uses cumulative sum analysis, implying careful handling of these values [S1].
+-*   **Degenerate Input:** Gaussians with zero gradient (e.g., those in static, unobserved regions) will be pruned. This is intended behavior but may remove valid geometry if the scene is not fully observed during training.
+-*   **Threshold Selection:** The sources do not specify a fixed gradient value threshold, but rather a percentage-based removal (75%) for specific methods [S1]. Implementers must choose between a fixed percentage or a dynamic threshold based on the gradient distribution.
+-
+ ## Subtopics
+ 
++### [Utilization-Based Pruning](18426-utilization-based-pruning.md)
++Utilization-Based Pruning (UBP) is a training-time sparsification technique for 3D Gaussian Splatting that removes Gaussians with negligible contribution to the rendered image gradient, replacing opacity reset to alleviate interference with residual distribution tracking and compress scene representation. It distinguishes itself from sibling methods by evaluating the gradient of the rendered image with respect to Gaussian positions rather than the loss gradient, allowing for efficient GPU implementation while effectively eliminating visual artifacts like floaters.
++
+ ## Operating characteristics
+-*   **Time Complexity:** $O(N)$ per pruning step, where $N$ is the number of Gaussians, as it requires iterating through all Gaussians to compute or aggregate gradients and then sorting or filtering them [S1].
+-*   **Memory Complexity:** $O(N)$ to store cumulative gradient values for each Gaussian [S1].
+-*   **Measured Performance:** Trimming the Fat [25] and ELMGS [18] achieve high visual quality while removing 75% of Gaussians [S1]. GDGS enhances compactness by modeling scene gradients [S1].
+-*   **Strengths:** Effectively removes redundant and floaters Gaussians that have low impact on the final image [S1]. It complements opacity-based pruning by targeting structural redundancy rather than transparency [S1].
+-*   **Limitations:** Requires access to gradient information, which is only available during training. It may be less effective for Gaussians that are important for fine details but have small gradients due to smoothness [S1].
+-*   **When to Use:** When computational efficiency is critical and the training process allows for gradient accumulation. It is particularly useful in conjunction with densification strategies to prevent over-density [S1].
++- **Time Complexity:** $O(N)$ per iteration for gradient accumulation and pruning, where $N$ is the number of Gaussians. Cumulative sum updates are $O(1)$ per Gaussian per iteration.
++- **Memory Complexity:** $O(N)$ to store accumulated gradients.
++- **Measured Performance:** Trimming the Fat [S1] and ELMGS [S1] remove 75% of Gaussians while maintaining high visual quality.
++- **Strengths:** Effective at removing redundant Gaussians and floaters. Efficient on GPU due to simple magnitude comparisons.
++- **Limitations:** Requires careful threshold selection. May remove Gaussians that are temporarily occluded but important for later views.
++- **When to Use:** When computational efficiency is critical and visual quality must be maintained with fewer Gaussians.
++- **When Not to Use:** When the scene has dynamic elements where temporary occlusion is common, or when SH details are critical and position-only pruning is insufficient.
+ 
+ ## Background
+-Gradient-based Pruning originated as a method to improve the efficiency of 3D Gaussian Splatting by removing Gaussians that contribute minimally to scene reconstruction [S1]. It is employed by several notable works:
+-*   **EfficientGS [27]:** Uses cumulative gradient sum analysis to halt unnecessary densification and prune redundant Gaussians [S1].
+-*   **GDGS [91]:** Reduces Gaussian density by modeling scene gradients [S1].
+-*   **Trimming the Fat [25] and ELMGS [18]:** Apply gradient-based pruning to remove 75% of Gaussians while maintaining high visual quality [S1].
+-*   **Kim et al. [30]:** Extended the approach by incorporating SH gradients alongside positional gradients [S1].
++Gradient-based Pruning originated as a method to improve the efficiency of 3D Gaussian Splatting training by removing Gaussians that contribute minimally to the optimization process [S1]. It has been adopted and extended by several methods, including EfficientGS [S1], GDGS [S1], Trimming the Fat [S1], ELMGS [S1], and Kim et al. [S1]. Kim et al. [S1] extended the approach by incorporating SH gradients alongside positional gradients.
+ 
+ ## Sources

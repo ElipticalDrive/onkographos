@@ -1,0 +1,162 @@
+# Structured Mesh Subsampling
+
+Also called: Resampled structured mesh rendering, Resampling unstructured dataset using a three-dimensional structured mesh, Structured Mesh Subsampling for Volume Rendering, Structured box clip, Structured grid volume rendering, Structured volume algorithm
+
+## Overview
+Structured Mesh Subsampling is a volume rendering technique that remaps unstructured computational mesh data onto a regular 3D structured grid (volume) based on analyst-provided values, allowing for resolution adjustment and subsetting [S1, unofficial]. It solves the problem of efficiently rendering large unstructured datasets by converting arbitrary cells into a uniform grid, enabling the volume renderer to process a regular grid instead of arbitrary cells [S1, unofficial]. Unlike traditional isosurface rendering which depends on looking at a subset of calculated data and representing results on the surface, this method allows viewing the entire volume at once without slicing [S1, unofficial]. It builds on [Voxelization](12-voxelization.md) by specifically targeting the conversion of unstructured mesh topology into a structured voxel representation for rendering.
+
+## How it works
+**Inputs and Outputs:**
+*   **Input:** An unstructured computational mesh (e.g., finite element or finite volume data), a specific scalar or vector variable to render, and a bounding box defining the region of interest.
+*   **Output:** A structured 3D grid (volume) containing resampled values of the selected variable, ready for ray-casting or similar volume rendering techniques.
+
+**Data Structures:**
+The core data structure is a 3D structured grid (tensor product grid) with dimensions $(N_x, N_y, N_z)$.
+*   **Grid Layout:** Uniformly spaced nodes within the bounding box.
+*   **Values:** A 3D array of size $N_x \times N_y \times N_z$ storing the resampled variable values.
+*   **Bounding Box:** Defined by minimum and maximum coordinates $(x_{min}, y_{min}, z_{min})$ and $(x_{max}, y_{max}, z_{max})$, potentially oriented in any direction relative to the mesh [S1, unofficial].
+
+**Steps:**
+1.  **Selection:** The user selects the parent part (unstructured mesh) to be displayed as a volume [S1, unofficial].
+2.  **Subsetting:** A bounding box (structured clip box) is defined to subset the dataset. This focuses the rendering on a specific area of interest, reducing computational effort by excluding cells outside the box [S1, unofficial].
+3.  **Resampling:** The algorithm resamples the unstructured data within the bounding box into a structured grid. The resolution of this grid is adjustable by the user [S1, unofficial].
+    *   The algorithm identifies all unstructured cells that overlap with the structured grid cells (or pixels in the final projection) [S1, unofficial].
+    *   Values from the unstructured cells are mapped to the structured grid nodes. The specific method of interpolation or averaging is not detailed in the sources, but the goal is to create a volume representation based on the analyst-provided variable [S1, unofficial].
+4.  **Rendering:** The volume renderer processes the structured grid. It finds all cells (structured grid cells) that overlap each pixel and accumulates a color for that pixel from the color and transparency (alpha) of each cell [S1, unofficial].
+    *   Color palettes, including transparency, are applied based on the variable values [S1, unofficial].
+
+**Parameters:**
+*   **Resolution ($N_x, N_y, N_z$):** The size of the structured mesh.
+    *   Low resolution (e.g., $32 \times 32 \times 32$) is used for initial exploration [S1, unofficial].
+    *   Resolution of 200 ($200 \times 200 \times 200$) is sufficient for video animations [S1, unofficial].
+    *   Resolution of 500 ($500 \times 500 \times 500$) is used for high-quality printed renderings [S1, unofficial].
+*   **Bounding Box:** Defines the spatial extent of the subsampling [S1, unofficial].
+*   **Variable:** The specific data field (e.g., vorticity magnitude) to be rendered [S1, unofficial].
+
+**Pseudocode:**
+> **Unverified code.** The code below did not pass a test run against a reference implementation, or no test fits it, so it may contain errors.
+
+```python
+def structured_mesh_subsampling(unstructured_mesh, variable_name, bounding_box, resolution):
+    """
+    Resamples unstructured mesh data into a structured grid for volume rendering.
+    
+    Args:
+        unstructured_mesh: The source unstructured mesh data.
+        variable_name: The name of the variable to resample.
+        bounding_box: A tuple (min_coords, max_coords) defining the region of interest.
+        resolution: A tuple (Nx, Ny, Nz) defining the structured grid dimensions.
+        
+    Returns:
+        structured_grid: A 3D array of shape (Nx, Ny, Nz) containing resampled values.
+    """
+    # 1. Define the structured grid domain based on the bounding box and resolution
+    # The grid is uniform within the bounding box.
+    x_min, y_min, z_min = bounding_box.min
+    x_max, y_max, z_max = bounding_box.max
+    Nx, Ny, Nz = resolution
+    
+    # Calculate step sizes
+    dx = (x_max - x_min) / Nx
+    dy = (y_max - y_min) / Ny
+    dz = (z_max - z_min) / Nz
+    
+    # Initialize the structured grid with zeros or null values
+    structured_grid = np.zeros((Nx, Ny, Nz))
+    
+    # 2. Identify unstructured cells within the bounding box
+    # This step involves spatial indexing to find cells overlapping the bounding box.
+    candidate_cells = find_cells_in_box(unstructured_mesh, bounding_box)
+    
+    # 3. Resample values from unstructured cells to structured grid nodes
+    # For each node in the structured grid, determine which unstructured cells contribute to it.
+    # The specific interpolation method is not detailed in the sources [S1, unofficial].
+    # A common approach would be trilinear interpolation or nearest-neighbor from the 
+    # unstructured cell centers/nodes to the structured grid nodes.
+    
+    for i in range(Nx):
+        for j in range(Ny):
+            for k in range(Nz):
+                # Calculate the world coordinates of the structured grid node
+                x = x_min + i * dx
+                y = y_min + j * dy
+                z = z_min + k * dz
+                
+                # Find the value of the variable at this point from the unstructured mesh
+                # This requires querying the unstructured mesh for the variable value at (x, y, z)
+                # If the point is not inside any cell, the value might be null or interpolated from neighbors.
+                value = get_variable_value_at_point(unstructured_mesh, variable_name, x, y, z)
+                
+                structured_grid[i, j, k] = value
+                
+    return structured_grid
+
+def render_volume(structured_grid, color_palette):
+    """
+    Renders the structured grid using volume rendering techniques.
+    
+    Args:
+        structured_grid: The 3D array of resampled values.
+        color_palette: A mapping from variable values to color and transparency (alpha).
+        
+    Returns:
+        image: The rendered 2D image.
+    """
+    # 1. Cast rays through the structured grid
+    # For each pixel in the output image, cast a ray through the volume.
+    # 2. Accumulate color and opacity
+    # Find all cells (voxels) that the ray overlaps.
+    # Accumulate color for the pixel from the color and transparency of each cell.
+    # This is typically done using front-to-back or back-to-front compositing.
+    
+    image = np.zeros((height, width, 3))
+    
+    for u in range(width):
+        for v in range(height):
+            ray = cast_ray(u, v)
+            accumulated_color = [0, 0, 0]
+            accumulated_alpha = 0
+            
+            # Traverse the structured grid along the ray
+            # The specific traversal algorithm (e.g., DDA) is not detailed in the sources [S1, unofficial]
+            # but is standard for structured grids.
+            for voxel in structured_grid.intersected_by_ray(ray):
+                value = structured_grid[voxel]
+                color, alpha = color_palette(value)
+                
+                # Compositing step (front-to-back example)
+                # C_out = C_in + (1 - A_in) * C_v * A_v
+                # A_out = A_in + (1 - A_in) * A_v
+                
+                accumulated_color = accumulated_color + (1 - accumulated_alpha) * color * alpha
+                accumulated_alpha = accumulated_alpha + (1 - accumulated_alpha) * alpha
+                
+            image[v, u] = accumulated_color
+            
+    return image
+```
+
+**Edge Cases and Pitfalls:**
+*   **Precision:** The volume calculated is less precise than the original hardware-based unstructured method [S1, unofficial]. However, there is often little to no perceivable difference in the rendering results [S1, unofficial].
+*   **Resolution Artifacts:** Lower-resolution images visibly demonstrate how the data has been subsampled, showing individual planes [S1, unofficial]. As resolution increases, these artifacts disappear [S1, unofficial].
+*   **Computational Cost:** Volume rendering algorithms are computationally expensive as they must look at every cell within the mesh multiple times [S1, unofficial]. Subsetting via bounding box is critical to reduce this effort [S1, unofficial].
+
+## Operating characteristics
+*   **Time Complexity:** The resampling step depends on the number of unstructured cells within the bounding box and the resolution of the structured grid. The rendering step depends on the number of rays (pixels) and the number of voxels intersected by each ray. The sources note that volume rendering is "computationally expensive" [S1, unofficial].
+*   **Memory Complexity:** The memory usage for the volume representation operation is estimated at 79MBs for the tested dataset [S1, unofficial]. This is significantly lower than storing the full unstructured mesh for rendering purposes if the mesh is very large.
+*   **Performance:** The method is faster and more flexible in terms of end-user interactive response compared to the original hardware-based rendering methodology [S1, unofficial]. It allows for efficient rendering of large datasets, particularly when leveraging HPC resources [S1, unofficial].
+*   **Strengths:**
+    *   Allows viewing the entire volume at once without slicing [S1, unofficial].
+    *   Reduces computational effort by subsetting the dataset [S1, unofficial].
+    *   Flexible resolution adjustment for exploration vs. final output [S1, unofficial].
+*   **Limitations:**
+    *   Less precise than the original hardware-based unstructured method [S1, unofficial].
+    *   Low resolutions show visible subsampling artifacts (individual planes) [S1, unofficial].
+*   **When to Use:** Use when interactive response is prioritized over absolute precision, or when rendering large datasets on HPC resources [S1, unofficial]. Ideal for initial exploration (low res) and final animations/printing (high res) [S1, unofficial].
+*   **When Not to Use:** Use when the highest possible precision is required and the computational cost of the original hardware-based method is acceptable [S1, unofficial].
+
+## Background
+Structured Mesh Subsampling was introduced in EnSight 10.0 (2012) [S1, unofficial]. It was implemented to address the limitations of the original volume rendering technique, which depended on the exclusive use of graphics hardware and was too limiting for general-purpose use [S1, unofficial]. The new methodology allows the end user to resample data to any resolution by creating an underlying structured volume based on values provided by the analyst [S1, unofficial]. It was successfully tested on large datasets generated at the Army Research Laboratory (ARL) [S1, unofficial]. The technique is used in EnSight 10.0 and later versions [S1, unofficial].
+
+## Sources
+[S1] DTIC ADA579690: EnSight Volume Visualization, https://archive.org/details/DTIC_ADA579690, fetched 2026-10-26 (unofficial)

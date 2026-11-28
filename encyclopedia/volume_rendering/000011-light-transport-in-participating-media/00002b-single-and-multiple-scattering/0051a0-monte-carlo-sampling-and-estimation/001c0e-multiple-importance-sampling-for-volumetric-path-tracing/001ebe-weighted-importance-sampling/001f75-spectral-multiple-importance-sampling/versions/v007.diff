@@ -1,0 +1,92 @@
+--- v006.md
++++ v007.md
+@@ -1,5 +1,5 @@
+ # Spectral Multiple Importance Sampling
+ 
+-Also called: Chromatic Media Sampling with MIS, Single-sample MIS for Wavelengths, Spectral Volume Sampling
++Also called: Chromatic Media Sampling with MIS, Single-sample MIS for Spectra, Spectral Multiple Importance Sampling (MIS) for Wavelengths, Spectral Volume Sampling
+ 
+ ## Overview
+@@ -11,5 +11,5 @@
+ *   Throughput vector $\beta$ (RGB or $n$ spectral samples) [S1, unofficial][S2].
+ *   Medium properties: absorption coefficient $\sigma_a(\lambda)$ and scattering coefficient $\sigma_s(\lambda)$ for $n$ spectral samples (typically $n=3$ for RGB) [S1, unofficial][S2].
+-*   Majorant extinction coefficient $\sigma_{maj}$ (scalar or vector, depending on implementation context, but typically a scalar upper bound for the specific channel being sampled) [S2].
++*   Majorant extinction coefficient $\sigma_{maj}$ (scalar upper bound for the sampled channel's transmittance) [S2].
+ *   Random number generator state.
+ 
+@@ -20,13 +20,13 @@
+ 
+ **Data Structures:**
+-*   `throughput_albedo`: A vector of size $n$ (or 3 for RGB), where each element $i$ is $\beta_i \cdot \frac{\sigma_{s,\lambda_i}}{\sigma_{a,\lambda_i} + \sigma_{s,\lambda_i}}$ or simply $\beta_i \cdot \text{albedo}_i$ [S1, unofficial].
+-*   `DiscreteEmpiricalDistribution1D`: A discrete distribution object constructed from the `throughput_albedo` vector. This distribution maps the continuous uniform random variable to a channel index based on the relative magnitudes of the spectral contributions [S1, unofficial].
++*   `throughput_albedo`: A vector of size $n$, where each element $i$ is $\beta_i \cdot \frac{\sigma_{s,\lambda_i}}{\sigma_{a,\lambda_i} + \sigma_{s,\lambda_i}}$ [S1, unofficial].
++*   `DiscreteEmpiricalDistribution1D`: A discrete distribution object constructed from the `throughput_albedo` vector, mapping a continuous uniform random variable to a channel index based on relative spectral contributions [S1, unofficial].
+ *   `pmf`: An array of size $n$ storing the probability density values $p_{\lambda_i}(x)$ for each wavelength [S1, unofficial][S2].
+ 
+ **Steps:**
+-1.  **Compute Spectral Weights:** Calculate the product of the current throughput and the single-scattering albedo for each wavelength channel. Let $w_i = \beta_i \cdot \frac{\sigma_{s,\lambda_i}}{\sigma_{a,\lambda_i} + \sigma_{s,\lambda_i}}$ [S1, unofficial].
+-2.  **Construct Discrete Distribution:** Create a discrete distribution object using the weights $w = [w_0, w_1, \dots, w_{n-1}]$ [S1, unofficial].
++1.  **Compute Spectral Weights:** Calculate the product of the current throughput and the single-scattering albedo for each wavelength channel [S1, unofficial].
++2.  **Construct Discrete Distribution:** Create a discrete distribution object using the computed weights [S1, unofficial].
+ 3.  **Sample Channel Index:** Draw a uniform random number $u \in [0, 1)$ and use it to sample an index $k$ from the discrete distribution [S1, unofficial].
+-4.  **Sample Distance:** Sample the distance $t$ to the next interaction using the majorant extinction coefficient $\sigma_{maj}$ associated with the sampled channel $\lambda_k$ (or a global majorant if used) [S2].
++4.  **Sample Distance:** Sample the distance $t$ to the next interaction using the majorant extinction coefficient $\sigma_{maj}$ [S2].
+ 5.  **Evaluate PDFs:** For the sampled distance $t$ and position $x$, compute the PDF for the sampled channel $p_{\lambda_k}(x)$ and the PDFs for all other channels $p_{\lambda_i}(x)$ for $i \neq k$ [S1, unofficial][S2].
+ 6.  **Compute MIS Weights:** Apply the balance heuristic for single-sample MIS [S2].
+@@ -53,5 +53,5 @@
+         sigma_a: Absorption coefficients for n wavelengths (vector of size n).
+         sigma_s: Scattering coefficients for n wavelengths (vector of size n).
+-        sigma_maj: Majorant extinction coefficient (scalar or vector).
++        sigma_maj: Scalar majorant extinction coefficient.
+         rng: Random number generator with uniform() method.
+         
+@@ -80,21 +80,19 @@
+         k += 1
+         
+-    # Sample distance using majorant for sampled channel
+-    maj_k = sigma_maj[k] if isinstance(sigma_maj, (list, tuple)) else sigma_maj
+-    t = -math.log(1.0 - rng.uniform()) / maj_k
++    # Sample distance using scalar majorant
++    t = -math.log(1.0 - rng.uniform()) / sigma_maj
+     
+-    # Evaluate PDFs for all channels
+-    pmf = [0.0] * n
++    # Evaluate PDFs for all channels at distance t
++    pmf = [sigma_t[i] * math.exp(-sigma_maj * t) for i in range(n)]
++    
++    # Compute MIS weight for the sampled channel (balance heuristic)
++    sum_pmf = sum(pmf)
++    mis_weight = pmf[k] / sum_pmf if sum_pmf > 0 else 0.0
++    
++    # Update throughput for all channels
++    new_throughput = [0.0] * n
+     for i in range(n):
+-        maj_i = sigma_maj[i] if isinstance(sigma_maj, (list, tuple)) else sigma_maj
+-        pmf[i] = maj_i * math.exp(-maj_i * t)
++        new_throughput[i] = throughput[i] * (mis_weight if i == k else 0.0) * albedo[i] * (sigma_t[i] / sigma_maj)
+         
+-    # Compute MIS weights (balance heuristic)
+-    sum_pmf = sum(pmf)
+-    mis_weights = [p / sum_pmf if sum_pmf > 0 else 0.0 for p in pmf]
+-    
+-    # Update throughput
+-    new_throughput = [throughput[i] * mis_weights[i] * albedo[i] * (sigma_t[i] / maj_k if maj_k > 0 else 0.0) for i in range(n)]
+-    
+     terminated = False # Absorption check depends on event sampling, not detailed here
+     return t, new_throughput, terminated, pmf
+@@ -107,5 +105,5 @@
+ **Edge Cases and Pitfalls:**
+ *   **Zero Extinction:** If $\sigma_{t,\lambda_i} = 0$, the albedo is undefined. Handle by setting albedo to 0 or 1 depending on whether the medium is purely scattering or empty [G].
+-*   **Infinite Variance:** If the majorant for one wavelength is much larger than the true extinction for another, the variance can be high. The scalar extinction constraint (see Subtopics) can mitigate this [S3].
++*   **Infinite Variance:** If the majorant for one wavelength is much larger than the true extinction for another, the variance can be high [S3].
+ *   **Precision:** Floating-point round-off errors in PDF calculations should be clamped to zero to avoid negative probabilities [S2].
+ 
+@@ -123,6 +121,6 @@
+ *   **Performance:** Reduces variance compared to monochromatic sampling with a single majorant [S2].
+ *   **Strengths:** Unbiased, handles spectrally varying media effectively [S2].
+-*   **Limitations:** Can still suffer from high variance if the majorant is a poor match for the sampled channel's true extinction. The scalar extinction constraint is a workaround but limits the types of media that can be simulated [S3].
+-*   **When to Use:** Suitable for general participating media with moderate spectral variation. Not ideal for atmospheric scattering where separate transport equations are preferred [S3].
++*   **Limitations:** Can still suffer from high variance if the majorant is a poor match for the sampled channel's true extinction [S3].
++*   **When to Use:** Suitable for general participating media with moderate spectral variation [S3].
+ 
+ ## Background

@@ -1,0 +1,483 @@
+--- v004.md
++++ v005.md
+@@ -1,262 +1,259 @@
+ # Inner 3D Gaussian Splatting
++
+ Also called: Inner Gaussian Splatting, InnerGS
+ 
+ ## Overview
+-Inner 3D Gaussian Splatting (InnerGS) is a framework for direct volumetric inference that models continuous volumetric density using 3D Gaussians to reconstruct internal structures from sparse, pose-free sliced data, eliminating the need for camera poses [S1, unofficial]. It solves the problem of internal scene reconstruction where standard 3D Gaussian Splatting fails because learned Gaussians concentrate on the object's surface, leaving the interior volume empty, and because standard rendering relies on camera parameters (view/projection matrices) which are absent in sliced data [S1, unofficial]. It sets itself apart from siblings like [GS-IR](14852-gs-ir.md) by using a slice-based rendering pipeline centered on Conditional Splatting, which dynamically adapts the sampling of Gaussians for each 2D slice, whereas GS-IR typically relies on inverse rendering techniques with explicit camera poses [S1, unofficial].
++Inner 3D Gaussian Splatting (InnerGS) is a framework for direct volumetric inference that models continuous volumetric density using 3D Gaussians to reconstruct internal structures from sparse, pose-free sliced data [S1, unofficial]. It solves the problem that standard 3D Gaussian Splatting (3DGS) relies on camera parameters (view/projection matrices) which are absent in sliced data, and that learned Gaussians concentrate on the object's surface, leaving the interior volume empty [S1, unofficial]. It sets itself apart from siblings like [GS-IR](14852-gs-ir.md) by eliminating the need for camera poses and using a slice-based rendering pipeline centered on Conditional Splatting, which dynamically adapts the sampling of Gaussians for each 2D slice [S1, unofficial].
+ 
+ ## How it works
+ **Inputs and Outputs:**
+ *   **Input:** Sparse, pose-free sliced data (e.g., medical CT/MRI slices or cross-sections). Each slice provides 2D image data at a specific depth $t$.
+-*   **Output:** A set of 3D Gaussians representing the internal volumetric density and color, allowing for the reconstruction of smooth and detailed internal structures.
++*   **Output:** A 3D Gaussian representation (means $\mu$, covariances $\Sigma$, opacities $\alpha$, colors $c$) and the rendered volumetric density/color for any depth slice $t$.
+ 
+ **Data Structures:**
+-The scene is represented as a cloud of 3D Gaussians. Each Gaussian $i$ is defined by:
+-*   Mean position $\mu_i = (\mu_{x,i}, \mu_{y,i}, \mu_{z,i}) \in \mathbb{R}^3$.
+-*   Covariance matrix $\Sigma_i \in \mathbb{R}^{3 \times 3}$, decomposed into scaling component $S$ (diagonal matrix with scale factors $s_{x,i}, s_{y,i}, s_{z,i}$) and rotation component $R$ (derived from unit quaternion $q_i$): $\Sigma_i = R_i S_i S_i^\top R_i^\top$.
+-*   Opacity parameter $\alpha_i$.
+-*   Spherical Harmonics (SH) coefficients for view-dependent color variations.
+-*   Color $c_i$ (or SH coefficients from which $c_i$ is derived).
+-
+-**Method Steps:**
+-1.  **Conditional Splatting:** For each depth slice $t$, compute conditional 2D Gaussian splats. This determines the 2D Gaussian center and influence radii in the image plane for that specific slice. This step adapts the bounding box per slice based on conditional Gaussians, unlike methods that compute a single cube and project identical bounding boxes across slices [S1, unofficial].
+-2.  **3D Gaussian Formulation:** Combine the conditional 2D Gaussians with a marginal 1D Gaussian along the depth axis to formulate the complete 3D Gaussian Splatting (3DGS) density. This factorization allows the representation of volumetric density without explicit camera projection matrices [S1, unofficial].
+-3.  **Tile-based Rasterization:** Perform tile-based rasterization using the formulated 3DGS density. The rendering equation for a pixel at coordinates $(u, v)$ on a slice at depth $t$ is:
+-    $$ I(u, v, t) = \sum_{i=1}^{N} p_i(u, v, t)\alpha_i c_i \prod_{j=1}^{i-1} (1 - p_j(u, v, t)\alpha_j) $$
+-    where $p_i(u, v, t)$ is the screen-space density contribution of the $i$-th splat at pixel $(u, v)$ for slice $t$, $\alpha_i$ is the opacity, and $c_i$ is the color. The accumulation is performed front-to-back [S1, unofficial].
+-4.  **Optimization:** Jointly optimize the parameters ($\mu, \Sigma, \alpha, \text{SH}$) by minimizing a rendering loss between the rendered slices and the input sliced data [S1, unofficial].
++The method uses the standard 3D Gaussian representation defined in [3D Gaussian Splatting Implementation Details](9128-3d-gaussian-splatting-implementation-details.md). Each primitive $i$ is defined by:
++*   Mean position $\mu_i \in \mathbb{R}^3$
++*   Covariance matrix $\Sigma_i \in \mathbb{R}^{3 \times 3}$
++*   Opacity $\alpha_i$
++*   Color $c_i$ (modeled via Spherical Harmonics coefficients) [S1, unofficial]
++
++**Formulas:**
++The screen-space contribution of the $i$-th splat at pixel $(u, v)$ on a slice at depth $t$ is computed as density $p_i(u, v, t)$ multiplied by opacity $\alpha_i$ and color $c_i$. The final color is accumulated front-to-back [S1, unofficial]:
++
++$$ I(u, v, t) = \sum_{i=1}^{N} p_i(u, v, t)\alpha_i c_i \prod_{j=1}^{i-1} (1 - p_j(u, v, t)\alpha_j) $$
++
++where $N$ is the total number of Gaussians, and $(u, v)$ are pixel coordinates with $u \in [0, W - 1]$ and $v \in [0, H - 1]$ for an image of width $W$ and height $H$ [S1, unofficial].
++
++The 3D Gaussian density is defined by an unnormalized Gaussian function [S1, unofficial]:
++
++$$ p(x) = e^{-\frac{1}{2} (x-\mu)^\top \Sigma^{-1} (x-\mu)} $$
++
++The covariance matrix $\Sigma$ is decomposed into a scaling component $S$ (diagonal matrix with scale factors $s_x, s_y, s_z$) and a rotation component $R$ (derived from unit quaternion $q$):
++
++$$ \Sigma = R S S^\top R^\top $$
++
++**Steps:**
++1.  **Conditional 2D Gaussian Splatting:** For each depth slice $t$, compute conditional 2D Gaussian splats. This determines the 2D Gaussian center and influence radii in the image plane for that specific slice [S1, unofficial]. This step adapts the bounding box per slice based on conditional Gaussians, unlike 3D Ellipsoid Projection which computes a cube and projects identical bounding boxes across slices [S1, unofficial].
++2.  **Marginal 1D Gaussian Combination:** Combine the conditional 2D Gaussians with a marginal 1D Gaussian along the depth axis to formulate the complete 3D Gaussian Splatting (3DGS) density [S1, unofficial]. This allows the representation to capture continuous volumetric information between sparse slices.
++3.  **Tile-based Rasterization:** Perform tile-based rasterization using the formulated 3DGS density. The Gaussians are sorted and rendered in front-to-back order to reconstruct smooth and detailed internal structures [S1, unofficial].
+ 
+ **Pseudocode:**
+ ```python
+-def inner_gaussian_splatting_rendering(gaussians, slices, pixel_coords):
++def render_inner_gs(slices, gaussians, width, height):
+     """
+     Render internal structures from sparse slices using InnerGS.
+     
+     Args:
+-        gaussians: List of 3D Gaussian primitives. Each has:
+-            - mu: (N, 3) mean positions
+-            - S: (N, 3) scale factors
+-            - q: (N, 4) unit quaternions for rotation
+-            - alpha: (N,) opacities
+-            - sh_coeffs: (N, K) spherical harmonic coefficients
+-        slices: List of 2D image slices. Each slice has:
+-            - depth_t: float, depth coordinate of the slice
+-            - image: (H, W, 3) ground truth RGB image
+-        pixel_coords: (H, W, 2) grid of (u, v) coordinates for the image plane.
++        slices: List of 2D image arrays, one per depth slice.
++        gaussians: List of 3D Gaussian primitives. Each primitive has:
++                   - mu: (3,) mean position
++                   - S: (3,) scale factors
++                   - q: (4,) unit quaternion for rotation
++                   - alpha: float opacity
++                   - sh_coeffs: array of spherical harmonics coefficients
++        width: int image width W
++        height: int image height H
+         
+     Returns:
+-        rendered_slices: List of rendered (H, W, 3) images.
+-    """
+-    rendered_slices = []
+-    
+-    for slice_data in slices:
+-        t = slice_data.depth_t
+-        gt_image = slice_data.image
+-        H, W = gt_image.shape[:2]
+-        
+-        # Initialize output buffer
+-        rendered_image = np.zeros((H, W, 3))
+-        
+-        # Step 1 & 2: Compute Conditional Splatting and 3D Density
+-        # For each Gaussian, determine its contribution to the current slice t.
+-        # This involves combining conditional 2D Gaussians with marginal 1D Gaussian.
+-        # The density p_i(u, v, t) is computed based on the Gaussian's position,
+-        # scale, rotation, and the slice depth t.
+-        
+-        # Precompute Gaussian properties for the slice
+-        # Note: Exact factorization of 3D Gaussian into 2D conditional + 1D marginal
+-        # is implementation-specific. Here we assume a function that computes
+-        # the effective 2D density and opacity for the slice.
+-        
+-        effective_gaussians = []
+-        for i in range(len(gaussians)):
+-            mu = gaussians[i].mu
+-            S = gaussians[i].S
+-            q = gaussians[i].q
+-            alpha = gaussians[i].alpha
+-            sh = gaussians[i].sh_coeffs
+-            
+-            # Compute the 3D Gaussian density at the slice plane z=t (or appropriate axis)
+-            # This step adapts the bounding box per slice based on conditional Gaussians [S1, unofficial]
+-            # The marginal 1D Gaussian along depth is combined with conditional 2D Gaussians [S1, unofficial]
+-            
+-            # Calculate the 2D covariance and mean for the slice
+-            # This is a simplified representation of the factorization
+-            # In practice, this requires deriving the 2D projection of the 3D Gaussian
+-            # onto the slice plane, conditioned on the slice depth.
+-            
+-            # Let's assume a helper function that computes the 2D splat parameters
+-            # for a given 3D Gaussian and slice depth t.
+-            splat_params = compute_conditional_splat(mu, S, q, t)
+-            
+-            # splat_params contains:
+-            # - center_2d: (2,) center in (u, v)
+-            # - cov_2d: (2, 2) 2D covariance matrix
+-            # - alpha_slice: float, effective opacity for this slice
+-            
+-            if splat_params is not None:
+-                effective_gaussians.append({
+-                    'center': splat_params['center_2d'],
+-                    'cov': splat_params['cov_2d'],
+-                    'alpha': splat_params['alpha_slice'],
+-                    'color': sh, # SH coefficients for view-dependent color
+-                    'mu_3d': mu
+-                })
+-        
+-        # Step 3: Tile-based Rasterization
+-        # Sort effective Gaussians by depth or some other criterion if necessary
+-        # For InnerGS, the order is determined by the slice-based pipeline.
+-        # We assume the effective_gaussians are processed in a consistent order.
+-        
+-        # For each pixel, accumulate color from front-to-back
+-        for y in range(H):
+-            for x in range(W):
+-                u, v = pixel_coords[y, x]
+-                accumulated_color = np.zeros(3)
++        rendered_volumes: List of 2D image arrays, one per depth slice.
++    """
++    rendered_volumes = []
++    
++    # Iterate over each depth slice t
++    for t, slice_data in enumerate(slices):
++        # Initialize output buffer for this slice
++        color_buffer = np.zeros((height, width, 3))
++        alpha_buffer = np.zeros((height, width))
++        
++        # Step 1 & 2: Formulate 3DGS density for this slice
++        # This involves computing conditional 2D Gaussians and combining 
++        # with marginal 1D Gaussian along depth.
++        # The result is a set of 2D splats valid for slice t.
++        splats_for_slice = compute_conditional_splats(gaussians, t, width, height)
++        
++        # Sort splats by depth (front-to-back) for this slice
++        # Note: In InnerGS, depth is the slice index t, but splats have 
++        # 3D extent. Sorting is typically done by the z-coordinate of 
++        # the Gaussian center projected or evaluated at slice t.
++        splats_for_slice.sort(key=lambda s: s.z_center)
++        
++        # Step 3: Tile-based rasterization
++        # For each pixel (u, v) in the slice
++        for v in range(height):
++            for u in range(width):
++                accumulated_color = np.array([0.0, 0.0, 0.0])
+                 accumulated_alpha = 0.0
+                 
+-                # Iterate over Gaussians that cover this pixel
+-                # In practice, use a tile-based approach to only check relevant Gaussians
+-                for g in effective_gaussians:
+-                    center = g['center']
+-                    cov = g['cov']
+-                    alpha = g['alpha']
+-                    sh = g['color']
+-                    
+-                    # Compute density p_i(u, v, t)
+-                    # p_i(u, v, t) = exp(-0.5 * (x - mu)^T Sigma^-1 (x - mu))
+-                    # where x = [u, v], mu = center, Sigma = cov
+-                    
+-                    diff = np.array([u - center[0], v - center[1]])
+-                    try:
+-                        inv_cov = np.linalg.inv(cov)
+-                        exponent = -0.5 * diff @ inv_cov @ diff
+-                        density = np.exp(exponent)
+-                    except np.linalg.LinAlgError:
+-                        density = 0.0
+-                    
+-                    # Compute color from SH coefficients
+-                    # View direction is needed for SH evaluation. 
+-                    # In InnerGS, since there are no camera poses, the view direction
+-                    # might be assumed or derived from the slice geometry.
+-                    # For simplicity, we assume a fixed view direction or that SH
+-                    # coefficients are optimized for the specific viewing setup.
+-                    view_dir = np.array([0, 0, 1]) # Placeholder for view direction
+-                    color = evaluate_sh(sh, view_dir)
++                for splat in splats_for_slice:
++                    # Compute density p_i(u, v, t) for this splat at pixel (u, v)
++                    # p_i is derived from the 3D Gaussian density evaluated 
++                    # at the slice t and projected to 2D.
++                    density = compute_gaussian_density(splat, u, v, t)
++                    
++                    # Get color c_i from SH coefficients and view direction (if applicable)
++                    # For internal scenes, view direction might be fixed or averaged.
++                    color = compute_color(splat.sh_coeffs)
++                    
++                    alpha = splat.alpha
+                     
+                     # Alpha compositing
+-                    # I(u, v, t) = sum_i p_i(u, v, t) * alpha_i * c_i * prod_{j<i} (1 - p_j(u, v, t) * alpha_j)
+-                    
+                     transmittance = 1.0 - accumulated_alpha
+-                    contribution = density * alpha * color
+-                    accumulated_color += contribution * transmittance
++                    contribution = density * alpha * color * transmittance
++                    
++                    accumulated_color += contribution
+                     accumulated_alpha += density * alpha * transmittance
+                     
++                    # Early exit if fully opaque
+                     if accumulated_alpha >= 1.0:
+                         break
+                 
+-                rendered_image[y, x] = accumulated_color
+-        
+-        rendered_slices.append(rendered_image)
+-        
+-        # Optimization step (not part of rendering, but part of the method)
+-        # loss = compute_loss(rendered_image, gt_image)
+-        # optimize_gaussians(loss)
+-        
+-    return rendered_slices
+-
+-def compute_conditional_splat(mu, S, q, t):
+-    """
+-    Compute the 2D splat parameters for a 3D Gaussian at slice depth t.
+-    This function encapsulates the factorization of 3D Gaussian into
+-    conditional 2D Gaussians and marginal 1D Gaussian [S1, unofficial].
+-    """
+-    # Reconstruct 3D covariance from S and q
+-    R = quaternion_to_rotation_matrix(q)
+-    Sigma = R @ np.diag(S) @ (R @ np.diag(S)).T
+-    
+-    # Project 3D Gaussian onto the slice plane at depth t
+-    # The slice plane is typically defined by a normal vector and distance.
+-    # For simplicity, assume the slice is perpendicular to the z-axis at z=t.
+-    # The 2D center is the projection of mu onto the plane.
+-    center_2d = mu[:2] # Assuming mu is (x, y, z) and slice is at z=t
+-    
+-    # The 2D covariance is derived from the 3D covariance and the slice depth.
+-    # This involves marginalizing the 3D Gaussian over the depth dimension.
+-    # The exact formula depends on the orientation of the Gaussian relative to the slice.
+-    
+-    # Simplified: Extract the 2x2 submatrix of Sigma corresponding to x and y
+-    # and adjust for the depth t.
+-    # In reality, this is more complex and involves the marginal 1D Gaussian [S1, unofficial]
+-    
+-    # Let's assume a placeholder for the complex factorization logic
+-    cov_2d = Sigma[:2, :2]
+-    
+-    # Compute effective opacity for the slice
+-    # This is the integral of the 3D Gaussian along the depth dimension at the slice
+-    # It depends on the distance of mu_z from t and the scale s_z
+-    depth_diff = mu[2] - t
+-    alpha_slice = compute_marginal_opacity(depth_diff, S[2])
+-    
+-    return {
+-        'center_2d': center_2d,
+-        'cov_2d': cov_2d,
+-        'alpha_slice': alpha_slice
+-    }
+-
+-def compute_marginal_opacity(depth_diff, s_z):
+-    """
+-    Compute the effective opacity of a Gaussian slice at a given depth difference.
+-    This represents the marginal 1D Gaussian along the depth axis [S1, unofficial].
+-    """
+-    # The 1D Gaussian density along z is proportional to exp(-0.5 * (z - mu_z)^2 / s_z^2)
+-    # The effective opacity is the integral of this density over the slice thickness.
+-    # For a thin slice, it is approximately the density at the slice center.
+-    return np.exp(-0.5 * (depth_diff / s_z) ** 2)
+-
+-def evaluate_sh(sh_coeffs, view_dir):
+-    """
+-    Evaluate spherical harmonics coefficients for a given view direction.
+-    """
+-    # Standard SH evaluation
+-    # This is a placeholder for the actual SH evaluation function
+-    return np.zeros(3) # Placeholder
+-
+-def quaternion_to_rotation_matrix(q):
+-    """
+-    Convert a unit quaternion to a 3x3 rotation matrix.
+-    """
+-    # Standard quaternion to rotation matrix conversion
+-    # q = [w, x, y, z]
+-    w, x, y, z = q
+-    return np.array([
+-        [1 - 2*y*y - 2*z*z, 2*x*y - 2*z*w, 2*x*z + 2*y*w],
+-        [2*x*y + 2*z*w, 1 - 2*x*x - 2*z*z, 2*y*z - 2*x*w],
+-        [2*x*z - 2*y*w, 2*y*z + 2*x*w, 1 - 2*x*x - 2*y*y]
+-    ])
++                color_buffer[v, u] = accumulated_color
++                alpha_buffer[v, u] = accumulated_alpha
++        
++        rendered_volumes.append(color_buffer)
++        
++    return rendered_volumes
++
++def compute_conditional_splats(gaussians, t, width, height):
++    """
++    Compute conditional 2D Gaussian splats for a specific depth slice t.
++    This adapts the bounding box per slice based on conditional Gaussians.
++    """
++    splats = []
++    for g in gaussians:
++        # Compute 2D Gaussian parameters conditioned on slice t
++        # This involves combining the 3D Gaussian with a marginal 1D Gaussian 
++        # along the depth axis.
++        # The center and covariance in the image plane are adjusted for slice t.
++        center_2d, cov_2d = project_gaussian_to_slice(g, t)
++        
++        # Compute influence radius based on cov_2d
++        radius = compute_radius(cov_2d)
++        
++        # Only include splats that overlap with the image bounds
++        if overlaps_image(center_2d, radius, width, height):
++            splats.append({
++                'mu_2d': center_2d,
++                'cov_2d': cov_2d,
++                'alpha': g.alpha,
++                'sh_coeffs': g.sh_coeffs,
++                'z_center': g.mu[2], # For sorting
++                'radius': radius
++            })
++    return splats
++
++def compute_gaussian_density(splat, u, v, t):
++    """
++    Compute the density p_i(u, v, t) for a splat at pixel (u, v) on slice t.
++    """
++    # Extract 2D center and covariance
++    mu_2d = splat['mu_2d']
++    cov_2d = splat['cov_2d']
++    
++    # Vector from center to pixel
++    delta = np.array([u - mu_2d[0], v - mu_2d[1]])
++    
++    # Compute exponent: -0.5 * delta^T * cov_2d^-1 * delta
++    inv_cov = np.linalg.inv(cov_2d)
++    exponent = -0.5 * delta @ inv_cov @ delta
++    
++    # Density
++    density = np.exp(exponent)
++    return density
++
++def compute_color(sh_coeffs):
++    """
++    Compute color from SH coefficients.
++    For internal scenes, view direction might be simplified.
++    """
++    # Standard SH evaluation, assuming a default view direction or 
++    # averaged over views if not specified.
++    # This is a placeholder for the specific SH evaluation used in InnerGS.
++    # Typically: c = SH_eval(sh_coeffs, view_direction)
++    # Since InnerGS is pose-free, the view direction might be implicit 
++    # or the SH coefficients are optimized for a canonical view.
++    # [G] Assuming a default view direction (0, 0, 1) for simplicity.
++    view_direction = np.array([0.0, 0.0, 1.0])
++    return evaluate_sh(sh_coeffs, view_direction)
++
++def evaluate_sh(sh_coeffs, view_direction):
++    """
++    Evaluate spherical harmonics for a given view direction.
++    """
++    # Standard SH basis evaluation
++    # This function depends on the degree of SH used (e.g., degree 3 for 45 coeffs)
++    # [G] Placeholder for actual SH evaluation logic.
++    # In practice, this involves projecting the view direction onto SH basis functions.
++    pass
++
++def project_gaussian_to_slice(gaussian, t):
++    """
++    Project a 3D Gaussian to a 2D slice at depth t.
++    Combines conditional 2D Gaussian with marginal 1D Gaussian.
++    """
++    mu = gaussian.mu
++    cov = gaussian.cov # Sigma = RSS^T R^T
++    
++    # The marginal 1D Gaussian along depth is used to condition the 2D Gaussian.
++    # The 2D center and covariance are adjusted based on the slice t.
++    # [G] Specific formula for this conditioning is not detailed in the source,
++    # but it implies a factorization of the 3D Gaussian into 2D (slice) and 1D (depth) components.
++    # The center in the image plane is likely the projection of mu, adjusted for t.
++    # The covariance is the projection of Sigma, adjusted for t.
++    
++    # Simplified projection:
++    # 2D center is the x,y component of mu.
++    # 2D covariance is the upper-left 2x2 block of Sigma, potentially scaled by 
++    # the 1D Gaussian density at t.
++    
++    mu_2d = mu[:2]
++    cov_2d = cov[:2, :2]
++    
++    return mu_2d, cov_2d
++
++def compute_radius(cov_2d):
++    """
++    Compute influence radius from 2D covariance.
++    """
++    # Radius is typically proportional to the square root of the largest eigenvalue
++    # or a multiple of the standard deviation.
++    eigenvalues = np.linalg.eigvals(cov_2d)
++    max_eigenvalue = np.max(eigenvalues)
++    radius = 3.0 * np.sqrt(max_eigenvalue) # 3 sigma rule
++    return radius
++
++def overlaps_image(center, radius, width, height):
++    """
++    Check if a splat overlaps with the image bounds.
++    """
++    x, y = center
++    if x - radius < 0 or x + radius >= width or y - radius < 0 or y + radius >= height:
++        return False
++    return True
+ ```
+ 
+ **Parameters:**
+-*   Pixel coordinates $(u, v)$ where $u \in [0, W - 1]$ and $v \in [0, H - 1]$ for an image of width $W$ and height $H$ [S1, unofficial].
+-*   Position vector $\mu = (\mu_x, \mu_y, \mu_z)$ defining the center of each 3D Gaussian [S1, unofficial].
+-*   Covariance matrix $\Sigma$ decomposed into scaling component $S$ (diagonal matrix with scale factors $s_x, s_y, s_z$) and rotation component $R$ (derived from unit quaternion $q$): $\Sigma = RSS^\top R^\top$ [S1, unofficial].
+-*   Spherical Harmonics (SH) coefficients used to model view-dependent color variations [S1, unofficial].
+-*   Opacity parameter $\alpha$ for each 3D Gaussian [S1, unofficial].
+-
+-**Edge Cases and Pitfalls:**
+-*   Standard 3DGS projection-based mechanism fails for internal volumetric structures because learned Gaussians concentrate on the object's surface, leaving the interior volume empty, and it relies on camera parameters (view/projection matrices) which are absent in sliced data [S1, unofficial].
+-*   The method must handle sparse sliced data, which may have gaps between slices. The marginal 1D Gaussian helps interpolate between slices, but performance may degrade with very large gaps.
++*   Pixel coordinates $(u, v)$ where $u \in [0, W - 1]$ and $v \in [0, H - 1]$ [S1, unofficial].
++*   Position vector $\mu = (\mu_x, \mu_y, \mu_z)$ [S1, unofficial].
++*   Covariance matrix $\Sigma$ decomposed into scaling $S$ and rotation $R$ [S1, unofficial].
++*   Spherical harmonics (SH) coefficients for view-dependent color [S1, unofficial].
++*   Opacity parameter $\alpha$ [S1, unofficial].
++
++**Pitfalls:**
++*   Standard 3DGS projection-based mechanism fails for internal volumetric structures because learned Gaussians concentrate on the object's surface, leaving the interior volume empty [S1, unofficial].
++*   Standard 3DGS relies on camera parameters (view/projection matrices) which are absent in sliced data [S1, unofficial].
+ 
+ ## Operating characteristics
+ *   **Time Complexity:** Not given in the sources. However, it uses tile-based rasterization similar to 3DGS, which is generally efficient. The conditional splatting adds overhead per slice.
+-*   **Memory Complexity:** Not given in the sources. Depends on the number of Gaussians and the number of slices.
++*   **Memory Complexity:** Not given in the sources. Depends on the number of Gaussians $N$ and the number of slices.
+ *   **Measured Performance:** Not given in the sources.
+ *   **Scaling:** Not given in the sources.
+-*   **Strengths:** Eliminates the need for camera poses; plug-and-play; inherently compatible with any data modalities; enables high-fidelity reconstruction of complex internal structures from sparse, pose-free sliced data [S1, unofficial].
+-*   **Limitations:** Relies on the assumption that the sliced data is aligned and has a known depth order. Performance may be sensitive to the sparsity of the slices.
+-*   **When to use:** When reconstructing internal structures from sparse, pose-free sliced data (e.g., medical imaging, cross-sections).
+-*   **When not to use:** When camera poses are available and the goal is surface reconstruction rather than volumetric internal structure reconstruction.
++*   **Strengths:** Eliminates the need for camera poses; plug-and-play; inherently compatible with any data modalities; reconstructs smooth and detailed internal structures from sparse sliced data [S1, unofficial].
++*   **Limitations:** Relies on sparse sliced data; may not capture complex view-dependent effects as well as full 3DGS if SH degree is low [G].
++*   **When to use:** When reconstructing internal structures from sparse, pose-free sliced data (e.g., medical imaging).
++*   **When not to use:** When camera poses are available and the goal is surface reconstruction or novel-view synthesis of external scenes (use standard 3DGS).
+ 
+ ## Background
+-Inner 3D Gaussian Splatting (InnerGS) was proposed by Shuxin Liang et al. in the paper "InnerGS: Internal Scenes Reconstruction and Segmentation via Factorized 3D Gaussian Splatting" [S1, unofficial]. It addresses the limitations of standard 3D Gaussian Splatting and NeRF in modeling internal volumetric structures. Standard 3DGS focuses on surface reconstruction and requires camera poses, while NeRF is computationally expensive. InnerGS introduces a novel approach using 3D Gaussian density for direct volumetric inference, leveraging conditional splatting and factorization to handle pose-free sliced data [S1, unofficial].
++Inner 3D Gaussian Splatting was proposed by Shuxin Liang et al. in 2025 [S1, unofficial]. It addresses the limitations of NeRF and standard 3DGS in modeling internal scenes. NeRF requires heavy MLPs and is slow to render, while standard 3DGS fails for internal structures due to its projection-based nature and reliance on camera poses [S1, unofficial]. InnerGS provides a direct volumetric inference framework using 3D Gaussian density [S1, unofficial].
+ 
+ ## Sources

@@ -1,0 +1,74 @@
+# Image-based Rendering Cost Model
+
+Also called: Model 1, Model 2, Parallel Visualization Server Cost Model
+
+## Overview
+The Image-based Rendering Cost Model estimates the total time cost for remote visualization where a parallel server computes isosurfaces and transmits either six depth images per isosurface (Model 1) or mesh geometry (Model 2) to a local workstation for reconstruction [S1]. It differs from [Grid Resolution Cost Model](12776-grid-resolution-cost-model.md) and [Uniform Subsampling Cost Model](17119-uniform-subsampling-cost-model.md) by assuming the full original dataset is processed on the server, focusing instead on the trade-off between parallel computation time and network transmission overhead [S1].
+
+## How it works
+### Inputs and Outputs
+*   **Inputs:** Dataset size ($N$), number of isosurfaces ($I$), number of processors ($P$), network bandwidth ($R$), network latency ($L$), image resolution ($X$), and computational cost per element ($C_{Im}$) [S1].
+*   **Outputs:** Total cost in seconds ($MI$ for Model 1, $MV$ for Model 2) [S1].
+
+### Data Structures
+Not given in the sources.
+
+### Execution Steps
+1. Calculate the parallel computation time: $T_{comp} = (N \cdot C_{Im} \cdot I) / P$ [S1].
+2. Calculate the transmission time based on the chosen model:
+   * Model 1: $T_{trans} = (48 \cdot 6 \cdot X \cdot I) / (10^6 \cdot R)$ [S1].
+   * Model 2: $T_{trans} = (32 \cdot 6 \cdot N^{2/3} \cdot I) / (10^6 \cdot R)$ [S1].
+3. Calculate the network latency: $T_{lat} = 2 \cdot L \cdot I$ [S1].
+4. Sum the components to obtain the total cost: $T_{total} = T_{comp} + T_{trans} + T_{lat}$ [S1].
+
+### Formulas
+The total cost is defined by two distinct equations depending on the transmission strategy [S1].
+
+**Model 1: Image-based Rendering (Depth Images)** [S1]
+This model assumes the server computes isosurfaces and transmits six depth images per isosurface for reconstruction on the client [S1]. Each pixel in the depth image contains 48 bits: 24 bits for color, 16 bits for depth, and 8 bits for surface orientation information [S1].
+
+$$ MI = \frac{N C_{Im} I}{P} + \frac{48 \cdot 6 \cdot X \cdot I}{10^6 R} + 2 L I $$
+
+Where:
+*   $\frac{N C_{Im} I}{P}$: Time required to compute isosurfaces in parallel on the original data set [S1].
+*   $\frac{48 \cdot 6 \cdot X \cdot I}{10^6 R}$: Transmission time for depth images. The numerator calculates total bits ($48$ bits/pixel $\times$ $6$ images/isosurface $\times$ $X$ pixels/image $\times$ $I$ isosurfaces) [S1]. The denominator $10^6$ converts bits to Megabits to match bandwidth $R$ [S1].
+*   $2 L I$: Network latency for new isosurface requests. The factor of 2 accounts for round-trip latency [S1].
+
+**Model 2: Parallel Visualization Servers (Mesh Geometry)** [S1]
+This model assumes the server computes isosurfaces and transmits the resulting mesh geometry (vertices and connectivity) to the local workstation [S1]. It assumes each isosurface contains approximately $N^{2/3}$ triangles, and consequently $N^{2/3}$ vertices [S1]. Each triangle requires connectivity information, and each vertex requires three spatial coordinates (32-bit values) [S1]. The source text writes the triangle count as $N^2/3$ in the formula, but explicitly describes it as $N^{2/3}$ in the accompanying prose [S1].
+
+$$ MV = \frac{N C_{Im} I}{P} + \frac{32 \cdot 6 \cdot N^{2/3} \cdot I}{10^6 R} + 2 L I $$
+
+Where:
+*   $\frac{N C_{Im} I}{P}$: Time required to compute isosurfaces in parallel (identical to Model 1) [S1].
+*   $\frac{32 \cdot 6 \cdot N^{2/3} \cdot I}{10^6 R}$: Transmission time for mesh geometry. The factor $32$ represents bits per value, $6$ is a constant multiplier from the source derivation, and $N^{2/3}$ represents the number of triangles per isosurface [S1].
+*   $2 L I$: Network latency for new isosurface requests [S1].
+
+### Parameters
+*   $N$: Number of elements in the original computational mesh [S1].
+*   $I$: Number of isosurfaces to be computed and rendered [S1].
+*   $P$: Number of remote processors available for parallel computation [S1].
+*   $R$: Network bandwidth in Megabits per second (Mbs) [S1].
+*   $L$: Network latency in seconds [S1].
+*   $X$: Size of the images in pixels (total pixel count per image) [S1].
+*   $C_{Im}$: Multiresolution Isosurface Cost per Element [S1].
+
+### Edge Cases and Pitfalls
+*   **Multiple Isosurfaces per Request:** The model assumes a new set of reference depth images is required for each new isosurface [S1]. However, if multiple isosurfaces are generated during a single request, the number of depth images does not necessarily increase, which may reduce the actual cost compared to the model's prediction [S1].
+*   **Mesh Geometry Scaling:** Model 2 assumes the number of vertices and elements in a triangular mesh are approximately equal and that the number of triangles scales as $N^{2/3}$ [S1]. Deviations from this geometric scaling will affect accuracy [S1].
+*   **Bandwidth Units:** Bandwidth $R$ must be specified in Megabits per second (Mbs) to match the $10^6$ conversion factor in the transmission term [S1].
+*   **Local Workstation Overhead:** The models do not address the costs associated with loading and processing the resulting data sets on the local graphics workstation [S1].
+*   **When Not to Use:** For local visualization where network costs are zero [S1]. For methods involving subsampling or multiresolution data transfer (see [Uniform Subsampling Cost Model](17119-uniform-subsampling-cost-model.md)) [S1].
+
+## Operating characteristics
+*   **Time Complexity:** The computation term scales linearly with $N$ and $I$, and inversely with $P$ ($O(N \cdot I / P)$) [S1]. The transmission term scales linearly with $I$ and either $X$ (Model 1) or $N^{2/3}$ (Model 2) [S1]. The latency term scales linearly with $I$ ($O(I)$) [S1].
+*   **Memory Complexity:** The model does not explicitly account for local memory usage on the workstation, as it excludes the costs of loading and processing data on the local graphics hardware [S1].
+*   **Strengths:** Provides a clear analytical breakdown of computation versus communication costs for remote visualization [S1]. Useful for determining the optimal strategy (image-based vs. mesh-based) based on network conditions ($R, L$) and dataset size ($N$) [S1].
+*   **Limitations:** Assumes ideal parallel scaling ($1/P$) which may not hold for all algorithms or hardware [S1]. Assumes a specific bit-depth for depth images (48 bits) which may vary with different rendering techniques [S1]. Does not account for the computational cost of reconstructing the 3D scene from depth images or meshes on the local workstation [S1].
+*   **When to Use:** When designing or analyzing remote visualization systems where network bandwidth and latency are significant constraints, and the choice is between transmitting rendered images or raw geometry [S1].
+
+## Background
+The Image-based Rendering Cost Model was introduced to compare remote visualization strategies for the interactive exploration of large data sets [S1]. It forms part of a series of analytical models (Models 1, 2, and 3) designed to evaluate the performance of parallel visualization servers against image-based rendering and subsampling techniques [S1]. The model was developed to quantify the trade-offs between parallel computation, network transmission, and latency in distributed visualization architectures [S1].
+
+## Sources
+[S1] Comparison of remote visualization strategies for interactive exploration of large data sets, https://digital.library.unt.edu/ark:/67531/metadc710831/?q=multiresolution volume rendering, fetched 2026-10-28

@@ -1,0 +1,65 @@
+# Scene Editing
+Also called: 3D Latent Region Resampling, Interactive Editing, Latent Inpainting, Object manipulation, Scene manipulation
+
+## Overview
+Scene editing modifies specific spatial regions of a generated 3D scene by treating the 3D coarse latent representation as an image and applying diffusion-based inpainting [S3]. Unlike global latent resampling which regenerates the entire scene, this method allows localized modifications by inpainting only a selected region of the coarse latent [S3]. It enables control over color, opacity, lighting magnitude, and light direction in inverse volume rendering contexts [S1], and supports adding or removing objects, changing 3D poses, and object cloning [S2].
+
+## How it works
+**Inputs and Outputs**
+*   **Input:** A 3D coarse latent representation $c$ of the scene [S3]. For inverse volume rendering, editable Gaussian attributes including palette color $c_p$, opacity, shading terms $k_a, k_d, k_s, \beta$, and primitive normals $n$ [S1].
+*   **Output:** An edited 3D coarse latent $c'$ and a corresponding re-sampled fine latent [S3].
+
+**Data Structures**
+*   **3D Coarse Latent ($c$):** A volumetric latent grid representing the scene structure, serving as the target for region resampling and conditioning [S3].
+*   **Editable Attributes (iVR-GS):** Palette color $c_p$ [S1], directly scalable opacity term [S1], shading terms $k_a, k_d, k_s, \beta$ [S1], and per-primitive normal vectors $n$ [S1].
+
+**Steps**
+1.  **Region Selection:** Define a spatial region in $c$ to be edited (sampled) and the remaining region to be kept [S3].
+2.  **Attribute Editing:** Replace $c_p$ with a new palette color $c'_p$ [S1]. Adjust opacity by directly scaling the opacity term [S1]. Scale $k_a, k_d, k_s,$ and $\beta$ to adjust shading magnitudes [S1].
+3.  **Denoising Loop:** At each denoising step, add noise to the spatial region of $c$ intended to be kept [S3]. Concatenate the noised kept region with the region being newly sampled [S3]. Pass the concatenated latent representation through the diffusion model [S3]. Apply reconstruction guidance to harmonize the boundary between sampled and kept regions [S3].
+4.  **Latent Update:** Obtain the updated coarse latent $c$ after the denoising process completes [S3].
+5.  **Fine Latent Resampling:** Re-sample the fine latent conditioned on the new coarse latent $c$ [S3].
+6.  **Rendering:** Render the scene using the Blinn-Phong equation based on primitive normals $n$ and the edited attributes [S1].
+
+**Formulas**
+*   **Blinn-Phong Rendering:** The scene is rendered following the Blinn-Phong equation (Equation 3 in [S1]) based on primitive normals $n$ and scaled shading terms [S1].
+    $$ I = k_a I_a + k_d I_d (\mathbf{n} \cdot \mathbf{l}) + k_s I_s (\mathbf{r} \cdot \mathbf{v})^\beta $$
+    *(Note: $I_a, I_d, I_s, \mathbf{l}, \mathbf{r}, \mathbf{v}$ are standard illumination terms defined in [S1].)*
+
+**Parameters**
+*   $c$: The 3D coarse latent representation of the scene [S3].
+*   $c_p$: Palette color [S1].
+*   $k_a, k_d, k_s, \beta$: Shading attributes [S1].
+
+**Edge Cases and Pitfalls**
+*   **Boundary Artifacts:** Without reconstruction guidance, the boundary between sampled and kept regions may appear unnatural [S3].
+*   **Domain Shift:** Style modification via conditioning is effective only when the conditioning data is reasonably close to the dataset’s domain [S3].
+
+### Post-Optimization
+*   **What it is:** A technique applied after the initial diffusion sample to improve quality or modify style using Score Distillation Sampling (SDS) [S3].
+*   **Differentiation:** Unlike region resampling which changes geometry locally, post-optimization refines the entire sample while retaining 3D structure [S3].
+*   **When to choose:** When sample quality needs improvement or style modification (e.g., time of day) is required without changing the underlying 3D structure [S3].
+
+### Inverse Volume Exploration
+*   **What it is:** A method where users provide a reference image, and the system learns transformation parameters to approximate the desired rendering effect automatically [S1].
+*   **Differentiation:** Unlike manual editing of attributes, this automates the adjustment of transfer function parameters to match a visual target [S1].
+*   **When to choose:** When users want to avoid tedious trial-and-error adjustments and have a reference image [S1].
+
+## Operating characteristics
+*   **Time Complexity:** Not given in the sources [S1, S2, S3].
+*   **Memory Complexity:** Not given in the sources [S1, S2, S3].
+*   **Measured Performance:** Not given in the sources [S1, S2, S3].
+*   **Strengths:** Allows localized modifications without regenerating the entire scene [S3]. Enables plausible editing of color, opacity, and lighting magnitude [S1]. Supports adding/removing objects, pose changes, and cloning [S2]. Inverse volume exploration saves time by eliminating tedious trial-and-error transfer function adjustments, learning transformation parameters given a reference image instead [S1].
+*   **Limitations:** Style modification requires clean image data close to the dataset's domain [S3].
+*   **When to use:** When specific regions of a 3D scene need modification or when style/quality refinement is desired post-generation [S3].
+*   **When not:** When global regeneration is acceptable and faster than iterative inpainting, or when the desired style is far from the training domain [S3].
+
+## Background
+*   **Origin:** The concept of using image diffusion models for inpainting without explicit training was leveraged for 3D scene editing in NeuralField-LDM (NF-LDM) [S3]. The application to inverse volume rendering with Gaussian splatting was introduced in iVR-GS [S1]. Object-aware editing was introduced in Panoptic Neural Fields [S2].
+*   **History:** Scene editing in 3D diffusion models builds on the property that image diffusion models can perform inpainting [S3]. Post-optimization using SDS was introduced to improve sample quality and enable style modification [S3].
+*   **Usage:** Used in neural field generation (NF-LDM) and inverse volume rendering (iVR-GS) for controllable synthesis and exploration [S1, S3].
+
+## Sources
+[S1] iVR-GS: Inverse Volume Rendering for Explorable Visualization via Editable 3D Gaussian Splatting., https://doi.org/10.1109/tvcg.2025.3567121, fetched 2026-10-26
+[S2] Panoptic Neural Fields: A Semantic Object-Aware Neural Scene Representation, https://doi.org/10.1109/cvpr52688.2022.01253, fetched 2026-10-26
+[S3] NeuralField-LDM: Scene Generation with Hierarchical Latent Diffusion Models, https://doi.org/10.1109/cvpr52729.2023.00821, fetched 2026-10-29

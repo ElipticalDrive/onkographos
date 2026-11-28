@@ -1,0 +1,139 @@
+# Intensity-isolated Front-to-back Ray Marching
+
+Also called: Front-to-back volume ray marching with intensity isolation mask, Intensity-masked Volume Ray Marching
+
+## Overview
+Intensity-isolated Front-to-back Ray Marching is a direct volume rendering technique that restricts the visual contribution of a ray to a specific scalar intensity range, defined by `intensityMin` and `intensityMax`. It solves the problem of visual clutter in dense volumes by masking out voxels outside this range using a smoothstep-based opacity mask, while maintaining the standard front-to-back compositing order. It differs from standard ray casting by the explicit intensity gating and from Maximum Intensity Projection (MIP) by preserving depth-based occlusion and alpha accumulation rather than selecting only the highest value.
+
+## How it works
+**Inputs and Outputs:**
+*   **Input:** A scalar volume texture `tex`, camera ray parameters (origin, direction, `rayStop`), and shader uniforms: `intensityMin`, `intensityMax`, `opacityFactor`, `numSamples`, `colorizeIntensity`, and `lightFactor`.
+*   **Output:** A final pixel color `accum.rgb` and accumulated opacity `accum.a`.
+
+**Data Structures:**
+*   `accum`: A structure containing `rgb` (vec3) and `a` (float), initialized to `(0, 0)`.
+*   `vsample`: A structure containing `rgb` (vec3) and `a` (float), representing the weighted contribution of the current sample.
+*   `value`: A temporary structure containing `rgb` (vec3) and `a` (float), representing the raw transfer function output before masking and weighting.
+
+**Parameters:**
+*   `intensityMin`: Lower bound of the isolated intensity range [S1].
+*   `intensityMax`: Upper bound of the isolated intensity range [S1].
+*   `opacityFactor`: Global multiplier for sample alpha [S1].
+*   `numSamples`: Total number of samples per ray, used to normalize opacity [S1].
+*   `colorizeIntensity`: Interpolation factor between raw intensity color and a heatmap color [S1].
+*   `lightFactor`: Multiplier for sample color contribution [S1].
+*   `marchDist`: Step increment for ray position per iteration [S1].
+*   `rayStop`: Endpoint of the ray segment being marched [S1].
+
+**Algorithm Steps:**
+1.  Initialize `pos` to the ray origin, `accum` to `(0, 0)`, and `travel` to the distance from `pos` to `rayStop`.
+2.  Loop while `travel > 0`:
+    a.  Calculate `fade`:
+        $$ \text{fade} = \text{clamp}\left(\frac{\text{distance}(\text{pos}, \text{rayStop})}{\text{stepSize}}, 0., 1.\right) $$
+        where `stepSize` is derived from the total ray length divided by `numSamples` [S1].
+    b.  Sample the voxel at `pos`:
+        $$ \text{tf\_pos} = \text{getVoxel}(\text{tex}, \text{pos}) $$
+        This retrieves the scalar intensity value $V(\mathbf{p})$ [S1].
+    c.  Compute the base color `value.rgb`:
+        $$ \text{value.rgb} = \text{mix}(\text{vec3}(\text{tf\_pos}), \text{Heatmap}(\text{tf\_pos}, 0., 1.), \text{float}(\text{colorizeIntensity})) $$
+        This mixes the raw scalar value (cast to RGB) with a heatmap color based on `colorizeIntensity` [S1].
+    d.  Compute the opacity mask `value.a` using a smoothstep function centered on the isolated range:
+        $$ \text{value.a} = \text{pow}\left( \text{smoothstep}(\text{intensityMax}, \frac{\text{intensityMax}+\text{intensityMin}}{2}, \text{tf\_pos}) \times \text{smoothstep}(\text{intensityMin}, \frac{\text{intensityMax}+\text{intensityMin}}{2}, \text{tf\_pos}), 0.25 \right) $$
+        The `smoothstep` function creates a bell-shaped mask that is 1.0 at the midpoint of the range and 0.0 outside the bounds, raised to the power of 0.25 to soften the transition [S1].
+    e.  Compute the final sample alpha `vsample.a`:
+        $$ \text{vsample.a} = \text{value.a} \times \text{opacityFactor} \times \left(\frac{1.0}{\text{numSamples}}\right) \times \text{fade} $$
+        This normalizes the opacity by the number of samples and applies the fade factor [S1].
+    f.  Compute the final sample color `vsample.rgb`:
+        $$ \text{vsample.rgb} = \text{value.rgb} \times \text{vsample.a} \times \text{lightFactor} $$
+        This weights the color by the computed alpha and a lighting factor [S1].
+    g.  Accumulate the color:
+        $$ \text{accum.rgb} \leftarrow \text{accum.rgb} + (1.0 - \text{accum.a}) \times \text{vsample.rgb} $$
+    h.  Accumulate the alpha:
+        $$ \text{accum.a} \leftarrow \text{accum.a} + \text{vsample.a} $$
+    i.  Check for early termination: If `accum.a >= 1.0`, break the loop [S1].
+    j.  Update position:
+        $$ \text{pos} \leftarrow \text{pos} + \text{marchDist} $$
+        $$ \text{travel} \leftarrow \text{travel} - \text{stepSize} $$
+
+**Pseudocode:**
+> **Unverified code.** The code below did not pass a test run against a reference implementation, or no test fits it, so it may contain errors.
+
+```python
+def intensity_isolated_ray_march(tex, ray_origin, ray_direction, ray_stop, 
+                                 intensity_min, intensity_max, opacity_factor, 
+                                 num_samples, colorize_intensity, light_factor):
+    # Calculate step size and initial parameters
+    ray_length = distance(ray_origin, ray_stop)
+    step_size = ray_length / num_samples
+    pos = ray_origin
+    travel = ray_length
+    accum_rgb = vec3(0.0, 0.0, 0.0)
+    accum_a = 0.0
+    
+    # Pre-calculate midpoint for smoothstep
+    midpoint = (intensity_max + intensity_min) * 0.5
+    
+    while travel > 0.0:
+        # 1. Calculate fade factor
+        dist_to_stop = distance(pos, ray_stop)
+        fade = clamp(dist_to_stop / step_size, 0.0, 1.0)
+        
+        # 2. Sample voxel intensity
+        tf_pos = get_voxel(tex, pos)
+        
+        # 3. Compute color
+        # Assuming vec3(tf_pos) casts scalar to RGB (e.g., grayscale)
+        raw_color = vec3(tf_pos)
+        heatmap_color = compute_heatmap(tf_pos, 0.0, 1.0)
+        value_rgb = mix(raw_color, heatmap_color, float(colorize_intensity))
+        
+        # 4. Compute opacity mask using smoothstep
+        # smoothstep(edge0, edge1, x) returns 0 if x <= edge0, 1 if x >= edge1
+        # First term: 1 when tf_pos <= midpoint, decreasing to 0 at intensityMax
+        term1 = smoothstep(intensity_max, midpoint, tf_pos)
+        # Second term: 0 when tf_pos <= intensityMin, increasing to 1 at midpoint
+        term2 = smoothstep(intensity_min, midpoint, tf_pos)
+        
+        value_a = pow(term1 * term2, 0.25)
+        
+        # 5. Compute sample alpha
+        vsample_a = value_a * opacity_factor * (1.0 / num_samples) * fade
+        
+        # 6. Compute sample color
+        vsample_rgb = value_rgb * vsample_a * light_factor
+        
+        # 7. Accumulate color
+        accum_rgb += (1.0 - accum_a) * vsample_rgb
+        
+        # 8. Accumulate alpha
+        accum_a += vsample_a
+        
+        # 9. Early termination check
+        if accum_a >= 1.0:
+            break
+            
+        # 10. Update position
+        pos += ray_direction * step_size # marchDist is effectively step_size along direction
+        travel -= step_size
+        
+    return accum_rgb, accum_a
+```
+
+**Edge Cases and Pitfalls:**
+*   **Early Termination:** The loop breaks when `accum.a >= 1.0` to avoid overdraw and wasted computation [S1].
+*   **Intensity Range:** If `intensityMin` >= `intensityMax`, the smoothstep mask will likely result in zero opacity for all samples, rendering the volume invisible.
+*   **Precision:** The `fade` calculation uses `distance(pos, rayStop)`. If `pos` exceeds `rayStop` due to floating-point error, `fade` may become negative before clamping, though `clamp` handles this.
+
+## Operating characteristics
+*   **Time Complexity:** $O(N)$ per pixel, where $N$ is `numSamples`. The loop runs until full opacity is reached or all samples are processed.
+*   **Memory Complexity:** $O(1)$ auxiliary memory per ray, storing only the accumulator and current sample values.
+*   **Strengths:** Effectively isolates specific tissue types or data ranges in medical or scientific visualization by suppressing background noise. Simple to implement as a shader modification.
+*   **Limitations:** The smoothstep mask is not a hard cutoff, which may lead to subtle leakage of adjacent intensities. Performance is identical to standard ray casting, but visual utility is restricted to the specified range.
+*   **When to use:** When the user needs to inspect a specific density range within a complex volume without removing other structures entirely (which might require multiple passes or segmentation).
+*   **When not to use:** When global context is required, or when the intensity range is unknown and requires interactive adjustment.
+
+## Background
+This method is derived from the implementation details of the **VolumeInspector** tool within the **graphXDoses** project. It represents a practical application of intensity masking in real-time volume rendering, utilizing GLSL-style operations (smoothstep, mix, clamp) typical of GPU-based ray marching.
+
+## Sources
+[S1] graphXDoses/VolumeInspector, https://github.com/graphXDoses/VolumeInspector, fetched 2026-10-28

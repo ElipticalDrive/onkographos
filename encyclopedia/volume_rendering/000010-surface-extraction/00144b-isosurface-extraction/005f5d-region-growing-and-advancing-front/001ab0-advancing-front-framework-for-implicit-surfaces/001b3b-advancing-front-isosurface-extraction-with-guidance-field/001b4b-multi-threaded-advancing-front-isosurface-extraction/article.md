@@ -1,0 +1,140 @@
+# Multi-threaded Advancing Front Isosurface Extraction
+
+Also called: Parallel Advancing Front Isosurface Extraction
+
+## Overview
+This method parallelizes the Advancing Front Isosurface Extraction with Guidance Field [947-advancing-front-isosurface-extraction-with-guidance-field.md] to accelerate mesh generation by distributing computational work across multiple CPU cores. It solves the performance bottleneck of sequential front projection and guidance field evaluation. Unlike its parent method, which relies on intrinsic geometry for quality, this variant specifically optimizes throughput via thread-level parallelism while maintaining the bounded distance and normal error guarantees of the underlying algorithm. It sets itself apart from standard parallel marching cubes by producing meshes that require negligible downstream processing, albeit at a slower raw execution speed.
+
+## How it works
+The method extends the single-threaded advancing front algorithm by parallelizing the most computationally intensive phases: the computation of the guidance field, the culling of candidate points, and the projection of points onto the advancing fronts.
+
+**Inputs and Outputs:**
+*   **Input:** An implicit function $f(\mathbf{x})$ defining the surface, a target isovalue $k$, and a guidance field $g(\mathbf{x})$ (computed by the parent method or provided externally). The function must admit well-defined gradient $\nabla f(\mathbf{x})$ and Hessian $H_f(\mathbf{x})$.
+*   **Output:** A triangle mesh approximating the isosurface $f(\mathbf{x}) = k$.
+
+**Data Structures:**
+*   **Worker Queue:** A thread-safe queue containing tasks for worker threads. Tasks typically involve projecting a specific point or edge onto the current front.
+*   **Front Data Structure:** The advancing front, maintained as a set of edges or vertices. Access to shared state (the front) must be synchronized or partitioned to avoid race conditions during parallel updates.
+*   **Guidance Field:** A scalar field $g(\mathbf{x})$ used to constrain edge lengths based on curvature.
+
+**Parameters:**
+*   **Thread Count ($T$):** The number of worker threads. The source uses $T=4$ for experiments [S1].
+*   **$\rho, \eta$:** Guidance field parameters controlling sampling density and smoothing. Typical values are not explicitly defined in the source text, but the method is robust across different settings [S1].
+
+**Numbered Steps:**
+1.  **Initialization:** Initialize the advancing front with seed points or edges derived from the guidance field.
+2.  **Parallel Guidance and Culling:** Compute the guidance field $g(\mathbf{x})$ and perform point culling in parallel across all available threads [S1]. This step determines which regions require refinement based on local curvature.
+3.  **Task Distribution:** Distribute the work of projecting points onto the advancing fronts to a set of $T$ worker threads [S1]. Each thread processes a subset of points or edges.
+4.  **Parallel Projection:** Worker threads independently project candidate points onto the front, evaluating $f(\mathbf{x})$ and using $\nabla f(\mathbf{x})$ to find the intersection with the isosurface.
+5.  **Front Update:** As projections complete, the front is updated. Synchronization mechanisms (e.g., locks or atomic operations) are required if multiple threads modify the same front segments simultaneously.
+6.  **Mesh Generation:** Triangles are formed from the projected points and added to the output mesh.
+
+**Formulas:**
+The method relies on the implicit function representation:
+$$ f(\mathbf{x}) = k $$
+The surface normal is given by:
+$$ \mathbf{n}(\mathbf{x}) = \frac{\nabla f(\mathbf{x})}{\|\nabla f(\mathbf{x})\|} $$
+The guidance field $g(\mathbf{x})$ constrains the maximum edge length $L$ in the mesh:
+$$ L \leq g(\mathbf{x}) $$
+where $g(\mathbf{x})$ is derived from the curvature (Hessian) of $f$. The source states the mesh has bounded distance error and bounded normal error [S1].
+
+**Pseudocode:**
+> **Unverified code.** The code below did not pass a test run against a reference implementation, or no test fits it, so it may contain errors.
+
+```python
+def multi_threaded_advancing_front_extraction(f, k, guidance_field, num_threads):
+    """
+    Extracts isosurface from implicit function f using parallel advancing front.
+    
+    Args:
+        f: Implicit function callable f(x) returning scalar value.
+        k: Isovalue threshold.
+        guidance_field: Precomputed or callable scalar field g(x) for edge length constraints.
+        num_threads: Number of worker threads.
+        
+    Returns:
+        List of triangles (vertices).
+    """
+    # Initialize the advancing front with seed points
+    front = initialize_front(f, k, guidance_field)
+    
+    # Initialize thread-safe queue for tasks
+    task_queue = ThreadSafeQueue()
+    
+    # Parallel Guidance Field Computation and Culling
+    # Compute guidance values and cull invalid points in parallel
+    parallel_compute_guidance_and_cull(f, k, guidance_field, front, task_queue)
+    
+    # Worker Thread Function
+    def worker():
+        while True:
+            try:
+                task = task_queue.get(timeout=1.0)
+            except Empty:
+                break
+            
+            # Project point onto the front
+            projected_point = project_point_onto_front(task.point, front, f, k)
+            
+            # Update front and generate triangles if valid
+            if projected_point is not None:
+                update_front(front, projected_point, task)
+                generate_triangles(front, projected_point)
+                
+            task_queue.task_done()
+
+    # Launch worker threads
+    threads = []
+    for _ in range(num_threads):
+        t = Thread(target=worker)
+        t.start()
+        threads.append(t)
+        
+    # Wait for completion
+    for t in threads:
+        t.join()
+        
+    return front.get_triangles()
+
+def parallel_compute_guidance_and_cull(f, k, guidance_field, front, task_queue):
+    """
+    Computes guidance field and culls points in parallel.
+    """
+    # Determine candidate points based on initial sampling or grid
+    candidates = get_candidate_points(front)
+    
+    # Parallel loop over candidates
+    for point in candidates:
+        # Compute guidance value
+        g_val = guidance_field(point)
+        
+        # Cull logic: check if point is valid for front projection
+        if is_valid_for_front(point, front, g_val):
+            task_queue.put(Task(point=point))
+```
+
+**Edge Cases and Pitfalls:**
+*   **Sharp Corners:** The method requires the implicit function to admit a well-defined gradient and Hessian. Sharp corners do not admit a regular isosurface representation where $f(\mathbf{x}) = k$ and $\nabla f(\mathbf{x}) \neq 0$ [S1].
+*   **Concurrency:** Race conditions may occur if multiple threads update the front simultaneously. Proper synchronization is required.
+*   **Precision:** The method assumes band-limited reconstruction of sampled volumes, ensuring smoothness [S1].
+
+## Subtopics
+
+### [Advancing Front Meshing with Curvature Guidance](3746-advancing-front-meshing-with-curvature-guidance.md)
+A coarse-to-fine surface extraction strategy that constructs a voxel pyramid from CT data, computes curvature fields, and iteratively refines high-curvature regions to guide adaptive particle sampling, reducing artifacts and topological errors compared to direct threshold-based methods. It generates high-quality triangle meshes using a curvature-based guidance field. It sets itself apart from its sibling [Multi-threaded Advancing Front Isosurface Extraction](963-multi-threaded-advancing-front-isosurface-extraction.md) by explicitly using a multi-scale pyramid and statistical curvature thresholds to drive the refinement process, rather than relying solely on the intrinsic geometry of the implicit function at a single resolution.
+
+## Operating characteristics
+*   **Time Complexity:** The algorithm is slower than Marching Cubes (MC) or Marching Tetrahedra (MT) implementations [S1]. Running times are typically several minutes for larger datasets. For example, on the specified hardware, times were 5:18 for Aneurism BS, 12:16 for Engine BS, and 5:50 for Skull CR [S1].
+*   **Memory Complexity:** Not given in the sources.
+*   **Measured Performance:** Experiments were conducted on a PC with two dual-core AMD Opteron processors at 2.25GHz, 4GB RAM, SuSE Linux 10.0 [S1]. Four threads were used for all experiments [S1].
+*   **Scaling:** The algorithm is mostly local, allowing decisions and actions to be taken independently of the reconstruction of distant surface parts, which facilitates parallelization [S1].
+*   **Strengths:** Generates high-quality meshes with bounded distance and normal error. 99% of triangles have quality at least half of optimal, and the median quality is within 3% of optimal [S1]. Triangle counts are often less than MC. The resulting meshes require negligible or no downstream processing [S1].
+*   **Limitations:** Slower than MC/MT. Requires well-defined gradient and Hessian.
+*   **When to use:** When high mesh quality and minimal downstream processing are prioritized over raw speed. Applicable to high-order meshes (typically degree ~10) where the technique is oblivious to the underlying mesh as long as gradient and Hessian are computable [S1].
+*   **When not:** When real-time performance is critical and lower quality mesh is acceptable.
+
+## Background
+The method originates from the work on high-quality extraction of isosurfaces from regular and irregular grids. It builds on the Advancing Front Isosurface Extraction with Guidance Field [947-advancing-front-isosurface-extraction-with-guidance-field.md]. The implementation was tested on various models including Catmull-Rom splines and B-splines, demonstrating robustness across different surface definitions and parameter settings [S1].
+
+## Sources
+[S1] High-Quality Extraction of Isosurfaces from Regular and Irregular Grids, https://doi.org/10.1109/tvcg.2006.149, fetched 2026-10-26

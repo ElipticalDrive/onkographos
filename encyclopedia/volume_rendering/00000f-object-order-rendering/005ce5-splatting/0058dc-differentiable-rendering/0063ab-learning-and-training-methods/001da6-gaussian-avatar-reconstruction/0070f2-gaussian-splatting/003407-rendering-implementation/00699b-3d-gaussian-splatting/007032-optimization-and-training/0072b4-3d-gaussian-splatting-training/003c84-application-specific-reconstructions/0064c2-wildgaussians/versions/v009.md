@@ -1,0 +1,89 @@
+# WildGaussians
+
+Also called: Splatting in the Wild images with Appearance-conditioned Gaussians, SWAG
+
+## Overview
+WildGaussians extends 3D Gaussian Splatting (3DGS) to handle "in-the-wild" photo collections characterized by varying illumination, occlusions, and transient objects [S2, S4]. It addresses the limitation of standard 3DGS, which lacks shared parameters and struggles with appearance changes, by integrating robust DINO features for uncertainty modeling and a lightweight appearance modeling module [S1, S2]. Unlike NeRF-based methods that use global per-image embeddings to condition an MLP for the entire radiance field, WildGaussians uses per-Gaussian and per-image embeddings to predict an affine transformation of the base color, preserving real-time rendering speeds [S2]. It sets itself apart from siblings like GauHuman and SplattingAvatar by focusing on unconstrained static scene reconstruction with transient occluders rather than dynamic human avatars or mesh-aligned bodies [S2, S4].
+
+## How it works
+**Inputs:** A set of $N$ uncalibrated or calibrated images $\{I_j\}_{j=1}^N$ with known camera poses.
+**Outputs:** A set of 3D Gaussians $\{G_i\}$ optimized for static scene reconstruction, with an optional "baked" representation for fast rendering.
+
+**Data Structures:**
+1.  **3D Gaussian $G_i$:**
+    *   Mean position $\mu_i \in \mathbb{R}^3$.
+    *   Covariance matrix $\Sigma_i \in \mathbb{R}^{3 \times 3}$ (positive semi-definite).
+    *   Opacity $\alpha_i \in [0, 1]$.
+    *   View-dependent color parametrized by spherical harmonics (SH) coefficients $c_i$.
+    *   Per-Gaussian trainable appearance embedding vector $e_i \in \mathbb{R}^d$ [S2].
+2.  **Per-Image Embedding:** A trainable vector $l_j \in \mathbb{R}^n$ for each training image $j$, where $n=24$ [S4].
+3.  **Appearance MLP $F_\theta$:** A multi-layer perceptron taking inputs $(c_i, e_i, l_j)$ and outputting parameters for color transformation [S2].
+4.  **Uncertainty Predictor:** A trainable affine transformation taking DINO features as input [S2].
+
+**Algorithm Steps:**
+
+1.  **Initialization:** Initialize 3D Gaussians using standard 3DGS initialization (e.g., from SfM points) [S2]. Initialize per-image embeddings $l_j$ and per-Gaussian embeddings $e_i$ to zeros or small random values [S2].
+
+2.  **Feature Extraction:** For each training image $I_j$, extract DINO v2 features $D(I_j)$ [S2].
+
+3.  **Rendering and Appearance Modeling:**
+    For each training image $I_j$:
+    a. Project 3D Gaussians to 2D image space. The 2D covariance matrix $\Sigma'_i$ is computed as:
+       $$ \Sigma'_i = J_W \Sigma_i W^T J_{1:2,1:2}^T $$
+       where $J$ is the Jacobian of the affine approximation of the projection, $W$ is the viewing transformation, and $(\cdot)_{1:2,1:2}$ denotes the first two rows and columns [S2].
+    b. Compute the base color $\hat{c}_i$ for each Gaussian using SH coefficients and ray direction [S2].
+    c. Compute the appearance-modulated color $\tilde{c}_i^j$:
+       $$ (\tilde{c}_i^j, \Delta \alpha_i^j) = F_\theta(c_i, e_i, l_j) $$
+       where $F_\theta$ is the appearance MLP [S2]. Note: SWAG variant predicts color directly and uses opacity variation [S4].
+    d. Render the image $\hat{C}_j$ using alpha compositing with the modulated colors [S2].
+
+4.  **Uncertainty Modeling:**
+    a. Extract DINO features from the rendered image $\hat{C}_j$, denoted $D(\hat{C}_j)$ [S2].
+    b. Pass $D(I_j)$ (GT features) and $D(\hat{C}_j)$ (rendered features) through the uncertainty predictor to obtain a per-pixel uncertainty mask $M_j$ [S2]. The predictor is optimized to maximize cosine similarity between GT and rendered DINO features in static regions [S2].
+
+5.  **Loss Computation:**
+    Compute the total loss $L$ for image $I_j$:
+    $$ L = \lambda_{dssim} \text{DSSIM}(\hat{C}_j, C_j) + (1 - \lambda_{dssim}) \| \hat{C}_j - C_j \|_1 $$
+    where $C_j$ is the ground truth image, and the loss is masked by $M_j$ to ignore occluders [S2]. $\lambda_{dssim}$ is a weighting factor [S2].
+
+6.  **Optimization:**
+    Update 3D Gaussian parameters ($\mu_i, \Sigma_i, \alpha_i, c_i, e_i$), per-image embeddings $l_j$, MLP weights $\theta$, and uncertainty predictor parameters using gradient descent [S2].
+
+7.  **Baking (Optional):**
+    After training, the appearance embeddings can be "baked" into the standard 3DGS formulation. This involves computing the final color for each Gaussian by applying the learned transformation for a reference appearance or averaging, allowing for fast rendering without the MLP [S2].
+
+**Parameters:**
+*   $\lambda_{dssim}$: Weighting factor for DSSIM loss [S2].
+*   $n$: Latent embedding size, set to 24 [S4].
+*   $T$: Temperature for Binary Concrete distribution (if using SWAG variant), set to 0.1 [S4].
+
+**Edge Cases and Pitfalls:**
+*   **Irreversible Geometry Loss:** Incorrect training signals (e.g., from occluders) can lead to irreversibly removing parts of the geometry due to 3DGS's primitive growth/pruning process [S2].
+*   **Over-construction:** Failure cases include over-construction of static parts, observed as black spots on roads or fountain water [S4].
+*   **Affine Limitations:** Simple affine color transformations cannot model all appearance changes in in-the-wild scenarios; direct color prediction or more complex MLPs are required [S4].
+
+## Subtopics
+
+### [Dynamic Appearance Features Modeling](3776-dynamic-appearance-features-modeling.md)
+Addresses global embedding limitations by extracting dynamic features from reference images and allowing per-Gaussian sampling from multiple feature maps to capture local highlights/shadows.
+
+### [SWAG Variant](3777-swag-variant.md)
+Uses a Hash Grid encoding for Gaussian centers and predicts opacity variation via Binary Concrete distribution to separate static and transient Gaussians.
+
+## Operating characteristics
+*   **Time Complexity:** Training is one order of magnitude faster than previous implicit methods (NeRF-W, Ha-NeRF) [S4]. Rendering speed matches standard 3DGS (real-time) after baking [S2].
+*   **Memory Complexity:** Requires storage for per-Gaussian embeddings and per-image embeddings. The Hash Grid variant (SWAG) adds memory for the hash table ($2^{19}$ entries) [S4].
+*   **Performance:** Improves 3DGS PSNR by an average margin of 5.01 dB on Phototourism scenes and 5 dB on NeRF-OSR benchmark [S4].
+*   **Strengths:** Handles varying illumination and transient occluders; maintains real-time rendering; robust to unconstrained photo collections [S1, S2].
+*   **Limitations:** May over-construct static geometry in complex scenes; requires careful tuning of uncertainty masking [S4].
+*   **When to use:** Reconstruction of static scenes from in-the-wild photo collections with transient objects and varying lighting [S2].
+*   **When not to use:** Dynamic human avatars (use GauHuman) or mesh-aligned bodies (use SplattingAvatar) [S2].
+
+## Background
+WildGaussians was introduced to address the challenges of 3D reconstruction from unconstrained "in-the-wild" images, which often contain occlusions, transient objects, and varying illumination [S2]. Standard 3DGS struggles with these conditions due to its explicit representation and lack of shared parameters across views [S2]. The method builds on the 3DGS framework [S2] and integrates concepts from NeRFs, such as per-image embeddings, but adapts them to the explicit Gaussian representation to maintain rendering speed [S2]. It leverages robust DINO features for uncertainty modeling to handle occluders effectively [S2].
+
+## Sources
+[S1] From Volume Rendering to 3D Gaussian Splatting: Theory and Applications, https://doi.org/10.1109/sibgrapi67909.2025.11223276, fetched 2026-10-26
+[S2] WildGaussians: 3D Gaussian Splatting in the Wild, https://arxiv.org/abs/2407.08447, fetched 2026-10-26
+[S3] From Volume Rendering to 3D Gaussian Splatting, https://www.visgraf.impa.br/Data/RefBib/PS_PDF/tutorial-sib2025/tutorial-sib2025.pdf, fetched 2026-10-28 (unofficial)
+[S4] SWAG: Splatting in the Wild images with Appearance-conditioned Gaussians, https://doi.org/10.48550/arXiv.2403.10427, fetched 2026-10-29

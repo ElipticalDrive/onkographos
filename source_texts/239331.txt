@@ -1,0 +1,2496 @@
+PlayStation 5 translation layer for Windows, Linux and macOS - Wolverine: renderer threading, caches, AMPR/AJM and shader recompiler fixes by itsmemac · Pull Request #937 · KytyPS5/KytyPS5
+
+Wolverine: renderer threading, caches, AMPR/AJM and shader recompiler fixes by itsmemac · Pull Request #937 · KytyPS5/KytyPS5 · GitHub
+Skip to content
+You signed in with another tab or window. Reload to refresh your session.
+You signed out in another tab or window. Reload to refresh your session.
+You switched accounts on another tab or window. Reload to refresh your session.
+Dismiss alert
+Conversation
+itsmemac
+commented
+Sep 30, 2026
+•
+edited
+Loading
+Uh oh!
+There was an error while loading. Please reload this page.
+Copy link
+Copy Markdown
+Contributor
+Summary
+Work that gets Marvel's Wolverine (PPSA03671) running, as 54 single-topic commits so any subset can
+be cherry-picked. Each commit keeps its own author. The branch is rebased on current upstream/main
+(e51de54) and no longer depends on #780. The research diagnostics are stripped out.
+Mac: 27 commits
+Senaxx: 24 commits
+Ali Almohaya: 3 commits (integer render-target exports, DRAW_INDIRECT_MULTI draw index,
+ShaderFunctions scalar-call expansion)
+Earlier versions of this PR carried about 30 more commits (bindless, mesh culling and clip/cull
+distances, GPU-read indirect draws, the software BVH path and others). They were dropped in this
+rebase because upstream now has an equivalent or conflicting implementation. See "Not included".
+Commits, by area
+Renderer and GPU thread
+Command buffers are submitted from a queue thread and recorded on a recording thread
+New graphics pipelines are compiled on worker threads
+Images and buffers are released between guest command buffers only after the GPU is done with
+them, which fixes sampling of freed memory after a guest unmap
+A dispatch marks only the bytes its stores can reach as GPU-written
+A scalar read that overlaps its own dispatch's write is logged once per shader pair instead of
+exiting
+The GPU and recording threads prefer the fast cores of hybrid CPUs
+Unmapped buffer descriptors and guest page 0 bind as null; uploads and unreadable image backing
+read as zero
+Integer render targets export uint/sint; R32 image atomics go through an R32Uint view
+Device loss is reported with VK_EXT_device_fault and NV checkpoints; a symbolized host stack is
+printed on fatal errors
+Texture cache: per-frame eviction budget, with write-back of GPU-written tiled images
+Buffer cache: entries age by presented frames
+Vulkan: images fall back to host memory when device memory is exhausted; GPUs that cannot report
+surface capabilities are skipped
+Video out: extra 10-bit and FP16 format policies on top of upstream's HDR table
+EOP labels published once the GPU has executed the work (opt-in)
+Shader recompiler
+IEEE float min/max, denormal flush on output modifiers, ordered LDS accesses, gather LOD, constant
+vertex fetches
+Wave64 branches, wave-size pipelines, device-clock S_MEMREALTIME, coherent loads and
+block-compressed volumes on AMD
+Scalar calls expanded before translation (ShaderFunctions)
+Native subgroup reductions for DPP scans; DPP16 leaves the destination alone for missing or
+inactive sources
+SRT reads only from committed pages; reads past num_records return zero
+The decoder gives up on the shader instead of exiting on unmodelled scalar operands; CDBG branches;
+SDWA byte destinations
+Programs the recompiler cannot translate are skipped instead of exiting
+NGG shaders with fewer than 3 GS/ES input VGPRs are accepted
+Dominators are solved in reverse postorder (structurizing 2k-block shaders drops from 21-84 s to
+0.8 s)
+IMAGE_SAMPLE*_CL applies the LOD clamp: MinLod where supported, otherwise a raised explicit LOD
+Kernel, memory, libraries
+Memory tracker: per-region clean bitmap, lazy direct-memory commit, cached mapping and range
+lookups
+AMPR: map commands, counters, async engines, per-unit locks, cheap APR destination check
+AJM: ATRAC9 config checks, partial superframes and vibration configs; Opus mapping family 1
+AvPlayer file-replacement callbacks, savedata Convert, NpEntitlementAccess, sceAcmBatchJobPriority,
+fsync, equeue timeouts, timed condition waits
+Not included
+Dropped from earlier versions of this PR, because upstream has overlapping infrastructure or the
+change depends on code that was removed:
+Bindless textures and samplers (--bindless)
+Mesh primitive culling, clip/cull distances, subgroup passes
+GPU-read DrawIndirect and GPU-side indirect thread counts
+Software IMAGE_BVH_INTERSECT_RAY, 64-bit compare/arith opcodes
+FLAT shared/private apertures, GPU-selected buffer descriptors through BDA, bound-length storage
+buffers
+Dispatch rollback on unmapped BDA pages and the other opt-in env switches
+(KYTY_IGNORE_WRITTEN_OVERLAP and similar)
+Testing
+Builds with MSVC 2022 / clang-cl on Windows. The emulator and test targets build with no errors.
+shader_cfg and resource_tracking pass.
+AI was used in development
+coderabbitai
+Bot
+commented
+Sep 30, 2026
+•
+edited
+Loading
+Uh oh!
+There was an error while loading. Please reload this page.
+Copy link
+Copy Markdown
+📝 Walkthrough
+📝 Walkthrough
+📝 Walkthrough
+📝 Walkthrough
+Walkthrough
+The pull request adds GPU bindless image and sampler handling, indirect draw and dispatch paths, GPU memory-fault recovery, and device-loss diagnostics. It expands shader decoding, translation, resource tracking, and SPIR-V emission, including multi-pass mesh work and shader-function expansion. It also changes kernel and library services for file flushing, save-data conversion, audio queue tracking, and command-buffer submission. Tests cover the updated graphics, shader, audio, and Windows x64 load-emulation paths.
+Suggested reviewers: nmzik
+Priority: ➖ Normal
+Merge Risk: 🟠 High · up to 41c7b
+This change touches core rendering and shader compilation, and several default-on paths can cause incorrect rendering, stale data, or crashes. Some of these paths also affect titles other than the target game. Fix the listed issues before merging.
+Security Architecture Review
+Security architecture risk: 🟡 Moderate · up to 3fa2b
+The change expands how guest workloads access memory and publish completion state. Address and mapping checks constrain the inspected read path, but ownership and recovery guarantees for delayed writes remain unresolved. No privilege escalation or isolation escape was established.
+Retained concerns
+Medium · security · inferred: Optional deferred label publication adds a completion callback that queues a later GPU-thread memcpy to a captured raw address. Sequence matching protects pending-entry cleanup, not destination mapping identity. Unmapping waits for priority callbacks, but the inspected code does not establish that the second queued write is completed or canceled before mapping reuse. Rejected enqueue also has no local pending-entry cleanup. This leaves an unresolved ownership and terminal-state contract that could allow stale writes or process faults; exploitation was not established.
+Security review details
+Security Blast Radius
+inferred — The inspected paths affect guest memory and execution state within the emulator process. The read path is constrained by current guest mappings and backing-allocation bounds. No cross-tenant, cross-service or elevated-privilege attack path was established; the complete independently attackable scope remains unverified.
+Security Findings and Attack Paths
+inferred — A mapping-reuse or cancellation interleaving could become relevant to deferred label writes because the later memcpy retains only a raw destination address. Scheduler tick ordering and unmap draining are countercontrols, so this remains an unresolved lifecycle concern rather than a verified arbitrary-write vulnerability.
+Trust Boundaries and Controls
+observed — Backing transfers validate every mapping segment and backing offset before copying, holding the backing mapping mutex through validation and transfer. Unsupported instructions, mismatched fault addresses and failed reads reject emulation instead of completing the load.
+inferred — Whether default clean-read authorization fully covers texture writers and guest protection policy remains unresolved. The inspected predicate checks buffer-modified and downloading ranges, while direct backing transfer does not consult mapping protection mode. Neither observation alone establishes a newly introduced bypass.
+Resilience and Maintainability Implications
+observed — Guest GPU shutdown stops accepting external commands and drains accepted work before joining. Scheduler shutdown drains callbacks separately. Deferred label enqueue rejection is ignored locally, leaving its pending-entry cleanup dependent on successful execution rather than an explicit cancellation transition.
+Hardening Proposals
+proposed — Bind deferred destination writes to a mapping lifetime or generation, and define completion and cancellation across both callback and GPU-command queues, including unmap, reuse and shutdown.
+Pre-merge checks | 4 | 1
+❌ Failed checks (1 inconclusive)
+Check name
+Status
+Explanation
+Resolution
+Docstring Coverage
+Docstring coverage is 10.21% which is insufficient. The required threshold is 80.00%. Docstring coverage is scoped to functions touched by this diff. Analyzed 529 functions across 78 files. (71 skippe…
+Write docstrings for the functions missing them to satisfy the coverage threshold.
+✅ Passed checks (4 passed)
+Check name
+Status
+Explanation
+Linked Issues check
+Check skipped because no linked issues were found for this pull request.
+Out of Scope Changes check
+Check skipped because no linked issues were found for this pull request.
+Title check
+The title clearly summarizes the main areas changed: renderer threading, caches, AMPR/AJM support, and shader recompiler fixes.
+Description check
+The description is detailed and directly related to the changeset, including renderer, shader recompiler, kernel, memory, AMPR, AJM, and testing changes.
+Full details: Docstring Coverage
+Explanation
+Docstring coverage is 10.21% which is insufficient. The required threshold is 80.00%. Docstring coverage is scoped to functions touched by this diff. Analyzed 529 functions across 78 files. (71 skipped: 7 unsupported, 64 over the file limit.)
+Thanks for using CodeRabbit! It's free for OSS, and your support helps us grow. If you like it, consider giving us a shout-out.
+❤️ Share
+X
+Mastodon
+Reddit
+LinkedIn
+Comment @coderabbitai help to get the list of available commands.
+coderabbitai
+Bot
+reviewed
+Sep 30, 2026
+View reviewed changes
+coderabbitai
+Bot
+left a comment
+Copy link
+Copy Markdown
+There was a problem hiding this comment.
+Choose a reason for hiding this comment
+The reason will be displayed to describe this comment to others. Learn more.
+Actionable comments posted: 18
+🧹 Nitpick comments (1)
+tests/ResourceTrackingTests.cpp (1)
+2489-2541: 📐 Maintainability & Code Quality | 🔵 Trivial | ⚡ Quick win
+Add a test that proves a valid sampler keeps its own words in nonfatal mode.
+TestDefaultSamplerKeepsDataReads checks only that an invalid heap sampler gets the default sampler. No test runs a valid sampler under TranslationNonFatalScope. Such a test would catch the PlanDefaultSamplers validation mismatch described in ResourceTracking.cpp.
+A good candidate is the SampleAdjust fixture from TestSampleAdjustSamplerScratch. Assert that its dword 3 is not replaced by the default sampler.
+ℹ️ Review info
+⚙️ Run configuration
+Configuration used: Repository: KytyPS5/KytyPS5/.coderabbit.yaml
+Review profile: CHILL
+Plan: Advanced
+Run ID: 4888c092-8472-4d20-95a8-efdb21888a8e
+📥 Commits
+Reviewing files that changed from the base of the PR and between 05057c9 and d6ec3a4.
+📒 Files selected for processing (144)
+3rdparty/stb/stb_image_write.h
+CMakeLists.txt
+src/common/CMakeLists.txt
+src/common/assert.cpp
+src/common/assert.h
+src/common/emulatorConfig.cpp
+src/common/emulatorConfig.h
+src/graphics/guest_gpu/command_processor/commandProcessor.h
+src/graphics/guest_gpu/command_processor/pm4Handlers.cpp
+src/graphics/guest_gpu/graphicsRun.cpp
+src/graphics/guest_gpu/graphicsRun.h
+src/graphics/host_gpu/diagnosticCheckpoints.cpp
+src/graphics/host_gpu/graphicContext.h
+src/graphics/host_gpu/memoryTracker.cpp
+src/graphics/host_gpu/memoryTracker.h
+src/graphics/host_gpu/pageManager.cpp
+src/graphics/host_gpu/pageManager.h
+src/graphics/host_gpu/regionManager.h
+src/graphics/host_gpu/renderer/cache/bufferCache.cpp
+src/graphics/host_gpu/renderer/cache/bufferCache.h
+src/graphics/host_gpu/renderer/cache/faultManager.cpp
+src/graphics/host_gpu/renderer/cache/faultManager.h
+src/graphics/host_gpu/renderer/cache/streamBuffer.h
+src/graphics/host_gpu/renderer/cache/textureCache.cpp
+src/graphics/host_gpu/renderer/cache/textureCache.h
+src/graphics/host_gpu/renderer/commandScheduler.cpp
+src/graphics/host_gpu/renderer/context.cpp
+src/graphics/host_gpu/renderer/image/image.h
+src/graphics/host_gpu/renderer/image/imageInfo.h
+src/graphics/host_gpu/renderer/image/imageView.h
+src/graphics/host_gpu/renderer/indirectDispatch.cpp
+src/graphics/host_gpu/renderer/indirectDispatch.h
+src/graphics/host_gpu/renderer/masterSemaphore.cpp
+src/graphics/host_gpu/renderer/pipeline/bindlessTable.cpp
+src/graphics/host_gpu/renderer/pipeline/bindlessTable.h
+src/graphics/host_gpu/renderer/pipeline/descriptors.cpp
+src/graphics/host_gpu/renderer/pipeline/descriptors.h
+src/graphics/host_gpu/renderer/pipeline/pipelineCache.cpp
+src/graphics/host_gpu/renderer/pipeline/pipelineCache.h
+src/graphics/host_gpu/renderer/pipeline/shaders.cpp
+src/graphics/host_gpu/renderer/render.h
+src/graphics/host_gpu/renderer/renderCompute.cpp
+src/graphics/host_gpu/renderer/renderContext.cpp
+src/graphics/host_gpu/renderer/renderContext.h
+src/graphics/host_gpu/renderer/renderDraw.cpp
+src/graphics/host_gpu/shaders/dispatch_indirect_groups.comp
+src/graphics/host_gpu/vma.cpp
+src/graphics/presentation/videoOut.cpp
+src/graphics/presentation/videoOut.h
+src/graphics/presentation/window/swapchain.cpp
+src/graphics/presentation/window/vulkanWindow.cpp
+src/graphics/shader/recompiler/ShaderRecompiler.cpp
+src/graphics/shader/recompiler/ShaderRecompiler.h
+src/graphics/shader/recompiler/Tessellation.cpp
+src/graphics/shader/recompiler/Tessellation.h
+src/graphics/shader/recompiler/backend/spirv/SpirvEmitter.cpp
+src/graphics/shader/recompiler/backend/spirv/SpirvEmitter.h
+src/graphics/shader/recompiler/backend/spirv/spirvEmitterAnalysis.cpp
+src/graphics/shader/recompiler/backend/spirv/spirvEmitterFlow.cpp
+src/graphics/shader/recompiler/backend/spirv/spirvEmitterHelpers.cpp
+src/graphics/shader/recompiler/backend/spirv/spirvEmitterImage.cpp
+src/graphics/shader/recompiler/backend/spirv/spirvEmitterInstructions.h
+src/graphics/shader/recompiler/backend/spirv/spirvEmitterInternal.h
+src/graphics/shader/recompiler/backend/spirv/spirvEmitterMemory.cpp
+src/graphics/shader/recompiler/backend/spirv/spirvEmitterMemoryHelpers.cpp
+src/graphics/shader/recompiler/backend/spirv/spirvEmitterMesh.cpp
+src/graphics/shader/recompiler/backend/spirv/spirvEmitterModule.cpp
+src/graphics/shader/recompiler/backend/spirv/spirvEmitterProgram.cpp
+src/graphics/shader/recompiler/frontend/cfg/ShaderCFG.cpp
+src/graphics/shader/recompiler/frontend/decode/ImageOps.cpp
+src/graphics/shader/recompiler/frontend/decode/MemoryOps.cpp
+src/graphics/shader/recompiler/frontend/decode/ScalarAluOps.cpp
+src/graphics/shader/recompiler/frontend/decode/ShaderDecoder.cpp
+src/graphics/shader/recompiler/frontend/decode/ShaderDecoder.h
+src/graphics/shader/recompiler/frontend/decode/ShaderFunctions.cpp
+src/graphics/shader/recompiler/frontend/decode/ShaderFunctions.h
+src/graphics/shader/recompiler/frontend/decode/VectorAluOps.cpp
+src/graphics/shader/recompiler/frontend/translate/Bvh.cpp
+src/graphics/shader/recompiler/frontend/translate/Compare.cpp
+src/graphics/shader/recompiler/frontend/translate/Control.cpp
+src/graphics/shader/recompiler/frontend/translate/Dispatch.cpp
+src/graphics/shader/recompiler/frontend/translate/Memory.cpp
+src/graphics/shader/recompiler/frontend/translate/Scalar.cpp
+src/graphics/shader/recompiler/frontend/translate/Translate.cpp
+src/graphics/shader/recompiler/frontend/translate/Translator.h
+src/graphics/shader/recompiler/frontend/translate/Vector.cpp
+src/graphics/shader/recompiler/ir/BindlessBindings.h
+src/graphics/shader/recompiler/ir/Program.cpp
+src/graphics/shader/recompiler/ir/ResourceSnapshot.h
+src/graphics/shader/recompiler/ir/ShaderIR.h
+src/graphics/shader/recompiler/ir/opcodes/ValueOpcodes.cpp
+src/graphics/shader/recompiler/ir/opcodes/ValueOpcodes.inc
+src/graphics/shader/recompiler/ir/passes/BindingLayout.cpp
+src/graphics/shader/recompiler/ir/passes/ConstantPropagation.cpp
+src/graphics/shader/recompiler/ir/passes/ConstantPropagation.h
+src/graphics/shader/recompiler/ir/passes/DeadCodeElimination.cpp
+src/graphics/shader/recompiler/ir/passes/DeadCodeElimination.h
+src/graphics/shader/recompiler/ir/passes/LocalAddressStores.cpp
+src/graphics/shader/recompiler/ir/passes/ReadLaneElimination.cpp
+src/graphics/shader/recompiler/ir/passes/ReadLaneElimination.h
+src/graphics/shader/recompiler/ir/passes/ResourceMaterialization.cpp
+src/graphics/shader/recompiler/ir/passes/ResourceMaterialization.h
+src/graphics/shader/recompiler/ir/passes/ResourceTracking.cpp
+src/graphics/shader/recompiler/ir/passes/ResourceTracking.h
+src/graphics/shader/recompiler/ir/passes/ShaderInfoCollection.cpp
+src/graphics/shader/recompiler/ir/passes/SrtWalker.cpp
+src/graphics/shader/recompiler/ir/passes/SrtWalker.h
+src/graphics/shader/shader.cpp
+src/graphics/shader/shader.h
+src/graphics/shader/shaderCompiler.h
+src/kernel/eventQueue.cpp
+src/kernel/fileSystem.cpp
+src/kernel/fileSystem.h
+src/kernel/memory.cpp
+src/kernel/memory.h
+src/launcher/forms/configuration_edit_dialog.ui
+src/launcher/include/configuration.h
+src/launcher/src/configurationEditDialog.cpp
+src/launcher/src/mainDialog.cpp
+src/libs/acm.cpp
+src/libs/acm.h
+src/libs/agc.cpp
+src/libs/ajm.cpp
+src/libs/ajm/atrac9_decoder.h
+src/libs/ajm/opus_decoder.h
+src/libs/dialog.cpp
+src/libs/libAmpr.cpp
+src/libs/libAudio.cpp
+src/libs/libKernel.cpp
+src/libs/libNet.cpp
+src/libs/libPngEnc.cpp
+src/libs/libSaveData.cpp
+src/libs/libVideoOut.cpp
+src/libs/libs.cpp
+src/loader/runtimeLinker.cpp
+src/loader/x64InstructionEmulator.cpp
+src/loader/x64InstructionEmulator.h
+src/main.cpp
+tests/ResourceTrackingTests.cpp
+tests/ScalarProvenanceTests.cpp
+tests/ShaderRayTracingTests.inc
+tests/ShaderRecompilerComputeTests.cpp
+tests/X64LoadEmulationTests.cpp
+tests/shaderCfgTests.cpp
+Included review availability: This review used your included allowance. Your plan provides up to 8 included reviews per hour; 7 remain after this review.
+Comment thread
+src/graphics/guest_gpu/graphicsRun.cpp
+Outdated
+Comment on lines
++1072
+to
++1090
+// Research: the GPU reads its own arguments. A CPU read of arguments an earlier GPU pass
+// wrote faults on the tracked page and drains the whole queue, once per draw. 8-bit indices
+// (expanded on the host) and an unknown index buffer size keep the CPU read.
+if (!indexed) {
+DrawIndexAuto({.vertex_count = 1,
+.instance_count = 1,
+.offset_source = DrawOffsetSource::IndirectArgs,
+.gpu_args = reinterpret_cast<uint64_t>(args_addr)});
+return;
+}
+if (m_index_buffer_size != 0 && (m_index_type_and_size == 0 || m_index_type_and_size == 1)) {
+DrawIndex({.index_count = m_index_buffer_size,
+.index_addr = reinterpret_cast<const void*>(m_index_base_addr),
+.instance_count = 1,
+.offset_source = DrawOffsetSource::IndirectArgs,
+.gpu_args = reinterpret_cast<uint64_t>(args_addr)});
+return;
+}
+coderabbitai
+Bot
+Sep 30, 2026
+Copy link
+Copy Markdown
+There was a problem hiding this comment.
+Choose a reason for hiding this comment
+The reason will be displayed to describe this comment to others. Learn more.
+🎯 Functional Correctness | 🟡 Minor | ⚡ Quick win
+🔎 Supported by static analysis
+🏁 Script executed:
+```
+#!/bin/bash
+rg -nP -C3 '\bm_num_instances\b' src/graphics/guest_gpu
+```
+Repository: KytyPS5/KytyPS5
+Length of output: 4811
+🏁 Script executed:
+```
+#!/bin/bash
+printf '%s\n' '--- graphicsRun.cpp 920-1160 ---'
+sed -n '920,1160p' src/graphics/guest_gpu/graphicsRun.cpp
+printf '%s\n' '--- graphicsRun.cpp 1160-1320 ---'
+sed -n '1160,1320p' src/graphics/guest_gpu/graphicsRun.cpp
+printf '%s\n' '--- commandProcessor.h 155-185 ---'
+sed -n '155,185p' src/graphics/guest_gpu/command_processor/commandProcessor.h
+printf '%s\n' '--- diff base..head for relevant file ---'
+git diff --unified=35 05057c9441dbf3972d49f9143b90213a43a01a00 d6ec3a42ed19d0f16bb3e184ca57e20cce8d5176 -- src/graphics/guest_gpu/graphicsRun.cpp src/graphics/guest_gpu/command_processor/commandProcessor.h
+```
+Repository: KytyPS5/KytyPS5
+Length of output: 42875
+Preserve the persistent instance count for GPU indirect draws.
+The GPU branches pass instance_count = 1 and return without updating m_num_instances. A later DrawIndex or DrawIndexAuto with instance_count == 0 can therefore use the count from before the indirect draw. Preserve the state update, or retain the CPU path when the GPU path cannot provide it. Remove the unreachable non-indexed CPU branch.
+Comment thread
+src/graphics/guest_gpu/graphicsRun.cpp
+Comment on lines
++1741
+to
++1750
+void CommandProcessor::PublishLabelAtCompletion(void* dst, uint64_t value, uint32_t bytes,
+bool clock) {
+auto& renderer = m_renderer;
+GetScheduler().DeferPriorityOperation([&renderer, dst, value, bytes, clock] {
+const uint64_t data = clock ? Sync::ReadReferenceClock() : value;
+// The backing write cannot fault into the caches from this thread.
+LibKernel::Memory::WriteBacking(reinterpret_cast<uint64_t>(dst), &data, bytes);
+renderer.GetGpu().Wake();
+});
+}
+coderabbitai
+Bot
+Sep 30, 2026
+Copy link
+Copy Markdown
+There was a problem hiding this comment.
+Choose a reason for hiding this comment
+The reason will be displayed to describe this comment to others. Learn more.
+🩺 Stability & Availability | 🟠 Major | ⚡ Quick win
+Deferred label callbacks can run after GuestGpu is destroyed.
+Two callbacks run on the scheduler priority thread and use GuestGpu:
+PublishLabelAtCompletion calls renderer.GetGpu().Wake().
+DeferLabelWrite (Lines 179-188) captures this and calls TrySendCommand.
+RenderContext::ShutdownGpu (src/graphics/host_gpu/renderer/renderContext.cpp, Lines 37-49) calls m_gpu->Shutdown() and then m_gpu.reset(). It calls m_command_scheduler.DrainPriorityOperations() only after that. ThreadRun stops with BufferWait() → Finish(), and Finish() does not wait for priority operations.
+A label callback that is queued or running when m_gpu.reset() executes has two outcomes:
+GetGpu() exits because m_gpu == nullptr.
+TrySendCommand runs on a freed GuestGpu (use-after-free).
+This happens at shutdown whenever KYTY_LABELS_AFTER_GPU or KYTY_LABELS_AT_COMPLETION is set. Drain the priority operations after the GPU thread joins and before m_gpu.reset(). TrySendCommand already returns false once m_accepting is false, so a late label write is dropped safely.
+🐛 Proposed fix (src/graphics/host_gpu/renderer/renderContext.cpp)
+```
+ void RenderContext::ShutdownGpu() {
+ 	if (m_gpu != nullptr) {
+ 		m_gpu->Shutdown();
++		// Label publications capture the GuestGpu; finish them before it is destroyed.
++		m_command_scheduler.DrainPriorityOperations();
+ 		m_gpu.reset();
+ 	}
+```
+Comment thread
+src/graphics/host_gpu/memoryTracker.h
+Outdated
+Comment on lines
++32
+to
++41
+// Calls func(address, bytes) for each part of the range, one per tracker region, that may
+// hold CPU-dirty pages (lock-free summaries: false is exact, true is conservative).
+template <typename Func>
+void ForEachMaybeCpuDirtyRegion(uint64_t vaddr, uint64_t size, Func&& func) {
+Iterate<false>(vaddr, size, [&](RegionManager* manager, uint64_t offset, uint64_t bytes) {
+if (manager->MaybeModified<DirtySource::Cpu>()) {
+func(manager->GetCpuAddr() + offset, bytes);
+}
+});
+}
+coderabbitai
+Bot
+Sep 30, 2026
+Copy link
+Copy Markdown
+There was a problem hiding this comment.
+Choose a reason for hiding this comment
+The reason will be displayed to describe this comment to others. Learn more.
+🗄️ Data Integrity & Integration | 🟠 Major | ⚡ Quick win
+🔎 Supported by static analysis
+🏁 Script executed:
+```
+#!/bin/bash
+rg -nP -B3 -A40 'bool\s+create_region_on_fail|Iterate\s*\(' src/graphics/host_gpu/memoryTracker.h
+```
+Repository: KytyPS5/KytyPS5
+Length of output: 1748
+🏁 Script executed:
+```
+#!/bin/bash
+set -e
+printf '%s\n' '--- memoryTracker.h ---'
+cat -n src/graphics/host_gpu/memoryTracker.h | sed -n '1,180p'
+printf '%s\n' '--- relevant symbols ---'
+rg -n -S -B5 -A20 'ForEachMaybeCpuDirtyRegion|ForEachUploadRange|SynchronizeCpuDirtyBuffersInRange|PrepareBda|BufferCache::Register|RegionManager|FindBuffer' src/graphics/host_gpu
+printf '%s\n' '--- PR diff ---'
+git diff --stat 05057c9441dbf3972d49f9143b90213a43a01a00 d6ec3a42ed19d0f16bb3e184ca57e20cce8d5176 -- src/graphics/host_gpu
+git diff --unified=35 05057c9441dbf3972d49f9143b90213a43a01a00 d6ec3a42ed19d0f16bb3e184ca57e20cce8d5176 -- src/graphics/host_gpu/memoryTracker.h src/graphics/host_gpu/memoryTracker.cpp src/graphics/host_gpu/bufferCache.cpp src/graphics/host_gpu/bufferCache.h | sed -n '1,1000p'
+```
+Repository: KytyPS5/KytyPS5
+Length of output: 42296
+🏁 Script executed:
+```
+#!/bin/bash
+set -e
+printf '%s\n' '--- regionManager.h ---'
+cat -n src/graphics/host_gpu/regionManager.h | sed -n '1,260p'
+printf '%s\n' '--- buffer cache synchronization and registration ---'
+rg -n -S -B12 -A45 'Register\(|SynchronizeCpuDirtyBuffersInRange|SynchronizeBuffersInRange|ForEachMaybeCpuDirtyRegion|ForEachUploadRange|PrepareBda' src/graphics/host_gpu/renderer/cache/bufferCache.cpp src/graphics/host_gpu/renderer/cache/bufferCache.h src/graphics/host_gpu/renderer/context.cpp
+printf '%s\n' '--- context PrepareBda callers ---'
+rg -n -S -B15 -A35 'PrepareBda\(' src/graphics/host_gpu/renderer src/graphics/host_gpu/graphicContext.h
+```
+Repository: KytyPS5/KytyPS5
+Length of output: 42040
+🏁 Script executed:
+```
+#!/bin/bash
+set -e
+rg -n -S -B12 -A55 'SynchronizeCpuDirtyBuffersInRange|SynchronizeBuffersInRange|FindBuffer\(' src/graphics/host_gpu/renderer/cache/bufferCache.cpp
+```
+Repository: KytyPS5/KytyPS5
+Length of output: 12256
+Create missing tracker regions in ForEachMaybeCpuDirtyRegion.
+When ForEachMaybeCpuDirtyRegion encounters an uncreated region, it skips that region. BufferCache::Register does not create a tracker region, while a new RegionManager starts with all CPU pages dirty. Therefore, PrepareBda can miss a newly registered buffer and mark the CPU-dirty epoch as synchronized without uploading its contents.
+Use Iterate<true> so the helper creates missing regions and processes their initial CPU-dirty state.
+🐛 Suggested fix
+```
+-		Iterate<false>(vaddr, size, [&](RegionManager* manager, uint64_t offset, uint64_t bytes) {
++		Iterate<true>(vaddr, size, [&](RegionManager* manager, uint64_t offset, uint64_t bytes) {
+```
+📝 Committable suggestion
+‼️ IMPORTANT
+Carefully review the code before committing. Ensure that it accurately replaces the highlighted code, contains no missing lines, and has no issues with indentation. Thoroughly test & benchmark the code to ensure it meets the requirements.
+Suggested change
+// Calls func(address, bytes) for each part of the range, one per tracker region, that may
+// hold CPU-dirty pages (lock-free summaries: false is exact, true is conservative).
+template <typename Func>
+void ForEachMaybeCpuDirtyRegion(uint64_t vaddr, uint64_t size, Func&& func) {
+Iterate<false>(vaddr, size, [&](RegionManager* manager, uint64_t offset, uint64_t bytes) {
+if (manager->MaybeModified<DirtySource::Cpu>()) {
+func(manager->GetCpuAddr() + offset, bytes);
+}
+});
+}
+// Calls func(address, bytes) for each part of the range, one per tracker region, that may
+// hold CPU-dirty pages (lock-free summaries: false is exact, true is conservative).
+template <typename Func>
+void ForEachMaybeCpuDirtyRegion(uint64_t vaddr, uint64_t size, Func&& func) {
+Iterate<true>(vaddr, size, [&](RegionManager* manager, uint64_t offset, uint64_t bytes) {
+if (manager->MaybeModified<DirtySource::Cpu>()) {
+func(manager->GetCpuAddr() + offset, bytes);
+}
+});
+}
+Comment thread
+src/graphics/host_gpu/pageManager.cpp
+Outdated
+Comment on lines
++293
+to
++300
+bool PageManager::IsReadWatched(uint64_t vaddr) const noexcept {
+const auto* region = m_impl->FindRegion(vaddr);
+if (region == nullptr) {
+return false;
+}
+const auto index = static_cast<size_t>((vaddr % REGION_SIZE) / PAGE_SIZE);
+return region->pages[index].access_watchers != 0;
+}
+coderabbitai
+Bot
+Sep 30, 2026
+Copy link
+Copy Markdown
+There was a problem hiding this comment.
+Choose a reason for hiding this comment
+The reason will be displayed to describe this comment to others. Learn more.
+🩺 Stability & Availability | 🟡 Minor | ⚡ Quick win
+Read access_watchers atomically; the unlocked read is a data race.
+CanServeCleanRead is documented as callable from any thread. It calls IsReadWatched, which reads the access_watchers bit-field without region->lock.
+UpdateRegionWatchers changes the same byte under SpinGuard on another thread. The byte also holds write_watchers. The header comment calls the result "a hint", but a concurrent non-atomic read and write of the same memory location is undefined behavior in C++. It is not only a stale value.
+Read the whole PageState byte with std::atomic_ref<uint8_t> (relaxed) and extract the bit. Make every writer use the same atomic view, or do all writes under the lock while readers use atomic_ref. Do not take the spin lock here, because the function can run inside a fault handler.
+Based on learnings: "when a non-atomic type ... is written by one thread and read by another without a mutex, atomic wrapper, or other explicit synchronization, this is a genuine data race (undefined behavior)".
+Source: Learnings
+Comment thread
+src/graphics/host_gpu/renderer/pipeline/bindlessTable.cpp
+Outdated
+Comment on lines
++585
+to
++601
+void BindlessTable::OnImageUnregistered(ImageId id) {
+const auto found = m_image_refs.find(ImageKey(id));
+if (found == m_image_refs.end()) {
+return;
+}
+for (const auto& [heap, key]: found->second) {
+if (heap->slots[key] != 0) {
+WriteSlot(heap->binding, heap->slots[key], m_placeholder_views[heap->binding],
+vk::ImageLayout::eShaderReadOnlyOptimal);
+}
+heap->slots[key] = 0;
+heap->settled[key] = 0;
+SetTranslation(*heap, key, ShaderRecompiler::IR::BindlessPending);
+std::erase(heap->resolved, id);
+}
+m_image_refs.erase(found);
+}
+coderabbitai
+Bot
+Sep 30, 2026
+Copy link
+Copy Markdown
+There was a problem hiding this comment.
+Choose a reason for hiding this comment
+The reason will be displayed to describe this comment to others. Learn more.
+🩺 Stability & Availability | 🟠 Major | 🏗️ Heavy lift
+🔎 Supported by static analysis
+🏁 Script executed:
+```
+#!/bin/bash
+rg -nP -C6 '\bOnImageUnregistered\s*\(' src/graphics
+rg -nP -C4 'bindless_pinned' src/graphics
+```
+Repository: KytyPS5/KytyPS5
+Length of output: 7367
+🏁 Script executed:
+```
+#!/bin/bash
+set -eu
+printf '%s\n' '--- bindless diff ---'
+git diff --unified=30 05057c9441dbf3972d49f9143b90213a43a01a00 d6ec3a42ed19d0f16bb3e184ca57e20cce8d5176 -- src/graphics/host_gpu/renderer/pipeline/bindlessTable.cpp src/graphics/host_gpu/renderer/pipeline/bindlessTable.h
+printf '%s\n' '--- unregister lifecycle ---'
+sed -n '210,280p' src/graphics/host_gpu/renderer/cache/textureCache.cpp
+rg -n -P -C8 'Unregister|unregister|on_bindless_unregister|bindless_pinned|m_slot_images\.erase|slot_images' src/graphics/host_gpu/renderer/cache/textureCache.cpp
+printf '%s\n' '--- bindless declarations and flags ---'
+sed -n '100,175p' src/graphics/host_gpu/renderer/pipeline/bindlessTable.h
+rg -n -P -C10 'eUpdateAfterBind|eUpdateUnusedWhilePending|eUpdateAfterBind' src/graphics/host_gpu/renderer/pipeline/bindlessTable.cpp src/graphics/host_gpu/renderer/pipeline/bindlessTable.h
+printf '%s\n' '--- scheduler APIs and related deferred cleanup ---'
+rg -n -P -C8 'SchedulerTick|scheduler tick|CurrentTick|last.*tick|retir|pending.*release|defer|SafeTo|WaitFor|IsFree|IsReady' src/graphics/host_gpu/renderer | head -n 500
+printf '%s\n' '--- image destruction references ---'
+rg -n -P -C8 'vk::ImageView|image_view|view.*destroy|destroy.*view|m_slot_images|UnregisterImage|RegisterImage' src/graphics/host_gpu/renderer/cache src/graphics/host_gpu/renderer/image src/graphics/host_gpu/renderer | head -n 500
+```
+Repository: KytyPS5/KytyPS5
+Length of output: 42932
+🤖 get_repo_knowledge executed:
+get_repo_knowledge KytyPS5/KytyPS5 /tmp/coderabbit-repo-knowledge/kytyps5-kytyps5-b6cddd0b/architecture
+Length of output: 42532
+Defer bindless slot retirement until pending work completes.
+TextureCache::UnregisterImage calls OnImageUnregistered immediately. That function updates the descriptor and translation for each referenced slot. A submitted draw may still use the slot. eUpdateUnusedWhilePending does not permit updates to descriptors used by pending work.
+Defer the complete slot retirement, including the placeholder descriptor write, translation update, and state cleanup, until the scheduler confirms that the last submission using the slot has retired. DeleteImage already defers image destruction while the scheduler is active, but that does not make the descriptor update safe.
+Comment thread
+src/graphics/shader/recompiler/ir/passes/ResourceTracking.cpp
+Outdated
+Comment on lines
++2456
+to
++2464
+DescriptorSource descriptor;
+descriptor.dword_count = 4u;
+for (uint32_t dword = 0; dword < 4u; dword++) {
+descriptor.dwords[dword] = LowerDescriptorPhi(sampler->Arg(dword));
+}
+uint32_t bad_dword = 0;
+if (ValidateSource(descriptor, bad_dword)) {
+continue;
+}
+coderabbitai
+Bot
+Sep 30, 2026
+Copy link
+Copy Markdown
+There was a problem hiding this comment.
+Choose a reason for hiding this comment
+The reason will be displayed to describe this comment to others. Learn more.
+🎯 Functional Correctness | 🟠 Major | ⚡ Quick win
+Use MakeSource in PlanDefaultSamplers, or valid samplers get replaced by the default sampler.
+PlanDefaultSamplers decides whether a sampler is valid by calling LowerDescriptorPhi on each raw dword. Collect and PlanBindlessSamplers use MakeSource, which also does three things this check skips:
+It resolves register sources through NativeDescriptorSource.
+It applies CanonicalizeSampleAdjustDword3 when ImageSampleFlagAdjust is set.
+It sets dword 3 to zero when no clamp axis selects border mode.
+Without these steps, some samplers fail ValidateSource here even though GetHandle would accept them. For example, a SampleAdjust sampler whose dword 3 carries lane-dependent reserved scratch bits fails this check. TestSampleAdjustSamplerScratch covers that shape.
+In nonfatal mode, PlanDefaultSamplers overwrites such a sampler with the fixed sampler and marks its reads planning-only. The game's filtering and addressing are lost, and nothing reports a failure.
+Build the descriptor the same way PlanBindlessSamplers does.
+Proposed fix
+```
+-				DescriptorSource descriptor;
+-				descriptor.dword_count = 4u;
+-				for (uint32_t dword = 0; dword < 4u; dword++) {
+-					descriptor.dwords[dword] = LowerDescriptorPhi(sampler->Arg(dword));
+-				}
++				const auto       flags  = inst.Flags<MemoryFlags>();
++				const auto&      memory = m_program.memory_info[flags.index];
++				DescriptorSource descriptor;
++				MakeSource(*sampler, 4u, true,
++				           (memory.image_sample_flags & Decoder::ImageSampleFlagAdjust) != 0,
++				           memory.sampler * 4u, descriptor, flags.pc);
++				if (m_failed) {
++					return;
++				}
+```
+Comment thread
+src/kernel/fileSystem.cpp
+LOGF_COLOR(flushed ? Log::Color::Green : Log::Color::Red, "\tFsync: %s, %s\n",
+Common::PathToString(file->real_name).c_str(), flushed ? "[ok]" : "[flush failed]");
+return OK;
+coderabbitai
+Bot
+Sep 30, 2026
+Copy link
+Copy Markdown
+There was a problem hiding this comment.
+Choose a reason for hiding this comment
+The reason will be displayed to describe this comment to others. Learn more.
+🗄️ Data Integrity & Integration | 🟠 Major | ⚡ Quick win
+Return an error when the flush fails.
+When file->f.Flush() returns false, KernelFsync still returns OK. The new POSIX wrapper also receives success. This hides a failed synchronization from guest code that relies on fsync before treating a save as durable. FreeBSD specifies an error return when synchronization fails. (man.freebsd.org)
+Return KERNEL_ERROR_EIO for a failed flush.
+Proposed fix
+```
+-	return OK;
++	return flushed ? OK : KERNEL_ERROR_EIO;
+```
+📝 Committable suggestion
+‼️ IMPORTANT
+Carefully review the code before committing. Ensure that it accurately replaces the highlighted code, contains no missing lines, and has no issues with indentation. Thoroughly test & benchmark the code to ensure it meets the requirements.
+Suggested change
+return OK;
+return flushed ? OK : KERNEL_ERROR_EIO;
+Comment thread
+src/libs/libPngEnc.cpp
+Outdated
+Comment on lines
++227
+to
++229
+if (width == 0 || height == 0 || width > ctx->max_image_width || height > 0x7fffffffu / min_pitch ||
+param->png_mem_size == 0 || pitch < min_pitch ||
+static_cast<uint64_t>(pitch) * (height - 1u) + min_pitch > param->image_mem_size) {
+coderabbitai
+Bot
+Sep 30, 2026
+Copy link
+Copy Markdown
+There was a problem hiding this comment.
+Choose a reason for hiding this comment
+The reason will be displayed to describe this comment to others. Learn more.
+🎯 Functional Correctness | 🟡 Minor | ⚡ Quick win
+Include the PNG filter byte in the height bound.
+The guard at Line 227 checks height > 0x7fffffff / min_pitch, so min_pitch * height stays within INT_MAX. stbi_write_png_to_mem needs more space than that. It computes (x*n+1) * y in int arithmetic at Line 1144 of 3rdparty/stb/stb_image_write.h. It computes the same product again as y*(x*n+1) for stbi_zlib_compress at Line 1176. Each row has one extra filter byte.
+Take RGBA input with width = 1 and height = 0x1fffffff. The guard accepts these values. The required image_mem_size is about 2 GiB, and a uint32_t can hold that. stb then computes 5 * 0x1fffffff, which is greater than INT_MAX. Signed overflow is undefined behavior. On common targets, the result wraps to a negative value, and malloc fails. The encode returns PNG_ENC_ERROR_FATAL, but the code still relies on undefined behavior. The guest controls image_width and image_height.
+Bound height by the stb row size that includes the filter byte:
+🐛 Proposed fix
+```
+-	if (width == 0 || height == 0 || width > ctx->max_image_width || height > 0x7fffffffu / min_pitch ||
++	// stb_image_write computes (row_bytes + 1) * height in int; keep it below INT_MAX
++	if (width == 0 || height == 0 || width > ctx->max_image_width || height > 0x7fffffffu / (min_pitch + 1u) ||
+ 	    param->png_mem_size == 0 || pitch < min_pitch ||
+ 	    static_cast<uint64_t>(pitch) * (height - 1u) + min_pitch > param->image_mem_size) {
+```
+📝 Committable suggestion
+‼️ IMPORTANT
+Carefully review the code before committing. Ensure that it accurately replaces the highlighted code, contains no missing lines, and has no issues with indentation. Thoroughly test & benchmark the code to ensure it meets the requirements.
+Suggested change
+if (width == 0 || height == 0 || width > ctx->max_image_width || height > 0x7fffffffu / min_pitch ||
+param->png_mem_size == 0 || pitch < min_pitch ||
+static_cast<uint64_t>(pitch) * (height - 1u) + min_pitch > param->image_mem_size) {
+// stb_image_write computes (row_bytes + 1) * height in int; keep it below INT_MAX
+if (width == 0 || height == 0 || width > ctx->max_image_width || height > 0x7fffffffu / (min_pitch + 1u) ||
+param->png_mem_size == 0 || pitch < min_pitch ||
+static_cast<uint64_t>(pitch) * (height - 1u) + min_pitch > param->image_mem_size) {
+Comment thread
+src/libs/libSaveData.cpp
+int KYTY_SYSV_ABI SaveDataConvert(const SaveDataConvertParam* convert) {
+PRINT_NAME();
+if (convert == nullptr || convert->src_dir_name == nullptr) {
+coderabbitai
+Bot
+Sep 30, 2026
+Copy link
+Copy Markdown
+There was a problem hiding this comment.
+Choose a reason for hiding this comment
+The reason will be displayed to describe this comment to others. Learn more.
+🔒 Security & Privacy | 🛡️ Detected with Advanced Tier | 🟠 Major | ⚡ Quick win
+Path Traversal
+Reachability: External
+Exploitability: Moderate
+CWE: CWE-22 — Improper Limitation of a Pathname to a Restricted Directory ('Path Traversal')
+Validate both directory names before constructing host paths.
+A guest can supply an existing source save and dst_dir_name = "../../victim". save_directory preserves the traversal components. The recursive copy can then overwrite matching files in a host directory outside _SaveData. Bounded strnlen does not enforce path containment. The filesystem copy options permit recursive copying and replacement of existing files. (eel.is)
+Use valid_path_component for the source and any explicit destination, as the mount and delete APIs already do.
+Proposed validation
+```
+-	if (convert == nullptr || convert->src_dir_name == nullptr) {
++	if (convert == nullptr || convert->src_dir_name == nullptr ||
++	    !valid_path_component(convert->src_dir_name->data) ||
++	    (convert->dst_dir_name != nullptr &&
++	     !valid_path_component(convert->dst_dir_name->data))) {
+ 		return SAVE_DATA_ERROR_PARAMETER;
+ 	}
+```
+View in Security blast radius
+Comment thread
+src/libs/libSaveData.cpp
+Comment on lines
++1234
+to
++1237
+std::filesystem::copy(from, save_directory(get_title_id(), dst_name, convert->user_id),
+std::filesystem::copy_options::recursive |
+std::filesystem::copy_options::overwrite_existing,
+ec);
+coderabbitai
+Bot
+Sep 30, 2026
+Copy link
+Copy Markdown
+There was a problem hiding this comment.
+Choose a reason for hiding this comment
+The reason will be displayed to describe this comment to others. Learn more.
+🗄️ Data Integrity & Integration | 🟠 Major | ⚡ Quick win
+Persist the destination allocation specified by dst_blocks.
+If a source save has 48 blocks and conversion requests 96 blocks, this copy retains the source sce_sys/blocks.bin. Conversion reports success, but SaveDataGetMountInfo still reports 48 blocks. In-place conversion also leaves the allocation unchanged.
+Validate the requested allocation and update the destination metadata with write_save_file. Report any metadata-write failure through the conversion event.
+nahshongraham97
+added a commit
+to nahshongraham97/KytyPS5
+that referenced
+this pull request
+Sep 30, 2026
+Merge PR KytyPS5#937 (wolverine) into main with memory commit fallbac…
+…
+3a32536
+```
+…k and non-atomic unaligned store fixes
+```
+itsmemac
+and others
+added 27 commits
+October 1, 2026 02:42
+shader: skip programs the recompiler cannot translate instead of exiting
+…
+e5aaca0
+```
+A program the recompiler cannot translate now costs its draw or dispatch
+instead of the session. Marvel's Spider-Man: Miles Morales and Astro Bot each
+have a handful of compute programs using instructions that are not implemented
+yet (MIMG 0xe6 BVH intersection, VOP2 0x12 with SDWA), and upstream exits on the
+first of them.
+
+- CompileOptions::non_fatal and TranslateResult::unsupported; a
+  TranslationNonFatalScope carries the policy into the frontend.
+- The give-up points in Dispatch, ShaderCFG, ResourceTracking and the
+  tessellation analysis and lowering record the reason, log it once and unwind
+  instead of calling EXIT. TrackResources and the tessellation entry points
+  return success.
+- The pipeline cache remembers unsupported programs and rejected tessellation
+  pairs so they are not translated again on every draw.
+- PrepareDrawRenderState skips a draw whose vertex or pixel program is missing,
+  and a tessellated draw is skipped when any of its three stages is missing;
+  DispatchDirect skips a dispatch whose program is missing.
+- A resource-materialization failure (a descriptor source not mapped or filled
+  yet) skips the draw and is logged, at most sixteen times.
+- resource_tracking_tests links common for the logging.
+```
+shader: implement S_MEMREALTIME with VK_KHR_shader_clock
+…
+e5f6f84
+```
+S_MEMREALTIME (SMEM opcode 0x25) reads a free-running 100 MHz counter; it
+decoded to a UINT64_MAX placeholder. It is now translated to a new
+ReadClockRealtime64 value opcode and emitted as
+OpReadClockKHR at device scope, read once as a uvec2 so the halves cannot tear
+and shifted right by three: a ~1 GHz device clock lands near 125 MHz without a
+64-bit divide, so guest timeouts expire slightly early rather than ten times
+early. A 56-instruction program the Spider-Man menu dispatches ~400 times a
+frame polls it and had been skipped.
+
+VK_KHR_shader_clock with shaderDeviceClock is enabled when the device offers
+it. On a device without it, a program that reads the clock is skipped like any
+other program the recompiler cannot translate.
+
+ScalarMemRealtimeCapturedPlaceholder becomes ScalarMemRealtimeReadsDeviceClock:
+the same decode checks, and the translation must read the device clock
+(OpReadClockKHR); a clock has no fixed value to read back.
+```
+gpu: skip PM4 type-0 packets
+…
+6850066
+```
+Titles leave reserved dwords in their command buffers as zeros, which decode as
+type-0 packets and were reported as an unknown opcode. They are now skipped by
+their encoded length.
+```
+render: bind buffer descriptors in guest page 0 as null
+…
+1453ea1
+```
+A buffer descriptor whose base lies in guest page 0 is a null or garbage
+descriptor; it now binds as null, as address 0 already did. The garbage
+collector skips a buffer registered at address 0 (it had died on a page-aligned
+buffer there, since the memory tracker cannot hold address 0), and the tracker's
+invalid-range exit names the range.
+```
+shader: snapshot pixel shader input semantics at registration
+…
+dc5b2f3
+```
+Pixel shader input semantics are copied into ShaderMappedData when the shader
+is registered, and ShaderGetStaticInputInfoPS reads the copy instead of reading
+through the guest pointer for every lookup.
+```
+buffer cache: age entries by presented frames and publish aged dirty …
+…
+a4c60d2
+```
+…buffers
+
+
+- Pressure is judged by the cache's own bytes. Device-wide usage also counts
+  the images spilled to host memory, which on a 6 GB card kept the collector in
+  its aggressive mode forever, recreating ~100 buffers a second.
+- An aged dirty buffer is always downloaded and dropped. Retaining it left its
+  GPU-written bytes owning the pages, and images sharing those pages went black.
+- Entries age in presented frames, not collector runs: the collector runs once
+  per guest submission, and a title can submit a hundred times a frame.
+  GraphicContext counts presented frames; the LRU clock adds one step per 512
+  collector runs so a stretch without presents still ages.
+- The cache tests present frames to age their entries, and the dirty-GC test
+  follows the new policy.
+```
+buffer cache: zero-fill guest image backing that cannot be read
+…
+50d1274
+```
+ObtainBufferForImage zero-fills an image's staging copy when its guest backing
+cannot be read yet (not mapped or not filled), instead of exiting.
+```
+texture cache: budget eviction per frame and write back GPU-written t…
+…
+4b728c6
+```
+…iled images
+
+
+The texture collector could not keep a 4K title in a 6 GB card. Measured on
+Spider-Man:
+
+- Entries age in presented frames. Counted in collector runs, one per guest
+  submission, an age of 8 evicted textures inside the frame that used them, to
+  recreate them the next: 11 000 image creations a second at the title menu.
+  An image used in the frame being recorded is never a candidate. Title menu:
+  1 fps to 30 fps.
+- Pressure is judged by the cache's own image bytes. Device-wide usage counts
+  the images the cache spilled to host memory and never falls.
+- Under pressure, eviction is budgeted per frame in bytes actually freed, in
+  proportion to the excess (a quarter of it over the critical mark, an eighth
+  over the pressure mark, at least 64 or 16 MiB, at most 1 024 images a
+  frame). A budget per run churned; a small fixed count was spent on images the
+  collector then skipped.
+- Under pressure a GPU-written tiled image is written back, detiled, and
+  evicted like any other, within 256 MiB of write-back a frame (an image that
+  does not fit what is left waits for the next frame, unless it is the first).
+  They were never
+  evicted before: 3 500 of every 4 000 candidates, so the cache grew to 13.5 GB
+  and the NVIDIA driver crashed in present. A streaming burst now returns to the
+  threshold within nine frames.
+- The collector test helper starts each scenario with an empty frame budget.
+```
+vulkan: place images in host memory when device memory is exhausted
+…
+e8be2c2
+```
+When the device heap refuses an image, it is created again allowing
+host-visible memory instead of failing. The Spider-Man menu needs about thirty
+such images on a 6 GB card. The first 32 spills are logged.
+```
+video out: add 10-bit and FP16 output format policies
+…
+58e0592
+```
+Adds video-out pixel format encodings titles register beside the ones already
+listed:
+
+- 0x8100000622000000, 0x8100070422000000: A2B10G10R10
+- 0x8100000600000000, 0x8100070400000000: A2R10G10B10
+- 0xc001070722000000, 0xc001070700000000: R16G16B16A16 float (the second with
+  swapped channels, as for 0xc001000600000000)
+```
+vulkan: skip GPUs that cannot report surface capabilities
+…
+d9ef706
+```
+A candidate GPU whose driver fails the surface capabilities query for the
+window (vkGetPhysicalDeviceSurfaceCapabilitiesKHR) is skipped during device
+selection instead of ending the session. The integrated GPU of a hybrid laptop
+does this intermittently (ErrorUnknown), and the discrete GPU was never
+considered.
+```
+ampr: implement map commands, counters and asynchronous engines
+…
+a29bcd9
+```
+Enough of AMPR for Spider-Man to load its world.
+
+- APR mapBegin and mapDirectBegin append real AMM map records. They are AMM map
+  commands placed in an APR buffer; as no-ops, the level load read into
+  MEM_RESERVE pages and failed with EFAULT.
+- The AMPR counter bank from the SDK's command_buffer.h: writeCounter,
+  waitOnCounter with masks and every compare operation, writeAddressFromCounter
+  and its pair form.
+- Submissions run on engine threads, one per (unit, priority ring): APR 1-6 and
+  AMM 0-2, taken from the submit call. A single in-order queue deadlocked a
+  waitOnAddress against the higher-priority writer of the value it waited for.
+- APR file reads go through a host chunk and memcpy: ReadFile into a page the
+  memory tracker protects fails silently with ERROR_NOACCESS and the data
+  landed as zeros. A committed-range check precedes the read; a short read is
+  logged instead of failing the command.
+- A free-interval pool for automatic AMM addresses; unmapping part of an
+  automatic mapping returns only that part. Wide-string path lists, whose
+  entries are read only from committed pages, and WaitOnAddress.
+- A submission that fails to enqueue is discarded instead of waited on, and
+  resetting a command buffer drops its counter commands.
+```
+ajm: carry partial ATRAC9 superframes across decode jobs
+…
+1545c56
+```
+The ATRAC9 decoder keeps a partial superframe across decode jobs, as the
+hardware does, instead of reporting partial input and dropping it. A RIFF
+header split across jobs is kept the same way, and Initialize with a new
+configuration drops what was kept.
+
+Spider-Man's recap audio thread had been resubmitting the same bytes forever.
+```
+dialog: keep progress bar dialogs open until the title closes them
+…
+50bd2f0
+```
+A progress bar dialog has no button: the title closes it when its work is
+done. The save-data dialog (mode 5) and the message dialog (mode 2) reported
+their progress bars as finished at once, so the title took them for dismissed
+and opened them again every frame. Spider-Man's manual save did that ~470
+times a frame. They now stay running until closed; every other mode is answered as
+before.
+```
+vulkan: report device loss with VK_EXT_device_fault and NV checkpoints
+…
+c1a60d3
+```
+Makes a GPU hang diagnosable from one run.
+
+- On ErrorDeviceLost, VK_EXT_device_fault is queried and its description,
+  address and vendor records are logged; the vendor binary is written to
+  _device_fault.nv-gpudmp (on NVIDIA an Aftermath dump behind a 0x38-byte
+  header, which names the hung shader and the program counters of its warps).
+- VK_NV_device_diagnostic_checkpoints markers are recorded from each command
+  buffer's debug info, and VK_NV_device_diagnostics_config is enabled with
+  shader debug info, resource tracking and error reporting when offered.
+- MasterSemaphore names the vk::Result of a failed wait instead of
+  EXIT_NOT_IMPLEMENTED.
+
+This is how the coherence hang and Astro Bot's shadow-stage hang were found.
+```
+common: print a symbolized host stack on fatal errors
+…
+a427f59
+```
+A fatal EXIT prints a symbolized host stack (dbghelp on Windows, serialized
+with a mutex since dbghelp is not thread-safe) after the build and error
+lines.
+```
+graphics: R32 image atomics through an R32Uint view; typed null images
+…
+935d8c1
+```
+Co-authored-by: Senaxx <michelbeld@gmail.com>
+Co-authored-by: Ali Almohaya <AliAlmohaya@gmail.com>
+```
+srt: read guest memory only from committed pages; a null base reads zero
+…
+2394382
+```
+Co-authored-by: Mac <me@itsmemac.com>
+```
+srt: scalar buffer reads past num_records read zero
+…
+b4dc8e5
+```
+Co-authored-by: Mac <me@itsmemac.com>
+```
+decode: give up the shader on scalar operands it does not model; CDBG…
+…
+c69e8ba
+```
+… branches, SDWA byte destinations
+
+
+Co-authored-by: Senaxx <michelbeld@gmail.com>
+```
+shader: allow NGG shaders with fewer than 3 GS/ES input VGPRs
+18364d5
+spirv: native subgroup reductions for DPP scans
+…
+78dd582
+```
+Co-authored-by: Mac <me@itsmemac.com>
+```
+spirv: DPP16 leaves the destination alone for missing or inactive sou…
+…
+e1580f9
+```
+…rces
+
+
+Co-authored-by: Senaxx <michelbeld@gmail.com>
+```
+decode: expand scalar calls before translation (ShaderFunctions)
+…
+90ab3ea
+```
+Co-authored-by: Senaxx <michelbeld@gmail.com>
+Co-authored-by: Mac <me@itsmemac.com>
+```
+cfg: solve dominators in reverse postorder; join early returns
+…
+f5217e3
+```
+Co-authored-by: Mac <me@itsmemac.com>
+```
+pm4: DRAW_INDIRECT_MULTI writes the draw index per draw
+47f4072
+graphics: integer render targets export uint and sint
+…
+2299a30
+```
+Co-authored-by: Mac <me@itsmemac.com>
+Co-authored-by: Senaxx <michelbeld@gmail.com>
+```
+This was referenced Oct 6, 2026
+shader: plan more indirect image table shapes
+#1118
+Open
+renderer: tolerate stale descriptor-table slots
+#1119
+Closed
+[GAME STATUS]: God of War Ragnarök
+#546
+Open
+MehmetCambaz
+mentioned this pull request
+Oct 7, 2026
+graphics: release GPU ownership of unbounded write windows the dispat…
+#1157
+Closed
+ronith256
+commented
+Oct 11, 2026
+Copy link
+Copy Markdown
+Linux confirmation for PPSA03671 on PR head 41c7b27:
+Host: Fedora 44, AMD x86-64 CPU, NVIDIA GeForce RTX 3080 (driver 610.57.04).
+Built kyty_emulator locally with Clang 22.1.8 and glslangValidator 16.2.0.
+Launch: KYTY_IGNORE_WRITTEN_OVERLAP=1 KYTY_LABELS_AFTER_GPU=1 ./kyty_emulator --game /path/to/eboot.bin --bindless --tessellation --readback-linear-images true --amd-cpu --screen-width 1600 --screen-height 900 --shader-validation false
+The shader failure at pc 0x0000114c seen on current main did not recur. The game reached its visible opening screen and screen-reader accessibility prompt. The emulator remained running at that prompt.
+--redzone is rejected as an unknown option on Linux; the flag is Windows-only in src/main.cpp, so the Linux command above omits it.
+itsmemac
+force-pushed
+the
+wolverine
+branch
+from
+41c7b27 to
+cc6c83e
+Compare
+October 11, 2026 18:45
+Senaxx
+added 9 commits
+October 12, 2026 00:18
+renderer: submit command buffers from a queue thread and record them …
+…
+41ab564
+```
+…on a recording thread
+
+
+- vkQueueSubmit, and the queue lock that present also holds, run off the GPU
+  thread. Frames reach the presenter only after their flip tick completed;
+  the presenter's own scheduler stays synchronous.
+- A Vulkan recording thread begins, records, ends and submits the command
+  buffers in order. The GPU thread queues the Vulkan commands of the hot
+  recording paths through CommandRecorder, which has the names and arguments
+  of vk::CommandBuffer. Code that records through the raw
+  CommandBuffer::Handle() first waits for the thread to catch up.
+- The recording thread is a port of IDXTRI's d9958e2 and ad1e139.
+```
+memory: per-region clean bitmap, lazy direct-memory commit, cached ma…
+…
+4395c95
+```
+…pping and range lookups
+
+
+Tracker:
+- A per-region bitmap answers whether a buffer range is CPU-clean; read-only
+  uploads visit only the CPU-dirty regions instead of every region.
+- A watched range whose host protection was replaced behind the tracker
+  (views mapped again after a partial unmap, rolled-back unmaps, guest
+  mprotect) gets the tracker's protection back.
+
+Guest memory:
+- Windows: direct memory is reserved at start and committed when the guest
+  maps it, instead of charging all of it to the commit limit at boot.
+- A thread remembers its recent backing lookups until the mapping table
+  changes.
+- TryClampRangeSize remembers recent answers until the guest mappings change,
+  and ClampRangeSize answers from merged committed spans.
+
+Timed waits use microsecond deadlines instead of whole milliseconds.
+```
+avplayer: read file replacement callbacks into a buffer from the game…
+…
+efcd1bd
+```
+…'s allocator
+
+
+With file replacement callbacks, the AVIO reader passed FFmpeg's buffer (host
+heap) to the game's read_offset callback. A callback that reads through AMPR
+accepts only guest memory, so the read failed with EFAULT and the game
+asserted.
+
+The reader now allocates its 64 KB read buffer with the game's
+memory_replacement allocator, lets the callback read into it and copies the
+bytes to FFmpeg. Without an allocator it keeps the old behaviour.
+AvPlayerFileTests checks that every callback read lands in a buffer of the
+game's allocator and that the buffer is freed.
+```
+shader: IEEE float min/max, denormal flush on output modifiers, order…
+…
+6ad02b5
+```
+…ed LDS accesses, gather LOD, constant vertex fetches
+
+
+- V_MIN/V_MAX_F32 and the median use GLSL NMin/NMax with the signed-zero
+  rule (two zeros give the AND or OR of their bits) and OpIsNan, under
+  SignedZeroInfNanPreserve.
+- VOP3 output modifiers flush denormal and negative-zero results to +0.
+- Compute: a barrier keeps one guest wave's LDS accesses in order across
+  host invocations (workgroup scope for a single-wave workgroup, subgroup
+  scope when one host subgroup holds one guest wave).
+- Explicit-LOD gathers with linear mip filtering gather the nearest level.
+- Vertex input: embedded fetches the shader only reads as constants get no
+  attribute and no buffer.
+```
+shader: wave64 branches, wave-size pipelines, device clock rate, cohe…
+…
+b148f23
+```
+…rent loads and block-compressed volumes on AMD
+
+
+- S_MEMREALTIME counts at the device clock's real rate, taken from the
+  timestamp period and shifted to the guest's 100 MHz; depth feedback loops
+  work without the extension.
+- Native wave64 scalar branches decide for the whole wave, and branches on
+  VCC and EXEC ballot only those conditions, not SCC.
+- Pixel and mesh pipelines require the guest's wave size where the driver
+  allows it.
+- Coherent buffer loads are followed by a device-scope acquire barrier on
+  every vendor but NVIDIA, so a value polled from another workgroup is seen.
+- V_MBCNT wraps the lane index at 32 in wave32 vertex shaders on 64-wide host
+  subgroups, which kept NGG strand geometry from exporting positions.
+- Block-compressed volumes get 2D views only where the device allows them,
+  and drop optional create flags until the device accepts the image.
+```
+gpu: keep the GPU and recording threads on the fast cores of hybrid CPUs
+024668e
+caches: release images and buffers between guest command buffers only…
+…
+291f4bd
+```
+… after the GPU is done
+
+
+TextureCache::DeleteImage and BufferCache::DeleteBuffer destroyed their resource at once when no
+guest command buffer was active, which is where a guest memory unmap runs. Command buffers
+submitted just before could still be sampling the destroyed images.
+
+CommandScheduler::DeferRelease queues an operation without requiring an active command buffer; it
+runs once the GPU has finished the current tick. Both caches release through it, and keep a
+resource that was bound again in a tick the GPU has not finished.
+```
+descriptors: a scalar read that its own dispatch writes is reported, …
+…
+a7cb4da
+```
+…not fatal
+
+
+A shader's scalar resource reads (the inputs the host evaluated to choose its reachable blocks)
+can overlap a buffer a bound shader writes. The host evaluates those inputs from the state before
+the dispatch, so the overlap is logged once per shader pair instead of exiting. A written range
+bounded by the dispatch's own stores (BufferWriteExtent) is used instead of the whole descriptor,
+so a heap-wide descriptor alone does not count as an overlap.
+```
+shader: apply the IMAGE_SAMPLE*_CL LOD clamp
+…
+2e9d07b
+```
+The _CL clamp is the last address component of the instruction. Implicit and gradient samples
+take it as the MinLod image operand where shaderResourceMinLod is supported; explicit-LOD forms
+raise their LOD to it.
+```
+coderabbitai
+Bot
+reviewed
+Oct 11, 2026
+View reviewed changes
+coderabbitai
+Bot
+left a comment
+Copy link
+Copy Markdown
+There was a problem hiding this comment.
+Choose a reason for hiding this comment
+The reason will be displayed to describe this comment to others. Learn more.
+Actionable comments posted: 6
+Caution
+Some comments are outside the diff and can’t be posted inline due to GitHub limitations.
+⚠️ Outside diff range comments (2)
+🟠 Major · DispatchDirect records the dispatch before its bindings when the… · renderCompute.cpp:360
+src/graphics/host_gpu/renderer/renderCompute.cpp:360
+🎯 Functional Correctness | 🟠 Major | ⚡ Quick win
+DispatchDirect records the dispatch before its bindings when the recording thread is enabled.
+Line 360 calls buffer.Handle(). In threaded mode this drains the recording thread and returns the raw command buffer. CommitBindings then queues the image transitions, push constants, and descriptor pushes through buffer.Recorder().
+Lines 376 and 438-442 record ShaderWriteHazardBarrier, bindPipeline, dispatch, and ShaderAccessBarrier directly on the raw handle. The implicit CommandRecorder(vk::CommandBuffer) conversion makes these calls direct. The recording thread executes the queued CommitBindings commands later.
+The consequences:
+The dispatch runs with the previous dispatch's descriptors and push constants.
+The dispatch runs without the image layout transitions it needs.
+If a chunk fills during CommitBindings, the recording thread writes to the same VkCommandBuffer concurrently with the GPU thread. This violates Vulkan external synchronization.
+RenderContext enables the recording thread unconditionally, so every direct compute dispatch takes this path. DispatchIndirect was already moved to Recorder(). Apply the same change here.
+Proposed fix
+```
+-	auto              vk_buffer        = buffer.Handle();
++	const auto        vk_buffer        = buffer.Recorder();
+ 	CommitBindings(buffer, vk::PipelineBindPoint::eCompute, pipeline,
+ 	               std::span {&descriptor_stage, 1u});
+```
+🟡 Minor · Require an enabled value for KYTY_LABELS_AFTER_GPU. · graphicsRun.cpp:68-70
+src/graphics/guest_gpu/graphicsRun.cpp:68-70
+🎯 Functional Correctness | 🟡 Minor | ⚡ Quick win
+Require an enabled value for KYTY_LABELS_AFTER_GPU.
+When an operator sets KYTY_LABELS_AFTER_GPU=0, this presence check still enables completion-time label publication. That changes label timing despite an explicit disabled value. Parse the value as LabelsAtCompletion does.
+🧹 Nitpick comments (5)
+CMakeLists.txt (1)
+605-607: 📐 Maintainability & Code Quality | 🔵 Trivial | ⚡ Quick win
+Correct the exception comment.
+TrackResources does not catch exceptions. Non-fatal Fail records m_failed and returns. Fatal Fail calls EXIT; the focused tests replace DbgExitHandler with a throwing hook that propagates through TrackResources. Update the comment to describe this path instead of claiming that TrackResources catches the exception.
+Suggested comment update
+```
+-	# Resource tracking gives a shader up by throwing (Fail, caught in TrackResources); utils.cmake
+-	# turns exceptions off for clang and GCC, while clang-cl builds have them on (/EHsc). Every
+-	# target that compiles the file, the emulator included, needs them on.
++	# Resource-tracking tests use a throwing DbgExitHandler for fatal Fail calls. The exception
++	# propagates through TrackResources; utils.cmake turns exceptions off for clang and GCC,
++	# while clang-cl builds have them on (/EHsc). Every target that compiles the file needs them on.
+```
+tests/shaderCfgTests.cpp (2)
+8290-8291: 📐 Maintainability & Code Quality | 🔵 Trivial | ⚡ Quick win
+Validate SPIR-V for the captured loop.
+This regression stops after Structurize, but the reported failure was invalid SPIR-V. Compile the captured control-flow shape and call CheckSpirvBinaryValidates. If unrelated shader instructions prevent compilation, reduce the fixture while preserving its loop exits.
+10468-10468: 📐 Maintainability & Code Quality | 🔵 Trivial | ⚡ Quick win
+Register both new opcode regressions.
+main does not call TestDsAddU64 or TestFloat64AddAndCompares. Add both calls so the normal test run checks the new LDS-atomic and FP64 paths.
+src/graphics/host_gpu/renderer/pipeline/pipelineCache.cpp (2)
+1024-1036: 🩺 Stability & Availability | 🔵 Trivial | 💤 Low value
+Deferred pipeline failure terminates the emulator.
+A worker can finish with job.result != eSuccess. In that case FinishPending runs EXIT_NOT_IMPLEMENTED on the next draw. This check is equivalent to the synchronous path, so it is not a regression. However, the job stays cached, and the deferral path is documented as a nonfatal skip path. Under ShaderFailureNonFatal(), record the failure and return nullptr so the draw is skipped. Also, a worker that is still compiling holds job->build, and Save() joins that worker, so shutdown is safe.
+139-151: 📐 Maintainability & Code Quality | 🔵 Trivial | 💤 Low value
+ReadShaderCode appears unused.
+No caller is visible in this file. The expander reads guest memory through the lambda in ExpandShaderFunctions. If nothing calls ReadShaderCode, remove it so an unused-function warning does not appear.
+ℹ️ Review info
+⚙️ Run configuration
+Configuration used: Repository: KytyPS5/KytyPS5/.coderabbit.yaml
+Review profile: CHILL
+Plan: Advanced
+Run ID: c9d83972-ae0d-467e-83d3-192314b9a485
+📥 Commits
+Reviewing files that changed from the base of the PR and between 41c7b27 and cc6c83e.
+📒 Files selected for processing (94)
+CMakeLists.txt
+src/common/CMakeLists.txt
+src/common/cpuAffinity.cpp
+src/common/cpuAffinity.h
+src/common/emulatorConfig.cpp
+src/common/emulatorConfig.h
+src/common/threads.cpp
+src/graphics/guest_gpu/command_processor/commandProcessor.h
+src/graphics/guest_gpu/command_processor/pm4Handlers.cpp
+src/graphics/guest_gpu/graphicsRun.cpp
+src/graphics/host_gpu/graphicContext.h
+src/graphics/host_gpu/renderer/cache/bufferCache.cpp
+src/graphics/host_gpu/renderer/cache/bufferCache.h
+src/graphics/host_gpu/renderer/cache/faultManager.cpp
+src/graphics/host_gpu/renderer/cache/streamBuffer.cpp
+src/graphics/host_gpu/renderer/cache/streamBuffer.h
+src/graphics/host_gpu/renderer/cache/textureCache.cpp
+src/graphics/host_gpu/renderer/cache/textureCache.h
+src/graphics/host_gpu/renderer/commandRecorder.h
+src/graphics/host_gpu/renderer/commandScheduler.cpp
+src/graphics/host_gpu/renderer/commandScheduler.h
+src/graphics/host_gpu/renderer/context.cpp
+src/graphics/host_gpu/renderer/depthRenderTarget.cpp
+src/graphics/host_gpu/renderer/dynamicState.cpp
+src/graphics/host_gpu/renderer/dynamicState.h
+src/graphics/host_gpu/renderer/image/blitHelper.cpp
+src/graphics/host_gpu/renderer/image/image.cpp
+src/graphics/host_gpu/renderer/image/image.h
+src/graphics/host_gpu/renderer/image/imageInfo.h
+src/graphics/host_gpu/renderer/image/tiler.cpp
+src/graphics/host_gpu/renderer/pipeline/descriptors.cpp
+src/graphics/host_gpu/renderer/pipeline/pipelineCache.cpp
+src/graphics/host_gpu/renderer/pipeline/pipelineCache.h
+src/graphics/host_gpu/renderer/pipeline/shaderResourceBarrier.cpp
+src/graphics/host_gpu/renderer/pipeline/shaderResourceBarrier.h
+src/graphics/host_gpu/renderer/pipeline/shaders.cpp
+src/graphics/host_gpu/renderer/render.h
+src/graphics/host_gpu/renderer/renderCompute.cpp
+src/graphics/host_gpu/renderer/renderContext.cpp
+src/graphics/host_gpu/renderer/renderDraw.cpp
+src/graphics/host_gpu/renderer/sync.cpp
+src/graphics/presentation/window/swapchain.cpp
+src/graphics/presentation/window/vulkanWindow.cpp
+src/graphics/shader/recompiler/ShaderRecompiler.cpp
+src/graphics/shader/recompiler/ShaderRecompiler.h
+src/graphics/shader/recompiler/backend/spirv/SpirvEmitter.cpp
+src/graphics/shader/recompiler/backend/spirv/SpirvEmitter.h
+src/graphics/shader/recompiler/backend/spirv/spirvEmitterAlu.cpp
+src/graphics/shader/recompiler/backend/spirv/spirvEmitterAluHelpers.cpp
+src/graphics/shader/recompiler/backend/spirv/spirvEmitterFlow.cpp
+src/graphics/shader/recompiler/backend/spirv/spirvEmitterImage.cpp
+src/graphics/shader/recompiler/backend/spirv/spirvEmitterInstructions.h
+src/graphics/shader/recompiler/backend/spirv/spirvEmitterInternal.h
+src/graphics/shader/recompiler/backend/spirv/spirvEmitterMemory.cpp
+src/graphics/shader/recompiler/backend/spirv/spirvEmitterModule.cpp
+src/graphics/shader/recompiler/backend/spirv/spirvEmitterProgram.cpp
+src/graphics/shader/recompiler/frontend/cfg/ShaderCFG.cpp
+src/graphics/shader/recompiler/frontend/decode/ImageOps.cpp
+src/graphics/shader/recompiler/frontend/decode/ShaderDecoder.cpp
+src/graphics/shader/recompiler/frontend/decode/ShaderDecoder.h
+src/graphics/shader/recompiler/frontend/translate/Attribute.cpp
+src/graphics/shader/recompiler/frontend/translate/Integer.cpp
+src/graphics/shader/recompiler/frontend/translate/Memory.cpp
+src/graphics/shader/recompiler/frontend/translate/Scalar.cpp
+src/graphics/shader/recompiler/frontend/translate/Translate.cpp
+src/graphics/shader/recompiler/frontend/translate/Translator.h
+src/graphics/shader/recompiler/ir/ResourceSnapshot.h
+src/graphics/shader/recompiler/ir/ShaderIR.h
+src/graphics/shader/recompiler/ir/opcodes/ValueOpcodes.inc
+src/graphics/shader/recompiler/ir/passes/ResourceMaterialization.cpp
+src/graphics/shader/recompiler/ir/passes/ResourceMaterialization.h
+src/graphics/shader/recompiler/ir/passes/ResourceTracking.cpp
+src/graphics/shader/recompiler/ir/passes/ShaderInfoCollection.cpp
+src/graphics/shader/recompiler/ir/passes/SrtWalker.cpp
+src/graphics/shader/recompiler/ir/passes/SrtWalker.h
+src/graphics/shader/shader.cpp
+src/graphics/shader/shader.h
+src/kernel/eventQueue.cpp
+src/kernel/fileSystem.cpp
+src/kernel/fileSystem.h
+src/kernel/memory.cpp
+src/kernel/memory.h
+src/libs/agc.cpp
+src/libs/avPlayer.cpp
+src/libs/dialog.cpp
+src/libs/libAmpr.cpp
+src/libs/libKernel.cpp
+src/libs/libNet.cpp
+src/main.cpp
+tests/AvPlayerFileTests.cpp
+tests/ResourceTrackingTests.cpp
+tests/ScalarProvenanceTests.cpp
+tests/ShaderRecompilerComputeTests.cpp
+tests/shaderCfgTests.cpp
+🚧 Files skipped from review as they are similar to previous changes (1)
+src/graphics/shader/recompiler/frontend/translate/Scalar.cpp
+Included review availability: This review used your included allowance. Your plan provides up to 8 included reviews per hour; 7 remain after this review.
+Comment thread
+src/graphics/guest_gpu/graphicsRun.cpp
+Comment on lines
++1202
+to
++1203
+m_renderer.GetGpu().DeferLabelWrite(reinterpret_cast<uint64_t>(dst), data,
+sizeof(data));
+coderabbitai
+Bot
+Oct 11, 2026
+Copy link
+Copy Markdown
+There was a problem hiding this comment.
+Choose a reason for hiding this comment
+The reason will be displayed to describe this comment to others. Learn more.
+🎯 Functional Correctness | 🟠 Major | ⚡ Quick win
+Route the other label conditions through ReadLabel.
+With KYTY_LABELS_AT_COMPLETION=1, DeferLabelWrite keeps the new value pending while backing memory retains the old value. CpOpCondExec still dereferences its comparison address directly at Line 1444 of src/graphics/guest_gpu/command_processor/pm4Handlers.cpp. Boolean CommandProcessor::SetPredication does the same at Line 929 of src/graphics/guest_gpu/graphicsRun.cpp. If either packet follows a deferred EOP write to that address, it can execute the wrong command path. Use the pending-label-aware read for these conditions too. The scheduler runs the write callback only after its recorded tick. (raw.githubusercontent.com)
+Comment thread
+src/graphics/host_gpu/renderer/commandScheduler.cpp
+Comment on lines
++353
+to
++362
+if (m_threaded) {
+m_command.m_buffer = nullptr;
+Record([this, tick](vk::CommandBuffer) {
+m_worker_buffer = m_command_pool.Commit(tick);
+vk::CommandBufferBeginInfo begin_info {};
+begin_info.flags = vk::CommandBufferUsageFlagBits::eOneTimeSubmit;
+EXIT_NOT_IMPLEMENTED(m_worker_buffer.begin(&begin_info) != vk::Result::eSuccess);
+});
+return m_command;
+}
+coderabbitai
+Bot
+Oct 11, 2026
+Copy link
+Copy Markdown
+There was a problem hiding this comment.
+Choose a reason for hiding this comment
+The reason will be displayed to describe this comment to others. Learn more.
+🎯 Functional Correctness | 🟠 Major | ⚡ Quick win
+Invalidate the dynamic state in the threaded BeginCommand path.
+The non-threaded path calls m_dynamic_state.Invalidate() after it begins a new command buffer. The threaded path returns at Line 361 without that call. RenderContext enables the recording thread unconditionally, so every guest command buffer takes this path.
+A new Vulkan command buffer inherits no dynamic state. DynamicState::Commit emits only dirty fields. The first draw in each new command buffer is therefore recorded without viewport, scissor, depth, stencil, blend-constant, or color-write state when those values did not change since the previous command buffer. This is undefined behavior in Vulkan: validation errors, wrong rendering, or device loss.
+Proposed fix
+```
+ 	if (m_threaded) {
+ 		m_command.m_buffer = nullptr;
+ 		Record([this, tick](vk::CommandBuffer) {
+ 			...
+ 		});
++		m_dynamic_state.Invalidate();
+ 		return m_command;
+ 	}
+```
+📝 Committable suggestion
+‼️ IMPORTANT
+Carefully review the code before committing. Ensure that it accurately replaces the highlighted code, contains no missing lines, and has no issues with indentation. Thoroughly test & benchmark the code to ensure it meets the requirements.
+Suggested change
+if (m_threaded) {
+m_command.m_buffer = nullptr;
+Record([this, tick](vk::CommandBuffer) {
+m_worker_buffer = m_command_pool.Commit(tick);
+vk::CommandBufferBeginInfo begin_info {};
+begin_info.flags = vk::CommandBufferUsageFlagBits::eOneTimeSubmit;
+EXIT_NOT_IMPLEMENTED(m_worker_buffer.begin(&begin_info) != vk::Result::eSuccess);
+});
+return m_command;
+}
+if (m_threaded) {
+m_command.m_buffer = nullptr;
+Record([this, tick](vk::CommandBuffer) {
+m_worker_buffer = m_command_pool.Commit(tick);
+vk::CommandBufferBeginInfo begin_info {};
+begin_info.flags = vk::CommandBufferUsageFlagBits::eOneTimeSubmit;
+EXIT_NOT_IMPLEMENTED(m_worker_buffer.begin(&begin_info) != vk::Result::eSuccess);
+});
+m_dynamic_state.Invalidate();
+return m_command;
+}
+Comment thread
+src/graphics/host_gpu/renderer/commandScheduler.cpp
+Comment on lines
++355
+to
++360
+Record([this, tick](vk::CommandBuffer) {
+m_worker_buffer = m_command_pool.Commit(tick);
+vk::CommandBufferBeginInfo begin_info {};
+begin_info.flags = vk::CommandBufferUsageFlagBits::eOneTimeSubmit;
+EXIT_NOT_IMPLEMENTED(m_worker_buffer.begin(&begin_info) != vk::Result::eSuccess);
+});
+coderabbitai
+Bot
+Oct 11, 2026
+Copy link
+Copy Markdown
+There was a problem hiding this comment.
+Choose a reason for hiding this comment
+The reason will be displayed to describe this comment to others. Learn more.
+🩺 Stability & Availability | 🟡 Minor | ⚡ Quick win
+🔎 Supported by static analysis
+🏁 Script executed:
+```
+#!/bin/bash
+fd -e h -e cpp masterSemaphore --exec cat -n {}
+```
+Repository: KytyPS5/KytyPS5
+Length of output: 4111
+🏁 Script executed:
+```
+#!/bin/bash
+set -e
+printf '%s\n' '--- CommandPool references and declarations ---'
+rg -n -F --glob '*.{h,cpp}' -- 'class CommandPool' src
+rg -n -F --glob '*.{h,cpp}' -- 'CommandPool::' src
+rg -n -F --glob '*.{h,cpp}' -- 'm_command_pool' src/graphics/host_gpu/renderer
+printf '%s\n' '--- relevant source files ---'
+files=$(rg -l -F --glob '*.{h,cpp}' -- 'class CommandPool' src; rg -l -F --glob '*.{h,cpp}' -- 'CommandPool::' src)
+for f in $files; do
+  printf '\n### %s\n' "$f"
+  nl -ba "$f"
+done
+printf '%s\n' '--- changed scheduler block ---'
+nl -ba src/graphics/host_gpu/renderer/commandScheduler.cpp | sed -n '280,430p'
+```
+Repository: KytyPS5/KytyPS5
+Length of output: 41550
+🏁 Script executed:
+```
+set -eu
+rg -n -F --glob '*.h' --glob '*.cpp' -- 'CommandPool' src/graphics/host_gpu/renderer
+printf '%s\n' '--- pool files ---'
+for f in $(rg -l -F --glob '*.h' --glob '*.cpp' -- 'CommandPool' src/graphics/host_gpu/renderer); do
+  printf '\n### %s\n' "$f"
+  nl -ba "$f"
+done
+printf '%s\n' '--- scheduler Commit/Record/Submit paths ---'
+rg -n -F --glob 'commandScheduler.cpp' -- 'm_command_pool.Commit' 'm_command_pool' 'Record(' 'Submit(' src/graphics/host_gpu/renderer
+nl -ba src/graphics/host_gpu/renderer/commandScheduler.cpp | sed -n '320,410p'
+```
+Repository: KytyPS5/KytyPS5
+Length of output: 36798
+🌐 Web query:
+Vulkan vkGetSemaphoreCounterValue host synchronization requirement vkWaitSemaphores vkGetSemaphoreCounterValue official specification
+💡 Result:
+```
+For **timeline semaphores**, the current Khronos spec distinguishes the two host calls:
+
+- **`vkGetSemaphoreCounterValue`**: host access to `semaphore` **must be externally synchronized**. So don’t make concurrent host accesses to that semaphore unless you synchronize them yourself. The semaphore must also be a timeline semaphore. ([docs.vulkan.org](https://docs.vulkan.org/spec/latest/chapters/synchronization.html?utm_source=openai))
+- **`vkWaitSemaphores`**: the spec lists **no host-synchronization requirement** for the semaphore handles. Multiple host threads can wait on the same timeline semaphore without externally synchronizing those waits. It blocks until the requested value(s) are reached or the timeout expires. ([docs.vulkan.org](https://docs.vulkan.org/spec/latest/chapters/synchronization.html?utm_source=openai))
+
+The queried counter is only a snapshot: if a queue submission is pending, the returned value may already be out of date. Use `vkWaitSemaphores` when you need to wait for a target value. ([docs.vulkan.org](https://docs.vulkan.org/spec/latest/chapters/synchronization.html?utm_source=openai))
+
+Citations:
+
+- 1: https://docs.vulkan.org/spec/latest/chapters/synchronization.html?utm_source=openai
+- 2: https://docs.vulkan.org/spec/latest/chapters/synchronization.html?utm_source=openai
+- 3: https://docs.vulkan.org/spec/latest/chapters/synchronization.html?utm_source=openai
+```
+Serialize vkGetSemaphoreCounterValue calls in MasterSemaphore.
+m_gpu_tick is atomic, so it does not have the proposed C++ data race. However, CommandPool::Commit can call m_master.Refresh() on the recording thread while scheduler paths call Refresh() concurrently. Refresh() calls vkGetSemaphoreCounterValue without external synchronization. Vulkan requires host access for this operation to be externally synchronized.
+Suggested fix
+```
+ #include <atomic>
++#include <mutex>
+ 
+@@
+ private:
++	std::mutex            m_refresh_mutex;
+ 	GraphicContext&       m_graphics;
+```
+```
+ void MasterSemaphore::Refresh() {
++	std::lock_guard lock(m_refresh_mutex);
+ 	uint64_t   counter = 0;
+```
+Comment thread
+src/graphics/host_gpu/renderer/commandScheduler.cpp
+Comment on lines
++528
+to
++531
+void CommandScheduler::DispatchChunk() {
+if (m_chunk == nullptr || m_chunk->first == nullptr) {
+return;
+}
+coderabbitai
+Bot
+Oct 11, 2026
+Copy link
+Copy Markdown
+There was a problem hiding this comment.
+Choose a reason for hiding this comment
+The reason will be displayed to describe this comment to others. Learn more.
+🩺 Stability & Availability | 🟡 Minor | ⚡ Quick win
+Allocate can destroy a chunk that holds live stashed data.
+DispatchChunk returns without queuing when m_chunk->first == nullptr. At Lines 519-522, Allocate then assigns m_chunk = take(). That assignment destroys the old chunk, but the old chunk can already hold arrays from Stash calls of the command that is being built.
+Trigger: a fresh chunk receives stash data before its first Record, and the command's stash data exceeds the remaining space. One example is StashWrites for a large descriptor or bindless write array. The pointers that were already returned by Stash then dangle. The recording thread later reads freed memory.
+Fix: dispatch the chunk whenever used != 0, not only when it holds commands. RecordingThread already handles a chunk with an empty command list, and the retention window keeps the chunk alive. Also note that the comment "up to two chunks before" holds only when one command's stash data spans at most two chunks.
+Proposed fix
+```
+--- "a/src/graphics/host_gpu/renderer/commandScheduler.cpp"
++++ "b/src/graphics/host_gpu/renderer/commandScheduler.cpp"
+@@ -525,10 +525,10 @@
+ 	return m_chunk->storage + offset;
+ }
+ 
+ void CommandScheduler::DispatchChunk() {
+-	if (m_chunk == nullptr || m_chunk->first == nullptr) {
++	if (m_chunk == nullptr || (m_chunk->first == nullptr && m_chunk->used == 0)) {
+ 		return;
+ 	}
+ 	{
+ 		std::lock_guard lock(m_record_mutex);
+ 		m_record_queue.push_back(std::move(m_chunk));
+```
+📝 Committable suggestion
+‼️ IMPORTANT
+Carefully review the code before committing. Ensure that it accurately replaces the highlighted code, contains no missing lines, and has no issues with indentation. Thoroughly test & benchmark the code to ensure it meets the requirements.
+Suggested change
+void CommandScheduler::DispatchChunk() {
+if (m_chunk == nullptr || m_chunk->first == nullptr) {
+return;
+}
+void CommandScheduler::DispatchChunk() {
+if (m_chunk == nullptr || (m_chunk->first == nullptr && m_chunk->used == 0)) {
+return;
+}
+Comment thread
+src/graphics/presentation/window/vulkanWindow.cpp
+Comment on lines
++356
+to
++359
+if (!skip_device && !TryGetSurfaceCapabilities(device, surface, candidate_capabilities)) {
+LOGF("Surface capabilities unavailable, skipping device\n");
+skip_device = true;
+}
+coderabbitai
+Bot
+Oct 11, 2026
+Copy link
+Copy Markdown
+There was a problem hiding this comment.
+Choose a reason for hiding this comment
+The reason will be displayed to describe this comment to others. Learn more.
+📐 Maintainability & Code Quality | 🟡 Minor | ⚡ Quick win
+Record the surface-capability failure as a device rejection.
+This branch sets skip_device directly and does not call reject. If this is the only candidate device, out_rejections stays empty. CreateVulkan then exits with "Could not find suitable device:" and gives no reason. Use reject so that the fatal message names the cause.
+Proposed fix
+```
+--- "a/src/graphics/presentation/window/vulkanWindow.cpp"
++++ "b/src/graphics/presentation/window/vulkanWindow.cpp"
+@@ -353,10 +353,9 @@
+ 		}
+ 
+ 		SurfaceCapabilities candidate_capabilities;
+ 		if (!skip_device && !TryGetSurfaceCapabilities(device, surface, candidate_capabilities)) {
+-			LOGF("Surface capabilities unavailable, skipping device\n");
+-			skip_device = true;
++			reject("Surface capabilities are unavailable");
+ 		}
+ 		if (!skip_device) {
+ 			if (!(candidate_capabilities.capabilities.supportedUsageFlags &
+ 			      vk::ImageUsageFlagBits::eTransferDst)) {
+```
+📝 Committable suggestion
+‼️ IMPORTANT
+Carefully review the code before committing. Ensure that it accurately replaces the highlighted code, contains no missing lines, and has no issues with indentation. Thoroughly test & benchmark the code to ensure it meets the requirements.
+Suggested change
+if (!skip_device && !TryGetSurfaceCapabilities(device, surface, candidate_capabilities)) {
+LOGF("Surface capabilities unavailable, skipping device\n");
+skip_device = true;
+}
+if (!skip_device && !TryGetSurfaceCapabilities(device, surface, candidate_capabilities)) {
+reject("Surface capabilities are unavailable");
+}
+Comment thread
+src/graphics/shader/recompiler/ir/passes/ResourceMaterialization.cpp
+Comment on lines
++1280
+to
++1281
+case ValueOpcode::IAdd32: out = {a.lo + b.lo, a.hi + b.hi}; break;
+case ValueOpcode::IMul32: out = {a.lo * b.lo, a.hi * b.hi}; break;
+coderabbitai
+Bot
+Oct 11, 2026
+Copy link
+Copy Markdown
+There was a problem hiding this comment.
+Choose a reason for hiding this comment
+The reason will be displayed to describe this comment to others. Learn more.
+🗄️ Data Integrity & Integration | 🟡 Minor | ⚡ Quick win
+🔎 Supported by static analysis
+🏁 Script executed:
+```
+set -e
+printf '%s\n' '--- diff ---'
+git diff --unified=40 984cfcebd141b211aa9e0a8cde63b0ebe652d07a cc6c83e34c404e2197c4d7b7c5ddc217b8ccda9c -- src/graphics/shader/recompiler/ir/passes/ResourceMaterialization.cpp
+printf '%s\n' '--- target excerpts ---'
+nl -ba src/graphics/shader/recompiler/ir/passes/ResourceMaterialization.cpp | sed -n '1180,1415p'
+printf '%s\n' '--- overlap consumer references ---'
+rg -n -F --glob '*.{cpp,h,hpp}' 'failed[|extent|WrittenOverlap|written overlap|Overlap' src/graphics | head -200
+```
+Repository: KytyPS5/KytyPS5
+Length of output: 44544
+🏁 Script executed:
+```
+set -e
+printf '%s\n' '--- extent declarations and uses ---'
+rg -n -F --glob '*.{h,hpp,cpp}' 'buffer_write_extents' src
+rg -n -F --glob '*.{h,hpp,cpp}' 'buffer_writes_bounded' src
+printf '%s\n' '--- overlap and descriptor access ---'
+rg -n -i --glob '*.{h,hpp,cpp}' 'written.?overlap|overlap.*written|buffer.*extent|GetSize\(\)|AddTid\(\)|Soffset|soffset' src/graphics src/core src
+printf '%s\n' '--- relevant declarations ---'
+rg -n -F --glob '*.{h,hpp,cpp}' 'struct ResourceSnapshot' src
+rg -n -F --glob '*.{h,hpp,cpp}' 'struct ShaderBufferResource' src
+```
+Repository: KytyPS5/KytyPS5
+Length of output: 25280
+🏁 Script executed:
+```
+set -e
+printf '%s\n' '--- extent type ---'
+nl -ba src/graphics/shader/recompiler/ir/ResourceSnapshot.h | sed -n '45,75p'
+printf '%s\n' '--- overlap helper and setup ---'
+nl -ba src/graphics/host_gpu/renderer/pipeline/descriptors.cpp | sed -n '90,135p'
+nl -ba src/graphics/host_gpu/renderer/pipeline/descriptors.cpp | sed -n '780,885p'
+printf '%s\n' '--- overlap consumer ---'
+nl -ba src/graphics/host_gpu/renderer/pipeline/descriptors.cpp | sed -n '985,1045p'
+printf '%s\n' '--- address calculation ---'
+nl -ba src/graphics/shader/recompiler/backend/spirv/spirvEmitterMemory.cpp | sed -n '30,90p'
+nl -ba src/graphics/shader/recompiler/backend/spirv/spirvEmitterMemory.cpp | sed -n '885,930p'
+printf '%s\n' '--- descriptor fields ---'
+nl -ba src/graphics/shader/shaderBindings.h | sed -n '35,70p'
+```
+Repository: KytyPS5/KytyPS5
+Length of output: 21804
+🏁 Script executed:
+```
+set -e
+nl -ba src/graphics/shader/recompiler/backend/spirv/spirvEmitterMemory.cpp | sed -n '85,155p'
+nl -ba src/graphics/shader/recompiler/backend/spirv/spirvEmitterMemory.cpp | sed -n '430,535p'
+nl -ba src/graphics/shader/recompiler/backend/spirv/spirvEmitterMemory.cpp | sed -n '880,985p'
+```
+Repository: KytyPS5/KytyPS5
+Length of output: 16349
+🏁 Script executed:
+```
+set -e
+nl -ba src/graphics/shader/recompiler/backend/spirv/spirvEmitterMemory.cpp | sed -n '980,1085p'
+rg -n -F --glob 'spirvEmitterMemory.cpp' 'StoreIndirect|StoreBuffer|EmitMemoryElementInBounds|BufferByteAddress' src/graphics/shader/recompiler/backend/spirv/spirvEmitterMemory.cpp
+```
+Repository: KytyPS5/KytyPS5
+Length of output: 6350
+🏁 Script executed:
+```
+set -e
+rg -n -F --glob 'spirvEmitterMemory.cpp' 'StoreWordPrepared' src/graphics/shader/recompiler/backend/spirv/spirvEmitterMemory.cpp
+rg -n -F --glob 'spirvEmitterMemory.cpp' 'PrepareMemoryResourceAccess' src/graphics/shader/recompiler/backend/spirv/spirvEmitterMemory.cpp
+rg -n -F --glob 'spirvEmitterMemory.cpp' 'EmitMemoryElementInBounds' src/graphics/shader/recompiler/backend/spirv/spirvEmitterMemory.cpp
+nl -ba src/graphics/shader/recompiler/backend/spirv/spirvEmitterMemory.cpp | sed -n '300,430p'
+```
+Repository: KytyPS5/KytyPS5
+Length of output: 10063
+🏁 Script executed:
+```
+set -e
+nl -ba src/graphics/shader/recompiler/backend/spirv/spirvEmitterMemory.cpp | sed -n '270,310p'
+nl -ba src/graphics/shader/recompiler/backend/spirv/spirvEmitterMemory.cpp | sed -n '530,575p'
+```
+Repository: KytyPS5/KytyPS5
+Length of output: 4565
+🏁 Script executed:
+```
+set -e
+rg -n -F --glob '*.{cpp,h,hpp}' 'EmitMemoryElementInBounds' src/graphics/shader/recompiler
+```
+Repository: KytyPS5/KytyPS5
+Length of output: 2286
+🏁 Script executed:
+```
+set -e
+nl -ba src/graphics/shader/recompiler/backend/spirv/spirvEmitterMemoryHelpers.cpp | sed -n '205,250p'
+```
+Repository: KytyPS5/KytyPS5
+Length of output: 2659
+Reject wrapped buffer-address extents.
+CalculateBufferAddress performs the buffer additions as uint32_t. A valid store can wrap to a low address and pass EmitMemoryElementInBounds. ComputeBufferWriteExtents uses 64-bit arithmetic instead, so it can set begin and end to the descriptor limit and report an empty or incomplete range. The overlap check can then miss the store.
+The IAdd32 and IMul32 interval checks already reject results whose upper bound exceeds UINT32_MAX. Add the guard before computing the extent:
+Suggested fix
+```
++		if (offset.hi + soffset.hi + write.immediate > UINT32_MAX) {
++			failed[write.buffer] = 1u;
++			extent               = {};
++			continue;
++		}
+ 		const uint64_t stride = descriptor.Stride();
+```
+itsmemac
+force-pushed
+the
+wolverine
+branch
+2 times, most recently
+from
+72362f7 to
+41c7b27
+Compare
+October 11, 2026 19:06
+coderabbitai
+Bot
+reviewed
+Oct 11, 2026
+View reviewed changes
+coderabbitai
+Bot
+left a comment
+Copy link
+Copy Markdown
+There was a problem hiding this comment.
+Choose a reason for hiding this comment
+The reason will be displayed to describe this comment to others. Learn more.
+Actionable comments posted: 11
+🧹 Nitpick comments (1)
+tests/X64LoadEmulationTests.cpp (1)
+65-65: 📐 Maintainability & Code Quality | 🔵 Trivial | 💤 Low value
+Initialize vec with a value that a non-merging write would change.
+In Result, vec starts as zeros. The VEC cases write the full YMM register into r.vec, so these initial zeros are never compared. That part is correct. The GPR cases have a gap, though. They check only gpr[0]. The FLAGS cases write only flags, and the flags mask hides every bit outside OF/SF/ZF/AF/PF/CF. As a result, this test cannot detect emulation that corrupts other registers, for example clobbering RSI or RDX. The emulator under test writes directly into CONTEXT.
+This is a coverage gap, not a defect. Consider recording RSI and RDX after each case.
+ℹ️ Review info
+⚙️ Run configuration
+Configuration used: Repository: KytyPS5/KytyPS5/.coderabbit.yaml
+Review profile: CHILL
+Plan: Advanced
+Run ID: 574f992b-462b-4755-b7bd-dcba69b1b021
+📥 Commits
+Reviewing files that changed from the base of the PR and between cc6c83e and 41c7b27.
+📒 Files selected for processing (122)
+CMakeLists.txt
+src/common/CMakeLists.txt
+src/common/emulatorConfig.cpp
+src/common/emulatorConfig.h
+src/graphics/guest_gpu/command_processor/commandProcessor.h
+src/graphics/guest_gpu/command_processor/pm4Handlers.cpp
+src/graphics/guest_gpu/graphicsRun.cpp
+src/graphics/host_gpu/graphicContext.h
+src/graphics/host_gpu/memoryTracker.cpp
+src/graphics/host_gpu/memoryTracker.h
+src/graphics/host_gpu/pageManager.cpp
+src/graphics/host_gpu/pageManager.h
+src/graphics/host_gpu/regionManager.h
+src/graphics/host_gpu/renderer/cache/bufferCache.cpp
+src/graphics/host_gpu/renderer/cache/bufferCache.h
+src/graphics/host_gpu/renderer/cache/faultManager.cpp
+src/graphics/host_gpu/renderer/cache/faultManager.h
+src/graphics/host_gpu/renderer/cache/streamBuffer.h
+src/graphics/host_gpu/renderer/cache/textureCache.cpp
+src/graphics/host_gpu/renderer/cache/textureCache.h
+src/graphics/host_gpu/renderer/commandScheduler.cpp
+src/graphics/host_gpu/renderer/context.cpp
+src/graphics/host_gpu/renderer/image/image.h
+src/graphics/host_gpu/renderer/image/imageInfo.h
+src/graphics/host_gpu/renderer/image/imageView.h
+src/graphics/host_gpu/renderer/indirectDispatch.cpp
+src/graphics/host_gpu/renderer/indirectDispatch.h
+src/graphics/host_gpu/renderer/pipeline/bindlessTable.cpp
+src/graphics/host_gpu/renderer/pipeline/bindlessTable.h
+src/graphics/host_gpu/renderer/pipeline/descriptors.cpp
+src/graphics/host_gpu/renderer/pipeline/descriptors.h
+src/graphics/host_gpu/renderer/pipeline/pipelineCache.cpp
+src/graphics/host_gpu/renderer/pipeline/pipelineCache.h
+src/graphics/host_gpu/renderer/pipeline/shaders.cpp
+src/graphics/host_gpu/renderer/render.h
+src/graphics/host_gpu/renderer/renderCompute.cpp
+src/graphics/host_gpu/renderer/renderContext.cpp
+src/graphics/host_gpu/renderer/renderContext.h
+src/graphics/host_gpu/renderer/renderDraw.cpp
+src/graphics/host_gpu/shaders/dispatch_indirect_groups.comp
+src/graphics/presentation/window/vulkanWindow.cpp
+src/graphics/shader/recompiler/ShaderRecompiler.cpp
+src/graphics/shader/recompiler/ShaderRecompiler.h
+src/graphics/shader/recompiler/backend/spirv/SpirvEmitter.cpp
+src/graphics/shader/recompiler/backend/spirv/SpirvEmitter.h
+src/graphics/shader/recompiler/backend/spirv/spirvEmitterAnalysis.cpp
+src/graphics/shader/recompiler/backend/spirv/spirvEmitterFlow.cpp
+src/graphics/shader/recompiler/backend/spirv/spirvEmitterHelpers.cpp
+src/graphics/shader/recompiler/backend/spirv/spirvEmitterImage.cpp
+src/graphics/shader/recompiler/backend/spirv/spirvEmitterInstructions.h
+src/graphics/shader/recompiler/backend/spirv/spirvEmitterInternal.h
+src/graphics/shader/recompiler/backend/spirv/spirvEmitterMemory.cpp
+src/graphics/shader/recompiler/backend/spirv/spirvEmitterMemoryHelpers.cpp
+src/graphics/shader/recompiler/backend/spirv/spirvEmitterMesh.cpp
+src/graphics/shader/recompiler/backend/spirv/spirvEmitterModule.cpp
+src/graphics/shader/recompiler/backend/spirv/spirvEmitterProgram.cpp
+src/graphics/shader/recompiler/frontend/cfg/ShaderCFG.cpp
+src/graphics/shader/recompiler/frontend/decode/ImageOps.cpp
+src/graphics/shader/recompiler/frontend/decode/MemoryOps.cpp
+src/graphics/shader/recompiler/frontend/decode/ScalarAluOps.cpp
+src/graphics/shader/recompiler/frontend/decode/ShaderDecoder.cpp
+src/graphics/shader/recompiler/frontend/decode/ShaderDecoder.h
+src/graphics/shader/recompiler/frontend/decode/VectorAluOps.cpp
+src/graphics/shader/recompiler/frontend/translate/Bvh.cpp
+src/graphics/shader/recompiler/frontend/translate/Compare.cpp
+src/graphics/shader/recompiler/frontend/translate/Control.cpp
+src/graphics/shader/recompiler/frontend/translate/Memory.cpp
+src/graphics/shader/recompiler/frontend/translate/Scalar.cpp
+src/graphics/shader/recompiler/frontend/translate/Translate.cpp
+src/graphics/shader/recompiler/frontend/translate/Translator.h
+src/graphics/shader/recompiler/frontend/translate/Vector.cpp
+src/graphics/shader/recompiler/ir/BindlessBindings.h
+src/graphics/shader/recompiler/ir/Program.cpp
+src/graphics/shader/recompiler/ir/ResourceSnapshot.h
+src/graphics/shader/recompiler/ir/ShaderIR.h
+src/graphics/shader/recompiler/ir/Value.cpp
+src/graphics/shader/recompiler/ir/Value.h
+src/graphics/shader/recompiler/ir/opcodes/ValueOpcodes.cpp
+src/graphics/shader/recompiler/ir/opcodes/ValueOpcodes.inc
+src/graphics/shader/recompiler/ir/passes/BindingLayout.cpp
+src/graphics/shader/recompiler/ir/passes/ConstantPropagation.cpp
+src/graphics/shader/recompiler/ir/passes/ConstantPropagation.h
+src/graphics/shader/recompiler/ir/passes/DeadCodeElimination.cpp
+src/graphics/shader/recompiler/ir/passes/DeadCodeElimination.h
+src/graphics/shader/recompiler/ir/passes/LocalAddressStores.cpp
+src/graphics/shader/recompiler/ir/passes/ResourceMaterialization.cpp
+src/graphics/shader/recompiler/ir/passes/ResourceMaterialization.h
+src/graphics/shader/recompiler/ir/passes/ResourceTracking.cpp
+src/graphics/shader/recompiler/ir/passes/ShaderInfoCollection.cpp
+src/graphics/shader/recompiler/ir/passes/SrtWalker.cpp
+src/graphics/shader/recompiler/ir/passes/SrtWalker.h
+src/graphics/shader/shader.cpp
+src/graphics/shader/shader.h
+src/kernel/eventQueue.cpp
+src/kernel/fileSystem.cpp
+src/kernel/fileSystem.h
+src/kernel/memory.cpp
+src/kernel/memory.h
+src/kernel/memoryAddressSpace.inc
+src/launcher/forms/configuration_edit_dialog.ui
+src/launcher/include/configuration.h
+src/launcher/src/configurationEditDialog.cpp
+src/launcher/src/mainDialog.cpp
+src/libs/agc.cpp
+src/libs/audio.cpp
+src/libs/audio_internal.h
+src/libs/dialog.cpp
+src/libs/libAmpr.cpp
+src/libs/libAudio2.cpp
+src/libs/libKernel.cpp
+src/libs/libNet.cpp
+src/loader/runtimeLinker.cpp
+src/loader/x64InstructionEmulator.cpp
+src/loader/x64InstructionEmulator.h
+src/main.cpp
+tests/AudioOut2PortTests.cpp
+tests/ResourceTrackingTests.cpp
+tests/ScalarProvenanceTests.cpp
+tests/ShaderRayTracingTests.inc
+tests/ShaderRecompilerComputeTests.cpp
+tests/X64LoadEmulationTests.cpp
+tests/shaderCfgTests.cpp
+💤 Files with no reviewable changes (1)
+src/graphics/shader/recompiler/ir/Value.cpp
+Included review availability: This review used your included allowance. Your plan provides up to 8 included reviews per hour; 6 remain after this review.
+Comment thread
+src/graphics/guest_gpu/graphicsRun.cpp
+Comment on lines
++1318
+to
++1332
+const bool clock_value = event_write_source == 0x04;
+if (clock_value && !LabelsAfterGpu()) {
+value = Sync::ReadReferenceClock();
+}
+auto write64 = [&](bool with_writeback) {
+auto* dst = static_cast<uint64_t*>(dst_gpu_addr);
+std::memcpy(dst, &value, sizeof(value));
+if (LabelsAfterGpu()) {
+// The label (or the timestamp, read then) lands when the GPU gets there.
+PublishLabelAtCompletion(dst, value, sizeof(value), clock_value);
+} else if (at_completion) {
+m_renderer.GetGpu().DeferLabelWrite(reinterpret_cast<uint64_t>(dst),
+value, sizeof(value));
+} else {
+std::memcpy(dst, &value, sizeof(value));
+}
+coderabbitai
+Bot
+Oct 11, 2026
+Copy link
+Copy Markdown
+There was a problem hiding this comment.
+Choose a reason for hiding this comment
+The reason will be displayed to describe this comment to others. Learn more.
+🎯 Functional Correctness | 🟡 Minor | ⚡ Quick win
+🔎 Supported by static analysis
+🏁 Script executed:
+```
+#!/bin/bash
+rg -nP -C8 '\bWriteAtEndOfPipe(WithWriteBack|WithInterrupt|WithInterruptWriteBack)?64\s*\(' --type=cpp -g '!**/graphicsRun.cpp'
+```
+Repository: KytyPS5/KytyPS5
+Length of output: 16202
+Skip the Sync data write when labels are published at completion.
+Sync::WriteAtEndOfPipe64 and its writeback variants write the supplied packet value to dst. When LabelsAfterGpu() and clock_value are both true, PublishLabelAtCompletion schedules the completion-time timestamp, but the Sync write can overwrite that timestamp with the raw packet payload. Ensure these paths signal or interrupt without performing a second data write.
+Comment thread
+src/graphics/host_gpu/renderer/renderContext.cpp
+Resolved
+Uh oh!
+There was an error while loading. Please reload this page.
+Comment thread
+src/graphics/host_gpu/renderer/renderContext.cpp
+Resolved
+Uh oh!
+There was an error while loading. Please reload this page.
+Comment thread
+src/graphics/presentation/window/vulkanWindow.cpp
+Resolved
+Uh oh!
+There was an error while loading. Please reload this page.
+Comment thread
+src/graphics/shader/recompiler/backend/spirv/spirvEmitterMemory.cpp
+Resolved
+Uh oh!
+There was an error while loading. Please reload this page.
+Comment thread
+src/graphics/shader/recompiler/frontend/translate/Memory.cpp
+Resolved
+Uh oh!
+There was an error while loading. Please reload this page.
+Comment thread
+src/graphics/shader/recompiler/frontend/translate/Translate.cpp
+Resolved
+Uh oh!
+There was an error while loading. Please reload this page.
+Comment thread
+src/graphics/shader/recompiler/ShaderRecompiler.cpp
+Resolved
+Uh oh!
+There was an error while loading. Please reload this page.
+Comment thread
+src/libs/libAmpr.cpp
+Comment on lines
++744
+to
++747
+const auto command_buffer_addr = reinterpret_cast<uint64_t>(command_buffer);
+const auto id =
+AprShared::AllocateSubmissionId(command_buffer_addr, reinterpret_cast<uint64_t>(result));
+coderabbitai
+Bot
+Oct 11, 2026
+Copy link
+Copy Markdown
+There was a problem hiding this comment.
+Choose a reason for hiding this comment
+The reason will be displayed to describe this comment to others. Learn more.
+🚀 Performance & Scalability | 🟡 Minor | ⚡ Quick win
+Submissions with a result but no ID leak their tracking entries.
+SubmitCommandBufferAndGetResult always calls AllocateSubmissionId, even when out_submission_id is null. With a null out_submission_id, the guest gets no ID and cannot call WaitCommandBuffer. CompleteSubmission is the only path that erases a completed entry. As a result, every such submission leaves one SubmissionState in g_submissions permanently. A title that submits this way every frame grows the map without bound.
+AmmSubmitCommandBufferAndGetResult (lines 3181-3183) has the same defect. The result already reaches the guest through Execute, which calls WriteResult with submission.result. Also, if the final WriteGuest of the ID fails, the entry is never retired.
+Allocate an ID only when the caller can receive it. Otherwise pass 0.
+Proposed fix
+```
+--- "a/src/libs/libAmpr.cpp"
++++ "b/src/libs/libAmpr.cpp"
+@@ -741,9 +741,11 @@
+ 		return KernelSyscallResult(LibKernel::KERNEL_ERROR_EINVAL);
+ 	}
+ 
+ 	const auto command_buffer_addr = reinterpret_cast<uint64_t>(command_buffer);
+-	const auto id =
+-	    AprShared::AllocateSubmissionId(command_buffer_addr, reinterpret_cast<uint64_t>(result));
++	const auto id = out_submission_id != nullptr
++	                    ? AprShared::AllocateSubmissionId(command_buffer_addr,
++	                                                      reinterpret_cast<uint64_t>(result))
++	                    : 0u;
+ 
+ 	const auto submit_result = LibAmpr::Ampr::EnqueueCommandBuffer(
+ 	    command_buffer_addr, false, static_cast<uint32_t>(priority), id,
+```
+Apply the same change in AmmSubmitCommandBufferAndGetResult. Guard each DiscardSubmission(id) call with id != 0.
+📝 Committable suggestion
+‼️ IMPORTANT
+Carefully review the code before committing. Ensure that it accurately replaces the highlighted code, contains no missing lines, and has no issues with indentation. Thoroughly test & benchmark the code to ensure it meets the requirements.
+Suggested change
+const auto command_buffer_addr = reinterpret_cast<uint64_t>(command_buffer);
+const auto id =
+AprShared::AllocateSubmissionId(command_buffer_addr, reinterpret_cast<uint64_t>(result));
+const auto command_buffer_addr = reinterpret_cast<uint64_t>(command_buffer);
+const auto id = out_submission_id != nullptr
+? AprShared::AllocateSubmissionId(command_buffer_addr,
+reinterpret_cast<uint64_t>(result))
+: 0u;
+Comment thread
+src/libs/libAudio2.cpp
+Resolved
+Uh oh!
+There was an error while loading. Please reload this page.
+itsmemac
+force-pushed
+the
+wolverine
+branch
+from
+41c7b27 to
+2e9d07b
+Compare
+October 11, 2026 20:12
+itsmemac
+changed the title
+Wolverine: recompiler, bindless, mesh and renderer fixes (51 commits)
+Wolverine: renderer threading, caches, AMPR/AJM and shader recompiler fixes
+Oct 11, 2026
+danielmod
+mentioned this pull request
+Oct 14, 2026
+[GAME STATUS]: Marvel's Wolverine (PPSA03671) crashes: "indirect image table at pc 0x0000114c has incompatible candidates"
+#1453
+Open
+overlordxrz-source
+mentioned this pull request
+Oct 14, 2026
+spirv: guard pixel shader cross-lane reads from lanes the host subgroup lacks
+#1515
+Open
+CarRamRod-963
+added a commit
+to CarRamRod-963/KytyPS5
+that referenced
+this pull request
+Oct 23, 2026
+renderer: optionally skip draws whose pipeline is still being built
+…
+8ae8a76
+```
+A graphics pipeline that is neither in the pipeline cache nor in the
+driver cache is built on the GPU thread at its first draw. On NVIDIA the
+large modules of open-world titles take 1-65 s each, during which the
+picture freezes while the game (and its audio) runs on. Building them
+unoptimized first does not help there: it costs as much as the optimized
+build.
+
+--skip-pending-draws true (default false, so nothing changes unless it is
+asked for) lets such a draw leave the whole optimized build to the
+background compile queue and be skipped until the pipeline is installed.
+Only a draw whose only effect is the picture is skipped
+(PendingDrawSkipBlocker, a pure function with its own unit test):
+
+- no stage writes memory: no buffer or image stores or atomics (GPU-
+  selected stores included), no device-address writes, no GDS;
+- no guest query counts it (occlusion counters are synthetic today, so
+  this is always false until host queries land);
+- no color target is linear and no depth/stencil write goes to a linear
+  target: the CPU reads such images back as data;
+- it is not a DB_RENDER_CONTROL depth/stencil clear.
+
+Every other draw, and every dispatch, waits for its pipeline exactly as
+before. Skipping is bounded: 2 s after a build was queued its draws wait
+for it (PipelineCompileQueue::Expedite runs it on the GPU thread if it
+has not started), so a slow build cannot hide geometry for long.
+
+The pipeline is looked up before the draw prepares its bindings, vertex
+and index buffers or render targets, so a skipped draw records nothing,
+uploads nothing, consumes no HTile clear state and marks no GPU writes;
+target discovery has already run, as for any draw. The finished pipeline
+is installed by the existing InstallOptimizedPipelines path at the next
+lookup. The cache logs once per pipeline when its draws are first
+skipped, when a draw has to wait for it, and when it is ready (with the
+time since it was queued and the number of skipped draws); the
+performance overlay shows skipped draws per second.
+
+The same policy (compute never skipped, graphics skipped only when they
+change nothing but the picture) was proposed upstream in KytyPS5#937 (Senaxx,
+b804a66) and KytyPS5#1469, and is used by TheCruZ/KytyPS5-GTA 15c8f43; KytyPS5#718
+dropped an asynchronous compute path because a skipped dispatch is never
+replayed. Here it is opt-in and on top of the existing background queue.
+
+Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
+```
+CarRamRod-963
+added a commit
+to CarRamRod-963/KytyPS5
+that referenced
+this pull request
+Oct 24, 2026
+renderer: optionally skip draws whose pipeline is still being built
+…
+8e8a48c
+```
+A graphics pipeline that is neither in the pipeline cache nor in the
+driver cache is built on the GPU thread at its first draw. On NVIDIA the
+large modules of open-world titles take 1-65 s each, during which the
+picture freezes while the game (and its audio) runs on. Building them
+unoptimized first does not help there: it costs as much as the optimized
+build.
+
+--skip-pending-draws true (default false, so nothing changes unless it is
+asked for) lets such a draw leave the whole optimized build to the
+background compile queue and be skipped until the pipeline is installed.
+Only a draw whose only effect is the picture is skipped
+(PendingDrawSkipBlocker, a pure function with its own unit test):
+
+- no stage writes memory: no buffer or image stores or atomics (GPU-
+  selected stores included), no device-address writes, no GDS;
+- no guest query counts it (occlusion counters are synthetic today, so
+  this is always false until host queries land);
+- no color target is linear and no depth/stencil write goes to a linear
+  target: the CPU reads such images back as data;
+- it is not a DB_RENDER_CONTROL depth/stencil clear.
+
+Every other draw, and every dispatch, waits for its pipeline exactly as
+before. Skipping is bounded: 2 s after a build was queued its draws wait
+for it (PipelineCompileQueue::Expedite runs it on the GPU thread if it
+has not started), so a slow build cannot hide geometry for long.
+
+The pipeline is looked up before the draw prepares its bindings, vertex
+and index buffers or render targets, so a skipped draw records nothing,
+uploads nothing, consumes no HTile clear state and marks no GPU writes;
+target discovery has already run, as for any draw. The finished pipeline
+is installed by the existing InstallOptimizedPipelines path at the next
+lookup. The cache logs once per pipeline when its draws are first
+skipped, when a draw has to wait for it, and when it is ready (with the
+time since it was queued and the number of skipped draws); the
+performance overlay shows skipped draws per second.
+
+The same policy (compute never skipped, graphics skipped only when they
+change nothing but the picture) was proposed upstream in KytyPS5#937 (Senaxx,
+b804a66) and KytyPS5#1469, and is used by TheCruZ/KytyPS5-GTA 15c8f43; KytyPS5#718
+dropped an asynchronous compute path because a skipped dispatch is never
+replayed. Here it is opt-in and on top of the existing background queue.
+
+Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
+```
+CarRamRod-963
+added a commit
+to CarRamRod-963/KytyPS5
+that referenced
+this pull request
+Oct 25, 2026
+renderer: optionally skip draws whose pipeline is still being built
+…
+6c92e23
+```
+A graphics pipeline that is neither in the pipeline cache nor in the
+driver cache is built on the GPU thread at its first draw. On NVIDIA the
+large modules of open-world titles take 1-65 s each, during which the
+picture freezes while the game (and its audio) runs on. Building them
+unoptimized first does not help there: it costs as much as the optimized
+build.
+
+--skip-pending-draws true (default false, so nothing changes unless it is
+asked for) lets such a draw leave the whole optimized build to the
+background compile queue and be skipped until the pipeline is installed.
+Only a draw whose only effect is the picture is skipped
+(PendingDrawSkipBlocker, a pure function with its own unit test):
+
+- no stage writes memory: no buffer or image stores or atomics (GPU-
+  selected stores included), no device-address writes, no GDS;
+- no guest query counts it (occlusion counters are synthetic today, so
+  this is always false until host queries land);
+- no color target is linear and no depth/stencil write goes to a linear
+  target: the CPU reads such images back as data;
+- it is not a DB_RENDER_CONTROL depth/stencil clear.
+
+Every other draw, and every dispatch, waits for its pipeline exactly as
+before. Skipping is bounded: 2 s after a build was queued its draws wait
+for it (PipelineCompileQueue::Expedite runs it on the GPU thread if it
+has not started), so a slow build cannot hide geometry for long.
+
+The pipeline is looked up before the draw prepares its bindings, vertex
+and index buffers or render targets, so a skipped draw records nothing,
+uploads nothing, consumes no HTile clear state and marks no GPU writes;
+target discovery has already run, as for any draw. The finished pipeline
+is installed by the existing InstallOptimizedPipelines path at the next
+lookup. The cache logs once per pipeline when its draws are first
+skipped, when a draw has to wait for it, and when it is ready (with the
+time since it was queued and the number of skipped draws); the
+performance overlay shows skipped draws per second.
+
+The same policy (compute never skipped, graphics skipped only when they
+change nothing but the picture) was proposed upstream in KytyPS5#937 (Senaxx,
+b804a66) and KytyPS5#1469, and is used by TheCruZ/KytyPS5-GTA 15c8f43; KytyPS5#718
+dropped an asynchronous compute path because a skipped dispatch is never
+replayed. Here it is opt-in and on top of the existing background queue.
+
+Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
+```
+CarRamRod-963
+added a commit
+to CarRamRod-963/KytyPS5
+that referenced
+this pull request
+Oct 25, 2026
+renderer: optionally skip draws whose pipeline is still being built
+…
+c380679
+```
+A graphics pipeline that is neither in the pipeline cache nor in the
+driver cache is built on the GPU thread at its first draw. On NVIDIA the
+large modules of open-world titles take 1-65 s each, during which the
+picture freezes while the game (and its audio) runs on. Building them
+unoptimized first does not help there: it costs as much as the optimized
+build.
+
+--skip-pending-draws true (default false, so nothing changes unless it is
+asked for) lets such a draw leave the whole optimized build to the
+background compile queue and be skipped until the pipeline is installed.
+Only a draw whose only effect is the picture is skipped
+(PendingDrawSkipBlocker, a pure function with its own unit test):
+
+- no stage writes memory: no buffer or image stores or atomics (GPU-
+  selected stores included), no device-address writes, no GDS;
+- no guest query counts it (occlusion counters are synthetic today, so
+  this is always false until host queries land);
+- no color target is linear and no depth/stencil write goes to a linear
+  target: the CPU reads such images back as data;
+- it is not a DB_RENDER_CONTROL depth/stencil clear.
+
+Every other draw, and every dispatch, waits for its pipeline exactly as
+before. Skipping is bounded: 2 s after a build was queued its draws wait
+for it (PipelineCompileQueue::Expedite runs it on the GPU thread if it
+has not started), so a slow build cannot hide geometry for long.
+
+The pipeline is looked up before the draw prepares its bindings, vertex
+and index buffers or render targets, so a skipped draw records nothing,
+uploads nothing, consumes no HTile clear state and marks no GPU writes;
+target discovery has already run, as for any draw. The finished pipeline
+is installed by the existing InstallOptimizedPipelines path at the next
+lookup. The cache logs once per pipeline when its draws are first
+skipped, when a draw has to wait for it, and when it is ready (with the
+time since it was queued and the number of skipped draws); the
+performance overlay shows skipped draws per second.
+
+The same policy (compute never skipped, graphics skipped only when they
+change nothing but the picture) was proposed upstream in KytyPS5#937 (Senaxx,
+b804a66) and KytyPS5#1469, and is used by TheCruZ/KytyPS5-GTA 15c8f43; KytyPS5#718
+dropped an asynchronous compute path because a skipped dispatch is never
+replayed. Here it is opt-in and on top of the existing background queue.
+
+Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
+```
+chaitan3
+mentioned this pull request
+Oct 28, 2026
+Fix for Call of Duty Vanguard to get to first mission screen
+#1961
+Open
+Nawid3333
+mentioned this pull request
+Oct 29, 2026
+graphics: collect scalar reads without native recursion (Assassin's Creed Black Flag)
+#1967
+Open
+CarRamRod-963
+added a commit
+to CarRamRod-963/KytyPS5
+that referenced
+this pull request
+Oct 29, 2026
+renderer: optionally skip draws whose pipeline is still being built
+…
+be034b9
+```
+A graphics pipeline that is neither in the pipeline cache nor in the
+driver cache is built on the GPU thread at its first draw. On NVIDIA the
+large modules of open-world titles take 1-65 s each, during which the
+picture freezes while the game (and its audio) runs on. Building them
+unoptimized first does not help there: it costs as much as the optimized
+build.
+
+--skip-pending-draws true (default false, so nothing changes unless it is
+asked for) lets such a draw leave the whole optimized build to the
+background compile queue and be skipped until the pipeline is installed.
+Only a draw whose only effect is the picture is skipped
+(PendingDrawSkipBlocker, a pure function with its own unit test):
+
+- no stage writes memory: no buffer or image stores or atomics (GPU-
+  selected stores included), no device-address writes, no GDS;
+- no guest query counts it (occlusion counters are synthetic today, so
+  this is always false until host queries land);
+- no color target is linear and no depth/stencil write goes to a linear
+  target: the CPU reads such images back as data;
+- it is not a DB_RENDER_CONTROL depth/stencil clear.
+
+Every other draw, and every dispatch, waits for its pipeline exactly as
+before. Skipping is bounded: 2 s after a build was queued its draws wait
+for it (PipelineCompileQueue::Expedite runs it on the GPU thread if it
+has not started), so a slow build cannot hide geometry for long.
+
+The pipeline is looked up before the draw prepares its bindings, vertex
+and index buffers or render targets, so a skipped draw records nothing,
+uploads nothing, consumes no HTile clear state and marks no GPU writes;
+target discovery has already run, as for any draw. The finished pipeline
+is installed by the existing InstallOptimizedPipelines path at the next
+lookup. The cache logs once per pipeline when its draws are first
+skipped, when a draw has to wait for it, and when it is ready (with the
+time since it was queued and the number of skipped draws); the
+performance overlay shows skipped draws per second.
+
+The same policy (compute never skipped, graphics skipped only when they
+change nothing but the picture) was proposed upstream in KytyPS5#937 (Senaxx,
+b804a66) and KytyPS5#1469, and is used by TheCruZ/KytyPS5-GTA 15c8f43; KytyPS5#718
+dropped an asynchronous compute path because a skipped dispatch is never
+replayed. Here it is opt-in and on top of the existing background queue.
+
+Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
+```
+Sign up for free
+to join this conversation on GitHub.
+Already have an account?
+Sign in to comment
+Uh oh!
+There was an error while loading. Please reload this page.
+Labels
+None yet
+4 participants
+Add this suggestion to a batch that can be applied as a single commit.This suggestion is invalid because no changes were made to the code.Suggestions cannot be applied while the pull request is closed.Suggestions cannot be applied while viewing a subset of changes.Only one suggestion per line can be applied in a batch.Add this suggestion to a batch that can be applied as a single commit.Applying suggestions on deleted lines is not supported.You must change the existing code in this line in order to create a valid suggestion.Outdated suggestions cannot be applied.This suggestion has been applied or marked resolved.Suggestions cannot be applied from pending reviews.Suggestions cannot be applied on multi-line comments.Suggestions cannot be applied while the pull request is queued to merge.Suggestion cannot be applied right now. Please check back later.
+You can’t perform that action at this time.

@@ -1,0 +1,79 @@
+--- v003.md
++++ v004.md
+@@ -7,28 +7,10 @@
+ 
+ ## Shared principles
+-The rendering pipeline of 3DGS consists of two primary stages, each with distinct optimization goals [12180]:
+-
+-1.  **Front-End (Memory-Bound):**
+-    *   **Projection and Sorting:** 3D Gaussians are projected to 2D, generating a depth key for each. To ensure correct alpha compositing, Gaussians must be sorted front-to-back (increasing depth) within each image tile.
+-    *   **Attribute Fetching:** For each Gaussian-pixel pair, attributes (opacity, spherical harmonic coefficients) are fetched from global memory.
+-    *   **Optimization Goal:** Reduce global memory traffic and bandwidth usage. This is achieved by compressing data (quantization, key compression) and fusing kernels to avoid intermediate writes [12180].
+-
+-2.  **Rasterization (Compute-Bound):**
+-    *   **Alpha Compositing:** The final pixel color $C$ is computed via alpha blending:
+-        $$C = \sum_{i=1}^N c_i \alpha_i T_i, \quad T_i = \prod_{j=1}^{i-1} (1 - \alpha_j)$$
+-        where $c_i$ is the color, $\alpha_i$ is the opacity, and $T_i$ is the transmittance [12180].
+-    *   **Gaussian Evaluation:** The opacity $\alpha_i$ for a pixel at $(x,y)$ relative to a Gaussian center $(u,v)$ is computed as [12180]:
+-        $$\alpha_i = o \exp(p(x, y))$$
+-        where $o$ is the base opacity and $p(x, y)$ is the Gaussian power:
+-        $$p(x, y) = -\frac{1}{2} \left( a(x - w)^2 + b(x - u)(y - v) + c(y - v)^2 \right)$$
+-        Here, $a, b, c$ are derived from the projected 2D covariance matrix, and $(w, v)$ are the center coordinates [12180].
+-    *   **Optimization Goal:** Increase instruction-level parallelism (ILP) and reduce expensive operations (like `exp`) within the per-pixel loop [12180].
+-
+-For distributed training, the global set of 3D Gaussians $\mathcal{G}$ is partitioned across $M$ GPUs. Each GPU maintains a local shard $\mathcal{G}^{(m)}$ and its optimizer state. The training loop involves local projection of the shard, communication (e.g., all-to-all exchange) to route Gaussians to responsible GPUs, filtering via importance scoring or pruning, and local rasterization with gradient updates [15108].
++See [Hardware and Computational Acceleration](16214-hardware-and-computational-acceleration.md) for the shared rendering pipeline principles.
+ 
+ ## Subtopics
+ 
+ ### BlitzGS
+-BlitzGS is a distributed 3D Gaussian Splatting (3DGS) framework designed to accelerate city-scale training by reducing the active Gaussian workload at three coupled levels: system-level sharding, model-level population control, and view-level filtering [S1]. Unlike spatial block partitioning which suffers from cross-block visibility waste and imbalanced shards, BlitzGS shards Gaussians by index parity and uses a single all-to-all communication step to distribute rendering tiles, ensuring balanced loads without a final merge step [S1]. It achieves nearly an order-of-magnitude speedup over baselines like Momen.GS and CityGS-X while maintaining high reconstruction quality [S1].
++BlitzGS is a distributed 3D Gaussian Splatting (3DGS) framework designed to accelerate city-scale training by reducing the active Gaussian workload at three coupled levels: system-level sharding, model-level population control, and view-level filtering [S2, unofficial]. Unlike spatial block partitioning which suffers from cross-block visibility waste and imbalanced shards, BlitzGS shards Gaussians by index parity and uses a single all-to-all communication step to distribute rendering tiles, ensuring balanced loads without a final merge step [S2, unofficial]. It achieves nearly an order-of-magnitude speedup over an edge GPU baseline (5.41×) and up to 17.3× with a customized accelerator, while incurring minimal visual quality degradation [S1].
+ 
+ ### [GS-Cache Inference Framework](15588-gs-cache-inference-framework.md)
+@@ -41,17 +23,37 @@
+ 
+ ### Spatial Block Partitioning
+-**Definition:** Divides the scene into fixed world-space spatial blocks (e.g., uniform grid). Each GPU is bound to a specific block and trains its Gaussians independently [S2, unofficial].
+-**Step:** Construct a uniform grid (e.g., 4×5 or 5×6). Assign each block a boundary halo of neighboring Gaussians for cross-block consistency. Train blocks independently across GPUs. During rendering, cameras near block boundaries trigger cross-block visibility overlap and boundary reassignment. Perform a final single-GPU merge to assemble the full scene [S2, unofficial].
+-**Pitfall:** Overlapping blocks re-optimize the same surfaces, wasting computation. In a 20-block split, 23.5M Gaussians are optimized but only 5.37M survive merge (77% discarded). Finer partitions increase redundancy and training time with negligible quality gain (<0.2 dB) [S2, unofficial].
+-**Number:** On Building (1,920 cameras, 4 GPUs), 86.8% of cameras fall in ≥2 blocks for 20-block partition, and 95.5% for 30-block partition. Wall-clock time for split/make-span/merge reaches 115.6–169.8 min vs 39 min for sharding [S2, unofficial].
++**Definition:** Divides the scene into fixed world-space spatial blocks (e.g., uniform grid) [S2, unofficial].
++**Step:** Construct a uniform grid (e.g., 4×5 or 5×6) and assign each block a boundary halo of neighboring Gaussians for cross-block consistency [S2, unofficial]. Each GPU is bound to a specific block and trains its Gaussians independently [S2, unofficial]. During rendering, cameras near block boundaries trigger cross-block visibility overlap and boundary reassignment, requiring a final single-GPU merge to assemble the full scene [S2, unofficial].
++**Pitfall:** Overlapping blocks re-optimize the same surfaces, wasting computation [S2, unofficial]. In a 20-block split, 23.5M Gaussians are optimized but only 5.37M survive merge (77% discarded) [S2, unofficial]. Finer partitions increase redundancy and training time with negligible quality gain (<0.2 dB) [S2, unofficial].
++**Number:** On Building (1,920 cameras, 4 GPUs), 86.8% of cameras fall in ≥2 blocks for 20-block partition, and 95.5% for 30-block partition [S2, unofficial]. Wall-clock time for split/make-span/merge reaches 115.6–169.8 min vs 39 min for sharding [S2, unofficial].
+ 
+ ### Primitive Sharding (Index-Parity Sharding)
+-**Definition:** Distributes a single global Gaussian model across multiple GPUs by assigning Gaussians to ranks based on index parity. Each GPU holds a balanced, scene-wide slice of the model [S2, unofficial].
+-**Step:** Assign each Gaussian primitive to a GPU rank using index parity. During rendering, distribute each step through balanced tile allocation across GPUs. Route projected Gaussians to tile owners via all-to-all communication. Train using a single global camera stream. Each camera enters training once per iteration with no cross-block duplication. Only distributed cost is the all-to-all exchange inside each render step [S2, unofficial].
++**Definition:** Distributes a single global Gaussian model across multiple GPUs by assigning Gaussians to ranks based on index parity [S2, unofficial]. Each GPU holds a balanced, scene-wide slice of the model [S2, unofficial].
++**Step:** Assign each Gaussian primitive to a GPU rank using index parity [S2, unofficial]. During rendering, distribute each step through balanced tile allocation across GPUs [S2, unofficial]. Route projected Gaussians to tile owners via all-to-all communication [S2, unofficial]. Train using a single global camera stream [S2, unofficial]. Each camera enters training once per iteration with no cross-block duplication [S2, unofficial]. Only distributed cost is the all-to-all exchange inside each render step [S2, unofficial].
+ **Number:** On a 4-GPU setup (Building scene, 1,920 cameras), communication cost for routing projected Gaussians to tile owners is 3–5 ms per iteration, staying under 7% of total iteration time [S2, unofficial].
+-**Comparison:** Unlike spatial block partitioning, it eliminates boundary reassignment, cross-block visibility overlap, and the final single-GPU merge step. Storage and per-step rendering remain evenly distributed as GPU count grows [S2, unofficial].
++**Comparison:** Unlike spatial block partitioning, it eliminates boundary reassignment, cross-block visibility overlap, and the final single-GPU merge step [S2, unofficial]. Storage and per-step rendering remain evenly distributed as GPU count grows [S2, unofficial].
++
++### [Distributed 3D Gaussian Splatting](16979-distributed-3d-gaussian-splatting.md)
++**Definition:** A multi-GPU extension of the 3D-GS pipeline designed for scientific visualization, enabling scalable processing of large datasets that exceed single-GPU memory capacity.
++**Step:** Partition the global set of Gaussian primitives and training data across multiple GPUs. Utilize a fused all-reduce scheme for gradient synchronization to maintain high-fidelity isosurface reconstruction at previously infeasible scales.
++**When to choose:** Use when training on scientific volume data (e.g., CFD simulations) with Gaussian counts exceeding ~11.2M, which exceeds the memory limit of a single NVIDIA A100 GPU.
++
++### [Distributed Batched Rendering Loop](18495-distributed-batched-rendering-loop.md)
++**Definition:** A parallelized training and inference pipeline for 3DGS that processes multiple camera views simultaneously across a cluster of GPUs.
++**Step:** Partition the global set of 3D Gaussians and distribute the rendering workload. Employ dynamic load balancing and sparse all-to-all communication to ensure efficient data distribution and aggregation across distributed ranks.
++**When to choose:** Use to solve memory and compute bottlenecks of single-GPU training for high-resolution and large-scale scene reconstruction.
++
++### [Online Image Rendering Placement](19195-online-image-rendering-placement.md)
++**Definition:** A per-iteration optimization step in distributed 3DGS training that assigns image patches to GPUs to minimize inter-node communication and balance computational load.
++**Step:** Dynamically solve for the optimal data placement for each small training batch using a fast heuristic solver, rather than relying on offline pre-computed assignments.
++**When to choose:** Use when scaling to many GPUs where whole-image assignment limits flexibility, and patch-level granularity (p=2–8) is needed for fine-grained placement.
++
++### [Grendel](19770-grendel.md)
++**Definition:** A distributed training system for 3DGS that partitions parameters and parallelizes computation across multiple GPUs to overcome single-GPU memory constraints in high-resolution and large-scale reconstruction.
++**Step:** Support batched training with multiple views and exploit mixed parallelism (Gaussian-wise and pixel-wise) with sparse all-to-all communication to handle dynamic workload imbalances.
++**When to choose:** Use when static workload partitioning fails due to dynamic and unbalanced workloads caused by varying Gaussian densities and scene complexity.
+ 
+ ## Background
+-Originating from the need to scale 3D Gaussian Splatting to city-scale scenes, distributed training methods evolved from naive spatial partitioning to sophisticated index-parity sharding. Spatial block partitioning was found to be inefficient due to boundary overlaps and merge costs [S2, unofficial]. BlitzGS introduced index-parity sharding to eliminate these issues, achieving significant speedups [S2, unofficial]. Concurrently, LS-Gaussian focused on hardware-aware streaming and workload prediction to reduce stalls in real-time rendering [S1].
++Originating from the need to scale 3D Gaussian Splatting to city-scale scenes, distributed training methods evolved from naive spatial partitioning to sophisticated index-parity sharding [S2, unofficial]. Spatial block partitioning was found to be inefficient due to boundary overlaps and merge costs [S2, unofficial]. BlitzGS introduced index-parity sharding to eliminate these issues, achieving significant speedups [S2, unofficial]. Concurrently, LS-Gaussian focused on hardware-aware streaming and workload prediction to reduce stalls in real-time rendering [S1].
+ 
+ ## Sources

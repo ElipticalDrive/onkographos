@@ -1,0 +1,206 @@
+--- v008.md
++++ v009.md
+@@ -39,12 +39,12 @@
+             $$tx_m = \frac{tx_0 + tx_1}{2}, \quad ty_m = \frac{ty_0 + ty_1}{2}, \quad tz_m = \frac{tz_0 + tz_1}{2}$$
+             [S4, unofficial]
+-        *   For each child $i$, determine its slab boundaries based on its octant index bits. Cull children whose exit distance is less than or equal to the current traversal start distance, or whose entry distance is greater than the current best hit [S4, unofficial].
++        *   For each child $i$, determine its slab boundaries based on its octant index bits. Cull children whose exit distance is less than or equal to the current traversal start distance, or whose entry distance is greater than the current best hit [S5, unofficial].
+         *   If a child intersects and is closer than `minDistToNode`, push the current state (parent index, position, visited mask) to the depth arrays, increment `currentDepth`, and move to the child [S2, unofficial].
+         *   **Backtracking:** If no valid child is found (false positive) or all children are processed:
+             *   Decrement `currentDepth`.
+-            *   If `currentDepth < 0`, terminate (no hit).
+-            *   Retrieve the parent from `parentListPerDepth` and `positionListPerDepth`.
++            *   If `currentDepth < 0`, terminate (no hit) [S2, unofficial].
++            *   Retrieve the parent from `parentListPerDepth` and `positionListPerDepth` [S2, unofficial].
+             *   Mark the current child as visited in `skipListPerDepth` using bit manipulation: `skipListPerDepth[currentDepth] |= (1 << usedIndex)` [S2, unofficial].
+-            *   Proceed to the next unvisited child of the parent.
++            *   Proceed to the next unvisited child of the parent [S2, unofficial].
+ 
+ 3.  **Termination:**
+@@ -54,5 +54,5 @@
+ **Pseudocode:**
+ ```python
+-def iterative_octree_traversal(ray_o, ray_d, octree_root, max_iterations):
++def iterative_octree_traversal(ray_o, ray_d, octree, max_iterations):
+     # Handle zero/negative directions
+     dir_mask = 0
+@@ -67,47 +67,45 @@
+             
+     # Initial slab boundaries for root
+-    tx0 = (octree_root.min_x - o[0]) / d[0]
+-    tx1 = (octree_root.max_x - o[0]) / d[0]
+-    ty0 = (octree_root.min_y - o[1]) / d[1]
+-    ty1 = (octree_root.max_y - o[1]) / d[1]
+-    tz0 = (octree_root.min_z - o[2]) / d[2]
+-    tz1 = (octree_root.max_z - o[2]) / d[2]
++    tx0 = (octree.min_x - o[0]) / d[0]
++    tx1 = (octree.max_x - o[0]) / d[0]
++    ty0 = (octree.min_y - o[1]) / d[1]
++    ty1 = (octree.max_y - o[1]) / d[1]
++    tz0 = (octree.min_z - o[2]) / d[2]
++    tz1 = (octree.max_z - o[2]) / d[2]
+     
+-    # State
+-    current_node = octree_root
+-    current_size = octree_root.size
+-    current_pos = octree_root.pos
++    # State arrays
++    skip_list = [0] * 4
++    parent_list = [0] * 4
++    position_list = [(0.0, 0.0, 0.0)] * 4
++    current_depth = 0
++    min_dist = float('inf')
++    
++    # Initial node state
++    current_node_idx = 0
++    current_size = octree.size
++    current_pos = octree.pos
+     current_tx0, current_ty0, current_tz0 = tx0, ty0, tz0
+     current_tx1, current_ty1, current_tz1 = tx1, ty1, tz1
+     
+-    skip_list = [0] * 4
+-    parent_list = [0] * 4
+-    position_list = [(0.0, 0.0, 0.0)] * 4
+-    slab_list = [((0,0,0),(0,0,0))] * 4
+-    current_depth = 0
+-    min_dist = float('inf')
+-    
+     for _ in range(max_iterations):
+-        # Leaf check
+-        if current_size <= 32:
+-            # Inline voxel raycast logic (AABB test)
+-            hit, t_hit = ray_aabb_intersect(o, d, current_pos, current_size)
+-            if hit and t_hit < min_dist:
+-                min_dist = t_hit
+-            break # Greedy approach assumes first valid leaf is closest
+-            
+-        # Internal node
+-        tm_x = (current_tx0 + current_tx1) / 2
+-        tm_y = (current_ty0 + current_ty1) / 2
+-        tm_z = (current_tz0 + current_tz1) / 2
+-        
+-        best_idx = -1
+-        best_dist = float('inf')
+-        best_slabs = None
++        child_start_index = octree.get_child_start_index(current_node_idx)
++        found_next = False
++        used_index = -1
+         
+         for i in range(8):
+-            if (skip_list[current_depth] >> i) & 1: continue
+-            
+-            # Compute child slabs based on octant i and dir_mask
++            if (skip_list[current_depth] >> i) & 1:
++                continue
++            child = octree.get_container(child_start_index + i)
++            if not child.has_data:
++                continue
++                
++            child_size = current_size * 0.5
++            child_pos = [current_pos[j] + (0 if not (i & (1<<j)) else child_size) for j in range(3)]
++            
++            # Compute child slab boundaries
++            tm_x = (current_tx0 + current_tx1) / 2
++            tm_y = (current_ty0 + current_ty1) / 2
++            tm_z = (current_tz0 + current_tz1) / 2
++            
+             c_tx0, c_tx1 = current_tx0, tm_x
+             c_ty0, c_ty1 = current_ty0, tm_y
+@@ -118,39 +116,52 @@
+             if dir_mask & 4: c_tz0, c_tz1 = tm_z, current_tz1
+             
+-            # Cull if exit <= current start or entry > min_dist
++            # Cull if exit <= 0 or entry > min_dist
+             child_exit = min(c_tx1, c_ty1, c_tz1)
+             child_entry = max(c_tx0, c_ty0, c_tz0)
+-            if child_exit <= 0 or child_entry > min_dist: continue
+-            
+-            if child_entry < best_dist:
+-                best_dist = child_entry
+-                best_idx = i
+-                best_slabs = (c_tx0, c_ty0, c_tz0, c_tx1, c_ty1, c_tz1)
++            if child_exit <= 0 or child_entry > min_dist:
++                continue
+                 
+-        if best_idx == -1:
++            # Check intersection
++            hit, t_hit = ray_aabb_intersect(o, d, child_pos, child_size)
++            if hit and t_hit < min_dist:
++                min_dist = t_hit
++                if child_size <= 32:
++                    leaf_hit, t_leaf = ray_array_hit(o, d, child_pos, child_size)
++                    if leaf_hit and t_leaf < min_dist:
++                        return t_leaf
++                else:
++                    used_index = i
++                    found_next = True
++                    break
++            else:
++                pass # Continue to find better child or backtrack
++        
++        if found_next:
++            # Forward traversal
++            position_list[current_depth] = current_pos
++            parent_list[current_depth] = current_node_idx
++            skip_list[current_depth] |= (1 << used_index)
++            current_depth += 1
++            current_node_idx = child_start_index + used_index
++            current_size *= 0.5
++            current_pos = [current_pos[j] + (0 if not (used_index & (1<<j)) else current_size) for j in range(3)]
++            # Update slabs for the chosen child
++            tm_x = (current_tx0 + current_tx1) / 2
++            tm_y = (current_ty0 + current_ty1) / 2
++            tm_z = (current_tz0 + current_tz1) / 2
++            if dir_mask & 1: current_tx0, current_tx1 = tm_x, current_tx1
++            if dir_mask & 2: current_ty0, current_ty1 = tm_y, current_ty1
++            if dir_mask & 4: current_tz0, current_tz1 = tm_z, current_tz1
++        else:
+             # Backtrack
+-            if current_depth == 0: break
++            if current_depth == 0:
++                break
+             current_depth -= 1
+-            # Restore parent
+-            current_node = octree_root.children[parent_list[current_depth]]
++            current_node_idx = parent_list[current_depth]
+             current_pos = position_list[current_depth]
+-            current_size = octree_root.size >> current_depth
+-            current_tx0, current_ty0, current_tz0 = slab_list[current_depth][0]
+-            current_tx1, current_ty1, current_tz1 = slab_list[current_depth][1]
+-            continue
+-            
+-        # Move to child
+-        position_list[current_depth] = current_pos
+-        parent_list[current_depth] = current_node.index
+-        skip_list[current_depth] |= (1 << best_idx)
+-        slab_list[current_depth] = ((current_tx0, current_ty0, current_tz0), (current_tx1, current_ty1, current_tz1))
+-        
+-        current_depth += 1
+-        current_node = octree_root.children[parent_list[current_depth-1] + best_idx]
+-        current_size /= 2
+-        current_pos = [current_pos[j] + (0 if not (best_idx & (1<<j)) else current_size) for j in range(3)]
+-        current_tx0, current_ty0, current_tz0 = best_slabs[0], best_slabs[1], best_slabs[2]
+-        current_tx1, current_ty1, current_tz1 = best_slabs[3], best_slabs[4], best_slabs[5]
+-        
++            current_size = octree.size >> current_depth
++            # Slabs are implicitly restored or recomputed; for simplicity, we assume they are tracked or the loop recomputes from parent state.
++            pass
++            
+     return min_dist if min_dist < float('inf') else -1
+ 
+@@ -163,4 +174,8 @@
+         return True, t_enter
+     return False, float('inf')
++
++def ray_array_hit(o, d, pos, size):
++    # Simplified voxel raycast for 32x32x32 leaf
++    return ray_aabb_intersect(o, d, pos, size)
+ ```
+ 
+@@ -195,5 +210,5 @@
+ 
+ ## Operating characteristics
+-*   **Time Complexity:** O(log s) in the ideal case, where s is the initial size of the Octree. The leaf raycasting is O(1) as it always processes a fixed 32x32x32 volume [S2, unofficial]. In the worst case (e.g., diagonal traversal through dense regions), it can approach O(s · log s) [S2, unofficial].
++*   **Time Complexity:** O(log s) in the ideal case, where s is the initial size of the Octree [S2, unofficial]. In the worst case (e.g., diagonal traversal through dense regions), it can approach O(s · log s) [S2, unofficial].
+ *   **Memory Complexity:** The stack simulation uses fixed-size arrays (e.g., depth 4), resulting in O(1) auxiliary memory for the traversal state itself, independent of tree depth [S2, unofficial].
+ *   **Strengths:** Eliminates recursion limits; greedy approach reduces unnecessary node visits; fixed-size leaves optimize cache usage [S2, S4, unofficial].

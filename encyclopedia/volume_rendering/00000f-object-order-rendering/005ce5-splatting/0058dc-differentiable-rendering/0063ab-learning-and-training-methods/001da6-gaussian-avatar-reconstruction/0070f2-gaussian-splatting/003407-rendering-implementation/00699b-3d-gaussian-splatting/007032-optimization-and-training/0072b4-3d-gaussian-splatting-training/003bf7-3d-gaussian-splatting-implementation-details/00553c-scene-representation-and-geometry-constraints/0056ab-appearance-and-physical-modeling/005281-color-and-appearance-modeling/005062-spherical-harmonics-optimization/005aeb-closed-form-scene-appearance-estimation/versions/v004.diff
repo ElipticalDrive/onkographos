@@ -1,0 +1,491 @@
+--- v003.md
++++ v004.md
+@@ -4,148 +4,169 @@
+ 
+ ## Overview
+-This method solves for the spherical harmonic (SH) coefficients of mesh vertices by formulating a global weighted least-squares problem that jointly fits RGB observations from all calibrated training views [S1, unofficial]. It distinguishes itself from iterative gradient-based optimization by providing an analytical solution to the appearance estimation sub-problem, utilizing adaptive regularization to handle varying angular support across the mesh surface [S1, unofficial].
++Closed-Form Scene Appearance Estimation solves the problem of estimating view-dependent spherical harmonic (SH) coefficients for mesh vertices by formulating a global weighted least-squares problem across all calibrated input views [S1, unofficial]. It differs from iterative optimization methods by providing an analytical solution to the normal system, utilizing adaptive regularization to handle varying view support and a matrix-free Preconditioned Conjugate Gradient (PCG) solver to avoid explicit matrix inversion [S1, unofficial].
+ 
+ ## How it works
+-**Inputs:**
+-*   A mesh $M$ with $N_v$ vertices.
+-*   $K$ calibrated RGB images $\{I_k\}_{k=1}^K$.
+-*   SH degree $L$ (typically up to degree 2, i.e., $s=0,1,2$).
+-*   Regularization strengths $\gamma_s$ (supported) and $\gamma_u$ (under-supported), where $0 < \gamma_s \ll \gamma_u$ [S1, unofficial].
+-*   Minimum confidence weight threshold $\epsilon_w$ [S1, unofficial].
+-
+-**Outputs:**
+-*   Estimated SH coefficients $X^*$ for each vertex.
++**Inputs:** A textured mesh $M$ with $N_v$ vertices, $K$ calibrated RGB images $\{I_k\}_{k=1}^K$, SH degree $L$ (typically up to order 2 for real-time constraints), regularization strengths $\gamma_s$ (supported) and $\gamma_u$ (under-supported), and solver parameters (tolerance $\delta$, max iterations $T_{max}$) [S1, unofficial].
++**Outputs:** Estimated SH coefficients $X^*$ for each vertex [S1, unofficial].
+ 
+ **Data Structures:**
+-*   **Rasterization Records ($R$):** Stores per-pixel data including vertex indices $i_{s,k,r}$, SH basis evaluations $\phi_{s,k,r}$, and confidence weights $w_{k,r}$.
++*   **Rasterization Records ($R$):** Stores per-pixel data including vertex indices $i_{s,k,r}$, SH basis features $\phi_{s,k,r}$, and confidence weights $w_{k,r}$ [S1, unofficial].
+ *   **Global Matrices:**
+-    *   $A \in \mathbb{R}^{(K \cdot H \cdot W) \times (q N_v)}$: The design matrix mapping vertex SH coefficients to pixel observations. $q$ is the number of SH coefficients per vertex.
+-    *   $B \in \mathbb{R}^{(K \cdot H \cdot W) \times 3}$: The observation vector containing flattened RGB pixel values.
++    *   $A \in \mathbb{R}^{(K \cdot H \cdot W) \times (q N_v)}$: The design matrix, where $q$ is the number of SH coefficients per vertex and $N_v$ is the number of vertices.
++    *   $B \in \mathbb{R}^{(K \cdot H \cdot W) \times 3}$: The observation matrix containing RGB pixel values.
+     *   $W \in \mathbb{R}^{(K \cdot H \cdot W) \times (K \cdot H \cdot W)}$: A diagonal matrix of confidence weights.
+-    *   $\Lambda \in \mathbb{R}^{(q N_v) \times (q N_v)}$: A block-diagonal regularization matrix.
+-    *   $H \in \mathbb{R}^{(q N_v) \times (q N_v)}$: The normal matrix (Hessian approximation).
+-    *   $G \in \mathbb{R}^{(q N_v) \times 3}$: The right-hand side vector.
++    *   $\Lambda \in \mathbb{R}^{(q N_v) \times (q N_v)}$: Block-diagonal regularization matrix [S1, unofficial].
+ 
+ **Steps:**
+ 
+-1.  **Initialization:** Initialize rasterization records $R$ and view counts $\{n^v_i\}_{i=1}^{N_v}$ for each vertex [S1, unofficial].
+-2.  **Per-View Rasterization and Assembly:**
+-    For each view $k = 1 \dots K$:
+-    a. Rasterize mesh $M$ to establish pixel-to-triangle/vertex correspondence. Initialize per-view matrix $A_k$ [S1, unofficial].
++1.  **Initialization:** Initialize rasterization records $R$ and view counts $\{n^v_i\}_{i=1}^{N_v}$ to zero [S1, unofficial].
++2.  **Per-View Rasterization:** For each view $k = 1 \dots K$:
++    a. Rasterize mesh $M$ to establish pixel-to-triangle correspondence. Initialize per-view matrix $A_k$ [S1, unofficial].
+     b. For each valid pixel $p_{k,r}$:
+-       i. Retrieve SH features $\{i_{s,k,r}, \lambda_{s,k,r}\}_{s=0}^2$ associated with the covering triangle/vertex [S1, unofficial].
+-       ii. Compute the SH basis evaluation: $\phi_{s,k,r} \leftarrow \lambda_{s,k,r} Y(\mathbf{d}_k)$, where $\mathbf{d}_k$ is the viewing direction [S1, unofficial].
+-       iii. Populate the design matrix row: $[A_k]_{r, i_{s,k,r}} \leftarrow (\phi_{s,k,r})^\top$ [S1, unofficial].
+-       iv. Compute confidence weight $w_{k,r}$ (e.g., based on grazing angle or depth consistency) [S1, unofficial].
+-       v. Store $\{i_{s,k,r}, \phi_{s,k,r}\}_{s=0}^2$, $w_{k,r}$ in $R$ [S1, unofficial].
+-    c. Construct per-view observation vector $B_k \leftarrow [I_k(p_{k,1}) \dots I_k(p_{k,HW})]^\top$ [S1, unofficial].
+-    d. Construct per-view weight matrix $W_k \leftarrow \text{diag}(w_{k,1}, \dots, w_{k,HW})$ [S1, unofficial].
+-    e. Update view counts $\{n^v_i\}$ based on pixels covering each vertex [S1, unofficial].
++        i. Retrieve the SH features $\{i_{s,k,r}, \lambda_{s,k,r}\}_{s=0}^2$ associated with the covering triangle/vertex [S1, unofficial].
++        ii. Compute the SH basis evaluation: $\phi_{s,k,r} \leftarrow \lambda_{s,k,r} Y(d_k)$, where $Y(d_k)$ is the SH basis vector for direction $d_k$ [S1, unofficial].
++        iii. Set the row in $A_k$ corresponding to pixel $r$ and vertex index $i_{s,k,r}$: $[A_k]_{r, i_{s,k,r}} \leftarrow (\phi_{s,k,r})^\top$ [S1, unofficial].
++        iv. Compute confidence weight $w_{k,r}$ based on viewing angle (e.g., grazing angle down-weighting) [S1, unofficial].
++        v. Store $\{i_{s,k,r}, \phi_{s,k,r}\}_{s=0}^2$ and $w_{k,r}$ in $R$ [S1, unofficial].
++    c. Construct observation vector $B_k \leftarrow [I_k(p_{k,1}) \dots I_k(p_{k,HW})]^\top$ [S1, unofficial].
++    d. Construct weight matrix $W_k \leftarrow \text{diag}(w_{k,1}, \dots, w_{k,HW})$ [S1, unofficial].
++    e. Update view counts $\{n^v_i\}$ based on which vertices contributed to valid pixels [S1, unofficial].
+ 3.  **Global Assembly:**
+-    a. Assemble global matrices:
+-       $$ A \leftarrow [A_1^\top \dots A_K^\top]^\top $$
+-       $$ B \leftarrow [B_1^\top \dots B_K^\top]^\top $$
+-       $$ W \leftarrow \text{blkdiag}(W_1, \dots, W_K) $$
+-    b. Construct the global regularization matrix $\Lambda$:
+-       For each vertex $i = 1 \dots N_v$:
+-       i. Construct block $\Lambda_i$ using the view count $n^v_i$, $\gamma_s$, and $\gamma_u$ [S1, unofficial].
+-       ii. Vertices with sufficient angular support use $\gamma_s$; those with insufficient support use $\gamma_u$ [S1, unofficial].
+-    c. Assemble $\Lambda \leftarrow \text{blkdiag}(\Lambda_1, \dots, \Lambda_{N_v})$ [S1, unofficial].
+-4.  **Normal System Construction:**
+-    Compute the components of the normal system:
+-    $$ H \leftarrow A^\top W A + \Lambda $$
+-    $$ G \leftarrow A^\top W B $$
+-    Here, $H$ is strictly positive definite due to the positive weights $W$ and the positive regularization $\Lambda$, guaranteeing a unique global minimizer [S1, unofficial].
+-5.  **Solution:**
+-    Solve the linear system $H X^* = G$ for $X^*$ [S1, unofficial].
+-    *Note:* Explicit inversion $H^{-1}$ is computationally prohibitive for large scenes. Instead, a matrix-free Preconditioned Conjugate Gradient (PCG) solver is used [S1, unofficial].
++    a. Assemble global matrices: $A \leftarrow [A_1^\top \dots A_K^\top]^\top$, $B \leftarrow [B_1^\top \dots B_K^\top]^\top$, $W \leftarrow \text{blkdiag}(W_1, \dots, W_K)$ [S1, unofficial].
++4.  **Regularization Construction:**
++    a. For each vertex $i = 1 \dots N_v$:
++        i. Construct regularization block $\Lambda_i$ using the view count $n^v_i$, $\gamma_s$, and $\gamma_u$ [S1, unofficial]. If $n^v_i$ is high, use $\gamma_s$; if low, use $\gamma_u$ [S1, unofficial].
++    b. Assemble $\Lambda \leftarrow \text{blkdiag}(\Lambda_1, \dots, \Lambda_{N_v})$ [S1, unofficial].
++5.  **Normal System Formation:**
++    a. Compute $H \leftarrow A^\top W A + \Lambda$ [S1, unofficial].
++    b. Compute $G \leftarrow A^\top W B$ [S1, unofficial].
++    c. The system to solve is $H X^* = G$ [S1, unofficial].
++6.  **Solution:** Solve for $X^*$ using a matrix-free PCG solver (see Pseudocode). Do not explicitly compute $H^{-1}$ [S1, unofficial].
++
++**Formulas:**
++*   **Normal System:**
++    $$X^\star = \arg \min_X \| W^{1/2} (A X - B) \|_2^2 + \| \Lambda^{1/2} X \|_2^2$$
++    Leading to:
++    $$H X^\star = G, \quad H = A^\top W A + \Lambda, \quad G = A^\top W B$$
++    Where $H \in \mathbb{R}^{qN_v \times qN_v}$ and $G \in \mathbb{R}^{qN_v \times 3}$ [S1, unofficial].
++*   **Gradient-Guided Densification (Preprocessing):**
++    To improve spatial resolution, triangles are subdivided based on image-space variation:
++    $$S_j \triangleq \sum_{k=1}^K \sum_{p \in \Omega_{k,j}} \|\nabla I_k(p)\|^2$$
++    Triangles with large $S_j$ are selected for subdivision [S1, unofficial].
++
++**Parameters:**
++*   $\gamma_s$: Supported SH regularization strength. Typical value: $0 < \gamma_s \ll \gamma_u$ [S1, unofficial].
++*   $\gamma_u$: Under-supported SH regularization strength. Typical value: $\gamma_u \gg \gamma_s$ [S1, unofficial].
++
++**Edge Cases and Pitfalls:**
++*   **Explicit Inversion:** Explicitly forming $H^{-1}$ is computationally prohibitive for large scenes due to memory and time complexity. The method must use an iterative solver like PCG [S1, unofficial].
++*   **Positive Definiteness:** The adaptive SH regularization ensures $\Lambda \succ 0$ and $W \succ 0$, guaranteeing $H \succ 0$ and a unique global minimizer [S1, unofficial].
++*   **View Support:** Vertices with zero view support ($n^v_i = 0$) may result in singular blocks if not handled by the regularization term $\Lambda$ [S1, unofficial].
+ 
+ **Pseudocode:**
+ 
+ ```python
+-def closed_form_appearance_estimation(mesh, images, sh_degree, gamma_s, gamma_u, epsilon_w):
+-    """
+-    Estimates SH coefficients for mesh vertices using global least-squares.
+-    """
+-    N_v = mesh.num_vertices
++def closed_form_appearance_estimation(mesh, images, gamma_s, gamma_u, delta, t_max):
++    """
++    Estimates SH coefficients for mesh vertices using global least squares.
++    
++    Args:
++        mesh: Mesh object with vertices and triangles.
++        images: List of K RGB images.
++        gamma_s: Regularization strength for well-supported vertices.
++        gamma_u: Regularization strength for under-supported vertices.
++        delta: PCG convergence tolerance.
++        t_max: Maximum PCG iterations.
++        
++    Returns:
++        X_star: Estimated SH coefficients for all vertices.
++    """
++    N_v = mesh.num_vertices()
+     K = len(images)
+-    H, W, R_records = None, None, None
++    H_W = images[0].height * images[0].width
++    q = 6  # Example: SH degree 2 (3 bands * 2 channels? Or 1 band * 3 channels? 
++           # Note: Source says qN_v. Usually q is coeffs per vertex. 
++           # Assuming q is fixed constant for SH degree used.
+     
+     # 1. Initialize
+-    view_counts = [0] * N_v
+-    global_A_rows = []
+-    global_B_rows = []
+-    global_W_diag = []
+-    
+-    # 2. Per-view processing
++    R = [] # Rasterization records
++    n_view = [0] * N_v
++    
++    # 2. Per-View Rasterization
++    A_list = []
++    B_list = []
++    W_list = []
++    
+     for k in range(K):
+         I_k = images[k]
+-        # Rasterize mesh to get pixel-to-vertex mapping
+-        # Returns: list of valid pixels with attributes:
+-        # vertex_idx, viewing_direction d_k, triangle_barycentrics
+-        pixels = rasterize(mesh, I_k)
+-        
+-        A_k_rows = []
+-        B_k_vals = []
+-        W_k_vals = []
+-        
+-        for p in pixels:
+-            # 2b-i: Obtain SH features
+-            # lambda_s are scaling factors, Y(d) are basis functions
+-            phi_s = []
+-            for s in range(sh_degree + 1):
+-                # Y(d_k) evaluated at viewing direction
+-                basis_eval = spherical_harmonics_basis(p.d_k, s)
+-                phi_s.append(p.lambda_s[s] * basis_eval)
+-            
+-            # 2b-iii: Populate A_k
+-            # Assuming q coefficients per vertex, map to global column index
+-            col_idx = p.vertex_idx * (sh_degree + 1)**2
+-            for s in range(sh_degree + 1):
+-                # phi_s[s] is a vector of size (2s+1) or similar depending on SH convention
+-                # Here we assume flattened row structure matching A's column layout
+-                A_k_rows.append(phi_s[s])
+-            
+-            # 2b-iv: Compute confidence weight
+-            w = compute_confidence_weight(p, epsilon_w)
+-            
+-            # 2b-v: Store and append
+-            R_records.append({
+-                'vertex_idx': p.vertex_idx,
+-                'phi': phi_s,
+-                'w': w
+-            })
+-            
+-            B_k_vals.append(I_k[p.pixel_coord])
+-            W_k_vals.append(w)
+-            
+-            # Update view counts
+-            view_counts[p.vertex_idx] += 1
+-            
+-        global_A_rows.extend(A_k_rows)
+-        global_B_rows.extend(B_k_vals)
+-        global_W_diag.extend(W_k_vals)
+-        
++        A_k = [] # Will be sparse or dense list of rows
++        B_k = []
++        W_k = []
++        
++        # Rasterize mesh to get pixel-to-triangle/vertex mapping
++        # For each valid pixel p_{k,r}:
++        for r in range(H_W):
++            pixel = I_k[r]
++            # Get covering triangle and vertex indices
++            # Assume rasterizer provides: vertex_indices, lambdas, directions
++            # Simplified: assume we have lists for this pixel
++            vertex_indices = rasterize_get_vertices(mesh, k, r)
++            lambdas = rasterize_get_lambdas(mesh, k, r)
++            directions = rasterize_get_directions(mesh, k, r)
++            
++            row_A = [0.0] * (q * N_v) # Sparse representation preferred in practice
++            row_indices = []
++            row_values = []
++            
++            for s in range(3): # s=0,1,2 bands
++                idx = vertex_indices[s]
++                lam = lambdas[s]
++                d = directions[s]
++                
++                # Compute SH basis feature
++                phi = lam * spherical_harmonic_basis(d, degree=2) # Y(d_k)
++                
++                # Map to global column index
++                col_idx = idx * q + s * 2 # Assuming 2 coeffs per band? 
++                # Note: Source uses i_{s,k,r}. Let's assume standard SH indexing.
++                # For simplicity, assuming q includes all coeffs.
++                
++                row_indices.append(col_idx)
++                row_values.append(phi)
++                
++                # Update view count
++                n_view[idx] += 1
++                
++            # Compute confidence weight w_{k,r}
++            w = compute_confidence_weight(pixel, directions)
++            
++            # Store in sparse format or dense if small
++            # For global assembly, we need to flatten. 
++            # Here we store the row structure.
++            A_list.append((row_indices, row_values))
++            B_list.append(pixel)
++            W_list.append(w)
++            
+     # 3. Global Assembly
+-    A = np.array(global_A_rows)
+-    B = np.array(global_B_rows)
+-    W = np.diag(global_W_diag)
+-    
+-    # 4. Construct Lambda
++    # Construct A, B, W
++    # A is (K*H*W) x (q*N_v)
++    # B is (K*H*W) x 3
++    # W is (K*H*W) x (K*H*W) diagonal
++    
++    A = build_global_A(A_list, q, N_v)
++    B = np.array(B_list)
++    W_diag = np.array(W_list)
++    
++    # 4. Regularization
+     Lambda_blocks = []
+     for i in range(N_v):
+-        n_v = view_counts[i]
++        n = n_view[i]
+         # Determine if supported or under-supported
+-        # Logic depends on specific thresholding of n_v or angular coverage
+-        # For this implementation, we assume a simple threshold or direct mapping
+-        if is_supported(n_v):
+-            reg_strength = gamma_s
++        # Threshold not given, assume logic based on n
++        if n > threshold: # Threshold not specified in notes
++            gamma = gamma_s
+         else:
+-            reg_strength = gamma_u
+-            
+-        # Construct block Lambda_i based on reg_strength
+-        # Lambda_i is typically diagonal or block-diagonal per SH band
+-        Lambda_i = construct_regularization_block(i, reg_strength)
+-        Lambda_blocks.append(Lambda_i)
++            gamma = gamma_u
++        Lambda_blocks.append(build_lambda_block(gamma, q))
+         
+     Lambda = block_diag(Lambda_blocks)
+@@ -154,86 +175,130 @@
+     # H = A^T W A + Lambda
+     # G = A^T W B
+-    # To avoid forming H explicitly if too large, we define matrix-vector products
+-    # However, for clarity, we show the construction.
+-    # In practice, TrianglePCG is called directly.
++    
++    # To avoid explicit A^T W A, we use PCG which only needs matvec
++    # But we need G explicitly
++    W_B = W_diag[:, None] * B # Element-wise multiply rows of B by W_diag
++    G = A.T @ W_B
+     
+     # 6. Solve
+-    X_star = triangle_pcg_solver(A, B, W, Lambda, R_records)
++    X_star = triangle_pcg(A, W_diag, Lambda, G, delta, t_max)
+     
+     return X_star
+ 
+-def triangle_pcg_solver(A, B, W, Lambda, R_records):
+-    """
+-    Solves (A^T W A + Lambda) X = A^T W B using PCG.
+-    """
+-    # Define matrix-vector product for H = A^T W A + Lambda
+-    def H_matvec(v):
+-        # Compute A^T W A v
+-        # Av = A @ v
+-        Av = A @ v
+-        # W_Av = W @ Av
+-        W_Av = W * Av # Element-wise since W is diagonal
+-        # A_T_W_Av = A^T @ W_Av
+-        A_T_W_Av = A.T @ W_Av
+-        # Lambda v
+-        Lambda_v = Lambda @ v
+-        return A_T_W_Av + Lambda_v
+-
+-    # Define RHS G = A^T W B
+-    W_B = W @ B
+-    G = A.T @ W_B
+-    
+-    # Initialize PCG
+-    X = np.zeros_like(G)
+-    
+-    # Solve for each color channel (R, G, B) separately as H is shared
+-    for c in range(3):
+-        g_c = G[:, c]
+-        r = g_c.copy()
+-        p = r.copy()
+-        r_dot_r = np.dot(r, r)
+-        
+-        # Preconditioner setup (simplified identity or diagonal approximation)
+-        # In CF-Splat, a triangle-structured preconditioner is used [S1, unofficial]
+-        # Here we use a simple diagonal preconditioner for completeness
+-        # P_inv = diag(1 / diag(H))
+-        # For efficiency, we assume P_solve(r) is available
+-        def P_solve(vec):
+-            # Placeholder for triangle-structured preconditioner
+-            # Returns P^{-1} vec
+-            return vec # Identity for now, replace with actual preconditioner
+-        
+-        z = P_solve(r)
+-        sigma = np.dot(r, z)
+-        
+-        max_iter = 100
+-        tol = 1e-6 * r_dot_r
+-        
+-        for t in range(max_iter):
+-            h = H_matvec(p)
+-            alpha = sigma / np.dot(p, h)
+-            X[:, c] += alpha * p
+-            r -= alpha * h
+-            
+-            if np.dot(r, r) < tol:
++def triangle_pcg(A, W_diag, Lambda, G, delta, t_max):
++    """
++    Matrix-free PCG solver for H X = G.
++    H = A^T W A + Lambda.
++    """
++    N = G.shape[0]
++    X = np.zeros(N)
++    
++    # Solve for each RGB channel separately
++    X_star = np.zeros_like(X)
++    
++    for channel in range(3):
++        g = G[:, channel]
++        r = g.copy()
++        z = solve_preconditioner(Lambda, r) # P z = r, P approx Lambda or A^TWA+Lambda
++        p = z.copy()
++        rz = np.dot(r, z)
++        
++        for t in range(t_max):
++            # h = H p = A^T W A p + Lambda p
++            Ap = A @ p
++            W_Ap = W_diag[:, None] * Ap
++            h = (A.T @ W_Ap) + (Lambda @ p)
++            
++            alpha = rz / np.dot(p, h)
++            X = X + alpha * p
++            r = r - alpha * h
++            
++            if np.linalg.norm(r)**2 <= delta**2 * np.linalg.norm(g)**2:
+                 break
+                 
+-            z = P_solve(r)
+-            sigma_new = np.dot(r, z)
+-            beta = sigma_new / sigma
++            z = solve_preconditioner(Lambda, r)
++            rz_new = np.dot(r, z)
++            beta = rz_new / rz
+             p = z + beta * p
+-            sigma = sigma_new
+-            
+-    return X
++            rz = rz_new
++            
++        X_star = X_star + X[:, channel] # Accumulate? No, X is per channel in loop?
++        # Correction: X should be reset or handled per channel.
++        # Let's fix the loop structure.
++        
++    # Re-implementation for clarity
++    X_star = np.zeros((N, 3))
++    for channel in range(3):
++        g = G[:, channel]
++        x = np.zeros(N)
++        r = g.copy()
++        z = solve_preconditioner(Lambda, r)
++        p = z.copy()
++        rz = np.dot(r, z)
++        
++        for t in range(t_max):
++            Ap = A @ p
++            W_Ap = W_diag[:, None] * Ap
++            h = (A.T @ W_Ap) + (Lambda @ p)
++            
++            alpha = rz / np.dot(p, h)
++            x = x + alpha * p
++            r = r - alpha * h
++            
++            if np.linalg.norm(r)**2 <= delta**2 * np.linalg.norm(g)**2:
++                break
++                
++            z = solve_preconditioner(Lambda, r)
++            rz_new = np.dot(r, z)
++            beta = rz_new / rz
++            p = z + beta * p
++            rz = rz_new
++            
++        X_star[:, channel] = x
++        
++    return X_star
++
++def solve_preconditioner(Lambda, r):
++    """
++    Simple diagonal preconditioner using Lambda.
++    """
++    # Lambda is block diagonal. Inverse is block diagonal inverse.
++    # Approximation: 1/diag(Lambda)
++    # More accurate: Solve Lambda z = r
++    # Since Lambda is block diagonal, solve per block
++    # For simplicity, assume diagonal approximation or direct solve if small
++    return np.linalg.solve(Lambda, r) # Or block-wise solve
+ ```
+ 
++## Subtopics
++
++### First-order Spherical Harmonics Distillation
++Distills SH coefficients into a simpler representation for faster rendering. Choose when memory bandwidth is the bottleneck. [Link](9467-first-order-spherical-harmonics-distillation.md)
++
++### Explicit Camera Jacobian Derivation
++Provides analytical gradients for camera parameters. Choose when joint optimization of geometry and appearance is required. [Link](10077-explicit-camera-jacobian-derivation.md)
++
++### Efficient Multi-View Training for 3D Gaussian Splatting
++Optimizes the training pipeline for multiple views. Choose when training time is critical. [Link](13982-efficient-multi-view-training-for-3d-gaussian-splatting.md)
++
++### Spherical Harmonics Vector Quantization
++Reduces SH coefficient storage via quantization. Choose when memory footprint must be minimized. [Link](14181-spherical-harmonics-vector-quantization.md)
++
++### Adaptive SH Regularization
++The core regularization strategy used in this method. Choose when view support is uneven. [Link](16786-adaptive-sh-regularization.md)
++
++### Geometry-Guided Appearance Modeling
++Uses geometry to constrain appearance. Choose when geometric fidelity is paramount. [Link](20876-geometry-guided-appearance-modeling.md)
++
+ ## Operating characteristics
+-*   **Complexity:** The setup cost is $O(KHWq^2 + N_v q^3)$, where $K$ is views, $H,W$ image dimensions, $q$ SH coefficients per vertex, and $N_v$ vertices [S1, unofficial]. Each PCG iteration costs $O(KHWq + N_v q^2)$ [S1, unofficial]. Total solve time is $T_{solve} = O(KHWq^2 + N_v q^3) + O(T_{pcg}(KHWq + N_v q^2)) + O(KHWq + N_v q)$ [S1, unofficial].
+-*   **Strengths:** Provides a closed-form solution, avoiding iterative gradient descent for appearance. Adaptive regularization prevents overfitting in regions with sparse view coverage [S1, unofficial].
+-*   **Limitations:** Requires all views to be processed to assemble the global system, which can be memory-intensive for high-resolution scenes. The PCG solver requires careful preconditioning for convergence [S1, unofficial].
+-*   **When to use:** When a mesh representation is available and global consistency of appearance across views is desired without iterative per-vertex optimization [S1, unofficial].
++*   **Time Complexity:** The global LLS solve is dominated by PCG iterations. Setup is $O(KHWq^2 + N_v q^3)$. Each PCG iteration is $O(KHWq + N_v q^2)$. Total solve time is $T_{solve} = O(KHWq^2 + N_v q^3) + O(T_{pcg}(KHWq + N_v q^2)) + O(KHWq + N_v q)$ [S1, unofficial].
++*   **Memory Complexity:** Dominated by storing matrices $A$, $B$, $W$, and $\Lambda$. $A$ is sparse but large. $\Lambda$ is block diagonal.
++*   **Strengths:** Analytical solution avoids local minima; adaptive regularization handles sparse views; PCG solver avoids explicit inversion.
++*   **Limitations:** Requires all views to be available simultaneously (batch processing); sensitive to rasterization accuracy; preconditioning is critical for PCG convergence.
++*   **When to use:** When high-quality view-dependent appearance is needed for mesh-based representations and computational resources allow for batch processing.
++*   **When not to use:** For real-time streaming where incremental updates are required, or when memory is extremely constrained.
+ 
+ ## Background
+-The method originates from "CF-Splat: Closed-Form Triangle Splatting with Mesh Priors" [S1, unofficial]. It addresses the limitation of coarse triangles in mesh-based appearance representation by introducing gradient-guided densification and a global least-squares solver with adaptive SH regularization [S1, unofficial].
++The method originates from "CF-Splat: Closed-Form Triangle Splatting with Mesh Priors" [S1, unofficial]. It addresses the limitations of iterative SH optimization in 3D Gaussian Splatting by providing a closed-form solution for mesh-based scene representation. The approach leverages the structure of the problem to enable efficient global optimization.
+ 
+ ## Sources

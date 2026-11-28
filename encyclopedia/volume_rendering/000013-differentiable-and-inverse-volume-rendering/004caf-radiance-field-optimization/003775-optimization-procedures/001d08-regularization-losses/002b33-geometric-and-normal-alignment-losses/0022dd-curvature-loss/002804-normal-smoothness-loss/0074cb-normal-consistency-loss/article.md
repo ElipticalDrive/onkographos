@@ -1,0 +1,112 @@
+# Normal Consistency Loss
+
+Also called: Face normal smoothness, Structural Regularization
+
+## Overview
+Normal Consistency Loss is a regularization term that penalizes geometric inconsistency between different normal estimates derived from a radiance field or mesh, thereby enforcing local surface smoothness and reducing artifacts such as floaters or mesh face flipping [S1, unofficial][S2]. It builds on [Normal Smoothness Loss](4190-normal-smoothness-loss.md) by explicitly comparing normals derived from distinct geometric proxies (e.g., density gradients versus depth maps, or adjacent mesh faces) rather than enforcing continuity along a single ray path [S1, unofficial][S2].
+
+## How it works
+The method is applied in two representation contexts based on the source literature: radiance fields with depth supervision [S1, unofficial] and joint optimization of explicit meshes with Gaussian splats [S2].
+
+### Inputs and Outputs
+**Inputs:**
+1. **Radiance Field Context:**
+   * $\mathbf{N}_\sigma$: Rendered density-gradient normal [S1, unofficial].
+   * $\mathbf{N}_{\text{mean}}$: Normal estimated from the expected (mean) depth map [S1, unofficial].
+   * $\mathbf{N}_{\text{med}}$: Normal estimated from the median depth map [S1, unofficial].
+2. **Mesh Context:**
+   * $N_f$: Set of all pairs of neighboring faces in the mesh [S2].
+   * $n_i, n_j$: Surface normals of adjacent mesh faces $i$ and $j$ [S2].
+
+**Outputs:**
+* Scalar loss value $\mathcal{L}_n$ or $L_{nc}$ [S1, unofficial][S2].
+
+### Data Structures
+* **Normals:** 3D unit vectors $\mathbf{n} \in \mathbb{R}^3$ [S1, unofficial][S2].
+* **Mesh Topology:** Adjacency list or face-pair index set $N_f$ defining neighboring triangles [S2].
+
+### Formulas
+**1. Radiance Field Variant (Structural Regularization)**
+This variant addresses the issue where LiDAR depth supervision only constrains the field along measured rays, leaving the density to ripple or drift between anchors [S1, unofficial]. It penalizes the inconsistency between the rendered density-gradient normal and normals estimated from rendered depth maps [S1, unofficial].
+
+$$\mathcal{L}_n = \|\mathbf{N}_\sigma - \mathbf{N}_{\text{mean}}\|_2^2 + \|\mathbf{N}_\sigma - \mathbf{N}_{\text{med}}\|_2^2 \quad (15)$$
+
+Where:
+* $\mathbf{N}_\sigma$: The normal derived from the gradient of the volume density $\nabla \sigma$ [S1, unofficial].
+* $\mathbf{N}_{\text{mean}}$: The normal computed from the expected depth [S1, unofficial].
+* $\mathbf{N}_{\text{med}}$: The normal computed from the median depth [S1, unofficial].
+
+**2. Mesh Variant (Face Normal Smoothness)**
+This variant encourages a smoother surface and reduces mesh face flipping during optimization [S2].
+
+$$L_{nc} = \frac{1}{|N_f|} \sum_{(i,j) \in N_f} (1 - n_i \cdot n_j) \quad (7)$$
+
+Where:
+* $N_f$: The set of all pairs of neighboring faces in the mesh [S2].
+* $n_i, n_j$: The surface normals of adjacent mesh faces $i$ and $j$ [S2].
+* $|N_f|$: The number of such neighboring face pairs [S2].
+
+### Parameters
+* $\lambda_{nc}$: The weight of the normal consistency loss in the total training objective [S2].
+* $\lambda_n$: The weight of the monocular normal loss in the total training objective, used in the combined loss $L = L_{img} + \lambda_{lap} L_{lap} + \lambda_{nc} L_{nc} + \lambda_n L_n$ [S2]. (The radiance field variant does not specify a weighting coefficient in the provided sources.)
+
+### Pseudocode
+> **Unverified code.** The code below did not pass a test run against a reference implementation, or no test fits it, so it may contain errors.
+
+```python
+def compute_normal_consistency_loss(mesh_pairs, normals, mode="mesh"):
+    """
+    Computes Normal Consistency Loss.
+    
+    Args:
+        mesh_pairs: List of tuples (i, j) representing neighboring face indices.
+                    Ignored when mode is 'radiance'.
+        normals: Dictionary containing normal vectors.
+                 For 'mesh' mode: Array-like of shape (num_faces, 3) for face normals.
+                 For 'radiance' mode: Dict with keys 'N_sigma', 'N_mean', 'N_med'.
+        mode: String, either "mesh" or "radiance".
+        
+    Returns:
+        Scalar loss value.
+    """
+    if mode == "mesh":
+        total_loss = 0.0
+        num_pairs = 0
+        for i, j in mesh_pairs:
+            n_i = normals[i]
+            n_j = normals[j]
+            dot_product = sum(a * b for a, b in zip(n_i, n_j))
+            total_loss += (1.0 - dot_product)
+            num_pairs += 1
+        if num_pairs == 0:
+            return 0.0
+        return total_loss / num_pairs
+
+    elif mode == "radiance":
+        N_sigma = normals['N_sigma']
+        N_mean = normals['N_mean']
+        N_med = normals['N_med']
+        diff_mean = [a - b for a, b in zip(N_sigma, N_mean)]
+        loss_mean = sum(d * d for d in diff_mean)
+        diff_med = [a - b for a, b in zip(N_sigma, N_med)]
+        loss_med = sum(d * d for d in diff_med)
+        return loss_mean + loss_med
+
+    else:
+        raise ValueError("Mode must be 'mesh' or 'radiance'")
+```
+
+### Edge Cases and Pitfalls
+* **Precision:** In the mesh variant, normals must be normalized before computing the dot product to ensure the range is $[-1, 1]$ [G].
+* **Degenerate Input:** If no neighboring face pairs exist ($|N_f| = 0$), the denominator in the mesh formula is zero [S2]. The pseudocode handles this by returning $0.0$ [G].
+* **Floaters:** In the radiance field variant, without this loss, density can ripple or drift between LiDAR anchors, creating floaters [S1, unofficial].
+
+## Operating characteristics
+Time complexity is not given in the sources [G]. Memory complexity is not given in the sources [G]. It effectively suppresses floaters in front of occupied voxels in sparse voxel maps [S1, unofficial]. It reduces mesh distortion (e.g., intersecting triangles) and face flipping during joint optimization [S2]. It acts as a geometric prior that constrains optimization, improving surface quality [S2]. It does not constrain the field along unmeasured rays in the radiance field variant; it only smooths between proxies [S1, unofficial]. It requires accurate depth estimation or mesh topology [S1, unofficial][S2].
+
+## Background
+The radiance field variant was introduced in the context of Sparse Radiance Voxels (SpaRV) for LiDAR-Visual Mapping [S1, unofficial]. It addresses the ambiguity in density fields between sparse LiDAR anchors [S1, unofficial]. The mesh variant was inspired by conventional mesh optimization works [8, 22] and Laplacian smoothing [10, 25], and it was adopted in OMeGa for joint optimization of explicit meshes and Gaussian splats [S2].
+
+## Sources
+[S1] SpaRV: Sparse Radiance Voxels for Scalable Geometrically Consistent LiDAR-Visual Mapping and Rendering, https://doi.org/10.48550/arxiv.2610.25665, fetched 2026-10-26 (unofficial)
+[S2] OMeGa: Joint Optimization of Explicit Meshes and Gaussian Splats for Robust Scene-Level Surface Reconstruction, https://doi.org/10.1109/WACV61042.2026.00427, fetched 2026-10-30

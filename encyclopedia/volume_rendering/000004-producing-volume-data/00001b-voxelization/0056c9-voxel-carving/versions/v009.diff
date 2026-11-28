@@ -1,0 +1,147 @@
+--- v008.md
++++ v009.md
+@@ -44,6 +44,6 @@
+ **Pseudocode:**
+ ```python
+-def voxel_carving(depth_maps, camera_poses, intrinsic_matrix, grid_config):
+-    # Initialize dense voxel grid
++def voxel_carving(depth_maps, camera_positions, intrinsic_matrix, grid_config):
++    # 1. Initialize dense voxel grid
+     grid = create_dense_grid(
+         width=grid_config['width'],
+@@ -54,16 +54,16 @@
+         color=grid_config.get('color', [1.0, 0.7, 0.0])
+     )
+-    # Preprocess model: center at origin, scale bounding box norm to 2.0
+-    model = preprocess_model(model)
+-    for pose in camera_poses:
++    # 2. Preprocess model: center at origin, scale bounding box norm to 2.0
++    model = preprocess_model(grid_config['model'])
++    # 3. Iterate cameras
++    for xyz in camera_positions:
+         # Compute extrinsic matrix from spherical coordinates
+-        xyz = pose.position
+         r = norm(xyz)
+         r_x = acos(xyz.y / r)
+         r_y = atan2(xyz.z, xyz.x)
+         extrinsic = compute_extrinsic(r_x, r_y, translation=[0, 0, 2])
+-        # Render depth map for current pose
++        # 4. Render depth map for current pose
+         depth_map = render_depth(model, intrinsic_matrix, extrinsic)
+-        # Carve grid using depth map or silhouette
++        # 5. Carve grid using depth map or silhouette
+         if grid_config['use_depth']:
+             for y in range(depth_map.height):
+@@ -72,22 +72,20 @@
+                     if d > 0:
+                         ray_origin = inv(extrinsic)[:3, 3]
+-                        ray_dir = normalize(inv(extrinsic)[:3, :3] @ inv(intrinsic_matrix) @ [x, y, 1])
+-                        surface_point = ray_origin + d * ray_dir
+-                        mark_voxels_between(grid, ray_origin, surface_point, grid_config['dilated_carving'])
++                        ray_dir = normalize(inv(extrinsic)[:3, :3] @ inv(intrinsic_matrix) @ [x, y, 1.0])
++                        march_voxels(grid, ray_origin, ray_dir, d, grid_config['dilated_carving'])
+         else:
+             for y in range(depth_map.height):
+                 for x in range(depth_map.width):
+-                    if depth_map[y, x] > 0:  # Silhouette mask
++                    if depth_map[y, x] > 0:
+                         ray_origin = inv(extrinsic)[:3, 3]
+-                        ray_dir = normalize(inv(extrinsic)[:3, :3] @ inv(intrinsic_matrix) @ [x, y, 1])
+-                        mark_voxels_ray(grid, ray_origin, ray_dir, grid_config['dilated_carving'])
+-    # Optionally add surface voxels
++                        ray_dir = normalize(inv(extrinsic)[:3, :3] @ inv(intrinsic_matrix) @ [x, y, 1.0])
++                        march_voxels_ray(grid, ray_origin, ray_dir, grid_config['dilated_carving'])
++    # 6. Finalize surface (Optional)
+     if grid_config['add_surface']:
+-        surface_grid = create_surface_grid(pcd_agg, grid_config['voxel_size'], grid_config['bounds'])
++        surface_grid = create_surface_grid(grid_config['point_cloud'], grid_config['voxel_size'], grid_config['bounds'])
+         grid.merge(surface_grid)
+     return grid
+ 
+ def create_dense_grid(width, height, depth, voxel_size, origin, color):
+-    # Standard initialization of a 3D occupancy grid [G]
+     return Grid3D(width, height, depth, voxel_size, origin, color)
+ 
+@@ -109,19 +107,42 @@
+     return T
+ 
+-def mark_voxels_between(grid, start, end, dilated):
+-    # Standard 3D line rasterization (DDA/Bresenham) [G]
+-    voxels = trace_line(start, end)
+-    for v in voxels:
+-        if dilated and is_last_voxel(v, end):
+-            continue
+-        grid.set_occupied(v, True)
++def march_voxels(grid, origin, direction, depth, dilated):
++    end = origin + direction * depth
++    if dilated:
++        end = origin + direction * (depth - grid.voxel_size)
++    current = origin
++    while norm(current - end) > 1e-6:
++        if grid.contains(current):
++            grid.set_occupied(current, True)
++        current += direction * grid.voxel_size
+ 
+-def mark_voxels_ray(grid, origin, direction, dilated):
+-    # Standard ray traversal to grid bounds [G]
+-    voxels = trace_ray(origin, direction, grid.bounds)
+-    for v in voxels:
+-        if dilated and is_last_voxel(v, origin + direction * grid.max_dist):
+-            continue
+-        grid.set_occupied(v, True)
++def march_voxels_ray(grid, origin, direction, dilated):
++    end = trace_ray_to_bounds(origin, direction, grid.bounds)
++    if end is None:
++        return
++    if dilated:
++        end = origin + direction * (norm(end - origin) - grid.voxel_size)
++    current = origin
++    while norm(current - end) > 1e-6:
++        if grid.contains(current):
++            grid.set_occupied(current, True)
++        current += direction * grid.voxel_size
++
++def trace_ray_to_bounds(origin, direction, bounds):
++    # Standard slab method for ray-box intersection [G]
++    t_min = -inf
++    t_max = inf
++    for i in range(3):
++        if direction[i] == 0:
++            if origin[i] < bounds.min[i] or origin[i] > bounds.max[i]:
++                return None
++        else:
++            t1 = (bounds.min[i] - origin[i]) / direction[i]
++            t2 = (bounds.max[i] - origin[i]) / direction[i]
++            t_min = max(t_min, min(t1, t2))
++            t_max = min(t_max, max(t1, t2))
++    if t_max < 0 or t_min > t_max:
++        return None
++    return origin + direction * t_max
+ ```
+ 
+@@ -129,14 +150,14 @@
+ 
+ ### [Streaming GPU-based Voxel Carving](4436-streaming-gpu-based-voxel-carving.md)
+-A streaming GPU-based voxel carving method that creates an explicit volume, avoids 3D texture drawbacks by using only surface voxels in a GPU-optimal 2D data representation, and minimizes GPU-CPU data transfer through effective load balancing. It differs from its parent method, Voxel Carving, by explicitly optimizing for graphics hardware trends to maintain interactivity, and from previous approaches like [LiMS04], [WoeKoch04], and [ZacKar04] by avoiding the continuous access and dual-texture overhead inherent in 3D texture-based representations. Choose it when real-time interactivity and GPU memory efficiency are prioritized over dense volumetric filling.
++A streaming GPU-based voxel carving method that creates an explicit volume, avoids 3D texture drawbacks by using only surface voxels in a GPU-optimal 2D data representation, and minimizes GPU-CPU data transfer through effective load balancing. It differs from its parent method, Voxel Carving, by explicitly optimizing for graphics hardware trends to maintain interactivity, and from previous approaches like [LiMS04], [WoeKoch04], and [ZacKar04] by avoiding the continuous access and dual-texture overhead inherent in 3D texture-based representations.
+ 
+ ### Interactive Multi-resolution Voxel Carving
+-A CPU-based voxel carving method that uses GVC-IB as its core but adds user-driven interactive refinement to create a model with varying resolution and level of detail across the voxel structure [S4, unofficial]. It differs from standard voxel carving by allowing human-guided input to assign perceptual significance to selected features, manipulating complexity via simple 2D image editing operations [S4, unofficial]. Choose it when perceptual quality and adaptive detail are more important than uniform resolution or processing speed.
++A CPU-based voxel carving method that uses GVC-IB as its core but adds user-driven interactive refinement to create a model with varying resolution and level of detail across the voxel structure [S4, unofficial]. It differs from standard voxel carving by allowing human-guided input to assign perceptual significance to selected features, manipulating complexity via simple 2D image editing operations [S4, unofficial].
+ 
+ ### Cell Carving
+-An algorithm that uses correspondence between arbitrary image regions to enable reconstruction of concavities difficult or impossible to reconstruct with other methods [S4, unofficial]. Choose it when the target geometry contains deep concavities or complex internal structures that standard silhouette/depth carving fails to capture.
++An algorithm that uses correspondence between arbitrary image regions to enable reconstruction of concavities difficult or impossible to reconstruct with other methods [S4, unofficial].
+ 
+ ### Voxel Space Warping
+-A method that warps the voxel space to model large scale scenes without requiring an excessive number of voxels [S4, unofficial]. Choose it for outdoor or large-scale environments where uniform voxel resolution would exceed memory limits, accepting spatial distortion in exchange for scalability.
++A method that warps the voxel space to model large scale scenes without requiring an excessive number of voxels [S4, unofficial].
+ 
+ ## Operating characteristics
+@@ -149,5 +170,5 @@
+ 
+ ## Background
+-Voxel Carving is supported in tools like Open3D (`carve_depth_map`, `carve_silhouette`) and binvox (z-buffer based carving) [S1, S2, S3]. Early hardware-accelerated approaches were explored by Culbertson [Culbertson99] and Sainz et al. [SBS02] [S4, unofficial]. Theoretical foundations were laid by researchers like Seitz and Dyer [ProDy, S4, unofficial]. The method has been extended to handle uncalibrated views (Approximate Space Carving by Kutulakos [Kutulakos00, S4, unofficial]) and interactive refinement [S4, unofficial].
++Voxel Carving is supported in tools like Open3D (`carve_depth_map`, `carve_silhouette`) and binvox (z-buffer based carving) [S1, S2, S3]. Early hardware-accelerated approaches were explored by Culbertson [Culbertson99] and Sainz et al. [SBS02] [S4, unofficial]. The method has been extended to handle uncalibrated views (Approximate Space Carving by Kutulakos [Kutulakos00, S4, unofficial]) and interactive refinement [S4, unofficial].
+ 
+ ## Sources

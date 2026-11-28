@@ -1,0 +1,253 @@
+# Streaming Model for Acceleration
+
+Also called: PPE-SPE streaming acceleration, Streaming Model Based Volume Ray Casting
+
+## Overview
+The Streaming Model for Acceleration is a parallel implementation of volume ray casting designed for the heterogeneous Cell Broadband Engine (Cell B.E.) architecture [S1]. It solves the problems of high computational demands, memory bandwidth bottlenecks, and irregular data access patterns inherent in ray casting by overlapping acceleration techniques with rendering [S1]. Unlike texture-mapping based volume rendering, which is limited by graphics memory size and lower quality, this method uses system memory to achieve high-quality interactive rendering [S1]. It sets itself apart from its siblings by explicitly separating the hierarchical traversal (empty space skipping) to the PowerPC Processor Element (PPE) and the ray integration (early ray termination) to the Synergistic Processing Elements (SPEs), using asynchronous DMA to hide latency [S1].
+
+## How it works
+**Inputs and Outputs:**
+*   **Input:** A 3D volumetric dataset (e.g., $256^3$), a classification table (mapping voxel values to color and opacity), and an image resolution (e.g., $256^2$ pixels) [S1].
+*   **Output:** A rendered 2D image tile [S1].
+
+**Data Structures:**
+1.  **Octree:** A hierarchical data structure used for empty space skipping [S1].
+    *   **Layout:** Each node has 8 children.
+    *   **Field:** Each node stores the maximum value of any voxel in the subvolume rooted at that node [S1].
+    *   **Leaf Node Size:** A trade-off parameter. Smaller sizes increase traversal time and data transfer overhead; larger sizes increase SPE rendering time due to more empty space handling [S1].
+2.  **Ray Segment:** Represents a contiguous sequence of voxels along a ray that lies within non-empty subvolumes [S1].
+    *   **Parameters:**
+        *   $R$: Ray offset from the viewpoint [S1].
+        *   $L$: Length of the corresponding segment [S1].
+3.  **Task List:** A concatenated list of ray segments for all pixels in a tile, transferred from PPE to SPE [S1].
+4.  **Subvolume Buffer:** A buffer in SPE local memory storing $2^3$ voxel data (subvolumes) required for interpolation [S1].
+
+**Numbered Steps:**
+
+1.  **Work Decomposition:** The screen is divided into a grid of small tiles [S1]. Tiles are assigned to SPEs using a static Z-order based scheme to exploit spatial locality and balance load [S1].
+2.  **Empty Space Skipping (PPE):**
+    *   The PPE traverses the octree along the ray direction for each pixel in the assigned tile [S1].
+    *   Empty space determination uses either raw voxel values or opacity values after classification [S1].
+        *   *Pitfall:* If opacity values are used, the octree must be updated every time the classification table changes [S1].
+    *   The PPE collects ray segments located only in non-empty subvolumes [S1].
+    *   Each ray segment is defined by parameters $R$ and $L$ [S1].
+    *   The PPE concatenates the collected ray segments for all pixels in the tile [S1].
+3.  **Data Transfer:**
+    *   The PPE sends the size of the task list to the SPE (unless the queue is full) [S1].
+    *   The PPE transfers the concatenated task list to the assigned SPE via DMA [S1].
+4.  **Rendering (SPE):**
+    *   The SPE waits for a signal from the PPE indicating all contributing ray segments for the tile have been collected [S1].
+    *   The SPE renders the tile using four main steps: prefetching, interpolation, shading/classification, and compositing [S1].
+    *   **SIMD Processing:** Four ray sampling points are processed together in a loop to exploit SIMD capabilities [S1].
+    *   **Prefetching:** Asynchronous DMA and double buffering are used to fetch the next 4 subvolumes required for rendering the next 4 ray sampling points into local memory [S1]. The volume in main memory is arranged into a 3-D grid of small subvolumes [S1].
+    *   **Interpolation:** If the 4 subvolumes for the current 4 ray sampling points are ready, 4 tri-linear interpolations are performed concurrently using 4-way SIMD instructions to reconstruct signal values [S1].
+    *   **Shading/Classification:** Reconstructed values are mapped to color and opacity using shading and classification tables [S1].
+    *   **Compositing:** The 4 values are composited sequentially [S1]. However, the R, G, and B values are composited concurrently, utilizing 3/4 of the SIMD capability [S1].
+    *   **Early Ray Termination:** The final opacity value is tested for early ray termination [S1]. If the threshold is reached, the next ray is processed [S1].
+5.  **Result Transfer:** After all pixel values for the tile are computed, the tile image is sent back to main memory using asynchronous DMA [S1].
+6.  **Loop:** The PPE and SPEs operate asynchronously. The PPE continues generating lists for the next tile while the SPE renders the current one, overlapping empty space skipping with actual rendering [S1].
+
+**Pseudocode:**
+
+> **Unverified code.** The code below did not pass a test run against a reference implementation, or no test fits it, so it may contain errors.
+
+```python
+# PPE Code
+def ppe_render_tile(tile_id, octree, classification_table):
+    """
+    PPE traverses octree to generate ray segments for a tile.
+    """
+    tile_pixels = get_tile_pixels(tile_id)
+    ray_segments_list = []
+    
+    for pixel in tile_pixels:
+        ray = create_ray_from_viewpoint(pixel)
+        segments = traverse_octree_for_ray(ray, octree)
+        # segments is a list of (R, L) tuples
+        ray_segments_list.extend(segments)
+        
+    # Send task list to SPE
+    spe_id = get_spe_for_tile(tile_id)
+    send_task_list_to_spe(spe_id, ray_segments_list)
+    
+    # Wait for SPE to finish this tile before moving to next? 
+    # No, asynchronous. But we need to ensure queue isn't full.
+    while not is_spe_queue_full(spe_id):
+        # Could start next tile generation here if logic allows, 
+        # but typically one tile per SPE assignment in this static scheme.
+        break 
+
+# SPE Code
+def spe_render_tile(task_list, volume_data, classification_table):
+    """
+    SPE renders a tile given a list of ray segments.
+    """
+    # Double buffering for prefetching
+    buffer_a = allocate_local_memory()
+    buffer_b = allocate_local_memory()
+    current_buffer = buffer_a
+    next_buffer = buffer_b
+    
+    # Pre-fetch initial subvolumes
+    prefetch_subvolumes(task_list, volume_data, next_buffer)
+    
+    for segment in task_list:
+        R = segment.R
+        L = segment.L
+        
+        # Process 4 sampling points at a time for SIMD
+        # Assume we have a loop over chunks of 4 segments or 4 points per segment
+        # Simplified: processing 4 points concurrently
+        
+        # Check if next 4 subvolumes are ready in next_buffer
+        if not is_prefetch_ready(next_buffer):
+            wait_for_dma(next_buffer)
+            
+        # Swap buffers
+        temp = current_buffer
+        current_buffer = next_buffer
+        next_buffer = temp
+        
+        # Prefetch next 4 subvolumes asynchronously
+        prefetch_subvolumes_for_next_points(task_list, volume_data, next_buffer)
+        
+        # Interpolation: 4-way SIMD
+        values = tri_linear_interpolate_4_points(current_buffer, R, L)
+        
+        # Shading/Classification
+        colors_opacities = apply_classification_table(values, classification_table)
+        
+        # Compositing: Sequential for alpha, Concurrent for RGB
+        # Assuming standard front-to-back compositing
+        result_color = (0, 0, 0)
+        result_opacity = 0
+        
+        for i in range(4):
+            c = colors_opacities[i]
+            # Concurrent RGB compositing
+            result_color = composite_rgb(result_color, c.color)
+            # Sequential Alpha compositing
+            result_opacity = composite_alpha(result_opacity, c.opacity)
+            
+        # Early Ray Termination
+        if result_opacity >= TERMINATION_THRESHOLD:
+            break
+            
+    # Send tile image back to main memory
+    send_tile_to_main_memory(tile_id, result_image)
+
+def traverse_octree_for_ray(ray, octree):
+    """
+    Traverses octree to find non-empty segments.
+    Returns list of (R, L) tuples.
+    """
+    segments = []
+    current_pos = ray.origin
+    direction = ray.direction
+    
+    node = octree.root
+    while node is not None:
+        # Check if node is empty
+        if node.max_value == EMPTY_VALUE:
+            # Skip this subvolume
+            # Advance ray past this subvolume
+            current_pos = advance_ray_past_subvolume(current_pos, direction, node.bounds)
+            # Move to next relevant node or terminate
+            # Implementation detail: standard octree traversal logic
+            break # Simplified for pseudocode
+            
+        # If leaf or non-empty, collect segment
+        # Determine intersection with current node
+        t_start, t_end = intersect_ray_node(ray, node.bounds)
+        
+        if t_start < t_end:
+            # Calculate R (offset) and L (length)
+            R = t_start
+            L = t_end - t_start
+            segments.append((R, L))
+            
+        # Move to children or next node
+        # ... (Standard traversal logic)
+        
+    return segments
+
+def prefetch_subvolumes(task_list, volume_data, buffer):
+    """
+    Uses asynchronous DMA to fetch subvolumes into local memory.
+    """
+    # Identify subvolumes needed for the next 4 sampling points
+    subvolume_indices = get_subvolume_indices(task_list, 4)
+    
+    # Issue DMA transfer
+    dma_transfer(volume_data, subvolume_indices, buffer)
+    
+def prefetch_subvolumes_for_next_points(task_list, volume_data, buffer):
+    """
+    Issues async DMA for the *next* set of points while current ones are processed.
+    """
+    subvolume_indices = get_subvolume_indices_for_next_chunk(task_list)
+    dma_transfer_async(volume_data, subvolume_indices, buffer)
+
+def is_prefetch_ready(buffer):
+    return buffer.dma_complete
+
+def tri_linear_interpolate_4_points(buffer, R, L):
+    """
+    Performs 4 tri-linear interpolations using 4-way SIMD.
+    """
+    # Extract voxel data from buffer
+    voxels = get_voxel_data_from_buffer(buffer)
+    # Interpolate
+    values = simd_tri_linear_interpolate(voxels, R, L)
+    return values
+
+def apply_classification_table(values, table):
+    """
+    Maps values to color and opacity.
+    """
+    return [table.lookup(v) for v in values]
+
+def composite_rgb(c1, c2):
+    """
+    Standard over operator for RGB.
+    """
+    return c2 + c1 * (1 - c2.a) # Simplified, assuming c2 is foreground
+
+def composite_alpha(a1, a2):
+    """
+    Standard over operator for Alpha.
+    """
+    return a1 + a2 * (1 - a1)
+```
+
+**Edge Cases and Pitfalls:**
+*   **Memory Limitation:** The Cell B.E. memory is limited to 1GB, preventing experiments with larger datasets [S1].
+*   **Leaf Node Size:** Choosing the leaf node size is critical. Too small increases traversal/transfer overhead; too large increases SPE rendering time [S1].
+*   **Classification Updates:** If opacity values are used for empty space detection, the octree must be updated whenever the classification table changes [S1].
+*   **Heterogeneous Speed Gap:** If the PPE is slower than the SPE, the SPE will idle waiting for input. If the PPE is faster, the output must be stored to avoid overflow. The streaming model attempts to balance this via asynchronous DMA [S1].
+
+## Operating characteristics
+*   **Time Complexity:** Not explicitly given in terms of Big-O, but performance is measured in frames per second (FPS) [S1].
+*   **Memory Complexity:** Limited by the 1GB memory constraint of the Cell B.E. [S1].
+*   **Measured Performance:** 9 to 26 frames/sec on a single Cell B.E. processor (3.2 GHz) for a $256^3$ dataset at $256^2$ resolution [S1].
+*   **Comparison:** Approximately an order of magnitude faster than an implementation on an Intel Xeon 3GHz processor [S1].
+*   **Strengths:**
+    *   Removes overhead of traversing hierarchical structures by overlapping it with rendering [S1].
+    *   Removes memory access latency via prefetching [S1].
+    *   Achieves better SIMD utilization in SPEs because SPEs know voxels to process in advance [S1].
+    *   Uses system memory, allowing larger datasets than graphics memory [S1].
+*   **Limitations:**
+    *   Limited by 1GB system memory [S1].
+    *   Requires careful tuning of leaf node size [S1].
+    *   Static assignment may not adapt to highly variable scene complexity, though fine-grain tiling helps balance load [S1].
+*   **When to use:** When rendering high-quality volumetric data on Cell B.E. hardware where interactive frame rates are required and datasets fit within 1GB [S1].
+*   **When not to use:** When datasets exceed 1GB or when hardware lacks the Cell B.E. architecture (PPE/SPE heterogeneity) [S1].
+
+## Background
+*   **Origin:** Developed by Sony, Toshiba, and IBM (STI) as part of the Cell Broadband Engine (Cell B.E.) initiative [S1].
+*   **Paper:** "Streaming Model Based Volume Ray Casting Implementation" [S1].
+*   **History:** The method addresses the limitations of texture-mapping based volume rendering, which suffers from limited data size (graphics memory) and lower quality [S1]. It leverages the Cell B.E.'s heterogeneous cores (PPE for control/traversal, SPEs for SIMD compute) and asynchronous DMA features [S1].
+*   **Usage:** Used for interactive visualization of practical datasets (e.g., $256^3$) on the Cell B.E. platform [S1].
+
+## Sources
+[S1] Streaming Model Based Volume Ray Casting Implementation ..., http://users.umiacs.umd.edu/~josephj/Streaming-model-ray-casting.pdf, fetched 2026-10-29

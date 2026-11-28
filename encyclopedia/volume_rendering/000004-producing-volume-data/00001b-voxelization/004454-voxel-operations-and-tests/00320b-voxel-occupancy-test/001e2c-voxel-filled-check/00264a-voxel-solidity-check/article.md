@@ -1,0 +1,88 @@
+# Voxel Solidity Check
+
+Also called: Voxel Occupancy Validation, Solidity Test
+
+## Overview
+Voxel Solidity Check is a post-sampling validation step used in volume rendering to verify whether a sampled voxel actually contributes to the volume's opacity [S1, unofficial]. It is primarily employed to reduce banding and rendering artifacts that arise from discrete voxel sampling [S1, unofficial]. Unlike its parent [Voxel Filled Check](1705-voxel-filled-check.md), which typically determines binary occupancy based on simple geometric containment, this method focuses on the visual contribution of the voxel to the final image, often acting as a filter before raycasting or compositing [S1, unofficial].
+
+## How it works
+The method operates as a validation gate within the rendering pipeline. While the specific algorithmic implementation can vary based on the underlying voxelization strategy (e.g., whether the voxel data was generated via point occupancy or volume fraction), the core logic remains consistent: determine if the voxel's content exceeds a significance threshold.
+
+### Inputs and Outputs
+*   **Input:** A voxel grid (typically 8-bit or 16-bit raw volumetric data) and a sampling position within a voxel [S1, unofficial].
+*   **Output:** A boolean flag or weighted value indicating if the voxel is "solid" enough to contribute to the render [S1, unofficial].
+
+### Data Structures
+The input is typically stored as a 3D array or texture.
+*   **Format:** Raw volumetric data, supporting 8-bit or 16-bit depth [S1, unofficial].
+*   **Layout:** Linear or 3D texture array, indexed by $(x, y, z)$ coordinates.
+
+### Steps
+1.  **Sample Voxel Value:** Retrieve the density or occupancy value at the current voxel coordinate $(x, y, z)$ [S1, unofficial].
+2.  **Validate Contribution:** Compare the sampled value against a threshold. If the value indicates the voxel contains significant material (i.e., it is not empty or negligible), mark it as solid [S1, unofficial].
+3.  **Proceed or Skip:** If the voxel is solid, proceed with raycasting or compositing; otherwise, skip or treat as transparent [S1, unofficial].
+
+### Formulas
+No explicit mathematical formula is provided in the sources for the threshold comparison itself, as it is often implementation-dependent. However, the validation can be conceptually represented as:
+$$
+\text{Solid} = \begin{cases} 
+\text{true} & \text{if } V(x,y,z) > T \\
+\text{false} & \text{otherwise}
+\end{cases}
+$$
+Where $V(x,y,z)$ is the voxel value and $T$ is the threshold.
+
+### Parameters
+*   **Threshold ($T$):** Not given in the sources. Typically determined by the noise floor of the data or the desired visual fidelity.
+*   **Bit Depth:** 8-bit or 16-bit [S1, unofficial].
+
+### Edge Cases and Pitfalls
+*   **Banding:** The primary pitfall this method addresses is banding artifacts. If the threshold is too high, thin structures may disappear; if too low, noise may be rendered as solid geometry [S1, unofficial].
+*   **Precision:** Using 16-bit data helps preserve subtle density variations that might be lost in 8-bit formats, reducing artifacts [S1, unofficial].
+
+### Pseudocode
+> **Unverified code.** The code below did not pass a test run against a reference implementation, or no test fits it, so it may contain errors.
+
+```python
+def voxel_solidity_check(voxel_grid, x, y, z, threshold):
+    """
+    Checks if a voxel at (x, y, z) is solid enough to contribute to rendering.
+    
+    Args:
+        voxel_grid: 3D array of voxel values (8-bit or 16-bit).
+        x, y, z: Coordinates of the voxel to check.
+        threshold: Minimum value for the voxel to be considered solid.
+        
+    Returns:
+        bool: True if the voxel is solid, False otherwise.
+    """
+    # Get the value at the specified voxel coordinate
+    # Note: Bounds checking should be performed in the calling context
+    value = voxel_grid[x][y][z]
+    
+    # Compare against threshold
+    if value > threshold:
+        return True
+    else:
+        return False
+```
+
+## Subtopics
+
+### Volume Fraction
+Volume Fraction is a specific variant of voxel occupancy determination where a cell is considered solid if the majority (or a specific cutoff value) of its volume is filled by the object [S2, unofficial]. This method requires calculating the volume of the intersection between the cube and the parametric surface to determine the fill ratio [S2, unofficial]. Alternatively, it can be approximated by choosing a representative or random set of points inside the cube, testing if they are inside the parametric object, and declaring the voxel occupied if a cutoff percentage of points are inside [S2, unofficial]. Binary Marching Cubes is described as a version of this method that specifically chooses the 8 corners of the cube as its test points and includes anti-aliasing [S2, unofficial]. Fractional occupancy varieties can use intermediate cases linked to other cutoff values as an anti-aliasing technique [S2, unofficial].
+
+## Operating characteristics
+*   **Time Complexity:** $O(1)$ per voxel for the check itself, assuming direct array access. The cost depends on the underlying voxelization method (e.g., Volume Fraction may require more expensive intersection calculations or point sampling during the generation phase).
+*   **Memory Complexity:** Depends on the storage format of the voxel grid (8-bit or 16-bit per voxel) [S1, unofficial].
+*   **Strengths:** Effectively reduces banding and rendering artifacts [S1, unofficial]. Simple to implement as a post-sampling step.
+*   **Limitations:** The effectiveness depends heavily on the choice of threshold and the quality of the initial voxelization.
+*   **When to use:** When rendering volumetric data that exhibits banding artifacts or when using raycasting on discrete voxel grids [S1, unofficial].
+*   **When not to use:** When real-time performance is critical and the overhead of additional validation is unacceptable, or when the voxel data is already high-fidelity enough to not require such checks.
+
+## Background
+The term "Voxel Solidity Check" appears in the context of a C++/OpenGL volume rendering project that loads 8 and 16-bit raw volumetric data and displays it using raycasting [S1, unofficial]. The project, authored by Jose Villegas, lists "voxel's solidity check" as a feature to reduce banding/artifacts, alongside ray jitter, gradient computation, and smoothing [S1, unofficial]. The concept of using volume fraction or point occupancy for voxelization, which underpins the solidity check, was discussed in the context of rasterizing parametric solids in Minecraft voxel space [S2, unofficial].
+
+## Sources
+[S1] VolumeRendering, https://github.com/jose-villegas/VolumeRendering, fetched 2026-10-27 (unofficial)
+[S2] Rasterizing parametric solids in Minecraft voxel space, https://gamedev.stackexchange.com/questions/72122/rasterizing-parametric-solids-in-minecraft-voxel-space, fetched 2026-10-27 (unofficial)

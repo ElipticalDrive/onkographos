@@ -1,0 +1,884 @@
+A set of reusable functions to integrate IPC into an existing simulation. - Add ipc::cuda::LBVH: a GPU broad phase sharing the CPU LBVH implementation by zfergus · Pull Request #260 · ipc-sim/ipc-toolkit
+
+Add ipc::cuda::LBVH: a GPU broad phase sharing the CPU LBVH implementation by zfergus · Pull Request #260 · ipc-sim/ipc-toolkit · GitHub
+Skip to content
+You signed in with another tab or window. Reload to refresh your session.
+You signed out in another tab or window. Reload to refresh your session.
+You switched accounts on another tab or window. Reload to refresh your session.
+Dismiss alert
+Conversation
+zfergus
+commented
+Sep 9, 2026
+•
+edited
+Loading
+Uh oh!
+There was an error while loading. Please reload this page.
+Copy link
+Copy Markdown
+Member
+Description
+Adds ipc::cuda::LBVH, a GPU-native LBVH broad phase, and factors the build and traversal it shares with ipc::LBVH into a single implementation used by both.
+The shared code lives in broad_phase/details/, parameterized on the few things that genuinely differ between host and device:
+lbvh_build.hpp — the Apetrei [2014] bottom-up build, parameterized on how sorted Morton codes are read and how a node's two children rendezvous (std::atomic post-increment vs. atomicAdd between two __threadfence()s).
+lbvh_traverse.hpp — the Karras-style explicit-stack descent, parameterized on the overlap test (a bool for one query, an xsimd::batch_bool for a batch) and on what to do with an overlapping leaf. The scalar CPU, SIMD CPU, and device traversals are all this one function.
+connectivity_filters.hpp — the shared-vertex exclusion (share_vertex, host/device) and the user-filter half of the can_*_collide rule, previously duplicated in BroadPhase, ipc::LBVH, SweepAndTiniestQueue, and ipc::cuda::LBVH.
+math/morton.hpp gains the shared Morton code construction, count-leading-zeros dispatch, common-prefix length, and normalization-domain reciprocal.
+LBVH::Node's predicates are now host/device, and LBVH::ConstructionInfo is templated on its counter so std::atomic<int> and int share one layout.
+utils/cuda/cuda_profiler.cuh adds CudaEventTimer, a ProfilePoint timer backed by CUDA events, so a device stage is measured by when the device ran it rather than when the host returned from the launch. Both broad phases are instrumented per stage behind it.
+Impacts:
+The GPU broad phase adds no second copy of the algorithm: ipc::LBVH loses 336 lines by adopting the shared build and descent, and its SIMD traversal keeps only the batched overlap test and emission.
+The CPU and GPU traversals cannot silently diverge; 2D and 3D go through the same predicates on both.
+Sharing the descent through a template costs nothing: CPU edge-edge traversal is within noise of the previous hand-written loop on every benchmark scene, and every device traverse_kernel instantiation has a 392-byte frame (the 97-entry stack) and zero spills.
+Performance
+ipc::cuda::LBVH vs. ipc::LBVH, same machine and build, median of three runs of 20 samples, transfers included: GPU build times cover uploading the vertices and connectivity and reading back the roots, and GPU detection times cover copying the candidate pairs back and constructing the host Candidate objects (about 5.2M pairs and 42 MB on Cloth-Ball). Context creation and first-touch allocation are excluded by a warm-up call; nothing is allocated per call afterwards.
+The build advantage widens with the tree, 1.9x at 18.5K faces to 4.9x at 1.06M: a build is tree construction end to end, and the GPU keeps finding parallelism as the scene grows.
+Detection goes the other way: 3.6x on Cloth-Funnel down to 1.3x on Cloth-Ball and N-Body-Simulation. The gain is set by how many candidates cross back to the host, not by the size of the scene.
+The next two figures come from a profiling build. Device stages are CUDA-event timed and each waits on its own stop event, so stages the build otherwise overlaps are serialized and these totals run above the fused times above; the shares are what they are for.
+The Morton sort dominates both sides, and CUB's radix sort is where the build is won: 0.54 ms to 0.077 ms per tree on Cloth-Ball, 7.0x.
+The device wins the descent outright on Cloth-Ball, 8.19 ms to 2.16 ms (3.8x), then spends 11.74 ms of its 16.96 ms (69%) materializing 5.2M host Candidate objects; the CPU spends 17.25 ms of 25.46 ms (68%) in its thread-local merge. The end-to-end ratio is set by the candidate output, not by the traversal. A GPU-native consumer can take the detect_*_candidates_device() view and skip it.
+GPU build does no allocation per call: scratch and candidate buffers are persistent, uninitialized, grow-only (DeviceBuffer), the sort and reduce are CUB with retained temp storage, and the Morton domain and tree roots stay on the device, so a build synchronizes once.
+API changes
+New BroadPhaseMethod::LBVH_CUDA, appended so existing enumerator values are unchanged. Without CUDA it throws, matching SWEEP_AND_TINIEST_QUEUE. New BroadPhaseMethod::NUM_BROAD_PHASE_METHODS sentinel.
+New ipc::cuda::LBVH (broad_phase/cuda/lbvh.hpp), a BroadPhase subclass supporting 2D and 3D, with detect_*_candidates_device() returning device-resident int32_t pair views. All device-side ids are 32-bit (the ceiling LBVH::Node::primitive_id already imposes). Its detect_*() are const per the interface but serialized by an internal mutex.
+New ipctk.cuda submodule mirroring ipc::cuda, with ipctk.cuda.LBVH in CUDA builds.
+New CollisionFilter::accepts_all(): true for a filter holding no predicate (the default), which is now represented by an empty std::function. Composing with an accept-all filter short-circuits (f | all is all, f & all is f).
+Changed contract BroadPhase::detect_*_candidates() now clear their output vector first, on every broad phase. Previously half the implementations overwrote and half appended; all in-library callers pass an empty vector, so results are unchanged.
+New AABB::conservative_lower_bound/upper_bound (host/device), the per-coordinate policy behind conservative_inflation, shared with the box kernel.
+LBVH::ConstructionInfo moves from a private type to a public template.
+New ipc::cuda::CudaEventTimer and IPC_TOOLKIT_PROFILE_BLOCK_CUDA, both behind IPC_TOOLKIT_WITH_PROFILER and compiled out when it is off.
+No existing signatures change; no deprecations.
+Build
+.cu files now get a curated, nvcc-validated warning set on the host pass via a new ipc_toolkit_filter_nvcc_flags() (also used for the SIMD flags), plus nvcc's -Werror all-warnings and -Werror cross-execution-space-call. The full C++ warning set is not forwarded: nvcc's generated host code is not clean under -Wpedantic, -Wold-style-cast, or -Wsign-promo.
+Doxygen predefines IPC_TOOLKIT_WITH_CUDA, so the CUDA classes are documented; pre-commit formats .cu/.cuh.
+Follow-ups
+Measured or scoped during review; deliberately not in this PR.
+30-bit Morton codes (10 bits per axis, uint32_t keys): GPU build 3 to 17% faster (4 radix passes instead of 8) with no measurable traversal change on these scenes. Deferred because the loss of resolution is input-dependent (a fine mesh in a large bounding box, or 2D going from 32 to 16 bits per axis) and needs a stress case first.
+Overlap the three tree builds on separate streams. Kernels are issued back to back on one stream today, so a small tree cannot fill the GPU while the next waits; the trees are independent after the domain reduction. Wins on sub-millisecond builds, a wash on large ones.
+fmt in device translation units. eigen_ext.tpp includes logger.hpp, so 23 of the 33 CUDA TUs (and Scalable CCD's own) reach the bundled fmt, and cmake/patches/fmt-nvcc-compat.patch stays required. Moving log_and_throw_error out of eigen_ext.tpp would confine the patch to Scalable CCD.
+Connectivity on the base class. BroadPhase reads connectivity from AABB::vertex_ids, which forces every broad phase that does not keep host AABBs to mirror it; storing it once on the base would delete those mirrors and shrink AABB.
+Type of change
+Enhancement (non-breaking change which improves existing functionality)
+New feature (non-breaking change which adds functionality)
+This change requires a documentation update
+How Has This Been Tested?
+[broad_phase], [lbvh], [collision_filter], [stq], [simd] suites in CUDA Release and Debug; cuda::LBVH runs in the shared tests::broad_phases() generator (build from boxes, codim points, 2D, brute-force comparison).
+test_gpu_lbvh.cu: GPU trees validated against the CPU trees with the shared exact-equality validators (lbvh_validation.hpp); candidate sets compared exactly in 2D and 3D, with a custom filter, on single-primitive trees, on a zero-width (planar) domain, through the device view, and across moves. All skip without a device.
+test_collision_filter.cpp: accepts_all() pinned in both directions, including compositions.
+Benchmarks above; CPU traversal A/B against the previous loop on all seven scenes.
+benchmark_lbvh_stages.cu: per-stage breakdown of both broad phases over the six scenes, written as JSON. Stages are credited self time, so they sum to the enclosing call.
+Profiler overhead A/B on all four benchmarks: with IPC_TOOLKIT_WITH_PROFILER off the blocks cost nothing (-5.2% to +1.2%, both directions, i.e. noise); with it on the CUDA event timers serialize stages the build overlaps, costing 3.6% to 27% of the GPU build (most on the smallest scenes) and under 9% elsewhere.
+ptxas --resource-usage: 392-byte frame, 0 spills, 32 to 36 registers for all six traverse_kernel instantiations.
+clang-tidy clean on the touched host TUs; clang-format: 0 replacements.
+Test Configuration:
+OS and Version: Linux 5.14.0 (RHEL 9.8)
+CPU: Intel Core Ultra 9 285K (24 cores / 24 threads, no SMT), 24 TBB threads
+GPU: NVIDIA RTX 5080 (sm_120)
+Compiler and Version: GCC 11.5.0 with CUDA 12.8 (V12.8.93), -march=native (AVX2+FMA) and -arch=native, Release and Debug
+Checklist
+I have followed the project style guide
+My code follows the clang-format style guidelines of this project
+I have performed a self-review of my code
+I have commented my code, particularly in hard-to-understand areas
+I have made corresponding changes to the documentation
+My changes generate no new warnings
+I have added tests that prove my fix is effective or that my feature works
+New and existing unit tests pass locally with my changes
+Any dependent changes have been merged and published in downstream modules
+zfergus
+and others
+added 10 commits
+September 9, 2026 17:19
+Add shared device utilities for the ipc::cuda implementations
+…
+a79d4d4
+```
+Introduce src/ipc/utils/cuda/device_utils.cuh, the header every ipc::cuda
+translation unit needs before it can launch anything:
+
+- IPC_TOOLKIT_CUDA_CHECK, which turns a cudaError_t into a std::runtime_error
+  naming the file and line.
+- KERNEL_BLOCK_SIZE and kernel_grid_size(), the single definition of the launch
+  geometry, so the block size is not repeated per call site.
+- global_dof_index(), mirroring the index math of
+  local_gradient_to_global_gradient() for device-side gradient scatter.
+- A compile-time guard rejecting compute capability < 6.0, where
+  atomicAdd(double*, double) does not exist.
+
+Include <Eigen/Core> directly: global_dof_index() compares
+VERTEX_DERIVATIVE_LAYOUT against Eigen::RowMajor, and config.hpp deliberately
+defines its own Eigen-free layout constants rather than pulling in Eigen, so
+the header would otherwise only compile when an includer happened to have
+included Eigen first.
+
+The header is CUDA-only and included from .cu files exclusively; it is wired in
+under IPC_TOOLKIT_WITH_CUDA so a non-CUDA build never sees it.
+```
+Add ipc::cuda::LBVH: GPU-native LBVH broad phase
+…
+b2b35ca
+```
+A first-class GPU counterpart to ipc::LBVH (not a CPU-upload adapter):
+builds vertex/edge/face AABBs and their BVHs entirely on the device
+(Morton codes + Apetrei 2014 single-pass bottom-up construction, reusing
+the 32-byte ipc::LBVH::Node layout for host validation/interop), then
+runs candidate detection with the BVH descent and mesh-connectivity
+(shared-vertex) exclusion both on the device. The user vertex filter is
+honored on the device for the common accept-all case (new
+CollisionFilter::accepts_all()); a non-trivial filter falls back to a
+host pass over the device-emitted, connectivity-filtered candidates.
+Either path matches the CPU ipc::LBVH's candidate set exactly. Adds
+DeviceCandidateView + detect_*_candidates_device() so candidates can
+stay device-resident for a future GPU-native pipeline (e.g. device
+Additive CCD) instead of always materializing to host vectors.
+
+Supporting changes: ipc::math::morton_2D/3D and expand_bits_1/2 are now
+IPC_TOOLKIT_HOST_DEVICE so the device Morton codes reuse the exact CPU
+implementation; the Morton-normalization reciprocal is now precomputed
+once per build and multiplied per box instead of divided (CPU and GPU
+changed identically so their Morton codes stay bit-matched to each
+other).
+
+Validation: build + detect + custom-filter-fallback GPU-run-validated on
+an RTX 3070 (artemis): 150517 assertions across 3 test cases, plus exact
+candidate-set parity against the CPU LBVH for all 6 candidate types.
+Benchmarked against the CPU LBVH (edge-edge detection): 1.1-1.7x faster
+on every real mesh tested except a trivial two-cube case. The Morton
+reciprocal-multiply optimization and code cleanup (Eigen::Array3d
+in place of a hand-rolled Vec3d, .min()/.max() in place of manual
+fminf/fmaxf loops) landed after artemis went offline and are
+Docker-compile-validated only; pending a GPU re-run.
+
+Not yet done: ipc::cuda::LBVH is not registered in BroadPhaseMethod /
+create_broad_phase (deferred until the device-resident candidate path is
+consumed by something), and the connectivity/user-filter split does not
+yet support device-side patch/connected-component filters (would need a
+label-data CollisionFilter descriptor).
+
+Co-Authored-By: Claude Sonnet 5 <noreply@anthropic.com>
+```
+Cache candidate-buffer capacity across calls in ipc::cuda::LBVH
+…
+dcc32a7
+```
+detect_*_candidates sized its output buffer from a fresh max(1024, 8 *
+n_source_leaves) guess on every single call, with nothing remembering
+what a prior call actually needed. Checking the real candidate counts
+on the CPU LBVH (proven exactly equal to the GPU's) showed 5 of 7
+benchmarked meshes overflow that guess by up to 17x, so nearly every
+real mesh silently paid for two full kernel dispatches on every call:
+one that discovers the buffer is too small, then a full re-traversal at
+the corrected size.
+
+Add a predicted_capacity field to LBVH::Impl::DeviceCandidates (one per
+candidate type) that persists the largest count ever observed and seeds
+the next call's guess. It is deliberately not reset by clear(), since
+build() calls clear() every timestep and the hint must survive that or
+it never helps; it only ever grows for the object's lifetime, mirroring
+the predicted_*_candidates_size pattern already used by the (Slang)
+vulkan branch's LBVH. Also add a logger().warn() on overflow, matching
+that same branch, so a retry is no longer silent.
+
+Validated on artemis (RTX 3070): [lbvh][cuda] unchanged at 150517
+assertions. Re-benchmarked detect_edge_edge_candidates against the CPU
+LBVH: the 2 meshes that never overflowed are byte-identical before/after
+as expected; the 5 that did are 13-29% faster (e.g. Rod-Twist 15.8ms ->
+11.2ms, Puffer-Ball 1.097s -> 0.912s), widening the GPU's margin over
+the CPU across the board (e.g. Rod-Twist 1.23x -> 1.73x, Puffer-Ball
+1.47x -> 1.76x faster than CPU).
+
+Co-Authored-By: Claude Sonnet 5 <noreply@anthropic.com>
+```
+Register ipc::cuda::LBVH in create_broad_phase
+…
+abd5150
+```
+Add BroadPhaseMethod::LBVH_CUDA, appended after SWEEP_AND_TINIEST_QUEUE
+to keep the existing enum values stable (the "Create broad phase" test
+casts consecutive integers to BroadPhaseMethod). The factory case
+mirrors the SWEEP_AND_TINIEST_QUEUE case exactly: returns
+ipc::cuda::LBVH under IPC_TOOLKIT_WITH_CUDA, otherwise throws with a
+message naming the CMake option to enable.
+
+Not added to tests/src/tests/utils.cpp's broad_phases() /
+BroadPhaseGenerator (used by most generic cross-broad-phase comparison
+tests): several of those exercise 2D meshes, and ipc::cuda::LBVH::build()
+currently throws on non-3D input (v1 scope), unlike SweepAndTiniestQueue
+which silently upgrades 2D to 3D via to_X3d() before building. Adding it
+there would break those tests immediately; left for a follow-up if 2D
+parity is wanted.
+
+Validated: host (non-CUDA) build passes "Create broad phase" (5
+assertions, count unchanged). Artemis (CUDA, RTX 3070): same test passes
+with the bumped count (7 assertions); [lbvh][cuda] suite unaffected
+(150517 assertions, no regression).
+
+Co-Authored-By: Claude Sonnet 5 <noreply@anthropic.com>
+```
+Add 2D support to ipc::cuda::LBVH, matching the CPU LBVH exactly
+…
+d6b7df0
+```
+build() previously hard-coded dim = 3 and threw for non-3-column input.
+The vertex upload also unconditionally read 3 components per vertex,
+which would read out of bounds on a 2-column matrix -- dimension
+support was blocked below the validation check, not just at it.
+
+Mirror the CPU ipc::LBVH's actual semantics instead of the simpler
+upgrade-to-3D-via-to_X3d approach SweepAndTiniestQueue uses. The key
+subtlety: ipc::AABB's constructor zero-initializes its 3-wide array and
+only assigns the first `dim` components from the already-inflated
+input, so a 2D box's z bound is an exact, uninflated 0.0 -- not
+nextafter(0 +/- inflation_radius, ...). build_vertex_boxes_{static,
+dynamic}_kernel now take dim and, for components past it, write a hard
+0.0 instead of running the inflation formula, matching that exactly.
+Vertex upload now sizes to dim * n instead of a fixed 3 * n. All three
+build() overloads relax to assert(dim == 2 || dim == 3) (matching the
+CPU's debug-only assert, not a throw) and set dim from the real input.
+
+The Morton-code kernel's dim == 2 branch already existed (copied from
+the CPU when first written) and needed no change; the edge/face box
+union kernels and the Apetrei hierarchy build are dim-agnostic and
+untouched.
+
+Add "GPU LBVH 2D build and detect" using the same mesh-2D CSV data as
+the CPU's own 2D test: checks vertex/edge BVH structural and root-AABB
+parity, plus exact detect_edge_vertex_candidates parity against the CPU
+LBVH (the only candidate type meaningful in 2D).
+
+Validated on artemis (RTX 3070): [lbvh][cuda] now 152785 assertions
+across 4 test cases (was 150517/3) -- the existing 3D paths are
+unregressed and the new 2D path matches the CPU exactly.
+
+Co-Authored-By: Claude Sonnet 5 <noreply@anthropic.com>
+```
+Fix CUDA LBVH errors on MSVC
+…
+2ba9781
+```
+nextafter(double, float) does not exist on the device, so use
+nextafter(double, double) with a constexpr for positive and negative infinity.
+INFINITY is a float macro, so nextafter(double, INFINITY) resolves to the
+host-only std::nextafter<double, float> promotion template instead of CUDA's
+__device__ nextafter(double, double).
+```
+Fix the GPU LBVH traversal stack corruption on sm_120
+…
+419a82c
+```
+prim_shares_vertex used two runtime-indexed index_t[3] locals. Runtime
+indexing forces them into local memory, and on sm_120 ptxas sized
+traverse_kernel's frame at 0x110 bytes while basing those arrays at
+frame+0x100 -- 16 bytes of room for 24 bytes of object, on top of the
+0x100-byte traversal stack based at frame+0. Writes landed on
+stack[0..1] and destroyed the INVALID_POINTER sentinel the descent loop
+terminates on, so the traversal popped past the bottom of the stack and
+read stack[-1].
+
+The result was cudaErrorIllegalAddress, which surfaces as an apparent
+hang: the driver spins in the candidate-counter readback, and the
+poisoned context makes every later GPU test look stuck too.
+
+Hold the vertex ids in scalars instead, filling unused slots from slot 0
+so every comparison stays well defined. The frame drops to 0x100
+(exactly the stack) and local traffic to the 3 stack accesses.
+
+Scope of the miscompile: sm_120 only. sm_75/86/89 allocate 0x120 as
+expected, identically with -rdc=true and -rdc=false, and the driver's
+own JIT (CUDA 13.3) reproduces the 272 vs 288 split, so it is neither
+an -rdc nor a 12.8 artifact. Building the unfixed source as compute_89
+PTX and JIT-ing onto the sm_120 device passes clean. A provably bounded
+index does not help, so this is not licensed by the latent UB.
+
+Tests: [gpu] ~[!benchmark] passes (158705 assertions, 28 cases) and
+compute-sanitizer memcheck reports 0 errors on [lbvh][gpu]; both faulted
+before.
+
+Co-Authored-By: Claude Opus 5 (1M context) <noreply@anthropic.com>
+```
+Share the duplicated LBVH code between the CPU and CUDA broad phases
+…
+a16ade8
+```
+ipc::LBVH and ipc::cuda::LBVH held line-for-line ports of the same
+algorithm, with agreement asserted only in comments and checked only by
+tests. Hoist the pieces that need no parallel abstraction into shared
+host/device code so the agreement is structural.
+
+New shared code:
+- ipc::morton_code() computes a box's Morton code from its center,
+  normalizing by a domain whose width is passed as a reciprocal so the
+  host and device multiply rather than divide.
+- ipc::count_leading_zeros() and ipc::morton_common_prefix() replace the
+  per-platform CLZ dispatch and the duplicate-code fallback rule
+  (Apetrei 2014's delta).
+- ipc::details::can_*_collide() hold the five mesh-connectivity filters.
+  These were duplicated three times, not two: ipc::BroadPhase carries the
+  same logic over AABB::vertex_ids.
+
+LBVH::Node's is_inner/is_leaf/is_valid/intersects are now
+IPC_TOOLKIT_HOST_DEVICE, so the traversal kernel calls the same
+predicates as the CPU instead of open-coding is_inner_marker == 0 and
+reimplementing the AABB overlap test.
+
+167 duplicated lines collapse into 111 shared ones.
+
+Node::intersects() also generates better SASS than the hand-expanded
+aabb_intersects it replaces: traverse_kernel drops 320 -> 304
+instructions, 33 -> 29 global loads, 16 -> 12 float compares and 5 -> 3
+reconvergence pairs, with the register count (35-36) and the 0x100 local
+frame unchanged. Holding that frame is a hard requirement here -- the
+sm_120 miscompile fixed in c03e546 was frame-size sensitive.
+
+Morton codes are unchanged bit-for-bit. check_tree only compares root
+AABBs within 1e-4, so the suite cannot establish this; a standalone
+harness comparing the shared function against both prior forms over
+200,000 random 2D and 3D cases found zero differences, and the
+compute_morton_codes_kernel opcode histogram is unchanged.
+
+Tested: full suite (4,348,911 assertions in 353 cases), compute-sanitizer
+memcheck on [lbvh][gpu] with 0 errors, clang-format and clang-tidy clean.
+
+Co-Authored-By: Claude Opus 5 (1M context) <noreply@anthropic.com>
+```
+Share the LBVH build and traversal between the CPU and CUDA broad phases
+…
+6ce6abc
+```
+The Apetrei 2014 bottom-up build and the BVH descent were line-for-line
+ports between ipc::LBVH and ipc::cuda::LBVH. Hoist both into shared
+host/device code, leaving each platform only what it genuinely owns: the
+parallel launch, the sort, and a small policy per difference.
+
+ipc::details::build_hierarchy_from_leaf() takes the sorted-code accessor
+(the host stores an array of structs, the device a flat array) and the
+atomic arrival gate. ipc::details::traverse_lbvh() takes what to do on an
+overlap, which is the whole of the host/device difference there: the host
+filters and appends to a std::vector, the device filters against the mesh
+connectivity and appends through an atomic counter. Also shared:
+set_inflated_aabb(), init_leaf_node(), delta(), is_left_child(),
+swap_root_to_zero() and patch_left_pointer().
+
+LBVH::ConstructionInfo is now a template over its counter type, so the
+host uses std::atomic<int> and the device a plain int, from one layout.
+
+434 lines leave the two implementations for 197 lines of shared code.
+
+Fixes a latent race in the device build. The arrival gate had a
+__threadfence() on the release side but none on the acquire side, then
+read the sibling's child pointer, range endpoint and rightmost leaf with
+ordinary loads, which may be served from a stale L1 on another SM. The
+shared gate's contract requires both halves, and the device policy now
+fences after an increment that returns nonzero. The kernel's SASS gains
+exactly one MEMBAR.SC.GPU, giving
+  MEMBAR.SC.GPU / ATOMG.E.ADD.STRONG.GPU / MEMBAR.SC.GPU
+with the paired CCTL.IVALL that invalidates L1. This would have corrupted
+internal-node AABBs and rightmost[] without breaking the tree structure,
+so check_tree's structural checks could not have caught it.
+
+The single-leaf build case is now explicit on both sides. The host
+previously relied on writing nodes[0].left = 0 over the lone leaf's
+primitive_id, which was only correct because a one-box sort always yields
+box_id 0.
+
+traverse_kernel's SASS is bit-identical after the change -- the templated
+descent and its lambda inline away completely -- and every kernel's
+register count is unchanged from before this series. The 0x100 frame that
+the sm_120 miscompile in c03e546 turned on is preserved; that was the
+acceptance gate for touching this kernel at all.
+
+Adds coverage for single-primitive BVHs, which no existing mesh reaches.
+Only face-vertex and edge-face put a one-node BVH in the traversal target
+position, so the test builds one face and one disjoint edge and checks
+both against BruteForce, and the device against the host. Verified
+non-vacuous by mutation: suppressing the emit in the single-node branch
+fails 4 of its assertions.
+
+Tested: full suite (4,348,947 assertions in 354 cases), compute-sanitizer
+memcheck on [lbvh][gpu] with 0 errors, clang-format and clang-tidy clean.
+
+Co-Authored-By: Claude Opus 5 (1M context) <noreply@anthropic.com>
+```
+Remove warning from spdlog.cmake
+…
+abfa013
+```
+- Warning falsly triggers on our own dependencies because spdlog.cmake
+  takes precedence over downstream spdlog.cmake scripts.
+```
+codecov
+Bot
+commented
+Sep 9, 2026
+•
+edited
+Loading
+Uh oh!
+There was an error while loading. Please reload this page.
+Copy link
+Copy Markdown
+Codecov Report
+❌ Patch coverage is 99.20949% with 2 lines in your changes missing coverage. Please review.
+✅ Project coverage is 96.92%. Comparing base (929086d) to head (d94d763).
+⚠️ Report is 1 commits behind head on main.
+Files with missing lines
+Patch %
+Lines
+src/ipc/broad_phase/details/lbvh_traverse.hpp
+97.14%
+1 Missing ⚠️
+src/ipc/collision_filter.hpp
+93.75%
+1 Missing ⚠️
+Additional details and impacted files
+```
+@@            Coverage Diff             @@
+##             main     #260      +/-   ##
+==========================================
++ Coverage   96.74%   96.92%   +0.17%     
+==========================================
+  Files         191      194       +3     
+  Lines       17292    17349      +57     
+  Branches      933      943      +10     
+==========================================
++ Hits        16730    16816      +86     
++ Misses        562      533      -29     
+```
+Flag
+Coverage Δ
+unittests
+96.92% <99.20%> (+0.17%)
+⬆️
+Flags with carried forward coverage won't be shown. Click here to find out more.
+☔ View full report in Codecov by Harness.
+📢 Have feedback on the report? Share it here.
+🚀 New features to boost your workflow:
+❄️ Test Analytics: Detect flaky tests, report on failures, and find test suite problems.
+zfergus
+commented
+Sep 10, 2026
+View reviewed changes
+Comment thread
+src/ipc/broad_phase/cuda/lbvh.hpp
+Resolved
+Uh oh!
+There was an error while loading. Please reload this page.
+zfergus
+commented
+Sep 10, 2026
+View reviewed changes
+Comment thread
+tests/src/tests/broad_phase/test_lbvh.cpp
+Resolved
+Uh oh!
+There was an error while loading. Please reload this page.
+zfergus
+commented
+Sep 10, 2026
+View reviewed changes
+Comment thread
+src/ipc/broad_phase/cuda/lbvh.cu
+Resolved
+Uh oh!
+There was an error while loading. Please reload this page.
+zfergus
+commented
+Sep 10, 2026
+View reviewed changes
+Comment thread
+src/ipc/broad_phase/cuda/lbvh.cu
+Resolved
+Uh oh!
+There was an error while loading. Please reload this page.
+zfergus
+commented
+Sep 10, 2026
+View reviewed changes
+Comment thread
+src/ipc/broad_phase/details/lbvh_traverse.hpp
+Resolved
+Uh oh!
+There was an error while loading. Please reload this page.
+zfergus
+commented
+Sep 10, 2026
+View reviewed changes
+Comment thread
+src/ipc/broad_phase/cuda/lbvh.cu
+Resolved
+Uh oh!
+There was an error while loading. Please reload this page.
+zfergus
+commented
+Sep 10, 2026
+View reviewed changes
+Comment thread
+src/ipc/broad_phase/cuda/lbvh.cu
+Resolved
+Uh oh!
+There was an error while loading. Please reload this page.
+zfergus
+commented
+Sep 10, 2026
+View reviewed changes
+Comment thread
+src/ipc/collision_filter.hpp
+Resolved
+Uh oh!
+There was an error while loading. Please reload this page.
+zfergus
+commented
+Sep 10, 2026
+View reviewed changes
+Comment thread
+tests/src/tests/broad_phase/test_broad_phase.cpp
+Resolved
+Uh oh!
+There was an error while loading. Please reload this page.
+zfergus
+commented
+Sep 10, 2026
+View reviewed changes
+Comment thread
+src/ipc/broad_phase/cuda/lbvh.cu
+Resolved
+Uh oh!
+There was an error while loading. Please reload this page.
+zfergus
+commented
+Sep 10, 2026
+View reviewed changes
+Comment thread
+src/ipc/math/morton.hpp
+Resolved
+Uh oh!
+There was an error while loading. Please reload this page.
+zfergus
+commented
+Sep 10, 2026
+View reviewed changes
+Comment thread
+tests/src/tests/broad_phase/test_gpu_lbvh.cu
+Resolved
+Uh oh!
+There was an error while loading. Please reload this page.
+zfergus
+commented
+Sep 10, 2026
+View reviewed changes
+Comment thread
+src/ipc/math/morton.hpp
+Resolved
+Uh oh!
+There was an error while loading. Please reload this page.
+zfergus
+commented
+Sep 10, 2026
+View reviewed changes
+Comment thread
+src/ipc/broad_phase/cuda/lbvh.cu
+Resolved
+Uh oh!
+There was an error while loading. Please reload this page.
+zfergus
+commented
+Sep 10, 2026
+View reviewed changes
+Comment thread
+src/ipc/broad_phase/cuda/lbvh_impl.cuh
+Resolved
+Uh oh!
+There was an error while loading. Please reload this page.
+zfergus
+commented
+Sep 10, 2026
+View reviewed changes
+Comment thread
+src/ipc/broad_phase/lbvh.cpp
+Resolved
+Uh oh!
+There was an error while loading. Please reload this page.
+zfergus
+commented
+Sep 10, 2026
+View reviewed changes
+Comment thread
+src/ipc/broad_phase/cuda/lbvh.cu
+Resolved
+Uh oh!
+There was an error while loading. Please reload this page.
+zfergus
+commented
+Sep 10, 2026
+View reviewed changes
+Comment thread
+src/ipc/broad_phase/create_broad_phase.hpp
+Resolved
+Uh oh!
+There was an error while loading. Please reload this page.
+zfergus
+commented
+Sep 10, 2026
+View reviewed changes
+Comment thread
+src/ipc/broad_phase/cuda/lbvh.cu
+Resolved
+Uh oh!
+There was an error while loading. Please reload this page.
+zfergus
+commented
+Sep 10, 2026
+View reviewed changes
+Comment thread
+src/ipc/utils/cuda/device_utils.cuh
+Resolved
+Uh oh!
+There was an error while loading. Please reload this page.
+zfergus
+commented
+Sep 10, 2026
+View reviewed changes
+Comment thread
+src/ipc/broad_phase/cuda/lbvh.hpp
+Resolved
+Uh oh!
+There was an error while loading. Please reload this page.
+zfergus
+commented
+Sep 10, 2026
+View reviewed changes
+Comment thread
+src/ipc/broad_phase/cuda/lbvh.hpp
+Resolved
+Uh oh!
+There was an error while loading. Please reload this page.
+zfergus
+commented
+Sep 10, 2026
+View reviewed changes
+Comment thread
+tests/src/tests/broad_phase/test_gpu_lbvh.cu
+Resolved
+Uh oh!
+There was an error while loading. Please reload this page.
+zfergus
+commented
+Sep 10, 2026
+View reviewed changes
+Comment thread
+src/ipc/broad_phase/cuda/lbvh.cu
+Resolved
+Uh oh!
+There was an error while loading. Please reload this page.
+zfergus
+commented
+Sep 10, 2026
+View reviewed changes
+Comment thread
+src/ipc/broad_phase/cuda/lbvh.cu
+Resolved
+Uh oh!
+There was an error while loading. Please reload this page.
+zfergus
+commented
+Sep 10, 2026
+View reviewed changes
+Comment thread
+src/ipc/broad_phase/cuda/lbvh.cu
+Resolved
+Uh oh!
+There was an error while loading. Please reload this page.
+zfergus
+commented
+Sep 10, 2026
+View reviewed changes
+Comment thread
+src/ipc/broad_phase/cuda/lbvh.cu
+Resolved
+Uh oh!
+There was an error while loading. Please reload this page.
+zfergus
+commented
+Sep 10, 2026
+View reviewed changes
+Comment thread
+src/ipc/broad_phase/cuda/lbvh.cu
+Resolved
+Uh oh!
+There was an error while loading. Please reload this page.
+zfergus
+commented
+Sep 10, 2026
+View reviewed changes
+Comment thread
+src/ipc/broad_phase/cuda/lbvh.cu
+Resolved
+Uh oh!
+There was an error while loading. Please reload this page.
+zfergus
+commented
+Sep 10, 2026
+View reviewed changes
+Comment thread
+src/ipc/broad_phase/cuda/lbvh.cu
+Resolved
+Uh oh!
+There was an error while loading. Please reload this page.
+zfergus
+commented
+Sep 10, 2026
+View reviewed changes
+Comment thread
+src/ipc/broad_phase/cuda/lbvh.cu
+Resolved
+Uh oh!
+There was an error while loading. Please reload this page.
+zfergus
+commented
+Sep 10, 2026
+View reviewed changes
+Comment thread
+src/ipc/broad_phase/cuda/lbvh.cu
+Resolved
+Uh oh!
+There was an error while loading. Please reload this page.
+zfergus
+commented
+Sep 10, 2026
+View reviewed changes
+Comment thread
+src/ipc/broad_phase/cuda/lbvh_impl.cuh
+Resolved
+Uh oh!
+There was an error while loading. Please reload this page.
+zfergus
+and others
+added 2 commits
+September 10, 2026 16:47
+Address review of the CUDA LBVH broad phase
+…
+a285029
+```
+ipc::cuda::LBVH
+- Replace per-call thrust::device_vectors with persistent, uninitialized,
+  non-throwing DeviceBuffers (no cudaMalloc/cudaFree per build, no
+  value-init fills, no std::terminate when unwinding past a sticky error).
+- Sort and reduce with CUB on retained temp storage; keep the Morton domain
+  and the tree roots on the device, with one synchronize per build.
+- Check that every hierarchy build reached its root; fail on a malformed
+  tree instead of traversing from an arbitrary node.
+- 64-bit pair counter and capacity; two-pass overflow protocol made
+  explicit.
+- One Traversal<Candidate> descriptor per type drives both the host and
+  device detect paths; vertex-id counts are template parameters, removing
+  the nullptr connectivity sentinel.
+- noexcept moves with a lazily re-seeded pimpl; const detect_*() serialized
+  by a mutex; view lifetime and the 32-bit device id ceiling documented.
+- Upload vertices column-major straight from the matrix (once for the
+  static build); flat host connectivity with bounds asserts.
+
+Shared code
+- Generalize details::traverse_lbvh to a lane mask so the CPU SIMD
+  traversal uses it too; size the stack from the Morton key width and make
+  overflow a hard failure.
+- Morton tie-break offset is the code width (64), with the widths derived
+  from the types; zero-width normalization axes get a reciprocal of 0.
+- Split the connectivity rule into host/device share_vertex and the user
+  filter half; STQ uses it too. Share AABB::conservative_*_bound with the
+  box kernel and morton_domain_width_inv with the codes kernel.
+- CollisionFilter::accepts_all() is state (an empty predicate), with
+  compositions short-circuiting on it.
+- BroadPhase::detect_*_candidates() clear their output on every broad
+  phase; BroadPhaseMethod::NUM_BROAD_PHASE_METHODS sentinel.
+- MSVC count_leading_zeros via _BitScanReverse.
+
+Build, tests, bindings, docs
+- Forward a curated, nvcc-validated warning set to the CUDA host pass
+  (ipc_toolkit_filter_nvcc_flags) and enable nvcc's own -Werror kinds;
+  pre-commit formats .cu/.cuh.
+- cuda::LBVH joins the shared broad-phase test generator; GPU cases moved
+  behind skip_if_no_cuda_device(); shared exact-equality tree validators;
+  move, device-view, and degenerate-domain tests; accepts_all() tests.
+- ipctk.cuda.LBVH binding; docs and release notes.
+
+Co-Authored-By: Claude Fable 5.1 <noreply@anthropic.com>
+```
+Restore merge_thread_local_vectors to its original form
+…
+d94d763
+```
+The detect_*_candidates() methods clear their output before calling it, so
+the append generality added during review is dead; keep the original contract
+(and its assert) that the output is empty on entry.
+```
+zfergus
+marked this pull request as ready for review
+September 11, 2026 14:00
+zfergus
+added
+the
+enhancement
+New feature or request
+label
+Sep 11, 2026
+zfergus
+added this to the
+v2.0.0 milestone
+Sep 11, 2026
+Hide details
+View details
+zfergus
+merged commit 8714e3c
+into
+main
+Sep 15, 2026
+21 checks passed
+Uh oh!
+There was an error while loading. Please reload this page.
+zfergus
+deleted the
+feature/cuda-lbvh
+branch
+September 15, 2026 22:23
+zfergus
+mentioned this pull request
+Sep 15, 2026
+Profile the LBVH build and detect stages on both the CPU and the GPU
+#263
+Merged
+12 tasks done
+fsichetti
+added a commit
+to fsichetti/ipc-toolkit
+that referenced
+this pull request
+Sep 22, 2026
+Merge remote-tracking branch 'upstream/main' into upstream-merge
+…
+8c5a01c
+```
+Brings in the GPU LBVH broad phase (ipc-sim#260), its profiling (ipc-sim#263), a
+scalable_ccd pin bump (ipc-sim#261), and a docs/output fix (ipc-sim#264).
+
+One conflict, in BroadPhase::detect_collision_candidates: upstream documented
+that the candidates are cleared first, while this branch had added the
+all_types parameter that ESP contact needs. The merged implementation already
+contains both -- candidates.clear() and the all_types branch -- so the
+declaration keeps our signature with upstream's wording, and documents
+all_types, which had no @PARAM entry before.
+
+Co-Authored-By: Claude Opus 5 <noreply@anthropic.com>
+```
+Sign up for free
+to join this conversation on GitHub.
+Already have an account?
+Sign in to comment
+Uh oh!
+There was an error while loading. Please reload this page.
+Labels
+enhancement
+New feature or request
+1 participant
+Add this suggestion to a batch that can be applied as a single commit.This suggestion is invalid because no changes were made to the code.Suggestions cannot be applied while the pull request is closed.Suggestions cannot be applied while viewing a subset of changes.Only one suggestion per line can be applied in a batch.Add this suggestion to a batch that can be applied as a single commit.Applying suggestions on deleted lines is not supported.You must change the existing code in this line in order to create a valid suggestion.Outdated suggestions cannot be applied.This suggestion has been applied or marked resolved.Suggestions cannot be applied from pending reviews.Suggestions cannot be applied on multi-line comments.Suggestions cannot be applied while the pull request is queued to merge.Suggestion cannot be applied right now. Please check back later.
+You can’t perform that action at this time.

@@ -1,0 +1,173 @@
+# Work-Efficient Scan
+Also called: Work-Efficient Parallel Scan, Work-Efficient Parallel Inclusive Scan, Work-Efficient Inclusive Scan
+
+## Overview
+The Work-Efficient Scan is a parallel algorithm that computes the inclusive prefix sum of an array in $O(n)$ total work and $O(\log n)$ parallel depth, significantly improving upon the $O(n \log n)$ work complexity of naive parallel scan [S2, unofficial][S3]. It achieves this efficiency by decomposing the computation into an upsweep (reduction) phase and a downsweep (scan) phase, operating on a binary tree structure [S1, S2, unofficial]. Unlike the Kogge-Stone algorithm, which is inherently inclusive and computes all prefix sums simultaneously via fixed-distance dependencies, the Work-Efficient Scan explicitly constructs exclusive intermediate values before converting them to inclusive results, making it suitable for operations where the current element must not influence its own prefix result during intermediate steps [S1, unofficial].
+
+## How it works
+For a single block, it operates in-place on a device array [S3]. For arrays larger than a single block, it uses multiple kernel launches across hierarchical levels [S2, unofficial]. It requires the input size to be padded to the next power of two for internal tree operations, though the final output matches the original size [S2, unofficial][S3].
+
+### Inputs and Outputs
+- **Input**: Array `idata` of size $n$ (arbitrary integer or floating-point type) [S2, unofficial].
+- **Output**: Array `odata` of size $n$ containing the inclusive prefix sum [S2, unofficial].
+- **Auxiliary**: For multi-block execution, arrays `dev_idata`, `dev_buffer`, and `dev_odata` of size `num_scans` are used to manage hierarchical reduction levels [S2, unofficial].
+
+### Data Structures
+For multi-block execution [S2, unofficial]:
+- `dev_idata`: Array of pointers to device memory, size `num_scans`. `dev_idata[i]` holds the input for level $i$ [S2, unofficial].
+- `dev_buffer`: Array of pointers to device memory, size `num_scans`. `dev_buffer[i]` holds intermediate results for level $i$ [S2, unofficial].
+- `dev_odata`: Array of pointers to device memory, size `num_scans`. `dev_odata[i]` holds the final exclusive results for level $i$ [S2, unofficial].
+- `array_sizes`: Array of integers, size `num_scans`. `array_sizes[i]` is the number of elements at level $i$ [S2, unofficial].
+- `grid_sizes`: Array of integers, size `num_scans`. `grid_sizes[i]` is the number of blocks at level $i$ [S2, unofficial].
+
+### Parameters
+- `block_size`: CUDA block size. Profiling indicates optimal performance at 128 threads per block [S2, unofficial], though 512 is also cited as optimal in other contexts [S1, unofficial]. Values like 1024 are suboptimal due to reduced GPU parallelism [S1, unofficial].
+- `n`: Input array size [S2, unofficial].
+- `n_pad`: Padded size, calculated as $2^{\lceil \log_2 n \rceil}$ [S2, unofficial].
+
+### Steps
+
+1. **Preparation**:
+   - Calculate `n_pad = 1 << ilog2ceil(n)` [S2, unofficial].
+   - Determine `num_scans` and `array_sizes`/`grid_sizes` by iteratively dividing the length by `block_size` until it fits in one block [S2, unofficial]:
+     ```python
+     len = n_pad
+     num_scans = 0
+     while (len + block_size - 1) / block_size > 1:
+         num_scans += 1
+         len = (len + block_size - 1) / block_size
+     ```
+   - Allocate device memory for `dev_idata`, `dev_buffer`, `dev_odata`, `array_sizes`, and `grid_sizes` [S2, unofficial].
+   - Copy input `idata` to `dev_idata[0]` for `n` elements [S2, unofficial].
+
+2. **Forward Pass (Inclusive Scan)**:
+   - Loop `i` from 0 to `num_scans - 1`:
+     - Launch `kernScanInclusive` on `dev_idata[i]` into `dev_buffer[i]` [S2, unofficial].
+     - Copy `dev_buffer[i]` back to `dev_idata[i]` [S2, unofficial].
+     - If `i < num_scans - 1`:
+       - Extract the last element of each block from `dev_idata[i]` into `dev_idata[i+1]` using `kernExtractLastElementPerBlock` to prepare the next level's input [S2, unofficial].
+
+3. **Backward Pass (Exclusive Scan/Shift)**:
+   - Loop `i` from `num_scans - 1` down to 0:
+     - Launch `kernShiftToExclusive` on `dev_buffer[i]` to produce exclusive indices in `dev_odata[i]` [S2, unofficial].
+     - If `i >= 1`:
+       - Launch `kernAddOffsetPerBlock` to add the offset from `dev_odata[i]` to `dev_buffer[i-1]` to produce the final exclusive indices for the next lower level [S2, unofficial].
+
+4. **Final Copy**:
+   - Copy the final exclusive scan results from `dev_odata[0]` to host output `odata` for `n` elements [S2, unofficial].
+
+### Single-Block Kernel Logic (Core Algorithm)
+The core work-efficient scan within a single block (used in steps 2 and 3 above) follows these steps [S2, unofficial]:
+
+1. **Upsweep Phase (Reduction)**:
+   - For each thread with global index `id < n`:
+     - Iterate `d` from 0 to `log2n - 1`:
+       - If `(id % (1 << (d + 1))) == 0`:
+         - `idata[id + (1 << (d + 1)) - 1] += idata[id + (1 << d) - 1]` [S2, unofficial].
+     - Synchronize threads after each `d` [S2, unofficial].
+
+2. **Reset Last Element**:
+   - The last thread (`tid == blockDim.x - 1`) or the thread processing the last element (`id == n - 1`) stores the total reduction sum in a local variable `reduction_sum` and sets `idata[id] = 0` [S2, unofficial].
+
+3. **Downsweep Phase (Scan)**:
+   - Iterate `d` from `log2n - 1` down to 0:
+     - If `(id % (1 << (d + 1))) == 0`:
+       - `temp = idata[id + (1 << d) - 1]`
+       - `idata[id + (1 << d) - 1] = idata[id + (1 << (d + 1)) - 1]`
+       - `idata[id + (1 << (d + 1)) - 1] += temp` [S2, unofficial].
+     - Synchronize threads after each `d` [S2, unofficial].
+
+4. **Convert Exclusive to Inclusive**:
+   - If the thread is the last thread in the block or processes the last element:
+     - `odata[id] = reduction_sum` [S2, unofficial].
+   - Otherwise:
+     - `odata[id] = idata[id + 1]` [S2, unofficial].
+
+### Pseudocode
+> **Unverified code.** The code below did not pass a test run against a reference implementation, or no test fits it, so it may contain errors.
+
+```python
+import math
+
+def ilog2ceil(x):
+    """Returns ceil(log2(x)) for x > 0."""
+    return math.ceil(math.log2(x)) if x > 1 else 1
+
+def sync_threads():
+    """Synchronizes all threads in the block."""
+    pass  # Represents a hardware barrier
+
+def work_efficient_scan_kernel(n, block_size, idata, odata):
+    """
+    CUDA kernel logic for work-efficient scan within a single block.
+    Assumes idata is padded to power of two size internally if necessary.
+    """
+    tid = 0  # Represents threadIdx.x
+    id = tid
+    n_pad = 1 << ilog2ceil(n)
+    log2n = ilog2ceil(n)
+
+    # Upsweep Phase
+    for d in range(log2n):
+        if (id % (1 << (d + 1))) == 0:
+            idx_left = id + (1 << d) - 1
+            idx_right = id + (1 << (d + 1)) - 1
+            if idx_right < n_pad:
+                idata[idx_right] += idata[idx_left]
+        sync_threads()
+
+    # Reset Last Element
+    reduction_sum = 0
+    if tid == block_size - 1 or id == n - 1:
+        reduction_sum = idata[id]
+        idata[id] = 0
+    sync_threads()
+
+    # Downsweep Phase
+    for d in range(log2n - 1, -1, -1):
+        if (id % (1 << (d + 1))) == 0:
+            idx_left = id + (1 << d) - 1
+            idx_right = id + (1 << (d + 1)) - 1
+            if idx_right < n_pad:
+                temp = idata[idx_left]
+                idata[idx_left] = idata[idx_right]
+                idata[idx_right] += temp
+        sync_threads()
+
+    # Convert Exclusive to Inclusive
+    if tid == block_size - 1 or id == n - 1:
+        odata[id] = reduction_sum
+    else:
+        odata[id] = idata[id + 1]
+```
+
+### Edge Cases and Pitfalls
+- **Non-Power-of-Two Sizes**: The algorithm works best with power-of-two length arrays. For non-power-of-two arrays, intermediate array sizes must be rounded up to the next power of two, requiring extra memory [S3].
+- **Memory Access Patterns**: High memory throughput indicates non-optimal memory access patterns. SM workload imbalance is a main bottleneck in the upsweep phase, where some Streaming Multiprocessors (SMs) are underutilized by as much as 43.66% [S1, unofficial].
+- **Block Size**: A block size of 1024 does not yield ideal results for any algorithm, likely due to excessive block size reducing GPU parallelism and leaving computational resources underutilized [S1, unofficial].
+- **Known Errors**: The pseudocode in GPU Gems 3 Chapter 39 Example 39-2 contains known errors [S3].
+
+## Subtopics
+
+### [Blelloch’s Prefix Sum Algorithm](15466-blelloch-s-prefix-sum-algorithm.md)
+Blelloch’s algorithm is an exclusive parallel in-place algorithm for computing the prefix sum of an array of size $N$. It solves the problem by decomposing the computation into two distinct phases: an up-sweep (reduce) phase that builds a binary tree of partial sums, and a down-sweep (scan) phase that distributes these sums to compute the final exclusive prefix values. Unlike Kogge-Stone, which is an inclusive algorithm, Blelloch’s method explicitly excludes the current element from its own sum, making it suitable for operations where the current value must not influence its own prefix result. It is a work-efficient alternative to naive parallel scan, building on the principles of [Work-Efficient Scan](10349-work-efficient-scan.md).
+
+### GPU Scan with Shared Memory and Hardware Optimization
+An optimized GPU scan implementation using shared memory and bank conflict avoidance, based on GPU Gems 3 Chapter 39 Examples 39.1 and 39.2 [S3]. It optimizes memory access patterns to avoid shared memory bank conflicts [S3]. The size of shared memory is dynamic and related to the block size [S3]. Occupancy is affected by the amount of shared memory used per block relative to the SM's limit [S3]. Using maximum shared memory per block reduces occupancy (e.g., max 1 block per SM), which may not yield best performance [S3].
+
+## Operating characteristics
+- **Time Complexity**: $O(\log n)$ parallel depth per block [S2, unofficial].
+- **Work Complexity**: $O(n)$ total work, compared to naive $O(n \log n)$ work [S2, unofficial].
+- **Memory Complexity**: In-place on a single device array for single-block execution [S3]. For multi-block execution, auxiliary arrays are required for each scan level [S2, unofficial].
+- **Measured Performance**: Tested on Ubuntu 20.04 LTS, Ryzen 3700X @ 2.22GHz, RTX 2060 Super. The upsweep phase consumes the majority of execution time (averaging 28.38 ms), while the downsweep phase is shorter (averaging 20.26 ms) [S1, unofficial].
+- **Scaling**: Performance improves with block size up to an optimal point (128 or 512 threads per block), after which it degrades due to reduced parallelism [S1, S2, unofficial].
+- **Strengths**: Work-efficient, suitable for arbitrary input sizes (with padding), in-place operation for single blocks.
+- **Limitations**: SM workload imbalance in upsweep phase, non-optimal memory access patterns, requires extra memory for non-power-of-two sizes [S1, unofficial][S3].
+
+## Background
+The Work-Efficient Scan is based on the "Work-Efficient" algorithm described in GPU Gems 3, Section 39.2.2 [S3]. It is a standard parallel primitive used in stream compaction and other GPU algorithms [S1, S2, unofficial].
+
+## Sources
+[S1] GitHub - jichumao/Stream-Compaction, https://github.com/jichumao/Stream-Compaction, fetched 2026-10-29 (unofficial)
+[S2] GitHub - shineyruan/CUDA-Stream-Compaction, https://github.com/shineyruan/CUDA-Stream-Compaction, fetched 2026-10-29 (unofficial)
+[S3] Project2-Stream-Compaction/INSTRUCTION.md at main, https://github.com/CIS565-Fall-2022/Project2-Stream-Compaction/blob/main/INSTRUCTION.md, fetched 2026-10-29

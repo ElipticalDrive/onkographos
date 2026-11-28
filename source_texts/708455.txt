@@ -1,0 +1,249 @@
+Summary When the streaming route's visible-splat cap binds (quality/max_splat_count on GaussianSplatWorld3D), the splats that survive the cap are picked by GPU atomicAdd order. That order is not deterministic, so a static camera over ful...
+
+Streaming visible-splat cap truncates by GPU atomic order: static camera flickers whenever max_splat_count binds (299/300 frames vs 0 below the cap) · Issue #1131 · klausi3D/godotGS · GitHub
+Skip to content
+You signed in with another tab or window. Reload to refresh your session.
+You signed out in another tab or window. Reload to refresh your session.
+You switched accounts on another tab or window. Reload to refresh your session.
+Dismiss alert
+Streaming visible-splat cap truncates by GPU atomic order: static camera flickers whenever max_splat_count binds (299/300 frames vs 0 below the cap) #1131
+New issue
+Copy link
+New issue
+Copy link
+Open
+Open
+Streaming visible-splat cap truncates by GPU atomic order: static camera flickers whenever max_splat_count binds (299/300 frames vs 0 below the cap)#1131
+Copy link
+Description
+klausi3D
+opened on Oct 1, 2026
+Issue body actions
+Summary
+When the streaming route's visible-splat cap binds (quality/max_splat_count on GaussianSplatWorld3D), the splats that survive the cap are picked by GPU atomicAdd order. That order is not deterministic, so a static camera over fully loaded, idle content draws a different subset every frame. Whole chunks appear and disappear frame to frame. This is the flicker seen in the open_world_corridor_proof lane: that lane sets the cap to 120,000 (benchmark_suite_lane.gd:434) against roughly 2M candidates.
+Where it happens (origin/master efb2c8bfba7)
+The cap. GaussianSplatWorld3D passes quality/max_splat_count as the renderer override max_splats (nodes/gaussian_splat_world_3d.cpp:483, with the tier clamp at :504-505).
+build_runtime_fidelity_policy sets runtime_budget_splats = min(real_count, max_splats) (renderer/gaussian_splat_renderer.cpp:1622).
+The streaming contract makes that buffers.max_visible_splats for a single world instance (renderer/render_streaming_orchestrator.cpp:1783-1801).
+Unordered chunk list. compute/frustum_cull.glsl:143-150 appends visible chunks with atomicAdd(counters.visible_chunk_count), so the chunk order changes from frame to frame.
+Truncation by arrival order. In compute/depth_compute.glsl:223-229, every splat that passes the per-splat culls takes a slot with atomicAdd(counters.visible_splat_count). Splats whose slot is >= max_visible_splats are dropped (overflowed_splats++). Which splats arrive first depends on workgroup scheduling, plus the unordered chunk list from step 2.
+compute/instance_count_clamp.glsl:44-47 clamps the count to the cap.
+The sort afterwards is deterministic: the key is depth plus atlas_index (depth_compute.glsl:234-235). So with demand below the cap, the image is stable. The non-determinism is only in which splats make it into the set.
+The drop is not silent: WARN_PRINT_ONCE and instance_count_overflow_events (interfaces/gpu_sorting_pipeline.cpp:994-998, ADR adr-overflow-drop-telemetry.md Channel B). But no rule says which splats should be dropped. The current behaviour is simply whichever threads lose the race.
+The resident route never applies this cap. resident_instance_contract_publisher.cpp:857-864 takes max_visible_splats = MAX(min(atlas, max_splats), instance_count × dispatch_chunk_count × max_chunk_splats). Since that product is at least the atlas count, the cap never binds there. Run C below shows it: 787,302 splats were drawn while the renderer reported max_splats = 500,000. So max_splat_count truncates on the streaming route and is ignored on the resident route. That is a second inconsistency, found while checking this one.
+Oracle evidence (static-frame flicker oracle)
+Setup
+RTX 3090, Vulkan, Windows. Binary: the Streaming: chunk demand has no distance bound (load threshold 100 km, discovery = camera z_far); max_render_distance only affects LOD #1087 speed_trace build (ac039ac315a). Its compute/, interfaces/ and streaming-cap code is identical to master; git diff ac039ac315a efb2c8bfba7 touches none of the files cited above.
+Throwaway project with no GS project settings pinned. The world is 4 lanes × 8 segments of synthetic_spiral.ply (32 × 25,000 = 800k splats, 81 chunks), built with the same GaussianSplatContainer → export_world_resource path as the corridor lane. Camera static, 960×540.
+Each run waits until streaming is idle: published chunks and residency unchanged and chunks_loaded_this_frame == 0 for 180 consecutive frames. It then captures 300 post-draw frames and compares the raw bytes of each frame with frame 0.
+During every capture window: 81/81 chunks were published, there were 0 chunk loads, and the visible count was constant.
+Run
+Route
+Cap
+Visible demand
+Drawn
+Frames differing from frame 0 (of 300)
+Distinct images
+Overflow events in window
+A
+streaming world
+120,000
+320,115
+120,000
+299
+300
++299 (one per frame)
+A2
+streaming world
+300,000
+320,115
+300,000
+299
+300
++299
+A3 (repeat of A)
+streaming world
+120,000
+320,115
+120,000
+299
+300
++299
+B
+streaming world
+4,000,000 (clamped to 800,000)
+320,115
+320,115
+0
+1
+0
+C1n
+resident: 32 GaussianSplatNode3D, same layout and view
+renderer max_splats 500,000
+787,302
+787,302 (cap not applied)
+0
+1
+0
+C2n
+resident, same layout and view
+renderer max_splats 500,000
+787,302
+787,302 (cap not applied)
+0
+1
+0
+C1
+resident, a single node
+renderer max_splats 500,000
+25,000
+25,000
+0
+1
+0
+Two notes on Run C:
+The probe requested node caps of 120,000 (C1n) and 4,000,000 (C2n), and 5,000 (C1). Neither GaussianSplatNode3D.set_max_splat_count nor a later renderer.set_max_splats changed the renderer's reported max_splats from the node preset's 500,000.
+Either way, the resident route drew 787,302 splats, more than that 500,000. A resident scene therefore cannot reproduce the binding cap; it has no truncation to race.
+In Runs A and A3, the difference from frame 0 reached a per-channel max of 179/255 and a mean of up to 33/255. A2 overshoots the cap by only 6.7% and still differs on every frame, with a max of 179/255 and a mean of 0.25 to 6.7/255. Whole lanes and chunks disappear between frames: the saved state images show, for example, only the left half of the corridor in one frame and a ragged subset in another. This matches the #1087 corridor observation: the image switches between states while the visible count stays pinned at the cap. The state images are local probe output and are not attached.
+Conclusion. Flicker appears only when the streaming cap binds, on 3/3 binding runs with 299/300 frames each, and goes to 0 when the same scene and view run under the cap. The static-frame differences track the cap, not streaming activity: in the window there were no chunk loads and the published chunk count held at 81/81. The alternatives (frame-parity or ping-pong mismatch, sort race, LOD oscillation, chunk-slot aliasing) would also show up in Run B. They do not.
+Fix options: a design decision (not implemented)
+Any deterministic fix has to decide which splats a binding cap drops. That is a policy choice, so this issue stops here.
+Nearest-first by a depth cutoff (recommended).
+Pass 1 histograms candidate depth into a fixed number of bins. Atomic counts do not depend on order, so the histogram is deterministic.
+A one-thread pass picks the largest bin k whose cumulative count fits under the cap.
+Pass 2 (depth_compute) writes only splats in bins < k. The boundary bin is dropped whole, so the set does not depend on arrival order. It slightly underfills the cap.
+Behaviour: like an adaptive draw distance, consistent with the streaming system's distance priority. Foreground detail is kept and far content goes first.
+Cost: one extra pass over candidates. It can be skipped while the previous frame did not overflow.
+Risk: R2/R3 (new shader and buffer, layout-sync).
+Stable stochastic thinning.
+Keep a splat if hash(instance_id, atlas_index) < keep_ratio. Set keep_ratio = cap / demand from the previous frame's unclamped_total, which the Channel B readback already reads.
+Subsets are nested, so the image is deterministic when static and degrades smoothly in motion.
+Downsides: thins everything uniformly, so the scene gets more transparent everywhere. A transient overflow still truncates by race until the ratio catches up.
+Cost: very low; one param field.
+Chunk-granular nearest-first: sort or prioritise the visible chunk list and dispatch only a prefix that fits the cap. This drops whole regions, the same complaint as Streaming chunk LOD 'splat skip' is prefix truncation on the GPU (first count/2^L Morton-ordered splats), so distant chunks lose whole regions instead of thinning #1053.
+Treat max_splat_count as a budget the LOD and streaming layer meets, rather than truncating records. This follows the "reduce splat count, never cap records" rule (renderer AGENTS.md, "do not … drop records to hit a budget"), and would also make the resident and streaming routes agree. It is the largest change.
+Recommendation: option 1 for the cap semantics, and in the same decision settle whether the resident route should apply the cap at all. A short-term mitigation for the benchmark is to set the corridor lane's cap above its visible demand. Then the lane measures streaming, not cap truncation.
+Not verified
+NVIDIA only (RTX 3090). Atomic arrival order differs by vendor and driver, but the code is order-dependent on any GPU.
+A speed_trace dev build, not a release template, and not a fresh master build (see the diff argument above).
+The corridor lane itself was not re-run with a static camera. Its symptom (visible count pinned at 120,000, against about 2M candidates) is the Run A condition.
+No fix was implemented, so there is no timing comparison.
+Refs #1087 (where it was observed). Related: #1053 (LOD prefix truncation), #1050 (static-frame oracle).
+Activity
+Next
+klausi3D
+added 15 commits that reference this issue on Oct 2, 2026
+docs: record the maintainer's HLOD decisions in the ADR and update th…
+...
+7fa337d
+docs: HLOD ADR revision for the independent review and decisions 5-7 …
+...
+a1da9be
+docs: HLOD ADR follow-up review fixes: per-draw record, top-level rul…
+...
+74bf369
+docs: HLOD ADR: S6 fade lives in DrawnNodeGPU; S2a uploads the drawn …
+...
+00a1408
+docs: HLOD ADR: baum2 rows are now the post-fix re-run (Refs #1131)
+...
+375121b
+docs: list the HLOD ADR under Decision Records in the docs nav (Refs #…
+...
+da5086a
+docs: ADR — hierarchical LOD for streamed splat worlds, accepted (Refs …
+...
+3345380
+gaussian_splatting: HLOD S1a review round 1: encodings, stale trees, …
+...
+50254cd
+gaussian_splatting: publish HLOD bakes transactionally
+...
+7e55463
+gaussian_splatting: reject overlapping HLOD file sections
+...
+7d9ffa1
+gaussian_splatting: resolve imported world sources before raw dispatch
+...
+6816b49
+tests: verify QA import sidecars and artifacts before scenes
+...
+e4f57ea
+gaussian_splatting: remove redundant virtual on world overrides
+...
+ffa32d8
+gaussian_splatting: validate conservative HLOD radii
+...
+5ae0fb4
+gaussian_splatting: match radius regression to culler planes
+...
+9167aec
+155 remaining items
+Load more
+Load more actions
+klausi3D
+added 15 commits that reference this issue on Nov 1, 2026
+gaussian_splatting: HLOD E1 - size the frame scratch from the streame…
+...
+8ad40a5
+gaussian_splatting: HLOD E1 review - refused frames are not active, t…
+...
+3c49221
+gaussian_splatting: HLOD E1 restack - one tile-grid provisioner for p…
+...
+0686dad
+gaussian_splatting: HLOD E1 - price the paged first overlap seed befo…
+...
+f42fce5
+gaussian_splatting: HLOD F1 - editable regions: stale-ancestor exclus…
+...
+ebb6ec2
+gaussian_splatting: HLOD F1 review fix round - sibling edits, admissi…
+...
+e999272
+gaussian_splatting: HLOD F1 second review round - the publish attempt…
+...
+ecd7459
+gaussian_splatting: HLOD F1 third review round - edited worlds always…
+...
+105c586
+gaussian_splatting: HLOD F1 round 4 - every blank frame names its cur…
+...
+bee8346
+gaussian_splatting: HLOD F1 - a blanked edit frame is not active and …
+...
+46aaadd
+gaussian_splatting: HLOD F1 - edit-cancelled loads and shadow payload…
+...
+1c2f140
+gaussian_splatting: HLOD F1 - raise the dispatch extent at the live e…
+...
+3c3f171
+gaussian_splatting: HLOD F1 - test the fixes at their prepare_hlod_fr…
+...
+ff17d76
+Merge origin/master (0f5b20a) into feat/hlod-stack-15-f-editable
+...
+ccff5f5
+gaussian_splatting: HLOD ViewSet - prune superseded tie-rank tables a…
+...
+4c08ffd
+Sign up for free to join this conversation on GitHub. Already have an account? Sign in to comment
+Metadata
+Metadata
+Assignees
+No one assigned
+Labels
+No labels
+No labels
+Projects
+No projects
+Milestone
+No milestone
+Relationships
+None yet
+Development
+No branches or pull requests
+Issue actions
+Open in GitHub Copilot app
+You can’t perform that action at this time.

@@ -1,0 +1,186 @@
+--- v002.md
++++ v003.md
+@@ -16,10 +16,10 @@
+ 
+ **Data Structures:**
+-*   **Voxel Grid $V$**: A 3D array. Each voxel stores a scalar density $\sigma$ and a feature vector $f$ (dimension $D$) [S1, S2].
++*   **Voxel Grid $V$**: A 3D array indexed as $V[z][y][x]$. Each voxel stores a scalar density $\sigma$ and a feature vector $f$ of dimension $D$ [S1, S2].
+ *   **Sampling Points**: Points $r(t)$ along rays [S1].
+ 
+ **Steps:**
+ 1.  **Ray Casting**: For each pixel, define a ray $r(t) = o + td$ [S1].
+-2.  **Sampling**: Sample $N$ points $t_n$ along the ray within the scene bounds $[t_n, t_f]$ [S1, S2].
++2.  **Sampling**: Sample $N$ points along the ray within the scene bounds $[t_n, t_f]$ [S1, S2].
+ 3.  **Interpolation**: For each sample point $r(t)$, trilinearly interpolate the density $\sigma(r(t))$ and feature vector $f(r(t))$ from the voxel grid $V$ [S2].
+ 4.  **Accumulation**: Compute transmittance $T(t)$ and accumulated feature vector $F(r)$ and depth $\hat{\rho}$ using volumetric rendering equations [S1, S2].
+@@ -40,11 +40,16 @@
+ 
+ Accumulated Depth $\hat{\rho}$:
+-$$ \hat{\rho} = \int_{t_n}^{t_f} T(t) \sigma(r(t)) t dt $$
+-Derived from [S2] ("get the expected depth $\hat{\rho}$ along each ray from the volume rendering process").
++$$ \hat{\rho} = \frac{\int_{t_n}^{t_f} T(t) \sigma(r(t)) t dt}{\int_{t_n}^{t_f} T(t) \sigma(r(t)) dt} $$
++Derived from [S2] ("get the expected depth $\hat{\rho}$ along each ray from the volume rendering process") and standard volume rendering definitions [G].
+ 
+ **Parameters:**
+-*   Number of samples $N$: Not given in the sources.
+-*   Feature vector dimension $D$: Not given in the sources.
+-*   Integration bounds $[t_n, t_f]$: Not given in the sources.
++*   Number of samples $N$: Not given in the sources. [G]
++*   Feature vector dimension $D$: Not given in the sources. [G]
++*   Integration bounds $[t_n, t_f]$: Not given in the sources. [G]
++
++**Edge Cases and Pitfalls:**
++*   **Precision**: Exponential transmittance can underflow for high density or large step sizes; clamp $\sigma \cdot \Delta t$ or use alpha compositing approximations [G].
++*   **Boundaries**: Rays missing the voxel grid should be discarded or handled with a default background feature [G].
++*   **Degenerate Input**: Zero-direction components or rays parallel to grid axes require careful AABB intersection to avoid division by zero [G].
+ 
+ **Pseudocode:**
+@@ -54,6 +59,6 @@
+ def feature_volume_rendering(voxel_grid, grid_bounds, camera_origin, camera_direction, num_samples):
+     # grid_bounds: (min_x, min_y, min_z, max_x, max_y, max_z)
+-    # voxel_grid: 3D array of (density, feature_vector)
+-    # Returns feature_map, depth_map
++    # voxel_grid: 3D array indexed as grid[z][y][x], each element is (density, feature_vector)
++    # Returns feature_vector, depth
+ 
+     def ray_aabb_intersect(origin, direction, bounds):
+@@ -75,44 +80,37 @@
+     t_n, t_f = ray_aabb_intersect(camera_origin, camera_direction, grid_bounds)
+     if t_n is None:
+-        return [], []
++        return None, None
+ 
+     step = (t_f - t_n) / num_samples
+     feature_dim = len(voxel_grid[0][0][1])
+-    feature_map = []
+-    depth_map = []
+-
+-    for _ in range(num_samples): # Iterates over pixels; simplified for structure
+-        acc_feat = [0.0] * feature_dim
+-        acc_depth = 0.0
+-        acc_weight = 0.0
+-        transmittance = 1.0
+-
+-        for i in range(num_samples):
+-            t = t_n + i * step
+-            point = [camera_origin[j] + t * camera_direction[j] for j in range(3)]
+-
+-            sigma, feat = trilinear_interpolate(voxel_grid, point, grid_bounds)
+-
+-            delta_t = step
+-            alpha = 1.0 - math.exp(-sigma * delta_t)
+-            weight = transmittance * alpha
+-
+-            for k in range(feature_dim):
+-                acc_feat[k] += weight * feat[k]
+-            acc_depth += weight * t
+-            acc_weight += weight
+-            transmittance *= (1.0 - alpha)
+-
+-        if acc_weight > 0:
+-            feature_map.append([f / acc_weight for f in acc_feat])
+-            depth_map.append(acc_depth / acc_weight)
+-        else:
+-            feature_map.append([0.0] * feature_dim)
+-            depth_map.append(0.0)
+-
+-    return feature_map, depth_map
++    acc_feat = [0.0] * feature_dim
++    acc_depth = 0.0
++    acc_weight = 0.0
++    transmittance = 1.0
++
++    for i in range(num_samples):
++        t = t_n + i * step
++        point = [camera_origin[j] + t * camera_direction[j] for j in range(3)]
++
++        sigma, feat = trilinear_interpolate(voxel_grid, point, grid_bounds)
++
++        delta_t = step
++        alpha = 1.0 - math.exp(-sigma * delta_t)
++        weight = transmittance * alpha
++
++        for k in range(feature_dim):
++            acc_feat[k] += weight * feat[k]
++        acc_depth += weight * t
++        acc_weight += weight
++        transmittance *= (1.0 - alpha)
++
++    if acc_weight > 0:
++        return [f / acc_weight for f in acc_feat], acc_depth / acc_weight
++    else:
++        return [0.0] * feature_dim, 0.0
+ 
+ def trilinear_interpolate(grid, point, bounds):
+     # Standard trilinear interpolation [G]
++    # grid is indexed as grid[z][y][x]
+     x = (point[0] - bounds[0]) / (bounds[3] - bounds[0])
+     y = (point[1] - bounds[1]) / (bounds[4] - bounds[1])
+@@ -121,28 +119,42 @@
+     y = max(0.0, min(1.0, y))
+     z = max(0.0, min(1.0, z))
+-    ix, iy, iz = int(x * (len(grid)-1)), int(y * (len(grid[0])-1)), int(z * (len(grid[0][0])-1))
+-    fx, fy, fz = x * (len(grid)-1) - ix, y * (len(grid[0])-1) - iy, z * (len(grid[0][0])-1) - iz
+-    corners = []
+-    for dx in (0, 1):
+-        for dy in (0, 1):
+-            for dz in (0, 1):
+-                cx, cy, cz = min(ix+dx, len(grid)-1), min(iy+dy, len(grid[0])-1), min(iz+dz, len(grid[0][0])-1)
+-                corners.append(grid[cx][cy][cz])
+-    d00, f00 = corners[0]; d10, f10 = corners[1]
+-    d01, f01 = corners[2]; d11, f11 = corners[3]
+-    d001, f001 = corners[4]; d101, f101 = corners[5]
+-    d011, f011 = corners[6]; d111, f111 = corners[7]
++
++    nx, ny, nz = len(grid[0][0]), len(grid[0]), len(grid)
++    ix = int(x * (nx - 1))
++    iy = int(y * (ny - 1))
++    iz = int(z * (nz - 1))
++    fx = x * (nx - 1) - ix
++    fy = y * (ny - 1) - iy
++    fz = z * (nz - 1) - iz
++
++    ix = min(ix, nx - 1); iy = min(iy, ny - 1); iz = min(iz, nz - 1)
++
++    def get_val(dx, dy, dz):
++        cx, cy, cz = min(ix+dx, nx-1), min(iy+dy, ny-1), min(iz+dz, nz-1)
++        return grid[cz][cy][cx]
++
++    d00, f00 = get_val(0, 0, 0)
++    d10, f10 = get_val(1, 0, 0)
++    d01, f01 = get_val(0, 1, 0)
++    d11, f11 = get_val(1, 1, 0)
++    d001, f001 = get_val(0, 0, 1)
++    d101, f101 = get_val(1, 0, 1)
++    d011, f011 = get_val(0, 1, 1)
++    d111, f111 = get_val(1, 1, 1)
++
+     d00z = d00*(1-fx) + d10*fx
+     f00z = [a*(1-fx)+b*fx for a,b in zip(f00,f10)]
+     d01z = d01*(1-fx) + d11*fx
+     f01z = [a*(1-fx)+b*fx for a,b in zip(f01,f11)]
+-    d10z = d001*(1-fx) + d101*fx
+-    f10z = [a*(1-fx)+b*fx for a,b in zip(f001,f101)]
+-    d11z = d011*(1-fx) + d111*fx
+-    f11z = [a*(1-fx)+b*fx for a,b in zip(f011,f111)]
++    d001z = d001*(1-fx) + d101*fx
++    f001z = [a*(1-fx)+b*fx for a,b in zip(f001,f101)]
++    d011z = d011*(1-fx) + d111*fx
++    f011z = [a*(1-fx)+b*fx for a,b in zip(f011,f111)]
++
+     d0z = d00z*(1-fy) + d01z*fy
+     f0z = [a*(1-fy)+b*fy for a,b in zip(f00z,f01z)]
+-    d1z = d10z*(1-fy) + d11z*fy
+-    f1z = [a*(1-fy)+b*fy for a,b in zip(f10z,f11z)]
++    d1z = d001z*(1-fy) + d011z*fy
++    f1z = [a*(1-fy)+b*fy for a,b in zip(f001z,f011z)]
++
+     d = d0z*(1-fz) + d1z*fz
+     f = [a*(1-fz)+b*fz for a,b in zip(f0z,f1z)]
+@@ -179,5 +191,5 @@
+ *   **Time Complexity**: $O(N \cdot P)$, where $N$ is the number of samples per ray and $P$ is the number of pixels. Trilinear interpolation is $O(1)$ per sample [G].
+ *   **Memory Complexity**: $O(V)$, where $V$ is the number of voxels, storing both density and feature vectors [G].
+-*   **Strengths**: Decouples geometry/structure (in the voxel grid) from appearance (in the CNN decoder) [S1, S2]. Allows for efficient decoding of multiple views or styles.
++*   **Strengths**: Decouples geometry/structure (in the voxel grid) from appearance (in the CNN decoder) [S1, S2]. Allows for efficient decoding of multiple views or styles [G].
+ *   **Limitations**: Requires explicit storage of feature vectors in voxels, which can be memory-intensive for high-dimensional features [G].
+ *   **When to use**: When the scene structure is better represented by explicit features and a separate decoder is desired [S1, S2].

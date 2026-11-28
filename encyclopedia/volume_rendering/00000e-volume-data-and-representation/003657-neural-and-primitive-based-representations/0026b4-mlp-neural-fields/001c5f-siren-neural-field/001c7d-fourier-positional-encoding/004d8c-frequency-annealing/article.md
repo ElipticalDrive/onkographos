@@ -1,0 +1,172 @@
+# Frequency Annealing
+
+Also called: Annealed Positional Encoding, Coarse-to-Fine Optimization via Positional Encoding Windowing, Fourier Frequency Annealing, Frequency Masking for Positional Encoding, Linear Frequency Annealing, Positional Encoding Frequency Annealing
+
+## Overview
+Frequency Annealing is a training regularization strategy that gradually activates higher-frequency bands of Fourier Positional Encoding [1267-fourier-positional-encoding.md] during optimization [S1][S3, unofficial][S4]. It solves the problem of optimization instability and local minima caused by high-frequency details appearing too early, which leads to artifacts like self-occlusions or incorrect geometry [S1, S4][S6, unofficial]. Unlike standard Fourier Feature Networks [2765-fourier-feature-networks.md] which use all frequencies from the start, Frequency Annealing employs a coarse-to-fine schedule, effectively narrowing the Neural Tangent Kernel (NTK) bandwidth initially to prioritize low-frequency structure before refining high-frequency details [S9][S6, unofficial].
+
+## How it works
+Frequency Annealing modifies the input to the MLP by applying a time-dependent window function to the frequency bands of the positional encoding [S3, unofficial][S9]. This ensures that low-frequency components dominate the gradient updates early in training, while high-frequency components are gradually introduced [S3, unofficial][S4].
+
+### Inputs and Outputs
+- **Inputs**:
+  - Input coordinates $x \in \mathbb{R}^3$ (or $\mathbb{R}^2$ for 2D embeddings) [S3, unofficial][S7].
+  - Training iteration $t$ or progress variable $\rho$ [S3, S6, unofficial][S7].
+  - Hyperparameters: $L$ (total number of frequency bases), $K$ (annealing duration in iterations), $m$ (maximum band index, often equal to $L$) [S3, S6, unofficial][S7].
+- **Outputs**:
+  - Annealed positional encoding vector $\gamma_\alpha(x)$ or $\gamma(x; \rho)$ [S1][S3, unofficial][S9].
+
+### Data Structures
+The positional encoding is represented as a concatenation of weighted sine and cosine pairs [S3, unofficial][S9].
+- **Base Encoding**: $\gamma(x) = [x, \gamma_0(x), \gamma_1(x), \dots, \gamma_{L-1}(x)] \in \mathbb{R}^{3+6L}$ [S3, unofficial].
+- **Band Encoding**: Each band $k$ produces a 6-dimensional vector (for 3D input): $\gamma_k(x) = [\cos(2^k \pi x), \sin(2^k \pi x)] \in \mathbb{R}^6$ [S3, unofficial].
+- **Annealed Band**: $\gamma_k(x; \rho) = w_k(\rho) \cdot [\cos(2^k \pi x), \sin(2^k \pi x)]$ [S3, unofficial].
+
+### Numbered Steps
+1. **Initialize Parameters**: Set the total number of frequency bases $L$ (e.g., 10 for 3D points, 4 for viewing directions) [S3, unofficial]. Define the annealing schedule range, typically from iteration 0 to $K$ (e.g., 15,000 iterations) [S6, unofficial].
+2. **Compute Progress Variable**: Calculate the progress variable $\rho$ (or $\alpha$) based on the current training iteration $t$ [S3, unofficial][S6, unofficial].
+   - In the BARF/UP-NeRF formulation, $\rho$ linearly increases from 0 to $L$ over the first 10% to 50% of total training iterations [S3, unofficial].
+   - In the HyperNeRF/Nerfies formulation, $\alpha(t) = m \cdot t / K$, where $m$ is the number of encoding frequencies and $K$ is a hyperparameter (e.g., 15k) [S6, unofficial].
+3. **Apply Window Function**: For each frequency band index $k \in \{0, \dots, L-1\}$, compute the weight $w_k(\rho)$ using a smooth window function (typically a truncated Hann window) [S4, S9].
+4. **Construct Encoding**: Multiply the base sine/cosine values of each band by its corresponding weight $w_k(\rho)$ and concatenate them with the raw coordinates $x$ [S3, unofficial][S9].
+5. **Feed to MLP**: Pass the resulting vector $\gamma(x; \rho)$ into the deformation or color MLP [S4].
+
+### Formulas
+The windowing function $w_k(\rho)$ determines the activation of band $k$ based on progress $\rho$ [S3, unofficial]:
+
+$$
+w_k(\rho) = 
+\begin{cases} 
+0 & \text{if } \rho < k \\
+1 - \frac{\cos((\rho - k)\pi)}{2} & \text{if } 0 \le \rho - k < 1 \\
+1 & \text{if } \rho - k \ge 1 
+\end{cases}
+$$
+
+[S3, unofficial]
+
+Alternatively, using the clamp notation common in implementations [S9]:
+
+$$
+w_j(\alpha) = \frac{1 - \cos(\pi \cdot \text{clamp}(\alpha - j, 0, 1))}{2}
+$$
+
+where $j$ is the band index and $\alpha$ is the annealing parameter [S9].
+
+The final annealed encoding is:
+
+$$
+\gamma_\alpha(x) = [x, w_0(\alpha)\gamma_0(x), w_1(\alpha)\gamma_1(x), \dots, w_{L-1}(\alpha)\gamma_{L-1}(x)]
+$$
+
+[S3, unofficial][S9]
+
+Note: [S1] uses a slightly different scaling factor $\beta_k(n) = \sqrt{2}(1 - \cos(\pi \text{clamp}(\alpha(n) - i + N_{fmin}, 0, 1)))$ [S1].
+
+### Parameters
+- **$L$ (or $m$)**: Number of frequency bases [S3, unofficial][S9]. Typical value: 10 for 3D point $x$, 4 for viewing direction $d$ [S3, unofficial].
+- **$\rho$ / $\alpha$**: Scheduling variable. $\rho$ goes from 0 to $L$ [S3, unofficial]. $\alpha$ goes from 0 to $m$ [S9].
+- **$K$**: Hyperparameter controlling the duration of annealing. Set to 15,000 iterations in some implementations [S6, unofficial].
+- **Near/Far Clipping**: For coarse model sampling, points are sampled between 0.1 and 5.0 [S3, unofficial].
+
+### Pseudocode
+The following Python-like pseudocode implements the windowed positional encoding described in [S3, unofficial] and [S9]. It assumes `positions` is a tensor of shape `[..., 3]` and `freqs` is $L$ [S3, unofficial].
+
+> **Unverified code.** The code below did not pass a test run against a reference implementation, or no test fits it, so it may contain errors.
+
+```python
+import numpy as np
+
+def frequency_annealing_encoding(positions, freqs, progress):
+    """
+    Computes frequency-annealed positional encoding.
+    
+    Args:
+        positions: Tensor of shape [..., 3] containing input coordinates.
+        freqs: Integer L, the number of frequency bands.
+        progress: Float between 0 and freqs. Represents the current annealing state.
+                  Equivalent to rho in [S3, unofficial] or alpha in [S9].
+    
+    Returns:
+        Tensor of shape [..., 3 + 6*freqs] containing the annealed encoding.
+    """
+    # 1. Generate frequency bands: 2^0, 2^1, ..., 2^(freqs-1)
+    levels = np.arange(freqs)
+    freq_bands = 2 ** levels
+    
+    # 2. Compute window weights w_k(progress)
+    # Formula from [S3, unofficial]:
+    # w_k = 0 if progress < k
+    # w_k = 1 - cos((progress - k)*pi)/2 if 0 <= progress - k < 1
+    # w_k = 1 if progress - k >= 1
+    diff = progress - levels
+    weights = np.where(diff < 0, 0.0, 
+               np.where(diff < 1, 1.0 - np.cos(diff * np.pi) / 2.0, 1.0))
+        
+    # 3. Apply weights to sine and cosine components
+    # Base encoding for band k: [cos(2^k * pi * x), sin(2^k * pi * x)]
+    encoded_components = []
+    
+    # Add raw coordinates (identity) as per standard NeRF/BARF [S3, unofficial]
+    encoded_components.append(positions)
+    
+    # Process each frequency band
+    for k in range(freqs):
+        freq = freq_bands[k]
+        w = weights[k]
+        
+        # Compute argument: 2^k * pi * x
+        arg = positions * freq * np.pi
+        
+        # Compute sin and cos
+        cos_vals = np.cos(arg)
+        sin_vals = np.sin(arg)
+        
+        # Apply weight
+        weighted_cos = cos_vals * w
+        weighted_sin = sin_vals * w
+        
+        # Concatenate cos and sin for this band to match [cos, sin] order [S3, unofficial]
+        band_encoding = np.concatenate([weighted_cos, weighted_sin], axis=-1)
+        encoded_components.append(band_encoding)
+        
+    # 4. Concatenate all components
+    # Final shape: [..., 3 + 6*freqs]
+    result = np.concatenate(encoded_components, axis=-1)
+    
+    return result
+```
+
+### Edge Cases and Pitfalls
+- **Zero Progress**: When $\rho=0$ or $\alpha=0$, all frequency bands are weighted to 0 [S3, unofficial][S9]. If the identity mapping (raw coordinates) is omitted, the input to the MLP becomes zero, potentially causing stagnation [S3, unofficial][S9].
+- **Large Motions**: Disabling coarse-to-fine regularization causes significant performance drops in dynamic scenes with large motions due to local minima [S4].
+- **Topological Changes**: The method may fail if the scene undergoes topological changes, as deformation field assumptions are violated [S4].
+
+## Subtopics
+
+### Positional Encoding with Linear Annealing
+A variant that uses a linear mask instead of a smooth window function [S8, unofficial]. It computes a mask `clamp(progress * freqs - levels, 0, 1)` and multiplies the sine/cosine components directly [S8, unofficial].
+
+### Windowed Positional Encoding
+Used in HyperNeRF [S9], this variant applies the windowing specifically to ambient dimensions (e.g., slicing surfaces) while keeping spatial coordinates unwindowed or using a separate schedule. It allows collapsing ambient dimensions by setting $\beta=0$ initially, preventing overfitting in the ambient space during early optimization [S9].
+
+## Operating characteristics
+- **Time Complexity**: Not given in the sources, but adds negligible forward-pass overhead involving simple multiplication of weights against precomputed sine/cosine values [G].
+- **Memory Complexity**: Not given in the sources, but requires no additional storage beyond the standard positional encoding buffer [G].
+- **Performance**: Improves convergence stability and final reconstruction quality, especially for few-shot or dynamic scenes [S1, S4]. On DTU with 3 views, CF PE yields PSNR 18.30 (21.01) and SSIM 0.78 (0.87), compared to Full PE which yields PSNR 16.27 (18.41) and SSIM 0.69 (0.81) [S5].
+- **Strengths**: Prevents high-frequency artifacts early in training; stabilizes optimization for deformable scenes; reduces local minima [S1, S4].
+- **Limitations**: Requires careful tuning of the annealing schedule hyperparameter $K$ [S6, unofficial].
+
+## Background
+Frequency Annealing was introduced to prevent noisy normal maps and geometry convergence issues caused by high-frequency noise appearing early in training [S1]. The coarse-to-fine schedule was popularized by Park et al. in the BARF paper [S3, unofficial] and further detailed in Nerfies [S4] and HyperNeRF [S9]. The method leverages the property that the Neural Tangent Kernel (NTK) bandwidth is controlled by the highest frequency in the positional encoding [S9]. By gradually increasing the maximum active frequency, the optimization landscape is smoothed initially, allowing the network to learn coarse geometry before refining details [S6, unofficial].
+
+## Sources
+[S1] NeRF for Outdoor Scene Relighting, https://doi.org/10.1007/978-3-031-19787-1_35, fetched 2026-10-26
+[S2] FreGS: 3D Gaussian Splatting with Progressive Frequency Regularization, https://doi.org/10.1109/cvpr52733.2024.02024, fetched 2026-10-26
+[S3] UP-NeRF: Unconstrained Pose-Prior-Free Neural Radiance Fields, https://arxiv.org/abs/2311.03784v2, fetched 2026-10-26 (unofficial)
+[S4] Nerfies: Deformable Neural Radiance Fields, https://doi.org/10.1109/iccv48922.2021.00581, fetched 2026-10-26
+[S5] SPARF: Neural Radiance Fields from Sparse and Noisy Poses, https://doi.org/10.1109/cvpr52729.2023.00408, fetched 2026-10-26
+[S6] GeCoNeRF: Few-Shot Neural Radiance Fields via Geometric Consistency, https://core.ac.uk/works/309257742, fetched 2026-11-01 (unofficial)
+[S7] SGCNeRF: Few-Shot Neural Rendering via Sparse Geometric Consistency Guidance, https://doi.org/10.1109/tcsvt.2025.3610950, fetched 2026-10-30
+[S8] Nemo1999/Joint-TensoRF, https://github.com/Nemo1999/Joint-TensoRF, fetched 2026-10-27 (unofficial)
+[S9] HyperNeRF, https://doi.org/10.1145/3478513.3480487, fetched 2026-10-28

@@ -1,0 +1,103 @@
+# DeSplat Loss Function
+
+Also called: DeSplat Loss
+
+## Overview
+The DeSplat Loss Function is a composite regularization objective designed for decomposed Gaussian Splatting to eliminate distractor artifacts and enforce background smoothness in novel view synthesis [S1]. It extends the standard Gaussian Splatting loss by adding specific terms for distractor Gaussians and background color consistency, distinguishing it from standard photometric losses by explicitly modeling non-scene elements [S1].
+
+## How it works
+The method computes a total loss $L$ by combining the standard Gaussian Splatting rendering loss ($L_{\text{GS}}$), a distractor regularization term ($\alpha_d$), and a background regularization term ($L_{\text{bg}}$) [S1].
+
+**Inputs and Outputs:**
+*   **Inputs:** Rendered image, ground truth image, distractor Gaussian parameters, background model parameters, and hyperparameters $\lambda_d, \lambda_{\text{bg}}, T_\epsilon$.
+*   **Output:** Scalar loss value $L$.
+
+**Data Structures:**
+*   **Distractor Gaussians:** A set of Gaussian primitives initialized to model occluders or distractors. Their parameters (position, scale, rotation, opacity, color) are optimized [S1].
+*   **Background Model:** An appearance embedding model or MLP that predicts background color [S1].
+*   **Threshold $T_\epsilon$:** A scalar value defining the error tolerance for background regularization [S1].
+
+**Formulas:**
+The total loss is defined as [S1]:
+$$ L = L_{\text{GS}} + \lambda_d \alpha_d + \lambda_{\text{bg}} L_{\text{bg}} $$
+
+Where:
+*   $L_{\text{GS}}$ is the standard Gaussian Splatting loss (photometric and depth consistency) [S1].
+*   $\alpha_d$ is the distractor regularization term. The sources cite $\alpha_d$ as the term associated with $\lambda_d$ but do not provide the explicit mathematical formula for $\alpha_d$ in the provided text, only noting it is a "distractor regularization term" [S1]. [G: In typical decomposed splatting, this often involves penalizing opacity or scale of distractor Gaussians, but the exact formula is not given in the sources.]
+*   $L_{\text{bg}}$ is the background regularization loss. It is computed by applying a box filter $B_{3\times3}$ to the background error $\tilde{e}(\mathbf{r})$, where $\tilde{e}(\mathbf{r}) = \epsilon(\mathbf{r})$ if $\epsilon(\mathbf{r}) \le T_\epsilon$, and $\epsilon(\mathbf{r})$ is the error between predicted background color and ground truth [S1].
+    $$ M(\mathbf{r}) = (\tilde{e}(\mathbf{r}) * B_{3\times3}) $$
+    $$ L_{\text{bg}} = \sum_{\mathbf{r}} M(\mathbf{r}) $$
+    (Note: The summation domain and exact aggregation of $M(\mathbf{r})$ into a scalar loss is not explicitly detailed beyond the filtering step in the provided text [S1].)
+
+**Parameters:**
+*   $\lambda_d$: Distractor regularization weight. Typically 0.01 [S1].
+*   $\lambda_{\text{bg}}$: Background regularization weight. Typically 0.15 [S1]. For the ablation study "DeSplat-A" (appearance-only), this is set to 0 [S1].
+*   $\lambda_s$: Static regularization weight. Set to 0.01 for RobustNeRF, On-the-go, and Mip-NeRF-360 datasets; set to 0 for Photo Tourism datasets [S1].
+*   $T_\epsilon$: Threshold for background error. Set to 0.003 [S1].
+
+**Pseudocode:**
+> **Unverified code.** The code below did not pass a test run against a reference implementation, or no test fits it, so it may contain errors.
+
+```python
+def compute_desplat_loss(rendered_image, ground_truth_image, distractor_gaussians, 
+                         background_model, lambda_d, lambda_bg, T_epsilon):
+    # 1. Compute standard Gaussian Splatting loss
+    # L_GS includes photometric and potentially depth losses from standard 3DGS
+    L_GS = compute_standard_gs_loss(rendered_image, ground_truth_image)
+    
+    # 2. Compute distractor regularization term alpha_d
+    # The explicit formula for alpha_d is not provided in the sources [S1]
+    # [G: Implementation requires specific definition of distractor penalty, 
+    # e.g., opacity or scale regularization for distractor primitives]
+    alpha_d = compute_distractor_regularization(distractor_gaussians) 
+    
+    # 3. Compute background regularization loss L_bg
+    # Predict background color for pixels identified as background
+    predicted_bg_color = background_model.predict(rendered_image)
+    
+    # Compute pixel-wise error
+    epsilon = abs(predicted_bg_color - ground_truth_image)
+    
+    # Apply threshold mask
+    # e_tilde(r) = epsilon(r) if epsilon(r) <= T_epsilon else 0 (implied by "smaller than a threshold")
+    # Note: Source says "epsilon(r) <= T_epsilon", implying zeroing out larger errors or ignoring them
+    mask = epsilon <= T_epsilon
+    e_tilde = epsilon * mask
+    
+    # Apply 3x3 box filter
+    # M(r) = e_tilde(r) * B_3x3
+    M = apply_box_filter(e_tilde, size=3)
+    
+    # Aggregate L_bg (sum of filtered errors)
+    L_bg = sum(M)
+    
+    # 4. Combine losses
+    L = L_GS + lambda_d * alpha_d + lambda_bg * L_bg
+    
+    return L
+```
+
+**Edge Cases and Pitfalls:**
+*   **Threshold Selection:** The choice of $T_\epsilon$ (0.003) is critical for background regularization; too high may include noisy pixels, too low may ignore valid background errors [S1].
+*   **Ablation Settings:** In DeSplat-A, $\lambda_{\text{bg}}$ is set to 0, disabling background regularization [S1].
+*   **Dataset Specifics:** $\lambda_s$ varies by dataset (0.01 vs 0), requiring configuration changes for Photo Tourism vs. RobustNeRF/Mip-NeRF-360 [S1].
+
+## Subtopics
+
+### SplatLoc Objective Functions
+SplatLoc is a variant that extends the loss with landmark probability and descriptor distillation terms for visual localization [S2]. It defines a total loss $L = \lambda_1 L_c + \lambda_2 L_d + \lambda_3 L_m + \lambda_4 L_{dis} + \lambda_5 L_{reg}$ [S2]. $L_c$ and $L_d$ are color and depth reconstruction losses ($\sum |\hat{I} - I|$ and $\sum |\hat{D} - D|$) [S2]. $L_m$ is a binary cross-entropy loss between rendered and ground truth 2D landmark probability maps [S2]. $L_{dis}$ is a descriptor distillation loss using cosine similarity between 3D feature decoder outputs and multi-resolution parametric encoding on surface points [S2]. $L_{reg}$ mitigates anisotropic Gaussian shapes [S2]. Weights are $\lambda_1=1.0, \lambda_2=0.5, \lambda_3=1.0, \lambda_4=1.0, \lambda_5=0.01$ [S2].
+
+## Operating characteristics
+*   **Complexity:** Adds overhead from background model prediction and filtering operations to the standard Gaussian Splatting pipeline [S1].
+*   **Performance:** Demonstrates high rendering quality on Photo Tourism (Trevi Fountain, Brandenburg Gate, Sacre Coeur) and RobustNeRF datasets [S1].
+*   **Hardware:** Experiments conducted on Tesla V100 GPU [S1].
+*   **Training Time:** 30k iterations for RobustNeRF/On-the-go/Mip-NeRF-360; densification of distractors stops after 15k iterations [S1].
+*   **Strengths:** Effective at removing distractor artifacts and smoothing background regions [S1].
+*   **Limitations:** Requires careful tuning of $\lambda_d, \lambda_{\text{bg}}, T_\epsilon$ and dataset-specific $\lambda_s$ [S1].
+
+## Background
+DeSplat was introduced in the paper "DeSplat: Decomposed Gaussian Splatting for Distractor-Free Rendering" [S1]. It builds upon 3D Gaussian Splatting [18] and Splatfacto [34], aiming to handle distractors and background artifacts explicitly [S1]. The method was evaluated on datasets including RobustNeRF, On-the-go, Mip-NeRF-360, and Photo Tourism [S1].
+
+## Sources
+[S1] DeSplat: Decomposed Gaussian Splatting for Distractor-Free Rendering, https://doi.org/10.1109/CVPR52734.2025.00076, fetched 2026-11-03
+[S2] SplatLoc: 3D Gaussian Splatting-based Visual Localization for Augmented Reality., https://doi.org/10.1109/tvcg.2025.3549563, fetched 2026-10-26

@@ -1,0 +1,296 @@
+--- v003.md
++++ v004.md
+@@ -4,23 +4,23 @@
+ 
+ ## Overview
+-Compact Voxel Section Storage is a memory-optimized representation for a fixed-size 3D block of voxels (a "section") that dynamically selects between three storage modes—Empty, Uniform, and Palette—to minimize heap usage based on content entropy [S1, unofficial]. It sets itself apart from sibling methods like [Sparse Voxel Octree Representation](2340-sparse-voxel-octree-representation.md) by maintaining a dense grid layout for locality while using palette indexing to compress mixed-material sections, and differs from [Chunk-based World Storage](2858-chunk-based-world-storage.md) by operating at the finer granularity of a 16³ section rather than a larger world chunk.
++Compact Voxel Section Storage is a memory-optimized representation for a fixed-size 3D block of voxels (a "section") that dynamically selects between three storage modes—Empty, Uniform, and Palette—to minimize heap usage based on content entropy [S1, unofficial]. It sets itself apart from sibling methods like [Sparse Voxel Octree Representation](2340-sparse-voxel-octree-representation.md) by maintaining a dense grid layout for locality while using palette indexing to compress mixed-material sections, and differs from [Chunk-based World Storage](2858-chunk-based-world-storage.md) by operating at the finer granularity of a 16³ section rather than a larger world chunk [G].
+ 
+ ## How it works
+ **Inputs and Outputs:**
+-- Input: An array of 4096 `VoxelId` values (application-defined material identifiers, where 0 is air).
+-- Output: A `SectionStorage` structure that supports O(1) read/write access to any voxel in the 16×16×16 section.
++- Input: An array of 4096 `VoxelId` values (application-defined material identifiers, where 0 is air) [S1, unofficial].
++- Output: A `SectionStorage` structure that supports O(1) read/write access to any voxel in the 16×16×16 section [S1, unofficial].
+ 
+ **Data Structures:**
+ The core structure `SectionStorage` contains a single field `data` of type `Representation`, an enum with three variants:
+ 
+-1.  `Representation::Empty`: Holds no data. Used when all 4096 voxels are air (ID 0).
+-2.  `Representation::Uniform`: Holds a single `VoxelId`. Used when all 4096 voxels share the same non-zero ID.
++1.  `Representation::Empty`: Holds no data. Used when all 4096 voxels are air (ID 0) [S1, unofficial].
++2.  `Representation::Uniform`: Holds a single `VoxelId`. Used when all 4096 voxels share the same non-zero ID [S1, unofficial].
+ 3.  `Representation::Palette`: Holds a `Palette` struct:
+-    -   `entries`: A `Vec<PaletteEntry>`. Each `PaletteEntry` is a struct with two fields: `id` (4 bytes, `VoxelId`) and `count` (2 bytes, `u16`). Total size per entry is 6 bytes, packed sequentially.
++    -   `entries`: A `Vec<PaletteEntry>`. Each `PaletteEntry` is a struct with two fields: `id` (4 bytes, `VoxelId`) and `count` (2 bytes, `u16`) [S1, unofficial]. Total size per entry is 6 bytes, packed sequentially [S1, unofficial].
+     -   `words`: A `Vec<u64>` containing the bit-packed palette indices.
+-    -   `bits`: A `u8` indicating the number of bits used to store each index (1–12).
++    -   `bits`: A `u8` indicating the number of bits used to store each index (1–12) [S1, unofficial].
+ 
+ **Local Coordinate Mapping:**
+-Voxels are addressed by a linear index `i` from 0 to 4095. This maps to 3D coordinates $(x, y, z)$ where $x, y, z \in [0, 15]$ using:
++Voxels are addressed by a linear index `i` from 0 to 4095 [S1, unofficial]. This maps to 3D coordinates $(x, y, z)$ where $x, y, z \in [0, 15]$ using:
+ $$ x = i \pmod{16} $$
+ $$ z = \lfloor i / 16 \rfloor \pmod{16} $$
+@@ -30,113 +30,145 @@
+ 
+ **Parameters:**
+--   `SECTION_VOLUME`: Constant 4096.
+--   `bits`: Calculated as $\lceil \log_2(\text{unique\_ids}) \rceil$. Minimum 1, maximum 12 (since $2^{12} = 4096$).
+-
+-**Algorithm Steps:**
+-
+-### 1. Initialization (`from_voxels`)
+-Constructs a `SectionStorage` from a raw array of 4096 `VoxelId`s.
+-
+-1.  Validate input length is 4096.
+-2.  Check if all voxels are 0. If so, return `Representation::Empty`.
+-3.  Check if all voxels are identical. If so, return `Representation::Uniform` with that ID.
+-4.  Initialize an empty `entries` vector and a stack-allocated `indices` array of size 4096.
+-5.  Iterate `i` from 0 to 4095:
+-    a. Let `id = blocks[i]`.
+-    b. Search `entries` for an entry with `id`.
+-    c. If found, increment `entry.count`.
+-    d. If not found, append `PaletteEntry { id, count: 1 }` to `entries` and record its new index as `slot`.
+-    e. Store `slot` in `indices[i]`.
+-6.  Shrink `entries` to remove any capacity.
+-7.  Calculate `bits = index_bits(entries.len())`.
+-8.  Calculate `word_count = (4096 * bits + 63) / 64`.
+-9.  Allocate `words` as a vector of `u64` of size `word_count`, initialized to 0.
+-10. Iterate `i` from 0 to 4095:
+-    a. Call `write_index(words, bits, i, indices[i])`.
+-11. Return `SectionStorage { data: Representation::Palette { entries, words, bits } }`.
+-
+-### 2. Read (`at_index`)
+-Returns the `VoxelId` at linear index `i`.
+-
+-1.  Match on `data`:
+-    -   If `Empty`, return `VoxelId::AIR` (0).
+-    -   If `Uniform`, return the stored `id`.
+-    -   If `Palette`:
+-        a. Call `slot = read_index(palette.words, palette.bits, i)`.
+-        b. Return `palette.entries[slot].id`.
+-
+-### 3. Bit-Packed Read (`read_index`)
+-Extracts a multi-bit value from the `words` array.
+-
+-1.  Calculate `bit_pos = i * bits`.
+-2.  Calculate `word_idx = bit_pos / 64`.
+-3.  Calculate `offset = bit_pos % 64`.
+-4.  Extract `low = words[word_idx] >> offset`.
+-5.  If `offset + bits > 64`:
+-    a. Extract `high = words[word_idx + 1] << (64 - offset)`.
+-    b. `value = low | high`.
+-6.  Else:
+-    a. `value = low`.
+-7.  Mask `value` with `(1 << bits) - 1`.
+-8.  Return `value`.
+-
+-### 4. Bit-Packed Write (`write_index`)
+-Sets a multi-bit value in the `words` array.
+-
+-1.  Calculate `bit_pos = i * bits`.
+-2.  Calculate `word_idx = bit_pos / 64`.
+-3.  Calculate `offset = bit_pos % 64`.
+-4.  Calculate `mask = (1 << bits) - 1`.
+-5.  Clear bits in `words[word_idx]`:
+-    a. `words[word_idx] &= !(mask << offset)`.
+-    b. `words[word_idx] |= (value << offset) & (mask << offset)`.
+-6.  If `offset + bits > 64`:
+-    a. Calculate `high_bits = offset + bits - 64`.
+-    b. Calculate `high_mask = (1 << high_bits) - 1`.
+-    c. Clear high bits in `words[word_idx + 1]`:
+-        i. `words[word_idx + 1] &= !high_mask`.
+-        ii. `words[word_idx + 1] |= (value >> (64 - offset)) & high_mask`.
+-
+-### 5. Bulk Replacement (`replace_from_voxels`)
+-Updates the storage with new voxel data, reusing buffers where possible.
+-
+-1.  Validate input length is 4096.
+-2.  If all voxels are identical:
+-    a. If `data` is `Uniform`, update ID.
+-    b. If `data` is `Empty` or `Palette`, replace `data` with `Uniform(id)`.
+-    c. Return.
+-3.  If all voxels are 0:
+-    a. Replace `data` with `Empty`.
+-    b. Return.
+-4.  Ensure `data` is `Palette`. If not, allocate new `Palette`.
+-5.  Clear `entries`.
+-6.  Use stack-allocated `indices` array.
+-7.  Iterate `blocks`:
+-    a. Find or create `PaletteEntry` in `entries`.
+-    b. Increment count.
+-    c. Store slot in `indices`.
+-8.  Calculate new `bits`.
+-9.  Resize `words` to `word_count(new_bits)` and fill with 0.
+-10. Write indices to `words`.
+-
+-### 6. Compaction (`compact`)
+-Reduces memory usage by removing unused palette slots and shrinking bit width.
+-
+-1.  If `data` is not `Palette`, return false.
+-2.  Count `live` entries where `count != 0`.
+-3.  If `live == entries.len()` and `entries.capacity() == entries.len()`, return false (already compact).
+-4.  If `live < entries.len()`:
+-    a. Create `mapping` array of size `entries.len()`.
+-    b. Iterate `entries`: if `count != 0`, set `mapping[old_slot] = new_slot` and push entry to new list.
+-    c. Calculate `new_bits = index_bits(live)`.
+-    d. Allocate new `words`.
+-    e. Iterate `i` from 0 to 4095:
+-        i. `old_slot = read_index(old_words, old_bits, i)`.
+-        ii. `new_slot = mapping[old_slot]`.
+-        iii. `write_index(new_words, new_bits, i, new_slot)`.
+-    f. Replace `palette` with new entries, words, and bits.
+-5.  Else (only shrink capacity, no live count change):
+-    a. `entries.shrink_to_fit()`.
+-6.  Return true.
++-   `SECTION_VOLUME`: Constant 4096 [S1, unofficial].
++-   `bits`: Calculated as $\lceil \log_2(\text{unique\_ids}) \rceil$. Minimum 1, maximum 12 (since $2^{12} = 4096$) [S1, unofficial].
++
++**Pseudocode:**
++```python
++SECTION_VOLUME = 4096
++
++class PaletteEntry:
++    id: int  # 4 bytes
++    count: int  # 2 bytes
++
++class Palette:
++    entries: list[PaletteEntry]
++    words: list[int]  # u64
++    bits: int  # u8
++
++class SectionStorage:
++    data: tuple  # ("Empty",) | ("Uniform", VoxelId) | ("Palette", Palette)
++
++def index_bits(n: int) -> int:
++    return max(1, (n - 1).bit_length())
++
++def read_index(words: list[int], bits: int, index: int) -> int:
++    bit_pos = index * bits
++    word_idx = bit_pos // 64
++    offset = bit_pos % 64
++    value = words[word_idx] >> offset
++    if offset + bits > 64:
++        value |= words[word_idx + 1] << (64 - offset)
++    return value & ((1 << bits) - 1)
++
++def write_index(words: list[int], bits: int, index: int, value: int) -> None:
++    bit_pos = index * bits
++    word_idx = bit_pos // 64
++    offset = bit_pos % 64
++    mask = (1 << bits) - 1
++    words[word_idx] &= ~(mask << offset)
++    words[word_idx] |= (value << offset) & (mask << offset)
++    if offset + bits > 64:
++        high_bits = offset + bits - 64
++        high_mask = (1 << high_bits) - 1
++        words[word_idx + 1] &= ~high_mask
++        words[word_idx + 1] |= (value >> (64 - offset)) & high_mask
++
++def from_voxels(blocks: list[int]) -> SectionStorage:
++    assert len(blocks) == SECTION_VOLUME
++    if all(b == 0 for b in blocks):
++        return SectionStorage(data=("Empty",))
++    if all(b == blocks[0] for b in blocks):
++        return SectionStorage(data=("Uniform", blocks[0]))
++    
++    entries = []
++    indices = [0] * SECTION_VOLUME
++    for i, id in enumerate(blocks):
++        slot = None
++        for j, entry in enumerate(entries):
++            if entry.id == id:
++                slot = j
++                break
++        if slot is None:
++            entries.append(PaletteEntry(id=id, count=0))
++            slot = len(entries) - 1
++        entries[slot].count += 1
++        indices[i] = slot
++    
++    entries = entries[:len(entries)]  # Shrink capacity
++    bits = index_bits(len(entries))
++    word_count = (SECTION_VOLUME * bits + 63) // 64
++    words = [0] * word_count
++    for i in range(SECTION_VOLUME):
++        write_index(words, bits, i, indices[i])
++    return SectionStorage(data=("Palette", Palette(entries=entries, words=words, bits=bits)))
++
++def at_index(storage: SectionStorage, index: int) -> int:
++    data = storage.data
++    if data[0] == "Empty":
++        return 0
++    if data[0] == "Uniform":
++        return data[1]
++    palette = data[1]
++    slot = read_index(palette.words, palette.bits, index)
++    return palette.entries[slot].id
++
++def replace_from_voxels(storage: SectionStorage, blocks: list[int]) -> None:
++    assert len(blocks) == SECTION_VOLUME
++    if all(b == blocks[0] for b in blocks):
++        storage.data = ("Uniform", blocks[0])
++        return
++    if all(b == 0 for b in blocks):
++        storage.data = ("Empty",)
++        return
++    
++    if storage.data[0] != "Palette":
++        storage.data = ("Palette", Palette(entries=[], words=[], bits=0))
++    palette = storage.data[1]
++    palette.entries = []
++    indices = [0] * SECTION_VOLUME
++    for i, id in enumerate(blocks):
++        slot = None
++        for j, entry in enumerate(palette.entries):
++            if entry.id == id:
++                slot = j
++                break
++        if slot is None:
++            palette.entries.append(PaletteEntry(id=id, count=0))
++            slot = len(palette.entries) - 1
++        palette.entries[slot].count += 1
++        indices[i] = slot
++    
++    bits = index_bits(len(palette.entries))
++    word_count = (SECTION_VOLUME * bits + 63) // 64
++    palette.words = [0] * word_count
++    for i in range(SECTION_VOLUME):
++        write_index(palette.words, bits, i, indices[i])
++
++def compact(storage: SectionStorage) -> bool:
++    if storage.data[0] != "Palette":
++        return False
++    palette = storage.data[1]
++    live = sum(1 for e in palette.entries if e.count != 0)
++    if live == len(palette.entries) and len(palette.entries) == palette.entries.capacity():
++        return False
++    
++    if live < len(palette.entries):
++        mapping = [0] * len(palette.entries)
++        new_entries = []
++        for old_slot, entry in enumerate(palette.entries):
++            if entry.count != 0:
++                mapping[old_slot] = len(new_entries)
++                new_entries.append(entry)
++        bits = index_bits(len(new_entries))
++        word_count = (SECTION_VOLUME * bits + 63) // 64
++        new_words = [0] * word_count
++        for i in range(SECTION_VOLUME):
++            old_slot = read_index(palette.words, palette.bits, i)
++            write_index(new_words, bits, i, mapping[old_slot])
++        storage.data = ("Palette", Palette(entries=new_entries, words=new_words, bits=bits))
++    else:
++        palette.entries = palette.entries[:len(palette.entries)]  # shrink_to_fit
++    return True
++```
+ 
+ **Edge Cases and Pitfalls:**
+@@ -148,5 +180,5 @@
+ 
+ ### [Palette Compression with Reference Counting and Reuse](14211-palette-compression-with-reference-counting-and-reuse.md)
+-Palette Compression with Reference Counting and Reuse is a memory optimization technique for dense voxel grids that maps voxel types to a compact palette of entries, storing indices into the palette rather than full type values to save memory. It sets itself apart from sibling methods in the [Compact Voxel Section Storage](4219-compact-voxel-section-storage.md) tree by specifically handling mixed-material sections through dynamic palette management with reference counting, rather than relying on static empty or uniform modes.
++Palette Compression with Reference Counting and Reuse is a memory optimization technique for dense voxel grids that maps voxel types to a compact palette of entries, storing indices into the palette rather than full type values to save memory. It sets itself apart from sibling methods in the [Compact Voxel Section Storage](4219-compact-voxel-section-storage.md) tree by specifically handling mixed-material sections through dynamic palette management with reference counting, rather than relying on static empty or uniform modes [G].
+ 
+ ### Voxel Color Indexing

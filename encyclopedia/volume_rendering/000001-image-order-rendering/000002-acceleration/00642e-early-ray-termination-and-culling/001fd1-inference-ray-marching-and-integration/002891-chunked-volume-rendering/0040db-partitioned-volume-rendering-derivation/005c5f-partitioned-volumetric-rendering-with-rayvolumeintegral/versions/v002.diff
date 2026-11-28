@@ -1,0 +1,340 @@
+--- v001.md
++++ v002.md
+@@ -4,5 +4,5 @@
+ 
+ ## Overview
+-Partitioned Volumetric Rendering with RayVolumeIntegral performs volumetric rendering over a partition of possible $t$ values in the union of rendering volumes, combining results from disjoint volume integrals and a void model for empty space [S1, unofficial]. It sets itself apart from standard single-volume ray marching by explicitly handling multiple disjoint volume bounds and accumulating transmittance across partitions, ensuring correct alpha compositing when rays traverse empty space between volumes [S1, unofficial].
++Partitioned Volumometric Rendering with RayVolumeIntegral performs volumetric rendering over a partition of possible $t$ values in the union of rendering volumes, combining results from disjoint volume integrals and a void model for empty space [S1, unofficial]. It sets itself apart from standard single-volume ray marching by explicitly handling multiple disjoint volume bounds and accumulating transmittance across partitions, ensuring correct alpha compositing when rays traverse empty space between volumes [S1, unofficial]. It builds on [Partitioned Volume Rendering Derivation](10384-partitioned-volume-rendering-derivation.md).
+ 
+ ## How it works
+@@ -10,30 +10,16 @@
+ ### Inputs and Outputs
+ *   **Inputs**:
+-    *   `rays`: Origin and direction vectors for each pixel.
+-    *   `results_i`: A sequence of `RayVolumeIntegralResults` objects, each containing `volume_range` (start/end $t$), `raw` (raw network outputs like density/color), and `transmittance`.
+-    *   `void_model`: A function or model that queries background color/transmittance for empty space.
+-    *   `origin`, `direc`: Ray origins and directions.
+-    *   `importance_sampling_options`: Configuration for the sampler.
++    *   `rays`: Tuple of ray origins and directions [S1, unofficial].
++    *   `results_i`: Sequence of `RayVolumeIntegralResults` objects, each containing `volume_range` (start/end $t$), `raw` (raw network outputs), and `transmittance` [S1, unofficial].
++    *   `void_model`: Function or model that queries background color/transmittance for empty space [S1, unofficial].
++    *   `importance_sampling_options`: Configuration for the sampler [S1, unofficial].
+ *   **Outputs**:
+-    *   `results`: A combined `RayVolumeIntegralResults` object containing the final rendered channels and transmittance.
++    *   `results`: Combined `RayVolumeIntegralResults` object containing the final rendered channels and transmittance [S1, unofficial].
+ 
+ ### Data Structures
+-
+-**RayVolumeIntegral**
+-A dataclass holding the rendering configuration [S1, unofficial]:
+-*   `model`: `NeRFModel` instance.
+-*   `volume`: `Volume` instance.
+-*   `sampler`: `RaySampler` instance.
+-*   `n_samples`: Integer, number of samples per ray segment.
+-
+-**RayVolumeIntegralResults**
+-Holds the state of integration for a specific volume partition [S1, unofficial]:
+-*   `volume_range`: Defines the $t$ interval $[t_0, t_1]$.
+-*   `raw`: Raw outputs from the neural network (density, color, etc.).
+-*   `transmittance`: Scalar or tensor representing transmittance at the end of the interval.
+-*   `output`: Rendered channels (e.g., RGB).
++*   `RayVolumeIntegral`: Dataclass holding the rendering configuration [S1, unofficial]. Fields: `model` (NeRFModel), `volume` (Volume), `sampler` (RaySampler), `n_samples` (int) [S1, unofficial].
++*   `RayVolumeIntegralResults`: Holds the state of integration for a specific volume partition [S1, unofficial]. Fields: `volume_range` (defines $t$ interval $[t_0, t_1]$), `raw` (raw outputs from the neural network), `transmittance` (scalar or tensor representing transmittance at the end of the interval), `output` (rendered channels) [S1, unofficial].
+ 
+ ### Algorithm Steps
+-
+ 1.  **Initialization**: Initialize `origin`, `direc` from `rays`. Set `prev_raw_outputs` to a list of `None`s. Initialize `samplers` list, `raw_outputs` list, `t0` to `None`, and `results` to `None` [S1, unofficial].
+ 2.  **Loop over Volume Partitions**: For each `results_i` in the sequence of volume results:
+@@ -47,71 +33,72 @@
+ 
+ ### RayVolumeIntegral.render_rays
+-
+-This method handles the sampling and integration for a single volume partition defined by `self.volume`.
+-
+-1.  **Intersection and Sampling**:
+-    *   Intersect rays with the volume: `vrange = self.volume.intersect(origin, direction, t0_lower=t0)` [S1, unofficial].
+-    *   Sample $t$ values: `ts = self.sampler.sample(vrange.t0, vrange.t1, self.n_samples)` [S1, unofficial].
+-2.  **Position and Interval Calculation**:
+-    *   Compute sample positions: `positions = origin.unsqueeze(-2) + ts * directions` [S1, unofficial].
+-    *   Compute midpoints: `mids = (ts[..., 1:, :] + ts[..., :-1, :]) / 2` [S1, unofficial].
+-3.  **Model Query**:
+-    *   Query the neural network model with positions, optional directions, and interval bounds:
+-        ```python
+-        t_min = torch.cat([vrange.t0[..., None, :], mids], dim=-2)
+-        t_max = torch.cat([mids, vrange.t1[..., None, :]], dim=-2)
+-        raw = Query(position=positions, direction=optional_directions, t_min=t_min, t_max=t_max)
+-        ```
+-        [S1, unofficial].
+-4.  **Integration**:
+-    *   Call `self.integrate_samples(vrange, raw)` to obtain `output` and `transmittance` [S1, unofficial].
+-5.  **Masking Non-Intersected Rays**:
+-    *   Mask transmittance: `transmittance = torch.where(vrange.intersected, transmittance, torch.ones_like(transmittance))` [S1, unofficial].
+-    *   Mask output tensors: `output = output.map(map_fn=_mask_fn, should_map=_is_tensor)` where `_mask_fn` returns `torch.where(vrange.intersected, tensor, torch.zeros_like(tensor))` [S1, unofficial].
++This method handles the sampling and integration for a single volume partition defined by `self.volume` [S1, unofficial].
++1.  **Intersection and Sampling**: Intersect rays with the volume: `vrange = self.volume.intersect(origin, direction, t0_lower=t0)` [S1, unofficial]. Sample $t$ values: `ts = self.sampler.sample(vrange.t0, vrange.t1, self.n_samples)` [S1, unofficial].
++2.  **Position and Interval Calculation**: Compute sample positions: `positions = origin.unsqueeze(-2) + ts * directions` [S1, unofficial]. Compute midpoints: `mids = (ts[..., 1:, :] + ts[..., :-1, :]) / 2` [S1, unofficial].
++3.  **Model Query**: Query the neural network model with positions, optional directions, and interval bounds:
++    ```python
++    t_min = torch.cat([vrange.t0[..., None, :], mids], dim=-2)
++    t_max = torch.cat([mids, vrange.t1[..., None, :]], dim=-2)
++    raw = Query(position=positions, direction=optional_directions, t_min=t_min, t_max=t_max)
++    ```
++    [S1, unofficial].
++4.  **Integration**: Call `self.integrate_samples(vrange, raw)` to obtain `output` and `transmittance` [S1, unofficial].
++5.  **Masking Non-Intersected Rays**: Mask transmittance: `transmittance = torch.where(vrange.intersected, transmittance, torch.ones_like(transmittance))` [S1, unofficial]. Mask output tensors: `output = output.map(map_fn=_mask_fn, should_map=_is_tensor)` where `_mask_fn` returns `torch.where(vrange.intersected, tensor, torch.zeros_like(tensor))` [S1, unofficial].
+ 
+ ### RayVolumeIntegral.integrate_samples
+-
+-This method computes the discrete volume integral approximation.
+-
+-1.  **Density and Transmittance Calculation**:
+-    *   Calculate interval lengths: `dt = volume_range.partition(raw.ts)` [S1, unofficial].
+-    *   Compute optical depth increments: `ddensity = raw.density * dt` [S1, unofficial].
+-    *   Compute cumulative optical depth: `mass = torch.cumsum(ddensity, dim=-2)` [S1, unofficial].
+-    *   Compute final transmittance: `transmittance = torch.exp(-mass[..., -1, :])` [S1, unofficial].
+-    *   Compute per-sample alphas: `alphas = 1.0 - torch.exp(-ddensity)` [S1, unofficial].
+-    *   Compute per-sample transmittances $T_s$:
+-        $$ T_s = \exp\left(\text{cat}([0, -\text{mass}[..., :-1, :]], \text{dim}=-2)\right) $$
+-        [S1, unofficial].
+-    *   Compute weights: `weights = alphas * Ts` [S1, unofficial].
+-2.  **Weighted Summation**:
+-    *   Integrate using `_integrate(key, samples, weights)` which returns `torch.sum(samples * weights, dim=-2)` for keys other than 'density' [S1, unofficial].
+-    *   Handle auxiliary losses with detached weights if `no_weight_grad_aux_losses` is enabled: use `weights.detach()` [S1, unofficial].
++This method computes the discrete volume integral approximation [S1, unofficial].
++1.  **Density and Transmittance Calculation**: Calculate interval lengths: `dt = volume_range.partition(raw.ts)` [S1, unofficial]. Compute optical depth increments: `ddensity = raw.density * dt` [S1, unofficial]. Compute cumulative optical depth: `mass = torch.cumsum(ddensity, dim=-2)` [S1, unofficial]. Compute final transmittance: `transmittance = torch.exp(-mass[..., -1, :])` [S1, unofficial]. Compute per-sample alphas: `alphas = 1.0 - torch.exp(-ddensity)` [S1, unofficial]. Compute per-sample transmittances $T_s$:
++    $$ T_s = \exp\left(\text{cat}([0, -\text{mass}[..., :-1, :]], \text{dim}=-2)\right) $$
++    [S1, unofficial]. Compute weights: `weights = alphas * Ts` [S1, unofficial].
++2.  **Weighted Summation**: Integrate using `_integrate(key, samples, weights)` which returns `torch.sum(samples * weights, dim=-2)` for keys other than 'density' [S1, unofficial]. Handle auxiliary losses with detached weights if `no_weight_grad_aux_losses` is enabled: use `weights.detach()` [S1, unofficial].
+ 
+ ### Combination Rule
+-
+ When combining results from disjoint volume partitions $[t_0, t_1]$ and $[t_1, t_2]$, the integral over $[t_0, t_2]$ is the sum of the integral over $[t_0, t_1]$ and the transmittance at $t_1$ times the integral over $[t_1, t_2]$ [S1, unofficial]:
+-
+ $$ \int_{t_0}^{t_2} = \int_{t_0}^{t_1} + \text{transmittance}(t_1) \cdot \int_{t_1}^{t_2} $$
+-
+ Implemented as: `prev_val + prev_transmittance * cur_val` [S1, unofficial].
+ 
+ ### Pseudocode
+-
+ ```python
+ import torch
+ 
++class RawOutput:
++    def __init__(self, channels):
++        self.channels = channels
++
++class RayVolumeIntegralResults:
++    def __init__(self, volume_range, raw, transmittance, output):
++        self.volume_range = volume_range
++        self.raw = raw
++        self.transmittance = transmittance
++        self.output = output
++
++    def combine(self, other):
++        # prev_val + prev_transmittance * cur_val
++        combined_channels = self.output.channels + self.transmittance * other.output.channels
++        combined_transmittance = self.transmittance * other.transmittance
++        return RayVolumeIntegralResults(
++            volume_range=other.volume_range,
++            raw=other.raw,
++            transmittance=combined_transmittance,
++            output=RawOutput(channels=combined_channels)
++        )
++
++class ImportanceRaySampler:
++    def __init__(self, volume_range, raw, options):
++        self.volume_range = volume_range
++        self.raw = raw
++        self.options = options
++
++    def sample(self, t0, t1, n_samples):
++        # Standard uniform sampling across the interval [G]
++        ts = torch.linspace(t0, t1, n_samples + 1, device=t0.device)
++        return ts
++
++def Query(position, direction, t_min, t_max):
++    # Standard neural network forward pass for volumetric properties [G]
++    # Returns dict with 'density' and other channels
++    pass
++
+ def render_partitioned_volumes(rays, volume_results_list, void_model, cfg):
+-    """
+-    Renders volumes by partitioning the ray space and combining results.
+-    
+-    Args:
+-        rays: Tuple of (origins, directions).
+-        volume_results_list: List of RayVolumeIntegralResults objects.
+-        void_model: Function to query background color.
+-        cfg: Configuration object.
+-        
+-    Returns:
+-        Combined RayVolumeIntegralResults.
+-    """
+     origins, directions = rays
+     prev_raw_outputs = [None] * len(volume_results_list)
+@@ -120,7 +107,6 @@
+     t0 = None
+     results = None
+-    
+-    for i, results_i in enumerate(volume_results_list):
+-        # Step 2a: Create Importance Ray Sampler
++
++    for results_i in volume_results_list:
+         sampler = ImportanceRaySampler(
+             volume_range=results_i.volume_range,
+@@ -129,79 +115,36 @@
+         )
+         samplers.append(sampler)
+-        
+-        # Step 2b: Store raw outputs
+         raw_outputs.append(results_i.raw)
+-        
+-        # Step 2c: Update t0
+         t0 = results_i.volume_range.next_t0()
+-        
+-        # Step 2d: Combine results
++
+         if results is None:
+             results = results_i
+         else:
+-            # Combine using the partitioned rule: prev + prev_trans * cur
+-            # Assuming results_i has 'output' (channels) and 'transmittance'
+-            combined_channels = results.output.channels + results.transmittance * results_i.output.channels
+-            # Transmittance updates to the end of the current partition
+-            combined_transmittance = results.transmittance * results_i.transmittance
+-            
+-            # Reconstruct results object (simplified)
+-            results = RayVolumeIntegralResults(
+-                volume_range=results_i.volume_range, # Or unioned range
+-                raw=results_i.raw,
+-                output=CombinedOutput(channels=combined_channels),
+-                transmittance=combined_transmittance
+-            )
+-            
+-    # Step 3: Add void background
+-    # Query void model at ray origin/direction
+-    void_color = void_model(Query(origin=origins, direction=directions))
++            results = results.combine(results_i)
++
++    void_color = void_model(origins, directions)
++    results.output.channels = results.output.channels + results.transmittance * void_color
++    return results
++
++def integrate_samples(vrange, raw):
++    ts = raw.ts
++    t0 = vrange.t0
++    t1 = vrange.t1
+     
+-    # Add void contribution weighted by final transmittance
+-    final_channels = results.output.channels + results.transmittance * void_color
+-    
+-    # Update final results with combined channels
+-    results.output.channels = final_channels
+-    
+-    return results
+-
+-def integrate_samples(vrange, raw, n_samples):
+-    """
+-    Integrates raw network outputs along a ray segment.
+-    
+-    Args:
+-        vrange: Volume range object with t0, t1, and intersected mask.
+-        raw: Dict of raw outputs (density, color, etc.) with ts (sample t values).
+-        n_samples: Number of samples.
+-        
+-    Returns:
+-        output: Rendered channels.
+-        transmittance: Final transmittance.
+-    """
+-    # Step 1: Calculate dt, ddensity, mass
+-    # Assuming raw.ts contains the sampled t values sorted
+-    ts = raw.ts
+-    dt = torch.diff(ts, dim=-2) # Partition lengths
+-    # Handle boundaries if necessary, e.g., prepend/append t0/t1
+-    
++    # Handle non-intersected rays early to prevent shape/dimension errors [G]
++    if not vrange.intersected.any():
++        transmittance = torch.ones_like(vrange.intersected, dtype=raw.density.dtype)
++        output = RawOutput(channels={k: torch.zeros_like(raw[k]) for k in raw.keys() if k != 'density'})
++        return output, transmittance
++
++    # ts are boundaries, shape (..., n_samples + 1)
++    dt = torch.diff(ts, dim=-2)
+     ddensity = raw.density * dt
+     mass = torch.cumsum(ddensity, dim=-2)
+-    
+-    # Final transmittance
+     transmittance = torch.exp(-mass[..., -1, :])
+-    
+-    # Alphas
+     alphas = 1.0 - torch.exp(-ddensity)
+-    
+-    # Ts (transmittance at start of each interval)
+-    # Prepend 0 to mass for T_0 = exp(0) = 1
+-    mass_padded = torch.cat([torch.zeros_like(mass[..., :1, :]), mass[..., :-1, :]], dim=-2)
+-    Ts = torch.exp(-mass_padded)
+-    
+-    # Weights
++    Ts = torch.exp(torch.cat([torch.zeros_like(mass[..., :1, :]), -mass[..., :-1, :]], dim=-2))
+     weights = alphas * Ts
+-    
+-    # Step 2: Integrate
+-    # For each channel key (e.g., 'rgb'), sum samples * weights
++
+     output_channels = {}
+     for key in raw.keys():
+@@ -209,18 +152,15 @@
+             continue
+         samples = raw[key]
+-        # Ensure samples shape matches weights
+         integrated = torch.sum(samples * weights, dim=-2)
+         output_channels[key] = integrated
+-        
++
+     output = RawOutput(channels=output_channels)
+-    
+-    # Step 4: Mask non-intersected rays
+-    if not vrange.intersected.all():
+-        # Mask transmittance to 1.0 for non-intersected
+-        transmittance = torch.where(vrange.intersected, transmittance, torch.ones_like(transmittance))
+-        # Mask output to 0.0 for non-intersected
+-        for key in output_channels:
+-            output_channels[key] = torch.where(vrange.intersected, output_channels[key], torch.zeros_like(output_channels[key]))
+-            
++
++    # Mask non-intersected rays
++    transmittance = torch.where(vrange.intersected, transmittance, torch.ones_like(transmittance))
++    for key in output_channels:
++        output_channels[key] = torch.where(vrange.intersected, output_channels[key], torch.zeros_like(output_channels[key]))
++    output = RawOutput(channels=output_channels)
++
+     return output, transmittance
+ ```
+@@ -239,5 +179,5 @@
+ 
+ ### Time and Memory Complexity
+-*   **Time**: Linear in the number of samples per ray and the number of volume partitions. Each partition requires a forward pass through the neural network and an integration step.
++*   **Time**: Linear in the number of samples per ray and the number of volume partitions. Each partition requires a forward pass through the neural network and an integration step [S1, unofficial].
+ *   **Memory**: Proportional to the number of samples and the number of channels stored in `raw` outputs. Not given in the sources.
+ 
+@@ -246,15 +186,15 @@
+ 
+ ### Scaling
+-Scales with the number of disjoint volumes. Each volume requires separate intersection, sampling, and integration steps. Not given in the sources.
++Scales with the number of disjoint volumes. Each volume requires separate intersection, sampling, and integration steps [S1, unofficial].
+ 
+ ### Strengths and Limitations
+-*   **Strengths**: Correctly handles multiple disjoint volumes and empty space between them. Allows for importance sampling within each partition.
+-*   **Limitations**: Requires explicit partitioning of the ray space. Performance depends on the number of partitions. Not given in the sources.
++*   **Strengths**: Correctly handles multiple disjoint volumes and empty space between them. Allows for importance sampling within each partition [S1, unofficial].
++*   **Limitations**: Requires explicit partitioning of the ray space. Performance depends on the number of partitions [S1, unofficial].
+ 
+ ### When to Use
+-Use when rendering scenes with multiple disjoint volumetric objects or when empty space between volumes needs to be explicitly modeled. Not given in the sources.
++Use when rendering scenes with multiple disjoint volumetric objects or when empty space between volumes needs to be explicitly modeled [S1, unofficial].
+ 
+ ### When Not to Use
+-Use standard ray marching for single, continuous volumes. Not given in the sources.
++Use standard ray marching for single, continuous volumes [S1, unofficial].
+ 
+ ## Background

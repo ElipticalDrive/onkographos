@@ -1,0 +1,207 @@
+# Local Hull-Based Surface Construction
+
+Also called: 3D hull based surface generation, Local convex classification, Local convex classification and 3D hull based surface generation
+
+## Overview
+Local Hull-Based Surface Construction is a surface extraction method that copes with concavity by classifying local convexities from an imperfect Marching Cubes (MC) surface and estimating each local hull using a 3D hull algorithm, then combining the locally constructed surfaces [S1]. It differs from its siblings, such as [Snap Marching Cubes](2181-snap-marching-cubes.md) and [Signed Distance and Two-Step Methods](10990-signed-distance-and-two-step-methods.md), by replacing standard linear interpolation with a two-stage process: classifying local convex regions from an initial MC surface, and applying a 3D convex hull algorithm to these subsets to preserve concave features that standard hull methods would flatten [S1].
+
+## How it works
+The method operates on volumetric data derived from silhouettes, using an octree to manage spatial structure and an initial MC surface to seed the convexity classification [S1].
+
+### Inputs and Outputs
+*   **Inputs:** A set of thresholded silhouette images from multiple viewpoints, projection matrices for these viewpoints, and a Voting MC (VMC) threshold $v_{th}$ [S1].
+*   **Outputs:** A triangle mesh representing the 3D surface [S1].
+
+### Data Structures
+1.  **Octree:** A hierarchical data structure where each node represents an octant of the 3D space [S1]. Nodes are split into 8 sub-octants if classified as intersection [S1].
+2.  **Tree Table:** Stores connectivity information between clusters of vertices [S1].
+3.  **Local Convex Vertices Table:** Maps each identified local convex region to its constituent vertices [S1].
+
+### Steps
+
+1.  **Initial Data Preparation (Octree Construction):**
+    *   Construct an octree data structure [S1].
+    *   For each octant in the current level of the octree:
+        *   Backproject the octant onto every silhouette image plane, approximating the backprojection as a 2D rectangle [S1].
+        *   If the rectangle intersects any silhouette in any view, classify the octant as `intersection` and split into 8 sub-octants [S1].
+        *   If the rectangle intersects no silhouettes in any view, classify as `background` and remove (do not split) [S1].
+        *   Repeat recursively until a minimum voxel size or depth is reached [S1].
+
+2.  **Estimate Initial MC Vertices:**
+    *   Generate an initial surface using Voting Marching Cubes (VMC) [S1].
+    *   The VMC decision function determines if a vertex is outside:
+        $$ \sum_{i=0}^{n} c_i(\theta_i, \vec{x}_{3d}) - v_{th} \le 0 $$
+        where $n$ is the number of views, $c_i$ is the classification (1 if outside, 0 if inside) for view $i$, $\vec{x}_{3d}$ is the 3D position, and $v_{th}$ is the threshold ($0 \le v_{th} < n$) [S1].
+    *   Extract the vertices from this initial MC surface [S1]. These serve as the seed points for convexity classification [S1].
+
+3.  **Local Convex Classification:**
+    *   **Slicing:** Slice the octree and the MC surface along the z-axis [S1].
+        *   Define the 3D delta function:
+            $$ \delta(x, y, z) = \begin{cases} 1 & \text{if } x = y = z = 0 \\ 0 & \text{otherwise} \end{cases} $$
+        *   The $i$-th sliced data of an octree $S_{ioc}(m, n)$ is defined as:
+            $$ S_{ioc}(m, n) = o(x, y, z)\delta(x - mT, y - nT, z - iT) $$
+            where $o(x,y,z)$ is 1 if the octant contains a point, $T$ is the slicing interval, and $i,m,n$ are integer indices [S1].
+        *   Quantize the octree slice to treat points from the same octant equally:
+            $$ S_{iocq}[u, v] = \sum_{j,k=0}^{1} S_{ioc}(u + j, v + k) $$
+            This results in a binary image plane where a nonzero point represents an octant [S1].
+    *   **MC Slice Representation:** Create a binary image plane $S_{imcq}[u, v]$ for MC vertices [S1]. A value is 1 if an MC vertex is found within the spatial bounds $uT \le x < (u+1)T$, $vT \le y < (v+1)T$, and $iT \le z < (i+1)T$ [S1].
+    *   **Classification:** Estimate cluster conditional probability density functions (PDFs) from every octree slice to classify the initial MC vertices into local convex regions [S1].
+    *   **Output:** Generate the `Tree Table` (cluster connections) and `Local Convex Vertices Table` [S1].
+
+4.  **3D Hull-Based Surface Construction:**
+    *   For each local convex region identified:
+        *   If the region has multiple connections (e.g., 1:n or n:1 topology), divide it into $n$ separate 1:1 local convexities [S1].
+        *   Apply a 3D convex hull algorithm to the vertices of the local convexity to generate the local surface triangles [S1].
+    *   **Aggregation:** Combine all local surfaces to complete the surface estimation [S1].
+
+### Pseudocode
+
+> **Unverified code.** The code below did not pass a test run against a reference implementation, or no test fits it, so it may contain errors.
+
+```python
+def local_hull_surface_construction(silhouettes, projection_matrices, v_th, min_voxel_size):
+    # Step 1: Initial Data Preparation (Octree Construction)
+    octree = Octree(root_bounds=get_volume_bounds())
+    # Source does not specify the exact recursive splitting implementation.
+    # Backproject each octant as a 2D rectangle onto every silhouette image.
+    # If rectangle intersects any silhouette, classify as intersection and split into 8 suboctants.
+    # Else classify as background and remove. Repeat until min_voxel_size is reached.
+    octree.build(silhouettes, projection_matrices, min_voxel_size)
+
+    # Step 2: Estimate Initial MC Vertices
+    # VMC decision function: sum(c_i) - v_th <= 0, where c_i is 1 if outside, 0 if inside.
+    # Extract vertices from the resulting MC surface.
+    initial_vertices = voting_marching_cubes(octree, v_th, silhouettes, projection_matrices)
+
+    # Step 3: Local Convex Classification
+    T = octree.slicing_interval
+    num_z_slices = octree.max_z // T
+    octree_slices = []
+    for i in range(num_z_slices):
+        slice_data = []
+        for m in range(octree.width // T):
+            for n in range(octree.height // T):
+                # Quantized slice: sum over j,k in [0,1] of S_ioc(u+j, v+k)
+                val = 0
+                for j in [0, 1]:
+                    for k in [0, 1]:
+                        if octree.contains_point(m + j, n + k, i):
+                            val += 1
+                slice_data.append(val)
+        octree_slices.append(slice_data)
+
+    # MC slice: binary plane S_imcq[u, v] set to 1 if vertex in bounds
+    mc_slices = slice_mc_vertices(initial_vertices, T, num_z_slices)
+    # Source does not specify the exact PDF estimation or clustering algorithm.
+    local_convexities = classify_local_convexities(octree_slices, mc_slices)
+    tree_table = build_tree_table(local_convexities)
+    local_convex_vertices_table = build_local_convex_vertices_table(local_convexities)
+
+    # Step 4: 3D Hull-Based Surface Construction
+    all_triangles = []
+    for local_hull_id, vertices in local_convex_vertices_table.items():
+        # Divide 1:n or n:1 connections into n 1:1 local convexities
+        sub_convexities = decompose_multiple_connections(vertices, tree_table)
+        for sub_vertices in sub_convexities:
+            # Apply standard 3D convex hull algorithm
+            local_triangles = compute_3d_convex_hull(sub_vertices)
+            all_triangles.extend(local_triangles)
+
+    final_mesh = aggregate_surfaces(all_triangles)
+    return final_mesh
+
+def get_volume_bounds():
+    return (0, 0, 0, 1, 1, 1)  # Normalized unit cube
+
+class Octree:
+    def __init__(self, root_bounds):
+        self.root_bounds = root_bounds
+        self.children = None
+        self.is_intersection = False
+        self.slicing_interval = 1.0
+        self.max_z = 10
+        self.width = 10
+        self.height = 10
+
+    def build(self, silhouettes, projection_matrices, min_voxel_size):
+        # Backproject octant as rectangle onto every silhouette image.
+        # If rectangle intersects any silhouette, classify as intersection and split into 8 suboctants.
+        # Else classify as background and remove.
+        pass
+
+    def contains_point(self, m, n, i):
+        # Returns 1 if octant at index (m,n,i) contains a 3D point, else 0
+        return 1
+
+def voting_marching_cubes(octree, v_th, silhouettes, projection_matrices):
+    vertices = []
+    # Iterate over octree leaves.
+    # Count votes: c_i = 1 if outside, 0 if inside.
+    # Decision function: sum(c_i) - v_th <= 0.
+    # Extract vertices from initial MC surface.
+    return vertices
+
+def slice_mc_vertices(initial_vertices, T, num_z_slices):
+    # Create binary image plane S_imcq[u, v].
+    # Set to 1 if MC vertex found within uT <= x < (u+1)T, vT <= y < (v+1)T, iT <= z < (i+1)T.
+    slices = []
+    for i in range(num_z_slices):
+        slice_plane = [[0 for _ in range(10)] for _ in range(10)]
+        for v in initial_vertices:
+            u, v_idx = int(v[0] // T), int(v[1] // T)
+            if 0 <= u < 10 and 0 <= v_idx < 10:
+                slice_plane[v_idx][u] = 1
+        slices.append(slice_plane)
+    return slices
+
+def classify_local_convexities(octree_slices, mc_slices):
+    # Estimate cluster conditional PDFs from every octree slice to classify initial vertices.
+    # Returns list of local convexity groups.
+    return []
+
+def build_tree_table(local_convexities):
+    # Generate tree table storing information on cluster connection.
+    return {}
+
+def build_local_convex_vertices_table(local_convexities):
+    # Generate local convex vertices table mapping regions to vertices.
+    return {}
+
+def decompose_multiple_connections(vertices, tree_table):
+    # Divide local convexities with 1:n or n:1 connections into n 1:1 local convexities.
+    return [vertices]
+
+def compute_3d_convex_hull(vertices):
+    # Apply standard 3D convex hull algorithm to generate local surface triangles.
+    return []
+
+def aggregate_surfaces(all_triangles):
+    # Combine all local surfaces to complete surface estimation.
+    return []
+```
+
+### Parameters
+*   **Rotational Angle ($\theta$):** Set to 6 degrees in the experimental setup [S1].
+*   **Number of Projection Matrices:** 60, corresponding to 60 image planes [S1].
+*   **VMC Threshold ($v_{th}$):** $0 \le v_{th} < n$, where $n$ is the number of views [S1].
+
+### Edge Cases and Pitfalls
+*   **Concavity:** Standard convex hull algorithms fail on concave objects [S1]. This method mitigates this by local convexity classification, but if the classification fails (e.g., due to noisy silhouettes), concave regions may be incorrectly filled [S1].
+*   **Dangling Edges:** If the surface is not closed, edges may be traversed only once [S1]. The premise requires each edge to be traversed twice to ensure the surface covers the object tightly without holes [S1].
+*   **Multiple Connections:** Local convexities with 1:n or n:1 connections must be explicitly divided into 1:1 convexities before hull construction [S1].
+*   **Precision:** The quantization of octree slices ($S_{iocq}$) assumes that every four points in a slice come from the same octant [S1]. This relies on the slicing interval $T$ and the octree structure being aligned [S1].
+
+## Operating characteristics
+*   **Time Complexity:** Not given in the sources. [S1]
+*   **Memory Complexity:** Not given in the sources. [S1]
+*   **Measured Performance:** Not given in the sources. [S1]
+*   **Strengths:** Handles concave shapes better than global convex hull methods; preserves surface details from the initial MC surface; robust to some noise via the voting mechanism [S1].
+*   **Limitations:** Computationally expensive due to octree construction and multiple hull computations [G]; sensitive to the quality of the initial VMC surface [S1]; requires multiple views (silhouettes) for input [S1].
+*   **When to Use:** When reconstructing 3D objects from silhouettes where concavity is significant and standard MC or global hull methods fail [S1].
+*   **When Not to Use:** For real-time applications due to computational cost [G]; when only a single view is available [S1].
+
+## Background
+The method was proposed to address the limitations of 3D Delaunay Triangulation (DT) and Constrained Delaunay Triangulation (CDT), which are designed for convex shapes and struggle with concavity [S1]. It builds on [Marching Cubes Lookup and Configuration](2518-marching-cubes-lookup-and-configuration.md) by using MC to generate an initial surface, which is then refined using local convex hulls [S1]. The approach was introduced in a paper by [S1] in 2008, aiming to combine the tight fitting of hull methods with the concavity handling of local classification [S1].
+
+## Sources
+[S1] Local hull-based surface construction of volumetric data from silhouettes, https://doi.org/10.1109/tip.2008.926149, fetched 2026-10-30

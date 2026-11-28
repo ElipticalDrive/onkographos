@@ -1,0 +1,117 @@
+--- v001.md
++++ v002.md
+@@ -4,9 +4,9 @@
+ 
+ ## Overview
+-The Gaussian Splat PLY Loader parses 3D Gaussian parameters (position, scale, rotation, color, opacity, and spherical harmonics) from a PLY file into a structured data container. It solves the problem of converting raw file data into a format suitable for differentiable rendering by applying necessary inverse transformations (e.g., exponentiation for scale, sigmoid for opacity) and packing data for GPU consumption. It differs from sibling loaders by specifically handling the `gsplat`-style PLY format which stores scales and opacities in latent space, requiring explicit decoding during load.
++The Gaussian Splat PLY Loader parses 3D Gaussian parameters (position, scale, rotation, color, opacity, and spherical harmonics) from a PLY file into a structured data container [S1, unofficial]. It converts raw file data into a format suitable for differentiable rendering by applying necessary inverse transformations (exponentiation for scale, sigmoid for opacity) and packing data for GPU consumption [S1, unofficial]. It differs from sibling loaders by specifically handling the `gsplat`-style PLY format which stores scales and opacities in latent space, requiring explicit decoding during load [S1, unofficial].
+ 
+ ## How it works
+-**Inputs:** A PLY file containing vertex properties `x`, `y`, `z`, `scale_0`, `scale_1`, `scale_2`, `rot_0`, `rot_1`, `rot_2`, `rot_3`, and optionally `red`, `green`, `blue`, `opacity`, and `f_dc_0`, `f_dc_1`, `f_dc_2`.
+-**Outputs:** A `GaussianData` structure populated with `positions`, `scales`, `rotations`, `colors`, and a `packedData` buffer ready for GPU upload.
++**Inputs:** A PLY file containing vertex properties `x`, `y`, `z`, `scale_0`, `scale_1`, `scale_2`, `rot_0`, `rot_1`, `rot_2`, `rot_3`, and optionally `red`, `green`, `blue`, `opacity`, and `f_dc_0`, `f_dc_1`, `f_dc_2` [S1, unofficial].
++**Outputs:** A `GaussianData` structure populated with `positions`, `scales`, `rotations`, `colors`, and a `packedData` buffer ready for GPU upload [S1, unofficial].
+ 
+ **Data Structures:**
+@@ -17,8 +17,5 @@
+     *   `colors`: `std::vector<glm::u8vec4>`
+     *   `packedData`: `std::vector<uint32_t>` (size $8 \times N$, where $N$ is vertex count)
+-    *   `worldPositions`: `std::vector<float>` (size $3 \times N$)
+-
+-**Constants:**
+-*   $SH\_C0 = \frac{1}{\sqrt{4\pi}}$ [S1, unofficial]
++    *   `worldPositions`: `std::vector<float>` (size $3 \times N$) [S1, unofficial]
+ 
+ **Steps:**
+@@ -59,5 +56,5 @@
+             $$ a = \text{clamp}(a \times 255.0, 0.0, 255.0) $$
+             [S1, unofficial]
+-        *   Else: Set $a = 255$ (implicit from `glm::u8vec4` initialization or default, though code explicitly assigns `a` only if opacity exists; if null, `a` remains uninitialized in the snippet but `glm::u8vec4` default construction is 0. However, standard PLY loaders often default to 255 if not present. The source snippet shows `if (opacity_data is not null)... assign to a`. It does not specify else. We assume default 255 or 0 based on struct init. Given `glm::u8vec4` default is 0, but opacity is usually 1.0. The source says "assign to a". If null, `a` is not assigned. We must initialize `a` to 255 if null to be safe, or follow source strictly. Source says "If opacity_data is not null... assign to a". It does not say else. We will assume default 255 for completeness as is standard, or note it. Let's stick to source: if null, `a` is not set. But `glm::u8vec4` constructor initializes to 0. This is a pitfall. [G] Initialize `a` to 255 if `opacity_data` is null to prevent transparent splats.)
++        *   Else: Initialize $a = 255$ [G]. The source code does not explicitly set a default when `opacity_data` is null, but `glm::u8vec4` default construction is 0, which would cause transparent splats [G].
+     *   **Store:** Set `colors[i] = glm::u8vec4(r, g, b, a)` [S1, unofficial].
+ 7.  **Pack Data:** Call `data.pack()` to prepare GPU data [S1, unofficial].
+@@ -74,5 +71,5 @@
+ 4.  **Covariance Calculation:**
+     *   Convert `rotations[i]` to rotation matrix $R$ [S1, unofficial].
+-    *   Create scale matrix $S = \text{diag}(\text{scales}[i])$ [S1, unofficial].
++    *   Create scale matrix $S = \text{diag}(\text{scales}[i])$ using the already exponentiated scale values [S1, unofficial].
+     *   Compute $M = R \times S$ [S1, unofficial].
+     *   Compute symmetric covariance matrix $\Sigma = M M^T$. Extract upper triangle elements:
+@@ -98,8 +95,8 @@
+ from typing import List, Optional, Tuple
+ 
+-# Helper for half-precision packing (standard implementation)
+ def pack_half_2x16(x: float, y: float) -> int:
+-    x_bytes = struct.pack('e', x)
+-    y_bytes = struct.pack('e', y)
++    """Pack two half-precision floats into a single uint32 (little-endian)."""
++    x_bytes = struct.pack('<e', x)
++    y_bytes = struct.pack('<e', y)
+     return struct.unpack('<I', x_bytes + y_bytes)[0]
+ 
+@@ -107,5 +104,5 @@
+     """
+     Loads Gaussian splat data from PLY vertex properties.
+-    Returns a dict with 'positions', 'scales', 'rotations', 'colors', 'packed_data'.
++    Returns a dict with 'positions', 'scales', 'rotations', 'colors', 'packed_data', 'world_positions'.
+     """
+     vertex_count = len(ply_data['x'])
+@@ -114,5 +111,5 @@
+     has_opacity = 'opacity' in ply_data
+     
+-    SH_C0 = 1.0 / math.sqrt(4 * math.pi)
++    SH_C0 = 1.0 / math.sqrt(4 * math.pi)  # [G] Standard SH constant
+     
+     positions = []
+@@ -155,5 +152,5 @@
+             a = max(0.0, min(255.0, a_sig * 255.0))
+         else:
+-            a = 255.0 # [G] Default to opaque if not specified
++            a = 255.0  # [G] Default to opaque if not specified to avoid transparent splats
+             
+         colors.append((int(r), int(g), int(b), int(a)))
+@@ -170,12 +167,12 @@
+         
+         # First uvec4: Position bytes + selection flag
+-        ux = struct.unpack('<I', struct.pack('f', x))[0]
+-        uy = struct.unpack('<I', struct.pack('f', y))[0]
+-        uz = struct.unpack('<I', struct.pack('f', z))[0]
++        ux = struct.unpack('<I', struct.pack('<f', x))[0]
++        uy = struct.unpack('<I', struct.pack('<f', y))[0]
++        uz = struct.unpack('<I', struct.pack('<f', z))[0]
+         
+         packed_data[i*8 + 0] = ux
+         packed_data[i*8 + 1] = uy
+         packed_data[i*8 + 2] = uz
+-        packed_data[i*8 + 3] = 0 # Selection flag
++        packed_data[i*8 + 3] = 0  # Selection flag
+         
+         world_positions.extend([x, y, z])
+@@ -183,8 +180,4 @@
+         # Covariance Calculation
+         # Rotation Matrix from Quaternion
+-        # R = [1-2(qy^2+qz^2), 2(qx*qy-qw*qz), 2(qx*qz+qw*qy)]
+-        #     [2(qx*qy+qw*qz), 1-2(qx^2+qz^2), 2(qy*qz-qw*qx)]
+-        #     [2(qx*qz-qw*qy), 2(qy*qz+qw*qx), 1-2(qx^2+qy^2)]
+-        
+         r00 = 1 - 2*(qy**2 + qz**2)
+         r01 = 2*(qx*qy - qw*qz)
+@@ -241,12 +234,12 @@
+ 
+ ## Operating characteristics
+-*   **Time Complexity:** $O(N)$, where $N$ is the number of Gaussians. Linear pass for decoding and packing.
+-*   **Memory Complexity:** $O(N)$. Stores raw vectors plus a packed buffer of $8 \times N$ uint32s.
+-*   **Performance:** Fast CPU-side loading. The packing step involves matrix multiplications per Gaussian, which is lightweight for typical scene sizes ($10^5-10^6$ splats).
+-*   **Strengths:** Handles latent space decoding (exp/sigmoid) automatically. Packs data efficiently for GPU shaders.
+-*   **Limitations:** Requires specific PLY property names. Does not handle coordinate system conversion (handled by sibling).
++*   **Time Complexity:** $O(N)$, where $N$ is the number of Gaussians. Linear pass for decoding and packing [S1, unofficial].
++*   **Memory Complexity:** $O(N)$. Stores raw vectors plus a packed buffer of $8 \times N$ uint32s [S1, unofficial].
++*   **Performance:** Fast CPU-side loading. The packing step involves matrix multiplications per Gaussian, which is lightweight for typical scene sizes ($10^5-10^6$ splats) [S1, unofficial].
++*   **Strengths:** Handles latent space decoding (exp/sigmoid) automatically. Packs data efficiently for GPU shaders [S1, unofficial].
++*   **Limitations:** Requires specific PLY property names. Does not handle coordinate system conversion (handled by sibling) [S1, unofficial].
+ 
+ ## Background
+-This loader is part of the `gsplat` OpenGL implementation, an unofficial port of 3D Gaussian Splatting rendering. It adapts the PLY format generated by the original 3DGS optimization pipeline, which stores scales and opacities in a latent space to facilitate gradient-based optimization.
++This loader is part of the `gsplat` OpenGL implementation, an unofficial port of 3D Gaussian Splatting rendering [S1, unofficial]. It adapts the PLY format generated by the original 3DGS optimization pipeline, which stores scales and opacities in a latent space to facilitate gradient-based optimization [S1, unofficial].
+ 
+ ## Sources

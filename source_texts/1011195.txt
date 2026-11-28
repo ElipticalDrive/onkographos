@@ -1,0 +1,212 @@
+Gaussian Splat Renderer for the Godot Engine. Contribute to klausi3D/godotGS development by creating an account on GitHub.
+
+gaussian_splatting: prime compressed Tier A (plain GSQ), codec in manifest and cache key (BV-C7, R3) by klausi3D · Pull Request #1381 · klausi3D/godotGS · GitHub
+Skip to content
+You signed in with another tab or window. Reload to refresh your session.
+You signed out in another tab or window. Reload to refresh your session.
+You switched accounts on another tab or window. Reload to refresh your session.
+Dismiss alert
+Conversation
+klausi3D
+commented
+Nov 8, 2026
+Copy link
+Copy Markdown
+Owner
+What and why
+BV-C7 of docs/architecture/adr-beyond-vram-worlds.md (section 10 row BV-C7, D-12, D-13, section 9.2, M1c row). The generator and the beyond-VRAM workflow can now write Tier A as plain GSQ (plain v3 + bit 7, paged GSQ v1 chunks). They prime it into the runner's world cache, and that prime deletes the uncompressed M1 world.
+Generator (io/gs_world_generator.*): GenerateOptions::codec_id selects GSQ v1 with the D-12 pre-registered block (gsq_v1_codec_params()). The codec block is part of gen_sha, so flat and GSQ worlds never share a cache key. The read-back runs once over the file:
+it checks the table structure: contiguous, aligned and ascending page runs that end at the chunk table, splat counts, and zero padding;
+it runs gs_gsq::verify_page on every page;
+it records each chunk's page run (first_page, page_count, pages_offset, pages_bytes, pages_sha256).
+The manifest gets a top-level codec block: id, page count, stored bytes, the SHA-256 of the decoded digest set, constant_groups and heterogeneous_chunks. The flat manifest bytes are unchanged.
+Verifiers: C++ verify_world() and the stdlib verify_world_manifest.py (the lane's V2) both verify GSQ worlds:
+the extension's codec block against the manifest's writer codec;
+the chunk and page tables;
+every page-run digest, the zero padding, the decoded digest set and the file digest;
+a manifest whose codec is not the file's encoding (codec_mismatch).
+--content refuses a GSQ world explicitly. It does not skip it.
+Script binding / entry points: generate(..., codec="none"|"gsq_v1"), generate_world.gd --codec, generate_world.py --encoding plain_v3_gsq.
+Dispatch lane (dispatch_lane.py): --encoding for generate, prime-cache and cache-check.
+The encoding applies to Tier A only. T0 stays uncompressed: the BV-07 F/k sweep regenerates T0 subsets uncompressed, and one sweep must not mix codecs.
+The cache key is told apart by codec in three places: the world id (A-plain_v3_gsq), gen_sha (codec block) and .key.json encoding. cache-check refuses a key that records another encoding as cache_stale. prime-cache refuses a manifest whose writer codec differs from the requested one.
+Delete the M1 file (D-13): once the compressed Tier A key is complete (never before, so a failed prime keeps it), the prime removes <cache>/A-plain_v3_uncompressed/. The removal is recorded as deleted_m1_world in the prime record. The prime record also carries world bytes, B/splat, the codec block and the generation time.
+GSQ disk budget: the ADR section 5.3 line "Steady from M1c: A plain GSQ … 7.6" (7.6 GB).
+Workflow beyond_vram_flythrough.yml: new input encoding (default plain_v3_gsq). The weekly schedule uses it too (D-13: every gated run from M1c on is compressed). It is passed to prime-cache and cache-check, and the run name and prime artifact name include it.
+world_cache: gsq_page_builder.{h,cpp} join the generator source fingerprint.
+GSQ does not become an engine default (#1357). Only the lane's Tier A world is compressed. The real-scan visual check of #1357 is still open.
+Evidence
+Risk class: python scripts/agentic/classify_change.py --base-ref 07baf4407e0 → R3 (same as the package).
+Base: 07baf4407e0edf46fc8c22c4457a0a860a249e76 (origin/master).
+Local (Windows Python, no Godot binary): test_verify_world_manifest.py 19 OK (7 new GSQ cases), test_dispatch_lane.py 102 OK (8 new BV-C7 cases), test_world_cache.py OK, guard-only lane: python tests/ci/run_module_tests.py --guard-only exit 0 (the StringName orphan guard and real-producer capture did not run: no Godot binary).
+New doctest (strict [WorldIO] lane): GSQ v1 world: codec in manifest and gen_sha, loads, verify names a corrupted page run. It checks bit 7, determinism, size at most 1/4 of flat, the gen_sha split, the codec block, load_resident decoding every page, a flipped page byte naming chunk 3's page run, and codec_mismatch. It runs in the PR's cpu-tests.
+Mutation: pending (tmp/mut-bv-c7)
+Runner evidence (prime, Tier A GSQ): pending
+M1c fly-through: pending
+MSVC is not compiled per PR; the nightly Release Builds cover it.
+Refs #1357 #1375
+🤖 Generated with Claude Code
+https://claude.ai/code/session_016Cyd8NybqWYXAvVBWZx2iJ
+gaussian_splatting: prime compressed Tier A (plain GSQ), codec in man…
+…
+168f340
+```
+…ifest and cache key (BV-C7, R3)
+
+ADR docs/architecture/adr-beyond-vram-worlds.md section 10 row BV-C7, D-12, D-13,
+section 9.2.
+
+- Generator: GenerateOptions::codec_id selects GSQ v1 (gsq_v1_codec_params()).
+  The writer emits plain v3 + bit 7; the read-back verifies every page's stored
+  digest and records each chunk's page run (offset, bytes, SHA-256). The
+  manifest carries a "codec" block (page count, stored bytes, decoded digest
+  set, constant groups). The codec block is part of gen_sha.
+- verify_world() and the stdlib verifier verify_world_manifest.py check GSQ
+  worlds: codec block against the file's extension, chunk and page tables,
+  page-run digests, zero padding, the decoded digest set and the file digest.
+- Script binding generate(..., codec), generate_world.gd --codec,
+  generate_world.py --encoding plain_v3_gsq.
+- Dispatch lane: --encoding for generate, prime-cache and cache-check. It
+  applies to Tier A only. T0 stays flat, because the BV-07 sweep regenerates
+  T0 subsets flat. The world id and key meta record the encoding. Prime
+  refuses a manifest whose writer codec is not the requested one. A
+  compressed Tier A prime deletes the uncompressed M1 world
+  (A-plain_v3_uncompressed) after the compressed key is complete (D-13).
+  The GSQ budget is the ADR section 5.3 7.6 GB line.
+- Workflow: input `encoding` (default plain_v3_gsq; the schedule uses it too)
+  passed to prime-cache and cache-check.
+- world_cache: the page builder sources join the stale fingerprint.
+
+GSQ stays out of the engine defaults (#1357). Only the lane world is
+compressed.
+
+Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
+Claude-Session: https://claude.ai/code/session_016Cyd8NybqWYXAvVBWZx2iJ
+```
+chatgpt-codex-connector
+Bot
+commented
+Nov 8, 2026
+•
+edited
+Loading
+Uh oh!
+There was an error while loading. Please reload this page.
+Copy link
+Copy Markdown
+Codex Review Summary: ✅ Completed
+This comment shows the latest Codex review activity on this pull request.
+Review
+Status
+Commit
+Review trigger
+📝 Code Review
+✅ Completed 2026-11-08T20:58:04.462767Z
+3e9409d
+New commits
+ℹ️ About Codex in GitHub
+Your team has set up Codex to review pull requests in this repo. Reviews are triggered when you
+Open a pull request for review
+Mark a draft as ready
+Comment "@codex review" or "@codex security review".
+Codex reacts with 👀 while any review is running, comments if it has suggestions, and reacts with 👍 once all reviews finish with no findings.
+chatgpt-codex-connector
+Bot
+reviewed
+Nov 8, 2026
+View reviewed changes
+chatgpt-codex-connector
+Bot
+left a comment
+Copy link
+Copy Markdown
+There was a problem hiding this comment.
+Choose a reason for hiding this comment
+The reason will be displayed to describe this comment to others. Learn more.
+💡 Codex Review
+Here are some automated review suggestions for this pull request.
+Reviewed commit: 168f340015
+ℹ️ About Codex in GitHub
+Your team has set up Codex to review pull requests in this repo. Reviews are triggered when you
+Open a pull request for review
+Mark a draft as ready
+Comment "@codex review".
+If Codex has suggestions, it will comment; otherwise it will react with 👍.
+Codex can also answer questions or update the PR. Try commenting "@codex address that feedback".
+Comment thread
+modules/gaussian_splatting/io/gs_world_generator.cpp
+Resolved
+Uh oh!
+There was an error while loading. Please reload this page.
+tests: upload oracle counts decoded bytes, so a GSQ world keeps uploa…
+…
+3e9409d
+```
+…ded_vs_expected_unique (BV-C7)
+
+On a GSQ manifest the chunks carry a page run instead of gaussian_bytes and
+sh_bytes. The oracle therefore summed to zero, and the M1c fly-through would
+have reported the upload ratio as missing (Codex P2 on #1381). The oracle
+adds decoded_bytes (count x (144 + 12 x sh_high_order)), and the ratio uses
+it. stored_bytes counts the page run on GSQ and the sections on flat. Flat
+numbers are unchanged: there, decoded equals stored.
+
+Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
+Claude-Session: https://claude.ai/code/session_016Cyd8NybqWYXAvVBWZx2iJ
+```
+chatgpt-codex-connector
+Bot
+reviewed
+Nov 8, 2026
+View reviewed changes
+chatgpt-codex-connector
+Bot
+left a comment
+Copy link
+Copy Markdown
+There was a problem hiding this comment.
+Choose a reason for hiding this comment
+The reason will be displayed to describe this comment to others. Learn more.
+💡 Codex Review
+Here are some automated review suggestions for this pull request.
+Reviewed commit: 3e9409d047
+ℹ️ About Codex in GitHub
+Your team has set up Codex to review pull requests in this repo. Reviews are triggered when you
+Open a pull request for review
+Mark a draft as ready
+Comment "@codex review".
+If Codex has suggestions, it will comment; otherwise it will react with 👍.
+Codex can also answer questions or update the PR. Try commenting "@codex address that feedback".
+Comment thread
+tests/runtime/flythrough/probe_groundtruth.py
+Comment on lines
++145
+to
++147
+def chunk_decoded_bytes(chunk: dict, sh_high_order: int) -> int:
+"""Bytes the chunk's decoded splats take on upload, whatever the file's codec."""
+return int(chunk["count"]) * (GAUSSIAN_BYTES + int(sh_high_order) * VECTOR3_BYTES)
+chatgpt-codex-connector
+Bot
+Nov 8, 2026
+Copy link
+Copy Markdown
+There was a problem hiding this comment.
+Choose a reason for hiding this comment
+The reason will be displayed to describe this comment to others. Learn more.
+Base the upload oracle on the packed GPU record size
+For the newly supported GSQ Tier A runs, this computes 288 bytes per degree-3 splat, but that is the decoded CPU representation, not the GPU upload representation. GaussianStreamingSystem::_pack_chunk_data() packs SH into PackedGaussian (176 bytes, as asserted in renderer/gaussian_gpu_layout.h), and StreamingUploadPipeline counts the actual packed bytes uploaded. Since summarise_path() now uses this helper's result as its denominator, uploading each visible splat exactly once reports an amplification of approximately 0.61 instead of 1, understating re-upload amplification. Keep decoded CPU bytes separate and derive the upload oracle from the effective packed GPU stride.
+Useful? React with 👍 / 👎.
+This branch has not been deployed
+No deployments
+Sign up for free
+to join this conversation on GitHub.
+Already have an account?
+Sign in to comment
+Uh oh!
+There was an error while loading. Please reload this page.
+Labels
+None yet
+1 participant
+Add this suggestion to a batch that can be applied as a single commit.This suggestion is invalid because no changes were made to the code.Suggestions cannot be applied while the pull request is closed.Suggestions cannot be applied while viewing a subset of changes.Only one suggestion per line can be applied in a batch.Add this suggestion to a batch that can be applied as a single commit.Applying suggestions on deleted lines is not supported.You must change the existing code in this line in order to create a valid suggestion.Outdated suggestions cannot be applied.This suggestion has been applied or marked resolved.Suggestions cannot be applied from pending reviews.Suggestions cannot be applied on multi-line comments.Suggestions cannot be applied while the pull request is queued to merge.Suggestion cannot be applied right now. Please check back later.
+You can’t perform that action at this time.

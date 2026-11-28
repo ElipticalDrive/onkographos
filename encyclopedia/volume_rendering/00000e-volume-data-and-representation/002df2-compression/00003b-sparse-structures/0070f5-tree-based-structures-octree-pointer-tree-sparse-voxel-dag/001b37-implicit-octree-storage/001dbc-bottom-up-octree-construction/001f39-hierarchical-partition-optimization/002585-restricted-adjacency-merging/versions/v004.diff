@@ -1,0 +1,283 @@
+--- v003.md
++++ v004.md
+@@ -4,189 +4,118 @@
+ 
+ ## Overview
+-Restricted Adjacency Merging is a strategy for merging extracted isosurface components from adjacent spatial blocks in sparse volume rendering [S1]. It solves the problem of inefficiently merging blocks that do not share a true geometric boundary by restricting merges to only those blocks (brothers or nephews) that are adjacent in space [S1]. It sets itself apart from unrestricted merging by enforcing an ancestry-based type check to ensure a common boundary exists, preventing the merging of non-adjacent components [S1].
++Restricted Adjacency Merging is a topological optimization strategy for parallel isosurface extraction from sparse voxel data. It solves the load-balancing problem in hierarchical partitioning by allowing a processed block to merge with a sibling (brother) or a cousin (nephew) if they share a geometric common boundary, rather than restricting merges to immediate siblings only [S1]. This approach reduces the number of final mesh components and communication overhead compared to strict brother-only merging, while avoiding the geometric discontinuities of unrestricted merging [S1]. It differs from [Boundary Point Identification and Merge Simplification](5296-boundary-point-identification-and-merge-simplification.md) by handling the topological eligibility of the merge; the latter handles the subsequent geometric vertex alignment and mesh simplification [S1, 5296].
+ 
+ ## How it works
+-**Inputs and Outputs:**
+-*   **Input:** A set of extracted isosurface components from leaf nodes of an octree, where each component consists of triangles [S1].
+-*   **Output:** A set of merged, simplified isosurface components ready for dumping to disk [S1].
++**Inputs:** An octree structure where nodes are marked as "processed" (extracted) or "unprocessed". Each node has a defined `type` based on its position relative to its father's split.
++**Outputs:** A set of merged blocks, where merged blocks are marked as "completely processed" and their constituent leaves are removed from the active extraction queue.
+ 
+ **Data Structures:**
+-*   **Node Type:** An enum or integer representing the position of a node relative to its father's split plane: `left`, `right`, `up`, `down`, `front`, `back` [S1].
+-*   **Ancestry Set ($A_{p,n}$):** A set of nodes containing node $n$ and its recursive fathers up to root $p$ [S1].
+-
+-**Definitions:**
+-1.  **Opposite Operator:** Defines the spatial relationship between siblings [S1].
+-    $$
+-    \begin{aligned}
+-    \text{left} &= \text{right}, & \text{right} &= \text{left} \\
+-    \text{up} &= \text{down}, & \text{down} &= \text{up} \\
+-    \text{front} &= \text{back}, & \text{back} &= \text{front}
+-    \end{aligned}
+-    $$
+-2.  **Ancestry ($A_{p,n}$):** The set of nodes on the path from $n$ to $p$ [S1]. Defined recursively:
+-    $$
+-    A_{p,n} = \begin{cases} 
+-    \{n\} & \text{if } n = p \\
+-    \{n\} \cup A_{p,f_n} & \text{else}
+-    \end{cases}
+-    $$
+-    Where $f_n$ is the father of node $n$ [S1].
+-3.  **Restricted Adjacency Criterion:** A nephew node $n$ belonging to the tree of root $p_2$ ($T_{p2}$) has a common boundary with block $p_1$ if and only if [S1]:
+-    $$
+-    \forall n' \in A_{c_{p2},n}, \text{type}(n') \neq \text{type}(p1)
+-    $$
+-    Where $c_{p2}$ is the child of $p_2$ that is an ancestor of $n$ (or $n$ itself if $n$ is a child of $p_2$) [S1]. Essentially, no ancestor of the nephew (up to the sibling of the target) can have the same type as the target block [S1].
++*   **Node:** Contains geometry data, a `type` field (enum: `left`, `right`, `up`, `down`, `front`, `back`), and a `status` field (`processed`, `completely_processed`, `unprocessed`).
++*   **Type Definition:** The type is determined by the split direction of the father node. If the father splits along the x-axis, children are `left` and `right`. If along y, `up` and `down`. If along z, `front` and `back` [S1].
++*   **Opposite Operator:** Defined as:
++    *   $left = right$
++    *   $right = left$
++    *   $up = down$
++    *   $down = up$
++    *   $front = back$
++    *   $back = front$ [S1]
+ 
+ **Algorithm Steps:**
+-1.  Define node types based on the split direction of the father: left/right (x-cut), up/down (y-cut), front/back (z-cut) [S1].
+-2.  Identify candidate merge partners for each unprocessed leaf node: its brother node and any nephew nodes in the subtrees of the brother's siblings [S1].
+-3.  Verify adjacency: brothers always share a boundary; for nephews, compute the ancestry set up to the relevant child and verify that no ancestor shares the same type as the target block [S1].
+-4.  Merge geometry: identify common points on the shared boundary using the Marching Cubes property that a cell edge generates at most one point, making points on common edges identical [S1].
+-5.  Combine triangle lists and simplify the pasted area using error criterion $E_0$ [S1].
+-6.  Apply the time lag guard: prevent contraction of an edge $ab$ if the sphere centered on the midpoint of $ab$ with radius $rad(c)$ is not totally included in the merged blocks [S1].
+-7.  Mark processed: when two brothers are merged, their father node is considered completely processed [S1].
+-8.  Dump finished components to disk [S1].
++1.  **Iterative Traversal:** Traverse the tree to identify processed leaf nodes.
++2.  **Candidate Selection:** For a processed block $p1$, identify potential merge partners. These can be:
++    *   Its brother $p2$ (if $p2$ is also processed).
++    *   A nephew node $n$ belonging to the tree of the brother ($T_{p2}$), provided $n$ is processed and not yet completely processed [S1].
++3.  **Restricted Adjacency Check:** To determine if a nephew $n$ (from the brother's subtree $T_{c_{p2}}$) shares a common boundary with $p1$, compute the ancestry set $A_{c_{p2}, n}$ and verify the type constraint [S1].
++    *   **Ancestry Set Definition:** The ancestry of node $n$ up to root $p$ is defined recursively:
++        $$ A_{p,n} = \begin{cases} n & \text{if } n = p \\ n \cup A_{p,f_n} & \text{else} \end{cases} $$
++        where $f_n$ is the father of $n$ [S1].
++    *   **Boundary Condition:** A nephew $n$ belonging to $T_{c_{p2}}$ has a common boundary with $p1$ if and only if:
++        $$ \forall n' \in A_{c_{p2},n}, \text{type}(n') \neq \text{type}(p1) $$
++        This ensures that no ancestor of the nephew shares the same type (and thus the same split orientation/position relative to the split plane) as the target block $p1$, which would imply they do not share a direct geometric boundary [S1].
++4.  **Merge Execution:** If the condition is met, merge $p1$ and $n$ (or $p1$ and its brother). The resulting merged node is marked as `completely_processed`.
++5.  **Completion:** When two brothers are merged, their father node is considered completely processed [S1].
+ 
+ **Pseudocode:**
+ ```python
+-class Component:
+-    def __init__(self, triangles, vertices):
+-        self.triangles = triangles
+-        self.vertices = vertices
++def check_restricted_adjacency(target_node, candidate_node, root_node):
++    """
++    Checks if candidate_node shares a common boundary with target_node
++    using the restricted adjacency criterion.
++    """
++    # Determine the subtree root of the candidate relative to the target's sibling
++    # In practice, this requires traversing up to find the common uncle/aunt
++    # For the formula provided in [S1], we assume we are checking a nephew n
++    # in the tree of the brother of target_node.
++    
++    # Let p1 be target_node, p2 be the brother of p1.
++    # Let n be the candidate nephew in T_p2.
++    # We need to check ancestry of n up to p2 (c_p2 in source notation refers to the brother node).
++    
++    current = candidate_node
++    while current is not None and current != root_node:
++        # Check if current node's type matches target_node's type
++        if current.type == target_node.type:
++            return False
++        current = current.father
++        
++    # If we reached the root or the brother node without finding a matching type,
++    # the condition is satisfied. Note: The source formula specifies ancestry up to c_p2.
++    # If the loop terminates at the brother node, we must ensure the brother itself
++    # doesn't invalidate the boundary (though typically the brother is the split point).
++    # Based on [S1], the check is strictly on the ancestry nodes within the nephew's branch.
++    return True
+ 
+-def get_ancestry(node, root):
+-    """Returns list of nodes from node up to root (inclusive)."""
+-    ancestry = []
+-    current = node
+-    while current is not None:
+-        ancestry.append(current)
+-        if current == root:
+-            break
+-        current = current.father
+-    return ancestry
++def merge_blocks(block_a, block_b):
++    """
++    Merges two blocks and marks the result as completely processed.
++    """
++    merged_node = create_merged_node(block_a, block_b)
++    merged_node.status = "completely_processed"
++    return merged_node
+ 
+-def has_common_boundary(nephew, target):
+-    """Checks if nephew (in subtree of target's sibling) shares a boundary with target."""
+-    current = nephew
+-    while current is not None:
+-        if current.father is None:
+-            return False
+-        # Check if target is a sibling of current
+-        if current.father.left == target or current.father.right == target or \
+-           current.father.up == target or current.father.down == target or \
+-           current.father.front == target or current.father.back == target:
+-            # Found common father. Determine the relevant child (sibling of target)
+-            if current.father.left == target: relevant = current.father.right
+-            elif current.father.right == target: relevant = current.father.left
+-            elif current.father.up == target: relevant = current.father.down
+-            elif current.father.down == target: relevant = current.father.up
+-            elif current.father.front == target: relevant = current.father.back
+-            elif current.father.back == target: relevant = current.father.front
+-            else: return False
+-            # Verify ancestry condition: no ancestor shares type with target
+-            for n_prime in get_ancestry(nephew, relevant):
+-                if n_prime.type == target.type:
+-                    return False
+-            return True
+-        current = current.father
+-    return False
+-
+-def merge_and_simplify(comp1, comp2):
+-    """Merges components, identifies common boundary points, and simplifies."""
+-    triangles = comp1.triangles + comp2.triangles
+-    vertices = []
+-    for tri in triangles:
+-        for v in tri.vertices:
+-            if v not in vertices:
+-                vertices.append(v)
+-    # Simplify pasted area using error criterion E0 [S1]
+-    # Time lag guard: prevent contraction of edge ab if sphere(midpoint(ab), rad(c)) not in merged blocks [S1]
+-    simplified_triangles = []
+-    for tri in triangles:
+-        # Standard edge collapse logic would go here [G]
+-        simplified_triangles.append(tri)
+-    return Component(simplified_triangles, vertices)
+-
+-def is_father_processed(father_node):
+-    """Checks if both children of a father node have been processed."""
+-    if father_node is None: return False
+-    # Octree splits are binary along one axis
+-    children = [father_node.left, father_node.right, father_node.up, father_node.down, father_node.front, father_node.back]
+-    children = [c for c in children if c is not None]
+-    return all(c in processed_set for c in children)
+-
+-def restricted_adjacency_merge(leaf_nodes):
+-    global processed_set
+-    processed_set = set()
+-    for node in leaf_nodes:
+-        if node in processed_set:
++def restricted_adjacency_merge(isosurface_extractor):
++    """
++    Main loop for restricted adjacency merging.
++    """
++    processed_blocks = isosurface_extractor.get_processed_blocks()
++    
++    for p1 in processed_blocks:
++        if p1.status == "completely_processed":
+             continue
+-        # Check brother merge
+-        brother = None
+-        if node.father:
+-            if node.father.left == node: brother = node.father.right
+-            elif node.father.right == node: brother = node.father.left
+-            elif node.father.up == node: brother = node.father.down
+-            elif node.father.down == node: brother = node.father.up
+-            elif node.father.front == node: brother = node.father.back
+-            elif node.father.back == node: brother = node.father.front
+-        if brother and brother not in processed_set:
+-            merged = merge_and_simplify(node.component, brother.component)
+-            node.component = merged
+-            processed_set.add(brother)
+-            if is_father_processed(node.father):
+-                processed_set.add(node.father)
++            
++        # Check for brother merge
++        brother = p1.father.children[opposite(p1.type)]
++        if brother and brother.status == "processed" and brother.status != "completely_processed":
++            merge_blocks(p1, brother)
+             continue
+-        # Check nephew merges
+-        if node.father:
+-            for sibling in [node.father.left, node.father.right, node.father.up, node.father.down, node.father.front, node.father.back]:
+-                if sibling and sibling != node and sibling not in processed_set:
+-                    # Traverse subtree to find leaves (nephews)
+-                    stack = [sibling]
+-                    while stack:
+-                        curr = stack.pop()
+-                        if curr.is_leaf:
+-                            if curr not in processed_set and has_common_boundary(curr, node):
+-                                merged = merge_and_simplify(node.component, curr.component)
+-                                node.component = merged
+-                                processed_set.add(curr)
+-                                break
+-                        else:
+-                            for child in [curr.left, curr.right, curr.up, curr.down, curr.front, curr.back]:
+-                                if child: stack.append(child)
+-                    if node.component != comp1: break
+-    # Dump finished components
+-    for node in leaf_nodes:
+-        if node not in processed_set:
+-            dump_to_disk(node.component)
+-
+-def dump_to_disk(component):
+-    """Writes component data to storage."""
+-    pass
++            
++        # Check for nephew merges
++        # Iterate through the brother's subtree to find processed nephews
++        for nephew in get_processed_leaves_in_tree(brother):
++            if nephew.status == "completely_processed":
++                continue
++                
++            if check_restricted_adjacency(p1, nephew, p1.father):
++                merge_blocks(p1, nephew)
++                break # One merge per block per pass, or merge all valid
+ ```
+ 
+-**Parameters:**
+-*   $E_0$: Error criterion for simplification. Typical value: Not given in the sources.
+-*   $rad(c)$: Radius for the time lag guard. Typical value: Not given in the sources.
+-
+ **Edge Cases and Pitfalls:**
+-*   **Numerical Inaccuracy:** Common points on shared boundaries cannot be identified by simple coordinate comparison [S1].
+-*   **Ancestry Check Failure:** If the ancestry check is not performed correctly, non-adjacent blocks may be merged, leading to topological errors [S1].
+-*   **Processing Order:** The algorithm requires a specific traversal order (bottom-up) to ensure that when a merge happens, the components are ready [S1].
++*   **Ancestry Check Failure:** If any ancestor of the nephew shares the same type as the target block, they do not share a common boundary, and merging is forbidden [S1].
++*   **Processing Order:** The algorithm relies on nodes being marked `completely_processed` to prevent re-merging. If a node is merged, it must be excluded from further merge candidates [S1].
++*   **Numerical Inaccuracy:** While the topological merge is defined by tree structure, the actual geometric merging requires handling vertex coordinates. Simple coordinate comparison is insufficient due to numerical inaccuracies in isosurface extraction [S1].
+ 
+ ## Subtopics
+ 
+-### Boundary Point Identification and Merge Simplification
+-This variant details the geometric handling of merged surfaces [S1]. It identifies common points extracted in each block lying on their shared boundary [S1]. It merges points belonging to common cell edges, leveraging the property that a cell edge generates only one or zero points, making points on common edges identical [S1]. It simplifies the pasted area using the same error criterion $E_0$ as for surface extraction [S1]. It prevents edge contraction $ab$ during merge simplification as long as the sphere centered on the middle of $ab$ with radius $rad(c)$ is not totally included in the merged blocks [S1]. Finally, it dumps finished components to disk [S1].
++### [Boundary Point Identification and Merge Simplification](5296-boundary-point-identification-and-merge-simplification.md)
++Handles the geometric vertex alignment and mesh simplification constraints after the topological merge eligibility has been determined by Restricted Adjacency Merging.
+ 
+ ## Operating characteristics
+-*   **Time Complexity:** Not given in the sources.
+-*   **Memory Complexity:** Not given in the sources.
+-*   **Strengths:** Reduces the number of triangles significantly by merging adjacent components [S1]. Avoids waiting for slower blocks by allowing selective merging with nephews [S1]. Improves boundary triangulation quality by applying the time lag method near block boundaries during simplification [S1].
+-*   **Limitations:** Requires careful implementation of the ancestry check [S1]. Merging is restricted, so not all adjacent components may be merged if they do not meet the strict adjacency criteria [S1].
+-*   **When to use:** When extracting isosurfaces from large volumes partitioned into blocks, especially when parallel extraction leads to fragmented components that need to be recombined [S1].
++*   **Complexity:** The ancestry check requires traversing up the tree from the nephew to the common ancestor. In the worst case, this is $O(h)$ where $h$ is the tree height. The number of potential merge candidates is limited by the local neighborhood in the octree.
++*   **Performance:** Allows merging of non-sibling components, reducing the total number of mesh parts and potentially improving cache coherence and reducing post-processing overhead [S1].
++*   **Limitations:** Requires careful management of node states (`processed` vs `completely_processed`) to avoid invalid merges. The geometric merging step (not covered here) must handle the boundary points identified by this topological step [S1, 5296].
+ 
+ ## Background
+-Restricted Adjacency Merging was introduced in the context of parallel extraction and simplification of large isosurfaces using an extended tandem algorithm [S1]. It addresses the issue of non-uniform distribution of iso-surface components in sub-blocks, which can lead to load imbalance and inefficient merging if all brothers are forced to merge [S1].
++Restricted Adjacency Merging was introduced in the context of parallel extraction and simplification of large isosurfaces using an extended tandem algorithm. It addresses the issue where iso-surface components are not uniformly distributed, causing load imbalance if only brothers are merged [S1]. The method was proposed to allow merging with nephews under strict topological constraints to maintain geometric continuity [S1].
+ 
+ ## Sources

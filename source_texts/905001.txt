@@ -1,0 +1,272 @@
+Contribute to taojin-6/volumetric_kit_recon development by creating an account on GitHub.
+
+feat(viewer): draw recon's buffers, deleting the host round trip by taojin-6 · Pull Request #55 · taojin-6/volumetric_kit_recon · GitHub
+Skip to content
+You signed in with another tab or window. Reload to refresh your session.
+You signed out in another tab or window. Reload to refresh your session.
+You switched accounts on another tab or window. Reload to refresh your session.
+Dismiss alert
+Conversation
+taojin-6
+commented
+Aug 9, 2026
+Copy link
+Copy Markdown
+Owner
+Interop seam B, end to end, in fuse_viewer — step 1 of the mesh perf plan.
+The viewer downloaded the mesh to the host and uploaded it straight back on
+every remesh (~63 MB each way on a room scan) for geometry that never
+conceptually left the device. Both calls are gone. recon's marching-cubes
+kernel writes the vertex arena, index run and VkDrawIndexedIndirectCommand;
+gfx binds those handles as a pipelines::LiveMesh and issues
+vkCmdDrawIndexedIndirect, so the index count is read GPU-side and never
+crosses the CPU either.
+fuse_viewer and not fuse_render, deliberately. fuse_render builds two
+devices by design; a VkBuffer is valid only on its creating device, so
+zero-copy is structurally impossible there without first adopting the
+shared-device bootstrap — and migrating it would delete the only coverage the
+two-device path has.
+What is checked rather than assumed
+Usage + sharing mode. Vulkan cannot be asked what a VkBuffer was created
+with, so the consumer verifies DeviceMesh::{vertex,index,indirect}_usage and
+sharing_mode before binding. This machine runs two queue families, where
+reading an EXCLUSIVE buffer from a non-owning family is undefined with
+nothing to report it. A failure latches — those flags come from two
+constants in this file, so a mesh unusable once is unusable every time.
+Lifetime. slot_count = frames_in_flight + 1; the renderer releases a
+generation once every frame that drew it has retired. begin_frame's per-slot
+fence wait is the only completion gfx exposes, and no semaphore may cross this
+seam.
+Visibility. Already there — recon's dispatch barrier reaches
+VERTEX_INPUT / DRAW_INDIRECT, so no barrier is recorded here.
+The ordering fault, which is the part worth reviewing
+The release mark must be published in the same critical section as the take,
+and computed first. Taking is what frees the fuse thread, and the fuse thread
+reads the mark in the same breath as it tests for an uncollected mesh — so a
+take published ahead of its own mark lets fusion run on a mark one iteration
+stale, ask for a slot beyond the ring's depth, and be refused.
+Measured, not reasoned: 25 refused extracts and 40 of 200 meshes published
+on a preloaded run. It is invisible whenever fusion is slower than the render
+loop, which is every streaming run — it took --preload at -O3 to surface.
+Two further consumer obligations with no analogue in the host path: fusion must
+not publish over an uncollected mesh (it skips the extract instead, whose result
+would have been discarded anyway), and an empty extract must still be
+published, since it claims and stamps a slot that nothing else can release.
+Also fixed
+A failed extract now reports, like every other stage in that loop. Silence
+there reads as a frozen mesh beside a healthy frame counter.
+The final extract passes its ExtractTimings, so the panel's arena row and
+mesh row stop describing different extracts — at 400 frames they genuinely
+differ (330394 vs 330389 triangles), frozen that way for the whole replay.
+Verification
+Replica room0, -O3, validation layer on:
+400/400 frames fused, 991167 vertices / 330389 triangles — identical to
+the figure CLAUDE.md records for the host path.
+Coherent, projectively textured room at ~106 fps; zero validation errors,
+zero refused extracts, one dispatch per extract.
+Rendering confirmed visually (the mesh↔atlas pairing survives: uv0 never
+indexes a stale atlas).
+Cost booked: three arenas instead of one, ~210–220 MiB resident, against a
+GpuMesh and two host mesh copies deleted plus the per-remesh readback and
+upload.
+Behaviour change worth knowing: with --preload the whole fusion is under a
+second of wall clock, so the viewer now collects a handful of intermediate
+meshes rather than 400 — the extracts that no longer run were being discarded.
+Streaming publishes on nearly every frame.
+Not in scope (later steps of the plan): vertex sharing, fuse_render,
+device-local arenas.
+🤖 Generated with Claude Code
+feat(viewer): draw recon's buffers, deleting the host round trip
+…
+cf775c7
+```
+Interop seam B, end to end, in fuse_viewer. The viewer downloaded the
+mesh to the host and uploaded it straight back on every remesh -- ~63 MB
+each way on a room scan, for geometry that never conceptually left the
+device. Both calls are gone.
+
+What replaces them is naming, not copying. Fusion publishes a DeviceMesh:
+handles and counts. The renderer binds those buffers as a gfx LiveMesh
+and issues vkCmdDrawIndexedIndirect, which reads the index count GPU-side
+out of the command recon's marching-cubes kernel wrote -- so the count
+does not cross the CPU either.
+
+fuse_viewer and not fuse_render, deliberately: fuse_render builds two
+devices by design, a VkBuffer is valid only on its creating device, and
+migrating it would delete the only coverage the two-device path has.
+
+Three things had to be true at once, and each is checked rather than
+assumed:
+
+- The buffers carry VERTEX_BUFFER / INDEX_BUFFER / INDIRECT_BUFFER usage
+  and the renderer verifies it, along with the sharing mode. Vulkan
+  cannot be asked what a VkBuffer was created with, and this machine runs
+  two queue families, where reading an EXCLUSIVE buffer from a
+  non-owning family is undefined with nothing to report it. A failure
+  latches: those flags come from two constants here, so a mesh unusable
+  once is unusable every time, and collecting more would walk the ring to
+  exhaustion one undrawable generation at a time.
+- The extractor rings its slots (frames in flight + 1) and the renderer
+  releases a generation once every frame that drew it has retired.
+  begin_frame's per-slot fence wait is the only completion gfx exposes,
+  and no semaphore may cross this seam at all.
+- Visibility was already there: recon's dispatch barrier reaches
+  VERTEX_INPUT and DRAW_INDIRECT, so no barrier is recorded here.
+
+The ordering fault this turned up is the part worth keeping. The release
+mark must be published in the same critical section as the take, and
+computed first. Taking is what frees the fuse thread, and the fuse thread
+reads the mark in the same breath as it tests for an uncollected mesh, so
+a take published ahead of its own mark lets fusion run on a mark one
+iteration stale and ask for a slot beyond the ring's depth. Measured, not
+reasoned: 25 refused extracts and 40 of 200 meshes on a preloaded run. It
+is invisible whenever fusion is slower than the render loop, which is
+every streaming run -- it took --preload at -O3 to surface at all.
+
+Fusion also stops publishing over a mesh nobody collected. It cannot free
+that slot itself (release_through is the consumer's high-water mark), so
+it skips the extract, whose result would have been discarded anyway. An
+empty extract must still be published for the same reason: it claims and
+stamps a slot, and a mesh that reaches no consumer is a slot nothing can
+release.
+
+Two smaller fixes found along the way. A failed extract now reports, like
+every other stage in that loop -- silence there reads as a frozen mesh
+beside a healthy frame counter. And the final extract passes its
+ExtractTimings, so the panel's arena row and mesh row stop describing
+different extracts: at 400 frames they genuinely differ (330394 vs
+330389 triangles), and the stale pair was frozen that way for the whole
+replay.
+
+Verified on Replica room0 at -O3 with the validation layer: 400/400
+frames fused, 991167 vertices / 330389 triangles -- identical to the
+figure recorded for the host path -- a coherent projectively textured
+room at ~106 fps, zero validation errors, zero refused extracts, one
+dispatch per extract. Cost booked: three arenas instead of one, ~210-220
+MiB resident, against a GpuMesh and two host mesh copies deleted.
+
+Co-Authored-By: Claude Opus 5 (1M context) <noreply@anthropic.com>
+```
+taojin-6
+self-assigned this
+Aug 9, 2026
+taojin-6
+mentioned this pull request
+Aug 9, 2026
+feat(mesh): in-block vertex sharing — 3.4x fewer vertices, 3.5% faster
+#56
+Merged
+2 tasks
+fix(viewer): unwedge the seam-B ring, and stop the instrument reading…
+…
+476dbb8
+```
+… zero
+
+Review of the seam-B landing found fifteen defects. Three could stop the
+viewer permanently, and all three are the same shape the seam-B decisions
+kept turning up: state that was correct for the path taken on the machine
+it ran on, and silently wrong on a path it never took.
+
+(1) `bindable` folded `taken.valid()` in with the usage/sharing checks and
+latched `mesh_unusable` forever. recon publishes an empty extract for slot
+hygiene and names its buffers as it found them, so a slot that was never
+sized carries NULL handles beside `empty()` being true -- its documented
+"draw nothing" case. Reaching it (`--max-frames 0`, a frame-0 load failure,
+a first depth frame with nothing in range) therefore read recon's own legal
+path as a configuration fault and stopped the viewer drawing AND extracting
+for good. Confirmed by running both: pre-fix prints "not bindable ...
+drawing stops here" and sits at `mesh v0`; fixed commits `mesh v1` silently
+and keeps running.
+
+(2) A generation taken but never committed -- an atlas upload that failed
+-- was dropped. The release mark is monotone, so its slot could only be
+freed by a *newer committed* generation, which is exactly what had failed:
+two such failures fill the three-slot ring and every later extract is
+refused, permanently. The pair is now parked and retried, and the take is
+gated on nothing being parked, which bounds the uncommitted set at one.
+
+(3) The final full-volume extract was skipped, silently and with no `else`,
+whenever the last publish was uncollected -- which a minimized window
+produces, since `begin_frame` returns no frame and the render loop never
+reaches its take. It now runs regardless (it supersedes that mesh, and
+recon refuses cleanly if the ring is genuinely full) and reports. `quit` is
+re-checked after the up-to-one-second wait, too; the guard and the extract
+used to be adjacent statements.
+
+Two more that cost accuracy rather than liveness. The remesh gate fires on
+a minority of fused frames, so seeding `extract` and its breakdown to zero
+every frame made them read 0.00 on most samples -- on the instrument this
+repo credits with catching the arena-alloc and neighbour-table regressions,
+against its own rule that a permanently-zero row is worse than an absent
+one. They are held now, like the sizes beside them. And the panel snapshot
+moved into the take's critical section: `begin_frame`'s fence wait can span
+a frame and the fuse thread publishes inside it, so one generation's vertex
+counts printed above another's arena and dispatch count.
+
+`committed_version` is deleted -- it duplicated `live_view.generation` and
+its comment was truncated mid-sentence -- along with two provable no-ops it
+propped up.
+
+Documentation, where the code was right and the record was not:
+
+* `DeviceMesh::is_current()` claimed to be "the check every consumer needs
+  before it uses these handles". That is the single-slot rule; a ring
+  consumer expects to hold older generations and its condition is instead
+  "not yet released", which is why `fuse_viewer` never calls it. Also
+  flagged as unsynchronized -- it dereferences the producer's live counter.
+* `MarchingCubesConfig`'s TODO booked the host-visible placement of the
+  20-byte command and said nothing about the arena. That is the one that
+  scales: binding it as geometry makes vertex-input pull ~64 MiB out of
+  system RAM per presented frame, free on unified memory and an inversion
+  of this seam's win on a discrete GPU.
+* `recon_gfx_bridge.hpp` still documented seam B as blocked by lifetime,
+  sharing and barrier visibility -- all SETTLED, and the file's own viewer
+  now draws through it.
+* The "only TU where both types are visible" comment is false;
+  `fuse_render.cpp` includes the same header and still calls the converter.
+* The barrier-scope justification credited a guarantee that does not exist
+  on a compute-only recon family. The handoff is safe via the fence plus
+  submit chain; `VERTEX_INPUT` is conditional and must not be restated as
+  flat fact (header, draw site, and CLAUDE.md).
+* CLAUDE.md's "40 of 200 meshes published" contradicted the in-code "two
+  thirds", and equalled the rate recorded as *healthy* -- so the record
+  could not discriminate the fault. The refusal count is the discriminator
+  and now says so. The arena row's description is corrected for
+  `slot_count = 3` (per-slot fraction, ring-total MiB), and the amendment
+  quoting the 2026-07-07 passage no longer rewrites the text it quotes.
+
+Verified on 400-frame room0 (Release, MoltenVK, validation on): 400/400
+fused, 991 167 vertices / 330 389 triangles -- identical to the recorded
+figure -- 87 remeshes, one dispatch per extract, 207 MiB across the ring,
+~100-120 fps, no refusals and no validation errors. All 26 tests pass;
+`fuse_viewer` and `fuse_render` build clean at -Werror.
+
+Co-Authored-By: Claude Opus 5 (1M context) <noreply@anthropic.com>
+```
+Hide details
+View details
+taojin-6
+merged commit b7ebcc2
+into
+main
+Aug 9, 2026
+12 checks passed
+Uh oh!
+There was an error while loading. Please reload this page.
+taojin-6
+deleted the
+feat/viewer-zero-copy
+branch
+August 9, 2026 07:28
+Sign up for free
+to join this conversation on GitHub.
+Already have an account?
+Sign in to comment
+Uh oh!
+There was an error while loading. Please reload this page.
+Labels
+None yet
+1 participant
+Add this suggestion to a batch that can be applied as a single commit.This suggestion is invalid because no changes were made to the code.Suggestions cannot be applied while the pull request is closed.Suggestions cannot be applied while viewing a subset of changes.Only one suggestion per line can be applied in a batch.Add this suggestion to a batch that can be applied as a single commit.Applying suggestions on deleted lines is not supported.You must change the existing code in this line in order to create a valid suggestion.Outdated suggestions cannot be applied.This suggestion has been applied or marked resolved.Suggestions cannot be applied from pending reviews.Suggestions cannot be applied on multi-line comments.Suggestions cannot be applied while the pull request is queued to merge.Suggestion cannot be applied right now. Please check back later.
+You can’t perform that action at this time.

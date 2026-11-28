@@ -1,0 +1,140 @@
+# Physical Cloud Model (Cumulus Convection)
+Also called: Cumulus convection simulation, Numerical cloud model
+
+## Overview
+The Physical Cloud Model (Cumulus Convection) simulates the dynamic evolution of cumulus clouds by solving simplified atmospheric physics equations on a 3D grid [S1, unofficial]. It solves the problem of generating realistic, time-evolving cloud shapes and densities by modeling the thermodynamic state of air parcels, specifically focusing on buoyancy-driven convection, moisture advection, and phase transitions [S1, unofficial]. Unlike procedural noise methods [Procedural Gas Modeling via Turbulence](3551-procedural-gas-modeling-via-turbulence.md) which generate static or noise-driven patterns, this method explicitly calculates the physical forces (buoyancy, friction) and mass conservation required for realistic cloud animation [S1, unofficial]. It differs from the Hybrid Physics-Driven Procedural Model [Hybrid Physics-Driven Procedural Model](19848-hybrid-physics-driven-procedural-model.md) by operating on a full grid solver for the atmospheric state rather than decoupling macro-parcels from micro-rendering, and from [Cloud Density Sampling](4806-cloud-density-sampling.md) by providing the generative physics engine rather than just the sampling technique.
+
+## How it works
+**Inputs and Outputs:**
+*   **Inputs:** Initial atmospheric state (velocity, temperature, humidity), boundary conditions, physical constants ($L_v, c_p, t_s$), and a constant heat source $Q$ at the base.
+*   **Outputs:** Liquid water mixing ratio ($q_l$) at each 3D grid point, interpreted as optical density for rendering [S1, unofficial].
+
+**Data Structures:**
+*   A 3D grid stores atmospheric variables: velocity components $(u, v, w)$, potential temperature $\theta$, total water mixing ratio $q$, and liquid water mixing ratio $q_l$ [S1, unofficial].
+*   Variables are stored in grid cells, implemented through grid-based operations [S2].
+
+**Formulas and Definitions:**
+*   **Saturation Mixing Ratio:** $q_s = A \exp(-\alpha z)$, where $A$ and $\alpha$ are exponential scaling constants determined by boundary conditions [S1, unofficial].
+*   **Liquid Water Mixing Ratio:** $q_l = \max(q - q_s, 0)$ [S1, unofficial].
+*   **Buoyancy:** Proportional to the potential temperature $\theta$ of the air parcel [S1, unofficial].
+*   **Friction Force:** $F = \frac{1}{t_s} \mathbf{v}$, yielding an exponential decay of wind velocities with time, where $t_s$ is the friction timescale [S1, unofficial].
+*   **Heat Source:** $Q$ represents external heating (e.g., sunlight) [S1, unofficial].
+
+**Parameters:**
+*   $L_v$: Latent heat of vaporization of water [S1, unofficial].
+*   $c_p$: Specific heat of air at constant pressure [S1, unofficial].
+*   $t_s$: Friction timescale [S1, unofficial].
+*   Boundary Conditions: $q_0 = 0.02$ at the bottom level, $q_0 = 0.002$ at the top level [S1, unofficial].
+
+**Steps:**
+1.  **Initialize:** Set up a convectively unstable atmosphere with high relative humidity. Define boundary conditions for $q$ [S1, unofficial].
+2.  **Apply Heat Source:** Apply a constant heat source $Q$ at the base of the model, representing sunlight heating the earth [S1, unofficial].
+3.  **Solve Momentum:** Calculate acceleration of air parcels based on momentum advection, frictional effects, and buoyancy. The buoyancy term is proportional to $\theta$ [S1, unofficial].
+    *   Note: Coriolis effects are ignored for computational efficiency [S1, unofficial].
+4.  **Advection:** Advect velocity, temperature, and water mixing ratios using the velocity field [S1, unofficial].
+5.  **Phase Transition (Condensation/Evaporation):**
+    *   Calculate saturation mixing ratio $q_s$ based on altitude [S1, unofficial].
+    *   Determine liquid water $q_l = \max(q - q_s, 0)$ [S1, unofficial].
+    *   Evaporation occurs until air is saturated or all liquid water is evaporated [S1, unofficial].
+    *   Condensation takes place whenever air is supersaturated [S1, unofficial].
+    *   Release latent heat $L_v$ during condensation to affect potential temperature $\theta$ [S1, unofficial].
+6.  **Output:** The resulting $q_l$ field represents the optical density of the cloud [S1, unofficial].
+
+**Pseudocode:**
+> **Unverified code.** The code below did not pass a test run against a reference implementation, or no test fits it, so it may contain errors.
+
+```python
+def simulate_cumulus_cloud(grid, dt, constants):
+    """
+    Simulates cumulus cloud physics on a 3D grid.
+    grid: object with attributes u, v, w, theta, q, q_l (all 3D arrays)
+    constants: dict with L_v, c_p, t_s, A, alpha
+    """
+    # 1. Apply Heat Source at base
+    # Q is applied to theta equation. Simplified as direct addition to theta at bottom layer
+    grid.theta[:, :, 0] += constants['Q'] * dt
+    
+    # 2. Calculate Buoyancy and Friction
+    # Buoyancy proportional to theta. Friction F = v / t_s
+    buoyancy = constants['g'] * (grid.theta - grid.theta_mean) # g is gravity, assumed constant
+    friction_u = grid.u / constants['t_s']
+    friction_v = grid.v / constants['t_s']
+    friction_w = grid.w / constants['t_s']
+    
+    # 3. Update Velocity (Momentum Equation)
+    # du/dt = -v . grad(u) - F_u + ... (buoyancy affects w primarily in standard models, 
+    # but source says acceleration determined from momentum, friction, buoyancy)
+    # Simplified Euler integration for velocity
+    grid.u -= dt * (grid.v * gradient(grid.u, 'x') + friction_u)
+    grid.v -= dt * (grid.v * gradient(grid.v, 'y') + friction_v)
+    grid.w -= dt * (grid.v * gradient(grid.w, 'z') + friction_w - buoyancy)
+    
+    # 4. Advect Scalars (Theta and q)
+    # dq/dt = -v . grad(q)
+    grid.q -= dt * (grid.v * gradient(grid.q, 'x') + grid.v * gradient(grid.q, 'y') + grid.w * gradient(grid.q, 'z'))
+    grid.theta -= dt * (grid.v * gradient(grid.theta, 'x') + grid.v * gradient(grid.theta, 'y') + grid.w * gradient(grid.theta, 'z'))
+    
+    # 5. Phase Transition
+    # Calculate saturation mixing ratio q_s = A * exp(-alpha * z)
+    z_coords = grid.z_coordinates # Assumed available or computed from grid height
+    q_s = constants['A'] * exp(-constants['alpha'] * z_coords)
+    
+    # Liquid water mixing ratio
+    q_l = max(grid.q - q_s, 0)
+    
+    # Update total water q based on condensation/evaporation
+    # If q > q_s, condensation occurs, releasing latent heat
+    condensation_rate = max(grid.q - q_s, 0)
+    if condensation_rate > 0:
+        # q decreases by condensation amount
+        grid.q -= condensation_rate
+        # Theta increases by latent heat release
+        # d_theta = (L_v / c_p) * condensation_rate
+        grid.theta += (constants['L_v'] / constants['c_p']) * condensation_rate
+        
+    # Evaporation: if q < q_s and q_l > 0, evaporate liquid
+    evaporation_rate = max(q_s - grid.q, 0)
+    if evaporation_rate > 0 and q_l > 0:
+        # q increases by evaporation amount
+        grid.q += evaporation_rate
+        # Theta decreases by latent heat absorption
+        grid.theta -= (constants['L_v'] / constants['c_p']) * evaporation_rate
+        q_l = max(grid.q - q_s, 0) # Recalculate q_l
+        
+    # 6. Boundary Conditions for q
+    grid.q[:, :, 0] = 0.02 # Bottom level
+    grid.q[:, :, -1] = 0.002 # Top level
+    
+    return grid.q_l
+```
+
+## Subtopics
+
+### [Cloud Physics: Temperature and Buoyancy](19845-cloud-physics-temperature-and-buoyancy.md)
+This method calculates the vertical acceleration of an air parcel due to density differences with its surrounding environment, which drives cumulus convection. It solves the problem of determining whether a rising parcel of air will continue to ascend or sink back down by comparing its thermodynamic state to the ambient atmosphere. It sets itself apart from sibling methods by focusing specifically on the thermodynamic variables (temperature, pressure, and humidity) required to compute the buoyant force, rather than the fluid dynamics advection or the saturation phase transitions. [Cloud Physics: Temperature and Buoyancy](19845-cloud-physics-temperature-and-buoyancy.md)
+
+### [Cloud Physics: Humidity and Saturation](19846-cloud-physics-humidity-and-saturation.md)
+This method defines the thermodynamic state of water vapor within an air parcel to determine saturation, condensation, and evaporation. It solves the problem of identifying when water vapor transitions into liquid water, which is a prerequisite for cloud formation and precipitation in physical cloud models. It differs from [Cloud Physics: Temperature and Buoyancy](19845-cloud-physics-temperature-and-buoyancy.md) by focusing on mass concentration ratios rather than thermal energy and vertical forces, and from [Hybrid Physics-Driven Procedural Model](19848-hybrid-physics-driven-procedural-model.md) by providing the fundamental physical constraints rather than the procedural noise generation. [Cloud Physics: Humidity and Saturation](19846-cloud-physics-humidity-and-saturation.md)
+
+### [Hybrid Physics-Driven Procedural Model](19848-hybrid-physics-driven-procedural-model.md)
+The Hybrid Physics-Driven Procedural Model is a real-time method for simulating and rendering cumulus clouds on a landscape scale by combining macro-level Lagrangian physics with micro-level procedural rendering. It solves the problem of generating physically plausible, animated cloud shapes and movement efficiently by representing the atmosphere implicitly and computing physics on a few large "macro parcels" rather than individual fluid elements. Unlike pure procedural noise methods, it explicitly models buoyancy, condensation, and parcel interactions; unlike full fluid dynamics, it remains computationally inexpensive enough for real-time frame rates by decoupling the physics solver from the high-resolution renderer. [Hybrid Physics-Driven Procedural Model](19848-hybrid-physics-driven-procedural-model.md)
+
+### Coupled Map Lattice Cloud Simulation
+A method using Coupled Map Lattice (CML), an extension of cellular automata, to model cloud types based on atmospheric fluid dynamics [S2]. It uses a 3D grid and traditional Navier–Stokes equations for simulation, with all variables stored in grid cells and implemented through grid-based operations [S2]. For generating certain types of clouds, Bénard convection is additionally employed [S2]. The technique can be improved by direct inclusion of heat equations (heat advection) and phase transition in the grid solver, and accounts for numerical dissipation by adding vorticity confinement, generated as a function of the velocity field [S2]. The user specifies the type of cloud desired, initial conditions, boundary conditions, grid resolution, and other variables [S2].
+
+## Operating characteristics
+*   **Time Complexity:** Depends on grid resolution and number of time steps. Grid-based operations are generally $O(N)$ where $N$ is the number of grid cells, but require careful handling of advection stability (CFL condition).
+*   **Memory Complexity:** $O(N)$ for storing velocity, temperature, and mixing ratio fields on the 3D grid.
+*   **Measured Performance:** Not given in the sources.
+*   **Scaling:** Scales with grid resolution. The model assumes constant air density over the scale of the model [S1, unofficial].
+*   **Strengths:** Produces realistic, time-evolving cloud behavior automatically, unlike procedural methods which may require manual tuning for animation [S1, unofficial]. Physically plausible interactions between heat, moisture, and motion.
+*   **Limitations:** Computationally intensive for high-resolution 3D grids. Coriolis effects are ignored, limiting large-scale atmospheric accuracy [S1, unofficial]. Assumes constant air density, which may not hold for very large vertical scales.
+*   **When to use:** When realistic, dynamic cloud animation is required and computational resources allow for grid-based physics simulation.
+*   **When not to use:** When real-time performance on low-end hardware is critical without simplification, or when large-scale atmospheric phenomena requiring Coriolis forces are needed.
+
+## Background
+The Physical Cloud Model (Cumulus Convection) originates from early computer graphics research into volume rendering and atmospheric simulation. The specific equations and model description are attributed to a SIGGRAPH '84 paper, as indicated by the reference [S1, unofficial]. The model was designed to address the limitations of static procedural cloud models by introducing dynamic physical processes. It has been cited in surveys of cloud modeling, such as the one by Goswami [S2], which reviews various techniques including Coupled Map Lattice approaches by Miyazaki et al. [S2]. The model's approach of using liquid water mixing ratio as optical density for diffuse rendering was a key contribution to physically-based cloud visualization.
+
+## Sources
+[S1] Ray Tracing for Volume Densities, https://www.scribd.com/document/746685923/ray-tracking-volume-densities, fetched 2026-10-25 (unofficial)
+[S2] A survey of modeling, rendering and animation of clouds in computer graphics, https://doi.org/10.1007/s00371-020-01953-y, fetched 2026-10-26

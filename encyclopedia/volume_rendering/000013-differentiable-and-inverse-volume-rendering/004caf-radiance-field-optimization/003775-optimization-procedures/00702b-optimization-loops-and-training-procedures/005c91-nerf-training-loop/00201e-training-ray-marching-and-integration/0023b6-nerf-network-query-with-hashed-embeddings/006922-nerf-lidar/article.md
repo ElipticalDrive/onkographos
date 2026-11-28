@@ -1,0 +1,266 @@
+# NeRF-LiDAR
+
+Also called: LiDAR simulation with NeRF
+
+## Overview
+NeRF-LiDAR is a method for generating realistic LiDAR point clouds and semantic labels by leveraging real-world images and sparse LiDAR data to learn an implicit neural radiance field representation of driving scenes [S1]. It differs from physics-based simulators that rely on manually constructed 3D virtual worlds and from reconstruction-based methods that require dense LiDAR scans and expensive hardware to create meshes, instead using multi-view images and sparse LiDAR signals to implicitly reconstruct the scene and avoid domain gaps [S1].
+
+## How it works
+**Inputs:**
+*   Multi-view RGB images from a driving dataset (e.g., nuScenes) [S1].
+*   Sparse LiDAR point clouds corresponding to the image timestamps [S1].
+*   Weak semantic labels (sparse 3D point labels and weak 2D image labels) [S1].
+*   Virtual LiDAR sensor parameters (e.g., Velodyne HDL32E settings) [S1].
+
+**Outputs:**
+*   Realistic simulated LiDAR point clouds [S1].
+*   Point-wise semantic labels for the generated point clouds [S1].
+
+**Data Structures:**
+*   **NeRF Representation:** An implicit neural network using hash encoding (specifically Instant-NGP style hash grids as adopted from Barron et al. 2023) to represent scene density $\sigma$ and color $c$ [S1]. The hash encoding replaces the original unbounded NeRF to address training speed issues [S1].
+*   **Ray Parameters:** Defined by origin $o$ and direction $d$. The direction is determined by azimuth $\theta$ and vertical angle $\phi$ [S1]. The origin $o$ is updated based on ego-vehicle velocity $v$ and time interval $\Delta t$ [S1].
+
+**Numbered Steps:**
+
+1.  **NeRF Reconstruction:**
+    Train an unbounded NeRF with hash encoding using multi-view images and sparse LiDAR depth supervision. The network learns to predict density $\sigma_i$ and color $c_i$ at sampled points $t_i$ along rays [S1].
+    
+    The volume rendering equation for color is:
+    $$ \hat{C}(r) = \sum_{i=1}^{N} T_i (1 - e^{-\sigma_i \delta_i}) c_i $$
+    where $T_i = \exp \left(-\sum_{j=1}^{i-1} \sigma_j \delta_j \right)$ is the accumulated transmittance, $r = o + td$ is the ray, $o$ is the origin, $d$ is the direction, $c_i$ and $\sigma_i$ are color and density at sampled point $t_i$, and $\delta_j = t_{j+1} - t_j$ is the distance between adjacent sampled points [S1].
+
+    The rendered depth $\hat{D}(r)$ is calculated as:
+    $$ \hat{D}(r) = \sum_{i=1}^{N} T_i (1 - e^{-\sigma_i \delta_i}) z_i $$
+    where $z_i$ is the depth value at the sampled point $t_i$ on the ray $r$ [S1].
+
+    The total loss combines RGB and depth losses:
+    $$ L_{rgb} = \|\hat{C}(r) - C(r)\|_2^2 $$
+    $$ L_{depth} = \|\hat{D}(r) - D(r)\|_1 $$
+    where $\hat{C}(r)$ is the rendered color, $C(r)$ is the ground truth color, $\hat{D}(r)$ is the rendered depth, and $D(r)$ is the ground truth depth derived from sparse LiDAR signals [S1].
+
+2.  **Virtual LiDAR Ray Generation:**
+    Define a virtual LiDAR sensor with parameters matching the real sensor (e.g., Velodyne HDL32E: 20Hz spinning speed, field of view from -30.67° to 10.67° across 32 channels) [S1].
+    
+    Generate ray directions $d$ using azimuth $\theta$ and vertical angle $\phi$:
+    $$ d = (\cos \theta \cos \phi, \sin \theta \sin \phi, \cos \phi)^T $$
+    where $\theta$ and $\phi$ are determined by the laser time interval and sensor settings [S1].
+    
+    Update the ray origin $o$ based on ego-vehicle motion:
+    $$ o = o_0 + \Delta t \cdot v $$
+    where $o_0$ is the initial position, $\Delta t$ is the time interval, and $v$ is the velocity of the ego car [S1].
+
+3.  **Coarse Point Cloud Generation:**
+    Cast the generated rays through the learned NeRF representation to sample points. Points are generated where the density $\sigma$ exceeds a threshold or via volume rendering integration to determine hit locations [S1]. This produces initial coarse point clouds [S1].
+
+4.  **Projection to Equirectangular Image:**
+    Project the initial coarse 3D point clouds into 2D equirectangular images [S1].
+
+5.  **Refinement via U-Net:**
+    Utilize a U-Net architecture to process the equirectangular images. The network learns to correct "raydrop" (simulating the physical phenomenon where LiDAR rays pass through transparent or semi-transparent objects without reflecting) and alignment errors to make the generated point clouds more realistic [S1].
+
+6.  **Semantic Label Generation:**
+    Integrate sparse 3D point labels and weak 2D image labels into the training process to learn semantic radiance fields, allowing the generation of point-wise semantic labels for the simulated LiDAR data [S1].
+
+**Pseudocode:**
+
+> **Unverified code.** The code below did not pass a test run against a reference implementation, or no test fits it, so it may contain errors.
+
+```python
+import torch
+import torch.nn as nn
+
+class NeRFLiDAR:
+    def __init__(self, lidar_params, ego_velocity_func):
+        """
+        Initialize NeRF-LiDAR simulation.
+        
+        Args:
+            lidar_params: Dict containing Velodyne HDL32E parameters.
+                - spinning_speed: int (Hz)
+                - fov_min: float (degrees)
+                - fov_max: float (degrees)
+                - num_channels: int
+            ego_velocity_func: Function returning velocity vector v at time t.
+        """
+        self.lidar_params = lidar_params
+        self.ego_velocity_func = ego_velocity_func
+        # Hash-encoded NeRF model (Instant-NGP style)
+        self.nerf_model = HashEncodedNeRF()
+        # U-Net for raydrop and alignment refinement
+        self.refinement_net = UNet()
+        
+    def get_ray_direction(self, azimuth_theta, vertical_phi):
+        """
+        Calculate ray direction d from azimuth and vertical angles.
+        
+        Args:
+            azimuth_theta: float, azimuth angle.
+            vertical_phi: float, vertical angle.
+            
+        Returns:
+            torch.Tensor, shape (3,), direction vector d.
+        """
+        # d = (cos(theta)cos(phi), sin(theta)sin(phi), cos(phi))^T
+        # Note: Source formula uses sin(theta)sin(phi) for y-component.
+        # Standard spherical coordinates often use sin(theta)cos(phi) or similar.
+        # We strictly follow the source formula [S1].
+        cos_theta = torch.cos(azimuth_theta)
+        sin_theta = torch.sin(azimuth_theta)
+        cos_phi = torch.cos(vertical_phi)
+        sin_phi = torch.sin(vertical_phi)
+        
+        d_x = cos_theta * cos_phi
+        d_y = sin_theta * sin_phi
+        d_z = cos_phi
+        
+        return torch.tensor([d_x, d_y, d_z], dtype=torch.float32)
+
+    def get_ray_origin(self, t, o0):
+        """
+        Calculate ray origin o based on ego-vehicle motion.
+        
+        Args:
+            t: float, current time.
+            o0: torch.Tensor, initial position.
+            
+        Returns:
+            torch.Tensor, shape (3,), origin vector o.
+        """
+        v = self.ego_velocity_func(t)
+        delta_t = t # Assuming t represents the interval or cumulative time step
+        o = o0 + delta_t * v
+        return o
+
+    def render_color(self, rays_o, rays_d, num_samples):
+        """
+        Render color using volume rendering equation.
+        
+        Args:
+            rays_o: torch.Tensor, shape (N, 3), ray origins.
+            rays_d: torch.Tensor, shape (N, 3), ray directions.
+            num_samples: int, number of samples per ray.
+            
+        Returns:
+            torch.Tensor, shape (N, 3), rendered colors C_hat.
+        """
+        # Sample points along rays
+        # t_vals = linspace(t_near, t_far, num_samples)
+        # points = rays_o[:, None, :] + t_vals[None, :, None] * rays_d[:, None, :]
+        # points_flat = points.reshape(-1, 3)
+        
+        # Query NeRF for density and color
+        # sigma_flat, c_flat = self.nerf_model(points_flat)
+        # sigma = sigma_flat.reshape(N, num_samples)
+        # c = c_flat.reshape(N, num_samples, 3)
+        
+        # Compute deltas
+        # delta = t_vals[1:] - t_vals[:-1]
+        # delta = torch.cat([delta, torch.tensor([1e10])], dim=0) # Handle last interval
+        
+        # Compute transmittance
+        # alpha = 1.0 - torch.exp(-sigma * delta)
+        # T = torch.cumprod(torch.exp(-sigma * delta), dim=1)
+        # T = torch.cat([torch.ones_like(T[:, :1]), T[:, :-1]], dim=1)
+        
+        # Weighted sum
+        # weights = alpha * T
+        # C_hat = torch.sum(weights[:, :, None] * c, dim=1)
+        
+        # Placeholder for actual NeRF query and integration logic
+        # as the specific hash encoding implementation details are not provided
+        # in the source text, but the formula is explicit [S1].
+        pass
+
+    def render_depth(self, rays_o, rays_d, num_samples):
+        """
+        Render depth using volume rendering equation.
+        
+        Args:
+            rays_o: torch.Tensor, shape (N, 3).
+            rays_d: torch.Tensor, shape (N, 3).
+            num_samples: int.
+            
+        Returns:
+            torch.Tensor, shape (N,), rendered depths D_hat.
+        """
+        # Similar to render_color, but weights depth values z_i
+        # D_hat = sum(T_i * (1 - exp(-sigma_i * delta_i)) * z_i)
+        pass
+
+    def generate_lidar_points(self, ego_pose, ego_velocity, t):
+        """
+        Simulate LiDAR point cloud generation.
+        
+        Args:
+            ego_pose: torch.Tensor, initial position o0.
+            ego_velocity: torch.Tensor, velocity v.
+            t: float, time step.
+            
+        Returns:
+            list of torch.Tensor, generated 3D points.
+        """
+        # 1. Generate rays based on LiDAR parameters
+        # For each channel and rotation step:
+        #   theta = azimuth_angle
+        #   phi = vertical_angle
+        #   d = get_ray_direction(theta, phi)
+        #   o = get_ray_origin(t, ego_pose)
+        
+        # 2. Cast rays through NeRF
+        #   points = render_points(o, d) # Implicitly defined by sampling
+        
+        # 3. Project to equirectangular image
+        #   img = project_to_equirectangular(points)
+        
+        # 4. Refine with U-Net
+        #   refined_img = self.refinement_net(img)
+        
+        # 5. Unproject to 3D
+        #   refined_points = unproject_from_equirectangular(refined_img)
+        
+        pass
+
+    def compute_loss(self, rendered_color, gt_color, rendered_depth, gt_depth):
+        """
+        Compute reconstruction loss.
+        
+        Args:
+            rendered_color: torch.Tensor, shape (N, 3).
+            gt_color: torch.Tensor, shape (N, 3).
+            rendered_depth: torch.Tensor, shape (N,).
+            gt_depth: torch.Tensor, shape (N,).
+            
+        Returns:
+            float, total loss.
+        """
+        l_rgb = torch.mean((rendered_color - gt_color) ** 2)
+        l_depth = torch.mean(torch.abs(rendered_depth - gt_depth))
+        return l_rgb + l_depth
+```
+
+## Subtopics
+
+### Hash-encoded NeRF
+A variant of NeRF using hash grids for spatial hashing to accelerate training and inference, adopted here to mitigate the slowness of original unbounded NeRF [S1].
+
+### U-Net Refinement
+A convolutional neural network architecture used to process equirectangular projections of point clouds to correct raydrop and alignment artifacts [S1].
+
+## Operating characteristics
+*   **Time Complexity:** Training is significantly faster than original unbounded NeRF due to the adoption of hash encoding. The original unbounded NeRF was reported to take about one day to train each NeRF block [S1].
+*   **Memory Complexity:** Hash encoding typically offers a good trade-off between memory and accuracy, though exact memory footprint is not specified [S1].
+*   **Strengths:**
+    *   Generates realistic LiDAR data with semantic labels using only multi-view images and sparse LiDAR signals, avoiding the need for dense LiDAR scans or expensive hardware [S1].
+    *   Avoids domain gaps associated with physics-based virtual world creation by learning from real-world data [S1].
+    *   Can boost 3D segmentation model accuracy when used for pre-training, reducing the requirement for real labeled data [S1].
+*   **Limitations:**
+    *   Driving data often comes from unbounded outdoor scenes with small overlaps between adjacent views due to fast ego-car movement, making multi-view geometry challenging [S1].
+    *   Relies on the quality of sparse LiDAR signals for depth supervision [S1].
+*   **When to use:** When realistic LiDAR simulation for autonomous driving training is needed, but dense LiDAR data or physics-based simulation environments are unavailable or too costly [S1].
+*   **When not to use:** When high-fidelity physics-based interactions (e.g., complex material properties not captured by density/color) are required, or when real-world data collection is impossible [S1].
+
+## Background
+NeRF-LiDAR was introduced by Junge Zhang, Feihu Zhang, Shaochen Kuang, and Li Zhang from Fudan University, University of Oxford, and South China University of Technology at the Thirty-Eighth AAAI Conference on Artificial Intelligence (AAAI-24) [S1]. The method addresses the high cost and difficulty of labeling LiDAR point clouds for autonomous driving by leveraging Neural Radiance Fields (NeRF) for novel view synthesis and implicit 3D scene reconstruction [S1]. It builds upon unbounded NeRF (Barron et al. 2022) and hash-encoding NeRF (Barron et al. 2023) to handle large-scale driving scenes [S1].
+
+## Sources
+[S1] NeRF-LiDAR: Generating Realistic LiDAR Point Clouds with Neural Radiance Fields, https://doi.org/10.1609/aaai.v38i7.28546, fetched 2026-10-29

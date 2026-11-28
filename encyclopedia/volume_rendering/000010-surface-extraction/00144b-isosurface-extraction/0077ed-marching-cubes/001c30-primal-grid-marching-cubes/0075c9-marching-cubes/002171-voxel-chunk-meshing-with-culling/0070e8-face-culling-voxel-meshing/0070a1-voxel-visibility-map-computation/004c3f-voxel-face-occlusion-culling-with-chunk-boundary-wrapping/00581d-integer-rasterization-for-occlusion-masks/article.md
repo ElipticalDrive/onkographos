@@ -1,0 +1,143 @@
+# Integer Rasterization for Occlusion Masks
+
+Also called: 2D AABB Union Occlusion, VXL-044, Couvertures discrétisées, VXL-044 Discrete Boundary Coverage
+
+## Overview
+Integer Rasterization for Occlusion Masks is a method for calculating occlusion between cells by rasterizing boundary polygons onto 2D domains using integer arithmetic and exact Axis-Aligned Bounding Box (AABB) unions [S1]. It replaces continuous analytical clipping constraints with grid-level precision, generating 2D occlusion masks for cell boundaries without sub-pixel accuracy [S1]. This approach is distinct from sibling methods by relying on deterministic integer Bresenham rasterization and exact 2D rectangle unions rather than floating-point polygon clipping or 3D projection [S1].
+
+## How it works
+**Inputs and Outputs:**
+*   **Input:** A set of 3D shapes where vertex coordinates are integers in the range $[0, 1000]^3$ [S1]. Each shape is classified into six outer shell groups (coplanar with boundary planes $X=0, X=1000, Y=0, Y=1000, Z=0, Z=1000$) and one inner shell group [S1].
+*   **Output:** Six 2D occlusion masks, each of size $1000 \times 1000$ pixels, representing the boundary domains [S1].
+
+**Data Structures:**
+*   **Vertex Coordinates:** Integer positions $(x, y, z)$ where $x, y, z \in [0, 1000]$ [S1].
+*   **Boundary Grid:** Six 2D arrays, each of dimensions $1000 \times 1000$, initialized to zero (unoccluded) [S1].
+*   **AABB Rectangles:** 2D rectangles defined by integer coordinates $(x_{min}, y_{min}, x_{max}, y_{max})$ [S1].
+
+**Steps:**
+1.  **Classification:** For each shape, separate its polygons into the six outer shell groups based on their coplanarity with the chunk boundaries, and the inner shell group for all other polygons [S1]. Only outer shell polygons contribute to the occlusion masks [S1].
+2.  **Rasterization:** Rasterize the edges of the coplanar 2D polygons directly onto the $1000 \times 1000$ boundary grid using integer Bresenham line algorithms [S1]. This ensures deterministic edge drawing without continuous projection [S1].
+3.  **Filling & AABB Union:** Fill the rasterized surfaces and compute the union of 2D AABB rectangles to reproduce exactly which pixels are covered [S1]. This step replaces approximate bounding boxes with exact coverage [S1].
+4.  **Mask Update:** Mark the corresponding pixels in the 2D occlusion mask as occluded [S1].
+
+**Pseudocode:**
+> **Unverified code.** The code below did not pass a test run against a reference implementation, or no test fits it, so it may contain errors.
+
+```python
+def compute_occlusion_masks(shapes):
+    # Initialize six 1000x1000 masks with zeros (unoccluded) [S1]
+    masks = [[0] * 1000 for _ in range(6)]
+
+    for shape in shapes:
+        # Classify polygons into outer shells (coplanar with boundaries) and inner shell [S1]
+        outer_shells = classify_outer_shells(shape.polygons)
+
+        for plane_index, polygons in outer_shells.items():
+            # Rasterize edges using integer Bresenham line family [S1]
+            rasterized_points = set()
+            for poly in polygons:
+                edges = get_polygon_edges(poly)
+                for p1, p2 in edges:
+                    rasterized_points.update(bresenham_line(p1, p2))
+
+            # Compute union of 2D AABB rectangles to determine covered pixels [S1]
+            # Note: Exact filling rule and edge handling are not specified in sources [S1]
+            covered_pixels = compute_aabb_union(polygons)
+
+            # Merge rasterized edges and AABB union for exact coverage [G]
+            all_pixels = rasterized_points.union(covered_pixels)
+
+            # Update mask with boundary checks [G]
+            for x, y in all_pixels:
+                if 0 <= x < 1000 and 0 <= y < 1000:
+                    masks[plane_index][y][x] = 1
+
+    return masks
+
+def classify_outer_shells(polygons):
+    # Classify polygons based on their plane equation relative to chunk boundaries [G]
+    shells = {0: [], 1: [], 2: [], 3: [], 4: [], 5: []} # X=0, X=1000, Y=0, Y=1000, Z=0, Z=1000
+    for poly in polygons:
+        normal = compute_polygon_normal(poly)
+        if abs(normal.x) > 0.5:
+            plane_idx = 0 if normal.x < 0 else 1
+        elif abs(normal.y) > 0.5:
+            plane_idx = 2 if normal.y < 0 else 3
+        else:
+            plane_idx = 4 if normal.z < 0 else 5
+        shells[plane_idx].append(poly)
+    return shells
+
+def get_polygon_edges(poly):
+    # Return list of vertex pairs for each edge [G]
+    edges = []
+    n = len(poly.vertices)
+    for i in range(n):
+        edges.append((poly.vertices[i], poly.vertices[(i + 1) % n]))
+    return edges
+
+def bresenham_line(p1, p2):
+    # Standard integer Bresenham line algorithm [G]
+    dx = abs(p2.x - p1.x)
+    dy = abs(p2.y - p1.y)
+    sx = 1 if p1.x < p2.x else -1
+    sy = 1 if p1.y < p2.y else -1
+    err = dx - dy
+    x, y = p1.x, p1.y
+    points = set()
+    while True:
+        points.add((x, y))
+        if x == p2.x and y == p2.y:
+            break
+        e2 = 2 * err
+        if e2 > -dy:
+            err -= dy
+            x += sx
+        if e2 < dx:
+            err += dx
+            y += sy
+    return points
+
+def compute_aabb_union(polygons):
+    # Compute union of bounding boxes for each polygon [G]
+    covered = set()
+    for poly in polygons:
+        xs = [v.x for v in poly.vertices]
+        ys = [v.y for v in poly.vertices]
+        x_min, x_max = min(xs), max(xs)
+        y_min, y_max = min(ys), max(ys)
+        for x in range(x_min, x_max + 1):
+            for y in range(y_min, y_max + 1):
+                covered.add((x, y))
+    return covered
+```
+
+**Parameters:**
+*   **Resolution:** $1/1000$ discrete resolution for boundary coverages [S1].
+*   **Vertex Range:** Integers in $[0, 1000]^3$ [S1].
+*   **Boundary Domains:** Six 2D domains, each $1000 \times 1000$ pixels [S1].
+
+**Edge Cases and Pitfalls:**
+*   The 6 masks only represent occlusion information at boundaries, not 3D polygons or inclined/internal surfaces [S1].
+*   Precision is limited to the grid; sub-pixel precision is not guaranteed [S1].
+*   The method does not replace 3D polygons, especially inclined/internal surfaces [S1].
+*   The exact rules for filling, edge handling, slot separation, cache, and rectangle decomposition are not specified [S1].
+*   The emission rules for inner shell polygons are open [S1].
+
+## Operating characteristics
+*   **Time Complexity:** Not given in the sources.
+*   **Memory Complexity:** Not given in the sources.
+*   **Performance:** Not given in the sources.
+*   **Strengths:** Deterministic integer rasterization; exact 2D AABB unions; avoids continuous analytical clipping [S1].
+*   **Limitations:** Grid-level precision only; no sub-pixel accuracy; does not handle internal/inclined surfaces [S1].
+*   **When to Use:** When boundary occlusion masks are required for cell-level occlusion culling with integer arithmetic [S1].
+*   **When Not to Use:** When sub-pixel precision or internal surface occlusion is required [S1].
+
+## Background
+*   **Origin:** VXL-044, part of the V0.1.4 voxel engine design specification [S1].
+*   **History:** The method was validated as part of the V0.1.4 specification, replacing continuous analytical clipping constraints with grid-level precision [S1].
+*   **Usage:** Used in the Sparkle voxel engine for boundary occlusion culling [S1].
+
+## Sources
+[S1] V0.1.4 — Voxel engine design and implementation specification, https://github.com/EreliaStudio/Sparkle/pull/37, fetched 2026-10-26

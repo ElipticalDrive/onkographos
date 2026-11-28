@@ -1,0 +1,257 @@
+--- v006.md
++++ v007.md
+@@ -4,139 +4,139 @@
+ 
+ ## Overview
+-An algorithm to construct a Sparse Voxel Octree from a stream of voxelized geometry or a voxel list by maintaining a flat array of nodes and expanding them level-by-level or recursively [S1, unofficial][S4, unofficial]. It maps occupied voxels to hierarchical paths in the octree, pre-allocating memory for internal and leaf nodes up to a specified maximum depth [S2, unofficial]. Unlike queue-based methods that merge nodes dynamically, this approach follows a strict depth-first or level-order expansion pattern to ensure a predictable memory layout [S1, unofficial].
++The Sparse Voxel Octree (SVO) Builder is a GPU-based algorithm that constructs a hierarchical Sparse Voxel Octree from a list of voxelized geometry fragments using compute shaders [S1, unofficial]. It solves the problem of efficiently converting triangle meshes into a compact, hierarchical voxel representation suitable for real-time global illumination techniques like Voxel Cone Tracing [S1, unofficial]. Unlike in-core CPU methods or grid-based GPU approaches, this method generates the SVO directly on the GPU by processing the voxel list level-by-level, flagging nodes, allocating memory for internal nodes, and storing leaf nodes [S4, unofficial]. It is distinct from [Brute Force SVO Construction](1704-brute-force-svo-construction.md) by its use of compute shaders for parallel level-by-level construction, and from [Out-of-Core SVO Construction via Morton Order](1885-out-of-core-svo-construction-via-morton-order.md) by its reliance on pre-allocated buffers and specific atomic merging strategies for fragment consolidation [S1, unofficial].
+ 
+ ## How it works
+-**Inputs:**
+-- `maxDepth`: The maximum depth of the octree. Determines when leaf nodes are created instead of children [S2, unofficial].
+-- `voxel_list`: A list of occupied voxels used to flag internal nodes and leaves during GPU-based iterative builds [S4, unofficial].
+-- `collision_trace` (optional): A custom collision trace channel (e.g., `SVOObstacle`) used exclusively for occupancy testing, with a default response of Ignore [S3, unofficial].
++The method constructs the SVO in a series of compute shader passes, building the tree level-by-level from the root down to the maximum depth [S1, unofficial].
+ 
+-**Outputs:**
+-- `_tree`: A flat array of `uint32_t` representing the SVO nodes [S2, unofficial].
++### Inputs and Outputs
++*   **Input:** A list of voxel fragments generated from conservative rasterization of triangle geometry [S1, unofficial]. Each fragment represents a voxel occupied by the mesh.
++*   **Output:** A flat array `_tree` storing the octree nodes, where each node is a 32-bit integer [S2, unofficial].
+ 
+-**Data Structures:**
+-The `_tree` array stores node metadata as `uint32_t` [S2, unofficial]:
+-- **Bits 0–16 (17 bits):** Index of the first child node [S2, unofficial].
+-- **Bit 17 (1 bit):** Leaf flag. If set, the node is a leaf [S2, unofficial].
+-- **Value `0x0000FFFF`:** Empty node. Child index is 0, leaf flag is 0 [S2, unofficial].
+-- **Value `0x00004200`:** Solid leaf node. Indicates an occupied leaf [S2, unofficial].
+-*Note: Alternative implementations may use a 1-byte struct with 7 bits for Depth and 1 bit for IsLeaf, plus fields for position, size, parent index, and children indices [S3, unofficial]. The following pseudocode follows the dense flat array layout [S2, unofficial].*
++### Data Structures
++The core data structure is the `_tree` array, which stores node metadata as `uint32_t` values [S2, unofficial]. The layout of a node is as follows:
++*   **Bits 0–16 (17 bits):** Index of the first child node in the `_tree` array.
++*   **Bit 17 (1 bit):** Leaf flag. If set, the node is a leaf; if clear, it is an internal node.
++*   **Value `0x0000FFFF`:** Represents an empty node (child index 0, leaf flag clear) [S2, unofficial].
++*   **Value `0x00004200`:** Represents a solid leaf node (child index 0, leaf flag set) [S2, unofficial].
+ 
+-**Algorithm Steps (Recursive/Stack-based Dense Build):**
+-1. Initialize `_tree` with a single root node `0x0000FFFF` [S2, unofficial].
+-2. Initialize a stack with `StackEntry{index=0, depth=0}` [S2, unofficial].
+-3. Loop while stack is not empty:
+-    a. Pop top of stack into `current`. Set `index = current.index`, `depth = current.depth` [S2, unofficial].
+-    b. Calculate `offset = _tree.size() - index` [S2, unofficial].
+-    c. Update `_tree[index]` with child offset: `_tree[index] |= offset << 17` [S2, unofficial].
+-    d. Increment `index` by `offset`.
+-    e. If `depth < maxDepth`:
+-        i. Increment `depth`.
+-        ii. Loop 8 times (for each octant):
+-            1. Push `0x0000FFFF` to `_tree`.
+-            2. Push `StackEntry{index + (8 - i), depth}` to stack [S2, unofficial].
+-    f. Else (leaf case):
+-        i. Loop 8 times:
+-            1. Push `0x00004200` to `_tree` [S2, unofficial].
++### Parameters
++*   **maxDepth:** The maximum depth of the octree. The root is at depth 0. When the current depth equals `maxDepth`, leaf nodes are created instead of children [S2, unofficial][S3, unofficial].
+ 
+-**Algorithm Steps (GPU Iterative Build):**
+-1. Initialize root node (level 0) by clearing memory for the first 8 nodes using a node initialization routine [S4, unofficial].
+-2. Iterate from level 1 to `resolution - 1`:
+-    a. Execute a node flagging routine to determine which nodes at the current level are internal (have children) or leaves, binding the octree buffer and voxel list [S4, unofficial].
+-    b. Execute a node allocation routine to allocate memory for children of internal nodes using an atomic counter. The output start address is `alloc_start`, and the count of new nodes is `alloc_count * 8` [S4, unofficial].
+-    c. Update state variables: `start` becomes `alloc_start`, `count` becomes `alloc_count * 8`, and `alloc_start` becomes `start + count` [S4, unofficial].
+-    d. Clear memory for newly allocated nodes using a node initialization routine [S4, unofficial].
+-3. Execute a leaf storage routine to store leaf node data, binding the octree buffer and voxel list [S4, unofficial].
++### Steps
++The construction proceeds in the following phases:
+ 
+-**Pseudocode (Dense Recursive/Stack-based):**
++1.  **Build Voxel Fragment List:** Generate a list of voxel fragments from the input geometry using conservative rasterization [S1, unofficial].
++2.  **Initialize Root:** Initialize the root node (level 0) by clearing memory for the first 8 nodes (indices 0–7) using a `node_init` shader [S4, unofficial]. The root is pushed to a processing stack with initial state [S2, unofficial].
++3.  **Level-by-Level Construction:** Iterate from level 1 to `resolution - 1` [S4, unofficial]. For each level:
++    *   **Tag Nodes:** Execute a `node_flag` shader to determine which nodes at the current level are internal (have children) or leaves based on the voxel list [S4, unofficial].
++    *   **Allocate Memory:** Execute a `node_alloc` shader to allocate memory for the children of the identified internal nodes. This uses an atomic counter to track the number of allocated nodes. The output start address is `alloc_start`, and the count of new nodes is `alloc_count * 8` [S4, unofficial].
++    *   **Initialize Buffer:** Clear the memory for the newly allocated nodes using the `node_init` shader [S4, unofficial].
++    *   **Update State:** Update state variables for the next iteration: `start` becomes `alloc_start`, `count` becomes `alloc_count * 8`, and `alloc_start` becomes `start + count` [S4, unofficial].
++4.  **Inject Attributes:** After the octree structure is built, inject voxel attributes (albedo, normal, etc.) into the leaf nodes. If multiple voxel fragments fall into the same leaf node, their attribute values are averaged [S1, unofficial]. This is done using a `store_leaf` shader that binds the octree buffer and voxel list [S4, unofficial].
++5.  **Mipmapping:** Mipmap node values from bottom to top, level by level, into the interior nodes [S1, unofficial].
++
++### Pseudocode
++The following pseudocode describes the recursive construction logic found in [S2, unofficial], adapted to be self-contained. It assumes a stack-based traversal to build the tree structure.
++
+ ```python
+-def build_svo_dense(max_depth):
+-    EMPTY_NODE = 0x0000FFFF
+-    LEAF_NODE = 0x00004200
+-    tree = [EMPTY_NODE]
+-    stack = [(0, 0)]
++# Constants
++EMPTY_NODE = 0x0000FFFF
++LEAF_NODE = 0x00004200
++MAX_DEPTH = 10  # Example value, typically determined by resolution
+ 
++# Data structures
++class StackEntry:
++    index: int
++    depth: int
++
++def build_svo(max_depth: int) -> list:
++    """
++    Builds the SVO structure in a flat array.
++    Returns the _tree array.
++    """
++    _tree = []
++    stack = []
++    
++    # Initialize root
++    # Push initial root node 0x0000FFFF to _tree
++    _tree.append(EMPTY_NODE)
++    
++    # Push StackEntry{0, 0} to stack
++    stack.append(StackEntry(index=0, depth=0))
++    
++    index = 0
++    
+     while stack:
+-        idx, depth = stack.pop()
+-        offset = len(tree) - idx
+-        tree[idx] = (tree[idx] & 0x1FFFF) | (offset << 17)
+-        idx += offset
+-
++        current = stack.pop()
++        depth = current.depth
++        index = current.index
++        
++        # Calculate offset for child pointer
++        # offset = _tree.size() - index
++        offset = len(_tree) - index
++        
++        # Set _tree[index] |= offset << 17
++        # Note: This logic in [S2, unofficial] seems to update the parent's pointer
++        # to the start of the children block.
++        # We must ensure _tree[index] exists.
++        if index < len(_tree):
++            _tree[index] = _tree[index] | (offset << 17)
++        
++        # Increment index by offset (for next sibling/child calculation in some variants)
++        # However, in the stack-based approach, index is managed by the stack entry.
++        # The [S2, unofficial] snippet increments index locally. We follow the snippet's flow.
++        index += offset
++        
+         if depth < max_depth:
++            # Increment depth for children
+             depth += 1
++            
++            # Loop 8 times to create children
+             for i in range(8):
+-                tree.append(EMPTY_NODE)
+-                stack.append((idx + (8 - i), depth))
++                # Push 0x0000FFFF to _tree
++                _tree.append(EMPTY_NODE)
++                
++                # Push StackEntry{index + (8 - i), depth} to stack
++                # Note: The index calculation in [S2, unofficial] is specific to its linear allocation scheme.
++                # Here we push the index where the child's data will start or be referenced.
++                child_index = len(_tree)
++                stack.append(StackEntry(index=child_index, depth=depth))
+         else:
++            # Max depth reached, create leaf nodes
+             for i in range(8):
+-                tree.append(LEAF_NODE)
+-
+-    return tree
++                # Push 0x00004200 to _tree
++                _tree.append(LEAF_NODE)
++                
++                # Push StackEntry for leaf (though no further expansion needed)
++                child_index = len(_tree)
++                stack.append(StackEntry(index=child_index, depth=depth))
++                
++    return _tree
+ ```
+ 
+-**Pseudocode (GPU Iterative):**
+-```python
+-def build_svo_gpu(voxel_list, resolution):
+-    # Pre-allocate octree buffer
+-    octree_buffer = [0] * (8 * resolution)
+-    start = 0
+-    count = 8
+-    alloc_start = 0
+-
+-    for level in range(1, resolution):
+-        # node_flag: determine which nodes at current level are internal or leaves
+-        # [G] Standard compute shader dispatch binding octree buffer and voxel list
+-        internal_mask = [False] * count
+-        
+-        # node_alloc: allocate memory for children of internal nodes
+-        # [G] Uses atomic counter to track allocated nodes
+-        alloc_count = sum(internal_mask)
+-        alloc_start = len(octree_buffer)
+-        octree_buffer.extend([0] * (alloc_count * 8))
+-        
+-        # Update state variables
+-        start = alloc_start
+-        count = alloc_count * 8
+-        alloc_start = start + count
+-        
+-        # node_init: clear memory for newly allocated nodes
+-        for i in range(start, start + count):
+-            octree_buffer[i] = 0x0000FFFF
+-
+-    # store_leaf: store leaf node data
+-    # [G] Standard compute shader dispatch binding octree buffer and voxel list
+-    for i in range(start, start + count):
+-        octree_buffer[i] = 0x00004200
+-
+-    return octree_buffer
+-```
+-
+-**Parameters:**
+-- `maxDepth`: Maximum octree subdivision depth. Root starts at Depth 0. Typical value is not specified in the sources, but determines when leaf nodes are created [S2, unofficial].
+-- `SVOObstacle`: Custom collision trace channel used exclusively for occupancy testing. Default response is Ignore [S3, unofficial].
+-
+-**Edge Cases and Pitfalls:**
+-- **Work Imbalance:** In parallel implementations, SVO sparsity can cause work imbalance, where one task takes significantly longer. Mitigated by using "Unbalanced" scheduling [S3, unofficial].
+-- **Root Collision:** If the root node collides with an obstacle, it must be recursively subdivided to `MaxDepth` [S3, unofficial].
+-- **Invalid Child Roots:** Child roots that are invalid (e.g., blocked) should be treated as non-existent and skipped during merge [S3, unofficial].
+-- **Buffer Preallocation:** The approach requires preallocating the octree buffer with a fixed size, which may limit dynamic scene updates [S5, unofficial].
++### Edge Cases and Pitfalls
++*   **Work Imbalance:** Due to the sparsity of the SVO, work distribution in parallel compute shaders can be uneven, causing bottlenecks. This is mitigated by using unbalanced scheduling for parallel tasks [S3, unofficial].
++*   **Root Collision:** If the root node collides with an obstacle, it must be recursively subdivided to `MaxDepth` [S3, unofficial].
++*   **Invalid Child Roots:** During merging, child roots that are invalid (treated as non-existent or blocked) should be skipped and not collected into the node array [S3, unofficial].
+ 
+ ## Subtopics
+ 
+ ### [GPU-based Octree Generation](5332-gpu-based-octree-generation.md)
+-Generates a hierarchical octree data structure directly on the GPU by partitioning the input volume into fixed-size cubes of $32 \times 32 \times 32$ voxels. Unlike standard Sparse Voxel Octrees that only subdivide non-empty regions, this approach uniformly subdivides the entire volume space down to the minimum node size, which simplifies compute shader logic by avoiding dynamic branching for empty regions. It constructs a pre-allocated array-based octree by mapping every non-empty voxel to a hierarchical path.
++This method generates a hierarchical octree data structure directly on the GPU by partitioning the input volume into fixed-size cubes of $32 \times 32 \times 32$ voxels. Unlike standard Sparse Voxel Octrees that only subdivide non-empty regions, this approach uniformly subdivides the entire volume space down to the minimum node size, which simplifies compute shader logic by avoiding dynamic branching for empty regions. It constructs a pre-allocated array-based octree by mapping every non-empty voxel to a hierarchical path.
++
++### [Sparse Octree Voxelization Performance](9137-sparse-octree-voxelization-performance.md)
++This article documents the performance characteristics and implementation details of the Sparse Voxel Octree (SVO) construction method used for GPU-based voxelization. It addresses the problem of efficiently converting triangle meshes into a compact hierarchical voxel representation for real-time global illumination. Unlike in-core CPU methods or grid-based GPU approaches, this method generates the SVO directly on the GPU, optimizing for parallel triangle processing and minimizing atomic contention. It is distinct from [Grid-Free Out-Of-Core GPU Voxelization](11494-grid-free-out-of-core-gpu-voxelization.md) by its reliance on preallocated buffers and specific atomic merging strategies for fragment consolidation.
+ 
+ ## Operating characteristics
+-- **Time Complexity:** Not given in the sources [S5, unofficial].
+-- **Memory Complexity:** Not given in the sources [S5, unofficial].
+-- **Measured Performance:** On a Kepler-based NVIDIA GTX680, with max resolution $512^3$ (9 octree levels) and RGBA32F values: Hand scene total time 3.04ms (with atomic merging), Dragon 12.98ms, Sponza 15.44ms [S5, unofficial]. Octree construction (flagging) is the most time-consuming step [S5, unofficial].
+-- **Scaling:** Performance is 30% to 58% faster than on a Fermi-based GTX480. Atomic fragment merging is up to 80% faster [S5, unofficial].
+-- **Strengths:** Reduces memory consumption compared to regular voxel grids [S5, unofficial]. Enables fast prevoxelization of static environments and real-time updates for dynamic objects [S5, unofficial].
+-- **Limitations:** Requires preallocating the octree buffer with a fixed size [S5, unofficial]. Work imbalance can occur in parallel implementations due to sparsity [S3, unofficial].
+-- **When to use:** When a dense, flat array representation is required for efficient GPU raycasting or voxel-based global illumination [S5, unofficial].
+-- **When not to use:** When memory efficiency is critical for highly sparse volumes [S5, unofficial].
++*   **Time Complexity:** The construction is performed level-by-level, with each level processed in parallel using compute shaders. The complexity is generally linear with respect to the number of nodes and fragments, but depends heavily on the sparsity and distribution of the geometry.
++*   **Memory Complexity:** The SVO stores only non-empty nodes, leading to significant memory savings compared to dense voxel grids. The flat array `_tree` grows dynamically based on the number of internal and leaf nodes required.
++*   **Performance:** The method is optimized for GPU execution, leveraging compute shaders for parallel processing. Performance is affected by the resolution of the voxelization and the complexity of the input geometry.
++*   **Strengths:** Efficient memory usage, suitable for real-time applications, parallelizable on GPU.
++*   **Limitations:** Requires careful handling of work imbalance due to sparsity. The level-by-level construction may involve multiple shader passes and atomic operations, which can introduce overhead.
++*   **When to Use:** Real-time global illumination, voxel cone tracing, applications requiring efficient hierarchical voxel data on the GPU.
++*   **When Not to Use:** Applications requiring strict CPU-side processing, or where the overhead of GPU compute shaders is prohibitive.
+ 
+ ## Background
+-The Sparse Voxel Octree (SVO) Builder is a method for constructing hierarchical acceleration structures for volume rendering and raycasting [S5, unofficial]. It is based on the method described in Chapter 22 of OpenGL Insight by Cyril Crassin and Simon Green [S5, unofficial]. The algorithm is used inside voxel-based global illumination techniques for prevoxelizing static environments and updating dynamic objects in real time [S5, unofficial]. Dense recursive builds are documented in unofficial GitHub repositories [S1, unofficial]. GPU-based iterative builds are documented in unofficial GitHub repositories [S4, unofficial]. Pathfinding-specific SVO constructions are documented in unofficial video tutorials [S3, unofficial].
++The method is based on the approach described in Chapter 22 of *OpenGL Insights* by Cyril Crassin and Simon Green [S1, unofficial]. It is widely used in real-time rendering for techniques like Voxel Cone Tracing, where a hierarchical voxel representation is needed for efficient light propagation calculations [S1, unofficial]. The implementation details provided in the sources are from unofficial repositories and tutorials, indicating its adoption in community-driven graphics projects [S1, unofficial][S4, unofficial].
+ 
+ ## Sources
+@@ -144,4 +144,3 @@
+ [S2] cianjinks/Sparse-Voxel-Octree, https://github.com/cianjinks/Sparse-Voxel-Octree, fetched 2026-10-26 (unofficial)
+ [S3] UE5 Tutorial | Simple SVO Pathfinder for 3D Pathfinding, https://www.youtube.com/watch?v=QmDbX_gZSLA, fetched 2026-10-27 (unofficial)
+-[S4] loryruta/voxelizer, https://github.com/loryruta/voxelizer, fetched 2026-10-27 (unofficial)
+-[S5] PDF K14190_text - Icare3D, https://icare3d.org/research/OpenGLInsights-SparseVoxelization.pdf, fetched 2026-10-29 (unofficial)+[S4] loryruta/voxelizer, https://github.com/loryruta/voxelizer, fetched 2026-10-27 (unofficial)

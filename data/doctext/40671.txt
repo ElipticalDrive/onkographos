@@ -1,0 +1,3644 @@
+# Fast Gaussian Rasterization
+
+- **Can be 5-10x faster than the original software CUDA rasterizer ([diff-gaussian-rasterization](https://github.com/graphdeco-inria/diff-gaussian-rasterization)).**
+- **Can be 2-3x faster if using offline rendering. (Bottleneck: copying rendered images around, thinking about improvements.)**
+- **Speedup most visible with high pixel-to-point ratio (large Gaussians, small point count, high-res rendering).**
+
+https://github.com/dendenxu/fast-gaussian-splatting/assets/43734697/f50afd6f-bbd5-4e18-aca6-a7356a5d3f75
+
+No backward pass is supported yet. 
+Will think of ways to add a backward. 
+Depth-peeling ([4K4D](https://zju3dv.github.io/4k4d)) is too slow.
+Discussion welcomed.
+
+## Installation
+
+Install the latest release from PyPI:
+
+```shell
+pip install fast_gauss
+```
+
+Or the latest commit from GitHub:
+
+```shell
+pip install git+https://github.com/dendenxu/fast-gaussian-rasterization
+```
+
+No CUDA compilation is required to build `fast_gauss` since we're only shader-based for now.
+
+## Usage
+
+Replace the original import of `diff_gaussian_rasterization` with `fast_gauss`.
+
+For example, replace this:
+
+```python
+from diff_gaussian_rasterization import GaussianRasterizationSettings, GaussianRasterizer
+```
+
+with this:
+
+```python
+from fast_gauss import GaussianRasterizationSettings, GaussianRasterizer
+```
+
+And you're good to go.
+
+## Tips
+
+**Note: for the ultimate 5-10x performance increase, you'll need to let `fast_gauss`'s shader directly write to your desired framebuffer.**
+
+Currently, we are trying to automatically detect whether you're managing your own OpenGL context (i.e. opening up a GUI) by checking for the module `OpenGL` during the import of `fast_gauss`.
+If detected, all rendering commands will return `None`s and we will directly write to the bound framebuffer at the time of the draw call.
+Thus if you're running in a GUI (OpenGL-based) environment, the output of our rasterizer will be `None`s and does not require further processing.
+
+- [ ] TODO: Improve offline rendering performance.
+- [ ] TODO: Add a warning to the user if they're performing further processing on the returned values.
+
+**Note: the speedup is the most visible when the pixel-to-point ratio is high.**
+
+That is, when there are large Gaussians and very high-resolution rendering, the speedup is more visible.
+The CUDA-based software implementation is more resolution sensitive and for some extremely dense point clouds (> 1 million points), the CUDA implementation might be faster.
+This is because the typical rasterization-based pipeline on modern graphics hardware is [not well-optimized for small triangles](https://www.youtube.com/watch?v=hf27qsQPRLQ&list=WL).
+
+**Note: for best performance, cache the persistent results (for example, the 6 elements of the covariance matrix).**
+
+This is more of a general tip and not directly related to `fast_gauss`.
+However, the impact is more observable here since we haven't implemented a fast 3D covariance computation (from scales and rotations) in the shader yet.
+Only PyTorch implementation is available for now.
+
+When the point count increases, even the smallest `precomputation` can help.
+An example is the concatenation of the base 0-degree SH parameter and the rest, that small maneuver might cost us 10ms on a 3060 with 5 million points.
+Thus, store the concatenated tensors instead and avoid concatenating them in every frame.
+
+- [ ] TODO: Implement SH eval in the vertex shader.
+- [ ] TODO: Warn users if they're not properly precomputing the covariance matrix.
+- [ ] TODO: Implement a more optimized `OptimizedGaussians` for precomputing things and apply a cache. Similar to that of the vertex shader (see [Invokation frequency](https://www.khronos.org/opengl/wiki/Vertex_Shader)).
+
+**Note: it's recommended to pass in a CPU tensor in the `GaussianRasterizationSettings` to avoid explicit synchronizations for even better performance.**
+
+- [ ] TODO: Add a warning to the user if GPU tensors are detected.
+
+**Note: the second output of the `GaussianRasterizer` is not radii anymore (since we're not gonna use it for the backward pass), but the alpha values of the rendered image instead.**
+
+And the alpha channel content seems to be bugged currently, will debug.
+
+- [ ] TODO: Debug alpha channel values
+
+## TODOs
+
+- [ ] TODO: Apply more of the optimization techniques used by similar shaders, including packing the data into a texture and bit reduction during computation.
+- [ ] TODO: Thinks of ways for a backward pass. Welcome to discuss!
+- [ ] TODO: Compute covariance from scaling and rotation in the shader, currently it's on the CUDA (PyTorch) side.
+- [ ] TODO: Compute SH in the shader, currently it's on the CUDA (PyTorch) side.
+- [ ] TODO: Try to align the rendering results at the pixel level, small deviation exists currently.
+- [ ] TODO: Use indexed draw calls to minimize data passing and shuffling.
+- [ ] TODO: Do incremental sorting based on viewport change, currently it's a full resort on with CUDA (PyTorch).
+
+## Implementation
+
+**Guidelines**
+
+- Let the professionals do the work.
+  - Let GPU do the large-scale sorting.
+  - Let the graphics pipeline do the rasterization for us, not the other way around.
+  - Let OpenGL directly write to your framebuffer.
+- Minimize repeated work.
+  - Compute the 3D to 2D covariance projection only once for each Gaussian, instead of 4 times for the quad, enabled by the geometry shader.
+- Minimize stalls (minimize explicit synchronizations between GPU and CPU).
+  - Enabled by using `non_blocking=True` data passing and moving sync points to as early as possible.
+  - Boosted by the fact that we're sorting on the GPU, thus no need to perform synchronized host-to-device copies.
+
+**Why does a global sort work?**
+
+The OpenGL specification is somewhat vague but there's this reference:
+(in the 4th paragraph of section 2.1 of chapter 2 of this specification: https://registry.khronos.org/OpenGL/specs/gl/glspec44.core.pdf)
+
+> Commands are always processed in the order in which they are received, although there may be an indeterminate delay before the effects of a command are realized. This means, for example, that one primitive must be drawn completely before any subsequent one can affect the framebuffer.
+
+Thus if the order of the data in the vertex buffer (or as specified by an index buffer) is back-to-front, and alpha blending is enabled, you can count on OpenGL to correctly update the framebuffer in the correct back to front order.
+
+- [ ] TODO: Expand implementation details.
+
+## Environment
+
+This project requires you to have an NVIDIA GPU with the ability to interop between CUDA and OpenGL.
+Thus, WSL is [not supported](https://docs.nvidia.com/cuda/wsl-user-guide/index.html#features-not-yet-supported) and OSX (MacOS) is not supported.
+Tested on Linux and Windows.
+
+For offline rendering (the drop-in replacement of the original CUDA rasterizer), we also need a valid EGL environment.
+It can sometimes be hard to set up for virtualized machines. [Potential fix](https://github.com/zju3dv/4K4D/issues/27#issuecomment-2026747401).
+
+## Credits
+
+Inspired by those insanely fast WebGL-based 3DGS viewers:
+
+- [GaussianSplats3D](https://github.com/mkkellogg/GaussianSplats3D) for inspiring our vertex-geometry-fragment shader pipeline.
+- [gsplat.tech](https://gsplat.tech/).
+- [splat](https://github.com/antimatter15/splat).
+
+Using the algorithm and improvements from:
+
+- [diff-gaussian-rasterization](https://github.com/graphdeco-inria/diff-gaussian-rasterization) for the main Gaussian Splatting algorithm.
+- [diff_gauss](https://github.com/dendenxu/diff-gaussian-rasterization) for the fixed culling.
+
+CUDA-GL interop & EGL environment inspired by:
+
+- [4K4D](https://zju3dv.github.io/4k4d) where they(I) used the interop for depth-peeling.
+- [EasyVolcap](https://github.com/zju3dv/EasyVolcap) for the collection of utilities, including EGL setup.
+- [nvdiffrast](https://nvlabs.github.io/nvdiffrast) for their EGL context setup and CUDA-GL interop setup.
+
+## Citation
+
+```bibtex
+@misc{fast_gauss,  
+    title = {Fast Gaussian Rasterization},
+    howpublished = {GitHub},  
+    year = {2024},
+    url = {https://github.com/dendenxu/fast-gaussian-rasterization}
+}
+```
+
+### fast_gauss/__init__.py
+```
+import torch
+from torch import nn
+from typing import NamedTuple, List, Dict
+
+from .gsplat_utils import GSplatContextManager
+
+raster_context = None
+
+
+class GaussianRasterizationSettings(NamedTuple):
+    image_height: int
+    image_width: int
+    tanfovx: float
+    tanfovy: float
+    bg: torch.Tensor
+    scale_modifier: float
+    viewmatrix: torch.Tensor
+    projmatrix: torch.Tensor
+    campos: torch.Tensor
+    sh_degree: int = 3
+    prefiltered: bool = True
+    debug: bool = False
+    use_depth: bool = False
+    use_normal: bool = False
+    solid_mode: bool = False
+    edge_mode: bool = False
+
+
+class GaussianRasterizer:
+    def __init__(self,
+                 raster_settings: GaussianRasterizationSettings,
+                 init_buffer_size: int = 32768,
+                 init_texture_size: List[int] = [512, 512],
+                 dtype=torch.float,
+                 tex_dtype=torch.uint8):
+        super().__init__()
+        self.raster_settings = raster_settings
+
+        global raster_context
+        dtype = getattr(torch, dtype) if isinstance(dtype, str) else dtype
+        tex_dtype = getattr(torch, tex_dtype) if isinstance(tex_dtype, str) else tex_dtype
+        if raster_context is None or raster_context.dtype != dtype or raster_context.tex_dtype != tex_dtype:
+            raster_context = GSplatContextManager(init_buffer_size=init_buffer_size, init_texture_size=init_texture_size, dtype=dtype, tex_dtype=tex_dtype)  # only created once
+
+    def __call__(self,
+                 means3D: torch.Tensor,
+                 means2D: torch.Tensor,  # only to match the api, can be none, not used
+                 opacities: torch.Tensor,
+                 shs: torch.Tensor = None,
+                 colors_precomp: torch.Tensor = None,
+                 scales: torch.Tensor = None,
+                 rotations: torch.Tensor = None,
+                 cov3D_precomp: torch.Tensor = None
+                 ):
+
+        raster_settings = self.raster_settings
+
+        if (shs is None and colors_precomp is None) or (shs is not None and colors_precomp is not None):
+            raise Exception('Please provide excatly one of either SHs or precomputed colors!')
+
+        if ((scales is None or rotations is None) and cov3D_precomp is None) or ((scales is not None or rotations is not None) and cov3D_precomp is not None):
+            raise Exception('Please provide exactly one of either scale/rotation pair or precomputed 3D covariance!')
+
+        # Invoke CUDA-GL rasterization routine
+        return raster_context.rasterize_gaussians(
+            means3D,
+            means2D,
+            shs,
+            colors_precomp,
+            opacities,
+            scales,
+            rotations,
+            cov3D_precomp,
+            raster_settings,
+        )  # will output 3 channel rgb + 1 channel alpha, instead of radii
+```
+
+### fast_gauss/base_utils.py
+```
+from __future__ import annotations
+from copy import copy
+from typing import Mapping, TypeVar, Union, Iterable, Callable, Dict, List
+# these are generic type vars to tell mapping to accept any type vars when creating a type
+KT = TypeVar("KT")  # key type
+VT = TypeVar("VT")  # value type
+
+# TODO: move this to engine implementation
+# TODO: this is a special type just like Config
+# ? However, dotdict is a general purpose data passing object, instead of just designed for config
+# The only reason we defined those special variables are for type annotations
+# If removed, all will still work flawlessly, just no editor annotation for output, type and meta
+
+
+def return_dotdict(func: Callable):
+    def inner(*args, **kwargs):
+        return dotdict(func(*args, **kwargs))
+    return inner
+
+
+class DoNothing:
+    def __getattr__(self, name):
+        def method(*args, **kwargs):
+            pass
+        return method
+
+
+class dotdict(dict, Dict[KT, VT]):
+    """
+    This is the default data passing object used throughout the codebase
+    Main function: dot access for dict values & dict like merging and updates
+
+    a dictionary that supports dot notation 
+    as well as dictionary access notation 
+    usage: d = make_dotdict() or d = make_dotdict{'val1':'first'})
+    set attributes: d.val2 = 'second' or d['val2'] = 'second'
+    get attributes: d.val2 or d['val2']
+    """
+
+    def update(self, dct: Dict = None, **kwargs):
+        dct = copy(dct)  # avoid modifying the original dict, use super's copy to avoid recursion
+
+        # Handle different arguments
+        if dct is None:
+            dct = kwargs
+        elif isinstance(dct, Mapping):
+            dct.update(kwargs)
+        else:
+            super().update(dct, **kwargs)
+            return
+
+        # Recursive updates
+        for k, v in dct.items():
+            if k in self:
+
+                # Handle type conversions
+                target_type = type(self[k])
+                if not isinstance(v, target_type):
+                    # NOTE: bool('False') will be True
+                    if target_type == bool and isinstance(v, str):
+                        dct[k] = v == 'True'
+                    else:
+                        dct[k] = target_type(v)
+
+                if isinstance(v, dict):
+                    self[k].update(v)  # recursion from here
+                else:
+                    self[k] = v
+            else:
+                if isinstance(v, dict):
+                    self[k] = dotdict(v)  # recursion?
+                elif isinstance(v, list):
+                    self[k] = [dotdict(x) if isinstance(x, dict) else x for x in v]
+                else:
+                    self[k] = v
+        return self
+
+    def __init__(self, *args, **kwargs):
+        self.update(*args, **kwargs)
+
+    copy = return_dotdict(dict.copy)
+    fromkeys = return_dotdict(dict.fromkeys)
+
+    # def __hash__(self):
+    #     # return hash(''.join([str(self.values().__hash__())]))
+    #     return super(dotdict, self).__hash__()
+
+    # def __init__(self, *args, **kwargs):
+    #     super(dotdict, self).__init__(*args, **kwargs)
+
+    """
+    Uncomment following lines and 
+    comment out __getattr__ = dict.__getitem__ to get feature:
+    
+    returns empty numpy array for undefined keys, so that you can easily copy things around
+    TODO: potential caveat, harder to trace where this is set to np.array([], dtype=np.float32)
+    """
+
+    def __getitem__(self, key):
+        try:
+            return dict.__getitem__(self, key)
+        except KeyError as e:
+            raise AttributeError(e)
+    # MARK: Might encounter exception in newer version of pytorch
+    # Traceback (most recent call last):
+    #   File "/home/xuzhen/miniconda3/envs/torch/lib/python3.9/multiprocessing/queues.py", line 245, in _feed
+    #     obj = _ForkingPickler.dumps(obj)
+    #   File "/home/xuzhen/miniconda3/envs/torch/lib/python3.9/multiprocessing/reduction.py", line 51, in dumps
+    #     cls(buf, protocol).dump(obj)
+    # KeyError: '__getstate__'
+    # MARK: Because you allow your __getattr__() implementation to raise the wrong kind of exception.
+    # FIXME: not working typing hinting code
+    __getattr__: Callable[..., 'torch.Tensor'] = __getitem__  # type: ignore # overidden dict.__getitem__
+    __getattribute__: Callable[..., 'torch.Tensor']  # type: ignore
+    # __getattr__ = dict.__getitem__
+    __setattr__ = dict.__setitem__
+    __delattr__ = dict.__delitem__
+
+    # TODO: better ways to programmically define these special variables?
+
+    @property
+    def meta(self) -> dotdict:
+        # Special variable used for storing cpu tensor in batch
+        if 'meta' not in self:
+            self.meta = dotdict()
+        return self.__getitem__('meta')
+
+    @meta.setter
+    def meta(self, meta):
+        self.__setitem__('meta', meta)
+
+    @property
+    def output(self) -> dotdict:  # late annotation needed for this
+        # Special entry for storing output tensor in batch
+        if 'output' not in self:
+            self.output = dotdict()
+        return self.__getitem__('output')
+
+    @output.setter
+    def output(self, output):
+        self.__setitem__('output', output)
+
+    @property
+    def persistent(self) -> dotdict:  # late annotation needed for this
+        # Special entry for storing persistent tensor in batch
+        if 'persistent' not in self:
+            self.persistent = dotdict()
+        return self.__getitem__('persistent')
+
+    @persistent.setter
+    def persistent(self, persistent):
+        self.__setitem__('persistent', persistent)
+
+    @property
+    def type(self) -> str:  # late annotation needed for this
+        # Special entry for type based construction system
+        return self.__getitem__('type')
+
+    @type.setter
+    def type(self, type):
+        self.__setitem__('type', type)
+
+    def to_dict(self):
+        out = dict()
+        for k, v in self.items():
+            if isinstance(v, dotdict):
+                v = v.to_dict()  # recursion point
+            out[k] = v
+        return out
+
+
+class default_dotdict(dotdict):
+    def __init__(self, default_type=object, *arg, **kwargs):
+        super().__init__(*arg, **kwargs)
+        dict.__setattr__(self, 'default_type', default_type)
+
+    def __getitem__(self, key):
+        try:
+            return super().__getitem__(key)
+        except (AttributeError, KeyError) as e:
+            super().__setitem__(key, dict.__getattribute__(self, 'default_type')())
+            return super().__getitem__(key)
+```
+
+### fast_gauss/console_utils.py
+```
+from __future__ import annotations
+# fmt: off
+class Colors:
+    """ ANSI color codes """
+    BLACK = "\033[0;30m"
+    RED = "\033[0;31m"
+    GREEN = "\033[0;32m"
+    BROWN = "\033[0;33m"
+    BLUE = "\033[0;34m"
+    PURPLE = "\033[0;35m"
+    CYAN = "\033[0;36m"
+    LIGHT_GRAY = "\033[0;37m"
+    DARK_GRAY = "\033[1;30m"
+    LIGHT_RED = "\033[1;31m"
+    LIGHT_GREEN = "\033[1;32m"
+    YELLOW = "\033[1;33m"
+    LIGHT_BLUE = "\033[1;34m"
+    LIGHT_PURPLE = "\033[1;35m"
+    LIGHT_CYAN = "\033[1;36m"
+    LIGHT_WHITE = "\033[1;37m"
+    BOLD = "\033[1m"
+    FAINT = "\033[2m"
+    ITALIC = "\033[3m"
+    UNDERLINE = "\033[4m"
+    BLINK = "\033[5m"
+    NEGATIVE = "\033[7m"
+    CROSSED = "\033[9m"
+    END = "\033[0m"
+
+essential_packages = [
+    'pdbr', # will also install rich
+    'tqdm',
+    'ujson',
+    'ruamel.yaml',
+]
+
+try:
+    for package in essential_packages:
+        __import__(package)
+except ImportError as e:
+    print(f'{Colors.YELLOW}{Colors.BOLD}Missing package: {Colors.RED}{Colors.BOLD}{e}{Colors.YELLOW}{Colors.BOLD}, trying to hot install using pip...{Colors.END}')
+    import sys
+    import subprocess
+    subprocess.call([sys.executable, '-m', 'ensurepip'])
+    subprocess.call([sys.executable, '-m', 'pip', 'install', *essential_packages])
+
+
+# This file should serve as a drop in replacement for log_utils.py
+import os
+import re
+import sys
+import time
+import pdbr  # looks much better than ipdb...
+import rich
+import shutil
+import argparse
+import builtins
+import warnings
+import readline  # if you need to update stuff from input
+import numpy as np
+import ujson as json
+from bdb import BdbQuit
+from pdbr import RichPdb
+from ruamel.yaml import YAML
+from functools import partial
+from collections import deque
+from io import StringIO, BytesIO
+from typing import List, Dict, Union, Optional, IO, Callable, Any, Iterable, Type, cast
+from os.path import join, exists, dirname, split, splitext, abspath, relpath, isdir, isfile, basename
+
+from rich import traceback, pretty
+from rich.live import Live
+from rich.text import Text
+from rich.style import Style
+from rich.control import Control
+from rich.console import Console
+from rich.progress import Progress
+from rich.table import Table, Column
+from rich.pretty import Pretty, pretty_repr, pprint
+from rich.progress import BarColumn, TimeElapsedColumn, TimeRemainingColumn, filesize, ProgressColumn
+from tqdm.std import tqdm as std_tqdm
+from tqdm.rich import tqdm_rich, FractionColumn, RateColumn
+from .base_utils import default_dotdict, dotdict, DoNothing
+
+pdbr_theme = 'ansi_dark'
+pdbr.utils.set_traceback(pdbr_theme)
+RichPdb._theme = pdbr_theme
+# fmt: on
+
+
+class MyYAML(YAML):
+    def dumps(self, obj: Union[dict, dotdict]):
+        if isinstance(obj, dotdict): obj = obj.to_dict()
+        buf = BytesIO()
+        self.dump(obj, buf)  # ?: is the dumping also in utf-8?
+        return buf.getvalue().decode(encoding='utf-8', errors='strict')[:-1]  # remove \n
+
+
+yaml = MyYAML()
+yaml.default_flow_style = None
+
+warnings.filterwarnings("ignore")  # ignore disturbing warnings
+os.environ["PYTHONBREAKPOINT"] = "fast_gauss.console_utils.set_trace"
+
+slim_width = None
+verbose_width = None
+slim_log_time = True
+slim_log_path = True
+slim_time_format = '%H:%M:%S'
+# slim_time_format = ''
+verbose_time_format = '%Y-%m-%d %H:%M:%S.%f'
+
+# fmt: off
+if 'easyvolcap.utils.console_utils' in sys.modules:
+    console = sys.modules['easyvolcap.utils.console_utils'].console
+    do_nothing_console = sys.modules['easyvolcap.utils.console_utils'].do_nothing_console
+    progress = sys.modules['easyvolcap.utils.console_utils'].progress
+    live = sys.modules['easyvolcap.utils.console_utils'].live
+    log = sys.modules['easyvolcap.utils.console_utils'].log
+    bold = sys.modules['easyvolcap.utils.console_utils'].bold
+    green = sys.modules['easyvolcap.utils.console_utils'].green
+    log(green('[FAST GAUSS] Reusing console from easyvolcap.utils.console_utils'))
+else:
+    do_nothing_console = Console(file=StringIO(), stderr=StringIO())
+    console = Console(soft_wrap=True, tab_size=4, log_time_format=slim_time_format, width=slim_width, log_time=slim_log_time, log_path=slim_log_path)
+    progress = Progress(console=console, expand=True)  # destroyed
+    live = Live(console=console, refresh_per_second=10)  # destroyed
+# fmt: on
+
+traceback.install(console=console, width=slim_width)  # for colorful tracebacks
+pretty.install(console=console)
+
+NoneType = type(None)
+
+# NOTE: we use console.log for general purpose logging
+# Need to check its reliability and integratability
+# Since the string markup might mess things up
+# TODO: maybe make the console object confiugrable?
+
+
+class without_live:
+    def __enter__(self):
+        stop_live()
+        stop_prog()
+
+    def __exit__(self, exc_type, exc_val, exc_tb):
+        start_live()
+        start_prog()
+
+
+def stop_live():
+    global live
+    if live is None: return
+    live.stop()
+    live = None
+
+
+def start_live():
+    global live
+    if live is not None:
+        live.start()
+        return
+    live = Live(console=console, refresh_per_second=1)
+    live.start()
+
+
+def stop_prog():
+    global progress
+    if progress is None: return
+    progress.stop()
+    progress = None
+
+
+def start_prog():
+    global progress
+    if progress is not None: return
+    progress = Progress(console=console, expand=True)
+
+
+def stacktrace(extra_lines=0, **kwargs):  # be consise
+    # Print colorful stacktrace
+    kwargs.update(dict(extra_lines=extra_lines))
+    console.print_exception(**kwargs, width=slim_width)  # messy formats
+
+
+breakpoint_disabled = False  # gives user a ways to manually enable or disable all breakpoints in the project
+
+
+def disable_breakpoint():
+    global breakpoint_disabled
+    breakpoint_disabled = True
+
+
+def enable_breakpoint():
+    global breakpoint_disabled
+    breakpoint_disabled = False
+
+
+progress_disabled = False
+standard_console = console
+
+
+def disable_console():
+    global console, standard_console, do_nothing_console
+    console = do_nothing_console
+
+
+def enable_console():
+    global console, standard_console, do_nothing_console
+    console = standard_console
+
+
+def disable_progress():
+    global progress_disabled
+    progress_disabled = True
+
+
+def enable_progress():
+    global progress_disabled
+    progress_disabled = False
+
+
+verbose_log = False
+
+
+def disable_verbose_log():
+    global verbose_log
+    verbose_log = False
+    console.width = slim_width
+    console._log_render.show_time = slim_log_time
+    console._log_render.show_path = slim_log_path
+    console._log_render.time_format = slim_time_format
+
+
+def enable_verbose_log():
+    global verbose_log
+    verbose_log = True
+    console.width = verbose_width
+    console._log_render.show_time = True
+    console._log_render.show_path = True
+    console._log_render.time_format = verbose_time_format
+
+
+disable_verbose_log()
+
+
+def set_trace(*args, **kwargs):
+    if breakpoint_disabled: return
+    stop_live()
+    stop_prog()
+    rich_pdb = RichPdb()
+    rich_pdb.set_trace(sys._getframe(1))
+
+
+def post_mortem(*args, **kwargs):
+    stop_live()
+    stop_prog()
+    pdbr.post_mortem()  # break on the last exception's stack for inpection
+
+
+def line(obj):
+    """
+    Represent objects in oneline for prettier printing
+    """
+    s = pretty_repr(obj, indent_size=0)
+    s = s.replace('\n', ' ')
+    s = re.sub(' {2,}', ' ', s)
+    return s
+
+
+def path(string):  # add path markup
+    string = str(string)
+    if exists(string):
+        return Text(string, style=Style(bold=True, color='blue', link=f'file://{abspath(string)}'))
+    else:
+        # return Text(string, style=Style(bold=True, color='blue'))
+        return blue(string)
+
+
+def red(string: str) -> str: return f'[red bold]{string}[/]'
+def blue(string: str) -> str: return f'[blue bold]{string}[/]'
+def cyan(string: str) -> str: return f'[cyan bold]{string}[/]'
+def pink(string: str) -> str: return f'[bright_magenta bold]{string}[/]'
+def green(string: str) -> str: return f'[green bold]{string}[/]'
+def yellow(string: str) -> str: return f'[yellow bold]{string}[/]'
+def magenta(string: str) -> str: return f'[magenta bold]{string}[/]'
+def color(string: str, color: str): return f'[{color} bold]{string}[/]'
+def bold(string: str): return f'[bold]{string}[/]'
+
+
+def red_slim(string: str) -> str: return f'[red]{string}[/]'
+def blue_slim(string: str) -> str: return f'[blue]{string}[/]'
+def cyan_slim(string: str) -> str: return f'[cyan]{string}[/]'
+def pink_slim(string: str) -> str: return f'[bright_magenta]{string}[/]'
+def green_slim(string: str) -> str: return f'[green]{string}[/]'
+def yellow_slim(string: str) -> str: return f'[yellow]{string}[/]'
+def magenta_slim(string: str) -> str: return f'[magenta]{string}[/]'
+def color_slim(string: str, color: str): return f'[{color}]{string}[/]'
+def slim(string: str): return f'{string}'
+
+
+def markup_to_ansi(string: str) -> str:
+    """
+    Convert rich-style markup to ANSI sequences for command-line formatting.
+
+    Args:
+        string: Text with rich-style markup.
+
+    Returns:
+        Text formatted via ANSI sequences.
+    """
+    with console.capture() as out:
+        console.print(string, soft_wrap=True)
+    return out.get()
+
+
+def get_log_prefix(back=2,
+                   module_color=blue,
+                   func_color=green,
+                   ):
+    frame = sys._getframe(back)  # with another offset
+    func = frame.f_code.co_name
+    module = frame.f_globals['__name__'] if frame is not None else ''
+    return module_color(module) + " -> " + func_color(func) + ":"
+
+
+def log(*stuff,
+        back=1,
+        file: Optional[IO[str]] = None,
+        no_prefix=False,
+        module_color=blue,
+        func_color=green,
+        console: Optional[Console] = console,
+        **kwargs):
+    """
+    Perform logging using the built in shared logger
+    """
+    writer = console if file is None else Console(file=file, soft_wrap=True, tab_size=4, log_time_format=verbose_time_format)  # shared
+    writer._log_render.time_format = verbose_time_format if verbose_log else slim_time_format
+    if no_prefix or not verbose_log: writer.log(*stuff, _stack_offset=2, **kwargs)
+    else: writer.log(get_log_prefix(back + 1, module_color, func_color), *stuff, _stack_offset=2, **kwargs)
+
+
+def run(cmd,
+        quite=False,
+        dry_run=False,
+        skip_failed=False,
+        invokation=os.system,  # or subprocess.run
+        ):
+    """
+    Run a shell command and print the command to the console.
+
+    Args:
+        cmd (str or list): The command to run. If a list, it will be joined with spaces.
+        quite (bool): If True, suppress console output.
+        dry_run (bool): If True, print the command but do not execute it.
+
+    Raises:
+        RuntimeError: If the command returns a non-zero exit code.
+
+    Returns:
+        None
+    """
+    if isinstance(cmd, list):
+        cmd = ' '.join(list(map(str, cmd)))
+    func = sys._getframe(1).f_code.co_name
+    if not quite:
+        cmd_color = 'cyan' if not cmd.startswith('rm') else 'red'
+        cmd_color = 'green' if dry_run else cmd_color
+        dry_msg = magenta('[dry_run]: ') if dry_run else ''
+        log(yellow(func), '->', green(invokation.__name__) + ":", dry_msg + color(cmd, cmd_color), no_prefix=True)
+        # print(color(cmd, cmd_color), soft_wrap=False)
+    if not dry_run:
+        code = invokation(cmd)
+    else:
+        code = 0
+    if code != 0 and not skip_failed:
+        log(red(code), "<-", yellow(func) + ":", red(cmd), no_prefix=True)
+        # print(red(cmd), soft_wrap=True)
+        raise RuntimeError(f'{code} <- {func}: {cmd}')
+    else:
+        return code  # or output
+
+
+def read(cmd: str, *args, **kwargs):
+    def get_output(cmd: str):
+        # return subprocess.run(cmd.split(' '), stdout=subprocess.PIPE, shell=True).stdout
+        return os.popen(cmd).read()
+    return run(cmd, invokation=get_output, skip_failed=True, *args, **kwargs)
+
+
+def run_if_not_exists(cmd, outname, *args, **kwargs):
+    # whether a file exists, whether a directory has more than 3 elements
+    # if (os.path.exists(outname) and os.path.isfile(outname)) or (os.path.isdir(outname) and len(os.listdir(outname)) >= 3):
+    if os.path.exists(outname):
+        log(yellow('Skipping:'), cyan(cmd))
+    else:
+        run(cmd, *args, **kwargs)
+
+
+def catch_throw(fatal: Union[Callable, bool] = True):
+    def wrapper(func: Callable):
+        # This function catches errors and stops the execution for easier inspection
+        def inner(*args, **kwargs):
+            try:
+                return func(*args, **kwargs)
+            except Exception as e:
+                if isinstance(e, BdbQuit): return  # so that nested catch_throw will respect each other
+                log(red(f'Runtime exception: {e}'))
+                stacktrace()
+                post_mortem()
+                if fatal: exit(1)  # catched variable
+        return inner
+
+    if callable(fatal):
+        func = fatal
+        fatal = True
+        return wrapper(func)  # just a regular function decorator
+    else:
+        fatal = fatal  # whether this is a fatal post_mortem
+        return wrapper
+
+
+def print(*stuff,
+          sep: str = " ",
+          end: str = "\n",
+          file: Optional[IO[str]] = None,
+          flush: bool = False,
+          console: Optional[Console] = console,
+          **kwargs,
+          ):
+    r"""
+    Print object(s) supplied via positional arguments.
+    This function has an identical signature to the built-in print.
+    For more advanced features, see the :class:`~rich.console.Console` class.
+
+    Args:
+        sep (str, optional): Separator between printed objects. Defaults to " ".
+        end (str, optional): Character to write at end of output. Defaults to "\\n".
+        file (IO[str], optional): File to write to, or None for stdout. Defaults to None.
+        flush (bool, optional): Has no effect as Rich always flushes output. Defaults to False.
+
+    """
+    writer = console if file is None else Console(file=file, soft_wrap=True, tab_size=4, log_time_format=verbose_time_format)  # shared
+    writer.print(*stuff, sep=sep, end=end, **kwargs)
+
+
+# https://github.com/tqdm/tqdm/blob/master/tqdm/rich.py
+# this is really nice
+# if we want to integrate this into our own system, just import the tqdm from here
+
+
+class PathColumn(ProgressColumn):
+    def __init__(self, **kwargs):
+        filename, line_no, locals = console._caller_frame_info(2)
+        link_path = None if filename.startswith("<") else os.path.abspath(filename)
+        path = filename.rpartition(os.sep)[-1]
+        path_text = Text(style='log.path')
+        path_text.append(
+            path, style=f"link file://{link_path}" if link_path else ""
+        )
+        if line_no:
+            path_text.append(":")
+            path_text.append(
+                f"{line_no}",
+                style=f"link file://{link_path}#{line_no}" if link_path else "",
+            )
+        self.path_text = path_text
+        super().__init__(**kwargs)
+
+    def render(self, task):
+        return self.path_text
+
+
+class RateColumn(ProgressColumn):
+    """Renders human readable transfer speed."""
+
+    def __init__(self, unit="", unit_scale=False, unit_divisor=1000, **kwargs):
+        self.unit = unit
+        self.unit_scale = unit_scale
+        self.unit_divisor = unit_divisor
+        super().__init__(**kwargs)
+
+    def render(self, task):
+        """Show data transfer speed."""
+        speed = task.speed
+        if speed is None:
+            return Text(f"  ?  {self.unit}/s", style="progress.data.speed")
+        if self.unit_scale:
+            unit, suffix = filesize.pick_unit_and_suffix(
+                speed,
+                ["", "K", "M", "G", "T", "P", "E", "Z", "Y"],
+                self.unit_divisor,
+            )
+        else:
+            unit, suffix = filesize.pick_unit_and_suffix(speed, [""], 1)
+        # precision = 3 if unit == 1 else 6
+        ratio = speed / unit
+
+        precision = 3 - int(np.log(ratio) / np.log(10))
+        precision = max(0, precision)
+        return Text(f"{ratio:,.{precision}f} {suffix}{self.unit}/s",
+                    style="progress.data.speed")
+        # ratio = speed / unit
+        # if ratio > 1:
+        #     return Text(f"{ratio:,.{precision}f} {suffix}{self.unit}/s",
+        #                 style="progress.data.speed")
+        # else:
+        #     return Text(f"{1/ratio:,.{precision}f} {suffix}s/{self.unit}",
+        #                 style="progress.data.speed")
+
+
+class PrefixColumn(ProgressColumn):
+    def __init__(self, content: str = None, **kwargs):
+        self.content = content
+        super().__init__(**kwargs)
+
+    def render(self, task):
+        if self.content is not None:
+            return self.content
+        else:
+            log_prefix = get_log_prefix(back=3)
+            return log_prefix
+
+
+class TimeColumn(ProgressColumn):
+    def render(self, task):
+        log_time = console.get_datetime()
+        log_time_display = Text(log_time.strftime(verbose_time_format if verbose_log else slim_time_format), style='log.time')
+        return log_time_display
+
+
+class tqdm_rich(std_tqdm):
+    def __init__(self, *args, back=2, **kwargs):
+        # This popping happens before initiating tqdm
+        _prog = kwargs.pop('progress', None)
+
+        # Thanks! tqdm!
+        super().__init__(*args, **kwargs)
+        self.disable = self.disable or progress_disabled
+        if self.disable: return
+
+        # Whatever for now
+        stop_live()
+        start_prog()
+        _prog = _prog if _prog is not None else progress
+
+        # Use the predefined progress object
+        d = self.format_dict
+        self._prog = _prog
+        self._prog.columns = \
+            ((TimeColumn(), ) if verbose_log or slim_log_time else ()) + \
+            ((PrefixColumn(content=get_log_prefix(back=back)),) if verbose_log else ()) + \
+            (
+                "[progress.description]{task.description}"
+                "[progress.percentage]{task.percentage:>4.0f}%",
+                BarColumn(),
+                FractionColumn(unit_scale=d['unit_scale'], unit_divisor=d['unit_divisor']),
+                TimeElapsedColumn(), "<", TimeRemainingColumn(),
+                RateColumn(unit=d['unit'], unit_scale=d['unit_scale'], unit_divisor=d['unit_divisor']),
+            ) + \
+            ((PathColumn(table_column=Column(ratio=1.0, justify='right')),) if verbose_log or slim_log_path else ())
+        self._prog.start()
+        self._task_id = self._prog.add_task(self.desc or "", **d)
+
+    def close(self):
+        if self.disable: return
+        self.disable = True  # prevent multiple closures
+
+        self.display(refresh=True)
+        if self._prog.finished:
+            self._prog.stop()
+            for task_id in self._prog.task_ids:
+                self._prog.remove_task(task_id)
+
+            # Whatever for now
+            stop_prog()
+
+    def clear(self, *_, **__):
+        pass
+
+    def display(self, refresh=True, *_, **__):
+        if not hasattr(self, '_prog'):
+            return
+        if self._task_id not in self._prog.task_ids:
+            return
+        self._prog.update(self._task_id, completed=self.n, description=self.desc, refresh=refresh)
+
+    def reset(self, total=None):
+        """
+        Resets to 0 iterations for repeated use.
+
+        Parameters
+        ----------
+        total  : int or float, optional. Total to use for the new bar.
+        """
+        if hasattr(self, '_prog'):
+            self._prog.reset(self._task_id, total=total)
+        super(tqdm_rich, self).reset(total=total)
+
+
+tqdm = tqdm_rich
+
+
+def time_function(sync_cuda: bool = True):
+    """Decorator: time a function call"""
+    def inner(*args, func: Callable = lambda x: x, **kwargs):
+        start = time.perf_counter()
+        ret = func(*args, **kwargs)
+        if sync_cuda:
+            import torch  # don't want to place this outside
+            torch.cuda.synchronize()
+        end = time.perf_counter()
+        name = getattr(func, '__name__', repr(func))
+        log(name, f"{(end - start) * 1000:8.3f} ms", back=2)
+        return ret
+
+    def wrapper(func: Callable):
+        return partial(inner, func=func)
+
+    if isinstance(sync_cuda, bool):
+        return wrapper
+    else:
+        func = sync_cuda
+        sync_cuda = True
+        return partial(inner, func=func)
+
+
+class Timer:
+    def __init__(self,
+                 name='base',
+                 exp_name='',
+                 record_dir: str = 'data/timing',
+                 disabled: bool = False,
+                 sync_cuda: bool = True,
+                 record_to_file: bool = False,
+                 ):
+        self.sync_cuda = sync_cuda
+        self.disabled = disabled
+        self.name = name
+        self.exp_name = exp_name
+        self.start_time = time.perf_counter()  # manually record another start time incase timer is disabled during initialization
+        self.start()  # you can always restart multiple times to reuse this timer
+
+        self.record_to_file = record_to_file
+        if self.record_to_file:
+            self.timing_record = dotdict()
+
+        self.event_acc = dotdict()
+        self.event_last = dotdict()
+        self.event_denom = dotdict()
+
+    def __enter__(self):
+        self.start()
+
+    def start(self):
+        if self.disabled: return self
+        if self.sync_cuda:
+            import torch  # don't want to place this outside
+            try: torch.cuda.synchronize()
+            except: pass
+        self.start_time = time.perf_counter()
+        return self
+
+    def __exit__(self, exc_type=None, exc_value=None, traceback=None):
+        self.stop()
+
+    def stop(self, print=True, back=2):
+        if self.disabled: return 0
+        if self.sync_cuda:
+            import torch  # don't want to place this outside
+            try: torch.cuda.synchronize()
+            except: pass
+        start = self.start_time
+        end = time.perf_counter()
+        if print: log(f"{(end - start) * 1000:8.3f} ms", self.name, back=back)  # 3 decimals, 3 digits
+        return end - start  # return the difference
+
+    def record(self, event: str = '', log_interval: float = -1):
+        if self.disabled: return 0
+        self.name = event
+
+        diff = self.stop(print=bool(event) and log_interval <= 0, back=3)
+        curr = time.perf_counter()
+        acc = self.event_acc.get(event, 0)
+        last = self.event_last.get(event, 0)
+        denom = self.event_denom.get(event, 0)
+
+        if (curr - last) > log_interval and log_interval > 0:  # if this is true, will never have printed
+            log(f"{(acc + diff) / (denom + 1) * 1000:8.3f} ms", event, back=3)
+            self.event_acc[event] = 0
+            self.event_denom[event] = 0
+            self.event_last[event] = curr
+        else:
+            self.event_acc[event] = acc + diff
+            self.event_denom[event] = denom + 1
+
+        if self.record_to_file and event:
+            if event not in self.timing_record:
+                self.timing_record[event] = []
+            self.timing_record[event].append(diff)
+
+            with open(join(self.record_dir, f'{self.exp_name}.json'), 'w') as f:
+                json.dump(self.timing_record, f, indent=4)
+
+        self.start()
+        return diff
+
+
+def run_once(f):
+    def wrapper(*args, **kwargs):
+        if not wrapper.has_run:
+            wrapper.has_run = True
+            return f(*args, **kwargs)
+    wrapper.has_run = False
+    return wrapper
+
+
+rows = None
+
+
+def display_table(states: dotdict,
+                  styles=default_dotdict(
+                      NoneType,
+                      {
+                          'eta': 'cyan',
+                          'epoch': 'cyan',
+                          'img_loss': 'magenta',
+                          'psnr': 'magenta',
+                          'loss': 'magenta',
+                          'data': 'blue',
+                          'batch': 'blue',
+                      }
+                  ),
+                  maxlen=5,
+                  ):
+
+    def create_table(columns: List[str],
+                     rows: List[List[str]] = [],
+                     styles=default_dotdict(NoneType),
+                     ):
+        try:
+            from easyvolcap.engine import cfg
+            title = cfg.exp_name  # MARK: global config & circular imports
+        except Exception as e:
+            title = None
+        table = Table(title=title, show_footer=True, show_header=False, box=None)  # move the row names down at the bottom
+        for col in columns:
+            table.add_column(footer=Text(col, styles[col]), style=styles[col], justify="center")
+        for row in rows:
+            table.add_row(*row)
+        return table
+
+    keys = list(states.keys())
+    values = list(map(str, states.values()))
+    width, height = shutil.get_terminal_size(fallback=(120, 50))
+    maxlen = max(min(height - 8, maxlen), 1)  # 5 would fill the terminal
+
+    global rows
+    if rows is None:
+        rows = deque(maxlen=maxlen)
+    if rows.maxlen != maxlen:
+        rows = deque(list(rows)[-maxlen + 1:], maxlen=maxlen)  # save space for header and footer
+    rows.append(values)
+
+    # MARK: check performance hit of these calls
+    start_live()
+    table = create_table(keys, rows, styles)
+    live.update(table)  # disabled autorefresh
+    return table
+
+
+def build_parser(d: dict, parser: argparse.ArgumentParser = None, **kwargs):
+    """
+    args = dotdict(vars(build_parser(args, description=__doc__).parse_args()))
+    """
+    if 'description' in kwargs:
+        kwargs['description'] = markup_to_ansi(green(kwargs['description']))
+
+    if parser is None:
+        parser = argparse.ArgumentParser(formatter_class=lambda prog: argparse.RawTextHelpFormatter(prog, max_help_position=140), **kwargs)
+
+    help_pattern = f'default = {blue("{}")}'
+
+    for k, v in d.items():
+        if isinstance(v, dict):
+            if 'default' in v:
+                # Use other params as kwargs
+                d = v.pop('default')
+                t = v.pop('type', type(d))
+                # h = v.pop('help', markup_to_ansi(help_pattern.format(d)))
+                h = (v.pop('help') + '; ' + markup_to_ansi(help_pattern.format(d))) if 'help' in v else markup_to_ansi(help_pattern.format(d))
+                parser.add_argument(f'--{k}', default=d, type=t, help=h, **v)
+            else:
+                # TODO: Add argparse group here
+                pass
+        elif isinstance(v, list):
+            parser.add_argument(f'--{k}', type=type(v[0]) if len(v) else str, default=v, nargs='+', help=markup_to_ansi(help_pattern.format(v)))
+        elif isinstance(v, bool):
+            t = 'no_' + k if v else k
+            parser.add_argument(f'--{t}', action='store_false' if v else 'store_true', dest=k, help=markup_to_ansi(help_pattern.format(v)))
+        else:
+            parser.add_argument(f'--{k}', type=type(v), default=v, help=markup_to_ansi(help_pattern.format(v)))
+
+    return parser
+
+
+def warn_once(message: str):
+    if not hasattr(warn_once, 'warned'):
+        warn_once.warned = set()
+    if message not in warn_once.warned:
+        log(yellow(message))
+        warn_once.warned.add(message)
+```
+
+### fast_gauss/cuda_utils.py
+```
+import torch
+
+
+def register_memory(x: torch.Tensor):
+    """
+    The implementation of registering memory for fast HtoD copy is ultimately quite tricky due to the fact that
+    some of the API for cuda and pytorch are not so robust on Windows (after an Windows 11 Insider update)
+    Previously we used torch.cuda.cudart().cudaHostRegister and torch.cuda.cudart().cudaHostUnregister
+    Everything is breaking a part, emitting strange errors like FIND CuDNN for convolution & invalid arguments & etc.
+
+    RuntimeError: CUDA error: invalid argument # ???
+    RuntimeError: FIND was unable to find an engine to execute this computation # disable benchmarking
+    CudaError: part or all of the requested memory range is already mapped (cudaError.???) # make memory contiguous
+
+    However the naive x.pin_memory() is not working either, the registered memory are too large
+    Pinning 128MB results in 256MB shared memory usage on Windows, which is not explained anywhere...
+
+    Thus we manually create a new tensor with pin_memory set to True, this should call cudaHostMalloc instead of registering
+    This code path is more thoroughly tested by the PyTorch community since the async dataloading involves this
+    And as experiments shown, this combines the benefits of the previous two implementations
+
+    And no, it doesn't work.
+    """
+    # 1:
+    # https://docs.nvidia.com/cuda/cuda-runtime-api/group__CUDART__TYPES.html#group__CUDART__TYPES_1g564c32d0e6032a9383494b6e63de7bd0
+    # x = x.contiguous()
+    # torch.cuda.check_error(cudart.cudaHostRegister(x.data_ptr(), x.numel() * x.element_size(), 0x08))
+    # torch.cuda.check_error(cudart.cudaHostRegister(x.data_ptr(), x.numel() * x.element_size(), 0x0))
+    # torch.cuda.synchronize()  # ???
+    # torch.cuda.empty_cache()  # ???
+    # return x
+
+    # 2:
+    # y = torch.empty_like(x, pin_memory=True)  # why extra memory usage here?
+    # y = y.copy_(x)
+    # return y
+
+    # 3:
+    x = x.pin_memory()
+    return x
+
+    # TODO: SWITCH THIS BASED ON PLATFORM
+    # 4:
+    # y = torch.empty_like(x, memory_format=torch.contiguous_format, pin_memory=False)
+    # torch.cuda.check_error(cudart.cudaHostRegister(y.data_ptr(), y.numel() * y.element_size(), 0x08))
+    # y = y.copy_(x)
+    # return y
+
+    # 5:
+    # from cuda import cudart
+    # CHECK_CUDART_ERROR(cudart.cudaHostRegister(x.data_ptr(), x.numel() * x.element_size(), cudart.cudaHostRegisterReadOnly))
+    # return x
+
+
+def unregister_memory(x: torch.Tensor):
+    # torch.cuda.check_error(cudart.cudaHostUnregister(x.data_ptr()))
+    # return x
+
+    # from cuda import cudart
+    # CHECK_CUDART_ERROR(cudart.cudaHostUnregister(x.data_ptr()))
+    # return x
+    y = torch.empty_like(x, pin_memory=False)
+    y.copy_(x)
+    return x
+
+
+def FORMAT_CUDART_ERROR(err):
+    from cuda import cudart
+    return (
+        f"{cudart.cudaGetErrorName(err)[1].decode('utf-8')}({int(err)}): "
+        f"{cudart.cudaGetErrorString(err)[1].decode('utf-8')}"
+    )
+
+
+def CHECK_CUDART_ERROR(args):
+    from cuda import cudart
+
+    if isinstance(args, tuple):
+        assert len(args) >= 1
+        err = args[0]
+        if len(args) == 1:
+            ret = None
+        elif len(args) == 2:
+            ret = args[1]
+        else:
+            ret = args[1:]
+    else:
+        err = args
+        ret = None
+
+    assert isinstance(err, cudart.cudaError_t), type(err)
+    if err != cudart.cudaError_t.cudaSuccess:
+        raise RuntimeError(FORMAT_CUDART_ERROR(err))
+
+    return ret
+```
+
+### fast_gauss/data_utils.py
+```
+import torch
+import struct
+from .console_utils import *
+
+
+def to_cuda(batch, device="cuda", ignore_list: bool = False) -> torch.Tensor:
+    if isinstance(batch, (tuple, list)):
+        batch = [to_cuda(b, device, ignore_list) for b in batch]
+    elif isinstance(batch, dict):
+        batch = dotdict({k: (to_cuda(v, device, ignore_list) if k != "meta" else v) for k, v in batch.items()})
+    elif isinstance(batch, torch.Tensor):
+        batch = batch.to(device, non_blocking=True)
+    else:  # numpy and others
+        batch = torch.as_tensor(batch, device=device)
+    return batch
+
+
+def to_x_if(batch, x: str, cond):
+    if isinstance(batch, (tuple, list)):
+        batch = [to_x(b, x) for b in batch]
+    elif isinstance(batch, dict):
+        batch = dotdict({k: to_x(v, x) for k, v in batch.items()})
+    elif isinstance(batch, torch.Tensor):
+        if cond(x):
+            batch = batch.to(x, non_blocking=True)
+    elif isinstance(batch, np.ndarray):  # numpy and others
+        if cond(x):
+            batch = torch.as_tensor(batch).to(x, non_blocking=True)
+    else:
+        pass  # do nothing here, used for typed in to_x for methods
+        # FIXME: Incosistent behavior here, might lead to undebuggable bugs
+    return batch
+
+
+def to_x(batch, x: str) -> Union[torch.Tensor, dotdict[str, torch.Tensor]]:
+    if isinstance(batch, (tuple, list)):
+        batch = [to_x(b, x) for b in batch]
+    elif isinstance(batch, dict):
+        batch = dotdict({k: to_x(v, x) for k, v in batch.items()})
+    elif isinstance(batch, torch.Tensor):
+        batch = batch.to(x, non_blocking=True)
+    elif isinstance(batch, np.ndarray):  # numpy and others
+        batch = torch.as_tensor(batch).to(x, non_blocking=True)
+    else:
+        pass  # do nothing here, used for typed in to_x for methods
+        # FIXME: Incosistent behavior here, might lead to undebuggable bugs
+    return batch
+
+
+def to_tensor(batch, ignore_list: bool = False) -> Union[torch.Tensor, dotdict[str, torch.Tensor]]:
+    if isinstance(batch, (tuple, list)) and not ignore_list:
+        batch = [to_tensor(b, ignore_list) for b in batch]
+    elif isinstance(batch, dict):
+        batch = dotdict({k: to_tensor(v, ignore_list) for k, v in batch.items()})
+    elif isinstance(batch, torch.Tensor):
+        pass
+    else:  # numpy and others
+        batch = torch.as_tensor(batch)
+    return batch
+
+
+def to_list(batch, non_blocking=False) -> Union[List, Dict, np.ndarray]:  # almost always exporting, should block
+    if isinstance(batch, (tuple, list)):
+        batch = [to_list(b, non_blocking) for b in batch]
+    elif isinstance(batch, dict):
+        batch = dotdict({k: to_list(v, non_blocking) for k, v in batch.items()})
+    elif isinstance(batch, torch.Tensor):
+        batch = batch.detach().to('cpu', non_blocking=non_blocking).numpy().tolist()
+    elif isinstance(batch, torch.Tensor):
+        batch = batch.tolist()
+    else:  # others, keep as is
+        pass
+    return batch
+
+
+def to_cpu(batch, non_blocking=False, ignore_list: bool = False) -> torch.Tensor:
+    if isinstance(batch, (tuple, list)) and not ignore_list:
+        batch = [to_cpu(b, non_blocking, ignore_list) for b in batch]
+    elif isinstance(batch, dict):
+        batch = dotdict({k: to_cpu(v, non_blocking, ignore_list) for k, v in batch.items()})
+    elif isinstance(batch, torch.Tensor):
+        batch = batch.detach().to('cpu', non_blocking=non_blocking)
+    else:  # numpy and others
+        batch = torch.as_tensor(batch, device="cpu")
+    return batch
+
+
+def to_numpy(batch, non_blocking=False, ignore_list: bool = False) -> Union[List, Dict, np.ndarray]:  # almost always exporting, should block
+    if isinstance(batch, (tuple, list)) and not ignore_list:
+        batch = [to_numpy(b, non_blocking, ignore_list) for b in batch]
+    elif isinstance(batch, dict):
+        batch = dotdict({k: to_numpy(v, non_blocking, ignore_list) for k, v in batch.items()})
+    elif isinstance(batch, torch.Tensor):
+        batch = batch.detach().to('cpu', non_blocking=non_blocking).numpy()
+    else:  # numpy and others
+        batch = np.asarray(batch)
+    return batch
+
+
+def get_mesh(verts: torch.Tensor, faces: torch.Tensor, uv: torch.Tensor = None, img: torch.Tensor = None, colors: torch.Tensor = None, normals: torch.Tensor = None, filename: str = "default.ply"):
+    from trimesh import Trimesh
+    from trimesh.visual import TextureVisuals
+    from trimesh.visual.material import PBRMaterial, SimpleMaterial
+    from easyvolcap.utils.mesh_utils import face_normals, loop_subdivision
+
+    verts, faces = to_numpy([verts, faces])
+    verts = verts.reshape(-1, 3)
+    faces = faces.reshape(-1, 3)
+    # MARK: used process=False here to preserve vertex order
+    mesh = Trimesh(verts, faces, process=False)
+    if colors is None:
+        # colors = verts
+        colors = face_normals(torch.from_numpy(verts), torch.from_numpy(faces).long()) * 0.5 + 0.5
+    colors = to_numpy(colors)
+    colors = colors.reshape(-1, 3)
+    colors = (np.concatenate([colors, np.ones([*colors.shape[:-1], 1])], axis=-1) * 255).astype(np.uint8)
+    if len(verts) == len(colors):
+        mesh.visual.vertex_colors = colors
+    elif len(faces) == len(colors):
+        mesh.visual.face_colors = colors
+
+    if normals is not None:
+        normals = to_numpy(normals)
+        mesh.vertex_normals = normals
+
+    if uv is not None:
+        from PIL import Image
+        uv = to_numpy(uv)
+        uv = uv.reshape(-1, 2)
+        img = to_numpy(img)
+        img = img.reshape(*img.shape[-3:])
+        img = Image.fromarray(np.uint8(img * 255))
+        mat = SimpleMaterial(
+            image=img,
+            diffuse=(0.8, 0.8, 0.8),
+            ambient=(1.0, 1.0, 1.0),
+        )
+        mat.name = os.path.splitext(os.path.split(filename)[1])[0]
+        texture = TextureVisuals(uv=uv, material=mat)
+        mesh.visual = texture
+
+    return mesh
+
+
+def get_tensor_mesh_data(verts: torch.Tensor, faces: torch.Tensor, uv: torch.Tensor = None, img: torch.Tensor = None, uvfaces: torch.Tensor = None):
+
+    # pytorch3d wants a tensor
+    verts, faces, uv, img, uvfaces = to_tensor([verts, faces, uv, img, uvfaces])
+    verts = verts.reshape(-1, 3)
+    faces = faces.reshape(-1, 3)
+    uv = uv.reshape(-1, 2)
+    img = img.reshape(img.shape[-3:])
+    uvfaces = uvfaces.reshape(-1, 3)
+
+    # textures = TexturesUV(img, uvfaces, uv)
+    # meshes = Meshes(verts, faces, textures)
+    return verts, faces, uv, img, uvfaces
+
+
+def export_npz(batch: dotdict, filename: struct):
+    export_dotdict(batch, filename)
+
+
+def export_dotdict(batch: dotdict, filename: struct):
+    batch = to_numpy(batch)
+    np.savez_compressed(filename, **batch)
+
+
+def load_mesh(filename: str, device='cuda', load_uv=False, load_aux=False, backend='pytorch3d'):
+    from pytorch3d.io import load_ply, load_obj
+    if backend == 'trimesh':
+        import trimesh
+        mesh: trimesh.Trimesh = trimesh.load(filename)
+        return mesh.vertices, mesh.faces
+
+    vm, fm = None, None
+    if filename.endswith('.npz'):
+        mesh = np.load(filename)
+        v = torch.from_numpy(mesh['verts'])
+        f = torch.from_numpy(mesh['faces'])
+
+        if load_uv:
+            vm = torch.from_numpy(mesh['uvs'])
+            fm = torch.from_numpy(mesh['uvfaces'])
+    else:
+        if filename.endswith('.ply'):
+            v, f = load_ply(filename)
+        elif filename.endswith('.obj'):
+            v, faces_attr, aux = load_obj(filename)
+            f = faces_attr.verts_idx
+
+            if load_uv:
+                vm = aux.verts_uvs
+                fm = faces_attr.textures_idx
+        else:
+            raise NotImplementedError(f'Unrecognized input format for: {filename}')
+
+    v = v.to(device, non_blocking=True).contiguous()
+    f = f.to(device, non_blocking=True).contiguous()
+
+    if load_uv:
+        vm = vm.to(device, non_blocking=True).contiguous()
+        fm = fm.to(device, non_blocking=True).contiguous()
+
+    if load_uv:
+        if load_aux:
+            return v, f, vm, fm, aux
+        else:
+            return v, f, vm, fm
+    else:
+        return v, f
+
+
+def load_pts(filename: str):
+    from pyntcloud import PyntCloud
+    cloud = PyntCloud.from_file(filename)
+    verts = cloud.xyz
+    if 'red' in cloud.points and 'green' in cloud.points and 'blue' in cloud.points:
+        r = np.asarray(cloud.points['red'])
+        g = np.asarray(cloud.points['green'])
+        b = np.asarray(cloud.points['blue'])
+        colors = (np.stack([r, g, b], axis=-1) / 255).astype(np.float32)
+    elif 'r' in cloud.points and 'g' in cloud.points and 'b' in cloud.points:
+        r = np.asarray(cloud.points['r'])
+        g = np.asarray(cloud.points['g'])
+        b = np.asarray(cloud.points['b'])
+        colors = (np.stack([r, g, b], axis=-1) / 255).astype(np.float32)
+    else:
+        colors = None
+
+    if 'nx' in cloud.points and 'ny' in cloud.points and 'nz' in cloud.points:
+        nx = np.asarray(cloud.points['nx'])
+        ny = np.asarray(cloud.points['ny'])
+        nz = np.asarray(cloud.points['nz'])
+        norms = np.stack([nx, ny, nz], axis=-1)
+    else:
+        norms = None
+
+    # if 'alpha' in cloud.points:
+    #     cloud.points['alpha'] = cloud.points['alpha'] / 255
+
+    reserved = ['x', 'y', 'z', 'red', 'green', 'blue', 'r', 'g', 'b', 'nx', 'ny', 'nz']
+    scalars = dotdict({k: np.asarray(cloud.points[k])[..., None] for k in cloud.points if k not in reserved})  # one extra dimension at the back added
+    return verts, colors, norms, scalars
+
+
+def export_pts(pts: torch.Tensor, color: torch.Tensor = None, normal: torch.Tensor = None, scalars: dotdict = dotdict(), filename: str = "default.ply", skip_color: bool = False, **kwargs):
+    from pandas import DataFrame
+    from pyntcloud import PyntCloud
+
+    data = dotdict()
+    pts = to_numpy(pts)  # always blocking?
+    pts = pts.reshape(-1, 3)
+    data.x = pts[:, 0].astype(np.float32)
+    data.y = pts[:, 1].astype(np.float32)
+    data.z = pts[:, 2].astype(np.float32)
+
+    if color is not None:
+        color = to_numpy(color)
+        color = color.reshape(-1, 3)
+        data.red = (color[:, 0] * 255).astype(np.uint8)
+        data.green = (color[:, 1] * 255).astype(np.uint8)
+        data.blue = (color[:, 2] * 255).astype(np.uint8)
+    elif not skip_color:
+        data.red = (pts[:, 0] * 255).astype(np.uint8)
+        data.green = (pts[:, 1] * 255).astype(np.uint8)
+        data.blue = (pts[:, 2] * 255).astype(np.uint8)
+
+    if normal is not None:
+        normal = to_numpy(normal)
+        normal = normal / (np.linalg.norm(normal, axis=-1, keepdims=True) + 1e-13)
+        normal = normal.reshape(-1, 3)
+        data.nx = normal[:, 0].astype(np.float32)
+        data.ny = normal[:, 1].astype(np.float32)
+        data.nz = normal[:, 2].astype(np.float32)
+
+    if scalars is not None:
+        scalars = to_numpy(scalars)
+        for k, v in scalars.items():
+            v = v.reshape(-1, 1)
+            data[k] = v[:, 0]
+
+    df = DataFrame(data)
+    cloud = PyntCloud(df)  # construct the data
+    dir = dirname(filename)
+    if dir: os.makedirs(dir, exist_ok=True)
+    return cloud.to_file(filename, **kwargs)  # maybe write comments here: comments: list of strings
+
+
+def export_lines(verts: torch.Tensor, lines: torch.Tensor, color: torch.Tensor = None, filename: str = 'default.ply'):
+    if color is None:
+        color = verts
+    verts, lines, color = to_numpy([verts, lines, color])  # always blocking?
+    if color.dtype == np.float32:
+        color = (color * 255).astype(np.uint8)
+    verts = verts.reshape(-1, 3)
+    lines = lines.reshape(-1, 2)
+    color = color.reshape(-1, 3)
+
+    # Write to PLY
+    with open(filename, 'wb') as f:
+        # PLY header
+        f.write(b"ply\n")
+        f.write(b"format binary_little_endian 1.0\n")
+        f.write(f"element vertex {len(verts)}\n".encode())
+        f.write(b"property float x\n")
+        f.write(b"property float y\n")
+        f.write(b"property float z\n")
+        f.write(b"property uchar red\n")
+        f.write(b"property uchar green\n")
+        f.write(b"property uchar blue\n")
+        f.write(f"element edge {len(lines)}\n".encode())
+        f.write(b"property int vertex1\n")
+        f.write(b"property int vertex2\n")
+        f.write(b"end_header\n")
+
+        # Write vertices and colors
+        for v, c in zip(verts, color):
+            f.write(struct.pack('fffBBB', v[0], v[1], v[2], c[0], c[1], c[2]))
+
+        # Write lines
+        for l in lines:
+            f.write(struct.pack('ii', l[0], l[1]))
+
+
+def export_camera(c2w: torch.Tensor, ixt: torch.Tensor = None, col: torch.Tensor = torch.tensor([50, 50, 200]), axis_size=0.10, filename: str = 'default.ply'):
+    verts = []
+    lines = []
+    rgbs = []
+
+    def add_line(p0: torch.Tensor, p1: torch.Tensor, col: torch.Tensor):
+        # Add a and b vertices
+        verts.append(p0)  # N, M, 3
+        verts.append(p1)  # N, M, 3
+        sh = p0.shape[:-1]
+
+        # Add the vertex colors
+        col = torch.broadcast_to(col, sh + (3,))
+        rgbs.append(col)
+        rgbs.append(col)
+
+        # Add the faces
+        new = p0.numel() // 3  # number of new elements
+        curr = new * (len(verts) - 2)  # assume all previous elements are of the same size
+        start = torch.arange(curr, curr + new)
+        end = torch.arange(curr + new, curr + new * 2)
+        line = torch.stack([start, end], dim=-1)  # NM, 2
+        line = line.view(sh + (2,))
+        lines.append(line)
+
+    c2w = c2w[..., :3, :]
+    p = c2w[..., 3]  # third row (corresponding to 3rd column)
+
+    if ixt is None: aspect = 1.0
+    else: aspect = ixt[..., 0, 0][..., None] / ixt[..., 1, 1][..., None]
+    if ixt is None: focal = 1000
+    else: focal = (ixt[..., 0, 0][..., None] + ixt[..., 1, 1][..., None]) / 2
+
+    axis_size = focal * axis_size / 1000
+    xs = axis_size * aspect
+    ys = axis_size
+    zs = axis_size * aspect * 2
+
+    a = p + xs * c2w[..., 0] + ys * c2w[..., 1] + zs * c2w[..., 2]
+    b = p - xs * c2w[..., 0] + ys * c2w[..., 1] + zs * c2w[..., 2]
+    c = p - xs * c2w[..., 0] - ys * c2w[..., 1] + zs * c2w[..., 2]
+    d = p + xs * c2w[..., 0] - ys * c2w[..., 1] + zs * c2w[..., 2]
+
+    add_line(p, p + axis_size * c2w[..., 0], torch.tensor([255, 64, 64]))
+    add_line(p, p + axis_size * c2w[..., 1], torch.tensor([64, 255, 64]))
+    add_line(p, p + axis_size * c2w[..., 2], torch.tensor([64, 64, 255]))
+    add_line(p, a, col)
+    add_line(p, b, col)
+    add_line(p, c, col)
+    add_line(p, d, col)
+    add_line(a, b, col)
+    add_line(b, c, col)
+    add_line(c, d, col)
+    add_line(d, a, col)
+
+    verts = torch.stack(verts)
+    lines = torch.stack(lines)
+    rgbs = torch.stack(rgbs)
+
+    export_lines(verts, lines, rgbs, filename=filename)
+
+
+def export_mesh(verts: torch.Tensor, faces: torch.Tensor, uv: torch.Tensor = None, img: torch.Tensor = None, uvfaces: torch.Tensor = None, colors: torch.Tensor = None, normals: torch.Tensor = None, filename: str = "default.ply", subdivision=0):
+    if dirname(filename): os.makedirs(dirname(filename), exist_ok=True)
+
+    if subdivision > 0:
+        from easyvolcap.utils.mesh_utils import face_normals, loop_subdivision
+        verts, faces = loop_subdivision(verts, faces, subdivision)
+
+    if filename.endswith('.npz'):
+        def collect_args(**kwargs): return kwargs
+        kwargs = collect_args(verts=verts, faces=faces, uv=uv, img=img, uvfaces=uvfaces, colors=colors, normals=normals)
+        ret = dotdict({k: v for k, v in kwargs.items() if v is not None})
+        export_dotdict(ret, filename)
+
+    elif filename.endswith('.ply') or filename.endswith('.obj'):
+        if uvfaces is None:
+            mesh = get_mesh(verts, faces, uv, img, colors, normals, filename)
+            mesh.export(filename)
+        else:
+            from pytorch3d.io import save_obj
+            verts, faces, uv, img, uvfaces = get_tensor_mesh_data(verts, faces, uv, img, uvfaces)
+            save_obj(filename, verts, faces, verts_uvs=uv, faces_uvs=uvfaces, texture_map=img)
+    else:
+        raise NotImplementedError(f'Unrecognized input format for: {filename}')
+
+
+def export_pynt_pts_alone(pts, color=None, filename="default.ply"):
+    import pandas as pd
+    from pyntcloud import PyntCloud
+    data = {}
+
+    pts = pts if isinstance(pts, np.ndarray) else pts.detach().cpu().numpy()
+    pts = pts.reshape(-1, 3)
+    data['x'] = pts[:, 0].astype(np.float32)
+    data['y'] = pts[:, 1].astype(np.float32)
+    data['z'] = pts[:, 2].astype(np.float32)
+
+    if color is not None:
+        color = color if isinstance(color, np.ndarray) else color.detach().cpu().numpy()
+        color = color.reshape(-1, 3)
+        data['red'] = color[:, 0].astype(np.uint8)
+        data['green'] = color[:, 1].astype(np.uint8)
+        data['blue'] = color[:, 2].astype(np.uint8)
+    else:
+        data['red'] = (pts[:, 0] * 255).astype(np.uint8)
+        data['green'] = (pts[:, 1] * 255).astype(np.uint8)
+        data['blue'] = (pts[:, 2] * 255).astype(np.uint8)
+
+    df = pd.DataFrame(data)
+    cloud = PyntCloud(df)  # construct the data
+    dirname = dirname(filename)
+    if dirname: os.makedirs(dirname, exist_ok=True)
+    return cloud.to_file(filename)
+
+
+def export_o3d_pts(pts: torch.Tensor, filename: str = "default.ply"):
+    import open3d as o3d
+    pts = to_numpy(pts)
+    pts = pts.reshape(-1, 3)
+    pcd = o3d.geometry.PointCloud()
+    pcd.points = o3d.utility.Vector3dVector(pts)
+    return o3d.io.write_point_cloud(filename, pcd)
+
+
+def export_o3d_pcd(pts: torch.Tensor, rgb: torch.Tensor, normal: torch.Tensor, filename="default.ply"):
+    import open3d as o3d
+    pts, rgb, normal = to_numpy([pts, rgb, normal])
+    pts = pts.reshape(-1, 3)
+    rgb = rgb.reshape(-1, 3)
+    normal = normal.reshape(-1, 3)
+    pcd = o3d.geometry.PointCloud()
+    pcd.points = o3d.utility.Vector3dVector(pts)
+    pcd.colors = o3d.utility.Vector3dVector(rgb)
+    pcd.normals = o3d.utility.Vector3dVector(normal)
+    return o3d.io.write_point_cloud(filename, pcd)
+
+
+def export_pcd(pts: torch.Tensor, rgb: torch.Tensor, occ: torch.Tensor, filename="default.ply"):
+    import pandas as pd
+    from pyntcloud import PyntCloud
+    pts, rgb, occ = to_numpy([pts, rgb, occ])
+    pts = pts.reshape(-1, 3)
+    rgb = rgb.reshape(-1, 3)
+    occ = occ.reshape(-1, 1)
+    # MARK: CloudCompare bad, set first to 0, last to 1
+    for i in range(3):
+        rgb[0, i] = 0
+        rgb[-1, i] = 1
+    occ[0, 0] = 0
+    occ[-1, 0] = 1
+
+    data = dotdict()
+    data.x = pts[:, 0]
+    data.y = pts[:, 1]
+    data.z = pts[:, 2]
+    # TODO: maybe, for compability, save color as uint?
+    # currently saving as float number from [0, 1]
+    data.red = rgb[:, 0]
+    data.green = rgb[:, 1]
+    data.blue = rgb[:, 2]
+    data.alpha = occ[:, 0]
+
+    # MARK: We're saving extra scalars for loading in CloudCompare
+    # can't assign same property to multiple fields
+    data.r = rgb[:, 0]
+    data.g = rgb[:, 1]
+    data.b = rgb[:, 2]
+    data.a = occ[:, 0]
+    df = pd.DataFrame(data)
+
+    cloud = PyntCloud(df)  # construct the data
+    dirname = dirname(filename)
+    if dirname: os.makedirs(dirname, exist_ok=True)
+    return cloud.to_file(filename)
+```
+
+### fast_gauss/egl_utils.py
+```
+"""Headless GPU-accelerated OpenGL context creation on Google Colaboratory.
+
+Typical usage:
+
+    # Optional PyOpenGL configuratiopn can be done here.
+    # import OpenGL
+    # OpenGL.ERROR_CHECKING = True
+
+    # 'glcontext' must be imported before any OpenGL.* API.
+    from lucid.misc.gl.glcontext import create_opengl_context
+
+    # Now it's safe to import OpenGL and EGL functions
+    import OpenGL.GL as gl
+
+    # create_opengl_context() creates a GL context that is attached to an
+    # offscreen surface of the specified size. Note that rendering to buffers
+    # of other sizes and formats is still possible with OpenGL Framebuffers.
+    #
+    # Users are expected to directly use the EGL API in case more advanced
+    # context management is required.
+    create_opengl_context()
+
+    # OpenGL context is available here.
+
+Please add this to your system:
+/usr/share/glvnd/egl_vendor.d/10_nvidia.json
+
+{
+    "file_format_version" : "1.0.0",
+    "ICD" : {
+        "library_path" : "libEGL_nvidia.so.0"
+    }
+}
+"""
+
+from __future__ import print_function, annotations
+
+import os
+import ctypes
+from ctypes import pointer, util
+
+if 'CUDA_VISIBLE_DEVICES' in os.environ:
+    CUDA_VISIBLE_DEVICES = list(map(int, [i for i in os.environ['CUDA_VISIBLE_DEVICES'].split(',') if i]))  # remove ''
+    import torch.distributed as dist
+
+    def get_rank() -> int:
+        if not dist.is_available():
+            return 0
+        if not dist.is_initialized():
+            return 0
+        return dist.get_rank()
+    # os.environ['EGL_DEVICE_ID'] = str(CUDA_VISIBLE_DEVICES[get_rank()])  # TODO: debug this and figure out what `torchrun` does behind the curtain
+    os.environ['EGL_DEVICE_ID'] = str(get_rank())
+
+
+# # [1] https://devblogs.nvidia.com/egl-eye-opengl-visualization-without-x-server/
+# # [2] https://devblogs.nvidia.com/linking-opengl-server-side-rendering/
+# # [3] https://bugs.python.org/issue9998
+# os.environ['PYOPENGL_PLATFORM'] = 'egl'
+# _find_library_old = ctypes.util.find_library
+# try:
+#     def _find_library_new(name):
+#         return {
+#             'GL': 'libOpenGL.so',
+#             'EGL': 'libEGL.so',
+#         }.get(name, _find_library_old(name))
+#     ctypes.util.find_library = _find_library_new
+#     import OpenGL.GL as gl
+#     import OpenGL.EGL as egl
+# except:
+#     raise ImportError('Unable to load OpenGL EGL libraries. Make sure you use GPU-enabled backend. Press "Runtime->Change runtime type" and set "Hardware accelerator" to GPU.')
+# finally:
+#     ctypes.util.find_library = _find_library_old
+
+# fmt: off
+"""Extends OpenGL.EGL with definitions necessary for headless rendering."""
+os.environ['PYOPENGL_PLATFORM'] = 'egl'
+
+from OpenGL.platform import ctypesloader  # pylint: disable=g-bad-import-order
+try:
+    # Nvidia driver seems to need libOpenGL.so (as opposed to libGL.so)
+    # for multithreading to work properly. We load this in before everything else.
+    ctypesloader.loadLibrary(ctypes.cdll, 'OpenGL', mode=ctypes.RTLD_GLOBAL)
+except OSError:
+    pass
+
+# pylint: disable=g-import-not-at-top
+from OpenGL import EGL as egl
+from OpenGL import GL as gl
+from OpenGL import error
+# fmt: on
+
+# From the EGL_EXT_device_enumeration extension.
+PFNEGLQUERYDEVICESEXTPROC = ctypes.CFUNCTYPE(
+    egl.EGLBoolean,
+    egl.EGLint,
+    ctypes.POINTER(egl.EGLDeviceEXT),
+    ctypes.POINTER(egl.EGLint),
+)
+try:
+    _eglQueryDevicesEXT = PFNEGLQUERYDEVICESEXTPROC(  # pylint: disable=invalid-name
+        egl.eglGetProcAddress('eglQueryDevicesEXT'))
+except TypeError as e:
+    raise ImportError('eglQueryDevicesEXT is not available.') from e
+
+EGL_CUDA_DEVICE_NV = 0x323A
+PFNEGLQUERYDEVICESATTRIBEXTPROC = ctypes.CFUNCTYPE(
+    egl.EGLBoolean,
+    egl.EGLDeviceEXT,
+    egl.EGLint,
+    ctypes.POINTER(ctypes.c_longlong),
+)
+try:
+    eglQueryDeviceAttribEXT = PFNEGLQUERYDEVICESATTRIBEXTPROC(
+        egl.eglGetProcAddress('eglQueryDeviceAttribEXT')
+    )
+except TypeError as e:
+    raise ImportError('eglQueryDeviceAttribEXT is not available.') from e
+
+# From the EGL_EXT_platform_device extension.
+EGL_PLATFORM_DEVICE_EXT = 0x313F
+PFNEGLGETPLATFORMDISPLAYEXTPROC = ctypes.CFUNCTYPE(
+    egl.EGLDisplay, egl.EGLenum, ctypes.c_void_p, ctypes.POINTER(egl.EGLint))
+try:
+    eglGetPlatformDisplayEXT = PFNEGLGETPLATFORMDISPLAYEXTPROC(  # pylint: disable=invalid-name
+        egl.eglGetProcAddress('eglGetPlatformDisplayEXT'))
+except TypeError as e:
+    raise ImportError('eglGetPlatformDisplayEXT is not available.') from e
+
+
+# Wrap raw _eglQueryDevicesEXT function into something more Pythonic.
+def eglQueryDevicesEXT(max_devices=10):  # pylint: disable=invalid-name
+    devices = (egl.EGLDeviceEXT * max_devices)()
+    num_devices = egl.EGLint()
+    success = _eglQueryDevicesEXT(max_devices, devices, num_devices)
+    if success == egl.EGL_TRUE:
+        return [devices[i] for i in range(num_devices.value)]
+    else:
+        from OpenGL import error
+        raise error.GLError(err=egl.eglGetError(),
+                            baseOperation=eglQueryDevicesEXT,
+                            result=success)
+
+
+def create_initialized_egl_device_display():
+    """Creates an initialized EGL display directly on a device."""
+    all_devices = eglQueryDevicesEXT()
+    selected_device = os.environ.get('EGL_DEVICE_ID', None)
+    if selected_device is None:
+        candidates = all_devices
+    else:
+        selected_device = int(selected_device)
+        for device_idx, device in enumerate(all_devices):
+            value = ctypes.c_longlong(-1)
+            success = eglQueryDeviceAttribEXT(device, EGL_CUDA_DEVICE_NV, ctypes.byref(value))
+            if success == egl.EGL_TRUE and value.value == selected_device:
+                break
+        if not 0 <= device_idx < len(all_devices):
+            raise RuntimeError(
+                f'The EGL_DEVICE_ID environment variable must be an integer '
+                f'between 0 and {len(all_devices)-1} (inclusive), got {device_idx}.')
+        candidates = all_devices[device_idx:device_idx + 1]
+    for device in candidates:
+        display = eglGetPlatformDisplayEXT(
+            EGL_PLATFORM_DEVICE_EXT, device, None)
+        if display != egl.EGL_NO_DISPLAY and egl.eglGetError() == egl.EGL_SUCCESS:
+            from OpenGL import error
+            # `eglInitialize` may or may not raise an exception on failure depending
+            # on how PyOpenGL is configured. We therefore catch a `GLError` and also
+            # manually check the output of `eglGetError()` here.
+            try:
+                initialized = egl.eglInitialize(display, None, None)
+            except error.GLError:
+                pass
+            else:
+                if initialized == egl.EGL_TRUE and egl.eglGetError() == egl.EGL_SUCCESS:
+                    return display
+    return egl.EGL_NO_DISPLAY
+
+
+def create_opengl_context():
+    """Create offscreen OpenGL context and make it current.
+    Users are expected to directly use EGL API in case more advanced
+    context management is required.
+    """
+    egl_display = create_initialized_egl_device_display()
+    if egl_display == egl.EGL_NO_DISPLAY:
+        raise ImportError(
+            'Cannot initialize a EGL device display. This likely means that your EGL '
+            'driver does not support the PLATFORM_DEVICE extension, which is '
+            'required for creating a headless rendering context.')
+
+    config_attribs = [
+        egl.EGL_SURFACE_TYPE, egl.EGL_PBUFFER_BIT,
+        egl.EGL_BLUE_SIZE, 8,
+        egl.EGL_GREEN_SIZE, 8,
+        egl.EGL_RED_SIZE, 8,
+        egl.EGL_ALPHA_SIZE, 8,
+        egl.EGL_DEPTH_SIZE, 24,
+        egl.EGL_STENCIL_SIZE, 8,
+        egl.EGL_RENDERABLE_TYPE, egl.EGL_OPENGL_BIT, egl.EGL_NONE
+    ]
+    config_attribs = (egl.EGLint * len(config_attribs))(*config_attribs)
+    num_configs = egl.EGLint()
+    egl_cfg = egl.EGLConfig()
+    egl.eglChooseConfig(egl_display, config_attribs, pointer(egl_cfg), 1, pointer(num_configs))
+
+    egl.eglBindAPI(egl.EGL_OPENGL_API)
+    egl_context = egl.eglCreateContext(egl_display, egl_cfg, egl.EGL_NO_CONTEXT, None)
+    egl.eglMakeCurrent(egl_display, egl.EGL_NO_SURFACE, egl.EGL_NO_SURFACE, egl_context)
+    return egl_context
+
+
+class eglContextManager:
+    # Manages the creation and destruction of an EGL context
+    # Will resize if the size of the window changes
+    # Will also manage gl.Viewport to render different parts of the screen
+    # Only resize the underlying egl ctx when exceeding current size
+    def __init__(self, W=1920, H=1080) -> None:
+        self.H, self.W = H, W
+        self.max_H, self.max_W = H, W  # always create at first
+        self.eglctx = create_opengl_context()
+        self.create_fbo_with_rbos(W, H)
+        self.resize(W, H)  # maybe create new framebuffer
+
+    def create_fbo_with_rbos(self, W: int, H: int):
+        if hasattr(self, 'fbo'):
+            gl.glDeleteFramebuffers(1, [self.fbo])
+            gl.glDeleteRenderbuffers(6, [self.rbo0, self.rbo1, self.rbo2, self.rbo3, self.rbo4, self.rbo_dpt])
+
+        # Add new buffer
+        self.fbo = gl.glGenFramebuffers(1)
+        self.rbo0, self.rbo1, self.rbo2, self.rbo3, self.rbo4, self.rbo_dpt = gl.glGenRenderbuffers(6)
+        gl.glBindRenderbuffer(gl.GL_RENDERBUFFER, self.rbo0)
+        gl.glRenderbufferStorage(gl.GL_RENDERBUFFER, gl.GL_RGBA8, W, H)
+        gl.glBindRenderbuffer(gl.GL_RENDERBUFFER, self.rbo1)
+        gl.glRenderbufferStorage(gl.GL_RENDERBUFFER, gl.GL_RGBA8, W, H)
+        gl.glBindRenderbuffer(gl.GL_RENDERBUFFER, self.rbo2)
+        gl.glRenderbufferStorage(gl.GL_RENDERBUFFER, gl.GL_RGBA8, W, H)
+        gl.glBindRenderbuffer(gl.GL_RENDERBUFFER, self.rbo3)
+        gl.glRenderbufferStorage(gl.GL_RENDERBUFFER, gl.GL_RGBA8, W, H)
+        gl.glBindRenderbuffer(gl.GL_RENDERBUFFER, self.rbo4)
+        gl.glRenderbufferStorage(gl.GL_RENDERBUFFER, gl.GL_RGBA8, W, H)
+        gl.glBindRenderbuffer(gl.GL_RENDERBUFFER, self.rbo_dpt)
+        gl.glRenderbufferStorage(gl.GL_RENDERBUFFER, gl.GL_DEPTH_COMPONENT, W, H)
+
+        gl.glBindFramebuffer(gl.GL_FRAMEBUFFER, self.fbo)
+        gl.glFramebufferRenderbuffer(gl.GL_FRAMEBUFFER, gl.GL_COLOR_ATTACHMENT0, gl.GL_RENDERBUFFER, self.rbo0)
+        gl.glFramebufferRenderbuffer(gl.GL_FRAMEBUFFER, gl.GL_COLOR_ATTACHMENT1, gl.GL_RENDERBUFFER, self.rbo1)
+        gl.glFramebufferRenderbuffer(gl.GL_FRAMEBUFFER, gl.GL_COLOR_ATTACHMENT1, gl.GL_RENDERBUFFER, self.rbo2)
+        gl.glFramebufferRenderbuffer(gl.GL_FRAMEBUFFER, gl.GL_COLOR_ATTACHMENT1, gl.GL_RENDERBUFFER, self.rbo3)
+        gl.glFramebufferRenderbuffer(gl.GL_FRAMEBUFFER, gl.GL_COLOR_ATTACHMENT1, gl.GL_RENDERBUFFER, self.rbo4)
+        gl.glFramebufferRenderbuffer(gl.GL_FRAMEBUFFER, gl.GL_DEPTH_ATTACHMENT, gl.GL_RENDERBUFFER, self.rbo_dpt)
+        gl.glDrawBuffers(5, [gl.GL_COLOR_ATTACHMENT0, gl.GL_COLOR_ATTACHMENT1, gl.GL_COLOR_ATTACHMENT2, gl.GL_COLOR_ATTACHMENT3, gl.GL_COLOR_ATTACHMENT4])
+
+        gl.glViewport(0, 0, W, H)  # wtf
+        gl.glScissor(0, 0, W, H)  # wtf # NOTE: Need to redefine scissor size
+
+    def resize(self, W=1920, H=1080):
+        self.H, self.W = H, W
+        if self.H > self.max_H or self.W > self.max_W:
+            self.max_H, self.max_W = max(int(self.H * 1.0), self.max_H), max(int(self.W * 1.0), self.max_W)
+            self.create_fbo_with_rbos(self.max_W, self.max_H)
+        gl.glViewport(0, 0, self.W, self.H)
+```
+
+### fast_gauss/gaussian_utils.py
+```
+import torch
+import numpy as np
+import torch.nn.functional as F
+from .math_utils import point_padding
+
+
+@torch.jit.script
+def in_frustum(xyz: torch.Tensor, full_proj_matrix: torch.Tensor, xy_padding: float = 0.5, padding: float = 0.01):
+    ndc = point_padding(xyz) @ full_proj_matrix  # this is now in clip space
+    ndc = ndc[..., :3] / ndc[..., 3:]
+    return (ndc[..., 2] > -1 - padding) & (ndc[..., 2] < 1 + padding) & (ndc[..., 0] > -1 - xy_padding) & (ndc[..., 0] < 1. + xy_padding) & (ndc[..., 1] > -1 - xy_padding) & (ndc[..., 1] < 1. + xy_padding)  # N,
+
+
+@torch.jit.script
+def rgb2sh0(rgb: torch.Tensor):
+    C0 = 0.28209479177387814
+    return (rgb - 0.5) / C0
+
+
+@torch.jit.script
+def sh02rgb(sh: torch.Tensor):
+    C0 = 0.28209479177387814
+    return sh * C0 + 0.5
+
+
+@torch.jit.script
+def inverse_sigmoid(x):
+    return torch.log(x / (1 - x))
+
+
+@torch.jit.script
+def strip_lowerdiag(L: torch.Tensor):
+    # uncertainty = torch.zeros((L.shape[0], 6), dtype=L.dtype, device=L.device)
+
+    # uncertainty[:, 0] = L[:, 0, 0].clip(0.0)  # sanitize covariance matrix
+    # uncertainty[:, 1] = L[:, 0, 1]
+    # uncertainty[:, 2] = L[:, 0, 2]
+    # uncertainty[:, 3] = L[:, 1, 1].clip(0.0)  # sanitize covariance matrix
+    # uncertainty[:, 4] = L[:, 1, 2]
+    # uncertainty[:, 5] = L[:, 2, 2].clip(0.0)  # sanitize covariance matrix
+    # return uncertainty
+
+    inds = torch.triu_indices(3, 3, device=L.device)  # 2, 6
+    return L[:, inds[0], inds[1]]
+
+
+def strip_symmetric(sym):
+    return strip_lowerdiag(sym)
+
+
+@torch.jit.script
+def build_rotation(q: torch.Tensor):
+    assert q.shape[-1] == 4
+    # norm = torch.sqrt(r[:, 0] * r[:, 0] + r[:, 1] * r[:, 1] + r[:, 2] * r[:, 2] + r[:, 3] * r[:, 3])
+
+    # q = r / norm[:, None]
+    q = F.normalize(q, dim=-1)
+
+    R = torch.zeros((q.size(0), 3, 3), dtype=q.dtype, device=q.device)
+
+    r = q[:, 0]
+    x = q[:, 1]
+    y = q[:, 2]
+    z = q[:, 3]
+
+    R[:, 0, 0] = 1 - 2 * (y * y + z * z)
+    R[:, 0, 1] = 2 * (x * y - r * z)
+    R[:, 0, 2] = 2 * (x * z + r * y)
+    R[:, 1, 0] = 2 * (x * y + r * z)
+    R[:, 1, 1] = 1 - 2 * (x * x + z * z)
+    R[:, 1, 2] = 2 * (y * z - r * x)
+    R[:, 2, 0] = 2 * (x * z - r * y)
+    R[:, 2, 1] = 2 * (y * z + r * x)
+    R[:, 2, 2] = 1 - 2 * (x * x + y * y)
+    return R
+
+
+@torch.jit.script
+def build_scaling_rotation(s: torch.Tensor, q: torch.Tensor):
+    L = torch.zeros((s.shape[0], 3, 3), dtype=s.dtype, device=s.device)
+    R = build_rotation(q)
+
+    L[:, 0, 0] = s[:, 0]
+    L[:, 1, 1] = s[:, 1]
+    L[:, 2, 2] = s[:, 2]
+
+    L = R @ L
+    return L
+
+
+@torch.jit.script
+def build_cov6(s: torch.Tensor, q: torch.Tensor):
+    L = build_scaling_rotation(s, q)
+    return strip_lowerdiag(L @ L.mT)
+
+
+def fov2focal(fov, pixels):
+    return pixels / (2 * np.tan(fov / 2))
+
+
+def focal2fov(focal, pixels):
+    return 2 * np.arctan(pixels / (2 * focal))
+```
+
+### fast_gauss/gl_utils.py
+```
+import os
+import sys
+from typing import Union
+
+from .console_utils import *
+
+
+# fmt: off
+# Environment variable messaging
+# Need to export EGL_DEVICE_ID before trying to import egl
+# And we need to consider the case when we're performing distributed training
+# from easyvolcap.engine import cfg, args
+if 'OpenGL' not in sys.modules:
+    try:
+        from .egl_utils import create_opengl_context, eglContextManager
+        eglctx = eglContextManager()
+    except Exception as e:
+        log(yellow(f'Could not import EGL related modules. {type(e).__name__}: {e}'))
+        os.environ['PYOPENGL_PLATFORM'] = ''
+        eglctx = None
+else:
+    eglctx = None
+
+def is_wsl2():
+    """Returns True if the current environment is WSL2, False otherwise."""
+    return exists("/etc/wsl.conf") and os.environ.get("WSL_DISTRO_NAME")
+
+if is_wsl2():
+    os.environ['PYOPENGL_PLATFORM'] = 'glx'
+
+import OpenGL.GL as gl
+
+try:
+    from OpenGL.GL import shaders
+except Exception as e:
+    print(f'WARNING: OpenGL shaders import error encountered, please install the latest PyOpenGL from github using:')
+    print(f'pip install git+https://github.com/mcfletch/pyopengl')
+    raise e
+# fmt: on
+
+
+def common_opengl_options():
+    # Use program point size
+    gl.glEnable(gl.GL_PROGRAM_POINT_SIZE)
+
+    # Performs face culling
+    gl.glEnable(gl.GL_CULL_FACE)
+    gl.glCullFace(gl.GL_BACK)
+
+    # Performs alpha trans testing
+    # gl.glEnable(gl.GL_ALPHA_TEST)
+    try: gl.glEnable(gl.GL_ALPHA_TEST)
+    except gl.GLError as e: pass
+
+    # Performs z-buffer testing
+    gl.glEnable(gl.GL_DEPTH_TEST)
+    # gl.glDepthMask(gl.GL_TRUE)
+    gl.glDepthFunc(gl.GL_LEQUAL)
+    # gl.glDepthRange(-1.0, 1.0)
+    gl.glClear(gl.GL_COLOR_BUFFER_BIT | gl.GL_DEPTH_BUFFER_BIT)
+
+    # Enable some masking tests
+    gl.glEnable(gl.GL_SCISSOR_TEST)
+
+    # Enable this to correctly render points
+    # https://community.khronos.org/t/gl-point-sprite-gone-in-3-2/59310
+    # gl.glEnable(gl.GL_POINT_SPRITE)  # MARK: ONLY SPRITE IS WORKING FOR NOW
+    try: gl.glEnable(gl.GL_POINT_SPRITE)  # MARK: ONLY SPRITE IS WORKING FOR NOW
+    except gl.GLError as e: pass
+    # gl.glEnable(gl.GL_POINT_SMOOTH) # MARK: ONLY SPRITE IS WORKING FOR NOW
+
+    # # Configure how we store the pixels in memory for our subsequent reading of the FBO to store the rendering into memory.
+    # # The second argument specifies that our pixels will be in bytes.
+    # gl.glPixelStorei(gl.GL_PACK_ALIGNMENT, 1)
+
+
+def load_shader_source(file: str = 'splat.frag'):
+    # Ideally we can just specify the shader name instead of an variable
+    if not exists(file):
+        file = f'{dirname(__file__)}/shaders/{file}'
+    if not exists(file):
+        file = file.replace('shaders/', '')
+    if not exists(file):
+        raise RuntimeError(f'Shader file: {file} does not exist')
+    with open(file, 'r') as f:
+        return f.read()
+
+
+def use_gl_program(program: Union[shaders.ShaderProgram, dict]):
+    if isinstance(program, dict):
+        # Recompile the program if the user supplied sources
+        program = dotdict(program)
+        program = shaders.compileProgram(
+            shaders.compileShader(program.VERT_SHADER_SRC, gl.GL_VERTEX_SHADER),
+            shaders.compileShader(program.FRAG_SHADER_SRC, gl.GL_FRAGMENT_SHADER)
+        )
+    return gl.glUseProgram(program)
+```
+
+### fast_gauss/gsplat_utils.py
+```
+from typing import List, Dict, Optional, TYPE_CHECKING
+
+if TYPE_CHECKING:
+    from . import GaussianRasterizationSettings
+
+import glm
+import math
+import torch
+import ctypes
+
+from glm import mat4
+
+from .console_utils import *
+from .sh_utils import eval_sh
+from .cuda_utils import CHECK_CUDART_ERROR
+from .math_utils import normalize, point_padding
+from .gl_utils import load_shader_source, use_gl_program
+from .gaussian_utils import build_cov6, in_frustum
+
+import OpenGL.GL as gl
+from OpenGL.GL import shaders
+
+
+class GSplatContextManager:
+    """
+    This is a high performance rendering backend of the gaussian splatting paper
+    We use CUDA to perform primitive sorting and then render the splats using geometry shader that emits quads
+    There's some cuda-gl interop involved, thus cuda-python is required, wsl2 out of the question
+
+    EGL should be automatically supported by this and thus it should be able to be used in an offline environment
+    """
+
+    def __init__(self,
+                 init_buffer_size: int = 32768,
+                 init_texture_size: List[int] = [512, 512],
+                 dtype: str = torch.float,  # +5-10 fps on 3060, not working too well with flame_salmon
+                 tex_dtype: str = torch.uint8,  # +5-10 fps on 3060, not working too well with flame_salmon
+
+                 # DEBUG: whether to write back to cuda in offline rendering mode, only used for speed tests
+                 offline_writeback: bool = True,
+                 ):
+        self.attr_sizes = [3, 3, 3, 4]  # verts, cov6, rgba4
+        self.dtype = getattr(torch, dtype) if isinstance(dtype, str) else dtype
+        self.tex_dtype = getattr(torch, tex_dtype) if isinstance(tex_dtype, str) else tex_dtype
+        self.gl_tex_dtype = gl.GL_RGBA16F if self.tex_dtype == torch.half else gl.GL_RGBA32F if self.tex_dtype == torch.float else gl.GL_RGBA8
+        self.gl_attr_dtypes = [gl.GL_FLOAT if self.dtype == torch.float else gl.GL_HALF_FLOAT] * len(self.attr_sizes)
+        self.uniforms = dotdict()  # uniform values
+
+        # Perform actual rendering
+        from .gl_utils import eglctx
+        self.offline_rendering = eglctx is not None
+        self.offline_writeback = offline_writeback
+
+        self.compile_shaders()
+        self.use_gl_program(self.gsplat_program)
+        self.opengl_options()
+        self.resize_buffers(init_buffer_size)
+        self.resize_textures(*init_texture_size)
+
+        log(bold(f'[FAST GAUSS] GSplatContextManager initialized with attribute dtype: {self.dtype}, texture dtype: {self.tex_dtype}, offline rendering: {self.offline_rendering}, vertex buffer size: {init_buffer_size}, render buffer size: {init_texture_size}'))
+
+        if not self.offline_rendering:
+            log(bold('[FAST GAUSS] Using online rendering mode, in this mode, calling the rendering function of fast_gauss will write directly to the currently bound framebuffer'))
+            log(bold('[FAST GAUSS] In this mode, the output of all rasterization calls will be None (same output count). Please do not perform further processing on them'))
+            log(bold('[FAST GAUSS] Please make sure to set up the correct GUI environment before calling the rasterization function, see more in readme.md'))
+
+    def opengl_options(self):
+        # Performs face culling
+        gl.glDisable(gl.GL_CULL_FACE)
+
+        # Performs z-buffer testing
+        gl.glDisable(gl.GL_DEPTH_TEST)
+        gl.glDisable(gl.GL_ALPHA_TEST)
+
+        # Enable some masking tests
+        gl.glEnable(gl.GL_SCISSOR_TEST)
+
+        # Enable blending for final rendering
+        gl.glEnable(gl.GL_BLEND)
+        gl.glBlendFunc(gl.GL_SRC_ALPHA, gl.GL_ONE_MINUS_SRC_ALPHA)
+
+    def compile_shaders(self):
+        try:
+            self.gsplat_program = shaders.compileProgram(
+                shaders.compileShader(load_shader_source('dsplat.vert'), gl.GL_VERTEX_SHADER),
+                shaders.compileShader(load_shader_source('dsplat.geom'), gl.GL_GEOMETRY_SHADER),
+                shaders.compileShader(load_shader_source('dsplat.frag'), gl.GL_FRAGMENT_SHADER)
+            )
+        except Exception as e:
+            print(str(e).encode('utf-8').decode('unicode_escape'))
+            raise e
+
+    def use_gl_program(self, program: shaders.ShaderProgram):
+        use_gl_program(program)
+        self.uniforms.P = gl.glGetUniformLocation(program, "P")
+        self.uniforms.VM = gl.glGetUniformLocation(program, "VM")
+        self.uniforms.focal = gl.glGetUniformLocation(program, "focal")
+        self.uniforms.principal = gl.glGetUniformLocation(program, "principal")
+        self.uniforms.basisViewport = gl.glGetUniformLocation(program, "basisViewport")
+        self.uniforms.useDepth = gl.glGetUniformLocation(program, "useDepth")
+        self.uniforms.solidMode = gl.glGetUniformLocation(program, "solidMode")
+        self.uniforms.edgeMode = gl.glGetUniformLocation(program, "edgeMode")
+
+    def upload_gl_uniforms(self, raster_settings: 'GaussianRasterizationSettings'):
+        # FIXME: Possible nasty synchronization issue: raster_settings might contain cuda tensors
+        # TODO: Add a warning here to make the user pass in cpu tensors to avoid explicit synchronization
+
+        P = raster_settings.projmatrix.detach().cpu().numpy() if isinstance(raster_settings.projmatrix, torch.Tensor) else raster_settings.projmatrix  # 4,4 # MARK: possible sync
+        P = mat4(*P.tolist())
+        V = raster_settings.viewmatrix.detach().cpu().numpy() if isinstance(raster_settings.viewmatrix, torch.Tensor) else raster_settings.viewmatrix  # 4,4 # MARK: possible sync
+        V = mat4(*V.tolist())
+
+        K = P * glm.affineInverse(V)
+        cx = (K[2][0] + 1) / 2 * raster_settings.image_width
+        cy = (K[2][1] + 1) / 2 * raster_settings.image_height
+        if not self.offline_rendering:
+
+            gl_c2w = glm.affineInverse(V)
+            gl_c2w[0] *= 1  # do notflip x
+            gl_c2w[1] *= -1  # flip y
+            gl_c2w[2] *= -1  # flip z
+            V = glm.affineInverse(gl_c2w)
+
+            K[2][0] *= -1
+            K[2][2] *= -1
+            K[2][3] *= -1
+
+            P = K * V
+
+        M = glm.identity(mat4)
+        VM = V * M
+
+        gl.glUniformMatrix4fv(self.uniforms.P, 1, gl.GL_FALSE, glm.value_ptr(P))  # o2c
+        gl.glUniformMatrix4fv(self.uniforms.VM, 1, gl.GL_FALSE, glm.value_ptr(VM))  # o2w
+        gl.glUniform2f(self.uniforms.focal, 0.5 * raster_settings.image_width / raster_settings.tanfovx, 0.5 * raster_settings.image_height / raster_settings.tanfovy)  # focal in pixel space
+        gl.glUniform2f(self.uniforms.principal, cx, cy)  # focal
+        gl.glUniform2f(self.uniforms.basisViewport, 1 / raster_settings.image_width, 1 / raster_settings.image_height)  # focal
+        gl.glUniform1i(self.uniforms.useDepth, 1 if raster_settings.use_depth else 0)
+        gl.glUniform1i(self.uniforms.solidMode, 1 if raster_settings.solid_mode else 0)
+        gl.glUniform1i(self.uniforms.edgeMode, 1 if raster_settings.edge_mode else 0)
+
+    def init_gl_buffers(self, v: int = 0):
+        from cuda import cudart
+        if hasattr(self, 'cu_vbo'):
+            CHECK_CUDART_ERROR(cudart.cudaGraphicsUnregisterResource(self.cu_vbo))
+
+        # This will only init the corresponding buffer object
+        element_size = 4 if self.gl_attr_dtypes[0] == gl.GL_FLOAT else 2
+        attr_size = sum(self.attr_sizes)
+        n_verts_bytes = v * attr_size * element_size
+
+        # Housekeeping
+        if hasattr(self, 'vao'):
+            gl.glDeleteVertexArrays(1, [self.vao])
+            gl.glDeleteBuffers(2, [self.vbo, self.ebo])
+
+        self.vao = gl.glGenVertexArrays(1)
+        self.vbo = gl.glGenBuffers(1)
+        self.ebo = gl.glGenBuffers(1)
+
+        gl.glBindVertexArray(self.vao)
+        gl.glBindBuffer(gl.GL_ARRAY_BUFFER, self.vbo)
+        gl.glBufferData(gl.GL_ARRAY_BUFFER, n_verts_bytes, ctypes.c_void_p(0), gl.GL_DYNAMIC_DRAW)  # NOTE: Using pointers here won't work
+
+        # https://stackoverflow.com/questions/67195932/pyopengl-cannot-render-any-vao
+        cumsum = 0
+        for i, (s, t) in enumerate(zip(self.attr_sizes, self.gl_attr_dtypes)):
+            gl.glVertexAttribPointer(i, s, t, gl.GL_FALSE, attr_size * element_size, ctypes.c_void_p(cumsum * element_size))  # we use 32 bit float
+            gl.glEnableVertexAttribArray(i)
+            cumsum += s
+        # Register vertex buffer obejct
+        flags = cudart.cudaGraphicsRegisterFlags.cudaGraphicsRegisterFlagsWriteDiscard
+        try:
+            self.cu_vbo = CHECK_CUDART_ERROR(cudart.cudaGraphicsGLRegisterBuffer(self.vbo, flags))
+        except RuntimeError as e:
+            log(red(f'Your system does not support CUDA-GL interop, will use pytorch3d\'s implementation instead'))
+            log(red(f'This can be done by specifying {blue("model_cfg.sampler_cfg.use_cudagl=False model_cfg.sampler_cfg.use_diffgl=False")} at the end of your command'))
+            log(red(f'Note that this implementation is extremely slow, we recommend running on a native system that support the interop'))
+            log(red(f'An alternative is to install diff_point_rasterization and use the approximated tile-based rasterization, enabled by the `render_gs` switch'))
+            # raise RuntimeError(str(e) + ": This unrecoverable, please read the error message above")
+            raise e
+
+    def init_textures(self, H: int, W: int):
+        from cuda import cudart
+        if hasattr(self, 'cu_tex'):
+            CHECK_CUDART_ERROR(cudart.cudaGraphicsUnregisterResource(self.cu_tex))
+
+        if hasattr(self, 'fbo'):
+            gl.glDeleteFramebuffers(1, [self.fbo])
+            gl.glDeleteRenderbuffers(1, [self.rbo_rgba, self.rbo_atth])
+
+        # Prepare for write frame buffers
+        self.rbo_rgba = gl.glGenRenderbuffers(1)
+        self.rbo_atth = gl.glGenRenderbuffers(1)
+        self.fbo = gl.glGenFramebuffers(1)  # generate 1 framebuffer, storereference in fb
+
+        # Init the texture (call the resizing function), will simply allocate empty memory
+        # The internal format describes how the texture shall be stored in the GPU. The format describes how the format of your pixel data in client memory (together with the type parameter).
+        gl.glBindRenderbuffer(gl.GL_RENDERBUFFER, self.rbo_rgba)
+        gl.glRenderbufferStorage(gl.GL_RENDERBUFFER, self.gl_tex_dtype, W, H)  # faster if using rgba8
+        gl.glBindRenderbuffer(gl.GL_RENDERBUFFER, self.rbo_atth)
+        gl.glRenderbufferStorage(gl.GL_RENDERBUFFER, gl.GL_DEPTH_COMPONENT, W, H)
+
+        # Bind texture to fbo
+        gl.glBindFramebuffer(gl.GL_FRAMEBUFFER, self.fbo)
+        gl.glFramebufferRenderbuffer(gl.GL_FRAMEBUFFER, gl.GL_COLOR_ATTACHMENT0, gl.GL_RENDERBUFFER, self.rbo_rgba)
+        gl.glFramebufferRenderbuffer(gl.GL_FRAMEBUFFER, gl.GL_DEPTH_ATTACHMENT, gl.GL_RENDERBUFFER, self.rbo_atth)
+        gl.glDrawBuffers(1, [gl.GL_COLOR_ATTACHMENT0])
+
+        # Check framebuffer status
+        if gl.glCheckFramebufferStatus(gl.GL_FRAMEBUFFER) != gl.GL_FRAMEBUFFER_COMPLETE:
+            log(red('Framebuffer not complete, exiting...'))
+            raise RuntimeError('Incomplete framebuffer')
+
+        # Restore the original state
+        gl.glBindFramebuffer(gl.GL_FRAMEBUFFER, 0)
+
+        # Register image to read from
+        flags = cudart.cudaGraphicsRegisterFlags.cudaGraphicsRegisterFlagsReadOnly
+        self.cu_tex = CHECK_CUDART_ERROR(cudart.cudaGraphicsGLRegisterImage(self.rbo_rgba, gl.GL_RENDERBUFFER, flags))
+
+    def resize_textures(self, H: int, W: int):  # analogy to update_gl_buffers
+        init = False
+        if not hasattr(self, 'max_H'): self.max_H = 0; init = True
+        if not hasattr(self, 'max_W'): self.max_W = 0; init = True
+        if H > self.max_H or W > self.max_W:  # max got updated
+            if H > self.max_H: self.max_H = int(H * 1.05)
+            if W > self.max_W: self.max_W = int(W * 1.05)
+            if not init: log(bold('[FAST GAUSS] Resizing render buffers to:'), int(H), int(W))
+            self.init_textures(self.max_H, self.max_W)
+
+    def resize_buffers(self, v: int = 0):
+        init = False
+        if not hasattr(self, 'max_verts'): self.max_verts = 0; init = True
+        if v > self.max_verts:
+            if v > self.max_verts: self.max_verts = int(v * 1.05)
+            if not init: log(bold('[FAST GAUSS] Resizing vertex buffers to:'), int(v))
+            self.init_gl_buffers(self.max_verts)
+
+    @torch.no_grad()
+    def render(self, xyz3: torch.Tensor, cov6: torch.Tensor, rgb3: torch.Tensor, occ1: torch.Tensor, raster_settings: 'GaussianRasterizationSettings'):
+        # TODO: Faster way to do this?
+        self.use_gl_program(self.gsplat_program)
+
+        # Compute GS
+        data = torch.cat([xyz3, cov6, rgb3, occ1], dim=-1)  # slow memory operation
+        stream = torch.cuda.current_stream().cuda_stream
+
+        # Preparing dtype
+        if data.dtype != self.dtype:
+            warn_once(yellow(f'Input tensors has dtype {data.dtype}, expected {self.dtype}, will cast to {self.dtype}'))
+            data = data.type(self.dtype)
+            xyz3 = xyz3.type(self.dtype)
+            raster_settings = dotdict(raster_settings._asdict())
+            for key in raster_settings:
+                if isinstance(raster_settings[key], torch.Tensor):
+                    raster_settings[key] = raster_settings[key].type(self.dtype)
+                elif isinstance(raster_settings[key], np.ndarray):
+                    raster_settings[key] = torch.from_numpy(raster_settings[key]).type(self.dtype).numpy()  # HACK: More efficient way?
+
+        # Prepare OpenGL texture size
+        render_h, render_w = raster_settings.image_height, raster_settings.image_width
+        self.resize_textures(render_h, render_w)
+        self.resize_buffers(len(xyz3))
+
+        # Sort by view space depth
+        # FIXME: For unknown reasons, sorting also required for solid mode?
+        # if not raster_settings.solid_mode:  # only perform sorting when not using solid mode
+        # view = point_padding(xyz3) @ raster_settings.viewmatrix.to('cuda', non_blocking=True)
+        w2cT = torch.as_tensor(raster_settings.viewmatrix).to(data.device, non_blocking=True)
+        view = xyz3 @ w2cT[:3, :3] + w2cT[:3, 3]
+        idx = view[..., 2].argsort(descending=True)  # S, sorted
+        data = data[idx].ravel().contiguous()  # sorted data on gpu
+
+        # Upload sorted data to OpenGL for rendering
+        from cuda import cudart
+        from .cuda_utils import CHECK_CUDART_ERROR, FORMAT_CUDART_ERROR
+        kind = cudart.cudaMemcpyKind.cudaMemcpyDeviceToDevice
+
+        CHECK_CUDART_ERROR(cudart.cudaGraphicsMapResources(1, self.cu_vbo, stream))
+        cu_vbo_ptr, cu_vbo_size = CHECK_CUDART_ERROR(cudart.cudaGraphicsResourceGetMappedPointer(self.cu_vbo))
+
+        CHECK_CUDART_ERROR(cudart.cudaMemcpyAsync(cu_vbo_ptr,
+                                                  data.data_ptr(),
+                                                  data.numel() * data.element_size(),
+                                                  kind,
+                                                  stream))
+        CHECK_CUDART_ERROR(cudart.cudaGraphicsUnmapResources(1, self.cu_vbo, stream))
+
+        fb_x, fb_y, fb_w, fb_h = gl.glGetIntegerv(gl.GL_VIEWPORT)
+        if self.offline_rendering or not (render_w == fb_w and render_h == fb_h and fb_x == 0 and fb_y == 0):
+            # Offline rendering or rendering to a differenly sized framebuffer
+            # Will render to the texture and then perform a blit
+            old = gl.glGetInteger(gl.GL_DRAW_FRAMEBUFFER_BINDING)
+            gl.glBindFramebuffer(gl.GL_FRAMEBUFFER, self.fbo)  # for offscreen rendering to textures
+            gl.glClearColor(0, 0, 0, 1.)
+            gl.glClear(gl.GL_COLOR_BUFFER_BIT | gl.GL_DEPTH_BUFFER_BIT)
+
+        if not (render_w == fb_w and render_h == fb_h and fb_x == 0 and fb_y == 0):
+            # Change the viewport and scissor test region
+            gl.glViewport(0, 0, render_w, render_h)
+            gl.glScissor(0, 0, render_w, render_h)  # only render in this small region of the viewport
+
+        # Perform the actual rendering
+        # Will simply render to the currently bound framebuffer
+        self.upload_gl_uniforms(raster_settings)
+        gl.glBindVertexArray(self.vao)
+        gl.glDrawArrays(gl.GL_POINTS, 0, len(xyz3))  # number of vertices
+        gl.glBindVertexArray(0)
+
+        if not self.offline_rendering and not (render_w == fb_w and render_h == fb_h and fb_x == 0 and fb_y == 0):
+            # Restore the original framebuffer and viewport
+            gl.glViewport(fb_x, fb_y, fb_w, fb_h)
+            gl.glScissor(fb_x, fb_y, fb_w, fb_h)  # only render in this small region of the viewport
+
+            gl.glBindFramebuffer(gl.GL_DRAW_FRAMEBUFFER, old)  # read buffer defaults to 0
+            gl.glBlitFramebuffer(0, 0, render_w, render_h,
+                                 fb_x, fb_y, fb_x + fb_w, fb_y + fb_h,
+                                 gl.GL_COLOR_BUFFER_BIT, gl.GL_LINEAR)  # now self.tex contains the content of the already rendered frame
+            gl.glBindFramebuffer(gl.GL_FRAMEBUFFER, old)
+
+        # TODO: Implement rendering normal as the gradient on screen space depth
+        # Need to use textures instead of renderbuffers?
+        # Should we do this in CUDA or just in plain OpenGL?
+        # If in CUDA, need to perform some copy operations, but renderbuffers should be fine
+        # If in OpenGL, we need to divise a full screen quad and perform the gradient computation using a texture in the fragment shader
+
+        # Early return if in online rendering mode
+        if not self.offline_rendering and self.offline_writeback:
+            return None
+
+        # Prepare the output for offline rendering
+        rgba_map = torch.empty((render_h, render_w, 4), dtype=self.tex_dtype, device='cuda')  # to hold the data from opengl
+        # Texture access and copy could be very slow...
+        gl.glBindFramebuffer(gl.GL_FRAMEBUFFER, 0)
+
+        # Copy rendered image and depth back as tensor
+        cu_tex = self.cu_tex
+
+        # The resources in resources may be accessed by CUDA until they are unmapped.
+        # The graphics API from which resources were registered should not access any resources while they are mapped by CUDA.
+        # If an application does so, the results are undefined.
+        CHECK_CUDART_ERROR(cudart.cudaGraphicsMapResources(1, cu_tex, stream))
+        cu_tex_arr = CHECK_CUDART_ERROR(cudart.cudaGraphicsSubResourceGetMappedArray(cu_tex, 0, 0))
+        CHECK_CUDART_ERROR(cudart.cudaMemcpy2DFromArrayAsync(rgba_map.data_ptr(),  # dst
+                                                             render_w * 4 * rgba_map.element_size(),  # dpitch
+                                                             cu_tex_arr,  # src
+                                                             0,  # wOffset
+                                                             0,  # hOffset
+                                                             render_w * 4 * rgba_map.element_size(),  # width Width of matrix transfer (columns in bytes)
+                                                             render_h,  # height
+                                                             kind,  # kind
+                                                             stream))  # stream
+        CHECK_CUDART_ERROR(cudart.cudaGraphicsUnmapResources(1, cu_tex, stream))
+
+        if rgba_map.dtype != xyz3.dtype:
+            warn_once(yellow(f'[FAST GAUSS] Using render buffer dtype {rgba_map.dtype}, expected {xyz3.dtype} for the output, will cast to {xyz3.dtype}'))
+            if not torch.is_floating_point(rgba_map):
+                warn_once(yellow(f'[FAST GAUSS] Using a non-floating-point render buffer dtype: {rgba_map.dtype}, this might cause some precision loss'))
+                rgba_map = rgba_map / torch.iinfo(rgba_map.dtype).max  # should be 255 for uint8
+            else:
+                rgba_map = rgba_map.to(xyz3.dtype)
+
+        rgba_map[..., -1] = 1.0  # unreliable alpha channel
+        return rgba_map  # render_h, render_w, 4
+
+    def rasterize_gaussians(
+        self,
+        means3D: torch.Tensor,  # N, 3
+        means2D: torch.Tensor,  # N, 2
+        shs: torch.Tensor,  # N, SH, 3
+        colors_precomp: torch.Tensor,  # N, 3
+        opacities: torch.Tensor,  # N, 1
+        scales: torch.Tensor,  # N, 3
+        rotations: torch.Tensor,  # N, 4
+        cov3D_precomp: torch.Tensor,  # N, 6
+        raster_settings: 'GaussianRasterizationSettings',
+    ):
+        # FIXME: This preprocessing stage is extremely slow, need to optimize this to raw cuda or write it in the shader
+        if raster_settings.prefiltered:
+
+            if cov3D_precomp is None:
+                cov3D_precomp = build_cov6(scales, rotations)  # N, 6
+
+            if colors_precomp is None:
+                C = torch.as_tensor(raster_settings.campos).to('cuda', non_blocking=True)  # 3,
+                dirs = normalize(means3D - C)
+                colors_precomp = eval_sh(raster_settings.sh_degree, shs.mT, dirs)
+                colors_precomp = (colors_precomp + 0.5).clip(0, 1)
+
+        else:
+
+            visible = in_frustum(means3D, torch.as_tensor(raster_settings.projmatrix).to('cuda', non_blocking=True)).nonzero()[..., 0]  # S, # MARK: SYNC
+            means3D = means3D[visible]
+            opacities = opacities[visible]
+
+            if cov3D_precomp is None:
+                cov3D_precomp = build_cov6(scales[visible], rotations[visible])
+            else:
+                cov3D_precomp = cov3D_precomp[visible]
+
+            if colors_precomp is None:
+                C = torch.as_tensor(raster_settings.campos).to('cuda', non_blocking=True)  # 3,
+                dirs = normalize(means3D - C)
+                colors_precomp = eval_sh(raster_settings.sh_degree, shs[visible].mT, dirs)
+                colors_precomp = (colors_precomp + 0.5).clip(0, 1)
+            else:
+                colors_precomp = colors_precomp[visible]
+
+        rgba_map = self.render(means3D, cov3D_precomp, colors_precomp, opacities, raster_settings)
+
+        if self.offline_rendering and self.offline_writeback:
+            image, alpha = rgba_map.split([3, 1], dim=-1)
+            image, alpha = image.permute(2, 0, 1), alpha.permute(2, 0, 1)
+
+            # FIXME: Alpha channel seems to be bugged
+            return image.float(), alpha.float()
+        else:
+            return None, None
+```
+
+### fast_gauss/math_utils.py
+```
+import math
+import torch
+
+
+@torch.jit.script
+def normalize(x: torch.Tensor, eps: float = 1e-8) -> torch.Tensor:
+    # channel last: normalization
+    return x / (torch.norm(x, dim=-1, keepdim=True) + eps)
+
+
+@torch.jit.script
+def normalize_sum(x: torch.Tensor, eps: float = 1e-8):
+    return x / (x.sum(dim=-1, keepdim=True) + eps)
+
+# Strange synchronization here if using torch.jit.script
+
+
+@torch.jit.script
+def point_padding(v: torch.Tensor):
+    pad = torch.zeros_like(v[..., -1:])
+    pad[..., -1] = 1.0
+    ext = torch.cat([v, pad], dim=-1)
+    return ext
+
+
+@torch.jit.script
+def vector_padding(v: torch.Tensor):
+    pad = torch.zeros_like(v[..., -1:])
+    ext = torch.cat([v, pad], dim=-1)
+    return ext
+
+
+@torch.jit.script
+def affine_padding(c2w: torch.Tensor):
+    # Already padded
+    if c2w.shape[-2] == 4:
+        return c2w
+    # Batch agnostic padding
+    sh = c2w.shape
+    pad0 = c2w.new_zeros(sh[:-2] + (1, 3))  # B, 1, 3
+    pad1 = c2w.new_ones(sh[:-2] + (1, 1))  # B, 1, 1
+    pad = torch.cat([pad0, pad1], dim=-1)  # B, 1, 4
+    c2w = torch.cat([c2w, pad], dim=-2)  # B, 4, 4
+    return c2w
+
+
+@torch.jit.script
+def affine_inverse(A: torch.Tensor):
+    R = A[..., :3, :3]  # ..., 3, 3
+    T = A[..., :3, 3:]  # ..., 3, 1
+    P = A[..., 3:, :]  # ..., 1, 4
+    return torch.cat([torch.cat([R.mT, -R.mT @ T], dim=-1), P], dim=-2)
+
+# these works with an extra batch dimension
+# Batched inverse of lower triangular matrices
+
+# @torch.jit.script
+
+
+def torch_trace(x: torch.Tensor):
+    return x.diagonal(offset=0, dim1=-1, dim2=-2).sum(-1)
+
+
+# @torch.jit.script
+def torch_inverse_decomp(L: torch.Tensor, eps=1e-10):
+    n = L.shape[-1]
+    invL = torch.zeros_like(L)
+    for j in range(0, n):
+        invL[..., j, j] = 1.0 / (L[..., j, j] + eps)
+        for i in range(j + 1, n):
+            S = 0.0
+            for k in range(i + 1):
+                S = S - L[..., i, k] * invL[..., k, j].clone()
+            invL[..., i, j] = S / (L[..., i, i] + eps)
+
+    return invL
+
+
+def torch_inverse_3x3_precompute(R: torch.Tensor, eps=torch.finfo(torch.float).eps):
+    # B, N, 3, 3
+    """
+    a, b, c | m00, m01, m02
+    d, e, f | m10, m11, m12
+    g, h, i | m20, m21, m22
+    """
+
+    if not hasattr(torch_inverse_3x3_precompute, 'g_idx_i'):
+        g_idx_i = torch.tensor(
+            [
+                [
+                    [[1, 1], [2, 2]],
+                    [[1, 1], [2, 2]],
+                    [[1, 1], [2, 2]],
+                ],
+                [
+                    [[0, 0], [2, 2]],
+                    [[0, 0], [2, 2]],
+                    [[0, 0], [2, 2]],
+                ],
+                [
+                    [[0, 0], [1, 1]],
+                    [[0, 0], [1, 1]],
+                    [[0, 0], [1, 1]],
+                ],
+            ], device='cuda', dtype=torch.long)
+
+        g_idx_j = torch.tensor(
+            [
+                [
+                    [[1, 2], [1, 2]],
+                    [[0, 2], [0, 2]],
+                    [[0, 1], [0, 1]],
+                ],
+                [
+                    [[1, 2], [1, 2]],
+                    [[0, 2], [0, 2]],
+                    [[0, 1], [0, 1]],
+                ],
+                [
+                    [[1, 2], [1, 2]],
+                    [[0, 2], [0, 2]],
+                    [[0, 1], [0, 1]],
+                ],
+            ], device='cuda', dtype=torch.long)
+
+        g_signs = torch.tensor([
+            [+1, -1, +1],
+            [-1, +1, -1],
+            [+1, -1, +1],
+        ], device='cuda', dtype=torch.long)
+
+        torch_inverse_3x3_precompute.g_idx_i = g_idx_i
+        torch_inverse_3x3_precompute.g_idx_j = g_idx_j
+        torch_inverse_3x3_precompute.g_signs = g_signs
+
+    g_idx_i = torch_inverse_3x3_precompute.g_idx_i
+    g_idx_j = torch_inverse_3x3_precompute.g_idx_j
+    g_signs = torch_inverse_3x3_precompute.g_signs
+
+    B, N, _, _ = R.shape
+
+    minors = R.new_zeros(B, N, 3, 3, 2, 2)
+    idx_i = g_idx_i.to(R.device, non_blocking=True)  # almost never need to copy
+    idx_j = g_idx_j.to(R.device, non_blocking=True)  # almost never need to copy
+    signs = g_signs.to(R.device, non_blocking=True)  # almost never need to copy
+
+    for i in range(3):
+        for j in range(3):
+            minors[:, :, i, j, :, :] = R[:, :, idx_i[i, j], idx_j[i, j]]
+
+    minors = minors[:, :, :, :, 0, 0] * minors[:, :, :, :, 1, 1] - minors[:, :, :, :, 0, 1] * minors[:, :, :, :, 1, 0]
+    cofactors = minors * signs[None, None]  # 3,3 -> B,N,3,3
+    cofactors_t = cofactors.transpose(-2, -1)  # B, N, 3, 3
+    determinant = R[:, :, 0, 0] * minors[:, :, 0, 0] - R[:, :, 0, 1] * minors[:, :, 0, 1] + R[:, :, 0, 2] * minors[:, :, 0, 2]  # B, N
+    inverse = cofactors_t / (determinant[:, :, None, None] + eps)
+
+    return inverse
+
+
+@torch.jit.script
+def torch_inverse_3x3(R: torch.Tensor, eps: float = torch.finfo(torch.float).eps):
+    # n_batch, n_bones, 3, 3
+    """
+    a, b, c | m00, m01, m02
+    d, e, f | m10, m11, m12
+    g, h, i | m20, m21, m22
+    """
+
+    # convenient access
+    r00 = R[..., 0, 0]
+    r01 = R[..., 0, 1]
+    r02 = R[..., 0, 2]
+    r10 = R[..., 1, 0]
+    r11 = R[..., 1, 1]
+    r12 = R[..., 1, 2]
+    r20 = R[..., 2, 0]
+    r21 = R[..., 2, 1]
+    r22 = R[..., 2, 2]
+
+    M = torch.empty_like(R)
+
+    # determinant of matrix minors
+    # fmt: off
+    M[..., 0, 0] =   r11 * r22 - r21 * r12
+    M[..., 1, 0] = - r10 * r22 + r20 * r12
+    M[..., 2, 0] =   r10 * r21 - r20 * r11
+    M[..., 0, 1] = - r01 * r22 + r21 * r02
+    M[..., 1, 1] =   r00 * r22 - r20 * r02
+    M[..., 2, 1] = - r00 * r21 + r20 * r01
+    M[..., 0, 2] =   r01 * r12 - r11 * r02
+    M[..., 1, 2] = - r00 * r12 + r10 * r02
+    M[..., 2, 2] =   r00 * r11 - r10 * r01
+    # fmt: on
+
+    # determinant of matrix
+    D = r00 * M[..., 0, 0] + r01 * M[..., 1, 0] + r02 * M[..., 2, 0]
+
+    # inverse of 3x3 matrix
+    M = M / (D[..., None, None] + eps)
+
+    return M
+
+
+@torch.jit.script
+def torch_inverse_2x2(A: torch.Tensor, eps: float = torch.finfo(torch.float).eps):
+    a, b, c, d = A[..., 0, 0], A[..., 0, 1], A[..., 1, 0], A[..., 1, 1]
+    det = a * d - b * c
+    B = torch.empty_like(A)
+    B[..., 0, 0], B[..., 0, 1] = d / det, -b / det
+    B[..., 1, 0], B[..., 1, 1] = -c / det, a / det
+    B = torch.where(det[..., None, None] != 0, B, torch.full_like(A, float('nan')))
+    return B
+
+
+def torch_unique_with_indices_and_inverse(x, dim=0):
+    unique, inverse = torch.unique(x, return_inverse=True, dim=dim)
+    perm = torch.arange(inverse.size(dim), dtype=inverse.dtype, device=inverse.device)
+    indices, perm = inverse.flip([dim]), perm.flip([dim])
+    return unique, indices.new_empty(unique.size(dim)).scatter_(dim, indices, perm), inverse
+
+
+def lcm(a, b):
+    return abs(a*b) // math.gcd(a, b)
+```
+
+### fast_gauss/sh_utils.py
+```
+import torch
+
+
+@torch.jit.script
+def eval_shfs_4d_00(sh: torch.Tensor, dirs: torch.Tensor, dirs_t: torch.Tensor, l: torch.Tensor):
+    C0 = 0.28209479177387814
+
+    l0m0 = C0
+    result = l0m0 * sh[..., 0]
+    return result
+
+
+@torch.jit.script
+def eval_shfs_4d_10(sh: torch.Tensor, dirs: torch.Tensor, dirs_t: torch.Tensor, l: torch.Tensor):
+    C0 = 0.28209479177387814
+    C1 = 0.4886025119029199
+
+    l0m0 = C0
+    result = l0m0 * sh[..., 0]
+
+    x, y, z = dirs[..., 0:1], dirs[..., 1:2], dirs[..., 2:3]
+    l1m1 = -1 * C1 * y
+    l1m0 = C1 * z
+    l1p1 = -1 * C1 * x
+
+    result = (result +
+              l1m1 * sh[..., 1] +
+              l1m0 * sh[..., 2] +
+              l1p1 * sh[..., 3])
+    return result
+
+
+@torch.jit.script
+def eval_shfs_4d_20(sh: torch.Tensor, dirs: torch.Tensor, dirs_t: torch.Tensor, l: torch.Tensor):
+    C0 = 0.28209479177387814
+    C1 = 0.4886025119029199
+    C2 = [
+        1.0925484305920792,
+        -1.0925484305920792,
+        0.31539156525252005,
+        -1.0925484305920792,
+        0.5462742152960396
+    ]
+
+    l0m0 = C0
+    result = l0m0 * sh[..., 0]
+
+    x, y, z = dirs[..., 0:1], dirs[..., 1:2], dirs[..., 2:3]
+    l1m1 = -1 * C1 * y
+    l1m0 = C1 * z
+    l1p1 = -1 * C1 * x
+
+    result = (result +
+              l1m1 * sh[..., 1] +
+              l1m0 * sh[..., 2] +
+              l1p1 * sh[..., 3])
+
+    xx, yy, zz = x * x, y * y, z * z
+    xy, yz, xz = x * y, y * z, x * z
+
+    l2m2 = C2[0] * xy
+    l2m1 = C2[1] * yz
+    l2m0 = C2[2] * (2.0 * zz - xx - yy)
+    l2p1 = C2[3] * xz
+    l2p2 = C2[4] * (xx - yy)
+
+    result = (result +
+              l2m2 * sh[..., 4] +
+              l2m1 * sh[..., 5] +
+              l2m0 * sh[..., 6] +
+              l2p1 * sh[..., 7] +
+              l2p2 * sh[..., 8])
+
+    return result
+
+
+@torch.jit.script
+def eval_shfs_4d_30(sh: torch.Tensor, dirs: torch.Tensor, dirs_t: torch.Tensor, l: torch.Tensor):
+    C0 = 0.28209479177387814
+    C1 = 0.4886025119029199
+    C2 = [
+        1.0925484305920792,
+        -1.0925484305920792,
+        0.31539156525252005,
+        -1.0925484305920792,
+        0.5462742152960396
+    ]
+    C3 = [
+        -0.5900435899266435,
+        2.890611442640554,
+        -0.4570457994644658,
+        0.3731763325901154,
+        -0.4570457994644658,
+        1.445305721320277,
+        -0.5900435899266435
+    ]
+    C4 = [
+        2.5033429417967046,
+        -1.7701307697799304,
+        0.9461746957575601,
+        -0.6690465435572892,
+        0.10578554691520431,
+        -0.6690465435572892,
+        0.47308734787878004,
+        -1.7701307697799304,
+        0.6258357354491761,
+    ]
+
+    l0m0 = C0
+    result = l0m0 * sh[..., 0]
+
+    x, y, z = dirs[..., 0:1], dirs[..., 1:2], dirs[..., 2:3]
+    l1m1 = -1 * C1 * y
+    l1m0 = C1 * z
+    l1p1 = -1 * C1 * x
+
+    result = (result +
+              l1m1 * sh[..., 1] +
+              l1m0 * sh[..., 2] +
+              l1p1 * sh[..., 3])
+
+    xx, yy, zz = x * x, y * y, z * z
+    xy, yz, xz = x * y, y * z, x * z
+
+    l2m2 = C2[0] * xy
+    l2m1 = C2[1] * yz
+    l2m0 = C2[2] * (2.0 * zz - xx - yy)
+    l2p1 = C2[3] * xz
+    l2p2 = C2[4] * (xx - yy)
+
+    result = (result +
+              l2m2 * sh[..., 4] +
+              l2m1 * sh[..., 5] +
+              l2m0 * sh[..., 6] +
+              l2p1 * sh[..., 7] +
+              l2p2 * sh[..., 8])
+
+    l3m3 = C3[0] * y * (3 * xx - yy)
+    l3m2 = C3[1] * xy * z
+    l3m1 = C3[2] * y * (4 * zz - xx - yy)
+    l3m0 = C3[3] * z * (2 * zz - 3 * xx - 3 * yy)
+    l3p1 = C3[4] * x * (4 * zz - xx - yy)
+    l3p2 = C3[5] * z * (xx - yy)
+    l3p3 = C3[6] * x * (xx - 3 * yy)
+
+    result = (result +
+              l3m3 * sh[..., 9] +
+              l3m2 * sh[..., 10] +
+              l3m1 * sh[..., 11] +
+              l3m0 * sh[..., 12] +
+              l3p1 * sh[..., 13] +
+              l3p2 * sh[..., 14] +
+              l3p3 * sh[..., 15])
+    return result
+
+
+@torch.jit.script
+def eval_shfs_4d_31(sh: torch.Tensor, dirs: torch.Tensor, dirs_t: torch.Tensor, l: torch.Tensor):
+    C0 = 0.28209479177387814
+    C1 = 0.4886025119029199
+    C2 = [
+        1.0925484305920792,
+        -1.0925484305920792,
+        0.31539156525252005,
+        -1.0925484305920792,
+        0.5462742152960396
+    ]
+    C3 = [
+        -0.5900435899266435,
+        2.890611442640554,
+        -0.4570457994644658,
+        0.3731763325901154,
+        -0.4570457994644658,
+        1.445305721320277,
+        -0.5900435899266435
+    ]
+
+    l0m0 = C0
+    result = l0m0 * sh[..., 0]
+
+    x, y, z = dirs[..., 0:1], dirs[..., 1:2], dirs[..., 2:3]
+    l1m1 = -1 * C1 * y
+    l1m0 = C1 * z
+    l1p1 = -1 * C1 * x
+
+    result = (result +
+              l1m1 * sh[..., 1] +
+              l1m0 * sh[..., 2] +
+              l1p1 * sh[..., 3])
+
+    xx, yy, zz = x * x, y * y, z * z
+    xy, yz, xz = x * y, y * z, x * z
+
+    l2m2 = C2[0] * xy
+    l2m1 = C2[1] * yz
+    l2m0 = C2[2] * (2.0 * zz - xx - yy)
+    l2p1 = C2[3] * xz
+    l2p2 = C2[4] * (xx - yy)
+
+    result = (result +
+              l2m2 * sh[..., 4] +
+              l2m1 * sh[..., 5] +
+              l2m0 * sh[..., 6] +
+              l2p1 * sh[..., 7] +
+              l2p2 * sh[..., 8])
+
+    l3m3 = C3[0] * y * (3 * xx - yy)
+    l3m2 = C3[1] * xy * z
+    l3m1 = C3[2] * y * (4 * zz - xx - yy)
+    l3m0 = C3[3] * z * (2 * zz - 3 * xx - 3 * yy)
+    l3p1 = C3[4] * x * (4 * zz - xx - yy)
+    l3p2 = C3[5] * z * (xx - yy)
+    l3p3 = C3[6] * x * (xx - 3 * yy)
+
+    result = (result +
+              l3m3 * sh[..., 9] +
+              l3m2 * sh[..., 10] +
+              l3m1 * sh[..., 11] +
+              l3m0 * sh[..., 12] +
+              l3p1 * sh[..., 13] +
+              l3p2 * sh[..., 14] +
+              l3p3 * sh[..., 15])
+
+    t1 = torch.cos(2 * torch.pi * dirs_t / l)
+
+    result = (result +
+              t1 * l0m0 * sh[..., 16] +
+              t1 * l1m1 * sh[..., 17] +
+              t1 * l1m0 * sh[..., 18] +
+              t1 * l1p1 * sh[..., 19] +
+              t1 * l2m2 * sh[..., 20] +
+              t1 * l2m1 * sh[..., 21] +
+              t1 * l2m0 * sh[..., 22] +
+              t1 * l2p1 * sh[..., 23] +
+              t1 * l2p2 * sh[..., 24] +
+              t1 * l3m3 * sh[..., 25] +
+              t1 * l3m2 * sh[..., 26] +
+              t1 * l3m1 * sh[..., 27] +
+              t1 * l3m0 * sh[..., 28] +
+              t1 * l3p1 * sh[..., 29] +
+              t1 * l3p2 * sh[..., 30] +
+              t1 * l3p3 * sh[..., 31])
+
+    return result
+
+
+@torch.jit.script
+def eval_shfs_4d_32(sh: torch.Tensor, dirs: torch.Tensor, dirs_t: torch.Tensor, l: torch.Tensor):
+    C0 = 0.28209479177387814
+    C1 = 0.4886025119029199
+    C2 = [
+        1.0925484305920792,
+        -1.0925484305920792,
+        0.31539156525252005,
+        -1.0925484305920792,
+        0.5462742152960396
+    ]
+    C3 = [
+        -0.5900435899266435,
+        2.890611442640554,
+        -0.4570457994644658,
+        0.3731763325901154,
+        -0.4570457994644658,
+        1.445305721320277,
+        -0.5900435899266435
+    ]
+
+    l0m0 = C0
+    result = l0m0 * sh[..., 0]
+
+    x, y, z = dirs[..., 0:1], dirs[..., 1:2], dirs[..., 2:3]
+    l1m1 = -1 * C1 * y
+    l1m0 = C1 * z
+    l1p1 = -1 * C1 * x
+
+    result = (result +
+              l1m1 * sh[..., 1] +
+              l1m0 * sh[..., 2] +
+              l1p1 * sh[..., 3])
+
+    xx, yy, zz = x * x, y * y, z * z
+    xy, yz, xz = x * y, y * z, x * z
+
+    l2m2 = C2[0] * xy
+    l2m1 = C2[1] * yz
+    l2m0 = C2[2] * (2.0 * zz - xx - yy)
+    l2p1 = C2[3] * xz
+    l2p2 = C2[4] * (xx - yy)
+
+    result = (result +
+              l2m2 * sh[..., 4] +
+              l2m1 * sh[..., 5] +
+              l2m0 * sh[..., 6] +
+              l2p1 * sh[..., 7] +
+              l2p2 * sh[..., 8])
+
+    l3m3 = C3[0] * y * (3 * xx - yy)
+    l3m2 = C3[1] * xy * z
+    l3m1 = C3[2] * y * (4 * zz - xx - yy)
+    l3m0 = C3[3] * z * (2 * zz - 3 * xx - 3 * yy)
+    l3p1 = C3[4] * x * (4 * zz - xx - yy)
+    l3p2 = C3[5] * z * (xx - yy)
+    l3p3 = C3[6] * x * (xx - 3 * yy)
+
+    result = (result +
+              l3m3 * sh[..., 9] +
+              l3m2 * sh[..., 10] +
+              l3m1 * sh[..., 11] +
+              l3m0 * sh[..., 12] +
+              l3p1 * sh[..., 13] +
+              l3p2 * sh[..., 14] +
+              l3p3 * sh[..., 15])
+
+    t1 = torch.cos(2 * torch.pi * dirs_t / l)
+
+    result = (result +
+              t1 * l0m0 * sh[..., 16] +
+              t1 * l1m1 * sh[..., 17] +
+              t1 * l1m0 * sh[..., 18] +
+              t1 * l1p1 * sh[..., 19] +
+              t1 * l2m2 * sh[..., 20] +
+              t1 * l2m1 * sh[..., 21] +
+              t1 * l2m0 * sh[..., 22] +
+              t1 * l2p1 * sh[..., 23] +
+              t1 * l2p2 * sh[..., 24] +
+              t1 * l3m3 * sh[..., 25] +
+              t1 * l3m2 * sh[..., 26] +
+              t1 * l3m1 * sh[..., 27] +
+              t1 * l3m0 * sh[..., 28] +
+              t1 * l3p1 * sh[..., 29] +
+              t1 * l3p2 * sh[..., 30] +
+              t1 * l3p3 * sh[..., 31])
+
+    t2 = torch.cos(2 * torch.pi * 2 * dirs_t / l)
+
+    result = (result +
+              t2 * l0m0 * sh[..., 32] +
+              t2 * l1m1 * sh[..., 33] +
+              t2 * l1m0 * sh[..., 34] +
+              t2 * l1p1 * sh[..., 35] +
+              t2 * l2m2 * sh[..., 36] +
+              t2 * l2m1 * sh[..., 37] +
+              t2 * l2m0 * sh[..., 38] +
+              t2 * l2p1 * sh[..., 39] +
+              t2 * l2p2 * sh[..., 40] +
+              t2 * l3m3 * sh[..., 41] +
+              t2 * l3m2 * sh[..., 42] +
+              t2 * l3m1 * sh[..., 43] +
+              t2 * l3m0 * sh[..., 44] +
+              t2 * l3p1 * sh[..., 45] +
+              t2 * l3p2 * sh[..., 46] +
+              t2 * l3p3 * sh[..., 47])
+
+    return result
+
+
+def eval_shfs_4d(deg: int, deg_t: int, sh: torch.Tensor, dirs: torch.Tensor, dirs_t: torch.Tensor, l: torch.Tensor):
+    # fmt: off
+    if deg <= 0:                  return eval_shfs_4d_00(sh, dirs, dirs_t, l)
+    elif deg <= 1:                return eval_shfs_4d_10(sh, dirs, dirs_t, l)
+    elif deg <= 2:                return eval_shfs_4d_20(sh, dirs, dirs_t, l)
+    elif deg <= 3 and deg_t <= 0: return eval_shfs_4d_30(sh, dirs, dirs_t, l)
+    elif deg <= 3 and deg_t <= 1: return eval_shfs_4d_31(sh, dirs, dirs_t, l)
+    elif deg <= 3 and deg_t <= 2: return eval_shfs_4d_32(sh, dirs, dirs_t, l)
+    else: raise NotImplementedError('Unsupported 4DSH dimension')
+    # fmt: on
+
+
+def eval_sh(deg: int, sh: torch.Tensor, dirs: torch.Tensor):
+    # fmt: off
+    if deg <= 0:                  return eval_shfs_4d_00(sh, dirs, torch.as_tensor([]), torch.as_tensor([]))
+    elif deg <= 1:                return eval_shfs_4d_10(sh, dirs, torch.as_tensor([]), torch.as_tensor([]))
+    elif deg <= 2:                return eval_shfs_4d_20(sh, dirs, torch.as_tensor([]), torch.as_tensor([]))
+    elif deg <= 3:                return eval_shfs_4d_30(sh, dirs, torch.as_tensor([]), torch.as_tensor([]))
+    else: raise NotImplementedError('Unsupported SH dimension')
+    # fmt: on
+```
+
+### fast_gauss/shaders/dsplat.frag
+```
+#version 330
+#pragma vscode_glsllint_stage : frag
+
+/**
+  Almost empty fragment shader for computing the final output color.
+  Note that the geometry should've been emitted in the order they want to be rendered (back to front) and blended normally
+ */
+
+in vec2 vPosition;
+flat in vec4 vColor;
+flat in float vDepth;
+
+uniform bool useDepth = false;
+uniform bool solidMode = false;
+uniform bool edgeMode = false;
+
+uniform float eight = 8;
+uniform float minAlpha = 0.004;
+uniform float maxAlpha = 0.99;
+uniform float edgeThreshold = 0.025;
+
+layout(location = 0) out vec4 write_color;
+// layout(location = 1) out vec4 write_depth;
+
+void main() {
+    // Compute the positional squared distance from the center of the splat to the current fragment.
+    float A = dot(vPosition, vPosition);
+
+    // Since the positional data in vPosition has been scaled by sqrt(8), the squared result will be
+    // scaled by a factor of 8. If the squared result is larger than 8, it means it is outside the ellipse
+    // defined by the rectangle formed by vPosition. It also means it's farther
+    // away than sqrt(8) standard deviations from the mean.
+    if (A > eight) discard;
+    float power = -0.5 * A;
+    // if (power > 0.0f) discard;
+
+    // Since the rendered splat is scaled by sqrt(8), the inverse covariance matrix that is part of
+    // the gaussian formula becomes the identity matrix. We're then left with (X - mean) * (X - mean),
+    // and since 'mean' is zero, we have X * X, which is the same as A:
+    float opacity = exp(power) * vColor.a;
+    // float opacity = exp(-0.5 * A) * vColor.a;
+    if (opacity < minAlpha) discard;
+    // opacity = min(maxAlpha, opacity);
+
+    vec3 color = vColor.rgb;
+    if (solidMode) opacity = 1.0;
+    if (useDepth) color = vec3(vDepth);
+    if (edgeMode && (exp(power) < edgeThreshold)) {
+    // color = vec3(1.0, 0.0, 0.0); // red edge
+    // if (exp(power) <= edgeThreshold) {
+        color = vec3(0.0, 0.0, 0.0); // red edge
+        opacity = 1.0;
+    }
+    // write_color = vec4(vec3(edgeMode), opacity);
+    write_color = vec4(color, opacity);
+}
+```
+
+### fast_gauss/shaders/dsplat.geom
+```
+#version 330
+#pragma vscode_glsllint_stage : geom
+
+/**
+  Given center point and computed basis vectors, emit the four quad positions
+  This computes the virtual position to be used by fragment shader to compute the gaussian fall off
+  The RGBA color of the GS is also passed as is to the geometry shader
+ */
+
+uniform vec2 basisViewport;
+uniform float discardAlpha = 0.0001;
+uniform float sqrt8 = sqrt(8);
+// uniform float sqrt8 = 3;
+
+layout(points) in;
+layout(triangle_strip, max_vertices = 4) out;
+
+in vec2 basisVector0[];
+in vec2 basisVector1[];
+in vec4 gColor[];
+in float gDepth[];
+
+out vec2 vPosition;
+flat out vec4 vColor;   // pass through
+flat out float vDepth;  // pass through
+
+vec2 computeNDCOffset(vec2 basisVector0, vec2 basisVector1, vec2 vPosition) {
+    return (vPosition.x * basisVector0 + vPosition.y * basisVector1) * basisViewport * 2.0;
+}
+
+void main() {
+    if (gColor[0].a < discardAlpha) {
+        return;  // will not emit any quad for later rendering
+    }
+
+    vec2 ndcOffset;
+    vec3 ndcCenter = gl_in[0].gl_Position.xyz;
+
+    vPosition.x = -1;
+    vPosition.y = -1;
+    ndcOffset = computeNDCOffset(basisVector0[0], basisVector1[0], vPosition);  // compute offset
+    gl_Position = vec4(ndcCenter.xy + ndcOffset, ndcCenter.z, 1.0);             // store output
+    vPosition *= sqrt8;                                                         // store output
+    vColor = gColor[0];                                                         // pass through
+    vDepth = gDepth[0];                                                         // pass through
+    EmitVertex();
+
+    vPosition.x = -1;
+    vPosition.y = 1;
+    ndcOffset = computeNDCOffset(basisVector0[0], basisVector1[0], vPosition);  // compute offset
+    gl_Position = vec4(ndcCenter.xy + ndcOffset, ndcCenter.z, 1.0);             // store output
+    vPosition *= sqrt8;                                                         // store output
+    vColor = gColor[0];                                                         // pass through
+    vDepth = gDepth[0];                                                         // pass through
+    EmitVertex();
+
+    vPosition.x = 1;
+    vPosition.y = -1;
+    ndcOffset = computeNDCOffset(basisVector0[0], basisVector1[0], vPosition);  // compute offset
+    gl_Position = vec4(ndcCenter.xy + ndcOffset, ndcCenter.z, 1.0);             // store output
+    vPosition *= sqrt8;                                                         // store output
+    vColor = gColor[0];                                                         // pass through
+    vDepth = gDepth[0];                                                         // pass through
+    EmitVertex();
+
+    vPosition.x = 1;
+    vPosition.y = 1;
+    ndcOffset = computeNDCOffset(basisVector0[0], basisVector1[0], vPosition);  // compute offset
+    gl_Position = vec4(ndcCenter.xy + ndcOffset, ndcCenter.z, 1.0);             // store output
+    vPosition *= sqrt8;                                                         // store output
+    vColor = gColor[0];                                                         // pass through
+    vDepth = gDepth[0];                                                         // pass through
+    EmitVertex();
+
+    EndPrimitive();
+}
+```
+
+### fast_gauss/shaders/dsplat.vert
+```
+#version 330
+#pragma vscode_glsllint_stage : vert
+
+/**
+  Compute covariance relatec computation & projection etc
+  This emits the 2 2D basis vector for geometry shader's quad construction
+  The RGBA color of the GS is also passed as is to the geometry shader
+ */
+
+// uniform int H;
+// uniform int W;
+// uniform float n;
+// uniform float f;
+// uniform mat3x3 K;
+
+uniform mat4x4 P;
+uniform mat4x4 VM;
+uniform vec2 focal;
+uniform vec2 principal;
+uniform vec2 basisViewport;
+
+// uniform float discardAlpha = 0.1;
+uniform float discardAlpha = 0.0001;
+// uniform float discardAlpha = 0.15;
+uniform float maxScreenSpaceSplatSize = 2048.0;
+uniform float sqrt8 = sqrt(8);
+// uniform float sqrt8 = 3;
+
+layout(location = 0) in vec3 aPos;     // xyz
+layout(location = 1) in vec3 aCov0_3;  // cov6
+layout(location = 2) in vec3 aCov3_6;  // cov6
+layout(location = 3) in vec4 aColor;   // rgba
+
+out vec2 basisVector0;
+out vec2 basisVector1;
+out vec4 gColor;   // pass through
+out float gDepth;  // pass through
+
+void main() {
+    if (aColor.a < discardAlpha) {
+        gColor.a = 0.0;  // will not emit things in geometry shader
+        return;
+    }
+
+    // Compute the view and clip space coordinates of the center of the ellipse
+    vec4 viewCenter = VM * vec4(aPos, 1.0);
+    vec4 clipCenter = P * vec4(aPos, 1.0);
+    clipCenter = clipCenter / clipCenter.w;  // perspective division
+
+    // Construct the 3D covariance matrix
+    mat3 Vrk = mat3(
+        aCov0_3[0], aCov0_3[1], aCov0_3[2],
+        aCov0_3[1], aCov3_6[0], aCov3_6[1],
+        aCov0_3[2], aCov3_6[1], aCov3_6[2]);
+
+    // Construct the Jacobian of the affine approximation of the projection matrix. It will be used to transform the
+    float width = 1 / basisViewport[0];
+    float height = 1 / basisViewport[1];
+    float fx = focal[0];
+    float fy = focal[1];
+    float cx = principal[0];
+    float cy = principal[1];
+    float x = viewCenter.x;
+    float y = viewCenter.y;
+    float z = viewCenter.z;
+
+    float tan_fovx = 0.5 * width / fx;
+    float tan_fovy = 0.5 * height / fy;
+    float lim_x_pos = (width - cx) / fx + 0.3 * tan_fovx;
+    float lim_x_neg = cx / fx + 0.3 * tan_fovx;
+    float lim_y_pos = (height - cy) / fy + 0.3 * tan_fovy;
+    float lim_y_neg = cy / fy + 0.3 * tan_fovy;
+
+    float rz = 1.0 / z;
+    float rz2 = rz * rz;
+    float tx = z * min(lim_x_pos, max(-lim_x_neg, x * rz));
+    float ty = z * min(lim_y_pos, max(-lim_y_neg, y * rz));
+
+    mat3 J = mat3(
+        fx * rz, 0., -fx * tx * rz2,
+        0., fy * rz, -fy * ty * rz2,
+        0., 0., 0.);
+
+    // Concatenate the projection approximation with the model-view transformation
+    mat3 W = transpose(mat3(VM));
+    mat3 T = W * J;
+
+    // Transform the 3D covariance matrix (Vrk) to compute the 2D covariance matrix
+    mat3 cov2Dm = transpose(T) * Vrk * T;
+    cov2Dm[0][0] += 0.3;
+    cov2Dm[1][1] += 0.3;
+
+    // We are interested in the upper-left 2x2 portion of the projected 3D covariance matrix because
+    // we only care about the X and Y values. We want the X-diagonal, cov2Dm[0][0],
+    // the Y-diagonal, cov2Dm[1][1], and the correlation between the two cov2Dm[0][1]. We don't
+    // need cov2Dm[1][0] because it is a symetric matrix.
+    vec3 cov2Dv = vec3(cov2Dm[0][0], cov2Dm[0][1], cov2Dm[1][1]);
+
+    // We now need to solve for the eigen-values and eigen vectors of the 2D covariance matrix
+    // so that we can determine the 2D basis for the splat. This is done using the method described
+    // here: https://people.math.harvard.edu/~knill/teaching/math21b2004/exhibits/2dmatrices/index.html
+    // After calculating the eigen-values and eigen-vectors, we calculate the basis for rendering the splat
+    // by normalizing the eigen-vectors and then multiplying them by (sqrt(8) * eigen-value), which is
+    // equal to scaling them by sqrt(8) standard deviations.
+    //
+    // This is a different approach than in the original work at INRIA. In that work they compute the
+    // max extents of the projected splat in screen space to form a screen-space aligned bounding rectangle
+    // which forms the geometry that is actually rasterized. The dimensions of that bounding box are 3.0
+    // times the maximum eigen-value, or 3 standard deviations. They then use the inverse 2D covariance
+    // matrix (called 'conic') in the CUDA rendering thread to determine fragment opacity by calculating the
+    // full gaussian: exp(-0.5 * (X - mean) * conic * (X - mean)) * splat opacity
+    float a = cov2Dv.x;
+    float d = cov2Dv.z;
+    float b = cov2Dv.y;
+    float D = a * d - b * b;
+
+    if (D <= 0.0 || cov2Dv.x <= 0.0 || cov2Dv.z <= 0.0) {
+        // Illegal cov matrix, this point should be pruned with zero gradients
+        gColor.a = 0.0;  // will not emit things
+        return;
+    }
+
+    float trace = a + d;
+    float traceOver2 = 0.5 * trace;
+    float term2 = sqrt(max(0.1f, traceOver2 * traceOver2 - D));
+    float eigenValue0 = traceOver2 + term2;
+    float eigenValue1 = traceOver2 - term2;
+
+    // if (eigenValue1 < 0) {
+    //     gColor.a = 0.0;  // will not emit things
+    //     return;
+    // }
+    if (eigenValue0 <= 0.01 || eigenValue1 <= 0.01 || eigenValue0 < eigenValue1 || (eigenValue0 / eigenValue1) > 10000.0) {
+        gColor.a = 0.0;  // will not emit things
+        return;
+    }
+
+    vec2 eigenVector0 = normalize(vec2(b, eigenValue0 - a));
+    // since the eigen vectors are orthogonal, we derive the second one from the first
+    vec2 eigenVector1 = vec2(eigenVector0.y, -eigenVector0.x);
+
+    // We use sqrt(8) standard deviations instead of 3 to eliminate more of the splat with a very low opacity.
+    basisVector0 = eigenVector0 * min(sqrt8 * sqrt(eigenValue0), maxScreenSpaceSplatSize);
+    basisVector1 = eigenVector1 * min(sqrt8 * sqrt(eigenValue1), maxScreenSpaceSplatSize);
+
+    gl_Position = clipCenter;  // doing a perspective projection to ndc space
+    gColor = aColor;           // passing through
+    gDepth = clipCenter.z;     // passing through
+}
+```

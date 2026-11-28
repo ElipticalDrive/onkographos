@@ -1,0 +1,164 @@
+--- v005.md
++++ v006.md
+@@ -73,93 +73,86 @@
+ def train_DNGaussian(input_images, camera_poses, num_iterations=6000, soft_start_iter=1000):
+     # 1. Initialization
+-    # Randomly initialize Gaussians (mu, s, q, alpha)
+-    gaussians = RandomInitializeGaussians()
+-    
+-    # Initialize Neural Color Renderer (Hash Encoder + MLP)
++    gaussians = RandomInitializeGaussians(num_primitives=10000)
+     color_renderer = NeuralColorRenderer(levels=16, res_range=(16, 512), max_size=2**19, mlp_layers=5, hidden_dim=64)
+-    
+-    # Predict monocular depth maps using DPT
+     mono_depth_maps = DPT_Predict(input_images)
+-    
+-    # Parameters
+-    tau = 0.95  # Hard depth opacity
+-    gamma = 0.1 # Global loss weight
+-    
++    tau, gamma = 0.95, 0.1
++    optimizer = GradientDescentOptimizer(gaussians + [color_renderer], lr=1e-3)
++
+     for iter in range(1, num_iterations + 1):
+-        # 2. Color Supervision (Standard 3DGS optimization)
+-        # Render color using Neural Color Renderer
++        # 2. Color Supervision
+         rendered_color = RenderColor(gaussians, color_renderer, camera_poses)
+-        
+-        # Calculate Color Loss
+         L_color = L1_Loss(rendered_color, input_images) + Lambda_LDDSSIM(rendered_color, input_images)
+-        
+-        # Backpropagate color loss to update Gaussians (mu, s, q, alpha) and Color Renderer
+-        # Note: Standard 3DGS duplication/removal happens here
+-        Optimizer.step(L_color)
+-        
++        optimizer.zero_grad(); L_color.backward(); optimizer.step()
++        # Standard 3DGS duplication/removal of active primitives occurs here [G]
++
+         # 3. Depth Regularization
+-        # Freeze parameters based on phase
+         if iter <= soft_start_iter:
+             # Hard Depth Phase
+-            FreezeParameters(gaussians, freeze=['s', 'q'])
+-            # Set temporary opacity tau for hard depth rendering
++            freeze_params(gaussians, ['s', 'q'])
+             hard_depth = RenderHardDepth(gaussians, tau, camera_poses)
+-            
+-            # Calculate Hard Depth Loss with Global-Local Normalization
+-            R_hard = GlobalLocalDepthLoss(hard_depth, mono_depth_maps, gamma=gamma)
+-            
+-            # Backpropagate hard depth loss to update mu and alpha
+-            Optimizer.step(R_hard)
+-            
++            R_hard = GlobalLocalDepthLoss(hard_depth, mono_depth_maps, gamma)
++            optimizer.zero_grad(); R_hard.backward(); optimizer.step()
+         else:
+             # Soft Depth Phase
+-            # Freeze centers mu
+-            FreezeParameters(gaussians, freeze=['mu'])
+-            
+-            # Render soft depth using current opacities
++            freeze_params(gaussians, ['mu'])
+             soft_depth = RenderSoftDepth(gaussians, camera_poses)
+-            
+-            # Calculate Soft Depth Loss with Global-Local Normalization
+-            R_soft = GlobalLocalDepthLoss(soft_depth, mono_depth_maps, gamma=gamma)
+-            
+-            # Backpropagate soft depth loss to update alpha
+-            Optimizer.step(R_soft)
+-            
+-        # Unfreeze parameters for next iteration if needed (though hard phase freezes s,q and soft phase freezes mu)
+-        # Note: The paper implies specific freezing during the respective regularization steps.
+-        # In practice, gradients are masked or parameters are detached during the specific loss calculation.
++            R_soft = GlobalLocalDepthLoss(soft_depth, mono_depth_maps, gamma)
++            optimizer.zero_grad(); R_soft.backward(); optimizer.step()
+ 
+ def RenderHardDepth(gaussians, tau, camera_poses):
+-    # For each ray, set opacity to tau
+-    # D_hard(xp) = sum_{i in N} tau * (1 - tau)^(i-1) * G_proj_i(xp) * ||mu_i - o||_2
+-    depth = 0.0
+-    for ray in rays:
+-        hit_gaussians = SortByDistance(ray.origin, gaussians)
+-        for i, g in enumerate(hit_gaussians):
+-            weight = tau * ((1 - tau) ** i)
+-            depth += weight * g.projected_area * distance(g.mu, ray.origin)
+-    return depth
++    depth_map = zeros_like(camera_poses.image_shape)
++    for ray in camera_poses.rays:
++        sorted_g = SortByDistance(ray.origin, gaussians)
++        d = 0.0
++        for i, g in enumerate(sorted_g):
++            d += tau * ((1 - tau) ** (i - 1)) * EvaluateProjectedGaussian(g, ray.pixel) * distance(g.mu, ray.origin)
++        depth_map[ray.pixel] = d
++    return depth_map
+ 
+ def RenderSoftDepth(gaussians, camera_poses):
+-    # D_soft(xp) = sum_{i in N} ||mu_i - o||_2 * alpha_i * product_{j=1}^{i-1} (1 - alpha_j)
+-    depth = 0.0
+-    for ray in rays:
+-        hit_gaussians = SortByDistance(ray.origin, gaussians)
+-        transmittance = 1.0
+-        for i, g in enumerate(hit_gaussians):
+-            alpha = g.alpha
+-            depth += distance(g.mu, ray.origin) * alpha * transmittance
+-            transmittance *= (1 - alpha)
+-    return depth
++    depth_map = zeros_like(camera_poses.image_shape)
++    for ray in camera_poses.rays:
++        sorted_g = SortByDistance(ray.origin, gaussians)
++        T, d = 1.0, 0.0
++        for i, g in enumerate(sorted_g):
++            d += distance(g.mu, ray.origin) * g.alpha * T
++            T *= (1 - g.alpha)
++        depth_map[ray.pixel] = d
++    return depth_map
+ 
+ def GlobalLocalDepthLoss(rendered_depth, mono_depth, gamma):
+-    # Compute Global Normalized Depth (GN) and Local Normalized Depth (LN)
+-    # This involves normalizing the depth maps to handle scale differences and emphasize local changes
+     D_GN, D_LN = NormalizeDepth(rendered_depth)
+     D_tilde_GN, D_tilde_LN = NormalizeDepth(mono_depth)
+-    
+-    # L2 Loss with error tolerance
+-    loss = L2_Loss(D_GN, D_tilde_GN) + gamma * L2_Loss(D_LN, D_tilde_LN)
+-    return loss
++    return L2_Loss(D_GN, D_tilde_GN) + gamma * L2_Loss(D_LN, D_tilde_LN)
++
++# Standard helpers
++def RandomInitializeGaussians(num_primitives): return {'mu': uniform_random(num_primitives, 3), 's': uniform_random(num_primitives, 3), 'q': unit_quaternion_random(num_primitives), 'alpha': uniform_random(num_primitives, 1)}
++def NeuralColorRenderer(levels, res_range, max_size, mlp_layers, hidden_dim): return {'hash': HashEncoder(levels, res_range, max_size), 'mlp': MLP(mlp_layers, hidden_dim)}
++def DPT_Predict(images): return [ForwardPass(DPT_Model, img) for img in images]
++def GradientDescentOptimizer(params, lr): return {'params': params, 'lr': lr}
++def RenderColor(gaussians, color_renderer, camera_poses): return [Rasterize(gaussians, color_renderer, ray) for ray in camera_poses.rays]
++def L1_Loss(a, b): return mean(abs(a - b))
++def Lambda_LDDSSIM(a, b): return 0.2 * SSIM_Loss(a, b)
++def freeze_params(g, params): [setattr(g, p, g[p].detach()) for p in params]
++def SortByDistance(origin, g): return sorted(g, key=lambda x: distance(x.mu, origin))
++def EvaluateProjectedGaussian(g, pixel): return exp(-0.5 * (pixel - g.center_proj).T @ g.cov_inv @ (pixel - g.center_proj))
++def distance(a, b): return sqrt(sum((a - b)**2))
++def NormalizeDepth(depth):
++    D_GN = (depth - min(depth)) / (max(depth) - min(depth) + 1e-6)
++    D_LN = LocalWindowNormalize(depth)
++    return D_GN, D_LN
++def L2_Loss(a, b): return mean((a - b)**2)
++def zeros_like(tensor): return full_like(tensor, 0.0)
++def uniform_random(n, d): return [[random.uniform(0, 1) for _ in range(d)] for _ in range(n)]
++def unit_quaternion_random(n): return normalize(uniform_random(n, 4))
++def HashEncoder(levels, res_range, max_size): return {'levels': levels, 'res_range': res_range, 'max_size': max_size}
++def MLP(layers, dim): return {'layers': layers, 'dim': dim}
++def ForwardPass(model, input): return model(input)
++def Rasterize(g, c, ray): return BlendColors(g, c, ray)
++def SSIM_Loss(a, b): return StructuralSimilarityIndex(a, b)
++def LocalWindowNormalize(depth): return LocalMeanStdNormalize(depth)
++def full_like(tensor, val): return [[val for _ in row] for row in tensor]
++def normalize(v): return v / sqrt(sum(v**2) + 1e-6)
++def random: import random; return random
+ ```
+ 
+@@ -185,5 +178,4 @@
+ *   **Limitations:** Exposes black background on empty/invisible areas, which can lower PSNR/SSIM metrics for those areas compared to NeRFs that interpolate colors [S1].
+ *   **When to use:** Few-shot novel view synthesis where training time and rendering speed are critical, and high-quality geometry is needed despite coarse monocular depth supervision [S1].
+-*   **When not to use:** Dense-view scenarios where standard 3DGS suffices, or when accurate reconstruction of invisible/background areas is required (due to black background exposure) [S1].
+ 
+ ## Background

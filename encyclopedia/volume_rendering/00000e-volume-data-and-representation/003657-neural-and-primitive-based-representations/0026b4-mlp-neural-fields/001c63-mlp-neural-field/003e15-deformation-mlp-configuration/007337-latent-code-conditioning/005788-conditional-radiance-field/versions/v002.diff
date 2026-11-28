@@ -1,0 +1,130 @@
+--- v001.md
++++ v002.md
+@@ -4,5 +4,5 @@
+ 
+ ## Overview
+-A Conditional Radiance Field extends the standard NeRF representation to model an entire object class (e.g., chairs) rather than a single static scene, using instance-specific latent vectors for shape and appearance to enable editing and interpolation [S1, S2]. It differs from standard NeRF by decoupling instance-specific details into latent codes $z$ while storing shared class information in the network parameters, allowing the radiance field characteristics to be altered via latent variable manipulation [S2].
++A Conditional Radiance Field extends the standard NeRF representation to model an entire object class (e.g., chairs) rather than a single static scene, using instance-specific latent vectors for shape and appearance to enable editing and interpolation [S1, S2]. It differs from standard NeRF by decoupling instance-specific details into latent codes $\mathbf{z}$ while storing shared class information in the network parameters, allowing the radiance field characteristics to be altered via latent variable manipulation [S2].
+ 
+ ## How it works
+@@ -17,10 +17,10 @@
+ **Steps:**
+ 1.  **Latent Code Generation (Optional):** If conditioning on an input image $I$, generate the latent code $\mathbf{z} = E(I)$ using an encoder network $E$ [S2].
+-2.  **Ray Sampling:** For a desired camera location, cast a ray $r$ from a pixel location. Sample $N_c$ 3D points $\{t_i\}_{i=1}^{N_c}$ along the ray, ordered from near to far [S1].
++2.  **Ray Sampling:** For a desired camera location, cast a ray $r$ from a pixel location [S1]. Sample $N_c$ 3D points $\{t_i\}_{i=1}^{N_c}$ along the ray, ordered from near to far [S1].
+ 3.  **Field Evaluation:** Compute radiance $\mathbf{c}_i$ and density $\sigma_i$ at each sampled point $t_i$ using the conditional network:
+     $$
+     (\mathbf{c}_i, \sigma_i) = F_\Theta(\mathbf{x}_i, \mathbf{d}_i, \mathbf{z}^{(s)}, \mathbf{z}^{(c)})
+     $$
+-    where $\mathbf{x}_i$ is the position $t_i$ and $\mathbf{d}_i$ is the viewing direction [S1, S2]. The density output $\sigma$ is designed to be independent of the viewing direction, while radiance $\mathbf{c}$ depends on both position and direction [S1].
++    where $\mathbf{x}_i$ is the 3D position of the $i$-th sample along the ray, and $\mathbf{d}_i$ is the ray direction [S1]. The density output $\sigma$ is independent of the viewing direction, while radiance $\mathbf{c}$ depends on both position and direction [S1].
+ 4.  **Alpha Compositing:** Compute the pixel color $\hat{C}$ using the "over" compositing operation [S1]:
+     $$
+@@ -31,72 +31,38 @@
+ **Pseudocode:**
+ ```python
++import math
++
++def sample_points_along_ray(origin, direction, num_samples, step):
++    """Generates scalar distances t_i for uniform sampling along a ray."""
++    return [i * step for i in range(num_samples)]
++
+ def conditional_radiance_field_eval(x, d, z_shape, z_color, network_F):
+-    """
+-    Evaluates the conditional radiance field for a single point.
+-    
+-    Args:
+-        x: 3D location vector (x, y, z).
+-        d: Viewing direction vector (phi, theta).
+-        z_shape: Latent shape vector.
+-        z_color: Latent color/appearance vector.
+-        network_F: The MLP model F_Theta.
+-        
+-    Returns:
+-        c: Radiance vector (r, g, b).
+-        sigma: Scalar density.
+-    """
+-    # The network F takes x, d, z(s), z(c) and returns c and sigma.
+-    # Density sigma is independent of viewing direction d.
+-    # Radiance c depends on both position x and viewing direction d.
++    """Evaluates the conditional radiance field for a single point."""
+     c, sigma = network_F(x, d, z_shape, z_color)
+     return c, sigma
+ 
+-def render_conditional_ray(ray_origin, ray_direction, z_shape, z_color, network_F, num_samples=128):
+-    """
+-    Renders a single pixel using conditional volume rendering.
+-    
+-    Args:
+-        ray_origin: Origin of the ray.
+-        ray_direction: Direction of the ray.
+-        z_shape: Latent shape vector for the instance.
+-        z_color: Latent color vector for the instance.
+-        network_F: The MLP model F_Theta.
+-        num_samples: Number of points Nc to sample along the ray.
+-        
+-    Returns:
+-        pixel_color: The computed color C_hat.
+-    """
+-    # 1. Sample Nc 3D points {ti} along the cast ray r, ordered near to far.
+-    # [G] Assuming a standard sampling strategy (e.g., uniform or stratified)
+-    # between near and far bounds along the ray direction.
+-    t_values = sample_along_ray(ray_origin, ray_direction, num_samples)
+-    
++def render_conditional_ray(ray_origin, ray_direction, z_shape, z_color, network_F, num_samples, step):
++    """Renders a single pixel using conditional volume rendering."""
++    t_values = sample_points_along_ray(ray_origin, ray_direction, num_samples, step)
+     pixel_color = [0.0, 0.0, 0.0]
+     accumulated_transmittance = 1.0
+-    
++
+     for i in range(num_samples):
+         t_i = t_values[i]
+-        t_next = t_values[i+1] if i + 1 < num_samples else t_i + 0.01 # [G] Default step if not defined
+-        
+-        # Position x_i and direction d_i
++        t_next = t_values[i + 1] if i + 1 < num_samples else t_i + step
++
+         x_i = ray_origin + t_i * ray_direction
+         d_i = ray_direction
+-        
+-        # 2. Compute radiance ci and density sigmai using network F
++
+         c_i, sigma_i = conditional_radiance_field_eval(x_i, d_i, z_shape, z_color, network_F)
+-        
+-        # 3. Compute alpha and delta
++
+         delta_i = t_next - t_i
+         alpha_i = 1.0 - math.exp(-sigma_i * delta_i)
+-        
+-        # 4. Compositing
+-        # Weighted sum: ci * alpha_i * exp(-sum(sigma_j * delta_j))
+-        # accumulated_transmittance holds exp(-sum(sigma_j * delta_j))
++
+         contribution = c_i * alpha_i * accumulated_transmittance
+-        pixel_color += contribution
+-        
+-        # Update transmittance for next sample
++        pixel_color = [pixel_color[k] + contribution[k] for k in range(3)]
++
+         accumulated_transmittance *= (1.0 - alpha_i)
+-        
++
+     return pixel_color
+ ```
+@@ -111,6 +77,7 @@
+ 
+ **Edge Cases and Pitfalls:**
+-*   **Disentanglement:** The density output $\sigma$ must be independent of the viewing direction $\mathbf{d}$, while radiance $\mathbf{c}$ depends on both $\mathbf{x}$ and $\mathbf{d}$ [S1]. Architectural separation or deformation networks are used to ensure this [S1].
++*   **Disentanglement:** The density output $\sigma$ must be independent of the viewing direction $\mathbf{d}$, while radiance $\mathbf{c}$ depends on both $\mathbf{x}$ and $\mathbf{d}$ [S1].
+ *   **Editing:** The disentanglement of shape and appearance allows modifying certain parts of the network during editing (e.g., updating only shape code $\mathbf{z}^{(s)}$ or only color code $\mathbf{z}^{(c)}$) [S1].
++*   **Precision:** Exponential terms in alpha compositing and transmittance decay can cause underflow for large $\sigma_i \delta_i$ or overflow for negative arguments; clamping or using `math.exp(-max(0, sigma_i * delta_i))` is recommended [G].
+ 
+ ## Operating characteristics
+@@ -120,5 +87,5 @@
+ *   **Limitations:** Requires training over a set of shapes belonging to a class [S1]. The quality of editing depends on the disentanglement of shape and appearance [S1].
+ *   **When to use:** When the goal is to model a category of objects (e.g., chairs) and enable editing or interpolation of shape and appearance [S1, S2].
+-*   **When not to use:** When modeling a single, static scene without the need for instance-specific editing or class-level generalization [S1].
++*   **When not to use:** Not given in the sources.
+ 
+ ## Background

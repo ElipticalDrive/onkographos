@@ -1,0 +1,96 @@
+# Elongation
+
+Also called: Elongation operator, elongation transform
+
+## Overview
+Elongation is a domain manipulation operator for Signed Distance Functions (SDFs) that stretches a primitive along a specific axis or direction by modifying the query position vector. It solves the problem of creating elongated or tapered geometric shapes from standard primitives without altering the underlying primitive definition. It sets itself apart from siblings like [SDF Rounding](1829-sdf-rounding.md) (which modifies distance values) and [Finite Repetition](2869-finite-repetition.md) (which tiling) by operating on the spatial coordinates to scale or shear the shape's extent.
+
+## How it works
+**Inputs:** A query point $\mathbf{p} \in \mathbb{R}^3$ and a base SDF function $d_{base}(\mathbf{p})$. An elongation vector $\mathbf{s}$ or scaling factor defines the stretch.
+**Outputs:** The signed distance $d_{result}$ at the transformed point.
+
+**Data Structures:**
+*   $\mathbf{p}$: Input position vector $(p_x, p_y, p_z)$.
+*   $\mathbf{q}$: Transformed position vector.
+*   $\mathbf{s}$: Elongation offset vector.
+
+**Steps:**
+1.  **Transform Position:** The input position $\mathbf{p}$ is modified to $\mathbf{q}$ using arithmetic operations involving the elongation parameters. In the specific implementation found in [S1, unofficial], the transformation involves:
+    *   Computing an intermediate value $m = h^2 + 0.25$.
+    *   Separating components: $p_x, p_z$ are processed via absolute values and max/min operations to handle symmetry.
+    *   Constructing $\mathbf{q}$ from $p_x, p_y, p_z$ and a height parameter $h$:
+        $$ q_x = p_z $$
+        $$ q_y = h \cdot p_y - 0.5 \cdot p_x $$
+        $$ q_z = h \cdot p_x + 0.5 \cdot p_y $$
+    *   Applying the elongation offset $\mathbf{s}$:
+        $$ \mathbf{s} = \text{relu}(-q_x) $$
+        $$ \mathbf{q}' = \mathbf{q} + \mathbf{s} $$
+2.  **Evaluate Base SDF:** The base SDF is evaluated at the transformed point $\mathbf{q}'$. The specific primitive in [S1, unofficial] computes a distance $d$ based on quadratic forms $a$ and $b$:
+    $$ a = m(q_x + s)^2 + q_y^2 $$
+    $$ b = m(q_x + 0.5t)^2 + (q_y - mt)^2 $$
+    where $t = \text{clamp}((q_y - 0.5p_z) / (m + 0.25), 0.0, 1.0)$.
+    The distance is selected via:
+    $$ d = \sqrt{\frac{\min(a, b) + q_z^2}{m}} \cdot \text{sign}(\max(q_z, -p_y)) $$
+3.  **Return Result:** The computed distance $d$ is returned.
+
+**Pseudocode:**
+> **Unverified code.** The code below did not pass a test run against a reference implementation, or no test fits it, so it may contain errors.
+
+```python
+def elongation_sdf(p, h):
+    # Unpack input
+    px, py, pz = p.x, p.y, p.z
+    
+    # Symmetry handling for x and z
+    px, pz = abs(px), abs(pz)
+    px, pz = max(px, pz), min(pz, px)
+    
+    # Offset
+    px, pz = px - 0.5, pz - 0.5
+    
+    # Construct q
+    qz = pz
+    qx = h * py - 0.5 * px
+    qy = h * px + 0.5 * py
+    
+    # Elongation offset s
+    s = max(-qx, 0.0)
+    
+    # Intermediate calculations
+    m = h**2 + 0.25
+    t = clamp((qy - 0.5 * pz) / (m + 0.25), 0.0, 1.0)
+    
+    a = m * (qx + s)**2 + qy**2
+    b = m * (qx + 0.5 * t)**2 + (qy - m * t)**2
+    
+    # Select distance
+    cond = min(qy, -qx * m - qy * 0.5) > 0.0
+    d_sq = where(cond, a, min(a, b))
+    
+    d = sqrt((d_sq + qz**2) / m) * sign(max(qz, -py))
+    
+    return d
+```
+
+**Edge Cases:**
+*   Precision errors near the elongation boundary where $q_x \approx 0$ may cause discontinuities if not clamped properly [S1, unofficial].
+*   Degenerate input where $h=0$ results in division by zero or undefined behavior in the transformation matrix.
+
+## Subtopics
+
+### [End-point Corrector](4063-end-point-corrector.md)
+The End-point Corrector addresses radius shrinkage and field variation divergence near skeleton end-points in vector field visualization.
+
+## Operating characteristics
+*   **Time Complexity:** $O(1)$ per query, involving basic arithmetic and trigonometric operations.
+*   **Memory Complexity:** $O(1)$, requiring only temporary variables for the transformation.
+*   **Strengths:** Efficiently creates complex elongated shapes from simple primitives; differentiable for gradient-based optimization.
+*   **Limitations:** The specific implementation in [S1, unofficial] is tailored to a specific primitive (likely a sphere or capsule variant) and may not generalize to all base SDFs without modification.
+*   **When to use:** When creating tapered or stretched objects in ray marching.
+*   **When not:** When uniform scaling is sufficient (use simple scaling instead).
+
+## Background
+The specific algorithmic implementation of elongation as described in [S1, unofficial] originates from the Torch-Sphere-Tracer repository by skmhrk1209. It is part of a collection of SDF primitives and domain manipulation operators designed for differentiable rendering and neural implicit surfaces. The technique builds on standard SDF domain manipulation principles where position vectors are transformed to create periodic, mirrored, or reflected structures.
+
+## Sources
+[S1] skmhrk1209/Torch-Sphere-Tracer, https://github.com/skmhrk1209/Torch-Sphere-Tracer, fetched 2026-10-26 (unofficial)

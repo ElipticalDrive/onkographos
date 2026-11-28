@@ -1,0 +1,132 @@
+# Label Color Assignment
+
+Also called: Palette-based Label Color Mapping
+
+## Overview
+Label Color Assignment maps discrete semantic label IDs to specific RGB(A) color values for visualization. It solves the problem of distinguishing distinct physical media or classes in a volume by assigning unique, perceptually distinct colors to each label ID. It differs from continuous transfer function methods by using hard classification thresholds and a predefined palette, rather than gradient-based opacity/alpha mapping [S1, unofficial].
+
+## How it works
+**Inputs and Outputs:**
+- Input: A 2D or 3D array of integer label IDs (`label_array`), and a predefined palette list (`palette`) containing RGB(A) tuples.
+- Output: A 2D or 3D RGBA image array (`rgba_image`) where each voxel/pixel is colored according to its label ID.
+
+**Data Structures:**
+- `label_array`: Integer array of shape $(H, W)$ or $(D, H, W)$.
+- `palette`: List of tuples, where each tuple is $(R, G, B)$ or $(R, G, B, A)$ with values in $[0, 1]$ or $[0, 255]$.
+- `rgba_image`: Unsigned integer array of shape $(H, W, 4)$ or $(D, H, W, 4)$, dtype `uint8`.
+
+**Steps:**
+1. Initialize `rgba_image` with zeros and dtype `uint8`.
+2. For each unique label ID `lid` in `label_array`:
+   a. Retrieve the color index using the formula:
+      $$ idx = (lid - 1) \pmod{L} $$
+      where $L$ is the length of the `palette`.
+   b. Retrieve the color tuple $C = (R, G, B, A)$ from `palette[idx]`.
+   c. Create a boolean mask $M$ where $M = (label\_array == lid)$.
+   d. Assign the color to the masked region:
+      $$ rgba\_image[M, 0] = \lfloor R \times 255 \rfloor $$
+      $$ rgba\_image[M, 1] = \lfloor G \times 255 \rfloor $$
+      $$ rgba\_image[M, 2] = \lfloor B \times 255 \rfloor $$
+      $$ rgba\_image[M, 3] = \lfloor A \times 255 \rfloor $$
+      [G] If the palette stores values in $[0, 255]$, skip the multiplication by 255.
+3. Return `rgba_image`.
+
+**Parameters:**
+- `palette`: Predefined list of colors. Size depends on the number of expected labels.
+- `lid`: Label ID. Must be $\ge 1$ for the modulo formula to work as described [S1, unofficial].
+
+**Edge Cases and Pitfalls:**
+- Label ID 0: The formula $(lid - 1) \pmod{L}$ results in $-1 \pmod{L}$, which typically wraps to the last element in Python. Ensure label IDs are $\ge 1$ or handle 0 separately [S1, unofficial].
+- Missing Labels: If a label ID is not in the palette and the modulo wraps to an unused color, it may cause visual confusion.
+- Precision: Use `uint8` for output to match standard image formats. Clamp values to $[0, 255]$ if palette values are not normalized [G].
+
+**Pseudocode:**
+> **Unverified code.** The code below did not pass a test run against a reference implementation, or no test fits it, so it may contain errors.
+
+```python
+def assign_label_colors(label_array, palette):
+    """
+    Assigns colors from a palette to label IDs in a label array.
+    
+    Args:
+        label_array: np.ndarray of int, shape (H, W) or (D, H, W).
+        palette: list of tuples, each tuple is (R, G, B, A) in [0, 1].
+        
+    Returns:
+        np.ndarray of uint8, shape (H, W, 4) or (D, H, W, 4).
+    """
+    import numpy as np
+    
+    # Initialize output RGBA image
+    rgba_image = np.zeros((*label_array.shape, 4), dtype=np.uint8)
+    
+    # Get unique labels
+    unique_labels = np.unique(label_array)
+    
+    # Palette length
+    L = len(palette)
+    
+    for lid in unique_labels:
+        # Skip if label is not visible or invalid
+        if lid < 1:
+            continue
+            
+        # Calculate palette index
+        idx = (lid - 1) % L
+        
+        # Get color from palette
+        color = palette[idx]
+        R, G, B, A = color
+        
+        # Create mask for current label
+        mask = (label_array == lid)
+        
+        # Assign RGBA values
+        rgba_image[mask, 0] = int(R * 255)
+        rgba_image[mask, 1] = int(G * 255)
+        rgba_image[mask, 2] = int(B * 255)
+        rgba_image[mask, 3] = int(A * 255)
+        
+    return rgba_image
+```
+
+## Subtopics
+
+### [VisC2D Color Coding](22532-visc2d-color-coding.md)
+VisC2D Color Coding is a semantic label-based visualization method that maps scalar physical data (specifically pressure) to a fixed 256-color grayscale palette stored in Device Independent Bitmap (DIB) format. It solves the problem of visualizing explosion shock wave propagation by explicitly classifying distinct physical media (wall, air, shock wave) and assigning them unique color indices, where brightness correlates linearly with pressure magnitude. It differs from general transfer function methods by using hard classification thresholds for static media and a fixed linear segment mapping for the variable medium, rather than continuous opacity/gradient mapping.
+
+### Material State Classification
+Material State Classification computes material state labels based on gelation and required value thresholds. It assigns state values (0-3) based on boolean conditions of `vial`, `target`, `above_gelation`, and `above_required` arrays. It is used for tracking material states in additive manufacturing processes [S2, unofficial].
+
+#### Definition
+Computes material state labels based on gelation and required value thresholds.
+
+#### Steps
+1. Compute `above_gelation` as the boolean array where `field >= 1.0`.
+2. Compute `above_required` as the boolean array where `field >= required_value`.
+3. Initialize `state` array with -1 of shape `field.shape` and dtype `int8`.
+4. Set `state` to 0 where `vial` is true and `above_gelation` is false.
+5. Set `state` to 1 where `target` is true, `above_gelation` is true, and `above_required` is false.
+6. Set `state` to 2 where `target` is true and `above_required` is true.
+7. Set `state` to 3 where `vial` is true, `target` is false, and `above_gelation` is true.
+
+#### Parameters
+- `field`: `np.ndarray`, field.
+- `target`: bool array, target mask.
+- `vial`: bool array, vial mask.
+- `required_value`: float, required value.
+
+## Operating characteristics
+- **Time Complexity:** $O(N)$ where $N$ is the number of voxels/pixels, as each voxel is visited once to assign a color.
+- **Memory Complexity:** $O(N)$ for the output RGBA image. The palette size is constant and small.
+- **Strengths:** Simple, fast, and deterministic. Ideal for discrete semantic data where distinct colors are needed for each class.
+- **Limitations:** Does not provide smooth transitions between classes. Requires a predefined palette. Performance depends on the number of unique labels.
+- **When to use:** When visualizing discrete semantic labels (e.g., tissue types, material states) and distinct colors are required for each class.
+- **When not to use:** When smooth gradients or continuous opacity mapping is needed.
+
+## Background
+Label Color Assignment is a fundamental technique in volume visualization, particularly in medical imaging and scientific visualization where discrete labels are common. It is often used in conjunction with transfer functions to map semantic information to visual properties. The method is widely supported in visualization libraries such as VTK and ITK.
+
+## Sources
+[S1] caitlin-leonard/medviewer, https://github.com/caitlin-leonard/medviewer, fetched 2026-10-27 (unofficial)
+[S2] EPFL-LAPD/Antagonistic-Dual-Wavelength-Tomographic-Volumetric-Additive-Manufacturing, https://github.com/EPFL-LAPD/Antagonistic-Dual-Wavelength-Tomographic-Volumetric-Additive-Manufacturing, fetched 2026-10-26 (unofficial)

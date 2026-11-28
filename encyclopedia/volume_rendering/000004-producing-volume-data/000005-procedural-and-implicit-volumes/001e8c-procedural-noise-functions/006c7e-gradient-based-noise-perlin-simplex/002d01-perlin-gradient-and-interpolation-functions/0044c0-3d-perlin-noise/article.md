@@ -1,0 +1,129 @@
+# 3D Perlin Noise
+Also called: 3D Gradient Noise, Gradient Noise, Improved 3D Noise, Ken Perlin’s improved Noise, Perlin Gradient Noise, Perlin Noise (Java Implementation), Perlin's improved noise
+
+## Overview
+3D Perlin Noise generates a continuous scalar field in three-dimensional space by interpolating gradient vectors assigned to lattice points, producing seamless, tileable textures when wrapping is enabled [S3, unofficial]. It distinguishes itself from its parent method by explicitly supporting 3D coordinate wrapping via modulo arithmetic and utilizing a fifth-order polynomial fade function to eliminate grid-oriented artifacts and derivative discontinuities [S1, S3, unofficial].
+
+## How it works
+**Inputs and Outputs**
+*   **Input:** A 3D point $(x, y, z)$ in continuous space [S1, unofficial].
+*   **Input:** A permutation table $P$ of size 512 containing integers 1 to 256 [S4, S6, unofficial].
+*   **Input:** Frequency parameter $f$ for coordinate wrapping [S3, unofficial].
+*   **Output:** A scalar noise value $N \in [-1, 1]$ [S1, unofficial].
+
+**Data Structures**
+*   **Permutation Table ($P$):** An array of 512 integers, where indices 0–255 and 256–511 contain identical shuffled permutations of integers 1 to 256 [S4, S6, unofficial].
+*   **Gradient Vectors ($G$):** A fixed set of 12 vectors in 3D space, typically $(\pm 1, \pm 1, 0)$, $(\pm 1, 0, \pm 1)$, and $(0, \pm 1, \pm 1)$ [S5, unofficial].
+
+**Numbered Steps**
+1.  **Wrapping and Integerization:** If wrapping is enabled, apply the modulo operator to the integer parts of the coordinates using the frequency parameter [S3, unofficial]. Compute integer grid coordinates $(i, j, k)$ and fractional parts $(x_f, y_f, z_f)$ by flooring and subtracting [S4, S6, unofficial].
+2.  **Gradient Index Lookup:** Compute the indices for the 8 corners of the unit cube containing the point by hashing coordinates through the permutation table and masking with 255 to wrap around the table boundaries [S4, S6, unofficial].
+3.  **Dot Product Calculation:** For each corner, compute the dot product of the gradient vector and the distance vector from the lattice point to the sample point [S4, S6, unofficial].
+4.  **Fade Function:** Apply the fifth-order polynomial fade function to the fractional coordinates to ensure smooth derivatives [S1, S3, unofficial].
+5.  **Trilinear Interpolation:** Interpolate the 8 dot products along the X, Y, and Z axes using the fade values [S4, S6, unofficial].
+
+**Formulas**
+*   **Fade function:** $fade(t) = t^3(t(t \cdot 6 - 15) + 10)$ [S4, unofficial].
+*   **Gradient contribution:** $h = hash \ \& \ 15$; $u = x$ if $h < 8$ else $y$; $v = y$ if $h < 4$ else ($x$ if $h == 12$ or $h == 14$ else $z$); $grad = ((h \ \& \ 1) == 0 ? u : -u) + ((h \ \& \ 2) == 0 ? v : -v)$ [S4, S6, unofficial].
+*   **Trilinear interpolation:** $lerp(t, a, b) = a + t \cdot (b - a)$ [S4, S6, unofficial].
+*   **Output range:** The dot product result is in range $[-1, 1]$ because distance vector components are in $[0,1]$ and the gradient is normalized [S1, unofficial].
+
+**Parameters**
+*   **Octaves:** Number of noise layers summed together [S3, unofficial].
+*   **Initial Frequency:** Starting frequency for the noise generation [S3, unofficial].
+*   **Initial Amplitude:** Starting amplitude for the noise generation [S3, unofficial].
+*   **Persistence:** Not given in the sources.
+*   **Texture Dimensions:** Width, Height, Slices/Depth for pre-computed textures [S3, unofficial].
+
+**Edge Cases and Pitfalls**
+*   **Random Initialization:** The permutation array must be initialized with random numbers using machine time as a seed to avoid similarities in subsequent calls [S3, unofficial].
+*   **Precision:** Floating-point precision issues may arise at large coordinate values, which wrapping helps mitigate by keeping coordinates within a bounded range [S3, unofficial].
+*   **Derivative Discontinuities:** The improved algorithm replaced the cubic interpolation of the fade function with a fifth-order polynomial to eliminate discontinuities of second and third order derivatives [S3, unofficial].
+
+**Pseudocode**
+> **Unverified code.** The code below did not pass a test run against a reference implementation, or no test fits it, so it may contain errors.
+
+```python
+def fade(t):
+    """Fifth-order polynomial fade function."""
+    return t * t * t * (t * (t * 6.0 - 15.0) + 10.0)
+
+def lerp(t, a, b):
+    """Linear interpolation."""
+    return a + t * (b - a)
+
+def grad(hash_val, x, y, z):
+    """Compute dot product of gradient vector and distance vector."""
+    h = hash_val & 15
+    u = x if (h & 1) == 0 else -x
+    v = y if (h & 2) == 0 else -y
+    w = z if (h & 4) == 0 else -z
+    if (h & 8) != 0:
+        u = -u
+    return u + v + w
+
+def noise3D(x, y, z, perm_table, frequency=0):
+    """3D Perlin Noise with optional wrapping."""
+    if frequency > 0:
+        x = x % frequency
+        y = y % frequency
+        z = z % frequency
+    xi = int(x) & 255
+    yi = int(y) & 255
+    zi = int(z) & 255
+    xf = x - int(x)
+    yf = y - int(y)
+    zf = z - int(z)
+    u = fade(xf)
+    v = fade(yf)
+    w = fade(zf)
+    A = perm_table[xi] + yi
+    B = perm_table[(xi + 1) & 255] + yi
+    AA = perm_table[A] + zi
+    AB = perm_table[(A + 1) & 255] + zi
+    BA = perm_table[B] + zi
+    BB = perm_table[(B + 1) & 255] + zi
+    p0 = grad(perm_table[AA], xf, yf, zf)
+    p1 = grad(perm_table[BA], xf - 1, yf, zf)
+    p2 = grad(perm_table[AB], xf, yf - 1, zf)
+    p3 = grad(perm_table[BB], xf - 1, yf - 1, zf)
+    p4 = grad(perm_table[(AA + 1) & 255], xf, yf, zf - 1)
+    p5 = grad(perm_table[(BA + 1) & 255], xf - 1, yf, zf - 1)
+    p6 = grad(perm_table[(AB + 1) & 255], xf, yf - 1, zf - 1)
+    p7 = grad(perm_table[(BB + 1) & 255], xf - 1, yf - 1, zf - 1)
+    q0 = lerp(u, p0, p1)
+    q1 = lerp(u, p2, p3)
+    q2 = lerp(u, p4, p5)
+    q3 = lerp(u, p6, p7)
+    r0 = lerp(v, q0, q1)
+    r1 = lerp(v, q2, q3)
+    return lerp(w, r0, r1)
+```
+
+## Subtopics
+
+### 3D Perlin Noise Voxel Generation
+When the 3D noise function returns a continuous density field ranging from -1 to 1, the process is referred to as an isosurface function [S9, unofficial]. The method feeds 3D grid vertex positions into the noise function and places a voxel at coordinates where the returned value exceeds a threshold (e.g., 0) [S9, unofficial]. Implementation requires tuning the threshold for desired terrain density, as the noise function typically returns values between -1 and 1 [S9, unofficial].
+
+## Operating characteristics
+*   **Time Complexity:** $O(1)$ per sample for a single octave, with a general complexity of $O(2^n)$ for $n$ dimensions [S1, unofficial].
+*   **Memory Complexity:** $O(1)$ for the permutation table (512 integers) [S4, unofficial].
+*   **Performance:** The method compiles to approximately 40 instructions in pixel shaders [S7, unofficial].
+*   **Strengths:** Produces smooth, continuous noise with no visible grid artifacts and supports seamless tiling via wrapping [S1, S3, unofficial].
+*   **Limitations:** Computationally more expensive than simpler noise functions due to the fifth-order polynomial and multiple lookups [S1, unofficial].
+*   **When to use:** Ideal for procedural texture generation, cloud simulation, and terrain generation where seamless tiling and smooth gradients are required [S1, S3, unofficial].
+*   **When not to use:** Not given in the sources.
+
+## Background
+The algorithm is based on Ken Perlin’s improved Noise, which was developed to reduce grid-oriented artifacts present in the original Perlin noise [S1, unofficial]. The improvement involves using a fixed set of gradient directions and a fifth-order polynomial fade function [S1, S3, unofficial]. This implementation was originally written in Java and later ported to C++ for use in cloud simulation and procedural texturing [S3, unofficial].
+
+## Sources
+[S1] Terrain synthesis using noise, https://trepo.tuni.fi/handle/10024/101043, fetched 2026-10-26 (unofficial)
+[S2] Pseudorandom Noise for Real-Time Volumetric Rendering of Fire in a Production System, https://doi.org/10.2312/vg/vg-pbg08/129-136, fetched 2026-10-26
+[S3] DTIC ADA427539: Simulating Clouds with Procedural Texturing Techniques Using the GPU, https://archive.org/details/DTIC_ADA427539, fetched 2026-10-26 (unofficial)
+[S4] paolorussian/proceduralplanet, https://github.com/paolorussian/proceduralplanet, fetched 2026-10-26 (unofficial)
+[S5] Russoul/voxelized3d, https://github.com/Russoul/voxelized3d, fetched 2026-10-26 (unofficial)
+[S6] edgorman/Voxel-Engine, https://github.com/edgorman/Voxel-Engine, fetched 2026-10-27 (unofficial)
+[S7] PDF Noise and Procedural Techniques - NVIDIA, https://www.nvidia.com/docs/IO/8228/GDC2003_OGL_ProceduralNoise.pdf, fetched 2026-10-27 (unofficial)
+[S8] GitHub Repo for VoxelEngine, https://github.com/TheSlabby/VoxelEngine, fetched 2026-10-29 (unofficial)
+[S9] how to make 3d terrain using voxels and perlin noise, https://stackoverflow.com/questions/24705511/how-to-make-3d-terrain-using-voxels-and-perlin-noise, fetched 2026-10-27 (unofficial)

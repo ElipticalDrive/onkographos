@@ -1,0 +1,208 @@
+--- v002.md
++++ v003.md
+@@ -1,15 +1,15 @@
+ # Chunk System (Dynamic Loading)
+-Also called: Dynamic Chunk Loading, On-Demand Chunk Generation
++Also called: Chunk Management System, Dynamic Chunk Loading, On-Demand Chunk Generation, World Chunk Loader
+ ## Overview
+ The Chunk System (Dynamic Loading) manages procedural world generation by loading and unloading fixed-size chunks on-demand based on camera position, enabling infinite or very large worlds without pre-generating geometry [S1, unofficial]. It distinguishes itself from static LOD approaches by relying on deterministic procedural regeneration rather than pre-cached static meshes, ensuring memory usage remains bounded by the viewer's vicinity [S1, unofficial].
+ ## How it works
+ **Inputs and Outputs:**
+-- Input: Camera position, chunk size, load/unload radii, world seed.
+-- Output: A set of active chunk meshes rendered in the scene.
++- Input: Camera position, chunk dimensions, load/unload radii, and world seed [S1, S2, unofficial].
++- Output: A set of active chunk meshes rendered in the scene [S2, unofficial].
+ 
+ **Data Structures:**
+-- **Chunk:** A fixed-size volume of world units. Contains voxel density data and generated mesh geometry.
+-- **Chunk Registry:** A map or hash table mapping chunk coordinates $(C_x, C_y, C_z)$ to active Chunk objects.
+-- **World Seed:** A deterministic integer used to generate procedural content.
++- **Active Chunks:** A map/dictionary mapping chunk coordinates $(C_x, C_y, C_z)$ to chunk objects containing voxel density data and generated mesh geometry [S2, unofficial].
++- **Generating Chunks:** A set tracking chunk coordinates currently being asynchronously generated to prevent duplicate requests [S2, unofficial].
++- **Last Chunk Position Reference:** A vector storing the camera position at the last chunk boundary crossing, used to validate late-arriving asynchronous generation results [S2, unofficial].
+ 
+ **Parameters:**
+@@ -19,26 +19,16 @@
+ 
+ **Steps:**
+-1. **Initialization:** Load voxel registry definitions once at startup to prevent redundant disk access [S2, unofficial]. Initialize the chunk registry as empty.
+-2. **Update Loop:** Each frame, call `chunk_manager.Update(renderer.camera_position)` to synchronize loaded chunks with the camera [S1, unofficial].
+-3. **Coordinate Calculation:** Determine the chunk coordinates $(C_x, C_y, C_z)$ containing the camera. Calculate the bounding box of chunks to load based on the load radius $R_{load}$:
+-   $$ C_{min} = \lfloor \frac{P_{camera}}{S_{chunk}} \rfloor - R_{load} $$
+-   $$ C_{max} = \lfloor \frac{P_{camera}}{S_{chunk}} \rfloor + R_{load} $$
+-   where $S_{chunk}$ is the chunk size [S1, unofficial].
+-4. **Load Chunks:** For each chunk coordinate in the bounding box:
+-   - If the chunk is not in the registry, generate it procedurally using the world seed and current coordinates.
+-   - Add the chunk to the registry.
+-5. **Unload Chunks:** For each chunk in the registry:
+-   - Calculate the distance from the camera to the chunk center.
+-   - If the distance exceeds the unload radius $R_{unload}$, remove the chunk from the registry and free its memory [S1, unofficial].
+-6. **Generation (Procedural):** For a new chunk at $(C_x, C_y, C_z)$:
+-   - Generate voxel data deterministically. The same chunk coordinates always produce the same islands [S1, unofficial].
+-   - Apply the **Halo Trick**: Generate voxels with a $+1$ block border ($+2 \times +2 \times +2$ padding) to ensure geometry continuity across boundaries [S2, unofficial].
+-   - Convert voxel data to mesh geometry. For each voxel at $(i, j, k)$, compute the voxel center:
+-     $$ V_{center} = (C_x \cdot S_{chunk} + i + 0.5, C_y \cdot S_{chunk} + j + 0.5, C_z \cdot S_{chunk} + k + 0.5) $$
+-     Check if the voxel center is close to a triangle plane (e.g., for floating islands) or if density is below an iso-value for terrain. If a face is exposed, add vertices and triangles to the mesh [S1, unofficial].
+-   - Store the mesh in the chunk object.
++1. **Initialization:** Load voxel registry definitions once at startup to prevent redundant disk access [S2, unofficial]. Initialize `active_chunks` as empty, `generating_chunks` as empty, and `last_chunk_pos_ref` to the initial camera position.
++2. **Update Loop:** Each frame, call `chunk_manager.Update(camera_position)` to synchronize loaded chunks with the camera [S1, unofficial].
++3. **Coordinate Calculation:** Determine the current chunk coordinates containing the camera: $C_x = \lfloor P_{camera.x} / S_{chunk} \rfloor$, $C_z = \lfloor P_{camera.z} / S_{chunk} \rfloor$ (and similarly for $C_y$) [S2, unofficial]. If $(C_x, C_y, C_z)$ matches `last_chunk_pos_ref`, return early to avoid recalculation [S2, unofficial].
++4. **Desired Chunks & Unloading:** Generate a set of desired chunk keys in the range $[C_x - R_{load}, C_x + R_{load}]$ and $[C_z - R_{load}, C_z + R_{load}]$ (and $C_y$) [S2, unofficial]. Iterate `active_chunks`; if a chunk key is not in `desired_chunks`, dispose its geometry, remove it from the scene, delete it from the map, and update statistics [S2, unofficial].
++5. **Loading & Asynchronous Generation:** Identify chunks to generate by filtering `desired_chunks` for keys not in `active_chunks` or `generating_chunks` [S2, unofficial]. Calculate the Manhattan distance $dist = |C_x - c_x| + |C_z - c_z| + |C_y - c_y|$ for each candidate [S2, unofficial]. Sort candidates by distance ascending [S2, unofficial]. For each chunk, add its key to `generating_chunks` and call `generate_chunk_async(key)` [S2, unofficial]. Update `last_chunk_pos_ref` to the current camera position [S2, unofficial].
++6. **Async Callback:** When `generate_chunk_async` completes, check if the chunk is still within the render radius relative to `last_chunk_pos_ref` [S2, unofficial]. If yes, add it to `active_chunks` and update statistics; if no, dispose its geometry and remove it from the scene [S2, unofficial]. Remove the chunk key from `generating_chunks` [S2, unofficial].
++7. **Procedural Generation:** Generation is deterministic: the same chunk coordinates always produce the same islands [S1, unofficial]. Apply the **Halo Trick**: generate voxels with a $+1$ block border ($+2 \times +2 \times +2$ padding) to ensure geometry continuity across boundaries [S3, unofficial]. For each voxel at local indices $(i, j, k)$, compute the voxel center: $V_{center} = \text{box.lo} + (i + 0.5) \cdot S_{voxel}$ [S1, unofficial]. Check if the voxel center is close to a triangle plane (e.g., for floating islands) or if density is below an iso-value for terrain [S1, unofficial]. If a face is exposed, add vertices and triangles to the mesh [S1, unofficial]. Store the mesh in the chunk object.
+ 
+ **Pseudocode:**
+ ```python
++import math
++
+ class ChunkManager:
+     def __init__(self, chunk_size=50, load_radius=3, unload_radius=5, seed=0):
+@@ -48,54 +38,81 @@
+         self.seed = seed
+         self.active_chunks = {}  # Map: (cx, cy, cz) -> Chunk
++        self.generating_chunks = set()  # Set: (cx, cy, cz)
++        self.last_chunk_pos_ref = (0.0, 0.0, 0.0)
+ 
+     def update(self, camera_pos):
+-        # Calculate current chunk coordinates
+-        cx = floor(camera_pos.x / self.chunk_size)
+-        cy = floor(camera_pos.y / self.chunk_size)
+-        cz = floor(camera_pos.z / self.chunk_size)
++        # 3. Coordinate Calculation
++        cx = math.floor(camera_pos[0] / self.chunk_size)
++        cy = math.floor(camera_pos[1] / self.chunk_size)
++        cz = math.floor(camera_pos[2] / self.chunk_size)
++        
++        if (cx, cy, cz) == self.last_chunk_pos_ref:
++            return  # Return early to avoid recalculation [S2, unofficial]
+ 
+-        # Determine load bounds
+-        min_cx = cx - self.load_radius
+-        max_cx = cx + self.load_radius
+-        min_cy = cy - self.load_radius
+-        max_cy = cy + self.load_radius
+-        min_cz = cz - self.load_radius
+-        max_cz = cz + self.load_radius
++        # 4. Desired Chunks & Unloading
++        desired_chunks = set()
++        for x in range(cx - self.load_radius, cx + self.load_radius + 1):
++            for y in range(cy - self.load_radius, cy + self.load_radius + 1):
++                for z in range(cz - self.load_radius, cz + self.load_radius + 1):
++                    desired_chunks.add((x, y, z))
+ 
+-        # Load new chunks
+-        for x in range(min_cx, max_cx + 1):
+-            for y in range(min_cy, max_cy + 1):
+-                for z in range(min_cz, max_cz + 1):
+-                    key = (x, y, z)
+-                    if key not in self.active_chunks:
+-                        chunk = self.generate_chunk(x, y, z)
+-                        self.active_chunks[key] = chunk
+-
+-        # Unload distant chunks
+         keys_to_remove = []
+-        for key, chunk in self.active_chunks.items():
+-            chunk_center = self.get_chunk_center(key)
+-            dist = distance(camera_pos, chunk_center)
+-            if dist > self.unload_radius * self.chunk_size:
++        for key in self.active_chunks:
++            if key not in desired_chunks:
++                self.dispose_chunk(key)
+                 keys_to_remove.append(key)
+-        
+         for key in keys_to_remove:
+             del self.active_chunks[key]
+ 
+-    def generate_chunk(self, cx, cy, cz):
+-        # Deterministic generation based on seed and coordinates
+-        # Apply Halo Trick: generate with +1 border for continuity
+-        # Convert voxels to mesh
++        # 5. Loading & Asynchronous Generation
++        chunks_to_generate = []
++        for key in desired_chunks:
++            if key not in self.active_chunks and key not in self.generating_chunks:
++                dist = abs(key[0] - cx) + abs(key[1] - cy) + abs(key[2] - cz)
++                chunks_to_generate.append((dist, key))
++        
++        chunks_to_generate.sort(key=lambda x: x[0])  # Sort by distance ascending [S2, unofficial]
++        
++        for _, key in chunks_to_generate:
++            self.generating_chunks.add(key)
++            self.generate_chunk_async(key)
++            
++        self.last_chunk_pos_ref = (cx, cy, cz)  # Update reference [S2, unofficial]
++
++    def generate_chunk_async(self, key):
++        # Simulate async generation with a callback [S2, unofficial]
++        chunk_data = self._procedural_generate(key)
++        self._on_chunk_ready(key, chunk_data)
++
++    def _on_chunk_ready(self, key, chunk_data):
++        # 6. Async Callback
++        cx, cy, cz = key
++        last_cx, last_cy, last_cz = self.last_chunk_pos_ref
++        dist = abs(cx - last_cx) + abs(cy - last_cy) + abs(cz - last_cz)
++        
++        if dist <= self.load_radius:
++            self.active_chunks[key] = chunk_data
++        else:
++            self.dispose_chunk(key)  # Discard if player moved away [S2, unofficial]
++            
++        self.generating_chunks.discard(key)
++
++    def _procedural_generate(self, key):
++        # 7. Procedural Generation
++        cx, cy, cz = key
++        # Deterministic generation based on seed and coordinates [S1, unofficial]
++        # Apply Halo Trick: generate with +1 border for continuity [S3, unofficial]
++        # Convert voxels to mesh using voxel center formula [S1, unofficial]
+         # Return Chunk object with mesh data
++        return {"mesh": "generated_geometry", "key": key}
++
++    def dispose_chunk(self, key):
++        # Remove from scene and free memory [S2, unofficial]
+         pass
++```
+ 
+-    def get_chunk_center(self, key):
+-        cx, cy, cz = key
+-        return (
+-            (cx + 0.5) * self.chunk_size,
+-            (cy + 0.5) * self.chunk_size,
+-            (cz + 0.5) * self.chunk_size
+-        )
+-```
++**Pitfalls:**
++- Async generation may complete after the player has moved away. The code checks distance against `lastChunkPosRef` (which updates only on chunk boundary crossing) to decide whether to keep or discard the generated mesh [S2, unofficial].
++
+ ## Subtopics
+ 
+@@ -104,18 +121,19 @@
+ 
+ ### Procedural Bypass Logic
+-Pure procedural chunks are regenerated from seed rather than saved to disk to minimize I/O overhead in the demo [S2, unofficial].
++Pure procedural chunks are regenerated from seed rather than saved to disk to minimize I/O overhead in the demo [S3, unofficial].
+ 
+ ## Operating characteristics
+-- **Time Complexity:** $O(N)$ where $N$ is the number of chunks within the load radius. Generation is deterministic and fast for procedural content.
+-- **Memory Complexity:** $O(N)$ where $N$ is the number of active chunks. Memory is bounded by the load radius.
+-- **Strengths:** Enables infinite worlds; low memory footprint; no pre-generation required.
+-- **Limitations:** Procedural generation can cause stutter if not optimized; requires careful handling of boundaries (Halo Trick) to avoid seams.
+-- **When to use:** Infinite or very large procedural worlds.
+-- **When not to use:** Static, hand-crafted worlds with complex geometry where pre-baking is feasible.
++- **Time Complexity:** Not given in the sources.
++- **Memory Complexity:** Not given in the sources.
++- **Strengths:** Enables infinite worlds; deterministic generation ensures reproducibility; asynchronous loading prevents main-thread blocking during chunk creation [S2, unofficial].
++- **Limitations:** Procedural generation can cause stutter if not optimized; requires careful handling of boundaries (Halo Trick) to avoid seams [S3, unofficial].
++- **When to use:** Infinite or very large procedural worlds [S1, unofficial].
++- **When not to use:** Not given in the sources.
+ 
+ ## Background
+-Originating from procedural voxel game development, this system allows for the creation of vast, explorable environments without the storage overhead of pre-generated data [S1, unofficial]. It is commonly used in sandbox games and voxel editors.
++Originating from procedural voxel game development, this system allows for the creation of vast, explorable environments without the storage overhead of pre-generated data [S1, unofficial]. Voxel registry definitions are typically loaded once at initialization to prevent redundant disk access during runtime [S2, unofficial].
+ 
+ ## Sources
+ [S1] lijiemark/floating-islands-generator, https://github.com/lijiemark/floating-islands-generator, fetched 2026-10-27 (unofficial)
+-[S2] herbal1st/pyvorengi-sdk-demo, https://github.com/herbal1st/pyvorengi-sdk-demo, fetched 2026-10-27 (unofficial)+[S2] RainArcanjo/CubWrldJS, https://github.com/RainArcanjo/CubWrldJS, fetched 2026-10-27 (unofficial)
++[S3] herbal1st/pyvorengi-sdk-demo, https://github.com/herbal1st/pyvorengi-sdk-demo, fetched 2026-10-27 (unofficial)

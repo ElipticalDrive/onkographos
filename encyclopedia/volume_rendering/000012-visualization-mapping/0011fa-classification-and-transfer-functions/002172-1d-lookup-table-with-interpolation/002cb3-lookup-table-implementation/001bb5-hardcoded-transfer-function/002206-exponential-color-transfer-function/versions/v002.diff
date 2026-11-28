@@ -1,0 +1,140 @@
+--- v001.md
++++ v002.md
+@@ -2,56 +2,83 @@
+ Also called: Exponential Opacity, Exponential Opacity Transfer, Simple Color Map
+ ## Overview
+-The Exponential Color Transfer Function maps scalar volume intensity values to RGBA color and opacity, using an exponential function for alpha and linear interpolation for color [S1, S2, unofficial]. It is distinguished from sibling methods like the Tent Alpha Transfer Function by its monotonic, non-linear opacity rise, which provides smooth visibility transitions for low-intensity data without the sharp cutoffs of linear or threshold-based functions [S1, S2, unofficial].
++The Exponential Color Transfer Function maps scalar volume intensity values to RGBA color and opacity, using an exponential function for alpha and linear interpolation for color [S1, unofficial][S2, unofficial]. It is a hardcoded transfer function that computes color and opacity directly from scalar intensity without lookup tables [S1, unofficial][S2, unofficial].
+ ## How it works
+ **Inputs and Outputs:**
+-- Input: Scalar intensity $I$ (normalized to $[0, 1]$).
++- Input: scalar intensity $I$ normalized to $[0, 1]$.
+ - Output: RGBA color vector $\mathbf{c}$.
+ 
+ **Data Structures:**
+-- No lookup table is stored. The function is hardcoded as a static computation [S1, S2, unofficial].
+-- Constants:
+-  - `high`: `vec3(1.0, 1.0, 1.0)` (White) [S2, unofficial].
+-  - `low`: `vec3(0.0, 0.0, 0.0)` (Black) [S2, unofficial].
+-  - `exp_1`: $e^1 \approx 2.71828$ [S1, S2, unofficial].
++- No lookup table is stored; the function is hardcoded as a static computation [S1, unofficial][S2, unofficial].
++- Constants: `high` = `vec3(1.0, 1.0, 1.0)` (white) [S2, unofficial]. `low` = `vec3(0.0, 0.0, 0.0)` (black) [S2, unofficial].
+ 
+ **Steps:**
+-1. Compute opacity $\alpha$ using the exponential formula:
+-   $$ \alpha = \frac{e^{I} - 1}{e^1 - 1} $$
+-   where $I$ is the input intensity [S1, S2, unofficial].
+-2. Compute color $\mathbf{c}_{rgb}$ via linear interpolation between `low` and `high` weighted by $I$:
+-   $$ \mathbf{c}_{rgb} = I \cdot \text{high} + (1.0 - I) \cdot \text{low} $$
+-   Since `low` is black and `high` is white, this simplifies to $\mathbf{c}_{rgb} = I \cdot \text{high}$ [S1, S2, unofficial].
+-3. Return $\mathbf{c} = (\mathbf{c}_{rgb}, \alpha)$ [S1, S2, unofficial].
++1. Compute opacity $\alpha$ using the exponential formula.
++2. Compute color $\mathbf{c}_{rgb}$ via linear interpolation between `low` and `high` weighted by $I$.
++3. Return $\mathbf{c} = (\mathbf{c}_{rgb}, \alpha)$.
++4. In the raymarching loop, sample intensity, apply the transfer function, and composite the result using front-to-back alpha blending.
++
++**Formulas:**
++$$ \alpha = \frac{e^{I} - 1}{e^1 - 1} $$
++where $I$ is the input intensity [S1, unofficial][S2, unofficial].
++$$ \mathbf{c}_{rgb} = I \cdot \text{high} + (1.0 - I) \cdot \text{low} $$
++Since `low` is black and `high` is white, this simplifies to $\mathbf{c}_{rgb} = I \cdot \text{high}$ [S1, unofficial][S2, unofficial].
++Front-to-back blending: $\mathbf{C}_{out} = \alpha_c \mathbf{C}_c + (1 - \alpha_c) \alpha_{acc} \mathbf{C}_{acc}$ and $\alpha_{acc} = \alpha_c + (1 - \alpha_c) \alpha_{acc}$ [S1, unofficial].
++
++**Parameters:**
++- The exponential base is fixed at $e$ [S1, unofficial][S2, unofficial].
++- The normalization factor is $e^1 - 1$ [S1, unofficial][S2, unofficial].
++- Color endpoints are fixed at black and white [S2, unofficial].
++
++**Edge Cases:**
++- If $I=0$, $\alpha = 0$ and color is black [S1, unofficial][S2, unofficial].
++- If $I=1$, $\alpha = 1$ and color is white [S1, unofficial][S2, unofficial].
++- Precision: For $I$ very close to 0, $e^I - 1$ may suffer from floating-point cancellation [G]. Use `math.expm1(I)` if available for better precision.
+ 
+ **Pseudocode:**
+ ```python
++import math
++
+ def exponential_color_transfer(intensity: float) -> tuple:
+-    # Constants
+     high = (1.0, 1.0, 1.0)
+     low = (0.0, 0.0, 0.0)
+-    exp_1 = 2.718281828459045
+-    
+-    # Compute alpha
+-    # Note: intensity is assumed to be in [0, 1]
++    exp_1 = math.exp(1.0)
+     alpha = (math.exp(intensity) - 1.0) / (exp_1 - 1.0)
+-    
+-    # Compute color (linear interpolation)
+     r = intensity * high[0] + (1.0 - intensity) * low[0]
+     g = intensity * high[1] + (1.0 - intensity) * low[1]
+     b = intensity * high[2] + (1.0 - intensity) * low[2]
+-    
+     return (r, g, b, alpha)
++
++def raycast_volume(volume_data, ray_origin, ray_direction, step_length, background_color=(0.0, 0.0, 0.0), gamma=2.2):
++    dir_len = math.sqrt(ray_direction[0]**2 + ray_direction[1]**2 + ray_direction[2]**2)
++    step_vector = (ray_direction[0]/dir_len * step_length,
++                   ray_direction[1]/dir_len * step_length,
++                   ray_direction[2]/dir_len * step_length)
++    ray_length = dir_len
++    position = ray_origin
++    accumulated_color = list(background_color)
++    accumulated_alpha = 0.0
++
++    while ray_length > 0:
++        intensity = volume_data[position]
++        c_rgb, c_a = exponential_color_transfer(intensity)
++        accumulated_color[0] = c_a * c_rgb[0] + (1 - c_a) * accumulated_alpha * accumulated_color[0]
++        accumulated_color[1] = c_a * c_rgb[1] + (1 - c_a) * accumulated_alpha * accumulated_color[1]
++        accumulated_color[2] = c_a * c_rgb[2] + (1 - c_a) * accumulated_alpha * accumulated_color[2]
++        accumulated_alpha = c_a + (1 - c_a) * accumulated_alpha
++        ray_length -= step_length
++        position = (position[0] + step_vector[0], position[1] + step_vector[1], position[2] + step_vector[2])
++
++    bg = background_color
++    final_r = accumulated_alpha * accumulated_color[0] + (1 - accumulated_alpha) * bg[0]
++    final_g = accumulated_alpha * accumulated_color[1] + (1 - accumulated_alpha) * bg[1]
++    final_b = accumulated_alpha * accumulated_color[2] + (1 - accumulated_alpha) * bg[2]
++    final_a = 1.0
++
++    final_r = final_r ** (1.0 / gamma)
++    final_g = final_g ** (1.0 / gamma)
++    final_b = final_b ** (1.0 / gamma)
++
++    return (final_r, final_g, final_b, final_a)
+ ```
+-
+-**Parameters:**
+-- The exponential base is fixed at $e$ [S1, S2, unofficial].
+-- The normalization factor is $e^1 - 1$ [S1, S2, unofficial].
+-- Color endpoints are fixed at black and white [S2, unofficial].
+-
+-**Edge Cases:**
+-- If $I=0$, $\alpha = 0$ and color is black [S1, S2, unofficial].
+-- If $I=1$, $\alpha = 1$ and color is white [S1, S2, unofficial].
+-- Precision: For $I$ very close to 0, $e^I - 1$ may suffer from floating-point cancellation. [G] Use `expm1(I)` if available for better precision.
+-
+ ## Subtopics
+ 
+@@ -63,13 +90,13 @@
+ 
+ ## Operating characteristics
+-- **Time Complexity:** $O(1)$ per sample. The exponential and linear interpolation are constant-time operations [S1, S2, unofficial].
+-- **Memory Complexity:** $O(1)$. No lookup table is stored; the function is hardcoded [S1, S2, unofficial].
+-- **Strengths:** Extremely fast to compute; no memory overhead for tables; smooth opacity transition [S1, S2, unofficial].
+-- **Limitations:** Limited flexibility; only one parameter (intensity) is used; opacity curve is fixed and cannot be adjusted for different datasets [S1, S2, unofficial].
+-- **When to use:** Simple visualization of scalar data where a smooth fade-in is desired and performance is critical [S1, S2, unofficial].
+-- **When not to use:** When specific intensity ranges need to be highlighted or when multi-dimensional data classification is required [S1, S2, unofficial].
++- **Time Complexity:** $O(1)$ per sample [S1, unofficial][S2, unofficial].
++- **Memory Complexity:** $O(1)$ [S1, unofficial][S2, unofficial].
++- **Strengths:** No memory overhead for tables [S1, unofficial][S2, unofficial].
++- **Limitations:** Limited flexibility; only one parameter (intensity) is used; opacity curve is fixed and cannot be adjusted for different datasets [S1, unofficial][S2, unofficial].
++- **When to use:** Simple visualization of scalar data [S1, unofficial][S2, unofficial].
++- **When not to use:** When specific intensity ranges need to be highlighted or when multi-dimensional data classification is required [S1, unofficial][S2, unofficial].
+ 
+ ## Background
+-The method originates from simple GPU-based volume raycasting implementations, such as those by Martino Pilia and Jimpelton, which prioritize simplicity and performance over complex classification [S1, S2, unofficial]. It is commonly used in educational visualizers and lightweight volume rendering tools [S1, S2, unofficial].
++The method originates from simple GPU-based volume raycasting implementations, such as those by Martino Pilia and Jimpelton, which prioritize simplicity and performance over complex classification [S1, unofficial][S2, unofficial].
+ 
+ ## Sources

@@ -1,0 +1,111 @@
+# MASt3R Feature Integration
+
+Also called: MASt3R
+
+## Overview
+MASt3R Feature Integration enriches stereo matching cost volumes with deep multi-view features to improve depth estimation and mesh reconstruction accuracy [S1, unofficial]. It injects correspondences learned by the MASt3R foundation model, which establishes dense pointmap and stereo feature correspondences between pairs of images of the same scene [S1, unofficial]. Unlike monocular feature extraction, this method leverages pairwise multi-view consistency to provide additional geometric cues for downstream reconstruction pipelines [S1, unofficial].
+
+## How it works
+**Inputs and Outputs:**
+- **Inputs:** A set of $N$ images $\{I_1, \dots, I_N\}$ of the same scene [S1, unofficial].
+- **Outputs:** Enriched feature representations for each image, concatenated with original image data, ready for injection into a downstream network such as a Feature Pyramid Network (FPN) [S1, unofficial].
+
+**Data Structures:**
+- **Stereo Feature Map ($F$):** Tensor of shape $\mathbb{R}^{H \times W \times 24}$, where $H$ and $W$ are the image dimensions and 24 is the feature dimension per pixel [S1, unofficial].
+- **Enriched Image Representation:** For image $I_i$, the representation is the concatenation of $I_i$ and all pairwise stereo feature maps $F_{ik}$ with other views $I_k$ ($k \neq i$) [S1, unofficial].
+
+**Numbered Steps:**
+1. **Pairwise Feature Extraction:** For every unique pair of input images $(I_i, I_j)$ where $i \neq j$, compute the stereo feature maps using the MASt3R model:
+   $$ F_{ij}, F_{ji} = F_{\text{MASt3R}}(I_i, I_j) $$
+   where $F_{ij} \in \mathbb{R}^{H \times W \times 24}$ contains features for $I_i$ conditioned on $I_j$ [S1, unofficial].
+2. **Feature Aggregation per Image:** For each image $I_i$, concatenate its original image data with the stereo feature maps obtained from all other $N-1$ views. The resulting feature representation for $I_i$ is:
+   $$ [I_i, F_{ik}]_{k=1, k \neq i}^{N} $$
+   For example, if $N=3$, the representation for $I_1$ is $[I_1, F_{12}, F_{13}]$ [S1, unofficial].
+3. **Injection into Downstream Pipeline:** Feed the concatenated enriched representation into the target network, such as an FPN to regress Gaussian attributes for 3D reconstruction [S1, unofficial].
+
+**Parameters:**
+- **Feature Dimension:** 24 (fixed for MASt3R) [S1, unofficial].
+- **Number of Views ($N$):** Variable, depending on the input set [S1, unofficial].
+
+**Edge Cases and Pitfalls:**
+- Not given in the sources: Specific normalization or scaling applied to the 24-dimensional features before concatenation.
+- Not given in the sources: Computational cost scaling with $N$ is not explicitly quantified.
+- Not given in the sources: Pose dependency requirements for the feature integration step.
+
+**Pseudocode:**
+> **Unverified code.** The code below did not pass a test run against a reference implementation, or no test fits it, so it may contain errors.
+
+```python
+import numpy as np
+from typing import List
+
+def concatenate_along_channels(tensors: List[np.ndarray]) -> np.ndarray:
+    """Concatenate a list of tensors along the last (channel) axis."""
+    return np.concatenate(tensors, axis=-1)
+
+def integrate_mast3r_features(images: List[np.ndarray], mast3r_model) -> List[np.ndarray]:
+    """
+    Integrates MASt3R multi-view features into input images for downstream reconstruction.
+    
+    Args:
+        images: List of N input images [I_1, ..., I_N].
+        mast3r_model: The pre-trained MASt3R model.
+        
+    Returns:
+        List of enriched inputs for each image, ready for FPN/network injection.
+    """
+    n = len(images)
+    enriched_inputs = []
+    pairwise_features = {}
+
+    # Step 1: Compute pairwise stereo features for all unique pairs
+    for i in range(n):
+        for j in range(n):
+            if i != j:
+                # F_ij, F_ji = F_MASt3R(I_i, I_j)
+                f_ij, f_ji = mast3r_model(images[i], images[j])
+                pairwise_features[(i, j)] = f_ij
+                pairwise_features[(j, i)] = f_ji
+
+    # Step 2: Aggregate features for each image
+    for i in range(n):
+        current_features = [images[i]]
+        
+        # Concatenate stereo features from all other views
+        for k in range(n):
+            if k != i:
+                f_ik = pairwise_features[(i, k)]
+                current_features.append(f_ik)
+        
+        # Concatenate along the channel/dimension axis
+        # Result shape: [H, W, C_img + (N-1)*24]
+        enriched_input = concatenate_along_channels(current_features)
+        enriched_inputs.append(enriched_input)
+        
+    return enriched_inputs
+```
+
+## Subtopics
+
+### MASt3R Point Cloud Baseline Rendering
+A baseline evaluation method that directly rasterizes MASt3R's predicted 3D points as a colored point cloud without confidence filtering [S2, unofficial]. It assigns each predicted 3D point the color of its corresponding source pixel from the input images and renders the entire unfiltered point cloud to reconstruct and visualize the full 3D scene [S2, unofficial]. This approach exhibits visible artifacts compared to learned Gaussian representations [S2, unofficial].
+
+### High-Fidelity Correspondence Establishment
+A multi-stage procedure to construct a sparse set of high-confidence 2D correspondences by enhancing MASt3R descriptors with semantic features and filtering via reciprocal nearest neighbors and confidence gating [S3]. It obtains a baseline descriptor from the MASt3R decoder and a spatially aligned DINOv3 feature, resizes DINOv3 features to the decoder grid via bilinear interpolation, and projects them to the descriptor dimension with a linear layer [S3]. A fusion MLP predicts a residual added to the baseline descriptor [S3]. Dense candidate correspondences are generated by identifying reciprocal nearest neighbors between the enhanced descriptor maps using cosine distance [S3]. Joint confidence is computed as the product of endpoint confidences from a frozen confidence head, and only matches exceeding a threshold $\tau_{\text{conf}}$ are retained [S3]. MASt3R matching head weights and the DINOv3 encoder are frozen [S3].
+
+## Operating characteristics
+- **Time Complexity:** $O(N^2)$ forward passes through the MASt3R model for $N$ images, as pairwise features are computed for all combinations [S1, unofficial].
+- **Memory Complexity:** High, due to storing $O(N^2)$ feature maps of size $H \times W \times 24$ and the concatenated enriched inputs [S1, unofficial].
+- **Performance:** Improves depth estimation accuracy and mesh reconstruction quality compared to methods using only monocular features [S1, unofficial].
+- **Strengths:** Not given in the sources.
+- **Limitations:** Not given in the sources.
+- **When to use:** Not given in the sources.
+- **When not to use:** Not given in the sources.
+
+## Background
+MASt3R is a state-of-the-art 3D foundation model trained on a large dataset to establish correspondences in feature space between pairs of images of the same scene [S1, unofficial]. It was introduced as a tool for dense pointmap and stereo feature prediction, enabling downstream tasks like depth estimation and 3D reconstruction [S1, unofficial]. The integration of MASt3R features into cost volumes or Gaussian Splatting pipelines represents a shift towards leveraging pre-trained 3D foundation models for generalizable reconstruction [S1, unofficial].
+
+## Sources
+[S1] SparSplat: Fast Multi-View Reconstruction with Generalizable 2D Gaussian Splatting, https://doi.org/10.48550/arXiv.2505.02175, fetched 2026-10-26 (unofficial)
+[S2] Splatt3R: Zero-Shot Gaussian Splatting from Uncalibrated Image Pairs, https://splatt3r.active.vision/, fetched 2026-10-30 (unofficial)
+[S3] MAC-Splat: Multi-Attribute Consistency for High-Fidelity Sparse-View Reconstruction, https://doi.org/10.1007/978-3-032-37023-5_36, fetched 2026-10-26

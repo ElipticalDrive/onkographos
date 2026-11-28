@@ -1,0 +1,66 @@
+# NeuRay Occlusion-Aware Parameterization
+
+Also called: Neural Rays
+
+## Overview
+NeuRay is a rendering method that parameterizes visibility and hitting probability directly using an occlusion probability function $t(z)$, rather than deriving them from volume density as in NeRF [S1]. This allows for efficient computation of visibility and hitting probability without requiring multiple network forward passes for each sample point [S1]. Unlike NeRF, which computes visibility $v_i = \prod_{j=1}^{i-1} (1 - \alpha_j)$ from density $d_i$ via alpha values $\alpha_i = 1 - \exp(-\text{ReLU}(d_i)l_i)$, NeuRay computes visibility directly from the occlusion probability $t(z)$ as $v_i = 1 - t(z_i)$ [S1].
+
+## How it works
+**Inputs and Outputs:**
+*   **Inputs:** Sample points $p_i \equiv p(z_i)$ on a ray with $z_i < z_{i+1}$ and $z_i \in \mathbb{R}^+$; occlusion probability parameters decoded from the network; features from neighboring input views.
+*   **Outputs:** Hitting probability $\tilde{h}_i$, visibility $v_i$, and alpha value $\hat{\alpha}_i$ for the test ray.
+
+**Data Structures:**
+The method relies on the occlusion probability function $t(z)$. The network outputs parameters that define $t(z)$, from which $\tilde{h}_i$ and $v_i$ are derived. The visibility feature $g$ is used to memorize visibility information during finetuning [S1].
+
+**Numbered Steps:**
+1.  **Sample Points:** Given an input ray, sample points $\{p_i \equiv p(z_i) | i = 1, ..., N; z_i < z_{i+1}; z_i \in \mathbb{R}^+\}$ [S1].
+2.  **Compute Hitting Probability and Visibility:** Compute the hitting probability $\tilde{h}_i$ and visibility $v_i$ from the occlusion probability $t(z)$ [S1]:
+    $$ \tilde{h}_i = t(z_{i+1}) - t(z_i) $$
+    $$ v_i \equiv v(z_i) = 1 - t(z_i) $$
+    Here, $\tilde{h}_i$ indicates the probability that the ray is not occluded by any depth up to $z_i$ and hits a surface in the range $(z_i, z_{i+1})$ [S1].
+3.  **Compute Alpha Value on Input Ray:** Derive the alpha value $\tilde{\alpha}_i$ on $p_i$ from $\tilde{h}_i$ and $v_i$ using the relationship $\tilde{h}_i = v_i \tilde{\alpha}_i$ [S1]:
+    $$ \tilde{\alpha}_i = \frac{\tilde{h}_i}{v_i} = \frac{t(z_{i+1}) - t(z_i)}{1 - t(z_i)} $$
+    This is the inverse of the density definition in NeRF [S1].
+4.  **Aggregate Alpha Values for Test Ray:** For a test ray, compute the alpha value $\hat{\alpha}_i$ as a weighted sum of alpha values $\tilde{\alpha}_{i,j}$ from all input rays $j$, weighted by their visibility $v_{i,j}$ [S1]:
+    $$ \hat{\alpha}_i = \frac{\sum_j \tilde{\alpha}_{i,j} v_{i,j}}{\sum_j v_{i,j}} $$
+    By considering the visibility, only visible input rays can affect the alpha values $\hat{\alpha}$ of the point [S1].
+5.  **Compute Final Hitting Probability:** Use $\hat{\alpha}_i$ in the computation of the final hitting probability $\hat{h}_i$ for the test ray [S1]:
+    $$ \hat{h}_i = \left( \prod_{j=1}^{i-1} (1 - \hat{\alpha}_j) \right) \hat{\alpha}_i $$
+6.  **Finetuning with Consistency Loss:** During finetuning, NeuRay uses a consistency loss $\ell_{consist}$ to memorize predicted surfaces [S1].
+    *   In one step, choose a pseudo test view A and aggregate features from neighboring input views B, C, D to predict hitting probability $h_i$ for the test ray on view A [S1].
+    *   Apply $\ell_{consist}$ to force the visibility feature $g$ of the test ray of view A to produce $\tilde{h}_i$ consistent with $h_i$. This memorizes the visibility (and thus geometry) in the feature $g$, since both are computed from $t(z)$ [S1].
+    *   In subsequent steps, when rendering a different pseudo test view D using views A, B, C, NeuRay checks the memorized visibility on view A to determine if points are invisible. It then predicts an accurate $h_i$ for view D, which is also memorized on D for future steps [S1].
+
+**Formulas:**
+*   Hitting Probability (Input Ray): $\tilde{h}_i = t(z_{i+1}) - t(z_i)$ [S1]
+*   Visibility (Input Ray): $v_i = 1 - t(z_i)$ [S1]
+*   Alpha Value (Input Ray): $\tilde{\alpha}_i = \frac{t(z_{i+1}) - t(z_i)}{1 - t(z_i)}$ [S1]
+*   Alpha Value (Test Ray): $\hat{\alpha}_i = \frac{\sum_j \tilde{\alpha}_{i,j} v_{i,j}}{\sum_j v_{i,j}}$ [S1]
+*   Hitting Probability (Test Ray): $\hat{h}_i = \left( \prod_{j=1}^{i-1} (1 - \hat{\alpha}_j) \right) \hat{\alpha}_i$ [S1]
+
+**Parameters:**
+*   Number of sample points $N$: Not given in the sources.
+*   Number of neighboring input views: Not given in the sources, but an example uses 8 views [S1].
+*   Sample points per input ray: Not given in the sources, but an example uses 32 points [S1].
+
+**Edge Cases and Pitfalls:**
+*   **Computational Cost of Visibility from Density:** Computing visibility from density in NeRF is computationally impractical for training because it requires $K_r$ forward passes of the network $F$ to compute visibility from one input view to one 3D point [S1]. For example, with 1 test ray, 8 input views, 128 sample points on the test ray, and 32 sample points per input ray, it requires $8 \times 128 \times 32$ network evaluations [S1]. Such computation complexity is not affordable for training on a single 2080 Ti GPU to achieve reasonable results [S1]. NeuRay avoids this by parameterizing visibility directly [S1].
+
+## Operating characteristics
+*   **Time Complexity:** NeuRay avoids the $O(K_r)$ forward passes required by NeRF for visibility computation, where $K_r$ is the number of sample points on input rays [S1]. The exact time complexity is not given in the sources.
+*   **Memory Complexity:** Not given in the sources.
+*   **Measured Performance:** Not given in the sources.
+*   **Scaling:** Not given in the sources.
+*   **Strengths:** Efficient computation of visibility and hitting probability without requiring multiple network forward passes for each sample point [S1]. Enables memorization of scene geometry in the visibility feature $g$ during finetuning [S1].
+*   **Limitations:** Not given in the sources.
+*   **When to use:** When efficient visibility computation is critical for training, especially in scenarios with many input views and sample points [S1].
+*   **When not to use:** Not given in the sources.
+
+## Background
+*   **Origin:** NeuRay was introduced in the paper "Neural Rays for Occlusion-aware Image-based Rendering" [S1].
+*   **History and Development:** The method was developed to address the computational impracticality of computing visibility from density in NeRF during training [S1]. It uses a consistency loss to memorize predicted surfaces and refine scene representation [S1].
+*   **Where it is used:** Image-based rendering [S1].
+
+## Sources
+[S1] Neural Rays for Occlusion-aware Image-based Rendering, https://doi.org/10.1109/cvpr52688.2022.00767, fetched 2026-10-26

@@ -1,0 +1,91 @@
+# Bounding Box Clipping
+Also called: clip (bbox)
+
+## Overview
+Bounding Box Clipping returns a new grid containing only the active voxels of a source grid that lie within a specified world-space bounding box [S1, unofficial]. It differs from [Mask Clipping](3229-mask-clipping.md) by using geometric containment rather than a secondary mask grid to determine voxel inclusion, and from [Voxel Body Copying with Sub-Voxel Clipping](7181-voxel-body-copying-with-sub-voxel-clipping.md) by operating on individual voxels rather than discrete solid blocks [S1, unofficial].
+
+## How it works
+**Inputs:**
+*   `source_grid`: The input voxel grid.
+*   `bbox`: A world-space bounding box defining the region of interest.
+
+**Outputs:**
+*   `clipped_grid`: A new grid containing only the active voxels from `source_grid` that satisfy the containment condition.
+
+**Data Structures:**
+*   `source_grid`: Contains voxel data and metadata (dimensions, origin, spacing).
+*   `clipped_grid`: Initialized with dimensions derived from the intersection of `bbox` and the source grid's extent.
+
+**Steps:**
+1.  Determine the spatial extent of the `source_grid` and compute the intersection with `bbox`.
+2.  Initialize `clipped_grid` with the appropriate dimensions and origin to cover the intersection region.
+3.  Iterate through all active voxels in `source_grid`.
+4.  For each active voxel at coordinate `c`, check if `c` is contained within `bbox`.
+5.  If `contains(bbox, c)` is true, copy the voxel's data to the corresponding position in `clipped_grid` [S1, unofficial].
+
+**Pseudocode:**
+> **Unverified code.** The code below did not pass a test run against a reference implementation, or no test fits it, so it may contain errors.
+
+```python
+def bounding_box_clip(source_grid, bbox):
+    # 1. Determine intersection bounds
+    # Compute the intersection of the source grid's world bounds and bbox
+    min_world = max(source_grid.origin, bbox.min)
+    max_world = min(source_grid.origin + source_grid.dimensions * source_grid.spacing, bbox.max)
+    
+    # If no intersection, return empty grid
+    if min_world >= max_world:
+        return EmptyGrid()
+
+    # 2. Initialize clipped grid
+    # Calculate dimensions in voxels for the clipped region
+    clipped_dims = (max_world - min_world) / source_grid.spacing
+    clipped_grid = Grid(dimensions=clipped_dims, origin=min_world, spacing=source_grid.spacing)
+
+    # 3. Iterate active voxels
+    for voxel in source_grid.active_voxels():
+        # 4. Check containment
+        if contains(bbox, voxel.center):
+            # 5. Copy data
+            # Map world coordinate to local grid index
+            local_idx = (voxel.center - min_world) / source_grid.spacing
+            clipped_grid.set(local_idx, voxel.data)
+            
+    return clipped_grid
+
+def contains(bbox, point):
+    return (bbox.min.x <= point.x <= bbox.max.x and
+            bbox.min.y <= point.y <= bbox.max.y and
+            bbox.min.z <= point.z <= bbox.max.z)
+```
+
+**Parameters:**
+*   `bbox`: Defined by minimum and maximum world coordinates.
+
+**Edge Cases:**
+*   **No Intersection:** If `bbox` does not overlap with the source grid's active region, the result is an empty grid [S1, unofficial].
+*   **Partial Overlap:** Voxels partially overlapping the `bbox` boundary are included if their center (or representative point) lies within the box, depending on the specific implementation of `contains` [S1, unofficial].
+
+## Subtopics
+
+### [Voxel Body Copying with Sub-Voxel Clipping](7181-voxel-body-copying-with-sub-voxel-clipping.md)
+Voxel Body Copying with Sub-Voxel Clipping extracts a subset of a voxel grid by retaining only the active solid blocks that intersect a specified world-space bounding box, while preserving the internal structure of those blocks. Unlike [Grid Clone](7232-grid-clone.md), which duplicates the entire grid, this method creates a new `VoxelBody` containing only the relevant data. It differs from [Bounding Box Clipping](4643-bounding-box-clipping.md) in that it operates on discrete solid blocks rather than individual voxels, clipping blocks that partially overlap the boundary to maintain structural integrity.
+
+### [Grid Clone](7232-grid-clone.md)
+Grid Clone creates a deep copy of a source voxel grid, preserving its bounding box, pixel dimensions, and all voxel data values. It solves the problem of duplicating grid state for independent modification or serialization. Unlike [Bounding Box Clipping](4643-bounding-box-clipping.md), which filters voxels by spatial containment, Grid Clone retains the entire logical extent of the source grid. It differs from [Voxel Body Copying with Sub-Voxel Clipping](7181-voxel-body-copying-with-sub-voxel-clipping.md) by performing a direct value assignment without geometric clipping or sub-voxel interpolation.
+
+### Grid Copy with Bounding Box Fallback
+Grid Copy with Bounding Box Fallback is a technique to copy parts of a scene into a new voxel grid, handling the undefined SDF region outside the grid bounds by returning the distance to a slightly shrunk bounding box [S2]. The method fills a voxel grid of the selection box size with signed distance values using `querySDF` [S2]. Negative values at border voxels are set to zero to avoid "leaking" at cut borders [S2]. For points outside the bounding box, it returns the distance to a slightly shrunk bounding box to prevent rays from stopping at the box boundary during sphere tracing [S2]. A key pitfall is that without this fallback, copied parts return the distance to their bounding box for points outside it, causing invisible bounding boxes to result in unwanted shadows and shadowing artifacts [S2].
+
+## Operating characteristics
+*   **Time Complexity:** Linear with respect to the number of active voxels in the source grid, $O(N)$, where $N$ is the count of active voxels [S1, unofficial].
+*   **Memory Complexity:** Proportional to the number of voxels retained in the clipped region [S1, unofficial].
+*   **Strengths:** Simple to implement; efficient for extracting regions of interest [S1, unofficial].
+*   **Limitations:** Does not handle partial voxel intersections at the boundary in a sub-voxel accurate manner unless combined with block-based methods [S1, unofficial].
+
+## Background
+Bounding Box Clipping is a fundamental operation in voxel grid manipulation, often used in conjunction with scene building and optimization routines [S1, unofficial]. It is commonly employed in tools like Lyr.jl for preparing voxel data for rendering [S1, unofficial].
+
+## Sources
+[S1] tobiasosborne/Lyr.jl, https://github.com/tobiasosborne/Lyr.jl, fetched 2026-10-26 (unofficial)
+[S2] PDF Interactive Editing of Voxel-Based Signed Distance Fields, http://wscg.zcu.cz/WSCG2022/journal/B97-full.pdf, fetched 2026-10-30

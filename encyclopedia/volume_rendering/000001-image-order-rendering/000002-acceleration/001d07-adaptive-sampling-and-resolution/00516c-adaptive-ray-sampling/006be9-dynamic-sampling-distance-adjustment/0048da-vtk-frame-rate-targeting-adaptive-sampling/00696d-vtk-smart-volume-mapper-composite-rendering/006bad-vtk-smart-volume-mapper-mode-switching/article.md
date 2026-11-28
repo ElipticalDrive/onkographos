@@ -1,0 +1,182 @@
+# VTK Smart Volume Mapper Mode Switching
+
+Also called: GPU Volume Ray Casting with Adaptive Sampling, Rendering Mode Switch, VTK Frame Rate Targeting & Adaptive Sampling, vtkGPUVolumeRayCastMapper
+
+## Overview
+This method defines the configuration protocol for switching between high-quality and fast rendering modes in the VTK `vtkGPUVolumeRayCastMapper` to maintain interactive frame rates during volume visualization. It solves the latency trade-off in remote or interactive MRI visualization by dynamically adjusting window resolution and sample distance based on the user's interaction state (static viewing vs. rotation). It differs from standard adaptive sampling by enforcing discrete, mode-specific presets for resolution and sampling density rather than continuous frame-rate feedback loops alone.
+
+## How it works
+
+### Inputs and Outputs
+*   **Inputs**:
+    *   `mode`: Enum or boolean indicating the current rendering intent (`normal` for high-quality/static, `rotation` for fast/interactive).
+    *   `mask_input`: Optional `vtkImageData` containing a binary mask (UCHAR, 255 inside/0 outside) or a label map (UCHAR, up to 256 labels) [S2].
+    *   `volume_data`: The 3D volume texture data [S2].
+*   **Outputs**:
+    *   Rendered image (color and optionally depth textures if `RenderToImage` is enabled) [S2].
+    *   Updated mapper state (sample distance, window resolution) [S1, unofficial].
+
+### Data Structures
+The method relies on the internal state of `vtkGPUVolumeRayCastMapper`. Key parameters are stored as follows:
+*   `SampleDistance`: `float`. Distance between samples along the ray [S2].
+*   `ImageSampleDistance`: `float`. Sampling distance in the XY image dimensions [S2].
+*   `RotationMode`: `bool`. Internal flag indicating if the mapper is in rotation mode [S1, unofficial].
+*   `MaskInput`: `vtkImageData*`. Pointer to the mask data [S2].
+*   `MaskType`: Enum. Specifies if `MaskInput` is binary or label map [S2].
+
+### Parameters
+*   **Window Resolution**:
+    *   Normal Mode: 600x600 pixels [S1, unofficial].
+    *   Rotation Mode: 400x400 pixels [S1, unofficial].
+*   **Sample Distance**:
+    *   Normal Mode: 0.2 [S1, unofficial].
+    *   Rotation Mode: 0.5 [S1, unofficial].
+    *   Default Initial Value: 1.0 [S2].
+*   **Image Sample Distance**:
+    *   Default: 1.0 (1 ray per pixel) [S2].
+    *   0.5: 4 rays per pixel (2x2 supersampling) [S2].
+    *   2.0: 1 ray per 4 pixels (2x2 downsampling) [S2].
+*   **Mask Blend Factor**: `float` [0.0, 1.0]. Weight for blending mask color transfer function with standard color transfer function. Default 1.0 [S2].
+*   **Final Color Window**: `float`. Width of the window/level applied to final color. Initial 1.0. Can be negative to reverse values [S2].
+*   **Max Memory In Bytes**: `vtkIdType`. Maximum size of the 3D texture in GPU memory. Defaults to graphics card computed size [S2].
+*   **Max Memory Fraction**: `float` [0.1, 1.0]. Fraction of `MaxMemoryInBytes` used for the texture [S2].
+*   **Report Progress**: `bool`. Enables GL blocking call (`glFinish()`) for progress reporting. Default true [S2].
+*   **Global Illumination Reach**: `float` [0.0, 1.0]. Balance between local and global shadows. Default 0.0 [S2].
+*   **Volumetric Scattering Blending**: `float` [0.0, 2.0]. Controls blending between surfacic approximation and volumetric multi-scattering. Only considered when Shade is enabled. 0.0: no scattered rays; 1.0: smart blend; 2.0: only volumetric model [S2].
+*   **Render To Image**: `bool`. Enables output to color and depth textures. Default 0 (off) [S2].
+
+### Numbered Steps
+
+1.  **Initialize Mapper State**:
+    *   Set `AutoAdjustSampleDistances` to `False` if manual mode switching is desired, or `True` if frame-rate targeting is preferred [S2].
+    *   Set `SampleDistance` to the initial value of 1.0 if not explicitly overridden by mode [S2].
+    *   Set `ImageSampleDistance` to 1.0 by default [S2].
+
+2.  **Configure Masking (Optional)**:
+    *   If `MaskInput` is provided:
+        *   Determine `MaskType` (Binary or Label Map) [S2].
+        *   **Binary Mask**: Ensure mask datatype is UCHAR. Rendering is confined to regions where mask value is 255 [S2].
+        *   **Label Map Mask**: Ensure mask datatype is UCHAR (up to 256 labels) [S2].
+            *   Voxels with label value 0 use default transfer functions from `vtkVolumeProperty` [S2].
+            *   Voxels with label value > 0 use color transfer functions from `vtkVolumeProperty`'s label API [S2].
+            *   Blend the label-specific color transfer function with the default color transfer function using `MaskBlendFactor` [S2].
+
+3.  **Switch Mode**:
+    *   **If Mode is Rotation**:
+        *   Set `rotation_mode = True` [S1, unofficial].
+        *   Set render window size to 400x400 [S1, unofficial].
+        *   Set volume mapper `SampleDistance` to 0.5 [S1, unofficial].
+    *   **If Mode is Normal**:
+        *   Set `rotation_mode = False` [S1, unofficial].
+        *   Set render window size to 600x600 [S1, unofficial].
+        *   Set volume mapper `SampleDistance` to 0.2 [S1, unofficial].
+        *   Call `render_to_image()` to trigger immediate render [S1, unofficial].
+        *   Send result over WebSocket (if remote rendering) [S1, unofficial].
+
+4.  **Apply Post-Processing (Optional)**:
+    *   Apply `FinalColorWindow` and `FinalColorLevel` to the final color for brightness/contrast adjustment [S2].
+    *   If `RenderToImage` is enabled, output color and depth textures [S2].
+
+### Pseudocode
+
+> **Unverified code.** The code below did not pass a test run against a reference implementation, or no test fits it, so it may contain errors.
+
+```python
+def switch_vtk_render_mode(mapper, renderer, window, mode, mask_input=None):
+    """
+    Switches VTK volume rendering mode between 'normal' and 'rotation'.
+    
+    Args:
+        mapper: vtkGPUVolumeRayCastMapper instance
+        renderer: vtkRenderer instance
+        window: vtkRenderWindow instance
+        mode: str, either 'normal' or 'rotation'
+        mask_input: vtkImageData instance (optional)
+    """
+    
+    # Step 1: Configure Masking if provided
+    if mask_input is not None:
+        # Assume mask type is set externally via SetMaskType based on content
+        # Binary mask: UCHAR, 255 inside, 0 outside
+        # Label map: UCHAR, up to 256 labels
+        mapper.SetMaskInput(mask_input)
+        
+        # If label map, ensure MaskBlendFactor is set correctly
+        # Default is 1.0 (only mask color transfer function for labels > 0)
+        # mapper.SetMaskBlendFactor(1.0) 
+
+    # Step 2: Switch Mode Parameters
+    if mode == 'rotation':
+        # Rotation Mode: Fast, lower resolution
+        mapper.SetRotationMode(True) # Internal flag
+        window.SetSize(400, 400)
+        mapper.SetSampleDistance(0.5)
+        
+    elif mode == 'normal':
+        # Normal Mode: High quality, higher resolution
+        mapper.SetRotationMode(False)
+        window.SetSize(600, 600)
+        mapper.SetSampleDistance(0.2)
+        
+        # Trigger immediate render for normal mode as per source
+        # Note: In VTK, rendering is typically triggered by Render() on the renderer
+        # The source specifically mentions render_to_image() for normal mode
+        mapper.RenderToImage(True) # Enable texture output if needed for streaming
+        renderer.Render()
+        
+        # If using RenderToImage, retrieve textures
+        # color_texture = mapper.GetColorImage()
+        # depth_texture = mapper.GetDepthImage()
+        
+    else:
+        raise ValueError("Mode must be 'normal' or 'rotation'")
+
+    # Step 3: Apply Final Color Window (Optional)
+    # Default window is 1.0, level is 0.5
+    # mapper.SetFinalColorWindow(1.0)
+    # mapper.SetFinalColorLevel(0.5)
+```
+
+### Edge Cases and Pitfalls
+*   **RenderToImage Limitations**: When `RenderToImage` is enabled, the mapper ignores other volumes/props in the scene, does not respect general scene attributes (e.g., background color), and always produces a color image with a transparent white background outside the volume bounds [S2].
+*   **Mask Datatype**: Masks must be UCHAR. Binary masks must use 255 for inside and 0 for outside. Label maps support up to 256 labels [S2].
+*   **Sample Distance Adjustment**: If `AutoAdjustSampleDistances` is on, `ImageSampleDistance` is adjusted automatically. `MinimumImageSampleDistance` and `MaximumImageSampleDistance` bound this adjustment [S2].
+*   **Progress Reporting**: `ReportProgress` uses `glFinish()`, which can slow down rendering of small datasets. It should be set to `False` for small datasets [S2].
+*   **Volumetric Scattering**: `VolumetricScatteringBlending` only affects rendering when `Shade` is enabled. Values in [0, 1] bias the choice between models, while values in [1, 2] force more volumetric model usage [S2].
+
+## Operating characteristics
+
+### Time and Memory Complexity
+*   **Time Complexity**: Depends on the number of samples per ray (`SampleDistance`) and the number of rays (`ImageSampleDistance` * window resolution). Normal mode (600x600, 0.2 sample distance) is significantly more expensive than Rotation mode (400x400, 0.5 sample distance).
+*   **Memory Complexity**: Dominated by the 3D texture in GPU memory, bounded by `MaxMemoryInBytes` and `MaxMemoryFraction` [S2].
+
+### Measured Performance
+*   Not given in the sources. Specific frame rates or timing data are not provided in the referenced documentation.
+
+### Scaling
+*   Scaling is achieved by adjusting `SampleDistance` and `ImageSampleDistance`. `AutoAdjustSampleDistances` can automatically scale these parameters to meet frame rate targets [S2].
+
+### Strengths and Limitations
+*   **Strengths**: Simple mode switching for interactive vs. high-quality rendering. Masking support for region-specific visualization. GPU-accelerated via `vtkGPUVolumeRayCastMapper` [S1, unofficial][S2].
+*   **Limitations**: `RenderToImage` mode ignores other scene elements. Masking requires specific data types (UCHAR). `ReportProgress` can impact performance on small datasets [S2].
+
+### When to Use
+*   Use Normal mode for final visualization or static analysis where image quality is paramount [S1, unofficial].
+*   Use Rotation mode for interactive exploration, such as rotating the volume, where frame rate is critical [S1, unofficial].
+*   Use Masking when specific regions of the volume need to be highlighted or isolated [S2].
+
+## Background
+
+### Origin
+The `vtkGPUVolumeRayCastMapper` is part of the Visualization Toolkit (VTK) library. The specific mode switching behavior described in [S1, unofficial] is from an unofficial remote rendering implementation using VTK. The core mapper functionality is documented in the official VTK class reference [S2].
+
+### History and Development
+VTK is an open-source, freely available software system for 3D computer graphics, image processing, and visualization. The `vtkGPUVolumeRayCastMapper` leverages GPU hardware for volume rendering, providing real-time performance capabilities. The adaptive sampling features allow for dynamic adjustment of rendering quality based on system load or user interaction [S2].
+
+### Where It Is Used
+Used in medical imaging visualization (e.g., MRI, CT), scientific visualization, and any application requiring real-time 3D volume rendering with interactive capabilities [S1, unofficial][S2].
+
+## Sources
+
+[S1] nikhilhv317/Remote_Rendering, https://github.com/nikhilhv317/Remote_Rendering, fetched 2026-10-26 (unofficial)
+[S2] vtkGPUVolumeRayCastMapper Class Reference - VTK, https://vtk.org/doc/nightly/html/classvtkGPUVolumeRayCastMapper.html, fetched 2026-10-26

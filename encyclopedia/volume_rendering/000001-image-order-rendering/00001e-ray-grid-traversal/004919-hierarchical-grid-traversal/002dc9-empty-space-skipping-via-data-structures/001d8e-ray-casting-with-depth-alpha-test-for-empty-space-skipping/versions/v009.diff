@@ -1,0 +1,158 @@
+--- v008.md
++++ v009.md
+@@ -7,5 +7,5 @@
+ 
+ ## How it works
+-The method operates in three main phases: pre-processing (gradient calculation), acceleration structure generation (Slab Silhouette Maps), and ray casting with skipping.
++The method operates in three main phases: pre-processing (gradient calculation), acceleration structure generation (Slab Silhouette Maps), and ray casting with skipping [S1, unofficial][S3, unofficial].
+ 
+ ### Inputs and Outputs
+@@ -38,5 +38,5 @@
+ 
+ 4.  **Generate Slab Silhouette Maps (SSM) via Two Passes:**
+-    The goal is to find the near ($P$) and far ($Q$) intersection points of the ray with the volume.
++    The goal is to find the near ($P$) and far ($Q$) intersection points of the ray with the volume [S3, unofficial].
+ 
+     *   **Pass 1 (Find Near Point):**
+@@ -44,5 +44,5 @@
+         *   Set depth write criterion to `GL_LESS` [S3, unofficial].
+         *   Enable the Alpha Test with `GL_GREATER` and a reference value $> 0$ (e.g., 0.001) to discard fragments with zero opacity [S3, unofficial].
+-        *   Render the volume slabs from front to back.
++        *   Render the volume slabs from front to back [S1, unofficial].
+         *   The depth buffer now contains the distances of the closest significant fragments to the projection plane for each pixel [S3, unofficial].
+ 
+@@ -51,5 +51,5 @@
+         *   Set depth write criterion to `GL_GREATER` [S3, unofficial].
+         *   Keep Alpha Test enabled (`GL_GREATER`, ref $> 0$) [S3, unofficial].
+-        *   Render the volume slabs from back to front.
++        *   Render the volume slabs from back to front [S1, unofficial].
+         *   The depth buffer now contains the distances of the farthest significant fragments [S3, unofficial].
+ 
+@@ -106,5 +106,4 @@
+ 
+     # 3. Pass 1: Find Near Points (SSM) [S3, unofficial]
+-    # Simulate GPU depth buffer initialization and front-to-back rendering
+     near_depth_buffer = [1.0] * (camera.height * camera.width)
+     for slab in slab_order:
+@@ -112,5 +111,4 @@
+ 
+     # 4. Pass 2: Find Far Points (SSM) [S3, unofficial]
+-    # Simulate GPU depth buffer initialization and back-to-front rendering
+     far_depth_buffer = [0.0] * (camera.height * camera.width)
+     for slab in reversed(slab_order):
+@@ -127,9 +125,7 @@
+             z_far_ndc = far_depth_buffer[y * camera.width + x]
+ 
+-            # Skip if no intersection found (depth unchanged from initialization)
+             if z_near_ndc >= 0.999 or z_far_ndc <= 0.001:
+                 continue
+ 
+-            # Transform NDC to World Coordinates [S3, unofficial]
+             ndc_x = (2.0 * x / camera.width) - 1.0
+             ndc_y = (2.0 * y / camera.height) - 1.0
+@@ -138,6 +134,5 @@
+             far_world = unproject_ndc_to_world(ndc_x, ndc_y, z_far_ndc, inv_pm, view_matrix)
+ 
+-            # Composite ray segment restricted to active interval
+-            color = composite_ray_segment(near_world, far_world, illuminated, n_samples)
++            color = composite_ray_segment(near_world, far_world, illuminated, n_samples, transfer_func)
+             image[y][x] = color
+ 
+@@ -145,5 +140,4 @@
+ 
+ def compute_central_difference_gradients(volume):
+-    """Compute voxel gradients using central differences [S3, unofficial]."""
+     D, H, W = volume.shape
+     grad = [[[0.0, 0.0, 0.0] for _ in range(W)] for _ in range(H)]
+@@ -158,8 +152,7 @@
+ 
+ def apply_lighting_model(volume, gradients, transfer_func):
+-    """Pre-compute color and opacity per voxel on CPU [S3, unofficial]."""
+-    H, W = volume.shape[1], volume.shape[2]
+-    illuminated = [[[0.0, 0.0, 0.0, 0.0] for _ in range(W)] for _ in range(H)]
+-    for d in range(volume.shape[0]):
++    D, H, W = volume.shape
++    illuminated = [[[0.0, 0.0, 0.0, 0.0] for _ in range(W)] for _ in range(D)]
++    for d in range(D):
+         for h in range(H):
+             for w in range(W):
+@@ -170,37 +163,40 @@
+                 dot = max(0.0, sum(n*l for n,l in zip(normal, light_dir)) / (math.sqrt(sum(n*n for n in normal)) + 1e-6))
+                 color = [c * (0.5 + 0.5 * dot) for c in rgba]
+-                illuminated[h][w] = color + [alpha]
++                illuminated[d][h][w] = color + [alpha]
+     return illuminated
+ 
+ def create_texture_slabs(illuminated_volume):
+-    """Group volume slices into 2D texture slabs [S1, unofficial]."""
+     return [illuminated_volume[d] for d in range(len(illuminated_volume))]
+ 
+ def get_axis_with_smallest_angle_to_projection_plane(camera):
+-    """Determine optimal rendering axis [S3, unofficial]."""
+     return 'Z'
+ 
+ def get_sorted_slabs(slabs, axis, camera):
+-    """Sort slabs by distance to camera [S3, unofficial]."""
+     return sorted(slabs, key=lambda s: 0.0)
+ 
+-def apply_depth_buffer(depth_buffer, slab, depth_func, alpha_test, alpha_ref):
+-    """Simulate GPU depth/alpha test pass per pixel [S1, unofficial][S3, unofficial]."""
+-    # In hardware, this updates the depth buffer based on fragment alpha and depth.
+-    # For self-contained pseudocode, we assume slab provides depth values per pixel.
+-    return depth_buffer
++def apply_depth_test(depth_buffer, slab, depth_func, alpha_test, alpha_ref):
++    """Simulates GPU depth/alpha test per pixel [G]."""
++    new_buffer = list(depth_buffer)
++    for i in range(len(depth_buffer)):
++        frag_depth = slab[i] if i < len(slab) else depth_buffer[i]
++        frag_alpha = 1.0
++        if alpha_test and frag_alpha <= alpha_ref:
++            continue
++        if depth_func == 'LESS' and frag_depth < new_buffer[i]:
++            new_buffer[i] = frag_depth
++        elif depth_func == 'GREATER' and frag_depth > new_buffer[i]:
++            new_buffer[i] = frag_depth
++    return new_buffer
+ 
+ def unproject_ndc_to_world(ndc_x, ndc_y, ndc_z, inv_pm, view_matrix):
+-    """Transform NDC coordinates to world coordinates [S3, unofficial]."""
+     clip = [ndc_x, ndc_y, ndc_z, 1.0]
+-    view = multiply_matrix_vector(inv_pm, clip)
++    view = mat_vec_mul(inv_pm, clip)
+     if view[3] == 0.0:
+         return [0.0, 0.0, 0.0, 0.0]
+     view = [v / view[3] for v in view]
+-    world = multiply_matrix_vector(view_matrix, view)
++    world = mat_vec_mul(view_matrix, view)
+     return world
+ 
+-def composite_ray_segment(origin, end, illuminated, n_samples):
+-    """Front-to-back compositing restricted to active segment [S3, unofficial]."""
++def composite_ray_segment(origin, end, illuminated, n_samples, transfer_func):
+     alpha = 0.0
+     color = [0.0, 0.0, 0.0]
+@@ -214,5 +210,4 @@
+         scalar = sample_volume(pos, illuminated)
+         rgba, alpha_sample = transfer_func(scalar)
+-        # Standard front-to-back compositing
+         alpha += (1.0 - alpha) * alpha_sample
+         color = [color[i] + rgba[i] * alpha_sample * (1.0 - (alpha - alpha_sample)) for i in range(3)]
+@@ -224,4 +219,11 @@
+     """Standard trilinear interpolation or texture fetch [G]."""
+     return 0.0
++
++def mat_vec_mul(m, v):
++    return [sum(m[i][j] * v[j] for j in range(len(v))) for i in range(len(m))]
++
++def inverse_matrix(m):
++    """Matrix inversion [G]."""
++    return m
+ ```
+ 
+@@ -247,5 +249,5 @@
+ *   **Time Complexity:** The acceleration structure generation (SSM) is very small compared to total rendering time [S1, unofficial]. The ray casting time is reduced to almost a quarter of a naive ray caster [S3, unofficial].
+ *   **Measured Performance:** 3 to 4 times faster than naive ray casting when using alpha and depth tests [S3, unofficial].
+-*   **Memory Complexity:** Requires storage for the volume, gradients, and 2D texture slabs. No additional hierarchical data structure (like an octree) is needed on the CPU [S1, unofficial].
++*   **Memory Complexity:** Requires storage for the volume, gradients, and 2D texture slabs [S1, unofficial]. No additional hierarchical data structure (like an octree) is needed on the CPU [S1, unofficial].
+ *   **Strengths:** No CPU-side preprocessing required; leverages hardware z-occlusion culling; simple implementation using standard OpenGL features [S1, unofficial][S3, unofficial].
+ *   **Limitations:** Lighting is pre-computed on the CPU, making dynamic lighting difficult [S3, unofficial]. Effectiveness degrades with high data dispersion [S3, unofficial]. Limited to skipping external empty space; internal holes are not skipped [S3, unofficial].

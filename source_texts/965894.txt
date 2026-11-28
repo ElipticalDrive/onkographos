@@ -1,0 +1,235 @@
+High-performance Toolkit for WebGL-based Data Visualization - feat(scene): add bounded diffuse indirect ray transport by ibgreen · Pull Request #3690 · visgl/luma.gl
+
+feat(scene): add bounded diffuse indirect ray transport by ibgreen · Pull Request #3690 · visgl/luma.gl · GitHub
+Skip to content
+You signed in with another tab or window. Reload to refresh your session.
+You signed out in another tab or window. Reload to refresh your session.
+You switched accounts on another tab or window. Reload to refresh your session.
+Dismiss alert
+Conversation
+ibgreen
+commented
+Nov 6, 2026
+•
+edited by cursor
+Bot
+Loading
+Uh oh!
+There was an error while loading. Please reload this page.
+Copy link
+Copy Markdown
+Collaborator
+Goals
+Enable bounded diffuse indirect illumination in the shared scene ray tracer.
+Changes
+Implement cosine-weighted diffuse continuation with path throughput, per-hit emission and existing explicit direct-light evaluation.
+Apply maxBounces as an additional diffuse-bounce budget (0–8); the default preserves direct lighting.
+Reset indirect accumulation after retained geometry or light changes.
+Update uniform-layout tests, exercise two bounces in the GPU validation test, and document limitations.
+Verification
+nvm use, yarn install, yarn lint fix, and yarn build completed.
+yarn test: 3,959 node tests and 2,682 headless tests passed (8 and 23 skipped respectively).
+Website builds not run.
+Limitations
+This implements diffuse continuation only. Material textures, specular and dielectric continuation, denoising, and quantitative image-convergence tests are follow-up work. Background color remains a camera backdrop. Implementation is independently authored within the existing renderer.
+Note
+Medium Risk
+Modifies shader uniform layouts and introduces iterative ray-dispatch logic in the experimental ray tracer, though risk is mitigated by defaulting to zero bounces to preserve direct lighting behavior.
+Overview
+Adds bounded diffuse indirect illumination to the experimental ray-tracing scene renderer via a configurable maxBounces option (clamped between 0 and 8, defaulting to 0). The ray generation shader now evaluates multi-bounce paths through traceDiffusePath using cosine-weighted hemisphere sampling, accumulating surface emission, direct lighting, and throughput across bounces.
+The ray-tracing uniform buffer layout is expanded to pass transport settings to the compute passes, and retained history is automatically invalidated when transforms or lights change while indirect bounces are active. In addition, example applications and documentation migrate public basemap styles from CARTO to OpenFreeMap.
+Reviewed by Cursor Bugbot for commit 73c7a90. Bugbot is set up for automated code reviews on this repo. Configure here.
+ibgreen
+added 2 commits
+October 7, 2026 09:37
+Replace CARTO example basemaps with OpenFreeMap
+23eb0f7
+feat(scene): add bounded diffuse indirect ray transport
+73c7a90
+chatgpt-codex-connector
+Bot
+commented
+Nov 6, 2026
+Copy link
+Copy Markdown
+Codex Review Summary: ❌ Failed
+This comment shows the latest Codex review activity on this pull request.
+Review
+Status
+Commit
+Review trigger
+📝 Code Review
+❌ Failed 2026-11-06T22:59:15.041193Z
+We couldn’t complete this review. Comment @codex review to try again.
+73c7a90
+PR opened
+ℹ️ About Codex in GitHub
+Your team has set up Codex to review pull requests in this repo. Reviews are triggered when you
+Open a pull request for review
+Mark a draft as ready
+Comment "@codex review" or "@codex security review".
+Codex reacts with 👀 while any review is running, comments if it has suggestions, and reacts with 👍 once all reviews finish with no findings.
+chatgpt-codex-connector
+Bot
+commented
+Nov 6, 2026
+Copy link
+Copy Markdown
+You have reached your Codex usage limits for code reviews. You can see your limits in the Codex usage dashboard.
+To continue using code reviews, add credits to your account and enable them for code reviews in your settings.
+greptile-apps
+Bot
+commented
+Nov 6, 2026
+•
+edited
+Loading
+Uh oh!
+There was an error while loading. Please reload this page.
+Copy link
+Copy Markdown
+Confidence Score: 3/5
+[Medium impact] The PR reaches the shared experimental ray tracer and two MapLibre examples.
+Fix progressive averaging and camera-distance fog before merging.
+Findings
+Indirect lighting stays unstable ▶
+Indirect light bypasses fog ▶
+Summary
+Adds bounded diffuse indirect lighting to the shared ray tracer.
+The scene ray tracer can gather light from diffuse bounces.
+The example maps now use OpenFreeMap basemaps.
+Two rendering issues need fixes: noisy indirect samples distort progressive history, and indirect light bypasses camera-distance fog.
+Acknowledged limitations: ibgreen explicitly defers material textures, specular and dielectric continuation, denoising, and quantitative image-convergence tests.
+Diagram
+```
+%%{init: {'theme': 'neutral'}}%%
+flowchart TD
+  A[Camera sample] --> B[Find nearest hit]
+  B -->|Miss| C[Camera backdrop on primary ray only]
+  B -->|Hit| D[Add weighted light and emission]
+  D --> E{Bounce budget remains?}
+  E -->|Yes| F[Sample diffuse direction and update weight]
+  F --> B
+  E -->|No| G[Combine primary samples]
+  C --> G
+  G --> H[Reuse progressive history]
+  H --> I[Present image]
+```
+Loading
+Reviews (1) · Last reviewed commit: "feat(scene): add bounded diffuse indirec..." · Reviewed by Greptile
+greptile-apps
+Bot
+reviewed
+Nov 6, 2026
+View reviewed changes
+Comment thread
+modules/experimental/src/engine/ray-tracing-scene-shaders.ts
+accumulatedColor += color;
+let seed = (pixel.y * uniforms.dimensions.x + pixel.x) * 1973u +
+uniforms.acceleration.w * 26699u + sampleIndex * 104729u;
+accumulatedColor += traceDiffusePath(ray, seed);
+greptile-apps
+Bot
+Nov 6, 2026
+Copy link
+Copy Markdown
+There was a problem hiding this comment.
+Choose a reason for hiding this comment
+The reason will be displayed to describe this comment to others. Learn more.
+Indirect lighting stays unstable
+With maxBounces > 0, traceDiffusePath feeds noisy indirect samples into the existing history clamp. The clamp pulls the saved average toward each new sample before averaging. If history and its neighbors are zero but a new sample is 10, it raises history to 5 regardless of the saved sample count. Rare emitter hits can therefore cause bright flashes instead of averaging out across unchanged frames.
+Skip this clamp for unchanged progressive history so indirect samples can average correctly.
+Note: If this suggestion doesn't match your team's coding style, reply to this and let me know. I'll remember it for next time!
+Comment thread
+modules/experimental/src/engine/ray-tracing-scene-shaders.ts
+if (bounce == 0u) { radiance += uniforms.background.rgb; }
+break;
+}
+radiance += throughput * evaluateDirectLighting(ray, hit);
+greptile-apps
+Bot
+Nov 6, 2026
+Copy link
+Copy Markdown
+There was a problem hiding this comment.
+Choose a reason for hiding this comment
+The reason will be displayed to describe this comment to others. Learn more.
+Indirect light bypasses fog
+With positive fogDensity and maxBounces, indirect light bypasses fog between the camera and the first surface. evaluateDirectLighting applies fog only to each hit's local light. traceDiffusePath then adds later hits without applying the first segment's visibility, so distant surfaces can remain brightly lit through dense fog.
+Apply the camera fog to the combined surface radiance, rather than only its direct-light contribution.
+Note: If this suggestion doesn't match your team's coding style, reply to this and let me know. I'll remember it for next time!
+cursor
+Bot
+reviewed
+Nov 6, 2026
+View reviewed changes
+cursor
+Bot
+left a comment
+Copy link
+Copy Markdown
+There was a problem hiding this comment.
+Choose a reason for hiding this comment
+The reason will be displayed to describe this comment to others. Learn more.
+Cursor Bugbot has reviewed your changes using default effort and found 2 potential issues.
+❌ Bugbot Autofix is OFF. To automatically fix reported issues with cloud agents, have a team admin enable autofix in the Cursor dashboard.
+Reviewed by Cursor Bugbot for commit 73c7a90. Configure here.
+Comment thread
+modules/experimental/src/engine/ray-tracing-scene-shaders.ts
+ray = Ray(ray.origin + ray.direction * hit.distance + normal * 0.002, direction);
+}
+return radiance;
+}
+cursor
+Bot
+Nov 6, 2026
+Copy link
+Copy Markdown
+There was a problem hiding this comment.
+Choose a reason for hiding this comment
+The reason will be displayed to describe this comment to others. Learn more.
+Secondary bounces reuse primary shading
+Medium Severity
+traceDiffusePath adds evaluateDirectLighting at every bounce. That shader was built for camera rays, so it reapplies ambient fill and distance fog on secondary hits. With the default ambient term, indirect paths pick up extra energy, and fog is mixed using bounce-segment length rather than camera distance, so GI looks too bright and fog-tinted when maxBounces is enabled.
+Reviewed by Cursor Bugbot for commit 73c7a90. Configure here.
+Comment thread
+modules/experimental/src/engine/ray-tracing-scene-shaders.ts
+let direction = normalize(tangent * sqrt(radiusSquared) * cos(angle) +
+cross(normal, tangent) * sqrt(radiusSquared) * sin(angle) + normal * sqrt(1.0 - radiusSquared));
+let halfDirection = normalize(direction - ray.direction);
+let fresnel = 0.04 + 0.96 * pow(1.0 - max(dot(direction, halfDirection), 0.0), 5.0);
+cursor
+Bot
+Nov 6, 2026
+Copy link
+Copy Markdown
+There was a problem hiding this comment.
+Choose a reason for hiding this comment
+The reason will be displayed to describe this comment to others. Learn more.
+Fresnel term can produce NaN
+Medium Severity
+The bounce Fresnel uses pow(1.0 - max(dot(direction, halfDirection), 0.0), 5.0) without clamping the argument into [0, 1]. Direct lighting already clamps this. If the half-vector dot slightly exceeds 1, pow of a negative base is undefined in WGSL and can write NaN into the pixel. Progressive history and temporal reprojection then keep that NaN until a reset.
+Reviewed by Cursor Bugbot for commit 73c7a90. Configure here.
+ibgreen
+commented
+Nov 6, 2026
+Copy link
+Copy Markdown
+Collaborator
+Author
+Closing as superseded by the diffuse transport and emissive-lighting implementation already merged in #3427. This PR was based on an older checkout and should not replace the newer ANARI renderer.
+The review findings about progressive-history clamping, fog/ambient accumulation, and the unclamped Fresnel power are valid concerns in this abandoned implementation. They are not being merged. Remaining material transport and example work is being continued from current master on codex/anari-material-completion, with those concerns included in validation.
+ibgreen
+closed this
+Nov 6, 2026
+Sign up for free
+to join this conversation on GitHub.
+Already have an account?
+Sign in to comment
+Uh oh!
+There was an error while loading. Please reload this page.
+Labels
+None yet
+1 participant
+Add this suggestion to a batch that can be applied as a single commit.This suggestion is invalid because no changes were made to the code.Suggestions cannot be applied while the pull request is closed.Suggestions cannot be applied while viewing a subset of changes.Only one suggestion per line can be applied in a batch.Add this suggestion to a batch that can be applied as a single commit.Applying suggestions on deleted lines is not supported.You must change the existing code in this line in order to create a valid suggestion.Outdated suggestions cannot be applied.This suggestion has been applied or marked resolved.Suggestions cannot be applied from pending reviews.Suggestions cannot be applied on multi-line comments.Suggestions cannot be applied while the pull request is queued to merge.Suggestion cannot be applied right now. Please check back later.
+You can’t perform that action at this time.

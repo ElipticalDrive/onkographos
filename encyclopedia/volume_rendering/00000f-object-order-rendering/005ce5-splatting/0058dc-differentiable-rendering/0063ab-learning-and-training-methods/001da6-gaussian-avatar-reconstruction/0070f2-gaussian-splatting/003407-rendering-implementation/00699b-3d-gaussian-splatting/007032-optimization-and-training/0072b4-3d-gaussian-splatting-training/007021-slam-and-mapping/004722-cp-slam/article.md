@@ -1,0 +1,81 @@
+# CP-SLAM
+
+Also called: Cooperative Point SLAM, Neural Point-based Hybrid Neural Field SLAM
+
+## Overview
+CP-SLAM is a neural point-based hybrid neural field SLAM system designed for multi-agent cooperative localization and mapping with loop closure [S1]. It distinguishes itself by introducing a keyframe-associated neural point representation inspired by PointNeRF, where each point maintains a learnable neural feature for scene encoding [S2]. This approach allows per-point features to be adjusted during pose graph optimization, integrating odometry, loop detection, sub-map fusion, and global refinement into a unified framework [S1].
+
+## How it works
+**Inputs and Outputs:**
+*   **Inputs:** Multi-agent RGB-D image streams, initial pose estimates (odometry), and loop closure detections.
+*   **Outputs:** A globally consistent 3D map represented as a set of neural points with associated features, and refined camera poses for all agents.
+
+**Data Structures:**
+*   **Neural Point:** A 3D point $P_i$ associated with a specific keyframe $K_j$. It stores:
+    *   Position $\mathbf{x}_i \in \mathbb{R}^3$.
+    *   Learnable neural feature vector $\mathbf{f}_i$ used for scene encoding [S2].
+    *   Keyframe ID $k_i$ linking the point to its source frame [S1].
+*   **Pose Graph:** Nodes represent agent poses; edges represent constraints from odometry and loop closures.
+
+**Method Steps:**
+1.  **Keyframe-Associated Neural Point Representation:**
+    *   Initialize the map with points derived from keyframes. Each point $P_i$ is assigned a learnable feature $\mathbf{f}_i$ [S2].
+    *   The scene is encoded by querying these features via a neural decoder (e.g., MLP) conditioned on the point's position and viewing direction [S1, S2].
+
+2.  **Distributed-to-Centralized Training Scheme:**
+    *   **Stage 1 (Distributed):** Each agent independently trains its local neural point decoder using its own keyframes and odometry data [S1].
+    *   **Stage 2 (Centralized):** When sub-maps are fused or loop closures are detected, the local decoders are fused. The system is then fine-tuned jointly across all agents to ensure cross-agent consistency [S1].
+
+3.  **Global Optimization (Pose Graph Optimization):**
+    *   Update the global optimization framework, analogous to traditional bundle adjustment [S2].
+    *   Adjust both camera poses and per-point neural features $\mathbf{f}_i$ during optimization to minimize reprojection errors and ensure geometric consistency [S1, S2].
+    *   This joint optimization improves localization accuracy and reconstruction quality [S2].
+
+4.  **Loop Closure and Sub-map Fusion:**
+    *   Detect loop closures between agents or within an agent's trajectory.
+    *   Fuse sub-maps by aligning neural point representations and refining the global pose graph [S1].
+
+**Parameters:**
+*   Not given in the sources.
+
+**Edge Cases and Pitfalls:**
+*   **Convergence in 3D Space:** While weighting poses near convergence is effective in 2D, achieving convergence in 3D space requires further investigation [S2].
+*   **Feature Consistency:** Ensuring that learnable features $\mathbf{f}_i$ remain consistent across different agents' views during fusion is critical for cross-agent consistency [S1].
+
+## Operating characteristics
+*   **Time and Memory Complexity:** Not given in the sources.
+*   **Measured Performance:** Not given in the sources.
+*   **Strengths:** Enables multi-agent cooperative mapping; supports loop closure; retains intuitive and easily scalable characteristics of point clouds while achieving NeRF rendering quality [S1, S2].
+*   **Limitations:** Convergence in 3D space for pose weighting is not fully established [S2].
+*   **When to use:** Multi-agent SLAM scenarios requiring high-fidelity neural rendering and global consistency.
+*   **When not to use:** Single-agent scenarios where simpler point-cloud-based SLAM suffices; real-time applications with strict latency constraints where neural decoding overhead is prohibitive.
+
+## Background
+CP-SLAM was introduced in November 2023 [S1]. It is inspired by PointNeRF and integrates concepts from traditional SLAM (bundle adjustment, pose graph optimization) with neural radiance fields [S1, S2]. The method addresses the need for cooperative localization and mapping in multi-agent systems by combining the scalability of point clouds with the representational power of neural fields [S2].
+
+## Subtopics
+
+### CG-SLAM
+A concurrent graph-based SLAM method. Choose when computational efficiency is prioritized over neural rendering quality. [CG-SLAM](9196-cg-slam.md)
+
+### Combined ORB-SLAM + 3DGS
+Combines traditional feature-based SLAM with 3D Gaussian Splatting. Choose when robust feature tracking is needed alongside fast Gaussian rendering. [Combined ORB-SLAM + 3DGS](10096-combined-orb-slam-3dgs.md)
+
+### iMAP
+An incremental mapping approach. Choose for online mapping with incremental updates. [iMAP](11979-imap.md)
+
+### Semantic-aware mapping
+Incorporates semantic information into the map. Choose when semantic understanding is required for navigation or interaction. [Semantic-aware mapping](12053-semantic-aware-mapping.md)
+
+### RNR-Map Construction
+Uses Ray Neural Rendering for map construction. Choose when ray-based rendering accuracy is critical. [RNR-Map Construction](16526-rnr-map-construction.md)
+
+### Hierarchical Submap Alignment
+Aligns submaps hierarchically. Choose for large-scale mapping with hierarchical structure management. [Hierarchical Submap Alignment](21123-hierarchical-submap-alignment.md)
+
+### Neural Implicit Representation
+Uses continuous implicit functions. Choose when smooth, high-resolution scene representation is needed without explicit points. [Neural Implicit Representation](22462-neural-implicit-representation.md)
+
+## Sources
+[S1] Neural Radiance Fields in 3D Vision: A Comprehensive Review, https://doi.org/10.26599/cvm.2026.9450535, fetched 2026-10-28
+[S2] Advancement in Neural Radiance Fields Propulsion for SLAM: A Novel Upgrade, https://www.atlantis-press.com/proceedings/icaic-24/126003439, fetched 2026-10-28

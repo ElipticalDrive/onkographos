@@ -1,0 +1,491 @@
+--- v001.md
++++ v002.md
+@@ -8,66 +8,86 @@
+ ## How it works
+ **Inputs and Outputs:**
+-- **Input:** A chunk of voxel data ($32 \times 32 \times 32$ blocks), neighbor chunk references for all 6 directions, and visibility flags for each block face.
+-- **Output:** A vertex buffer containing packed vertex data for all visible faces, optimized into quads via run-length expansion.
++- **Input:** A chunk of voxel data ($32 \times 32 \times 32$ blocks), neighbor chunk references for all 6 directions, and visibility flags for each block face [S1, unofficial].
++- **Output:** A vertex buffer containing packed vertex data for all visible faces, optimized into quads via run-length expansion [S1, unofficial].
+ 
+ **Data Structures:**
+-1.  **Block Vertex Data:** Packed into a single 32-bit integer (`uint`).
+-    -   Bits 0–5 (6 bits): X position (0–31).
+-    -   Bits 6–11 (6 bits): Y position (0–31).
+-    -   Bits 12–17 (6 bits): Z position (0–31).
+-    -   Bits 18–22 (5 bits): Texture ID (0–31).
+-    -   Bits 23–26 (4 bits): Brightness/Health (0–15).
+-    -   Bits 27–29 (3 bits): Normal (0–7).
+-    -   Bits 30–31: Unused [S1, unofficial].
+-2.  **ChunkHelper:** Contains 6 boolean arrays of size $32^3 = 32,768$ (`visitXN`, `visitXP`, `visitZN`, `visitZP`, `visitYN`, `visitYP`). These track visited blocks for each face direction to avoid duplicate face generation [S1, unofficial].
+-3.  **BlockVertexBuffer:** Stores vertex data in an `int[]` array. Uses OpenGL VAO/VBO. Vertex attribute 0 is a single integer (`uint`) with stride equal to `sizeof(uint)` [S1, unofficial].
+-4.  **Height Maps:** `MinY` and `MaxY` arrays of size $32 \times 32 = 1,024$ bytes, storing the minimum and maximum occupied Y indices for each $(X, Z)$ column to skip empty space [S1, unofficial].
++1. **Block Vertex Data:** Packed into a single 32-bit integer (`uint`) [S1, unofficial].
++   - Bits 0–5 (6 bits): X position (0–31) [S1, unofficial].
++   - Bits 6–11 (6 bits): Y position (0–31) [S1, unofficial].
++   - Bits 12–17 (6 bits): Z position (0–31) [S1, unofficial].
++   - Bits 18–22 (5 bits): Texture ID (0–31) [S1, unofficial].
++   - Bits 23–26 (4 bits): Brightness/Health (0–15) [S1, unofficial].
++   - Bits 27–29 (3 bits): Normal (0–7) [S1, unofficial].
++2. **ChunkHelper:** Contains 6 boolean arrays of size $32^3 = 32,768$ (`visitXN`, `visitXP`, `visitZN`, `visitZP`, `visitYN`, `visitYP`) to track visited blocks for each face direction and avoid duplicate face generation [S1, unofficial].
++3. **BlockVertexBuffer:** Stores vertex data in an `int[]` array. Uses OpenGL VAO/VBO. Vertex attribute 0 is a single integer (`uint`) with stride equal to `sizeof(uint)` [S1, unofficial].
++4. **Height Maps:** `MinY` and `MaxY` arrays of size $32 \times 32 = 1,024$ bytes, storing the minimum and maximum occupied Y indices for each $(X, Z)$ column to skip empty space [S1, unofficial].
+ 
+ **Parameters:**
+--   Chunk Size: $32 \times 32 \times 32$ blocks [S1, unofficial].
+--   Constants: `CHUNK_SIZE` = 32, `CHUNK_SIZE_SQUARED` = 1024, `CHUNK_SIZE_CUBED` = 32768, `CHUNK_SIZE_SHIFTED` = $32 \ll 6$ [S1, unofficial].
++- Chunk Size: $32 \times 32 \times 32$ blocks [S1, unofficial].
++- Constants: `CHUNK_SIZE` = 32, `CHUNK_SIZE_SQUARED` = 1024, `CHUNK_SIZE_CUBED` = 32768, `CHUNK_SIZE_SHIFTED` = $32 \ll 6$ [S1, unofficial].
+ 
+ **Pseudocode:**
+-
+ ```python
+-def generate_chunk_mesh(chunk, neighbor_chunks):
+-    """
+-    Generates a mesh for a single 32x32x32 chunk.
+-    chunk: Object containing data[32768], MinY[1024], MaxY[1024]
+-    neighbor_chunks: Dict or array with keys 'XN', 'XP', 'YN', 'YP', 'ZN', 'ZP'
+-    """
+-    CHUNK_SIZE = 32
+-    CHUNK_SIZE_SQUARED = 1024
+-    CHUNK_SIZE_CUBED = 32768
+-    CHUNK_SIZE_SHIFTED = 32 << 6  # 2048
+-    
+-    # Initialize vertex buffer
+-    # [G] Standard initialization: allocate initial capacity (e.g., 4096 ints)
++# Constants and lookup tables from source
++CHUNK_SIZE = 32
++CHUNK_SIZE_SQUARED = 1024
++CHUNK_SIZE_CUBED = 32768
++CHUNK_SIZE_SHIFTED = 32 << 6  # 2048
++EMPTY = 0
++indexToTextureShifted = [0] * 256  # Placeholder for block-index-to-texture lookup table
++
++class VertexBuffer:
++    def __init__(self, capacity=4096):
++        self.data = [0] * capacity
++        self.used = 0
++    def extend(self, amount):
++        self.data += [0] * amount
++    def append_quad_x(self, x, yL, yR, kL, kR, normal, textureHealth):
++        shared = x | textureHealth | normal
++        self.data[self.used]     = yR | (kL << 6) | shared
++        self.data[self.used + 1] = self.data[self.used + 4] = yL | (kL << 6) | shared
++        self.data[self.used + 2] = self.data[self.used + 3] = yR | (kR << 6) | shared
++        self.data[self.used + 5] = yL | (kR << 6) | shared
++        self.used += 6
++    def append_quad_z(self, xL, xR, yL, yR, z, normal, textureHealth):
++        shared = z | textureHealth | normal
++        self.data[self.used]     = xR | (yR << 6) | shared
++        self.data[self.used + 1] = self.data[self.used + 4] = xR | (yL << 6) | shared
++        self.data[self.used + 2] = self.data[self.used + 3] = xL | (yR << 6) | shared
++        self.data[self.used + 5] = xL | (yL << 6) | shared
++        self.used += 6
++
++def draw_face_xn(j, access, minX, k, neighbors):
++    if minX:
++        return neighbors.get('XN') is None or neighbors['XN'].data[k * CHUNK_SIZE_SQUARED + 31 * CHUNK_SIZE + j].kind == EMPTY
++    return chunk.data[access - 1].kind == EMPTY
++
++def draw_face_xp(j, access, maxX, k, neighbors):
++    if maxX:
++        return neighbors.get('XP') is None or neighbors['XP'].data[k * CHUNK_SIZE_SQUARED + 0 * CHUNK_SIZE + j].kind == EMPTY
++    return chunk.data[access + 1].kind == EMPTY
++
++def draw_face_zn(j, access, minZ, i, neighbors):
++    if minZ:
++        return neighbors.get('ZN') is None or neighbors['ZN'].data[i * CHUNK_SIZE_SQUARED + 31 * CHUNK_SIZE + j].kind == EMPTY
++    return chunk.data[access - CHUNK_SIZE_SQUARED].kind == EMPTY
++
++def draw_face_zp(j, access, maxZ, i, neighbors):
++    if maxZ:
++        return neighbors.get('ZP') is None or neighbors['ZP'].data[i * CHUNK_SIZE_SQUARED + 0 * CHUNK_SIZE + j].kind == EMPTY
++    return chunk.data[access + CHUNK_SIZE_SQUARED].kind == EMPTY
++
++def different_block(access, current_block):
++    return chunk.data[access].kind != current_block.kind
++
++def generate_chunk_mesh(chunk, neighbors):
+     vertex_buffer = VertexBuffer(capacity=4096)
+-    
+-    # Initialize visit arrays
+     visitXN = [False] * CHUNK_SIZE_CUBED
+     visitXP = [False] * CHUNK_SIZE_CUBED
+     visitZN = [False] * CHUNK_SIZE_CUBED
+     visitZP = [False] * CHUNK_SIZE_CUBED
+-    # Note: Source mentions visitYN/YP but algorithm description focuses on X/Z runs.
+-    # Assuming Y faces are handled similarly or not merged in this specific run-based variant.
+-    # Based on "runs along X and Y axis" in overview, but code loops X and Z, runs in Y?
+-    # Correction: Source code loops k (Z), i (X), j (Y). Runs are extended in Y direction?
+-    # Re-reading source: "Faces are generated by combining faces in runs along the X and Y axis."
+-    # However, the loop structure iterates Z, then X, then Y.
+-    # The CreateRun function checks XN, XP, ZN, ZP. It does NOT check YN/YP in the provided snippet.
+-    # It seems the "runs" are along the Y axis (vertical) for X and Z faces.
+-    # Let's stick to the explicit loop and CreateRun logic provided.
+     
+-    # Load neighbor references
+-    neighbors = {
+-        'XN': neighbor_chunks.get('XN'),
+-        'XP': neighbor_chunks.get('XP'),
+-        'ZN': neighbor_chunks.get('ZN'),
+-        'ZP': neighbor_chunks.get('ZP')
+-    }
++    chunkY = chunk.chunkPosY * CHUNK_SIZE
+     
+-    # Iterate Z (k)
+     for k in range(CHUNK_SIZE):
+         kCS2 = k * CHUNK_SIZE_SQUARED
+@@ -75,10 +95,8 @@
+         maxZEdge = (k == CHUNK_SIZE - 1)
+         
+-        # Iterate X (i)
+         for i in range(CHUNK_SIZE):
+             heightMapAccess = k * CHUNK_SIZE + i
+             j = chunk.MinY[heightMapAccess]
+             topJ = chunk.MaxY[heightMapAccess]
+-            
+             minXEdge = (i == 0)
+             maxXEdge = (i == CHUNK_SIZE - 1)
+@@ -87,49 +105,15 @@
+             access = kCS2 + iCS + j
+             
+-            # Iterate Y (j) from MinY to MaxY
+             for j in range(j, topJ):
+                 b = chunk.data[access]
+-                
+                 if b.kind != EMPTY:
+-                    # Create run for visible faces
+-                    create_run(
+-                        block=b, 
+-                        i=i, 
+-                        j=j, 
+-                        k=k, 
+-                        access=access, 
+-                        minX=minXEdge, 
+-                        maxX=maxXEdge,
+-                        minZ=minZEdge, 
+-                        maxZ=maxZEdge,
+-                        neighbors=neighbors,
+-                        visitXN=visitXN,
+-                        visitXP=visitXP,
+-                        visitZN=visitZN,
+-                        visitZP=visitZP,
+-                        vertex_buffer=vertex_buffer,
+-                        chunkY=chunk.chunkPosY * CHUNK_SIZE
+-                    )
+-                
++                    create_run(b, i, j, k, access, minXEdge, maxXEdge, minZEdge, maxZEdge, neighbors, visitXN, visitXP, visitZN, visitZP, vertex_buffer, chunkY)
+                 access += 1
+                 
+-                # Extend buffer if nearly full
+                 if vertex_buffer.used > len(vertex_buffer.data) - 2048:
+                     vertex_buffer.extend(2048)
+ 
+-def create_run(block, i, j, k, access, minX, maxX, minZ, maxZ, neighbors, visitXN, visitXP, visitZN, visitZP, vertex_buffer, chunkY):
+-    """
+-    Generates runs for X- (XN), X+ (XP), Z- (ZN), Z+ (ZP) faces.
+-    """
+-    # Pack block data
+-    # [G] indexToTextureShifted is a lookup table mapping block index to shifted texture ID
+-    texture_id_shifted = indexToTextureShifted[block.index]
+-    health_shifted = (block.health // 16) << 23
+-    texture_health = texture_id_shifted | health_shifted
+-    
+-    # Normal is derived from face direction, packed later.
+-    # For now, we determine visibility and extent.
+-    
+-    jS = j << 6
++def create_run(b, i, j, k, access, minX, maxX, minZ, maxZ, neighbors, visitXN, visitXP, visitZN, visitZP, vertex_buffer, chunkY):
++    textureHealth16 = indexToTextureShifted[b.index] | ((b.health // 16) << 23)
+     jS1 = (j + 1) << 6
+     
+@@ -137,222 +121,92 @@
+     if not visitXN[access] and draw_face_xn(j, access, minX, k, neighbors):
+         visitXN[access] = True
+-        chunk_access = access + 1
+-        length = jS1
+-        while length < CHUNK_SIZE_SHIFTED:
+-            if different_block(chunk_access, block):
+-                break
+-            visitXN[chunk_access] = True
+-            chunk_access += 1
+-            length += (1 << 6)
+-        
+-        # Append Quad X-
+-        # [G] AppendQuadX takes buffer, x, yL, yR, kL, kR, normal, textureHealth
+-        # For X- face, x is constant (i). y ranges from j to end of run. z ranges from k to end of run?
+-        # Source code for AppendQuadX:
+-        # buffer.data[used] = yR | kL | shared
+-        # buffer.data[used+1] = buffer.data[used+4] = yL | kL | shared
+-        # ...
+-        # shared = x | textureHealth | normal
+-        # Here x = i. yL = j, yR = end_j. kL = k, kR = end_k.
+-        # Normal for X- is 2 (from enum: xp=2, xn=3? Wait. enum: yp=0, yn=1, xp=2, xn=3, zp=4, zn=5).
+-        # So X- normal is 3.
+-        
+-        end_j = length >> 6 # length was in shifted coords
+-        end_k = k # Run is only in Y? No, source says "runs along X and Y".
+-        # But the loop only increments in Y (j). The X and Z dimensions are single blocks?
+-        # Re-reading: "combines adjacent faces into runs along the X and Y axes".
+-        # The code loops Z, then X, then Y.
+-        # Inside CreateRun, it loops Y to find run length.
+-        # It does NOT loop X or Z to find run length.
+-        # This implies the "run" is only in the Y direction for X and Z faces.
+-        # What about Y faces? The source mentions visitYN/YP but no code for them.
+-        # We will implement only what is in the code: Runs in Y for X/Z faces.
+-        
+-        # Determine run length in Y
+-        run_len_y = end_j - j
+-        
+-        # For X- face:
+-        # x = i
+-        # y range: j to end_j
+-        # z range: k to k (single block depth in Z for this specific run logic?)
+-        # Wait, if it's a run along Y, the quad is in the X-Z plane? No, X- face is in Y-Z plane.
+-        # Vertices for X- face:
+-        # (i, y, z) for y in [j, end_j], z in [k, k+1]?
+-        # The source code `AppendQuadX` suggests a quad.
+-        # Let's look at `AppendQuadX` args: `x, yL, yR, kL, kR, normal, textureHealth`
+-        # It creates 6 vertices (2 triangles).
+-        # If kL == kR, it's a flat quad in Y.
+-        
+-        normal_xn = 3 # From enum: xn = 3 << 27
+-        shared_xn = (i << 0) | texture_health | normal_xn # x is bits 0-5
+-        
+-        # Vertices for X- face (Left)
+-        # The source code constructs specific vertex indices.
+-        # We will call AppendQuadX with the calculated bounds.
+-        # Note: The source code loops `length` in `jS1` steps. This implies the run is vertical.
+-        # Does it extend in Z? The loop `chunk_access` increments by 1 (linear index).
+-        # Linear index = k*CS2 + i*CS + j.
+-        # Incrementing access by 1 moves to j+1.
+-        # So the run is strictly in the Y direction.
+-        
+-        vertex_buffer.append_quad_x(
+-            x=i, 
+-            yL=j, 
+-            yR=end_j, 
+-            kL=k, 
+-            kR=k, 
+-            normal=normal_xn, 
+-            texture_health=texture_health
+-        )
++        chunkAccess = access + 1
++        length = jS1
++        while length < CHUNK_SIZE_SHIFTED:
++            if different_block(chunkAccess, b):
++                break
++            visitXN[chunkAccess] = True
++            chunkAccess += 1
++            length += (1 << 6)
++        vertex_buffer.append_quad_x(i, j, length >> 6, k, k, 3, textureHealth16)
+ 
+     # X+ Face (Right)
+     if not visitXP[access] and draw_face_xp(j, access, maxX, k, neighbors):
+         visitXP[access] = True
+-        chunk_access = access + 1
+-        length = jS1
+-        while length < CHUNK_SIZE_SHIFTED:
+-            if different_block(chunk_access, block):
+-                break
+-            visitXP[chunk_access] = True
+-            chunk_access += 1
+-            length += (1 << 6)
+-            
+-        end_j = length >> 6
+-        normal_xp = 2 # From enum: xp = 2 << 27
+-        shared_xp = (i << 0) | texture_health | normal_xp
+-        
+-        vertex_buffer.append_quad_x(
+-            x=i, 
+-            yL=j, 
+-            yR=end_j, 
+-            kL=k, 
+-            kR=k, 
+-            normal=normal_xp, 
+-            texture_health=texture_health
+-        )
++        chunkAccess = access + 1
++        length = jS1
++        while length < CHUNK_SIZE_SHIFTED:
++            if different_block(chunkAccess, b):
++                break
++            visitXP[chunkAccess] = True
++            chunkAccess += 1
++            length += (1 << 6)
++        vertex_buffer.append_quad_x(i, j, length >> 6, k, k, 2, textureHealth16)
+ 
+     # Z- Face (Back)
+     if not visitZN[access] and draw_face_zn(j, access, minZ, i, neighbors):
+         visitZN[access] = True
+-        chunk_access = access + 1
+-        length = jS1
+-        while length < CHUNK_SIZE_SHIFTED:
+-            if different_block(chunk_access, block):
+-                break
+-            visitZN[chunk_access] = True
+-            chunk_access += 1
+-            length += (1 << 6)
+-            
+-        end_j = length >> 6
+-        normal_zn = 5 # From enum: zn = 5 << 27
+-        # For Z face, shared part includes Z coordinate
+-        # AppendQuadZ args: xL, xR, yL, yR, z, normal, textureHealth
+-        # z is constant k. x range i to i. y range j to end_j.
+-        
+-        vertex_buffer.append_quad_z(
+-            xL=i, 
+-            xR=i, 
+-            yL=j, 
+-            yR=end_j, 
+-            z=k, 
+-            normal=normal_zn, 
+-            texture_health=texture_health
+-        )
++        chunkAccess = access + 1
++        length = jS1
++        while length < CHUNK_SIZE_SHIFTED:
++            if different_block(chunkAccess, b):
++                break
++            visitZN[chunkAccess] = True
++            chunkAccess += 1
++            length += (1 << 6)
++        vertex_buffer.append_quad_z(i, i, j, length >> 6, k, 5, textureHealth16)
+ 
+     # Z+ Face (Front)
+     if not visitZP[access] and draw_face_zp(j, access, maxZ, i, neighbors):
+         visitZP[access] = True
+-        chunk_access = access + 1
+-        length = jS1
+-        while length < CHUNK_SIZE_SHIFTED:
+-            if different_block(chunk_access, block):
+-                break
+-            visitZP[chunk_access] = True
+-            chunk_access += 1
+-            length += (1 << 6)
+-            
+-        end_j = length >> 6
+-        normal_zp = 4 # From enum: zp = 4 << 27
+-        
+-        vertex_buffer.append_quad_z(
+-            xL=i, 
+-            xR=i, 
+-            yL=j, 
+-            yR=end_j, 
+-            z=k, 
+-            normal=normal_zp, 
+-            texture_health=texture_health
+-        )
+-
+-def draw_face_xn(j, access, minX, k, neighbors):
+-    """Check if X- face is visible."""
+-    # [G] Standard face culling: visible if neighbor is empty or different block type
+-    if minX:
+-        neighbor_chunk = neighbors['XN']
+-        if neighbor_chunk is None:
+-            return True
+-        # Check neighbor block at same Y, Z
+-        # Neighbor's X+ face corresponds to this chunk's X- face
+-        # Access in neighbor chunk: (k * CS2 + j * CS + (CS-1))? 
+-        # No, neighbor is at X-1. Its local X is 31.
+-        # Linear index in neighbor: k*CS2 + 31*CS + j
+-        neighbor_access = k * CHUNK_SIZE_SQUARED + 31 * CHUNK_SIZE + j
+-        neighbor_block = neighbor_chunk.data[neighbor_access]
+-        if neighbor_block.kind == EMPTY:
+-            return True
+-        return False
+-    else:
+-        # Internal face: visible if neighbor block is different
+-        neighbor_access = access - 1 # X-1 is index -1 in linear array for same k,j
+-        neighbor_block = chunk.data[neighbor_access] # Assuming chunk is available in scope
+-        if neighbor_block.kind == EMPTY:
+-            return True
+-        return False
+-
+-def different_block(access, current_block):
+-    """Check if block at access is different from current_block."""
+-    # [G] Assuming chunk data is accessible
+-    neighbor_block = chunk.data[access]
+-    return neighbor_block.kind != current_block.kind
++        chunkAccess = access + 1
++        length = jS1
++        while length < CHUNK_SIZE_SHIFTED:
++            if different_block(chunkAccess, b):
++                break
++            visitZP[chunkAccess] = True
++            chunkAccess += 1
++            length += (1 << 6)
++        vertex_buffer.append_quad_z(i, i, j, length >> 6, k, 4, textureHealth16)
+ ```
+ 
+ **Formulas:**
+--   **Vertex Position Extraction:**
+-    -   $x = \text{aData} \ \& \ 63$
+-    -   $y = (\text{aData} \gg 6) \ \& \ 63$
+-    -   $z = (\text{aData} \gg 12) \ \& \ 63$
+-    -   $\text{texID} = (\text{aData} \gg 18) \ \& \ 31$
+-    -   $\text{brightness} = ((\text{aData} \gg 23) \ \& \ 15 + 2) / 8.0$
+-    -   $\text{normal} = (\text{aData} \gg 27) \ \& \ 7$ [S1, unofficial]
+--   **Brightness Modulation:**
+-    -   If $\text{normal} == 0$ (Y-), $\text{brightness} \times 1.3$
+-    -   If $\text{normal} == 1$ (Y+), $\text{brightness} \times 0.85$
+-    -   If $\text{normal} < 4$ (X- or X+), $\text{brightness} \times 1.15$ [S1, unofficial]
++- **Vertex Position Extraction:**
++  - $x = \text{aData} \ \& \ 63$
++  - $y = (\text{aData} \gg 6) \ \& \ 63$
++  - $z = (\text{aData} \gg 12) \ \& \ 63$
++  - $\text{texID} = (\text{aData} \gg 18) \ \& \ 31$
++  - $\text{brightness} = ((\text{aData} \gg 23) \ \& \ 15 + 2) / 8.0$
++  - $\text{normal} = (\text{aData} \gg 27) \ \& \ 7$ [S1, unofficial]
++- **Brightness Modulation:**
++  - If $\text{normal} == 0$ (Y-), $\text{brightness} \times 1.3$
++  - If $\text{normal} == 1$ (Y+), $\text{brightness} \times 0.85$
++  - If $\text{normal} < 4$ (X- or X+), $\text{brightness} \times 1.15$ [S1, unofficial]
+ 
+ **Edge Cases and Pitfalls:**
+--   **Buffer Overflow:** The vertex buffer must be checked for capacity during generation. If `used > data.Length - 2048`, extend by 2048 integers [S1, unofficial].
+--   **Boundary Conditions:** Neighbor chunks may be `null` if the current chunk is at the map edge. These must be handled as empty space (visible face) [S1, unofficial].
+--   **Precision:** All coordinates are integers. No floating-point errors during mesh generation.
++- **Buffer Overflow:** The vertex buffer must be checked for capacity during generation. If `used > data.Length - 2048`, extend by 2048 integers [S1, unofficial].
++- **Boundary Conditions:** Neighbor chunks may be `null` if the current chunk is at the map edge. These must be handled as empty space (visible face) [S1, unofficial].
++- **Precision:** All coordinates are integers. No floating-point errors during mesh generation.
+ 
+ ## Operating characteristics
+--   **Time Complexity:** $O(N)$ where $N$ is the number of blocks in the chunk ($32^3$). The algorithm iterates each block once and performs constant-time checks for run extension.
+--   **Memory Complexity:** $O(N)$ for the chunk data, height maps, and visit arrays. The vertex buffer size depends on the number of visible faces, typically $O(N)$ in the worst case (all faces visible) but significantly less on average.
+--   **Measured Performance:**
+-    -   Hardware: Ryzen 5 1600 CPU [S1, unofficial].
+-    -   Crashed Freighter map (799 chunks): Average Chunk Mesh Generation Time (CMGT) of 0.527ms single-threaded [S1, unofficial].
+-    -   Soltrium Temple map (648 chunks): Average CMGT of 0.432ms [S1, unofficial].
+-    -   Aegis Desert map (441 chunks): Average CMGT of 0.456ms [S1, unofficial].
+-    -   Magma Chamber map (293 chunks): Average CMGT of 0.535ms [S1, unofficial].
+-    -   Arena map (108 chunks): Average CMGT of 0.278ms [S1, unofficial].
+--   **Scaling:** The algorithm is designed for multi-threading, with multiple chunks initialized on different threads [S1, unofficial].
+--   **Strengths:** Extremely fast generation speed (~390% faster than greedy meshing) [S1, unofficial]. Suitable for real-time applications with frequent updates.
+--   **Limitations:** Produces ~20% more triangles than greedy meshing [S1, unofficial]. Only merges faces in the Y direction for X and Z faces, leading to less optimal triangle counts than full greedy meshing.
+--   **When to use:** Real-time voxel games with many players and frequent chunk updates (e.g., Sector's Edge) [S1, unofficial].
+--   **When not to use:** Offline mesh generation where minimal triangle count is prioritized over generation speed.
++- **Time Complexity:** $O(N)$ where $N$ is the number of blocks in the chunk ($32^3$). The algorithm iterates each block once and performs constant-time checks for run extension [S1, unofficial].
++- **Memory Complexity:** $O(N)$ for the chunk data, height maps, and visit arrays. The vertex buffer size depends on the number of visible faces, typically $O(N)$ in the worst case (all faces visible) but significantly less on average.
++- **Measured Performance:**
++  - Hardware: Ryzen 5 1600 CPU [S1, unofficial].
++  - Crashed Freighter map (799 chunks): Average Chunk Mesh Generation Time (CMGT) of 0.527ms single-threaded [S1, unofficial].
++  - Soltrium Temple map (648 chunks): Average CMGT of 0.432ms [S1, unofficial].
++  - Aegis Desert map (441 chunks): Average CMGT of 0.456ms [S1, unofficial].
++  - Magma Chamber map (293 chunks): Average CMGT of 0.535ms [S1, unofficial].
++  - Arena map (108 chunks): Average CMGT of 0.278ms [S1, unofficial].
++- **Scaling:** The algorithm is designed for multi-threading, with multiple chunks initialized on different threads [S1, unofficial].
++- **Strengths:** Extremely fast generation speed (~390% faster than greedy meshing) [S1, unofficial]. Suitable for real-time applications with frequent updates.
++- **Limitations:** Produces ~20% more triangles than greedy meshing [S1, unofficial]. Only merges faces in the Y direction for X and Z faces, leading to less optimal triangle counts than full greedy meshing.
++- **When to use:** Real-time voxel games with many players and frequent chunk updates (e.g., Sector's Edge) [S1, unofficial].
++- **When not to use:** Offline mesh generation where minimal triangle count is prioritized over generation speed.
+ 
+ ## Background
+--   **Origin:** Developed for the game *Sector's Edge* by Vercidium [S1, unofficial].
+--   **History:** The algorithm was published in a blog post by Vercidium in January 2020 [S1, unofficial]. It was designed to handle the performance requirements of a multiplayer voxel game with 16 players, where multiple chunk meshes must be regenerated every frame on older hardware [S1, unofficial].
+--   **Usage:** Used in *Sector's Edge* [S1, unofficial].
++- **Origin:** Developed for the game *Sector's Edge* by Vercidium [S1, unofficial].
++- **History:** The algorithm was published in a blog post by Vercidium [S1, unofficial]. It was designed to handle the performance requirements of a multiplayer voxel game with 16 players, where multiple chunk meshes must be regenerated every frame on older hardware [S1, unofficial].
++- **Usage:** Used in *Sector's Edge* [S1, unofficial].
+ 
+ ## Sources

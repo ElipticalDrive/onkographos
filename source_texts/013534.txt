@@ -1,0 +1,784 @@
+A cross-platform 2D + 3D game engine built in modern C++ - Multi-volume micro voxel rendering with physics and local-space raymarching by painfulexistence · Pull Request #104 · painfulexistence/Atmospheric
+
+Multi-volume micro voxel rendering with physics and local-space raymarching by painfulexistence · Pull Request #104 · painfulexistence/Atmospheric · GitHub
+Skip to content
+You signed in with another tab or window. Reload to refresh your session.
+You signed out in another tab or window. Reload to refresh your session.
+You switched accounts on another tab or window. Reload to refresh your session.
+Dismiss alert
+Conversation
+painfulexistence
+commented
+Jul 26, 2026
+Copy link
+Copy Markdown
+Owner
+Summary
+This PR extends the micro voxel renderer from a single static terrain volume to support multiple independent volumes with full physics simulation and local-space raymarching. Volumes can now be small procedural objects (crates, boulders, crystal clusters) that rotate and collide with each other and the terrain, while the renderer correctly handles their transforms.
+Key Changes
+Rendering Architecture
+Local-space raymarching: The DDA now runs in each volume's local coordinate space using u_invObjModel to transform rays, allowing volumes to rotate freely while maintaining axis-aligned voxel traversal
+Per-volume bounding boxes: Each volume rasterizes its own tight bounding box (derived from solid occupancy bounds) with front-face culling, ensuring exactly one marched fragment per pixel
+Frustum culling: Added Gribb-Hartmann plane extraction and conservative OBB-vs-frustum tests to cull volumes outside the view
+Multi-volume GI: The GI pass now traces the nearest-K volumes (up to kMaxGiVolumes), allowing light to bleed between volumes while keeping the cost bounded
+Volume Generation
+Multiple volume kinds: Added VoxelVolumeKind enum supporting Terrain, Crate, Boulder, and CrystalCluster
+New generators: Implemented _generateCrate(), _generateBoulder(), and _generateCrystalCluster() for small self-contained props (16-48 voxels per edge)
+Water support: Added water voxels that fill valleys up to a configurable level, with transmission/refraction support in the shader
+Material palette expansion: Added MatWater and moved palette setup to _buildPalette() for reuse across all volume kinds
+Centroid calculation: Added GetSolidCentroidLocal() to compute the center of mass for physics bodies, accounting for sparse voxel grids
+Physics Integration
+New VoxelColliderComponent: Derives collision shapes from voxel volumes:
+Dynamic bodies: convex hull of solid voxels (supports rotation)
+Static bodies: triangle mesh of exposed voxel faces (terrain)
+Configurable mesh downsampling (1/2/4x) to reduce triangle count
+Proper inertia tensors: Fixed ComputeLocalInertia() to use shape-derived tensors instead of hardcoded values, preventing excessive spin
+Internal-edge correction: Added MvInternalEdgeContactCallback() to fix contact normals on triangle mesh edges, eliminating jitter and sinking
+Centre-of-mass offset: Bodies are built about their centroid and the offset is passed to the rigidbody, ensuring correct rotation dynamics
+Runtime Editing
+Partial uploads: Added MvUploadSubRegion3D() to upload only edited voxel sub-boxes using GL's unpack skip/stride parameters, avoiding full-grid re-uploads on carves
+Dirty region tracking: Volumes track dirtyMin/dirtyMax and fullDirty flags; partial edits preserve GI history while full regeneration resets it
+Occupancy updates: Carve operations recompute only affected occupancy bricks
+Shader Enhancements
+Glossy jitter: Added glossyDir() and interleaved gradient noise (ign()) for roughness-based reflection variation
+Transmission/refraction: Implemented transmitRadiance() for dielectric BTDF with Beer-Lambert absorption, supporting glass and water
+Material parameters: Extended palette to 256×2 RGBA8 (row 0: albedo+emission, row 1: reflectivity/roughness/transmission/IOR)
+Local-space normals: Face AO and shading now work correctly in local space
+Example Updates
+Multi-object scene: The demo now creates one large terrain volume plus ~20 small prop volumes (crates, boulders, crystals) with various rotations
+Physics bodies: Props drop in, bounce, and pile into each other; Bullet writes poses back to GameObjects and the
+https://claude.ai/code/session_012AubFEch7Zy2Y6E2nXgV92
+claude
+added 20 commits
+July 22, 2026 12:26
+MicroVoxel: dielectric transmission (BTDF) + glossy roughness jitter
+…
+d316719
+```
+Upstreamed from the project-vapor port, which crossed the BRDF -> BSDF line
+first: the voxel path stopped at the first solid voxel and specular was a
+perfect mirror (palette row 1's roughness byte was reserved but never read).
+
+- Palette row 1 gains its two free bytes: transmission.b (0..255) and ior.a
+  (actual IOR decodes as 1.0 + a/255). Row layout comment updated; the
+  crystal becomes the showcase — near-clear cyan glass (transmission 200,
+  IOR 1.55, roughness 20) with its emission dimmed now that light passes
+  through.
+- Transmissive hit: Fresnel (from the IOR) splits energy into a reflection
+  ray and a refraction ray. The refraction bends at entry, marches through
+  the medium voxel-by-voxel accumulating path length for Beer-Lambert
+  absorption (tinted by the medium albedo), bends out at the glass->air
+  face (TIR continues straight - the one-bounce approximation), then
+  gathers the scene behind with the normal DDA. Opaque voxels inside the
+  medium terminate the march and shade directly.
+- Glossy: reflection AND refraction directions jitter inside a roughness^2
+  cone using interleaved gradient noise (stable per-pixel pattern - no
+  temporal accumulation on this pass). Snow/ore's existing roughness bytes
+  now do something.
+- Emission moves after the secondary mix so emissive glass keeps its glow.
+- GL (microvoxel.frag) and WebGPU (micro_voxel_pass_wgsl.hpp) twins updated
+  with parity; the GI pass still reads only palette row 0, unchanged.
+
+Known approximations (documented in-shader, matching the vapor port): one
+secondary bounce, TIR passes straight through, sun shadow rays still treat
+glass as opaque, and GI bounces treat glass as an opaque albedo surface.
+
+Verified: microvoxel.frag passes glslangValidator; the WGSL twin is a
+line-by-line mirror using the file's existing idioms (no WGSL validator in
+this sandbox).
+
+Co-Authored-By: Claude Fable 5 <noreply@anthropic.com>
+Claude-Session: https://claude.ai/code/session_01Cy8dWZ5jA18Y7rfB7AhVL7
+```
+MicroVoxel: crystals keep their original mirror look; water is the BT…
+…
+75fb7bb
+```
+…DF showcase
+
+Same feedback-driven change as the vapor port: the floating crystals read
+better as the original near-mirror emissive cyan, so their palette entry
+reverts (reflectivity 210 / roughness 20 / emission 160, no transmission).
+The transmission showcase moves to a new MatWater (palette index 9; the
+default-gray fill now starts at 10): deep blue, transmission 215, IOR 1.33
+(byte 84), roughness 25 for a lightly rippled refraction via the glossy
+jitter.
+
+The generator fills valleys with water columns up to a water level just
+under the sand line (baseH + 0.08 * varH), so beaches ring every pool.
+Water voxels are ordinary solids to the DDA (counted in solidCount and the
+brick occupancy); the shaders' glass path refracts through them,
+Beer-tinting the bed below. GL and WGSL need no changes — the BTDF is
+palette-driven.
+
+Known limit shared with the rest of the BTDF: sun shadow rays treat water
+as opaque, so pool beds are lit by ambient/GI only.
+
+Co-Authored-By: Claude Fable 5 <noreply@anthropic.com>
+Claude-Session: https://claude.ai/code/session_01Cy8dWZ5jA18Y7rfB7AhVL7
+```
+perf: MicroVoxel M1 — partial uploads, tight bounds, OBB volumes, nea…
+…
+be8aa6c
+```
+…rest-K GI, overdraw cuts
+
+Scaling + performance groundwork for physics-driven micro voxel objects
+(M1 of the physics/fracture roadmap):
+
+- Partial uploads: carves record a dirty voxel sub-box and the pass uploads
+  only that region via glTexSubImage3D with UNPACK_SKIP/ROW_LENGTH/
+  IMAGE_HEIGHT (WebGPU path: writeTexture with a dst origin). A dig went
+  from re-uploading the full 16.8 MB grid per edit frame to ~KBs, and GI
+  history is now kept across edits (full reset only on regeneration) — the
+  GI pass's per-pixel distance validation drops stale samples.
+
+- Tight solid bounds: Generate/CarveSphere maintain brick-granular
+  solidMin/solidMax from the occupancy grid; the pass rasterizes and
+  slab-tests the shrunk box instead of the full grid, so empty margins cost
+  nothing. Fully-carved volumes stop rendering.
+
+- OBB support: volumes follow their GameObject's full rigid transform.
+  Rays are transformed into each volume's local space for the DDA (t stays
+  a world distance), normals come back through the model matrix, and the
+  CPU raycast/carve do the same, so physics-driven rotation works
+  everywhere. GI rejects history for volumes whose transform changed that
+  frame (per-volume moved flags).
+
+- Right-sized per-object volumes: VoxelVolumeComponent gains object kinds
+  (Crate / Boulder / CrystalCluster) with per-instance grid sizes; the demo
+  is now one 256^3 terrain plus 20 small (16^3-48^3) objects, several
+  rotated. All kinds share one palette so the GI trace stays single-palette.
+
+- GI nearest-K selection: the GI pass traces the K=4 volumes nearest the
+  camera (by surface distance, primary terrain included) instead of the
+  first 4 registered; the composite falls back to flat ambient wherever the
+  GI sample is invalid, so out-of-set volumes degrade gracefully.
+
+- Overdraw cuts: per-volume frustum culling, near-to-far draw order, and a
+  dedicated consistently-wound cube drawn with front-face culling — one
+  marched fragment per covered pixel instead of two (the shared skybox cube
+  is mixed-winding and previously drew both faces with culling disabled).
+
+Verified: glslang validates all touched shaders as GLSL 410 core and as the
+GLES 300 translation the web path generates; component logic (generation
+kinds, occupancy/bounds consistency, dirty-region accumulation, rotated
+raycast/carve round-trip) passes a standalone functional test harness; the
+pass and headers compile against the real declarations. Full engine build
+was not runnable in this environment (dependency downloads blocked).
+
+Co-Authored-By: Claude Fable 5 <noreply@anthropic.com>
+Claude-Session: https://claude.ai/code/session_012AubFEch7Zy2Y6E2nXgV92
+```
+Merge branch 'claude/microvoxel-project-vapor-port-ng9trx' (water/gla…
+…
+0494b3b
+```
+…ss BTDF)
+
+Brings the dielectric transmission port into the M1 branch: water as a real
+BTDF material (Beer-Lambert absorption, IOR-driven Fresnel, roughness-jittered
+"frosted" refraction), the glossy reflection jitter, and the MatWater palette
+entry plus the terrain's water-filled valleys.
+
+Two conflicts, both because M1 had restructured the same code:
+
+- voxel_volume_component.cpp: M1 hoisted the material enum to file scope and
+  moved the palette into _buildPalette(). Kept that structure and folded in the
+  new material — MatWater in the shared enum, the setGlass lambda writing
+  transmission/ior into palette row 1 (.b/.a), the water palette/params, and
+  the water column fill in _generateTerrain().
+
+- microvoxel.frag: M1 moved the DDA into the volume's LOCAL space for the OBB
+  raymarch, while the port's secondary-ray helpers were written against the old
+  world-space raycast. Kept both features by running ALL secondary rays in
+  local space: secondaryRadiance now calls raycastLocal, and transmitRadiance
+  (which indexes voxel cells, so it has to be local) takes a local entry point.
+  This is exact rather than a compromise — the transform is rigid, so the dot
+  products, reflect() and refract() are unchanged by it — and only the lighting
+  terms leave local space, rotating hit normals and miss directions back to
+  world for the sun and the sky gradient. The old mirror-reflection block is
+  replaced by the port's superset (glossy + BTDF), fed the local-space ray.
+
+The WebGPU WGSL twin merged cleanly and now carries the BTDF; it still has no
+OBB support, matching the documented WebGPU limitation (single volume,
+translation only).
+
+Verified: microvoxel.frag / microvoxel_gi.frag / microvoxel_box.vert all
+validate under glslangValidator as GLSL 410 core and as the GLES 300
+translation the web path generates; the standalone VoxelVolumeComponent tests
+(generation kinds, occupancy/bounds consistency, dirty regions, rotated
+raycast/carve round-trip) still pass with water in the terrain.
+
+Co-Authored-By: Claude Fable 5 <noreply@anthropic.com>
+Claude-Session: https://claude.ai/code/session_012AubFEch7Zy2Y6E2nXgV92
+```
+feat(microvoxel): physics for Atmospheric — voxel-derived colliders, …
+…
+9a26e32
+```
+…props collide
+
+Ports the Vapor MicroVoxel physics work to Atmospheric/Bullet, so both engines'
+demos now show the same thing: props whose colliders come from their own voxels
+dropping onto the terrain and piling into each other.
+
+- VoxelVolumeComponent gains the two extractors:
+  BuildSurfaceMesh() emits every exposed voxel face, greedy-merged into maximal
+  rectangles per slice with outward winding (a static btBvhTriangleMeshShape —
+  Bullet meshes cannot move), skipping empty regions a brick at a time via the
+  occupancy grid; BuildConvexHullPoints() samples support points over a
+  Fibonacci-sphere direction set plus the 6 axes for a dynamic
+  btConvexHullShape. Both emit points in the volume's LOCAL frame, which here
+  is already centred on the object pivot, so no offset is needed — unlike the
+  Vapor port, whose grid frame starts at the min corner.
+
+- VoxelColliderComponent builds the shape and attaches a RigidbodyComponent,
+  owning the shape plus (for the mesh) the vertex/index arrays and the triangle
+  interface, since Bullet keeps raw pointers into all of them. Modelled on
+  HeightFieldColliderComponent. Dynamic mass defaults to solidCount *
+  voxelSize^3 * density; maxMeshVoxels gates the static path so an oversized
+  volume is skipped rather than stalling a frame. Rebuild() drops the body
+  before freeing the shape it points at.
+
+- RigidbodyComponent: fixed the euler->quaternion conversion. All three sites
+  built the rotation as btQuaternion(euler.x, euler.y, euler.z, 1), feeding
+  euler radians in as raw quaternion components — identity only at zero
+  rotation, and an unnormalized, wrong orientation otherwise. They now use
+  glm::quat(euler), the exact conversion TransformComponent uses to build its
+  matrix, so a body starts where its object is drawn. This is what lets the
+  demo's rotated props be physical; it also silently fixes every other rotated
+  rigid body in the engine.
+
+- Demo: the terrain gets the static mesh collider and each prop a dynamic hull,
+  spawned 9-13 m up so none start embedded. Bullet's pose sync
+  (Application::Update) feeds the object transform the OBB raymarch reads, so
+  they render tumbling.
+
+Verified: the extractors are covered by the standalone VoxelVolumeComponent
+tests — area conservation (merged mesh area equals the brute-force exposed-face
+count x voxelSize^2), orientation (sampling either side of every triangle
+centroid finds air on the normal side and solid behind), perfect merging (a
+hollow crate collapses to exactly 12 quads), and hull points landing on voxel
+corners with all 8 AABB corners captured. voxel_collider_component.cpp passes a
+syntax check against the real component headers with stubbed Bullet types, and
+the shaders still validate as GLSL 410 and GLES 300. The Bullet wiring and
+runtime behaviour were not build-tested here (vcpkg dependency downloads are
+blocked in this environment) — needs a local build.
+
+Known limits, matching the Vapor port: digging does not refresh a collider
+(Rebuild() forces one), props collide as convex hulls so a hollow crate is
+solid to physics, and the terrain mesh is extracted inline on attach.
+
+Co-Authored-By: Claude Fable 5 <noreply@anthropic.com>
+Claude-Session: https://claude.ai/code/session_012AubFEch7Zy2Y6E2nXgV92
+```
+fix(microvoxel): spawn props above the floating crystals, not inside …
+…
+1c546cc
+```
+…them
+
+The drop band (9-12.6 m) overlapped the terrain generator's floating crystal
+spheres, which sit at 8.96-11.78 m with radii up to 0.64 m — and those are
+solid voxels in the terrain volume, so they are part of the static mesh
+collider too. A prop could spawn intersecting one and get flung out by the
+penetration resolver, non-deterministically.
+
+Props now drop from 13.0-16.6 m, clear of the crystals' 12.42 m ceiling. A
+volume's local origin is its base, so a prop at 13 m is entirely above that.
+They still hit the crystals on the way down, which is the intended interaction
+— they just no longer start embedded in one.
+
+Co-Authored-By: Claude Fable 5 <noreply@anthropic.com>
+Claude-Session: https://claude.ai/code/session_012AubFEch7Zy2Y6E2nXgV92
+```
+fix(physics): cap fixed-step catch-up and clamp the frame delta
+…
+473057b
+```
+The MicroVoxel physics demo froze on startup. Cause: Physics3DSubsystem::
+Process drained its accumulator with an UNBOUNDED while loop, so it is a
+spiral of death the moment a frame runs long.
+
+The demo makes that certain. Its startup blocks ~2.5 s building the terrain's
+236k-triangle collider, so the next frame arrives with dt ~= 3 s -> ~180
+substeps of 20 dynamic hulls against that mesh in one frame -> that frame also
+overruns -> the backlog grows without bound and the game never catches up.
+Before this branch the example had no bodies at all, so the same unbounded loop
+was free and the bug stayed hidden.
+
+Two guards, both mirroring what project-vapor's Physics3D already does:
+
+- Physics3DSubsystem::Process caps the loop at 4 substeps per frame and drops
+  the remaining backlog (accumulator reset to one step) instead of carrying it.
+  Simulated time slips behind wall time after a stall, which is the only stable
+  choice.
+- Application::Update clamps the frame delta to 0.25 s before anything consumes
+  it, so a blocking load or a breakpoint cannot hand a multi-second delta to
+  physics, animation or particles at once.
+
+Neither changes steady-state behaviour: at 60 fps the delta is ~0.016 s and the
+loop takes one substep, exactly as before.
+
+Co-Authored-By: Claude Fable 5 <noreply@anthropic.com>
+Claude-Session: https://claude.ai/code/session_012AubFEch7Zy2Y6E2nXgV92
+```
+chore(microvoxel): make the demo prop count a knob, default 5
+…
+ec8ba5a
+```
+Physics cost scales with the number of dynamic props (each is a hull against
+the terrain's 236k-triangle static mesh), so the demo now spawns the first
+kPropCount of them instead of all 20. Set to 5 while the physics path is being
+profiled on an unoptimized build; raise it to std::size(kObjects) for the full
+scene.
+
+Co-Authored-By: Claude Fable 5 <noreply@anthropic.com>
+Claude-Session: https://claude.ai/code/session_012AubFEch7Zy2Y6E2nXgV92
+```
+perf(physics): use btDiscreteDynamicsWorldMt so the parallel solver a…
+…
+fa86f21
+```
+…ctually runs
+
+The subsystem already set a task scheduler and built a btCollisionDispatcherMt
+and a btSequentialImpulseConstraintSolverMt, then handed them to a plain
+btDiscreteDynamicsWorld — the single-threaded world. That world solves
+simulation islands serially no matter how parallel its solver is, so only the
+narrowphase was really threaded. The serial part is exactly what dominates once
+bodies pile up and merge into one large island, which is what the MicroVoxel
+props do when they land.
+
+Now, under BT_THREADSAFE, the world is btDiscreteDynamicsWorldMt with a
+btConstraintSolverPoolMt sized to the scheduler's thread count: each island
+goes to a pooled solver (one per thread, mutex-guarded, so it never spin-waits
+while the pool is at least thread-count deep), and islands large enough to be
+worth it fall back to the single multi-threaded solver. The non-threadsafe
+branch keeps the old world, and both paths now log which one is live next to
+the existing thread-count lines.
+
+The pool is declared before _world so it outlives the world pointing at it, and
+is held through a forward declaration with the destructor already out-of-line
+in the .cpp. API verified against Bullet's btDiscreteDynamicsWorldMt.h, which
+declares both classes and the exact 5-argument constructor used here.
+
+Not build-tested in this environment (vcpkg dependency downloads are blocked) —
+needs a local build.
+
+Co-Authored-By: Claude Fable 5 <noreply@anthropic.com>
+Claude-Session: https://claude.ai/code/session_012AubFEch7Zy2Y6E2nXgV92
+```
+fix(physics): sub-voxel collision margin, coarser terrain mesh, CCD o…
+…
+b23040e
+```
+…n props
+
+Props tanked the frame rate on impact and eventually sank through the terrain.
+Three causes, all from applying Bullet's metre-scale defaults to a 5 cm voxel
+world.
+
+1. Collision margin. Bullet's CONVEX_DISTANCE_MARGIN is 0.04 m — as wide as a
+   voxel, and comparable to the 5 cm triangles the terrain mesh is made of.
+   Every triangle inflated into its neighbours, so contact normals contradicted
+   each other: bodies jittered, ground themselves in, and were eventually
+   squeezed through the surface. A triangle mesh is a shell, so once a body is
+   through, nothing pushes it back. Both shapes now take a margin derived from
+   the voxel size (a fifth of a voxel, 1 cm here), overridable via
+   VoxelColliderProps::collisionMargin.
+
+2. Triangle density. Narrowphase cost tracks triangle count and a voxel-exact
+   256^3 terrain is ~237k triangles, so a resting prop queried thousands of
+   them per step. BuildSurfaceMesh takes a `step` that coarsens the grid it
+   meshes: a cell is solid if ANY voxel in it is, which only ever inflates the
+   collider outward — it can never open a hole a prop could fall through. The
+   demo terrain now builds at 10 cm: 237k -> 57k triangles (216 ms -> 45 ms),
+   for a stair-step nobody sees. step 4 gives ~12k if more is needed.
+
+3. No CCD. Props fall ~10 m and reach ~0.25 m per step, comparable to a small
+   prop's own size, so a single bad contact could put one on the far side of
+   the shell. RigidbodyComponent gains SetContinuousCollision, and dynamic
+   voxel colliders enable it by default, sized from the volume's thinnest side.
+
+Verified: the standalone tests still pass at step 1, and a new check confirms
+that at steps 1/2/4 the mesh area still equals the exposed-face area of the
+correspondingly coarsened grid and every triangle still winds outward — i.e.
+coarsening loses no area and flips no normals.
+
+Not build-tested here (vcpkg downloads blocked); the collider source passes a
+syntax check against the real headers with stubbed Bullet types.
+
+Co-Authored-By: Claude Fable 5 <noreply@anthropic.com>
+Claude-Session: https://claude.ai/code/session_012AubFEch7Zy2Y6E2nXgV92
+```
+Fix rigid body mass properties and mesh contact normals
+…
+16f53ad
+```
+Props dropped onto the voxel terrain tumbled and jittered without ever
+coming to rest. Two independent causes, both scale mismatches between
+Bullet's defaults and a 5 cm voxel world.
+
+Mass properties. RigidbodyComponent hardcoded the inertia tensor to
+btVector3(1, 1, 1). That is not a scale-free default: it is a literal
+1 kg*m^2 about every axis, whatever the body. A 1.6 m voxel crate (589 kg)
+wants ~267 and a boulder of the same size ~333, so bodies were two to three
+hundred times too easy to spin — the faintest glancing contact span them up
+and they could never settle. Derive the tensor from the shape instead, and
+rescale rather than zero it in SetMass, which was quietly locking the
+rotation of any body whose mass was changed.
+
+Centre of mass. Bullet has no separate notion of one: a body's local origin
+IS its centre of mass. A voxel volume's origin is the grid's bottom centre,
+so a prop's real centroid sits roughly half its height above it (measured:
+0.80 m for a 32^3 crate, 0.22 m for a crystal cluster, which is bottom
+heavy). Props were pivoting about their own undersides. VoxelVolumeComponent
+gains GetSolidCentroidLocal(); the collider builds its hull about that point
+and reports it, and the motion state carries the offset so the transform the
+renderer reads back is still the object's own, not the centre of mass's.
+
+Contact normals. A box resting on a triangle soup generates contacts on the
+shared edges between triangles, where the raw normal points along the edge
+rather than out of the surface — bodies get shoved sideways, and on a mesh
+(a shell, not a solid) slowly sink through. Build the triangle adjacency map
+and snap those normals back to the face normal via gContactAddedCallback.
+The map's default edge threshold is 0.1 m, wider than a collision cell here,
+which would classify every contact as an edge contact, so it is scaled to
+the voxel grid. Split impulse likewise only engages past 4 cm of
+penetration by default — deeper than a voxel — so a resting body's overlap
+never reached it and recovery buzzed through the normal impulse instead.
+
+Verified with two standalone harnesses that compile the real translation
+units against stub Bullet headers: mass properties and the centre-of-mass
+frame algebra against a faithful copy of btDefaultMotionState's semantics
+(both mutation-tested), and the solid centroid against a brute-force scan.
+
+Co-Authored-By: Claude Opus 5 <noreply@anthropic.com>
+Claude-Session: https://claude.ai/code/session_012AubFEch7Zy2Y6E2nXgV92
+```
+Extract voxel colliders on a worker thread
+…
+ac8d199
+```
+The terrain's collider was built inline on the frame its volume finished
+generating: ~60 ms of greedy meshing plus the BVH build at 256^3 and
+meshDownsample 2, and ~260 ms at voxel-exact. That is a visible hitch on
+desktop and a much worse one on mobile, where it lands during load.
+
+Extraction reads finished voxel data and touches no engine state, so it
+moves to the job system. Only body creation, which mutates the Bullet world,
+stays on the main thread — VoxelColliderComponent::OnTick picks up the
+finished shape and attaches the RigidbodyComponent. The BVH build moves off
+the main thread too, since btBvhTriangleMeshShape builds it in its
+constructor and that is most of the cost.
+
+The result is held by shared_ptr, so a component torn down mid-build leaves
+no writer pointing into freed memory. The worker also reads the sibling
+volume by raw pointer, so OnDetach blocks until the extraction finishes —
+~GameObject already detaches in reverse attach order, which is what keeps
+the volume alive across that wait. The corollary is that nothing may carve
+while a build is in flight; Rebuild() waits one out before starting another.
+
+Two knock-on fixes:
+
+- GameObject::Tick and PhysicsTick iterated _components with a range-for.
+  A handler that adds a component to its own object — which is exactly what
+  the completion path now does — reallocates that vector and dangles the
+  cached iterators. Both loops become index loops with the size re-read,
+  matching what GameLayer::OnUpdate already does at the entity level.
+
+- The MicroVoxel demo held its props back until the terrain reports it is no
+  longer building. Without that they would get bodies first and spend the
+  window falling through ground that does not exist yet — an ordering that
+  simply could not arise while the build blocked the frame.
+
+Verified with a harness that runs the real components against a real thread
+pool: the shape is queued rather than built inline, no body exists until it
+lands, mass and centre of mass survive the handoff intact, 40 rounds of
+teardown at varied points mid-build, and Rebuild during an in-flight build
+leaves exactly one body. Clean under ThreadSanitizer and ASan+UBSan.
+
+Co-Authored-By: Claude Opus 5 <noreply@anthropic.com>
+Claude-Session: https://claude.ai/code/session_012AubFEch7Zy2Y6E2nXgV92
+```
+Rebuild colliders in place instead of replacing the body
+…
+6ffc224
+```
+Rebuilding a voxel collider destroyed the RigidbodyComponent and created a
+new one from the object's transform, so the body restarted from rest. A prop
+carved while falling would freeze in mid-air, and every contact it had was
+thrown away. That made rebuild-on-edit unusable, which is the prerequisite
+for both incremental terrain colliders and carving props apart.
+
+RigidbodyComponent::SwapShape swaps the shape into the existing body, so
+velocity, contacts and broadphase membership all survive. Two things have to
+be handled for that to be correct:
+
+- The centre of mass moves when voxels are removed, and Bullet positions a
+  body BY its centre of mass. The pose is re-derived from the unchanged
+  graphics transform and the new offset, otherwise the object jumps by the
+  centroid delta on the next physics writeback. Mass and the inertia tensor
+  are re-derived too — a carved prop is lighter and differently balanced.
+
+- The broadphase caches an AABB measured from the old shape, so
+  Physics3DSubsystem::RefreshAabb re-measures it. The body is also woken:
+  a sleeping one would sit on stale contacts and never notice the swap.
+
+VoxelColliderComponent holds the outgoing shape (and the vertex/index arrays
+Bullet reads through it) alive until the swap returns, then drops it.
+
+Verified against the faithful btDefaultMotionState stub: the object stays
+put across a simulated physics writeback while its centre of mass shifts
+under it, the body's own pose follows the NEW centre of mass, and the tensor
+tracks the new shape and mass — each mutation-tested. The component-level
+suite adds a carve-then-rebuild round showing one body reused rather than a
+second added, with mass dropping and the centroid tracking the carved
+voxels. Clean under ThreadSanitizer and ASan+UBSan.
+
+Co-Authored-By: Claude Opus 5 <noreply@anthropic.com>
+Claude-Session: https://claude.ai/code/session_012AubFEch7Zy2Y6E2nXgV92
+```
+Add region-limited surface meshing
+…
+b84cfe1
+```
+Groundwork for rebuilding a terrain collider one chunk at a time instead of
+re-meshing the whole volume on every edit: BuildSurfaceMeshRegion meshes only
+the voxels inside a box, while still judging faces on that box's own boundary
+against the voxels outside it. Meshing in pieces therefore reproduces the same
+surface as meshing whole — no seams, and no internal walls where two pieces
+meet. BuildSurfaceMesh is now a call to it over the full grid.
+
+The subtlety is plane ownership. A face lives on the plane between two cells,
+so the plane at a region's far edge is shared with the region above it and
+both would emit it, doubling the surface there. Each plane now has a single
+owner — the region whose cells start at it — and only the topmost region
+closes off the far side, since nothing above will. Getting this wrong in the
+other direction would leave a hole for props to fall through.
+
+Verified by summing chunked mesh area against whole-volume mesh area across
+grid sizes 64 and 128, coarsening steps 1/2/4 and chunk sizes 16 and 32:
+equal to float precision (rel err < 1e-8) in all twelve combinations. The
+first run of that test is what caught the double-counted seam, at up to 15%
+excess area. Triangle counts are legitimately higher when chunked (2% at
+chunk 32, 6% at chunk 16) because greedy runs cannot span chunk boundaries,
+so area rather than triangle count is the invariant checked.
+
+Co-Authored-By: Claude Opus 5 <noreply@anthropic.com>
+Claude-Session: https://claude.ai/code/session_012AubFEch7Zy2Y6E2nXgV92
+```
+Rebuild terrain colliders one chunk at a time
+…
+90cd199
+```
+Digging changed only the voxels: the collider kept the geometry it was built
+with, so the hole was purely visual — you could see through it but not walk
+into it, and props went on resting on a surface that was no longer there. The
+reason it was left that way is that refreshing meant re-meshing the whole
+volume, 93 ms at 256^3 and downsample 2, on every frame a dig key is held.
+
+The static collider is now a grid of chunks, each its own body, and an edit
+re-meshes only the chunks it touched. MarkDirtyRegion takes the same voxel box
+VoxelVolumeComponent already records for its partial GPU upload, so one dirty
+region drives both the texture sub-upload and the collider patch. Measured at
+256^3, downsample 2, chunk 32: 187 bodies, 0.36 ms average and 0.68 ms worst
+case to re-mesh a chunk, against 93 ms for the whole volume. Chunking costs 4%
+more triangles there, since greedy runs cannot span chunk boundaries — chunk
+16 is 10% and chunk 64 is 2% but takes 1.4 ms average per chunk.
+
+Chunks are separate bodies rather than children of a btCompoundShape. Bullet's
+internal-edge correction reaches a triangle info map by casting the BODY's root
+shape to btBvhTriangleMeshShape, so a compound root would have it
+reinterpreting unrelated memory — a compound would have silently broken the
+contact-normal fix. The bodies are owned by the collider and registered with
+the physics subsystem directly rather than attached to the GameObject, which
+has no reason to model a terrain as a hundred rigid body components.
+
+Marks that arrive while a pass is already running are kept and picked up
+afterwards, so holding the dig key costs one rebuild per completed pass rather
+than one per frame. The dirty test is grown by a voxel in each direction:
+removing a voxel at a chunk's edge uncovers a face on the neighbour's side of
+the boundary, and missing that would leave a one-voxel wall standing where the
+dig went through.
+
+Verified: a 64^3 terrain chunked at 16 produces 38 bodies, and a carve dirties
+and rebuilds exactly one of them; marks made mid-build are not dropped; every
+chunk body is unregistered from the world before the memory Bullet reads
+through it is freed. Clean under ThreadSanitizer and ASan+UBSan.
+
+Co-Authored-By: Claude Opus 5 <noreply@anthropic.com>
+Claude-Session: https://claude.ai/code/session_012AubFEch7Zy2Y6E2nXgV92
+```
+Break props apart once they are dug away
+…
+ebca8ad
+```
+Digging a prop did nothing physical, and the obvious fix does not work: a
+convex hull is the object's outer envelope, so hollowing a crate out leaves
+the hull completely unchanged. No amount of re-hulling lets you fall through
+the hole — the shape simply cannot express it. So the model is erode, then
+break.
+
+VoxelColliderComponent now tracks the solid voxels it was built from. While a
+prop stays above destroyBelowSolidFraction (default 40%) it re-hulls once
+rehullAfterSolidFraction (default 8% of the original) has been carved away
+since the last build, so knocking corners off visibly shrinks the collider
+without re-hulling on every frame a dig key is held. Below the threshold
+OnDestroyed fires, once.
+
+What destruction means is left to the game — despawn, spawn debris, swap in a
+broken variant — so the component reports and does not delete. The demo
+retires the prop: it drops the collider (first, since tearing it down waits on
+any in-flight mesh job that is reading the volume's voxels), then the body,
+then the volume, which unregisters it from the raymarch pass. That happens at
+a point in the frame chosen by the demo rather than inside the tick that
+noticed, since a component may not remove itself from the loop walking it.
+
+The baseline is captured at the first build rather than from a full grid, so a
+prop spawned already partly carved is judged against how it spawned.
+
+Verified: a small nibble triggers neither path; taking a corner off re-hulls
+but does not destroy; eating the shell from every side fires OnDestroyed
+exactly once and never again. Worth noting the generated crate is a hollow
+shell, so the test has to carve its faces — carving the middle removes nothing,
+which is the same fact that makes hull rebuilding the wrong answer here.
+Clean under ThreadSanitizer and ASan+UBSan.
+
+Co-Authored-By: Claude Opus 5 <noreply@anthropic.com>
+Claude-Session: https://claude.ai/code/session_012AubFEch7Zy2Y6E2nXgV92
+```
+Wrap an over-long inspector line
+…
+1578eb7
+```
+Formatting only; the project's clang-format column limit is 120.
+
+Co-Authored-By: Claude Opus 5 <noreply@anthropic.com>
+Claude-Session: https://claude.ai/code/session_012AubFEch7Zy2Y6E2nXgV92
+```
+Fix voxel raycast missing on axis-aligned rays, and a carve/mesh data…
+…
+41e83d5
+```
+… race
+
+Two bugs found while checking whether a dug hole actually reaches the
+collider. The collider path itself turned out to be correct — an end-to-end
+test drives carve, mark, tick and sees the live triangle count move — but
+getting there surfaced these.
+
+Axis-aligned rays. RaycastVoxel reported a miss straight through solid
+ground for a perfectly vertical ray. 1/rd is infinite on an axis the ray does
+not travel along, and the distance to the next crossing on that axis is
+computed from a boundary offset that is exactly zero, so it evaluates to
+0 * inf = NaN. Every comparison against NaN is false, so the DDA picked that
+axis every iteration, advanced by step = 0, and spun on one cell until its
+budget ran out. Those axes are now pinned to infinity, which is what they
+mean: an axis you never cross is never the nearest crossing. The demo's
+surfaceY helper probes straight down, so it had been silently returning its
+fallback height the whole time.
+
+Carve versus mesh. Collider extraction runs on a worker reading the voxel
+grid, while carving writes it on the main thread — so holding a dig key
+edits the grid mid-mesh. ThreadSanitizer reports seven distinct races on a
+test that digs continuously while rebuilds are in flight. VoxelVolumeComponent
+gains a shared_mutex: CarveSphere and Generate take it exclusively, and the
+collider takes it shared once around an entire extraction rather than
+per-voxel, since meshing walks millions of cells. Zero races afterwards, and
+the collider still converges on the carved geometry.
+
+Also fixes the same NaN stall in project-vapor's VoxelWorld::raycast, which
+has the identical pattern at both levels of its brick/voxel DDA. Its collider
+extraction is synchronous, so it has no equivalent race.
+
+Both fixed by mutation test: removing the NaN guards makes every straight-down
+probe fail, and removing the lock brings the races back.
+
+Co-Authored-By: Claude Opus 5 <noreply@anthropic.com>
+Claude-Session: https://claude.ai/code/session_012AubFEch7Zy2Y6E2nXgV92
+```
+Make the terrain collider voxel-exact and the dig bite smaller
+…
+365a2ad
+```
+The collider was meshed at 10 cm while voxels are 5 cm, and a coarse cell
+counts as solid if any voxel in it is — so every carve lost up to a cell off
+each side of its hole. At the old 45 cm dig radius that turned a 0.90 m hole
+into 0.80 x 0.60 x 0.90 m, and at anything smaller it would have eaten most
+of the hole. Physics and the raymarch now agree exactly.
+
+Voxel-exact is four times the triangles (59k -> 242k at 256^3), which is why
+it was coarsened in the first place, so the chunk grid drops from 32^3 to
+16^3 to pay for it. That is the interesting part: total work barely moves,
+but per-chunk re-mesh goes from 1.12 ms average / 5.13 ms worst to 0.14 ms /
+1.07 ms, because a chunk holds a quarter of the triangles. Smaller chunks are
+what make voxel-exact affordable per keypress at all. The cost is one body per
+non-empty chunk, 1009 rather than 181, and 16 MB of collider rather than 4.
+
+The dig radius halves to 25 cm — 265 voxels, a 0.50 x 0.30 x 0.50 m hole —
+so holding the key digs progressively instead of in jumps, and one carve
+touches only a couple of chunks. Same change on the Vapor side, whose mesher
+was always voxel-exact and only needed the chunk size.
+
+meshDownsample is still the knob to reach for if terrain narrowphase becomes
+the bottleneck: the cost tracks the triangle count, and the trade is exactly
+the hole erosion described above.
+
+Co-Authored-By: Claude Opus 5 <noreply@anthropic.com>
+Claude-Session: https://claude.ai/code/session_012AubFEch7Zy2Y6E2nXgV92
+```
+Make physics optional, pausable and steppable; spawn props by key
+…
+eb11f13
+```
+enablePhysics3D existed in AppConfig but only gated the scene loader's
+colliders — the subsystem itself was created, stepped and consulted
+unconditionally. It now gates construction, which is what makes the flag
+real: Physics3DSubsystem::Get() locates the constructed instance and every
+consumer already null-checks it, so no subsystem means no bodies, no
+stepping, and — via a new early-out in the voxel collider — no extraction
+either, which is where the actual cost lives (a quarter second of meshing
+and 16 MB of BVH for the demo terrain). The few unguarded Get() sites are
+fixed: the editor's physics panel, and two Lua bindings that would have
+crashed the VM (raycast dereferenced Get() directly, and setGravity bound a
+member function to the null instance captured at bind time).
+
+The subsystem also gains SetPaused/StepOnce. Pausing freezes the world in
+place — bodies, contacts and broadphase stay resident, Process just stops
+stepping — and unpausing clears the accumulated backlog so time resumes from
+the frozen state rather than fast-forwarding through the pause. StepOnce
+advances exactly one fixed step while frozen: the tool for watching the
+solver resolve a pile one step at a time.
+
+The demo turns all of it into controls. Props are no longer a fixed set
+spawned at load: B spawns the next one from a palette at the crosshair —
+with physics on it drops from 3 m above the aimed point (collider queued
+until the terrain is collidable, same as before), with physics off it is
+placed standing on the surface as static decoration. Pressing B repeatedly
+is the incremental load test that replaces the old compile-time kPropCount.
+P pauses, N single-steps, and --no-physics runs the whole demo without the
+subsystem; digging still works there, since carving never depended on
+physics. Spawning through this path is also a rehearsal for fracture, whose
+fragments are runtime-spawned volumes with bodies.
+
+Verified: with the subsystem absent the collider queues no build, extracts
+no geometry and never produces a body; the full suite still passes under
+ThreadSanitizer.
+
+Co-Authored-By: Claude Fable 5 <noreply@anthropic.com>
+Claude-Session: https://claude.ai/code/session_012AubFEch7Zy2Y6E2nXgV92
+```
+Sign up for free
+to join this conversation on GitHub.
+Already have an account?
+Sign in to comment
+Uh oh!
+There was an error while loading. Please reload this page.
+Labels
+None yet
+2 participants
+Add this suggestion to a batch that can be applied as a single commit.This suggestion is invalid because no changes were made to the code.Suggestions cannot be applied while the pull request is closed.Suggestions cannot be applied while viewing a subset of changes.Only one suggestion per line can be applied in a batch.Add this suggestion to a batch that can be applied as a single commit.Applying suggestions on deleted lines is not supported.You must change the existing code in this line in order to create a valid suggestion.Outdated suggestions cannot be applied.This suggestion has been applied or marked resolved.Suggestions cannot be applied from pending reviews.Suggestions cannot be applied on multi-line comments.Suggestions cannot be applied while the pull request is queued to merge.Suggestion cannot be applied right now. Please check back later.
+You can’t perform that action at this time.

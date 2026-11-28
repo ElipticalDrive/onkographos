@@ -1,0 +1,86 @@
+# Point Gaussian Representation
+
+Also called: 2D Image Sprite Rendering, Point Sprite, Sprite-based Splatting
+
+## Overview
+The Point Gaussian representation renders a dataset by drawing a 2D image sprite with potential transparency at each data point, rather than constructing 3D geometry [S1, S2]. It is distinguished from its sibling [3D Glyphs](link-to-3d-glyphs) by replacing volumetric or surface primitives with flat, billboard-like sprites, offering a lightweight alternative for visualizing point-based data [S1, S2].
+
+## How it works
+**Inputs and Outputs**
+*   **Input:** A dataset containing points (e.g., particle positions, sampled locations).
+*   **Output:** A 2D image where each point is rendered as a sprite.
+
+**Data Structures**
+The method does not define a specific complex data structure beyond the standard dataset point attributes. The rendering state is defined by the selected **Sprite Type** [S1, S2].
+
+**Steps**
+1.  **Iterate** over each point in the input dataset.
+2.  **Select** a sprite shape from the available predefined types or a custom definition [S1, S2].
+3.  **Render** the selected sprite at the point's projected screen location. The sprite may include transparency (alpha blending) [S1, S2].
+4.  **Color** the sprite using a single color or pseudocoloring based on a data array associated with the point [S1, S2].
+
+**Parameters**
+*   **Sprite Type:** Defines the visual shape of the sprite. Available predefined options include:
+    *   Gaussian Blur [S1, S2]
+    *   Sphere [S1, S2]
+    *   Black-edged circle [S1, S2]
+    *   Plain circle [S1, S2]
+    *   Triangle [S1, S2]
+    *   Square outline [S1, S2]
+    *   Custom sprite defined via GLSL shader code [S1, S2]
+*   **Coloring:** Can be set to a single color or mapped from a scalar/vector data array (pseudocoloring) [S1, S2].
+
+**Pseudocode**
+> **Unverified code.** The code below did not pass a test run against a reference implementation, or no test fits it, so it may contain errors.
+
+```python
+def render_point_gaussian(dataset, sprite_type, color_map):
+    """
+    Renders a dataset using the Point Gaussian representation.
+    
+    Args:
+        dataset: List of points with associated data arrays.
+        sprite_type: Enum or string specifying the sprite shape 
+                     (e.g., 'Gaussian Blur', 'Sphere', 'Custom').
+        color_map: Function or lookup table mapping data values to colors.
+    """
+    for point in dataset:
+        # Project point to screen coordinates
+        screen_pos = project_to_screen(point.position)
+        
+        # Determine color based on point data
+        color = color_map(point.data_value)
+        
+        # Draw the sprite
+        # The sprite is a 2D image drawn at screen_pos
+        # Transparency is handled by the sprite's alpha channel
+        draw_sprite(screen_pos, sprite_type, color)
+```
+
+**Edge Cases and Pitfalls**
+*   **Overdraw:** Since sprites are 2D images, heavy overlap can lead to blending artifacts if transparency is not handled correctly.
+*   **Custom Shaders:** Using custom GLSL code requires the renderer to support fragment shader injection for sprites [S1, S2].
+
+## Subtopics
+
+### [Gsplat Split and Combine](8494-gsplat-split-and-combine.md)
+Handles the adaptive refinement and coarsening of point clouds. Choose when dynamic resolution adjustment is needed.
+
+### [Runtime Style/Shape Transformation via MLP Encoders](11469-runtime-style-shape-transformation-via-mlp-encoders.md)
+Uses neural networks to define sprite shapes. Choose when complex, data-driven sprite geometries are required.
+
+## Operating characteristics
+*   **Time Complexity:** Linear with respect to the number of points, $O(N)$, as each point is rendered independently as a sprite [S1, S2].
+*   **Memory Complexity:** Low, as no 3D geometry meshes are generated for each point [S1, S2].
+*   **Performance:** Generally faster than generating and rendering full 3D geometry for large datasets, as it avoids the overhead of mesh generation and complex vertex processing [S1].
+*   **Strengths:** Efficient for large point clouds; supports various visual styles via sprite types; supports transparency [S1, S2].
+*   **Limitations:** Lacks true 3D depth cues compared to 3D Glyphs; sprite size may not scale intuitively with depth without additional logic [S1, S2].
+*   **When to use:** When visualizing large sets of points where performance is critical and 3D geometry is unnecessary [S1, S2].
+*   **When not to use:** When precise 3D shape representation or occlusion handling via geometry is required [S1, S2].
+
+## Background
+The Point Gaussian representation is a visualization technique available in ParaView for displaying point-based data [S1, S2]. It was introduced as an alternative to 3D Glyphs, which draw 3D geometry (e.g., arrows, cones) at data points [S1, S2]. The technique leverages graphics instancing to render the same sprite geometry at many locations efficiently [S1]. It is part of ParaView's suite of display representations for volume and point data [S1, S2].
+
+## Sources
+[S1] 4. Displaying data — ParaView Documentation 5.8.1 documentation, https://docs.paraview.org/en/v5.9.1/UsersGuide/displayingData.html, fetched 2026-10-29
+[S2] 5. Displaying data — ParaView Documentation 6.2.0 documentation, https://docs.paraview.org/en/latest/UsersGuide/displayingData.html, fetched 2026-10-29

@@ -1,0 +1,214 @@
+# Neus SDF Volume Rendering
+
+Also called: Neus rendering, SRDF Volume Rendering, SparseNeuS Volume Rendering, Volume Rendering of SRDF
+
+## Overview
+Neus SDF Volume Rendering is a technique that renders 3D scenes represented as Signed Distance Functions (SDF) or Signed Ray Distance Functions (SRDF) by accumulating color and depth along rays using alpha compositing [S1][S2, unofficial]. It solves the problem of precisely extracting geometric surfaces from implicit representations by replacing the standard NeRF density field with an SDF-based weighting scheme [S2, unofficial]. It differs from standard NeRF rendering by using a trainable S-density function to concentrate weight at the zero-level set of the SDF, ensuring the surface contributes most to the image [S2, unofficial], and adapts this theory to SRDF by treating surface normals as irrelevant to the value distribution [S1]. It builds on [NeRF Rendering (Alpha Compositing)](5124-nerf-rendering-alpha-compositing.md).
+
+## How it works
+
+### Inputs and Outputs
+**Inputs:**
+*   Ray origin $o$ and direction $v$ [S4].
+*   SDF field $f(x)$ or SRDF field [S2, unofficial].
+*   Color field $c(p(t), v)$ sampled at points along the ray [S4].
+*   Number of sampled points $M$ (sum of coarse $N_{coarse}$ and fine $N_{fine}$ samples) [S1].
+*   Trainable hyperparameter $b$ [S4].
+*   Ray bounds $t_{min}$ and $t_{max}$ [G].
+
+**Outputs:**
+*   Rendered color $\hat{C}$ [S1].
+*   Rendered depth $\hat{D}$ [S1].
+
+### Data Structures
+*   **Ray Samples:** A sequence of $M$ points $t_j$ along the ray $p(t) = o + tv$, sorted from near to far [S1].
+*   **SDF Values:** $f(p(t_j))$ for each sample point [S2, unofficial].
+*   **Color Values:** $\hat{c}_j$ for each sample point [S1].
+
+### Formulas and Definitions
+
+**1. S-Density Function**
+The S-density $\phi_b(f(x))$ is defined as [S4]:
+$$
+\phi_b(f(x)) = \frac{b e^{-b f(x)}}{(1 + e^{-b f(x)})^2}
+$$
+where $b$ is a trainable hyperparameter that gradually increases to a large number as network training converges [S4].
+
+**2. Surface Extraction**
+The surface $S$ is extracted by finding the zero-level set of the SDF [S4]:
+$$
+S = \{x \in \mathbb{R}^3 \mid f(x) = 0\}
+$$
+
+**3. Continuous Volume Rendering**
+The continuous color $C(o, v)$ is accumulated along the ray [S4]:
+$$
+C(o, v) = \int_0^{+\infty} w(t)c(p(t), v)dt
+$$
+where the weight $w(t)$ is rebuilt using the S-density to guarantee surface contribution [S4]:
+$$
+w(t) = \frac{\phi_s(f(p(t)))}{\int_0^{+\infty} \phi_s(f(p(u)))du}
+$$
+Here, $\phi_s$ is the S-density function used for weighting [S1, S4].
+
+**4. Discrete Opacity**
+The discrete opacity $\alpha_j$ at sample $j$ is defined by integrating the opaque density $\rho(t)$ over the interval $[t_j, t_{j+1}]$ [S1]:
+$$
+\alpha_j = 1 - \exp\left(-\int_{t_j}^{t_{j+1}} \rho(t) dt\right)
+$$
+For SRDF, $\rho(t)$ uses the SRDF value instead of SDF, but the distribution is treated as equivalent to SDF where surfaces are perpendicular to the ray [S1].
+
+**5. Discrete Accumulative Transmittance**
+$$
+T_j = \prod_{k=1}^{j-1} (1 - \alpha_k)
+$$
+with $T_1 = 1$ [S1].
+
+**6. Rendered Color**
+$$
+\hat{C} = \sum_{j=1}^{M} T_j \alpha_j \hat{c}_j
+$$
+where $\hat{c}_j$ is the color at sample $j$ [S1].
+
+**7. Rendered Depth**
+$$
+\hat{D} = \sum_{j=1}^{M} T_j \alpha_j t_j
+$$
+where $t_j$ is the distance of sample $j$ from the origin [S1].
+
+### Parameters
+*   $b$: Trainable hyperparameter for S-density sharpness [S4].
+*   $M$: Total number of sampled points ($N_{coarse} + N_{fine}$) [S1]. Typical values: $N_{coarse}=64, N_{fine}=64$ [S1].
+*   $\delta$: Threshold for image space consistency in geometric consistency filtering. Default: 1 [S1].
+*   $\varepsilon$: Threshold for depth consistency in geometric consistency filtering. Default: 0.01 [S1].
+
+### Steps
+1.  **Emit Ray:** Define ray $p(t) = o + tv$ from pixel origin $o$ and direction $v$ [S4].
+2.  **Sample Points:** Uniformly sample $N_{coarse}$ points and importance sample $N_{fine}$ points to get $M$ total points $t_j$ along the ray [S1].
+3.  **Evaluate SDF/SRDF:** Query the neural network for $f(p(t_j))$ at each sample point [S2, unofficial].
+4.  **Compute S-Density:** Calculate $\phi_b(f(p(t_j)))$ using the current value of $b$ [S4].
+5.  **Compute Opacity:** Calculate $\alpha_j$ based on the integral of the density derived from $\phi_b$ [S1, S4]. Note: For SRDF, the method assumes the distribution of SRDF values along the ray is the same as SDF with surfaces perpendicular to the ray, allowing the use of the same SDF volume rendering theory [S1].
+6.  **Compute Transmittance:** Calculate $T_j$ using the product of $(1-\alpha_k)$ for previous samples [S1].
+7.  **Accumulate Color:** Compute $\hat{C} = \sum_{j=1}^{M} T_j \alpha_j \hat{c}_j$ [S1].
+8.  **Accumulate Depth:** Compute $\hat{D} = \sum_{j=1}^{M} T_j \alpha_j t_j$ [S1].
+
+### Edge Cases and Pitfalls
+*   **SRDF vs SDF Normals:** For SRDF, surface normal vectors are set to be random at intersection points because the distribution of SRDF is irrelevant to the surface normal [S1]. For SDF, surfaces are assumed perpendicular to the ray [S1]. The method adopts SDF rendering for SRDF based on the equivalence of their distributions under this assumption [S1].
+*   **Hyperparameter $b$:** $b$ must be trained and gradually increased to ensure the surface contribution is sharp and accurate [S4].
+*   **Geometric Consistency:** When using multi-view aggregation, depth estimates should be filtered using geometric consistency with thresholds $\delta=1$ and $\varepsilon=0.01$ to reject unreliable views [S1].
+
+### Pseudocode
+> **Unverified code.** The code below did not pass a test run against a reference implementation, or no test fits it, so it may contain errors.
+
+```python
+import math
+import random
+
+def neus_sdf_volume_rendering(ray_origin, ray_direction, sdf_network, color_network, b, t_min, t_max, num_coarse=64, num_fine=64):
+    """
+    Renders color and depth using NeuS SDF volume rendering.
+    
+    Args:
+        ray_origin: 3D vector, origin of the ray.
+        ray_direction: 3D vector, direction of the ray.
+        sdf_network: Function returning SDF/SRDF value f(x) for point x.
+        color_network: Function returning color c(x, v) for point x and direction v.
+        b: Trainable hyperparameter for S-density.
+        t_min: Near bound for ray marching [G].
+        t_max: Far bound for ray marching [G].
+        num_coarse: Number of coarse samples.
+        num_fine: Number of fine samples.
+        
+    Returns:
+        rendered_color: Scalar, accumulated color.
+        rendered_depth: Scalar, accumulated depth.
+    """
+    
+    # 1. Hierarchical Sampling
+    # Uniform coarse sampling
+    t_coarse = [t_min + i * (t_max - t_min) / num_coarse for i in range(num_coarse)]
+    
+    # Importance fine sampling (standard NeRF/NeuS step [G])
+    coarse_sdf = [sdf_network([ray_origin[k] + t * ray_direction[k] for k in range(3)]) for t in t_coarse]
+    coarse_phi = [b * math.exp(-b * f) / (1 + math.exp(-b * f))**2 for f in coarse_sdf]
+    coarse_delta = [t_coarse[i+1] - t_coarse[i] if i < num_coarse-1 else 0.01 for i in range(num_coarse)]
+    coarse_sigma = [phi * dt for phi, dt in zip(coarse_phi, coarse_delta)]
+    coarse_alpha = [1.0 - math.exp(-s) for s in coarse_sigma]
+    
+    # Build CDF and sample fine points via inverse transform sampling
+    cdf = [sum(coarse_alpha[:i+1]) for i in range(num_coarse)]
+    cdf = [c / cdf[-1] for c in cdf]
+    t_fine = []
+    for _ in range(num_fine):
+        u = random.random()
+        idx = 0
+        while idx < num_coarse - 1 and cdf[idx] < u:
+            idx += 1
+        denom = cdf[idx+1] - cdf[idx] if cdf[idx+1] != cdf[idx] else 1e-6
+        t_fine.append(t_coarse[idx] + (t_coarse[idx+1] - t_coarse[idx]) * (u - cdf[idx]) / denom)
+        
+    # Combine and sort
+    t_samples = sorted(t_coarse + t_fine)
+    M = len(t_samples)
+    
+    # 2. Evaluate SDF and Color
+    points = [[ray_origin[k] + t * ray_direction[k] for k in range(3)] for t in t_samples]
+    sdf_values = [sdf_network(p) for p in points]
+    colors = [color_network(p, ray_direction) for p in points]
+    
+    # 3. Compute S-Density and Opacity
+    s_densities = []
+    for f_val in sdf_values:
+        exp_neg_bf = math.exp(-b * f_val)
+        phi = (b * exp_neg_bf) / ((1 + exp_neg_bf) ** 2)
+        s_densities.append(phi)
+        
+    alphas = []
+    for j in range(M):
+        t_j = t_samples[j]
+        t_next = t_samples[j+1] if j < M - 1 else t_j + 0.01
+        delta_t = t_next - t_j
+        rho_integral = s_densities[j] * delta_t
+        alpha = 1.0 - math.exp(-rho_integral)
+        alphas.append(alpha)
+        
+    # 4. Compute Transmittance
+    transmittances = [1.0] * M
+    for j in range(1, M):
+        transmittances[j] = transmittances[j-1] * (1.0 - alphas[j-1])
+        
+    # 5. Accumulate Color and Depth
+    rendered_color = 0.0
+    rendered_depth = 0.0
+    
+    for j in range(M):
+        weight = transmittances[j] * alphas[j]
+        rendered_color += weight * colors[j]
+        rendered_depth += weight * t_samples[j]
+        
+    return rendered_color, rendered_depth
+```
+
+## Subtopics
+
+### NeuS-style Volume Rendering with Normal Maps
+A volume rendering technique that renders both color and normal maps along a casting ray by accumulating measurements of $N$ sampling points [S5, unofficial]. It uses opacity derived from SDF values and renders normals via automatic differentiation of the SDF decoder [S5, unofficial]. The opacity $\alpha_i$ is transformed from the SDF value $s_i$ decoded by $f_\theta$ following the NeuS transformation [S5, unofficial]. The accumulated transmittance is $T_i = \prod_{j=1}^{i-1} (1 - \alpha_i)$ [S5, unofficial]. The normal estimation $n_i$ is calculated by the automatic derivation (gradient) of the SDF decoder $f_\theta$ [S5, unofficial]. The final normal map is accumulated as $\hat{N}(r) = \sum_{i=1}^N T_i \alpha_i n_i$ [S5, unofficial].
+
+## Operating characteristics
+*   **Time Complexity:** Linear in the number of samples $M$ per ray [S1].
+*   **Memory Complexity:** Linear in $M$ for storing sample values [S1].
+*   **Performance:** Depends on the resolution of the global feature volume and the number of samples [S1]. In experiments, $N_{coarse}=64$ and $N_{fine}=64$ were used [S1].
+*   **Strengths:** Precisely extracts geometric surfaces via the zero-level set of the SDF [S4]. Handles SRDF by leveraging the equivalence of value distributions with perpendicular SDF surfaces [S1].
+*   **Limitations:** Not suitable for very large-scale scenes due to the low resolution of the global feature volume [S1]. Requires careful tuning of the hyperparameter $b$ [S4].
+
+## Background
+*   **Origin:** The method is based on the NeuS paper [49] which introduced SDF-based volume rendering for NeRF [S1][S2, unofficial].
+*   **Development:** It was adapted for Signed Ray Distance Functions (SRDF) in VolRecon [S1] to handle multi-view reconstruction where surface normals are not explicitly defined or reliable [S1]. It is also used in Instant-NSR [S2, unofficial] for accelerated training with Hash encoding [S2, unofficial].
+*   **Usage:** Used in multi-view stereo reconstruction on datasets like DTU and ETH3D for high-fidelity 3D reconstruction [S1][S2, unofficial].
+
+## Sources
+[S1] VolRecon: Volume Rendering of Signed Ray Distance Functions for Generalizable Multi-View Reconstruction, https://doi.org/10.1109/cvpr52729.2023.01601, fetched 2026-10-26
+[S2] [PDF] VolRecon: Volume Rendering of Signed Ray Distance Functions for ..., https://openaccess.thecvf.com/content/CVPR2023/papers/Ren_VolRecon_Volume_Rendering_of_Signed_Ray_Distance_Functions_for_Generalizable_CVPR_2023_paper.pdf, fetched 2026-10-26 (unofficial)
+[S3] SparseNeuS: Fast Generalizable Neural Surface Reconstruction from Sparse Views, https://doi.org/10.1007/978-3-031-19824-3_13, fetched 2026-10-26
+[S4] High-fidelity 3D Reconstruction of Plants using Neural Radiance Field, https://arxiv.org/abs/2311.04154v1, fetched 2026-10-27
+[S5] MonoNeuralFusion: Online Monocular Neural 3D Reconstruction with Geometric Priors, https://doi.org/10.48550/arxiv.2209.15153, fetched 2026-10-29 (unofficial)

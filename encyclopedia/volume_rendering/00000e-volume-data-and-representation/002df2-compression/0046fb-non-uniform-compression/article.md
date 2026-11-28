@@ -1,0 +1,134 @@
+# Non-uniform Compression
+Also called: Importance-based Nonuniform Compression
+
+## Overview
+Non-uniform Compression (NCB) is a compression strategy that applies different downsampling scales to density and color features to balance storage cost and rendering quality [S1]. It sets itself apart from uniform compression methods by recognizing that density contributes more to preserving visual quality while color features occupy significantly more storage, justifying asymmetric treatment [S1]. It builds on [Sparse structures](5-sparse-structures.md) by integrating sparsification with non-uniform scaling [G].
+
+## How it works
+**Inputs and Outputs:**
+*   **Input:** Dense voxel grids for volume density ($V_\sigma$) and volume color ($V_c$) [S1].
+*   **Output:** Compressed bitstream containing downsampled sparse grids, a full-resolution occupancy mask, and metadata [S1].
+
+**Data Structures:**
+1.  **Downsampled Grids:** Sparse voxel grids for density and color at reduced resolutions [S1].
+2.  **Occupancy Mask:** A binary mask at the original full resolution indicating occupied voxels [S1].
+3.  **Data Pointers:** Reversible mapping from the binary mask to sparse array indices [S1].
+
+**Parameters:**
+*   **Density downsampling scale:** $1/2$ by default [S1].
+*   **Color downsampling scale:** $1/4$ by default [S1].
+*   **Data pointer storage:** 4 bytes reduced to 1 bit per voxel [S1].
+*   **Precision:** Float 16 (FP16) [S1].
+
+**Steps:**
+1.  **Downsampling:** Treat volume density ($V_\sigma$) and volume color ($V_c$) as dense voxel grids and directly apply trilinear downsampling using their respective scales [S1].
+2.  **Sparsification:** Follow the sparsification operation in the Plenoxels pipeline to re-sparsify the downsampled voxel grids [S1].
+3.  **Mask Generation:** Keep the full-resolution occupancy mask for future decompression [S1].
+4.  **Pointer Conversion:** Convert data pointers (used in importance map and sparse array storage) to the binary occupancy mask [S1].
+5.  **Encoding:** Convert all tensors to float 16 and compress with zlib for saving [S1].
+
+**Decompression Steps:**
+1.  **Decoding:** Decompress the bitstream to retrieve the downsampled sparse grids and the full-resolution binary mask [S1].
+2.  **Upsampling:** Trilinearly upsample the downsampled density ($V_\sigma$) and color ($V_c$) grids to get the full-size voxel grid [S1].
+3.  **Sparsification:** Sparsify the upsampled grid using the saved full-resolution mask [S1].
+4.  **Pointer Derivation:** Derive data pointers from the mask if required for rendering [S1].
+
+**Pseudocode:**
+> **Unverified code.** The code below did not pass a test run against a reference implementation, or no test fits it, so it may contain errors.
+
+```python
+import zlib
+import struct
+
+def trilinear_downsample(grid, scale):
+    # [G] Standard 3D trilinear downsampling.
+    new_shape = (int(grid.shape[0] * scale), int(grid.shape[1] * scale), int(grid.shape[2] * scale))
+    downsampled = [[[] for _ in range(new_shape[2])] for _ in range(new_shape[1])]
+    for _ in range(new_shape[0]): downsampled.append([])
+    for d in range(new_shape[0]):
+        for h in range(new_shape[1]):
+            for w in range(new_shape[2]):
+                src_d, src_h, src_w = d / scale, h / scale, w / scale
+                downsampled[d][h][w] = grid[int(src_d)][int(src_h)][int(src_w)]
+    return downsampled
+
+def trilinear_upsample(grid, scale):
+    # [G] Standard 3D trilinear upsampling.
+    new_shape = (int(grid.shape[0] * scale), int(grid.shape[1] * scale), int(grid.shape[2] * scale))
+    upsampled = [[[] for _ in range(new_shape[2])] for _ in range(new_shape[1])]
+    for _ in range(new_shape[0]): upsampled.append([])
+    for d in range(new_shape[0]):
+        for h in range(new_shape[1]):
+            for w in range(new_shape[2]):
+                src_d, src_h, src_w = d / scale, h / scale, w / scale
+                upsampled[d][h][w] = grid[int(src_d)][int(src_h)][int(src_w)]
+    return upsampled
+
+def sparsify(grid, mask):
+    # Keeps values where mask is True.
+    sparse_vals = []
+    sparse_indices = []
+    for d in range(len(mask)):
+        for h in range(len(mask[0])):
+            for w in range(len(mask[0][0])):
+                if mask[d][h][w]:
+                    sparse_vals.append(grid[d][h][w])
+                    sparse_indices.append((d, h, w))
+    return sparse_vals, sparse_indices
+
+def pointers_to_mask(indices, shape):
+    mask = [[[False for _ in range(shape[2])] for _ in range(shape[1])] for _ in range(shape[0])]
+    for idx in indices: mask[idx[0]][idx[1]][idx[2]] = True
+    return mask
+
+def mask_to_pointers(mask):
+    indices = []
+    for d in range(len(mask)):
+        for h in range(len(mask[0])):
+            for w in range(len(mask[0][0])):
+                if mask[d][h][w]: indices.append((d, h, w))
+    return indices
+
+def compress_volume(V_sigma, V_color, density_scale=0.5, color_scale=0.25):
+    V_sigma_down = trilinear_downsample(V_sigma, density_scale)
+    V_color_down = trilinear_downsample(V_color, color_scale)
+    # [G] Importance-based selection generates the full-resolution mask.
+    occupancy_mask = generate_full_resolution_occupancy_mask(V_sigma)
+    sigma_sparse, sigma_indices = sparsify(V_sigma_down, occupancy_mask)
+    color_sparse, color_indices = sparsify(V_color_down, occupancy_mask)
+    mask_binary = pointers_to_mask(sigma_indices, V_sigma.shape)
+    sigma_fp16 = [struct.pack('e', v) for v in sigma_sparse]
+    color_fp16 = [struct.pack('e', v) for v in color_sparse]
+    mask_bytes = struct.pack('?' * len(mask_binary), *mask_binary)
+    return zlib.compress(sigma_fp16 + color_fp16 + mask_bytes)
+
+def decompress_volume(compressed_data):
+    decompressed = zlib.decompress(compressed_data)
+    # [G] Parsing assumes fixed layout.
+    sigma_fp16, color_fp16, mask_bytes = parse_layout(decompressed)
+    mask_binary = struct.unpack('?' * len(mask_bytes), mask_bytes)
+    V_sigma_up = trilinear_upsample(sigma_fp16, 1.0 / density_scale)
+    V_color_up = trilinear_upsample(color_fp16, 1.0 / color_scale)
+    V_sigma_sparse, _ = sparsify(V_sigma_up, mask_binary)
+    V_color_sparse, _ = sparsify(V_color_up, mask_binary)
+    data_pointers = mask_to_pointers(mask_binary)
+    return V_sigma_sparse, V_color_sparse, data_pointers
+```
+
+**Edge Cases and Pitfalls:**
+*   **Precision:** Using FP16 may introduce quantization error, but the source reports it as the standard for storage [S1].
+*   **Mask Accuracy:** The quality of the full-resolution mask is critical [S1].
+*   **Reversibility:** The conversion between data pointers and the binary mask must be strictly reversible to ensure correct reconstruction [S1].
+
+## Operating characteristics
+*   **Time Complexity:** Decompression involves trilinear upsampling and sparsification, which are linear with respect to the number of voxels in the upsampled grid [S1].
+*   **Memory Complexity:** Storage is reduced by downsampling color features more aggressively than density [S1].
+*   **Measured Performance:** On the LLFF dataset, saving 2.5% of the most important voxels adds 2.6 MB to the size, increasing PSNR from 31.02 to 31.35 dB [S1]. Saving 10% adds 10.0 MB, increasing PSNR to 31.54 dB [S1].
+*   **Strengths:** Significant storage reduction (over 40x compared to direct Plenoxels) with minimal quality loss (0.26 dB) [S1].
+*   **Limitations:** Requires training a Neural Codebook (NCB) for each scene, which adds deployment time [S1].
+
+## Background
+Non-uniform Compression was introduced in the paper "Compact Real-Time Radiance Fields with Neural Codebook" [S1]. It addresses the high storage costs of radiance field representations by leveraging the observation that density and color features have different impacts on visual quality and storage requirements [S1].
+
+## Sources
+[S1] Compact Real-Time Radiance Fields with Neural Codebook, https://doi.org/10.1109/icme55011.2023.00374, fetched 2026-10-26

@@ -1,0 +1,110 @@
+# Cumulus Cloud Rendering Configuration
+
+
+## Overview
+This configuration defines the specific procedural noise parameters used to generate the density field for cumulus clouds within the Ray-Guided Streaming framework. It serves as a concrete instantiation of procedural volume cloud modeling, specifically tailored to encode cloud details for multiple scattering simulations. It differs from general gas modeling by focusing on the specific fractal noise parameters required for the distinct morphology of cumulus formations rather than generic turbulence.
+
+## How it works
+The method configures a procedural noise generator to evaluate cloud density at any point in space. It relies on the underlying Ray-Guided Streaming architecture to handle memory and rendering, but this specific configuration dictates the noise generation parameters.
+
+**Inputs:**
+- Noise type: Perlin noise.
+- Octaves: 5.
+- Noise dimensions: $N=2$ (2D noise projected or sampled).
+- Noise scale/period: $M=32$.
+- Target virtual resolution: $2048^3$.
+
+**Outputs:**
+- A density field $\rho(x, y, z)$ representing the cumulus cloud structure.
+
+**Data Structures:**
+The density values are stored in a sparse voxel grid managed by the Ray-Guided Streaming system. The configuration implies a virtual resolution of $2048^3$, but actual memory usage is optimized via the streaming brick pool.
+- Brick pool size: 430 MB, supporting up to 423 bricks.
+- Node pool size: Typically 4 MB (corresponding to $64^3$ entries).
+- Indexing: 10243 indices can be referenced using 163 bricks.
+
+**Steps:**
+1. Initialize a Perlin noise generator with 5 octaves.
+2. Set the base noise dimension to 2D ($N=2$).
+3. Set the noise scale parameter to $M=32$.
+4. Evaluate the noise function at the query point $(x, y, z)$ to determine the local density contribution.
+5. Integrate the density into the streaming voxel structure.
+
+**Pseudocode:**
+> **Unverified code.** The code below did not pass a test run against a reference implementation, or no test fits it, so it may contain errors.
+
+```python
+def evaluate_cumulus_density(x, y, z):
+    """
+    Evaluates the density for a cumulus cloud using the specific
+    configuration: N=2, M=32, 5 octaves of Perlin noise.
+    """
+    # Initialize noise generator if not already done
+    # Note: The specific implementation of the Perlin noise generator
+    # is assumed to be available from the underlying procedural volume
+    # modeling library.
+    
+    noise_value = 0.0
+    amplitude = 1.0
+    frequency = 1.0
+    
+    # 5 octaves of Perlin noise
+    for i in range(5):
+        # Scale the input coordinates by M=32 and frequency
+        # N=2 implies 2D noise is likely used, possibly projected
+        # or sampled from a 2D plane. The exact projection method
+        # is not specified in the source notes, so we assume a
+        # standard 3D evaluation or 2D projection as per the
+        # underlying framework's default behavior for N=2.
+        
+        # Calculate scaled coordinates
+        scale = M * frequency
+        nx = x * scale
+        ny = y * scale
+        # If N=2 strictly means 2D noise, z might be ignored or
+        # used as a time/phase variable. Without explicit formula,
+        # we assume standard 3D Perlin noise evaluation with
+        # 2D characteristics or projection.
+        
+        # Evaluate Perlin noise
+        p = perlin_noise(nx, ny, z * scale) # [G] Assumption: z is scaled similarly
+        noise_value += amplitude * p
+        
+        # Update amplitude and frequency for next octave
+        amplitude *= 0.5
+        frequency *= 2.0
+        
+    # Normalize or scale the final noise value to density
+    # The exact mapping from noise value to density is not specified.
+    return noise_value
+
+# Parameters
+N = 2
+M = 32
+octaves = 5
+virtual_resolution = 2048
+```
+
+**Edge Cases and Pitfalls:**
+- **Precision:** The virtual resolution of $2048^3$ is high; ensuring floating-point precision in the noise evaluation is critical to avoid artifacts at fine scales.
+- **Performance:** The source notes that complex computations on the GPU result in relatively low frame rates (around 20 FPS for a $1024^3$ volume). This configuration, being more detailed, may suffer similar performance bottlenecks.
+- **Memory:** While the virtual resolution is high, the actual memory usage is managed by the brick pool. Care must be taken to ensure the brick pool size (430 MB) is sufficient for the scene complexity.
+
+## Subtopics
+
+### [Procedural Cirrus Cloud Rendering](6895-procedural-cirrus-cloud-rendering.md)
+A procedural technique for rendering cirrus clouds using layered fractal Brownian motion (fbm) noise on a 2D plane projected from the view ray, modulated by wind direction and time to create strands, hooks, and fibres.
+
+## Operating characteristics
+- **Time Complexity:** The source notes that complex computations on the GPU result in relatively low frame rates (around 20 FPS for a $1024^3$ volume) [S1, unofficial]. The use of 5 octaves of Perlin noise adds computational overhead.
+- **Memory Complexity:** The method trades computation time for memory efficiency. Normals are computed on-the-fly. The brick pool used 430 MB, giving room for 423 bricks. The node pool was small (4 MB) corresponding to $64^3$ entries. Using 163 bricks, 10243 indices can be referenced [S1, unofficial].
+- **Strengths:** Allows for an increase of detail in cloud simulation, especially when combined with complex shading for multiple scattering. On-the-fly noise creation on the GPU is more efficient than CPU evaluation and transfer.
+- **Limitations:** Low frame rates due to complex GPU computations.
+- **When to use:** When high-detail cumulus clouds are required for multiple scattering simulations and memory efficiency is a priority.
+- **When not to use:** When real-time performance is critical and lower detail is acceptable.
+
+## Background
+This configuration was used to encode cloud details in the work by BNM* 08, which deals with multiple scattering in clouds [S1, unofficial]. The specific parameters ($N=2, M=32, 5$ octaves) were chosen to simulate enhanced cumulus clouds within the Ray-Guided Streaming framework [S1, unofficial].
+
+## Sources
+[S1] [PDF] Ray-Guided Streaming for Efficient and Detailed Voxel Rendering, https://www-sop.inria.fr/reves/Basilic/2009/CNLE09/CNLE09.pdf, fetched 2026-10-26 (unofficial)

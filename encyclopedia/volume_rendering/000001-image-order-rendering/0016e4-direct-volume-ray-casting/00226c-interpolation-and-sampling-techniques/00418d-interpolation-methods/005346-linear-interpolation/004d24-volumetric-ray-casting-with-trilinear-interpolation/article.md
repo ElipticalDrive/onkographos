@@ -1,0 +1,138 @@
+# Volumetric Ray Casting with Trilinear Interpolation
+
+Also called: Basic Volumetric Ray Casting, Voxel Region Interpolation
+
+## Overview
+Volumetric Ray Casting with Trilinear Interpolation is a direct volume rendering technique that visualizes scalar data stored in a voxel grid by casting rays through the volume and interpolating values at sample points [S1, unofficial]. It differs from nearest-neighbor sampling by using the eight corners of the enclosing voxel cell to produce smoother gradients, and from higher-order methods by its simplicity and low computational cost [S1, unofficial]. Despite the name, the method implements a distance-weighted interpolation scheme rather than standard trilinear interpolation [S1, unofficial].
+
+## How it works
+**Inputs and Outputs:**
+- Input: A 3D array of voxel data (scalar values) with dimensions $W \times H \times D$ (width, height, depth) [S1, unofficial].
+- Input: A ray defined by origin $\mathbf{O}$, direction $\mathbf{D}$, $t_{min}$, and $t_{max}$ [S1, unofficial].
+- Output: A scalar value $V_{interp}$ at a point $\mathbf{V}$ along the ray [S1, unofficial].
+
+**Data Structures:**
+- `Voxel`: A struct containing:
+  - `location`: `Vector3` representing the 3D coordinates $(x, y, z)$ [S1, unofficial].
+  - `scalardata`: `float` representing the scalar value at that voxel [S1, unofficial].
+- The voxels are stored in a flat array indexed by $x + y \cdot W + z \cdot W \cdot H$ [S1, unofficial].
+
+**Steps:**
+
+1. **Prepare Voxel Region:**
+   Iterate through all voxels in $z, y, x$ order (depth, height, width) [S1, unofficial]. For each voxel at index corresponding to coordinates $(x, y, z)$, set `voxels[idx].location` to $(x, y, z)$ and `voxels[idx].scalardata` to the input data value at that index [S1, unofficial].
+
+2. **Ray-Box Intersection:**
+   Determine the intersection interval $[t_{near}, t_{far}]$ of the ray with the volume bounding box defined by $\mathbf{b}_{min}$ and $\mathbf{b}_{max}$ [S1, unofficial].
+   - Compute $\mathbf{inv\_dir} = 1.0 / \mathbf{D}$ [S1, unofficial].
+   - Compute $\mathbf{min\_Ts} = (\mathbf{b}_{min} - \mathbf{O}) \cdot \mathbf{inv\_dir}$ and $\mathbf{max\_Ts} = (\mathbf{b}_{max} - \mathbf{O}) \cdot \mathbf{inv\_dir}$ [S1, unofficial].
+   - $t_{near} = \max(\min(\mathbf{min\_Ts}_x, \mathbf{max\_Ts}_x), \min(\mathbf{min\_Ts}_y, \mathbf{max\_Ts}_y), \min(\mathbf{min\_Ts}_z, \mathbf{max\_Ts}_z))$ [S1, unofficial].
+   - $t_{far} = \min(\max(\mathbf{min\_Ts}_x, \mathbf{max\_Ts}_x), \max(\mathbf{min\_Ts}_y, \mathbf{max\_Ts}_y), \max(\mathbf{min\_Ts}_z, \mathbf{max\_Ts}_z))$ [S1, unofficial].
+   - Intersection exists if $t_{near} \le t_{far}$ and $t_{far} > t_{min}$ [S1, unofficial].
+
+3. **Sample Along Ray:**
+   For each sample point $\mathbf{V}$ along the ray within $[t_{near}, t_{far}]$:
+   - Calculate integer coordinates identifying the enclosing voxel cell: $x = \lfloor V_x \rfloor$, $y = \lfloor V_y \rfloor$, $z = \lfloor V_z \rfloor$ [S1, unofficial].
+   - Retrieve the 8 corner voxel indices for the cell defined by $(x, y, z)$ to $(x+1, y+1, z+1)$ using a boundary-aware `getCell` function [S1, unofficial]:
+     - $v_{00} = \text{getCell}(x, y, z)$
+     - $v_{01} = \text{getCell}(x+1, y, z)$
+     - $v_{02} = \text{getCell}(x+1, y+1, z)$
+     - $v_{03} = \text{getCell}(x, y+1, z)$
+     - $v_{04} = \text{getCell}(x, y, z+1)$
+     - $v_{05} = \text{getCell}(x+1, y, z+1)$
+     - $v_{06} = \text{getCell}(x+1, y+1, z+1)$
+     - $v_{07} = \text{getCell}(x, y+1, z+1)$
+   - Calculate weights for each corner: For each corner $v_i$, compute $w_i = \| \mathbf{V} - \text{voxels}[v_i].\text{location} \|$ [S1, unofficial].
+   - Sum all weights: $W_{total} = \sum_{i=0}^{7} w_i$ [S1, unofficial].
+   - Normalize weights: $w'_i = w_i / W_{total}$ [S1, unofficial].
+   - Compute interpolated value: $V_{interp} = \sum_{i=0}^{7} \text{voxels}[v_i].\text{scalardata} \cdot w'_i$ [S1, unofficial].
+
+**Boundary Handling in `getCell`:**
+- If $x < 0$, set $x = 0$. If $x > W-1$, set $x = W-1$ [S1, unofficial].
+- If $y < 0$, set $y = 0$. If $y > H-1$, set $y = H-1$ [S1, unofficial].
+- If $z < 0$, set $z = 0$. If $z > D-1$, set $z = D-1$ [S1, unofficial].
+- Compute index as $x + y \cdot W + z \cdot W \cdot H$ [S1, unofficial].
+
+**Parameters:**
+- $t_{min}$: Default $0.0$ [S1, unofficial].
+- $t_{max}$: Default $\infty$ (or `FLT_MAX`) [S1, unofficial].
+
+**Pitfalls:**
+- The original source clamps coordinates to $[0, W]$, $[0, H]$, $[0, D]$ inclusive, which places $x=W$ one past the last valid 0-based index $W-1$ and causes out-of-bounds access [S1, unofficial]. The pseudocode below corrects this to clamp to $[0, W-1]$ [G].
+- Zero direction components cause division by zero in $\mathbf{inv\_dir}$; the implementation guards against this [G].
+- The condition $t_{far} > 0$ rejects valid intersections when $t_{min} > 0$ or rays start inside the volume; the condition is updated to $t_{far} > t_{min}$ [G].
+
+> **Unverified code.** The code below did not pass a test run against a reference implementation, or no test fits it, so it may contain errors.
+
+```python
+import math
+
+def get_cell(x, y, z, width, height, depth, voxels):
+    """Retrieves voxel index with boundary clamping.
+    Corrects source pitfall: clamps to [0, W-1] instead of [0, W] to prevent out-of-bounds access [G]."""
+    x = max(0, min(x, width - 1))
+    y = max(0, min(y, height - 1))
+    z = max(0, min(z, depth - 1))
+    return x + y * width + z * width * height
+
+def trilinear_interpolate(V, voxels, width, height, depth):
+    """Interpolates scalar value at point V using the distance-weighted scheme from [S1, unofficial]."""
+    x = math.floor(V.x)
+    y = math.floor(V.y)
+    z = math.floor(V.z)
+    
+    v00 = get_cell(x, y, z, width, height, depth, voxels)
+    v01 = get_cell(x+1, y, z, width, height, depth, voxels)
+    v02 = get_cell(x+1, y+1, z, width, height, depth, voxels)
+    v03 = get_cell(x, y+1, z, width, height, depth, voxels)
+    v04 = get_cell(x, y, z+1, width, height, depth, voxels)
+    v05 = get_cell(x+1, y, z+1, width, height, depth, voxels)
+    v06 = get_cell(x+1, y+1, z+1, width, height, depth, voxels)
+    v07 = get_cell(x, y+1, z+1, width, height, depth, voxels)
+    
+    corners = [v00, v01, v02, v03, v04, v05, v06, v07]
+    weights = []
+    for v_idx in corners:
+        loc = voxels[v_idx].location
+        dx = V.x - loc.x
+        dy = V.y - loc.y
+        dz = V.z - loc.z
+        weights.append(math.sqrt(dx*dx + dy*dy + dz*dz))
+    
+    total_weight = sum(weights)
+    if total_weight == 0.0:
+        return voxels[corners[0]].scalardata
+        
+    result = 0.0
+    for i, v_idx in enumerate(corners):
+        result += voxels[v_idx].scalardata * (weights[i] / total_weight)
+    return result
+
+def ray_box_intersect(ray_origin, ray_direction, bmin, bmax, tmin=0.0, tmax=float('inf')):
+    """Returns (near_t, far_t) if intersection exists, else None.
+    Guards against division by zero and fixes grazing edge/face cases [G]."""
+    inv_dir = [1.0 / d if d != 0.0 else 0.0 for d in ray_direction]
+    min_ts = [(bmin[i] - ray_origin[i]) * inv_dir[i] for i in range(3)]
+    max_ts = [(bmax[i] - ray_origin[i]) * inv_dir[i] for i in range(3)]
+    
+    near_t = max(min(min_ts[0], max_ts[0]), min(min_ts[1], max_ts[1]), min(min_ts[2], max_ts[2]))
+    far_t = min(max(min_ts[0], max_ts[0]), max(min_ts[1], max_ts[1]), max(min_ts[2], max_ts[2]))
+    
+    if near_t <= far_t and far_t > tmin:
+        return max(near_t, tmin), min(far_t, tmax)
+    return None
+```
+
+## Operating characteristics
+- **Time Complexity:** Not given in the sources.
+- **Memory Complexity:** Not given in the sources.
+- **Strengths:** Simple to implement; provides smoother results than nearest-neighbor sampling; intended for GPU rendering with multithreading support [S1, unofficial].
+- **Limitations:** The weighting scheme (Euclidean distance normalization) is non-standard for trilinear interpolation and may produce artifacts or incorrect values compared to standard linear interpolation based on fractional coordinates [S1, unofficial]. Boundary handling requires careful clamping to avoid out-of-bounds access [S1, unofficial].
+- **When to use:** Quick visualization of RAW volumetric data where high fidelity is not critical [S1, unofficial].
+- **When not to use:** Not given in the sources.
+
+## Background
+This method originates from an open-source project by Srinath Ravichandran (2014) intended as a basic starter code for volumetric visualization [S1, unofficial]. The project intended GPU rendering and noted multithreading via OpenMP pragmas as a possible extension [S1, unofficial]. The specific distance-weighted mechanism described is unique to this implementation and differs from the standard mathematical definition of trilinear interpolation [S1, unofficial].
+
+## Sources
+[S1] sriravic/volumeraycast, https://github.com/sriravic/volumeraycast, fetched 2026-10-26 (unofficial)

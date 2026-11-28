@@ -1,0 +1,106 @@
+# Depth Buffer Sign Determination
+
+Also called: Point Map Visibility Sign Determination, Sign Flipping for Voxel Corners
+
+## Overview
+Depth Buffer Sign Determination determines the inside/outside sign of Signed Distance Field (SDF) voxel corners by projecting them into camera space and comparing their depth against a rendered depth buffer of the surface [S1, S2, unofficial]. It differs from sibling methods like Normal-Based Sign Determination by relying on geometric occlusion rather than surface normals, thereby avoiding bubble artifacts caused by noisy normals or tiny triangles [S2, unofficial]. However, it is less accurate and fails on non-watertight geometry [S2, unofficial].
+
+## How it works
+**Inputs:**
+- Camera poses (intrinsic and extrinsic parameters) [S1, unofficial].
+- A point map $P_{world}$ representing the surface [S1, unofficial].
+- A depth buffer rendered from $P_{world}$ for each camera [S2, unofficial].
+- Voxel corners to be signed [S1, unofficial].
+
+**Outputs:**
+- A sign (+1 for outside, -1 for inside) for each voxel corner [S1, unofficial].
+
+**Data Structures:**
+- **Depth Buffer:** A 2D array storing the minimum depth value for each pixel $(u, v)$ across all surface points projected to that pixel [S1, unofficial].
+- **Point Map:** A set of 3D points $p_{world}$ representing the mesh surface [S1, unofficial].
+
+**Steps:**
+1. **Projection:** Project all voxel corners and the surface point map $P_{world}$ into the image plane of each camera using the camera projection matrix [S1, unofficial].
+2. **Visibility Check:** For each voxel corner, determine if it is "visible" to any camera [S1, unofficial]. A corner is considered visible (and thus outside) if its depth $d_{corner}$ is less than the depth $d_{surface}$ stored in the depth buffer at the corresponding pixel location [S1, unofficial]. This implies the corner is closer to the camera than the nearest surface point, meaning it is not occluded by the surface [S1, unofficial].
+3. **Frustum Check:** If a voxel corner is never projected to any valid pixel in any camera's view (i.e., it lies outside all camera frustums), it is also marked as visible/outside [S1, unofficial].
+4. **Sign Assignment:** If the corner is visible by any camera (via depth comparison or frustum check), its sign is set to positive (outside) [S1, S2, unofficial]. Otherwise, the sign remains negative (inside) [S2, unofficial].
+
+**Pseudocode:**
+> **Unverified code.** The code below did not pass a test run against a reference implementation, or no test fits it, so it may contain errors.
+
+```python
+def determine_sign_depth(voxel_corners, cameras, depth_buffers):
+    """
+    Determine the sign of voxel corners using depth buffer visibility.
+    
+    Args:
+        voxel_corners: List of (x, y, z) tuples for voxel corners.
+        cameras: List of camera objects with 'project' and 'frustum_contains' methods.
+                 'project' returns (u, v, depth). 'frustum_contains' returns bool.
+        depth_buffers: List of 2D lists (HxW) storing min depth for each pixel.
+        
+    Returns:
+        signs: List of +1 (outside) or -1 (inside).
+    """
+    signs = []
+    for corner in voxel_corners:
+        is_visible = False
+        
+        for cam_idx, camera in enumerate(cameras):
+            # Project corner to image space
+            u, v, d_corner = camera.project(corner)
+            
+            # Check if corner is within image bounds
+            if not camera.is_in_bounds(u, v):
+                continue
+                
+            # Get depth from buffer at this pixel
+            d_surface = depth_buffers[cam_idx][v][u]
+            
+            # Compare depths: visible if corner is closer than surface
+            if d_corner < d_surface:
+                is_visible = True
+                break
+        
+        # If not visible in any camera, check if it was outside all frustums
+        if not is_visible:
+            outside_all = True
+            for camera in cameras:
+                if camera.frustum_contains(corner):
+                    outside_all = False
+                    break
+            
+            if outside_all:
+                is_visible = True
+        
+        signs.append(1 if is_visible else -1)
+        
+    return signs
+```
+
+**Parameters:**
+- `sign_method='depth'`: Selects this algorithm in implementations like `mesh_to_sdf` [S2, unofficial].
+- `scan_count`, `scan_resolution`: Parameters for generating the point map/depth buffer [S2, unofficial].
+
+**Edge Cases and Pitfalls:**
+- **Holes in Mesh:** The method fails on non-watertight meshes [S2, unofficial]. If a mesh has holes, a camera may see "inside" the mesh through the hole, causing the depth buffer to record a deeper surface point. This leads to ray-shaped artifacts in the SDF volume [S2, unofficial].
+
+## Subtopics
+
+### Normal-Based Sign Determination
+Uses surface normals and dot products to determine sign. More robust to holes but prone to bubble artifacts on noisy geometry. Choose when mesh is watertight and normals are reliable. [Normal-Based Sign Determination](16359-normal-based-sign-determination.md)
+
+## Operating characteristics
+- Time complexity: Not given in the sources.
+- Memory complexity: Not given in the sources.
+- Strengths: Avoids bubble artifacts associated with normal-based methods [S2, unofficial].
+- Limitations: Fails on non-watertight meshes (holes) [S2, unofficial]. Less accurate than normal-based methods in some cases [S2, unofficial].
+- When to use: When the mesh is watertight and normal-based methods produce artifacts [S2, unofficial].
+- When not to use: When the mesh has holes or is non-watertight [S2, unofficial].
+
+## Background
+Originating from sparse voxel rasterization techniques for surface reconstruction [S1, unofficial], this method was adapted for SDF generation in tools like `mesh_to_sdf` [S2, unofficial]. It addresses the issue of "cone shaped artifacts" produced by normal-based voting on meshes with tiny triangles or inconsistent normals [S2, unofficial].
+
+## Sources
+[S1] SVRecon: Sparse Voxel Rasterization for Surface Reconstruction, https://doi.org/10.48550/arxiv.2511.17364, fetched 2026-10-26 (unofficial)
+[S2] mesh_to_sdf, https://github.com/marian42/mesh_to_sdf, fetched 2026-10-28 (unofficial)

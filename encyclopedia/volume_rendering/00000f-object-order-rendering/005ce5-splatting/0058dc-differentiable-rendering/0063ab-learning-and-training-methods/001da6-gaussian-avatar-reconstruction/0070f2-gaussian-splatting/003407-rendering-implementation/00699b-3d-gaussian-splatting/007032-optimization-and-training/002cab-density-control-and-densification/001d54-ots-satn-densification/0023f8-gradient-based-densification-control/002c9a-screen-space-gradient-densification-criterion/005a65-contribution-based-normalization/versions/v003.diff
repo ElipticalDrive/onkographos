@@ -1,0 +1,88 @@
+--- v002.md
++++ v003.md
+@@ -8,9 +8,9 @@
+ ## How it works
+ **Inputs and Outputs:**
+-*   **Input:** For each Gaussian $i$, the accumulated gradient vector $\mathbf{g}_i$ over all training views, and the set of per-pixel contribution weights $w_{i,p}$ for all pixels $p$ where the Gaussian contributes to the final color.
+-*   **Output:** A scalar densification score $\gamma_i$. If $\gamma_i$ exceeds a threshold $\tau$, the Gaussian is split or cloned.
++*   **Input:** For each Gaussian $i$, the accumulated gradient vector $\mathbf{g}_i$ over all training views, and the set of per-pixel contribution weights $w_{i,p}$ for all pixels $p$ where the Gaussian contributes to the final color [S1, unofficial].
++*   **Output:** A scalar densification score $\gamma_i$. If $\gamma_i$ exceeds a threshold $\tau$, the Gaussian is split or cloned [S1, unofficial].
+ 
+ **Data Structures:**
+-*   **Accumulated Gradient $\mathbf{g}_i$:** A 2D vector $(g_{i,x}, g_{i,y})$ storing the sum of gradients with respect to the projected screen-space mean $\mu_i$ across all views.
++*   **Accumulated Gradient $\mathbf{g}_i$:** A 2D vector $(g_{i,x}, g_{i,y})$ storing the sum of gradients with respect to the projected screen-space mean $\mu_i$ across all views [S1, unofficial].
+ *   **Contribution Weights $w_{i,p}$:** A scalar value per pixel $p$ in the view, defined as $w_{i,p} = \alpha_{i,p} T_{i,p}$, where $\alpha_{i,p}$ is the Gaussian's opacity at pixel $p$ and $T_{i,p}$ is the transmittance reaching the Gaussian [S1, unofficial].
+ 
+@@ -23,9 +23,9 @@
+     $$ g_{i,x,p} = \frac{\partial L_p}{\partial C_p} \cdot (c_i - A_{i,p}) \cdot w_{i,p} \cdot \frac{\partial \ln(G_{i,p})}{\partial \mu_{i,x}} $$
+     where:
+-    *   $\frac{\partial L_p}{\partial C_p}$ is the photometric error gradient at pixel $p$.
++    *   $\frac{\partial L_p}{\partial C_p}$ is the photometric error gradient at pixel $p$ [S1, unofficial].
+     *   $c_i$ is the color of Gaussian $i$.
+-    *   $A_{i,p}$ is the accumulated color from Gaussians rendered *before* $i$ (background/transmittance accumulation).
++    *   $A_{i,p}$ is the accumulated color from Gaussians rendered *before* $i$ (background/transmittance accumulation) [S1, unofficial].
+     *   $w_{i,p} = \alpha_{i,p} T_{i,p}$ is the contribution weight [S1, unofficial].
+-    *   $\frac{\partial \ln(G_{i,p})}{\partial \mu_{i,x}}$ is the geometric steering term, derived from the Gaussian's shape.
++    *   $\frac{\partial \ln(G_{i,p})}{\partial \mu_{i,x}}$ is the geometric steering term, derived from the Gaussian's shape [S1, unofficial].
+ 
+ 3.  **Accumulated Gradient:** The total gradient for Gaussian $i$ in a view is the sum over all pixels $p$:
+@@ -36,5 +36,5 @@
+     $$ \bar{w}_{i,v} = \frac{1}{N_{i,v}} \sum_p w_{i,p} $$
+     where $N_{i,v}$ is the number of pixels $p$ where $w_{i,p} > 0$ in view $v$ [S1, unofficial].
+-    *Note:* The global mean contribution $\bar{w}_i$ used in the final score is typically the sum of per-view means or the mean over all pixels across all views, depending on the specific implementation variant. The core definition uses the per-view mean to avoid footprint bias [S1, unofficial].
++    The global mean contribution $\bar{w}_i$ used in the final score is the sum of per-view means $\sum_v \bar{w}_{i,v}$ [S1, unofficial]. The core definition uses the per-view mean to avoid footprint bias [S1, unofficial].
+ 
+ 5.  **Densification Score:** The final criterion score $\gamma_i$ is:
+@@ -68,12 +68,12 @@
+     for view in views:
+         # 1. Compute projected footprint parameters for this view
+-        # Project 3D mean and covariance to 2D screen space
+-        mu_2d = project_mean(gaussian.mu_3d, view.camera_matrix)
+-        Sigma_2d = project_covariance(gaussian.Sigma_3d, view.camera_matrix, gaussian.mu_3d)
++        # Standard pinhole camera projection of 3D mean and covariance to 2D screen space
++        mu_2d = project_3d_to_2d(gaussian.mu_3d, view.camera_matrix)
++        Sigma_2d = project_covariance_3d_to_2d(gaussian.Sigma_3d, view.camera_matrix, gaussian.mu_3d)
+         
+         # 2. Identify contributing pixels and compute weights
+         # In practice, this is done during rasterization. 
+         # Here we assume we have access to the list of pixels p where the Gaussian is visible.
+-        contributing_pixels = get_contributing_pixels(gaussian, view)
++        contributing_pixels = get_rasterized_pixels(gaussian, view)
+         
+         view_gradient = [0.0, 0.0]
+@@ -133,4 +133,17 @@
+     
+     return score
++
++def project_3d_to_2d(mean_3d, camera_matrix):
++    # Standard perspective projection
++    return camera_matrix.project(mean_3d)
++
++def project_covariance_3d_to_2d(cov_3d, camera_matrix, mean_3d):
++    # Standard 3D to 2D covariance projection using Jacobian
++    J = camera_matrix.jacobian(mean_3d)
++    return J @ cov_3d @ J.T
++
++def get_rasterized_pixels(gaussian, view):
++    # Returns list of pixel coordinates covered by the Gaussian's 2D footprint
++    return view.rasterize_footprint(gaussian.mu_2d, gaussian.Sigma_2d)
+ ```
+ 
+@@ -152,9 +165,7 @@
+ **Formula:**
+ $$ \gamma_i^{\text{sum-alloc}} = \frac{\sum_v \|\mathbf{g}_{i,v}\|}{1 + \sum_v W_{i,v}} $$
+-**Comparison:** This places the denominator on a different scale and reintroduces footprint dependence, leading to instability or divergence on large scenes compared to the mean contribution variant [S1, unofficial].
++**Comparison:** This places the denominator on a different scale and explicitly reintroduces footprint dependence, leading to instability or divergence on large scenes compared to the mean contribution variant [S1, unofficial].
+ 
+ ## Operating characteristics
+-*   **Time Complexity:** $O(N \cdot P \cdot V)$, where $N$ is the number of Gaussians, $P$ is the average number of pixels per Gaussian footprint, and $V$ is the number of views. The normalization step is $O(V)$ per Gaussian.
+-*   **Memory Complexity:** $O(N \cdot V)$ to store accumulated gradients and contribution sums if not computed on the fly.
+ *   **Performance:** On occlusion-heavy scenes (e.g., Zip-NeRF), this method outperforms standard baselines (like StopThePop) on all image-quality metrics, reducing LPIPS by up to 12% [S1, unofficial]. It keeps the Gaussian count bounded under long training schedules where other criteria diverge [S1, unofficial].
+ *   **Scaling:** On smaller benchmarks (Mip-NeRF360), it improves metrics at the cost of increased Gaussian count (1.8× on 2DGS, 2.4× on 3DGS at threshold 0.002) [S1, unofficial]. Raising the threshold to 0.003 reduces the count closer to baseline levels while retaining gains [S1, unofficial].
+@@ -163,5 +174,5 @@
+ 
+ ## Background
+-Originated in the paper "Counting Contributions, Not Views: Occlusion-Aware Densification for 3D Gaussian Splatting" [S1, unofficial]. The method was developed to address the limitations of view-count normalization in the presence of occlusions, which is common in complex scenes. It builds on the observation that the gradient signal is intrinsically contribution-weighted, making the mean contribution a natural normalizer. The method has been ported and validated on 2DGS and 3DGS frameworks, demonstrating its generalizability beyond the original StopThePop baseline [S1, unofficial].
++Originated in the paper "Counting Contributions, Not Views: Occlusion-Aware Densification for 3D Gaussian Splatting" [S1, unofficial]. The method was developed to address the limitations of view-count normalization in the presence of occlusions, which is common in complex scenes [S1, unofficial]. It builds on the observation that the gradient signal is intrinsically contribution-weighted, making the mean contribution a natural normalizer [S1, unofficial]. The method has been ported and validated on 2DGS and 3DGS frameworks, demonstrating its generalizability beyond the original StopThePop baseline [S1, unofficial].
+ 
+ ## Sources

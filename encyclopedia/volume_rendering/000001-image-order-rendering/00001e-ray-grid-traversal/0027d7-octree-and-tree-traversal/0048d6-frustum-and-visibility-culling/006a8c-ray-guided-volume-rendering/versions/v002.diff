@@ -1,0 +1,151 @@
+--- v001.md
++++ v002.md
+@@ -8,14 +8,14 @@
+ ## How it works
+ **Inputs and Outputs:**
+-*   **Input:** A hierarchical volume data structure (either an octree or a hierarchical grid with bricking) and a transfer function.
+-*   **Output:** A rendered image and a list of required bricks for the current frame.
++*   **Input:** A hierarchical volume data structure (either an octree or a hierarchical grid with bricking) and a transfer function [S1].
++*   **Output:** A rendered image and a list of required bricks for the current frame [S1].
+ 
+ **Data Structures:**
+ The method relies on one of two primary data structures, accessed via a multi-level page table hierarchy or a tree structure with a node/brick pool [S1]:
+ 1.  **Octree/Tree Structure:**
+-    *   **Node Pool:** Stores active tree nodes. Each node contains pointers to child nodes in the pool and a pointer to an associated texture brick in the brick pool [S1].
++    *   **Node Pool:** Stores active tree nodes [S1]. Each node contains pointers to child nodes in the pool and a pointer to an associated texture brick in the brick pool [S1].
+     *   **Brick Pool:** A shared cache texture storing the actual voxel data (bricks) [S2, unofficial].
+ 2.  **Hierarchical Grid with Multi-level Page Tables:**
+-    *   **Page Tables:** Multi-level structures mapping virtual addresses to physical brick locations. Entries are flagged as mapped or unmapped [S1].
++    *   **Page Tables:** Multi-level structures mapping virtual addresses to physical brick locations [S1]. Entries are flagged as mapped or unmapped [S1].
+     *   **Brick Pool:** Shared cache texture for voxel data [S1].
+ 
+@@ -24,5 +24,5 @@
+ 2.  **Working Set Determination:** As rays traverse, they determine the required data resolution automatically, either on a per-sample basis [HBJP12] or per-brick basis [FSK13] [S1].
+ 3.  **Missing Brick Detection:** The ray-caster detects if a required brick is missing from GPU memory (e.g., a missing octree node, an unmapped page table entry, or a "missing" subtree flag) [S1].
+-4.  **Write-out:** The ray-caster writes out accurate information on missing bricks and brick usage. This is typically done using multiple render targets or modern OpenGL extensions such as `GL_ARB_shader_storage_buffer_object` [S1][S2, unofficial].
++4.  **Write-out:** The ray-caster writes out accurate information on missing bricks and brick usage [S1]. This is typically done using multiple render targets or modern OpenGL extensions such as `GL_ARB_shader_storage_buffer_object` [S1][S2, unofficial].
+ 5.  **Implicit Culling:** Visibility is determined during ray traversal, providing implicit view frustum culling without extra steps [S2, unofficial]. Rays also determine implicit occlusion culling without extra steps or occlusion buffers [S2, unofficial].
+ 6.  **Data Streaming:** The written-out information is used to load missing data into the GPU cache [S1].
+@@ -31,67 +31,55 @@
+ **Pseudocode:**
+ ```python
+-# Pseudocode for a single ray's interaction with the ray-guided system
+-# Assumes a global 'BrickPool' and 'PageTable' or 'NodePool'
++def ray_guided_volume_render(ray_origin, ray_direction, ray_length, brick_size, transfer_function):
++    accumulated_color = [0.0, 0.0, 0.0]
++    accumulated_opacity = 0.0
++    t = 0.0
++    missing_bricks = []
++    used_bricks = []
+ 
+-def ray_guided_traverse(ray_origin, ray_direction, max_depth):
+-    # Initialize traversal state
+-    current_node = root_node
+-    t = 0.0
+-    
+-    # List to store bricks required by this ray
+-    required_bricks = []
+-    
+-    while current_node is not None and t < max_distance:
+-        # Determine if the current node/brick is in GPU memory
+-        is_present = check_gpu_presence(current_node)
++    while t < ray_length and accumulated_opacity < 1.0:
++        pos = [ray_origin[i] + ray_direction[i] * t for i in range(3)]
++        brick_idx = [int(pos[i] // brick_size) for i in range(3)]
+         
++        is_present = brick_idx in gpu_cache
+         if not is_present:
+-            # Write out request for missing brick
+-            # This writes to a buffer accessible by the CPU or a streaming manager
+-            write_missing_brick_request(current_node.brick_id)
+-            
+-            # For the purpose of rendering this frame, we might skip or use lower res
+-            # [G] Implementation detail: Skip rendering or substitute with lower resolution
+-            current_node = get_next_node_in_traversal(current_node)
++            missing_bricks.append(brick_idx)
++            t += brick_size
+             continue
+             
+-        # If present, sample the brick
+-        sample = sample_brick(current_node.brick_id, ray_origin, ray_direction, t)
++        voxel_val = sample_voxel_at(pos, brick_idx)
++        color, alpha = transfer_function(voxel_val)
+         
+-        # Accumulate color/opacity based on transfer function
+-        accumulate_render_output(sample)
++        weight = alpha * (1.0 - accumulated_opacity)
++        accumulated_color = [accumulated_color[i] + color[i] * weight for i in range(3)]
++        accumulated_opacity += weight
+         
+-        # Record this brick as used for cache management
+-        record_brick_usage(current_node.brick_id)
+-        
+-        # Advance ray
+-        t = advance_ray_t(ray_origin, ray_direction, current_node, t)
+-        current_node = get_next_node_in_traversal(current_node)
+-        
+-    return required_bricks
++        used_bricks.append(brick_idx)
++        t += brick_size
+ 
+-def check_gpu_presence(node):
+-    # For octree: check if node pointer is valid in NodePool
+-    # For page tables: check if page table entry is flagged as mapped
+-    if node is None:
+-        return False
+-    if node.brick_id is None:
+-        return False
+-    return True
++    write_missing_bricks(missing_bricks)
++    write_usage_info(used_bricks)
++    return accumulated_color + [accumulated_opacity]
+ 
+-def write_missing_brick_request(brick_id):
+-    # Writes to a Shader Storage Buffer Object or Render Target
+-    # [G] Implementation detail: Append to a global atomic counter buffer
+-    append_to_missing_brick_buffer(brick_id)
++def sample_voxel_at(pos, brick_idx):
++    # [G] Standard trilinear interpolation within the brick
++    return 0.5
+ 
+-def record_brick_usage(brick_id):
+-    # Writes to a usage buffer to inform eviction policy
+-    # [G] Implementation detail: Increment usage counter or set timestamp
+-    append_to_usage_buffer(brick_id)
++def transfer_function(value):
++    # [G] Standard mapping from scalar to RGBA
++    return [value, value, value], value
++
++def write_missing_bricks(bricks):
++    # [G] Appends brick indices to a Shader Storage Buffer Object or render target
++    pass
++
++def write_usage_info(bricks):
++    # [G] Appends brick indices to a usage buffer for eviction policy
++    pass
+ ```
+ 
+ **Parameters and Typical Values:**
+ *   **Traversal Algorithm:** kd-restart algorithm is commonly used for octree traversal [S1].
+-*   **Resolution Determination:** Can be per-sample [HBJP12] or per-brick [FSK13].
++*   **Resolution Determination:** Can be per-sample [HBJP12] or per-brick [FSK13] [S1].
+ *   **OpenGL Extensions:** `GL_ARB_shader_storage_buffer_object` is used for writing out working set information [S2, unofficial].
+ 
+@@ -104,8 +92,8 @@
+ 
+ ### Gigavoxels System
+-Introduced by Crassin et al. in 2009, this system uses GPU-based octree volume rendering with ray-guided streaming. It employs an N^3 tree (octree) and the kd-restart algorithm for traversal, storing active nodes in a node pool and voxel data in a brick pool [S1]. It targets entertainment applications and supports real-time transfer function updates [S1].
++Introduced by Crassin et al. in 2009, this system uses GPU-based octree volume rendering with ray-guided streaming [S1]. It employs an N^3 tree (octree) and the kd-restart algorithm for traversal, storing active nodes in a node pool and voxel data in a brick pool [S1]. It targets entertainment applications and supports real-time transfer function updates [S1].
+ 
+ ### Multi-level Page Table Hierarchy
+-Proposed by Hadwiger et al. in 2012, this approach uses hierarchical grids with bricking accessed via multi-level page tables instead of a tree structure. It scales to petavoxel data and efficiently handles highly anisotropic data common in electron microscopy [S1]. It offers advantages in traversal complexity and cache access behavior compared to standard octree traversal for very large data [S1].
++Proposed by Hadwiger et al. in 2012, this approach uses hierarchical grids with bricking accessed via multi-level page tables instead of a tree structure [S1]. It scales to petavoxel data and efficiently handles highly anisotropic data common in electron microscopy [S1]. It offers advantages in traversal complexity and cache access behavior compared to standard octree traversal for very large data [S1].
+ 
+ ## Operating characteristics
+@@ -125,5 +113,5 @@
+ 
+ ## Background
+-*   **Origin:** The concept was introduced by Crassin et al. in 2009 with the Gigavoxels system [S2, unofficial]. Gobbetti et al. [GMG08] were among the first to implement a volume ray-caster with stackless GPU octree traversal using occlusion queries, though it was not fully ray-guided because culling was performed on the CPU [S1].
++*   **Origin:** The concept was introduced by Crassin et al. in 2009 with the Gigavoxels system [S1]. Gobbetti et al. [GMG08] were among the first to implement a volume ray-caster with stackless GPU octree traversal using occlusion queries, though it was not fully ray-guided because culling was performed on the CPU [S1].
+ *   **History and Development:**
+     *   2009: Crassin et al. [CN09] introduced the Gigavoxels system for GPU-based octree volume rendering with ray-guided streaming [S1].

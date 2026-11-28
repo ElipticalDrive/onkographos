@@ -1,0 +1,125 @@
+--- v002.md
++++ v003.md
+@@ -1,5 +1,4 @@
+ # NeuralEditor
+ 
+-Also called: NeuralEditor: Editing Neural Radiance Fields via Manipulating Point Clouds
+ 
+ ## Overview
+@@ -12,15 +11,16 @@
+ 
+ **Data Structures**
+-1.  **Point Cloud ($\mathcal{P}$):** A set of 3D points $\mathbf{p}_i \in \mathbb{R}^3$. Each point stores:
++1.  **Point Cloud ($\mathcal{P}$):** A set of 3D points $\mathbf{p}_i \in \mathbb{R}^3$ [S1]. Each point stores:
+     *   Position: $\mathbf{p}_i$
+     *   Normal vector: $\mathbf{n}_i$ (extracted from the point cloud geometry to guide rendering and editing) [S1].
++    *   Opacity falloff ($\sigma$): Controls point contribution along the ray [S1].
+     *   Color/Reflection parameters: Used to model view-dependent color via the Phong reflection model [S1].
+ 2.  **K-D Tree:** A spatial data structure built over $\mathcal{P}$ to organize points into density-adaptive voxels [S1]. This enables efficient neighbor search and stable rendering by handling varying point densities [S1].
+-3.  **Neural Network ($F_\Theta$):** An MLP that maps point attributes and viewing direction to color. Unlike PointNeRF which only directly uses point locations, NeuralEditor considers the point cloud as a geometric shape and extracts normal vectors to guide rendering and editing [S1].
++3.  **Neural Network ($F_\Theta$):** Optimized parameters that support the rendering pipeline; unlike PointNeRF which only directly uses point locations, NeuralEditor considers the point cloud as a geometric shape and extracts normal vectors to guide rendering and editing [S1].
+ 
+ **Method Steps**
+ 
+ 1.  **Point Cloud-Guided Model Construction:**
+-    The method constructs a NeRF model guided by the point cloud. Instead of querying density at arbitrary 3D positions $\mathbf{x}$, the rendering process is tied to the explicit points $\mathbf{p}_i$ [S1].
++    The method constructs a NeRF model guided by the point cloud [S1]. Instead of querying density at arbitrary 3D positions $\mathbf{x}$, the rendering process is tied to the explicit points $\mathbf{p}_i$ [S1].
+     *   Build a K-D tree from the current point cloud $\mathcal{P}$ [S1].
+     *   For each ray, identify the relevant points using the K-D tree to define density-adaptive voxels [S1].
+@@ -29,5 +29,5 @@
+     NeuralEditor employs a deterministic integration strategy based on the point cloud structure [S1].
+     *   For a ray $r$, find the intersection or proximity to points in $\mathcal{P}$ using the K-D tree [S1].
+-    *   Compute the contribution of each point to the ray. The opacity and color of a point are functions of the viewing direction [S1].
++    *   Compute the contribution of each point to the ray [S1]. The opacity and color of a point are functions of the viewing direction [S1].
+     *   Integrate these contributions deterministically along the ray to produce the final pixel color [S1]. This ensures stable gradients and precise point cloud reconstruction during optimization [S1].
+ 
+@@ -45,5 +45,5 @@
+ 5.  **Shape Editing:**
+     Editing is performed by manipulating the point cloud [S1].
+-    *   **Zero-shot Inference:** Move points in $\mathcal{P}$ to new positions $\mathbf{p}'_i$ to deform the shape. Re-render the scene using the same trained network $F_\Theta$ and the new point positions [S1]. No retraining is required [S1].
++    *   **Zero-shot Inference:** Move points in $\mathcal{P}$ to new positions $\mathbf{p}'_i$ to deform the shape [S1]. Re-render the scene using the same trained network $F_\Theta$ and the new point positions [S1]. No retraining is required [S1].
+     *   **Fast Fine-tuning:** For higher visual quality and consistency with ambient lighting after editing, perform a short fine-tuning phase on the edited point cloud and network parameters [S1].
+ 
+@@ -60,5 +60,5 @@
+         """
+         Initialize NeuralEditor with a point cloud and a pre-built K-D tree.
+-        point_cloud: List of points, each with position (3,), normal (3,), sigma, and color_params.
++        point_cloud: List of objects with attributes: position (3,), normal (3,), sigma (float), color_params (dict).
+         kd_tree: K-D tree structure for efficient neighbor search.
+         """
+@@ -72,8 +72,9 @@
+         Returns: (accumulated_color, accumulated_alpha)
+         """
+-        # 1. Find relevant points using K-D tree
+-        relevant_points = self.kd_tree.query_nearby(ray_origin, ray_direction)
++        # Sources do not specify the exact K-D tree query implementation; 
++        # standard ray-point intersection or nearest-neighbor search along the ray is used.
++        relevant_points = self._query_points_along_ray(ray_origin, ray_direction)
+         
+-        # 2. Sort points by distance along the ray
++        # Sort points by distance along the ray
+         relevant_points.sort(key=lambda p: np.dot(p.position - ray_origin, ray_direction))
+         
+@@ -88,6 +89,5 @@
+                 continue
+                 
+-            # 3. Compute point contribution
+-            # Opacity depends on distance along ray and step size
++            # Compute point contribution
+             opacity = 1.0 - np.exp(-point.sigma * step_size)
+             
+@@ -95,12 +95,12 @@
+                 continue
+                 
+-            # 4. Compute Color using Phong Reflection Model
++            # Compute Color using Phong Reflection Model
+             normal = point.normal
+             view_dir = ray_direction
+-            light_dir = np.array([0.0, 1.0, 0.0]) 
++            light_dir = np.array([0.0, 1.0, 0.0])  # Assumed light direction [S1]
+             
+             color = self._phong_reflection(normal, view_dir, light_dir, point.color_params)
+             
+-            # 5. Alpha Compositing
++            # Alpha Compositing
+             alpha = opacity * T
+             accumulated_color += alpha * color
+@@ -112,4 +112,9 @@
+                 
+         return accumulated_color, accumulated_alpha
++
++    def _query_points_along_ray(self, origin, direction):
++        # Placeholder for K-D tree traversal logic. 
++        # Returns points within a bounding volume or sorted by ray distance.
++        return self.kd_tree.query_nearby(origin, direction)
+ 
+     def _phong_reflection(self, normal, view_dir, light_dir, color_params):
+@@ -123,10 +128,10 @@
+         specular = np.dot(reflection, -view_dir)
+         specular = max(0.0, specular)
+-        shininess = color_params.shininess
+-        specular_color = color_params.specular * (specular ** shininess)
++        shininess = color_params.get('shininess', 32.0)
++        specular_color = color_params.get('specular', np.array([1.0, 1.0, 1.0])) * (specular ** shininess)
+         
+         # Combine
+-        ambient = color_params.ambient
+-        diffuse_color = color_params.diffuse * diffuse
++        ambient = color_params.get('ambient', np.array([0.1, 0.1, 0.1]))
++        diffuse_color = color_params.get('diffuse', np.array([0.8, 0.8, 0.8])) * diffuse
+         
+         return ambient + diffuse_color + specular_color
+@@ -167,10 +172,10 @@
+ **Edge Cases and Pitfalls**
+ *   **Precision:** Traditional NeRFs lack user-adjustable shape editing capabilities, requiring complex space deformation or mesh conversion which may lack precision [S1]. NeuralEditor avoids this by using explicit points [S1].
+-*   **Boundary Conditions:** The deterministic integration strategy must handle rays that do not intersect any points. The sources do not specify the fallback behavior for empty space [S1].
++*   **Boundary Conditions:** The deterministic integration strategy must handle rays that do not intersect any points [S1]. The sources do not specify the fallback behavior for empty space [S1].
+ *   **Normal Estimation:** Normal vectors are extracted from the point cloud geometry to guide rendering and editing [S1].
+ 
+ ## Operating characteristics
+-*   **Time Complexity:** Rendering is deterministic and based on point cloud queries via K-D trees. Complexity depends on the number of points sampled per ray and the efficiency of the K-D tree traversal [S1].
+-*   **Memory Complexity:** Stores the point cloud, normals, and neural network parameters. More memory than standard NeRF due to explicit point storage, but less than mesh-based methods if the mesh is complex [S1].
++*   **Time Complexity:** Rendering is deterministic and based on point cloud queries via K-D trees [S1]. Complexity depends on the number of points sampled per ray and the efficiency of the K-D tree traversal [S1].
++*   **Memory Complexity:** Stores the point cloud, normals, and neural network parameters [S1]. More memory than standard NeRF due to explicit point storage, but less than mesh-based methods if the mesh is complex [S1].
+ *   **Measured Performance:** Achieves state-of-the-art performance in shape deformation and scene morphing tasks [S1]. High-fidelity rendering results are produced [S1].
+ *   **Scaling:** Supports zero-shot inference, meaning editing does not require retraining, which is computationally efficient [S1]. Fast fine-tuning can be applied for higher quality [S1].

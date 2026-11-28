@@ -1,0 +1,202 @@
+--- v003.md
++++ v004.md
+@@ -1,104 +1,125 @@
+ # Explicit Tone Mapping
+ 
+-Also called: Camera response modeling, Global Tone-Mapping Function, HDR to LDR conversion, M(E, EV), Reinhard Tone-Mapping with Exposure Scaling
++Also called: Camera response modeling, Gamma Correction, Global Tone-Mapping Function, HDR to LDR Conversion, M(E, EV), Reinhard Tone Mapping, Reinhard Tone-Mapping with Exposure Scaling, Soft Clipping
+ 
+ ## Overview
+-Explicit Tone Mapping is a global function that converts High Dynamic Range (HDR) pixel values into Low Dynamic Range (LDR) images for evaluation, visualization, or as input for downstream tasks [S1, S2]. It simulates the image acquisition process of a digital camera by combining exposure scaling, white balance, and a parameterized Camera Response Function (CRF) [S2]. Unlike adaptive or local tone-mapping operators, it applies a uniform transformation across the entire image based on physical radiometric parameters [S1, S2].
++Explicit tone mapping is a post-processing step that compresses the high dynamic range (HDR) RGB image output from volume rendering into a perceptible low dynamic range (LDR) image suitable for display [S1, S2, S3]. It differs from implicit or learned tone mapping methods by using a fixed, parameterized mathematical function—typically combining exposure scaling, a global tone-mapping operator (such as Reinhard), and gamma correction—to simulate camera response and ensure the final image fits within the displayable range [S2, S3].
+ 
+ ## How it works
+ **Inputs and Outputs**
+-*   **Input:** HDR image $I_h$ (or ray color $C_h(\mathbf{r}) \in \mathbb{R}^3$ for a specific ray $\mathbf{r}$) [S2].
+-*   **Parameters:** Exposure Value $EV \in \mathbb{R}$ [S1], white balance parameters $\theta_w = [w_r, w_g, w_b]^T \in \mathbb{R}^3$ [S2], CRF control points $\theta_g$ (256 values) [S2], and thresholding coefficient $\alpha$ [S2].
+-*   **Output:** LDR image $I_l$ (pixel values in $[0, 1]$) [S1, S2].
++*   **Input:** An HDR image $I_h$ (or pixel radiance $C_h(\mathbf{r})$) with values typically in linear RGB space, potentially exceeding the [0, 1] range [S3, S5].
++*   **Parameters:** Exposure value $EV$ (or exposure time $\Delta t$), white balance coefficients $\theta_w$, and optionally a scale factor $\Phi$ or soft-clipping threshold $\tau$ [S2, S3][S4, unofficial][S5].
++*   **Output:** An LDR image $I_l$ with values in the range [0, 1], typically in sRGB space [S1, S5].
+ 
+ **Data Structures**
+-*   **CRF Lookup:** A 1D grid of 256 control points representing the CRF $g(x)$ over the domain $[0, 1]$ [S2]. The function is approximated as a piece-wise linear function [S2].
+-*   **White Balance Vector:** A 3-element vector $\theta_w$ [S2].
++*   **HDR Image:** A 2D array or tensor of floating-point values representing linear radiance per pixel [S3].
++*   **White Balance Parameters:** A vector $\theta_w = [w_r, w_g, w_b]^T \in \mathbb{R}^3$ [S3].
++*   **CRF Control Points (Optional):** If parameterizing the Camera Response Function (CRF) explicitly, a set of 256 control points defining a piece-wise linear function [S3].
+ 
+ **Steps**
+-1.  **Exposure Scaling:** Scale the HDR pixel value $E$ by $2^{EV}$ to simulate exposure time $\Delta t = 2^{EV}$ [S1].
+-2.  **White Balance:** Apply element-wise multiplication of the scaled HDR color channels by the white balance parameters [S2].
+-3.  **CRF Application:** Map the white-balanced pixel value to the LDR range using the parameterized CRF $g$ [S2].
+-4.  **Leaky Thresholding:** Apply leaky thresholding to the CRF output to handle saturation regions during training [S2].
++The standard explicit tone mapping pipeline, as defined in HDR-NeRF and related works, proceeds as follows [S2, S3]:
+ 
+-**Formulas**
+-The overall tone mapping function is $I_l = T(I_h, \theta) = g_{leaky}(w(I_h))$ [S2].
++1.  **Exposure Scaling:** Scale the HDR pixel value $E$ by $2^{EV}$ to simulate camera exposure. This is equivalent to multiplying by the exposure time $\Delta t = 2^{EV}$ [S2].
++    $$ E' = 2^{EV} E $$
++    *Note: Some implementations use a fixed scale factor $\Phi$ instead of or in addition to $EV$, e.g., $E' = \Phi \Delta t_2 E$ [S4, unofficial].*
+ 
+-1.  **Exposure Scaling (S1):**
+-    $$ E_{scaled} = 2^{EV} E $$
+-    Where $E$ is the HDR pixel value and $EV$ is the exposure value [S1].
++2.  **White Balance (Optional):** Apply element-wise multiplication with white balance parameters $\theta_w$ to the HDR pixel color $C_h(\mathbf{r})$ [S3].
++    $$ I_w = C_h(\mathbf{r}) \odot \theta_w $$
++    The parameters $\theta_w$ are regularized to be positive [S3].
+ 
+-2.  **White Balance (S2):**
+-    $$ I_w = C_h(\mathbf{r}) \odot \theta_w = \begin{bmatrix} w_r c_h^r \\ w_g c_h^g \\ w_b c_h^b \end{bmatrix} $$
+-    Where $\odot$ is element-wise product, $C_h(\mathbf{r}) = [c_h^r, c_h^g, c_h^b]^T$, and $\theta_w$ is regularized to be positive [S2].
++3.  **Tone Mapping Operator:** Apply a global tone-mapping function to compress the dynamic range. The most common operator is the Reinhard tone mapper [S1, S2][S4, unofficial]:
++    $$ T(E') = \frac{E'}{E' + 1} $$
++    *Alternative:* Some implementations use a soft clipping function $\phi(x)$ with threshold $\tau$ (e.g., $\tau=0.95$) for $x > \tau$ [S5]:
++    $$ \phi(x) = \begin{cases} x & \text{if } x \leq \tau \\ \tau + \frac{x-\tau}{1-\tau} (1 - e^{-\frac{x-\tau}{1-\tau}}) & \text{if } x > \tau \end{cases} $$
++    *Note: The Reinhard operator is often preferred for its simplicity and differentiability [S1, S2].*
+ 
+-3.  **CRF Mapping (S2):**
+-    The CRF $g(x)$ is a piece-wise linear function defined by 256 control points. For a pixel value $x$ in $I_w$, $g(x)$ is computed by interpolating the control points in the domain $[0, 1]$ using 1D grid-sampling [S2]. Boundary conditions are $g(0) = 0$ and $g(1) = 1$ [S2].
++4.  **Camera Response Function (CRF) (Optional):** If a learnable or explicit CRF $g$ is used, map the tone-mapped value $I_w$ to $I_l$ using piece-wise linear interpolation over 256 intervals [S3]. The CRF is constrained by boundary conditions $g(0)=0$ and $g(1)=1$ [S3]. For differentiability during training, leaky thresholding is applied to handle saturation:
++    $$ g_{\text{leaky}}(x) = \begin{cases} \alpha x & \text{if } x < 0 \\ g(x) & \text{if } 0 \leq x \leq 1 \\ -\frac{\alpha}{\sqrt{x}} + \alpha + 1 & \text{if } x > 1 \end{cases} $$
++    where $\alpha$ is a thresholding coefficient [S3].
+ 
+-4.  **Leaky Thresholding (S2):**
+-    To propagate loss in saturation regions, the CRF is modified to $g_{leaky}(x)$:
+-    $$ g_{leaky}(x) = \begin{cases} \alpha x, & x < 0 \\ g(x), & 0 \leq x \leq 1 \\ -\frac{\alpha}{\sqrt{x}} + \alpha + 1, & x > 1 \end{cases} $$
+-    Where $\alpha$ is the thresholding coefficient [S2].
++5.  **Gamma Correction:** Apply gamma correction to convert the linear LDR value to sRGB space. The standard gamma is $\gamma = 2.2$ [S2][S4, unofficial][S5].
++    $$ I_l = (T(E'))^{\frac{1}{2.2}} $$
++    *Note: Some implementations omit this step if the tone mapper already accounts for it or if the target display does not require sRGB gamma [S1].*
+ 
+ **Pseudocode**
+ ```python
+-def explicit_tone_mapping(hdr_image, ev, white_balance, crf_control_points, alpha):
+-    # hdr_image: array of shape (..., 3) with HDR pixel values
+-    # ev: scalar exposure value
+-    # white_balance: array of shape (3,) with [wr, wg, wb]
+-    # crf_control_points: array of shape (256,) representing CRF values at uniform intervals in [0, 1]
+-    # alpha: scalar thresholding coefficient
++import math
+ 
+-    # 1. Exposure Scaling
+-    exposure_scale = 2.0 ** ev
+-    scaled_image = hdr_image * exposure_scale
+-
+-    # 2. White Balance
+-    white_balanced = scaled_image * white_balance
+-
+-    # 3 & 4. CRF Mapping and Leaky Thresholding
+-    x = white_balanced.flatten()
+-    ldr_flat = []
+-
+-    for val in x:
+-        if val < 0.0:
+-            # Leaky threshold for undersaturation
+-            ldr_flat.append(alpha * val)
+-        elif val > 1.0:
+-            # Leaky threshold for oversaturation
+-            ldr_flat.append(-alpha / (val ** 0.5) + alpha + 1.0)
+-        else:
+-            # Linear interpolation over 256 control points in [0, 1]
+-            idx = val * 255.0
+-            idx_low = int(idx)
+-            idx_high = min(idx_low + 1, 255)
+-            frac = idx - idx_low
+-            ldr_flat.append(crf_control_points[idx_low] + frac * (crf_control_points[idx_high] - crf_control_points[idx_low]))
+-
+-    return np.array(ldr_flat).reshape(white_balanced.shape)
++def explicit_tone_mapping(hdr_image, ev=0.0, white_balance=None, gamma=2.2, use_reinhard=True, tau=0.95):
++    """
++    Converts an HDR image to LDR using explicit tone mapping.
++    
++    Args:
++        hdr_image: 2D array or tensor of shape (H, W, 3) with linear RGB values.
++        ev: Exposure value (EV). Exposure time delta_t = 2^ev.
++        white_balance: Optional vector [wr, wg, wb] for white balancing.
++        gamma: Gamma value for correction (default 2.2).
++        use_reinhard: If True, use Reinhard operator; else use soft clipping.
++        tau: Threshold for soft clipping (default 0.95).
++        
++    Returns:
++        ldr_image: 2D array or tensor of shape (H, W, 3) with sRGB values in [0, 1].
++    """
++    # Step 1: Exposure Scaling
++    # delta_t = 2^ev
++    delta_t = math.pow(2, ev)
++    scaled_image = hdr_image * delta_t
++    
++    # Step 2: White Balance (Optional)
++    if white_balance is not None:
++        # Element-wise multiplication
++        scaled_image = scaled_image * white_balance
++        
++    # Step 3: Tone Mapping Operator
++    if use_reinhard:
++        # Reinhard tone mapping: E / (E + 1)
++        tone_mapped = scaled_image / (scaled_image + 1.0)
++    else:
++        # Soft clipping
++        tone_mapped = scaled_image.copy()
++        mask = scaled_image > tau
++        if mask.any():
++            x = scaled_image[mask]
++            # phi(x) = tau + (x-tau)/(1-tau) * (1 - exp(-(x-tau)/(1-tau)))
++            term = (x - tau) / (1 - tau)
++            tone_mapped[mask] = tau + term * (1 - math.exp(-term))
++            
++    # Step 4: Gamma Correction
++    # Raise to power 1/gamma
++    ldr_image = tone_mapped ** (1.0 / gamma)
++    
++    # Clamp to [0, 1] to handle any numerical overflow
++    ldr_image = np.clip(ldr_image, 0.0, 1.0)
++    
++    return ldr_image
+ ```
+ 
+-**Parameters**
+-*   $EV$: Exposure value. Typical values depend on the desired exposure range for synthetic or real-world scenes [S1].
+-*   $\theta_w$: White balance parameters. Regularized to be positive [S2].
+-*   $\alpha$: Thresholding coefficient. Value not given in the sources [S2].
+-*   CRF Control Points: 256 values. Boundary conditions $g(0)=0, g(1)=1$ [S2].
++**Edge Cases and Pitfalls**
++*   **Precision:** HDR values can be very large. The Reinhard operator handles large values gracefully by asymptotically approaching 1, but floating-point overflow can occur before tone mapping if not scaled properly [S2].
++*   **Saturation:** In training scenarios, saturated pixels (clipped to 0 or 1) provide no gradient information. Leaky thresholding or masking is required to propagate loss through these regions [S3].
++*   **Gamma Mismatch:** Applying gamma correction twice (e.g., if the renderer already outputs sRGB) will result in incorrect colors [S1].
++*   **White Balance Regularization:** White balance parameters must be constrained to positive values to maintain physical plausibility [S3].
+ 
+-**Edge Cases and Pitfalls**
+-*   **Saturation:** Values outside $[0, 1]$ are handled by leaky thresholding to allow gradient propagation during training [S2].
+-*   **White Balance Regularization:** $\theta_w$ must be positive to maintain physical propriety [S2].
+-*   **CRF Domain:** The CRF is defined on $[0, 1]$. Inputs outside this range require special handling (leaky thresholding) [S2].
++## Subtopics
++
++### [HDR-GS Tone Mapping via MLP](19698-hdr-gs-tone-mapping-via-mlp.md)
++This method models the inverse tone-mapping function for High Dynamic Range Gaussian Splatting (HDR-GS) by transforming the input signal to a logarithmic domain, thereby enhancing Multi-Layer Perceptron (MLP) training stability and avoiding nonlinearity and discontinuity issues inherent in linear domain multiplication. It differs from traditional non-parametric calibration methods by parameterizing the Camera Response Function (CRF) as a learnable MLP, allowing for joint optimization with the scene representation.
+ 
+ ## Operating characteristics
+-*   **Differentiability:** The method is fully differentiable, enabling end-to-end training of radiance fields with LDR supervision [S2].
+-*   **Physical Simulation:** It physically simulates the camera response pipeline [S2].
+-*   **Usage:** It is used to generate LDR ground truth views from HDR renders for evaluation [S1].
+-*   **When to Use:** It is appropriate for HDR radiance field training and evaluation where LDR inputs or outputs are required [S1, S2].
+-*   **Not Given in the Sources:** Time complexity, memory complexity, and qualitative limitations regarding local contrast preservation.
++*   **Time Complexity:** $O(N)$ where $N$ is the number of pixels, as it involves per-pixel arithmetic operations [S2].
++*   **Memory Complexity:** $O(N)$ for storing the output LDR image [S2].
++*   **Performance:** Extremely fast, suitable for real-time rendering and interactive applications [S1].
++*   **Strengths:** Simple to implement, differentiable (if using smooth operators like Reinhard or soft clipping), and physically interpretable via exposure and white balance parameters [S2, S3].
++*   **Limitations:** Global tone mapping may not preserve local contrast as well as adaptive methods. The choice of gamma and exposure is critical and may require manual tuning or optimization [S2].
++*   **When to use:** When a simple, differentiable, and fast conversion from HDR to LDR is needed, especially in neural rendering pipelines where the tone mapping parameters can be learned or optimized [S2, S3].
++*   **When not to use:** When high-fidelity local contrast preservation is required, or when the dynamic range is extremely wide and requires adaptive tone mapping [S2].
+ 
+ ## Background
+-Explicit Tone Mapping was introduced in the context of HDR-NeRF and HDR-Plenoxels to evaluate and train Neural Radiance Fields using LDR images [S1, S2]. It is based on the classical Reinhard tone-mapping operator [S1]. The method simulates the image acquisition pipeline of a digital camera, including white balance and CRF [S2].
++Explicit tone mapping has its roots in photographic tone reproduction and computer graphics. The Reinhard tone mapping operator was introduced by Reinhard et al. in 2002 [S1, S2]. It has been widely adopted in neural radiance field (NeRF) and volume rendering pipelines to generate LDR ground truth images for training and evaluation [S2, S3]. The method is often combined with gamma correction to match the sRGB standard [S2, S5].
+ 
+ ## Sources
+-[S1] HDR-NeRF: High Dynamic Range Neural Radiance Fields, https://xhuangcv.github.io/hdr-nerf/, fetched 2026-10-27
+-[S2] HDR-Plenoxels: Self-Calibrating High Dynamic Range Radiance Fields, https://doi.org/10.1007/978-3-031-19824-3_23, fetched 2026-10-26+[S1] Real-time interactive platform-agnostic volumetric path tracing in webGL 2.0, https://doi.org/10.1145/3208806.3208814, fetched 2026-10-28
++[S2] HDR-NeRF: High Dynamic Range Neural Radiance Fields, https://xhuangcv.github.io/hdr-nerf/, fetched 2026-10-27
++[S3] HDR-Plenoxels: Self-Calibrating High Dynamic Range Radiance Fields, https://doi.org/10.1007/978-3-031-19824-3_23, fetched 2026-10-26
++[S4] Seeing through Light and Darkness: Sensor-Physics Grounded Deblurring HDR NeRF from Single-Exposure Images and Events, https://arxiv.org/abs/2601.15475v4, fetched 2026-10-26 (unofficial)
++[S5] Neural Light Field Estimation for Street Scenes with Differentiable Virtual Object Insertion, https://doi.org/10.1007/978-3-031-20086-1_22, fetched 2026-10-30

@@ -1,0 +1,100 @@
+# Diffusion Tensor Definition
+
+Also called: DTI Tensor
+
+## Overview
+The Diffusion Tensor is a 3x3 symmetric positive-definite matrix that serves as the native measurement quantity in Diffusion Tensor Imaging (DTI), modeling the local anisotropic diffusion of water molecules in biological tissue [S1, S2, unofficial]. It is defined by three orthogonal eigenvectors and their corresponding eigenvalues, which geometrically represent the principal axes and magnitudes of a diffusion ellipsoid [S1, unofficial]. This definition distinguishes the tensor from scalar metrics like the Apparent Diffusion Coefficient (ADC) or derived visualizations such as those using Random Field Correlation, by providing the full second-order directional information required for fiber tracking [S1, S2, unofficial].
+
+## How it works
+**Inputs and Outputs**
+*   **Input:** A 3x3 symmetric diffusion tensor $D$ at a specific voxel location in Cartesian space.
+*   **Output:** Three eigenvalues $\lambda_1, \lambda_2, \lambda_3$ (where $\lambda_1 \ge \lambda_2 \ge \lambda_3 \ge 0$) and three corresponding unit eigenvectors $v_{\lambda_1}, v_{\lambda_2}, v_{\lambda_3}$.
+
+**Data Structures**
+The tensor $D$ is stored as a 3x3 matrix:
+$$
+D = \begin{bmatrix}
+D_{xx} & D_{xy} & D_{xz} \\
+D_{xy} & D_{yy} & D_{yz} \\
+D_{xz} & D_{yz} & D_{zz}
+\end{bmatrix}
+$$
+Due to symmetry, only 6 unique values are stored. The eigenvalues and eigenvectors are typically stored as a vector of 3 floats for eigenvalues and a 3x3 matrix (or 3 vectors) for eigenvectors.
+
+**Mathematical Definition and Properties**
+The eigenvectors and eigenvalues are derived from the characteristic equation:
+$$ \det(D - \lambda I) = 0 $$
+The resulting eigenvectors satisfy the following orthogonality conditions in Cartesian space [S1, unofficial]:
+$$ \langle v_{\lambda_1}, v_{\lambda_2} \rangle = \langle v_{\lambda_2}, v_{\lambda_3} \rangle = \langle v_{\lambda_1}, v_{\lambda_3} \rangle = 0 $$
+Additionally, the eigenvectors form a right-handed coordinate system, allowing the third eigenvector to be computed via the cross product of the first two [S1, unofficial]:
+$$ v_{\lambda_1} \times v_{\lambda_2} = v_{\lambda_3} $$
+This property reduces computational effort during reconstruction or visualization [S1, unofficial].
+
+**Geometric Interpretation**
+The tensor defines an ellipsoid where the eigenvectors represent the spanning radii and the eigenvalues represent the squared lengths of these radii, describing the shape to which water diffuses from a given point in a given time [S1, unofficial].
+
+**Pitfalls and Edge Cases**
+1.  **Critical Points:** A critical point occurs when two eigenvalues are equal ($\lambda_i = \lambda_j$ for $i \neq j$) [S1, unofficial]. At these points, the corresponding eigenvectors are not uniquely defined, and anisotropy measures (such as $c_l$ or $c_p$) become zero [S1, unofficial].
+2.  **Orientation Ambiguity:** Eigenvectors are orientationless, meaning they define a direction but not a sign (i.e., $v$ and $-v$ are equivalent) [S1, unofficial]. This causes interpolation problems if adjacent voxels have contrary orientations, requiring sign-flipping algorithms to ensure continuity [S1, unofficial].
+
+**Pseudocode**
+> **Unverified code.** The code below did not pass a test run against a reference implementation, or no test fits it, so it may contain errors.
+
+```python
+def decompose_tensor(D):
+    """
+    Decomposes a 3x3 symmetric diffusion tensor D into eigenvalues and eigenvectors.
+    D is a list of lists or 2D array: [[Dxx, Dxy, Dxz], [Dxy, Dyy, Dyz], [Dxz, Dyz, Dzz]]
+    """
+    # 1. Compute eigenvalues and eigenvectors
+    # Using a standard symmetric eigensolver (e.g., Jacobi method or QR algorithm)
+    eigenvalues, eigenvectors = solve_symmetric_eigen(D)
+    
+    # 2. Sort eigenvalues in descending order: lambda1 >= lambda2 >= lambda3
+    # Corresponding eigenvectors must be reordered to match
+    indices = argsort_descending(eigenvalues)
+    lambda1 = eigenvalues[indices[0]]
+    lambda2 = eigenvalues[indices[1]]
+    lambda3 = eigenvalues[indices[2]]
+    
+    v1 = eigenvectors[:, indices[0]]
+    v2 = eigenvectors[:, indices[1]]
+    v3 = eigenvectors[:, indices[2]]
+    
+    # 3. Enforce right-handed coordinate system using cross product
+    # v1 x v2 should equal v3. If not, flip v3.
+    cross_product = cross(v1, v2)
+    if dot(cross_product, v3) < 0:
+        v3 = negate(v3)
+        
+    # 4. Handle Critical Points
+    # If lambda1 approx equals lambda2 or lambda2 approx equals lambda3,
+    # the corresponding eigenvectors are not unique.
+    # Implementation note: [G] In practice, small perturbations or fallback 
+    # to principal axes of symmetry may be needed, but the definition 
+    # simply states they are not uniquely defined [S1, unofficial].
+    
+    return {
+        "eigenvalues": [lambda1, lambda2, lambda3],
+        "eigenvectors": [v1, v2, v3]
+    }
+```
+
+## Subtopics
+
+### Tractography
+Tractography is the process of obtaining curves of neural pathways by extracting underlying continuous anatomical structures from diffusion tensor data [S2, unofficial]. It uses streamlines, streamtubes, or surfsurfaces to trace paths through the tensor field, aligning the tracing direction with the principal eigenvector field ($v_{\lambda_1}$) to follow neural fibers [S2, unofficial].
+
+## Operating characteristics
+*   **Complexity:** Eigen decomposition of a 3x3 symmetric matrix is $O(1)$ per voxel, but requires numerical stability checks for critical points.
+*   **Strengths:** Provides complete directional information; orthogonal eigenvectors simplify geometric interpretation and computation [S1, unofficial].
+*   **Limitations:** Ambiguity in eigenvector sign complicates interpolation and streamline integration; critical points (isotropy) break directional uniqueness [S1, unofficial].
+*   **When to use:** When full directional fiber architecture is required for visualization or tractography [S2, unofficial].
+*   **When not to use:** When only scalar diffusion magnitude is needed (use ADC) or when computational resources are extremely limited and only dominant direction is needed (though tensor is still small).
+
+## Background
+Diffusion Tensor Imaging (DTI) visualization relies on the mathematical definition of the diffusion tensor as a symmetric positive-definite matrix. The geometric interpretation of the tensor as an ellipsoid and the properties of its eigenvectors are foundational to scientific information visualization in medical imaging [S1, S2, unofficial]. The challenges of critical points and orientation ambiguity are well-documented in image-space tensor field visualization literature [S1, unofficial].
+
+## Sources
+[S1] Image-Space Tensor Field Visualization Using a LIC-like Method, https://doi.org/10.1007/978-3-642-21608-4_11, fetched 2026-10-27 (unofficial)
+[S2] PDF Tensor Visualization, http://www.csc.lsu.edu/~karki/courses/SV/19-TensorVis.pdf, fetched 2026-10-28 (unofficial)

@@ -1,0 +1,191 @@
+# Capacity Response Modeling
+
+Also called: Opacity Response Gram Matrix, Quadratic Selection, Quadratic Selection via Opacity Response
+
+## Overview
+Capacity Response Modeling is a pruning method that computes individual importance scores and pairwise interaction terms for quadratic selection by measuring RGB changes when Gaussian opacity varies [S1, unofficial]. It determines which $K_b$ members to retain in each block by accounting for joint rendering effects via the response matrix $R_b$ [S1, unofficial].
+
+## How it works
+**Inputs:**
+- A set of 3D Gaussians partitioned into blocks [S1, unofficial].
+- Training views $v$ and their corresponding ground-truth images [S1, unofficial].
+- For each block $b$, the set of Gaussians $C_b$ and their parameters (opacity, color, covariance, position) [S1, unofficial].
+- Target retention count $K_b$ for block $b$ (determined by a prior budget allocation step) [S1, unofficial].
+
+**Outputs:**
+- A binary retention vector $x_b \in \{0, 1\}^{n_b}$ for each block, where $x_{b,i}=1$ indicates the $i$-th Gaussian is retained [S1, unofficial].
+
+**Data Structures:**
+- **Selected Pixels Set $P_b$**: A set of pairs $(v, p)$ representing view $v$ and pixel coordinate $p$ [S1, unofficial].
+- **Jacobian Matrix $J_b$**: Dimensions $3|P_b| \times n_b$ [S1, unofficial].
+- **Response Matrix $R_b$**: Dimensions $n_b \times n_b$, computed as $J_b^T J_b$ [S1, unofficial].
+
+**Steps:**
+
+1.  **Pixel Selection**:
+    For each block $b$ and camera view $v$, use projected Gaussian centers as initially selected pixel coordinates [S1, unofficial]. Augment this set with neighboring pixels obtained by offsetting each center [S1, unofficial]. Remove duplicate locations and discard pixels outside the image, collecting selected pixels $p$ for view $v$ as pairs $(v, p)$ into set $P_b$ [S1, unofficial].
+
+2.  **Rendered Color Definition**:
+    Let $L_{vp}$ denote the number of Gaussians covering pixel $p$ in view $v$, indexed front-to-back as $g_1, \dots, g_{L_{vp}}$ [S1, unofficial]. Let $\alpha_\ell$ denote the original alpha of $g_\ell$, given by its activated opacity times its projected Gaussian value [S1, unofficial]. Introduce a continuous multiplier $\eta_i \in [0, 1]$ for each Gaussian's activated opacity [S1, unofficial]. The modified alpha and incoming transmittance are:
+    $$ \alpha_\ell(\eta) = \eta_{g_\ell} \alpha_\ell $$
+    $$ T_\ell(\eta) = \prod_{r=1}^{\ell-1} (1 - \alpha_r(\eta)) $$
+    Using front-to-back alpha compositing, the rendered RGB channel $q \in \{1, 2, 3\}$ at pixel $p$ in view $v$ is:
+    $$ I_{vpq}(\eta) = \sum_{\ell=1}^{L_{vp}} T_\ell(\eta)\alpha_\ell(\eta)c_\ell^q + T_{L_{vp}+1}(\eta)c_{bg}^q $$
+    where $c_\ell$ is the Gaussian's view-dependent color component, $c_{bg}^q$ is the background color component, and $T_{L_{vp}+1}$ is the transmittance remaining after all contributors [S1, unofficial].
+
+3.  **Jacobian Computation**:
+    Differentiate each sampled RGB channel with respect to the opacity multiplier of every block member [S1, unofficial]. For $i \in C_b$, the corresponding entry of $J_b \in \mathbb{R}^{3|P_b| \times n_b}$ is:
+    $$ (J_b)_{(v,p,q),i} = \left. \frac{\partial I_{vpq}(\eta)}{\partial \eta_i} \right|_{\eta=1} $$
+    Rows correspond to sampled view-pixel-channel triples $(v, p, q)$, and columns correspond to the Gaussians in block $b$ [S1, unofficial].
+
+4.  **Response Matrix Construction**:
+    Compute the opacity-response Gram matrix $R_b = J_b^T J_b$ [S1, unofficial]. The diagonal score $D_i = (R_b)_{ii}$ sums the squared color derivatives for opacity of Gaussian $i$ over all selected pixels, views, and RGB channels [S1, unofficial]. A larger $D_i$ indicates that Gaussian $i$ has a greater influence on the rendered image [S1, unofficial]. Each off-diagonal entry is the signed inner product between two response columns; positive entries indicate reinforcing linearized deletion effects, whereas negative entries indicate partial cancellation [S1, unofficial].
+
+5.  **Quadratic Selection (QUBO)**:
+    Solve the following QUBO problem for each block independently:
+    $$ \min_{x_b \in \{0,1\}^{n_b}} E_b(x_b) = (1 - x_b)^T R_b (1 - x_b) + \lambda (1^T x_b - K_b)^2 $$
+    Here $x_{b,i}=1$ if Gaussian is retained, $R_b$ is the response matrix, $K_b$ is the quota, and $\lambda$ is a penalty weight [S1, unofficial]. The first term approximates the rendering change caused by jointly deleting the Gaussians with $x_{b,i} = 0$ [S1, unofficial]. The second term penalizes deviations from the allocated quota $K_b$ [S1, unofficial].
+
+6.  **Repair and Combine**:
+    Repair infeasible solver outputs if necessary, then combine block masks into a model containing exactly $K$ Gaussians [S1, unofficial].
+
+**Pseudocode:**
+
+> **Unverified code.** The code below did not pass a test run against a reference implementation, or no test fits it, so it may contain errors.
+
+```python
+import numpy as np
+
+def compute_capacity_response_modeling(gaussians, views, target_counts, lambda_penalty=1.0):
+    """
+    gaussians: List of blocks, where each block is a list of Gaussian objects.
+               Each Gaussian has attributes: alpha (scalar), color (3,), depth (scalar).
+    views: List of view objects. Each view has: gt_image (H, W, 3), background_color (3,).
+    target_counts: Dict mapping block_index -> K_b.
+    lambda_penalty: Scalar lambda for QUBO penalty.
+    
+    Returns:
+    retention_masks: List of boolean arrays, one per block.
+    """
+    retention_masks = []
+    
+    for b_idx, block in enumerate(gaussians):
+        n_b = len(block)
+        K_b = target_counts[b_idx]
+        
+        # Step 1: Pixel Selection
+        P_b = set()
+        for view in views:
+            projected_centers = [(g.pos[0], g.pos[1]) for g in block]
+            selected_pixels = set()
+            for cx, cy in projected_centers:
+                for dy in [-1, 0, 1]:
+                    for dx in [-1, 0, 1]:
+                        ny, nx = int(cy) + dy, int(cx) + dx
+                        if 0 <= ny < view.gt_image.shape[0] and 0 <= nx < view.gt_image.shape[1]:
+                            selected_pixels.add((ny, nx))
+            for p in selected_pixels:
+                P_b.add((view, p))
+        
+        if not P_b:
+            retention_masks.append(np.ones(n_b, dtype=bool))
+            continue
+
+        # Step 2 & 3: Jacobian Computation
+        num_pixels = len(P_b)
+        J_b = np.zeros((3 * num_pixels, n_b))
+        pixel_list = list(P_b)
+        
+        for row_idx, (view, p) in enumerate(pixel_list):
+            # Assume block is pre-sorted front-to-back [G]
+            covering_gaussians = block
+            L_vp = len(covering_gaussians)
+            
+            alphas = np.array([g.alpha for g in covering_gaussians])
+            colors = np.array([g.color for g in covering_gaussians])
+            
+            # Precompute transmittances T_l
+            Ts = np.zeros(L_vp + 1)
+            Ts[0] = 1.0
+            for l in range(1, L_vp + 1):
+                Ts[l] = Ts[l-1] * (1 - alphas[l-1])
+                
+            c_bg = view.background_color
+            
+            for col_idx, g_global in enumerate(block):
+                # Find position in front-to-back list
+                if g_global in covering_gaussians:
+                    local_idx = covering_gaussians.index(g_global)
+                    k = local_idx + 1  # 1-based index
+                    
+                    dI = np.zeros(3)
+                    # Term for l == k: T_k * alpha_k * c_k
+                    dI += Ts[k-1] * alphas[k-1] * colors[k-1]
+                    
+                    # Terms for l > k: -alpha_i * (T_l / (1 - alpha_i)) * alpha_l * c_l
+                    denom = 1.0 - alphas[local_idx] + 1e-8
+                    for l in range(k + 1, L_vp + 1):
+                        dI += (-alphas[local_idx] * Ts[l-1] / denom) * alphas[l-1] * colors[l-1]
+                    
+                    # Background term T_{L+1}
+                    dI += (-alphas[local_idx] * Ts[L_vp] / denom) * c_bg
+                    
+                    J_b[row_idx * 3, col_idx] = dI[0]
+                    J_b[row_idx * 3 + 1, col_idx] = dI[1]
+                    J_b[row_idx * 3 + 2, col_idx] = dI[2]
+                else:
+                    J_b[row_idx * 3 : row_idx * 3 + 3, col_idx] = 0.0
+
+        # Step 4: Response Matrix
+        R_b = J_b.T @ J_b
+        
+        # Step 5: QUBO Solution (Greedy Deletion Approximation)
+        num_to_delete = n_b - K_b
+        if num_to_delete <= 0:
+            retention_masks.append(np.ones(n_b, dtype=bool))
+            continue
+            
+        x = np.ones(n_b, dtype=float)
+        deleted = np.zeros(n_b, dtype=bool)
+        
+        for _ in range(num_to_delete):
+            best_i = -1
+            best_cost = np.inf
+            
+            for i in range(n_b):
+                if deleted[i]: continue
+                
+                # Marginal cost of deleting i: approx 2 * (R_b @ (1-x))[i] - R_b[i,i]
+                # Using exact quadratic form difference for correctness
+                y = 1.0 - x.copy()
+                y[i] = 0.0
+                cost = y @ R_b @ y + lambda_penalty * (np.sum(x) - 1.0 - K_b)**2
+                
+                if cost < best_cost:
+                    best_cost = cost
+                    best_i = i
+            
+            if best_i != -1:
+                x[best_i] = 0.0
+                deleted[best_i] = True
+            else:
+                break
+                
+        retention_masks.append(x.astype(bool))
+        
+    return retention_masks
+```
+
+## Operating characteristics
+- **Time Complexity**: Dominated by the Jacobian computation $O(|P_b| \cdot L_{vp} \cdot n_b)$ and the QUBO solve [S1, unofficial]. Greedy selection runs in $O(n_b^2)$ per block [S1, unofficial].
+- **Memory Complexity**: $O(|P_b| \cdot n_b)$ for the Jacobian and $O(n_b^2)$ for the response matrix $R_b$ [S1, unofficial].
+- **Strengths**: Accounts for pairwise interactions between Gaussians, leading to better visual quality than independent pruning [S1, unofficial].
+- **Limitations**: Requires computing derivatives for all selected pixels, which can be memory-intensive for large blocks [S1, unofficial]. The QUBO problem is NP-hard, so approximations are used [S1, unofficial].
+- **When to use**: When pruning 3D Gaussian Splatting models while preserving visual fidelity and handling occlusion/interaction effects [S1, unofficial].
+- **When not to use**: When real-time performance is critical and pruning overhead is prohibitive, or when interactions are negligible [S1, unofficial].
+
+## Background
+Originated in "SplatQ: Interaction-Aware Pruning of 3D Gaussian Splatting via Quadratic Selection" (under review at ICLR 2027) [S1, unofficial]. It extends standard pruning by incorporating a quadratic selection mechanism based on the opacity response Gram matrix [S1, unofficial].
+
+## Sources
+[S1] SplatQ: Interaction-Aware Pruning of 3D Gaussian Splatting via Quadratic Selection, https://arxiv.org/abs/2610.13503, fetched 2026-10-29 (unofficial)

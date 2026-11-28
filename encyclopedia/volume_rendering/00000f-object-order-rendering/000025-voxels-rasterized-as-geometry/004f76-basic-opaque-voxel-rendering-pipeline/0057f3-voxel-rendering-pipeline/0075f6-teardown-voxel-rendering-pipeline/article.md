@@ -1,0 +1,112 @@
+# Teardown Voxel Rendering Pipeline
+
+Also called: Multi-Volume Voxel Engine, Voxel Ray Marching with Bounding Box Rasterization
+
+## Overview
+The Teardown Voxel Rendering Pipeline is a custom rendering architecture that avoids a single massive axis-aligned volume by organizing scene geometry into thousands of smaller, internally axis-aligned voxel volumes [S1, unofficial]. This structure enables real-time environmental destruction and volumetric rendering without relying on traditional polygon-based meshes, except for specific surface types like water and power lines [S1, unofficial]. It differs from traditional destruction games by making destruction the central mechanic, leveraging voxels' ease of use for destructive physics [S1, unofficial].
+
+## How it works
+**Inputs and Outputs:**
+*   **Input:** Scene geometry partitioned into thousands of discrete voxel volumes. Each volume contains its own axis-aligned grid, bounding box, and indexed material palette. A separate occlusion-only voxel structure is maintained for ray marching.
+*   **Output:** A rendered frame composed of volumetric data, with reflections computed via Screen Space Reflections (SSR).
+
+**Data Structures:**
+1.  **Discrete Voxel Volumes:** The scene is not a single grid but thousands of individual volumes. Each volume is internally axis-aligned.
+2.  **Occlusion-Only Structure:** A separate voxel data structure containing only 3D occlusion information (binary or occupancy data) for ray tracing. It deliberately excludes color data to optimize access [S1, unofficial].
+3.  **Indexed Material Palettes:** Each object/volume has its own palette for material lookup after hit detection [S1, unofficial].
+
+**Steps:**
+1.  **Partitioning:** Organize all destructible geometry into thousands of smaller voxel volumes, ensuring each volume remains axis-aligned internally [S1, unofficial].
+2.  **Collision Detection:** Perform collision detection using voxel-vs-voxel checks executed on the CPU [S1, unofficial].
+3.  **Bounding Box Rasterization:** For primary rays, rasterize a bounding box for each individual object or volume [S1, unofficial].
+4.  **Ray Marching:** Raymarch the visual grid of the object within a fragment shader to determine the exact hit voxel [S1, unofficial].
+5.  **Material Lookup:** After hit detection, perform material lookup using indexed palettes specific to each object [S1, unofficial].
+6.  **Reflections:** Compute reflection color using Screen Space Reflections (SSR) rather than full path tracing to maintain performance [S1, unofficial].
+7.  **Rendering:** Execute all rendering on the GPU using purely volumetric data, excluding triangles except for water surfaces and power lines [S1, unofficial].
+
+**Pseudocode:**
+> **Unverified code.** The code below did not pass a test run against a reference implementation, or no test fits it, so it may contain errors.
+
+```python
+# Pseudocode for the Teardown Voxel Rendering Pipeline
+# Note: Collision is CPU-side, Rendering is GPU-side.
+
+def render_frame(scene_volumes, camera):
+    # 1. CPU-side Collision Detection
+    # Perform voxel-vs-voxel checks for all active volumes
+    for volume in scene_volumes:
+        if volume.is_active:
+            check_voxel_collision(volume)
+
+    # 2. GPU-side Rendering
+    # Iterate over each discrete voxel volume in the scene
+    for volume in scene_volumes:
+        if not volume.is_visible:
+            continue
+
+        # 3. Rasterize Bounding Box
+        # Rasterize the axis-aligned bounding box (AABB) of the volume
+        # This acts as a coarse culling step for the ray marcher
+        rasterize_aabb(volume.aabb)
+
+        # 4. Fragment Shader: Ray Marching
+        # For each pixel covered by the AABB, raymarch the visual grid
+        for pixel in pixels_covered_by_aabb:
+            ray = generate_ray_from_pixel(pixel, camera)
+            
+            # Raymarch through the volume's internal grid
+            hit_voxel = raymarch_visual_grid(volume.visual_grid, ray)
+            
+            if hit_voxel is not None:
+                # 5. Material Lookup
+                # Use the volume's specific indexed palette
+                material_id = volume.palette[hit_voxel.index]
+                color = get_material_color(material_id)
+                
+                # 6. Reflections (SSR)
+                # Compute reflection color using SSR
+                reflected_color = screen_space_reflection(ray, hit_voxel.position, material_id)
+                
+                # Combine colors
+                final_color = blend(color, reflected_color)
+                write_to_framebuffer(pixel, final_color)
+            else:
+                # No hit within this volume
+                pass
+
+    # 7. Special Cases: Non-Voxel Geometry
+    # Render water surfaces and power lines using triangles
+    render_triangle_mesh(water_surfaces)
+    render_triangle_mesh(power_lines)
+```
+
+**Parameters:**
+*   **Minimum Recommended GPU:** NVIDIA GeForce 1070 (tested successfully on older 970 models) [S1, unofficial].
+
+**Edge Cases and Pitfalls:**
+*   **Precision:** Ray marching within fragment shaders requires careful step size management to avoid missing thin voxels or artifacts [G].
+*   **Boundaries:** The separation between discrete volumes must be handled to avoid gaps or overlaps in the visual grid [G].
+*   **Degenerate Input:** Empty volumes should be skipped during rasterization to save performance [G].
+
+## Subtopics
+
+### WorldRenderer Multi-Pass Pipeline
+A multi-pass approach for voxel shading, differing by using multiple rendering passes rather than a single ray-marched pass per volume. Choose when complex lighting interactions between volumes are required. [WorldRenderer Multi-Pass Pipeline](17202-worldrenderer-multi-pass-pipeline.md)
+
+### Two-Pass Voxel Shading Pipeline
+A two-pass method for voxel shading, differing by splitting the process into two distinct stages. Choose when performance optimization through pass separation is needed. [Two-Pass Voxel Shading Pipeline](18311-two-pass-voxel-shading-pipeline.md)
+
+## Operating characteristics
+*   **Time Complexity:** Linear with respect to the number of voxels in the active volumes, but heavily dependent on the number of discrete volumes and their bounding box rasterization cost.
+*   **Memory Complexity:** Proportional to the total number of voxels across all discrete volumes plus the occlusion-only structure.
+*   **Measured Performance:** Runs on NVIDIA GeForce 1070 and older 970 models [S1, unofficial].
+*   **Strengths:** Enables real-time environmental destruction; avoids the memory overhead of a single massive volume; leverages GPU for rendering and CPU for collision.
+*   **Limitations:** Requires careful management of thousands of discrete volumes; SSR is used instead of full path tracing, which may limit reflection fidelity.
+*   **When to Use:** When real-time destruction is a core mechanic and performance on mid-range hardware is required.
+*   **When Not to Use:** When global illumination or full path tracing is required, or when the scene is static and does not require voxel-based destruction.
+
+## Background
+The Teardown Voxel Rendering Pipeline was developed by Jonatan Gustafsson for the game *Teardown*, released in Early Access in 2020. Gustafsson, known for destruction-based games like *Smash Hit*, found voxel technology easier to use for destructive physics than polygons [S1, unofficial]. Early prototypes faced challenges with players solving objectives by destroying paths, leading to the final game design. The engine was designed to run on lower-end devices, using SSR for reflections to maintain performance [S1, unofficial].
+
+## Sources
+[S1] How beautiful voxels laid the way for Teardown's heist-y ..., https://www.gamedeveloper.com/design/how-beautiful-voxels-laid-the-way-for-i-teardown-s-i-heist-y-framework, fetched 2026-10-29 (unofficial)

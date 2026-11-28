@@ -1,0 +1,357 @@
+--- v004.md
++++ v005.md
+@@ -4,169 +4,214 @@
+ 
+ ## Overview
+-The Second-order Grid Sampler computes the Hessian matrix of a Signed Distance Field (SDF) with respect to 3D query coordinates and feature grid parameters by manually implementing second-order gradients through trilinear interpolation. It solves the problem that standard automatic differentiation frameworks (e.g., PyTorch) do not support double back-propagation through the `grid_sampler` operation, which is required to regularize gradient terms in neural surface reconstruction [S1]. It is distinguished from finite difference methods (see [Second Derivative Computation](6353-second-derivative-computation.md)) by computing exact analytical derivatives of the learned interpolation function rather than approximating them from sampled voxel values, thereby avoiding noise amplification and stencil boundary issues [S1].
++The Second-order Grid Sampler computes the Hessian matrix of a Signed Distance Field (SDF) with respect to 3D query coordinates and feature grid parameters by manually implementing the second-order derivatives of trilinear interpolation. It solves the problem that standard automatic differentiation frameworks (e.g., PyTorch) do not support double back-propagation through the grid sampling operation [S1]. Unlike [Second Derivative Computation](6353-second-derivative-computation.md), which uses finite differences on discrete grids, this method operates on continuous coordinates within a learned feature grid, providing exact analytical second derivatives required for gradient regularization in neural surface reconstruction [S1].
+ 
+ ## How it works
+-The method computes the second-order derivatives of the SDF $\phi$ with respect to the query position $x$, feature grid parameters $\theta$, and geometry network parameters $\omega$. The SDF is defined as $\phi(x, \theta, \omega) = f_\omega(z(\theta, x))$, where $z = V_\theta(x)$ is the tri-linearly interpolated feature vector at query point $x$ [S1].
+-
+-### Inputs and Outputs
+-**Inputs:**
+-1.  Query position $x = [x, y, z]^T \in \mathbb{R}^3$, normalized to $[0, 1]$ within the voxel containing the point [S1].
+-2.  Feature vector $\theta \in \mathbb{R}^8$ containing the values at the 8 vertices of the enclosing voxel, ordered as $[\theta_{000}, \theta_{001}, \theta_{010}, \theta_{011}, \theta_{100}, \theta_{101}, \theta_{110}, \theta_{111}]^T$ [S1].
+-3.  (Optional) Geometry network parameters $\omega$ and the function $f_\omega$ if mixed derivatives with $\omega$ are required [S1].
+-
+-**Outputs:**
+-1.  Hessian block $\frac{\partial^2 \phi}{\partial x^2}$ (3x3 matrix) [S1].
+-2.  Mixed Hessian block $\frac{\partial^2 \phi}{\partial x \partial \theta}$ (3x8 matrix) [S1].
+-3.  Mixed Hessian block $\frac{\partial^2 \phi}{\partial x \partial \omega}$ (if $\omega$ is used) [S1].
+-
+-### Data Structures
+-*   **Coefficient Vector $w(x)$**: An 8-dimensional vector representing the trilinear interpolation weights for the 8 voxel corners [S1].
+-*   **Jacobian Matrix $\frac{\partial w}{\partial x}$**: An $8 \times 3$ matrix where each column $J_i$ is the derivative of $w$ with respect to coordinate $i$ ($x, y, z$) [S1].
+-
+-### Formulas
+-The first-order gradient of the SDF with respect to $x$ is computed as [S1]:
+-$$ \frac{\partial \phi}{\partial x} = \sum_{i=1}^C \frac{\partial f_\omega(z)}{\partial z_i} \frac{\partial z_i}{\partial x} $$
+-where $C$ is the feature dimension (typically 1 for scalar SDF, or higher for multi-channel features) [S1].
+-
+-The second-order derivatives required for regularization are [S1]:
+-
+-1.  **Hessian w.r.t. position $x$**:
+-    $$ \frac{\partial^2 \phi}{\partial x^2} = \sum_{i=1}^C \left( \frac{\partial^2 f_\omega(z)}{\partial z_i^2} \left(\frac{\partial z_i}{\partial x}\right)^2 + \frac{\partial f_\omega(z)}{\partial z_i} \frac{\partial^2 z_i}{\partial x^2} \right) $$
+-    For the specific case where $f_\omega$ is linear or identity (common in simple grid samplers), the term $\frac{\partial^2 f_\omega}{\partial z_i^2}$ vanishes, leaving the computation dependent on $\frac{\partial^2 z_i}{\partial x^2}$ [S1].
+-
+-2.  **Mixed Hessian w.r.t. $x$ and $\theta$**:
+-    $$ \frac{\partial^2 \phi}{\partial x \partial \theta} = \sum_{i=1}^C \frac{\partial^2 f_\omega(z)}{\partial z_i^2} \frac{\partial z_i}{\partial \theta} \frac{\partial z_i}{\partial x} $$
+-    If $f_\omega$ is linear, this simplifies to the transpose of the Jacobian of the weights [S1]:
+-    $$ \frac{\partial^2 f}{\partial x \partial \theta} = \left(\frac{\partial w}{\partial x}\right)^T $$
+-
+-3.  **Mixed Hessian w.r.t. $x$ and $\omega$**:
+-    $$ \frac{\partial^2 \phi}{\partial x \partial \omega} = \sum_{i=1}^C \left( \frac{\partial^2 f_\omega(z)}{\partial z_i^2} \frac{\partial z_i}{\partial \omega} \frac{\partial z_i}{\partial x} + \frac{\partial f_\omega(z)}{\partial z_i} \frac{\partial^2 z_i}{\partial x \partial \omega} \right) $$
+-    Note: PyTorch supports double back-propagation through MLPs ($f_\omega$), so this term can often be computed via standard autograd if $f_\omega$ is differentiable, whereas the grid sampler part requires manual implementation [S1].
+-
+-### Trilinear Interpolation Derivatives
+-The coefficient vector $w(x)$ for $x=[x,y,z]$ is [S1]:
+-$$ w(x) = \begin{bmatrix} (1-x)(1-y)(1-z) \\ (1-x)(1-y)z \\ (1-x)y(1-z) \\ (1-x)yz \\ x(1-y)(1-z) \\ x(1-y)z \\ xy(1-z) \\ xyz \end{bmatrix} $$
+-
+-The Jacobian $\frac{\partial w}{\partial x}$ is an $8 \times 3$ matrix with columns $J_1, J_2, J_3$ [S1]:
+-$$ J_1 = \frac{\partial w}{\partial x} = \begin{bmatrix} -(1-y)(1-z) \\ -(1-y)z \\ -y(1-z) \\ -yz \\ (1-y)(1-z) \\ (1-y)z \\ y(1-z) \\ yz \end{bmatrix}, \quad J_2 = \frac{\partial w}{\partial y} = \begin{bmatrix} -(1-x)(1-z) \\ -(1-x)z \\ (1-x)(1-z) \\ (1-x)z \\ -x(1-z) \\ -xz \\ x(1-z) \\ xz \end{bmatrix}, \quad J_3 = \frac{\partial w}{\partial z} = \begin{bmatrix} -(1-x)(1-y) \\ (1-x)(1-y) \\ -(1-x)y \\ (1-x)y \\ -x(1-y) \\ x(1-y) \\ -xy \\ xy \end{bmatrix} $$
+-
+-The Hessian block $\frac{\partial^2 f}{\partial x^2}$ is a $3 \times 3$ matrix $H$ where $H_{ij} = J_i^T \theta J_j$ (for linear $f$) or more generally derived from differentiating $J_i \theta$ [S1].
+-The diagonal elements $h_{11}, h_{22}, h_{33}$ are zero because each column $J_i$ depends only on the other two dimensions [S1].
+-The off-diagonal elements are [S1]:
+-$$ h_{12} = h_{21} = (1-z)(\theta_{000} + \theta_{110} - \theta_{010} - \theta_{100}) + z(\theta_{001} + \theta_{111} - \theta_{011} - \theta_{101}) $$
+-$$ h_{13} = h_{31} = (1-y)(\theta_{000} + \theta_{101} - \theta_{001} - \theta_{100}) + y(\theta_{010} + \theta_{111} - \theta_{011} - \theta_{110}) $$
+-$$ h_{23} = h_{32} = (1-x)(\theta_{000} + \theta_{011} - \theta_{001} - \theta_{010}) + x(\theta_{100} + \theta_{111} - \theta_{101} - \theta_{110}) $$
+-
+-### Pseudocode
++**Inputs and Outputs:**
++- **Input:**
++  - Query point coordinates $x = [x, y, z]^T \in \mathbb{R}^3$, normalized to $[0, 1]$ within the voxel containing the point.
++  - Feature vector $\theta \in \mathbb{R}^8$, representing the values at the 8 vertices of the enclosing voxel, ordered as $[\theta_{000}, \theta_{001}, \theta_{010}, \theta_{011}, \theta_{100}, \theta_{101}, \theta_{110}, \theta_{111}]^T$.
++  - (Optional) Geometry network parameters $\omega$ and feature dimension $C$. Note: The core Hessian blocks w.r.t $x$ and $\theta$ are independent of $\omega$ and $C$ due to the linearity of the interpolation step.
++- **Output:**
++  - The $3 \times 3$ Hessian matrix $H = \frac{\partial^2 f}{\partial x \partial x^T}$ of the interpolated feature value $f$ with respect to $x$.
++  - The $3 \times 8$ mixed derivative matrix $\frac{\partial^2 f}{\partial x \partial \theta}$.
++
++**Data Structures:**
++- **Coefficient Vector $w(x)$:** An 8-element vector of trilinear interpolation weights.
++- **Jacobian Matrix $J_w$:** An $8 \times 3$ matrix containing the first derivatives of $w(x)$ with respect to $x, y, z$.
++- **Hessian Matrix $H$:** A $3 \times 3$ symmetric matrix.
++
++**Step-by-Step Method:**
++
++1.  **Compute Interpolation Weights $w(x)$:**
++    Calculate the 8 coefficients for the vertices of the voxel enclosing $x$. The indices correspond to the binary representation of the vertex offsets $(dx, dy, dz)$ where $dx, dy, dz \in \{0, 1\}$.
++    $$
++    \begin{aligned}
++    w_0 &= (1-x)(1-y)(1-z) \\
++    w_1 &= (1-x)(1-y)z \\
++    w_2 &= (1-x)y(1-z) \\
++    w_3 &= (1-x)yz \\
++    w_4 &= x(1-y)(1-z) \\
++    w_5 &= x(1-y)z \\
++    w_6 &= xy(1-z) \\
++    w_7 &= xyz
++    \end{aligned}
++    $$
++    The interpolated feature value is $f = \theta^T w(x) = \sum_{i=0}^7 \theta_i w_i$.
++
++2.  **Compute Jacobian Columns $J_1, J_2, J_3$:**
++    The Jacobian $\frac{\partial w}{\partial x}$ is an $8 \times 3$ matrix with columns $J_1 = \frac{\partial w}{\partial x}$, $J_2 = \frac{\partial w}{\partial y}$, and $J_3 = \frac{\partial w}{\partial z}$.
++    
++    Column $J_1$ (derivatives w.r.t $x$):
++    $$
++    J_1 = \begin{bmatrix} -(1-y)(1-z) \\ -(1-y)z \\ -y(1-z) \\ -yz \\ (1-y)(1-z) \\ (1-y)z \\ y(1-z) \\ yz \end{bmatrix}
++    $$
++    
++    Column $J_2$ (derivatives w.r.t $y$):
++    $$
++    J_2 = \begin{bmatrix} -(1-x)(1-z) \\ -(1-x)z \\ (1-x)(1-z) \\ (1-x)z \\ -x(1-z) \\ -xz \\ x(1-z) \\ xz \end{bmatrix}
++    $$
++    
++    Column $J_3$ (derivatives w.r.t $z$):
++    $$
++    J_3 = \begin{bmatrix} -(1-x)(1-y) \\ (1-x)(1-y) \\ -(1-x)y \\ (1-x)y \\ -x(1-y) \\ x(1-y) \\ -xy \\ xy \end{bmatrix}
++    $$
++
++3.  **Compute Mixed Derivative $\frac{\partial^2 f}{\partial x \partial \theta}$:**
++    This block is the transpose of the Jacobian of the weights with respect to $x$.
++    $$
++    \frac{\partial^2 f}{\partial x \partial \theta} = \left( \frac{\partial w}{\partial x} \right)^T = \begin{bmatrix} J_1^T \\ J_2^T \\ J_3^T \end{bmatrix}
++    $$
++    This results in a $3 \times 8$ matrix.
++
++4.  **Compute Hessian $\frac{\partial^2 f}{\partial x^2}$:**
++    The Hessian $H$ is a $3 \times 3$ symmetric matrix.
++    
++    **Diagonal Elements:**
++    The diagonal elements are zero because the derivative of $w_i$ with respect to a coordinate (e.g., $x$) depends only on the other two coordinates ($y, z$), which are treated as constants when differentiating again with respect to $x$.
++    $$
++    h_{11} = h_{22} = h_{33} = 0
++    $$
++    
++    **Off-Diagonal Elements:**
++    The off-diagonal elements are computed using the feature values $\theta$ and the coordinates.
++    
++    $h_{12} = h_{21}$:
++    $$
++    h_{12} = (1-z)(\theta_{000} + \theta_{110} - \theta_{010} - \theta_{100}) + z(\theta_{001} + \theta_{111} - \theta_{011} - \theta_{101})
++    $$
++    
++    $h_{13} = h_{31}$:
++    $$
++    h_{13} = (1-y)(\theta_{000} + \theta_{101} - \theta_{001} - \theta_{100}) + y(\theta_{010} + \theta_{111} - \theta_{011} - \theta_{110})
++    $$
++    
++    $h_{23} = h_{32}$:
++    $$
++    h_{23} = (1-x)(\theta_{000} + \theta_{011} - \theta_{001} - \theta_{010}) + x(\theta_{100} + \theta_{111} - \theta_{101} - \theta_{110})
++    $$
++
++5.  **Assemble Full SDF Hessian (if required):**
++    If the SDF $\phi$ is defined as $\phi(x, \theta, \omega) = f_\omega(z(\theta, x))$, where $f_\omega$ is a geometry network (MLP) taking the interpolated feature vector $z$, the full Hessian blocks required for regularization are:
++    - $\frac{\partial^2 \phi}{\partial x^2} = \sum_{i=1}^C \left( \frac{\partial^2 f_\omega}{\partial z_i^2} \left(\frac{\partial z_i}{\partial x}\right)^2 + \frac{\partial f_\omega}{\partial z_i} \frac{\partial^2 z_i}{\partial x^2} \right)$ [S1]. Here $\frac{\partial z_i}{\partial x}$ is the $i$-th row of $\frac{\partial^2 f}{\partial x \partial \theta}$, and $\frac{\partial^2 z_i}{\partial x^2}$ is the $i$-th row of $H$.
++    - $\frac{\partial^2 \phi}{\partial x \partial \theta} = \sum_{i=1}^C \frac{\partial^2 f_\omega}{\partial z_i^2} \frac{\partial z_i}{\partial \theta} \frac{\partial z_i}{\partial x}$ [S1]. Note that $\frac{\partial z_i}{\partial \theta}$ is the $i$-th column of the identity matrix (since $z_i$ is the $i$-th feature component), simplifying to $\sum_{i=1}^C \frac{\partial^2 f_\omega}{\partial z_i^2} \frac{\partial z_i}{\partial x}$.
++    
++    *Note: The implementation of Eq. 5 ($\frac{\partial^2 \phi}{\partial x \partial \omega}$) is not required as PyTorch supports double back-propagation through the MLP $f_\omega$ [S1].*
++
++**Pseudocode:**
++
+ ```python
+ import torch
+ 
+-def second_order_grid_sampler(x, theta):
++def second_order_grid_sampler(theta, x):
+     """
+-    Computes the Hessian of the SDF with respect to x and theta for a single query point.
++    Computes the Hessian of the interpolated feature value f w.r.t. x
++    and the mixed derivative w.r.t. x and theta.
+     
+     Args:
+-        x: Tensor of shape (3,), query coordinates [x, y, z] in [0, 1].
+-        theta: Tensor of shape (8,), feature values at voxel corners.
+-               Order: [000, 001, 010, 011, 100, 101, 110, 111].
+-               
++        theta: Tensor of shape (8,) or (N, 8), feature values at voxel corners.
++               Order: [000, 001, 010, 011, 100, 101, 110, 111]
++        x: Tensor of shape (3,) or (N, 3), query coordinates in [0, 1].
++           Order: [x, y, z]
++           
+     Returns:
+-        hessian_x: Tensor of shape (3, 3), second derivative w.r.t. x.
+-        hessian_x_theta: Tensor of shape (3, 8), mixed derivative w.r.t. x and theta.
++        H: Tensor of shape (3, 3) or (N, 3, 3), Hessian d^2f/dx^2.
++        H_x_theta: Tensor of shape (3, 8) or (N, 3, 8), Mixed derivative d^2f/dxdtheta.
+     """
+-    x_val, y_val, z_val = x[0], x[1], x[2]
+-    
+-    # Precompute terms to avoid redundant calculations
+-    one_minus_x = 1.0 - x_val
+-    one_minus_y = 1.0 - y_val
+-    one_minus_z = 1.0 - z_val
+-    
+-    # Compute off-diagonal elements of the Hessian w.r.t. x
++    # Ensure x is 2D for batch processing: (N, 3)
++    if x.dim() == 1:
++        x = x.unsqueeze(0)
++        theta = theta.unsqueeze(0)
++        
++    x_coord, y_coord, z_coord = x[:, 0], x[:, 1], x[:, 2]
++    
++    # 1. Compute Jacobian Columns J1, J2, J3 (Shape: N, 8)
++    # J1: d/dx
++    J1 = torch.stack([
++        -(1-y_coord)*(1-z_coord), -(1-y_coord)*z_coord, -y_coord*(1-z_coord), -y_coord*z_coord,
++        (1-y_coord)*(1-z_coord), (1-y_coord)*z_coord, y_coord*(1-z_coord), y_coord*z_coord
++    ], dim=1)
++    
++    # J2: d/dy
++    J2 = torch.stack([
++        -(1-x_coord)*(1-z_coord), -(1-x_coord)*z_coord, (1-x_coord)*(1-z_coord), (1-x_coord)*z_coord,
++        -x_coord*(1-z_coord), -x_coord*z_coord, x_coord*(1-z_coord), x_coord*z_coord
++    ], dim=1)
++    
++    # J3: d/dz
++    J3 = torch.stack([
++        -(1-x_coord)*(1-y_coord), (1-x_coord)*(1-y_coord), -(1-x_coord)*y_coord, (1-x_coord)*y_coord,
++        -x_coord*(1-y_coord), x_coord*(1-y_coord), -x_coord*y_coord, x_coord*y_coord
++    ], dim=1)
++    
++    # H_x_theta is the transpose of the Jacobian matrix [J1, J2, J3]
++    # J_w is (N, 8, 3). H_x_theta is (N, 3, 8).
++    J_w = torch.stack([J1, J2, J3], dim=2) # (N, 8, 3)
++    H_x_theta = J_w.permute(0, 2, 1)      # (N, 3, 8)
++    
++    # 2. Compute Hessian H (Shape: N, 3, 3)
++    # Diagonals are 0
++    H = torch.zeros(x.shape[0], 3, 3, device=x.device)
++    
++    # Off-diagonals
+     # h12 = h21
+-    term1_12 = one_minus_z * (theta[0] + theta[6] - theta[2] - theta[4])
+-    term2_12 = z_val * (theta[1] + theta[7] - theta[3] - theta[5])
++    term1_12 = (1-z_coord) * (theta[:, 0] + theta[:, 6] - theta[:, 2] - theta[:, 4])
++    term2_12 = z_coord * (theta[:, 1] + theta[:, 7] - theta[:, 3] - theta[:, 5])
+     h12 = term1_12 + term2_12
+     
+     # h13 = h31
+-    term1_13 = one_minus_y * (theta[0] + theta[5] - theta[1] - theta[4])
+-    term2_13 = y_val * (theta[2] + theta[7] - theta[3] - theta[6])
++    term1_13 = (1-y_coord) * (theta[:, 0] + theta[:, 5] - theta[:, 1] - theta[:, 4])
++    term2_13 = y_coord * (theta[:, 2] + theta[:, 7] - theta[:, 3] - theta[:, 6])
+     h13 = term1_13 + term2_13
+     
+     # h23 = h32
+-    term1_23 = one_minus_x * (theta[0] + theta[3] - theta[1] - theta[2])
+-    term2_23 = x_val * (theta[4] + theta[7] - theta[5] - theta[6])
++    term1_23 = (1-x_coord) * (theta[:, 0] + theta[:, 3] - theta[:, 1] - theta[:, 2])
++    term2_23 = x_coord * (theta[:, 4] + theta[:, 7] - theta[:, 5] - theta[:, 6])
+     h23 = term1_23 + term2_23
+     
+-    # Construct the 3x3 Hessian matrix
+-    # Diagonal elements are zero
+-    hessian_x = torch.zeros(3, 3)
+-    hessian_x[0, 1] = h12
+-    hessian_x[1, 0] = h12
+-    hessian_x[0, 2] = h13
+-    hessian_x[2, 0] = h13
+-    hessian_x[1, 2] = h23
+-    hessian_x[2, 1] = h23
+-    
+-    # Compute mixed Hessian w.r.t. x and theta
+-    # This is the transpose of the Jacobian of w w.r.t. x
+-    # J1 (d/dx)
+-    j1 = torch.tensor([
+-        -one_minus_y * one_minus_z,
+-        -one_minus_y * z_val,
+-        -y_val * one_minus_z,
+-        -y_val * z_val,
+-        one_minus_y * one_minus_z,
+-        one_minus_y * z_val,
+-        y_val * one_minus_z,
+-        y_val * z_val
+-    ], dtype=theta.dtype, device=theta.device)
+-    
+-    # J2 (d/dy)
+-    j2 = torch.tensor([
+-        -one_minus_x * one_minus_z,
+-        -one_minus_x * z_val,
+-        one_minus_x * one_minus_z,
+-        one_minus_x * z_val,
+-        -x_val * one_minus_z,
+-        -x_val * z_val,
+-        x_val * one_minus_z,
+-        x_val * z_val
+-    ], dtype=theta.dtype, device=theta.device)
+-    
+-    # J3 (d/dz)
+-    j3 = torch.tensor([
+-        -one_minus_x * one_minus_y,
+-        one_minus_x * one_minus_y,
+-        -one_minus_x * y_val,
+-        one_minus_x * y_val,
+-        -x_val * one_minus_y,
+-        x_val * one_minus_y,
+-        -x_val * y_val,
+-        x_val * y_val
+-    ], dtype=theta.dtype, device=theta.device)
+-    
+-    # Stack Jacobian columns to form 8x3 matrix, then transpose to get 3x8
+-    J = torch.stack([j1, j2, j3], dim=1) # Shape (8, 3)
+-    hessian_x_theta = J.T # Shape (3, 8)
+-    
+-    return hessian_x, hessian_x_theta
++    # Fill symmetric matrix
++    H[:, 0, 1] = h12
++    H[:, 1, 0] = h12
++    H[:, 0, 2] = h13
++    H[:, 2, 0] = h13
++    H[:, 1, 2] = h23
++    H[:, 2, 1] = h23
++    
++    # Reshape if input was 1D
++    if x.dim() == 1:
++        H = H.squeeze(0)
++        H_x_theta = H_x_theta.squeeze(0)
++        
++    return H, H_x_theta
+ ```
+ 
+-### Parameters and Edge Cases
+-*   **Feature Dimension**: The derivation assumes 1-D features for simplicity but generalizes to any feature dimension $C$ by summing over dimensions $i=1 \dots C$ [S1].
+-*   **Coordinate Normalization**: The formulas assume query coordinates $x, y, z$ are normalized to $[0, 1]$ within the voxel. If using world coordinates, they must be converted to local voxel coordinates [S1].
+-*   **Voxel Boundary**: The method is defined strictly within the voxel enclosing the query point. If the query point lies exactly on a boundary, the interpolation weights are still well-defined, but numerical stability may depend on the specific implementation of the surrounding grid sampler [S1].
+-*   **Zero Diagonal**: The diagonal elements of the Hessian w.r.t. $x$ are analytically zero for trilinear interpolation. This is a specific property of the linear basis functions used [S1].
++**Parameters:**
++- **Feature Dimension:** The derivation assumes 1-D features for simplicity but generalizes to any feature dimension $C$ as the derivation is equivalent for all dimensions [S1].
++- **Coordinate Normalization:** Coordinates $x, y, z$ must be normalized to $[0, 1]$ relative to the voxel boundaries [S1].
++
++**Edge Cases and Pitfalls:**
++- **Boundary Conditions:** The method assumes the query point $x$ lies strictly within a voxel $[0,1]^3$. If $x$ is outside, the weights $w(x)$ may become negative or exceed 1, leading to extrapolation artifacts. Standard implementations assume zero-padding or clamping for neighbors outside the active domain, but the analytical derivatives derived here are local to the voxel [S1, Parent].
++- **Higher-Order Tensors:** The method explicitly avoids constructing higher-order tensors (e.g., $N \times 8 \times 3$ for gradients of gradients) by summing over feature dimensions $z_i$ as per Eq. 2, which is crucial for memory efficiency [S1].
++- **PyTorch Limitations:** Standard `grid_sampler` does not support second-order gradients. Manual implementation of Eq. 3 and 4 is required; Eq. 5 can rely on PyTorch's autograd if the geometry network $f_\omega$ is differentiable [S1].
++
++## Subtopics
++
++### Mean Curvature Grid Computation
++Computes the mean curvature from the trace of the Hessian. Chooses this when surface smoothness is prioritized over exact Hessian values. [Mean Curvature Grid Computation](3126-mean-curvature-grid-computation.md)
++
++### Laplacian Grid Computation
++Computes the Laplacian (sum of diagonal second derivatives). Chooses this for diffusion-based smoothing. [Laplacian Grid Computation](3160-laplacian-grid-computation.md)
++
++### Second Derivative Computation
++General finite difference approach for discrete grids. Chooses this when working with voxelized SDFs rather than continuous feature grids. [Second Derivative Computation](6353-second-derivative-computation.md)
+ 
+ ## Operating characteristics
+-*   **Time Complexity**: $O(1)$ per query point, as it involves a fixed number of arithmetic operations (constant number of multiplications and additions) regardless of grid size.
+-*   **Memory Complexity**: $O(1)$ auxiliary memory per query point.
+-*   **Strengths**: Provides exact analytical derivatives, avoiding the noise amplification associated with finite difference methods. Integrates seamlessly into gradient-based optimization pipelines (e.g., PyTorch) when implemented as a custom autograd function.
+-*   **Limitations**: Only applicable to trilinear interpolation. Does not handle non-linear interpolation schemes without re-derivation. Requires manual implementation of the backward pass for the grid sampler component in frameworks that do not support double back-propagation through the sampling operation natively [S1].
+-*   **When to use**: When regularizing the gradient of an SDF learned via neural feature grids (e.g., in GO-Surf, NeuralRGBD) and exact Hessian information is needed for optimization stability [S1].
+-*   **When not to use**: When the interpolation is not trilinear, or when approximate derivatives are sufficient and finite differences are preferred for simplicity [S1].
++- **Time Complexity:** $O(1)$ per query point, as it involves a fixed number of arithmetic operations (8 multiplications/additions for weights, constant time for Jacobian and Hessian elements).
++- **Memory Complexity:** $O(1)$ auxiliary memory per query point. No large tensors are stored.
++- **Performance:** Significantly faster than numerical differentiation or automatic differentiation through grid sampling (which is unsupported). It enables real-time gradient regularization during training of neural surface reconstruction models [S1].
++- **Strengths:** Exact analytical derivatives; memory efficient; compatible with standard deep learning frameworks (via manual implementation).
++- **Limitations:** Limited to trilinear interpolation; does not handle higher-order interpolation schemes without re-derivation; requires coordinates to be within voxel bounds for valid weights.
+ 
+ ## Background
+-The method was introduced in the context of "GO-Surf: Neural Feature Grid Optimization for Fast, High-Fidelity RGB-D Surface Reconstruction" by Jingwen Wang, Tymoteusz Bleja, and Lourdes Agapito (2022) [S1]. It addresses the limitation of PyTorch's `grid_sampler` which lacks support for second-order gradients (double back-propagation) through the sampling operation, a requirement for regularizing the gradient term of the SDF in their learning framework [S1]. The approach builds on the analytical derivatives of trilinear interpolation, allowing the computation of Hessian blocks with respect to query positions and feature parameters without resorting to finite differences [S1].
++The Second-order Grid Sampler was introduced in the context of "GO-Surf: Neural Feature Grid Optimization for Fast, High-Fidelity RGB-D Surface Reconstruction" by Jingwen Wang, Tymoteusz Bleja, and Lourdes Agapito (UCL, 2022) [S1]. It was developed to address the need for gradient regularization in learning geometry priors on large datasets. The method allows double back-propagation through the grid sampler to compute the Hessian of the SDF, which is used to regularize the gradient term in the loss function, improving reconstruction fidelity [S1].
+ 
+ ## Sources

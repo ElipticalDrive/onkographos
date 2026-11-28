@@ -1,0 +1,185 @@
+--- v005.md
++++ v006.md
+@@ -4,5 +4,5 @@
+ 
+ ## Overview
+-Voxel Coloring is a volumetric reconstruction technique that computes photo-realistic 3D models from multiple color images by assigning colors (radiances) to voxels in a 3D volume, guaranteeing consistency with the input images [S1]. It distinguishes itself from other reconstruction methods by using a "carving" approach: it starts with an opaque volume and iteratively removes (carves) voxels that are inconsistent with the observed image colors, rather than building geometry from surface points [S2, unofficial]. Unlike [Space Carving](link), which allows arbitrary camera placement through multiple scans, Voxel Coloring relies on an ordinal visibility constraint to allow reconstruction in a single scan [S2, unofficial].
++Voxel Coloring is a volumetric reconstruction technique that computes photo-realistic 3D models from multiple color images by assigning colors (radiances) to voxels in a 3D volume, guaranteeing consistency with the input images [S1]. It distinguishes itself from other reconstruction methods by using a "carving" approach: it starts with an opaque volume and iteratively removes (carves) voxels that are inconsistent with the observed image colors, rather than building geometry from surface points [S2, unofficial]. Unlike multi-scan methods such as Space Carving, Voxel Coloring relies on an ordinal visibility constraint to allow reconstruction in a single scan [S2, unofficial].
+ 
+ ## How it works
+@@ -27,7 +27,5 @@
+ 
+ 1. **Initialization:**
+-   - Construct a 3D grid of transparent voxels where the initial alpha value is 0 [S1].
+-   - Alternatively, initialize a reconstruction volume of voxels as opaque (alpha = 255) to represent the initial volume containing the scene [S2, unofficial].
+-   - *Note:* The sources describe two variations: one starting transparent and coloring, and one starting opaque and carving. The standard Voxel Coloring algorithm described by Seitz and Dyer starts with an opaque volume and carves inconsistent voxels [S2, unofficial]. The following steps assume the opaque-initialization/carving approach as it is the canonical definition of the "Voxel Coloring" algorithm [S2, unofficial].
++   - Initialize a reconstruction volume of voxels as opaque (alpha = 255) to represent the initial volume containing the scene [S2, unofficial].
+ 
+ 2. **Camera Space Transformation:**
+@@ -43,12 +41,11 @@
+ 4. **Projection and Consistency Test:**
+    - For each voxel $v$ in the traversal order:
+-     - Compute the position of the voxel in the camera's image plane using the transformation matrix $M$ and the voxel's 3D coordinates [S1].
++     - Compute the position of the corresponding voxel in the grid and project it to the image plane using the transformation matrix $M$ [S1].
+      - Retrieve the color $C_{img}$ from the corresponding pixel in each input image $V_i$ [S1].
+-     - Test for color consistency: Check if the voxel's current color (or the projected image colors) are consistent across all views.
+-     - The consistency is determined by comparing the projected colors against a threshold `thresh` [S1]. If the correlation error exceeds `thresh`, the voxel is considered inconsistent [S1].
++     - Test for color consistency: Check if the correlation error between the voxel's assigned color and the projected image colors exceeds `thresh` [S1].
+ 
+ 5. **Carving:**
+    - If a voxel is found to be color inconsistent across the input images, carve it by setting its alpha value to 0 (transparent) [S2, unofficial].
+-   - If the voxel is consistent, retain its opacity (alpha = 255) and assign the average or representative color from the consistent views [S2, unofficial].
++   - If consistent, retain its opacity (alpha = 255) and assign the pixel's color to the found voxel [S1].
+ 
+ 6. **Termination:**
+@@ -72,92 +69,60 @@
+         volume: 3D array of voxels with 'color' and 'alpha' fields.
+     """
+-    # Initialize volume with opaque voxels
+-    volume = create_volume(grid_resolution, bounding_box)
+-    for voxel in volume:
+-        voxel.alpha = 255
+-        voxel.color = [0, 0, 0]  # Initial color, will be overwritten
++    # Initialize volume with opaque voxels (alpha = 255) [S2, unofficial]
++    volume = [[[{'color': [0.0, 0.0, 0.0], 'alpha': 255} for _ in range(grid_resolution[2])]
++                for _ in range(grid_resolution[1])] for _ in range(grid_resolution[0])]
+ 
+-    # Ensure ordinal visibility constraint is met
+-    if not check_ordinal_visibility(cameras):
+-        raise ValueError("Cameras do not satisfy ordinal visibility constraint.")
++    for x in range(grid_resolution[0]):
++        for y in range(grid_resolution[1]):
++            for z in range(grid_resolution[2]):
++                voxel = volume[x][y][z]
++                if voxel['alpha'] == 0:
++                    continue
+ 
+-    # Traverse voxels in monotonic order (near-to-far)
+-    for voxel in volume.get_monotonic_traversal():
+-        is_consistent = True
+-        accumulated_color = [0, 0, 0]
+-        count = 0
++                consistent_colors = []
++                for i, cam in enumerate(cameras):
++                    # Compute transformation matrix M = RX * RY * T [S1]
++                    # RX, RY rotate vision vector to OZ axis; T translates camera to scene center [S1]
++                    M = cam.RX @ cam.RY @ cam.T
+ 
+-        for i, camera in enumerate(cameras):
+-            # Compute transformation matrix M for this camera
+-            M = compute_camera_matrix(camera)
+-            
+-            # Project voxel to image plane
+-            pixel_coords = project_3d_to_2d(voxel.position, M)
+-            
+-            # Check if projection falls within image bounds
+-            if not is_within_bounds(pixel_coords, images[i].shape):
+-                is_consistent = False
+-                break
+-            
+-            # Get color from image
+-            img_color = images[i].get_color(pixel_coords)
+-            
+-            # Test consistency against threshold
+-            # Note: Exact consistency metric (e.g., correlation) is not fully detailed in sources
+-            # Assuming a simple distance metric for implementation clarity [G]
+-            if voxel.alpha > 0:
+-                # If voxel already has color, compare with image color
+-                error = color_distance(voxel.color, img_color)
+-            else:
+-                # If voxel is new, accumulate color
+-                accumulated_color = [c + img_color[j] for j, c in enumerate(accumulated_color)]
+-                count += 1
+-                continue
+-            
+-            if error > thresh:
+-                is_consistent = False
+-                break
+-        
+-        if is_consistent:
+-            if count > 0:
+-                # Assign average color from consistent views
+-                voxel.color = [c / count for c in accumulated_color]
+-            voxel.alpha = 255
+-        else:
+-            # Carve the voxel
+-            voxel.alpha = 0
++                    # Project voxel center to image plane [S1]
++                    # Homogeneous coordinate: p_h = M @ [x, y, z, 1]^T
++                    p_h = M @ [x, y, z, 1.0]
++                    # Perspective division to get normalized device coordinates
++                    if p_h[3] == 0:
++                        continue
++                    p_ndc = [p_h[0]/p_h[3], p_h[1]/p_h[3], p_h[2]/p_h[3]]
++
++                    # Map to pixel coordinates (u, v) using image dimensions [G]
++                    img_w, img_h = images[i].shape[1], images[i].shape[0]
++                    u = int((p_ndc[0] + 1.0) * img_w / 2.0)
++                    v = int((1.0 - p_ndc[1]) * img_h / 2.0)
++
++                    # Check bounds
++                    if not (0 <= u < img_w and 0 <= v < img_h):
++                        continue
++
++                    # Retrieve pixel color [S1]
++                    pixel_color = images[i].get_color(u, v)
++                    consistent_colors.append(pixel_color)
++
++                if not consistent_colors:
++                    voxel['alpha'] = 0
++                    continue
++
++                # Assign average color from consistent views [G]
++                avg_color = [sum(c[j] for c in consistent_colors) / len(consistent_colors) for j in range(3)]
++
++                # Test consistency: max allowable correlation error threshold [S1]
++                # Using Euclidean distance as a standard proxy for correlation error [G]
++                max_deviation = max(sum((c[j] - avg_color[j])**2 for j in range(3))**0.5 for c in consistent_colors)
++
++                if max_deviation <= thresh:
++                    voxel['color'] = avg_color
++                    voxel['alpha'] = 255
++                else:
++                    voxel['alpha'] = 0
+ 
+     return volume
+-
+-def compute_camera_matrix(camera):
+-    """
+-    Computes M = RX * RY * T.
+-    RX, RY: Rotation matrices to align vision vector with OZ axis.
+-    T: Translation to center scene.
+-    """
+-    # Implementation details for rotation/translation depend on specific camera model [G]
+-    # This is a placeholder for the mathematical operation described in [S1]
+-    pass
+-
+-def project_3d_to_2d(position, M):
+-    """
+-    Projects a 3D voxel position to 2D image coordinates using matrix M.
+-    """
+-    # Homogeneous transformation and projection [G]
+-    pass
+-
+-def color_distance(c1, c2):
+-    """
+-    Computes distance between two RGB colors.
+-    """
+-    return sum((a - b) ** 2 for a, b in zip(c1, c2)) ** 0.5
+-
+-def check_ordinal_visibility(cameras):
+-    """
+-    Checks if cameras satisfy the ordinal visibility constraint.
+-    """
+-    # This check ensures cameras do not surround the scene [S2, unofficial]
+-    # Implementation depends on specific geometric arrangement [G]
+-    pass
+ ```
+ 
+@@ -186,5 +151,5 @@
+ 
+ ## Background
+-Voxel Coloring was introduced by Seitz and Dyer in 1997 in the paper "Photorealistic Scene Reconstruction by Voxel Coloring" [S1]. It was one of the first methods to use color consistency as a criterion for distinguishing object surface voxels from background in a volumetric reconstruction [S2, unofficial]. The method laid the foundation for subsequent voxel-based reconstruction techniques [S1].
++Voxel Coloring was introduced by Seitz and Dyer in 1997 in the paper "Photorealistic Scene Reconstruction by Voxel Coloring" [S1]. The method laid the foundation for subsequent voxel-based reconstruction techniques [S1].
+ 
+ ## Sources

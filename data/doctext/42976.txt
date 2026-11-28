@@ -1,0 +1,3807 @@
+# VisualNifty
+
+VisualNifty is an interactive volumetric image viewer developed for medical imaging and scientific visualization. It is designed to efficiently render three-dimensional scalar fields from NifTi-format datasets. The system utilizes a ray casting-based Direct Volume Rendering (DVR) pipeline to transform raw intensity data into detailed visualizations. Advanced rendering techniques - such as gradient-based shading and ambient occlusion — are integrated to improve the perception of depth and surface detail, resulting in photorealistic images that depict internal structures. High performance enable real-time interactivity even on complex and high-resolution datasets. VisualNifty also offers an intuitive user interface that allows fine-grained adjustments of visualization parameters, like transfer functions, lighting configurations, and view manipulations.
+
+## Project Report
+
+For a detailed description of the implementation and results, see the full report:
+
+[VisualNifty - A Volumetric image viewer](<VisualNifty - A Volumetric image viewer.pdf>)
+
+## Screenshots
+
+### Startup Interface
+
+![Startup Interface](pictures/Start_up_interface.png)
+
+### Photo Realistic Rendering
+
+![Photo Realistic](pictures/Photo_realistic.png)
+
+### First Contact
+
+![First Contact](pictures/First_contact.png)
+
+### Compositing (Front-to-Back)
+
+![Compositing (Front-to-Back)](<pictures/Compositing(front-to-back).png>)
+
+### Maximum Intensity Projection
+
+![Maximum Intensity](pictures/Maximum_intensity.png)
+
+### Mean Density
+
+![Mean Density](pictures/Mean_density.png)
+
+## Project Structure
+
+```
+src/
+  main.cpp
+  core/                # NIfTI data management
+  interface/           # UI components (GradientEditor, LayoutSetup, RangeSlider)
+  viewPort/            # 3D viewport, camera, and rendering logic
+shaders/               # GLSL shader files for rendering
+datasets/              # Example NIfTI datasets
+CMakeLists.txt         # Build configuration
+```
+
+## Getting Started
+
+### Prerequisites
+
+- C++17 compatible compiler (e.g., clang++)
+- OpenGL development libraries
+- Qt
+- [RNifti](https://github.com/jonclayden/RNifti) (for NIfTI support)
+
+### Build Instructions
+
+```sh
+mkdir build
+cd build
+cmake ..
+make
+```
+
+After building, run the application from the [build](build/) directory:
+
+```sh
+./VisualNifty
+```
+
+### shaders/axis.frag
+```
+#version 410
+in vec3 vertColor;
+out vec4 fragColor;
+
+void main() {
+    fragColor = vec4(vertColor, 1.0);
+}
+```
+
+### shaders/axis.vert
+```
+#version 410
+uniform mat4 mvp;
+layout (location = 0) in vec3 position;
+layout (location = 1) in vec3 color;
+out vec3 vertColor;
+
+void main() {
+    gl_Position = mvp * vec4(position, 1.0);
+    vertColor = color;
+}
+```
+
+### shaders/raycast.frag
+```
+#version 410 core
+in vec3 vertexPosition;
+uniform sampler3D volumeTexture;
+uniform sampler1D colorMap;
+uniform vec3 cameraWorldPosition;
+uniform float stepSize = 0.001;
+uniform float growthFactor = 0.00001;
+uniform int renderType = 0; // 0 = MIP, 1 = First Contact, 2 = Mean Density, 3 = Compositing, 4 = Full Opacity
+uniform bool exactRayCasting = false;
+uniform float minDensityThreshold = 0.15; // Minimum threshold for all rendering modes
+uniform float maxDensityThreshold = 1.0;  // Maximum threshold for all rendering modes
+uniform vec3 minSlices;
+uniform vec3 maxSlices;
+uniform float alphaFactor = 20.0f;
+uniform vec3 volumeDimensions = vec3(1.0, 1.0, 1.0);
+
+uniform vec3 lightPosition = vec3(1.0, 1.0, 2.0);
+uniform float ambientStrength = 0.3;
+uniform float diffuseStrength = 0.7;
+uniform float specularStrength = 0.8;
+uniform float shininess = 32.0;
+uniform bool enableLighting = true;
+uniform bool enableAO = false;
+uniform bool enableShadow = false;
+uniform vec3 lightColor = vec3(1.0, 1.0, 1.0);
+
+out vec4 FragColor;
+
+float rand(vec2 seed) {
+    return fract(sin(dot(seed, vec2(12.9898, 78.233))) * 43758.5453);
+}
+
+/*****************************
+* Lighting functions
+******************************/
+
+vec3 calculateNormal(vec3 pos) {
+    float delta = 0.01;
+    
+    // Sample neighboring points for central difference
+    float x1 = texture(volumeTexture, pos - vec3(delta, 0.0, 0.0)).r;
+    float x2 = texture(volumeTexture, pos + vec3(delta, 0.0, 0.0)).r;
+    float y1 = texture(volumeTexture, pos - vec3(0.0, delta, 0.0)).r;
+    float y2 = texture(volumeTexture, pos + vec3(0.0, delta, 0.0)).r;
+    float z1 = texture(volumeTexture, pos - vec3(0.0, 0.0, delta)).r;
+    float z2 = texture(volumeTexture, pos + vec3(0.0, 0.0, delta)).r;
+    
+    // Calculate gradient using central difference
+    vec3 grad = vec3(x2 - x1, y2 - y1, z2 - z1);
+    
+    // Avoid normalizing very small gradients which could lead to artifacts
+    float magnitude = length(grad);
+    if(magnitude > 0.0001) {
+        // Surface normals are defined as the negative gradient
+        return - normalize(grad); 
+    } else {
+        return vec3(0.0, 0.0, 1.0); // Default normal if gradient is too small
+    }
+}
+
+vec3 calculateLighting(vec3 normal, vec3 viewDir, vec3 pos, vec3 baseColor) {
+    // Convert sample position from [0,1] to [-1,1] for lighting calculation
+    vec3 worldPos = pos * 2.0 - 1.0;
+    
+    // Ambient
+    vec3 ambient = ambientStrength * baseColor;
+    
+    // Diffuse
+    vec3 lightDir = normalize(lightPosition - worldPos);
+    float diff = max(dot(normal, lightDir), 0.0);
+    vec3 diffuse = diffuseStrength * diff * lightColor * baseColor;
+    
+    // Specular
+    vec3 halfwayDir = normalize(lightDir + viewDir);
+    float spec = pow(max(dot(normal, halfwayDir), 0.0), shininess);
+    vec3 specular = specularStrength * spec * lightColor;
+    
+    // Combine lighting components
+    return ambient + diffuse + specular;
+}
+
+
+vec3 sampleUniformSphere(int i) {
+    float theta = 2.0 * 3.14 * rand(i * gl_FragCoord.xy);
+    float phi = acos(1.0 - 2.0 * rand(i * gl_FragCoord.zz)); 
+
+    float x = cos(theta) * sin(phi);
+    float y = sin(theta) * sin(phi);
+    float z = cos(phi);
+
+    return vec3(x, y, z);
+}
+
+float caculateOcclusion(vec3 pos) {
+    float occlusion = 0.0;
+    int sampleCount = 8;
+
+    const int NUM_RAYS = 10;
+    const int NUM_SAMPLES_PER_RAY = 5;
+
+    for (int i = 0; i < NUM_RAYS; i++) {
+        vec3 offset = sampleUniformSphere(i) * 0.01;
+        // vec3 offset = directions[i] * 0.01;
+        vec3 samplePos = pos + offset;
+
+        for (int j = 0; j < NUM_SAMPLES_PER_RAY; j++) {
+            samplePos += offset;
+            float neighborIntensity = texture(volumeTexture, samplePos).r;
+            if(any(lessThan(samplePos, minSlices)) || any(greaterThan(samplePos, maxSlices)))
+                break;
+            if (neighborIntensity > minDensityThreshold && neighborIntensity < maxDensityThreshold) 
+                occlusion += -7.0*neighborIntensity / (NUM_RAYS * NUM_SAMPLES_PER_RAY);
+        }
+    }
+    return clamp(2*exp(occlusion),0.0f,1.0f);
+}
+
+float calculateShadow(vec3 pos) {
+    float shadowFactor = 1.0;
+    float shadowStepSize = 0.01;
+    int maxShadowSteps = 20;
+    vec3 lightDir = normalize((lightPosition * 0.5 + 0.5) - pos);
+    vec3 samplePos = pos;
+
+    for (int i = 0; i < maxShadowSteps; i++) {
+        samplePos += lightDir * shadowStepSize;
+    
+        float sampleDensity = texture(volumeTexture, samplePos).r;
+    
+        shadowFactor *= exp(-sampleDensity / maxShadowSteps * 5);
+    
+        if (shadowFactor < 0.01) break;
+    }
+
+    return shadowFactor;
+}
+/******************************
+* Projection functions with sampling propogation
+******************************/
+void projectionMIP(vec3 startPos, vec3 rayDir, float tNear, float tFar) {
+
+    float maxVal = -1.0;
+    vec3 maxValPos;
+    vec3 samplePos;
+    float localGrowthFactor = growthFactor;
+
+    for (float t = tNear; t < tFar; t += stepSize) {
+        t += localGrowthFactor;
+        localGrowthFactor += growthFactor;
+
+        samplePos = startPos + rayDir * t;
+        
+        float val = texture(volumeTexture, samplePos).r;
+        bool isInRange = (val >= minDensityThreshold && val <= maxDensityThreshold);
+        
+        if (isInRange && val > maxVal) {
+            maxVal = val;
+            maxValPos = samplePos;
+        }
+    
+    }
+
+    if (maxVal < 0.0f){
+        FragColor = vec4(0.0f);
+        return;
+    }
+
+    vec4 baseColor = texture(colorMap, maxVal);
+    vec3 shadedColor = enableLighting ? calculateLighting(calculateNormal(maxValPos), -rayDir, maxValPos, baseColor.rgb) : baseColor.rgb;
+    FragColor = vec4(shadedColor, baseColor.a);
+}
+
+void projectionFirstContact(vec3 startPos, vec3 rayDir, float tNear, float tFar) {
+        
+    float firstContactVal = 0.0;
+    vec3 samplePos;
+    float localGrowthFactor = growthFactor;
+
+    for (float t = tNear; t < tFar; t += stepSize) {
+        t += localGrowthFactor;
+        localGrowthFactor += growthFactor;
+
+        // Move along ray
+        samplePos = startPos + rayDir * t;
+        
+        float val = texture(volumeTexture, samplePos).r;
+        
+        // Check if value is within threshold range
+        bool isInRange = (val >= minDensityThreshold && val <= maxDensityThreshold);
+        
+
+        // First contact rendering
+        if (isInRange) {
+            firstContactVal = val;
+            break; // Stop once we've found first contact
+        }
+
+    }
+
+    if (firstContactVal <= 0.0f){
+        FragColor = vec4(0.0f);
+        return;
+    }
+
+    vec4 baseColor = texture(colorMap, firstContactVal);
+    vec3 shadedColor = enableLighting ? calculateLighting(calculateNormal(samplePos), -rayDir, samplePos, baseColor.rgb) : baseColor.rgb;
+    float occlusion = enableAO ? caculateOcclusion(samplePos) : 1.0f;
+    float shadow = enableShadow ? calculateShadow(samplePos) : 1.0f;
+    FragColor = vec4(shadedColor*occlusion*shadow, 1.0f);
+}
+
+void projectionMeanDensity(vec3 startPos, vec3 rayDir, float tNear, float tFar) {
+    float meanSum = 0.0;
+    int sampleCount = 0;     
+    int validSamples = 0;
+    vec3 samplePos;
+    vec3 meanPos = vec3(0.0); // Track the average position for normal calculation
+    // float localGrowthFactor = growthFactor;
+
+    for (float t = tNear; t < tFar; t += stepSize) {
+
+        // Move along ray
+        samplePos = startPos + rayDir * t;
+        
+        float val = texture(volumeTexture, samplePos).r;
+        
+        // Check if value is within threshold range
+        bool isInRange = (val >= minDensityThreshold && val <= maxDensityThreshold);
+        
+        // Mean density rendering (only consider values within range)
+        if (isInRange) {
+            meanSum += val;
+            meanPos += samplePos; // Accumulate positions for lighting calculation
+            validSamples++;
+        }
+        sampleCount++;
+    }
+    
+    // Calculate final color
+    if (validSamples > 0) {
+        float meanValue = meanSum / float(validSamples);
+        vec4 color = texture(colorMap, meanValue);
+        
+        if (enableLighting) {
+            // Calculate mean position for normal calculation
+            meanPos /= float(validSamples);
+            vec3 normal = calculateNormal(meanPos);
+            vec3 litColor = calculateLighting(normal, -rayDir, meanPos, color.rgb);
+            FragColor = vec4(litColor, 1.0);
+        } else {
+            FragColor = color;
+        }
+    } else {
+        FragColor = vec4(0.0);
+    }
+}
+
+void projectionCompositing(vec3 startPos, vec3 rayDir, float tNear, float tFar){
+
+    vec3 samplePos;
+    float adjustedAlphaFactor = alphaFactor * stepSize;
+    float accumulatedAlpha = 0.0;
+    vec3 accumulatedColor = vec3(0.0);
+    // float localGrowthFactor = growthFactor;
+
+    for (float t = tNear; t < tFar; t += stepSize) {
+        
+        samplePos = startPos + rayDir * t;
+        
+        float val = texture(volumeTexture, samplePos).r;
+        bool isInRange = (val >= minDensityThreshold && val <= maxDensityThreshold);
+
+        if (isInRange){
+            vec4 baseColor = texture(colorMap, val);
+            vec3 shadedColor = enableLighting ? calculateLighting(calculateNormal(samplePos), -rayDir, samplePos, baseColor.rgb) : baseColor.rgb;
+            float shadow = enableShadow ? calculateShadow(samplePos) : 1.0f;
+
+            float alpha = baseColor.a * adjustedAlphaFactor;
+            accumulatedColor += (1.0 - accumulatedAlpha) * shadedColor * shadow * alpha;
+            accumulatedAlpha += (1.0 - accumulatedAlpha) * alpha;
+        }
+
+        if (accumulatedAlpha >= 1.0) break;
+    }
+    FragColor = vec4(accumulatedColor, accumulatedAlpha);
+}
+
+void projectionFullOpacity(vec3 startPos, vec3 rayDir, float tNear, float tFar) {
+    vec3 samplePos;
+    float localGrowthFactor = growthFactor;
+    
+    // Accumulation variables
+    vec3 accumulatedColor = vec3(0.0);
+    float accumulatedAlpha = 0.0;
+    
+    // For storing primary visible object (front object with sufficient density)
+    bool foundPrimaryObject = false;
+    vec3 primaryObjectPos = vec3(0.0);
+    vec4 primaryObjectColor = vec4(0.0);
+    float primaryObjectDistance = 0.0;
+    float primaryObjectDensity = 0.0;
+    
+    // For storing high-density background object
+    bool foundBackgroundObject = false;
+    vec3 backgroundObjectPos = vec3(0.0);
+    vec4 backgroundObjectColor = vec4(0.0);
+    float backgroundObjectDistance = 0.0;
+    
+    // Constants to control visibility behavior
+    const float HIGH_DENSITY_THRESHOLD = 0.7;    // Density above which front objects obscure back objects
+    const float DISTANCE_THRESHOLD = 0.5;        // Distance beyond which back objects are ignored
+    
+    // Front-to-back ray traversal (reversed from typical compositing which is back-to-front)
+    for (float t = tNear; t < tFar; t += stepSize) {
+        t += localGrowthFactor;
+        localGrowthFactor += growthFactor;
+
+        samplePos = startPos + rayDir * t;
+        
+        float val = texture(volumeTexture, samplePos).r;
+        if (val < minDensityThreshold || val > maxDensityThreshold) continue;
+        
+        vec4 color = texture(colorMap, val);
+        
+        // Skip very low opacity samples
+        if (color.a < 0.05) continue;
+        
+        // If we haven't found a primary object yet
+        if (!foundPrimaryObject) {
+            // Found our first meaningful object - store it as primary
+            foundPrimaryObject = true;
+            primaryObjectPos = samplePos;
+            primaryObjectColor = color;
+            primaryObjectDistance = t;
+            primaryObjectDensity = val;
+            
+            // If this primary object has very high density or opacity, we can stop
+            // No need to look for background objects
+            if (val > HIGH_DENSITY_THRESHOLD || color.a > 0.9) {
+                break;
+            }
+            
+            // Otherwise continue looking for background objects
+            continue;
+        }
+        
+        // We already have a primary object, now looking for background objects
+        // Only consider significant background objects (high opacity)
+        if (!foundBackgroundObject && color.a > 0.6) {
+            foundBackgroundObject = true;
+            backgroundObjectPos = samplePos;
+            backgroundObjectColor = color;
+            backgroundObjectDistance = t;
+            
+            // Check if the distance between primary and background object is significant
+            float distanceBetweenObjects = backgroundObjectDistance - primaryObjectDistance;
+            
+            // If primary object has moderate-high density or objects are far apart,
+            // ignore the background object
+            if (primaryObjectDensity > 0.5 || distanceBetweenObjects > DISTANCE_THRESHOLD) {
+                foundBackgroundObject = false;  // Effectively ignore the background object
+            }
+            
+            // We found what we needed, no need to continue ray traversal
+            break;
+        }
+    }
+    
+    // If we didn't find any objects
+    if (!foundPrimaryObject) {
+        FragColor = vec4(0.0);
+        return;
+    }
+    
+    // Apply lighting to primary object
+    vec3 primaryColor;
+    if (enableLighting) {
+        vec3 normal = calculateNormal(primaryObjectPos);
+        primaryColor = calculateLighting(normal, -rayDir, primaryObjectPos, primaryObjectColor.rgb);
+    } else {
+        primaryColor = primaryObjectColor.rgb;
+    }
+    
+    // Start with the primary object
+    accumulatedColor = primaryColor;
+    accumulatedAlpha = primaryObjectColor.a;
+    
+    // If we have a relevant background object, blend it
+    if (foundBackgroundObject) {
+        // Calculate how much of the background should show through based on:
+        // 1. Distance between objects
+        // 2. Primary object's density/opacity
+        float distanceFactor = clamp((backgroundObjectDistance - primaryObjectDistance) / DISTANCE_THRESHOLD, 0.0, 1.0);
+        float densityFactor = clamp(1.0 - primaryObjectDensity / HIGH_DENSITY_THRESHOLD, 0.0, 1.0);
+        
+        // Combined factor determines background contribution
+        float backgroundContribution = min(distanceFactor, densityFactor) * 0.7;
+        
+        // Apply lighting to background object
+        vec3 backgroundLitColor;
+        if (enableLighting) {
+            vec3 normal = calculateNormal(backgroundObjectPos);
+            backgroundLitColor = calculateLighting(normal, -rayDir, backgroundObjectPos, backgroundObjectColor.rgb);
+        } else {
+            backgroundLitColor = backgroundObjectColor.rgb;
+        }
+        
+        // Blend background with accumulated color
+        accumulatedColor = mix(accumulatedColor, backgroundLitColor, backgroundContribution * (1.0 - accumulatedAlpha));
+        accumulatedAlpha = accumulatedAlpha + backgroundContribution * (1.0 - accumulatedAlpha);
+    }
+    
+    FragColor = vec4(accumulatedColor, max(accumulatedAlpha, 0.5));  // Ensure minimum opacity
+}
+
+/******************************
+* Projection functions with exact propogation
+******************************/
+void exactProjectionMIP(vec3 startPos, vec3 rayDir, float tNear, float tFar) {
+    float maxVal = -1.0;
+    vec3 maxValPos = startPos;
+    vec3 samplePos;
+    float t = tNear;
+    const int MAX_ITERATIONS = 2000;
+    int iterations = 0;
+
+    while (t < tFar && iterations < MAX_ITERATIONS) {
+        samplePos = startPos + rayDir * t;
+
+        // Check if we're still inside volume bounds
+        if (any(lessThan(samplePos, vec3(0.0))) || any(greaterThan(samplePos, vec3(1.0)))) {
+            t += stepSize;
+            iterations++;
+            continue;
+        }
+
+        // Calculate current voxel coordinates
+        vec3 voxelPos = samplePos * volumeDimensions;
+
+        // Determine next voxel boundaries differently for positive/negative ray directions
+        vec3 nextVoxel;
+        nextVoxel.x = rayDir.x > 0.0 ? floor(voxelPos.x) + 1.0 : ceil(voxelPos.x) - 1.0;
+        nextVoxel.y = rayDir.y > 0.0 ? floor(voxelPos.y) + 1.0 : ceil(voxelPos.y) - 1.0; 
+        nextVoxel.z = rayDir.z > 0.0 ? floor(voxelPos.z) + 1.0 : ceil(voxelPos.z) - 1.0;
+
+        // Compute dt per axis using exact boundaries with explicit safety checks:
+        vec3 dtVec = vec3(tFar);
+        if (abs(rayDir.x) > 0.0001) dtVec.x = (nextVoxel.x - voxelPos.x) / (rayDir.x * volumeDimensions.x);
+        if (abs(rayDir.y) > 0.0001) dtVec.y = (nextVoxel.y - voxelPos.y) / (rayDir.y * volumeDimensions.y);
+        if (abs(rayDir.z) > 0.0001) dtVec.z = (nextVoxel.z - voxelPos.z) / (rayDir.z * volumeDimensions.z);
+
+        float dt = min(min(dtVec.x, dtVec.y), dtVec.z);
+
+        // Ensure dt is positive and not too small
+        dt = max(dt, 0.0001);
+
+        float val = texture(volumeTexture, samplePos).r;
+        bool isInRange = (val >= minDensityThreshold && val <= maxDensityThreshold);
+
+        if (isInRange && val > maxVal) {
+            maxVal = val;
+            maxValPos = samplePos;
+        }
+
+        // Advance to the next voxel boundary (adding small epsilon)
+        t += dt;
+        iterations++;
+    }
+
+    if (maxVal < 0.0f){
+        FragColor = vec4(0.0f);
+        return;
+    }
+
+    vec4 baseColor = texture(colorMap, maxVal);
+    vec3 shadedColor = enableLighting ? calculateLighting(calculateNormal(maxValPos), -rayDir, maxValPos, baseColor.rgb) : baseColor.rgb;
+    FragColor = vec4(shadedColor, baseColor.a);
+}
+
+void exactProjectionFirstContact(vec3 startPos, vec3 rayDir, float tNear, float tFar) {
+    float firstContactVal = 0.0;
+    vec3 firstContactPos = startPos; // Initialize to avoid undefined behavior
+    vec3 samplePos;
+
+    // Start at the near intersection point
+    float t = tNear;
+
+    // Safety counter to prevent infinite loops
+    const int MAX_ITERATIONS = 2000;
+    int iterations = 0;
+    int voxelCounter = 0;
+
+    while (t < tFar && iterations < MAX_ITERATIONS) {
+        samplePos = startPos + rayDir * t;
+
+        // Check if we're still inside volume bounds
+        if (any(lessThan(samplePos, vec3(0.0))) || any(greaterThan(samplePos, vec3(1.0)))) {
+            t += stepSize;
+            iterations++;
+            continue;
+        }
+
+        // Calculate current voxel coordinates
+        vec3 voxelPos = samplePos * volumeDimensions;
+
+        // Determine next voxel boundaries differently for positive/negative ray directions
+        vec3 nextVoxel;
+        nextVoxel.x = rayDir.x > 0.0 ? floor(voxelPos.x) + 1.0 : ceil(voxelPos.x) - 1.0;
+        nextVoxel.y = rayDir.y > 0.0 ? floor(voxelPos.y) + 1.0 : ceil(voxelPos.y) - 1.0; 
+        nextVoxel.z = rayDir.z > 0.0 ? floor(voxelPos.z) + 1.0 : ceil(voxelPos.z) - 1.0;
+
+        // Compute dt per axis using exact boundaries with explicit safety checks:
+        vec3 dtVec = vec3(tFar);
+        if (abs(rayDir.x) > 0.0001) dtVec.x = (nextVoxel.x - voxelPos.x) / (rayDir.x * volumeDimensions.x);
+        if (abs(rayDir.y) > 0.0001) dtVec.y = (nextVoxel.y - voxelPos.y) / (rayDir.y * volumeDimensions.y);
+        if (abs(rayDir.z) > 0.0001) dtVec.z = (nextVoxel.z - voxelPos.z) / (rayDir.z * volumeDimensions.z);
+
+        float dt = min(min(dtVec.x, dtVec.y), dtVec.z);
+
+        // Ensure dt is positive and not too small
+        dt = max(dt, 0.0001);
+
+
+        float val = texture(volumeTexture, samplePos).r;
+        bool isInRange = (val >= minDensityThreshold && val <= maxDensityThreshold);
+
+        if (isInRange) {
+            firstContactVal = val;
+            firstContactPos = samplePos;
+            break;
+        }
+
+        t += dt;
+        iterations++;
+    }
+
+    if (firstContactVal <= 0.0f){
+        FragColor = vec4(0.0f);
+        return;
+    }
+
+    vec4 baseColor = texture(colorMap, firstContactVal);
+    vec3 shadedColor = enableLighting ? calculateLighting(calculateNormal(firstContactPos), -rayDir, firstContactPos, baseColor.rgb) : baseColor.rgb;
+    float occlusion = enableAO ? caculateOcclusion(firstContactPos) : 1.0f;
+    float shadow = enableShadow ? calculateShadow(firstContactPos) : 1.0f;
+    FragColor = vec4(shadedColor*occlusion*shadow, 1.0f);
+}
+
+void exactProjectionMeanDensity(vec3 startPos, vec3 rayDir, float tNear, float tFar) {
+    float meanSum = 0.0;
+    int validSamples = 0;
+    vec3 samplePos;
+    vec3 meanPos = vec3(0.0);
+
+    // Start at the near intersection point
+    float t = tNear;
+
+    // Safety counter to prevent infinite loops
+    const int MAX_ITERATIONS = 2000;
+    int iterations = 0;
+
+    while (t < tFar && iterations < MAX_ITERATIONS) {
+        samplePos = startPos + rayDir * t;
+
+        // Check if we're still inside volume bounds
+        if (any(lessThan(samplePos, vec3(0.0))) || any(greaterThan(samplePos, vec3(1.0)))) {
+            t += stepSize;
+            iterations++;
+            continue;
+        }
+
+        // Calculate current voxel coordinates
+        vec3 voxelPos = samplePos * volumeDimensions;
+
+        // Determine next voxel boundaries differently for positive/negative ray directions
+        vec3 nextVoxel;
+        nextVoxel.x = rayDir.x > 0.0 ? floor(voxelPos.x) + 1.0 : ceil(voxelPos.x) - 1.0;
+        nextVoxel.y = rayDir.y > 0.0 ? floor(voxelPos.y) + 1.0 : ceil(voxelPos.y) - 1.0; 
+        nextVoxel.z = rayDir.z > 0.0 ? floor(voxelPos.z) + 1.0 : ceil(voxelPos.z) - 1.0;
+
+        // Compute dt per axis using exact boundaries with explicit safety checks:
+        vec3 dtVec = vec3(tFar);
+        if (abs(rayDir.x) > 0.0001) dtVec.x = (nextVoxel.x - voxelPos.x) / (rayDir.x * volumeDimensions.x);
+        if (abs(rayDir.y) > 0.0001) dtVec.y = (nextVoxel.y - voxelPos.y) / (rayDir.y * volumeDimensions.y);
+        if (abs(rayDir.z) > 0.0001) dtVec.z = (nextVoxel.z - voxelPos.z) / (rayDir.z * volumeDimensions.z);
+
+        float dt = min(min(dtVec.x, dtVec.y), dtVec.z);
+
+        // Ensure dt is positive and not too small
+        dt = max(dt, 0.0001);
+
+        // Skip voxels based on voxelSkip parameter
+        float val = texture(volumeTexture, samplePos).r;
+        bool isInRange = (val >= minDensityThreshold && val <= maxDensityThreshold);
+
+        // For mean density, accumulate all values in range
+        if (isInRange) {
+            meanSum += val;
+            meanPos += samplePos; // Accumulate positions for lighting calculation
+            validSamples++;
+        }
+
+        // Advance to the next voxel boundary (adding small epsilon)
+        t += dt;
+        iterations++;
+    }
+
+        // Calculate final color with lighting
+    if (validSamples > 0) {
+        float meanValue = meanSum / float(validSamples);
+        vec4 color = texture(colorMap, meanValue);
+        
+        if (enableLighting) {
+            // Calculate mean position for normal calculation
+            meanPos /= float(validSamples);
+            vec3 normal = calculateNormal(meanPos);
+            vec3 litColor = calculateLighting(normal, -rayDir, meanPos, color.rgb);
+            FragColor = vec4(litColor, 1.0);
+        } else {
+            FragColor = color;
+        }
+    } else {
+        FragColor = vec4(0.0);
+    }
+}
+
+void exactProjectionCompositing(vec3 startPos, vec3 rayDir, float tNear, float tFar) {
+    vec3 samplePos;
+    float accumulatedAlpha = 0.0;
+    vec3 accumulatedColor = vec3(0.0);
+
+    // Start at the near intersection point
+    float t = tNear;
+
+    // Safety counter to prevent infinite loops
+    const int MAX_ITERATIONS = 2000;
+    int iterations = 0;
+    int voxelCounter = 0;
+
+    // Calculate alpha adjustment factor based on expected sampling density
+    float avgStep = 1.0 / float(volumeDimensions.x + volumeDimensions.y + volumeDimensions.z) / 3.0;
+    float adjustedAlphaFactor = alphaFactor * avgStep;
+
+    while (t < tFar && iterations < MAX_ITERATIONS && accumulatedAlpha < 1.0) {
+        samplePos = startPos + rayDir * t;
+
+        // Check if we're still inside volume bounds
+        if (any(lessThan(samplePos, vec3(0.0))) || any(greaterThan(samplePos, vec3(1.0)))) {
+            t += stepSize;
+            iterations++;
+            continue;
+        }
+
+        // Calculate current voxel coordinates
+        vec3 voxelPos = samplePos * volumeDimensions;
+
+        // Determine next voxel boundaries differently for positive/negative ray directions
+        vec3 nextVoxel;
+        nextVoxel.x = rayDir.x > 0.0 ? floor(voxelPos.x) + 1.0 : ceil(voxelPos.x) - 1.0;
+        nextVoxel.y = rayDir.y > 0.0 ? floor(voxelPos.y) + 1.0 : ceil(voxelPos.y) - 1.0; 
+        nextVoxel.z = rayDir.z > 0.0 ? floor(voxelPos.z) + 1.0 : ceil(voxelPos.z) - 1.0;
+
+        // Compute dt per axis using exact boundaries with explicit safety checks:
+        vec3 dtVec = vec3(tFar);
+        if (abs(rayDir.x) > 0.0001) dtVec.x = (nextVoxel.x - voxelPos.x) / (rayDir.x * volumeDimensions.x);
+        if (abs(rayDir.y) > 0.0001) dtVec.y = (nextVoxel.y - voxelPos.y) / (rayDir.y * volumeDimensions.y);
+        if (abs(rayDir.z) > 0.0001) dtVec.z = (nextVoxel.z - voxelPos.z) / (rayDir.z * volumeDimensions.z);
+
+        float dt = min(min(dtVec.x, dtVec.y), dtVec.z);
+
+        // Ensure dt is positive and not too small
+        dt = max(dt, 0.0001);
+
+        float val = texture(volumeTexture, samplePos).r;
+        bool isInRange = (val >= minDensityThreshold && val <= maxDensityThreshold);
+
+        // For compositing, accumulate color and alpha
+        if (isInRange) {
+            vec4 baseColor = texture(colorMap, val);
+            vec3 shadedColor = enableLighting ? calculateLighting(calculateNormal(samplePos), -rayDir, samplePos, baseColor.rgb) : baseColor.rgb;
+            float shadow = enableShadow ? calculateShadow(samplePos) : 1.0f;
+
+            float alpha = baseColor.a * adjustedAlphaFactor;
+            accumulatedColor += (1.0 - accumulatedAlpha) * shadedColor * shadow * alpha;
+            accumulatedAlpha += (1.0 - accumulatedAlpha) * alpha;
+        }
+
+        // Advance to the next voxel boundary (adding small epsilon)
+        t += dt;
+        iterations++;
+    }
+
+    FragColor = vec4(accumulatedColor, accumulatedAlpha);
+}
+
+void exactProjectionFullOpacity(vec3 startPos, vec3 rayDir, float tNear, float tFar) {
+    vec3 samplePos;
+    
+    // Accumulation variables
+    vec3 accumulatedColor = vec3(0.0);
+    float accumulatedAlpha = 0.0;
+    
+    // For storing primary visible object (front object with sufficient density)
+    bool foundPrimaryObject = false;
+    vec3 primaryObjectPos = vec3(0.0);
+    vec4 primaryObjectColor = vec4(0.0);
+    float primaryObjectDistance = 0.0;
+    float primaryObjectDensity = 0.0;
+    
+    // For storing high-density background object
+    bool foundBackgroundObject = false;
+    vec3 backgroundObjectPos = vec3(0.0);
+    vec4 backgroundObjectColor = vec4(0.0);
+    float backgroundObjectDistance = 0.0;
+    
+    // Constants to control visibility behavior
+    const float HIGH_DENSITY_THRESHOLD = 0.7;    // Density above which front objects obscure back objects
+    const float DISTANCE_THRESHOLD = 0.5;        // Distance beyond which back objects are ignored
+    
+    // Start at the near intersection point
+    float t = tNear;
+    
+    // Safety counter to prevent infinite loops
+    const int MAX_ITERATIONS = 2000;
+    int iterations = 0;
+    
+    // Front-to-back ray traversal with exact steps
+    while (t < tFar && iterations < MAX_ITERATIONS) {
+        samplePos = startPos + rayDir * t;
+        
+        // Check if we're still inside volume bounds
+        if (any(lessThan(samplePos, vec3(0.0))) || any(greaterThan(samplePos, vec3(1.0)))) {
+            t += stepSize;
+            iterations++;
+            continue;
+        }
+        
+        // Calculate current voxel coordinates
+        vec3 voxelPos = samplePos * volumeDimensions;
+        
+        // Determine next voxel boundaries differently for positive/negative ray directions
+        vec3 nextVoxel;
+        nextVoxel.x = rayDir.x > 0.0 ? floor(voxelPos.x) + 1.0 : ceil(voxelPos.x) - 1.0;
+        nextVoxel.y = rayDir.y > 0.0 ? floor(voxelPos.y) + 1.0 : ceil(voxelPos.y) - 1.0; 
+        nextVoxel.z = rayDir.z > 0.0 ? floor(voxelPos.z) + 1.0 : ceil(voxelPos.z) - 1.0;
+        
+        // Compute dt per axis using exact boundaries with explicit safety checks
+        vec3 dtVec = vec3(tFar);
+        if (abs(rayDir.x) > 0.0001) dtVec.x = (nextVoxel.x - voxelPos.x) / (rayDir.x * volumeDimensions.x);
+        if (abs(rayDir.y) > 0.0001) dtVec.y = (nextVoxel.y - voxelPos.y) / (rayDir.y * volumeDimensions.y);
+        if (abs(rayDir.z) > 0.0001) dtVec.z = (nextVoxel.z - voxelPos.z) / (rayDir.z * volumeDimensions.z);
+        
+        float dt = min(min(dtVec.x, dtVec.y), dtVec.z);
+        
+        // Ensure dt is positive and not too small
+        dt = max(dt, 0.0001);
+        
+        // Sample the current position
+        float val = texture(volumeTexture, samplePos).r;
+        if (val < minDensityThreshold || val > maxDensityThreshold) {
+            t += dt;
+            iterations++;
+            continue;
+        }
+        
+        vec4 color = texture(colorMap, val);
+        
+        // Skip very low opacity samples
+        if (color.a < 0.05) {
+            t += dt;
+            iterations++;
+            continue;
+        }
+        
+        // If we haven't found a primary object yet
+        if (!foundPrimaryObject) {
+            // Found our first meaningful object - store it as primary
+            foundPrimaryObject = true;
+            primaryObjectPos = samplePos;
+            primaryObjectColor = color;
+            primaryObjectDistance = t;
+            primaryObjectDensity = val;
+            
+            // If this primary object has very high density or opacity, we can stop
+            // No need to look for background objects
+            if (val > HIGH_DENSITY_THRESHOLD || color.a > 0.9) {
+                break;
+            }
+            
+            // Otherwise continue looking for background objects
+            t += dt;
+            iterations++;
+            continue;
+        }
+        
+        // We already have a primary object, now looking for background objects
+        // Only consider significant background objects (high opacity)
+        if (!foundBackgroundObject && color.a > 0.6) {
+            foundBackgroundObject = true;
+            backgroundObjectPos = samplePos;
+            backgroundObjectColor = color;
+            backgroundObjectDistance = t;
+            
+            // Check if the distance between primary and background object is significant
+            float distanceBetweenObjects = backgroundObjectDistance - primaryObjectDistance;
+            
+            // If primary object has moderate-high density or objects are far apart,
+            // ignore the background object
+            if (primaryObjectDensity > 0.5 || distanceBetweenObjects > DISTANCE_THRESHOLD) {
+                foundBackgroundObject = false;  // Effectively ignore the background object
+            }
+            
+            // We found what we needed, no need to continue ray traversal
+            break;
+        }
+        
+        // Advance to the next voxel boundary
+        t += dt;
+        iterations++;
+    }
+    
+    // If we didn't find any objects
+    if (!foundPrimaryObject) {
+        FragColor = vec4(0.0);
+        return;
+    }
+    
+    // Apply lighting to primary object
+    vec3 primaryColor;
+    if (enableLighting) {
+        vec3 normal = calculateNormal(primaryObjectPos);
+        primaryColor = calculateLighting(normal, -rayDir, primaryObjectPos, primaryObjectColor.rgb);
+    } else {
+        primaryColor = primaryObjectColor.rgb;
+    }
+    
+    // Start with the primary object
+    accumulatedColor = primaryColor;
+    accumulatedAlpha = primaryObjectColor.a;
+    
+    // If we have a relevant background object, blend it
+    if (foundBackgroundObject) {
+        // Calculate how much of the background should show through based on:
+        // 1. Distance between objects
+        // 2. Primary object's density/opacity
+        float distanceFactor = clamp((backgroundObjectDistance - primaryObjectDistance) / DISTANCE_THRESHOLD, 0.0, 1.0);
+        float densityFactor = clamp(1.0 - primaryObjectDensity / HIGH_DENSITY_THRESHOLD, 0.0, 1.0);
+        
+        // Combined factor determines background contribution
+        float backgroundContribution = min(distanceFactor, densityFactor) * 0.7;
+        
+        // Apply lighting to background object
+        vec3 backgroundLitColor;
+        if (enableLighting) {
+            vec3 normal = calculateNormal(backgroundObjectPos);
+            backgroundLitColor = calculateLighting(normal, -rayDir, backgroundObjectPos, backgroundObjectColor.rgb);
+        } else {
+            backgroundLitColor = backgroundObjectColor.rgb;
+        }
+        
+        // Blend background with accumulated color
+        accumulatedColor = mix(accumulatedColor, backgroundLitColor, backgroundContribution * (1.0 - accumulatedAlpha));
+        accumulatedAlpha = accumulatedAlpha + backgroundContribution * (1.0 - accumulatedAlpha);
+    }
+    
+    FragColor = vec4(accumulatedColor, max(accumulatedAlpha, 0.5));  // Ensure minimum opacity
+}
+
+/******************************
+* Main function
+******************************/
+void main() {
+    // Normalized vertex position (in cube from -1 to 1)
+    vec3 pos = vertexPosition;
+    
+    // Calculate ray direction in model space
+    vec3 rayDir = normalize(pos - cameraWorldPosition);
+    
+    // Ray-box intersection for unit cube [-1,1]
+    vec3 invRayDir = 1.0 / rayDir;
+    vec3 tMin = (minSlices - pos) * invRayDir;
+    vec3 tMax = (maxSlices - pos) * invRayDir;
+    vec3 t1 = min(tMin, tMax);
+    vec3 t2 = max(tMin, tMax);
+    float tNear = max(max(t1.x, t1.y), t1.z);
+    float tFar = min(min(t2.x, t2.y), t2.z);
+    
+    // Skip if ray doesn't intersect box
+    if(tNear > tFar || tFar < 0.0) {
+        discard;
+        return;
+    }
+
+    // Adjust to texture coordinates [0,1]
+    float jitter = rand(vertexPosition.xy*vertexPosition.zz);
+    
+    vec3 startPos = pos * 0.5 + 0.5 + jitter * stepSize * 0.3;
+
+    rayDir = rayDir * 0.5;
+
+    if (exactRayCasting) {
+        
+        if (renderType == 0) {
+            exactProjectionMIP(startPos, rayDir, tNear, tFar);
+        }
+        else if (renderType == 1) {
+            exactProjectionFirstContact(startPos, rayDir, tNear, tFar);
+        }
+        else if (renderType == 2) {
+            exactProjectionMeanDensity(startPos, rayDir, tNear, tFar);
+        }
+        else if (renderType == 3) {
+            exactProjectionCompositing(startPos, rayDir, tNear, tFar);
+        }
+        else if (renderType == 4) {
+            exactProjectionFullOpacity(startPos, rayDir, tNear, tFar);
+        }    
+    } else {
+        
+        if (renderType == 0) {
+            projectionMIP(startPos, rayDir, tNear, tFar);
+        }
+        else if (renderType == 1) {
+            projectionFirstContact(startPos, rayDir, tNear, tFar);
+        }
+        else if (renderType == 2) {
+            projectionMeanDensity(startPos, rayDir, tNear, tFar);
+        }
+        else if (renderType == 3) {
+            projectionCompositing(startPos, rayDir, tNear, tFar);
+        } 
+        else if (renderType == 4) {
+            projectionFullOpacity(startPos, rayDir, tNear, tFar);
+        } 
+    }
+}
+```
+
+### shaders/raycast.vert
+```
+#version 410 core
+layout (location = 0) in vec3 position;
+out vec3 vertexPosition;
+uniform mat4 model;
+uniform mat4 mvp;
+void main() {
+    vertexPosition = (model * vec4(position,1.0)).xyz;
+    gl_Position = mvp * vec4(position, 1.0);
+}
+```
+
+### src/main.cpp
+```
+#include <QApplication>
+#include <QWidget>
+#include <QVBoxLayout>
+#include <QPushButton>
+#include <QOpenGLWidget>
+#include <QOpenGLFunctions>
+#include <QMouseEvent>
+#include <QSurfaceFormat>
+#include <RNifti.h>
+#include "interface/LayoutSetup.h"
+#include <fstream>
+#include <iostream>
+#include "viewPort/ViewPort3D.h"
+#include "core/NiftiDataManager.h"
+#include <QMenuBar>
+#include <QMenu>
+#include <QAction>
+#include <QFileDialog>
+#include <QMessageBox>
+#include <QDebug>
+#include <QDateTime>
+#include <QDir>
+
+QString g_lastUsedDirectory = QDir::homePath();
+
+NiftiDataManager readNifti(const std::string &path) {
+    qDebug() << "readNifti: Checking file path:" << QString::fromStdString(path);
+    std::ifstream infile(path);
+    if (!infile.good()) {
+        qWarning() << "readNifti: Error - Image file not found at" << QString::fromStdString(path);
+        std::cerr << "Error: Image file not found at " << path << std::endl;
+        return NiftiDataManager(); // Return empty manager
+    }
+    qDebug() << "readNifti: Image file found at" << QString::fromStdString(path);
+    std::cout << "Image file found at " << path << std::endl;
+
+    qDebug() << "readNifti: Creating NiftiImage from file";
+    RNifti::NiftiImage image(path, true);
+    
+    if (image.isNull()) {
+        qWarning() << "readNifti: Created image is null";
+        return NiftiDataManager(); // Return empty manager
+    }
+    
+    qDebug() << "readNifti: Image loaded with dimensions:" 
+             << image.dim()[0] << "x" 
+             << image.dim()[1] << "x" 
+             << image.dim()[2];
+    std::cout << "Loaded image dimensions: "
+        << image.dim()[0] << " x "
+        << image.dim()[1] << " x "
+        << image.dim()[2] << std::endl;
+    
+    NiftiDataManager dataManager;
+    dataManager.loadFromNiftiImage(image);
+    qDebug() << "readNifti: Data manager created from NiftiImage";
+    
+    qDebug() << "readNifti: Returning data manager";
+    return dataManager;
+}
+
+ViewPort3D* createViewport(QWidget* contentWidget) {
+    auto *viewport3D = new ViewPort3D(contentWidget);
+    setupLayout(contentWidget, viewport3D);
+    return viewport3D;
+}
+
+QMenuBar* createMenuBar(QWidget* window, QWidget* contentWidget, ViewPort3D* viewport3D) {
+    QMenuBar* menuBar = new QMenuBar(window);
+    
+    // File menu
+    QMenu* fileMenu = menuBar->addMenu("&File");
+    QAction* loadFileAction = new QAction("&Load File...", window);
+    loadFileAction->setShortcut(QKeySequence::Open);
+    fileMenu->addAction(loadFileAction);
+
+    QAction* saveScreenshotAction = new QAction("Save &Screenshot...", window);
+    saveScreenshotAction->setShortcut(QKeySequence("Ctrl+S"));
+    fileMenu->addAction(saveScreenshotAction);
+    
+    QAction* exitAction = new QAction("&Exit", window);
+    exitAction->setShortcut(QKeySequence::Quit);
+    fileMenu->addAction(exitAction);
+    
+    // Editor menu with toggles
+    QMenu* editorMenu = menuBar->addMenu("Editor");
+    QAction* showAllAction = new QAction("Show All", window);
+    QAction* hideAllAction = new QAction("Hide All", window);
+    editorMenu->addAction(showAllAction);
+    editorMenu->addAction(hideAllAction);
+    editorMenu->addSeparator();
+    
+    QStringList groupNames = {
+        "RotationControls",
+        "StandardViews",
+        "VisibilityOptions",
+        "RenderingSettings",
+        "TransferFunctionEditor",
+        "SliceSettings",
+        "LightingSettings",
+        "LightDirectionSettings"
+    };
+    QMap<QString, QKeySequence> groupShortcuts = {
+        {"RenderingSettings", QKeySequence("Ctrl+R")},
+        {"TransferFunctionEditor", QKeySequence("Ctrl+T")},
+        {"LightingSettings", QKeySequence("Ctrl+L")},
+    };
+    QMap<QString, bool> groupDefaults = {
+        {"RotationControls", false},
+        {"StandardViews", false},
+        {"VisibilityOptions", false},
+        {"RenderingSettings", true},
+        {"TransferFunctionEditor", true},
+        {"SliceSettings", true},
+        {"LightingSettings", false},
+        {"LightDirectionSettings", false}
+    };
+    QMap<QString, QAction*> toggleActions;
+    for (const QString &groupName : groupNames) {
+        QAction *toggleAction = new QAction(groupName, window);
+        bool defaultState = groupDefaults.value(groupName, false);
+        toggleAction->setCheckable(true);
+        toggleAction->setChecked(defaultState);
+
+        if (groupShortcuts.contains(groupName))
+            toggleAction->setShortcut(groupShortcuts.value(groupName));
+
+        if(auto *group = contentWidget->findChild<QWidget*>(groupName)) {
+            group->setVisible(defaultState);
+        } else {
+            qWarning() << "createMenuBar: Group" << groupName << "not found in content widget";
+        }
+        editorMenu->addAction(toggleAction);
+        toggleActions[groupName] = toggleAction;
+        QObject::connect(toggleAction, &QAction::toggled, [contentWidget, groupName](bool checked) {
+            if(auto *group = contentWidget->findChild<QWidget*>(groupName)) {
+                group->setVisible(checked);
+            }
+        });
+    }
+    QObject::connect(showAllAction, &QAction::triggered, [toggleActions]() mutable {
+        for (auto it = toggleActions.begin(); it != toggleActions.end(); ++it) {
+            it.value()->setChecked(true);
+        }
+    });
+    QObject::connect(hideAllAction, &QAction::triggered, [toggleActions]() mutable {
+        for (auto it = toggleActions.begin(); it != toggleActions.end(); ++it) {
+            it.value()->setChecked(false);
+        }
+    });
+    
+    QObject::connect(loadFileAction, &QAction::triggered, [viewport3D]() {
+        QString filePath = QFileDialog::getOpenFileName(nullptr,
+            "Open NIfTI Image",
+            g_lastUsedDirectory,
+            "NIfTI files (*.nii *.nii.gz);;All files (*)");
+        if (!filePath.isEmpty()) {
+            g_lastUsedDirectory = QFileInfo(filePath).absolutePath();
+
+            try {
+                qDebug() << "createMenuBar/load: Loading NiftiData from:" << filePath;
+                NiftiDataManager dataManager = readNifti(filePath.toStdString());
+                if (dataManager.isValid()) {
+                    qDebug() << "createMenuBar/load: Data manager is valid, setting to viewport";
+                    viewport3D->setVolumeData(dataManager);
+                    viewport3D->setAxesVisible(false); // Set showAxes to false after loading data
+                    viewport3D->setViewAxis("axial");
+
+                    qDebug() << "createMenuBar/load: Data set to viewport successfully, axes hidden";
+                    std::cout << "Successfully loaded: " << filePath.toStdString() << std::endl;
+                } else {
+                    qWarning() << "createMenuBar/load: Created data manager is invalid";
+                    QMessageBox::warning(nullptr, "Load Error", 
+                        "Failed to load NIfTI image: The file format may be invalid.");
+                    std::cerr << "Failed to load NIfTI image: The file format may be invalid." << std::endl;
+                }
+            } catch (const std::exception& e) {
+                qWarning() << "createMenuBar/load: Exception loading NiftiData:" << e.what();
+                QMessageBox::critical(nullptr, "Load Error", 
+                    QString("Failed to load NIfTI image: %1").arg(e.what()));
+                std::cerr << "Failed to load NIfTI image: " << e.what() << std::endl;
+            }
+        }
+    });
+
+    QObject::connect(saveScreenshotAction, &QAction::triggered, [viewport3D]() {
+        if (!viewport3D) {
+            qWarning() << "Cannot save screenshot: viewport is null";
+            return;
+        }
+        
+        QImage screenshot = viewport3D->grabFramebuffer();
+        
+        // Ask user for save location with timestamp in the default filename
+        QDateTime now = QDateTime::currentDateTime();
+        QString timestamp = now.toString("yyyyMMdd_hhmmss");
+        QString defaultFilename = QString("vn_%1.png").arg(timestamp);
+
+        QString filePath = QFileDialog::getSaveFileName(nullptr,
+            "Save Screenshot", 
+            g_lastUsedDirectory + "/" + defaultFilename,
+            "PNG Images (*.png);;All Files (*)");
+                    
+        if (!filePath.isEmpty()) {
+            g_lastUsedDirectory = QFileInfo(filePath).absolutePath();
+
+            // Ensure filename has .png extension
+            if (!filePath.endsWith(".png", Qt::CaseInsensitive)) {
+                filePath += ".png";
+            }
+            
+            // Save the image
+            if (screenshot.save(filePath, "PNG")) {
+                QMessageBox::information(nullptr, "Screenshot Saved", 
+                    "Screenshot saved successfully to:\n" + filePath);
+                qDebug() << "Screenshot saved to:" << filePath;
+            } else {
+                QMessageBox::critical(nullptr, "Save Error", 
+                    "Failed to save screenshot to " + filePath);
+            }
+        }
+    });
+
+    QObject::connect(exitAction, &QAction::triggered, qApp, &QApplication::quit);
+    
+    return menuBar;
+}
+
+int main(int argc, char *argv[]) {
+    QApplication app(argc, argv);
+
+    // Set OpenGL version
+    QSurfaceFormat format;
+    format.setVersion(4, 1);
+    format.setProfile(QSurfaceFormat::CoreProfile);
+    QSurfaceFormat::setDefaultFormat(format);
+
+    QWidget window;
+    window.setWindowState(Qt::WindowMaximized);
+    window.setWindowTitle("3D Nifti Viewer");
+
+    QVBoxLayout* mainVerticalLayout = new QVBoxLayout(&window);
+    mainVerticalLayout->setContentsMargins(0,0,0,0);
+    mainVerticalLayout->setSpacing(0);
+
+    // Create content widget and viewport
+    QWidget* contentWidget = new QWidget();
+    mainVerticalLayout->addWidget(contentWidget, 1);
+    ViewPort3D* viewport3D = createViewport(contentWidget);
+
+    // Create menu bar using the new helper function and add it to the layout.
+    QMenuBar* menuBar = createMenuBar(&window, contentWidget, viewport3D);
+    mainVerticalLayout->insertWidget(0, menuBar);
+
+    // Apply styling
+    window.setStyleSheet(
+        "QSlider::groove:horizontal {"
+        "    border: 1px solid #999999;"
+        "    height: 8px;"
+        "    background: #b0b0b0;"
+        "    border-radius: 4px;"
+        "}"
+        "QSlider::handle:horizontal {"
+        "    background: #5c5c5c;"
+        "    border: 1px solid #5c5c5c;"
+        "    width: 18px;"
+        "    height: 18px;"
+        "    margin: -5px 0;"
+        "    border-radius: 9px;"
+        "}"
+        "#minSlider::handle:horizontal {"
+        "    background: #4286f4;"
+        "    border: 1px solid #2a5cac;"
+
+        "}"
+        "#maxSlider::handle:horizontal {"
+        "    background: #f44242;"
+        "    border: 1px solid #ac2a2a;"
+        "}"
+    );
+
+    window.show();
+    return QApplication::exec();
+}
+```
+
+### src/core/NiftiDataManager.cpp
+```
+#include "NiftiDataManager.h"
+#include <algorithm>
+
+NiftiDataManager::NiftiDataManager() = default;
+
+NiftiDataManager::NiftiDataManager(const RNifti::NiftiImage& image) {
+    loadFromNiftiImage(image);
+}
+
+NiftiDataManager::~NiftiDataManager() = default;
+
+bool NiftiDataManager::loadFromNiftiImage(const RNifti::NiftiImage& image) {
+    // Clear old data
+    m_volumeData.clear();
+    m_width = 0;
+    m_height = 0;
+    m_depth = 0;
+    
+    if (image.isNull()) {
+        qWarning() << "Cannot load from null NiftiImage";
+        return false;
+    }
+    
+    try {
+        // Extract dimensions
+        m_width = image.dim()[0];
+        m_height = image.dim()[1];
+        m_depth = image.dim()[2];
+        
+        qDebug() << "NiftiDataManager: Loading data with dimensions:" 
+                 << m_width << "x" << m_height << "x" << m_depth;
+        
+        if (m_width <= 0 || m_height <= 0 || m_depth <= 0) {
+            qWarning() << "Invalid NifTI dimensions:" << m_width << "x" << m_height << "x" << m_depth;
+            return false;
+        }
+        
+        // Extract actual volume data
+        m_volumeData = image.getData<float>();
+        if (m_volumeData.empty()) {
+            qWarning() << "Failed to get NifTI data as float vector";
+            return false;
+        }
+        
+        qDebug() << "NiftiDataManager: Loaded volume data with size:" << m_volumeData.size();
+        
+        // Calculate min/max values
+        auto [minIt, maxIt] = std::minmax_element(m_volumeData.begin(), m_volumeData.end());
+        m_minValue = *minIt;
+        m_maxValue = *maxIt;
+        
+        qDebug() << "NiftiDataManager: Value range:" << m_minValue << "to" << m_maxValue;
+        
+        return true;
+    }
+    catch (const std::exception& e) {
+        qWarning() << "Exception in loadFromNiftiImage:" << e.what();
+        m_volumeData.clear();
+        m_width = m_height = m_depth = 0;
+        return false;
+    }
+}
+
+void NiftiDataManager::getDimensions(int dimensions[3]) const {
+    dimensions[0] = m_width;
+    dimensions[1] = m_height;
+    dimensions[2] = m_depth;
+}
+
+std::vector<float> NiftiDataManager::getNormalizedVolumeData() const {
+    std::vector<float> normalizedData = m_volumeData;
+    
+    // Check if normalization is needed (same min/max)
+    if (m_minValue == m_maxValue) {
+        qWarning() << "NiftiDataManager: Data has uniform values, normalization skipped";
+        return normalizedData;
+    }
+    
+    // Normalize values to 0-1 range
+    qDebug() << "NiftiDataManager: Normalizing volume data";
+    for (auto& val : normalizedData) {
+        val = (val - m_minValue) / (m_maxValue - m_minValue);
+    }
+    
+    return normalizedData;
+}
+```
+
+### src/core/NiftiDataManager.h
+```
+#ifndef NIFTIDATAMANAGER_H
+#define NIFTIDATAMANAGER_H
+
+#include <RNifti.h>
+#include <vector>
+#include <QDebug>
+
+class NiftiDataManager {
+public:
+    NiftiDataManager();
+    explicit NiftiDataManager(const RNifti::NiftiImage& image);
+    ~NiftiDataManager();
+
+    // Load data from NiftiImage
+    bool loadFromNiftiImage(const RNifti::NiftiImage& image);
+    
+    // Access functions
+    bool isValid() const { return !m_volumeData.empty() && m_width > 0 && m_height > 0 && m_depth > 0; }
+    const std::vector<float>& getVolumeData() const { return m_volumeData; }
+    std::vector<float> getNormalizedVolumeData() const;
+    int getWidth() const { return m_width; }
+    int getHeight() const { return m_height; }
+    int getDepth() const { return m_depth; }
+    
+    // Get array of dimensions [width, height, depth]
+    void getDimensions(int dimensions[3]) const;
+    
+    // Get statistical info
+    float getMinValue() const { return m_minValue; }
+    float getMaxValue() const { return m_maxValue; }
+
+private:
+    std::vector<float> m_volumeData;
+    int m_width = 0;
+    int m_height = 0;
+    int m_depth = 0;
+    float m_minValue = 0.0f;
+    float m_maxValue = 0.0f;
+};
+
+#endif // NIFTIDATAMANAGER_H
+```
+
+### src/interface/GradientEditor.cpp
+```
+#include <QGradient>
+#include <QPainter>
+#include <QPushButton>
+#include <QGridLayout>
+#include "GradientEditor.h"
+#include <QVBoxLayout>
+#include <QHBoxLayout>
+#include <QLabel>
+#include <iostream>
+#include <string>
+#include <QComboBox>
+#include <QFontMetrics>
+#include <QFormLayout>
+#include <QColorDialog>
+
+GradientEditor::GradientEditor(QWidget *parent) : QWidget(parent) {
+  QVBoxLayout *layout = new QVBoxLayout(this);
+  layout->setContentsMargins(0, 0, 0, 0);
+  layout->addSpacing(m_gradientHeight + m_tickHeight + m_tickTextHeight + 10);
+
+  QHBoxLayout *stopButtonsLayout = new QHBoxLayout();
+  layout->addLayout(stopButtonsLayout);
+
+  QPushButton *removeStopButton = new QPushButton("Remove stop");
+  QPushButton *addStopButton = new QPushButton("Add stop");
+  QPushButton *colorPickerButton = new QPushButton("Pick Color");
+  
+  removeStopButton->setFixedWidth(100);
+  removeStopButton->setMinimumHeight(30);
+  addStopButton->setFixedWidth(100);
+  addStopButton->setMinimumHeight(30);
+  colorPickerButton->setFixedWidth(100);
+  colorPickerButton->setMinimumHeight(30);
+  
+  stopButtonsLayout->addWidget(removeStopButton);
+  stopButtonsLayout->addWidget(addStopButton);
+  stopButtonsLayout->addWidget(colorPickerButton);
+
+  QObject::connect(removeStopButton, &QPushButton::pressed, this, &GradientEditor::removeStop);
+  QObject::connect(addStopButton, &QPushButton::pressed, this, &GradientEditor::addStop);
+  QObject::connect(colorPickerButton, &QPushButton::clicked, this, &GradientEditor::openColorPicker);
+
+  layout->addSpacing(10);
+  layout->addWidget(new QLabel("Select preset:"));
+  m_presetSelector = new QComboBox();
+  m_presetSelector->addItem("Blue to Red", QVariant::fromValue(static_cast<int>(GradientPresets::BLUE_TO_RED)));
+  m_presetSelector->addItem("Grayscale", QVariant::fromValue(static_cast<int>(GradientPresets::GRAYSCALE)));
+  m_presetSelector->addItem("Lava", QVariant::fromValue(static_cast<int>(GradientPresets::LAVA)));
+  m_presetSelector->addItem("Realistic", QVariant::fromValue(static_cast<int>(GradientPresets::REALISTIC)));
+  m_presetSelector->addItem("Full opacity - Philips", QVariant::fromValue(static_cast<int>(GradientPresets::PHOTOREALISTIC)));
+  m_presetSelector->addItem("Custom", QVariant::fromValue(static_cast<int>(GradientPresets::CUSTOM)));
+  layout->addWidget(m_presetSelector);
+
+  QObject::connect(m_presetSelector, &QComboBox::currentIndexChanged, this, &GradientEditor::setPreset);
+
+  layout->addStretch();  // Pushes drawing area to the top
+  setLayout(layout);
+
+  setPreset(0);
+}
+
+void GradientEditor::openColorPicker() {
+  if (m_selectedStop == nullptr) return;
+  
+  QColorDialog colorDialog(this);
+  colorDialog.setCurrentColor((*m_selectedStop).second);
+  colorDialog.setOption(QColorDialog::ShowAlphaChannel, true);
+  
+  if (colorDialog.exec() == QDialog::Accepted) {
+    QColor selectedColor = colorDialog.selectedColor();
+    (*m_selectedStop).second = selectedColor;
+    
+    setPresetSelectorItem(GradientPresets::CUSTOM);
+    update();
+    emitGradientChange();
+  }
+}
+
+void GradientEditor::paintEvent(QPaintEvent *event) {
+  QPainter painter(this);
+
+  // Create a linear gradient
+  QLinearGradient gradient(0, 0, width(), 0);
+  for (const auto &stop : m_stops) {
+    gradient.setColorAt(stop.first, stop.second);
+  }
+
+  // Draw the gradient background
+  QRect gradientArea(m_gradientMargin, 0, width() - 2 * m_gradientMargin, m_gradientHeight);
+  painter.fillRect(gradientArea, gradient);
+
+  // Draw control points
+  for (const auto &stop : m_stops) {
+    int x = m_gradientMargin + stop.first * (width() - 2 * m_gradientMargin);
+    painter.setBrush(m_selectedStop != nullptr && *m_selectedStop == stop ? Qt::red : Qt::black);
+    painter.drawEllipse(QPointF(x, m_gradientHeight / 2), 5, 5);
+  }
+
+  QFontMetrics fm(painter.font());
+
+  for (int i = 0; i <= m_numTicks; ++i) {
+    double value = static_cast<double>(i) / m_numTicks;
+    int x = m_gradientMargin + value * (width() - 2 * m_gradientMargin);
+
+    // Draw tick
+    painter.drawLine(x, m_gradientHeight, x, m_gradientHeight + m_tickHeight);
+
+    // Draw label
+    QString label = QString::number(value, 'f', 1);
+    int textWidth = fm.horizontalAdvance(label);
+    painter.drawText(x - textWidth / 2, m_gradientHeight + m_tickHeight + m_tickTextHeight, label);
+  }
+}
+
+void GradientEditor::setStops(QGradientStops stops) {
+  m_stops = stops;
+  m_selectedStop = &m_stops[0];
+
+  update();
+  emitGradientChange();
+}
+
+void GradientEditor::addStop() {
+  QGradientStop newStop(0.5, Qt::white);
+  m_stops.append(newStop);
+  m_selectedStop = &m_stops[m_stops.size() - 1];
+
+  update();
+  emitGradientChange();
+}
+
+void GradientEditor::removeStop() {
+  if (m_selectedStop == nullptr || m_stops.size() == 1) return;
+  m_stops.removeOne(*m_selectedStop);
+  m_selectedStop = nullptr;
+
+  update();
+  emitGradientChange();
+}
+
+void GradientEditor::mousePressEvent(QMouseEvent *event) {
+  float hitMargin = 0.05;
+  float x = (event->pos().rx() - m_gradientMargin) / (float)(width() - 2 * m_gradientMargin);
+
+  if (event->button() == Qt::LeftButton) {
+    for (auto &stop : m_stops) {
+      if (stop.first - hitMargin < x && x < stop.first + hitMargin) {
+        if (m_selectedStop == nullptr || *m_selectedStop != stop)
+          m_selectedStop = &stop;
+      }
+    }
+  }
+
+  update();
+}
+
+void GradientEditor::mouseMoveEvent(QMouseEvent *event) {
+  if (m_selectedStop == nullptr) return;
+
+  float x = (event->pos().rx() - m_gradientMargin) / (float)(width() - 2 * m_gradientMargin);
+  x = qBound(0.0, x, 1.0);
+  (*m_selectedStop).first = x;
+
+  setPresetSelectorItem(GradientPresets::CUSTOM);
+  update();
+  emitGradientChange();
+}
+
+void GradientEditor::changeColor(const QString &hex) {
+  if (QColor::isValidColorName(hex) && m_selectedStop != nullptr) {
+    (*m_selectedStop).second = QColor(hex);
+
+    setPresetSelectorItem(GradientPresets::CUSTOM);
+    update();
+    emitGradientChange();
+  }
+}
+
+QColor GradientEditor::interoplateColor(const QColor &c1, const QColor &c2, double t) {
+  int r = (1 - t) * c1.red() + t * c2.red();
+  int g = (1 - t) * c1.green() + t * c2.green();
+  int b = (1 - t) * c1.blue() + t * c2.blue();
+  int a = (1 - t) * c1.alpha() + t * c2.alpha();
+  return QColor(r, g, b, a);
+}
+
+QVector<QVector4D> GradientEditor::interpolateGradient(QGradientStops stops, int numSamples) {
+  QVector<QVector4D> gradient(numSamples);
+
+  std::sort(stops.begin(), stops.end(), [](const QGradientStop &a, const QGradientStop &b) {
+    return a.first < b.first;
+  });
+
+  int j = 0;
+
+  for (int i = 0; i < numSamples; i++) {
+    double pos = double(i) / (numSamples - 1);  // Normalize position between 0 and 1
+
+    QColor finalColor;
+
+    if (pos <= stops[0].first) {
+      finalColor = stops[0].second;
+    } else if (pos >= stops[stops.size() - 1].first) {
+      finalColor = stops[stops.size() - 1].second;
+    } else {
+      if (pos >= stops[j + 1].first)
+        j++;
+
+      double startPos = stops[j].first, endPos = stops[j + 1].first;
+      QColor startColor = stops[j].second, endColor = stops[j + 1].second;
+      double t = (pos - startPos) / (endPos - startPos);
+      finalColor = interoplateColor(startColor, endColor, t);
+    }
+
+    gradient[i] = QVector4D(finalColor.redF(), finalColor.greenF(), finalColor.blueF(), finalColor.alphaF());
+  }
+
+  return gradient;
+}
+
+void GradientEditor::setPreset(int index) {
+  QGradientStops stops;
+
+  GradientPresets preset = static_cast<GradientPresets>(m_presetSelector->itemData(index).toInt());
+
+  switch (preset) {
+  case GradientPresets::BLUE_TO_RED:
+    stops << QGradientStop(0.0, QColor(0, 0, 255, 0)) << QGradientStop(1.0, QColor(255, 0, 0, 255));
+    break;
+  case GradientPresets::GRAYSCALE:
+    stops << QGradientStop(0.0, QColor(0, 0, 0, 0)) << QGradientStop(1.0, QColor(255, 255, 255, 255));
+    break;
+  case GradientPresets::LAVA:
+    stops << QGradientStop(0.0, QColor(0, 0, 0, 0)) << QGradientStop(0.3, QColor(255, 0, 0, 80)) << QGradientStop(0.7, QColor(255, 255, 0, 200)) << QGradientStop(1.0, QColor(255, 255, 255, 255));
+    break;
+  case GradientPresets::REALISTIC:
+    stops << QGradientStop(0.0, QColor(0, 0, 0, 0)) << QGradientStop(0.25, QColor(100, 220, 240, 15)) << QGradientStop(0.37, QColor(100, 20, 20, 25)) << QGradientStop(0.45, QColor(240, 230, 130, 255)) << QGradientStop(0.85, QColor(205, 210, 240, 255));
+    break;
+  case GradientPresets::PHOTOREALISTIC:
+    // Completely transparent for values below 0.12
+    
+    stops 
+    << QGradientStop(0.0, QColor(0, 0, 0, 0)) 
+    << QGradientStop(0.275, QColor(0, 0, 0, 5)) 
+    << QGradientStop(0.295, QColor(255, 0, 0, 100)) 
+    << QGradientStop(0.302, QColor(255, 0, 0, 100)) 
+    << QGradientStop(0.31, QColor(240, 230, 130, 255)) 
+    << QGradientStop(0.85, QColor(205, 210, 240, 255))
+    << QGradientStop(1.0, QColor(255, 255, 255, 255)); 
+
+    break;
+  case GradientPresets::CUSTOM:
+    break;
+  }
+
+  if (!stops.isEmpty()) {
+    setStops(stops);
+  }
+}
+
+void GradientEditor::setPresetSelectorItem(GradientPresets preset) {
+  int index = m_presetSelector->findData(static_cast<int>(preset));
+  m_presetSelector->setCurrentIndex(index);
+}
+
+void GradientEditor::emitGradientChange() {
+  emit gradientChanged(interpolateGradient(m_stops, SAMPLING_SIZE));
+}
+```
+
+### src/interface/GradientEditor.h
+```
+#ifndef GRADIENTEDITOR_H
+#define GRADIENTEDITOR_H
+
+#include<QWidget>
+#include <QMouseEvent>
+#include <QGridLayout>
+#include <QPainter>
+#include <QLineEdit>
+#include <QVector4D>
+#include <QComboBox>
+
+enum ColorComponent {
+  RED = 0,
+  GREEN = 1,
+  BLUE = 2,
+  ALPHA = 3
+};
+
+enum GradientPresets {
+  CUSTOM,
+  BLUE_TO_RED,
+  LAVA,
+  GRAYSCALE,
+  REALISTIC,
+  PHOTOREALISTIC,
+};
+
+class GradientEditor : public QWidget {
+  Q_OBJECT
+
+public:
+  explicit GradientEditor(QWidget *parent = nullptr);
+  void emitGradientChange();
+
+signals:
+  void gradientChanged(QVector<QVector4D> gradient);  // Signal to emit mouse coordinates
+
+protected:
+  void paintEvent(QPaintEvent *event) override;
+  void mousePressEvent(QMouseEvent *event) override;
+  void mouseMoveEvent(QMouseEvent *event) override;
+  void changeColor(const QString &hex);
+  void setStops(QGradientStops stops);
+  void addStop();
+  void removeStop();
+  QColor interoplateColor(const QColor &c1, const QColor &c2, double t);
+  QVector<QVector4D> interpolateGradient(QGradientStops stops, int numSamples);
+  void setPresetSelectorItem(GradientPresets preset);
+
+public slots:
+  void setPreset(int preset);
+
+private:
+  QGradientStops m_stops;
+  QGradientStop *m_selectedStop;
+  QComboBox *m_presetSelector;
+
+  int SAMPLING_SIZE = 256;
+
+  int m_gradientHeight = 20;
+  int m_gradientMargin = 10;
+  int m_numTicks = 5;
+  int m_tickHeight = 5;
+  int m_tickTextHeight = 15;
+
+private slots:
+  void openColorPicker();
+};
+
+#endif // GRADIENTEDITOR_H
+```
+
+### src/interface/LayoutSetup.cpp
+```
+// LayoutSetup.cpp
+
+#include "LayoutSetup.h"
+#include "GradientEditor.h"
+#include "RangeSlider.h" 
+#include <QHBoxLayout>
+#include <QVBoxLayout>
+#include <QScrollArea>
+#include <QScrollBar>
+#include <QSlider>
+#include <QGroupBox>
+#include <QLabel>
+#include <QPushButton>
+#include <QGridLayout>
+#include <QCheckBox>
+#include <QRadioButton>
+#include <QPainter>
+#include <QStyle>
+#include <QStyleOptionSlider>
+#include <QMouseEvent>
+#include <QTimer>
+
+static QWidget *createAdvancedDropdown(const QString &title, QWidget *contentWidget) {
+    auto *container = new QWidget();
+    auto *layout = new QVBoxLayout(container);
+    layout->setContentsMargins(0, 0, 0, 0);
+
+    auto *toggleButton = new QPushButton(QString("▶ %1").arg(title));
+    toggleButton->setCheckable(true);
+    toggleButton->setFlat(true);
+    toggleButton->setStyleSheet("text-align: left; padding-left: 5px;");
+
+    contentWidget->setVisible(false);
+
+    layout->addWidget(toggleButton);
+    layout->addWidget(contentWidget);
+
+    QObject::connect(toggleButton, &QPushButton::toggled,
+        [toggleButton, contentWidget, title](bool checked) {
+            contentWidget->setVisible(checked);
+            toggleButton->setText(checked ? QString("▼ %1").arg(title) :
+                QString("▶ %1").arg(title));
+        });
+
+    return container;
+}
+
+static QGroupBox *createRotationControls(ViewPort3D *viewPort3D, QLabel *timeElapsedLabel) {
+    QGroupBox *rotationGroup = new QGroupBox("Rotation Controls");
+    rotationGroup->setObjectName("RotationControls");
+    QGridLayout *rotationLayout = new QGridLayout(rotationGroup);
+
+    auto *rotateLeftButton = new QPushButton("←");
+    auto *rotateRightButton = new QPushButton("→");
+    auto *rotateUpButton = new QPushButton("↑");
+    auto *rotateDownButton = new QPushButton("↓");
+    auto *resetViewButton = new QPushButton("Reset View");
+
+    rotateLeftButton->setFixedSize(40, 40);
+    rotateRightButton->setFixedSize(40, 40);
+    rotateUpButton->setFixedSize(40, 40);
+    rotateDownButton->setFixedSize(40, 40);
+
+    rotationLayout->addWidget(rotateUpButton, 0, 1);
+    rotationLayout->addWidget(rotateLeftButton, 1, 0);
+    rotationLayout->addWidget(rotateRightButton, 1, 2);
+    rotationLayout->addWidget(rotateDownButton, 2, 1);
+    rotationLayout->addWidget(resetViewButton, 3, 0, 1, 3);
+
+    if (viewPort3D) {
+        const float rotationStep = 15.0f;
+
+        QObject::connect(rotateLeftButton, &QPushButton::clicked, [viewPort3D, rotationStep]() {
+            viewPort3D->rotateCamera(-rotationStep, 0.0f);
+            });
+
+        QObject::connect(rotateRightButton, &QPushButton::clicked, [viewPort3D, rotationStep]() {
+            viewPort3D->rotateCamera(rotationStep, 0.0f);
+            });
+
+        QObject::connect(rotateUpButton, &QPushButton::clicked, [viewPort3D, rotationStep]() {
+            viewPort3D->rotateCamera(0.0f, rotationStep);
+            });
+
+        QObject::connect(rotateDownButton, &QPushButton::clicked, [viewPort3D, rotationStep]() {
+            viewPort3D->rotateCamera(0.0f, -rotationStep);
+            });
+
+        QObject::connect(resetViewButton, &QPushButton::clicked, viewPort3D, &ViewPort3D::resetView);
+    }
+
+    return rotationGroup;
+}
+
+static QGroupBox *createStandardViews(ViewPort3D *viewPort3D) {
+    QGroupBox *axisGroup = new QGroupBox("Standard Views");
+    axisGroup->setObjectName("StandardViews");
+    QVBoxLayout *axisLayout = new QVBoxLayout(axisGroup);
+
+    auto *axialButton = new QPushButton("Axial View (Top)");
+    auto *coronalButton = new QPushButton("Coronal View (Front)");
+    auto *sagittalButton = new QPushButton("Sagittal View (Side)");
+    auto *obliqueButton = new QPushButton("Oblique View (3D)");
+    auto *bottomButton = new QPushButton("Inferior View (Bottom)");
+
+    axisLayout->addWidget(axialButton);
+    axisLayout->addWidget(coronalButton);
+    axisLayout->addWidget(sagittalButton);
+    axisLayout->addWidget(obliqueButton);
+    axisLayout->addWidget(bottomButton);
+
+    if (viewPort3D) {
+        QObject::connect(axialButton, &QPushButton::clicked, [viewPort3D]() {
+            viewPort3D->setViewAxis("axial");
+            });
+
+        QObject::connect(coronalButton, &QPushButton::clicked, [viewPort3D]() {
+            viewPort3D->setViewAxis("coronal");
+            });
+
+        QObject::connect(sagittalButton, &QPushButton::clicked, [viewPort3D]() {
+            viewPort3D->setViewAxis("sagittal");
+            });
+
+        QObject::connect(obliqueButton, &QPushButton::clicked, [viewPort3D]() {
+            viewPort3D->setViewAxis("oblique");
+            });
+
+        QObject::connect(bottomButton, &QPushButton::clicked, [viewPort3D]() {
+            viewPort3D->setViewAxis("bottom");
+            });
+    }
+
+    return axisGroup;
+}
+
+static QGroupBox *createVisibilityOptions(ViewPort3D *viewPort3D) {
+    QGroupBox *visibilityGroup = new QGroupBox("Visibility Options");
+    visibilityGroup->setObjectName("VisibilityOptions");
+    QVBoxLayout *visibilityLayout = new QVBoxLayout(visibilityGroup);
+
+    auto *showVolumeCheckBox = new QCheckBox("Show Volume");
+    auto *showAxesCheckBox = new QCheckBox("Show Coordinate Axes");
+    auto *showBoundingBoxFrameCheckBox = new QCheckBox("Show Bounding Box Frame");
+
+    showVolumeCheckBox->setChecked(viewPort3D ? viewPort3D->isVolumeVisible() : true);
+    showAxesCheckBox->setChecked(viewPort3D ? viewPort3D->areAxesVisible() : false);
+    showBoundingBoxFrameCheckBox->setChecked(viewPort3D ? viewPort3D->isBoundingBoxFrameVisible() : false);
+
+    visibilityLayout->addWidget(showVolumeCheckBox);
+    visibilityLayout->addWidget(showAxesCheckBox);
+    visibilityLayout->addWidget(showBoundingBoxFrameCheckBox);
+
+    if (viewPort3D) {
+        QObject::connect(showAxesCheckBox, &QCheckBox::toggled, viewPort3D, &ViewPort3D::setAxesVisible);
+        QObject::connect(showBoundingBoxFrameCheckBox, &QCheckBox::toggled, viewPort3D, &ViewPort3D::setBoundingBoxFrameVisible);
+        QObject::connect(showVolumeCheckBox, &QCheckBox::toggled, viewPort3D, &ViewPort3D::setVolumeVisible);
+    }
+
+    return visibilityGroup;
+}
+
+static QGroupBox *createRenderingSettings(ViewPort3D *viewPort3D) {
+    QGroupBox *renderingGroup = new QGroupBox("Rendering Settings");
+    renderingGroup->setObjectName("RenderingSettings");
+    QVBoxLayout *renderingLayout = new QVBoxLayout(renderingGroup);
+
+    auto *exactRayCastingLabel = new QLabel("Extra options:");
+    auto *exactRayCastingCheckBox = new QCheckBox("Use Exact Ray Casting");
+    exactRayCastingCheckBox->setToolTip("Uses exact voxel traversal algorithm instead of fixed step size");
+
+    auto *renderTypeLabel = new QLabel("Render Type:");
+    auto *renderTypeGroup = new QWidget();
+    auto *renderTypeLayout = new QVBoxLayout(renderTypeGroup);
+
+    auto *mipRadio = new QRadioButton("Maximum Intensity (MIP)");
+    auto *firstContactRadio = new QRadioButton("First Contact");
+    auto *meanDensityRadio = new QRadioButton("Mean Density");
+    auto *compositingRadio = new QRadioButton("Compositing (front-to-back)");
+    auto *fullOpacityRadio = new QRadioButton("Full Opacity");
+
+    firstContactRadio->setChecked(true);
+
+    renderTypeLayout->addWidget(firstContactRadio);
+    renderTypeLayout->addWidget(fullOpacityRadio);
+    renderTypeLayout->addWidget(compositingRadio);
+    renderTypeLayout->addWidget(mipRadio);
+    renderTypeLayout->addWidget(meanDensityRadio);
+
+    renderingLayout->addWidget(renderTypeLabel);
+    renderingLayout->addWidget(renderTypeGroup);
+
+    // Create advanced settings content widget
+    auto *advancedSettingsWidget = new QWidget();
+    auto *advancedSettingsLayout = new QVBoxLayout(advancedSettingsWidget);
+    advancedSettingsLayout->setContentsMargins(0, 0, 0, 0);
+
+    // Create step size control
+    auto *stepSizeLabel = new QLabel("Ray Step Size:");
+    auto *stepSizeSlider = new QSlider(Qt::Horizontal);
+    stepSizeSlider->setMinimum(5);
+    stepSizeSlider->setMaximum(50);
+
+    if (viewPort3D) {
+        int sliderValue = static_cast<int>(viewPort3D->getStepSize() * 10000.0f);
+        stepSizeSlider->setValue(sliderValue);
+        exactRayCastingCheckBox->setChecked(viewPort3D ? viewPort3D->getExactRayCasting() : false);
+    } else {
+        stepSizeSlider->setValue(10);
+        exactRayCastingCheckBox->setChecked(false);
+    }
+    auto *stepSizeValueLabel = new QLabel(QString::number(stepSizeSlider->value() / 10000.0f, 'f', 4));
+
+    auto *alphaLabel = new QLabel("Alpha factor (compositing only):");
+    auto *alphaSlider = new QSlider(Qt::Horizontal);
+    alphaSlider->setValue(viewPort3D ? (int)viewPort3D->getAlphaFactor() : 20.0f);
+
+    // Add controls to advanced settings
+    advancedSettingsLayout->addWidget(exactRayCastingLabel);
+    advancedSettingsLayout->addWidget(exactRayCastingCheckBox);
+    advancedSettingsLayout->addWidget(stepSizeLabel);
+    advancedSettingsLayout->addWidget(stepSizeSlider);
+    advancedSettingsLayout->addWidget(stepSizeValueLabel);
+    advancedSettingsLayout->addWidget(alphaLabel);
+    advancedSettingsLayout->addWidget(alphaSlider);
+
+    // Create and add the advanced dropdown to the rendering group
+    auto *advancedDropdown = createAdvancedDropdown("Advanced Settings", advancedSettingsWidget);
+    renderingLayout->addWidget(advancedDropdown);
+
+    if (viewPort3D) {
+        QObject::connect(mipRadio, &QRadioButton::toggled, [viewPort3D](bool checked) {
+            if (checked) viewPort3D->setRenderType(RenderType::MAXIMUM_INTENSITY);
+            });
+
+        QObject::connect(firstContactRadio, &QRadioButton::toggled, [viewPort3D](bool checked) {
+            if (checked) viewPort3D->setRenderType(RenderType::FIRST_CONTACT);
+            });
+
+        QObject::connect(meanDensityRadio, &QRadioButton::toggled, [viewPort3D](bool checked) {
+            if (checked) viewPort3D->setRenderType(RenderType::MEAN_DENSITY);
+            });
+
+        QObject::connect(compositingRadio, &QRadioButton::toggled, [viewPort3D](bool checked) {
+            if (checked) viewPort3D->setRenderType(RenderType::COMPOSITING);
+            });
+
+        QObject::connect(fullOpacityRadio, &QRadioButton::toggled, [viewPort3D](bool checked) {
+            if (checked) viewPort3D->setRenderType(RenderType::FULL_OPACITY);
+            });
+
+        QObject::connect(stepSizeSlider, &QSlider::valueChanged, [viewPort3D, stepSizeValueLabel](int value) {
+            float stepSize = value / 10000.0f;
+            viewPort3D->setStepSize(stepSize);
+            stepSizeValueLabel->setText(QString::number(stepSize, 'f', 4));
+            });
+
+        QObject::connect(alphaSlider, &QSlider::valueChanged, [viewPort3D](int value) {
+            viewPort3D->setAlphaFactor((float)value);
+            });
+
+        QObject::connect(exactRayCastingCheckBox, &QCheckBox::toggled,
+            [viewPort3D](bool checked) {
+                viewPort3D->setExactRayCasting(checked);
+            });
+    }
+
+    return renderingGroup;
+}
+
+static QGroupBox *createSliceSettings(ViewPort3D *viewPort3D) {
+    QGroupBox *sliceGroup = new QGroupBox("Slice Settings");
+    sliceGroup->setObjectName("SliceSettings");
+    QVBoxLayout *sliceLayout = new QVBoxLayout(sliceGroup);
+
+    auto *thresholdLabel = new QLabel("Density Thresholds:");
+    auto *thresholdRangeSlider = new RangeSlider();
+
+    if (viewPort3D) {
+        thresholdRangeSlider->setMinimumValue(static_cast<int>(viewPort3D->getMinDensityThreshold() * 100.0f));
+        thresholdRangeSlider->setMaximumValue(static_cast<int>(viewPort3D->getMaxDensityThreshold() * 100.0f));
+    } else {
+        thresholdRangeSlider->setMinimumValue(15);
+        thresholdRangeSlider->setMaximumValue(100);
+    }
+
+    sliceLayout->addWidget(thresholdLabel);
+    sliceLayout->addWidget(thresholdRangeSlider);
+
+    // Create advanced settings content widget
+    auto *advancedSettingsWidget = new QWidget();
+    auto *advancedSettingsLayout = new QVBoxLayout(advancedSettingsWidget);
+    advancedSettingsLayout->setContentsMargins(0, 0, 0, 0);
+
+    auto *sliceLabelX = new QLabel("X-axis:");
+    auto *sliceRangeSliderX = new RangeSlider();
+    auto *sliceLabelY = new QLabel("Y-axis:");
+    auto *sliceRangeSliderY = new RangeSlider();
+    auto *sliceLabelZ = new QLabel("Z-axis:");
+    auto *sliceRangeSliderZ = new RangeSlider();
+
+    sliceRangeSliderX->setMinimumValue(0);
+    sliceRangeSliderY->setMinimumValue(0);
+    sliceRangeSliderZ->setMinimumValue(0);
+
+    advancedSettingsLayout->addWidget(sliceLabelX);
+    advancedSettingsLayout->addWidget(sliceRangeSliderX);
+    advancedSettingsLayout->addWidget(sliceLabelY);
+    advancedSettingsLayout->addWidget(sliceRangeSliderY);
+    advancedSettingsLayout->addWidget(sliceLabelZ);
+    advancedSettingsLayout->addWidget(sliceRangeSliderZ);
+
+    // Create and add the advanced dropdown to the rendering group
+    auto *advancedDropdown = createAdvancedDropdown("Advanced Settings", advancedSettingsWidget);
+    sliceLayout->addWidget(advancedDropdown);
+
+    if (viewPort3D) {
+        QObject::connect(thresholdRangeSlider, &RangeSlider::minValueChanged, [viewPort3D](int value) {
+            float minThreshold = value / 100.0f;
+            viewPort3D->setMinDensityThreshold(minThreshold);
+            });
+
+        QObject::connect(thresholdRangeSlider, &RangeSlider::maxValueChanged, [viewPort3D](int value) {
+            float maxThreshold = value / 100.0f;
+            viewPort3D->setMaxDensityThreshold(maxThreshold);
+            });
+
+        QObject::connect(sliceRangeSliderX, &RangeSlider::minValueChanged, [viewPort3D](int value) {
+            float minSlice = value / 100.0f;
+            viewPort3D->setMinSliceX(minSlice);
+            });
+
+        QObject::connect(sliceRangeSliderX, &RangeSlider::maxValueChanged, [viewPort3D](int value) {
+            float maxSlice = value / 100.0f;
+            viewPort3D->setMaxSliceX(maxSlice);
+            });
+
+        QObject::connect(sliceRangeSliderY, &RangeSlider::minValueChanged, [viewPort3D](int value) {
+            float minSlice = value / 100.0f;
+            viewPort3D->setMinSliceY(minSlice);
+            });
+
+        QObject::connect(sliceRangeSliderY, &RangeSlider::maxValueChanged, [viewPort3D](int value) {
+            float maxSlice = value / 100.0f;
+            viewPort3D->setMaxSliceY(maxSlice);
+            });
+
+        QObject::connect(sliceRangeSliderZ, &RangeSlider::minValueChanged, [viewPort3D](int value) {
+            float minSlice = value / 100.0f;
+            viewPort3D->setMinSliceZ(minSlice);
+            });
+
+        QObject::connect(sliceRangeSliderZ, &RangeSlider::maxValueChanged, [viewPort3D](int value) {
+            float maxSlice = value / 100.0f;
+            viewPort3D->setMaxSliceZ(maxSlice);
+            });
+    }
+
+    return sliceGroup;
+}
+
+static QGroupBox *createLightingSettings(ViewPort3D *viewPort3D) {
+    QGroupBox *lightingGroup = new QGroupBox("Lighting Settings");
+    lightingGroup->setObjectName("LightingSettings");
+    QVBoxLayout *lightingLayout = new QVBoxLayout(lightingGroup);
+
+    auto *enableLighting = new QCheckBox("Enable lighting");
+    auto *ambientLabel = new QLabel("Ambient strength:");
+    auto *ambientSlider = new QSlider(Qt::Horizontal);
+    auto *diffuseLabel = new QLabel("Diffuse strength:");
+    auto *diffuseSlider = new QSlider(Qt::Horizontal);
+    auto *specularLabel = new QLabel("Specular strength:");
+    auto *specularSlider = new QSlider(Qt::Horizontal);
+    auto *shininessLabel = new QLabel("Shininess:");
+    auto *shininessSlider = new QSlider(Qt::Horizontal);
+    auto *additionalLabel = new QLabel("Additional settings:");
+    auto *enableAO = new QCheckBox("Enable ambient occlusion");
+    auto *enableShadow = new QCheckBox("Enable basic shadows");
+
+    lightingLayout->addWidget(enableLighting);
+    lightingLayout->addWidget(ambientLabel);
+    lightingLayout->addWidget(ambientSlider);
+    lightingLayout->addWidget(diffuseLabel);
+    lightingLayout->addWidget(diffuseSlider);
+    lightingLayout->addWidget(specularLabel);
+    lightingLayout->addWidget(specularSlider);
+    lightingLayout->addWidget(shininessLabel);
+    lightingLayout->addWidget(shininessSlider);
+    lightingLayout->addWidget(additionalLabel);
+    lightingLayout->addWidget(enableAO);
+    lightingLayout->addWidget(enableShadow);
+
+    if (viewPort3D) {
+        enableLighting->setChecked(viewPort3D->getLightingEnabled());
+        ambientSlider->setValue(viewPort3D->getAmbientStrength() * 100);
+        diffuseSlider->setValue(viewPort3D->getDiffuseStrength() * 100);
+        specularSlider->setValue(viewPort3D->getSpecularStrength() * 100);
+        shininessSlider->setValue(viewPort3D->getShininess());
+        enableAO->setChecked(viewPort3D->getAOEnabled());
+        enableShadow->setChecked(viewPort3D->getShadowEnabled());
+
+        QObject::connect(enableLighting, &QCheckBox::checkStateChanged, [viewPort3D](int value) {
+            viewPort3D->setEnableLighting(value);
+            });
+
+        QObject::connect(ambientSlider, &QSlider::valueChanged, [viewPort3D](int value) {
+            viewPort3D->setAmbientStrength(value / 100.0f);
+            });
+
+        QObject::connect(diffuseSlider, &QSlider::valueChanged, [viewPort3D](int value) {
+            viewPort3D->setDiffuseStrength(value / 100.0f);
+            });
+
+        QObject::connect(specularSlider, &QSlider::valueChanged, [viewPort3D](int value) {
+            viewPort3D->setSpecularStrength(value / 100.0f);
+            });
+
+        QObject::connect(shininessSlider, &QSlider::valueChanged, [viewPort3D](int value) {
+            viewPort3D->setShininess(value);
+            });
+
+        QObject::connect(enableAO, &QCheckBox::checkStateChanged, [viewPort3D](int value) {
+            viewPort3D->setEnableAO(value);
+            });
+
+        QObject::connect(enableShadow, &QCheckBox::checkStateChanged, [viewPort3D](int value) {
+            viewPort3D->setEnableShadow(value);
+            });
+    }
+
+    return lightingGroup;
+}
+
+static QGroupBox *createLightPositionSettings(ViewPort3D *viewPort3D) {
+    QGroupBox *lightPosGroup = new QGroupBox("Light Direction");
+    lightPosGroup->setObjectName("LightDirectionSettings");
+    QVBoxLayout *lightPosLayout = new QVBoxLayout(lightPosGroup);
+
+    // Create sliders for adjusting light position relative to camera
+    auto *xLabel = new QLabel("Left/Right:");
+    auto *xSlider = new QSlider(Qt::Horizontal);
+    xSlider->setRange(-200, 200);
+    xSlider->setValue(0); // Center position by default
+
+    auto *yLabel = new QLabel("Up/Down:");
+    auto *ySlider = new QSlider(Qt::Horizontal);
+    ySlider->setRange(0, 200);
+    ySlider->setValue(100); // Default above camera
+
+    auto *zLabel = new QLabel("Front/Back:");
+    auto *zSlider = new QSlider(Qt::Horizontal);
+    zSlider->setRange(-200, 200);
+    zSlider->setValue(-100); // Default slightly behind camera
+
+    // Add labels describing the extremes
+    auto *xRangeLabel = new QLabel("◀ Left                Right ▶");
+    xRangeLabel->setAlignment(Qt::AlignCenter);
+    auto *yRangeLabel = new QLabel("◀ Below              Above ▶");
+    yRangeLabel->setAlignment(Qt::AlignCenter);
+    auto *zRangeLabel = new QLabel("◀ Behind              Front ▶");
+    zRangeLabel->setAlignment(Qt::AlignCenter);
+
+    lightPosLayout->addWidget(xLabel);
+    lightPosLayout->addWidget(xSlider);
+    lightPosLayout->addWidget(xRangeLabel);
+    lightPosLayout->addWidget(yLabel);
+    lightPosLayout->addWidget(ySlider);
+    lightPosLayout->addWidget(yRangeLabel);
+    lightPosLayout->addWidget(zLabel);
+    lightPosLayout->addWidget(zSlider);
+    lightPosLayout->addWidget(zRangeLabel);
+
+    if (viewPort3D) {
+        // Initialize sliders with current values
+        xSlider->setValue(viewPort3D->getLightOffsetX() * 100);
+        ySlider->setValue(viewPort3D->getLightOffsetY() * 100);
+        zSlider->setValue(viewPort3D->getLightOffsetZ() * 100);
+
+        // Connect signals to update light position
+        QObject::connect(xSlider, &QSlider::valueChanged, [viewPort3D](int value) {
+            viewPort3D->setLightOffsetX(value / 100.0f);
+            });
+
+        QObject::connect(ySlider, &QSlider::valueChanged, [viewPort3D](int value) {
+            viewPort3D->setLightOffsetY(value / 100.0f);
+            });
+
+        QObject::connect(zSlider, &QSlider::valueChanged, [viewPort3D](int value) {
+            viewPort3D->setLightOffsetZ(value / 100.0f);
+            });
+    }
+
+    return lightPosGroup;
+}
+
+static QGroupBox *createGradientEditorGroup(ViewPort3D *viewPort3D) {
+    QGroupBox *gradientGroup = new QGroupBox("Gradient editor");
+    gradientGroup->setObjectName("TransferFunctionEditor");
+    QGridLayout *gradientLayout = new QGridLayout(gradientGroup);
+    GradientEditor *gradientEditor = new GradientEditor();
+    gradientLayout->addWidget(gradientEditor);
+
+    if (viewPort3D) {
+        QObject::connect(gradientEditor, &GradientEditor::gradientChanged, viewPort3D, &ViewPort3D::setColorMap);
+        gradientEditor->emitGradientChange();
+    }
+
+    return gradientGroup;
+}
+
+void setupLayout(QWidget *window, QWidget *viewport3D)
+{
+    auto *mainLayout = new QHBoxLayout(window);
+
+    auto *sidebarContainer = new QWidget;
+    auto *sidebarLayout = new QVBoxLayout(sidebarContainer);
+    QScrollArea *sidebar = new QScrollArea();
+    sidebar->setWidgetResizable(true);
+    sidebar->setWidget(sidebarContainer);
+    mainLayout->addWidget(sidebar);
+
+    mainLayout->addWidget(viewport3D, 1);
+
+    auto *viewPort3D = qobject_cast<ViewPort3D *>(viewport3D);
+
+    QLabel *timeElapsedLabel = new QLabel("--", viewport3D);
+    timeElapsedLabel->setFixedWidth(170);
+    timeElapsedLabel->setStyleSheet("color:rgb(187, 187, 187)");
+
+    sidebarLayout->addWidget(createRotationControls(viewPort3D, timeElapsedLabel));
+    sidebarLayout->addWidget(createStandardViews(viewPort3D));
+    sidebarLayout->addWidget(createVisibilityOptions(viewPort3D));
+    sidebarLayout->addWidget(createRenderingSettings(viewPort3D));
+    sidebarLayout->addWidget(createSliceSettings(viewPort3D));
+    sidebarLayout->addWidget(createGradientEditorGroup(viewPort3D));
+    sidebarLayout->addWidget(createLightingSettings(viewPort3D));
+    sidebarLayout->addWidget(createLightPositionSettings(viewPort3D));
+
+    auto *infoLabel = new QLabel("3D Nifti Viewer\n\nUse mouse to rotate\nScroll to zoom");
+    sidebarLayout->addWidget(infoLabel);
+    sidebarLayout->addStretch(1);
+
+    QTimer *timer = new QTimer(timeElapsedLabel);
+    QObject::connect(timer, &QTimer::timeout, [viewPort3D, timeElapsedLabel]() {
+        GLuint64 time = viewPort3D->getElapsedTime();
+        if (time <= 0) {
+            timeElapsedLabel->setText("--");
+            return;
+        }
+        double ms = time / 1e6;
+        double fps = 1000.0 / ms;
+        timeElapsedLabel->setText(QString("Render: %1 ms (%2 FPS)")
+            .arg(ms, 0, 'f', 2)
+            .arg(fps, 0, 'f', 1));
+        });
+    timer->start(500);
+
+    QObject::connect(viewPort3D, &ViewPort3D::resized, [timeElapsedLabel](int w, int h) {
+        timeElapsedLabel->move(w - timeElapsedLabel->width() - 10, 5);
+        });
+}
+```
+
+### src/interface/LayoutSetup.h
+```
+// LayoutSetup.h
+
+#ifndef LAYOUTSETUP_H
+#define LAYOUTSETUP_H
+
+#include <QWidget>
+#include "../viewPort/ViewPort3D.h"
+
+void setupLayout(QWidget *window, QWidget *viewport3D);
+
+#endif // LAYOUTSETUP_H
+```
+
+### src/interface/RangeSlider.cpp
+```
+#include "RangeSlider.h"
+
+RangeSlider::RangeSlider(QWidget *parent) : QWidget(parent) {
+    // Create layout for the sliders
+    QVBoxLayout* layout = new QVBoxLayout(this);
+    layout->setContentsMargins(0, 0, 0, 0);
+    layout->setSpacing(2);
+    
+    // Create labels to describe the sliders
+    QHBoxLayout* labelsLayout = new QHBoxLayout();
+    minLabel = new QLabel("Min:", this);
+    maxLabel = new QLabel("Max:", this);
+    minValueDisplay = new QLabel("0.15", this);
+    maxValueDisplay = new QLabel("1.00", this);
+    
+    labelsLayout->addWidget(minLabel);
+    labelsLayout->addWidget(minValueDisplay);
+    labelsLayout->addStretch();
+    labelsLayout->addWidget(maxLabel);
+    labelsLayout->addWidget(maxValueDisplay);
+    
+    layout->addLayout(labelsLayout);
+    
+    // Create sliders
+    minSlider = new QSlider(Qt::Horizontal, this);
+    maxSlider = new QSlider(Qt::Horizontal, this);
+    
+    minSlider->setObjectName("minSlider");
+    maxSlider->setObjectName("maxSlider");
+    
+    layout->addWidget(minSlider);
+    layout->addWidget(maxSlider);
+    
+    // Set up sliders
+    minSlider->setRange(0, 100);
+    maxSlider->setRange(0, 100);
+    
+    // Initialize with default values
+    minSlider->setValue(15);
+    maxSlider->setValue(100);
+    updateLabels();
+    
+    // Connect signals to enforce constraints
+    connect(minSlider, &QSlider::valueChanged, this, [this](int value) {
+        // Ensure min doesn't exceed max
+        if (value > maxSlider->value()) {
+            minSlider->blockSignals(true);
+            minSlider->setValue(maxSlider->value());
+            minSlider->blockSignals(false);
+            value = maxSlider->value();
+        }
+        
+        updateLabels();
+        emit minValueChanged(value);
+        emit rangeChanged(minSlider->value(), maxSlider->value());
+    });
+    
+    connect(maxSlider, &QSlider::valueChanged, this, [this](int value) {
+        // Ensure max doesn't go below min
+        if (value < minSlider->value()) {
+            maxSlider->blockSignals(true);
+            maxSlider->setValue(minSlider->value());
+            maxSlider->blockSignals(false);
+            value = minSlider->value();
+        }
+        
+        updateLabels();
+        emit maxValueChanged(value);
+        emit rangeChanged(minSlider->value(), maxSlider->value());
+    });
+}
+
+int RangeSlider::minimumValue() const { 
+    return minSlider->value(); 
+}
+
+int RangeSlider::maximumValue() const { 
+    return maxSlider->value(); 
+}
+
+void RangeSlider::setMinimumValue(int value) {
+    minSlider->setValue(value);
+}
+
+void RangeSlider::setMaximumValue(int value) {
+    maxSlider->setValue(value);
+}
+
+void RangeSlider::updateLabels() {
+    minValueDisplay->setText(QString::number(minSlider->value() / 100.0, 'f', 2));
+    maxValueDisplay->setText(QString::number(maxSlider->value() / 100.0, 'f', 2));
+}
+```
+
+### src/interface/RangeSlider.h
+```
+#ifndef RANGESLIDER_H
+#define RANGESLIDER_H
+
+#include <QWidget>
+#include <QSlider>
+#include <QLabel>
+#include <QVBoxLayout>
+#include <QHBoxLayout>
+
+class RangeSlider : public QWidget {
+    Q_OBJECT
+public:
+    explicit RangeSlider(QWidget *parent = nullptr);
+
+    int minimumValue() const;
+    int maximumValue() const;
+
+    void setMinimumValue(int value);
+    void setMaximumValue(int value);
+
+signals:
+    void minValueChanged(int value);
+    void maxValueChanged(int value);
+    void rangeChanged(int min, int max);
+
+private:
+    QSlider *minSlider;
+    QSlider *maxSlider;
+    QLabel *minLabel;
+    QLabel *maxLabel;
+    QLabel *minValueDisplay;
+    QLabel *maxValueDisplay;
+    
+    void updateLabels();
+};
+
+#endif // RANGESLIDER_H
+```
+
+### src/viewPort/Camera.cpp
+```
+#include "Camera.h"
+#include <cmath>
+#include <algorithm>
+
+Camera::Camera()
+    : m_position(0.0f, 0.0f, 5.0f),
+      m_center(0.0f, 0.0f, 0.0f),
+      m_front(0.0f, 0.0f, -1.0f),
+      m_up(0.0f, 1.0f, 0.0f),
+      m_radius(5.0f),
+      m_rotation()
+{
+    updateCameraVectors();
+}
+
+void Camera::setPosition(const QVector3D& position) {
+    m_position = position;
+    m_front = (m_center - m_position).normalized();
+    m_radius = (m_center - m_position).length();
+}
+
+void Camera::setCenter(const QVector3D& center) {
+    m_center = center;
+    m_front = (m_center - m_position).normalized();
+    m_radius = (m_center - m_position).length();
+}
+
+void Camera::setUpVector(const QVector3D& up) {
+    m_up = up.normalized();
+}
+
+void Camera::setRadius(float radius) {
+    m_radius = std::max(0.5f, std::min(20.0f, radius));
+    updateCameraVectors();
+}
+
+void Camera::rotate(float yawDelta, float pitchDelta) {
+  // Calculate camera's current right and up vectors dynamically
+  QVector3D cameraRight = QVector3D::crossProduct(m_front, m_up).normalized();
+  QVector3D cameraUp = m_up;
+
+  // Create rotation quaternions for yaw (around the up vector) and pitch (around the right vector)
+  QQuaternion yawRotation = QQuaternion::fromAxisAndAngle(cameraUp, -yawDelta);
+  QQuaternion pitchRotation = QQuaternion::fromAxisAndAngle(cameraRight, -pitchDelta);
+
+  // Combine rotations
+  m_rotation = yawRotation * pitchRotation * m_rotation;
+  m_rotation.normalize(); // Keep quaternion normalized
+
+  // Update camera vectors
+  updateCameraVectors();
+}
+
+void Camera::zoom(float zoomDelta) {
+    // Update radius (zoom in/out)
+    m_radius -= zoomDelta * 0.1f * m_radius;
+    
+    // Clamp radius to reasonable values
+    m_radius = std::max(0.5f, std::min(20.0f, m_radius));
+    
+    updateCameraVectors();
+}
+
+void Camera::resetOrientation() {
+    m_rotation = QQuaternion();
+    updateCameraVectors();
+}
+
+void Camera::setViewAxis(const QString& axis) {
+    // Reset rotation quaternion first
+    m_rotation = QQuaternion();
+    
+    // Then set up standard views using quaternions
+    if (axis.compare("axial", Qt::CaseInsensitive) == 0) {
+        // Top-down view (axial)
+        QQuaternion xRotation = QQuaternion::fromAxisAndAngle(QVector3D(1, 0, 0), -90.0f);
+        QQuaternion yRotation = QQuaternion::fromAxisAndAngle(QVector3D(0, 1, 0), 180.0f);
+
+        m_rotation = yRotation * xRotation;
+    } else if (axis.compare("coronal", Qt::CaseInsensitive) == 0) {
+        // Front view (coronal) - default orientation, no rotation needed
+        m_rotation = QQuaternion();
+    } else if (axis.compare("sagittal", Qt::CaseInsensitive) == 0) {
+        // Side view (sagittal)
+        m_rotation = QQuaternion::fromAxisAndAngle(QVector3D(0, 1, 0), -90.0f);
+    } else if (axis.compare("oblique", Qt::CaseInsensitive) == 0) {
+        // Oblique view (good for 3D visualization)
+        QQuaternion yawRotation = QQuaternion::fromAxisAndAngle(QVector3D(0, 1, 0), -45.0f);
+        QQuaternion pitchRotation = QQuaternion::fromAxisAndAngle(QVector3D(1, 0, 0), -30.0f);
+        m_rotation = yawRotation * pitchRotation;
+    } else if (axis.compare("bottom", Qt::CaseInsensitive) == 0) {
+        // Bottom-up view
+        m_rotation = QQuaternion::fromAxisAndAngle(QVector3D(1, 0, 0), 90.0f);
+    }
+    
+    // Normalize the quaternion to ensure proper rotation
+    m_rotation.normalize();
+    
+    // Update camera vectors
+    updateCameraVectors();
+}
+
+QMatrix4x4 Camera::getViewMatrix() const {
+    QMatrix4x4 viewMatrix;
+    viewMatrix.lookAt(m_position, m_center, m_up);
+    return viewMatrix;
+}
+
+void Camera::updateCameraVectors() {
+  QVector3D basePosition(0, 0, m_radius);
+  QVector3D rotatedPosition = m_rotation.rotatedVector(basePosition);
+
+  m_position = rotatedPosition + m_center;
+  m_front = (m_center - m_position).normalized();
+
+  // Recalculate up vector dynamically from rotation to maintain intuitive orientation
+  m_up = m_rotation.rotatedVector(QVector3D(0, 1, 0)).normalized();
+}
+
+void Camera::rotateViewAligned(float angle) {
+  // Create a rotation quaternion around the front vector (view direction)
+  QQuaternion viewRotation = QQuaternion::fromAxisAndAngle(m_front, angle);
+  
+  // Apply this rotation to the camera's orientation
+  m_rotation = viewRotation * m_rotation;
+  m_rotation.normalize(); // Keep quaternion normalized
+  
+  // Update camera vectors
+  updateCameraVectors();
+}
+```
+
+### src/viewPort/Camera.h
+```
+#ifndef CAMERA_H
+#define CAMERA_H
+
+#include <QVector3D>
+#include <QQuaternion>
+#include <QMatrix4x4>
+
+class Camera {
+public:
+    Camera();
+    
+    // Set up the camera
+    void setPosition(const QVector3D& position);
+    void setCenter(const QVector3D& center);
+    void setUpVector(const QVector3D& up);
+    void setRadius(float radius);
+    
+    // Camera movement
+    void rotate(float yawDelta, float pitchDelta);
+    void rotateViewAligned(float angle);
+    void zoom(float zoomDelta);
+    void resetOrientation();
+    
+    // Predefined views
+    void setViewAxis(const QString& axis);
+    
+    // Get camera properties
+    QVector3D getPosition() const { return m_position; }
+    QVector3D getCenter() const { return m_center; }
+    QVector3D getUpVector() const { return m_up; }
+    QVector3D getFrontVector() const { return m_front; }
+    float getRadius() const { return m_radius; }
+    
+    // Get transformation matrix
+    QMatrix4x4 getViewMatrix() const;
+    
+private:
+    // Update camera vectors based on rotation
+    void updateCameraVectors();
+    
+    QVector3D m_position;  // Camera position
+    QVector3D m_center;    // Look-at point
+    QVector3D m_front;     // Camera front direction
+    QVector3D m_up;        // Camera up vector
+    float m_radius;        // Distance from center
+    
+    QQuaternion m_rotation; // Stores the camera orientation
+};
+
+#endif // CAMERA_H
+```
+
+### src/viewPort/CameraLightManagement.cpp
+```
+#include "ViewPort3D.h"
+
+void ViewPort3D::rotateCamera(float yawDelta, float pitchDelta)
+{
+    startInteractionTimer();
+    m_camera.rotate(yawDelta, pitchDelta);
+    update();
+}
+
+void ViewPort3D::resetView()
+{
+    m_camera.resetOrientation();
+    m_objectRotation = QQuaternion(); // Reset object rotation too
+    updateModelMatrix();
+    update();
+}
+
+void ViewPort3D::setViewAxis(const QString &axis)
+{
+    m_camera.setViewAxis(axis);
+    update();
+}
+
+
+
+void ViewPort3D::setLightOffsetX(float offset) {
+    m_lightOffsetX = offset;
+    updateWithInteraction();
+}
+
+void ViewPort3D::setLightOffsetY(float offset) {
+    m_lightOffsetY = offset;
+    updateWithInteraction();
+}
+
+void ViewPort3D::setLightOffsetZ(float offset) {
+    m_lightOffsetZ = offset;
+    updateWithInteraction();
+}
+
+void ViewPort3D::setEnableLighting(bool enabled) {
+    m_enableLighting = enabled;
+    update();
+}
+
+void ViewPort3D::setAmbientStrength(float f) {
+    setLightingParameter(m_ambientStrength, f);
+}
+
+void ViewPort3D::setDiffuseStrength(float f) {
+    setLightingParameter(m_diffuseStrength, f);
+}
+
+void ViewPort3D::setSpecularStrength(float f) {
+    setLightingParameter(m_specularStrength, f);
+}
+
+void ViewPort3D::setShininess(float f) {
+    setLightingParameter(m_shininess, f);
+}
+
+void ViewPort3D::setLightingParameter(float &parameter, float newValue) {
+    parameter = newValue;
+    updateWithInteraction();
+}
+
+void ViewPort3D::setEnableShadow(bool enabled) {
+    m_enableShadow = enabled;
+    update();
+}
+```
+
+### src/viewPort/InteractionInputHandling.cpp
+```
+#include "ViewPort3D.h"
+
+void ViewPort3D::mouseMoveEvent(QMouseEvent *event) {
+    if (!m_isMousePressed && !m_isRightMousePressed) {
+        QOpenGLWidget::mouseMoveEvent(event);
+        return;
+    }
+
+    startInteractionTimer();
+
+    // Compute the mouse movement deltas
+    float dx = static_cast<float>(event->position().x() - m_lastMousePos.x());
+    float dy = static_cast<float>(event->position().y() - m_lastMousePos.y());
+
+    if (m_isMousePressed) {
+        // Adjust sensitivity based on your application's feel
+        const float sensitivity = 0.2f * (m_camera.getRadius() / 5.0f);
+
+        // Rotate camera
+        m_camera.rotate(dx * sensitivity, dy * sensitivity);
+    } else if (m_isRightMousePressed) {
+        // Adjust sensitivity for view-aligned rotation
+        const float viewRotationSensitivity = 0.5f;
+
+        // Use the new method to rotate around view direction
+        m_camera.rotateViewAligned(dx * viewRotationSensitivity);
+    }
+
+    m_lastMousePos = event->pos();
+    update();
+
+    QOpenGLWidget::mouseMoveEvent(event);
+}
+
+void ViewPort3D::mousePressEvent(QMouseEvent *event) {
+    if (event->button() == Qt::LeftButton) {
+        m_isMousePressed = true;
+        m_lastMousePos = event->pos();
+    } else if (event->button() == Qt::RightButton) {
+        m_isRightMousePressed = true;
+        m_lastMousePos = event->pos();
+    }
+
+    QOpenGLWidget::mousePressEvent(event);
+}
+
+void ViewPort3D::mouseReleaseEvent(QMouseEvent *event) {
+    if (event->button() == Qt::LeftButton) {
+        m_isMousePressed = false;
+    } else if (event->button() == Qt::RightButton) {
+        m_isRightMousePressed = false;
+    }
+
+    QOpenGLWidget::mouseReleaseEvent(event);
+}
+
+void ViewPort3D::wheelEvent(QWheelEvent *event) {
+    startInteractionTimer();
+
+    float numDegrees = event->angleDelta().y() / 8.0f;
+    float numSteps = numDegrees / 15.0f;
+
+    // Zoom camera
+    m_camera.zoom(numSteps);
+
+    update();
+
+    QOpenGLWidget::wheelEvent(event);
+}
+
+void ViewPort3D::startInteractionTimer(int time) {
+    m_interactionTimer->start(time);
+}
+
+void ViewPort3D::interactionTimeout() {
+    update();
+}
+```
+
+### src/viewPort/ViewPort3D.cpp
+```
+#include "ViewPort3D.h"
+#include <QOpenGLShaderProgram>
+#include <QMatrix4x4>
+#include <QVector3D>
+#include <cmath>
+#include <algorithm>
+#include <QFile>
+#include <QTextStream>
+#include <QDir>
+
+
+
+ViewPort3D::ViewPort3D(QWidget *parent)
+    : QOpenGLWidget(parent),
+    m_program(nullptr),
+    m_axisProgram(nullptr),
+    m_lastMousePos(0, 0),
+    m_isMousePressed(false),
+    m_isRightMousePressed(false),
+    m_objectRotation()
+{
+    setMouseTracking(true);
+    setAttribute(Qt::WA_TranslucentBackground); // Ensures that the QOpenGL widget supports alpha blending
+    setFocusPolicy(Qt::StrongFocus);
+    m_interactionTimer = new QTimer(this);
+    m_interactionTimer->setSingleShot(true);  // Trigger once after timeout
+    connect(m_interactionTimer, &QTimer::timeout, this, &ViewPort3D::interactionTimeout);
+}
+
+ViewPort3D::ViewPort3D(const NiftiDataManager &dataManager, QWidget *parent)
+    : ViewPort3D(parent)
+{
+    qDebug() << "ViewPort3D: Creating from NiftiDataManager";
+    setVolumeData(dataManager);
+}
+
+ViewPort3D::~ViewPort3D()
+{
+    makeCurrent();
+    cleanupTextures();
+    m_vbo.destroy();
+    m_ebo.destroy();
+    m_vao.destroy();
+    m_axisVbo.destroy();
+    m_axisVao.destroy();
+    delete m_program;
+    delete m_axisProgram;
+    doneCurrent();
+}
+
+void ViewPort3D::initializeGL()
+{
+    initializeOpenGLFunctions();
+
+    // Create main shader program for volume rendering
+    m_program = new QOpenGLShaderProgram(this);
+    m_program->addShaderFromSourceFile(QOpenGLShader::Vertex, "shaders/raycast.vert");
+    m_program->addShaderFromSourceFile(QOpenGLShader::Fragment, "shaders/raycast.frag");
+
+    if (!m_program->link()) {
+        qDebug() << "Main shader program failed to link!";
+        qDebug() << m_program->log();  // Output log information for debugging
+    } else {
+        qDebug() << "Main shader program linked successfully!";
+    }
+
+    // Create shader program for axes
+    m_axisProgram = new QOpenGLShaderProgram(this);
+    m_axisProgram->addShaderFromSourceFile(QOpenGLShader::Vertex, "shaders/axis.vert");
+    m_axisProgram->addShaderFromSourceFile(QOpenGLShader::Fragment, "shaders/axis.frag");
+
+    if (!m_axisProgram->link()) {
+        qDebug() << "Axis shader program failed to link!";
+        qDebug() << m_axisProgram->log();  // Output log information for debugging
+    } else {
+        qDebug() << "Axis shader program linked successfully!";
+    }
+
+    // Create x-, y- and z-axis 
+    createAxis();
+
+    // Create bounding box for volume rendering
+    createBoundingBox();
+
+    // Create texture if we have NifTI data
+    if (m_hasNiftiData) {
+        createTexture();
+    }
+
+    // Enable alpha blending
+    glEnable(GL_BLEND);
+    glBlendFunc(GL_SRC_ALPHA, GL_ONE_MINUS_SRC_ALPHA);
+
+    // Set OpenGL state
+    glClearColor(0.4f, 0.4f, 0.4f, 1.0f);
+    glEnable(GL_DEPTH_TEST);
+    glEnable(GL_CULL_FACE);
+}
+
+void ViewPort3D::resizeGL(int w, int h)
+{
+    if (w <= 0 || h <= 0)
+        return;
+
+    m_projectionMatrix.setToIdentity();
+    m_projectionMatrix.perspective(45.0f, static_cast<float>(w) / static_cast<float>(h), 0.1f, 100.0f);
+
+    emit resized(w, h);
+}
+
+void ViewPort3D::paintGL()
+{
+    glClear(GL_COLOR_BUFFER_BIT | GL_DEPTH_BUFFER_BIT);
+
+    // Set polygon draw mode
+    glPolygonMode(GL_FRONT_AND_BACK, m_drawMode);
+
+    // Get view matrix from camera
+    m_viewMatrix = m_camera.getViewMatrix();
+
+    // Draw coordinate axes if enabled
+    if (m_showAxes)
+        drawAxes();
+
+    if (m_showBoundingBoxFrame)
+        drawBoundingBoxFrame();
+
+    if (m_showVolume)
+        drawVolume();
+
+    // Reset polygon mode
+    glPolygonMode(GL_FRONT_AND_BACK, GL_FILL);
+}
+
+
+void ViewPort3D::adjustQuality() {
+    // If user isn't interacting anymore when can reset the quality to default
+    if (m_qualityReduced && !m_interactionTimer->isActive()) {
+        m_adjustedStepSize = m_defaultStepSize;
+        m_qualityReduced = false;
+    }
+    // If the quality already is reduced, but not sufficiently, reduce it even more
+    else if (m_qualityReduced && m_timeElapsed > 1.2 * m_maxFrameRenderDuration) {
+        m_adjustedStepSize = m_adjustedStepSize * m_timeElapsed / m_maxFrameRenderDuration;
+    }
+    // If the user begins to interact, we reduce the quality.
+    else if (!m_qualityReduced && m_interactionTimer->isActive() && m_timeElapsed > m_maxFrameRenderDuration) {
+        m_adjustedStepSize = m_adjustedStepSize * m_timeElapsed / m_maxFrameRenderDuration;
+        m_qualityReduced = true;
+
+    } else  if (!m_qualityReduced) {
+        m_adjustedStepSize = m_defaultStepSize;
+    }
+}
+
+
+void ViewPort3D::setVolumeData(const NiftiDataManager &dataManager)
+{
+    qDebug() << "ViewPort3D::setVolumeData - Starting";
+
+    try {
+        // Clean up OpenGL resources first
+        if (isValid()) {
+            qDebug() << "Making OpenGL context current";
+            makeCurrent();
+
+            cleanupTextures();
+
+            doneCurrent();
+            qDebug() << "OpenGL context released";
+        }
+
+        // Mark as having no data
+        m_hasNiftiData = false;
+
+        // If the data manager has no valid data, we're done
+        if (!dataManager.isValid()) {
+            qDebug() << "Input data manager contains no valid data";
+            update();
+            return;
+        }
+
+        // Store the data manager
+        m_volumeData = dataManager;
+        m_hasNiftiData = m_volumeData.isValid();
+
+        qDebug() << "Volume data assigned with dimensions:"
+            << m_volumeData.getWidth() << "x"
+            << m_volumeData.getHeight() << "x"
+            << m_volumeData.getDepth();
+
+        // Reset view and slices
+        qDebug() << "Resetting view parameters";
+        m_sliceValues = SliceValues{};
+        updateModelMatrix();
+
+        // Now create OpenGL resources if the context is valid
+        if (m_hasNiftiData && isValid()) {
+            qDebug() << "Making OpenGL context current for texture creation";
+            makeCurrent();
+
+            try {
+                qDebug() << "Creating 3D texture from volume data";
+                createTexture();
+                qDebug() << "Creating color map";
+                createColorMapTexture();
+                qDebug() << "Texture creation complete";
+            }
+            catch (const std::exception &e) {
+                qWarning() << "Exception in texture creation:" << e.what();
+
+                // Clean up if texture creation fails
+                cleanupTextures();
+
+                m_hasNiftiData = false;
+            }
+
+            doneCurrent();
+            qDebug() << "OpenGL context released after texture creation";
+        }
+
+        // Reset camera view
+        resetView();
+        update();  // Request a redraw
+        qDebug() << "ViewPort3D::setVolumeData - Completed successfully";
+    }
+    catch (const std::exception &e) {
+        qWarning() << "Exception in setVolumeData:" << e.what();
+
+        // Clean up in case of any exception
+        if (isValid()) {
+            qDebug() << "Making OpenGL context current for error cleanup";
+            makeCurrent();
+
+            cleanupTextures();
+
+            doneCurrent();
+            qDebug() << "OpenGL context released during error cleanup";
+        }
+
+        m_hasNiftiData = false;
+        update(); // Request a redraw
+        qDebug() << "ViewPort3D::setVolumeData - Failed with exception";
+    }
+}
+
+void ViewPort3D::setStepSize(float size)
+{
+    // Clamp step size to reasonable values
+    m_defaultStepSize = std::max(0.0001f, std::min(0.1f, size));
+    startInteractionTimer(100); // Use shorter timeout value to get more instant feedback
+    update();
+}
+
+void ViewPort3D::setRenderType(RenderType type)
+{
+    m_renderType = type;
+    update();  // Trigger redraw with new render type
+}
+
+void ViewPort3D::setMinDensityThreshold(float threshold)
+{
+    if (threshold == 0.0f) {
+        threshold = 0.00001f; // Avoid zero threshold
+    }
+    // Make sure min threshold doesn't exceed max threshold
+    m_minDensityThreshold = std::min(threshold, m_maxDensityThreshold);
+    updateWithInteraction();
+}
+
+void ViewPort3D::setMaxDensityThreshold(float threshold)
+{
+    // Make sure max threshold isn't less than min threshold
+    m_maxDensityThreshold = std::max(threshold, m_minDensityThreshold);
+    updateWithInteraction();
+}
+
+void ViewPort3D::setAxesVisible(bool visible)
+{
+    m_showAxes = visible;
+    update();
+}
+
+void ViewPort3D::setBoundingBoxFrameVisible(bool visible)
+{
+    m_showBoundingBoxFrame = visible;
+    update();
+}
+
+void ViewPort3D::setVolumeVisible(bool visible)
+{
+    m_showVolume = visible;
+    update();
+}
+
+void ViewPort3D::setAlphaFactor(float f) {
+    m_alphaFactor = f;
+    updateWithInteraction();
+}
+
+void ViewPort3D::updateWithInteraction() {
+    startInteractionTimer();
+    update();
+}
+
+void ViewPort3D::setEnableAO(bool enabled) {
+    m_enableAO = enabled;
+    update();
+}
+
+
+
+void ViewPort3D::setExactRayCasting(bool enabled) {
+    m_exactRayCasting = enabled;
+    update();
+}
+```
+
+### src/viewPort/ViewPort3D.h
+```
+// ViewPort3D.h
+#ifndef VIEWPORT3D_H
+#define VIEWPORT3D_H
+
+#include <QOpenGLWidget>
+#include <QOpenGLFunctions_3_1> // DO NOT CHANGE IMPORTANT FOR 3DTEXIMAGE FUNCTION
+#include <QOpenGLVertexArrayObject>
+#include <QOpenGLBuffer>
+#include <QMatrix4x4>
+#include <QTimer>
+#include <QVector3D>
+#include <QMouseEvent>
+#include <QKeyEvent>
+#include <QWheelEvent>
+#include <RNifti.h>
+#include "../core/NiftiDataManager.h"
+#include "Camera.h"
+#include <QTimer>
+#include <QQuaternion>
+
+enum RenderType {
+    MAXIMUM_INTENSITY = 0,
+    FIRST_CONTACT = 1,
+    MEAN_DENSITY = 2,
+    COMPOSITING = 3,
+    FULL_OPACITY = 4
+};
+
+struct SliceValues {
+    float minSliceX{ 0.0f };
+    float maxSliceX{ 1.0f };
+    float minSliceY{ 0.0f };
+    float maxSliceY{ 1.0f };
+    float minSliceZ{ 0.0f };
+    float maxSliceZ{ 1.0f };
+};
+
+struct VertexData {
+    QVector3D position;
+    QVector3D color;
+};
+
+class QOpenGLShaderProgram;
+
+class ViewPort3D : public QOpenGLWidget, protected QOpenGLFunctions_3_1 {
+    Q_OBJECT
+
+public:
+    explicit ViewPort3D(QWidget *parent = nullptr);
+    explicit ViewPort3D(const NiftiDataManager &dataManager, QWidget *parent = nullptr);
+    ~ViewPort3D() override;
+
+    // Accessors
+    bool areAxesVisible() const { return m_showAxes; }
+    bool isBoundingBoxFrameVisible() const { return m_showBoundingBoxFrame; }
+    bool isVolumeVisible() const { return m_showVolume; }
+    float getStepSize() const { return m_defaultStepSize; }
+    RenderType getRenderType() const { return m_renderType; }
+    float getMinDensityThreshold() const { return m_minDensityThreshold; }
+    float getMaxDensityThreshold() const { return m_maxDensityThreshold; }
+    SliceValues getSliceValues() const { return m_sliceValues; }
+    GLuint getElapsedTime() const { return m_timeElapsed; }
+    bool getLightingEnabled() { return m_enableLighting; }
+    bool getAOEnabled() { return m_enableAO; }
+    bool getShadowEnabled() { return m_enableShadow; }
+    float getAmbientStrength() { return m_ambientStrength; }
+    float getDiffuseStrength() { return m_diffuseStrength; }
+    float getSpecularStrength() { return m_specularStrength; }
+    float getShininess() { return m_shininess; }
+    float getAlphaFactor() { return m_alphaFactor; }
+    bool getExactRayCasting() { return m_exactRayCasting; }
+
+    QVector3D getLightPosition() const { return m_lightPosition; }
+    float getLightOffsetX() const { return m_lightOffsetX; }
+    float getLightOffsetY() const { return m_lightOffsetY; }
+    float getLightOffsetZ() const { return m_lightOffsetZ; }
+
+signals:
+    void resized(int w, int h);
+
+public slots:
+    void setAxesVisible(bool visible);
+    void setBoundingBoxFrameVisible(bool visible);
+    void setVolumeVisible(bool visible);
+    void setStepSize(float size);
+    void setRenderType(RenderType type);
+    void setMinDensityThreshold(float threshold);
+    void setMaxDensityThreshold(float threshold);
+    void rotateCamera(float yaw, float pitch);
+    void resetView();
+    void setViewAxis(const QString &axis);
+    void setEnableLighting(bool enable);
+    void setEnableAO(bool enable);
+    void setEnableShadow(bool enable);
+    void setColorMap(QVector<QVector4D> colorMap);
+    void setFallbackColorMap();
+    void setAlphaFactor(float f);
+    void setExactRayCasting(bool enabled);
+
+
+    void setMinSliceX(float min);
+    void setMaxSliceX(float max);
+    void setMinSliceY(float min);
+    void setMaxSliceY(float max);
+    void setMinSliceZ(float min);
+    void setMaxSliceZ(float max);
+
+    void setLightOffsetX(float offset);
+    void setLightOffsetY(float offset);
+    void setLightOffsetZ(float offset);
+
+    void setAmbientStrength(float f);
+    void setDiffuseStrength(float f);
+    void setSpecularStrength(float f);
+    void setShininess(float f);
+
+    void setVolumeData(const NiftiDataManager &dataManager);
+
+protected:
+    void initializeGL() override;
+    void resizeGL(int w, int h) override;
+    void paintGL() override;
+
+    void mousePressEvent(QMouseEvent *event) override;
+    void mouseReleaseEvent(QMouseEvent *event) override;
+    void mouseMoveEvent(QMouseEvent *event) override;
+    void wheelEvent(QWheelEvent *event) override;
+    void interactionTimeout();
+
+private:
+    void createTexture();
+    void createColorMapTexture();
+    void createBoundingBox();
+    void createAxis();
+    void drawAxes();
+    void drawVolume();
+    void drawBoundingBoxFrame();
+    void updateCameraVectors();
+    void updateModelMatrix();
+    void startInteractionTimer(int time = 250);
+    void adjustQuality();
+
+    // Add these new private methods
+    void cleanupTextures();
+    void setSliceValue(float &sliceValue, float newValue);
+    void setLightingParameter(float &parameter, float newValue);
+    void updateWithInteraction();
+
+    // OpenGL objects
+    QOpenGLShaderProgram *m_program;
+    QOpenGLShaderProgram *m_axisProgram;
+    QOpenGLVertexArrayObject m_vao;
+    QOpenGLBuffer m_vbo;
+    QOpenGLBuffer m_ebo{ QOpenGLBuffer::IndexBuffer };
+    QOpenGLVertexArrayObject m_axisVao;
+    QOpenGLBuffer m_axisVbo;
+    GLuint m_timeElapsed = -1;
+    int m_maxFrameRenderDuration = 50e6;
+    bool m_qualityReduced;
+    QTimer *m_interactionTimer;
+
+    // Volume data storage using NiftiDataManager
+    NiftiDataManager m_volumeData;
+    GLuint m_volumeTexture = 0;
+    bool m_hasNiftiData = false;
+
+    // Camera/view properties
+    QMatrix4x4 m_projectionMatrix;
+    QMatrix4x4 m_modelMatrix;
+    QMatrix4x4 m_viewMatrix;
+
+    Camera m_camera;
+    QPoint m_lastMousePos;
+    bool m_isMousePressed;
+    bool m_isRightMousePressed;
+    QQuaternion m_objectRotation;
+
+    QVector3D m_lightPosition{ 1.0f, 1.0f, 2.0f };
+    float m_lightOffsetX = 0.0f;
+    float m_lightOffsetY = 1.0f;
+    float m_lightOffsetZ = -1.0f;
+
+    // Rendering options
+    GLenum m_drawMode = GL_FILL;
+    bool m_showAxes = false;
+    bool m_showVolume = true;
+    bool m_showBoundingBoxFrame = true;
+    float m_defaultStepSize = 0.0025f;
+    float m_adjustedStepSize = m_defaultStepSize;
+    RenderType m_renderType = FIRST_CONTACT;
+    float m_minDensityThreshold = 0.15f;
+    float m_maxDensityThreshold = 1.0f;
+    SliceValues m_sliceValues;
+    float m_alphaFactor = 20.0f;
+    bool m_exactRayCasting = false;
+
+    // Lighting
+    GLuint m_colorTexture = 0;
+    QVector<QVector4D> m_colorMap;
+    bool m_enableLighting = true;
+    bool m_enableAO = false;
+    bool m_enableShadow = false;
+    float m_ambientStrength = 0.3f;
+    float m_diffuseStrength = 0.7f;
+    float m_specularStrength = 0.8f;
+    float m_shininess = 32.0f;
+};
+
+#endif // VIEWPORT3D_H
+```
+
+### src/viewPort/ViewPort3DDdraw.cpp
+```
+#include "ViewPort3D.h"
+#include <QOpenGLShaderProgram>
+
+
+void ViewPort3D::createBoundingBox()
+{
+    // Create a cube bounding box with vertices from -1 to 1
+    VertexData axisVertices[] = {
+        // Front face
+        {{-1.0f, -1.0f,  1.0f}, {1.0f, 1.0f, 1.0f}},
+        {{ 1.0f, -1.0f,  1.0f}, {1.0f, 1.0f, 1.0f}},
+        {{ 1.0f,  1.0f,  1.0f}, {1.0f, 1.0f, 1.0f}},
+        {{-1.0f,  1.0f,  1.0f}, {1.0f, 1.0f, 1.0f}},
+
+        // Back face
+        {{-1.0f, -1.0f, -1.0f}, {1.0f, 1.0f, 1.0f}},
+        {{ 1.0f, -1.0f, -1.0f}, {1.0f, 1.0f, 1.0f}},
+        {{ 1.0f,  1.0f, -1.0f}, {1.0f, 1.0f, 1.0f}},
+        {{-1.0f,  1.0f, -1.0f}, {1.0f, 1.0f, 1.0f}}
+    };
+
+    unsigned int indices[] = {
+        // Front face
+        0, 1, 2,
+        2, 3, 0,
+
+        // Right face
+        1, 5, 6,
+        6, 2, 1,
+
+        // Back face
+        5, 4, 7,
+        7, 6, 5,
+
+        // Left face
+        4, 0, 3,
+        3, 7, 4,
+
+        // Top face
+        3, 2, 6,
+        6, 7, 3,
+
+        // Bottom face
+        4, 5, 1,
+        1, 0, 4
+    };
+
+    m_vao.create();
+    m_vao.bind();
+
+    m_vbo.create();
+    m_vbo.bind();
+    m_vbo.allocate(axisVertices, sizeof(axisVertices));
+
+    m_ebo.create();
+    m_ebo.bind();
+    m_ebo.allocate(indices, sizeof(indices));
+
+    // Position attribute
+    glEnableVertexAttribArray(0);
+    glVertexAttribPointer(0, 3, GL_FLOAT, GL_FALSE, sizeof(VertexData), nullptr);
+
+    // Color attribute
+    glEnableVertexAttribArray(1);
+    glVertexAttribPointer(1, 3, GL_FLOAT, GL_FALSE, sizeof(VertexData),
+        reinterpret_cast<void *>(sizeof(QVector3D)));
+
+    m_vao.release();
+}
+
+void ViewPort3D::createAxis() {
+    // Create axes geometry
+    m_axisVao.create();
+    m_axisVao.bind();
+
+    VertexData axisVertices[] = {
+        // X-axis (red)
+        {{0.0f, 0.0f, 0.0f}, {1.0f, 0.0f, 0.0f}},
+        {{2.0f, 0.0f, 0.0f}, {1.0f, 0.0f, 0.0f}},
+
+        // Y-axis (green)
+        {{0.0f, 0.0f, 0.0f}, {0.0f, 1.0f, 0.0f}},
+        {{0.0f, 2.0f, 0.0f}, {0.0f, 1.0f, 0.0f}},
+
+        // Z-axis (blue)
+        {{0.0f, 0.0f, 0.0f}, {0.0f, 0.0f, 1.0f}},
+        {{0.0f, 0.0f, 2.0f}, {0.0f, 0.0f, 1.0f}}
+    };
+
+    m_axisVbo.create();
+    m_axisVbo.bind();
+    m_axisVbo.allocate(axisVertices, sizeof(axisVertices));
+
+    // Position attribute
+    glEnableVertexAttribArray(0);
+    glVertexAttribPointer(0, 3, GL_FLOAT, GL_FALSE, sizeof(VertexData), nullptr);
+
+    // Color attribute
+    glEnableVertexAttribArray(1);
+    glVertexAttribPointer(1, 3, GL_FLOAT, GL_FALSE, sizeof(VertexData),
+        reinterpret_cast<void *>(sizeof(QVector3D)));
+
+    m_axisVao.release();
+}
+
+
+void ViewPort3D::drawVolume() {
+    if (!m_hasNiftiData || !m_program || !m_program->isLinked())
+        return;
+
+    adjustQuality();
+
+    // Draw volume with raycasting
+    m_program->bind();
+
+    QMatrix4x4 mvpMatrix = m_projectionMatrix * m_viewMatrix * m_modelMatrix;
+
+    // Calculate camera-relative light position
+    QVector3D cameraPos = m_camera.getPosition();
+    QVector3D cameraFront = m_camera.getFrontVector();
+    QVector3D cameraRight = QVector3D::crossProduct(cameraFront, m_camera.getUpVector()).normalized();
+    QVector3D cameraUp = m_camera.getUpVector();
+
+    // Compute light position relative to camera
+    QVector3D lightPos = cameraPos +
+        (cameraRight * m_lightOffsetX) +
+        (cameraUp * m_lightOffsetY) +
+        (cameraFront * m_lightOffsetZ);
+
+    m_program->setUniformValue("lightPosition", lightPos);
+
+    m_program->setUniformValue("volumeDimensions", QVector3D(m_volumeData.getWidth(), m_volumeData.getHeight(), m_volumeData.getDepth()));
+    m_program->setUniformValue("exactRayCasting", m_exactRayCasting);
+
+    // Set uniforms for raycasting shader
+    m_program->setUniformValue("mvp", mvpMatrix);
+    m_program->setUniformValue("model", m_modelMatrix);
+    m_program->setUniformValue("cameraWorldPosition", m_camera.getPosition());
+
+    m_program->setUniformValue("aspectRatio",
+        static_cast<float>(width()) / static_cast<float>(height()));
+
+    // Pass step size to shader
+    m_program->setUniformValue("stepSize", m_adjustedStepSize);
+
+    // Pass render type and thresholds to shader
+    m_program->setUniformValue("renderType", static_cast<int>(m_renderType));
+    m_program->setUniformValue("minDensityThreshold", m_minDensityThreshold);
+    m_program->setUniformValue("maxDensityThreshold", m_maxDensityThreshold);
+    m_program->setUniformValue("minSlices", QVector3D(m_sliceValues.minSliceX * 2 - 1, m_sliceValues.minSliceY * 2 - 1, m_sliceValues.minSliceZ * 2 - 1));
+    m_program->setUniformValue("maxSlices", QVector3D(m_sliceValues.maxSliceX * 2 - 1, m_sliceValues.maxSliceY * 2 - 1, m_sliceValues.maxSliceZ * 2 - 1));
+    m_program->setUniformValue("alphaFactor", m_alphaFactor);
+
+    m_program->setUniformValue("enableLighting", m_enableLighting);
+    m_program->setUniformValue("enableAO", m_enableAO);
+    m_program->setUniformValue("enableShadow", m_enableShadow);
+    m_program->setUniformValue("ambientStrength", m_ambientStrength);
+    m_program->setUniformValue("diffuseStrength", m_diffuseStrength);
+    m_program->setUniformValue("specularStrength", m_specularStrength);
+    m_program->setUniformValue("shininess", m_shininess);
+
+    // Bind volume texture
+    glActiveTexture(GL_TEXTURE0);
+    glBindTexture(GL_TEXTURE_3D, m_volumeTexture);
+    m_program->setUniformValue("volumeTexture", 0);
+
+    // Bind color texture
+    glActiveTexture(GL_TEXTURE1);
+    glBindTexture(GL_TEXTURE_1D, m_colorTexture);
+    m_program->setUniformValue("colorMap", 1);
+
+    m_vao.bind();
+
+    GLuint query;
+    glGenQueries(1, &query);
+
+    // Start query
+    glBeginQuery(GL_TIME_ELAPSED, query);
+    glDrawElements(GL_TRIANGLES, 36, GL_UNSIGNED_INT, 0);
+    glEndQuery(GL_TIME_ELAPSED);
+
+    // Retrieve time
+    glGetQueryObjectuiv(query, GL_QUERY_RESULT, &m_timeElapsed);
+
+    m_vao.release();
+
+    // Unbind texture
+    glBindTexture(GL_TEXTURE_3D, 0);
+    m_program->release();
+}
+
+void ViewPort3D::drawBoundingBoxFrame() {
+    if (!m_axisProgram || !m_axisProgram->isLinked())
+        return;
+
+    m_axisProgram->bind();
+
+    QMatrix4x4 mvpMatrix = m_projectionMatrix * m_viewMatrix * m_modelMatrix;
+    m_axisProgram->setUniformValue("mvp", mvpMatrix);
+
+    m_vao.bind();
+    glLineWidth(1.0f);
+    glDrawElements(GL_LINE_STRIP, 24, GL_UNSIGNED_INT, 0);
+    m_vao.release();
+
+    m_axisProgram->release();
+}
+
+void ViewPort3D::drawAxes() {
+    if (!m_axisProgram || !m_axisProgram->isLinked())
+        return;
+
+    m_axisProgram->bind();
+
+    QMatrix4x4 mvpMatrix = m_projectionMatrix * m_viewMatrix;
+    m_axisProgram->setUniformValue("mvp", mvpMatrix);
+
+    // Draw axes
+    m_axisVao.bind();
+    glLineWidth(3.0f); // Make axes thicker for better visibility
+    glDrawArrays(GL_LINES, 0, 6);
+    m_axisVao.release();
+
+    m_axisProgram->release();
+}
+```
+
+### src/viewPort/ViewPort3DSlicing.cpp
+```
+#include "ViewPort3D.h"
+
+void ViewPort3D::setMinSliceX(float min) {
+    setSliceValue(m_sliceValues.minSliceX, min);
+}
+
+void ViewPort3D::setMaxSliceX(float max) {
+    setSliceValue(m_sliceValues.maxSliceX, max);
+}
+
+void ViewPort3D::setMinSliceY(float min) {
+    setSliceValue(m_sliceValues.minSliceY, min);
+}
+
+void ViewPort3D::setMaxSliceY(float max) {
+    setSliceValue(m_sliceValues.maxSliceY, max);
+}
+
+void ViewPort3D::setMinSliceZ(float min) {
+    setSliceValue(m_sliceValues.minSliceZ, min);
+}
+
+void ViewPort3D::setMaxSliceZ(float max) {
+    setSliceValue(m_sliceValues.maxSliceZ, max);
+}
+
+void ViewPort3D::setSliceValue(float &sliceValue, float newValue) {
+    sliceValue = newValue;
+    updateModelMatrix();
+    updateWithInteraction();
+}
+
+
+void ViewPort3D::updateModelMatrix() {
+    m_modelMatrix.setToIdentity();
+
+    // Apply object rotation first
+    m_modelMatrix.rotate(m_objectRotation);
+
+    // Then handle slicing
+    float transX = ((m_sliceValues.maxSliceX + m_sliceValues.minSliceX) - 1) / (m_sliceValues.maxSliceX - m_sliceValues.minSliceX);
+    float transY = ((m_sliceValues.maxSliceY + m_sliceValues.minSliceY) - 1) / (m_sliceValues.maxSliceY - m_sliceValues.minSliceY);
+    float transZ = ((m_sliceValues.maxSliceZ + m_sliceValues.minSliceZ) - 1) / (m_sliceValues.maxSliceZ - m_sliceValues.minSliceZ);
+
+    m_modelMatrix.scale(m_sliceValues.maxSliceX - m_sliceValues.minSliceX,
+        m_sliceValues.maxSliceY - m_sliceValues.minSliceY,
+        m_sliceValues.maxSliceZ - m_sliceValues.minSliceZ);
+    m_modelMatrix.translate(transX, transY, transZ);
+}
+```
+
+### src/viewPort/ViewPort3DTexture.cpp
+```
+#include "ViewPort3D.h"
+
+
+void ViewPort3D::createTexture()
+{
+    if (!m_hasNiftiData || !m_volumeData.isValid()) {
+        qWarning() << "Cannot create texture: No valid volume data available";
+        return;
+    }
+
+    try {
+        if (m_volumeTexture != 0) {
+            glDeleteTextures(1, &m_volumeTexture);
+            m_volumeTexture = 0;
+        }
+
+        int width = m_volumeData.getWidth();
+        int height = m_volumeData.getHeight();
+        int depth = m_volumeData.getDepth();
+
+        qDebug() << "Using volume dimensions:" << width << "x" << height << "x" << depth;
+
+        if (width <= 0 || height <= 0 || depth <= 0) {
+            qWarning() << "Invalid volume dimensions:" << width << "x" << height << "x" << depth;
+            return;
+        }
+
+        // Get normalized data from manager
+        std::vector<float> normalizedData = m_volumeData.getNormalizedVolumeData();
+        qDebug() << "Creating 3D texture with data size:" << normalizedData.size();
+
+        glGenTextures(1, &m_volumeTexture);
+        glBindTexture(GL_TEXTURE_3D, m_volumeTexture);
+
+        glTexParameteri(GL_TEXTURE_3D, GL_TEXTURE_MIN_FILTER, GL_LINEAR);
+        glTexParameteri(GL_TEXTURE_3D, GL_TEXTURE_MAG_FILTER, GL_LINEAR);
+        glTexParameteri(GL_TEXTURE_3D, GL_TEXTURE_WRAP_S, GL_CLAMP_TO_BORDER);
+        glTexParameteri(GL_TEXTURE_3D, GL_TEXTURE_WRAP_T, GL_CLAMP_TO_BORDER);
+        glTexParameteri(GL_TEXTURE_3D, GL_TEXTURE_WRAP_R, GL_CLAMP_TO_BORDER);
+
+        glTexImage3D(GL_TEXTURE_3D, 0, GL_R32F, width, height, depth, 0, GL_RED, GL_FLOAT, normalizedData.data());
+        glBindTexture(GL_TEXTURE_3D, 0);
+
+    }
+    catch (const std::exception &e) {
+        qWarning() << "Exception in createTexture:" << e.what();
+        if (m_volumeTexture != 0) {
+            glDeleteTextures(1, &m_volumeTexture);
+            m_volumeTexture = 0;
+        }
+    }
+}
+
+
+void ViewPort3D::cleanupTextures() {
+    if (m_volumeTexture != 0) {
+        qDebug() << "Deleting volume texture";
+        glDeleteTextures(1, &m_volumeTexture);
+        m_volumeTexture = 0;
+    }
+
+    if (m_colorTexture != 0) {
+        qDebug() << "Deleting color texture";
+        glDeleteTextures(1, &m_colorTexture);
+        m_colorTexture = 0;
+    }
+}
+
+
+void ViewPort3D::setColorMap(QVector<QVector4D> colorMap) {
+    m_colorMap = colorMap;
+    if (isValid()) {
+        createColorMapTexture();
+        updateWithInteraction();
+    }
+}
+
+void ViewPort3D::createColorMapTexture() {
+    if (m_colorMap.isEmpty()) {
+        qDebug() << "Using fall back color map";
+        setFallbackColorMap();
+    }
+
+    if (m_colorTexture != 0) {
+        glDeleteTextures(1, &m_colorTexture);
+        m_colorTexture = 0;
+    }
+
+    glGenTextures(1, &m_colorTexture);
+    glBindTexture(GL_TEXTURE_1D, m_colorTexture);
+
+    glTexParameteri(GL_TEXTURE_1D, GL_TEXTURE_MIN_FILTER, GL_LINEAR);
+    glTexParameteri(GL_TEXTURE_1D, GL_TEXTURE_MAG_FILTER, GL_LINEAR);
+    glTexParameteri(GL_TEXTURE_1D, GL_TEXTURE_WRAP_S, GL_CLAMP_TO_EDGE);
+
+    glTexImage1D(GL_TEXTURE_1D, 0, GL_RGBA, m_colorMap.length(), 0, GL_RGBA, GL_FLOAT, m_colorMap.data());
+    glBindTexture(GL_TEXTURE_1D, 0);
+
+    update();
+}
+
+void ViewPort3D::setFallbackColorMap() {
+    const int SIZE = 256;
+    m_colorMap = QVector<QVector4D>(SIZE);
+    for (int i = 0; i < SIZE; i++) {
+        float f = i / static_cast<float>(SIZE - 1);
+        m_colorMap[i] = QVector4D(f, f, f, 1.0f);
+    }
+}
+```

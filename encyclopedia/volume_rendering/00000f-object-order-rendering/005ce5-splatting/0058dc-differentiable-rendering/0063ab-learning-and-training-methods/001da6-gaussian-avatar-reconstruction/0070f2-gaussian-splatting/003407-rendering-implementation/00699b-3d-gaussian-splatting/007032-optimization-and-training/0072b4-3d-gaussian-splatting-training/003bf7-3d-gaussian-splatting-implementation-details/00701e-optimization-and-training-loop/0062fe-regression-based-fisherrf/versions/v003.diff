@@ -1,0 +1,242 @@
+--- v002.md
++++ v003.md
+@@ -4,148 +4,118 @@
+ 
+ ## Overview
+-Regression-based FisherRF is a variant of the FisherRF uncertainty estimation method that replaces the direct aggregation of color parameter variances with a meta-regression model to predict pixel-wise uncertainty [S1, unofficial]. While original FisherRF estimates uncertainty by summing the variances of all spherical harmonic parameters to capture direction-dependent color uncertainty, this method groups Gaussian primitive parameter variances into six distinct categories and feeds them into a regression network [S1, unofficial]. It is primarily used as a baseline for comparing uncertainty estimation (UE) quality in scene separation and out-of-scene generalization experiments [S1, unofficial].
++Regression-based FisherRF is a variant of the FisherRF uncertainty estimation method that replaces the direct aggregation of color parameter variances with a meta-regression model to predict pixel-wise uncertainty [S1, unofficial]. While standard FisherRF estimates uncertainty by summing the variances of all spherical harmonic parameters to determine color direction-dependence, this method groups Gaussian primitive parameter variances into six distinct categories and feeds them as feature maps into a regression network [S1, unofficial]. It is primarily used as a baseline for comparing uncertainty estimation quality in scene separation and out-of-scene generalization experiments [S1, unofficial].
+ 
+ ## How it works
+ **Inputs:**
+-*   A set of 3D Gaussians $\mathcal{G} = \{g_i\}_{i=1}^N$ optimized via the training loop [S1, unofficial].
+-*   Each Gaussian $g_i$ is defined by position $\mathbf{p}_i$, covariance $\Sigma_i$ (parameterized by scale $\mathbf{s}_i$ and rotation $\mathbf{q}_i$), opacity $\alpha_i$, and spherical harmonic coefficients $\mathbf{c}_{i, l}$ .
+-*   The rendered image $\hat{I}$ and the ground-truth image $I_{gt}$ are available to compute gradients, from which parameter variances are derived [S1, unofficial].
++*   The set of $N$ 3D Gaussian primitives $\mathcal{G} = \{g_i\}_{i=1}^N$ optimized during training [S1, unofficial].
++*   For each primitive $g_i$, the variance of its parameters: mean $\mathbf{p}_i$, scale $\mathbf{s}_i$, rotation $\mathbf{q}_i$, opacity $\alpha_i$, and spherical harmonic coefficients $\mathbf{c}_{i, l}$ [S1, unofficial].
+ 
+ **Outputs:**
+-*   A set of six uncertainty feature maps, one for each parameter group.
+-*   A final pixel-wise uncertainty map predicted by the meta-regression model.
++*   A set of six uncertainty feature maps, one for each parameter group, which serve as input to a regression model to predict pixel-wise uncertainty [S1, unofficial].
+ 
+ **Data Structures:**
+-*   **Parameter Variance Map:** For each Gaussian $i$, the variance of its parameters is computed. The sources do not specify the exact mathematical formulation of the variance (e.g., diagonal elements of the Fisher Information Matrix or gradient-based variance estimates), only that they correspond to the variances of the Gaussian primitive parameters [S1, unofficial].
+-*   **Feature Maps:** Six 2D feature maps are generated, corresponding to the screen-space projection of the variances of the six parameter groups.
++The method relies on grouping the variances of Gaussian parameters into six specific categories, originating from the standard 3D Gaussian Splatting implementation [S1, unofficial]:
++1.  **Mean:** Variance of the position $\mathbf{p}_i \in \mathbb{R}^3$.
++2.  **Scale:** Variance of the scale vector $\mathbf{s}_i \in \mathbb{R}^3$.
++3.  **Rotation:** Variance of the rotation quaternion $\mathbf{q}_i \in \mathbb{R}^4$.
++4.  **Opacity:** Variance of the opacity scalar $\alpha_i \in [0, 1]$.
++5.  **SH Degree 0:** Variance of the spherical harmonic coefficients for degree zero (view-independent color).
++6.  **SH Higher Degree:** Variance of the spherical harmonic coefficients for degrees $>0$ (view-dependent color).
++
++Note that the Scale and Rotation groups correspond to the covariance matrix $\Sigma_i$ of the primitive [S1, unofficial].
+ 
+ **Steps:**
+-1.  **Compute Parameter Variances:** For each Gaussian primitive $i$, compute the variance of its parameters. The sources state that the diagonal entries of the Fisher Information Matrix correspond to these variances [S1, unofficial].
+-2.  **Group Variances:** Aggregate the variances per primitive into six categories based on the original Gaussian Splatting implementation [14]:
+-    1.  Mean ($\mathbf{p}_i$)
+-    2.  Scale ($\mathbf{s}_i$)
+-    3.  Rotation ($\mathbf{q}_i$)
+-    4.  Opacity factor ($\alpha_i$)
+-    5.  Spherical harmonics color parameters of degree zero ($\mathbf{c}_{i, 0}$)
+-    6.  Higher degree spherical harmonics color parameters ($\mathbf{c}_{i, l>0}$)
+-    
+-    Note: The scale and rotation groups correspond to the primitive's covariance matrix $\Sigma_i$ [S1, unofficial].
+-3.  **Form Feature Maps:** Aggregate these grouped variances per primitive to form six uncertainty feature maps. This involves projecting the 3D variances to 2D screen space, similar to the rendering process [S1, unofficial].
+-4.  **Meta-Regression:** Feed the six feature maps into a regression model. The model architecture is not detailed in the sources, but it is described as being used "in the same manner as for our uncertainty feature maps obtained by our method" (referring to the PRIMU method) [S1, unofficial].
+-5.  **Predict Uncertainty:** The regression model outputs the final pixel-wise uncertainty map [S1, unofficial].
++1.  **Compute Parameter Variances:** For each Gaussian primitive $g_i$, calculate the variance of each parameter group. Let $Var(\cdot)$ denote the variance operator.
++    *   $V_{mean, i} = Var(\mathbf{p}_i)$
++    *   $V_{scale, i} = Var(\mathbf{s}_i)$
++    *   $V_{rot, i} = Var(\mathbf{q}_i)$
++    *   $V_{op, i} = Var(\alpha_i)$
++    *   $V_{sh0, i} = Var(\mathbf{c}_{i, 0})$
++    *   $V_{sh>0, i} = Var(\{\mathbf{c}_{i, l}\}_{l > 0})$
++2.  **Aggregate into Feature Maps:** Project the variances of all $N$ primitives onto the image plane using the standard differentiable rasterization/splatting pipeline . Aggregate the variances per pixel to form six uncertainty feature maps $F_1, \dots, F_6$. For a pixel $u$, the value of the $k$-th feature map is the sum of the variances of the $k$-th parameter group for all Gaussians splatting to $u$:
++    $$ F_k(u) = \sum_{i \in \text{rasterized}(u)} V_{group_k, i} $$
++    where $group_k \in \{mean, scale, rotation, opacity, sh0, sh>0\}$ [S1, unofficial].
++3.  **Meta-Regression:** Feed the six feature maps $\{F_1, \dots, F_6\}$ into a regression model (e.g., a neural network) [S1, unofficial].
++4.  **Predict Uncertainty:** The regression model outputs the predicted pixel-wise uncertainty [S1, unofficial].
+ 
+ **Pseudocode:**
+ ```python
+-def regression_based_fisher_rf(gaussians, camera):
++def regression_based_fisherrf(gaussians, rasterizer, regression_model):
+     """
+-    Computes pixel-wise uncertainty using regression-based FisherRF.
++    gaussians: List of Gaussian primitives with parameters p, s, q, alpha, c_sh
++    rasterizer: Function that projects 3D Gaussians to 2D image plane
++    regression_model: A neural network taking 6 input channels and outputting uncertainty
++    """
++    # Step 1: Compute variances for each primitive
++    # Note: In practice, these variances are obtained from the optimizer's state 
++    # or accumulated gradients during training [S1, unofficial].
++    variances = []
++    for g in gaussians:
++        v_mean = compute_variance(g.p)
++        v_scale = compute_variance(g.s)
++        v_rot = compute_variance(g.q)
++        v_op = compute_variance(g.alpha)
++        v_sh0 = compute_variance(g.c_sh[0])
++        v_sh_high = compute_variance(g.c_sh[1:]) # All degrees > 0
++        variances.append({
++            'mean': v_mean,
++            'scale': v_scale,
++            'rotation': v_rot,
++            'opacity': v_op,
++            'sh0': v_sh0,
++            'sh_high': v_sh_high
++        })
++
++    # Step 2: Aggregate variances into 6 feature maps
++    # The rasterizer must support accumulating variance values, not just opacity/color
++    feature_maps = [0.0] * 6
++    for g in gaussians:
++        v = variances[g.index]
++        # Project variances to image plane
++        # This step assumes a custom rasterizer that accumulates variance sums
++        # similar to how it accumulates opacity and color
++        projected = rasterizer.project_variance_sum(g, v)
++        
++        # Add projected variance to the corresponding feature map channels
++        # Assuming projected is a tensor of shape (H, W, 6) or similar
++        feature_maps[0] += projected['mean']
++        feature_maps[1] += projected['scale']
++        feature_maps[2] += projected['rotation']
++        feature_maps[3] += projected['opacity']
++        feature_maps[4] += projected['sh0']
++        feature_maps[5] += projected['sh_high']
++
++    # Step 3: Feed feature maps into regression model
++    # Stack the 6 feature maps into a single tensor of shape (6, H, W)
++    input_tensor = torch.stack(feature_maps, dim=0)
+     
+-    Args:
+-        gaussians: List of Gaussian primitives, each with parameters:
+-                   - mean: (3,)
+-                   - scale: (3,)
+-                   - rotation: (4,) (quaternion)
+-                   - opacity: (1,)
+-                   - sh_coeffs: (L, 3) where L is the number of SH bands
+-        camera: Camera parameters for projection.
+-        
+-    Returns:
+-        uncertainty_map: (H, W) predicted uncertainty.
+-    """
+-    # Step 1: Compute variances for each Gaussian parameter
+-    # Note: The exact formula for variance is not specified in the sources.
+-    # It is assumed to be derived from the Fisher Information Matrix or gradients.
+-    variances = compute_parameter_variances(gaussians)
++    # Step 4: Predict uncertainty
++    predicted_uncertainty = regression_model(input_tensor)
+     
+-    # Step 2: Group variances into 6 categories
+-    # Group 1: Mean
+-    var_mean = variances['mean']
+-    
+-    # Group 2: Scale
+-    var_scale = variances['scale']
+-    
+-    # Group 3: Rotation
+-    var_rotation = variances['rotation']
+-    
+-    # Group 4: Opacity
+-    var_opacity = variances['opacity']
+-    
+-    # Group 5: SH Degree 0
+-    var_sh_0 = variances['sh_coeffs'][:, 0, :] # Assuming shape (L, 3)
+-    
+-    # Group 6: Higher Degree SH
+-    var_sh_high = variances['sh_coeffs'][:, 1:, :]
+-    
+-    # Step 3: Aggregate variances per primitive to form 6 feature maps
+-    # This involves projecting 3D variances to 2D screen space
+-    feature_map_mean = project_to_screen(var_mean, gaussians, camera)
+-    feature_map_scale = project_to_screen(var_scale, gaussians, camera)
+-    feature_map_rotation = project_to_screen(var_rotation, gaussians, camera)
+-    feature_map_opacity = project_to_screen(var_opacity, gaussians, camera)
+-    feature_map_sh_0 = project_to_screen(var_sh_0, gaussians, camera)
+-    feature_map_sh_high = project_to_screen(var_sh_high, gaussians, camera)
+-    
+-    # Step 4: Feed feature maps into regression model
+-    # The regression model architecture is not specified.
+-    # It is assumed to be a neural network that takes the 6 feature maps as input.
+-    input_features = [
+-        feature_map_mean,
+-        feature_map_scale,
+-        feature_map_rotation,
+-        feature_map_opacity,
+-        feature_map_sh_0,
+-        feature_map_sh_high
+-    ]
+-    
+-    # Step 5: Predict uncertainty
+-    uncertainty_map = regression_model(input_features)
+-    
+-    return uncertainty_map
++    return predicted_uncertainty
+ 
+-def compute_parameter_variances(gaussians):
+-    """
+-    Computes the variance of each Gaussian parameter.
+-    The exact method is not specified in the sources.
+-    """
+-    # Placeholder for variance computation logic
+-    # [G] In FisherRF, variances are typically the diagonal of the Fisher Information Matrix.
+-    # This function would compute the inverse of the Hessian or use gradient statistics.
+-    raise NotImplementedError("Variance computation method not specified in sources.")
+-
+-def project_to_screen(variance_map, gaussians, camera):
+-    """
+-    Projects 3D variance information to 2D screen space.
+-    """
+-    # Placeholder for projection logic
+-    # [G] This likely involves rasterizing the Gaussian primitives and accumulating
+-    # the variance contributions to each pixel, similar to alpha blending.
+-    raise NotImplementedError("Projection logic not specified in sources.")
++def compute_variance(param):
++    # [G] Placeholder for the specific variance calculation method.
++    # In the context of FisherRF, this typically refers to the diagonal 
++    # entries of the Fisher Information Matrix or the optimizer's 
++    # accumulated second-moment estimates.
++    return param.variance
+ ```
+ 
+-**Parameters:**
+-*   **Grouping Scheme:** The six groups are fixed as defined above, originating from the original Gaussian Splatting implementation [14].
+-*   **Regression Model:** The specific architecture (e.g., MLP, CNN) is not provided in the sources [S1, unofficial].
+-
+ **Edge Cases and Pitfalls:**
+-*   **Variance Computation:** The exact method for computing the parameter variances from the Fisher Information Matrix or gradients is not detailed [S1, unofficial].
+-*   **Projection:** The method for aggregating 3D variances into 2D feature maps is not specified [S1, unofficial].
+-
+-## Subtopics
+-
+-### FisherRF
+-The original method that sums all color parameter variances for direction-dependent uncertainty. It is the predecessor to this variant [S1, unofficial].
+-
+-### PRIMU
+-The method that uses a meta-regression model for uncertainty estimation. Regression-based FisherRF is modified to align with PRIMU's pipeline for fair comparison [S1, unofficial].
++*   **Variance Calculation:** The method assumes access to the variance of the Gaussian parameters. In standard 3DGS, these are not explicitly stored as simple scalars but are derived from the Fisher Information Matrix or optimizer states [S1, unofficial]. The exact computation of $Var(\cdot)$ for quaternion and SH coefficients requires careful handling of their non-Euclidean or high-dimensional nature [G].
++*   **Rasterization of Variance:** Standard splatting rasterizers accumulate opacity and color. A custom rasterizer is required to accumulate the *sum of variances* for each parameter group per pixel [S1, unofficial].
++*   **Grouping Consistency:** The grouping must strictly follow the six categories defined in the original GS implementation to ensure fair comparison with other methods [S1, unofficial].
+ 
+ ## Operating characteristics
+-*   **Time Complexity:** Not given in the sources.
+-*   **Memory Complexity:** Not given in the sources.
+-*   **Performance:** Used as a baseline for uncertainty estimation quality evaluation. Specific performance metrics are not provided in the sources [S1, unofficial].
+-*   **Strengths:** Aligns with the PRIMU pipeline, allowing for fair comparison of feature map quality for uncertainty estimation [S1, unofficial].
+-*   **Limitations:** Relies on a regression model, which may introduce additional computational overhead and complexity compared to direct variance summation [S1, unofficial].
++*   **Complexity:** The method adds the overhead of a regression model inference step on top of the standard rasterization. The rasterization step itself must be modified to accumulate six variance channels instead of just opacity and color, increasing memory bandwidth and compute slightly [S1, unofficial].
++*   **Performance:** No specific quantitative performance metrics (FPS, memory usage) are provided in the sources [S1, unofficial].
++*   **Strengths:** Aligns the uncertainty estimation pipeline with modern meta-regression approaches (like PRIMU), allowing for fair comparison of feature map quality [S1, unofficial]. Separates uncertainty sources by parameter type (e.g., position vs. color), potentially providing more granular uncertainty signals than the original FisherRF which sums all color variances [S1, unofficial].
++*   **Limitations:** Requires a custom rasterizer and a trained regression model, adding complexity compared to the direct summation method of original FisherRF [S1, unofficial].
+ 
+ ## Background
+-Regression-based FisherRF was introduced in the context of the PRIMU paper, which focuses on uncertainty estimation for novel views in Gaussian Splatting [S1, unofficial]. It was developed to provide a baseline for comparing uncertainty estimation methods by modifying the original FisherRF approach to use a meta-regression model, similar to the PRIMU method itself [S1, unofficial].
++*   **Origin:** Regression-based FisherRF was introduced in the study of Uncertainty Estimation (UE) for Gaussian Splatting, specifically in the context of the PRIMU method [S1, unofficial].
++*   **History:** It is a modification of the original FisherRF method [11], which is based on the Fisher information matrix of a Gaussian Splatting primitive with respect to the gradient of the rendering function [S1, unofficial]. The original FisherRF used the sum of color parameter variances (including all SH parameters) to estimate direction-dependent uncertainty [S1, unofficial].
++*   **Usage:** It is used as a baseline for UE scene separation studies and out-of-scene generalization experiments [S1, unofficial].
+ 
+ ## Sources

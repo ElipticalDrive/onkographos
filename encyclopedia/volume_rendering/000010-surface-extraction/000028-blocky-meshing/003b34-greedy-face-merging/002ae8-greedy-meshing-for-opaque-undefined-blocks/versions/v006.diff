@@ -1,0 +1,244 @@
+--- v005.md
++++ v006.md
+@@ -1,79 +1,161 @@
+ # Greedy Meshing for Opaque/Undefined Blocks
++
++
+ ## Overview
+-This method extends standard greedy face merging to handle voxel volumes containing opaque and undefined (empty/transparent) blocks, ensuring only exposed faces of opaque materials are meshed [G]. It differs from standard [Greedy Meshing](3519-greedy-meshing.md) by explicitly defining visibility logic for undefined block types, preventing internal face emission between opaque blocks and undefined space [G]. It builds on [Greedy face merging](8935-greedy-face-merging.md).
++This method extends the standard greedy face merging algorithm to handle voxel blocks that are either opaque or have undefined appearance, ensuring that only visible faces are meshed while maintaining correct UV and color attributes for rendering. It differs from [Greedy Meshing](3519-greedy-meshing.md) by explicitly managing the attribute arrays (UVs and colors) associated with the generated quads and enforcing strict visibility checks for blocks lacking defined appearance data.
+ 
+ ## How it works
+-**Inputs:** A 3D voxel grid $V$ of size $D_x \times D_y \times D_z$ [G]. Each voxel $V(x,y,z)$ holds a material ID [G]. An undefined/empty ID (typically $0$) represents non-opaque space [G]. A predicate `has_appearance(id)` returns true for renderable opaque materials [G].
+-**Outputs:** A list of quads, each defined by position, normal, width, height, material ID, and associated UV/color attributes [G].
++The method builds on [Greedy face merging](8935-greedy-face-merging.md). It processes the voxel volume to generate a mesh of quads, handling opaque and undefined blocks by validating appearance definitions and extending attribute arrays.
++
++**Inputs and Outputs:**
++- **Input:** A voxel volume where each cell has a material ID. A boundary policy (e.g., "air" or "solid") determines visibility at volume edges.
++- **Output:** A list of quads, each with an origin, normal, width, height, and associated UV and color data.
+ 
+ **Data Structures:**
+-*   **2D Slice Mask:** A 2D integer array `mask[D_t][D_b]` for the current sweep slice, storing material IDs of exposed faces or $0$ if not exposed/processed [G].
++- **Quads List:** Each element contains:
++  - `origin`: 3D vector $(x, y, z)$ representing the corner of the quad.
++  - `normal`: Integer $n \in \{0, 1, 2\}$ for X, Y, Z axes.
++  - `width`: Integer $w$.
++  - `height`: Integer $h$.
++  - `uvs`: Array of 4 UV pairs.
++  - `colors`: Array of 4 RGBA values.
++- **UVs Array:** Accumulates 4 UV coordinates per quad. Each UV is a pair $[u, v]$ where $u, v \in [0.0, 2.0]$.
++- **Colors Array:** Accumulates 4 color values per quad. Each color is a 4-tuple $[r, g, b, a]$.
+ 
+ **Steps:**
+-1.  **Initialize:** Set output mesh lists for positions, normals, UVs, and colors [G].
+-2.  **Sweep Normals:** Iterate over the three principal axes $n \in \{0, 1, 2\}$ (X, Y, Z) [S1, S7, S27, unofficial]. Let $t = (n + 1) \pmod 3$ and $b = (n + 2) \pmod 3$ be the tangent and bitangent axes [S1, S7, S27, unofficial].
+-3.  **Sweep Slices:** For each slice index $s$ from $0$ to $D_n - 1$:
+-    a.  **Construct 2D Mask:** Initialize `mask` of size $D_t \times D_b$ to $0$ [S1, S7, S27, unofficial].
+-    b.  **Visibility Check:** For each cell $(t, b)$ in the slice, determine the voxel coordinates $p$ where the $n$-component is $s$ [S1, S7, S27, unofficial]. Check neighbors $p \pm \hat{n}$ along the normal axis [S7, S13, S19, S27, unofficial]. A face is exposed if `has_appearance(V[p])` is true AND (`p_{neighbor}` is out of bounds OR `V[p_{neighbor}]` is undefined OR `!has_appearance(V[p_{neighbor}])`) [S7, S13, S19, S27, unofficial]. Boundary handling treats out-of-bounds neighbors as undefined [G]. If exposed, set `mask[t][b] = V[p]`; otherwise, set `mask[t][b] = 0` [S27, S31, unofficial].
+-    c.  **Greedy Expansion:** Iterate through `mask` in lexicographic order (row $t$, then column $b$) [S22, S27, unofficial]. Find the first cell $(t_0, b_0)$ where `mask[t_0][b_0] != 0` [S1, S27, unofficial]. Expand width $w$ starting at $1$ while $t_0 + w < D_t$, `mask[t_0 + w][b_0] == mask[t_0][b_0]`, and the cell is unprocessed [S1, S27, unofficial]. Expand height $h$ starting at $1$ while $b_0 + h < D_b$ and all cells in $[t_0, t_0 + w) \times [b_0, b_0 + h)$ match the material ID and are unprocessed [S1, S27, unofficial]. Emit a quad with origin $(t_0, b_0, s)$, normal $n$, width $w$, height $h$ [S27, unofficial]. Extend the mesh's UVs array with 4 sets of `[0.0; 2]` UV coordinates. Extend the mesh's colors array with 4 sets of `[0.0; 4]` color coordinates [S1, unofficial]. If `has_appearance` fails for the material ID, assert failure with the message "No appearance defined for block face" [S1, unofficial]. Mark all cells in the rectangle as processed by setting `mask` entries to $0$ to prevent double-counting [S21, S27, unofficial]. Advance scan cursor to $t_0 + w$.
+-
+-**Parameters:**
+-*   **Undefined ID:** The integer value representing empty/transparent space. Default: $0$ [G].
+-*   **Boundary Policy:** Voxels outside the grid bounds are treated as undefined [G].
+-
+-**Edge Cases and Pitfalls:**
+-*   Precision issues near boundaries are handled by the explicit out-of-bounds check [G].
+-*   Degenerate input (empty volume or all undefined blocks) results in zero quads [G].
+-*   The mask-based visited tracking ensures $O(1)$ per-cell processing without auxiliary 3D arrays [G].
++1. **Initialize Attribute Arrays:** Start with empty `uvs` and `colors` arrays.
++2. **Sweep and Visibility Check:** For each normal axis $n \in \{0, 1, 2\}$:
++   - Define tangent $t = (n + 1) \pmod 3$ and bitangent $b = (n + 2) \pmod 3$.
++   - Iterate through slices $s$ along the normal axis.
++   - For each cell $(t, b)$ in the slice, check if the face is exposed. A face is exposed if the voxel $V(s, t, b)$ differs from its neighbor $V(s \pm 1, t, b)$ or if the neighbor is out of bounds and the boundary policy dictates exposure.
++   - **Appearance Check:** If the voxel has no defined appearance, assert failure with the message "No appearance defined for block face" [S1, unofficial].
++   - If exposed, mark the cell in the 2D mask with the material's merge key.
++3. **Greedy Expansion:** Scan the 2D mask to find maximal rectangles of identical merge keys.
++   - For each maximal rectangle found with origin $(t_0, b_0)$, width $w$, and height $h$:
++     - Emit a quad with origin $(t_0, b_0, s)$, normal $n$, width $w$, and height $h$.
++     - **Extend UVs:** Append 4 UV coordinates to the `uvs` array. The coordinates are typically normalized to $[0.0, 2.0]$ to support texture tiling across the quad [S1, unofficial].
++     - **Extend Colors:** Append 4 color coordinates to the `colors` array. Each color is a 4-tuple $[r, g, b, a]$ [S1, unofficial].
++   - Mark the cells in the mask as processed to prevent double-counting.
+ 
+ **Pseudocode:**
+ ```python
+-def greedy_mesh_opaque_undefined(V, dims, has_appearance):
+-    Dx, Dy, Dz = dims
++def greedy_mesh_opaque_undefined(volume, dims, boundary_policy="air", merge_key=None):
++    """
++    volume: function (x, y, z) -> material_id
++    dims: tuple (Dx, Dy, Dz)
++    boundary_policy: "air" (default) or "solid"
++    merge_key: function (material_id, x, y, z) -> int. Default: identity.
++    """
++    if merge_key is None:
++        merge_key = lambda m, x, y, z: m
++
+     quads = []
+-    axes = [(0,1,2), (1,2,0), (2,0,1)] # (n, t, b)
+-    for n, t, b in axes:
+-        Dn, Dt, Db = dims[n], dims[t], dims[b]
+-        for s in range(Dn):
+-            mask = [[0]*Db for _ in range(Dt)]
+-            for tt in range(Dt):
+-                for bb in range(Db):
+-                    p = [0,0,0]; p[n]=s; p[t]=tt; p[b]=bb
++    uvs = []
++    colors = []
++
++    # Iterate over the 3 normal axes: 0=X, 1=Y, 2=Z
++    for n in range(3):
++        t = (n + 1) % 3  # Tangent axis
++        b = (n + 2) % 3  # Bitangent axis
++        dim_t, dim_b, dim_n = dims[t], dims[b], dims[n]
++        
++        # Mask stores the merge key if visible and unprocessed, else 0
++        mask = [0] * (dim_t * dim_b)
++        
++        # Iterate through each slice along the normal axis
++        for s in range(dim_n):
++            # 1. Build Visibility Mask for slice s
++            for y in range(dim_b):
++                for x in range(dim_t):
++                    coords = [0, 0, 0]
++                    coords[n] = s
++                    coords[t] = x
++                    coords[b] = y
++                    voxel_val = volume(*coords)
++                    
++                    # Check appearance definition
++                    if not has_appearance(voxel_val): # [G] Placeholder for appearance check
++                        raise Exception("No appearance defined for block face")
++                    
+                     exposed = False
++                    # Check both neighbors along the normal axis
+                     for dir in [-1, 1]:
+-                        p_nb = [p[0], p[1], p[2]]; p_nb[n] += dir
+-                        if not (0 <= p_nb[n] < Dn):
+-                            if has_appearance(V[p]):
+-                                exposed = True; break
++                        nb_s = s + dir
++                        if 0 <= nb_s < dim_n:
++                            nb_coords = coords.copy()
++                            nb_coords[n] = nb_s
++                            nb_val = volume(*nb_coords)
++                            if voxel_val != nb_val:
++                                exposed = True
++                                break
+                         else:
+-                            nb_val = V[p_nb[0]][p_nb[1]][p_nb[2]]
+-                            if has_appearance(V[p]) and (nb_val == 0 or not has_appearance(nb_val)):
+-                                exposed = True; break
++                            # Out of bounds neighbor
++                            if boundary_policy == "air":
++                                exposed = True  # Air neighbor implies exposed face
++                                break
++                            else:  # solid
++                                exposed = False  # Solid neighbor implies internal
++                                break
++                    
+                     if exposed:
+-                        mask[tt][bb] = V[p]
+-            for tt in range(Dt):
+-                for bb in range(Db):
+-                    if mask[tt][bb] == 0: continue
++                        mask[y * dim_t + x] = merge_key(voxel_val, *coords)
++                    else:
++                        mask[y * dim_t + x] = 0
++
++            # 2. Greedy Expansion on the 2D Mask
++            for y in range(dim_b):
++                for x in range(dim_t):
++                    idx = y * dim_t + x
++                    key = mask[idx]
++                    
++                    if key == 0:
++                        continue
++                    
++                    # Start of a new quad
+                     w = 1
+-                    while tt + w < Dt and mask[tt+w][bb] == mask[tt][bb]:
++                    # Expand width
++                    while x + w < dim_t and mask[y * dim_t + (x + w)] == key:
+                         w += 1
++                    
+                     h = 1
+-                    while bb + h < Db:
+-                        rect_ok = True
+-                        for r_tt in range(tt, tt+w):
+-                            for r_bb in range(bb, bb+h):
+-                                if mask[r_tt][r_bb] != mask[tt][bb]:
+-                                    rect_ok = False; break
+-                            if not rect_ok: break
+-                        if rect_ok: h += 1
+-                        else: break
+-                    quad_pos = [0,0,0]; quad_pos[n]=s; quad_pos[t]=tt; quad_pos[b]=bb
+-                    quads.append({"pos": quad_pos, "normal": n, "w": w, "h": h, "mat": mask[tt][bb]})
+-                    quads[-1]["uvs"] = [[0.0]*2 for _ in range(4)]
+-                    quads[-1]["colors"] = [[0.0]*4 for _ in range(4)]
+-                    for r_tt in range(tt, tt+w):
+-                        for r_bb in range(bb, bb+h):
+-                            mask[r_tt][r_bb] = 0
+-    return quads
++                    # Expand height
++                    while y + h < dim_b:
++                        row_match = True
++                        for k in range(w):
++                            if mask[(y + h) * dim_t + (x + k)] != key:
++                                row_match = False
++                                break
++                        if not row_match:
++                            break
++                        h += 1
++                    
++                    # Emit Quad
++                    origin = [0, 0, 0]
++                    origin[n] = s
++                    origin[t] = x
++                    origin[b] = y
++                    quads.append({
++                        'origin': origin,
++                        'normal': n,
++                        'width': w,
++                        'height': h
++                    })
++                    
++                    # Extend UVs with 4 sets of [0.0; 2] UV coordinates
++                    # [S1, unofficial]
++                    for _ in range(4):
++                        uvs.append([0.0, 2.0])
++                    
++                    # Extend Colors with 4 sets of [0.0; 4] color coordinates
++                    # [S1, unofficial]
++                    for _ in range(4):
++                        colors.append([0.0, 0.0, 0.0, 1.0])
++                    
++                    # Mark cells as processed (set to 0)
++                    for dy in range(h):
++                        for dx in range(w):
++                            mask[(y + dy) * dim_t + (x + dx)] = 0
++                            
++    return quads, uvs, colors
+ ```
+ 
+@@ -81,18 +163,11 @@
+ 
+ ### Chunk Neighbor Optimization
+-An optimization where chunks are made aware of their neighboring chunks to remove inner polygons that are never visible, solving the issue where neighboring chunks previously did not know about each other [S2, unofficial].
+-*   **Definition:** Chunks pass neighbor coordinates to each other during mesh generation to check visibility against adjacent chunk boundaries [S2, unofficial].
+-*   **Step:** Construct the world cube by cube. Pass the neighbor's coordinates (if one exists) to the current cube. Check against each of the cube's sides as it is created to determine visibility [S2, unofficial].
+-*   **Pitfall:** Unity restricts a mesh to approximately 65,000 vertices. A Minecraft-style chunk of 65,536 cubes exceeds this limit, so a single chunk cannot be made. The solution is to recombine meshes by stacking multiple chunks on top of each other [S2, unofficial].
++An optimization where chunks are made aware of their neighboring chunks to remove inner polygons that are never visible, solving the issue where neighboring chunks previously did not know about each other [S2, unofficial]. It constructs the world cube by cube, passing the neighbor's coordinates (if one exists) to the current cube and checking against each of the cube's sides as it is created to determine visibility [S2, unofficial]. A pitfall is that Unity restricts a mesh to approximately 65,000 vertices. A Minecraft-style chunk of 65,536 cubes exceeds this limit, so a single chunk cannot be made. The solution is to recombine meshes by stacking multiple chunks on top of each other [S2, unofficial].
+ 
+ ## Operating characteristics
+-*   **Time Complexity:** $O(D_x D_y D_z)$ per axis pass, with a constant factor depending on the average quad size. The greedy expansion is linear in the number of voxels if implemented with efficient visited tracking [G].
+-*   **Memory Complexity:** $O(D_t \times D_b)$ for the 2D mask per slice, plus $O(N_{quads})$ for the output mesh [G].
+-*   **Strengths:** Significantly reduces triangle count compared to per-voxel meshing. Handles undefined blocks correctly by culling internal faces [G].
+-*   **Limitations:** Does not handle transparency blending (only opaque blocks are meshed). Performance degrades if the volume has high surface complexity (many small exposed faces) [G].
+-*   **When to use:** When rendering large voxel worlds with opaque blocks and empty space, where draw call reduction is critical [G].
++Not given in the sources.
+ 
+ ## Background
+-This method is a variant of greedy meshing adapted for voxel engines like Minecraft, where "undefined" blocks (air) are distinct from opaque blocks [G]. The concept of chunk neighbor optimization was developed to address visibility issues between adjacent chunks in static world generation [S2, unofficial]. The specific handling of UVs and colors for opaque blocks is documented in the Infinigen project [S1, unofficial].
++Not given in the sources.
+ 
+ ## Sources

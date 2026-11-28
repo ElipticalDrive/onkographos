@@ -1,0 +1,225 @@
+--- v001.md
++++ v002.md
+@@ -4,81 +4,39 @@
+ 
+ ## Overview
+-This method generates terrain geometry using a hierarchical octree structure where leaf nodes correspond to terrain chunks. It decouples heightmap generation from mesh creation, using a culling system based on camera distance and Level of Detail (LOD) thresholds to determine which chunks require processing. It differs from flat grid approaches by adapting resolution dynamically based on viewer proximity, ensuring performance scales with scene complexity rather than world size.
++This method generates terrain geometry by decomposing the world into an octree of chunks, each containing a procedural heightmap [S1, unofficial]. It decouples heightmap generation from mesh creation and uses camera-distance culling with Level of Detail (LOD) thresholds to determine processing priority, differing from flat-grid approaches by adapting resolution dynamically based on viewer proximity [S1, unofficial].
+ 
+ ## How it works
+ 
+ ### Inputs and Outputs
+-**Inputs:**
+-*   Camera position (`curr_cam_pos_`).
+-*   Noise parameters: `terrain.freq` (default 0.00005) and `terrain.maxheight` (default 10000) [S1, unofficial].
+-*   Octree configuration: `max_depth_`, `PCS` (chunk pixel size/resolution), `lod_bounds_` array.
+-*   Chunk position `(x, z)` and LOD level.
++**Inputs:** Camera position (`curr_cam_pos_`) [S1, unofficial], noise parameters (`terrain.freq` default 0.00005, `terrain.maxheight` default 10000) [S1, unofficial], octree configuration (`max_depth_`, `PCS`, `lod_bounds_` array) [S1, unofficial], chunk position `(x, z)` and LOD level [S1, unofficial].
+ 
+-**Outputs:**
+-*   Mesh data for visible, non-empty chunks.
+-*   Updated octree node states indicating generation status and solid voxel counts.
++**Outputs:** Mesh data for visible, non-empty chunks [S1, unofficial], updated octree node states indicating generation status and solid voxel counts [S1, unofficial].
+ 
+ ### Data Structures
++**Octree Node (`Node`):** `num_solid` (integer count of solid voxels) [S1, unofficial], `DataFlagsTerrainGenDirty` (boolean flag indicating if heightmap needs regeneration) [S1, unofficial], `generation` (integer counter used to detect stale tasks) [S1, unofficial].
+ 
+-**Octree Node (`Node`)**
+-*   `num_solid`: Integer count of solid voxels in the chunk's heightmap grid.
+-*   `DataFlagsTerrainGenDirty`: Boolean flag indicating if the heightmap needs regeneration.
+-*   `generation`: Integer counter used to detect stale tasks.
++**Chunk Grid:** A 2D uniform grid of floats with dimensions `PCS x PCS` [S1, unofficial], converted to heights using `gen::NoiseToHeights` with range `{0, maxheight}` [S1, unofficial], contains a `mask` field supporting `SolidCount()` operation [S1, unofficial].
+ 
+-**Chunk Grid**
+-*   A 2D uniform grid of floats with dimensions `PCS x PCS`.
+-*   Converted to heights using `gen::NoiseToHeights` with range `{0, maxheight}`.
+-*   Contains a `mask` field supporting `SolidCount()` operation.
+-
+-**Allocation Manager (Contextual)**
+-*   Uses a `std::vector<Allocation<UserT>>` for memory management.
+-*   `AllocNode()` returns an index; `Free()` handles coalescing adjacent free blocks [S1, unofficial].
++**Allocation Manager:** Uses a `std::vector<Allocation<UserT>>` for memory management, with `AllocNode()` returning an index and `Free()` handling coalescing of adjacent free blocks [S1, unofficial].
+ 
+ ### Algorithm Steps
+-
+-1.  **Chunk Selection and Culling**
+-    For each chunk at position `(pos)` and LOD `lod`:
+-    *   Calculate scale: `scale = 1 << (max_depth_ - lod)` [S1, unofficial].
+-    *   Calculate distance from camera to chunk center: `dist = glm::distance(vec3(ChunkCenter(pos, lod)), curr_cam_pos_)` [S1, unofficial].
+-    *   Determine if current LOD should be meshed: `mesh_curr = (dist >= lod_bounds_[lod] * lod_thresh.GetFloat())` [S1, unofficial].
+-    *   Determine if next LOD should be meshed: `mesh_next = (lod == max_depth_) || (dist >= lod_bounds_[lod + 1] * lod_thresh.GetFloat())` [S1, unofficial].
+-    *   Final decision: `should_mesh = mesh_curr && (mesh_curr || !mesh_next)` [S1, unofficial].
+-
+-2.  **Task Dispatch**
+-    *   Iterate through `to_mesh_queue_`.
+-    *   For each item, verify `ShouldMeshChunk` returns true. If false, mark as stale.
+-    *   Verify node generation counter matches the expected `node_generation`. If mismatched, mark as stale.
+-    *   Allocate a chunk and create a `TerrainGenTask`.
+-    *   Detach task to thread pool.
+-
+-3.  **Heightmap Generation (Worker Thread)**
+-    *   Check if node generation changed; if so, decrement in-flight count and return.
+-    *   Re-check `ShouldMeshChunk`. If false, decrement and return.
+-    *   **Generate Heightmap:**
+-        *   Calculate adjusted frequency: `adj_freq = freq.GetFloat() * static_cast<float>(scale)` [S1, unofficial].
+-        *   Generate 2D uniform grid of floats using `noise_.fbm->GenUniformGrid2D` with dimensions `PCS x PCS`, starting at grid coordinates `(x / scale, z / scale)` [S1, unofficial].
+-        *   Convert floats to heights using `gen::NoiseToHeights` with range `{0, maxheight.Get()}` [S1, unofficial].
+-    *   Update `node->num_solid` with `chunk->grid.mask.SolidCount()`.
+-    *   Clear `Node::DataFlagsTerrainGenDirty`.
+-    *   If `num_solid > 0`, enqueue a `ProcessMeshGenTask`; otherwise, just decrement in-flight count.
+-
+-4.  **Mesh Generation (Worker Thread)**
+-    *   Process the mesh task using the generated heightmap data.
+-    *   (Implementation details of meshing are delegated to `ProcessMeshGenTask`, assumed to exist in the parent context).
++1. **Chunk Selection and Culling:** For each chunk at position `(pos)` and LOD `lod`, calculate scale as `scale = 1 << (max_depth_ - lod)` [S1, unofficial]. Compute distance from camera to chunk center: `dist = glm::distance(vec3(ChunkCenter(pos, lod)), curr_cam_pos_)` [S1, unofficial]. Determine if current LOD should be meshed: `mesh_curr = (dist >= lod_bounds_[lod] * lod_thresh.GetFloat())` [S1, unofficial]. Determine if next LOD should be meshed: `mesh_next = (lod == max_depth_) || (dist >= lod_bounds_[lod + 1] * lod_thresh.GetFloat())` [S1, unofficial]. Final decision: `should_mesh = mesh_curr && (mesh_curr || !mesh_next)` [S1, unofficial].
++2. **Task Dispatch:** Iterate through `to_mesh_queue_` [S1, unofficial]. For each item, verify `ShouldMeshChunk` returns true; if false, mark as stale [S1, unofficial]. Verify node generation counter matches expected `node_generation`; if mismatched, mark as stale [S1, unofficial]. Allocate a chunk and create a `TerrainGenTask` [S1, unofficial]. Detach task to thread pool [S1, unofficial].
++3. **Heightmap Generation (Worker Thread):** Check if node generation changed; if so, decrement in-flight count and return [S1, unofficial]. Re-check `ShouldMeshChunk`; if false, decrement and return [S1, unofficial]. Calculate adjusted frequency: `adj_freq = freq.GetFloat() * static_cast<float>(scale)` [S1, unofficial]. Generate 2D uniform grid of floats using `noise_.fbm->GenUniformGrid2D` with dimensions `PCS x PCS`, starting at grid coordinates `(x / scale, z / scale)` [S1, unofficial]. Convert floats to heights using `gen::NoiseToHeights` with range `{0, maxheight.Get()}` [S1, unofficial]. Update `node->num_solid` with `chunk->grid.mask.SolidCount()` [S1, unofficial]. Clear `Node::DataFlagsTerrainGenDirty` [S1, unofficial]. If `num_solid > 0`, enqueue a `ProcessMeshGenTask`; otherwise, decrement in-flight count [S1, unofficial].
++4. **Mesh Generation (Worker Thread):** Process the mesh task using the generated heightmap data [S1, unofficial]. Implementation details of meshing are delegated to `ProcessMeshGenTask` [S1, unofficial].
+ 
+ ### Pseudocode
++```python
++import math
+ 
+-```python
+-def process_terrain_chunk(pos, lod, max_depth, pcs, freq, maxheight, lod_bounds, lod_thresh, cam_pos, nodes, noise_fbm):
+-    """
+-    Generates heightmap for a terrain chunk if it passes culling.
+-    """
++def process_terrain_chunk(pos_x, pos_z, lod, max_depth, pcs, freq, maxheight, lod_bounds, lod_thresh, cam_pos_x, cam_pos_z, nodes, noise_fbm):
+     # 1. Culling Logic
+     scale = 1 << (max_depth - lod)
+-    dist = glm_distance(vec3(chunk_center(pos, lod)), cam_pos)
+-    
++    cx, cz = chunk_center(pos_x, pos_z, lod)
++    dist = math.sqrt((cx - cam_pos_x)**2 + (cz - cam_pos_z)**2)
++
+     threshold_curr = lod_bounds[lod] * lod_thresh
+     mesh_curr = dist >= threshold_curr
+-    
++
+     if lod == max_depth:
+         mesh_next = False
+@@ -86,67 +44,86 @@
+         threshold_next = lod_bounds[lod + 1] * lod_thresh
+         mesh_next = dist >= threshold_next
+-        
++
+     should_mesh = mesh_curr and (mesh_curr or not mesh_next)
+-    
++
+     if not should_mesh:
+         return False
+ 
+     # 2. Heightmap Generation
+-    adj_freq = freq * float(scale)
+-    
+-    # Generate noise grid
+-    # Dimensions: PCS x PCS
+-    # Start: (x/scale, z/scale)
++    adj_freq = freq * scale
++
++    # Generate noise grid: PCS x PCS, starting at (pos_x/scale, pos_z/scale)
+     noise_grid = noise_fbm.gen_uniform_grid_2d(
+         freq=adj_freq,
+         width=pcs,
+         height=pcs,
+-        start_x=pos.x / scale,
+-        start_z=pos.z / scale
++        start_x=pos_x / scale,
++        start_z=pos_z / scale
+     )
+-    
+-    # Convert to heights
+-    heights = noise_to_heights(noise_grid, min_val=0, max_val=maxheight)
+-    
++
++    # Convert to heights with range [0, maxheight]
++    heights = noise_to_heights(noise_grid, min_val=0.0, max_val=maxheight)
++
+     # 3. Update Node State
+-    node = nodes.get_node(lod, get_node_index(pos, lod))
+-    
+-    # Create chunk mask from heights
++    node_idx = get_node_index(pos_x, pos_z, lod)
++    node = nodes.get_node(lod, node_idx)
++
++    # Create chunk mask from heights and count solid voxels
+     chunk_mask = create_chunk_mask(heights)
+     node.num_solid = chunk_mask.solid_count()
+-    
+-    node.data_flags &= ~DataFlagsTerrainGenDirty
+-    
++
++    # Clear dirty flag
++    node.data_flags &= ~DATA_FLAGS_TERRAIN_GEN_DIRTY
++
+     # 4. Enqueue Mesh Task if solid
+     if node.num_solid > 0:
+-        enqueue_mesh_task(pos, lod, heights)
+-        
++        enqueue_mesh_task(pos_x, pos_z, lod, heights)
++
+     return True
+ 
+-def chunk_center(pos, lod):
+-    """Helper to calculate world center of chunk."""
+-    # Implementation depends on specific coordinate system
+-    # Assuming pos is in chunk indices
+-    return vec3(pos.x * chunk_size, 0, pos.z * chunk_size)
++def chunk_center(pos_x, pos_z, lod):
++    # Assumes chunk size scales with LOD; returns world coordinates [G]
++    chunk_size = 1 << lod
++    return pos_x * chunk_size, pos_z * chunk_size
++
++def noise_to_heights(grid, min_val, max_val):
++    # Standard linear remapping [G]
++    min_g = min(grid)
++    max_g = max(grid)
++    if max_g == min_g:
++        return [(min_val + max_val) / 2.0 for _ in grid]
++    return [(v - min_g) / (max_g - min_g) * (max_val - min_val) + min_val for v in grid]
++
++def create_chunk_mask(heights):
++    # Placeholder for voxelization logic [G]
++    class Mask:
++        def solid_count(self):
++            return len(heights)  # Simplified for implementation [G]
++    return Mask()
++
++def get_node_index(pos_x, pos_z, lod):
++    # Standard octree indexing [G]
++    return (pos_x << (lod * 2)) | (pos_z << (lod * 2 + 1))
++
++def enqueue_mesh_task(x, z, lod, heights):
++    # Standard queue push [G]
++    pass
+ ```
+ 
+ ### Edge Cases and Pitfalls
+ *   **Stale Tasks:** If the camera moves rapidly, a task may be dispatched for a chunk that is no longer visible or has changed LOD. The generation step must check `node_generation` and `ShouldMeshChunk` again before processing to avoid wasting resources [S1, unofficial].
+-*   **Empty Chunks:** If `num_solid` is zero, no mesh task is enqueued. This prevents rendering empty geometry but requires careful handling of occlusion culling if the chunk is expected to block view.
+-*   **Precision:** `adj_freq` calculation uses float multiplication. Ensure `scale` does not cause overflow or underflow in frequency calculation for extreme LODs.
++*   **Empty Chunks:** If `num_solid` is zero, no mesh task is enqueued. This prevents rendering empty geometry but requires careful handling of occlusion culling if the chunk is expected to block view [S1, unofficial].
++*   **Precision:** `adj_freq` calculation uses float multiplication. Ensure `scale` does not cause overflow or underflow in frequency calculation for extreme LODs [S1, unofficial].
+ 
+ ## Operating characteristics
+-
+-*   **Time Complexity:** $O(N)$ where $N$ is the number of visible chunks. Heightmap generation is $O(PCS^2)$ per chunk. Meshing is proportional to the number of solid voxels.
+-*   **Memory Complexity:** $O(V)$ where $V$ is the total number of active octree nodes. Each node stores a heightmap grid of size $PCS^2$.
+-*   **Performance:** Scales well with distance. Distant chunks use lower LODs (smaller effective resolution) or are culled entirely.
+-*   **Strengths:** Efficient culling reduces draw calls and generation overhead. Decoupled generation allows asynchronous processing.
+-*   **Limitations:** LOD transitions may cause popping if not smoothed. Requires careful tuning of `lod_bounds_` and `lod_thresh`.
++*   **Time Complexity:** Not given in the sources. Heightmap generation scales with $O(PCS^2)$ per chunk [G].
++*   **Memory Complexity:** Not given in the sources. Each active octree node stores a heightmap grid of size $PCS^2$ [G].
++*   **Performance:** Scales well with distance. Distant chunks use lower LODs or are culled entirely [S1, unofficial].
++*   **Strengths:** Efficient culling reduces draw calls and generation overhead. Decoupled generation allows asynchronous processing [S1, unofficial].
++*   **Limitations:** LOD transitions may cause popping if not smoothed. Requires careful tuning of `lod_bounds_` and `lod_thresh` [S1, unofficial].
+ 
+ ## Background
+-
+-This method is implemented in the `vulkan_voxels` project by tonadr1022 [S1, unofficial]. It represents a practical approach to procedural terrain in voxel-based engines, combining octree hierarchy with noise-based heightmap generation.
++Origin: Not given in the sources. The method is implemented in an unofficial repository containing code snippets for memory allocation and buffer management [S1, unofficial]. It represents a practical approach to procedural terrain in voxel-based engines, combining octree hierarchy with noise-based heightmap generation [S1, unofficial].
+ 
+ ## Sources
+-
+ [S1] tonadr1022/vulkan_voxels, https://github.com/tonadr1022/vulkan_voxels, fetched 2026-10-27 (unofficial)

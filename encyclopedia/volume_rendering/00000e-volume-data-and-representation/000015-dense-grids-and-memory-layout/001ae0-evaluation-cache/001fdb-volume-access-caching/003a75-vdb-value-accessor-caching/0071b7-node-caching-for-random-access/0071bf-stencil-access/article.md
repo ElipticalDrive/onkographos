@@ -1,0 +1,131 @@
+# Stencil Access
+
+Also called: Combined Sequential and Random Stencil, VDB Stencil Iterator
+
+## Overview
+Stencil Access provides efficient evaluation of a local neighborhood (support stencil) of grid points for Finite Difference computations, interpolation, or filtering [S1, unofficial]. It sets itself apart from sibling methods like DT-Grid and H-RLE by combining a single sequential iterator for the center point with accelerated random access via an `Accessor` (see [Node Caching for Random Access](22341-node-caching-for-random-access.md)), rather than grouping multiple sequential iterators [S1, unofficial]. This approach avoids the linear overhead scaling with stencil size found in those alternatives, amortizing retrieval costs through cache reuse [S1, unofficial].
+
+## How it works
+**Inputs:**
+*   A linear `offset` identifying the position of the stencil center within a node's bit mask.
+*   The node's signed origin $(x_0, y_0, z_0)$.
+*   The node's dimensions, defined by $\text{sLog2X}$, $\text{sLog2Y}$, and $\text{sLog2Z}$ (the base-2 logarithms of the node dimensions along each axis).
+
+**Outputs:**
+*   Global coordinates $(x, y, z)$ of the stencil center.
+*   Access to neighboring voxel values via the `Accessor`.
+
+**Data Structures:**
+*   **Iterator:** A sequential iterator over the node's bit mask (see [Evaluation Cache](12345-evaluation-cache.md) context) that yields the `offset` for the center point [S1, unofficial].
+*   **Accessor:** An instance of the node caching accessor (see [Node Caching for Random Access](22341-node-caching-for-random-access.md)) used to retrieve values at arbitrary global coordinates [S1, unofficial].
+
+**Parameters:**
+*   $(x_0, y_0, z_0)$: The signed origin of the node. For `LeafNodes`, this is encoded in `mFlags`. For `InternalNodes`, it is stored in `mX, mY, mZ` [S1, unofficial].
+*   $\text{sLog2X}, \text{sLog2Y}, \text{sLog2Z}$: Compile-time constants representing the logarithm of the node width, height, and depth [S1, unofficial].
+
+**Steps:**
+1.  Initialize a single sequential iterator to traverse the active voxels or tiles of the current node [S1, unofficial].
+2.  For each iteration, obtain the linear `offset` of the center point from the iterator [S1, unofficial].
+3.  Derive the global coordinates $(x, y, z)$ of the center point using the following bitwise formulas:
+    $$x = x_0 + (\text{offset} \gg \text{sLog2Y} + \text{sLog2Z})$$
+    $$n = \text{offset} \ \& \ ((1 \ll \text{sLog2Y} + \text{sLog2Z}) - 1)$$
+    $$y = y_0 + (n \gg \text{sLog2Z})$$
+    $$z = z_0 + (n \ \& \ (1 \ll \text{sLog2Z}) - 1)$$
+    where $n$ is an intermediate variable representing the offset within the $yz$-plane [S1, unofficial].
+4.  Use the `Accessor` to retrieve values for the remaining stencil points by computing their global coordinates relative to $(x, y, z)$ and querying the tree [S1, unofficial].
+5.  For very large stencils (e.g., convolution), employ multiple `Accessor` instances, each associated with a compact subset of the stencil, to decrease `LeafNode` cache misses [S1, unofficial].
+
+**Pseudocode:**
+> **Unverified code.** The code below did not pass a test run against a reference implementation, or no test fits it, so it may contain errors.
+
+```python
+def compute_stencil_center_global_coords(offset, x0, y0, z0, sLog2Y, sLog2Z):
+    """
+    Derives global coordinates (x, y, z) from a linear offset within a node.
+    
+    Args:
+        offset: Linear index within the node's bit mask.
+        x0, y0, z0: Signed origin of the node.
+        sLog2Y: Log2 of the node's Y dimension.
+        sLog2Z: Log2 of the node's Z dimension.
+        
+    Returns:
+        Tuple (x, y, z) representing global coordinates.
+    """
+    # Calculate x coordinate
+    # Note: The source formula for x uses sLog2Y + sLog2Z as the shift amount.
+    # This implies the offset is structured such that the upper bits correspond to X.
+    x = x0 + (offset >> (sLog2Y + sLog2Z))
+    
+    # Calculate intermediate n for Y and Z
+    # Mask out the X bits to get the offset within the YZ plane
+    mask_yz = (1 << (sLog2Y + sLog2Z)) - 1
+    n = offset & mask_yz
+    
+    # Calculate y coordinate
+    y = y0 + (n >> sLog2Z)
+    
+    # Calculate z coordinate
+    # Mask out the Y bits to get the Z offset
+    mask_z = (1 << sLog2Z) - 1
+    z = z0 + (n & mask_z)
+    
+    return (x, y, z)
+
+def access_stencil(center_offset, node_origin, accessor, stencil_offsets):
+    """
+    Accesses a stencil of points centered at the iterator's current position.
+    
+    Args:
+        center_offset: Linear offset of the center point from the sequential iterator.
+        node_origin: Tuple (x0, y0, z0) of the node's signed origin.
+        accessor: An instance of the VDB Accessor (see Node Caching for Random Access).
+        stencil_offsets: List of relative (dx, dy, dz) offsets for the stencil points.
+        
+    Returns:
+        List of values retrieved from the grid.
+    """
+    # Constants for node dimensions (assumed known or passed in)
+    # In a real implementation, these would be derived from the node type/size
+    sLog2Y = 4  # Example: 16x16x16 node
+    sLog2Z = 4  # Example: 16x16x16 node
+    sLog2X = 4  # Example: 16x16x16 node
+    
+    x0, y0, z0 = node_origin
+    
+    # 1. Compute global coordinates of the center point
+    cx, cy, cz = compute_stencil_center_global_coords(
+        center_offset, x0, y0, z0, sLog2Y, sLog2Z
+    )
+    
+    values = []
+    for dx, dy, dz in stencil_offsets:
+        # 2. Compute global coordinates for the stencil neighbor
+        nx = cx + dx
+        ny = cy + dy
+        nz = cz + dz
+        
+        # 3. Use the Accessor to retrieve the value
+        # The Accessor handles the tree traversal and node caching
+        val = accessor.getValue(nx, ny, nz)
+        values.append(val)
+        
+    return values
+```
+
+**Edge Cases and Pitfalls:**
+*   **Large Stencils:** For very large stencils, a single `Accessor` may cause frequent `LeafNode` cache misses, triggering expensive tree traversals. The solution is to partition the stencil into compact subsets and use multiple `Accessor` instances [S1, unofficial].
+*   **Coordinate Derivation:** The bitwise operations assume a specific linear layout of the node's bit mask. Incorrect usage of shift amounts or masks will result in invalid global coordinates [S1, unofficial].
+*   **Node Origin:** The origin $(x_0, y_0, z_0)$ must be correctly retrieved from the node's metadata (`mFlags` for `LeafNodes`, `mX, mY, mZ` for `InternalNodes`) [S1, unofficial].
+
+## Operating characteristics
+*   **Complexity:** Constant-time complexity for stencil access, amortizing overhead via cache reuse [S1, unofficial].
+*   **Performance:** In practice, VDB amortizes the overhead of retrieving multiple stencil elements thanks to cache reuse, whereas DT-Grid and H-RLE suffer from overhead scaling linearly with stencil size due to the synchronization of multiple iterators [S1, unofficial].
+*   **Strengths:** Efficient for both sequential and random stencil access; suitable for Finite Difference computations, interpolation, and filtering [S1, unofficial].
+*   **Limitations:** Performance may degrade for very large stencils if not partitioned into multiple `Accessor` instances [S1, unofficial].
+
+## Background
+Stencil access is a fundamental requirement for Finite Difference (FD) computations, which approximate differential operators with discrete differences of grid values in a local neighborhood [S1, unofficial]. Common applications include interpolation and filtering with convolution kernels [S1, unofficial]. The VDB method was introduced to address the limitations of prior approaches like DT-Grid and H-RLE, which grouped multiple sequential iterators, causing linear overhead scaling with stencil size [S1, unofficial]. VDB's approach leverages its sparse volume representation and node caching to provide a more efficient solution [S1, unofficial].
+
+## Sources
+[S1] VDB: High-Resolution Sparse Volumes with Dynamic Topology (Academy Award Winner) [pdf], http://www.museth.org/Ken/Publications_files/Museth_TOG13.pdf, fetched 2026-10-26 (unofficial)

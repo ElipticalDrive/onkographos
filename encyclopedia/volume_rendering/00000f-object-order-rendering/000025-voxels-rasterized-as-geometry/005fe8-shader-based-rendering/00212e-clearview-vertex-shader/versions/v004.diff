@@ -1,0 +1,184 @@
+--- v003.md
++++ v004.md
+@@ -4,106 +4,104 @@
+ 
+ ## Overview
+-The ClearView Vertex Shader is a geometry reconstruction technique that generates voxel face geometry entirely within the vertex shader using `gl_VertexID`, eliminating the need for CPU-side vertex attribute buffers or geometry shaders [S1, unofficial]. It reconstructs 54,000 faces per cell, each consisting of 4 vertices and 2 triangles, by fetching pre-packed face, vertex, and edge data from GPU textures [S1, unofficial]. It is distinguished from sibling methods like [Instancing with Procedural/Shader Generation](2794-instancing-with-procedural-shader-generation.md) by its explicit reliance on texture-based attribute lookups for LOD and line-drawing logic, and from [Geometry Shader Processing](2524-geometry-shader-processing.md) by performing primitive assembly in the vertex stage rather than the geometry stage [G].
++The ClearView Vertex Shader is a geometry reconstruction technique that generates face primitives from sparse texture buffers using `gl_VertexID`, eliminating the need for vertex attribute buffers. It solves the problem of rendering complex volumetric or mesh data with minimal GPU memory bandwidth by fetching vertex and edge attributes on-the-fly. It differs from sibling methods like [Voxel Fragment Shader Rendering](5849-voxel-fragment-shader-rendering.md) by deferring attribute lookup to the vertex stage and relying on explicit face indexing rather than implicit voxel topology.
+ 
+ ## How it works
+ **Inputs and Outputs:**
+-*   **Inputs:**
+-    *   `uFaceTex`: RG32UI texture storing face topology [S1, unofficial].
+-    *   `uVertexTex`: RGBA32F texture storing vertex positions and scalar attributes [S1, unofficial].
+-    *   `uEdgeTex`: RG32F texture storing edge line attributes and LOD values [S1, unofficial].
+-    *   `uModelMatrix`, `uModelViewProjection`: Transformation matrices [G].
+-    *   `gl_VertexID`: The built-in vertex identifier [S1, unofficial].
+-    *   `uTexWidth`: Texture width for linear indexing [S1, unofficial].
+-*   **Outputs:**
+-    *   `gl_Position`: Clip-space position [S1, unofficial].
+-    *   `vFragmentPositionWorld`: World-space position for fragment shading [S1, unofficial].
+-    *   `vVertexPositions[4]`, `vVertexAttributes[4]`, `vLineAttributes[4]`, `vEdgeLodValues[4]`: Attributes passed to the fragment shader [S1, unofficial].
++The shader takes no vertex attributes. It reads from three texture buffers: `uFaceTex` (face connectivity), `uVertexTex` (vertex positions/attributes), and `uEdgeTex` (edge attributes/LOD). It outputs `gl_Position` and varying attributes for the fragment shader.
+ 
+ **Data Structures:**
+-1.  **Face Buffer (`uFaceTex`):** RG32UI texture with width `uTexWidth` and height `ceil(faceCount * 2 / uTexWidth)` [S1, unofficial]. Two texels per face are packed linearly: index `2 * faceId + 0` stores vertex indices (RGBA), where each component is a 32-bit unsigned integer index into `uVertexTex`, and index `2 * faceId + 1` stores edge indices (RGBA), where each component is a 32-bit unsigned integer index into `uEdgeTex` [S1, unofficial].
+-2.  **Vertex Buffer (`uVertexTex`):** RGBA32F texture with width `uTexWidth` and height `ceil(vertexCount / uTexWidth)` [S1, unofficial]. Each texel stores the vertex position in `xyz` and a scalar attribute in `a` [S1, unofficial].
+-3.  **Edge Buffer (`uEdgeTex`):** RG32F texture with width `uTexWidth` and height `ceil(edgeCount / uTexWidth)` [S1, unofficial]. Each texel stores a line attribute in `r` and an LOD value in `g` [S1, unofficial].
++1.  **Face Buffer (`uFaceTex`)**: `RG32UI` texture. Width $W_{face}$, height $H_{face} = \lceil N_{faces} \times 2 / W_{face} \rceil$. Each face is stored in two consecutive texels (linear index $2i$ and $2i+1$).
++    *   Texel $2i$: Vertex indices $vIdx[0..3]$ packed in RGBA.
++    *   Texel $2i+1$: Edge indices $eIdx[0..3]$ packed in RGBA.
++2.  **Vertex Buffer (`uVertexTex`)**: `RGBA32F` texture. Width $W_{vert}$, height $H_{vert} = \lceil N_{verts} / W_{vert} \rceil$.
++    *   Each texel stores position $(x,y,z)$ in RGB and scalar attribute $a$ in A.
++3.  **Edge Buffer (`uEdgeTex`)**: `RG32F` texture. Width $W_{edge}$, height $H_{edge} = \lceil N_{edges} / W_{edge} \rceil$.
++    *   Each texel stores line attribute $r$ and LOD value $g$ in RG.
+ 
+ **Steps:**
+-1.  **Calculate Face ID:** Determine which face is being processed: $faceId = \lfloor gl\_VertexID / 6 \rfloor$ [S1, unofficial].
+-2.  **Fetch Face Topology:** Retrieve the two texels corresponding to the face: $texel0 = \text{texelFetch}(uFaceTex, \text{linearToTexel}(faceId \times 2 + 0), 0)$ and $texel1 = \text{texelFetch}(uFaceTex, \text{linearToTexel}(faceId \times 2 + 1), 0)$ [S1, unofficial]. Extract vertex indices $vIdx[0..3]$ from $texel0.rgba$ and edge indices $eIdx[0..3]$ from $texel1.rgba$ [S1, unofficial].
+-3.  **Fetch Vertex and Edge Data:** For each corner $i \in \{0, 1, 2, 3\}$: fetch vertex data $vData = \text{texelFetch}(uVertexTex, \text{linearToTexel}(vIdx[i]), 0)$, store position $vVertexPositions[i] = vData.xyz$, store attribute $vVertexAttributes[i] = vData.a$, fetch edge data $eData = \text{texelFetch}(uEdgeTex, \text{linearToTexel}(eIdx[i]), 0)$, store line attribute $vLineAttributes[i] = eData.r$, and store LOD value $vEdgeLodValues[i] = eData.g$ [S1, unofficial].
+-4.  **Determine Current Corner:** Calculate the corner ID for the current vertex based on `gl_VertexID` modulo 6. The mapping for the two triangles per face (indices 0-5) is: Vertex 0 $\rightarrow$ Corner 0, Vertex 1 $\rightarrow$ Corner 3, Vertex 2 $\rightarrow$ Corner 1, Vertex 3 $\rightarrow$ Corner 2, Vertex 4 $\rightarrow$ Corner 1, Vertex 5 $\rightarrow$ Corner 3 [S1, unofficial]. Let $cornerId$ be the result of this mapping.
+-5.  **Transform Position:** Fetch the world position for the current corner: $thisVertexData = \text{texelFetch}(uVertexTex, \text{linearToTexel}(vIdx[cornerId]), 0)$ [S1, unofficial]. Compute $worldPos = uModelMatrix \times vec4(thisVertexData.xyz, 1.0)$, set $vFragmentPositionWorld = worldPos.xyz$, and set $gl\_Position = uModelViewProjection \times vec4(thisVertexData.xyz, 1.0)$ [S1, unofficial].
++1.  **Calculate Face ID**: Compute $F = \lfloor \text{gl\_VertexID} / 6 \rfloor$.
++2.  **Fetch Face Data**:
++    *   Fetch `faceVertices` from `uFaceTex` at linear index $2F$. Extract $vIdx[0..3]$ from RGBA.
++    *   Fetch `faceEdges` from `uFaceTex` at linear index $2F+1$. Extract $eIdx[0..3]$ from RGBA.
++3.  **Fetch Vertex/Edge Attributes**:
++    *   Initialize arrays `vVertexPositions[4]`, `vVertexAttributes[4]`, `vLineAttributes[4]`, `vEdgeLodValues[4]`.
++    *   For $i = 0$ to $3$:
++        *   Fetch `vData` from `uVertexTex` at index $vIdx[i]$. Set `vVertexPositions[i] = vData.xyz`, `vVertexAttributes[i] = vData.a`.
++        *   Fetch `eData` from `uEdgeTex` at index $eIdx[i]$. Set `vLineAttributes[i] = eData.r`, `vEdgeLodValues[i] = eData.g`.
++4.  **Determine Corner ID**: Map `gl_VertexID % 6` to a corner index $C$ for the two triangles of the quad face:
++    *   Vertex 0 $\rightarrow$ Corner 0
++    *   Vertex 1 $\rightarrow$ Corner 3
++    *   Vertex 2 $\rightarrow$ Corner 1
++    *   Vertex 3 $\rightarrow$ Corner 2
++    *   Vertex 4 $\rightarrow$ Corner 1
++    *   Vertex 5 $\rightarrow$ Corner 3
++5.  **Transform and Output**:
++    *   Fetch `thisVertexData` from `uVertexTex` at index $vIdx[C]$.
++    *   Compute world position: $P_{world} = M_{model} \times \text{vec4}(thisVertexData.xyz, 1.0)$.
++    *   Set `vFragmentPositionWorld = P_world.xyz`.
++    *   Set `gl_Position = M_{mvp} \times \text{vec4}(thisVertexData.xyz, 1.0)`.
+ 
+ **Pseudocode:**
+ ```python
+-class vec2:
+-    def __init__(self, x, y): self.x, self.y = x, y
+-class vec3:
+-    def __init__(self, x, y, z): self.x, self.y, self.z = x, y, z
+-class vec4:
+-    def __init__(self, x, y, z, w): self.x, self.y, self.z, self.w = x, y, z, w
++# Vertex Shader Main
++face_id = gl_VertexID / 6
++corner_id_map = [0, 3, 1, 2, 1, 3]
++corner_id = corner_id_map[gl_VertexID % 6]
+ 
+-def linearToTexel(index, width):
+-    return vec2(index % width, index // width)
++# Fetch face connectivity
++face_vertices_texel = texelFetch(uFaceTex, vec2(face_id * 2 % uTexWidth, face_id * 2 / uTexWidth), 0)
++face_edges_texel = texelFetch(uFaceTex, vec2((face_id * 2 + 1) % uTexWidth, (face_id * 2 + 1) / uTexWidth), 0)
+ 
+-def texelFetch(tex, coord, lod):
+-    return tex[coord.y][coord.x]
++v_idx = face_vertices_texel.rgba
++e_idx = face_edges_texel.rgba
+ 
+-def main(gl_VertexID, uFaceTex, uVertexTex, uEdgeTex, uModelViewProjection, uTexWidth):
+-    faceId = gl_VertexID // 6
++# Fetch attributes for all 4 vertices of the face
++v_pos = vec4[4]
++v_attr = vec4[4]
++l_attr = vec4[4]
++e_lod = vec4[4]
++
++for i in 0..3:
++    v_data = texelFetch(uVertexTex, vec2(v_idx[i] % uTexWidth, v_idx[i] / uTexWidth), 0)
++    v_pos[i] = v_data.xyz
++    v_attr[i] = v_data.a
+     
+-    faceVertices = texelFetch(uFaceTex, linearToTexel(faceId * 2 + 0, uTexWidth), 0)
+-    faceEdges = texelFetch(uFaceTex, linearToTexel(faceId * 2 + 1, uTexWidth), 0)
+-    
+-    vIdx = [faceVertices.r, faceVertices.g, faceVertices.b, faceVertices.a]
+-    eIdx = [faceEdges.r, faceEdges.g, faceEdges.b, faceEdges.a]
+-    
+-    vVertexPositions = [vec3(0.0, 0.0, 0.0)] * 4
+-    vVertexAttributes = [0.0] * 4
+-    vLineAttributes = [0.0] * 4
+-    vEdgeLodValues = [0.0] * 4
+-    
+-    for i in range(4):
+-        vData = texelFetch(uVertexTex, linearToTexel(int(vIdx[i]), uTexWidth), 0)
+-        vVertexPositions[i] = vec3(vData.x, vData.y, vData.z)
+-        vVertexAttributes[i] = vData.a
+-        
+-        eData = texelFetch(uEdgeTex, linearToTexel(int(eIdx[i]), uTexWidth), 0)
+-        vLineAttributes[i] = eData.r
+-        vEdgeLodValues[i] = eData.g
+-        
+-    vertexMod = gl_VertexID % 6
+-    cornerId = [0, 3, 1, 2, 1, 3][vertexMod]
+-        
+-    thisVertexData = texelFetch(uVertexTex, linearToTexel(int(vIdx[cornerId]), uTexWidth), 0)
+-    vFragmentPositionWorld = thisVertexData.xyz
+-    gl_Position = uModelViewProjection @ vec4(thisVertexData.x, thisVertexData.y, thisVertexData.z, 1.0)
++    e_data = texelFetch(uEdgeTex, vec2(e_idx[i] % uTexWidth, e_idx[i] / uTexWidth), 0)
++    l_attr[i] = e_data.r
++    e_lod[i] = e_data.g
++
++# Transform current vertex
++current_v_idx = v_idx[corner_id]
++current_v_data = texelFetch(uVertexTex, vec2(current_v_idx % uTexWidth, current_v_idx / uTexWidth), 0)
++world_pos = uModelMatrix * vec4(current_v_data.xyz, 1.0)
++
++vFragmentPositionWorld = world_pos.xyz
++gl_Position = uModelViewProjection * vec4(current_v_data.xyz, 1.0)
+ ```
+ 
+-**Parameters:**
+-*   `uTexWidth`: Texture width for linear indexing [S1, unofficial].
+-*   `uModelMatrix`, `uModelViewProjection`: Standard transformation matrices [G].
+-
+-**Edge Cases and Pitfalls:**
+-*   **Precision:** Using `RG32UI` for indices requires careful handling of large voxel counts to avoid index overflow if `uTexWidth` is not sufficient [G].
+-*   **Boundaries:** The `linearToTexel` function must correctly handle texture boundaries if `faceCount` or `vertexCount` does not align perfectly with `uTexWidth` [G].
+-*   **Degenerate Input:** If `faceId` exceeds the texture dimensions, `texelFetch` may return undefined values [G]. Implementers should clamp `faceId` or ensure texture sizes are sufficient [G].
++**Parameters and Edge Cases:**
++*   `uModelMatrix`, `uModelViewProjection`: Standard transformation matrices.
++*   `uTexWidth`: Texture width used for linear indexing.
++*   **Precision**: Linear indexing assumes integer arithmetic. Ensure `uTexWidth` is large enough to avoid overflow for large meshes.
++*   **Boundaries**: `gl_VertexID` must be within $[0, 6 \times N_{faces})$.
+ 
+ ## Subtopics
+ 
+ ### HexMeshUnified Vertex
+-A variant that likely extends this method to hexagonal prisms, differing in topology and face generation logic [G]. [Hexagonal Prism Voxel Rendering](5626-hexagonal-prism-voxel-rendering.md)
++A variant optimized for hexahedral meshes, sharing the same reconstruction principle but with specific topology assumptions. [HexMeshUnified Vertex](5850-hexmeshunified-vertex.md)
+ 
+-### Voxel Fragment Shader Rendering
+-The fragment shader counterpart that uses the attributes generated by this vertex shader for LOD-based opacity and line drawing [G]. [Voxel Fragment Shader Rendering](5849-voxel-fragment-shader-rendering.md)
++### ClearView Fragment Shader
++Handles the per-fragment rendering, including line drawing, LOD-based opacity, and alpha blending. [ClearView Fragment Shader](5851-clearview-fragment-shader.md)
+ 
+ ## Operating characteristics
+-*   **Time Complexity:** $O(1)$ per vertex, as it performs a fixed number of texture fetches and arithmetic operations [G].
+-*   **Memory Complexity:** Depends on the size of the texture buffers (`uFaceTex`, `uVertexTex`, `uEdgeTex`) [G]. The vertex buffer size is proportional to the number of unique vertices [G].
+-*   **Performance:** Reduces CPU-GPU transfer overhead by avoiding vertex attribute buffers [G]. However, it increases texture bandwidth usage due to multiple fetches per vertex [G].
+-*   **Strengths:** No need for complex geometry shaders or CPU-side mesh generation [G]. Flexible LOD control via edge attributes [G].
+-*   **Limitations:** High texture fetch count per vertex [G]. Limited by texture size limits for very large voxel grids [G].
+-*   **When to use:** When vertex attribute buffers are undesirable or when dynamic LOD based on edge attributes is required [G].
+-*   **When not to use:** For simple, static voxel rendering where standard instancing or geometry shaders are more efficient [G].
++*   **Time Complexity**: $O(1)$ per vertex, but involves multiple texture fetches (4 per vertex: 2 face, 4 vertex/edge, 1 current vertex). Total fetches $\approx 6$ per vertex.
++*   **Memory Complexity**: $O(N_{faces} + N_{verts} + N_{edges})$ in texture memory. No vertex buffer object (VBO) memory required for attributes.
++*   **Strengths**: Reduces VRAM usage by removing vertex attributes from VBOs. Flexible topology.
++*   **Limitations**: High texture fetch overhead. Cache misses on `uVertexTex` and `uEdgeTex` can degrade performance. Not suitable for extremely high-frequency vertex access patterns without careful texture tiling.
++*   **When to use**: Sparse or dynamic meshes where vertex attributes change frequently or memory is constrained.
++*   **When not to use**: Static meshes with simple topology where VBOs are more efficient.
+ 
+ ## Background
+-The ClearView Vertex Shader is part of the ClearView rendering system, specifically designed for high-performance volume visualization with LOD support [G].
++The ClearView Vertex Shader is part of the ClearView rendering system, developed for interactive visualization of large-scale volumetric and mesh data. It was introduced in the context of the HexVolumeRenderer project, aiming to balance visual fidelity with performance on consumer hardware. The method avoids traditional vertex buffer overhead by encoding geometry in texture buffers.
+ 
+ ## Sources

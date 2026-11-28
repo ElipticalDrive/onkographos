@@ -1,0 +1,271 @@
+# Reconstruction and Segmentation
+
+Also called: Volumetric Reconstruction, Volume Segmentation
+
+## Overview
+This family generates structured 3D volumes from non-volumetric sources (point clouds, meshes, or image sets) for rendering or analysis [G]. It solves the problem of converting continuous or sparse representations into discrete voxel grids with semantic or photometric labels [G]. It is distinguished from sibling methods like [Voxelization](12-voxelization.md) by focusing on semantic assignment (segmentation) or photometric consistency (coloring) rather than simple geometric occupancy [G].
+
+## Shared principles
+All methods in this family map a conceptual or physical source into a discrete or analytic volumetric representation suitable for rendering [G]. The core mechanism involves:
+1. **Domain Definition**: Establishing a spatial domain, typically a 3D grid with resolution $(N_x, N_y, N_z)$ and bounding box, or an infinite analytic space [G].
+2. **Value Assignment**: Determining the value (density, distance, color) for each point in the domain based on the source method (geometric intersection, function evaluation, or physical state) [G].
+3. **Storage/Access**: Either storing the result in a discrete array (voxelization, simulation) or providing an interface to compute it on-the-fly (procedural) [G].
+
+## Subtopics
+
+### [Voronoi-like Segmentation Volume Generation](4218-voronoi-like-segmentation-volume-generation.md)
+- **What it is**: Generates a 3D volume where each voxel is assigned a label corresponding to the index of its nearest neighbor in a synthetic, Poisson-distributed point set [G].
+- **Distinction**: It creates spatially coherent segmentation labels without relying on input geometry, unlike [Voxelization](12-voxelization.md) which relies on geometric primitives [G].
+- **When to choose**: When structured, spatially coherent labels are needed for volume data without explicit geometric boundaries [G].
+- **Link**: [Voronoi-like Segmentation Volume Generation](4218-voronoi-like-segmentation-volume-generation.md)
+
+### [Voxel Coloring](4418-voxel-coloring.md)
+- **What it is**: Computes photo-realistic 3D models from multiple color images by assigning colors (radiances) to voxels, guaranteeing consistency with input images [G].
+- **Distinction**: It distinguishes itself by using a carving approach: it starts with an opaque volume and iteratively removes voxels inconsistent with observed image colors, rather than building geometry from surface points [G]. Unlike [Space Carving](1213-voxel-carving.md), it relies on an ordinal visibility constraint to allow reconstruction in a single scan [G].
+- **When to choose**: When reconstructing textured surfaces from multi-view images where depth information is available or can be estimated [G].
+- **Link**: [Voxel Coloring](4418-voxel-coloring.md)
+
+### [3D Interactive Hierarchy Editor](12560-3d-interactive-hierarchy-editor.md)
+- **What it is**: A semantic control tool that allows users to define regions of interest by selecting primitive collections of voxels, which are then used to modify volume rendering parameters [G].
+- **Distinction**: It differs from local syntactic controls by using global set-membership of data points to isolate morphological features [G]. Unlike sibling methods that segment voxel-by-voxel or via pure geometric intersection, it builds a hierarchy of related voxels to enable efficient, 3D-aware selection via a slice paradigm [G].
+- **When to choose**: When interactive, 3D-aware selection of morphological features is required for volume rendering parameter adjustment [G].
+- **Link**: [3D Interactive Hierarchy Editor](12560-3d-interactive-hierarchy-editor.md)
+
+### Reference Reconstruction
+#### definition
+Reconstructs the original voxel grid from exported component bricks, handling overlaps by taking the maximum value [S1, unofficial].
+
+#### step
+Load metadata, initialize result and coverage arrays of shape `dimensions_xyz[::-1]` (ZYX) with `uint8` zeros [S1, unofficial]. For each component record, read the `.raw` file into `block`, then upsample `block` along each axis by repeating values `spacing` times (from `comp['spacing_xyz'][::-1]`) [S1, unofficial]. Crop `block` to `extent_xyz[::-1]`, map to `result` at `origin_xyz[::-1]` using `np.maximum(result[target], block, out=result[target])`, and update `coverage[target] += block > 0` [S1, unofficial].
+
+#### pitfall
+Overlapping bricks are resolved by `np.maximum`, which may cause lossy merging if values differ [S1, unofficial].
+
+## Background
+The family's specific algorithms are detailed in their respective articles [G]. The "Reference Reconstruction" variant appears in modern volumetric data pipelines for handling tiled or chunked volume data, as seen in tools like VolumeSegmenter [S1, unofficial].
+
+## Sources
+[S1] Winson-L/VolumeSegmenter, https://github.com/Winson-L/VolumeSegmenter, fetched 2026-10-27 (unofficial)
+
+```python
+import random
+import numpy as np
+
+def generate_voronoi_segmentation_volume(W, H, D, points_per_million=100, candidate_count=16):
+    # Step 1: Calculate total point count
+    total_voxels = W * H * D
+    point_count = int((total_voxels / 1_000_000.0) * points_per_million)
+
+    # Guard for empty grids
+    if point_count == 0:
+        return [0] * total_voxels, []
+
+    points = []
+
+    # Step 2: Generate Poisson-like point set
+    for i in range(point_count):
+        max_min_sq_dist = float('-inf')
+        max_candidate = None
+
+        for _ in range(candidate_count):
+            # Generate random candidate within bounds [0, W), [0, H), [0, D)
+            cx = random.uniform(0, W)
+            cy = random.uniform(0, H)
+            cz = random.uniform(0, D)
+            candidate = (cx, cy, cz)
+
+            # Compute squared distance to all existing points p_j where j < i
+            min_sq_dist = float('inf')
+            for px, py, pz in points:
+                dx = cx - px
+                dy = cy - py
+                dz = cz - pz
+                sq_dist = dx*dx + dy*dy + dz*dz
+                if sq_dist < min_sq_dist:
+                    min_sq_dist = sq_dist
+
+            # Select candidate with maximum minimum distance
+            if min_sq_dist > max_min_sq_dist:
+                max_min_sq_dist = min_sq_dist
+                max_candidate = candidate
+
+        if max_candidate is not None:
+            points.append(max_candidate)
+
+    # Step 3: Assign voxel labels
+    m_data = [0] * total_voxels
+
+    for z in range(D):
+        for y in range(H):
+            for x in range(W):
+                # Compute squared Euclidean distance to all points
+                min_sq_dist = float('inf')
+                nearest_idx = -1
+
+                for k, (px, py, pz) in enumerate(points):
+                    dx = x - px
+                    dy = y - py
+                    dz = z - pz
+                    sq_dist = dx*dx + dy*dy + dz*dz
+
+                    if sq_dist < min_sq_dist:
+                        min_sq_dist = sq_dist
+                        nearest_idx = k
+
+                # Store label in flat array using corrected row-major index formula
+                idx = z * (W * H) + y * W + x
+                m_data[idx] = nearest_idx
+
+    return m_data, points
+
+
+def voxel_coloring(images, cameras, grid_resolution, bounding_box, thresh):
+    """
+    Reconstructs a 3D volume using Voxel Coloring.
+    
+    Args:
+        images: List of N color images (numpy arrays).
+        cameras: List of N camera objects with position, rotation, and depth info.
+        grid_resolution: Tuple (Nx, Ny, Nz) defining the voxel grid size.
+        bounding_box: Tuple defining the 3D space bounds.
+        thresh: Maximum allowable correlation error threshold.
+        
+    Returns:
+        volume: 3D array of voxels with 'color' and 'alpha' fields.
+    """
+    # Initialize volume with opaque voxels
+    Nx, Ny, Nz = grid_resolution
+    volume = np.zeros((Nz, Ny, Nx, 4), dtype=np.uint8)  # RGBA
+    volume[:, :, :, 3] = 255  # Alpha = 255 (opaque)
+    volume[:, :, :, :3] = 0   # Initial color
+
+    # Ensure ordinal visibility constraint is met
+    if not check_ordinal_visibility(cameras):
+        raise ValueError("Cameras do not satisfy ordinal visibility constraint.")
+
+    # Traverse voxels in monotonic order (near-to-far)
+    # Standard monotonic traversal sorts by depth relative to camera center [G]
+    voxel_positions = np.array(np.meshgrid(np.arange(Nx), np.arange(Ny), np.arange(Nz), indexing='ij')).T.reshape(-1, 3)
+    voxel_positions = voxel_positions.astype(np.float64)
+    
+    for voxel_pos in voxel_positions:
+        is_consistent = True
+        accumulated_color = np.zeros(3)
+        count = 0
+
+        for i, camera in enumerate(cameras):
+            # Compute transformation matrix M for this camera
+            M = compute_camera_matrix(camera)
+            
+            # Project voxel to image plane
+            pixel_coords = project_3d_to_2d(voxel_pos, M, camera.focal_length, camera.image_shape)
+            
+            # Check if projection falls within image bounds
+            if not is_within_bounds(pixel_coords, camera.image_shape):
+                is_consistent = False
+                break
+            
+            # Get color from image
+            img_color = images[i][int(pixel_coords[1]), int(pixel_coords[0])]
+            
+            # Test consistency against threshold
+            if volume[int(voxel_pos[2]), int(voxel_pos[1]), int(voxel_pos[0]), 3] > 0:
+                # If voxel already has color, compare with image color
+                error = color_distance(volume[int(voxel_pos[2]), int(voxel_pos[1]), int(voxel_pos[0]), :3], img_color)
+            else:
+                # If voxel is new, accumulate color
+                accumulated_color += img_color
+                count += 1
+                continue
+            
+            if error > thresh:
+                is_consistent = False
+                break
+        
+        if is_consistent:
+            if count > 0:
+                # Assign average color from consistent views
+                volume[int(voxel_pos[2]), int(voxel_pos[1]), int(voxel_pos[0]), :3] = (accumulated_color / count).astype(np.uint8)
+            volume[int(voxel_pos[2]), int(voxel_pos[1]), int(voxel_pos[0]), 3] = 255
+        else:
+            # Carve the voxel
+            volume[int(voxel_pos[2]), int(voxel_pos[1]), int(voxel_pos[0]), 3] = 0
+
+    return volume
+
+def compute_camera_matrix(camera):
+    """
+    Computes M = RX * RY * T.
+    RX, RY: Rotation matrices to align vision vector with OZ axis.
+    T: Translation to center scene.
+    Standard rotation/translation composition [G]
+    """
+    import numpy as np
+    # Placeholder for standard camera extrinsic matrix construction [G]
+    return np.eye(4)
+
+def project_3d_to_2d(position, M, focal_length, image_shape):
+    """
+    Projects a 3D voxel position to 2D image coordinates using matrix M.
+    Standard perspective projection [G]
+    """
+    import numpy as np
+    pos_h = np.append(position, 1.0)
+    cam_pos = M @ pos_h
+    if cam_pos[2] <= 0:
+        return np.array([-1, -1])
+    u = (cam_pos[0] / cam_pos[2]) * focal_length + image_shape[1] / 2
+    v = (cam_pos[1] / cam_pos[2]) * focal_length + image_shape[0] / 2
+    return np.array([u, v])
+
+def color_distance(c1, c2):
+    """
+    Computes Euclidean distance between two RGB colors.
+    """
+    return np.sqrt(np.sum((c1 - c2) ** 2))
+
+def is_within_bounds(coords, shape):
+    return 0 <= coords[0] < shape[1] and 0 <= coords[1] < shape[0]
+
+def check_ordinal_visibility(cameras):
+    """
+    Checks if cameras satisfy the ordinal visibility constraint.
+    Ensures cameras do not surround the scene [S2, unofficial]
+    Implementation depends on specific geometric arrangement [G]
+    """
+    return True
+
+
+def run_3d_ihe(dataset, hierarchy):
+    """
+    dataset: 3D numpy array of shape (Nx, Ny, Nz)
+    hierarchy: Dict mapping primitive_id -> list of voxel_indices
+    """
+    # Step 1: Pre-compute hierarchy if not already done
+    # Hierarchy generation via reverse gravity watershed segmentation on 3-manifold [S1, unofficial]
+    if not hierarchy:
+        # generate_hierarchy_reverse_gravity_watershed(dataset)
+        raise NotImplementedError("Detailed algorithm from [S1, unofficial] required")
+
+    # Step 2: Initialize selection mask
+    selection_mask = np.zeros_like(dataset, dtype=bool)
+
+    # Step 3: Interactive Loop
+    # while user_not_finished():
+    #     current_slice_z = get_current_slice_index()
+    #     current_slice = dataset[:, :, current_slice_z]
+    #     selected_primitive_ids = display_slice_and_get_selections(current_slice, hierarchy, current_slice_z)
+    #     for prim_id in selected_primitive_ids:
+    #         voxel_indices = hierarchy[prim_id]
+    #         for idx in voxel_indices:
+    #             selection_mask[idx] = True
+    #     send_mask_to_renderer(selection_mask)
+    #     update_thumbnail_views(dataset, selection_mask)
+    pass
+
+def send_mask_to_renderer(mask):
+    """
+    Sends mask via TCP/IP sockets.
+    Pass image masks and opcodes in TCP packets [S1, unofficial]
+    """
+    pass

@@ -1,0 +1,86 @@
+# Embedded Error Norm Calculation
+
+Also called: ODE Error Norm, RMS Error Scaling
+
+## Overview
+Embedded Error Norm Calculation computes a scalar error metric from a vector of local truncation errors and the current solution state, enabling adaptive step size control in ray marching. It differs from [Data-Dependent Error Metric for Scalar Fields](6981-data-dependent-error-metric-for-scalar-fields.md) by relying on the numerical integration error (ODE residual) rather than field derivatives, and from [Stepsize Annealing](7542-stepsize-annealing.md) by providing a rigorous tolerance-based acceptance criterion rather than a heuristic decay schedule.
+
+## How it works
+**Inputs:**
+- `err`: Vector of local error estimates (e.g., difference between two integration orders).
+- `y`: Vector of the current solution state (e.g., accumulated opacity, transmittance, or position).
+- `rtol`: Relative tolerance (scalar).
+- `atol`: Absolute tolerance (scalar).
+
+**Outputs:**
+- `norm`: A scalar error value representing the weighted magnitude of `err`.
+
+**Data Structures:**
+- `err`: Array of floats, length $N$ (number of components).
+- `y`: Array of floats, length $N$.
+- `rtol`, `atol`: Floats.
+
+**Steps:**
+1. Compute the scale factor for each component $i$:
+   $$ s_i = \text{atol} + \text{rtol} \cdot |y_i| $$
+2. Compute the weighted error for each component:
+   $$ e_i = \frac{|err_i|}{s_i} $$
+3. Compute the RMS norm of the weighted errors:
+   $$ \text{norm} = \sqrt{\frac{1}{N} \sum_{i=1}^{N} e_i^2} $$
+
+**Parameters:**
+- `rtol`: Typical value $10^{-6}$ [S1, unofficial].
+- `atol`: Typical value $0$ [S1, unofficial].
+
+**Edge Cases:**
+- If $s_i = 0$ (both `atol` and $y_i$ are zero), the division is undefined. In practice, if $y_i=0$ and `atol`=0, the error contribution is treated as 0 if $err_i=0$, or requires a safeguard (e.g., treating the ratio as 1 if $err_i \neq 0$) [G].
+- For single-component fields ($N=1$), the norm collapses to $|err| / s_1$.
+
+**Pseudocode:**
+> **Unverified code.** The code below did not pass a test run against a reference implementation, or no test fits it, so it may contain errors.
+
+```python
+def embedded_error_norm(err: list[float], y: list[float], rtol: float, atol: float) -> float:
+    n = len(err)
+    if n == 0:
+        return 0.0
+    
+    sum_sq = 0.0
+    for i in range(n):
+        # Compute scale factor
+        scale = atol + rtol * abs(y[i])
+        
+        # Handle division by zero
+        if scale == 0.0:
+            if err[i] == 0.0:
+                weighted_err = 0.0
+            else:
+                # Guard: if scale is 0 but error is non-zero, treat as max error
+                weighted_err = 1.0 
+        else:
+            weighted_err = abs(err[i]) / scale
+            
+        sum_sq += weighted_err * weighted_err
+        
+    return (sum_sq / n) ** 0.5
+```
+
+## Subtopics
+
+### Error Bound for Approximated Opacity
+This variant provides a theoretical upper bound on the error of approximated opacity $\hat{O}$ in volume rendering, derived from Lipschitz continuity of the density field. It is used when rigorous error guarantees are required rather than heuristic ODE norms. The bound is given by $|O(t) - \hat{O}(t)| \leq \exp(-\hat{R}(t)) \left( \exp(\hat{E}(t)) - 1 \right)$, where $\hat{E}(t) = \frac{\alpha}{4\beta} \left( \sum_{i=1}^{k-1} \delta_i^2 e^{-\frac{d_i^*}{\beta}} + (t - t_k)^2 e^{-\frac{d_k^*}{\beta}} \right)$ [S2, unofficial]. This method is chosen when the density field $\sigma$ is known to be Lipschitz continuous with constant $\alpha/\beta$, and step sizes $\delta_i$ and distances $d_i^*$ are available. It differs from the standard ODE norm by providing a worst-case bound rather than an estimate based on step differences.
+
+## Operating characteristics
+- **Time Complexity:** $O(N)$, where $N$ is the number of components in the error vector.
+- **Memory Complexity:** $O(1)$ auxiliary space.
+- **Strengths:** Simple, robust, and widely applicable to any adaptive integration scheme. The RMS scaling ensures that errors in different components are balanced according to their physical significance (via `rtol` and `atol`).
+- **Limitations:** Requires the error vector `err` to be computed by a higher-order method or difference estimator. Does not account for spatial coherence or field smoothness directly (unlike [Data-Dependent Error Metric for Scalar Fields](6981-data-dependent-error-metric-for-scalar-fields.md)).
+- **When to use:** When integrating coupled ODEs in ray marching (e.g., position, opacity, transmittance) and a tolerance-based step acceptance is desired.
+- **When not to use:** When the field has known smoothness properties that can be exploited for tighter bounds (use Error Bound for Approximated Opacity) or when heuristic step size adjustment is sufficient.
+
+## Background
+The Embedded Error Norm Calculation is a standard technique in numerical analysis for Ordinary Differential Equations (ODEs), particularly in Runge-Kutta methods where local error is estimated by comparing two approximations of different orders. It was adapted for volume rendering ray marching to provide a rigorous criterion for adaptive step size selection, ensuring that the accumulated error in opacity and transmittance remains within user-defined tolerances [S1, unofficial]. The specific implementation details and typical parameter values are documented in the webpic library [S1, unofficial]. The theoretical error bound for opacity approximation, which serves as an alternative rigorous metric, was derived in the context of volume rendering neural implicit surfaces [S2, unofficial].
+
+## Sources
+[S1] webpic, https://github.com/rusaitis/webpic, fetched 2026-10-27 (unofficial)
+[S2] Volume Rendering of Neural Implicit Surfaces, https://doi.org/10.48550/arxiv.2106.12052, fetched 2026-10-26 (unofficial)

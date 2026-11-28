@@ -1,0 +1,117 @@
+# Supplementary Point Addition for Sparse Point Clouds
+
+
+## Overview
+Supplementary Point Addition is a densification technique designed to compensate for the sparsity of 3D Gaussians at the far end of scenes with large depth of field, where Structure-from-Motion (SfM) extraction is poor due to defocus blur [S1]. It differs from its siblings by explicitly injecting synthetic points into empty or sparse regions after a fixed number of training iterations, rather than relying on gradient-based densification or geometric replication on tangent planes [S1].
+
+## How it works
+**Inputs:**
+*   Existing point cloud $P_{\text{existing}}$ with positions and colors [S1].
+*   Training iteration counter $t$ [S1].
+*   Hyperparameters: $N_{st}$ (start iteration), $N_p$ (number of points), $K$ (KNN neighbors), $t_d$ (distance threshold) [S1].
+
+**Outputs:**
+*   Updated point cloud $P_{\text{new}} = P_{\text{existing}} \cup P_{\text{supp}}$, where $P_{\text{supp}}$ are the newly added points [S1].
+
+**Data Structures:**
+*   $P_{\text{existing}}$: List of points, each with position $\mathbf{x} \in \mathbb{R}^3$ and color $\mathbf{c} \in \mathbb{R}^3$ [S1].
+*   $P_{\text{supp}}$: List of new points with position $\mathbf{x}$ and interpolated color $\mathbf{c}_p$ [S1].
+
+**Steps:**
+1.  **Check Start Condition:** If current iteration $t < N_{st}$, terminate without adding points [S1].
+2.  **Determine Bounds:** Calculate the minimum ($\alpha$) and maximum ($\beta$) coordinate values across all dimensions of $P_{\text{existing}}$ [S1].
+3.  **Sample Positions:** Generate $N_p$ new points $P_{\text{raw}}$ by sampling each coordinate independently from a uniform distribution $U(\alpha, \beta)$ [S1].
+4.  **Interpolate Colors:** For each new point $\mathbf{x}_{\text{new}} \in P_{\text{raw}}$, find the $K$-nearest neighbors ($P_{\text{knn}}$) within $P_{\text{existing}}$ based on Euclidean distance, and assign the interpolated color $\mathbf{c}_p$ from $P_{\text{knn}}$ [S1].
+5.  **Filter by Distance:** For each new point $\mathbf{x}_{\text{new}}$, compute its distance $d_{\text{min}}$ to the nearest neighbor in $P_{\text{existing}}$. If $d_{\text{min}} > t_d$, discard $\mathbf{x}_{\text{new}}$; otherwise, add it to $P_{\text{supp}}$ [S1].
+6.  **Merge:** Update the point cloud: $P_{\text{new}} = P_{\text{existing}} \cup P_{\text{supp}}$ [S1].
+
+**Pseudocode:**
+> **Unverified code.** The code below did not pass a test run against a reference implementation, or no test fits it, so it may contain errors.
+
+```python
+def supplementary_point_addition(existing_points, current_iteration, Nst, Np, K, td):
+    """
+    Adds supplementary points to the existing point cloud if the current iteration
+    has reached the start threshold Nst.
+    
+    Args:
+        existing_points: List of dicts with 'pos' (list [3]) and 'color' (list [3]).
+        current_iteration: Integer, current training step.
+        Nst: Integer, start iteration for adding points.
+        Np: Integer, number of points to sample.
+        K: Integer, number of neighbors for KNN color interpolation.
+        td: Float, distance threshold to discard points.
+        
+    Returns:
+        Updated list of points.
+    """
+    import random
+    
+    # Step 1: Check Start Condition
+    if current_iteration < Nst:
+        return existing_points
+
+    # Step 2: Determine bounds
+    positions = [p['pos'] for p in existing_points]
+    min_coords = [min(p[i] for p in positions) for i in range(3)]
+    max_coords = [max(p[i] for p in positions) for i in range(3)]
+    
+    # Step 3: Sample positions uniformly within the bounding box
+    new_positions = [[random.uniform(min_coords[i], max_coords[i]) for i in range(3)] for _ in range(Np)]
+    
+    new_points = []
+    
+    for x_new in new_positions:
+        # Step 4: Find K nearest neighbors and interpolate color
+        distances = [((x_new[0]-p['pos'][0])**2 + (x_new[1]-p['pos'][1])**2 + (x_new[2]-p['pos'][2])**2)**0.5 for p in existing_points]
+        sorted_indices = sorted(range(len(distances)), key=lambda k: distances[k])
+        k_indices = sorted_indices[:K]
+        k_colors = [existing_points[idx]['color'] for idx in k_indices]
+        
+        # Interpolate color. Source does not specify weighting formula [S1].
+        # [G] Standard practice uses inverse distance weighting or uniform averaging.
+        c_p = [sum(c[i] for c in k_colors) / K for i in range(3)]
+        
+        # Step 5: Check distance threshold
+        min_dist = distances[k_indices[0]]
+        
+        if min_dist <= td:
+            new_points.append({'pos': x_new, 'color': c_p})
+            
+    # Step 6: Merge
+    return existing_points + new_points
+```
+
+**Parameters:**
+*   $N_{st}$: The iteration number at which supplementary point addition begins. Value: 2,500 [S1].
+*   $N_p$: The number of supplementing points. Value: Proportional to the extent of the point cloud, at most 200,000 [S1].
+*   $K$: The number of neighbors for KNN interpolation. Value: 4 [S1].
+*   $t_d$: The minimum distance threshold for discarding points. Value: 2 [S1].
+
+**Edge Cases and Pitfalls:**
+*   **Empty Point Cloud:** If $P_{\text{existing}}$ is empty, bounds $\alpha, \beta$ are undefined. The method assumes a non-empty SfM cloud exists [S1].
+*   **Fixed Threshold:** The distance threshold $t_d=2$ is a fixed value defined in the source [S1]. Its unit depends on the scene scale, but the source does not specify dynamic scaling adjustments [S1].
+*   **Color Interpolation:** The source cites KNN [29] but does not specify the interpolation formula [S1].
+
+## Subtopics
+
+### [Distance-Aware Replication on Tangent-planes (DART)](12502-distance-aware-replication-on-tangent-planes-dart.md)
+A geometry-only initialization augmentation that replicates points on local tangent planes, targeting sparsely seeded regions peripherally. It is deterministic and relies on geometric relationships rather than uniform sampling.
+
+### [Hybrid Volume-based Densification](15407-hybrid-volume-based-densification.md)
+Uses a continuous neural radiance field (MLP) to predict density and position for filling large voids where no initial point cloud exists, differing from the uniform sampling approach.
+
+## Operating characteristics
+*   **Time Complexity:** $O(N_p \cdot N_{\text{existing}})$ for naive nearest-neighbor search, or $O(N_p \log N_{\text{existing}})$ with spatial indexing [G].
+*   **Memory Complexity:** $O(N_p)$ for storing the new points [S1].
+*   **Performance:** The method is applied once after $N_{st}=2,500$ iterations [S1]. It increases the primitive count by up to 200,000 points [S1].
+*   **Strengths:** Effectively compensates for sparsity in defocus blurry scenes where SfM fails at far distances [S1].
+*   **Limitations:** Adds points uniformly, which may not align perfectly with scene geometry compared to tangent-plane methods. The fixed threshold $t_d=2$ is scene-scale dependent but not dynamically adjusted in the source [S1].
+*   **When to Use:** Defocus blurry scenes with large depth of field where SfM extraction is poor at the far end [S1].
+*   **When Not to Use:** Scenes with clear SfM initialization, as the technique is specifically designed to compensate for poor extraction [S1].
+
+## Background
+The method was introduced in the context of Deblurring 3D Gaussian Splatting to address the issue of sparse point clouds in defocus blurry scenes [S1]. Standard SfM techniques struggle to extract points on the far end of scenes with large depth of field, leading to incomplete 3D Gaussian representations [S1]. The technique is part of a broader effort to improve initialization for 3DGS in challenging imaging conditions [S1].
+
+## Sources
+[S1] Deblurring 3D Gaussian Splatting, https://doi.org/10.1007/978-3-031-73636-0_8, fetched 2026-10-26

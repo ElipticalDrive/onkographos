@@ -1,0 +1,178 @@
+--- v002.md
++++ v003.md
+@@ -4,79 +4,97 @@
+ 
+ ## Overview
+-A rendering strategy that combines volume rendering with a rasterized proxy mesh to boost speed by determining a rough distance to the object [S1]. It enables real-time performance on consumer hardware by using the surface mesh to guide volume sampling, significantly reducing the number of samples required compared to pure volume methods [S1].
++A rendering strategy combining volume rendering with a rasterized proxy mesh to boost speed by determining a rough distance to the object [S1]. It enables real-time performance on consumer hardware by reducing the number of volume samples required per pixel [S1]. Unlike pure volume rendering, it uses surface geometry to guide sampling; unlike pure surface rendering, it retains volumetric appearance details [S1].
+ 
+ ## How it works
+ **Inputs:**
+-*   A reconstructed density field (e.g., from a neural radiance field or voxel grid).
+-*   Camera parameters (position, orientation, intrinsics).
+-*   A sampling interval parameter $\Delta t$.
++- A reconstructed density field (implicit volume) [S1].
++- Camera parameters (position, orientation, intrinsics) [S1].
++- A cone-casting configuration (pixel footprint) [S1].
+ 
+ **Outputs:**
+-*   A rendered image pixel color.
++- Final pixel color [S1].
+ 
+ **Data Structures:**
+-*   **Proxy Mesh:** A triangle mesh generated from the density field.
+-    *   *Generation:* Marching Cubes [S1] applied to the density field, followed by mesh decimation [S1].
+-    *   *Properties:* High-fidelity quality, capturing complicated structure details [S1].
+-*   **Cone:** Defined by the camera pixel footprint and the ray direction.
+-*   **Sampling Spheres:** Uniformly distributed spheres used to sample the volume along the ray.
++- **Proxy Mesh:** A triangle mesh generated from the density field.
++  - *Generation:* Marching Cubes applied to the density field, followed by mesh decimation [S1].
++  - *Properties:* High-fidelity quality, capturing complicated structure details [S1].
++- **Sampling Interval:** Defined by $\Delta t$ [S1].
+ 
+ **Steps:**
+-1.  **Proxy Mesh Generation:** Generate the proxy mesh from the density field using Marching Cubes and decimation [S1].
+-2.  **Ray-Cone Intersection:** For each pixel, define a cone originating from the camera center.
+-3.  **Surface Hit Detection:** Rasterize the proxy mesh to find the hit point on the surface for the central axis of the cone [S1]. Let this hit point be $P_{hit}$ and the distance from the camera to $P_{hit}$ be $d_{hit}$ [S1].
+-4.  **Volume Sampling Interval Definition:** Define a sampling interval of $2\Delta t$ centered around $P_{hit}$ [S1].
+-5.  **Sphere Sampling:** Uniformly sample spheres within the distance $\Delta t$ from $P_{hit}$ along the central axis of the cone [S1]. This yields a total sampling interval of $2\Delta t$ [S1].
+-6.  **Volume Integration:** Evaluate the volume density and color at the centers of these sampled spheres and integrate them along the ray to produce the final pixel color [S1].
++1. **Proxy Mesh Generation:** Generate a proxy mesh by applying marching cubes on the reconstructed density field followed by mesh decimation [S1].
++2. **Cone Axis Hit Detection:** For each pixel, define the central axis of the viewing cone. Rasterize the proxy mesh to obtain the hit point on the surface for this central axis [S1].
++3. **Sphere Sampling:** Uniformly sample spheres within a distance of $\Delta t$ from the hit point along the central axis of the cone [S1].
++   - This yields a $2\Delta t$ sampling interval centered on the surface hit [S1].
++   - The occupied area of these sampling spheres connects the rendering distance and resolution, preventing blurring in close-up views and aliasing in distant views [S1].
++4. **Volume Rendering:** Evaluate the volume density and radiance at the sampled sphere locations using the underlying radiance field (e.g., Tri-MipRF) [S1].
++5. **Compositing:** Composite the sampled values along the cone axis to produce the final pixel color [S1].
++
++**Parameters:**
++- $\Delta t$: Sampling distance parameter. Typical values are not explicitly given in the sources, but the method relies on it to define the $2\Delta t$ interval [S1].
++- Mesh Decimation Level: Not specified, but required to balance proxy mesh fidelity and rasterization speed [S1].
++
++**Edge Cases and Pitfalls:**
++- **Precision:** The method relies on accurate rasterization of the proxy mesh to find the central axis hit point. Errors here shift the sampling interval [S1].
++- **Boundaries:** The proxy mesh must accurately represent the object's boundary to ensure the sampling interval is correctly positioned relative to the volume [S1].
++- **Degenerate Input:** If the density field is empty or the proxy mesh fails to generate (e.g., no isosurface), the method cannot proceed [G].
+ 
+ **Pseudocode:**
+ ```python
+-def render_pixel(camera, proxy_mesh, density_field, delta_t):
+-    # 1. Define the ray cone for the current pixel
+-    ray_origin = camera.position
+-    ray_direction = camera.get_ray_direction(pixel_uv)
++def hybrid_volume_surface_render(camera, proxy_mesh, density_field, delta_t):
++    """
++    Render a frame using hybrid volume-surface strategy.
+     
+-    # 2. Rasterize proxy mesh to find the hit point on the central axis
+-    # This is an efficient GPU rasterization step
+-    hit_point, distance_hit = rasterize_mesh_hit(proxy_mesh, ray_origin, ray_direction)
++    Args:
++        camera: Camera object with position, orientation, and intrinsics.
++        proxy_mesh: Triangle mesh generated from density field.
++        density_field: Implicit function or grid providing density/radiance.
++        delta_t: Sampling distance parameter.
++        
++    Returns:
++        Image buffer.
++    """
++    image = create_empty_image(camera.resolution)
+     
+-    # 3. Determine sampling range
+-    # Sample spheres within distance delta_t from hit_point
+-    # This yields a 2*delta_t sampling interval
+-    start_dist = distance_hit - delta_t
+-    end_dist = distance_hit + delta_t
+-    
+-    # 4. Uniformly sample spheres along the ray within the interval
+-    # The number of samples depends on the desired density of spheres
+-    # Let N be the number of samples
+-    samples = []
+-    for i in range(N):
+-        t = start_dist + (i + 0.5) * (2 * delta_t / N)
+-        sample_point = ray_origin + t * ray_direction
+-        samples.append(sample_point)
++    for pixel in camera.pixels:
++        # 1. Define central axis of the cone for this pixel
++        cone_axis = pixel.get_ray_direction()
++        ray_origin = camera.position
+         
+-    # 5. Evaluate volume at sample points and integrate
+-    color = vec3(0.0)
+-    alpha_accum = 0.0
+-    for point in samples:
+-        density = evaluate_density(density_field, point)
+-        color_sample, alpha_sample = evaluate_radiance(density_field, point)
++        # 2. Rasterize proxy mesh to find hit point on central axis
++        hit_point = rasterize_proxy_mesh(proxy_mesh, ray_origin, cone_axis)
+         
+-        # Standard volume rendering integration
+-        weight = alpha_sample * exp(-sum(alpha_sampled_so_far))
+-        color += weight * color_sample
+-        alpha_accum += weight
++        # If no hit, fallback to pure volume or background
++        if hit_point is None:
++            image[pixel] = render_volume_fallback(ray_origin, cone_axis, density_field)
++            continue
++            
++        # 3. Determine sampling interval
++        # Sample spheres within distance delta_t from hit point along cone axis
++        # This yields a 2*delta_t interval centered at hit_point
++        start_dist = -delta_t
++        end_dist = delta_t
++        num_samples = estimate_num_samples(delta_t, pixel.footprint_area)
+         
+-    return color
++        samples = []
++        for i in range(num_samples):
++            # Uniformly sample along the axis
++            t = start_dist + (i + 0.5) * (2 * delta_t / num_samples)
++            sample_pos = hit_point + cone_axis * t
++            samples.append(sample_pos)
++            
++        # 4. Evaluate volume at sample points
++        colors = []
++        alphas = []
++        for pos in samples:
++            density, radiance = density_field.query(pos)
++            colors.append(radiance)
++            alphas.append(density) # Simplified accumulation
++            
++        # 5. Composite
++        color = composite_volume(colors, alphas)
++        image[pixel] = color
++        
++    return image
+ ```
+-
+-**Parameters:**
+-*   $\Delta t$: The half-width of the sampling interval around the surface hit point. Typical values are not explicitly given, but the method relies on this being small enough to capture surface details but large enough to cover the volume thickness [S1].
+-*   $N$: Number of spheres sampled within the $2\Delta t$ interval. Not explicitly given, but implied to be small to achieve real-time performance [S1].
+-
+-**Edge Cases and Pitfalls:**
+-*   **Empty Space:** If the ray does not intersect the proxy mesh, the method may fail to sample the volume correctly. The sources do not specify a fallback for non-intersecting rays, though standard volume rendering techniques (e.g., empty space skipping) are implied as necessary for robustness [S1].
+-*   **Mesh Quality:** The proxy mesh must accurately represent the density field. Poor mesh quality (e.g., from aggressive decimation) can lead to incorrect hit points and thus incorrect sampling intervals [S1].
+-*   **Precision:** Rasterization of the proxy mesh must be precise enough to determine the hit point accurately [S1].
+ 
+ ## Subtopics
+@@ -86,13 +104,13 @@
+ 
+ ## Operating characteristics
+-*   **Performance:** Achieves 60 FPS on an Nvidia RTX 3060 graphics card [S1]. Enables real-time rendering at >60 FPS on consumer-level GPUs [S1].
+-*   **Complexity:** Significantly reduces the number of samples compared to pure volume rendering, thus reducing computational cost [S1].
+-*   **Strengths:** Real-time performance on consumer hardware; high-fidelity rendering; anti-aliased volume rendering with efficient area sampling (when combined with Tri-Mip encoding) [S1].
+-*   **Limitations:** Requires generation of a proxy mesh, which adds preprocessing overhead; quality depends on the accuracy of the proxy mesh [S1].
+-*   **When to use:** When real-time rendering of high-fidelity volume data is required on consumer hardware [S1].
+-*   **When not to use:** When the density field is too complex to generate an accurate proxy mesh efficiently, or when the highest possible accuracy is required regardless of performance [S1].
++- **Performance:** Achieves 60 FPS on an Nvidia RTX 3060 graphics card [S1]. Enables real-time rendering at >60 FPS on consumer-level GPUs [S1].
++- **Complexity:** Significantly reduces the number of volume samples compared to pure volume rendering by restricting sampling to a narrow interval around the surface [S1].
++- **Strengths:** Real-time performance on consumer hardware; high-fidelity quality in proxy mesh; anti-aliased volume rendering [S1].
++- **Limitations:** Requires generation and maintenance of a proxy mesh; quality depends on proxy mesh fidelity [S1].
++- **When to use:** When real-time rendering of high-fidelity volumetric data is required on consumer hardware [S1].
++- **When not to use:** When the volume has no clear surface structure or when proxy mesh generation is too costly [G].
+ 
+ ## Background
+-Originated in the Tri-MipRF paper [S1]. The method was developed to address the computational cost of volume rendering by leveraging the efficiency of surface rasterization. It builds on the principles of isosurface detection and ray casting [Parent].
++Originated in the Tri-MipRF paper (2023) by the authors of "Tri-MipRF: Tri-Mip Representation for Efficient Anti-Aliasing Neural Radiance Fields" [S1]. The method was developed to enable real-time rendering on consumer-level GPUs by combining the benefits of surface rasterization and volume rendering [S1].
+ 
+ ## Sources

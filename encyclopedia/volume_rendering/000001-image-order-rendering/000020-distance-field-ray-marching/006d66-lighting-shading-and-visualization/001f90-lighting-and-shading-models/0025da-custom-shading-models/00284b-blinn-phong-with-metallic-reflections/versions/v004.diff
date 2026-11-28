@@ -1,0 +1,207 @@
+--- v003.md
++++ v004.md
+@@ -4,117 +4,105 @@
+ 
+ ## Overview
+-A custom shading model combining Blinn-Phong diffuse/specular components, metallic environment reflections weighted by a Schlick-like Fresnel term, and emissive contributions for neon effects [S1, unofficial]. It distinguishes itself from standard Blinn-Phong by introducing material-dependent specular power and intensity [S1, unofficial].
++A custom shading model for ray-marched signed distance fields (SDFs) that extends the classic Blinn-Phong approximation with environment reflections and emissive contributions to simulate urban night scenes [S1, unofficial]. It distinguishes itself from standard Blinn-Phong by modulating specular intensity, power, and reflection weight based on a material's metallic property, and from GGX microfacet models by using a simplified Schlick-like Fresnel term rather than a full microfacet distribution [S1, unofficial].
+ 
+ ## How it works
+ **Inputs:**
+-- Surface point $p$ and view ray direction $rd$ (normalized) [S1, unofficial].
+-- Surface normal $n$ (normalized) [S1, unofficial].
+-- Material properties: albedo (RGB), metalness ($m \in [0,1]$), emissive (RGB) [S1, unofficial].
+-- Ambient intensity scalar [S1, unofficial].
+-- Sky color function $C_{sky}(d)$ [S1, unofficial].
++- Surface point $\mathbf{p}$ in world space.
++- Ray direction $\mathbf{rd}$ (from camera to $\mathbf{p}$, normalized).
++- Material structure `sf` containing:
++  - `albedo`: `vec3` base color.
++  - `metal`: `float` in $[0, 1]$ (0 = non-metal, 1 = metal).
++  - `emissive`: `vec3` self-illuminated color.
++- Scene functions: `calcNormal(p)`, `softShadow(p, l, radius)`, `calcAO(p, n)`, `skyColor(r)`.
+ 
+ **Outputs:**
+-- Final surface color $C_{out}$ [S1, unofficial].
++- Final color `vec3`.
+ 
+ **Data Structures:**
+-- `sf` (Surface Field): Struct containing `albedo` (RGB vector), `metal` (float), `emissive` (RGB vector) [S1, unofficial].
++The material structure `sf` is determined by a material ID derived from the SDF evaluation (e.g., via hashing the cell coordinates or distance field value).
++
++**Steps:**
++1.  **Normal Calculation:** Compute the surface normal $\mathbf{n}$ at $\mathbf{p}$.
++    $$ \mathbf{n} = \text{calcNormal}(\mathbf{p}) $$
++    [G] Typically estimated via central finite differences of the SDF $f(\mathbf{x})$:
++    $$ \mathbf{n} = \frac{f(\mathbf{p} + \epsilon \mathbf{e}_i) - f(\mathbf{p} - \epsilon \mathbf{e}_i)}{2\epsilon} $$
++    normalized, where $\epsilon$ is a small offset (e.g., $0.001$) and $\mathbf{e}_i$ are basis vectors.
++
++2.  **Light Setup:** Define the light direction $\mathbf{l}$ and color $\mathbf{c}_L$.
++    $$ \mathbf{l} = \text{normalize}(\text{vec3}(-0.5, 0.8, -0.25)) $$
++    $$ \mathbf{c}_L = \text{vec3}(0.5, 0.65, 1.0) $$
++    [S1, unofficial]
++
++3.  **Diffuse Lighting:**
++    $$ d = \max(\mathbf{n} \cdot \mathbf{l}, 0.0) $$
++    [S1, unofficial]
++
++4.  **Shadowing:**
++    $$ s = \text{softShadow}(\mathbf{p} + \mathbf{n} \cdot 0.03, \mathbf{l}, 12.0) $$
++    [S1, unofficial]
++    [G] `softShadow` typically performs ray marching along $\mathbf{l}$ with a radius-based softening factor.
++
++5.  **Specular Calculation:**
++    Compute the half-vector $\mathbf{h}$:
++    $$ \mathbf{h} = \text{normalize}(\mathbf{l} - \mathbf{rd}) $$
++    [S1, unofficial]
++    Compute specular intensity using a power term interpolated by metalness:
++    $$ \text{spec} = \text{pow}(\max(\mathbf{n} \cdot \mathbf{h}, 0.0), \text{mix}(32.0, 140.0, \text{sf.metal})) \cdot s $$
++    [S1, unofficial]
++
++6.  **Ambient Occlusion:**
++    $$ \text{ao} = \text{calcAO}(\mathbf{p}, \mathbf{n}) $$
++    [S1, unofficial]
++    [G] `calcAO` typically samples the SDF along $\mathbf{n}$ and neighbors to estimate local occlusion.
++
++7.  **Base Color Accumulation:**
++    $$ \mathbf{c}_{\text{base}} = \text{sf.albedo} \cdot (\text{ambient} \cdot \text{ao}) + \text{sf.albedo} \cdot \mathbf{c}_L \cdot d + \mathbf{c}_L \cdot \text{spec} \cdot \text{mix}(0.4, 2.0, \text{sf.metal}) $$
++    [S1, unofficial]
++    Where `ambient` is a constant $0.16$.
++
++8.  **Fresnel Term:**
++    Compute the view angle cosine $\cos \theta_v = \max(\mathbf{n} \cdot (-\mathbf{rd}), 0.0)$.
++    $$ F = \text{pow}(1.0 - \cos \theta_v, 5.0) $$
++    [S1, unofficial]
++
++9.  **Environment Reflection:**
++    Compute the reflection vector $\mathbf{r}$:
++    $$ \mathbf{r} = \text{reflect}(\mathbf{rd}, \mathbf{n}) $$
++    [G] $\mathbf{r} = 2(\mathbf{n} \cdot (-\mathbf{rd}))\mathbf{n} + \mathbf{rd}$.
++    Sample the sky color:
++    $$ \mathbf{c}_{\text{refl}} = \text{skyColor}(\mathbf{r}) $$
++    [S1, unofficial]
++
++10. **Reflection Contribution:**
++    $$ \mathbf{c}_{\text{refl\_contrib}} = \mathbf{c}_{\text{refl}} \cdot \text{mix}(0.03, 0.6, \text{sf.metal}) \cdot (0.25 + 0.75 \cdot F) \cdot \text{ao} $$
++    [S1, unofficial]
++
++11. **Final Color:**
++    $$ \mathbf{c}_{\text{final}} = \mathbf{c}_{\text{base}} + \mathbf{c}_{\text{refl\_contrib}} + \text{sf.emissive} $$
++    [S1, unofficial]
+ 
+ **Parameters:**
+-- Light direction: $L = (-0.5, 0.8, -0.25)$ [S1, unofficial].
+-- Light color: $C_L = (0.5, 0.65, 1.0)$ [S1, unofficial].
+-- Ambient intensity: $0.16$ [S1, unofficial].
+-- Specular power range: $32.0$ (non-metal) to $140.0$ (metal) [S1, unofficial].
+-- Specular intensity range: $0.4$ (non-metal) to $2.0$ (metal) [S1, unofficial].
+-- Fresnel power: $5.0$ [S1, unofficial].
+-- Reflection intensity range: $0.03$ (non-metal) to $0.6$ (metal) [S1, unofficial].
+-- Fresnel reflection weight: $0.25 + 0.75 \times f$ [S1, unofficial].
+-- Shadow offset: $0.03$ [S1, unofficial].
+-- Shadow max distance/step limit: $12.0$ [S1, unofficial].
++- Light Direction: $\text{vec3}(-0.5, 0.8, -0.25)$ [S1, unofficial]
++- Light Color: $\text{vec3}(0.5, 0.65, 1.0)$ [S1, unofficial]
++- Ambient Intensity: $0.16$ [S1, unofficial]
++- Specular Power: Interpolated between $32.0$ (non-metal) and $140.0$ (metal) [S1, unofficial]
++- Specular Intensity Multiplier: Interpolated between $0.4$ (non-metal) and $2.0$ (metal) [S1, unofficial]
++- Fresnel Power: $5.0$ [S1, unofficial]
++- Reflection Intensity: Interpolated between $0.03$ (non-metal) and $0.6$ (metal) [S1, unofficial]
++- Fresnel Reflection Weight: $0.25 + 0.75 \cdot F$ [S1, unofficial]
+ 
+-**Steps:**
+-1. Calculate normal $n = \text{calcNormal}(p)$ [S1, unofficial].
+-2. Determine surface properties (albedo, metalness $m$, emissive) based on material ID at $p$ [S1, unofficial].
+-3. Define light direction $L = \text{normalize}(-0.5, 0.8, -0.25)$ and light color $C_L = (0.5, 0.65, 1.0)$ [S1, unofficial].
+-4. Calculate diffuse term: $diff = \max(\text{dot}(n, L), 0.0)$ [S1, unofficial].
+-5. Calculate shadow factor $S = \text{softShadow}(p + n \times 0.03, L, 12.0)$ [S1, unofficial].
+-6. Apply shadow to diffuse: $diff = diff \times S$ [S1, unofficial].
+-7. Calculate half-vector: $h = \text{normalize}(L - rd)$ [S1, unofficial].
+-8. Calculate specular term base: $spec = \text{pow}(\max(\text{dot}(n, h), 0.0), \text{mix}(32.0, 140.0, m)) \times S$ [S1, unofficial].
+-9. Calculate ambient occlusion $ao = \text{calcAO}(p, n)$ [S1, unofficial].
+-10. Calculate base color: $C = sf.albedo \times (C_{amb} \times ao) + sf.albedo \times C_L \times diff + C_L \times spec \times \text{mix}(0.4, 2.0, m)$ [S1, unofficial].
+-11. Calculate Fresnel factor: $f = \text{pow}(1.0 - \max(\text{dot}(n, -rd), 0.0), 5.0)$ [S1, unofficial].
+-12. Calculate reflection direction: $r = \text{reflect}(rd, n)$ [S1, unofficial].
+-13. Calculate reflected contribution: $C = C + \text{skyColor}(r) \times \text{mix}(0.03, 0.6, m) \times (0.25 + 0.75 \times f) \times ao$ [S1, unofficial].
+-14. Add emissive contribution: $C = C + sf.emissive$ [S1, unofficial].
+-
+-**Pseudocode:**
+-```python
+-import math
+-
+-class Vec3:
+-    def __init__(self, x, y, z):
+-        self.x, self.y, self.z = x, y, z
+-    def __add__(self, v): return Vec3(self.x+v.x, self.y+v.y, self.z+v.z)
+-    def __sub__(self, v): return Vec3(self.x-v.x, self.y-v.y, self.z-v.z)
+-    def __mul__(self, s): return Vec3(self.x*s, self.y*s, self.z*s)
+-    def dot(self, v): return self.x*v.x + self.y*v.y + self.z*v.z
+-    def length(self): return math.sqrt(self.x**2 + self.y**2 + self.z**2)
+-    def normalize(self):
+-        l = self.length()
+-        return Vec3(self.x/l, self.y/l, self.z/l) if l > 0 else Vec3(0,0,0)
+-    def reflect(self, n):
+-        d = 2 * self.dot(n)
+-        return Vec3(self.x - d*n.x, self.y - d*n.y, self.z - d*n.z)
+-
+-def mix(a, b, t):
+-    return a + t * (b - a)
+-
+-def softShadow(p, light_dir, max_dist):
+-    # softShadow implementation not provided in sources [G]
+-    return 1.0
+-
+-def calcAO(p, n):
+-    # calcAO implementation not provided in sources [G]
+-    return 1.0
+-
+-def blinn_phong_metallic(p, rd, n, sf, skyColor):
+-    albedo = sf.albedo
+-    metal = sf.metal
+-    emissive = sf.emissive
+-
+-    light_dir = Vec3(-0.5, 0.8, -0.25).normalize()
+-    light_col = Vec3(0.5, 0.65, 1.0)
+-    ambient = 0.16
+-
+-    diff = max(n.dot(light_dir), 0.0)
+-    shadow = softShadow(p + n * 0.03, light_dir, 12.0)
+-    diff = diff * shadow
+-
+-    half_vec = (light_dir - rd).normalize()
+-    spec_pow = mix(32.0, 140.0, metal)
+-    spec = max(n.dot(half_vec), 0.0) ** spec_pow * shadow
+-
+-    ao = calcAO(p, n)
+-
+-    spec_int = mix(0.4, 2.0, metal)
+-    color = albedo * (ambient * ao) + albedo * light_col * diff + light_col * spec * spec_int
+-
+-    fresnel = (1.0 - max(n.dot(-rd), 0.0)) ** 5.0
+-
+-    refl_dir = rd.reflect(n)
+-    refl_int = mix(0.03, 0.6, metal)
+-    fresnel_weight = 0.25 + 0.75 * fresnel
+-    reflected = skyColor(refl_dir)
+-    color = color + reflected * refl_int * fresnel_weight * ao
+-
+-    color = color + emissive
+-
+-    return color
+-```
++**Edge Cases:**
++- If $\mathbf{n}$ is zero (degenerate SDF), the normal must be clamped or defaulted to $\text{vec3}(0,1,0)$ to avoid division by zero in normalization [G].
++- If $\mathbf{rd}$ is parallel to $\mathbf{n}$, the half-vector calculation remains stable, but the Fresnel term approaches 0 or 1 depending on alignment.
+ 
+ ## Operating characteristics
++- **Time Complexity:** $O(1)$ per pixel for shading, assuming `softShadow` and `calcAO` are $O(k)$ where $k$ is the number of shadow/AO samples. The reflection requires one additional ray trace to the skybox/environment map.
++- **Memory Complexity:** $O(1)$ auxiliary memory per pixel.
++- **Strengths:** Fast to compute compared to full microfacet BRDFs; provides a convincing "wet" or metallic look with minimal parameters; simple to implement in GLSL/HLSL.
++- **Limitations:** The Schlick-like approximation $F = (1-\cos\theta_v)^5$ is less physically accurate than the standard Schlick Fresnel equation for dielectrics; does not account for anisotropy or complex roughness distributions.
++- **When to use:** Real-time ray marching for stylized or urban night scenes where performance is critical and approximate metallic reflections are sufficient.
+ 
+ ## Background
+-Not given in the sources.
++This model originates from the "neon-raymarcher" project by PIGJET, designed to render a stylized cyberpunk cityscape using SDF ray marching [S1, unofficial]. It adapts the classic Blinn-Phong model to emphasize high-contrast specular highlights and environment reflections typical of neon-lit wet surfaces.
+ 
+ ## Sources

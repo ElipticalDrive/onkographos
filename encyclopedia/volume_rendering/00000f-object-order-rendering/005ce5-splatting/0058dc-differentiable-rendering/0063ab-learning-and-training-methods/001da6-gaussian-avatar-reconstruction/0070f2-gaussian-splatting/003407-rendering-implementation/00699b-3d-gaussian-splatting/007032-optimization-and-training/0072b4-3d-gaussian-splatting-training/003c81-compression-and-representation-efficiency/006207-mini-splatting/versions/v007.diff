@@ -1,0 +1,228 @@
+--- v006.md
++++ v007.md
+@@ -4,123 +4,128 @@
+ 
+ ## Overview
+-Mini-Splatting is a training optimization and initialization strategy for 3D Gaussian Splatting (3DGS) that explicitly constrains the total number of Gaussians to a hard limit $N_{max}$ to reduce memory footprint and accelerate rendering [S1, unofficial][S2]. It addresses the inefficient spatial distribution of vanilla 3DGS—specifically "overlapping" and "under-reconstruction" phenomena—by pivoting from direct simplification to spatial reorganization [S2]. Unlike its sibling [C3DGS](9184-c3dgs.md), which focuses on voxel-based pruning, Mini-Splatting leverages both screen-space and world-space information to densify around objects and simplify redundant overlaps, achieving comparable or superior visual quality with significantly fewer primitives [S2].
++Mini-Splatting is a resource-efficient training and rendering method for 3D Gaussian Splatting that explicitly constrains the total number of Gaussians to a hard limit $N_{max}$, addressing the spatial redundancy and inefficient distribution inherent in vanilla 3DGS [S2]. Unlike sibling methods like [C3DGS](9184-c3dgs.md) which focus on voxel-based pruning or [CompGS](18575-compgs.md) which relies on attribute quantization, Mini-Splatting pivots from direct simplification to spatial reorganization, leveraging both screen-space and world-space information to densify around objects and remove redundant overlaps [S2]. It achieves this by stacking densification and simplification passes to maintain a uniform spatial distribution, resulting in significantly reduced memory footprint and faster training times while maintaining comparable or superior visual fidelity [S2].
+ 
+ ## How it works
+ **Inputs and Outputs:**
+-*   **Input:** A scene representation initialized with 3D Gaussians (position $\mathbf{p}$, rotation $\mathbf{R}$, scale $\mathbf{s}$, opacity $\alpha$, spherical harmonic coefficients $\mathbf{c}_{lm}$) and a target maximum Gaussian count $N_{max}$ [S2][G].
+-*   **Output:** A sparse Gaussian field with exactly $N_{max}$ primitives, uniformly distributed around object surfaces, maintaining rendering fidelity [S2].
++*   **Input:** A set of initial 3D Gaussians $\mathcal{G} = \{g_i\}_{i=1}^{N_{init}}$ derived from Structure-from-Motion (SfM) points, along with a sequence of training images.
++*   **Output:** A constrained set of $N_{max}$ Gaussians $\mathcal{G}'$ with optimized position $\mathbf{p}_i$, rotation $\mathbf{q}_i$, scale $\mathbf{s}_i$, opacity $\alpha_i$, and spherical harmonic coefficients $\mathbf{c}_{i, lm}$ [S2].
+ 
+ **Data Structures:**
+-The method maintains the standard 3DGS attribute set for each Gaussian $i$:
+-*   $\mathbf{p}_i \in \mathbb{R}^3$: Center position.
+-*   $\mathbf{q}_i \in \mathbb{R}^4$: Rotation (quaternion).
+-*   $\mathbf{s}_i \in \mathbb{R}^3$: Scale.
+-*   $\alpha_i \in [0, 1]$: Opacity.
+-*   $\mathbf{c}_{i, lm}$: Spherical Harmonic coefficients.
+-*   $score_i \in \mathbb{R}$: Importance score used for selection [S1, unofficial][S2].
++The method operates on the standard 3DGS attribute set for each Gaussian $i$:
++*   Position: $\mathbf{p}_i \in \mathbb{R}^3$
++*   Rotation: $\mathbf{q}_i \in \mathbb{R}^4$ (normalized quaternion)
++*   Scale: $\mathbf{s}_i \in \mathbb{R}^3$
++*   Opacity: $\alpha_i \in [0, 1]$
++*   SH Coefficients: $\mathbf{c}_{i, lm}$
++*   Importance Score: $I_i \in \mathbb{R}$ (scalar, used for selection) [S2]
++
++**Parameters:**
++*   $N_{max}$: The hard limit on the total number of Gaussians. Typical values are ~0.49M for Mip-NeRF360 Outdoor vs 3.36M for vanilla 3DGS [S2].
++*   Total Optimization Steps: 30,000 [S2].
++*   Densification Stop Iteration: 15,000 [S2].
++*   Simplification Iterations: 15,000 and 20,000 [S2].
++*   SH Level: Disabled (Degree 0) during densification; increased after simplification [S2].
+ 
+ **Algorithm Steps:**
+-The optimization follows a 30,000-step schedule, divided into densification and simplification phases [S2].
++The optimization process is divided into densification and simplification phases, stacked to reorganize the spatial distribution of Gaussians [S2].
+ 
+-1.  **Initialization:** Initialize Gaussians using standard 3DGS densification (point cloud sampling) until iteration 15,000 [S2][G]. Disable view-dependent colors (SH coefficients) during this phase to save resources, as they barely enhance densification [S2].
+-2.  **Densification (Iterations 0–15,000):**
+-    *   **Blur Split:** Detect blurring areas in the rendered image and split Gaussians located in those regions to increase local density [S2].
+-    *   **Depth Reinitialization:** Use merged depth points to reinitialize scene geometry and Gaussian positions, ensuring coverage of under-reconstructed areas [S2].
+-    *   **Constraint:** The total count may exceed $N_{max}$ temporarily during densification.
+-3.  **Simplification (Iterations 15,000 and 20,000):**
++1.  **Initialization:** Initialize Gaussians from SfM points. Set $N_{max}$ and total steps $T_{total}=30K$ [S2].
++2.  **Densification Phase (Iterations $1$ to $15K$):**
++    *   **Blur Split:** Detect blurring areas in the rendered image (high gradient magnitude or low sharpness). Split Gaussians located in these regions to increase local density [S2].
++        *   *Note:* View-dependent colors (SH coefficients) are disabled during this phase as they barely enhance densification and consume resources [S2].
++    *   **Depth Reinitialization:** Use merged depth points to reinitialize scene geometry.
++        *   Calculate depth points from the mid-point of ray intersections with Gaussian ellipsoids [S4].
++        *   Reposition Gaussians based on these newly generated depth points to ensure geometric accuracy and avoid artifacts from alpha blending [S4].
++    *   **Constraint:** The total number of Gaussians is kept constant at $N_{max}$ by pruning the least important Gaussians and splitting the most important ones [S1, unofficial]. Importance is determined by a score $I_i$ [S3].
++3.  **Simplification Phase (Iterations $15K$ and $20K$):**
+     *   **Intersection Preserving:** Retain only Gaussians that have the maximal impact on the rendered image, discarding redundant overlaps [S2].
+-    *   **Gaussian Sampling:** Sample points to preserve the underlying geometric structure and original rendering quality [S2].
+-    *   **Hard Constraint:** Iteratively prune the least important Gaussians and split the most important ones to keep the total count constant at $N_{max}$ [S1, unofficial].
+-4.  **Refinement (Iterations 15,000–30,000):**
+-    *   Enable SH coefficients and increase the SH level after the first simplification pass (at 15K) [S2].
+-    *   Continue standard 3DGS optimization (opacity reset, etc.) for the remaining steps [S2].
++    *   **Sampling:** Sample points to preserve both the underlying geometric structure and the original rendering quality, reducing complexity [S2].
++    *   **SH Update:** Increase the SH level (enable view-dependent colors) after simplification (at iteration 15K) [S2].
++4.  **Final Optimization:** Continue optimization until $T_{total}$ with the constrained set $\mathcal{G}'$ [S2].
+ 
+ **Pseudocode:**
+ ```python
+-def mini_splatting_training(scene_data, N_max, total_steps=30000):
+-    # [G] Initialize Gaussians from point cloud using standard 3DGS densification rules
+-    gaussians = initialize_from_point_cloud(scene_data)
+-    gaussians.sh_degree = 0  # Disable view-dependent colors during densification
+-
+-    for step in range(1, total_steps + 1):
+-        # [G] Rasterize Gaussians onto camera image using alpha blending
+-        rendered_image = rasterize(gaussians, camera)
+-        # [G] Compute L1 loss between rendered and ground truth images
+-        loss = compute_l1_loss(rendered_image, ground_truth)
+-        loss.backward()
+-
+-        if step <= 15000:
+-            # Densification Phase
+-            # [G] Compute gradient magnitude of rendered image; regions with high gradient indicate blur
+-            blur_mask = compute_gradient_magnitude(rendered_image) > threshold
+-            # Split Gaussians in blurred regions to increase local density
+-            gaussians = split_in_blur_regions(gaussians, blur_mask)
+-            # [G] Reinitialize positions using depth points calculated from mid-point of ray intersections with Gaussian ellipsoids
+-            depth_points = compute_merged_depth(gaussians, camera)
+-            gaussians = reinitialize_positions(gaussians, depth_points)
+-            # [G] Standard 3DGS densification (clone/split based on gradient/opacity)
+-            gaussians = standard_densification(gaussians)
++def mini_splatting_training(initial_gaussians, images, N_max, T_total=30000):
++    """
++    Implements the Mini-Splatting optimization pipeline.
++    """
++    gaussians = initial_gaussians
++    # Disable SH during densification to save resources [S2]
++    gaussians.sh_degree = 0 
++    
++    for t in range(1, T_total + 1):
++        # Sample a random training image
++        image = sample_random_image(images)
++        
++        # Render current Gaussians
++        rendered_image, depth_map, gaussian_indices = render(gaussians, image.camera)
++        
++        # Compute loss and gradients
++        loss = compute_loss(rendered_image, image.gt)
++        gradients = compute_gradients(loss, gaussians)
++        
++        if t <= 15000:
++            # Densification Phase [S2]
++            
++            # 1. Blur Split: Detect blurring areas and split Gaussians
++            blur_mask = detect_blur(rendered_image, image.gt)
++            split_candidates = get_gaussians_in_regions(gaussians, blur_mask)
++            
++            # Split high-importance Gaussians in blurred regions
++            for g in split_candidates:
++                if g.importance_score > threshold:
++                    split_gaussian(g, gradients)
++            
++            # 2. Depth Reinitialization: Reposition based on depth mid-points
++            # Calculate mid-point of ray intersection with Gaussian ellipsoids [S4]
++            depth_points = compute_depth_midpoints(gaussians, image.camera)
++            reinitialize_gaussian_positions(gaussians, depth_points)
++            
++            # 3. Prune least important to maintain N_max [S1, unofficial]
++            gaussians = prune_least_important(gaussians, N_max)
++            
++        elif t in [15000, 20000]:
++            # Simplification Phase [S2]
++            
++            # 1. Intersection Preserving: Retain maximal impact Gaussians
++            impact_scores = compute_rendering_impact(gaussians, images)
++            gaussians = retain_max_impact(gaussians, impact_scores, N_max)
++            
++            # 2. Sampling: Preserve geometric structure
++            gaussians = sample_gaussians(gaussians, N_max)
++            
++            # Enable SH after simplification [S2]
++            gaussians.sh_degree = 1 # Or higher based on dataset
++            
+         else:
+-            # Simplification Phase (triggered at 15K and 20K)
+-            if step in [15000, 20000]:
+-                # Compute rendering impact (e.g., accumulated gradient or coverage)
+-                impact_scores = compute_rendering_impact(gaussians)
+-                # Keep top N_max Gaussians by impact
+-                gaussians = keep_top_gaussians(gaussians, impact_scores, N_max)
+-                # [G] Sample points to preserve geometric structure and rendering quality
+-                gaussians = sample_gaussians(gaussians, N_max)
+-
+-            # Enable SH coefficients after first simplification
+-            if step > 15000:
+-                gaussians.sh_degree = 1
+-
+-            # [G] Standard optimization step (Adam update, opacity reset)
+-            gaussians = optimize_step(gaussians)
+-
++            # Standard optimization with constrained set
++            optimize_gaussians(gaussians, gradients)
++            
+     return gaussians
+ ```
+ 
+-**Parameters:**
+-*   $N_{max}$: Hard limit on Gaussian count. Typical value: ~0.49M for Mip-NeRF360 Outdoor (vs 3.36M for vanilla 3DGS) [S2].
+-*   Total Optimization Steps: 30,000 [S2].
+-*   Densification Stop: 15,000 steps [S2].
+-*   Simplification Steps: 15,000 and 20,000 [S2].
+-
+ **Edge Cases and Pitfalls:**
+-*   **Popping Artifacts:** Using fewer Gaussians results in larger Gaussians on average, which increases the prevalence of noticeable popping artifacts during camera movement [S4].
+-*   **SH Redundancy:** View-dependent colors (SH coefficients) provide minimal benefit during the densification phase; enabling them early wastes resources without improving spatial distribution [S2].
++*   **Popping Artifacts:** Using fewer Gaussians results in larger Gaussians on average, which increases the prevalence of noticeable popping artifacts [S5].
++*   **SH Redundancy:** Incorporating view-dependent colors during densification barely enhances quality but consumes resources; thus, they are disabled until after simplification [S2].
++*   **Depth Estimation:** Depth reinitialization relies on initial training to estimate depth, requiring a few iterations to obtain accurate information [S4].
+ 
+ ## Subtopics
+ 
+-### [Model Compression Pipeline for 3D Gaussian Splatting](9987-model-compression-pipeline-for-3d-gaussian-splatting.md)
+-This method is a compression and rendering pipeline for 3D Gaussian Splatting (3DGS) that reduces memory footprint and increases rendering speed while maintaining image quality. It addresses the high memory bandwidth and computational complexity of standard 3DGS, making it suitable for edge deployment, mobile VR/AR, and low-power hardware. It sets itself apart from its parent [Mini-Splatting](7850-mini-splatting.md) by not imposing a hard limit on the total number of Gaussians via mixed-integer optimization, but rather by iteratively pruning, quantizing attributes, and reducing spherical harmonic (SH) degrees to achieve high compression ratios (up to 51.6×) with minimal quality loss. It differs from LightGaussian by using iterative pruning with intermediate fine-tuning, progressive SH-degree reduction, and vector quantization (VQ) on all SH coefficients and colors, rather than only low-salience subsets.
+-
+ ### Mini-Splatting-D
+-A quality-prioritized variant of Mini-Splatting that omits the simplification process to maximize rendering quality [S2]. On Mip-NeRF360 (Outdoor), Mini-Splatting-D uses 4.69M Gaussians, achieving SSIM 0.831, PSNR 27.51, LPIPS 0.176 [S2]. It surpasses Zip-NeRF in SSIM (0.828) and LPIPS (0.189) on this dataset [S2]. Training time is 31m48s, Peak GPU Memory is 7.45GB, Rendering FPS is 83, Peak Rendering Memory is 3.12GB [S2].
++A quality-prioritized variant of Mini-Splatting that omits the simplification process to maximize rendering quality [S2]. It retains the densification phase (Blur Split and Depth Reinitialization) but skips the Intersection Preserving and Sampling steps. This results in a higher Gaussian count (~4.69M vs ~0.49M for standard Mini-Splatting) but achieves superior SSIM and LPIPS metrics, surpassing Zip-NeRF on Mip-NeRF360 Outdoor [S2].
+ 
+ ### Mini-Splatting-C
+-Designed for scenarios requiring storage compression, this pipeline is directly based on Mini-Splatting [S2]. Given a pre-trained Mini-Splatting model, it stores Gaussian centers as float32, while other attributes (scales, SH coefficients) are processed using transform coding and standard zip compression [S2].
++A storage-compression variant designed for scenarios requiring reduced file size. It is based on the Mini-Splatting pipeline but applies transform coding and standard zip compression to attributes (scales, SH coefficients) after training, storing only Gaussian centers as float32 [S2].
+ 
+ ## Operating characteristics
+-**Time and Memory Complexity:**
+-*   **Training Time:** Mini-Splatting reduces training time significantly, taking 17m56s compared to 30m8s for vanilla 3DGS on Mip-NeRF360 (Outdoor) [S2].
+-*   **Peak GPU Memory:** Reduced from 7.45GB (3DGS) to 2.61GB (Mini-Splatting) on Mip-NeRF360 (Outdoor) [S2].
+-*   **Rendering FPS:** Increases from 98 FPS (3DGS) to 410 FPS (Mini-Splatting) on Mip-NeRF360 (Outdoor) [S2].
+-*   **Peak Rendering Memory:** Reduced from 2.79GB (3DGS) to 0.40GB (Mini-Splatting) [S2].
+-
+-**Measured Performance:**
+-*   **Mip-NeRF360 (Outdoor):** Mini-Splatting uses 0.49M Gaussians (7x fewer than 3DGS's 3.36M) [S2]. Metrics: SSIM 0.822 (vs 0.815), PSNR 27.34 (vs 27.21), LPIPS 0.217 (vs 0.214) [S2].
+-*   **Mip-NeRF360 (General):** Another variant achieves SSIM 0.763, PSNR 25.83, LPIPS 0.273, with a model size of 18.2 MB [S3].
+-*   **Model Size:** Up to 10x reduction compared to original 3DGS [S4].
+-
+-**Strengths and Limitations:**
+-*   **Strengths:** Efficient spatial distribution reduces redundancy; significant memory and speed improvements; comparable or better visual quality than dense 3DGS [S2].
+-*   **Limitations:** Fewer Gaussians lead to larger individual splats, increasing popping artifacts [S4]. The hard constraint requires careful balancing of densification and simplification schedules [S2].
+-
+-**Applicability:**
+-Mini-Splatting is suitable for resource-constrained environments, such as mobile AR/VR and edge devices, where memory bandwidth, training time, or rendering FPS are critical constraints [S1, unofficial][S2]. Mini-Splatting-D is preferred when quality is prioritized over memory/speed constraints [S2].
++*   **Memory Footprint:** Significantly reduced. On Mip-NeRF360 (Outdoor), Mini-Splatting uses 0.49M Gaussians compared to 3.36M for vanilla 3DGS, a ~7x reduction [S2]. Peak GPU Memory during training is 2.61GB vs 7.45GB for 3DGS [S2]. Peak Rendering Memory is 0.40GB vs 2.79GB [S2].
++*   **Training Time:** Faster. 17m56s vs 30m8s for 3DGS on Mip-NeRF360 (Outdoor) [S2]. Mini-Splatting-D takes 31m48s [S2].
++*   **Rendering Speed:** Higher FPS. 410 FPS vs 98 FPS for 3DGS on Mip-NeRF360 (Outdoor) [S2]. Mini-Splatting-D achieves 83 FPS [S2].
++*   **Visual Quality:** Comparable or superior. On Mip-NeRF360 (Outdoor), Mini-Splatting achieves SSIM 0.822 (vs 0.815), PSNR 27.34 (vs 27.21), LPIPS 0.217 (vs 0.214) [S2]. Mini-Splatting-D achieves SSIM 0.831, PSNR 27.51, LPIPS 0.176 [S2]. On MipNeRF360 generally, Mini-Splatting achieves SSIM 0.763, PSNR 25.83, LPIPS 0.273, with a model size of 18.2 MB [S3].
++*   **Scaling:** The method scales well to resource-constrained environments, enabling training on consumer-grade GPUs (e.g., GTX 1060 6G) [S2].
++*   **Limitations:** The hard constraint $N_{max}$ may lead to larger average Gaussian sizes, increasing popping artifacts [S5]. The method requires careful tuning of the densification/simplification schedule [S2].
+ 
+ ## Background
+-Mini-Splatting was introduced by Fang and Wang in 2024 [S2]. It emerged from the observation that vanilla 3DGS suffers from inefficient spatial distribution, leading to overlapping and under-reconstruction [S2]. The method formulates the optimization as a mixed-integer problem to bound memory footprints explicitly [S1, unofficial]. It is part of the broader effort to make 3DGS viable for resource-constrained environments, such as mobile AR/VR and edge devices [S1, unofficial][S2].
++Mini-Splatting was introduced by Guangchi Fang and Bing Wang from the Spatial Intelligence Group at The Hong Kong Polytechnic University [S2]. It was published in 2024 as part of the ECCV proceedings [S2]. The method addresses the "overlapping" and "under-reconstruction" phenomena observed in vanilla 3DGS, where Gaussians are not uniformly distributed around object surfaces [S2]. It builds on the principles of 3D Gaussian Splatting [17] but introduces a mixed-integer optimization formulation to explicitly bound the Gaussian count [S1, unofficial].
+ 
+ ## Sources
+@@ -128,3 +133,4 @@
+ [S2] Mini-Splatting: Representing Scenes with a Constrained Number of Gaussians, https://doi.org/10.1007/978-3-031-72980-5_10, fetched 2026-10-26
+ [S3] Recent advances in 3D Gaussian splatting, https://doi.org/10.1007/s41095-024-0436-y, fetched 2026-10-26
+-[S4] Fast and Robust 3D Gaussian Splatting for Virtual Reality, https://doi.org/10.1145/3681756.3697947, fetched 2026-10-30+[S4] 3DGS.zip: A survey on 3D Gaussian Splatting Compression Methods, https://arxiv.org/abs/2407.09510v5, fetched 2026-10-26
++[S5] Fast and Robust 3D Gaussian Splatting for Virtual Reality, https://doi.org/10.1145/3681756.3697947, fetched 2026-10-30

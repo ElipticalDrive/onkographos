@@ -1,0 +1,412 @@
+OpenH1: Halo: Combat Evolved ported from its decompilation to macOS, Windows, Linux, Android and VR - World-space ambient occlusion (draft, #578) by erincena · Pull Request #579 · OpenH1/OpenH1
+
+World-space ambient occlusion (draft, #578) by erincena · Pull Request #579 · OpenH1/OpenH1 · GitHub
+Skip to content
+You signed in with another tab or window. Reload to refresh your session.
+You signed out in another tab or window. Reload to refresh your session.
+You switched accounts on another tab or window. Reload to refresh your session.
+Dismiss alert
+Conversation
+erincena
+commented
+Nov 4, 2026
+•
+edited
+Loading
+Uh oh!
+There was an error while loading. Please reload this page.
+Copy link
+Copy Markdown
+Collaborator
+Refs #578. The design and the workstreams: docs/world-ao.md.
+The integration branch for world-space ambient occlusion: the structure's distance field, baked once per map from the player's own map and cached, plus analytic proxies for the objects, applied to the ambient term alone through #574's slot. This PR is the skeleton the four workstreams fill. Their PRs go into world-ao, not master. Draft until every stream has landed and the checks in the doc pass.
+What the skeleton has
+Interfaces:
+port/linux/include/world_scene.h: stable ids, static triangles, drawn instances, the world light list;
+world_sdf.h: layout, encoding, cache format and version, the bake's schedule;
+world_proxies.h: shapes, the GPU layout, the reference occlusion;
+world_ao.h: the game hooks and the front end;
+struct xgpu_world_ao_block in port/linux/src/xgpu_stream.h: the GPU block.
+Stubs that do nothing: port/linux/game/world_*.c. The pure parts (the field's layout, encoding and trilinear sample; a sphere's occlusion) are real, so their tests have something to test.
+Hooks:
+render.c: per frame, and per window around the opaque surfaces until the lightmap pass ends;
+scenario.c: map load (a cache lookup only, never a bake), BSP switch, unload;
+d3d8_device.c: the front end's halo_world_ao_*.
+Command stream version 16: WORLD_AO_WINDOW (the block) and WORLD_AO_FIELD (slabs of the field, bounds-checked by the decoder). Both backends leave the callbacks unset, at marked points.
+Bindings: SPIR-V set 3 bindings 1–2 (Ambient occlusion: darken the ambient light alone, not the flashlight and dynamic lights #574's set, so still at most four sets), MSL texture 5 and buffer 23.
+The setting: display.ambient_occlusion = "world" is documented. It runs no GTAO, and for now draws as "off". Off is still the default, and Classic's preset still sets "off".
+Harness tests: test_world_sdf.py, test_world_proxies.py, test_world_scene.py and test_world_ao.py, with negative controls. They cover:
+nothing running unless the setting is "world";
+the hooks' order;
+no bake in a load;
+the stream records and the bindings.
+Off is unchanged
+With the setting off, nothing new runs past a cached string compare. No record is written, and the emitters aren't touched, so the shaders are byte-identical.
+Checks
+Linux x86-64 build (5900X).
+pytest tools/harness.
+CI builds every platform.
+erin.cena
+and others
+added 30 commits
+November 4, 2026 01:39
+World-space ambient occlusion: the interfaces, stubs and hooks (#578)
+…
+47ec5ea
+```
+display.ambient_occlusion "world" for workstreams A to D to fill: the
+scene, the distance field, the object proxies and the game's hooks
+(port/linux/include/world_*.h, port/linux/game/world_*.c), their hooks in
+render.c and scenario.c, the command stream's two records (version 16) with
+the decoder's checks, the bindings both backends will take, and a harness
+test for each part. Off, and "world" for now, draw as before.
+```
+World-space ambient occlusion: the design and the four workstreams (d…
+…
+49463eb
+```
+…ocs/world-ao.md)
+```
+World AO: the GPU block in xgpu_stream.h, which every copy of the ren…
+…
+6cfd9a4
+```
+…derer's headers has
+```
+World AO: the bindings' owners in one line
+207e196
+World scene: the static triangles' copy of the loaded BSP's collision…
+…
+6a0195f
+```
+… geometry (#578)
+
+world_scene_static_triangles fans each collision surface's ring of edges
+into world-space triangles with its collision material and the bounds, as
+an owned copy a background bake can read after the tags are gone. Only the
+loaded BSP's tags are in place; another is found as the game switches to
+it. debug.world_scene_dump writes each BSP's triangles as an OBJ;
+debug.world_scene_log is registered for the frame's counts.
+```
+World AO field: the bake, the cache, the schedule and their harness t…
+…
+5cb7964
+```
+…ests
+```
+Merge remote-tracking branch 'origin/wao-a' into wao-b
+a9c9c7c
+World AO, workstream C: the object proxies
+…
+d58949b
+```
+Each object definition's spheres, capsules and boxes, fitted to its
+collision geometry on its skeleton (port/linux/game/world_proxies.c),
+placed each window on its nodes as drawn, culled by reach against the
+frustum, the nearest 64 kept with owner slots. The game is read through
+world_proxies_source.h (world_proxies_game.c), so the arithmetic is tested
+alone. The analytic occlusion, the shaders' reference: the sphere with the
+horizon's clipping, the capsule as a line integral with its caps, the box
+as its clipped faces' form factor, each against a numerical integral of the
+hemisphere (docs/world-ao.md). debug.world_proxies_view draws the shapes.
+```
+World AO proxies: the negative controls compile
+de78200
+World AO D: the world term in the emitters, the pixel keys and the dr…
+…
+01b90c5
+```
+…aws' object (work in progress)
+```
+Merge remote-tracking branch 'origin/wao-c' into wao-d
+1b15d98
+World AO field: the start-up pass's bakes, the backends' field and bl…
+…
+16f02aa
+```
+…ock, low-priority guest threads
+```
+World AO field: the game's clock, mkdir declared
+af1c55b
+World AO field: the Vulkan resources' includes
+093a7af
+World AO field: the bake threads lowered through the guest's dispatcher
+d58c584
+World scene: the frame's instances and the world light list (#578)
+…
+4c28870
+```
+Each frame, the loaded BSP as a static instance, then every object that may
+be drawn under its datum handle: its root node as drawn this frame and the
+frame before (render_interpolation.c's pose), its bounding sphere moved with
+it, and the lightmap point below it where its ambient light is sampled
+(found again only when its centre moves). The light list: the dynamic
+lights the rasterizer took the frame before, under their handles (matched
+by where dynamic_lights_drawn says each was drawn, and only one alive), and
+the scenario's light fixtures in the loaded BSP. dynamic_lights.c gains a
+read-only accessor, dynamic_lights_drawn_get. debug.world_scene_dump is now
+a switch writing to the data folder (the game's paths are the data
+folder's); debug.world_scene_log logs the counts and the first object's
+drawn place. world_scene.h's comment on the transform now says what its
+columns are (the node's forward, left, up and position).
+```
+World AO field harness: the deletions' log checked
+aaff2eb
+World AO proxies: a tag index with its salt in the sign bit is a defi…
+…
+bb6ceba
+```
+…nition too
+```
+World AO proxies: a steering wheel is no wheel
+9f0c57c
+World AO D: C's shapes in both emitters, the window's block and objec…
+…
+860220e
+```
+…ts, the shading's CPU reference and its numeric checks
+```
+Merge pull request #580 from OpenH1/wao-a
+…
+b586cbe
+```
+World AO A: the world scene (static triangles, instances, light list)
+```
+Merge remote-tracking branch 'origin/world-ao' into wao-d
+3bff9fb
+Merge remote-tracking branch 'origin/world-ao' into wao-b
+396904d
+Merge remote-tracking branch 'origin/world-ao' into wao-c
+7785862
+World AO proxies: the objects from A's scene
+9fab2a8
+World AO field: the C library's allocator, which the bake's threads m…
+…
+403ed43
+```
+…ay call
+```
+World AO D: the design's shading as built (the combine, the reach's f…
+…
+664a8b4
+```
+…ade, the owner slot, the test block)
+```
+World AO D: the checks build with GCC and in the harness
+eb71050
+World AO D: the Metal shim's float4, its parts apart
+a165350
+World AO doc: a map's other BSPs baked when first switched to; the ba…
+…
+d8a9a7a
+```
+…ke's threads lowered
+```
+erin.cena
+and others
+added 5 commits
+November 4, 2026 06:57
+World AO docs: the sparse field, its format and bindings; pipelines n…
+…
+41499cd
+```
+…ever in a load
+```
+World AO field: HALO_WORLD_SDF_FRAMES counts the frames of play, not …
+…
+17fd8e7
+```
+…the one that prepares a map's pipelines
+```
+Merge pull request #587 from OpenH1/wao-f
+…
+8d208ce
+```
+World AO F: a sparse field where objects can be; the world's pipelines never in a load
+```
+World AO G: the proxies walked a subgroup at a time, each kind only w…
+…
+867050c
+```
+…here its shapes are, a box's frame once
+
+The proxies were the world's cost on b30's start (measured per draw and per
+part of the shader: the field is 0.02 ms of it, the loop's place and shape
+loads, every kind's reach computed for every shape, and the box's bound and
+exact faces the rest). The SPIR-V emitter now:
+
+- walks the subgroup's cells' shapes together (OpGroupNonUniformBitwiseOr of
+  the pixels' masks), lowest first, each pixel taking only its own: the
+  same product, of the same shapes in the same order, while each shape's
+  index, place and kind are the subgroup's (scalar loads, uniform branches);
+  without the subgroups' bitwise operations in pixel shaders it walks each
+  pixel's own, as before (xgpu_spirv_options subgroups, the device's
+  VkPhysicalDeviceVulkan11Properties; HALO_VULKAN_NO_SUBGROUPS);
+- finds each kind's reach, bound, fade and occlusion inside its own branch;
+- finds a box's frame once for its bound and its faces, its far patches or
+  exact faces by a branch, and one face of each pair (the side p is on).
+
+HALO_VULKAN_DRAW_TIMES (and _FILE): a timestamp after each draw of every
+nth frame, summed by the draws' occlusion kind, or written a draw a line to
+compare two fixed-step runs draw for draw.
+
+The reference checks run both walks (check spirv_subgroups); the SPIR-V
+interpreter learned OpGroupNonUniformBitwiseOr and OpShiftLeftLogical.
+```
+World AO docs: where the GPU time goes, how to hold the GPU still to …
+…
+02005cf
+```
+…measure it, and what b30's start still needs
+```
+g0atbutt
+mentioned this pull request
+Nov 4, 2026
+Hardware ray tracing (ray queries) on the lighting slots, from desktops down to the Deck, the Frame and phones
+#602
+Open
+erincena
+mentioned this pull request
+Nov 4, 2026
+Graphical issues with AO
+#588
+Open
+erincena
+and others
+added 23 commits
+November 4, 2026 18:50
+Merge pull request #627 from OpenH1/wao-g
+…
+4b0e3cf
+```
+World AO G: the proxies walked a subgroup at a time; where the GPU time goes
+```
+Merge master into world-ao
+…
+bb3c9d8
+```
+Two conflicts, both resolved with both sides kept:
+- render.c: master's near_clip.h include beside world_ao.h.
+- menu_pictures_render.c: master's maps loaded for their preparations'
+  records alone (their pictures current) and world AO's maps loaded for
+  their distance fields alone now share the pass. A map in neither list
+  that is missing its field is added after master's records, a map's field
+  is begun as it loads whichever list it is in, and a field-only map goes
+  on to the next pose without recording or a picture (and counts as no
+  picture made). The summary says the other maps were prepared, which
+  holds for records and fields alike.
+
+And world_sdf.c's copy of the pass's quiet-run test, which master grew
+(the script console, screenshots, load traces, VR), is now the pass's own,
+menu_pictures_quiet_run, so the two can't drift again.
+```
+World AO: the static scenery baked, its occlusion of the level in lig…
+…
+9fcdecd
+```
+…htmap pages and of the objects in the field (work in progress)
+```
+World AO: the placements' order before its use
+9ad9719
+World AO harness: the scenery part's file functions
+d377c37
+World AO harness: the window's dynamic count, the scenery part's cons…
+…
+06e2007
+```
+…tants in the header
+```
+World AO harness: the file's scenery part round trip and rejections
+85976f1
+Merge master into world-ao-sync
+…
+5a48f4f
+```
+Brings in #631 (the embedded assets moved out of the guest image), which
+frees the room linux-arm64's guest image ran out of.
+```
+World AO harness: a volume's scenery part zeroed where it is made; th…
+…
+c69c30b
+```
+…e reference's control keeps the baked test
+```
+Merge world-ao-sync into wao-static-scenery
+e7a3d88
+World AO light tests: the static shapes left to the pages, a lightmap…
+…
+111f93d
+```
+… pass with its lightmap, the walk's limit
+```
+World AO tests: the static scenery's pages, and the window's dynamic …
+…
+dac480a
+```
+…objects first
+```
+Merge pull request #630 from OpenH1/world-ao-sync
+…
+66ab170
+```
+World AO: master merged in
+```
+World AO: HALO_WORLD_AO_COUNTS, the windows' shapes and the lightmap …
+…
+e4e558b
+```
+…pages drawn with a layer, for measuring
+```
+World AO: the counts before their use
+106f65f
+World AO: the devices that cannot move baked with the static scenery …
+…
+d3759e2
+```
+…(no animations, nothing to damage, unnamed)
+```
+World AO: the counts' dynamic shapes by kind
+4ee1fee
+World AO: a static scenery placement's own draws take none of the fie…
+…
+c34cf95
+```
+…ld, which holds its own geometry
+```
+World AO: the baked test declared with the proxies' interface
+fca4705
+World AO: a static scenery placement's own draws take the field from …
+…
+9103f02
+```
+…the pixel's own depth in it (its ground kept, a canopy within its hull not darkened by it)
+```
+World AO: the static scenery's pages read as their format reads them …
+…
+a0d8f9e
+```
+…(the coverage's: 1, 1, 1, the byte), and the light test's pages so too
+```
+World AO docs: the static scenery, its pages and its fold into the fi…
+…
+32e45c8
+```
+…eld, what it saves and what is left on b30
+```
+Merge pull request #636 from OpenH1/wao-static-scenery
+…
+9ead01a
+```
+World AO: the static scenery baked, its occlusion of the level in lightmap pages and of the objects in the field
+```
+Sign up for free
+to join this conversation on GitHub.
+Already have an account?
+Sign in to comment
+Uh oh!
+There was an error while loading. Please reload this page.
+Labels
+None yet
+1 participant
+Add this suggestion to a batch that can be applied as a single commit.This suggestion is invalid because no changes were made to the code.Suggestions cannot be applied while the pull request is closed.Suggestions cannot be applied while viewing a subset of changes.Only one suggestion per line can be applied in a batch.Add this suggestion to a batch that can be applied as a single commit.Applying suggestions on deleted lines is not supported.You must change the existing code in this line in order to create a valid suggestion.Outdated suggestions cannot be applied.This suggestion has been applied or marked resolved.Suggestions cannot be applied from pending reviews.Suggestions cannot be applied on multi-line comments.Suggestions cannot be applied while the pull request is queued to merge.Suggestion cannot be applied right now. Please check back later.
+You can’t perform that action at this time.

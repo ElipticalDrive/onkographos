@@ -1,0 +1,181 @@
+--- v020.md
++++ v021.md
+@@ -17,5 +17,5 @@
+     *   Learnable offsets: $O_v \in \mathbb{R}^{k \times 3}$, where $k$ is the number of neural Gaussians spawned per anchor [S4].
+ 2.  **Feature Bank:** For each anchor $v$, a multi-resolution feature bank $\{f_v, f_{v\downarrow1}, f_{v\downarrow2}\}$ is maintained, where $\downarrow n$ denotes $f_v$ down-sampled by $2^n$ factors [S4].
+-3.  **Neural Gaussians:** Spawned dynamically from anchors. Each neural Gaussian $i$ has position $\mu_i$, opacity $\alpha_i$, color $c_i$, quaternion $q_i$, and scale $s_i$ [S4].
++3.  **Neural Gaussians:** Spawned dynamically from anchors [S4]. Each neural Gaussian $i$ has position $\mu_i$, opacity $\alpha_i$, color $c_i$, quaternion $q_i$, and scale $s_i$ [S4].
+ 
+ **Parameters:**
+@@ -45,5 +45,5 @@
+         [S4]
+     b.  **Feature Blending:**
+-        Create feature bank $\{f_v, f_{v\downarrow1}, f_{v\downarrow2}\}$. Predict view-dependent weights $\{w, w_1, w_2\}$ using MLP $F_w$:
++        Create feature bank $\{f_v, f_{v\downarrow1}, f_{v\downarrow2}\}$ [S4]. Predict view-dependent weights $\{w, w_1, w_2\}$ using MLP $F_w$:
+         $$ \{w, w_1, w_2\} = \text{Softmax}(F_w(\delta_{vc}, \vec{d}_{vc})) $$
+         Form integrated anchor feature $\hat{f}_v$:
+@@ -51,9 +51,9 @@
+         [S4]
+     c.  **Spawn Neural Gaussians:**
+-        Spawn $k$ neural Gaussians from anchor $x_v$. Calculate positions $\{\mu_0, \dots, \mu_{k-1}\}$:
++        Spawn $k$ neural Gaussians from anchor $x_v$ [S4]. Calculate positions $\{\mu_0, \dots, \mu_{k-1}\}$:
+         $$ \{\mu_0, \dots, \mu_{k-1}\} = x_v + \{O_0, \dots, O_{k-1}\} \cdot l_v $$
+         [S4]
+     d.  **Decode Attributes:**
+-        Decode attributes in one-pass from $\hat{f}_v$, $\delta_{vc}$, and $\vec{d}_{vc}$ via MLPs $F_\alpha, F_c, F_q, F_s$. Example for opacity:
++        Decode attributes in one-pass from $\hat{f}_v$, $\delta_{vc}$, and $\vec{d}_{vc}$ via MLPs $F_\alpha, F_c, F_q, F_s$ [S4]. Example for opacity:
+         $$ \{\alpha_0, \dots, \alpha_{k-1}\} = F_\alpha(\hat{f}_v, \delta_{vc}, \vec{d}_{vc}) $$
+         Colors $\{c_i\}$, quaternions $\{q_i\}$, and scales $\{s_i\}$ are derived similarly [S4].
+@@ -62,5 +62,5 @@
+ 
+ 3.  **Rendering:**
+-    Project 3D Gaussians to 2D Gaussians $G'_i(x')$. Sort by depth. Compute color via alpha-blending:
++    Project 3D Gaussians to 2D Gaussians $G'_i(x')$ [S4]. Sort by depth. Compute color via alpha-blending:
+     $$ C(x') = \sum_{i \in N} c_i \sigma_i \prod_{j=1}^{i-1} (1 - \sigma_j) $$
+     where $\sigma_i = \alpha_i G'_i(x')$ [S4].
+@@ -69,7 +69,7 @@
+     Performed every $N$ iterations.
+     a.  **Growing Operation:**
+-        Quantize neural Gaussians into multi-resolution voxels of size $\epsilon_g^{(m)} = \epsilon_g / 4^{m-1}$ for levels $m \in \{1, 2, 3\}$. Compute averaged gradients $\nabla_g$ over $N$ iterations. If $\nabla_g > \tau_g^{(m)} = \tau_g \cdot 2^{m-1}$, deploy a new anchor at the voxel center if none exists. Apply random elimination to candidates to regulate addition [S4].
++        Quantize neural Gaussians into multi-resolution voxels of size $\epsilon_g^{(m)} = \epsilon_g / 4^{m-1}$ for levels $m \in \{1, 2, 3\}$ [S4]. Compute averaged gradients $\nabla_g$ over $N$ iterations [S4]. If $\nabla_g > \tau_g^{(m)} = \tau_g \cdot 2^{m-1}$, deploy a new anchor at the voxel center if none exists [S4]. Apply random elimination to candidates to regulate addition [S4].
+     b.  **Pruning Operation:**
+-        Accumulate opacity values of neural Gaussians associated with an anchor over $N$ iterations. If accumulated opacity $< 0.5$, remove the anchor [S4].
++        Accumulate opacity values of neural Gaussians associated with an anchor over $N$ iterations [S4]. If accumulated opacity $< 0.5$, remove the anchor [S4].
+ 
+ 5.  **Loss Function:**
+@@ -87,29 +87,37 @@
+     return e_x / e_x.sum(axis=-1, keepdims=True)
+ 
+-def downsample(f, factor):
++def downsample_1d(f, factor):
+     return f[::factor]
+ 
+-def is_in_frustum(anchor_pos, camera):
+-    # Standard frustum culling check
+-    return True
+-
+-def quantize(point, voxel_size):
+-    return np.floor(point / voxel_size) * voxel_size
++class MLP:
++    def __init__(self, in_dim, hidden_dim, out_dim, layers=2):
++        self.weights = [np.random.randn(in_dim if i == 0 else hidden_dim, hidden_dim) for i in range(layers)]
++        self.biases = [np.zeros(hidden_dim) for _ in range(layers)]
++        self.out_weight = np.random.randn(hidden_dim, out_dim)
++        self.out_bias = np.zeros(out_dim)
++    def forward(self, x):
++        h = x
++        for w, b in zip(self.weights, self.biases):
++            h = np.maximum(0, h @ w + b)
++        return h @ self.out_weight + self.out_bias
++
++class Anchor:
++    def __init__(self, x_v, k=10):
++        self.x_v = x_v
++        self.f_v = np.zeros(32)
++        self.l_v = np.ones(3)
++        self.O_v = np.random.randn(k, 3)
++        self.gradients = np.zeros(k)
++        self.opacity_history = np.zeros(100)
+ 
+ def scaffold_gs_training_loop(anchors, cameras, gt_images, 
+                               k=10, epsilon_g=0.1, tau_g=64.0, tau_alpha=0.01, N=100,
+                               lambda_ssim=0.2, lambda_vol=0.001):
+-    # Initialize anchor attributes
+-    for v in anchors:
+-        v.f_v = np.random.randn(32)
+-        v.l_v = np.ones(3)
+-        v.O_v = np.random.randn(k, 3)
+-        
+     # Initialize MLPs (2-layer, hidden dim 32, ReLU)
+-    F_w = MLP(32, 2)
+-    F_alpha = MLP(32, 2)
+-    F_c = MLP(32, 2)
+-    F_q = MLP(32, 2)
+-    F_s = MLP(32, 2)
++    F_w = MLP(4, 32, 3)
++    F_alpha = MLP(39, 32, k)
++    F_c = MLP(39, 32, k * 3)
++    F_q = MLP(39, 32, k * 4)
++    F_s = MLP(39, 32, k * 3)
+     
+     optimizer = SGD(params=anchors + [F_w, F_alpha, F_c, F_q, F_s], lr=0.001)
+@@ -119,4 +127,5 @@
+             gaussians = []
+             for v in anchors:
++                # [G] Standard view frustum culling check
+                 if not is_in_frustum(v.x_v, camera):
+                     continue
+@@ -125,6 +134,6 @@
+                 d_vc = (v.x_v - camera.x_c) / delta_vc
+                 
+-                f_v_down1 = downsample(v.f_v, 2)
+-                f_v_down2 = downsample(v.f_v, 4)
++                f_v_down1 = downsample_1d(v.f_v, 2)
++                f_v_down2 = downsample_1d(v.f_v, 4)
+                 
+                 weights = softmax(F_w.forward(np.concatenate([delta_vc, d_vc])))
+@@ -143,4 +152,5 @@
+                                           'c': colors[i], 'q': quats[i], 's': scales[i]})
+                         
++            # [G] Tile-based rasterization and alpha blending of 2D Gaussians
+             rendered_img = rasterize_and_blend(gaussians, camera)
+             
+@@ -151,4 +161,9 @@
+             loss = loss_l1 + lambda_ssim * loss_ssim + lambda_vol * loss_vol
+             optimizer.step(loss)
++            
++            # Track gradients and opacity for refinement
++            for i in range(k):
++                v.gradients[i] = alphas[i] # Placeholder for actual gradient accumulation
++                v.opacity_history[iteration % 100] = alphas[i]
+             
+             if iteration % N == 0:
+@@ -158,5 +173,5 @@
+                     for i in range(k):
+                         grad = v.gradients[i]
+-                        voxel_id = tuple(quantize(v.x_v + v.O_v[i]*v.l_v, epsilon_g))
++                        voxel_id = tuple(np.floor((v.x_v + v.O_v[i]*v.l_v) / epsilon_g) * epsilon_g)
+                         voxel_grads[voxel_id] = voxel_grads.get(voxel_id, 0) + grad
+                         
+@@ -164,18 +179,8 @@
+                     if grad > tau_g:
+                         if not any(np.allclose(a.x_v, voxel_id) for a in anchors):
+-                            anchors.append(Anchor(voxel_id))
++                            anchors.append(Anchor(voxel_id, k))
+                             
+                 # Pruning
+-                anchors = [v for v in anchors if v.opacity_history.sum() >= 0.5]
+-
+-class MLP:
+-    def __init__(self, hidden_dim, layers):
+-        self.weights = [np.random.randn(hidden_dim, hidden_dim) for _ in range(layers)]
+-        self.biases = [np.zeros(hidden_dim) for _ in range(layers)]
+-    def forward(self, x):
+-        h = x
+-        for w, b in zip(self.weights, self.biases):
+-            h = np.maximum(0, h @ w + b)
+-        return h
++                anchors = [v for v in anchors if np.sum(v.opacity_history) >= 0.5]
+ 
+ class SGD:
+@@ -187,13 +192,4 @@
+             if hasattr(p, 'grad'):
+                 p.value -= self.lr * p.grad
+-
+-class Anchor:
+-    def __init__(self, x_v):
+-        self.x_v = x_v
+-        self.f_v = np.zeros(32)
+-        self.l_v = np.ones(3)
+-        self.O_v = np.zeros((10, 3))
+-        self.gradients = np.zeros(10)
+-        self.opacity_history = np.zeros(100)
+ ```
+ 
+@@ -208,5 +204,5 @@
+ ## Operating characteristics
+ *   **Time Complexity:** Rendering speed is around 100 FPS at 1K resolution, comparable to original 3D-GS with little computational overhead [S4]. On-the-fly prediction is limited to anchors within the view frustum, and trivial Gaussians are filtered by opacity threshold $\tau_\alpha$ to cut computational load [S4].
+-*   **Memory Complexity:** Storage requirements are significantly reduced as only anchor points and MLP predictors are stored per scene. Reduction is 4.4x–10.2x compared to 3D-GS [S4].
++*   **Memory Complexity:** Storage requirements are significantly reduced as only anchor points and MLP predictors are stored per scene [S4]. Reduction is 4.4x–10.2x compared to 3D-GS [S4].
+ *   **Performance:** Achieves comparable PSNR/SSIM to 3D-GS on Mip-NeRF360 but surpasses SOTA on Tanks&Temples and DeepBlending [S4].
+ *   **Strengths:** Robust to view changes, compact storage, real-time rendering, handles sparse initialization regions well via growing/pruning [S4].

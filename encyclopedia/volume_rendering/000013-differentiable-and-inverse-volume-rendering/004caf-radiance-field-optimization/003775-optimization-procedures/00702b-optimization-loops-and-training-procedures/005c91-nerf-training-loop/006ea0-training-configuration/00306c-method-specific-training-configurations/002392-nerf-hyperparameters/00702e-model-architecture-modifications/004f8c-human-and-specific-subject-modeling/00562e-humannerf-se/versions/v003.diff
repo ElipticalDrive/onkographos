@@ -1,0 +1,315 @@
+--- v002.md
++++ v003.md
+@@ -4,131 +4,201 @@
+ 
+ ## Overview
+-HumanNeRF-SE is a method for synthesizing novel pose images of humans from monocular video inputs by combining explicit SMPL shape priors with an implicit NeRF representation [S1]. It solves the problem of overfitting and high computational complexity inherent in previous deformable NeRF methods, which often require large numbers of optimizable parameters and multi-camera data [S1]. Unlike siblings such as [HumanNeRF](13842-humannerf.md) and [Unified Volumetric Avatar (UVA)](13784-unified-volumetric-avatar-uva.md) that learn blending weights from scratch or fine-tune SMPL weights, HumanNeRF-SE uses frozen SMPL blending weights for rigid deformation and filters irrelevant sampling points using a sparse convolutional voxel volume, ensuring pose generalization without pose leakage [S1].
++HumanNeRF-SE is a method for synthesizing novel pose images of humans from monocular video inputs by combining explicit SMPL shape priors with an implicit NeRF representation [S1]. It solves the problem of overfitting and high computational complexity inherent in previous NeRF-based human avatars, which typically require large numbers of optimizable parameters and multi-camera data [S1]. Unlike sibling methods such as [HumanNeRF](13842-humannerf.md) and [Unified Volumetric Avatar (UVA)](13784-unified-volumetric-avatar-uva.md) that rely on frame-level conditioning or learned blend weights, HumanNeRF-SE uses frozen SMPL blending weights for rigid deformation and point-level spatial-aware features for non-rigid refinement, ensuring pose generalization without pose leakage [S1].
+ 
+ ## How it works
+-**Inputs:** Monocular video frames of a human performer; SMPL model parameters (vertices $v$, joints $J$) for each frame.
+-**Outputs:** Rendered image $C(r)$ for arbitrary viewpoints and poses.
+-
+-**Data Structures:**
+-*   **Voxel Volume $V$:** A sparse 3D grid. Each voxel containing SMPL vertices stores a tuple $(n_v, w_1, \dots, w_{24})$, where $n_v$ is the vertex count (occupancy) and $w_j$ are the SMPL Linear Blending Skinning (LBS) weights for the 24 joints [S1]. Empty voxels store $(0, 0, \dots, 0)$ [S1].
+-*   **Spatial-Aware Features $F_s$:** Output of channel-by-channel convolution on $V$, providing local geometric context for sampling points [S1].
+-
+-**Numbered Steps:**
+-
+-1.  **Voxelization:** Calculate the bounding box of the SMPL vertices $v$. Scale the bounding box to a set voxel size $v_s$. Find the least common multiple of the axes dimensions and 32. Scale vertices down by $v_s$ after subtracting the minimum coordinate. Construct the voxel volume $V$ using Sparse Convolution $Sp$:
+-    $$ V = Sp(v, v_s, W) $$
+-    [S1]
+-
+-2.  **Conv-Filter (Feature Extraction & Point Filtering):** Initialize a convolution kernel to one. Perform channel-by-channel convolution on $V$ to obtain spatially-aware features $F_s$. For the $i$-th channel:
++The method maps 3D query points from the target observation space to a canonical T-pose space using a two-stage deformation process (rigid then non-rigid), conditioned on explicit SMPL geometry rather than frame indices. It filters irrelevant sampling points using a sparse convolutional voxel volume derived from SMPL vertices, significantly reducing the number of points queried by the neural network.
++
++### Inputs and Outputs
++*   **Inputs:** Monocular video frames $\{I_n\}$, corresponding SMPL mesh vertices $v$ and pose parameters $J$ (rotation/translation of joints relative to T-pose) for each frame.
++*   **Outputs:** Synthesized RGB images $C(r)$ for arbitrary viewpoints and poses.
++
++### Data Structures
++**Voxel Volume $V$:**
++A sparse 3D grid representing the SMPL space.
++*   **Layout:** Each voxel stores a tuple of values.
++    *   If the voxel contains SMPL vertices: $(n_v, w_1, w_2, \dots, w_{24})$.
++        *   $n_v$: Occupancy count (number of vertices in the voxel).
++        *   $w_1 \dots w_{24}$: The Linear Blending Skinning (LBS) weights from the pre-trained SMPL model for the 24 joints.
++    *   If the voxel is empty: $(0, 0, \dots, 0)$.
++*   **Construction:**
++    1.  Calculate the bounding box min/max of SMPL vertices $v$.
++    2.  Scale the bounding box to a target voxel size $v_s$.
++    3.  Find the least common multiple of the axes dimensions and 32.
++    4.  Scale vertices down by $v_s$ after subtracting the minimum.
++    5.  Populate $V$ using Sparse Convolution $Sp$:
++        $$ V = Sp(v, v_s, W) $$
++        where $W$ is the SMPL weight matrix [S1].
++
++**Spatial-Aware Features $F_s$:**
++A feature volume obtained by convolving $V$.
++*   **Layout:** Same spatial dimensions as $V$. Each voxel contains a feature vector resulting from channel-by-channel convolution.
++*   **Construction:**
+     $$ F_{s,i} = \sum_{m=h}^{h'} \sum_{n=w}^{w'} \sum_{t=d}^{d'} \nu_{m,n,t,i} \cdot \vartheta_{m,n,t,i} $$
+-    where $\nu$ is the voxel value and $\vartheta$ is the kernel weight [S1].
+-    Query the occupancy of $F_s(x)$ for each sampling point $x$:
+-    *   If $F_s(x) = 0$, the point is irrelevant ($x_o$). Force its density $\sigma(x_o) = 0$ and exclude it from further deformation [S1].
+-    *   If $F_s(x) > 0$, the point is human-related ($x_r$). Keep it for canonicalization [S1].
+-
+-3.  **Point Canonicalization (Rigid Deformation):** Query the nearest neighbor SMPL weights $W_{smpl} = K(x_r, v)$ for the remaining points $x_r$. Compute the rigid deformation $x^{rcnl}$ using the frozen SMPL blending weights and current pose joints $J$:
+-    $$ x^{rcnl} = \sum_{j \in J} w_j ((x_r \cdot R_j) + T_j) $$
+-    where $R_j$ and $T_j$ are the rotation and translation of the $j$-th joint relative to the T-pose, and $w_j$ is the deformation weight of the $j$-th channel of $W_{smpl}$ on the sampled point [S1].
+-
+-4.  **Point Canonicalization (Non-Rigid Refinement):** Refine the coarse coordinates using a network $P$ conditioned on the spatial-aware features $F_s$ and the filtered points $x_r$:
+-    $$ x^{cnl} = x^{rcnl} + P(F_s, x_r) $$
+-    This step accounts for non-rigid clothing deformation that rigid LBS cannot capture [S1].
+-
+-5.  **Appearance Net:** Encode the canonical coordinates $x^{cnl}$ using positional encoding (as in standard NeRF). Pass through an MLP $M_\sigma$ to output color $\mathbf{c}$ and density $\sigma$:
+-    $$ \mathbf{c}, \sigma = M_\sigma(x^{cnl}) $$
+-    [S1]
+-
+-6.  **Volume Rendering:** Render the image using differentiable volume rendering along ray $r$ with $N_s$ samples:
+-    $$ \tilde{C}_t(r) = \sum_{k=1}^{N_s} \alpha_k \mathbf{c}(x_k) \prod_{j=1}^{k-1} (1 - \alpha_j) $$
+-    where $\alpha_i = 1 - \exp(-\sigma(x_i) \Delta t_i)$ [S1].
+-
+-**Pseudocode:**
++    where $\nu$ is the voxel value, $\vartheta$ is the convolution kernel (initialized to one), and $h', w', d'$ are adjusted dimensions based on kernel size [S1].
++
++### Numbered Steps
++
++1.  **Voxelization:** Construct the voxel volume $V$ from SMPL vertices $v$ as described in Data Structures.
++2.  **Conv-Filter (Feature Extraction & Point Filtering):**
++    *   Perform channel-by-channel convolution on $V$ to obtain spatial-aware features $F_s$.
++    *   Query $F_s$ at each sampling point $x$.
++    *   Classify points into two sets:
++        *   **Irrelevant points ($x_o$):** If $F_s(x) = 0$ (occupancy is zero). These points are filtered out.
++        *   **Human-related points ($x_r$):** If $F_s(x) > 0$. These points remain for deformation.
++    *   For $x_o$, force density $\sigma(x_o) = 0$ [S1].
++3.  **Rigid Deformation (Canonicalization):**
++    *   For each human-related point $x_r$, query the nearest neighbor SMPL weights $W_{smpl} = K(x_r, v)$, where $K$ finds the weights associated with the nearest SMPL vertex [S1].
++    *   Compute the rigidly deformed coordinate $x^{rcnl}$ using the frozen SMPL weights and current pose $J$:
++        $$ x^{rcnl} = \sum_{j \in J} w_j ((x_r \cdot R_j) + T_j) $$
++        where $J$ is the set of joints, $w_j$ is the deformation weight of the $j$-th channel of $W_{smpl}$, and $R_j, T_j$ are the rotation and translation of the $j$-th joint in the current pose relative to the T-pose [S1].
++4.  **Non-Rigid Refinement:**
++    *   Refine the coarse canonical coordinate $x^{rcnl}$ using a neural network $P$ conditioned on the point-level spatial-aware features $F_s$ and the point $x_r$:
++        $$ x^{cnl} = x^{rcnl} + P(F_s, x_r) $$
++    *   Note: $P$ uses only point-level features, not frame-level features (e.g., frame index), to ensure pose generalization [S1].
++5.  **Appearance Network:**
++    *   Encode the final canonical coordinate $x^{cnl}$ using positional encoding (standard NeRF encoding).
++    *   Pass the encoded vector through an MLP $M_\sigma$ to output color $\mathbf{c}$ and density $\sigma$:
++        $$ \mathbf{c}, \sigma = M_\sigma(x^{cnl}) $$
++    *   The full mapping is summarized as:
++        $$ \mathbf{c}, \sigma = M_\sigma (P(F_s, x_r) + D(x_r, K(x_r, V), J)) $$
++        where $D$ represents the rigid deformation process [S1].
++6.  **Differentiable Volume Rendering:**
++    *   Render the image along ray $r$ with $N_s$ samples:
++        $$ \tilde{C}_t(r) = \sum_{i=1}^{N_s} \alpha_i \mathbf{c}(x_i) \prod_{j=1}^{i-1} (1 - \alpha_j) $$
++        where $\alpha_i = 1 - \exp(-\sigma(x_i) \Delta t_i)$ and $\Delta t_i$ is the distance between samples [S1].
++
++### Pseudocode
+ 
+ ```python
+-def human_nerf_se_forward(smpl_vertices, pose_joints, ray_samples, voxel_size):
+-    # 1. Voxelization
+-    # Calculate bounding box of smpl_vertices
++def human_nerf_se_train_step(video_frames, smpl_vertices, smpl_weights, poses):
++    """
++    video_frames: List of input images
++    smpl_vertices: List of SMPL mesh vertices for each frame
++    smpl_weights: Pre-trained SMPL LBS weights (24 joints)
++    poses: List of pose parameters (joint rotations/translations)
++    """
++    
++    # 1. Voxelization (One-time setup per subject)
++    # Calculate bounding box of SMPL vertices
+     min_coord, max_coord = compute_bounding_box(smpl_vertices)
+-    # Scale vertices to voxel grid
+-    scaled_vertices = scale_vertices(smpl_vertices, min_coord, voxel_size)
+-    # Construct sparse voxel volume V with occupancy and SMPL weights
+-    V = sparse_convolution(scaled_vertices, voxel_size)
+-    
+-    # 2. Conv-Filter
+-    # Initialize kernel to ones
++    voxel_size = get_voxel_size()
++    
++    # Scale vertices and populate sparse voxel volume V
++    # V stores (occupancy_count, w1...w24)
++    V = sparse_convolution(smpl_vertices, min_coord, max_coord, voxel_size, smpl_weights)
++    
++    # 2. Conv-Filter (Feature Extraction)
++    # Initialize convolution kernel to ones
+     kernel = initialize_kernel_ones()
+-    # Channel-by-channel convolution to get spatial features Fs
+-    Fs = channel_by_channel_conv(V, kernel)
+-    
+-    # Filter points
++    
++    # Channel-by-channel convolution to get spatial-aware features Fs
++    Fs = channel_by_channel_convolution(V, kernel)
++    
++    # 3. Sampling and Filtering
++    # Generate random sampling points x in the view frustum
++    all_points = sample_points_in_frustum()
++    
+     human_points = []
+-    filtered_points = []
+-    for point in ray_samples:
+-        # Query spatial feature at point location
+-        feature_val = query_voxel(Fs, point)
+-        if feature_val > 0:
+-            human_points.append(point)
++    irrelevant_points = []
++    
++    for x in all_points:
++        # Query spatial-aware feature at x
++        feature_val = query_volume(Fs, x)
++        
++        if feature_val == 0:
++            # Filter out irrelevant points
++            irrelevant_points.append(x)
+         else:
+-            filtered_points.append(point)
++            # Keep human-related points
++            human_points.append(x)
+             
+-    # 3. Rigid Deformation
+-    # Query nearest SMPL weights for human points
+-    W_smpl = query_nearest_smpl_weights(human_points, smpl_vertices)
+-    
+-    # Compute rigid transform using frozen SMPL weights and current pose
+-    x_rcnl = zeros_like(human_points)
+-    for j in pose_joints:
+-        w_j = W_smpl[:, j]
+-        R_j, T_j = get_pose_transform(j, pose_joints)
+-        x_rcnl += w_j * (human_points * R_j + T_j)
+-        
+-    # 4. Non-Rigid Refinement
+-    # Get spatial features for human points
+-    Fs_human = query_voxel(Fs, human_points)
+-    # Refine coordinates using point-level network P
+-    x_cnl = x_rcnl + P(Fs_human, human_points)
+-    
+-    # 5. Appearance Net
+-    # Encode canonical points
+-    encoded_cnl = positional_encoding(x_cnl)
+-    # Predict color and density
+-    color, density = MLP(encoded_cnl)
+-    
+-    # Set density to 0 for filtered points
+-    density_filtered = zeros_like(density)
+-    
+-    # 6. Rendering
+-    # Combine densities and colors for all samples
+-    all_density = concatenate(density, density_filtered)
+-    all_color = concatenate(color, zeros_like(color))
+-    
+-    # Volume render
+-    alpha = 1 - exp(-all_density * delta_t)
+-    T = product(1 - alpha[:-1])
+-    rendered_color = sum(alpha * all_color * T)
+-    
+-    return rendered_color
++    # 4. Rigid Deformation
++    canonical_coarse = []
++    for x in human_points:
++        # Query nearest SMPL weights for point x
++        W_smpl = query_nearest_weights(x, smpl_vertices, smpl_weights)
++        
++        # Compute rigid deformation using current pose J
++        x_rcnl = rigid_deformation(x, W_smpl, current_pose)
++        canonical_coarse.append((x, x_rcnl))
++        
++    # 5. Non-Rigid Refinement
++    canonical_final = []
++    for x, x_rcnl in canonical_coarse:
++        # Query spatial feature for this point
++        Fs_x = query_volume(Fs, x)
++        
++        # Refine using point-level network P
++        # P takes Fs_x and x as input
++        x_cnl = x_rcnl + non_rigid_refinement_network(Fs_x, x)
++        canonical_final.append((x, x_cnl))
++        
++    # 6. Appearance Network
++    colors = []
++    densities = []
++    
++    for x, x_cnl in canonical_final:
++        # Positional Encoding
++        encoded_x = positional_encoding(x_cnl)
++        
++        # MLP to predict color and density
++        c, sigma = appearance_mlp(encoded_x)
++        
++        colors.append(c)
++        densities.append(sigma)
++        
++    # 7. Rendering
++    # Render image using differentiable volume rendering
++    # Filtered points (irrelevant_points) have density forced to 0
++    rendered_image = volume_rendering(rays, colors, densities)
++    
++    return rendered_image
++
++def rigid_deformation(x, W_smpl, pose):
++    """
++    x: 3D point in observation space
++    W_smpl: List of 24 weights for the nearest SMPL vertex
++    pose: Current pose parameters (J)
++    """
++    x_rcnl = [0, 0, 0]
++    for j in range(24):
++        w_j = W_smpl[j]
++        R_j, T_j = pose.joint_rotation(j), pose.joint_translation(j)
++        
++        # Transform point by joint j
++        transformed_point = transform_point(x, R_j, T_j)
++        
++        # Weighted sum
++        x_rcnl += w_j * transformed_point
++        
++    return x_rcnl
+ ```
+ 
+-**Parameters:**
+-*   $v_s$: Voxel size used to scale the bounding box of the SMPL model [S1].
+-*   $\lambda$: Weight for the MSE loss term in the total loss function [S1].
+-*   SMPL Blending Weights: Frozen, not fine-tuned [S1].
+-
+-**Edge Cases and Pitfalls:**
+-*   **Overfitting:** Using learnable or fine-tuned SMPL weights leads to artifacts in novel poses because the weights overfit the limited training data [S1].
+-*   **Pose Leakage:** Using frame-level features (e.g., frame index) in the refinement network causes the model to memorize specific poses rather than generalizing. HumanNeRF-SE avoids this by using only point-level features $F_s$ [S1].
+-*   **Irrelevant Points:** Simply using nearest SMPL weights fills the volume with incorrect colors because training deforms irrelevant points onto the body. The Conv-Filter is essential to remove these points [S1].
+-*   **Alpha Map Errors:** If points are not filtered, the network may learn incorrect alpha maps due to color diffusion into surrounding space, increasing computational complexity and training time [S1].
++### Parameters
++*   **$v_s$ (Voxel Size):** Determines the resolution of the voxel volume. Not given in the sources.
++*   **$\lambda$:** Weight for the MSE loss term in the total loss function. Not given in the sources.
++*   **Rigid Deformation Weights:** Frozen blending weights from SMPL. No fine-tuning or changes are applied [S1].
++*   **Non-Rigid Deformation Input:** Conditioned exclusively on point-level spatial-aware features $F_s$ and points $x_r$. Frame-level features (pose/index) are explicitly excluded [S1].
++
++### Edge Cases and Pitfalls
++*   **Overfitting with Learned Weights:** Previous methods that learn blend weights from scratch or fine-tune SMPL weights overfit limited input data, causing artifacts in novel poses. HumanNeRF-SE avoids this by using frozen SMPL weights [S1].
++*   **Irrelevant Point Deformation:** Simply using nearest SMPL weights deforms irrelevant sampling points (e.g., background) onto the human body, filling the space with incorrect colors. The Conv-Filter step is critical to remove these points ($x_o$) by forcing their density to zero [S1].
++*   **Pose Leakage:** Methods using frame-level features (like frame index) suffer from pose leakage, where the model memorizes specific poses rather than generalizing. HumanNeRF-SE uses only point-level features to prevent this [S1].
++*   **Alpha Map Learning Errors:** If filtering is not applied, the network may learn incorrect alpha maps due to color diffusion into surrounding space, increasing computational complexity and training time [S1].
+ 
+ ## Operating characteristics
+-*   **Complexity:** Reduces required sampling points from ~300K to less than 100K [S1]. Uses less than 1% of learnable parameters compared to previous methods [S1].
+-*   **Performance:** Reduces training time by 95% (to 1/20 of previous methods) [S1]. Increases rendering speed by 15 times without using existing acceleration modules [S1].
+-*   **Quality:** On ZJU-MOCAP few-shot evaluation: PSNR=31.09, SSIM=0.974, LPIPS=24.085 (where LPIPS is scaled by 1,000). This outperforms HumanNeRF (PSNR=30.10, SSIM=0.9677, LPIPS=33.056) and MonoHuman (PSNR=30.11, SSIM=0.9684, LPIPS=32.084) [S1].
+-*   **Strengths:** Generalizes to diverse poses with few-shot input; avoids overfitting; computationally efficient; works with monocular input.
+-*   **Limitations:** Relies on the accuracy of the SMPL model; performance may degrade if the subject's body shape deviates significantly from the SMPL average [S1].
++*   **Computational Complexity:** Reduces the number of required sampling points from ~300,000 to less than 100,000 [S1].
++*   **Parameter Count:** Uses less than 1% of the learnable parameters compared to previous methods [S1].
++*   **Training Time:** Reduces training time by 95% (or to 1/20 of previous methods) [S1].
++*   **Rendering Speed:** Increases rendering speed by 15 times without using existing acceleration modules (like Octree or Grid encoding) [S1].
++*   **Performance (ZJU-MOCAP Few-Shot):**
++    *   **HumanNeRF-SE:** PSNR=31.09, SSIM=0.974, LPIPS=24.085.
++    *   **HumanNeRF:** PSNR=30.10, SSIM=0.9677, LPIPS=33.056.
++    *   **MonoHuman:** PSNR=30.11, SSIM=0.9684, LPIPS=32.084 [S1].
++*   **Strengths:** High pose generalization with monocular input; avoids overfitting; efficient training and rendering.
++*   **Limitations:** Relies on the accuracy of the SMPL model; performance may degrade if the SMPL fit is poor for the specific subject (though SMPL is pre-trained on diverse humans) [S1].
+ 
+ ## Background
+-HumanNeRF-SE was introduced in 2024 by Miles et al. in the paper "HumanNeRF-SE: A Simple yet Effective Approach to Animate HumanNeRF with Diverse Poses" [S1]. It addresses the limitations of earlier methods like HumanNeRF [56] and MonoHuman [62], which struggled with overfitting and required extensive training data or multi-camera setups [S1]. The method builds on the insight that explicit shape priors (SMPL) can reduce the burden on the implicit NeRF representation [S1].
++HumanNeRF-SE was introduced in 2024 by Miles et al. [S1]. It addresses the limitations of earlier NeRF-based human avatars like [HumanNeRF](13842-humannerf.md), which required large numbers of optimizable parameters and often multi-camera data. The key insight was that explicit shape priors (SMPL) can reduce the sampling points needed for implicit representation and that frozen SMPL blending weights can generalize rigid deformation without overfitting. The method was evaluated on the ZJU-MOCAP dataset and in-the-wild captured videos, demonstrating superior performance in few-shot scenarios compared to state-of-the-art methods like MonoHuman and Ani-NeRF [S1].
+ 
+ ## Sources

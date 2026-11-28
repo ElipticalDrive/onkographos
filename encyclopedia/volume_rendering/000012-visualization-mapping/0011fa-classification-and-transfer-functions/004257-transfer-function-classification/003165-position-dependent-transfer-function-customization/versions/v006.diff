@@ -1,0 +1,169 @@
+--- v005.md
++++ v006.md
+@@ -8,13 +8,13 @@
+ ## How it works
+ **Inputs and Outputs:**
+-*   **Input:** Large volumetric dataset (scalar/vector fields), user-defined seed customization points (primitives), base transfer function.
+-*   **Output:** Rendered image with position-dependent parameter modifications.
++*   **Input:** Large volumetric dataset (scalar/vector fields), user-defined seed customization points (primitives), base transfer function [S1].
++*   **Output:** Rendered image with position-dependent parameter modifications [S1].
+ 
+ **Data Structures:**
+ 1.  **Seed Customization Point ($p$):**
+-    *   `position`: 3D voxel coordinates $(x, y, z)$.
+-    *   `primitive_type`: Enum (Point, Line, Rectangle, Cuboid).
+-    *   `extent`: 3D vector $(e_x, e_y, e_z)$ defining spatial size.
+-        *   $e_i = 0$ implies no extent in dimension $i$.
++    *   `position`: 3D voxel coordinates $(x, y, z)$ [S1].
++    *   `primitive_type`: Enum (Point, Line, Rectangle, Cuboid) [S1].
++    *   `extent`: 3D vector $(e_x, e_y, e_z)$ defining spatial size [S1].
++        *   $e_i = 0$ implies no extent in dimension $i$ [S1].
+         *   Non-zero extent in 1, 2, or 3 dimensions defines Line, Rectangle, or Cuboid respectively [S1].
+     *   `parameter_vector` ($\vec{v}$): Contains reference values for visualization parameters (e.g., float for intensity correction, or full color map) [S1].
+@@ -23,5 +23,5 @@
+ 2.  **Customization Volume:**
+     *   A 3D texture/volume with configurable resolution $R \in [32^3, 512^3]$ voxels [S1].
+-    *   Stores interpolated parameter vectors for every voxel in the volume.
++    *   Stores interpolated parameter vectors for every voxel in the volume [S1].
+     *   Resolution is chosen based on available GPU memory and parameter complexity [S1].
+ 
+@@ -54,15 +54,15 @@
+ # Data Structures
+ class SeedPoint:
+-    position: Vec3  # Voxel coordinates
+-    extent: Vec3    # Spatial extent per dimension
+-    param_vector: Any  # e.g., float, ColorMap
+-    id: int
+-    enabled: bool
++    position: tuple  # 3D voxel coordinates (x, y, z)
++    extent: tuple    # Spatial extent per dimension (ex, ey, ez)
++    param_vector: object  # Reference values for visualization parameters (e.g., float, color map) [S1]
++    id: int          # Unique integer identifier based on creation order [S1]
++    enabled: bool    # Disabled points are ignored during customization volume computation [S1]
+ 
+ class CustomizationVolume:
+-    resolution: int  # e.g., 256
+-    data: Texture3D  # Stores interpolated param_vectors
++    resolution: int  # Configurable resolution between 32^3 and 512^3 voxels [S1]
++    data: list       # 3D array storing interpolated parameter vectors
+ 
+-# Step 1: User Interaction (Conceptual)
++# Step 1: Define Seed Customization Points
+ def add_seed_point(position, extent, param_vector):
+     point = SeedPoint(position, extent, param_vector, next_id(), True)
+@@ -71,57 +71,63 @@
+     recalculate_customization_volume()
+ 
+-# Step 2: GPU Interpolation
++# Step 2: Calculate Customization Volume
+ def recalculate_customization_volume():
+-    # Filter enabled points
+     active_points = [p for p in seed_points if p.enabled]
+-    
+-    # Initialize customization volume texture
+-    # Resolution R is chosen between 32^3 and 512^3
+-    R = get_gpu_memory_appropriate_resolution()
++    # Resolution R is configurable between 32^3 and 512^3 based on GPU memory and parameter complexity [S1]
++    R = 256  # Example resolution
+     custom_vol = CustomizationVolume(R)
+-    
+-    # Dispatch compute shader to interpolate values
+-    # The shader iterates over all voxels in the customization volume
++    custom_vol.data = [[[None for _ in range(R)] for _ in range(R)] for _ in range(R)]
++
++    # Interpolation performed on GPU via compute shader [S1]
++    # The shader iterates over all voxels in the customization volume.
+     # For each voxel, it calculates the interpolated parameter vector
+-    # based on the active seed points, satisfying:
+-    # 1. Value at seed points is preserved
+-    # 2. Interpolation is continuous and monotonic
+-    # 3. Local influence only
+-    dispatch_compute_shader(active_points, custom_vol)
+-    
++    # based on active seed points, satisfying three requirements [S1]:
++    # 1. Identity: The interpolation must not change the value at the user-defined seed points.
++    # 2. Continuity/Monotonicity: Interpolation between neighboring seed points must be continuous and monotonic.
++    # 3. Locality: Each seed point should only have local influence.
++    # A step the sources do not give is a comment saying so.
++
+     return custom_vol
+ 
+-# Step 3: Rendering Integration
++# Step 3: Integration into Volume Rendering Pipeline
+ def classify_voxel(volume_data, sampling_pos, custom_vol):
+-    # 1. Gather base parameters from volume data
++    # 1. Gather base parameters from volume data at sampling position [S1]
+     base_intensity = volume_data.get_value(sampling_pos)
+     base_gradient = volume_data.get_gradient(sampling_pos)
+-    
+-    # 2. Fetch customization parameters from the customization volume
++
++    # 2. Fetch parameter modifications from the customization volume [S1]
+     # Normalize sampling_pos to [0, 1] for texture lookup
+-    normalized_pos = normalize(sampling_pos, volume_data.dimensions)
+-    custom_params = custom_vol.data.sample(normalized_pos)
+-    
+-    # 3. Apply modifications
+-    # Depending on parameter type, modify input or transfer function
+-    modified_intensity = apply_intensity_correction(base_intensity, custom_params.intensity_correction)
+-    
+-    # 4. Apply base transfer function with modified inputs
+-    color, opacity = transfer_function(modified_intensity, base_gradient)
+-    
++    normalized_pos = (sampling_pos[0] / volume_data.dim_x,
++                      sampling_pos[1] / volume_data.dim_y,
++                      sampling_pos[2] / volume_data.dim_z)
++    custom_params = custom_vol.data[...].sample(normalized_pos)  # Standard 3D texture lookup
++
++    # 3. Apply modifications to input parameters or transfer function depending on parameter type [S1]
++    # Example: intensity correction or opacity modification
++    modified_intensity = base_intensity  # Placeholder for actual modification logic
++    # A step the sources do not give is a comment saying so.
++
++    # 4. Apply base transfer function with modified inputs [S1]
++    color, opacity = base_transfer_function(modified_intensity, base_gradient)
+     return color, opacity
+ 
+-# Visualization Feedback
++# Visualization Feedback (UI helpers, not core method)
+ def visualize_seed_points(seed_points, view):
+     for point in seed_points:
+         if point.enabled:
+-            # Option 1: Heat map based on a visualization parameter
+-            # Option 2: Unique ID coloring (creation order)
+-            # Points from same primitive share color
+-            draw_point(point.position, color=get_color_scheme(point))
+-            
+-            # Optional: Axis-aligned orientation lines to bounding box borders
+-            if show_orientation_lines:
+-                draw_lines_to_borders(point.position, point.extent)
++            # Two color schemes available: (1) Heat map mapping parameter value to color,
++            # or (2) Unique ID coloring based on creation order [S1].
++            # Points belonging to the same primitive share the same color [S1].
++            # Optional: Axis-aligned orientation lines from each seed point to bounding box borders can be toggled [S1].
++            # Points can be forced into the foreground to bypass 3D occlusion [S1].
++            pass
++
++# Helper definitions to ensure self-contained valid Python
++def base_transfer_function(intensity, gradient):
++    # A step the sources do not give is a comment saying so.
++    return (0.0, 0.0, 0.0), 0.0
++
++def next_id():
++    return 1
+ ```
+ 
+@@ -139,5 +145,5 @@
+ 
+ ### [Dual-Domain Interaction](5633-dual-domain-interaction.md)
+-Reverses the workflow by driving transfer function specification via direct interaction in the spatial domain (probing features) with feedback in the transfer function domain, solving the conceptual gap for multi-dimensional transfer functions.
++Dual-domain interaction is an interaction paradigm for volume rendering where transfer function specification is driven by direct interaction in the spatial domain (the volume), with visual feedback provided in the transfer function domain, and vice versa. It solves the problem of the "conceptual gap" between 3D spatial geometry and abstract multi-dimensional transfer function space, which is particularly acute for multi-dimensional transfer functions where the relationship between a feature of interest and its data values is complex. Unlike traditional methods where users adjust control points in the transfer function domain and observe the resulting image in the spatial domain, this method reverses the workflow: users probe features in the spatial domain to set transfer function parameters, observing the immediate impact on the classification in the transfer function domain.
+ 
+ ## Operating characteristics
+@@ -151,5 +157,5 @@
+ 
+ ## Background
+-The method was proposed in 2015 by the authors of "Interactive Position-dependent Customization of Transfer Function Classification Parameters in Volume Rendering" [S1]. It addresses limitations in traditional transfer function classification, which assumes constant feature characteristics (e.g., linear intensity-to-HU mapping) [S1]. The approach extends concepts from segmentation and volume registration [S1] but avoids preprocessing. It is particularly relevant in medical and biological research for visualizing large datasets like CT scans of human hearts or mouse embryos [S1].
++The method was proposed in 2015 by the authors of "Interactive Position-dependent Customization of Transfer Function Classification Parameters in Volume Rendering" [S1]. It addresses limitations in traditional transfer function classification, which assumes constant feature characteristics (e.g., linear intensity-to-HU mapping) [S1]. The approach extends transfer function classification concepts to allow position-dependent customization without preprocessing computations [S1]. It is particularly relevant in medical and biological research for visualizing large datasets like CT scans of human hearts or mouse embryos [S1].
+ 
+ ## Sources

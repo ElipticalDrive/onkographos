@@ -1,0 +1,145 @@
+--- v001.md
++++ v002.md
+@@ -2,104 +2,57 @@
+ Also called: Advanced partitioning mode
+ ## Overview
+-This method converts a point cloud into a voxel grid mask by accepting an explicit cell length parameter to define the voxel spacing. It differs from the "Existing Image Geometry" path, which derives spacing from a pre-existing image, by allowing dynamic spacing definition. Unlike its sibling [Voxelize Point Cloud (Basic Mode)](15079-voxelize-point-cloud-basic-mode.md), which likely uses fixed or derived geometry, this mode explicitly calculates spacing from the input parameter. It solves the problem of generating a voxel mask with user-defined resolution independent of the source geometry's native grid.
++Voxelize Point Cloud (Advanced Mode) is a voxelization method that maps a 3D point cloud to a regular grid using a user-defined cell length (spacing) parameter. It differs from [Voxelize Point Cloud (Basic Mode)](15079-voxelize-point-cloud-basic-mode.md) by explicitly accepting a spacing parameter rather than deriving it from geometry, and from [Voxelize Point Cloud (Existing Partition Grid Mode)](15084-voxelize-point-cloud-existing-partition-grid-mode.md) by not requiring an existing image geometry as a reference. Unlike the Existing Partition Grid path, which rejects zero spacing with an error, Advanced Mode allows zero spacing, resulting in a silent failure where all points are skipped.
++
+ ## How it works
+ **Inputs:**
+-- Point cloud geometry (e.g., `VertexGeom`).
+-- `cell_length`: A scalar float representing the voxel side length.
+-- `origin`: The world-space origin of the voxel grid (default or specified).
+-- `dims`: The dimensions of the output grid (e.g., `[X, Y, Z]`).
++*   Point cloud geometry (e.g., `VertexGeom`).
++*   Cell length parameter $s$ (scalar).
++*   Grid origin $o$ (optional, defaults may apply).
++*   Grid dimensions $D_x, D_y, D_z$ (optional, may be derived or fixed).
+ 
+ **Outputs:**
+-- A binary mask image (or volume) where voxels containing points are marked as 1, and empty voxels are 0.
+-- The mask tuple shape is `[dims[2], dims[1], dims[0]]` (Z, Y, X order).
++*   A binary mask or data array associated with the grid geometry. The tuple shape is typically $\{D_z, D_y, D_x\}$ [S1, unofficial].
+ 
+ **Data Structures:**
+-- **Voxel Grid:** A 3D array of size $D_z \times D_y \times D_x$.
+-- **Point Cloud:** A list of 3D coordinates $(x, y, z)$.
++*   The output is an image geometry with dimensions $D_x, D_y, D_z$.
++*   The mask is a 1D array of tuples with shape $\{D_z, D_y, D_x\}$ [S1, unofficial].
+ 
+-**Algorithm:**
+-1. **Validate Input:** Check if `cell_length` is negative. If so, reject with an error. [S1, unofficial]
+-2. **Calculate Spacing:** Set spacing $s = \text{cell\_length}$. [S1, unofficial]
+-3. **Calculate Inverse Spacing:** Compute $s_{inv} = 1.0 / s$. [S1, unofficial]
+-4. **Initialize Mask:** Create a mask of size $D_z \times D_y \times D_x$ initialized to 0.
+-5. **Iterate Points:** For each point $P_i = (x_i, y_i, z_i)$ in the point cloud:
+-   a. **Compute Relative Coordinates:** Calculate offset from origin:
+-      $$ \Delta x = x_i - \text{origin}_x $$
+-      $$ \Delta y = y_i - \text{origin}_y $$
+-      $$ \Delta z = z_i - \text{origin}_z $$
+-   b. **Compute Voxel Indices:**
+-      $$ v_x = \lfloor \Delta x \cdot s_{inv} \rfloor $$
+-      $$ v_y = \lfloor \Delta y \cdot s_{inv} \rfloor $$
+-      $$ v_z = \lfloor \Delta z \cdot s_{inv} \rfloor $$
+-   c. **Boundary Check:** If $0 \le v_x < D_x$, $0 \le v_y < D_y$, and $0 \le v_z < D_z$:
+-      Set $\text{Mask}[v_z][v_y][v_x] = 1$.
+-   d. **Out-of-Bounds:** If indices are out of bounds, skip the point.
+-6. **Return Mask:** Output the binary mask.
++**Steps:**
++1.  **Validate Input:** Check if the cell length $s$ is negative. If $s < 0$, reject with an error [S1, unofficial].
++2.  **Calculate Spacing:** Set spacing $s_{calc} = s$. If $s = 0$, $s_{calc} = 0$ [S1, unofficial].
++3.  **Compute Inverse Spacing:** Calculate $s_{inv} = 1.0 / s_{calc}$ [S1, unofficial].
++    *   If $s_{calc} = 0$, $s_{inv}$ becomes $\infty$ or `NaN` [S1, unofficial].
++4.  **Map Points to Voxels:** For each point $p = (p_x, p_y, p_z)$:
++    *   Calculate voxel coordinates:
++        $$ v_x = (p_x - o_x) \times s_{inv} $$
++        $$ v_y = (p_y - o_y) \times s_{inv} $$
++        $$ v_z = (p_z - o_z) \times s_{inv} $$
++    *   If $s_{calc} = 0$, $v_i$ becomes $\infty$ or `NaN` [S1, unofficial].
++5.  **Index and Clamp:** Convert $v_i$ to integer indices $(v_x, v_y, v_z)$ and clamp to grid bounds $[0, D_i-1]$ [S1, unofficial].
++    *   If $v_i$ is $\infty$ or `NaN`, the point is skipped [S1, unofficial].
++6.  **Set Mask:** Set the corresponding voxel in the output mask to 1 (or relevant data) [S1, unofficial].
++7.  **Finalize:** If all points were skipped (e.g., due to $s=0$), the output mask is all zeros. A warning is issued, but the filter completes successfully [S1, unofficial].
+ 
+-**Parameters:**
+-- `cell_length`: Typical values depend on scene scale. Must be $> 0$.
+-- `origin`: Default often $[0, 0, 0]$ or derived from geometry bounds.
++**Pitfalls:**
++*   **Zero Spacing:** If $s=0$, the division $1.0/0$ results in infinity/NaN, causing all points to be skipped. The filter produces an all-zero mask and only a warning, unlike the Existing Partition Grid path which errors out [S1, unofficial].
++*   **Negative Spacing:** Rejected by `DataCheckCellLength` [S1, unofficial].
++*   **Origin/Spacing Mismatch:** A sign error on origin subtraction or swapped inverse spacing components can lead to incorrect voxel mapping [S1, unofficial].
+ 
+-**Edge Cases and Pitfalls:**
+-- **Zero Cell Length:** If `cell_length` is 0, $s_{inv}$ becomes $\infty$. This results in voxel indices of $\pm \infty$ or NaN, causing all points to be skipped. The filter completes with an all-zero mask and only a warning, rather than an error. [S1, unofficial]
+-- **Negative Cell Length:** Rejected by `DataCheckCellLength`. [S1, unofficial]
+-- **Precision:** Floating-point precision errors in coordinate mapping may cause points near boundaries to be assigned to incorrect voxels. [G]
+-
+-**Pseudocode:**
+-```python
+-def voxelize_point_cloud_advanced(points, cell_length, origin, dims):
+-    # dims is [X, Y, Z]
+-    X, Y, Z = dims
+-    
+-    # Validate cell_length
+-    if cell_length < 0:
+-        raise ValueError("Cell length must be non-negative")
+-    
+-    # Calculate spacing and inverse spacing
+-    spacing = cell_length
+-    spacing_inv = 1.0 / spacing
+-    
+-    # Initialize mask with zeros
+-    # Shape is [Z, Y, X]
+-    mask = [[ [0 for _ in range(X)] for _ in range(Y) ] for _ in range(Z)]
+-    
+-    for point in points:
+-        x, y, z = point
+-        
+-        # Calculate relative coordinates
+-        dx = x - origin[0]
+-        dy = y - origin[1]
+-        dz = z - origin[2]
+-        
+-        # Calculate voxel indices
+-        # Note: Using floor for index calculation
+-        vx = int(dx * spacing_inv)
+-        vy = int(dy * spacing_inv)
+-        vz = int(dz * spacing_inv)
+-        
+-        # Check for infinity or NaN (result of division by zero if spacing was 0)
+-        if not (isfinite(vx) and isfinite(vy) and isfinite(vz)):
+-            continue
+-            
+-        # Boundary check
+-        if 0 <= vx < X and 0 <= vy < Y and 0 <= vz < Z:
+-            mask[vz][vy][vx] = 1
+-            
+-    return mask
+-```
+ ## Subtopics
+ 
+ ### Voxelize Point Cloud (Bounding Box Mode)
+-A variant that accepts min/max bounding box coordinates instead of a cell length. If min equals max on any axis, the spacing becomes zero, causing all points to be skipped due to infinite/NaN coordinate mapping. The pitfall is identical to the Advanced Mode: `DataCheckBoundingBoxCoords` only rejects min > max, allowing min == max, which leads to an all-zero mask and a warning. [S1, unofficial]
++A voxelization mode that accepts min/max bounding box coordinates to determine grid extent. If min equals max on any axis, the spacing becomes zero, causing all points to be skipped. Unlike the Advanced Mode which uses a fixed cell length, this mode derives spacing from the bounding box. If min == max, `DataCheckBoundingBoxCoords` does not reject it (only min > max is rejected), leading to $s=0$, $s_{inv}=\infty$, and an all-zero mask with only a warning [S1, unofficial].
+ 
+ ## Operating characteristics
+-- **Time Complexity:** $O(N)$, where $N$ is the number of points. Each point is processed once.
+-- **Memory Complexity:** $O(D_x D_y D_z)$ for the output mask.
+-- **Strengths:** Allows explicit control over voxel resolution.
+-- **Limitations:** Silent failure on zero spacing. No error thrown for degenerate bounding boxes (min == max).
+-- **When to use:** When explicit voxel size is required.
+-- **When not to use:** When robustness to zero-spacing inputs is critical without post-processing checks.
++*   **Time Complexity:** Linear with respect to the number of points $N$, $O(N)$, as each point is mapped once.
++*   **Memory Complexity:** Proportional to the grid volume $D_x \times D_y \times D_z$ for the output mask.
++*   **Strengths:** Explicit control over voxel size via cell length parameter.
++*   **Limitations:** Silent failure on zero spacing; no automatic grid dimension derivation if not provided.
++*   **When to Use:** When a specific voxel resolution is required independent of the input geometry's extent.
++*   **When Not to Use:** When zero spacing is possible and silent failure is unacceptable; use Existing Partition Grid Mode for stricter validation.
++
+ ## Background
+-This mode is part of the `VoxelizePointCloudFilter` in the simplnx library. It was introduced to provide an alternative to deriving voxel geometry from existing images. The specific pitfall regarding zero spacing was identified in code review and testing (PR #1724). [S1, unofficial]
++This mode is part of the Voxelize Point Cloud filter family in the simplnx library. It was introduced to provide explicit control over voxelization parameters. The behavior regarding zero spacing was noted in code review discussions, highlighting a discrepancy with the Existing Partition Grid path [S1, unofficial].
++
+ ## Sources
+ [S1] FILT: Voxelize Point Cloud, https://github.com/BlueQuartzSoftware/simplnx/pull/1724, fetched 2026-10-27 (unofficial)

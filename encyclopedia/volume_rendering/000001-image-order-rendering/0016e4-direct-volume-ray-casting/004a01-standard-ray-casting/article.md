@@ -1,0 +1,47 @@
+# Standard Ray Casting
+
+Also called: Fixed-step ray casting, Direct volume ray casting (baseline), Image-order volume rendering
+
+## Overview
+Standard Ray Casting is the foundational direct volume rendering technique that generates images by casting rays from the camera through each pixel, sampling a 3D scalar field at regular intervals, and accumulating color and opacity via front-to-back compositing [G]. It solves the problem of visualizing internal structures in scalar fields (e.g., CT scans) without extracting explicit geometric surfaces, serving as the baseline for more complex traversal or scattering variants [G]. It differs from [Exponential Approximation Method](2079-exponential-approximation-method.md) by using discrete alpha compositing rather than exponential transmittance approximations, and from [Ray Marching Volume Rendering with Henyey-Greenstein Scattering](2545-ray-marching-volume-rendering-with-henyey-greenstein-scatter.md) by typically neglecting scattering effects in its standard form [G].
+
+## Shared principles
+All children of Standard Ray Casting share the following mechanism, terms, and mathematical formulation.
+
+**Ray Definition**: For each pixel $(x, y)$ in the image plane, a ray $r(t) = \mathbf{o} + t\mathbf{d}$ is defined, where $\mathbf{o}$ is the camera origin and $\mathbf{d}$ is the viewing direction [G]. The ray is intersected with the volume bounding box to determine the entry parameter $t_{near}$ and exit parameter $t_{far}$ [G].
+**Sampling**: The ray segment $[t_{near}, t_{far}]$ is discretized into $N$ samples at positions $t_i = t_{near} + i \cdot \Delta t$, where $\Delta t = (t_{far} - t_{near}) / N$ [S2, unofficial]. At each sample position $\mathbf{p}_i = r(t_i)$, the scalar volume value $V(\mathbf{p}_i)$ is retrieved, typically via trilinear interpolation of the surrounding voxels [G].
+**Classification**: The scalar value $V(\mathbf{p}_i)$ is mapped to optical properties: a color vector $\mathbf{c}_i$ (RGB) and an opacity scalar $\alpha_i$ (A) [S1, book]. This mapping is defined by a transfer function $T(V) \rightarrow (\mathbf{c}, \alpha)$ [G].
+**Compositing**: The samples are composited into the final pixel color $\mathbf{C}_{out}$ and accumulated opacity $\alpha_{out}$ using the front-to-back volume rendering equation [G]:
+$$
+\mathbf{C}_{out} = \sum_{i=1}^{N} \mathbf{c}_i \alpha_i \prod_{j=1}^{i-1} (1 - \alpha_j)
+$$
+$$
+\alpha_{out} = 1 - \prod_{i=1}^{N} (1 - \alpha_i)
+$$
+In iterative form, for each sample $i$:
+$$
+\mathbf{C}_{acc} \leftarrow \mathbf{C}_{acc} + (1 - \alpha_{acc}) \cdot \mathbf{c}_i \cdot \alpha_i
+$$
+$$
+\alpha_{acc} \leftarrow \alpha_{acc} + (1 - \alpha_{acc}) \cdot \alpha_i
+$$
+where $\mathbf{C}_{acc}$ and $\alpha_{acc}$ are initialized to $(0, 0)$ [G].
+**Shading**: At each sample, a shading model (e.g., Phong, Blinn-Phong) may be applied to compute the base color $\mathbf{c}_i$ based on the local gradient $\nabla V(\mathbf{p}_i)$, which serves as the surface normal [G].
+
+## Subtopics
+
+### [Front-to-Back Volume Rendering](2350-front-to-back-volume-rendering.md)
+Front-to-Back Volume Rendering is a direct volume ray casting method that integrates light along camera rays by sampling a 3D scalar field from the near intersection point to the far intersection point and compositing the results using the Porter-Duff "Over" operator. It solves the problem of rendering semi-transparent volumetric data without extracting explicit geometric surfaces, correctly handling transparency and occlusion by accumulating color and opacity from front to back. It sets itself apart from its siblings by explicitly defining the traversal order as front-to-back to enable early ray termination, a critical optimization for performance that is less effective or impossible in back-to-front approaches. Choose it when early termination is desired to improve performance on semi-transparent data. See [Front-to-Back Volume Rendering](2350-front-to-back-volume-rendering.md).
+
+### [Volume Ray Casting](3161-volume-ray-casting.md)
+Volume Ray Casting is a direct volume rendering technique that generates a 2D image by casting primary rays from each pixel of the view plane into a 3D volumetric dataset, sampling the data along the ray, and compositing the results to determine the final pixel color. It solves the problem of visualizing 3D scalar fields without converting the data to intermediate surface geometry, thereby preserving all volume information and avoiding artifacts associated with thresholding or isosurface extraction. Unlike [Front-to-Back Volume Rendering](2350-front-to-back-volume-rendering.md) which may refer to the compositing order specifically, or [VCP Ray-Casting Algorithm](10664-vcp-ray-casting-algorithm.md) which uses a specific voxel-centric approach, standard Volume Ray Casting is defined by its image-order traversal and equidistant sampling along view rays. Choose it as the baseline method for general volume visualization. See [Volume Ray Casting](3161-volume-ray-casting.md).
+
+### [VCP Ray-Casting Algorithm](10664-vcp-ray-casting-algorithm.md)
+The VCP Ray-Casting Algorithm renders a smooth surface approximation from a dense point cloud by storing vector-valued data in a grid structure, rather than rendering discrete points or scalar distance fields directly. It solves the problem of noisy rendering caused by sensor noise and calibration errors in real-world LiDAR data, where points do not strictly lie on the scene surface. Unlike standard closest-point ray casting which selects the single nearest point (z-buffer), VCP uses the length of an interpolated vector to determine step sizes and the vector direction as the surface normal, allowing for adaptive marching and smooth shading. Choose it when rendering noisy point cloud data with adaptive step sizes and smooth normals. See [VCP Ray-Casting Algorithm](10664-vcp-ray-casting-algorithm.md).
+
+## Background
+Standard Ray Casting is a foundational technique in direct volume rendering, widely used in medical imaging (CT, MRI) and scientific visualization to explore internal structures of scalar fields [G]. It relies on the optical model of participating media, where light is absorbed and emitted along the ray path [G]. The technique has become the standard baseline for direct volume rendering, serving as the reference implementation for more complex traversal or scattering variants [G].
+
+## Sources
+[S1] Chapter 7 - Advanced Computer Graphics - VTK, https://examples.vtk.org/site/VTKBook/07Chapter7/, fetched 2026-10-29 (book)
+[S2] Direct Volume Rendering Direct Volume Rendering. What is volume rendering?. Accumulate information along 1 dimension line through volume. Volume rendering vs. isosurfaces. No intermediate geometry No , https://www.slideserve.com/lenci/direct-volume-rendering, fetched 2026-10-25 (unofficial)

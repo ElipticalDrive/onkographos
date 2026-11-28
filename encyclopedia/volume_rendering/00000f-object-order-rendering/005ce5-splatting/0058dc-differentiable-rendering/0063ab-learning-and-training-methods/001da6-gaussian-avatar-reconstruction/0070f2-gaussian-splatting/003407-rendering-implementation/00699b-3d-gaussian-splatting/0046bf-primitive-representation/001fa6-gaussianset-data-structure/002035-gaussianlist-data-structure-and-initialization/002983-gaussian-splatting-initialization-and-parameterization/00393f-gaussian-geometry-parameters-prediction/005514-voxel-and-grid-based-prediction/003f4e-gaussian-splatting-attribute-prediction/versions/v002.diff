@@ -1,0 +1,113 @@
+--- v001.md
++++ v002.md
+@@ -4,9 +4,9 @@
+ 
+ ## Overview
+-Gaussian Splatting Attribute Prediction is a method for refining 3D Gaussian primitives by predicting additive residuals to initial rendering attributes, rather than regenerating them from scratch [S1]. It solves the problem of high-frequency detail loss in coarse initializations by using a voxel transformer to correct errors on a per-voxel basis [S1]. Unlike sibling methods that optimize neural feature grids directly, this approach operates on the Gaussian set's geometric and color parameters via residual correction [S1][S2, unofficial].
++Gaussian Splatting Attribute Prediction is a method for refining 3D Gaussian primitives by predicting additive residuals to initial rendering attributes, rather than regenerating them from scratch [S1]. It solves the problem of high-frequency detail loss in coarse initializations by using a voxel transformer to correct errors on a per-voxel basis [S1]. The approach operates on the Gaussian set's geometric and color parameters via residual correction [S1][S2, unofficial].
+ 
+ ## How it works
+ **Inputs and Outputs:**
+-*   **Input:** Initial Gaussian rendering parameters $\mathbf{G}_j$ and fused voxel attributes $\mathbf{E}_j$ for a specific voxel $j$ [S1].
++*   **Input:** Initial Gaussian rendering parameters $\mathbf{G}_j$, fused voxel attributes $\mathbf{E}_j$, and offset $\mathbf{O}_j$ for voxel $j$ [S1].
+ *   **Output:** Refined Gaussian rendering parameters $\mathbf{G}'_j$ [S1].
+ 
+@@ -20,12 +20,19 @@
+ 2.  **Residual Prediction:** Compute the residual $\Delta \mathbf{G}_j$ using a fine-grained Multi-Layer Perceptron ($\text{MLP}_{fine}$) that takes the concatenation of the offset $\mathbf{O}_j$ and voxel attributes $\mathbf{E}_j$ as input [S1].
+ 3.  **Attribute Update:** Add the predicted residual to the initial parameters to obtain the final splat rendering parameters $\mathbf{G}'_j$ [S1].
++4.  **Stage-wise Accumulation:** For multi-stage reconstruction, initialize the Gaussian set $G_0 = \emptyset$ and rendered image $I_0 = 0$ [S2, unofficial].
++5.  **Residual Rendering:** At stage $i$, compute the image residual $E_{i-1} = I_{gt} - I_{i-1}$ [S2, unofficial].
++6.  **Incremental Update:** Predict new Gaussians $\Delta G_i = f_{\theta_i}(E_{i-1})$ and accumulate them as $G_i = G_{i-1} \cup \Delta G_i$ [S2, unofficial].
++7.  **Objective:** Optimize using the residual rendering loss $L_{res}^{(i)} = L_{render}(R(\Delta G_i), E_{i-1})$ [S2, unofficial].
+ 
+ **Formulas:**
+-The residual is defined as [S1]:
++The voxel transformer residual prediction is defined as [S1]:
+ $$ \Delta \mathbf{G}_j = \text{MLP}_{fine}([\mathbf{O}_j, \mathbf{E}_j]) $$
+-where $[\cdot]$ denotes concatenation.
+-
+-The final parameters are updated as [S1]:
+ $$ \mathbf{G}'_j = \mathbf{G}_j + \Delta \mathbf{G}_j $$
++The stage-wise residual prediction framework is defined as [S2, unofficial]:
++$$ G_i = G_{i-1} \cup \Delta G_i $$
++$$ I_i = R(G_i) = R(G_{i-1}) + R(\Delta G_i) = I_{i-1} + R(\Delta G_i) $$
++$$ E_{i-1} = I_{gt} - I_{i-1} $$
++$$ \Delta G_i = f_{\theta_i}(E_{i-1}) $$
++$$ L_{res}^{(i)} = L_{render}(R(\Delta G_i), E_{i-1}) $$
+ 
+ **Parameters:**
+@@ -37,36 +44,36 @@
+ *   **Precision:** The offset $\mathbf{O}_j$ must be normalized to $[-1, 1]$ using the grid size $h$ to ensure stable MLP input [S1].
+ *   **Additivity:** The renderer must support additive composition of disjoint Gaussian sets for the residual logic to hold [S2, unofficial].
++*   **Initialization:** The process initializes with an empty Gaussian set $G_0 = \emptyset$ and zero image $I_0 = 0$, making the first stage model the full target image [S2, unofficial].
+ 
+ **Pseudocode:**
+ ```python
+ def predict_gaussian_attributes(G_initial, voxel_features, offset, grid_size_h):
+-    """
+-    Predicts refined Gaussian attributes by adding residuals to initial attributes.
+-    
+-    Args:
+-        G_initial: Initial Gaussian rendering parameters (tensor).
+-        voxel_features: Fused voxel attributes E_j (tensor).
+-        offset: Raw offset vector for the primitive center.
+-        grid_size_h: Grid size used for normalization.
+-        
+-    Returns:
+-        G_final: Refined Gaussian rendering parameters.
+-    """
+-    # Normalize offset to [-1, 1] range
+-    # [G] Implementation detail: Division by grid_size_h assumes linear scaling.
++    # Normalize offset to [-1, 1] range per source specification [S1]
+     O_normalized = offset / grid_size_h
+-    
+-    # Concatenate offset and voxel attributes
+-    # [G] Assuming standard concatenation along the feature dimension.
+-    input_features = concatenate(O_normalized, voxel_features)
+-    
+-    # Predict residual using MLP
+-    # [G] MLP_fine is assumed to be a defined network module with weights theta.
++    # Clamp to [-1, 1] to handle boundary cases [G]
++    O_normalized = clamp(O_normalized, -1.0, 1.0)
++    # Concatenate offset and voxel attributes along the feature dimension
++    input_features = concatenate(O_normalized, voxel_features, axis=-1)
++    # Predict residual using a standard 2-layer MLP with ReLU activation [G]
+     residual = MLP_fine(input_features)
+-    
+     # Add residual to initial parameters
+     G_final = G_initial + residual
+-    
+     return G_final
++
++def concatenate(a, b, axis=-1):
++    # Standard tensor concatenation along the specified axis
++    # Stacks tensors and reshapes to merge the last dimension
++    return stack([a, b], axis=axis).reshape(a.shape[:-1] + (a.shape[-1] + b.shape[-1],))
++
++class MLP_fine:
++    def __init__(self, in_dim, hidden_dim, out_dim):
++        self.W1 = random_normal((in_dim, hidden_dim))
++        self.b1 = zeros(hidden_dim)
++        self.W2 = random_normal((hidden_dim, out_dim))
++        self.b2 = zeros(out_dim)
++    def forward(self, x):
++        h = matmul(x, self.W1) + self.b1
++        h = max(h, 0) # ReLU activation
++        return matmul(h, self.W2) + self.b2
+ ```
+ 
+@@ -74,11 +81,11 @@
+ 
+ ### Stage-wise Residual Prediction
+-A broader framework where the entire Gaussian set is updated incrementally across stages, predicting Gaussians that explain the remaining image error [S2, unofficial].
++A framework that updates the Gaussian set incrementally across multiple stages, predicting primitives that explain the remaining image error [S2, unofficial]. It sets itself apart from single-stage voxel refinement by decomposing the reconstruction problem along the error signal, reducing the learning burden per stage [S2, unofficial]. Choose it when progressive refinement improves convergence or when modeling complex residual distributions [S2, unofficial]. See [Feed-forward and Generalizable Prediction](15832-feed-forward-and-generalizable-prediction.md).
+ 
+ ### Voxel Transformer
+-The specific neural architecture used to process voxelized features and predict residuals [S1].
++A neural architecture that processes voxelized features to predict residuals for Gaussian attributes [S1]. It sets itself apart from direct attribute regression by operating on fused voxel grids and predicting additive corrections rather than absolute values [S1]. Choose it when spatial locality and voxel-based feature fusion are required for efficient refinement [S1]. See [Voxel and Grid-Based Prediction](15382-voxel-and-grid-based-prediction.md).
+ 
+ ## Operating characteristics
+-*   **Time Complexity:** Depends on the MLP size and voxel grid resolution. The method avoids global optimization per frame, enabling feed-forward inference [S1].
++*   **Time Complexity:** Depends on the MLP size and voxel grid resolution [S1]. The method enables feed-forward inference for dynamic scenes [S1].
+ *   **Memory Complexity:** Requires storage for the voxel grid and the MLP weights [S1].
+ *   **Strengths:** Reduces the learning burden on individual predictors by focusing on remaining error rather than full image content [S2, unofficial]. Allows for efficient refinement of coarse initializations [S1].

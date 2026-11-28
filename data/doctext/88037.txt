@@ -1,0 +1,4516 @@
+# Procedural Generation in Unity3D: Voxel and Octree Implementation
+
+This project demonstrates the use of procedural generation techniques to create a voxel-based environment using a random walk algorithm, with the generated voxels then organized and stored in an octree structure.
+
+## Table of Contents
+- [Introduction](#introduction)
+- [Features](#features)
+- [Installation](#installation)
+- [Usage](#usage)
+- [Contributing](#contributing)
+- [Screenshots](#screenshots)
+
+## Introduction
+Procedural generation is a method of creating data algorithmically rather than manually, often used in game development for generating content such as landscapes, dungeons, and entire worlds. This project focuses on:
+- Generating voxels using a random walk algorithm.
+- Organizing and optimizing voxel storage with an octree data structure.
+
+## Features
+- **Random Walk**: Generate caves or floating islands using a random walk algorithm.
+- **Voxel Generation**: Instead of manually instantiating meshes or similar, voxels are generated to act as geometry
+- **Octree Implementation**: Efficiently manage and query voxel data with an octree.
+- **Modes**: Two modes of generation, inner creating cavern like worlds where voxels are just air while everything surrounded is drawn as voxels. Outer where voxels are geometry and everything else is air
+
+## Installation
+1. **Clone the repository:**
+2. **Open the project in Unity:**
+   - Open Unity Hub.
+   - Click on `Add` and navigate to the cloned project folder.
+   - Select the folder and open the project.
+
+## Usage
+Once the project is set up in Unity, you can run the scene and see the procedural generation in action.
+**Select Scene**:
+   - Inside the scenes folder select either Inside or Outside.
+   - Inside is for caverns, outside is for floating island generation
+**Adjust Parameters**:
+   - Depending on the scene you selected, locate the `Inside.asset` or the `Outside.asset` of type Generation Settings
+   - Adjust parameters such as `voxelsToCreate`, `noise`, `inflationPasses`, and `startBlockSize` in the Inspector to see different generation results.
+
+### Key Scripts
+- **VoxelGenerator.cs**: Manages voxel generation and random walking
+- **Octree.cs**: Defines the octree data structure
+- **OctreeNode.cs**: Each node in the octree and their logic
+- **PlayerVoxelInteraction**: Handles player adding and removing geometry to the world
+
+## Contributing
+Contributions are welcome! If you have any ideas, suggestions, or improvements, feel free to fork the repository and submit a pull request.
+
+## Screenshots
+
+![alt text](https://github.com/ForlornU/Images/blob/main/VoxelCaverns01.png)
+![alt text](https://github.com/ForlornU/Images/blob/main/OctreeDivide01.png)
+![alt text](https://github.com/ForlornU/Images/blob/main/OctreeDivide02.png)
+
+### Assets/Scripts/Misc/CameraLook.cs
+```
+using UnityEngine;
+
+public class CameraLook : MonoBehaviour
+{
+    [Header("FOV")]
+    [SerializeField] int MinFOV = 10;
+    [SerializeField] int MaxFOV = 90;
+    [SerializeField, Range(0.1f, 1f)] float minZoom = .25f;
+    [SerializeField, Range(1.05f, 5f)] float maxZoom = 3f;
+
+    [Header("Perlin FOV")]
+    [SerializeField] bool randomFOVNoise;
+    public float noiseScale = 0.1f; // Scale of the Perlin noise
+    public float speed = 1f; // Speed of change
+
+    [Header("Camera follow")]
+    [SerializeField] float rotateAroundSpeed = 6f;
+    [SerializeField, Range(0.25f, 1f)] float followingStrictness = 0.6f;
+
+    float startdist;
+    Camera cam;
+
+    [Header("Walker")]
+    [SerializeField] Transform cursor;
+
+    //Follower
+    Vector3 centerposition;
+    Transform smoothFollower;
+    Vector3 smoothVelocity = Vector3.zero;
+
+    private void Start()
+    {
+        cam = GetComponent<Camera>();
+        smoothFollower = new GameObject("CursorFollow").transform;
+        smoothFollower.transform.position = centerposition;
+
+        startdist = Vector3.Distance(transform.position, smoothFollower.position);
+    }
+
+    void Update()
+    {
+        centerposition = (Vector3.zero + cursor.position) * followingStrictness;
+        smoothFollower.position = Vector3.SmoothDamp(smoothFollower.position, centerposition, ref smoothVelocity, 1.5f);
+
+        Quaternion newRotation = Quaternion.LookRotation(smoothFollower.position - transform.position, Vector3.up);
+
+        transform.rotation = Quaternion.Slerp(transform.rotation, newRotation, Time.smoothDeltaTime);
+        transform.parent.RotateAround(Vector3.zero, Vector3.up, Time.deltaTime * rotateAroundSpeed);
+
+        ZoomView();
+    }
+
+    private void ZoomView()
+    {
+        float dist = Vector3.Distance(transform.position, smoothFollower.position);
+        float t = Mathf.InverseLerp(startdist*minZoom, startdist*maxZoom, dist);
+
+        if(randomFOVNoise)
+            t += Mathf.PerlinNoise(Time.time * speed, 0f) * noiseScale;
+
+        cam.fieldOfView = Mathf.Lerp(MaxFOV, MinFOV, t);
+    }
+}
+```
+
+### Assets/Scripts/Misc/FogUndulation.cs
+```
+using UnityEngine;
+
+public class FogUndulation : MonoBehaviour
+{
+    [SerializeField] float minDensity;
+    [SerializeField] float maxDensity;
+    [SerializeField] float frequency = 1f;
+    void Update()
+    {
+        // Scale Time.deltaTime for frequency control
+        float undulation = Mathf.Clamp(Mathf.PerlinNoise(frequency * Time.deltaTime, frequency * Time.time), 0f, 1f);
+        RenderSettings.fogDensity = Mathf.Lerp(minDensity, maxDensity, undulation);
+    }
+}
+```
+
+### Assets/Scripts/Player/MouseLook.cs
+```
+using UnityEngine;
+
+public class MouseLook : MonoBehaviour
+{
+    #region variables
+    Vector2 mouseFinal;
+    Vector2 smoothMouse;
+    Vector2 targetDirection;
+    Vector2 targetCharacterDirection;
+
+    public Vector2 clampInDegrees = new Vector2(360f, 180f);
+    public Vector2 sensitivity = new Vector2(0.1f, 0.1f);
+    public Vector2 smoothing = new Vector2(1f, 1f);
+
+    public bool lockCursor;
+    public GameObject characterBody;
+
+    public PlayerInputActions input;
+    #endregion
+
+    private void OnEnable()
+    {
+        input = new PlayerInputActions();
+        input.Enable();
+    }
+
+    void Start()
+    {
+        // Set target direction to the camera's initial orientation.
+        targetDirection = transform.localRotation.eulerAngles;
+
+        // Set target direction for the character body to its inital state.
+        if (characterBody)
+            targetCharacterDirection = characterBody.transform.localRotation.eulerAngles;
+
+    }
+
+    Vector2 ScaleAndSmooth(Vector2 delta)
+    {
+        //Apply sensetivity
+        delta = Vector2.Scale(delta, new Vector2(sensitivity.x * smoothing.x, sensitivity.y * smoothing.y));
+
+        //Lerp from last frame
+        smoothMouse.x = Mathf.Lerp(smoothMouse.x, delta.x, 1f / smoothing.x);
+        smoothMouse.y = Mathf.Lerp(smoothMouse.y, delta.y, 1f / smoothing.y);
+
+        return smoothMouse;
+    }
+
+    void LateUpdate()
+    {
+        if (lockCursor)
+            Cursor.lockState = CursorLockMode.Locked;
+
+        Vector2 mouseDelta = input.pActionMap.MouseLook.ReadValue<Vector2>();
+        mouseFinal += ScaleAndSmooth(mouseDelta);
+
+        ClampValues();
+        AlignToBody();
+    }
+
+    void ClampValues()
+    {
+        // Clamp and apply the local x value first
+        if (clampInDegrees.x < 360)
+            mouseFinal.x = Mathf.Clamp(mouseFinal.x, -clampInDegrees.x * 0.5f, clampInDegrees.x * 0.5f);
+
+        // Then clamp y value.
+        if (clampInDegrees.y < 360)
+            mouseFinal.y = Mathf.Clamp(mouseFinal.y, -clampInDegrees.y * 0.5f, clampInDegrees.y * 0.5f);
+
+        // Allow the script to clamp based on a desired target value.
+        var targetOrientation = Quaternion.Euler(targetDirection);
+        transform.localRotation = Quaternion.AngleAxis(-mouseFinal.y, targetOrientation * Vector3.right) * targetOrientation;
+
+    }
+
+    void AlignToBody()
+    {
+        var targetCharacterOrientation = Quaternion.Euler(targetCharacterDirection);
+        Quaternion yRotation = Quaternion.identity;
+
+        // If there's a character body that acts as a parent to the camera
+        if (characterBody)
+        {
+            yRotation = Quaternion.AngleAxis(mouseFinal.x, Vector3.up);
+            characterBody.transform.localRotation = yRotation * targetCharacterOrientation;
+        }
+        else
+        {
+            yRotation = Quaternion.AngleAxis(mouseFinal.x, transform.InverseTransformDirection(Vector3.up));
+            transform.localRotation *= yRotation;
+        }
+    }
+}
+```
+
+### Assets/Scripts/Player/MoveSettings.cs
+```
+using UnityEngine;
+
+[CreateAssetMenu(menuName = "ScriptableObjects/Movement/MoveSettings")]
+public class MoveSettings : ScriptableObject
+{
+    public float movespeed = 5;
+
+    public float jumpforce = 9;
+    public int airJumps = 1;
+    public float groundColliderSize = 0.36f;
+
+    public float dashforce = 3f;
+    public float dashtime = 0.5f;
+
+}
+```
+
+### Assets/Scripts/Player/Movement.cs
+```
+using System.Collections;
+using UnityEngine;
+
+[RequireComponent(typeof(CharacterController))]
+public abstract class Movement : MonoBehaviour
+{
+    #region variables
+
+    [SerializeField]
+    Transform _groundCollider;
+    public LayerMask groundLayer;
+    private bool _grounded;
+
+    [SerializeField]
+    protected MoveSettings movesettings;
+
+    protected CharacterController controller;
+
+    bool _crouching = false;
+
+    protected Vector3 moveDirection;
+    protected Vector3 dash = Vector3.zero;
+
+    protected int _airJumpCount = 0;
+
+    #endregion
+
+    private void Start()
+    {
+        controller = GetComponent<CharacterController>();
+    }
+
+    protected void UpdateMovement(Vector2 input)
+    {
+        moveDirection.x = input.x * movesettings.movespeed;
+        moveDirection.z = input.y * movesettings.movespeed;
+
+        moveDirection = transform.TransformDirection(moveDirection);
+    }
+
+    protected void Jump()
+    {
+        if (!_grounded)
+        {
+            if (_airJumpCount >= movesettings.airJumps)
+                return;
+
+            _airJumpCount++;
+        }
+
+        moveDirection.y = 0f;
+        moveDirection += Vector3.up * movesettings.jumpforce;
+    }
+
+    protected void Crouch()
+    {
+        _crouching = !_crouching;
+
+        if (_crouching)
+            controller.height = 0.5f;
+        else
+            controller.height = 2f;
+    }
+
+    protected IEnumerator Dash()
+    {
+
+        float starttime = 0f;
+        float endtime = starttime + movesettings.dashtime;
+
+        moveDirection.y = 0f;
+        dash = moveDirection * movesettings.dashforce;
+
+        while (starttime < endtime)
+        {
+            moveDirection.y = 0f;
+            starttime += Time.deltaTime;
+            yield return null;
+        }
+    }
+
+    protected virtual void LateUpdate()
+    {
+        isGrounded();
+        Gravity();
+        ReduceMomentum();
+    }
+
+    private void Gravity()
+    {
+        moveDirection.y -= (Physics.gravity.magnitude + 6f) * Time.deltaTime;
+
+        if (_grounded)
+        {
+            _airJumpCount = 0;
+            moveDirection.y = Mathf.Clamp(moveDirection.y, -10f, 999f);
+        }
+    }
+
+    private void ReduceMomentum()
+    {
+        if (Mathf.Abs(dash.magnitude) < 0.3f)
+        {
+            dash = Vector3.zero;
+            return;
+        }
+
+        dash = Vector3.MoveTowards(dash, Vector3.zero, dash.magnitude / 10f);
+    }
+
+    protected void FixedUpdate()
+    {
+        controller.Move((moveDirection + dash) * Time.deltaTime);
+    }
+
+    void isGrounded()
+    {
+        if (Physics.CheckSphere(_groundCollider.position, movesettings.groundColliderSize, groundLayer))
+        {
+            _grounded = true;
+            return;
+        }
+
+        _grounded = false;
+    }
+}
+```
+
+### Assets/Scripts/Player/PlayerController.cs
+```
+using UnityEngine;
+using UnityEngine.InputSystem;
+
+public class PlayerController : Movement
+{
+    public PlayerInputActions playerControls;
+
+    public void ResetMovement()
+    {
+        moveDirection = Vector3.zero;
+    }
+
+    private void OnEnable()
+    {
+        playerControls = new PlayerInputActions();
+        playerControls.Enable();
+
+        playerControls.pActionMap.Jump.performed += InputJump;
+        //_playerControls.PlayerInputActions.Dash.performed += InputDash;
+        playerControls.pActionMap.Crouch.performed += InputCrouch;
+    }
+
+    Vector2 InputMovement()
+    {
+        return playerControls.pActionMap.Move.ReadValue<Vector2>();
+    }
+
+    private void InputJump(InputAction.CallbackContext context)
+    {
+        Jump();
+    }
+
+    private void InputDash(InputAction.CallbackContext context)
+    {
+        StartCoroutine(Dash());
+    }
+
+    private void InputCrouch(InputAction.CallbackContext context)
+    {
+        Crouch();
+    }
+
+    protected override void LateUpdate()
+    {
+        base.LateUpdate();
+        UpdateMovement(InputMovement());
+    }
+    
+}
+```
+
+### Assets/Scripts/Player/PlayerInputActions.cs
+```
+//------------------------------------------------------------------------------
+// <auto-generated>
+//     This code was auto-generated by com.unity.inputsystem:InputActionCodeGenerator
+//     version 1.7.0
+//     from Assets/Scripts/Player/PlayerInputActions.inputactions
+//
+//     Changes to this file may cause incorrect behavior and will be lost if
+//     the code is regenerated.
+// </auto-generated>
+//------------------------------------------------------------------------------
+
+using System;
+using System.Collections;
+using System.Collections.Generic;
+using UnityEngine.InputSystem;
+using UnityEngine.InputSystem.Utilities;
+
+public partial class @PlayerInputActions: IInputActionCollection2, IDisposable
+{
+    public InputActionAsset asset { get; }
+    public @PlayerInputActions()
+    {
+        asset = InputActionAsset.FromJson(@"{
+    ""name"": ""PlayerInputActions"",
+    ""maps"": [
+        {
+            ""name"": ""pActionMap"",
+            ""id"": ""d5f081bd-feda-4f95-a278-0e88ca3ec25b"",
+            ""actions"": [
+                {
+                    ""name"": ""MouseLook"",
+                    ""type"": ""Value"",
+                    ""id"": ""535fb7b2-285c-486f-8207-18f93e1007d7"",
+                    ""expectedControlType"": ""Vector2"",
+                    ""processors"": """",
+                    ""interactions"": """",
+                    ""initialStateCheck"": true
+                },
+                {
+                    ""name"": ""Jump"",
+                    ""type"": ""Button"",
+                    ""id"": ""62a62add-d7d3-40cf-9cc8-4081a2f1b50c"",
+                    ""expectedControlType"": ""Button"",
+                    ""processors"": """",
+                    ""interactions"": """",
+                    ""initialStateCheck"": false
+                },
+                {
+                    ""name"": ""Crouch"",
+                    ""type"": ""Button"",
+                    ""id"": ""a95bfbb1-1606-4b95-a2c9-1a5b01f15ec4"",
+                    ""expectedControlType"": ""Button"",
+                    ""processors"": """",
+                    ""interactions"": """",
+                    ""initialStateCheck"": false
+                },
+                {
+                    ""name"": ""Move"",
+                    ""type"": ""Value"",
+                    ""id"": ""8e43df0f-dbef-4603-aa08-45bcd7fa9f05"",
+                    ""expectedControlType"": ""Vector2"",
+                    ""processors"": """",
+                    ""interactions"": """",
+                    ""initialStateCheck"": true
+                }
+            ],
+            ""bindings"": [
+                {
+                    ""name"": """",
+                    ""id"": ""9306427e-2b61-4b28-a460-e7c3f1ab1dcb"",
+                    ""path"": ""<Pointer>/delta"",
+                    ""interactions"": """",
+                    ""processors"": """",
+                    ""groups"": ""PlayerScheme"",
+                    ""action"": ""MouseLook"",
+                    ""isComposite"": false,
+                    ""isPartOfComposite"": false
+                },
+                {
+                    ""name"": """",
+                    ""id"": ""13c8814c-3cc7-40c5-982e-276f4c3924f1"",
+                    ""path"": ""<Keyboard>/space"",
+                    ""interactions"": """",
+                    ""processors"": """",
+                    ""groups"": """",
+                    ""action"": ""Jump"",
+                    ""isComposite"": false,
+                    ""isPartOfComposite"": false
+                },
+                {
+                    ""name"": """",
+                    ""id"": ""83feffba-3f91-4574-8fe1-a555d155a359"",
+                    ""path"": ""<Keyboard>/c"",
+                    ""interactions"": """",
+                    ""processors"": """",
+                    ""groups"": """",
+                    ""action"": ""Crouch"",
+                    ""isComposite"": false,
+                    ""isPartOfComposite"": false
+                },
+                {
+                    ""name"": ""2D Vector"",
+                    ""id"": ""d941fafd-995e-4681-8d54-75c3b580be87"",
+                    ""path"": ""2DVector"",
+                    ""interactions"": """",
+                    ""processors"": """",
+                    ""groups"": """",
+                    ""action"": ""Move"",
+                    ""isComposite"": true,
+                    ""isPartOfComposite"": false
+                },
+                {
+                    ""name"": ""up"",
+                    ""id"": ""0eba3a52-2597-404e-89fe-5a19666885dd"",
+                    ""path"": ""<Keyboard>/w"",
+                    ""interactions"": """",
+                    ""processors"": """",
+                    ""groups"": """",
+                    ""action"": ""Move"",
+                    ""isComposite"": false,
+                    ""isPartOfComposite"": true
+                },
+                {
+                    ""name"": ""down"",
+                    ""id"": ""2ee74b10-52d9-451f-b93f-5382de4562be"",
+                    ""path"": ""<Keyboard>/s"",
+                    ""interactions"": """",
+                    ""processors"": """",
+                    ""groups"": """",
+                    ""action"": ""Move"",
+                    ""isComposite"": false,
+                    ""isPartOfComposite"": true
+                },
+                {
+                    ""name"": ""left"",
+                    ""id"": ""d0ae6c03-d12e-44d6-98f9-e342be62d03a"",
+                    ""path"": ""<Keyboard>/a"",
+                    ""interactions"": """",
+                    ""processors"": """",
+                    ""groups"": """",
+                    ""action"": ""Move"",
+                    ""isComposite"": false,
+                    ""isPartOfComposite"": true
+                },
+                {
+                    ""name"": ""right"",
+                    ""id"": ""97a9f049-8c45-4a21-b209-a112a7d43ba9"",
+                    ""path"": ""<Keyboard>/d"",
+                    ""interactions"": """",
+                    ""processors"": """",
+                    ""groups"": """",
+                    ""action"": ""Move"",
+                    ""isComposite"": false,
+                    ""isPartOfComposite"": true
+                }
+            ]
+        }
+    ],
+    ""controlSchemes"": [
+        {
+            ""name"": ""PlayerScheme"",
+            ""bindingGroup"": ""PlayerScheme"",
+            ""devices"": []
+        }
+    ]
+}");
+        // pActionMap
+        m_pActionMap = asset.FindActionMap("pActionMap", throwIfNotFound: true);
+        m_pActionMap_MouseLook = m_pActionMap.FindAction("MouseLook", throwIfNotFound: true);
+        m_pActionMap_Jump = m_pActionMap.FindAction("Jump", throwIfNotFound: true);
+        m_pActionMap_Crouch = m_pActionMap.FindAction("Crouch", throwIfNotFound: true);
+        m_pActionMap_Move = m_pActionMap.FindAction("Move", throwIfNotFound: true);
+    }
+
+    public void Dispose()
+    {
+        UnityEngine.Object.Destroy(asset);
+    }
+
+    public InputBinding? bindingMask
+    {
+        get => asset.bindingMask;
+        set => asset.bindingMask = value;
+    }
+
+    public ReadOnlyArray<InputDevice>? devices
+    {
+        get => asset.devices;
+        set => asset.devices = value;
+    }
+
+    public ReadOnlyArray<InputControlScheme> controlSchemes => asset.controlSchemes;
+
+    public bool Contains(InputAction action)
+    {
+        return asset.Contains(action);
+    }
+
+    public IEnumerator<InputAction> GetEnumerator()
+    {
+        return asset.GetEnumerator();
+    }
+
+    IEnumerator IEnumerable.GetEnumerator()
+    {
+        return GetEnumerator();
+    }
+
+    public void Enable()
+    {
+        asset.Enable();
+    }
+
+    public void Disable()
+    {
+        asset.Disable();
+    }
+
+    public IEnumerable<InputBinding> bindings => asset.bindings;
+
+    public InputAction FindAction(string actionNameOrId, bool throwIfNotFound = false)
+    {
+        return asset.FindAction(actionNameOrId, throwIfNotFound);
+    }
+
+    public int FindBinding(InputBinding bindingMask, out InputAction action)
+    {
+        return asset.FindBinding(bindingMask, out action);
+    }
+
+    // pActionMap
+    private readonly InputActionMap m_pActionMap;
+    private List<IPActionMapActions> m_PActionMapActionsCallbackInterfaces = new List<IPActionMapActions>();
+    private readonly InputAction m_pActionMap_MouseLook;
+    private readonly InputAction m_pActionMap_Jump;
+    private readonly InputAction m_pActionMap_Crouch;
+    private readonly InputAction m_pActionMap_Move;
+    public struct PActionMapActions
+    {
+        private @PlayerInputActions m_Wrapper;
+        public PActionMapActions(@PlayerInputActions wrapper) { m_Wrapper = wrapper; }
+        public InputAction @MouseLook => m_Wrapper.m_pActionMap_MouseLook;
+        public InputAction @Jump => m_Wrapper.m_pActionMap_Jump;
+        public InputAction @Crouch => m_Wrapper.m_pActionMap_Crouch;
+        public InputAction @Move => m_Wrapper.m_pActionMap_Move;
+        public InputActionMap Get() { return m_Wrapper.m_pActionMap; }
+        public void Enable() { Get().Enable(); }
+        public void Disable() { Get().Disable(); }
+        public bool enabled => Get().enabled;
+        public static implicit operator InputActionMap(PActionMapActions set) { return set.Get(); }
+        public void AddCallbacks(IPActionMapActions instance)
+        {
+            if (instance == null || m_Wrapper.m_PActionMapActionsCallbackInterfaces.Contains(instance)) return;
+            m_Wrapper.m_PActionMapActionsCallbackInterfaces.Add(instance);
+            @MouseLook.started += instance.OnMouseLook;
+            @MouseLook.performed += instance.OnMouseLook;
+            @MouseLook.canceled += instance.OnMouseLook;
+            @Jump.started += instance.OnJump;
+            @Jump.performed += instance.OnJump;
+            @Jump.canceled += instance.OnJump;
+            @Crouch.started += instance.OnCrouch;
+            @Crouch.performed += instance.OnCrouch;
+            @Crouch.canceled += instance.OnCrouch;
+            @Move.started += instance.OnMove;
+            @Move.performed += instance.OnMove;
+            @Move.canceled += instance.OnMove;
+        }
+
+        private void UnregisterCallbacks(IPActionMapActions instance)
+        {
+            @MouseLook.started -= instance.OnMouseLook;
+            @MouseLook.performed -= instance.OnMouseLook;
+            @MouseLook.canceled -= instance.OnMouseLook;
+            @Jump.started -= instance.OnJump;
+            @Jump.performed -= instance.OnJump;
+            @Jump.canceled -= instance.OnJump;
+            @Crouch.started -= instance.OnCrouch;
+            @Crouch.performed -= instance.OnCrouch;
+            @Crouch.canceled -= instance.OnCrouch;
+            @Move.started -= instance.OnMove;
+            @Move.performed -= instance.OnMove;
+            @Move.canceled -= instance.OnMove;
+        }
+
+        public void RemoveCallbacks(IPActionMapActions instance)
+        {
+            if (m_Wrapper.m_PActionMapActionsCallbackInterfaces.Remove(instance))
+                UnregisterCallbacks(instance);
+        }
+
+        public void SetCallbacks(IPActionMapActions instance)
+        {
+            foreach (var item in m_Wrapper.m_PActionMapActionsCallbackInterfaces)
+                UnregisterCallbacks(item);
+            m_Wrapper.m_PActionMapActionsCallbackInterfaces.Clear();
+            AddCallbacks(instance);
+        }
+    }
+    public PActionMapActions @pActionMap => new PActionMapActions(this);
+    private int m_PlayerSchemeSchemeIndex = -1;
+    public InputControlScheme PlayerSchemeScheme
+    {
+        get
+        {
+            if (m_PlayerSchemeSchemeIndex == -1) m_PlayerSchemeSchemeIndex = asset.FindControlSchemeIndex("PlayerScheme");
+            return asset.controlSchemes[m_PlayerSchemeSchemeIndex];
+        }
+    }
+    public interface IPActionMapActions
+    {
+        void OnMouseLook(InputAction.CallbackContext context);
+        void OnJump(InputAction.CallbackContext context);
+        void OnCrouch(InputAction.CallbackContext context);
+        void OnMove(InputAction.CallbackContext context);
+    }
+}
+```
+
+### Assets/Scripts/Player/PlayerVoxelInteraction.cs
+```
+using UnityEngine;
+
+public class PlayerVoxelInteraction : MonoBehaviour
+{
+    Octree tree;
+    [SerializeField] GameObject targetVoxelCursor;
+    [SerializeField] GameObject normalCursor;
+    [SerializeField] LayerMask hitMask;
+    [SerializeField] ParticleSystem blockBreak;
+
+    Vector3 hitVoxelPosition;
+    Vector3 neighborVoxelPosition;
+
+    void Update()
+    {
+        ActivateCursors(false);
+
+        if (Physics.Raycast(transform.position, transform.forward, out RaycastHit hitInfo, 3f, hitMask))
+        {
+            if (tree == null)
+                tree = World.Instance.treeReference;
+
+            ActivateCursors(true);
+            PositionCursors(hitInfo);
+            //Change Behaviour depending on outer/inner generation
+            if (World.Instance.invertedWorld == true)
+            {
+                Click(hitVoxelPosition, neighborVoxelPosition, 0, 1);
+            }
+            else
+            {
+                Click(neighborVoxelPosition, hitVoxelPosition, 1, 0);
+            }
+        }
+    }
+
+    void ActivateCursors(bool value)
+    {
+        normalCursor.SetActive(value);
+        targetVoxelCursor.SetActive(value);
+    }
+
+    void PositionCursors(RaycastHit hitInfo)
+    {
+        Vector3 targetVoxel = hitInfo.point - hitInfo.normal * 0.5f;
+        targetVoxel = SnapToGrid(targetVoxel);
+
+        Vector3 adjacentVoxel = hitInfo.point + hitInfo.normal * 0.5f;
+        adjacentVoxel = SnapToGrid(adjacentVoxel);
+
+        hitVoxelPosition = targetVoxel;
+        neighborVoxelPosition = adjacentVoxel;
+
+        targetVoxelCursor.transform.position = targetVoxel;
+        normalCursor.transform.position = adjacentVoxel;
+        normalCursor.transform.rotation = Quaternion.LookRotation(hitInfo.normal, Vector3.up);
+    }
+
+    private Vector3 SnapToGrid(Vector3 pos)
+    {
+        pos.x = Mathf.Floor(pos.x) + 0.5f;
+        pos.y = Mathf.Floor(pos.y) + 0.5f;
+        pos.z = Mathf.Floor(pos.z) + 0.5f;
+        return pos;
+    }
+
+    void Click(Vector3 add, Vector3 remove, int button1, int button2)
+    {
+        if (Input.GetMouseButtonDown(button1))
+        {
+            tree.RemoveVoxel(remove);
+            tree.CubicQuery(remove);
+
+            blockBreak.transform.position = remove;
+            blockBreak.Play();
+        }
+        //Removing a voxel (by adding one)
+        else if (Input.GetMouseButtonDown(button2))
+        {
+            tree.InsertVoxel(new Voxel(add));
+            tree.CubicQuery(add);
+
+            blockBreak.transform.position = add;
+            blockBreak.Play();
+        }
+    }
+}
+```
+
+### Assets/Scripts/TileGeneration/GenerationSettings.cs
+```
+using UnityEngine;
+
+[CreateAssetMenu(fileName = "Settings", menuName = "ScriptableObjects/Generational Settings", order = 0)]
+
+public class GenerationSettings : ScriptableObject
+{
+    [Header("World")]
+    [Tooltip("Power of 2 values only, 64, 128, 512, 1024 etc.")] public int OctreeSize = 512;
+    public int voxelsToCreate = 5000;
+    [Range(0f, 1f)] public float creationSpeed = 0.01f;
+
+    [Tooltip("Size of block +1. For example 12: 13^3 = 2197 Voxels in a cube. This is also affected by inflation")]
+    public int startBlockSize = 1;
+    public int inflationPasses = 2;
+    public bool isInsideWorld = false;
+
+    [Header("Randomness")]
+    [Range(0f, 1f)] public float noise = 0.2f;
+    [Range(-0.5f, 0.5f)] public float radialBias = 0.1f;
+    public float branchChance = 0.1f;
+
+    [Header("Torches")]
+    [Range(0.001f, 0.1f)] public float torchesDistribution = 0.02f;
+    [Range(0f, 128f)] public int maxTorches = 64;
+
+    [Header("Debug")]
+    public bool debug = true;
+}
+```
+
+### Assets/Scripts/TileGeneration/Octree.cs
+```
+using System.Collections.Generic;
+using UnityEngine;
+
+public class Octree
+{
+    private readonly OctreeNode root;
+
+    public Octree(Bounds worldBounds)
+    {
+        root = new OctreeNode(worldBounds, 0, this);
+    }
+
+    #region BoundingBox Drawing
+    public List<Bounds> getAllBounds()
+    {
+        List<Bounds> bounds = new List<Bounds>();
+        GatherBoundsRecursively(root, bounds);
+        return bounds;
+    }
+    private void GatherBoundsRecursively(OctreeNode node, List<Bounds> boundsList)
+    {
+        if (node == null)
+            return;
+
+        boundsList.Add(node.bounds);
+
+        if (node.Children == null)
+            return;
+
+        if (node.Children.Length > 0)
+        {
+            foreach (var child in node.Children)
+            {
+                GatherBoundsRecursively(child, boundsList); // Recursively gather from children
+            }
+        }
+    }
+    #endregion
+
+    //Render the entire tree
+    public void DrawAllNodes()
+    {
+        root.Draw();
+    }
+
+    public void InsertVoxel(Voxel voxel)
+    {
+        root.Insert(voxel);
+    }
+
+    internal void RemoveVoxel(Vector3 pos)
+    {
+        root.RemoveAt(pos);
+    }
+
+    public void InsertVoxelRange(List<Voxel> voxels)
+    {
+        foreach (Voxel voxel in voxels)
+            InsertVoxel(voxel);
+    }
+
+    //Finds overlapping octants
+    public void CubicQuery(Vector3 position)
+    {
+        Bounds queryBounds = new Bounds(position, new Vector3(3, 3, 3));
+
+        //Find all the affected meshes
+        List<OctreeMesh> list = new List<OctreeMesh>();
+
+        // Start the query from the root node
+        QueryCubicRange(queryBounds, root, list);
+
+        foreach (OctreeMesh mesh in list)
+        {
+            mesh.DrawSection();
+        }
+    }
+
+    private void QueryCubicRange(Bounds queryBounds, OctreeNode node, List<OctreeMesh> meshes)
+    {
+
+        if (!node.bounds.Intersects(queryBounds))
+        {
+            return;
+        }
+        else
+        {
+
+            // If it's a leaf node, check the voxel and update mesh if needed
+            if (node.IsLeaf && node.mesh != null && node.mesh.drawn)
+            {
+                meshes.Add(node.mesh);
+            }
+            else
+            {
+                // Recursively query child nodes that might be within the range
+                for (int i = 0; i < 8; i++)
+                {
+                    QueryCubicRange(queryBounds, node.Children[i], meshes);
+                }
+            }
+        }
+    }
+
+    public bool FindVoxel(Vector3 position, out Voxel foundVoxel)
+    {
+        if(root.Find(position, out foundVoxel))
+            return true;
+        else
+            return false;
+    }
+
+    public bool VoxelAtPos(Vector3 pos)
+    {
+        if(root.Find(pos, out Voxel v))
+            return true;
+        else
+            return false;
+    }
+
+    public void Clear()
+    {
+        root.Clear();
+    }
+
+    //Dynamically grow or shrink the tree, need to redraw entire tree?
+    public void Grow()
+    {
+        //List<Voxel> voxels = new List<Voxel>();
+        //GetAllVoxels(root, voxels);
+
+        //Destroy all old nodes
+        //Create new root with double the bounds
+        //Move bounds center to centre of generation
+        //Insert voxels into new octree
+        //Redraw entire octree
+    }
+
+    public void Shrink()
+    {
+        /*
+         * Recreate the tree with a smaller size
+         */
+    }
+}
+```
+
+### Assets/Scripts/TileGeneration/OctreeMesh.cs
+```
+using System.Collections.Generic;
+using System.Linq;
+using UnityEngine;
+
+public class OctreeMesh : MonoBehaviour
+{
+    Dictionary<Vector3, Voxel> meshVoxels = new Dictionary<Vector3, Voxel>();
+    //Drawing
+    private List<Vector3> vertices = new List<Vector3>();
+    private List<int> triangles = new List<int>();
+    private List<Vector2> uvs = new List<Vector2>();
+    //Components
+    private MeshFilter meshFilter;
+    private MeshRenderer meshRenderer;
+    private MeshCollider meshCollider;
+    public bool drawn = false;
+
+    public void DrawVoxels(Dictionary<Vector3, Voxel> voxels)
+    {
+        transform.position = new Vector3(-0.5f, -0.5f, -0.5f); //Account for voxel 0.5f offset, temp fix?
+        meshVoxels = voxels; //This just points to the same collection, reference
+        CheckComponents();
+        DrawSection();
+        meshRenderer.material = World.Instance.VoxelMaterial;
+        drawn = true;
+    }
+
+    public void DrawSection()
+    {
+        ClearMesh();
+        ProcessVoxels();
+        Mesh mesh = new Mesh();
+        mesh.name = "VoxelMesh";
+        if (vertices.Count > 65536 && mesh.indexFormat == UnityEngine.Rendering.IndexFormat.UInt16)
+        {
+            Debug.Log("Verticies above limit! - " + vertices.Count + ". Switching to uint32");
+            mesh.indexFormat = UnityEngine.Rendering.IndexFormat.UInt32;
+        }
+        mesh.vertices = vertices.ToArray();
+        mesh.triangles = triangles.ToArray();
+        if(World.Instance.invertedWorld)
+            mesh.triangles = mesh.triangles.Reverse().ToArray();
+        mesh.uv = uvs.ToArray();
+
+        mesh.RecalculateNormals();
+        mesh.RecalculateBounds();
+        mesh.RecalculateTangents();
+
+        meshFilter.mesh = mesh;
+        meshCollider.sharedMesh = mesh;
+    }
+
+    private void ClearMesh()
+    {
+        if (meshFilter.mesh)
+        {
+            meshFilter.mesh.Clear(false); // Clear existing mesh data, preserving vertex layout
+        }
+
+        // Reset vertex and triangle collections for new data
+        vertices.Clear();
+        triangles.Clear();
+        uvs.Clear();
+    }
+
+    private void ProcessVoxels()
+    {
+        int nrOfFaces = 6;
+        foreach (Voxel voxel in meshVoxels.Values)
+        {
+            bool[] facesVisible = new bool[nrOfFaces];
+            for (int faceDir = 0; faceDir < nrOfFaces; faceDir++)
+            {
+                int offsetX = 0, offsetY = 0, offsetZ = 0;
+
+                // Determine offsets based on face direction
+                switch (faceDir)
+                {
+                    case 0: // Top
+                        offsetY = 1;
+                        break;
+                    case 1: // Bottom
+                        offsetY = -1;
+                        break;
+                    case 2: // Left
+                        offsetX = -1;
+                        break;
+                    case 3: // Right
+                        offsetX = 1;
+                        break;
+                    case 4: // Front
+                        offsetZ = 1;
+                        break;
+                    case 5: // Back
+                        offsetZ = -1;
+                        break;
+                }
+
+                // Calculate neighboring voxel position
+                Vector3 neighborPos = new Vector3(voxel.position.x + offsetX, voxel.position.y + offsetY, voxel.position.z + offsetZ);
+
+                // Check if voxel exists and is active
+                bool isFaceVisible = IsFaceVisible(neighborPos);
+                if (!isFaceVisible)
+                {
+                    AddFaceData(voxel.position.x, voxel.position.y, voxel.position.z, faceDir);
+                 }
+            }
+        }
+    }
+
+    private void CheckComponents()
+    {
+        if (meshFilter == null)
+            meshFilter = gameObject.AddComponent<MeshFilter>();
+        if (meshRenderer == null)
+            meshRenderer = gameObject.AddComponent<MeshRenderer>();
+        if (meshCollider == null)
+            meshCollider = gameObject.AddComponent<MeshCollider>();
+    }
+
+    private void AddFaceData(float x, float y, float z, int faceIndex)
+    {
+        // Based on faceIndex, determine vertices and triangles
+        // Add vertices and triangles for the visible face
+        // Calculate and add corresponding UVs
+
+        if (faceIndex == 0) // Top Face
+        {
+            vertices.Add(new Vector3(x, y + 1, z));
+            vertices.Add(new Vector3(x, y + 1, z + 1));
+            vertices.Add(new Vector3(x + 1, y + 1, z + 1));
+            vertices.Add(new Vector3(x + 1, y + 1, z));
+            uvs.Add(new Vector2(0, 0));
+            uvs.Add(new Vector2(1, 0));
+            uvs.Add(new Vector2(1, 1));
+            uvs.Add(new Vector2(0, 1));
+        }
+
+        if (faceIndex == 1) // Bottom Face
+        {
+            vertices.Add(new Vector3(x, y, z));
+            vertices.Add(new Vector3(x + 1, y, z));
+            vertices.Add(new Vector3(x + 1, y, z + 1));
+            vertices.Add(new Vector3(x, y, z + 1));
+            uvs.Add(new Vector2(0, 0));
+            uvs.Add(new Vector2(0, 1));
+            uvs.Add(new Vector2(1, 1));
+            uvs.Add(new Vector2(1, 0));
+        }
+
+        if (faceIndex == 2) // Left Face
+        {
+            vertices.Add(new Vector3(x, y, z));
+            vertices.Add(new Vector3(x, y, z + 1));
+            vertices.Add(new Vector3(x, y + 1, z + 1));
+            vertices.Add(new Vector3(x, y + 1, z));
+            uvs.Add(new Vector2(0, 0));
+            uvs.Add(new Vector2(0, 0));
+            uvs.Add(new Vector2(0, 1));
+            uvs.Add(new Vector2(0, 1));
+        }
+
+        if (faceIndex == 3) // Right Face
+        {
+            vertices.Add(new Vector3(x + 1, y, z + 1));
+            vertices.Add(new Vector3(x + 1, y, z));
+            vertices.Add(new Vector3(x + 1, y + 1, z));
+            vertices.Add(new Vector3(x + 1, y + 1, z + 1));
+            uvs.Add(new Vector2(1, 0));
+            uvs.Add(new Vector2(1, 1));
+            uvs.Add(new Vector2(1, 1));
+            uvs.Add(new Vector2(1, 0));
+        }
+
+        if (faceIndex == 4) // Front Face
+        {
+            vertices.Add(new Vector3(x, y, z + 1));
+            vertices.Add(new Vector3(x + 1, y, z + 1));
+            vertices.Add(new Vector3(x + 1, y + 1, z + 1));
+            vertices.Add(new Vector3(x, y + 1, z + 1));
+            uvs.Add(new Vector2(0, 1));
+            uvs.Add(new Vector2(0, 1));
+            uvs.Add(new Vector2(1, 1));
+            uvs.Add(new Vector2(1, 1));
+        }
+
+        if (faceIndex == 5) // Back Face
+        {
+            vertices.Add(new Vector3(x + 1, y, z));
+            vertices.Add(new Vector3(x, y, z));
+            vertices.Add(new Vector3(x, y + 1, z));
+            vertices.Add(new Vector3(x + 1, y + 1, z));
+            uvs.Add(new Vector2(0, 0));
+            uvs.Add(new Vector2(1, 0));
+            uvs.Add(new Vector2(1, 0));
+            uvs.Add(new Vector2(0, 0));
+
+        }
+        AddTriangleIndices();
+    }
+
+    private void AddTriangleIndices()
+    {
+        int vertCount = vertices.Count;
+
+        // First triangle
+        triangles.Add(vertCount - 4);
+        triangles.Add(vertCount - 3);
+        triangles.Add(vertCount - 2);
+
+        // Second triangle
+        triangles.Add(vertCount - 4);
+        triangles.Add(vertCount - 2);
+        triangles.Add(vertCount - 1);
+    }
+
+    private bool IsFaceVisible(Vector3 pos)
+    {
+        bool localNeighbor = meshVoxels.TryGetValue(pos, out Voxel localNeighborVoxel); //&& localNeighborVoxel.isActive;
+        bool hasGlobalNeighbor;
+
+        if(World.Instance.FindInTree(pos, out Voxel GlobalNeighbor))
+            hasGlobalNeighbor = true;
+        else
+            hasGlobalNeighbor = false;
+
+        return localNeighbor || hasGlobalNeighbor;
+    }
+
+}
+```
+
+### Assets/Scripts/TileGeneration/OctreeNode.cs
+```
+using System.Collections.Generic;
+using UnityEngine;
+
+public class OctreeNode
+{
+    int depth;
+    public Bounds bounds { get; private set; }
+    public bool IsLeaf { get; private set; }
+    public Dictionary<Vector3, Voxel> voxels;
+    public OctreeNode[] Children { get; private set; }
+    int capacity;
+    const float minBoundsSize = 7.0f;
+    public OctreeMesh mesh;
+    const int maxCapacity = 5000;
+    Octree tree;
+
+    public OctreeNode(Bounds bounds, int depth, Octree tree)
+    {
+        mesh = World.CreateNodeMesh().GetComponent<OctreeMesh>();
+        mesh.name = mesh.name + "_" + depth;
+
+        this.bounds = bounds;
+
+        IsLeaf = true;
+        Children = null;
+        voxels = new Dictionary<Vector3, Voxel>();
+        capacity = (int)Mathf.Clamp((bounds.size.x * bounds.size.x * bounds.size.x) / 3, minBoundsSize, maxCapacity);
+        this.depth = depth;
+        this.tree = tree;
+    }
+
+    bool CanSubdivide()
+    {
+        return (bounds.extents.x > minBoundsSize);
+    }
+
+    private bool ShouldSubdivide()
+    {
+        return voxels.Count >= capacity;
+    }
+
+    private void Subdivide()
+    {
+        // Calculate child node bounds based on parent and octant index
+        float halfSize = bounds.extents.x;
+        float quarterSize = bounds.extents.x / 2.0f;
+
+        IsLeaf = false;
+        Children = new OctreeNode[8];
+
+        // Create child nodes
+        for (int i = 0; i < 8; i++)
+        {
+            Vector3 childCenter = bounds.center;
+
+            childCenter.x += (i & 4) > 0 ? quarterSize : -quarterSize;
+            childCenter.y += (i & 2) > 0 ? quarterSize : -quarterSize;
+            childCenter.z += (i & 1) > 0 ? quarterSize : -quarterSize;
+
+            Children[i] = new OctreeNode(new Bounds(childCenter, new Vector3(halfSize, halfSize, halfSize)), depth + 1, tree);
+        }
+
+        // Redistribute existing voxels among child nodes
+        foreach (Voxel voxel in voxels.Values)
+        {
+            int childIndex = GetOctantIndex(voxel.position);
+            Children[childIndex].Insert(voxel);
+        }
+
+        // Clear the voxels collection of the parent node
+        voxels.Clear();
+    }
+
+
+    private int GetOctantIndex(Vector3 position)
+    {
+        int index = 0;
+        if (position.x > bounds.center.x) index |= 4;
+        if (position.y > bounds.center.y) index |= 2;
+        if (position.z > bounds.center.z) index |= 1;
+        return index;
+    }
+
+    public void Insert(Voxel voxel)
+    {
+        if (!bounds.Contains(voxel.position))
+        {
+            tree.Grow();
+            return;
+        }
+
+        if (IsLeaf)
+        {
+            if (ShouldSubdivide() && CanSubdivide())
+            {
+                Subdivide();
+                Insert(voxel);
+            }
+            else
+            {
+                voxels.TryAdd(voxel.position, voxel);
+            }
+        }
+        else
+        {
+            //Find leaf
+            int childIndex = GetOctantIndex(voxel.position);
+            Children[childIndex].Insert(voxel);
+        }
+    }
+
+    public void RemoveAt(Vector3 position)
+    {
+        if (IsLeaf)
+        {
+            if (voxels.ContainsKey(position))
+            {
+                voxels.Remove(position);
+            }
+        }
+        else
+        {
+            int childIndex = GetOctantIndex(position);
+            Children[childIndex].RemoveAt(position);
+        }
+
+    }
+
+    public bool Find(Vector3 position, out Voxel foundVoxel)
+    {
+        foundVoxel = new Voxel();
+        bool found = false;
+        if (!bounds.Contains(position))
+        {
+            return false;
+        }
+
+        if (IsLeaf)
+        {
+            if (voxels.ContainsKey(position))
+            {
+                foundVoxel = voxels[position];
+                found = true;
+                return true;
+            }
+            else
+            {
+                return false;
+            }
+        }
+        else
+        {
+            int childIndex = GetOctantIndex(position);
+            found = Children[childIndex].Find(position, out foundVoxel);
+        }
+
+        return found;
+    }
+
+    public void Clear()
+    {
+        if (IsLeaf)
+        {
+            voxels.Clear();
+            //World.DestroyNodeMesh(mesh);
+            //Redraw entire octree?
+        }
+        else
+        {
+            for (int i = 0; i < 8; i++)
+            {
+                Children[i].Clear();
+            }
+        }
+    }
+
+    //Drawing
+    public void Draw()
+    {
+        if (IsLeaf)
+        {
+            mesh.DrawVoxels(voxels);
+        }
+        else
+        {
+            for (int i = 0; i < 8; i++)
+            {
+                Children[i].Draw();
+            }
+        }
+    }
+
+
+}
+```
+
+### Assets/Scripts/TileGeneration/Voxel.cs
+```
+using UnityEngine;
+
+public struct Voxel
+{
+    public Vector3 position;
+
+    public Voxel(Vector3 position)
+    {
+        this.position = position;
+    }
+}
+```
+
+### Assets/Scripts/TileGeneration/VoxelGenerator.cs
+```
+using System.Collections;
+using System.Collections.Generic;
+using UnityEngine;
+using static Voxel;
+
+public class VoxelGenerator : MonoBehaviour
+{
+    [SerializeField] Transform voxelWalker;
+    [SerializeField] GenerationSettings settings;
+    [SerializeField] Transform Player;
+    World world;
+    Octree tree;
+
+    // Runtime variables
+    private Voxel currentVoxel;
+    List<Vector3> previousPositions = new List<Vector3>();
+    
+    public bool canSpawn { get { return previousPositions.Count < settings.voxelsToCreate; } }
+
+    private void Start()
+    {
+        if (world == null)
+            world = new GameObject("World").AddComponent<World>();
+
+        world.InitOctoTree(settings.isInsideWorld, settings.OctreeSize);
+        tree = world.treeReference;
+
+        StartGeneration();
+    }
+
+    public void StartGeneration()
+    {
+        Player.gameObject.SetActive(false);
+        Clear();
+        StartCoroutine(Generate());
+    }
+
+    IEnumerator Generate()
+    {
+        Vector3 firstVoxelPosition = new Vector3(0.5f, 0.5f, 0.5f);
+        CreateNeighbors(firstVoxelPosition, true, settings.startBlockSize, true); //Create a 9x9 square starting point
+        currentVoxel.position = firstVoxelPosition;
+        int attempts = 0;
+
+        while (canSpawn)
+        {
+            // Perform random walk step
+            Vector3 newPosition = currentVoxel.position + RandomWalkDirection();
+            if (!tree.VoxelAtPos(newPosition))
+            {
+                currentVoxel = new Voxel(newPosition);
+                AddVoxel(currentVoxel);
+
+                voxelWalker.position = currentVoxel.position;
+                attempts = 0;
+            }
+            else
+            {
+                attempts++;
+                if (attempts >= 5)
+                {
+                    attempts = 0;
+                    tree.FindVoxel(previousPositions[Random.Range(0, previousPositions.Count - 1)], out currentVoxel);
+                }
+            }
+
+            yield return new WaitForSeconds(settings.creationSpeed);
+        }
+
+        Inflate();
+
+        if (settings.isInsideWorld)
+            PlaceTorchesInside();
+        else
+            PlaceTorchesOutside();
+
+        if (!settings.debug)
+            previousPositions.Clear();
+
+        voxelWalker.gameObject.SetActive(false);
+        Invoke("SetPlayer", 1f);
+        world.DrawWorld();
+    }
+
+    private void SetPlayer()
+    {
+        Player.position = new Vector3(0.5f, 1f, 0.5f);
+        Player.GetComponent<PlayerController>().ResetMovement();
+        Player.gameObject.SetActive(true);
+    }
+
+    void Inflate()
+    {
+        foreach (Vector3 pos in previousPositions)
+        {
+            if (Random.value < settings.noise)
+                CreateNeighbors(pos, false, settings.inflationPasses);
+        }
+    }
+
+    void PlaceTorchesInside()
+    {
+        int numTorches = Mathf.RoundToInt(previousPositions.Count * settings.torchesDistribution) + 1;
+        numTorches = Mathf.Clamp(numTorches, 0, settings.maxTorches);
+        Vector3 lastPosition = Vector3.zero;
+
+        for (int i = 0; i < numTorches; i++)
+        {
+            int verticalChange = 15;
+            int randomIndex = Random.Range(0, previousPositions.Count - 1);
+            Vector3 targetPosition = previousPositions[randomIndex];
+            Vector3 floor = targetPosition;
+            floor.y -= 1;
+
+            if (Vector3.Distance(targetPosition, lastPosition) < verticalChange*1.5f)
+                continue;
+
+            if(settings.debug)
+                Instantiate(Resources.Load<GameObject>("TorchStartCube"), targetPosition, Quaternion.identity);
+
+            // Look down until we reach floor
+            while (tree.VoxelAtPos(floor))
+            {
+                floor.y--;
+                verticalChange--;
+            }
+
+            if (verticalChange < 0) //If we moved too far, skip
+                continue;
+
+            targetPosition = floor;
+            targetPosition.y++;
+            lastPosition = targetPosition;
+
+            Instantiate(Resources.Load<GameObject>("Torch"), targetPosition, Quaternion.identity);
+        }
+    }
+
+    void PlaceTorchesOutside()
+    {
+        int numTorches = Mathf.RoundToInt(previousPositions.Count * settings.torchesDistribution) + 1;
+        numTorches = Mathf.Clamp(numTorches, 0, settings.maxTorches);
+        Vector3 lastPosition = Vector3.zero;
+
+        for (int i = 0; i < numTorches; i++)
+        {
+            int verticalChange = 15;
+            int randomIndex = Random.Range(0, previousPositions.Count - 1);
+            Vector3 targetPosition = previousPositions[randomIndex];
+            Vector3 floor = targetPosition;
+            floor.y += verticalChange;
+
+            if (Vector3.Distance(targetPosition, lastPosition) < verticalChange * 1.5f)
+                continue;
+
+            if (settings.debug)
+                Instantiate(Resources.Load<GameObject>("TorchStartCube"), targetPosition, Quaternion.identity);
+
+            // Look up until we reach air
+            while (tree.VoxelAtPos(floor) && verticalChange > 0)
+            {
+                floor.y++;
+                verticalChange--;
+            }
+
+            if (verticalChange <= 0) //If we moved too far, skip
+                continue;
+
+            targetPosition = floor;
+            lastPosition = floor;
+
+            Instantiate(Resources.Load<GameObject>("Torch"), targetPosition, Quaternion.identity);
+        }
+    }
+
+    public void CreateNeighbors(Vector3 centre, bool addToPreviousLocations, int radius, bool forceCubic = false)
+    {
+        for (int x = -radius; x <= radius; x++)
+        {
+            for (int y = -radius; y <= radius; y++)
+            {
+                for (int z = -radius; z <= radius; z++)
+                {
+                    Vector3 pos = centre + new Vector3(x, y, z);
+
+                    if (tree.VoxelAtPos(pos))
+                        continue;
+
+                    if (!forceCubic)
+                    {
+                        if (Random.value < settings.noise)
+                        {
+                            if (IsDiagonalOrCenter(new Vector3(x, y, z)))
+                            {
+                                continue;
+                            }
+                        }
+                    }
+                    if (addToPreviousLocations)
+                        AddVoxel(new Voxel(pos));
+                    else
+                        tree.InsertVoxel(new Voxel(pos));
+                }
+            }
+        }
+    }
+    bool IsDiagonalOrCenter(Vector3 pos)
+    {
+        return pos.x * pos.z != 0 || pos.y * pos.z != 0 || pos.x * pos.y != 0 || (pos.x == 0 && pos.y == 0 && pos.z == 0);
+    }
+
+    private void AddVoxel(Voxel v)
+    {
+        tree.InsertVoxel(v);
+        previousPositions.Add(v.position);
+    }
+
+    private void OnDrawGizmos()
+    {
+        Gizmos.color = Color.green;
+
+        foreach (Vector3 pos in previousPositions)
+        {
+            Gizmos.DrawWireCube(pos, Vector3.one);
+        }
+    }
+
+    private Vector3 RandomWalkDirection()
+    {
+        if (Random.value < settings.radialBias)
+            return RadialBias();
+        
+        int randomDirection = Random.Range(0, 6);
+        Vector3 result = Vector3.forward;
+
+        switch (randomDirection)
+        {
+            case 0: result = Vector3.right; break;
+            case 1: result = Vector3.up; break;
+            case 2: result = Vector3.down; break;
+            case 3: result = Vector3.left; break;
+            case 4: result = Vector3.forward; break;
+            case 5: result = Vector3.back; break;
+        }
+
+        return result;
+    }
+
+    private Vector3 RadialBias()
+    {
+        //Bias test
+        Vector3 dirFromCenter = (currentVoxel.position - Vector3.zero).normalized;
+
+        float[] dotProducts = new float[6];
+        dotProducts[0] = Vector3.Dot(dirFromCenter, Vector3.forward);
+        dotProducts[1] = Vector3.Dot(dirFromCenter, Vector3.right);
+        dotProducts[2] = Vector3.Dot(dirFromCenter, Vector3.up);
+        dotProducts[3] = Vector3.Dot(dirFromCenter, Vector3.left);
+        dotProducts[4] = Vector3.Dot(dirFromCenter, Vector3.back);
+        dotProducts[5] = Vector3.Dot(dirFromCenter, Vector3.down);
+
+        int closestIndex = Mathf.FloorToInt(Mathf.Max(dotProducts));//Mathf.RoundToInt(Mathf.Max(dotProducts));
+        Vector3 closestDirection = closestIndex switch
+        {
+            0 => Vector3.forward,
+            1 => Vector3.right,
+            2 => Vector3.up,
+            3 => Vector3.left,
+            4 => Vector3.back,
+            5 => Vector3.down,
+            _ => throw new System.NotImplementedException(),
+        };
+
+        return closestDirection;
+    }
+
+    public void Clear()
+    {
+        StopAllCoroutines();
+        world.ClearTree();
+        previousPositions.Clear();
+        currentVoxel = new Voxel();
+        voxelWalker.position = Vector3.one;
+        Player.gameObject.SetActive(false);
+    }
+}
+```
+
+### Assets/Scripts/TileGeneration/World.cs
+```
+using UnityEngine;
+
+public class World : MonoBehaviour
+{
+    Octree tree;
+    public Octree treeReference => tree;
+    public static World Instance { get; private set; }
+    public int worldSize;
+    public bool invertedWorld = false;
+    public Material VoxelMaterial;
+
+    void Awake()
+    {
+        if (Instance == null)
+            Instance = this;
+        else
+            Destroy(gameObject);
+
+        VoxelMaterial = Resources.Load("test") as Material;
+    }
+
+    public static GameObject CreateNodeMesh()
+    {
+        GameObject meshGO = new GameObject("Mesh");
+        meshGO.AddComponent<OctreeMesh>();
+        return meshGO;
+    }
+
+    public static void DestroyNodeMesh(OctreeMesh mesh)
+    {
+        Destroy(mesh.gameObject);
+    }
+
+    private void OnDrawGizmos()
+    {
+        Gizmos.color = Color.red;
+        if (tree != null)
+        {
+            foreach (var item in tree.getAllBounds())
+            {
+                Gizmos.DrawWireCube(item.center, item.size);
+                Gizmos.DrawSphere(item.center, 0.5f);
+            }
+        }
+    }
+
+    public void DrawWorld()
+    {
+        tree.DrawAllNodes();
+    }
+
+    public void InitOctoTree(bool normals, int size)
+    {
+        //Bounds must always be power of 2 = 64/128/256/512/1024
+        worldSize = size;
+        invertedWorld = normals;
+
+        if (tree == null)
+            tree = new Octree(new Bounds(Vector3.zero, Vector3.one * worldSize));
+    }
+
+    public bool FindInTree(Vector3 pos, out Voxel voxel)
+    {
+        return tree.FindVoxel(pos, out voxel);
+    }
+
+    public void ClearTree()
+    {
+        tree.Clear();
+    }
+
+}
+```
+
+### Assets/TextMesh Pro/Shaders/TMP_Bitmap-Custom-Atlas.shader
+```
+Shader "TextMeshPro/Bitmap Custom Atlas" {
+
+Properties {
+	_MainTex		("Font Atlas", 2D) = "white" {}
+	_FaceTex		("Font Texture", 2D) = "white" {}
+	[HDR]_FaceColor	("Text Color", Color) = (1,1,1,1)
+
+	_VertexOffsetX	("Vertex OffsetX", float) = 0
+	_VertexOffsetY	("Vertex OffsetY", float) = 0
+	_MaskSoftnessX	("Mask SoftnessX", float) = 0
+	_MaskSoftnessY	("Mask SoftnessY", float) = 0
+
+	_ClipRect("Clip Rect", vector) = (-32767, -32767, 32767, 32767)
+	_Padding		("Padding", float) = 0
+
+	_StencilComp("Stencil Comparison", Float) = 8
+	_Stencil("Stencil ID", Float) = 0
+	_StencilOp("Stencil Operation", Float) = 0
+	_StencilWriteMask("Stencil Write Mask", Float) = 255
+	_StencilReadMask("Stencil Read Mask", Float) = 255
+
+	_CullMode("Cull Mode", Float) = 0
+	_ColorMask("Color Mask", Float) = 15
+}
+
+SubShader{
+
+	Tags { "Queue" = "Transparent" "IgnoreProjector" = "True" "RenderType" = "Transparent" }
+
+	Stencil
+	{
+		Ref[_Stencil]
+		Comp[_StencilComp]
+		Pass[_StencilOp]
+		ReadMask[_StencilReadMask]
+		WriteMask[_StencilWriteMask]
+	}
+
+
+	Lighting Off
+	Cull [_CullMode]
+	ZTest [unity_GUIZTestMode]
+	ZWrite Off
+	Fog { Mode Off }
+	Blend SrcAlpha OneMinusSrcAlpha
+	ColorMask[_ColorMask]
+
+	Pass {
+		CGPROGRAM
+		#pragma vertex vert
+		#pragma fragment frag
+
+		#pragma multi_compile __ UNITY_UI_CLIP_RECT
+		#pragma multi_compile __ UNITY_UI_ALPHACLIP
+
+
+		#include "UnityCG.cginc"
+
+		struct appdata_t {
+			float4 vertex		: POSITION;
+			fixed4 color		: COLOR;
+			float2 texcoord0	: TEXCOORD0;
+			float2 texcoord1	: TEXCOORD1;
+		};
+
+		struct v2f {
+			float4	vertex		: SV_POSITION;
+			fixed4	color		: COLOR;
+			float2	texcoord0	: TEXCOORD0;
+			float2	texcoord1	: TEXCOORD1;
+			float4	mask		: TEXCOORD2;
+		};
+
+		uniform	sampler2D 	_MainTex;
+		uniform	sampler2D 	_FaceTex;
+		uniform float4		_FaceTex_ST;
+		uniform	fixed4		_FaceColor;
+
+		uniform float		_VertexOffsetX;
+		uniform float		_VertexOffsetY;
+		uniform float4		_ClipRect;
+		uniform float		_MaskSoftnessX;
+		uniform float		_MaskSoftnessY;
+
+		float2 UnpackUV(float uv)
+		{
+			float2 output;
+			output.x = floor(uv / 4096);
+			output.y = uv - 4096 * output.x;
+
+			return output * 0.001953125;
+		}
+
+		v2f vert (appdata_t v)
+		{
+			float4 vert = v.vertex;
+			vert.x += _VertexOffsetX;
+			vert.y += _VertexOffsetY;
+
+			vert.xy += (vert.w * 0.5) / _ScreenParams.xy;
+
+			float4 vPosition = UnityPixelSnap(UnityObjectToClipPos(vert));
+
+			fixed4 faceColor = v.color;
+			faceColor *= _FaceColor;
+
+			v2f OUT;
+			OUT.vertex = vPosition;
+			OUT.color = faceColor;
+			OUT.texcoord0 = v.texcoord0;
+			OUT.texcoord1 = TRANSFORM_TEX(UnpackUV(v.texcoord1), _FaceTex);
+			float2 pixelSize = vPosition.w;
+			pixelSize /= abs(float2(_ScreenParams.x * UNITY_MATRIX_P[0][0], _ScreenParams.y * UNITY_MATRIX_P[1][1]));
+
+			// Clamp _ClipRect to 16bit.
+			float4 clampedRect = clamp(_ClipRect, -2e10, 2e10);
+			OUT.mask = float4(vert.xy * 2 - clampedRect.xy - clampedRect.zw, 0.25 / (0.25 * half2(_MaskSoftnessX, _MaskSoftnessY) + pixelSize.xy));
+
+			return OUT;
+		}
+
+		fixed4 frag (v2f IN) : SV_Target
+		{
+			fixed4 color = tex2D(_MainTex, IN.texcoord0) * tex2D(_FaceTex, IN.texcoord1) * IN.color;
+
+			// Alternative implementation to UnityGet2DClipping with support for softness.
+			#if UNITY_UI_CLIP_RECT
+				half2 m = saturate((_ClipRect.zw - _ClipRect.xy - abs(IN.mask.xy)) * IN.mask.zw);
+				color *= m.x * m.y;
+			#endif
+
+			#if UNITY_UI_ALPHACLIP
+				clip(color.a - 0.001);
+			#endif
+
+			return color;
+		}
+		ENDCG
+	}
+}
+
+	CustomEditor "TMPro.EditorUtilities.TMP_BitmapShaderGUI"
+}
+```
+
+### Assets/TextMesh Pro/Shaders/TMP_Bitmap-Mobile.shader
+```
+Shader "TextMeshPro/Mobile/Bitmap" {
+
+Properties {
+	_MainTex		("Font Atlas", 2D) = "white" {}
+	[HDR]_Color		("Text Color", Color) = (1,1,1,1)
+	_DiffusePower	("Diffuse Power", Range(1.0,4.0)) = 1.0
+
+	_VertexOffsetX("Vertex OffsetX", float) = 0
+	_VertexOffsetY("Vertex OffsetY", float) = 0
+	_MaskSoftnessX("Mask SoftnessX", float) = 0
+	_MaskSoftnessY("Mask SoftnessY", float) = 0
+
+	_ClipRect("Clip Rect", vector) = (-32767, -32767, 32767, 32767)
+
+	_StencilComp("Stencil Comparison", Float) = 8
+	_Stencil("Stencil ID", Float) = 0
+	_StencilOp("Stencil Operation", Float) = 0
+	_StencilWriteMask("Stencil Write Mask", Float) = 255
+	_StencilReadMask("Stencil Read Mask", Float) = 255
+
+	_CullMode("Cull Mode", Float) = 0
+	_ColorMask("Color Mask", Float) = 15
+}
+
+SubShader {
+
+	Tags { "Queue"="Transparent" "IgnoreProjector"="True" "RenderType"="Transparent" }
+
+	Stencil
+	{
+		Ref[_Stencil]
+		Comp[_StencilComp]
+		Pass[_StencilOp]
+		ReadMask[_StencilReadMask]
+		WriteMask[_StencilWriteMask]
+	}
+
+
+	Lighting Off
+	Cull [_CullMode]
+	ZTest [unity_GUIZTestMode]
+	ZWrite Off
+	Fog { Mode Off }
+	Blend SrcAlpha OneMinusSrcAlpha
+	ColorMask[_ColorMask]
+
+	Pass {
+		CGPROGRAM
+		#pragma vertex vert
+		#pragma fragment frag
+		#pragma fragmentoption ARB_precision_hint_fastest
+
+		#pragma multi_compile __ UNITY_UI_CLIP_RECT
+		#pragma multi_compile __ UNITY_UI_ALPHACLIP
+
+
+		#include "UnityCG.cginc"
+
+		struct appdata_t {
+			float4 vertex : POSITION;
+			fixed4 color : COLOR;
+			float2 texcoord0 : TEXCOORD0;
+			float2 texcoord1 : TEXCOORD1;
+		};
+
+		struct v2f {
+			float4 vertex		: POSITION;
+			fixed4 color		: COLOR;
+			float2 texcoord0	: TEXCOORD0;
+			float4 mask			: TEXCOORD2;
+		};
+
+		sampler2D 	_MainTex;
+		fixed4		_Color;
+		float		_DiffusePower;
+
+		uniform float		_VertexOffsetX;
+		uniform float		_VertexOffsetY;
+		uniform float4		_ClipRect;
+		uniform float		_MaskSoftnessX;
+		uniform float		_MaskSoftnessY;
+
+		v2f vert (appdata_t v)
+		{
+			v2f OUT;
+			float4 vert = v.vertex;
+			vert.x += _VertexOffsetX;
+			vert.y += _VertexOffsetY;
+
+			vert.xy += (vert.w * 0.5) / _ScreenParams.xy;
+
+			OUT.vertex = UnityPixelSnap(UnityObjectToClipPos(vert));
+			OUT.color = v.color;
+			OUT.color *= _Color;
+			OUT.color.rgb *= _DiffusePower;
+			OUT.texcoord0 = v.texcoord0;
+
+			float2 pixelSize = OUT.vertex.w;
+			//pixelSize /= abs(float2(_ScreenParams.x * UNITY_MATRIX_P[0][0], _ScreenParams.y * UNITY_MATRIX_P[1][1]));
+
+			// Clamp _ClipRect to 16bit.
+			float4 clampedRect = clamp(_ClipRect, -2e10, 2e10);
+			OUT.mask = float4(vert.xy * 2 - clampedRect.xy - clampedRect.zw, 0.25 / (0.25 * half2(_MaskSoftnessX, _MaskSoftnessY) + pixelSize.xy));
+
+			return OUT;
+		}
+
+		fixed4 frag (v2f IN) : COLOR
+		{
+			fixed4 color = fixed4(IN.color.rgb, IN.color.a * tex2D(_MainTex, IN.texcoord0).a);
+
+			// Alternative implementation to UnityGet2DClipping with support for softness.
+			#if UNITY_UI_CLIP_RECT
+				half2 m = saturate((_ClipRect.zw - _ClipRect.xy - abs(IN.mask.xy)) * IN.mask.zw);
+				color *= m.x * m.y;
+			#endif
+
+			#if UNITY_UI_ALPHACLIP
+				clip(color.a - 0.001);
+			#endif
+
+			return color;
+		}
+		ENDCG
+	}
+}
+
+SubShader {
+	Tags { "Queue"="Transparent" "IgnoreProjector"="True" "RenderType"="Transparent" }
+	Lighting Off Cull Off ZTest Always ZWrite Off Fog { Mode Off }
+	Blend SrcAlpha OneMinusSrcAlpha
+	BindChannels {
+		Bind "Color", color
+		Bind "Vertex", vertex
+		Bind "TexCoord", texcoord0
+	}
+	Pass {
+		SetTexture [_MainTex] {
+			constantColor [_Color] combine constant * primary, constant * texture
+		}
+	}
+}
+
+CustomEditor "TMPro.EditorUtilities.TMP_BitmapShaderGUI"
+}
+```
+
+### Assets/TextMesh Pro/Shaders/TMP_Bitmap.shader
+```
+Shader "TextMeshPro/Bitmap" {
+
+Properties {
+	_MainTex		("Font Atlas", 2D) = "white" {}
+	_FaceTex		("Font Texture", 2D) = "white" {}
+	[HDR]_FaceColor	("Text Color", Color) = (1,1,1,1)
+
+	_VertexOffsetX	("Vertex OffsetX", float) = 0
+	_VertexOffsetY	("Vertex OffsetY", float) = 0
+	_MaskSoftnessX	("Mask SoftnessX", float) = 0
+	_MaskSoftnessY	("Mask SoftnessY", float) = 0
+
+	_ClipRect("Clip Rect", vector) = (-32767, -32767, 32767, 32767)
+
+	_StencilComp("Stencil Comparison", Float) = 8
+	_Stencil("Stencil ID", Float) = 0
+	_StencilOp("Stencil Operation", Float) = 0
+	_StencilWriteMask("Stencil Write Mask", Float) = 255
+	_StencilReadMask("Stencil Read Mask", Float) = 255
+
+	_CullMode("Cull Mode", Float) = 0
+	_ColorMask("Color Mask", Float) = 15
+}
+
+SubShader{
+
+	Tags { "Queue" = "Transparent" "IgnoreProjector" = "True" "RenderType" = "Transparent" }
+
+	Stencil
+	{
+		Ref[_Stencil]
+		Comp[_StencilComp]
+		Pass[_StencilOp]
+		ReadMask[_StencilReadMask]
+		WriteMask[_StencilWriteMask]
+	}
+
+
+	Lighting Off
+	Cull [_CullMode]
+	ZTest [unity_GUIZTestMode]
+	ZWrite Off
+	Fog { Mode Off }
+	Blend SrcAlpha OneMinusSrcAlpha
+	ColorMask[_ColorMask]
+
+	Pass {
+		CGPROGRAM
+		#pragma vertex vert
+		#pragma fragment frag
+
+		#pragma multi_compile __ UNITY_UI_CLIP_RECT
+		#pragma multi_compile __ UNITY_UI_ALPHACLIP
+
+
+		#include "UnityCG.cginc"
+
+		struct appdata_t {
+			float4 vertex		: POSITION;
+			fixed4 color		: COLOR;
+			float2 texcoord0	: TEXCOORD0;
+			float2 texcoord1	: TEXCOORD1;
+		};
+
+		struct v2f {
+			float4	vertex		: SV_POSITION;
+			fixed4	color		: COLOR;
+			float2	texcoord0	: TEXCOORD0;
+			float2	texcoord1	: TEXCOORD1;
+			float4	mask		: TEXCOORD2;
+		};
+
+		uniform	sampler2D 	_MainTex;
+		uniform	sampler2D 	_FaceTex;
+		uniform float4		_FaceTex_ST;
+		uniform	fixed4		_FaceColor;
+
+		uniform float		_VertexOffsetX;
+		uniform float		_VertexOffsetY;
+		uniform float4		_ClipRect;
+		uniform float		_MaskSoftnessX;
+		uniform float		_MaskSoftnessY;
+
+		float2 UnpackUV(float uv)
+		{
+			float2 output;
+			output.x = floor(uv / 4096);
+			output.y = uv - 4096 * output.x;
+
+			return output * 0.001953125;
+		}
+
+		v2f vert (appdata_t v)
+		{
+			float4 vert = v.vertex;
+			vert.x += _VertexOffsetX;
+			vert.y += _VertexOffsetY;
+
+			vert.xy += (vert.w * 0.5) / _ScreenParams.xy;
+
+			float4 vPosition = UnityPixelSnap(UnityObjectToClipPos(vert));
+
+			fixed4 faceColor = v.color;
+			faceColor *= _FaceColor;
+
+			v2f OUT;
+			OUT.vertex = vPosition;
+			OUT.color = faceColor;
+			OUT.texcoord0 = v.texcoord0;
+			OUT.texcoord1 = TRANSFORM_TEX(UnpackUV(v.texcoord1), _FaceTex);
+			float2 pixelSize = vPosition.w;
+			pixelSize /= abs(float2(_ScreenParams.x * UNITY_MATRIX_P[0][0], _ScreenParams.y * UNITY_MATRIX_P[1][1]));
+
+			// Clamp _ClipRect to 16bit.
+			float4 clampedRect = clamp(_ClipRect, -2e10, 2e10);
+			OUT.mask = float4(vert.xy * 2 - clampedRect.xy - clampedRect.zw, 0.25 / (0.25 * half2(_MaskSoftnessX, _MaskSoftnessY) + pixelSize.xy));
+
+			return OUT;
+		}
+
+		fixed4 frag (v2f IN) : SV_Target
+		{
+			fixed4 color = tex2D(_MainTex, IN.texcoord0);
+			color = fixed4 (tex2D(_FaceTex, IN.texcoord1).rgb * IN.color.rgb, IN.color.a * color.a);
+
+			// Alternative implementation to UnityGet2DClipping with support for softness.
+			#if UNITY_UI_CLIP_RECT
+				half2 m = saturate((_ClipRect.zw - _ClipRect.xy - abs(IN.mask.xy)) * IN.mask.zw);
+				color *= m.x * m.y;
+			#endif
+
+			#if UNITY_UI_ALPHACLIP
+				clip(color.a - 0.001);
+			#endif
+
+			return color;
+		}
+		ENDCG
+	}
+}
+
+	CustomEditor "TMPro.EditorUtilities.TMP_BitmapShaderGUI"
+}
+```
+
+### Assets/TextMesh Pro/Shaders/TMP_SDF Overlay.shader
+```
+Shader "TextMeshPro/Distance Field Overlay" {
+
+Properties {
+	_FaceTex			("Face Texture", 2D) = "white" {}
+	_FaceUVSpeedX		("Face UV Speed X", Range(-5, 5)) = 0.0
+	_FaceUVSpeedY		("Face UV Speed Y", Range(-5, 5)) = 0.0
+	[HDR]_FaceColor		("Face Color", Color) = (1,1,1,1)
+	_FaceDilate			("Face Dilate", Range(-1,1)) = 0
+
+	[HDR]_OutlineColor	("Outline Color", Color) = (0,0,0,1)
+	_OutlineTex			("Outline Texture", 2D) = "white" {}
+	_OutlineUVSpeedX	("Outline UV Speed X", Range(-5, 5)) = 0.0
+	_OutlineUVSpeedY	("Outline UV Speed Y", Range(-5, 5)) = 0.0
+	_OutlineWidth		("Outline Thickness", Range(0, 1)) = 0
+	_OutlineSoftness	("Outline Softness", Range(0,1)) = 0
+
+	_Bevel				("Bevel", Range(0,1)) = 0.5
+	_BevelOffset		("Bevel Offset", Range(-0.5,0.5)) = 0
+	_BevelWidth			("Bevel Width", Range(-.5,0.5)) = 0
+	_BevelClamp			("Bevel Clamp", Range(0,1)) = 0
+	_BevelRoundness		("Bevel Roundness", Range(0,1)) = 0
+
+	_LightAngle			("Light Angle", Range(0.0, 6.2831853)) = 3.1416
+	[HDR]_SpecularColor	("Specular", Color) = (1,1,1,1)
+	_SpecularPower		("Specular", Range(0,4)) = 2.0
+	_Reflectivity		("Reflectivity", Range(5.0,15.0)) = 10
+	_Diffuse			("Diffuse", Range(0,1)) = 0.5
+	_Ambient			("Ambient", Range(1,0)) = 0.5
+
+	_BumpMap 			("Normal map", 2D) = "bump" {}
+	_BumpOutline		("Bump Outline", Range(0,1)) = 0
+	_BumpFace			("Bump Face", Range(0,1)) = 0
+
+	_ReflectFaceColor	("Reflection Color", Color) = (0,0,0,1)
+	_ReflectOutlineColor("Reflection Color", Color) = (0,0,0,1)
+	_Cube 				("Reflection Cubemap", Cube) = "black" { /* TexGen CubeReflect */ }
+	_EnvMatrixRotation	("Texture Rotation", vector) = (0, 0, 0, 0)
+
+
+	[HDR]_UnderlayColor	("Border Color", Color) = (0,0,0, 0.5)
+	_UnderlayOffsetX	("Border OffsetX", Range(-1,1)) = 0
+	_UnderlayOffsetY	("Border OffsetY", Range(-1,1)) = 0
+	_UnderlayDilate		("Border Dilate", Range(-1,1)) = 0
+	_UnderlaySoftness	("Border Softness", Range(0,1)) = 0
+
+	[HDR]_GlowColor		("Color", Color) = (0, 1, 0, 0.5)
+	_GlowOffset			("Offset", Range(-1,1)) = 0
+	_GlowInner			("Inner", Range(0,1)) = 0.05
+	_GlowOuter			("Outer", Range(0,1)) = 0.05
+	_GlowPower			("Falloff", Range(1, 0)) = 0.75
+
+	_WeightNormal		("Weight Normal", float) = 0
+	_WeightBold			("Weight Bold", float) = 0.5
+
+	_ShaderFlags		("Flags", float) = 0
+	_ScaleRatioA		("Scale RatioA", float) = 1
+	_ScaleRatioB		("Scale RatioB", float) = 1
+	_ScaleRatioC		("Scale RatioC", float) = 1
+
+	_MainTex			("Font Atlas", 2D) = "white" {}
+	_TextureWidth		("Texture Width", float) = 512
+	_TextureHeight		("Texture Height", float) = 512
+	_GradientScale		("Gradient Scale", float) = 5.0
+	_ScaleX				("Scale X", float) = 1.0
+	_ScaleY				("Scale Y", float) = 1.0
+	_PerspectiveFilter	("Perspective Correction", Range(0, 1)) = 0.875
+	_Sharpness			("Sharpness", Range(-1,1)) = 0
+
+	_VertexOffsetX		("Vertex OffsetX", float) = 0
+	_VertexOffsetY		("Vertex OffsetY", float) = 0
+
+	_MaskCoord			("Mask Coordinates", vector) = (0, 0, 32767, 32767)
+	_ClipRect			("Clip Rect", vector) = (-32767, -32767, 32767, 32767)
+	_MaskSoftnessX		("Mask SoftnessX", float) = 0
+	_MaskSoftnessY		("Mask SoftnessY", float) = 0
+
+	_StencilComp		("Stencil Comparison", Float) = 8
+	_Stencil			("Stencil ID", Float) = 0
+	_StencilOp			("Stencil Operation", Float) = 0
+	_StencilWriteMask	("Stencil Write Mask", Float) = 255
+	_StencilReadMask	("Stencil Read Mask", Float) = 255
+
+	_CullMode			("Cull Mode", Float) = 0
+	_ColorMask			("Color Mask", Float) = 15
+}
+
+SubShader {
+
+	Tags
+  {
+		"Queue"="Overlay"
+		"IgnoreProjector"="True"
+		"RenderType"="Transparent"
+	}
+
+	Stencil
+	{
+		Ref [_Stencil]
+		Comp [_StencilComp]
+		Pass [_StencilOp]
+		ReadMask [_StencilReadMask]
+		WriteMask [_StencilWriteMask]
+	}
+
+	Cull [_CullMode]
+	ZWrite Off
+	Lighting Off
+	Fog { Mode Off }
+	ZTest Always
+	Blend One OneMinusSrcAlpha
+	ColorMask [_ColorMask]
+
+	Pass {
+		CGPROGRAM
+		#pragma target 3.0
+		#pragma vertex VertShader
+		#pragma fragment PixShader
+		#pragma shader_feature __ BEVEL_ON
+		#pragma shader_feature __ UNDERLAY_ON UNDERLAY_INNER
+		#pragma shader_feature __ GLOW_ON
+
+		#pragma multi_compile __ UNITY_UI_CLIP_RECT
+		#pragma multi_compile __ UNITY_UI_ALPHACLIP
+
+		#include "UnityCG.cginc"
+		#include "UnityUI.cginc"
+		#include "TMPro_Properties.cginc"
+		#include "TMPro.cginc"
+
+		struct vertex_t {
+			UNITY_VERTEX_INPUT_INSTANCE_ID
+			float4	position		: POSITION;
+			float3	normal			: NORMAL;
+			fixed4	color			: COLOR;
+			float2	texcoord0		: TEXCOORD0;
+			float2	texcoord1		: TEXCOORD1;
+		};
+
+
+		struct pixel_t {
+			UNITY_VERTEX_INPUT_INSTANCE_ID
+			UNITY_VERTEX_OUTPUT_STEREO
+			float4	position		: SV_POSITION;
+			fixed4	color			: COLOR;
+			float2	atlas			: TEXCOORD0;		// Atlas
+			float4	param			: TEXCOORD1;		// alphaClip, scale, bias, weight
+			float4	mask			: TEXCOORD2;		// Position in object space(xy), pixel Size(zw)
+			float3	viewDir			: TEXCOORD3;
+
+		#if (UNDERLAY_ON || UNDERLAY_INNER)
+			float4	texcoord2		: TEXCOORD4;		// u,v, scale, bias
+			fixed4	underlayColor	: COLOR1;
+		#endif
+			float4 textures			: TEXCOORD5;
+		};
+
+		// Used by Unity internally to handle Texture Tiling and Offset.
+		float4 _FaceTex_ST;
+		float4 _OutlineTex_ST;
+
+		pixel_t VertShader(vertex_t input)
+		{
+			pixel_t output;
+
+			UNITY_INITIALIZE_OUTPUT(pixel_t, output);
+			UNITY_SETUP_INSTANCE_ID(input);
+			UNITY_TRANSFER_INSTANCE_ID(input,output);
+			UNITY_INITIALIZE_VERTEX_OUTPUT_STEREO(output);
+
+			float bold = step(input.texcoord1.y, 0);
+
+			float4 vert = input.position;
+			vert.x += _VertexOffsetX;
+			vert.y += _VertexOffsetY;
+
+			float4 vPosition = UnityObjectToClipPos(vert);
+
+			float2 pixelSize = vPosition.w;
+			pixelSize /= float2(_ScaleX, _ScaleY) * abs(mul((float2x2)UNITY_MATRIX_P, _ScreenParams.xy));
+			float scale = rsqrt(dot(pixelSize, pixelSize));
+			scale *= abs(input.texcoord1.y) * _GradientScale * (_Sharpness + 1);
+			if (UNITY_MATRIX_P[3][3] == 0) scale = lerp(abs(scale) * (1 - _PerspectiveFilter), scale, abs(dot(UnityObjectToWorldNormal(input.normal.xyz), normalize(WorldSpaceViewDir(vert)))));
+
+			float weight = lerp(_WeightNormal, _WeightBold, bold) / 4.0;
+			weight = (weight + _FaceDilate) * _ScaleRatioA * 0.5;
+
+			float bias =(.5 - weight) + (.5 / scale);
+
+			float alphaClip = (1.0 - _OutlineWidth*_ScaleRatioA - _OutlineSoftness*_ScaleRatioA);
+
+		#if GLOW_ON
+			alphaClip = min(alphaClip, 1.0 - _GlowOffset * _ScaleRatioB - _GlowOuter * _ScaleRatioB);
+		#endif
+
+			alphaClip = alphaClip / 2.0 - ( .5 / scale) - weight;
+
+		#if (UNDERLAY_ON || UNDERLAY_INNER)
+			float4 underlayColor = _UnderlayColor;
+			underlayColor.rgb *= underlayColor.a;
+
+			float bScale = scale;
+			bScale /= 1 + ((_UnderlaySoftness*_ScaleRatioC) * bScale);
+			float bBias = (0.5 - weight) * bScale - 0.5 - ((_UnderlayDilate * _ScaleRatioC) * 0.5 * bScale);
+
+			float x = -(_UnderlayOffsetX * _ScaleRatioC) * _GradientScale / _TextureWidth;
+			float y = -(_UnderlayOffsetY * _ScaleRatioC) * _GradientScale / _TextureHeight;
+			float2 bOffset = float2(x, y);
+		#endif
+
+			// Generate UV for the Masking Texture
+			float4 clampedRect = clamp(_ClipRect, -2e10, 2e10);
+			float2 maskUV = (vert.xy - clampedRect.xy) / (clampedRect.zw - clampedRect.xy);
+
+			// Support for texture tiling and offset
+			float2 textureUV = UnpackUV(input.texcoord1.x);
+			float2 faceUV = TRANSFORM_TEX(textureUV, _FaceTex);
+			float2 outlineUV = TRANSFORM_TEX(textureUV, _OutlineTex);
+
+
+			output.position = vPosition;
+			output.color = input.color;
+			output.atlas =	input.texcoord0;
+			output.param =	float4(alphaClip, scale, bias, weight);
+			output.mask = half4(vert.xy * 2 - clampedRect.xy - clampedRect.zw, 0.25 / (0.25 * half2(_MaskSoftnessX, _MaskSoftnessY) + pixelSize.xy));
+			output.viewDir =	mul((float3x3)_EnvMatrix, _WorldSpaceCameraPos.xyz - mul(unity_ObjectToWorld, vert).xyz);
+			#if (UNDERLAY_ON || UNDERLAY_INNER)
+			output.texcoord2 = float4(input.texcoord0 + bOffset, bScale, bBias);
+			output.underlayColor =	underlayColor;
+			#endif
+			output.textures = float4(faceUV, outlineUV);
+
+			return output;
+		}
+
+
+		fixed4 PixShader(pixel_t input) : SV_Target
+		{
+			UNITY_SETUP_INSTANCE_ID(input);
+
+			float c = tex2D(_MainTex, input.atlas).a;
+
+		#ifndef UNDERLAY_ON
+			clip(c - input.param.x);
+		#endif
+
+			float	scale	= input.param.y;
+			float	bias	= input.param.z;
+			float	weight	= input.param.w;
+			float	sd = (bias - c) * scale;
+
+			float outline = (_OutlineWidth * _ScaleRatioA) * scale;
+			float softness = (_OutlineSoftness * _ScaleRatioA) * scale;
+
+			half4 faceColor = _FaceColor;
+			half4 outlineColor = _OutlineColor;
+
+			faceColor.rgb *= input.color.rgb;
+
+			faceColor *= tex2D(_FaceTex, input.textures.xy + float2(_FaceUVSpeedX, _FaceUVSpeedY) * _Time.y);
+			outlineColor *= tex2D(_OutlineTex, input.textures.zw + float2(_OutlineUVSpeedX, _OutlineUVSpeedY) * _Time.y);
+
+			faceColor = GetColor(sd, faceColor, outlineColor, outline, softness);
+
+		#if BEVEL_ON
+			float3 dxy = float3(0.5 / _TextureWidth, 0.5 / _TextureHeight, 0);
+			float3 n = GetSurfaceNormal(input.atlas, weight, dxy);
+
+			float3 bump = UnpackNormal(tex2D(_BumpMap, input.textures.xy + float2(_FaceUVSpeedX, _FaceUVSpeedY) * _Time.y)).xyz;
+			bump *= lerp(_BumpFace, _BumpOutline, saturate(sd + outline * 0.5));
+			n = normalize(n- bump);
+
+			float3 light = normalize(float3(sin(_LightAngle), cos(_LightAngle), -1.0));
+
+			float3 col = GetSpecular(n, light);
+			faceColor.rgb += col*faceColor.a;
+			faceColor.rgb *= 1-(dot(n, light)*_Diffuse);
+			faceColor.rgb *= lerp(_Ambient, 1, n.z*n.z);
+
+			fixed4 reflcol = texCUBE(_Cube, reflect(input.viewDir, -n));
+			faceColor.rgb += reflcol.rgb * lerp(_ReflectFaceColor.rgb, _ReflectOutlineColor.rgb, saturate(sd + outline * 0.5)) * faceColor.a;
+		#endif
+
+		#if UNDERLAY_ON
+			float d = tex2D(_MainTex, input.texcoord2.xy).a * input.texcoord2.z;
+			faceColor += input.underlayColor * saturate(d - input.texcoord2.w) * (1 - faceColor.a);
+		#endif
+
+		#if UNDERLAY_INNER
+			float d = tex2D(_MainTex, input.texcoord2.xy).a * input.texcoord2.z;
+			faceColor += input.underlayColor * (1 - saturate(d - input.texcoord2.w)) * saturate(1 - sd) * (1 - faceColor.a);
+		#endif
+
+		#if GLOW_ON
+			float4 glowColor = GetGlowColor(sd, scale);
+			faceColor.rgb += glowColor.rgb * glowColor.a;
+		#endif
+
+		// Alternative implementation to UnityGet2DClipping with support for softness.
+		#if UNITY_UI_CLIP_RECT
+			half2 m = saturate((_ClipRect.zw - _ClipRect.xy - abs(input.mask.xy)) * input.mask.zw);
+			faceColor *= m.x * m.y;
+		#endif
+
+		#if UNITY_UI_ALPHACLIP
+			clip(faceColor.a - 0.001);
+		#endif
+
+			return faceColor * input.color.a;
+		}
+
+		ENDCG
+	}
+}
+
+Fallback "TextMeshPro/Mobile/Distance Field"
+CustomEditor "TMPro.EditorUtilities.TMP_SDFShaderGUI"
+}
+```
+
+### Assets/TextMesh Pro/Shaders/TMP_SDF SSD.shader
+```
+﻿Shader "TextMeshPro/Distance Field SSD" {
+
+Properties {
+    _FaceTex            ("Face Texture", 2D) = "white" {}
+    _FaceUVSpeedX       ("Face UV Speed X", Range(-5, 5)) = 0.0
+    _FaceUVSpeedY       ("Face UV Speed Y", Range(-5, 5)) = 0.0
+    [HDR]_FaceColor     ("Face Color", Color) = (1,1,1,1)
+    _FaceDilate         ("Face Dilate", Range(-1,1)) = 0
+
+    [HDR]_OutlineColor  ("Outline Color", Color) = (0,0,0,1)
+    _OutlineTex         ("Outline Texture", 2D) = "white" {}
+    _OutlineUVSpeedX    ("Outline UV Speed X", Range(-5, 5)) = 0.0
+    _OutlineUVSpeedY    ("Outline UV Speed Y", Range(-5, 5)) = 0.0
+    _OutlineWidth       ("Outline Thickness", Range(0, 1)) = 0
+    _OutlineSoftness    ("Outline Softness", Range(0,1)) = 0
+
+    _Bevel              ("Bevel", Range(0,1)) = 0.5
+    _BevelOffset        ("Bevel Offset", Range(-0.5,0.5)) = 0
+    _BevelWidth         ("Bevel Width", Range(-.5,0.5)) = 0
+    _BevelClamp         ("Bevel Clamp", Range(0,1)) = 0
+    _BevelRoundness     ("Bevel Roundness", Range(0,1)) = 0
+
+    _LightAngle         ("Light Angle", Range(0.0, 6.2831853)) = 3.1416
+    [HDR]_SpecularColor ("Specular", Color) = (1,1,1,1)
+    _SpecularPower      ("Specular", Range(0,4)) = 2.0
+    _Reflectivity       ("Reflectivity", Range(5.0,15.0)) = 10
+    _Diffuse            ("Diffuse", Range(0,1)) = 0.5
+    _Ambient            ("Ambient", Range(1,0)) = 0.5
+
+    _BumpMap            ("Normal map", 2D) = "bump" {}
+    _BumpOutline        ("Bump Outline", Range(0,1)) = 0
+    _BumpFace           ("Bump Face", Range(0,1)) = 0
+
+    _ReflectFaceColor   ("Reflection Color", Color) = (0,0,0,1)
+    _ReflectOutlineColor("Reflection Color", Color) = (0,0,0,1)
+    _Cube               ("Reflection Cubemap", Cube) = "black" { /* TexGen CubeReflect */ }
+    _EnvMatrixRotation  ("Texture Rotation", vector) = (0, 0, 0, 0)
+
+
+    [HDR]_UnderlayColor ("Border Color", Color) = (0,0,0, 0.5)
+    _UnderlayOffsetX    ("Border OffsetX", Range(-1,1)) = 0
+    _UnderlayOffsetY    ("Border OffsetY", Range(-1,1)) = 0
+    _UnderlayDilate     ("Border Dilate", Range(-1,1)) = 0
+    _UnderlaySoftness   ("Border Softness", Range(0,1)) = 0
+
+    [HDR]_GlowColor     ("Color", Color) = (0, 1, 0, 0.5)
+    _GlowOffset         ("Offset", Range(-1,1)) = 0
+    _GlowInner          ("Inner", Range(0,1)) = 0.05
+    _GlowOuter          ("Outer", Range(0,1)) = 0.05
+    _GlowPower          ("Falloff", Range(1, 0)) = 0.75
+
+    _WeightNormal       ("Weight Normal", float) = 0
+    _WeightBold         ("Weight Bold", float) = 0.5
+
+    _ShaderFlags        ("Flags", float) = 0
+    _ScaleRatioA        ("Scale RatioA", float) = 1
+    _ScaleRatioB        ("Scale RatioB", float) = 1
+    _ScaleRatioC        ("Scale RatioC", float) = 1
+
+    _MainTex            ("Font Atlas", 2D) = "white" {}
+    _TextureWidth       ("Texture Width", float) = 512
+    _TextureHeight      ("Texture Height", float) = 512
+    _GradientScale      ("Gradient Scale", float) = 5.0
+    _ScaleX             ("Scale X", float) = 1.0
+    _ScaleY             ("Scale Y", float) = 1.0
+    _PerspectiveFilter  ("Perspective Correction", Range(0, 1)) = 0.875
+    _Sharpness          ("Sharpness", Range(-1,1)) = 0
+
+    _VertexOffsetX      ("Vertex OffsetX", float) = 0
+    _VertexOffsetY      ("Vertex OffsetY", float) = 0
+
+    _MaskCoord          ("Mask Coordinates", vector) = (0, 0, 32767, 32767)
+    _ClipRect           ("Clip Rect", vector) = (-32767, -32767, 32767, 32767)
+    _MaskSoftnessX      ("Mask SoftnessX", float) = 0
+    _MaskSoftnessY      ("Mask SoftnessY", float) = 0
+
+    _StencilComp        ("Stencil Comparison", Float) = 8
+    _Stencil            ("Stencil ID", Float) = 0
+    _StencilOp          ("Stencil Operation", Float) = 0
+    _StencilWriteMask   ("Stencil Write Mask", Float) = 255
+    _StencilReadMask    ("Stencil Read Mask", Float) = 255
+
+    _CullMode           ("Cull Mode", Float) = 0
+    _ColorMask          ("Color Mask", Float) = 15
+}
+
+SubShader {
+    Tags
+    {
+        "Queue" = "Transparent"
+        "IgnoreProjector" = "True"
+        "RenderType" = "Transparent"
+    }
+
+    Stencil
+    {
+        Ref[_Stencil]
+        Comp[_StencilComp]
+        Pass[_StencilOp]
+        ReadMask[_StencilReadMask]
+        WriteMask[_StencilWriteMask]
+    }
+
+    Cull[_CullMode]
+    ZWrite Off
+    Lighting Off
+    Fog { Mode Off }
+    ZTest[unity_GUIZTestMode]
+    Blend One OneMinusSrcAlpha
+    ColorMask[_ColorMask]
+
+    Pass {
+        CGPROGRAM
+        #pragma target 3.0
+        #pragma vertex VertShader
+        #pragma fragment PixShader
+        #pragma shader_feature __ BEVEL_ON
+        #pragma shader_feature __ UNDERLAY_ON UNDERLAY_INNER
+        #pragma shader_feature __ GLOW_ON
+        #pragma shader_feature __ FORCE_LINEAR
+
+        #pragma multi_compile __ UNITY_UI_CLIP_RECT
+        #pragma multi_compile __ UNITY_UI_ALPHACLIP
+
+        #include "UnityCG.cginc"
+        #include "UnityUI.cginc"
+        #include "TMPro_Properties.cginc"
+        #include "TMPro.cginc"
+
+        struct vertex_t {
+            UNITY_VERTEX_INPUT_INSTANCE_ID
+            float4	position        : POSITION;
+            float3	normal          : NORMAL;
+            float4	color           : COLOR;
+            float2	texcoord0       : TEXCOORD0;
+            float2	texcoord1       : TEXCOORD1;
+        };
+
+
+        struct pixel_t {
+            UNITY_VERTEX_INPUT_INSTANCE_ID
+            UNITY_VERTEX_OUTPUT_STEREO
+            float4	position        : SV_POSITION;
+            float4	color           : COLOR;
+            float2	atlas           : TEXCOORD0;
+            float	weight          : TEXCOORD1;
+            float2	mask            : TEXCOORD2;		// Position in object space(xy)
+            float3	viewDir         : TEXCOORD3;
+
+        #if (UNDERLAY_ON || UNDERLAY_INNER)
+            float2	texcoord2       : TEXCOORD4;
+            float4	underlayColor   : COLOR1;
+        #endif
+            float4 textures         : TEXCOORD5;
+        };
+
+        // Used by Unity internally to handle Texture Tiling and Offset.
+        float4 _FaceTex_ST;
+        float4 _OutlineTex_ST;
+
+        float4 SRGBToLinear(float4 rgba) {
+            return float4(lerp(rgba.rgb / 12.92f, pow((rgba.rgb + 0.055f) / 1.055f, 2.4f), step(0.04045f, rgba.rgb)), rgba.a);
+        }
+
+        pixel_t VertShader(vertex_t input)
+        {
+            pixel_t output;
+
+            UNITY_INITIALIZE_OUTPUT(pixel_t, output);
+            UNITY_SETUP_INSTANCE_ID(input);
+            UNITY_TRANSFER_INSTANCE_ID(input,output);
+            UNITY_INITIALIZE_VERTEX_OUTPUT_STEREO(output);
+
+            float bold = step(input.texcoord1.y, 0);
+
+            float4 vert = input.position;
+            vert.x += _VertexOffsetX;
+            vert.y += _VertexOffsetY;
+
+            float4 vPosition = UnityObjectToClipPos(vert);
+
+            float weight = lerp(_WeightNormal, _WeightBold, bold) / 4.0;
+            weight = (weight + _FaceDilate) * _ScaleRatioA * 0.5;
+
+        #if (UNDERLAY_ON || UNDERLAY_INNER)
+            float4 underlayColor = _UnderlayColor;
+            underlayColor.rgb *= underlayColor.a;
+
+            float x = -(_UnderlayOffsetX * _ScaleRatioC) * _GradientScale / _TextureWidth;
+            float y = -(_UnderlayOffsetY * _ScaleRatioC) * _GradientScale / _TextureHeight;
+            float2 bOffset = float2(x, y);
+        #endif
+
+            // Generate UV for the Masking Texture
+            float4 clampedRect = clamp(_ClipRect, -2e10, 2e10);
+
+            // Support for texture tiling and offset
+            float2 textureUV = UnpackUV(input.texcoord1.x);
+            float2 faceUV = TRANSFORM_TEX(textureUV, _FaceTex);
+            float2 outlineUV = TRANSFORM_TEX(textureUV, _OutlineTex);
+
+            float4 color = input.color;
+        #if (FORCE_LINEAR && !UNITY_COLORSPACE_GAMMA)
+            color = SRGBToLinear(input.color);
+        #endif
+
+            output.position = vPosition;
+            output.color = color;
+            output.atlas = input.texcoord0;
+            output.weight = weight;
+            output.mask = half2(vert.xy * 2 - clampedRect.xy - clampedRect.zw);
+            output.viewDir = mul((float3x3)_EnvMatrix, _WorldSpaceCameraPos.xyz - mul(unity_ObjectToWorld, vert).xyz);
+        #if (UNDERLAY_ON || UNDERLAY_INNER)
+            output.texcoord2 = input.texcoord0 + bOffset;
+            output.underlayColor = underlayColor;
+        #endif
+            output.textures = float4(faceUV, outlineUV);
+
+            return output;
+        }
+
+
+        fixed4 PixShader(pixel_t input) : SV_Target
+        {
+            UNITY_SETUP_INSTANCE_ID(input);
+
+            float c = tex2D(_MainTex, input.atlas).a;
+
+            float2 pixelSize = float2(ddx(input.atlas.y), ddy(input.atlas.y));
+            pixelSize *= _TextureWidth * .75;
+            float scale = rsqrt(dot(pixelSize, pixelSize)) * _GradientScale * (_Sharpness + 1);
+
+            float weight = input.weight;
+            float bias = (.5 - weight) + (.5 / scale);
+            float sd = (bias - c) * scale;
+
+            float outline = (_OutlineWidth * _ScaleRatioA) * scale;
+            float softness = (_OutlineSoftness * _ScaleRatioA) * scale;
+
+            half4 faceColor = _FaceColor;
+            half4 outlineColor = _OutlineColor;
+
+            faceColor.rgb *= input.color.rgb;
+
+            faceColor *= tex2D(_FaceTex, input.textures.xy + float2(_FaceUVSpeedX, _FaceUVSpeedY) * _Time.y);
+            outlineColor *= tex2D(_OutlineTex, input.textures.zw + float2(_OutlineUVSpeedX, _OutlineUVSpeedY) * _Time.y);
+
+            faceColor = GetColor(sd, faceColor, outlineColor, outline, softness);
+
+        #if BEVEL_ON
+            float3 dxy = float3(0.5 / _TextureWidth, 0.5 / _TextureHeight, 0);
+            float3 n = GetSurfaceNormal(input.atlas, weight, dxy);
+
+            float3 bump = UnpackNormal(tex2D(_BumpMap, input.textures.xy + float2(_FaceUVSpeedX, _FaceUVSpeedY) * _Time.y)).xyz;
+            bump *= lerp(_BumpFace, _BumpOutline, saturate(sd + outline * 0.5));
+            n = normalize(n - bump);
+
+            float3 light = normalize(float3(sin(_LightAngle), cos(_LightAngle), -1.0));
+
+            float3 col = GetSpecular(n, light);
+            faceColor.rgb += col * faceColor.a;
+            faceColor.rgb *= 1 - (dot(n, light) * _Diffuse);
+            faceColor.rgb *= lerp(_Ambient, 1, n.z * n.z);
+
+            fixed4 reflcol = texCUBE(_Cube, reflect(input.viewDir, -n));
+            faceColor.rgb += reflcol.rgb * lerp(_ReflectFaceColor.rgb, _ReflectOutlineColor.rgb, saturate(sd + outline * 0.5)) * faceColor.a;
+        #endif
+
+        #if (UNDERLAY_ON || UNDERLAY_INNER)
+            float bScale = scale;
+            bScale /= 1 + ((_UnderlaySoftness * _ScaleRatioC) * bScale);
+            float bBias = (0.5 - weight) * bScale - 0.5 - ((_UnderlayDilate * _ScaleRatioC) * 0.5 * bScale);
+        #endif
+
+        #if UNDERLAY_ON
+            float d = tex2D(_MainTex, input.texcoord2.xy).a * bScale;
+            faceColor += input.underlayColor * saturate(d - bBias) * (1 - faceColor.a);
+        #endif
+
+        #if UNDERLAY_INNER
+            float d = tex2D(_MainTex, input.texcoord2.xy).a * bScale;
+            faceColor += input.underlayColor * (1 - saturate(d - bBias)) * saturate(1 - sd) * (1 - faceColor.a);
+        #endif
+
+        #if GLOW_ON
+            float4 glowColor = GetGlowColor(sd, scale);
+            faceColor.rgb += glowColor.rgb * glowColor.a;
+        #endif
+
+            // Alternative implementation to UnityGet2DClipping with support for softness.
+        #if UNITY_UI_CLIP_RECT
+            float2 maskZW = 0.25 / (0.25 * half2(_MaskSoftnessX, _MaskSoftnessY) + (1 / scale));
+            half2 m = saturate((_ClipRect.zw - _ClipRect.xy - abs(input.mask.xy)) * maskZW);
+            faceColor *= m.x * m.y;
+        #endif
+
+        #if UNITY_UI_ALPHACLIP
+            clip(faceColor.a - 0.001);
+        #endif
+
+            return faceColor * input.color.a;
+            }
+
+            ENDCG
+        }
+}
+
+Fallback "TextMeshPro/Mobile/Distance Field"
+CustomEditor "TMPro.EditorUtilities.TMP_SDFShaderGUI"
+}
+```
+
+### Assets/TextMesh Pro/Shaders/TMP_SDF-Mobile Masking.shader
+```
+﻿// Simplified SDF shader:
+// - No Shading Option (bevel / bump / env map)
+// - No Glow Option
+// - Softness is applied on both side of the outline
+
+Shader "TextMeshPro/Mobile/Distance Field - Masking" {
+
+Properties {
+	[HDR]_FaceColor		("Face Color", Color) = (1,1,1,1)
+	_FaceDilate			("Face Dilate", Range(-1,1)) = 0
+
+	[HDR]_OutlineColor	("Outline Color", Color) = (0,0,0,1)
+	_OutlineWidth		("Outline Thickness", Range(0,1)) = 0
+	_OutlineSoftness	("Outline Softness", Range(0,1)) = 0
+
+	[HDR]_UnderlayColor	("Border Color", Color) = (0,0,0,.5)
+	_UnderlayOffsetX 	("Border OffsetX", Range(-1,1)) = 0
+	_UnderlayOffsetY 	("Border OffsetY", Range(-1,1)) = 0
+	_UnderlayDilate		("Border Dilate", Range(-1,1)) = 0
+	_UnderlaySoftness 	("Border Softness", Range(0,1)) = 0
+
+	_WeightNormal		("Weight Normal", float) = 0
+	_WeightBold			("Weight Bold", float) = .5
+
+	_ShaderFlags		("Flags", float) = 0
+	_ScaleRatioA		("Scale RatioA", float) = 1
+	_ScaleRatioB		("Scale RatioB", float) = 1
+	_ScaleRatioC		("Scale RatioC", float) = 1
+
+	_MainTex			("Font Atlas", 2D) = "white" {}
+	_TextureWidth		("Texture Width", float) = 512
+	_TextureHeight		("Texture Height", float) = 512
+	_GradientScale		("Gradient Scale", float) = 5
+	_ScaleX				("Scale X", float) = 1
+	_ScaleY				("Scale Y", float) = 1
+	_PerspectiveFilter	("Perspective Correction", Range(0, 1)) = 0.875
+	_Sharpness			("Sharpness", Range(-1,1)) = 0
+
+	_VertexOffsetX		("Vertex OffsetX", float) = 0
+	_VertexOffsetY		("Vertex OffsetY", float) = 0
+
+	_ClipRect			("Clip Rect", vector) = (-32767, -32767, 32767, 32767)
+	_MaskSoftnessX		("Mask SoftnessX", float) = 0
+	_MaskSoftnessY		("Mask SoftnessY", float) = 0
+	_MaskTex			("Mask Texture", 2D) = "white" {}
+	_MaskInverse		("Inverse", float) = 0
+	_MaskEdgeColor		("Edge Color", Color) = (1,1,1,1)
+	_MaskEdgeSoftness	("Edge Softness", Range(0, 1)) = 0.01
+	_MaskWipeControl	("Wipe Position", Range(0, 1)) = 0.5
+
+	_StencilComp		("Stencil Comparison", Float) = 8
+	_Stencil			("Stencil ID", Float) = 0
+	_StencilOp			("Stencil Operation", Float) = 0
+	_StencilWriteMask	("Stencil Write Mask", Float) = 255
+	_StencilReadMask	("Stencil Read Mask", Float) = 255
+
+	_CullMode			("Cull Mode", Float) = 0
+	_ColorMask			("Color Mask", Float) = 15
+}
+
+SubShader {
+	Tags
+	{
+		"Queue"="Transparent"
+		"IgnoreProjector"="True"
+		"RenderType"="Transparent"
+	}
+
+
+	Stencil
+	{
+		Ref [_Stencil]
+		Comp [_StencilComp]
+		Pass [_StencilOp]
+		ReadMask [_StencilReadMask]
+		WriteMask [_StencilWriteMask]
+	}
+
+	Cull [_CullMode]
+	ZWrite Off
+	Lighting Off
+	Fog { Mode Off }
+	ZTest [unity_GUIZTestMode]
+	Blend One OneMinusSrcAlpha
+	ColorMask [_ColorMask]
+
+	Pass {
+		CGPROGRAM
+		#pragma vertex VertShader
+		#pragma fragment PixShader
+		#pragma shader_feature __ OUTLINE_ON
+		#pragma shader_feature __ UNDERLAY_ON UNDERLAY_INNER
+
+		#pragma multi_compile __ UNITY_UI_CLIP_RECT
+		#pragma multi_compile __ UNITY_UI_ALPHACLIP
+
+
+		#include "UnityCG.cginc"
+		#include "UnityUI.cginc"
+		#include "TMPro_Properties.cginc"
+
+		struct vertex_t {
+			float4	vertex			: POSITION;
+			float3	normal			: NORMAL;
+			fixed4	color			: COLOR;
+			float2	texcoord0		: TEXCOORD0;
+			float2	texcoord1		: TEXCOORD1;
+		};
+
+		struct pixel_t {
+			float4	vertex			: SV_POSITION;
+			fixed4	faceColor		: COLOR;
+			fixed4	outlineColor	: COLOR1;
+			float4	texcoord0		: TEXCOORD0;			// Texture UV, Mask UV
+			half4	param			: TEXCOORD1;			// Scale(x), BiasIn(y), BiasOut(z), Bias(w)
+			half4	mask			: TEXCOORD2;			// Position in clip space(xy), Softness(zw)
+		#if (UNDERLAY_ON | UNDERLAY_INNER)
+			float4	texcoord1		: TEXCOORD3;			// Texture UV, alpha, reserved
+			half2	underlayParam	: TEXCOORD4;			// Scale(x), Bias(y)
+		#endif
+		};
+
+		float _MaskWipeControl;
+		float _MaskEdgeSoftness;
+		fixed4 _MaskEdgeColor;
+		bool _MaskInverse;
+
+		pixel_t VertShader(vertex_t input)
+		{
+			float bold = step(input.texcoord1.y, 0);
+
+			float4 vert = input.vertex;
+			vert.x += _VertexOffsetX;
+			vert.y += _VertexOffsetY;
+			float4 vPosition = UnityObjectToClipPos(vert);
+
+			float2 pixelSize = vPosition.w;
+			pixelSize /= float2(_ScaleX, _ScaleY) * abs(mul((float2x2)UNITY_MATRIX_P, _ScreenParams.xy));
+
+			float scale = rsqrt(dot(pixelSize, pixelSize));
+			scale *= abs(input.texcoord1.y) * _GradientScale * (_Sharpness + 1);
+			if(UNITY_MATRIX_P[3][3] == 0) scale = lerp(abs(scale) * (1 - _PerspectiveFilter), scale, abs(dot(UnityObjectToWorldNormal(input.normal.xyz), normalize(WorldSpaceViewDir(vert)))));
+
+			float weight = lerp(_WeightNormal, _WeightBold, bold) / 4.0;
+			weight = (weight + _FaceDilate) * _ScaleRatioA * 0.5;
+
+			float layerScale = scale;
+
+			scale /= 1 + (_OutlineSoftness * _ScaleRatioA * scale);
+			float bias = (0.5 - weight) * scale - 0.5;
+			float outline = _OutlineWidth * _ScaleRatioA * 0.5 * scale;
+
+			float opacity = input.color.a;
+					#if (UNDERLAY_ON | UNDERLAY_INNER)
+					opacity = 1.0;
+					#endif
+
+			fixed4 faceColor = fixed4(input.color.rgb, opacity) * _FaceColor;
+			faceColor.rgb *= faceColor.a;
+
+			fixed4 outlineColor = _OutlineColor;
+			outlineColor.a *= opacity;
+			outlineColor.rgb *= outlineColor.a;
+			outlineColor = lerp(faceColor, outlineColor, sqrt(min(1.0, (outline * 2))));
+
+		#if (UNDERLAY_ON | UNDERLAY_INNER)
+
+			layerScale /= 1 + ((_UnderlaySoftness * _ScaleRatioC) * layerScale);
+			float layerBias = (.5 - weight) * layerScale - .5 - ((_UnderlayDilate * _ScaleRatioC) * .5 * layerScale);
+
+			float x = -(_UnderlayOffsetX * _ScaleRatioC) * _GradientScale / _TextureWidth;
+			float y = -(_UnderlayOffsetY * _ScaleRatioC) * _GradientScale / _TextureHeight;
+			float2 layerOffset = float2(x, y);
+		#endif
+
+			// Generate UV for the Masking Texture
+			float4 clampedRect = clamp(_ClipRect, -2e10, 2e10);
+			float2 maskUV = (vert.xy - clampedRect.xy) / (clampedRect.zw - clampedRect.xy);
+
+			// Structure for pixel shader
+			pixel_t output = {
+				vPosition,
+				faceColor,
+				outlineColor,
+				float4(input.texcoord0.x, input.texcoord0.y, maskUV.x, maskUV.y),
+				half4(scale, bias - outline, bias + outline, bias),
+				half4(vert.xy * 2 - clampedRect.xy - clampedRect.zw, 0.25 / (0.25 * half2(_MaskSoftnessX, _MaskSoftnessY) + pixelSize.xy)),
+			#if (UNDERLAY_ON | UNDERLAY_INNER)
+				float4(input.texcoord0 + layerOffset, input.color.a, 0),
+				half2(layerScale, layerBias),
+			#endif
+			};
+
+			return output;
+		}
+
+
+		// PIXEL SHADER
+		fixed4 PixShader(pixel_t input) : SV_Target
+		{
+			half d = tex2D(_MainTex, input.texcoord0.xy).a * input.param.x;
+			half4 c = input.faceColor * saturate(d - input.param.w);
+
+		#ifdef OUTLINE_ON
+			c = lerp(input.outlineColor, input.faceColor, saturate(d - input.param.z));
+			c *= saturate(d - input.param.y);
+		#endif
+
+		#if UNDERLAY_ON
+			d = tex2D(_MainTex, input.texcoord1.xy).a * input.underlayParam.x;
+			c += float4(_UnderlayColor.rgb * _UnderlayColor.a, _UnderlayColor.a) * saturate(d - input.underlayParam.y) * (1 - c.a);
+		#endif
+
+		#if UNDERLAY_INNER
+			half sd = saturate(d - input.param.z);
+			d = tex2D(_MainTex, input.texcoord1.xy).a * input.underlayParam.x;
+			c += float4(_UnderlayColor.rgb * _UnderlayColor.a, _UnderlayColor.a) * (1 - saturate(d - input.underlayParam.y)) * sd * (1 - c.a);
+		#endif
+
+		// Alternative implementation to UnityGet2DClipping with support for softness.
+		//#if UNITY_UI_CLIP_RECT
+			half2 m = saturate((_ClipRect.zw - _ClipRect.xy - abs(input.mask.xy)) * input.mask.zw);
+			c *= m.x * m.y;
+		//#endif
+
+		float a = abs(_MaskInverse - tex2D(_MaskTex, input.texcoord0.zw).a);
+		float t = a + (1 - _MaskWipeControl) * _MaskEdgeSoftness - _MaskWipeControl;
+		a = saturate(t / _MaskEdgeSoftness);
+		c.rgb = lerp(_MaskEdgeColor.rgb*c.a, c.rgb, a);
+		c *= a;
+
+		#if (UNDERLAY_ON | UNDERLAY_INNER)
+			c *= input.texcoord1.z;
+		#endif
+
+    #if UNITY_UI_ALPHACLIP
+			clip(c.a - 0.001);
+		#endif
+
+			return c;
+		}
+		ENDCG
+	}
+}
+
+CustomEditor "TMPro.EditorUtilities.TMP_SDFShaderGUI"
+}
+```
+
+### Assets/TextMesh Pro/Shaders/TMP_SDF-Mobile Overlay.shader
+```
+// Simplified SDF shader:
+// - No Shading Option (bevel / bump / env map)
+// - No Glow Option
+// - Softness is applied on both side of the outline
+
+Shader "TextMeshPro/Mobile/Distance Field Overlay" {
+
+Properties {
+	[HDR]_FaceColor		("Face Color", Color) = (1,1,1,1)
+	_FaceDilate			("Face Dilate", Range(-1,1)) = 0
+
+	[HDR]_OutlineColor	("Outline Color", Color) = (0,0,0,1)
+	_OutlineWidth		("Outline Thickness", Range(0,1)) = 0
+	_OutlineSoftness	("Outline Softness", Range(0,1)) = 0
+
+	[HDR]_UnderlayColor	("Border Color", Color) = (0,0,0,.5)
+	_UnderlayOffsetX 	("Border OffsetX", Range(-1,1)) = 0
+	_UnderlayOffsetY 	("Border OffsetY", Range(-1,1)) = 0
+	_UnderlayDilate		("Border Dilate", Range(-1,1)) = 0
+	_UnderlaySoftness 	("Border Softness", Range(0,1)) = 0
+
+	_WeightNormal		("Weight Normal", float) = 0
+	_WeightBold			("Weight Bold", float) = .5
+
+	_ShaderFlags		("Flags", float) = 0
+	_ScaleRatioA		("Scale RatioA", float) = 1
+	_ScaleRatioB		("Scale RatioB", float) = 1
+	_ScaleRatioC		("Scale RatioC", float) = 1
+
+	_MainTex			("Font Atlas", 2D) = "white" {}
+	_TextureWidth		("Texture Width", float) = 512
+	_TextureHeight		("Texture Height", float) = 512
+	_GradientScale		("Gradient Scale", float) = 5
+	_ScaleX				("Scale X", float) = 1
+	_ScaleY				("Scale Y", float) = 1
+	_PerspectiveFilter	("Perspective Correction", Range(0, 1)) = 0.875
+	_Sharpness			("Sharpness", Range(-1,1)) = 0
+
+	_VertexOffsetX		("Vertex OffsetX", float) = 0
+	_VertexOffsetY		("Vertex OffsetY", float) = 0
+
+	_ClipRect			("Clip Rect", vector) = (-32767, -32767, 32767, 32767)
+	_MaskSoftnessX		("Mask SoftnessX", float) = 0
+	_MaskSoftnessY		("Mask SoftnessY", float) = 0
+
+	_StencilComp		("Stencil Comparison", Float) = 8
+	_Stencil			("Stencil ID", Float) = 0
+	_StencilOp			("Stencil Operation", Float) = 0
+	_StencilWriteMask	("Stencil Write Mask", Float) = 255
+	_StencilReadMask	("Stencil Read Mask", Float) = 255
+
+	_CullMode			("Cull Mode", Float) = 0
+	_ColorMask			("Color Mask", Float) = 15
+}
+
+SubShader {
+	Tags
+  {
+		"Queue"="Overlay"
+		"IgnoreProjector"="True"
+		"RenderType"="Transparent"
+	}
+
+
+	Stencil
+	{
+		Ref [_Stencil]
+		Comp [_StencilComp]
+		Pass [_StencilOp]
+		ReadMask [_StencilReadMask]
+		WriteMask [_StencilWriteMask]
+	}
+
+	Cull [_CullMode]
+	ZWrite Off
+	Lighting Off
+	Fog { Mode Off }
+	ZTest Always
+	Blend One OneMinusSrcAlpha
+	ColorMask [_ColorMask]
+
+	Pass {
+		CGPROGRAM
+		#pragma vertex VertShader
+		#pragma fragment PixShader
+		#pragma shader_feature __ OUTLINE_ON
+		#pragma shader_feature __ UNDERLAY_ON UNDERLAY_INNER
+
+		#pragma multi_compile __ UNITY_UI_CLIP_RECT
+		#pragma multi_compile __ UNITY_UI_ALPHACLIP
+
+		#include "UnityCG.cginc"
+		#include "UnityUI.cginc"
+		#include "TMPro_Properties.cginc"
+
+		struct vertex_t {
+			UNITY_VERTEX_INPUT_INSTANCE_ID
+			float4	vertex			: POSITION;
+			float3	normal			: NORMAL;
+			fixed4	color			: COLOR;
+			float2	texcoord0		: TEXCOORD0;
+			float2	texcoord1		: TEXCOORD1;
+		};
+
+		struct pixel_t {
+			UNITY_VERTEX_INPUT_INSTANCE_ID
+			UNITY_VERTEX_OUTPUT_STEREO
+			float4	vertex			: SV_POSITION;
+			fixed4	faceColor		: COLOR;
+			fixed4	outlineColor	: COLOR1;
+			float4	texcoord0		: TEXCOORD0;			// Texture UV, Mask UV
+			half4	param			: TEXCOORD1;			// Scale(x), BiasIn(y), BiasOut(z), Bias(w)
+			half4	mask			: TEXCOORD2;			// Position in clip space(xy), Softness(zw)
+		#if (UNDERLAY_ON | UNDERLAY_INNER)
+			float4	texcoord1		: TEXCOORD3;			// Texture UV, alpha, reserved
+			half2	underlayParam	: TEXCOORD4;			// Scale(x), Bias(y)
+		#endif
+		};
+
+
+		pixel_t VertShader(vertex_t input)
+		{
+			pixel_t output;
+
+			UNITY_INITIALIZE_OUTPUT(pixel_t, output);
+			UNITY_SETUP_INSTANCE_ID(input);
+			UNITY_TRANSFER_INSTANCE_ID(input, output);
+			UNITY_INITIALIZE_VERTEX_OUTPUT_STEREO(output);
+
+			float bold = step(input.texcoord1.y, 0);
+
+			float4 vert = input.vertex;
+			vert.x += _VertexOffsetX;
+			vert.y += _VertexOffsetY;
+			float4 vPosition = UnityObjectToClipPos(vert);
+
+			float2 pixelSize = vPosition.w;
+			pixelSize /= float2(_ScaleX, _ScaleY) * abs(mul((float2x2)UNITY_MATRIX_P, _ScreenParams.xy));
+
+			float scale = rsqrt(dot(pixelSize, pixelSize));
+			scale *= abs(input.texcoord1.y) * _GradientScale * (_Sharpness + 1);
+			if(UNITY_MATRIX_P[3][3] == 0) scale = lerp(abs(scale) * (1 - _PerspectiveFilter), scale, abs(dot(UnityObjectToWorldNormal(input.normal.xyz), normalize(WorldSpaceViewDir(vert)))));
+
+			float weight = lerp(_WeightNormal, _WeightBold, bold) / 4.0;
+			weight = (weight + _FaceDilate) * _ScaleRatioA * 0.5;
+
+			float layerScale = scale;
+
+			scale /= 1 + (_OutlineSoftness * _ScaleRatioA * scale);
+			float bias = (0.5 - weight) * scale - 0.5;
+			float outline = _OutlineWidth * _ScaleRatioA * 0.5 * scale;
+
+			float opacity = input.color.a;
+		#if (UNDERLAY_ON | UNDERLAY_INNER)
+				opacity = 1.0;
+		#endif
+
+			fixed4 faceColor = fixed4(input.color.rgb, opacity) * _FaceColor;
+			faceColor.rgb *= faceColor.a;
+
+			fixed4 outlineColor = _OutlineColor;
+			outlineColor.a *= opacity;
+			outlineColor.rgb *= outlineColor.a;
+			outlineColor = lerp(faceColor, outlineColor, sqrt(min(1.0, (outline * 2))));
+
+		#if (UNDERLAY_ON | UNDERLAY_INNER)
+			layerScale /= 1 + ((_UnderlaySoftness * _ScaleRatioC) * layerScale);
+			float layerBias = (.5 - weight) * layerScale - .5 - ((_UnderlayDilate * _ScaleRatioC) * .5 * layerScale);
+
+			float x = -(_UnderlayOffsetX * _ScaleRatioC) * _GradientScale / _TextureWidth;
+			float y = -(_UnderlayOffsetY * _ScaleRatioC) * _GradientScale / _TextureHeight;
+			float2 layerOffset = float2(x, y);
+		#endif
+
+			// Generate UV for the Masking Texture
+			float4 clampedRect = clamp(_ClipRect, -2e10, 2e10);
+			float2 maskUV = (vert.xy - clampedRect.xy) / (clampedRect.zw - clampedRect.xy);
+
+			// Populate structure for pixel shader
+			output.vertex = vPosition;
+			output.faceColor = faceColor;
+			output.outlineColor = outlineColor;
+			output.texcoord0 = float4(input.texcoord0.x, input.texcoord0.y, maskUV.x, maskUV.y);
+			output.param = half4(scale, bias - outline, bias + outline, bias);
+			output.mask = half4(vert.xy * 2 - clampedRect.xy - clampedRect.zw, 0.25 / (0.25 * half2(_MaskSoftnessX, _MaskSoftnessY) + pixelSize.xy));
+			#if (UNDERLAY_ON || UNDERLAY_INNER)
+			output.texcoord1 = float4(input.texcoord0 + layerOffset, input.color.a, 0);
+			output.underlayParam = half2(layerScale, layerBias);
+			#endif
+
+			return output;
+		}
+
+
+		// PIXEL SHADER
+		fixed4 PixShader(pixel_t input) : SV_Target
+		{
+			UNITY_SETUP_INSTANCE_ID(input);
+
+			half d = tex2D(_MainTex, input.texcoord0.xy).a * input.param.x;
+			half4 c = input.faceColor * saturate(d - input.param.w);
+
+		#ifdef OUTLINE_ON
+			c = lerp(input.outlineColor, input.faceColor, saturate(d - input.param.z));
+			c *= saturate(d - input.param.y);
+		#endif
+
+		#if UNDERLAY_ON
+			d = tex2D(_MainTex, input.texcoord1.xy).a * input.underlayParam.x;
+			c += float4(_UnderlayColor.rgb * _UnderlayColor.a, _UnderlayColor.a) * saturate(d - input.underlayParam.y) * (1 - c.a);
+		#endif
+
+		#if UNDERLAY_INNER
+			half sd = saturate(d - input.param.z);
+			d = tex2D(_MainTex, input.texcoord1.xy).a * input.underlayParam.x;
+			c += float4(_UnderlayColor.rgb * _UnderlayColor.a, _UnderlayColor.a) * (1 - saturate(d - input.underlayParam.y)) * sd * (1 - c.a);
+		#endif
+
+		// Alternative implementation to UnityGet2DClipping with support for softness.
+		#if UNITY_UI_CLIP_RECT
+			half2 m = saturate((_ClipRect.zw - _ClipRect.xy - abs(input.mask.xy)) * input.mask.zw);
+			c *= m.x * m.y;
+		#endif
+
+		#if (UNDERLAY_ON | UNDERLAY_INNER)
+			c *= input.texcoord1.z;
+		#endif
+
+    #if UNITY_UI_ALPHACLIP
+			clip(c.a - 0.001);
+		#endif
+
+			return c;
+		}
+		ENDCG
+	}
+}
+
+CustomEditor "TMPro.EditorUtilities.TMP_SDFShaderGUI"
+}
+```
+
+### Assets/TextMesh Pro/Shaders/TMP_SDF-Mobile SSD.shader
+```
+﻿// Simplified SDF shader:
+// - No Shading Option (bevel / bump / env map)
+// - No Glow Option
+// - Softness is applied on both side of the outline
+
+Shader "TextMeshPro/Mobile/Distance Field SSD" {
+
+Properties {
+	[HDR]_FaceColor		("Face Color", Color) = (1,1,1,1)
+	_FaceDilate			("Face Dilate", Range(-1,1)) = 0
+
+	[HDR]_OutlineColor	("Outline Color", Color) = (0,0,0,1)
+	_OutlineWidth		("Outline Thickness", Range(0,1)) = 0
+	_OutlineSoftness	("Outline Softness", Range(0,1)) = 0
+
+	[HDR]_UnderlayColor		("Border Color", Color) = (0,0,0,.5)
+	_UnderlayOffsetX 	("Border OffsetX", Range(-1,1)) = 0
+	_UnderlayOffsetY 	("Border OffsetY", Range(-1,1)) = 0
+	_UnderlayDilate		("Border Dilate", Range(-1,1)) = 0
+	_UnderlaySoftness 	("Border Softness", Range(0,1)) = 0
+
+	_WeightNormal		("Weight Normal", float) = 0
+	_WeightBold			("Weight Bold", float) = .5
+
+	_ShaderFlags		("Flags", float) = 0
+	_ScaleRatioA		("Scale RatioA", float) = 1
+	_ScaleRatioB		("Scale RatioB", float) = 1
+	_ScaleRatioC		("Scale RatioC", float) = 1
+
+	_MainTex			("Font Atlas", 2D) = "white" {}
+	_TextureWidth		("Texture Width", float) = 512
+	_TextureHeight		("Texture Height", float) = 512
+	_GradientScale		("Gradient Scale", float) = 5
+	_ScaleX				("Scale X", float) = 1
+	_ScaleY				("Scale Y", float) = 1
+	_PerspectiveFilter	("Perspective Correction", Range(0, 1)) = 0.875
+	_Sharpness			("Sharpness", Range(-1,1)) = 0
+
+	_VertexOffsetX		("Vertex OffsetX", float) = 0
+	_VertexOffsetY		("Vertex OffsetY", float) = 0
+
+	_ClipRect			("Clip Rect", vector) = (-32767, -32767, 32767, 32767)
+	_MaskSoftnessX		("Mask SoftnessX", float) = 0
+	_MaskSoftnessY		("Mask SoftnessY", float) = 0
+	_MaskTex			("Mask Texture", 2D) = "white" {}
+	_MaskInverse		("Inverse", float) = 0
+	_MaskEdgeColor		("Edge Color", Color) = (1,1,1,1)
+	_MaskEdgeSoftness	("Edge Softness", Range(0, 1)) = 0.01
+	_MaskWipeControl	("Wipe Position", Range(0, 1)) = 0.5
+
+	_StencilComp		("Stencil Comparison", Float) = 8
+	_Stencil			("Stencil ID", Float) = 0
+	_StencilOp			("Stencil Operation", Float) = 0
+	_StencilWriteMask	("Stencil Write Mask", Float) = 255
+	_StencilReadMask	("Stencil Read Mask", Float) = 255
+
+    _CullMode           ("Cull Mode", Float) = 0
+	_ColorMask			("Color Mask", Float) = 15
+}
+
+SubShader {
+	Tags {
+		"Queue"="Transparent"
+		"IgnoreProjector"="True"
+		"RenderType"="Transparent"
+	}
+
+	Stencil
+	{
+		Ref [_Stencil]
+		Comp [_StencilComp]
+		Pass [_StencilOp]
+		ReadMask [_StencilReadMask]
+		WriteMask [_StencilWriteMask]
+	}
+
+	Cull [_CullMode]
+	ZWrite Off
+	Lighting Off
+	Fog { Mode Off }
+	ZTest [unity_GUIZTestMode]
+	Blend One OneMinusSrcAlpha
+	ColorMask [_ColorMask]
+
+	Pass {
+		CGPROGRAM
+		#pragma vertex VertShader
+		#pragma fragment PixShader
+		#pragma shader_feature __ OUTLINE_ON
+		#pragma shader_feature __ UNDERLAY_ON UNDERLAY_INNER
+
+		#pragma multi_compile __ UNITY_UI_CLIP_RECT
+		#pragma multi_compile __ UNITY_UI_ALPHACLIP
+
+		#include "UnityCG.cginc"
+		#include "UnityUI.cginc"
+		#include "TMPro_Properties.cginc"
+
+		#include "TMPro_Mobile.cginc"
+
+		ENDCG
+	}
+}
+
+CustomEditor "TMPro.EditorUtilities.TMP_SDFShaderGUI"
+}
+```
+
+### Assets/TextMesh Pro/Shaders/TMP_SDF-Mobile.shader
+```
+﻿// Simplified SDF shader:
+// - No Shading Option (bevel / bump / env map)
+// - No Glow Option
+// - Softness is applied on both side of the outline
+
+Shader "TextMeshPro/Mobile/Distance Field" {
+
+Properties {
+	[HDR]_FaceColor     ("Face Color", Color) = (1,1,1,1)
+	_FaceDilate			("Face Dilate", Range(-1,1)) = 0
+
+	[HDR]_OutlineColor	("Outline Color", Color) = (0,0,0,1)
+	_OutlineWidth		("Outline Thickness", Range(0,1)) = 0
+	_OutlineSoftness	("Outline Softness", Range(0,1)) = 0
+
+	[HDR]_UnderlayColor	("Border Color", Color) = (0,0,0,.5)
+	_UnderlayOffsetX 	("Border OffsetX", Range(-1,1)) = 0
+	_UnderlayOffsetY 	("Border OffsetY", Range(-1,1)) = 0
+	_UnderlayDilate		("Border Dilate", Range(-1,1)) = 0
+	_UnderlaySoftness 	("Border Softness", Range(0,1)) = 0
+
+	_WeightNormal		("Weight Normal", float) = 0
+	_WeightBold			("Weight Bold", float) = .5
+
+	_ShaderFlags		("Flags", float) = 0
+	_ScaleRatioA		("Scale RatioA", float) = 1
+	_ScaleRatioB		("Scale RatioB", float) = 1
+	_ScaleRatioC		("Scale RatioC", float) = 1
+
+	_MainTex			("Font Atlas", 2D) = "white" {}
+	_TextureWidth		("Texture Width", float) = 512
+	_TextureHeight		("Texture Height", float) = 512
+	_GradientScale		("Gradient Scale", float) = 5
+	_ScaleX				("Scale X", float) = 1
+	_ScaleY				("Scale Y", float) = 1
+	_PerspectiveFilter	("Perspective Correction", Range(0, 1)) = 0.875
+	_Sharpness			("Sharpness", Range(-1,1)) = 0
+
+	_VertexOffsetX		("Vertex OffsetX", float) = 0
+	_VertexOffsetY		("Vertex OffsetY", float) = 0
+
+	_ClipRect			("Clip Rect", vector) = (-32767, -32767, 32767, 32767)
+	_MaskSoftnessX		("Mask SoftnessX", float) = 0
+	_MaskSoftnessY		("Mask SoftnessY", float) = 0
+
+	_StencilComp		("Stencil Comparison", Float) = 8
+	_Stencil			("Stencil ID", Float) = 0
+	_StencilOp			("Stencil Operation", Float) = 0
+	_StencilWriteMask	("Stencil Write Mask", Float) = 255
+	_StencilReadMask	("Stencil Read Mask", Float) = 255
+
+	_CullMode			("Cull Mode", Float) = 0
+	_ColorMask			("Color Mask", Float) = 15
+}
+
+SubShader {
+	Tags
+	{
+		"Queue"="Transparent"
+		"IgnoreProjector"="True"
+		"RenderType"="Transparent"
+	}
+
+
+	Stencil
+	{
+		Ref [_Stencil]
+		Comp [_StencilComp]
+		Pass [_StencilOp]
+		ReadMask [_StencilReadMask]
+		WriteMask [_StencilWriteMask]
+	}
+
+	Cull [_CullMode]
+	ZWrite Off
+	Lighting Off
+	Fog { Mode Off }
+	ZTest [unity_GUIZTestMode]
+	Blend One OneMinusSrcAlpha
+	ColorMask [_ColorMask]
+
+	Pass {
+		CGPROGRAM
+		#pragma vertex VertShader
+		#pragma fragment PixShader
+		#pragma shader_feature __ OUTLINE_ON
+		#pragma shader_feature __ UNDERLAY_ON UNDERLAY_INNER
+
+		#pragma multi_compile __ UNITY_UI_CLIP_RECT
+		#pragma multi_compile __ UNITY_UI_ALPHACLIP
+
+		#include "UnityCG.cginc"
+		#include "UnityUI.cginc"
+		#include "TMPro_Properties.cginc"
+
+		struct vertex_t {
+			UNITY_VERTEX_INPUT_INSTANCE_ID
+			float4	vertex			: POSITION;
+			float3	normal			: NORMAL;
+			fixed4	color			: COLOR;
+			float2	texcoord0		: TEXCOORD0;
+			float2	texcoord1		: TEXCOORD1;
+		};
+
+		struct pixel_t {
+			UNITY_VERTEX_INPUT_INSTANCE_ID
+			UNITY_VERTEX_OUTPUT_STEREO
+			float4	vertex			: SV_POSITION;
+			fixed4	faceColor		: COLOR;
+			fixed4	outlineColor	: COLOR1;
+			float4	texcoord0		: TEXCOORD0;			// Texture UV, Mask UV
+			half4	param			: TEXCOORD1;			// Scale(x), BiasIn(y), BiasOut(z), Bias(w)
+			half4	mask			: TEXCOORD2;			// Position in clip space(xy), Softness(zw)
+			#if (UNDERLAY_ON | UNDERLAY_INNER)
+			float4	texcoord1		: TEXCOORD3;			// Texture UV, alpha, reserved
+			half2	underlayParam	: TEXCOORD4;			// Scale(x), Bias(y)
+			#endif
+		};
+
+
+		pixel_t VertShader(vertex_t input)
+		{
+			pixel_t output;
+
+			UNITY_INITIALIZE_OUTPUT(pixel_t, output);
+			UNITY_SETUP_INSTANCE_ID(input);
+			UNITY_TRANSFER_INSTANCE_ID(input, output);
+			UNITY_INITIALIZE_VERTEX_OUTPUT_STEREO(output);
+
+			float bold = step(input.texcoord1.y, 0);
+
+			float4 vert = input.vertex;
+			vert.x += _VertexOffsetX;
+			vert.y += _VertexOffsetY;
+			float4 vPosition = UnityObjectToClipPos(vert);
+
+			float2 pixelSize = vPosition.w;
+			pixelSize /= float2(_ScaleX, _ScaleY) * abs(mul((float2x2)UNITY_MATRIX_P, _ScreenParams.xy));
+
+			float scale = rsqrt(dot(pixelSize, pixelSize));
+			scale *= abs(input.texcoord1.y) * _GradientScale * (_Sharpness + 1);
+			if(UNITY_MATRIX_P[3][3] == 0) scale = lerp(abs(scale) * (1 - _PerspectiveFilter), scale, abs(dot(UnityObjectToWorldNormal(input.normal.xyz), normalize(WorldSpaceViewDir(vert)))));
+
+			float weight = lerp(_WeightNormal, _WeightBold, bold) / 4.0;
+			weight = (weight + _FaceDilate) * _ScaleRatioA * 0.5;
+
+			float layerScale = scale;
+
+			scale /= 1 + (_OutlineSoftness * _ScaleRatioA * scale);
+			float bias = (0.5 - weight) * scale - 0.5;
+			float outline = _OutlineWidth * _ScaleRatioA * 0.5 * scale;
+
+			float opacity = input.color.a;
+			#if (UNDERLAY_ON | UNDERLAY_INNER)
+			opacity = 1.0;
+			#endif
+
+			fixed4 faceColor = fixed4(input.color.rgb, opacity) * _FaceColor;
+			faceColor.rgb *= faceColor.a;
+
+			fixed4 outlineColor = _OutlineColor;
+			outlineColor.a *= opacity;
+			outlineColor.rgb *= outlineColor.a;
+			outlineColor = lerp(faceColor, outlineColor, sqrt(min(1.0, (outline * 2))));
+
+			#if (UNDERLAY_ON | UNDERLAY_INNER)
+			layerScale /= 1 + ((_UnderlaySoftness * _ScaleRatioC) * layerScale);
+			float layerBias = (.5 - weight) * layerScale - .5 - ((_UnderlayDilate * _ScaleRatioC) * .5 * layerScale);
+
+			float x = -(_UnderlayOffsetX * _ScaleRatioC) * _GradientScale / _TextureWidth;
+			float y = -(_UnderlayOffsetY * _ScaleRatioC) * _GradientScale / _TextureHeight;
+			float2 layerOffset = float2(x, y);
+			#endif
+
+			// Generate UV for the Masking Texture
+			float4 clampedRect = clamp(_ClipRect, -2e10, 2e10);
+			float2 maskUV = (vert.xy - clampedRect.xy) / (clampedRect.zw - clampedRect.xy);
+
+			// Populate structure for pixel shader
+			output.vertex = vPosition;
+			output.faceColor = faceColor;
+			output.outlineColor = outlineColor;
+			output.texcoord0 = float4(input.texcoord0.x, input.texcoord0.y, maskUV.x, maskUV.y);
+			output.param = half4(scale, bias - outline, bias + outline, bias);
+			output.mask = half4(vert.xy * 2 - clampedRect.xy - clampedRect.zw, 0.25 / (0.25 * half2(_MaskSoftnessX, _MaskSoftnessY) + pixelSize.xy));
+			#if (UNDERLAY_ON || UNDERLAY_INNER)
+			output.texcoord1 = float4(input.texcoord0 + layerOffset, input.color.a, 0);
+			output.underlayParam = half2(layerScale, layerBias);
+			#endif
+
+			return output;
+		}
+
+
+		// PIXEL SHADER
+		fixed4 PixShader(pixel_t input) : SV_Target
+		{
+			UNITY_SETUP_INSTANCE_ID(input);
+
+			half d = tex2D(_MainTex, input.texcoord0.xy).a * input.param.x;
+			half4 c = input.faceColor * saturate(d - input.param.w);
+
+			#ifdef OUTLINE_ON
+			c = lerp(input.outlineColor, input.faceColor, saturate(d - input.param.z));
+			c *= saturate(d - input.param.y);
+			#endif
+
+			#if UNDERLAY_ON
+			d = tex2D(_MainTex, input.texcoord1.xy).a * input.underlayParam.x;
+			c += float4(_UnderlayColor.rgb * _UnderlayColor.a, _UnderlayColor.a) * saturate(d - input.underlayParam.y) * (1 - c.a);
+			#endif
+
+			#if UNDERLAY_INNER
+			half sd = saturate(d - input.param.z);
+			d = tex2D(_MainTex, input.texcoord1.xy).a * input.underlayParam.x;
+			c += float4(_UnderlayColor.rgb * _UnderlayColor.a, _UnderlayColor.a) * (1 - saturate(d - input.underlayParam.y)) * sd * (1 - c.a);
+			#endif
+
+			// Alternative implementation to UnityGet2DClipping with support for softness.
+			#if UNITY_UI_CLIP_RECT
+			half2 m = saturate((_ClipRect.zw - _ClipRect.xy - abs(input.mask.xy)) * input.mask.zw);
+			c *= m.x * m.y;
+			#endif
+
+			#if (UNDERLAY_ON | UNDERLAY_INNER)
+			c *= input.texcoord1.z;
+			#endif
+
+			#if UNITY_UI_ALPHACLIP
+			clip(c.a - 0.001);
+			#endif
+
+			return c;
+		}
+		ENDCG
+	}
+}
+
+CustomEditor "TMPro.EditorUtilities.TMP_SDFShaderGUI"
+}
+```
+
+### Assets/TextMesh Pro/Shaders/TMP_SDF-Surface-Mobile.shader
+```
+// Simplified version of the SDF Surface shader :
+// - No support for Bevel, Bump or envmap
+// - Diffuse only lighting
+// - Fully supports only 1 directional light. Other lights can affect it, but it will be per-vertex/SH.
+
+Shader "TextMeshPro/Mobile/Distance Field (Surface)" {
+
+Properties {
+	_FaceTex			("Fill Texture", 2D) = "white" {}
+	[HDR]_FaceColor		("Fill Color", Color) = (1,1,1,1)
+	_FaceDilate			("Face Dilate", Range(-1,1)) = 0
+
+	[HDR]_OutlineColor	("Outline Color", Color) = (0,0,0,1)
+	_OutlineTex			("Outline Texture", 2D) = "white" {}
+	_OutlineWidth		("Outline Thickness", Range(0, 1)) = 0
+	_OutlineSoftness	("Outline Softness", Range(0,1)) = 0
+
+	[HDR]_GlowColor		("Color", Color) = (0, 1, 0, 0.5)
+	_GlowOffset			("Offset", Range(-1,1)) = 0
+	_GlowInner			("Inner", Range(0,1)) = 0.05
+	_GlowOuter			("Outer", Range(0,1)) = 0.05
+	_GlowPower			("Falloff", Range(1, 0)) = 0.75
+
+	_WeightNormal		("Weight Normal", float) = 0
+	_WeightBold			("Weight Bold", float) = 0.5
+
+	// Should not be directly exposed to the user
+	_ShaderFlags		("Flags", float) = 0
+	_ScaleRatioA		("Scale RatioA", float) = 1
+	_ScaleRatioB		("Scale RatioB", float) = 1
+	_ScaleRatioC		("Scale RatioC", float) = 1
+
+	_MainTex			("Font Atlas", 2D) = "white" {}
+	_TextureWidth		("Texture Width", float) = 512
+	_TextureHeight		("Texture Height", float) = 512
+	_GradientScale		("Gradient Scale", float) = 5.0
+	_ScaleX				("Scale X", float) = 1.0
+	_ScaleY				("Scale Y", float) = 1.0
+	_PerspectiveFilter	("Perspective Correction", Range(0, 1)) = 0.875
+	_Sharpness			("Sharpness", Range(-1,1)) = 0
+
+	_VertexOffsetX		("Vertex OffsetX", float) = 0
+	_VertexOffsetY		("Vertex OffsetY", float) = 0
+
+	_CullMode			("Cull Mode", Float) = 0
+	//_MaskCoord		("Mask Coords", vector) = (0,0,0,0)
+	//_MaskSoftness		("Mask Softness", float) = 0
+}
+
+SubShader {
+
+	Tags {
+		"Queue"="Transparent"
+		"IgnoreProjector"="True"
+		"RenderType"="Transparent"
+	}
+
+	LOD 300
+	Cull [_CullMode]
+
+	CGPROGRAM
+	#pragma surface PixShader Lambert alpha:blend vertex:VertShader noforwardadd nolightmap nodirlightmap
+	#pragma target 3.0
+	#pragma shader_feature __ GLOW_ON
+
+	#include "TMPro_Properties.cginc"
+	#include "TMPro.cginc"
+
+	half _FaceShininess;
+	half _OutlineShininess;
+
+	struct Input
+	{
+		fixed4	color		: COLOR;
+		float2	uv_MainTex;
+		float2	uv2_FaceTex;
+		float2  uv2_OutlineTex;
+		float2	param;					// Weight, Scale
+		float3	viewDirEnv;
+	};
+
+	#include "TMPro_Surface.cginc"
+
+	ENDCG
+
+	// Pass to render object as a shadow caster
+	Pass
+	{
+		Name "Caster"
+		Tags { "LightMode" = "ShadowCaster" }
+		Offset 1, 1
+
+		Fog {Mode Off}
+		ZWrite On ZTest LEqual Cull Off
+
+		CGPROGRAM
+		#pragma vertex vert
+		#pragma fragment frag
+		#pragma multi_compile_shadowcaster
+		#include "UnityCG.cginc"
+
+		struct v2f {
+			V2F_SHADOW_CASTER;
+			float2	uv			: TEXCOORD1;
+			float2	uv2			: TEXCOORD3;
+			float	alphaClip	: TEXCOORD2;
+		};
+
+		uniform float4 _MainTex_ST;
+		uniform float4 _OutlineTex_ST;
+		float _OutlineWidth;
+		float _FaceDilate;
+		float _ScaleRatioA;
+
+		v2f vert( appdata_base v )
+		{
+			v2f o;
+			TRANSFER_SHADOW_CASTER(o)
+			o.uv = TRANSFORM_TEX(v.texcoord, _MainTex);
+			o.uv2 = TRANSFORM_TEX(v.texcoord, _OutlineTex);
+			o.alphaClip = o.alphaClip = (1.0 - _OutlineWidth * _ScaleRatioA - _FaceDilate * _ScaleRatioA) / 2;
+			return o;
+		}
+
+		uniform sampler2D _MainTex;
+
+		float4 frag(v2f i) : COLOR
+		{
+			fixed4 texcol = tex2D(_MainTex, i.uv).a;
+			clip(texcol.a - i.alphaClip);
+			SHADOW_CASTER_FRAGMENT(i)
+		}
+		ENDCG
+	}
+}
+
+CustomEditor "TMPro.EditorUtilities.TMP_SDFShaderGUI"
+}
+```
+
+### Assets/TextMesh Pro/Shaders/TMP_SDF-Surface.shader
+```
+Shader "TextMeshPro/Distance Field (Surface)" {
+
+Properties {
+	_FaceTex			("Fill Texture", 2D) = "white" {}
+	_FaceUVSpeedX		("Face UV Speed X", Range(-5, 5)) = 0.0
+	_FaceUVSpeedY		("Face UV Speed Y", Range(-5, 5)) = 0.0
+	[HDR]_FaceColor		("Fill Color", Color) = (1,1,1,1)
+	_FaceDilate			("Face Dilate", Range(-1,1)) = 0
+
+	[HDR]_OutlineColor	("Outline Color", Color) = (0,0,0,1)
+	_OutlineTex			("Outline Texture", 2D) = "white" {}
+	_OutlineUVSpeedX	("Outline UV Speed X", Range(-5, 5)) = 0.0
+	_OutlineUVSpeedY	("Outline UV Speed Y", Range(-5, 5)) = 0.0
+	_OutlineWidth		("Outline Thickness", Range(0, 1)) = 0
+	_OutlineSoftness	("Outline Softness", Range(0,1)) = 0
+
+	_Bevel				("Bevel", Range(0,1)) = 0.5
+	_BevelOffset		("Bevel Offset", Range(-0.5,0.5)) = 0
+	_BevelWidth			("Bevel Width", Range(-.5,0.5)) = 0
+	_BevelClamp			("Bevel Clamp", Range(0,1)) = 0
+	_BevelRoundness		("Bevel Roundness", Range(0,1)) = 0
+
+	_BumpMap 			("Normalmap", 2D) = "bump" {}
+	_BumpOutline		("Bump Outline", Range(0,1)) = 0.5
+	_BumpFace			("Bump Face", Range(0,1)) = 0.5
+
+	_ReflectFaceColor	    ("Face Color", Color) = (0,0,0,1)
+	_ReflectOutlineColor	("Outline Color", Color) = (0,0,0,1)
+	_Cube 					("Reflection Cubemap", Cube) = "black" { /* TexGen CubeReflect */ }
+	_EnvMatrixRotation  	("Texture Rotation", vector) = (0, 0, 0, 0)
+	[HDR]_SpecColor		    ("Specular Color", Color) = (0,0,0,1)
+
+	_FaceShininess		("Face Shininess", Range(0,1)) = 0
+	_OutlineShininess	("Outline Shininess", Range(0,1)) = 0
+
+	[HDR]_GlowColor		("Color", Color) = (0, 1, 0, 0.5)
+	_GlowOffset			("Offset", Range(-1,1)) = 0
+	_GlowInner			("Inner", Range(0,1)) = 0.05
+	_GlowOuter			("Outer", Range(0,1)) = 0.05
+	_GlowPower			("Falloff", Range(1, 0)) = 0.75
+
+	_WeightNormal		("Weight Normal", float) = 0
+	_WeightBold			("Weight Bold", float) = 0.5
+
+	// Should not be directly exposed to the user
+	_ShaderFlags		("Flags", float) = 0
+	_ScaleRatioA		("Scale RatioA", float) = 1
+	_ScaleRatioB		("Scale RatioB", float) = 1
+	_ScaleRatioC		("Scale RatioC", float) = 1
+
+	_MainTex			("Font Atlas", 2D) = "white" {}
+	_TextureWidth		("Texture Width", float) = 512
+	_TextureHeight		("Texture Height", float) = 512
+	_GradientScale		("Gradient Scale", float) = 5.0
+	_ScaleX				("Scale X", float) = 1.0
+	_ScaleY				("Scale Y", float) = 1.0
+	_PerspectiveFilter	("Perspective Correction", Range(0, 1)) = 0.875
+	_Sharpness			("Sharpness", Range(-1,1)) = 0
+
+	_VertexOffsetX		("Vertex OffsetX", float) = 0
+	_VertexOffsetY		("Vertex OffsetY", float) = 0
+
+	_CullMode			("Cull Mode", Float) = 0
+	//_MaskCoord		("Mask Coords", vector) = (0,0,0,0)
+	//_MaskSoftness		("Mask Softness", float) = 0
+}
+
+SubShader {
+
+	Tags { "Queue"="Transparent" "IgnoreProjector"="True" "RenderType"="Transparent" }
+
+	LOD 300
+	Cull [_CullMode]
+
+	CGPROGRAM
+	#pragma surface PixShader BlinnPhong alpha:blend vertex:VertShader nolightmap nodirlightmap
+	#pragma target 3.0
+	#pragma shader_feature __ GLOW_ON
+	#pragma glsl
+
+	#include "TMPro_Properties.cginc"
+	#include "TMPro.cginc"
+
+	half _FaceShininess;
+	half _OutlineShininess;
+
+	struct Input
+	{
+		fixed4	color			: COLOR;
+		float2	uv_MainTex;
+		float2	uv2_FaceTex;
+		float2  uv2_OutlineTex;
+		float2	param;						// Weight, Scale
+		float3	viewDirEnv;
+	};
+
+
+	#define BEVEL_ON 1
+	#include "TMPro_Surface.cginc"
+
+	ENDCG
+
+	// Pass to render object as a shadow caster
+	Pass
+	{
+		Name "Caster"
+		Tags { "LightMode" = "ShadowCaster" }
+		Offset 1, 1
+
+		Fog {Mode Off}
+		ZWrite On
+		ZTest LEqual
+		Cull Off
+
+		CGPROGRAM
+		#pragma vertex vert
+		#pragma fragment frag
+		#pragma multi_compile_shadowcaster
+		#include "UnityCG.cginc"
+
+		struct v2f {
+			V2F_SHADOW_CASTER;
+			float2	uv			: TEXCOORD1;
+			float2	uv2			: TEXCOORD3;
+			float	alphaClip	: TEXCOORD2;
+		};
+
+		uniform float4 _MainTex_ST;
+		uniform float4 _OutlineTex_ST;
+		float _OutlineWidth;
+		float _FaceDilate;
+		float _ScaleRatioA;
+
+		v2f vert( appdata_base v )
+		{
+			v2f o;
+			TRANSFER_SHADOW_CASTER(o)
+			o.uv = TRANSFORM_TEX(v.texcoord, _MainTex);
+			o.uv2 = TRANSFORM_TEX(v.texcoord, _OutlineTex);
+			o.alphaClip = (1.0 - _OutlineWidth * _ScaleRatioA - _FaceDilate * _ScaleRatioA) / 2;
+			return o;
+		}
+
+		uniform sampler2D _MainTex;
+
+		float4 frag(v2f i) : COLOR
+		{
+			fixed4 texcol = tex2D(_MainTex, i.uv).a;
+			clip(texcol.a - i.alphaClip);
+			SHADOW_CASTER_FRAGMENT(i)
+		}
+		ENDCG
+	}
+}
+
+CustomEditor "TMPro.EditorUtilities.TMP_SDFShaderGUI"
+}
+```
+
+### Assets/TextMesh Pro/Shaders/TMP_SDF.shader
+```
+Shader "TextMeshPro/Distance Field" {
+
+Properties {
+	_FaceTex			("Face Texture", 2D) = "white" {}
+	_FaceUVSpeedX		("Face UV Speed X", Range(-5, 5)) = 0.0
+	_FaceUVSpeedY		("Face UV Speed Y", Range(-5, 5)) = 0.0
+	[HDR]_FaceColor		("Face Color", Color) = (1,1,1,1)
+	_FaceDilate			("Face Dilate", Range(-1,1)) = 0
+
+	[HDR]_OutlineColor	("Outline Color", Color) = (0,0,0,1)
+	_OutlineTex			("Outline Texture", 2D) = "white" {}
+	_OutlineUVSpeedX	("Outline UV Speed X", Range(-5, 5)) = 0.0
+	_OutlineUVSpeedY	("Outline UV Speed Y", Range(-5, 5)) = 0.0
+	_OutlineWidth		("Outline Thickness", Range(0, 1)) = 0
+	_OutlineSoftness	("Outline Softness", Range(0,1)) = 0
+
+	_Bevel				("Bevel", Range(0,1)) = 0.5
+	_BevelOffset		("Bevel Offset", Range(-0.5,0.5)) = 0
+	_BevelWidth			("Bevel Width", Range(-.5,0.5)) = 0
+	_BevelClamp			("Bevel Clamp", Range(0,1)) = 0
+	_BevelRoundness		("Bevel Roundness", Range(0,1)) = 0
+
+	_LightAngle			("Light Angle", Range(0.0, 6.2831853)) = 3.1416
+	[HDR]_SpecularColor	("Specular", Color) = (1,1,1,1)
+	_SpecularPower		("Specular", Range(0,4)) = 2.0
+	_Reflectivity		("Reflectivity", Range(5.0,15.0)) = 10
+	_Diffuse			("Diffuse", Range(0,1)) = 0.5
+	_Ambient			("Ambient", Range(1,0)) = 0.5
+
+	_BumpMap 			("Normal map", 2D) = "bump" {}
+	_BumpOutline		("Bump Outline", Range(0,1)) = 0
+	_BumpFace			("Bump Face", Range(0,1)) = 0
+
+	_ReflectFaceColor	("Reflection Color", Color) = (0,0,0,1)
+	_ReflectOutlineColor("Reflection Color", Color) = (0,0,0,1)
+	_Cube 				("Reflection Cubemap", Cube) = "black" { /* TexGen CubeReflect */ }
+	_EnvMatrixRotation	("Texture Rotation", vector) = (0, 0, 0, 0)
+
+
+	[HDR]_UnderlayColor	("Border Color", Color) = (0,0,0, 0.5)
+	_UnderlayOffsetX	("Border OffsetX", Range(-1,1)) = 0
+	_UnderlayOffsetY	("Border OffsetY", Range(-1,1)) = 0
+	_UnderlayDilate		("Border Dilate", Range(-1,1)) = 0
+	_UnderlaySoftness	("Border Softness", Range(0,1)) = 0
+
+	[HDR]_GlowColor			("Color", Color) = (0, 1, 0, 0.5)
+	_GlowOffset			("Offset", Range(-1,1)) = 0
+	_GlowInner			("Inner", Range(0,1)) = 0.05
+	_GlowOuter			("Outer", Range(0,1)) = 0.05
+	_GlowPower			("Falloff", Range(1, 0)) = 0.75
+
+	_WeightNormal		("Weight Normal", float) = 0
+	_WeightBold			("Weight Bold", float) = 0.5
+
+	_ShaderFlags		("Flags", float) = 0
+	_ScaleRatioA		("Scale RatioA", float) = 1
+	_ScaleRatioB		("Scale RatioB", float) = 1
+	_ScaleRatioC		("Scale RatioC", float) = 1
+
+	_MainTex			("Font Atlas", 2D) = "white" {}
+	_TextureWidth		("Texture Width", float) = 512
+	_TextureHeight		("Texture Height", float) = 512
+	_GradientScale		("Gradient Scale", float) = 5.0
+	_ScaleX				("Scale X", float) = 1.0
+	_ScaleY				("Scale Y", float) = 1.0
+	_PerspectiveFilter	("Perspective Correction", Range(0, 1)) = 0.875
+	_Sharpness			("Sharpness", Range(-1,1)) = 0
+
+	_VertexOffsetX		("Vertex OffsetX", float) = 0
+	_VertexOffsetY		("Vertex OffsetY", float) = 0
+
+	_MaskCoord			("Mask Coordinates", vector) = (0, 0, 32767, 32767)
+	_ClipRect			("Clip Rect", vector) = (-32767, -32767, 32767, 32767)
+	_MaskSoftnessX		("Mask SoftnessX", float) = 0
+	_MaskSoftnessY		("Mask SoftnessY", float) = 0
+
+	_StencilComp		("Stencil Comparison", Float) = 8
+	_Stencil			("Stencil ID", Float) = 0
+	_StencilOp			("Stencil Operation", Float) = 0
+	_StencilWriteMask	("Stencil Write Mask", Float) = 255
+	_StencilReadMask	("Stencil Read Mask", Float) = 255
+
+	_CullMode			("Cull Mode", Float) = 0
+	_ColorMask			("Color Mask", Float) = 15
+}
+
+SubShader {
+
+	Tags
+	{
+		"Queue"="Transparent"
+		"IgnoreProjector"="True"
+		"RenderType"="Transparent"
+	}
+
+	Stencil
+	{
+		Ref [_Stencil]
+		Comp [_StencilComp]
+		Pass [_StencilOp]
+		ReadMask [_StencilReadMask]
+		WriteMask [_StencilWriteMask]
+	}
+
+	Cull [_CullMode]
+	ZWrite Off
+	Lighting Off
+	Fog { Mode Off }
+	ZTest [unity_GUIZTestMode]
+	Blend One OneMinusSrcAlpha
+	ColorMask [_ColorMask]
+
+	Pass {
+		CGPROGRAM
+		#pragma target 3.0
+		#pragma vertex VertShader
+		#pragma fragment PixShader
+		#pragma shader_feature __ BEVEL_ON
+		#pragma shader_feature __ UNDERLAY_ON UNDERLAY_INNER
+		#pragma shader_feature __ GLOW_ON
+
+		#pragma multi_compile __ UNITY_UI_CLIP_RECT
+		#pragma multi_compile __ UNITY_UI_ALPHACLIP
+
+		#include "UnityCG.cginc"
+		#include "UnityUI.cginc"
+		#include "TMPro_Properties.cginc"
+		#include "TMPro.cginc"
+
+		struct vertex_t {
+			UNITY_VERTEX_INPUT_INSTANCE_ID
+			float4	position		: POSITION;
+			float3	normal			: NORMAL;
+			fixed4	color			: COLOR;
+			float2	texcoord0		: TEXCOORD0;
+			float2	texcoord1		: TEXCOORD1;
+		};
+
+
+		struct pixel_t {
+			UNITY_VERTEX_INPUT_INSTANCE_ID
+			UNITY_VERTEX_OUTPUT_STEREO
+			float4	position		: SV_POSITION;
+			fixed4	color			: COLOR;
+			float2	atlas			: TEXCOORD0;		// Atlas
+			float4	param			: TEXCOORD1;		// alphaClip, scale, bias, weight
+			float4	mask			: TEXCOORD2;		// Position in object space(xy), pixel Size(zw)
+			float3	viewDir			: TEXCOORD3;
+
+		#if (UNDERLAY_ON || UNDERLAY_INNER)
+			float4	texcoord2		: TEXCOORD4;		// u,v, scale, bias
+			fixed4	underlayColor	: COLOR1;
+		#endif
+			float4 textures			: TEXCOORD5;
+		};
+
+		// Used by Unity internally to handle Texture Tiling and Offset.
+		float4 _FaceTex_ST;
+		float4 _OutlineTex_ST;
+
+		pixel_t VertShader(vertex_t input)
+		{
+			pixel_t output;
+
+			UNITY_INITIALIZE_OUTPUT(pixel_t, output);
+			UNITY_SETUP_INSTANCE_ID(input);
+			UNITY_TRANSFER_INSTANCE_ID(input,output);
+			UNITY_INITIALIZE_VERTEX_OUTPUT_STEREO(output);
+
+			float bold = step(input.texcoord1.y, 0);
+
+			float4 vert = input.position;
+			vert.x += _VertexOffsetX;
+			vert.y += _VertexOffsetY;
+
+			float4 vPosition = UnityObjectToClipPos(vert);
+
+			float2 pixelSize = vPosition.w;
+			pixelSize /= float2(_ScaleX, _ScaleY) * abs(mul((float2x2)UNITY_MATRIX_P, _ScreenParams.xy));
+			float scale = rsqrt(dot(pixelSize, pixelSize));
+			scale *= abs(input.texcoord1.y) * _GradientScale * (_Sharpness + 1);
+			if (UNITY_MATRIX_P[3][3] == 0) scale = lerp(abs(scale) * (1 - _PerspectiveFilter), scale, abs(dot(UnityObjectToWorldNormal(input.normal.xyz), normalize(WorldSpaceViewDir(vert)))));
+
+			float weight = lerp(_WeightNormal, _WeightBold, bold) / 4.0;
+			weight = (weight + _FaceDilate) * _ScaleRatioA * 0.5;
+
+			float bias =(.5 - weight) + (.5 / scale);
+
+			float alphaClip = (1.0 - _OutlineWidth * _ScaleRatioA - _OutlineSoftness * _ScaleRatioA);
+
+		#if GLOW_ON
+			alphaClip = min(alphaClip, 1.0 - _GlowOffset * _ScaleRatioB - _GlowOuter * _ScaleRatioB);
+		#endif
+
+			alphaClip = alphaClip / 2.0 - ( .5 / scale) - weight;
+
+		#if (UNDERLAY_ON || UNDERLAY_INNER)
+			float4 underlayColor = _UnderlayColor;
+			underlayColor.rgb *= underlayColor.a;
+
+			float bScale = scale;
+			bScale /= 1 + ((_UnderlaySoftness*_ScaleRatioC) * bScale);
+			float bBias = (0.5 - weight) * bScale - 0.5 - ((_UnderlayDilate * _ScaleRatioC) * 0.5 * bScale);
+
+			float x = -(_UnderlayOffsetX * _ScaleRatioC) * _GradientScale / _TextureWidth;
+			float y = -(_UnderlayOffsetY * _ScaleRatioC) * _GradientScale / _TextureHeight;
+			float2 bOffset = float2(x, y);
+		#endif
+
+			// Generate UV for the Masking Texture
+			float4 clampedRect = clamp(_ClipRect, -2e10, 2e10);
+			float2 maskUV = (vert.xy - clampedRect.xy) / (clampedRect.zw - clampedRect.xy);
+
+			// Support for texture tiling and offset
+			float2 textureUV = UnpackUV(input.texcoord1.x);
+			float2 faceUV = TRANSFORM_TEX(textureUV, _FaceTex);
+			float2 outlineUV = TRANSFORM_TEX(textureUV, _OutlineTex);
+
+
+			output.position = vPosition;
+			output.color = input.color;
+			output.atlas =	input.texcoord0;
+			output.param =	float4(alphaClip, scale, bias, weight);
+			output.mask = half4(vert.xy * 2 - clampedRect.xy - clampedRect.zw, 0.25 / (0.25 * half2(_MaskSoftnessX, _MaskSoftnessY) + pixelSize.xy));
+			output.viewDir =	mul((float3x3)_EnvMatrix, _WorldSpaceCameraPos.xyz - mul(unity_ObjectToWorld, vert).xyz);
+			#if (UNDERLAY_ON || UNDERLAY_INNER)
+			output.texcoord2 = float4(input.texcoord0 + bOffset, bScale, bBias);
+			output.underlayColor =	underlayColor;
+			#endif
+			output.textures = float4(faceUV, outlineUV);
+
+			return output;
+		}
+
+
+		fixed4 PixShader(pixel_t input) : SV_Target
+		{
+			UNITY_SETUP_INSTANCE_ID(input);
+
+			float c = tex2D(_MainTex, input.atlas).a;
+
+		#ifndef UNDERLAY_ON
+			clip(c - input.param.x);
+		#endif
+
+			float	scale	= input.param.y;
+			float	bias	= input.param.z;
+			float	weight	= input.param.w;
+			float	sd = (bias - c) * scale;
+
+			float outline = (_OutlineWidth * _ScaleRatioA) * scale;
+			float softness = (_OutlineSoftness * _ScaleRatioA) * scale;
+
+			half4 faceColor = _FaceColor;
+			half4 outlineColor = _OutlineColor;
+
+			faceColor.rgb *= input.color.rgb;
+
+			faceColor *= tex2D(_FaceTex, input.textures.xy + float2(_FaceUVSpeedX, _FaceUVSpeedY) * _Time.y);
+			outlineColor *= tex2D(_OutlineTex, input.textures.zw + float2(_OutlineUVSpeedX, _OutlineUVSpeedY) * _Time.y);
+
+			faceColor = GetColor(sd, faceColor, outlineColor, outline, softness);
+
+		#if BEVEL_ON
+			float3 dxy = float3(0.5 / _TextureWidth, 0.5 / _TextureHeight, 0);
+			float3 n = GetSurfaceNormal(input.atlas, weight, dxy);
+
+			float3 bump = UnpackNormal(tex2D(_BumpMap, input.textures.xy + float2(_FaceUVSpeedX, _FaceUVSpeedY) * _Time.y)).xyz;
+			bump *= lerp(_BumpFace, _BumpOutline, saturate(sd + outline * 0.5));
+			n = normalize(n- bump);
+
+			float3 light = normalize(float3(sin(_LightAngle), cos(_LightAngle), -1.0));
+
+			float3 col = GetSpecular(n, light);
+			faceColor.rgb += col*faceColor.a;
+			faceColor.rgb *= 1-(dot(n, light)*_Diffuse);
+			faceColor.rgb *= lerp(_Ambient, 1, n.z*n.z);
+
+			fixed4 reflcol = texCUBE(_Cube, reflect(input.viewDir, -n));
+			faceColor.rgb += reflcol.rgb * lerp(_ReflectFaceColor.rgb, _ReflectOutlineColor.rgb, saturate(sd + outline * 0.5)) * faceColor.a;
+		#endif
+
+		#if UNDERLAY_ON
+			float d = tex2D(_MainTex, input.texcoord2.xy).a * input.texcoord2.z;
+			faceColor += input.underlayColor * saturate(d - input.texcoord2.w) * (1 - faceColor.a);
+		#endif
+
+		#if UNDERLAY_INNER
+			float d = tex2D(_MainTex, input.texcoord2.xy).a * input.texcoord2.z;
+			faceColor += input.underlayColor * (1 - saturate(d - input.texcoord2.w)) * saturate(1 - sd) * (1 - faceColor.a);
+		#endif
+
+		#if GLOW_ON
+			float4 glowColor = GetGlowColor(sd, scale);
+			faceColor.rgb += glowColor.rgb * glowColor.a;
+		#endif
+
+		// Alternative implementation to UnityGet2DClipping with support for softness.
+		#if UNITY_UI_CLIP_RECT
+			half2 m = saturate((_ClipRect.zw - _ClipRect.xy - abs(input.mask.xy)) * input.mask.zw);
+			faceColor *= m.x * m.y;
+		#endif
+
+		#if UNITY_UI_ALPHACLIP
+			clip(faceColor.a - 0.001);
+		#endif
+
+  		return faceColor * input.color.a;
+		}
+
+		ENDCG
+	}
+}
+
+Fallback "TextMeshPro/Mobile/Distance Field"
+CustomEditor "TMPro.EditorUtilities.TMP_SDFShaderGUI"
+}
+```
+
+### Assets/TextMesh Pro/Shaders/TMP_Sprite.shader
+```
+Shader "TextMeshPro/Sprite"
+{
+	Properties
+	{
+        [PerRendererData] _MainTex ("Sprite Texture", 2D) = "white" {}
+		_Color ("Tint", Color) = (1,1,1,1)
+		
+		_StencilComp ("Stencil Comparison", Float) = 8
+		_Stencil ("Stencil ID", Float) = 0
+		_StencilOp ("Stencil Operation", Float) = 0
+		_StencilWriteMask ("Stencil Write Mask", Float) = 255
+		_StencilReadMask ("Stencil Read Mask", Float) = 255
+		
+		_CullMode ("Cull Mode", Float) = 0
+		_ColorMask ("Color Mask", Float) = 15
+		_ClipRect ("Clip Rect", vector) = (-32767, -32767, 32767, 32767)
+
+		[Toggle(UNITY_UI_ALPHACLIP)] _UseUIAlphaClip ("Use Alpha Clip", Float) = 0
+	}
+
+	SubShader
+	{
+		Tags
+		{ 
+			"Queue"="Transparent" 
+			"IgnoreProjector"="True" 
+			"RenderType"="Transparent" 
+			"PreviewType"="Plane"
+			"CanUseSpriteAtlas"="True"
+		}
+		
+		Stencil
+		{
+			Ref [_Stencil]
+			Comp [_StencilComp]
+			Pass [_StencilOp] 
+			ReadMask [_StencilReadMask]
+			WriteMask [_StencilWriteMask]
+		}
+
+		Cull [_CullMode]
+		Lighting Off
+		ZWrite Off
+		ZTest [unity_GUIZTestMode]
+		Blend SrcAlpha OneMinusSrcAlpha
+		ColorMask [_ColorMask]
+
+		Pass
+		{
+            Name "Default"
+		CGPROGRAM
+			#pragma vertex vert
+			#pragma fragment frag
+            #pragma target 2.0
+
+			#include "UnityCG.cginc"
+			#include "UnityUI.cginc"
+
+            #pragma multi_compile __ UNITY_UI_CLIP_RECT
+            #pragma multi_compile __ UNITY_UI_ALPHACLIP
+			
+			struct appdata_t
+			{
+				float4 vertex   : POSITION;
+				float4 color    : COLOR;
+				float2 texcoord : TEXCOORD0;
+                UNITY_VERTEX_INPUT_INSTANCE_ID
+			};
+
+			struct v2f
+			{
+				float4 vertex   : SV_POSITION;
+				fixed4 color    : COLOR;
+                float2 texcoord  : TEXCOORD0;
+				float4 worldPosition : TEXCOORD1;
+                UNITY_VERTEX_OUTPUT_STEREO
+			};
+			
+            sampler2D _MainTex;
+			fixed4 _Color;
+			fixed4 _TextureSampleAdd;
+			float4 _ClipRect;
+            float4 _MainTex_ST;
+
+            v2f vert(appdata_t v)
+			{
+				v2f OUT;
+                UNITY_SETUP_INSTANCE_ID(v);
+                UNITY_INITIALIZE_VERTEX_OUTPUT_STEREO(OUT);
+                OUT.worldPosition = v.vertex;
+				OUT.vertex = UnityObjectToClipPos(OUT.worldPosition);
+
+                OUT.texcoord = TRANSFORM_TEX(v.texcoord, _MainTex);
+				
+                OUT.color = v.color * _Color;
+				return OUT;
+			}
+
+			fixed4 frag(v2f IN) : SV_Target
+			{
+				half4 color = (tex2D(_MainTex, IN.texcoord) + _TextureSampleAdd) * IN.color;
+				
+                #ifdef UNITY_UI_CLIP_RECT
+					color.a *= UnityGet2DClipping(IN.worldPosition.xy, _ClipRect);
+				#endif
+
+				#ifdef UNITY_UI_ALPHACLIP
+					clip (color.a - 0.001);
+				#endif
+
+				return color;
+			}
+		ENDCG
+		}
+	}
+}
+```

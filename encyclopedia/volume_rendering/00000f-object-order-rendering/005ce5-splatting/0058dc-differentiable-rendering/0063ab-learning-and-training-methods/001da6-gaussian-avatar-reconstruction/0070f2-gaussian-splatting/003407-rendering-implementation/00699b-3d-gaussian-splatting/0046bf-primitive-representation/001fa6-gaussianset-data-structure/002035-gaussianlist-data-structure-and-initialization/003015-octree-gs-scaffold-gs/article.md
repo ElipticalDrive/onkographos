@@ -1,0 +1,194 @@
+# Octree-GS / Scaffold-GS
+
+Also called: Anchor-Based Structured Representation, Anchor-based Gaussian Splatting, Anchor-based Representations
+
+## Overview
+Octree-GS and Scaffold-GS are hierarchical rendering methods that replace the flat list of 3D Gaussians with a structured representation anchored to a sparse voxel grid or octree [S1, unofficial][S2, S3]. Scaffold-GS initializes anchors from Structure-from-Motion (SfM) points, using a neural network to predict Gaussian attributes on the fly, while Octree-GS builds an octree where nodes summarize radiance and opacity of children [S1, unofficial]. This approach reduces memory usage by approximately 5× compared to vanilla 3D Gaussian Splatting (3DGS) at equivalent quality and naturally adapts to view distance by allocating primitives only in occupied regions [S1, S4, unofficial]. It builds on [GaussianList Data Structure and Initialization](2214-gaussianlist-data-structure-and-initialization.md) by introducing spatial hierarchy and neural decoding.
+
+## How it works
+**Inputs:** Sparse point cloud from Structure-from-Motion (SfM); camera poses; training images.
+**Outputs:** Rendered RGB image; optimized anchor features and offsets.
+
+**Data Structures:**
+1.  **Sparse Voxel Grid / Octree:** A hierarchical spatial index. In Scaffold-GS, this is initialized from SfM points [S2]. Each active voxel center serves as an **Anchor** [S3].
+2.  **Anchor Attributes:** For each anchor, the following learnable parameters are stored:
+    *   Position $\mathbf{p}_a$ (fixed or learnable, typically voxel center) [S3].
+    *   Context features $\mathbf{f}_a$ (learnable vector) [S3].
+    *   Learnable scale $s_a$ [S2, S3].
+    *   Learnable offsets $\{\mathbf{O}_k\}_{k=1}^k$ for spawned Gaussians [S2].
+3.  **Neural Decoder:** A small Multi-Layer Perceptron (MLP) $F_\theta$ that takes anchor features and viewing direction as input to predict Gaussian attributes [S3][S4, unofficial].
+
+**Parameters:**
+*   $k$: Number of Gaussians generated per visible anchor. Typical value $k=4$ [S2].
+*   $\tau_\alpha$: Opacity threshold. Gaussians with predicted opacity $\alpha < \tau_\alpha$ are not rasterized [S2].
+
+**Algorithm Steps:**
+1.  **Initialization:** Voxelize the initial SfM-derived point cloud. Place an anchor at the center of each occupied voxel [S3]. Assign each anchor a local context feature $\mathbf{f}_a$, a scale $s_a$, and $k$ learnable offsets $\{\mathbf{O}_k\}$ [S2, S3].
+2.  **Gaussian Generation (Per View):** For each training view:
+    a. Identify visible anchors within the view frustum [S2].
+    b. For each visible anchor $a$, generate $k$ candidate Gaussians. The $i$-th Gaussian's position is $\mathbf{p}_{a,i} = \mathbf{p}_a + \mathbf{O}_{a,i}$ [S2].
+    c. Pass the anchor's context feature $\mathbf{f}_a$ and the viewing direction $\mathbf{v}$ into the neural decoder $F_\theta$ [S3].
+    d. The decoder outputs the attributes for the $k$ Gaussians: opacity $\alpha_{a,i}$, color $\mathbf{c}_{a,i}$ (often via spherical harmonics coefficients or direct RGB), scale $\mathbf{s}_{a,i}$, and rotation quaternion $\mathbf{q}_{a,i}$ [S2, S3].
+3.  **Filtering:** Discard any generated Gaussian where $\alpha_{a,i} < \tau_\alpha$ [S2].
+4.  **Rasterization:** Render the remaining significant Gaussians using standard alpha-blending (d$\alpha$-blending) [S2].
+5.  **Optimization:** Compute reconstruction loss (e.g., L1, SSIM, volumetric loss) between rendered and ground truth images. Backpropagate to update anchor context features $\mathbf{f}_a$, offsets $\mathbf{O}_a$, and MLP weights $\theta$ [S2].
+
+**Pseudocode:**
+
+> **Unverified code.** The code below did not pass a test run against a reference implementation, or no test fits it, so it may contain errors.
+
+```python
+import numpy as np
+
+class AnchorBasedRenderer:
+    def __init__(self, sfm_points, voxel_size, k=4, tau_alpha=0.01):
+        """
+        Initialize Scaffold-GS / Anchor-based representation.
+        :param sfm_points: Nx3 array of initial SfM points
+        :param voxel_size: Size of voxel grid cells
+        :param k: Number of Gaussians per anchor
+        :param tau_alpha: Opacity threshold for rasterization
+        """
+        self.k = k
+        self.tau_alpha = tau_alpha
+        
+        # 1. Initialize Sparse Voxel Grid from SfM
+        # Map SfM points to voxel centers
+        self.anchors = {} # Map: voxel_index -> AnchorData
+        for point in sfm_points:
+            voxel_idx = np.floor(point / voxel_size).astype(int)
+            if voxel_idx not in self.anchors:
+                # Anchor Data: Context feature, Scale, Offsets
+                # Context feature: learnable vector (e.g., dim 16)
+                context = np.random.randn(16) 
+                # Scale: learnable scalar
+                scale = 1.0 
+                # Offsets: k x 3 array for k Gaussians
+                offsets = np.zeros((k, 3))
+                
+                self.anchors[voxel_idx] = {
+                    'voxel_idx': voxel_idx,
+                    'pos': voxel_idx * voxel_size + voxel_size / 2, # Center
+                    'context': context,
+                    'scale': scale,
+                    'offsets': offsets
+                }
+        
+        # Neural Decoder MLP (simplified)
+        # Input: Context (16) + ViewDir (3) -> Output: k * (1 + 3 + 1 + 4) 
+        # Attributes: alpha (1), color (3), scale (1), quat (4)
+        self.mlp_weights = np.random.randn(24, k * 9) # 24 inputs, 9*k outputs
+        self.mlp_bias = np.zeros(k * 9)
+
+    def decode_gaussians(self, anchor, view_dir):
+        """
+        Predict Gaussian attributes from an anchor and view direction.
+        :param anchor: Dict with 'context', 'pos', 'scale', 'offsets'
+        :param view_dir: Normalized view direction vector (3,)
+        :return: List of Gaussian attributes
+        """
+        # Concatenate context and view direction
+        input_vec = np.concatenate([anchor['context'], view_dir])
+        
+        # Linear layer (simplified MLP step)
+        logits = np.dot(input_vec, self.mlp_weights) + self.mlp_bias
+        
+        # Reshape to k Gaussians, each with [alpha, color(3), scale(1), quat(4)]
+        # Note: Real implementation uses activation functions (ReLU, Softmax, etc.)
+        # Here we assume raw logits are processed appropriately
+        # alpha: sigmoid
+        # color: tanh or direct
+        # scale: exp
+        # quat: normalize
+        
+        gaussians = []
+        for i in range(self.k):
+            offset = anchor['offsets'][i]
+            pos = anchor['pos'] + offset
+            
+            # Extract attributes from logits
+            # Assuming logits layout: [alpha_0, c0_0, c0_1, c0_2, s0, q0_0, q0_1, q0_2, q0_3, ...]
+            start_idx = i * 9
+            alpha_raw = logits[start_idx]
+            color_raw = logits[start_idx+1:start_idx+4]
+            scale_raw = logits[start_idx+4]
+            quat_raw = logits[start_idx+5:start_idx+9]
+            
+            # Apply activations (standard assumptions for neural fields)
+            alpha = 1.0 / (1.0 + np.exp(-alpha_raw)) # Sigmoid
+            color = np.tanh(color_raw) # Tanh for color range
+            scale = np.exp(scale_raw) # Positive scale
+            quat = quat_raw / np.linalg.norm(quat_raw) # Normalize quaternion
+            
+            gaussians.append({
+                'pos': pos,
+                'alpha': alpha,
+                'color': color,
+                'scale': scale,
+                'quat': quat
+            })
+        return gaussians
+
+    def render(self, camera, anchors):
+        """
+        Render scene using anchor-based Gaussians.
+        :param camera: Camera object with projection matrix and view direction
+        :param anchors: List of active anchors in view frustum
+        :return: Rendered image
+        """
+        # 1. Generate Gaussians for all visible anchors
+        all_gaussians = []
+        for anchor in anchors:
+            # Get view direction for this anchor from camera
+            view_dir = ... # Calculate based on anchor pos and camera pos
+            gaussians = self.decode_gaussians(anchor, view_dir)
+            all_gaussians.extend(gaussians)
+            
+        # 2. Filter by opacity threshold
+        significant_gaussians = [g for g in all_gaussians if g['alpha'] >= self.tau_alpha]
+        
+        # 3. Rasterize (Standard 3DGS Splatting)
+        # Project to 2D, compute covariance, sort, blend
+        image = standard_3dgs_rasterize(significant_gaussians, camera)
+        return image
+```
+
+**Edge Cases and Pitfalls:**
+*   **Precision:** The neural decoder introduces approximation errors. If the MLP is too small, it may fail to capture high-frequency details, leading to blurring [S3].
+*   **Boundaries:** Voxelization resolution determines the minimum detail level. Too coarse a voxel size loses fine geometry; too fine increases memory overhead and reduces the benefit of anchoring [S3].
+*   **Degenerate Input:** If SfM points are sparse, large empty voxels may be created. The method avoids allocating Gaussians in these regions, but the neural decoder must still handle queries for empty space gracefully (typically returning low opacity) [S2].
+
+## Subtopics
+
+### [Context-GS](7355-context-gs.md)
+Context-GS is a structured compression method for 3D Gaussian Splatting that enhances representational capacity by explicitly modeling hierarchical relationships among anchor primitives. Unlike flat compression approaches, it employs a context-aware encoding scheme where higher-level anchors rely on context from coarser-level anchors for both encoding and decoding. It builds on anchor-based representations to predict attributes of dependent Gaussians, reducing redundancy and improving coding efficiency.
+
+### [Anchor-2D-GS / Anchor-3D-GS](11302-anchor-2d-gs-anchor-3d-gs.md)
+Anchor-2D-GS and Anchor-3D-GS are modified variants of 2D-GS [15] and 3D-GS [5] that employ an anchor grid structure to organize Gaussian primitives more efficiently, reducing redundancy and storage overhead. They achieve competitive rendering quality with fewer file storage than original methods, demonstrating that the anchor design organizes primitives more efficiently.
+
+## Operating characteristics
+*   **Memory Complexity:** Memory usage is approximately 5× less than vanilla 3DGS at the same visual quality [S4, unofficial]. This is achieved by storing only anchor features and offsets rather than full attributes for every Gaussian [S3].
+*   **Time Complexity:** Rendering time depends on the number of visible anchors and the cost of the neural decoder. The MLP inference is fast but adds overhead compared to direct attribute lookup. Rasterization complexity is proportional to the number of significant Gaussians generated [S2].
+*   **Measured Performance:** In large-scale scenes (e.g., CityGaussian), Scaffold-GS enables real-time rendering of massive datasets that would otherwise exceed memory limits [S4, unofficial].
+*   **Strengths:**
+    *   High memory efficiency for large scenes [S1, S4, unofficial].
+    *   Natural Level-of-Detail (LoD) adaptation; distant views render fewer Gaussians [S1, unofficial].
+    *   Better generalization to extrapolated views compared to flat representations [S5, unofficial].
+*   **Limitations:**
+    *   Requires SfM initialization; performance degrades if SfM points are sparse or noisy [S3].
+    *   Neural decoding adds computational overhead per view compared to static attribute storage [S3].
+    *   May struggle with high-frequency details if the anchor density or MLP capacity is insufficient [S3].
+*   **When to Use:** Large-scale urban reconstruction, huge scenes (CityGaussian), and scenarios requiring significant memory compression [S4, S5, unofficial].
+*   **When Not to Use:** Small scenes where vanilla 3DGS fits in memory, or scenes with very sparse SfM data where voxelization is unreliable [S3].
+
+## Background
+*   **Origin:** Anchor-based representations were introduced to address the memory bottleneck of 3D Gaussian Splatting in large scenes. Scaffold-GS [34] (cited as [141] in [S1, unofficial], [34] in [S3]) pioneered the use of a sparse voxel grid with neural decoding [S3]. Octree-GS [142] (cited in [S1, unofficial]) extended this with hierarchical octree structures for LoD.
+*   **History:** The method evolved from the need to scale 3DGS to city-scale environments. Early works like CityGaussian used tiling, while Scaffold-GS and Octree-GS introduced structured, hierarchical representations [S1, S5, unofficial]. Context-GS [50] (cited in [S3]) further refined this by adding hierarchical context prediction [S3].
+*   **Usage:** Widely used in large-scale reconstruction pipelines, such as CityGaussian and VastGaussian, for streaming and rendering massive urban environments [S5, unofficial].
+
+## Sources
+[S1] 3D Gaussian Splatting Rasterization: A Survey, https://doi.org/10.20944/preprints202607.0776.v2, fetched 2026-10-26 (unofficial)
+[S2] Compression in 3D Gaussian Splatting: A Survey of Methods, Trends, and Future Directions, https://doi.org/10.1109/TCSVT.2026.3676048, fetched 2026-10-26
+[S3] 3DGS.zip: A survey on 3D Gaussian Splatting Compression Methods, https://arxiv.org/abs/2407.09510v5, fetched 2026-10-26
+[S4] Neural Rendering — Technologies & Tricks, https://www.chengjianglong.com/ml/3D-Neural_Rendering_SOTA_Updated.html, fetched 2026-10-27 (unofficial)
+[S5] Gaussian Splatting — All Variants Cheat Sheet, https://www.chengjianglong.com/ml/3D-Gaussian_Splatting_SOTA_Updated.html, fetched 2026-10-27 (unofficial)

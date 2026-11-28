@@ -1,0 +1,95 @@
+--- v001.md
++++ v002.md
+@@ -3,5 +3,5 @@
+ 
+ ## Overview
+-Gaussian Pruning (Monocular) is a preprocessing step for 3D Gaussian Splatting initialization in monocular SLAM that filters out unreliable initial Gaussian centers based on multi-view consistency checks [S1, S2, unofficial]. It prevents incorrect initial geometry from degrading camera tracking performance by ensuring only Gaussians with valid, consistent observations in the training views are retained [S1, unofficial]. Unlike sibling methods that focus on replication or allocation density, this method focuses on quality control of the initial point cloud [S1, unofficial].
++Gaussian Pruning (Monocular) is a preprocessing step for 3D Gaussian Splatting initialization in monocular SLAM that filters out unreliable initial Gaussian centers based on per-view projection and visibility checks [S1, S2, unofficial]. It prevents incorrect initial geometry from degrading camera tracking performance by ensuring only Gaussians with valid, consistent observations in the training views are retained [S1, unofficial]. Unlike sibling methods that focus on replication or allocation density, this method focuses on quality control of the initial point cloud [S1, unofficial].
+ 
+ ## How it works
+@@ -16,15 +16,13 @@
+ 
+ **Data Structures:**
+-- Boolean indicator $r_{i,v}$ for each Gaussian $i$ and view $v$, where $r_{i,v}=1$ if the observation is reliable, 0 otherwise [S2, unofficial].
+-- Set $\mathcal{R} = \{ i \mid \exists v, r_{i,v}=1 \}$ (or similar aggregation logic, though the source defines the sample set based on the indicator) [S2, unofficial].
++- Boolean indicator $r_{i,v}$ for each Gaussian $i$ and view $v$, where $r_{i,v}=1$ if the observation is reliable, $0$ otherwise [S2, unofficial].
++- Reliable observation set $\mathcal{R} = \{ (i, v) \mid r_{i,v}=1 \}$ [S2, unofficial].
+ 
+ **Steps:**
+ 1. **Projection:** For each Gaussian $i$ and each training view $v$, project the initialized center $c_0^i$ into the image plane of view $v$ using the camera calibration parameters [S2, unofficial].
+-   - Compute homogeneous coordinates: $p_{h} = K \cdot T_{v} \cdot c_0^i$ (assuming $c_0^i$ is in homogeneous coordinates or appropriately transformed) [S2, unofficial].
++   - Compute homogeneous coordinates: $p_{h} = K \cdot T_{v} \cdot c_0^i$ [S2, unofficial].
+    - Apply perspective division to obtain 2D image coordinates $(u_{i,v}, v_{i,v})$ [S2, unofficial].
+    - Formula: $(u_{i,v}, v_{i,v}) = \text{persp\_div}(p_{h})$ [S2, unofficial].
+-
+ 2. **Visibility Check:** Determine the projected visibility of Gaussian $i$ in view $v$ by performing z-buffer rasterization of the initialization point cloud [S2, unofficial]. Let $vis_{i,v}$ be a boolean indicating if the Gaussian is visible (not occluded by other initialized points) in view $v$ [S2, unofficial].
+-
+ 3. **Filtering Criteria:** For each Gaussian $i$ and view $v$, evaluate four binary criteria [S2, unofficial]:
+    - **Range ($rng_{i,v}$):** Is $(u_{i,v}, v_{i,v})$ inside the valid image domain (e.g., $0 \le u < W, 0 \le v < H$)? [S2, unofficial].
+@@ -33,10 +31,51 @@
+    - **Depth Consistency ($dep_{i,v}$):** Is the projected depth $z_{proj}$ consistent with the z-buffer depth $z_{buf}$ at $(u_{i,v}, v_{i,v})$? [S2, unofficial].
+      - Condition: $\frac{|z_{proj} - z_{buf}|}{z_{buf}} \le \tau$, where $\tau = 0.05$ (5%) [S2, unofficial].
+-
+ 4. **Reliable Observation Indicator:** Compute the indicator $r_{i,v}$ for Gaussian $i$ in view $v$ [S2, unofficial]:
+    $$ r_{i,v} = rng_{i,v} \land fg_{i,v} \land vis_{i,v} \land dep_{i,v} $$
+    where $\land$ denotes logical AND [S2, unofficial].
++5. **Pruning:** Gaussians not contributing to any reliable observation (or failing a global threshold if applied) are pruned [S1, S2, unofficial].
+ 
+-5. **Pruning:** A Gaussian $i$ is considered to have a reliable observation if $r_{i,v}=1$ for at least one view $v$ (or potentially all views, depending on specific implementation details not fully explicit, but the source implies inclusion in a "reliable sample set" based on the indicator) [S2, unofficial]. The source defines the reliable sample set as $\mathcal{R} = \{ (i, v) \mid r_{i,v}=1 \}$ [S2, unofficial]. Gaussians not contributing to any reliable observation (or failing a global threshold if applied) are pruned [S1, unofficial].
++**Pseudocode:**
++```python
++def gaussian_pruning_monocular(centers, K, T_views, depth_buffers, fg_masks, img_shape):
++    N, V = len(centers), len(T_views)
++    H, W = img_shape
++    reliable_set = set()
++    
++    for v in range(V):
++        T_v = T_views[v]
++        depth_buf = depth_buffers[v]
++        fg_mask = fg_masks[v]
++        
++        # Z-buffer rasterization of initialization point cloud for view v
++        z_buffer = rasterize_z_buffer(centers, K, T_v, H, W)
++        
++        for i in range(N):
++            c0 = centers[i]
++            # 1. Projection
++            p_h = K @ T_v @ np.append(c0, 1.0)
++            u, v_coord = p_h[0] / p_h[2], p_h[1] / p_h[2]
++            z_proj = p_h[2]
++            
++            # 2. Range check
++            rng = (0 <= u < W) and (0 <= v_coord < H)
++            
++            # 3. Foreground check
++            fg = fg_mask[int(v_coord), int(u)] if rng else False
++            
++            # 4. Visibility check
++            vis = (z_proj == z_buffer[int(v_coord), int(u)]) if rng else False
++            
++            # 5. Depth consistency check
++            z_buf = depth_buf[int(v_coord), int(u)]
++            dep = (abs(z_proj - z_buf) / z_buf <= 0.05) if rng else False
++            
++            # 6. Indicator
++            r_i_v = rng and fg and vis and dep
++            if r_i_v:
++                reliable_set.add((i, v))
++                
++    return reliable_set
++```
+ 
+ **Parameters:**
+@@ -54,10 +93,9 @@
+ ## Operating characteristics
+ - **Time Complexity:** $O(N \cdot V)$, where $N$ is the number of Gaussians and $V$ is the number of training views, due to projection and z-buffer checks for each Gaussian-view pair [S2, unofficial].
+-- **Memory Complexity:** $O(N \cdot V)$ to store the reliability indicators $r_{i,v}$ [S2, unofficial].
+ - **Measured Performance:** On the TUM RGB-D dataset (Monocular input), Gaussian pruning reduces the average camera tracking error (ATE RMSE) from 46.6 cm (without pruning) to 3.96 cm across sequences f1/desk, f2/xyz, and f3/office [S1, unofficial].
+ - **Strengths:** Significantly enhances camera tracking performance in monocular SLAM by preventing incorrect initial geometry [S1, unofficial]. Stabilizes training by fixing the reliable observation set [S2, unofficial].
+-- **Limitations:** Depends on the quality of the initial point cloud and camera calibration. May prune valid Gaussians if the initial geometry is poor or if depth consistency threshold is too strict [S2, unofficial].
++- **Limitations:** Depends on the quality of the initial point cloud and camera calibration. May prune valid Gaussians if the initial geometry is poor or if the depth consistency threshold is too strict [S2, unofficial].
+ - **When to use:** Monocular SLAM settings with 3D Gaussian Splatting initialization [S1, unofficial].
+-- **When not to use:** RGB-D inputs where depth information is more reliable and direct, or when computational resources for pre-filtering are extremely limited (though the cost is generally low) [S1, S2, unofficial].
++- **When not to use:** RGB-D inputs where depth information is more reliable and direct, or when computational resources for pre-filtering are extremely limited [S1, S2, unofficial].
+ 
+ ## Background

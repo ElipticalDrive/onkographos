@@ -1,0 +1,323 @@
+--- v005.md
++++ v006.md
+@@ -14,5 +14,5 @@
+ - `useRk4`: Boolean flag selecting between Runge-Kutta 4th order (`rk4Integrate`) and Euler integration (`eulerIntegrate`) [S3, unofficial].
+ - `geometrySampling`: Integer controlling frequency of tube mesh generation (geometry generated every `geometrySampling` steps) [S3, unofficial].
+-- `mangitudeCtfNormalizeMult`: Normalization factor for vector magnitude texture lookup [S3, unofficial].
++- `magnitudeCtfNormalizeMult`: Normalization factor for vector magnitude texture lookup [S3, unofficial].
+ 
+ **Outputs:**
+@@ -33,71 +33,112 @@
+    where $\varepsilon$ is a small value appropriate to the data set $\Omega$ to reduce integration error [S1]. If `useRk4` is true, use 4th-order Runge-Kutta instead [S3, unofficial].
+ 
+-2. **Boundary Check:** Initialize `maxWorld` bounds:
+-   ```python
+-   maxWorld.x = volumeSize.width / volumeCoordSpaceMult.x
+-   maxWorld.y = volumeSize.height / volumeCoordSpaceMult.y
+-   maxWorld.z = volumeSize.depth / volumeCoordSpaceMult.z
+-   ```
+-   If `position.x < 0` or `position.y < 0` or `position.z < 0` or `position.x > maxWorld.x` or `position.y > maxWorld.y` or `position.z > maxWorld.z`, break the loop [S3, unofficial].
++2. **Boundary Check:** Initialize `maxWorld` bounds: `maxWorld.x = volumeSize.width / volumeCoordSpaceMult.x`, `maxWorld.y = volumeSize.height / volumeCoordSpaceMult.y`, `maxWorld.z = volumeSize.depth / volumeCoordSpaceMult.z` [S3, unofficial]. If `position.x < 0` or `position.y < 0` or `position.z < 0` or `position.x > maxWorld.x` or `position.y > maxWorld.y` or `position.z > maxWorld.z`, break the loop [S3, unofficial].
+ 
+-3. **Geometry Generation Trigger:** Maintain a counter `geometryStep`. If `geometryStep == 0`, reset `geometryStep = geometrySampling` and generate geometry for the current position [S3, unofficial].
++3. **Geometry Generation Trigger:** Maintain a counter `geometryStep` initialized to `geometrySampling` [S3, unofficial]. Decrement it each step. If `geometryStep == 0`, reset `geometryStep = geometrySampling` and generate geometry for the current position [S3, unofficial].
+ 
+-4. **Color Lookup:** Sample magnitude color:
+-   ```python
+-   color = tex1D(vectorMangitudeCtfTex, (float)(dv.w * mangitudeCtfNormalizeMult))
+-   ```
+-   where `dv.w` is the magnitude component from the integration result [S3, unofficial].
++4. **Color Lookup:** Sample magnitude color: `color = tex1D(vectorMangitudeCtfTex, (float)(dv.w * magnitudeCtfNormalizeMult))` where `dv.w` is the magnitude component from the integration result [S3, unofficial].
+ 
+-5. **Vertex Generation:** Call `createTubeBaseVertices` with `position`, velocity vector `v` (from integration), `radius`, `baseIndex`, and `color` [S3, unofficial]. This function computes the pentagonal cross-section in the plane defined by the velocity vector [S2, unofficial].
++5. **Vertex Generation:** Call `createTubeBaseVertices` with `position`, velocity vector `dv.xyz` (from integration), `radius`, `outputPos`, `color`, and output buffers [S3, unofficial]. This function computes the pentagonal cross-section in the plane defined by the velocity vector [S2, unofficial].
+ 
+-6. **Index Generation:** Call `createTubeIndices` with `vertexBaseId` and `baseFaceId` to generate triangles connecting the current pentagon to the previous one [S3, unofficial].
++6. **Index Generation:** Call `createTubeIndices` with `outputPos` and `(outputPos - 5 * id - 5) * 2` to generate triangles connecting the current pentagon to the previous one [S3, unofficial].
+ 
+-7. **Loop:** Increment step counter. If `step < maxSteps`, continue integration. Otherwise, store `outComputedSteps[id] = step / geometrySampling` [S3, unofficial].
++7. **Loop & Store:** Increment step counter. If `step < maxSteps`, continue integration [S3, unofficial]. Otherwise, store `outComputedSteps[id] = step / geometrySampling` [S3, unofficial].
+ 
+ **Pseudocode:**
+ 
+ ```python
+-def integrate_and_generate_tubes(seed_position, volume_field, volume_size, volume_coord_space_mult, 
+-                                 radius, use_rk4, geometry_sampling, magnitude_ctf_normalize_mult):
+-    """
+-    Generates stream tube geometry for a single seed.
+-    Returns vertices, normals, colors, indices, and step count.
+-    """
+-    # Output buffers
+-    vertices = []
+-    normals = []
+-    colors = []
+-    indices = []
++class Vec3:
++    def __init__(self, x=0.0, y=0.0, z=0.0):
++        self.x, self.y, self.z = x, y, z
++    def __add__(self, o): return Vec3(self.x+o.x, self.y+o.y, self.z+o.z)
++    def __sub__(self, o): return Vec3(self.x-o.x, self.y-o.y, self.z-o.z)
++    def __mul__(self, s): return Vec3(self.x*s, self.y*s, self.z*s)
++    def length(self): return (self.x**2 + self.y**2 + self.z**2)**0.5
++    def normalize(self): l = self.length(); return Vec3(self.x/l, self.y/l, self.z/l) if l > 0 else Vec3()
++
++class Vec4:
++    def __init__(self, x=0.0, y=0.0, z=0.0, w=0.0):
++        self.x, self.y, self.z, self.w = x, y, z, w
++
++def cross(a, b):
++    return Vec3(a.y*b.z - a.z*b.y, a.z*b.x - a.x*b.z, a.x*b.y - a.y*b.x)
++
++def find_perpendicular(v):
++    # [G] Standard heuristic to find a vector perpendicular to v
++    if abs(v.x) < 0.9:
++        return cross(v, Vec3(1, 0, 0)).normalize()
++    else:
++        return cross(v, Vec3(0, 1, 0)).normalize()
++
++def euler_integrate(position, dt, field_func, coord_mult):
++    # [G] Standard Euler step for dx/dt = V(x)
++    vel = field_func(position)
++    dv = Vec4(vel.x * dt * coord_mult.x, vel.y * dt * coord_mult.y, vel.z * dt * coord_mult.z, vel.length())
++    return dv
++
++def rk4_integrate(position, dt, field_func, coord_mult):
++    # [G] Standard RK4 step
++    k1 = field_func(position)
++    k2 = field_func(position + 0.5*dt*k1)
++    k3 = field_func(position + 0.5*dt*k2)
++    k4 = field_func(position + dt*k3)
++    new_pos = position + (dt/6.0) * (k1 + 2*k2 + 2*k3 + k4)
++    vel = (k1 + 2*k2 + 2*k3 + k4) / 6.0
++    return Vec4(new_pos.x, new_pos.y, new_pos.z, vel.length())
++
++def sample_magnitude_texture(magnitude, normalize_mult, ctf_texture):
++    # [G] Linear interpolation or clamped lookup in a 1D magnitude-to-color texture
++    t = min(max(magnitude * normalize_mult, 0.0), 1.0)
++    return ctf_texture[t] # Returns Vec3
++
++def create_tube_base_vertices(pos, v, radius, base_index, color, out_vertices, out_normals, out_colors):
++    x_axis = find_perpendicular(v)
++    y_axis = cross(v, x_axis).normalize()
++    # Precomputed pentagon directions (cos, sin) for 0, 72, 144, 216, 288 degrees
++    pentagon_dirs = [
++        (1.0, 0.0), (0.3090, 0.9511), (-0.8090, 0.5878),
++        (-0.8090, -0.5878), (0.3090, -0.9511)
++    ]
++    for i in range(5):
++        cos_a, sin_a = pentagon_dirs[i]
++        normal = x_axis * cos_a + y_axis * sin_a
++        out_normals[base_index + i] = normal
++        out_vertices[base_index + i] = pos + normal * radius
++        out_colors[base_index + i] = color
++
++def create_tube_indices(vertex_base_id, base_face_id, out_faces):
++    for i in range(5):
++        i_next = (i + 1) % 5
++        out_faces[base_face_id] = (vertex_base_id + i, vertex_base_id + i_next, vertex_base_id - 5 + i_next)
++        out_faces[base_face_id + 1] = (vertex_base_id + i, vertex_base_id - 5 + i, vertex_base_id - 5 + i_next)
++        base_face_id += 2
++
++def generate_stream_tubes(seed_position, field_func, volume_size, coord_mult, radius, use_rk4, geometry_sampling, mag_normalize_mult, ctf_texture, max_steps, seed_id):
++    out_vertices = [None] * (max_steps * 5)
++    out_normals = [None] * (max_steps * 5)
++    out_colors = [None] * (max_steps * 5)
++    out_faces = [None] * (max_steps * 10)
+     
+-    # State
+     position = seed_position
+-    step = 0
+-    geometry_step = 0
++    step = 1
++    geometry_step = geometry_sampling
++    output_pos = 0
+     
+-    # Pre-compute max world bounds
+-    max_world_x = volume_size.width / volume_coord_space_mult.x
+-    max_world_y = volume_size.height / volume_coord_space_mult.y
+-    max_world_z = volume_size.depth / volume_coord_space_mult.z
++    # Max world bounds [S3, unofficial]
++    max_world_x = volume_size.width / coord_mult.x
++    max_world_y = volume_size.height / coord_mult.y
++    max_world_z = volume_size.depth / coord_mult.z
+     
+-    # Initial vertex index and face index
+-    vertex_base_id = 0
+-    face_base_id = 0
+-    
+-    # Generate first tube slice at seed position? 
+-    # Note: Sources imply geometry is generated after integration steps or at specific intervals.
+-    # We assume the first slice is generated at the start or after the first integration step.
+-    # Based on S3, geometry is generated when geometry_step == 0.
+-    
+-    while step < 1000: # maxSteps placeholder, typically determined by boundary or fixed limit
+-        # Boundary check
+-        if (position.x < 0 or position.y < 0 or position.z < 0 or 
++    while step < max_steps:
++        # Boundary check [S3, unofficial]
++        if (position.x < 0 or position.y < 0 or position.z < 0 or
+             position.x > max_world_x or position.y > max_world_y or position.z > max_world_z):
+             break
+             
+-        # Integration
++        # Integration [S3, unofficial]
+         if use_rk4:
+-            dv = rk4_integrate(position, 1.0, volume_field, volume_coord_space_mult) # dt=1.0 assumed or scaled
++            dv = rk4_integrate(position, 1.0, field_func, coord_mult)
+         else:
+-            dv = euler_integrate(position, 1.0, volume_field, volume_coord_space_mult)
++            dv = euler_integrate(position, 1.0, field_func, coord_mult)
+             
+         position.x += dv.x
+@@ -105,124 +146,24 @@
+         position.z += dv.z
+         
+-        # Decrement geometry step
++        # Geometry generation trigger [S3, unofficial]
+         geometry_step -= 1
+-        
+         if geometry_step == 0:
+-            # Reset geometry step
+             geometry_step = geometry_sampling
+             
+-            # Sample color
+-            magnitude = dv.w # Assuming dv.w holds magnitude
+-            color = sample_magnitude_texture(magnitude * magnitude_ctf_normalize_mult)
++            # Color lookup [S3, unofficial]
++            color = sample_magnitude_texture(dv.w, mag_normalize_mult, ctf_texture)
+             
+-            # Generate tube slice vertices
+-            v = float3(dv.x, dv.y, dv.z)
+-            base_index = len(vertices)
++            # Vertex generation [S3, unofficial]
++            create_tube_base_vertices(position, Vec3(dv.x, dv.y, dv.z), radius, output_pos, color, out_vertices, out_normals, out_colors)
+             
+-            # Create pentagonal cross-section
+-            create_tube_base_vertices(position, v, radius, base_index, color, vertices, normals, colors)
+-            
+-            # If not the first slice, generate indices connecting to previous slice
+-            if vertex_base_id > 0:
+-                # Previous slice started at (vertex_base_id - 5)
+-                create_tube_indices(vertex_base_id, face_base_id, indices)
+-                face_base_id += 10 # 5 faces per pentagon side * 2 triangles
++            # Index generation [S3, unofficial]
++            if output_pos >= 5:
++                create_tube_indices(output_pos, (output_pos - 5 * seed_id - 5) * 2, out_faces)
+                 
+-            vertex_base_id = len(vertices)
+-            
++            output_pos += 5
+         step += 1
+         
+-    return vertices, normals, colors, indices, step
+-
+-def create_tube_base_vertices(pos, v, radius, base_index, color, out_vertices, out_normals, out_colors):
+-    """
+-    Generates 5 vertices for a pentagonal cross-section at pos, oriented along v.
+-    """
+-    # Find perpendicular vector to v
+-    x_axis = normalize(find_perpendicular(v))
+-    y_axis = normalize(cross(v, x_axis))
+-    
+-    # Precomputed cos/sin values for pentagon angles (0, 72, 144, 216, 288 degrees)
+-    # cos(0)=1, sin(0)=0
+-    # cos(72)=0.3090, sin(72)=0.9511
+-    # cos(144)=-0.8090, sin(144)=0.5878
+-    # cos(216)=-0.8090, sin(216)=-0.5878
+-    # cos(288)=0.3090, sin(288)=-0.9511
+-    
+-    angles = [
+-        (1.0, 0.0),
+-        (0.3090, 0.9511),
+-        (-0.8090, 0.5878),
+-        (-0.8090, -0.5878),
+-        (0.3090, -0.9511)
+-    ]
+-    
+-    for i in range(5):
+-        cos_a, sin_a = angles[i]
+-        # Normal is the direction of the vertex from center
+-        normal = x_axis * cos_a + y_axis * sin_a
+-        out_normals.append(normal)
+-        
+-        # Vertex position
+-        vertex = pos + normal * radius
+-        out_vertices.append(vertex)
+-        
+-        # Color
+-        out_colors.append(color)
+-
+-def create_tube_indices(vertex_base_id, base_face_id, out_indices):
+-    """
+-    Generates indices for the 5 quads (2 triangles each) connecting the current pentagon
+-    (starting at vertex_base_id) to the previous pentagon (starting at vertex_base_id - 5).
+-    """
+-    for i in range(5):
+-        i_next = (i + 1) % 5
+-        
+-        # Triangle 1: current[i], current[i_next], prev[i_next]
+-        out_indices.append((vertex_base_id + i, vertex_base_id + i_next, vertex_base_id - 5 + i_next))
+-        
+-        # Triangle 2: current[i], prev[i], prev[i_next]
+-        out_indices.append((vertex_base_id + i, vertex_base_id - 5 + i, vertex_base_id - 5 + i_next))
+-
+-def find_perpendicular(v):
+-    """
+-    Finds a vector perpendicular to v.
+-    [G] Simple heuristic: if v is not parallel to x-axis, use cross(v, (1,0,0)), else cross(v, (0,1,0)).
+-    """
+-    if abs(v.x) < 0.9:
+-        return normalize(cross(v, float3(1, 0, 0)))
+-    else:
+-        return normalize(cross(v, float3(0, 1, 0)))
+-
+-def euler_integrate(pos, dt, field, mult):
+-    """
+-    Euler integration step.
+-    """
+-    # Sample field at pos
+-    vel = sample_vector_field(pos, field)
+-    # Scale by dt and mult
+-    dv = vel * dt * mult
+-    # Add magnitude to w component (assuming field returns float4 or we append magnitude)
+-    # Note: S3 uses dv.w for magnitude lookup. We assume the integration function returns magnitude in w.
+-    mag = length(vel)
+-    return float3(dv.x, dv.y, dv.z), mag
+-
+-def rk4_integrate(pos, dt, field, mult):
+-    """
+-    Runge-Kutta 4th order integration step.
+-    """
+-    # [G] Standard RK4 implementation for ODE dx/dt = V(x)
+-    k1 = field(pos)
+-    k2 = field(pos + 0.5 * dt * k1)
+-    k3 = field(pos + 0.5 * dt * k2)
+-    k4 = field(pos + dt * k3)
+-    
+-    new_pos = pos + (dt / 6.0) * (k1 + 2*k2 + 2*k3 + k4)
+-    
+-    # Approximate magnitude for color
+-    vel = (k1 + 2*k2 + 2*k3 + k4) / 6.0
+-    mag = length(vel)
+-    
+-    return new_pos, mag
++    out_computed_steps = step / geometry_sampling
++    return out_vertices, out_normals, out_colors, out_faces, out_computed_steps
+ ```
+ 
+@@ -241,6 +182,6 @@
+ 
+ ## Operating characteristics
+-- **Time Complexity:** Integration is $O(N)$ where $N$ is the number of steps per streamline. Geometry generation is proportional to the number of steps divided by `geometrySampling` [S3, unofficial].
+-- **Memory Complexity:** Significantly higher than stream lines. Requires storage for vertices, normals, colors, and indices for all tubes [S2, unofficial].
++- **Time Complexity:** Integration is $O(N)$ where $N$ is the number of steps per streamline [S3, unofficial]. Geometry generation is proportional to the number of steps divided by `geometrySampling` [S3, unofficial].
++- **Memory Complexity:** Significantly higher than stream lines [S2, unofficial]. Requires storage for vertices, normals, colors, and indices for all tubes [S3, unofficial].
+ - **Performance:** On an NVIDIA Quadro K5000, $2^{13}$ stream tubes with $2^{13}$ samples took 240 ms [S2, unofficial]. This is comparable to stream lines in integration time, but the geometry generation and memory bandwidth for normals/indices add overhead [S2, unofficial].
+ - **Strengths:** Provides clear 3D orientation and position of flow paths; allows for shading and lighting effects; smooth shading with pentagonal cross-sections is visually sufficient [S2, unofficial].
+@@ -248,5 +189,5 @@
+ 
+ ## Background
+-Stream Tube Generation was developed as a method to visualize 3D vector fields by solving the ODE $\frac{\partial x(t)}{\partial t} = V(x(t))$ and constructing tube geometry from the resulting streamlines [S1]. The approach was detailed in research on ambient occlusion effects for combined volumes and tubular geometry [S1]. Practical CUDA implementations for real-time visualization have been documented in academic blogs and open-source repositories [S2, S3, unofficial].
++Stream Tube Generation was developed as a method to visualize 3D vector fields by solving the ODE $\frac{\partial x(t)}{\partial t} = V(x(t))$ and constructing tube geometry from the resulting streamlines [S1]. The approach was detailed in research on combined volumes and tubular geometry [S1]. Practical CUDA implementations for real-time visualization have been documented in academic blogs and open-source repositories [S2, S3, unofficial].
+ 
+ ## Sources

@@ -1,0 +1,72 @@
+# Implicit Surface Primitives
+
+Also called: Blobbies
+
+## Overview
+Implicit Surface Primitives represent 3D geometry as the zero-level set (or isosurface) of a scalar field function $f(\vec{x})$. Unlike explicit representations that store discrete topological data, this family defines geometry analytically, allowing for on-demand evaluation of values and gradients at arbitrary points in space. This approach enables the creation of complex, organic, or mathematically precise shapes that can be composed, deformed, or sampled for volume rendering and surface extraction.
+
+## Shared principles
+All methods in this family rely on the evaluation of a scalar field function $f$ over a domain $\Omega \subseteq \mathbb{R}^3$. The core mechanism identifies the surface as the locus of points where the function output equals a specific constant, typically zero.
+
+**Mathematical Definition:**
+The implicit surface is defined as the set of points $\vec{x}$ satisfying:
+$$ \{\vec{x} \in \mathbb{R}^3 \mid f(\vec{x}) = 0\} $$
+
+More generally, an isosurface at isovalue $v$ is defined by:
+$$ f(\vec{x}) - v = 0 $$
+
+**Function Properties:**
+1. **Mapping:** The function maps any point in N-dimensional space to a real number:
+   $$ \forall \vec{x} \in \mathbb{R}^3, f(\vec{x}) \in \mathbb{R} $$
+2. **Filter/Kernel:** The function $f$ acts as a filter or form. It can be algebraic or transcendental, and defined globally or as piecewise kernels.
+3. **Support:** The function can be defined globally over the entire domain or as piecewise kernels (local support).
+4. **Sign Convention:** While the zero set defines the surface, the sign of $f(\vec{x})$ often carries semantic meaning. In Signed Distance Functions (SDFs), $f(\vec{x}) > 0$ indicates outside, $f(\vec{x}) < 0$ indicates inside, and $f(\vec{x}) = 0$ is on the surface.
+
+**Evaluation:**
+The geometry is not stored as a discrete structure but is computed on-demand. For volume rendering, this means evaluating $f(\vec{x})$ at sample points along rays or within voxels [Implicit Surface Primitives](1800-implicit-surface-primitives.md).
+
+## Subtopics
+
+### [Metaball Field Evaluation](1017-metaball-field-evaluation.md)
+Generates and updates a 3D scalar density volume representing dynamic metaballs using a CPU-GPU pipeline. Unlike [Implicit Field Composition](2652-implicit-field-composition.md), which composes general implicit primitives, this method specifically sums inverse-distance or Gaussian contributions from moving spheres to create organic, merging blob shapes. Choose this for dynamic, fluid-like organic shapes.
+
+### [Distance to Hypertextures](1555-distance-to-hypertextures.md)
+Adds relief or details to surfaces without increasing geometry cost, using procedural texture synthesis evaluated within a volumetric region around the object rather than only on the surface. It deforms implicit surfaces by adding procedural noise to the function's range instead of the domain, enabling sphere tracing with distance bounds. Choose this for adding fine procedural detail to existing SDFs.
+
+### [Superelliptic Blends](2051-superelliptic-blends.md)
+A local geometric deformation technique for implicitly defining the union of two or more signed distance functions (SDFs). This method computes a $p$-norm distance to the blended union, allowing for smooth transitions between surfaces controlled by a tightness parameter $p$. It differs from global additive field methods by operating directly on distance values and maintaining local support. Choose this for smooth unions of SDFs.
+
+### [Soft Metablobby SDF](2753-soft-metablobby-sdf.md)
+Approximates Gaussian blobby fields using piecewise cubic polynomials to avoid expensive exponentiation and iterative root finding. It defines a smooth, blended volume from a set of key points, where the surface is the zero-crossing of the summed field. Unlike standard metaballs that use Gaussian kernels, this method localizes the influence of each point to a finite radius, providing a bounded support that simplifies culling and distance estimation. Choose this for efficient, bounded blobby fields.
+
+### [Implicit Surface Definition](2798-implicit-surface-definition.md)
+Represents 3D geometry as the zero-level set of a scalar field function $f(\vec{x})$. It defines surfaces by evaluating a function at arbitrary points in space rather than storing discrete topological data. What sets it apart from explicit surface definitions is that the geometry is defined analytically through a filter function $f$. Choose this as the foundational abstraction for all implicit methods.
+
+### [Half-Space Field Generation](4006-half-space-field-generation.md)
+Creates a binary volume mask by assigning values to voxels based on a spatial or level-set condition, effectively gating simulation or rendering computations. It differs from continuous implicit primitives by discretizing the domain boundary into a hard binary mask rather than evaluating a smooth scalar field for isosurface extraction [G]. This method restricts physical simulation (such as pressure solving or force application) to active regions, ignoring empty space like air. Choose this for binary masking in simulations.
+
+### [Implicit Geometry Sampling](6685-implicit-geometry-sampling.md)
+A technique for generating volume data from mathematical implicit functions, providing value and gradient at any point in space without discrete voxel grids. It solves the problem of defining complex, continuous geometry for volume rendering by evaluating a scalar field function $f(\vec{x})$ on-demand [G]. Unlike sibling methods that may rely on precomputed grids or specific primitive compositions, this method provides an abstract interface for sampling arbitrary implicit geometries, returning position, scalar value, and gradient. It builds on [Implicit Surface Primitives](1800-implicit-surface-primitives.md) by implementing the core evaluation mechanism for specific algebraic and transcendental functions [G]. Choose this for abstract, on-demand geometry sampling.
+
+### [Specific Implicit Primitives](8499-specific-implicit-primitives.md)
+Provides closed-form analytical expressions for the scalar field $f(\vec{x})$ of specific geometric primitives, primarily yielding exact signed Euclidean distances. Unlike generic implicit surface definitions that may rely on approximations or piecewise kernels, these functions offer precise, singularity-free evaluation for standard shapes like tori, shells, and periodic surfaces, which is critical for robust marching cubes and ray marching in volume rendering. Choose this for standard, exact geometric primitives.
+
+### [Metaball-based Envelope Painting](8803-metaball-based-envelope-painting.md)
+An interaction model for defining a Volume of Interest (VOI) or Region of Interest (ROI) within unsegmented volumetric data by "painting" an implicit envelope around features of interest. It solves the problem of intuitive, context-preserving volume exploration by replacing complex transfer function tuning with a direct spatial marking metaphor. Unlike techniques using independent surface-bound brushes or fixed-depth peeling regions, this method uses a higher-level shape representation (Metaballs) to create organic, merging envelopes that allow for real-time previewing of the visualization effect before final deposition. Choose this for interactive volume selection.
+
+### [Implicit Function Evaluation](14250-implicit-function-evaluation.md)
+Generates voxel coordinates or scalar field values defined by a custom mathematical function $f(x, y, z)$. It solves the problem of defining geometry procedurally rather than storing discrete mesh or voxel data, allowing for infinite resolution and easy parameterization. It differs from [Metaball Field Evaluation](1017-metaball-field-evaluation.md) by evaluating a single global function per point rather than summing contributions from multiple localized sources, and from [Implicit Surface Primitives](1800-implicit-surface-primitives.md) by focusing on the general mechanism of assigning scalar values to a grid rather than specific primitive shapes. Choose this for procedural grid generation.
+
+#### Compact Polynomial Kernel
+**Definition:** A kernel family used to define skeleton-based implicit surfaces, characterized by local support required for efficient field evaluation on large skeletons and efficient closed-form evaluation of the integral field equation for line segment primitives with linearly interpolated prescribed thickness [S1, unofficial].
+**Formula:** The support of an individual primitive is a sphere-cone defined by scaling the two primitive endpoints' radius by a factor $\sigma$ [S1, unofficial].
+**Parameters:**
+*   Degree parameter $i$: A parameter defining the polynomial degree of the kernel [S1, unofficial].
+*   Scale parameter $\sigma$: A parameter scaling the primitive endpoints' radius to define the support of an individual primitive [S1, unofficial].
+
+## Background
+An increasingly popular approach uses field functions in 3D, where surfaces are isosurfaces through the field [S1, unofficial]. Surfaces can be easily and smoothly morphed and deformed by slowly changing the attributes of the control primitives [S1, unofficial]. The family includes specific kernels like Cauchy, Inverse, and Compact Polynomial for skeleton-based rendering [S1, unofficial], and tools for voxel generation from arbitrary functions [S2].
+
+## Sources
+[S1] Implicit surfaces - Paul Bourke, https://paulbourke.net/geometry/implicitsurf/, fetched 2026-10-28 (unofficial)
+[S2] isocubes: Voxel Data Visualization with Isometric Cubes, https://doi.org/10.32614/cran.package.isocubes, fetched 2026-10-26

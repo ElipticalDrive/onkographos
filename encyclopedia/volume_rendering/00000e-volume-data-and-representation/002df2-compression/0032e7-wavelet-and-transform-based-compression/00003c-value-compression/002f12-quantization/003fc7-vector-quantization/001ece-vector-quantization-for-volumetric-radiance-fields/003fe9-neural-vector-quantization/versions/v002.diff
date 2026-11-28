@@ -1,0 +1,181 @@
+--- v001.md
++++ v002.md
+@@ -8,15 +8,15 @@
+ ## How it works
+ **Inputs:**
+-*   Trained 3D Gaussian primitives with attributes: position, scale, rotation, opacity, and Spherical Harmonic coefficients $Y$.
++*   Trained 3D Gaussian primitives with attributes: position, scale, rotation, opacity, and Spherical Harmonic coefficients $Y$ [S1, unofficial].
+ *   Hyperparameters: Number of clusters $K$, cluster length $L$, number of codewords per subspace $B$, and number of MLP groups (typically 5) [S1, unofficial].
+ 
+ **Outputs:**
+-*   Quantized attribute codes (indices into codebooks).
+-*   Huffman-encoded bitstream of the codes.
+-*   Quantized MLP weights for SH reconstruction.
++*   Quantized attribute codes (indices into codebooks) [S1, unofficial].
++*   Huffman-encoded bitstream of the codes [S1, unofficial].
++*   Quantized MLP weights for SH reconstruction [S1, unofficial].
+ 
+ **Data Structures:**
+-1.  **Codebooks:** $K$ separate codebooks $C_k \in \mathbb{R}^{B \times L}$, where $k \in \{1, \dots, K\}$. Each codebook $C_k$ contains $B$ codewords of dimension $L$ [S1, unofficial].
+-2.  **MLPs:** Lightweight Multi-Layer Perceptrons $\text{MLP}_d$ and $\text{MLP}_v$ for diffuse and view-dependent SH components. Each MLP has a single hidden layer with 64 neurons [S1, unofficial]. Weights are quantized to 16-bit precision [S1, unofficial].
++1.  **Codebooks:** $K$ separate codebooks $C_k \in \mathbb{R}^{B \times L}$, where $k \in \{1, \dots, K\}$ [S1, unofficial].
++2.  **MLPs:** Lightweight Multi-Layer Perceptrons $\text{MLP}_d$ and $\text{MLP}_v$ for diffuse and view-dependent SH components [S1, unofficial].
+ 3.  **Indices:** For each Gaussian, an index vector mapping its sub-vectors to the respective codebooks [S1, unofficial].
+ 
+@@ -24,5 +24,5 @@
+ 
+ 1.  **Attribute Partitioning:**
+-    Decompose the Gaussian attribute vector $z \in \mathbb{R}^{KL}$ into $K$ clusters (sub-vectors) $\{z_1, z_2, \dots, z_K\}$, where each $z_k \in \mathbb{R}^L$. The sources specify that attributes are partitioned into five groups of sub-vectors [S1, unofficial].
++    Decompose the Gaussian attribute vector $z \in \mathbb{R}^{KL}$ into $K$ clusters (sub-vectors) $\{z_1, z_2, \dots, z_K\}$, where each $z_k \in \mathbb{R}^L$ [S1, unofficial]. The sources specify that attributes are partitioned into five groups of sub-vectors [S1, unofficial].
+ 
+ 2.  **Clustering:**
+@@ -30,5 +30,5 @@
+ 
+ 3.  **Quantization:**
+-    For each Gaussian, replace each sub-vector $z_k$ with the nearest codeword from its corresponding codebook $C_k$. Let $c_k \in C_k$ be the selected codeword. The quantized representation is the sequence of indices $\{i_1, i_2, \dots, i_K\}$ where $i_k$ is the index of $c_k$ in $C_k$ [S1, unofficial].
++    For each Gaussian, replace each sub-vector $z_k$ with the nearest codeword from its corresponding codebook $C_k$ [S1, unofficial]. Let $c_k \in C_k$ be the selected codeword [S1, unofficial]. The quantized representation is the sequence of indices $\{i_1, i_2, \dots, i_K\}$ where $i_k$ is the index of $c_k$ in $C_k$ [S1, unofficial].
+ 
+ 4.  **SH Decomposition and Neural Decoding:**
+@@ -53,6 +53,7 @@
+ ```python
+ import numpy as np
++import heapq
+ 
+-def neural_vector_quantization(gaussians, K=5, L=None, B=256):
++def neural_vector_quantization(gaussians, K=5, B=256):
+     """
+     Compress Gaussian attributes using Neural Vector Quantization.
+@@ -61,5 +62,4 @@
+         gaussians: List of Gaussian objects with attributes (pos, scale, rot, opacity, SH_coeffs).
+         K: Number of sub-vector clusters.
+-        L: Length of each sub-vector. Derived from total attribute dimension / K.
+         B: Number of codewords per codebook.
+         
+@@ -69,45 +69,39 @@
+         mlp_d: Quantized MLP for diffuse SH.
+         mlp_v: Quantized MLP for view-dependent SH.
++        bitstream: Huffman-encoded bitstream.
+     """
++    N = len(gaussians)
+     # 1. Extract and Partition Attributes
+-    # Assume attribute vector z is concatenated from relevant Gaussian properties
+-    # Partition z into K clusters of length L
+-    # Note: Specific attribute grouping (e.g., which properties go into which cluster)
+-    # is implementation-specific but sources state 5 groups are used [S1, unofficial].
++    # Each Gaussian has an attribute vector z of size K*L.
+     clusters = []
+     for g in gaussians:
+-        z = extract_attribute_vector(g) # Returns vector of size K*L
+-        sub_vectors = partition_into_clusters(z, K, L) # List of K vectors, each size L
++        z = g.attributes # Shape (K*L,)
++        sub_vectors = z.reshape(K, -1) # List of K vectors, each size L
+         clusters.append(sub_vectors)
+-    
++    clusters = np.array(clusters) # Shape (N, K, L)
++
+     # 2. K-Means Clustering for Codebooks
+     codebooks = []
+     for k in range(K):
+-        # Collect all k-th sub-vectors from all Gaussians
+-        data_k = [cv[k] for cv in clusters]
+-        # Run K-Means with B clusters
+-        codebooks.append(run_kmeans(data_k, B)) # Shape (B, L)
+-        
++        data_k = clusters[:, k, :] # Shape (N, L)
++        # Initialize centroids randomly from data
++        centroids = data_k[np.random.choice(N, B, replace=False)]
++        # Iterate K-Means
++        for _ in range(100):
++            dists = np.linalg.norm(data_k[:, np.newaxis, :] - centroids[np.newaxis, :, :], axis=2)
++            assignments = np.argmin(dists, axis=1)
++            for i in range(B):
++                mask = assignments == i
++                if np.any(mask):
++                    centroids[i] = data_k[mask].mean(axis=0)
++        codebooks.append(centroids) # Shape (B, L)
++
+     # 3. Quantization (Lookup)
+-    indices = []
++    all_indices = np.zeros((N, K), dtype=np.int32)
+     for k in range(K):
+         C_k = codebooks[k]
+-        k_indices = []
+-        for cv in clusters:
+-            z_k = cv[k]
+-            # Find nearest codeword index
+-            dists = np.linalg.norm(C_k - z_k, axis=1)
+-            idx = np.argmin(dists)
+-            k_indices.append(idx)
+-        # Store indices for this cluster across all Gaussians
+-        # In practice, indices are stored per Gaussian: shape (N, K)
+-        
+-    # Reconstruct indices per Gaussian
+-    N = len(gaussians)
+-    all_indices = np.zeros((N, K), dtype=np.int32)
+-    for k in range(K):
+-        # ... populate all_indices[:, k] from k_indices calculation above ...
+-        pass
+-        
++        dists = np.linalg.norm(clusters[:, k, np.newaxis, :] - C_k[np.newaxis, :, :], axis=2)
++        all_indices[:, k] = np.argmin(dists, axis=1)
++
+     # 4. SH Decomposition and MLP Training
+     # Decompose SH coefficients Y into h_d and h_v
+@@ -115,34 +109,31 @@
+     # MLP structure: Single hidden layer, 64 neurons [S1, unofficial]
+     # Weights quantized to 16-bit [S1, unofficial]
+-    mlp_d = train_mlp(gaussians, target='diffuse', hidden_units=64)
+-    mlp_v = train_mlp(gaussians, target='view_dependent', hidden_units=64)
+-    
++    # (Training loop omitted; standard backpropagation)
++    mlp_d = NeuralNetwork(layers=[2, 64, 3], precision=16)
++    mlp_v = NeuralNetwork(layers=[2, 64, 3], precision=16)
++    # mlp_d.train(h_d, h_v, target_diffuse)
++    # mlp_v.train(h_d, h_v, target_view_dependent)
++
+     # 5. Huffman Coding
+-    # Encode the sequence of indices
+     bitstream = huffman_encode(all_indices.flatten())
+-    
++
+     return codebooks, all_indices, mlp_d, mlp_v, bitstream
+ 
+-def extract_attribute_vector(gaussian):
+-    # Placeholder for specific attribute extraction logic
+-    # Combines position, scale, rotation, opacity, SH coefficients
+-    # into a single vector z of size K*L
+-    pass
+-
+-def partition_into_clusters(z, K, L):
+-    # Reshape z into K sub-vectors of length L
+-    return z.reshape(K, L)
+-
+-def run_kmeans(data, B):
+-    # Standard K-Means implementation
+-    # Returns codebook of shape (B, L)
+-    pass
+-
+-def train_mlp(gaussians, target, hidden_units):
+-    # Train MLP to predict target SH component
+-    # Input: h_d, h_v (latent codes)
+-    # Output: f_d or f_v
+-    # Quantize weights to 16-bit after training
+-    pass
++def huffman_encode(data):
++    """Standard Huffman encoding implementation."""
++    freq = {}
++    for x in data:
++        freq[x] = freq.get(x, 0) + 1
++    heap = [[weight, [symbol, ""]] for symbol, weight in freq.items()]
++    heapq.heapify(heap)
++    while len(heap) > 1:
++        lo = heapq.heappop(heap)
++        hi = heapq.heappop(heap)
++        for pair in lo[1:]:
++            pair[1] = '0' + pair[1]
++        for pair in hi[1:]:
++            pair[1] = '1' + pair[1]
++        heapq.heappush(heap, [lo[0] + hi[0]] + lo[1:] + hi[1:])
++    return sorted(heapq.heappop(heap)[1:], key=lambda p: (len(p[-1]), p))
+ ```
+ 

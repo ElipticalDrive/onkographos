@@ -1,0 +1,191 @@
+# Environment Map Generation from Gaussian Background
+
+Also called: Baking Gaussian Background to EnvMap, SH0 Environment Map Extraction
+
+## Overview
+This method converts the distant background components of a 3D Gaussian Splatting scene into a static 2D equirectangular environment map, replacing the explicit Gaussian primitives in those regions. It solves the rendering overhead and visual instability (floaters) associated with distant background Gaussians in interactive applications like VR. It is distinguished from sibling methods like [DeSplat](12925-desplat.md) or [360 Gaussian Splatting](12929-360-gaussian-splatting.md) by explicitly decoupling the scene into a dynamic foreground (Gaussians) and a static background (EnvMap), trading motion parallax for performance and stability.
+
+## How it works
+**Inputs and Outputs:**
+*   **Input:** A trained 3D Gaussian Splatting scene model containing a set of Gaussians $\mathcal{G}$, each defined by position $\mathbf{t}$, covariance $\mathbf{\Sigma}$ (or rotation $\mathbf{R}$ and scale $\mathbf{S}$), opacity $\alpha$, and spherical harmonic coefficients $\mathbf{c}_{lm}$ for view-dependent color.
+*   **Output:** A static equirectangular environment map texture $E$ of resolution $W \times H$, and a modified scene representation where background Gaussians are removed.
+
+**Data Structures:**
+*   **Environment Map:** A 2D texture array or single image of size $8192 \times 4096$ pixels (8K equirectangular). Each pixel stores the RGB color value.
+*   **Gaussian Set:** The remaining foreground Gaussians $\mathcal{G}_{FG}$ are stored as usual. The background set $\mathcal{G}_{BG}$ is discarded or marked as inactive.
+
+**Parameters:**
+*   **Resolution:** $8192 \times 4096$ pixels [S1].
+*   **Foreground/Background Threshold ($R_i$):** A distance cutoff from the camera origin. Gaussians with centers beyond $R_i$ are considered background. The sources indicate that the visual effect of Gaussians is limited beyond 20 meters, so $R_i = 20$ m is a typical value, though it can be adjusted to preserve parallax for specific mid-distance regions [S1].
+
+**Steps:**
+1.  **Segmentation:** Partition the Gaussian set $\mathcal{G}$ into foreground $\mathcal{G}_{FG}$ and background $\mathcal{G}_{BG}$ based on the Euclidean distance of each Gaussian's center $\mathbf{t}_i$ from the camera origin (or scene center).
+    $$ \mathcal{G}_{BG} = \{ g_i \in \mathcal{G} \mid \|\mathbf{t}_i\| > R_i \} $$
+    $$ \mathcal{G}_{FG} = \{ g_i \in \mathcal{G} \mid \|\mathbf{t}_i\| \le R_i \} $$
+2.  **SH0 Extraction:** For each Gaussian $g_i \in \mathcal{G}_{BG}$, extract only the zeroth-order spherical harmonic coefficient ($SH0$). This represents the view-independent base color $c_0$. Higher-order coefficients ($SH1, SH2, \dots$) are discarded to prevent view-dependent artifacts from being "burned" into the static texture [S1].
+3.  **Rasterization/Baking:** Render the background Gaussians $\mathcal{G}_{BG}$ onto an equirectangular projection. This involves projecting each Gaussian onto the sphere defined by the environment map coordinates.
+    *   For each pixel $(u, v)$ in the $8192 \times 4096$ map, determine the corresponding view direction $\mathbf{d}_{uv}$.
+    *   Accumulate the contributions of all $\mathcal{G}_{BG}$ Gaussians that project onto this direction. Since the background is static and distant, standard alpha compositing is used:
+        $$ C_{bg}(u,v) = \sum_{i \in \mathcal{G}_{BG}} \alpha_i \cdot c_{0,i} \cdot \prod_{j < i} (1 - \alpha_j) $$
+        where the sum is over Gaussians sorted by depth along $\mathbf{d}_{uv}$, $\alpha_i$ is the opacity, and $c_{0,i}$ is the SH0 color.
+    *   *Note:* In practice, this is often implemented by rendering the background Gaussians to a temporary buffer using the standard 3DGS rasterizer but with a fixed, omnidirectional camera setup or by explicitly mapping Gaussian centers to spherical coordinates and splatting onto the equirectangular grid.
+4.  **Texture Generation:** Store the accumulated color $C_{bg}(u,v)$ into the environment map texture $E$.
+5.  **Scene Update:** Remove $\mathcal{G}_{BG}$ from the active rendering list. The renderer now uses $\mathcal{G}_{FG}$ for near-field rendering and samples $E$ for the background.
+
+**Pseudocode:**
+> **Unverified code.** The code below did not pass a test run against a reference implementation, or no test fits it, so it may contain errors.
+
+```python
+def generate_env_map(gaussians, R_i, width=8192, height=4096):
+    """
+    Generates an equirectangular environment map from background Gaussians.
+    
+    Args:
+        gaussians: List of Gaussian objects with attributes:
+            - center: (x, y, z) position
+            - opacity: float
+            - sh_coeffs: array of spherical harmonic coefficients
+        R_i: Float, distance threshold for background separation.
+        width, height: Int, resolution of the output env map.
+        
+    Returns:
+        env_map: 2D array (height, width, 3) containing the baked background.
+    """
+    # Step 1: Segment Gaussians
+    bg_gaussians = []
+    for g in gaussians:
+        dist = sqrt(g.center.x**2 + g.center.y**2 + g.center.z**2)
+        if dist > R_i:
+            bg_gaussians.append(g)
+            
+    # Step 2: Initialize Environment Map
+    env_map = zeros((height, width, 3))
+    
+    # Step 3: Bake Gaussians to Equirectangular Map
+    # Iterate over each pixel in the equirectangular map
+    for v in range(height):
+        for u in range(width):
+            # Calculate view direction for this pixel
+            # u maps to longitude [-pi, pi], v maps to latitude [pi/2, -pi/2]
+            lon = (u / width) * 2 * pi - pi
+            lat = (v / height) * pi - pi / 2
+            
+            # Convert spherical to Cartesian direction vector
+            # Note: Coordinate system depends on renderer convention.
+            # Assuming standard OpenGL/Camera space:
+            dir_x = cos(lat) * sin(lon)
+            dir_y = sin(lat)
+            dir_z = cos(lat) * cos(lon)
+            view_dir = normalize([dir_x, dir_y, dir_z])
+            
+            # Collect contributions from background Gaussians along this ray
+            # Since Gaussians are 3D, we project them onto the ray direction.
+            # A simple approximation for baking is to treat the background as
+            # a distant sphere. We can project each Gaussian center onto the
+            # sphere and accumulate color if the Gaussian's angular spread
+            # covers the pixel direction.
+            
+            accumulated_color = [0.0, 0.0, 0.0]
+            accumulated_alpha = 0.0
+            
+            # Sort bg_gaussians by depth along view_dir for correct compositing
+            # Depth is dot product of center and view_dir
+            depths = []
+            for g in bg_gaussians:
+                depth = dot(g.center, view_dir)
+                depths.append((depth, g))
+            depths.sort(key=lambda x: x[0])
+            
+            for depth, g in depths:
+                # Extract SH0 color (view-independent)
+                # Assuming sh_coeffs[0] is the DC term (SH0)
+                color = g.sh_coeffs[0] 
+                alpha = g.opacity
+                
+                # Check if this Gaussian contributes to this pixel direction.
+                # In a full implementation, one would compute the Gaussian's
+                # projected 2D covariance in the tangent plane of the sphere
+                # at view_dir. For simplicity in baking, we assume the Gaussian
+                # is distant enough that its angular size is small, or we use
+                # a standard splatting kernel.
+                
+                # Simplified contribution:
+                # If we assume the Gaussian is a point source for the env map
+                # (or use a proper 2D Gaussian projection in spherical space):
+                
+                # Calculate angular distance between Gaussian center direction
+                # and view_dir
+                g_dir = normalize(g.center)
+                cos_angle = dot(g_dir, view_dir)
+                # Avoid numerical issues
+                cos_angle = max(-1.0, min(1.0, cos_angle))
+                angle = acos(cos_angle)
+                
+                # Approximate Gaussian spread in radians based on scale
+                # This is a simplification; proper baking requires projecting
+                # the 3D covariance to the sphere tangent plane.
+                # Let sigma_ang be the angular standard deviation.
+                # sigma_ang = scale_factor / depth (if depth > 0)
+                
+                # For the purpose of this article, we assume a standard
+                # rasterization step handles the projection.
+                # Here we just accumulate if within a certain angular radius.
+                # In practice, use a spatial hash or grid to find nearby Gaussians.
+                
+                # Pseudocode for proper spherical splatting:
+                # 1. Project Gaussian 3D covariance to 2D tangent plane at view_dir.
+                # 2. Evaluate 2D Gaussian PDF at (u,v).
+                # 3. Composite.
+                
+                # Since we cannot implement full 3D-to-Spherical projection here
+                # without more context on the covariance handling, we note that
+                # the standard 3DGS rasterizer can be adapted to render to an
+                # equirectangular buffer by changing the projection matrix to
+                # an equirectangular projection.
+                
+                # Placeholder for the actual spherical splatting logic:
+                contribution = spherical_splat(g, view_dir)
+                
+                if contribution.alpha > 0:
+                    # Alpha compositing
+                    new_alpha = accumulated_alpha + contribution.alpha * (1 - accumulated_alpha)
+                    accumulated_color = (accumulated_color * accumulated_alpha + 
+                                         contribution.color * contribution.alpha * (1 - accumulated_alpha)) / new_alpha if new_alpha > 0 else accumulated_color
+                    accumulated_alpha = new_alpha
+            
+            env_map[v, u] = accumulated_color
+
+    return env_map
+```
+*[G] The pseudocode above simplifies the spherical projection. In practice, one uses the standard 3DGS rasterizer but replaces the perspective projection matrix with an equirectangular projection matrix, or explicitly maps Gaussian centers to spherical coordinates and splats them onto the 2D equirectangular grid using a 2D Gaussian kernel scaled by the distance. The key is that only SH0 is used.*
+
+**Edge Cases and Pitfalls:**
+*   **Parallax Artifacts:** A static environment map cannot reproduce motion parallax for mid-distance objects. This causes standard metrics (PSNR/SSIM) to drop compared to ground truth, though it is often acceptable in VR [S1].
+*   **Visual Gap:** A visual gap may appear at the boundary $R_i$ under certain viewing conditions, especially if the camera moves outside the intended navigation area. This can be mitigated with soft transitions or distance-based alpha blending [S1].
+*   **Floaters:** The method is floater-free for the background, avoiding pop-up effects common in distant Gaussian reconstructions [S1].
+
+## Subtopics
+
+### EnvMap-GS
+The primary method described, focusing on two-stage outdoor reconstruction with background-to-environment map baking. It is chosen when performance and stability in VR are prioritized over perfect parallax. [EnvMap-GS](18915-envmap-gs.md)
+
+### DeSplat
+A sibling method that may handle background differently, potentially retaining Gaussian structure or using different compression. [DeSplat](12925-desplat.md)
+
+### 360 Gaussian Splatting
+Focuses on 360-degree scene representation, possibly using different primitives or projections. [360 Gaussian Splatting](12929-360-gaussian-splatting.md)
+
+## Operating characteristics
+*   **Time Complexity:** Rendering time is significantly reduced. Replacing background Gaussians with an environment map reduces average frame time and increases throughput, as background Gaussians introduce significant rendering overhead even when visually static [S1].
+*   **Memory Complexity:** Memory usage is reduced by removing $\mathcal{G}_{BG}$ from the active Gaussian list. The environment map texture ($8192 \times 4096 \times 3$ bytes $\approx 100$ MB for 32-bit float, or less for 16-bit) is added to memory footprint.
+*   **Performance:** The method boosts rendering throughput, making it suitable for interactive VR navigation [S1].
+*   **Strengths:** Floater-free background, reduced rendering overhead, stable frame rates in VR.
+*   **Limitations:** Loss of motion parallax for mid-distance objects, potential visual gaps at $R_i$, lower PSNR/SSIM for distant regions compared to ground truth [S1].
+*   **When to Use:** Interactive VR applications, semi-bounded environments with well-defined navigation areas, scenes with significant distant background elements that cause floaters or performance issues.
+*   **When Not to Use:** Applications requiring precise motion parallax for mid-distance objects, or where high-fidelity novel view synthesis metrics for distant regions are critical.
+
+## Background
+The method originates from the work on "EnvMap-GS: two-stage outdoor Gaussian reconstruction with background-to-environment map baking" by D. Pintani et al. [S1]. It addresses the challenges of rendering large-scale outdoor scenes with 3D Gaussian Splatting, where distant background elements often suffer from noise (floaters) and high computational cost. By baking the background into a static environment map, the method leverages the efficiency of traditional environment map rendering while maintaining the high-quality foreground reconstruction of 3DGS.
+
+## Sources
+[S1] EnvMap-GS: two-stage outdoor Gaussian reconstruction with background-to-environment map baking, https://doi.org/10.1007/s00371-026-04593-w, fetched 2026-10-29

@@ -1,0 +1,885 @@
+ISSN 2464-4617 (print)
+ISSN 2464-4625 (online)
+Computer Science Research Notes - CSRN
+http://www.wscg.eu
+VisibilitySplat: Ray-Traced Occlusion for Relighting with 3D
+Gaussian Splatting
+Sven Kluge
+University of Rostock
+Albert-Einstein-Straße 22
+18059 Rostock, Germany
+sven.kluge@uni-rostock.de
+Oliver Staadt
+University of Rostock
+Albert-Einstein-Straße 22
+18059 Rostock, Germany
+oliver.staadt@uni-rostock.de
+ABSTRACT
+We address inverse rendering with 3D Gaussian Splatting (3DGS) by introducing explicit visibility modeling for
+relighting as well as material and light decomposition. Our approach augments the standard rasterized 3DGS
+pipeline with a sparse visibility oracle that estimates transmittance-weighted occlusion for Gaussian primitives
+from sampled lighting directions. This oracle is implemented using a point-based ray tracer accelerated by a
+bounding volume hierarchy (BVH) and queried sparsely within the inverse-rendering objectives, while the original
+3DGS loop is retained for training efficiency, interactive visualization, and tooling compatibility. Shading follows
+a physically based rendering (PBR) formulation with a principled microfacet bidirectional reflectance distribution
+function (BRDF) and low-resolution high-dynamic-range (HDR) environment maps. We evaluate our method on
+the TensoIR synthetic dataset against baselines based on neural radiance fields (NeRFs), tensor representations,
+and 3DGS. The results show competitive performance and improvements over several earlier baselines for novelview synthesis (NVS), albedo reconstruction, and relighting. Ablations indicate that explicit visibility modeling
+is an important contributor to relighting and material-illumination disentanglement, while pure PBR supervision
+can favor appearance fitting in NVS. Overall, the findings suggest that sparse, point-based visibility queries effectively complement rasterized splatting for inverse rendering while preserving the practical advantages of the 3DGS
+ecosystem.
+Keywords
+inverse rendering; 3D Gaussian splatting; relighting; visibility; physically based rendering
+1
+INTRODUCTION
+Inverse rendering (IR) seeks to recover geometry,
+reflectance, and illumination from images by inverting
+the image formation process. Neural radiance fields
+(NeRFs) [25] enable high-fidelity novel-view synthesis
+(NVS) and have been extended toward relightable
+decompositions under unknown illumination (e.g.,
+NeRFactor [41] and TensoIR [18]), but their implicit
+volumetric formulation is costly to train and render.
+3D Gaussian Splatting (3DGS) [19] instead optimizes
+explicit point primitives via differentiable rasterization,
+enabling real-time rendering and practical tooling, and
+has recently been adopted for IR (e.g., 3D Gaussian
+Splatting for Inverse Rendering (GS-IR) [22] and
+Gaussian Inverse Rendering (GIR) [30]). A key
+Permission to make digital or hard copies of all or part of
+this work for personal or classroom use is granted without
+fee provided that copies are not made or distributed for profit
+or commercial advantage and that copies bear this notice and
+the full citation on the first page. To copy otherwise, or republish, to post on servers or to redistribute to lists, requires
+prior specific permission and/or a fee.
+http://www.doi.org/10.24132/CSRN.2026-E17
+challenge is visibility: screen-space alpha compositing
+provides limited information about cast shadows and
+mutual occlusion, which are crucial for stabilizing
+material-light disentanglement under unknown illumination. While 3DGS-based IR pipelines benefit
+from fast forward rendering, visibility signals derived
+from the rasterizer alone can be too weak or too viewdependent to constrain shadows robustly. Recent work,
+including Inter-Reflective Gaussian Splatting (IRGS),
+therefore augments splatting with ray-based visibility
+estimation [14, 15]. We take a pragmatic step along this
+trajectory by adding a sparse visibility oracle that estimates transmittance-weighted occlusion from sampled
+lighting directions, while retaining the original 3DGS
+rasterization loop for training efficiency and interactive
+visualization. This lightweight division of labor injects
+physically meaningful visibility constraints without
+replacing the splatting renderer (Fig. 1). Rather than
+proposing a highly specialized approximation or
+learned visibility model, we deliberately study a direct
+formulation based on explicit visibility queries. This
+provides a reference baseline for assessing how much
+transmittance-weighted visibility contributes to IR
+and relighting with 3DGS. Our contributions are as
+131
+WSCG 2026, CSRN Vol. 3601
+ISSN 2464-4617 (print)
+ISSN 2464-4625 (online)
+Computer Science Research Notes - CSRN
+http://www.wscg.eu
+Figure 1: VisibilitySplat. Given a Gaussian point cloud optimized from multi-view images under unknown illumination (left), VisibilitySplat recovers physical properties (normals, materials, and illumination) using a visibility
+ray tracer (center), enabling relighting (right).
+follows: (i) a sparse visibility oracle for 3DGS that
+estimates how much light reaches each Gaussian from
+sampled environment directions, implemented with a
+point-based ray tracer accelerated by a bounding volume hierarchy (BVH); (ii) a reference baseline on the
+TensoIR synthetic benchmark, including comparisons
+to NeRF-based, tensor-based, and 3DGS-based IR
+methods and ablations that isolate the effect of explicit
+visibility.
+2
+RELATED WORK
+2.1
+Radiance Fields
+The original NeRF method [25] introduced neural volumetric representations for NVS, with subsequent work
+improving anti-aliasing and efficiency via scale-aware
+integration and more explicit encodings [2–4, 7, 12, 13,
+27]. 3DGS [19] further shifts computation to explicit
+anisotropic Gaussian primitives rendered by a custom
+rasterizer, enabling real-time performance. Geometryoriented variants [16, 37] and BVH-based Gaussian ray
+tracing [26] broaden the representation toward editing
+and secondary-ray effects.
+2.2
+Inverse Rendering
+Neural fields for inverse rendering: IR aims to
+recover geometry, materials, and illumination from
+images and is intrinsically ill-posed. Early NeRF-based
+methods reduced ambiguity with simplifying assumptions: PhySG [39] represents bidirectional reflectance
+distribution functions (BRDFs) and lighting using
+spherical Gaussians (SGs) but omits complex visibility
+and indirect transport. NeRFactor [41] factorizes shape
+and reflectance under unknown lighting. InvRender [42] derives spatially varying indirect illumination
+directly from the learned radiance field to improve
+albedo recovery. Ref-NeRF [31] improves specular
+handling via a reflected-radiance parameterization that
+also yields better normals. To raise physical fidelity
+without losing efficiency, TensoIR [18] builds on
+tensor-factorized fields to support on-the-fly visibility
+queries and second-bounce effects during reconstruction. Complementary surface-aligned fields stabilize
+geometry and normals for IR pipelines [32, 35]. More
+recent work targets illumination modeling itself:
+ENVIDR [21] learns a neural environment for shiny
+scenes. NeRF-as-Emitter [23] replaces the distant-light
+assumption with a near-field light NeRF, improving accuracy under spatially varying illumination,
+and NeILF++ [38] jointly learns incident-light and
+outgoing-radiance fields with inter-reflections to better
+disentangle material and lighting.
+Gaussian splatting for inverse rendering: Adopting
+3DGS for IR leverages real-time forward rendering but
+introduces new challenges: splats lack native surface
+normals, and forward splatting does not natively model
+occlusion or multi-bounce light. GS-IR [22] addresses
+these by regularizing per-Gaussian normals and baking
+visibility for secondary effects while recovering geometry, spatially varying bidirectional reflectance distribution functions (SVBRDFs), and environment lighting
+under unknown illumination. Subsequent work deepens physical correctness: GaussianShader [17] estimates robust normals and per-splat shading for reflective scenes. DeferredGS [33] decouples geometry from
+lighting and performs deferred shading for editable relighting and Ref-Gaussian [34] targets glossy reflections with a specialized deferred pipeline. Beyond perfect mirrors, SSS-GS [10] introduces subsurface scattering to a 3DGS framework using an explicit surface
+plus an implicit scattering component. To improve general relighting, RNG [11] conditions radiance on view
+and light directions with shadow cues and depth refinement, while BiGS [24] unifies surface and volumetric materials via bidirectional spherical harmonics
+(SH), supporting near- and distant-light setups. Finally,
+GI-GS [8] explicitly decomposes direct/indirect components and uses lightweight path tracing on a G-buffer
+for multi-bounce global illumination, bringing 3DGSbased IR closer to physically faithful relighting at in-
+132
+WSCG 2026, CSRN Vol. 3601
+ISSN 2464-4617 (print)
+ISSN 2464-4625 (online)
+Computer Science Research Notes - CSRN
+http://www.wscg.eu
+Figure 2: Method Overview. VisibilitySplat is a two-stage, 3DGS-based IR pipeline that reconstructs scene geometry, materials, and environment illumination from multi-view images. Stage 1 pretrains a 3D Gaussian point
+cloud with the standard 3DGS attributes and per-splat normals derived from depth. Stage 2 adds a sparse visibility
+oracle, implemented with BVH-accelerated point-based ray tracing, to compute transmittance-weighted visibility
+over the Gaussians. Together with physically based rendering (PBR) using a Disney “principled” BRDF [6], this
+enables joint decomposition into material parameters and estimation of a compact high-dynamic-range (HDR) environment map for relighting.
+teractive rates. These efforts are complementary to
+geometry-focused 2D Gaussian Splatting (2DGS) [16]
+and surface extraction with Gaussian Opacity Fields
+(GOF) [37], as well as to BVH-accelerated Gaussian
+ray tracing for secondary-ray phenomena [26].
+where J is the Jacobian matrix of the affine approximation of the perspective projection [43].
+The final color at pixel u is obtained by depth-sorting
+Gaussians and accumulating color in a front-to-back
+manner:
+i−1
+3 OVERVIEW
+3.1 Gaussian Splatting
+Ĉ = ∑ Ti gi αi ci ,
+i∈N
+3DGS [19] is a method for rendering 3D scenes in real
+time, offering high visual quality and fast training. A
+scene is represented as a cloud of anisotropic 3D Gaussians:
+1
+T −1
+gi (x) = e− 2 (x−µi ) Σi (x−µi )
+(1)
+with mean µi ∈ R3 and covariance Σi .
+The complete parameter set for each Gaussian is defined as Gi = (µi , Σi , αi , ci ), where the mean µi ∈ R3
+specifies the position, the full covariance Σi ∈ R3×3 encodes the ellipsoidal footprint, αi denotes the opacity,
+and ci is the color, stored as a set of SH coefficients. The
+covariance matrix Σi can be decomposed into a scaling matrix Si = diag(sx , sy , sz ) and a rotation matrix Ri
+constructed from a unit quaternion q, which results in
+Σi = RSST RT .
+With the extrinsic camera matrix T and intrinsic camera matrix K, the screen-space mean µi′ and covariance
+matrix Σ′ are defined as
+µi′ = KT[µi , 1]T ,
+Σ′ = JTΣTT JT
+(2)
+Ti = ∏ (1 − g j α j )
+(3)
+j=1
+where Ti denotes the accumulated transmittance, and
+for readability we use the shorthand gi ≡ gi (u | µi′ , Σ′i ).
+3.2
+Physically Based Rendering
+We follow a physically based rendering (PBR) formulation similar to recent IR systems such as TensoIR [18],
+NeRFactor [41], and GS-IR [22]. Image formation is
+expressed by the surface rendering equation with geometric visibility and an energy-conserving microfacet
+BRDF, while geometry, reflectance, and illumination
+are represented by differentiable fields and optimized
+from multi-view images. Formally,
+Lo (x, ωo ) =
+Z
+Ω
+fr (x, ωi , ωo )Li (x, ωi )V (x, ωi )(n·ωi )dωi .
+(4)
+Here, x is the shaded surface point, ωo is the outgoing view direction, and ωi is an incident lighting direction integrated over the hemisphere Ω around the surface normal n. Lo and Li denote outgoing and incident
+radiance, fr is the BRDF, V ∈ [0, 1] is the visibility or
+133
+WSCG 2026, CSRN Vol. 3601
+ISSN 2464-4617 (print)
+ISSN 2464-4625 (online)
+Computer Science Research Notes - CSRN
+transmittance term, and (n · ωi ) is the cosine foreshortening factor.
+For reflectance, we adopt a reduced principled microfacet model in the Disney family [6] and remove the
+metallic degree of freedom to keep the inverse problem
+better constrained. We use a fixed dielectric base reflectance F0 = 0.04, and write
+fr = fdi f f + fspec ,
+fspec =
+D(h)G(ωi , ωo )F(ωo · h; F0 = 0.04)
+4(n · ωi )(n · ωo )
+(5)
+where D is the normal-distribution function, G is the
+masking-shadowing term, and F is the Fresnel term
+(typically Schlick) evaluated with fixed F0 . Roughness controls the lobe width. Fixing F0 and removing metallicity reduces the number of learnable appearance parameters, which improves stability in this underconstrained setting while retaining a physically plausible BRDF.
+In practice, illumination is computed by evaluating the
+integral over scene lights and/or an environment map
+together with the visibility term V . Many IR systems
+employ this same BRDF formulation but differ in how
+geometry, visibility, and indirect effects are estimated.
+For example, TensoIR introduces efficient online visibility and secondary shading, NeRFactor learns a visibility field, and GS-IR attaches BRDF parameters to
+Gaussians with an occlusion approximation.
+3.3
+obtained by linearly accumulating depth samples zi and
+normalizing by the accumulated weight:
+zE =
+∑i∈N wi zi
+, W = ∑ wi , wi = Ti gi αi .
+W
+i∈N
+Normal estimation: Purely gradient-based normals
+derived from rendered depth are sensitive to noise and
+often lack multi-view consistency when applied to 3D
+Gaussian surfaces. We therefore assign each Gaussian
+i a learnable unit normal ni and compute per-pixel predictions using splatting weights wi = Ti gi αi :
+ñ =
+∑Ni=1 wi ni
+,
+∑Ni=1 wi + εn
+n̂ =
+ñ
+,
+∥ñ∥2 + εn
+Because reflectance acts as an angular low-pass filter,
+the recoverable illumination bandwidth is limited by
+the object’s BRDF lobes [29]. Accordingly, we use a
+compact environment-map parameterization, with concrete settings summarized in the implementation details
+paragraph.
+Depth and Normal Estimation
+Reconstructing scene geometry, in particular surface
+normals, is essential for IR and PBR.
+Depth estimation: We estimate depth with the expected depth zE of the Gaussian mixture along each ray,
+(7)
+where εn is a small constant for numerical stability. As a geometry-anchored target, we derive
+pseudo-normals from expected depth zE . World-space
+normals n̂∇ are obtained from image-space gradients
+∇zE = (∂x zE , ∂y zE ), and predictions are aligned to this
+estimate with
+Ln−p = ||n̂ − n̂∇ ||.
+Each HDR environment-map texel stores radiance L,
+and we optimize these values directly during training
+with solid-angle compensation to account for the nonuniform texel area of equirectangular maps.
+(6)
+We evaluate alternative depth formulations, including
+inverse-depth variants, and find that expected depth
+provides the best overall reconstruction quality and the
+most stable downstream supervision in our setting. We
+therefore use zE as the geometric signal for pseudonormal supervision in optimization and for computing
+surface positions that initialize ray-tracing queries.
+Environmental Lighting
+Accurate recovery of incident illumination is essential
+for robust IR. We model distant lighting as a highdynamic-range (HDR) spherical environment map parameterized in equirectangular coordinates [9]. Unlike
+SGs or mixtures of SGs, this image-based representation preserves high-frequency angular detail and thus
+supports sharp cast shadows without requiring many
+analytic lobes.
+3.4
+http://www.wscg.eu
+(8)
+To further smooth predictions, we follow GS-IR [22]
+and add a total variation (TV) loss TVnormal .
+The overall normal objective is
+Ln = Ln−p + λn−TV TVnormal ,
+(9)
+and is optimized jointly with the photometric loss Lc
+of the splatting model.
+3.5
+Point-Based Ray Tracing
+In our pipeline, the ray tracer is not used as a replacement renderer. It serves as a sparse visibility oracle for
+evaluating transmittance along sampled light directions.
+The 3DGS rasterizer is a highly optimized, tile-based
+renderer: for each screen-space tile it collects all projected splats overlapping the tile, sorts them in frontto-back order, and evaluates color and opacity via elliptical weighted average (EWA) splatting [43] in that
+order. This design delivers excellent throughput for primary views but is tied to camera projection and ordered
+blending per tile.
+A point-based ray tracer allows us to evaluate Gaussian splatting from any point in space in any direction.
+The 3D starting points for our rays are computed from
+134
+WSCG 2026, CSRN Vol. 3601
+ISSN 2464-4617 (print)
+ISSN 2464-4625 (online)
+Normal
+Computer Science Research Notes - CSRN
+Albedo
+Env. Map
+Normal
+http://www.wscg.eu
+Albedo
+Env. Map
+TensoIR
+GS-IR
+IRGS
+Ours
+GT
+Figure 3: Qualitative comparison of albedo, normal and environmental lighting estimation on the TensoIR synthetic
+dataset [18].
+(a)
+(b)
+Figure 4: (a) mean transmittance from all directions;
+(b) transmittance from a single direction.
+the expected-depth map zE . Following 3D Gaussian
+Ray Tracing (3DGRT) [26], each 3D Gaussian is enclosed by an anisotropically stretched regular icosahedron and the triangles of this proxy mesh are inserted
+into a BVH for fast ray-triangle traversal. The proxy
+is scaled so that it tightly bounds the region where the
+particle’s response exceeds a small minimum ε. The
+scale explicitly incorporates the particle’s opacity α
+so that nearly transparent splats receive proportionally
+tighter bounds (”adaptive clamping”), which reduces
+false-positive hits during traversal. Rays then query the
+BVH to gather the next batch of intersections, evaluate
+contributions in sorted order, and early-terminate once
+the accumulated transmittance reaches a preset threshold.
+For occlusion-only queries, we use the fact that transmittance along a ray can be accumulated multiplica-
+tively T ← T · (1 − ∆ai ) where ∆ai is the per-hit attenuation computed from the Gaussian’s line integral
+along the ray segment covered by the proxy. Because
+multiplication commutes, the hits need not be depthsorted for this visibility pass. They can be processed
+in arbitrary order while maintaining correctness for T .
+We early-terminate when T ≤ Tstop . In practice, Tstop
+should match the early-out used by the rasterizer to
+keep consistency between visibility estimated by ray
+tracing and the screen-space renderer. To make the ray
+tracer a drop-in companion to standard 3DGS (so we
+can reuse pretrained point clouds and the existing rasterizer), we evaluate Gaussians on a ray with the same
+EWA-splatting formulation as the rasterizer. For a ray
+r(t) = o + td, we instantiate a one-pixel virtual camera at o whose optical axis is d (i.e., a local camera
+frame aligned with the ray). We then reuse the unmodified rasterizer to splat exactly the Gaussians reported
+by the BVH for that ray into the center pixel of this virtual camera. This yields consistent blending with the
+original tile-based renderer while allowing us to drive
+the evaluation from rays rather than from a full image
+plane.
+Alternative ray-based renderers make different evaluation choices that deviate from EWA splatting: 3DGRT
+[26] evaluates each Gaussian at the maximum response
+along the ray and processes batches of intersections in
+sorted order using a k-buffer scheme. IRGS [15] collapses 3D Gaussians to planar 2D Gaussian disks [16]
+to obtain a closed-form ray-splat intersection. These
+135
+WSCG 2026, CSRN Vol. 3601
+ISSN 2464-4617 (print)
+ISSN 2464-4625 (online)
+(a) Lego
+Computer Science Research Notes - CSRN
+(b) Armadillo
+http://www.wscg.eu
+(c) Ficus
+(d) Hotdog
+Figure 5: Visual results on the TensoIR synthetic dataset [18]. Each model is displayed in order from left to right
+and from top to bottom: ground truth, novel-view synthesis (NVS), normal map, and mean visibility.
+choices are effective but generally require training with
+their respective renderer to avoid a mismatch with classic 3DGS splatting.
+3.6
+Table 1: Stage-wise optimization schedule (compact
+form).
+Stage
+Stage 1
+Stage 2
+Optimization
+Our optimization method consists of a two-stage strategy, as shown in Fig. 2.
+Initial stage. The first step in our optimization pipeline
+is pretraining a standard Gaussian model with the extension that we jointly train the normal n̂. During this
+stage, we observe partially transparent regions where
+background color can leak through the object silhouette. To address this, we add an opacity-mask loss
+Lmask = ||α̂ − M||1 ,
+(10)
+where α̂ is the rendered opacity and M is the binary
+foreground mask. By measuring the deviation of Gaussian splats from the expected surface, we find that this
+term reduces that deviation and pulls splats closer to
+the surface, yielding a better-defined geometry proxy
+for our ray-tracing pass.
+We use the color reconstruction loss Lc from standard
+Gaussian splatting, the normal loss Ln , and the opacitymask loss Lmask . The full loss function for our initial
+stage is:
+Linit = Lc + Ln + λmask Lmask .
+(11)
+Second stage. After pretraining the 3D Gaussian
+model, we freeze geometric Gaussian attributes (positions, covariance, opacity, and normals) and optimize
+BRDF material parameters jointly with the HDR environment map. We use an L1 photometric loss L1pbr
+with unit weight in this stage. For reproducibility,
+Tab. 1 enumerates trainable/frozen variables and active
+losses for both stages.
+Implementation-specific optimization and runtime
+settings are summarized in the implementation details
+paragraph below.
+Implementation details. The visibility ray tracer is
+implemented with NVIDIA OptiX, and our Gaussiansplatting training and relighting pipeline is built
+Trainable
+variables
+{µ, Σ, c, α, n}
+{ρ, r, Lenv }
+Frozen
+variables
+{ρ, r, Lenv }
+{µ, Σ, c, α, n}
+Objective
+Linit
+pbr
+L1
+Symbols: µ position, Σ covariance, c color, α opacity, n normal, ρ
+albedo, r roughness, and Lenv environment-map radiance.
+on top of the Gaussian-splatting Python framework
+GSplat [36]. We pretrain for 30,000 iterations in stage
+1 and 400 iterations in stage 2. On an NVIDIA RTX
+A6000 graphics processing unit (GPU), stage 1 takes
+around 15 minutes and stage 2 around 10 minutes.
+We observe that longer second-stage training degrades
+relighting quality because the albedo begins to absorb
+illumination information. We use a compact 16 × 32
+environment map and normal-based hemisphere
+sampling, which halves the number of rays per pixel
+compared with full-sphere sampling. With a 16 × 32
+environment map, there are 512 candidate directions,
+after hemisphere culling and empty-space removal, the
+OptiX visibility pass takes approximately 436 ms at
+the evaluation resolution, corresponding to about 127
+MRays/s. This measures only transmittance-weighted
+visibility queries. A full second-stage optimization
+iteration takes approximately 1.25 s/it, while final
+PBR relighting renders at about 0.83 s/image. Forward relighting spends about 55% of its time on
+visibility queries and 44% on BRDF/environment-map
+integration.
+4
+EXPERIMENTS
+We compare our method against previous state-of-theart methods and also present an ablation study to isolate
+the contribution of each design component. Baselines
+are selected based on popularity and code availability.
+Our evaluation focuses on masked single-object scenes.
+This choice narrows the range of real-world inverserendering ambiguities (e.g., clutter, contact shadows,
+interreflections, and segmentation errors), but it is technically motivated by our lighting model: we sample il-
+136
+WSCG 2026, CSRN Vol. 3601
+ISSN 2464-4617 (print)
+ISSN 2464-4625 (online)
+Computer Science Research Notes - CSRN
+http://www.wscg.eu
+Normal
+Novel View Synthesis
+Albedo
+Relighting
+MAE
+PSNR
+SSIM LPIPS PSNR
+SSIM LPIPS PSNR
+SSIM LPIPS
+NeRFactor
+6.314
+24.679 0.922
+0.120 25.125 0.940
+0.109 23.383 0.908
+0.131
+InvRender
+5.074
+27.367 0.934
+0.089 27.341 0.933
+0.100 23.973 0.901
+0.101
+NVDiffrec
+6.078
+30.696 0.962
+0.052 29.174 0.908
+0.115 19.880 0.879
+0.104
+GS-IR
+4.948
+35.333 0.974
+0.039 30.286 0.941
+0.084 24.374 0.885
+0.096
+TensoIR
+4.100
+35.088 0.976
+0.040 29.275 0.950
+0.085 28.581 0.944
+0.081
+IRGS
+3.975
+35.530 0.964
+0.049 33.435 0.955
+0.076 30.646 0.935
+0.076
+Ours
+5.111
+34.807 0.967
+0.053 30.305 0.934
+0.101 30.538 0.941
+0.077
+Table 2: Quantitative comparison on the TensoIR Synthetic dataset [18]. All reported values are aggregated means
+over the evaluated objects. Most results are taken from the respective papers. For IRGS [15], we ran their evaluation
+ourselves because the publication did not include the full results.
+Method
+Method
+PBR-only
+w/o visibility
+w/o opacity loss
+Full
+PSNR
+35.697
+34.789
+34.996
+34.996
+NVS
+SSIM
+0.971
+0.966
+0.967
+0.976
+LPIPS
+0.046
+0.053
+0.052
+0.053
+Albedo
+SSIM
+0.922
+0.933
+0.932
+0.933
+PSNR
+20.848
+30.313
+29.834
+30.321
+LPIPS
+0.105
+0.101
+0.103
+0.101
+PSNR
+28.848
+29.091
+29.939
+30.594
+Relighting
+SSIM
+LPIPS
+0.932
+0.077
+0.933
+0.077
+0.938
+0.077
+0.942
+0.076
+Table 3: Ablation study of the different components of VisibilitySplat on the Lego model from the TensoIR synthetic dataset [18].
+lumination from a distant environment map, and without modeling secondary bounces the incident radiance
+can vanish when the environment is occluded by surrounding structures. Isolated objects therefore provide
+a well-defined direct-lighting signal and allow us to isolate the effect of explicit visibility queries.
+4.1
+Dataset & Metrics
+We report experimental results on the synthetic TensoIR dataset [18] for IR of single objects. It contains
+four objects, each with reference images rendered under
+ten different lighting conditions, along with albedo and
+normal maps. We evaluate normal-estimation quality
+using mean angular error (MAE). For relighting, NVS,
+and albedo reconstruction, we report peak signal-tonoise ratio (PSNR), structural similarity index (SSIM),
+and learned perceptual image patch similarity (LPIPS)
+[40]. Some results of our method for each model can
+be seen in Fig. 5.
+Following prior work, we compensate for the inherent
+albedo-shading scale ambiguity by scaling each predicted albedo with a single global RGB factor that minimizes MSE to the ground truth [1,14,18,20,22,30,41].
+We do not apply color correction [5], all reported and
+visualized synthetic albedo results therefore use this
+scale normalization unless stated otherwise.
+To visualize the HDR environment maps, we follow
+TensoIR [18] and apply gamma tonemapping to convert
+HDR radiance to low-dynamic-range (LDR) values for
+display.
+NVS results are rendered using PBR with the estimated
+material parameters and environment lighting.
+4.2
+Comparison
+We compare our method with previous inverse rendering methods, NeRFactor [41], InvRender [42], NVDiffrec [28], GS-IR [22], TensoIR [18] and IRGS [15]
+on the TensoIR synthetic dataset. All comparisons are
+performed using multi-view images captured under unknown lighting conditions. Tab. 2 summarizes the
+quantitative comparison and Fig. 3 shows a visual comparison.
+Our method is competitive with prior 3DGS-based IR
+approaches and improves over several earlier baselines
+across NVS, albedo reconstruction, and relighting.
+However, IRGS [15] achieves the best overall results
+on this benchmark. These results position VisibilitySplat as a direct explicit-visibility baseline that
+remains competitive with specialized 3DGS-based
+IR methods while retaining the standard rasterized
+3DGS pipeline for training and visualization. We
+attribute our performance gains over earlier baselines
+primarily to the explicit visibility term: on masked,
+single-object scenes the dominant ambiguity is often
+cast-shadow visibility and mutual occlusion under
+direct environment lighting, while multi-bounce transport is comparatively weak. In this regime, sparse but
+physically grounded transmittance queries already provide a large part of the benefit for disentangling albedo
+and lighting. Compared to IRGS, our lightweight
+separation between rasterized splatting for efficient
+training/preview and sparse ray-based visibility queries
+offers a favorable practicality-accuracy trade-off, but
+still leaves room for improvement in terms of absolute
+reconstruction quality.
+137
+WSCG 2026, CSRN Vol. 3601
+ISSN 2464-4617 (print)
+ISSN 2464-4625 (online)
+Computer Science Research Notes - CSRN
+Our main source of error is imperfect surface reconstruction rather than instability of the occlusion ray
+tracer. In particular, inaccurate normals lead to visibly curved shadow boundaries and local relighting artifacts (see Fig. 4b). This interpretation is consistent
+with our higher mean angular error compared to competing methods. Despite these geometric limitations,
+our relighting quality in PSNR, SSIM, and LPIPS remains competitive with state-of-the-art approaches.
+At the measured 800 × 800 evaluation resolution on an
+NVIDIA RTX A6000 GPU, final PBR relighting takes
+about 0.83 s/image, so the current implementation is
+not real-time. Forward relighting time is dominated
+by explicit visibility queries (about 55%) and discrete
+BRDF/environment-map integration (about 44%), the
+remaining time is spent on standard 3D Gaussian splatting and minor overhead. Thus, real-time deployment
+would require optimizing both the visibility pass and
+the PBR integration.
+4.3
+Ablation Study
+We conduct an ablation study on the components of our
+method to validate their effectiveness. We report PSNR,
+SSIM, and LPIPS for NVS, albedo reconstruction, and
+relighting on the Lego model from the TensoIR Synthetic dataset (Tab. 3), including a PBR-only baseline without visibility and without opacity-mask loss,
+as well as single-component removals.
+PBR-only baseline. We disable both the visibility ray
+tracer and the opacity-mask loss and optimize with PBR
+supervision alone. Interestingly, this baseline yields the
+highest NVS PSNR (and lowest LPIPS), though not the
+highest SSIM. We attribute this behavior to stronger
+appearance fitting, where albedo absorbs more illumination information and therefore reproduces the training lighting more easily. However, this entanglement
+hurts decomposition: albedo reconstruction and relighting quality both degrade compared to the full model.
+Visibility. To isolate the visibility term, we compare
+the without visibility variant (with opacity-mask loss retained) against the full model. Reintroducing explicit
+visibility improves relighting metrics and yields cleaner
+shadow behavior, indicating better separation of material and illumination.
+Opacity mask loss. As described in the optimization
+section, this term mainly acts through improved geometric support for ray-based visibility queries. Comparing without opacity loss with the full model shows
+lower relighting quality. Removing the opacity-mask
+loss also decreases albedo PSNR, while albedo SSIM
+and LPIPS remain nearly unchanged. This suggests
+that coarse albedo structure is preserved but radiometric
+consistency degrades. Better-defined occluding geometry from opacity regularization allows visibility rays to
+produce cleaner shadow estimates, which in turn stabilizes relighting.
+5
+http://www.wscg.eu
+CONCLUSION
+We present VisibilitySplat, an IR approach that
+augments 3DGS with a sparse visibility oracle for
+transmittance-weighted occlusion. Implemented using
+BVH-accelerated point-based ray tracing, the oracle
+complements the standard rasterized 3DGS training
+and visualization loop while injecting explicit visibility
+cues for material-illumination disentanglement. On
+a synthetic benchmark, we improve over several
+baselines in PSNR for NVS, albedo reconstruction, and
+relighting, while remaining competitive in SSIM and
+LPIPS. Ablations suggest that explicit visibility queries
+primarily improve relighting and decomposition quality, even when a PBR-only variant can score higher on
+NVS appearance metrics.
+Limitations. Our evaluation targets single, masked,
+static objects, behavior in cluttered or dynamic scenes,
+or under imperfect segmentation, is not assessed. The
+illumination model accounts for direct lighting only. Indirect transport (interreflection, subsurface, participating media) and very high-frequency environment lighting are not modeled. Finally, experiments are restricted
+to synthetic data, robustness to real captures, complex
+materials (e.g., glass, hair, translucency), and sensor
+noise remains untested.
+Future work. Future extensions include multi-object
+and full-scene evaluation, incorporation of indirect
+lighting, tighter coupling between splatting and visibility (e.g., differentiable or cached variants), improved
+geometric robustness, and investigations toward realtime deployment and comprehensive testing on real
+datasets.
+Code availability. We will release the full implementation and supporting resources upon publication of this
+paper.
+6
+REFERENCES
+[1] Jonathan T Barron and Jitendra Malik. Shape, illumination, and reflectance from shading. IEEE
+transactions on pattern analysis and machine intelligence, 37(8):1670–1687, 2014.
+[2] Jonathan T Barron, Ben Mildenhall, Matthew
+Tancik, Peter Hedman, Ricardo Martin-Brualla,
+and Pratul P Srinivasan. Mip-NeRF: A multiscale
+representation for anti-aliasing neural radiance
+fields. In Proceedings of the IEEE/CVF international conference on computer vision, pages
+5855–5864, 2021.
+[3] Jonathan T Barron, Ben Mildenhall, Dor Verbin,
+Pratul P Srinivasan, and Peter Hedman. MipNeRF 360: Unbounded anti-aliased neural radiance fields. In Proceedings of the IEEE/CVF
+conference on computer vision and pattern recognition, pages 5470–5479, 2022.
+138
+WSCG 2026, CSRN Vol. 3601
+ISSN 2464-4617 (print)
+ISSN 2464-4625 (online)
+Computer Science Research Notes - CSRN
+[4] Jonathan T Barron, Ben Mildenhall, Dor Verbin,
+Pratul P Srinivasan, and Peter Hedman. ZipNeRF: Anti-aliased grid-based neural radiance
+fields. In Proceedings of the IEEE/CVF International Conference on Computer Vision, pages
+19697–19705, 2023.
+[5] Gershon Buchsbaum. A spatial processor model
+for object colour perception. Journal of the
+Franklin institute, 310(1):1–26, 1980.
+[6] Brent Burley and Walt Disney Animation Studios.
+Physically-based shading at disney. In Acm siggraph, volume 2012, pages 1–7. vol. 2012, 2012.
+[7] Anpei Chen, Zexiang Xu, Andreas Geiger, Jingyi
+Yu, and Hao Su. TensoRF: Tensorial radiance
+fields. In European conference on computer vision, pages 333–350. Springer, 2022.
+[8] Hongze Chen, Zehong Lin, and Jun Zhang. GIGS: Global illumination decomposition on gaussian splatting for inverse rendering. arXiv preprint
+arXiv:2410.02619, 2024.
+[9] Paul Debevec. Rendering synthetic objects into
+real scenes: bridging traditional and image-based
+graphics with global illumination and high dynamic range photography. In Proceedings of the
+25th Annual Conference on Computer Graphics and Interactive Techniques, SIGGRAPH ’98,
+pages 189–198, New York, NY, USA, 1998. Association for Computing Machinery.
+[10] Jan-Niklas Dihlmann, Arjun Majumdar, Andreas
+Engelhardt, Raphael Braun, and Hendrik Lensch.
+Subsurface scattering for gaussian splatting. Advances in Neural Information Processing Systems,
+37:121765–121789, 2024.
+[11] Jiahui Fan, Fujun Luan, Jian Yang, Milos Hasan,
+and Beibei Wang. RNG: Relightable neural gaussians. In Proceedings of the Computer Vision and
+Pattern Recognition Conference, pages 26525–
+26534, 2025.
+[12] Sara Fridovich-Keil, Giacomo Meanti, Frederik Rahbæk Warburg, Benjamin Recht, and
+Angjoo Kanazawa. K-planes: Explicit radiance
+fields in space, time, and appearance. In Proceedings of the IEEE/CVF Conference on Computer
+Vision and Pattern Recognition, pages 12479–
+12488, 2023.
+[13] Sara Fridovich-Keil, Alex Yu, Matthew Tancik,
+Qinhong Chen, Benjamin Recht, and Angjoo
+Kanazawa. Plenoxels: Radiance fields without
+neural networks. In Proceedings of the IEEE/CVF
+conference on computer vision and pattern recognition, pages 5501–5510, 2022.
+[14] Jian Gao, Chun Gu, Youtian Lin, Zhihao Li, Hao
+Zhu, Xun Cao, Li Zhang, and Yao Yao. Relightable 3D gaussians: Realistic point cloud re-
+http://www.wscg.eu
+lighting with brdf decomposition and ray tracing.
+In European Conference on Computer Vision,
+pages 73–89. Springer, 2024.
+[15] Chun Gu, Xiaofei Wei, Zixuan Zeng, Yuxuan
+Yao, and Li Zhang. IRGS: Inter-reflective gaussian splatting with 2d gaussian ray tracing. In
+Proceedings of the Computer Vision and Pattern
+Recognition Conference, pages 10943–10952,
+2025.
+[16] Binbin Huang, Zehao Yu, Anpei Chen, Andreas
+Geiger, and Shenghua Gao. 2D gaussian splatting for geometrically accurate radiance fields. In
+ACM SIGGRAPH 2024 conference papers, pages
+1–11, 2024.
+[17] Yingwenqi Jiang, Jiadong Tu, Yuan Liu, Xifeng
+Gao, Xiaoxiao Long, Wenping Wang, and Yuexin
+Ma. GaussianShader: 3D gaussian splatting
+with shading functions for reflective surfaces.
+In Proceedings of the IEEE/CVF Conference on
+Computer Vision and Pattern Recognition, pages
+5322–5332, 2024.
+[18] Haian Jin, Isabella Liu, Peijia Xu, Xiaoshuai
+Zhang, Songfang Han, Sai Bi, Xiaowei Zhou,
+Zexiang Xu, and Hao Su. TensoIR: Tensorial inverse rendering. In Proceedings of the
+IEEE/CVF Conference on Computer Vision and
+Pattern Recognition, pages 165–174, 2023.
+[19] Bernhard Kerbl, Georgios Kopanas, Thomas
+Leimkühler, and George Drettakis. 3d gaussian
+splatting for real-time radiance field rendering.
+ACM Transactions on Graphics, 42(4), July 2023.
+[20] Edwin H Land and John J McCann. Lightness
+and retinex theory. Journal of the Optical society
+of America, 61(1):1–11, 1971.
+[21] Ruofan Liang, Huiting Chen, Chunlin Li, Fan
+Chen, Selvakumar Panneer, and Nandita Vijaykumar. ENVIDR: Implicit differentiable renderer
+with neural environment lighting. In Proceedings of the IEEE/CVF International Conference
+on Computer Vision, pages 79–89, 2023.
+[22] Zhihao Liang, Qi Zhang, Ying Feng, Ying Shan,
+and Kui Jia. GS-IR: 3D gaussian splatting for inverse rendering. In Proceedings of the IEEE/CVF
+Conference on Computer Vision and Pattern
+Recognition, pages 21644–21653, 2024.
+[23] Jingwang Ling, Ruihan Yu, Feng Xu, Chun Du,
+and Shuang Zhao. NeRF as a non-distant environment emitter in physics-based inverse rendering.
+In ACM SIGGRAPH 2024 Conference Papers,
+pages 1–12, 2024.
+[24] Zhenyuan Liu, Yu Guo, Xinyuan Li, Bernd
+Bickel, and Ran Zhang. BiGS: Bidirectional gaussian primitives for relightable 3d gaussian splatting. arXiv preprint arXiv:2408.13370, 2024.
+139
+WSCG 2026, CSRN Vol. 3601
+ISSN 2464-4617 (print)
+ISSN 2464-4625 (online)
+Computer Science Research Notes - CSRN
+[25] Ben Mildenhall, Pratul P Srinivasan, Matthew
+Tancik, Jonathan T Barron, Ravi Ramamoorthi,
+and Ren Ng. NeRF: Representing scenes as neural radiance fields for view synthesis. Communications of the ACM, 65(1):99–106, 2021.
+[26] Nicolas Moenne-Loccoz, Ashkan Mirzaei,
+Or Perel, Riccardo de Lutio, Janick Martinez Esturo, Gavriel State, Sanja Fidler, Nicholas Sharp,
+and Zan Gojcic. 3d gaussian ray tracing: Fast
+tracing of particle scenes. ACM Transactions on
+Graphics and SIGGRAPH Asia, 2024.
+[27] Thomas Müller, Alex Evans, Christoph Schied,
+and Alexander Keller. Instant neural graphics
+primitives with a multiresolution hash encoding.
+ACM transactions on graphics (TOG), 41(4):1–
+15, 2022.
+[28] Jacob Munkberg, Jon Hasselgren, Tianchang
+Shen, Jun Gao, Wenzheng Chen, Alex Evans,
+Thomas Müller, and Sanja Fidler. Extracting Triangular 3D Models, Materials, and Lighting From
+Images. In Proceedings of the IEEE/CVF Conference on Computer Vision and Pattern Recognition
+(CVPR), pages 8280–8290, June 2022.
+[29] Ravi Ramamoorthi and Pat Hanrahan. An efficient representation for irradiance environment
+maps. Proceedings of the 28th annual conference
+on Computer graphics and interactive techniques,
+2001.
+[30] Yahao Shi, Yanmin Wu, Chenming Wu, Xing
+Liu, Chen Zhao, Haocheng Feng, Jian Zhang, Bin
+Zhou, Errui Ding, and Jingdong Wang. GIR: 3D
+gaussian inverse rendering for relightable scene
+factorization. IEEE Transactions on Pattern Analysis and Machine Intelligence, 2025.
+[31] Dor Verbin, Peter Hedman, Ben Mildenhall, Todd
+Zickler, Jonathan T Barron, and Pratul P Srinivasan. Ref-NeRF: Structured view-dependent
+appearance for neural radiance fields. In 2022
+IEEE/CVF Conference on Computer Vision and
+Pattern Recognition (CVPR), pages 5481–5490.
+IEEE, 2022.
+[32] Peng Wang, Lingjie Liu, Yuan Liu, Christian
+Theobalt, Taku Komura, and Wenping Wang.
+NeuS: Learning neural implicit surfaces by volume rendering for multi-view reconstruction.
+arXiv preprint arXiv:2106.10689, 2021.
+[33] Tong Wu, Jia-Mu Sun, Yu-Kun Lai, Yuewen Ma,
+Leif Kobbelt, and Lin Gao. DeferredGS: Decoupled and editable gaussian splatting with deferred
+shading. arXiv preprint arXiv:2404.09412, 2024.
+[34] Yuxuan Yao, Zixuan Zeng, Chun Gu, Xiatian Zhu,
+and Li Zhang. Reflective gaussian splatting. arXiv
+preprint arXiv:2412.19282, 2024.
+[35] Lior Yariv, Jiatao Gu, Yoni Kasten, and Yaron
+http://www.wscg.eu
+Lipman. Volume rendering of neural implicit surfaces. Advances in neural information processing
+systems, 34:4805–4815, 2021.
+[36] Vickie Ye, Ruilong Li, Justin Kerr, et al. GSplat:
+An open-source library for gaussian splatting.
+Journal of Machine Learning Research, 26(34):1–
+17, 2025.
+[37] Zehao Yu, Torsten Sattler, and Andreas Geiger.
+Gaussian opacity fields: Efficient adaptive surface
+reconstruction in unbounded scenes. ACM Transactions on Graphics (ToG), 43(6):1–13, 2024.
+[38] Jingyang Zhang, Yao Yao, Shiwei Li, Jingbo Liu,
+Tian Fang, David McKinnon, Yanghai Tsin, and
+Long Quan. NeILF++: Inter-reflectable light
+fields for geometry and material estimation. In
+Proceedings of the IEEE/CVF International Conference on Computer Vision, pages 3601–3610,
+2023.
+[39] Kai Zhang, Fujun Luan, Qianqian Wang, Kavita
+Bala, and Noah Snavely. PhySG: Inverse rendering with spherical gaussians for physics-based
+material editing and relighting. In Proceedings of
+the IEEE/CVF conference on computer vision and
+pattern recognition, pages 5453–5462, 2021.
+[40] Richard Zhang, Phillip Isola, Alexei A Efros, Eli
+Shechtman, and Oliver Wang. The unreasonable
+effectiveness of deep features as a perceptual metric. In CVPR, 2018.
+[41] Xiuming Zhang, Pratul P Srinivasan, Boyang
+Deng, Paul Debevec, William T Freeman, and
+Jonathan T Barron. NeRFactor: Neural factorization of shape and reflectance under an unknown
+illumination. ACM Transactions on Graphics
+(ToG), 40(6):1–18, 2021.
+[42] Yuanqing Zhang, Jiaming Sun, Xingyi He, Huan
+Fu, Rongfei Jia, and Xiaowei Zhou. Modeling indirect illumination for inverse rendering.
+In Proceedings of the IEEE/CVF Conference on
+Computer Vision and Pattern Recognition, pages
+18643–18652, 2022.
+[43] Matthias Zwicker, Hanspeter Pfister, Jeroen
+Van Baar, and Markus Gross. EWA splatting.
+IEEE Transactions on Visualization and Computer Graphics, 8(3):223–238, 2002.
+140
+WSCG 2026, CSRN Vol. 3601

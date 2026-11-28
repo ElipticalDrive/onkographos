@@ -1,0 +1,333 @@
+Hi, First of all, thank you very much for creating this package and sharing it with the community. From the paper to the code, I found strong scientific value, and in honesty, the code was a key enabler for me to run quick experiments wi...
+
+Question/doubt about VDB allocation · Issue #2 · fzi-forschungszentrum-informatik/vdb_mapping · GitHub
+Skip to content
+You signed in with another tab or window. Reload to refresh your session.
+You signed out in another tab or window. Reload to refresh your session.
+You switched accounts on another tab or window. Reload to refresh your session.
+Dismiss alert
+Question/doubt about VDB allocation #2
+New issue
+Copy link
+New issue
+Copy link
+Open
+Open
+Question/doubt about VDB allocation#2
+Copy link
+Assignees
+Description
+YoshuaNava
+opened on Mar 16, 2022
+Issue body actions
+Hi,
+First of all, thank you very much for creating this package and sharing it with the community. From the paper to the code, I found strong scientific value, and in honesty, the code was a key enabler for me to run quick experiments with VDB 🙏
+In order to inspect the VDB structure at a deeper level, I implemented a set of functions to render point clouds with the centroids of:
+Internal octree nodes:
+a. Root (Color: Red)
+b. Internal nodes level 1 (Color: Green)
+c. Internal nodes level 2 (Color: Blue)
+d. Lead nodes level 2 (Color: White)
+Value-carrying nodes:
+a. Active voxels (Color: Yellow)
+a. Inactive voxels (Color: Pink-ish)
+Problem
+I ran an experiment, adding one point (1,1,1) into VDB in the following manner:
+```
+DataContainer data{{1, 1, 1}, {0, 0, 0}, {0, 0, 0,0}}; // Custom data container, only change.
+const Coord ptIndexCoordinates{1, 1, 1};
+acc.setValue(ptIndexCoordinates, std::move(data));
+acc.setActiveState(ptIndexCoordinates, true);
+```
+Note that I implemented a custom data container which is literally an extended version of Vec3i with space for normals, and switched the desired resolution to 15cm. The rest of the code from vdb_mapping/vdb_mapping_ros is intact.
+When I rendered the corresponding centroids, I noticed that while the internal nodes of VDB are quite sparse (literally only one active):
+The inactive value-carrying nodes (internal nodes level 2 and leaf nodes) close to the leafs seem to be plenty:
+Upon zooming out and increasing the visualization marker size, I could see the same pattern on internal nodes level 1 and 2:
+Furthermore, I collected some metrics:
+As you can see, the bounding box is minimal, only containing the point I added to the tree, and the voxel count is 1. Nonetheless, 1.6MB of memory for such a sparse tree (only one element) seems like quite a bit.
+Questions
+Why do I see so little internal nodes, but so many value-carrying inactive ones?
+a. Could it be that OpenVDB instantiates the tree topology required for a whole sub-branch of the tree upon setting one voxel as active?
+Is there a way to disable/prevent this broad instantiation scheme? I can see this becoming a bottleneck for 3D mapping.
+Thank you very much in advance.
+Best regards,
+Yoshua Nava
+Reactions are currently unavailable
+Activity
+YoshuaNava commented on Mar 16, 2022
+YoshuaNava
+on Mar 16, 2022
+Last edited by YoshuaNava
+Author
+More actions
+I ran another experiment with vdb_mapping, using the default policy to integrate points into the map, obtaining the following occupancy point cloud:
+Which corresponds to this set of tree nodes:
+And maps to the following set of potential value-carrying voxels:
+Zoom-out
+Some stats:
+YoshuaNava commented on Mar 16, 2022
+YoshuaNava
+on Mar 16, 2022
+Author
+More actions
+For future travelers, this is the code I used to render the centroids of the VDB nodes:
+Centroids of internal octree nodes.
+```
+void VDBMappingROS::publishInternalNodes() const {
+  if(m_internal_nodes_pub.getNumSubscribers() == 0) {
+    return;
+  }
+
+  ROS_INFO("Publish tree nodes centroids");
+
+  VDBMapping::GridT::Ptr grid{m_vdb_map->getMap()};
+  VDBMapping::PointCloudT::Ptr cloud(new VDBMapping::PointCloudT);
+  for (auto nodeIterator = grid->tree().cbeginNode(); nodeIterator; ++nodeIterator)
+  {
+    const openvdb::CoordBBox nodeBoundingBox{nodeIterator.getBoundingBox()};
+    const openvdb::Vec3f nodeCenterWorldCoordinates{grid->indexToWorld(nodeIterator.getCoord())};
+    const unsigned int nodeDepth{nodeIterator.getDepth()};
+    
+    // Add points to point cloud.
+    VDBMapping::PointT point;
+    point.x = nodeCenterWorldCoordinates.x();
+    point.y = nodeCenterWorldCoordinates.y();
+    point.z = nodeCenterWorldCoordinates.z();
+    if(nodeDepth == 0) {
+      // Root.
+      // Color: Red.
+      point.r = 255;
+      point.g = 0;
+      point.b = 0;
+    } else if(nodeDepth == 1) {
+      // Internal node level 1.
+      // Color: Green.
+      point.r = 0;
+      point.g = 255;
+      point.b = 0;
+    } else if(nodeDepth == 2) {
+      // Internal node level 2.
+      // Color: Blue.
+      point.r = 0;
+      point.g = 0;
+      point.b = 255;
+    } else if(nodeDepth == 3) {
+      // Leaf node.
+      // Color: White.
+      point.r = 255;
+      point.g = 255;
+      point.b = 255;
+    } else {
+      // Anything else.
+      // Color: Gray.
+      point.r = 150;
+      point.g = 150;
+      point.b = 150;
+    }
+    point.a = 255.0;
+    cloud->points.emplace_back(std::move(point));
+  }
+  cloud->width  = cloud->points.size();
+  cloud->height = 1;
+  sensor_msgs::PointCloud2 internal_nodes_cloud_msg;
+  pcl::toROSMsg(*cloud, internal_nodes_cloud_msg);
+  internal_nodes_cloud_msg.header.frame_id = m_map_frame;
+  internal_nodes_cloud_msg.header.stamp    = ros::Time::now();
+  m_internal_nodes_pub.publish(internal_nodes_cloud_msg);
+}
+```
+Centroids of value-carrying nodes.
+```
+void VDBMappingROS::publishVoxels() const {
+  if(m_voxels_pub.getNumSubscribers() == 0) {
+    return;
+  }
+  
+  ROS_INFO("Publish voxel centroids");
+
+  VDBMapping::GridT::Ptr grid{m_vdb_map->getMap()};
+  VDBMapping::PointCloudT::Ptr cloud(new VDBMapping::PointCloudT);
+  for (auto iter = grid->cbeginValueAll(); iter; ++iter)
+  {
+    const openvdb::Vec3f world_coord{grid->indexToWorld(iter.getCoord())};
+    const unsigned int nodeDepth{iter.getDepth()};
+    VDBMapping::PointT point;
+    point.x = world_coord.x();
+    point.y = world_coord.y();
+    point.z = world_coord.z();
+    if(iter.isValueOn()) {
+      // Active voxel.
+      // Color: Yellow/gold.
+      point.r = 255;
+      point.g = 215;
+      point.b = 0;
+    } else {
+      // Inactive voxel.
+      // Color: Pink-ish.
+      point.r = 255 - nodeDepth * 30;
+      point.g = 105 - nodeDepth * 10;
+      point.b = 180 + nodeDepth * 10;
+    }
+    point.a = 255.0;
+    cloud->points.emplace_back(std::move(point));
+  }
+
+  cloud->width  = cloud->points.size();
+  cloud->height = 1;
+  sensor_msgs::PointCloud2 cloud_msg;
+  pcl::toROSMsg(*cloud, cloud_msg);
+  cloud_msg.header.frame_id = m_map_frame;
+  cloud_msg.header.stamp    = ros::Time::now();
+  m_voxels_pub.publish(cloud_msg);
+}
+```
+MGBla
+self-assigned this
+on Mar 21, 2022
+YoshuaNava commented on Mar 21, 2022
+YoshuaNava
+on Mar 21, 2022
+Last edited by YoshuaNava
+Author
+More actions
+@MGBla I put a reduced version of the code that is run in the program info a single snippet, and reported the issue into the OpenVDB upstream as well, as I was unsure of whether this is a general aspect of OpenVDB, or something specific of the code.
+AcademySoftwareFoundation/openvdb#1329
+Thank you again for looking into it 🙂
+MGBla commented on Mar 21, 2022
+MGBla
+on Mar 21, 2022
+Contributor
+More actions
+Hi Yoshua,
+first of all I'm glad to hear that my package could help you.
+This is a quite interesting issue and I tested around a little with your code and tried to replicate your results as best as possible.
+Concerning the size of the grid, as is see it you missed one decimal and the grid is only 1.6MB
+which is still kind of large for only one point.
+It seems that custom types are much larger than native types (e.g. Floatgrids)
+I added a single voxel at coordinate 1,1,1 for both of them
+FloatGrid: 0.307584MB
+Custom: 1.50162MB
+However adding additional datapoints within the same leaf node (in this case coordinates below
+(8,8,8)) does not increase the memory footprint of the grid.
+Therefore I made some futher tests adding new voxel on different levels.
+For the experiments a simple custom datatype in 5,4,3 configuration was used.
+Adding additional points on leaf level
+Adding (0,0,7):
+Size: 1.50162 MB
+Increased by: 0 MB
+Adding points on first level
+Adding (0,0,8):
+Size: 1.5181 MB
+Increased by: 0.01648 MB
+Adding (0,0,16):
+Size: 1.53458 MB
+Increased by: 0.01648 MB
+Adding point on second level
+Adding (0,0,128)
+Size: 1.71593 MB
+Increased by: 0.181356 MB
+Adding point on third level
+Adding (0,0,4096)
+Size: 3.21621 MB
+Increased by: 1.50028
+with sizeof(datatype) = 0.000032 MB
+From this I would reason, that only the necessary nodes of the tree along the way to the leaf node are
+initialized.
+However, on each level all direct children are initialized with the datatype (not additional internal nodes) as well which is
+used for the tile values of the grid holding the background value of the grid.
+Therefore you initialize on the different levels:
+Level 1
+2^3^3 = 512 Nodes
+= 0.016384 MB
+Level 2
+2^4^3 = 4096
++ 512 for Level 1
+=4608 Nodes
+=0.147456 MB
+Level 3
+2^5^3 = 32768
++ 4096 for Level 2
++ 512 for Level 1
+=37376 Nodes
+=1.19603 MB
+As a result the farther a new datapoint is away from the currently allocated grid the more the
+memory footprint will increase.
+So back to your questions:
+I think the reason for this is that the iterator query the grid in two distinct ways.
+The nodeIterator iterates over all nodes which in this case are only the 4 nodes necessary to reach the
+leaf level on which we added a voxel.
+In contrast the cbeginValueAll Interator iterates over all of this grid's values (tile and voxel)
+which includes all implicitly set tile values inside the grid.
+I think you can prevent this behavior by using a different grid setup like for example decrease
+the level 3 size to prevent broad initialization. However I guess this
+is a trade-off between the used memory footprint and the time inserting additional data takes.
+I hope this made enough sense otherwise feel free to keep up the discussion.
+Best wishes
+Marvin
+YoshuaNava commented on Mar 21, 2022
+YoshuaNava
+on Mar 21, 2022
+Author
+More actions
+Hi @MGBla,
+Thank you very much for the reply and for testing the code 👍
+Based on your observation that memory is only allocated when a new point is integrated into a voxel block that is far from the volume of VDB, I think there are measures I could take to account for this during live operation, including:
+Tuning the size of the lowest level / leaf nodes of VDB to decrease the size of voxel blocks, as you suggested above.
+Selectively stream data from VDB to disk, to preserve sections of the map that are not in the current range of observation of my sensor.
+Regarding your observation about grids with complex types, I've read posts from the VDB authors inviting users to allocate multiple trees in parallel to represent different data fields. I can see a bit benefit in flexibility (e.g. the possibility of representing an arbitrary number of fields through new trees), and in re-using existing VDB utilities. But beyond that, this seems like a significant compute/memory overhead. What do you think?
+Best regards,
+Yoshua
+MGBla commented on Mar 25, 2022
+MGBla
+on Mar 25, 2022
+Contributor
+More actions
+Hi Yoshua,
+Sorry for the late reply but I had a quite stressful week.
+I think it highly depends on the use case. If you just have one or two additional values you want to store within the grid, having additional trees with native datatypes (low memory footprint) might be the way to go. But I guess at some point having a custom datatype with all necessary fields becomes more feasible.
+From a computational perspective having to make multiple accesses on different trees obviously costs much more than making a single access to get the single complex data type.
+But re-using existing VDB utilities might be a big selling point. Until know I only used morphological operators which operate as far as I know only on the active state of the grid which should also be possible with complex datatypes. But it might be interesting to explore more of the internal functionality and see what is also relevant in a mapping context.
+Best regards,
+Marvin
+YoshuaNava commented on Jul 29, 2022
+YoshuaNava
+on Jul 29, 2022
+Author
+More actions
+Hi @MGBla,
+I hope this message finds you well, and sorry to bother again with a related question.
+In your reply:
+From this I would reason, that only the necessary nodes of the tree along the way to the leaf node are
+initialized.
+However, on each level all direct children are initialized with the datatype (not additional internal nodes) as well which is
+used for the tile values of the grid holding the background value of the grid.
+Did you imply that when instantiating points far away, for example, we would also get multiple tiles instantiated on the way to that point?
+Level 2
+2^4^3 = 4096
+512 for Level 1
+=4608 Nodes
+=0.147456 MB
+For example ^
+Thank you in advance,
+Yoshua
+Sign up for free to join this conversation on GitHub. Already have an account? Sign in to comment
+Metadata
+Metadata
+Assignees
+MGBla
+Labels
+No labels
+No labels
+Type
+No type
+Projects
+No projects
+Milestone
+No milestone
+Relationships
+None yet
+Development
+No branches or pull requests
+Issue actions
+Open in GitHub Copilot app
+You can’t perform that action at this time.

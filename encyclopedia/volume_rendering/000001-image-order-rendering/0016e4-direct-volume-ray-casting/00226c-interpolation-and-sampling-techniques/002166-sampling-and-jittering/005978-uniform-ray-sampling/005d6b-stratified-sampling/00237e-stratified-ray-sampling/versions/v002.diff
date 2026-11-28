@@ -1,0 +1,143 @@
+--- v001.md
++++ v002.md
+@@ -4,17 +4,19 @@
+ 
+ ## Overview
+-Stratified Ray Sampling is a technique that divides the ray interval $[near, far]$ into $N$ equal bins and draws one sample uniformly at random from each bin [S3, unofficial]. It improves upon Uniform Ray Sampling by reducing aliasing artifacts and providing a more uniform coverage of the depth space, which is particularly beneficial for training neural volume rendering models [S1, unofficial]. Unlike [Evenly Spaced Sampling with Preprocessed Rays and Depth Indicators](2335-evenly-spaced-sampling-with-preprocessed-rays-and-depth-indi.md) which uses fixed positions, this method introduces controlled randomness within structured intervals [S3, unofficial].
++Stratified Ray Sampling divides the ray interval $[near, far]$ into $N$ evenly-spaced bins and draws one sample uniformly at random from each bin [S3, unofficial]. Unlike [Evenly Spaced Sampling with Preprocessed Rays and Depth Indicators](2335-evenly-spaced-sampling-with-preprocessed-rays-and-depth-indi.md) which uses fixed positions, this method introduces controlled randomness within structured intervals [S3, unofficial]. It is used to improve the feel and quality of training data for volume rendering by breaking up regular sampling patterns [S1, unofficial].
+ 
+ ## How it works
+ **Inputs:**
+-- `near` (float): Minimum depth ($z_{min}$).
+-- `far` (float): Maximum depth ($z_{max}$).
+-- `n_pts_per_ray` (int): Number of samples $N$ per ray.
+-- `lindisp` (bool, optional): If True, sample linearly in disparity ($1/z$) instead of depth [S3, unofficial].
+-- `perturb` (bool, optional): If True, add uniform noise within each bin [S3, unofficial].
++- `near` (float): Minimum depth ($z_{min}$) [S2, unofficial].
++- `far` (float): Maximum depth ($z_{max}$) [S2, unofficial].
++- `n_pts_per_ray` (int): Number of samples $N$ per ray [S2, unofficial].
++- `lindisp` (bool): If True, sample linearly in disparity ($1/z$) instead of depth [S3, unofficial].
++- `perturb` (bool): If True, add uniform noise within each bin [S3, unofficial].
++- `origins` (Tensor): Ray origins, shape $[N_{rays}, 3]$.
++- `directions` (Tensor): Ray directions, shape $[N_{rays}, 3]$.
+ 
+ **Outputs:**
+-- `z_vals` (Tensor of shape $[N_{rays}, N]$): Depth values for each sample.
+-- `sample_points` (Tensor of shape $[N_{rays}, N, 3]$): 3D coordinates corresponding to the depth values.
++- `z_vals` (Tensor): Depth values, shape $[N_{rays}, N]$.
++- `sample_points` (Tensor): 3D coordinates, shape $[N_{rays}, N, 3]$.
+ 
+ **Data Structures:**
+@@ -27,24 +29,23 @@
+     Compute $N$ evenly spaced values $t_i$ in the range $[0, 1]$ [S3, unofficial]:
+     $$ t_i = \frac{i}{N-1}, \quad i = 0, \dots, N-1 $$
+-    If `lindisp` is True, compute depths in disparity space:
++    If `lindisp` is True, compute depths in disparity space [S3, unofficial]:
+     $$ z_i = \frac{1}{\frac{1}{near}(1 - t_i) + \frac{1}{far}t_i} $$
+-    Otherwise, compute depths linearly:
++    Otherwise, compute depths linearly [S3, unofficial]:
+     $$ z_i = near(1 - t_i) + far \cdot t_i $$
+-    Let the resulting sorted depths be $z^{sorted}_0, \dots, z^{sorted}_{N-1}$ [S3, unofficial].
+ 
+ 2.  **Apply Perturbation (if enabled):**
+     If `perturb` is True, divide the interval into bins and sample uniformly within each bin [S3, unofficial]:
+     - Compute midpoints between sorted samples:
+-      $$ m_i = \frac{1}{2}(z^{sorted}_{i+1} + z^{sorted}_i), \quad i = 0, \dots, N-2 $$
+-    - Define bin boundaries:
+-      $$ lower_i = \begin{cases} z^{sorted}_0 & i=0 \\ m_{i-1} & i > 0 \end{cases} $$
+-      $$ upper_i = \begin{cases} m_i & i < N-1 \\ z^{sorted}_{N-1} & i = N-1 \end{cases} $$
++      $$ m_i = \frac{1}{2}(z_{i+1} + z_i), \quad i = 0, \dots, N-2 $$
++    - Define bin boundaries [S3, unofficial]:
++      $$ lower_i = \begin{cases} z_0 & i=0 \\ m_{i-1} & i > 0 \end{cases} $$
++      $$ upper_i = \begin{cases} m_i & i < N-1 \\ z_{N-1} & i = N-1 \end{cases} $$
+     - Generate uniform random noise $r_i \sim U(0, 1)$ for each sample [S3, unofficial].
+     - Compute final stratified depths:
+       $$ z_i = lower_i + (upper_i - lower_i) \cdot r_i $$
+-    If `perturb` is False, $z_i = z^{sorted}_i$ [S3, unofficial].
++    If `perturb` is False, $z_i$ remains unchanged [S3, unofficial].
+ 
+ 3.  **Compute 3D Points:**
+-    For each ray $r$ with origin $o_r$ and direction $d_r$, compute the 3D sample positions:
++    For each ray $r$ with origin $o_r$ and direction $d_r$, compute the 3D sample positions [S3, unofficial]:
+     $$ P_{r,i} = o_r + z_{r,i} \cdot d_r $$
+     This is vectorized as:
+@@ -56,5 +57,4 @@
+ ```python
+ import torch
+-import math
+ 
+ def stratified_ray_sampling(origins, directions, near, far, n_pts_per_ray, lindisp=False, perturb=True):
+@@ -76,11 +76,11 @@
+     """
+     N = n_pts_per_ray
++    device = origins.device
+     
+     # Step 1: Generate base intervals
+-    t_vals = torch.linspace(0.0, 1.0, N, device=origins.device)
++    t_vals = torch.linspace(0.0, 1.0, N, device=device)
+     
+     if lindisp:
+         # Sample linearly in disparity (1/depth)
+-        # z = 1 / ( (1/near)*(1-t) + (1/far)*t )
+         inv_near = 1.0 / near
+         inv_far = 1.0 / far
+@@ -90,18 +90,13 @@
+         z_vals = near * (1.0 - t_vals) + far * t_vals
+         
+-    # Expand z_vals to [N_rays, N] if it's a 1D tensor (assuming same near/far for all rays)
+-    # If near/far vary per ray, they should be tensors of shape [N_rays]
+-    if z_vals.dim() == 1:
+-        z_vals = z_vals.unsqueeze(0).expand(origins.shape[0], -1)
+-        
++    # Expand z_vals to [N_rays, N] for batched rays
++    z_vals = z_vals.unsqueeze(0).expand(origins.shape[0], -1)
++    
+     # Step 2: Apply Perturbation
+     if perturb:
+-        # Compute midpoints
+-        # mids[i] = 0.5 * (z_vals[i+1] + z_vals[i])
++        # Compute midpoints: mids[i] = 0.5 * (z_vals[i+1] + z_vals[i])
+         mids = 0.5 * (z_vals[:, 1:] + z_vals[:, :-1])
+         
+         # Define bin boundaries
+-        # lower: [z[0], m[0], m[1], ..., m[N-2]]
+-        # upper: [m[0], m[1], ..., m[N-2], z[N-1]]
+         lower = torch.cat([z_vals[:, :1], mids], dim=1)
+         upper = torch.cat([mids, z_vals[:, -1:]], dim=1)
+@@ -122,14 +117,12 @@
+ 
+ **Parameters:**
+-- `n_pts_per_ray`: Number of sample points per ray. Typical values range from 64 to 128 in coarse passes, up to 256+ in fine passes [S3, unofficial].
+-- `min_depth` (`near`): Starting depth. Typical values depend on the scene scale [S2, unofficial].
+-- `max_depth` (`far`): Ending depth. Typical values depend on the scene scale [S2, unofficial].
+-- `lindisp`: Boolean flag. If True, sampling is performed in disparity space, which is often preferred for scenes with large depth variations [S3, unofficial].
++- `n_pts_per_ray`: Number of sample points per ray. Typical values are $N_c = 64$ for coarse passes and $N_f = 128$ for fine passes in hierarchical sampling [S3, unofficial].
++- `min_depth` (`near`): Starting depth for sampling [S2, unofficial].
++- `max_depth` (`far`): Ending depth for sampling [S2, unofficial].
++- `lindisp`: Boolean flag. If True, sampling is performed in disparity space [S3, unofficial].
+ - `perturb`: Boolean flag. If True, uniform noise is added to break up regular sampling patterns [S3, unofficial].
+ 
+ **Edge Cases and Pitfalls:**
+-- **Precision:** When `near` is very small, $1/near$ can cause overflow or precision loss in disparity calculations [S3, unofficial].
+-- **Degenerate Input:** If `near` equals `far`, the interval has zero width, leading to division by zero in disparity mode or identical samples in linear mode.
+-- **Boundary Conditions:** The bin boundaries must be correctly defined to ensure the first and last bins are handled properly (using the actual min/max depths rather than midpoints) [S3, unofficial].
++Not given in the sources.
+ 
+ ## Subtopics
+@@ -145,14 +138,8 @@
+ 
+ ## Operating characteristics
+-- **Time Complexity:** $O(N)$ per ray to generate samples, where $N$ is the number of samples per ray. Sorting is $O(1)$ if generated in order. Random number generation is $O(N)$.
+-- **Memory Complexity:** $O(N \cdot R)$ for storing $z\_vals$ and $sample\_points$, where $R$ is the number of rays.
+-- **Performance:** Provides better visual quality than uniform sampling by reducing aliasing, at the cost of slightly higher variance than deterministic evenly spaced sampling if not averaged over multiple samples [S1, unofficial].
+-- **Strengths:** Reduces high-frequency aliasing artifacts; simple to implement; works well with neural rendering pipelines [S1, S3, unofficial].
+-- **Limitations:** Still susceptible to aliasing if $N$ is too small; random noise can introduce variance that requires multiple samples per pixel for convergence [S1, unofficial].
+-- **When to use:** Standard choice for volume rendering and NeRF training when uniform coverage is needed without strict determinism [S3, unofficial].
+-- **When not to use:** When deterministic results are required (use [Evenly Spaced Sampling...](2335-evenly-spaced-sampling-with-preprocessed-rays-and-depth-indi.md)) or when adaptive sampling based on density is needed (use [Hierarchical Sampling](2335-evenly-spaced-sampling-with-preprocessed-rays-and-depth-indi.md) or similar).
++Not given in the sources.
+ 
+ ## Background
+-Stratified sampling is a classic variance reduction technique in Monte Carlo integration. In the context of volume rendering and neural radiance fields (NeRF), it was popularized by the original NeRF paper and subsequent implementations [S3, unofficial]. It is often used in the "coarse" pass of hierarchical sampling strategies to provide a uniform initial estimate before refining samples in high-density regions [S3, unofficial]. The technique is also used in general volume rendering to improve the visual quality of training data by breaking up regular sampling patterns [S1, unofficial].
++Stratified Ray Sampling is used in the "coarse" pass of hierarchical sampling strategies to provide a uniform initial estimate before refining samples in high-density regions [S3, unofficial]. It is also used in general volume rendering to improve the feel and quality of training data by breaking up regular sampling patterns [S1, unofficial].
+ 
+ ## Sources

@@ -1,0 +1,146 @@
+# Adversarial and GAN-based Optimization
+
+Also called: GAN-based NeRF, Adversarial Radiance Field Optimization
+
+## Overview
+Adversarial and GAN-based Optimization methods enhance the photorealism and structural consistency of radiance fields by integrating a discriminator network into the training loop [G]. Unlike standard photometric optimization which minimizes pixel-wise reconstruction errors, these methods enforce that rendered image patches follow the distribution of real image patches, thereby suppressing artifacts and improving high-frequency details [S1, S2]. This family is distinct from pure geometric or photometric approaches [44-radiance-field-optimization.md] by introducing a game-theoretic component that provides gradient feedback for perceptual quality rather than just color accuracy [G].
+
+## Shared principles
+All methods in this family extend the standard radiance field optimization by adding an adversarial loss term [G]. The core mechanism involves a discriminator $D$ that distinguishes between real image patches and those rendered by the generator (the radiance field $G$ or $F_\Theta$) [G]. The optimization problem becomes a minimax game where the radiance field parameters $\Theta$ are updated to fool the discriminator, while the discriminator parameters $\eta$ are updated to correctly classify real vs. fake patches [G]. The general adversarial loss formulation follows the minimax objective:
+$$
+\min_\Theta \max_\eta L_A(\Theta, \eta) = \mathbb{E}_{I \sim P_{real}}[\log(D(I; \eta))] + \mathbb{E}_{\hat{I} \sim P_{fake}}[\log(1 - D(\hat{I}; \eta))]
+$$
+where $P_{real}$ is the distribution of real image patches and $P_{fake}$ is the distribution of generated patches [G]. Common variations include patch-based discrimination to reduce memory usage and focus on local texture consistency [GANeRF](7571-ganerf.md), gradient penalty terms (e.g., R1 penalty) to stabilize training and prevent mode collapse [GANeRF](7571-ganerf.md), and VGG-based perceptual losses to ensure semantic consistency [GANeRF](7571-ganerf.md).
+
+## Subtopics
+
+### [GNeRF](7359-gnerf.md)
+GNeRF is a two-phase framework that jointly optimizes camera poses and neural radiance fields from uncalibrated images using adversarial training [GNeRF](7359-gnerf.md). It is designed for scenarios where Structure-from-Motion (SfM) fails due to low texture or complex outside-in configurations [GNeRF](7359-gnerf.md). Unlike methods requiring rough initialization, GNeRF uses an inversion network to decouple pose estimation from direct photometric gradient propagation, which is prone to local minima [GNeRF](7359-gnerf.md). It builds on [Radiance-field optimization](44-radiance-field-optimization.md) by introducing a GAN-based generator-discriminator pair [GNeRF](7359-gnerf.md).
+
+> **Unverified code.** The code below did not pass a test run against a reference implementation, or no test fits it, so it may contain errors.
+
+```python
+def GNeRF(images, num_iterations, lambda_weight, batch_size):
+    """
+    GNeRF implementation.
+    images: List of n RGB images.
+    num_iterations: Total optimization steps.
+    lambda_weight: Weight for the inversion network penalty in hybrid loss.
+    batch_size: Number of random poses sampled per iteration.
+    """
+    # [G] Framework-specific initialization
+    F_Theta = initialize_NeRF() # MLP dim 360
+    D_Nu = initialize_Discriminator() # GRAF architecture
+    E_Theta_E = initialize_InversionNetwork() # Vision Transformer
+    Phi = [IdentityPose() for _ in images]
+    PriorPoseDist = get_prior_distribution()
+    opt_G = RMSprop(lr=0.0005) # Generator (NeRF)
+    opt_D = RMSprop(lr=0.0001) # Discriminator
+    opt_E = Adam(lr=0.0001)    # Inversion Network
+    opt_P = Adam(lr=0.005)     # Camera Poses
+
+    for iteration in range(num_iterations):
+        # --- Phase A: Adversarial Training ---
+        random_poses = [PriorPoseDist.sample() for _ in range(batch_size)]
+        rendered_images = [render_NeRF(F_Theta, pose) for pose in random_poses]
+        real_patches = dynamic_patch_sample(images, size=16)
+        fake_patches = dynamic_patch_sample(rendered_images, size=16)
+
+        loss_D = adversarial_loss(D_Nu, real_patches, fake_patches)
+        D_Nu.update(loss_D, opt_D)
+
+        loss_G_adv = adversarial_loss(D_Nu, real_patches, fake_patches, generator=True)
+        F_Theta.update(loss_G_adv, opt_G)
+
+        predicted_poses = [E_Theta_E(patch) for patch in fake_patches]
+        loss_E = sum(l2_norm(pred - true) for pred, true in zip(predicted_poses, random_poses))
+        E_Theta_E.update(loss_E, opt_E)
+
+        # --- Phase B: Photometric Refinement ---
+        rendered_estimates = [render_NeRF(F_Theta, phi) for phi in Phi]
+        loss_N = sum(l2_norm(img - est) for img, est in zip(images, rendered_estimates))
+        estimated_poses_from_E = [E_Theta_E(img) for img in images]
+        loss_PosePenalty = sum(l2_norm(est_phi - phi) for est_phi, phi in zip(estimated_poses_from_E, Phi))
+        loss_R = loss_N + lambda_weight * loss_PosePenalty
+
+        F_Theta.update(loss_R, opt_G)
+        for i in range(len(Phi)):
+            Phi[i].update(loss_R, opt_P) # [G] Explicit pose embedding update loop
+```
+
+### [GANeRF](7571-ganerf.md)
+GANeRF optimizes a 3D radiance field using a 2D adversarial loss to enforce 3D-consistent photorealism [GANeRF](7571-ganerf.md). It differs from non-adversarial refinement methods like NeRFLiX by using direct backpropagation from a discriminator to a full-resolution NeRF [GANeRF](7571-ganerf.md). It builds on [Neural Radiance Fields](4972-neural-radiance-fields.md) by integrating a discriminator into the training loop with adversarial, VGG perceptual, and gradient penalty losses [GANeRF](7571-ganerf.md).
+
+> **Unverified code.** The code below did not pass a test run against a reference implementation, or no test fits it, so it may contain errors.
+
+```python
+def train_iteration(self, batch, outputs):
+    # 1. Zero gradients
+    self.optimizers.zero_grad_all()
+
+    # 2. Check if adversarial loss is active
+    if self.config.adv_loss_mult > 0.0:
+        # 3. Extract patches
+        real_patches, fake_patches = self.get_patches(outputs, batch)
+
+        # 4. Discriminator Loss
+        pred_real = self.run_discriminator(real_patches)
+        pred_fake = self.run_discriminator(fake_patches)
+        
+        # Standard GAN loss terms (implied by get_discriminator_train_loss_dict)
+        d_loss_dict = self.compute_d_loss(real_patches, fake_patches)
+        
+        # Gradient Penalty
+        gp_loss = self.compute_simple_gradient_penalty(real_patches)
+        d_loss_dict["gp_loss"] = gp_loss * self.config.gp_loss_mult
+        
+        # Sum discriminator loss
+        d_loss = functools.reduce(torch.add, d_loss_dict.values())
+        
+        # Update Discriminator
+        d_loss.backward()
+        assert has_finite_gradients(self.discriminator.parameters())
+        self.discriminator_optimizer.step()
+
+    # 5. NeRF Loss
+    nerf_loss_dict = self.get_nerf_train_loss_dict(outputs, batch)
+    
+    # Merge discriminator loss if active
+    if self.config.adv_loss_mult > 0.0:
+        # Add adversarial loss to NeRF dict
+        adv_loss = self.compute_adv_loss(fake_patches)
+        nerf_loss_dict["adv_loss"] = adv_loss * self.config.adv_loss_mult
+        # Add VGG perceptual loss if configured
+        if self.config.vgg_loss_mult > 0.0:
+            vgg_loss = self.compute_vgg_loss(outputs, batch)
+            nerf_loss_dict["vgg_loss"] = vgg_loss * self.config.vgg_loss_mult
+            
+    loss = functools.reduce(torch.add, nerf_loss_dict.values())
+    
+    # Update NeRF
+    loss.backward()
+    self.nerf_optimizer.step()
+```
+
+### Semantic Pseudo Label with Local Texture Guidance
+This variant uses a patch discriminator to regularize 2D image fidelity, addressing view-inconsistent rendered color and texture [S1]. To overcome discriminator memorization due to limited training data, it employs differentiable augmentation $T$ applied to both real and fake samples [S1]. The GAN loss components are:
+$$
+\mathcal{L}_\text{D} =\mathbb{E}_{\boldsymbol{x} \sim p_{\text{data}}(\boldsymbol{x})}\left[f_{D}(-D(T(\boldsymbol{x})))\right] +\mathbb{E}_{\boldsymbol{z} \sim p(\boldsymbol{z})}\left[f_{D}(D(T(G(\boldsymbol{z}))))\right]
+$$
+$$
+\mathcal{L}_\text{G} =\mathbb{E}_{\boldsymbol{z} \sim p(\boldsymbol{z})}\left[f_{G}(-D(T(G(\boldsymbol{z}))))\right]
+$$
+$$
+\mathcal{L}_\text{adv} = \mathcal{L}_\text{D} + \mathcal{L}_\text{G}
+$$
+where $T$ refers to the augmentation applied on both real and fake samples [S1]. The GAN framework is trained using Hinge loss, so $f_D(x) = \max(0, 1 + x)$ and $f_G(x) = x$ [S1]. The discriminator architecture consists of a cascade of convolutional layers [S1].
+
+### No GAN Inversion
+This variant removes the GAN inversion step from the training pipeline [S2]. Renderings become blurry and uncanny because this step connects π-GAN training and reconstruction, significantly affecting overall performance [S2].
+
+## Background
+The integration of Generative Adversarial Networks (GANs) into volume rendering and NeRF optimization emerged to address the "blurry" or artifact-prone results of standard photometric loss minimization [S2]. Early works like SinNeRF [S1] demonstrated that adversarial training with local texture guidance could recover geometry and poses from uncalibrated single images. Subsequent works like Pix2NeRF [S2] focused on unsupervised conditional π-GAN translation for single-image to NeRF translation, while GANeRF [GANeRF](7571-ganerf.md) refined existing NeRFs for higher photorealism. The approach has become a standard component in high-fidelity radiance field training pipelines, often combined with perceptual losses and gradient penalties to stabilize the adversarial game [G].
+
+## Sources
+[S1] SinNeRF: Training Neural Radiance Fields on Complex Scenes from a Single Image, https://doi.org/10.1007/978-3-031-20047-2_42, fetched 2026-10-26
+[S2] Pix2NeRF: Unsupervised Conditional $\pi$-GAN for Single Image to Neural Radiance Fields Translation, https://doi.org/10.1109/cvpr52688.2022.00395, fetched 2026-10-29

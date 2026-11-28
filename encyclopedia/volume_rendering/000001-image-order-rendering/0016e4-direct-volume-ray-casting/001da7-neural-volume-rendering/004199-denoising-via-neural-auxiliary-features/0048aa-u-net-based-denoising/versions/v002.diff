@@ -1,0 +1,100 @@
+--- v001.md
++++ v002.md
+@@ -4,24 +4,24 @@
+ 
+ ## Overview
+-A U-Net based denoiser is a convolutional neural network used to enhance reconstructed volumes or images by removing noise and artifacts [S1, unofficial]. It operates as a post-processing step, taking a noisy input and auxiliary features to predict a clean output [S1, unofficial]. It sets itself apart from kernel-prediction methods by using a fixed encoder-decoder architecture with skip connections rather than predicting spatially varying kernels [S1, 13214-spatiotemporal-kernel-prediction-network-for-vpt.md, unofficial].
++A U-Net based denoiser is a convolutional neural network used to enhance reconstructed volumes or images by removing noise and artifacts [S1, unofficial]. It operates as a post-processing step, taking a noisy input to predict a clean output [S1, unofficial]. It sets itself apart from kernel-prediction methods by using a fixed encoder-decoder architecture rather than predicting spatially varying kernels [G]. It builds on the shared principles of neural auxiliary feature denoising [Parent](10536-denoising-via-neural-auxiliary-features.md).
+ 
+ ## How it works
+ **Inputs and Outputs:**
+-*   **Input:** A noisy volume or image slice (normalized to $[0, 1]$) and optionally auxiliary features (depths, normals, etc., as per [Parent](10536-denoising-via-neural-auxiliary-features.md)).
+-*   **Output:** A denoised volume or image slice.
++*   **Input:** A noisy volume or image slice normalized to the range $[0, 1]$ [S1, unofficial].
++*   **Output:** A denoised volume or image slice [S1, unofficial].
+ 
+ **Data Structures:**
+ The model is a standard 2D U-Net architecture [S1, unofficial].
+-*   **Encoder (`enc`):** A sequential block of convolutional layers.
+-    *   Layer 1: `Conv2d(1, 32, kernel_size=3, stride=1, padding=1)` followed by `ReLU`.
+-    *   Layer 2: `Conv2d(32, 64, kernel_size=3, stride=2, padding=1)` followed by `ReLU`.
+-*   **Decoder (`dec`):** A sequential block of transposed convolutional and convolutional layers.
+-    *   Layer 1: `ConvTranspose2d(64, 32, kernel_size=2, stride=2)` followed by `ReLU`.
+-    *   Layer 2: `Conv2d(32, 1, kernel_size=1)`.
++*   **Encoder (`enc`):** Sequential block of convolutional layers.
++    *   Layer 1: `Conv2d(1, 32, kernel_size=3, stride=1, padding=1)` followed by `ReLU` [S1, unofficial].
++    *   Layer 2: `Conv2d(32, 64, kernel_size=3, stride=2, padding=1)` followed by `ReLU` [S1, unofficial].
++*   **Decoder (`dec`):** Sequential block of transposed convolutional and convolutional layers.
++    *   Layer 1: `ConvTranspose2d(64, 32, kernel_size=2, stride=2)` followed by `ReLU` [S1, unofficial].
++    *   Layer 2: `Conv2d(32, 1, kernel_size=1)` [S1, unofficial].
+ *   **Parameters:** The model weights are stored in a file (e.g., `denoiser.pt`) [S1, unofficial].
+ 
+ **Steps:**
+ 1.  Load the pre-trained U-Net model from the specified model path (default `denoiser.pt`) [S1, unofficial].
+-2.  Normalize the input volume data to the range $[0, 1]$ [S1, unofficial].
++2.  Normalize the input volume data to the range $[0, 1]$ using $v_{\text{norm}} = (v - v_{\min}) / (v_{\max} - v_{\min})$ [S1, unofficial].
+ 3.  Process the volume slice-by-slice along the axial direction in inference mode [S1, unofficial].
+ 4.  For each slice:
+@@ -34,4 +34,5 @@
+ **Pseudocode:**
+ ```python
++import numpy as np
+ import torch
+ import torch.nn as nn
+@@ -63,5 +64,5 @@
+     # 1. Load model
+     model = UNet()
+-    model.load_state_dict(torch.load(model_path))
++    model.load_state_dict(torch.load(model_path, weights_only=True))
+     model.eval()
+ 
+@@ -78,5 +79,4 @@
+         
+         # 4a. Convert to tensor and add dims
+-        # Assuming slice_2d is H x W
+         tensor_input = torch.from_numpy(slice_2d).float().unsqueeze(0).unsqueeze(0)
+         
+@@ -88,6 +88,5 @@
+         enhanced_vol[z, :, :] = output_tensor.squeeze().numpy()
+ 
+-    # 5. Normalize enhanced volume and save (implementation specific)
+-    # [G] Rescale back to original intensity range if needed for downstream use
++    # 5. Rescale back to original intensity range
+     final_vol = enhanced_vol * (vol_max - vol_min) + vol_min
+     return final_vol
+@@ -99,5 +98,4 @@
+ **Edge Cases and Pitfalls:**
+ *   **Boundary Effects:** Slice-by-slice processing may introduce discontinuities at slice boundaries if the network does not account for 3D context [G].
+-*   **Normalization:** Incorrect normalization ranges can lead to poor denoising performance or artifacts [S1, unofficial].
+ *   **Input Dimensions:** The encoder uses stride 2, which halves spatial dimensions. Input slices must have even dimensions or appropriate padding to avoid size mismatches in the decoder [G].
+ 
+@@ -105,19 +103,23 @@
+ 
+ ### Post-Processing
+-Uses a standard three-layer U-Net architecture with a single residual block based on Fast Fourier Convolution (FFC) to enhance the reconstruction of high-frequency details [S2]. This variant is chosen when high-frequency detail preservation is critical, such as in radiance field rendering [S2].
++Uses a standard three-layer U-Net architecture with a single residual block based on Fast Fourier Convolution (FFC) to enhance the reconstruction of high-frequency details [S2]. This variant is chosen when high-frequency detail preservation is critical in implicit neural point cloud rendering [S2].
++
++### Post-processing Network D_θ
++A denoiser network $D_\theta$ trained in a supervised fashion for artifact removal within the RED framework [S3]. It is constructed as a non-expansive operator by unrolling the network $q$ times: $D_\theta^{(q)}(\tilde{f}) = [D_\theta \circ \dots \circ D_\theta](\tilde{f})$ [S3]. Training minimizes the distance between each iteration and the ground truth: $L_D(\theta) = \frac{1}{K} \sum_{i=1}^K \sum_{j=1}^q \frac{1}{n} \|D_\theta^{(j)}(\tilde{f}_i) - f^\dagger_i\|_2^2$ [S3].
+ 
+ ## Operating characteristics
+-*   **Time Complexity:** Linear with respect to the number of pixels/slices processed. Inference speed depends on the hardware (GPU/CPU) and the size of the input volume [S1, 13214-spatiotemporal-kernel-prediction-network-for-vpt.md, unofficial].
+-*   **Memory Complexity:** Proportional to the model size and the input batch size. The specific U-Net described has a small footprint due to its shallow depth (2 encoder layers, 2 decoder layers) [S1, unofficial].
+-*   **Performance:** The method effectively removes noise and artifacts from reconstructed CT volumes and radiance fields [S1, unofficial][S2]. It is often combined with classical methods like FDK or iterative reconstruction (SIRT) to improve final quality [S1, unofficial].
++*   **Time Complexity:** Linear with respect to the number of pixels and slices processed [G].
++*   **Memory Complexity:** Proportional to the model size and the input batch size [G]. The specific U-Net described has a small footprint due to its shallow depth (2 encoder layers, 2 decoder layers) [S1, unofficial].
++*   **Performance:** The method effectively removes noise and artifacts from reconstructed CT volumes [S1, unofficial]. It is often combined with classical methods like FDK or iterative reconstruction (SIRT) to improve final quality [S1, unofficial].
+ *   **Strengths:** Simple architecture, easy to implement, effective at removing structured noise and artifacts [S1, unofficial].
+ *   **Limitations:** Requires training data for effective performance; may blur fine details if not properly regularized [G]. Slice-by-slice processing may lack 3D coherence [G].
+-*   **When to use:** When high-quality denoising is required for medical imaging (CT) or novel view synthesis, and computational resources allow for GPU inference [S1, unofficial][S2].
++*   **When to use:** When high-quality denoising is required for medical imaging (CT) and computational resources allow for GPU inference [S1, unofficial].
+ *   **When not to use:** When real-time performance is critical and GPU inference is not available, or when 3D coherence is more important than 2D slice quality [G].
+ 
+ ## Background
+-The U-Net architecture was originally introduced for biomedical image segmentation [G]. In the context of volume rendering and CT reconstruction, it has been adapted as a deep learning enhancement step to clean up outputs from classical reconstruction algorithms like Filtered Back Projection (FDK) or Iterative Reconstruction (SIRT) [S1, unofficial]. It is used in industrial imaging systems (X-ray CT, NDE) to handle noise, sparse views, and physics constraints [S1, unofficial]. The specific implementation described in [S1, unofficial] is part of a GPU-accelerated, physics-informed CT reconstruction pipeline [S1, unofficial]. The variant using FFC is applied in implicit neural point cloud rendering for radiance field rendering [S2].
++The U-Net architecture was originally introduced for biomedical image segmentation [G]. In the context of volume rendering and CT reconstruction, it has been adapted as a deep learning enhancement step to clean up outputs from classical reconstruction algorithms like Filtered Back Projection (FDK) or Iterative Reconstruction (SIRT) [S1, unofficial]. It is used in industrial imaging systems (X-ray CT, NDE) to handle noise, sparse views, and physics constraints [S1, unofficial]. The specific implementation described in [S1, unofficial] is part of a GPU-accelerated, physics-informed CT reconstruction pipeline [S1, unofficial]. The variant using FFC is applied in implicit neural point cloud rendering for radiance field rendering [S2]. The non-expansive unrolled variant is used in neural field regularization for sparse-view X-ray CT [S3].
+ 
+ ## Sources
+ [S1] ayush-chauhan-1202/physics-aware-ct-reconstruction, https://github.com/ayush-chauhan-1202/physics-aware-ct-reconstruction, fetched 2026-10-27 (unofficial)
+-[S2] INPC: Implicit Neural Point Clouds for Radiance Field Rendering, https://doi.org/10.1109/3dv66043.2025.00021, fetched 2026-10-26+[S2] INPC: Implicit Neural Point Clouds for Radiance Field Rendering, https://doi.org/10.1109/3dv66043.2025.00021, fetched 2026-10-26
++[S3] Neural field regularization by denoising for 3D sparse-view X-ray computed tomography, https://doi.org/10.1109/3DV62453.2024.00094, fetched 2026-10-26

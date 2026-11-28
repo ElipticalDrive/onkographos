@@ -1,0 +1,197 @@
+# DIF-Gaussian Training Pipeline
+
+Also called: DIF-Gaussian, Learning 3D Gaussians for Extremely Sparse-View Cone-Beam CT Reconstruction
+
+## Overview
+A deep learning training pipeline for reconstructing 3D volumes from extremely sparse-view cone-beam CT (CBCT) projections. It predicts point-wise voxel values via a neural network optimized with Mean Squared Error (MSE) loss. It differs from standard 3D Gaussian Splatting [3D Gaussian Splatting](3D-Gaussian-Splatting.md) by focusing on sparse-view volumetric regression rather than novel view synthesis, using a specific Gaussian-based network architecture [S1, unofficial].
+
+## How it works
+**Inputs:** Sparse-view CBCT projections (typically 10 views), ground truth volume data for training.
+**Outputs:** Reconstructed 3D volume (voxel grid).
+
+**Data Structures:**
+*   `CBCT_dataset_gs`: Dataset class handling sparse view loading and point sampling.
+*   `DIF_Gaussian`: Neural network model.
+*   `train_loader`: PyTorch DataLoader yielding batches of `(projections, points_gt)`.
+
+**Parameters:**
+*   `batch_size`: 4 [S1, unofficial].
+*   `lr`: 1e-2 [S1, unofficial].
+*   `weight_decay`: 1e-3 [S1, unofficial].
+*   `lr_decay`: 1e-3 [S1, unofficial].
+*   `num_points`: 10,000 sampling points per volume [S1, unofficial].
+*   `epoch`: 400 total epochs [S1, unofficial].
+*   `num_views`: 10 sparse views per batch [S1, unofficial].
+*   `out_res_scale`: 1.0 for training, 0.5 for evaluation [S1, unofficial].
+
+**Steps:**
+1.  **Initialization:** Load configuration. Create `CBCT_dataset_gs` and `DataLoader`. Initialize `DIF_Gaussian` model. Set up SGD optimizer with `lr=1e-2`, `momentum=0.98`, `weight_decay=1e-3`. Set up `MSELoss`. If distributed training (`--dist`) is enabled, wrap model with `DistributedDataParallel` (backend `nccl`) and use `DistributedSampler` [S1, unofficial].
+2.  **Iteration:** For each epoch, iterate through `train_loader`.
+    *   Move batch to CUDA.
+    *   **Forward:** `pred = model(item)`. The model predicts point values.
+    *   **Loss:** `loss = MSELoss(pred['points_pred'], item['points_gt'])`.
+    *   **Backward:** `loss.backward()`.
+    *   **Gradient Clipping:** `clip_grad_norm_(model.parameters(), 1.0)`.
+    *   **Update:** `optimizer.step()`, `optimizer.zero_grad()`.
+3.  **Learning Rate Schedule:** Use `StepLR` scheduler. `step_size=1`. `gamma = np.power(lr_decay, 1/epoch)` [S1, unofficial].
+4.  **Evaluation:** Every 50 epochs (or every 20 epochs in the last 100 epochs), run `eval_one_epoch`. Use `out_res_scale=0.5` for speed. Metrics: PSNR, SSIM [S1, unofficial].
+
+**Pitfalls:**
+*   `F.grid_sample` behavior varies by PyTorch version. Must use `align_corners=True` to maintain compatibility and prevent training degradation in newer versions [S1, unofficial].
+
+> **Unverified code.** The code below did not pass a test run against a reference implementation, or no test fits it, so it may contain errors.
+
+```python
+import torch
+import torch.nn as nn
+import torch.nn.functional as F
+from torch.utils.data import DataLoader
+from torch.optim import SGD
+from torch.optim.lr_scheduler import StepLR
+from torch.nn.utils import clip_grad_norm_
+import numpy as np
+
+# Placeholder for external modules defined in the repository
+# from datasets.dst_gs import CBCT_dataset_gs
+# from models.model import DIF_Gaussian
+# from utils import convert_cuda
+
+def train_dif_gaussian(cfg):
+    """
+    Training loop for DIF-Gaussian.
+    cfg: Configuration object containing hyperparameters.
+    """
+    # 1. Initialization
+    # Assume CBCT_dataset_gs and DIF_Gaussian are imported from the repo
+    train_dataset = CBCT_dataset_gs(
+        dst_name=cfg.dst_name,
+        cfg=cfg.dataset,
+        split='train',
+        num_views=cfg.num_views,
+        out_res_scale=1.0,
+        random_views=cfg.random_views
+    )
+    
+    train_loader = DataLoader(
+        train_dataset,
+        batch_size=cfg.batch_size,
+        shuffle=True,
+        num_workers=cfg.num_workers,
+        pin_memory=True,
+        worker_init_fn=lambda worker_id: None # Seed handling in repo
+    )
+
+    model = DIF_Gaussian(cfg.model)
+    model = model.cuda()
+    
+    # Distributed setup placeholder
+    # if cfg.dist:
+    #     model = torch.nn.parallel.DistributedDataParallel(model, device_ids=[cfg.local_rank])
+
+    optimizer = SGD(
+        model.parameters(),
+        lr=cfg.lr,
+        momentum=0.98,
+        weight_decay=cfg.weight_decay
+    )
+    
+    criterion = nn.MSELoss()
+    
+    # StepLR with custom gamma calculation per epoch
+    # Note: Standard StepLR gamma is constant. The source uses a dynamic gamma.
+    # We implement the manual LR update or a custom scheduler.
+    scheduler = StepLR(optimizer, step_size=1, gamma=1.0) # Placeholder, updated manually
+
+    # 2. Training Loop
+    for epoch in range(1, cfg.epoch + 1):
+        model.train()
+        
+        for item in train_loader:
+            # Convert to CUDA
+            # Assuming convert_cuda handles moving tensors to device
+            item = {k: v.cuda() if isinstance(v, torch.Tensor) else v for k, v in item.items()}
+            
+            # Forward pass
+            pred = model(item)
+            
+            # Compute Loss
+            # pred['points_pred'] shape: (B, 1, N)
+            # item['points_gt'] shape: (B, 1, N) or similar
+            loss = criterion(pred['points_pred'], item['points_gt'])
+            
+            # Backward pass
+            loss.backward()
+            
+            # Gradient clipping
+            clip_grad_norm_(model.parameters(), 1.0)
+            
+            # Optimizer step
+            optimizer.step()
+            optimizer.zero_grad()
+            
+        # Learning Rate Update
+        # Dynamic gamma: gamma = lr_decay^(1/epoch)
+        current_lr = cfg.lr * np.power(cfg.lr_decay, 1.0 / epoch)
+        for param_group in optimizer.param_groups:
+            param_group['lr'] = current_lr
+            
+        # Evaluation
+        if epoch % 50 == 0 or (epoch > cfg.epoch - 100 and epoch % 20 == 0):
+            eval_one_epoch(model, train_loader, npoint=cfg.eval_npoint, out_res_scale=0.5)
+
+def eval_one_epoch(model, loader, npoint=50000, out_res_scale=0.5):
+    """
+    Evaluation function.
+    """
+    model.eval()
+    metrics = {'psnr': [], 'ssim': []}
+    
+    with torch.no_grad():
+        for item in loader:
+            item = {k: v.cuda() if isinstance(v, torch.Tensor) else v for k, v in item.items()}
+            
+            # Forward pass with evaluation flag
+            pred = model(item, is_eval=True, eval_npoint=npoint)
+            
+            # Convert to numpy for metrics
+            # Assuming pred and gt are aligned
+            pred_np = pred['points_pred'].cpu().numpy()
+            gt_np = item['points_gt'].cpu().numpy()
+            
+            # Calculate PSNR and SSIM
+            # Note: skimage metrics require specific input shapes
+            # This is a placeholder for the actual metric calculation logic
+            psnr = calculate_psnr(pred_np, gt_np)
+            ssim = calculate_ssim(pred_np, gt_np)
+            
+            metrics['psnr'].append(psnr)
+            metrics['ssim'].append(ssim)
+            
+    avg_psnr = np.mean(metrics['psnr'])
+    avg_ssim = np.mean(metrics['ssim'])
+    print(f"Epoch Eval - PSNR: {avg_psnr:.4f}, SSIM: {avg_ssim:.4f}")
+
+def calculate_psnr(pred, gt):
+    # Placeholder for PSNR calculation
+    # In repo: from skimage.metrics import peak_signal_noise_ratio
+    return 0.0
+
+def calculate_ssim(pred, gt):
+    # Placeholder for SSIM calculation
+    # In repo: from skimage.metrics import structural_similarity
+    return 0.0
+```
+
+## Operating characteristics
+*   **Time Complexity:** Linear with respect to the number of sampling points and epochs. Evaluation is accelerated by using `out_res_scale=0.5`.
+*   **Memory Complexity:** Proportional to batch size and number of sampling points (`num_points=10000`).
+*   **Strengths:** Effective for extremely sparse-view scenarios (e.g., 10 views) where traditional CT reconstruction fails.
+*   **Limitations:** Requires careful handling of PyTorch version compatibility for `grid_sample`. Performance depends heavily on the sparse view configuration.
+*   **When to use:** Sparse-view CBCT reconstruction.
+*   **When not to use:** Dense-view CT or standard novel view synthesis tasks.
+
+## Background
+Originated from the paper "Learning 3D Gaussians for Extremely Sparse-View Cone-Beam CT Reconstruction" by Yiqun Lin, Hualiang Wang, Jixiang Chen, and Xiaomeng Li, presented at MICCAI 2024 [S1, unofficial]. It adapts Gaussian-based representations for volumetric regression in medical imaging.
+
+## Sources
+[S1] xmed-lab/DIF-Gaussian, https://github.com/xmed-lab/DIF-Gaussian, fetched 2026-10-27 (unofficial)

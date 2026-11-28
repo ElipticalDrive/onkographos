@@ -1,0 +1,142 @@
+# K-Means Spatial Partitioning for Camera Clustering
+Also called: Camera Center Clustering, Initial spatial partitioning
+
+## Overview
+A data-driven spatial decomposition strategy that uses K-Means clustering on 3D camera center positions to partition large-scale scenes into sub-scenes for parallel training [S1]. It adapts to the actual distribution of viewpoints rather than using heuristic grids, providing a principled solution for decomposing large-scale scenes in 3D reconstruction tasks [S1]. Unlike [Sub-scene Extension](16800-sub-scene-extension.md), which augments cluster radii to ensure overlap, this method performs only static spatial partitioning based on camera center positions [S1].
+
+## How it works
+**Inputs:** Intrinsic and extrinsic camera parameters, and a sparse point cloud [S1].
+**Outputs:** A set of camera clusters $C_1, \dots, C_K$, where each cluster corresponds to a sub-scene for separate training [S1].
+
+**Data Structures:**
+*   **Camera Positions:** A list or array of 3D coordinates $X \in \mathbb{R}^3$ derived from the extrinsic parameters of all input cameras [S1].
+*   **Centroids:** A list of $K$ 3D coordinates $O_i \in \mathbb{R}^3$, representing the center of each cluster [S1].
+*   **Clusters:** A mapping or list of sets $C_i$, where each $C_i$ contains the indices or objects of cameras assigned to cluster $i$ [S1].
+
+**Parameters:**
+*   **$K$ (Number of clusters):** Determined by the available GPU memory during training [S1].
+*   **Maximum Iterations:** A preset limit for the K-Means loop [S1].
+*   **Threshold:** A preset value for the change in error $E$ to determine convergence [S1].
+
+**Steps:**
+1.  **Initialization:** Choose $K$ camera positions from the input set as the initial centroids $(\mathbf{O_1}, \mathbf{O_2}, \dots, \mathbf{O_K})$ [S1].
+2.  **Assignment:** For each camera position $X$, assign it to the cluster $C_j$ whose centroid $O_j$ is closest to $X$ [S1].
+3.  **Update:** Recalculate the centroid for each cluster $j$ as the mean of all camera positions $X$ currently in that cluster:
+    $$O_j = \frac{1}{|C_j|} \sum_{X \in C_j} X$$
+    [S1]
+4.  **Convergence Check:** Calculate the total within-cluster squared error $E$:
+    $$E = \sum_{i=1}^{K} \sum_{X \in C_i} ||X - O_i||^2_2$$
+    where $E$ is the total error, $K$ is the number of clusters, $C_i$ is the set of cameras in cluster $i$, $X$ is a camera position, and $O_i$ is the centroid of cluster $i$ [S1]. Repeat steps 2–4 until the change in error $E$ falls below the preset threshold or the maximum number of iterations is reached [S1].
+
+**Pseudocode:**
+> **Unverified code.** The code below did not pass a test run against a reference implementation, or no test fits it, so it may contain errors.
+
+```python
+def kmeans_spatial_partitioning(camera_positions, k, max_iterations, threshold):
+    """
+    Partitions camera positions into K clusters using K-Means.
+    
+    Args:
+        camera_positions: List of 3D vectors (numpy arrays or lists) representing camera centers.
+        k: Integer, number of clusters (determined by GPU memory).
+        max_iterations: Integer, maximum number of K-Means iterations.
+        threshold: Float, minimum change in error to continue.
+        
+    Returns:
+        clusters: List of lists, where clusters[i] contains indices of cameras in cluster i.
+        centroids: List of 3D vectors, the final centroids of each cluster.
+    """
+    n = len(camera_positions)
+    
+    # Step 1: Initialize centroids by choosing K camera positions
+    # Using a simple deterministic selection for reproducibility if random seed not specified
+    # In practice, random selection or K-Means++ is common, but source specifies "choosing K camera positions"
+    indices = list(range(n))
+    # Simple selection: pick every n/K-th element or first K if n < K
+    # To be robust, we select K distinct indices. 
+    # Note: Source does not specify the exact selection heuristic (e.g., random, first K).
+    # We assume a standard random selection for initialization [G].
+    import random
+    initial_indices = random.sample(indices, k)
+    centroids = [camera_positions[i] for i in initial_indices]
+    
+    clusters = [[] for _ in range(k)]
+    
+    for iteration in range(max_iterations):
+        # Step 2: Assignment
+        # Clear previous assignments
+        for i in range(k):
+            clusters[i] = []
+            
+        for idx, pos in enumerate(camera_positions):
+            # Find closest centroid
+            min_dist = float('inf')
+            closest_cluster = -1
+            for c_idx, centroid in enumerate(centroids):
+                # Euclidean distance squared
+                dist = sum((p - c)**2 for p, c in zip(pos, centroid))
+                if dist < min_dist:
+                    min_dist = dist
+                    closest_cluster = c_idx
+            clusters[closest_cluster].append(idx)
+            
+        # Step 3: Update
+        new_centroids = []
+        for c_idx in range(k):
+            cluster_points = [camera_positions[idx] for idx in clusters[c_idx]]
+            if not cluster_points:
+                # If a cluster is empty, keep the old centroid or reinitialize [G]
+                new_centroids.append(centroids[c_idx])
+            else:
+                # Calculate mean
+                mean_pos = [0.0, 0.0, 0.0]
+                for p in cluster_points:
+                    for d in range(3):
+                        mean_pos[d] += p[d]
+                for d in range(3):
+                    mean_pos[d] /= len(cluster_points)
+                new_centroids.append(mean_pos)
+        
+        # Step 4: Convergence Check
+        # Calculate change in error or change in centroids
+        # Source specifies "change in error E"
+        # E = sum_{i=1}^{K} sum_{X in C_i} ||X - O_i||^2_2
+        current_error = 0.0
+        for c_idx, centroid in enumerate(new_centroids):
+            for idx in clusters[c_idx]:
+                pos = camera_positions[idx]
+                dist_sq = sum((p - c)**2 for p, c in zip(pos, centroid))
+                current_error += dist_sq
+                
+        # Calculate change in error from previous iteration
+        if iteration == 0:
+            prev_error = current_error
+        else:
+            error_change = abs(current_error - prev_error)
+            if error_change < threshold:
+                break
+            prev_error = current_error
+            
+        centroids = new_centroids
+        
+    return clusters, centroids
+```
+
+## Subtopics
+
+### [Sub-scene Extension](16800-sub-scene-extension.md)
+A post-processing step applied to initial K-Means clusters to ensure sufficient overlap between neighboring sub-scenes for robust image registration and multi-block rendering. It sets itself apart from its sibling, [K-Means Spatial Partitioning for Camera Clustering](16768-k-means-spatial-partitioning-for-camera-clustering.md), by actively augmenting cluster radii and adding nearby cameras to prevent registration failures, whereas the parent method only performs static spatial partitioning based on camera center positions.
+
+## Operating characteristics
+*   **Time Complexity:** Standard K-Means complexity $O(I \cdot N \cdot K \cdot D)$, where $I$ is iterations, $N$ is number of cameras, $K$ is clusters, $D=3$ is dimensionality [S1].
+*   **Memory Complexity:** $O(N + K \cdot D)$ to store positions and centroids [S1].
+*   **Strengths:** Adapts to the actual spatial distribution of camera viewpoints, providing a principled and efficient solution for decomposing large-scale scenes [S1].
+*   **Limitations:** The initial clustering does not guarantee sufficient camera overlap between clusters, meaning overlap between sub-scenes cannot be ensured, which can negatively impact the quality of the final rendered results if not handled by subsequent steps like [Sub-scene Extension](16800-sub-scene-extension.md) [S1].
+*   **When to use:** When decomposing large-scale scenes for parallel training where GPU memory limits the size of each sub-scene [S1].
+*   **When not to use:** When uniform grid-based partitioning is sufficient or when overlap is critical and not handled by post-processing [S1].
+
+## Background
+Originated in the context of BirdNeRF, a method for fast neural reconstruction of large-scale scenes from aerial imagery [S1]. It was introduced to address the limitations of traditional heuristic or grid-based spatial decomposition methods by leveraging K-Means clustering on camera center positions [S1].
+
+## Sources
+[S1] BirdNeRF: fast neural reconstruction of large-scale scenes from aerial imagery., https://doi.org/10.1038/s41598-025-21206-z, fetched 2026-10-26

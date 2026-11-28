@@ -1,0 +1,245 @@
+# Semantic-Aware Data Grouping (PG-SAG)
+Also called: LSA-based segmentation and grouping, PG-SAG grouping
+
+## Overview
+Semantic-Aware Data Grouping (PG-SAG) is a pipeline that partitions large-scale 3D scenes into sub-groups based on semantic segmentation of specific objects (e.g., buildings) and geographic proximity, enabling parallel optimization of those regions [S1]. It sets itself apart from standard density-based clustering by integrating semantic priors (via LSA and SAM2) to define object boundaries before applying geographic clustering, whereas its sibling [Density-based Clustering with Weighted Dissimilarity](17596-density-based-clustering-with-weighted-dissimilarity.md) relies solely on geometric dissimilarity without semantic context.
+
+## How it works
+**Inputs:**
+*   Set of input images $I_{set} = \{Image_1, ..., Image_N\}$.
+*   Sparse point cloud from Structure-from-Motion (SfM), denoted as points $p_i$.
+*   Pre-trained 3D Gaussian Splatting model (initially trained or initialized).
+*   Text prompt $p_{building}$ (e.g., "buildings").
+
+**Outputs:**
+*   Refined building masks $R_{BM}$ for each image.
+*   A set of disjoint sub-groups, where each group contains:
+    *   A subset of sparse points.
+    *   A subset of images.
+    *   Refined masks for those images.
+    *   Non-building areas partitioned into geographic blocks.
+
+**Data Structures:**
+*   **Mask:** Binary image of size $H \times W$, where $H, W$ are image dimensions.
+*   **Point:** 3D coordinate $(x, y, z)$ and associated metadata.
+*   **Group:** A tuple $(P_{sub}, I_{sub}, M_{sub})$ where $P_{sub}$ is a list of points, $I_{sub}$ is a list of image indices, and $M_{sub}$ is a list of refined masks.
+
+**Parameters:**
+*   $t$: Threshold for initial LSA segmentation. Small value to capture all potential building content [S1].
+*   $\tau$: Tolerance threshold for the Unreliability Score (US). Empirically selected based on image overlapping information [S1].
+*   DBSCAN parameters ($\epsilon, min\_points$): Standard DBSCAN parameters for geographic clustering [S1].
+
+**Steps:**
+
+1.  **Initial Coarse Segmentation:**
+    Apply the Large-Segment-Anything (LSA) model to each image $Image_j$ using the text prompt $p_{building}$ and threshold $t$ to generate initial building masks $M_{building, j}$ [S1]:
+    $$ M_{building, j} = \text{LSA}(Image_j, p_{building}, t) $$
+    [S1]
+
+2.  **Identify Potential Building Points:**
+    Re-project each SfM sparse point $p_i$ to all $N$ images. Identify potential building points $p_p$ by counting how many images contain the projected point within its initial mask [S1]:
+    $$ p_p = \{ p_i \mid \sum_{j=1}^N \mathbb{I}(p_i \in M_{building, j}) > 0 \} $$
+    where $\mathbb{I}(\cdot)$ is the indicator function returning 1 if the condition is true, 0 otherwise.
+    [S1]
+
+3.  **Calculate Unreliability Score (US):**
+    For each potential building point $p_p$, calculate the US, which counts the number of times the point appears in an image but falls *outside* the initial mask [S1]:
+    $$ US(p_p) = \sum_{j=1}^N \mathbb{I}(p_p \in Image_j \setminus M_{building, j}) $$
+    where $Image_j \setminus M_{building, j}$ represents the region of image $j$ excluding the mask.
+    [S1]
+
+4.  **Filter Reliable Points:**
+    Select reliable building points $p_r$ from $p_p$ where the US is below the tolerance threshold $\tau$ [S1]:
+    $$ p_r = \{ p_p \mid US(p_p) < \tau \} $$
+    [S1]
+
+5.  **Refine Masks using SAM2:**
+    Project the reliable building points $p_r$ (or pre-trained Gaussian points derived from them) as point-based queries into the SAM2 model. Generate refined building masks $R_{BM}$ with accurate boundaries for each image [S1].
+
+6.  **Grouping via DBSCAN:**
+    Apply the DBSCAN algorithm to the reliable building points $p_r$ based on geographic proximity (3D Euclidean distance) to cluster them into sub-groups [S1].
+    *   Each cluster forms a sub-group containing the corresponding sparse points, the images that view these points, and the refined masks $R_{BM}$ for those images.
+    *   Non-building points/areas are partitioned into geographic blocks using a similar geographic partitioning strategy [S1].
+
+**Pseudocode:**
+
+> **Unverified code.** The code below did not pass a test run against a reference implementation, or no test fits it, so it may contain errors.
+
+```python
+def semantic_aware_data_grouping(images, sparse_points, lsa_model, sam2_model, 
+                                 gaussian_model, prompt, t, tau, dbscan_eps, min_points):
+    """
+    Implements the PG-SAG semantic-aware grouping pipeline.
+    
+    Args:
+        images: List of input images.
+        sparse_points: List of 3D points from SfM.
+        lsa_model: Pre-trained LSA model.
+        sam2_model: Pre-trained SAM2 model.
+        gaussian_model: Pre-trained 3D Gaussian Splatting model.
+        prompt: Text prompt for segmentation (e.g., "buildings").
+        t: Threshold for LSA.
+        tau: Tolerance threshold for Unreliability Score.
+        dbscan_eps: DBSCAN epsilon parameter.
+        min_points: DBSCAN min_points parameter.
+        
+    Returns:
+        groups: List of sub-groups (each containing points, image indices, masks).
+        non_building_blocks: List of non-building geographic blocks.
+    """
+    n_images = len(images)
+    n_points = len(sparse_points)
+    
+    # Step 1: Initial Coarse Segmentation
+    # M_building[j] is a binary mask for image j
+    m_building = []
+    for img in images:
+        mask = lsa_model.segment(img, prompt, threshold=t)
+        m_building.append(mask)
+        
+    # Step 2: Identify Potential Building Points
+    # Project points to images and check if they fall within initial masks
+    potential_building_points = []
+    for i, point in enumerate(sparse_points):
+        # Project point to all images to get 2D coordinates
+        projections = project_points_to_images([point], images) # Helper: returns list of (x,y) per image
+        count_in_mask = 0
+        for j in range(n_images):
+            x, y = projections[j]
+            if is_point_in_mask(x, y, m_building[j]):
+                count_in_mask += 1
+        if count_in_mask > 0:
+            potential_building_points.append(point)
+            
+    # Step 3 & 4: Calculate US and Filter Reliable Points
+    reliable_building_points = []
+    for point in potential_building_points:
+        projections = project_points_to_images([point], images)
+        unreliability_score = 0
+        for j in range(n_images):
+            x, y = projections[j]
+            # Check if point is in image j but OUTSIDE the mask
+            if is_point_in_image(x, y, images[j]) and not is_point_in_mask(x, y, m_building[j]):
+                unreliability_score += 1
+        
+        if unreliability_score < tau:
+            reliable_building_points.append(point)
+            
+    # Step 5: Refine Masks using SAM2
+    # Project reliable points as queries to SAM2
+    refined_masks = []
+    for j in range(n_images):
+        # Get 2D projections of reliable points for this image
+        reliable_projections_j = []
+        for point in reliable_building_points:
+            proj = project_point_to_image(point, images[j])
+            if proj is not None:
+                reliable_projections_j.append(proj)
+        
+        # Use SAM2 with point queries to generate refined mask
+        refined_mask = sam2_model.refine_mask(images[j], point_queries=reliable_projections_j)
+        refined_masks.append(refined_mask)
+        
+    # Step 6: Grouping via DBSCAN
+    # Cluster reliable points based on 3D geographic proximity
+    # DBSCAN returns cluster labels for each point in reliable_building_points
+    cluster_labels = dbscan_cluster(reliable_building_points, eps=dbscan_eps, min_samples=min_points)
+    
+    groups = []
+    non_building_points = []
+    
+    # Map original sparse points to clusters
+    # Note: reliable_building_points is a subset of sparse_points. 
+    # We need to track indices to map back to original sparse_points and images.
+    
+    # Create a map from point ID to cluster ID
+    point_to_cluster = {}
+    for idx, point in enumerate(reliable_building_points):
+        point_to_cluster[point.id] = cluster_labels[idx]
+        
+    # Assign points to groups
+    unique_clusters = set(cluster_labels)
+    for cluster_id in unique_clusters:
+        if cluster_id == -1: # Noise in DBSCAN, handle as non-building or ignore
+            continue
+            
+        group_points = []
+        group_image_indices = set()
+        group_masks = []
+        
+        # Find all reliable points in this cluster
+        cluster_reliable_points = [p for p, c in zip(reliable_building_points, cluster_labels) if c == cluster_id]
+        
+        # Determine which images view these points and collect masks
+        for point in cluster_reliable_points:
+            group_points.append(point)
+            # Find images that contain this point
+            for j in range(n_images):
+                proj = project_point_to_image(point, images[j])
+                if proj is not None:
+                    group_image_indices.add(j)
+                    
+        # Collect masks for the images in this group
+        for j in group_image_indices:
+            group_masks.append(refined_masks[j])
+            
+        groups.append({
+            'points': group_points,
+            'image_indices': list(group_image_indices),
+            'masks': group_masks
+        })
+        
+    # Handle non-building points (sparse points not in reliable_building_points)
+    # Partition them into geographic blocks (simplified as a single block or similar logic)
+    non_building_points = [p for p in sparse_points if p.id not in point_to_cluster]
+    non_building_blocks = [non_building_points] # Simplified: one block for all non-building
+    
+    return groups, non_building_blocks
+
+def is_point_in_mask(x, y, mask):
+    """Check if 2D point (x,y) is within the binary mask."""
+    h, w = mask.shape
+    if 0 <= x < w and 0 <= y < h:
+        return mask[int(y), int(x)] > 0
+    return False
+
+def is_point_in_image(x, y, image):
+    """Check if 2D point (x,y) is within image bounds."""
+    h, w = image.shape[:2]
+    return 0 <= x < w and 0 <= y < h
+
+def project_points_to_images(points, images):
+    """Project a list of 3D points to all images, returning list of lists of (x,y)."""
+    # Implementation depends on camera intrinsics/extrinsics
+    # Returns: [[(x1,y1), (x2,y2)...], [(x1,y1)...], ...] for each image
+    pass
+
+def project_point_to_image(point, image):
+    """Project a single 3D point to a single image."""
+    # Implementation depends on camera intrinsics/extrinsics
+    pass
+
+def dbscan_cluster(points, eps, min_samples):
+    """Perform DBSCAN clustering on 3D points."""
+    # Standard DBSCAN implementation
+    pass
+```
+
+**Edge Cases and Pitfalls:**
+*   **Precision:** The threshold $t$ must be small to avoid missing building parts, but too small may increase noise. The tolerance $\tau$ is empirical and depends on image overlap; insufficient overlap may lead to incorrect filtering [S1].
+*   **Boundaries:** SAM2 refinement relies on accurate point queries. If reliable points are sparse or incorrectly identified, mask boundaries may be inaccurate [S1].
+*   **Degenerate Input:** If no points are identified as reliable (e.g., due to poor overlap or incorrect prompt), the grouping step may fail or produce empty groups.
+
+## Operating characteristics
+*   **Time Complexity:** Dominated by the LSA segmentation for all images, the multi-view voting filter (projections and checks for all points), and the DBSCAN clustering. SAM2 refinement is performed per image based on reliable points.
+*   **Memory Complexity:** Requires storing masks for all images, the sparse point cloud, and the refined masks.
+*   **Strengths:** Enables parallel optimization of large-scale scenes by partitioning them into manageable, semantically coherent sub-groups [S1]. Improves segmentation accuracy for buildings compared to coarse LSA masks [S1].
+*   **Limitations:** Relies on the quality of the initial LSA segmentation and the SfM point cloud. Performance depends on the empirical selection of $\tau$ and $t$ [S1].
+*   **When to use:** Large-scale urban reconstruction where computational resources are limited and fine-grained building meshes are required [S1].
+*   **When not to use:** Scenes with minimal building content or where semantic segmentation is not relevant.
+
+## Background
+PG-SAG was introduced in the paper "PG-SAG: Parallel Gaussian Splatting for Fine-Grained Large-Scale Urban Buildings Reconstruction via Semantic-Aware Grouping" [S1]. It addresses the challenges of limited computational resources and the need for fine-grained building surface mesh generation in large-scale urban scenes [S1]. The method leverages 3D Gaussian Splatting and integrates semantic segmentation (LSA, SAM2) with geographic clustering (DBSCAN) to enable parallel optimization [S1].
+
+## Sources
+[S1] PG-SAG: Parallel Gaussian Splatting for Fine-Grained Large-Scale Urban Buildings Reconstruction via Semantic-Aware Grouping, https://doi.org/10.1007/s41064-025-00343-0, fetched 2026-10-29

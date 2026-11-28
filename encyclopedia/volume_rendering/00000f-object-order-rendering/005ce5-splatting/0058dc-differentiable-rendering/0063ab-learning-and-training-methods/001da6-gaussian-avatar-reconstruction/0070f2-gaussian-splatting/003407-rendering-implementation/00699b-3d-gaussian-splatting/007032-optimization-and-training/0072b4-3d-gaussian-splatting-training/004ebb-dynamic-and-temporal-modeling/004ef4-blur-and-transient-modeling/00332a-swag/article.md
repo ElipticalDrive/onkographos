@@ -1,0 +1,68 @@
+# SWAG
+
+Also called: SWAG: Unsupervised Transient Gaussian Splatting, Unsupervised Transient Gaussians
+
+## Overview
+SWAG is a method for unsupervised transient Gaussian splitting that extends 3D Gaussian Splatting (3DGS) by conditioning Gaussians on learned appearance embeddings and training unsupervised transient Gaussians to ignore occluders [S1][S2, unofficial]. It distinguishes itself from sibling methods like Neural Transient Field (NeTF) by operating directly in the Gaussian primitive space rather than a continuous neural field, leveraging learned embeddings to separate static geometry from transient artifacts [S1][S2, unofficial].
+
+## How it works
+SWAG builds on the standard 3DGS representation [13851-blur-and-transient-modeling.md] but introduces mechanisms to handle transient elements (e.g., moving people, reflections) without explicit segmentation masks.
+
+**Inputs and Outputs:**
+*   **Input:** A set of unposed or posed images containing transient occluders.
+*   **Output:** A set of 3D Gaussians representing the static scene geometry and appearance, effectively filtering out transient objects.
+
+**Data Structures:**
+The method maintains the standard 3DGS attributes for each Gaussian $i$: position $\mathbf{c}_i$, rotation $\mathbf{q}_i$, scale $\mathbf{s}_i$, opacity $\alpha_i$, and spherical harmonics coefficients for color $\mathbf{c}_{i, SH}$. Additionally, SWAG introduces:
+*   **Appearance Embeddings:** A learned embedding vector $\mathbf{e}_i$ associated with each Gaussian or spatial region, used to condition the appearance and distinguish static from transient features [S1][S2, unofficial].
+
+**Algorithm Steps:**
+1.  **Initialization:** Initialize Gaussians from the input images using standard 3DGS initialization (e.g., SfM points) [13851-blur-and-transient-modeling.md].
+2.  **Embedding Conditioning:** Associate each Gaussian with an appearance embedding $\mathbf{e}_i$. This embedding allows the model to learn distinct appearance characteristics for static and transient components [S1][S2, unofficial].
+3.  **Rendering:** Render the scene using standard alpha-blending rasterization. The color contribution of each Gaussian is modulated by its embedding [S1][S2, unofficial].
+4.  **Transient Gaussian Training:** During optimization, the method trains "unsupervised transient Gaussians." These are Gaussians that are allowed to have high opacity and distinct embeddings but are penalized if they do not align with the static structure or if they represent occluders [S1][S2, unofficial].
+5.  **Occlusion Ignoring:** The optimization process implicitly learns to ignore occluders by adjusting the embeddings and opacities such that transient elements do not contribute to the final static reconstruction [S1][S2, unofficial].
+
+**Pseudocode:**
+> **Unverified code.** The code below did not pass a test run against a reference implementation, or no test fits it, so it may contain errors.
+
+```python
+# SWAG Training Step
+def swag_step(images, cameras, gaussians, embeddings):
+    # 1. Render image using current Gaussians and embeddings
+    rendered_image = render(gaussians, cameras, embeddings)
+    
+    # 2. Compute photometric loss against ground truth
+    loss = l1_loss(rendered_image, images)
+    
+    # 3. Backpropagate to update Gaussians and embeddings
+    # The key is that transient Gaussians are trained to 
+    # ignore occluders, effectively separating them from static geometry
+    loss.backward()
+    
+    # 4. Update Gaussians and embeddings
+    update(gaussians, embeddings)
+    
+    return loss
+```
+
+**Parameters:**
+*   **Learning Rate:** Standard 3DGS learning rates apply [13851-blur-and-transient-modeling.md].
+*   **Embedding Dimension:** Not given in the sources.
+
+**Edge Cases:**
+*   **Precision:** Standard floating-point precision issues in 3DGS apply [13851-blur-and-transient-modeling.md].
+*   **Boundaries:** Transient objects moving rapidly may leave artifacts if the embedding conditioning is not robust [S1][S2, unofficial].
+
+## Operating characteristics
+*   **Time Complexity:** Comparable to 3DGS, with additional overhead for embedding conditioning [S1][S2, unofficial].
+*   **Memory Complexity:** Increased memory usage due to stored appearance embeddings for each Gaussian [S1][S2, unofficial].
+*   **Strengths:** State-of-the-art results on diverse photo scenes with transient occluders [S1][S2, unofficial].
+*   **Limitations:** Requires careful tuning of embedding conditioning to avoid overfitting to transients [S1][S2, unofficial].
+
+## Background
+SWAG was introduced as an extension to 3D Gaussian Splatting to handle unsupervised transient Gaussian splitting [S1][S2, unofficial]. It is part of the broader trend of improving 3DGS robustness in real-world scenarios with dynamic elements [S1][S2, unofficial].
+
+## Sources
+[S1] From Volume Rendering to 3D Gaussian Splatting: Theory and Applications, https://doi.org/10.1109/sibgrapi67909.2025.11223276, fetched 2026-10-26
+[S2] From Volume Rendering to 3D Gaussian Splatting, https://www.visgraf.impa.br/Data/RefBib/PS_PDF/tutorial-sib2025/tutorial-sib2025.pdf, fetched 2026-10-28 (unofficial)

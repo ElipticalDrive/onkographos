@@ -1,0 +1,187 @@
+# GPU-based Eraser and Digger Tools
+
+Also called: Painting paradigm clipping, Sculpting tools
+
+## Overview
+GPU-based eraser and digger tools are interactive visualization methods that allow users to selectively remove voxels from a volume rendering using a "painting" paradigm [S1]. They solve the problem of intuitive, real-time data manipulation by mapping 2D screen interactions to 3D voxel selection via line-of-sight projection [S1]. Unlike the parent [Convex VOI Clipping via Weighted Sweep Graph](15939-convex-voi-clipping-via-weighted-sweep-graph.md), which defines a static convex boundary for the entire Volume of Interest (VOI), these tools define dynamic, user-controlled removal zones that persist across multiple interaction strokes [S1].
+
+## How it works
+
+### Inputs and Outputs
+*   **Inputs:**
+    *   `ClippedImage`: The resampled 3D volume data defined by the parent clipper [S1].
+    *   `Sight-Reference-Point (SRP)`: A 2D point $(u, v)$ on the screen selected by the user via mouse input [S1].
+    *   `Circle-of-Interest Radius ($R$)`: A scalar parameter defining the extent of the selection area on the projection plane [S1].
+    *   `Digging Depth ($D_{dig}$)`: A scalar parameter (for Digger tool only) defining the maximum depth from the surface along the viewing direction [S1].
+*   **Outputs:**
+    *   `SculptBuffer`: A 3D texture buffer storing visibility/distance information [S1].
+    *   Final rendered image where selected voxels are invisible [S1].
+
+### Data Structures
+
+**SculptBuffer**
+*   **Type:** 3D Texture Buffer.
+*   **Layout:** Scalar values.
+*   **Content:** Stores the minimum screen-coordinate distance between any previously set SRP and the voxel's projection on the screen [S1].
+*   **Initialization:** All voxels initialized to the largest representable number (infinity), indicating all voxels are visible [S1].
+*   **Update Logic:** For a new SRP, if the new projected distance $d_{new}$ for a voxel is less than the stored value $d_{old}$, update $d_{old} \leftarrow d_{new}$ [S1]. Otherwise, leave unchanged [S1]. This ensures the buffer tracks the closest SRP encountered for each voxel [S1].
+
+**ClippedImage**
+*   **Type:** 3D Volume Texture.
+*   **Content:** The original 3D image resampled by the parent convex clipper [S1].
+
+**2DSculptBuffer**
+*   **Type:** 2D Texture Array / Side-by-side slices.
+*   **Purpose:** Intermediate representation used to bypass hardware limitations regarding 3D texture writes from fragment shaders [S1].
+
+### Algorithm Steps
+
+1.  **SRP Acquisition:** The user places a 2D point (SRP) on the screen [S1].
+2.  **Line-of-Sight Calculation:** Apply the inverse viewing transformation to the SRP to obtain the line of projective equivalent points in 3D space [S1].
+    *   For perspective projection, this defines a cone.
+    *   For parallel projection, this defines a cylinder [S1].
+3.  **Voxel Projection:** For every voxel in the `ClippedImage`:
+    *   Project the voxel center onto the 2D projection plane (screen) [S1].
+    *   Compute the 2D Euclidean distance $d$ between the projected voxel center and the SRP [S1].
+4.  **SculptBuffer Update:**
+    *   Calculate the new distance $d_{new}$ for the current SRP.
+    *   If $d_{new} < \text{SculptBuffer}[voxel]$, update $\text{SculptBuffer}[voxel] \leftarrow d_{new}$ [S1].
+5.  **Visibility Determination (Eraser):**
+    *   A voxel is considered for removal if $\text{SculptBuffer}[voxel] \le R$ [S1].
+    *   Voxels satisfying this condition are marked invisible in the final rendering [S1].
+6.  **Visibility Determination (Digger):**
+    *   First, identify voxels selected by the Eraser criteria ($\text{SculptBuffer}[voxel] \le R$) [S1].
+    *   For these selected voxels, determine the depth along the viewing direction from the first point of intersection with the volume [S1].
+    *   If the depth is less than the `Digging Depth` ($D_{dig}$), write a specific value to the `SculptBuffer` that forces the voxel to be invisible [S1].
+    *   Voxels with depth $\ge D_{dig}$ remain visible (or retain their previous visibility state based on the distance check) [S1].
+
+### Pseudocode
+
+> **Unverified code.** The code below did not pass a test run against a reference implementation, or no test fits it, so it may contain errors.
+
+```python
+def update_sculpt_buffer(sculpt_buffer, clipped_image, srp_2d, radius, digging_depth, is_digger_mode):
+    """
+    Updates the SculptBuffer based on the current SRP and tool parameters.
+    
+    Args:
+        sculpt_buffer: 3D array, initialized to infinity.
+        clipped_image: 3D volume data.
+        srp_2d: Tuple (u, v), the 2D screen coordinates of the SRP.
+        radius: Float, the Circle-of-Interest radius.
+        digging_depth: Float, the max depth for the Digger tool.
+        is_digger_mode: Boolean, True for Digger, False for Eraser.
+    """
+    # 1. Get inverse view ray for SRP
+    # This yields a ray origin and direction in world space
+    ray_origin, ray_direction = inverse_view_transform(srp_2d)
+    
+    # 2. Iterate over all voxels in ClippedImage
+    for voxel in clipped_image.voxels:
+        # Project voxel center to screen space
+        projected_center = project_to_screen(voxel.center, ray_origin, ray_direction)
+        
+        # Compute 2D Euclidean distance to SRP
+        dist_2d = euclidean_distance(projected_center, srp_2d)
+        
+        # Update SculptBuffer with minimum distance
+        if dist_2d < sculpt_buffer[voxel]:
+            sculpt_buffer[voxel] = dist_2d
+            
+        # Determine visibility
+        is_in_circle = dist_2d <= radius
+        
+        if is_digger_mode:
+            # Digger Logic: Check depth along viewing direction
+            # Find first intersection of ray with volume boundary
+            first_intersection_depth = get_depth_from_surface(voxel, ray_origin, ray_direction)
+            
+            if is_in_circle and first_intersection_depth < digging_depth:
+                # Force invisibility
+                sculpt_buffer[voxel] = INVISIBLE_MARKER
+            # Else: Keep existing value (which might be <= radius, making it invisible,
+            # or > radius, keeping it visible)
+        else:
+            # Eraser Logic: Simple radius check
+            if is_in_circle:
+                # Mark as invisible. 
+                # Note: The source says "ignored (invisible) in further image generation".
+                # We store a value that signifies invisibility.
+                # If the buffer stores distance, we might store a special flag or 
+                # rely on the renderer to check <= radius. 
+                # Based on source: "All voxels 'touched' ... being ignored".
+                # We assume the renderer checks sculpt_buffer[voxel] <= radius.
+                pass 
+            # Else: Keep existing value
+
+def render(clipped_image, sculpt_buffer, radius):
+    """
+    Renders the volume using the SculptBuffer for visibility.
+    """
+    for voxel in clipped_image.voxels:
+        # Check visibility based on SculptBuffer
+        # If the buffer stores the min distance, check against radius
+        if sculpt_buffer[voxel] <= radius:
+            continue # Skip rendering this voxel (invisible)
+        else:
+            render_voxel(voxel, clipped_image[voxel])
+
+# Hardware Limitation Workaround
+def generate_2d_sculpt_buffer(sculpt_buffer_3d):
+    """
+    Generates a 2D representation of the 3D SculptBuffer to bypass 
+    hardware limitations on 3D texture writes from fragment processing.
+    """
+    # Store slices side-by-side
+    width = sculpt_buffer_3d.width * sculpt_buffer_3d.depth
+    height = sculpt_buffer_3d.height
+    buffer_2d = new_texture(width, height)
+    
+    for z in range(sculpt_buffer_3d.depth):
+        for y in range(sculpt_buffer_3d.height):
+            for x in range(sculpt_buffer_3d.width):
+                buffer_2d[x + z * sculpt_buffer_3d.width, y] = sculpt_buffer_3d[x, y, z]
+    return buffer_2d
+
+def load_3d_sculpt_buffer(buffer_2d, sculpt_buffer_3d):
+    """
+    Reads back the 2D buffer to CPU and reconstructs the 3D buffer on GPU.
+    """
+    # Read back to CPU memory
+    cpu_data = read_texture_to_cpu(buffer_2d)
+    
+    # Reconstruct 3D structure
+    for z in range(sculpt_buffer_3d.depth):
+        for y in range(sculpt_buffer_3d.height):
+            for x in range(sculpt_buffer_3d.width):
+                sculpt_buffer_3d[x, y, z] = cpu_data[x + z * sculpt_buffer_3d.width, y]
+```
+
+### Parameters
+*   **SRP:** 2D point $(u, v)$ on the screen [S1].
+*   **Circle-of-Interest Radius ($R$):** Controls the extents of the imaginary volume on the projection plane. Defined by a slider [S1].
+*   **Digging Depth ($D_{dig}$):** Specifies the depth from the first point of intersection with the volume along the viewing direction. Defined by a slider [S1].
+
+### Edge Cases and Pitfalls
+*   **Hardware Limitation:** Current graphics hardware prevents 3D textures from being written as the output of fragment processing [S1].
+    *   *Solution:* Generate a 2D representation (`2DSculptBuffer`) using several slices stored side-by-side, read back to CPU, then pass pointer to GPU to create 3D `SculptBuffer` without further processing [S1].
+*   **Precision:** The distance calculation is performed in screen coordinates (2D Euclidean distance) [S1].
+*   **Degenerate Input:** If the SRP is outside the volume bounds, no voxels may be selected depending on the projection geometry [S1].
+
+## Operating characteristics
+
+*   **Time Complexity:** $O(N)$ where $N$ is the number of voxels in the `ClippedImage`, as every voxel must be projected and checked against the SRP [S1].
+*   **Memory Complexity:** $O(N)$ for the `SculptBuffer` [S1].
+*   **Performance:** Real-time interactive performance is achieved by offloading the selection logic to the GPU [S1].
+*   **Strengths:** Intuitive "painting" interaction; supports persistent selection (accumulation of SRPs) via the `SculptBuffer` [S1].
+*   **Limitations:** Dependent on hardware capabilities for 3D texture writes, requiring a CPU-GPU round-trip workaround [S1]. The "Digger" tool requires additional depth calculations [S1].
+
+## Background
+
+*   **Origin:** The method was introduced in the paper "Real-time interactive visualization and manipulation of the volumetric data using GPU-based methods" [S1].
+*   **Context:** It is part of a suite of interactive tools for volumetric data, including a convex VOI clipper using Weighted Sweep Graphs (WSG) [S1].
+*   **Usage:** Used for real-time interactive visualization and manipulation of volumetric data [S1].
+
+## Sources
+
+[S1] Real-time interactive visualization and manipulation of the volumetric data using GPU-based methods, https://doi.org/10.1117/12.536578, fetched 2026-10-26

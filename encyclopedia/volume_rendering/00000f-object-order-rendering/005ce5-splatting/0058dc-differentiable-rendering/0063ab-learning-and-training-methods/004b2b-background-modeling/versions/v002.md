@@ -1,0 +1,80 @@
+# Background Modeling
+
+Also called: Background MLP and SH Model, Static Background Modeling
+
+## Overview
+Background Modeling addresses static or slowly varying background elements in dynamic scene reconstruction, preventing foreground primitives from absorbing background pixels and causing halos or ghosting [S3][S4, unofficial]. It separates the background from the foreground by modeling it independently, either via a differentiable MLP with spherical harmonics for view-dependent appearance [S3] or via a per-camera residual network [S4, unofficial]. This decoupling distinguishes it from sibling methods that integrate background into the primary scene representation [G].
+
+## How it works
+The method operates by estimating a background component that is added to the foreground rendering [S3][S4, unofficial]. Two primary implementations exist in the literature: a differentiable MLP-based model for view-dependent appearance and a per-camera residual network [S3][S4, unofficial].
+
+### Inputs and Outputs
+*   **Inputs:** Camera viewing direction $\mathbf{d}$ or camera pose $C_i$, pixel coordinates, and optionally an initial background estimate $\bar{I}_{bg}$ [S3][S4, unofficial].
+*   **Outputs:** Background color/radiance $I_{bg}$ or a background mask $M$ for loss weighting [S3][S4, unofficial].
+
+### Data Structures
+**1. Differentiable MLP with Spherical Harmonics (DeSplat variant [S3]):**
+*   **Architecture:** Multi-Layer Perceptron (MLP) with 3 hidden layers, each containing 128 hidden units [S3].
+*   **Output:** View-dependent color parameterized via Spherical Harmonics (SH) coefficients [S3].
+*   **Activation:** Not specified in sources [G: Typically ReLU or SiLU is used in such architectures].
+
+**2. Per-Camera Residual Network (PVA variant [S4, unofficial]):**
+*   **Architecture:** Network $N_{bg}$ mapping camera parameters to a background color map [S4, unofficial].
+*   **Input Encoding:** Camera $C_i$ encoded as a 4D rotation quaternion and 3D position [S4, unofficial].
+*   **Output:** Residual background color map of size $H \times W \times 3$ [S4, unofficial].
+
+### Numbered Steps
+
+#### Variant A: Differentiable MLP with Spherical Harmonics [S3]
+1.  **Render Foreground:** Compute the standard Gaussian splatting render $I_{rgb}$ and accumulated opacity $I_{\alpha}$ [G].
+2.  **Compute Background Mask:** Calculate the pixel-wise error $\epsilon(\mathbf{r})$ between the predicted background color and the ground truth [S3]. Apply a threshold $T_\epsilon$ to create a binary mask $\tilde{\epsilon}(\mathbf{r}) = \mathbb{I}(\epsilon(\mathbf{r}) \leq T_\epsilon)$ [S3]. Apply a $3 \times 3$ box filter $B_{3\times3}$ to smooth the mask: $M(\mathbf{r}) = (\tilde{\epsilon}(\mathbf{r}) * B_{3\times3})$ [S3].
+3.  **Compute Background Loss:** Use the mask $M(\mathbf{r})$ to weight the background color loss $L_{bg}$, ensuring the background model only learns from pixels confidently identified as background [S3].
+4.  **Optimize:** Update the MLP and SH parameters using the combined loss [S3].
+
+#### Variant B: Per-Camera Residual Network [S4, unofficial]
+1.  **Inpaint Initial Background:** Generate an initial estimate $\bar{I}_{bg}$ for the background using inpainting techniques, assuming the foreground object occludes parts of the background [S4, unofficial].
+2.  **Encode Camera:** Represent the current camera $C_i$ as a 4D rotation quaternion and 3D position [S4, unofficial].
+3.  **Predict Residual:** Pass the camera encoding through the network $N_{bg}$ to predict the residual background: $I_{bg} = \bar{I}_{bg} + N_{bg}(C_i)$ [S4, unofficial].
+4.  **Composite Final Image:** Combine the foreground render $I_{rgb}$ and accumulated opacity $I_{\alpha}$ with the background $I_{bg}$: $I_p = I_{rgb} + (1 - I_{\alpha}) I_{bg}$ [S4, unofficial].
+5.  **Optimize:** Minimize the difference between $I_p$ and the ground truth image [S4, unofficial].
+
+### Formulas
+*   **Masking (DeSplat):**
+    $$ \tilde{\epsilon}(\mathbf{r}) = \epsilon(\mathbf{r}) \leq T_\epsilon $$
+    $$ M(\mathbf{r}) = (\tilde{\epsilon}(\mathbf{r}) * B_{3\times3}) $$
+*   **Final Pixel Prediction (PVA):**
+    $$ I_p = I_{rgb} + (1 - I_{\alpha}) I_{bg} $$
+    $$ I_{bg} = \bar{I}_{bg} + N_{bg}(C_i) $$
+
+### Parameters
+*   **Opacity Threshold ($T_\epsilon$):** 0.003 [S3].
+*   **Spherical Harmonics Degree:** 4 [S3].
+*   **Learning Rate (Background MLP Encoder & 0th-order SH):** 0.002 [S3].
+*   **Learning Rate (Remaining SH Orders):** 0.0001 [S3].
+*   **Regularization Weight ($\lambda_{bg}$):** 0.15 [S3].
+
+### Edge Cases and Pitfalls
+*   **Halo Effects:** Inpainted backgrounds are often noisy, leading to 'halo' effects around the head or foreground objects [S4, unofficial]. Learning the residual rather than the absolute background mitigates this by not requiring a high-capacity network to account for the entire background [S4, unofficial].
+*   **Sky Modeling Overhead:** For unbounded outdoor environments, mapping 3D viewing directions to 2D environment map coordinates and updating textures via backpropagation minimizes voxel allocation overhead [S1, unofficial].
+
+## Subtopics
+
+### Background Model
+A network $N_{bg}$ that learns a per-camera fixed background to avoid learning background parts in the scene representation [S4, unofficial]. It predicts final pixels as the sum of rendered radiance and background residual [S4, unofficial]. It is chosen when the background is static but complex, and inpainting provides a reasonable initial estimate [S4, unofficial]. It differs from the DeSplat approach by using a residual network rather than a differentiable MLP with SH [S3][S4, unofficial].
+
+## Operating characteristics
+*   **Time Complexity:** The MLP approach [S3] adds minimal overhead per pixel during rendering but requires optimization time for per-image appearance embeddings [S3]. The residual network [S4, unofficial] requires a forward pass through $N_{bg}$ per camera.
+*   **Memory Complexity:** The MLP [S3] stores weights for 3 hidden layers of 128 units. The residual network [S4, unofficial] stores weights for $N_{bg}$ and the initial inpainted background map.
+*   **Strengths:** Prevents foreground-background mixing; handles view-dependent background effects (via SH or camera encoding); reduces artifacts like halos [S3][S4, unofficial].
+*   **Limitations:** Requires additional optimization parameters; inpainting-based methods [S4, unofficial] depend on the quality of the initial background estimate.
+*   **When to use:** When the background is static or slowly varying and distinct from the foreground object of interest [S3][S4, unofficial].
+*   **When not to use:** When the background is dynamic or part of the scene of interest [G].
+
+## Background
+Background modeling in the context of Gaussian Splatting and neural rendering has been developed to handle distractor-free rendering and avatar reconstruction. The DeSplat method [S3] introduces a decomposed approach using a background MLP and SH to handle complex illumination and weather effects, separate from foreground Gaussians. The PVA method [S4, unofficial] uses a per-camera background estimation network to avoid learning background parts in the scene representation, addressing halo effects common in inpainted backgrounds. The DrivingVoxels method [S1, unofficial] models the sky as a 2D spherical environment map to minimize computational overhead in unbounded outdoor environments.
+
+## Sources
+[S1] DrivingVoxels: Compositional Sparse Voxel Rasterization for Dynamic Driving Scene Reconstruction, https://doi.org/10.48550/arxiv.2606.23031, fetched 2026-10-26 (unofficial)
+[S2] RealFusion 360° Reconstruction of Any Object from a Single Image, https://doi.org/10.1109/cvpr52729.2023.00816, fetched 2026-10-30
+[S3] DeSplat: Decomposed Gaussian Splatting for Distractor-Free Rendering, https://doi.org/10.1109/CVPR52734.2025.00076, fetched 2026-11-03
+[S4] PVA: Pixel-aligned Volumetric Avatars, https://doi.org/10.48550/arxiv.2101.02697, fetched 2026-10-30 (unofficial)

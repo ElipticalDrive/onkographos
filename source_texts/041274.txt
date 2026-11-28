@@ -1,0 +1,148 @@
+I hope a github issue is the right way to get feedback on feature requests. Let me know if another approach is preferable. Motivation With a labelmap, render_torch routes each sample's intensity to a channel with a nearest-neighbour labe...
+
+[FEAT] Partial-volume (soft-label) rendering for per-structure channels · Issue #92 · eigenvivek/nanodrr · GitHub
+Skip to content
+You signed in with another tab or window. Reload to refresh your session.
+You signed out in another tab or window. Reload to refresh your session.
+You switched accounts on another tab or window. Reload to refresh your session.
+Dismiss alert
+[FEAT] Partial-volume (soft-label) rendering for per-structure channels #92
+New issue
+Copy link
+New issue
+Copy link
+Closed
+#96
+Closed
+[FEAT] Partial-volume (soft-label) rendering for per-structure channels#92
+#96
+Copy link
+Description
+tvercaut
+opened on Oct 12, 2026
+Issue body actions
+I hope a github issue is the right way to get feedback on feature requests. Let me know if another approach is preferable.
+Motivation
+With a labelmap, render_torch routes each sample's intensity to a channel with a nearest-neighbour label lookup (grid_sample(..., mode="nearest")). Two consequences:
+Thin structures alias. A vessel 1–3 voxels wide appears/disappears as rays cross voxel centres, so its channel is blocky and its integral jitters with pose.
+No gradient through the label. The label lookup is piecewise constant in the camera pose, so per-structure channels are not differentiable w.r.t. pose at structure boundaries.
+This is orthogonal to #61 (pixel-footprint anti-aliasing): that is about sampling across the detector, this is about how a sample is attributed to a class.
+It is also a building block for per-material attenuation (e.g. a separate contrast-agent material in small vessels), which is a use case I'm exploring.
+Proposal
+Replace the nearest lookup by trilinear interpolation of a one-hot label volume and weight the intensity by it:
+```
+proj_img_c        = Δs · Σ_k μ(x_k) · w_c(x_k)      w_c = trilinear(one_hot_c)
+proj_soft_label_c = Δs · Σ_k w_c(x_k)               (second output, see below)
+```
+where x_k is the k-th sample along the ray, Δs the step size (mm) between samples, μ(x_k) the interpolated linear attenuation coefficient and w_c(x_k) the interpolated one-hot weight of class c. Since Σ_c w_c = 1, the channel sum of proj_img still equals the whole-volume render.
+Second output: projected soft label. Today render_torch returns only the [B, C, H, W] image, and the projected labels are inferred implicitly from img_c > 0. That does not work with soft labels (every class near a boundary has a small non-zero weight), and there would be no way to recover per-class weights in the projection. So the soft version also returns proj_soft_label, a [B, C, H, W] map: the path length (mm) each ray spends in class c. proj_soft_label.sum(1) is the ray length, and proj_soft_label / proj_soft_label.sum(1, keepdim=True) gives one-hot-style class fractions per pixel. For a hard label, proj_soft_label_c > 0 recovers the current implicit mask.
+A working prototype (notebook) is written to stay as close as possible to render_torch, plus a render_soft wrapper mirroring render. The lines that differ from render_torch are:
+```
+# ... same coordinate change, sample points and `img = grid_sample(subject.image, ...)` as render_torch ...
+
+# trilinear one-hot weights instead of a nearest-neighbour integer lookup
+w = F.grid_sample(soft_label.expand(B, -1, -1, -1, -1), pts, mode="bilinear",
+                  padding_mode="border", align_corners=False)[..., 0]           # [B, C, n_samples, N]
+
+# weighted sum instead of scatter_add_ on nearest indices, plus the second output
+proj_img = torch.einsum("bkn,bckn->bcn", img, w) * step_size[:, None, :]
+proj_soft_label = w.sum(dim=2) * step_size[:, None, :]
+```
+with hard_to_soft_label(label, n_classes) building the [1, C, D, H, W] one-hot volume from the integer labelmap. If integrated, the soft label would probably best live on Subject (next to label, computed once, e.g. lazily like the cached μ volume).
+Note on padding_mode="border" for the weights: with zero padding, Σ_c w_c < 1 in the half-voxel border and the channel sum no longer matches the whole-volume render. The image is zero-padded outside the volume anyway, so border padding for the weights costs nothing.
+The prototype keeps the same [B, C, n_samples, N] intermediate as the existing nearest path would with C channels.
+Results
+Tutorial subject (DeepFluoro subject 1, tutorial camera: SDD 1020 mm, 2 mm pixels, 200×200, AP view, 500 samples, 8 classes, MPS):
+The notebook (gist) reproduces everything below on this subject (it also runs on nanodrr==0.1.6) and contains two figures. The first is shown here
+Top row: DRR, total structure path length, and the label overlay from nearest (img > 0) vs. soft (alpha ∝ path length).
+Rows 2–3: the smallest class (7) and the largest class (1): nearest image, soft image, projected soft label, and their difference.
+Channel sum agrees with the nearest render to 1.9e-6 (max DRR value 4.9). Σ_c proj_soft_label matches the ray length to 2.4e-7.
+Single-run timing on MPS: 0.33 s for render_torch vs. 0.05 s for the soft version. I did not investigate this and would not read much into it (it is likely the scatter_add_ in the nearest path, but I have not profiled it).
+The soft label volume is 856 MB for these 8 classes (float32, 341×197×398), versus 107 MB for the integer labelmap.
+The second image shows the individual per-class label maps: nearest img > 0, the projected soft label, and the soft label binarised with a > eps rule (the binarised mask extends about one voxel beyond the nearest one: e.g. 5680 → 5852 pixels for class 1, +3 to 5 % over the classes).
+Caveats / open questions
+Memory scales with C. A one-hot volume is [1, C, D, H, W] (see the 856 MB above for only 8 classes). With 100+ segmentation classes at 512³ this is not feasible, so this only makes sense on a collapsed material set (≈3–8 channels). The integer-label path would stay the default; soft labels would be opt-in. Half precision for the weights would halve this.
+API. Should soft labels live in Subject.label (accepting [1, C, D, H, W] floats in addition to integer ids), or in a separate field? Should the second output be returned always, or only when a soft label is used (to avoid changing the return type of render)? n_classes is currently inferred from label.max().
+Triton backend not done. The fused kernel does a nearest lookup and a single-channel scatter (_fused.py, around the cls = _sample(lab_ptr, ...) line). The soft version would do C interpolated label reads per sample (channels-last layout would keep it coalesced) and also accumulate the label output. The torch version could serve as the reference for it. I don't have an NVIDIA GPU at hand though.
+Volume boundary. The soft − nearest difference for class 7 shows a strong, systematic line along the top edge of its footprint in the tutorial figure. I believe this is where the labelmap is cut by the volume boundary, but I have not verified it.
+Unrelated observation. step_size spans the whole source–detector segment, so with n_samples=500 and a 1020 mm SDD the spacing along the ray is ~2 mm, coarser than a 1 mm voxel and much coarser than a thin vessel. For small structures this ray-axis sampling can dominate the aliasing.
+Would such a feature be of interest for nanodrr?
+Reactions are currently unavailable
+Activity
+eigenvivek commented on Oct 12, 2026
+eigenvivek
+on Oct 12, 2026
+Owner
+More actions
+Hi @tvercaut, github is perfect for feature requests and thanks for opening this one! Soft label assignment is definitely of interest because it addresses a limitation of the existing implementation: currently in nanodrr, the attenuation at each sampled point µ(x) is assigned entirely to the channel corresponding to the label at that voxel, which is problematic for boundaries between two structures.
+I like the soft label weights from trilinear interpolation on one-hot labels, but the memory scaling is an issue bc I often render DRRs with hundreds of channels. We can avoid computing the one-hot labelmap altogether if we just compute the trilinear interpolation weights manually instead of using grid_sample. That way, trilinear(onehot(labels), x) is just the trilinear weights of all neighbors of x, reduced into their labels. The label leak at boundaries isn't exactly resolved, but it's definitely better than nearest neighbors.
+If we write out trilinear manually, it actually opens up an even cleaner soft implementation. Let each sampled point has j=1..8 neighbors with attenuation µ_j, weight w_j, and label k_j. Then, the vector of per-class attenuations at x would be
+```
+M_c(x) = Σ_j u_j ⋅ w_j ⋅ [k_j == c]
+```
+where [⋅] is an indicator. This way there's no label leak at all, and it's just as fast as the soft label weight version. The projected soft label stays the same.
+Here's a picture of the output (looks basically the same as your soft version):
+Open questions
+With hand-rolled trilinear interpolation, there's no longer a memory issue (it'll still be slower than fused grid_sample kernel, but that's fine; plus claude is great at writing optimized kernels from reference torch code)
+No change needed to Subject, probably could just be a soft_labels flag in the render code, but I'm not sure what the best implementation is yet
+I'm happy to have my assistant convert this to a good triton implementation :)
+Not sure where this comes from, also need to dig into more
+In DiffDRR, I limited the sampled points to be within the bounds of the volume, rather than spanning the whole SDD. Happy to add that to nanodrr in a separate PR
+https://github.com/eigenvivek/DiffDRR/blob/984329c9d52eceb6f256c8ffb9bffd6c38d6acfc/diffdrr/renderers.py#L124-L140
+eigenvivek commented on Oct 12, 2026
+eigenvivek
+on Oct 12, 2026
+Owner
+More actions
+When you have a chance, can you please check out the soft-labels branch? This implements label-partitioned volumetric projection in a differentiable way. It also removes the label bleed at boundaries.
+However, it doesn't address two other things, which could be separate PRs:
+Path length computing. We could do this with trilinear interpolation integration, but we do have an exact way of computing it. Siddon's method in DiffDRR computes the exact intersection length of each ray with every voxel. This could be easily adapted to compute intersection lengths in this repo.
+Constraining sampled points to the volume.
+🚀React with 🚀1Reacted by Tom Vercauteren
+tvercaut commented on Oct 13, 2026
+tvercaut
+on Oct 13, 2026
+ContributorAuthor
+More actions
+Brilliant. Thanks for the soft-labels branch! I like the neighbour unrolling trick when the input 3D labels are discrete.
+I have updated my prototype gist to install the branch and to compare against render(..., soft_labels=True), on every torch device available (CPU, MPS, CUDA, with the fused Triton kernels on CUDA): https://gist.github.com/tvercaut/029b8e6acdfca096216d981301b83720 (the notebook is executed; the benchmark cell can be re-run on Colab). Numbers below are for DeepFluoro subject 1 (8 classes, 200 x 200 detector, 500 samples), medians of 5 renders.
+First impressions:
+On the branch, the channel sum matches my prototype to ~1e-5 and the per-class channels differ near boundaries (by up to 0.12 against a DRR maximum of 4.9). This is what I would expect: the branch routes each corner voxel's own $\mu_j$ to its own label (no leak), while my prototype shares the interpolated $\mu$ between classes in proportion to the label weights.
+The Triton path looks excellent. On a Colab A100: 1.2 ms for soft_labels=True (0.9 ms for nearest-neighbour), with a 13 MB peak memory, against 18-24 ms and 1.4-3.9 GB for the torch soft-label paths (3 ms / 0.56 GB for torch nearest-neighbour). It agrees with the torch path to ~1e-5. This removes the memory scaling concern on CUDA.
+Some thoughts and suggestions:
+Memory of the unrolled torch path. In the gist, my unrolled torch version uses noticeably less memory than the torch path of the branch (CPU 1.7 vs 2.5 GB, MPS 2.1 vs 3.2 GB, A100 1.44 vs 2.24 GB), mostly by computing the flat index of the lower corner once and then adding scalar offsets for the other 7 neighbours, and by keeping only frac / 1 - frac per axis instead of six masked weights and six strided indices. Part of that gap is due to a different formulation (it samples the interpolated intensity with grid_sample, so it is not equivalent to the branch). To check that the trick is useful for the branch's formulation, I ported it to _render_soft (zero-padding the volume and labelmap by one voxel so that no per-neighbour clamping or masking is needed): the outputs are identical (max difference 7e-7), the memory goes down by ~26% on MPS (3.2 to 2.4 GB) and ~8% on CPU (2.45 to 2.25 GB), but it is 15-30% slower (MPS 187 to 243 ms, CPU 289 to 333 ms), probably because of the extra padded copies. So the saving is real but modest on this formulation.
+Keeping the one-hot path, dispatched for a small number of labels. The one-hot grid_sample path is not tied to my leaky formulation: interpolating image * onehot (a [C, D, H, W] volume) with grid_sample reproduces _render_soft (max difference 1.3e-5 against the branch on this subject), i.e. it is the same no-leak soft assignment. The trade-offs are device dependent: at 8 classes the one-hot path was the fastest torch soft path on MPS (110 vs 185 ms for my unrolled loop, but 5.2 vs 2.1 GB), roughly on par on the A100 (21 vs 18 ms, 3.1 vs 1.4 GB), and clearly slower on CPU (2.3 vs 0.41 s). I have not scanned the number of classes, so I do not have a threshold to suggest; a small benchmark (see below) would be the way to pick one. On CUDA the Triton kernel makes this moot.
+Probabilistic / soft 3D label maps as input. The one-hot path would also allow feeding a float [C, D, H, W] map of per-class probabilities $p_c$ for a subject (e.g. from a segmentation network): interpolating image * p_c gives $\sum_j w_j \mu_j p_{c,j}$, the natural generalisation. The unrolled / Triton paths gather one integer label per voxel, so they cannot take such input (the data is dense in $C$ anyway). It might be worth keeping the dense path for that use case and dispatching to it automatically when the label map is a float [C, ...] tensor.
+A small benchmark script in the repo. The benchmark cell of the gist is a possible starting point: it loops over the available devices, warms up, synchronises before reading the clock, takes the median of several renders, reports CUDA peak memory, runs the Triton paths when available, and checks that the paths agree. A benchmarks/ script along those lines would help pick dispatch thresholds (torch / one-hot / Triton) and catch regressions.
+Path length / projected label. A more accurate path-length computation (e.g. Siddon, as you suggest) makes sense, and as a separate piece of work. In the meantime, approximate projected label maps can come from img_c > 0: on this subject the footprints of the branch's per-class images are identical to the ones of the trilinearly weighted projected label of my prototype for all 8 classes (e.g. 5852 pixels for class 1, against 5680 for nearest-neighbour). It is a mask, not a length, though. For a length, my prototype computes $\Delta s \sum_k w_c(x_k)$, which sums over the classes to the ray length (relative error ~2e-6) and costs about 10-15% on top of the unrolled torch path on CPU and MPS, and only a few percent on the A100. An opt-in return_soft_label_projection argument (default off, so that the default cost is unchanged) could return that per-class path length, and later be switched to an exact Siddon computation without changing the interface.
+eigenvivek commented on Oct 13, 2026
+eigenvivek
+on Oct 13, 2026
+Owner
+More actions
+Hi Tom, great glad it worked! I think the move is to add the benchmark script to the PR and merge as is. We can make new issues for
+A dedicated one-hot path (also with support for probabilistic 3D label maps)
+A dedicated per-class path length method
+A tweak to sample points for rendering exclusively within the volume
+👍React with 👍1Reacted by Tom Vercauteren
+eigenvivek
+closed this as completedin #96on Oct 13, 2026
+Sign up for free to join this conversation on GitHub. Already have an account? Sign in to comment
+Metadata
+Metadata
+Assignees
+No one assigned
+Labels
+No labels
+No labels
+Projects
+No projects
+Milestone
+No milestone
+Relationships
+None yet
+Development
+No branches or pull requests
+Issue actions
+Open in GitHub Copilot app
+You can’t perform that action at this time.

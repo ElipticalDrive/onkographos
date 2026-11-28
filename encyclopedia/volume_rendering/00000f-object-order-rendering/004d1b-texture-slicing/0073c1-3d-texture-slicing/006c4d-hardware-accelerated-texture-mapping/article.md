@@ -1,0 +1,46 @@
+# Hardware-Accelerated Texture Mapping
+
+
+## Overview
+Hardware-Accelerated Texture Mapping is a family of volume rendering techniques that exploit Graphics Processing Units (GPUs) to achieve interactive frame rates for structured grids fitting in main memory [S1, unofficial]. It solves the performance bottleneck of software-based ray casting by utilizing hardware parallel logic units, cache coherency rearrangement, and native hardware support for trilinear interpolation and alpha compositing [S1, unofficial]. It differs from [Shear-Warp](shear-warp.md) by avoiding the final warp step and performing classification after resampling, and from [Custom Hardware Units](8284-custom-hardware-units.md) by relying on general-purpose programmable GPUs rather than dedicated ASICs [G].
+
+## Shared principles
+The family relies on storing volume data in GPU texture memory and using the graphics pipeline's texture sampling hardware to perform interpolation (bilinear or trilinear) and fetch scalar values in parallel [S1, unofficial]. Rendering is typically performed by rasterizing proxy geometry (slices or rays) and compositing results in the frame buffer using hardware alpha blending or accumulation buffers [S1, unofficial]. Key shared mechanisms include:
+1.  **Texture Storage:** Volume data is mapped to 2D or 3D texture objects, with components representing intensity, RGB, or RGBA [S1, unofficial].
+2.  **Hardware Interpolation:** The texture unit performs interpolation of surrounding texels/voxels, avoiding manual shader computation for sampling [S1, unofficial].
+3.  **Compositing:** Final image assembly uses hardware-supported blending equations, such as $C_{dest} = C_{src} \cdot A_{src} + C_{dest} \cdot (1 - A_{src})$ for 2D approaches [G], or front-to-back accumulation for ray casting [G].
+4.  **Optimization:** Techniques like Early Ray Termination (ERT) or pre-computed shading volumes are used to reduce computational load [G].
+
+## Subtopics
+
+### [Hardware-Accelerated Volume Rendering](5616-hardware-accelerated-volume-rendering.md)
+A technique that performs direct volume ray casting on the GPU. It differs from other approaches by executing the ray marching loop, including classification and front-to-back compositing, within the fragment shader, leveraging hardware trilinear interpolation for sampling. It builds on [Direct volume ray casting](19-direct-volume-ray-casting.md).
+
+### [2D Texture Mapping Approaches](9842-2d-texture-mapping-approaches.md)
+Techniques that decompose a 3D scalar field into a stack of 2D slices, rasterize them as textured polygons, and composite them using hardware alpha blending. Unlike view-aligned slicing, this approach uses object-aligned slices, trading visual accuracy for hardware compatibility on systems lacking native 3D texture support [G].
+
+### [Texture-Mapped Parallel-Beam Backprojection](22636-texture-mapped-parallel-beam-backprojection.md)
+A method for filtered backprojection of 2D tomographic data (sinograms) onto a 2D image grid using graphics hardware texture mapping and frame buffer accumulation. It distinguishes itself by generating the reconstructed image directly in frame-buffer memory, allowing intermediate results to be visible projection-by-projection.
+
+### SGI Octane 2 Hardware Implementation
+This specific implementation uses the SGI Octane 2 with V series graphics cards, which support 3D pixel texture only via `glDrawPixels()` or `glCopyPixels()` [S1, unofficial]. The process requires a scratch/auxiliary buffer because pixel texture does not occur directly on a per-fragment basis during rasterization [S1, unofficial].
+**Step:**
+1.  Render the slice to a scratch/auxiliary buffer using `glDrawPixels()` or `glCopyPixels()` [S1, unofficial].
+2.  Pixel texture the slice from the scratch buffer [S1, unofficial].
+3.  If shading is enabled, render a matching slice from a shading volume and modulate (multiply) it with the current classified slice [S1, unofficial].
+4.  Copy the slice from the scratch buffer and blend it with previously rendered slices in the frame buffer [S1, unofficial].
+5.  When updating transfer function: Use raw data values (VGH) for volume texture and pre-computed RGBA shade volume [S1, unofficial].
+6.  When rotating volume: Update shade volume once rotation completes. Generate new quantized normal pixel texture [S1, unofficial].
+7.  Render each slice of the quantized normal volume orthographically in the scratch buffer [S1, unofficial].
+8.  Pixel texture the normal slice [S1, unofficial].
+9.  Copy the pixel-textured normal slice from the scratch buffer to the corresponding slice in the shade volume [S1, unofficial].
+10. Re-render the volume with the updated shade volume [S1, unofficial].
+**Pitfall:**
+*   Updating the shade volume in hardware requires that quantized normal slices are always smaller than the scratch buffer's dimensions [S1, unofficial].
+*   Some hardware implementations are not flexible enough to support rendering quantized normals as points with hardware lighting and copying to pixel texture [S1, unofficial].
+
+## Background
+The method originated with implementations on SGI Octane 2 systems using V series graphics cards and later nVidia GeForce3 series adapters [S1, unofficial]. The SGI implementation addressed the limitation of 3D pixel texture being available only through `glDrawPixels()` or `glCopyPixels()` operations, necessitating the use of scratch buffers [S1, unofficial]. The GeForce3 platform introduced dependent texture reads on a per-fragment basis, eliminating the need for scratch buffers and improving performance, though it was constrained to 2D dependent texture reads [S1, unofficial].
+
+## Sources
+[S1] Interactive Volume Rendering Using Multi-Dimensional Transfer Functions and Direct Manipulation Widgets, https://www.researchgate.net/publication/2399866_Interactive_Volume_Rendering_Using_Multi-Dimensional_Transfer_Functions_and_Direct_Manipulation_Widgets, fetched 2026-11-01 (unofficial)

@@ -1,0 +1,1910 @@
+# Slice-Base-Volume-Rendering
+
+This project implement slice-base volume rendering describe in [GPU Gems](http://developer.download.nvidia.com/books/HTML/gpugems/gpugems_ch39.html).
+
+
+# require
+
+- imgui
+
+- stb-image
+
+- glm
+
+- GLUT
+
+### Mesh.cpp
+```
+#include "main.h"
+
+
+Mesh::Mesh(int ID){
+  // textures = textures;
+  CreateMeshVBO();
+}
+
+void Mesh::CreateMeshVBO(){
+
+   glGenBuffers(2, GBO);
+   GLuint vertexdat = GBO[0];
+   GLuint veridxdat = GBO[1];
+   glBindBuffer(GL_ARRAY_BUFFER, vertexdat);
+   glBufferData(GL_ARRAY_BUFFER, 24*sizeof(GLfloat), cube_vertices, GL_STATIC_DRAW);
+   // used in glDrawElement()
+   glBindBuffer(GL_ELEMENT_ARRAY_BUFFER, veridxdat);
+   glBufferData(GL_ELEMENT_ARRAY_BUFFER, 36*sizeof(GLuint), cube_indices, GL_STATIC_DRAW);
+   std::cout<<"after GBO created"<<std::endl;
+   glGenVertexArrays(1, &VAO);
+   // vao like a closure binding 3 buffer object: verlocdat vercoldat and veridxdat
+   glBindVertexArray(VAO);
+   glEnableVertexAttribArray(0); // for vertexloc
+   // glEnableVertexAttribArray(1); // for vertexcol
+   std::cout<<"after VAO created"<<std::endl;
+   // the vertex location is the same as the vertex color
+   glBindBuffer(GL_ARRAY_BUFFER, vertexdat);
+   glVertexAttribPointer(0, 3, GL_FLOAT, GL_FALSE, 0, (GLfloat *)NULL);
+   // glVertexAttribPointer(1, 3, GL_FLOAT, GL_FALSE, 0, (GLfloat *)NULL);
+   glBindBuffer(GL_ELEMENT_ARRAY_BUFFER, veridxdat);
+   std::cout<<"after bind buffer"<<std::endl;
+}
+
+void Mesh::Bind(){
+  glBindVertexArray(VAO);
+}
+
+void Mesh::Draw(){
+  //This don't work
+  // draw mesh
+  glEnable(GL_CULL_FACE);
+  // glCullFace(glFaces);
+  glBindVertexArray(VAO);
+  glDrawElements(GL_TRIANGLES, 36, GL_UNSIGNED_INT, (GLuint *)NULL);
+  glDisable(GL_CULL_FACE);
+}
+```
+
+### RawObject.cpp
+```
+#include "main.h"
+
+RawObject::RawObject(std::string filepath,glm::vec3 _dimension){
+  file_Path = filepath;
+  dimension = _dimension;
+}
+```
+
+### Shader.cpp
+```
+// #include "Render.h"
+#include "main.h"
+#include <GL/glew.h>
+#include <fstream>
+#include <GLFW/glfw3.h>
+#ifdef __APPLE__
+#  include <GLUT/glut.h>
+#else
+#  include <GL/glut.h>
+#endif
+#include <iostream>
+#include <string>
+#include <fstream>
+#include <sstream>
+
+Shader::Shader(const std::string& filepath)
+    : m_FilePath(filepath), m_RendererID(0){
+    ShaderProgramSource source = ParseShader(filepath);
+
+    std::cout << "VERTEX" << std::endl << source.VertexSource << std::endl;
+    std::cout << "FRAGMENT" << std::endl << source.FragmentSource << std::endl;
+
+    m_RendererID = CreateShader(source.VertexSource, source.FragmentSource);
+    glUseProgram(m_RendererID);
+}
+
+Shader::~Shader()
+{
+    glDeleteProgram(m_RendererID);
+}
+
+void Shader::Bind() const
+{
+  glUseProgram(m_RendererID);
+}
+
+void Shader::Unbind() const
+{
+  glUseProgram(0);
+}
+
+int Shader::GetUniformLocation(const std::string& name){
+    if (m_UniformLocationCache.find(name) != m_UniformLocationCache.end())
+        return m_UniformLocationCache[name];
+
+    int location = glGetUniformLocation(m_RendererID, name.c_str());
+    if (location == -1)
+        std::cout << "No active uniform variable with name " << name << " found" << std::endl;
+
+    m_UniformLocationCache[name] = location;
+
+    return location;
+}
+void Shader::SetUniform3f(const std::string& name, float f0, float f1, float f2)
+{
+    glUniform3f(GetUniformLocation(name), f0, f1, f2);
+}
+void Shader::SetUniform4f(const std::string& name, float f0, float f1, float f2, float f3)
+{
+    glUniform4f(GetUniformLocation(name), f0, f1, f2, f3);
+}
+
+void Shader::SetUniformMat4f(const std::string& name, const glm::mat4& matrix)
+{
+    glUniformMatrix4fv(GetUniformLocation(name), 1, GL_FALSE, &matrix[0][0]);
+}
+
+void Shader::SetUniformInt(const std::string& name, int i){
+  glUniform1i(GetUniformLocation(name), i);
+}
+
+void Shader::SetUniform1f(const std::string& name, float f)
+{
+    glUniform1f(GetUniformLocation(name), f);
+}
+
+
+enum ShaderType
+{
+    NONE = -1, VERTEX = 0, FRAGMENT = 1
+};
+
+struct ShaderProgramSource Shader::ParseShader(const std::string& filepath){
+
+    std::ifstream stream(filepath);
+    std::string line;
+    std::stringstream ss[2];
+    ShaderType type = NONE;
+
+    while (getline(stream, line)){
+        if (line.find("#shader") != std::string::npos){
+            if (line.find("vertex") != std::string::npos)
+                type = VERTEX;
+            else if (line.find("fragment") != std::string::npos)
+                type = FRAGMENT;
+        }else{
+            ss[(int)type] << line << '\n';
+        }
+    }
+
+    struct ShaderProgramSource sps = { ss[0].str(), ss[1].str() };
+    return sps;
+}
+
+unsigned int Shader::CompileShader(unsigned int type, const std::string& source){
+    unsigned int id = glCreateShader(type);
+    const char* src = source.c_str();
+    glShaderSource(id, 1, &src, nullptr);
+    glCompileShader(id);
+
+    // Error handling
+    int result;
+    glGetShaderiv(id, GL_COMPILE_STATUS, &result);
+    std::cout << (type == GL_VERTEX_SHADER ? "vertex" : "fragment") << " shader compile status: " << result << std::endl;
+    if ( result == GL_FALSE ){
+        int length;
+        glGetShaderiv(id, GL_INFO_LOG_LENGTH, &length) ;
+        char* message = (char*) alloca(length * sizeof(char));
+        glGetShaderInfoLog(id, length, &length, message);
+        std::cout
+            << "Failed to compile "
+            << (type == GL_VERTEX_SHADER ? "vertex" : "fragment")
+            << "shader"
+            << std::endl;
+        std::cout << message << std::endl;
+        glDeleteShader(id);
+        return 0;
+    }
+
+    return id;
+}
+
+unsigned int Shader::CreateShader(const std::string& vertexShader, const std::string& fragmentShader)
+{
+    // create a shader program
+    unsigned int program = glCreateProgram();
+    unsigned int vs = CompileShader(GL_VERTEX_SHADER, vertexShader);
+    unsigned int fs = CompileShader(GL_FRAGMENT_SHADER, fragmentShader);
+
+    glAttachShader(program, vs);
+    glAttachShader(program, fs);
+
+    glLinkProgram(program);
+    GLint program_linked;
+    glGetProgramiv(program, GL_LINK_STATUS, &program_linked);
+    std::cout << "Program link status: " << program_linked << std::endl;
+    if (program_linked != GL_TRUE){
+        GLsizei log_length = 0;
+        GLchar message[1024];
+        glGetProgramInfoLog(program, 1024, &log_length, message);
+        std::cout << "Failed to link program" << std::endl;
+        std::cout << message << std::endl;
+    }
+    glValidateProgram(program);
+    glDeleteShader(vs);
+    glDeleteShader(fs);
+
+    return program;
+}
+```
+
+### Texture.cpp
+```
+#include "main.h"
+
+Texture::Texture(const std::string& path,glm::vec3 dimension)
+    : m_RendererID(0), m_FilePath(path), m_LocalBuffer(nullptr)
+{
+    // inintialize 3D texture from file
+    m_LocalBuffer = load_3d_raw_data(path.c_str(), dimension);
+
+    glGenTextures(1, &m_RendererID);
+    glBindTexture(GL_TEXTURE_3D, m_RendererID); // Bind without slot selection
+
+    // glBindTexture(GL_TEXTURE_3D, g_volTexObj);
+    glTexParameteri(GL_TEXTURE_3D, GL_TEXTURE_MAG_FILTER, GL_LINEAR);
+    glTexParameteri(GL_TEXTURE_3D, GL_TEXTURE_MIN_FILTER, GL_LINEAR);
+    glTexParameteri(GL_TEXTURE_3D, GL_TEXTURE_WRAP_S, GL_REPEAT);
+    glTexParameteri(GL_TEXTURE_3D, GL_TEXTURE_WRAP_T, GL_REPEAT);
+    glTexParameteri(GL_TEXTURE_3D, GL_TEXTURE_WRAP_R, GL_REPEAT);
+    // pixel transfer happens here from client to OpenGL server
+    // glPixelStorei(GL_UNPACK_ALIGNMENT,1);
+    glTexImage3D(GL_TEXTURE_3D, 0, GL_RED, dimension.x, dimension.y, dimension.z, 0, GL_RED, GL_UNSIGNED_BYTE,m_LocalBuffer);
+
+    Unbind();
+    delete []m_LocalBuffer;
+    // if (m_LocalBuffer)
+    //     stbi_image_free(m_LocalBuffer);
+};
+
+Texture::~Texture(){
+  glDeleteTextures(1, &m_RendererID);
+}
+
+void Texture::Bind(unsigned int slot) const{
+  glActiveTexture(GL_TEXTURE0 + slot);
+  glBindTexture(GL_TEXTURE_2D, m_RendererID);
+}
+
+void Texture::Unbind() const{
+  glBindTexture(GL_TEXTURE_2D, 0);
+}
+```
+
+### TextureSlice.cpp
+```
+#include <cmath>
+#include "main.h"
+
+TextureSlice::TextureSlice(int ID){
+  /**
+   * Texture slice computes all vertex from interaction with cube edges
+   * @param center : center of the cube for 3-D texture
+   */
+  std::cout<<"init textureSlice"<<std::endl;
+  center = glm::vec3(0.0f,0.0f,0.0f);
+}
+
+void TextureSlice::add(glm::vec3 vertex){
+  /**
+   * store interaction int sliceVertex
+   * @param vertex interaction with edges on cube.
+   */
+  sliceVertex.push_back(vertex);
+}
+void TextureSlice::getSortedVertex(std::vector<glm::vec3> &vertices){
+  std::cout<<"getSortedVertex"<<std::endl;
+  ComputeCenter();
+  if(angelVertex.size() > 3){
+    std::sort(angelVertex.begin(),angelVertex.end(),PseudoangleComparator);
+    int i = 0;
+    int j = 1;
+    while(i<angelVertex.size()){
+      if(j == angelVertex.size()){
+        j=0;
+      }
+      vertices.push_back(angelVertex[i].position);
+      vertices.push_back(center);
+      vertices.push_back(angelVertex[j].position);
+      i++;j++;
+    }
+  }else{
+    std::sort(angelVertex.begin(),angelVertex.end(),PseudoangleComparator);
+    for(int i = 0;i< angelVertex.size() ;i++){
+      vertices.push_back(angelVertex[i].position);
+    }
+  }
+}
+
+void TextureSlice::ComputeCenter(){
+  /**
+   * compute center of interaction of a slice sort interaction in counter clock
+   * wise order.
+   * ==========================================================================
+   * example:
+   * p1,p1 and center o
+   *
+   *               p1 *
+   *
+   *             o      p2 *
+   *
+   *     will push in vector in p1->p2->o order
+   * ==========================================================================
+   */
+  float centerx = 0.0f;
+  float centery = 0.0f;
+  float centerz = 0.0f;
+  int len = sliceVertex.size();
+  for (int i = 0;i<len;i++){
+    centerx += sliceVertex[i].x;
+    centery += sliceVertex[i].y;
+    centerz += sliceVertex[i].z;
+  }
+  center = glm::vec3(centerx/len,centery/len,centerz/len);
+  for(int j = 0;j<len;j++){
+    angelV v;
+    v.position = sliceVertex[j];
+    v.angel = Pseudoangle(center,sliceVertex[j]);
+    angelVertex.push_back(v);
+  }
+}
+
+float TextureSlice::Pseudoangle(glm::vec3 p1, glm::vec3 p2){
+  /**
+   * pseudo angle to sort vertex in counter clock wise order
+   * @param p1 center of a slice
+   * @param p2 slice interaction on cube edge
+   */
+  glm::vec3 delta = p2 - p1;
+   float result;
+
+   if ((delta.x == 0) && (delta.y == 0)) {
+      return -1;
+   } else {
+      result = delta.y / (abs(delta.x) + abs(delta.y));
+
+      if (delta.x < 0.0) {
+         result = 2.0f - result;
+      } else {
+         result = 4.0f + result;
+      }
+   }
+   return result;
+}
+```
+
+### Utils.cpp
+```
+#include <fstream>
+#include <filesystem>
+#include <sstream>
+#include <stdlib.h>
+#include <stdio.h>
+#include <math.h>
+#include <stdlib.h>
+#include <vector>
+#include <string>
+//GLM
+#include "glm/glm.hpp"
+#include "glm/gtc/matrix_transform.hpp"
+#include <GL/glew.h>
+#include "stb_image/stb_image.h"
+//applicaiton file
+#include "main.h"
+
+
+GLubyte * load_3d_raw_data(std::string texture_path, glm::vec3 dimension) {
+  /**
+   * Load .raw file for volume rendering
+   * @param texture_path path to texture file
+   * @param dimension 3D dimention of texture
+   */
+	size_t size = dimension.x * dimension.y * dimension.z;
+	std::cout << texture_path << std::endl;
+	FILE *fp;
+	GLubyte *data = new GLubyte[size];			  // 8bit
+	if (!(fp = fopen(texture_path.c_str(), "rb"))) {
+		std::cout << "Error: opening .raw file failed" << std::endl;
+		exit(EXIT_FAILURE);
+	}
+	else {
+		std::cout << "OK: open .raw file successed" << std::endl;
+	}
+	if (fread(data, sizeof(char), size, fp) != size) {
+		std::cout << "Error: read .raw file failed" << std::endl;
+		exit(1);
+	}
+	else {
+		std::cout << "OK: read .raw file successed" << std::endl;
+	}
+	fclose(fp);
+	return data;
+}
+
+void load1DTexturecolorBar(unsigned int textureID){
+
+	glGenTextures(1, &textureID);
+	glActiveTexture(GL_TEXTURE1);
+	glBindTexture(GL_TEXTURE_1D, textureID);
+
+	int width, height, nrComponents;
+
+	stbi_set_flip_vertically_on_load(true);
+	unsigned char *data = stbi_load("data_and_code/colorbar.png", &width, &height, &nrComponents, 0);
+
+	if (data)
+	{
+		GLenum format;
+		if (nrComponents == 1)
+			format = GL_RED;
+		else if (nrComponents == 3)
+			format = GL_RGB;
+		else if (nrComponents == 4)
+			format = GL_RGBA;
+
+		// set the texture parameters
+		glTexParameteri(GL_TEXTURE_1D, GL_TEXTURE_WRAP_S, GL_REPEAT);
+		glTexParameteri(GL_TEXTURE_1D, GL_TEXTURE_MAG_FILTER, GL_LINEAR);
+		glTexParameteri(GL_TEXTURE_1D, GL_TEXTURE_MIN_FILTER, GL_LINEAR);
+
+		//allocate the data to texture memory. Since pData is on stack, we donot delete it
+		glTexImage1D(GL_TEXTURE_1D, 0, GL_RGBA, 256, 3 * sizeof(float) * 4, GL_RGBA, GL_FLOAT, data);
+		float pdata = data[256];
+		stbi_image_free(data);
+	}
+	else
+	{
+		std::cout << "Texture failed to load at path: " << std::endl;
+		stbi_image_free(data);
+	}
+}
+
+CenteredView getMinMax(std::vector<Vertex> &vertices){
+  GLfloat min_x, max_x, min_y, max_y, min_z, max_z;
+  min_x = max_x = vertices[0].Position.x;
+  min_y = max_y = vertices[0].Position.y;
+  min_z = max_z = vertices[0].Position.z;
+  for (int i = 0; i < vertices.size(); i++) {
+    if (vertices[i].Position.x < min_x) min_x = vertices[i].Position.x;
+    if (vertices[i].Position.x > max_x) max_x = vertices[i].Position.x;
+    if (vertices[i].Position.y < min_y) min_y = vertices[i].Position.y;
+    if (vertices[i].Position.y > max_y) max_y = vertices[i].Position.y;
+    if (vertices[i].Position.z < min_z) min_z = vertices[i].Position.z;
+    if (vertices[i].Position.z > max_z) max_z = vertices[i].Position.z;
+  }
+  CenteredView cv;
+  glm::vec3 size = glm::vec3(max_x-min_x, max_y-min_y, max_z-min_z);
+  glm::vec3 center = glm::vec3((min_x+max_x)/2, (min_y+max_y)/2, 0.0f);
+  cv.transform = glm::translate(glm::mat4(1), center) * glm::scale(glm::mat4(1), size);
+  GLfloat max_edge = 0.0f;
+  if(((max_x-min_x)) > max_edge){
+    max_edge = ((max_x-min_x));
+  }if(((max_y-min_y)) > max_edge){
+    max_edge = ((max_y-min_y));
+  }
+  cv.cameracenter = glm::vec3((min_x+max_x)/2,(min_y+max_y)/2,max_z+(max_edge/tan(glm::radians(45.f / 2.f))));
+  return cv;
+}
+
+CenteredView getCubeMinMax(){
+	//only for cube mesh on voume rendering cube center at (0.5,0.5,0.5)
+
+  //GLfloat min_x, max_x, min_y, max_y, min_z, max_z;
+  GLfloat min_x = 0.0f;
+	GLfloat max_x = 1.0f;
+	GLfloat min_y = 0.0f;
+	GLfloat max_y = 1.0f;
+	GLfloat min_z = 0.0f;
+	GLfloat max_z = 1.0f;
+	std::cout<<"min max"<<std::endl;
+  CenteredView cv;
+  glm::vec3 size = glm::vec3(max_x-min_x, max_y-min_y, max_z-min_z);
+  glm::vec3 center = glm::vec3((min_x+max_x)/2, (min_y+max_y)/2, (min_z+max_z)/2);
+  cv.transform = glm::translate(glm::mat4(1), center) * glm::scale(glm::mat4(1), size);
+	std::cout<<"cv"<<std::endl;
+	GLfloat max_edge = 0.0f;
+  if(((max_x-min_x)) > max_edge){
+    max_edge = ((max_x-min_x));
+  }if(((max_y-min_y)) > max_edge){
+    max_edge = ((max_y-min_y));
+  }
+	std::cout<<"max edge"<<std::endl;
+  cv.cameracenter = glm::vec3((min_x+max_x)/2,(min_y+max_y)/2,max_z+(max_edge/tan(glm::radians(45.f / 2.f))));
+  return cv;
+}
+
+GLubyte * LoadColorBar(std::string texture_path){
+	GLubyte * m_LocalBuffer;
+	int m_Width, m_Height, m_BPP;
+	//3 for RGB
+	m_LocalBuffer = stbi_load(texture_path.c_str(), &m_Width, &m_Height, &m_BPP, 3);
+	//only return the first row for intensity mapping
+	return m_LocalBuffer;
+}
+```
+
+### View.cpp
+```
+#include <glm/glm.hpp>
+#include <glm/gtc/matrix_transform.hpp>
+#include <glm/gtx/rotate_vector.hpp>
+#include <vector>
+#include "main.h"
+
+Camera::Camera(glm::vec3 position_ ,
+glm::vec3 front_ ,
+glm::vec3 up_ ,
+glm::vec3 right_ ,
+float zoom_ ,
+float near_,
+float far_ ,
+unsigned int width_ ,
+unsigned int height_ )
+{
+  this->ori_position = position_;
+  this->ori_front = front_;
+  this->ori_up = up_;
+  this->ori_right = right_;
+  this->ori_zoom = zoom_;
+  this->near = near_;
+  this->far = far_;
+  this->width = width_;
+  this->height = height_;
+}
+
+// Constructor with vectors
+void Camera::init() {
+reset();
+}
+
+void Camera::reset() {
+this->position = ori_position;
+
+this->front = ori_front;
+this->up = ori_up;
+this->right = ori_right;
+this->zoom = ori_zoom;
+}
+
+// view getter
+glm::mat4 Camera::get_view_mat(){
+this->view_mat = glm::lookAt(this->position, glm::vec3(0.0f, 0.0f, 0.0f), this->up);
+return this->view_mat;
+}
+
+glm::mat4 Camera::get_projection_mat(){
+this->proj_mat = glm::perspective(glm::radians(this->zoom), (GLfloat)this->width / (GLfloat)this->height, this->near, this->far);
+return this->proj_mat;
+}
+
+glm::vec3 Camera::GetViewDir(){
+  return this->front;
+}
+
+// Processes input received from any keyboard-like input system. Accepts input parameter in the form of camera defined ENUM (to abstract it from windowing systems)
+void Camera::HandelKeyboardInput(Camera_Movement direction,  GLfloat delta_time){
+  GLfloat move_velocity = delta_time * 10;
+  GLfloat rotate_velocity = delta_time * 50;
+
+  if (direction == FORWARD)
+    this->position += this->front * move_velocity;
+  if (direction == BACKWARD)
+    this->position -= this->front * move_velocity;
+  if (direction == LEFT)
+    this->position -= this->right * move_velocity;
+  if (direction == RIGHT)
+    this->position += this->right * move_velocity;
+  if (direction == UP)
+    this->position += this->up * move_velocity;
+  if (direction == DOWN)
+    this->position -= this->up * move_velocity;
+  if (direction == ROTATE_X_UP)
+    rotate_x(rotate_velocity);
+  if (direction == ROTATE_X_DOWN)
+    rotate_x(-rotate_velocity);
+  if (direction == ROTATE_Y_UP)
+    rotate_y(rotate_velocity);
+  if (direction == ROTATE_Y_DOWN)
+    rotate_y(-rotate_velocity);
+  if (direction == ROTATE_Z_UP)
+    rotate_z(rotate_velocity);
+  if (direction == ROTATE_Z_DOWN)
+    rotate_z(-rotate_velocity);
+}
+// Rotate specific angle along local camera system(LCS)
+void Camera::rotate_x(GLfloat angle){
+  glm::vec3 up = this->up;
+  glm::mat4 rotation_mat(1);
+  rotation_mat = glm::rotate(rotation_mat, glm::radians(angle), this->right);
+  this->up = glm::normalize(glm::vec3(rotation_mat * glm::vec4(up, 1.0)));
+  this->front = glm::normalize(glm::cross(this->up, this->right));
+}
+
+void Camera::rotate_y(GLfloat angle){
+  glm::vec3 front = this->front;
+  glm::mat4 rotation_mat(1);
+  rotation_mat = glm::rotate(rotation_mat, glm::radians(angle), this->up);
+  this->front = glm::normalize(glm::vec3(rotation_mat * glm::vec4(front, 1.0)));
+  this->right = glm::normalize(glm::cross(this->front, this->up));
+}
+
+void Camera::rotate_z(GLfloat angle){
+  glm::vec3 right = this->right;
+  glm::mat4 rotation_mat(1);
+  rotation_mat = glm::rotate(rotation_mat, glm::radians(angle), this->front);
+  this->right = glm::normalize(glm::vec3(rotation_mat * glm::vec4(right, 1.0)));
+  this->up = glm::normalize(glm::cross(this->right, this->front));
+}
+```
+
+### cubeSlice.cpp
+```
+#include "main.h"
+#include <math.h>
+#include "glm/gtc/matrix_transform.hpp"
+#include "glm/gtc/type_ptr.hpp"
+#include <glm/gtx/rotate_vector.hpp>
+
+cubeSlice::cubeSlice(glm::vec3 viewDirection){
+  std::cout<<"init cubeSLice"<<std::endl;
+  numberOfSlice = 10;
+  viewDir = viewDirection;
+  glm::mat4 Model = glm::mat4(1.0f);
+  Model = glm::rotate(Model, glm::radians(45.0f), glm::vec3(1.0f, 0.0f, 0.0f));
+  for(int i = 0;i< 8;i++){
+    cube_vertices[i] = glm::vec3(Model * glm::vec4(cube_vertices[i],1.0f));
+  }
+}
+
+void cubeSlice::setNumSlice(int numSlices){
+  numberOfSlice = numSlices;
+}
+
+void cubeSlice::getNewSlices(std::vector<std::vector<glm::vec3> > &slices,std::vector<int> lengthArr){
+  std::cout<<"getNewSlices"<<std::endl;
+  getZMinMax();
+  calculateIntersect();
+  for(int i = 0;i < numberOfSlice;i++){
+    std::vector<glm::vec3> v;
+    SlicePositionArray[i].getSortedVertex(v);
+    slices.push_back(v);
+    std::cout<<"v size "<<v.size()<<std::endl;
+    lengthArr.push_back(v.size());
+  }
+}
+
+void cubeSlice::getZMinMax(){
+  //get the max and min distance of each vertex of the unit cube
+	//in the viewing direction
+	float max_z = glm::dot(viewDir, cube_vertices[0]);
+	float min_z = max_dist;
+	int max_index = 0;
+
+	for(int i=1;i<8;i++) {
+		//get the distance between the current unit cube vertex and
+		//the view vector by dot product
+		float dist = glm::dot(viewDir, cube_vertices[i]);
+
+		//if distance is > max_dist, store the value and index
+		if(dist > max_dist) {
+			max_z = dist;
+			max_index = i;
+		}
+
+		//if distance is < min_dist, store the value
+		if(dist<min_dist)
+			min_z = dist;
+	}
+
+	//expand it a little bit
+	min_z -= EPSILON;
+	max_z += EPSILON;
+
+
+  daltaZ = (max_z-min_z)/float(numberOfSlice);
+  std::cout<<"daltaZ "<<daltaZ<<std::endl;
+}
+
+
+void cubeSlice::linePlaneIntersection() {
+
+	float denom = 0;
+
+	//set the minimum distance as the plane_dist
+	//subtract the max and min distances and divide by the
+	//total number of slices to get the plane increment
+	float plane_dist = min_dist;
+	float plane_dist_inc = (max_dist-min_dist)/float(num_slices);
+
+	//for all edges
+	for(int i=0;i<12;i++) {
+		//get the start position vertex by table lookup
+		edgeStart[i] = vertexList[edges[edgeList[max_index][i]][0]];
+
+		//get the direction by table lookup
+		edgeDir[i] = vertexList[edges[edgeList[max_index][i]][1]]-edgeStart[i];
+
+		//do a dot of edgeDir with the view direction vector
+		denom = glm::dot(edgeDir[i], viewDir);
+
+		//determine the plane intersection parameter (lambda) and
+		//plane intersection parameter increment (lambda_inc)
+		if (1.0 + denom != 1.0) {
+			lambda_inc[i] =  plane_dist_inc/denom;
+			lambda[i]     = (plane_dist - glm::dot(edgeStart[i],viewDir))/denom;
+		} else {
+			lambda[i]     = -1.0;
+			lambda_inc[i] =  0.0;
+		}
+	}
+
+}
+
+void cubeSlice::calculateIntersect(){
+  //generate slices starting from min_z
+  // float slicePoint = min_z;
+  // while(slicePoint <= max_z){
+  //   TextureSlice s(0);
+  //   for(int i = 0;i < 24;i+=2){
+  //     glm::vec3 intersect;
+  //     // std::cout<<i<<std::endl;
+  //     if(linePlaneIntersection(intersect,cube_edges[i],cube_edges[i+1],glm::vec3(0.0f,0.0f,slicePoint))){
+  //       std::cout<<"x "<<intersect.x<<" y "<<intersect.y<<" z "<<intersect.z<<std::endl;
+  //       s.add(intersect);
+  //     }
+  //   }
+  //   SlicePositionArray.push_back(s);
+  //   slicePoint+=daltaZ;
+  // }
+
+  // glm::vec3 intersection[6];
+	float dL[12];
+
+	//loop through all slices
+	for(int i=num_slices-1;i>=0;i--) {
+
+		//determine the lambda value for all edges
+		for(int e = 0; e < 12; e++)
+		{
+			dL[e] = lambda[e] + i*lambda_inc[e];
+		}
+    TextureSlice s(0);
+
+    //if the values are between 0-1, we have an intersection at the current edge
+		//repeat the same for all 12 edges
+		if  ((dL[0] >= 0.0) && (dL[0] < 1.0))	{
+			intersection[0] = edgeStart[0] + dL[0]*edgeDir[0];
+		}
+		else if ((dL[1] >= 0.0) && (dL[1] < 1.0))	{
+			intersection[0] = edgeStart[1] + dL[1]*edgeDir[1];
+		}
+		else if ((dL[3] >= 0.0) && (dL[3] < 1.0))	{
+			intersection[0] = edgeStart[3] + dL[3]*edgeDir[3];
+		}
+		else continue;
+
+		if ((dL[2] >= 0.0) && (dL[2] < 1.0)){
+			intersection[1] = edgeStart[2] + dL[2]*edgeDir[2];
+		}
+		else if ((dL[0] >= 0.0) && (dL[0] < 1.0)){
+			intersection[1] = edgeStart[0] + dL[0]*edgeDir[0];
+		}
+		else if ((dL[1] >= 0.0) && (dL[1] < 1.0)){
+			intersection[1] = edgeStart[1] + dL[1]*edgeDir[1];
+		} else {
+			intersection[1] = edgeStart[3] + dL[3]*edgeDir[3];
+		}
+
+		if  ((dL[4] >= 0.0) && (dL[4] < 1.0)){
+			intersection[2] = edgeStart[4] + dL[4]*edgeDir[4];
+		}
+		else if ((dL[5] >= 0.0) && (dL[5] < 1.0)){
+			intersection[2] = edgeStart[5] + dL[5]*edgeDir[5];
+		} else {
+			intersection[2] = edgeStart[7] + dL[7]*edgeDir[7];
+		}
+		if	((dL[6] >= 0.0) && (dL[6] < 1.0)){
+			intersection[3] = edgeStart[6] + dL[6]*edgeDir[6];
+		}
+		else if ((dL[4] >= 0.0) && (dL[4] < 1.0)){
+			intersection[3] = edgeStart[4] + dL[4]*edgeDir[4];
+		}
+		else if ((dL[5] >= 0.0) && (dL[5] < 1.0)){
+			intersection[3] = edgeStart[5] + dL[5]*edgeDir[5];
+		} else {
+			intersection[3] = edgeStart[7] + dL[7]*edgeDir[7];
+		}
+		if	((dL[8] >= 0.0) && (dL[8] < 1.0)){
+			intersection[4] = edgeStart[8] + dL[8]*edgeDir[8];
+		}
+		else if ((dL[9] >= 0.0) && (dL[9] < 1.0)){
+			intersection[4] = edgeStart[9] + dL[9]*edgeDir[9];
+		} else {
+			intersection[4] = edgeStart[11] + dL[11]*edgeDir[11];
+		}
+
+		if ((dL[10]>= 0.0) && (dL[10]< 1.0)){
+			intersection[5] = edgeStart[10] + dL[10]*edgeDir[10];
+		}
+		else if ((dL[8] >= 0.0) && (dL[8] < 1.0)){
+			intersection[5] = edgeStart[8] + dL[8]*edgeDir[8];
+		}
+		else if ((dL[9] >= 0.0) && (dL[9] < 1.0)){
+			intersection[5] = edgeStart[9] + dL[9]*edgeDir[9];
+		} else {
+			intersection[5] = edgeStart[11] + dL[11]*edgeDir[11];
+		}
+
+		//after all 6 possible intersection vertices are obtained,
+		//we calculated the proper polygon indices by using indices of a triangular fan
+		int indices[]={0,1,2, 0,2,3, 0,3,4, 0,4,5};
+
+		//Using the indices, pass the intersection vertices to the vTextureSlices vector
+		for(int i=0;i<12;i++)
+			vTextureSlices[count++]=intersection[indices[i]];
+	}
+}
+
+// void cubeSlice::updateSlice(glm::vec3 viewDirection,int numSlices,std::vector<glm::vec3> &vTextureSlices){
+//   numberOfSlice = numSlices;
+//   viewDir = viewDirection;
+//   getZMinMax();
+//   linePlaneIntersection();
+//   calculatePoint(vTextureSlices);
+// }
+
+
+int cubeSlice::getNumSlice(){
+  return count;
+}
+```
+
+### main.cpp
+```
+#define GLEW_STATIC
+#include <stdlib.h>
+#include <stdio.h>
+#include <math.h>
+#include <stdlib.h>
+#include <vector>
+#include <string>
+#include <GL/glew.h>
+#include <fstream>
+#include <filesystem>
+#include <GLFW/glfw3.h>
+#ifdef __APPLE__
+#  include <GLUT/glut.h>
+#else
+#  include <GL/glut.h>
+#endif
+//application file
+#include "main.h"
+//GLM
+#include "glm/glm.hpp"
+#include "glm/gtc/matrix_transform.hpp"
+#include "glm/gtc/type_ptr.hpp"
+#include <glm/gtx/rotate_vector.hpp>
+//imgui
+#include "imgui/imgui.h"
+#include "imgui/imgui_impl_glfw.h"
+#include "imgui/imgui_impl_opengl3.h"
+#include <iostream>
+#include <sstream>
+
+glm::vec3 position_ = glm::vec3(0, 0, -3);
+glm::vec3 front_ = glm::vec3(0, 0, -1);
+glm::vec3 up_ = glm::vec3(0, 1, 0);
+glm::vec3 right_ = glm::vec3(1, 0, 0);
+float zoom_ = 0.0;
+float near_ = 0.1;
+float far_ = 500;
+
+unsigned int window_width = 1280;
+unsigned int window_height = 960;
+
+int indices[] = { 0,1,2, 0,2,3, 0,3,4, 0,4,5 };
+
+// camera
+Camera camera(position_,front_,up_,right_,zoom_,near_,far_,window_width,window_height);
+
+float lastX = (float)window_width / 2.0;
+float lastY = (float)window_height / 2.0;
+bool firstMouse = true;
+// timing
+float deltaFrame = 0.0f;	// time between current frame and last frame
+float lastFrame = 0.0f;
+
+//static light
+glm::vec3 lightPos( 0.0f, -1.0f, -1.0f );
+
+//================ constant ======================================
+RawObject Head("data_and_code/Head_256_256_225.raw",glm::vec3(256,256,225));
+RawObject Bonsai("data_and_code/Bonsai_512_512_154.raw",glm::vec3(512,512,154));
+RawObject BostonTeapot("data_and_code/BostonTeapot_256_256_178.raw",glm::vec3(256,256,178));
+RawObject Bucky("data_and_code/Bucky_32_32_32.raw",glm::vec3(32,32,32));
+//==================================================================
+
+//unit cube vertices
+glm::vec3 cube_vertices[8] = {glm::vec3(-0.5,-0.5,-0.5),
+						   glm::vec3( 0.5,-0.5,-0.5),
+						   glm::vec3(0.5, 0.5,-0.5),
+						   glm::vec3(-0.5, 0.5,-0.5),
+						   glm::vec3(-0.5,-0.5, 0.5),
+						   glm::vec3(0.5,-0.5, 0.5),
+						   glm::vec3( 0.5, 0.5, 0.5),
+						   glm::vec3(-0.5, 0.5, 0.5)};
+
+//unit cube edges
+int edgeSequence[8][12] = {
+	{ 0,1,5,6,   4,8,11,9,  3,7,2,10 },
+	{ 0,4,3,11,  1,2,6,7,   5,9,8,10 },
+	{ 1,5,0,8,   2,3,7,4,   6,10,9,11},
+	{ 7,11,10,8, 2,6,1,9,   3,0,4,5  },
+	{ 8,5,9,1,   11,10,7,6, 4,3,0,2  },
+	{ 9,6,10,2,  8,11,4,7,  5,0,1,3  },
+	{ 9,8,5,4,   6,1,2,0,   10,7,11,3},
+	{ 10,9,6,5,  7,2,3,1,   11,4,8,0 }
+};
+const int edges[12][2]= {{0,1},{1,2},{2,3},{3,0},{0,4},{1,5},{2,6},{3,7},{4,5},{5,6},{6,7},{7,4}};
+const float EPSILON = 0.0001f;
+//maximum number of slices
+const int MAX_SLICES = 2000;
+
+//sliced vertices
+glm::vec3 renderSliceArray[MAX_SLICES*12];
+
+//total number of slices current used
+int num_slices = 10;
+int count;
+glm::vec3 viewDir = glm::vec3(0.0f,0.0f,-1.0f);
+unsigned int VBO,VAO;
+
+void GLFWHandelScroll(GLFWwindow* window, double x_offset,double y_offset);
+void GLFWwindowSizeCallback(GLFWwindow* window,int height,int width);
+void GLFWframebufferSizeCallback(GLFWwindow* window,int height,int width);
+void mouse_callback(GLFWwindow* window, double xpos, double ypos);
+void initFrameBuffer(GLuint texObj, GLuint texWidth, GLuint texHeight);
+GLuint initFace2DTex(GLuint bfTexWidth,GLuint frameBuffer, GLuint bfTexHeight);
+void onModelChange(std::string modelName);
+
+void onModelChange(std::string modelName,Shader shader){
+  if(modelName == "Head"){
+    Texture texture(Head.file_Path,Head.dimension);
+    texture.Bind(0);
+    shader.SetUniformInt("u_3DTexture", 0);
+  }
+  if(modelName == "Bonsai"){
+    Texture texture(Bonsai.file_Path,Bonsai.dimension);
+    texture.Bind(0);
+    shader.SetUniformInt("u_3DTexture", 0);
+  }
+  if(modelName == "BostonTeapot"){
+    Texture texture(BostonTeapot.file_Path,BostonTeapot.dimension);
+    texture.Bind(0);
+    shader.SetUniformInt("u_3DTexture", 0);
+  }
+  if(modelName == "Bucky"){
+    Texture texture(Bucky.file_Path,Bucky.dimension);
+    texture.Bind(0);
+    shader.SetUniformInt("u_3DTexture", 0);
+  }
+}
+
+void ViewSliceCube() {
+	//reference from opengl33_dev_cookbook_2013
+
+	float max_z = glm::dot(viewDir, cube_vertices[0]);
+	float min_z = max_z;
+	int max_index = 0;
+	count = 0;
+
+	for(int i=1;i<8;i++) {
+
+		float dist = glm::dot(viewDir, cube_vertices[i]);
+		if(dist > max_z) {
+			max_z = dist;
+			max_index = i;
+		}
+		if(dist<min_z)
+			min_z = dist;
+	}
+	min_z -= EPSILON;
+	max_z += EPSILON;
+
+	glm::vec3 edgeStart[12];
+	glm::vec3 edgeDir[12];
+	float lambda[12];
+	float lambda_inc[12];
+	float edgedot = 0;
+	float plane_dist = min_z;
+	float plane_dist_inc = (max_z-min_z)/float(num_slices);
+
+	//for all edges
+	for(int i=0;i<12;i++) {
+		//get the start position vertex by table lookup
+		edgeStart[i] = cube_vertices[edges[edgeSequence[max_index][i]][0]];
+
+		//get the direction by table lookup
+		edgeDir[i] = cube_vertices[edges[edgeSequence[max_index][i]][1]]-edgeStart[i];
+
+		edgedot = glm::dot(edgeDir[i], viewDir);
+
+		if (1.0 + edgedot != 1.0) {
+			lambda_inc[i] =  plane_dist_inc/edgedot;
+			lambda[i]     = (plane_dist - glm::dot(edgeStart[i],viewDir))/edgedot;
+		} else {
+			lambda[i]     = -1.0;
+			lambda_inc[i] =  0.0;
+		}
+	}
+	glm::vec3 intersection[6];
+	float daltaL[12];
+
+	//loop through all slices
+	for(int i=num_slices-1;i>=0;i--) {
+
+		//determine the lambda value for all edges
+		for(int e = 0; e < 12; e++)
+		{
+			daltaL[e] = lambda[e] + i*lambda_inc[e];
+		}
+		if  ((daltaL[0] >= 0.0) && (daltaL[0] < 1.0))	{
+			intersection[0] = edgeStart[0] + daltaL[0]*edgeDir[0];
+		}
+		else if ((daltaL[1] >= 0.0) && (daltaL[1] < 1.0))	{
+			intersection[0] = edgeStart[1] + daltaL[1]*edgeDir[1];
+		}
+		else if ((daltaL[3] >= 0.0) && (daltaL[3] < 1.0))	{
+			intersection[0] = edgeStart[3] + daltaL[3]*edgeDir[3];
+		}
+		else continue;
+
+		if ((daltaL[2] >= 0.0) && (daltaL[2] < 1.0)){
+			intersection[1] = edgeStart[2] + daltaL[2]*edgeDir[2];
+		}
+		else if ((daltaL[0] >= 0.0) && (daltaL[0] < 1.0)){
+			intersection[1] = edgeStart[0] + daltaL[0]*edgeDir[0];
+		}
+		else if ((daltaL[1] >= 0.0) && (daltaL[1] < 1.0)){
+			intersection[1] = edgeStart[1] + daltaL[1]*edgeDir[1];
+		} else {
+			intersection[1] = edgeStart[3] + daltaL[3]*edgeDir[3];
+		}
+
+		if  ((daltaL[4] >= 0.0) && (daltaL[4] < 1.0)){
+			intersection[2] = edgeStart[4] + daltaL[4]*edgeDir[4];
+		}
+		else if ((daltaL[5] >= 0.0) && (daltaL[5] < 1.0)){
+			intersection[2] = edgeStart[5] + daltaL[5]*edgeDir[5];
+		} else {
+			intersection[2] = edgeStart[7] + daltaL[7]*edgeDir[7];
+		}
+		if	((daltaL[6] >= 0.0) && (daltaL[6] < 1.0)){
+			intersection[3] = edgeStart[6] + daltaL[6]*edgeDir[6];
+		}
+		else if ((daltaL[4] >= 0.0) && (daltaL[4] < 1.0)){
+			intersection[3] = edgeStart[4] + daltaL[4]*edgeDir[4];
+		}
+		else if ((daltaL[5] >= 0.0) && (daltaL[5] < 1.0)){
+			intersection[3] = edgeStart[5] + daltaL[5]*edgeDir[5];
+		} else {
+			intersection[3] = edgeStart[7] + daltaL[7]*edgeDir[7];
+		}
+		if	((daltaL[8] >= 0.0) && (daltaL[8] < 1.0)){
+			intersection[4] = edgeStart[8] + daltaL[8]*edgeDir[8];
+		}
+		else if ((daltaL[9] >= 0.0) && (daltaL[9] < 1.0)){
+			intersection[4] = edgeStart[9] + daltaL[9]*edgeDir[9];
+		} else {
+			intersection[4] = edgeStart[11] + daltaL[11]*edgeDir[11];
+		}
+
+		if ((daltaL[10]>= 0.0) && (daltaL[10]< 1.0)){
+			intersection[5] = edgeStart[10] + daltaL[10]*edgeDir[10];
+		}
+		else if ((daltaL[8] >= 0.0) && (daltaL[8] < 1.0)){
+			intersection[5] = edgeStart[8] + daltaL[8]*edgeDir[8];
+		}
+		else if ((daltaL[9] >= 0.0) && (daltaL[9] < 1.0)){
+			intersection[5] = edgeStart[9] + daltaL[9]*edgeDir[9];
+		} else {
+			intersection[5] = edgeStart[11] + daltaL[11]*edgeDir[11];
+		}
+
+		//after all 6 possible intersection vertices are obtained,
+		int indices[]={0,1,2, 0,2,3, 0,3,4, 0,4,5};
+		for(int i=0;i<12;i++)
+			renderSliceArray[count++]=intersection[indices[i]];
+	}
+
+	//update buffer object with the new vertices
+	glBindBuffer(GL_ARRAY_BUFFER, VBO);
+	glBufferSubData(GL_ARRAY_BUFFER, 0,  sizeof(renderSliceArray), &(renderSliceArray[0].x));
+}
+GLFWwindow* InitWindow(){
+    // Initialise GLFW
+    if(!glfwInit()){
+        fprintf( stderr, "Failed to initialize GLFW\n" );
+        getchar();
+        return nullptr;
+    }
+
+    glfwWindowHint(GLFW_SAMPLES, 4);
+    glfwWindowHint(GLFW_CONTEXT_VERSION_MAJOR, 3);
+    glfwWindowHint(GLFW_CONTEXT_VERSION_MINOR, 3);
+    glfwWindowHint(GLFW_OPENGL_FORWARD_COMPAT, GL_TRUE); // To make MacOS happy; should not be needed
+    glfwWindowHint(GLFW_OPENGL_PROFILE, GLFW_OPENGL_CORE_PROFILE);
+
+    GLFWwindow* window = glfwCreateWindow( window_width, window_height, "assignment1", NULL, NULL);
+    if( window == NULL ){
+        fprintf( stderr, "Failed to open GLFW window. If you have an Intel GPU, they are not 3.3 compatible. Try the 2.1 version of the tutorials.\n" );
+        getchar();
+        glfwTerminate();
+        return nullptr;
+
+    }
+    glfwMakeContextCurrent(window);
+    glewExperimental = true; // Needed for core profile
+    if (glewInit() != GLEW_OK) {
+        fprintf(stderr, "Failed to initialize GLEW\n");
+        getchar();
+        glfwTerminate();
+        return nullptr;
+    }
+    glfwSetFramebufferSizeCallback(window, GLFWframebufferSizeCallback);
+    std::cout << "Using GL Version: " << glGetString(GL_VERSION) << std::endl;
+    // glfwSetScrollCallback(window, GLFWHandelScroll);
+    // Ensure we can capture the escape key being pressed below
+    glfwSetInputMode(window, GLFW_STICKY_KEYS, GL_TRUE);
+
+    return window;
+}
+
+void initFrameBuffer(GLuint texObj,GLuint frameBuffer, GLuint texWidth, GLuint texHeight){
+  // create a depth buffer for our framebuffer
+    GLuint depthBuffer;
+    glGenRenderbuffers(1, &depthBuffer);
+    glBindRenderbuffer(GL_RENDERBUFFER, depthBuffer);
+    glRenderbufferStorage(GL_RENDERBUFFER, GL_DEPTH_COMPONENT, texWidth, texHeight);
+
+    // attach the texture and the depth buffer to the framebuffer
+    glGenFramebuffers(1, &frameBuffer);
+    glBindFramebuffer(GL_FRAMEBUFFER, frameBuffer);
+    glFramebufferTexture2D(GL_FRAMEBUFFER, GL_COLOR_ATTACHMENT0, GL_TEXTURE_2D, texObj, 0);
+    glFramebufferRenderbuffer(GL_FRAMEBUFFER, GL_DEPTH_ATTACHMENT, GL_RENDERBUFFER, depthBuffer);
+    glEnable(GL_DEPTH_TEST);
+}
+
+// init the 2D texture for render backface 'bf' stands for backface
+GLuint initFace2DTex(GLuint bfTexWidth, GLuint bfTexHeight)
+{
+    GLuint backFace2DTex;
+    glGenTextures(1, &backFace2DTex);
+    glBindTexture(GL_TEXTURE_2D, backFace2DTex);
+    glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_S, GL_REPEAT);
+    glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_T, GL_REPEAT);
+    glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MIN_FILTER, GL_NEAREST);
+    glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MAG_FILTER, GL_NEAREST);
+    glTexImage2D(GL_TEXTURE_2D, 0, GL_RGBA16F, bfTexWidth, bfTexHeight, 0, GL_RGBA, GL_FLOAT, NULL);
+    return backFace2DTex;
+}
+
+void GLFWwindowSizeCallback(GLFWwindow* window,int height,int width){
+  glViewport(0, 0, width, height);
+}
+
+void GLFWframebufferSizeCallback(GLFWwindow* window,int height,int width){
+  glViewport(0, 0, width, height);
+}
+
+void GLFWprocessKeyboardInput(GLFWwindow *window){
+    if (glfwGetKey(window, GLFW_KEY_ESCAPE) == GLFW_PRESS)//close
+        glfwSetWindowShouldClose(window, true);
+    if (glfwGetKey(window, GLFW_KEY_Q) == GLFW_PRESS)//forward
+        camera.HandelKeyboardInput(FORWARD, deltaFrame);
+    if (glfwGetKey(window, GLFW_KEY_E) == GLFW_PRESS)//backward
+        camera.HandelKeyboardInput(BACKWARD, deltaFrame);
+    if (glfwGetKey(window, GLFW_KEY_A) == GLFW_PRESS)//left
+        camera.HandelKeyboardInput(LEFT, deltaFrame);
+    if (glfwGetKey(window, GLFW_KEY_D) == GLFW_PRESS)//right
+        camera.HandelKeyboardInput(RIGHT, deltaFrame);
+    if (glfwGetKey(window, GLFW_KEY_W) == GLFW_PRESS)//up
+        camera.HandelKeyboardInput(UP, deltaFrame);
+    if (glfwGetKey(window, GLFW_KEY_S) == GLFW_PRESS)//down
+        camera.HandelKeyboardInput(DOWN, deltaFrame);
+}
+
+
+
+//=========================================================
+
+int main(int argc, char *argv[]){
+
+  if(argc < 2){
+    std::cout<<"please enter file path\n";
+  }
+   const char* glsl_version = "#version 330";
+   GLFWwindow* window = InitWindow();
+    std::cout<<"window created\n";
+    if (window == NULL)
+        return -1;
+
+    //
+    glEnable(GL_BLEND);
+    glBlendEquation(GL_FUNC_ADD);
+    glBlendFunc(GL_SRC_ALPHA, GL_ONE_MINUS_SRC_ALPHA);
+    glDisable(GL_DEPTH_TEST);
+
+    //shader
+    Shader shader("shader/shader.code");
+    shader.Bind();
+
+		std::string fp = Head.file_Path;
+		glm::vec3 di = Head.dimension;
+
+		if(strcmp(argv[1],"Head")==0){
+	    fp = Head.file_Path;
+			di = Head.dimension;
+	  }
+	  else if(strcmp(argv[1] , "Bonsai")==0){
+			fp = Bonsai.file_Path;
+			di = Bonsai.dimension;
+	  }
+	  else if(strcmp(argv[1] , "BostonTeapot")==0){
+			fp = BostonTeapot.file_Path;
+			di = BostonTeapot.dimension;
+	  }
+	  else{
+			fp = Bucky.file_Path;
+			di = Bucky.dimension;
+	  }
+		Texture texture(fp,di);
+		texture.Bind(0);
+		shader.SetUniformInt("u_3DTexture", 0);
+
+    // Texture texture(Bonsai.file_Path,Bonsai.dimension);
+    // texture.Bind(0);
+    // shader.SetUniformInt("u_3DTexture", 0);
+    unsigned int ColorBartextureID;
+    // load1DTexturecolorBar(ColorBartextureID);
+    shader.SetUniformInt("barColor", 1);
+    std::cout<<"before mesh created"<<std::endl;
+    // Mesh cube(0);
+
+      //===================== initialize imgui =====================
+      IMGUI_CHECKVERSION();
+      ImGui::CreateContext();
+      ImGuiIO& io = ImGui::GetIO(); (void)io;
+      ImGui_ImplGlfw_InitForOpenGL(window, true);
+      ImGui_ImplOpenGL3_Init(glsl_version);
+      ImGui::StyleColorsDark();
+      float f0=0.123f, f1=0.023f,f2=0.045f,f3=0.05f,f4=0.7f,f5=0.3f,f6=0.023f,f7=0.03;
+      float arr[8];
+      arr[0] = f0;
+      arr[1] = f1;
+      arr[2] = f2;
+      arr[3] = f3;
+      arr[4] = f4;
+      arr[5] = f5;
+      arr[6] = f6;
+      arr[7] = f7;
+      float xyz_offset[] = {0.0f,0.0f,0.0f};
+      float pre_offset_x = 0.0f;
+      float pre_offset_y = 0.0f;
+      float pre_offset_z = 0.0f;
+      float cube_offset[] = {0.0f,0.0f,0.0f};
+      float cube_pre_offset_x = 0.0f;
+      float cube_pre_offset_y = 0.0f;
+      float cube_pre_offset_z = 0.0f;
+
+      float showslice = 1.0f;
+      bool transferFunctionSwich = false;
+
+      float alpha, a0, s = 10;
+      float colorBarData[256][4];
+	     int indices[9];
+       //rander premitive
+       const char* premitive[] = {"Head","Bonsai","BostonTeapot","Bucky"};
+       static const char* curr_premitive = "Head";
+      //============================================================
+
+      //model view project matrix
+      glm::mat4 Model, View, Projection,cModel;
+      std::cout<<"view"<<std::endl;
+      Model = glm::mat4(1.0f);
+      cModel = glm::mat4(1.0f);
+      Model = glm::rotate(Model, glm::radians(0.0f), glm::vec3(1.0f, 0.0f, 0.0f));
+	    View = glm::lookAt(glm::vec3(0.0f, 0.0f, 3.0f), glm::vec3(0.0f, 0.0f, 0.0f), glm::vec3(0.0f, 1.0f, 0.0f));
+	    Projection = glm::perspective(glm::radians(45.0f), ((float)window_width / (float)window_height), 0.1f, 200.0f);
+      shader.Bind();
+      shader.SetUniformMat4f("model",Model);
+      shader.SetUniformMat4f("projection", Projection);
+      shader.SetUniformMat4f("view", View);
+
+      //=========== model view projection end ============================
+
+      glGenVertexArrays(1, &VAO);
+      // std::cout<<std::to_string(VAO)<<std::endl;
+      glGenBuffers(1, &VBO);
+      // glGenBuffers(1, &EBO);
+      // std::cout<<std::to_string(renderVertex.size())<<std::endl;
+      glBindVertexArray(VAO);
+      glBindBuffer(GL_ARRAY_BUFFER, VBO);
+      glBufferData(GL_ARRAY_BUFFER, sizeof(renderSliceArray), &renderSliceArray[0].x, GL_DYNAMIC_DRAW);
+
+      // vertex positions
+      glEnableVertexAttribArray(0);
+      glVertexAttribPointer(0, 3, GL_FLOAT, GL_FALSE, sizeof(glm::vec3), 0);
+      ViewSliceCube();
+
+
+      // std::cout<<"count"<<count<<std::endl;
+      //get the viewing direction
+
+      std::cout<<"before while loop"<<std::endl;
+      while(!glfwWindowShouldClose(window)){
+
+          //Timing
+          float currentFrame = glfwGetTime();
+          deltaFrame = currentFrame - lastFrame;
+          lastFrame = currentFrame;
+          //new frame
+          glClear(GL_COLOR_BUFFER_BIT| GL_DEPTH_BUFFER_BIT);
+
+          //imgui new frame
+          ImGui_ImplOpenGL3_NewFrame();
+          ImGui_ImplGlfw_NewFrame();
+          ImGui::NewFrame();
+
+          //handel keyboard input
+          GLFWprocessKeyboardInput(window);
+          // glfwGetWindowSize(window, &window_width, &window_height);
+
+          //control panel gui
+          //GUI
+          {//model control UI
+            ImGui::Begin("Control Window");
+            //take input
+            // ImGui::InputText("input new file path", input_filePath, IM_ARRAYSIZE(input_filePath));
+            // std::string s(input_filePath);
+
+            ImGui::SliderFloat("X rotate", &xyz_offset[0], 0.0f, 180.0f, "%.1f");
+            ImGui::SliderFloat("Y rotate", &xyz_offset[1], 0.0f, 180.0f, "%.1f");
+            ImGui::SliderFloat("Z rotate", &xyz_offset[2], 0.0f, 180.0f, "%.1f");
+
+            ImGui::SliderFloat("X rotate cube", &cube_offset[0], 0.0f, 359.0f, "%.1f");
+            ImGui::SliderFloat("Y rotate cube", &cube_offset[1], 0.0f, 359.0f, "%.1f");
+            ImGui::SliderFloat("Z rotate cube", &cube_offset[2], 0.0f, 359.0f, "%.1f");
+
+            ImGui::Text("%.1f FPS", ImGui::GetIO().Framerate);
+            ImGui::End();
+          }
+          {//transfor function UI
+           ImGui::Begin("transfer function");
+           ImGui::Checkbox("ON/OFF transfer function",&transferFunctionSwich);
+           ImGui::SliderInt("number of slice", &num_slices, 10, 2000, "%d");
+           ImGui::SliderFloat("show slice", &showslice, 0.0f, 1.0f, "%.1f");
+           ImVec2 plotextent(ImGui::GetContentRegionAvailWidth()*0.9,150);
+           ImGui::Text("transfer function");
+           ImGui::PlotLines(" ", &arr[0], 7, 0, NULL, 0.0f, FLT_MAX, plotextent, sizeof(float));
+           ImGui::SliderFloat("slider 1", &arr[0], 0.0f, 1.0f, "%.3f");
+           ImGui::SliderFloat("slider 2", &arr[1], 0.0f, 1.0f, "%.3f");
+           ImGui::SliderFloat("slider 3", &arr[2], 0.0f, 1.0f, "%.3f");
+           ImGui::SliderFloat("slider 4", &arr[3], 0.0f, 1.0f, "%.3f");
+           ImGui::SliderFloat("slider 5", &arr[4], 0.0f, 1.0f, "%.3f");
+           ImGui::SliderFloat("slider 6", &arr[5], 0.0f, 1.0f, "%.3f");
+           ImGui::SliderFloat("slider 7", &arr[6], 0.0f, 1.0f, "%.3f");
+            ImGui::End();
+          }
+
+          shader.Bind();
+          if((xyz_offset[0] != pre_offset_x)){
+            cModel = glm::rotate(cModel, glm::radians(pre_offset_x-xyz_offset[0]), glm::vec3(1.0f, 0.0f, 0.0f));
+            pre_offset_x = xyz_offset[0];
+            for(int i = 0;i< 8;i++){
+              cube_vertices[i] = glm::vec3(cModel * glm::vec4(cube_vertices[i],1.0f));
+            }
+          }if((xyz_offset[1] != pre_offset_y)){
+            cModel = glm::rotate(cModel, glm::radians(pre_offset_y-xyz_offset[1]), glm::vec3(0.0f, 1.0f, 0.0f));
+            pre_offset_y = xyz_offset[1];
+            for(int i = 0;i< 8;i++){
+              cube_vertices[i] = glm::vec3(cModel * glm::vec4(cube_vertices[i],1.0f));
+            }
+          }if((xyz_offset[2] != pre_offset_z)){
+            cModel = glm::rotate(cModel, glm::radians(pre_offset_z-xyz_offset[2]), glm::vec3(0.0f, 0.0f, 1.0f));
+            pre_offset_z = xyz_offset[2];
+            for(int i = 0;i< 8;i++){
+              cube_vertices[i] = glm::vec3(cModel * glm::vec4(cube_vertices[i],1.0f));
+            }
+          }
+          if((cube_offset[0] != cube_pre_offset_x)){
+            Model = glm::rotate(Model, glm::radians(cube_pre_offset_x-cube_offset[0]), glm::vec3(1.0f, 0.0f, 0.0f));
+            cube_pre_offset_x = cube_offset[0];
+          }if((cube_offset[1] != cube_pre_offset_y)){
+            Model = glm::rotate(Model, glm::radians(cube_pre_offset_y-cube_offset[1]), glm::vec3(0.0f, 1.0f, 0.0f));
+            cube_pre_offset_y = cube_offset[1];
+          }if((cube_offset[2] != cube_pre_offset_z)){
+            Model = glm::rotate(Model, glm::radians(cube_pre_offset_z-cube_offset[2]), glm::vec3(0.0f, 0.0f, 1.0f));
+            cube_pre_offset_z = cube_offset[2];
+          }
+          shader.SetUniformMat4f("model",Model);
+          shader.SetUniformInt("TransferFunction",transferFunctionSwich);
+
+
+
+          alpha = 1 - (glm::pow((1 - 0.5), (s / num_slices)));
+
+	for (int i = 0; i < 32; i++){
+		colorBarData[i][0] = 0.0f;
+		colorBarData[i][1] = 0.0f;
+		colorBarData[i][2] = arr[0];
+		colorBarData[i][3] = arr[0]*alpha;
+	}
+	for (int i = 32; i < 64; i++){
+		colorBarData[i][0] = arr[1] * 0.5;
+		colorBarData[i][1] = arr[1] * 0.5;
+		colorBarData[i][2] = arr[1]  ;
+		colorBarData[i][3] = arr[1] * alpha;
+	}
+	for (int i = 64; i < 96; i++){
+		colorBarData[i][0] = arr[2] * 0.6;
+		colorBarData[i][1] = arr[2] * 0.7;
+		colorBarData[i][2] = arr[2] * 1.5;
+		colorBarData[i][3] = alpha * arr[2];
+	}
+	for (int i = 96; i < 128; i++){
+		colorBarData[i][0] = arr[3] * 0.8;
+		colorBarData[i][1] = arr[3] * 0.8;
+		colorBarData[i][2] = arr[3] * 1.0;
+		colorBarData[i][3] = alpha * arr[3];
+	}
+	for (int i = 128; i < 160; i++){
+		colorBarData[i][0] = arr[4];
+		colorBarData[i][1] = arr[4] * 0.7;
+		colorBarData[i][2] = arr[4] * 0.7;
+		colorBarData[i][3] = alpha * arr[4];
+	}
+	for (int i = 160; i < 192; i++){
+		colorBarData[i][0] = arr[5];
+		colorBarData[i][1] = 0.2;
+		colorBarData[i][2] =  0.1;
+		colorBarData[i][3] = alpha * arr[5];
+	}
+	for (int i = 192; i < 224; i++){
+		colorBarData[i][0] = arr[6];
+		colorBarData[i][1] = 0.75* arr[6];
+		colorBarData[i][2] = 0.75 * arr[6];
+		colorBarData[i][3] = alpha * arr[6];
+	}
+	for (int i = 224; i < 256; i++){
+		colorBarData[i][0] = arr[7];
+		colorBarData[i][1] = 0.0f;
+		colorBarData[i][2] = 0.0f;
+		colorBarData[i][3] = alpha * arr[7];
+	}
+
+	glGenTextures(1, &ColorBartextureID);
+	glActiveTexture(GL_TEXTURE1);
+	glBindTexture(GL_TEXTURE_1D, ColorBartextureID);
+	glTexParameteri(GL_TEXTURE_1D, GL_TEXTURE_WRAP_S, GL_REPEAT);
+	glTexParameteri(GL_TEXTURE_1D, GL_TEXTURE_MAG_FILTER, GL_LINEAR);
+	glTexParameteri(GL_TEXTURE_1D, GL_TEXTURE_MIN_FILTER, GL_LINEAR);
+	glTexImage1D(GL_TEXTURE_1D, 0, GL_RGBA, 256, 0, GL_RGBA, GL_FLOAT, colorBarData);
+          shader.SetUniformInt("barColor", 1);
+          ViewSliceCube();
+      	glBindVertexArray(VAO);
+
+      	if (transferFunctionSwich){
+      		glPolygonMode(GL_FRONT_AND_BACK, GL_FILL);
+      	}
+      	else{
+      			glPolygonMode(GL_FRONT_AND_BACK, GL_LINE);
+      	}
+
+        glDrawArrays(GL_TRIANGLES, 0, (int)(floor(count/6)*showslice)*6);
+        // Rendering
+        ImGui::Render();
+        ImGui_ImplOpenGL3_RenderDrawData(ImGui::GetDrawData());
+        glfwSwapBuffers(window);
+        glfwPollEvents();
+      }
+
+    // Close OpenGL window and terminate GLFW
+    ImGui_ImplOpenGL3_Shutdown();
+    ImGui_ImplGlfw_Shutdown();
+    ImGui::DestroyContext();
+    glfwTerminate();
+
+    return 0;
+
+}
+```
+
+### main.h
+```
+#include <iostream>
+#include <fstream>
+#include <filesystem>
+#include <sstream>
+#include <stdlib.h>
+#include <stdio.h>
+#include <math.h>
+#include <stdlib.h>
+#include <vector>
+#include <string>
+#include <unordered_map>
+
+//GLM
+#include "glm/glm.hpp"
+#include <GL/glew.h>
+
+//structs
+
+enum Camera_Movement {
+    FORWARD,
+    BACKWARD,
+    LEFT,
+    RIGHT,
+    UP,
+    DOWN,
+    ROTATE_X_UP,
+  	ROTATE_X_DOWN,
+  	ROTATE_Y_UP,
+  	ROTATE_Y_DOWN,
+  	ROTATE_Z_UP,
+  	ROTATE_Z_DOWN,
+};
+
+struct CenteredView {
+// Position
+glm::vec3 size;
+// Normal
+glm::vec3 center;
+// TexCoords
+glm::mat4 transform;
+//camera position
+glm::vec3 cameracenter;
+};
+
+struct angelV{
+  glm::vec3 position;
+  float angel;
+};
+
+
+struct Vertex {
+// Position
+ glm::vec3 Position;
+// Normal
+ glm::vec3 Normal;
+// TexCoords
+ glm::vec2 TexCoords;
+ glm::vec3 Tangent;
+ glm::vec3 Bitangent;
+};
+
+struct obj_index {
+
+    std::vector<glm::vec3> positions;
+    std::vector<glm::vec3> normals;
+    std::vector<glm::vec2> tex_coods;
+};
+
+// ============= constant =================================
+// glm::vec3(0.0, 0.0, 0.0),
+// glm::vec3(0.0, 0.0, 1.0),
+// glm::vec3(0.0, 1.0, 0.0),
+// glm::vec3(0.0, 1.0, 1.0),
+// glm::vec3(1.0, 0.0, 0.0),
+// glm::vec3(1.0, 0.0, 1.0),
+// glm::vec3(1.0, 1.0, 0.0),
+// glm::vec3(1.0, 1.0, 1.0)
+
+// ============================================================
+
+//utils
+GLubyte * load_3d_raw_data(std::string texture_path, glm::vec3 dimension);
+CenteredView getMinMax(std::vector<Vertex> &vertices);
+CenteredView getCubeMinMax();
+void load1DTexturecolorBar(unsigned int textureID);
+//============================================
+//view
+
+// Default camera values
+const float YAW         = -90.0f;
+const float PITCH       =  0.0f;
+const float SPEED       =  2.5f;
+const float SENSITIVITY =  0.5f;
+const float ZOOM        =  45.0f;
+
+class Camera
+{
+public:
+    // Camera view parameters
+    glm::vec3 ori_position;
+    glm::vec3 ori_front;
+    glm::vec3 ori_up;
+    glm::vec3 ori_right;
+
+    glm::vec3 position;
+    glm::vec3 front;
+    glm::vec3 up;
+    glm::vec3 right;
+
+    // Camera projection parameters
+    float ori_zoom;
+    float zoom;
+
+    float near;
+    float far;
+
+    unsigned int width;
+    unsigned int height;
+
+    // Camera projection matrix: used for projection
+    glm::mat4 proj_mat;
+
+    // Camera view matrix: used for changing camera rotation and position
+    glm::mat4 view_mat;
+
+    // Camera parameter initialization
+    Camera(glm::vec3 position_ ,
+    glm::vec3 front_,
+    glm::vec3 up_ ,
+    glm::vec3 right_,
+    float zoom_,
+    float near_ ,
+    float far_ ,
+    unsigned int width_,
+    unsigned int height_);
+
+    void init();
+    void reset();
+    void HandelKeyboardInput(Camera_Movement direction, GLfloat delta_time);
+    // Rotate specific angle along local camera system(LCS)
+    void rotate_x(GLfloat angle);
+    void rotate_y(GLfloat angle);
+    void rotate_z(GLfloat angle);
+    glm::vec3 GetViewDir();
+    // Get camera view matrix
+    glm::mat4 get_view_mat();
+    // Get camera projection matrix
+    glm::mat4 get_projection_mat();
+};
+
+//====================================================================
+
+
+//Shader
+struct ShaderProgramSource
+{
+    std::string VertexSource;
+    std::string FragmentSource;
+};
+
+class Shader
+{
+    private:
+        unsigned int m_RendererID;
+        std::string m_FilePath;
+        std::unordered_map<std::string, int> m_UniformLocationCache;
+
+    public:
+        Shader(const std::string& filepath);
+        ~Shader();
+
+        void Bind() const;
+        void Unbind() const;
+        void SetUniform3f(const std::string& name, float f0, float f1, float f2);
+        void SetUniform4f(const std::string& name, float f0, float f1, float f2, float f3);
+        void SetUniformMat4f(const std::string& name, const glm::mat4& matrix);
+        void SetUniformInt(const std::string& name, int i);
+        void SetUniform1f(const std::string& name, float f);
+
+    private:
+        int GetUniformLocation(const std::string& name);
+        struct ShaderProgramSource ParseShader(const std::string& filepath);
+        unsigned int CompileShader(unsigned int type, const std::string& source);
+        unsigned int CreateShader(const std::string& vertexShader, const std::string& fragmentShader);
+
+};
+//=============================================
+
+//mesh
+
+
+class Mesh {
+    public:
+        /*  Mesh Data  */
+
+        //cubes coordinates for binding 3d texture
+        GLfloat cube_vertices[24] = {
+        	0.0, 0.0, 0.0,
+        	0.0, 0.0, 1.0,
+        	0.0, 1.0, 0.0,
+        	0.0, 1.0, 1.0,
+        	1.0, 0.0, 0.0,
+        	1.0, 0.0, 1.0,
+        	1.0, 1.0, 0.0,
+        	1.0, 1.0, 1.0
+        };
+
+        GLuint cube_indices[36] = {
+        	1,5,7,
+        	7,3,1,
+        	0,2,6,
+        	6,4,0,
+        	0,1,3,
+        	3,2,0,
+        	7,5,4,
+        	4,6,7,
+        	2,3,7,
+        	7,6,2,
+        	1,0,4,
+        	4,5,1
+        };
+
+        GLuint cube_edges[24] = {
+        	1,5,
+        	5,7,
+        	7,3,
+        	3,1,
+        	0,4,
+        	4,6,
+        	6,2,
+        	2,0,
+        	0,1,
+        	2,3,
+        	4,5,
+        	6,7
+        };
+
+        //vector<Texture> textures;
+
+        /*  Functions  */
+        Mesh(int ID);
+        void Draw();
+        void Bind();
+
+    private:
+        /*  Render data  */
+        unsigned int VAO, VBO, EBO;
+        GLuint GBO[2];
+
+        int len;
+        /*  Functions    */
+        void CreateMeshVBO();
+};
+
+//=================================================
+
+//textures
+
+class Texture
+{
+    private:
+        unsigned int m_RendererID;
+        std::string m_FilePath;
+        GLubyte * m_LocalBuffer;
+
+        // Glint g_volTexObj;
+    public:
+        Texture(const std::string& path,glm::vec3 dimension);
+        ~Texture();
+
+        void Bind(unsigned int slot = 0) const;
+        void Unbind() const;
+
+        // inline int GetWidth() const { return m_Width; }
+        // inline int GetHeight() const { return m_Height; }
+};
+
+
+class RawObject{
+public:
+  RawObject(std::string file_path,glm::vec3 dimension);
+
+  std::string file_Path;
+  glm::vec3 dimension;
+};
+
+class TextureSlice{
+public:
+  glm::vec3 center;
+  TextureSlice(int ID);
+  void getSortedVertex(std::vector<glm::vec3> &vertices);
+  void add(glm::vec3 vertex);
+  static bool PseudoangleComparator(angelV V1,angelV V2){
+  	return V1.angel < V2.angel;
+  };
+private:
+
+  static float Pseudoangle(glm::vec3 p1, glm::vec3 p2);
+  void ComputeCenter();
+  std::vector<glm::vec3> sliceVertex;
+  std::vector<angelV> angelVertex;
+};
+
+class cubeSlice{
+public:
+  cubeSlice(glm::vec3 viewDirection);
+  void setNumSlice(int numSlices);
+  // void updateSlice(glm::vec3 viewDirection,int numSlices,std::vector<glm::vec3> &vTextureSlices);
+  void getNewSlices(std::vector<std::vector<glm::vec3> > &slices,std::vector<int> lengthArr);
+  void getZMinMax();
+  void linePlaneIntersection();
+  void calculateIntersect();
+  int getNumSlice();
+  glm::vec3 cube_vertices[8] = {
+    glm::vec3(-0.5,-0.5,-0.5),
+   glm::vec3(0.5,-0.5,-0.5),
+   glm::vec3(0.5, 0.5,-0.5),
+   glm::vec3(-0.5, 0.5,-0.5),
+   glm::vec3(-0.5,-0.5, 0.5),
+   glm::vec3(0.5,-0.5, 0.5),
+   glm::vec3(0.5, 0.5, 0.5),
+   glm::vec3(-0.5, 0.5, 0.5)
+  };
+
+  GLuint cube_indices[36] = {
+    1,5,7,
+    7,3,1,
+    0,2,6,
+    6,4,0,
+    0,1,3,
+    3,2,0,
+    7,5,4,
+    4,6,7,
+    2,3,7,
+    7,6,2,
+    1,0,4,
+    4,5,1
+  };
+
+  GLuint cube_edges[24] = {
+    1,5,
+    5,7,
+    7,3,
+    3,1,
+    0,4,
+    4,6,
+    6,2,
+    2,0,
+    0,1,
+    2,3,
+    4,5,
+    6,7
+  };
+
+private:
+  glm::vec3 edgeStart[12];
+  glm::vec3 edgeDir[12];
+  float lambda[12];
+  float lambda_inc[12];
+  float denom;
+  glm::vec3 viewDir;
+  int numberOfSlice;
+  float max_x;
+  float min_x;
+  float max_y;
+  float min_y;
+  float max_z;
+  float min_z;
+  float daltaZ;
+  int minZidx;
+  int maxZidx;
+  int count;
+  const float EPSILON = 0.0001f;
+  const int MAX_SLICES = 2000;
+  // glm::vec3 vTextureSlices[numberOfSlice * 12];
+  std::vector<TextureSlice> SlicePositionArray;
+};
+```

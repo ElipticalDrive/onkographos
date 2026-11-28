@@ -1,0 +1,174 @@
+A Couple 3D AABB Tricks
+A Couple 3D AABB Tricks
+published on Dec 23 2025
+Axis-aligned bounding boxes are ubiquitous in 3D programming, typically
+used as stand-ins for some other shape (for example, for purposes of collision
+detection or determining visibility). The main characteristic of an AABB is
+that it is, well, axis-aligned: its sides line up with the coordinate axes.
+Over the years I've encountered a couple useful tricks for working with them
+that I want to share here. None of these are new.
+AABB Representation
+The first trick has to do with AABB representation. In some learning materials,
+I've seen AABB represented as a point (usually the centroid) plus the dimensions of
+the box:
+```
+
+
+struct aabb {
+  float centroid[3];
+  float width_height_depth[3];
+};
+
+```
+Sometimes the width/height/depth are stored divided by 2, but you get the idea.
+A better (in my opinion) representation is storing the min and max values for
+the x, y and z coordinates within the AABB:
+```
+
+
+struct aabb {
+  float x_minmax[2];
+  float y_minmax[2];
+  float z_minmax[2];
+};
+
+```
+Incidentally, this representation is used in
+Peter Shirley's raytracing series.
+A slighly different version of this is just storing min and max corners of the
+box. Those "minmax" regions are also referred to as "slabs", because the AABB
+can be thought of as the intersection between three "slabs" of 3D
+space (think of a slab as an infinite region bounded by two parallel 3D planes).
+This representation occupies the same amount of memory as the
+point-plus-dimensions one, but I think it's nicer because many operations call
+for computing those boundary values anyway. For example, computing the bounding
+box that encloses any two given bounding boxes is extremely trivial with this
+representation, whereas the point-plus-dimensions one requires some extra
+computation:
+```
+
+
+aabb enclosing_aabb(const aabb& b0, const aabb& b1) {
+  return aabb {
+    {std::min(b0.x_minmax[0], b1.x_minmax[0]), std::max(b0.x_minmax[1], b1.x_minmax[1])},
+    {std::min(b0.y_minmax[0], b1.y_minmax[0]), std::max(b0.y_minmax[1], b1.y_minmax[1])},
+    {std::min(b0.z_minmax[0], b1.z_minmax[0]), std::max(b0.z_minmax[1], b1.z_minmax[1])},
+  };
+}
+
+```
+Finding AABB Vertex Coordinates
+Some operations require us to know the coordinates of individual bounding box
+vertices. For example, to test whether a bounding box intersects an arbitrary
+plane we need to check whether all of the vertices lie on the same side of the
+plane or not.
+At first glance it might seem like the point-plus-dimensions representation
+should be ideal for this, but it actually turns out that the slab one results
+in much simpler code.
+Two key observations here are: 1) the AABB has only eight vertices; 2) a
+coordinate of an AABB vertex cannot have a value that is between the allowed
+min and max values. For example, for any AABB vertex, its X coordinate is always
+either X_min or X_max.
+Putting these two observations together, we can conclude that the index of an
+AABB vertex (a number ranging from 0 to 7) fully encodes the coordinate values of
+that vertex. The rules for this encoding are pretty simple:
+1) bit 0 corresponds to coordinate X, bit 1 to Y, bit 2 to Z (the rest of the
+bits are irrelevant since there are only 8 possible index values); 2) if the bit
+value is 0, its corresponding coordinate should have the minimum value, otherwise
+it should have the maximum value.
+Using this rule, we can determine the coordinates of any vertex using some bit-twiddling and indexing with no floating point math
+whatsoever:
+```
+
+
+// assuming `i` is the vertex index.
+// for each axis, isolate the corresponding bit and use it to look up 
+// the coordinate in the axis' minmax array.
+float vertex_i_xyz[] = {
+  aabb.x_minmax[(i & 1) >> 0],
+  aabb.y_minmax[(i & 2) >> 1],
+  aabb.z_minmax[(i & 4) >> 2]
+};
+
+```
+I haven't seen this particular trick explicitly mentioned anywhere, though I am
+sure that many people have figured it out on their own.
+Ray-AABB Intersection Test
+There's a very nice way to check whether a given ray intersects an
+axis-aligned bounding box. This test is pretty old with roots dating all
+the way back to Kajiya and Kay's 1986 paper. It's used extensively to this day.
+Ray Tracing Gems 2
+includes an explanation for this algorithm but to be honest I think it's a bit
+terse, so I'll try explaining it myself.
+First, a ray is fully defined by its origin point o and its
+direction d. Any point along the ray corresponds to a value of a
+scalar parameter t and can be found by evaluating
+o + t*d.
+We already mentioned that an AABB can be thought of as an intersection of three
+"slabs". The idea of this ray-AABB intersection test is as follows:
+For each slab, find the values of t corresponding to points where the ray
+pierces the slab. The value of t for the entry point is necessarily
+smaller than that for the exit point. We'll call this pair of values a "t-range".
+If the t-ranges for all three slabs overlap, the ray intersects the AABB.
+An axis-aligned slab is defined by two values - min and max. It's pretty trivial to find
+the ray-slab intersection points using the ray equation. This example shows
+finding the t-value of the intersection point with the "min" wall of the X-slab:
+```
+
+
+// If there is a point where the ray pierces the "min" wall of the slab, the
+// following must be true for that point's corresponding t-value:
+o_x + d_x * t = x_min 
+
+// therefore:
+
+t = (x_min - o_x) / d_x
+
+```
+The intuition behind this is that, whatever that intersection point is,
+its x-coordinate has to be x_min because that's just how
+the X-slab is defined. Similar logic applies to Y and Z slabs, which gives us
+t-ranges for each slab.
+Finding whether all t-ranges overlap is also easy. Each t-range has a start and
+end value. For all ranges to overlap, the largest start value has to be smaller
+than the smallest end value.
+This condition is necessary: if the largest start value were
+larger than the smallest end value, then the range with the largest start value
+would not overlap the range with the smallest end value.
+This condition is also sufficient: every range starts before the range
+with the largest start value (by definition), and every range ends
+within or after the range with the largest start value
+(due to our condition), therefore they all overlap.
+With all of that said, we can write some pseudo-code for the AABB-ray
+intersection test:
+```
+
+
+// returns true if the ray `r` intersects the aabb `box` AND the t-value
+// for the intersection point is within the [t_min; t_max] range.
+bool intersects(const aabb& box, const ray& r, float t_min, float t_max) {
+  const float3 min_walls { box.x_minmax[0], box.y_minmax[0], box.z_minmax[0] };
+  const float3 max_walls { box.x_minmax[1], box.y_minmax[1], box.z_minmax[1] };
+  const float3 reciprocal_ray_dir = 1.0 / r.d; // assumes div by 0 will result in inf.
+  const float3 t_minwalls = (min_walls - r.o) * reciprocal_ray_dir;
+  const float3 t_maxwalls = (max_walls - r.o) * reciprocal_ray_dir;
+  // we have the t-values for intersection points with every slab wall.
+  // now determine which of these are the start points of the t-ranges,
+  // and which are the end points.
+  const float4 t_ranges_starts { min(t_minwalls, t_maxwalls), t_min };
+  const float4 t_ranges_ends { max(t_minwalls, t_maxwalls), t_max };
+  const float largest_start = max_component(t_ranges_starts);
+  const float smallest_end = min_component(t_ranges_ends);
+  return largest_start <= smallest_end;
+}
+
+```
+By now you probably have noticed that this algorithm contains a potential division
+by zero. Unless your environment is set to trap on division by 0, this operation
+should produce an infinity which is a perfectly legal IEEE floating point value
+(actually, would be a negative infinity in case of division by -0.0, which is
+also a perfectly valid IEEE float).
+The ray tracing gems article provides some further pointers on why this works,
+and explains a case where this code might produce NaNs (due to multiplying 0
+with infinity).
+Like this post? Follow me on bluesky for more!

@@ -1,0 +1,101 @@
+--- v001.md
++++ v002.md
+@@ -8,10 +8,10 @@
+ ## How it works
+ **Inputs and Outputs:**
+-- Input: A 3D texture storing the volume data, camera parameters (position $c$, screen coordinates $(x, y)$), and a block min-max structure storing the minimum and maximum scalar values for each block in the volume.
+-- Output: A rendered image with isosurface shading, where rays are terminated early if they traverse inactive (transparent) blocks.
++- Input: A 3D texture storing the volume data, camera parameters (position $c$, screen coordinates $(x, y)$), and a block min-max structure storing the minimum and maximum scalar values for each block in the volume [S1].
++- Output: A rendered image with isosurface shading, where rays are terminated early if they traverse inactive (transparent) blocks [S1].
+ 
+ **Data Structures:**
+-- **Block Min-Max Structure:** For a regular subdivision of the volume into blocks of size $B^3$ (e.g., $4^3$ or $8^3$ voxels), this structure stores two values per block: $min$ and $max$. These represent the minimum and maximum scalar values present in the block's voxel data [S1].
+-- **Bounding Geometry:** A set of 3D primitives representing the bounding boxes of active blocks. This geometry is kept in GPU memory and updated when the isovalue changes [S1].
++- **Block Min-Max Structure:** For a regular subdivision of the volume into blocks of size $B^3$ (e.g., $4^3$ or $8^3$ voxels), this structure stores two values per block: $min$ and $max$ [S1].
++- **Bounding Geometry:** A set of 3D primitives representing the bounding boxes of active blocks, kept in GPU memory and updated when the isovalue changes [S1].
+ 
+ **Steps:**
+@@ -25,15 +25,59 @@
+ 
+ 3. **Ray Casting Loop:** Iterate through the volume in front-to-back order within the fragment shader [S1]:
+-   - Sample the volume at the current ray position.
+-   - **Object-Order Skip:** If the current ray segment falls within a region covered by inactive blocks (blocks where the isovalue is outside $[min, max]$), skip the sampling process for that segment. This is handled by the depth range computed in Step 2, which excludes inactive blocks from the initial search range unless they are enclosed by active blocks [S1].
+-   - **Image-Order Skip:** For samples within active blocks but in transparent regions, use adaptive sampling or early termination based on accumulated opacity [S1].
+-   - Refine the isosurface intersection position using iterative bisection if the ray crosses the isovalue [S1].
++   - **Object-Order Skip:** If the current ray segment falls within a region covered by inactive blocks (blocks where the isovalue is outside $[min, max]$), skip the sampling process for that segment [S1].
++   - **Image-Order Skip:** For samples within inactive blocks, use image-order skipping accelerated via an adaptive sampling strategy [S1].
++   - **Volume Sampling & Accumulation:** Sample the volume at the current ray position, accumulate opacity, and apply iterative bisection to refine the isosurface intersection position if the ray crosses the isovalue [S1].
+ 
+ **Parameters:**
+-- **Block Size:** The volume is subdivided into blocks of size $4^3$ or $8^3$ voxels [S1]. Smaller blocks increase culling precision but increase memory overhead for the min-max structure.
++- **Block Size:** The volume is subdivided into blocks of size $4^3$ or $8^3$ voxels [S1]. Smaller blocks increase culling precision but increase memory overhead for the min-max structure [S1].
+ 
+ **Edge Cases and Pitfalls:**
+ - **Enclosed Inactive Blocks:** Inactive blocks enclosed by active blocks are not excluded from the search range by the bounding geometry because the rasterization only captures the outer boundary of active regions [S1]. Samples in these enclosed inactive blocks are skipped on a per-sample basis early in the ray-casting loop, incurring a small overhead [S1].
+-- **Precision:** Depth values for $t_{start}$ and $t_{exit}$ must be computed with sufficient precision to avoid gaps or overlaps in the bounding geometry, which could lead to incorrect ray ranges [S1].
++
++**Pseudocode:**
++```python
++def object_order_empty_space_skipping(camera_pos, screen_coords, block_min_max, volume_texture, isovalue):
++    # 1. Compute ray direction d(x, y) from camera position c and screen coordinates (x, y) [S1]
++    d = compute_direction(camera_pos, screen_coords)
++
++    # 2. Compute ray depth range [tstart, texit] per frame by rasterizing bounding geometry [S1]
++    t_start = rasterize_front_faces(block_min_max, depth_test='GL_LESS')
++    t_exit = rasterize_back_faces(block_min_max, depth_test='GL_GREATER')
++
++    # 3. Loop in the fragment shader in front-to-back order [S1]
++    t = t_start
++    accumulated_color = vec3(0.0)
++    accumulated_opacity = 0.0
++
++    while t < t_exit:
++        pos = camera_pos + t * d
++        block_id = get_block_index(pos, block_min_max)
++
++        # Object-order skip: check min-max values against isovalue
++        if isovalue < block_min_max[block_id].min or isovalue > block_min_max[block_id].max:
++            # Inactive block: skip samples on a per-sample basis early in the loop [S1]
++            # Use image-order skipping accelerated via adaptive sampling strategy [S1]
++            t += get_adaptive_step_size() # [G] Adaptive step logic not specified in sources
++            continue
++
++        # Sample volume at current position
++        color, opacity = sample_3d_texture(volume_texture, pos)
++
++        # Front-to-back compositing
++        accumulated_color += color * opacity * (1.0 - accumulated_opacity)
++        accumulated_opacity += opacity * (1.0 - accumulated_opacity)
++
++        # Early termination if fully opaque
++        if accumulated_opacity >= 1.0:
++            break
++
++        # Refine isosurface intersection position using iterative bisection [S1]
++        if opacity > 0.0:
++            t += refine_intersection_step(pos, d, isovalue) # [G] Bisection step logic not specified in sources
++        else:
++            t += BASE_STEP_SIZE # [G] Base step size not specified in sources
++
++    return accumulated_color, accumulated_opacity
++```
+ 
+ ## Subtopics
+@@ -43,12 +87,12 @@
+ 
+ ## Operating characteristics
+-- **Time Complexity:** The culling overhead is minimal, as it relies on rasterization of bounding geometry, which is highly optimized on GPUs [S1]. The main cost is the ray casting loop, which is reduced by skipping inactive blocks [S1].
+-- **Memory Complexity:** Requires additional memory for the block min-max structure, proportional to the number of blocks in the volume [S1]. For large volumes that do not fit in GPU memory, a second level of coarser bricks is maintained, increasing memory usage [S1].
+-- **Performance:** In empty regions, this approach results in a considerable speed-up because only one texture fetch is needed to check the mean value of the block [S1]. However, in complex scenes with many active blocks, the overhead of maintaining the bounding geometry and min-max structure may reduce performance gains [S1].
++- **Time Complexity:** Culling overhead is reduced by using a two-level approach, where most empty space is skipped with no cost using modified ray segments, and only a small number of samples require skipping on a sample-by-sample basis accelerated via adaptive sampling [S1].
++- **Memory Complexity:** Requires additional memory for the block min-max structure, proportional to the number of blocks in the volume [S1]. For large volumes that do not fit in GPU memory, a second level of coarser bricks is maintained [S1].
++- **Performance:** In empty regions, this approach results in a considerable speed-up because only one texture fetch is needed to check the mean value of the block [S1]. However, rendering uncompressed data initially perceives a loss in performance of a factor of 2-3 due to complex shaders and texture indirections, though empty regions still yield speed-ups [S1].
+ - **Strengths:** Simple implementation, low per-pixel overhead, effective for real-time isosurface rendering [S1].
+-- **Limitations:** Enclosed inactive blocks are not fully excluded, leading to per-sample overhead in those regions [S1]. Performance may degrade with complex shaders and texture indirections [S1].
++- **Limitations:** Enclosed inactive blocks are not fully excluded, leading to per-sample overhead in those regions [S1].
+ 
+ ## Background
+-Object-Order Empty Space Skipping was introduced in the context of GPU-based ray-casting for real-time volume rendering [S1]. It builds on earlier approaches that used multiple rendering passes for ray casting, replacing them with a single pass and front-to-back looping in the fragment shader [S1]. The technique was developed to overcome limitations of earlier empty space skipping methods, such as high overhead and poor performance with complex shaders [S1]. It is widely used in real-time volume rendering applications, particularly for isosurface visualization [S1].
++Object-Order Empty Space Skipping was introduced in the context of GPU-based ray-casting for real-time volume rendering [S1]. It builds on earlier approaches that used multiple rendering passes for ray casting, replacing them with a single pass and front-to-back looping in the fragment shader [S1]. It is widely used in real-time volume rendering applications, particularly for isosurface visualization [S1].
+ 
+ ## Sources

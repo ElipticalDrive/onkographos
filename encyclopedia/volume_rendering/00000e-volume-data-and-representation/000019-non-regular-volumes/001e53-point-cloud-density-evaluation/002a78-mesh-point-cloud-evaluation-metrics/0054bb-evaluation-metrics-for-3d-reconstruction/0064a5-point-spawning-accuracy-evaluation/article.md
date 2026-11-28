@@ -1,0 +1,123 @@
+# Point Spawning Accuracy Evaluation
+
+Also called: F-score Evaluation on Tanks&Temples
+
+## Overview
+Point Spawning Accuracy Evaluation measures the geometric fidelity of reconstructed point clouds against ground truth data using the F-score metric, specifically within the context of the Tanks&Temples benchmark [S1]. It distinguishes itself from photometric metrics by focusing exclusively on spatial alignment, combining precision and recall to penalize both missing geometry and false positives [S2].
+
+## How it works
+**Inputs and Outputs:**
+- **Input:** A reconstructed point cloud $P$ and a ground truth point cloud $P^*$.
+- **Output:** A scalar F-score value in $[0, 1]$, where 1 indicates perfect overlap.
+
+**Data Structures:**
+- $P$: Set of $N$ points $\{p_1, ..., p_N\}$ in $\mathbb{R}^3$.
+- $P^*$: Set of $M$ points $\{p^*_1, ..., p^*_M\}$ in $\mathbb{R}^3$.
+- Threshold $\tau$: Distance tolerance for matching. The standard value used in the Tanks&Temples benchmark is $\tau = 0.05$ meters [S2].
+
+**Steps:**
+1. **Compute Accuracy (Precision):** For each point $p \in P$, find the minimum Euclidean distance to any point in $P^*$:
+   $$ d(p, P^*) = \min_{p^* \in P^*} \| p - p^* \| $$
+   Accuracy is the mean of these distances:
+   $$ \text{Accuracy} = \frac{1}{|P|} \sum_{p \in P} d(p, P^*) $$
+   *Note: While Accuracy is defined in [S2], the F-score calculation relies on Precision and Recall, not Accuracy directly.*
+
+2. **Compute Precision:** Calculate the fraction of points in $P$ that are within distance $\tau$ of $P^*$:
+   $$ \text{Precision} = \frac{1}{|P|} \sum_{p \in P} \mathbb{I}(d(p, P^*) < \tau) $$
+   where $\mathbb{I}(\cdot)$ is the indicator function (1 if true, 0 otherwise) [S2].
+
+3. **Compute Recall:** For each point $p^* \in P^*$, find the minimum Euclidean distance to any point in $P$:
+   $$ d(p^*, P) = \min_{p \in P} \| p^* - p \| $$
+   Recall is the fraction of points in $P^*$ that are within distance $\tau$ of $P$:
+   $$ \text{Recall} = \frac{1}{|P^*|} \sum_{p^* \in P^*} \mathbb{I}(d(p^*, P) < \tau) $$
+   [S2].
+
+4. **Compute F-score:** Combine Precision and Recall using the harmonic mean:
+   $$ \text{F-score} = \frac{2 \times \text{Precision} \times \text{Recall}}{\text{Precision} + \text{Recall}} $$
+   [S2].
+
+**Pseudocode:**
+> **Unverified code.** The code below did not pass a test run against a reference implementation, or no test fits it, so it may contain errors.
+
+```python
+import numpy as np
+
+def point_spawning_accuracy_evaluation(P, P_star, threshold=0.05):
+    """
+    Computes the F-score for point cloud accuracy.
+    
+    Args:
+        P: numpy array of shape (N, 3), reconstructed points.
+        P_star: numpy array of shape (M, 3), ground truth points.
+        threshold: float, distance tolerance (default 0.05).
+        
+    Returns:
+        float: F-score.
+    """
+    if len(P) == 0 or len(P_star) == 0:
+        return 0.0
+
+    # Compute pairwise distances between P and P_star
+    # Shape: (N, M)
+    # Using broadcasting: P[:, None, :] - P_star[None, :, :]
+    diff = P[:, np.newaxis, :] - P_star[np.newaxis, :, :]
+    dists = np.sqrt(np.sum(diff**2, axis=2))
+    
+    # Minimum distance from each p in P to P_star
+    min_dists_p = np.min(dists, axis=1)
+    
+    # Minimum distance from each p_star in P_star to P
+    # Transpose dists to get (M, N)
+    min_dists_p_star = np.min(dists.T, axis=1)
+    
+    # Precision: fraction of P points within threshold of P_star
+    precision = np.mean(min_dists_p < threshold)
+    
+    # Recall: fraction of P_star points within threshold of P
+    recall = np.mean(min_dists_p_star < threshold)
+    
+    # F-score
+    if precision + recall == 0:
+        return 0.0
+    f_score = (2 * precision * recall) / (precision + recall)
+    
+    return f_score
+```
+
+**Parameters:**
+- **Threshold ($\tau$):** 0.05 meters is the standard for Tanks&Temples [S2].
+- **Point Clouds:** Must be aligned. Misalignment invalidates the metric.
+
+**Edge Cases:**
+- Empty point clouds result in division by zero; handled by returning 0.0 [G].
+- Large disparities in point cloud density can skew results if not normalized by count [G].
+
+## Subtopics
+
+### F-score Evaluation
+The core metric combining precision and recall. It is chosen when a single scalar is needed to balance completeness (recall) and correctness (precision). It is preferred over simple Chamfer distance when binary classification of "valid" vs "invalid" geometry is required via a threshold [S2].
+
+## Operating characteristics
+**Time and Memory Complexity:**
+- **Time:** $O(N \cdot M)$ for naive pairwise distance computation, where $N$ and $M$ are the number of points in $P$ and $P^*$ respectively. Optimized implementations using KD-trees or spatial hashing can reduce this to $O((N+M) \log N)$ or similar [G].
+- **Memory:** $O(N \cdot M)$ for the full distance matrix in the naive approach. Spatial indexing reduces this to $O(N + M)$ [G].
+
+**Measured Performance:**
+- On the Tanks&Temples "Meetingroom" scene: COLMAP F-score = 0.335, VET (Ours) = 0.338, VET-full = 0.365 [S1].
+- On the "Barn" scene: COLMAP F-score = 0.591, VET (Ours) = 0.591, VET-full = 0.651 [S1].
+- These results indicate that VET-full improves geometric accuracy by nearly 10% over COLMAP on the Meetingroom scene [S1].
+
+**Strengths and Limitations:**
+- **Strengths:** Intuitive interpretation; penalizes both holes (low recall) and noise (low precision) [S2].
+- **Limitations:** Sensitive to the choice of threshold $\tau$ [S2]. Does not account for surface normals or texture [S1].
+
+**When to Use:**
+- Use when evaluating geometric reconstruction quality on standard benchmarks like Tanks&Temples [S1].
+- Do not use for photometric quality assessment; use PSNR or LPIPS instead [S1].
+
+## Background
+Originating from the Tanks&Temples benchmark [Knapitsch et al. 2017], this metric is widely used in 3D reconstruction and neural rendering to evaluate point cloud completeness and accuracy [S1]. It was applied in VET (Visual Error Tomography) to assess the geometric impact of point spawning and cleaning strategies [S1].
+
+## Sources
+[S1] VET: Visual Error Tomography for Point Cloud Completion and High-Quality Neural Rendering, https://doi.org/10.1145/3610548.3618212, fetched 2026-10-26
+[S2] HelixSurf: A Robust and Efficient Neural Implicit Surface Learning of Indoor Scenes with Iterative Intertwined Regularization, https://arxiv.org/abs/2302.14340v2, fetched 2026-10-26

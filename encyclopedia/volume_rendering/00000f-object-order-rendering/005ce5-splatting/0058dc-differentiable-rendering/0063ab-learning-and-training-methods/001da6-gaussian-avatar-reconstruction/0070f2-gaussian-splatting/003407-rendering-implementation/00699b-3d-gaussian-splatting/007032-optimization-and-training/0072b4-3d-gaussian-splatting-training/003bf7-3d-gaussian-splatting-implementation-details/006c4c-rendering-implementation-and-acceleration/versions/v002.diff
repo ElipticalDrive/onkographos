@@ -1,0 +1,99 @@
+--- v001.md
++++ v002.md
+@@ -1,38 +1,82 @@
+ # Rendering Implementation and Acceleration
+ 
++Also called: 3D Gaussian Splatting Rendering Pipeline, 3DGS Rasterization, Gaussian Splatting Optimization
+ 
+ ## Overview
+-This family covers implementation strategies and acceleration techniques for 3D Gaussian Splatting, focusing on robust geometric queries, slice-based volumetric consistency, and high-dynamic-range rendering. It differs from standard rasterization by introducing specialized intersection criteria [19020-occupancy-region-derivation-intersection-criterion.md], imaging-system-aware focus models [19322-gaussian-piling.md], and parallel HDR/LDR pipelines [19784-parallel-differentiable-rasterization.md].
++Rendering Implementation and Acceleration encompasses the computational strategies, data structures, and mathematical approximations required to efficiently project, sort, and blend millions of 3D Gaussian primitives into 2D images [S1, S2, S3, unofficial][S4]. It solves the bottleneck of rendering large-scale scenes by addressing the memory-bound nature of Gaussian parameter storage and the compute-bound nature of the rasterization loop [S2, unofficial]. This family is distinct from [Data Compression and Storage Optimization](12943-data-compression-and-storage-optimization.md), which focuses on reducing model size, and [Occupancy Region Derivation & ϵ-Intersection Criterion](19020-occupancy-region-derivation-intersection-criterion.md), which focuses on geometric intersection robustness; instead, it focuses on the throughput of the rendering pipeline itself [S2, S3, unofficial].
+ 
+ ## Shared principles
+-The methods share a foundation in 3D Gaussian primitives defined by mean $\mu$, covariance $\Sigma$ (derived from scale $s$ and rotation $q$), opacity $\alpha$, and color/radiance parameters. Rendering involves projecting these 3D primitives to 2D screen space, typically via affine approximation of the projective transformation. The core mathematical operation is the evaluation of the Gaussian density function $P(x|\mu, \Sigma) = \exp\left(-\frac{1}{2}(x - \mu)^\top \Sigma^{-1} (x - \mu)\right)$ and alpha blending. Acceleration often relies on tiling the image plane and sorting primitives by depth.
++All methods in this family operate on a set of $N$ 3D Gaussian primitives $\{G_i\}_{i=1}^N$. Each primitive $G_i$ is defined by:
++*   Mean position $\boldsymbol{\mu}_i \in \mathbb{R}^3$.
++*   Covariance matrix $\boldsymbol{\Sigma}_i \in \mathbb{R}^{3 \times 3}$, derived from scale $\mathbf{s}_i \in \mathbb{R}^3$ and rotation quaternion $\mathbf{q}_i \in \mathbb{R}^4$ (or rotation matrix $\mathbf{R}_i$) via $\boldsymbol{\Sigma}_i = \mathbf{R}_i \mathbf{S}_i \mathbf{S}_i^\top \mathbf{R}_i^\top$, where $\mathbf{S}_i = \text{diag}(\mathbf{s}_i)$ [S3, unofficial].
++*   Opacity $\alpha_i \in [0, 1]$.
++*   Color/Radiance parameters (e.g., spherical harmonic coefficients or direct RGB values) [S1, S3, unofficial].
++
++The core rendering operation involves projecting these 3D primitives to 2D screen space. This is typically achieved via an affine approximation of the projective transformation. The Gaussian density function evaluated at a point $\mathbf{x}$ is:
++$$
++P(\mathbf{x} | \boldsymbol{\mu}_i, \boldsymbol{\Sigma}_i) = \exp\left(-\frac{1}{2}(\mathbf{x} - \boldsymbol{\mu}_i)^\top \boldsymbol{\Sigma}_i^{-1} (\mathbf{x} - \boldsymbol{\mu}_i)\right)
++$$
++[ S1, S3 ]
++
++Acceleration relies on:
++1.  **Tiling:** Dividing the image plane into non-overlapping tiles (e.g., $16 \times 16$ pixels) to localize Gaussian processing [S2, unofficial][S4].
++2.  **Sorting:** Sorting Gaussians within each tile by view-space depth (front-to-back) to enable alpha blending [S2, unofficial][S4].
++3.  **Culling:** Discarding Gaussians that do not overlap with the camera frustum or specific tiles to reduce enumeration overhead [S2, unofficial].
+ 
+ ## Subtopics
+ 
++### [Data Compression and Storage Optimization](12943-data-compression-and-storage-optimization.md)
++Reduces storage footprint and transmission bandwidth by compressing geometric attributes, opacity, and color. Uses codebooks, quantization-aware training, and spatial sorting (Morton codes) to achieve ~10×–25× compression. Choose when memory bandwidth or storage is the primary constraint.
++
++### [Hardware and Computational Acceleration](16214-hardware-and-computational-acceleration.md)
++Optimizes the rendering and training pipelines for modern GPUs, targeting bottlenecks in projection, sorting, and blending. Focuses on memory-bound front-ends and compute-bound rasterization stages specific to 3DGS data structures. Choose for real-time rendering or large-scale training speedups.
++
+ ### [Occupancy Region Derivation & ϵ-Intersection Criterion](19020-occupancy-region-derivation-intersection-criterion.md)
+-Defines a robust geometric intersection test for 3D Gaussian splats by deriving an elliptic occupancy region $\Omega_i$ from the Gaussian kernel $G_i$, replacing strict binary overlap checks with a tolerance-based $\epsilon$-intersection criterion. It solves the problem of robustly determining whether two splats $G_i$ and $G_j$ interact during rendering or optimization, avoiding numerical instability from strict boundary comparisons. It differs from standard alpha-testing by using a derived geometric region $\Omega_i$ defined by an adaptive threshold $T_i$ and a normal-wise offset metric $\delta_{ij}$, rather than simple distance-to-center checks.
++Defines a robust, surface-aligned elliptic occupancy region $\Omega_i$ for intersection checks, using a normal-wise offset metric $\delta_{ij}$ and adaptive threshold $\epsilon$. Choose when geometric stability and robust visibility culling are required, especially for differentiable rendering pipelines.
+ 
+ ### [Gaussian Piling](19322-gaussian-piling.md)
+-Gaussian Piling is a slice-based volumetric reconstruction method that unifies 3D Gaussian Splatting with an imaging system-aware focus model to compress aggressively while preserving internal structure. Unlike standard 3D Gaussian Splatting, which discards internal volumetric information and produces incoherent 3D structures with floating artifacts for slice-based modalities, Gaussian Piling models the finite focal zone to preserve high-frequency internal volumetric detail. It achieves this by maintaining Gaussian primitives' form through axial re-parameterization, opacity modulation, and additive rasterization to enforce 3D-to-2D consistency.
++A slice-based volumetric reconstruction method that unifies 3DGS with an imaging system-aware focus model. Models finite focal zone to preserve internal volumetric detail and prevents ghosting via axial re-parameterization and opacity modulation. Choose for slice-based modalities (e.g., CT, microscopy) where internal structure matters.
+ 
+ ### [Parallel Differentiable Rasterization](19784-parallel-differentiable-rasterization.md)
+-Parallel Differentiable Rasterization is a rendering technique that jointly generates High Dynamic Range (HDR) and Low Dynamic Range (LDR) views from a single set of 3D Gaussian primitives by employing two parallel differentiable rasterization pipelines ($F_{HDR}$ and $F_{LDR}$). It distinguishes itself from standard 3D Gaussian Splatting by decoupling the color representation into HDR base values and LDR exposure-dependent values, allowing simultaneous optimization and rendering of both radiance ranges without tone-mapping artifacts during the differentiable process.
++Jointly produces High Dynamic Range (HDR) and Low Dynamic Range (LDR) images from a single set of primitives using two parallel pipelines ($F_{HDR}$ and $F_{LDR}$). Decouples color representation into intrinsic HDR radiance and exposure-dependent LDR values. Choose when simultaneous HDR/LDR output or exposure-aware rendering is needed.
+ 
+ ### Conditional Splat Approximation
+-- **Definition**: A technique to approximate the influence range of a 3D Gaussian on a slice by using a 2D ellipse splat scaled by the marginal factor, which closely matches the true iso-probability contours [S1, unofficial].
+-- **Validation**: Qualitative validation shows that the conditional splat approximation (dashed red contours) closely overlaps with the true 3D Gaussian iso-probability contours (solid blue contours) [S1, unofficial].
+-- **Comparison**: The conditional splat provides an accurate and efficient approximation of the original 3D Gaussian’s influence range [S1, unofficial].
++*   **Definition:** A technique to approximate the influence range of a 3D Gaussian on a slice by using a 2D ellipse splat scaled by the marginal factor, which closely matches the true iso-probability contours [S1, unofficial].
++*   **Validation:** Qualitative validation shows that the conditional splat approximation (dashed red contours) closely overlaps with the true 3D Gaussian iso-probability contours (solid blue contours) [S1, unofficial].
++*   **Comparison:** The conditional splat provides an accurate and efficient approximation of the original 3D Gaussian’s influence range [S1, unofficial].
++
++### Conservative Region Pre-Culling
++*   **Definition:** A pre-rasterization optimization that skips spatially contiguous blocks of Gaussians before projection and preprocessing, reducing enumeration, sorting, and downstream rasterization overhead [S2, unofficial].
++*   **Steps:**
++    1.  At export time, reorder the Gaussian model by Morton code and cut it into fixed-size contiguous memory blocks [S2, unofficial].
++    2.  For each block, precompute an axis-aligned bounding box that contains the full $\tau_0$-support of every Gaussian it holds, inflated by a safety factor [S2, unofficial].
++    3.  Pass surviving blocks to the rasterizer as contiguous ranges; Gaussians in rejected blocks are never read, incurring zero cost in projection, prefix scan, or duplication [S2, unofficial].
++*   **Parameters:** $\tau_0$: The finite-support radius used by the backbone's Gaussian culling predicate [S2, unofficial].
++*   **Layout:** Gaussians are stored in contiguous memory blocks ordered by Morton code. Each block has a precomputed AABB. Rejected blocks are passed to the rasterizer as contiguous ranges to be skipped [S2, unofficial].
++*   **Pitfalls:** Conservative culling may skip visible Gaussians if their support extends beyond the inflated block box. Handled by inflating the box with a safety factor to guarantee bit-exactness [S2, unofficial].
++*   **Validation:** Evaluated across 52 runs; images produced are bit-identical to the unmodified backbone [S2, unofficial].
+ 
+ ### GaussianPile Forward Rendering
+-- **Definition**: A forward rendering process for slice-based volumetric reconstruction that converts 3D Gaussian primitives into 2D images by convolving the Gaussian with a reversed sensitivity map (PSF) along the axial direction, resulting in a 'focus Gaussian' that accounts for depth-of-field effects [S2, unofficial].
+-- **Steps**:
+-    1. Represent each primitive as an anisotropic 3D Gaussian with parameters $G = (\mu, s, q, \alpha)$, where $\mu$ is position, $s$ is scale, $q$ is orientation quaternion, and $\alpha$ is opacity [S2, unofficial].
+-    2. Convert scale $s$ and orientation $q$ into a 3D covariance matrix $\Sigma$ in world coordinates: $S = \text{diag}(\text{mod} \cdot s)$, $R = \text{quatToMatrix}(q)$, $\Sigma = R S S^\top R^\top$ [S2, unofficial].
+-    3. Extract the 2D components from the focus Gaussian: $\Sigma_{2d}$ is the top-left 2x2 block of $\Sigma_e$, and $\mu_{2d} = [\mu_e[0], \mu_e[1]]^\top$ [S2, unofficial].
++*   **Definition:** A forward rendering process for slice-based volumetric reconstruction that converts 3D Gaussian primitives into 2D images by convolving the Gaussian with a reversed sensitivity map (PSF) along the axial direction, resulting in a 'focus Gaussian' that accounts for depth-of-field effects [S3, unofficial].
++*   **Steps:**
++    1.  Represent each primitive as an anisotropic 3D Gaussian with parameters $G = (\boldsymbol{\mu}, \mathbf{s}, \mathbf{q}, \alpha)$, where $\boldsymbol{\mu}$ is position, $\mathbf{s}$ is scale, $\mathbf{q}$ is orientation quaternion, and $\alpha$ is opacity [S3, unofficial].
++    2.  Convert scale $\mathbf{s}$ and orientation $\mathbf{q}$ into a 3D covariance matrix $\boldsymbol{\Sigma}$ in world coordinates: $\mathbf{S} = \text{diag}(\text{mod} \cdot \mathbf{s})$, $\mathbf{R} = \text{quatToMatrix}(\mathbf{q})$, $\boldsymbol{\Sigma} = \mathbf{R}\mathbf{S}\mathbf{S}^\top\mathbf{R}^\top$ [S3, unofficial].
++    3.  Extract the 2D components from the focus Gaussian: $\boldsymbol{\Sigma}_{2d}$ is the top-left 2x2 block of $\boldsymbol{\Sigma}_e$, and $\boldsymbol{\mu}_{2d} = [\boldsymbol{\mu}_e[0], \boldsymbol{\mu}_e[1]]^\top$ [S3, unofficial].
++
++### GES Implementation and Rendering Pipeline
++*   **Parameters:** $\delta$: Depth offset in Eq. (2) and (3). Set $\delta = \sum_{k=1}^D s^k$ for each Gaussian, where $D$ is dimension of scaling and $s^k$ is the $k$-th axis length of scaling $\mathbf{s}$. This allows $\delta$ to vary adaptively to geometric granularity [S4].
++*   **Layout:**
++    *   **Optimization renderer:** Pytorch framework, per-pixel rendering (GPU thread per pixel querying surfels and Gaussians) [S4].
++    *   **Post-optimization renderer:** OpenGL, per-primitive rendering (GPU thread per fragment of primitives querying covered pixels). Uses 4x MSAA instead of 4x supersampling. Two rendering passes:
++        1.  Depth testing/writing enabled, blending disabled. Geometry shader generates surfels from points, renders surfel color map and depth map. Multisampling textures resolved. Depth map modified by offset $\delta$ via post-processing shader [S4].
++        2.  Depth testing and additive blending enabled, depth writing disabled. Geometry shader generates 3D Gaussians from points, splats 3D Gaussians to obtain $\mathbf{C}$ and $\mathbf{D}$. Final image computed using Eq. (5) via post-processing shader [S4].
++*   **Pitfalls:** Depth offset $\delta$ impact: If too large, 3D Gaussians occluded by surface leak out. If too small, 3D Gaussians close to surface are wrongly truncated [S4].
+ 
+ ## Background
+-The techniques in this family address specific limitations of standard 3D Gaussian Splatting in specialized domains. Occupancy region derivation improves robustness in geometric queries [19020-occupancy-region-derivation-intersection-criterion.md]. Gaussian Piling targets slice-based modalities like ultrasound or tomography, where standard splatting fails to preserve internal structure [S2, unofficial]. Parallel differentiable rasterization enables HDR rendering without post-processing artifacts [S1, unofficial]. Conditional splat approximation provides an efficient way to handle slice intersections [S1, unofficial].
++3D Gaussian Splatting was introduced by Kerbl et al. in 2023 as a real-time explicit scene representation method [G]. The initial implementation relied on a CUDA-based rasterizer that projected Gaussians to 2D ellipses, sorted them by depth, and blended them using alpha compositing [G]. Subsequent research has focused on accelerating this pipeline through hardware-aware optimizations [S2, unofficial], improving geometric robustness [S1, unofficial], adapting the method for slice-based volumetric data [S3, unofficial], and extending it to handle HDR/LDR rendering [S1, unofficial]. The field has evolved from a single CUDA kernel to a diverse ecosystem of rendering backends, including OpenGL-based pipelines [S4] and optimized memory layouts [S2, unofficial].
+ 
+ ## Sources
+ [S1] InnerGS: Internal Scenes Reconstruction and Segmentation via Factorized 3D Gaussian Splatting, https://doi.org/10.48550/arxiv.2508.13287, fetched 2026-10-26 (unofficial)
+-[S2] GaussianPile: A Unified Sparse Gaussian Splatting Framework for Slice-based Volumetric Reconstruction, https://doi.org/10.48550/arXiv.2603.20611, fetched 2026-10-27 (unofficial)+[S2] TileSkipper: Region-Adaptive Tile Pruning for 3D Gaussian Splatting, https://arxiv.org/abs/2610.09343, fetched 2026-10-29 (unofficial)
++[S3] GaussianPile: A Unified Sparse Gaussian Splatting Framework for Slice-based Volumetric Reconstruction, https://doi.org/10.48550/arXiv.2603.20611, fetched 2026-10-27 (unofficial)
++[S4] When Gaussian Meets Surfel: Ultra-fast High-fidelity Radiance Field Rendering, https://doi.org/10.1145/3730925, fetched 2026-10-26

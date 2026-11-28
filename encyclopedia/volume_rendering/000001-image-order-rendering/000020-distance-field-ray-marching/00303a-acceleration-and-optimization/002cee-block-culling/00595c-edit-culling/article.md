@@ -1,0 +1,99 @@
+# Edit Culling
+
+
+## Overview
+Edit culling is a technique used during the construction of Signed Distance Field (SDF) bricks to reduce the number of edits evaluated per brick, thereby reducing construction latency [S1, unofficial]. It determines which edits affect a sub-brick based on the principle that a sub-brick is entirely encapsulated by its parent, ensuring that no edit affecting the child is missed while culling those that do not [S1, unofficial]. It sets itself apart from sibling methods by focusing on the hierarchical relationship between parent and child bricks to minimize redundant distance evaluations during the critical construction phase [S1, unofficial].
+
+## How it works
+**Inputs and Outputs:**
+*   **Input:** A parent brick's index buffer (list of active edits), the edit definitions (including smooth blending dependencies), and the brick geometry (size and midpoint).
+*   **Output:** A new index buffer for the sub-brick containing indices of edits that affect the sub-brick, guaranteed to be unique and in ascending order [S1, unofficial].
+
+**Data Structures:**
+*   **Bitfield:** A 32-element array of 32-bit unsigned integers (`uint32[32]`), totaling 1024 bits [S1, unofficial]. This supports a maximum of 1024 edits [S1, unofficial].
+*   **Index Buffer:** A list of integers representing the indices of the set bits in the bitfield [S1, unofficial].
+*   **Dependency Buffer:** A structure mapping smooth edits to their required dependencies [S1, unofficial].
+
+**Parameters:**
+*   **Max Edits:** 1024 [S1, unofficial].
+*   **Brick Size:** The physical size of the brick volume [S1, unofficial].
+
+**Steps:**
+1.  Initialize a 1024-bit bitfield (32 `uint32` words) to all zeros [S1, unofficial].
+2.  Iterate through each edit index $i$ present in the parent brick's index buffer:
+    a. Evaluate the edit's distance function at the midpoint of the sub-brick, denoted as $d_{mid}$ [S1, unofficial].
+    b. Compare $d_{mid}$ to the brick size $S$ [S1, unofficial].
+    c. If $d_{mid} > S$, the edit is culled; do not set its bit [S1, unofficial].
+    d. If $d_{mid} \le S$, set the $i$-th bit in the bitfield to 1 [S1, unofficial].
+    e. If the edit is smooth, retrieve its dependencies from the dependency buffer and set the corresponding bits for each dependency in the bitfield to 1 [S1, unofficial].
+3.  Construct the index buffer:
+    a. Perform a prefix sum (scan) on the bitfield to determine the position of each set bit [S1, unofficial].
+    b. Write the indices of the set bits to the global index buffer in ascending order [S1, unofficial].
+
+**Pseudocode:**
+> **Unverified code.** The code below did not pass a test run against a reference implementation, or no test fits it, so it may contain errors.
+
+```python
+def edit_culling(parent_index_buffer, edits, brick_midpoint, brick_size, max_edits=1024):
+    # Initialize bitfield: 32 uint32s
+    bitfield = [0] * 32
+    
+    # Helper to set bit i
+    def set_bit(i):
+        word_idx = i // 32
+        bit_idx = i % 32
+        bitfield[word_idx] |= (1 << bit_idx)
+        
+    # Helper to get bit i
+    def get_bit(i):
+        word_idx = i // 32
+        bit_idx = i % 32
+        return (bitfield[word_idx] >> bit_idx) & 1
+
+    # Step 2: Evaluate edits
+    for edit_idx in parent_index_buffer:
+        edit = edits[edit_idx]
+        
+        # Evaluate distance at midpoint
+        dist = edit.distance_function(brick_midpoint)
+        
+        # Culling condition: if distance > brick size, cull
+        if dist > brick_size:
+            continue
+            
+        # Set bit for this edit
+        set_bit(edit_idx)
+        
+        # Handle smooth blending dependencies
+        if edit.is_smooth:
+            for dep_idx in edit.dependencies:
+                set_bit(dep_idx)
+                
+    # Step 3: Construct index buffer
+    index_buffer = []
+    for i in range(max_edits):
+        if get_bit(i):
+            index_buffer.append(i)
+            
+    return index_buffer
+```
+
+**Edge Cases and Pitfalls:**
+*   **Approximation Error:** The method relies on evaluating the distance at the midpoint. This is an approximation; precise signed distance function intersection calculation would be more accurate but is more expensive [S1, unofficial].
+*   **Smooth Blending Overhead:** High edit counts with smooth blending significantly increase the number of edits per brick because dependencies are added, increasing the index buffer size [S1, unofficial].
+*   **Bounding Sphere Limitation:** The source notes that bounding spheres are used for intersection detection in some contexts, which can result in more edits being evaluated than necessary [S1, unofficial]. However, the primary algorithm described uses midpoint evaluation against brick size [S1, unofficial].
+
+## Operating characteristics
+*   **Time Complexity:** The algorithm iterates through the parent's index buffer and performs constant-time bit operations. The prefix sum is linear in the number of edits (1024). It significantly reduces the total amount of work compared to evaluating all edits [S1, unofficial].
+*   **Memory Complexity:** Requires a fixed 1024-bit bitfield per brick during construction and an index buffer for the output. The index buffer size varies; in optimal cases (e.g., Fractal scene), it references less than 10 edits, but in worst cases (e.g., Drops scene with 1024 edits and smooth blending), it can be much larger [S1, unofficial].
+*   **Performance:** In the "Drops" scene at a brick size of 0.0625, enabling edit culling increased construction performance by a factor of 32, reducing construction times to less than 100 milliseconds, whereas without it, construction took multiple seconds [S1, unofficial].
+*   **Strengths:** Dramatically reduces construction latency for scenes with many edits; ensures correct geometry by maintaining sorted, unique indices; leverages hierarchical encapsulation.
+*   **Limitations:** The midpoint evaluation is an approximation and may cull edits that actually intersect the brick (false negatives) or keep edits that don't (false positives, though the condition $d_{mid} > S$ is conservative for culling). Smooth blending increases memory overhead.
+*   **When to Use:** When constructing SDF bricks hierarchically and the number of edits is large (up to 1024). Particularly effective when sparsity results from runtime parameters or when construction latency is critical [S1, unofficial].
+*   **When Not to Use:** When precise intersection is required and the cost of midpoint approximation is unacceptable, or when the number of edits is very small (overhead may not be justified).
+
+## Background
+Edit culling was introduced in the context of real-time rendering and construction of Signed Distance Fields, specifically within hierarchical brick-based representations. It addresses the bottleneck of evaluating hundreds of edits per brick during construction, which is critical for interactive applications [S1, unofficial]. The technique was developed to make real-time reconstruction of SDF geometry feasible, as construction without it was too slow for interactive use [S1, unofficial].
+
+## Sources
+[S1] Real-time Rendering and Construction of Signed Distance Fields, https://jambuttenshaw.github.io/devportfolio/Dissertation.pdf, fetched 2026-10-28 (unofficial)

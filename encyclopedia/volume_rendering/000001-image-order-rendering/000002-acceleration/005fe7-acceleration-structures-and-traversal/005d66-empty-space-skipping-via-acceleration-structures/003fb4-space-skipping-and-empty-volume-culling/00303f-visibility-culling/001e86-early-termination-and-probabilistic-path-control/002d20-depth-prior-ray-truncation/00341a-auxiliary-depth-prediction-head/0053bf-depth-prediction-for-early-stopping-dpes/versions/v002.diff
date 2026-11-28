@@ -1,0 +1,228 @@
+--- v001.md
++++ v002.md
+@@ -3,5 +3,5 @@
+ 
+ ## Overview
+-Depth Prediction for Early Stopping (DPES) is a technique used in streaming 3D Gaussian Splatting to predict the early stopping position for each tile in a target frame by leveraging truncated depth information from a reference frame [S1]. It solves the problem of redundant computation and load imbalance during viewpoint changes by allowing the renderer to exclude Gaussians that are guaranteed to be occluded or beyond the visible depth range in the new view [S1]. Unlike standard early termination which relies on per-pixel opacity thresholds during rendering, DPES pre-computes a tile-level depth bound to prune the Gaussian sorting stage entirely [S1].
++Depth Prediction for Early Stopping (DPES) predicts the early stopping position for each tile in a target frame by leveraging truncated depth information from a reference frame [S1]. It solves the problem of redundant computation and load imbalance during viewpoint changes by allowing the renderer to exclude Gaussians that are guaranteed to be occluded or beyond the visible depth range in the new view [S1]. Unlike standard early termination which relies on per-pixel opacity thresholds during rendering, DPES pre-computes a tile-level depth bound to prune the Gaussian sorting stage entirely [S1].
+ 
+ ## How it works
+@@ -11,135 +11,118 @@
+ 
+ **Data Structures:**
+-*   $F_{ref}, F_{tgt}$: 2D arrays of pixel colors.
+-*   $D_{ref}, D_{ref}^{max}$: 2D arrays of depth values. $D_{ref}$ stores the depth of the last traversed Gaussian or the early stopping depth [S1]. $D_{ref}^{max}$ stores the truncated depth bound [S1].
++*   $F_{ref}, F_{tgt}$: 2D arrays of pixel colors [S1].
++*   $D_{ref}, D_{ref}^{max}$: 2D arrays of depth values [S1]. $D_{ref}$ stores the depth of the last traversed Gaussian or the early stopping depth [S1]. $D_{ref}^{max}$ stores the truncated depth bound [S1].
+ *   $D_T^{max}$: 2D array where each element corresponds to a tile and stores the maximum valid reprojected depth within that tile [S1].
++*   $T$: Grid of tile coordinates covering the target frame [S1].
+ 
+ **Steps:**
+-1.  **Record Reference Depths:** During the initial rendering of the reference frame, record the depth of each pixel. This depth corresponds to the depth of the last Gaussian traversed or the depth at which early stopping occurred [S1].
+-2.  **Project to 3D:** Convert the 2D pixel coordinates and depth values from the reference frame into 3D world coordinates using the reference viewpoint $V_{ref}$ [S1]. This yields 3D points $P_{ref}$ and truncated depth bounds $P_{ref}^{max}$ [S1].
++1.  **Initialize:** Allocate output buffers $F_{tgt}$ and $D_T^{max}$ [S1].
++2.  **Project to 3D:** Convert 2D pixel coordinates and depth values from the reference frame into 3D world coordinates using $V_{ref}$ [S1]. This yields 3D points $P_{ref}$ and truncated depth bounds $P_{ref}^{max}$ [S1].
+ 3.  **View Transfer:** Transform the 3D points $P_{ref}$ and $P_{ref}^{max}$ from the reference viewpoint $V_{ref}$ to the target viewpoint $V_{tgt}$ [S1]. This yields transformed points $P_{tgt}$ and $P_{tgt}^{max}$ [S1].
+-4.  **Reproject to Target Frame:** Project the transformed 3D points $P_{tgt}$ and $P_{tgt}^{max}$ back onto the 2D image plane of the target viewpoint $V_{tgt}$ [S1]. This produces the target frame color buffer $F_{tgt}$ (interpolated or reprojected colors) and the target depth map $D_{tgt}$ [S1].
+-5.  **Tile-Level Processing:** Iterate through each tile $t$ in the target frame [S1]:
+-    *   Count the number of valid pixels $N$ within the tile $t$ in $F_{tgt}$ [S1].
+-    *   If $N > N_0$: Interpolate the color values for the tile [S1].
+-    *   If $N \le N_0$: Calculate the early stopping depth for the tile as the maximum depth of all valid reprojected pixels within that tile: $D_T^{max}(t) = \max(D_{tgt}, t)$ [S1]. Use this depth to re-render the tile, excluding any Gaussians with depth beyond $D_T^{max}(t)$ from the sorting stage [S1].
++4.  **Reproject to Target Frame:** Project the transformed 3D points $P_{tgt}$ and $P_{tgt}^{max}$ back onto the 2D image plane of $V_{tgt}$ [S1]. This produces the target frame color buffer $F_{tgt}$ and the target depth map $D_{tgt}$ [S1].
++5.  **Tile-Level Processing:** Iterate through each tile $t \in T$ [S1]:
++    *   Count the number of valid pixels $N$ within tile $t$ in $F_{tgt}$ [S1].
++    *   If $N > N_0$: Interpolate missing pixel values for the tile [S1].
++    *   If $N \le N_0$: Calculate the early stopping depth for the tile as the maximum depth of all valid reprojected pixels within that tile: $D_T^{max}(t) = \max_{p \in t} D_{tgt}(p)$ [S1]. Use this depth to re-render the tile, excluding any Gaussians with depth beyond $D_T^{max}(t)$ from the sorting stage [S1].
+ 
+ **Pseudocode:**
+ ```python
+ def depth_prediction_for_early_stopping(F_ref, D_ref, D_ref_max, V_ref, V_tgt, N0):
+-    """
+-    Predicts early stopping positions for tiles in the target frame.
+-    
+-    Args:
+-        F_ref: Reference frame color buffer.
+-        D_ref: Reference scene depth map.
+-        D_ref_max: Reference truncated depth max map.
+-        V_ref: Reference viewpoint (camera matrix/intrinsics).
+-        V_tgt: Target viewpoint (camera matrix/intrinsics).
+-        N0: Rerendering threshold.
+-        
+-    Returns:
+-        F_tgt: Target frame color buffer.
+-        T: List of tiles.
+-        D_T_max: Tile-level truncated depth map.
+-    """
+     # Initialize outputs
+-    F_tgt = Initialize()
+-    D_T_max = Initialize()
+-    T = GetTiles()
+-    
++    F_tgt = [[None for _ in range(W)] for _ in range(H)]
++    D_T_max = [[float('inf') for _ in range(num_tiles_x)] for _ in range(num_tiles_y)]
++    T = [(tx, ty) for ty in range(num_tiles_y) for tx in range(num_tiles_x)]
++
+     # Step 2: Project to 3D
+-    # Convert 2D pixels and depths to 3D world coordinates
+-    P_ref, P_ref_max = ProjectTo3D(F_ref, D_ref, D_ref_max, V_ref)
+-    
++    P_ref, P_ref_max = project_to_3d(F_ref, D_ref, D_ref_max, V_ref)
++
+     # Step 3: View Transfer
+-    # Transform 3D points to target camera space
+-    P_tgt, P_tgt_max = ViewTransfer(P_ref, P_ref_max, V_ref, V_tgt)
+-    
++    P_tgt, P_tgt_max = view_transfer(P_ref, P_ref_max, V_ref, V_tgt)
++
+     # Step 4: Reproject to Target Frame
+-    # Project 3D points back to 2D target image plane
+-    F_tgt, D_tgt = Reproject(P_tgt, P_tgt_max, V_tgt)
+-    
++    F_tgt, D_tgt = reproject_to_2d(P_tgt, P_tgt_max, V_tgt)
++
+     # Step 5: Tile-Level Processing
+     for t in T:
+-        # Count valid pixels in the tile
+-        N = ValidPixelSum(F_tgt, t)
+-        
++        N = count_valid_pixels(F_tgt, D_tgt, t)
+         if N > N0:
+-            # Interpolate if enough valid pixels are available
+-            Interpolate(F_tgt, t)
++            interpolate_tile(F_tgt, t)
+         else:
+-            # Calculate max depth for early stopping
+-            D_T_max[t] = Max(D_tgt, t)
+-            # Re-render with depth pruning
+-            Re_render(F_tgt, t, D_T_max[t])
+-            
++            D_T_max[t] = max_tile_depth(D_tgt, t)
++            re_render_tile(F_tgt, t, D_T_max[t])
++
+     return F_tgt, T, D_T_max
+ 
+-def ProjectTo3D(F, D, D_max, V):
+-    """
+-    Projects 2D pixels to 3D world coordinates.
+-    """
+-    # Implementation depends on camera intrinsics V
+-    # For each pixel (u, v) with depth d:
+-    # x = (u - cx) * d / fx
+-    # y = (v - cy) * d / fy
+-    # z = d
+-    # Return 3D points and corresponding max depths
++def project_to_3d(F, D, D_max, V):
++    points, points_max = [], []
++    for y in range(H):
++        for x in range(W):
++            if is_valid_depth(D[y, x]):
++                z = D[y, x]
++                x_3d = (x - V.cx) * z / V.fx
++                y_3d = (y - V.cy) * z / V.fy
++                points.append((x_3d, y_3d, z))
++                points_max.append((x_3d, y_3d, D_max[y, x]))
++    return points, points_max
++
++def view_transfer(P, P_max, V_ref, V_tgt):
++    P_tgt, P_tgt_max = [], []
++    for p, p_max in zip(P, P_max):
++        world = V_ref.inverse() * p
++        tgt = V_tgt * world
++        P_tgt.append(tgt)
++        P_tgt_max.append(V_tgt * (V_ref.inverse() * p_max))
++    return P_tgt, P_tgt_max
++
++def reproject_to_2d(P, P_max, V):
++    F_tgt = [[None for _ in range(W)] for _ in range(H)]
++    D_tgt = [[float('inf') for _ in range(W)] for _ in range(H)]
++    for p, p_max in zip(P, P_max):
++        u, v = p[0] / p[2], p[1] / p[2]
++        if 0 <= u < W and 0 <= v < H:
++            F_tgt[v, u] = F_ref[original_pixel_index]
++            D_tgt[v, u] = p[2]
++    return F_tgt, D_tgt
++
++def count_valid_pixels(F, D, t):
++    count = 0
++    for y in range(t.y * tile_h, (t.y + 1) * tile_h):
++        for x in range(t.x * tile_w, (t.x + 1) * tile_w):
++            if is_valid_depth(D[y, x]):
++                count += 1
++    return count
++
++def max_tile_depth(D, t):
++    m = float('inf')
++    for y in range(t.y * tile_h, (t.y + 1) * tile_h):
++        for x in range(t.x * tile_w, (t.x + 1) * tile_w):
++            if is_valid_depth(D[y, x]):
++                m = max(m, D[y, x])
++    return m
++
++def interpolate_tile(F, t):
++    # Fill invalid pixels using bilinear interpolation from valid neighbors [G]
+     pass
+ 
+-def ViewTransfer(P, P_max, V_ref, V_tgt):
+-    """
+-    Transforms 3D points from reference to target viewpoint.
+-    """
+-    # Apply inverse of V_ref to get world coordinates
+-    # Apply V_tgt to get target camera coordinates
+-    # Return transformed points
++def re_render_tile(F, t, depth_bound):
++    # Rasterize Gaussians for tile t, skipping those with depth > depth_bound [G]
+     pass
+ 
+-def Reproject(P, P_max, V):
+-    """
+-    Projects 3D points to 2D target image plane.
+-    """
+-    # Apply V to get clip space
+-    # Perspective divide
+-    # Return 2D coordinates and depths
+-    pass
+-
+-def ValidPixelSum(F, t):
+-    """
+-    Counts valid (non-empty/valid depth) pixels in tile t.
+-    """
+-    count = 0
+-    for pixel in t:
+-        if IsValid(F[pixel]):
+-            count += 1
+-    return count
+-
+-def Max(D, t):
+-    """
+-    Returns the maximum depth value in tile t.
+-    """
+-    max_val = -infinity
+-    for pixel in t:
+-        if IsValid(D[pixel]):
+-            max_val = max(max_val, D[pixel])
+-    return max_val
++def is_valid_depth(d):
++    return d is not None and 0 < d < float('inf')
+ ```
+ 
+ **Parameters:**
+-*   $N_0$: Rerendering threshold. Heuristically defined as $3\lambda_1$ and $3\lambda_2$ in the source, though exact values for $\lambda_1$ and $\lambda_2$ are not provided in the excerpt [S1].
++*   $N_0$: Rerendering threshold [S1]. Exact numerical values are not given in the sources [S1].
+ 
+ **Edge Cases and Pitfalls:**
+-*   **Sparse Valid Pixels:** If the number of valid reprojected pixels $N$ is low ($N \le N_0$), the method triggers re-rendering with depth pruning. If $N$ is too low, the depth estimate $D_T^{max}$ may be noisy or incomplete, potentially leading to incorrect Gaussian culling if the max depth is underestimated [S1].
+-*   **Occlusion:** The method assumes that the depth from the reference frame is a valid upper bound for the target frame. If significant occlusion changes occur, the predicted depth might be inaccurate [S1].
+-
+-## Subtopics
++*   **Sparse Valid Pixels:** If the number of valid reprojected pixels $N$ is low ($N \le N_0$), the method triggers re-rendering with depth pruning [S1]. If $N$ is too low, the depth estimate $D_T^{max}$ may be noisy or incomplete, potentially leading to incorrect Gaussian culling if the max depth is underestimated [S1].
++*   **Occlusion Changes:** The method assumes that the depth from the reference frame is a valid upper bound for the target frame [S1].
+ 
+ ## Operating characteristics
+-*   **Time Complexity:** The method adds an overhead of projecting and reprojecting depths for the reference frame. However, it reduces the sorting complexity for tiles that are re-rendered by excluding Gaussians beyond the predicted depth [S1].
++*   **Time Complexity:** The method adds an overhead of projecting and reprojecting depths for the reference frame [S1]. It reduces the sorting complexity for tiles that are re-rendered by excluding Gaussians beyond the predicted depth [S1].
+ *   **Memory Complexity:** Requires storing the reference depth maps $D_{ref}$ and $D_{ref}^{max}$ and the target depth map $D_{tgt}$ [S1].
+ *   **Strengths:** Enables balanced workload distribution across rasterization units by predicting expected load per tile [S1]. Reduces redundant computation by pruning Gaussians early [S1].
+-*   **Limitations:** Relies on the accuracy of the reference depth map. Performance degrades if the viewpoint change is large or if the scene has significant dynamic occlusion [S1].
++*   **Limitations:** Relies on the accuracy of the reference depth map [S1].
+ *   **When to use:** Real-time streaming 3D Gaussian Splatting where viewpoint changes are frequent and computational resources are limited [S1].
+ 

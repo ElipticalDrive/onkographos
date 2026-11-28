@@ -1,0 +1,801 @@
+arXiv:2204.02585v3 [cs.CV] 7 Oct 2022
+SqueezeNeRF: Further factorized FastNeRF for memory-efficient inference
+Krishna Wadhwani
+Sony Group Corporation
+Tamaki Kojima
+Sony Group Corporation
+krishna.a.wadhwani@sony.com
+tamaki.kojima@sony.com
+Abstract
+Neural Radiance Fields (NeRF) has emerged as the
+state-of-the-art method for novel view generation of complex scenes, but is very slow during inference. Recently,
+there have been multiple works on speeding up NeRF inference, but the state of the art methods for real-time NeRF
+inference rely on caching the neural network output, which
+occupies several giga-bytes of disk space that limits their
+real-world applicability. As caching the neural network of
+original NeRF network is not feasible, Garbin et.al. proposed "FastNeRF" which factorizes the problem into 2 subnetworks - one which depends only on the 3D coordinate of
+a sample point and one which depends only on the 2D camera viewing direction. Although this factorization enables
+them to reduce the cache size and perform inference at over
+200 frames per second, the memory overhead is still substantial. In this work, we propose SqueezeNeRF, which is
+more than 60 times memory-efficient than the sparse cache
+of FastNeRF and is still able to render at more than 190
+frames per second on a high spec GPU during inference.
+Figure 1. Memory requirement vs inference speed (to generate
+800x800 image) for faster inference based NeRF models on the
+synthetic 360◦ dataset [12]. Note: Reported numbers in this figure
+may have different GPU settings. FastNeRF result uses Nvidia
+RTX-3090 while PlenOctrees and SqueezeNeRF have been tested
+on Nvidia V100.
+views by volume rendering.
+1. Introduction
+Image-based rendering and novel view synthesis are fundamental problems in computer vision, and there is a rich
+and long history of research works in these directions [2–4].
+This field of novel view synthesis, using a set of observed
+images of a scene to recover 3D representation of the scene
+that allows rendering from unobserved viewpoints, has seen
+an unprecedented rise in popularity with the proposal of
+Neural Radiance Fields (NeRF) [12]. Given a limited
+amount of images of a scene, NeRF learns an implicit volumetric representation of the scene that allows photo-realistic
+rendering of novel views of the scene that is able to capture
+fine level details and view-dependent effects. Essentially,
+it is a multi-layer perceptron (MLP) based model to learn
+a mapping of 5D input-3D coordinates plus 2D viewing directions to density and color values. The model is optimized
+on a set of training views of a scene with known camera
+poses. The learnt model can then be used to render novel
+However, despite impressive view generation results,
+NeRF has several limitations. Some of them are: (i) it cannot handle dynamic objects and scene appearance(s), (ii) it
+cannot handle unbounded scenes, (iii) a network trained on
+one scene cannot generalize across another scene, (iv) it requires relatively large number of views to learn an accurate
+representation, and (v) slow inference speed. These several
+limitations of NeRF have inspired several follow-up works
+such as [1, 5, 19, 20].
+In this work, we focus on the slow rendering issue of
+NeRF. The reason why NeRF is slow during inference is
+also, its greatest strength - an MLP-based volumetric representation. How NeRF works is that for a given camera
+pose, a ray is projected that passes through each pixel in the
+image into the 3D scene. We then sample points on each
+ray, predict the color and density value at each point and
+then, do volumetric integration along each ray to compute
+the final color at the pixel location. While the simplicity of
+NeRF’s representation of a 3D scene via a MLP is elegant
+and results in high-quality novel view synthesis of a scene,
+it also means that during inference, we need to query the
+neural network to get the color and density values for millions of points. For example, in order to render a 800x800
+image by sampling 192 points along each ray, we will need
+to query the neural network for 122.88 million 3D points.
+This means that it takes a several seconds to render an image via NeRF on a high-end GPU.
+There have been multiple works that have attempted to
+speed-up NeRF inference [6–10, 14, 17, 18]. While all of
+them are considerably faster than the original NeRF model
+during inference, they either still do not achieve real time
+rendering [8–10] or achieve real-time rendering at the cost
+of significant memory overhead [6, 7, 17, 18].
+The state-of-the-art approaches in speeding up NeRF inference rely on caching the mapping learnt by MLP. Now
+it must be stated that caching the original NeRF model is
+not practically possible. This is because NeRF maps a 5dimensional input (3D coordinate p + 2D viewing direction
+d) to a 4-dimensional output (RGB color c and scalar density σ). So caching this function in the input space would
+mean that the cache-size would scale with n5 (where n is
+the number of bins or sampled values per input dimension).
+For n = 512 bins per input dimension, the cache size would
+be approximately 176 terabytes and infeasible to store. In
+order to solve this issue, FastNeRF [6] proposed a novel
+architecture that factorizes the problem into 2 independent
+networks - their first MLP takes the 3D coordinate p as input and the second MLP takes the 2D viewing direction d as
+input. The outputs of these two networks are combined via
+their inner product to produce the RGB color values. Now
+considering np number of bins for each position dimension
+and nd number of bins for each viewing direction component, the FastNeRF cache size would have a complexity of
+O(Dp n3p + Dd n2d ) ∼ O(n3 ) where Dp and Dd represent
+the dimensionality of the position dependent MLP output
+and viewing direction dependent MLP output respectively.
+For standard FastNeRF configuration of Dp = 25, Dd = 8
+and np = 512, nd = 256, the cache size is approximately
+6.7 GB, if all the values are stored as half-precision floating point numbers. The FastNeRF authors further leveraged the scene sparsity to store a sparse cache instead of a
+dense one in order to reduce the cache size to around 3GB.
+Similarly, NeRF-SH [18] and SNeRG [7] also use an architecture based on similar factorization but rely on different
+architecture and cache-storage strategy.
+While FastNeRF and NeRF-SH (PlenOctrees based inference) can render over 150 frames per second (FPS) on a
+high-end GPU, their cache takes up several gigabytes (GBs)
+of memory, which make them prohibitive for any embedded
+system application and can lead to memory fragmentation
+issues during inference. Moreover, as a NeRF requires a
+different MLP to be trained for each scene, storing several
+GBs of cache for every scene makes this memory overhead
+issue even worse.
+To address this issue, we propose SqueezeNeRF, a further factorized version of FastNeRF which is able to render over 150 FPS with affordable cache-size. This makes
+the model convenient for deploying on embedded systems.
+SqueezeNeRF factorizes the position dependent MLP of
+FastNeRF into 3 separate MLPs - which take (x, y), (y, z)
+and (z, x) as input. This factorization enables SqueezeNeRF to have a cache-size complexity of O((Dpxy + Dpyz +
+Dpzx )n2p + Dd n2d ) ∼ O(n2 ), where Dpxy , Dpyz , Dpzx
+represent the dimensionality of the 3 position dependent
+networks. For a standard SqueezeNeRF configuration of
+Dpyz = Dpyz = Dpyz = 25, Dd = 8 and np = 512, nd =
+64, the cache-size is approximately 40 MB, which is more
+than 160 times memory efficient than the dense FastNeRF
+cache, more than 65 times memory efficient that sparse
+FastNeRF cache. We further compare our approach with
+the fast inference based NeRF approaches in terms of performance, speed and memory requirements and show that
+our relatively straightforward approach is competitive with
+the state-of-the-art approaches in terms of speed while being more memory-efficient, although is slightly inferior in
+terms of image generation performance.
+The contributions of our work can be summarized as:
+• We propose SqueezeNeRF, which is the first approach
+that allows NeRF rendering at over 150 frames per second with cache-size less than 200 megabytes. The approach is based on a novel NeRF architecture, that is
+based on further factorization of FastNeRF.
+• We present a comprehensive evaluation of NeRF
+follow-up works for faster inference and compare their
+speed, performance and memory requirements.
+2. Related Work
+Neural Radiance Fields [12] has shown impressive results in the task of novel view generation of a static scene
+but is limited by its slow inference speed. A number of recent works [6–10, 14, 16, 18] have tried to address this particular limitation of NeRF. Our proposed model, SqueezeNeRF also belongs to these family of methods aimed to improve the inference speed of NeRF.
+AutoInt [9] proposed a neural network to learn integrals
+along each ray with reduces number of point samples on
+each ray. Neural Sparse Voxel Fields [10] learns a sparse
+voxel grid that allows to skip over empty region during inference. While considerably faster than NeRF, [9,10] do not
+render at interactive frame rates.
+KiloNeRF [14] splits one network into multiple tiny networks and parallelizes the multiple network evaluations.
+DIVeR [17] combines implicit representation learning with
+voxel based representation and uses deterministic integration instead of the sampling scheme done in NeRF. DONeRF [13] predicts depth distribution along each ray for
+using reduced number of samples in volumetric rendering. NeX [16] models the scene as a multi-plane image (MPI) rather than a continuous volumetric representation. While NeX shows impressive results, it cannot model
+scenes where the viewpoint span is high. State-of-the-art
+methods [6, 7, 18] in fast inference of NeRF rely on caching
+the neural network output. Caching NeRF MLP is not feasible due to extremely high memory complexity. So all these
+work modify the NeRF architecture in order to make this
+caching possible. All [6, 7, 18] factorize the structure of the
+implicit model, by using two separate neural networks for
+3D position and camera view direction. While this factorization allows their network cache to be 1000 times smaller
+than NeRF and perform inference at interactive rate, their
+cache-size is still in the order of few giga-bytes. Although
+memory requirement in [7, 13, 14, 17] is smaller due to not
+relying on cache [13, 14] or efficient compression scheme
+[7], their rendering speed is less than those in FastNeRF [6]
+and NeRF-SH [18]. In this work, we further factorize the
+position dependent network in FastNeRF which allows us
+to reduce the FastNeRF cache-size by more than 60 times
+as compared to FastNeRF or NeRF-SH, while still maintaining similar rendering speed.
+A concurrent work [8] also proposed to combine implicit
+representation based learning neural networks with a split
+MLP architecture, which is similar in spirit to the idea of
+factorization used by FastNeRF or us. They use a separate
+MLP for each dimension of the input but they do not employ
+caching for faster inference and their speed-up for inference
+is significantly less than our approach.
+3. Method
+In this section, we describe SqueezeNeRF. FastNeRF
+splits NeRF into 2 neural networks - a position (x, y, z) dependent network and viewing direction dependent network.
+The key idea in this work is to further split the position dependent network into 3 networks, which are dependent on
+(x, y), (y, z) and (z, x) respectively. We briefly recap NeRF
+and FastNeRF in the following subsection before describing
+the details of our model.
+3.1. Background
+Neural Radiance Fields (NeRF): Given multi-view images of a scene with known camera poses and parameters,
+NeRF [12] learns to recover the 3D volumetric representation of a scene in the form of (i) opacity field or volume
+density σ that captures a soft or an approximate geometry
+of the scene and (ii) a radiance field or RGB color c that
+captures the view dependent surface texture. This representation is captured in the form of a mapping from 3D co-
+ordinate position p = (x, y, z) and 2D viewing direction
+d = (θ, φ). A MLP FN eRF is used to learn this mapping
+FN eRF : (p, d) → (σ, c). The density σ is modelled as a
+function of p. On the other hand, the color c is modelled as
+a function of both p and d.
+How this process works is that for a given viewing angle,
+in order to render a single pixel at pixel location P , a ray
+is projected from the camera center that passes through that
+pixel and into the 3D scene. This ray direction is denoted
+as d. N number of 3D points are sampled along this ray
+(p1 , p2 . . . pN ) between the near and far plane of the camera. Each point sample is fed as input to the neural network
+which then predicts the color ci and density σi at each point
+pi . The color and density value at each point is then used to
+compute the final pixel color ĉ using volumetric integration
+as:
+N
+X
+ĉ(P ) =
+Ti (1 − exp(−σi δi )ci ),
+(1)
+i=1
+Pi−1
+where Ti = exp(− j=1 σj δj ) is the transmittance and
+δi = (pi+1 − pi ) is the distance between adjacent samples.
+Given a set of training images with known camera poses,
+NeRF optimizes the MLP by minimizing the squared error
+between input pixel color and the pixel color value predicted
+using Eq. (1). So, the network weights are trained to optimize:
+P
+Lp = P ||c(P ) − ĉ(P )||22 ,
+where c(P ) is the ground truth color at P . Hence, by replacing an explicit volumetric representation with an MLP,
+NeRF requires orders of magnitude less space than a dense
+voxel grid, but rendering an image requires querying the
+neural network at millions of 3D points, which makes the
+rendering process slow and computationally expensive.
+FastNeRF: As mentioned earlier, FastNeRF [6] splits
+NeRF’s neural network FN eRF into two networks, (i) position dependent network Fpos : p → {σ, (u, v, w)}
+and (ii) ray direction dependent network Fdir : d → β
+where u, v, w are D-dimensional vectors that form a radiance map describing the view dependent radiance at position p, and β is a D−dimensional vector for the D components of the deep radiance map. Note that D is a hyperparameter here and is set as 8 for most of the scenes in
+FastNeRF and this work as well. The color at a given 3D
+position is then computed by taking the inner product of the
+weights and deep radiance map:
+c = (r, g, b) =
+D
+X
+βi (ui , vi , wi ) = β T · (u, v, w). (2)
+i=1
+After computing the color c at a given 3D position, the
+final pixel color can be computed in a similar manner as
+NeRF by using Eq. (1).
+𝜎
+(𝑥, 𝑦, 𝑧)
+𝜎
+(𝑟, 𝑔, 𝑏, 𝜎)
+(𝑢1 , 𝑣1 , 𝑤1 )
+(𝑢𝐷 , 𝑣𝑑 , 𝑤𝑑 )
+𝐹𝑝𝑜𝑠
+(𝑟, 𝑔, 𝑏)
+(𝜃, 𝜙)
+𝐹𝑁𝑒𝑅𝐹
+(𝑥, 𝑦)
+𝑥𝑦
+𝐹𝑝𝑜𝑠
+(𝑦, 𝑧)
+𝑦𝑧
+𝐹𝑝𝑜𝑠
+NeRF
+𝐹𝑑𝑖𝑟
+𝜎 𝑥𝑦
+𝑢1 , 𝑣1 , 𝑤1 𝑥𝑦
+…
+𝑢𝐷 , 𝑣𝐷 , 𝑤𝐷 𝑥𝑦
+𝜎 𝑦𝑧
+𝑢1 , 𝑣1 , 𝑤1 𝑦𝑧
+…
+𝑢𝐷 , 𝑣𝐷 , 𝑤𝐷 𝑦𝑧
+𝑓𝜎({𝜎 𝑗 })
+𝑓𝑢({𝑢 𝑗 }),
+𝑓𝑣({𝑣𝑗 }),
+𝑓𝑤({𝑤𝑗 })
+(𝑧, 𝑥)
+𝑧𝑥
+𝐹𝑝𝑜𝑠
+(𝜃, 𝜙)
+𝜎
+𝑢1 , 𝑣1 , 𝑤1 𝑧𝑥
+…
+𝑢𝐷 , 𝑣𝐷 , 𝑤𝐷 𝑧𝑥
+𝛽𝑖 (𝑢𝑖 , 𝑣𝑖 , 𝑤𝑖 )
+(𝑟, 𝑔, 𝑏, 𝜎)
+𝑖=1
+(𝛽1 , 𝛽2 … 𝛽𝐷 )
+(𝜃, 𝜙)
+𝑧𝑥
+𝐷
+…
+(𝑥, 𝑦, 𝑧)
+FastNeRF
+𝐷
+𝛽𝑖 (𝑢𝑖 , 𝑣𝑖 , 𝑤𝑖 )
+(𝑟, 𝑔, 𝑏, 𝜎)
+𝑖=1
+(𝛽1 , 𝛽2 … 𝛽𝐷 )
+SqueezeNeRF
+𝐹𝑑𝑖𝑟
+Figure 2. Neural network architecture comparison. Top left: NeRF architecture. Cache-size of the original NeRF network is of the
+order O(n5 ), where n is the number of bins per input dimension. Top right: FastNeRF [6] architecture based on factorization into position
+dependent network Fpos and Fdir . Cache-size of FastNeRF network is of the order O(n3 ). Bottom: Proposed SqueezeNeRF architecture
+xy
+yz
+zx
+that further factorizes the position dependent network in FastNeRF into 3 networks: Fpos
+, Fpos
+and Fpos
+. Cache-size of SqueezeNeRF
+2
+network is of the order O(n ). In the above diagram, (x, y, z) denotes 3D position of input sample, (θ, φ) denotes camera ray direction
+and (r, g, b, σ) are the color and density/opacity values.
+3.2. SqueezeNeRF
+Default architecture: In our proposed SqueezeNeRF,
+we further split Fpos into three networks as:
+j
+Fpos
+: j → {(σ0j , Wσj ), (wju , uj0 , wjv , v j0 , wjw , wj0 )}, for
+∀ j ∈ {(x, y), (y, z), (z, x)}.
+We then compute σ j , uj , v j and wj (∗ denotes pointwise multiplication) as:
+σ j = σ0j ∗ wσj , kj = wjk ∗ kj0 ∀ k ∈ {u, v, w}.
+(3)
+Essentially for each σ j and kj , we also compute its corresponding weight. In our experiments, we found that explicitly predicting the weight of the quantities and then, using them for subsequent computation Eq. (4) led to better
+results. We also present the non-weighted network performance as an ablation study in Tab. 5.
+We then combine the output of the three networks:
+σ = fσ ({σ j }), k = fk ({kj }) ∀ k ∈ {u, v, w},
+∀ j ∈ {(x, y), (y, z), (z, x)}.
+(4)
+There can be multiple ways in which we represent the
+network outputs. In the default SqueezeNeRF configuration, for simplicity, we model each σ j as a scalar value and
+each k as a D dimensional vector (wσj ∈ R, wjk ∈ RD ).
+We use a straightforward combination scheme to model
+fσ , fk as represented in Fig. 2. We simply multiply all σ j
+to get our final σ value. We add each kj to get k.
+Alternate architecture: We also evaluate our factorization scheme with another type of architecture. Referred to
+as "SqueezeNeRF (alt)" in our results, Fpos is split as
+Fposj : j → {σ j , uj , v j , wj }.
+Here each σ j ∈ RDσ and k ∈ RDk . In our experiments,
+Dσ is set as 12 and Dk is set as 8. Finally σ and (u, v, w)
+is computed as:
+σ = Wσ [concat({σ j })] + bσ ,
+k = Wk [concat({kj })] + bk ,
+(5)
+where Wσ ∈ R1×3Dσ , bσ ∈ R, Wk ∈ RD×3Dk , bk ∈
+RD are learnable parameters, that are also saved when the
+neural network is cached and concat refers to concatenation
+operation.
+Please note that while other factorization schemes such
+as splitting (x, y, z) into x, y, z instead of (x, y), (y, z) and
+(z, x) is also possible but, we found that the former factorization scheme lead to considerably inferior results. Experimentation with more sophisticated combination functions
+in Eq. (4) is left as part of future work.
+Fdir remains same as that in FastNeRF. After computing
+σ, (u, v, w), we follow Eq. (2) to compute the color at a 3D
+point sample and then use Eq. (1) to compute the final pixel
+color. After computing the final pixel color, SqueezeNeRF
+is trained in a similar manner as NeRF.
+3.3. Caching
+The motivation of our proposed architecture is that the
+j
+cache-size of the mapping learnt by all the Fpos
+and Fdir
+is considerably small. Following similar caching strategy
+as described in FastNeRF, we define a bounding box that
+covers the entire scene captured by the NeRF. We sample np
+values along each 3D dimension and nd number of points
+for each of the ray direction coordinate θ and φ. Hence
+j
+for each Fpos
+, we store the output of n2p values, that is, we
+j
+store { σ , (uj , v j , wj ) } for every ordered pair of j. For
+default architecture, σ j is a scalar value and (uj , v j , wj )
+are D dimensional vectors, we store 3n2p (3D +1) values for
+n3p combination of (x, y, z). Similarly for SqueezeNeRF
+(alt), we store 3n2p (3D + Dσ ) values for n3p combination
+of (x, y, z). For Fdir , we store the output for D dimensional
+vector for the n2d combination of (θ, φ). So, we store n2d (D)
+output values of Fdir .
+In our experiments, we observe that nd = 64 for synthetic 360◦ [12] and nd = 32 for LLFF dataset [11] is
+sufficient for good results. We further test the cache based
+inference model for np = 512 (referred to as 512 cache)
+and np = 1024 (referred to as 1K cache). Based on our
+experimental observations, we store each σ j using 32 bit
+floating point precision whereas each of uj , v j , wj and β
+are stored using 16 bit floating point precision. In total,
+our 1K cache takes up 155MB of memory whereas our
+512 cache occupies 39MB. A similarly dense 1K cache for
+FastNeRF would take approximately 54GB, and the corresponding 512 cache would occupy approximately 6.7GB.
+Also, the corresponding 1K cache and 512 cache size for
+NeRF would be approximately 35TB and 4.4TB respectively. Alternatively, SqueezeNeRF (alt) is evaluated with
+np = 512, nd = 256 and all the values are stored using 16 bit floating point precision. So, the 512 cache for
+SqueezeNeRF (alt) occupies 58MB. Readers are referred to
+the Supplementary of [6] for the formulas used to calculate
+cache sizes for FastNeRF and NeRF. The formula was similarly adapted for cache-size calculation of SqueezeNeRF.
+Also note that as the dense cache corresponding to FastNeRF, NeRF-SH [18] and SNeRG [7] are quite huge, they
+save a sparse cache of the neural network mapping based
+on the scene geometry. While this works fine in case of
+the scenes used for comparison in this and their work, we
+believe that this will be less effective for highly dense and
+feature-rich scenes. On the other hand, SqueezeNeRF enables storage of affordable dense cache.
+3.4. Implementation
+The SqueezeNeRF training script is based on that of
+NeRF [12]. Apart from the different architecture, the training process is identical to NeRF.
+The position dependent MLPs are modelled using 6 layers with 256 hidden units each whereas the view dependent
+MLP is modelled with 4 layers and 128 hidden units. As
+our network has more number of parameters than NeRF, it’s
+training and inference without caching the trained network
+is slower than that of NeRF. Other training features such as
+hierarchical sampling and positional encoding and training
+and testing hyper-parameters are same as that in NeRF.
+At inference, similar to NeRF, our method takes a test
+view as input and predicts the color at each pixel location
+as described in Sec. 3.2. We sample 256 points along each
+projected ray. The 3D location and viewing direction of
+each point is then used to fetch σ j , uj , v j , wj , β from the
+respective cache files, which are then used to compute the
+color and density using Eq. (4) and Eq. (2). Finally, the final
+pixel color is computed using Eq. (1).
+While we use custom CUDA kernels for speeding up inference, our implementation relies on simply querying our
+dense cache and computing the pixel color via ray marching. We use nearest neighbour interpolation for cache lookj
+up of the outputs of Fpos
+and bilinear interpolation for sampling from the cache of Fdir
+Unlike FastNeRF, we did not use bounded volume hierarchy based ray tracing or other performance enhancements. Therefore, the performance of our approach can be
+further improved with similar techniques.
+4. Experiments, Result and Discussion
+We evaluate our method along with the current approaches on novel view synthesis in terms of quality of rendered images, speed at which the images are generated and
+memory requirement for any additional data structure such
+as a cache for neural network output or weights of trained
+neural network. We use two datasets for this task - NeRF
+synthetic 360◦ [12] and forward facing Local Light Field
+Fusion (LLFF) dataset [11].
+Image quality: To evaluate the quality of rendered images, we quantitatively measure the performance by comparing the model output to its corresponding ground truth
+image in the test set using 3 metrics - Peak Signal to
+Noise Ratio (PSNR), Structured Similarity (SSIM) [15] and
+LPIPS [21]. In the top half of Tab. 1 and Tab. 2, we compare the quality of images rendered by our model (without
+caching) to NeRF [12], the corresponding network outputs
+of the different NeRF variants that also rely on caching for
+speeding up inference [6, 7, 18] and faster inference based
+NeRF models that do not rely on caching. In the bottom
+half, we compare the cache based inference of the different
+Method
+NeRF [12]
+FastNeRF (no-cache) [6]
+NeRF-SH (no-cache) [18]
+JAXNeRF+ Deferred [7]
+KiloNeRF [14]
+AutoInt (8 sections) [9]
+DIVeR32 (RT) [17]
+SqueezeNeRF (no-cache)
+FastNeRF (1K Cache)
+FastNeRF (512 Cache)
+NeRF-SH (PlenOctree)
+SNeRG (PNG) [7]
+SqueezeNeRF (1K Cache)
+SqueezeNeRF (512 Cache)
+Image Generation Quality
+PSNR [dB] ↑ SSIM ↑ LPIPS ↓
+30.23
+0.946
+0.050
+29.16
+0.936
+0.053
+31.57
+0.953
+0.047
+30.55
+0.952
+0.049
+31.00
+0.920
+0.060
+25.55
+0.911
+0.170
+32.12
+0.958
+0.033
+29.59
+0.931
+0.038
+29.97
+0.941
+0.053
+N/A
+N/A
+N/A
+31.71
+0.958
+0.053
+30.38
+0.950
+0.050
+29.61
+0.921
+0.046
+28.12
+0.917
+0.087
+Speed [FPS] ↑
+Memory [MB] ↓
+0.04
+0.03
+14
+0.01
+50
+0.6
+47
+0.02
+172
+238
+168
+84
+165
+168
+5
+28
+12
+18
+160
+5
+68
+11
+16200
+2700
+1900
+87
+155
+39
+Table 1. Results: Comparison of Image Quality, inference speed and required memory for storing cache/network weights for the
+novel view synthesis of 800x800 image in synthetic 360◦ dataset.
+Method
+NeRF [12]
+FastNeRF (no-cache) [6]
+JAXNeRF+ Deferred [7]
+AutoInt (8 sections) [9]
+NeX [16]
+SqueezeNeRF (no-cache)
+SqueezeNeRF (alt, no-cache)
+FastNeRF (768 Cache)
+SNeRG (PNG) [7]
+SqueezeNeRF (1K Cache)
+SqueezeNeRF (512 Cache)
+SqueezeNeRF (alt, 512 Cache)
+Image Generation Quality
+PSNR [dB] ↑ SSIM ↑ LPIPS ↓
+26.50
+0.855
+0.07
+27.96
+0.888
+0.063
+24.32
+0.808
+0.086
+24.14
+0.820
+0.176
+27.26
+0.904
+0.178
+24.32
+0.808
+0.085
+26.08
+0.859
+0.081
+26.04
+0.856
+0.085
+25.63
+0.818
+0.183
+22.50
+0.762
+0.122
+21.62
+0.729
+0.189
+23.87
+0.817
+0.071
+Speed [FPS] ↑
+Memory [MB] ↓
+0.06
+0.04
+0.00
+0.6
+449
+0.03
+0.02
+714
+27
+480
+484
+190
+5
+28
+18
+5
+89
+11
+11
+6100
+373
+155
+39
+58
+Table 2. Results: Comparison of Image Quality, inference speed and required memory for storing cache/network weights for the
+novel view synthesis of 504x378 image in LLFF dataset.
+NeRF variants to our model’s cache based inference. The
+reported PSNR for NeRF synthetic 360◦ and LLFF are averaged across all the eight types of scenes present in the two
+types of datasets. KiloNeRF [14], DIVeR32 [17] and NeRFSH [18] are not designed for frontal facing and unbounded
+scenes so, their performance is not reported in Tab. 2. Likewise, NeX [16] is not designed for 360◦ scenes so its performance is not reported in Tab. 1. The reported PSNR in these
+tables are taken from the respective papers. From these tables, we can see that the quality of images generated by our
+proposed network architecture is competitive with NeRF
+and other models. Cache based inference does lead to a
+degradation in the quality of the images, but also provides
+significantly high rendering speed. For the NeRF synthetic
+360◦ dataset, the drop in quality due to cache based infer-
+ence is still small (<7%) and the rendered images in Fig. 3
+(a-b) also verify that that. For LLFF dataset, the drop in image quality is relatively higher but still, the rendered images
+in Fig. 3 (d-e) still look reasonable. The significant drop in
+the quality of images generated by SqueezeNeRF for LLFF
+dataset served as our motivation to propose SqueezeNeRF
+(alt). From the tables, we can see that the quality of images
+generated by SqueezeNeRF (alt) is superior to SqueezeNeRF but the performance improvement comes at the cost of
+slower inference speed. With that said, with caching, we
+can still render at 190 FPS with SqueezeNeRF (alt).
+Rendering speed comparison: We compare the inference speed of our method with the baselines in terms of
+number of image frames generated per second. In Tab. 1
+and Tab. 2, the inference speed for NeRF [12], NeRF-SH
+(no-cache and plenoctree) [18], AutoInt [9] has been meaured on a single Nvidia V100 GPU. FastNeRF has been measured on Nvidia RTX 3090, while JAXNeRF+ Deferred
+and SNeRG have been measured on Nvidia RTX 2080 and
+KiloNeRF [14] and DiVeR32 [17] have been measured on
+Nvidia GTX 1080 Ti. For the purposes of comparison in
+Tab. 1, Tab. 2 and Tab. 4, we report our performance on
+a single Nvidia V100 GPU. We also report our inference
+speed on Nvidia A100 GPU in Tab. 3.
+In Tab. 1 and Tab. 2, we can see that our method enables
+real-time inference of NeRF and is able to render at over
+150 frames per second. The rendering speed of our method
+is competitive with the state of the art methods [6,18], while
+our memory requirement is significantly less than these
+methods. Moreover, in Tab. 4, we also compare [6, 18] with
+our method in terms the time taken to generate taken to generate the cache for neural network. Our smaller cache-size
+allows us to generate the cache in less than 9s, in contrast
+to the considerably longer time required by other methods,
+which is another advantage of our method. So even if the
+inference speed of our 512 cache model is less than the corresponding FastNeRF model, it will take FastNeRF over 16
+minutes to compensate for the longer cache generation time
+in comparison to our approach.
+Memory comparison and speed-memory trade-off: In
+Tab. 1 and Tab. 2, we also compare the memory requirement
+of our method along with our baselines. For SNeRG [7],
+NeRF-SH (PlenOctree) [18], FastNeRF [6] cache based inference and our method, memory here refers to the network cache-size. For other methods, memory here refers
+to the memory occupied by the weights of the trained neural network. From the two tables, we can see that noncaching based methods have a considerably less memory
+overhead but have a slower inference speed compared to
+the caching based methods. So there is a clear trade-off between the memory efficiency of a model and it’s inference
+speed. From Tab. 1, Tab. 2 and Fig. 1, we can see that our
+model can generate images at a high speed, which is competitive with caching based methods, with sufficiently low
+memory requirement, which is closer to the non-caching
+based methods.
+Other experiments: In Tab. 5, we also present results
+of our model with different configurations. We compare the
+quality of image generation of our final model configuration (referred to as SqueezeNeRF (no-cache) in Tab. 5) in
+terms of PSNR to the different configurations of hidden dixy
+yz
+zx
+mension in the MLPs of Fpos
+, Fpos
+and Fpos
+and different
+settings of D, dimensionality of u, v, w and β. In Tab. 5,
+we also show the effect of number of bins per dimension on
+the quality of images generated via cache-based inference.
+Method
+SqueezeNeRF (1K cache)
+SqueezeNeRF (512 cache)
+Cache-size
+[MB] ↓
+155
+39
+Speed [FPS] ↑
+V100 A100
+165
+200
+168
+202
+Table 3. Results: cache-size and inference speed. SqueezeNeRF
+cache-size and inference speed of the 800x800 images from synthetic 360◦ scene. The inference speed has been reported on two
+different GPUs - Nvidia V100 and Nvidia A100.
+Method
+FastNeRF (1K cache) [6]
+NeRF-SH (PlenOctree) [18]
+SqueezeNeRF (1K cache)
+Time [sec] ↓
+420
+1539
+9
+Table 4. Results: Cache generation time on a single Nvidia
+V100 GPU. Comparison of time required to cache the trained neural network into a sparse 3D grid (for FastNeRF) or Octree (for
+PlenOctree) or dense 2D grid (for SqueezeNeRF).
+Configuration
+NeRF [12]
+SqueezeNeRF (No-cache): 256 hidden units,
+D=8, weighted combination Eq. (3)
+128 hidden units, D = 8, using Eq. (3)
+256 hidden units, D = 6, using Eq. (3)
+256 hidden units, D = 10, using Eq. (3)
+256 hidden units, D = 8, without Eq. (3)
+np = 1024, nd = 64 (cache-size=155MB)
+np = 1024, nd = 32 (cache-size=155MB)
+np = 512, nd = 64 (cache-size=39MB)
+np = 512, nd = 32 (cache-size=39MB)
+PSNR [dB] ↑
+26.80
+26.92
+25.61
+26.31
+26.67
+24.11
+26.68
+26.46
+24.52
+24.42
+Table 5. Results: Other experiments and ablation study. Comparison of Image quality (in PSNR) of the different SqueezeNeRF
+configurations for the "Chair" scene in synthetic 360◦ dataset. In
+the first row, we report NeRF performance as a reference.
+5. Summary and Limitations
+We present SqueezeNeRF, a further factorized variation of FastNeRF [6] that allows real-time rendering of
+NeRF [12] in a memory efficient manner. Similar to the
+state of the art methods, FastNeRF and NeRF-SH [18], our
+method also relies on storing a cache of the neural network
+mapping so that during inference we can replace the millions of neural network computations by simple look-up operations. But while these method can also render at over 150
+frames per second, their cache-size, even though they store
+a sparse version of it, is in the order of few GBs which is
+a major drawback for any embedded systems application.
+Our proposed model factorizes the NeRF MLPs into a view
+conditioned network which takes the camera viewing direction (θ, φ) as input and three position conditioned networks, which take (x, y), (y, z) and (z, x) as input respec-
+(a) Blender scene: Hotdog
+(b) Blender scene: Chair
+(c) LLFF scene: Horns
+(d) LLFF scene: Room
+Figure 3. Results: Images generated from a novel view in the test set. From left to right: Ground truth image from the test set, NeRF
+generation, SqueezeNeRF (no-cache) generation, SqueezeNeRF (1K-cache) generation, SqueezeNeRF (512-cache) generation
+tively. This factorization allows us to reduce the memory
+complexity of our neural network cache from O(n3 ) (for
+FastNeRF) to O(n2 ). This allows us to store a dense cache
+which occupies less than 160MB and still enables us to render over 160 frames per second with Nvidia V100 and over
+200 frames per second with Nvidia A100.
+Despite being competitive with the state of the art models
+in rendering speed with a considerably less memory overhead, the quality of images generated via cache based inference of our approach is inferior to NeRF and some of
+the other baselines. This can be attributed to our relatively
+simple combination scheme of fusing the intermediate outputs as described by Eq. (4). A more sophisticated fusion of
+these intermediate output or incorporation of training techniques from some other follow-up works on NeRF such
+as [5, 13, 20] should lead to higher quality of rendered im-
+ages. Another point to worth noting is that our factorization
+scheme, while applied to the position dependent network of
+FastNeRF in this work, also lends itself for future application to NeRF-SH and SNeRG [7] in a similar manner.
+References
+[1] Alex Yu and Sara Fridovich-Keil, Matthew Tancik, Qinhong
+Chen, Benjamin Recht, and Angjoo Kanazawa. Plenoxels:
+Radiance fields without neural networks, 2021. 1
+[2] Yuan Chang and Guo-Ping Wang. A review on image-based
+rendering. Virtual Reality & Intelligent Hardware, pages 39–
+54, 2019. 1
+[3] Shenchang Eric Chen. Quicktime vr: An image-based approach to virtual environment navigation. In SIGGRAPH,
+page 29–38, 1995. 1
+[4] Shenchang Eric Chen and Lance Williams. View interpolation for image synthesis. In SIGGRAPH, page 279–88, 1993.
+1
+[5] Kangle Deng, Andrew Liu, Jun-Yan Zhu, and Deva Ramanan. Depth-supervised nerf: Fewer views and faster training for free. arXiv:2107.02791, 2021. 1, 8
+[6] Stephan J. Garbin, Marek Kowalski, Matthew Johnson,
+Jamie Shotton, and Julien Valentin. Fastnerf: High-fidelity
+neural rendering at 200fps. In ICCV, 2021. 2, 3, 4, 5, 6, 7
+[7] Peter Hedman, Pratul P. Srinivasan, Ben Mildenhall,
+Jonathan T. Barron, and Paul Debevec. Baking neural radiance fields for real-time view synthesis. ICCV, 2021. 2, 3,
+5, 6, 7, 8
+[8] Ruofan Liang, Hongyi Sun, and Nandita Vijaykumar. Coordx: Accelerating implicit neural representation with a split
+mlp architecture. In ICLR, 2022. 2, 3
+[9] David B. Lindell, Julien N. P. Martel, and Gordon Wetzstein.
+Autoint: Automatic integration for fast neural volume rendering. CVPR, pages 14551–60, 2021. 2, 6, 7
+[10] Lingjie Liu, Jiatao Gu, Kyaw Zaw Lin, Tat-Seng Chua, and
+Christian Theobalt. Neural sparse voxel fields. NeurIPS,
+2020. 2
+[11] Ben Mildenhall, Pratul P. Srinivasan, Rodrigo Ortiz-Cayon,
+Nima Khademi Kalantari, Ravi Ramamoorthi, Ren Ng, and
+Abhishek Kar. Local light field fusion: Practical view synthesis with prescriptive sampling guidelines. TOG, 2019. 5
+[12] Ben Mildenhall, Pratul P. Srinivasan, Matthew Tancik,
+Jonathan T. Barron, Ravi Ramamoorthi, and Ren Ng. Nerf:
+Representing scenes as neural radiance fields for view synthesis. In ECCV, 2020. 1, 2, 3, 5, 6, 7
+[13] Thomas Neff, Pascal Stadlbauer, Mathias Parger, Andreas
+Kurz, Joerg H. Mueller, Chakravarty Reddy Alla Chaitanya,
+Anton Kaplanyan, and Markus Steinberger. Donerf: Towards real-time rendering of compact neural radiance fields
+using depth oracle networks. Computer Graphics Forum, 40,
+2021. 3, 8
+[14] Christian Reiser, Songyou Peng, Yiyi Liao, and Andreas
+Geiger. Kilonerf: Speeding up neural radiance fields with
+thousands of tiny mlps. In ICCV, 2021. 2, 3, 6, 7
+[15] Zhou Wang, A.C. Bovik, H.R. Sheikh, and E.P. Simoncelli.
+Image quality assessment: from error visibility to structural
+similarity. TIP, pages 600–12, 2004. 5
+[16] Suttisak Wizadwongsa, Pakkapon Phongthawee, Jiraphon
+Yenphraphai, and Supasorn Suwajanakorn. Nex: Real-time
+view synthesis with neural basis expansion. In CVPR, 2021.
+2, 3, 6
+[17] Liwen Wu, Jae Yong Lee, Anand Bhattad, Yuxiong Wang,
+and David Forsyth. Diver: Real-time and accurate neural radiance fields with deterministic integration for volume rendering. arXiv:2111.10427, 2021. 2, 3, 6, 7
+[18] Alex Yu, Ruilong Li, Matthew Tancik, Hao Li, Ren Ng, and
+Angjoo Kanazawa. Plenoctrees for real-time rendering of
+neural radiance fields. In ICCV, 2021. 2, 3, 5, 6, 7
+[19] Alex Yu, Vickie Ye, Matthew Tancik, and Angjoo Kanazawa.
+pixelnerf: Neural radiance fields from one or few images. In
+CVPR, pages 4578–87, 2021. 1
+[20] Kai Zhang, Gernot Riegler, Noah Snavely, and Vladlen
+Koltun. Nerf++: Analyzing and improving neural radiance
+fields. arXiv:2010.07492, 2020. 1, 8
+[21] R. Zhang, P. Isola, A. A. Efros, E. Shechtman, and O. Wang.
+The unreasonable effectiveness of deep features as a perceptual metric. In CVPR, pages 586–95, 2018. 5

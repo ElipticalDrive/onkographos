@@ -1,0 +1,195 @@
+--- v001.md
++++ v002.md
+@@ -8,6 +8,6 @@
+ ## How it works
+ **Inputs and Outputs:**
+-*   **Input:** A list of sorted 3D Gaussians overlapping with the current image tile; tile dimensions (typically 16×16 pixels); batch size of Gaussians (typically 256).
+-*   **Output:** Rendered color values for all pixels in the tile.
++*   **Input:** A list of sorted 3D Gaussians overlapping with the current image tile, tile dimensions (16×16 pixels), and batch size (256 Gaussians) [S1].
++*   **Output:** Rendered color values for all pixels in the tile [S1].
+ 
+ **Data Structures:**
+@@ -19,9 +19,9 @@
+ *   **Matrix $M_g$:** Dimensions $B \times 6$, where $B$ is the batch size (e.g., 256). Rows are $\hat{v}_{g_i}^T$ [S1].
+ *   **Matrix $M_p$:** Dimensions $P \times 6$, where $P$ is the number of pixels in the tile (e.g., 256). Rows are $\hat{v}_{p_j}^T$ [S1]. This matrix is identical across all tiles and stored in global memory for reuse [S1].
+-*   **Matrix $M_{power}$:** Dimensions $B \times P$. Result of $M_g \cdot M_p$ [S1].
++*   **Matrix $M_{power}$:** Dimensions $B \times P$. Result of the dot-product computation between $M_g$ and $M_p$ [S1].
+ 
+ **Formulas:**
+ The opacity $\alpha_{ij}$ for Gaussian $g_i$ at pixel $p_j$ is:
+-$$ \alpha_{ij} = o_i \times \exp(-\frac{1}{2} \mathbf{x}_{g_i}^T \Sigma_i^{-1} \mathbf{x}_{g_i}) $$
++$$ \alpha_{ij} = o_i \times \exp\left(-\frac{1}{2} \mathbf{x}_{g_i}^T \Sigma_i^{-1} \mathbf{x}_{g_i}\right) $$
+ where $\mathbf{x}_{g_i} = [\Delta x_{ij} \ \Delta y_{ij}]^T$ is the vector from the Gaussian center to the pixel, and $\Sigma_i^{-1} = \begin{bmatrix} A_i & B_i \\ B_i & C_i \end{bmatrix}$ is the inverse covariance matrix [S1].
+ 
+@@ -38,7 +38,7 @@
+ [ S1 ]
+ 
+-The components of $\hat{v}_{p_j}$ are derived from the expansion of the quadratic form with respect to $\bar{x}_{p_j}$ and $\bar{y}_{p_j}$:
++The components of $\hat{v}_{p_j}$ are derived from the factorization of the quadratic form:
+ $$ \hat{v}_{p_j} = \left[ -\frac{1}{2}\bar{x}_{p_j}^2, -\frac{1}{2}\bar{y}_{p_j}^2, -\bar{x}_{p_j}\bar{y}_{p_j}, \bar{x}_{p_j}, \bar{y}_{p_j}, 1 \right]^T $$
+-*Note: The source [S1] provides the matrix multiplication structure $M_{power} = M_g \cdot M_p$ and the explicit $\hat{v}_{g_i}$ vector. The $\hat{v}_{p_j}$ vector is derived from the factorization shown in [S1] where the pixel-dependent terms are isolated. Specifically, the expansion in [S1] shows the pixel terms as $[-\frac{1}{2}\bar{x}_{p_j}^2, -\frac{1}{2}\bar{y}_{p_j}^2, -\bar{x}_{p_j}\bar{y}_{p_j}, \bar{x}_{p_j}, \bar{y}_{p_j}, 1]^T$ matching the Gaussian coefficients.*
++[ S1 ]
+ 
+ **Parameters:**
+@@ -60,89 +60,91 @@
+ 
+ **Pseudocode:**
++```python
++import math
+ 
+-```python
+-# Precomputed global constant for a 16x16 tile centered at (0,0) relative coords
+-# M_p_global is 256x6, precomputed offline
+-M_p_global = compute_pixel_vectors()
++def compute_pixel_vectors(tile_size=16):
++    """Precompute M_p for a tile. Returns a (256, 6) array."""
++    M_p = []
++    half = tile_size // 2
++    for dy in range(tile_size):
++        for dx in range(tile_size):
++            x_bar = dx - half
++            y_bar = dy - half
++            v_p = [
++                -0.5 * x_bar**2,
++                -0.5 * y_bar**2,
++                -x_bar * y_bar,
++                x_bar,
++                y_bar,
++                1.0
++            ]
++            M_p.append(v_p)
++    return M_p
+ 
+-def gemm_gs_blend(Gaussian_List, Tile_Ref_Center):
++def gemm_gs_blend(gaussian_list, tile_ref_center, M_p_global):
+     """
+-    Gaussian_List: List of sorted Gaussians overlapping the tile.
+-    Tile_Ref_Center: (x_c, y_c) of the reference pixel (e.g., tile center).
++    gaussian_list: List of sorted Gaussians overlapping the tile.
++    tile_ref_center: (x_c, y_c) of the reference pixel.
++    M_p_global: Precomputed (256, 6) matrix of pixel vectors.
+     """
++    x_c, y_c = tile_ref_center
+     batch_size = 256
+     tile_pixels = 256
+-    
+-    # Shared memory buffers (double buffered)
+-    # I_Buffer: indices of Gaussians
+-    # F_Buffer: Gaussian attributes (A, B, C, x_g, y_g, o, color)
+-    # M_Buffer: M_g matrix (batch_size x 6)
+-    
+-    # Stage 1: Load Indices
+-    # Load batch_size indices from Gaussian_List into I_Buffer
+-    # Use async copy to overlap with next stage
+-    
+-    # Stage 2: Fetch Attributes and Construct M_g
+-    # For each Gaussian i in batch:
+-    #   Fetch A_i, B_i, C_i, x_g_i, y_g_i, o_i, color_i
+-    #   Compute offsets: x_hat = x_g_i - x_c, y_hat = y_g_i - y_c
+-    #   Compute v_hat_g_i vector:
+-    #     v_hat_g_i[0] = -0.5 * A_i
+-    #     v_hat_g_i[1] = -0.5 * C_i
+-    #     v_hat_g_i[2] = -B_i
+-    #     v_hat_g_i[3] = -A_i * x_hat - B_i * y_hat
+-    #     v_hat_g_i[4] = -C_i * y_hat - B_i * x_hat
+-    #     v_hat_g_i[5] = -0.5 * A_i * x_hat**2 - 0.5 * C_i * y_hat**2 - B_i * x_hat * y_hat
+-    #   Store v_hat_g_i in M_Buffer[i]
+-    
++
++    # Stage 1: Load indices into shared memory (IBuffer)
++    # [G] Standard async memory copy from global to shared memory
++
++    # Stage 2: Fetch attributes and construct M_g
++    M_g = []
++    for i in range(batch_size):
++        g = gaussian_list[i]
++        x_hat = g.x_proj - x_c
++        y_hat = g.y_proj - y_c
++        v_g = [
++            -0.5 * g.A,
++            -0.5 * g.C,
++            -g.B,
++            -g.A * x_hat - g.B * y_hat,
++            -g.C * y_hat - g.B * x_hat,
++            -0.5 * g.A * x_hat**2 - 0.5 * g.C * y_hat**2 - g.B * x_hat * y_hat
++        ]
++        M_g.append(v_g)
++
+     # Stage 3: GEMM and Rendering
+-    # M_p is loaded from global memory (shared across tiles)
+-    
+-    # Mini-batch GEMM: M_g (256x6) * M_p (256x6)^T -> M_power (256x256)
+-    # Note: M_p in source is 256x6, so M_g * M_p^T or M_g * M_p depending on layout.
+-    # Source says M_g is 256x6, M_p is 256x6, M_power is 256x256.
+-    # This implies M_power[i][j] = dot(M_g[i], M_p[j]).
+-    # So we need M_g * M_p^T if using standard GEMM, or specific layout.
+-    # Source Algorithm 2: M_power <- M_g * M_p. 
+-    # If M_g is (Bx6) and M_p is (Px6), standard GEMM (Bx6) * (6xP) is needed.
+-    # So M_p must be transposed or stored as (6xP). 
+-    # Source text: "M_p is 256x6... M_power is 256x256... M_g * M_p".
+-    # This implies M_p is treated as (6x256) in the multiplication or the notation 
+-    # implies row-wise dot products. Given "rows are v_hat_p_j", M_p is Px6.
+-    # To get BxP result from Bx6 and Px6, we compute M_g * M_p^T.
+-    
+-    M_power = matmul(M_g, transpose(M_p_global))
+-    
+-    # Volume Rendering
+-    for i in range(batch_size):
+-        o_i = Gaussian_List[i].opacity
+-        color_i = Gaussian_List[i].color
+-        for j in range(tile_pixels):
++    # Mini-batch design due to shared memory limits [S1]
++    # Multiply 16x8 submatrices of M_g with M_p using warp-level mma(m16n8k8) PTX instructions [S1]
++    # A thread block of 8 warps makes 32 warp-level calls to complete m256n16k8 [S1]
++    # Compute dot products explicitly to match M_power[i][j] = v_g_i . v_p_j
++    M_power = [[sum(M_g[i][k] * M_p_global[j][k] for k in range(6)) for j in range(tile_pixels)] for i in range(batch_size)]
++
++    # Volume rendering per pixel
++    for j in range(tile_pixels):
++        T_j = 1.0
++        C_j = [0.0, 0.0, 0.0]
++        for i in range(batch_size):
+             power = M_power[i][j]
+-            alpha = o_i * exp(power)
+-            
+-            # Alpha skipping
+-            if alpha <= 1/255:
++            alpha = gaussian_list[i].opacity * math.exp(power)
++
++            if alpha <= 1.0 / 255.0:
+                 continue
+-                
+-            # Accumulate color
+-            # T_j is transmittance of pixel j
+-            # C_j = C_j + alpha * T_j * color_i
+-            # T_j = T_j * (1 - alpha)
+-            
+-            # Early termination if T_j <= 0
+-            if T_j <= 0:
++
++            C_j[0] += alpha * T_j * gaussian_list[i].color[0]
++            C_j[1] += alpha * T_j * gaussian_list[i].color[1]
++            C_j[2] += alpha * T_j * gaussian_list[i].color[2]
++            T_j *= (1.0 - alpha)
++
++            if T_j <= 0.0:
+                 break
++        # [G] Store C_j to frame buffer
+ ```
+ 
+ **Edge Cases and Pitfalls:**
+-*   **Shared Memory Limits:** The mini-batch design (16x8 submatrices) is required due to limited shared memory [S1].
+-*   **Precision:** The transformation relies on exact arithmetic for the dot product decomposition; floating-point errors in coordinate differences may affect accuracy, though not explicitly detailed in sources [S1].
+-*   **Boundary Conditions:** The method assumes a fixed tile size (16x16). Tiles at image boundaries may require padding or special handling not detailed in the source [S1].
++*   **Shared Memory Limits:** The mini-batch design (16×8 submatrices) is required due to limited shared memory [S1].
++*   **Boundary Conditions:** Handling tiles at image boundaries requires padding or special handling not given in the sources.
+ 
+ ## Operating characteristics
+-*   **Time Complexity:** The core blending operation is reduced to GEMM, which is highly optimized on Tensor Cores. The complexity is dominated by the matrix multiplication $O(B \cdot P \cdot 6)$ per batch, where $B$ is batch size and $P$ is pixels per tile [S1].
+-*   **Memory Complexity:** Requires storage for $M_p$ (256x6 floats) in global memory, plus shared memory for double-buffered indices, features, and $M_g$ [S1].
+-*   **Measured Performance:** On NVIDIA A100, GEMM-GS achieves a 1.42× speedup over vanilla 3DGS. On H100, it achieves a 1.37× speedup [S1]. It provides an average 1.19× speedup over FlashGS, 1.42× over StopThePop, and 1.50× over SpeedySplat on A100 [S1].
++*   **Time Complexity:** The core blending operation is reduced to GEMM, which is highly optimized on Tensor Cores [S1]. The complexity is dominated by the matrix multiplication $O(B \cdot P \cdot 6)$ per batch, where $B$ is batch size and $P$ is pixels per tile [S1].
++*   **Memory Complexity:** Requires storage for $M_p$ (256×6 floats) in global memory, plus shared memory for double-buffered indices, features, and $M_g$ [S1].
++*   **Measured Performance:** On NVIDIA A100, GEMM-GS achieves a 1.42× speedup over vanilla 3DGS [S1]. On H100, it achieves a 1.37× speedup [S1]. It provides an average 1.19× speedup over FlashGS, 1.42× over StopThePop, and 1.50× over SpeedySplat on A100 [S1].
+ *   **Strengths:** High utilization of GPU Tensor Cores; efficient memory hierarchy usage via double buffering and warp-level synchronization [S1].
+ *   **Limitations:** Requires fixed tile and batch sizes for optimal performance; relies on specific PTX instructions for warp-level GEMM [S1].

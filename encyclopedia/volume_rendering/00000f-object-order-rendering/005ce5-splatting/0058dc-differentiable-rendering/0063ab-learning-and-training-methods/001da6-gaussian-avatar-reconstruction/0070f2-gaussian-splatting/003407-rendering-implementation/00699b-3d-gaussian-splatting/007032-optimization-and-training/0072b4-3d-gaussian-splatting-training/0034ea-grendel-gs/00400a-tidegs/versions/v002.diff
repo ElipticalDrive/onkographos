@@ -1,0 +1,127 @@
+--- v001.md
++++ v002.md
+@@ -1,5 +1,4 @@
+ # TideGS
+ 
+-Also called: TideGS: Scalable Training of Over One Billion 3D Gaussian Splatting Primitives via Out-of-Core Optimization
+ 
+ ## Overview
+@@ -7,16 +6,16 @@
+ 
+ ## How it works
+-TideGS manages Gaussian parameters across an SSD–CPU–GPU hierarchy. The method relies on the observation that each training iteration touches only a small subset of Gaussians visible from the current camera batch, creating sparsity and temporal locality [S2, unofficial].
++TideGS manages Gaussian parameters across an SSD–CPU–GPU hierarchy [S2, unofficial]. The method relies on the observation that each training iteration touches only a small subset of Gaussians visible from the current camera batch, creating sparsity and temporal locality [S2, unofficial].
+ 
+ ### Inputs and Outputs
+ *   **Inputs:**
+-    *   Camera batch $\mathcal{B}_t$ at iteration $t$.
++    *   Camera batch $\mathcal{B}_t$ at iteration $t$ [S2, unofficial].
+     *   Total number of Gaussians $N$.
+-    *   Spatial block size $B$ (default 4096).
++    *   Spatial block size $B$ (default 4096) [S2, unofficial].
+     *   GPU VRAM capacity limit $C$.
+-    *   CPU cache size (e.g., 16 GB or 32 GB).
++    *   CPU cache size (e.g., 16 GB or 32 GB) [S2, unofficial].
+ *   **Outputs:**
+-    *   Updated Gaussian parameters $\Theta$ stored on SSD.
+-    *   Rendered images for the batch $\mathcal{B}_t$.
++    *   Updated Gaussian parameters $\Theta$ stored on SSD [S2, unofficial].
++    *   Rendered images for the batch $\mathcal{B}_t$ [S2, unofficial].
+ 
+ ### Data Structures and Layout
+@@ -46,5 +45,5 @@
+ 1.  **Identify working set:** Compute $K_t$ via lightweight CPU-side block visibility tests (6-plane frustum tests against block bounding spheres) [S2, unofficial].
+ 2.  **Prefetch & materialize:** Prefetch needed blocks into the CPU cache and materialize them in VRAM via an asynchronous host-to-device (H2D) stream [S2, unofficial].
+-3.  **Render & backprop:** Execute the standard 3DGS forward/backward pass on the resident blocks $R_t$ on GPU. Fine-grained Gaussian-level filtering is executed on GPU within the retained blocks to ensure exact 3DGS semantics [S2, unofficial].
++3.  **Render & backprop:** Execute the standard 3DGS forward/backward pass on the resident blocks $R_t$ on GPU [S2, unofficial]. Fine-grained Gaussian-level filtering is executed on GPU within the retained blocks to ensure exact 3DGS semantics [S2, unofficial].
+ 4.  **Evict & write back:** Evict cold blocks when VRAM/CPU caches are full; dirty evictions are propagated through the CPU cache and written back to SSD patch segments asynchronously [S2, unofficial].
+ 
+@@ -54,11 +53,12 @@
+ # TideGS Training Loop
+ # Constants
+-B = 4096  # Spatial block size
+-C = GPU_VRAM_CAPACITY  # VRAM capacity limit
+-CPU_CACHE_SIZE = 16 * 1024 * 1024 * 1024  # Example: 16 GB
++B = 4096  # Spatial block size (primitives per block)
++C = 24 * 1024 * 1024 * 1024  # VRAM capacity limit (e.g., 24 GB)
++CPU_CACHE_SIZE = 16 * 1024 * 1024 * 1024  # CPU cache size (e.g., 16 GB)
++K = (N + B - 1) // B  # Total number of blocks
+ 
+ # Preprocessing (done once)
+ # 1. Morton-sort Gaussians
+-# 2. Compute block bounds
++# 2. Compute block bounds (bounding spheres)
+ # 3. Write initial base segment to SSD
+ # End Preprocessing
+@@ -66,27 +66,41 @@
+ for t in range(num_iterations):
+     # Stage 1: Identify working set
+-    # Compute block-level working set K_t via CPU-side frustum tests
+-    K_t = identify_block_working_set(camera_batch[t], block_bounds)
+-    
++    # Compute block-level working set K_t via CPU-side 6-plane frustum tests against block bounding spheres
++    K_t = set()
++    for k in range(K):
++        if block_is_visible(k, camera_batch[t]):
++            K_t.add(k)
++            
+     # Stage 2: Prefetch & materialize (asynchronous)
+     # Prefetch blocks in K_t to CPU cache
+     # Materialize blocks in K_t to GPU VRAM (resident set R_t)
+-    # Evict blocks from R_t if capacity C exceeded, writing back dirty blocks
+-    R_t = materialize_and_cache(K_t, R_t, C, cpu_cache)
+-    
++    # Evict blocks from R_t if capacity C exceeded, writing back dirty blocks asynchronously
++    R_t = set()
++    for k in K_t:
++        if k not in R_t:
++            prefetch_to_cpu_cache(k, CPU_CACHE_SIZE)
++            materialize_to_vram(k, C)
++            R_t.add(k)
++            
+     # Stage 3: Render & backprop (GPU)
+     # Extract active Gaussian indices I_t from R_t via GPU-side fine filtering
+-    I_t = fine_filter_gaussians(R_t, camera_batch[t])
+-    
++    I_t = set()
++    for k in R_t:
++        for i in block_gaussians(k):
++            if gaussian_is_visible(i, camera_batch[t]):
++                I_t.add(i)
++                
+     # Perform standard 3DGS forward pass and backward pass on I_t
+-    loss, gradients = render_and_backprop(R_t, I_t, camera_batch[t])
++    loss, gradients = standard_3dgs_forward_backward(I_t, camera_batch[t])
+     
+     # Update optimizer states (Adam) for I_t
+-    update_optimizer(I_t, gradients)
++    update_adam_optimizer(I_t, gradients)
+     
+     # Stage 4: Evict & write back (asynchronous overlap with Stage 1/2 of next iter)
+     # Mark evicted blocks as dirty if modified
+     # Asynchronously write dirty blocks to SSD
+-    async_write_back(R_t)
++    for k in R_t:
++        if is_dirty(k):
++            async_write_to_ssd(k)
+ ```
+ 
+@@ -104,5 +118,5 @@
+ 
+ ## Operating characteristics
+-*   **Time Complexity:** Not explicitly given in sources.
++*   **Time Complexity:** Not explicitly given in sources [S2, unofficial].
+ *   **Memory Complexity:** VRAM scaling is $O(|R_t|)$ or $O(|I_t|)$, where $|R_t|$ is the capacity-bounded resident set and $|I_t|$ is the Gaussian active set after fine filtering. This contrasts with $O(N)$ scaling of other methods [S2, unofficial].
+ *   **Measured Performance:**
+@@ -111,8 +125,8 @@
+     *   **MatrixCity $\sim 1.1$B:** TideGS PCIe traffic 0.97 GB/iter, Iter 525.6 ms, GPU Utilization 49.5%. CLM fails with OOM [S2, unofficial].
+ *   **Quality Consistency:** On Mip-NeRF 360, TideGS PSNR 28.9157 vs Native 3DGS 29.052 (gap 0.11 dB). SSIM 0.8689 vs 0.8694. LPIPS 0.1399 vs 0.1394 [S2, unofficial].
+-*   **Strengths:** Enables training with >1B Gaussians on a single 24 GB GPU. Reduces PCIe traffic by 4x compared to CLM at $\sim 102$M Gaussians.
++*   **Strengths:** Enables training with >1B Gaussians on a single 24 GB GPU. Reduces PCIe traffic by 4x compared to CLM at $\sim 102$M Gaussians [S2, unofficial].
+ *   **Limitations:** Incurs modest overhead in the in-memory regime compared to Native 3DGS. Requires SSD storage capacity.
+-*   **When to use:** When training 3DGS scenes with billions of primitives on a single GPU with limited VRAM.
+-*   **When not to use:** When the scene fits entirely in GPU memory and maximum throughput is required (Native 3DGS is faster).
++*   **When to use:** When training 3DGS scenes with billions of primitives on a single GPU with limited VRAM [S2, unofficial].
++*   **When not to use:** When the scene fits entirely in GPU memory and maximum throughput is required (Native 3DGS is faster) [S2, unofficial].
+ 
+ ## Background

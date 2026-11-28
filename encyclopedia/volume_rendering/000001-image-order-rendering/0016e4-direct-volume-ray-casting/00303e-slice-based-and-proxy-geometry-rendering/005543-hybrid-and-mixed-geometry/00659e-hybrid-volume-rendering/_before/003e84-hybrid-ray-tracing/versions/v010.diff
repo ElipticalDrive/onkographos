@@ -1,0 +1,433 @@
+--- v009.md
++++ v010.md
+@@ -4,256 +4,168 @@
+ 
+ ## Overview
+-Hybrid Ray Tracing is a method for mixing geometric and volumetric data by casting rays through the ensemble of both, drawing samples of each, and compositing them in depth-sorted order [S1, S2, unofficial]. It solves the problem of rendering scenes containing both polygonal models (e.g., surgical instruments, skin surfaces) and scalar fields (e.g., CT/MR data) without converting geometry to voxels or volumes to polygons [S3, unofficial]. It sets itself apart from [Texture-Based Volume Rendering](4707-texture-based-volume-rendering.md) by explicitly handling polygon intersections within the ray traversal loop, and from [Mixed Geometry Rendering](3442-mixed-geometry-rendering.md) by using a unified ray-casting framework with adaptive supersampling for geometric events rather than separate rendering passes or fixed scan-conversion [S2, unofficial].
++Hybrid Ray Tracing is a method for mixing geometric and volumetric data by casting rays through the ensemble of both, drawing samples of each, and compositing them in depth-sorted order [S1, unofficial][S2, unofficial]. It solves the problem of rendering scenes containing both scalar fields (volumes) and polygonal boundaries (surfaces) simultaneously. Unlike pure volume rendering which ignores geometry, or pure ray tracing which ignores volumetric density, this method treats polygons as opaque or translucent obstacles within the volume, handling the "hidden-volume" problem locally within slabs [S2, unofficial]. It sets itself apart from [3D Scan-conversion](#hybrid-ray-tracing-with-volume-data) by maintaining the continuous nature of the volume and the sharpness of the geometry, at the cost of higher computational complexity due to ray-polygon intersection testing and adaptive supersampling.
+ 
+ ## How it works
+-The method operates on the fundamental loop structure of [Image-order rendering](16-image-order-rendering.md): for each pixel, a ray $r(t) = \mathbf{o} + t\mathbf{d}$ is defined, intersected with the volume domain, and sampled/composited along its path [G]. The traversal order is determined by the pixel's position in the image plane [G].
+-
+-The core computational engine consists of four sequential stages applied to each ray [S2, S5, S10, S37, unofficial]:
+-
+-1.  **Ray Generation and Discretization**: The ray segment $[t_{start}, t_{end}]$ intersecting the volume is determined, typically by intersecting the ray with the volume's bounding box [S1, S8, S16, unofficial]. The segment is discretized into $N$ samples at equidistant intervals $\Delta t = (t_{end} - t_{start}) / N$ [S5, S10, S17, unofficial].
+-2.  **Sampling and Interpolation**: At each sample point $\mathbf{p}_i = r(t_i)$, the scalar value $V(\mathbf{p}_i)$ is retrieved from the volume data. This is typically performed by trilinear interpolation of the eight surrounding voxels [S9, S11, S47, unofficial].
+-3.  **Classification (Transfer Function)**: The scalar value $V(\mathbf{p}_i)$ is mapped to optical properties: color $C_i$ and opacity $\alpha_i$ [S2, S2789]. The opacity is often corrected for the step size $\Delta t$ to ensure physical consistency, using the Beer-Lambert law approximation:
+-    $$ \alpha_i = 1 - e^{-\sigma_i \Delta t} $$
+-    where $\sigma_i$ is the extinction coefficient derived from the scalar value [S24, S30, unofficial].
+-4.  **Compositing**: The samples are accumulated from front to back (closest to the eye to furthest) using the front-to-back alpha compositing equation [S1, S2, S13, unofficial][S61]:
+-    $$ C_{out} = C_{in} + (1 - \alpha_{in}) \cdot C_{sample} \cdot \alpha_{sample} $$
+-    $$ \alpha_{out} = \alpha_{in} + (1 - \alpha_{in}) \cdot \alpha_{sample} $$
+-    where $C_{in}$ and $\alpha_{in}$ are the accumulated color and opacity from previous samples, and $C_{sample}$ and $\alpha_{sample}$ are the color and opacity of the current sample [S52, S60, unofficial]. The process initializes with $C_{in} = 0$ and $\alpha_{in} = 0$ [S15, S46, unofficial].
+-
+-### Hybrid Ray Tracing Algorithm Details
+-
+-**Inputs:**
+-*   Volume data: 3D array of scalar values $V[x,y,z]$.
+-*   Polygonal data: List of polygons $P_j$ with associated shading models.
+-*   Camera parameters: Origin $\mathbf{o}$, direction $\mathbf{d}$, image plane dimensions.
+-*   Transfer function: Maps scalar $V \to (C_v, \sigma_v)$.
+-*   Supersampling threshold: $\theta$.
+-
+-**Outputs:**
+-*   Final pixel color $C_{final}$.
++**Inputs and Outputs:**
++*   **Inputs:** A 3D voxel array of scalar values (density), a set of embedded polygons (geometry), a camera position, and a viewing direction.
++*   **Outputs:** A 2D image with color and opacity per pixel.
+ 
+ **Data Structures:**
+-*   `Ray`: Struct containing origin $\mathbf{o}$, direction $\mathbf{d}$, $t_{min}$, $t_{max}$.
+-*   `Sample`: Struct containing position $\mathbf{p}$, scalar value $V$, color $C_v$, opacity $\alpha_v$.
+-*   `Intersection`: Struct containing distance $t$, polygon ID $j$, color $C_p$, opacity $\alpha_p$.
++*   **Volumetric Data:** Stored as a 3D texture or array. Each voxel $v$ has an associated color $c_v$ and opacity $o_v$ derived from classification/shading of the scalar value.
++*   **Geometric Data:** A list of polygons (triangles/quads) with surface color $c_p$ and opacity $o_p$.
++*   **Ray Representation:** A ray is defined by an origin $O$ and a direction $D$.
++
++**Parameters:**
++*   **Slab Thickness ($t_v$):** Equal to the spacing between samples along a viewing ray. Typically equal to the voxel spacing [S2, unofficial].
++*   **Slab Width:** Equal to the spacing between adjacent rays [S2, unofficial].
++*   **Supersampling Threshold ($\theta$):** A threshold value for color range variance to trigger adaptive supersampling [S2, unofficial].
+ 
+ **Algorithm Steps:**
+ 
+-1.  **Volumetric Sampling**:
+-    For each sample index $i$ from $0$ to $N-1$:
+-    *   Compute $t_i = t_{min} + i \cdot \Delta t$.
+-    *   Compute position $\mathbf{p}_i = \mathbf{o} + t_i \mathbf{d}$.
+-    *   Retrieve scalar $V_i$ via trilinear interpolation from $V[x,y,z]$.
+-    *   Compute $\sigma_i$ from $V_i$ using transfer function.
+-    *   Compute $\alpha_{v,i} = 1 - e^{-\sigma_i \Delta t}$.
+-    *   Compute $C_{v,i}$ from $V_i$ using transfer function.
+-    *   Store $(\mathbf{p}_i, C_{v,i}, \alpha_{v,i})$ in a list `vol_samples`.
++1.  **Preprocessing:**
++    *   Shade and classify the volumetric data to yield a color $c_v$ and opacity $o_v$ for each voxel [S2, unofficial].
++    *   Shade the polygons to yield a color $c_p$ and opacity $o_p$ for each polygon [S2, unofficial].
+ 
+-2.  **Geometric Intersection**:
+-    *   Compute all intersections between ray $r(t)$ and polygons $P_j$.
+-    *   For each intersection at distance $t_j$:
+-        *   Shade polygon $P_j$ to get $C_{p,j}$ and $\alpha_{p,j}$ (typically $\alpha_{p,j}=1$ for opaque polygons).
+-        *   Store $(t_j, C_{p,j}, \alpha_{p,j})$ in a list `poly_intersections`.
+-    *   Sort `poly_intersections` by $t_j$.
++2.  **Ray Casting Loop:**
++    For each pixel in the image:
++    a.  **Initialize Ray:** Cast a primary viewing ray from the observer position into the scene [S2, unofficial].
++    b.  **Volumetric Sampling:** Compute a vector of colors $c_v$ and opacities $o_v$ by resampling the volumetric data at equally spaced positions along the ray. Use tri-linear interpolation from the eight voxels surrounding each sample location [S2, unofficial].
++    c.  **Geometric Intersection:** Independently compute all intersections between the ray and polygons in the environment. For each intersection, determine the distance along the ray [S2, unofficial].
++    d.  **Depth Sorting:** Collect all events (volumetric sample points and polygon intersections) along the ray. Sort them in depth-sorted order (front-to-back) [S1, unofficial][S2, unofficial].
++    e.  **Composite:** Composite the resampled volumetric colors and opacities with the polygonal colors and opacities in depth-sorted order to yield the final ray color [S2, unofficial].
+ 
+-3.  **Slab Decomposition and Compositing**:
+-    *   Initialize accumulated color $C_{acc} = (0,0,0)$ and opacity $\alpha_{acc} = 0$.
+-    *   Create a combined event list containing all `vol_samples` and `poly_intersections`, sorted by distance $t$.
+-    *   Iterate through the combined event list. The list defines a sequence of "slabs" (volumetric regions) and "planes" (polygons).
+-    *   For each segment between consecutive events at $t_{prev}$ and $t_{curr}$:
+-        *   If the segment is volumetric (no polygon in between):
+-            *   Calculate thickness $t_{seg} = t_{curr} - t_{prev}$.
+-            *   If multiple volumetric samples fall within this segment, aggregate their contribution or treat as a single slab with average properties [S2, unofficial]. *Note: The source describes treating the slab as homogeneous for the purpose of the polygon interaction, but standard ray casting samples at discrete points. The hybrid method specifically handles the case where a polygon cuts through a slab.*
+-            *   Actually, the source [S2, unofficial] specifies that volumetric samples are drawn at equally spaced intervals. When a polygon intersects, it splits the current slab.
+-            *   Let the current slab have total opacity $O_v$ (computed from the volumetric samples spanning the slab thickness).
+-            *   If a polygon is encountered at $t_{poly}$ within the slab (defined by $t_{start\_slab}$ and $t_{end\_slab}$):
+-                *   Calculate front thickness $t_f = t_{poly} - t_{start\_slab}$.
+-                *   Calculate back thickness $t_b = t_{end\_slab} - t_{poly}$.
+-                *   Calculate front slab opacity $O_f = 1 - (1 - O_v)^{t_f / t_{slab\_thickness}}$.
+-                *   Calculate back slab opacity $O_b = 1 - (1 - O_v)^{t_b / t_{slab\_thickness}}$.
+-                *   Composite front sliver: Update $C_{acc}, \alpha_{acc}$ using $C_v, O_f$.
+-                *   Composite polygon: Update $C_{acc}, \alpha_{acc}$ using $C_p, \alpha_p$.
+-                *   Composite back sliver: Update $C_{acc}, \alpha_{acc}$ using $C_v, O_b$.
+-                *   *Note*: $C_v$ for the slivers is derived from the volumetric data. The source [S2, unofficial] implies using the slab's average color/opacity or the specific samples. Given the "slab" abstraction, $C_v$ is the color of the material in that slab.
+-        *   If the segment is purely volumetric (no polygon):
+-            *   Composite the volumetric sample(s) in this segment directly using standard front-to-back compositing.
++3.  **Handling Polygon-Volume Interaction (Slab Method):**
++    When a ray intersects a polygon within a volumetric slab:
++    a.  **Local Approximation:** Treat the polygon locally as a plane perpendicular to the ray at the intersection point [S2, unofficial].
++    b.  **Sliver Calculation:** Compute the opacities for the slivers of volumetric gel immediately in front of and behind this plane.
++        *   Let $o_v$ be the opacity of the entire slab.
++        *   Let $t_v$ be the total thickness of the slab.
++        *   Let $t_f$ be the thickness of the front portion of the slab.
++        *   Let $t_b$ be the thickness of the back portion of the slab.
++        *   The opacity of the front sliver $o_f$ is calculated as:
++            $$o_f = 1 - (1 - o_v)^{t_f/t_v}$$
++        *   The opacity of the back sliver $o_b$ is calculated as:
++            $$o_b = 1 - (1 - o_v)^{t_b/t_v}$$
++    c.  **Composite Order:** Working from front to back, composite the front volumetric sliver ($c_v, o_f$), then the polygon ($c_p, o_p$), then the back volumetric sliver ($c_v, o_b$) [S2, unofficial].
++    d.  **Multiple Polygons:** If a ray intersects more than one polygon within a slab, compute and composite the contribution of each polygon and each sliver of volumetric gel separately [S2, unofficial].
+ 
+-4.  **Adaptive Supersampling**:
+-    *   To handle aliasing at polygon edges, compute two auxiliary colors for the pixel region:
+-        *   $C_x$: Composite result assuming only polygons contribute (set $\alpha_v = 0$ for all volumetric samples).
+-        *   $C_q$: Composite result assuming only polygons contribute, but attenuated by volumetric data (set $\alpha_v = 0$ for all volumetric samples, but use volumetric opacity for attenuation? Source [S2, unofficial] says: "attenuated by passage through volumetric data, setting $\alpha_v=0$ for all volumetric samples". This implies the volumetric data acts as a transparent medium with extinction but no emission/color, or simply that the geometric events are hidden. The text says: "If the range of $C_q$ exceeds $\theta$ but the range of $C_x$ does not, the region contains a geometric event, but that event is hidden from view by overlying opaque volumetric data." This implies $C_q$ includes the attenuation effect of the volume on the polygon colors).
+-    *   Calculate the range (max - min) of $C_x$ and $C_q$ within the sample region (pixel).
+-    *   If range($C_x$) > $\theta$ AND range($C_q$) > $\theta$:
+-        *   The region contains a visible geometric event.
+-        *   Cast more rays (supersample) for this pixel.
+-    *   Else:
+-        *   Do not supersample.
++4.  **Adaptive Supersampling (Anti-aliasing):**
++    To avoid aliasing at polygonal edges, intersections, and shading highlights:
++    a.  **Compute Auxiliary Colors:** During the initial ray trace, compute two additional colors:
++        *   $C_x$: Contributions only from polygons (set $o_v = 0$ for all volumetric samples).
++        *   $C_q$: Contributions only from polygons, attenuated by passage through volumetric data (set $o_v = 0$ for all volumetric samples, but apply volumetric attenuation to the polygon contributions) [S2, unofficial].
++    b.  **Evaluate Variance:** Calculate the range (max - min) of $C_x$ and $C_q$ within the current sample region (pixel).
++    c.  **Decision Logic:**
++        *   If Range($C_x$) > $\theta$ AND Range($C_q$) $\le \theta$: The difference is due to volumetric data. Do not supersample [S2, unofficial].
++        *   If Range($C_q$) > $\theta$ AND Range($C_x$) $\le \theta$: The geometric event is hidden by opaque volumetric data. Do not supersample [S2, unofficial].
++        *   If Range($C_x$) > $\theta$ AND Range($C_q$) > $\theta$: The region contains a visible geometric event. Cast more rays (supersample) [S2, unofficial].
+ 
+ **Pseudocode:**
+ 
+ ```python
+-def hybrid_ray_trace(ray, volume, polygons, transfer_func, theta):
+-    # 1. Sample Volume
+-    vol_samples = []
+-    t_start, t_end = ray.intersect_volume_bbox()
+-    N = compute_samples(t_end - t_start)
+-    dt = (t_end - t_start) / N
++def hybrid_ray_trace(ray_origin, ray_direction, volume_data, polygons, threshold_theta):
++    # 1. Precompute voxel colors/opacities (c_v, o_v) and polygon colors/opacities (c_p, o_p)
++    # This is typically done in a preprocessing step or fragment shader context
+     
+-    for i in range(N):
+-        t = t_start + i * dt
+-        p = ray.origin + ray.direction * t
+-        v_val = volume.trilinear_interpolate(p)
+-        color_v, sigma = transfer_func(v_val)
+-        alpha_v = 1.0 - exp(-sigma * dt)
+-        vol_samples.append({'t': t, 'color': color_v, 'alpha': alpha_v, 'sigma': sigma})
++    # 2. Collect Events
++    events = []
++    
++    # Add volumetric sample points along the ray
++    # Assuming slab thickness t_v is known
++    t = 0
++    while t < max_distance:
++        pos = ray_origin + ray_direction * t
++        # Tri-linear interpolation to get c_v, o_v at pos
++        c_v, o_v = sample_volume(volume_data, pos)
++        events.append({
++            'type': 'volume',
++            't': t,
++            'c': c_v,
++            'o': o_v
++        })
++        t += slab_thickness
++        
++    # Add polygon intersections
++    for poly in polygons:
++        t_intersect = intersect_ray_polygon(ray_origin, ray_direction, poly)
++        if t_intersect is not None and t_intersect > 0:
++            # Shade polygon to get c_p, o_p
++            c_p, o_p = shade_polygon(poly, ray_origin, ray_direction)
++            events.append({
++                'type': 'polygon',
++                't': t_intersect,
++                'c': c_p,
++                'o': o_p,
++                'poly': poly
++            })
++            
++    # 3. Sort Events by t (front-to-back)
++    events.sort(key=lambda e: e['t'])
++    
++    # 4. Composite
++    accumulated_color = (0, 0, 0)
++    accumulated_opacity = 0
++    
++    for event in events:
++        if event['type'] == 'volume':
++            # Standard volume compositing
++            # C_out = C_in + (1 - A_in) * c_v * o_v
++            # A_out = A_in + (1 - A_in) * o_v
++            # Note: o_v here is the opacity of the slab segment
++            accumulated_color = accumulated_color + (1 - accumulated_opacity) * event['c'] * event['o']
++            accumulated_opacity = accumulated_opacity + (1 - accumulated_opacity) * event['o']
++            
++        elif event['type'] == 'polygon':
++            # Handle polygon interaction with surrounding volume slabs
++            # Find the slab this polygon intersects
++            # Calculate t_f and t_b relative to the slab boundaries
++            slab_start_t = floor(event['t'] / slab_thickness) * slab_thickness
++            slab_end_t = slab_start_t + slab_thickness
++            
++            t_f = event['t'] - slab_start_t
++            t_b = slab_end_t - event['t']
++            
++            # Get the slab's volumetric properties (c_v, o_v)
++            # For simplicity, assume the slab properties are constant or averaged
++            c_v_slab, o_v_slab = get_slab_properties(volume_data, slab_start_t, slab_end_t)
++            
++            # Calculate sliver opacities
++            o_f = 1 - (1 - o_v_slab) ** (t_f / slab_thickness)
++            o_b = 1 - (1 - o_v_slab) ** (t_b / slab_thickness)
++            
++            # Composite front sliver
++            accumulated_color = accumulated_color + (1 - accumulated_opacity) * c_v_slab * o_f
++            accumulated_opacity = accumulated_opacity + (1 - accumulated_opacity) * o_f
++            
++            # Composite polygon
++            accumulated_color = accumulated_color + (1 - accumulated_opacity) * event['c'] * event['o']
++            accumulated_opacity = accumulated_opacity + (1 - accumulated_opacity) * event['o']
++            
++            # Composite back sliver
++            accumulated_color = accumulated_color + (1 - accumulated_opacity) * c_v_slab * o_b
++            accumulated_opacity = accumulated_opacity + (1 - accumulated_opacity) * o_b
++            
++    return accumulated_color
+ 
+-    # 2. Intersect Polygons
+-    poly_intersections = []
+-    for poly in polygons:
+-        t, normal = ray.intersect_polygon(poly)
+-        if t is not None and t_start < t < t_end:
+-            color_p = poly.shade(ray, t, normal)
+-            alpha_p = 1.0 # Assuming opaque polygons
+-            poly_intersections.append({'t': t, 'color': color_p, 'alpha': alpha_p})
++def adaptive_supersample(ray_origin, ray_direction, volume_data, polygons, threshold_theta):
++    # Compute C_x (polygons only, no volume opacity)
++    c_x = composite_polygons_only(ray_origin, ray_direction, volume_data, polygons, set_volume_opacity_to_zero=True)
+     
+-    poly_intersections.sort(key=lambda x: x['t'])
+-
+-    # 3. Composite
+-    acc_color = (0.0, 0.0, 0.0)
+-    acc_alpha = 0.0
++    # Compute C_q (polygons only, but attenuated by volume)
++    c_q = composite_polygons_attenuated(ray_origin, ray_direction, volume_data, polygons, set_volume_opacity_to_zero=True, apply_volume_attenuation=True)
+     
+-    # Combine events
+-    events = []
+-    for s in vol_samples:
+-        events.append({'t': s['t'], 'type': 'vol', 'data': s})
+-    for p in poly_intersections:
+-        events.append({'t': p['t'], 'type': 'poly', 'data': p})
+-    events.sort(key=lambda x: x['t'])
+-
+-    # Process events
+-    # The source [S2, unofficial] describes a slab-based approach where polygons split slabs.
+-    # We need to group volumetric samples into slabs or process sequentially.
+-    # A simpler interpretation consistent with "equally spaced intervals" and "slabs":
+-    # The volume is treated as a series of slabs of thickness dt.
+-    # Polygons intersect these slabs.
++    # In a real implementation, these would be computed over a region (pixel)
++    # and the range (max - min) would be calculated
++    range_x = compute_range(c_x)
++    range_q = compute_range(c_q)
+     
+-    # To implement the "slab" logic precisely:
+-    # We iterate through the sorted events.
+-    # Between two polygon intersections (or bbox bounds), we have a volumetric region.
+-    # If a polygon is inside a slab, we split the slab.
+-    
+-    # Let's assume we process the ray segment by segment defined by polygon intersections.
+-    # Within each segment, we composite the volumetric data.
+-    
+-    current_t = t_start
+-    for event in events:
+-        t_curr = event['t']
+-        
+-        if event['type'] == 'poly':
+-            # We have a polygon at t_curr.
+-            # The volumetric data from current_t to t_curr must be composited.
+-            # However, the source [S2, unofficial] says: "treat a polygon locally as a plane...
+-            # compute opacities for the slivers... immediately in front of and behind".
+-            # This implies the polygon splits the *current* slab or the volume is processed in slabs.
+-            
+-            # Let's assume the volume samples are dense enough that we can approximate
+-            # the volume opacity between current_t and t_curr.
+-            
+-            # Calculate volume opacity in the segment [current_t, t_curr]
+-            # This requires integrating sigma over the segment.
+-            # For simplicity, if we have samples, we can use the last sample's sigma or average.
+-            # The source [S2, unofficial] uses the slab opacity O_v.
+-            
+-            # Let's find the volume samples in [current_t, t_curr]
+-            vol_seg_samples = [s for s in vol_samples if current_t <= s['t'] < t_curr]
+-            
+-            if vol_seg_samples:
+-                # Approximate slab opacity O_v for this segment
+-                # Using the Beer-Lambert law for the segment thickness
+-                seg_thickness = t_curr - current_t
+-                # Average sigma or sum of sigmas * dt?
+-                # O_v = 1 - exp(-sum(sigma_i * dt))
+-                sigma_sum = sum(s['sigma'] for s in vol_seg_samples) * dt # Approximation
+-                O_v = 1.0 - exp(-sigma_sum)
+-                C_v = average_color(vol_seg_samples)
+-                
+-                # Composite front sliver (which is the whole segment before the polygon)
+-                # Actually, the polygon is AT t_curr. So the volume is from current_t to t_curr.
+-                # The "front sliver" is the volume before the polygon.
+-                # The "back sliver" is the volume after the polygon.
+-                
+-                # Composite volume before polygon
+-                acc_color, acc_alpha = composite_front_to_back(acc_color, acc_alpha, C_v, O_v)
+-                
+-                # Composite polygon
+-                acc_color, acc_alpha = composite_front_to_back(acc_color, acc_alpha, event['data']['color'], event['data']['alpha'])
+-                
+-                # Now we need to handle the volume AFTER the polygon.
+-                # But the next event might be another polygon or the end.
+-                # The source [S2, unofficial] says: "composite the front volumetric sliver... then the polygon... then the back volumetric sliver".
+-                # This implies the volume is split by the polygon.
+-                
+-                # So, we should NOT composite the volume after the polygon yet.
+-                # We should pause volume compositing until we know if there's more volume after.
+-                # But the events are sorted. The next event is the next intersection.
+-                
+-                # Let's re-read [S2, unofficial]: "If the ray intersects more than one polygon within a slab...
+-                # compute and composite the contribution of each polygon and each sliver... separately."
+-                
+-                # Correct logic:
+-                # 1. Identify all polygons in the ray path.
+-                # 2. These polygons divide the ray into segments.
+-                # 3. For each segment between two polygons (or bbox), there is a volume sliver.
+-                # 4. Composite: Vol_sliver_1 -> Poly_1 -> Vol_sliver_2 -> Poly_2 ...
+-                
+-                pass # Logic handled in the loop structure below
+-        
+-        current_t = t_curr
+-
+-    # Refined Composite Logic based on [S2, unofficial]
+-    acc_color = (0.0, 0.0, 0.0)
+-    acc_alpha = 0.0
+-    
+-    # Get all polygon t-values
+-    poly_ts = [p['t'] for p in poly_intersections]
+-    # Add bbox boundaries
+-    boundaries = [t_start, t_end]
+-    all_ts = sorted(list(set(boundaries + poly_ts)))
+-    
+-    for i in range(len(all_ts) - 1):
+-        t_a = all_ts[i]
+-        t_b = all_ts[i+1]
+-        
+-        # Check if there is a polygon at t_a (except t_start)
+-        is_poly_start = any(abs(p['t'] - t_a) < 1e-6 for p in poly_intersections)
+-        
+-        # Composite Volume Sliver from t_a to t_b
+-        vol_seg_samples = [s for s in vol_samples if t_a <= s['t'] < t_b]
+-        if vol_seg_samples:
+-            seg_thickness = t_b - t_a
+-            sigma_sum = sum(s['sigma'] for s in vol_seg_samples) * dt
+-            O_v = 1.0 - exp(-sigma_sum)
+-            C_v = average_color(vol_seg_samples)
+-            acc_color, acc_alpha = composite_front_to_back(acc_color, acc_alpha, C_v, O_v)
+-        
+-        # If t_b is a polygon, composite it
+-        if is_poly_start and t_b != t_end: # t_end is not a polygon
+-             # Find the polygon at t_b
+-             poly = next(p for p in poly_intersections if abs(p['t'] - t_b) < 1e-6)
+-             acc_color, acc_alpha = composite_front_to_back(acc_color, acc_alpha, poly['color'], poly['alpha'])
+-
+-    # 4. Adaptive Supersampling Check
+-    # Compute C_x and C_q for the pixel
+-    # C_x: Polygons only, alpha_v = 0
+-    # C_q: Polygons only, attenuated by volume (alpha_v = 0 for color, but volume opacity affects transmission)
+-    # This requires a separate pass or caching.
+-    # If supersampling needed, call hybrid_ray_trace with higher N and average results.
+-    
+-    return acc_color
+-
+-def composite_front_to_back(C_acc, alpha_acc, C_sample, alpha_sample):
+-    C_out = C_acc + (1.0 - alpha_acc) * C_sample * alpha_sample
+-    alpha_out = alpha_acc + (1.0 - alpha_acc) * alpha_sample
+-    return C_out, alpha_out
++    if range_x > threshold_theta and range_q <= threshold_theta:
++        return False # Volumetric variation, no supersample
++    elif range_q > threshold_theta and range_x <= threshold_theta:
++        return False # Hidden geometry, no supersample
++    elif range_x > threshold_theta and range_q > threshold_theta:
++        return True # Visible geometric event, supersample
++    else:
++        return False
+ ```
+ 
+@@ -261,18 +173,18 @@
+ 
+ ### Hybrid Ray Tracing with Volume Data
+-A rendering method that combines shaded polygons with volumetric data by treating surfaces as infinitesimally thin solids, using a binary voxel representation for the geometry, and rendering the composite dataset using volume rendering techniques to avoid aliasing artifacts [S1, unofficial]. It differs from the primary hybrid ray tracer by converting geometry to voxels (3D scan-conversion) rather than intersecting rays with polygons [S1, S3, unofficial]. It is chosen when polygonal edges are sufficiently bandlimited prior to sampling, avoiding the need for adaptive supersampling [S1, unofficial]. Pitfalls include aliasing if the object is not bandlimited to the Nyquist frequency in all three dimensions before sampling [S1, unofficial].
++Also called: 3D Scan-conversion Method.
++This variant avoids ray-polygon intersection testing by converting polygonal models into sampled volumes. Surfaces are treated as infinitesimally thin solids and converted into a binary voxel representation using 3D scan-conversion algorithms (e.g., Kaufman 1987b) [S1, unofficial]. The object must be bandlimited to the Nyquist frequency in all three dimensions prior to sampling to avoid aliasing artifacts [S1, unofficial]. The filtered geometry is then combined with volumetric data and rendered using standard volume rendering techniques [S1, unofficial]. Unlike the primary hybrid ray tracer, this approach does not require adaptive supersampling if polygons are sufficiently bandlimited prior to sampling, producing images free from aliasing artifacts [S1, unofficial]. It is chosen when hardware acceleration for volume rendering is available and polygonal geometry is static or can be pre-processed [S3, unofficial].
+ 
+ ## Operating characteristics
+-*   **Time Complexity**: $O(N \cdot M)$ per pixel, where $N$ is the number of volumetric samples and $M$ is the number of polygons intersected by the ray. Adaptive supersampling increases the effective $N$ in regions with geometric complexity.
+-*   **Memory Complexity**: $O(V + P)$, where $V$ is the volume data size and $P$ is the polygon data size. Auxiliary buffers for $C_x$ and $C_q$ require additional memory proportional to the image size if computed per-pixel.
+-*   **Measured Performance**: Not given in the sources.
+-*   **Scaling**: Performance degrades with increasing polygon count due to intersection tests. Volumetric sampling cost is linear with resolution.
+-*   **Strengths**: Handles mixtures of geometry and volume naturally; avoids aliasing of polygon edges via supersampling; avoids aliasing of volume via appropriate sampling/interpolation [S2, unofficial].
+-*   **Limitations**: Computationally expensive due to ray-polygon intersections and adaptive supersampling; complex handling of volumetric slivers around polygons [S2, unofficial].
+-*   **When to use**: When high-quality mixing of synthetic geometry and scalar fields is required, and performance allows for ray-polygon intersection overhead.
+-*   **When not**: When real-time performance is critical and geometry is simple; when geometry can be pre-converted to voxels without significant quality loss.
++*   **Time Complexity:** $O(R \cdot (N + P))$, where $R$ is the number of rays, $N$ is the number of volumetric samples per ray, and $P$ is the number of polygons. The adaptive supersampling step adds overhead proportional to the number of geometric events [S2, unofficial].
++*   **Memory Complexity:** $O(V + P)$, where $V$ is the size of the volumetric data and $P$ is the size of the polygonal database [S2, unofficial].
++*   **Performance:** The method is computationally expensive due to the need for ray-polygon intersection tests and the sorting of events [S2, unofficial]. It is generally slower than pure volume rendering or pure ray tracing for homogeneous scenes but provides higher quality for mixed scenes [S2, unofficial].
++*   **Strengths:** Handles complex mixtures of geometry and volume accurately; avoids aliasing at polygon edges via supersampling; handles transparency in both domains [S2, unofficial].
++*   **Limitations:** High computational cost; complex implementation; requires careful handling of polygon-volume intersections [S2, unofficial].
++*   **When to Use:** When high-quality visualization of mixed geometric and volumetric data is required, and computational resources are sufficient [S2, unofficial].
++*   **When Not to Use:** For real-time applications with large polygon counts or very large volumes, where performance is critical [S2, unofficial].
+ 
+ ## Background
+-The method was proposed by Levoy in 1990 [S1, S2, unofficial]. It addresses the need to incorporate polygonally defined objects into volumetric scenes, particularly in medical applications like virtual endoscopy [S3, unofficial]. Prior to this, researchers had suggested hybrid approaches but no implementation was reported [S1, unofficial]. The method extends the volume rendering algorithm described by Levoy [1988a] to handle polygonal data [S2, unofficial].
++The concept of a hybrid ray tracer handling both scalar fields and polygons was proposed by several researchers including Kajiya (1984), Levoy (1988a), DeRose (1988), and Upson (1988) [S1, unofficial]. However, no implementation was reported at the time. The first detailed implementation and description of the hybrid ray tracer method was presented by Levoy in 1990 [S2, unofficial]. The 3D scan-conversion variant was also developed by Levoy and colleagues as an alternative approach [S1, unofficial]. These methods were developed in the context of medical visualization, where combining CT/MR volumes with synthetic surgical instruments or anatomical surface models is common [S3, unofficial].
+ 
+ ## Sources

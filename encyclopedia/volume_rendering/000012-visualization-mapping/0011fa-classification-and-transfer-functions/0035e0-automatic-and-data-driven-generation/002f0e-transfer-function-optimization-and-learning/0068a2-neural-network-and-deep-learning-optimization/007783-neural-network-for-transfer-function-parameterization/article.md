@@ -1,0 +1,177 @@
+# Neural Network for Transfer Function Parameterization
+
+Also called: Back-propagation network, MLP for TF Parameterization, Multi-layer perceptron, Multilayer Feed-Forward Neural Network for 2D Histogram Pattern Recognition
+
+## Overview
+This method uses a trained multilayer feed-forward neural network to automatically determine the position and size of Gaussian filters for 2D transfer functions in volume rendering [S1, unofficial]. It solves the problem of manual transfer function setup by mapping input patterns from a 2D histogram of attenuation coefficient and gradient magnitude to filter parameters [S1, unofficial]. It sets itself apart from siblings by using a fixed, shallow MLP architecture trained via back-propagation on downsampled histogram data, rather than predicting peak locations via regression or using large language models for guidance [S1, unofficial].
+
+## How it works
+**Inputs and Outputs:**
+*   **Input:** A 2D histogram of attenuation coefficient vs. gradient magnitude, originally a 256x256 grayscale image [S1, unofficial].
+*   **Output:** 8 values representing the x and y positions and x and y sizes for two Gaussian filters: $xpos_1, ypos_1, xsize_1, ysize_1, xpos_2, ypos_2, xsize_2, ysize_2$ [S1, unofficial].
+
+**Data Structures:**
+*   **Input Layer:** 2048 neurons, resulting from preprocessing the 256x256 histogram [S1, unofficial].
+*   **Hidden Layer:** 1 hidden layer with 16 neurons [S1, unofficial].
+*   **Output Layer:** 8 neurons [S1, unofficial].
+*   **Weights:** $w_{ij}$ connects neuron $i$ in the previous layer to neuron $j$ in the current layer [S1, unofficial].
+*   **Thresholds:** $\theta_j$ is the threshold for neuron $j$ [S1, unofficial].
+
+**Preprocessing Steps:**
+1.  Remove the upper half of the 256x256 histogram, keeping only the lower half to reduce input size and remove irrelevant data [S1, unofficial].
+2.  Downscale the remaining histogram by a factor of 4 in each dimension to reduce the number of inputs to 2048 and smooth out noise [S1, unofficial].
+
+**Neural Network Architecture and Training:**
+The network uses a logistic activation function and is trained using the back-propagation algorithm [S1, unofficial].
+
+1.  **Forward Pass:** Compute the output of each neuron [S1, unofficial]. For the input layer, $y_i = f(\theta + x_i)$ [S1, unofficial]. For subsequent layers, the output of neuron $j$ is computed as:
+    $$y_j = f\left(\theta_j + \sum_i w_{ij} y_i\right)$$
+    where $i$ indexes neurons in the previous layer, $j$ indexes neurons in the current layer, $y$ is the output, $f$ is the activation function, $\theta$ is the threshold, and $w_{ij}$ is the weight [S1, unofficial].
+
+2.  **Activation Function:** The logistic function is used:
+    $$f(x) = \frac{1}{1+e^{-x}}$$
+    Its derivative, required for back-propagation, is calculated from the output $y$:
+    $$y' = y(1 - y)$$
+    where $y$ is the output of the neuron [S1, unofficial].
+
+3.  **Error Calculation (Output Layer):** Compare the actual output $y_f$ with the desired output $desired_f$ [S1, unofficial]. Calculate the error delta $\delta_f$ for each output neuron $f$:
+    $$\delta_f = y'_f (desired_f - y_f)$$
+    where $y'_f$ is the derivative of the activation function at the output neuron's output point [S1, unofficial].
+
+4.  **Error Calculation (Hidden Layers):** For all layers except the output, error deltas are calculated using the rule:
+    $$\delta_i = y'_i \sum_j w_{ij} \delta_j$$
+    where $j$ indexes neurons in the next layer [G].
+
+5.  **Weight Update:** Update weights using the rule:
+    $$w_{ij} = w_{ij} + \eta \delta_j y_i$$
+    where $\eta$ is the learning rate, $\delta_j$ is the error delta of the neuron the weight leads into, and $y_i$ is the output of the neuron the weight comes from [S1, unofficial]. The learning rate $\eta$ is typically between 0.05 and 0.3 [S1, unofficial].
+
+6.  **Training Loop:** Repeat the forward pass, error calculation, and weight update for many epochs until the error is less than a certain limit or a pre-set maximum number of epochs is reached [S1, unofficial]. Batch learning (updating weights after processing all samples) is preferred to lower oscillations [S1, unofficial].
+
+**Pseudocode:**
+
+> **Unverified code.** The code below did not pass a test run against a reference implementation, or no test fits it, so it may contain errors.
+
+```python
+import math
+
+def logistic(x):
+    return 1.0 / (1.0 + math.exp(-x))
+
+def logistic_derivative(y):
+    return y * (1.0 - y)
+
+def preprocess_histogram(histogram_256x256):
+    # Step 1: Remove upper half (keep rows 128 to 255)
+    lower_half = [row[128:] for row in histogram_256x256]
+    # Step 2: Downscale by factor of 4 in each dimension (average pooling)
+    h, w = len(lower_half), len(lower_half[0])
+    new_h, new_w = h // 4, w // 4
+    downsampled = [[0.0] * new_w for _ in range(new_h)]
+    for i in range(new_h):
+        for j in range(new_w):
+            pool_sum = 0.0
+            for di in range(4):
+                for dj in range(4):
+                    pool_sum += lower_half[i * 4 + di][j * 4 + dj]
+            downsampled[i][j] = pool_sum / 16.0
+    # Flatten to 1D vector of 2048 values
+    return [val for row in downsampled for val in row]
+
+class NeuralNetwork:
+    def __init__(self, input_size=2048, hidden_size=16, output_size=8, learning_rate=0.1):
+        self.input_size = input_size
+        self.hidden_size = hidden_size
+        self.output_size = output_size
+        self.lr = learning_rate
+        
+        # Initialize weights and thresholds
+        # w_hidden[i][j] connects input i to hidden j
+        self.w_hidden = [[0.0 for _ in range(hidden_size)] for _ in range(input_size)]
+        self.theta_hidden = [0.0 for _ in range(hidden_size)]
+        
+        # w_output[j][k] connects hidden j to output k
+        self.w_output = [[0.0 for _ in range(output_size)] for _ in range(hidden_size)]
+        self.theta_output = [0.0 for _ in range(output_size)]
+
+    def forward(self, inputs):
+        # Input layer to Hidden layer
+        hidden_outputs = []
+        for j in range(self.hidden_size):
+            sum_val = self.theta_hidden[j]
+            for i in range(self.input_size):
+                sum_val += self.w_hidden[i][j] * inputs[i]
+            hidden_outputs.append(logistic(sum_val))
+        
+        # Hidden layer to Output layer
+        output_outputs = []
+        for k in range(self.output_size):
+            sum_val = self.theta_output[k]
+            for j in range(self.hidden_size):
+                sum_val += self.w_output[j][k] * hidden_outputs[j]
+            output_outputs.append(logistic(sum_val))
+            
+        return hidden_outputs, output_outputs
+
+    def train(self, inputs, targets, epochs=1000):
+        for epoch in range(epochs):
+            hidden_outputs, output_outputs = self.forward(inputs)
+            
+            # Calculate output deltas
+            output_deltas = []
+            for k in range(self.output_size):
+                y_prime = logistic_derivative(output_outputs[k])
+                delta = y_prime * (targets[k] - output_outputs[k])
+                output_deltas.append(delta)
+            
+            # Update weights between hidden and output
+            for j in range(self.hidden_size):
+                for k in range(self.output_size):
+                    self.w_output[j][k] += self.lr * output_deltas[k] * hidden_outputs[j]
+            
+            # Update thresholds for output
+            for k in range(self.output_size):
+                self.theta_output[k] += self.lr * output_deltas[k]
+                
+            # Calculate hidden deltas
+            hidden_deltas = []
+            for j in range(self.hidden_size):
+                y_prime = logistic_derivative(hidden_outputs[j])
+                sum_delta = 0.0
+                for k in range(self.output_size):
+                    sum_delta += self.w_output[j][k] * output_deltas[k]
+                hidden_deltas.append(y_prime * sum_delta)
+                
+            # Update weights between input and hidden
+            for i in range(self.input_size):
+                for j in range(self.hidden_size):
+                    self.w_hidden[i][j] += self.lr * hidden_deltas[j] * inputs[i]
+                    
+            # Update thresholds for hidden
+            for j in range(self.hidden_size):
+                self.theta_hidden[j] += self.lr * hidden_deltas[j]
+```
+
+**Parameters:**
+*   **Learning Rate ($\eta$):** 0.05 to 0.3 [S1, unofficial].
+*   **Training Samples:** 4 samples are sufficient for good recognition; 6, 8, or 10 provide nearly the same results [S1, unofficial].
+
+**Edge Cases and Pitfalls:**
+*   **Over-training:** Training the network too much lowers predictive abilities as it learns details of the training set (overfitting) [S1, unofficial]. Validation sets should be used to test capabilities before implementation [S1, unofficial].
+*   **Input Size:** Using the full 256x256 histogram requires significant memory (e.g., 16MB for weights with 64 neurons in the second layer) and slows training [S1, unofficial].
+
+## Operating characteristics
+*   **Time Complexity:** Not given in the sources [S1, unofficial].
+*   **Memory Complexity:** Not given in the sources [S1, unofficial].
+*   **Measured Performance:** Filter positioning time reduced from 1-3 minutes to 10-30 seconds for fine-tuning after automatic generation [S1, unofficial].
+*   **Scaling:** Not given in the sources [S1, unofficial].
+*   **Strengths:** Reduces manual setup time significantly; works well with typical histogram shapes; generalizes well with small training sets (4 samples) [S1, unofficial].
+*   **Limitations:** Requires manual creation of training data (associating outputs with input patterns) once; limited to the specific dataset types for which it was trained (e.g., heart CT scans) [S1, unofficial].
+*   **When to use:** When automatic setup of 2D transfer functions for volume rendering is needed, particularly for medical scans with typical histogram shapes [S1, unofficial].
+*   **When not:** When the histogram shape is atypical or significantly different from the training set [S1, unofficial].
+
+## Background
+This method was implemented in VolumeStudio software for automatic filter setup in 3D medical scan visualization [S1, unofficial]. It was developed based on the observation that 2D histograms of attenuation coefficient and gradient magnitude contain distinctive features (circular spots for homogeneous materials, arches for boundaries) that can guide transfer function setup [S1, unofficial]. The approach was evaluated using heart CT scans [S1, unofficial].
+
+## Sources
+[S1] Neural networks in 3D medical scan visualization, https://doi.org/10.48550/arxiv.0806.2925, fetched 2026-10-26 (unofficial)

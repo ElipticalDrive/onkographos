@@ -1,0 +1,359 @@
+--- v009.md
++++ v010.md
+@@ -4,202 +4,193 @@
+ 
+ ## Overview
+-DoF-NeRF is a neural rendering framework that extends the standard Neural Radiance Field (NeRF) to simulate the depth-of-field (DoF) effects of a physical lens, allowing it to operate on views with different focus configurations and manipulate DoF effects by adjusting virtual aperture and focus parameters [S1]. Unlike standard NeRF, which assumes a pinhole camera model and all-in-focus inputs, DoF-NeRF explicitly models the aperture and circle of confusion (CoC) to approximate DoF under arbitrary aperture size and focus distance, enabling the reconstruction of all-in-focus scenes from shallow DoF inputs [S1]. It distinguishes itself from related methods like RawNeRF and NeRFocus, which also simulate DoF but assume all-in-focus inputs, by jointly optimizing aperture diameters and focus distances during training to render clear novel views from shallow DoF inputs [S1].
++DoF-NeRF is a neural rendering framework that extends the standard Neural Radiance Field (NeRF) to simulate the depth-of-field (DoF) effects of a physical lens, allowing it to operate on views with different focus configurations and manipulate DoF effects by adjusting virtual aperture and focus parameters [S1]. Unlike vanilla NeRF, which assumes a pinhole camera model and all-in-focus inputs, DoF-NeRF explicitly models the aperture and focus distance, enabling it to handle shallow DoF inputs and produce clear, all-in-focus novel view synthesis with reduced blurriness and enhanced texture details [S1]. It achieves this by combining optical models with classical volume rendering to approximate the DoF effect under arbitrary aperture size and focus distance configurations [S1].
+ 
+ ## How it works
+-DoF-NeRF extends the NeRF architecture by incorporating optical models of geometric optics into the volume rendering process [S1]. The method simulates the emergence of DoF in two steps: (1) radiance of spatial points scattering to a particular area, and (2) the center ray accepting the scattered radiance from neighboring rays [S1]. This is achieved by combining optical models with classical volume rendering, using an indicator function to distinguish points based on the CoC diameter and the distance to the ray [S1].
++DoF-NeRF modifies the NeRF rendering pipeline to account for the Circle of Confusion (CoC) caused by finite aperture size and defocus. The method introduces two learnable parameters per training view: the aperture parameter $K$ and the focus distance $F$, which are jointly optimized with the NeRF network weights [S1]. The rendering process simulates DoF through a "concentrate-and-scatter" mechanism: radiance from spatial points scatters to a particular area (concentration), and the center ray accepts scattered radiance from neighboring rays (scatter) [S1].
+ 
+ ### Inputs and Outputs
+-*   **Inputs**: A set of $N$ training images $\mathcal{I} = \{I_1, I_2, \dots, I_N\}$ with known camera parameters (generated via COLMAP [S1]). The images may have shallow DoF.
+-*   **Outputs**: A trained NeRF model $G_\Theta$ and learned aperture parameters $\hat{K}$ and focus distances $\hat{F}$ [S1].
++*   **Inputs:** A set of $N$ training images $I = \{I_1, \dots, I_N\}$ with known camera poses (obtained via COLMAP) [S1].
++*   **Outputs:** A trained NeRF model $G_\Theta$ and optimized learnable parameters: aperture parameters $\hat{K} = \{\hat{K}_1, \dots, \hat{K}_N\}$ and focus distances $\hat{F} = \{\hat{F}_1, \dots, \hat{F}_N\}$ [S1].
+ 
+ ### Data Structures and Parameters
+-The method introduces two sets of learnable parameters, one for each training image $n \in \{1, \dots, N\}$:
+-1.  **Aperture Parameter** $K_n$: A scalar representing the aperture size. Defined as $K_n = f \times D$, where $f$ is the focal length and $D$ is the aperture diameter [S1].
+-2.  **Focus Distance** $F_n$: A scalar representing the distance to the plane of focus for image $n$ [S1].
+-
+-These parameters are initialized as learnable tensors:
+-$$ \hat{K} = \text{nn.Parameter}(\text{shape}=(N, 1), \text{requires\_grad}=\text{True}) $$
+-$$ \hat{F} = \text{nn.Parameter}(\text{shape}=(N, 1), \text{requires\_grad}=\text{True}) $$
+-[G] In practice, $K$ and $F$ are initialized to small positive values or values estimated from metadata if available, to ensure physical plausibility during early training.
++*   **NeRF Model $G_\Theta$:** The standard MLP mapping $(\mathbf{x}, \mathbf{d}) \rightarrow (\sigma, \mathbf{c})$ [S1].
++*   **Aperture Parameter $\hat{K}$:** A learnable vector of size $N \times 1$, where $\hat{K}_n$ corresponds to the $n$-th image. Defined as $K = f \times D$, where $f$ is focal length and $D$ is aperture diameter [S1].
++*   **Focus Distance $\hat{F}$:** A learnable vector of size $N \times 1$, where $\hat{F}_n$ corresponds to the $n$-th image [S1].
++*   **Patch Parameters:**
++    *   $N_{anchor}$: Spacing between anchors on the imaging plane.
++    *   $N_{patch}$: Size of the square patch ($N_{patch} \times N_{patch}$) centered at each anchor [S1].
+ 
+ ### Formulas
+-**Circle of Confusion (CoC) Diameter**
+-The simplified CoC diameter $\delta(h_t)$ for a spatial point at object distance $h_t$ is calculated as [S1]:
+-$$ \delta(h_t) = K \times \left| \frac{1}{F} - \frac{1}{h_t} \right| $$
+-where $K$ is the aperture parameter and $F$ is the focus distance [S1].
++1.  **Circle of Confusion (CoC) Diameter:**
++    The simplified CoC diameter $\delta(h_t)$ for a point at object distance $h_t$ is:
++    $$ \delta(h_t) = K \times \left| \frac{1}{F} - \frac{1}{h_t} \right| $$
++    where $K$ is the aperture parameter and $F$ is the focus distance [S1].
+ 
+-**Concentration Step**
+-For a ray $r_p$ passing through pixel $p$, the method first computes the "concentrated" radiance $\hat{C}^s(p)$ by integrating the volume rendering along the ray, weighted by the CoC area [S1]:
+-$$ \hat{C}^s(p) = \frac{\sum_{i=1}^{N_s} K_{volume}(r_p, h_i) c(r_p(h_i), d)}{\pi \delta_c^2(p)/4} $$
+-where $N_s$ is the number of sample points along the ray, $K_{volume}$ is the volume rendering weight, $c$ is the color, and $\delta_c(p)$ is the CoC radius at the concentration point [S1].
++2.  **Concentration (Scattered Radiance at Center):**
++    The scattered radiance $\hat{C}^s(p)$ at a concentration point $p$ is computed by summing contributions from $N_s$ samples along the ray $r_p$:
++    $$ \hat{C}^s(p) = \frac{\sum_{i=1}^{N_s} K_{volume}(r_p, h_i) c(r_p(h_i), d)}{\pi \delta_c^2(p)/4} $$
++    where $K_{volume}$ is the volume rendering weight, $c$ is the color, and $\delta_c(p)$ is the CoC radius at pixel $p$ [S1].
+ 
+-**Scatter Step**
+-The scattered radiance $\hat{I}_{scatter}(p)$ at pixel $p$ sums contributions from $M$ neighboring pixels $p_j$ [S1]. A point contributes to pixel $p$ if its CoC diameter is larger than the distance between pixels [S1]:
+-$$ \hat{I}_{scatter}(p) = \sum_{j=1}^{M} \sum_{i=1}^{N_s} \mathbb{1}_{\delta(h'_i) > 2 \|p - p_j\|^2} T'_{ij} \hat{C}(p_j, h'_i) $$
+-where $\mathbb{1}$ is the indicator function, $T'_{ij}$ is the transmittance, and $\hat{C}(p_j, h'_i)$ is the radiance at neighbor $p_j$ [S1].
++3.  **Scatter (Final Observed Color):**
++    The final observed color $\hat{I}(p)$ for a pixel $p$ is the sum of scattered radiance from neighboring pixels $p_j$ within the CoC radius:
++    $$ \hat{I}(p) = \sum_{j=1}^{P} \mathbb{1}_{\delta_c(p) > 2 \|p - p_j\|^2} \hat{C}^s(p_j) $$
++    where $P$ is the number of neighboring pixels considered, and $\mathbb{1}$ is an indicator function checking if the distance between pixels is within the CoC diameter [S1].
++    *Note: The source also provides an alternative formulation for scattered radiance $\hat{I}_{scatter}(p)$ summing over $M$ neighbors $p_j$ and $N_s$ samples:*
++    $$ \hat{I}_{scatter}(p) = \sum_{j=1}^{M} \sum_{i=1}^{N_s} \mathbb{1}_{\delta(h'_i) > 2 \|p - p_j\|^2} T'_{ij} \hat{C}(p_j, h'_i) $$
++    [S1]
+ 
+-**Final Observed Color**
+-The final color $\hat{I}(p)$ for $P$ rays is computed by scattering the concentrated radiance from neighbors [S1]:
+-$$ \hat{I}(p) = \sum_{j=1}^{P} \mathbb{1}_{\delta_c(p) > 2 \|p - p_j\|^2} \hat{C}^s(p_j) $$
+-[G] The indicator function $\mathbb{1}_{\delta_c(p) > 2 \|p - p_j\|^2}$ effectively blurs the image by averaging radiance from neighboring pixels whose CoC covers the distance to pixel $p$.
+-
+-**Loss Function**
+-The optimization loss $L$ is the photometric error (Mean Squared Error) between synthesized views $\hat{I}$ and observations $I$, summed over all $N$ input images [S1]:
+-$$ L = \sum_{n=1}^{N} \| I_n - \hat{I}_n \|_2^2 $$
+-
+-### Algorithm Steps
+-The training process uses a two-stage optimization to reduce the complexity of learning geometry representation, aperture size, and focus distance [S1].
+-
+-**Stage 1: Pinhole Camera Training**
+-1.  Initialize NeRF model $G_\Theta$, aperture parameters $\hat{K}$, and focus distances $\hat{F}$ [S1].
+-2.  Set aperture parameter $K=0$ for all images, degenerating the model to a linear pinhole camera [S1].
+-3.  For $N_{pretrain}$ iterations:
+-    a.  Randomly select rays $\mathbf{r}$ and corresponding ground truth images $I$ [S1].
+-    b.  Render images $\hat{I}$ using standard volume rendering [S1].
+-    c.  Compute loss $L$ [S1].
+-    d.  Update NeRF parameters $\Theta$ [S1].
+-    [G] During this stage, $\hat{K}$ and $\hat{F}$ are not updated or are fixed to neutral values to establish a coarse 3D geometry [S1].
+-
+-**Stage 2: Concentrate-and-Scatter Optimization**
+-1.  For $N_{iter}$ iterations (after $N_{pretrain}$):
+-    a.  **Patch-based Ray Selection**:
+-        i.  Define anchors every $N_{anchor}$ pixels on the imaging plane [S1].
+-        ii. Randomly select one anchor, defining an $N_{patch} \times N_{patch}$ patch [S1].
+-        iii. Generate rays $\mathbf{r}$ passing through pixels in the selected patch [S1].
+-    b.  **Concentration**:
+-        i.  Compute concentrated radiance $\hat{C}^s$ and CoC radius $\delta_c$ for the rays using the current NeRF, $\hat{K}$, and $\hat{F}$ [S1].
+-    c.  **Scatter**:
+-        i.  Compute final rendered images $\hat{I}$ using the scatter step [S1].
+-    d.  **Loss and Update**:
+-        i.  Compute loss $L$ [S1].
+-        ii. Update NeRF parameters $\Theta$, aperture parameters $\hat{K}$, and focus distances $\hat{F}$ jointly [S1].
++4.  **Loss Function:**
++    The optimization loss $L$ is the photometric error (Mean Squared Error) between synthesized views $\hat{I}$ and observations $I$, summed over all $N$ input images:
++    $$ L = \sum_{n=1}^{N} \| I_n - \hat{I}_n \|_2^2 $$
++    [S1]
+ 
+ ### Pseudocode
++The following pseudocode implements the two-stage optimization process described in [S1]. It assumes standard volume rendering functions and PyTorch-like tensor operations.
++
+ ```python
+ import torch
+ import torch.nn as nn
+ 
+-def train_dof_nerf(N_images, N_iters, N_pretrain, N_anchor, N_patch, lr):
+-    # Initialize learnable parameters per image [S1]
+-    K = nn.Parameter(torch.ones(N_images, 1) * 0.1, requires_grad=True)
+-    F = nn.Parameter(torch.ones(N_images, 1) * 1.0, requires_grad=True)
+-    G_Theta = NeRF_Model() # Standard NeRF MLP [S1]
+-
+-    optimizer = torch.optim.Adam(list(G_Theta.parameters()) + [K, F], lr=lr)
+-
++def DoF_NeRF_Training(N_images, N_iters, N_pretrain, N_anchor, N_patch):
++    """
++    N_images: Number of training images
++    N_iters: Total number of optimization iterations
++    N_pretrain: Number of pretraining iterations (Stage 1)
++    N_anchor: Spacing for anchor points on the image plane
++    N_patch: Size of the patch (N_patch x N_patch)
++    """
++    
++    # 1. Initialize Learnable Parameters
++    # K and F are learnable parameters for each of the N images
++    K = nn.Parameter(torch.randn(N_images, 1), requires_grad=True)
++    F = nn.Parameter(torch.randn(N_images, 1), requires_grad=True)
++    
++    # Initialize NeRF Model (standard MLP)
++    NeRF_Model = NeRF_Model_Class() # Assumes standard NeRF architecture
++    
++    # 2. Two-Stage Optimization
+     for i in range(N_iters):
+         if i < N_pretrain:
+-            # Stage 1: Pinhole camera training [S1]
+-            r, I_gt, idx = random_rays_selection(N_images)
+-            # K=0 degenerates to pinhole; gradients for K/F are not updated here [S1]
+-            I_pred = volume_render(G_Theta, r)
+-            loss = torch.mean((I_gt - I_pred) ** 2)
+-            optimizer.zero_grad()
++            # Stage 1: Pinhole Camera Training
++            # Train NeRF with aperture parameter set to 0 (pinhole model)
++            # Use random rays for efficiency
++            rays, target_images = random_rays_selection(N_images)
++            
++            # Standard Volume Rendering (no DoF simulation)
++            rendered_images = Volume_Rendering(NeRF_Model, rays)
++            
++            # Compute Loss
++            loss = torch.mean((rendered_images - target_images) ** 2)
++            
++            # Update NeRF weights only
+             loss.backward()
+-            # Update only NeRF parameters [S1]
+-            for param in G_Theta.parameters():
+-                if param.grad is not None:
+-                    param.data -= lr * param.grad
++            optimizer_NeRF.step()
++            optimizer_NeRF.zero_grad()
++            
+         else:
+-            # Stage 2: Concentrate-and-Scatter Optimization [S1]
+-            r, I_gt, idx = patch_rays_selection(N_images, N_anchor, N_patch)
+-            K_curr = K[idx]
+-            F_curr = F[idx]
++            # Stage 2: Joint Optimization with DoF
++            # Use patch-based ray selection
++            rays, target_images = patch_rays_selection(N_images, N_anchor, N_patch)
++            
++            # Step 1: Concentration
++            # Compute scattered radiance at concentration points
++            # Returns scattered radiance C_hat and CoC radius delta_c
++            C_hat, delta_c = Concentration(NeRF_Model, rays, K, F)
++            
++            # Step 2: Scatter
++            # Compute final observed color using concentrate-and-scatter
++            rendered_images = Scatter(C_hat, delta_c, rays)
++            
++            # Compute Loss
++            loss = torch.mean((rendered_images - target_images) ** 2)
++            
++            # Update NeRF weights, K, and F jointly
++            loss.backward()
++            optimizer_all.step() # Updates NeRF_Model, K, and F
++            optimizer_all.zero_grad()
+ 
+-            # Concentration Step [S1]
+-            delta_c, C_s = concentration_step(G_Theta, r, K_curr, F_curr)
++    return NeRF_Model, K, F
+ 
+-            # Scatter Step [S1]
+-            I_pred = scatter_step(C_s, delta_c, r)
++def Concentration(NeRF_Model, rays, K, F):
++    """
++    Simulates the concentration step: radiance scatters to a particular area.
++    Computes the scattered radiance at the center of the CoC.
++    """
++    # Sample points along rays
++    # For each ray, compute volume rendering weights and colors
++    # Calculate CoC radius delta_c for each pixel based on K and F
++    # Aggregate contributions into C_hat (scattered radiance at center)
++    # Formula: C_hat(p) = sum(K_volume * color) / (pi * delta_c^2 / 4)
++    
++    # Implementation detail:
++    # 1. Query NeRF for sigma and color at sampled points along rays
++    # 2. Compute volume rendering weights T
++    # 3. Calculate delta_c using delta(h_t) = K * |1/F - 1/h_t|
++    # 4. Sum weighted colors and divide by CoC area
++    
++    return C_hat, delta_c
+ 
+-            loss = torch.mean((I_gt - I_pred) ** 2)
+-            optimizer.zero_grad()
+-            loss.backward()
+-            optimizer.step() # Updates Theta, K, F jointly [S1]
++def Scatter(C_hat, delta_c, rays):
++    """
++    Simulates the scatter step: center ray accepts scattered radiance from neighbors.
++    """
++    # For each pixel p, sum C_hat from neighboring pixels p_j
++    # where distance ||p - p_j||^2 < delta_c(p) / 2
++    # Formula: I(p) = sum_{j} 1_{delta_c(p) > 2||p-p_j||^2} * C_hat(p_j)
++    
++    rendered_image = torch.zeros_like(target_images)
++    for p in pixels:
++        sum_radiance = 0
++        for j in neighbors(p, delta_c[p]):
++            if delta_c[p] > 2 * distance(p, j)**2:
++                sum_radiance += C_hat[j]
++        rendered_image[p] = sum_radiance
++        
++    return rendered_image
+ 
+-def NeRF_Model():
+-    # Standard NeRF MLP taking position and direction, returning density and color [G]
+-    return nn.Sequential(
+-        nn.Linear(3, 256), nn.ReLU(),
+-        nn.Linear(256, 256), nn.ReLU(),
+-        nn.Linear(256, 4) # sigma, color
+-    )
++def patch_rays_selection(N_images, N_anchor, N_patch):
++    """
++    Selects rays based on a randomly chosen patch.
++    Anchors are set every N_anchor pixels.
++    One patch of size N_patch x N_patch is randomly chosen.
++    Rays passing through pixels in that patch are returned.
++    """
++    # 1. Define grid of anchors
++    # 2. Randomly select one anchor index
++    # 3. Define patch boundaries around the anchor
++    # 4. Collect rays corresponding to pixels in the patch
++    # 5. Return rays and corresponding target image patches
++    pass
+ 
+ def random_rays_selection(N_images):
+-    # Select random rays from the training set [S1]
+-    # Implementation: Sample random pixel coordinates, construct camera rays,
+-    # and fetch corresponding ground truth image patches.
+-    # (Standard ray sampling routine not detailed in source)
++    """
++    Selects random rays from the N images for Stage 1 training.
++    """
++    # Randomly sample rays from the N images
+     pass
+-
+-def patch_rays_selection(N_images, N_anchor, N_patch):
+-    # Define anchors every N_anchor pixels on the imaging plane [S1]
+-    # Randomly select one anchor, define N_patch x N_patch patch [S1]
+-    # Generate rays r passing through pixels in the selected patch [S1]
+-    # Implementation: Pick random anchor, sample pixels within patch bounds,
+-    # construct rays, fetch ground truth.
+-    # (Patch-based ray sampling routine not detailed in source)
+-    pass
+-
+-def volume_render(G_Theta, r):
+-    # Standard volume rendering along rays r [S1]
+-    h = sample_points_along_rays(r, N_s=64)
+-    sigma, c = G_Theta(r, h)
+-    T, accumulated_color = volume_render_accumulate(sigma, c)
+-    return accumulated_color
+-
+-def sample_points_along_rays(r, N_s=64):
+-    # Sample N_s depths along each ray r [G]
+-    return torch.linspace(0.0, 1.0, N_s).unsqueeze(0) + r.origin.unsqueeze(1)
+-
+-def volume_render_accumulate(sigma, c):
+-    # Standard alpha compositing [G]
+-    alpha = 1.0 - torch.exp(-sigma)
+-    T = torch.cumprod(1.0 - alpha + 1e-10, dim=0)
+-    weights = alpha * T[:, :-1]
+-    color = torch.sum(weights.unsqueeze(-1) * c[:, :-1], dim=0)
+-    return T, color
+-
+-def concentration_step(G_Theta, r, K, F):
+-    # Sample N_s points along each ray r at depths h [S1]
+-    h = sample_points_along_rays(r, N_s=64)
+-    sigma, c = G_Theta(r, h)
+-    # Compute CoC diameter for each point [S1]
+-    delta_c = K * torch.abs(1.0 / F - 1.0 / h)
+-    # Standard volume rendering accumulation [S1]
+-    T, accumulated_color = volume_render_accumulate(sigma, c)
+-    # Concentrated radiance formula [S1]
+-    area = torch.pi * (delta_c ** 2) / 4.0
+-    C_s = accumulated_color / (area + 1e-8)
+-    return delta_c, C_s
+-
+-def scatter_step(C_s, delta_c, r):
+-    # For each pixel p, sum contributions from neighboring pixels p_j [S1]
+-    # Indicator: delta_c(p) > 2 * ||p - p_j||^2 [S1]
+-    # This implements the concentrate-and-scatter rendering [S1]
+-    I_pred = torch.zeros_like(C_s)
+-    # Iterate over pixels in the patch to compute the scatter sum
+-    for p in range(C_s.shape[0]):
+-        for j in range(C_s.shape[0]):
+-            if delta_c[p] > 2.0 * torch.norm(r[p].origin - r[j].origin) ** 2:
+-                I_pred[p] += C_s[j]
+-    return I_pred
+ ```
+ 
+ ### Edge Cases and Pitfalls
+-*   **Divergence**: Using random rays for DoF simulation in the early stages can lead to divergence or sub-optimal results due to ray gathering [S1]. The two-stage optimization mitigates this by first establishing geometry with a pinhole model [S1].
+-*   **Computational Cost**: Simulating DoF for every ray on the entire imaging plane is computationally unacceptable [S1]. The patch-based ray selection method is used as a compromise to reduce cost [S1].
+-*   **Precision**: The CoC diameter calculation involves division by distance $h_t$. Points at infinity or very close to the camera may require careful handling to avoid numerical instability [G].
+-*   **Boundary Conditions**: The indicator function $\mathbb{1}_{\delta_c(p) > 2 \|p - p_j\|^2}$ requires careful handling of pixel boundaries to avoid artifacts when scattering from neighbors near the image edge [G].
++*   **Divergence:** Using randomly chosen rays for DoF simulation in the initial stages can lead to divergence or sub-optimal results due to the gathering of rays [S1]. This is mitigated by the two-stage optimization process [S1].
++*   **Computational Cost:** Computing rays for the whole imaging plane in each iteration is computationally unacceptable [S1]. The patch-based ray selection method is used as a compromise to reduce cost [S1].
++*   **Blurriness in Vanilla NeRF:** Vanilla NeRF is prone to generating blurry renderings and missing texture details when trained on shallow DoF inputs because it ignores the interference between rays and does not model the aperture structure [S1].
+ 
+ ## Operating characteristics
+-*   **Time Complexity**: The concentrate-and-scatter rendering is more expensive than standard volume rendering due to the neighbor summation step. The patch-based ray selection reduces the per-iteration cost compared to full-image rendering [S1].
+-*   **Memory Complexity**: Requires storing the NeRF model parameters, plus the learnable $K$ and $F$ parameters for each training image. The scatter step may require temporary storage for neighbor radiance values [S1].
+-*   **Performance**: On the real-world dataset (amiya scene), DoF-NeRF achieves PSNR 28.311 vs NeRF 26.924, SSIM 0.9289 vs 0.9092, and LPIPS 0.1370 vs 0.1633 [S1]. On the synthetic dataset (room scene), DoF-NeRF achieves PSNR 29.443 vs NeRF 26.668, SSIM 0.9135 vs 0.8743, and LPIPS 0.1502 vs 0.1961 [S1].
+-*   **Strengths**: Explicitly models aperture and focus distance, allowing it to handle shallow DoF inputs and produce better all-in-focus novel view synthesis with less blurriness and more texture details compared to vanilla NeRF [S1]. It is plug-and-play and can be inserted into NeRF-based frameworks [S1].
+-*   **Limitations**: Requires a two-stage optimization process, increasing training complexity. The scatter step is computationally intensive, necessitating patch-based selection [S1].
++*   **Time Complexity:** The method uses a two-stage optimization. Stage 1 is efficient as it uses random rays and standard volume rendering. Stage 2 uses patch-based ray selection, which is more efficient than processing the entire image plane but more complex than Stage 1 due to the concentrate-and-scatter rendering [S1].
++*   **Memory Complexity:** Requires storing the NeRF model, and learnable parameters $K$ and $F$ for each training image. The patch-based selection reduces memory pressure compared to full-image processing per iteration [S1].
++*   **Performance:**
++    *   On the real-world dataset (amiya scene), DoF-NeRF achieves PSNR 28.311 vs NeRF 26.924, SSIM 0.9289 vs 0.9092, and LPIPS 0.1370 vs 0.1633 [S1].
++    *   On the synthetic dataset (room scene), DoF-NeRF achieves PSNR 29.443 vs NeRF 26.668, SSIM 0.9135 vs 0.8743, and LPIPS 0.1502 vs 0.1961 [S1].
++*   **Strengths:**
++    *   Handles shallow DoF inputs effectively.
++    *   Produces clear, all-in-focus novel views with fine-grained details.
++    *   Allows direct manipulation of DoF effects by adjusting virtual aperture and focus parameters [S1].
++    *   Plug-and-play and can be inserted into NeRF-based frameworks [S1].
++*   **Limitations:**
++    *   Requires joint optimization of aperture and focus distances, which adds complexity to the training process [S1].
++    *   Performance depends on the quality of the initial camera parameters (obtained via COLMAP) and the accuracy of the depth estimation for synthetic data generation [S1].
+ 
+ ## Background
+-DoF-NeRF was introduced by Zijin Wu, Juewen Peng, and Weicai Zhong in 2022 at the ACM Multimedia conference [S1]. It addresses the limitation of standard NeRF, which assumes a linear pinhole camera model and all-in-focus inputs, making it unsuitable for real-world images with finite depth-of-field [S1]. The method builds on the principles of geometric optics to simulate the aperture of a lens, allowing for the manipulation of DoF effects and the reconstruction of all-in-focus scenes from shallow DoF inputs [S1]. It differs from RawNeRF and NeRFocus, which also simulate DoF but assume all-in-focus inputs, by optimizing aperture and focus distances during training [S1].
++DoF-NeRF was introduced by Zijin Wu, Juewen Peng, and Weicai Zhong from Huazhong University of Science and Technology and Huawei [S1]. It was presented at the ACM Multimedia Conference (MM '22) in Lisboa, Portugal, on October 10–14, 2022 [S1]. The work addresses the limitation of existing NeRF models, which assume a linear pinhole camera model and all-in-focus inputs, making them unsuitable for real-world images with finite depth-of-field [S1]. It builds upon the principles of geometric optics to simulate the aperture of a lens [S1].
+ 
+ ## Sources

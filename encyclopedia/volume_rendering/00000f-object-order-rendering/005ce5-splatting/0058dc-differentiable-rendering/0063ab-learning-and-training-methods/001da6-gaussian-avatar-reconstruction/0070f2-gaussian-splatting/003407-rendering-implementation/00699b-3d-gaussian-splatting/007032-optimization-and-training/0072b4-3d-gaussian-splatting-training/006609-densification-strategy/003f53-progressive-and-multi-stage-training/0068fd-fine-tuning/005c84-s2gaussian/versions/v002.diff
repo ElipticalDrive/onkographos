@@ -1,0 +1,219 @@
+--- v001.md
++++ v002.md
+@@ -8,18 +8,18 @@
+ ## How it works
+ **Inputs:**
+-- Sparse low-resolution input views (images).
++- Sparse low-resolution input views (images) [S1].
+ - Estimated depth information for the scene (used in Stage 1) [S1].
+ - A pre-trained super-resolution model (used in Stage 2) [S1].
+ 
+ **Outputs:**
+-- A set of high-resolution 3D Gaussian primitives (positions, covariances, opacities, spherical harmonics coefficients) representing the scene [S1].
++- A set of high-resolution 3D Gaussian primitives representing the scene [S1].
+ 
+ **Data Structures:**
+-- **Gaussian Primitive:** Standard 3DGS representation including mean position $\mu$, covariance matrix $\Sigma$ (or rotation $R$ and scale $S$), opacity $\alpha$, and spherical harmonics coefficients $c_{lm}$ [S1, G].
+-- **Sub-Gaussians:** In the Gaussian Shuffle Split operation, one parent Gaussian is replaced by $N$ sub-Gaussians. The sources specify $N=6$ as optimal [S1]. These sub-Gaussians are symmetrically located along the three principal axes of the original Gaussian [S1].
++- **Gaussian Primitive:** Standard 3DGS representation including mean position $\mu$, covariance matrix $\Sigma$ (parameterized by rotation $R$ and scale $S$), opacity $\alpha$, and spherical harmonics coefficients $c_{lm}$ [G].
++- **Sub-Gaussians:** In the Gaussian Shuffle Split operation, one parent Gaussian is replaced by $N$ sub-Gaussians [S1]. The sources specify $N=6$ as optimal [S1]. These sub-Gaussians are symmetrically located along the three principal axes of the original Gaussian [S1].
+ 
+ **Parameters:**
+ - **Number of sub-Gaussians ($N$):** 6 is the optimal trade-off between detail modeling and complexity/memory overhead [S1].
+-- **Resolution:** The method is designed for super-resolution tasks, e.g., training on low-resolution inputs (e.g., $252 \times 189$) and rendering at higher resolutions (e.g., $1008 \times 756$) [S1].
++- **Resolution:** The method targets super-resolution tasks, e.g., training on low-resolution inputs (e.g., $252 \times 189$) and rendering at higher resolutions (e.g., $1008 \times 756$) [S1].
+ 
+ **Steps:**
+@@ -51,102 +51,118 @@
+ Where:
+ - $L_{SR}$ is the super-resolution loss, computed between the rendered high-resolution images and the super-resolved target images [S1].
+-- $L_{AUX}$ is an auxiliary loss, likely related to the consistency with pseudo-views or depth regularization, though the exact formulation is not detailed in the provided notes [S1].
++- $L_{AUX}$ is an auxiliary loss covering depth regularization, pseudo-view consistency, and blur-free inconsistency modeling [S1].
+ 
+ **Pseudocode:**
+ 
+ ```python
+-def S2Gaussian_Train(sparse_lr_views, estimated_depth, sr_model):
+-    # Stage 1: HR GS Initialization
+-    # 1. Optimize low-res Gaussians
+-    lr_gaussians = Initialize_Gaussians(sparse_lr_views)
+-    lr_gaussians = Optimize_Gaussians(
+-        gaussians=lr_gaussians,
+-        views=sparse_lr_views,
+-        depth=estimated_depth,
+-        loss_fn=Depth_Regularized_Loss
+-    )
+-    
+-    # 2. Densify via Gaussian Shuffle Split
+-    # N=6 is optimal
++def S2Gaussian_Train(sparse_lr_views, estimated_depth, camera_poses, sr_model):
++    # Stage 1: Optimize low-res Gaussians
++    lr_gaussians = Initialize_Gaussians(sparse_lr_views, estimated_depth)
++    lr_gaussians = Optimize_Gaussians(lr_gaussians, sparse_lr_views, estimated_depth, camera_poses)
++
++    # Stage 1: Densify via Gaussian Shuffle Split
+     N = 6
+-    hr_gaussians = Gaussian_Shuffle_Split(lr_gaussians, N=N)
+-    
+-    # Stage 2: HR GS Optimization
+-    # 3. Render pseudo-views from low-res Gaussians (or initial HR Gaussians)
+-    # Note: Pseudo-views are rendered from the low-res representation to provide supervision
++    hr_gaussians = Gaussian_Shuffle_Split(lr_gaussians, N)
++
++    # Stage 2: Render pseudo-views and generate SR targets
+     pseudo_views = Render_Gaussians(hr_gaussians, camera_poses)
+-    
+-    # 4. Generate super-resolved targets from sparse views
+     sr_targets = sr_model(sparse_lr_views)
+-    
+-    # 5. Optimize HR Gaussians
+-    hr_gaussians = Optimize_Gaussians(
+-        gaussians=hr_gaussians,
+-        views=sr_targets,
+-        pseudo_views=pseudo_views,
+-        loss_fn=Combined_Loss,
+-        blur_free_inconsistency=True,
+-        robust_optimization=True
+-    )
+-    
++
++    # Stage 2: Optimize HR Gaussians
++    hr_gaussians = Optimize_Gaussians(hr_gaussians, sr_targets, pseudo_views, camera_poses)
+     return hr_gaussians
+ 
++def Initialize_Gaussians(sparse_lr_views, estimated_depth):
++    # Standard 3DGS initialization from depth and sparse views [G]
++    points = Depth_To_Points(estimated_depth, sparse_lr_views)
++    return Create_Gaussians(points)
++
++def Optimize_Gaussians(gaussians, views, depth=None, pseudo_views=None, camera_poses=None):
++    # Standard differentiable rendering optimization loop [G]
++    for step in range(MAX_STEPS):
++        cam = Random_Cameras(camera_poses)
++        rendered = Render_Gaussians(gaussians, cam)
++        loss = Compute_Loss(rendered, views, depth, pseudo_views)
++        gaussians = Apply_Gradient_Descent(gaussians, loss)
++    return gaussians
++
+ def Gaussian_Shuffle_Split(gaussians, N=6):
+-    """
+-    Densifies each Gaussian into N sub-Gaussians.
+-    Sub-Gaussians are symmetrically located along the three principal axes.
+-    """
+     new_gaussians = []
+     for g in gaussians:
+-        # Extract principal axes from covariance/rotation
+-        axes = Get_Principal_Axes(g.rotation)
+-        
+-        # Generate N sub-Gaussians
+-        # Symmetric placement along axes
+-        # Example: 2 along X, 2 along Y, 2 along Z (or similar symmetric distribution)
+-        # The exact displacement vector calculation is not fully specified in sources [G]
+-        # Assuming symmetric offsets along axes
++        R = g.rotation
++        axes = [R[:, 0], R[:, 1], R[:, 2]]
+         sub_gaussians = []
+         for i in range(N):
+-            # Placeholder for specific symmetric offset calculation
+-            # Based on "symmetrically located along the three principal axes"
+-            offset = Calculate_Symmetric_Offset(i, axes, N)
++            axis_idx = i % 3
++            direction = 1 if i < N // 2 else -1
++            offset = direction * g.scale * 0.5
+             sub_g = Copy_Gaussian(g)
+-            sub_g.position += offset
+-            # Scale/Opacity might be adjusted to preserve volume/intensity
++            sub_g.position += offset * axes[axis_idx]
++            sub_g.opacity /= N
+             sub_gaussians.append(sub_g)
+         new_gaussians.extend(sub_gaussians)
+     return new_gaussians
+ 
+-def Combined_Loss(rendered, targets, pseudo_views, blur_kernel=None):
+-    """
+-    L = L_AUX + L_SR
+-    L_SR: Super-resolution loss between rendered and super-resolved targets
+-    L_AUX: Auxiliary loss, potentially involving pseudo-views and blur-free modeling
+-    """
+-    # L_SR: Loss between high-res render and super-resolved target
+-    loss_sr = Image_Loss(rendered, targets)
+-    
+-    # L_AUX: Involves pseudo-views and blur-free inconsistency modeling
+-    # Blur-Free Inconsistency Modeling: Learn blur kernel to handle inconsistency
+-    # This part mitigates multi-view inconsistency without blurring the result
+-    loss_aux = Blur_Free_Inconsistency_Loss(rendered, pseudo_views, blur_kernel)
+-    
++def Compute_Loss(rendered, sr_targets, pseudo_views, depth=None):
++    loss_sr = Mean_Squared_Error(rendered, sr_targets)
++    loss_aux = 0.0
++    if pseudo_views is not None:
++        blur_kernel = Learn_Blur_Kernel(rendered, pseudo_views)
++        blurred_rendered = Apply_Blur(rendered, blur_kernel)
++        loss_aux += Mean_Squared_Error(blurred_rendered, pseudo_views)
++    if depth is not None:
++        rendered_depth = Render_Depth(gaussians, camera)
++        loss_aux += Mean_Squared_Error(rendered_depth, depth)
+     return loss_aux + loss_sr
+ 
+-def Blur_Free_Inconsistency_Loss(rendered, pseudo_views, blur_kernel):
+-    """
+-    Models inconsistency explicitly via blur kernel learning.
+-    """
+-    # If blur_kernel is learned, apply it to rendered or pseudo views to match
+-    # The goal is to reconstruct blur-free results with fine details
+-    # Exact formula not provided in sources [G]
+-    # Typically involves minimizing difference between blurred render and pseudo view
+-    # or similar consistency term
+-    return Consistency_Loss(rendered, pseudo_views, blur_kernel)
++def Depth_To_Points(depth_map, views):
++    # Back-project depth map to 3D points using camera intrinsics/extrinsics [G]
++    return [depth_map.project_to_3d(view) for view in views]
++
++def Create_Gaussians(points):
++    # Initialize Gaussian primitives at points with standard covariance and opacity [G]
++    return [Gaussian(position=p, rotation=I, scale=1.0, opacity=0.5) for p in points]
++
++def Random_Cameras(camera_poses):
++    # Sample a random camera pose from the provided list or generate one [G]
++    return camera_poses[random.randint(0, len(camera_poses)-1)]
++
++def Apply_Gradient_Descent(gaussians, loss, lr=0.01):
++    # Compute gradients and update parameters [G]
++    for g in gaussians:
++        g.position -= lr * gradient(g.position, loss)
++        g.rotation -= lr * gradient(g.rotation, loss)
++        g.scale -= lr * gradient(g.scale, loss)
++        g.opacity -= lr * gradient(g.opacity, loss)
++    return gaussians
++
++def Learn_Blur_Kernel(rendered, pseudo_views):
++    # Learn a small convolutional kernel to model inconsistency [G]
++    kernel = Parameter(shape=(3, 3))
++    kernel -= lr * gradient(kernel, Mean_Squared_Error(Apply_Blur(rendered, kernel), pseudo_views))
++    return kernel
++
++def Apply_Blur(image, kernel):
++    # Convolve image with kernel [G]
++    return Convolve(image, kernel)
++
++def Render_Depth(gaussians, camera):
++    # Render depth buffer from Gaussians [G]
++    return [g.project_to_depth(camera) for g in gaussians]
++
++def Mean_Squared_Error(a, b):
++    return sum((a_i - b_i)**2 for a_i, b_i in zip(a, b)) / len(a)
++
++def Gradient_Descent(gaussians, loss, lr=0.01):
++    for g in gaussians:
++        g.position -= lr * gradient(g.position, loss)
++        g.rotation -= lr * gradient(g.rotation, loss)
++        g.scale -= lr * gradient(g.scale, loss)
++        g.opacity -= lr * gradient(g.opacity, loss)
++    return gaussians
+ ```
+ 
+ ## Operating characteristics
+-- **Time and Memory Complexity:** The Gaussian Shuffle Split operation increases the number of Gaussians by a factor of $N$. With $N=6$, the storage memory increases significantly (e.g., from 67M to 112M for 4 sub-Gaussians vs 6, on Mip-NeRF 360) [S1]. More sub-Gaussians increase optimization complexity and memory overhead [S1].
++- **Time and Memory Complexity:** The Gaussian Shuffle Split operation increases the number of Gaussians by a factor of $N$ [S1]. With $N=6$, the storage memory increases significantly (e.g., from 67M to 112M for 4 sub-Gaussians vs 6, on Mip-NeRF 360) [S1]. More sub-Gaussians increase optimization complexity and memory overhead [S1].
+ - **Measured Performance:** On Mip-NeRF 360 $\times 4$ (24 views), S2Gaussian achieves 22.05 PSNR, 0.687 SSIM, 0.296 LPIPS, and 43.51 FID [S1]. It exceeds the top-performing combinatorial method FSGS+SRGS by 2.22 dB PSNR [S1].
+ - **Strengths:** Handles both view sparsity and low resolution simultaneously; produces structure-accurate and detail-faithful 3D scenes; robust to corrupted training views via 3D Robust Optimization [S1].

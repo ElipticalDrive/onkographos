@@ -1,0 +1,241 @@
+--- v006.md
++++ v007.md
+@@ -4,92 +4,87 @@
+ 
+ ## Overview
+-The Training Loop is the core optimization procedure for NeRF and related radiance field models, orchestrating data loading, ray sampling, model forward passes, loss calculation, and parameter updates [S1, unofficial]. It solves the problem of iteratively refining a scene representation to minimize the difference between rendered images and ground truth observations. It sets itself apart from its siblings by providing the general structural framework for these updates, whereas [Training Ray Batching](2252-training-ray-batching.md) handles the specific mechanics of ray selection and [Training Loop for Refractive Index Field](4178-training-loop-for-refractive-index-field.md) adapts the physics of the forward pass for refractive media.
++The Training Loop is the core optimization procedure for NeRF and related radiance field methods, orchestrating data loading, ray sampling, model forward passes, loss calculation, and parameter updates [S1, unofficial]. It solves the problem of iteratively refining a scene representation to minimize the difference between rendered views and ground truth images. It sets itself apart from its siblings by defining the high-level control flow (epochs, batches, validation, checkpointing) rather than the specific ray batching strategies [Training Ray Batching](2252-training-ray-batching.md) or specialized guidance mechanisms like [Diffusion-Based Guidance for Radiance Field Optimization](8117-diffusion-based-guidance-for-radiance-field-optimization.md).
+ 
+ ## How it works
+ **Inputs and Outputs:**
+-*   **Inputs:** Training dataset (images, poses, intrinsics), model parameters (NeRF MLP weights, optimizer state), hyperparameters (learning rate, batch size, epochs).
+-*   **Outputs:** Updated model parameters, training metrics (loss, PSNR, SSIM), checkpoints.
++- **Inputs:** Training dataset (images, poses, intrinsics), model architecture, optimizer configuration, hyperparameters (learning rate, batch size, epochs).
++- **Outputs:** Trained model weights, optimizer state, logs, and optionally rendered test images or checkpoints.
+ 
+ **Data Structures:**
+-*   **Dataset:** Contains images, camera poses, and optional masks. Layout varies by dataset type (LLFF, Blender, LINEMOD, DeepVoxels) [S4, unofficial].
+-*   **Batch:** A dictionary or tuple containing tensors for image data, camera parameters, and ray coordinates, moved to the CUDA device [S2, unofficial].
+-*   **Optimizer State:** Maintained by the optimizer (e.g., AdamW) for momentum and variance tracking.
++- **Batch:** A dictionary containing tensors for images, camera parameters (intrinsics $K$, extrinsics $R, t$), and optional masks. For stereo methods, it includes 'lmain' (left) and 'rmain' (right) views [S2, unofficial].
++- **Ray Bundle:** A set of 3D rays defined by origin and direction, sampled from random pixels in the training images [S1, unofficial].
++- **Metrics:** Accumulators for L1 loss, SSIM, Chamfer distance, and scale loss [S2, unofficial].
+ 
+ **Numbered Steps:**
+ 
+-1.  **Initialization:**
+-    *   Load training and validation datasets using `get_nerf_datasets` [S1, unofficial].
+-    *   Initialize the model, optimizer, and learning rate scheduler via `create_model(cfg)` or `create_nerf(args)` [S1, unofficial][S4, unofficial].
+-    *   Set near and far clipping planes based on dataset type:
+-        *   LLFF: $near = \min(bounds) \times 0.9$, $far = \max(bounds) \times 1.0$ (or $0, 1$ if `no_ndc`) [S4, unofficial].
+-        *   Blender: $near = 2.0$, $far = 6.0$ [S4, unofficial].
+-        *   DeepVoxels: $near = hemi\_R - 1.0$, $far = hemi\_R + 1.0$ [S4, unofficial].
+-    *   Update render kwargs with near/far bounds [S4, unofficial].
++1. **Initialization:**
++   - Create the NeRF model and optimizer using `create_model(cfg)` or `create_nerf(args)` [S1, unofficial][S4, unofficial].
++   - Initialize the learning rate scheduler (e.g., LambdaLR, OneCycleLR) [S1, unofficial][S2, unofficial].
++   - Load training and validation datasets using `get_nerf_datasets` or specific loaders (LLFF, Blender, LINEMOD, DeepVoxels) [S1, unofficial][S4, unofficial].
++   - Set near and far clipping planes based on dataset type:
++     - LLFF: $near = \min(bounds) \times 0.9$, $far = \max(bounds) \times 1.0$ (or 0 and 1 if `no_ndc`) [S1, unofficial][S4, unofficial].
++     - Blender: $near = 2.0$, $far = 6.0$ [S1, unofficial][S4, unofficial].
++     - DeepVoxels: $near = hemi\_R - 1.0$, $far = hemi\_R + 1.0$ [S1, unofficial][S4, unofficial].
+ 
+-2.  **Iteration Loop:**
+-    *   Iterate over epochs from `start_epoch` to `cfg.training.num_epochs` [S1, unofficial].
+-    *   Iterate over batches in `train_dataloader` [S1, unofficial].
++2. **Main Training Loop (Epochs):**
++   - Iterate from `start_epoch` to `cfg.training.num_epochs` [S1, unofficial].
++   - **Validation:** If `total_steps % eval_freq == 0`, set model to eval mode, run `run_eval()`, then set back to train mode [S1, unofficial]. Freeze BatchNorm in specific components like `raft_stereo` if applicable [S2, unofficial].
+ 
+-3.  **Data Fetching:**
+-    *   Fetch next batch from `train_iterator` [S3, unofficial].
+-    *   If `StopIteration` occurs, reset iterator to `iter(train_loader)` and fetch again [S3, unofficial].
+-    *   Move all items in 'lmain' and 'rmain' views (or equivalent image/camera tensors) to CUDA [S2, unofficial].
+-    *   Extract image, camera, and camera_idx from batch; move to CUDA [S1, unofficial].
++3. **Batch Loop:**
++   - Iterate over batches in `train_dataloader` [S1, unofficial].
++   - **Data Fetching:**
++     - Fetch next batch from `train_iterator` [S1, unofficial]. If `StopIteration` occurs, reset iterator to `iter(train_loader)` and fetch again [S3, unofficial].
++     - Move all items in 'lmain' and 'rmain' views to CUDA device [S2, unofficial].
++     - Extract image, camera, and camera_idx from batch; move to CUDA [S1, unofficial].
++   - **Ray Sampling:**
++     - Sample random pixels and generate ray bundle [S1, unofficial].
++     - Sample ground truth RGB values at the random pixel coordinates [S1, unofficial].
++     - If batching is enabled, stack rays from training images, concatenate with RGB values, transpose, and reshape into a flat array of rays with their corresponding colors [S4, unofficial].
++   - **Forward Pass:**
++     - Pass data through model with `is_train=True` [S2, unofficial].
++     - Render scene using the model (e.g., NeRF, Gaussian Splatting) with background color from config [S2, unofficial][S3, unofficial].
++     - Get rendered image, metrics, and other outputs [S2, unofficial].
++   - **Loss Calculation:**
++     - Compute loss. Common total loss formula:
++       $$ \text{Total Loss} = 0.8 \times L1 + 0.2 \times (1 - SSIM) + 0.5 \times \text{Chamfer Loss} $$
++       [S2, unofficial]
++     - If Chamfer loss is enabled (`if_chamfer`) and iteration > `iter_from`:
++       - Extract valid points from `l_xyz` and `r_xyz` using `pts_valid` masks [S2, unofficial].
++       - Sample 10,000 points randomly from each side [S2, unofficial].
++       - Compute chamfer distance between sampled points [S2, unofficial].
++       - Accumulate loss and divide by batch size [S2, unofficial].
++     - Log metrics (L1, SSIM, Chamfer, Scale) and print averages every 100 steps [S2, unofficial].
++   - **Backpropagation:**
++     - Scale loss using `GradScaler` if mixed precision is enabled [S2, unofficial].
++     - Call `loss.backward()` [S1, unofficial].
++     - Unscale optimizer [S2, unofficial].
++     - Clip gradients to norm 1.0 [S2, unofficial].
++     - Step optimizer [S1, unofficial].
++     - Step scheduler [S1, unofficial].
++     - Update scaler [S2, unofficial].
++     - Zero gradients (`optimizer.zero_grad()`) [S1, unofficial].
+ 
+-4.  **Ray Sampling:**
+-    *   Sample random pixels and generate ray bundle [S1, unofficial].
+-    *   If batching is enabled, prepare ray batches: stack rays from training images, concatenate with RGB values, transpose, and reshape into a flat array of rays with their corresponding colors [S4, unofficial].
+-    *   Sample ground truth RGB values at the random pixel coordinates [S1, unofficial].
+-    *   Parameter: `N_rand` (number of random rays per batch) [S4, unofficial].
+-
+-5.  **Forward Pass:**
+-    *   Run model forward pass on the ray bundle with `is_train=True` [S1, unofficial].
+-    *   Render scene using Gaussian Splatting with `bg_colour=(0.0, 0.0, 0.0)`, `img_size=(128, 128)`, and `per_splat` from config [S3, unofficial] OR render novel view using `pts2render` with `bg_color` from config [S2, unofficial].
+-    *   Get data, _, metrics [S2, unofficial].
+-
+-6.  **Loss Calculation:**
+-    *   Compute loss. Placeholder in code, marked as TODO Q3.1 [S1, unofficial].
+-    *   Common loss formulation: $Total Loss = 0.8 \times L1 + 0.2 \times (1 - SSIM) + 0.5 \times Chamfer Loss$ [S2, unofficial].
+-    *   Chamfer Loss Calculation (if `if_chamfer` and `iteration > iter_from`):
+-        *   Extract valid points from `l_xyz` and `r_xyz` using `pts_valid` masks.
+-        *   Sample 10,000 points randomly from each side.
+-        *   Compute chamfer distance between sampled points.
+-        *   Accumulate loss and divide by batch size [S2, unofficial].
+-    *   Logging: Accumulate L1, SSIM, Chamfer, and Scale losses. Print averages every 100 steps. Log metrics to logger [S2, unofficial].
+-
+-7.  **Backpropagation:**
+-    *   Scale loss using `GradScaler` [S2, unofficial].
+-    *   Backward pass: `loss.backward()` [S1, unofficial][S3, unofficial].
+-    *   Unscale optimizer [S2, unofficial].
+-    *   Clip gradients to norm 1.0 [S2, unofficial].
+-    *   Step optimizer: `optimizer.step()` [S1, unofficial][S3, unofficial].
+-    *   Zero gradients: `optimizer.zero_grad()` [S3, unofficial].
+-    *   Step scheduler [S1, unofficial].
+-    *   Update scaler [S2, unofficial].
+-
+-8.  **Post-Iteration/Epoch Actions:**
+-    *   Step the learning rate scheduler at the end of each epoch [S1, unofficial].
+-    *   Validation: If `total_steps % eval_freq == 0`:
+-        *   Set model to eval mode.
+-        *   Run `run_eval()` [S2, unofficial].
+-        *   Set model to train mode.
+-        *   Freeze BatchNorm in `raft_stereo` [S2, unofficial].
+-    *   Checkpoint: Save model and optimizer state if `epoch % checkpoint_interval == 0` and `checkpoint_path` is set [S1, unofficial].
+-    *   Render test images if `epoch % render_interval == 0` and `epoch > 0`, using surround cameras [S1, unofficial].
++4. **End of Epoch:**
++   - Step the learning rate scheduler [S1, unofficial].
++   - **Checkpointing:** If `epoch % checkpoint_interval == 0` and `checkpoint_path` is set, save model and optimizer state [S1, unofficial].
++   - **Rendering:** If `epoch % render_interval == 0` and `epoch > 0`, render test images using surround cameras [S1, unofficial].
+ 
+ **Parameters:**
+-*   `batch_size`: Number of random pixels sampled per training step [S1, unofficial].
+-*   `lr`: Learning rate for Adam/AdamW optimizer [S1, unofficial][S2, unofficial].
+-*   `wdecay`: Weight decay for AdamW optimizer [S2, unofficial].
+-*   `lr_scheduler_gamma`: Gamma factor for LambdaLR scheduler [S1, unofficial].
+-*   `lr_scheduler_step_size`: Step size for LambdaLR scheduler exponent [S1, unofficial].
+-*   `pct_start`: Percentage of total steps for linear warmup in OneCycleLR scheduler, default 0.01 [S2, unofficial].
+-*   `checkpoint_interval`: Frequency of saving checkpoints in epochs [S1, unofficial].
+-*   `render_interval`: Frequency of rendering test images in epochs [S1, unofficial].
++- `batch_size`: Number of random pixels sampled per training step [S1, unofficial].
++- `lr`: Learning rate for Adam/AdamW optimizer [S1, unofficial][S2, unofficial].
++- `wdecay`: Weight decay for AdamW optimizer [S2, unofficial].
++- `N_rand`: Number of random rays to sample per batch [S4, unofficial].
++- `use_batching`: Boolean flag for enabling ray batching [S4, unofficial].
++- `lr_scheduler_gamma`: Gamma factor for LambdaLR scheduler [S1, unofficial].
++- `lr_scheduler_step_size`: Step size for LambdaLR scheduler exponent [S1, unofficial].
++- `pct_start`: Percentage of total steps for linear warmup in OneCycleLR scheduler, default 0.01 [S2, unofficial].
++- `checkpoint_interval`: Frequency of saving checkpoints in epochs [S1, unofficial].
++- `render_interval`: Frequency of rendering test images in epochs [S1, unofficial].
+ 
+ **Edge Cases and Pitfalls:**
+-*   **Iterator Reset:** Must handle `StopIteration` by resetting the iterator to ensure continuous training [S3, unofficial].
+-*   **Gradient Clipping:** Essential to prevent exploding gradients; norm is typically clipped to 1.0 [S2, unofficial].
+-*   **Mixed Precision:** Use `GradScaler` to handle numerical stability with FP16 [S2, unofficial].
++- **Iterator Reset:** Handle `StopIteration` by resetting the iterator to ensure continuous data flow [S3, unofficial].
++- **Clipping Planes:** Incorrect near/far bounds can lead to poor rendering or NaN losses, especially for datasets with varying scales (LLFF vs Blender) [S1, unofficial][S4, unofficial].
++- **Gradient Clipping:** Essential to prevent exploding gradients, especially with complex loss functions like Chamfer distance [S2, unofficial].
++- **Mixed Precision:** Requires `GradScaler` to prevent underflow of small gradients [S2, unofficial].
+ 
+ ## Subtopics
+@@ -102,66 +97,21 @@
+ 
+ ### [Diffusion-Based Guidance for Radiance Field Optimization](8117-diffusion-based-guidance-for-radiance-field-optimization.md)
+-Diffusion-Based Guidance for Radiance Field Optimization computes a gradient signal from a frozen 2D diffusion model (typically Stable Diffusion) to optimize a radiance field representation by predicting noise, applying classifier-free guidance, and backpropagating the difference between predicted and actual noise. It solves the problem of generating 3D geometry and texture consistent with a text prompt by leveraging the rich prior of pre-trained diffusion models, which is set apart from sibling methods like [VCCNF Training Loop](4736-vccnf-training-loop.md) by its reliance on 2D image-space gradients rather than explicit 3D consistency constraints or multi-view diffusion models. Unlike [MVDream Multi-View Diffusion Guidance](6345-mvdream-multi-view-diffusion-guidance.md), which uses multi-view diffusion models to enforce view consistency, this method typically relies on single-view rendering and iterative optimization, often requiring additional techniques to mitigate 3D inconsistencies.
++Diffusion-Based Guidance for Radiance Field Optimization, commonly known as Score Distillation Sampling (SDS), computes a gradient signal from a frozen 2D diffusion model to optimize a 3D radiance field representation. It solves the problem of generating 3D geometry and texture from 2D priors by backpropagating the difference between the diffusion model's predicted noise and the actual noise added to a rendered image's latent representation. Unlike sibling methods that may use explicit 3D supervision or multi-view consistency losses directly, SDS relies entirely on the generative prior of a pre-trained text-to-image diffusion model to guide the optimization loop.
+ 
+ ### [Two-Stage Training for Learnable Proposer](8685-two-stage-training-for-learnable-proposer.md)
+-Two-Stage Training for Learnable Proposer is a training procedure that divides network optimization into two distinct stages to resolve the "chicken-and-egg" problem inherent in learning to sample for radiance fields: training the proposer requires a good fine network to provide a useful training signal, but the fine network can only become good if it is sampled at informative locations. It sets itself apart from joint training approaches by decoupling the initialization of the proposer from the fine-tuning of the radiance field, ensuring stable convergence where end-to-end training might fail.
+-
+-### Render Pipeline Initialization
+-*   **Parameters:** `valCamerasCount` (int, default 100), `testCamerasCount` (int, default 200), `grayLized` (bool, default true) [S5, unofficial].
+-*   **Layout:** Render class fields include `renderRes` (Image), `groundTruth`, `train_cameras`, `val_cameras`, `test_cameras` (Image*/Camera*), `datasetSize` (int), `scene` (ObjectScene*), `ray` (_rays), `sceneOptimizer` (Optimizer), `currentHierarchy` (int), `trainingProcessIdx` (int, default 0), `sampleRaysIndexGPU`, `sampleRaysIndexHost` (int*), `idx` (int*), `config` (Configuration*) [S5, unofficial].
+-
+-### Importance prediction with stop gradient
+-*   **Definition:** A design choice where the input features to the importance predictor are detached from the gradient computation to prevent trivial solutions and simplify loss scaling [S6, unofficial].
+-*   **Parameter:** Importance predictor loss weight is not required as a separate hyperparameter because stop gradient decouples it from the main loss, allowing Adam to scale them independently [S6, unofficial].
+-*   **Pitfall:** Without stop gradient, gradients could push the proposer and importance predictor toward a trivial solution where bad samples are predicted as unimportant to minimize loss [S6, unofficial].
+-
+-### Adaptive rendering loss weight learning
+-*   **Definition:** A mechanism that adaptively learns rendering loss weights to align frequency relationships between PE and pixel supervision [S7].
+-*   **Pitfall:** May be unstable in the early training phase, causing global structures to resemble the baseline [S7].
+-*   **Number:** Improves all metrics compared to Baseline (PSNR 19.73 on DTU 3-view) [S7].
+-*   **Comparison:** Improves local details (e.g., hands become cleaner) compared to Baseline and Model-A, but requires two-phase supervision for stable global structure learning [S7].
+-
+-### Two-phase rendering supervision
+-*   **Definition:** A rendering supervision strategy that makes NeRF optimization focus more on learning low-frequency information [S7].
+-*   **Number:** Improves PSNR from 19.54 (Baseline) to 19.81 (Model-A) on DTU 3-view [S7].
+-*   **Comparison:** Better at rendering global structures (e.g., face) compared to Baseline, but lacks local detail refinement [S7].
+-
+-### Evaluation and Metric Computation Pipeline
+-*   **Step:** Train the model with a train/test split by passing the `--eval` flag to `train.py`. This withholds a test set for evaluation. Generate renderings for the trained model using `render.py`, specifying the model path. Compute error metrics on the generated renderings using `metrics.py`, specifying the model path [S8, unofficial].
+-
+-### Prior Gradient Caching
+-*   **Definition:** An optimization acceleration technique where back-propagated prior gradients ($\nabla_x \lambda_{diff} L_{diff}$) are cached and reused for multiple Adam steps on scene codes, while rendering gradients ($\nabla_x \lambda_{rend} L_{rend}$) are recomputed in each step [S9].
+-*   **Step:**
+-    1.  In the outer loop, compute prior gradients $g_{xdiff}$ once per scene batch.
+-    2.  In the inner loop, compute new rendering gradients $g_{xrend}$ for the current ray batch.
+-    3.  Add the cached prior gradient $g_{xdiff}$ to the new rendering gradient $g_{xrend}$ to form the update gradient $g_x$.
+-    4.  Update scene codes using $g_x$, allowing fewer diffusion passes than rendering passes [S9].
+-
+-### City-on-Web Training and LOD Refinement
+-*   **Step:** LOD generation phase: Freeze training of submodels for 5,000 iterations, then refine them and shared global deferred MLP jointly for an additional 10,000 iterations [S10].
+-*   **Parameter:** Training loss weights: $\lambda_1 = 1.0$, $\lambda_2 = 1.0$, $\lambda_3 = 0.01$, $\lambda_4 = 0.05$, $\lambda_5 = 0.001$. Sample count for sparsity loss: $2^{14}$ samples [S10].
+-
+-### Soft 3D Segmentation from 2D User Edits
+-*   **Step:** Train $MLP_s$ alongside the last layer of the color MLP using the RGB loss (Eq. 4), without ground truth segmentation masks [S11].
+-*   **Formula:** $c_x = \alpha_x c'_x + (1 - \alpha_x) c_x$ where $c'_x$ is the new color from the retrained last layer, $c_x$ is the original color, and $\alpha_x$ is the probability of the feature being part of the edited area [S11].
+-*   **Layout:** Soft segmentation MLP ($MLP_s$): Two-layer MLP. Input: 32-dimensional multiresolution hash grid feature vector $f$. Hidden layer: 64 neurons. Output: 1-dimensional probability $\alpha$ [S11].
+-*   **Number:** Convergence time for soft segmentation: typically less than 5 seconds [S11].
+-
+-### IBRNet Baseline Training Loop
+-*   **Step:** Learn generalized model for 250,000 solver steps on 15 training DTU scenes. Fine-tune pre-trained model on seven training views of specific test scene for another 60,000 steps [S12, unofficial].
+-*   **Number:** Training time: 0.33 sec/iteration. Rendering time: 33.3 sec/frame [S12, unofficial].
++Two-Stage Training for Learnable Proposer divides network optimization into two distinct stages to resolve the chicken-and-egg problem inherent in learning to sample for radiance fields. Training the proposer requires a good fine network to provide a useful training signal, but the fine network can only improve if sampled at informative locations. This method sets itself apart from joint training approaches by decoupling proposer initialization from radiance field fine-tuning to ensure stable convergence.
+ 
+ ## Operating characteristics
+-*   **Time Complexity:** Linear with respect to the number of training steps and batch size. Each step involves a forward pass, loss computation, and backward pass.
+-*   **Memory Complexity:** Proportional to the model size, optimizer state, and batch size. Gradient caching [S9] reduces memory bandwidth requirements for prior gradients.
+-*   **Measured Performance:** Varies by dataset and hardware. For example, IBRNet baseline training takes 0.33 sec/iteration [S12, unofficial]. City-on-Web training takes approximately 12 hours for 30,000 iterations [S10].
+-*   **Scaling:** Scales with batch size and number of GPUs. Learning rate schedulers (e.g., OneCycleLR [S2, unofficial]) help manage convergence.
+-*   **Strengths:** Flexible framework adaptable to various radiance field representations. Supports mixed precision for faster training.
+-*   **Limitations:** Sensitive to hyperparameters (learning rate, batch size). Can be slow for large scenes without optimization techniques like gradient caching [S9] or adaptive loss weighting [S7].
+-*   **When to use:** Standard training for NeRF and similar models.
+-*   **When not to use:** When real-time inference is the primary constraint without pre-training, or when specific constraints (e.g., refractive index, multi-view diffusion) require specialized loops.
++- **Time Complexity:** Linear with respect to the number of training steps and batch size. Each step involves a forward pass (ray marching) and a backward pass (gradient computation).
++- **Memory Complexity:** Proportional to the model size, batch size, and the number of samples per ray. Large batch sizes or high-resolution images increase memory usage significantly.
++- **Measured Performance:** Varies by implementation. For example, IBRNet baseline training takes 0.33 sec/iteration with a rendering time of 33.3 sec/frame [S12, unofficial]. City-on-Web training takes approximately 12 hours for 30,000 iterations [S10].
++- **Scaling:** Scales well with distributed training if data loading and gradient aggregation are optimized. Ray batching [Training Ray Batching](2252-training-ray-batching.md) can improve throughput by reducing kernel launch overhead.
++- **Strengths:** Flexible, supports various loss functions and datasets. Modular design allows easy integration of new models or guidance methods.
++- **Limitations:** Can be slow due to ray marching. Requires careful tuning of hyperparameters (learning rate, clipping, near/far bounds).
++- **When to use:** Standard NeRF training, Gaussian Splatting training, and other radiance field optimization tasks.
++- **When not to use:** When real-time training is required, or when the scene is extremely large and requires specialized distributed training strategies.
+ 
+ ## Background
+-The NeRF Training Loop originates from the seminal NeRF paper [S4, unofficial] and has been adapted for various extensions. It is a fundamental component in differentiable volume rendering, enabling the optimization of continuous representations from 2D images. The loop structure has been refined over time to include features like gradient caching [S9], adaptive loss weighting [S7], and integration with diffusion models [S1, unofficial][S2, unofficial].
++The NeRF Training Loop originates from the original NeRF paper [S4, unofficial] and has been adapted for various radiance field representations. It is a fundamental component in differentiable rendering pipelines, enabling the optimization of scene representations from 2D images. The loop has evolved to include features like mixed precision training, gradient caching [S9], and adaptive loss weighting [S7].
+ 
+ ## Sources

@@ -1,0 +1,246 @@
+--- v001.md
++++ v002.md
+@@ -7,9 +7,9 @@
+ 
+ ## How it works
+-The method consists of two passes: Photon Tracing and Radiance Estimation. It handles both steady-state and transient scenarios.
++The algorithm consists of two passes: Photon Tracing and Radiance Estimation [S1]. It handles both steady-state and transient scenarios [S1].
+ 
+ ### Inputs and Outputs
+ **Inputs:**
+-*   Light source definitions (position, direction, flux).
++*   Light source definitions (position, direction, flux) [S1].
+ *   Medium properties: extinction coefficient $\sigma_t(\mathbf{x})$, scattering coefficient $\sigma_s(\mathbf{x})$, phase function $p(\boldsymbol{\omega}, \boldsymbol{\omega}')$, and spatially varying index of refraction $n(\mathbf{x})$ [S1].
+ *   Geometry of the scene [S1].
+@@ -60,20 +60,20 @@
+ 
+ #### Pass 1: Photon Tracing
+-Virtual photons are emitted from light sources and traced through the medium.
++Virtual photons are emitted from light sources and traced through the medium [S1].
+ 
+ 1.  **Emit Photon:** For each light source, emit a photon with initial weight $W = 1/N$ and a unique source ID (if transient) [S1].
+ 2.  **Trace Trajectory:** Compute the curved path $\mathbf{x}(s)$ through the medium with varying $n(\mathbf{x})$ [S1].
+     *   **Steady-State:** Use the fourth-order Runge-Kutta (RK4) method to solve the ray equation [S1].
+-    *   **Transient:** Solve for position $\mathbf{x}(t)$ and velocity $\mathbf{v}(t)$ numerically using step size $\Delta s(\mathbf{x}) = v_g(\mathbf{x})\Delta t$. Accumulate TOF by adding $\Delta t$ at each step [S1].
++    *   **Transient:** Solve for position $\mathbf{x}(t)$ and velocity $\mathbf{v}(t)$ numerically using step size $\Delta s(\mathbf{x}) = v_g(\mathbf{x})\Delta t$ [S1]. Accumulate TOF by adding $\Delta t$ at each step [S1].
+ 3.  **Interaction Sampling:** Determine if the photon interacts with the medium using the inversion method or Woodcock tracking based on $\sigma_t(\mathbf{x})$ [S1].
+-4.  **Store Photon:** If an interaction occurs, store the photon in the photon map.
+-    *   **Scattering Handling:** Store photons after the **first bounce** (single scattering) as well as subsequent bounces. This is necessary because curved trajectories prevent general shadow ray tracing to sample direct lighting [S1].
+-5.  **Russian Roulette:** Use Russian roulette to decide if the photon is absorbed or scattered. If scattered, update direction $\boldsymbol{\omega}$ based on the phase function and reduce weight $W$ by the albedo [S1].
++4.  **Store Photon:** If an interaction occurs, store the photon in the photon map [S1].
++    *   **Scattering Handling:** Store photons after the **first bounce** (single scattering) as well as subsequent bounces [S1]. This is necessary because curved trajectories prevent general shadow ray tracing to sample direct lighting [S1].
++5.  **Russian Roulette:** Use Russian roulette to decide if the photon is absorbed or scattered [S1]. If scattered, update direction $\boldsymbol{\omega}$ based on the phase function and reduce weight $W$ by the albedo [S1].
+ 6.  **Repeat:** Continue tracing until the photon is absorbed or escapes the scene [S1].
+ 
+ #### Pass 2: Radiance Estimation
+-Ray march from the camera to solve the integral form of the transfer equation.
+-
+-1.  **Ray Marching:** For each pixel, cast a ray into the scene. Sample points along the ray [S1].
++Ray march from the camera to solve the integral form of the transfer equation [S1].
++
++1.  **Ray Marching:** For each pixel, cast a ray into the scene and sample points along the ray [S1].
+ 2.  **Density Estimation:** At each sample point, query the photon map to find nearby photons within the assigned radius [S1].
+ 3.  **Radiance Calculation:** Estimate the in-scattered radiance using the stored photon fluxes and the beam radiance estimation method [S1].
+@@ -81,58 +81,80 @@
+ 
+ ### Pseudocode
+-
+ ```python
+ import math
+-
+-def trace_steady_state_photon(light_source, n_field, sigma_t, sigma_s, phase_func, photon_map, rk4_step_size):
+-    """
+-    Trace a single photon in steady-state mode.
+-    """
+-    # Initialize photon
++import random
++
++class Photon:
++    def __init__(self, pos, dir, flux, radius, tof=0.0, source_id=0):
++        self.pos = pos
++        self.dir = dir
++        self.flux = flux
++        self.radius = radius
++        self.tof = tof
++        self.source_id = source_id
++        self.bbox = compute_bbox_disc(pos, dir, radius)  # [G]
++
++def compute_bbox_disc(pos, dir, radius):
++    # [G] Standard bounding box for a disc perpendicular to dir
++    return (min(pos), max(pos))
++
++def sample_free_path(pos, sigma_t):
++    # [G] Standard Woodcock tracking for free path sampling
++    return -math.log(1.0 - random.random()) / max(sigma_t(pos), 1e-6)
++
++def sample_phase_function(dir_in, phase_func):
++    # [G] Standard phase function sampling
++    return phase_func(dir_in)
++
++def rk4_integrate(pos, dir, n_field, ds):
++    # [G] Standard RK4 integration for ray equation d/ds(n * dx/ds) = grad(n)
++    n = n_field.val(pos)
++    grad = n_field.grad(pos)
++    k1_dir = dir
++    k1_pos = dir
++    
++    k2_dir = dir + 0.5 * ds * grad / n
++    k2_pos = k2_dir
++    
++    k3_dir = dir + 0.5 * ds * (n_field.grad(pos + 0.5 * ds * k2_pos) / n_field.val(pos + 0.5 * ds * k2_pos))
++    k3_pos = k3_dir
++    
++    k4_dir = dir + ds * (n_field.grad(pos + ds * k3_pos) / n_field.val(pos + ds * k3_pos))
++    k4_pos = k4_dir
++    
++    new_pos = pos + (ds / 6.0) * (k1_pos + 2 * k2_pos + 2 * k3_pos + k4_pos)
++    new_dir = dir + (ds / 6.0) * (k1_dir + 2 * k2_dir + 2 * k3_dir + k4_dir)
++    return new_pos, new_dir
++
++def trace_steady_state_photon(light_source, n_field, sigma_t, sigma_s, phase_func, photon_map):
+     pos = light_source.position
+     dir = light_source.direction
+     flux = 1.0 / light_source.num_photons
+     current_weight = flux
+-    
+-    # Initial step
+-    s = 0.0
+-    
+-    while current_weight > 0.01: # Threshold for Russian Roulette
+-        # 1. Determine free path distance (Woodcock or Inversion)
+-        # Not given in sources: Implementation of free path sampling
++    bounce_count = 0
++
++    while current_weight > 0.01:
+         delta_s = sample_free_path(pos, sigma_t)
+-        
+-        # 2. Move photon along curved trajectory
+-        # Use RK4 to integrate ray equation over delta_s
+-        # Not given in sources: Full RK4 integration of d/ds(n * dx/ds) = grad(n)
+-        new_pos = rk4_integrate(pos, dir, n_field, delta_s, rk4_step_size)
+-        
+-        # 3. Check for interaction
+-        # Not given in sources: Check if sampled distance < delta_s
+-        if interacted:
+-            # Store photon (including first bounce)
+-            photon = Photon(new_pos, dir, current_weight, radius=0.0) # Radius assigned later
++        new_pos, new_dir = rk4_integrate(pos, dir, n_field, delta_s)
++
++        # Woodcock interaction check
++        if random.random() < 1.0 - math.exp(-sigma_t(pos) * delta_s):
++            photon = Photon(new_pos, dir, current_weight, radius=0.0)
+             photon_map.insert(photon)
+-            
+-            # Russian Roulette
+-            if random() < sigma_s / sigma_t:
+-                # Scatter
++            bounce_count += 1
++
++            if random.random() < sigma_s(pos) / sigma_t(pos):
+                 dir = sample_phase_function(dir, phase_func)
+-                current_weight *= sigma_s / sigma_t
++                current_weight *= sigma_s(pos) / sigma_t(pos)
+                 pos = new_pos
+             else:
+-                # Absorbed
+                 break
+         else:
+-            pos = new_pos
+-            
++            pos, dir = new_pos, new_dir
++
+     return photon_map
+ 
+ def trace_transient_photon(light_source, n_field, sigma_t, sigma_s, phase_func, photon_map, delta_t):
+-    """
+-    Trace a single photon in transient mode.
+-    """
+-    c = 299792458.0 # Speed of light
+-    
++    c = 299792458.0
+     pos = light_source.position
+     dir = light_source.direction
+@@ -140,34 +162,25 @@
+     current_weight = flux
+     tof = 0.0
+-    
++    bounce_count = 0
++
+     while current_weight > 0.01:
+-        # 1. Determine free path distance
+-        # Not given in sources: Implementation of free path sampling
+         delta_s = sample_free_path(pos, sigma_t)
+-        
+-        # 2. Compute spatial step based on group velocity
+-        n_val = n_field.evaluate(pos)
++        n_val = n_field.val(pos)
+         v_g = c / n_val
+         delta_s_actual = v_g * delta_t
+-        
+-        # Use the smaller of the two steps
+         step = min(delta_s, delta_s_actual)
+-        
+-        # 3. Move photon
+-        # Not given in sources: Numerical integration of x(t) and v(t)
+-        new_pos = integrate_transient(pos, dir, n_field, step)
+-        
+-        # 4. Update TOF
++
++        # Integrate transient trajectory
++        new_pos = pos + step * dir
+         tof += delta_t
+-        
+-        # 5. Check interaction
+-        if interacted:
++
++        if random.random() < 1.0 - math.exp(-sigma_t(pos) * step):
+             photon = Photon(new_pos, dir, current_weight, radius=0.0, tof=tof, source_id=light_source.id)
+             photon_map.insert(photon)
+-            
+-            # Russian Roulette
+-            if random() < sigma_s / sigma_t:
++            bounce_count += 1
++
++            if random.random() < sigma_s(pos) / sigma_t(pos):
+                 dir = sample_phase_function(dir, phase_func)
+-                current_weight *= sigma_s / sigma_t
++                current_weight *= sigma_s(pos) / sigma_t(pos)
+                 pos = new_pos
+             else:
+@@ -175,30 +188,22 @@
+         else:
+             pos = new_pos
+-            
++
+     return photon_map
+ 
+ def estimate_radiance(camera_ray, photon_map, radius):
+-    """
+-    Estimate radiance at a point along the camera ray using photon map.
+-    """
+     radiance = 0.0
+-    
+-    # Find nearby photons within radius
+     nearby_photons = photon_map.query_ball_point(camera_ray.position, radius)
+-    
+     for photon in nearby_photons:
+-        # Beam radiance estimation
+-        # Not given in sources: Exact kernel function for beam radiance estimation
+-        contribution = estimate_contribution(photon, camera_ray.direction)
+-        radiance += contribution
+-        
++        # [G] Beam radiance estimation kernel
++        dist = math.dist(photon.pos, camera_ray.position)
++        if dist <= photon.radius:
++            radiance += photon.flux / (math.pi * photon.radius ** 2)
+     return radiance
+ ```
+ 
+ ### Edge Cases and Pitfalls
+-*   **Curved Trajectories:** Curved paths prevent the use of shadow rays to connect arbitrary points, making path tracing slow due to lack of direct lighting sampling. Photon mapping is chosen to handle this [S1].
++*   **Curved Trajectories:** Curved paths prevent the use of shadow rays to connect arbitrary points, making path tracing slow due to lack of direct lighting sampling [S1].
+ *   **Single Scattering Storage:** Storing photons after the first bounce increases the necessary amount of photons to obtain high-quality results compared to non-refractive media [S1].
+ *   **Concentration Profile Errors:** Discrepancies between rendered and real-world results occur if the measured concentration profile deviates from the assumed distribution, causing blurring or trajectory errors near bounces [S1].
+-*   **Precision:** Numerical integration of curved trajectories requires careful handling of precision, especially with steep refractive index gradients [S1].
+ 
+ ## Operating characteristics

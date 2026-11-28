@@ -1,0 +1,72 @@
+# Unified Volumetric Avatar (UVA)
+
+## Overview
+Unified Volumetric Avatar (UVA) is a neural radiance field representation for dynamic human avatars that enables local and independent editing of both geometry and texture while supporting novel view and pose synthesis [S1, unofficial]. It distinguishes itself from UV-mapping-based methods by anchoring structured latent codes to a deformable mesh in canonical space, thereby avoiding the 3D-to-2D directionality limitation that hinders local texture editing, and from two-stage distillation methods by being end-to-end trainable with joint optimization of the skinning field [S1, unofficial].
+
+## How it works
+**Inputs:**
+- Target space observation points $\mathbf{x}_t$ sampled along rays.
+- A deformable canonical mesh $\mathcal{M}$ with anchor nodes.
+- Skeleton pose parameters defining the target pose.
+- Top-$K$ parameter for nearest-neighbor search.
+
+**Outputs:**
+- Final pixel color $\mathbf{c}(\mathbf{r})$ for each ray $\mathbf{r}$.
+- Volume density $\sigma$ and base color $\mathbf{c}_0$ for volume rendering.
+
+**Data Structures:**
+1.  **Deformable Canonical Mesh $\mathcal{M}$:** A mesh in canonical space with $N$ anchor nodes. Each node $i$ stores:
+    -   Position $\mathbf{p}_i$ in canonical space.
+    -   Geometry latent code $\mathbf{l}_{geo}^{(i)} \in \mathbb{R}^{d_{geo}}$.
+    -   Appearance latent code $\mathbf{l}_{rgb}^{(i)} \in \mathbb{R}^{d_{rgb}}$.
+    -   UV coordinates $(u_i, v_i)$ on the canonical surface.
+2.  **Neural Deformation Field:** An MLP $\phi_{def}$ that predicts non-rigid deformation offsets $\Delta \mathbf{x}$ given a canonical point and pose.
+3.  **Geometry MLP:** $\phi_{geo}$ takes interpolated latent codes and signed height indicator to predict $\sigma$.
+4.  **Color MLP:** $\phi_{rgb}$ takes interpolated latent codes and signed height indicator to predict base color $\mathbf{c}_0$.
+5.  **Shading MLP:** $\phi_{shade}$ takes pose parameters and view direction to predict shading factor $s$.
+
+**Numbered Steps:**
+
+1.  **Compute LBS Weights:** For a target point $\mathbf{x}_t$, find the Top-$K$ nearest neighbor anchor nodes on the current posed mesh. Interpolate their pre-defined Linear Blending Skinning (LBS) weights to obtain the blending weights $\mathbf{w}_b$ for $\mathbf{x}_t$ [S1, unofficial].
+
+2.  **Transform to Canonical Space:** Apply the inverse skinning motion to $\mathbf{x}_t$ to find its canonical position $\mathbf{x}_c$. This combines the LBS transformation (using $\mathbf{w}_b$) with a neural deformation field correction $\Delta \mathbf{x}$ [S1, unofficial]:
+    $$ \mathbf{x}_c = \text{LBS}^{-1}(\mathbf{x}_t, \mathbf{w}_b) + \Delta \mathbf{x} $$
+    where $\Delta \mathbf{x} = \phi_{def}(\mathbf{x}_c, \text{pose})$ [G: Note that $\mathbf{x}_c$ appears on both sides; in practice, this is solved via iterative refinement or by defining the deformation field on the target space and adding to the LBS result, but the source describes it as transforming $\mathbf{x}_t$ to $\mathbf{x}_c$ using the combined field].
+
+3.  **Interpolate Latent Codes:** In the canonical space, find the Top-$K$ nearest neighbor anchor nodes to $\mathbf{x}_c$. Interpolate their latent codes using the same weights $\mathbf{w}_b$ (or NN weights derived from $\mathbf{x}_c$) to obtain the local latent codes $\mathbf{l}_{geo}$ and $\mathbf{l}_{rgb}$ [S1, unofficial]:
+    $$ \mathbf{l}_{geo} = \sum_{i \in \text{Top-}K} w_i \mathbf{l}_{geo}^{(i)}, \quad \mathbf{l}_{rgb} = \sum_{i \in \text{Top-}K} w_i \mathbf{l}_{rgb}^{(i)} $$
+
+4.  **Compute Signed Height Indicator:** Calculate the local signed height indicator $\tilde{h}$ for $\mathbf{x}_c$ relative to the canonical mesh $\mathcal{M}$ [S1, unofficial]:
+    $$ \tilde{h} = [u, v, \bar{d}] $$
+    where $(u, v)$ are the UV coordinates of the closest point on the canonical mesh surface to $\mathbf{x}_c$, and $\bar{d}$ is the signed point-to-surface distance [S1, unofficial].
+
+5.  **Predict Density and Base Color:** Pass the interpolated latent codes and the signed height indicator through separate MLPs [S1, unofficial]:
+    $$ \sigma = \phi_{geo}(\mathbf{l}_{geo}, \tilde{h}) $$
+    $$ \mathbf{c}_0 = \phi_{rgb}(\mathbf{l}_{rgb}, \tilde{h}) $$
+
+6.  **Modulate Color with Shading:** Compute a pose-dependent shading factor $s$ using the current pose and view direction. Modulate the base color $\mathbf{c}_0$ to get the final radiance color $\mathbf{c}$ [S1, unofficial]:
+    $$ \mathbf{c} = \mathbf{c}_0 \otimes s $$
+    where $\otimes$ denotes element-wise multiplication or a specific shading modulation operation defined by $\phi_{shade}$ [G: The source uses $\otimes$, implying a multiplicative modulation].
+
+7.  **Volume Rendering:** Integrate the modulated colors $\mathbf{c}$ and densities $\sigma$ along the ray $\mathbf{r}$ using standard volume rendering equations to produce the final pixel color $\mathbf{c}(\mathbf{r})$ [S1, unofficial].
+
+**Parameters:**
+-   **Top-$K$:** The number of nearest neighbors used for interpolating LBS weights and latent codes. Typical values are not explicitly given in the abstract, but Table 1 in the source lists "Local Tex." and "Local Geo." with values like 8, 4, 8, 4, 4, suggesting $K$ may vary or be a hyperparameter [S1, unofficial].
+
+**Edge Cases and Pitfalls:**
+-   **Spatial Ambiguity:** Using discrete latent codes defined on mesh nodes and diffusing them via nearest-neighbor interpolation can lead to spatial query indistinguishability, where points in different regions might map to the same latent code if they share the same nearest neighbors [S1, unofficial]. This is mitigated by the signed height indicator $\tilde{h}$, which provides continuous local context [S1, unofficial].
+-   **Boundary Conditions:** The accuracy of the signed height indicator $\bar{d}$ and UV coordinates $(u, v)$ depends on the quality of the canonical mesh $\mathcal{M}$. Degenerate mesh regions may lead to inaccurate $\tilde{h}$ values [G].
+
+## Operating characteristics
+-   **Time Complexity:** Dominated by the nearest-neighbor searches for LBS weights and latent codes, and the MLP evaluations. The complexity is $O(N \log N)$ for preprocessing and $O(K)$ per query point for interpolation, where $N$ is the number of mesh nodes and $K$ is Top-$K$.
+-   **Memory Complexity:** $O(N \cdot (d_{geo} + d_{rgb}))$ to store the latent codes on the mesh nodes, plus the memory for the mesh structure and MLP parameters.
+-   **Strengths:** Enables local and independent editing of geometry and texture by allowing direct manipulation of latent codes on specific mesh nodes. Supports novel view and pose synthesis. End-to-end trainable [S1, unofficial].
+-   **Limitations:** Relies on the quality of the canonical mesh and the skinning motion field. Spatial ambiguity from NN interpolation requires the signed height indicator for resolution. Not suitable for static objects only; designed for dynamic avatars [S1, unofficial].
+-   **When to use:** When local editing of geometry and texture is required for dynamic human avatars, and novel view/pose synthesis is needed.
+-   **When not to use:** For static scenes where simpler methods suffice, or when high-fidelity global illumination is required without pose-dependent shading approximations.
+
+## Background
+Unified Volumetric Avatar (UVA) was proposed in the paper "UVA: Towards Unified Volumetric Avatar for View Synthesis, Pose rendering, Geometry and Texture Editing" [S1, unofficial]. It addresses the limitations of previous neural field methods for humans, which either relied on pre-defined UV mapping (making local texture editing difficult) or two-stage distillation (requiring manual tuning and being suitable only for static objects) [S1, unofficial]. The method builds on the baseline NeRF architecture [Parent](3065-nerf-hyperparameters.md) by augmenting the input space with structured latent codes anchored to a mesh and modifying the output space to include pose-dependent shading [S1, unofficial].
+
+## Sources
+[S1] UVA: Towards Unified Volumetric Avatar for View Synthesis, Pose rendering, Geometry and Texture Editing, https://doi.org/10.48550/arXiv.2304.06969, fetched 2026-10-29 (unofficial)

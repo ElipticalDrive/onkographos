@@ -1,0 +1,205 @@
+--- v002.md
++++ v003.md
+@@ -18,5 +18,5 @@
+ 2.  **Ray Casting:** For each pixel in the image, cast a ray from the camera through the scene [S1, unofficial].
+ 3.  **Traversal:** Traverse the AMR octree. The ray is advanced by the **local cell size** of the current leaf node it intersects [S1, unofficial].
+-4.  **Sampling:** Sample field values at the ray position.
++4.  **Sampling:** Sample field values at the ray position [S1, unofficial].
+     *   *De-blocking:* To avoid piecewise-constant artifacts (blockiness) from nearest-leaf sampling, use cross-level trilinear reconstruction [S1, unofficial]. This interpolates the 8 surrounding leaf values at the local cell spacing, looking up values from finest to coarsest [S1, unofficial].
+     *   *Active Corners:* Determine which of the 8 corner values are active based on the 6 active planes of the leaf, filling them from the brick stored in the leaf [S2, unofficial].
+@@ -26,107 +26,127 @@
+ **Pseudocode:**
+ ```python
+-def render_amr_volume(amr_volume, camera_origin, camera_dir, width, height, smooth=True, aa=True):
+-    image = [[vec3(0.0) for _ in range(width)] for _ in range(height)]
++class Vec3:
++    def __init__(self, x, y, z): self.x, self.y, self.z = x, y, z
++    def __add__(self, o): return Vec3(self.x+o.x, self.y+o.y, self.z+o.z)
++    def __sub__(self, o): return Vec3(self.x-o.x, self.y-o.y, self.z-o.z)
++    def __mul__(self, s): return Vec3(self.x*s, self.y*s, self.z*s)
++    def __truediv__(self, s): return Vec3(self.x/s, self.y/s, self.z/s)
++    def __getitem__(self, i): return (self.x, self.y, self.z)[i]
++
++def render_amr_volume(amr_volume, camera_origin, right, up, width, height, smooth=True, aa=True):
++    image = [[Vec3(0.0, 0.0, 0.0) for _ in range(width)] for _ in range(height)]
++    step_x = right / width
++    step_y = up / height
+     
+     for y in range(height):
+         for x in range(width):
+-            # Generate ray for pixel [G]
+-            u = (2.0 * (x + 0.5) / width) - 1.0
+-            v = (2.0 * (y + 0.5) / height) - 1.0
+-            ray_dir = normalize(vec3(u, v, -1.0))
+-            ray_origin = camera_origin
+-            
+-            color = vec3(0.0)
++            ray_origin = camera_origin + step_x * x + step_y * y
++            ray_dir = Vec3(0.0, 0.0, -1.0) # Orthographic per Mera [S1, unofficial]
++            color = Vec3(0.0, 0.0, 0.0)
+             opacity = 0.0
+             t = 0.0
+             
+-            while t < 1000.0: # Max distance placeholder [G]
++            while True:
+                 pos = ray_origin + ray_dir * t
+                 leaf = find_leaf_in_hash(amr_volume, pos)
+-                
+-                if leaf is None:
+-                    break
++                if leaf is None: break
+                 
+                 step = leaf.cell_size
+                 
+                 if smooth:
+-                    # Cross-level trilinear interpolation [S1, unofficial]
+                     surrounding = get_surrounding_leaves(amr_volume, pos, leaf)
+                     vals = []
+                     for s_leaf in surrounding:
+-                        # Active planes mask 8 corners [S2, unofficial]
+-                        corners = get_active_corners(s_leaf.active_planes, s_leaf.brick, pos)
+-                        vals.append(interpolate_brick(corners, pos))
+-                    val = trilinear_interpolate(vals, pos)
++                        corners = get_active_corners(s_leaf.active_planes, s_leaf.brick)
++                        vals.append(interpolate_brick(corners, pos, s_leaf.cell_size))
++                    val = trilinear_interpolate(vals, pos, step)
+                 else:
+-                    # Nearest-leaf sampling [S1, unofficial]
+                     val = sample_nearest(leaf.brick, pos, leaf.active_planes)
+                 
+-                # Accumulate color/opacity [S1, unofficial]
+-                contrib = compute_emission(val, step)
+-                alpha = contrib.alpha
+-                color = color * (1.0 - alpha) + contrib.color * alpha
+-                opacity += alpha * (1.0 - opacity)
++                contrib_color = Vec3(val, val, val)
++                contrib_alpha = min(1.0, val * step)
++                color = color * (1.0 - contrib_alpha) + contrib_color * contrib_alpha
++                opacity += contrib_alpha * (1.0 - opacity)
+                 
+-                if opacity >= 1.0:
+-                    break
+-                    
++                if opacity >= 1.0: break
+                 t += step
+             
+             if aa:
+-                # Supersampling averages multiple rays per pixel [S1, unofficial]
+-                pass
+-                
+-            image[y][x] = color
++                aa_color = Vec3(0.0, 0.0, 0.0)
++                for dy in (0, 1):
++                    for dx in (0, 1):
++                        sub_origin = ray_origin + step_x * (dx + 0.5) + step_y * (dy + 0.5)
++                        sub_color, sub_opacity = march_ray(amr_volume, sub_origin, ray_dir)
++                        aa_color = aa_color * (1.0 - sub_opacity) + Vec3(sub_color.x, sub_color.y, sub_color.z) * sub_opacity
++                image[y][x] = aa_color
++            else:
++                image[y][x] = color
+     return image
+ 
++def march_ray(amr_volume, origin, direction):
++    color = Vec3(0.0, 0.0, 0.0)
++    opacity = 0.0
++    t = 0.0
++    while True:
++        pos = origin + direction * t
++        leaf = find_leaf_in_hash(amr_volume, pos)
++        if leaf is None: break
++        step = leaf.cell_size
++        val = sample_nearest(leaf.brick, pos, leaf.active_planes)
++        c = Vec3(val, val, val)
++        a = min(1.0, val * step)
++        color = color * (1.0 - a) + c * a
++        opacity += a * (1.0 - opacity)
++        if opacity >= 1.0: break
++        t += step
++    return color, opacity
++
+ def find_leaf_in_hash(amr_volume, pos):
+-    # Search per-level hash for leaf containing pos [S1, unofficial]
+-    for level in amr_volume.levels:
+-        key = floor(pos / level.cell_size)
+-        if key in level.hash:
+-            return level.hash[key]
++    for level in reversed(amr_volume.levels): # Finest to coarsest
++        key = (int(pos.x // level.cell_size), int(pos.y // level.cell_size), int(pos.z // level.cell_size))
++        if key in level.hash: return level.hash[key]
+     return None
+ 
+ def get_surrounding_leaves(amr_volume, pos, current_leaf):
+-    # Return 8 neighbors at local spacing, finest to coarsest [S1, unofficial]
+     neighbors = []
+-    for offset in [(0,0,0), (1,0,0), (0,1,0), (0,0,1), (1,1,0), (1,0,1), (0,1,1), (1,1,1)]:
+-        key = floor(pos / current_leaf.cell_size) + offset
+-        leaf = amr_volume.per_level_hash[current_leaf.level].get(key)
+-        if leaf:
+-            neighbors.append(leaf)
+-        else:
+-            # Fallback to coarser level [G]
+-            coarser = find_leaf_in_hash(amr_volume, pos)
+-            if coarser and coarser != current_leaf:
+-                neighbors.append(coarser)
++    base_key = (int(pos.x // current_leaf.cell_size), int(pos.y // current_leaf.cell_size), int(pos.z // current_leaf.cell_size))
++    for dx in (0, 1):
++        for dy in (0, 1):
++            for dz in (0, 1):
++                offset_key = (base_key[0]+dx, base_key[1]+dy, base_key[2]+dz)
++                leaf = amr_volume.per_level_hash[current_leaf.level].get(offset_key)
++                if leaf: neighbors.append(leaf)
++                else:
++                    fallback = find_leaf_in_hash(amr_volume, pos)
++                    if fallback and fallback != current_leaf: neighbors.append(fallback)
+     return neighbors
+ 
+-def get_active_corners(active_planes, brick, pos):
+-    # 6 active planes define valid 8 corners [S2, unofficial]
+-    corners = []
+-    for i in range(8):
+-        if is_corner_active(i, active_planes):
+-            corners.append(brick[i])
+-        else:
+-            corners.append(0.0)
+-    return corners
++def get_active_corners(active_planes, brick):
++    return [brick[i] if is_corner_active(i, active_planes) else 0.0 for i in range(8)]
+ 
+-def interpolate_brick(corners, pos):
+-    # Trilinear interpolation within a single brick [G]
+-    return sum(c * w for c, w in zip(corners, compute_barycentric_weights(pos)))
++def interpolate_brick(corners, pos, cell_size):
++    fx = (pos.x % cell_size) / cell_size
++    fy = (pos.y % cell_size) / cell_size
++    fz = (pos.z % cell_size) / cell_size
++    return (corners[0]*(1-fx)*(1-fy)*(1-fz) + corners[1]*fx*(1-fy)*(1-fz) +
++            corners[2]*(1-fx)*fy*(1-fz) + corners[3]*fx*fy*(1-fz) +
++            corners[4]*(1-fx)*(1-fy)*fz + corners[5]*fx*(1-fy)*fz +
++            corners[6]*(1-fx)*fy*fz + corners[7]*fx*fy*fz)
+ 
+-def trilinear_interpolate(vals, pos):
+-    # Standard trilinear interpolation across 8 leaf values [G]
+-    return sum(v * w for v, w in zip(vals, compute_barycentric_weights(pos)))
+-
+-def compute_emission(value, step):
+-    # Simple emission model [G]
+-    return {"color": vec3(value), "alpha": min(1.0, value * step)}
++def trilinear_interpolate(vals, pos, step):
++    fx = (pos.x % step) / step
++    fy = (pos.y % step) / step
++    fz = (pos.z % step) / step
++    return (vals[0]*(1-fx)*(1-fy)*(1-fz) + vals[1]*fx*(1-fy)*(1-fz) +
++            vals[2]*(1-fx)*fy*(1-fz) + vals[3]*fx*fy*(1-fz) +
++            vals[4]*(1-fx)*(1-fy)*fz + vals[5]*fx*(1-fy)*fz +
++            vals[6]*(1-fx)*fy*fz + vals[7]*fx*fy*fz)
+ 
+ def sample_nearest(brick, pos, active_planes):
+-    # Return nearest valid corner [G]
+-    return brick[0] # Placeholder for nearest valid corner lookup [G]
++    idx = int(pos.x // brick.cell_size) % 2 + 2*(int(pos.y // brick.cell_size) % 2) + 4*(int(pos.z // brick.cell_size) % 2)
++    return brick[idx] if is_corner_active(idx, active_planes) else 0.0
++
++def is_corner_active(idx, planes):
++    return (planes & (1 << idx)) != 0
+ ```
+ 

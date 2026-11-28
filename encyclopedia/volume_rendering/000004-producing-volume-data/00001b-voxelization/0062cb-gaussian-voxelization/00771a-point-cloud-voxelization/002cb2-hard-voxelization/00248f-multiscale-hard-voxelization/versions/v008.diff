@@ -1,0 +1,156 @@
+--- v007.md
++++ v008.md
+@@ -1,5 +1,3 @@
+ # Multiscale Hard Voxelization
+-
+-
+ ## Overview
+ Multiscale Hard Voxelization is a GPU-accelerated method that simultaneously voxelizes a LiDAR point cloud into multiple spatial resolutions in a single pass, outputting voxel features, coordinates, and point counts for each scale [S1, unofficial]. It solves the inefficiency of invoking separate single-scale voxelization operators for different resolutions in 3D perception pipelines [S1, unofficial]. Unlike standard single-scale hard voxelization, this method iterates over multiple voxel sizes and stores results in separate memory blocks indexed by scale, offering a 10% speed improvement over ordinary single-scale CUDA operators on an NVIDIA RTX 3090 [S1, unofficial]. It builds on [Hard Voxelization](5345-hard-voxelization.md) by extending the coordinate mapping and aggregation logic to handle a list of voxel sizes and maximum point limits per scale [S1, unofficial].
+@@ -46,41 +44,40 @@
+ 
+ 3.  **Boundary Check:**
+-    If any coordinate is out of bounds $[0, \text{grid})$, the point is discarded. The implementation sets the corresponding coordinate in the output `coors` to -1 to mark invalidity [S1, unofficial]. Specifically:
+-    *   If $c_x \notin [0, \text{grid}_x)$, set `coors[0] = -1`.
+-    *   If $c_y \notin [0, \text{grid}_y)$, set `coors[0] = -1, coors[1] = -1`.
+-    *   If $c_z \notin [0, \text{grid}_z)$, set `coors[0] = -1, coors[1] = -1, coors[2] = -1`.
+-    [S1, unofficial]
+-
+-4.  **Link Points to Voxels (Deterministic Aggregation):**
++    The implementation applies progressive masking to mark out-of-bounds points by setting coordinates to -1 [S1, unofficial]. Specifically:
++    *   If $c_x \notin [0, \text{grid}_x)$, set `coors[0] = -1` and skip the point [S1, unofficial].
++    *   If $c_y \notin [0, \text{grid}_y)$, set `coors[0] = -1, coors[1] = -1` and skip the point [S1, unofficial].
++    *   If $c_z \notin [0, \text{grid}_z)$, set `coors[0] = -1, coors[1] = -1, coors[2] = -1` and skip the point [S1, unofficial].
++
++4.  **Store Coordinates:**
++    Store the valid voxel coordinates in the output buffer as `[c_z, c_y, c_x]` (Z, Y, X order) [S1, unofficial].
++
++5.  **Link Points to Voxels (Deterministic Aggregation):**
+     To ensure determinism and avoid race conditions, the method uses a nested loop approach to identify points belonging to the same voxel [S1, unofficial].
+     *   Initialize `point_to_voxelidx` and `point_to_pointidx` arrays of size $N$ with -1 [S1, unofficial].
+     *   For each point $i$ from 0 to $N-1$:
+         *   If the point is invalid (from step 3), skip [S1, unofficial].
+-        *   Find the first point $j < i$ with identical voxel coordinates $(c_x, c_y, c_z)$. This is done by iterating $k$ from 0 to $i-1$ and checking if `coors[k]` matches `coors[i]` [S1, unofficial].
++        *   Iterate $j$ from 0 to $i-1$ to find matching previous points [S1, unofficial].
+         *   Let $num$ be the count of points with identical coordinates among indices $0 \dots i-1$ [S1, unofficial].
++        *   If $num == 1$, set `point_to_pointidx[i] = j` [S1, unofficial].
++        *   If $num \ge$ `max_points_for_scale[s]`, set `point_to_voxelidx[i] = -1` and skip the point [S1, unofficial].
++        *   Set `point_to_voxelidx[i] = num` [S1, unofficial].
+         *   If $num == 0$:
+-            *   This is the first point in a new voxel [S1, unofficial].
+-            *   If `voxel_num` (global counter for this scale) $\ge$ `max_voxels`, skip the point [S1, unofficial].
++            *   Set `point_to_pointidx[i] = i` [S1, unofficial].
++            *   If `voxel_num` (global counter for this scale) $\ge$ `max_voxels`, set `point_to_voxelidx[i] = -1` and skip [S1, unofficial].
+             *   Allocate a new voxel index: $v_{idx} = \text{voxel\_num}$ [S1, unofficial].
+             *   Increment `voxel_num` [S1, unofficial].
+-            *   Set `point_to_voxelidx[i] = 0` (indicating it's the head of the voxel list) [S1, unofficial].
+-            *   Set `point_to_pointidx[i] = i` [S1, unofficial].
++            *   Set `coor_to_voxelidx[i] = v_{idx}` [S1, unofficial].
+             *   Set `num_points_per_voxel[v_{idx}] = 1` [S1, unofficial].
+-            *   Set `coor_to_voxelidx[i] = v_{idx}` [S1, unofficial].
+         *   If $num > 0$:
+-            *   Let $j$ be the index of the first point in this voxel (found via `point_to_pointidx` of the previous matching point, or by searching). The source notes imply finding the "first point with identical coordinates" [S1, unofficial].
+-            *   Set `point_to_voxelidx[i] = num` [S1, unofficial].
+-            *   If $num \ge$ `max_points_for_scale[s]`, discard the point (set `point_to_voxelidx[i] = -1`) [S1, unofficial].
+-            *   Else, set `point_to_pointidx[i] = j` (linking to the previous point in the same voxel) [S1, unofficial].
+-            *   Set `coor_to_voxelidx[i] = coor_to_voxelidx[j]` [S1, unofficial].
+-            *   Increment `num_points_per_voxel[coor_to_voxelidx[j]]` [S1, unofficial].
++            *   Let $j$ be the index of the first point in this voxel (`point_idx = point_to_pointidx[i]`) [S1, unofficial].
++            *   Set `coor_to_voxelidx[i] = coor_to_voxelidx[point_idx]` [S1, unofficial].
++            *   Increment `num_points_per_voxel[coor_to_voxelidx[i]]` [S1, unofficial].
+     [S1, unofficial]
+-    *Note: The source describes an $O(N^2)$ approach where for each point, it iterates through previous points to find matches. This is inefficient for large $N$ but ensures determinism.*
+-
+-5.  **Aggregate Features:**
++
++6.  **Aggregate Features:**
+     For each point $i$ that was assigned a valid voxel index $v_{idx}$ and a position $p_{idx} = \text{point\_to\_voxelidx}[i]$ within that voxel:
+     *   Copy the point features `points[i]` to `voxels[s, v_{idx}, p_{idx}]` [S1, unofficial].
+ 
+-6.  **Finalize:**
++7.  **Finalize:**
+     Return the slices of the pre-allocated tensors up to `voxel_num[s]` for each scale [S1, unofficial].
+ 
+@@ -130,5 +127,5 @@
+             c_z = math.floor((z - zmin) / vz)
+             
+-            # Boundary checks (progressive masking per source)
++            # Progressive boundary masking per source
+             if not (0 <= c_x < grid_x):
+                 point_coors[i] = [-1, -1, -1]
+@@ -143,5 +140,5 @@
+             point_coors[i] = [c_z, c_y, c_x]
+             
+-            # Find matching previous points
++            # Deterministic O(N^2) linking
+             num = 0
+             first_match = -1
+@@ -152,18 +149,20 @@
+                         first_match = j
+             
++            if num >= max_pts:
++                point_to_voxelidx[i] = -1
++                continue
++                
++            point_to_voxelidx[i] = num
++            
+             if num == 0:
++                point_to_pointidx[i] = i
+                 if voxel_num >= max_voxels:
++                    point_to_voxelidx[i] = -1
+                     continue
+                 v_idx = voxel_num
+                 voxel_num += 1
+-                point_to_voxelidx[i] = 0
+-                point_to_pointidx[i] = i
++                coor_to_voxelidx[i] = v_idx
+                 num_points_per_voxel[s][v_idx] = 1
+-                coor_to_voxelidx[i] = v_idx
+             else:
+-                if num >= max_pts:
+-                    point_to_voxelidx[i] = -1
+-                    continue
+-                point_to_voxelidx[i] = num
+                 point_to_pointidx[i] = first_match
+                 coor_to_voxelidx[i] = coor_to_voxelidx[first_match]
+@@ -178,5 +177,10 @@
+                 coors[s][v_idx] = point_coors[i]
+                 
+-    return voxels, coors, num_points_per_voxel
++    # Slice outputs to actual used voxel counts per scale
++    voxels_out = [voxels[s][:voxel_num] for s in range(S)]
++    coors_out = [coors[s][:voxel_num] for s in range(S)]
++    num_points_out = [num_points_per_voxel[s][:voxel_num] for s in range(S)]
++    
++    return voxels_out, coors_out, num_points_out
+ ```
+ 
+@@ -188,7 +192,7 @@
+ 
+ **Edge Cases and Pitfalls:**
+-*   **Out of Bounds:** Points outside the `point_cloud_range` are discarded. The implementation marks them by setting coordinates to -1 [S1, unofficial].
+-*   **Max Voxels/Points:** If the number of voxels exceeds `max_voxels` or points in a voxel exceed `max_points`, additional points are discarded. The source notes that users should shuffle points before calling the function because `max_voxels` may drop points [S1, unofficial].
+-*   **Determinism:** The method is deterministic by default. Non-deterministic versions (using atomic operations) are not enabled in the reference implementation [S1, unofficial].
++*   **Out of Bounds:** Points outside the `point_cloud_range` are discarded by progressively masking their coordinates to -1 [S1, unofficial].
++*   **Max Voxels/Points:** If the number of voxels exceeds `max_voxels` or points in a voxel exceed `max_points`, additional points are discarded [S1, unofficial]. The source notes that users should shuffle points before calling the function because `max_voxels` may drop points [S1, unofficial].
++*   **Determinism:** The method is deterministic by default, using explicit nested loops instead of atomic operations [S1, unofficial].
+ *   **Performance:** The deterministic linking approach is $O(N^2)$, which is inefficient for large point clouds [S1, unofficial].
+ 
+@@ -196,13 +200,13 @@
+ 
+ ### PointNet++ LiDAR Encoding
+-This variant uses Multiscale Hard Voxelization as a preprocessing step for LiDAR feature encoding. It encodes LiDAR features using PointNet++ with hidden feature dimensions mirroring those of a sparse UNet method. It samples points at different levels (4096, 1024, 256, and 56 points) using farthest point sampling (FPS). The FPS and neighbor point grouping are implemented using CUDA-based routines from PyTorch3D to enhance efficiency. This approach was found to underperform compared to sparse UNet-based encoding in the context of neural radiance fields for street scenes [S2].
++This variant uses Multiscale Hard Voxelization as a preprocessing step for LiDAR feature encoding [S2]. It encodes LiDAR features using PointNet++ with hidden feature dimensions mirroring those of a sparse UNet method [S2]. It samples points at different levels (4096, 1024, 256, and 56 points) using farthest point sampling (FPS) [S2]. The FPS and neighbor point grouping are implemented using CUDA-based routines from PyTorch3D to enhance efficiency [S2]. This approach was found to underperform compared to sparse UNet-based encoding in the context of neural radiance fields for street scenes [S2].
+ 
+ ## Operating characteristics
+-*   **Time Complexity:** The coordinate mapping is $O(N)$ per scale. However, the deterministic point linking is $O(N^2)$ per scale due to the nested loop approach, which is a significant bottleneck for large $N$ [S1, unofficial].
++*   **Time Complexity:** The coordinate mapping is $O(N)$ per scale, but the deterministic point linking is $O(N^2)$ per scale due to the nested loop approach, which is a significant bottleneck for large $N$ [S1, unofficial].
+ *   **Memory Complexity:** $O(S \cdot M_{total} \cdot M_{max} \cdot D)$ for the output tensors, where $S$ is the number of scales, $M_{total}$ is `max_voxels`, $M_{max}$ is the maximum `max_points`, and $D$ is the number of features [S1, unofficial].
+ *   **Performance:** On an NVIDIA RTX 3090, the multiscale operator shows a 10% speed improvement over the ordinary single-scale voxelization CUDA operator [S1, unofficial].
+-*   **Strengths:** Simultaneous multi-scale processing reduces API overhead and kernel launch latency. Deterministic output ensures reproducibility.
+-*   **Limitations:** The $O(N^2)$ linking step is inefficient for large point clouds. The method requires pre-allocation of memory based on `max_voxels` and `max_points`, which can lead to wasted memory if these limits are not tight.
+-*   **When to Use:** When a 3D perception network requires multi-scale voxel inputs and deterministic behavior is critical. Not suitable for very large point clouds where the $O(N^2)$ step becomes prohibitive.
++*   **Strengths:** Simultaneous multi-scale processing reduces API overhead and kernel launch latency, while deterministic output ensures reproducibility [S1, unofficial].
++*   **Limitations:** The $O(N^2)$ linking step is inefficient for large point clouds, and the method requires pre-allocation of memory based on `max_voxels` and `max_points`, which can lead to wasted memory if these limits are not tight [S1, unofficial].
++*   **When to Use:** When a 3D perception network requires multi-scale voxel inputs and deterministic behavior is critical [S1, unofficial]. Not suitable for very large point clouds where the $O(N^2)$ step becomes prohibitive [S1, unofficial].
+ 
+ ## Background

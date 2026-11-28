@@ -1,0 +1,271 @@
+# Neural Residual Field (ReRF)
+Also called: Neural Residual Field (ReRF) Training, Neural Residual Radiance Fields
+
+## Overview
+Neural Residual Field (ReRF) is a method for generating compact neural representations of dynamic scenes from RGB video inputs by sequentially optimizing explicit feature grids, motion grids, and residual grids [S1]. It solves the problem of efficiently storing and rendering long-duration dynamic scenes by avoiding a global canonical space, instead warping features from the previous frame and encoding only the differences [S1]. Unlike [Neural Radiance Fields](4972-neural-radiance-fields.md) which model static scenes, or [Deformable and Dynamic Fields](11311-deformable-and-dynamic-fields.md) which may use complex deformation fields, ReRF explicitly separates motion estimation and residual compensation into distinct grid structures to maintain sparsity and smoothness [S1].
+
+## How it works
+ReRF operates in a two-stage sequential training scheme: first optimizing an explicit feature grid for the initial frame, then iteratively optimizing motion and residual grids for subsequent frames [S1].
+
+### Inputs and Outputs
+*   **Inputs:** A sequence of RGB images (video frames) $I_t$ for $t=0, 1, \dots, T$.
+*   **Outputs:** A sequence of feature grids $f_t$ (containing density and color features) for each frame, and a global MLP $\Phi$ [S1].
+
+### Data Structures
+1.  **Explicit Feature Grid ($V_\sigma, V_c$):**
+    *   $V_\sigma$: Explicit density grid. Dimensions $N_x \times N_y \times N_z$ [S1].
+    *   $V_c$: Color feature grid. Dimensions $N_x \times N_y \times N_z$ [S1].
+    *   Total feature dimension $C=13$ (union of density and color features) [S1].
+2.  **Dense Motion Field ($D_t$):**
+    *   Dimensions $3 \times N_x \times N_y \times N_z$ [S1].
+    *   Contains warping information (position offset) from frame $t$ to $t-1$ [S1].
+3.  **Compact Motion Grid ($M_t$):**
+    *   Generated from $D_t$ via motion pooling [S1].
+    *   Represents the position offset from the current frame to the previous [S1].
+4.  **Residual Grid ($r_t$):**
+    *   Dimensions $C \times N_x \times N_y \times N_z$ [S1].
+    *   Initialized to zero. Stores residuals to compensate for warping errors and newly observed regions [S1].
+5.  **Global MLP ($\Phi$):**
+    *   Two hidden layers, 128 channels each [S1].
+    *   Decodes color features to RGB [S1].
+
+### Parameters
+*   **Grid Resolution:** Progressive upscaling from $125^3$ to $150^3$ (step 1000), $200^3$ (step 2000), and $250^3$ (step 4000) [S1].
+*   **Optimizer:** Adam [S1].
+*   **Batch Size:** 10,192 rays [S1].
+*   **Learning Rates:**
+    *   Global MLP $\Phi$: 0.002 [S1].
+    *   Explicit Grid ($V_\sigma, V_c$): 0.1 (density), 0.11 (color) [S1].
+    *   Motion Grid ($M_t$): $10^{-4}$ [S1].
+    *   Residual Grid ($r_t$): 0.1 (density), 0.11 (color) [S1].
+*   **Loss Weights:**
+    *   $\lambda_{TV}$ (Total Variation): 0.000016 for explicit and residual grids; 1 for motion grid [S1].
+    *   $\lambda_{residual}$ (L1 Residual): 0.01 [S1].
+*   **TV Loss Activation:** Only active during training iterations 1000 to 12,000 [S1].
+
+### Numbered Steps
+
+**Stage 1: Explicit Feature Grid Optimization (Frame 0)** [S1]
+1.  Construct an explicit density grid $V_\sigma$ and color feature grid $V_c$ for the first frame using an initialization resolution (e.g., $125^3$) [S1].
+2.  For each training iteration:
+    a. Cast rays through pixels. Sample points $p$ along rays [S1].
+    b. Query density $\sigma(p)$ and color features $c_{feat}(p)$ via trilinear interpolation from $V_\sigma$ and $V_c$ [S1].
+    c. Apply softplus activation to density: $\sigma_{final}(p) = \text{softplus}(\sigma(p))$ [S1].
+    d. Decode color features to RGB using global MLP $\Phi$: $c_{pred}(p) = \Phi(c_{feat}(p))$ [S1].
+    e. Perform volume rendering to predict pixel color $\hat{c}(l)$ for ray $l$ [S1].
+    f. Compute loss $\mathcal{L}_{explicit}$ (see Formulas) and update $V_\sigma, V_c, \Phi$ [S1].
+    g. Train for 5,000 iterations (coarse) and 16,000 iterations (fine) [S1].
+
+**Stage 2: Sequential Optimization for Frame $t > 0$** [S1]
+1.  **Motion Grid Estimation:**
+    a. Sample points $p_t$ along rays in frame $t$ [S1].
+    b. Estimate dense motion field $D_t$ by warping points from frame $t-1$ to $t$ and minimizing photometric loss and TV loss on $D_t$ [S1].
+    c. Progressively upscale $D_t$ resolution as defined in parameters [S1].
+    d. Generate compact motion grid $M_t$ from $D_t$ using motion pooling strategy [S1].
+    e. Train for 3,000 iterations (coarse) and 16,000 iterations (fine) [S1].
+2.  **Warping:**
+    a. Warp the previous frame's feature grid $f_{t-1}$ using $M_t$ to generate base feature grid $\hat{f}_t$ [S1].
+    b. $\hat{f}_t$ is fixed during residual optimization [S1].
+3.  **Residual Grid Optimization:**
+    a. Initialize residual grid $r_t$ with zero values [S1].
+    b. For each training iteration:
+        i. Sample points $p_t$ along rays in frame $t$ [S1].
+        ii. Query base features $\hat{f}_t(p_t)$ via trilinear interpolation from warped grid [S1].
+        iii. Query residual features $r_t(p_t)$ via trilinear interpolation from $r_t$ [S1].
+        iv. Compute final feature $f_t(p_t) = \hat{f}_t(p_t) + r_t(p_t)$ [S1].
+        v. Decode $f_t(p_t)$ using $\Phi$ and render to get $\hat{c}(l)$ [S1].
+        vi. Compute loss $\mathcal{L}_{residual}$ (see Formulas) and update $r_t$ [S1].
+        vii. Train for 5,000 iterations (coarse) and 16,000 iterations (fine) [S1].
+
+### Formulas
+*   **Explicit Loss:**
+    $$ \mathcal{L}_{explicit} = \mathcal{L}_{render_{explicit}} + \lambda_{TV} \mathcal{L}_{TV_{explicit}} $$
+    $$ \mathcal{L}_{render_{explicit}} = \sum_{l \in L} \| c(l) - \hat{c}(l) \| $$
+    $$ \mathcal{L}_{TV_{explicit}} = \frac{1}{|V_\sigma|} \sum_{v \in V_\sigma} \sqrt{\Delta_x^2 v + \Delta_y^2 v + \Delta_z^2 v} $$
+    Where $\Delta_{x,y,z}^2 v$ is the squared difference between density values in adjacent voxels [S1].
+
+*   **Deformation (Motion) Loss:**
+    $$ \mathcal{L}_{deform} = \mathcal{L}_{render_{deform}} + \lambda_{TV} \mathcal{L}_{TV_{deform}} $$
+    $$ \mathcal{L}_{render_{deform}} = \sum_{l \in L} \| c(l) - \hat{c}(l) \| $$
+    $$ \mathcal{L}_{TV_{deform}} = \frac{1}{|D_t|} \sum_{v \in D_t} \sqrt{\Delta_x^2(v,d) + \Delta_y^2(v,d) + \Delta_z^2(v,d)} $$
+    Where $\Delta_{x,y,z}^2(v,d)$ is the squared difference of motion vectors in adjacent voxels [S1].
+
+*   **Residual Loss:**
+    $$ \mathcal{L}_{residual} = \mathcal{L}_{render_{residual}} + \lambda_{TV} \mathcal{L}_{TV_{residual}} + \lambda_{residual} \cdot \mathcal{L}_{1residual} $$
+    $$ \mathcal{L}_{render_{residual}} = \sum_{l \in L} \| c(l) - \hat{c}(l) \| $$
+    $$ \mathcal{L}_{TV_{residual}} = \frac{1}{|f_t^d|} \sum_{v \in f_t^d} \sqrt{\Delta_x^2 v + \Delta_y^2 v + \Delta_z^2 v} $$
+    $$ \mathcal{L}_{1residual} = \frac{1}{|r_t|} \sum_{v \in r_t} (|v_x| + |v_y| + |v_z|) $$
+    Where $f_t^d$ represents the density component of the feature grid $f_t$ [S1].
+
+### Pseudocode
+
+> **Unverified code.** The code below did not pass a test run against a reference implementation, or no test fits it, so it may contain errors.
+
+```python
+def trilinear_interp(grid, points):
+    # grid: (D, D, D) or (D, D, D, C)
+    # points: (N, 3) coordinates in [0, D-1]
+    # Returns interpolated values at points
+    x0 = floor(points[:, 0])
+    y0 = floor(points[:, 1])
+    z0 = floor(points[:, 2])
+    x1 = clamp(x0 + 1, max=grid.shape[0]-1)
+    y1 = clamp(y0 + 1, max=grid.shape[1]-1)
+    z1 = clamp(z0 + 1, max=grid.shape[2]-1)
+    dx = points[:, 0] - x0
+    dy = points[:, 1] - y0
+    dz = points[:, 2] - z0
+    
+    if grid.dim() == 3:
+        v00 = grid[x0, y0, z0]
+        v10 = grid[x1, y0, z0]
+        v01 = grid[x0, y1, z0]
+        v11 = grid[x1, y1, z0]
+        v001 = grid[x0, y0, z1]
+        v101 = grid[x1, y0, z1]
+        v011 = grid[x0, y1, z1]
+        v111 = grid[x1, y1, z1]
+        w000 = (1-dx)*(1-dy)*(1-dz)
+        w100 = dx*(1-dy)*(1-dz)
+        w010 = (1-dx)*dy*(1-dz)
+        w110 = dx*dy*(1-dz)
+        w001 = (1-dx)*(1-dy)*dz
+        w101 = dx*(1-dy)*dz
+        w011 = (1-dx)*dy*dz
+        w111 = dx*dy*dz
+        return (w000*v00 + w100*v10 + w010*v01 + w110*v11 +
+                w001*v001 + w101*v101 + w011*v011 + w111*v111)
+    else:
+        v00 = grid[x0, y0, z0, :]
+        v10 = grid[x1, y0, z0, :]
+        v01 = grid[x0, y1, z0, :]
+        v11 = grid[x1, y1, z0, :]
+        v001 = grid[x0, y0, z1, :]
+        v101 = grid[x1, y0, z1, :]
+        v011 = grid[x0, y1, z1, :]
+        v111 = grid[x1, y1, z1, :]
+        w000 = (1-dx)*(1-dy)*(1-dz)
+        w100 = dx*(1-dy)*(1-dz)
+        w010 = (1-dx)*dy*(1-dz)
+        w110 = dx*dy*(1-dz)
+        w001 = (1-dx)*(1-dy)*dz
+        w101 = dx*(1-dy)*dz
+        w011 = (1-dx)*dy*dz
+        w111 = dx*dy*dz
+        return (w000*v00 + w100*v10 + w010*v01 + w110*v11 +
+                w001*v001 + w101*v101 + w011*v011 + w111*v111)
+
+def volume_render(sigma, color, ray_origins, ray_dirs, near, far, num_samples):
+    # Standard volume rendering logic
+    # The sources do not provide the exact volume rendering implementation details. [G]
+    # Typically: sample points along ray, compute transmittance T, accumulate color.
+    pass
+
+def tv_loss(grid):
+    # Total variation loss on grid
+    diff_x = grid[:, 1:, :] - grid[:, :-1, :]
+    diff_y = grid[:, :, 1:] - grid[:, :, :-1]
+    diff_z = grid[1:, :, :] - grid[:-1, :, :]
+    return sqrt(diff_x**2 + diff_y**2 + diff_z**2).mean()
+
+class ReRF:
+    def __init__(self, grid_size=125, channels=13):
+        self.V_sigma = randn(grid_size, grid_size, grid_size)
+        self.V_c = randn(grid_size, grid_size, grid_size, channels)
+        self.mlp = Sequential(
+            Linear(channels, 128),
+            ReLU(),
+            Linear(128, 128),
+            ReLU(),
+            Linear(128, 3)
+        )
+        self.optimizer = Adam(list(self.mlp.parameters()) + [self.V_sigma, self.V_c], lr=0.002)
+        self.channels = channels
+        self.grid_size = grid_size
+
+    def train_frame_0(self, rays, targets, num_coarse=5000, num_fine=16000):
+        # Stage 1: Explicit Feature Grid Optimization
+        for i in range(num_coarse + num_fine):
+            self.optimizer.zero_grad()
+            ray_origins, ray_dirs, targets = rays
+            
+            sigma = trilinear_interp(self.V_sigma, ray_origins)
+            c_feat = trilinear_interp(self.V_c, ray_origins)
+            
+            sigma = softplus(sigma)
+            colors = self.mlp(c_feat)
+            
+            rendered_colors = volume_render(sigma, colors, ray_origins, ray_dirs, near=0.0, far=1.0, num_samples=128)
+            
+            loss_render = mean((rendered_colors - targets)**2)
+            
+            loss_tv = 0
+            if 1000 <= i <= 12000:
+                loss_tv = tv_loss(self.V_sigma)
+                
+            loss = loss_render + 0.000016 * loss_tv
+            loss.backward()
+            self.optimizer.step()
+
+    def train_frame_t(self, prev_feature_grid, current_rays, targets, motion_grid_size=125, residual_grid_size=125):
+        # Stage 2: Sequential Optimization
+        # 1. Motion Grid Optimization
+        # Estimate dense motion field D_t and generate compact motion grid M_t via motion pooling.
+        # Optimize M_t using L_deform for 3000 (coarse) + 16000 (fine) iterations with lr=1e-4.
+        # [S1] Motion pooling and dense field estimation details are implementation-specific.
+        
+        # 2. Warping
+        f_hat_t = warp(prev_feature_grid, M_t)
+        
+        # 3. Residual Grid Optimization
+        r_t = zeros(residual_grid_size, residual_grid_size, residual_grid_size, self.channels)
+        optimizer_r = Adam([r_t], lr=0.1)
+        
+        for i in range(5000 + 16000):
+            optimizer_r.zero_grad()
+            ray_origins, ray_dirs, targets = current_rays
+            
+            f_hat = trilinear_interp(f_hat_t, ray_origins)
+            r = trilinear_interp(r_t, ray_origins)
+            
+            f_final = f_hat + r
+            
+            sigma = softplus(f_final[..., 0])
+            c_feat = f_final[..., 1:]
+            colors = self.mlp(c_feat)
+            
+            rendered_colors = volume_render(sigma, colors, ray_origins, ray_dirs, near=0.0, far=1.0, num_samples=128)
+            
+            loss_render = mean((rendered_colors - targets)**2)
+            
+            loss_tv = 0
+            if 1000 <= i <= 12000:
+                r_density = r_t[..., 0]
+                loss_tv = tv_loss(r_density)
+                
+            loss_l1 = mean(abs(r_t))
+            
+            loss = loss_render + 0.000016 * loss_tv + 0.01 * loss_l1
+            loss.backward()
+            optimizer_r.step()
+            
+        return r_t
+```
+
+## Subtopics
+
+### Sequential Training Scheme
+A two-stage training scheme to efficiently obtain ReRF from RGB videos, maintaining smoothness and sparsity of motion/residual grids [S1]. It introduces a novel motion pooling strategy to maintain the smoothness and compactness of the inter-frame motion grid along with sparsity regularizers to improve the compactness of ReRF [S1].
+
+## Operating characteristics
+*   **Time Complexity:** Sequential optimization per frame [S1]. Motion grid optimization takes 19,000 iterations (3k coarse + 16k fine) [S1]. Residual grid optimization takes 21,000 iterations (5k coarse + 16k fine) [S1].
+*   **Memory Complexity:** Scales with grid resolution [S1]. Base resolution $125^3$, up to $250^3$. Feature dimension 13 [S1].
+*   **Performance:** Achieves three orders of magnitude compression rate compared to per-frame-based neural representations [S1].
+*   **Strengths:** Compact representation, supports online streaming, allows pause/play/fast-forward like 2D video [S1].
+*   **Limitations:** Requires sequential training; errors can accumulate if motion estimation is poor (mitigated by residual grid) [S1].
+
+## Background
+ReRF was introduced in "Neural Residual Radiance Fields for Streamably Free-Viewpoint Videos" (CVPR 2023) [S1]. It builds on the idea of using explicit grids (like [DVGO](4972-neural-radiance-fields.md)) and extends it to dynamic scenes by decomposing the feature field into motion and residual components, inspired by video compression standards (H.264/AVC, H.265/HEVC) [S1].
+
+## Sources
+[S1] Neural Residual Radiance Fields for Streamably Free-Viewpoint Videos, https://doi.org/10.1109/cvpr52729.2023.00016, fetched 2026-10-26

@@ -1,0 +1,635 @@
+CHAPTER 11
+HANDLING TRANSLUCENCY
+WITH REAL-TIME RAY TRACING
+Tianyi “Tanki” Zhang
+NVIDIA
+ABSTRACT
+Translucency is a hard problem in real-time rendering. Despite the various
+techniques introduced to handle translucency in rasterization, the result is far
+from satisfactory, due to the limited geometry surface information outside of
+the screen space. For example, multi-layer alpha blending is nontrivial to
+implement and can still fail in many cases, not to mention rendering
+physically based translucency effects like refraction and absorption. This
+chapter provides an overview of translucent rendering effects with the aid of
+hardware-accelerated ray tracing. Ray tracing allows techniques to become
+possible that are not possible with rasterization, while also improving others.
+We are going to show how to implement transparency in ray tracing while also
+discussing trade-offs between correctness and accuracy. Instead of focusing
+on explaining different algorithms, the major focus of this chapter is
+implementation. This chapter will use the terminology of DirectX Raytracing
+(DXR) for simplicity, but the methods can also be applied for Vulkan.
+11.1
+CATEGORIES OF TRANSLUCENT MATERIAL
+When we talk about translucency, regardless of how we define the
+parameterization of the material models, there are two different categories.
+On one hand, physically based translucent materials are modeled through
+physical properties, scattering coefficient σs and absorption coefficient σa ,
+which are generally used to describe participating media. Coefficient σs
+describes the probability of an out-scattering event occurring per unit
+distance, and σa represents the probability that light is absorbed per unit
+distance traveled in the medium [3]. When light travels through a volume,
+different events happen (Figure 11-1).
+In the real three-dimensional world, all objects—and the space between
+them—have a certain volume. We can define scattering and absorption based
+© NVIDIA 2021
+A. Marrs, P. Shirley, I. Wald (eds.), Ray Tracing Gems II, https://doi.org/10.1007/978-1-4842-7185-8_11
+127
+RAY TRACING GEMS II
+x
+Absorption
+d
+x
+d
+Out-Scattering
+d
+x
+Emission
+x
+d
+In-Scattering
+Figure 11-1. Different events when energy travels through a participating medium [1].
+on the distance within those volumes. But in a virtual world, not all objects
+are created as closed geometries, which simply means that if a ray passes
+through the geometry, we will have pairs of intersection points, where the ray
+first hits the frontface and then hits the backface. When we want to render
+geometries without volume, for example, quads and disks, assuming a
+thickness can achieve physically plausible results.
+On the other side, opacity-based, non-physically based materials are highly
+adopted in game engines. A single float opacity α is applied to indicate how
+“transparent” a surface is, as shown in Figure 11-2. The lower the opacity
+value is, the more transparent the surface is. The core idea of rendering
+semitransparent materials is called alpha blending. There are many different
+approaches with the rasterization pipelines, with different pros and cons [1].
+11.2
+OVERVIEW
+Figure 11-3 is a common example that a renderer needs to handle. Shooting
+one ray bouncing in the scene and spawning more secondary rays along the
+way to make sure all sources of contribution are well sampled is the most
+ideal approach, but it requires much more time than a real-time renderer can
+afford. Thus, translucency is broken into different effects and handled
+0.7
+Figure 11-2. When light hits a surface with opacity, it’s easy to think about it as if some part of the
+energy will go through. In this example, the surface has an opacity of 0.7, which means that 70% of
+the energy is reflected and the remaining 30% of energy goes straight through the surface.
+128
+CHAPTER 11. HANDLING TRANSLUCENCY WITH REAL-TIME RAY TRACING
+Figure 11-3. When the ray travels through the scene, the primary ray is refracted and enters the
+object, then is refracted again when leaving the object and hitting an object with a scattering
+material. The renderer needs to evaluate the radiance at all points by sampling the light and
+computing the visibility term to calculate the total throughput that the ray is carrying.
+separately in different passes with different assumptions in real time and also
+skips the parts that only have limited contribution to the result fidelity.
+To shade this example, we will start with a path tracing–style translucent pass
+(Section 11.3), which can handle “clear” materials well. Clear materials are
+those that only have absorption (or opacity) and do not have scattering.
+Section 11.5 introduces a setup to handle visibility for semitransparent
+materials, which can also be directly applied to render transparent shadows.
+11.3
+SINGLE TRANSLUCENT PASS
+A good start to handle the translucent effects for a real-time renderer is to
+add a path tracing fashion translucent pass, where a primary ray is traced
+through the scene for each pixel, refracted upon entering or leaving the
+geometries until it reaches the max bounce or hits an opaque surface.
+Figure 11-4a illustrates how one ray travels through the scene in that pass. A
+primary ray starts from the camera and hits the translucent surface, where
+we shade the surface with incoming light radiance. Then, according to the
+index of refraction (IoR), the ray is refracted and enters the geometry. When
+the ray is inside the geometry, we can also sample the distance and phase
+functions to estimate single scattering events. When a ray leaves the
+geometry from the other side, the hit point is shaded and absorption-based
+transmittance is evaluate according to the Beer–Lambert law.
+Unfortunately, the plain approach just described can cause many obvious
+visual artifacts in real time. A good example is when a user puts a slice of
+glass in front of the camera (Figure 11-5). Because opaque objects are all
+shaded with deferred passes before the forward translucency pass and for
+129
+RAY TRACING GEMS II
+(a) Light transport in the translucent pass
+(b) Light transport in the opaque pass
+Figure 11-4. (a) An example of the light transport in the translucent pass in 2D. The sphere and
+cube are translucent and the triangle is opaque. Only a few representative paths are drawn to
+keep the figure clean. (b) The main pipeline shades opaque objects only and stores the results in
+the G-buffer. In this example, both rays hit the same location. Instead of shading the hit point
+again, the renderer can immediately fetch the radiance from the G-buffer to take advantage of the
+evaluated result.
+performance consideration, the renderer will usually only compute basic
+energy contributions like direct lighting. If we want to keep the same level of
+fidelity for those opaque objects behind the translucent objects, the pass
+needs to invoke all the algorithms for different effects, which can quickly
+become very expensive. One trick to improve this issue is to fetch the output
+radiance buffer composited from the previous shading passes for opaque
+objects when it’s possible, instead of always shading the hit points. Many
+different properties of the hit points can be tested against the information in
+the G-buffer to tell whether the ray hits something that is included in the
+G-buffer, including object ID, world position, normal, etc. See Listing 11-1.
+(a) Without fallback
+(b) Reference
+(c) With G-buffer fallback
+Figure 11-5. (a) A scene with only opaque objects, where part of the view is blocked by a thin slice
+of glass, without fetching the G-buffer for refracted rays when the translucent rays hit the opaque
+objects. (b) A reference image without the glass slice. (c) When the translucent path hits an
+opaque object, the program checks the geometry and material properties and tries to fetch the
+G-buffer radiance. Notice that the “over-exposed” looking lines in the figures are not artifacts, but
+are the inner bottom face of the glass slice.
+130
+CHAPTER 11. HANDLING TRANSLUCENCY WITH REAL-TIME RAY TRACING
+Listing 11-1. Pseudocode of a recursive path tracing–style translucent path.
+1
+2
+3
+4
+5
+6
+7
+8
+9
+10
+void TraceTranslucency (RayDesc ray , inout float3 throughput , inout float3
+radiance , int depth)
+{
+if(depth > MAX_DEPTH) return;
+HitInfo hit = TraceRay(ray , ...);
+float3 directLightingOutgoingRadiance = shaderHit(hit);
+// Direct lighting
+if(hit.isBackHit) {
+throughput *= exp(-hit. absorptionCoefficient * hit.hitT);
+}
+radiance += throughput * directLightingOutgoingRadiance ;
+11
+RayDesc reflectionRay = getReflectionRay(ray , hit);
+TraceTranslucency (reflectionRay , throughput , radiance , depth + 1);
+RayDesc refractionRay = getRefractionRay(ray , hit);
+TraceTranslucency (refractionRay , throughput , radiance , depth + 1);
+12
+13
+14
+15
+16
+}
+17
+18
+19
+20
+21
+22
+23
+24
+25
+11.4
+void TranslucentRayGen ()
+{
+uint2 pixelIndex = DispatchRaysIndex ().xy;
+RayDesc ray = GetPrimaryFromPixel (pixelIndex);
+float3 totalRadiance = 0;
+TraceTranslucency (ray , float3 (1, 1, 1), totalRadiance , 0);
+OutputToTexture(pixelIndex , totalRadiance);
+}
+PIPELINE SETUP
+The renderer needs to have the ability to invoke a TraceRay() call that only
+traces some of the geometries in the rendering pipeline before the developer
+can implement the pass in Section 11.3.
+There are two steps to achieve it. First, the renderer needs a way to
+categorize different materials and be able to tell what kind of material an
+object instance has. Second, the shader needs a way to access this piece of
+information and filter out undesired geometry. See Listing 11-2.
+The InstanceMask field in D3D12_RAYTRACING_INSTANCE_DESC can be used
+for the first task. It is an 8-bit mask, declared when constructing geometry
+instances for the acceleration structure. Users can use those bits to
+categorize geometries. One of the arguments of the TraceRay()
+function is InstanceInclusionMask, and the driver will check
+!((InstanceInclusionMask&InstanceMask)&0xff) to skip certain
+instances. The renderer can take advantage of this feature to decide which
+categories are accepted, while others will be ignored during the traversal.
+This is the fastest way to filter geometries that also provides a fine granularity
+131
+RAY TRACING GEMS II
+Listing 11-2. Essential pipeline setups.
+1
+// Setup on the CPU side
+2
+3
+4
+5
+6
+7
+///// This part should be shared between CPU and GPU. /////
+#define INSTANCE_OPAQUE
+(1<<0)
+#define INSTANCE_TRANSLUCENT
+(1<<1)
+#define INSTANCE_IS_SOMETHING_ELSE (1<<2)
+// ----------------------end shared code ---------------------//
+8
+9
+10
+11
+12
+13
+// CPU
+D3D12_RAYTRACING_INSTANCE_DESC opaqueInstance , translucentInstance;
+opaqueInstance.InstanceMask |= INSTANCE_OPAQUE;
+translucentInstance .InstanceMask |= INSTANCE_TRANSLUCENT;
+// ...
+14
+15
+16
+17
+18
+19
+// GPU
+// Only trace opaque geometries.
+uint rayMask = INSTANCE_OPAQUE;
+// Trace opaque and translucent geometries.
+// uint rayMask = INSTANCE_OPAQUE | INSTANCE_TRANSLUCENT ;
+20
+21
+TraceRay(sceneAcc , flags , rayMasks , /* other arguments */);
+to apply control at the per-ray level. The only con is that there are only 8 bits
+available, which can be quickly consumed in a production renderer.
+The renderer can bind per geometry data as part of the local root signature
+for each hit shader. Another way to store category information is to deploy it
+as part of the geometry data. During the runtime, the user can either pass the
+categories as payload or configure it as some global constant data bound to
+the pass. By conditionally invoking IgnoreHit() in the any-hit shader, the
+renderer will be able to filter out geometries with the overhead of any hit
+invocation. This approach provides the max system flexibility with the cost of
+increased overhead. Although developers can shave off some of the overhead
+by enforcing a RAY_FLAG_FORCE_OPAQUE ray flag, closest-hit shader invocation
+can still cause large performance penalties if instances invoke many different
+ones due to frequent instruction cache misses. Besides, it sacrifices the
+chance to handle extra logic through any-hit shaders.
+11.5
+VISIBILITY FOR SEMITRANSPARENT MATERIALS
+We are going to describe transparent shadows that allow objects to partially
+block light (as in Figure 11-6), as opposed to traditional shadows where
+objects either fully block light or fully let light pass. Because of this, our
+visibility term will not be a binary 0 or 1 value but instead will be continuous
+132
+CHAPTER 11. HANDLING TRANSLUCENCY WITH REAL-TIME RAY TRACING
+(a) Semitransparent material in real time
+(b) Path tracing reference
+Figure 11-6. Two transparent boxes overlapped with each other. One of the major challenges is to
+correctly handle the visibility term, including transparent shadows that fall onto the transparent
+geometry.
+floating-point values between 0 and 1. This allows semitransparent objects to
+cast colorful shadows in the renderer, increasing realism and allowing artistic
+effects that go beyond what rasterized monochrome shadow maps can
+give us.
+The attenuation of visibility, which is transmittance in the real world, happens
+when the light passes through some volume so that part of the energy is
+absorbed. Because semitransparent materials try to describe opacity without
+volume, one way to evaluate the visibility term is by blending the color with
+the opacity. Regardless of the material models, let’s say that the surface has
+opacity α. Then, the visibility can be represented as (1 – α). Notice that
+although α usually denotes a single floating-point number, it can also be
+three float numbers, each of which represents the opacity of a single channel
+of RGB color.
+Given some objects’ opacity values as α0 , α1 , α2 , α3 , . . . αn , the overall visibility
+v is
+n
+Y
+v = 1 – (1 – αi )
+(11.1)
+i=1
+Unlike handling alpha blending for rendering transparent objects, as shown in
+Figure 11-7, notice that 1 – v, which is the overall opacity α, is order
+independent. This is a good property for implementation because the
+renderer can take advantage of an any-hit shader, which can be invoked in
+arbitrary order along the ray, instead of casting rays one after another to
+process them from front to back. Listing 11-3 shows the setup of computing
+the visibility. The ray payload stores the overall visibility v, which is initialized
+133
+RAY TRACING GEMS II
+0.7
+0.7
+0.1
+0.1
+0.5
+0.5
+Opacity
+(0, 0.3, 0)
+(0, 0, 0.5)
+(0.9, 0, 0)
+(0, 0.3, 0)
+(0.9, 0, 0)
+(0, 0, 0.5)
+Visiblity
+(1, 0.7, 1)
+(1, 1, 0.5)
+(0.1, 1, 1)
+(1, 0.7, 1)
+(0.1, 1, 1)
+(1, 1, 0.5)
+Figure 11-7. The color of the transparent shadow depends on how much energy from the light
+source is left. The result is order independent. In this example, for demonstration, the light ray is
+illustrated by three color beams, representing the R, G, and B channels. When going through the
+surface, the energy attenuates according to the surface opacity.
+Listing 11-3. Visibility ray setup: payload and raygen shader.
+1
+2
+3
+4
+5
+6
+7
+8
+9
+10
+11
+12
+13
+14
+15
+16
+struct Payload
+{
+float3 accumulatedVisibility;
+float hitT;
+};
+struct HitInfo;
+float3 TraceVisibilityRay(HitInfo hit)
+{
+Payload payload;
+payload.accumulatedVisibility = float3 (1, 1, 1);
+payload.hitT = 0;
+RayDesc shadowRay = CreateShadowRayFromHit (hit);
+// It is fine to use RAY_FLAG_ACCEPT_FIRST_HIT_AND_END_SEARCH .
+TraceRay(shadowRay , ..., RAY_FLAG_ACCEPT_FIRST_HIT_AND_END_SEARCH , ...,
+payload);
+return payload.accumulatedVisibility ;
+}
+to 1. It is worth mentioning that RAY_FLAG_ACCEPT_FIRST_HIT_AND_END_SEARCH
+still works with this setup—as soon as the visibility reduces to 0 or the ray hits
+any opaque objects, the traversal is terminated. Without it, the ray would just
+keep testing against transparent hits, even if they were behind an opaque
+object that the ray had hit. Another alternative to improve the performance is
+to limit the max number of translucent hits with the trade-off of some
+artifacts.
+We evaluate the material properties to get opacity αi , and v = v ∗ (1 – αi ). As
+long as the new v is greater than 0, we invoke IgnoreHit() but still update
+the hit information to make sure that we still get the correct closest-hit
+information through the payload (Listing 11-4). This setup can bring two
+134
+CHAPTER 11. HANDLING TRANSLUCENCY WITH REAL-TIME RAY TRACING
+Listing 11-4. Visibility ray setup: any-hit shader.
+1
+2
+3
+4
+5
+6
+7
+8
+9
+10
+11
+12
+13
+14
+15
+16
+17
+18
+[shader("anyhit")]
+void ahs(Payload payload)
+{
+// geometryData is constant data that bound to the shader with
+// geometry instance data.
+// Each any -hit shader includes the corresponding material shader logic.
+float3 opacity = materialOpacity(geometryData);
+float3 visibility = float3 (1, 1, 1) - opacity;
+payload.accumulatedVisibility *= visibility;
+if(payload.hitT == 0) {
+payload.hitT = RayCurrent ();
+} else {
+payload.hitT = min(payload.hitT , RayCurrent ());
+}
+if(any(payload.accumulatedVisibility > 0)) {
+IgnoreHit ();
+}
+}
+potential outcomes. In some cases, if there is nothing along the ray or all hits
+are ignored in any-hit shaders (imagining if we only hit translucent object),
+miss shaders will be invoked. In other cases, a closest-hit shader will be
+invoked because one ray is accepted in an any-hit shader or any opaque
+geometries are hit, where v will not be updated. Developers will need to set v
+to 0 in those cases. Optionally, developers can consider overriding the hit
+information if that’s the more desired behavior (Listing 11-5).
+Any-hit shaders are invoked one after another for all potential hits during the
+traversal for non-opaque geometries, although the specification does not
+guarantee that those are invoked only once for potential hits between the ray
+origin and the max distance, which provides opportunities to optimize the
+traversal. As a result, this setup may fail for some edge cases. Although
+D3D12_RAYTRACING_GEOMETRY_FLAG_NO_DUPLICATE_ANYHIT_INVOCATION is
+available to achieve the correct result, we chose not to do so to keep better
+traversal performance in general. When it goes wrong, it will cause the result
+to look darker, but so far we have not noticed any of those cases.
+By extending this setup, we can also implement stochastic opacity. To keep
+this section reasonably concise, we will skip explaining the algorithm of
+stochastic opacity [2] and assume the reader understands how to implement
+it. The pipeline can render the visibility buffer with one ray and roughly one
+invocation of any-hit shader per surface. To render a 16-sample visibility
+buffer, we first cast one ray with 16 hitT. The any-hit shaders first check a
+135
+RAY TRACING GEMS II
+Listing 11-5. Visibility ray setup: closest-hit shader and miss shader.
+1
+2
+3
+4
+5
+6
+7
+[shader("closesthit")]
+void chs(Payload payload)
+{
+// If we want to get the first opaque closest hit
+payload.hitT = RayCurrent ();
+payload.accumulatedVisibility = 0;
+}
+8
+9
+10
+11
+12
+13
+14
+15
+[shader("miss")]
+void miss(Payload payload)
+{
+if(payload.hitT == 0) {
+payload.hitT = 1.f / 0.f; // Set to INF.
+}
+}
+random number against the opacity value 16 times to decide whether to
+consider the candidate a hit for each individual entry and then update the
+corresponding hitT and call IgnoreHit(). Hit distances are then stored in
+a buffer.
+Listing 11-6 shows how to compute the final color with single ray invocation of
+16 samples. After tracing the ray, what’s left is to sum up all 16 samples and
+apply alpha correction, as in Listing 11-7.
+Listing 11-6. The 16-sample stochastic opacity ray setup.
+1
+2
+3
+4
+5
+6
+7
+8
+9
+10
+11
+12
+13
+14
+15
+16
+17
+18
+19
+20
+21
+22
+23
+136
+struct VisPayload
+{
+float hitT [16];
+};
+void ahs(VisPayload payload)
+{
+// geometryData is constant data that bound to the shader with
+// geometry instance data.
+// Each any -hit shader includes the corresponding material shader logic.
+float opacity = materialOpacity(geometryData);
+for(int i = 0; i < 16; i++) {
+// Pass i as additional seed.
+bool opaque = opacity > random01(i);
+if(opaque) {
+if(payload.hitT[i] == 0) {
+payload.hitT[i] = RayCurrent ();
+} else {
+payload.hitT[i] = min(payload.hitT[i], RayCurrent ());
+}
+}
+}
+IgnoreHit ();
+}
+CHAPTER 11. HANDLING TRANSLUCENCY WITH REAL-TIME RAY TRACING
+Listing 11-7. The 16-sample stochastic opacity shading pass.
+1
+2
+3
+4
+5
+6
+7
+8
+9
+10
+11
+12
+13
+14
+15
+16
+17
+18
+19
+20
+21
+22
+23
+24
+25
+26
+27
+28
+29
+11.6
+struct ShadePayload
+{
+float3 finalColor [16];
+float hitT [16]
+}
+void ahs(ShadePayload payload)
+{
+// geometryData is constant data that bound to the shader with
+// geometry instance data.
+// Each any -hit shader includes the corresponding material shader logic.
+float opacity = materialOpacity(geometryData);
+float3 color = materialColor(geometryData);
+// Fetch 16 hitT and compare against the current T.
+float visibility = sampleVisibility (DispatchRayIndex ().xy , RayCurrent ())
+;
+for(int i = 0; i < 16; i++) {
+// Pass i as additional seed.
+bool opaque = opacity > random01(i);
+if(opaque) {
+if(payload.hitT[i] == 0) {
+payload.hitT[i] = RayCurrent ();
+payload.finalColor[i] = visibility * color * opacity;
+} else {
+payload.finalColor[i] = payload.hitT[i] < RayCurrent () ?
+payload.finalColor[i] : visibility * color * opacity;
+payload.hitT[i] = min(payload.hitT[i], RayCurrent ());
+}
+}
+}
+IgnoreHit ();
+}
+CONCLUSION
+Have we solved the translucency problem in real-time rendering with ray
+tracing? Absolutely not, it is still an open problem. Besides what we
+mentioned so far, a bigger challenge is to handle volumetric scattering. The
+fact that this chapter did not introduce a uniform approach is simply because
+it does not exist for real time, so we have to make different assumptions and
+estimations to render what we can afford.
+The biggest gain in terms of introducing ray tracing is adding one extra tool
+into developers’ toolboxes, which offers developers easy access to offscreen
+geometry information, required for many advanced effects. Although it’s
+definitely overstated that the introduction of hardware-accelerated ray tracing
+magically solves everything, we are able to shift away part of the focus from
+tedious engine-side infrastructure work so that some offscreen information is
+available for the rendering pipeline—for example, different shadow map
+137
+RAY TRACING GEMS II
+techniques, reflection captures, etc. We can expect that more sophisticated
+usage of ray tracing pipelines will also help hardware architectures evolve to
+help with the challenge that we are facing.
+ACKNOWLEDGMENTS
+The author wrote this chapter to be practical and will consider it successful if
+you find it inspiring and helpful. The author wants to thank the Omniverse
+RTX renderer team at NVIDIA, a technical team with both real-time and offline
+rendering professionals. Many of the techniques would not have become
+reality without the great discussion within the team. The author also would
+like to thank his friends Alan Wolfe, Blagovest Taskov, Daqi Lin, Eugene
+D’Eon, and Tiantian Xie for reviewing the chapter, as well as the section editor
+Per Christensen for editing the chapter. All the render results are produced in
+the Omniverse RTX renderer with either real-time mode (for implementation
+results) or path tracing mode (for references).
+REFERENCES
+[1]
+Akenine-Möller, T., Haines, E., and Hoffman, N. Real-Time Rendering. A K Peters/CRC
+Press, 4th edition, 2018.
+[2]
+Enderton, E., Sintorn, E., Shirley, P., and Luebke, D. Stochastic transparency. IEEE
+Transactions on Visualization and Computer Graphics, 17(08):1036–1047, 2011. DOI:
+10.1109/TVCG.2010.123.
+[3]
+Pharr, M., Jakob, W., and Humphreys, G. Physically Based Rendering: From Theory to
+Implementation. Morgan Kaufmann, 3rd edition, 2016.
+Open Access This chapter is licensed under the terms of the Creative Commons
+Attribution-NonCommercial-NoDerivatives 4.0 International License
+(http://creativecommons.org/licenses/by-nc-nd/4.0/), which permits any
+noncommercial use, sharing, distribution and reproduction in any medium or format, as long as you give
+appropriate credit to the original author(s) and the source, provide a link to the Creative Commons license
+and indicate if you modified the licensed material. You do not have permission under this license to share
+adapted material derived from this chapter or parts of it.
+The images or other third party material in this chapter are included in the chapter’s Creative Commons
+license, unless indicated otherwise in a credit line to the material. If material is not included in the chapter’s
+Creative Commons license and your intended use is not permitted by statutory regulation or exceeds the
+permitted use, you will need to obtain permission directly from the copyright holder.
+138

@@ -1,0 +1,285 @@
+--- v001.md
++++ v002.md
+@@ -4,158 +4,151 @@
+ 
+ ## Overview
+-Gaussian Decoding from Scene Tokens is a method that maps learned scene tokens into a set of freely placed 3D Gaussians, allowing each token to represent a surface region with variable spatial extent and complexity [S1, unofficial]. It differs from ray-anchored decoding by decoupling Gaussian placement from fixed camera rays, enabling more flexible scene representation [S1, unofficial].
++Gaussian Decoding from Scene Tokens is a method that maps learned scene tokens into a set of freely placed 3D Gaussian primitives, allowing each token to represent a surface region with variable spatial extent and complexity [S1, unofficial]. It differs from standard Gaussian Splatting by decoupling Gaussian center prediction from fixed ray intersections, enabling the decoder to place Gaussians anywhere in 3D space rather than anchoring them to specific rays [S1, unofficial]. This approach builds on [3D Gaussian Splatting with Transformer-based Parameterization](6072-3d-gaussian-splatting-with-transformer-based-parameterizatio.md) by introducing a fusion stage that integrates geometry and appearance information before decoding.
+ 
+ ## How it works
+ **Inputs and Outputs:**
+-*   **Input:** Scene tokens $\stok_k$ (derived from geometry tokens), geometry tokens, visual tokens from three backbone layers, and a color embedding.
+-*   **Output:** A set of $G$ 3D Gaussians per scene token, defined by center, scale, rotation, opacity, and color [S1, unofficial].
++*   **Inputs:** Scene tokens $\stok_k$ (derived from fused geometry and visual features), color embeddings, and camera parameters.
++*   **Outputs:** A set of $G$ 3D Gaussians per scene token, each defined by 23 parameters.
+ 
+ **Data Structures:**
+-*   **Scene Tokens:** Vectors representing surface regions. Initialized from a shared template with a forward bias of $z=0.5$ [S1, unofficial].
+-*   **Geometry Tokens:** Derived from features of three backbone layers, serving as keys in cross-attention [S1, unofficial].
+-*   **Visual Tokens:** Values in cross-attention, taken from the deepest backbone layers first [S1, unofficial].
+-*   **Color Embedding:** Used in the final residual cross-attention for appearance information [S1, unofficial].
++*   **Scene Token ($\stok_k$):** A vector representation for the $k$-th scene region.
++*   **Geometry Tokens:** Derived from backbone features, serving as keys in cross-attention.
++*   **Visual Tokens:** Layer-specific features serving as values in cross-attention.
++*   **Color Embedding:** Appearance information used in the final residual cross-attention.
++*   **Gaussian Parameters:** Each Gaussian $j$ in token $k$ has:
++    *   $\gmean_{kj} \in \mathbb{R}^3$: Center.
++    *   $\gscale_{kj} \in \mathbb{R}^3$: Scale.
++    *   $\grot_{kj} \in \mathbb{R}^4$: Rotation (unit quaternion).
++    *   $\gopac_{kj} \in \mathbb{R}$: Opacity.
++    *   $\gcolor_{kj}$: Color represented by degree-1 spherical harmonics.
+ 
+ **Numbered Steps:**
+-1.  **Fusion:** Perform fusion using three blocks. Each block consists of:
+-    *   Cross-attention: Queries are scene tokens; keys are geometry tokens; values are visual tokens from one layer (deepest first) [S1, unofficial].
+-    *   Self-attention: Among the scene tokens [S1, unofficial].
+-2.  **Appearance Injection:** Apply a final residual cross-attention with the color embedding as values to add appearance information [S1, unofficial].
+-3.  **Decoding:** Decode each scene token into $G=32$ Gaussians using a two-layer MLP [S1, unofficial].
++1.  **Token Initialization:** Scene tokens start from a shared template with a forward bias of $z=0.5$ in the reference frame [S1, unofficial].
++2.  **Fusion:** Perform fusion using three blocks. Each block consists of:
++    *   **Cross-Attention:** Queries are scene tokens; keys are geometry tokens; values are visual tokens from one backbone layer (deepest first) [S1, unofficial].
++    *   **Self-Attention:** Among scene tokens [S1, unofficial].
++    *   *Parameters:* 24 attention heads, MLP ratio 4, GELU activation, residual gates initialized to 0.01 [S1, unofficial].
++3.  **Appearance Injection:** Apply a final residual cross-attention with the color embedding as values to add appearance information to the scene tokens [S1, unofficial].
++4.  **Decoding:** Decode each scene token into $G$ Gaussians using a two-layer MLP [S1, unofficial].
++5.  **Parameter Constraints:** Apply squared-hinge penalties to keep scales in $[10^{-6}, 0.1]$, opacities above 0.01, and positions within a radius of 10 [S1, unofficial].
+ 
+ **Formula:**
+ The set of Gaussians $\mathcal{G}_k$ for token $k$ is decoded as:
+-$$ \mathcal {G}_k = \left \{ \left ( \gmean _{kj}, \gscale _{kj}, \grot _{kj}, \gopac _{kj}, \gcolor _{kj} \right ) \right \}_{j=1}^{\ngs } = D(\stok _k) $$
+-where:
+-*   $\gmean_{kj}$: Center of the $j$-th Gaussian.
+-*   $\gscale_{kj}$: Scale of the $j$-th Gaussian.
+-*   $\grot_{kj}$: Rotation of the $j$-th Gaussian.
+-*   $\gopac_{kj}$: Opacity of the $j$-th Gaussian.
+-*   $\gcolor_{kj}$: Color of the $j$-th Gaussian.
+-*   $\ngs$: Number of Gaussians per token ($G$) [S1, unofficial].
+-
+-**Parameters:**
+-*   $G=32$: Number of Gaussians produced per scene token [S1, unofficial].
+-*   Spherical Harmonics: Degree-1 SH used for color representation [S1, unofficial].
+-*   Attention Heads: 24 heads in cross-attention blocks [S1, unofficial].
+-*   MLP Ratio: 4 [S1, unofficial].
+-*   Activation: GELU [S1, unofficial].
+-*   Residual Gates: Initialized to 0.01 [S1, unofficial].
+-*   Coordinate Frame: All geometry expressed in the coordinate frame of the first input camera [S1, unofficial].
+-*   Scene Scale: Normalized so the median distance of input depth points to the origin is one [S1, unofficial].
++$$
++\mathcal {G}_k = \left \{ \left ( \gmean _{kj}, \gscale _{kj}, \grot _{kj}, \gopac _{kj}, \gcolor _{kj} \right ) \right \}_{j=1}^{\ngs } = D(\stok _k)
++$$
++where $D$ is the MLP decoder, $\ngs = G$ is the number of Gaussians per token, and the full scene is assembled from all $K$ tokens [S1, unofficial].
+ 
+ **Pseudocode:**
+ ```python
+-def decode_scene_tokens(scene_tokens, geometry_tokens, visual_tokens_layers, color_embedding):
++def gaussian_decode_from_scene_tokens(scene_tokens, geometry_tokens, visual_tokens_layers, color_embedding):
+     """
+     Decodes scene tokens into 3D Gaussians.
+     
+     Args:
+-        scene_tokens: List of scene token vectors.
+-        geometry_tokens: Geometry token vectors for cross-attention keys.
+-        visual_tokens_layers: List of visual token vectors from backbone layers (deepest first).
+-        color_embedding: Color embedding vector for final appearance injection.
++        scene_tokens: Tensor of shape (K, D_token)
++        geometry_tokens: Tensor of shape (N_geo, D_geo)
++        visual_tokens_layers: List of Tensors, one per layer, deepest first. 
++                              Each shape (N_vis, D_vis)
++        color_embedding: Tensor of shape (N_color, D_color)
+         
+     Returns:
+-        List of Gaussian sets, one per scene token.
++        gaussians: List of K lists, each containing G Gaussian parameter sets.
+     """
+-    # Step 1: Fusion using three blocks
+-    # Each block: Cross-attention (scene tokens as queries, geometry tokens as keys, visual tokens as values)
+-    # followed by Self-attention on scene tokens.
+-    # Note: Visual tokens are taken from layers deepest first.
++    K, D_token = scene_tokens.shape
++    G = 32  # Number of Gaussians per token
++    
++    # Step 1: Fusion Blocks
++    current_tokens = scene_tokens
+     for i in range(3):
+-        visual_tokens = visual_tokens_layers[i]
+-        # Cross-attention
+-        scene_tokens = cross_attention(
+-            queries=scene_tokens,
+-            keys=geometry_tokens,
+-            values=visual_tokens,
++        # Cross-Attention: Queries=current_tokens, Keys=geometry_tokens, Values=visual_tokens_layers[i]
++        # Using 24 heads, MLP ratio 4, GELU, residual gates init 0.01
++        cross_attn_out = cross_attention(
++            query=current_tokens,
++            key=geometry_tokens,
++            value=visual_tokens_layers[i],
+             num_heads=24,
+             mlp_ratio=4,
+-            activation='GELU',
++            activation='gelu',
+             residual_gate_init=0.01
+         )
+-        # Self-attention
+-        scene_tokens = self_attention(
+-            queries=scene_tokens,
+-            keys=scene_tokens,
+-            values=scene_tokens,
++        current_tokens = current_tokens + cross_attn_out  # Residual connection
++        
++        # Self-Attention among scene tokens
++        self_attn_out = self_attention(
++            query=current_tokens,
++            key=current_tokens,
++            value=current_tokens,
+             num_heads=24,
+             mlp_ratio=4,
+-            activation='GELU',
++            activation='gelu',
+             residual_gate_init=0.01
+         )
+-    
+-    # Step 2: Final residual cross-attention with color embedding
+-    scene_tokens = residual_cross_attention(
+-        queries=scene_tokens,
+-        keys=scene_tokens, # Assuming keys are scene tokens or identity mapping if not specified
+-        values=color_embedding,
++        current_tokens = current_tokens + self_attn_out  # Residual connection
++        
++    # Step 2: Appearance Injection
++    # Final residual cross-attention with color embedding as values
++    appearance_attn_out = cross_attention(
++        query=current_tokens,
++        key=geometry_tokens, # Or geometry tokens as per standard practice, source says "residual cross-attention with color embedding as values"
++        value=color_embedding,
+         num_heads=24,
+         mlp_ratio=4,
+-        activation='GELU',
++        activation='gelu',
+         residual_gate_init=0.01
+     )
++    current_tokens = current_tokens + appearance_attn_out
+     
+-    # Step 3: Decode each scene token into G=32 Gaussians
+-    gaussians_per_token = []
+-    for token in scene_tokens:
+-        # Two-layer MLP decoder
+-        gaussian_params = two_layer_mlp_decoder(token)
+-        # gaussian_params contains 23 parameters per Gaussian
+-        # Unpack into mean, scale, rotation, opacity, color
+-        gaussians = []
+-        for j in range(32):
+-            # Extract parameters for j-th Gaussian
+-            # Note: Exact unpacking depends on MLP output layout, assumed to be 23 params per Gaussian
+-            mean = gaussian_params[j*23 : j*23+3]
+-            scale = gaussian_params[j*23+3 : j*23+6]
+-            rotation = gaussian_params[j*23+6 : j*23+10] # Quaternion
+-            opacity = gaussian_params[j*23+10 : j*23+11]
+-            color = gaussian_params[j*23+11 : j*23+23] # Degree-1 SH coefficients
+-            gaussians.append({
+-                'mean': mean,
+-                'scale': scale,
+-                'rotation': rotation,
+-                'opacity': opacity,
+-                'color': color
++    # Step 3: Decode to Gaussians
++    gaussians = []
++    # Two-layer MLP decoder D
++    decoder = TwoLayerMLP(input_dim=D_token, output_dim=G * 23)
++    
++    for k in range(K):
++        token = current_tokens[k]
++        params = decoder(token) # Shape (G * 23,)
++        token_gaussians = []
++        for j in range(G):
++            # Extract 23 parameters
++            offset = j * 23
++            g_mean = params[offset : offset+3]
++            g_scale = params[offset+3 : offset+6]
++            g_rot = params[offset+6 : offset+10]
++            g_opac = params[offset+10]
++            g_color = params[offset+11 : offset+23] # Degree-1 SH
++            
++            # Apply constraints [G]
++            # Squared-hinge penalties are applied during training loss, 
++            # but for inference, we assume valid parameters.
++            # If implementing training, apply penalties to gradients.
++            
++            token_gaussians.append({
++                'mean': g_mean,
++                'scale': g_scale,
++                'rot': g_rot,
++                'opacity': g_opac,
++                'color': g_color
+             })
+-        gaussians_per_token.append(gaussians)
++        gaussians.append(token_gaussians)
+         
+-    return gaussians_per_token
+-
+-def cross_attention(queries, keys, values, num_heads, mlp_ratio, activation, residual_gate_init):
+-    # Standard multi-head cross-attention implementation
+-    # ...
+-    pass
+-
+-def self_attention(queries, keys, values, num_heads, mlp_ratio, activation, residual_gate_init):
+-    # Standard multi-head self-attention implementation
+-    # ...
+-    pass
+-
+-def residual_cross_attention(queries, keys, values, num_heads, mlp_ratio, activation, residual_gate_init):
+-    # Residual cross-attention implementation
+-    # ...
+-    pass
+-
+-def two_layer_mlp_decoder(token):
+-    # Two-layer MLP with GELU activation and residual gates initialized to 0.01
+-    # ...
+-    pass
++    return gaussians
+ ```
+ 
++**Parameters:**
++*   $G=32$: Number of Gaussians per scene token [S1, unofficial].
++*   Degree-1 spherical harmonics: Used for color representation [S1, unofficial].
++*   Cross-attention: 24 heads, MLP ratio 4, GELU activation, residual gates initialized to 0.01 [S1, unofficial].
++*   Reference frame: All geometry is expressed in the coordinate frame of the first input camera [S1, unofficial].
++*   Scene scale: Normalized so that the median distance of input depth points to the origin is one [S1, unofficial].
++
+ **Edge Cases and Pitfalls:**
+-*   **Unconstrained Placement:** The decoder can place Gaussians anywhere in 3D, not necessarily near the source patch. This requires auxiliary losses (e.g., Cone loss) to ground Gaussians in their source patch [S1, unofficial].
+-*   **Scale and Opacity Constraints:** Squared-hinge penalties are used to keep scales in $[10^{-6}, 0.1]$, opacities above 0.01, and positions within a radius of 10 [S1, unofficial].
+-*   **Coordinate Frame:** All geometry is in the first input camera's frame. Misalignment if camera estimation is poor [S1, unofficial].
++*   **Free Placement:** Nothing constrains decoded Gaussians to stay near their source patch; the decoder can place them anywhere in 3D [S1, unofficial]. This requires auxiliary losses (e.g., Cone loss) to ground Gaussians in their source patch [S1, unofficial].
++*   **Precision:** Scales are constrained to $[10^{-6}, 0.1]$ and opacities above 0.01 to prevent numerical instability [S1, unofficial].
++*   **Boundaries:** Positions are constrained within a radius of 10 [S1, unofficial].
+ 
+ ## Subtopics
+ 
+-### [VolSplat](7674-volsplat.md)
+-A method that uses volumetric splatting for differentiable rendering. Choose when volumetric representation is preferred over explicit Gaussians.
+-
+-### [Sequential Gaussian Attribute Decoding](16432-sequential-gaussian-attribute-decoding.md)
+-A method that decodes Gaussian attributes sequentially. Choose when sequential processing is beneficial for attribute dependency.
++### [Depth and Gaussian Decoding](18077-depth-and-gaussian-decoding.md)
++A variant that predicts depth from features to map pixel-aligned predictions to 3D space, decoupling Gaussian center prediction from fixed ray intersections. It differs by inferring geometry directly from latent features without relying on encoder-side depth maps. Choose this when explicit 3D geometry reconstruction from feature streams is required without external depth inputs.
+ 
+ ## Operating characteristics
+@@ -163,12 +156,12 @@
+ *   **Memory Complexity:** Not given in the sources.
+ *   **Measured Performance:** On DL3DV at 6 views, $G=32$ gains 0.34 to 0.36 dB PSNR over $G=8$, while $G=64$ adds at most 0.08 dB at twice the Gaussians [S1, unofficial].
+-*   **Scaling:** Not given in the sources.
+-*   **Strengths:** Flexible Gaussian placement, efficient representation with $G=32$ [S1, unofficial].
+-*   **Limitations:** Unconstrained Gaussian placement requires auxiliary losses [S1, unofficial].
+-*   **When to Use:** When flexible scene representation is needed and computational resources allow for transformer-based decoding [S1, unofficial].
+-*   **When Not to Use:** When strict ray-anchored placement is required or computational resources are limited [S1, unofficial].
++*   **Scaling:** The number of Gaussians per token can be varied ($G=8, 16, 32, 64$), with diminishing returns for higher $G$ [S1, unofficial].
++*   **Strengths:** Allows tokens to spread Gaussians over observed regions with variable complexity; free placement offers flexibility.
++*   **Limitations:** Requires auxiliary losses (Cone loss) to prevent Gaussians from drifting away from their source patch; no guarantee of association between token and observation [S1, unofficial].
++*   **When to Use:** When flexible, region-based Gaussian representation is needed and computational budget allows for transformer-based fusion.
++*   **When Not to Use:** When strict ray-anchored Gaussian placement is required or when auxiliary losses cannot be applied.
+ 
+ ## Background
+-Originated in ZipSplat, a method for few-shot Gaussian splatting [S1, unofficial]. It builds on [3D Gaussian Splatting with Transformer-based Parameterization](6072-3d-gaussian-splatting-with-transformer-based-parameterizatio.md) by introducing scene token fusion and decoding [S1, unofficial]. Used in few-shot novel view synthesis [S1, unofficial].
++Originated in ZipSplat (Lin et al., 2026), which builds on DA3-Giant. The method uses features from three backbone layers merged into geometry tokens, fused into scene tokens, and decoded into Gaussians [S1, unofficial]. It is trained on RealEstate10K and DL3DV datasets [S1, unofficial].
+ 
+ ## Sources

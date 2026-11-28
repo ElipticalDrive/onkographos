@@ -1,0 +1,266 @@
+--- v003.md
++++ v004.md
+@@ -1,97 +1,193 @@
+ # Optimized Ray Casting
+ 
+-Also called: Adaptive Ray Casting, Octtree Ray Casting
++Also called: Adaptive Ray Casting, Boundary cell projection, Fast Ray Casting Algorithm, Octtree Ray Casting
+ 
+ ## Overview
+-Optimized Ray Casting is a hierarchical volume rendering technique that accelerates image-order rendering by combining octree-based empty space skipping with adaptive ray density and alpha cutoffs [S1, unofficial]. Unlike standard ray casting which samples every voxel along the view ray, this method skips transparent regions using an octree structure and terminates rays early when sufficient opacity is accumulated, significantly reducing computational cost for sparse or semi-transparent datasets [S1, unofficial]. It distinguishes itself from sibling methods like [Sparse Voxel Octree Ray Traversal](2451-sparse-voxel-octree-ray-traversal.md) by emphasizing adaptive ray casting (sub-sampling in high-frequency areas) and specific hardware-optimized pipeline stages (cut planes, coarse-to-fine refinement) rather than just traversal efficiency [S1, unofficial].
++Optimized Ray Casting is a volume rendering algorithm that accelerates image-order rendering by combining hierarchical data structures (such as octrees) with adaptive sampling and early ray termination [S1, S2, unofficial]. It solves the problem of high computational cost in dense volumetric datasets by skipping transparent regions and reducing the number of ray samples where visual detail is low [S1, S2, unofficial]. Unlike sibling methods that focus on parallel distribution or specific hardware constraints, Optimized Ray Casting focuses on algorithmic efficiency through spatial coherence and opacity thresholds, building on the [Traversal and Data Access](13739-traversal-and-data-access.md) principles of path parameterization and coordinate mapping.
+ 
+ ## How it works
+-The method operates on a master-slave GPU architecture where the master manages data flow and slaves perform parallel rendering of image tiles [S1, unofficial].
++The method integrates boundary cell projection, adaptive image sampling, and octree-based traversal to minimize unnecessary computation.
+ 
+-**Inputs and Outputs:**
+-- Input: Volumetric dataset, camera parameters, cut plane position (optional), alpha cutoff threshold, dissimilarity threshold.
+-- Output: Final 2D image formed by bilinear interpolation of the ray-cast pixels [S1, unofficial].
++**Inputs and Outputs**
++*   **Input:** A 3D scalar field (volume data), transfer functions (mapping scalar values to color and opacity), and camera parameters (origin $\mathbf{o}$, direction $\mathbf{d}$, image resolution).
++*   **Output:** A 2D image where each pixel contains the accumulated color and opacity along the corresponding ray.
+ 
+-**Data Structures:**
+-- **Octree:** Incrementally updated as macro blocks arrive; nodes are tagged to indicate if they contain only transparent voxels [S1, unofficial].
+-- **Ray Grid:** Adaptive grid of rays that starts coarse and refines locally based on value dissimilarity [S1, unofficial].
++**Data Structures**
++*   **Octree:** A hierarchical structure representing the volume. Each node represents a macro-block (e.g., a $4 \times 4 \times 4$ or larger block of voxels). Nodes are tagged to indicate if they contain only transparent voxels [S2, unofficial].
++*   **Backstore/Backing Store:** Memory region holding loaded macros (blocks of voxels) for the current rendering sector [S2, unofficial].
+ 
+-**Algorithm Steps:**
+-1. **Initialization:** The master GPU loads a backing store region (e.g., 32 macros or 16K voxels) into a renderer's pixel memory [S1, unofficial].
+-2. **Octree Construction/Update:** As macro blocks arrive, the octree is incrementally updated [S1, unofficial]. Macros containing only transparent voxels are tagged to assist computation [S1, unofficial]. This tagging is critical because typically 2/3 of macros are completely transparent, making the octtree skipping worthwhile [S1, unofficial].
+-3. **Ray Casting Loop (per tile/sector):**
+-    a. **Adaptive Ray Selection:** Cast an initial coarse grid of rays across the image tile [S1, unofficial].
+-    b. **Refinement:** If adjacent ray samples or resulting pixel values are sufficiently dissimilar, cast additional rays in those regions to capture high-frequency details [S1, unofficial].
+-    c. **Ray Traversal:** For each ray, traverse the octree [S1, unofficial].
+-        i. **Cut Plane Optimization:** If a cut plane is defined, start the ray at the cut plane intersection instead of the dataset boundary [S1, unofficial]. This adds no runtime cost and can speed up rendering by reducing the traversal distance [S1, unofficial].
+-        ii. **Empty Space Skipping:** Use the octree to skip over transparent regions [S1, unofficial]. If a node is tagged as transparent, skip trilinear interpolation and compositing for that subtree [S1, unofficial].
+-        iii. **Alpha Cutoff:** Accumulate opacity along the ray [S1, unofficial]. Terminate the ray when accumulated opacity reaches a predefined threshold ('alpha cutoff'), as further processing yields little color change [S1, unofficial].
+-    d. **Shading:** Classify and shade the voxels encountered along the active ray segments in parallel (SIMD) [S1, unofficial].
+-4. **Image Formation:** Store the shaded voxels in the backing store [S1, unofficial]. The final image is formed by bilinear interpolation of the ray-cast pixels [S1, unofficial].
++**Algorithm Steps**
+ 
+-**Formulas:**
+-The method modifies the standard front-to-back compositing loop from [Acceleration](18-acceleration.md) by introducing early termination and skipping conditions:
+-$$ C_{acc} = C_{acc} + C_{sample} \cdot \alpha_{sample} \cdot (1 - \alpha_{acc}) $$
+-$$ \alpha_{acc} = \alpha_{acc} + \alpha_{sample} \cdot (1 - \alpha_{acc}) $$
+-The loop breaks when $\alpha_{acc} \ge \text{alpha\_cutoff}$ or when the octree traversal skips a transparent subtree.
++1.  **Preprocessing (Offline):**
++    *   Construct the octree from the volume data.
++    *   Tag macros (leaf nodes or internal nodes representing blocks) that contain *only* transparent voxels. This allows the traversal to skip these regions entirely [S2, unofficial].
+ 
+-**Parameters:**
+-- **Alpha Cutoff:** Threshold for ray termination when accumulated opacity yields little color change [S1, unofficial]. Not given in the sources.
+-- **Dissimilarity Threshold:** Threshold for adaptive ray refinement when adjacent values are sufficiently dissimilar [S1, unofficial]. Not given in the sources.
+-- **Macro Size:** Example given is 32 macros or 16K voxels per backing store region [S1, unofficial].
++2.  **Ray Initialization:**
++    *   For each pixel in the image, define the ray $\mathbf{r}(t) = \mathbf{o} + t\mathbf{d}$ [S1, unofficial][S2, unofficial].
++    *   If a cut plane is defined, start the ray traversal at the intersection with the cut plane rather than the dataset boundary. This adds no runtime cost and can speed up rendering by reducing the traversal distance [S2, unofficial].
+ 
+-**Edge Cases and Pitfalls:**
+-- **Transparent Macros:** Typically 2/3 of macros are completely transparent, making octtree skipping worthwhile [S1, unofficial]. If the octree tagging is inaccurate, skipping may lead to visual artifacts [S1, unofficial].
+-- **Adaptive Refinement:** Choosing the dissimilarity threshold too low may lead to excessive ray casting; too high may miss details [S1, unofficial].
++3.  **Adaptive Ray Casting (Coarse to Fine):**
++    *   **Coarse Pass:** Cast rays on a coarse grid (e.g., skipping pixels or using lower resolution sampling) to estimate the scene content [S2, unofficial].
++    *   **Adaptive Refinement:** Compare adjacent sampled values. If the difference in color or density exceeds a threshold, cast additional rays in that region to capture detail [S2, unofficial].
++        *   *Color Difference Thresholds:* 10 (electric field), 40 (neghip), 30 (brain) [S1, unofficial].
++        *   *Density Difference Thresholds:* 30 (electric field), 80 (neghip), 5 (brain) [S1, unofficial].
++    *   **Interpolation:** The final image is formed by bilinear interpolation of the ray-cast pixels from the adaptive sampling [S2, unofficial].
++
++4.  **Hierarchical Traversal (Octree Skip):**
++    *   Traverse the octree along the ray.
++    *   If a node is tagged as "completely transparent," skip the entire subtree. This avoids trilinear interpolation and compositing for empty space [S2, unofficial].
++    *   This optimization is effective because typically 2/3 of macros are completely transparent [S2, unofficial].
++
++5.  **Ray Termination (Early Exit):**
++    *   Accumulate opacity $\alpha$ along the ray.
++    *   If $\alpha$ exceeds a threshold (alpha cutoff), terminate the ray. Further processing yields negligible color change [S2, unofficial].
++    *   *Opacity Thresholds:* 92% (electric field), 98% (neghip), 98% (brain) [S1, unofficial].
++
++**Pseudocode**
+ 
+ ```python
+-def render_tile(tile_coords, camera, cut_plane, alpha_cutoff, dissimilarity_threshold):
+-    # Initialize accumulation buffers
+-    color_acc = (0.0, 0.0, 0.0)
+-    alpha_acc = 0.0
+-    # Load backing store region (32 macros / 16K voxels) into pixel memory [S1, unofficial]
+-    macro_data = load_backing_store(tile_coords)
+-    # Incrementally update octree and tag transparent macros [S1, unofficial]
+-    octree = build_or_update_octree(macro_data)
+-    # Cast initial coarse grid of rays [S1, unofficial]
+-    rays = generate_coarse_grid(tile_coords)
+-    # Adaptive refinement: cast additional rays if adjacent values are sufficiently dissimilar [S1, unofficial]
+-    rays = refine_rays(rays, macro_data, dissimilarity_threshold)
+-    for ray in rays:
+-        # Cut plane optimization: start ray at plane instead of dataset boundary [S1, unofficial]
+-        ray.origin = max(ray.origin, cut_plane) if cut_plane else ray.origin
+-        # Traverse octree, skipping transparent regions [S1, unofficial]
+-        for voxel in traverse_octree_ray(ray, octree):
+-            # Classify and shade voxel [S1, unofficial]
+-            sample_color, sample_alpha = classify_and_shade(voxel)
+-            # Front-to-back compositing (follows parent shared principles)
+-            color_acc += sample_color * sample_alpha * (1.0 - alpha_acc)
+-            alpha_acc += sample_alpha * (1.0 - alpha_acc)
+-            # Alpha cutoff termination [S1, unofficial]
+-            if alpha_acc >= alpha_cutoff:
++def optimized_ray_casting(volume_data, camera, transfer_function, octree):
++    """
++    Renders a volume using optimized ray casting with adaptive sampling and octree skipping.
++    """
++    image_width = camera.width
++    image_height = camera.height
++    image = empty_array(image_height, image_width, 4) # RGBA
++
++    # Pre-compute thresholds from configuration
++    color_thresholds = get_color_thresholds() # e.g., [10, 40, 30]
++    density_thresholds = get_density_thresholds() # e.g., [30, 80, 5]
++    alpha_cutoff = get_alpha_cutoff() # e.g., 0.98
++
++    # 1. Adaptive Sampling: Determine which pixels need full ray casting
++    # Cast a coarse grid first
++    coarse_step = 2 # Example: skip every other pixel
++    coarse_samples = []
++    for y in range(0, image_height, coarse_step):
++        for x in range(0, image_width, coarse_step):
++            ray = camera.get_ray(x, y)
++            color, alpha = cast_ray_coarse(ray, volume_data, transfer_function, octree)
++            coarse_samples.append((x, y, color, alpha))
++
++    # 2. Refine based on differences
++    refined_pixels = set()
++    for i, (x1, y1, c1, a1) in enumerate(coarse_samples):
++        # Check neighbors in coarse grid
++        neighbors = get_coarse_neighbors(x1, y1, coarse_step, image_width, image_height)
++        for x2, y2, c2, a2 in neighbors:
++            # Check color difference
++            if abs(c1 - c2) > color_thresholds:
++                # Mark all pixels in the bounding box of these coarse samples for refinement
++                mark_region_for_refinement(x1, y1, x2, y2, refined_pixels)
++            # Check density difference (requires sampling density along ray)
++            if abs(a1 - a2) > density_thresholds: # Approximation using alpha as proxy for density integration
++                mark_region_for_refinement(x1, y1, x2, y2, refined_pixels)
++
++    # 3. Full Ray Casting for refined pixels
++    for y in range(image_height):
++        for x in range(image_width):
++            if (x, y) in refined_pixels:
++                ray = camera.get_ray(x, y)
++                final_color, final_alpha = cast_ray_fine(ray, volume_data, transfer_function, octree, alpha_cutoff)
++                image[y, x] = final_color
++            else:
++                # Interpolate from coarse samples
++                image[y, x] = bilinear_interpolate_coarse(x, y, coarse_samples)
++
++    return image
++
++def cast_ray_fine(ray, volume_data, transfer_function, octree, alpha_cutoff):
++    """
++    Casts a single ray using octree traversal and early termination.
++    """
++    accumulated_color = (0.0, 0.0, 0.0, 0.0)
++    accumulated_opacity = 0.0
++    
++    # Determine entry and exit t values for the volume
++    t_min, t_max = ray.intersect_volume_bounds()
++    
++    # Traverse octree
++    nodes_to_visit = octree.get_nodes_intersecting_ray(ray, t_min, t_max)
++    
++    for node in nodes_to_visit:
++        # Optimization: Skip transparent macros
++        if node.is_tagged_transparent():
++            continue
++            
++        # Get voxel samples within this node
++        samples = node.get_voxel_samples(ray)
++        
++        for sample in samples:
++            # Sample value and compute color/opacity
++            value = volume_data.get_value(sample.position)
++            color, opacity = transfer_function.apply(value)
++            
++            # Composite
++            # C_out = C_in + (1 - A_in) * C_sample * A_sample
++            # A_out = A_in + (1 - A_in) * A_sample
++            
++            weight = (1.0 - accumulated_opacity) * opacity
++            accumulated_color += weight * color
++            accumulated_opacity += weight
++            
++            # Early termination
++            if accumulated_opacity >= alpha_cutoff:
+                 break
+-    return color_acc
+-# Note: Helper functions (load_backing_store, build_or_update_octree, etc.) 
+-# implement standard volume rendering primitives; exact source implementations not provided.
++                
++    return accumulated_color, accumulated_opacity
+ ```
++
++**Parameters**
++*   **Sample Region Size:** For adaptive image sampling, the square sample region size is typically $3 \times 3$ pixels [S1, unofficial].
++*   **Alpha Cutoff:** Thresholds vary by dataset: 92% (electric field), 98% (neghip), 98% (brain) [S1, unofficial].
++*   **Cut Planes:** Implemented by starting rays at the plane equation $ax + by + cz + d = 0$ instead of the dataset boundary [S5].
++
++**Edge Cases and Pitfalls**
++*   **Precision:** Adaptive sampling relies on threshold comparisons. If thresholds are too low, performance degrades to full ray casting; if too high, visual artifacts (blockiness) appear [S1, unofficial].
++*   **Boundary Conditions:** Cut planes must be correctly intersected with the ray to avoid starting inside the volume or missing the volume entirely [S5].
++*   **Memory:** The octree and backing store require additional memory. If the volume is sparse, the octree overhead is justified; if dense, the skipping benefit diminishes [S2, unofficial].
+ 
+ ## Subtopics
+ 
++### [Light Ray Extinction Optimization](15221-light-ray-extinction-optimization.md)
++Accelerates direct illumination computation in Monte Carlo volume rendering by optimizing extinction estimates along light rays. Distinct from camera-ray optimization as it handles stochastic scattering paths.
++
++### [Parallel Volume Rendering for Computational Flow Imaging](16105-parallel-volume-rendering-for-computational-flow-imaging.md)
++Optimizes ray casting for CFD data by converting curilinear grids to rectilinear multi-block voxel fields for parallel processing. Addresses integral errors from overlapping grids.
++
++### [STiles (Sorted Tiles)](16374-stiles-sorted-tiles.md)
++A progressive technique that sorts screen-space tiles by cost and renders them in batches. Designed for interactive rendering on mobile/low-performance devices to avoid frame stalls.
++
+ ### Nishita and Nakamae Water Rendering
+-A variant focused on underwater optical effects [S2]. It considers caustics, shafts of light, and water color [S2]. The water is modeled as a uniform particle density medium, eliminating the need for numerical integration of densities along the ray [S2]. Intensity due to scattered light is computed as an analytical function of the distance between particles and the viewpoint [S2]. Unlike standard ray casting, this method does not perform ray-tracing; instead, it uses a scanline Z-buffer and accumulation buffer [S2].
++A specific application of optimized ray casting principles for water rendering [S3]. It considers optical effects like caustics, shafts of light, and water color. The water is modeled as a uniform particle density medium, eliminating the need for numerical integration of densities along the ray. Intensity is calculated as an analytical function of the distance between particles and the viewpoint. Unlike standard ray casting, it uses a scanline Z-buffer and accumulation buffer instead of ray-tracing [S3].
++
++### Pre-calculated Gradient Storage
++An optimization that replaces real-time gradient calculation with a pre-computed 3D texture lookup [S4]. Gradients (direction and magnitude) are stored in a 3D RGBA texture. During raycasting, the gradient texture is sampled instead of computing gradients on the fly, saving 6 extra texture fetches per sample [S4]. This trades memory for computation speed, advantageous for VR hardware like HTC Vive [S4].
++
++### Reslicing via Ray Casting
++A modification to the ray-cast algorithm to reslice a volume along an arbitrary plane $ax + by + cz + d = 0$ [S5]. The ray-cast is performed by either starting the search for the first voxel at the z-coordinate determined by the plane equation or continuing until the x-coordinate value is reached. This effectively removes voxels where $ax + by + cz + d < 0$ or $ax + by + cz + d > 0$, allowing for interactive slicing without global re-display [S5].
+ 
+ ## Operating characteristics
+-- **Time Complexity:** Depends on data sparsity and alpha cutoff [S1, unofficial]. The octree skipping reduces the number of samples significantly [S1, unofficial].
+-- **Measured Performance:** A slave GPU renders a 128x128 image tile for a 128x128x128 dataset with coarse refinement in 100-240 ms [S1, unofficial].
+-- **Memory Complexity:** Requires storage for the octree and backing store regions (e.g., 16K voxels per region) [S1, unofficial].
+-- **Strengths:** Significant speedup for sparse or transparent datasets due to empty space skipping and alpha cutoffs [S1, unofficial]. Adaptive ray casting improves quality in complex regions without uniform overhead [S1, unofficial]. Cut planes provide free optimization [S1, unofficial].
+-- **Limitations:** Requires incremental octree construction and management [S1, unofficial]. Adaptive ray casting adds complexity to the ray selection logic [S1, unofficial].
+-- **When to Use:** Interactive visualization of large, sparse, or semi-transparent volumetric datasets (e.g., medical imaging) where performance is critical [S1, unofficial].
+-- **When Not to Use:** Dense, fully opaque datasets where empty space skipping provides little benefit, or when high-frequency detail requires uniform dense sampling [S1, unofficial].
++*   **Time Complexity:** Depends on the sparsity of the volume and the effectiveness of the octree skipping. In the worst case (fully opaque), it approaches $O(N)$ where $N$ is the number of voxels along the ray. In sparse volumes, it is significantly faster due to octree traversal skipping empty space [S2, unofficial].
++*   **Memory Complexity:** $O(V)$ for the volume data plus $O(M)$ for the octree structure, where $M$ is the number of macros/nodes. The backing store adds temporary memory pressure [S2, unofficial].
++*   **Measured Performance:**
++    *   On an SGI Power Challenge with 16 processors: Electric field ($50^3$) 0.04s, Neghip ($68^3$) 0.15s, Brain ($256 \times 256 \times 124$) 0.09s [S1, unofficial].
++    *   On 4 processors: Electric field 0.39s, Neghip 1.02s, Brain 0.17s [S1, unofficial].
++    *   On 8 processors: Electric field 0.11s, Neghip 0.93s, Brain 0.12s [S1, unofficial].
++    *   On 12 processors: Electric field 0.06s, Neghip 0.28s, Brain 0.11s [S1, unofficial].
++    *   More than 10 frames per second achieved for all three datasets at highest resolution on 16 processors [S1, unofficial].
++    *   On a slave GPU: 100-240 ms to render a $128 \times 128$ image tile for a $128^3$ dataset with coarse refinement [S2, unofficial].
++*   **Strengths:** High performance on sparse or semi-transparent volumes; interactive frame rates achievable on older hardware; adaptive sampling reduces aliasing without full supersampling cost.
++*   **Limitations:** Performance degrades on dense, fully opaque volumes where octree skipping is ineffective; adaptive sampling introduces complexity in threshold tuning; requires preprocessing to build the octree [S1, S2, unofficial].
++*   **When to Use:** Interactive visualization of large, sparse volumetric datasets (e.g., medical CT/MRI, scientific simulations) where real-time feedback is required.
++*   **When Not to Use:** Dense, fully opaque volumes where the overhead of octree traversal outweighs the benefit; scenes requiring precise, non-adaptive sampling for scientific accuracy.
+ 
+ ## Background
+-The method was developed in the context of achieving direct volume visualization with interactive semantic region selection [S1, unofficial]. It builds on earlier work by Levoy [S1, unofficial]. The approach was implemented on a master-slave GPU architecture to handle asynchronous fetch requests and parallel rendering of image tiles [S1, unofficial]. The specific optimizations of adaptive ray casting and alpha cutoffs were introduced to enhance performance for interactive applications [S1, unofficial].
++Optimized Ray Casting was developed in the late 1980s and early 1990s as a response to the computational demands of direct volume rendering. Key contributors include Marc Levoy, who introduced the concept of early ray termination and alpha cutoffs [S2, unofficial], and researchers at SGI and NASA who implemented fast ray casting algorithms on parallel architectures [S1, unofficial]. The method integrates boundary cell projection and octree traversal to optimize the ray casting process, achieving real-time performance on datasets that were previously too large for interactive visualization [S1, S2, unofficial]. It has been widely used in medical imaging and scientific visualization for its balance of speed and visual quality.
+ 
+ ## Sources
+-[S1] DTIC ADA236718: Achieving Direct Volume Visualization with Interactive Semantic Region Selection, https://archive.org/details/DTIC_ADA236718, fetched 2026-10-26 (unofficial)
+-[S2] A survey on participating media rendering techniques, https://doi.org/10.1007/s00371-005-0287-1, fetched 2026-10-26+[S1] Time-Critical Volume Rendering, https://ntrs.nasa.gov/api/citations/19990040407/downloads/19990040407.pdf, fetched 2026-10-26 (unofficial)
++[S2] DTIC ADA236718: Achieving Direct Volume Visualization with Interactive Semantic Region Selection, https://archive.org/details/DTIC_ADA236718, fetched 2026-10-26 (unofficial)
++[S3] A survey on participating media rendering techniques, https://doi.org/10.1007/s00371-005-0287-1, fetched 2026-10-26
++[S4] Rendering and Interacting With Volume Models in Immersive Environments, https://doi.org/10.2312/ceig.20181153, fetched 2026-10-26
++[S5] Hardware Support for the Display and Manipulation of Binary Voxel Models, https://doi.org/10.2312/eggh/eggh88/103-117, fetched 2026-10-26

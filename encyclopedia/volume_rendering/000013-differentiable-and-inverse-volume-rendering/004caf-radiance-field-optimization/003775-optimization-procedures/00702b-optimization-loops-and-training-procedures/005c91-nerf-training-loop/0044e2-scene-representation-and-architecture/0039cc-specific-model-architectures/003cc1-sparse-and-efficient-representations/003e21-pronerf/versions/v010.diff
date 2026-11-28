@@ -1,0 +1,410 @@
+--- v009.md
++++ v010.md
+@@ -4,153 +4,266 @@
+ 
+ ## Overview
+-ProNeRF is a few-point volumetric rendering method that uses a Projection-Aware Sampling (PAS) network to predict sparse 3D sampling points and opacity adjustments, allowing high-quality rendering with significantly fewer samples than standard NeRF [S1]. It achieves faster inference than vanilla NeRF with higher quality than HyperReel [S1]. Unlike generalizable radiance fields that store all training input images for epipolar feature projection, ProNeRF uses a fixed subset of reference views, eliminating the need for nearest-neighbor projection among all available training views [S1].
++ProNeRF is a few-point volumetric rendering method that uses a Projection-Aware Sampling (PAS) network to predict sparse 3D sampling points and opacity adjustments, allowing high-quality rendering with significantly fewer samples than standard NeRF [S1]. It achieves faster inference than vanilla NeRF with higher quality than HyperReel [S1]. Unlike generalizable radiance fields (e.g., IBRNet, NeuRay) that store all training input images for epipolar feature projection, ProNeRF uses a fixed subset of reference views, eliminating the need for nearest-neighbor projection among all available training views [S1].
+ 
+ ## How it works
+-ProNeRF performs volumetric rendering using a small number of samples $N_s$ (e.g., 8, 12, or 32) guided by a PAS network [S1]. The method consists of a PAS network (comprising MLP heads $F_{\theta_c}$ and $F_{\theta_f}$) and a shading network $F_{\theta_s}$ [S1].
+-
+-### Inputs and Outputs
+-*   **Input:** Ray parameters $\mathbf{r} = (\mathbf{r}_o, \mathbf{r}_d)$ (origin and direction), a set of $N_n$ neighboring reference view colors $\{\mathbf{c}^k\}_{k=1}^{N_n}$ from a fixed pool of $N_t$ training views [S1].
+-*   **Output:** Rendered pixel color $\hat{\mathbf{c}}(\mathbf{r})$ [S1].
+-
+-### Data Structures and Network Layout
+-1.  **Plücker Ray-Point Encoding:** The ray is encoded into a vector $\mathbf{r}_{pr}$ of size 48 using $N_{pr}=48$ points evenly spaced between near $t_n$ and far $t_f$ bounds [S1]:
+-    $$
+-    \mathbf{r}_{pr} = [\mathbf{r}_d, \mathbf{r}_o + \mathbf{r}_d \odot \mathbf{t}_{nf}, (\mathbf{r}_o + \mathbf{r}_d \odot \mathbf{t}_{nf}) \odot \mathbf{r}_d]
+-    $$
+-    where $\mathbf{t}_{nf}$ is a vector of $N_{pr}$ elements, $\odot$ is the Hadamard product, and $[\cdot, \cdot]$ is concatenation [S1].
+-2.  **Coarse MLP ($F_{\theta_c}$):** Consists of 6 fully connected layers with 256 neurons and ELU activations [S1]. It takes $\mathbf{r}_{pr}$ as input and outputs:
+-    *   Coarse sampling distances $\mathbf{T}' = \{t'_1, \dots, t'_{N_s}\}$ [S1].
+-    *   Opacity shifts $\Delta_t$ and scales $B_t$ [S1].
+-    *   Auxiliary coarse color $\hat{\mathbf{c}}_c$ [S1].
+-3.  **Color-to-Ray Projections:** For each coarse point $p_i = \mathbf{r}(t'_i)$, lines are traced to the camera centers of $N_n$ neighboring reference views [S1]. The colors at these intersections are collected into a projection vector $\mathbf{f}_{pi} = [\mathbf{c}^1_{pi}, \dots, \mathbf{c}^{N_n}_{pi}]$ [S1].
+-4.  **Fine MLP ($F_{\theta_f}$):** Consists of 6 fully connected layers with 256 neurons and ELU activations [S1]. It takes the encoded ray $\mathbf{r}'_{pr}$ and the aggregated projections $\{\mathbf{f}_{p1}, \dots, \mathbf{f}_{pN_s}\}$ as input [S1]. It outputs:
+-    *   Refinement weights $\Delta_T$ [S1].
+-    *   Auxiliary weights $W \in \mathbb{R}^{N_s}$ (softmax) and $M \in \mathbb{R}^{N_n}$ (sigmoid) [S1].
+-    *   Auxiliary fine color $\hat{\mathbf{c}}_f$ [S1].
+-5.  **Shading Network ($F_{\theta_s}$):** Consists of 8 fully connected layers with 256 neurons [S1]. It takes the refined 3D points $\mathbf{x}_i = \mathbf{r}_o + \mathbf{r}_d \odot T_i$ as input and outputs density $\sigma_i$ and color $\mathbf{c}_i$ for volumetric rendering [S1].
+-
+-### Numbered Steps
+-1.  **Encode Ray:** Compute $\mathbf{r}_{pr}$ from $\mathbf{r}_o, \mathbf{r}_d$ and $\mathbf{t}_{nf}$ [S1].
+-2.  **Coarse Sampling:** Query $F_{\theta_c}(\mathbf{r}_{pr})$ to obtain $\mathbf{T}'$, $\Delta_t$, $B_t$, and $\hat{\mathbf{c}}_c$ [S1].
+-3.  **Projection:** For each $t'_i \in \mathbf{T}'$, compute $p_i = \mathbf{r}(t'_i)$ [S1]. Trace rays from $p_i$ to the $N_n$ reference camera centers [S1]. Interpolate colors from the reference images to get $\mathbf{f}_{pi}$ [S1].
+-4.  **Refinement:** Query $F_{\theta_f}([\mathbf{r}'_{pr}, \mathbf{f}_{p1}, \dots, \mathbf{f}_{pN_s}])$ to obtain $\Delta_T$, $W$, $M$, and $\hat{\mathbf{c}}_f$ [S1].
+-5.  **Compute Refined Distances:** Linearly interpolate between consecutive elements of the expanded set $\dot{\mathbf{T}} = \{t_n, t'_1, \dots, t'_{N_s}, t_f\}$ using $\Delta_T$:
+-    $$
+-    T_i = \frac{1}{2} \left( (\dot{T}_i + \dot{T}_{i+1}) + \Delta_{T_i}(\dot{T}_{i+2} - \dot{T}_i) \right), \quad i=1,\dots,N_s
+-    $$
+-    [S1].
+-6.  **Adjust Opacity:** Compute adjusted opacities $\hat{\alpha}_i$ using the original opacities $\alpha_i$ (derived from $\sigma_i$ and distances in $T$), shifts $\Delta_t$, and scales $B_t$:
+-    $$
+-    \hat{\alpha}_i = 1 - \exp(-(\sigma_i + \Delta_{t_i})(t_{i+1} - t_i) \cdot B_{t_i})
+-    $$
+-    [S1].
+-7.  **Render Color:** Compute final color using alpha compositing with adjusted opacities:
+-    $$
+-    \hat{\mathbf{c}}(\mathbf{r}) = \sum_{i=1}^{N_s} \left( \prod_{j=1}^{i-1} (1 - \hat{\alpha}_j) \right) \hat{\alpha}_i \mathbf{c}_i
+-    $$
+-    [S1].
+-
+-### Pseudocode
++**Inputs and Outputs:**
++*   **Input:** Target ray $\mathbf{r}$ defined by origin $\mathbf{r}_o$ and direction $\mathbf{r}_d$, near/far bounds $t_n, t_f$, and a fixed set of $N_n$ neighboring reference view camera centers and colors.
++*   **Output:** Rendered ray color $\hat{c}(\mathbf{r})$.
++
++**Data Structures:**
++*   **Plucker Ray-Point Encoding:** A vector of size $N_{pr}$ (typically 48) representing the ray.
++*   **MLP Heads:**
++    *   $F_{\theta_c}$ (Coarse Sampler): 6 fully connected layers, 256 neurons, ELU activation.
++    *   $F_{\theta_f}$ (Fine Sampler): 6 fully connected layers, 256 neurons, ELU activation.
++    *   $F_{\theta_s}$ (Shading Network): 8 fully connected layers, 256 neurons (based on DoNeRF).
++    *   $F_{\theta_m}$ (Pruning Head, optional): Same complexity as $F_{\theta_c}$.
++*   **Reference Views:** A small, fixed subset of $N_n$ views from the training set.
++
++**Numbered Steps:**
++
++1.  **Ray Encoding:** Compute the Plucker ray-point representation $\mathbf{r}_{pr}$ for the target ray $\mathbf{r}$:
++    $$ \mathbf{r}_{pr} = [\mathbf{r}_d, \mathbf{r}_o + \mathbf{r}_d \odot \mathbf{t}_{nf}, (\mathbf{r}_o + \mathbf{r}_d \odot \mathbf{t}_{nf}) \odot \mathbf{r}_d] $$
++    where $\mathbf{t}_{nf}$ is a vector of $N_{pr}$ elements evenly spaced between near $t_n$ and far $t_f$ bounds, and $\odot$ is the Hadamard product [S1].
++
++2.  **Coarse Sampling:** Pass $\mathbf{r}_{pr}$ through $F_{\theta_c}$ to obtain coarse sampling distances $\mathbf{T}' = \{t'_1, \dots, t'_{N_s}\}$, opacity shifts $A_t$, scales $B_t$, and auxiliary light-field outputs $\hat{c}_c, \hat{c}_f$ [S1]:
++    $$ [ \mathbf{T}', A_t, B_t, \hat{\mathbf{c}}_c, \hat{\mathbf{c}}_f ] = F_{\theta_c}(\mathbf{r}_{pr}) $$
++    [S1]
++
++3.  **Color-to-Ray Projection:** For each coarse point $p_i = \mathbf{r}(t'_i)$, trace lines from $p_i$ to the camera centers of $N_n$ neighboring reference views. Collect the colors at these intersection points to form projection vectors $\mathbf{f}_{p_i} = [c^1_{p_i}, c^2_{p_i}, \dots, c^{N_n}_{p_i}]$ [S1].
++
++4.  **Refined Sampling:** Concatenate the encoded ray $\mathbf{r}'_{pr}$ with the projected features $\mathbf{f}_{p_1}, \dots, \mathbf{f}_{p_{N_s}}$ and pass through $F_{\theta_f}$ to obtain refinement weights $\Delta_T$, weights $W$, and mixing coefficients $M$:
++    $$ [\Delta_T, W, M] = F_{\theta_f}([\mathbf{r}'_{pr}, \mathbf{f}_{p_1}, \dots, \mathbf{f}_{p_{N_s}}]) $$
++    [S1]
++
++5.  **Distance Interpolation:** Compute refined ray distances $\mathbf{T}$ by linear interpolation between consecutive elements of the expanded set $\dot{\mathbf{T}} = \{t_n, t'_1, \dots, t'_{N_s}, t_f\}$ using $\Delta_T$:
++    $$ \mathbf{T} = \left\{ \frac{1}{2} \left( (\dot{\mathbf{T}}_i + \dot{\mathbf{T}}_{i+1}) + \Delta_{T_i}(\dot{\mathbf{T}}_{i+2} - \dot{\mathbf{T}}_i) \right) \right\}_{i=1}^{N_s} $$
++    [S1]
++
++6.  **Volumetric Rendering:** Query the shading network $F_{\theta_s}$ at points $\mathbf{r}(t)$ for $t \in \mathbf{T}$ to get densities $\sigma_i$ and colors $c_i$. Compute opacity $\alpha_i = 1 - e^{-\sigma_i(t_{i+1} - t_i)}$. Adjust opacities using $A_t$ and $B_t$ (as per Eq. 5 in [S1], typically $\hat{\alpha}_i = 1 - e^{-(\sigma_i + A_t) \Delta t} \cdot B_t$ or similar adjustment to compensate for sparse sampling, though the exact formula for $A_t, B_t$ application is referenced as Eq. 5 in the source [S1]). Render color $\hat{c}(\mathbf{r})$ using alpha compositing:
++    $$ \hat{c}(\mathbf{r}) = \sum_{i=1}^{N_s} \left( \prod_{j=1}^{i-1} 1 - \hat{\alpha}_j \right) \hat{\alpha}_i c_i $$
++    [S1]
++
++**Training Strategy (Exploration-Exploitation):**
++Training alternates between two passes [S1]:
++
++*   **Exploration Pass (Every other iteration, first $4 \times 10^5$ iterations):**
++    1.  Sample a random number of samples $N^+_s$ uniformly between $N_s$ and $N$ (max 64) [S1].
++    2.  Sample $N^+_s$ distances $T^+$ randomly around the estimated coarse points $\mathbf{T}$ and add Gaussian noise [S1].
++    3.  Query $F_{\theta_s}$ at $T^+$ to get $\{c_i, \sigma_i\}$.
++    4.  Compute loss using standard VRE (Eq. 1) [S1].
++    5.  Update only $F_{\theta_s}$ parameters [S1].
++
++*   **Exploitation Pass (Every other iteration, all iterations):**
++    1.  Query $F_{\theta_s}$ at the sparse points $\mathbf{T}$ predicted by PAS.
++    2.  Compute loss using PAS-guided VRE (Eq. 5 in [S1]) [S1].
++    3.  If iteration $< 4 \times 10^5$, add auxiliary losses for coarse color $\hat{c}_c$ and fine color $\hat{c}_f$ [S1].
++    4.  Update all MLP heads ($F_{\theta_c}, F_{\theta_f}, F_{\theta_s}$) [S1].
++
++**Auxiliary Losses:**
++*   Primary loss: $l = \frac{1}{N_r} \sum_{N_r} \|\hat{c}(\mathbf{r}) - \mathbf{c}(\mathbf{r})\|_2$ [S1].
++*   Auxiliary loss: $l_a = \frac{1}{N_r} \sum_{N_r} \|\hat{\mathbf{c}}_c(\mathbf{r}) - \mathbf{c}(\mathbf{r})\|_2 + \|\hat{\mathbf{c}}_f(\mathbf{r}) - \mathbf{c}(\mathbf{r})\|_2$ [S1]. Note: The source text for Eq. 13 contains identical terms, but describes the structure of combining coarse and fine light-field outputs [S1].
++*   Total loss: $l_T = l + \lambda l_a$, where $\lambda = 1$ for the first 60% of training ($4 \times 10^5$ iterations) and 0 afterward [S1].
++
++**Pruning (ProNeRF-8 prune):**
++*   Train a complementary MLP head $F_{\theta_m}$ (same complexity as $F_{\theta_c}$) to predict the error between the fast output $\hat{c}_f$ and the full output $\hat{c}$ [S1].
++*   During inference, if the predicted error is low, render using $\hat{c}_f$ (AVR); otherwise, run $F_{\theta_s}$ [S1].
++
++**Pseudocode:**
++
+ ```python
+-def pronerf_render(ray_origin, ray_direction, ref_view_colors, ref_cameras, t_n, t_f, N_pr, N_s, N_n):
+-    import math
+-
+-    # Helper: Trace ray from p to cam_center, interpolate color from image
+-    def trace_and_interpolate(p, cam_center, image, intrinsics):
+-        dir_to_cam = [cam_center[j] - p[j] for j in range(3)]
+-        u, v = project_to_image(p, cam_center, intrinsics)
+-        return bilinear_sample(image, u, v)
+-
+-    # 1. Plücker Ray-Point Encoding
+-    t_nf = [t_n + i * (t_f - t_n) / (N_pr - 1) for i in range(N_pr)]
+-    r_d = ray_direction
+-    r_o = ray_origin
+-    term2 = [r_o[j] + r_d[j] * t for j in range(3) for t in t_nf]
+-    term3 = [term2[j] * r_d[j % 3] for j in range(len(term2))]
+-    r_pr = r_d + term2 + term3
+-
+-    # 2. Coarse Sampling
+-    T_prime, delta_t, B_t, c_hat_c = F_theta_c(r_pr)
+-
+-    # 3. Color-to-Ray Projections
+-    projections = []
+-    for t_prime in T_prime:
+-        p = [r_o[j] + r_d[j] * t_prime for j in range(3)]
+-        view_colors = []
+-        for k in range(N_n):
+-            view_colors.append(trace_and_interpolate(p, ref_cameras[k].center, ref_view_colors[k], ref_cameras[k].intrinsics))
+-        projections.append(view_colors)
+-
+-    # 4. Refinement
+-    delta_T, W, M, c_hat_f = F_theta_f(r_pr + flatten(projections))
+-
+-    # 5. Refined Distances
+-    T_dot = [t_n] + T_prime + [t_f]
+-    T = []
+-    for i in range(N_s):
+-        t_i = 0.5 * ((T_dot[i] + T_dot[i+1]) + delta_T[i] * (T_dot[i+2] - T_dot[i]))
+-        T.append(t_i)
+-
+-    # 6. Shading and Opacity Adjustment
+-    alphas = []
+-    colors = []
+-    for i in range(N_s):
+-        x = [r_o[j] + r_d[j] * T[i] for j in range(3)]
+-        sigma, c = F_theta_s(x)
+-        colors.append(c)
+-        delta_dist = T[i+1] - T[i] if i < N_s - 1 else t_f - T[i]
+-        adj_alpha = 1.0 - math.exp(-(sigma + delta_t[i]) * delta_dist * B_t[i])
+-        alphas.append(adj_alpha)
+-
+-    # 7. Compositing
+-    T_transmittance = 1.0
+-    c_final = [0.0, 0.0, 0.0]
+-    for i in range(N_s):
+-        c_final = [c_final[j] + T_transmittance * alphas[i] * colors[i][j] for j in range(3)]
+-        T_transmittance *= (1.0 - alphas[i])
+-
+-    return c_final, c_hat_c, c_hat_f
++import torch
++import torch.nn as nn
++import torch.nn.functional as F
++
++class ProNeRF:
++    def __init__(self, N_s=8, N_pr=48, N_n=5, N_max_explore=64, 
++                 lr=5e-4, total_iters=700000, aux_iters=400000):
++        self.N_s = N_s
++        self.N_pr = N_pr
++        self.N_n = N_n
++        self.N_max_explore = N_max_explore
++        self.total_iters = total_iters
++        self.aux_iters = aux_iters
++        
++        # Define MLPs
++        self.F_c = CoarseMLP(N_pr)
++        self.F_f = FineMLP(N_pr + N_n * N_s)
++        self.F_s = ShadingMLP()
++        self.F_m = PruningMLP(N_pr) # Optional
++        
++        # Optimizers
++        self.opt_s = torch.optim.Adam(self.F_s.parameters(), lr=lr)
++        self.opt_cfs = torch.optim.Adam(list(self.F_c.parameters()) + 
++                                        list(self.F_f.parameters()) + 
++                                        list(self.F_s.parameters()), lr=lr)
++        
++        # Reference views data (colors and camera centers)
++        # self.ref_colors: [N_n, H, W, 3]
++        # self.ref_cameras: [N_n, 4, 4] transformation matrices
++
++    def encode_ray(self, r_o, r_d, t_n, t_f):
++        # r_o: [B, 3], r_d: [B, 3]
++        t_nf = torch.linspace(t_n, t_f, self.N_pr).to(r_o.device)
++        # Expand dims for broadcasting
++        t_nf = t_nf.unsqueeze(0).expand(r_o.shape[0], -1) # [B, N_pr]
++        
++        # Plucker encoding components
++        # r_d: [B, 3]
++        # r_o + r_d * t_nf: [B, N_pr, 3]
++        term1 = r_d.unsqueeze(1).expand(-1, self.N_pr, -1)
++        term2 = r_o.unsqueeze(1) + r_d.unsqueeze(1) * t_nf.unsqueeze(2)
++        
++        # Concatenate [r_d, r_o + r_d * t_nf, (r_o + r_d * t_nf) * r_d]
++        # Note: Source says Hadamard product for last term
++        term3 = term2 * r_d.unsqueeze(1)
++        
++        r_pr = torch.cat([term1, term2, term3], dim=-1) # [B, N_pr, 9]
++        return r_pr.flatten(1) # [B, N_pr * 9]
++
++    def get_projections(self, r_o, r_d, t_coarse, ref_cameras, ref_colors):
++        # t_coarse: [B, N_s]
++        # Points p_i = r_o + r_d * t_coarse
++        points = r_o.unsqueeze(1) + r_d.unsqueeze(1) * t_coarse.unsqueeze(2) # [B, N_s, 3]
++        
++        # For each point, project to N_n reference views
++        # This requires ray-plane intersection or similar. 
++        # Simplified: Assume we have precomputed colors at these projected locations
++        # In practice, this involves tracing rays from points to camera centers
++        # and sampling the reference images.
++        # f_pi shape: [B, N_s, N_n, 3]
++        f_pi = self.sample_reference_views(points, ref_cameras, ref_colors)
++        return f_pi
++
++    def sample_reference_views(self, points, ref_cameras, ref_colors):
++        # Placeholder for actual ray-triangle/intersection logic
++        # Returns colors at the intersection of rays (point -> cam_center) with reference planes
++        # B, N_s, N_n, 3
++        B, N_s, _ = points.shape
++        # Initialize with zeros
++        colors = torch.zeros(B, N_s, self.N_n, 3, device=points.device)
++        # ... Implementation of color-to-ray projection ...
++        return colors
++
++    def forward(self, r_o, r_d, t_n, t_f, ref_cameras, ref_colors):
++        r_pr = self.encode_ray(r_o, r_d, t_n, t_f)
++        
++        # Step 2: Coarse Sampling
++        out_c = self.F_c(r_pr)
++        # Split output: T', A_t, B_t, c_hat_c, c_hat_f
++        # Assuming specific split based on layer output size
++        # T' shape: [B, N_s]
++        # A_t, B_t: [B, N_s] or scalars? Source implies per-point or global adjustment
++        # Let's assume A_t, B_t are [B, N_s] for opacity adjustment
++        T_prime = out_c[:, :self.N_s]
++        A_t = out_c[:, self.N_s : 2*self.N_s]
++        B_t = out_c[:, 2*self.N_s : 3*self.N_s]
++        c_hat_c = out_c[:, 3*self.N_s : 3*self.N_s + 3] # [B, 3]
++        c_hat_f = out_c[:, 3*self.N_s + 3 : 3*self.N_s + 6] # [B, 3]
++        
++        # Step 3: Projections
++        f_pi = self.get_projections(r_o, r_d, T_prime, ref_cameras, ref_colors) # [B, N_s, N_n, 3]
++        
++        # Step 4: Refined Sampling
++        # Concatenate r_pr and flattened f_pi
++        f_pi_flat = f_pi.view(f_pi.shape[0], -1) # [B, N_s * N_n * 3]
++        input_f = torch.cat([r_pr, f_pi_flat], dim=-1)
++        out_f = self.F_f(input_f)
++        
++        # Split: Delta_T, W, M
++        # Delta_T: [B, N_s]
++        # W: [B, N_s]
++        # M: [B, N_n]
++        Delta_T = out_f[:, :self.N_s]
++        W = out_f[:, self.N_s : 2*self.N_s]
++        M = out_f[:, 2*self.N_s : 2*self.N_s + self.N_n]
++        
++        # Step 5: Interpolation
++        # Expand T_prime to include t_n and t_f
++        t_n_exp = torch.full_like(T_prime[:, :1], t_n)
++        t_f_exp = torch.full_like(T_prime[:, :1], t_f)
++        T_dot = torch.cat([t_n_exp, T_prime, t_f_exp], dim=1) # [B, N_s + 2]
++        
++        # T = 0.5 * ( (T_dot_i + T_dot_{i+1}) + Delta_T_i * (T_dot_{i+2} - T_dot_i) )
++        # Indices: i from 0 to N_s-1
++        # T_dot_i, T_dot_{i+1}, T_dot_{i+2}
++        T_i = T_dot[:, :-2]
++        T_ip1 = T_dot[:, 1:-1]
++        T_ip2 = T_dot[:, 2:]
++        
++        T_refined = 0.5 * ((T_i + T_ip1) + Delta_T * (T_ip2 - T_i))
++        
++        # Step 6: Rendering
++        # Query F_s at T_refined
++        points_refined = r_o.unsqueeze(1) + r_d.unsqueeze(1) * T_refined.unsqueeze(2) # [B, N_s, 3]
++        sigma, color = self.F_s(points_refined) # [B, N_s], [B, N_s, 3]
++        
++        # Opacity calculation
++        # Delta t
++        dt = torch.diff(T_refined, dim=1, prepend=torch.zeros(B, 1, device=T_refined.device))
++        # Standard opacity
++        alpha = 1.0 - torch.exp(-sigma * dt)
++        
++        # Adjust opacity with A_t, B_t
++        # Source Eq 5 reference. Assuming: alpha_adj = 1 - exp(-(sigma + A_t) * dt) * B_t
++        # Or similar. Let's use a generic adjustment placeholder if exact formula is ambiguous
++        # However, source says "adjusting alpha_i in Eq. 4 is needed... A_t and B_t"
++        # Let's assume: alpha_adj = (1 - exp(-sigma * dt)) * B_t + A_t ? 
++        # Given ambiguity, we stick to the structure:
++        alpha_adj = alpha * B_t.unsqueeze(-1) + A_t.unsqueeze(-1) # [B, N_s, 1]
++        alpha_adj = torch.clamp(alpha_adj, 0, 1)
++        
++        # Alpha compositing
++        # Transmittance T_i = prod_{j=0}^{i-1} (1 - alpha_j)
++        ones = torch.ones_like(alpha_adj)
++        one_minus_alpha = ones - alpha_adj
++        transmittance = torch.cumprod(one_minus_alpha, dim=1)
++        transmittance = torch.cat([ones[:, :1, :], transmittance[:, :-1, :]], dim=1)
++        
++        contribution = transmittance * alpha_adj * color
++        c_hat = torch.sum(contribution, dim=1) # [B, 3]
++        
++        return c_hat, c_hat_c, c_hat_f, T_refined, alpha_adj
++
++    def train_step(self, batch, it):
++        r_o, r_d, c_gt, t_n, t_f, ref_cameras, ref_colors = batch
++        
++        # Get PAS outputs
++        c_hat, c_hat_c, c_hat_f, T_refined, alpha_adj = self.forward(r_o, r_d, t_n, t_f, ref_cameras, ref_colors)
++        
++        is_exploration = (it % 2 == 0) and (it < self.aux_iters)
++        
++        if is_exploration:
++            # Exploration: Dense sampling around T
++            N_s_plus = torch.randint(self.N_s, self.N_max_explore, (1,)).item()
++            # Sample N_s_plus points around T_refined
++            # Add noise
++            # Query F_s
++            # Compute VRE loss
++            # Update F_s only
++            pass 
++        else:
++            # Exploitation: Sparse sampling T_refined
++            # Compute VRE loss with adjusted opacities
++            loss = F.mse_loss(c_hat, c_gt)
++            
++            if it < self.aux_iters:
++                loss_c = F.mse_loss(c_hat_c, c_gt)
++                loss_f = F.mse_loss(c_hat_f, c_gt)
++                loss = loss + loss_c + loss_f
++            
++            # Update all
++            pass
+ ```
+ 
+-### Parameters
+-*   **$N_s$:** Number of samples. Typical values: 8, 12, 32 [S1].
+-*   **$N_{pr}$:** Number of Plücker points. Value: 48 [S1].
+-*   **$N$:** Maximum exploration samples. Value: 64 [S1].
+-*   **$N_n$:** Number of neighboring reference views. Significantly smaller than total training views $N_t$ [S1].
+-*   **Learning Rate:** $5 \times 10^{-4}$, exponentially decayed for 700,000 iterations [S1].
+-*   **Batch Size:** 4,096 rays [S1].
+-*   **$\lambda$:** Auxiliary loss weight. 1 for first 60% of training, 0 afterward [S1].
+-*   **Auxiliary Loss Duration:** First $4 \times 10^5$ iterations [S1].
+-
+-### Edge Cases and Pitfalls
+-*   **Pruning:** ProNeRF-8 prune adds an MLP head $F_{\theta_m}$ (same complexity as $F_{\theta_c}$) to predict error between $\hat{\mathbf{c}}_f$ and $\hat{\mathbf{c}}$ [S1]. If error is low, use $\hat{\mathbf{c}}_f$ (AVR); otherwise, run $F_{\theta_s}$ [S1]. This adds 3.3 MB memory overhead [S1].
+-*   **Auxiliary Loss:** Removing auxiliary loss $l_a$ causes ~1 dB PSNR drop [S1].
+-*   **Plücker Encoding:** Removing Plücker ray-point encoding causes ~0.5 dB PSNR drop [S1].
+-
+-## Subtopics
+-
+-### ProNeRF-8
+-8 samples. 26.78 dB PSNR on LLFF. >20x faster than NeRF [S1].
+-
+-### ProNeRF-12
+-12 samples. 27.15 dB PSNR on LLFF. ~15x faster than NeRF [S1].
+-
+-### ProNeRF-32
+-32 samples. 31.92 dB PSNR on Blender. 3.2 FPS after pruning [S1].
+-
+-### ProNeRF-8 prune
+-Pruned version of ProNeRF-8. 23% faster than standard ProNeRF-8. 26.54 dB PSNR [S1].
+-
+ ## Operating characteristics
+-*   **Speed:** 15-23× faster than vanilla NeRF [S1]. ProNeRF-8 is >20x faster [S1]. ProNeRF-8 prune is 23% faster than ProNeRF-8 [S1].
+-*   **Quality:** 0.65 dB higher PSNR than NeRF on LLFF [S1]. 0.95 dB higher PSNR than HyperReel [S1].
+-*   **Memory:** Similar to NeRF. ProNeRF-8 prune adds 3.3 MB overhead [S1]. ProNeRF-32 uses 6.3 MB memory [S1].
+-*   **Strengths:** High quality with few samples; consistent memory footprint via fixed reference views; fast inference [S1].
+-*   **Limitations:** Requires training with auxiliary losses; pruning adds 3.3 MB memory overhead and requires training a complementary MLP head [S1].
+-*   **When to use:** When rendering speed is critical but quality must exceed sampler-based methods like HyperReel, and memory is constrained [S1].
+-*   **When not to use:** When generalizable rendering across many scenes without per-scene training is required (ProNeRF is not generalizable like IBRNet) [S1].
++*   **Speed:** ProNeRF is 15-23× faster than vanilla NeRF [S1]. ProNeRF-8 is >20× faster, ProNeRF-12 is ~15× faster [S1]. ProNeRF-8 prune is 23% faster than standard ProNeRF-8 [S1].
++*   **Quality:** ProNeRF-12 achieves 0.65dB higher PSNR than vanilla NeRF and 0.95dB higher PSNR than HyperReel on LLFF [S1]. ProNeRF-8 achieves 26.78 dB PSNR on LLFF, outperforming vanilla NeRF (26.50 dB) by 0.28 dB [S1].
++*   **Memory:** Memory footprint is similar to NeRF. Pruning adds 3.3 MB of memory overhead [S1].
++*   **Scaling:** Uses a fixed subset of reference views ($N_n$) regardless of the total number of training views ($N_t$), ensuring consistent memory footprint [S1].
++*   **Strengths:** Optimal trade-off between memory, speed, and quality. Better quality than explicit methods like K-Planes and HyperReel [S1].
++*   **Limitations:** Requires careful tuning of the exploration-exploitation balance. Removing auxiliary loss causes ~1 dB PSNR drop; removing Plucker encoding causes ~0.5 dB drop [S1].
+ 
+ ## Background
+-ProNeRF was proposed in 2024 [S1]. It builds on the differentiable approximation of continuous radiance fields [Parent]. It addresses the quality degradation in few-point sampling methods [S1]. It is evaluated on LLFF and Blender datasets [S1].
++ProNeRF was proposed in 2024 [S1]. It builds on [Specific Model Architectures](8585-specific-model-architectures.md) [G]. It is evaluated on LLFF (Mildenhall et al. 2019) and Blender (Mildenhall et al. 2020) datasets [S1].
+ 
+ ## Sources

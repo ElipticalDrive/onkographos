@@ -1,0 +1,186 @@
+--- v005.md
++++ v006.md
+@@ -1,5 +1,5 @@
+ # Two-stage Ray Marching with Empty-Space Skipping
+ 
+-Also called: Occupancy Map Empty Space Skipping, Occupancy-based early exit, Simple occupancy map traversal, Two-phase volumetric rendering
++Also called: Occupancy Map Empty Space Skipping, Occupancy-based early exit, Simple occupancy map traversal, Two-phase volumometric rendering
+ 
+ ## Overview
+@@ -12,5 +12,5 @@
+ *   **Inputs:**
+     *   Primary volume data (density/opacity field) [S1][S2, unofficial].
+-    *   Occupancy map: A lower-resolution grid where each voxel indicates if its corresponding volume block is active (non-zero density/opacity) or empty [S1][S2, unofficial].
++    *   Occupancy map: A 3D grid of integers (or bits) where each element corresponds to a block of $B \times B \times B$ volume voxels [S1][S2, unofficial].
+     *   Camera parameters: Origin, direction, projection matrix, and world-to-camera matrices [S2, unofficial].
+     *   Parameters:
+@@ -24,5 +24,5 @@
+ 
+ ### Data Structures
+-1.  **Occupancy Map:** A 3D grid of integers (or bits). Each element corresponds to a block of $B \times B \times B$ volume voxels [S1].
++1.  **Occupancy Map:** A 3D grid of integers (or bits) [S1][S2, unofficial].
+     *   Value `1`: Block contains active data [S2, unofficial].
+     *   Value `0`: Block is empty [S2, unofficial].
+@@ -46,5 +46,5 @@
+         *   Query occupancy: `smokeValue = getSmokeVoxel(positionWS)` [S2, unofficial].
+             *   `getSmokeVoxel` converts world position to voxel indices, checks bounds, and returns the occupancy map value (0 or 1) [S2, unofficial].
+-    *   **Exit Condition:** If `smokeValue <= 0` after exceeding `_RayMaxLength`, the ray misses the volume. Output black color and terminate [S2, unofficial].
++    *   **Exit Condition:** If `smokeValue <= 0` after exceeding `_RayMaxLength`, the ray misses the volume entirely and outputs black color [S2, unofficial].
+ 3.  **Stage 2: Density Sampling (Active Region Traversal):**
+     *   If `smokeValue == 1` (entry detected):
+@@ -57,5 +57,5 @@
+             *   Increment `length` by `stepSize` [S2, unofficial].
+             *   Increment `stage2StepNum` [S2, unofficial].
+-    *   **Resuming Skipping:** After Stage 2, if the ray is still within the volume bounds, check if the occupancy map coordinate $u_{occ}$ has changed and if the previously sampled voxel had zero opacity. If so, resume Stage 1 skipping [S1].
++    *   **Resuming Skipping:** After Stage 2, if the ray is still within the volume bounds, check if the occupancy map coordinate $u_{occ}$ has changed and if the previously sampled voxel had zero opacity [S1]. If so, resume Stage 1 skipping [S1].
+ 4.  **Backward Adjustment (Boundary Handling):**
+     *   When an occupied region is found, decrement the ray step number by $\Delta i_{\text{backward}} = -\lfloor f \rfloor$ to ensure the ray goes back at least one voxel length, accounting for interpolation or boundary isosurfaces [S1]. Here, $f$ is the sampling factor [S1].
+@@ -63,5 +63,5 @@
+ ### Formulas
+ **Step Calculation in Occupancy Space:**
+-To determine how many steps to skip in the occupancy map, the algorithm calculates the distance to the next block boundary. For a ray parameter $\mathbf{u}$ and step $\Delta \mathbf{u}$, the number of steps $\Delta \mathbf{i}$ on each dimension $j \in \{x, y, z\}$ is:
++To determine how many steps to skip in the occupancy map, the algorithm calculates the distance to the next block boundary [S1]. For a ray parameter $\mathbf{u}$ and step $\Delta \mathbf{u}$, the number of steps $\Delta \mathbf{i}$ on each dimension $j \in \{x, y, z\}$ is:
+ $$ \Delta i_j = \begin{cases} \lceil (1 + \lfloor \mathbf{u}_j \rfloor - \mathbf{u}_j) / \Delta \mathbf{u}_j \rceil, & \text{if } \Delta \mathbf{u}_j > 0 \\ \lceil (\lfloor \mathbf{u}_j \rfloor - \mathbf{u}_j) / \Delta \mathbf{u}_j \rceil, & \text{otherwise} \end{cases} $$
+ This can be vectorized using the Heaviside step function:
+@@ -85,48 +85,52 @@
+     occupancy_map: 3D list of ints (0 or 1)
+     volume_data: 3D list of floats
+-    params: dict containing B, stepSize, RayMaxLength, stage2StepMax, voxelResolution, boundsExtent, densityMult
++    params: dict containing B, stepSize, RayMaxLength, stage2StepMax, voxelResolution, boundsExtent, densityMult, smoothing, smokeOrigin, smokeRadius
+     """
+     length = 0.0
+-    smoke_value = 0  # 0 means empty/unfound
+-    
+-    # Stage 1: Find active region
++    smoke_value = -1  # Initialize as per [S2, unofficial]
++    stage2_step_num = 0
++    accumulated_density = 0.0
++
++    # Stage 1: Occupancy Lookup (Empty Space Skipping)
+     while smoke_value <= 0 and length < params['RayMaxLength']:
+         length += params['stepSize']
+         position_ws = [ray_origin[i] + length * ray_direction[i] for i in range(3)]
+-        
+-        # Convert world position to occupancy map index
++
++        # Convert world position to occupancy map index: u_occ = u_vol / B
+         voxel_pos = [(position_ws[i] + params['boundsExtent'][i]) / params['voxelResolution'] for i in range(3)]
+-        occ_index = [int(voxel_pos[i] // params['B']) for i in range(3)]
+-        
+-        if is_within_bounds(occ_index, occupancy_map.shape):
+-            smoke_value = occupancy_map[occ_index[0]][occ_index[1]][occ_index[2]]
++        occ_idx = [int(voxel_pos[i] // params['B']) for i in range(3)]
++
++        if is_within_bounds(occ_idx, occupancy_map.shape):
++            smoke_value = occupancy_map[occ_idx[0]][occ_idx[1]][occ_idx[2]]
+         else:
+-            smoke_value = 0 # Out of bounds is empty
+-            
+-    # If no active region found within max length
++            smoke_value = 0
++
++    # Exit Condition: Ray misses volume
+     if smoke_value <= 0:
+-        return [0.0, 0.0, 0.0, 0.0] # Black, transparent
++        return [0.0, 0.0, 0.0, 0.0]
+ 
+-    # Stage 2: Sample density in active region
+-    stage2_step_num = 0
+-    accumulated_density = 0.0
+-    
++    # Backward Adjustment: Ensure ray goes back at least one voxel length for boundary/interpolation [S1]
++    length -= params['stepSize']
++
++    # Stage 2: Density Sampling (Active Region Traversal)
+     while stage2_step_num < params['stage2StepMax']:
+         sample_point = [ray_origin[i] + length * ray_direction[i] for i in range(3)]
+-        
++
+         # Sample density from volume data
+         density = sample_volume_density(sample_point, volume_data, params)
+-        
++
+         accumulated_density += density * params['densityMult']
+-        
++
+         length += params['stepSize']
+         stage2_step_num += 1
+-        
++
+         # Check if we should resume skipping
+         current_voxel_pos = [(sample_point[i] + params['boundsExtent'][i]) / params['voxelResolution'] for i in range(3)]
+-        current_occ_index = [int(current_voxel_pos[i] // params['B']) for i in range(3)]
+-        if is_within_bounds(current_occ_index, occupancy_map.shape) and occupancy_map[current_occ_index[0]][current_occ_index[1]][current_occ_index[2]] == 0:
+-            break # Resume Stage 1 skipping logic in a real implementation
+-            
++        current_occ_idx = [int(current_voxel_pos[i] // params['B']) for i in range(3)]
++
++        # Resuming Skipping: Check if occupancy map coordinate changed and previous voxel was zero opacity [S1]
++        if is_within_bounds(current_occ_idx, occupancy_map.shape) and occupancy_map[current_occ_idx[0]][current_occ_idx[1]][current_occ_idx[2]] == 0:
++            break  # In a full implementation, this would loop back to Stage 1
++
+     # Simple transfer function for output
+     color = [accumulated_density, accumulated_density, accumulated_density, 1.0]
+@@ -134,24 +138,26 @@
+ 
+ def sample_volume_density(pos, volume_data, params):
+-    # Convert world pos to voxel index
+     voxel_pos = [(pos[i] + params['boundsExtent'][i]) / params['voxelResolution'] for i in range(3)]
+-    voxel_idx = [int(voxel_pos[i] // 1.0) for i in range(3)] # floor
+-    
++    voxel_idx = [int(voxel_pos[i]) for i in range(3)]  # floor
++
+     if not is_within_bounds(voxel_idx, volume_data.shape):
+         return 0.0
+-        
++
+     # Direct lookup or trilinear interpolation
+     val = volume_data[voxel_idx[0]][voxel_idx[1]][voxel_idx[2]]
+-    
+-    # Apply transfer function or density calculation if needed
+-    # Example from [S2, unofficial]:
+-    # dist = sqrt(sum((pos[i] - smokeOrigin[i])**2 for i in range(3)))
+-    # norm_dist = dist / smokeRadius
+-    # val = 1.0 - smoothstep(smoothing, 1.0, norm_dist)
+-    
++
++    # Apply density calculation from [S2, unofficial]
++    dist = sum((pos[i] - params['smokeOrigin'][i])**2 for i in range(3)) ** 0.5
++    norm_dist = dist / params['smokeRadius']
++    val = max(0.0, min(1.0, 1.0 - smoothstep(params['smoothing'], 1.0, norm_dist)))
++
+     return val
+ 
+ def is_within_bounds(idx, shape):
+     return all(0 <= i < s for i, s in zip(idx, shape))
++
++def smoothstep(edge0, edge1, x):
++    t = max(0.0, min(1.0, (x - edge0) / (edge1 - edge0)))
++    return t * t * (3 - 2 * t)
+ ```
+ 
+@@ -160,6 +166,6 @@
+ *   **Asymmetric Bounds Check:** Incorrect bounds checking logic (e.g., `position.y < -_BoundsExtent.y + _BoundsExtent.y`) can anchor the volume incorrectly at ground level or cause out-of-bounds access [S2, unofficial].
+ *   **Variable Shadowing:** Using variable names like `length` that shadow intrinsic functions (e.g., HLSL `length()`) can cause compilation errors or logic bugs [S2, unofficial].
+-*   **Noise Sampling:** Sampling noise using screen UVs (`uv`) pins the noise pattern to the screen, causing it to "swim" as the camera moves. Correct implementation requires sampling noise using world position (`samplePoint`) to attach detail to the volume [S2, unofficial].
+-*   **Interpolation Halo:** Trilinear interpolation of the volume can cause a sampling point near the edge of an empty block to map to a non-zero opacity if a neighboring block is occupied. A backward step adjustment ($\Delta i_{\text{backward}}$) is required to re-sample the boundary correctly [S1].
++*   **Noise Sampling:** Sampling noise using screen UVs (`uv`) pins the noise pattern to the screen, causing it to "swim" as the camera moves [S2, unofficial]. Correct implementation requires sampling noise using world position (`samplePoint`) to attach detail to the volume [S2, unofficial].
++*   **Interpolation Halo:** Trilinear interpolation of the volume can cause a sampling point near the edge of an empty block to map to a non-zero opacity if a neighboring block is occupied [S1]. A backward step adjustment ($\Delta i_{\text{backward}}$) is required to re-sample the boundary correctly [S1].
+ 
+ ## Subtopics
+@@ -172,6 +178,6 @@
+ 
+ ## Operating characteristics
+-*   **Time Complexity:** Stage 1 is $O(k)$ where $k$ is the number of empty blocks skipped. Stage 2 is $O(m)$ where $m$ is the number of samples in the active region. Overall complexity depends on the sparsity of the volume. For sparse volumes, it is significantly faster than brute-force marching [S3, unofficial].
+-*   **Memory Complexity:** Requires storage for the primary volume data and the occupancy map. The occupancy map size is $1/B^3$ of the volume data size [S1].
++*   **Time Complexity:** Stage 1 is $O(k)$ where $k$ is the number of empty blocks skipped [S3, unofficial]. Stage 2 is $O(m)$ where $m$ is the number of samples in the active region [S1][S2, unofficial]. Overall complexity depends on the sparsity of the volume [S1][S3, unofficial]. For sparse volumes, it is significantly faster than brute-force marching [S3, unofficial].
++*   **Memory Complexity:** Requires storage for the primary volume data and the occupancy map [S1]. The occupancy map size is $1/B^3$ of the volume data size [S1].
+ *   **Measured Performance:** In a medical imaging project, using a Volume Occupancy Map for skipping increased rendering frame rate by 3.2x [S3, unofficial].
+ *   **Strengths:** Simple to implement; effective for sparse volumes; low memory overhead for the acceleration structure [S1][S3, unofficial].
+@@ -181,5 +187,5 @@
+ 
+ ## Background
+-The concept of using occupancy maps for empty space skipping in volume rendering was introduced in the paper "Efficient ray casting of volumetric images using distance maps for empty space skipping" [S1]. The method leverages the observation that large portions of volumetric datasets are empty, and skipping these regions can significantly reduce rendering time. The two-stage approach (search then sample) is a common optimization pattern in graphics, adapted here for volumetric data using a flat occupancy grid [S1][S2, unofficial]. The technique is widely used in real-time rendering of atmospheric effects and medical visualization [S1][S3, unofficial].
++The concept of using occupancy maps for empty space skipping in volume rendering was introduced in the paper "Efficient ray casting of volumetric images using distance maps for empty space skipping" [S1]. The method leverages the observation that large portions of volumetric datasets are empty, and skipping these regions can significantly reduce rendering time [S1][S2, unofficial]. The two-stage approach (search then sample) is a common optimization pattern in graphics, adapted here for volumetric data using a flat occupancy grid [S1][S2, unofficial]. The technique is widely used in real-time rendering of atmospheric effects and medical visualization [S1][S3, unofficial].
+ 
+ ## Sources

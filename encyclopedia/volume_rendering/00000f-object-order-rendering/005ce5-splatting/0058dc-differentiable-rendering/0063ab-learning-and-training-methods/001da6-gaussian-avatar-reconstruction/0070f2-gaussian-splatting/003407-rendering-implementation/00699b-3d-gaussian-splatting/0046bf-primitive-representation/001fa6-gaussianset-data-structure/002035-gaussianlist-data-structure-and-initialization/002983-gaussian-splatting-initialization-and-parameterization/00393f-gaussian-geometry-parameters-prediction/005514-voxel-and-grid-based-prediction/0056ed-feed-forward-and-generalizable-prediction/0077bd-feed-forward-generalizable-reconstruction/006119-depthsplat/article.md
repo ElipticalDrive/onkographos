@@ -1,0 +1,229 @@
+# DepthSplat
+
+
+## Overview
+DepthSplat is a feed-forward method for 3D Gaussian Splatting reconstruction that integrates pre-trained monocular depth features into a multi-view cost volume framework to produce robust depth maps and Gaussian parameters [S1]. It solves the problem of inaccurate depth estimation in low-texture, occluded, or reflective regions where standard multi-view stereo fails, and scale ambiguities inherent in monocular estimation [S1]. Unlike sibling methods that either discard explicit feature matching (e.g., GS-LRM) or use monocular features only to refine coarse depth (e.g., TranSplat), DepthSplat concatenates monocular features with multi-view cost volumes early in the pipeline, enabling efficient training on limited hardware and high-quality generalizable reconstruction [S1].
+
+## How it works
+**Inputs:** $N$ RGB images $\{I_i\}_{i=1}^N$ with known projection matrices $\{P_i\}_{i=1}^N$ (intrinsic and extrinsic).
+**Outputs:** A set of 3D Gaussians $\mathcal{G} = \{\mu_j, \alpha_j, \Sigma_j, c_j\}$ for each pixel $j$ in the reference views, and rendered novel views.
+
+**Data Structures:**
+*   **Image Features:** $F_i \in \mathbb{R}^{\frac{H}{s} \times \frac{W}{s} \times C}$, extracted per view.
+*   **Cost Volume:** $C_i \in \mathbb{R}^{\frac{H}{s} \times \frac{W}{s} \times D}$, representing correlation scores for depth candidates.
+*   **Depth Map:** $D_i \in \mathbb{R}^{H \times W}$, predicted dense depth.
+*   **Gaussian Parameters:** $\mu_j \in \mathbb{R}^3$, $\alpha_j \in \mathbb{R}$, $\Sigma_j \in \mathbb{R}^{3 \times 3}$ (or parameterized as scale/rotation), $c_j$ (color/SH).
+
+**Parameters:**
+*   $N$: Number of input views.
+*   $D$: Number of depth candidates sampled uniformly between near and far planes.
+*   $s$: Downsampling factor for feature extraction. $s=4$ if two stride-2 convolutions are used; $s=8$ if three are used [S1].
+*   $K$: Number of nearest neighbor views selected for cross-attention. $K=2$ is used when $N > 2$ [S1].
+
+**Steps:**
+
+1.  **Monocular Feature Extraction:**
+    For each input image $I_i$, extract features $F_i^{mono}$ using a pre-trained monocular depth encoder (e.g., ViT-based) [S1].
+
+2.  **Multi-View Feature Extraction:**
+    Encode input images $\{I_i\}$ into multi-view features $F_i \in \mathbb{R}^{\frac{H}{s} \times \frac{W}{s} \times C}$ using a backbone with stride-2 convolutions [S1].
+
+3.  **Cost Volume Construction:**
+    For each reference view $i$:
+    a. Uniformly sample $D$ depth candidates $\{d_m\}_{m=1}^D$ from the near/far depth ranges.
+    b. Identify the set of neighboring views. If $N > 2$, select the top-$K$ ($K=2$) nearest neighboring views based on camera distance to view $i$ [S1].
+    c. For each selected neighbor $j$ and each depth candidate $d_m$:
+       i. Warp the feature map $F_j$ of view $j$ to the coordinate system of view $i$ using $P_i$ and depth $d_m$ to obtain warped features $F_{j \to i}^m$ [S1].
+       ii. Compute the dot-product correlation between $F_i$ and $F_{j \to i}^m$ [S1].
+    d. Combine correlation values from the selected neighbors by averaging [S1].
+    e. Stack correlations for all $D$ depth candidates to form the cost volume $C_i \in \mathbb{R}^{\frac{H}{s} \times \frac{W}{s} \times D}$ [S1].
+
+4.  **Multi-View Transformer:**
+    Process the features $\{F_i\}$ using a Multi-View Transformer consisting of six stacked self- and cross-attention layers to obtain multi-view-aware features [S1].
+
+5.  **Feature Concatenation:**
+    Concatenate the multi-view cost volumes $C_i$ with the monocular features $F_i^{mono}$ (upsampled or aligned as necessary) [S1].
+
+6.  **Depth Regression:**
+    Pass the concatenated features through a 2D U-Net architecture followed by a softmax layer to predict the probability distribution over depth candidates, yielding the dense per-pixel depth map $D_i \in \mathbb{R}^{H \times W}$ [S1].
+
+7.  **Gaussian Center Unprojection:**
+    Unproject the predicted depth map $D_i$ to 3D space using the camera projection matrix $P_i$ to obtain the Gaussian centers $\mu_j$ for each pixel $j$ [S1].
+
+8.  **Remaining Gaussian Parameter Prediction:**
+    Predict opacity $\alpha_j$, covariance $\Sigma_j$, and color $c_j$ using an additional lightweight network head operating in parallel with the depth regression [S1].
+
+9.  **Rendering:**
+    Render novel views using the differentiable splatting operation with the predicted 3D Gaussians $\{\mu_j, \alpha_j, \Sigma_j, c_j\}$ [S1].
+
+**Pseudocode:**
+
+> **Unverified code.** The code below did not pass a test run against a reference implementation, or no test fits it, so it may contain errors.
+
+```python
+import torch
+import torch.nn as nn
+import torch.nn.functional as F
+
+class DepthSplat:
+    def __init__(self, num_depth_candidates=64, downsampling_factor=4, num_neighbor_views=2):
+        self.D = num_depth_candidates
+        self.s = downsampling_factor
+        self.K = num_neighbor_views
+        # Placeholder for actual network components defined in source
+        self.monocular_encoder = MonocularDepthEncoder() # Pre-trained
+        self.multi_view_encoder = MultiViewEncoder()     # Stride-2 convs
+        self.multi_view_transformer = MultiViewTransformer(num_layers=6)
+        self.depth_head = DepthRegressionHead()          # 2D U-Net + Softmax
+        self.gaussian_head = GaussianParameterHead()     # Lightweight head
+
+    def forward(self, images, projection_matrices):
+        """
+        images: List of N tensors, shape (H, W, 3)
+        projection_matrices: List of N matrices, shape (3, 4)
+        Returns: List of Gaussian sets for each view
+        """
+        N = len(images)
+        H, W = images[0].shape[0], images[0].shape[1]
+        
+        # 1. Monocular Features
+        mono_features = []
+        for i in range(N):
+            # Extract features from pre-trained monocular model
+            feat = self.monocular_encoder(images[i]) 
+            mono_features.append(feat)
+            
+        # 2. Multi-View Features
+        # Encode all images into multi-view features
+        # Input: N images. Output: List of N feature maps
+        mv_features = self.multi_view_encoder(images)
+        
+        # 3. Multi-View Transformer
+        # Exchange info across views
+        mv_features_aware = self.multi_view_transformer(mv_features)
+        
+        gaussians_per_view = []
+        
+        for i in range(N):
+            # 4. Cost Volume Construction
+            # Select neighbors
+            neighbors = self._select_neighbors(i, projection_matrices, self.K)
+            
+            # Sample depth candidates
+            depth_candidates = self._sample_depth_candidates(projection_matrices[i])
+            
+            cost_volume = []
+            for d in depth_candidates:
+                correlations = []
+                for j in neighbors:
+                    # Warp neighbor feature to reference view i at depth d
+                    warped_feat = self._warp_feature(mv_features_aware[j], projection_matrices[i], projection_matrices[j], d)
+                    # Dot product correlation
+                    corr = torch.sum(mv_features_aware[i] * warped_feat, dim=-1) # Shape: (H/s, W/s)
+                    correlations.append(corr)
+                
+                # Average correlations from selected neighbors
+                if len(correlations) > 0:
+                    avg_corr = torch.mean(torch.stack(correlations, dim=0), dim=0)
+                    cost_volume.append(avg_corr.unsqueeze(-1))
+            
+            # Stack to form Cost Volume: (H/s, W/s, D)
+            cost_volume = torch.cat(cost_volume, dim=-1)
+            
+            # 5. Concatenate Monocular and Cost Volume
+            # Note: Mono features might need resizing to match (H/s, W/s)
+            mono_feat_resized = F.interpolate(mono_features[i].unsqueeze(0), 
+                                              size=(H//self.s, W//self.s), 
+                                              mode='bilinear').squeeze(0)
+            combined_features = torch.cat([cost_volume, mono_feat_resized], dim=-1)
+            
+            # 6. Depth Regression
+            # 2D U-Net + Softmax
+            depth_probs = self.depth_head(combined_features) # Shape: (H/s, W/s, D)
+            # Convert probabilities to depth values
+            depth_map = self._compute_depth_from_probs(depth_probs, depth_candidates)
+            # Upsample depth map to original resolution if needed for unprojection
+            depth_map_full_res = F.interpolate(depth_map.unsqueeze(0).unsqueeze(0), 
+                                               size=(H, W), mode='bilinear').squeeze(0).squeeze(0)
+            
+            # 7. Unproject to 3D Gaussians
+            # Get 2D pixel coordinates
+            y, x = torch.meshgrid(torch.arange(H), torch.arange(W), indexing='ij')
+            coords = torch.stack([x, y], dim=-1).float()
+            
+            # Unproject using P_i and depth
+            # This is a simplified representation; actual unprojection uses P^{-1}
+            centers = self._unproject(coords, depth_map_full_res, projection_matrices[i])
+            
+            # 8. Predict remaining parameters
+            # Use a head that takes image features or depth features
+            alpha, sigma, color = self.gaussian_head(mv_features_aware[i], depth_map_full_res)
+            
+            gaussians_per_view.append({
+                'mu': centers,
+                'alpha': alpha,
+                'sigma': sigma,
+                'color': color
+            })
+            
+        return gaussians_per_view
+
+    def _select_neighbors(self, ref_idx, projection_matrices, K):
+        # Compute camera distances between ref_idx and all other views
+        # Select top K nearest views
+        # Not given in sources: specific distance metric (e.g., translation norm)
+        # Placeholder logic
+        distances = [self._camera_distance(projection_matrices[ref_idx], projection_matrices[j]) 
+                     for j in range(len(projection_matrices)) if j != ref_idx]
+        sorted_indices = torch.argsort(torch.tensor(distances))
+        return [sorted_indices[k] for k in range(K)]
+
+    def _sample_depth_candidates(self, projection_matrix):
+        # Uniformly sample D depth candidates from near/far ranges
+        # Not given in sources: specific near/far values
+        # Placeholder logic
+        near, far = 0.1, 100.0 # Example values
+        return torch.linspace(near, far, self.D)
+
+    def _warp_feature(self, feat_j, P_i, P_j, depth_d):
+        # Warp feature map from view j to view i using depth d
+        # Not given in sources: specific warping implementation (e.g., grid_sample)
+        # Placeholder logic
+        pass
+
+    def _compute_depth_from_probs(self, probs, candidates):
+        # Weighted sum of candidates based on softmax probabilities
+        return torch.sum(probs * candidates, dim=-1)
+
+    def _unproject(self, coords, depth, P):
+        # Unproject 2D coords + depth to 3D using P
+        # Not given in sources: specific unprojection math
+        # Placeholder logic
+        pass
+
+    def _camera_distance(self, P1, P2):
+        # Compute distance between camera poses
+        # Not given in sources
+        pass
+```
+
+## Subtopics
+
+### [Gaussian Graph Network](18863-gaussian-graph-network.md)
+A feed-forward method that models relations between Gaussian groups from different views using a Gaussian Graph structure to reduce artifacts and memory costs. It performs message passing at the Gaussian level, unlike DepthSplat which operates on pixel-aligned Gaussians derived from depth maps. Choose when inter-view consistency of individual Gaussians is critical and computational resources allow for graph-based aggregation.
+
+## Operating characteristics
+*   **Time Complexity:** The method is feed-forward, enabling fast inference. Reconstruction from 12 input views at 512x960 resolution takes 0.6 seconds [S1].
+*   **Memory Complexity:** Depends on the number of depth candidates $D$ and the cost volume size $\frac{H}{s} \times \frac{W}{s} \times D$. Selecting only top-2 neighbors for $N>2$ views keeps memory usage tractable [S1].
+*   **Performance:** Achieves state-of-the-art results on ScanNet, RealEstate10K, and DL3DV datasets for both depth estimation and Gaussian splatting [S1].
+*   **Training Efficiency:** Trained on 4 GPUs for 2 days, significantly cheaper than methods like GS-LRM which require 64 A100 GPUs [S1].
+*   **Strengths:** Robustness to low-texture, occluded, and reflective regions due to monocular feature augmentation; multi-view consistency maintained by using monocular features as augmentation rather than primary signal; efficient training.
+*   **Limitations:** Relies on the quality of the pre-trained monocular depth model; multi-view depth estimation can still fail in extreme occlusions or non-Lambertian surfaces, though mitigated by monocular features [S1].
+*   **When to use:** When generalizable, feed-forward 3D Gaussian reconstruction is needed from sparse or multi-view inputs, especially in challenging scenes with low texture or reflections, and when training compute is limited.
+*   **When not to use:** When per-scene optimization is acceptable and higher quality is required regardless of speed; when input images lack known camera poses (DepthSplat requires poses) [S1].
+
+## Background
+DepthSplat was introduced to connect the fields of Gaussian splatting and depth estimation, leveraging their mutual benefits [S1]. It addresses the limitations of multi-view stereo (failure in low-texture/occluded areas) and monocular depth estimation (scale ambiguity) by combining pre-trained monocular depth features with multi-view cost volumes [S1]. The method was trained on large-scale datasets including TartanAir, ScanNet, RealEstate10K, and DL3DV [S1]. It also demonstrates that Gaussian splatting can serve as an unsupervised pre-training objective for learning depth models from large-scale multi-view posed datasets without ground truth depth supervision [S1].
+
+## Sources
+[S1] DepthSplat: Connecting Gaussian Splatting and Depth, https://doi.org/10.1109/cvpr52734.2025.01534, fetched 2026-10-26

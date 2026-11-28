@@ -1,0 +1,114 @@
+--- v003.md
++++ v004.md
+@@ -4,50 +4,53 @@
+ 
+ ## Overview
+-A learning rate schedule that transitions from an initial value to a final value over a specified number of steps using linear interpolation [S1, unofficial]. It provides a deterministic, monotonic decay path for optimization parameters in radiance-field training [S1, unofficial].
++A linear interpolation schedule that transitions a learning rate from an initial value to a final value over a specified number of steps [S1, unofficial]. It differs from its sibling [Exponential Decay Learning Rate Schedule](9145-exponential-decay-learning-rate-schedule.md) by using a constant rate of change rather than a multiplicative decay, and from [Cosine Decay Learning Rate Schedule](14118-cosine-decay-learning-rate-schedule.md) by lacking the smooth, non-linear curvature that reduces the learning rate more aggressively in the middle of the schedule [S1, unofficial].
+ 
+ ## How it works
+-**Inputs and Outputs**
+-*   **Inputs**: `step` (current optimization step index, integer $\ge 0$), `initial_value` (starting learning rate, float), `final_value` (target learning rate at completion, float), `num_steps` (total steps for the transition, integer) [S1, unofficial].
+-*   **Output**: The computed learning rate for the current step (float) [S1, unofficial].
++**Inputs and outputs:**
++- Input: current training step $t$, total steps $T$, initial learning rate $lr_{init}$, final learning rate $lr_{final}$.
++- Output: current learning rate $lr_t$.
+ 
+-**Data Structures**
+-No persistent data structures are required; the state is purely a function of the current step index and the fixed parameters [G].
++**Data structures:**
++No persistent data structures are required; the schedule is stateless with respect to the optimizer's internal state, depending only on the step counter.
+ 
+-**Parameters**
+-*   `initial_value`: The learning rate at step 0 [S1, unofficial].
+-*   `final_value`: The learning rate at step `num_steps` [S1, unofficial].
+-*   `num_steps`: The total number of steps over which the interpolation occurs [S1, unofficial].
++**Steps:**
++1. Compute the progress ratio $\alpha$ as the minimum of the normalized step count and 1.0:
++   $$ \alpha = \min\left(\frac{t}{T}, 1.0\right) $$
++2. Compute the learning rate via linear interpolation:
++   $$ lr_t = (1 - \alpha) \cdot lr_{init} + \alpha \cdot lr_{final} $$
+ 
+-**Algorithm**
+-1.  Compute the progress ratio $\alpha$ as the fraction of steps completed, capped at 1.0:
+-    $$ \alpha = \min\left(\frac{\text{step}}{\text{num\_steps}}, 1.0\right) $$
+-2.  Compute the learning rate $lr$ by linearly interpolating between `initial_value` and `final_value` using $\alpha$:
+-    $$ lr = (1.0 - \alpha) \cdot \text{initial\_value} + \alpha \cdot \text{final\_value} $$
++**Parameters:**
++- $lr_{init}$: Starting value of the schedule [S1, unofficial].
++- $lr_{final}$: Target value at completion [S1, unofficial].
++- $T$ (or $num\_steps$): Total number of steps for the transition [S1, unofficial].
+ 
+-**Edge Cases and Pitfalls**
+-*   **Division by Zero**: If `num_steps` is 0, the division in step 1 is undefined. The implementation must ensure `num_steps > 0` or handle this case explicitly (e.g., returning `initial_value`) [G].
+-*   **Step Bounds**: If `step` exceeds `num_steps`, $\alpha$ is clamped to 1.0, ensuring the learning rate remains at `final_value` rather than extrapolating [S1, unofficial].
+-*   **Precision**: Using floating-point arithmetic for `step / num_steps` is standard. For very large `num_steps`, precision loss is negligible for typical learning rate magnitudes [G].
++**Edge cases and pitfalls:**
++- If $t > T$, the schedule clamps to $lr_{final}$ [S1, unofficial].
++- Some implementations define the schedule as log-linear interpolation, equivalent to exponential decay, rather than linear interpolation of the rate itself [S2, unofficial]. In such cases, the formula becomes $lr_t = lr_{init} \cdot (lr_{final} / lr_{init})^{t/T}$ [S2, unofficial].
++- An optional initial delay phase can be applied where the learning rate is scaled by a multiplier $lr_{delay\_mult}$ for the first $lr_{delay\_steps}$ steps, then eases back to the normal rate [S2, unofficial].
+ 
+-**Pseudocode**
++**Pseudocode:**
+ ```python
+-def linear_schedule(step: int, initial_value: float, final_value: float, num_steps: int) -> float:
++def linear_schedule(step, num_steps, initial_value, final_value, 
++                    lr_delay_steps=0, lr_delay_mult=1.0):
+     """
+-    Compute the learning rate using a linear schedule.
++    Compute learning rate using linear interpolation.
+     
+     Args:
+-        step: Current optimization step index.
+-        initial_value: Starting learning rate.
+-        final_value: Target learning rate at completion.
+-        num_steps: Total number of steps for the transition.
++        step: Current training step (integer).
++        num_steps: Total number of steps for the transition (integer).
++        initial_value: Starting learning rate (float).
++        final_value: Target learning rate at completion (float).
++        lr_delay_steps: Number of steps to apply delayed initial learning rate (integer).
++        lr_delay_mult: Multiplier for the initial learning rate during delay phase (float).
+         
+     Returns:
+-        The computed learning rate.
++        Current learning rate (float).
+     """
+-    if num_steps <= 0:
+-        # Guard against division by zero; behavior is undefined in sources for num_steps=0 [G]
+-        return initial_value
+-        
+-    # Compute progress ratio, capped at 1.0
++    # Handle delay phase
++    if step < lr_delay_steps:
++        return initial_value * lr_delay_mult
++    
++    # Compute alpha
+     alpha = min(step / num_steps, 1.0)
+     
+@@ -61,19 +64,16 @@
+ 
+ ### [Cosine Learning Rate Schedule](11851-cosine-learning-rate-schedule.md)
+-A learning rate schedule that transitions from an initial value to a final value using a cosine function to ease the change. It differs from the parent [Linear Learning Rate Schedule](11850-linear-learning-rate-schedule.md) by providing a non-linear, smooth decay curve rather than a linear interpolation, which can help stabilize optimization in radiance-field training by reducing the learning rate more gradually in the later stages.
++A learning rate schedule that eases slowly using a cosine function to transition between initial and final values. It differs from the parent [Linear Learning Rate Schedule](11850-linear-learning-rate-schedule.md) by using a smooth, non-linear decay curve rather than a linear interpolation, which can help stabilize training in radiance-field optimization by reducing the learning rate more aggressively in the middle of the schedule.
+ 
+ ### Linear Stage Transition
+-A linear interpolation method to avoid abrupt transitions between training stages by blending the previous coarser representation with the current less-merged one [S3]. Transitions between stages are smoothed using linear interpolation over 2k iterations [S3]. It interpolates the decoded quantity $z$ as $z^{(s)} = (1-\lambda) z^{(s-1)} + \lambda \bar{z}^{(s)}$, where $\lambda \in [0,1]$ is the transition coefficient [S3].
++A linear interpolation method to avoid abrupt transitions between training stages by blending the previous coarser representation with the current less-merged one [S3]. Transitions between stages are smoothed using linear interpolation over 2k iterations [S3]. The interpolated decoded quantity $z$ is computed as:
++$$ z^{(s)} = (1-\lambda) z^{(s-1)} + \lambda \bar{z}^{(s)} $$
++where $\lambda \in [0,1]$ is the transition coefficient [S3]. This procedure does not introduce new candidates but progressively relaxes the merging applied to the same underlying set of predictions [S3].
+ 
+ ## Operating characteristics
+-*   **Time Complexity**: $O(1)$ per step [G]. The calculation involves a single division, a minimum, and two multiplications and an addition [G].
+-*   **Memory Complexity**: $O(1)$. No history or state needs to be stored beyond the current step counter [G].
+-*   **Strengths**: Simple to implement and understand [G]. Provides a predictable, linear decay path [G]. Useful when a steady, constant reduction in learning rate is desired without the compounding effect of exponential decay [G].
+-*   **Limitations**: The rate of change is constant, which may not be optimal for all loss landscapes [G]. It lacks the smoothness of cosine schedules or the adaptive nature of exponential decay [G].
+-*   **When to use**: When a simple, deterministic decay is sufficient and computational overhead of more complex schedules is undesirable [G].
+-*   **When not to use**: When the optimization landscape requires a smoother transition (consider Cosine) or a faster initial decay followed by a slower tail (consider Exponential Decay) [G].
++Not given in the sources.
+ 
+ ## Background
+-It is implemented in the Nerfies library [S1, unofficial].
++The linear interpolation schedule is implemented in the training code for Nerfies, a system for deformable neural radiance fields [S1, unofficial]. It is also referenced in the context of density-bounded ray weights [S2, unofficial]. The concept of linear stage transition is used in GlobalSplat, an efficient feed-forward 3D Gaussian Splatting method, to smooth transitions between training stages [S3].
+ 
+ ## Sources

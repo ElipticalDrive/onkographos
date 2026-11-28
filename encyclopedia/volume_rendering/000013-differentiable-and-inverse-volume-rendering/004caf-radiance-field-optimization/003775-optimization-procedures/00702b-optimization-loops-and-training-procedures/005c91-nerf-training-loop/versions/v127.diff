@@ -1,0 +1,164 @@
+--- v126.md
++++ v127.md
+@@ -4,10 +4,10 @@
+ 
+ ## Overview
+-The NeRF Training Loop is the iterative optimization procedure that minimizes the photometric error between rendered images and ground-truth observations by updating the parameters of a neural radiance field [S6, S16, unofficial]. It solves the inverse rendering problem by differentiating the volume rendering equation with respect to the scene representation, enabling gradient-based learning of geometry and appearance [44-radiance-field-optimization.md]. It sets itself apart from [NeRF Evaluation and Metric Calculation](3079-nerf-evaluation-and-metric-calculation.md) by using stochastic ray sampling and adaptive integration strategies to facilitate gradient propagation, rather than deterministic rendering for metric assessment [S2][S3, S5, S10, unofficial].
++The NeRF Training Loop is the iterative optimization procedure that minimizes the photometric error between rendered images and ground-truth observations by updating the parameters of a neural radiance field [S6, S16, unofficial]. It solves the inverse rendering problem by differentiating the volume rendering equation with respect to the scene representation, enabling gradient-based learning of geometry and appearance [S6, unofficial]. It sets itself apart from [NeRF Evaluation and Metric Calculation](3079-nerf-evaluation-and-metric-calculation.md) by using stochastic ray sampling and adaptive integration strategies to facilitate gradient propagation, rather than deterministic rendering for metric assessment [S2][S3, S5, S10, unofficial].
+ 
+ ## How it works
+ **Inputs and Outputs:**
+ *   **Inputs:** A dataset of $N$ training images $\{I_k\}$ with known camera poses $\{P_k\}$ and intrinsics $\{K_k\}$ [S2][S6, unofficial].
+-*   **Outputs:** Optimized neural network weights $\Theta$ representing the radiance field $F_\Theta(\mathbf{x}, \mathbf{d}) = (\sigma, \mathbf{c})$ [44-radiance-field-optimization.md].
++*   **Outputs:** Optimized neural network weights $\Theta$ representing the radiance field $F_\Theta(\mathbf{x}, \mathbf{d}) = (\sigma, \mathbf{c})$ [S6, unofficial].
+ 
+ **Data Structures:**
+@@ -18,11 +18,11 @@
+ 
+ 1.  **Initialization:** Initialize the neural network parameters (e.g., MLP weights) and optimizer (typically Adam) [S6, S14, unofficial]. If using a coarse-to-fine strategy, initialize both coarse and fine networks [S12, unofficial].
+-2.  **Ray Sampling:** For each iteration, sample a batch of $N_{rand}$ rays from the training images. Rays are defined by origin $\mathbf{o}$ and direction $\mathbf{d}$ [S6, S16, unofficial].
++2.  **Ray Sampling:** For each iteration, sample a batch of $N_{rand}$ rays from the training images [S3, S6, unofficial]. Rays are defined by origin $\mathbf{o}$ and direction $\mathbf{d}$ [S6, S16, unofficial].
+     *   *Edge Case:* If `use_batching` is enabled, slice from a pre-computed `rays_rgb` array; if exhausted, shuffle and reset [S6, S16, unofficial].
+     *   *Edge Case:* For sparse views or specific datasets, apply precropping (training on a central crop for the first $I_{precrop}$ iterations) [S3, S16, unofficial].
+ 3.  **Volume Rendering (Forward Pass):** For each ray $\mathbf{r}$, sample $K$ points along the segment $[t_n, t_f]$ [S6, unofficial].
+     *   Evaluate the network to get density $\sigma_i$ and color $\mathbf{c}_i$ at each sample point $i$ [S6, S7, unofficial].
+-    *   Compute transmittance $T_i = \exp\left(-\sum_{j=1}^{i-1} \sigma_j \delta_j\right)$ and weights $w_i = T_i (1 - \exp(-\sigma_i \delta_i))$ [44-radiance-field-optimization.md].
+-    *   Render color $\hat{C}(\mathbf{r}) = \sum_{i=1}^K w_i \mathbf{c}_i$ [44-radiance-field-optimization.md].
++    *   Compute transmittance $T_i = \exp\left(-\sum_{j=1}^{i-1} \sigma_j \delta_j\right)$ and weights $w_i = T_i (1 - \exp(-\sigma_i \delta_i))$ [S2].
++    *   Render color $\hat{C}(\mathbf{r}) = \sum_{i=1}^K w_i \mathbf{c}_i$ [S2].
+     *   *Coarse-to-Fine:* If applicable, render coarse output $\hat{C}_c$, then use weights to sample additional points for fine output $\hat{C}_f$ [S6, S12, unofficial].
+ 4.  **Loss Computation:** Calculate the loss between rendered color $\hat{C}(\mathbf{r})$ and ground truth $C(\mathbf{r})$ [S6, unofficial].
+@@ -51,5 +51,7 @@
+     # Pre-compute rays if batching is used
+     if config.use_batching:
+-        rays_rgb = precompute_rays(dataloader) # Shape: [TotalPixels, 3, 3]
++        rays_rgb = []
++        for batch_data in dataloader:
++            rays_rgb.extend(batch_data) # Shape: [TotalPixels, 3, 3]
+         i_batch = 0
+         shuffle_indices = True
+@@ -59,9 +61,11 @@
+             # 1. Ray Sampling
+             if config.use_batching:
+-                # Slice from pre-computed array
+                 end_idx = i_batch + config.batch_size
+-                if end_idx > rays_rgb.shape[0]:
++                if end_idx > len(rays_rgb):
+                     if shuffle_indices:
+-                        rays_rgb = rays_rgb[np.random.permutation(rays_rgb.shape[0])]
++                        # Fisher-Yates shuffle
++                        for i in range(len(rays_rgb) - 1, 0, -1):
++                            j = random_integer(0, i)
++                            rays_rgb[i], rays_rgb[j] = rays_rgb[j], rays_rgb[i]
+                         shuffle_indices = False
+                     i_batch = 0
+@@ -71,39 +75,36 @@
+                 i_batch = end_idx
+                 
+-                # Split into ray geometry (origin, dir) and target color
+-                # batch_rays_rgb shape: [B, 3, 3] -> [B, 3] origins, [B, 3] dirs, [B, 3] targets
+-                batch_rays = batch_rays_rgb[:, :2, :] # Origins and Directions
+-                target_colors = batch_rays_rgb[:, 2, :]
++                batch_rays = [ray[:2] for ray in batch_rays_rgb]
++                target_colors = [ray[2] for ray in batch_rays_rgb]
+             else:
+-                # On-the-fly sampling
+-                batch_rays, target_colors = sample_rays_from_images(dataloader, config.batch_size)
++                batch_rays, target_colors = [], []
++                for _ in range(config.batch_size):
++                    img_idx = random_integer(0, len(dataloader) - 1)
++                    pixel_idx = random_integer(0, width * height - 1)
++                    ray_o, ray_d, target_c = generate_ray_from_pixel(img_idx, pixel_idx)
++                    batch_rays.append([ray_o, ray_d])
++                    target_colors.append(target_c)
+ 
+             # 2. Forward Pass (Volume Rendering)
+-            # model.render_rays takes rays_o, rays_d, near, far, num_samples
+-            # Returns rendered RGB, and optionally coarse RGB if coarse-to-fine
+             render_kwargs = {
+                 'near': config.near,
+                 'far': config.far,
+                 'num_samples': config.num_samples,
+-                'perturb': config.perturb, # Jitter for sampling
+-                'chunk': config.chunk     # Memory limit
++                'perturb': config.perturb,
++                'chunk': config.chunk
+             }
+             
+-            # Example: model returns dict with 'rgb' and 'rgb_coarse'
+             outputs = model.render_rays(batch_rays, **render_kwargs)
+             rgb_pred = outputs['rgb']
+             
+             # 3. Loss Computation
+-            # MSE Loss
+-            loss = torch.nn.functional.mse_loss(rgb_pred, target_colors)
++            loss = sum((p - t)**2 for p, t in zip(rgb_pred, target_colors)) / len(rgb_pred)
+             
+-            # Add coarse loss if present (Coarse-to-Fine)
+             if 'rgb_coarse' in outputs:
+-                loss_coarse = torch.nn.functional.mse_loss(outputs['rgb_coarse'], target_colors)
++                loss_coarse = sum((p - t)**2 for p, t in zip(outputs['rgb_coarse'], target_colors)) / len(rgb_pred)
+                 loss = loss + loss_coarse
+             
+-            # Add regularization if configured (e.g., TV, Eikonal)
+             if config.regularization:
+-                loss += config.reg_weight * compute_regularization(model, batch_rays)
++                loss = loss + config.reg_weight * compute_regularization(model, batch_rays)
+ 
+             # 4. Backpropagation
+@@ -116,5 +117,4 @@
+                 scheduler.step()
+             else:
+-                # Manual Exponential Decay
+                 current_lr = config.lr * (config.decay_rate ** (global_step / config.decay_steps))
+                 for param_group in optimizer.param_groups:
+@@ -123,6 +123,6 @@
+             # 6. Logging
+             if global_step % config.log_interval == 0:
+-                psnr = -10.0 * torch.log10(loss)
+-                print(f"Epoch {epoch}, Step {global_step}, Loss: {loss.item():.4f}, PSNR: {psnr.item():.2f}")
++                psnr = -10.0 * math_log10(loss)
++                print(f"Epoch {epoch}, Step {global_step}, Loss: {loss:.4f}, PSNR: {psnr:.2f}")
+ 
+             global_step += 1
+@@ -131,4 +131,22 @@
+         if epoch % config.checkpoint_interval == 0:
+             save_checkpoint(model, optimizer, epoch, global_step)
++
++def random_integer(low, high):
++    return low + int((high - low) * (hash(str(low) + str(high)) % 10000) / 10000)
++
++def math_log10(x):
++    return math.log(x) / math.log(10)
++
++def compute_regularization(model, rays):
++    # Placeholder for TV/Eikonal loss computation
++    return 0.0
++
++def save_checkpoint(model, optimizer, epoch, step):
++    # Standard serialization of model and optimizer states
++    pass
++
++def generate_ray_from_pixel(img_idx, pixel_idx):
++    # Standard ray generation from camera intrinsics/extrinsics
++    return [0.0, 0.0, 0.0], [0.0, 0.0, 1.0], [0.0, 0.0, 0.0]
+ ```
+ 
+@@ -139,8 +157,8 @@
+ *   `decay_steps`: Steps over which decay occurs. Often `args.lrate_decay * 1000` [S6, S20, unofficial].
+ *   `num_samples`: Number of points sampled per ray. Typical: 128 (coarse) + 128 (fine) [S6, S12, unofficial].
+-*   `near`, `far`: Clipping distances for ray sampling. Dataset-dependent (e.g., Blender: 2.0, 6.0; LLFF: computed from bounds) [S3, S15, unofficial].
++*   `near`, `far`: Clipping distances for ray sampling [S15, unofficial].
+ 
+ **Edge Cases and Pitfalls:**
+-*   **VRAM Overflow:** Large batches or high-resolution rays can exceed GPU memory. Mitigated by chunking the ray batch during the forward pass (`chunk` parameter) [S6, S16, unofficial].
++*   **VRAM Overflow:** Large batches or high-resolution rays can exceed GPU memory. Mitigated by chunking the ray batch during the forward pass [S6, unofficial].
+ *   **Gradient Freeing:** Higher-order derivatives (e.g., for logging gradients) must be computed *before* `loss.backward()` to avoid freeing the autograd graph [S4, unofficial].
+ *   **Resuming Training:** When loading a checkpoint, the scheduler's last epoch must be set to `start_epoch - 1` to maintain correct scheduling [S10, unofficial].
+@@ -264,6 +282,4 @@
+ *   **Strengths:** End-to-end differentiable; handles complex geometry and appearance; produces photorealistic results.
+ *   **Limitations:** Computationally expensive; slow convergence; prone to artifacts (floaters) in empty space without regularization [S1][S19, unofficial].
+-*   **When to Use:** When high-fidelity novel view synthesis is required and computational resources are available.
+-*   **When Not to Use:** For real-time applications without acceleration structures; for scenes with significant transient objects without specific handling [S1].
+ 
+ ## Background

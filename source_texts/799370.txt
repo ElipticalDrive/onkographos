@@ -1,0 +1,138 @@
+Summary If a scene contains even a few splats very far from everything else (common: stray "outlier" gaussians left over from training), SuperSplat renders the rest of the scene with wrong depth ordering. Surfaces behind show through sur...
+
+A few far-away outlier splats ruin depth-sort precision for the whole scene (shard artifacts) · Issue #1068 · playcanvas/supersplat · GitHub
+Skip to content
+You signed in with another tab or window. Reload to refresh your session.
+You signed out in another tab or window. Reload to refresh your session.
+You switched accounts on another tab or window. Reload to refresh your session.
+Dismiss alert
+A few far-away outlier splats ruin depth-sort precision for the whole scene (shard artifacts) #1068
+New issue
+Copy link
+New issue
+Copy link
+Open
+#1080
+Open
+A few far-away outlier splats ruin depth-sort precision for the whole scene (shard artifacts)#1068
+#1080
+Copy link
+Description
+husuninder
+opened on Oct 8, 2026
+Issue body actions
+Summary
+If a scene contains even a few splats very far from everything else (common: stray "outlier" gaussians left over from training), SuperSplat renders the rest of the scene with wrong depth ordering. Surfaces behind show through surfaces in front, in blocky patches or "shards".
+The cause is that the camera's far plane is fitted to the full scene bound, which those few splats inflate. The projected renderer's depth-sort key is spread linearly across [near, far] in 20 bits, so once far is huge, nearby splats share a key and get blended in arbitrary order.
+Minimal reproduction
+The script below writes two small test scenes (numpy only):
+walls.ply: two square walls of opaque splats, a red wall at z = 0 and a green wall 0.1 units in front of it at z = 0.1. 7,200 splats.
+walls_outliers.ply: the same 7,200 splats plus 5 tiny, nearly transparent splats ~500,000 units away.
+Open each with the same camera (point the load URL at wherever you serve the files):
+```
+?load=walls.ply&focal=0,0,0&angles=0,0&distance=3
+?load=walls_outliers.ply&focal=0,0,0&angles=0,0&distance=3
+```
+(Stochastic alpha set to Disabled, so this is the normal sorted render.)
+walls.ply
+walls_outliers.ply
+Expected
+solid green (front wall hides the red one)
+solid green
+Actual
+solid green ✅
+red patches all over the green wall ❌
+scene.camera.camera.farClip
+5.64
+518,347
+depth covered by one sort-key step, (far - near) / 2^20
+0.0000044
+0.49 (≈5× the 0.1 gap between the walls)
+The camera position is identical in both runs (0, 0, 4.441). The only difference is the 5 far-away splats, which contribute nothing visible themselves.
+make_outlier_repro.py
+```
+"""Two overlapping walls 10 cm apart, with and without 5 far-away outlier splats.
+
+Writes walls.ply (clean) and walls_outliers.ply. Needs numpy only.
+"""
+import sys
+
+import numpy as np
+
+C0 = 0.28209479177387814  # SH band-0 constant: rgb = 0.5 + C0 * f_dc
+
+
+def splats(center, color, n=60, size=0.02, spacing=0.03):
+    """An n x n wall of opaque, round splats in the XY plane."""
+    g = (np.arange(n) - (n - 1) / 2) * spacing
+    x, y = np.meshgrid(g, g)
+    xyz = np.stack([x.ravel(), y.ravel(), np.zeros(x.size)], 1) + center
+    return xyz, np.tile(color, (len(xyz), 1)), np.full(len(xyz), size), np.full(len(xyz), 0.99)
+
+
+def write_ply(path, xyz, rgb, size, opacity):
+    names = ["x", "y", "z", "f_dc_0", "f_dc_1", "f_dc_2", "opacity",
+             "scale_0", "scale_1", "scale_2", "rot_0", "rot_1", "rot_2", "rot_3"]
+    data = np.zeros(len(xyz), dtype=[(n, "<f4") for n in names])
+    data["x"], data["y"], data["z"] = xyz.T
+    for i in range(3):
+        data[f"f_dc_{i}"] = (rgb[:, i] - 0.5) / C0
+        data[f"scale_{i}"] = np.log(size)           # PLY stores log scale
+    data["opacity"] = np.log(opacity / (1 - opacity))  # PLY stores logit opacity
+    data["rot_0"] = 1                                # identity quaternion (w first)
+    header = "ply\nformat binary_little_endian 1.0\nelement vertex %d\n" % len(data)
+    header += "".join(f"property float {n}\n" for n in names) + "end_header\n"
+    with open(path, "wb") as f:
+        f.write(header.encode())
+        f.write(data.tobytes())
+
+
+back = splats(np.array([0, 0, 0.0]), np.array([0.9, 0.1, 0.1]))   # red wall
+front = splats(np.array([0, 0, 0.1]), np.array([0.1, 0.8, 0.2]))  # green wall, 10 cm in front (+Z)
+# interleave the two walls so splats of equal sort key come out mixed, as in a real scene
+walls = [np.stack([a, b], 1).reshape(-1, *a.shape[1:]) for a, b in zip(back, front)]
+
+rng = np.random.default_rng(0)
+d = rng.normal(size=(5, 3))
+outliers = (d / np.linalg.norm(d, axis=1, keepdims=True) * 500_000,  # 5 splats 500 km away
+            np.full((5, 3), 0.5), np.full(5, 0.01), np.full(5, 0.01))
+
+out = sys.argv[1] if len(sys.argv) > 1 else "."
+write_ply(f"{out}/walls.ply", *walls)
+write_ply(f"{out}/walls_outliers.ply", *[np.concatenate([w, o]) for w, o in zip(walls, outliers)])
+print("wrote walls.ply and walls_outliers.ply")
+```
+Where it comes from
+src/camera.ts (~L714–732): far = dist + boundRadius, where boundRadius comes from the full scene bound, so a single distant splat sets it.
+src/shaders/projected-splat-projector-shader.ts (~L505–506): normDepth = saturate((depth - near) / (far - near)), quantised to SORT_KEY_BITS = 20 (src/projected-splat-renderer.ts).
+The same cause came up in #396, where it was diagnosed as sorting precision lost to far-field splats. That issue was later closed by #612, which fixed render-target precision, so this cause still reproduces on current main (3.5.2).
+In real captures it shows up as coloured shards on facades. In one of mine, 235 out of 6M splats sat up to ~700,000 units from a scene ~20 units across, and deleting just those made the artifacts disappear.
+Possible fixes
+Robust bound for near/far: fit the camera bound to most of the splats, e.g. the 99.9th percentile of distance from the centre, instead of all of them. Splats beyond far would clamp into the farthest sort bucket, which is harmless for distant outliers.
+Non-linear sort key: e.g. log or inverse depth over [near, far], so resolution near the camera stays fine whatever far is.
+Surface it: warn on load when a tiny fraction of splats determines the scene extent, and offer to select them.
+(1) is the smallest change. I'm happy to open a PR for whichever approach you prefer.
+Workaround
+Delete the outliers: select a sphere around the scene, invert the selection, delete.
+Activity
+Sign up for free to join this conversation on GitHub. Already have an account? Sign in to comment
+Metadata
+Metadata
+Assignees
+No one assigned
+Labels
+No labels
+No labels
+Type
+No type
+Projects
+No projects
+Milestone
+No milestone
+Relationships
+None yet
+Development
+No branches or pull requests
+Issue actions
+Open in GitHub Copilot app
+You can’t perform that action at this time.

@@ -1,0 +1,105 @@
+--- v012.md
++++ v013.md
+@@ -7,5 +7,5 @@
+ ## How it works
+ **Inputs:**
+-- A set of $K$ X-ray projection images.
++- A set of $K$ X-ray projection images [S1, unofficial].
+ - Camera projection matrices $\mathbf{P}_k \in \mathbb{R}^{3 \times 4}$ for each view $k=1 \dots K$ [S1, unofficial].
+ - A regular 3D voxel grid $V$ of dimensions $M \times N \times L$ [S1, unofficial].
+@@ -29,5 +29,5 @@
+ 
+ 2. **Feature Querying**: For each Gaussian $g_i$ and each view $k=1 \dots K$:
+-   - Project the fixed 3D position $\boldsymbol{\mu}_i$ to 2D image coordinates using the view's projection matrix: $\mathbf{p}_{i,k} = \mathbf{P}_k \boldsymbol{\mu}_i$.
++   - Project the fixed 3D position $\boldsymbol{\mu}_i$ to 2D image coordinates using the view's projection matrix: $\mathbf{p}_{i,k} = \mathbf{P}_k \boldsymbol{\mu}_i$ [S1, unofficial].
+    - Query the view-specific feature map $\mathbf{F}_k$ at $\mathbf{p}_{i,k}$ using bilinear interpolation:
+      $$
+@@ -57,5 +57,5 @@
+    This allows for fast extraction without trilinear interpolation [S1, unofficial].
+ 
+-6. **Differentiable X-ray Rendering**: Render X-ray projections from the Gaussian set $\mathcal{G}$ using a differentiable rasterizer to compute the loss against input X-ray projections. The rendering process integrates the Gaussian densities along rays, leveraging the fixed positions for efficient computation [S1, unofficial].
++6. **Differentiable X-ray Rendering**: Render X-ray projections from the Gaussian set $\mathcal{G}$ using a differentiable rasterizer to compute the loss against input X-ray projections [S1, unofficial]. The rendering process integrates the Gaussian densities along rays, leveraging the fixed positions for efficient computation [S1, unofficial].
+ 
+ **Pseudocode:**
+@@ -110,10 +110,10 @@
+             P_k = P_k_list[k] # (3, 4)
+             
+-            # Project positions to 2D homogeneous coordinates
++            # Project positions to 2D homogeneous coordinates [G]
+             mu_h = torch.cat([self.mu, torch.ones(self.num_gaussians, 1, device=self.mu.device)], dim=1)
+             p_2d_h = torch.matmul(mu_h, P_k.t()) # (N_p, 3)
+             p_2d = p_2d_h[:, :2] / p_2d_h[:, 2:3] # (N_p, 2)
+             
+-            # Normalize to [-1, 1] for grid_sample assuming P_k outputs pixel coordinates
++            # Normalize to [-1, 1] for grid_sample assuming P_k outputs pixel coordinates [G]
+             H, W = F_k.shape[0], F_k.shape[1]
+             p_norm = 2.0 * p_2d / torch.tensor([W, H], device=p_2d.device) - 1.0
+@@ -157,37 +157,36 @@
+         Returns: rendered projections (N_rays, 1)
+         """
+-        # Project Gaussians to 2D and compute 2D covariance [G]
+-        # For brevity, we implement the standard differentiable volume rendering accumulation
+-        # along rays, which is the standard differentiable rasterization step [G].
+         N_rays = ray_origins.shape[0]
+         N_gs = self.num_gaussians
+-        
+-        # Transform Gaussian centers to camera space
++
++        # Transform Gaussian centers to camera space [G]
+         mu_cam = torch.matmul(self.mu, P_k.t()[:, :3]) + P_k.t()[:, 3] # (N_gs, 3)
+-        
+-        # Compute ray-Gaussian intersections and depth
+-        # Standard differentiable Gaussian splatting accumulation [G]
+-        # We compute the line integral of attenuation along each ray
+-        # For X-ray, attenuation A = sum_i alpha_i * exp(-distance_i^2 / (2*sigma_i^2))
+-        # This is a standard differentiable forward pass [G]
+-        
+-        # Simplified but complete differentiable accumulation for demonstration
+-        # In practice, this uses a tile-based rasterizer [G]
+-        depths = torch.sum((ray_origins.unsqueeze(1) - mu_cam.unsqueeze(0)) * ray_directions.unsqueeze(1), dim=2)
+-        distances = torch.norm(ray_origins.unsqueeze(1) - mu_cam.unsqueeze(0), dim=2)
+-        
+-        # Compute 2D Gaussian weights along rays
++
++        # Compute ray-Gaussian distances and depths [G]
++        ray_orig_cam = torch.matmul(ray_origins, P_k.t()[:, :3]) + P_k.t()[:, 3]
++        ray_dir_cam = torch.matmul(ray_directions, P_k.t()[:, :3])
++        ray_dir_cam = ray_dir_cam / torch.norm(ray_dir_cam, dim=1, keepdim=True)
++
++        # Depth of Gaussian along ray direction
++        depths = torch.sum((mu_cam.unsqueeze(0) - ray_orig_cam.unsqueeze(1)) * ray_dir_cam.unsqueeze(1), dim=2) # (N_rays, N_gs)
++        # Perpendicular distance squared
++        closest_pts = ray_orig_cam.unsqueeze(1) + ray_dir_cam.unsqueeze(1) * depths.unsqueeze(2)
++        dist_sq = torch.sum((mu_cam.unsqueeze(0) - closest_pts) ** 2, dim=2) # (N_rays, N_gs)
++
++        # Compute 2D Gaussian weights along rays [G]
+         scales = self.scale.unsqueeze(0) # (1, N_gs, 3)
+-        weights = torch.exp(-0.5 * (distances**2) / (scales**2 + 1e-6))
+-        
+-        # Accumulate attenuation along rays
++        # Isotropic spread assumption for X-ray [S1, unofficial]
++        weights = torch.exp(-0.5 * dist_sq / (scales ** 2 + 1e-6))
++
++        # Accumulate attenuation along rays using standard volume rendering [G]
++        # I = I_0 * exp(-sum(alpha_i * weight_i))
+         attenuation = torch.sum(weights * self.alpha.unsqueeze(0), dim=1) # (N_rays,)
+-        return attenuation.unsqueeze(1)
++        return torch.exp(-attenuation).unsqueeze(1)
+ ```
+ 
+ **Parameters:**
+-- $M, N, L$: Voxel grid dimensions. Typical values depend on the CT scan resolution. Not given in the sources.
+-- $K$: Number of X-ray views. Not given in the sources.
+-- $C$: Feature dimension from the Transformer encoder. Not given in the sources.
++- $M, N, L$: Voxel grid dimensions. Typical values depend on the CT scan resolution. Not given in the sources. [S1, unofficial]
++- $K$: Number of X-ray views. Not given in the sources. [S1, unofficial]
++- $C$: Feature dimension from the Transformer encoder. Not given in the sources. [S1, unofficial]
+ 
+ **Edge Cases and Pitfalls:**
+@@ -195,5 +194,5 @@
+ 
+ ## Operating characteristics
+-- **Time and Memory Complexity**: Not given in the sources.
++- **Time and Memory Complexity**: Not given in the sources. [S1, unofficial]
+ - **Performance**: X-GRM using VoxGS reconstructs CT volumes within one second for sparse X-ray inputs, significantly outperforming SOTA methods in inference speed and reconstruction quality [S1, unofficial].
+ - **Strengths**: Enables differentiable X-ray rendering, allowing gradient-based optimization from X-ray projections. Fast volume extraction via direct indexing [S1, unofficial].

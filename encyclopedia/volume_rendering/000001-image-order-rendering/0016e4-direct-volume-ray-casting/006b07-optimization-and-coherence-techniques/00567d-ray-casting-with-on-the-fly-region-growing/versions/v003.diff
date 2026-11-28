@@ -1,0 +1,185 @@
+--- v002.md
++++ v003.md
+@@ -28,5 +28,5 @@
+ ### Algorithm Steps
+ 1.  **Ray Casting Initialization**: For each pixel, define ray $r(t) = \mathbf{o} + t\mathbf{d}$ [G]. Intersect with volume bounding box to get $t_{\text{near}}$ and $t_{\text{far}}$ [G].
+-2.  **Rough Detection Loop**: Iterate along the ray from $t_{\text{near}}$ to $t_{\text{far}}$ with a step size $\Delta t$ sufficient to avoid missing surfaces [S1]. At sample position $\mathbf{p}_i$, retrieve voxel value $V(\mathbf{p}_i)$ [G]. Check if $V(\mathbf{p}_i) < CT$ [S1]. If $V(\mathbf{p}_i) \ge CT$, continue to next sample [S1]. If $V(\mathbf{p}_i) < CT$, a potential object is detected [S1]. Proceed to Region Growing.
++2.  **Rough Detection Loop**: Iterate along the ray from $t_{\text{near}}$ to $t_{\text{far}}$ with a step size $\Delta t$ small enough to avoid unexpected crossings of surfaces [S1]. At sample position $\mathbf{p}_i$, retrieve voxel value $V(\mathbf{p}_i)$ [G]. Check if $V(\mathbf{p}_i) < CT$ [S1]. If $V(\mathbf{p}_i) \ge CT$, continue to next sample [S1]. If $V(\mathbf{p}_i) < CT$, a potential object is detected [S1]. Proceed to Region Growing.
+ 3.  **Region Growing**: Initialize `Stack` with $\mathbf{p}_i$ [S1]. Initialize `Visited` set with $\mathbf{p}_i$ [S1]. Initialize `RegionSize` = 0 [S1]. While `Stack` is not empty: Pop voxel $\mathbf{v}$ from `Stack` [S1]. Increment `RegionSize` [S1]. If `RegionSize` $\ge ST$, stop growing. The region is considered "relevant" (e.g., a wall) [S1]. Break loop. For each neighbor $\mathbf{n}$ of $\mathbf{v}$ (6-connected or 26-connected) [G]: If $\mathbf{n}$ is within volume bounds and not in `Visited`: Retrieve $V(\mathbf{n})$ [G]. If $V(\mathbf{n}) < CT$: Add $\mathbf{n}$ to `Visited` [S1]. Push $\mathbf{n}$ to `Stack` [S1].
+ 4.  **Decision and Continuation**: If `RegionSize` $< ST$: The detected region is an artifact [S1]. The text states "omit it, and continue the ray-casting process using the rough detection scheme" [S1]. This implies the ray traversal continues past the artifact cluster [G]. If `RegionSize` $\ge ST$: The region is relevant [S1]. The first detected voxel $\mathbf{p}_i$ is assumed to be on the surface [S1]. Stop ray traversal for this pixel. Proceed to Refinement.
+@@ -44,86 +44,92 @@
+     Returns: (color, alpha, surface_point) or (0, 0, None).
+     """
+-    # 1. Ray-Bounding Box Intersection (Fixed: clamps t_near to 0.0 when ray starts inside)
++    # 1. Ray-Bounding Box Intersection
+     t_near, t_far = ray_aabb_intersect(origin, direction, bbox_min, bbox_max)
+     if t_near is None:
+-        return (0, 0, 0), 0.0, None
++        return (0.0, 0.0, 0.0), 0.0, None
+ 
+     # 2. Rough Detection Loop
+-    step = 1.0  # Step size in voxel units [G]
++    dt = 0.5  # Step size in continuous units [G]
+     t = t_near
+     surface_point = None
+-    
++
+     while t <= t_far:
+         p = origin + t * direction
+-        voxel_val = interpolate_volume(volume, p)
+-        
++        voxel_val = trilinear_interpolate(volume, p, bbox_min, bbox_max)
++
+         if voxel_val < CT:
+-            # Object detected, launch region growing
+-            region_size, is_relevant = perform_region_growing(volume, p, CT, ST, bbox_min, bbox_max)
+-            
++            # Convert continuous position to integer voxel index for region growing
++            idx = [int(floor(p[i])) for i in range(3)]
++            region_size, is_relevant = perform_region_growing(volume, idx, CT, ST, bbox_min, bbox_max)
++
+             if is_relevant:
+-                # Relevant region found (e.g., wall)
+                 surface_point = p
+                 break
+-            else:
+-                # Artifact detected, omit and continue ray casting [S1]
+-                pass
+-        
+-        t += step
++            # else: artifact detected, omit and continue ray casting [S1]
++
++        t += dt
+ 
+     if surface_point is not None:
+         # 3. Refinement
+-        # Perform 3-D linear interpolation in neighborhood of surface_point using eight surrounding voxels [S1]
+-        # Search for local gradient maximum to determine surface orientation [S1]
+-        normal = compute_gradient_max(volume, surface_point)
+-        color = compute_shading(volume, surface_point, normal)
+-        alpha = 1.0  # Opaque surface assumption for navigation [G]
++        normal = compute_gradient(volume, surface_point, bbox_min, bbox_max)
++        color = compute_shading(normal)
++        alpha = 1.0
+         return color, alpha, surface_point
+     else:
+-        return (0, 0, 0), 0.0, None
++        return (0.0, 0.0, 0.0), 0.0, None
+ 
+ def ray_aabb_intersect(origin, direction, bbox_min, bbox_max):
+-    """Returns (t_near, t_far) or (None, None) if no intersection."""
+-    t_min = [(bbox_min[i] - origin[i]) / direction[i] if direction[i] != 0 else float('-inf') for i in range(3)]
+-    t_max = [(bbox_max[i] - origin[i]) / direction[i] if direction[i] != 0 else float('inf') for i in range(3)]
++    t_min = []
++    t_max = []
++    for i in range(3):
++        if direction[i] != 0:
++            t_min.append((bbox_min[i] - origin[i]) / direction[i])
++            t_max.append((bbox_max[i] - origin[i]) / direction[i])
++        else:
++            if origin[i] < bbox_min[i] or origin[i] > bbox_max[i]:
++                return None, None
++            t_min.append(float('-inf'))
++            t_max.append(float('inf'))
+     t_near = max(min(t_min[i], t_max[i]) for i in range(3))
+     t_far = min(max(t_min[i], t_max[i]) for i in range(3))
+     if t_near > t_far or t_far < 0:
+         return None, None
+-    # Fix for start-inside cases: clamp t_near to 0.0
+-    t_near = max(0.0, t_near)
+-    return t_near, t_far
++    return max(0.0, t_near), t_far
+ 
+-def interpolate_volume(volume, point):
+-    """Trilinear interpolation of volume at point [G]."""
+-    # Standard trilinear interpolation implementation omitted for brevity; 
+-    # maps continuous point to 8 surrounding voxel values and weights.
+-    pass
++def trilinear_interpolate(volume, point, bbox_min, bbox_max):
++    p = [max(bbox_min[i], min(bbox_max[i], point[i])) for i in range(3)]
++    ix, iy, iz = [int(floor(p[i])) for i in range(3)]
++    fx, fy, fz = [p[i] - ix for i in range(3)]
++    def v(x, y, z):
++        x = max(0, min(x, volume.shape[0]-1))
++        y = max(0, min(y, volume.shape[1]-1))
++        z = max(0, min(z, volume.shape[2]-1))
++        return volume[x, y, z]
++    c00 = v(ix, iy, iz) * (1-fx) + v(ix+1, iy, iz) * fx
++    c01 = v(ix, iy, iz+1) * (1-fx) + v(ix+1, iy, iz+1) * fx
++    c10 = v(ix, iy+1, iz) * (1-fx) + v(ix+1, iy+1, iz) * fx
++    c11 = v(ix, iy+1, iz+1) * (1-fx) + v(ix+1, iy+1, iz+1) * fx
++    c0 = c00 * (1-fy) + c10 * fy
++    c1 = c01 * (1-fy) + c11 * fy
++    return c0 * (1-fz) + c1 * fz
+ 
+-def perform_region_growing(volume, seed_point, CT, ST, bbox_min, bbox_max):
+-    """Grows a region from seed_point. Returns (size, is_relevant)."""
+-    stack = [seed_point]
+-    visited = {tuple(seed_point)}
++def perform_region_growing(volume, seed_idx, CT, ST, bbox_min, bbox_max):
++    stack = [seed_idx]
++    visited = set()
++    visited.add(tuple(seed_idx))
+     region_size = 0
+-    
+     while stack:
+-        current = stack.pop()
++        curr = stack.pop()
+         region_size += 1
+-        
+         if region_size >= ST:
+             return region_size, True
+-        
+-        neighbors = get_neighbors(current, bbox_min, bbox_max)
+-        for n in neighbors:
++        for n in get_neighbors(curr, bbox_min, bbox_max):
+             if n not in visited:
+-                val = interpolate_volume(volume, n)
+-                if val < CT:
+-                    visited.add(n)
++                visited.add(n)
++                if volume[n[0], n[1], n[2]] < CT:
+                     stack.append(n)
+-                    
+     return region_size, False
+ 
+ def get_neighbors(point, bbox_min, bbox_max):
+-    """Returns 6-connected integer grid neighbors within bounds [G]."""
+     neighbors = []
+     for axis in range(3):
+@@ -135,12 +141,21 @@
+     return neighbors
+ 
+-def compute_gradient_max(volume, point):
+-    """Computes surface normal via finite differences [G]."""
+-    # Standard central difference gradient computation
+-    pass
++def compute_gradient(volume, point, bbox_min, bbox_max):
++    dx = 0.5
++    grad = [0.0, 0.0, 0.0]
++    for i in range(3):
++        p_pos = list(point)
++        p_neg = list(point)
++        p_pos[i] += dx
++        p_neg[i] -= dx
++        grad[i] = trilinear_interpolate(volume, p_pos, bbox_min, bbox_max) - \
++                  trilinear_interpolate(volume, p_neg, bbox_min, bbox_max)
++    norm = (grad[0]**2 + grad[1]**2 + grad[2]**2)**0.5
++    if norm == 0: return [0, 0, 1]
++    return [g/norm for g in grad]
+ 
+-def compute_shading(volume, point, normal):
+-    """Computes diffuse shading from normal [G]."""
+-    return (0.5, 0.5, 0.5)
++def compute_shading(normal):
++    intensity = max(0.0, -normal[0]*0.5 - normal[1]*0.5 - normal[2]*0.8)
++    return (intensity, intensity, intensity)
+ ```
+ 
+@@ -156,5 +171,5 @@
+ 
+ ## Operating characteristics
+-*   **Time Complexity**: The base ray casting is $O(N)$ per pixel where $N$ is the number of samples. The region growing adds overhead proportional to the size of the detected regions. In the worst case, if many large regions are detected, the complexity increases significantly. The source notes that computation time is twice that of standard ray casting [S1].
++*   **Time Complexity**: The base ray casting is $O(N)$ per pixel where $N$ is the number of samples [G]. The region growing adds overhead proportional to the size of the detected regions [G]. In the worst case, if many large regions are detected, the complexity increases significantly [G]. The source notes that computation time is twice that of standard ray casting [S1].
+ *   **Memory Complexity**: Requires additional memory for the `Stack` and `Visited` set during region growing. The size is proportional to the largest artifact region detected along the ray [G].
+ *   **Performance**: Tested on cardiac MSCT data (512x512 matrix, ~200 slices, voxel size 0.33-0.4 mm³) [S1]. Average 100-150 eliminated regions per view [S1].

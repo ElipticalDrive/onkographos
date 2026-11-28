@@ -1,0 +1,117 @@
+--- v004.md
++++ v005.md
+@@ -3,49 +3,42 @@
+ 
+ ## Overview
+-The Splat Data Structure (ISplatSource) is an abstract interface designed to load splat data asynchronously, returning a `LoadResult` upon completion [S1, unofficial]. It solves the problem of blocking the main thread during large asset ingestion by decoupling data loading from rendering [S1, unofficial]. It is distinguished from its siblings by providing the foundational asynchronous loading contract that `Splat Cloud Loading` implements for specific file formats and `LOD Download Manager` uses for prioritized network fetching .
++The Splat Data Structure (ISplatSource) is an abstract interface for loading splat data asynchronously, returning a `LoadResult` upon completion [S1, unofficial]. It decouples data ingestion from the rendering pipeline to prevent main-thread blocking [S1, unofficial]. It provides the foundational contract that sibling methods implement: `Splat Cloud Loading` handles specific file formats, while the `LOD Download Manager` manages prioritized network fetching [G].
+ 
+ ## How it works
+ **Inputs and Outputs:**
+-The method takes no direct input parameters in its interface definition but requires a callback function to handle the result. The output is a `LoadResult` struct containing the loaded splat data, spherical harmonic degree, and error status.
++The interface requires no direct input parameters for initialization but requires a callback function to handle the asynchronous result [S1, unofficial]. The output is delivered via the callback as a `LoadResult` struct containing the loaded splat primitives, spherical harmonic degree, and error status [S1, unofficial].
+ 
+ **Data Structures:**
+-The core data structure is `LoadResult`, defined as follows:
+-- `splats`: `std::vector<SplatGPU>` - The container for the loaded splat primitives.
+-- `sh_degree`: `int` - The active spherical harmonic degree of the loaded data.
+-- `error`: `std::string` - A non-empty string if loading failed; empty if successful.
+-- `ok()`: A method returning `true` if `error` is empty.
+-
+-The `SplatGPU` structure contains the geometric and photometric data for each splat. While the exact layout of `SplatGPU` is not fully detailed in the interface notes, the source indicates it includes spherical harmonic coefficients (`sh`) where `sh[0]` is the DC component and subsequent indices are non-DC coefficients [S1, unofficial].
++The `LoadResult` struct contains four fields: `splats` (`std::vector<SplatGPU>`), `sh_degree` (`int`), `error` (`std::string`, non-empty on failure), and `ok()` (returns `true` if `error` is empty) [S1, unofficial]. The `SplatGPU` structure holds geometric and photometric data for each primitive [S1, unofficial]. Its spherical harmonic coefficients (`sh`) are indexed such that `sh[0]` is the DC component, while `sh[1]` onward are non-DC coefficients [S1, unofficial]. Non-DC coefficients are packed into GPU textures as `RGBA16F` texels in the layout `[splat0_c1, splat0_c2, …, splat1_c1, splat1_c2, …]`, where each coefficient occupies `(R, G, B, 0)` and the total count per splat is `(active_sh_degree + 1)^2 - 1` [S1, unofficial].
+ 
+ **Steps:**
+-1. Initialize the `ISplatSource` instance.
+-2. Call `start(Callback cb)`, passing a callback function of type `std::function<void(LoadResult)>` [S1, unofficial].
+-3. The implementation performs asynchronous loading (e.g., file I/O, decompression) in the background.
+-4. Upon completion, the callback is invoked with a `LoadResult` object.
+-5. The caller checks `result.ok()`. If false, `result.error` contains the failure reason. If true, `result.splats` contains the data.
++1. Instantiate the concrete `ISplatSource` implementation.
++2. Call `start(Callback cb)`, passing a function of type `std::function<void(LoadResult)>` [S1, unofficial].
++3. The implementation performs background I/O and parsing [S1, unofficial].
++4. Upon completion, the callback is invoked with a `LoadResult` object [S1, unofficial].
++5. The caller evaluates `result.ok()`. If `false`, `result.error` contains the failure reason [S1, unofficial]. If `true`, `result.splats` contains the loaded data [S1, unofficial].
+ 
+ **Pseudocode:**
+ ```python
+-# Abstract interface definition
+-class ISplatSource:
+-    def start(self, callback):
+-        """
+-        Starts the asynchronous loading process.
+-        :param callback: A function that accepts a LoadResult object.
+-        """
+-        # Implementation is provided by the concrete subclass (e.g., SplatCloudLoader)
+-        # This method returns immediately.
+-        pass
+-
+ class LoadResult:
+     def __init__(self, splats, sh_degree, error):
+         self.splats = splats          # List of SplatGPU objects
+         self.sh_degree = sh_degree    # Integer
+-        self.error = error            # String, empty if success
++        self.error = error            # String, empty on success
+ 
+     def ok(self):
+         return len(self.error) == 0
+ 
+-# Example usage
++class ISplatSource:
++    def start(self, callback):
++        """
++        Initiates asynchronous loading.
++        :param callback: Function accepting a LoadResult.
++        """
++        # Concrete implementations handle background I/O.
++        # This method returns immediately.
++        pass
++
++# Usage example
+ def on_load_complete(result):
+     if result.ok():
+@@ -56,15 +49,15 @@
+         print(f"Load failed: {result.error}")
+ 
+-# Initialization
+-source = get_concrete_splat_source() # Concrete implementation not defined in ISplatSource
++source = ConcreteSplatSource()  # Concrete subclass provided by runtime
+ source.start(on_load_complete)
+ ```
+ 
+ **Parameters:**
+-- `Callback`: A function pointer or lambda that handles the `LoadResult`.
++- `Callback`: A function or lambda accepting a `LoadResult` instance [S1, unofficial].
+ 
+ **Edge Cases:**
+-- Network failures or file corruption result in a non-empty `error` string.
+-- The `SplatGPU` vector may be empty if the source file contains no splats.
++- Network failures or file corruption populate `error` with a descriptive string [G].
++- The `splats` vector may be empty if the source contains no primitives [G].
++- Precision limits in `RGBA16F` packing may affect high-dynamic-range SH coefficients [G].
+ 
+ ## Subtopics
+@@ -78,5 +71,5 @@
+ ## Operating characteristics
+ **Time and Memory Complexity:**
+-Not given in the sources. The complexity depends on the concrete implementation (e.g., file size, network speed, decompression algorithm).
++Not given in the sources. Complexity depends on the concrete implementation, file size, network speed, and decompression algorithm [G].
+ 
+ **Measured Performance:**
+@@ -84,12 +77,12 @@
+ 
+ **Strengths and Limitations:**
+-- **Strengths:** Prevents UI thread blocking during large asset ingestion . Provides a standardized interface for asynchronous loading [S1, unofficial].
+-- **Limitations:** The abstract interface itself does not define the loading mechanism; performance depends on the specific implementation (e.g., `Splat Cloud Loading` or `LOD Download Manager`).
++- **Strengths:** Prevents main-thread blocking during large asset ingestion [G]. Provides a unified contract for diverse loading backends [G].
++- **Limitations:** The abstract interface does not define the loading mechanism; performance and feature parity depend entirely on the concrete implementation [G].
+ 
+ **When to Use:**
+-Use when loading large splat datasets that would otherwise block the main thread. Choose a specific implementation (e.g., `Splat Cloud Loading`) based on the data format and source (local file vs. network).
++Use when loading large splat datasets that would otherwise block the main thread [G]. Choose a specific implementation based on the data format and source (local file vs. network) [G].
+ 
+ ## Background
+-The `ISplatSource` interface is part of the splatting family, which treats volumetric data as a set of geometric or parametric primitives [G]. It is used in the `RVizSplat` project and related tools for loading 3D Gaussian Splat data [S1, unofficial]. The interface was developed to support asynchronous loading in ROS-based visualization tools.
++The interface was defined in [S1, unofficial] to support asynchronous data ingestion in a ROS-based visualization context [S1, unofficial]. It belongs to the splatting family, which treats volumetric data as geometric or parametric primitives [G].
+ 
+ ## Sources

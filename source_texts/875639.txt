@@ -1,0 +1,269 @@
+Modular node graph based noise generation library using SIMD, C++17 and templates - Perf: DomainWarpSimplex and DomainWarpSuperSimplex kernels: cheaper gradient products, vertex skips, inlined 2D kernels by Auburn · Pull Request #221 · Auburn/FastNoise2
+
+Perf: DomainWarpSimplex and DomainWarpSuperSimplex kernels: cheaper gradient products, vertex skips, inlined 2D kernels by Auburn · Pull Request #221 · Auburn/FastNoise2 · GitHub
+Skip to content
+You signed in with another tab or window. Reload to refresh your session.
+You signed out in another tab or window. Reload to refresh your session.
+You switched accounts on another tab or window. Reload to refresh your session.
+Dismiss alert
+Conversation
+Auburn
+commented
+Oct 28, 2026
+•
+edited
+Loading
+Uh oh!
+There was an error while loading. Please reload this page.
+Copy link
+Copy Markdown
+Owner
+Change
+Three commits, all in DomainWarpSimplex.inl. No node, setting or public API changes. Below, "first scheme" is the default vectorisation scheme (orthogonal gradient matrix) and "second scheme" the gradient outer product.
+1. Vector product helpers.
+Orthogonal gradient matrix, 3D (SSE2 to AVX2): the facet decides which axis gets which of three fixed gradient components: (A, C, B), (A, B, C) or (C, A, B). Master selects every component of the three gradients separately. Now f is permuted once (four blends) and multiplied by the fixed components. AVX-512 keeps its permute tables.
+Orthogonal gradient matrix, 4D (SSE4.1 and AVX2): every basis gives the four axes roles: the positive indexed axis, the first and second unindexed axes, and either the negative indexed axis (pairwise case) or the third unindexed axis (single and extra cases). f is gathered in that role order from a 16-entry table (two vpermd and a blend on AVX2, one pshufb on SSE4.1). After that the gradient components only depend on the case, which one permute (AVX2) or two blends (SSE4.1) pick. Master works through the four axes one at a time, with compares, masked counters and a table lookup or select per component. SSE2 and AVX-512 keep their code.
+4D per half, with a skip: below AVX-512 the 4D orthogonal matrix product runs on each native half of float32v separately and skips a half whose multiplier, the vertex falloff, is 0 in every lane. Both orthogonal matrix bodies are now templates on the register type (...CommonImpl<SIMD, I, F>, ...SimplexImpl<SIMD, I, F>) behind the existing helper functions.
+Gradient outer product, 4D (AVX2): the gradient and outer vector components come from the same 20-entry table as on AVX-512, split into two 8-entry halves (one vpermps each, the half picked with a compare). Entries 16 to 19 are entries 0 to 3 negated, so their sign is applied once to the dot product and once to the multiplier instead of to every component. On AVX2, master used the generic selects.
+The 2D and 4D orthogonal matrix products get part 8's FN_ALIGN_STACK.
+The table-half compare and the 3D facet bits rely on HashPrimes returning a hash with a clear sign bit (its final ( hash >> 15 ) ^ hash shifts arithmetically). The 4D index [0,20) << 27 is then in the upper table half exactly when it is greater than 0x3FFFFFFF, and the two facet bits are never both set. The comments say so.
+2. Warp kernels.
+DomainWarpSuperSimplex 3D and 4D, as part 7 does for SuperSimplex. Each vertex's direction comes from the sign bit of a difference (SelectSign, SignBit; a compare into a k mask on AVX-512). Its hash is the base hash XOR a precomputed delta for each moved axis and direction. Its hash, gradient product and accumulation are skipped when its clamped falloff is 0 in every lane (AnyInRange: on SSE4.1 and AVX2 an OR of the two halves and one ptest). That covers 7 of the 8 vertices in 3D and 15 of the 16 in 4D, on every feature set.
+DomainWarpSimplex 4D: vertices 1 to 3 go through one lambda that computes a vertex's masks, offsets and falloff right before its contribution, so the three vertices' values are not all live at once.
+DomainWarpSimplex 3D, AVX-512, first scheme: four of the vertex masks come from masked compares (part 7's MaskedGreater; kUseMaskedGreater keeps it off on MSVC). The second scheme keeps the plain masks.
+2D kernels: Warp_2D of both classes is FS_FORCEINLINE, so it becomes part of the 2D Warp(), which part 8's GenFn calls directly. The 2D Warp() and the 3D and 4D kernels get FN_ALIGN_STACK.
+3. GCC: force-inline the 4D vector product helpers. Part 4 force-inlined the 2D and 3D helpers on GCC but left FN_WARP_HELPER_4D out of line, because master's 4D bodies, inlined at every vertex, spilled heavily on SSE and AVX2. Commit 1's bodies don't, so GCC now force-inlines the 4D helpers too. The comment above the macros now only gives MSVC AVX-512's reason for keeping them out of line. Clang and MSVC compile the same code as with commit 2.
+Why
+Below AVX-512, float32v is two registers wide. These kernels keep the warp vector, the vertex offsets and the hash state live across up to 16 vertex contributions, so they spill heavily. Each change removes operations or live values from the contributions. The counts are from clang-cl 23's objects, part 8 against this branch:
+3D orthogonal matrix: about 18 operations per contribution instead of about 28. DomainWarpSimplex's 3D kernel (first scheme), which inlines the product at its 4 vertices, goes from 1062 instructions with 446 stack accesses to 905 with 328 on AVX2, and from 1675 with 503 to 1352 with 384 on SSE4.1.
+4D orthogonal matrix: the out-of-line 4D product goes from 459 instructions with 146 stack accesses to 273 with 27 on AVX2, and from 763 with 268 to 409 with 24 on SSE4.1: per native half, the product almost fits in the registers. In earlier measurements the same product at full width was 1.09-1.24 times slower on SSE4.1 and AVX2. On a grid the lanes of a vector are neighbours, so often one half lies entirely outside a vertex's range and is skipped.
+4D outer product (AVX2): two permutes and a blend per component replace the generic selects, and applying the sign once saves an XOR per component. Clang would fold a test of bit 30 into an extra vpmulld, which the compare avoids. The AVX2 DomainWarpSuperSimplex 4D kernel with the second scheme inlines this product at all 16 vertices. With commit 2's skips, it goes from 4793 instructions to 3924.
+SuperSimplex vertex skips and hash deltas: the same reasons as in part 7. The vertex hash no longer waits for the direction compare. A skipped vertex saves its hash, its gradient product and its accumulation, and on a grid the far vertices are often out of range for every lane. DomainWarpSuperSimplex's 3D kernel (first scheme) goes from 2126 instructions with 922 stack accesses to 1766 with 655 on AVX2, and from 3314 with 993 to 2602 with 649 on SSE4.1.
+DomainWarpSimplex 4D per vertex: stack accesses in its 4D kernel (first scheme) go from 359 to 225 on AVX2, 320 to 226 on SSE4.1 and 323 to 227 on SSE2.
+AVX-512 masked compares: the 3D kernel kept its k masks on the stack. With the masked compares, DomainWarpSimplex's AVX-512 3D kernel (first scheme) drops its 4 kandd, 6 knotd and 7 kmovd and gains 4 compares. It goes from 767 instructions with 134 stack accesses to 739 with 118. The second scheme doesn't spill its masks, so there the extra compares would only compete with its FMAs.
+2D kernels: a 2D warp is now one call from GenFn instead of two (GenFn 2D makes 3 calls instead of 4). The 3D and 4D kernels stay out of line, because inlining them was slower on AVX-512 in earlier measurements. The 3D product and the SuperSimplex kernels stay at full width, as in part 7: per-half versions measured slower.
+GCC: SysV passes the two-register float32v through memory, so every call to an out-of-line helper stores and reloads its arguments. A 4D warp calls these helpers up to 16 times per point.
+Effect
+Measured on a Ryzen 9 7950X, one pinned core, nothing else running: clang-cl and MSVC under Windows, GCC and Linux clang under WSL 2 on the same machine. Both builds use FastSIMD 7aff025 and run interleaved in one process, in 3 processes with the A/B order alternating; each figure is the median of the per-process new/old time ratios (lower is faster). Two identical builds give feature-set geomeans of 0.998-1.001 and 99% of single rows within 1.5% (worst 9.1%) under Windows, and 0.999-1.005 and 2.4% under WSL, where a few single rows were 8-26% off in every process, so a lone Linux row is not evidence on its own. Part 8 (perf-series/domain-warp) against this branch, with clang-cl 23 and MSVC 19.51 (VS 2026). GCC 16 ran the default set; GCC 13, Linux clang 23 and AArch64 were not measured.
+Default set: 21 generators and node trees, 2D/3D/4D, 252 rows on a 16384-point uniform grid. 6 change: DomainWarpSimplex and DomainWarpSuperSimplex with either scheme, DomainWarpFractalIndependent over DomainWarpSuperSimplex (first scheme) and the MountainTerrain tree.
+Warp set: part 8's 10 warp setups plus Simplex and Perlin, 144 rows, on the same grid and on random positions. 7 of the 12 change: the 6 above and DomainWarpFractalProgressive over DomainWarpSimplex (second scheme).
+SSE2
+SSE4.1
+AVX2
+AVX-512
+All
+clang-cl 23, default set, grid
+0.962
+0.943
+0.950
+0.988
+0.961
+clang-cl 23, warp set, grid
+0.932
+0.900
+0.906
+0.977
+0.928
+clang-cl 23, warp set, random positions
+0.971
+0.938
+0.937
+0.995
+0.960
+MSVC 19.51, default set, grid
+0.969
+0.962
+0.961
+0.975
+0.967
+MSVC 19.51, warp set, grid
+0.944
+0.935
+0.929
+0.955
+0.941
+MSVC 19.51, warp set, random positions
+0.985
+0.964
+0.960
+0.981
+0.972
+GCC 16, default set, grid
+0.963
+0.945
+0.948
+0.974
+0.958
+In the default set, the 72 rows of the changed setups are 0.868 with clang-cl 23 and 0.889 with MSVC 19.51, the other 180 at 1.000 (none more than 1.5% off). The gain is mostly in 4D: on the warp-set grid, 2D / 3D / 4D are 0.999 / 0.946 / 0.847 with clang-cl 23 and 0.996 / 0.963 / 0.869 with MSVC 19.51.
+Default-set grid rows, clang-cl 23 then MSVC 19.51 (the warp-set run agrees within 0.03):
+DomainWarpSuperSimplex, first scheme: 4D 0.384-0.721 and 0.439-0.693, most on SSE4.1; 3D 0.748-0.871 below AVX-512. The independent fractal over it follows.
+DomainWarpSuperSimplex, second scheme: 4D 0.515-0.798, most on AVX2 (0.515 and 0.639), which also gets the table outer product; 3D 0.890-0.981.
+DomainWarpSimplex, first scheme: 4D 0.612-0.801 on SSE4.1 and AVX2, which get the role-order gather, against 0.861 and 0.875 on SSE2. 3D 0.871-0.940 below AVX-512, where the facet permutation is the change.
+DomainWarpSimplex, second scheme: AVX2 4D, which gets the table outer product, is 0.930 with clang-cl 23 (warp-set run) and 0.931-0.933 with MSVC 19.51.
+AVX-512 keeps its product tables and gains mostly in DomainWarpSuperSimplex. The masked compares (clang-cl 23 only) are within noise: DomainWarpSimplex first scheme AVX-512 3D is 0.989-1.007 in the three runs. MSVC 19.51's changed AVX-512 2D rows except MountainTerrain gain (0.886-0.935 on grids).
+Random positions (clang-cl 23; MSVC 19.51 is similar): the facet permutation and the gather keep their gain (DomainWarpSimplex first scheme 3D 0.874-0.894 below AVX-512, DomainWarpSuperSimplex first scheme SSE4.1 4D 0.575). The skips gain much less, as the lanes of a vector are not neighbours: DomainWarpSuperSimplex first scheme SSE2 4D is 0.913 (grid 0.610).
+Setups this part doesn't change (warp set): 0.999-1.000 per run, except DomainWarpGradient with axis scales SSE2 4D: 0.951 (clang-cl 23) and 0.859 (MSVC 19.51) on the grid, every process agreeing; it is in the SSE2 geomeans.
+What it costs:
+clang-cl 23, DomainWarpSimplex 2D grids: 1.038-1.065 with the first scheme (SSE4.1 to AVX-512) and 1.046-1.047 with the second (AVX2, AVX-512), every process of both grid runs 1.036-1.069. On random positions they are 0.954-1.021. Most other 2D rows of the changed setups gain a little. The force-inlined 2D kernel is behind the cost and the gains (see Earlier measurements).
+MSVC 19.51, SSE2 and SSE4.1 2D, in all three runs, on grids and random positions: DomainWarpSimplex first scheme and DomainWarpSuperSimplex either scheme 1.131-1.161 on SSE4.1, DomainWarpSuperSimplex second scheme 1.109-1.125 on SSE2. The independent fractal over DomainWarpSuperSimplex SSE4.1 2D is 1.217 and 1.204 on grids (0.976 on random positions). One default-set process ran the first-scheme SSE4.1 rows and the fractal at 0.900-0.972; the others agree. In 2D this part only force-inlines the kernel and adds FN_ALIGN_STACK; which one MSVC reacts to is not measured. The complete performance branch is slowest against master on the same three SSE4.1 rows (1.140-1.153 on the grid), so that cost comes from this part.
+MSVC 19.51, DomainWarpSimplex second scheme, SSE2 and SSE4.1 4D: 1.025-1.046, the progressive fractal over it 1.056-1.069, every process 1.022-1.087. Below AVX2 this kernel's only changes are commit 2's per-vertex lambda and FN_ALIGN_STACK. clang-cl 23: 0.956-1.001.
+MSVC 19.51, random positions: DomainWarpSuperSimplex second scheme SSE2 3D is 1.065 (processes 1.065-1.073; grids 0.979 and 0.981).
+GCC 16 (default set, grid): the 72 rows of the changed setups are 0.861, the other 180 at 0.999.
+AVX-512 4D gains more than on Windows: 0.566-0.834 over the five changed warp setups, against 0.693-1.001 on Windows, likely from commit 3 (Earlier measurements). DomainWarpSimplex's second scheme also gains more in SSE4.1 and AVX2 4D: 0.906 and 0.805 (clang-cl 23 0.971 and 0.939).
+2D costs: DomainWarpSuperSimplex SSE2 and AVX-512 2D are 1.070 and 1.066 with the first scheme and 1.043 and 1.057 with the second, and the independent fractal over it SSE2 2D 1.079 (every process 1.043-1.084; clang-cl 23 0.969-1.023). In 2D this part only force-inlines the kernel and adds FN_ALIGN_STACK. The complete performance branch still runs these five rows at 0.81-0.88 of master's time.
+Earlier measurements, not repeated in this pass and less controlled: same machine and method, but other builds and benchmarks were running, so single rows could be several percent off.
+clang-cl 23, 2D kernel out of line again: DomainWarpSimplex 2D 0.94-0.96 of this branch, but DomainWarpSuperSimplex 2D 1.01-1.04 and the fractals 1.02-1.06. Inlining only DomainWarpSuperSimplex's 2D kernel might keep both gains (not measured).
+GCC 16, commit 3 alone (the 48 4D rows of the warp set): 0.882-0.978 per feature set. DomainWarpSimplex and DomainWarpSuperSimplex 4D were 0.71-0.93 on AVX2 and AVX-512, but first-scheme SSE2 4D 1.04-1.05, as SSE2, without the role-order gather, now inlines the generic 4D product at every vertex. DomainWarpGradient with axis scales SSE4.1 4D, identical in both builds, was 1.19-1.28 in all 5 processes: code placement, as commit 3 grows the SSE4.1 object.
+Output
+Against master built with the same FastSIMD (7aff025), in all 1212 cases (101 node setups, 4 feature sets, 2D/3D/4D). Each case covers a grid, random positions near the origin, positions up to 2e5 away, tileable output and GenSingle, with 2 seeds. At 1e-3 of the output range, the result is the same as for part 8 on every toolchain:
+differ at 1e-3
+bit-identical to master
+cases that change against part 8
+clang-cl 23
+0
+875 (part 8: 897)
+52
+MSVC 19.44
+0
+946 (part 8: 966)
+28
+MSVC 19.51
+55, the same cases as part 8, none of them a domain warp
+462 (part 8: 469)
+46
+GCC 16
+0, and part 7's one case with a single 8-bit step
+862 (part 8: 875)
+56
+GCC 13
+0
+709 (part 8: 712)
+49
+Linux clang 23
+2, the AddDimension cases master gets wrong (part 1)
+869 (part 8: 890)
+52
+WASM: 92 of the 1128 output grids of the WASM dump change against part 8, all of them from the setups below. They change by up to 7.2e-6 of the range, except on the grid 2e5 away, where they change by up to 2.0e-3 and 5 grids pass 1e-3 (2D DomainWarpSimplex with either scheme and DomainWarpSuperSimplex with the first). That is the far-coordinate rounding every warp grid on WASM already has against master. Against master, 97 grids of the dump differ by more than 1e-3 (part 8: 100) and 10 more at a few points (part 8: 9), all on that far grid. No near, random-position or odd-size grid does.
+Only seven setups change: DomainWarpSimplex and DomainWarpSuperSimplex over Simplex with either scheme, DomainWarpFractalIndependent over DomainWarpSuperSimplex, DomainWarpFractalProgressive over DomainWarpSimplex, and the MountainTerrain tree. With MSVC 19.44, only the first-scheme setups change. Every other case is bit-identical to part 8 on every toolchain. No hash, vertex choice or gradient changes. Every difference is float rounding: up to 1.2e-5 of the range on grids, near the origin, in tileable output and in GenSingle (MSVC 19.51: 2.4e-5, MSVC 19.44: 7.7e-6), and up to 1.6e-4 at single points of the grid 2e5 away.
+Orthogonal matrix products (commit 1; every compiler): the same products, summed in a different order. This changes the first-scheme cases in 3D on SSE2, SSE4.1 and AVX2, and in 4D (and 2D tileable output, which samples 4D) on SSE4.1 and AVX2. That is 28 cases with clang, GCC and MSVC 19.44, and 36 with MSVC 19.51. AVX-512 keeps its tables and is bit-identical. The outer product lookups are bit-identical too: negating the dot product or the multiplier gives the same bits as negating every component.
+Kernels (commit 2): the same operations, accumulated in a different order around the new branches and in the inlined 2D kernel, under fast-math. With clang-cl 23 this changes 38 cases. They are DomainWarpSimplex 4D with either scheme on SSE2, SSE4.1 and AVX2 (and its 2D tileable output), DomainWarpSuperSimplex 3D, and the 2D grids where the kernel is now inlined. The fractals and the MountainTerrain tree change through them. GCC changes 35 (GCC 13) to 44 (GCC 16) cases, and MSVC 19.51 24 cases, all SSE2 and SSE4.1 in 2D and 4D. MSVC 19.44 is bit-identical to commit 1. The masked compares give the same masks: DomainWarpSimplex AVX-512 3D doesn't change.
+GCC 4D helpers (commit 3): GCC rounds the inlined helpers differently in 4 cases: DomainWarpSuperSimplex with the first scheme and the independent fractal over it, in 4D and 2D tileable output, on SSE2 with GCC 16 and on SSE4.1 with GCC 13. The differences are up to 1.8e-6.
+Same values as the complete performance branch: with clang-cl 23, Linux clang 23 and GCC 16, every domain warp case and the MountainTerrain tree are now bit-identical to it. With part 8, 58 of these cases still differed from it on clang-cl 23. The remaining differences are in cases that the complete branch evaluates through part 10's block functions. MSVC 19.44 differs in one MountainTerrain case, AVX2 2D, at a few grid points (1.4e-7). MSVC 19.51 differs on the MountainTerrain grids and tileable output on SSE2 to AVX2 (up to 3.4e-7, as with part 8). GCC 13 differs in the 4 cases of commit 3 (up to 1.8e-6). On WASM every domain warp and MountainTerrain grid is bit-identical to the complete branch's dump.
+No behaviour changes. A skipped vertex or half has a falloff of 0 in every lane, so it would add 0. The sign-bit selection picks the same direction as master's comparison, and the hash deltas give the same integers as master's per-vertex prime sums.
+Testing
+Builds: clang-cl 23.1.3, MSVC 19.51 (VS 2026), MSVC 19.44 (VS 2022), GCC 16 (snapshot), GCC 13.3, clang 23.1.4 on Linux and Emscripten 6.0.12, all without new warnings (GCC 16 shows FastSIMD's four known -Wignored-attributes warnings, as on master). NEON/AARCH64 compiles with clang 23 (compile only). FastSIMD's "__regcall is not supported for this target" warnings go from 400 to 398 per file: the two Warp_2D kernels no longer have FS_VECTORCALL.
+Code size: the clang-cl 23 DLL shrinks from 2.88 to 2.83 MB, MSVC 19.51 from 3.04 to 3.02 MB, and the WASM module from 1.32 to 1.31 MB. The GCC 16 .so grows from 7.85 to 8.04 MB (commit 3 alone adds 82 KB to the SSE4.1 object).
+Output: compared on each toolchain at 1e-3 and 1e-7 relative to the output range, against master, against part 8 and against the complete performance branch, as above. Builds of commit 1 (clang-cl 23, MSVC 19.51, MSVC 19.44, GCC 16, GCC 13, Linux clang 23) and of commits 1-2 (clang-cl 23, GCC 16, GCC 13) attribute each change. The WASM dump was compared against part 8, master and the complete branch.
+Amplitude-0 skips: part 8's check, run against the complete performance branch. DomainWarpGradient, DomainWarpSimplex and DomainWarpSuperSimplex, and the two domain warp fractals over them, with masked, Constant 0 and constant 0 amplitudes, all feature sets, 2D/3D/4D, 2 seeds, on uniform grids and on random position arrays: 1320 configurations each. Bit-identical in all of them with clang-cl 23, MSVC 19.44 and MSVC 19.51.
+MSVC AVX-512: the masked compares are off on MSVC, so MSVC 19.44 and 19.51 compute the AVX-512 3D domain warp cases alike. The one exception is a single point 2e5 away in the progressive fractal over DomainWarpSimplex, which differs the same way on master, on part 8 and in the complete branch.
+Code: clang-cl 23's objects compared function by function against part 8 for the counts in Why.
+Other PRs
+None of the open PRs touch DomainWarpSimplex.inl.
+Series
+Part 9 of 16 of the FastNoise2 performance series, which goes into perf one part at a time, in order. Merge it after part 8 (perf-series/domain-warp: devirtualised Warp, final-class reads, aligned kernels, static WarpFn for DomainWarpFractal). This part relies on part 8's direct Warp calls from GenFn and on its FN_ALIGN_STACK, and was built and measured on part 8. It also uses part 4's FN_WARP_HELPER macros and part 7's MaskedGreater. Part 10 (perf-series/composite-blocks) adds block evaluation to both warp classes, and part 14 (perf-series/aarch64) adds the AArch64 table lookups and its explicit FMA macros to this file.
+Previous part: #220.
+Auburn
+added 3 commits
+October 20, 2026 08:24
+DomainWarpSimplex: faster vector product helpers
+…
+7fe8ab2
+```
+Gradient outer product 4D (AVX2): look the gradient and outer vector
+components up with permutes (two 8 entry table halves picked with a
+compare) and apply the sign of the negated entries once to the dot product
+and the multiplier.
+
+Orthogonal gradient matrix 3D (SSE/AVX2): permute f by the facet and
+multiply with fixed gradient components instead of selecting every
+component of the three gradients. 4D (AVX2 and SSE4.1): gather f in basis
+role order, the gradients then only depend on the pairwise/single/extra
+case. The 4D product runs per native register half on SSE/AVX2 and skips
+halves whose multiplier is zero in every lane. The 2D and 4D products
+realign their stack (FN_ALIGN_STACK).
+
+Output: the same products in a different order, float rounding only on the
+orthogonal gradient matrix (vs0) rows: up to 1.2e-5 relative (far
+coordinates 1.6e-4), DIFF=0 at 1e-3 vs master on clang-cl 23, clang 23,
+GCC 16/13 and MSVC 14.51/14.44.
+```
+DomainWarpSimplex/SuperSimplex: skip zero falloff vertices, aligned w…
+…
+b5115b6
+```
+…arp kernels
+
+SuperSimplex 3D/4D: pick each vertex direction with the sign bit of a
+difference instead of a compare, hash the vertex from precomputed
+( base ^ moved ) deltas per axis direction, and skip the contribution when
+its clamped falloff is zero in every lane (OR + vptest on SSE4.1/AVX2).
+
+Simplex 4D computes each vertex right before its contribution, so fewer
+values stay live across the contribution calls. Simplex 3D on AVX512 builds
+the orthogonal matrix scheme's vertex masks with masked compares
+(kUseMaskedGreater: not on MSVC).
+
+The 2D kernels are force inlined into Warp() and Gen, the 2D Warp() and the
+3D/4D kernels realign their stack (FN_ALIGN_STACK).
+
+Output: float rounding only, up to 1.2e-5 relative (far coordinates
+1.1e-4), DIFF=0 at 1e-3 vs master on every compiler.
+
+Ryzen 9 7950X, uniform grids, DomainWarp + Mountain rows vs the previous
+layer (both commits): clang-cl 23 0.927 (SuperSimplex 4D 0.39-0.78, 3D
+0.71-0.95), MSVC 14.51 0.939, GCC 16 0.925; random positions clang-cl 23
+0.957. DomainWarpSimplex 2D grids are 2-7% slower on clang-cl
+SSE4.1-AVX512 with the force inlined 2D kernel; keeping it out of line
+costs the SuperSimplex and fractal 2D rows 1-6% instead.
+```
+DomainWarpSimplex: force inline the 4D vector product helpers on GCC
+…
+8ef365f
+```
+With the per-half orthogonal matrix product and the permute based gradient
+outer product, GCC inlines the 4D helpers into the Simplex/SuperSimplex 4D
+warps without the spills the previous bodies had, and saves the calls that
+pass the float32v arguments through memory.
+
+GCC 16, 4D DomainWarp rows: SSE2 0.976, SSE4.1 0.978, AVX2 0.913, AVX512
+0.882. Output: float rounding only on the SuperSimplex vs0 4D rows (<= 1.8e-6
+relative, GCC 16/13), clang and MSVC compile the same code as before.
+```
+Auburn
+mentioned this pull request
+Oct 28, 2026
+Perf: Evaluate composite node trees a block at a time
+#222
+Open
+Auburn
+force-pushed
+the
+perf-series/domain-warp-simplex
+branch
+from
+ff04014 to
+8ef365f
+Compare
+November 3, 2026 22:00
+Auburn
+changed the base branch from
+perf
+to
+perf-series/domain-warp
+November 3, 2026 22:00
+Auburn
+added this pull request to stack #239
+November 3, 2026 22:01
+This branch has not been deployed
+No deployments
+Sign up for free
+to join this conversation on GitHub.
+Already have an account?
+Sign in to comment
+Uh oh!
+There was an error while loading. Please reload this page.
+Labels
+None yet
+1 participant
+Add this suggestion to a batch that can be applied as a single commit.This suggestion is invalid because no changes were made to the code.Suggestions cannot be applied while the pull request is closed.Suggestions cannot be applied while viewing a subset of changes.Only one suggestion per line can be applied in a batch.Add this suggestion to a batch that can be applied as a single commit.Applying suggestions on deleted lines is not supported.You must change the existing code in this line in order to create a valid suggestion.Outdated suggestions cannot be applied.This suggestion has been applied or marked resolved.Suggestions cannot be applied from pending reviews.Suggestions cannot be applied on multi-line comments.Suggestions cannot be applied while the pull request is queued to merge.Suggestion cannot be applied right now. Please check back later.
+You can’t perform that action at this time.

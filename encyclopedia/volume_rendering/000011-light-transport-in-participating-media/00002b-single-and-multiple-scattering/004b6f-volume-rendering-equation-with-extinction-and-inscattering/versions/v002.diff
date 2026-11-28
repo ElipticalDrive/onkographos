@@ -1,0 +1,170 @@
+--- v001.md
++++ v002.md
+@@ -4,15 +4,15 @@
+ 
+ ## Overview
+-This method computes the radiance arriving at a camera by integrating the Radiative Transfer Equation (RTE), accounting for light attenuation via extinction (absorption and out-scattering) and light gain via emission and in-scattering [S1, unofficial]. It differs from the [Absorption-only model](839-absorption-only-model.md) by including scattering effects and from the [Single Scattering Model](1053-single-scattering-model.md) by integrating over the full sphere of directions for in-scattering, providing a physically accurate solution for participating media [S1, unofficial].
++This method computes the radiance arriving at a camera by integrating the balance of light attenuation (extinction) and light gain (emission and in-scattering) along a ray through a participating medium [S1, unofficial]. It differs from absorption-only models by including scattering effects and from simplified single-light approximations by integrating over the full sphere of directions for in-scattering [S1, unofficial].
+ 
+ ## How it works
+ **Inputs:**
+-*   Camera ray origin $\mathbf{o}$ and direction $\boldsymbol{\omega}$ (unit vector pointing from eye to scene).
+-*   Volume density field $\rho(\mathbf{p})$ (scalar field, typically $0$ to $1$).
+-*   Absorption coefficient $\sigma_a$ (base value, units $m^{-1}$).
+-*   Scattering coefficient $\sigma_s$ (base value, units $m^{-1}$).
+-*   Emissive term $L_e(\mathbf{p}, \boldsymbol{\omega})$ (radiance emitted per unit length).
+-*   Incident radiance $L_i(\mathbf{p}, \boldsymbol{\omega}')$ from light sources, attenuated through the volume.
+-*   Phase function $p(\boldsymbol{\omega}, \boldsymbol{\omega}')$.
++*   Camera ray origin $\mathbf{o}$ and direction $\boldsymbol{\omega}$ (unit vector pointing from eye to scene) [S1, unofficial].
++*   Volume density field $\rho(\mathbf{p})$ (scalar field, typically $0$ to $1$) [G].
++*   Absorption coefficient $\sigma_a$ (base value, units $m^{-1}$) [S1, unofficial].
++*   Scattering coefficient $\sigma_s$ (base value, units $m^{-1}$) [S1, unofficial].
++*   Emissive term $L_e(\mathbf{p}, \boldsymbol{\omega})$ (radiance emitted per unit length) [G].
++*   Incident radiance $L(x, \boldsymbol{\omega}')$ from light sources, attenuated through the volume [S1, unofficial].
++*   Phase function $p(\boldsymbol{\omega}, \boldsymbol{\omega}')$ [S1, unofficial].
+ 
+ **Outputs:**
+@@ -23,5 +23,5 @@
+     *   Layout: $\sigma_t = \sigma_a + \sigma_s$ [S1, unofficial].
+ *   **Phase Function $p$**: A scalar value in range $[0, 1]$ [S1, unofficial].
+-    *   Depends on the angle $\theta$ between view direction $\boldsymbol{\omega}$ and light direction $\boldsymbol{\omega}'$.
++    *   Depends on the angle $\theta$ between view direction $\boldsymbol{\omega}$ and light direction $\boldsymbol{\omega}'$ [S1, unofficial].
+     *   For isotropic scattering: $p = \frac{1}{4\pi}$ [S1, unofficial].
+     *   Normalization: $\int_{\Omega} p(\boldsymbol{\omega}, \boldsymbol{\omega}') d\omega' = 1$ to conserve energy [S1, unofficial].
+@@ -40,18 +40,20 @@
+     $$ T = e^{-\tau} = e^{-\int \sigma_t dt} $$
+     This accounts for both absorption and out-scattering (light lost from the view ray) [S1, unofficial].
+-3.  **Check Density**: If the local density is zero, skip accumulation for this sample. No light is accumulated, and no in-scattering is added [S1, unofficial].
++3.  **Check Density**: If the local density is zero, skip accumulation for this sample [S1, unofficial].
+ 4.  **Compute In-Scattering**: Calculate the in-scattering contribution $L_i(x, \boldsymbol{\omega})$ by integrating incident radiance over the sphere of directions:
+     $$ L_i(x, \boldsymbol{\omega}) = \int_{\Omega} p(\boldsymbol{\omega}, \boldsymbol{\omega}') L(x, \boldsymbol{\omega}') d\omega' $$
+     Where:
+     *   $x$ is the sample position.
+-    *   $\boldsymbol{\omega}$ is the view direction.
++    *   $\boldsymbol{\omega}$ is the view direction [S1, unofficial].
+     *   $\boldsymbol{\omega}'$ is the light direction (opposite to radiance flow, from light to particle) [S1, unofficial].
+     *   $L(x, \boldsymbol{\omega}')$ is the incident radiance at $x$ from direction $\boldsymbol{\omega}'$, attenuated through the volume [S1, unofficial].
+     *   $p(\boldsymbol{\omega}, \boldsymbol{\omega}')$ is the phase function, determined by the angle $\theta$ between $\boldsymbol{\omega}$ and $\boldsymbol{\omega}'$ (via dot product and cosine) [S1, unofficial].
+-5.  **Accumulate**: Add the in-scattering term and emission term to the result, weighted by the transmittance from the camera to the sample point.
++5.  **Accumulate**: Integrate the source term along the ray:
++    $$ L_o = \int_0^{t_{end}} T(0, t) (\sigma_s L_i(t) + \sigma_e(t)) dt $$
++    Discretized per step: `accumulated_radiance += transmittance * (sigma_s * inscattering + emission) * STEP_SIZE` [G].
+ 
+ **Pseudocode:**
+ ```python
+-def render_volume_ray(ray_origin, ray_direction, volume_density, sigma_a_base, sigma_s_base, L_e, L_incident, phase_function):
++def render_volume_ray(ray_origin, ray_direction, volume_density, sigma_a_base, sigma_s_base, L_e, L_incident, phase_function, light_direction):
+     """
+     Renders a single ray through a participating medium using the volume rendering equation with extinction and inscattering.
+@@ -66,21 +68,19 @@
+         L_incident: function(p, omega) -> vec3, incident radiance from lights, attenuated.
+         phase_function: function(omega, omega_prime) -> float, returns scattering probability.
++        light_direction: vec3, direction to the light source.
+         
+     Returns:
+         vec3, final radiance.
+     """
+-    # Constants
+     MAX_STEPS = 100
+-    STEP_SIZE = 0.1 # Example step size, depends on resolution
++    STEP_SIZE = 0.1
+     
+     accumulated_radiance = vec3(0.0)
+     transmittance = 1.0
+     
+-    # Ray marching
+     for i in range(MAX_STEPS):
+-        # Current sample position
+-        pos = ray_origin + ray_direction * (i * STEP_SIZE)
++        t = i * STEP_SIZE
++        pos = ray_origin + ray_direction * t
+         
+-        # Get density at current position
+         density = volume_density(pos)
+         
+@@ -96,5 +96,4 @@
+         
+         # Compute transmittance for this step
+-        # T = exp(-sigma_t * dt)
+         step_transmittance = exp(-sigma_t * STEP_SIZE)
+         
+@@ -102,24 +101,7 @@
+         # L_i(x, omega) = integral over sphere of p(omega, omega') * L(x, omega') domega'
+         # In practice, this is approximated by sampling light directions
+-        inscattering = vec3(0.0)
+-        
+-        # Example: Single light source approximation for inscattering
+-        # Note: Full integration requires sampling the sphere, which is computationally expensive.
+-        # Here we assume L_incident provides the attenuated light from specific directions.
+-        # For a single light, we might sample the direction to the light.
+-        light_direction = normalize(light_position - pos)
+-        
+-        # Phase function value
+-        # theta is angle between view direction and light direction
+-        # p depends on theta
+         p_val = phase_function(ray_direction, light_direction)
+-        
+-        # Incident radiance from light, already attenuated through volume
+-        # L(x, omega') is the light reaching this point from the light source
+         L_light = L_incident(pos, light_direction)
+-        
+-        # In-scattering contribution for this direction
+-        # Note: The integral is over all directions. This is a simplification.
+-        inscattering += p_val * L_light
++        inscattering = p_val * L_light
+         
+         # Add emission
+@@ -127,24 +109,5 @@
+         
+         # Accumulate radiance
+-        # dL = (sigma_s * L_i + sigma_e) * T * dt
+-        # Here, sigma_s * L_i is the inscattering term, sigma_e is emission
+-        # We multiply by the transmittance from the camera to this point (transmittance)
+-        # And the transmittance of the current step (step_transmittance)
+-        
+-        # The term (sigma_s * inscattering + emission) represents the source term
+-        # multiplied by the step length (implicitly handled by integration)
+-        
+-        # Correct accumulation formula:
+-        # L_o = integral from 0 to t_max of T(0, t) * (sigma_s * L_i(t) + sigma_e(t)) dt
+-        # Discretized:
+-        # accumulated_radiance += transmittance * (sigma_s * inscattering + emission) * STEP_SIZE
+-        # transmittance *= step_transmittance
+-        
+-        # However, the source notes emphasize that sigma_s is used for transmission calculation too.
+-        # And that result is premultiplied by opacity.
+-        
+-        # Let's follow the standard volume rendering integral:
+-        # C = integral T(t) * sigma_s * L_i(t) dt + integral T(t) * sigma_e(t) dt
+-        
++        # Discretized form of: L_o = integral T(t) * (sigma_s * L_i(t) + sigma_e(t)) dt
+         accumulated_radiance += transmittance * (sigma_s * inscattering + emission) * STEP_SIZE
+         transmittance *= step_transmittance
+@@ -158,19 +121,18 @@
+ 
+ **Edge Cases and Pitfalls:**
+-*   **Zero Density**: If density is zero, no light is accumulated, and no in-scattering is added [S1, unofficial].
++*   **Zero Density**: If density is zero, nothing is added to the result variable [S1, unofficial].
+ *   **Phase Function Normalization**: The phase function must be normalized such that its integral over the sphere equals 1 to conserve energy [S1, unofficial].
+ *   **Anisotropic Scattering**: Most volumes are anisotropic, scattering light biased towards certain directions (e.g., forward scattering). Isotropic scattering ($p = 1/4\pi$) is a simplification [S1, unofficial].
+-*   **Computational Cost**: Integrating over the sphere of directions for in-scattering is expensive. Approximations (like single scattering or gradient-guided approximations) are often used [S1, unofficial].
++
++## Subtopics
++
++### [Volume Rendering (Single Scattering Stratified)](16671-volume-rendering-single-scattering-stratified.md)
++This method renders participating media (fog, smoke, smog) by numerically integrating the radiance transfer equation along view rays using stratified sampling. It solves the problem of light attenuation and in-scattering in volumetric scenes by decomposing the rendering equation into separate attenuation and augmentation terms, estimating the latter via single scattering from direct light sources. It is distinguished from general single scattering methods by its use of stratified sampling to reduce variance in the 1D light transfer integral, and from multiple scattering methods by its neglect of indirect lighting contributions.
+ 
+ ## Operating characteristics
+-*   **Time Complexity**: $O(N \cdot M)$, where $N$ is the number of samples per ray and $M$ is the number of light directions sampled for in-scattering integration. Full integration over the sphere is $O(N \cdot S)$, where $S$ is the number of samples over the sphere.
+-*   **Memory Complexity**: $O(V)$, where $V$ is the size of the volume density field.
+-*   **Strengths**: Physically accurate; handles complex lighting interactions; accounts for both absorption and scattering.
+-*   **Limitations**: Computationally expensive due to the integration over the sphere of directions for in-scattering; sensitive to noise if not enough samples are used.
+-*   **When to Use**: High-quality offline rendering; scenes with significant scattering effects (fog, smoke, clouds).
+-*   **When Not to Use**: Real-time applications with limited computational resources; scenes where scattering effects are negligible.
++Not given in the sources.
+ 
+ ## Background
+-The volume rendering equation with extinction and inscattering is derived from the Radiative Transfer Equation (RTE), a fundamental equation in physics describing light transport in participating media [S1, unofficial]. It generalizes the Beer-Lambert law by including scattering and emission terms. The method is widely used in computer graphics for rendering volumetric effects like fog, smoke, and clouds [S1, unofficial]. The phase function concept, introduced to model directional scattering, is central to this model [S1, unofficial].
++The volume rendering equation with extinction and inscattering is described as a physically accurate model that accounts for light attenuation (absorption and out-scattering) and light gain (emission and in-scattering) by integrating over the sphere of directions, replacing the simplified single-light-source approximation [S1, unofficial]. It generalizes the Beer-Lambert law by including scattering and emission terms. The phase function concept, introduced to model directional scattering, is central to this model [S1, unofficial].
+ 
+ ## Sources

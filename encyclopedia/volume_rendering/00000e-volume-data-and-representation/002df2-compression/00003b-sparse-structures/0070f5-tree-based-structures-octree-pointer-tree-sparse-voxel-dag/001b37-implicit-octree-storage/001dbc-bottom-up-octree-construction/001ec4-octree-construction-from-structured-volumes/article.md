@@ -1,0 +1,108 @@
+# Octree Construction from Structured Volumes
+
+Also called: Adaptive-resolution octree, Lossless-compression octree representation, Octree Volume Construction and Compression, Voxel Consolidation, Zero-variance Octree Construction
+
+## Overview
+This method compresses large structured scalar volumes into an adaptive-resolution octree to reduce memory footprint while serving as an acceleration structure for ray tracing [S1, S2, unofficial]. It generates an octree from a 3D grid by consolidating voxels with zero inter-voxel variance, extending the principle of quadtree generation from 2D grids (consolidating pixels with zero inter-pixel variance) to 3D [S1, S2, unofficial]. Unlike [Min/Max Tree Construction](1623-min-max-tree-construction.md) which focuses on the hierarchy bounds, this method focuses on the data consolidation and tree topology. It differs from [Velasco and Torres](1623-min-max-tree-construction.md) by encapsulating actual individual voxels rather than eight-voxel cells [S1, unofficial].
+
+## How it works
+**Inputs:** A 3D scalar array (structured volume) [S1, unofficial].
+**Outputs:** An octree structure where leaf nodes store scalar values and interior nodes define the hierarchy [S1, unofficial].
+
+**Data Structures:**
+Nodes store eight-value arrays for child pointers and scalar leaves [S3, unofficial]. Voxels are mapped to the lower-left corner of a cell to facilitate ray tracing [S2, unofficial]. Values outside the octree data are defined to be zero [S2, unofficial].
+
+**Algorithm Steps:**
+1. Initialize with the finest resolution grid where each voxel is a leaf node [S1, unofficial].
+2. Iterate bottom-up from the finest level to the root [S3, unofficial]. For every group of 8 sibling voxels:
+   * Calculate the inter-voxel variance of the 8 children [S3, unofficial].
+   * If the variance is zero (all 8 voxels have identical scalar values), consolidate them into a single parent node [S1, unofficial].
+   * The parent node becomes a leaf storing that common scalar value [S1, unofficial].
+   * If the variance is non-zero, the parent remains an interior node with pointers to its 8 children [S1, unofficial].
+3. Repeat recursively up the hierarchy until the root is reached [S1, unofficial].
+4. Construct the embedded min/max tree for acceleration [S1, unofficial].
+
+**Formulas:**
+* **Inter-voxel Variance ($\sigma^2$):** For a block of 8 voxels with values $v_1, ..., v_8$:
+  $$ \sigma^2 = \frac{1}{8} \sum_{i=1}^{8} (v_i - \mu)^2 $$
+  where $\mu = \frac{1}{8} \sum_{i=1}^{8} v_i$.
+* **Consolidation Condition:** A parent node is created if $\sigma^2 = 0$ [S1, S2, unofficial].
+
+**Parameters:**
+* **Variance Threshold:** 0 for lossless compression [S3, unofficial].
+
+**Edge Cases and Pitfalls:**
+* **Boundary Conditions:** Values outside the octree data are defined to be zero [S2, unofficial]. This affects variance calculations for blocks at the volume boundary if not handled explicitly [S2, unofficial].
+
+**Pseudocode:**
+> **Unverified code.** The code below did not pass a test run against a reference implementation, or no test fits it, so it may contain errors.
+
+```python
+class Node:
+    def __init__(self, is_leaf, value, children=None, pos=None, depth=None):
+        self.is_leaf = is_leaf
+        self.value = value
+        self.children = children
+        self.pos = pos
+        self.depth = depth
+
+def build_octree(volume_grid):
+    # volume_grid: 3D array of shape (W, H, D)
+    W, H, D = len(volume_grid), len(volume_grid[0]), len(volume_grid[0][0])
+    
+    # Initialize leaves at finest resolution
+    current_level = {}
+    for x in range(W):
+        for y in range(H):
+            for z in range(D):
+                current_level[(x, y, z)] = Node(is_leaf=True, value=volume_grid[x][y][z], pos=(x, y, z), depth=0)
+                
+    level = 0
+    while len(current_level) > 1:
+        next_level = {}
+        parents = {}
+        # Group children by parent coordinate
+        for pos, node in current_level.items():
+            px, py, pz = pos[0] // 2, pos[1] // 2, pos[2] // 2
+            if (px, py, pz) not in parents:
+                parents[(px, py, pz)] = []
+            parents[(px, py, pz)].append(node)
+            
+        for parent_pos, children in parents.items():
+            if len(children) == 8:
+                values = [c.value for c in children]
+                mean = sum(values) / 8.0
+                variance = sum((v - mean)**2 for v in values) / 8.0
+                
+                if variance == 0:
+                    next_level[parent_pos] = Node(is_leaf=True, value=values[0], pos=parent_pos, depth=level+1)
+                else:
+                    next_level[parent_pos] = Node(is_leaf=False, children=children, pos=parent_pos, depth=level+1)
+            else:
+                # Boundary/partial blocks remain as children
+                for child in children:
+                    next_level[child.pos] = child
+        current_level = next_level
+        level += 1
+        
+    return current_level[(0, 0, 0)] if current_level else None
+```
+
+## Subtopics
+
+### Multiresolution Octree Construction with Variance Threshold
+A method for building octree volumes where coarser-resolution consolidated voxels are computed and stored in interior nodes, regardless of whether they are leaves, allowing for lossless compression (threshold zero) or lossy compression (variance threshold) [S3, unofficial]. It constructs the octree bottom-up, merging voxels with a variance beneath a given threshold [S3, unofficial]. Nodes store eight-value arrays containing either child pointers or scalar leaves, identical to the static-resolution implementation [S3, unofficial]. It requires a slightly looser min-max tree computation that includes wider neighbors at coarser resolutions [S3, unofficial].
+
+## Operating characteristics
+* **Compression:** The data occupies less than one quarter the size of the original 3D array [S1, unofficial].
+* **Performance:** On an Intel Core Duo 2.16 GHz laptop with 2 GB RAM, frame rates were 2.4, 1.3, and 3.3 fps for three test scenes. On a 16-core NUMA 2.4 GHz Opteron workstation, frame rates were 17.9, 9.8, and 22.0 fps [S1, unofficial].
+* **Strengths:** Reduces memory footprint significantly, allowing storage of large data in main memory. Embeds acceleration tree and scalar data in a single structure [S1, unofficial].
+* **Limitations:** Performance impact of the looser min/max tree in multiresolution mode is negligible but present [S3, unofficial].
+
+## Background
+This technique was presented for ray tracing isosurfaces of large compressed structured volumes [S1, S2, unofficial]. It draws inspiration from previous works using min/max trees for extraction and rasterization [S1, S2, unofficial]. The approach is similar to Velasco and Torres but encapsulates actual voxels as opposed to eight-voxel cells [S1, unofficial]. It employs optimized octree hash schemes to achieve competitive frame rates on common multicore architectures [S1, unofficial].
+
+## Sources
+[S1] Interactive isosurface ray tracing of large octree volumes, https://www.researchgate.net/publication/310054812_Interactive_isosurface_ray_tracing_of_large_octree_volumes, fetched 2026-10-29 (unofficial)
+[S2] Interactive Isosurface Ray Tracing of Large Octree Volumes, https://www.researchgate.net/publication/261082346_Interactive_Isosurface_Ray_Tracing_of_Large_Octree_Volumes, fetched 2026-10-29 (unofficial)
+[S3] RAY TRACING IMPLICIT SURFACES FOR INTERACTIVE ..., https://www.sci.utah.edu/~knolla/thesis.pdf, fetched 2026-10-29 (unofficial)

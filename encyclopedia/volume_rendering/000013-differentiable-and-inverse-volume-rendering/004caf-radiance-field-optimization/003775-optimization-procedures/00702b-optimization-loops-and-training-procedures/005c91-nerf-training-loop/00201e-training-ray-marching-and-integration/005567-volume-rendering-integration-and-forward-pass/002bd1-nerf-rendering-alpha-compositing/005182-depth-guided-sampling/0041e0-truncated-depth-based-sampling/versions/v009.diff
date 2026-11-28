@@ -1,0 +1,142 @@
+--- v008.md
++++ v009.md
+@@ -1,7 +1,5 @@
+ # Truncated Depth-Based Sampling
+-
+-
+ ## Overview
+-Truncated Depth-Based Sampling (TDBS) is a ray sampling strategy that utilizes monocular depth priors informed by the truncated normal distribution to optimize ray point sampling, improving convergence speed and accuracy of pose estimation [S1]. It differs from siblings like [NoPe-NeRF](link) by explicitly using the truncated normal distribution for sampling to fully exploit depth priors, whereas NoPe-NeRF considers overall depth distortion and does not fully exploit the potential of monocular depth maps [S1]. It builds on [Depth-Guided Sampling](7490-depth-guided-sampling.md) by replacing uniform or heuristic sampling with a probabilistic model centered on the estimated depth.
++Truncated Depth-Based Sampling (TDBS) is a ray sampling strategy that utilizes monocular depth priors informed by the truncated normal distribution to optimize ray point sampling, improving convergence speed and accuracy of pose estimation [S1]. It differs from siblings like [NoPe-NeRF](8866-pixel-region-and-depth-guided-ray-sampling.md) by explicitly using the truncated normal distribution for sampling to fully exploit depth priors, whereas NoPe-NeRF considers overall depth distortion and does not fully exploit the potential of monocular depth maps [S1]. It builds on [Depth-Guided Sampling](7490-depth-guided-sampling.md) by using a coarse monocular depth map as a prior to sample points from a truncated normal distribution, assuming the real surface is near the estimated depth [S1].
+ 
+ ## How it works
+@@ -32,5 +30,5 @@
+     \end{cases}
+     $$
+-    where $\phi(\cdot)$ and $\Phi(\cdot)$ denote the probability density and distribution function of the normal distribution with mean $\bar{\mu}$ and variance $\bar{\sigma}^2$, respectively [S1].
++    where $\phi(\cdot)$ and $\Phi(\cdot)$ denote the probability density and distribution function of the standard normal distribution, respectively [S1].
+ 4.  **Inverse Transform Sampling:** Use inverse distribution sampling to obtain $N$ sampling points along the ray from the truncated normal distribution defined by mean $\bar{\mu}$, variance $\bar{\sigma}$, and interval $[a, b]$ [S1].
+ 5.  **Network Evaluation:** Feed the sampled points into an MLP $F_\theta$ to estimate color $c$ and volume density $\sigma$ [S1].
+@@ -48,98 +46,37 @@
+ 
+ def truncated_normal_pdf(x, mu, sigma, a, b):
+-    """
+-    Probability density function of the truncated normal distribution.
+-    """
+-    # Standardize
++    z = (x - mu) / sigma
+     z_a = (a - mu) / sigma
+     z_b = (b - mu) / sigma
+-    
+-    # CDF difference for normalization
+     cdf_diff = norm.cdf(z_b) - norm.cdf(z_a)
+-    
+-    # PDF values
+-    pdf_unnormalized = norm.pdf((x - mu) / sigma) / sigma
+-    
+-    # Apply truncation
+-    pdf = np.where((x > a) & (x < b), pdf_unnormalized / cdf_diff, 0.0)
+-    return pdf
++    pdf_unnormalized = norm.pdf(z) / sigma
++    return np.where((x > a) & (x < b), pdf_unnormalized / cdf_diff, 0.0)
+ 
+ def inverse_transform_sampling_truncated_normal(mu, sigma, a, b, n_samples):
+-    """
+-    Generate samples from a truncated normal distribution using inverse transform sampling.
+-    """
+-    # Standardize bounds
+     z_a = (a - mu) / sigma
+     z_b = (b - mu) / sigma
+-    
+-    # CDF values at bounds
+     cdf_a = norm.cdf(z_a)
+     cdf_b = norm.cdf(z_b)
+-    
+-    # Generate uniform random numbers in the truncated CDF range
+     u = np.random.uniform(cdf_a, cdf_b, n_samples)
+-    
+-    # Inverse CDF (PPF)
+     z_samples = norm.ppf(u)
+-    
+-    # Transform back to original scale
+     t_samples = z_samples * sigma + mu
+-    
+-    return t_samples
++    return np.sort(t_samples)
++
++def evaluate_radiance_field(points, direction):
++    # Radiance field network F_theta(points, direction) -> (colors, densities) [S1]
++    # Implementation details of F_theta are not provided in the sources.
++    return np.zeros_like(points), np.zeros(points.shape[0])
+ 
+ def tdbs_rendering(ray_origin, ray_direction, depth_prior, n_samples=128, a=0.001, b=1.0, sigma=0.1):
+-    """
+-    Perform Truncated Depth-Based Sampling and rendering for a single ray.
+-    
+-    Args:
+-        ray_origin: 3D vector, camera origin o
+-        ray_direction: 3D vector, viewing direction d
+-        depth_prior: float, estimated depth value mu_bar from DPT
+-        n_samples: int, number of sampling points
+-        a: float, lower bound of truncation
+-        b: float, upper bound of truncation
+-        sigma: float, standard deviation of the normal distribution
+-        
+-    Returns:
+-        rendered_color: RGB value
+-        rendered_depth: Depth value
+-    """
+-    # Step 1: Sample points along the ray using truncated normal distribution
+-    # The depth prior mu_bar is the mean of the distribution
+-    # We sample t values (distances along the ray)
+-    t_samples = inverse_transform_sampling_truncated_normal(
+-        mu=depth_prior, 
+-        sigma=sigma, 
+-        a=a, 
+-        b=b, 
+-        n_samples=n_samples
+-    )
+-    
+-    # Compute 3D points
++    t_samples = inverse_transform_sampling_truncated_normal(depth_prior, sigma, a, b, n_samples)
+     points = ray_origin + t_samples[:, np.newaxis] * ray_direction
+-    
+-    # Step 2: Evaluate MLP for color and density
+-    # F_theta(points, ray_direction) -> (colors, densities)
+-    # Note: In practice, this involves batching and neural network inference
+-    colors, densities = evaluate_mlp(points, ray_direction)
+-    
+-    # Step 3: Volume Rendering
+-    # Compute transmittance
+-    # T(t) = exp(-integral from t_n to t of sigma(s) ds)
+-    # Discrete approximation
+-    dt = t_samples[1] - t_samples[0] # Assuming uniform spacing in t for simplicity, or use actual differences
+-    # More accurately, compute alpha and transmittance step-by-step
+-    
+-    alphas = 1.0 - np.exp(-densities * dt)
++    colors, densities = evaluate_radiance_field(points, ray_direction)
++    dt = np.diff(t_samples)
++    alphas = 1.0 - np.exp(-densities[:-1] * dt)
+     transmittances = np.cumprod(1.0 - alphas)
+-    transmittances = np.insert(transmittances, 0, 1.0) # T(t_0) = 1
+-    
+-    # Weighted sum for color
++    transmittances = np.insert(transmittances, 0, 1.0)
+     weights = alphas * transmittances
+-    rendered_color = np.sum(weights[:, np.newaxis] * colors, axis=0)
+-    
+-    # Weighted sum for depth
+-    rendered_depth = np.sum(weights * t_samples)
+-    
++    rendered_color = np.sum(weights[:, np.newaxis] * colors[:-1], axis=0)
++    rendered_depth = np.sum(weights * t_samples[:-1])
+     return rendered_color, rendered_depth
+ ```
+@@ -151,6 +88,6 @@
+ 
+ ## Operating characteristics
+-*   **Time Complexity:** Depends on the number of sampling points per ray ($N=128$) and the number of rays. The inverse transform sampling is $O(N)$ per ray. The MLP evaluation is the dominant cost.
+-*   **Memory Complexity:** Proportional to the number of samples and the size of the MLP.
++*   **Time Complexity:** Not given in the sources.
++*   **Memory Complexity:** Not given in the sources.
+ *   **Performance:** Improves convergence speed and accuracy of pose estimation compared to methods that do not fully exploit depth priors [S1].
+ *   **Strengths:** Explicitly uses truncated normal distribution to sample near the estimated depth, reducing the search space for the surface [S1].

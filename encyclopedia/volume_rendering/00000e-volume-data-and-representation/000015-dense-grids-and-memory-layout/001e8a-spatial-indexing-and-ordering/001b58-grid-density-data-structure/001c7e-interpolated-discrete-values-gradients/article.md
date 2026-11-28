@@ -1,0 +1,176 @@
+# Interpolated Discrete Values & Gradients
+
+Also called: Cubic Spline Interpolation, CubicSpline, Discrete Field Interpolation, Interpolated Grid Fields
+
+## Overview
+Interpolated Discrete Values & Gradients computes a continuous scalar field and its spatial gradient from discrete grid data using tri-cubic interpolation [S1, unofficial][S2]. It solves the problem of mapping continuous world-space coordinates to discrete memory indices while providing smooth, differentiable field values essential for ray marching and isosurface extraction [S1, unofficial][S2]. Unlike [Nearest Voxel Lookup with Periodic Boundary](1573-nearest-voxel-lookup-with-periodic-boundary.md), which produces a piecewise-constant field with sharp discontinuities, this method blends adjacent voxels to ensure $C^0$ continuity and provides explicit gradient estimates for stable normal estimation [S1, unofficial][S2]. It differs from [Gradient Computation via Finite Differences](1077-gradient-computation-via-finite-differences.md) by deriving gradients analytically from the interpolation basis functions rather than approximating them via discrete differences, resulting in smoother derivatives [S2].
+
+## How it works
+**Inputs:**
+- A query point $p = (p_x, p_y, p_z)$ in continuous space [S1, unofficial].
+- A dense 3D grid of scalar values $V$ with dimensions $D_x \times D_y \times D_z$ [S2].
+- Grid bounds $B_{min}$ and voxel dimensions $d_x, d_y, d_z$ [S1, unofficial].
+
+**Outputs:**
+- Scalar value $f(p)$.
+- Gradient vector $\nabla f(p) = (\frac{\partial f}{\partial x}, \frac{\partial f}{\partial y}, \frac{\partial f}{\partial z})$ [S2].
+
+**Data Structures:**
+- The grid $V$ is stored as a contiguous 3D array or flattened 1D array [G].
+- Accessor `field(data, i, j, k)` returns the value at integer indices $(i, j, k)$ [G].
+- The interpolation uses a $4 \times 4 \times 4$ neighborhood of 64 voxels centered around the query point's voxel [S1, unofficial].
+
+**Steps:**
+
+1.  **Voxel Coordinate Calculation:**
+    Determine the integer coordinates of the voxel containing $p$:
+    $$ v_i[axis] = \lfloor \frac{p[axis] - B_{min}[axis]}{d[axis]} \rfloor $$
+    where $axis \in \{x, y, z\}$ [S1, unofficial].
+
+2.  **Local Offset Calculation:**
+    Compute the minimum corner of the voxel containing $p$:
+    $$ v_{min}[axis] = B_{min}[axis] + v_i[axis] \cdot d[axis] $$
+    Compute the fractional offset $t$ in range $[0, 1]$:
+    $$ t[axis] = \frac{p[axis] - v_{min}[axis]}{d[axis]} $$
+    [S1, unofficial].
+
+3.  **1D Cubic Interpolation Basis:**
+    The method uses cubic spline interpolation along each axis [S1, unofficial]. The provided implementation loop uses a 4-value Catmull-Rom variant [G]. For an interval with values $P_{-1}, P_0, P_1, P_2$ and parameter $t \in [0, 1]$, the basis functions are:
+    $$ h_0 = -0.5t^3 + t^2 - 0.5t $$
+    $$ h_1 = 1.5t^3 - 2.5t^2 + 1 $$
+    $$ h_2 = -1.5t^3 + 2t^2 + 0.5t $$
+    $$ h_3 = 0.5t^3 - 0.5t^2 $$
+    $$ Result = h_0 P_{-1} + h_1 P_0 + h_2 P_1 + h_3 P_2 $$
+    [G]. (Note: If Hermite splines with explicit derivatives $m_k, m_{k+1}$ are used, the basis is $h_{00} = 2t^3 - 3t^2 + 1$, $h_{10} = t^3 - 2t^2 + t$, $h_{01} = -2t^3 + 3t^2$, $h_{11} = t^3 - t^2$, and the result is $h_{00} P_k + h_{10} \Delta m_k + h_{01} P_{k+1} + h_{11} \Delta m_{k+1}$ [S1, unofficial]).
+
+4.  **Tri-Cubic Interpolation (Value):**
+    Perform interpolation along the $z$-axis first, then $y$, then $x$ [S1, unofficial].
+    
+    For each $j \in [-1, 2]$ and $i \in [-1, 2]$:
+    $$ z\_interp[j+1][i+1] = \text{CINT\_CR}(t_z, V[v_i+x+i][v_i+y+j][v_i+z-1], V[v_i+x+i][v_i+y+j][v_i+z], V[v_i+x+i][v_i+y+j][v_i+z+1], V[v_i+x+i][v_i+y+j][v_i+z+2]) $$
+    [S1, unofficial].
+    
+    Interpolate along $y$:
+    $$ y\_interp[i] = \text{CINT\_CR}(t_y, z\_interp[0][i], z\_interp[1][i], z\_interp[2][i], z\_interp[3][i]) \quad \text{for } i \in [0, 3] $$
+    [S1, unofficial].
+    
+    Interpolate along $x$:
+    $$ result = \text{CINT\_CR}(t_x, y\_interp[0], y\_interp[1], y\_interp[2], y\_interp[3]) $$
+    [S1, unofficial].
+
+5.  **Gradient Calculation:**
+    The gradient $\nabla f(p)$ is computed by differentiating the interpolation basis functions [S2]. If using Catmull-Rom, the gradient is the sum of the derivatives of the basis functions multiplied by the neighboring values [G]. In CGAL, `Interpolated_discrete_gradients_3` computes this analytically [S2].
+
+**Pseudocode:**
+
+> **Unverified code.** The code below did not pass a test run against a reference implementation, or no test fits it, so it may contain errors.
+
+```python
+def catmull_rom(t, p0, p1, p2, p3):
+    """
+    Performs 1D Catmull-Rom interpolation.
+    t: float in [0, 1]
+    p0, p1, p2, p3: scalar values at indices -1, 0, 1, 2 relative to the interval
+    """
+    t2 = t * t
+    t3 = t2 * t
+    
+    h0 = -0.5 * t3 + t2 - 0.5 * t
+    h1 = 1.5 * t3 - 2.5 * t2 + 1.0
+    h2 = -1.5 * t3 + 2.0 * t2 + 0.5 * t
+    h3 = 0.5 * t3 - 0.5 * t2
+    
+    return h0 * p0 + h1 * p1 + h2 * p2 + h3 * p3
+
+def interpolate_tricubic(p, grid, bounds_min, voxel_dim, grid_dims):
+    """
+    Computes scalar value at p using tri-cubic interpolation.
+    p: tuple (px, py, pz)
+    grid: 3D array of values
+    bounds_min: tuple (xmin, ymin, zmin)
+    voxel_dim: tuple (dx, dy, dz)
+    grid_dims: tuple (Dx, Dy, Dz)
+    """
+    # 1. Voxel coordinates
+    vx = int((p[0] - bounds_min[0]) / voxel_dim[0])
+    vy = int((p[1] - bounds_min[1]) / voxel_dim[1])
+    vz = int((p[2] - bounds_min[2]) / voxel_dim[2])
+    
+    # 2. Local offset
+    tx = (p[0] - (bounds_min[0] + vx * voxel_dim[0])) / voxel_dim[0]
+    ty = (p[1] - (bounds_min[1] + vy * voxel_dim[1])) / voxel_dim[1]
+    tz = (p[2] - (bounds_min[2] + vz * voxel_dim[2])) / voxel_dim[2]
+    
+    # Helper for boundary clamping [G]
+    def clamp(val, min_val, max_val):
+        return max(min_val, min(val, max_val))
+
+    # 3. Z-interpolation (4x4 slice)
+    z_interp = [[0.0 for _ in range(4)] for _ in range(4)]
+    
+    for j in range(4): # j=0..3 corresponds to vy-1..vy+2
+        for i in range(4): # i=0..3 corresponds to vx-1..vx+2
+            # Get 4 Z neighbors with boundary clamping [G]
+            p_z0 = grid[clamp(vx + i - 1, 0, grid_dims[0]-1)][clamp(vy + j - 1, 0, grid_dims[1]-1)][clamp(vz - 1, 0, grid_dims[2]-1)]
+            p_z1 = grid[clamp(vx + i - 1, 0, grid_dims[0]-1)][clamp(vy + j - 1, 0, grid_dims[1]-1)][clamp(vz, 0, grid_dims[2]-1)]
+            p_z2 = grid[clamp(vx + i - 1, 0, grid_dims[0]-1)][clamp(vy + j - 1, 0, grid_dims[1]-1)][clamp(vz + 1, 0, grid_dims[2]-1)]
+            p_z3 = grid[clamp(vx + i - 1, 0, grid_dims[0]-1)][clamp(vy + j - 1, 0, grid_dims[1]-1)][clamp(vz + 2, 0, grid_dims[2]-1)]
+            
+            z_interp[j][i] = catmull_rom(tz, p_z0, p_z1, p_z2, p_z3)
+            
+    # 4. Y-interpolation (4 lines)
+    y_interp = [0.0 for _ in range(4)]
+    for i in range(4):
+        y_interp[i] = catmull_rom(ty, z_interp[0][i], z_interp[1][i], z_interp[2][i], z_interp[3][i])
+        
+    # 5. X-interpolation
+    result = catmull_rom(tx, y_interp[0], y_interp[1], y_interp[2], y_interp[3])
+    
+    return result
+```
+
+**Edge Cases and Pitfalls:**
+- **Boundary Conditions:** The $4 \times 4 \times 4$ neighborhood extends 1 voxel outside the containing voxel. If the query point is near the grid boundary, indices may go out of bounds. Padding or clamping is required [G].
+- **Gradient Accuracy:** If gradients are not computed analytically from the basis, finite difference approximations may introduce noise [S2].
+
+## Subtopics
+
+### [Nearest Voxel Lookup with Periodic Boundary](1573-nearest-voxel-lookup-with-periodic-boundary.md)
+
+### [Dense Copy Extraction](3215-dense-copy-extraction.md)
+
+### [Mipmap Grid Query](4154-mipmap-grid-query.md)
+
+### [Cylindrical Coordinate Interpolation](4282-cylindrical-coordinate-interpolation.md)
+
+### [Data Interpolation](7180-data-interpolation.md)
+
+### [Polynomial and Spline Interpolation](11104-polynomial-and-spline-interpolation.md)
+
+### Kriging Interpolation
+An interpolation algorithm used to construct a regular grid data model from limited and discrete 3D borehole data [S3]. Steps include gridding, selecting reference points $p_i$, calculating coefficients $K, \lambda, D$ from a variation function, and solving the equation set using LU decomposition to get weights $\lambda_i$ [S3]. The estimated value is $R'(p_0) = \sum_{i=1}^n \lambda_i R(p_i)$ [S3].
+
+### Zero Set Initialization of Isosurfaces
+Initialization of closest points for isosurfaces defined on regularly sampled scalar fields using local gradient estimates instead of trilinear interpolation [S4]. It examines each volume cell; if the cell contains the isosurface, distance samples at corners are initialized with closest point information [S4]. The scalar field gradient $\nabla f(s)$ is estimated using central differencing [S4]. The linear approximation $f(s') = f(s) + \nabla f(s) \cdot (s' - s)$ is used to compute the closest point where $f(s') = f_0$ [S4]. This is inaccurate for high curvature regions [S4].
+
+### Constant Filter Radius Mapping
+Maps curvilinear grid data to a rectangular grid using a user-set constant filter radius for spatial interpolation [S5, unofficial]. A pitfall is that it violates the Nyquist criteria when input data has a wide range of scales and spatial densities, as a single radius cannot adequately sample all parts of the input grid [S5, unofficial].
+
+## Operating characteristics
+- **Time Complexity:** $O(1)$ per query, as it accesses a fixed $4 \times 4 \times 4$ neighborhood (64 voxels) regardless of grid size [S1, unofficial].
+- **Memory Complexity:** $O(N)$ for the grid storage, where $N$ is the number of voxels [S1, unofficial].
+- **Performance:** Tri-cubic interpolation is more computationally expensive than trilinear or nearest-neighbor lookup due to the 64 samples and cubic basis evaluations [S1, unofficial].
+- **Strengths:** Provides smooth, continuous fields with continuous first derivatives (if gradients are computed correctly), reducing aliasing and visual artifacts in ray marching [S1, unofficial][S2].
+- **Limitations:** Computationally heavier; requires careful boundary handling [S1, unofficial].
+- **When to Use:** When smooth shading, accurate normals, or high-quality isosurface extraction is required [S2].
+- **When Not to Use:** When performance is critical and visual smoothness is less important (use Nearest Voxel Lookup) or when data is inherently sparse (use Sparse Grid methods) [S1, unofficial][S2].
+
+## Background
+The method originates from the use of cubic spline interpolation for volume rendering and isosurfacing [S1, unofficial][S2]. It is implemented in libraries such as CGAL's `Isosurfacing_3` module, specifically in `Interpolated_discrete_values_3` and `Interpolated_discrete_gradients_3` [S2]. It is used in dual contouring and marching cubes algorithms to provide smooth field values and gradients for surface reconstruction [S2]. The technique is also applied in ray marching for volume rendering to ensure smooth transfer function evaluation [S1, unofficial].
+
+## Sources
+[S1] SRaimondi/VolumeRender, https://github.com/SRaimondi/VolumeRender, fetched 2026-10-27 (unofficial)
+[S2] 3D Isosurfacing, https://doc.cgal.org/latest/Isosurfacing_3/index.html, fetched 2026-10-29
+[S3] Volume Rendering of 3D Borehole Data Based on GPU, https://doi.org/10.2991/icsem.2013.181, fetched 2026-10-26
+[S4] Multiresolution Distance Volumes for Progressive Surface Compression, https://digital.library.unt.edu/ark:/67531/metadc1409942/?q=volume data compression rendering, fetched 2026-10-28
+[S5] DTIC ADA215533: Sampling Scattered Data Onto Rectangular Grids for Volume Visualization, https://archive.org/details/DTIC_ADA215533, fetched 2026-10-26 (unofficial)

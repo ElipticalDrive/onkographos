@@ -1,0 +1,75 @@
+# Depth Map Visualization Scaling
+Also called: Linear Scaling for Depth Visualization
+
+## Overview
+Depth Map Visualization Scaling maps raw accumulated depth values to a normalized $[0, 1]$ range for qualitative visualization using a colormap [S2]. It differs from [Log-Space Transfer Function Mapping](20110-log-space-transfer-function-mapping.md) by using a linear transformation rather than a logarithmic one, making it suitable for scenes with bounded depth ranges where linear perceptual uniformity is preferred [S2].
+
+## How it works
+**Inputs:**
+- `depth`: 2D array of accumulated depth values (meters).
+- `alpha`: 2D array of accumulated opacity values.
+- `lo`: Minimum depth bound (default 1.0 m) [S2].
+- `hi`: Maximum depth bound (default 82.5 m) [S2].
+
+**Outputs:**
+- `scaled_depth`: 2D array of values in $[0, 1]$.
+
+**Data Structures:**
+- `valid_mask`: Boolean 2D array of same shape as `depth`.
+
+**Steps:**
+1. Compute the valid pixel mask where depth is finite, greater than a small epsilon ($10^{-3}$), and alpha is greater than a small epsilon ($10^{-6}$) [S1, unofficial].
+2. For valid pixels, apply linear scaling: subtract `lo`, divide by `hi - lo` (clamped to minimum $10^{-8}$ to avoid division by zero), and clip the result to $[0, 1]$ [S1, unofficial].
+3. For invalid pixels, assign the value `lo` (or 0 if `lo` is treated as the lower bound of the output range, but the source uses `lo` in the `np.where` fill, which is then clipped) [S1, unofficial]. Note: The source code `np.where(valid, depth, lo)` fills invalid depths with `lo`. The subsequent subtraction `(val - lo)` makes invalid pixels map to 0.0 after clipping [S1, unofficial].
+
+**Pseudocode:**
+> **Unverified code.** The code below did not pass a test run against a reference implementation, or no test fits it, so it may contain errors.
+
+```python
+import numpy as np
+
+def depth_map_visualization_scaling(depth, alpha, lo=1.0, hi=82.5):
+    # Step 1: Compute valid mask
+    # Depth must be finite, > 1e-3, and alpha > 1e-6
+    valid = np.isfinite(depth) & (depth > 1.0e-3) & (alpha > 1.0e-6)
+    
+    # Step 2: Apply linear scaling
+    # Use lo as fill value for invalid pixels before scaling
+    depth_filled = np.where(valid, depth, lo)
+    
+    # Calculate range, ensuring minimum denominator to avoid division by zero
+    range_val = hi - lo
+    if range_val < 1.0e-8:
+        range_val = 1.0e-8
+        
+    # Linear transformation: (depth - lo) / (hi - lo)
+    scaled = (depth_filled - lo) / range_val
+    
+    # Clip to [0, 1]
+    scaled = np.clip(scaled, 0.0, 1.0)
+    
+    return scaled
+```
+
+**Parameters:**
+- `lo`: Minimum depth. Typical value: 1.0 meter [S2].
+- `hi`: Maximum depth. Typical value: 82.5 meters [S2].
+
+**Edge Cases:**
+- If `hi <= lo`, the denominator is clamped to $10^{-8}$ [S1, unofficial].
+- Invalid depth values (NaN, Inf, or below threshold) are treated as `lo` before scaling, resulting in an output of 0.0 [S1, unofficial].
+
+## Operating characteristics
+- **Time Complexity:** $O(N)$ where $N$ is the number of pixels, due to element-wise operations.
+- **Memory Complexity:** $O(N)$ for the intermediate mask and filled depth array.
+- **Strengths:** Simple, fast, and effective for qualitative visualization when the depth range is known and bounded [S2].
+- **Limitations:** Sensitive to outliers if `hi` is not chosen carefully; does not handle unbounded depth well. Not suitable for quantitative analysis [S2].
+- **When to use:** Qualitative visualization of depth maps in dynamic urban environments with known depth bounds [S2].
+- **When not to use:** When depth values span several orders of magnitude or when logarithmic perceptual scaling is required.
+
+## Background
+This method is used in the context of evaluating dynamic urban environment reconstruction, specifically in the "Multi-Level Neural Scene Graphs for Dynamic Urban Environments" paper [S2]. It is employed for qualitative results to visualize depth maps during validation phases to compensate for pose errors [S2]. The specific parameters (1.0 m to 82.5 m) were chosen for the City-1M benchmark context [S2]. The implementation details (masking, clipping) are derived from the SplatMend repository [S1, unofficial].
+
+## Sources
+[S1] zjllllllllll/SplatMend, https://github.com/zjllllllllll/SplatMend, fetched 2026-10-27 (unofficial)
+[S2] Multi-Level Neural Scene Graphs for Dynamic Urban Environments, https://doi.org/10.1109/cvpr52733.2024.01996, fetched 2026-10-29

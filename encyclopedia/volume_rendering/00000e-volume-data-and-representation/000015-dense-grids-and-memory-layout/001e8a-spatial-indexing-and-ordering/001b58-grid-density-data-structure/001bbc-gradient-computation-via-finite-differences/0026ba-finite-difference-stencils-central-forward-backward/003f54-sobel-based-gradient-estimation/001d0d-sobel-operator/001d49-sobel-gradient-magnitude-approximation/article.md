@@ -1,0 +1,138 @@
+# Sobel Gradient Magnitude Approximation
+
+Also called: Euclidian normal approximation, K-value approximation
+
+## Overview
+The Sobel Gradient Magnitude Approximation is a method for estimating the Euclidean norm of a gradient vector using a linear combination of its components, thereby avoiding computationally expensive square root operations [S1, unofficial]. It sets itself apart from exact norm calculation by trading a small, bounded approximation error for significant performance gains in hardware or software implementations where speed is critical, such as in real-time volume rendering pipelines [S1, unofficial].
+
+## How it works
+**Inputs and Outputs:**
+*   **Input:** The four gradient component magnitudes resulting from Sobel convolution kernels applied to a 3x3 window: Horizontal ($E(H)$), Vertical ($E(V)$), Diagonal Right ($E(DR)$), and Diagonal Left ($E(DL)$). These represent intensity variations in specific orientations.
+*   **Output:** A single scalar value representing the approximate gradient magnitude $A$, and optionally a binary edge mask indicating if the pixel is part of an edge.
+
+**Data Structures:**
+*   **Gradient Components:** Four signed integer or floating-point values corresponding to the convolution results.
+*   **Threshold:** A scalar value used to determine edge presence.
+
+**Steps:**
+1.  **Compute Component Magnitudes:** Calculate the absolute values of the four Sobel responses: $|E(H)|$, $|E(V)|$, $|E(DR)|$, and $|E(DL)|$.
+2.  **Identify Maximum Component:** Find the maximum value among the four components. Let this maximum be $x$ and the component perpendicular to it be $y$.
+    *   If the maximum is $|E(H)|$ or $|E(V)|$, the perpendicular component is the other axis-aligned one.
+    *   If the maximum is $|E(DR)|$ or $|E(DL)|$, the perpendicular component is the other diagonal one.
+    *   *Note:* The specific assignment of $x$ and $y$ depends on the dominant direction. For $0 < \theta < \pi/4$ (or $45^\circ$), $x$ is the larger component and $y$ is the smaller [S1, unofficial].
+3.  **Assign Gradient Direction:** Determine the gradient direction from a template of eight angle directions based on the selected maximum measure and its corresponding sign (positive or negative) [S1, unofficial].
+4.  **Calculate Approximate Magnitude:** Compute the magnitude $A$ using the linear approximation formula:
+    $$ A = x + K y $$
+    where $x$ is the larger gradient component, $y$ is the smaller gradient component, and $K$ is a constant parameter [S1, unofficial].
+5.  **Edge Detection (Optional):** Compare the computed magnitude $A$ (or the maximum component $x$) against a specified threshold. If the magnitude exceeds the threshold, declare the center pixel as part of an edge [S1, unofficial].
+6.  **Assign Pixel Values:** After edge detection, assign a foreground value (e.g., 255) to edge pixels and a background value (e.g., 0) to non-edge pixels [S1, unofficial].
+
+**Formula:**
+The exact Euclidean norm is $A(\theta) = \sqrt{x^2 + y^2}$. The approximation is:
+$$ A(\theta, K) = x + K y $$
+This approximation is valid for $0 < \theta < \frac{\pi}{4}$ where $x > y$ [S1, unofficial].
+
+The error percentage $E(\theta, K)$ is defined as:
+$$ E(\theta, K) = 100 \frac{A(\theta, K) - A(\theta)}{A(\theta)} = 100 \left( \frac{\cos \theta + K \sin \theta - 1}{1} \right) $$
+Assuming normalized components where $x=1$ and $y=\tan \theta$, the error simplifies to:
+$$ E(\theta, K) = 100 (\cos \theta + K \sin \theta - 1) $$
+Or in terms of $x$ and $y$ without normalization:
+$$ E(\theta, K) = 100 \left( \frac{\tan \theta}{\tan \theta + K} \frac{x}{y} + K - 1 \right) $$
+Simplified for normalized components ($x/y = \cot \theta$ or similar derivation leading to the trigonometric form):
+$$ E(\theta, K) = 100 (\cos \theta + K \sin \theta - 1) $$ [S1, unofficial]
+
+**Parameters:**
+*   **K:** The constant $K$ is chosen to minimize the maximum error over the angular range. For the 0-22.5° range (four Sobel operators) and 0-45° range (two Sobel operators), the optimal value is $K = 1/4$ [S1, unofficial].
+
+**Pseudocode:**
+> **Unverified code.** The code below did not pass a test run against a reference implementation, or no test fits it, so it may contain errors.
+
+```python
+def sobel_gradient_magnitude_approximation(e_h, e_v, e_dr, e_dl, threshold=None):
+    """
+    Computes the approximate gradient magnitude from Sobel responses.
+    
+    Args:
+        e_h: Horizontal gradient component
+        e_v: Vertical gradient component
+        e_dr: Diagonal Right gradient component
+        e_dl: Diagonal Left gradient component
+        threshold: Optional threshold for edge detection
+        
+    Returns:
+        magnitude: Approximate gradient magnitude
+        is_edge: Boolean indicating if the pixel is an edge (if threshold provided)
+    """
+    # Step 1: Compute absolute values
+    abs_h = abs(e_h)
+    abs_v = abs(e_v)
+    abs_dr = abs(e_dr)
+    abs_dl = abs(e_dl)
+    
+    # Step 2: Identify maximum component (x) and perpendicular component (y)
+    # The logic assumes x is the largest magnitude and y is the perpendicular one.
+    # For Sobel, the perpendicular pairs are (H, V) and (DR, DL).
+    # However, the standard approximation A = x + Ky assumes x and y are the 
+    # orthogonal components of the gradient vector in the dominant direction.
+    # In the context of the 4-direction Sobel, we pick the max of the 4, 
+    # and the "perpendicular" is the other component in the same orthogonal pair 
+    # or the next largest? The source implies x > y in the dominant quadrant.
+    
+    # Let's find the max of the four
+    max_val = max(abs_h, abs_v, abs_dr, abs_dl)
+    
+    # Determine x and y based on the dominant direction
+    # If H is max, V is perpendicular. If DR is max, DL is perpendicular.
+    if max_val == abs_h:
+        x = abs_h
+        y = abs_v
+    elif max_val == abs_v:
+        x = abs_v
+        y = abs_h
+    elif max_val == abs_dr:
+        x = abs_dr
+        y = abs_dl
+    else: # max_val == abs_dl
+        x = abs_dl
+        y = abs_dr
+        
+    # Step 4: Calculate approximate magnitude with K = 1/4
+    K = 0.25
+    magnitude = x + K * y
+    
+    # Step 5 & 6: Edge detection
+    is_edge = False
+    if threshold is not None:
+        if magnitude > threshold:
+            is_edge = True
+            
+    return magnitude, is_edge
+```
+
+**Edge Cases and Pitfalls:**
+*   **Precision:** The approximation introduces error. The maximum error for $K=1/4$ is bounded but non-zero. Implementers should be aware that this is an approximation, not the true Euclidean norm [S1, unofficial].
+*   **Boundaries:** The method relies on a 3x3 window. Pixels at the image boundary require padding or special handling to compute Sobel responses [S1, unofficial].
+*   **Degenerate Input:** If all gradient components are zero, the magnitude is zero. The direction assignment is undefined in this case [S1, unofficial].
+
+## Subtopics
+
+### [Gradient Magnitude Modulation](2001-gradient-magnitude-modulation.md)
+Uses the computed magnitude to modulate opacity and illumination, solving occlusion issues. It differs by defining the *application* of the magnitude rather than its *computation*.
+
+### [Cube-4/VolumePro Gradient Magnitude Approximation](21442-cube-4-volumepro-gradient-magnitude-approximation.md)
+Uses central differences instead of Sobel operators for gradient estimation, followed by a Newton-Raphson iteration. It builds on the approximation concept but changes the underlying gradient estimator.
+
+## Operating characteristics
+*   **Time Complexity:** $O(1)$ per pixel after the initial Sobel convolution. The approximation involves only addition and multiplication, avoiding square roots, which are significantly more expensive [S1, unofficial].
+*   **Memory Complexity:** $O(1)$ auxiliary memory per pixel for storing intermediate gradient components.
+*   **Measured Performance:** The method is designed for hardware implementation and real-time visualization systems where square root operations are costly [S1, unofficial].
+*   **Strengths:** Fast, simple, isotropic (when using all four Sobel operators), good signal-to-noise characteristics [S1, unofficial].
+*   **Limitations:** Approximation error exists. The error depends on the angle $\theta$ and the value of $K$. The error is minimized for $K=1/4$ but is not zero [S1, unofficial].
+*   **When to Use:** Real-time volume rendering, hardware implementations, edge detection where speed is prioritized over exact geometric accuracy [S1, unofficial].
+*   **When Not to Use:** Applications requiring precise geometric surface normals or exact Euclidean distances [S1, unofficial].
+
+## Background
+The method originates from the Shear-warp factorization volume rendering visualization system, specifically in the context of edge detection and gradient measurement for volume rendering [S1, unofficial]. It was developed to provide an efficient way to compute gradient magnitudes for opacity function generation and shading, avoiding the computational cost of square roots in hardware or software implementations [S1, unofficial]. The choice of $K=1/4$ was derived from error analysis to minimize magnitude error for both 22.5° and 45° angular ranges [S1, unofficial].
+
+## Sources
+[S1] Shear-warp factorization volume rendering visualization system, https://archive.org/details/0162018299360, fetched 2026-10-26 (unofficial)

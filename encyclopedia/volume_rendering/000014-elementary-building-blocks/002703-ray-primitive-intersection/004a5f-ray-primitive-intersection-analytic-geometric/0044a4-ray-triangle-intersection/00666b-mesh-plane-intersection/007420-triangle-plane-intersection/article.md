@@ -1,0 +1,138 @@
+# Triangle-Plane Intersection
+
+Also called: Plane Intersection Computation
+
+## Overview
+Triangle-plane intersection determines whether a triangle intersects a plane, calculating the resulting intersection segment(s) and handling degenerate cases where vertices lie on the plane [S1, unofficial]. It serves as the core geometric primitive for mesh-plane intersection, enabling the extraction of cutting lines from polygonal meshes [S1, unofficial]. Unlike ray-triangle intersection which yields a single point or none, this method yields a line segment (or points) representing the cross-section of the triangle by the plane [S1, unofficial].
+
+## How it works
+**Inputs:**
+- Triangle vertices: $v_0, v_1, v_2$ (3D points).
+- Plane defined by origin $p_{origin}$ and normal $n$ (normalized).
+
+**Outputs:**
+- A list of intersection points.
+- If two distinct points exist, they form an `IntersectionSegment`.
+
+**Data Structures:**
+- `IntersectionSegment`: struct with fields `Vertex start`, `Vertex end`, `int planeIndex`.
+- `PlaneIntersection`: struct with fields `std::vector<IntersectionSegment> segments`, `bool visible`.
+- `Vertex`: 3D point $(x, y, z)$.
+
+**Parameters:**
+- On-Plane Tolerance: $\epsilon = 10^{-6}$. Vertices with absolute distance $< \epsilon$ are considered on the plane [S1, unofficial].
+- Duplicate Removal Threshold: $10^{-10}$. Points with squared distance $< 10^{-10}$ are considered duplicates [S1, unofficial].
+- Degenerate Segment Extension: $0.0001$. Added to coordinates of a degenerate segment's end point [S1, unofficial].
+
+**Steps:**
+
+1. **Calculate Distances:** Compute the signed distance of each vertex from the plane using the dot product formula:
+   $$ d_i = (v_i - p_{origin}) \cdot n $$
+   for $i \in \{0, 1, 2\}$ [S1, unofficial].
+
+2. **Check for No Intersection:** If all distances are strictly positive ($d_0 > 0, d_1 > 0, d_2 > 0$) or all are strictly negative ($d_0 < 0, d_1 < 0, d_2 < 0$), the triangle lies entirely on one side of the plane. Return no intersection [S1, unofficial].
+
+3. **Identify On-Plane Vertices:** For each vertex $v_i$, if $|d_i| < \epsilon$, mark $v_i$ as on-plane [S1, unofficial].
+
+4. **Compute Edge Intersections:** Iterate over the three edges $(v_0, v_1), (v_1, v_2), (v_2, v_0)$. For an edge connecting $v_{start}$ and $v_{end}$ with distances $d_{start}$ and $d_{end}$:
+   - If neither vertex is on the plane and $d_{start} \cdot d_{end} \le 0$, the edge intersects the plane.
+   - Calculate the interpolation parameter $t$:
+     $$ t = \frac{d_{start}}{d_{start} - d_{end}} $$
+   - Compute the intersection point:
+     $$ p_{intersect} = v_{start} + t \cdot (v_{end} - v_{start}) $$
+   - Add $p_{intersect}$ to the intersections list [S1, unofficial].
+
+5. **Add On-Plane Vertices:** Add all vertices marked as on-plane to the intersections list [S1, unofficial].
+
+6. **Remove Duplicates:** Iterate through the intersections list to remove duplicate points. For each pair of points, if the squared Euclidean distance is less than $10^{-10}$, remove one. Use nested loops where the inner index $j$ increments only if no removal occurs [S1, unofficial].
+
+7. **Form Segments:**
+   - If the number of unique intersection points is $\ge 2$, set `segment.start` to the first point and `segment.end` to the second point. Return true [S1, unofficial].
+   - If exactly 1 intersection point exists (degenerate case), set `segment.start` and `segment.end` to that point. Then, add $0.0001$ to each coordinate of `segment.end` to create a tiny segment. Return true [S1, unofficial].
+   - If 0 points, return false [S1, unofficial].
+
+**Pseudocode:**
+
+> **Unverified code.** The code below did not pass a test run against a reference implementation, or no test fits it, so it may contain errors.
+
+```python
+def triangle_plane_intersection(v0, v1, v2, plane_origin, plane_normal):
+    # Step 1: Calculate distances
+    d0 = dot(v0 - plane_origin, plane_normal)
+    d1 = dot(v1 - plane_origin, plane_normal)
+    d2 = dot(v2 - plane_origin, plane_normal)
+
+    # Step 2: Check for no intersection
+    if (d0 > 0 and d1 > 0 and d2 > 0) or (d0 < 0 and d1 < 0 and d2 < 0):
+        return []
+
+    intersections = []
+    epsilon = 1e-6
+
+    # Step 3 & 4: Identify on-plane vertices and edge intersections
+    # Helper to check if point is on plane
+    def is_on_plane(d):
+        return abs(d) < epsilon
+
+    # Check edges
+    edges = [(v0, v1, d0, d1), (v1, v2, d1, d2), (v2, v0, d2, d0)]
+    
+    for v_start, v_end, d_start, d_end in edges:
+        if is_on_plane(d_start):
+            if v_start not in intersections:
+                intersections.append(v_start)
+        elif is_on_plane(d_end):
+            if v_end not in intersections:
+                intersections.append(v_end)
+        else:
+            # Edge crosses plane
+            if d_start * d_end <= 0:
+                t = d_start / (d_start - d_end)
+                p_intersect = v_start + t * (v_end - v_start)
+                intersections.append(p_intersect)
+
+    # Step 6: Remove duplicates
+    unique_intersections = []
+    for i in range(len(intersections)):
+        is_dup = False
+        for j in range(len(unique_intersections)):
+            if squared_distance(intersections[i], unique_intersections[j]) < 1e-10:
+                is_dup = True
+                break
+        if not is_dup:
+            unique_intersections.append(intersections[i])
+
+    # Step 7: Form segments
+    if len(unique_intersections) >= 2:
+        seg_start = unique_intersections[0]
+        seg_end = unique_intersections[1]
+        return [IntersectionSegment(seg_start, seg_end)]
+    elif len(unique_intersections) == 1:
+        p = unique_intersections[0]
+        # Degenerate case: create tiny segment
+        seg_start = p
+        seg_end = Vector3(p.x + 0.0001, p.y + 0.0001, p.z + 0.0001)
+        return [IntersectionSegment(seg_start, seg_end)]
+    else:
+        return []
+
+def squared_distance(p1, p2):
+    dx = p1.x - p2.x
+    dy = p1.y - p2.y
+    dz = p1.z - p2.z
+    return dx*dx + dy*dy + dz*dz
+```
+
+## Operating characteristics
+- **Time Complexity:** $O(1)$ per triangle-plane pair, as it involves a fixed number of arithmetic operations and comparisons.
+- **Memory Complexity:** $O(1)$ auxiliary space for the intersection calculation.
+- **Strengths:** Simple to implement, robust handling of degenerate cases (vertices on plane, single point intersection).
+- **Limitations:** The degenerate segment extension ($0.0001$) is arbitrary and may cause visual artifacts or incorrect topology if not handled carefully in downstream processing [S1, unofficial]. Precision issues may arise with very large or very small coordinates due to floating-point tolerance thresholds [S1, unofficial].
+- **When to use:** When extracting cross-sections from polygonal meshes for visualization or further geometric processing [S1, unofficial].
+- **When not to use:** For ray-triangle intersection (use analytic ray-triangle methods) or when high-precision boolean operations are required without careful tolerance management.
+
+## Background
+The method is described in the context of an exploded volume visualization tool, where mesh-plane intersection is used to cut meshes along cutting planes [S1, unofficial]. The specific implementation details, including tolerance values and degenerate handling, are derived from the `explodedvolumes` repository [S1, unofficial].
+
+## Sources
+[S1] KillaWan/explodedvolumes, https://github.com/KillaWan/explodedvolumes, fetched 2026-10-27 (unofficial)

@@ -1,0 +1,247 @@
+--- v008.md
++++ v009.md
+@@ -4,5 +4,5 @@
+ 
+ ## Overview
+-Sparse Page Table and Brick Pool is a sparse volume representation that avoids materialating a dense 3D grid by using a two-level structure: a page table mapping logical $8^3$-texel regions to resident bricks, and a pool of apron-padded bricks [S3, unofficial]. This allows full source resolution (up to 2048 cells per axis) while bounding memory usage and enabling empty-space skipping [S3, unofficial]. It represents a trade-off between rendering speed and data compression by storing only non-empty 3D tiles [S1, unofficial]. In Unreal Engine, this method is exposed as the "Heterogeneous Volumes" feature [S2, unofficial].
++Sparse Page Table and Brick Pool is a sparse volume representation that avoids materializing a dense 3D grid by using a two-level structure: a page table mapping logical $8^3$-texel regions to resident bricks, and a pool of apron-padded bricks [S3, unofficial]. This allows full source resolution (up to 2048 cells per axis) while bounding memory usage and enabling empty-space skipping [S3, unofficial]. It represents a trade-off between rendering speed and data compression by storing only non-empty 3D tiles [S1, unofficial]. In Unreal Engine, this method is exposed as the "Heterogeneous Volumes" feature [S2, unofficial].
+ 
+ ## How it works
+@@ -12,11 +12,11 @@
+ 
+ **Data Structures:**
+-1.  **Page Table:** A 3D volume texture where each entry corresponds to a logical $8^3$-texel page.
++1.  **Page Table:** A 3D volume texture where each entry corresponds to a logical $8^3$-texel page [S3, unofficial].
+     *   **Format:** RG8 (8-bit Red, 8-bit Green).
+     *   **Layout:** One entry per logical page.
+     *   **Encoding:**
+-        *   Value `0`: The page is empty (no echo/data).
++        *   Value `0`: The page is empty (no echo/data) [S3, unofficial].
+         *   Value `>0`: The page contains data. The value encodes the pool slot index + 1 [S3, unofficial].
+-2.  **Brick Pool:** A collection of resident bricks stored densely in a volume texture.
++2.  **Brick Pool:** A collection of resident bricks stored densely in a physical tile data texture [S2, S3, unofficial].
+     *   **Brick Layout:** Each brick consists of an $8^3$ texel core wrapped in a one-texel apron, resulting in a total size of $10^3$ texels [S3, unofficial].
+     *   **Apron:** The one-texel apron is filled by copying neighboring logical texels, clamped at the grid edge, to ensure trilinear filtering stays within the brick [S3, unofficial].
+@@ -38,11 +38,11 @@
+         *   If space is available:
+             *   Allocate a slot in the pool.
+-            *   Copy the $8^3$ core data into the slot.
++            *   Copy the $8^3$ core data into the slot [S3, unofficial].
+             *   Fill the one-texel apron from neighboring logical texels (clamped at edges) [S3, unofficial].
+             *   Set the page table entry to `slot_index + 1` [S3, unofficial].
+         *   If the pool is full:
+-            *   Perform a count-only pass to determine coarsening needs.
++            *   Perform a count-only pass to determine coarsening needs [S3, unofficial].
+             *   Coarsen the grid by the next whole footprint multiple [S3, unofficial].
+-            *   Re-evaluate pages in the coarsened grid.
++            *   Re-evaluate pages in the coarsened grid [S3, unofficial].
+ 
+ **Raymarching Step (GPU Shader):**
+@@ -60,60 +60,28 @@
+ 
+ ```python
+-# Constants
+ MAX_VOLUME_BRICKS = 8192
+ PAGE_SIZE = 8
+-APRON_SIZE = 1  # One-texel apron
+ EXTINCTION_POWER = 2.75
+ 
+-# Data Structures
+-# PageTable: 3D texture, RG8 format. Entry 0 = empty, Entry > 0 = pool_index + 1
+-# BrickPool: 3D texture, dense storage of 10^3 texel bricks.
+-# GroundPageMax: 2D texture, stores max ground height per page column.
+-
+ def build_volume_texture(logical_voxels, max_ground_heights):
+-    """
+-    Builds the Page Table and Brick Pool from logical voxel data.
+-    logical_voxels: Sparse map of (x,y,z) -> value.
+-    max_ground_heights: 2D array of max ground height per (x,y) column.
+-    """
+     page_table = {}
+     brick_pool = []
+-    
+-    # Iterate over logical grid pages
+     for page_x, page_y, page_z in logical_voxels.pages():
+-        # Check if page has any non-empty voxels
+         if not logical_voxels.page_has_data(page_x, page_y, page_z):
+             page_table[(page_x, page_y, page_z)] = 0
+             continue
+-        
+-        # Check pool capacity
+         if len(brick_pool) >= MAX_VOLUME_BRICKS:
+             # Pool full: trigger coarsening logic (simplified)
+-            # In practice, this involves a count-only pass and re-gridding.
+-            # For this implementation, we assume coarsening handles the overflow
+-            # by reducing resolution or skipping lower-priority bricks.
+-            # Here we simply skip adding to pool if full, effectively treating as empty
+-            # or handled by the coarsening pass mentioned in sources.
+-            # [G]: In a full implementation, this block would trigger grid coarsening.
+             page_table[(page_x, page_y, page_z)] = 0
+             continue
+-            
+-        # Allocate brick
+         slot_index = len(brick_pool)
+         brick = create_brick(logical_voxels, page_x, page_y, page_z)
+         brick_pool.append(brick)
+-        
+-        # Update page table
+         page_table[(page_x, page_y, page_z)] = slot_index + 1
+-
+     return page_table, brick_pool
+ 
+ def create_brick(logical_voxels, page_x, page_y, page_z):
+-    """
+-    Creates a 10^3 brick with 8^3 core and 1-texel apron.
+-    """
+-    brick = empty_3d_array(10, 10, 10)
+-    
+-    # Copy core (8^3)
++    # 10^3 array initialized to 0
++    brick = [[[0 for _ in range(10)] for _ in range(10)] for _ in range(10)]
+     for dx in range(8):
+         for dy in range(8):
+@@ -122,86 +90,73 @@
+                 ly = page_y * 8 + dy
+                 lz = page_z * 8 + dz
+-                brick[dx+1, dy+1, dz+1] = logical_voxels.get(lx, ly, lz)
+-                
+-    # Fill apron (1-texel border)
+-    # Core is at indices 1..8. Apron is at 0 and 9.
++                brick[dx+1][dy+1][dz+1] = logical_voxels.get(lx, ly, lz)
+     for x in range(10):
+         for y in range(10):
+             for z in range(10):
+                 if x == 0 or x == 9 or y == 0 or y == 9 or z == 0 or z == 9:
+-                    # Clamp to nearest core voxel
+-                    cx = clamp(x - 1, 1, 8)
+-                    cy = clamp(y - 1, 1, 8)
+-                    cz = clamp(z - 1, 1, 8)
+-                    brick[x, y, z] = brick[cx, cy, cz]
+-                    
++                    cx = max(1, min(8, x - 1))
++                    cy = max(1, min(8, y - 1))
++                    cz = max(1, min(8, z - 1))
++                    brick[x][y][z] = brick[cx][cy][cz]
+     return brick
+ 
++def trilinear_sample(brick, u, v, w):
++    u0, v0, w0 = int(u), int(v), int(w)
++    u1, v1, w1 = u0 + 1, v0 + 1, w0 + 1
++    u0, u1 = max(0, min(9, u0)), max(0, min(9, u1))
++    v0, v1 = max(0, min(9, v0)), max(0, min(9, v1))
++    w0, w1 = max(0, min(9, w0)), max(0, min(9, w1))
++    du, dv, dw = u - u0, v - v0, w - w0
++    return (brick[u0][v0][w0] * (1-du)*(1-dv)*(1-dw) +
++            brick[u1][v0][w0] * du*(1-dv)*(1-dw) +
++            brick[u0][v1][w0] * (1-du)*dv*(1-dw) +
++            brick[u0][v0][w1] * (1-du)*(1-dv)*dw +
++            brick[u1][v1][w0] * du*dv*(1-dw) +
++            brick[u1][v0][w1] * du*(1-dv)*dw +
++            brick[u0][v1][w1] * (1-du)*dv*dw +
++            brick[u1][v1][w1] * du*dv*dw)
++
+ def raymarch_ray(ray_origin, ray_direction, page_table, brick_pool, ground_page_max):
+-    """
+-    Raymarches through the sparse volume.
+-    """
+     t = 0.0
+     max_steps = 384
+-    step_size = 1.0 / 2048.0 # Assuming normalized coordinates
+-    
++    step_size = 1.0 / 2048.0
++    accumulated_color = [0.0, 0.0, 0.0]
++    accumulated_alpha = 0.0
++
+     for _ in range(max_steps):
+         if t > 1.0:
+             break
+-            
+-        # Calculate logical page index
+-        pos = ray_origin + ray_direction * t
+-        page_x = floor(pos.x / 8)
+-        page_y = floor(pos.y / 8)
+-        page_z = floor(pos.z / 8)
+-        
+-        # Fetch page table entry
++        pos = [ray_origin[i] + ray_direction[i] * t for i in range(3)]
++        page_x = int(pos[0] / 8)
++        page_y = int(pos[1] / 8)
++        page_z = int(pos[2] / 8)
++
+         entry = page_table.get((page_x, page_y, page_z), 0)
+-        
+         if entry == 0:
+-            # Empty page
+-            # Check terrain occlusion
+-            # [G]: ground_page_max is 2D, so we use page_x, page_y
+             max_ground = ground_page_max.get((page_x, page_y), 0)
+-            # If the entire page is above the max ground height, skip it
+-            # Page Z range is [page_z * 8, (page_z + 1) * 8)
+-            if page_z * 8 >= max_ground:
+-                # Jump to exit of page
+-                t += (1.0 - pos.z) / ray_direction.z if ray_direction.z != 0 else float('inf')
+-                # Adjust to lattice
+-                t = adjust_to_lattice(t)
++            z_min = page_z * 8
++            if z_min >= max_ground:
++                dir_z = ray_direction[2]
++                if dir_z != 0:
++                    t_exit = ((page_z + 1) * 8 - pos[2]) / dir_z
++                    t = t_exit + 0.5 * step_size # [G] Adjust to jittered sample lattice
++                else:
++                    t += step_size
+                 continue
+             else:
+-                # Step through without volume fetch
+                 t += step_size
+                 continue
+         else:
+-            # Resident page
+             slot_index = entry - 1
+             brick = brick_pool[slot_index]
+-            
+-            # Sample trilinearly
+-            # Map ray position to local brick coordinates (0..9)
+-            local_pos = (pos - (page_x * 8, page_y * 8, page_z * 8)) * 1.0 # Scale to brick size
+-            # [G]: Trilinear sampling logic depends on specific texture coordinate mapping.
+-            # Assuming brick is stored as 10^3 texture.
+-            value = trilinear_sample(brick, local_pos)
+-            
+-            # Apply extinction
++            local_u = (pos[0] - page_x * 8) * (9.0 / 7.0)
++            local_v = (pos[1] - page_y * 8) * (9.0 / 7.0)
++            local_w = (pos[2] - page_z * 8) * (9.0 / 7.0)
++            value = trilinear_sample(brick, local_u, local_v, local_w)
+             alpha = 1.0 - pow(1.0 - value, EXTINCTION_POWER)
+-            
+-            # Composite
+-            # [G]: Standard front-to-back compositing
++            accumulated_color = [accumulated_color[i] + alpha * value * (1 - accumulated_alpha) for i in range(3)]
++            accumulated_alpha += alpha * (1 - accumulated_alpha)
+             t += step_size
+-            
+     return accumulated_color
+-
+-def adjust_to_lattice(t):
+-    """
+-    Adjusts ray position to land on jittered sample lattice.
+-    """
+-    # [G]: Specific lattice adjustment algorithm not detailed in sources.
+-    # Placeholder for maintaining sampling cadence.
+-    return t
+ ```
+ 
+@@ -219,5 +174,5 @@
+ ## Operating characteristics
+ **Time and Memory Complexity:**
+-*   **Memory:** The memory footprint is bounded by the number of resident bricks (`MAX_VOLUME_BRICKS`) and the page table size. The page table size is proportional to the logical volume resolution ($N^3 / 8^3$ entries). The brick pool is capped at 8192 bricks, resulting in ~16.4 MB [S3, unofficial]. The effective displayed volume size is reduced by a factor of $4^3 = 64$ compared to the original dataset due to the page table lookup and sparse storage [S1, unofficial].
++*   **Memory:** The memory footprint is bounded by the number of resident bricks (`MAX_VOLUME_BRICKS`) and the page table size [S3, unofficial]. The page table size is proportional to the logical volume resolution ($N^3 / 8^3$ entries) [S3, unofficial]. The brick pool is capped at 8192 bricks, resulting in ~16.4 MB [S3, unofficial]. The effective displayed volume size is reduced by a factor of $4^3 = 64$ compared to the original dataset due to the page table lookup and sparse storage [S1, unofficial].
+ *   **Time:** Rendering time is reduced by empty-space skipping. The maximum ray steps (`MAX_RAY_STEPS`) remain at 384, but the number of actual volume fetches is reduced [S3, unofficial].
+ 
+@@ -225,5 +180,5 @@
+ *   **Kolumbo Dataset:** Rendering the Kolumbo dataset (2.6 billion non-empty voxels) achieved about 20 fps after fixes [S2, unofficial].
+ *   **Smoke Test:** On a live KATL weather payload (456 × 385 × 96 logical texels at 1× coarsening), the system used 2,158 bricks and a 5.0 MB pool [S3, unofficial].
+-*   **Visual Accuracy:** Comparing old dense grid vs. new sparse source-resolution renders on live KATL (wide) data: Old 6.11M, Cubic at source res 5.08M (-17%), 2.75 power 6.12M (0%). On KATL close: Old 4.57M, Cubic 3.65M (-20%), 2.75 power 4.75M (+4%). On KSEA stratiform: Old 270k, Cubic 193k (-28%), 2.75 power 259k (-4%) [S3, unofficial].
++*   **Visual Accuracy:** Comparing old dense grid vs. new sparse source-resolution renders on live KATL (wide) data: Old 6.11M, Cubic at source res 5.08M (-17%), 2.75 power 6.12M (0%) [S3, unofficial]. On KATL close: Old 4.57M, Cubic 3.65M (-20%), 2.75 power 4.75M (+4%) [S3, unofficial]. On KSEA stratiform: Old 270k, Cubic 193k (-28%), 2.75 power 259k (-4%) [S3, unofficial].
+ 
+ **Strengths and Limitations:**

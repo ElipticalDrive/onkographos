@@ -1,0 +1,75 @@
+# Regularization Techniques
+
+
+## Overview
+Regularization techniques in NeRF training are methods applied to the loss function or optimization process to suppress artifacts (such as floaters, noise, or blur) and enforce geometric or perceptual priors, particularly in sparse-view or ill-posed settings [G]. What sets this family apart from sibling methods like [NeRF Initialization Strategies](8674-nerf-initialization-strategies.md) or [Model Architecture Modifications](11313-model-architecture-modifications.md) is that it operates directly on the gradient updates or loss landscape during the training loop, rather than altering the network structure or the initial state [G]. It complements [Alpha Invariance / Inverse Scaling](10127-alpha-invariance-inverse-scaling.md) by addressing high-frequency noise and structural consistency rather than just density scaling [G].
+
+## Shared principles
+The shared mechanism across all regularization techniques in this family is the addition of a penalty term $L_{reg}$ to the primary photometric loss $L_{color}$ (and potentially geometric losses $L_{geo}$), such that the total loss becomes:
+$$ L_{total} = L_{color} + \sum_k \lambda_k L_{reg, k} $$
+where $\lambda_k$ is a hyperparameter weighting the specific regularization term [G]. The core principle is to constrain the solution space of the radiance field to be physically plausible (e.g., smooth geometry, consistent normals, or perceptually natural images) when the photometric signal alone is insufficient due to sparse inputs or ambiguities [G].
+
+## Subtopics
+
+### [Spherical Harmonics Regularization](8693-spherical-harmonics-regularization.md)
+A training strategy that restricts the maximum degree of Spherical Harmonics (SH) during early optimization to prevent high-frequency overfitting. It differs from density-based floaters removal by directly controlling the frequency bandwidth of the view-dependent radiance representation, ensuring low-frequency diffuse properties are learned before high-frequency specular details. Choose this when training Plenoxels or SH-based NeRFs with sparse inputs to stabilize geometry reconstruction.
+
+### [Bilateral Edge-Aware Constraint](16372-bilateral-edge-aware-constraint.md)
+A geometric regularization technique that preserves sharp structural discontinuities while suppressing high-frequency noise. It differs from standard smoothness constraints by dynamically weighting geometric penalties based on photometric similarity, ensuring rays with similar colors are enforced to be coplanar while distinct rays diverge. Choose this when reconstructing scenes with sharp edges (e.g., buildings) to prevent blurring of boundaries.
+
+### [Appearance Regularization](21795-appearance-regularization.md)
+A technique that encourages rendered images to appear perceptually correct by leveraging pre-trained generative models (CNNs/GANs) rather than relying solely on pixel-wise photometric errors. It distinguishes itself from sibling methods by operating in image space using learned priors to suppress unstructured artifacts. Choose this when photometric loss leads to perceptually poor results despite low pixel-wise error.
+
+### Simple-RF Loss Function
+- **Definition**: A composite loss function used in Simple-RF models to mitigate floaters and improve geometry in sparse input scenarios by combining multiple regularization terms [S1].
+- **Step**: During the first 10k iterations, only impose $L_m$, $L_a$, and $L_{sd}$. Do not impose $L_{aug}$ and $L_{cfc}$. After 10k iterations, impose all loss terms including $L_{aug}$ and $L_{cfc}$ [S1].
+- **Formula**: $L = \lambda_m L_m + \lambda_a L_a + \lambda_{sd} L_{sd} + \lambda_{aug} L_{aug} + \lambda_{cfc} L_{cfc} + \lambda_{mc} L_{mc}$ [S1].
+- **Parameter**: $\lambda_{sd} = 0.1$, $\lambda_{aug} = 0.1$, $\lambda_{cfc} = 0.1$ [S1].
+- **Pitfall**: $L_{cfc}$ and $L_{mc}$ are imposed only for the main NeRF and augmented TensoRF models respectively, not for all variants simultaneously in the same way [S1].
+
+### Density Loss with Black and White Prior
+- **Definition**: A regularization technique that minimizes the density of early samples along a ray to suppress background misplaces and floaters, adapted with a black/white prior for uniform backgrounds [S2].
+- **Step**: When a pixel value is either black or white, minimize the density of the first $M+10$ samples along the ray instead of the first $M$ samples [S2].
+- **Comparison**: Using only the density loss yields correct metrics but produces a slightly less precise 3D reconstruction and lower stability compared to using continuous coarse-to-fine alone. The combination of both provides the best trade-off between 3D reconstruction and novel view synthesis quality [S2].
+
+### Hierarchical Sampling Consistency
+- **Definition**: A regularization technique to prevent blur in rendered images caused by inconsistencies between coarse and fine NeRF depth estimates in few-shot settings. It drives the two NeRFs to be consistent in their solutions [S3].
+- **Formula**: $L_{cfc} = \mathbb{1}_{\{m_{cfc}=1\}} \odot \|z_c - \tau(z_f)\|^2 + \mathbb{1}_{\{m_{cfc}=-1\}} \odot \|\tau(z_c) - z_f\|^2$, where $z_c$ and $z_f$ are depths estimated by coarse and fine NeRFs, $\tau$ is a transformation function, and $m_{cfc}$ is a mask determined by reliability estimation [S3].
+- **Pitfall**: Without this loss, dense sampling may not be employed around the region where the fine NeRF predicts the object surface, leading to blur in rendered images [S3].
+
+### Asymmetric Predicted Normal Loss
+- **Definition**: Apply an asymmetric predicted normal loss to tie predicted normals $\tilde{n}$ to geometry normals $n$ and rendering weights $w$, allowing separate multipliers for gradients flowing from geometry normals and weights to predicted normals, and vice versa [S4].
+- **Formula**: Compute asymmetric loss $L_{pred} = \lambda_n L_p(w, n, \text{sg}(\tilde{n})) + \lambda_{\tilde{n}} L_p(\text{sg}(w), \text{sg}(n), \tilde{n})$, where $L_p(w, n, \tilde{n}) = \sum w^{(i)} \|n^{(i)} - \tilde{n}^{(i)}\|^2$ and $\text{sg}(\cdot)$ is stop-gradient [S4].
+- **Parameter**: $\lambda_n$: Multiplier for the term tying predicted normals to geometry normals. Typical value: $10^{-3}$ [S4].
+- **Pitfall**: Using standard symmetric predicted normal loss tends to oversmooth or underconstrain geometry, preventing normal vectors from converging to the correct solution [S4].
+
+### MixNeRF Regularization
+- **Definition**: A regularization method that models input rays with mixture density models to achieve promising results with sparse inputs [S5].
+- **Step**: Minimize the negative log-likelihood (NLL) to learn the density distribution effectively with sparse inputs [S5].
+- **Formula**: Mixture coefficient $\pi_i = w_i / \sum_{m=1}^{M} w_m = T_i(1-\exp(-\sigma_i \delta_i)) / \sum_{m=1}^{M} T_m(1-\exp(-\sigma_m \delta_m))$, where $w_i$ is alpha blending weight, $\delta_i$ is sample interval, $T_i$ is transmittance, $\sigma_i$ is volume density, and $M$ is number of samples [S5].
+
+### Occlusion Regularization
+- **Definition**: A regularization term to prevent 'floater' or 'walls' artifacts in sparse-view training by constraining near-camera density to zero. It operates effectively where geometry regularization cannot due to missing correspondences [S6].
+- **Formula**: Total loss: $L(\theta, t) = L_{color}(\theta) + L_{geo}(\theta, t) + \lambda_{occ} L_{occ}(\theta)$, where $\lambda_{occ}$ is a pre-defined weighting factor [S6].
+- **Parameter**: Occlusion regularization weight ($\lambda_{occ}$): 0.01 across all experiments [S6].
+
+### NeRF Path Regularization
+- **Definition**: A regularization term enforcing 3D consistency by matching the model output to the original NeRF path, implemented by subsampling pixels and comparing them against NeRF-generated rays [S7, unofficial].
+- **Parameter**: $\beta$: Weight for the NeRF path regularization term in the total loss, set to 0.2 [S7, unofficial].
+
+### EWC with NeRF
+- **Definition**: A regularization approach for continual learning in NeRF that penalizes changes to important weights [S8].
+- **Parameter**: Regularization loss weight: $10^8$ (multiplied to make it ~10% of photometric loss) [S8].
+
+## Background
+Regularization in NeRFs emerged as a response to the inherent ambiguities in inverse volume rendering, particularly when training data is sparse or noisy [G]. Early NeRF implementations [MST*21] relied heavily on photometric loss, which often resulted in "floaters" (spurious geometry) and overfitting to noise [G]. The introduction of density regularization [FreeNeRF] and geometric constraints marked the first major shift [G]. Subsequent works like Simple-RF [S1] and RING-NeRF [S2] formalized composite loss functions with specific scheduling (e.g., delaying augmentation losses) to stabilize training. The use of perceptual priors [Appearance Regularization](21795-appearance-regularization.md) and advanced geometric constraints like [Bilateral Edge-Aware Constraint](16372-bilateral-edge-aware-constraint.md) and asymmetric normal losses [S4] reflects the field's move towards incorporating external knowledge (GANs, surface normals) to resolve ill-posed problems [G].
+
+## Sources
+[S1] Simple-RF: Regularizing Sparse Input Radiance Fields with Simpler Solutions, https://arxiv.org/abs/2404.19015v5, fetched 2026-10-27
+[S2] RING-NeRF : Rethinking Inductive Biases for Versatile and Efficient Neural Fields, https://doi.org/10.1007/978-3-031-72761-0_9, fetched 2026-10-30
+[S3] SimpleNeRF: Regularizing Sparse Input Neural Radiance Fields with Simpler Solutions, https://doi.org/10.1145/3610548.3618188, fetched 2026-10-26
+[S4] NeRF-Casting: Improved View-Dependent Appearance with Consistent Reflections, https://arxiv.org/abs/2405.14871v1, fetched 2026-10-26
+[S5] FlipNeRF: Flipped Reflection Rays for Few-shot Novel View Synthesis, https://doi.org/10.1109/iccv51070.2023.02092, fetched 2026-10-29
+[S6] SGCNeRF: Few-Shot Neural Rendering via Sparse Geometric Consistency Guidance, https://doi.org/10.1109/tcsvt.2025.3610950, fetched 2026-10-30
+[S7] StyleNeRF: A Style-based 3D-Aware Generator for High-resolution Image Synthesis, https://doi.org/10.48550/arxiv.2110.08985, fetched 2026-10-26 (unofficial)
+[S8] SCARF: Scalable Continual Learning Framework for Memory‐efficient Multiple Neural Radiance Fields, https://doi.org/10.1111/cgf.15255, fetched 2026-10-26

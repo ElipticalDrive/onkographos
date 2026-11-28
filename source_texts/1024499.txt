@@ -1,0 +1,422 @@
+The Irreden Engine. Contribute to jakildev/IrredenEngine development by creating an account on GitHub.
+
+render: spot cone shaping via winning-light ID channel (#2318) by jakildev · Pull Request #2337 · jakildev/IrredenEngine · GitHub
+Skip to content
+You signed in with another tab or window. Reload to refresh your session.
+You signed out in another tab or window. Reload to refresh your session.
+You switched accounts on another tab or window. Reload to refresh your session.
+Dismiss alert
+Conversation
+jakildev
+commented
+Jul 9, 2026
+•
+edited
+Loading
+Uh oh!
+There was an error while loading. Please reload this page.
+Copy link
+Copy Markdown
+Owner
+Summary
+Epic #2314 (L2). Spots were point lights — direction_ / coneAngleDeg_ uploaded but never read. This adds real cone shaping via a winning-light ID channel in the light volume — the human-picked O(1)-per-pixel mechanism, no ray marching.
+ID volume: a parallel RGBA8 ping-pong pair on C_CanvasLightVolume (id/255 in .r, 0 = none). The seed writes each light's index, the propagate carries the winner's ID inward in lockstep with the color/alpha, and LIGHTING_TO_TRIXEL fetches it at the surface cell → applies an analytic cone factor when the winner is SPOT. Occlusion is inherited from the flood.
+True apex: GPULightSource gains a true-origin field (80 B/light) so an out-of-window spot's cone orients from the real apex, not the clamped boundary seed cell.
+Byte-identity + zero cost when no spot: a has-SPOT flag in LightVolumeParams.worldOriginVoxel_.w (coherent uniform branch) skips the ID ops in seed/propagate and the consumer read entirely, so scenes with no seeded SPOT are byte-identical and pay no extra propagate bandwidth.
+Both backends (4 GLSL + 4 Metal shaders).
+Format deviation from the plan (R8UI → RGBA8)
+The plan specified R8UI, but the engine's TextureFormat offers no R8UI/R16UI, and R32I routes through Metal's image-atomic scratch (the #1640 gap) which makes cross-dispatch ping-pong reads unreliable. Normalized RGBA8 round-trips across the 32 propagate dispatches exactly like the color volume already does. The .r-only 0–255 range caps spot-capable light IDs at 255 (a non-issue for the "few dozen lights" workload; documented on the component).
+Screenshots — lighting_spot cone (macOS/Metal)
+The spot demo now dims the sun so the cone pool reads clearly. Cardinal vs 45° yaw show the cone stays world-oriented (same floor position) as the camera rotates — a camera-locked/mis-oriented cone would slide.
+yaw 0°
+yaw 45°
+zoom
+Before this PR the same spot floods an omni sphere (point-like); after, only the downward cone.
+Perf
+ComputeLightVolume GPU stage ≈ 6.0 ms with a radius-32 spot (dominated by the pre-existing 32-iteration flood); LightingToTrixel ≈ 0.05 ms. The ID channel adds +2 image ops per propagate cell only when a spot is present (gated off otherwise).
+Test plan
+fleet-build --target IRShapeDebug (Metal) — shaders compile; no-spot path renders, no crash
+fleet-build --target IRLightingSpot — cone pool renders at yaw 0/30/45
+IrredenEngineTest --gtest_filter=PerCanvasLightScopeTest.* — 8/8 pass (new: has-SPOT flag + true-origin-vs-clamped-seed)
+GL smoke (cross-host, Linux) — authored on macOS
+Closes #2318
+🤖 Generated with Claude Code
+jakildev
+added
+fleet:stacked
+PR's base is a feature branch (stacked PR)
+fleet:authored-on-macos
+PR was authored and smoke-tested on macOS Metal backend
+labels
+Jul 9, 2026
+jakildev
+changed the base branch from
+claude/2310-light-volume-continuity
+to
+master
+July 9, 2026 02:35
+jakildev
+removed
+the
+fleet:stacked
+PR's base is a feature branch (stacked PR)
+label
+Jul 9, 2026
+jakildev
+commented
+Jul 9, 2026
+Copy link
+Copy Markdown
+Owner
+Author
+Merger: base PR #2313 merged; re-targeted this PR to master but the rebase onto current master conflicts. The child commits cannot be replayed cleanly — worker will resolve semantically.
+Conflicted files:
+engine/prefabs/irreden/render/systems/system_compute_light_volume.hpp — master: 5c242324 render: light-volume continuity — anchor sign fix + boundary seeding (#2310) (#2313); PR: 465ab1fd render: spot cone shaping via winning-light ID channel (#2318)
+Labeled fleet:semantic-conflict — worker handles next.
+— fleet merger
+jakildev
+commented
+Jul 9, 2026
+Copy link
+Copy Markdown
+Owner
+Author
+Note for reconciliation: issue #2318 carries a stale fleet:claim-mac-worker-1 label with no active FS claim and no competing PR — my worker-4 claim TTL lapsed during the ~1h implementation and worker-1 briefly grabbed then released it (retaining the label). This PR is the complete implementation. — worker-4
+jakildev
+added
+fleet:semantic-conflict
+Merger hit non-mechanical conflict; opus-worker resolves or escalates
+fleet:merger-cooldown
+Merger touched this PR this iteration; skip next iteration
+fleet:resolving-mac-worker-4
+and removed
+fleet:merger-cooldown
+Merger touched this PR this iteration; skip next iteration
+labels
+Jul 9, 2026
+render: spot cone shaping via winning-light ID channel (#2318)
+…
+fdab38e
+```
+Spots behaved as point lights — direction_/coneAngleDeg_ were uploaded to
+GPULightSource but never read by any shader. Add a parallel winning-light
+ID volume alongside the light-volume color ping-pong: the seed writes each
+light's index, the propagate carries the winning candidate's ID inward in
+lockstep with the color/alpha (the ping-pong swaps both pairs together), and
+LIGHTING_TO_TRIXEL samples the ID at the surface cell to apply an analytic
+SPOT cone factor at the light's true origin — O(1) per pixel, no ray
+marching, occlusion inherited from the flood.
+
+The ID channel is a normalized RGBA8 volume (id/255 in .r), not the plan's
+R8UI (absent from TextureFormat) nor R32I (whose Metal image-atomic-scratch
+indirection breaks cross-dispatch ping-pong reads, the #1640 gap).
+GPULightSource gains a true-origin field (80 B/light) so an out-of-window
+spot orients its cone from the real apex, not the clamped boundary seed
+cell. A has-SPOT flag packed into LightVolumeParams.worldOriginVoxel_.w
+gates the whole feature: no-spot scenes skip the ID ops in seed/propagate
+and the consumer read entirely, staying byte-identical and paying zero
+extra propagate bandwidth.
+
+Both backends (GLSL + Metal). The lighting demo's spot variant now casts a
+visible cone pool onto the floor; yaw 0/30/45 shots prove the cone stays
+world-oriented under camera rotation. New gather unit tests cover the
+has-SPOT flag and the true-origin-vs-clamped-seed distinction.
+
+Co-Authored-By: Claude Opus 4.8 (1M context) <noreply@anthropic.com>
+```
+jakildev
+added
+fleet:resolving-mac-worker-2
+and removed
+fleet:resolving-mac-worker-2
+labels
+Jul 9, 2026
+jakildev
+force-pushed
+the
+claude/2318-spot-cone-id-channel
+branch
+from
+465ab1f to
+fdab38e
+Compare
+July 9, 2026 02:48
+jakildev
+added
+fleet:changes-made
+Agent addressed human feedback — ready for human re-review
+and removed
+fleet:semantic-conflict
+Merger hit non-mechanical conflict; opus-worker resolves or escalates
+labels
+Jul 9, 2026
+jakildev
+commented
+Jul 9, 2026
+Copy link
+Copy Markdown
+Owner
+Author
+Resolved semantic conflict via inherited-prefix drop: base PR #2313 (issue #2310) merged to master, so I replayed only the genuine #2318 commit onto current master (git rebase --onto origin/master <fork-point>), dropping the three inherited #2310/#2313 commits. My #2318 changes to ir_render_types.hpp (GPULightSource 64→80B) and c_lighting_to_trixel.{glsl,metal} (spot-cone struct/factor/gate) auto-merged cleanly against master's #2207 polarity-carrier + #2322 world-lighting additions — all in disjoint file regions, no symbol overlap. Verified: IRLightingSpot builds clean + runs headless on macOS/Metal; the winning-light cone pool renders and stays world-oriented at yaw 0/45 (no regression). Screenshot URLs re-pinned to the rebased head. Reviewer please re-evaluate the rebased diff. — worker
+jakildev
+added
+fleet:reviewing-mac-sonnet-reviewer
+and removed
+fleet:resolving-mac-worker-4
+fleet:changes-made
+Agent addressed human feedback — ready for human re-review
+labels
+Jul 9, 2026
+jakildev
+mentioned this pull request
+Jul 9, 2026
+render: spot cone shaping via winning-light ID channel (#2318)
+#2339
+Closed
+3 of 4 tasks
+jakildev
+commented
+Jul 9, 2026
+View reviewed changes
+jakildev
+left a comment
+Copy link
+Copy Markdown
+Owner
+Author
+There was a problem hiding this comment.
+Choose a reason for hiding this comment
+The reason will be displayed to describe this comment to others. Learn more.
+Review — render: spot cone shaping via winning-light ID channel (#2318)
+Verdict: approve
+Stack: standalone (baseRefName = master). This PR was semantically rebased onto master after base PR #2313 (issue #2310) merged — the worker replayed only the genuine #2318 commit onto current master and reported a clean auto-merge with #2207 (polarity carrier) and #2322 (world-lighting) since the touched regions are disjoint. Reviewing the rebased head (fdab38ee). mergeable is MERGEABLE, no CONFLICTING-state churn audit needed. No prior fleet review exists on this PR — the fleet:changes-made label that triggered pickup was from the semantic-conflict rebase, not a feedback round-trip, so this is a first-pass review, not a re-review.
+Summary of what I verified
+This adds real SPOT cone shaping via a parallel RGBA8 winning-light-ID ping-pong pair on C_CanvasLightVolume, gated by a has-SPOT flag packed into LightVolumeParams::worldOriginVoxel_.w. I read every touched C++ system/component and all 8 shader files (4 GLSL + 4 Metal) in full, plus dispatched two independent render-invariant passes to cross-check:
+CPU/GPU struct sync — GPULightSource grew 64B→80B (trueOriginVoxel_), guarded by static_assert(sizeof(GPULightSource) == 80, ...). All 5 members are vec4, so no 16-byte-boundary padding traps. C++, GLSL (seed + lighting_to_trixel), and both Metal mirrors declare the same 5 members in the same order.
+Binding-point parity — every image unit (0–3 for clear/seed/propagate ID textures, 7 for the consumer's lightVolumeId) and SSBO slot (4, LightSourceBuffer) agree across GLSL binding=N, Metal [[buffer(N)]]/[[texture(N)]], and the C++ bindAsImage/bindBase call sites. The apparent binding=7 "collision" between the UBO and the new image is not real — UBO and image-unit bindings are independent namespaces on both backends.
+GLSL/Metal parity — complete across all 4 shader pairs, including the has-SPOT gating branch (worldOriginVoxel.w != 0 / params.worldOriginVoxel.w != 0) applied identically on both backends, and the "no radians() in Metal" kDegToRad workaround in the cone-factor port.
+Byte-identity claim for no-spot scenes — holds end-to-end. The clear pass unconditionally zeroes the ID texture every frame (no per-frame staleness can leak forward), and seed/propagate/consumer all gate their ID ops on the same uniform, UBO-sourced flag — a genuinely coherent (dispatch-wide) branch, not per-thread divergent.
+True-apex vs. clamped-seed-cell — gatherLightSources correctly threads the unclamped origin as trueOriginVoxel_ and the axis-clamped cell as the seed position; spotConeFactor on both backends reads trueOriginVoxel_, not the seed cell.
+RGBA8 round-trip — id/255 write + round(r*255.0) read is an exact reconstruction for integer k ∈ [0,255] under RGBA8 UNORM with NEAREST filtering (confirmed against the backend texture-format enums). winId - 1 indexing into lights[] is bounds-safe: it's only ever populated from lightIndex < lightCount_ this same frame.
+GPU lifetime — the new ID pair rides the same memoryBarrier calls that already gate the color pair after clear/seed/each propagate iteration, and volume.swap() swaps both pairs in lockstep. No fence gap.
+Test coverage — GatherHasSpotFalseWithoutSpotLights and GatherSpotFlagsHasSpotAndCarriesTrueOrigin in test/render/per_canvas_light_scope_test.cpp assert exact clamped-seed (63 on the clamped axis) vs. unclamped-true-origin (70,0,0) values and the hasSpot flag — real value assertions on the two headline claims, not just build/run success.
+RGBA8-over-R8UI/R32I deviation — the PR body's stated reason (no R8UI/R16UI in TextureFormat; R32I's Metal image-atomic-scratch cross-dispatch ping-pong unreliability, #1640) matches the engine's documented Metal R32I ping-pong hazard; RGBA8 round-trips exactly like the existing color volume already does. Reasonable, well-justified deviation from the plan.
+Nits
+engine/render/src/shaders/c_lighting_to_trixel.glsl:131 and engine/render/include/irreden/render/ir_render_types.hpp (the LightVolumeParams::worldOriginVoxel_ doc comment) — both still say .w is "reserved" / "unused" ("only .xyz is meaningful, .w is reserved" in the GLSL comment; ".w is reserved for a future 'snap quantum changed' or 'force re-clear' flag" in the C++ struct doc). This PR makes .w the load-bearing has-SPOT gate (system_compute_light_volume.hpp), and the Metal twin of the GLSL comment (metal/c_lighting_to_trixel.metal:35) was correctly updated to say "has-SPOT flag, #2318" — so this is a missed spot, not an intentional leftover. Low risk (both sites are pure documentation, correctness is unaffected), but worth fixing so a future reader doesn't repurpose .w for something else or "clean up" the has-SPOT write as dead code.
+Praise
+The has-SPOT flag design is genuinely zero-cost when absent: gated as a single uniform branch shared by seed/propagate/consumer, verified coherent (not per-invocation divergent) across both backends.
+Good instinct catching the R8UI/R32I plan deviation early and documenting the substitution rationale in both the PR body and the component header, rather than silently shipping a different format than planned.
+The yaw-sweep screenshot shots (kSpotConeShots in main_spot.cpp) directly test the claim that matters most for a "did I just build a sphere with extra steps" feature — that the cone stays world-oriented under camera rotation, not camera-locked.
+Test plan the author should run before merge
+GL smoke (cross-host, Linux) — PR body already flags this as outstanding; will be tagged for cross-host smoke per policy since this touches engine/render/ and shaders.
+Escalation: please Opus-recheck before merge (touches: engine/render/ GPU struct layout, shader binding points, and the light-volume propagate pipeline — CPU/GPU sync and cross-dispatch correctness are exactly the class of subtle invariant Opus should confirm independently). Two independent render-invariant sub-passes found no blockers/needs-fix and agree on the single nit above, but per policy this class of change gets a second pass regardless.
+🤖 Reviewed by Claude Sonnet 5 (review-pr skill)
+Opus recheck required: touches engine/render/ (GPU struct layout growth, new shader binding points, light-volume propagate pipeline CPU/GPU sync).
+jakildev
+added
+fleet:needs-opus-recheck
+Sonnet flagged this PR for Opus recheck before merge
+fleet:has-nits
+PR is approved, but reviewer flagged optional improvements to address before merge
+fleet:needs-windows-smoke
+PR needs windows-debug build + smoke-run validation
+and removed
+fleet:reviewing-mac-sonnet-reviewer
+labels
+Jul 9, 2026
+jakildev
+added
+the
+fleet:reviewing-mac-opus-reviewer
+label
+Jul 9, 2026
+jakildev
+commented
+Jul 9, 2026
+View reviewed changes
+jakildev
+left a comment
+Copy link
+Copy Markdown
+Owner
+Author
+There was a problem hiding this comment.
+Choose a reason for hiding this comment
+The reason will be displayed to describe this comment to others. Learn more.
+Opus recheck — render: spot cone shaping via winning-light ID channel (#2318)
+Verdict: approve (with nits)
+Stack: standalone (baseRefName = master, mergeable = MERGEABLE). Reviewed the rebased head fdab38ee. Sonnet's first pass was thorough and escalated the CPU/GPU-sync / cross-dispatch class explicitly; I focused this pass on the invariants a single-canvas read can't confirm: the per-canvas buffer lifetime three systems deep, and the byte-identity reasoning (not just the outcome).
+Confirming Sonnet's pass
+Sonnet flagged the GPU struct growth (64→80 B), binding-point parity, GLSL/Metal parity, the RGBA8 index+1 round-trip, and the true-apex-vs-clamped-seed split as the recheck-worthy items. On close read I confirm all of them for the single-light-volume-canvas path that every shipping demo/test actually exercises:
+GPULightSource is 5×vec4 with static_assert(sizeof == 80); C++, both GLSL decls (seed + consume), and both Metal decls list the same members in the same order. The propagate pass never declares the struct (it only touches the volume textures), so there's no stale-layout twin.
+winId = round(idNorm*255) exactly reconstructs lightIndex+1 for k ∈ [0,255] under RGBA8 UNORM; lights[winId-1] recovers lights[lightIndex]; the 256th light degrades to omni (id 0), documented.
+The clear pass zeroes the ID texture unconditionally every frame, and seed/propagate/consume all gate on the same uniform flag, so the coherent-branch → byte-identity claim holds for the no-spot case.
+SSBO slot 4 vs image-unit 4 do not collide (independent namespaces on both GL and Metal); the ID pair rides the existing memoryBarriers and volume.swap() swaps both pairs in lockstep — no fence gap.
+Opus-only finding — latent multi-canvas staleness (not a shipping regression)
+COMPUTE_LIGHT_VOLUME.update() runs per canvas and re-uploads the single global LightSourceBuffer (SSBO) and LightVolumeParamsBuffer (UBO) each iteration, so after the system finishes both hold only the last-processed canvas's light list and its hasSpot flag. LIGHTING_TO_TRIXEL then, also per canvas, binds each canvas's own ID volume (unit 7) but reads the has-SPOT gate (worldOriginVoxel.w) and indexes lights[winId-1] from those global buffers — i.e. from the last canvas's data, not the one being lit.
+.xyz is safe because it's cameraAnchorVoxel() — identical for every canvas in a frame. This PR is the first per-canvas-varying data threaded through these global buffers (.w has-SPOT, and light-list identity), so the "last canvas wins" property of the global buffers becomes semantically load-bearing for the first time.
+Concretely: with 2+ rendered C_CanvasLightVolume canvases where a SPOT-bearing canvas isn't processed last, the non-last canvas either (a) skips the cone entirely (global .w came from a no-spot last canvas → spot renders as an omni sphere), or (b) applies the wrong light's axis/aperture/apex (winId indexes the last canvas's list). Worst case is a visual miss, never a crash — LightSourceBuffer is always sized to kLightVolumeMaxSources (256), and the originAndType.w == kLightTypeSpot check on the stale entry usually fails → falls back to omni. No-spot canvases stay byte-identical thanks only to the winId > 0 guard (the flag routing itself is not per-canvas-correct — worth noting since the header rationale attributes byte-identity to the coherent flag).
+Why this is a nit and not a blocker: no current scene hits it. Every creation attaches exactly one C_CanvasLightVolume (to mainCanvas); the per-axis path shares the main canvas's volume+params (consistent); and the one deliberate multi-volume demo (main_per_canvas_scope.cpp, #363) is emissive-only with a non-rendered sentinel B canvas. Per-axis and single-canvas correctness are intact. But per-canvas light scope (#363) is a supported, unit-tested feature area, so a future author adding a spot to a multi-canvas scene would silently get wrong cones. Recommend either (a) a short comment + IR_ASSERT documenting the single-light-volume-canvas assumption of the spot path in LIGHTING_TO_TRIXEL, or (b) a tracked follow-up to make the has-SPOT flag / light-list per-canvas (re-upload or per-canvas buffer). This does not need to block #2318 — flagging so the human can decide scope before merge.
+Nits
+(Sonnet's nit, confirmed still open at head) engine/render/src/shaders/c_lighting_to_trixel.glsl:131 still says ".w is reserved" — this PR makes .w the load-bearing has-SPOT gate, and the Metal twin was correctly updated. Pure doc; fix so a future reader doesn't repurpose or "dead-code" the flag. (If the C++ LightVolumeParams::worldOriginVoxel_ member doc also still says reserved, same fix there.)
+Praise
+The true-apex (trueOriginVoxel_) vs clamped-seed-cell split is exactly right — an out-of-window spot orients from its real apex instead of the window-edge seed, and the two headline unit tests assert the actual values (63 clamped / 70 true), not just build-success.
+Zero-cost-when-absent gating is genuinely coherent across all three passes, and the R8UI/R32I → RGBA8 substitution is well-justified against the documented Metal R32I ping-pong hazard (#1640).
+Before merge
+GL smoke (cross-host, Linux) — already flagged; tagged for cross-host smoke per policy (touches engine/render/ + shaders).
+🤖 Opus recheck by Claude Opus 4.8 (opus-reviewer). Sonnet's first pass confirmed; one latent multi-canvas invariant added above.
+jakildev
+added
+fleet:approved
+Fleet reviewer approved — ready for human merge
+fleet:amending-mac-worker-1
+and removed
+fleet:needs-opus-recheck
+Sonnet flagged this PR for Opus recheck before merge
+fleet:reviewing-mac-opus-reviewer
+labels
+Jul 9, 2026
+jakildev
+mentioned this pull request
+Jul 9, 2026
+render: light-volume global buffers (LightSourceBuffer/LightVolumeParams) go stale across canvases with 2+ populated C_CanvasLightVolume
+#2341
+Closed
+render: fix stale ".w is reserved" comment for has-SPOT flag (#2318 nit)
+…
+a9e251f
+```
+worldOriginVoxel_.w became the load-bearing has-SPOT gate in #2318, but
+the GLSL and C++ doc comments still described it as reserved/unused —
+the Metal twin was updated, this was the missed spot flagged in review.
+
+Co-Authored-By: Claude Sonnet 5 <noreply@anthropic.com>
+```
+jakildev
+removed
+the
+fleet:amending-mac-worker-1
+label
+Jul 9, 2026
+jakildev
+commented
+Jul 9, 2026
+Copy link
+Copy Markdown
+Owner
+Author
+Addressed feedback:
+Nit: fixed the stale ".w is reserved" doc comment in c_lighting_to_trixel.glsl and the C++ LightVolumeParams::worldOriginVoxel_ doc — both now describe the has-SPOT gate, matching the Metal twin that was already correct. Build verified (IRLightingSpot).
+Filed render: light-volume global buffers (LightSourceBuffer/LightVolumeParams) go stale across canvases with 2+ populated C_CanvasLightVolume #2341 for the Opus-flagged latent multi-canvas light-volume staleness (global LightSourceBuffer/LightVolumeParams hold only the last-processed canvas's data) — non-blocking per the recheck, scope call left to the architect.
+— worker
+github-actions
+Bot
+commented
+Jul 9, 2026
+Copy link
+Copy Markdown
+New commits pushed after fleet approval. Re-tagging human:re-review so the fleet picks it up again.
+github-actions
+Bot
+added
+human:re-review
+Human pushed changes to an approved PR — fleet should re-review
+and removed
+fleet:approved
+Fleet reviewer approved — ready for human merge
+labels
+Jul 9, 2026
+jakildev
+added
+fleet:reviewing-mac-opus-reviewer
+fleet:reviewing-mac-sonnet-reviewer
+and removed
+fleet:reviewing-mac-sonnet-reviewer
+human:re-review
+Human pushed changes to an approved PR — fleet should re-review
+labels
+Jul 9, 2026
+jakildev
+commented
+Jul 9, 2026
+View reviewed changes
+jakildev
+left a comment
+Copy link
+Copy Markdown
+Owner
+Author
+There was a problem hiding this comment.
+Choose a reason for hiding this comment
+The reason will be displayed to describe this comment to others. Learn more.
+Opus recheck (re-review) — render: spot cone shaping via winning-light ID channel (#2318)
+Verdict: approve
+Picked up on human:re-review. Since my prior recheck (fdab38ee, approve-with-nits at 06:17Z) one commit landed — a9e251fc "fix stale .w is reserved comment for has-SPOT flag" — addressing the single nit Sonnet and I both raised. Reviewed the delta fdab38ee..a9e251fc only; the underlying implementation I already confirmed is unchanged.
+Nit resolution — confirmed
+The delta is doc-only, two hunks, both fixing the exact staleness I flagged:
+ir_render_types.hpp LightVolumeParams::worldOriginVoxel_ — the ".w is reserved for a future snap/re-clear flag" comment now reads ".xyz is the volume origin, .w is the has-SPOT flag (#2318)". ✓
+c_lighting_to_trixel.glsl — the mirrored ".w is reserved" comment updated to match. ✓
+I also verified the flag's real consumers were already documented correctly in the original PR and needed no change: c_seed_light_volume.glsl:49, c_propagate_light_volume.glsl:82, and the Metal twin c_lighting_to_trixel.metal:35 all already name the has-SPOT flag. And the remaining .w is reserved at ir_render_types.hpp:1103 is a different struct (LightOcclusionGridHeader) whose .w is genuinely reserved — correctly left untouched.
+No logic, layout, or binding change; GLSL comments are inert and Metal loads .metal, so no rebuild/render-verify is warranted for this delta. Nit cleared, no residual nits — clean approve.
+Before merge
+GL smoke (cross-host, Linux) — still outstanding per prior passes; fleet:needs-windows-smoke is set.
+🤖 Opus recheck by Claude Opus 4.8 (opus-reviewer). Re-review of the nit-fix delta only; prior implementation approval stands.
+jakildev
+added
+fleet:approved
+Fleet reviewer approved — ready for human merge
+and removed
+fleet:has-nits
+PR is approved, but reviewer flagged optional improvements to address before merge
+fleet:reviewing-mac-opus-reviewer
+labels
+Jul 9, 2026
+Hide details
+View details
+jakildev
+merged commit cab4215
+into
+master
+Jul 10, 2026
+1 of 2 checks passed
+Uh oh!
+There was an error while loading. Please reload this page.
+This was referenced Jul 13, 2026
+docs/fleet: epic-steward — reconcile #2314, close out #2164
+#2365
+Merged
+docs/fleet: epic-steward #2314 — distribute S1 proposal + rollup
+#2371
+Closed
+jakildev
+mentioned this pull request
+Sep 11, 2026
+render: lighting/shadow domain culling correctness + validation infrastructure (epic)
+#2314
+Closed
+11 of 12 tasks
+jakildev
+added
+fleet:verified-windows
+Cross-host smoke passed on windows-debug
+and removed
+fleet:needs-windows-smoke
+PR needs windows-debug build + smoke-run validation
+labels
+Sep 26, 2026
+Sign up for free
+to join this conversation on GitHub.
+Already have an account?
+Sign in to comment
+Uh oh!
+There was an error while loading. Please reload this page.
+Labels
+fleet:approved
+Fleet reviewer approved — ready for human merge
+fleet:authored-on-macos
+PR was authored and smoke-tested on macOS Metal backend
+fleet:verified-windows
+Cross-host smoke passed on windows-debug
+1 participant
+Add this suggestion to a batch that can be applied as a single commit.This suggestion is invalid because no changes were made to the code.Suggestions cannot be applied while the pull request is closed.Suggestions cannot be applied while viewing a subset of changes.Only one suggestion per line can be applied in a batch.Add this suggestion to a batch that can be applied as a single commit.Applying suggestions on deleted lines is not supported.You must change the existing code in this line in order to create a valid suggestion.Outdated suggestions cannot be applied.This suggestion has been applied or marked resolved.Suggestions cannot be applied from pending reviews.Suggestions cannot be applied on multi-line comments.Suggestions cannot be applied while the pull request is queued to merge.Suggestion cannot be applied right now. Please check back later.
+You can’t perform that action at this time.

@@ -1,0 +1,207 @@
+--- v006.md
++++ v007.md
+@@ -4,96 +4,133 @@
+ 
+ ## Overview
+-GS-Cache is a holistic rendering framework designed to support real-time rendering of large-scale 3D Gaussian Splatting (3DGS) models at the city level, achieving >72 FPS at binocular 2K resolution by using a cache-centric de-redundancy pipeline and elastic parallel scheduling [S1, unofficial]. It specifically targets 'Structured Gaussian derivation methods' (like Scaffold-GS and Octree-GS) which use anchors to derive neural Gaussians, addressing the bottleneck of the 'Gaussian Derivation Stage' (decoding anchor features) which dominates computation time [S1, unofficial]. Unlike native 3DGS or unstructured methods, GS-Cache optimizes the derivation stage by caching decoded parameters, while leaving the rasterization stage uncached to preserve visual quality against occlusion changes [S1, unofficial].
++GS-Cache is a holistic rendering framework designed to support real-time rendering of large-scale 3D Gaussian Splatting (3DGS) models at the city level, achieving >72 FPS at binocular 2K resolution [S1, unofficial]. It addresses the computational bottleneck of the "Gaussian Derivation Stage" in structured Gaussian methods (e.g., Scaffold-GS, Octree-GS) by employing a cache-centric de-redundancy pipeline [S1, unofficial]. Unlike native 3DGS or unstructured methods, GS-Cache specifically targets structured representations where anchors derive neural Gaussians, optimizing inter-frame redundancy in parameter decoding while maintaining rasterization quality [S1, unofficial].
+ 
+ ## How it works
++The pipeline is divided into two main parts: the Anchor Decoding part and the Rasterizer part [S1, unofficial].
++
+ **Inputs and Outputs:**
+-*   **Input:** Camera pose (view/projection matrices), structured 3DGS model (anchors, MLP weights $\theta$, anchor features), previous frame's cache state [S1, unofficial].
+-*   **Output:** Rendered image (binocular 2K), updated cache state [S1, unofficial].
++*   **Input:** Camera pose (view/projection matrices), current frame index, previous frame cache state.
++*   **Output:** Rendered image, updated cache state.
+ 
+ **Data Structures:**
+-*   **Cache:** Stores decoded Gaussian parameters indexed by anchor ID, mapping anchor indices to cache indices [S1, unofficial]. Exact memory layout, fields, sizes, and bit packing are Not given in the sources.
+-*   **Anchor Set ($X$):** The set of anchors required for decoding in the current frame [S1, unofficial].
+-*   **Newly Decoded Anchors ($X_k'$):** The subset of anchors from $X$ that were newly decoded from the previous $k$ frames [S1, unofficial].
++*   **Cache:** Stores derived Gaussian parameters (mean $\mu$, covariance $\Sigma$, opacity $\alpha$, color/radiance) for anchors. The layout is not explicitly defined in the sources, but it maps anchor indices to cached parameter sets [S1, unofficial].
++*   **Anchor Set ($X$):** The total set of anchors requiring decoding for the current frame [S1, unofficial].
++*   **Newly Decoded Anchors ($X_k'$):** The subset of anchors from the previous $k$ frames that were newly decoded (not present in the cache) [S1, unofficial].
+ 
+-**Steps:**
+-1.  **Binocular De-redundancy:** Process camera inputs to identify unique view frustums, reducing redundant anchor queries for binocular rendering [S1, unofficial].
+-2.  **Anchor Filtering:** Compute anchor indices from the camera input to filter the global anchor set and identify $X$ [S1, unofficial].
+-3.  **Index Mapping:** Translate anchor indices to cache indices to locate existing Gaussian parameters in the cache [S1, unofficial].
+-4.  **Cache Scheduling:** The cache scheduler loads necessary model parameters (MLP weights $\theta$) for anchors not in the cache based on the filtered anchors [S1, unofficial].
+-5.  **Dynamic Cache Depth Scheduling:** Calculate the expected reuse depth using the heuristic function $H$ and the update rate [S1, unofficial]:
+-    $$ \text{depth} = H\left(\frac{|X_k'|}{|X|}\right) $$
+-    where $|X_k'|$ is the number of newly decoded anchors from the previous $k$ frames, and $|X|$ is the total anchor set for decoding in the current frame [S1, unofficial]. The function $H$ adjusts the depth of reuse and cached parameters according to the intensity of decoding calculations [S1, unofficial].
+-6.  **Anchor Decoding (Derivation Stage):** For anchors in the cache, retrieve cached Gaussian parameters [S1, unofficial]. For anchors not in the cache, decode anchor features into neural Gaussian parameters using the MLP with weights $\theta$ [S1, unofficial]. Update the cache with newly decoded parameters [S1, unofficial]. Flush cache entries that have exceeded the dynamic reuse depth to prevent significant rendering errors due to viewpoint changes [S1, unofficial].
+-7.  **Gaussian Rasterization (Rasterization Stage):** Project the decoded 3D Gaussians to 2D and perform alpha compositing to generate the final image [S1, unofficial]. This stage is not accelerated by caching because slight perspective changes significantly affect occlusion, and caching here would degrade visual quality [S1, unofficial].
++**Numbered Steps:**
++1.  **Anchor Indexing:** Compute anchor indices from the camera input. These indices filter which anchors need decoding and locate existing anchors in the cache [S1, unofficial].
++2.  **Index Mapping:** Translate anchor indices to cache indices using a mapping function [S1, unofficial].
++3.  **Cache Scheduling:** The cache scheduler loads necessary model parameters for the decoding stage based on the filtered anchors. It determines which anchors are present in the cache and which require new decoding [S1, unofficial].
++4.  **Anchor Decoding:**
++    *   For anchors **not** in the cache: Decode anchor features into neural Gaussian parameters simultaneously [S1, unofficial].
++    *   For anchors **in** the cache: Reuse the Gaussian parameters from the previous frame's cache results [S1, unofficial].
++    *   Update the cache with the newly decoded parameters [S1, unofficial].
++5.  **Gaussian Rasterization:** Splat the 3D neural Gaussians (both cached and newly decoded) to 2D screen space and rasterize them into the image [S1, unofficial]. This stage is **not** accelerated by caching to maintain visual quality, as slight perspective changes significantly affect occlusion [S1, unofficial].
++6.  **Dynamic Cache Depth Scheduling:** Adjust the depth of reuse and cached parameters based on the intensity of decoding calculations in the current frame using a heuristic function $H$ [S1, unofficial].
++
++**Formulas:**
++The expected reuse depth is determined by:
++$$ \text{depth} = H\left(\frac{|X_k'|}{|X|}\right) $$
++Where:
++*   $\text{depth}$: The expected reuse depth [S1, unofficial].
++*   $H$: The guiding function of the heuristic cache reuse depth scheduling strategy [S1, unofficial].
++*   $|X_k'|$: The number of newly decoded anchors from the previous $k$ frames [S1, unofficial].
++*   $|X|$: The total anchor set for decoding in the current frame [S1, unofficial].
++
++**Parameters:**
++*   $k$: The number of previous frames considered for the update rate calculation (i.e., the window for $X_k'$) [S1, unofficial].
++*   $H$: The heuristic function mapping the update rate ($|X_k'| / |X|$) to the cache reuse depth [S1, unofficial].
++
++**Edge Cases and Pitfalls:**
++*   **Cache Flushing:** If Gaussian appearance parameters are maintained in the cache for too long, significant rendering errors can occur (e.g., on trajectories around a centered target) [S1, unofficial]. The cache must be flushed in time to avoid rapid changes in scene appearance [S1, unofficial].
++*   **Visual Quality:** The rasterization stage cannot be cached because slight perspective changes significantly affect occlusion and visual perception [S1, unofficial]. Caching only applies to the derivation stage where slight perspective changes cause little color difference [S1, unofficial].
+ 
+ **Pseudocode:**
+ ```python
+-def gs_cache_render(camera_pose, model, prev_cache, k, H_func):
+-    # 1. Binocular De-redundancy and Anchor Filtering
+-    # Compute anchor indices from camera input and filter global set to X
+-    anchor_indices = [a.id for a in model.anchors if in_view_frustum(a, camera_pose)] # [G] standard frustum culling (not given in sources)
+-    X = set(anchor_indices)
++def gs_cache_render(camera_pose, prev_cache, k, H_func):
++    """
++    Render a single frame using the GS-Cache framework.
+     
+-    # 2. Index Mapping and Cache Lookup
+-    # Translate anchor indices to cache indices
+-    cache_indices = {aid: aid for aid in X} # [G] direct mapping per source (not given in sources)
+-    cached_params = {aid: prev_cache.get(aid) for aid in X if aid in prev_cache}
++    Args:
++        camera_pose: Current camera view/projection matrices.
++        prev_cache: Dictionary mapping anchor_index -> GaussianParameters from previous frames.
++        k: Number of previous frames to consider for update rate.
++        H_func: Heuristic function mapping update_rate -> reuse_depth.
++        
++    Returns:
++        image: Rendered image.
++        new_cache: Updated cache state.
++    """
++    # Step 1: Compute anchor indices from camera input
++    anchor_indices = compute_anchor_indices(camera_pose)
+     
+-    # 3. Identify Newly Decoded Anchors (from previous k frames logic)
+-    # Track anchors decoded in the last k frames to compute |X_k'|
+-    num_recently_decoded = prev_cache.count_recently_decoded(k) # [G] sliding window counter (not given in sources)
++    # Step 2: Filter anchors and locate in cache
++    # Determine which anchors are in the cache and which need decoding
++    cached_anchors = []
++    uncached_anchors = []
++    for idx in anchor_indices:
++        if idx in prev_cache:
++            cached_anchors.append(idx)
++        else:
++            uncached_anchors.append(idx)
++            
++    # Step 3: Cache Scheduling (Load necessary model parameters)
++    # This step is implicit in the filtering; the scheduler ensures
++    # necessary parameters are available for decoding uncached anchors.
+     
+-    # 4. Dynamic Cache Depth Scheduling
+-    update_rate = num_recently_decoded / len(X) if len(X) > 0 else 0.0
+-    expected_reuse_depth = H_func(update_rate)
++    # Step 4: Anchor Decoding
++    # Decode only uncached anchors
++    new_gaussians = {}
++    for idx in uncached_anchors:
++        # Decode anchor features into neural Gaussian parameters
++        # This involves the MLP defined in the source [S1, unofficial]
++        gaussian_params = decode_anchor(idx, camera_pose)
++        new_gaussians[idx] = gaussian_params
++        
++    # Combine cached and newly decoded parameters
++    all_gaussians = {}
++    for idx in cached_anchors:
++        all_gaussians[idx] = prev_cache[idx]
++    for idx, params in new_gaussians.items():
++        all_gaussians[idx] = params
++        
++    # Step 5: Gaussian Rasterization
++    # Rasterize all Gaussians (cached and new)
++    image = rasterize_gaussians(all_gaussians, camera_pose)
+     
+-    # 5. Cache Scheduling and Decoding
+-    mlp_weights = model.get_mlp_weights() # weights theta
+-    new_gaussians = {}
+-    for anchor_id in X:
+-        if anchor_id in cached_params:
+-            # Hit: Use cached parameters
+-            gaussian = cached_params[anchor_id]
+-        else:
+-            # Miss: Decode anchor features using MLP
+-            anchor_feature = model.get_anchor_feature(anchor_id)
+-            # MLP forward pass: gaussian = MLP(anchor_feature, mlp_weights)
+-            gaussian = anchor_feature @ mlp_weights
+-            new_gaussians[anchor_id] = gaussian
+-            
+-    # 6. Update Cache
+-    # Flush old entries based on expected_reuse_depth to prevent appearance errors
+-    prev_cache.flush(expected_reuse_depth)
+-    # Insert new/updated entries
+-    prev_cache.update(new_gaussians)
++    # Step 6: Dynamic Cache Depth Scheduling
++    # Calculate update rate
++    # Note: |X_k'| is the number of newly decoded anchors from the previous k frames.
++    # In this simplified loop, we assume we track this externally or via a sliding window.
++    # For the purpose of this pseudocode, we assume 'newly_decoded_count' is available
++    # from a history buffer of size k.
++    newly_decoded_count = get_newly_decoded_count_from_history(k)
++    total_anchors = len(anchor_indices)
+     
+-    # 7. Rasterization (Uncached)
+-    # Combine cached and newly decoded Gaussians
+-    all_gaussians = {**cached_params, **new_gaussians}
+-    # Project all Gaussians to 2D and perform alpha compositing
+-    # [G] standard 3DGS rasterization pipeline (not given in sources)
+-    projected = [project_to_2d(g, camera_pose) for g in all_gaussians.values()] # [G] standard perspective projection (not given in sources)
+-    projected.sort(key=lambda g: g.depth) # [G] depth sorting (not given in sources)
+-    image = alpha_composite(projected) # [G] standard alpha compositing (not given in sources)
++    if total_anchors > 0:
++        update_rate = newly_decoded_count / total_anchors
++        reuse_depth = H_func(update_rate)
++        
++        # Apply reuse depth to manage cache eviction/update
++        # This logic is heuristic and not fully specified in the source.
++        # We assume it influences how long parameters stay in the cache.
++        manage_cache_eviction(prev_cache, reuse_depth)
++        
++    # Update cache for next frame
++    new_cache = all_gaussians
+     
+-    return image, prev_cache
++    return image, new_cache
+ ```
+-
+-**Parameters:**
+-*   $k$: The number of previous frames from which newly decoded anchors ($X_k'$) are considered for the update rate calculation [S1, unofficial].
+-*   $H$: The guiding function of the heuristic cache reuse depth scheduling strategy [S1, unofficial].
+-
+-**Edge Cases and Pitfalls:**
+-*   **Viewpoint Correlation:** Neural Gaussian appearance has viewpoint correlation. Reusing cached results without restraint can cause rendering errors (e.g., around centered targets). The dynamic cache depth scheduling suppresses rapid appearance changes caused by cache flushing [S1, unofficial].
+-*   **Occlusion Sensitivity:** The rasterization stage cannot be cached because occlusion changes significantly with slight perspective shifts. Caching rasterization results would degrade visual quality [S1, unofficial].
+ 
+ ## Operating characteristics
+ *   **Performance:** Achieves an average frame rate exceeding 72 FPS at binocular 2K resolution for large-scale city-level scenes [S1, unofficial].
+-*   **Complexity:** The framework reduces inter-frame redundancy in the derivation stage, which is the dominant computation time for structured Gaussian derivation methods [S1, unofficial].
+-*   **Strengths:** Enables real-time photo-realistic rendering of large-scale 3DGS models, particularly for VR applications requiring binocular stereo [S1, unofficial]. It is model-agnostic regarding the specific pipeline structure, relying on a heuristic strategy [S1, unofficial].
+-*   **Limitations:** Specifically targets structured Gaussian derivation methods (Scaffold-GS, Octree-GS). It does not accelerate the rasterization stage, which remains compute-bound [S1, unofficial].
++*   **Complexity:** The method reduces computational load in the Gaussian Derivation Stage by reusing cached parameters, thereby increasing the theoretical upper limit of FPS [S1, unofficial]. The rasterization stage remains computationally intensive as it is not cached [S1, unofficial].
++*   **Strengths:** Significantly enhances rendering efficiency for large-scale structured Gaussian representations by eliminating inter-frame redundancy in the derivation stage [S1, unofficial]. Maintains visual quality by not caching the rasterization stage [S1, unofficial].
++*   **Limitations:** Requires structured Gaussian derivation methods (e.g., Scaffold-GS, Octree-GS) that use anchors [S1, unofficial]. The dynamic cache depth scheduling relies on a heuristic function $H$ which is not explicitly defined in the sources [S1, unofficial].
++*   **When to use:** Real-time rendering of large-scale 3DGS models, particularly in VR applications requiring binocular 2K resolution [S1, unofficial].
++*   **When not to use:** Small-scale scenes where the overhead of cache management may not be justified, or unstructured Gaussian representations that do not use anchors [S1, unofficial].
+ 
+ ## Background
+-GS-Cache was introduced in the paper "A GS-Cache Inference Framework for Large-Scale Gaussian Splatting Models" [S1, unofficial]. It addresses the challenges of real-time rendering of large-scale 3DGS models, particularly in VR applications where binocular 2K resolution is required [S1, unofficial]. The framework was developed to overcome the bottleneck of the Gaussian Derivation Stage in structured Gaussian derivation methods, which becomes increasingly computationally intensive as scene scale and anchor feature parameters increase [S1, unofficial].
++GS-Cache was introduced in the paper "A GS-Cache Inference Framework for Large-Scale Gaussian Splatting Models" [S1, unofficial]. It addresses the challenges of real-time photo-realistic rendering of large-scale 3DGS models, particularly for VR applications [S1, unofficial]. The framework was developed to support elastic parallel rendering and overcome the bottleneck of the Gaussian Derivation Stage in structured Gaussian methods [S1, unofficial].
+ 
+ ## Sources

@@ -1,0 +1,160 @@
+# Projected Tetrahedra (PT) with Barycentric Formulation
+
+Also called: Barycentric PT, DRR generation using PT
+
+## Overview
+Projected Tetrahedra (PT) with Barycentric Formulation is a volume rendering method for unstructured tetrahedral grids that computes line integrals of higher-order attenuation functions (specifically Bernstein polynomials in barycentric coordinates) without preintegration or depth sorting [S1]. It differs from the classic PT method by using barycentric coordinates to ensure geometrically correct interpolation of thickness and density under perspective projection, and it computes integrals on the GPU fragment unit using a closed formula rather than lookup tables [S1].
+
+## How it works
+The method renders a tetrahedral mesh by processing each cell individually and accumulating the output to a rendering target. The process is independent of visibility order because the volumetric model represents attenuation only [S1].
+
+### Inputs and Outputs
+*   **Input:** A tetrahedral mesh where each tetrahedron is associated with a polynomial density function (attenuation only). The polynomial is defined using Bernstein basis functions in barycentric coordinates.
+*   **Output:** A final image accumulated in a high-dynamic-range pbuffer [S1].
+
+### Data Structures
+Each vertex of the generated triangular facets carries the following attributes, which are interpolated across the fragment:
+1.  **Position:** The 2D screen coordinates of the vertex.
+2.  **Barycentric Coordinates:** The barycentric coordinates of the vertex with respect to the original tetrahedron vertices.
+3.  **Tetrahedron Index:** An identifier for the source tetrahedron.
+4.  **Thickness:** The path length through the tetrahedron at that vertex [S1].
+
+### Algorithm Steps
+The rendering of a single tetrahedron proceeds as follows [S1]:
+
+1.  **Find Projected Shape:** Determine the silhouette of the tetrahedron on the image plane. The resulting shape is either a triangle or a quadrilateral. This step involves identifying the "thick point" (the central point of the projected shape) and the boundary vertices [S1].
+2.  **Assign Vertex Attributes:** For each vertex of the projected shape (the thick point and the boundary vertices), compute and assign the attributes: position, barycentric coordinates, tetrahedron index, and thickness [S1].
+3.  **Tessellation:** Generate three or four triangular facets. Each facet consists of the thick point and two adjacent boundary vertices. These facets are sent to the rendering pipeline [S1].
+4.  **Rasterization:** Transform and rasterize each triangle on the GPU. The vertex attributes (position, barycentric coordinates, thickness) are interpolated for each generated fragment [S1].
+5.  **Integral Computation:** In the fragment program, compute the line integral of the attenuation function. This involves reading the coefficients for the basis functions of the integral from a texture object and computing the integral using a closed formula [S1].
+6.  **Accumulation:** Accumulate the fragment value in a high-dynamic-range pbuffer to form the final image [S1].
+
+### Pseudocode
+The following pseudocode outlines the rendering of a single tetrahedron. It assumes the existence of helper functions for projection and barycentric computation described in the sources.
+
+> **Unverified code.** The code below did not pass a test run against a reference implementation, or no test fits it, so it may contain errors.
+
+```python
+def render_tetrahedron(tet, projection_model, polynomial_coeffs):
+    """
+    Renders a single tetrahedron using the Barycentric PT method.
+    
+    Args:
+        tet: Object containing 4 3D vertices (v0, v1, v2, v3).
+        projection_model: 'perspective' or 'orthographic'.
+        polynomial_coeffs: Coefficients for the Bernstein polynomial density function.
+        
+    Returns:
+        List of triangular facets to be rasterized.
+    """
+    # Step 1: Find the projected shape (silhouette)
+    # Determine if the shape is a triangle or quadrilateral.
+    # Identify the 'thick point' (central point) and boundary vertices.
+    # This requires a tessellation algorithm specific to the projection model.
+    projected_shape = compute_projected_shape(tet, projection_model)
+    
+    # projected_shape contains:
+    # - thick_point: 2D position of the central point
+    # - boundary_vertices: List of 2D positions of the silhouette vertices
+    # - num_boundary: 3 or 4
+    
+    # Step 2: Determine vertex attributes
+    # Compute barycentric coordinates for the thick point and boundary vertices
+    # relative to the original tetrahedron vertices.
+    # Compute thickness (path length) for each vertex.
+    
+    thick_point_attrs = compute_vertex_attributes(
+        projected_shape.thick_point, 
+        tet.vertices, 
+        projection_model
+    )
+    
+    boundary_attrs = []
+    for b_vertex in projected_shape.boundary_vertices:
+        attrs = compute_vertex_attributes(
+            b_vertex, 
+            tet.vertices, 
+            projection_model
+        )
+        boundary_attrs.append(attrs)
+        
+    # Step 3: Generate triangular facets
+    facets = []
+    
+    # The thick point is the first vertex of each triangle
+    # The other two vertices are consecutive boundary vertices
+    
+    for i in range(projected_shape.num_boundary):
+        v1 = boundary_attrs[i]
+        v2 = boundary_attrs[(i + 1) % projected_shape.num_boundary]
+        
+        facet = [thick_point_attrs, v1, v2]
+        facets.append(facet)
+        
+    return facets
+
+def compute_vertex_attributes(screen_pos, tet_vertices, projection_model):
+    """
+    Computes barycentric coordinates and thickness for a screen-space vertex.
+    [G] The exact geometric derivation for perspective-correct barycentric 
+    coordinates is detailed in the source's tessellation algorithm section.
+    """
+    # Compute barycentric coordinates (b0, b1, b2, b3) for the point
+    # corresponding to screen_pos with respect to tet_vertices.
+    barycentric_coords = compute_barycentric_coords(screen_pos, tet_vertices, projection_model)
+    
+    # Compute thickness. For the thick point, this is the maximum depth 
+    # or path length through the tetrahedron. For boundary vertices, 
+    # it is the path length at the silhouette edge.
+    thickness = compute_thickness(screen_pos, tet_vertices, projection_model)
+    
+    return {
+        'position': screen_pos,
+        'barycentric_coords': barycentric_coords,
+        'thickness': thickness,
+        'tet_index': tet.id
+    }
+
+def compute_line_integral(barycentric_coords, polynomial_coeffs):
+    """
+    Computes the line integral of the attenuation function at a fragment.
+    Uses a closed formula based on Bernstein polynomials.
+    """
+    # The density function is a Bernstein polynomial in barycentric coordinates.
+    # The line integral is computed using the coefficients and the 
+    # interpolated barycentric coordinates.
+    # [G] Specific closed-form formula for Bernstein polynomial line integrals
+    # is applied here.
+    integral_value = evaluate_bernstein_integral(barycentric_coords, polynomial_coeffs)
+    return integral_value
+```
+
+### Parameters
+*   **Projection Model:** Supports both perspective and orthographic projection models [S1].
+*   **Volumetric Function:** Attenuation only (no emission). This allows the method to be independent of depth sorting [S1].
+*   **Polynomial Degree:** The method supports higher-order attenuation functions. There is a tradeoff between polynomial degree and mesh resolution, but the rendering algorithm itself does not enforce continuity constraints across cell boundaries [S1].
+
+### Edge Cases and Pitfalls
+*   **Inefficiency of Previous Methods:** Previous methods for finding barycentric coordinates at vertices were highly inefficient. The new method provides a simple and efficient solution [S1].
+*   **Geometric Correctness:** Unlike Shirley and Tuchman's PT method, which uses linear interpolation of thickness and is not geometrically correct under perspective projection, this method uses barycentric coordinates for correct interpolation [S1].
+*   **Preintegration:** Unlike preintegration methods that use lookup tables, this method computes integrals on the GPU fragment unit, allowing for higher-order functions without precomputation [S1].
+
+## Operating characteristics
+*   **Time Complexity:** Not given in the sources.
+*   **Memory Complexity:** Not given in the sources.
+*   **Performance:** Wylie et al. [6] implemented a PT tessellation algorithm using a GPU vertex shader but reported that performance was limited by the capacities of the graphics hardware at the time [S1].
+*   **Strengths:**
+    *   Geometrically correct interpolation under perspective projection.
+    *   No preintegration or depth sorting required.
+    *   Supports higher-order attenuation functions via closed-form GPU computation.
+*   **Limitations:**
+    *   Performance may be limited by hardware capabilities (as noted in early GPU implementations) [S1].
+    *   The method currently handles attenuation only; components can be used for models with emission, but the core algorithm is defined for attenuation [S1].
+*   **When to use:** When rendering unstructured tetrahedral grids with higher-order density functions where geometric correctness under perspective projection is required, and preintegration is undesirable.
+*   **When not to use:** When emission is required and the method's attenuation-only model is insufficient without modification.
+
+## Background
+The method was introduced by Ofri Sadowsky, Jonathan D. Cohen, and Russell H. Taylor in the paper "Projected Tetrahedra Revisited: A Barycentric Formulation Applied to Digital Radiograph Reconstruction Using Higher-Order Attenuation Functions" [S1]. It builds upon their previous work [1] which focused on correct interpolation of fragment attributes and computing the integral formula. This paper, published in 2006, presents the new tessellation algorithm for finding the shape, vertices, and vertex attributes of a projected tetrahedron for the first time [S1]. The method is applicable to Digital Radiograph (DRR) generation [S1].
+
+## Sources
+[S1] Projected Tetrahedra Revisited: A Barycentric Formulation Applied to Digital Radiograph Reconstruction Using Higher-Order Attenuation Functions, https://www.cs.jhu.edu/~rht//RHT%20Papers/2006/Projected%20Tetrahedra%20Revisited.pdf, fetched 2026-10-27

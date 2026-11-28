@@ -1,0 +1,180 @@
+# Explicit Camera Jacobian Derivation
+
+Also called: Analytical Jacobians for 3DGS, Camera Pose Jacobian Derivation (Lie Group), Lie Algebra Jacobian for 3DGS
+
+## Overview
+This method derives analytical Jacobians of the SE(3) camera pose with respect to 3D Gaussian Splatting (3DGS) primitives to enable efficient gradient-based camera pose optimization. It solves the problem of high computational overhead associated with automatic differentiation in differentiable rendering pipelines, particularly for SLAM systems where tracking must be performed in real-time. It sets itself apart from prior ray-intersection methods [S1, unofficial] by providing the first analytical Jacobian specifically tailored for EWA splatting and 3DGS, ensuring the Jacobian dimensionality matches the 6 degrees of freedom of the Lie algebra without redundant computations.
+
+## How it works
+The method computes the derivatives of the projected Gaussian parameters (mean $\mu_I$ and covariance $\Sigma_I$) with respect to the camera pose $T_{CW} \in SE(3)$. It uses Lie algebra to derive minimal Jacobians, avoiding the overhead of automatic differentiation.
+
+**Inputs and Outputs:**
+*   **Input:** Camera pose $T_{CW} \in SE(3)$, Gaussian mean in camera coordinates $\mu_C \in \mathbb{R}^3$, Gaussian covariance matrix $\Sigma_C$, projection Jacobian $J$, and rotation matrix component $W$ of the camera pose.
+*   **Output:** Jacobians $\frac{\partial \mu_I}{\partial T_{CW}}$ and $\frac{\partial \Sigma_I}{\partial T_{CW}}$.
+
+**Data Structures:**
+*   $T_{CW}$: $4 \times 4$ homogeneous transformation matrix representing camera-to-world pose.
+*   $\mu_C$: $3 \times 1$ vector representing the Gaussian center in camera coordinates.
+*   $W$: $3 \times 3$ rotation matrix component of $T_{CW}$.
+*   $\tau \in se(3)$: Infinitesimal parameter (Lie algebra element).
+*   $\theta$: Rotation vector component of $\tau$.
+*   $\rho$: Translation vector component of $\tau$.
+
+**Definitions:**
+*   $\times$: Skew-symmetric matrix operator mapping a 3D vector $\mathbf{v} = [v_x, v_y, v_z]^\top$ to:
+    $$ \mathbf{v}^\times = \begin{bmatrix} 0 & -v_z & v_y \\ v_z & 0 & -v_x \\ -v_y & v_x & 0 \end{bmatrix} $$
+*   $\mathcal{D}$: Derivative on the manifold (Lie group).
+*   $\text{Exp}$: Exponential map from Lie algebra $se(3)$ to Lie group $SE(3)$.
+*   $\text{Log}$: Logarithmic map from Lie group $SE(3)$ to Lie algebra $se(3)$.
+*   $\circ$: Group composition.
+
+**Formulas:**
+The chain rule is applied to decompose the derivatives:
+
+1.  **Mean Jacobian:**
+    $$ \frac{\partial \mu_I}{\partial T_{CW}} = \frac{\partial \mu_I}{\partial \mu_C} \frac{\mathcal{D}\mu_C}{\mathcal{D}T_{CW}} \quad (3) $$
+
+2.  **Covariance Jacobian:**
+    $$ \frac{\partial \Sigma_I}{\partial T_{CW}} = \frac{\partial \Sigma_I}{\partial J} \frac{\partial J}{\partial \mu_C} \frac{\mathcal{D}\mu_C}{\mathcal{D}T_{CW}} + \frac{\partial \Sigma_I}{\partial W} \frac{\mathcal{D}W}{\mathcal{D}T_{CW}} \quad (4) $$
+
+3.  **Manifold Derivative Definition:**
+    $$ \frac{\mathcal{D}(f(\mathbf{T}))}{\mathcal{D}\mathbf{T}} \triangleq \lim_{\tau \rightarrow 0} \frac{\text{Log}(f(\text{Exp}(\tau) \circ \mathbf{T}) \circ f(\mathbf{T})^{-1})}{\tau} \quad (5) $$
+
+4.  **Specific Manifold Derivatives:**
+    $$ \frac{\mathcal{D}\mu_C}{\mathcal{D}T_{CW}} = [I \quad -\mu_C^\times] \quad (6a) $$
+    $$ \frac{\mathcal{D}W}{\mathcal{D}T_{CW}} = \begin{bmatrix} 0 & -W_{:,1}^\times \\ 0 & -W_{:,2}^\times \\ 0 & -W_{:,3}^\times \end{bmatrix} \quad (6b) $$
+    where $W_{:,i}$ is the $i$-th column of matrix $W$.
+
+**Derivation Details:**
+The derivation of $\frac{\mathcal{D}\mu_C}{\mathcal{D}T_{CW}}$ proceeds as follows [S1, unofficial]:
+$$ \frac{\mathcal{D}\mu_C}{\mathcal{D}T_{CW}} = \lim_{\tau \rightarrow 0} \frac{\text{Exp}(\tau) \cdot \mu_C - \mu_C}{\tau} $$
+$$ = \lim_{\tau \rightarrow 0} \frac{(\mathbf{I} + \tau^\wedge) \cdot \boldsymbol{\mu}_C - \boldsymbol{\mu}_C}{\tau} $$
+$$ = \lim_{\tau \rightarrow 0} \frac{\tau^\wedge \cdot \boldsymbol{\mu}_C}{\tau} $$
+Let $\tau = [\rho^\top, \theta^\top]^\top$. Then $\tau^\wedge \cdot \boldsymbol{\mu}_C = \rho + \theta^\times \boldsymbol{\mu}_C = \rho - \mu_C^\times \theta$.
+$$ = \lim_{\tau \rightarrow 0} \frac{\rho - \mu_C^\times \theta}{\tau} = \begin{bmatrix} I & -\mu_C^\times \end{bmatrix} $$
+
+The derivation of $\frac{\mathcal{D}W}{\mathcal{D}T_{CW}}$ uses the property that the derivative of the rotation component with respect to the rotation vector $\theta$ is:
+$$ \frac{\partial \mathbf{W}}{\partial \theta_x} = \mathbf{e}_1^\times \mathbf{W} = \begin{bmatrix} \mathbf{0}_{1 \times 3} \\ -\mathbf{W}_{3,:} \\ \mathbf{W}_{2,:} \end{bmatrix} $$
+Generalizing for all three axes yields the block matrix in (6b).
+
+**Pseudocode:**
+> **Unverified code.** The code below did not pass a test run against a reference implementation, or no test fits it, so it may contain errors.
+
+```python
+import numpy as np
+
+def skew_symmetric(v):
+    """Converts a 3D vector to its skew-symmetric matrix."""
+    return np.array([
+        [0, -v[2], v[1]],
+        [v[2], 0, -v[0]],
+        [-v[1], v[0], 0]
+    ])
+
+def compute_mean_jacobian(mu_C):
+    """
+    Computes D(mu_C) / D(T_CW).
+    mu_C: 3D vector, Gaussian mean in camera coordinates.
+    Returns: 3x6 matrix.
+    """
+    I_3 = np.eye(3)
+    mu_C_skew = skew_symmetric(mu_C)
+    # [I | -mu_C^x]
+    return np.hstack([I_3, -mu_C_skew])
+
+def compute_rotation_jacobian(W):
+    """
+    Computes D(W) / D(T_CW).
+    W: 3x3 rotation matrix component of camera pose.
+    Returns: 9x6 matrix (flattened W derivative).
+    """
+    # W columns
+    W_col1 = W[:, 0]
+    W_col2 = W[:, 1]
+    W_col3 = W[:, 2]
+    
+    # Skew symmetric matrices of columns
+    W1_skew = skew_symmetric(W_col1)
+    W2_skew = skew_symmetric(W_col2)
+    W3_skew = skew_symmetric(W_col3)
+    
+    # Block matrix:
+    # [ 0      -W1^x ]
+    # [ 0      -W2^x ]
+    # [ 0      -W3^x ]
+    # Top 3 rows (translation part derivative is 0)
+    top_block = np.zeros((3, 6))
+    
+    # Bottom 9 rows (rotation part derivative)
+    # The derivative is with respect to [rho, theta]. 
+    # Translation rho does not affect W directly in this minimal parameterization context 
+    # as W is purely rotational. The derivative w.r.t theta is constructed from columns.
+    # Formula (6b) implies the structure.
+    # Row 1-3: derivative of W rows 1-3 w.r.t theta
+    # Actually, the formula (6b) is a 9x6 matrix where the first 3 cols are 0.
+    
+    # Constructing the 9x3 block for theta derivative
+    # Each block is -W_{:,i}^x
+    # But wait, W_{:,i} is a column. The formula shows -W_{:,1}^x etc.
+    # Let's stack them vertically.
+    
+    # The output shape is 9x6.
+    # First 3 columns are 0.
+    # Last 3 columns are the stacked skew-symmetric matrices of W's columns.
+    
+    block1 = -W1_skew
+    block2 = -W2_skew
+    block3 = -W3_skew
+    
+    # Stack vertically: block1, block2, block3
+    # This results in a 9x3 matrix.
+    theta_deriv = np.vstack([block1, block2, block3])
+    
+    zero_block = np.zeros((9, 3))
+    
+    return np.hstack([zero_block, theta_deriv])
+
+def get_camera_pose_jacobians(mu_C, W):
+    """
+    Computes the explicit camera Jacobians for 3DGS.
+    mu_C: 3D vector, Gaussian mean in camera coordinates.
+    W: 3x3 rotation matrix.
+    Returns: 
+        d_mu_d_T: 3x6 Jacobian for mean
+        d_Sigma_d_T: 9x6 Jacobian for covariance (partial, requires chain rule terms)
+    """
+    d_mu_d_T = compute_mean_jacobian(mu_C)
+    d_W_d_T = compute_rotation_jacobian(W)
+    
+    # Note: Full covariance Jacobian requires chain rule terms:
+    # d_Sigma_d_T = (d_Sigma_d_J @ d_J_d_mu @ d_mu_d_T) + (d_Sigma_d_W @ d_W_d_T)
+    # These terms (d_Sigma_d_J, d_J_d_mu, d_Sigma_d_W) are specific to the 
+    # Gaussian projection and covariance transformation logic, not just the pose derivative.
+    
+    return d_mu_d_T, d_W_d_T
+```
+
+**Parameters:**
+*   Requires at least 50 iterations of gradient descent per frame for accurate tracking [S1, unofficial].
+
+**Edge Cases:**
+*   Precision issues may arise near singularities in the exponential map, though the Lie algebra formulation avoids redundant parameters.
+*   The method assumes the Gaussian representation is compatible with EWA splatting.
+
+## Subtopics
+
+### [Photometric and Geometric Tracking](10080-photometric-and-geometric-tracking.md)
+Optimizes only the current camera pose without updating the map representation, minimizing photometric and/or geometric residuals to estimate motion. It sets itself apart from full SLAM or mapping methods by decoupling pose estimation from scene reconstruction, allowing for efficient real-time tracking using pre-existing Gaussian splats.
+
+## Operating characteristics
+*   **Time Complexity:** Significantly faster than automatic differentiation due to explicit analytical derivatives. The dimensionality matches the 6 DOF of SE(3), eliminating redundant computations.
+*   **Memory Complexity:** Low, as it avoids storing intermediate computation graphs for the camera pose derivatives.
+*   **Performance:** Enables real-time tracking (e.g., 3.2 FPS monocular, 2.5 FPS RGB-D on Replica dataset) when interleaved with mapping [S1, unofficial].
+*   **Strengths:** Computationally efficient, minimal parameterization, applicable to large-scale 3DGS (unlike prior ray-intersection methods).
+*   **Limitations:** Requires careful implementation of the Lie group derivatives; assumes the Gaussian primitives are differentiable with respect to the pose.
+
+## Background
+The method was introduced in "Gaussian Splatting SLAM" [S1, unofficial] to address the need for efficient camera pose optimization in SLAM systems using 3D Gaussians. Prior methods [12] assumed a smaller number of Gaussians and relied on ray-intersection, making them unsuitable for 3DGS. This work provides the first analytical Jacobian for SE(3) camera pose with respect to 3D Gaussians in EWA splatting, enabling applications like dynamic tracking and 4D scene representation.
+
+## Sources
+[S1] Gaussian Splatting SLAM, https://arxiv.org/abs/2312.06741, fetched 2026-10-27 (unofficial)

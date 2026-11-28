@@ -1,0 +1,69 @@
+# Depth-Prior Ray Truncation
+Also called: depthPriorLearned
+## Overview
+Depth-Prior Ray Truncation adjusts the near and far bounds of volumetric ray sampling using a learned depth prior (disparity map) to restrict integration to relevant depth ranges, thereby reducing floating artifacts [S1, unofficial].
+## How it works
+**Inputs and Outputs:**
+- Input: Ray origin, ray direction, raw AABB intersection bounds ($t_{min}, t_{max}$), a boolean flag `depthPriorLearned`, and a per-pixel disparity value from a ground truth or learned depth map (`groundTruth.disparityDevice`) [S1, unofficial].
+- Output: Modified ray bounds $t_{near}$ and $t_{far}$ used for subsequent volume sampling [S1, unofficial].
+
+**Data Structures:**
+- `rayInfo`: Array or struct containing raw intersection distances. `rayInfo[0]` is the near bound, `rayInfo[1]` is the far bound [S1, unofficial].
+- `groundTruth.disparityDevice`: 1D array or texture mapping pixel indices to disparity values [S1, unofficial].
+
+**Steps:**
+1. Check the `depthPriorLearned` flag [S1, unofficial].
+2. If true, set $t_{near} = \text{rayInfo}[0] + \text{groundTruth.disparityDevice}[\text{pixelIndex}] \times 0.5$ [S1, unofficial].
+3. Set $t_{far} = \text{rayInfo}[1] - 10.0$ [S1, unofficial].
+4. If false, use raw AABB intersection $t_{min}$ and $t_{max}$ [S1, unofficial].
+
+**Pseudocode:**
+> **Unverified code.** The code below did not pass a test run against a reference implementation, or no test fits it, so it may contain errors.
+
+```python
+def apply_depth_prior_truncation(ray_info, depth_prior_learned, ground_truth_disparity, pixel_index):
+    """
+    ray_info: tuple (t_min, t_max) representing raw AABB intersection bounds
+    depth_prior_learned: bool
+    ground_truth_disparity: array or function accessing disparity by pixel index
+    pixel_index: int, index into the disparity map corresponding to the ray's screen position
+    """
+    t_min, t_max = ray_info
+    
+    if depth_prior_learned:
+        disparity = ground_truth_disparity[pixel_index]
+        t_near = t_min + disparity * 0.5
+        t_far = t_max - 10.0
+    else:
+        t_near = t_min
+        t_far = t_max
+        
+    return t_near, t_far
+```
+
+**Parameters:**
+- `depthPriorLearned`: Boolean flag enabling the use of the depth prior [S1, unofficial].
+- `0.5`: Scaling factor applied to the disparity value to compute the near bound offset [S1, unofficial].
+- `10.0`: Fixed offset subtracted from the raw far bound to truncate the ray end [S1, unofficial].
+
+**Edge Cases and Pitfalls:**
+- Handling for $t_{near} > t_{far}$, disparity inaccuracy, and scene scale normalization is Not given in the sources.
+## Subtopics
+
+### [Auxiliary Depth Prediction Head](7207-auxiliary-depth-prediction-head.md)
+Trains a convolutional network to predict depth maps and confidence scores jointly with radiance field reconstruction, using predictions to supervise rendered depth, narrow sampling ranges, and guide point sampling. Differs from methods relying on third-party depth sources by learning compact geometry end-to-end without external priors.
+
+### Detached Finite-Surface Proxy
+A finite integration endpoint for the water field determined by rendering object alpha and alpha-weighted camera-space depth without water, preventing the medium integral from moving object geometry [S2, unofficial]. Proxy depth: $z^*(p) = \text{stopgrad} \max \left( \frac{\sum_j w_j(p) z_j}{\sum_j w_j(p)}, \epsilon \right)$, where $w_j(p) = T_j(p)\alpha_j(p)$, $T_j$ is standard object visibility before Gaussian $j$, and pixels with negligible accumulated alpha use the farthest visible object depth [S2, unofficial]. Integration endpoint in ray-distance units: $t^* = z^* / \max(d^\text{cam}_{p,z}, \epsilon)$, where $d^\text{cam}_{p,z}$ is the camera-forward component of the unit world-space ray [S2, unofficial]. Gaussian integral along ray segment: $L_i(p, z^*) = \int_0^{t^*} \phi_i(r_p(t)) dt$. With $A_i = \Sigma_i^{-1}$, $q_i = o - \mu_i$, $a = d_p^\top A_i d_p$, $b = d_p^\top A_i q_i$, $c = q_i^\top A_i q_i$, the closed form is $L_i(p) = \frac{\exp[-\frac{1}{2}(c - b^2/a)] \pi}{2a (2\pi)^{3/2} |\Sigma_i|^{1/2}} \left[ \text{erf} \left( \frac{at+b}{\sqrt{2a}} \right) \right]_0^{t^*}$ [S2, unofficial]. Finite-path RGB optical depths: $\tau_k(p, z^*) = \sum_i m_{k,i} L_i(p, z^*)$ for $k \in \{D, B\}$ [S2, unofficial].
+
+## Operating characteristics
+- Time and memory complexity: Not given in the sources.
+- Measured performance: Not given in the sources.
+- Strengths: Reduces floating artifacts by restricting sampling to relevant depth ranges [S1, unofficial].
+- Limitations: Relies on the accuracy of the depth prior; the fixed offset `10.0` assumes a specific scene scale [S1, unofficial].
+- When to use and when not: Not given in the sources.
+## Background
+This method is associated with the Clear-Plenoxels project, which aims to improve the visual quality of Plenoctrees by addressing artifacts through depth-aware sampling [S1, unofficial].
+## Sources
+[S1] nortonBryan/Clear-plenoxels, https://github.com/nortonBryan/Clear-plenoxels, fetched 2026-10-27 (unofficial)
+[S2] Optical-Mass Water Gaussians for Per-Scene Underwater Rendering, https://doi.org/10.21203/rs.3.rs-10938586/v1, fetched 2026-10-26 (unofficial)

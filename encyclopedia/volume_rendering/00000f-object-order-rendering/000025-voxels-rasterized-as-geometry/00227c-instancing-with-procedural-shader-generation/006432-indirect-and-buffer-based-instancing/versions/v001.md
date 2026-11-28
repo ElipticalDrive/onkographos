@@ -1,0 +1,28 @@
+# Indirect and Buffer-Based Instancing
+
+Also called: Indirect Instancing, Buffer-Based Instancing, SSBO Instancing, Indirect Draw Argument Setting
+
+## Overview
+Indirect and Buffer-Based Instancing is a family of rendering techniques that decouple instance data storage and draw command generation from the standard fixed-function hardware instancing pipeline. It solves the problem of rendering massive numbers of distinct or procedurally generated voxels by allowing the CPU or compute shaders to manage instance records in large buffers (SSBOs) and issue draw commands via indirect argument structures rather than explicit per-object calls . It sets itself apart from standard hardware instancing by enabling non-uniform instance layouts and dynamic visibility culling on the GPU, and from naive per-chunk rendering by reducing driver overhead through batched indirect calls .
+
+## Shared principles
+The family relies on the GPU's ability to iterate over a base geometry and apply per-instance attributes defined in a buffer. The core mechanism involves:
+1. **Base Geometry:** A single mesh (e.g., a voxel cube) is defined with vertices and indices. For voxels, this often includes duplicated vertices for flat shading (e.g., 24 vertices and 36 indices for a cube) [Instanced Rendering](13354-instanced-rendering.md).
+2. **Instance Data Buffer:** A GPU-accessible buffer (e.g., `StructuredBuffer`, `SSBO`, or VBO) stores per-instance parameters. Common data includes position (x, y, z), occupancy flags, scale, and color [Instanced Rendering](13354-instanced-rendering.md).
+3. **Instanced Draw Call:** A specific API call (e.g., `gl.drawElementsInstanced`, `Graphics.DrawMeshInstancedIndirect`) is used. This call takes the base geometry, the instance buffer, and an instance count. The GPU automatically iterates through the instance buffer, applying the per-instance data to the base vertices during vertex shader execution [Instanced Rendering](13354-instanced-rendering.md).
+4. **Vertex Shader Processing:** The vertex shader accesses the instance data using a built-in instance ID (e.g., `gl_InstanceID` or `unity_InstanceID`) to transform the base vertex position into world space [GPU Instancing with Indirect Draw Calls](2205-gpu-instancing-with-indirect-draw-calls.md).
+
+## Subtopics
+
+### [Indirect Draw Argument Setting](2418-indirect-draw-argument-setting.md)
+Uses a persistently mapped VBO as a memory pool for interleaved vertex data, divided into fixed-size buckets. Each occupied bucket is associated with an indirect draw call structure, allowing multiple sub-meshes to be rendered simultaneously via `glMultiDrawElementsIndirect`. It reduces driver overhead from frequent state changes and draw calls while simplifying memory management for procedural voxel meshing. It sets itself apart from naive per-chunk VAO/VBO systems by merging sub-meshes and from merged VAO/VBO systems by avoiding full buffer resizes and re-uploads when updating sub-regions.
+
+### [Buffer-Based Instancing (SSBO/Instance Buffers)](6501-buffer-based-instancing-ssbo-instance-buffers.md)
+Supplies per-instance data (such as position, rotation, and material IDs) to the vertex shader via large, flexible Shader Storage Buffer Objects (SSBOs) rather than standard vertex attribute buffers or uniform buffers. It solves the problem of efficiently rendering massive numbers of distinct objects by allowing the CPU or a compute shader to write instance records directly into GPU memory, which the vertex shader then accesses dynamically using `gl_InstanceID`. It differs from standard hardware instancing by decoupling instance data from the vertex stream, enabling complex, non-uniform instance layouts and procedural generation of transforms in the vertex stage, avoiding CPU-side mesh generation.
+
+### [Hardware Instancing via Draw Calls](16221-hardware-instancing-via-draw-calls.md)
+Renders a large number of identical meshes (voxels) efficiently by issuing a single draw call that instructs the GPU to replicate a base primitive multiple times. It solves the CPU bottleneck associated with issuing individual draw calls for large numbers of voxels by decoupling the CPU-side draw call issuance from the GPU-side execution logic. Unlike standard per-object rendering, which requires repeated matrix multiplications, uniform uploads, and state changes per frame, this method uploads transformation data once and lets the GPU handle the replication. It sets itself apart from siblings like [Indirect and Buffer-Based Instancing](19066-indirect-and-buffer-based-instancing.md) by relying on explicit draw calls rather than compute-driven dispatch.
+
+## Background
+The techniques originate from the need to optimize voxel rendering in real-time applications, particularly in games and simulations where millions of voxels must be rendered. Indirect draw calls were introduced in OpenGL 4.0 via `glMultiDrawElementsIndirect` to reduce CPU overhead . SSBOs were introduced in OpenGL 4.3 to allow general-purpose data access from shaders, enabling the decoupling of instance data [G]. Hardware instancing via `glDrawElementsInstanced` was introduced in OpenGL 3.1 [Instanced Rendering](13354-instanced-rendering.md). These methods are widely used in voxel engines, particle systems, and large-scale scene rendering.
+

@@ -1,0 +1,201 @@
+--- v004.md
++++ v005.md
+@@ -1,111 +1,83 @@
+ # Normal Field Supervision via Rendering and Depth Derivatives
+ 
+-Also called: Lemma 2, Supervision of Normal Field
++Also called: Learnable Unit Normal with Depth Gradient Supervision, Lemma 2, Phys3DGS Normal Regularizer, Pseudo-Normal Supervision, Supervision of Normal Field
+ 
+ ## Overview
+-This method supervises the learnable surface normal field of a 3D Gaussian Splatting representation by enforcing consistency between rendered normal maps and the image-derivative of the rendered depth map [S1]. It establishes a supervisory loss by comparing the normal estimated directly from Gaussian attributes against the normal estimated from the depth field [S1].
++This method supervises the learnable surface normal attributes of 3D Gaussians by enforcing consistency between the rendered normal map and the geometric normals derived from the rendered depth map. It solves the problem of noisy or inconsistent normal estimates in Gaussian Splatting by using the depth map as a geometry prior. It differs from pure gradient-based approaches by explicitly optimizing normal attributes per Gaussian and supervising them against pseudo-normals computed from expected depth [S1, unofficial][S2].
+ 
+ ## How it works
+-### Inputs and Outputs
+-*   **Inputs:** 3D Gaussian Splatting representation containing Gaussians with learnable normals $n_i$ [S1]. Camera rays defined by origin $\mathbf{o}$ and direction $\mathbf{w}$ [S1].
+-*   **Outputs:** Supervision loss $\mathcal{L}_{\text{normal}}$ minimizing the angular difference between the two normal estimates [G].
++**Inputs:**
++- Rendered depth map $\hat{D}$ of resolution $W \times H$.
++- Rendered normal map $\hat{N}$ of resolution $W \times H$, obtained by alpha-blending the learnable unit normals $n_i$ of the splatted Gaussians.
+ 
+-### Data Structures
+-*   **Rendered Normal Map:** 2D array of 3D vectors $\mathbf{N}_{\text{rendered}}(u,v)$, computed via alpha-blending of Gaussian normals [S1].
+-*   **Rendered Depth Map:** 2D array of scalar depths $D(u,v)$, specifically the median depth [S1].
+-*   **Depth Derivative:** 2D array of 3D vectors $\mathbf{N}_{\text{depth}}$, computed from the spatial gradient of $D(u,v)$ [G].
++**Outputs:**
++- Normal consistency loss $L_n$ used for gradient-based optimization of Gaussian parameters.
+ 
+-### Steps
+-1.  **Render Normal Map:** Rasterize the Gaussian splats using alpha-blending to produce $\mathbf{N}_{\text{rendered}}$ [S1].
+-2.  **Render Median Depth:** Compute the median depth $D(u,v)$ for each pixel [S1].
+-3.  **Compute Depth Derivative:** Estimate the surface normal $\mathbf{N}_{\text{depth}}$ by taking the spatial gradient of $D(u,v)$ [S1].
+-4.  **Compute Loss:** Calculate the angular difference between $\mathbf{N}_{\text{rendered}}$ and $\mathbf{N}_{\text{depth}}$ [G].
++**Data Structures:**
++- $\hat{D}$: 2D array of floats, where $\hat{D}(x,y)$ is the median depth at pixel $(x,y)$.
++- $\hat{N}$: 2D array of 3D vectors, where $\hat{N}(x,y)$ is the alpha-blended normal at pixel $(x,y)$.
++- $n_i$: 3D vector, the learnable unit normal attribute of the $i$-th Gaussian.
+ 
+-### Formulas
+-The method uses the **median** free-flight distance $t^*_{o,w}$ for robustness against outliers, rather than the expectancy [S1]. The median depth $t$ is defined as the infimum of $t$ such that the transmittance $T_{\mathbf{o},\mathbf{w}}(t) \leq 0.5$ [S1]:
++**Steps:**
++1. **Render Normal Map:** Rasterize the 3D Gaussian Splatting representation. For each pixel, compute the alpha-blended normal $\hat{N}(x,y)$ using the learnable normals $n_i$ of the contributing Gaussians.
++2. **Compute Pseudo-Normal:** Calculate the pseudo-ground truth normal $\tilde{N}(x,y)$ from the gradient of the rendered depth map $\hat{D}$ under a local planarity assumption [S1, unofficial].
++   - Compute the image gradients of the depth map: $\nabla_x d$ and $\nabla_y d$. These are the differences in depth values between nearby pixels.
++   - Compute the cross product of these gradients.
++   - Normalize the resulting vector to get $\tilde{N}(x,y)$.
++   $$ \tilde{N}(x, y) = \frac{\nabla_x d \times \nabla_y d}{|\nabla_x d \times \nabla_y d|} $$
++   where $d$ are nearby depth points of pixel $(x, y)$ [S1, unofficial].
++3. **Compute Loss:** Quantify the normal consistency as an L1 loss between the rendered normal $\hat{N}$ and the pseudo-normal $\tilde{N}$ [S1, unofficial]:
++   $$ L_n = |\hat{N} - \tilde{N}| $$
++   This loss encourages the rendered normal field to match the true normal of the surface at the 0.5-isosurface of the transmittance [S2].
+ 
+-$$ \text{Median}_M(t_{\mathbf{o},\mathbf{w}}^*) = \inf \{ t \in [0, +\infty) : T_{\mathbf{o},\mathbf{w}}(t) \leq 0.5 \} $$
++**Parameters:**
++- **Depth Metric:** The depth used for gradient computation is the median value of the free-flight distance $t^*_{o,w}$, not the expectancy, for robustness to outliers [S2].
++- **Median Depth Definition:** The median depth $t$ is the infimum of $t$ such that transmittance $T_{o,w}(t) \leq 0.5$ [S2]. In point-based rendering, this is the depth $t^G_{o,w}$ of the first Gaussian along the ray for which the transmittance reaches the 0.5 threshold [S2].
+ 
+-In point-based rendering, this is approximated as the depth $t^G_{o,w}$ of the first Gaussian along the ray where the accumulated transmittance drops to or below 0.5 [S1]. The rendered normal $\mathbf{N}_{\text{rendered}}$ is obtained by alpha-compositing the learnable normals $n_i$ of the splats [G]. The depth-derived normal $\mathbf{N}_{\text{depth}}$ is computed by taking the spatial gradient of the depth map $D(u,v)$ and converting it to world space [G].
+-
+-### Pseudocode
++**Pseudocode:**
+ ```python
+-def compute_normal_supervision_loss(gaussians, camera, width, height):
+-    # Step 1: Render Normal Map via alpha-blending
+-    N_rendered = [[(0.0, 0.0, 0.0) for _ in range(width)] for _ in range(height)]
+-    for y in range(height):
+-        for x in range(width):
+-            ray = camera.get_ray(x, y)
+-            splats = sorted(gaussians, key=lambda s: dot(s.position - ray.origin, ray.direction))
+-            alpha_acc = 0.0
+-            N_acc = [0.0, 0.0, 0.0]
+-            for s in splats:
+-                alpha = s.alpha
+-                weight = alpha * (1.0 - alpha_acc)
+-                N_acc[0] += weight * s.normal[0]
+-                N_acc[1] += weight * s.normal[1]
+-                N_acc[2] += weight * s.normal[2]
+-                alpha_acc += weight
+-                if alpha_acc >= 1.0:
+-                    break
+-            denom = max(alpha_acc, 1e-6)
+-            N_rendered[y][x] = (N_acc[0]/denom, N_acc[1]/denom, N_acc[2]/denom)
+-
+-    # Step 2: Render Median Depth Map
+-    D_median = [[0.0 for _ in range(width)] for _ in range(height)]
+-    for y in range(height):
+-        for x in range(width):
+-            ray = camera.get_ray(x, y)
+-            splats = sorted(gaussians, key=lambda s: dot(s.position - ray.origin, ray.direction))
+-            transmittance = 1.0
+-            median_depth = None
+-            for s in splats:
+-                if transmittance * (1.0 - s.alpha) <= 0.5:
+-                    median_depth = dot(s.position - ray.origin, ray.direction)
+-                    break
+-                transmittance *= (1.0 - s.alpha)
+-            if median_depth is None:
+-                median_depth = camera.far_plane # [G]
+-            D_median[y][x] = median_depth
+-
+-    # Step 3: Compute Depth Derivative
+-    N_depth = [[(0.0, 0.0, 0.0) for _ in range(width)] for _ in range(height)]
+-    fx = camera.focal_length
+-    for y in range(1, height - 1):
+-        for x in range(1, width - 1):
+-            dx = D_median[y][x + 1] - D_median[y][x - 1]
+-            dy = D_median[y + 1][x] - D_median[y - 1][x]
+-            # Convert depth gradients to surface normal in camera space [G]
+-            n_cam = normalize((dx, dy, -fx))
+-            # Transform to world space [G]
+-            N_depth[y][x] = tuple(sum(camera.world_rotation[i][j] * n_cam[j] for j in range(3)) for i in range(3))
+-
+-    # Step 4: Compute Loss
+-    total_loss = 0.0
+-    count = 0
+-    for y in range(height):
+-        for x in range(width):
+-            dot_prod = dot(N_rendered[y][x], N_depth[y][x])
+-            dot_prod = max(-1.0, min(1.0, dot_prod))
+-            total_loss += 1.0 - dot_prod
+-            count += 1
+-    return total_loss / count
+-
+-def dot(v1, v2):
+-    return v1[0]*v2[0] + v1[1]*v2[1] + v1[2]*v2[2]
+-
+-def normalize(v):
+-    mag = (v[0]**2 + v[1]**2 + v[2]**2)**0.5
+-    return (v[0]/mag, v[1]/mag, v[2]/mag)
++def compute_normal_loss(rendered_depth, rendered_normal):
++    """
++    Computes the normal consistency loss between rendered normals and 
++    pseudo-normals derived from depth gradients.
++    
++    Args:
++        rendered_depth (Tensor): Depth map of shape (H, W), float32.
++        rendered_normal (Tensor): Normal map of shape (H, W, 3), float32.
++        
++    Returns:
++        Tensor: Scalar loss value.
++    """
++    # Compute depth gradients using finite differences
++    # Gradient in x direction: difference between adjacent columns
++    depth_grad_x = rendered_depth[:, 1:] - rendered_depth[:, :-1]
++    # Pad to maintain spatial dimensions
++    depth_grad_x = torch.cat([depth_grad_x, depth_grad_x[:, -1:] - depth_grad_x[:, -1:]], dim=1)
++    
++    # Gradient in y direction: difference between adjacent rows
++    depth_grad_y = rendered_depth[1:, :] - rendered_depth[:-1, :]
++    # Pad to maintain spatial dimensions
++    depth_grad_y = torch.cat([depth_grad_y, depth_grad_y[-1:, :] - depth_grad_y[-1:, :]], dim=0)
++    
++    # Compute pseudo-normal via cross product of depth gradients
++    # Normal vector is perpendicular to the tangent plane defined by depth gradients
++    pseudo_normal = torch.cross(depth_grad_x.unsqueeze(-1), depth_grad_y.unsqueeze(-1), dim=-1)
++    
++    # Normalize the pseudo-normal
++    norm = torch.norm(pseudo_normal, dim=-1, keepdim=True)
++    # Avoid division by zero
++    norm = torch.clamp(norm, min=1e-8)
++    pseudo_normal = pseudo_normal / norm
++    
++    # Compute L1 loss between rendered normal and pseudo-normal
++    loss = torch.mean(torch.abs(rendered_normal - pseudo_normal))
++    
++    return loss
+ ```
+ 
+-### Parameters
+-*   **Transmittance Threshold:** 0.5 [S1].
+-*   **Gradient Window:** Not given in the sources. [G]
+-
+-### Edge Cases and Pitfalls
+-*   **Specular/Transparent Regions:** Artifacts in the normal field correspond to under-reconstructed parts of the scene (e.g., specular spots, sky, background) [S1]. The depth derivative may be noisy or undefined in these regions. [G]
+-*   **Outliers:** The method explicitly chooses median depth over expectancy to be robust to statistical outliers [S1].
+-*   **Orientation Ambiguity:** The normal derived from depth derivatives has an inherent sign ambiguity (inward vs outward) [G]. The learnable normals $n_i$ must be oriented consistently with the depth gradient direction, typically by flipping the depth-derived normal if the dot product with the rendered normal is negative. [G]
++**Edge Cases and Pitfalls:**
++- **Degenerate Gradients:** If the depth map is flat or noisy, the cross product may be near zero, leading to unstable normals. The normalization step includes a clamp to prevent division by zero [G].
++- **Boundary Conditions:** Depth gradients at image boundaries require padding or special handling to maintain spatial alignment with the normal map [G].
++- **Specular Surfaces:** Artifacts in the normal field may correspond to under-reconstructed parts of the scene, such as specular spots or sky regions, where depth estimates are unreliable [S2].
+ 
+ ## Subtopics
+@@ -115,12 +87,14 @@
+ 
+ ## Operating characteristics
+-*   **Time Complexity:** Dominated by rasterization for normal and depth maps, $O(N)$ per pixel where $N$ is the number of splats [G]. Depth derivative computation is $O(1)$ per pixel [G].
+-*   **Memory Complexity:** Requires storing rendered normal and depth maps, $O(W \times H)$ per frame [G].
+-*   **Strengths:** Self-supervised; does not require ground-truth normals or external geometry. Robust to outliers via median depth [S1].
+-*   **Limitations:** Relies on depth map accuracy. Fails in textureless or specular regions where depth estimation is ambiguous. [S1] The "first Gaussian" approximation for median depth may be inaccurate if Gaussians are large or overlapping significantly [G].
++- **Time Complexity:** The method adds a constant overhead per pixel for computing depth gradients and the cross product, which is $O(W \times H)$ per frame.
++- **Memory Complexity:** Requires storing the rendered depth and normal maps, $O(W \times H)$ for depth and $O(W \times H \times 3)$ for normals.
++- **Strengths:** Provides a robust supervision signal for normals without requiring explicit mesh reconstruction or additional geometric priors. The use of median depth makes it robust to outliers [S2].
++- **Limitations:** Relies on the accuracy of the rendered depth map. In regions with specular reflections or transparent surfaces, depth estimates may be noisy, leading to inaccurate pseudo-normals [S2].
++- **When to Use:** Suitable for scenes where consistent surface normals are required for downstream tasks like mesh extraction or lighting estimation, and where explicit normal supervision is not available.
+ 
+ ## Background
+-Originating from "From Blobs to Spokes: High-Fidelity Surface Reconstruction via Oriented Gaussians" [S1], this method (Lemma 2) leverages the closed-form equation for transmittance to define a robust median depth. It builds on the observation that the derivative of the depth map estimates the normal of the expected visible surface [S1].
++The method originates from the work on high-fidelity surface reconstruction using oriented Gaussians [S2] and reflection-aware rendering in Gaussian Splatting [S1, unofficial]. It leverages the relationship between depth derivatives and surface normals, a concept well-established in computer vision [S2]. The specific formulation using median depth for robustness is detailed in [S2].
+ 
+ ## Sources
+-[S1] From Blobs to Spokes: High-Fidelity Surface Reconstruction via Oriented Gaussians, https://doi.org/10.1007/978-3-032-37095-2_4, fetched 2026-10-29+[S1] Gaussian Splatting in Mirrors: Reflection-Aware Rendering via Virtual Camera Optimization, https://doi.org/10.48550/arxiv.2410.01614, fetched 2026-10-26 (unofficial)
++[S2] From Blobs to Spokes: High-Fidelity Surface Reconstruction via Oriented Gaussians, https://doi.org/10.1007/978-3-032-37095-2_4, fetched 2026-10-29

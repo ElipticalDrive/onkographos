@@ -1,0 +1,70 @@
+# Sparse Input Reconstruction via Generalizability
+
+Also called: Feed-Forward Gaussian Models, Learned Prior 3D GS
+
+## Overview
+Sparse Input Reconstruction via Generalizability refers to methods that leverage learned priors to reconstruct 3D scenes, enabling reconstruction from a single input image or a very sparse set of views after training on multiple views [S1]. Unlike regularization-based methods that rely on strong constraints and per-scene optimization to favor geometric quality, these generalizability-based methods use learned priors for fast feed-forward inference, prioritizing speed and cross-scene generalization [S1].
+
+## How it works
+**Inputs and Outputs:**
+*   **Input:** One or more calibrated input images [S1].
+*   **Output:** A set of $N$ 3D Gaussian parameters representing the scene [S1]. Each Gaussian $i$ comprises mean position $\mu_i \in \mathbb{R}^3$, covariance matrix $\Sigma_i \in \mathbb{R}^{3 \times 3}$ (parameterized by rotation $R_i$ and scale $S_i$), opacity $\alpha_i \in [0, 1]$, and spherical harmonics coefficients $c_{i, l}$ for color [G].
+
+**Steps:**
+1. **Training:** Train a feed-forward neural network on a dataset of scenes with multiple views to learn the mapping from 2D image features to 3D Gaussian parameters [S1].
+2. **Inference:** Pass one or more input images through the trained network to directly generate the properties of a set of 3D Gaussians in a single forward pass [S1].
+
+**Variants:**
+*   **PixelSplat:** Samples Gaussians from dense probability distributions [S1].
+*   **Splatter Image:** Uses a 2D image-to-image network to map an input image to a 3D Gaussian per pixel [S1].
+
+**Pitfalls:**
+*   **Generative Augmentation Cost:** Synthesizing additional views through generative models to augment input data is computationally intensive and bounded by the capabilities of the generative model [S1].
+*   **Uniform Distribution:** In pixel-aligned approaches like Splatter Image, generated pixel-aligned Gaussians are distributed nearly evenly in space, struggling to represent high-frequency details and smoother regions with an appropriate number of Gaussians [S1].
+
+**Pseudocode:**
+> **Unverified code.** The code below did not pass a test run against a reference implementation, or no test fits it, so it may contain errors.
+
+```python
+def generalizable_reconstruction(input_images):
+    # input_images: Tensor of shape (B, C, H, W)
+    # Step 1: Extract multi-scale features using a backbone network (e.g., CNN or Transformer)
+    features = extract_features(input_images)
+    # Step 2: Predict Gaussian parameters directly from features
+    # Sources do not specify the exact network architecture for this mapping [S1].
+    gaussians = predict_gaussian_parameters(features)
+    return gaussians
+
+def extract_features(images):
+    # Standard backbone feature extraction (e.g., ResNet or ViT forward pass)
+    return images
+
+def predict_gaussian_parameters(features):
+    # Standard prediction head outputting position, covariance, opacity, and SH coefficients
+    return features
+```
+
+## Subtopics
+
+### [Sparse View Input Scalability](18095-sparse-view-input-scalability.md)
+Sparse View Input Scalability is the capability of generalizable neural rendering methods to process an arbitrary number of input views, with reconstruction quality progressively improving as more views are added. It leverages cost volume representations as input to attribute prediction networks for Gaussians, enabling direct inference from sparse calibrated inputs without per-scene optimization.
+
+## Operating characteristics
+*   **Speed:** Inference is a single forward pass, providing fast feed-forward inference compared to iterative optimization methods [S1].
+*   **Generalization:** Excels at cross-scene generalization due to learned priors [S1].
+*   **Geometric Fidelity:** Sometimes at the expense of geometric fidelity compared to regularization-based methods [S1].
+*   **Memory:** Memory usage depends on the number of Gaussians predicted; pixel-aligned methods may use more Gaussians than necessary for smooth regions [S1].
+*   **Limitations:** Performance is bounded by the training data distribution. Not given in the sources.
+
+## Background
+The challenge of 3D Gaussian Splatting for sparse inputs centers on how priors are modeled, whether through depth information, generative models, or feed-forward Gaussian models [S1]. Traditional regularization-based methods rely on strong constraints and per-scene optimization, favoring geometric quality but incurring higher computation [S1]. Generalizability-based methods emerged to address the inefficiency of per-scene optimization, particularly when dealing with a limited number of views or even just one, where the efficacy of regularization techniques tends to diminish [S1].
+
+Key developments include:
+*   **PixelSplat:** Proposed sampling Gaussians from dense probability distributions [S1].
+*   **Splatter Image:** Introduced a 2D image-to-image network that maps an input image to a 3D Gaussian per pixel [S1].
+*   **Cost Volume Representations:** Some approaches use cost volume representations to provide geometry cues, although this can be challenging with very few views [S1].
+
+Future research directions include exploring adaptive mechanisms to control the trade-off between speed and geometric fidelity, such as learned confidence measures or context-aware prior selection [S1]. Additionally, extending these approaches to dynamic scenarios, handling temporal consistency and motion-induced artifacts, is an active area of interest [S1].
+
+## Sources
+[S1] A Survey on 3D Gaussian Splatting, https://doi.org/10.1145/3807511, fetched 2026-10-27

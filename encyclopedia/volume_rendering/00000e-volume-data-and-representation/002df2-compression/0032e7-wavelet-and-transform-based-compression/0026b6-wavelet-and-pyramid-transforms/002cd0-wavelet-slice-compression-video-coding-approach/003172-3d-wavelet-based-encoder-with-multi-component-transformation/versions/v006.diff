@@ -1,0 +1,184 @@
+--- v005.md
++++ v006.md
+@@ -26,5 +26,5 @@
+     For each subband frame generated in Step 1 (e.g., LLL, LLH, LH, H), apply a 2D spatial lifting-based wavelet transform [S2].
+     *   The transform is applied horizontally and vertically [S3].
+-    *   The number of decomposition levels can vary per subband (e.g., low-pass subbands may be decomposed deeper than high-pass subbands) [S2].
++    *   **Decomposition Levels:** Variable per subband. Low-pass subbands (LLL) can be decomposed up to 3 levels, while high-pass subbands (H, LH, etc.) may be decomposed fewer levels or not at all [S2].
+     *   This results in spatial subbands such as LLL, HLL, LHL, HHL, LLH, HLH, LHH, HHH for a 1-level 3D decomposition [S3].
+ 
+@@ -68,51 +68,60 @@
+ ### Pseudocode
+ ```python
+-def lifting_1d(signal, filter_type='haar'):
+-    """
+-    Performs a 1D lifting-based DWT on a 1D array.
+-    Returns (low_pass, high_pass).
+-    """
+-    even = signal[0::2]
+-    odd = signal[1::2]
++def apply_lifting_step(even, odd, coeffs_P, coeffs_U):
++    """Applies one pair of prediction and update lifting steps in-place."""
++    n_odd = len(odd)
++    n_even = len(even)
++    
++    # Prediction: odd <- odd - floor(sum(coeffs_P * even_neighbors))
++    for i in range(n_odd):
++        pred = 0
++        for k in range(-coeffs_P['K'], coeffs_P['K'] + 1):
++            idx = i - (2 * k + 1)
++            # Boundary handling: symmetric extension [G]
++            if idx < 0: idx = -idx
++            if idx >= n_even: idx = 2 * n_even - 2 - idx
++            pred += coeffs_P['c'][k] * even[idx]
++        odd[i] -= int(pred // 1)  # floor via integer division
++        
++    # Update: even <- even + floor(sum(coeffs_U * odd_neighbors) + 0.5)
++    for i in range(n_even):
++        upd = 0
++        for k in range(-coeffs_U['K'], coeffs_U['K'] + 1):
++            idx = i - (2 * k + 1)
++            if idx < 0: idx = -idx
++            if idx >= n_odd: idx = 2 * n_odd - 2 - idx
++            upd += coeffs_U['c'][k] * odd[idx]
++        even[i] += int((upd + 0.5) // 1)  # floor with 0.5 offset
++
++def dwt_1d(signal, filter_type='haar'):
++    """Performs a 1D lifting-based DWT. Returns (low_pass, high_pass)."""
++    even = signal[0::2].copy()
++    odd = signal[1::2].copy()
+     
+     if filter_type == 'haar':
+-        # Prediction: odd <- odd - floor((even_prev + even_next) / 2)
++        # Haar: 1 prediction step, 1 update step
++        # P: odd[i] -= floor((even[i-1] + even[i+1]) / 2)
+         for i in range(len(odd)):
+-            prev_e = even[i-1] if i > 0 else 0
+-            next_e = even[i+1] if i < len(even)-1 else 0
+-            odd[i] -= (prev_e + next_e) // 2
+-        # Update: even <- even + floor((odd_prev + odd_next + 2) / 4)
++            p = (even[max(0, i-1)] + even[min(len(even)-1, i+1)]) // 2
++            odd[i] -= p
++        # U: even[i] += floor((odd[i-1] + odd[i+1] + 2) / 4)
+         for i in range(len(even)):
+-            prev_o = odd[i-1] if i > 0 else 0
+-            next_o = odd[i+1] if i < len(odd)-1 else 0
+-            even[i] += (prev_o + next_o + 2) // 4
++            u = (odd[max(0, i-1)] + odd[min(len(odd)-1, i+1)] + 2) // 4
++            even[i] += u
+     elif filter_type == '5/3':
+-        # Step 1: Predict odd from even
+-        for i in range(len(odd)):
+-            prev_e = even[i-1] if i > 0 else 0
+-            next_e = even[i+1] if i < len(even)-1 else 0
+-            odd[i] -= (prev_e + next_e) // 2
+-        # Step 2: Update even from odd
+-        for i in range(len(even)):
+-            prev_o = odd[i-1] if i > 0 else 0
+-            next_o = odd[i+1] if i < len(odd)-1 else 0
+-            even[i] += (prev_o + next_o + 2) // 4
+-        # Step 3: Predict odd from updated even
+-        for i in range(len(odd)):
+-            prev_e = even[i-1] if i > 0 else 0
+-            next_e = even[i+1] if i < len(even)-1 else 0
+-            odd[i] -= (prev_e + next_e) // 2
+-        # Step 4: Update even from updated odd
+-        for i in range(len(even)):
+-            prev_o = odd[i-1] if i > 0 else 0
+-            next_o = odd[i+1] if i < len(odd)-1 else 0
+-            even[i] += (prev_o + next_o + 2) // 4
+-            
+-    # Reorder: even samples are low-pass, odd samples are high-pass
++        # 5/3: 2 prediction steps, 2 update steps (standard JPEG2000) [G]
++        for _ in range(2):
++            for i in range(len(odd)):
++                p = (even[max(0, i-1)] + even[min(len(even)-1, i+1)]) // 2
++                odd[i] -= p
++            for i in range(len(even)):
++                u = (odd[max(0, i-1)] + odd[i] + odd[min(len(odd)-1, i+1)] + 2) // 4
++                even[i] += u
++                
++    # Reordering: even samples are low-pass, odd samples are high-pass [S3]
+     return even, odd
+ 
+ def multi_component_transform(volume):
+-    """
+-    Applies wavelet transform along the component axis.
++    """Applies wavelet transform along the component axis.
+     volume shape: (X, Y, Z, C)
+     """
+@@ -120,43 +129,49 @@
+     high_pass_components = []
+     
+-    # Process each spatial location across components
+     for x in range(volume.shape[0]):
+         for y in range(volume.shape[1]):
+             for z in range(volume.shape[2]):
+                 comp_vector = volume[x, y, z, :]
+-                # Use Haar for Y (index 0), 5/3 for U,V (indices 1,2)
++                # Use Haar for Y (index 0), 5/3 for U,V (indices 1,2) [S2]
+                 f_type = 'haar' if len(comp_vector) == 1 else '5/3'
+-                lp, hp = lifting_1d(comp_vector, f_type)
++                lp, hp = dwt_1d(comp_vector, f_type)
+                 low_pass_components.append(lp)
+                 high_pass_components.append(hp)
+                 
+-    # Reshape back to volume format (simplified conceptual flow)
+-    # In practice, this is done per voxel vector across C
+     return low_pass_components, high_pass_components
+ 
+ def spatial_transform(subband, levels=3):
+-    """
+-    Applies 2D spatial wavelet transform to a subband.
+-    """
++    """Applies 2D spatial wavelet transform to a subband. Returns list of subbands."""
++    subbands = [subband]
+     current = subband
+     for level in range(levels):
+         # Apply 1D DWT along rows
+-        rows = [lifting_1d(row, '5/3')[0] for row in current]
+-        current = [row for row in rows]
+-        # Apply 1D DWT along columns to the low-pass rows
+-        cols = [lifting_1d(col, '5/3')[0] for col in current]
+-        current = cols
+-    return current
++        row_lp, row_hp = [], []
++        for row in current:
++            lp, hp = dwt_1d(row, '5/3')
++            row_lp.append(lp)
++            row_hp.append(hp)
++        # Apply 1D DWT along columns to low-pass rows
++        col_lp, col_hp = [], []
++        for i in range(len(row_lp)):
++            col_vec = [row_lp[i][j] for j in range(len(row_lp[i]))]
++            lp, hp = dwt_1d(col_vec, '5/3')
++            col_lp.append(lp)
++            col_hp.append(hp)
++        # Store high-pass subbands for this level
++        subbands.extend(row_hp + col_hp)
++        current = col_lp
++    return subbands
+ 
+ def compress_volume(volume):
+-    # 1. Multi-component transform
++    # 1. Multi-component transform [S2]
+     lp_comp, hp_comp = multi_component_transform(volume)
+     
+-    # 2. Spatial transform on subbands
+-    # Typically, low-pass subbands are transformed more levels than high-pass
++    # 2. Spatial transform on subbands [S2]
+     lp_spatial = spatial_transform(lp_comp, levels=3)
+     hp_spatial = spatial_transform(hp_comp, levels=1)
+     
+-    # 3. EBCOT Coding per JPEG2000 Part-1 standard [G]
++    # 3. EBCOT Coding per JPEG2000 Part-1 standard [S2]
++    # Implementation of EBCOT encoding is omitted as it is a separate standard [G]
+     bitstream = encode_ebcot(lp_spatial) + encode_ebcot(hp_spatial)
+     return bitstream
+@@ -171,5 +186,5 @@
+ *   **Reversibility:** Floating-point arithmetic introduces approximation errors, making the transform irreversible. Integer calculus with floor operators is mandatory for lossless compression [S1].
+ *   **Artifact Generation:** Using longer filters (5/3) for luminance when inter-component correlations are low or the number of components is small generates high-frequency energy and causes ghosting artifacts. Haar is preferred for Y to avoid this [S2].
+-*   **Boundary Conditions:** The pseudocode notes boundary handling for the lifting steps (e.g., $s_{x-1}$ when $x=0$). Standard JPEG2000 uses symmetric extension or periodic extension, but the specific method is not detailed in the sources [G].
++*   **Boundary Conditions:** The sources do not specify boundary handling for the lifting steps. Standard JPEG2000 implementations use symmetric extension or periodic extension [G].
+ 
+ ## Subtopics

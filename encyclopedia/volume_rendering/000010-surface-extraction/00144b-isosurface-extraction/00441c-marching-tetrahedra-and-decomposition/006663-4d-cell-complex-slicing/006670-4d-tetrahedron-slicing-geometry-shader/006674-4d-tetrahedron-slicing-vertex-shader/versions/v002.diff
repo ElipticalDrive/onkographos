@@ -1,0 +1,175 @@
+--- v001.md
++++ v002.md
+@@ -4,103 +4,76 @@
+ 
+ ## Overview
+-A GPU-based method to compute the 3D cross-section of a 4D tetrahedron against a slicing hyperplane using the Vertex Shader [S1, unofficial]. It outputs 0, 1, or 2 triangles representing the intersection [S1, unofficial]. It sets itself apart from its sibling [4D Tetrahedron Slicing (Geometry Shader)](19630-4d-tetrahedron-slicing-geometry-shader.md) by avoiding adjacency primitives and data replication, instead replicating vertex data four times to drive parallel computation in the Vertex Shader, at the cost of increased conditional branching [S1, unofficial].
++A GPU-based method to compute the 3D cross-section of a 4D tetrahedron against a slicing hyperplane using the Vertex Shader [S1, unofficial]. It outputs 0, 1, or 2 triangles representing the intersection [S1, unofficial]. It sets itself apart from its sibling [4D Tetrahedron Slicing (Geometry Shader)](19630-4d-tetrahedron-slicing-geometry-shader.md) by replicating vertex data four times to drive parallel computation in the Vertex Shader, at the cost of increased conditional branching [S1, unofficial].
+ 
+ ## How it works
+ **Inputs and Outputs:**
+-*   **Input:** A structure containing the four 4D vertices of a tetrahedron. To facilitate processing, the vertex data is replicated four times, with an appended index (0–3) identifying which vertex is currently being processed [S1, unofficial].
++*   **Input:** A structure containing the four 4D vertices of a tetrahedron, replicated four times with an appended index (0–3) identifying the vertex being processed [S1, unofficial].
+ *   **Output:** 0, 1, or 2 triangles (0 to 6 vertices) representing the intersection polygon [S1, unofficial].
+ 
+ **Data Structures:**
+-The input to the Vertex Shader is a stream of vertices. Each entry in the stream corresponds to one of the four vertices of a specific tetrahedron. The structure typically includes:
+-*   `vec4 position`: The 4D coordinates of the vertex.
+-*   `int id`: An integer index (0, 1, 2, or 3) indicating the vertex's role within the tetrahedron [S1, unofficial].
++The input stream consists of the replicated vertex data paired with a vertex ID (0–3) [S1, unofficial].
+ 
+ **Steps:**
+-1.  **Hyperplane Evaluation:** For each vertex passed to the Vertex Shader, substitute its 4D coordinates into the slicing hyperplane equation $H(\mathbf{v}) = \mathbf{n} \cdot \mathbf{v} + d = 0$ to determine its signed distance or position relative to the plane [S1, unofficial].
+-2.  **Topology Determination:** Determine the intersection shape based on the signs of the four vertices. Since the Vertex Shader processes vertices individually, it must determine the global configuration (1 vs 3 or 2 vs 2) to know what to output. This is typically done by using a pre-computed lookup table (texture) indexed by the vertex ID and the configuration of signs, or by passing the configuration as a uniform/attribute [S1, unofficial].
+-    *   If all four vertices are on one side of the plane: Output nothing (empty set) [S1, unofficial].
+-    *   If the vertices are split 1 vs 3: Output a triangle [S1, unofficial].
+-    *   If the vertices are split 2 vs 2: Output a quadrilateral, which is decomposed into two triangles [S1, unofficial].
+-3.  **Intersection Calculation:** Calculate the exact 3D coordinates of the intersection points on the edges of the tetrahedron. For an edge connecting vertices $\mathbf{v}_i$ and $\mathbf{v}_j$ with signed distances $d_i$ and $d_j$, the intersection point $\mathbf{p}$ is found by linear interpolation:
+-    $$ \mathbf{p} = \frac{d_j \mathbf{v}_i - d_i \mathbf{v}_j}{d_j - d_i} $$
+-    The resulting 3D coordinates are derived by projecting or slicing the 4D point onto the 3D hyperplane [S1, unofficial].
+-4.  **Output Generation:** Emit the calculated vertices as triangles. The Vertex Shader must emit the correct number of vertices (3 for a triangle, 6 for two triangles) based on the topology determined in Step 2 [S1, unofficial].
++1.  **Hyperplane Evaluation:** For each vertex passed to the Vertex Shader, substitute its 4D coordinates into the slicing hyperplane equation $H(\mathbf{v}) = \mathbf{n} \cdot \mathbf{v} + d = 0$ to determine its signed distance relative to the plane [S1, unofficial].
++2.  **Topology Determination:** Classify the intersection shape based on the signs of the four vertices: if all are on one side, output nothing; if split 1 vs 3, output a triangle; if split 2 vs 2, output a quadrilateral decomposed into two triangles [S1, unofficial]. This classification is resolved using a pre-computed lookup table indexed by the vertex sign configuration to avoid conditional branching in the shader [S1, unofficial].
++3.  **Intersection Calculation:** Compute the exact 3D coordinates of intersection points on the tetrahedron edges where the plane crosses [S1, unofficial].
++4.  **Output Generation:** Emit the calculated vertices as triangles based on the determined topology [S1, unofficial].
+ 
+ **Pitfalls:**
+-*   **Branching:** The algorithm involves many conditional branches based on vertex signs to determine topology and output vertices. This hurts GPU parallel efficiency [S1, unofficial].
++*   **Branching:** The algorithm involves many conditional branches based on vertex signs to determine topology and output vertices, which hurts GPU parallel efficiency [S1, unofficial].
+ *   **Mitigation:** Use a pre-computed lookup table (texture) to determine the output topology and avoid conditional branches in the shader [S1, unofficial].
+ 
+ **Pseudocode:**
+ ```python
+-# Vertex Shader Input
+-struct VertexInput {
+-    vec4 position; // 4D vertex coordinates
+-    int id;        // Vertex ID (0-3)
+-};
++def compute_cross_section(tetrahedra, plane_normal, plane_dist):
++    """
++    Computes 3D cross-sections of 4D tetrahedra against a slicing hyperplane.
++    tetrahedra: list of 4-tuples, each containing 4D vectors (x, y, z, w)
++    plane_normal: 4D vector (nx, ny, nz, nw)
++    plane_dist: float (d in nx*x + ny*y + nz*z + nw*w + d = 0)
++    Returns: list of triangles, each triangle is a list of 3D vectors (x, y, z)
++    """
++    triangles = []
++    # Pre-computed topology lookup: maps sign bitmask to intersection point indices
++    # 0 = negative side, 1 = positive side. Bit i corresponds to vertex i.
++    # Standard combinatorial mapping for 1v3 (triangle) and 2v2 (quad) cases.
++    topology_lookup = {
++        0b0000: [], 0b1111: [],
++        0b0001: [[0, 1, 2]], 0b0010: [[1, 0, 2]], 0b0100: [[2, 0, 1]], 0b1000: [[3, 1, 2]],
++        0b0011: [[0, 1, 2, 3]], 0b0101: [[0, 2, 1, 3]], 0b1001: [[0, 3, 1, 2]], 0b1100: [[0, 1, 3, 2]],
++        # Remaining permutations follow the same pattern
++    }
+ 
+-// Uniforms
+-uniform vec4 planeNormal; // Normal of the slicing hyperplane
+-uniform float planeDist;  // Distance offset of the slicing hyperplane
+-uniform sampler2D topologyLookup; // Lookup table for topology based on vertex ID and configuration
++    for tet in tetrahedra:
++        signs = 0
++        distances = []
++        for i, v in enumerate(tet):
++            d = plane_normal[0]*v[0] + plane_normal[1]*v[1] + plane_normal[2]*v[2] + plane_normal[3]*v[3] + plane_dist
++            distances.append(d)
++            if d >= 0:
++                signs |= (1 << i)
+ 
+-// Helper to compute signed distance
+-float signedDistance(vec4 v) {
+-    return dot(planeNormal, v) + planeDist;
+-}
++        topology = topology_lookup.get(signs, [])
++        if not topology:
++            continue
+ 
+-// Main Vertex Shader
+-void main() {
+-    vec4 v = input.position;
+-    int id = input.id;
+-    
+-    // Compute signed distance for this vertex
+-    float d = signedDistance(v);
+-    
+-    // Determine topology configuration
+-    // In a real implementation, the configuration (signs of all 4 vertices) 
+-    // would be passed or computed via a lookup based on the batch ID.
+-    // For this pseudocode, we assume a function getTopology(id, signs) exists.
+-    // The lookup table mitigates branching.
+-    
+-    // Example: If topology is 'triangle' (1 vs 3)
+-    if (topology == TRIANGLE) {
+-        // Calculate intersection points on edges
+-        // Edges connected to the single vertex on one side
+-        vec3 p1 = interpolateIntersection(v, neighbor1, d, neighbor1Dist);
+-        vec3 p2 = interpolateIntersection(v, neighbor2, d, neighbor2Dist);
+-        vec3 p3 = interpolateIntersection(v, neighbor3, d, neighbor3Dist);
+-        
+-        // Output triangle vertices
+-        emitVertex(p1);
+-        emitVertex(p2);
+-        emitVertex(p3);
+-    }
+-    // Example: If topology is 'quad' (2 vs 2)
+-    else if (topology == QUAD) {
+-        // Calculate intersection points on the 4 edges crossing the plane
+-        vec3 p1 = interpolateIntersection(v, neighbor1, d, neighbor1Dist);
+-        vec3 p2 = interpolateIntersection(v, neighbor2, d, neighbor2Dist);
+-        vec3 p3 = interpolateIntersection(v, neighbor3, d, neighbor3Dist);
+-        vec3 p4 = interpolateIntersection(v, neighbor4, d, neighbor4Dist);
+-        
+-        // Output two triangles
+-        emitVertex(p1);
+-        emitVertex(p2);
+-        emitVertex(p3);
+-        
+-        emitVertex(p1);
+-        emitVertex(p3);
+-        emitVertex(p4);
+-    }
+-    // If topology is 'empty', output nothing
+-}
++        # Calculate intersection points on crossing edges
++        intersections = []
++        for i in range(4):
++            for j in range(i + 1, 4):
++                # Sign difference guarantees non-zero denominator
++                if (distances[i] >= 0) != (distances[j] >= 0):
++                    t = distances[i] / (distances[i] - distances[j])
++                    p4 = [tet[i][k] + t * (tet[j][k] - tet[i][k]) for k in range(4)]
++                    intersections.append(p4[:3])
+ 
+-vec3 interpolateIntersection(vec4 v1, vec4 v2, float d1, float d2) {
+-    // Linear interpolation to find intersection point
+-    float t = d1 / (d1 - d2);
+-    vec4 p = mix(v1, v2, t);
+-    // Project to 3D by removing the slicing dimension or using the hyperplane equation
+-    return projectTo3D(p);
+-}
++        for tri_indices in topology:
++            if len(tri_indices) == 3:
++                triangles.append([intersections[k] for k in tri_indices])
++            elif len(tri_indices) == 4:
++                # Quad decomposed into two triangles
++                triangles.append([intersections[tri_indices[0]], intersections[tri_indices[1]], intersections[tri_indices[2]]])
++                triangles.append([intersections[tri_indices[0]], intersections[tri_indices[2]], intersections[tri_indices[3]]])
++    return triangles
+ ```
+ 
+@@ -111,11 +84,11 @@
+ 
+ ## Operating characteristics
+-*   **Time Complexity:** Linear with respect to the number of tetrahedra, $O(N)$, where $N$ is the number of tetrahedra [S1, unofficial].
+-*   **Memory Complexity:** Low, as it does not require storing adjacency information or complex data structures beyond the vertex buffer [S1, unofficial].
++*   **Time Complexity:** Not given in the sources.
++*   **Memory Complexity:** Not given in the sources.
+ *   **Performance:** Efficient on GPUs with strong vertex processing capabilities, but may suffer from branch divergence due to the conditional logic required for topology determination [S1, unofficial].
+ *   **Strengths:** Simple implementation, no need for Geometry Shader support, compatible with WebGL and WebGPU which lack Geometry Shader support [S1, unofficial].
+ *   **Limitations:** Data replication (4x vertex data) increases memory bandwidth usage. Branching can reduce parallel efficiency [S1, unofficial].
+ *   **When to use:** When targeting platforms without Geometry Shader support (e.g., WebGL, WebGPU) or when simplicity of implementation is prioritized over memory efficiency [S1, unofficial].
+-*   **When not to use:** When memory bandwidth is a critical bottleneck or when the scene complexity makes data replication prohibitive [S1, unofficial].
++*   **When not to use:** Not given in the sources.
+ 
+ ## Background

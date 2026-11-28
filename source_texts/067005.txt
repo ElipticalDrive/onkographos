@@ -1,0 +1,1122 @@
+MeshUDF: Fast and Differentiable Meshing of
+Unsigned Distance Field Networks
+Benoı̂t Guillard, Federico Stella, and Pascal Fua
+CVLab, EPFL,
+benoit.guillard@epfl.ch federico.stella@epfl.ch pascal.fua@epfl.ch
+Abstract. Unsigned Distance Fields (UDFs) can be used to represent
+non-watertight surfaces. However, current approaches to converting them
+into explicit meshes tend to either be expensive or to degrade the accuracy. Here, we extend the marching cube algorithm to handle UDFs,
+both fast and accurately. Moreover, our approach to surface extraction
+is differentiable, which is key to using pretrained UDF networks to fit
+sparse data.
+(a)
+(b)
+(c)
+(d)
+Fig. 1: Meshing the UDF of a garment. We present front and top views. (a)
+Inflating shapes to turn open surfaces into watertight ones [37,13,17] inherently reduces
+accuracy by making the surface thicker, as shown in top view. (b) Triangulating a cloud
+of 3D points collapsed on the 0-levelset [11] is time-consuming and tends to produce
+rough surfaces. (c) Directly meshing the UDF using our approach is more accurate and
+less likely to produce artifacts. In addition, it makes the iso-surface extraction process
+differentiable. (d) We mesh the UDF of a shirt and display it on a human body. The
+three insets represent the ground truth shirt, the reconstruction with our method, and
+the inflation approach, respectively. Our approach—in the upper right inset—produces
+fewer artifacts and no penetrations with the body.
+2
+1
+B. Guillard et al.
+Introduction
+In recent years, deep implicit surfaces [32,29,8] have emerged as a powerful tool
+to represent and manipulate watertight surfaces. Furthermore, for applications
+that require an explicit 3D mesh, such as sophisticated rendering including complex physical properties [31] or optimizing physical performance [4], they can
+be used to parameterize explicit 3D meshes whose topology can change while
+preserving differentiability [1,34,17]. However, these approaches can only handle
+watertight surfaces. Because common 3D datasets such as ShapeNet [7] contain non-watertight meshes, one needs to preprocess them to create a watertight
+outer shell [32,38]. This is time consuming and ignores potentially useful inner
+components, such as seats in a car. An alternative is to rely on network initialization or regularization techniques to directly learn from raw data [2,3] but this
+significantly slows down the training procedure.
+This therefore leaves open the problem of modeling non-watertight surfaces
+implictly. It has been shown in [11,39,37,13] that occupancy fields and signed
+distance functions (SDFs) could be replaced by unsigned ones (UDFs) for this
+purpose. However, unlike for SDFs, there are no fast algorithms to directly mesh
+UDFs. Hence, these methods rely on a two-step process that first extracts a dense
+point cloud that can then be triangulated using slow standard techniques [5].
+Alternatively, non-watertight surfaces can be represented as watertight thin ones
+surrounding them [13,17,37]. This amounts to meshing the ϵ iso-surface of an
+UDF using marching cubes [28], for ϵ being a small strictly positive scalar.
+Unfortunately, that degrades reconstruction accuracy because the thin surfaces
+cannot be infinitely so, as ϵ cannot be arbitrarily small. Furthermore, some
+applications such as draping simulation [23,36,18] require surfaces to be singlefaced and cannot be used in conjunction with this approach.
+In this paper, we first show that marching cubes can be extended to UDFs
+by reasoning on their gradients. When neighboring gradients face in opposite
+directions, this is evidence that a surface element should be inserted between
+them. We rely on this to replace the sign flips on which the traditional marching
+cube algorithm depends and introduce a new approach that exploits the gradients instead. This yields vertices and facets. When the UDF is parameterized
+by latent vectors, we then show that the 3D position of these vertices can be
+differentiated with respect to the latent vectors. This enables us to fit the output
+of pre-trained networks to sparse observations, such as 3D points on the surface
+of a target object or silhouettes of that object.
+In short, our contribution is a new approach to meshing UDFs and parameterizing 3D meshes to model non-watertight surfaces whose topology can
+change while preserving differentiability, which is something that had only been
+achieved for watertight surfaces before. We use it in conjunction with a learned
+shape prior to optimize fitting to partial observations via gradient descent.
+We demonstrate it achieves better reconstruction accuracy than current deeplearning based approaches to handling non-watertight surfaces, in a fraction of
+the computation time, as illustrated by Fig. 1. Our code is publicly available at
+https://github.com/cvlab-epfl/MeshUDF/ .
+MeshUDF: Fast and Differentiable Meshing of UDF networks
+2
+3
+Related Work
+Deep implicit surfaces [32,29,8] have proved extremely useful to model watertight
+surfaces using occupancy grids and SDFs, while non-watertight surfaces can be
+handled either using UDFs or inflating an SDF around them. As meshing almost always involves using a version of the classic marching cube algorithm [28],
+we discuss these first. We then review recent approaches to representing nonwatertight surfaces using implicit surfaces.
+Triangulating an Implicit Field. Marching cubes was originally proposed in [28]
+and refined in [10,27,24] to triangulate the 0-isosurface of a 3D scalar field. It
+marches sequentially across cubic grid cells and if field values at neighboring corners have opposing signs, triangular facets are created according to a manually
+defined lookup table. Vertices of these triangle facets are adjusted by linear interpolation over the field values. Since then, newer methods have been developed
+such as dual methods [20]. They are better at triangulating surfaces with sharp
+edges at the expense of increased complexity and requiring a richer input. Hence,
+due to its simplicity and flexibility, along with the availability of efficient implementations, the original algorithm of [24] remains in wide use [29,32,33,19,38].
+More recently, [9] proposed a data driven approach at improving sharp features
+reconstructed by marching cubes. Even though marching cubes is not differentiable, it has been shown that gradients can be estimated for surface points,
+thus allowing backpropagation [1,34]. However, this approach requires surface
+normals whose orientation is unambiguous, which makes it impractical when
+dealing with non-watertight surfaces.
+Triangulating Implicit Non-Watertight Surfaces. Unfortunately, neither the original marching cubes algorithm nor any of its recent improvements are designed
+to handle non-watertight surfaces. One way around this is to surround the target surface with a thin watertight one [13,17,37], as shown in Fig. 1(a). One can
+think of the process as inflating a watertight surface around the original one.
+Marching cubes can then be used to triangulate the inflated surface, but the
+result will be some distance away from the target surface, resulting in a loss
+of accuracy. Another approach is to sample the minimum level set of an UDF
+field, as in NDF [11] and AnchorUDF [39]. This is done by projecting randomly
+initialized points on the surface using gradient descent. To ensure full coverage,
+points are re-sampled and perturbed during the process. This produces a cloud,
+but not a triangulated mesh with information about the connectivity of neighboring points. Then the ball-pivoting method [5], which connects neighboring
+points one triplet at a time, is used to mesh the cloud, as shown in Fig. 1(b). It
+is slow and inherently sequential.
+3
+Method
+We now present our core contribution, a fast and differentiable approach to
+extracting triangulated isosurfaces from unsigned distance fields produced by a
+4
+B. Guillard et al.
+neural network. Let us consider a network that implements a function
+\phi : \mathbb {R}^C \times \mathbb {R}^3 &\rightarrow \mathbb {R}^+ \; , \\ \bz , \bx &\mapsto s \nonumber \; ,
+where z ∈ RC is a parameter vector; x is a 3D point; s is the Euclidean distance
+to a surface. Depending on the application, z can either represent only a latent
+code that parameterizes the surface or be the concatenation of such a code
+and the network parameters. In Sec. 3.1, we propose an approach to creating a
+triangulated mesh M = (V, F ) with vertices V and facets F from the 0-levelset
+of the scalar field ϕ(z, ·). Note that it could also apply to non-learned UDFs,
+as shown in the supplementary material. In Sec. 3.2, we show how to make the
+vertex coordinates differentiable with respect to z. This allows refinement of
+shape codes or network parameters with losses directly defined on the mesh.
+3.1
+From UDF to Triangulated Mesh
+Surface Detection within Cells As in standard marching cubes [28], we first
+sample a discrete regular grid G in the region of interest, typically [−1, 1]3 . At
+each location xi ∈ G we compute
+u_i = \phi (\bz , \bx _i) \; , \; \; \; \; \; \; \; \; \; \; \bgrad _i = \nabla _{\bx }\phi (\bz , \bx _i) \; , \nonumber
+where ui is the unsigned distance to the implicit surface at location xi , and
+gi ∈ R3 is the gradient computed using backpropagation. Given a cubic cell and
+its 8 corners, let (u1 , ..., u8 ), (x1 , ..., x8 ), and (g1 , ..., g8 ) be the above values in
+each one. Since all ui are positive, a surface traversing a cell does not produce
+a sign flip as it does when using an SDF. However, when corners xi and xj lie
+on opposite sides of the 0-levelset surface, their corresponding vectors gi and
+gj should have opposite orientations, provided the surface is sufficiently smooth
+within the cell. Hence, we define a pseudo-signed distance
+s_i = \text {sgn}(\bgrad _1 \cdot \bgrad _i) u_i \; , \label {eq:pseudo_signed_dist}
+(2)
+where x1 is one of the cell corners that we refer to as the anchor. x1 is assigned
+a positive pseudo-signed distance and corners where the gradient direction is
+opposite to that at x1 a negative one. When there is at least one negative si , we
+use marching cubes’ disjunction cases and vertex interpolation to reconstruct a
+triangulated surface in the cell. Computing pseudo-signs in this way is simple
+but has two shortcomings. First, it treats each cell independently, which may
+cause inconsistencies in the reconstructed facets orientations. Second, especially
+when using learned UDF fields that can be noisy [37], the above smoothness
+assumption may not hold within the cells. This typically results in holes in the
+reconstructed meshes.
+To mitigate the first problem, our algorithm starts by exploring the 3D grid
+until it finds a cell with at least one negative pseudo-sign. It then uses it as the
+starting point for a breadth-first exploration of the surface. Values computed at
+MeshUDF: Fast and Differentiable Meshing of UDF networks
+_
++
+_
+5
+_
++
+_
+_
+(a)
+(b)
+(a)
+(b)
+Fig. 3: Removing
+artifacts. (a)
+Given
+the
+blue
+0-level
+surface, the red
+Fig. 2: Voting. (a) Corner xi of cell c has
+3 neighbors that already have a pseudo-sign cell has gradients in opposing direcand vote. (b) The projections of gi and gk1 tions and yields an undesirable face.
+on the edge connecting the two neighbors face We prune these by evaluating the
+each other. Thus xk1 votes for xi having the UDF on reconstructed faces. (b) Inisame sign as itself (-). The other two neigh- tially reconstructed borders are uneven
+bors vote for − as well given the result of (top). We smooth them during postprocessing (bottom).
+computing Eq. 3.
+any cell corner are stored and never recomputed, which ensures that the normal
+directions and interpolated vertices are consistent in adjacent cells. The process
+is repeated to find other non-connected surfaces, if any. To mitigate the second
+problem we developed a more sophisticated method to assign a sign to each cell
+corner. We do so as described above for the root cell of our breadth-first search,
+but we use the voting scheme depicted by Fig. 2 for the subsequent ones. Voting
+is used to aggregate information from neighboring nodes to estimate pseudo-sign
+more robustly. Each corner xi of a cell under consideration receives votes from
+all adjacent grid points xk that have already been assigned a pseudo-sign, based
+on the relative directions of their gradients and the pseudo-sign of xk . Since
+gradients locally point towards the greatest ascent direction, if the projections
+of gi and gk along the edge connecting xi and xk face each other, there is no
+surface between them and the vote is in favor of them having the same sign:
+vik = sgn(sk ). Otherwise, the vote depends on gradient directions and we take
+it to be
+\label {eq:voting_scheme} v_{ik} = (\bgrad _i \cdot \bgrad _k) \text {sgn}(s_k)
+(3)
+because the more the gradients are aligned, the more confident we are about the
+two points being on the same side of the surface or not, depending on the sign
+of the dot product. The sign of the sum of the votes is assigned to the corner.
+If one of the xk is zero-valued its vote does not contribute to the scheme, but
+it means that there is a clear surface crossing. This can happen when meshing
+learned UDF fields at higher resolutions, because their 0-level set can have a nonnegligible volume. Thus, the first non-zero grid point along its direction takes its
+place in the voting scheme, provided that it has already been explored. To further
+increase the reliability of these estimates, grid points with many disagreeing votes
+are put into a lower priority queue to be considered later, when more nearby grid
+points have been evaluated and can help produce a more consistent sign estimate.
+6
+B. Guillard et al.
+In practice we only perform these computations within cells whose average UDF
+values of (u1 , ..., u8 ) are small. Others can be ignored, thus saving computation
+time and filtering bad cell candidates which have opposing gradients but lie far
+from the surface.
+Global Surface Triangulation The facets that the above approach yields are
+experimentally consistent almost everywhere, except for a small number of them,
+which we describe below and can easily remove in a post-processing stage. Note
+that the gradients we derive in Sec. 3.2 do not require backpropagation through
+the iso-surface extraction. Hence, this post-processing step does not compromise
+differentiability.
+Removing Spurious Facets and Smoothing Borders. As shown in Fig. 3 (a), facets
+that do not correspond to any part of the surfaces can be created in cells with
+gradients pointing in opposite directions without intersecting the 0-levelset. This
+typically happens near surface borders because our approach tends to slightly
+extend them, or around areas with poorly approximated gradients far from the
+surface in the case of learned UDF fields. Such facets can be detected by reevaluating the distance field on all vertices. If the distance field for one vertex
+of a face is greater than half the side-length of a cubic cell, it is then eliminated.
+Moreover, since marching cubes was designed to reconstruct watertight surfaces,
+it cannot handle surface borders. As a result, they appear slightly jagged on
+initial reconstructions. To mitigate this, we apply Laplacian smoothing on the
+edges belonging to a single triangle. This smoothes borders and qualitatively
+improves reconstructions, as shown in Fig. 3 (b).
+3.2
+Differentiating through Iso-Surface Extraction
+Let v ∈ R3 be a point on a facet reconstructed using the method of Sec. 3.1. Even
+though differentiating v directly through marching cubes is not possible [25,34],
+it was shown that if ϕ were an SDF instead of an UDF, derivatives could be
+obtained by reasoning about surface inflation and deflation [1,34]. Unfortunately,
+for an UDF, there is no ”in” or ”out” and its derivative is undefined on the surface
+itself. Hence, this method does not directly apply. Here we extend it so that it
+does, first for points strictly within the surface, and then for points along its
+boundary.
+Derivatives within the Surface. Let us assume that v ∈ R3 lies within a facet
+where the surface normal n is unambiguously defined up to its orientation. Let
+us pick a small scalar value α > 0 and consider
+\bv _+ = \bv + \alpha \bn \; \text { and } \; \bv _- = \bv - \alpha \bn \; , \nonumber
+the two closest points to v on the α-levelset on both sides of the 0-levelset. For
+α small enough, the outward oriented normals at these two points are close to
+being n and −n. We can therefore use the formulation of [1,34] to write
+\frac {\partial \bv _+}{\partial \bz } \approx - \bn \frac {\partial \phi }{\partial \bz }(\bz , \bv _+) \; \; \; \; \; \; \text { and } \; \; \; \; \; \; \; \frac {\partial \bv _-}{\partial \bz } \approx \bn \frac {\partial \phi }{\partial \bz }(\bz , \bv _-)\; . \label {eq:derivatives_vPlusMinus}
+(4)
+MeshUDF: Fast and Differentiable Meshing of UDF networks
+7
+n
+>0
+=0
+>0
+v+
+v
+v−
+α
+v′
+v
+>0
+=0
+(a)
+(b)
+v vo
+α o
+(a)
+v′
+v
+(b)
+Fig. 4: Iso-surface deformation: (a) Fig. 5: Iso-surface shrinkage or exv on the 0-levelset, v+ and v− at dis- tension: (a) with v on the border of
+tance α ; (b) v moves to v′ if the UDF the 0-levelset, we place vo at a distance
+decreases at v+ and increases at v− . α in the direction of o ; (b) If the UDF
+increases at vo , v moves to v′ .
+Since v = 21 (v− + v+ ), Eq. 4, yields
+\frac {\partial \bv }{\partial \bz } &\approx \frac {\bn }{2} \left [ \frac {\partial \phi }{\partial \bz }(\bz , \bv - \alpha \bn ) - \frac {\partial \phi }{\partial \bz }(\bz , \bv + \alpha \bn )\right ] \; . \label {eq:derivatives0}
+(5)
+We provide a more formal proof and discuss the validity of the approximation
+in appendix. Note that using n′ = −n instead of n yields the same result.
+Intuitively, this amounts to surrounding the 0-levelset with α-margins where
+UDF values can be increased on one side and decreased on the other, which
+allows local deformations perpendicular to the surface. Fig. 4 (a) depicts the
+arrangement of v, v+ and v− around the surface. The derivative of Eq. 5 implies
+that infinitesimally increasing the UDF value at v− and decreasing it at v+
+would push v in the direction of n, as shown in Fig. 4 (b), and conversely. In
+practice, we use α = 10−2 in all our experiments.
+Derivatives at the Surface Boundaries. Let us now assume that v sits on the
+edge of a boundary facet. Mapping it to v+ and v− and using the derivatives of
+Eq. 5 would mean that all deformations are perpendicular to that facet. Thus, it
+does not permit shrinking or expanding of the surface during shape optimization.
+In this setting, there is a whole family of closest points to v in the α-levelset;
+they lay on a semicircle with radius α. To allow for shrinkage and expansion,
+we map v to the semicircle point along o, a vector perpendicular to the edge,
+pointing outwards, and within the plane defined by the facet. Hence, we consider
+the point vo which is the closest to v on the α-levelset in the direction of o:
+\bv _o &= \bv + \alpha \bo \label {eq:mapping_Out}
+(6)
+For α small enough, the outward oriented normal at vo is o and we again use
+the formulation of [1,34] and Eq. 6 to write
+\frac {\partial \bv _o}{\partial \bz } = - \bo \frac {\partial \phi }{\partial \bz }(\bz , \bv _o) \; \text { and } \; \frac {\partial \bv }{\partial \bz } = - \bo \frac {\partial \phi }{\partial \bz }(\bz , \bv + \alpha \bo ) \; , \label {eq:derivatives5}
+(7)
+which we use for all points v on border edges. As shown in Fig. 5, this implies
+that increasing the UDF value at vo would push v inwards and make the surface
+shrink. Conversely, decreasing it extends the surface in the direction of o.
+8
+B. Guillard et al.
+4
+Experiments
+We demonstrate our ability to mesh UDFs created by deep neural networks. To
+this end, we first train a deep network to map latent vectors to UDFs representing
+different garments, that is, complex open surfaces with many different topologies.
+We then show that, given this network, our approach can be used to effectively
+triangulate these garments and to model previously unseen ones. Next, we plug
+our triangulation scheme into existing UDF networks and show that it is a
+straightforward operation. Finally, the benefit of the border gradients of Sec. 3.2
+is evaluated. The voting scheme proposed in Sec. 3.1 is ablated in appendix,
+where more qualitative results are also shown.
+4.1
+Network and Metrics
+Our approach is designed to triangulate the output of networks that have been
+trained to produce UDF fields. To demonstrate this, we use an auto-encoding
+approach [32] with direct supervision on UDF samples on the MGN dataset [6]
+to train a network ϕθ that maps latent vectors of dimension 128 to UDFs that
+represent garments. These UDFs can in turn be triangulated using our algorithm
+to produce meshes such as those of Fig. 1. We provide details of this training procedure in the supplementary material. The MGN dataset comprises 328 meshes.
+We use 300 to train ϕθ and the remaining 28 for testing. For comparison purposes, we also use the publicly available pre-trained network of NDF [11] that
+regresses UDF from sparse input point clouds. It was trained on raw ShapeNet [7]
+meshes, without pre-processing to remove inner components make them watertight or consistently orient facets.
+To compare the meshes we obtain to the ground-truth ones, we evaluate the
+following three metrics (details in the supplementary material):
+– The Chamfer distance (CHD) measures the proximity of 3D points sampled from the surfaces, the lower the better.
+– The Image consistency (IC) is the product of IoU and cosine similarity of
+2D renderings of normal maps from 8 viewpoints, the higher the better.
+– The Normal consistency (NC) quantifies the agreement of surface normals
+in 3D space, the higher the better.
+4.2
+Mesh Quality and Triangulation Speed
+Fig. 1 was created by triangulating a UDF produced by ϕθ using either our
+meshing procedure (Ours) or one of two baselines:
+– BP. It applies the ball-pivoting method [5] implemented in [12] on a dense
+surface sampling of 900k points, as originally proposed in [11] and also used
+in [39]. Surface points are obtained by gradient descent on the UDF field.
+– Inflation [17,37,13]. It uses standard marching cubes to mesh the ϵ-isolevel
+of the field, with ϵ > 0.
+MeshUDF: Fast and Differentiable Meshing of UDF networks
+9
+Table 1: Comparing UDF meshing methods. Average Chamfer (CHD), image
+consistency (IC), normal consistency (NC) and processing time for 300 garments (left)
+and 300 ShapeNet cars (right). We use a single UDF network in each case and only
+change the meshing procedure. For BP, we decompose the time into sampling and
+meshing times.
+Garments, ϕθ network
+Cars, NDF network [11]
+BP
+Inflation Ours
+BP
+Inflation Ours
+CHD (↓)
+1.62
+3.00
+1.51
+6.84
+11.24
+6.63
+IC (%, ↑)
+92.51
+88.48
+92.80
+90.50
+87.09
+90.87
+NC (%, ↑)
+89.50
+94.16
+95.50
+61.50
+73.19
+70.38
+Time (↓) 16.5s + 3000s 1.0 sec. 1.2 sec. 24.7s + 8400s 4.8 sec. 7.1 sec.
+In Tab. 1 (left), we report metrics on the 300 UDF fields ϕθ (zi , ·) for which we
+have latent codes resulting from the above-mentioned training. Inflation and
+Ours both use a grid size of 1283 over the [−1, 1]3 bounding box, and we set
+Inflation’s ϵ to be 55% of marching cubes’ step size. In Tab. 1 (right) we also
+report metrics for the pretrained NDF network [11] tested on 300 ShapeNet cars,
+in which case we increase Inflation and Ours resolution to 1923 to account for
+more detailed shapes. An example is shown in Fig. 9 The experiments were run
+on a NVidia V100 GPU with an Intel Xeon 6240 CPU.
+As shown on the left of Table. 1, Ours is slightly more accurate than NDF in
+terms of all three metrics, while being orders of magnitude faster. Inflation is
+even faster—this reflects the overhead our modified marching cube algorithm
+imposes—but far less accurate. To show that this result is not specific to garments, we repeated the same experiment on 300 cars from the ShapeNet dataset
+and report the results on the right side of Table. 1. The pattern is the same
+except for NC, which is slightly better for Inflation. We conjecture this to be
+a byproduct of the smoothing provided by Inflation, which is clearly visible in
+Fig. 1(a,c). To demonstrate that these results do not depend on the specific
+marching cube grid resolution we chose, we repeated the experiment for grid
+resolutions ranging from 64 to 512 and plot the average CHD as a function of
+resolution in Fig. 6. It remains stable over the whole range. For comparison purposes, we also repeated the experiment with Inflation. Each time we increase
+the resolution, we take the ϵ value that defines the iso-surface to be triangulated to be 10% greater than half the grid-size, as shown in Fig. 7. At very high
+resolution, the accuracy of Inflation approaches Ours but that also comes at a
+high-computational cost because operating on 512 × 512 × 512 cubes instead of
+128×128×128 ones is much slower, even when using multi-resolution techniques.
+4.3
+Using Differentiability to Fit Sparse Data
+Given the trained network ϕθ and latent codes for training shapes from Sec. 4.2,
+we now turn to recovering latent codes for the remaining 28 test garments. For
+10
+B. Guillard et al.
+6.99
+Ours
+Inflation
+CHD
+6
+4
+2
+2.00
+1.66
+1.51
+64
+128
+s
+2ϵ
+3.00
+1.51
+Grid resolution
+256
+2ϵ
+1.76
+1.53
+512
+Fig. 6: CHD as a function of grid Fig. 7: Choosing ϵ for Inflation. when
+resolution. between reconstructed and meshing a UDF’s ϵ iso-level with standard
+ground truth meshes, averaged over the marching cubes, the value of ϵ is lower
+300 training garments of MGN. Ours bounded by half the step size s. Left:
+yields constantly accurate meshes, Infla- 2ϵ < s yields many large holes. Right:
+tion deforms the shapes at low resolutions. 2ϵ ≥ s yields a watertight mesh.
+Table 2: Fitting to sparse point clouds. The table shows average Chamfer (CHD),
+image consistency (IC), and normal consistency (NC) wrt. ground truth test garments.
+We report metrics for un-optimized latent codes (Init.), after optimizing (LP C,mesh )
+using our method, and optimizing either LP C,U DF or LeP C,U DF in the implicit domain.
+(a) A sparsely sampled ground truth mesh. (b) Mesh reconstructed by mimimizing
+LP C,mesh , (c) LP C,U DF , (d) LeP C,U DF .
+(a)
+(b)
+(c)
+(d)
+Init. LP C,mesh LP C,U DF LeP C,U DF
+CHD (↓) 20.45 3.54
+4.54
+4.69
+IC (%,↑) 69.54 84.84
+82.80
+82.31
+NC (%,↑) 74.54 86.85
+80.68
+86.35
+each test garment Gj , given the UDF representing it, this would be a simple
+matter of minimizing the mean square error between it and the field ϕθ (z, ·)
+with respect to z, which does not require triangulating. We therefore consider
+the more challenging and more realistic cases where we are only given eiter small
+set of 3D points Pj —in practice we use 200 points—or silhouettes and have to
+find a latent vector that generates the UDF that best approximates them.
+Fitting to 3D points. One way to do this is to remain in the implicit domain
+and to minimize one of the two loss functions
+\mathcal {L}_{PC,UDF}(P_j, \mathbf {z}) &= \tfrac {1}{|P_j|} \sum _{p \in {P_j}} | \phi _{\theta }(\mathbf {z}, p) | \; , \\ \widetilde {\mathcal {L}}_{PC,UDF}(P_j, \mathbf {z}) & = \mathcal {L}_{PC,UDF}(P_j, \mathbf {z}) + \tfrac {1}{|A|} \sum _{a \in A} | \phi _{\theta }(\mathbf {z}, a) - \min _{p \in {P_j}} \left \| a - p \right \|_2 | \; , \nonumber
+MeshUDF: Fast and Differentiable Meshing of UDF networks
+11
+Table 3: Fitting to silhouettes. Average Chamfer (CHD), image consistency (IC),
+and normal consistency (NC) wrt. ground truth test garments. We report metrics for
+un-optimized latent codes (Init.), using our method to minimize (Lsilh,mesh ), and by
+minimizing (Lsilh,U DF ) in the implicit domain. (a) Mesh reconstructed by minimizing
+Lsilh,mesh . (b,c) Superposition of a target silhouette (light gray) and of the reconstructions (dark gray) by minimizing Lsilh,U DF or Lsilh,mesh . Black denotes perfect
+alignment and shows that the Lsilh,U DF mesh is much better aligned.
+Init. Lsilh,mesh Lsilh,U DF
+CHD 20.45 9.68
+12.74
+IC 69.54 79.90
+74.46
+NC 74.54 81.37
+80.70
+(a)
+(b)
+(c)
+where A is a set of randomly sampled points. Minimizing LP C,U DF means that
+the given Pj points must be on the zero-level surface of the UDF. Minimizing
+LeP C,U DF means that, in addition, the predicted UDF evaluated at points of
+A must match the approximated UDF computed from Pj . Since the latter is
+sparse, LeP C,U DF only provides an approximate supervision.
+An alternative is to use our approach to triangulate the UDFs and minimize
+the loss function
+\mathcal {L}_{PC,mesh}(P_j, \bz ) = \tfrac {1}{|P_j|} \sum _{p \in {P_j}} \min _{a \in M_{\mathbf {z}}} \left \| a - p \right \|_2 \; , \label {eq:chdLoss}
+(9)
+where a ∈ Mz means sampling 10k points a on the triangulate surface of Mz .
+Minimizing LP C,mesh means that the chamfer distance between the triangulated
+surfaces and the sample points should be small. Crucially, the results of Sec. 3.2
+guarantee that LP C,mesh is differentiable with respect to z, which makes minimization practical. We tried minimizing the three loss functions defined above.
+In each case we started the minimization from a randomly chosen latent vector
+for a garment of the same type as the one we are trying to model, which corresponds to a realistic scenario if the initial estimate is provided by an upstream
+network. We report our results in Tab. 2. Minimizing LP C,mesh clearly yields
+the best results, which highlights the usefulness of being able to triangulate and
+to differentiate the result.
+Fitting to Silhouettes. We now turn to the problem of fitting garments to rasterized binary silhouettes. Each test garment j is rendered into a front-facing
+binary silhouette Sj ∈ {0, 1}256×256 . Given Sj only, our goal is to find the latent
+code zj that best encodes j. To this end, we minimize
+\mathcal {L}_{silh,mesh}(S_j, \bz ) = L_1(rend(M_{\mathbf {z}}), S_j) \; ,
+(10)
+where rend is a differentiable renderer [21] that produces a binary image of the
+UDF triangulation Mz and L1 (·) is the L1 distance. Once again, the differentiability of Mz with respect to z is key to making this minimization practical.
+12
+B. Guillard et al.
+Table 4: Ablation Study. Average Chamfer (CHD), image consistency (IC), and
+normal consistency (NC) for test garments using either our full approach to computing
+gradients (normals + border ) vs. computing the gradients everywhere using only the
+formula of Eq. 5. (normals).
+Gradients:
+Gradients:
+Fitting
+Metric normals normals + border
+CHD
+3.75
+3.54
+Point cloud,
+NC
+84.28
+84.84
+LP C,mesh
+IC
+86.71
+86.76
+CHD
+10.45
+9.68
+Silhouette,
+IC
+78.84
+79.90
+Lsilh,mesh
+NC
+80.86
+81.37
+In theory, instead of rendering a triangulation, we could have used an UDF
+differential renderer. Unfortunately, we are not aware of any. Approaches such as
+that of [26] rely on finding sign changes and only work with SDFs. In contrast,
+CSP-Net [37] can render UDFs without meshing them but is not differentiable.
+To provide a baseline, we re-implemented SMPLicit’s strategy [13] for fitting a
+binary silhouette by directly supervising UDF values. We sample a set of points
+P ⊂ [−1, 1]3 , and project each p ∈ P to Sj using the front-facing camera c to
+get its projected value sp . If sp = 1, point p falls within the target silhouette,
+otherwise it falls into the background. SMPLicit’s authors advocate optimizing
+z by summing
+\mathcal {L}_{silh,UDF}(S_j, \mathbf {z}) = \left \{\begin {matrix} |\phi _{\theta }(\mathbf {z}, p) - d_{max}| & \mbox {if }s_p=0\\ \underset {\bar {p}\mbox { s.t. } \mathbf {c}(\bar {p})=\mathbf {c}(p)}{\min } |\phi _{\theta }(\mathbf {z}, \bar {p})| & \mbox {if }s_p=1 \end {matrix}\right . \; .
+(11)
+on p ∈ P . That is, points projecting outside the silhouette (sp = 0) should have
+a UDF value equal to the clamping value dmax . For points projecting inside the
+silhouette, along a camera ray we only consider p̄, the closest point to the current
+garment surface estimate and its predicted UDF value should be close to 0. We
+report our results in Tab. 3. Minimizing Lsilh,mesh yields the best results, which
+highlights the benefits of pairing our method with a differentiable mesh renderer.
+Ablation Study. We re-ran the optimizations without the border derivative
+term of Eq. 7, that is, by computing the derivatives everywhere using the expression of Eq. 5. As can be seen in Tab. 4, this reduces performance and confirms
+the importance of allowing for shrinkage and expansion of the garments.
+4.4
+Differentiable Topology Change
+A key feature of all implicit surface representations is that they can represent
+surfaces whose topology can change. As shown in Fig. 8, our approach allows us
+to take advantage of this while simultaneously creating a mesh whose vertices
+have associated spatial derivatives. To create this example, we started from a
+MeshUDF: Fast and Differentiable Meshing of UDF networks
+(a)
+(b)
+13
+(c)
+Fig. 8: Optimization with a change in topology: (a) Starting mesh associated to
+the initial latent code z = zstart ; (b) Optimizing z with gradient descent by applying
+a 3D Chamfer loss between the reconstructed mesh and a target shape shown in (c).
+During optimization, the latent code takes values that do not correspond to valid
+garments, hence the tears in our triangulations. Nevertheless, it eventually converges
+to the desired shape.
+Fig. 9: Using our approach to triangulate the outputs of NDF [11] (left) and
+AnchorUDF [39] (right). In both cases, we display the input to the network, a point
+cloud in one case and a color image in the other, the dense cloud of points that is the
+final output of these methods, and a triangulation of the UDF they compute generated
+using our method.
+latent code for a pair of pants and optimized with respect to it to create a new
+surface that approximates a sweater by minimizing the CHD loss of Eq. 9 over
+10k 3D points on that sweater. The topology changes that occur on the mesh
+representing the deforming shape do not create any difficulties.
+4.5
+Generalization to other UDF Networks
+To show that our meshing procedure is applicable as-is to other UDF-based
+methods, we use it downstream of publicly available pre-trained networks. In
+Fig. 9 (bottom) we mesh the outputs of the garment reconstruction network
+of AnchorUDF [39]. In Fig. 9 (top) we apply it to the point cloud completion
+pipeline of NDF [11]. Both these methods output dense point clouds surface,
+which must then be meshed using the time-costly ball pivoting algorithm. Instead, our method can directly mesh the UDF and does so in a fraction of the
+time while preserving differentiability. That makes the whole algorithm suitable
+for inclusion into an end-to-end differentiable pipeline.
+4.6
+Limitations
+Reliance on learned UDF fields. The proposed method can mesh the zero-surface
+of an unsigned distance field. In practice however, UDF fields are approximated
+14
+B. Guillard et al.
+with neural networks, and we find it difficult to learn a sharp 0-valued surface for
+networks with small capacities. It can for example happen that the approximate
+UDF field is not reaching zero, or that the zero surface thickens and becomes a
+volume, or that the gradients are not approximated well enough. In such cases,
+artifacts such as single-cell holes can appear when using our method at a high
+resolution. Note that applying our method to a real UDF would not exhibit such
+issues. By comparison however, applying marching cubes on an approximate
+and poorly learned SDF is more robust since it only requires the field to be
+continuous and to have a zero crossing to produce artifact-free surfaces. UDF
+networks could be made more accurate by using additional loss terms [16] or
+an adaptive training procedure [15], but this research direction is orthogonal to
+the method proposed in this paper. Moreover, similarly to [34] for SDFs, since
+the proposed gradients rely on the field being an UDF, they cannot be used to
+train a neural network from scratch. This would require network initialization
+or regularization strategies to ensure it regresses valid UDF fields, a topic we see
+as an interesting research direction.
+Limitations of marching cubes. After locally detecting surface crossings via
+the pseudo-sign computation, we rely on standard marching cubes for meshing
+an open surface, which implies the need of a high resolution grid to detect high
+frequency details, and cubic scalability over grid resolution. Moreover, marching
+cubes was designed to handle watertight surfaces, and as a consequence some
+topological cases are missing, for example at surface borders or intersections.
+This could be remedied by detecting and handling such new cases with additional
+disjunctions. Finally, the breadth-first exploration of the surface makes the orientation of adjacent facets consistent with each other. However, non-orientable
+surfaces such as Möbius-strips would intrisically produce juncture points with
+inconsistent orientations when two different branches of the exploration reach
+each other. In such points, our method can produce holes. Similarly, marching
+cubes has geometric guarantees on the topology of reconstructed meshes, but
+this is not true for the proposed method since there is no concept of inside and
+outside in UDFs.
+5
+Conclusion
+We have shown that deep-implicit non-watertight surfaces expressed in terms of
+unsigned distance functions could be effectively and differentiably triangulated.
+This provides an explicit parameterization of such surfaces that can be integrated
+in end-to-end differentiable pipelines, while retaining all the strengths of implicit
+representations, mainly that a network can accurately represent shapes with
+different topologies (jeans, sweater...) from the same latent space. In future work,
+we will explore how it can be used to jointly optimize the pose and clothes of
+people wearing loose attire.
+Acknowledgement. This project was supported in part by the Swiss National
+Science Foundation.
+MeshUDF: Fast and Differentiable Meshing of UDF networks
+15
+References
+1. Atzmon, M., Haim, N., Yariv, L., Israelov, O., Maron, H., Lipman, Y.: Controlling
+Neural Level Sets. In: Advances in Neural Information Processing Systems (2019)
+2, 3, 6, 7, 20
+2. Atzmon, M., Lipman, Y.: SAL: Sign Agnostic Learning of Shapes from Raw Data.
+In: Conference on Computer Vision and Pattern Recognition (2020) 2
+3. Atzmon, M., Lipman, Y.: SALD: Sign Agnostic Learning with Derivatives. In:
+International Conference on Learning Representations (2020) 2
+4. Baqué, P., Remelli, E., Fleuret, F., Fua, P.: Geodesic Convolutional Shape Optimization. In: International Conference on Machine Learning (2018) 2
+5. Bernardini, F., Mittleman, J., Rushmeier, H., Silva, C., Taubin, G.: The BallPivoting Algorithm for Surface Reconstruction. IEEE Transactions on Visualization and Computer Graphics 5(4), 349–359 (1999) 2, 3, 8
+6. Bhatnagar, B.L., Tiwari, G., Theobalt, C., Pons-Moll, G.: Multi-Garment Net:
+Learning to Dress 3D People from Images. In: International Conference on Computer Vision (2019) 8, 18
+7. Chang, A., Funkhouser, T., G., L., Hanrahan, P., Huang, Q., Li, Z., Savarese, S.,
+Savva, M., Song, S., Su, H., Xiao, J., Yi, L., Yu, F.: Shapenet: An Information-Rich
+3D Model Repository. In: arXiv Preprint (2015) 2, 8
+8. Chen, Z., Zhang, H.: Learning Implicit Fields for Generative Shape Modeling. In:
+Conference on Computer Vision and Pattern Recognition (2019) 2, 3
+9. Chen, Z., Zhang, H.: Neural Marching Cubes. In: ACM Transactions on Graphics
+(Special Issue of SIGGRAPH Asia) (2021) 3
+10. Chernyaev, E.V.: Marching Cubes 33: Construction of Topologically Correct Isosurfaces. In: Institute for High Energy Physics, Moscow, Russia, Report CN/95-17
+(1995) 3
+11. Chibane, J., Mir, A., Pons-Moll, G.: Neural Unsigned Distance Fields for Implicit
+Function Learning. In: Advances in Neural Information Processing Systems (2020)
+1, 2, 3, 8, 9, 13, 18, 27
+12. Cignoni, P., Callieri, M., Corsini, M., Dellepiane, M., Ganovelli, F., Ranzuglia, G.:
+Meshlab: An Open-Source Mesh Processing Tool. In: Eurographics Italian Chapter
+Conference (2008) 8
+13. Corona, E., Pumarola, A., Alenya, G., Pons-Moll, G., Moreno-Noguer, F.: Smplicit: Topology-Aware Generative Model for Clothed People. In: Conference on
+Computer Vision and Pattern Recognition (2021) 1, 2, 3, 8, 12
+14. Dawson-Haggerty et al.: trimesh, https://trimsh.org/ 18
+15. Duan, Y., Zhu, H., Wang, H., Yi, L., Nevatia, R., Guibas, L.J.: Curriculum
+DeepSDF. In: European Conference on Computer Vision (2020) 14
+16. Gropp, A., Yariv, L., Haim, N., Atzmon, M., Lipman, Y.: Implicit Geometric Regularization for Learning Shapes. In: International Conference on Machine Learning
+(2020) 14
+17. Guillard, B., Remelli, E., Lukoianov, A., Richter, S., Bagautdinov, T., Baque, P.,
+Fua, P.: Deepmesh: Differentiable Iso-Surface Extraction. In: arXiv Preprint (2022)
+1, 2, 3, 8
+18. Gundogdu, E., Constantin, V., Parashar, S., Seifoddini, A., Dang, M., Salzmann,
+M., Fua, P.: Garnet++: Improving Fast and Accurate Static 3D Cloth Draping by
+Curvature Loss. IEEE Transactions on Pattern Analysis and Machine Intelligence
+22(1), 181–195 (2022) 2
+16
+B. Guillard et al.
+19. Hao, Z., Averbuch-Elor, H., Snavely, N., Belongie, S.: DualSDF: Semantic Shape
+Manipulation Using a Two-Level Representation. In: Conference on Computer Vision and Pattern Recognition. pp. 7631–7641 (2020) 3
+20. Ju, T., Losasso, F., Schaefer, S., Warren, J.: Dual Contouring of Hermite Data. In:
+ACM SIGGRAPH (2002) 3
+21. Kato, H., Ushiku, Y., Harada, T.: Neural 3D Mesh Renderer. In: Conference on
+Computer Vision and Pattern Recognition (2018) 11
+22. Kingma, D.P., Ba, J.: Adam: A Method for Stochastic Optimization. In: International Conference on Learning Representations (2015) 18
+23. Lahner, Z., Cremers, D., Tung, T.: Deepwrinkles: Accurate and Realistic Clothing
+Modeling. In: European Conference on Computer Vision (September 2018) 2
+24. Lewiner, T., Lopes, H., Vieira, A.W., Tavares, G.: Efficient Implementation of
+Marching Cubes’ Cases with Topological Guarantees. In: Journal of Graphics Tools
+(2003) 3
+25. Liao, Y., Donné, S., Geiger, A.: Deep Marching Cubes: Learning Explicit Surface
+Representations. In: Conference on Computer Vision and Pattern Recognition. pp.
+2916–2925 (2018) 6
+26. Liu, S., Zhang, Y., Peng, S., Shi, B., Pollefeys, M., Cui, Z.: Dist: Rendering Deep
+Implicit Signed Distance Function with Differentiable Sphere Tracing. In: Conference on Computer Vision and Pattern Recognition. pp. 2019–2028 (2020) 12
+27. Lopes, A., Brodlie, K.: Improving the Robustness and Accuracy of the Marching
+Cubes Algorithm for Isosurfacing. In: IEEE Transactions on Visualization and
+Computer Graphics (2003) 3
+28. Lorensen, W., Cline, H.: Marching Cubes: A High Resolution 3D Surface Construction Algorithm. In: ACM SIGGRAPH. pp. 163–169 (1987) 2, 3, 4
+29. Mescheder, L., Oechsle, M., Niemeyer, M., Nowozin, S., Geiger, A.: Occupancy Networks: Learning 3D Reconstruction in Function Space. In: Conference on Computer
+Vision and Pattern Recognition. pp. 4460–4470 (2019) 2, 3
+30. Müller, T., Evans, A., Schied, C., Keller, A.: Instant Neural Graphics Primitives
+with a Multiresolution Hash Encoding. arXiv Preprint (2022) 21
+31. Nimier-David, M., Vicini, D., Zeltner, T., Jakob, W.: Mitsuba 2: A Retargetable
+Forward and Inverse Renderer. ACM Transactions on Graphics 38(6), 1–17 (2019)
+2
+32. Park, J.J., Florence, P., Straub, J., Newcombe, R.A., Lovegrove, S.: Deepsdf: Learning Continuous Signed Distance Functions for Shape Representation. In: Conference on Computer Vision and Pattern Recognition (2019) 2, 3, 8, 18
+33. Peng, S., Niemeyer, M., Mescheder, L., Pollefeys, M., Geiger, A.: Convolutional
+Occupancy Networks. In: European Conference on Computer Vision. pp. 523–540
+(2020) 3
+34. Remelli, E., Lukoianov, A., Richter, S., Guillard, B., Bagautdinov, T., Baque, P.,
+Fua, P.: Meshsdf: Differentiable Iso-Surface Extraction. In: Advances in Neural
+Information Processing Systems (2020) 2, 3, 6, 7, 14, 20
+35. Sitzmann, V., Martel, J., Bergman, A., Lindell, D., Wetzstein, G.: Implicit Neural Representations with Periodic Activation Functions. In: Advances in Neural
+Information Processing Systems (2020) 18
+36. Tang, M., Wang, T., Liu, Z., Tong, R., Manocha, D.: I-Cloth: Incremental Collision
+Handling for Gpu-Based Interactive Cloth Simulation. In: ACM Transactions on
+Graphics (2018) 2
+37. Venkatesh, R., Karmali, T., Sharma, S., Ghosh, A., Babu, R.V., Jeni, L.A., Singh,
+M.: Deep Implicit Surface Point Prediction Networks. In: International Conference
+on Computer Vision (2021) 1, 2, 3, 4, 8, 12
+MeshUDF: Fast and Differentiable Meshing of UDF networks
+17
+38. Xu, Q., Wang, W., Ceylan, D., Mech, R., Neumann, U.: DISN: Deep Implicit
+Surface Network for High-Quality Single-View 3D Reconstruction. In: Advances in
+Neural Information Processing Systems (2019) 2, 3
+39. Zhao, F., Wang, W., Liao, S., Shao, L.: Learning Anchored Unsigned Distance
+Functions with Gradient Direction Alignment for Single-View Garment Reconstruction. In: International Conference on Computer Vision (2021) 2, 3, 8, 13, 27,
+28
+18
+B. Guillard et al.
+Supplementary Material
+In Sec. 5.1 we describe the procedure used to train the UDF network ϕθ on MGN
+garments. In Sec. 5.2 we explain the metrics used in the experiment section.
+In Sec. 5.3 we explain in more details the gradients introduced in the main
+paper. In Sec. 5.4 we show experimental evidence that artifacts appearing at
+high resolution are caused by the UDF field being approximated. In Sec. 5.5 we
+demonstrate the benefits of the voting scheme for establishing pseudo-signs. In
+Sec. 5.6, we show the fitting to sparse pointclouds of Sec. 4.3 can be initialized
+from random latent codes.
+5.1
+Network Training
+We train one auto-decoder [32] network ϕθ to approximate the UDF field of a
+garment collection. We use the dataset from MGN [6] consisting of 328 meshes
+from which we keep 300 instances for training and 28 for testing.
+To generate UDF supervision sample points and values, meshes are scaled to
+fit a sphere of radius 0.8, and for each mesh i we generate N training samples
+(pi,j , di,j ) ∈ R3 × R+ where di,j is the minimum between dmax and the distance
+from 3D point pi,j to the i-th shape. We clamp UDF values at dmax = 0.1 to
+avoid wasting the network’s capacity on learning a precise field away from the
+surface as in [32,11]. We pick N = 30000 and sample 6000 points uniformly on
+the surface, 12000 within a distance 0.05, 8000 within a distance 0.3 and 4000
+within the bounding box of side length 2. As opposed to SDF values, unsigned
+distances di,j can be computed directly from raw triangle soups with standard
+software [14], and do not require any pre-processing of the meshes.
+ϕθ is implemented by a 9-layer MLP with 512 hidden dimensions and ReLU
+activation functions. It uses Fourier positional encoding of fifth order on the
+3D coordinate inputs [35]. We jointly optimize the network’s weights θ with one
+latent vector embedding zi ∈ R128 per training shape i by minimizing the L1 loss
+between the predicted and target UDF values, with a regularization of strength
+λ = 10−4 on the norm of the latent codes. With T as the training set, the full
+loss is
+
+
+N
+X
+X
+1
+
+|ϕθ (zi , pi,j ) − di,j | + λ ∥zi ∥2 
+L=
+|T | · N
+j=1
+i∈T
+and is minimized using Adam [22] for 2000 epochs.
+5.2
+Metrics
+f and a set A of points on its surface, along with
+Given a reconstructed mesh M
+a ground-truth mesh M and a set B of points on its surface, we
+MeshUDF: Fast and Differentiable Meshing of UDF networks
+19
+– Chamfer distance. We take it to be
+\mathrm {CHD}(\widetilde {M},M) &= \frac {1}{|A|} \sum _{a \in A} \! \min _{b \in B} \left \| a - b \right \|^2 \\ &+ \frac {1}{|B|} \sum _{b \in B} \! \min _{a \in A} \left \| a - b \right \|^2 , \nonumber
+the sum of the average distance of each point in A to B and the average
+distance of each point in B to A.
+– Image consistency. Let K be a set of 8 cameras located at the vertices of a
+cuboid encompassing the garments looking at its centroid. For each k ∈ K we
+render the corresponding binary silhouette Sk ∈ {0, 1}256×256 (respectively
+ek ) of mesh M (resp. M
+f).
+Sek ) and normal map Nk ∈ R256×256×3 (resp. N
+f
+Then we define the image consistency between M and M as
+\!\!\! \mathrm {IC}(\widetilde {M},M) = \tfrac {1}{|K|} \! \sum _{k \in K} \! \mathrm {IoU}(\widetilde {S}_k, S_k) * \mathrm {COS}(\widetilde {N}_k, N_k) \; ,
+(13)
+where IoU is the intersection-over-union of two binary silhouettes and COS is
+the average cosine-similarity between two normal maps. Both can be written
+as
+\!\!\! \mathrm {IoU}(\widetilde {S}, S) =& \! \sum _{u=1}^{H} \! \sum _{v=1}^{W} \! \widetilde {S}_{u,v} S_{u,v} \! \\ & \cdot \left [\sum _{u=1}^{H} \! \sum _{v=1}^{W} \! max(\widetilde {S}_{u,v} + S_{u,v},1) \right ]^{-1} \; ,
+(15)
+\!\!\! \mathrm {COS}(\widetilde {N}, N) = \tfrac {1}{HW} \! \sum _{u=1}^{H} \! \sum _{v=1}^{W} \! \tfrac {\widetilde {N}_{u,v} \cdot N_{u,v}}{\left \| \widetilde {N}_{u,v} \right \| \left \| N_{u,v} \right \| } \; , \nonumber
+with H and W the image height and width, Su,v ∈ {0, 1} the binary pixel
+value at coordinate (u, v) of S and Nu,v ∈ R3 the color pixel value at coordinate (u, v) of N .
+– Normal consistency. We take it to be
+\!\!\! \mathrm {NC}(\widetilde {M},M) & \! = \!\tfrac {1}{|A|}\!\! \sum _{a \in A} \!\! \left |\cos [ \mathbf {\widetilde {n}}(a), \mathbf {n}(\underset {b \in B}{\arg \!\min } \left \| a - b \right \|^2 ) ]\right | \nonumber \\ + & \tfrac {1}{|B|}\!\! \sum _{b \in B} \!\! \left |\cos [ \mathbf {n}(b), \mathbf {\widetilde {n}}(\underset {a \in A}{\arg \!\min } \left \| a - b \right \|^2 ) ]\right |,
+(16)
+the average unsigned cosine-similarity between the normals of pairs of closest
+e (x) denotes the normal at point x.
+point in A and B, where n
+5.3
+Differentiating through Iso-Surface Extraction
+In Sec. 3.2, we derived gradients for surface points with respect to the latent
+code z. We here expand on the underlying assumptions and justify our choices.
+20
+B. Guillard et al.
+n
+v+
+Sα
+S
+v
+α
+v−
+Fig. 10: Iso-surface differentiation: S is the minimum-levelset of UDF ϕ(z, ·)
+and Sα its α-levelset (α > 0). By using already established differentiability
+results on v+ ∈ Sα and v− ∈ Sα , we derive new derivatives for v ∈ S.
+Using the α-isolevel. Let α > 0 be a small scalar and z ∈ RC a latent code
+parametrizing the UDF field ϕ(z, ·). We consider v ∈ R3 , a surface point lying
+within a facet of the mesh Mz , and n its surface normal –defined up to its
+orientation. v lies on the 0-levelset of the field, and we choose to formulate it as
+the following linear combination
+\bv = \tfrac {1}{2} (\bv _- + \bv _+) \; , \label {eq:mapping_v}
+(17)
+where
+\bv _+ = \bv + \alpha \bn \; \text { and } \; \bv _- = \bv - \alpha \bn \; . \nonumber
+The arrangement of v, v+ and v− is depicted in Fig. 10.
+Both v+ and v− are at a distance α from v. Assuming such points to belong
+to the α-levelset, the outwards pointing normal of v+ on the α-levelset is n, and
+the one of v− is −n, and we can use [1,34] to write
+\frac {\partial \bv _+}{\partial \bz } = - \bn \frac {\partial \phi }{\partial \bz }(\bz , \bv _+) \; \; \; \; \; \; \text { and } \; \; \; \; \; \; \; \frac {\partial \bv _-}{\partial \bz } = \bn \frac {\partial \phi }{\partial \bz }(\bz , \bv _-)\; . \label {eq:equal_derivatives_vPlusMinus}
+(18)
+and differentiating the mapping of Eq. 17 –which we consider as fixed– yields
+\frac {\partial \bv }{\partial \bz } = \frac {\bn }{2} \left [ \frac {\partial \phi }{\partial \bz }(\bz , \bv - \alpha \bn ) - \frac {\partial \phi }{\partial \bz }(\bz , \bv + \alpha \bn )\right ] \; . \label {eq:equal_derivatives0}
+(19)
+Approximate gradients. In practice however, v+ and v− are not guaranteed to
+lie on the α-levelset, but can be on a β-levelset with β < α, in which case
+their normals differ from n and −n. For our assumption to hold, v needs to
+be the closest point to v+ on the 0-levelset, and similarly for v− , which is true
+when α is small compared to the surface curvature. We thus use Eqs. 18, 19 as
+approximations only.
+Eq. 19 is only flawed for points with high curvature, and still holds true
+for most of the points lying on unwrinkled regions of the surface. Since gradients backpropagated to the latent code are averaged over the entire surface (as
+MeshUDF: Fast and Differentiable Meshing of UDF networks
+S
+Sα
+vo
+v
+α
+21
+o
+Fig. 11: Iso-surface differentiation at borders: S is the minimum-levelset of
+UDF ϕ(z, ·) and Sα its α-levelset (α > 0). By using already established differentiability results on vo ∈ Sα , we derive a new derivative for v ∈ S.
+in [30]), a minority of them being noisy is not an issue. Sec. 4.3 empirically shows
+that using α = 0.01 works in practice for a wide range of shapes.
+Uniqueness of the mapping. Eq. 17 is an arbitrary choice of a mapping. It is not
+unique, and one could instead pair v to other points on the α-levelset, leading to
+a different result in Eq. 19. We deliberately chose the 2 closest points to naturally
+surround v with its closest neighbors.
+Minimizing a downstream loss. Eq. 19 can be used to minimize downstream loss
+functions directly defined on mesh vertices with gradient descent. Given such a
+loss function L, we use the chain rule to write
+\frac {\partial \mathcal {L}}{\partial \bz } = \sum _{(\bv , \bn ) \in M_{\bz }} \frac {\partial \mathcal {L}}{\partial \bv } \frac {\bn }{2} \left [ \frac {\partial \phi }{\partial \bz }(\bz , \bv - \alpha \bn ) - \frac {\partial \phi }{\partial \bz }(\bz , \bv + \alpha \bn )\right ] \;\;\;\; . \nonumber
+We rely on the field being an UDF and move its zero level set. This is in
+practice enforced by freezing the network weights, which is thus acting as a
+strong prior on the field, and only optimize the latent code.
+The case of border points. Border do not only have 2 closest neighbors on the
+α-levelset, but an entire semi-circle as depicted in blue on Fig. 11. In this case,
+we pair v with the outmost point on the α-level set with
+\bv = \bv _o - \alpha \bo \; , \label {eq:mapping_v_ext}
+(20)
+and follow the same reasoning as above. We consider o as a mapping direction,
+and thus locally fixed.
+Constructing the o vectors. Fig. 12 depicts the outwards pointing vectors o for
+one reconstructed garment. They are computed as follows. Let v be a vertex
+lying on the border, n be the normal vector of the facet it belongs to, and e be
+the border edge it is on. We take o to be
+\bo = \omega \frac {\bn \times \mathbf {e}}{\left \| \bn \times \mathbf {e} \right \|} \;\;\;\; \text {with} \;\;\;\; \omega =\pm 1\; ,
+(21)
+22
+B. Guillard et al.
+Fig. 12: Outwards pointing vectors: for border vertices we define outwards
+pointing vectors o to construct derivatives allowing the surface to shrink or
+extend along them.
+(a)
+(b)
+(c)
+Fig. 13: Meshing UDFs: (a) Ground truth mesh; (b) Our meshing procedure
+applied to a shallow UDF neural network yields staircase artifacts at a very
+high resolution (512); (c) Our method applied to the exact UDF at the same
+resolution reconstructs a smooth surface.
+the unit vector colinear to the cross product of n and e. This way, o is both in
+the tangent plane of the surface and perpendicular to the border. We choose the
+sign ω to orient o outwards. We write
+\omega = \underset {\{-1,1\}}{\arg \!\max } \;\; u(\bv +\omega \frac {\bn \times \mathbf {e}}{\left \| \bn \times \mathbf {e} \right \|} ) \; ,
+(22)
+that is, we evaluate the UDF in both directions and pick the one that yields the
+highest value.
+5.4
+Meshing approximate or real UDFs
+In Sec. 4.6 and Fig. 6 of the main paper, we mention artifacts of our meshing
+procedure when applied to approximate UDFs and at a high resolution. This is
+depicted in Fig. 13(b), where meshing a UDF represented by a shallow network
+(4 layers) with a grid resolution of 512 yields a mesh that is not smooth.
+MeshUDF: Fast and Differentiable Meshing of UDF networks
+g1 u1
+u2 g2
+g4 u4
+u3 g3
+(a)
+s1 =u1
+s2 =-u2
+s4 =u4
+s3 =-u3
+(b)
+23
+s1
+s1 −s2
+(c)
+Fig. 14: Detecting surface crossings: (a) all corners of the grid’s cell are
+annotated with unsigned distance values ui and gradients gi ; (b) we locally approximate signed distances with si =sgn(g1 ·gi )ui ; (c) marching cubes processes
+these pseudo-signed distances and produces a surface element accordingly.
+We hypothesized that this is due to the 0-levelset of the field being slightly
+inflated into a volume, with many grid locations evaluating to a 0 distance near
+the surface. This impedes Marching Cube’s interpolation step and produces this
+staircase artifact. To validate this hypothesis, in Fig. 13(c) we apply our meshing
+procedure to the exact UDF grid, numerically computed from the ground truth
+mesh of Fig. 13(a). This results in a smooth surface, thus indicating that the
+staircase artifact is indeed a consequence of meshing approximate UDFs.
+5.5
+Ablation study: pseudo-sign and breadth-first exploration
+In Sec. 3 we described a way to locally compute the pseudo-signed distance
+using gradient orientations (PSD), that is described in more details in Fig. 14.
+The PSD method has two shortcomings. First, the choice of the anchor corner
+implies that the anchor will have a positive pseudo-sign, and thus choosing a
+different anchor might invert all the signs of the cell. Since the choice is arbitrary,
+adjacent cells might have opposing sign choices: they will produce meaningful
+facets, but with opposing orientations. This can be partially fixed in a postprocessing step that scans the mesh trying to consistently reorient the facets,
+but this proved to be a time-consuming operation and it does not always find
+a consistent orientation. Second, if the surface in the cell or in the immediate
+proximity is not smooth enough, the gradients of the field can have ambiguous
+orientations (i.e. they do not clearly oppose each other, for example at a 45◦
+angle). In this setting, two different anchors can produce different pseudo-signs
+for the corners of the cell, and thus nearby cells that use a different anchor can
+assign different pseudo-signs to the same corner. This inconsistency creates an
+unwanted hole in the mesh and happens especially with learned UDF fields,
+which have noisy gradients.
+The breadth-first exploration (BFE ) method with a voting scheme that we
+propose has the purpose of improving these shortcomings: produce consistent
+normal orientations in adjacent facets and increase the robustness of the method
+on learned UDF fields with noisy gradients. The first objective is reached thanks
+to the breadth-first exploration itself, which is implemented using queues: following the surface makes it possible to store values of previously computed pseudosigns, ensuring that corners have the same pseudo-sign in adjacent cells. This
+also reduces the number of dot products required to complete the meshing proce-
+24
+B. Guillard et al.
+Table 5: Comparing UDF meshing methods: pseudo sign (PSD) versus
+breadth-first exploration with voting strategy (BFE ). Average Chamfer distance (CHD), average number of excess holes (EH) and average processing time on 300
+garments. We use a single UDF network and only change the meshing procedure.
+Resolution
+64
+128
+256
+512
+Meshing procedure PSD BFE PSD BFE PSD BFE PSD BFE
+CHD (↓)
+1.63 1.66 1.51 1.51 1.52 1.51 1.61 1.53
+EH (↓)
+21
+1.6
+153 7.8 1566 38 11526 478
+Time (↓)
+0.35s 0.24s 1.4s 1.2s 10.0s 9.1s 105s 69s
+dure, since corners are only computed once instead of being recomputed in every
+cell. However, simply plugging the pseudo-signed distance computation in this
+breadth-first exploration can cause even more artifacts due to anchor choice, as
+they can propagate in nearby cells since the cells are not treated independently
+anymore.
+To solve this problem and at the same time address the second objective,
+we use the voting scheme described in Sec. 3. This voting scheme has been
+experimentally inferred by looking at artifacts of the previous procedure, and
+has three motivations. First, it avoids an explicit and arbirary anchor choice,
+which is the main cause of inconsistencies, and it increases the robustness by
+making multiple neighbours vote for a single corner. Second, it prevents votes
+to be computed along diagonals in a cell, because the underlying interpolation
+algorithm of marching cubes does not create vertices along cell diagonals. Third,
+it prevents gradients facing each other along an edge to vote for having an
+opposing sign –when they indicate a local maximum of the field instead.
+Moreover, we notice that in corners with possible ambiguities the absolute
+value of the sum of received votes will be low. Some neighbours will vote positively and some others negatively, and the weight itself of the votes can be low
+when gradients are not clearly facing or opposing each other. We detect these
+cases that get a sum of votes below a threshold, fixed to cos(π/4), and we put
+them into a separate queue with a lower priority, to be re-evaluated later. The
+threshold has been set by noticing that, in a single-vote scenario, gradients at a
+[45◦ , 135◦ ] angle have a high ambiguity, since a 45◦ variation in the angle would
+flip the sign of their dot product. This queue is explored when the main exploration is over, thus increasing the number of neighbours that can vote and
+making the sign decision more robust. We also employ a third queue, which is
+explored with the lowest priority, that contains cells with multiple non-adjacent
+facets. These cells can potentially start the exploration of a non-contiguous surface, and are thus explored at the very end.
+To validate this algorithm, we compare BFE with the simple application of
+PSD using the same garment network and dataset described in Sec. 4.2 (and
+Tab. 1 left), at different resolutions. The post-processing steps (Fig. 3) applied
+to the two methods are the same except for the parameters used. Since PSD
+MeshUDF: Fast and Differentiable Meshing of UDF networks
+(a) 64
+(b) 128
+(c) 256
+25
+(d) 512
+Fig. 15: Comparing qualitative results of PSD and BFE. Each of the 4 columns
+corresponds to a meshing resolution, as indicated in the labels. In each column, top
+row left is the result of PSD, top row right is the result of BFE. Center and bottom
+rows show an above view of the same mesh, with holes colored in black. The two bigger
+holes correspond to the legs. Center row is PSD, bottom row is BFE.
+produces slightly less precise borders, we apply a coarser filtering of spurious
+facets and remove those whose UDF value is larger than 1/6 of the side-length
+of a cubic cell instead of half. In PSD we also apply 5 steps of laplacian smoothing
+on the borders instead of 1 for BFE.
+In Fig 15 we see that BFE produces consistent facets orientations, while PSD
+does not. Moreover, one can notice small holes in the garments reconstructed
+with PSD (center row), which tend to increase in number and decrease in dimension as the resolution increases, whereas BFE is able to close most of them
+(bottom row), proving to be more robust. Tab. 5 shows that the BFE method
+produces meshes with a slightly lower Chamfer distance, except at resolution 64.
+Since the size of the holes produced by PSD is very small, they do not significatively impact the CHD of this method. They however produce artifacts that
+are detrimental to the quality of the reconstructed mesh. To have a quantitative
+f, we
+measure of this, given a ground-truth mesh M and a reconstructed mesh M
+define the number of excess holes as:
+EH(\widetilde {M},M) = | |\widetilde {H}| - |H| | \; ,
+(23)
+e are the sets of holes of M and M
+f, computed as closed loops of
+where H and H
+edges that belong to a single triangle. This amounts to computing the number
+f compared to M , or viceversa.
+of holes in excess that are in M
+26
+B. Guillard et al.
+Table 6: Fitting to sparse point clouds, with different latent code initializations: either from a code of the same garment type (left), or from a random code
+(right). The table shows average Chamfer (CHD), image consistency (IC), and normal
+consistency (NC) wrt. ground truth test garments. We report metrics for un-optimized
+latent codes (Init.), after optimizing (LP C,mesh ) using our method, and optimizing
+either LP C,U DF or LeP C,U DF in the implicit domain.
+Initialization: same class
+Initialization: random
+Init. LP C,mesh LP C,U DF LeP C,U DF Init. LP C,mesh LP C,U DF LeP C,U DF
+CHD (↓) 20.45 3.54
+4.54
+4.69
+129.51 3.64
+4.59
+4.60
+IC (%,↑) 69.54 84.84
+82.80
+82.31
+49.08 84.70
+83.22
+82.94
+NC (%,↑) 74.54 86.85
+80.68
+86.35
+56.74 86.96
+84.20
+86.62
+Tab. 5 shows that BFE has a consistent advantage over PSD in this metric
+across all tested resolutions. In both methods, the EH tends to increase with
+resolution, as the limits of the learned field are approached and the gradients
+become noisier. The same experiment with a network trained on only 4 garments
+yields better results on such garments, with the BFE producing no excess holes
+at all 64-512 resolutions, and PSD producing a similar amount to that shown in
+the table.
+Finally, the BFE method is also slightly faster than PSD. This is mainly
+due to the reduced number of dot products computed. In PSD we compute
+8 dot products per cell –which amounts to an average of 4 dot products per
+corner, since every corner belongs to 4 different cells. In BFE each corner receives
+votes from a maximum of 6 neighbours with existing pseudo-signs. Since the
+exploration starts from one cell and proceeds breadth-first, for the vast majority
+of corners only a smaller number of neighbours will actually vote, decreasing the
+total number of dot products.
+5.6
+Optimization from random initial latent codes
+In Tab. 6 we reproduce the experiment from Sec. 4.3 and fit latent codes using
+sparse point clouds, but start from random latent codes instead of codes from
+a similar semantic class. This shows that the latter is not even a requirement
+because, despite starting from much worse initializations, our approach still succeeds better than direct supervision on the UDF values. Starting with latent
+codes of the same object category remains a plausible scenario because such
+codes could be provided by a regressor.
+MeshUDF: Fast and Differentiable Meshing of UDF networks
+27
+Fig. 16: Using our approach to triangulate the outputs of NDF [11]. For 8
+examples we display the input to the network (a sparse point cloud), a mesh of the
+predicted UDF mesh reconstructed by the ball pivoting method in more than 2 hours,
+and a triangulation of the UDF generated using our method in less than 10 seconds.
+5.7
+Additional results
+In Fig. 16 we show additional results of our method applied to mesh the UDF
+regressed from NDF [11] from sparse input point clouds. In Fig. 17, we mesh
+the UDF predicted by AnchorUDF [39] from input images. In Fig. 18, we compare our meshing method to the ϵ-inflation baseline for other garment samples
+reconstructed by an auto-decoder network.
+28
+B. Guillard et al.
+Fig. 17: Using our approach to triangulate the outputs of AnchorUDF [39],
+For 4 examples we display the input to the network (a color image), a point cloud of
+the predicted UDF as originally provided by this network, and a triangulation of the
+UDF generated using our method.
+MeshUDF: Fast and Differentiable Meshing of UDF networks
+29
+Fig. 18: Comparison of UDF meshing methods: Comparison of UDF meshing
+methods: In light grey are our open surface reconstructions ; In dark grey we display
+the ϵ-inflated baseline that yields wrongly inflated meshes.

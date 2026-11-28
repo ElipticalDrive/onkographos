@@ -1,0 +1,135 @@
+# Precise Rectangle-Ellipse Intersection Test
+
+Also called: Precise Rectangle-Ellipse Intersection, Algebraic Simplification for Intersection
+
+## Overview
+An algorithm to determine if a rectangular tile needs rendering by checking if a projected Gaussian ellipse intersects with it, used to reduce false positives compared to bounding box checks [S1]. It improves upon the [Axis-Aligned Rectangle Hit Test](5279-axis-aligned-rectangle-hit-test.md) by performing exact geometric intersection tests rather than conservative bounding volume checks, thereby reducing overdraw in 3D Gaussian Splatting [S1].
+
+## How it works
+**Inputs:**
+- A rectangle $R$ defined by its four edges (segments).
+- An ellipse $E$ defined by its center and conic coefficients (implicitly via the quadratic form derived from the Gaussian projection).
+
+**Outputs:**
+- Boolean: `true` if the rectangle and ellipse intersect (or the rectangle center is inside the ellipse), `false` otherwise.
+
+**Data Structures:**
+- Rectangle edges are treated as line segments $[a_i, b_i]$ on lines containing the rectangle boundaries.
+- Ellipse intersection with a line is determined by solving a quadratic equation $AX^2 + BX + C = 0$, where $A, B, C$ are coefficients derived from the ellipse equation and the line equation.
+
+**Steps:**
+1. **Center Check:** Check if the center point of the rectangle lies inside the ellipse. If true, return `true` [S1].
+2. **Edge Iteration:** For each edge of the rectangle:
+   a. Define the line containing the segment [S1].
+   b. Determine if the line intersects the ellipse. This involves solving the quadratic equation formed by substituting the line equation into the ellipse equation [S1].
+   c. If the line intersects the ellipse, calculate the intersection points (roots of the quadratic).
+   d. Check if any intersection points lie on the rectangle edge segment $[a_i, b_i]$ [S1].
+   e. If an intersection is found on the segment, return `true` [S1].
+3. **Result:** If no intersection is found after checking all edges, return `false` [S1].
+
+**Algebraic Simplification for Intersection:**
+To avoid high-cost operations (division and square roots) when checking if a tile edge intersects an ellipse, the root check is transformed into algebraic inequalities [S1].
+
+**Formulas:**
+- Quadratic Equation: $AX^2 + BX + C = 0$ [S1].
+- Discriminant: $DELTA = B^2 - 4AC$ [S1].
+- Assume $A > 0$ [S1].
+- Define expressions:
+  $$e_1 = 2Aa_i + B$$
+  $$e_2 = 2Ab_i + B$$
+- The condition for the line segment $[a_i, b_i]$ to intersect the ellipse roots $\frac{-B \pm \sqrt{DELTA}}{2A}$ is:
+  $$a_i \leq \frac{-B + \sqrt{DELTA}}{2A} \quad \& \quad b_i \geq \frac{-B - \sqrt{DELTA}}{2A}$$
+- Optimized check avoiding sqrt/div:
+  $$(e_1 \leq 0 \parallel e_1^2 \leq DELTA) \quad \& \quad (e_2 \geq 0 \parallel e_2^2 \leq DELTA)$$
+  [S1]
+
+**Pseudocode:**
+> **Unverified code.** The code below did not pass a test run against a reference implementation, or no test fits it, so it may contain errors.
+
+```python
+def precise_rectangle_ellipse_intersection(rect_center, rect_edges, ellipse_conic):
+    """
+    rect_center: (cx, cy)
+    rect_edges: list of 4 segments, each segment is ((x1, y1), (x2, y2))
+    ellipse_conic: coefficients A, B, C for the quadratic form along a line, 
+                   or full 2D conic matrix to derive line coefficients.
+                   Note: The source assumes A, B, C are pre-computed for the specific line.
+    """
+    # Step 1: Check if rectangle center is inside ellipse
+    # [G] Implementation detail: Evaluate ellipse equation at rect_center.
+    # If ellipse is defined by matrix M, check if p^T M p <= 1 (or similar threshold).
+    if is_point_inside_ellipse(rect_center, ellipse_conic):
+        return True
+
+    # Step 2: Check each edge
+    for edge in rect_edges:
+        # [G] Derive line equation from edge segment (x1, y1) to (x2, y2)
+        # Line: ax + by + c = 0. 
+        # Substitute into ellipse equation to get quadratic in one variable (e.g., t along the line).
+        # This yields coefficients A, B, C for At^2 + Bt + C = 0.
+        # The source simplifies this by assuming A, B, C are available for the line.
+        
+        # Calculate discriminant
+        delta = B**2 - 4*A*C
+        
+        # If delta < 0, no real intersection with the line
+        if delta < 0:
+            continue
+            
+        # Check if intersection points lie on the segment [a_i, b_i]
+        # Using the optimized algebraic check from [S1]
+        # a_i and b_i are the parameter values (e.g., t) for the segment endpoints
+        # along the line.
+        
+        e1 = 2 * A * a_i + B
+        e2 = 2 * A * b_i + B
+        
+        # Optimized check: (e1 <= 0 OR e1^2 <= DELTA) AND (e2 >= 0 OR e2^2 <= DELTA)
+        # Note: This assumes A > 0. If A < 0, signs may need adjustment or A should be normalized.
+        # [G] Ensure A > 0 by flipping signs of A, B, C if necessary.
+        
+        cond1 = (e1 <= 0) or (e1**2 <= delta)
+        cond2 = (e2 >= 0) or (e2**2 <= delta)
+        
+        if cond1 and cond2:
+            return True
+            
+    return False
+```
+
+**Parameters:**
+- $DELTA$: Discriminant $B^2 - 4AC$ [S1].
+- $A, B, C$: Coefficients of the quadratic equation $AX^2 + BX + C = 0$ derived from the line-ellipse intersection [S1].
+
+**Edge Cases and Pitfalls:**
+- Precision: The algebraic simplification avoids square roots, which helps with performance but requires careful handling of floating-point comparisons [S1].
+- Boundary: The check relies on the segment endpoints $a_i, b_i$ being correctly mapped to the parameter space of the quadratic equation [S1].
+- Degenerate Input: If $A=0$, the equation is linear, not quadratic. The source assumes $A > 0$ for the simplification [S1].
+
+## Subtopics
+
+### Algebraic Simplification for Intersection
+A method to avoid high-cost operations (division and square roots) when checking if a tile edge intersects an ellipse by transforming the quadratic root check into algebraic inequalities [S1]. It uses the expressions $e_1 = 2Aa_i + B$ and $e_2 = 2Ab_i + B$ to check overlap conditions without computing roots [S1]. Choose this when performance is critical and the quadratic coefficients are available [S1].
+
+## Operating characteristics
+**Time and Memory Complexity:**
+- The algorithm performs a constant number of checks per rectangle (4 edges) [S1].
+- The algebraic simplification reduces the computational cost per edge by avoiding square roots and divisions [S1].
+
+**Measured Performance:**
+- The method is part of the FlashGS workflow, which aims to balance computational cost and avoid bottlenecks in 3D Gaussian Splatting [S1].
+- It reduces false positives compared to bounding box checks, potentially reducing the number of tiles that need full rendering [S1].
+
+**Strengths and Limitations:**
+- Strengths: More accurate than bounding box tests, reducing overdraw [S1]. Algebraic simplification improves performance [S1].
+- Limitations: More complex to implement than bounding box tests [S1]. Requires careful handling of quadratic coefficients [S1].
+
+**When to Use:**
+- Use when precise intersection testing is required to minimize overdraw in 3D Gaussian Splatting [S1].
+- Use when performance is a concern and square roots/divisions are expensive [S1].
+
+## Background
+Originated in FlashGS: Efficient 3D Gaussian Splatting for Large-scale and High-resolution Rendering [S1]. The method is part of a refined and balanced workflow for 3DGS rendering, aiming to amortize computational costs [S1].
+
+## Sources
+[S1] FlashGS: Efficient 3D Gaussian Splatting for Large-scale and High-resolution Rendering, https://doi.org/10.1109/cvpr52734.2025.02482, fetched 2026-10-26

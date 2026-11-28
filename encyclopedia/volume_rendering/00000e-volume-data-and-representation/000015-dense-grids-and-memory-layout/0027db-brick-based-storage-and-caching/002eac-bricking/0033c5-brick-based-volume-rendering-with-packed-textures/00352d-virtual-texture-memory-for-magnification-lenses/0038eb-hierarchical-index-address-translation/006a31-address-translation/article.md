@@ -1,0 +1,95 @@
+# Address Translation
+
+Also called: Page table lookup, Virtual to physical address mapping
+
+## Overview
+Address translation is the process of mapping virtual volume coordinates (specifying sample locations along viewing rays) to physical addresses (coordinates in actual texture space) to access volume data stored in individual bricks, enabling out-of-core rendering [S1]. It allows the renderer to specify sample locations in a unified space covering the whole bounding box of the volume, independent of individual brick storage, and then resolve the actual texture coordinates where the brick's data resides [S1]. This method is distinct from hierarchical approaches like octree rendering, which can be viewed as address translation where the octree itself acts as a hierarchical page table and tree traversal performs the lookup [S1].
+
+## How it works
+**Inputs and Outputs:**
+*   **Input:** Virtual volume coordinates $(u, v, w)$ representing a sample location along a viewing ray, typically normalized in a $[0,1]^3$ unit cube covering the entire volume bounding box [S1].
+*   **Output:** Physical texture coordinates $(u', v', w')$ pointing to the specific sub-region within a texture (e.g., a 3D texture or packed texture) that stores the data for the brick containing the sample [S1].
+
+**Data Structures:**
+*   **Page Table:** A data structure storing the mapping from virtual addresses to physical addresses [S1]. In the context of bricked volumes, a "page" refers to a volume brick [S1].
+*   **Index Texture:** The page table is commonly stored in a linear texture (e.g., a single 3D texture) with one entry (texel) per page (brick) [S1]. Each texel contains the information necessary to translate the virtual address to the physical address for that specific brick [S1].
+
+**Steps:**
+1.  **Specify Sample Locations:** Define sample locations in a space covering the whole bounding box of the volume, independent of individual bricks, such as normalized coordinates in a $[0,1]^3$ unit cube [S1].
+2.  **Translate Coordinates:** Translate the volume coordinates of a given sample to actual texture coordinates, taking the physical storage of the brick's data into account [S1].
+3.  **Lookup and Compute:** Identify the target brick, perform a page table lookup to retrieve its physical storage metadata, and compute the final texture coordinates by combining the brick-local offset with the retrieved base coordinates [S1].
+
+**Pseudocode:**
+> **Unverified code.** The code below did not pass a test run against a reference implementation, or no test fits it, so it may contain errors.
+
+```python
+def address_translation(virtual_coords, brick_size, grid_dims, page_table):
+    """
+    Translates virtual volume coordinates to physical texture coordinates.
+    
+    Args:
+        virtual_coords: Tuple (u, v, w) in normalized [0,1]^3 space.
+        brick_size: Tuple (bx, by, bz) normalized size of one brick.
+        grid_dims: Tuple (gx, gy, gz) number of bricks per dimension.
+        page_table: List/array mapping brick_id -> (base_u, base_v, base_w, phys_w, phys_h, phys_d).
+    
+    Returns:
+        Tuple (u_phys, v_phys, w_phys) representing the physical texture coordinates, or None.
+    """
+    # 1. Determine brick ID from virtual coordinates
+    bx = int(virtual_coords[0] / brick_size[0])
+    by = int(virtual_coords[1] / brick_size[1])
+    bz = int(virtual_coords[2] / brick_size[2])
+    # Clamp to valid range to handle boundary cases
+    bx = min(bx, grid_dims[0] - 1)
+    by = min(by, grid_dims[1] - 1)
+    bz = min(bz, grid_dims[2] - 1)
+    brick_id = bx + by * grid_dims[0] + bz * grid_dims[0] * grid_dims[1]
+
+    # 2. Lookup physical storage info
+    physical_info = page_table[brick_id]
+    if physical_info is None:
+        return None  # Brick not resident
+
+    base_u, base_v, base_w = physical_info[0], physical_info[1], physical_info[2]
+    phys_w, phys_h, phys_d = physical_info[3], physical_info[4], physical_info[5]
+
+    # 3. Compute local offset within the brick
+    local_u = (virtual_coords[0] - bx * brick_size[0]) / brick_size[0]
+    local_v = (virtual_coords[1] - by * brick_size[1]) / brick_size[1]
+    local_w = (virtual_coords[2] - bz * brick_size[2]) / brick_size[2]
+
+    # 4. Map to physical texture coordinates
+    u_phys = base_u + local_u * phys_w
+    v_phys = base_v + local_v * phys_h
+    w_phys = base_w + local_w * phys_d
+
+    return (u_phys, v_phys, w_phys)
+```
+
+**Parameters:**
+*   **Brick Size:** The dimensions of each brick in the virtual volume space. Not given in the sources.
+*   **Grid Dimensions:** The number of bricks in each dimension of the virtual volume grid. Not given in the sources.
+
+**Edge Cases and Pitfalls:**
+*   **Out-of-Core Access:** If the brick corresponding to the virtual address is not currently loaded into physical memory, the page table lookup returns no valid physical address, requiring the renderer to handle the missing data [S1].
+*   **Dynamic Management:** In early dynamically managed page table approaches, the working set of active bricks was determined independently of view-dependent occlusions, which could lead to inefficient memory usage [S1].
+
+## Subtopics
+
+### Single-Level, Single-Resolution Page Tables
+Address translation for bricked, single-resolution volumes using a single page table look-up per sample [S1]. The page table is stored in a linear texture (index texture) with one entry per brick [S1]. This approach allows for out-of-core volume rendering, but only with volume bricks from the original resolution and no down-sampling [S1]. Multi-resolution rendering is not possible with this approach, hence scalability is very limited [S1]. A key pitfall in early implementations was that the working set of active bricks was determined independently of view-dependent occlusions [S1].
+
+## Operating characteristics
+*   **Time Complexity:** $O(1)$ per sample for the page table lookup, assuming constant-time access to the index texture [S1].
+*   **Memory Complexity:** Proportional to the number of bricks in the volume, as the page table stores one entry per brick [S1].
+*   **Strengths:** Enables out-of-core rendering of large volumes by managing brick residency dynamically [S1]. Simple to implement for single-resolution data [S1].
+*   **Limitations:** Limited scalability for multi-resolution rendering as it does not support down-sampling [S1]. Early dynamic management approaches did not account for view-dependent occlusions, potentially leading to suboptimal memory usage [S1].
+*   **When to Use:** When rendering large, single-resolution volumes that do not fit in memory, and multi-resolution rendering is not required [S1].
+*   **When Not to Use:** When multi-resolution rendering is required, as this method only supports bricks from the original resolution without down-sampling [S1].
+
+## Background
+The concept of address translation in volume rendering is analogous to standard CPU virtual memory terminology, where a "page table" maps virtual addresses to physical addresses [S1]. The term "page" in this context commonly refers to a volume brick [S1]. The first introduction of adaptive texture maps for GPUs, which can be viewed as an early form of address translation using a small index texture, was by Kraus and Ertl [KE02] [S1]. More recent hardware support for partially resident textures (e.g., OpenGL `GL_ARB_sparse_texture`) allows the GPU hardware to manage the page table and perform address translation directly in the texture unit [S1].
+
+## Sources
+[S1] State-of-the-Art in GPU-Based Large-Scale Volume Visualization, https://vcg.seas.harvard.edu/publications/20150513-stateof-the-art-in-gpu-based-large-scale-volume-visualization/paper, fetched 2026-10-24

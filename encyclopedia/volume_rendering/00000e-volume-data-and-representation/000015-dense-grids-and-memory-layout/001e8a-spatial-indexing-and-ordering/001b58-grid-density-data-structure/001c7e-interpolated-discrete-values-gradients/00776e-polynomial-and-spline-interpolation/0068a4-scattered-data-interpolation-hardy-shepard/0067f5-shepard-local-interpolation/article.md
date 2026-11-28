@@ -1,0 +1,103 @@
+# Shepard Local Interpolation
+## Overview
+Shepard Local Interpolation estimates volume values at regular grid points by weighting nearby scattered sample points using inverse distance squared, utilizing a K-D tree to efficiently find the $k$ nearest neighbors [S1, unofficial]. It differs from its sibling [Hardy Global Interpolation](19995-hardy-global-interpolation.md) by limiting the influence to a local neighborhood rather than all sample points, which avoids solving a large global linear system [G].
+## How it works
+**Inputs:**
+- A set of scattered sample points, each with 3D coordinates $(x, y, z)$ and a scalar value $d$ [S1, unofficial].
+- A target volume grid defined by dimensions $(dim\_x, dim\_y, dim\_z)$ [S1, unofficial].
+- An integer $k$, the number of nearest neighbors to consider [S1, unofficial].
+
+**Outputs:**
+- A volume grid `ret` of size $(dim\_x, dim\_y, dim\_z)$ containing interpolated values [S1, unofficial].
+
+**Data Structures:**
+- A K-D tree constructed from the input sample points to support efficient nearest-neighbor queries [S1, unofficial].
+- A 3D array `ret` initialized to zeros [S1, unofficial].
+
+**Steps:**
+1. Initialize `ret` with zeros [S1, unofficial].
+2. Construct a K-D tree from the input sample points [S1, unofficial].
+3. For each grid point $P$ in the volume grid:
+    a. Query the K-D tree for the $k$ nearest neighbors of $P$ [S1, unofficial].
+    b. Retrieve the data values $d_i$ and coordinates $(x_i, y_i, z_i)$ for each of the $k$ neighbors [S1, unofficial].
+    c. Initialize `numerator` and `denominator` to $0.0$ [S1, unofficial].
+    d. For each neighbor $i$ from $1$ to $k$:
+        i. Calculate the squared Euclidean distance $dist_i$ between $P$ and the neighbor's coordinates:
+           $$dist_i = (P_x - x_i)^2 + (P_y - y_i)^2 + (P_z - z_i)^2$$
+        ii. If $dist_i$ is zero (the grid point coincides with a sample point), the weight is effectively infinite; assign $d_i$ to `ret[P]` and skip to the next grid point [G].
+        iii. Otherwise, calculate the weight $w_i = \frac{1}{dist_i}$ [S1, unofficial].
+        iv. Accumulate `numerator` by adding $d_i \times w_i$ [S1, unofficial].
+        v. Accumulate `denominator` by adding $w_i$ [S1, unofficial].
+    e. If `denominator` is not $0.0$, set `ret[P]` to $\frac{numerator}{denominator}$; otherwise, set it to $\frac{numerator}{1.0}$ [S1, unofficial].
+
+**Pseudocode:**
+> **Unverified code.** The code below did not pass a test run against a reference implementation, or no test fits it, so it may contain errors.
+
+```python
+def shepard_local_interpolation(samples, grid_dims, k):
+    """
+    samples: list of tuples (x, y, z, d)
+    grid_dims: tuple (dim_x, dim_y, dim_z)
+    k: int, number of nearest neighbors
+    """
+    # Represents K-D tree nearest-neighbor query.
+    # Implemented here as a brute-force sort for self-containment.
+    def kdtree_query(point, samples, k):
+        scored = []
+        for s in samples:
+            dx = point[0] - s[0]
+            dy = point[1] - s[1]
+            dz = point[2] - s[2]
+            dist_sq = dx*dx + dy*dy + dz*dz
+            scored.append((dist_sq, s[3], s[0], s[1], s[2]))
+        scored.sort(key=lambda item: item[0])
+        return scored[:k]
+
+    ret = [[[0.0 for _ in range(grid_dims[2])] for _ in range(grid_dims[1])] for _ in range(grid_dims[0])]
+
+    for x in range(grid_dims[0]):
+        for y in range(grid_dims[1]):
+            for z in range(grid_dims[2]):
+                point = (x, y, z)
+                neighbors = kdtree_query(point, samples, k)
+                numerator = 0.0
+                denominator = 0.0
+                exact_match = False
+                for dist_sq, d_val, sx, sy, sz in neighbors:
+                    if dist_sq == 0.0:
+                        ret[x][y][z] = d_val
+                        exact_match = True
+                        break
+                    weight = 1.0 / dist_sq
+                    numerator += d_val * weight
+                    denominator += weight
+                if not exact_match:
+                    if denominator != 0.0:
+                        ret[x][y][z] = numerator / denominator
+                    else:
+                        ret[x][y][z] = numerator / 1.0
+    return ret
+```
+
+**Parameters:**
+- $k$: Number of nearest neighbors. Not given in the sources.
+
+**Edge Cases and Pitfalls:**
+- If a grid point coincides exactly with a sample point, the distance is zero, leading to division by zero. The implementation handles this by directly assigning the sample value and breaking the neighbor loop [G].
+- If `denominator` remains $0.0$ (e.g., $k=0$ or all distances are infinite), the result is set to `numerator / 1.0` [S1, unofficial].
+- Precision issues may arise if distances are very small or very large. Using squared distances avoids square roots but can lead to overflow/underflow if not managed [G].
+## Subtopics
+
+### Shepard Global Interpolation
+A variant that estimates volume values by weighting all sample points using inverse distance squared, without using a K-D tree or limiting the number of neighbors [S1, unofficial]. It is simpler to implement but computationally expensive for large datasets as it requires iterating over all sample points for each grid point [S1, unofficial]. The provided source implementation contains a specific indexing assumption (`self.random_Points[point[0]]`) which appears to be a bug or specific to a particular data layout, so a general implementation should iterate over all samples [S1, unofficial].
+
+## Operating characteristics
+- **Time Complexity:** Not given in the sources.
+- **Memory Complexity:** Not given in the sources.
+- **Strengths:** Local version avoids solving a large global system, reducing per-query complexity compared to global variants [G].
+- **Limitations:** Quality depends heavily on the choice of $k$ and sample distribution [G].
+- **When to use:** Use local for large datasets where performance is critical; use global when global smoothness is desired and $N$ is small [G].
+## Background
+Not given in the sources.
+## Sources
+[S1] jarusified/WebGL-Volume-rendering, https://github.com/jarusified/WebGL-Volume-rendering, fetched 2026-10-27 (unofficial)

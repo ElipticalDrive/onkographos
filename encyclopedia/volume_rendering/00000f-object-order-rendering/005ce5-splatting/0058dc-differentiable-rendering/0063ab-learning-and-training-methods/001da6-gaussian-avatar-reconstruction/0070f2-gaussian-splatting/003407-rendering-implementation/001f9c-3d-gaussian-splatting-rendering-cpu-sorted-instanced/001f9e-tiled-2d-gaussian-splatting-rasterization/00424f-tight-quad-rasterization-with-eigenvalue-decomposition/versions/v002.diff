@@ -1,0 +1,150 @@
+--- v001.md
++++ v002.md
+@@ -4,92 +4,81 @@
+ 
+ ## Overview
+-This method renders 3D Gaussian splats by projecting their anisotropic covariance into screen space and emitting a non-axis-aligned quad per splat to the GPU's fixed-function rasterizer. It solves the problem of overdraw and inefficient clipping inherent in axis-aligned bounding boxes by computing a tight, rotated bounding quad that incorporates the splat's alpha threshold. It differs from software-based CUDA rasterization [S1] by leveraging hardware clipping and interpolation, achieving significant speedups on mobile hardware by discarding large, distant Gaussians early.
++This method renders 3D Gaussians as tightly fitted, non-axis-aligned quads to minimize overdraw and improve rendering performance, particularly on mobile hardware. It differs from standard axis-aligned bounding box approaches by computing a rotated rectangle that incorporates the splat's alpha value, ensuring only relevant pixels are processed.
+ 
+ ## How it works
+-**Inputs:** 3D Gaussian parameters (mean $\mathbf{\mu}$, 3D covariance $\Sigma$, opacity $\alpha$, color $C$); camera projection matrix $P$; clipping thresholds $\tau_\lambda$ (max eigenvalue) and $\lambda_{dist}$ (distance).
+-**Outputs:** Rasterized image with blended Gaussians.
++**Inputs:** 3D Gaussian parameters (mean $\mathbf{\mu}$, 3D covariance $\Sigma$, opacity $\alpha$, color $C$); camera projection matrix $P$; clipping threshold $\tau_\lambda$.
++**Outputs:** Rasterized image with alpha-blended Gaussians.
+ 
+ **Data Structures:**
+-*   **Gaussian:** Struct containing $\mathbf{\mu} \in \mathbb{R}^3$, $\Sigma \in \mathbb{R}^{3 \times 3}$ (symmetric positive definite), $\alpha \in \mathbb{R}$, $C \in \mathbb{R}^3$.
+-*   **Quad Vertices:** 4 vertices in screen space $(x, y)$ with associated attributes (color, opacity).
++*   **Gaussian:** Struct containing `mean` (vec3), `covariance` (mat3), `opacity` (float), `color` (vec3).
++*   **Quad:** Defined by center $\mathbf{c}$, two orthogonal basis vectors $\mathbf{u}, \mathbf{v}$, and half-extents $h_u, h_v$.
+ 
+ **Steps:**
+-1.  **Cull Negative Opacity:** If $\alpha < 0$, discard the Gaussian [S1].
+-2.  **Project Covariance:** Compute the 2D screen-space covariance $\Sigma_{2D}$. This involves projecting the 3D covariance $\Sigma$ using the camera's Jacobian $J$ and projection matrix $P$. Let $W$ be the depth scaling factor. The standard EWA splatting approach is used [S1].
+-3.  **Eigen Decomposition:** Decompose $\Sigma_{2D}$ to find eigenvalues $\lambda_1, \lambda_2$ and eigenvectors $\mathbf{v}_1, \mathbf{v}_2$. These represent the scale and rotation of the Gaussian in screen space [S1].
+-4.  **Compute Tight Quad Bounds:**
+-    *   Determine the extent of the Gaussian based on $\lambda_1, \lambda_2$ and the alpha threshold.
+-    *   Calculate the rotation angle $\theta$ from $\mathbf{v}_1$.
+-    *   Compute the width $w$ and height $h$ of the bounding box aligned with the eigenvectors. The calculation incorporates the splat alpha value to ensure the quad tightly fits the visible portion of the splat [S1].
+-    *   Construct the 4 vertices of the non-axis-aligned quad centered at the projected mean $\mathbf{\mu}_{2D}$, rotated by $\theta$, with dimensions $w \times h$.
+-5.  **Clipping Check:**
+-    *   Check if the maximum eigenvalue $\max(\lambda_1, \lambda_2) > \tau_\lambda$. If so, discard the Gaussian [S1].
+-    *   (Optional for mobile) Check distance threshold $\lambda_{dist}$. If the Gaussian is too distant, discard it [S1].
+-6.  **Rasterization:** Emit the quad to the fragment shader. The hardware rasterizer handles clipping against the view frustum and tile boundaries.
+-7.  **Blending:** In the fragment shader, evaluate the 2D Gaussian density at each fragment inside the quad and blend using the pre-multiplied alpha [S1].
++1.  **Cull Negative Opacity:** Discard Gaussians where $\alpha < 0$ [S1].
++2.  **Project Covariance:** Compute the 2D screen-space covariance matrix $\Sigma_{2D}$ using the Jacobian of the projection. Let $J$ be the Jacobian of the projection transform at $\mathbf{\mu}$. Then $\Sigma_{2D} = J \Sigma_{3D} J^T$ [S1, implied by standard EWA].
++3.  **Eigen Decomposition:** Compute eigenvalues $\lambda_1, \lambda_2$ and eigenvectors $\mathbf{e}_1, \mathbf{e}_2$ of $\Sigma_{2D}$ [S1].
++4.  **Compute Basis and Extents:**
++    *   The eigenvectors $\mathbf{e}_1, \mathbf{e}_2$ define the orientation of the quad.
++    *   The eigenvalues determine the scale. The half-extents are derived from the square roots of the eigenvalues, scaled by a factor that incorporates the alpha value to ensure a tight fit [S1]. Let $k$ be a scaling factor (e.g., 3 for 3-sigma coverage). The half-extents are $h_u = k \sqrt{\lambda_1}$ and $h_v = k \sqrt{\lambda_2}$.
++5.  **Clipping Check:** Calculate the maximum axis length $L_{max} = \max(h_u, h_v)$. If $L_{max} > \tau_\lambda$, discard the Gaussian [S1]. This prevents processing Gaussians with large splats that extend outside the view frustum but have means outside it.
++6.  **Emit Quad:** Construct a non-axis-aligned quad centered at the projected mean $\mathbf{p}$, with axes $\mathbf{u} = \mathbf{e}_1$ and $\mathbf{v} = \mathbf{e}_2$, and extents $h_u, h_v$.
++7.  **Rasterize:** Render the quad to the fragment shader. The fragment shader computes the alpha value based on the distance from the center in the eigenbasis and blends it into the frame buffer.
+ 
+ **Pseudocode:**
+ ```python
+-def render_tight_quad(gaussian, camera, tau_lambda):
+-    # Step 1: Cull negative opacity
+-    if gaussian.alpha < 0:
+-        return []
++def render_tight_quad(gaussian, projection_matrix, tau_lambda):
++    # 1. Cull negative opacity
++    if gaussian.opacity < 0:
++        return None
+ 
+-    # Step 2: Project covariance to 2D
++    # 2. Project 3D covariance to 2D
+     # J is the Jacobian of the projection at gaussian.mean
+-    # Sigma_2D = J * Sigma_3D * J^T
+-    sigma_2d = project_covariance(gaussian.sigma_3d, camera)
++    J = compute_projection_jacobian(gaussian.mean, projection_matrix)
++    Sigma_2D = J @ gaussian.covariance @ J.T
+ 
+-    # Step 3: Eigen decomposition
+-    eigenvalues, eigenvectors = eigen_decompose(sigma_2d)
+-    lambda_1, lambda_2 = eigenvalues
+-    v_1, v_2 = eigenvectors
++    # 3. Eigen decomposition
++    eigenvalues, eigenvectors = torch.linalg.eigh(Sigma_2D)
++    # eigenvalues are sorted ascending by default in some libraries, ensure order
++    lambda_1, lambda_2 = eigenvalues[1], eigenvalues[0] # Assuming largest first for clarity
++    e_1, e_2 = eigenvectors[:, 1], eigenvectors[:, 0]
+ 
+-    # Step 4: Compute tight quad
+-    # Determine scale factors based on alpha threshold and eigenvalues
+-    # This part incorporates alpha into the bound rectangle calculation [S1]
+-    scale_1 = compute_scale(lambda_1, gaussian.alpha)
+-    scale_2 = compute_scale(lambda_2, gaussian.alpha)
++    # 4. Compute extents incorporating alpha
++    # The source mentions incorporating alpha into the bound rectangle.
++    # A common implementation uses a scaling factor k (e.g., 3) and potentially
++    # a function of alpha to tighten the bound.
++    k = 3.0
++    h_u = k * torch.sqrt(lambda_1)
++    h_v = k * torch.sqrt(lambda_2)
+ 
+-    # Calculate quad dimensions
+-    width = 2 * scale_1
+-    height = 2 * scale_2
++    # 5. Clipping check
++    max_axis = max(h_u, h_v)
++    if max_axis > tau_lambda:
++        return None
+ 
+-    # Calculate rotation angle from eigenvector
+-    angle = atan2(v_1.y, v_1.x)
+-
+-    # Project mean to screen space
+-    mean_2d = project_point(gaussian.mean, camera)
+-
+-    # Generate 4 vertices of the rotated quad
+-    vertices = generate_rotated_quad(mean_2d, width, height, angle)
+-
+-    # Step 5: Clipping check
+-    if max(lambda_1, lambda_2) > tau_lambda:
+-        return []
+-
+-    # Step 6: Return vertices for rasterization
+-    return vertices
++    # 6. Emit Quad
++    projected_mean = project_point(gaussian.mean, projection_matrix)
++    quad = Quad(
++        center=projected_mean,
++        axis_u=e_1,
++        axis_v=e_2,
++        half_extent_u=h_u,
++        half_extent_v=h_v
++    )
++    return quad
+ ```
+-
+-**Parameters:**
+-*   $\tau_\lambda$: Clipping threshold for maximum eigenvalue. Typical value: Not given in the sources.
+-*   $\lambda_{dist}$: Distance threshold for culling distant Gaussians. Typical value: Not given in the sources.
+-
+-**Edge Cases:**
+-*   **Degenerate Covariance:** If $\Sigma_{2D}$ is singular (eigenvalues are zero), the quad collapses. Handle by skipping or using a minimal fallback quad [G].
+-*   **Large Eigenvalues:** Gaussians with large splats but means outside the view frustum are discarded by the $\tau_\lambda$ check, preventing unnecessary processing [S1].
+ 
+ ## Subtopics
+ 
++### [Fast Gaussian Rasterization (Covariance Eigen-decomposition and Quad Emission)](19824-fast-gaussian-rasterization-covariance-eigen-decomposition-a.md)
++A rasterization method for 3D Gaussians that projects the 3D covariance to 2D, computes eigenvalues and eigenvectors to determine basis vectors, and emits a quad per splat to the fragment shader for alpha-based blending.
++
+ ## Operating characteristics
+-*   **Time Complexity:** $O(N)$ for $N$ Gaussians, with constant-time projection and decomposition per Gaussian.
+-*   **Memory Complexity:** $O(1)$ per Gaussian for vertex generation.
+-*   **Performance:** Achieves 5-10x speedup over original software CUDA rasterizer for high pixel-to-point ratios on mobile hardware [S1].
+-*   **Strengths:** Reduces overdraw; leverages fixed-function hardware for clipping and interpolation; efficient culling of large, distant Gaussians.
+-*   **Limitations:** Requires GPU support for non-axis-aligned quad rasterization; eigen decomposition can be computationally expensive if not optimized [S1].
++*   **Time Complexity:** Dominated by eigen decomposition per Gaussian, which is $O(1)$ for 2x2 matrices but involves square roots and trigonometric operations.
++*   **Memory Complexity:** Minimal overhead per Gaussian for storing the quad parameters.
++*   **Performance:** Reduces overdraw compared to axis-aligned boxes, leading to faster fragment shading. The clipping threshold $\tau_\lambda$ significantly speeds up rendering on mobile hardware by culling large, distant splats [S1].
++*   **Limitations:** Requires careful tuning of $\tau_\lambda$ and the scaling factor for the alpha incorporation. Eigen decomposition can be numerically unstable if the covariance is near-singular.
+ 
+ ## Background
+-This method is part of the Shape-Shifting Splats approach for real-time context translation in VR [S1]. It builds on the standard 3D Gaussian Splatting rasterization pipeline but optimizes it for mobile and VR contexts by using tight, rotated quads instead of axis-aligned boxes. It references EWA Splatting [60] for the projection foundation and GSplat [54] for the tight fit concept.
++This method is described in "Shape-Shifting Splats: Realtime Context Translation for Gaussian Splatting in VR" [S1]. It builds on the standard 3D Gaussian Splatting rasterization pipeline but optimizes the bounding volume for tighter fitting. It references EWA Splatting [60] and modern implementations like GSplat [54] as predecessors in using non-axis-aligned quads.
+ 
+ ## Sources

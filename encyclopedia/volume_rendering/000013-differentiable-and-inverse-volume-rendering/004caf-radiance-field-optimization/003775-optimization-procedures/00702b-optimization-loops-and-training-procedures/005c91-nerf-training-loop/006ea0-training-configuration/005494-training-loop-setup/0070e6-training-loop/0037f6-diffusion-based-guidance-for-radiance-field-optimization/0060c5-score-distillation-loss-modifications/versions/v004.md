@@ -1,0 +1,45 @@
+# Score Distillation Loss Modifications
+## Overview
+Score Distillation Loss Modifications are optimization objectives that adapt the gradient signal from a frozen 2D diffusion model to refine a 3D radiance field or latent representation. They solve the limitations of vanilla Score Distillation Sampling (SDS), such as oversaturation, poor composition, or lack of high-frequency detail, by altering how the diffusion model is conditioned, how noise is sampled, or how the loss is computed. This family is distinguished from its siblings by focusing specifically on the mathematical formulation of the loss function and its conditioning inputs, rather than the broader training loop architecture or sampling mechanisms.
+
+## Shared principles
+All methods in this family operate within the differentiable rendering loop defined in [Diffusion-Based Guidance for Radiance Field Optimization](8117-diffusion-based-guidance-for-radiance-field-optimization.md). They share the following core mechanism:
+1.  **Differentiable Rendering:** A radiance field $\Theta$ (or latent representation) is rendered to an image $I$ (or latent $z_0$) given a camera pose.
+2.  **Diffusion Conditioning:** The rendered image/latent is perturbed with noise to obtain $x_t$ (or $z_t$) at timestep $t$.
+3.  **Noise Prediction:** A frozen diffusion model $\epsilon_\theta$ (or $\epsilon_\phi$) predicts the noise $\hat{\epsilon}$ conditioned on $x_t$, $t$, and additional context (prompts, masks, etc.).
+4.  **Gradient Computation:** The gradient $\nabla_\Theta L$ is computed by backpropagating the difference between the predicted noise and the actual noise (or a derived target) through the diffusion model and the differentiable renderer.
+5.  **Optimization:** The radiance field parameters $\Theta$ are updated using the computed gradient.
+
+The specific modifications lie in the conditioning inputs (masks, background prompts), the noise sampling strategy (DDIM inversion, re-noising), or the loss target (reconstruction of noise estimates).
+
+## Subtopics
+
+### [Interval Score Matching](8995-interval-score-matching.md)
+Replaces the standard DDPM forward process with DDIM inversion to supervise multiple interval steps, reducing reconstruction error from single-step updates. Choose when high-fidelity geometry is required and single-step SDS fails.
+
+### [Inpainting SDS Loss](11185-inpainting-sds-loss.md)
+Uses a pre-trained inpainting diffusion model conditioned on a masked rendered image and binary mask to generate content that harmonizes with existing scene context. Choose when inserting objects into existing scenes to avoid isolated or misaligned geometry.
+
+### [Mask+SDS with Background Prompt](14382-mask-sds-with-background-prompt.md)
+Appends a background description to the text prompt while using a mask to restrict changes to the target object, preventing "black hole" artifacts in occluded regions. Choose when editing specific objects in a scene without collapsing the background.
+
+### [Renoised Score Distillation (RSD)](16424-renoised-score-distillation-rsd.md)
+Optimizes latent residuals in intermediate timestep space to combine the sharpness of ancestral sampling with the consistency of SDS. Choose for super-resolution or refining latent vectors where standard SDS lacks detail.
+
+### [Diffusion Model Reconstruction Loss](19319-diffusion-model-reconstruction-loss.md)
+Enforces fidelity to a specific input image by comparing noise predictions of the rendered image against the input image. Choose when perceptual reconstruction of a reference image is required alongside generative guidance.
+
+### Masked-NeRF + DreamFusion
+A baseline method using per-scene text prompts to guide masked region generation via SDS [S1]. It improves quality by gradually and uniformly decreasing the maximum noise steps $t_{max}$ during fitting until it equals the minimum noise steps $t_{min}$ at the last iteration [S1]. This schedule leverages higher noise levels for global structure generation early on and lower noise levels for detail fixing later [S1]. Implementation typically uses Stable Diffusion as the underlying model [S1].
+
+### Post-Optimizing Generated Neural Fields via SDS
+Iteratively updates initially generated voxels $V$ by rendering viewpoints and applying SDS loss independently on each image [S2]. For latent diffusion models, noise prediction is applied after encoding the rendered view $r(V, \kappa)$ into the LDM's latent space [S2]. The gradient is:
+$$ \nabla_V L_{SDS} = \mathbb{E}_{\epsilon, t, \kappa} \left[ w(\lambda_t)(\epsilon - \hat{\epsilon}_\theta(r(V, \kappa), t)) \frac{\partial r(V, \kappa)}{\partial V} \right] $$
+where $\kappa$ is sampled uniformly in a $6m^2$ region around the scene origin with random vertical rotation, and $t \sim U[0.02T, 0.2T]$ [S2]. It employs LSDS with negative guidance using classifier-free guidance, replacing the unconditional embedding with artifact conditioning to sample from $p(x|y)/p(x|y')$, controlling the trade-off between dataset images and artifact-free samples [S2].
+
+## Background
+Score Distillation Sampling (SDS) was introduced in DreamFusion [Parent] as a method to optimize 3D structures from 2D diffusion models. Subsequent works identified limitations in SDS, such as oversaturation and poor composition, leading to modifications like Interval Score Matching (LucidDreamer) [S1], Inpainting SDS (LiSDS) [S1], and Renoised Score Distillation [S1]. The concept of post-optimizing neural fields with SDS was explored in NeuralField-LDM [S2] to refine hierarchical latent diffusion outputs. These modifications collectively form a family of techniques that adapt the diffusion prior to better suit 3D generation constraints.
+
+## Sources
+[S1] Reference-guided Controllable Inpainting of Neural Radiance Fields, https://doi.org/10.1109/ICCV51070.2023.01633, fetched 2026-10-29
+[S2] NeuralField-LDM: Scene Generation with Hierarchical Latent Diffusion Models, https://doi.org/10.1109/cvpr52729.2023.00821, fetched 2026-10-29

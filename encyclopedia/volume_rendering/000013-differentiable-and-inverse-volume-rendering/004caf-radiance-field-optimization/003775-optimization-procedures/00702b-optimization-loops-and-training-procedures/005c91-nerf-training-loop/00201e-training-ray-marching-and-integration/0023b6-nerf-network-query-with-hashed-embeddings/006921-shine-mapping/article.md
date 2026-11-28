@@ -1,0 +1,205 @@
+# SHINE-Mapping
+
+Also called: Sparse Hierarchical Implicit Neural Representations
+
+## Overview
+SHINE-Mapping is a large-scale incremental 3D mapping system that represents the environment as a continuous Signed Distance Field (SDF) using sparse hierarchical implicit neural representations [S1]. It solves the problem of memory-efficient, real-time mapping for autonomous robots by storing learnable feature vectors in an octree-based sparse structure and regressing SDF values via a shared shallow MLP [S1]. Unlike dense voxel methods (e.g., NICE-SLAM) or replay-based continual learning approaches (e.g., iMap/iSDF), SHINE-Mapping uses a sparse hash-table-based octree with feature update regularization to prevent catastrophic forgetting while maintaining limited memory usage [S1]. It differs from single-object hierarchical models like NGLOD by supporting incremental extension of the mapped area without pre-allocated memory [S1].
+
+## How it works
+**Inputs:** 3D LiDAR point clouds with known sensor poses.
+**Outputs:** A continuous SDF representation of the environment, queryable at any resolution.
+
+**Data Structures:**
+The representation consists of $H$ hash tables, one for each hierarchical level $h \in \{0, \dots, H-1\}$ [S1].
+*   **Hash Table Layout:** Each hash table maps Morton codes (Z-order/Lebesgue curve spatial hash codes) to feature vectors [S1].
+*   **Feature Vector:** Stored in the corners of octree nodes. Each feature is a one-dimensional vector of length $L$ [S1].
+*   **Morton Codes:** Used to address hash tables, preserving spatial locality and allowing average-case $O(1)$ access [S1].
+*   **MLP Decoder:** A shared shallow multilayer perceptron with $M$ hidden layers [S1]. The MLP takes the summed feature vector as input and outputs the SDF value. The query point coordinates are **not** stacked under the feature vector [S1].
+
+**Parameters:**
+*   $H$: Number of hierarchical levels. Typical values are 3 or 4 [S1]. Each level doubles the spatial extend in the x, y, and z directions relative to the previous level [S1].
+*   $L$: Length of the feature vector. This is also the input dimension for the MLP [S1].
+*   $M$: Number of hidden layers in the shared shallow MLP [S1].
+
+**Algorithm Steps:**
+
+1.  **Initialization:** When a new octree node corner is created (triggered by LiDAR measurements), its feature vector is randomly initialized [S1].
+2.  **Querying (Hierarchical Interpolation):** For a query point $\mathbf{x}$:
+    *   Start at the lowest level (level 0).
+    *   Compute the Morton code for $\mathbf{x}$ at the current level.
+    *   Retrieve the feature vectors from the corners of the octree node containing $\mathbf{x}$ at this level.
+    *   Perform trilinear interpolation of these corner features at position $\mathbf{x}$ to obtain the interpolated feature vector $\mathbf{f}_h$ for level $h$ [S1].
+    *   Repeat steps 2a-2d for each level $h$ from 0 to $H-1$ [S1].
+3.  **Aggregation:** Sum the interpolated feature vectors from all $H$ levels to form the final input vector $\mathbf{F}_{sum}$:
+    $$ \mathbf{F}_{sum} = \sum_{h=0}^{H-1} \mathbf{f}_h $$
+    [S1]
+4.  **Decoding:** Feed $\mathbf{F}_{sum}$ into the shared shallow MLP $\phi$ to output the SDF value $s$:
+    $$ s = \phi(\mathbf{F}_{sum}) $$
+    [S1]
+5.  **Optimization:**
+    *   Sample points along rays from LiDAR measurements.
+    *   Calculate the projected signed distance from the sampled point to the beam endpoint as the supervision signal (label $l$) [S1].
+    *   Compute the Binary Cross Entropy (BCE) loss between the network output $s$ and the label $l$ [S1].
+    *   Optimize feature vectors and MLP parameters jointly via backpropagation [S1].
+
+**Pseudocode:**
+
+> **Unverified code.** The code below did not pass a test run against a reference implementation, or no test fits it, so it may contain errors.
+
+```python
+# Data structures
+# hash_tables: List of H hash tables. Each maps MortonCode -> FeatureVector (size L)
+# mlp: Shared shallow MLP with M hidden layers, input size L, output size 1
+# H: Number of hierarchical levels
+# L: Feature vector length
+
+def get_morton_code(point, level):
+    """
+    Computes the Morton code (Z-order) for the point at the specific hierarchical level.
+    The spatial extent doubles at each level.
+    Implementation detail: Not given in sources. Assumes a standard Morton encoding
+    function that maps 3D coordinates to a 1D integer based on the grid resolution
+    of the current level.
+    """
+    # Placeholder for Morton code calculation logic
+    pass
+
+def trilinear_interpolate(corners, point):
+    """
+    Performs trilinear interpolation of 8 corner features at the query point.
+    corners: List of 8 FeatureVectors (size L) corresponding to the octree node corners.
+    point: 3D query coordinates relative to the node.
+    Returns: Interpolated FeatureVector (size L).
+    Implementation detail: Not given in sources. Standard trilinear interpolation
+    using the relative coordinates of the point within the unit cube defined by the corners.
+    """
+    # Placeholder for trilinear interpolation logic
+    pass
+
+def query_sdf(query_point, hash_tables, mlp, H):
+    """
+    Queries the SDF value for a given 3D point.
+    """
+    summed_features = None
+    
+    for level in range(H):
+        # 1. Get Morton code for the current level
+        morton_code = get_morton_code(query_point, level)
+        
+        # 2. Retrieve features from the hash table
+        # Note: If the key does not exist, it implies no data has been stored there.
+        # In a sparse structure, missing features might be treated as zero or require
+        # handling. The sources do not specify the behavior for missing keys during
+        # interpolation. [G] Assuming missing features are treated as zero vectors
+        # for the purpose of interpolation, or that the query point always falls
+        # within a populated node.
+        features = hash_tables[level].get(morton_code)
+        
+        if features is None:
+            # [G] Guard for sparse lookup: if no features exist at this level for this location,
+            # the contribution is zero.
+            interpolated_feature = [0.0] * L
+        else:
+            # 3. Trilinear interpolation
+            # Note: 'features' here refers to the 8 corners of the octree node.
+            # The hash table typically stores the feature for a specific corner.
+            # The pseudocode in the source simplifies this by implying 'features'
+            # are retrieved directly. In practice, one must retrieve the 8 corners
+            # surrounding the query point.
+            # The source pseudocode: "features = hash_tables[level].get(morton_code)"
+            # followed by "trilinear_interpolate(features, query_point)".
+            # This implies the hash table might store the node's features or the
+            # Morton code resolves to the node containing the point.
+            # However, Morton codes usually identify specific cells.
+            # To be implementable from text alone, we assume the hash table lookup
+            # returns the necessary corner features or the node structure allows
+            # interpolation. Given the source says "determine the grids... and determine
+            # the interpolated feature... by trilinear interpolation of the vertex features",
+            # we assume the retrieval step provides the 8 vertices.
+            
+            # Re-interpreting source pseudocode strictly:
+            # "features = hash_tables[level].get(morton_code)"
+            # If the hash table maps Morton Code -> Feature Vector (single vector),
+            # trilinear interpolation is impossible with a single vector.
+            # The text says: "store features in the corners... trilinear interpolation of the vertex features".
+            # Therefore, the hash table likely maps Morton Code -> List of 8 Feature Vectors
+            # OR the Morton Code identifies the node, and the 8 corners are retrieved
+            # via neighbor lookups.
+            # To make the pseudocode valid and self-contained based on the text:
+            # We assume get_morton_code returns the code for the node containing the point.
+            # We assume a helper to get the 8 corners.
+            
+            corner_features = get_octree_node_corners(query_point, level, hash_tables)
+            interpolated_feature = trilinear_interpolate(corner_features, query_point)
+            
+        # 4. Aggregate
+        if summed_features is None:
+            summed_features = interpolated_feature
+        else:
+            summed_features = add_vectors(summed_features, interpolated_feature)
+            
+    # 5. Decode
+    sdf_value = mlp.forward(summed_features)
+    return sdf_value
+
+def get_octree_node_corners(point, level, hash_tables):
+    """
+    Retrieves the 8 feature vectors from the corners of the octree node
+    containing the query point at the given level.
+    Implementation detail: Not given in sources. Requires mapping the point
+    to the node index, then computing the 8 neighbor Morton codes and
+    retrieving their features from the hash table.
+    """
+    pass
+
+def add_vectors(v1, v2):
+    return [a + b for a, b in zip(v1, v2)]
+
+def train_step(query_points, labels, hash_tables, mlp, learning_rate):
+    """
+    Optimizes features and MLP parameters.
+    """
+    # 1. Forward pass
+    predictions = []
+    for point in query_points:
+        pred = query_sdf(point, hash_tables, mlp, H)
+        predictions.append(pred)
+        
+    # 2. Loss Calculation (Binary Cross Entropy)
+    # Loss is sensitive to sign misprediction and changes near the surface.
+    loss = binary_cross_entropy(predictions, labels)
+    
+    # 3. Backpropagation
+    # Update MLP parameters and feature vectors in hash_tables
+    # Implementation detail: Standard backpropagation through the MLP and
+    # the interpolation graph.
+    pass
+```
+
+**Edge Cases and Pitfalls:**
+*   **Catastrophic Forgetting:** In incremental mapping, updating features can cause the network to forget previously learned geometry [S1].
+    *   *Mitigation:* Use feature update regularization [S1]. In incremental mode, keep the pre-trained MLP fixed (do not update its parameters) to minimize forgetting effects [S1].
+*   **Sparse Lookup:** If a query point falls in a region where no octree nodes have been created (no LiDAR data), the hash table lookup may return empty. The implementation must handle missing features (e.g., treating them as zero) to allow interpolation [G].
+*   **Memory Management:** While sparse, the hash tables grow with the scene. The system relies on the sparsity of the environment to keep memory low [S1].
+
+## Operating characteristics
+*   **Time Complexity:** Average-case $O(1)$ access to features via hash tables [S1]. Querying involves $H$ interpolations and one MLP forward pass.
+*   **Memory Complexity:** Sparse. Memory usage depends on the number of occupied octree nodes, which is proportional to the surface area/volume of the scanned environment, significantly less than dense voxel grids [S1].
+*   **Performance:** More accurate, complete, and memory-efficient than current state-of-the-art 3D mapping methods in large-scale outdoor scenes [S1].
+*   **Strengths:**
+    *   Supports incremental mapping without pre-allocating memory [S1].
+    *   Memory-efficient compared to dense voxel structures (e.g., NICE-SLAM) [S1].
+    *   Robust to catastrophic forgetting via feature update regularization and fixed MLP in incremental mode [S1].
+    *   High-resolution querying via trilinear interpolation of hierarchical features [S1].
+*   **Limitations:**
+    *   Requires 3D LiDAR sensors with known poses [S1].
+    *   Memory usage can still become significant in extremely dense environments, though less than dense grids [S1].
+    *   Not designed for single-object modeling (unlike NGLOD) but for large-scale scenes [S1].
+*   **When to use:** Large-scale outdoor autonomous systems, mobile robots, and self-driving cars using 3D LiDAR [S1].
+*   **When not to use:** Single-object modeling, scenes without LiDAR, or scenarios where replay-based memory is acceptable and memory is not a constraint.
+
+## Background
+SHINE-Mapping was proposed in 2023 by the authors of the paper "SHINE-Mapping: Large-Scale 3D Mapping Using Sparse Hierarchical Implicit Neural Representations" [S1]. It builds upon the NGLOD method [34] but adapts it for incremental large-scale mapping by using hash tables instead of a fixed octree structure [S1]. It addresses the limitations of NICE-SLAM [40] (dense voxel memory cost) and iMap/iSDF [31, 23] (replay-based continual learning memory growth) [S1].
+
+## Sources
+[S1] SHINE-Mapping: Large-Scale 3D Mapping Using Sparse Hierarchical Implicit Neural Representations, https://doi.org/10.1109/icra48891.2023.10160907, fetched 2026-10-26

@@ -1,0 +1,363 @@
+Currently in mba_benchmark.cpp, we see that the Spline creation module is run in CPU while the interpolation is done in GPU. This makes sense. However, would it be possible to make this portion (i.e., Spline creation module) work in GPU?
+
+Run "mba" in OpenCL · Issue #126 · ddemidov/vexcl · GitHub
+Skip to content
+You signed in with another tab or window. Reload to refresh your session.
+You signed out in another tab or window. Reload to refresh your session.
+You switched accounts on another tab or window. Reload to refresh your session.
+Dismiss alert
+Run "mba" in OpenCL #126
+New issue
+Copy link
+New issue
+Copy link
+Open
+Open
+Run "mba" in OpenCL#126
+Copy link
+Labels
+enhancementtodo
+Description
+skn123
+opened on May 4, 2014
+Issue body actions
+Currently in mba_benchmark.cpp, we see that the Spline creation module is run in CPU while the interpolation is done in GPU. This makes sense. However, would it be possible to make this portion (i.e., Spline creation module) work in GPU?
+Activity
+Next
+ddemidov
+added
+enhancement
+on May 4, 2014
+ddemidov commented on May 4, 2014
+ddemidov
+on May 4, 2014
+Owner
+More actions
+I don't remember all the implementation details right away, but it seems it would be possible to do the setup phase in OpenCL. It could even make sense because all underlying structures are regular.
+It will, however, take some time, because I am a bit busy at the moment.
+skn123 commented on May 4, 2014
+skn123
+on May 4, 2014
+Author
+More actions
+Denis, The setup was done using lot of C++11 code :) That's why I was having a hard time understanding it, but I have a suspicion that it can be done. Let me know if I can help in any way.
+ddemidov commented on May 4, 2014
+ddemidov
+on May 4, 2014
+Owner
+More actions
+I think it should be enough to implement the control lattice structure with OpenCL. See the referenced paper for the details of the algorithm.
+The biggest problem is that it needs to be done in generic way w.r.t. the number of dimensions, so one would need to do some OpenCL code generation.
+skn123 commented on May 4, 2014
+skn123
+on May 4, 2014
+Author
+More actions
+Why not take the FFT route? Handcraft those kernels for 1,2 and 3D and make it work on the device for these 3 dimensions. For all other dimensions, it can continue to use the current Host option?
+ddemidov commented on May 4, 2014
+ddemidov
+on May 4, 2014
+Owner
+More actions
+I don't like the idea of keeping separate (but very similar) kernels when they all may be generated from a single source.
+skn123 commented on May 7, 2014
+skn123
+on May 7, 2014
+Author
+More actions
+If you are referring to the basic BA algorithm in the paper, then there are loops that can easily be "OpenMP-fied" even in the current implementation.
+ddemidov commented on May 7, 2014
+ddemidov
+on May 7, 2014
+Owner
+More actions
+Yes. Feel free to provide a pull request :).
+ddemidov
+added a commit that references this issue on May 9, 2014
+Parallelize mba setup with OpenMP
+...
+c217b22
+ddemidov commented on May 9, 2014
+ddemidov
+on May 9, 2014
+Owner
+More actions
+So I looked at mba implementation a bit closer. Now I know why I decided to stay on the CPU for the initialization.
+First, and least important, VexCL supports parallel work with multiple compute devices. Since MBA may take a random set of coordinates to get interpolated values at, each device has to hold a complete copy of the control lattice phi. It did not seem right to either duplicate the initialization work for each device, or do initialization on the first device and then transfer the lattice to the rest of the devices.
+Second, in the initialization loop over the data points here temporary arrays delta and omega are updated at some random positions. This could lead to data races both with OpenMP and OpenCL parallelizations and would require use of atomic operations. This would negatively affect performance.
+For example, take a look at c217b22. Here are results of mba_benchmark with and without openmp parallelization:
+No OpenMP
+```
+1. Capeverde (AMD Accelerated Parallel Processing)
+
+surf(0.5, 0.5) = -4.48714e-05
+surf(0.5, 0.5) = -4.48714e-05
+
+[Profile:             8.889 sec.] (100.00%)
+[  generate data:     0.047 sec.] (  0.53%)
+[  GPU:               3.711 sec.] ( 41.75%)
+[    setup:           2.320 sec.] ( 26.10%)
+[    interpolate:     1.385 sec.] ( 15.58%)
+[  CPU:               5.131 sec.] ( 57.72%)
+[    setup:           2.324 sec.] ( 26.14%)
+[    interpolate:     2.806 sec.] ( 31.57%)
+```
+OpenMP
+```
+1. Capeverde (AMD Accelerated Parallel Processing)
+
+surf(0.5, 0.5) = -4.48714e-05
+surf(0.5, 0.5) = -4.48714e-05
+
+[Profile:            17.936 sec.] (100.00%)
+[  generate data:     0.047 sec.] (  0.26%)
+[  GPU:              12.662 sec.] ( 70.60%)
+[    setup:          11.137 sec.] ( 62.09%)
+[    interpolate:     1.519 sec.] (  8.47%)
+[  CPU:               5.226 sec.] ( 29.14%)
+[    setup:           2.322 sec.] ( 12.95%)
+[    interpolate:     2.903 sec.] ( 16.19%)
+```
+Note that setup now takes 11 seconds instead of 2.3.
+So unless I did something wrong here, it seems its better to leave the current MBA setup as it is.
+ddemidov
+added a commit that references this issue on May 9, 2014
+Replace critical section with atomic in mba setup
+...
+ecad92c
+ddemidov commented on May 9, 2014
+ddemidov
+on May 9, 2014
+Owner
+More actions
+Ok, I did something wrong here. After replacing critical section with atomic in ecad92c. mba_bechmark output looks like this:
+```
+1. Capeverde (AMD Accelerated Parallel Processing)
+
+surf(0.5, 0.5) = -4.48714e-05
+surf(0.5, 0.5) = -4.48714e-05
+
+[Profile:             8.834 sec.] (100.00%)
+[  generate data:     0.046 sec.] (  0.52%)
+[  GPU:               3.642 sec.] ( 41.23%)
+[    setup:           2.251 sec.] ( 25.48%)
+[    interpolate:     1.386 sec.] ( 15.69%)
+[  CPU:               5.145 sec.] ( 58.25%)
+[    setup:           2.327 sec.] ( 26.34%)
+[    interpolate:     2.818 sec.] ( 31.90%)
+```
+This is better than serial version, but only slightly. This also introduces requirement that iterators to coordinates and values of data points are pointing at continuous chunks of memory. I am not sure the neglectable speedup worth it. What do you think?
+skn123 commented on May 10, 2014
+skn123
+on May 10, 2014
+Author
+More actions
+If I look at BA algorithm in the paper, there are three main loops.
+If I understand correctly, the innermost loop can be parallelized using Boost-Compute (or even Bolt) as it is potentially data parallelizable.
+The third loop where we eventually compute the \phi is anyway parallelizable.
+If we assume data parallelizable, then barring the boundary points, \delta_{i+k}{j+l} can be computed locally. There won't be any need for inter data communication except at the boundary locations. \delta and \omega at these locations can be done serially once inner locations have been computed.
+Your other concerns regarding multi-device operations is valid. Hence, a mechanism should be available to use this parallel version (either as an ifdef or some user-specified input). That being said, anything that utilizes any form of parallelizaltion (CPU and GPU) is always welcome.
+Do you think I am correct in my assumptions?
+skn123 commented on May 10, 2014
+skn123
+on May 10, 2014
+Author
+More actions
+I have another question regarding mba_benchmark,cpp
+vex::multivector<double, 2> C(ctx, n);
+vex::vector Z(ctx, n);
+```
+    vex::copy(x, C(0));
+    vex::copy(y, C(1));
+
+    prof.tic_cl("interpolate");
+    for(size_t i = 0; i < m; ++i)
+        Z = surf(C(0), C(1));
+```
+Now, is this the only way to copy x and y to the device? Would it be possible to allocate values to C(0) and C(1) directly without having to first allocate them on the host?
+ddemidov commented on May 10, 2014
+ddemidov
+on May 10, 2014
+Owner
+More actions
+There are no host-allocated structures in the snippet you provided. Both vex::multivector and vex::vector are device structures. And those are allocated directly.
+If what you meant to ask is if its possible to initialize newly created device vector with a host vector data, then the answer is yes, it is possible. See the list of vex::vector constructors.
+The mba_bechmark does look a bit ugly in this regard. 56e236a fixes that.
+48 remaining items
+Load more
+ddemidov commented on May 20, 2014
+ddemidov
+on May 20, 2014
+Owner
+More actions
+Note to myself: each control point updates m = 4^ndim spline coefficients. In case there are few control points, this could be done by allocating m * npoints of temporary storage, then reduce_by_key after doing parallel updates (where key is id of spline coefficient).
+skn123 commented on Jun 21, 2014
+skn123
+on Jun 21, 2014
+Author
+More actions
+I am facing a problem running vex::mba in parallel threads. The crash happens when I am doing the Z = surf(C(0),C(1)). This means that I cannot run concurrent versions of interpolation on the GPU from multiple host threads. In that case, If I were to serialize this, I would need to save the spline coefficients. However, the API that is provided for MBA does not allow me to do this. Is there a way out of this conundrum?
+On a separate note; the algorithm does not scale up to 3D elements and the results are coming out incorrect.
+ddemidov commented on Jun 21, 2014
+ddemidov
+on Jun 21, 2014
+Owner
+More actions
+Running interpolation on the same GPU from multiple threads does not make sense performance-wise, since OpenCL will serialize the kernels anyway. Moreover, it is not safe (see notes about thread safety in OpenCL specification) and you should guard calls to mba::operator().
+Applying an instance of MBA on GPU other than was used for construction is not supported.
+Regarding the incorrect results in 3D: I have mostly used mba for 3D problems, and it worked for me. Could you please provide a simple test case?
+skn123 commented on Jun 21, 2014
+skn123
+on Jun 21, 2014
+Author
+More actions
+So, thats why I said I will serialize the interpolation operation. However, as the MBA algorithm runs on the CPU I can potentially parallelize it. For that, I would need to create a
+std::vectorvex::mba operators. However, there is no API to create an empty instance of vex::mba.
+I will provide you with a set of 3D control as well as test points.
+ddemidov commented on Jun 21, 2014
+ddemidov
+on Jun 21, 2014
+Owner
+More actions
+Only constructor of MBA runs on CPU. The interpolation itself runs on GPU (or, more generally, a compute device).
+You could use a std::vector< std::shared_ptr<vex::mba> >, or boost::ptr_vector< vex::mba>. Second option has the advantage that it provides reference semantics (so that you could write mba[i](X, Y) instead of (*mba[i])(X, Y)).
+skn123 commented on Jun 21, 2014
+skn123
+on Jun 21, 2014
+Author
+More actions
+Maybe, this should be documented somewhere in the code.
+ddemidov commented on Jun 21, 2014
+ddemidov
+on Jun 21, 2014
+Owner
+More actions
+What exactly? The use of smart pointers with a class that does not provide a default constructor?
+skn123 commented on Jun 21, 2014
+skn123
+on Jun 21, 2014
+Author
+More actions
+Yes; Especially for this example. I am familiar with std::shared_ptr. I will have to look into boost::ptr_vector and see if that is more beneficial.
+skn123 commented on Jun 22, 2014
+skn123
+on Jun 22, 2014
+Author
+More actions
+I tried it with std::shared_ptr and it apparently worked. However, I think the vex::mba is being overwritten
+```
+// This defines a context to be used by VexCL
+static vex::Context ctx( vex::Filter::Env );
+// A typedef for the routine to be called from vexcl
+typedef vex::mba<2, double> mba_type;
+// A vector of such mba modules
+static std::vector< std::shared_ptr< mba_type > > mba_vector(cBands_Num, NULL);
+```
+and the calling loops are:
+```
+//#ifdef USE_OPENMP
+//#pragma omp parallel for
+//#endif
+  for (int sIdx = 0; sIdx < cBands_Num; ++sIdx)
+  {
+     ....//The image to be interpolated pImage
+    // 4.) Run the MBA pipeline on this slice
+    MBA_BuildSplineLattice(pImage, h_Rows, w_Cols, sIdx);
+  }
+
+  // In this loop we use the spline lattices to interpolate missing pixels. This
+  // step is done serially as the interpolation is effected on the GPU.
+  for (int sIdx = 0; sIdx < cBands_Num; ++sIdx)
+  {
+    std::cout << "Interpolate: "<<cBands[sIdx] << std::endl;
+    // 5.) Run the MBA pipeline on this slice
+    MBA_Interpolate(pImage, h_Rows, w_Cols, sIdx);
+    .....//The interpolated image
+  }
+```
+and the place where I build the spline lattice
+```
+....
+  //////////////////////////////////////////////////////////////////////////////
+  //From this point, we interface it with vexcl/mba.hpp
+  mba_vector[sIdx] = std::make_shared<mba_type>(ctx,
+                                             make_array2<double>(-0.01, -0.01),
+                                             make_array2<double>(1.01, 1.01),
+                                             p, v, make_array2<size_t>(2, 2));
+```
+I can compute the spline lattice for all slices in parallel and the do the interpolation serially.
+ddemidov commented on Jun 22, 2014
+ddemidov
+on Jun 22, 2014
+Owner
+More actions
+This looks mostly valid. Why do you make ctx and especially mba_vector static? Is this inside a function that gets called several times? Can you guarantee that cBands_num won't change between calls?
+Also, what do you mean by 'vex::mba is being overwritten'?
+skn123 commented on Jun 22, 2014
+skn123
+on Jun 22, 2014
+Author
+More actions
+Static is because I do not want to errors related to "multiple definitions". Now, I did the other way as
+```
+for (int sIdx = 0; sIdx < cBands_Num; ++sIdx)
+  {
+     ....//The image to be interpolated pImage
+    // 4.) Run the MBA pipeline on this slice
+    MBA_BuildSplineLattice(pImage, h_Rows, w_Cols, sIdx);
+  //}
+
+  // In this loop we use the spline lattices to interpolate missing pixels. This
+  // step is done serially as the interpolation is effected on the GPU.
+ // for (int sIdx = 0; sIdx < cBands_Num; ++sIdx)
+  //{
+    std::cout << "Interpolate: "<<cBands[sIdx] << std::endl;
+    // 5.) Run the MBA pipeline on this slice
+    MBA_Interpolate(pImage, h_Rows, w_Cols, sIdx);
+    .....//The interpolated image
+  }
+```
+and it works like a breeze! Can you see if you can reproduce this at your end? I think there is some issue with storing previously generated lattices. Yes, all the other factors that you have mentioned are stable.
+I even tried this by removing the OPENMP directive and it still doesnt work. The only way it works is if I run interpolation right after build lattice.
+skn123 commented on Jun 22, 2014
+skn123
+on Jun 22, 2014
+Author
+More actions
+Ignore these comments...My mistake..I was not updating the slice to be interpolated and it stayed on with the last slice after the build lattice loop :)
+ddemidov commented on Jun 22, 2014
+ddemidov
+on Jun 22, 2014
+Owner
+More actions
+Could write a bit more clearly what does and what does not work?
+skn123 commented on Jun 22, 2014
+skn123
+on Jun 22, 2014
+Author
+More actions
+The variable "pImage" in the code above corresponds to an image slice. I was not updating that in the interpolation phase. Now, would / can there be a way to run interpolation for multiple spline lattices and multiple C(0) and C(1) rather than having to do it the serial way?
+ddemidov commented on Jun 22, 2014
+ddemidov
+on Jun 22, 2014
+Owner
+More actions
+As I said before, applying several instances of a vex::mba from several host threads on the same compute device(s) does not make sense and is not safe. OpenCL implementation will serialize the compute kernels anyway. I think you can not get better than what you have now: parallel construction of several interpolators with multiple host threads, and serial application of the interpolators with a GPU.
+Sign up for free to join this conversation on GitHub. Already have an account? Sign in to comment
+Metadata
+Metadata
+Assignees
+No one assigned
+Labels
+enhancementtodo
+Projects
+No projects
+Milestone
+No milestone
+Relationships
+None yet
+Development
+No branches or pull requests
+Issue actions
+Open in GitHub Copilot app
+You can’t perform that action at this time.

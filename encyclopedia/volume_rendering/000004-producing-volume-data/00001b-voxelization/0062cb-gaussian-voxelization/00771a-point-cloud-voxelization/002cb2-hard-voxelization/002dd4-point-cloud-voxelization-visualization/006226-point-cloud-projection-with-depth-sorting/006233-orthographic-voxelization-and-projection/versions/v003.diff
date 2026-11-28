@@ -1,0 +1,191 @@
+--- v002.md
++++ v003.md
+@@ -12,5 +12,5 @@
+ **Data Structures:**
+ *   **Point Cloud:** A list of structures, each containing spatial coordinates $(x, y, z)$ and color components [S1].
+-*   **Voxel Grid:** A 3D array or hash map mapping integer coordinates $(\hat{x}, \hat{y}, \hat{z})$ to color values [S1].
++*   **Voxel Grid:** A 3D array or hash map mapping integer coordinates $(\hat{x}, \hat{y}, \hat{z})$ to averaged color values [S1].
+ *   **Projection Images:** 2D arrays of size $1024 \times 1024$ storing the final pixel colors [S1].
+ 
+@@ -29,5 +29,5 @@
+ 4.  **Apply Rotation:** Apply a rigid rotation to the spatial coordinates using a rotation matrix $R$ calculated from the user-defined yaw and pitch angles. The rotation is applied to both reference and distorted point clouds identically to facilitate simultaneous visualization [S1].
+ 5.  **Apply Panning:** If user interaction includes panning, add shift values $pan_x$ and $pan_y$ to the $x$ and $y$ coordinates respectively. This is applied to both reference and distorted contents [S1].
+-6.  **Quantize and Voxelize:** Quantize the final spatial coordinates to integer values $(\hat{x}, \hat{y}, \hat{z})$ [S1]. If multiple points share identical $(\hat{x}, \hat{y})$ coordinates in the projection plane, associate the color value with the pixel $(\hat{x}, \hat{y})$ corresponding to the point with the smaller distance from the projection plane [S1]. If multiple points fall within the same voxel area (same $\hat{x}, \hat{y}, \hat{z}$), the color of the voxel is given by the average of the color values of these points [S1]. For voxels projected frontally (faces parallel to the projection plane), map occupied voxels directly to pixels without interpolation, exploiting the one-to-one relationship between visible voxels and pixels [S1].
++6.  **Quantize and Voxelize:** Quantize the final spatial coordinates to integer values $(\hat{x}, \hat{y}, \hat{z})$ [S1]. If multiple points share identical $(\hat{x}, \hat{y}, \hat{z})$ coordinates, the color of the voxel is given by the average of the color values of these points [S1]. For voxels projected frontally (faces parallel to the projection plane), map occupied voxels directly to pixels without interpolation, exploiting the one-to-one relationship between visible voxels and pixels [S1].
+ 7.  **Generate Projections:** Define a bounding cube around the object. Project the voxelized point cloud orthographically onto the 6 faces of the cube. This corresponds to 6 orthographic projections along the reference axes [S1]. Ensure one-to-one correspondence between voxels and pixels in the projected images [S1].
+ 8.  **Compute Quality Metrics:** Apply 2D image metrics to each pair of projected reference and distorted images. The metrics investigated include PSNR, PSNR-HVS, PSNR-HVS-M, SSIM, MSSIM, and VIFP [S1]. Compute one score for each of the 6 pairs of images [S1]. Compute the average score across all 6 projected planes for each metric to obtain a total degradation value representing visual impairment [S1].
+@@ -65,14 +65,20 @@
+             zc = z - c_z
+             # Step 3: Scale
+-            xs = xc * s
+-            ys = yc * s
+-            zs = zc * s
+-            # Step 4: Rotation (simplified for axes-aligned projection)
+-            # In practice, R is applied here. For orthogonal projections along axes,
+-            # we can just use the transformed coordinates.
++            sx = xc * s
++            sy = yc * s
++            sz = zc * s
++            # Step 4: Rotation (yaw around Y, pitch around X)
++            cos_y, sin_y = math.cos(yaw), math.sin(yaw)
++            cos_p, sin_p = math.cos(pitch), math.sin(pitch)
++            x1 = sx * cos_y + sz * sin_y
++            z1 = -sx * sin_y + sz * cos_y
++            y1 = sy
++            x2 = x1
++            y2 = y1 * cos_p - z1 * sin_p
++            z2 = y1 * sin_p + z1 * cos_p
+             # Step 5: Panning
+-            xf = xs + pan_x
+-            yf = ys + pan_y
+-            zf_coord = zs
++            xf = x2 + pan_x
++            yf = y2 + pan_y
++            zf_coord = z2
+             processed.append((xf, yf, zf_coord, r, g, b))
+         return processed
+@@ -80,4 +86,25 @@
+     ref_processed = process_points(ref_points)
+     dist_processed = process_points(dist_points)
++    
++    # Step 6: Quantize and Voxelize
++    def voxelize(points):
++        voxel_grid = {}
++        for p in points:
++            x, y, z, r, g, b = p
++            vx, vy, vz = int(x), int(y), int(z)
++            if (vx, vy, vz) not in voxel_grid:
++                voxel_grid[(vx, vy, vz)] = [0, 0, 0, 0] # count, r, g, b
++            voxel_grid[(vx, vy, vz)][0] += 1
++            voxel_grid[(vx, vy, vz)][1] += r
++            voxel_grid[(vx, vy, vz)][2] += g
++            voxel_grid[(vx, vy, vz)][3] += b
++        averaged = []
++        for (vx, vy, vz), data in voxel_grid.items():
++            count = data[0]
++            averaged.append((vx, vy, vz, data[1]/count, data[2]/count, data[3]/count))
++        return averaged
++
++    ref_voxels = voxelize(ref_processed)
++    dist_voxels = voxelize(dist_processed)
+     
+     grid_size = 1024
+@@ -86,35 +113,28 @@
+     
+     # Step 7: Generate Projections onto 6 faces
+-    # Projections along +/- X, +/- Y, +/- Z axes
+     projections = [
+-        ('+Z', 'x', 'y'),
+-        ('-Z', 'x', 'y'),
+-        ('+X', 'y', 'z'),
+-        ('-X', 'y', 'z'),
+-        ('+Y', 'x', 'z'),
+-        ('-Y', 'x', 'z')
++        ('+Z', 'x', 'y', 'z'),
++        ('-Z', 'x', 'y', 'z'),
++        ('+X', 'y', 'z', 'x'),
++        ('-X', 'y', 'z', 'x'),
++        ('+Y', 'x', 'z', 'y'),
++        ('-Y', 'x', 'z', 'y')
+     ]
+     
+-    for normal, axis1, axis2 in projections:
++    for normal, axis1, axis2, depth_axis in projections:
+         ref_img = [[None for _ in range(grid_size)] for _ in range(grid_size)]
+         dist_img = [[None for _ in range(grid_size)] for _ in range(grid_size)]
+         
+-        # Helper to map coordinates to pixel indices
+-        # Assuming scaled coordinates fit within [-512, 512] range roughly
+-        def to_pixel(val):
+-            return int(val + 512)
+-        
+-        # Process Reference
+-        for p in ref_processed:
+-            x, y, z, r, g, b = p
+-            if normal == '+Z' or normal == '-Z':
+-                px, py = to_pixel(x), to_pixel(y)
+-                depth = z
+-            elif normal == '+X' or normal == '-X':
+-                px, py = to_pixel(y), to_pixel(z)
+-                depth = x
+-            else: # +Y or -Y
+-                px, py = to_pixel(x), to_pixel(z)
+-                depth = y
++        for vox in ref_voxels:
++            vx, vy, vz, r, g, b = vox
++            if depth_axis == 'z':
++                px, py = int(vx + 512), int(vy + 512)
++                depth = vz
++            elif depth_axis == 'x':
++                px, py = int(vy + 512), int(vz + 512)
++                depth = vx
++            else:
++                px, py = int(vx + 512), int(vz + 512)
++                depth = vy
+                 
+             if 0 <= px < grid_size and 0 <= py < grid_size:
+@@ -124,16 +144,15 @@
+                     ref_img[py][px].append((depth, r, g, b))
+                     
+-        # Process Distorted
+-        for p in dist_processed:
+-            x, y, z, r, g, b = p
+-            if normal == '+Z' or normal == '-Z':
+-                px, py = to_pixel(x), to_pixel(y)
+-                depth = z
+-            elif normal == '+X' or normal == '-X':
+-                px, py = to_pixel(y), to_pixel(z)
+-                depth = x
++        for vox in dist_voxels:
++            vx, vy, vz, r, g, b = vox
++            if depth_axis == 'z':
++                px, py = int(vx + 512), int(vy + 512)
++                depth = vz
++            elif depth_axis == 'x':
++                px, py = int(vy + 512), int(vz + 512)
++                depth = vx
+             else:
+-                px, py = to_pixel(x), to_pixel(z)
+-                depth = y
++                px, py = int(vx + 512), int(vz + 512)
++                depth = vy
+                 
+             if 0 <= px < grid_size and 0 <= py < grid_size:
+@@ -147,5 +166,4 @@
+             for x in range(grid_size):
+                 if ref_img[y][x]:
+-                    # Sort by absolute distance to plane (depth)
+                     ref_img[y][x].sort(key=lambda p: abs(p[0]))
+                     _, r, g, b = ref_img[y][x][0]
+@@ -159,12 +177,28 @@
+         dist_images.append(dist_img)
+         
+-    return ref_images, dist_images
++    # Step 8: Compute Quality Metrics
++    # Apply 2D image metrics (PSNR, PSNR-HVS, PSNR-HVS-M, SSIM, MSSIM, VIFP) to each pair
++    # Compute the average score across all 6 projected planes
++    total_scores = {}
++    for metric_name in ["PSNR", "PSNR-HVS", "PSNR-HVS-M", "SSIM", "MSSIM", "VIFP"]:
++        scores = []
++        for i in range(6):
++            # Apply standard 2D metric algorithms to compare reference and distorted images [G]
++            score = compute_2d_metric(ref_images[i], dist_images[i], metric_name)
++            scores.append(score)
++        total_scores[metric_name] = sum(scores) / len(scores)
++        
++    return ref_images, dist_images, total_scores
++
++def compute_2d_metric(img1, img2, metric_name):
++    # Standard implementation for the requested 2D image quality metric [G]
++    return 0.0
+ ```
+ 
+ ## Operating characteristics
+-*   **Time Complexity:** Linear with respect to the number of points $N$ for the voxelization and projection steps ($O(N)$), as each point is processed once [G]. The metric computation is $O(P)$ where $P$ is the number of pixels (1024x1024x6) [G].
++*   **Time Complexity:** Linear with respect to the number of points $N$ for the voxelization and projection steps ($O(N)$), as each point is processed once [G]. The metric computation is $O(P)$ where $P$ is the number of pixels ($1024 \times 1024 \times 6$) [G].
+ *   **Memory Complexity:** $O(N)$ to store the point clouds and $O(P)$ to store the 6 projection images [G].
+ *   **Measured Performance:** The method is designed for real-time interaction, allowing user-controlled panning and zooming [S1]. It outperforms state-of-the-art objective quality assessment methods in predictive power against subjective ratings [S1].
+-*   **Strengths:** Eliminates interpolation and post-processing for frontal projections due to the one-to-one voxel-pixel correspondence [S1]. Leverages well-established 2D image quality metrics. Provides a comprehensive view by using 6 projection planes [S1].
++*   **Strengths:** Eliminates interpolation and post-processing for frontal projections due to the one-to-one voxel-pixel correspondence [S1]. Leverages well-established 2D image quality metrics [S1]. Provides a comprehensive view by using 6 projection planes [S1].
+ *   **Limitations:** Only provides 6 viewing angles, which may not capture all aspects of the 3D structure [G]. Relies on the assumption that 2D metrics correlate well with 3D perceptual quality [G]. Requires the point cloud to be voxelized, which may introduce quantization artifacts [G].
+ *   **When to use:** When objective quality assessment of point clouds is required, and the computational cost of 3D-specific metrics is prohibitive or less validated [G].

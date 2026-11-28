@@ -1,0 +1,90 @@
+--- v002.md
++++ v003.md
+@@ -4,54 +4,56 @@
+ 
+ ## Overview
+-The DDPM Denoise Function Network is a 3D convolutional neural network used as the core denoiser in diffusion-based radiance field optimization. It predicts the noise component $\epsilon_\theta$ for a noisy 3D latent field, enabling the reverse diffusion process to iteratively refine the radiance field representation. It differs from sibling methods like [DDIM Sampling with Classifier-Free Guidance](8118-ddim-sampling-with-classifier-free-guidance.md) by its specific architectural choice of an 8-layer 3D U-Net-like structure designed for voxel grid inputs, rather than relying on 2D image latents or transformer-based attention mechanisms.
++The DDPM Denoise Function Network is a neural network architecture that parameterizes the reverse diffusion process for 3D radiance fields, predicting the noise component $\epsilon_\theta(x_t, t)$ to recover clean latent volumes [S1, unofficial]. It enables image-to-volume synthesis by integrating volumetric rendering gradients into the diffusion sampling loop, steering the denoised field toward photometric consistency with target images [S2]. It differs from sibling methods by explicitly using a 3D convolutional U-Net structure to operate directly on voxelized latent representations rather than implicit coordinate-based MLPs [S1, unofficial].
+ 
+ ## How it works
+ **Inputs and Outputs:**
+-- Input: Noisy 3D latent field $x_t$ at timestep $t$, typically represented as a voxel grid.
+-- Output: Predicted noise $\epsilon_\theta(x_t, t)$ or the denoised field estimate $\tilde{f}_0^t$.
++- Input: Noisy latent volume $x_t$ at timestep $t$, and timestep embedding $t$.
++- Output: Predicted noise $\epsilon_\theta(x_t, t)$ or the denoised estimate $\hat{x}_0$.
+ 
+ **Data Structures:**
+-The network processes 3D voxel grids. The input resolution is $32 \times 32 \times 32$. The latent representation is a tensor of shape $(N, C, D, H, W)$ where $N$ is batch size, $C$ is channels, and $D, H, W$ are spatial dimensions.
+-
+-**Network Architecture:**
+-The network consists of 8 layers of 3D convolutions [S1, unofficial].
+-- **Encoder (Layers 1-4):** Four 3D convolutional layers with stride 2.
+-  - Layer widths (channels): 32, 64, 128, 256.
+-  - Resolution mapping: $32 \to 16 \to 8 \to 4$.
+-- **Decoder (Layers 5-8):** Four 3D transposed convolutional layers with stride 2.
+-  - Layer widths (channels): 256, 128, 64, 32.
+-  - Resolution mapping: $4 \to 8 \to 16 \to 32$.
++The network is an 8-layer 3D convolutional U-Net [S1, unofficial].
++- **Encoder Path (Layers 1-4):**
++  - Layer widths: $\{32, 64, 128, 256\}$.
++  - Operation: 3D Convolution with stride 2.
++  - Resolution change: Encodes voxel resolution from $32^3$ to $4^3$.
++- **Decoder Path (Layers 5-8):**
++  - Layer widths: $\{256, 128, 64, 32\}$.
++  - Operation: 3D Transposed Convolution with stride 2.
++  - Resolution change: Recovers voxel resolution from $4^3$ to $32^3$.
++- **Skip Connections:** Standard U-Net skip connections are implied by the encoder-decoder symmetry [S1, unofficial].
+ 
+ **Algorithm Steps:**
+-1. **Forward Pass:** Pass the noisy latent $x_t$ through the 8-layer 3D convolution network to predict the noise $\epsilon_\theta(x_t, t)$ [S1, unofficial].
+-2. **Denoising Estimate:** Compute the estimated clean field $\tilde{f}_0^t$ using the standard DDPM reverse step formula, combining the prediction with the diffusion schedule parameters $\alpha_t, \bar{\alpha}_t$ [S1, unofficial][S2].
+-3. **Rendering:** Perform volumetric rendering on the current denoised estimate $\tilde{f}_0^t$ from a specific camera pose to generate a synthetic image $\tilde{I}_t$ [S2].
+-4. **Gradient Computation:** Compute the photometric error between the rendered image $\tilde{I}_t$ and the target foreground-masked image $I$. Calculate the gradient of this error with respect to the denoised field estimate: $\nabla_{\tilde{f}_t} (\tilde{I}_t, I)$ [S2].
+-5. **Guidance Update:** Update the denoised field estimate by steering it towards the target image using a guidance weight $\lambda$:
++1. **Forward Diffusion:** Add Gaussian noise to the clean latent volume $x_0$ over $T$ timesteps to obtain $x_t$ [Parent].
++2. **Denoising Prediction:** Pass $x_t$ and timestep $t$ through the 3D Convolutional Network to predict noise $\epsilon_\theta(x_t, t)$ [S1, unofficial].
++3. **Image-to-Volume Steering (Optional):** For guided synthesis, compute the photometric error between the rendered image $\tilde{I}_t$ (from current denoising estimate $\tilde{f}_0^t$) and the target image $I$ [S2].
++4. **Gradient Computation:** Compute the gradient $\nabla_{\tilde{f}_t} (\tilde{I}_t, I)$ via differentiable volumetric rendering [S2].
++5. **Latent Update:** Update the predicted denoised field $\tilde{f}_0^t$ using the guidance weight $\lambda$:
+    $$ \tilde{f}_0^t \leftarrow \tilde{f}_0^t - \lambda \nabla_{\tilde{f}_t} (\tilde{I}_t, I) $$
+-   This step integrates the diffusion prior with the photometric consistency constraint [S2].
++   [S2].
++6. **Reverse Step:** Use the predicted noise (and optionally the steered latent) to compute $x_{t-1}$ according to the parent's diffusion equations [Parent].
+ 
+ **Parameters:**
+-- Guidance weight $\lambda$: Small scalar value (exact value not specified in sources, described as "small") [S2].
+-- Optimizer: Adam optimizer with learning rate $10^{-2}$ [S2].
+-- L2 Regularization: Weighted with $5 \times 10^{-2}$ on the latent code [S2].
++- Guidance weight $\lambda$: Small scalar value [S2].
++- Learning rate for latent code update: $10^{-2}$ [S2].
++- L2 regularization weight on code: $5 \times 10^{-2}$ [S2].
+ 
+-**Edge Cases and Pitfalls:**
+-- The method assumes the input latent is a 3D voxel grid. If the input is not aligned with the $32^3$ resolution, interpolation or padding is required [G].
+-- The gradient computation via volumetric rendering must be differentiable to allow backpropagation through the rendering process [S2].
++**Edge Cases:**
++- Precision: Volumetric rendering gradients may suffer from aliasing if query point sampling is insufficient [S1, unofficial].
++- Boundaries: The network operates on fixed $32^3$ voxel grids; inputs must be padded or cropped to this resolution [S1, unofficial].
+ 
+ ## Subtopics
+ 
+ ### Classifier Guidance for Image-to-Volume Synthesis
+-This variant conditions the diffusion model using a classifier guidance approach for image-to-volume synthesis. It steers the sampling process by computing gradients from the photometric error between the rendered view and the target image, similar to the main method but explicitly framed as classifier guidance for synthesizing 3D volumes from 2D images [S2].
++This variant uses the DDPM Denoise Function Network in conjunction with classifier guidance to synthesize 3D volumes from single images. It steers the diffusion sampling process by computing gradients of the photometric error with respect to the latent field, allowing the model to align the generated radiance field with the input image's appearance [S2].
+ 
+ ## Operating characteristics
+-- **Time Complexity:** Depends on the number of diffusion steps and the cost of volumetric rendering per step. The 3D convolution network is relatively lightweight compared to 2D image models due to the small voxel resolution ($32^3$) [S1, unofficial].
+-- **Memory Complexity:** Requires storing the 3D voxel grid and intermediate feature maps. The peak memory usage is determined by the largest feature map ($256$ channels at $4 \times 4 \times 4$ resolution) [S1, unofficial].
+-- **Strengths:** Directly operates in 3D space, ensuring geometric consistency. Integrates photometric guidance for high-fidelity image-to-volume synthesis [S2].
+-- **Limitations:** Limited to low-resolution voxel grids ($32^3$) due to computational constraints of 3D convolutions. Not suitable for high-resolution detailed geometry without multi-resolution approaches [S1, unofficial].
++- **Time Complexity:** Determined by the 8-layer 3D convolutional network and the cost of differentiable volumetric rendering per sampling step [S1, unofficial][S2].
++- **Memory Complexity:** Requires storing the $32^3$ voxel latent volume and intermediate feature maps for the U-Net [S1, unofficial].
++- **Strengths:** Directly operates on voxel grids, enabling efficient 3D convolutions; supports image-to-volume synthesis via gradient steering [S1, unofficial][S2].
++- **Limitations:** Fixed resolution ($32^3$) limits detail; volumetric rendering gradients can be noisy [S1, unofficial][S2].
++- **When to use:** When synthesizing 3D radiance fields from images with explicit geometric consistency [S2].
+ 
+ ## Background
+-The DDPM Denoise Function Network was introduced in the context of 3D radiance field diffusion models, specifically for tasks like image-to-volume synthesis and text-to-3D generation. It builds upon the Denoising Diffusion Probabilistic Models (DDPM) framework, adapting it to 3D voxel representations. The architecture was designed to efficiently encode and decode 3D spatial information using 3D convolutions [S1, unofficial][S2].
++The method was introduced in "DiffRF: Rendering-Guided 3D Radiance Field Diffusion" (CVPR 2023) [S2] and "Neural Volumetric Mesh Generator" (arXiv 2022) [S1, unofficial]. It builds on the DDPM framework [Parent] and adapts it to 3D radiance fields using 3D convolutions [S1, unofficial].
+ 
+ ## Sources

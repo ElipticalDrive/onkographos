@@ -1,0 +1,3142 @@
+# Fast Compressed Segmentation Volumes for Scientific Visualization
+
+The directory contains exemplary code for the compression method proposed in "Fast Compressed Segmentation Volumes for Scientific Visualization".
+The project is kept minimal to allow integration into other systems.
+For details regarding the compression method, we refer to the paper.
+
+This directory contains:
+* C++ code for compressing and decompressing segmentation volumes on the CPU,
+* simple tests for verifying results on multiple level-of-details,
+* code to generate example 3D-Voronoi volumes, and
+* GLSL code for implementing GPU based decompression.
+
+## Dependencies
+This project only depends on GLM which can be installed on Debian / Ubuntu systems with `sudo apt install libglm-dev`.
+To build the project, you need CMake which can be installed with `sudo apt install cmake`. 
+If your compiler supports it, OpenMP is used to parallelize (de)compression and example data generation.
+
+To build the CMake project, move to the root directory and execute
+
+```
+mkdir cmake-build-release && cd cmake-build-release
+cmake -DCMAKE_BUILD_TYPE=Release ..
+make -j 8
+```
+followed by `./csvol` to run the example program.
+
+## Example Data
+The example program creates a Voronoi-like data set by sampling a point set and computing a nearest neighbor within this point set for each voxel.
+Note that this code is not optimized and will lead to long runtimes for high volume dimensions or label densities.
+We highly recommend running the code as a Release build.
+Once the example data is computed, it is exported to a local file which will be re-imported when the program runs for the next time.  
+If you want to use your own data from hdf5 files, we recommend [HighFive](https://github.com/BlueBrain/HighFive) which can easily be integrated as a CMake subdirectory.
+
+
+## Project Structure
+
+| Directory / Files                | Functionality                                                                    |
+|----------------------------------|----------------------------------------------------------------------------------|
+| main.cpp                         | contains the example program                                                     |
+| shader                           | GLSL code for decompressing Compressed Segmentation Volumes on the GPU           |
+| include/rANS                     | contains a modified version of the rANS implementation released by Fabian Giesen |
+| CompressedSegmentationVolume.hpp | class containing the main compression and decompression implementation           |
+| VolumeCompressionBase.hpp        | contains the reference multi grid construction                                   |
+| Volume.hpp                       | contains code to generate an example Voronoi volume and import/export functions  |
+
+## Contact
+
+Max Piochowiak ([max.piochowiak@kit.edu](mailto:max.piochowiak@kit.edu)), Karlsruhe Institute of Technology, Institute for Visualization and Data Analysis, Germany
+
+
+## License
+Copyright(c) 2023 Max Piochowiak
+
+<a rel="license" href="http://creativecommons.org/licenses/by-nc/4.0/"><img alt="Creative Commons License" style="border-width:0" src="https://i.creativecommons.org/l/by-nc/4.0/88x31.png" /></a><br />This work is licensed under a <a rel="license" href="http://creativecommons.org/licenses/by-nc/4.0/">Creative Commons Attribution-NonCommercial 4.0 International License</a>.
+
+### include/CompressedSegmentationVolume.hpp
+```
+#pragma once
+
+#include <filesystem>
+#include <fstream>
+#include <omp.h>
+#include <map>
+#include <iostream>
+
+#include "csvol_constants.h"
+#include "VolumeCompressionBase.hpp"
+#include "rans.hpp"
+#include "util.hpp"
+#include "space_filling_curves.hpp"
+
+// How many CPU Threads to use to parallelize encoding/decoding etc.
+// Usually, the number of available CPU cores is a good fit.
+#define NUM_THREADS 8
+
+namespace vvv {
+
+class CompressedSegmentationVolume : public VolumeCompressionBase {
+
+public:
+    explicit CompressedSegmentationVolume(uint32_t brick_size=0) : VolumeCompressionBase(), m_brick_size(brick_size), m_encoding(),
+                                                                   m_brick_starts(), m_volume_dim(-1), m_use_rANS(false), m_use_detail_freq(false) {}
+
+    // COMPRESSION -----------------------------------------------------------------------------------------------------
+
+    /**
+     * Sets the options for the compression step. If using rANS, 64 bit frequency tables must be given as uint32_t[16] arrays.
+     */
+    void setCompressionOptions(bool use_rANS, bool use_detail_freq, const uint32_t* operation_frequencies = nullptr, const uint32_t* detail_operation_frequencies = nullptr);
+
+    /**
+     * Sets the options for the compression step. If using rANS, 64 bit frequency tables must be given as size_t[16] arrays.
+     */
+    void setCompressionOptions64(bool use_rANS, bool use_detail_freq, const size_t* operation_frequencies = nullptr, const size_t* detail_operation_frequencies = nullptr);
+
+    /**
+     * Performs a pseudo compression pass to obtain operation frequency tables for later rANS encoding.
+     * @param detail_freq if true, a separate table is computed for the finest LoD.
+     * @param freq_out first 16 entries contain the base frequencies. If detail_freq, the latter 16 elements contain the table for the finest LoD.
+     * @param subsampling_factor if > 1, only every other brick is handled. The higher the factor, the fewer bricks are processed.
+     */
+    void compressForFrequencyTable(const std::vector<uint32_t>& volume, glm::uvec3 volume_dim, size_t freq_out[32], uint32_t subsampling_factor, bool detail_freq, bool verbose=false);
+
+    /**
+     * Converts the 64 bit operation frequency table into a 32 bit table with identical relative operation frequencies,
+     * normalized for rANS encoding. Any operation frequency that is zero is set to a minimal value of 1. This is due
+     * to the potential subsampling of bricks when computing the frequencies which could miss counting certain operations
+     * in small data sets. Later rANS encoding behavior would be undefined when encoding operations with zero frequencies.
+     */
+    static std::vector<uint32_t> normalizeOperationFrequencies(const size_t* freq);
+
+    /**
+     * Normalizes this frequency table for rANS encoding. Any operation frequency that is zero is set to a minimal value
+     * of 1. This is due to the potential subsampling of bricks when computing the frequencies which could miss counting
+     * certain operations in small data sets. Later rANS encoding behavior would be undefined when encoding operations
+     * with zero frequencies.
+     */
+    static std::vector<uint32_t> normalizeOperationFrequencies(const uint32_t* freq);
+
+    /**
+     * Compresses the given volume for the previously set compression options and stores the result internally.
+     * Afterwards, single bricks or the full volume can be decoded to any LoD.
+     * @param volume original label volume with 32 bit labels and voxels stored in XYZ linearized order.
+     * @param volume_dim dimensions in voxels of the original volume.
+     */
+    void compress(const std::vector<uint32_t>& volume, glm::uvec3 volume_dim, bool verbose=false) override;
+
+    // DECOMPRESSION ---------------------------------------------------------------------------------------------------
+
+    /**
+     * Decompresses a single brick to the given output buffer. Note that the voxels will be in morton order in out!
+     * Additional remapping is required if another linearization should be present.
+     * @param out buffer with at least brick_size^3 elements
+     * @param brick the brick to decompress
+     * @param target_lod the target LoD to compress the brick to
+     */
+    void decompressBrickTo(uint32_t* out, glm::uvec3 brick, int target_lod) const;
+
+    /**
+     * Decompresses the full volume up to a certain LoD into the vector out.
+     */
+    void decompressLoD(int lod, std::vector<uint32_t>& out) const;
+
+    /**
+     * Decompresses the full original volume an returns it as a new uint32_t vector.
+     */
+    std::shared_ptr<std::vector<uint32_t>> decompress() override {
+        std::shared_ptr<std::vector<uint32_t>> out = std::make_shared<std::vector<uint32_t>>();
+        out->resize(static_cast<size_t>(m_volume_dim.x) * m_volume_dim.y * m_volume_dim.z);
+        MiniTimer t;
+        decompressLoD(0, *out);
+        double time = t.elapsed();
+        std::cout << " full decode in " << t.elapsed() << "s (" << (static_cast<double>(out->size() * sizeof(uint32_t))/time/1000/1000/1000) << " GB/s)";
+        return out;
+    }
+
+    // TESTS -----------------------------------------------------------------------------------------------------------
+
+    /**
+     * Checks if all LoDs except the finest one are decompressed correctly.
+     * Any node should have the same label as given in the reference multigrids.
+     */
+    bool testLoD(const std::vector<uint32_t>& volume, glm::uvec3 volume_dim) const;
+
+    /**
+     * Tests if the original volume can be reconstructed without errors from the encoding and if all available LoDs
+     * can be reconstructed as defined by the reference multigrids per brick.
+     * @param compress_first if true, the volume is compressed before testing
+     */
+    bool test(const std::vector<uint32_t>& volume, const glm::uvec3 volume_dim, bool compress_first=false) override {
+        if(!VolumeCompressionBase::test(volume, volume_dim, compress_first)) {
+            std::cout << "skipping LODs...";
+            std::cout << "-------------------------------------------------------------";
+            return false;
+        }
+        return testLoD(volume, volume_dim);
+    }
+
+    /**
+     * Linearization of all 3D brick indices. All compressed bricks are stored along this order.
+     * Also used to access the start indices in the brick_starts array.
+     */
+    static inline uint32_t brick_to_1D(glm::uvec3 brick_pos, glm::uvec3 brick_count) {
+        return sfc::Cartesian::p2i(brick_pos, brick_count);
+    }
+    bool isUsingRANS() const { return m_use_rANS; }
+    bool isUsingDetailFreq() const { return m_use_detail_freq; }
+    const std::vector<uint32_t>* getEncoding() { return &m_encoding; }
+    const std::vector<uint32_t>* getBrickStarts() { return &m_brick_starts; }
+    glm::uvec3 getVolumeDim() const { return m_volume_dim; }
+    glm::uint32_t getBrickSize() const { return m_brick_size; }
+    uint32_t getLodCountPerBrick() const { return static_cast<uint32_t>(log2(m_brick_size)) + 1; }
+    glm::uvec3 getBrickCount() const { return (m_volume_dim - glm::uvec3(1)) / m_brick_size + 1u; }
+
+
+    // FILE IMPORT/EXPORT ----------------------------------------------------------------------------------------------
+    static std::string getCSVFileName(const std::string& filepath, uint32_t brick_size, bool use_rANS,
+                                      bool use_detail_freq, const std::string filetype= ".cmp") {
+        return filepath.substr(0, filepath.rfind('.')) + "_difftree_bs" + std::to_string(brick_size) +
+                    (use_rANS ? "_rANS" : "") + (use_detail_freq ? "df" : "") + filetype;
+    }
+    std::string getCSVFileName(const std::string& filepath, const std::string filetype= ".cmp") {
+        return getCSVFileName(filepath, m_brick_size, m_use_rANS, m_use_detail_freq, filetype);
+    }
+    void exportToFile(const std::string& path, bool verbose = true);
+    bool importFromFile(const std::string& path, bool verbose = true);
+
+    // UTILITY ---------------------------------------------------------------------------------------------------------
+    void clear() {
+        m_volume_dim = glm::uvec3(0u);
+        m_brick_size = 0u;
+        m_encoding.clear();
+        m_brick_starts.clear();
+    }
+
+    float getCompressedSizeInGB() {
+        return static_cast<float>(m_encoding.size() + m_brick_starts.size()) * sizeof(uint32_t) / 1000.f / 1000.f / 1000.f;
+    }
+
+    /**
+     * Returns a compression ratio measured as [compressed size] / [original uint32 data set size] in percent.
+     */
+    float getCompressionRatio() override {
+        return static_cast<float>((m_encoding.size() + m_brick_starts.size()) * sizeof(uint32_t)) /
+               static_cast<float>(m_volume_dim.x * m_volume_dim.y * m_volume_dim.z * sizeof(uint32_t)) * 100.f;
+    }
+
+    std::string decodingInfoString() {
+        const float brick_starts_memory = static_cast<float>(m_brick_starts.size() * sizeof(uint32_t)) / 1000.f / 1000.f;
+        const float encoding_memory = static_cast<float>(m_encoding.size() * sizeof(uint32_t)) / 1000.f / 1000.f;
+        const float volume_memory = static_cast<float>(static_cast<size_t>(m_volume_dim[0] * m_volume_dim[1] * m_volume_dim[2]) * sizeof(uint32_t)) / 1000.f / 1000.f;
+        std::stringstream ss;
+        ss << "start buffer (" << brick_starts_memory << "MB) + encoding buffer (" << encoding_memory << "MB) = "
+           << (brick_starts_memory + encoding_memory) << "MB / " << volume_memory << "MB original size ("
+           << (static_cast<float>(brick_starts_memory + encoding_memory) / volume_memory*100.f) << "%)";
+        return ss.str();
+    }
+
+
+private:
+    // list of neighbor vectors per index (8 indices in total) where each index has 3 ivec3 vectors of type [-1, 1]^3
+    static constexpr const glm::ivec3 neighbor[][3] = {{glm::ivec3({-1, 0, 0}), glm::ivec3({0, -1, 0}), glm::ivec3({0, 0, -1})},
+                                                       {glm::ivec3({1, 0, 0}), glm::ivec3({0, -1, 0}), glm::ivec3({0, 0, -1})},
+                                                       {glm::ivec3({-1, 0, 0}), glm::ivec3({0, 1, 0}), glm::ivec3({0, 0, -1})},
+                                                       {glm::ivec3({1, 0, 0}), glm::ivec3({0, 1, 0}), glm::ivec3({0, 0, -1})},
+                                                       {glm::ivec3({-1, 0, 0}), glm::ivec3({0, -1, 0}), glm::ivec3({0, 0, 1})},
+                                                       {glm::ivec3({1, 0, 0}), glm::ivec3({0, -1, 0}), glm::ivec3({0, 0, 1})},
+                                                       {glm::ivec3({-1, 0, 0}), glm::ivec3({0, 1, 0}), glm::ivec3({0, 0, 1})},
+                                                       {glm::ivec3({1, 0, 0}), glm::ivec3({0, 1, 0}), glm::ivec3({0, 0, 1})}};
+
+    /**
+     * Returns the current value in the brick at the neighbor_i neighbor position of brick_pos at the decoding stage at the given lod_width.
+     * If the neighbor is not yet set in this level, the parent element of this neighbor is returned.
+     * If the neighbor would lie outside the brick, INVALID is returned.
+     */
+    static uint32_t valueOfNeighbor(const uint32_t* brick, const glm::uvec3& brick_pos, uint32_t local_lod_i, uint32_t lod_width, uint32_t brick_size, int neighbor_i);
+    static uint32_t valueOfNeighbor(const MultiGridNode* grid, const MultiGridNode* parent_grid, const glm::uvec3& brick_pos, uint32_t local_lod_i, uint32_t lod_width, int neighbor_i);
+
+    /**
+     * Enumerate the voxel positions within a brick.
+     * Because of how we encode the LoDs, this enumeration is required to always be in an "octree manner":
+     * Iterating over it with a step size of 2*2*2=8 should land on all start points of 2x2x2 bricks in the Octree and so on.
+     * Morton and Hilbert curves for example satisfy this criterion.
+     */
+    static inline glm::uvec3 enumBrickPos(uint32_t i, uint32_t brick_size) { return sfc::Morton3D::i2p(i); }
+    static inline glm::uint32_t indexOfBrickPos(const glm::uvec3& p) { return sfc::Morton3D::p2i(p); }
+
+    /**
+     * Computes operation frequencies and detail operation frequencies (the latter offsetted by 16) for the brick into the given brick_freq[32] array.
+     */
+    void compressBrickForFrequencyTable(const std::vector<uint32_t>& volume, size_t* brick_freq, glm::uvec3 start, glm::uvec3 volume_dim, bool detail_freq) const;
+
+
+    /**
+     * Encodes a single brick from given start with size brick_size in the volume to the out vector. out should have enough space reserved for adding all elements.
+     * @return number of uint32_t elements written to out
+     */
+    uint32_t compressBrick(const std::vector<uint32_t>& volume, std::vector<uint32_t>& out, glm::uvec3 start, glm::uvec3 volume_dim);
+
+    /**
+     * Uses the given rANS encoder to compress the stream of nibbles between the given start and end point.
+     */
+    static uint32_t packRANS(std::vector<uint32_t>& v, uint32_t start4bit, uint32_t end4bit, RANS& rANS);
+
+    struct ReadState {
+        uint32_t idxE = 0u;         // Used either as 4 bit element index or byte index for rANS.
+        uint32_t rans_state = 0u;   // This is the whole rANS decoding state.
+        bool in_detail_lod = false; // Whether we're currently reading from the finest LoD.
+
+    };
+    /**
+     * Reads the next element from the encoding, possibly using the rANS decoder, and updates the state.
+     */
+    uint32_t readNextLodOperation(size_t start32bit, CompressedSegmentationVolume::ReadState &state) const;
+
+    /**
+     * Decompresses a single brick in the volume. A volume has to be compressed beforehand.
+     * The brick_idx is used to read the begin and endpoint of the encoding from the brick_starts buffer.
+     * Output is an uint32_t array of the decoded brick. It always has to have brick_size^3 elements, but output
+     * values for elements outside the volume dimension are undefined. Output elements are in morton order.
+     *
+     * @param valid_brick_size usually brick_size^3 except for bricks at the border of the volume. Has to specify the dimension of the potentially clamped brick in the original volume.
+     * @param inv_lod the inverse LoD until which to decompress, or rather, the decompression iterations. 0 is the coarsest and log2(brick_size) is the original / finest level.
+     */
+    void decompressBrick(uint32_t brick_idx, uint32_t* output_brick, glm::uvec3 valid_brick_size, int inv_lod) const;
+
+    uint32_t m_brick_size;                  // size of one axis, must be power of two. Each brick spans brick_size^3 voxels.
+    glm::uvec3 m_volume_dim;                // size of the input volume to compress.
+    std::vector<uint32_t> m_encoding;       // contains all compressed entries for all LoDs of all bricks.
+    std::vector<uint32_t> m_brick_starts;   // contains start index of each brick in m_encoding.
+
+    RANS m_rans;                            // rANS encoder with a given frequency table.
+    RANS m_detail_rans;                     // rANS encoder with another frequency table for the finest LoD.
+
+    bool m_use_rANS;                        // if rANS encoding should be used as a secondary compression.
+    bool m_use_detail_freq;                 // if the rANS encoding should use a second frequency table for the finest LoD.
+};
+
+} // namespace vvv
+```
+
+### include/Volume.hpp
+```
+#pragma once
+
+#include <cstdint>
+#include <vector>
+#include <memory>
+
+#include <glm/glm.hpp>
+#include <cstdlib>
+#include <iostream>
+#include <fstream>
+#include <sstream>
+
+class Volume {
+
+public:
+    Volume() : dim_x(0u), dim_y(0u), dim_z(0u), m_data() {}
+
+    uint32_t dim_x = 0u, dim_y = 0u, dim_z = 0u;
+    const std::vector<uint32_t>& data() const { return m_data; }
+
+    /**
+     * Replaces this volume with a Voronoi-like volume with the specified width, height, and depth and approx.
+     * points_per_million_voxels labels per million voxels. Internally, a poisson point set is created before computing
+     * nearest neighbors within this point set for all voxels in the volume. Generating large volumes with many labels
+     * can lead to high compute times.
+     */
+    void createSyntheticSegmentationVolume(int w, int h, int d, size_t points_per_million_voxels = 100, size_t candidate_count = 16) {
+        const size_t point_count = static_cast<size_t>(static_cast<float>(w * h * d) / 1000000.f
+                                                        * static_cast<float>(points_per_million_voxels));
+        std::vector<glm::ivec3> candidates(candidate_count);
+        std::vector<uint32_t> dist2(candidate_count);
+        uint32_t max_candidate;
+
+        // Generated poisson-like point cloud
+        std::vector<glm::ivec3> points(point_count);
+        for (size_t i = 0; i < point_count; i++) {
+            // Create candidate_count candidates and keep the candidate point with the maximum distance to all existing
+            // points in the data set.
+            #pragma omp parallel for default(none) shared(candidates, dist2, candidate_count, w, h, d, points, i)
+            for (size_t n = 0; n < candidate_count; n++) {
+                candidates[n].x = std::rand() % static_cast<int>(w);
+                candidates[n].y = std::rand() % static_cast<int>(h);
+                candidates[n].z = std::rand() % static_cast<int>(d);
+                dist2[n] = -1u;
+                glm::ivec3 dist;
+                uint32_t d2;
+                // Careful with large volumes / point sets: the following step can take ages.
+                // A better implementation would use an acceleration structure to speed up the nearest neighbor search.
+                for (size_t p = 0; p < i; p++) {
+                    dist = points[p] - candidates[n];
+                    d2 = dist.x * dist.x + dist.y * dist.y + dist.z * dist.z;
+                    if (d2 < dist2[n]) {
+                        dist2[n] = d2;
+                    }
+                }
+            }
+            max_candidate = 0;
+            for (uint32_t n = 1; n < candidate_count; n++) {
+                if (dist2[n] > dist2[max_candidate]) {
+                    max_candidate = n;
+                }
+            }
+            points[i] = candidates[max_candidate];
+
+            if (i % (point_count / 100) == 0) {
+                std::cout << "Poisson point cloud creation: " << (100 * i / point_count) << "%"
+                          << " of " << point_count << " points." <<"\r" << std::flush;
+            }
+        }
+        std::cout << "Filling voxels with nearest neighbors..                  " << "\r" << std::flush;
+
+        // now we have our nice point set. Next step: create a voronoi volume from it
+        dim_x = w;
+        dim_y = h;
+        dim_z = d;
+        m_data.resize(w * h * d);
+        #pragma omp parallel for collapse(3) default(none) shared(points, w, h, d)
+        for (int z = 0; z < d; z++) {
+            for (int y = 0; y < h; y++) {
+                for (int x = 0; x < w; x++) {
+                    glm::ivec3 pos(x, y, z);
+                    glm::ivec3 dist = pos - points[0];
+                    uint32_t d2 = dist.x * dist.x + dist.y * dist.y + dist.z * dist.z;
+                    uint32_t min_point = 0;
+                    uint32_t min_d2 = d2;
+                    // And again, the following step can take a long time for large volumes:
+                    for (uint32_t i = 1; i < points.size(); i++) {
+                        dist = pos - points[i];
+                        d2 = dist.x * dist.x + dist.y * dist.y + dist.z * dist.z;
+                        if (d2 < min_d2) {
+                            min_point = i;
+                            min_d2 = d2;
+                        }
+                    }
+                    m_data[z * (dim_x * dim_y) + y * dim_z + x] = min_point;
+                }
+            }
+        }
+    }
+
+
+    // Volumes can be loaded and stored in very simple NRRD-like format as [two lines header, raw payload]:
+    // "[volume width] [volume height] [volume depth]"
+    // "[volume data type]"
+    // "[raw-array of data]"
+    void exportToFile(std::string out_path) {
+        std::ofstream fout(out_path, std::ios::out);
+        if(!fout.is_open()) {
+            std::cout << "Could not open volume export file " << out_path << "! Aborting." << std::endl;
+        }
+        fout << dim_x << " " << dim_y << " " << dim_z << std::endl;
+        fout << "uint32" << std::endl;
+        fout.write(reinterpret_cast<char *>(m_data.data()), m_data.size() * sizeof(uint32_t));
+        fout.close();
+    }
+
+    bool importFromFile(std::string in_path) {
+        std::ifstream fin(in_path, std::ios::out);
+        if(!fin.is_open()) {
+            std::cout << "Could not open volume import file " << in_path << "! Aborting." << std::endl;
+            return false;
+        }
+
+        std::string line;
+        // first line contains space seperated width height depth
+        if (!std::getline(fin, line)) {
+            fin.close();
+            std::cout << "Unexpected end of file in " << in_path << "! Aborting." << std::endl;
+            return false;
+        }
+        std::istringstream sizes(line);
+        sizes >> dim_x >> dim_y >> dim_z;
+        // second line contains data type
+        if (!std::getline(fin, line)) {
+            fin.close();
+            std::cout << "Unexpected end of file in " << in_path << "! Aborting." << std::endl;
+            return false;
+        }
+        if (line != "uint32") {
+            fin.close();
+            std::cout << "Data format " << line << " is not supported. Expected uint32! Aborting." << std::endl;
+            return false;
+        }
+
+        const size_t voxel_count = dim_x * dim_y * dim_z;
+        m_data.resize(voxel_count);
+        fin.read(reinterpret_cast<char *>(m_data.data()), static_cast<long>(voxel_count * sizeof(uint32_t)));
+        if (!fin) {
+            std::cout << "Could only read " << std::to_string(fin.gcount()) << " of expected "
+                      << std::to_string(voxel_count * sizeof(uint32_t)) << "bytes!";
+            fin.close();
+            return false;
+        }
+        fin.close();
+        return true;
+    }
+
+private:
+    std::vector<uint32_t> m_data = {};
+
+};
+```
+
+### include/VolumeCompressionBase.hpp
+```
+#pragma once
+
+#include <cstdint>
+#include <glm/glm.hpp>
+#include <memory>
+#include <vector>
+#include <unordered_map>
+
+#include "util.hpp"
+#include "space_filling_curves.hpp"
+
+namespace vvv {
+
+
+class VolumeCompressionBase {
+
+protected:
+
+    static inline glm::uvec3 idx2pos(size_t i, glm::uvec3 volume_dim) {
+        assert(i < volume_dim.x*volume_dim.y*volume_dim.z);
+        return sfc::Cartesian::i2p(i, volume_dim);
+    }
+    static inline size_t pos2idx(glm::uvec3 p, glm::uvec3 volume_dim) {
+        assert(glm::all(glm::lessThan(p, volume_dim)));
+        return sfc::Cartesian::p2i(p, volume_dim);
+    }
+
+    struct MultiGridNode {
+        uint32_t label;
+        bool constant_subregion;
+    };
+
+public:
+
+    /**
+     * Constructs a multigrid in out from finest to coarsest level for the given brick in the volume. brick_dim must be a power of 2 but can reach to areas outside of the volume.
+     * Levels are stored from finest (original) to coarsest (1³) resolution in out.
+     * Entries for nodes in out lying completely outside the volume are set to 0 and are flagged as constant.
+     * Nodes in the finest level L0 are always flagged as constant.
+     */
+    static void constructMultiGrid(std::vector<MultiGridNode>& out, const std::vector<uint32_t>& volume, const glm::uvec3 volume_dim, const glm::uvec3 brick_start, const uint32_t brick_dim) {
+        assert(!(brick_dim & (brick_dim - 1u)) && "brick_dim must be a power of 2");
+
+        out.resize(static_cast<size_t>(std::floor(brick_dim * brick_dim * brick_dim) * 8.f/7.f));
+        glm::uvec3 pos;
+        // fill finest level with entries from volume
+        for (pos.z = 0u; pos.z < brick_dim; pos.z++) {
+            for (pos.y = 0u; pos.y < brick_dim; pos.y++) {
+                for (pos.x = 0u; pos.x < brick_dim; pos.x++) {
+                    if(glm::any(glm::greaterThanEqual(brick_start + pos, volume_dim))) {
+                        out[pos2idx(pos, glm::uvec3(brick_dim))].label = 0xFFFFFFFF;
+                    }
+                    else {
+                        assert(volume[pos2idx(brick_start + pos, volume_dim)] != 0xFFFFFFFF && "Volume contains forbidden magic number to flag multigrid nodes lying outside the volume");
+                        out[pos2idx(pos, glm::uvec3(brick_dim))].label = volume[pos2idx(brick_start + pos, volume_dim)];
+                    }
+                    // you can have different opinions about this but we set it to false because it leads to smaller numbers in our encoding -> better rANS compression:
+                    out[pos2idx(pos, glm::uvec3(brick_dim))].constant_subregion = false;
+                }
+            }
+        }
+
+
+        // for all other levels: reduce 2x2x2 nodes form finer level to one node in current level
+        // if all 8 finer nodes have constant subregions and the same label, flag this node as constant too.
+        uint32_t prev_lod_start = 0u;
+        uint32_t lod_start = brick_dim * brick_dim * brick_dim;
+        for(uint32_t current_dim = brick_dim/2u; current_dim >= 1u; current_dim /= 2u) {
+            // iterate over all cells in finer level
+            for (pos.z = 0u; pos.z < current_dim; pos.z++) {
+                for (pos.y = 0u; pos.y < current_dim; pos.y++) {
+                    for (pos.x = 0u; pos.x < current_dim; pos.x++) {
+                        // gather 8 child elements from finer level
+                        MultiGridNode *child_elements[8];
+                        glm::uvec3 delta;
+                        int i = 0;
+                        for (delta.z = 0u; delta.z <= 1u; delta.z++) {
+                            for (delta.y = 0u; delta.y <= 1u; delta.y++) {
+                                for (delta.x = 0u; delta.x <= 1u; delta.x++) {
+                                    child_elements[i] = &out[prev_lod_start + pos2idx((2u * pos) + delta, glm::uvec3(current_dim * 2u))];
+                                    i++;
+                                }
+                            }
+                        }
+                        // find most frequent label in child elements and check if they're constant
+                        uint32_t max_ocurrences = 0u;
+                        uint32_t max_label = 0xFFFFFFFF;
+                        bool constant = true;
+                        for(i = 0; i < 8; i++) {
+                            // skip childs lying completely outside the volume
+                            if(child_elements[i]->label == 0xFFFFFFFF)
+                                continue;
+
+                            uint32_t occurrences = 1u;
+                            for(int n = i+1; n < 8; n++) {
+                                if(child_elements[n]->label == child_elements[i]->label)
+                                    occurrences++;
+                            }
+                            if(occurrences > max_ocurrences) {
+                                max_label = child_elements[i]->label;
+                                max_ocurrences = occurrences;
+                            }
+
+                            // all children must have constant subregions (or be a single element) and the same label for this node to also be constant
+                            constant = constant && (prev_lod_start == 0u || child_elements[i]->constant_subregion) && (child_elements[i]->label == child_elements[0]->label);
+                        }
+
+
+                        out[lod_start + pos2idx(pos, glm::uvec3(current_dim))].label = max_label;
+                        out[lod_start + pos2idx(pos, glm::uvec3(current_dim))].constant_subregion = constant;
+                        assert(lod_start + pos2idx(pos, glm::uvec3(current_dim)) < out.size() && "Writing multigrid node outside of array!");
+                    }
+                }
+            }
+            prev_lod_start = lod_start;
+            lod_start += current_dim * current_dim * current_dim;
+        }
+        assert(lod_start == out.size() && "Allocated too much memory for Multigrid nodes");
+    }
+
+    /**
+     * Compresses the volume and stores the encoded representation as object attributes.
+     */
+    virtual void compress(const std::vector<uint32_t>& volume, const glm::uvec3 volume_dim, bool verbose=false) = 0;
+
+    /**
+     * Decompresses the encoded volume from this object's attribute to an uncompressed volume.
+     * @return
+     */
+    virtual std::shared_ptr<std::vector<uint32_t>> decompress() = 0;
+
+    /**
+     * @return Compression ratio achieved after calling compress.
+     */
+    virtual float getCompressionRatio() { return -1.f; }
+
+    /**
+     * Compresses and decompresses the given volume, then checks for all differences.
+     * @return true if output and input are the same, false if there are (de)compression errors.
+     */
+    virtual bool test(const std::vector<uint32_t>& volume, const glm::uvec3 volume_dim, bool compress_first=false) {
+        assert(volume.size() == volume_dim.x * volume_dim.y * volume_dim.z && "volume size does not match dimension");
+
+        std::cout << "Running compression test ------------------------------------" << std::endl;
+        MiniTimer timer;
+        if(compress_first) {
+            std::cout << "Encode";
+            compress(volume, volume_dim);
+            std::cout << " finished in " << timer.restart() << "s with compression ratio " << getCompressionRatio() * 100.f << "%" << std::endl;
+        }
+        std::cout << "Decode" << std::endl;
+        std::shared_ptr<std::vector<uint32_t>> out = decompress();
+        std::cout << " finished in " << timer.elapsed() << "s" << std::endl;
+
+        if(volume.size() != out->size()) {
+            std::cout << "Compressed in and out sizes don't match" << std::endl;
+            std::cout << "-------------------------------------------------------------" << std::endl;
+            return false;
+        }
+
+        static constexpr int max_error_lines = 32;
+        size_t error_count = 0;
+        for(size_t i = 0; i < volume.size(); i++) {
+            if (volume[i] != (*out)[i]) {
+                if (error_count < max_error_lines)
+                    std::cout << "error at " << str(idx2pos(i, volume_dim)) << " in " << volume[i] << " != out " << (*out)[i] << std::endl;
+                else if (error_count == max_error_lines)
+                    std::cout << "[...] skipping additional errors" << std::endl;
+                error_count++;
+            }
+        }
+
+        std::cout << " finished with " << error_count << " errors (" << (100.f*static_cast<float>(error_count)/static_cast<float>(volume.size())) << "%)" << std::endl;
+        return error_count == 0;
+    }
+
+};
+
+
+
+} // namespace vvv
+```
+
+### include/bitpack.hpp
+```
+#pragma once
+
+#include <cassert>
+#include <cstdint>
+#include <vector>
+
+namespace vvv {
+
+/**
+ * Returns the entry_id-th 4 bit entry from the memory block starting at v[start].
+ * Note that start counts in elements of size uint32_t and entry_id counts in elements of 4 bit size.
+ */
+uint32_t read4Bit(const uint32_t* v, size_t start, size_t entry_id) {
+    // we packed into the highest bits first: one uint contains the indices [0000111122223333 ... 7777]
+    //assert(start + entry_id / 8 < v.size() && "trying to unpack element out of bounds");
+    int shift = 28 - 4 * static_cast<int>(entry_id % 8);
+    return (v[start + entry_id / 8] >> shift) & 0xFu;
+}
+
+/**
+ * Returns the entry_id-th 4 bit entry from the memory block starting at v[start].
+ * Note that start counts in elements of size uint32_t and entry_id counts in elements of 4 bit size.
+ */
+uint32_t read4Bit(const std::vector<uint32_t> &v, size_t start, size_t entry_id) {
+    // we packed into the highest bits first: one uint contains the indices [0000111122223333 ... 7777]
+    assert(start + entry_id / 8 < v.size() && "trying to unpack element out of bounds");
+    int shift = 28 - 4 * static_cast<int>(entry_id % 8);
+    return (v[start + entry_id / 8] >> shift) & 0xFu;
+}
+
+
+/**
+ * Writes the value value4bit to the entry_id-th position in v, offset by start uint32_t elements.
+ */
+void write4Bit(uint32_t* v, size_t start, size_t entry_id, uint32_t value4bit) {
+    assert(value4bit < 16 && "value must be within 4 bit range");
+
+    int shift = 28 - 4 * static_cast<int>(entry_id % 8);
+    // erase bits at position
+    v[start + entry_id / 8] &= ~(0xFu << shift);
+    // add 4 bit bits to position
+    v[start + entry_id / 8] |= value4bit << shift;
+}
+
+/**
+ * Writes the value value4bit to the entry_id-th position in v, offset by start uint32_t elements.
+ */
+void write4Bit(std::vector<uint32_t> &v, size_t start, size_t entry_id, uint32_t value4bit) {
+    assert(value4bit < 16 && "value must be within 4 bit range");
+    assert(start + entry_id / 8 < v.size() && "trying to write element out of bounds");
+
+    int shift = 28 - 4 * static_cast<int>(entry_id % 8);
+    // erase bits at position
+    v[start + entry_id / 8] &= ~(0xFu << shift);
+    // add 4 bit bits to position
+    v[start + entry_id / 8] |= value4bit << shift;
+}
+
+
+/**
+ * Squeezes 4bit elements into one uint32_t element respectively starting with first up to the element before last.
+ * If the number of elements is not divided evenly, the last resulting element does not contain all entries, i.e. is padded.
+ * @return the number of 4bit elements that were squeezed
+ */
+uint32_t pack4Bit(std::vector<uint32_t> &v, size_t start, size_t end) {
+    // iterate over all 32 bit elements, pack them into 4 bit elements in the same array
+    size_t i = start;
+    for(; i < end; i++) {
+        write4Bit(v.data(), start, i, v[i]);
+    }
+    // round up: how many elements did we write divided by packing factor
+    size_t new_size = (i - start + 7) / 8;
+
+    // resize the vector (this won't change the capacity / reserve a new array)
+    v.erase(v.begin() + static_cast<long>(start + new_size), v.begin() + static_cast<long>(end));
+    return new_size;
+}
+
+
+} // namespace vvv
+```
+
+### include/rans.hpp
+```
+#pragma once
+
+// adapted form the public domain ryg_rans rANS code by Fabian Giesen.
+// see README.txt in include/rANS for details.
+
+#include <cassert>
+#include <cstring>
+#include <sstream>
+#include <string>
+#include <vector>
+
+#include <glm/glm.hpp>
+
+#include "rANS/rans_nibble.h"
+
+namespace vvv {
+
+#define RANS_ALPHABET_SIZE 16
+
+// ---- Stats
+struct SymbolStats {
+    uint32_t freqs[RANS_ALPHABET_SIZE];
+    uint32_t cum_freqs[RANS_ALPHABET_SIZE + 1];
+
+    void count_freqs(uint8_t const *in, size_t nbytes);
+    void calc_cum_freqs();
+    void normalize_freqs(uint32_t target_total);
+};
+
+
+class RANS {
+
+private:
+    static const uint32_t prob_bits = 14;
+    static const uint32_t prob_scale = 1 << prob_bits;
+
+    // Big01 frequencies
+    // WITH RLE
+    //static constexpr uint32_t _fixed_freq[RANS_ALPHABET_SIZE] = {48202,17346,13600,8479,5961,7251,3676,35787,164102,82383,37653,17155,4946,2766,2898,187};
+
+    RansEncSymbol esyms[RANS_ALPHABET_SIZE];
+    RansDecSymbol dsyms[RANS_ALPHABET_SIZE];
+    uint8_t cum2sym[prob_scale];
+    SymbolStats stats;
+    bool has_frequency_tables = false;
+
+public:
+    RANS(const uint32_t *frequency_array = nullptr) {
+        if(frequency_array)
+            recomputeFrequencyTables(frequency_array);
+    }
+
+    void recomputeStaticFrequencyTables(bool rle, bool palette_delta, bool mtf) {
+        int index = 0 + (rle ? 1 : 0) + (palette_delta ? 2 : 0) + (mtf ? 4 : 0);
+        constexpr uint32_t freq[8][RANS_ALPHABET_SIZE] = {{34348398,12353221,6980536,3731146,0,2588286,583112,0,292140797,87522960,31339420,10214634,0,1706446,914476,0}, // NO RLE, NO DELTA, NO MTF x
+                                                          {0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0}, // RLE,    NO DELTA, NO MTF
+                                                          {34622857,12500575,7070347,3797499,367003,2347588,596492,0,292169364,87550125,31364824,10238574,633648,1286117,767857,20234}, // NO RLE, DELTA,    NO MTF x
+                                                          {48202,17346,13600,8479,5961,7251,3676,35787,164102,82383,37653,17155,4946,2766,2898,187}, // RLE,    DELTA,    NO MTF x
+                                                          {0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0}, // NO RLE, NO DELTA, MTF
+                                                          {0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0}, // RLE,    NO DELTA, MTF
+                                                          {209313281,152575121,68505625,27940834,11289632,6696073,3922867,2271703,1201771,668477,398199,254278,168337,91472,30166,5268}, // NO RLE, DELTA,    MTF x
+                                                          {0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0}};// RLE,    DELTA,    MTF
+        assert(freq[index][0] > 0 && " this frequency table does not yet exist! please recompute the compression without rANS and copy the frequency table to rans.hpp");
+        recomputeFrequencyTables(freq[index]);
+        // for hardcoded Fiber Polymer data set:
+//        constexpr uint32_t freq_poly[RANS_ALPHABET_SIZE] = {24933215,5479512,2757734,1022971,805234,328002,426147,0,184334129,46344079,12791205,1448358,391163,85886,184283,31258};
+//        recomputeFrequencyTables(freq_poly);
+    }
+    void recomputeFrequencyTables(const uint32_t * frequency_array = nullptr);
+    void recomputeFrequencyTables(std::vector<uint8_t> &in_bytes);
+
+    void copyCurrentFrequencyTableTo(uint32_t * frequency_array) {
+        assert(has_frequency_tables && "can't copy frequency table because it doesn't exist");
+        assert(frequency_array && "invalid pointer to write buffer for frequency array");
+        for(int i = 0; i < 16; i++)
+            frequency_array[i] = stats.freqs[i];
+    }
+
+    /**
+     * Replaces all 4 bit elements between start4bit (including) and end4bit (excluding)  in_packed with a rANS encoded bytestream.
+     * The first 4 bit element start4bit must be the first position in a 32bit memory location.
+     * @return the new end4bit endpoint measured in number of 4 bit elements
+     */
+     uint32_t packRANS(std::vector<uint32_t> &in_packed, uint32_t start4bit, uint32_t end4bit) const;
+
+     uint32_t packRANS(uint32_t* in_packed, uint32_t start4bit, uint32_t end4bit) const;
+
+    /**
+     * Decodes number_of_out_elements packed half bytes to the byte array starting at out. Out will have half the size of the actual elements (since it is a vector of bytes instead of half bytes).
+     */
+    int unpackRANS(uint8_t *rans_begin, uint8_t *out, size_t number_of_output_elements) const;
+
+    /**
+     * Initializes iterative decoding for reading single elements from the decoding with itr_nextSymbol(). The state is carried in both of the parameters.
+     */
+    void itr_initDecoding(uint32_t* rans_state, const uint8_t** rans_ptr) const;
+    void itr_initDecoding(uint32_t& rans_state, uint32_t& byte_index, const uint32_t* array) const;
+    /**
+     * Returns the next element from the decoding given the current internal state and updates the state in the two parameters.
+     */
+    uint32_t itr_nextSymbol(uint32_t* rans_state, const uint8_t** rans_ptr) const;
+    uint32_t itr_nextSymbol(RansState& rans_state, uint32_t& byte_index,  const uint32_t* array) const;
+
+    std::vector<uint32_t> getFrequencyArray() {
+        assert(has_frequency_tables && "rANS instance has no frequency array");
+        std::vector<uint32_t> out(16);
+        for(int i=0; i < 16; i++)
+            out[i] = stats.freqs[i];
+        return out;
+    }
+
+    /**
+     * @return an array string "uvec3(..), uvec3(..)" with 17 elements where each element < 16 is:
+     * (dsys.start, dsyms.freq, stats.cum_freq) and element 16 is (0, 0, stats.cum_freq[16]).
+     */
+    std::string getGLSLSymbolArrayString() {
+        // output our frequency tables:
+        std::stringstream ss;
+        for (int i = 0; i < RANS_ALPHABET_SIZE; i++) {
+            ss << "uvec3(" << dsyms[i].start << "," << dsyms[i].freq << "," << stats.cum_freqs[i] << "),";
+        }
+        ss << "uvec3(0,0," << stats.cum_freqs[RANS_ALPHABET_SIZE] << ")";
+        return ss.str();
+    }
+
+
+};
+
+} // namespace vvv
+```
+
+### include/space_filling_curves.hpp
+```
+#pragma once
+
+#include <glm/glm.hpp>
+
+namespace sfc {
+
+class Cartesian {
+public:
+    static size_t p2i(glm::uvec3 p, glm::uvec3 brick_size) { return static_cast<size_t>(p.x) + static_cast<size_t>(p.y) * brick_size.x + static_cast<size_t>(p.z) * brick_size.x * brick_size.y; }
+    static glm::uvec3 i2p(size_t i, glm::uvec3 brick_size) { return {i % brick_size.x, (i / brick_size.x) % brick_size.y, (i / brick_size.x / brick_size.y) % brick_size.z}; }
+};
+
+/**
+ * Using code from
+ * https://fgiesen.wordpress.com/2009/12/13/decoding-morton-codes/
+ */
+class Morton3D {
+public:
+    static uint32_t p2i(glm::uvec3 p) { return (Part1By2(p.z) << 2) + (Part1By2(p.y) << 1) + Part1By2(p.x); }
+    static glm::uvec3 i2p(uint32_t i) { return {Compact1By2(i >> 0), Compact1By2(i >> 1), Compact1By2(i >> 2)}; }
+
+private:
+    // "Insert" two 0 bits after each of the 10 low bits of x
+    static uint32_t Part1By2(uint32_t x) {
+        x &= 0x000003ff;                  // x = ---- ---- ---- ---- ---- --98 7654 3210
+        x = (x ^ (x << 16)) & 0xff0000ff; // x = ---- --98 ---- ---- ---- ---- 7654 3210
+        x = (x ^ (x << 8)) & 0x0300f00f;  // x = ---- --98 ---- ---- 7654 ---- ---- 3210
+        x = (x ^ (x << 4)) & 0x030c30c3;  // x = ---- --98 ---- 76-- --54 ---- 32-- --10
+        x = (x ^ (x << 2)) & 0x09249249;  // x = ---- 9--8 --7- -6-- 5--4 --3- -2-- 1--0
+        return x;
+    }
+
+    // Inverse of Part1By1 - "delete" all odd-indexed bits
+    static uint32_t Compact1By2(uint32_t x) {
+        x &= 0x09249249;                  // x = ---- 9--8 --7- -6-- 5--4 --3- -2-- 1--0
+        x = (x ^ (x >> 2)) & 0x030c30c3;  // x = ---- --98 ---- 76-- --54 ---- 32-- --10
+        x = (x ^ (x >> 4)) & 0x0300f00f;  // x = ---- --98 ---- ---- 7654 ---- ---- 3210
+        x = (x ^ (x >> 8)) & 0xff0000ff;  // x = ---- --98 ---- ---- ---- ---- 7654 3210
+        x = (x ^ (x >> 16)) & 0x000003ff; // x = ---- ---- ---- ---- ---- --98 7654 3210
+        return x;
+    }
+};
+
+} // namespace sfc
+```
+
+### include/util.hpp
+```
+#pragma once
+
+#include <string>
+#include <chrono>
+#include <glm/glm.hpp>
+
+/**
+ * Constructs a string of a memory consecutive float array with n elements.
+ */
+template<typename T>
+std::string array_string(T* v, int n) {
+    std::string out = "{";
+    for(int i = 0; i < n ; i++) {
+        if(i > 0)
+            out += ", ";
+        out += std::to_string(v[i]);
+    }
+    return out + "}";
+}
+
+std::string str(glm::vec2 v);
+std::string str(glm::vec3 v);
+std::string str(glm::vec4 v);
+std::string str(glm::ivec2 v);
+std::string str(glm::ivec3 v);
+std::string str(glm::ivec4 v);
+std::string str(glm::uvec2 v);
+std::string str(glm::uvec3 v);
+std::string str(glm::uvec4 v);
+std::string str(glm::mat3 v);
+std::string str(glm::mat4 v);
+
+
+
+/**
+ * Lightweight (but inaccurate) timer for measuring elapsed time in seconds using std::chrono::high_resolution_clock.
+ * Usage:
+ *
+ * MiniTimer t;
+ * // do stuff..
+ * double seconds_since_creation = t.elapsed();
+ */
+class MiniTimer {
+public:
+    MiniTimer() : m_startTime(std::chrono::high_resolution_clock::now()) {}
+    ~MiniTimer() = default;
+
+    /**
+     * Restarts the timer.
+     * @return the time in seconds passed since the object was created or since the last restart.
+     */
+    double restart();
+
+    /**
+     * @return the time in seconds passed since the object was created or since the last time start was called.
+     */
+    double elapsed() {
+        return static_cast<std::chrono::duration<double>>(std::chrono::high_resolution_clock::now() - m_startTime).count();
+    }
+
+
+private:
+    std::chrono::time_point<std::chrono::system_clock> m_startTime;
+};
+```
+
+### shader/compressed_segmentation_volume.glsl
+```
+#ifndef COMPRESSED_SEGMENTATION_VOLUME_GLSL
+#define COMPRESSED_SEGMENTATION_VOLUME_GLSL
+
+// compile time macros:
+//   CSVOL_ENCODING_ARRAY name of the SSBO from which the compressed bricks are read
+//   CSVOL_DECODING_ARRAY name of the SSBO into which the decompressed bricks are written
+//   USE_RANS                must be defined if and only if rANS encoding is used in the compression
+//   USE_DETAIL_FREQ         must be defined if and only if the finest LoD uses another frequency table
+//   RANS_SYMBOL_TABLE       array init. notation for 34 vec3 containing the freq. tables (see rans.glsl!)
+//
+#ifndef CSVOL_ENCODING_ARRAY
+ #define CSVOL_ENCODING_ARRAY g_encoding
+#endif
+#ifndef CSVOL_DECODING_ARRAY
+ #define CSVOL_DECODING_ARRAY g_decoding
+#endif
+
+// 4 bit operation symbols:
+#include "cpp_glsl_include/csvol_constants.h"
+
+#include "morton.glsl"
+#ifdef USE_RANS
+    #include "rans.glsl"
+#endif
+
+uint _indexOfBrickPos(const uvec3 p) {
+    return morton3Dp2i(p);
+}
+
+// returns the label for the voxel position within the brick starting at the start_idx.
+// decoded_inv_lod: the state of the brick in CSVOL_DECODING_ARRAY *must* be a full decoding up to this inv_lod
+// brick_voxel: the coordinate of the lookup voxel on the *finest* lod, even if the lookup is for a coarser lod
+uint readCSVolBrick(const uvec3 brick_voxel, const uint decoded_inv_lod, const uint decoded_brick_start_idx) {
+    uint lod_width = g_brick_size / (1u << decoded_inv_lod);
+    // determine position in brick
+    return CSVOL_DECODING_ARRAY[decoded_brick_start_idx + (_indexOfBrickPos(brick_voxel) / (lod_width * lod_width * lod_width))];
+}
+
+const ivec3 neighbor[8][3] = {  {ivec3(-1, 0, 0), ivec3(0, -1, 0), ivec3(0, 0, -1)},
+                                {ivec3( 1, 0, 0), ivec3(0, -1, 0), ivec3(0, 0, -1)},
+                                {ivec3(-1, 0, 0), ivec3(0,  1, 0), ivec3(0, 0, -1)},
+                                {ivec3( 1, 0, 0), ivec3(0,  1, 0), ivec3(0, 0, -1)},
+                                {ivec3(-1, 0, 0), ivec3(0, -1, 0), ivec3(0, 0,  1)},
+                                {ivec3( 1, 0, 0), ivec3(0, -1, 0), ivec3(0, 0,  1)},
+                                {ivec3(-1, 0, 0), ivec3(0,  1, 0), ivec3(0, 0,  1)},
+                                {ivec3( 1, 0, 0), ivec3(0,  1, 0), ivec3(0, 0,  1)}};
+
+uint _unpack4BitFromEncoding(uint start, uint entry_id) {
+    return bitfieldExtract(CSVOL_ENCODING_ARRAY[start + entry_id/8], 28 - int(entry_id % 8u) * 4, 4);
+}
+
+struct DiffTreeReadState {
+    uint idxE;
+    uint rans_state;
+    bool in_detail_lod;
+};
+
+
+uint _readNextLodOperationFromEncoding(uint brick_start, inout DiffTreeReadState state) {
+#ifdef USE_RANS
+    return rans_itr_nextSymbol(state.rans_state, state.idxE, state.in_detail_lod);
+#else
+    return _unpack4BitFromEncoding(brick_start, state.idxE++);
+#endif
+}
+
+uvec3 _enumBrickPos(uint i) {
+    return morton3Di2p(i);
+}
+
+
+uint _valueOfNeighbor(const uvec3 brick_pos, const uint local_lod_i, const uint lod_width, const int neighbor_i, const uint decoded_brick_start_idx) {
+    // find the position of the neighbor
+    ivec3 neighbor_pos = ivec3(brick_pos) + neighbor[local_lod_i][neighbor_i] * int(lod_width);
+    // find the index of the neighbor within the brick array
+    uint neighbor_index = _indexOfBrickPos(uvec3(neighbor_pos));
+
+    // in case we want to access a neighbor that is not already existing on this level, we have to
+    // round down to the parent element of this element (lod_width*8)
+    if(any(greaterThan(neighbor[local_lod_i][neighbor_i], ivec3(0))))
+        neighbor_index -= neighbor_index % (lod_width * lod_width * lod_width * 8);
+
+    // return value of neighbor or parent neighbor in brick
+    return CSVOL_DECODING_ARRAY[decoded_brick_start_idx + neighbor_index];
+}
+
+// reset the brick by setting all of its entries to INVALID
+void resetCSVolBrick(const uint decoded_brick_start_idx, const uint inv_lod) {
+    uint voxel_count = 1u << (3u * inv_lod);
+    for(uint i = decoded_brick_start_idx; i < decoded_brick_start_idx + voxel_count; i++) {
+        CSVOL_DECODING_ARRAY[i] = INVALID;
+    }
+}
+
+// fills the brick by setting all of its entries to value
+void fillCSVolBrick(const uint decoded_brick_start_idx, const uint inv_lod, const uint value) {
+    uint voxel_count = 1u << (3u * inv_lod);
+    for(uint i = decoded_brick_start_idx; i < decoded_brick_start_idx + voxel_count; i++) {
+        CSVOL_DECODING_ARRAY[i] = value;
+    }
+}
+
+// Decompresses the encoding of the brick from the CSVOL_ENCODING_ARRAY array starting at encoding_start_index and ending
+// at encoding_end_index up to the given inverse LOD level into the cached decompressed brick in CSVOL_DECODING_ARRAY.
+// decoded_brick_start_index denotes the start position of this output brick.
+// If start_at_inv_lod == 0, it is assumed that the output brick cache is set to INVALID at all entries.
+// If start_at_inv_lod > 0, it is assumed that the output brick cache is fully decoded up to (start_at_inv_lod-1).
+// start_at_inv_Lod mustn't already be the finest possible LoD.
+void decompressCSVolBrick(const uint encoding_start_index, const uint encoding_end_index, const uvec3 valid_brick_size, const uint start_at_inv_lod, const uint inv_lod, const uint decoded_brick_start_idx) {
+    // Refine up to the LOD that was requested, starting with decoding of start_at_inv_lod.
+    // The starting position (taken from brick header) of the current LOD in the encoding array, measured in elements of uint.
+    uint local_lod_i;
+    // the palette starts at the end of the encoding block
+    uint paletteE = encoding_end_index - 1u;
+    uint beginE = encoding_start_index;
+
+    DiffTreeReadState readState;    // read and changed in the _readNextLodOperationFromEncoding function
+    readState.idxE = CSVOL_ENCODING_ARRAY[beginE + start_at_inv_lod];  // offset of current 4 bit entry to read
+    readState.in_detail_lod = false;
+#ifdef USE_RANS
+    readState.idxE = (encoding_start_index + readState.idxE / 8u) * 4u;
+    rans_itr_initDecoding(readState.rans_state, readState.idxE);
+#endif
+
+    uint output_size = (1u << inv_lod); // the resolution of voxel in each dimension of the output brick = for this LoD. On the finest LoD this is g_brick_size
+    uint lod_width = (1u << inv_lod) / (1u << start_at_inv_lod);
+    uint index_step = (lod_width * lod_width * lod_width);
+    uint parent_value;
+
+    // WE ASSUME that the brick was already completely set to INVALID
+    //    // otherwise, set the whole brick to INVALID so we know later, what elements and LOD blocks were already processed
+    //    for(uint i = 0; i < g_brick_size * g_brick_size * g_brick_size; i++)
+    //        CSVOL_DECODING_ARRAY[i] = INVALID;
+
+    for(uint lod = start_at_inv_lod; lod <= inv_lod; lod++) {
+#ifdef USE_DETAIL_FREQ
+#ifdef USE_RANS
+        if(lod == g_lod_count - 1u) {
+            readState.idxE = CSVOL_ENCODING_ARRAY[beginE + g_lod_count - 1u];
+            readState.in_detail_lod = true;
+            // a new rANS encoding starts for the finest LoD
+            rans_itr_initDecoding(readState.rans_state, readState.idxE);
+        }
+#endif
+#endif
+
+        for (uint i = 0u; i < output_size * output_size * output_size; i += index_step) {
+            // if an LOD block is completely outside the volume (i.e. it's first element is not within the volume)
+            // we skip it as it won't have any entries in the encoding
+            if (any(greaterThanEqual(_enumBrickPos(i).xyz * (g_brick_size/output_size), valid_brick_size)))
+                continue;
+
+            uint out_i = decoded_brick_start_idx + i;
+
+            // every 8th element (we span 2*2*2=8 elements of the coarse LOD above), we fetch the new parent
+            local_lod_i = (i % (index_step*8))/index_step;
+            if (lod > 0u && i % (index_step*8) == 0) {
+                // if this subtree is already filled, the last element of this block is set and we can skip it
+                if (CSVOL_DECODING_ARRAY[out_i + (index_step*7)] != INVALID) {
+                    i += (index_step*7);
+                    continue;
+                }
+
+                parent_value = CSVOL_DECODING_ARRAY[out_i];
+            }
+
+            // get the next operation and apply it
+            uint operation = _readNextLodOperationFromEncoding(beginE, readState);
+
+            uint code_lsb = operation & 7u; // extract least significant 3 bits with 0111
+            if (code_lsb == PARENT)
+                CSVOL_DECODING_ARRAY[out_i] = parent_value;
+            else if (code_lsb == NEIGHBORX)
+                CSVOL_DECODING_ARRAY[out_i] = _valueOfNeighbor(_enumBrickPos(i), local_lod_i, lod_width, 0, decoded_brick_start_idx);
+            else if (code_lsb == NEIGHBORY)
+                CSVOL_DECODING_ARRAY[out_i] = _valueOfNeighbor(_enumBrickPos(i), local_lod_i, lod_width, 1, decoded_brick_start_idx);
+            else if (code_lsb == NEIGHBORZ)
+                CSVOL_DECODING_ARRAY[out_i] = _valueOfNeighbor(_enumBrickPos(i), local_lod_i, lod_width, 2, decoded_brick_start_idx);
+            else if (code_lsb == PALETTE_ADV) {   // read palette entry and advance palette pointer to the next entry
+                CSVOL_DECODING_ARRAY[out_i] = CSVOL_ENCODING_ARRAY[paletteE--];
+            }
+            else if (code_lsb == PALETTE_LAST) { // reuse the last palette entry
+                CSVOL_DECODING_ARRAY[out_i] = CSVOL_ENCODING_ARRAY[paletteE+1];
+            }
+            else if (code_lsb == PALETTE_DELTA) {
+                uint palette_delta = _readNextLodOperationFromEncoding(beginE, readState) + 2u;
+                CSVOL_DECODING_ARRAY[out_i] = CSVOL_ENCODING_ARRAY[paletteE + palette_delta];
+            }
+
+            // stop traversal: fill all other parts of the brick with this value
+            if ((operation & STOP_BIT) > 0u) {
+                // fill the whole subtree with the parent value
+                for (uint n = out_i; n < out_i + index_step; n++) {
+                    CSVOL_DECODING_ARRAY[n] = CSVOL_DECODING_ARRAY[out_i];
+                }
+            }
+        }
+        // move to the next LOD block with half the block width and an eight of the index_step respectively
+        index_step /= 8u;
+        lod_width /= 2u;
+    }
+}
+
+#endif /* COMPRESSED_SEGMENTATION_VOLUME_GLSL */
+```
+
+### shader/compression_utils.glsl
+```
+#ifndef COMPRESSION_UTILS_GLSL
+#define COMPRESSION_UTILS_GLSL
+
+// map brick + frame combination to 1D index, for example to access the index_buffer
+int brick_to_1D(ivec3 brick_idx, ivec3 brick_dim, int frame) {
+    return brick_idx.x + brick_dim.x * (brick_idx.y + brick_dim.y * (brick_idx.z + brick_dim.z * frame));
+}
+int brick_to_1D(ivec3 brick_idx, ivec3 brick_dim) {
+    return brick_to_1D(brick_idx, brick_dim, 0);
+}
+
+uint brick_to_1D(uvec3 brick_idx, uvec3 brick_dim, uint frame) {
+    return brick_idx.x + brick_dim.x * (brick_idx.y + brick_dim.y * (brick_idx.z + brick_dim.z * frame));
+}
+uint brick_to_1D(uvec3 brick_idx, uvec3 brick_dim) {
+    return brick_to_1D(brick_idx, brick_dim, 0u);
+}
+
+#endif // COMPRESSION_UTILS_GLSL
+```
+
+### shader/morton.glsl
+```
+#ifndef MORTON_GLSL
+#define MORTON_GLSL
+
+// see: https://fgiesen.wordpress.com/2009/12/13/decoding-morton-codes/
+
+// 2D ------------------------------------------------------------------------------------------------------------------
+
+// "Insert" a 0 bit after each of the 16 low bits of x
+uint _morton_Part1By1(uint x) {
+    x &= 0x0000ffffu;                 // x = ---- ---- ---- ---- fedc ba98 7654 3210
+    x = (x ^ (x << 8u)) & 0x00ff00ffu; // x = ---- ---- fedc ba98 ---- ---- 7654 3210
+    x = (x ^ (x << 4u)) & 0x0f0f0f0fu; // x = ---- fedc ---- ba98 ---- 7654 ---- 3210
+    x = (x ^ (x << 2u)) & 0x33333333u; // x = --fe --dc --ba --98 --76 --54 --32 --10
+    x = (x ^ (x << 1u)) & 0x55555555u; // x = -f-e -d-c -b-a -9-8 -7-6 -5-4 -3-2 -1-0
+    return x;
+}
+
+// Inverse of Part1By1 - "delete" all odd-indexed bits
+uint _morton_Compact1By1(uint x) {
+    x &= 0x55555555u;                 // x = -f-e -d-c -b-a -9-8 -7-6 -5-4 -3-2 -1-0
+    x = (x ^ (x >> 1u)) & 0x33333333u; // x = --fe --dc --ba --98 --76 --54 --32 --10
+    x = (x ^ (x >> 2u)) & 0x0f0f0f0fu; // x = ---- fedc ---- ba98 ---- 7654 ---- 3210
+    x = (x ^ (x >> 4u)) & 0x00ff00ffu; // x = ---- ---- fedc ba98 ---- ---- 7654 3210
+    x = (x ^ (x >> 8u)) & 0x0000ffffu; // x = ---- ---- ---- ---- fedc ba98 7654 3210
+    return x;
+}
+
+uint morton2Dp2i(uvec3 p) { return (_morton_Part1By1(p.y) << 1) + _morton_Part1By1(p.x); }
+uvec2 morton2Di2p(uint i) { return uvec2(_morton_Compact1By1(i >> 0), _morton_Compact1By1(i >> 1)); }
+
+// 3D ------------------------------------------------------------------------------------------------------------------
+
+// "Insert" two 0 bits after each of the 10 low bits of x
+uint _morton_Part1By2(uint x) {
+    x &= 0x000003ffu;                  // x = ---- ---- ---- ---- ---- --98 7654 3210
+    x = (x ^ (x << 16u)) & 0xff0000ffu; // x = ---- --98 ---- ---- ---- ---- 7654 3210
+    x = (x ^ (x << 8u)) & 0x0300f00fu;  // x = ---- --98 ---- ---- 7654 ---- ---- 3210
+    x = (x ^ (x << 4u)) & 0x030c30c3u;  // x = ---- --98 ---- 76-- --54 ---- 32-- --10
+    x = (x ^ (x << 2u)) & 0x09249249u;  // x = ---- 9--8 --7- -6-- 5--4 --3- -2-- 1--0
+    return x;
+}
+
+// Inverse of Part1By1 - "delete" all odd-indexed bits
+uint _morton_Compact1By2(uint x) {
+    x &= 0x09249249u;                  // x = ---- 9--8 --7- -6-- 5--4 --3- -2-- 1--0
+    x = (x ^ (x >> 2u)) & 0x030c30c3u;  // x = ---- --98 ---- 76-- --54 ---- 32-- --10
+    x = (x ^ (x >> 4u)) & 0x0300f00fu;  // x = ---- --98 ---- ---- 7654 ---- ---- 3210
+    x = (x ^ (x >> 8u)) & 0xff0000ffu;  // x = ---- --98 ---- ---- ---- ---- 7654 3210
+    x = (x ^ (x >> 16u)) & 0x000003ffu; // x = ---- ---- ---- ---- ---- --98 7654 3210
+    return x;
+}
+
+uint morton3Dp2i(uvec3 p) { return (_morton_Part1By2(p.z) << 2) + (_morton_Part1By2(p.y) << 1) + _morton_Part1By2(p.x); }
+uvec3 morton3Di2p(uint i) { return uvec3(_morton_Compact1By2(i >> 0), _morton_Compact1By2(i >> 1), _morton_Compact1By2(i >> 2)); }
+
+
+
+
+#endif // MORTON_GLSL
+```
+
+### shader/rans.glsl
+```
+#ifndef RANS_GLSL
+#define RANS_GLSL
+
+// adapted form the public domain ryg_rans rANS code by Fabian Giesen.
+// see README.txt in include/rANS for details.
+
+#define RANS_PROB_BITS 14
+#define RANS_BYTE_L (1u << 23)  // lower bound of our normalization interval
+
+// RANS_SYMBOL_TABLE must be defined at compile time to initilaize an array of uvec3 elements.
+// for both the base encoding + for the detail back to back:
+// decoding info for all 16 possible symbols: (dsyms.start, dsyms.freq, stats.cum_freq)
+//                   + a 17th dummy entry with (0, 0, total stats.cum_freq)
+// example:
+// RANS_SYMBOL_TABLE=uvec3[34](uvec3(0,4659,0),uvec3(4659,1450,4659),uvec3(6109,771,6109), ...)
+//
+const uvec3 _RANS_STATS[34] = RANS_SYMBOL_TABLE;
+
+uint _RansDecGet(uint rans_state) {
+    return rans_state & ((1u << RANS_PROB_BITS) - 1u);
+}
+
+void _RansDecAdvanceSymbol(inout uint r, inout uint byte_index, uint sym_start, uint sym_freq, bool detail) {
+    const uint mask = (1u << RANS_PROB_BITS) - 1u;
+
+    // s, x = D(x)
+    uint x = r;
+    x = sym_freq * (x >> RANS_PROB_BITS) + (x & mask) - sym_start;
+
+    // renormalize
+    if (x < RANS_BYTE_L) {
+        uint idx = byte_index;
+        do {
+            // read the next byte from our uint32 array
+            uint shift = 8 * (idx % 4);
+
+            // if the finest LoD is stored in a separate buffer, e.g. to stream it from CPU to GPU on demand,
+            // this would be the place to access a different array:
+            // uint byte = (detail ? (CSVOL_DETAIL_ARRAY[idx / 4] >> shift) : (CSVOL_ENCODING_ARRAY[idx / 4] >> shift)) & 0xFFu;
+            // Additionally, rans_itr_initDecoding has to be similarly adapted.
+            uint byte = (CSVOL_ENCODING_ARRAY[idx / 4] >> shift) & 0xFFu;       // alternatively, use bitfieldExtract(..)
+
+            x = (x << 8) | byte;
+            idx++;
+        } while (x < RANS_BYTE_L);
+        byte_index = idx;
+    }
+    r = x;
+}
+
+void rans_itr_initDecoding(inout uint rans_state, inout uint byte_index) {
+    rans_state = CSVOL_ENCODING_ARRAY[byte_index/4];
+    byte_index += 4;
+}
+
+uint rans_itr_nextSymbol(inout uint rans_state, inout uint byte_index, bool use_detail_freq) {
+    uint cumulative = _RansDecGet(rans_state);
+#ifdef USE_DETAIL_FREQ
+    uint freq_table_offset = use_detail_freq ? 17u : 0u; // use another rANS frequency table for the detail level
+#else
+    uint freq_table_offset = 0u;
+#endif
+    for(s=freq_table_offset; s < freq_table_offset + 16u; s++) {
+        if(_RANS_STATS[s+1].z > cumulative)
+            break;
+    }
+    _RansDecAdvanceSymbol(rans_state, byte_index, _RANS_STATS[s].x, _RANS_STATS[s].y, use_detail_freq);
+    return s - freq_table_offset;
+}
+```
+
+### src/CompressedSegmentationVolume.cpp
+```
+#include "CompressedSegmentationVolume.hpp"
+
+#include <algorithm>
+#include <map>
+#include <sstream>
+#include <string>
+#include <thread>
+#include <iostream>
+
+#include "bitpack.hpp"
+
+namespace vvv {
+
+
+uint32_t CompressedSegmentationVolume::valueOfNeighbor(const MultiGridNode* grid, const MultiGridNode* parent_grid,
+                                                       const glm::uvec3 &brick_pos, const uint32_t local_lod_i,
+                                                       const uint32_t lod_dim, const int neighbor_i) {
+    assert(local_lod_i >= 0 && local_lod_i < 8);
+    // Find the position of the neighbor.
+    glm::ivec3 neighbor_pos = glm::ivec3(brick_pos) + neighbor[local_lod_i][neighbor_i];
+    if (glm::any(glm::lessThan(neighbor_pos, glm::ivec3(0))) || glm::any(glm::greaterThanEqual(neighbor_pos, glm::ivec3(static_cast<int>(lod_dim)))))
+        return INVALID;
+
+        // In case we want to access a neighbor that is not already existing on this level (neighbor_i > our_i) or
+        // any element of neighbor[local_lod_i][neighbor_i] is positive, we have to look up the parent element.
+    else if (glm::any(glm::greaterThan(neighbor[local_lod_i][neighbor_i], glm::ivec3(0)))) {
+        return parent_grid[pos2idx( glm::ivec3(brick_pos/2u) + neighbor[local_lod_i][neighbor_i], glm::uvec3(lod_dim/2))].label;
+    }
+        // Otherwise, lookup the neighbor.
+    else {
+        return grid[pos2idx(neighbor_pos, glm::uvec3(lod_dim))].label;
+    }
+}
+
+uint32_t CompressedSegmentationVolume::valueOfNeighbor(const uint32_t* brick, const glm::uvec3 &brick_pos, const uint32_t local_lod_i, const uint32_t lod_width, const uint32_t brick_size,
+                                                       const int neighbor_i) {
+    assert(lod_width > 0);
+    assert(local_lod_i >= 0 && local_lod_i < 8);
+    // Find the position of the neighbor.
+    glm::ivec3 neighbor_pos = glm::ivec3(brick_pos) + neighbor[local_lod_i][neighbor_i] * static_cast<int>(lod_width);
+    if (glm::any(glm::lessThan(neighbor_pos, glm::ivec3(0))) || glm::any(glm::greaterThanEqual(neighbor_pos, glm::ivec3(static_cast<int>(brick_size)))))
+        return INVALID;
+    uint32_t neighbor_index = indexOfBrickPos(glm::uvec3(neighbor_pos));
+
+    // In case we want to access a neighbor that is not already existing on this level (neighbor_i > our_i) or
+    // any element of neighbor[local_lod_i][neighbor_i] is positive, we have to look up the parent element.
+    if (glm::any(glm::greaterThan(neighbor[local_lod_i][neighbor_i], glm::ivec3(0))))
+        neighbor_index -= neighbor_index % (lod_width * lod_width * lod_width * 8);
+
+    // Since we don't check here if we're out of bounds of the volume, it CAN happen that a value is INVALID in the
+    // encoding in the decoding, such a neighbor should never be accessed.
+    // assert(brick[neighbor_index] != INVALID);
+
+    return brick[neighbor_index];
+}
+
+
+
+// COMPRESSION ---------------------------------------------------------------------------------------------------------
+
+void CompressedSegmentationVolume::setCompressionOptions(bool use_rANS, bool use_detail_freq, const uint32_t* operation_frequencies,
+                                                         const uint32_t* detail_operation_frequencies) {
+    m_use_rANS = use_rANS;
+    m_use_detail_freq = use_detail_freq;
+
+    if(m_use_detail_freq && !m_use_rANS)
+        throw std::runtime_error("detail freq. can only be used in combination with rANS!");
+
+    if(m_use_rANS) {
+        assert(operation_frequencies != nullptr && "4 bit operation frequencies must be given if using rANS!");
+        // normalize the symbol frequencies
+        std::vector<uint32_t> _operation_frequencies = normalizeOperationFrequencies(operation_frequencies);
+        m_rans.recomputeFrequencyTables(_operation_frequencies.data());
+        if(m_use_detail_freq) {
+            assert(detail_operation_frequencies != nullptr && "4 bit detail operation frequencies must be given if using rANS and detail freq.!");
+            std::vector<uint32_t> _detail_operation_frequencies = normalizeOperationFrequencies(
+                    detail_operation_frequencies);
+            m_detail_rans.recomputeFrequencyTables(_detail_operation_frequencies.data());
+        }
+    }
+}
+
+void CompressedSegmentationVolume::setCompressionOptions64(bool use_rANS, bool use_detail_freq, const size_t *operation_frequencies,
+                                                           const size_t *detail_operation_frequencies) {
+    m_use_rANS = use_rANS;
+    m_use_detail_freq = use_detail_freq;
+
+    if(m_use_detail_freq && !m_use_rANS)
+        throw std::runtime_error("detail freq. can only be used in combination with rANS!");
+
+    if(m_use_rANS) {
+        assert(operation_frequencies != nullptr && "4 bit operation frequencies must be given if using rANS!");
+        // normalize the symbol frequencies
+        std::vector<uint32_t> _operation_frequencies = normalizeOperationFrequencies(operation_frequencies);
+        m_rans.recomputeFrequencyTables(_operation_frequencies.data());
+        if(m_use_detail_freq) {
+            assert(detail_operation_frequencies != nullptr && "4 bit detail operation frequencies must be given if using rANS and detail freq.!");
+            std::vector<uint32_t> _detail_operation_frequencies = normalizeOperationFrequencies(
+                    detail_operation_frequencies);
+            m_detail_rans.recomputeFrequencyTables(_detail_operation_frequencies.data());
+        }
+    }
+}
+
+
+void CompressedSegmentationVolume::compressBrickForFrequencyTable(const std::vector<uint32_t>& volume, size_t* brick_freq,
+                                                                  glm::uvec3 start, glm::uvec3 volume_dim, bool detail_freq) const {
+    std::vector<uint32_t> palette;
+    palette.reserve(32);
+    glm::uvec3 volume_pos, brick_pos;
+
+    const uint32_t lod_count = getLodCountPerBrick();
+
+    // We keep track of the current brick status from coarsest to finest level to determine the right operations,
+    // basically do an implicit decoding while we're encoding.
+    uint32_t parent_value;
+    uint32_t value;
+    uint32_t local_lod_i;
+
+    // construct the multigrid on this brick that we want to represent in this encoding
+    std::vector<MultiGridNode> multigrid;
+    constructMultiGrid(multigrid, volume, volume_dim, start, m_brick_size);
+
+    // we start with the coarsest LOD, which is always a PALETTE_ADV of the max occuring value in the whole brick
+    // we handle this here because it allows us to skip some special handling (for example checking if the palette is empty) in the following loop
+    // in theory, we could start with a finer level here too and skip the first levels (= Carsten's original idea)
+    uint32_t muligrid_lod_start = multigrid.size() - 1;
+    if (multigrid[muligrid_lod_start].constant_subregion) {
+        brick_freq[PALETTE_ADV | STOP_BIT]++;
+    }
+    else {
+        brick_freq[PALETTE_ADV]++;
+    }
+    palette.push_back(multigrid[muligrid_lod_start].label);
+
+    // now we iteratively refine from coarse (8 elements in the brick) to finest (brick_size^3 elements in the brick) levels
+    uint32_t current_inv_lod = 1u;
+    for (uint32_t lod_width = m_brick_size / 2u; lod_width > 0u; lod_width /= 2u) {
+        // in the multigrid, LODs are ordered from finest to coarsest, so we have to go through them in reverse.
+        uint32_t lod_dim = (m_brick_size/lod_width);
+        uint32_t parent_multigrid_lod_start = muligrid_lod_start;
+        muligrid_lod_start -= lod_dim * lod_dim * lod_dim;
+
+        for (uint32_t i = 0; i < m_brick_size * m_brick_size * m_brick_size; i += lod_width * lod_width * lod_width) {
+            brick_pos = enumBrickPos(i, m_brick_size);
+            volume_pos = start + brick_pos;
+            if (glm::any(glm::greaterThanEqual(volume_pos, volume_dim)))
+                continue;
+
+            local_lod_i = (i % (lod_width * lod_width * lod_width * 8)) / (lod_width * lod_width * lod_width);
+            if (local_lod_i == 0) {
+                if (multigrid[parent_multigrid_lod_start + pos2idx(brick_pos / lod_width / 2u, glm::uvec3(lod_dim / 2u))].constant_subregion) {
+                    i += (lod_width * lod_width * lod_width * 7);
+                    continue;
+                }
+                parent_value = multigrid[parent_multigrid_lod_start + pos2idx(brick_pos / lod_width / 2u, glm::uvec3(lod_dim / 2u))].label;
+                assert(parent_value != INVALID && "parent element in brick was not set in previous LoD!");
+            }
+
+            value = multigrid[muligrid_lod_start + pos2idx(brick_pos / lod_width, glm::uvec3(lod_dim))].label;
+            assert(value != INVALID && "Original volume mustn't contain the INVALID magic value!");
+
+            uint32_t operation = 0u;
+            if (lod_width >= 1 && multigrid[muligrid_lod_start + pos2idx(brick_pos / lod_width, glm::uvec3(lod_dim))].constant_subregion) {
+                operation = STOP_BIT;
+            }
+            if (value == parent_value)
+                operation |= PARENT;
+            else if (valueOfNeighbor(multigrid.data() + muligrid_lod_start, multigrid.data() + parent_multigrid_lod_start, brick_pos / lod_width, local_lod_i, lod_dim, 0) == value)
+                operation |= NEIGHBORX;
+            else if (valueOfNeighbor(multigrid.data() + muligrid_lod_start, multigrid.data() + parent_multigrid_lod_start, brick_pos / lod_width, local_lod_i, lod_dim, 1) == value)
+                operation |= NEIGHBORY;
+            else if (valueOfNeighbor(multigrid.data() + muligrid_lod_start, multigrid.data() + parent_multigrid_lod_start, brick_pos / lod_width, local_lod_i, lod_dim, 2) == value)
+                operation |= NEIGHBORZ;
+            else if (palette.back() == value) // reuse the last palette value. but detail can't reference previous palettes!
+                operation |= PALETTE_LAST;
+            else {
+                uint32_t palette_delta = static_cast<uint32_t>(std::find(palette.rbegin(), palette.rend(), value) - palette.rbegin());
+                if(palette_delta < 17u && palette_delta < palette.size()) {
+                    assert(palette.at(palette.size() - palette_delta - 1u) == value && "Palette value does not fit!");
+                    assert(palette_delta > 0u &&
+                           "the palette delta 0 should've been catched by the palette_last value!");
+                    assert(palette_delta < 17u && "the palette delta can't be >= 17");
+                    if (detail_freq && (current_inv_lod == lod_count - 1u))
+                        brick_freq[16 + (operation | PALETTE_DELTA)]++;
+                    else
+                        brick_freq[operation | PALETTE_DELTA]++;
+                    operation = palette_delta - 1u;
+                }
+                else {
+                    palette.push_back(value);
+                    operation |= PALETTE_ADV;
+                }
+            }
+            assert(operation < 16u && "we only allow writing 4 bit operations!");
+            if(detail_freq && (current_inv_lod == lod_count - 1u))
+                brick_freq[16 + operation]++;
+            else
+                brick_freq[operation]++;
+
+            assert(value != INVALID);
+        }
+        current_inv_lod++;
+    }
+}
+
+
+void CompressedSegmentationVolume::compressForFrequencyTable(const std::vector<uint32_t>& volume, glm::uvec3 volume_dim, size_t freq_out[32], uint32_t subsampling_factor, bool detail_freq, bool verbose) {
+    assert(m_brick_size > 0u && "brick size must be a power of 2 > 0");
+    m_volume_dim = volume_dim;
+    glm::uvec3 brickCount = getBrickCount();
+    if(verbose) {
+        std::cout << " running with " << NUM_THREADS << " threads on " << std::thread::hardware_concurrency() << " CPU cores" << std::endl;
+        std::cout << " brick count: " << str(brickCount) << " = " << (brickCount.x * brickCount.y * brickCount.z)
+                  << " with brick size " << m_brick_size << "^3 and " << str(m_volume_dim) << " voxels." << std::endl;
+    }
+
+    std::cout << " Progress 0.0%" << "\r" << std::flush;
+    MiniTimer progressTimer;
+    MiniTimer totalTimer;
+    int bricks_since_last_update = 0;
+
+    size_t brick_freq[NUM_THREADS][32]; // last 16 elements are detail frequencies, if detail separation is used
+    for (int thread_id = 0; thread_id < NUM_THREADS; thread_id++) {
+        for(int i = 0; i < 32; i++) {
+            brick_freq[thread_id][i] = 0ul;
+        }
+    }
+
+    glm::uvec3 brick;
+    size_t brick_idx = 0;
+    for (brick.z = 0u; brick.z < brickCount.z; brick.z+=subsampling_factor) {
+        for (brick.y = 0u; brick.y < brickCount.y; brick.y+=subsampling_factor) {
+            for (brick.x = 0u; brick.x < brickCount.x; brick.x+=(subsampling_factor * NUM_THREADS)) {
+
+                #pragma omp parallel num_threads(NUM_THREADS) default(none) shared(brick, brickCount, volume, brick_freq, subsampling_factor, detail_freq)
+                {
+                    unsigned int thread_id = omp_get_thread_num();
+                    if (brick.x + thread_id*subsampling_factor < brickCount.x) {
+
+                        //volume, size_t* brick_freq, glm::uvec3 start, glm::uvec3 volume_dim, bool detail_freq
+                        compressBrickForFrequencyTable(volume, brick_freq[thread_id],
+                                   glm::uvec3(brick.x + thread_id * subsampling_factor, brick.y, brick.z) * m_brick_size,
+                                   m_volume_dim, detail_freq);
+                    }
+                }
+
+                // Progress output.
+                bricks_since_last_update += NUM_THREADS;
+                constexpr const double PROGRESS_UPDATE_INTERVAL = 2.;
+                if (progressTimer.elapsed() >= PROGRESS_UPDATE_INTERVAL) {
+                    float bricks_per_second = static_cast<float>(bricks_since_last_update) / progressTimer.elapsed();
+                    std::stringstream stream;
+                    stream << " Progress " << std::fixed << std::setprecision(1) << static_cast<float>(brick_idx) / static_cast<float>(brickCount.x * brickCount.y * brickCount.z / subsampling_factor / subsampling_factor / subsampling_factor) * 100.f << "%"
+                           << " (" << std::setprecision(2) << (bricks_per_second * m_brick_size * m_brick_size * m_brick_size / 1000000.f)
+                           << " million voxels/second)";
+                    std::cout << stream.str() << "\r" << std::endl;
+                    progressTimer.restart();
+                    bricks_since_last_update = 0;
+                }
+            }
+        }
+    }
+
+
+    // sum up the frequencies
+    #pragma omp parallel for default(none) shared(freq_out, brick_freq)
+    for(int i = 0; i < 32; i++) {
+        freq_out[i] = 0ul;
+        for (int thread_id = 0; thread_id < NUM_THREADS; thread_id++) {
+            freq_out[i] += brick_freq[thread_id][i];
+        }
+    }
+
+    float total_seconds = static_cast<float>(totalTimer.elapsed());
+    std::cout << " Progress 100% in " << std::fixed << std::setprecision(3) << total_seconds
+              << "s freq: " << array_string(freq_out, 16)  << " | " <<  array_string(freq_out + 16, 16) << std::endl;
+}
+
+
+std::vector<uint32_t> CompressedSegmentationVolume::normalizeOperationFrequencies(const size_t* freq) {
+    std::vector<uint32_t> out(16);
+    size_t operation_freq_sum = 0ul;
+    for(int i =0; i < 16; i++) {
+        operation_freq_sum += freq[i];
+    }
+    for (int i = 0; i < 16; i++) {
+        bool greaterThanZero = freq[i] > 0u;
+        out[i] = static_cast<uint32_t>(freq[i] / (operation_freq_sum  / (1ul << 30u) + 1u));
+        if(greaterThanZero && out[i] == 0u)
+            out[i] = 1u;        // existing symbols mustn't have a zero frequency
+    }
+    return out;
+}
+
+std::vector<uint32_t> CompressedSegmentationVolume::normalizeOperationFrequencies(const uint32_t* freq) {
+    size_t f[16];
+    for(int i = 0; i < 16; i++)
+        f[i] = freq[i];
+    return normalizeOperationFrequencies(f);
+}
+
+uint32_t CompressedSegmentationVolume::packRANS(std::vector<uint32_t>& entries, uint32_t start4bit, uint32_t end4bit, RANS& rANS) {
+    return rANS.packRANS(entries, start4bit, end4bit);
+}
+
+uint32_t CompressedSegmentationVolume::compressBrick(const std::vector<uint32_t>& volume, std::vector<uint32_t>& out, glm::uvec3 start, glm::uvec3 volume_dim) {
+
+    // BRICK MEMORY LAYOUT for L = log2(brick_size) LoDs
+    // HEADER                 ENCODING:                              ┌ padded to 32bit
+    // 4bit_encoding_start[0, 1, .. L-1], palette_start[0, 1 .. L], 4bit_encoding[0, 1, .. L], 32bit_palette[L, .. 1, 0]
+    //       header_size*8 ᒧ                always zero ᒧ  ∟ .. one  ∟ palette size
+
+    std::vector<uint32_t> palette;
+    palette.reserve(32);
+    glm::uvec3 volume_pos, brick_pos;
+
+    const uint32_t lod_count = getLodCountPerBrick();
+    const uint32_t header_size = 2u * lod_count + 1u;
+    uint32_t out_i = header_size * 8u;  // write head position in out, counted as number of encoded 4 bit elements
+
+    // We keep track of the current brick status from coarsest to finest level to determine the right operations,
+    // basically do an implicit decoding while we're encoding.
+    uint32_t parent_value;
+    uint32_t value;
+    uint32_t local_lod_i; // the local index of this element within the lod block of the coarser parent element, in 0 - 7, used for parent_value and neighbor-lookup index
+
+    // construct the multigrid on this brick that we want to represent in this encoding
+    std::vector<MultiGridNode> multigrid;
+    constructMultiGrid(multigrid, volume, volume_dim, start, m_brick_size);
+
+    // We start with the coarsest LOD, which is always a PALETTE_ADV of the max occuring value in the whole brick.
+    // We handle this here because it allows us to skip some special handling (for example checking if the palette is empty) in the following loop.
+    out[0] = out_i;                                     // inv. LoD 0 start position counted as 4bit elements
+    out[header_size - 1] = 0u;                          // palette start position (from back)
+    uint32_t muligrid_lod_start = multigrid.size() - 1; // coarsest LoD is the last entry of the multigrid
+    if (multigrid[muligrid_lod_start].constant_subregion) {
+        write4Bit(out, 0u, out_i++, PALETTE_ADV | STOP_BIT);
+    }
+    else {
+        write4Bit(out, 0u, out_i++, PALETTE_ADV);
+    }
+    palette.push_back(multigrid[muligrid_lod_start].label);
+
+    // now we iteratively refine from coarse (8 elements in the brick) to finest (brick_size^3 elements in the brick) levels
+    uint32_t current_inv_lod = 1u;
+    for (uint32_t lod_width = m_brick_size / 2u; lod_width > 0u; lod_width /= 2u) {
+        // Write to header: where the new LODs start as a number of 4bit elements in encoding.
+        out[current_inv_lod] = out_i;
+        // Write to header: where the palette entries for the new LoD start.
+        out[lod_count + current_inv_lod] = static_cast<uint32_t>(palette.size());
+
+        // In the multigrid, LoDs are ordered from finest to coarsest, so we have to go through them in reverse.
+        uint32_t lod_dim = (m_brick_size/lod_width);
+        uint32_t parent_multigrid_lod_start = muligrid_lod_start;
+        muligrid_lod_start -= lod_dim * lod_dim * lod_dim;
+
+        for (uint32_t i = 0; i < m_brick_size * m_brick_size * m_brick_size; i += lod_width * lod_width * lod_width) {
+            brick_pos = enumBrickPos(i, m_brick_size);
+            // We don't store any operations for areas that would lie completely outside the volume.
+            // The alternative would be to output a dummy value here (e.g. PARENT | STOP_BIT).
+            volume_pos = start + brick_pos;
+            if (glm::any(glm::greaterThanEqual(volume_pos, volume_dim)))
+                continue;
+
+            // Every 8th element, we fetch the new parent. 2*2*2=8 elements here have the same parent in the coarser LoD.
+            local_lod_i = (i % (lod_width * lod_width * lod_width * 8)) / (lod_width * lod_width * lod_width);
+            if (local_lod_i == 0) {
+                // If our parent had a stop bit set (i.e. the multigrid parent indicated a constant subregion), all
+                // current child elements are skipped. Note that this will also happen if this LoD block lies completely
+                // outside the volume because a parent would've indicated a constant subregion earlier. Our parent
+                // spanned 8 elements of this finer current level, so we advance 7 elements further.
+                if (multigrid[parent_multigrid_lod_start + pos2idx(brick_pos / lod_width / 2u, glm::uvec3(lod_dim / 2u))].constant_subregion) {
+                    i += (lod_width * lod_width * lod_width * 7);
+                    continue;
+                }
+
+                // Otherwise, we remember the label of our parent for the parent operations that may follow.
+                parent_value = multigrid[parent_multigrid_lod_start + pos2idx(brick_pos / lod_width / 2u, glm::uvec3(lod_dim / 2u))].label;
+                assert(parent_value != INVALID && "parent element in brick was not set in previous LoD!");
+            }
+
+            value = multigrid[muligrid_lod_start + pos2idx(brick_pos / lod_width, glm::uvec3(lod_dim))].label;
+            assert(value != INVALID && "Original volume mustn't contain the INVALID magic value!");
+
+            // Find the best operation to encode the current multigrid node's label.
+            uint32_t operation = 0u;
+            // if the whole subtree from here has this parent_value, we can set a stop sign and fill the whole brick area of the subtree
+            // note that LOD blocks outside the volume are by definition also homogeneous
+            if (multigrid[muligrid_lod_start + pos2idx(brick_pos / lod_width, glm::uvec3(lod_dim))].constant_subregion) {
+                operation = STOP_BIT;
+            }
+            if (value == parent_value)
+                operation |= PARENT;
+            else if (valueOfNeighbor(multigrid.data() + muligrid_lod_start, multigrid.data() + parent_multigrid_lod_start, brick_pos / lod_width, local_lod_i, lod_dim, 0) == value)
+                operation |= NEIGHBORX;
+            else if (valueOfNeighbor(multigrid.data() + muligrid_lod_start, multigrid.data() + parent_multigrid_lod_start, brick_pos / lod_width, local_lod_i, lod_dim, 1) == value)
+                operation |= NEIGHBORY;
+            else if (valueOfNeighbor(multigrid.data() + muligrid_lod_start, multigrid.data() + parent_multigrid_lod_start, brick_pos / lod_width, local_lod_i, lod_dim, 2) == value)
+                operation |= NEIGHBORZ;
+            else if (palette.back() == value)
+                operation |= PALETTE_LAST;
+            else {
+                // reuse the n-delta palette value when 0 < delta < 17
+                uint32_t palette_delta = static_cast<uint32_t>(std::find(palette.rbegin(), palette.rend(), value) - palette.rbegin());
+                if(palette_delta < 17u && palette_delta < palette.size()) {
+                    assert(palette.at(palette.size() - palette_delta - 1u) == value && "Palette value does not fit!");
+                    assert(palette_delta > 0u && "the palette delta 0 should've been catched by the palette_last value!");
+                    assert(palette_delta < 17u && "the palette delta can't be >= 17");
+
+                    // we write two "operations". First, the actual operation for the palette backwards reference:
+                    write4Bit(out, 0u, out_i++, operation | PALETTE_DELTA);
+                    // Second, the delta of the reference:
+                    // The "0" case is already handled by PALETTE_LAST, so we only consider case 1 - 16 in our 4 bits.
+                    operation = palette_delta - 1u;
+                }
+                    // if nothing helps, we add a completely new palette entry
+                else {
+                    palette.push_back(value);
+                    operation |= PALETTE_ADV;
+                }
+            }
+            assert(operation < 16u && "We only allow writing 4 bit operations!");
+            write4Bit(out, 0u, out_i++, operation);
+        }
+
+
+        // we handle the rANS packing here, if we're using separate frequency tables for the finest LoD and the coarser
+        // LoDs. Otherwise, we will do the rANS packing with the default encoder after all loops finished execution.
+        if(m_use_detail_freq) {
+            // Pack all previous levels via rANS encoding if we're at the second last LoD.
+            // This is the last LoD of non-detail encoding for which another rANS encoder will be used.
+            if (current_inv_lod == lod_count - 2u) {
+                out_i = packRANS(out, out[0], out_i, m_rans);
+                assert(out_i % 8u == 0u && "Next element after rANS output should start at a full uint32_t element!");
+            }
+                // Pack the detail (=finest LoD) via rANS encoding if we're at the finest LoD.
+                // We use a separate rANS encoder here because the detail level doesn't use stop bits => different operation frequencies
+            else if (current_inv_lod == lod_count - 1u) {
+                out_i = packRANS(out, out[current_inv_lod], out_i, m_detail_rans);
+            }
+        }
+
+        current_inv_lod++;
+    }
+    // Pack everything via rANS encoding if we didn't pack it before.
+    // i.e. when using the same rANS encoder for all LoDs.
+    if(!m_use_detail_freq && m_use_rANS)
+        out_i = packRANS(out, out[0], out_i, m_rans);
+
+    // last entry of our header stores the palette size
+    out[header_size - 1u] = palette.size();
+
+    // After the encoding follows the palette containing the labels.
+    // Round up to start the palette at a full uint32_t index, but AFTER the last encoding element.
+    while(out_i % 8u != 0u)
+        write4Bit(out, 0u, out_i++, 0u);
+    // Now we count everything in 32 bit elements:
+    out_i /= 8u;
+    // The palette is added in reverse order at the end to be read from the full compressed block back to front.
+    for(int i = static_cast<int>(palette.size()) - 1; i >= 0; i--) {
+        out.at(out_i++) = palette.at(i);
+    }
+
+    assert(out_i < out.size() && "out doesn't provide enough memory for encoded brick, writing outside of allocated region");
+    return out_i; // Return the number of uint32_t elements that we wrote for this block.
+}
+
+void CompressedSegmentationVolume::compress(const std::vector<uint32_t> &volume, const glm::uvec3 volume_dim, bool verbose) {
+    assert(m_brick_size > 0u && "brick size must be a power of 2 > 0");
+    m_volume_dim = volume_dim;
+    glm::uvec3 brickCount = getBrickCount();
+    if(verbose) {
+        std::cout << " running with " << NUM_THREADS << " threads on " << std::thread::hardware_concurrency() << " CPU cores" << std::endl;
+        std::cout << " brick count: " << str(brickCount) << " = " << (brickCount.x * brickCount.y * brickCount.z) << " with brick size " << m_brick_size << "^3" << std::endl;
+    }
+
+    m_encoding.clear();
+    m_encoding.reserve(m_volume_dim.x * m_volume_dim.y * m_volume_dim.z / 12u / 7); // assume that we have a compression rate below 1/12
+    m_brick_starts.resize(brickCount.x * brickCount.y * brickCount.z + 1);
+
+    // Tracking the compression progress.
+    if(verbose)
+        std::cout << " Progress 0.0%" << "\r" << std::flush;
+    MiniTimer progressTimer;
+    MiniTimer totalTimer;
+    int bricks_since_last_update = 0;
+
+    // compute the next NUM_THREADS brick encodings in parallel.
+    // Multiple buffers are required to store the temporary results of compressing the single bricks.
+    std::vector<uint32_t> encodedBrick[NUM_THREADS];
+    uint32_t encoded_element_count[NUM_THREADS];
+    // Assume a worst case compression rate of 100%.
+    const uint32_t max_encoded_brick_count_32bit = m_brick_size * m_brick_size * m_brick_size;
+    for (int thread_id = 0; thread_id < NUM_THREADS; thread_id++) {
+        encodedBrick[thread_id].resize(max_encoded_brick_count_32bit / 4u);
+        encoded_element_count[thread_id] = 0u;
+    }
+
+    glm::uvec3 brick;
+    size_t brick_idx = 0;
+    for (brick.z = 0u; brick.z < brickCount.z; brick.z++) {
+        for (brick.y = 0u; brick.y < brickCount.y; brick.y++) {
+            for (brick.x = 0u; brick.x < brickCount.x; brick.x += NUM_THREADS) {
+
+                // Compress the current line of bricks in parallel.
+                #pragma omp parallel num_threads(NUM_THREADS) default(none) shared(brick, brickCount, volume, encodedBrick, encoded_element_count)
+                {
+                    unsigned int thread_id = omp_get_thread_num();
+                    encoded_element_count[thread_id] = 0u;
+                    if (brick.x + thread_id < brickCount.x) {
+                        encoded_element_count[thread_id] = compressBrick(volume, encodedBrick[thread_id],
+                                                                         glm::uvec3(brick.x + thread_id, brick.y, brick.z)
+                                                                         * m_brick_size, m_volume_dim);
+                    }
+                }
+
+                // Append the results to the complete buffers.
+                for (int thread_id = 0; thread_id < NUM_THREADS; thread_id++) {
+                    if (encoded_element_count[thread_id] == 0u)
+                        continue;
+                    // Store the start index of the brick in the encoding array.
+                    assert(brick_idx < m_brick_starts.size() && "out of bounds");
+                    m_brick_starts[brick_idx++] = static_cast<uint32_t>(m_encoding.size());
+                    // Store the encoded brick at the right position in the encoding array (ordered by brick index).
+                    size_t old_size = m_encoding.size();
+                    m_encoding.resize(old_size + encoded_element_count[thread_id]);
+                    memcpy(m_encoding.data() + old_size, encodedBrick[thread_id].data(), encoded_element_count[thread_id] * sizeof(uint32_t));
+                }
+
+
+                // Output a progress update after some fixed time interval.
+                if(verbose) {
+                    bricks_since_last_update += NUM_THREADS;
+                    constexpr const double PROGRESS_UPDATE_INTERVAL = 2.;
+                    if (progressTimer.elapsed() >= PROGRESS_UPDATE_INTERVAL) {
+                        float bricks_per_second = static_cast<float>(bricks_since_last_update) / progressTimer.elapsed();
+                        float remaining_seconds = static_cast<float>(brickCount.x * brickCount.y * brickCount.z - brick_idx) / bricks_per_second;
+                        std::stringstream stream;
+                        stream << " Progress " << std::fixed << std::setprecision(1) << static_cast<float>(brick_idx) / static_cast<float>(brickCount.x * brickCount.y * brickCount.z) * 100.f << "%"
+                               << " (" << std::setprecision(2) << (bricks_per_second * m_brick_size * m_brick_size * m_brick_size / 1000000.f)
+                               << " million voxels/second), remaining: " << static_cast<int>(remaining_seconds / 60.f) << "m" << (static_cast<int>(remaining_seconds) % 60) << "s        ";
+                        std::cout << stream.str() << "\r" << std::flush;
+                        progressTimer.restart();
+                        bricks_since_last_update = 0;
+                    }
+                }
+            }
+        }
+    }
+
+    // One last dummy entry to be able to query an "end" index for the last brick.
+    m_brick_starts[brick_idx] = static_cast<uint32_t>(m_encoding.size());
+
+    // Output a final progress update.
+    float total_seconds = static_cast<float>(totalTimer.elapsed());
+    std::cout << " ______________________________________________________________________________________" << std::endl;
+    std::cout << " Progress 100% in " << std::fixed << std::setprecision(3) << total_seconds << "s ("
+              << (static_cast<float>(volume.size()) / total_seconds / 1000000.f) << " million voxels/second) "
+              << decodingInfoString() << std::endl;
+}
+
+// DECOMPRESSION ---------------------------------------------------------------------------------------------------
+
+uint32_t CompressedSegmentationVolume::readNextLodOperation(size_t start32bit, CompressedSegmentationVolume::ReadState &state) const {
+    if (m_use_rANS) {
+        const RANS* rANS_decoder = (m_use_detail_freq && state.in_detail_lod) ? &m_detail_rans : &m_rans;
+        return rANS_decoder->itr_nextSymbol(state.rans_state, state.idxE, m_encoding.data());
+    }
+    else
+        return read4Bit(m_encoding, start32bit, state.idxE++);
+}
+
+void CompressedSegmentationVolume::decompressBrick(uint32_t brick_idx, uint32_t* output_brick, glm::uvec3 valid_brick_size, int inv_lod) const {
+    // the palette starts at the end of the encoding block
+    uint32_t beginE = m_brick_starts[brick_idx];
+    uint32_t paletteE = m_brick_starts[brick_idx + 1u] - 1u;
+    uint32_t lod_count = getLodCountPerBrick();
+
+    // refine up to the inverse LoD that was requested
+    uint32_t local_lod_i;   // local index within the block of elements that have the same coarser parent (in 0 - 7)
+
+    ReadState readState = {.idxE=m_encoding[beginE], .in_detail_lod=false};
+    if(m_use_rANS) {
+        readState.idxE = (beginE + readState.idxE / 8) * 4;
+        m_rans.itr_initDecoding(readState.rans_state, readState.idxE, m_encoding.data());
+    }
+
+    uint32_t index_step = m_brick_size * m_brick_size * m_brick_size;
+    uint32_t lod_width = m_brick_size;
+    uint32_t parent_value;
+
+    // First, set the whole brick to INVALID to know later which elements and LoD blocks were already processed.
+    for (uint32_t i = 0; i < m_brick_size * m_brick_size * m_brick_size; i++)
+        output_brick[i] = INVALID;
+
+    for (int lod = 0; lod <= inv_lod; lod++) {
+
+        // in case we're using a different rANS frequency table for the finest LoD:
+        // check if we ran into the detail layer (finest LoD) and change the readState accordingly
+        if(m_use_detail_freq && lod == lod_count-1) {
+            // Read the lod start from the brick header to start reading at the right encoding buffer index.
+            // We have to start at a fully padded uint32, because we switch the rANS decoder.
+            readState.idxE = (beginE + m_encoding[beginE + lod] / 8) * 4;
+            readState.in_detail_lod = true;
+            m_detail_rans.itr_initDecoding(readState.rans_state, readState.idxE, m_encoding.data());
+        }
+
+        for (uint32_t i = 0; i < m_brick_size * m_brick_size * m_brick_size; i += index_step) {
+            // if an LOD block is completely outside the volume (i.e. it's first element is not within the volume) we skip it as it won't have any entries in the encoding
+            if (glm::any(glm::greaterThanEqual(enumBrickPos(i, m_brick_size), valid_brick_size)))
+                continue;
+
+            // every 8th element (we span 2*2*2=8 elements of the coarse LOD above), we fetch the new parent
+            local_lod_i = (i % (index_step * 8)) / index_step;
+            if (lod > 0 && i % (index_step * 8) == 0) {
+                // if the last element of this block is set, this subtree is already filled (because of a PARENT_STOP
+                // operation in a coarser LoD before) and we can skip it.
+                if (output_brick[i + (index_step * 7)] != INVALID) {
+                    i += (index_step * 7);
+                    continue;
+                }
+
+                parent_value = output_brick[i];
+                assert(parent_value != INVALID && "Parent element in brick was not set in previous LoD!");
+            }
+
+            // get the next operation and apply it
+            uint32_t operation = readNextLodOperation(beginE, readState);
+            uint32_t operation_lsb = operation & 7u; // extract least significant 3 bits
+            if (operation_lsb == PARENT)
+                output_brick[i] = parent_value;
+            else if (operation_lsb == NEIGHBORX)
+                output_brick[i] = valueOfNeighbor(output_brick, enumBrickPos(i, m_brick_size), local_lod_i, lod_width, m_brick_size, 0);
+            else if (operation_lsb == NEIGHBORY)
+                output_brick[i] = valueOfNeighbor(output_brick, enumBrickPos(i, m_brick_size), local_lod_i, lod_width, m_brick_size, 1);
+            else if (operation_lsb == NEIGHBORZ)
+                output_brick[i] = valueOfNeighbor(output_brick, enumBrickPos(i, m_brick_size), local_lod_i, lod_width, m_brick_size, 2);
+            else if (operation_lsb == PALETTE_ADV) { // read palette entry and advance palette pointer to the next entry
+                output_brick[i] = m_encoding[paletteE--];
+            }
+            else if (operation_lsb == PALETTE_LAST) {
+                output_brick[i] = m_encoding[paletteE + 1];
+            }
+            else if (operation_lsb == PALETTE_DELTA) {
+                uint32_t palette_delta = readNextLodOperation(beginE, readState) + 2u;
+                output_brick[i] = m_encoding[paletteE + palette_delta];
+            }
+            else
+                assert(false && "unrecognized compression operation");
+
+            // If the stop bit was set, stop traversal: fill all other parts of the brick with this value.
+            if ((operation & STOP_BIT) != 0u) {
+                for (uint32_t n = i; n < i + index_step; n++) {
+                    output_brick[n] = output_brick[i];
+                }
+            }
+
+            assert(output_brick[i] != INVALID && "Set output element brick to forbidden magic value INVALID!");
+        }
+
+        // move to the next LOD block with half the block width and an eight of the index_step respectively
+        index_step /= 8;
+        lod_width /= 2;
+    }
+}
+
+void CompressedSegmentationVolume::decompressBrickTo(uint32_t* out, glm::uvec3 brick_pos, int target_lod) const {
+    int inv_lod = static_cast<int>(getLodCountPerBrick()) - 1 - target_lod;
+    const glm::uvec3 brickCount = getBrickCount();
+    size_t brick_idx = brick_to_1D(brick_pos, brickCount);
+    decompressBrick(brick_idx, out,
+                    glm::clamp(m_volume_dim - brick_pos * m_brick_size, glm::uvec3(0u), glm::uvec3(m_brick_size)),
+                    inv_lod);
+}
+
+void CompressedSegmentationVolume::decompressLoD(int lod, std::vector<uint32_t>& out) const {
+
+    const glm::uvec3 brickCount = getBrickCount();
+    int inv_lod = getLodCountPerBrick() - 1 - lod;
+    assert(inv_lod >= 0);
+
+
+    // For CPU decoding of a full volume up to a certain LoD, we assume that the voxels are stored in the same linearized
+    // XYZ order as the original volume. To that end, we have to remap the ordering of the voxels using temporary buffers.
+    // This behavior can be disabled by commenting out the following define, leading to a decompression where each brick
+    // is stored in morton order (Z-order) in the output volume buffer back to back :
+    //#define NO_BRICK_DECODE_INDEX_REMAP
+
+    // this would run in parallel on the GPU later!
+    glm::uvec3 brick_pos;
+#ifndef NO_BRICK_DECODE_INDEX_REMAP
+    std::vector<uint32_t> brick_cache[NUM_THREADS]; // Contains voxels in morton order
+    for (auto &bc : brick_cache)
+        bc.resize(m_brick_size * m_brick_size * m_brick_size);
+#else
+    void* brick_cache = nullptr; // just for OpenMP
+#endif
+#pragma omp parallel for num_threads(NUM_THREADS) default(none) private(brick_pos) shared(brickCount, brick_cache, out, inv_lod)
+    for (uint32_t z = 0; z < brickCount.z; z++) {
+        unsigned int thread_id = omp_get_thread_num();
+        brick_pos.z = z;
+        for (brick_pos.y = 0; brick_pos.y < brickCount.y; brick_pos.y++) {
+            for (brick_pos.x = 0; brick_pos.x < brickCount.x; brick_pos.x++) {
+                size_t brick_idx = brick_to_1D(brick_pos, brickCount);
+#ifndef NO_BRICK_DECODE_INDEX_REMAP
+                // Decode brick to a buffer where the voxels are linearized in morton order.
+                decompressBrick(brick_idx, brick_cache[thread_id].data(),
+                                glm::clamp(m_volume_dim - brick_pos * m_brick_size, glm::uvec3(0u),
+                                           glm::uvec3(m_brick_size)),
+                                inv_lod);
+                // Fill the output array with decoded brick entries in linearized XYZ order.
+                for (uint32_t i = 0; i < m_brick_size * m_brick_size * m_brick_size; i++) {
+                    glm::uvec3 out_pos = brick_pos * m_brick_size + enumBrickPos(i, m_brick_size);
+                    if (glm::all(glm::lessThan(out_pos, m_volume_dim))) {
+                        out[pos2idx(out_pos, m_volume_dim)] = brick_cache[thread_id][i];
+                    }
+                }
+#else
+                decodeBrick(brick_idx, &(out[pos2idx(brick_pos * m_brick_size, m_volume_dim)]),
+                            glm::clamp(m_volume_dim - brick_pos * m_brick_size, glm::uvec3(0u), glm::uvec3(m_brick_size)),
+                            inv_lod);
+#endif
+            }
+        }
+    }
+}
+
+
+// TESTS -----------------------------------------------------------------------------------------------------------
+
+bool CompressedSegmentationVolume::testLoD(const std::vector<uint32_t> &volume, glm::uvec3 volume_dim) const {
+    assert(volume.size() == volume_dim.x * volume_dim.y * volume_dim.z && "Volume size does not match dimension!");
+
+    std::cout << " Running LoD compression test" << std::endl;
+
+
+    MiniTimer timer;
+    static constexpr int max_error_lines = 8;
+    size_t error_count = 0;
+    bool allgood = true;
+    // Reserve space to store a full volume:
+    std::vector<uint32_t> out;
+    out.resize(static_cast<size_t>(m_volume_dim.x) * static_cast<size_t>(m_volume_dim.y) * static_cast<size_t>(m_volume_dim.z));
+
+    // Check the LODs over increasing LOD brick size. We skip LoD 0, because that's already tested in the 'test' method
+    // of VolumeCompressionBase and is technically the volume without any LOD.
+    int lod = 1;
+    uint32_t multigrid_lod_start = m_brick_size * m_brick_size * m_brick_size;
+    for (uint32_t width = 2; width <= m_brick_size; width *= 2) {
+        timer.restart();
+        std::cout << " Decompress LoD " << lod << " with block width " << width << "\r" << std::flush;
+        decompressLoD(lod, out);
+        std::cout << " Decompress LoD " << lod << " with block width " << width << " in " << timer.elapsed() << "s done. Test: ";
+        if (volume.size() != out.size()) {
+            std::cout << " ERROR: Compressed in and out sizes don't match" << std::endl;
+            std::cout << " skipping other LODs..." << std::endl;
+            std::cout << "-------------------------------------------------------------" << std::endl;
+            return false;
+        }
+
+        // Iterate over all bricks but only check the currently tested LoD.
+        error_count = 0;
+        const glm::uvec3 brickCount = getBrickCount();
+        glm::uvec3 brick;
+        size_t brick_idx = 0;
+        #pragma omp parallel for default(none) private(brick) shared(width, volume_dim, volume, out, error_count, max_error_lines, brickCount, multigrid_lod_start, std::cout)
+        for (uint32_t z = 0u; z < brickCount.z; z++) {
+            brick.z = z;
+            for (brick.y = 0u; brick.y < brickCount.y; brick.y++) {
+                for (brick.x = 0u; brick.x < brickCount.x; brick.x += NUM_THREADS) {
+
+                    // Construct target multigrid for this brick (quite inefficient since we only test one level here).
+                    std::vector<MultiGridNode> multigrid;
+                    constructMultiGrid(multigrid, volume, volume_dim, brick * m_brick_size, m_brick_size);
+
+                    // check all elements of this LoD
+                    glm::uvec3 pos_in_brick;
+                    for (pos_in_brick.z = 0; pos_in_brick.z < m_brick_size/width; pos_in_brick.z++) {
+                        for (pos_in_brick.y = 0; pos_in_brick.y < m_brick_size/width; pos_in_brick.y += width) {
+                            for (pos_in_brick.x = 0; pos_in_brick.x < m_brick_size/width; pos_in_brick.x += width) {
+                                if(glm::any(glm::greaterThanEqual(brick * m_brick_size + pos_in_brick * width, volume_dim)))
+                                    continue;
+
+                                uint32_t i = pos2idx(brick * m_brick_size + pos_in_brick * width, volume_dim);
+                                uint32_t expected_value = multigrid[multigrid_lod_start + pos2idx(pos_in_brick, glm::uvec3(m_brick_size/width))].label;
+
+                                if (expected_value != out[i]) {
+                                    #pragma omp critical
+                                    {
+                                        error_count++;
+                                        if (error_count <= max_error_lines)
+                                            std::cout << "error at " << str(idx2pos(i, volume_dim)) << " in " <<
+                                                          volume[i] << " != out " << out[i] <<
+                                                          " multigrid LoD start index " << multigrid_lod_start << std::endl;
+                                        else if (error_count == max_error_lines + 1)
+                                            std::cout << "[...] skipping additional errors" << std::endl;
+                                    }
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+        }
+
+
+        size_t lod_total_number_of_elements = ((volume_dim.x + width - 1) / width) * ((volume_dim.y + width - 1) / width) * ((volume_dim.z + width - 1) / width);
+        std::cout << "finished with " << error_count << " / " << lod_total_number_of_elements << " errors ("
+                     << (100.f * static_cast<float>(error_count) / static_cast<float>(lod_total_number_of_elements)) << "%)" << std::endl;
+
+        allgood &= (error_count == 0);
+        lod++;
+        multigrid_lod_start += (m_brick_size / width) * (m_brick_size / width) * (m_brick_size / width);
+    }
+
+    if(allgood)
+        std::cout << "no errors!" << std::endl;
+    else
+        std::cout << "encountered errors!" << std::endl;
+
+    std::cout << "-------------------------------------------------------------" << std::endl;
+    return error_count == 0;
+}
+
+
+// FILE IMPORT/EXPORT --------------------------------------------------------------------------------------------------
+
+void CompressedSegmentationVolume::exportToFile(const std::string &path, bool verbose) {
+    if (m_brick_starts.empty() || m_encoding.empty()) {
+        std::cout << "Encoding was not yet computed. Call compress(..) first. Skipping." << std::endl;
+        return;
+    }
+    if (std::filesystem::exists(path)) {
+        std::cout << "File " << path << " already exist. Skipping." << std::endl;
+        return;
+    }
+    std::ofstream file(path, std::ios_base::out | std::ios::binary);
+    if (!file.is_open()) {
+        std::cout << "Unable to open export file " << path << ". Skipping." << std::endl;
+        return;
+    }
+
+    // write header: 8 chars CMPSGVOL + 4 chars version number
+    const char *magic_header = "CMPSGVOL";
+    const char *version = "0010"; // paper release version
+    file.write(magic_header, 8);
+    file.write(version, 4);
+    // write general info
+    file.write(reinterpret_cast<char *>(&m_brick_size), sizeof(uint32_t));
+    file.write(reinterpret_cast<char *>(&m_volume_dim), sizeof(glm::uvec3));
+    file.write(reinterpret_cast<char *>(&m_use_rANS), sizeof(bool)); // since 0002
+    if(m_use_rANS) {
+        auto freq_table = m_rans.getFrequencyArray();
+        for(int i = 0; i < 16; i++)
+            file.write(reinterpret_cast<char *>(&freq_table[i]), sizeof(uint32_t));
+        file.write(reinterpret_cast<char *>(&m_use_detail_freq), sizeof(bool));
+        if(m_use_detail_freq) {
+            freq_table = m_detail_rans.getFrequencyArray();
+            for(int i = 0; i < 16; i++)
+                file.write(reinterpret_cast<char *>(&freq_table[i]), sizeof(uint32_t));
+        }
+    }
+    // write brick starts buffer and encoding
+    size_t size = m_brick_starts.size();
+    file.write(reinterpret_cast<char *>(&size), sizeof(size_t));
+    file.write(reinterpret_cast<char *>(&m_brick_starts[0]), static_cast<long>(size * sizeof(m_brick_starts[0])));
+    size = m_encoding.size();
+    file.write(reinterpret_cast<char *>(&size), sizeof(size_t));
+    file.write(reinterpret_cast<char *>(&m_encoding[0]), static_cast<long>(size * sizeof(m_encoding[0])));
+    file.close();
+    if(verbose)
+        std::cout << "Exported compressed segmentation volume to " << path << std::endl;
+}
+
+bool CompressedSegmentationVolume::importFromFile(const std::string &path, bool verbose) {
+    std::ifstream fin(path, std::ios::in | std::ios::binary);
+    if (!fin.is_open()) {
+        if(verbose)
+            std::cout << "Unable to open import file " << path << ". Skipping." << std::endl;
+        return false;
+    }
+    // Check header and version.
+    char magic_header[9];
+    char _version[5];
+    fin.read(reinterpret_cast<char *>(magic_header), 8);
+    magic_header[8] = '\0';
+    if (std::string(magic_header) != "CMPSGVOL") {
+        std::cout << "File " << path << " is not a compressed segmentation volume. Missing header CMPSGVOL." << std::endl;
+        return false;
+    }
+    fin.read(reinterpret_cast<char *>(_version), 4);
+    _version[4] = '\0';
+    std::string version(_version);
+    if (version != "0010") {
+        std::cout << "Import does not support version " << version << " of file " << path << ". Skipping." << std::endl;
+        return false;
+    }
+
+    // Read the general data set info.
+    fin.read(reinterpret_cast<char *>(&m_brick_size), sizeof(uint32_t));
+    fin.read(reinterpret_cast<char *>(&m_volume_dim), sizeof(glm::uvec3));
+    fin.read(reinterpret_cast<char *>(&m_use_rANS), sizeof(bool));
+    if (m_use_rANS) {
+        uint32_t freq_table[16];
+        for (int i = 0; i < 16; i++)
+            fin.read(reinterpret_cast<char *>(&freq_table[i]), sizeof(uint32_t));
+        m_rans.recomputeFrequencyTables(freq_table);
+        fin.read(reinterpret_cast<char *>(&m_use_detail_freq), sizeof(bool));
+        if (m_use_detail_freq) {
+            for (int i = 0; i < 16; i++)
+                fin.read(reinterpret_cast<char *>(&freq_table[i]), sizeof(uint32_t));
+            m_detail_rans.recomputeFrequencyTables(freq_table);
+        }
+    }
+    // Read the data directly to our members.
+    size_t size;
+    fin.read(reinterpret_cast<char *>(&size), sizeof(size_t));
+    m_brick_starts.resize(size);
+    fin.read(reinterpret_cast<char *>(&m_brick_starts[0]), static_cast<long>(size * sizeof(uint32_t)));
+    fin.read(reinterpret_cast<char *>(&size), sizeof(size_t));
+    m_encoding.resize(size);
+    fin.read(reinterpret_cast<char *>(&m_encoding[0]), static_cast<long>(size * sizeof(uint32_t)));
+    fin.close();
+    glm::uvec3 brickCount = getBrickCount();
+    if(verbose)
+        std::cout << "Imported CompressedSegmentationVolume from " << path << " with brick count: "
+                  << str(brickCount) << " = " << (brickCount.x * brickCount.y * brickCount.z) << " with brick size "
+                  << m_brick_size << "^3" << std::endl;
+    return true;
+}
+
+
+
+}
+```
+
+### src/main.cpp
+```
+#include <memory>
+#include "CompressedSegmentationVolume.hpp"
+#include "Volume.hpp"
+
+
+int main(int argc, char *argv[]) {
+
+    // CONFIGURATION ------------------
+    const int brick_dim = 32;                           // size of one brick
+    const bool use_rANS = true;                         // use secondary compression with rANS
+    const bool use_detail_freq = true;                  // use a separate freq. table for brick leaf nodes / finest LoD
+    const unsigned int frequency_pass_subsampling = 8u; // only use every n³th block for computing frequencies
+    //
+    const bool verbose = true;
+    const int example_volume_dim = 128;                 // be careful with large volume sizes and label densities
+    const int example_volume_label_density = 100;       // labels per million voxels
+    // ---------------------------------
+
+
+    // SEGMENTATION VOLUME IMPORT  -----
+    // Try to load a precomputed uint32_t segmentation volume or create a new one.
+    Volume volume;
+    if(!volume.importFromFile("./example_segmentation_voronoi.csgv")) {
+        // Careful with large volume sizes or label numbers!
+        volume.createSyntheticSegmentationVolume(example_volume_dim, example_volume_dim, example_volume_dim,
+                                                 example_volume_label_density);
+        volume.exportToFile("./example_segmentation_voronoi.csgv");
+        std::cout << std::endl;
+    }
+    glm::ivec3 volume_dim = glm::ivec3(volume.dim_x, volume.dim_y, volume.dim_z);;
+    // ---------------------------------
+
+
+    // COMPRESSION ---------------------
+    // create an empty compressed segmentation volume object
+    std::shared_ptr<vvv::CompressedSegmentationVolume> csvol = std::make_shared<vvv::CompressedSegmentationVolume>(brick_dim);
+    // compute frequencies of operations in a compressed volume for later use in the rANS encoding
+    size_t operation_frequencies[32];
+    if(use_rANS) {
+        std::cout << std::endl << "Operation frequency pass:" << std::endl;
+        csvol->compressForFrequencyTable(volume.data(), volume_dim, operation_frequencies, frequency_pass_subsampling,
+                                         use_detail_freq, false);
+        // We can't risk missing any existing operations in our table due to subsampling,
+        // so we set any frequency to at least one.
+        if(frequency_pass_subsampling > 1u) {
+            for(int i = 0; i < 16; i++) {
+                operation_frequencies[i] = std::max(operation_frequencies[i], 1ul);
+                if(use_detail_freq)
+                    operation_frequencies[i + 16] = std::max(operation_frequencies[i + 16], 1ul);
+            }
+        }
+    }
+    // perform the compression
+    std::cout << "Compression pass:                             " << std::endl;
+    csvol->setCompressionOptions64(use_rANS, use_detail_freq, operation_frequencies, operation_frequencies + 16);
+    csvol->compress(volume.data(), volume_dim, verbose);
+    // ---------------------------------
+
+
+    // DECOMPRESSION TESTS -------------
+    std::cout << std::endl;
+    csvol->test(volume.data(), volume_dim, false);
+    // ---------------------------------
+
+
+    return 0;
+}
+```
+
+### src/rans.cpp
+```
+#include "rans.hpp"
+
+// adapted form the public domain ryg_rans rANS code by Fabian Giesen.
+// see README.txt in include/rANS for details.
+
+namespace vvv {
+
+void SymbolStats::count_freqs(uint8_t const *in, size_t nbytes) {
+    for (int i = 0; i < RANS_ALPHABET_SIZE; i++)
+        freqs[i] = 0;
+
+    for (size_t i = 0; i < nbytes; i++)
+        freqs[in[i]]++;
+}
+
+void SymbolStats::calc_cum_freqs() {
+    cum_freqs[0] = 0;
+    for (int i = 0; i < RANS_ALPHABET_SIZE; i++)
+        cum_freqs[i + 1] = cum_freqs[i] + freqs[i];
+}
+
+void SymbolStats::normalize_freqs(uint32_t target_total) {
+    assert(target_total >= 256); // >= RANS_ALPHABET_SIZE?
+
+    calc_cum_freqs();
+    uint32_t cur_total = cum_freqs[RANS_ALPHABET_SIZE];
+
+    // resample distribution based on cumulative freqs
+    for (int i = 1; i <= RANS_ALPHABET_SIZE; i++)
+        cum_freqs[i] = ((uint64_t)target_total * cum_freqs[i]) / cur_total;
+
+    // if we nuked any non-0 frequency symbol to 0, we need to steal
+    // the range to make the frequency nonzero from elsewhere.
+    //
+    // this is not at all optimal, i'm just doing the first thing that comes to mind.
+    for (int i = 0; i < RANS_ALPHABET_SIZE; i++) {
+        if (freqs[i] && cum_freqs[i + 1] == cum_freqs[i]) {
+            // symbol i was set to zero freq
+
+            // find best symbol to steal frequency from (try to steal from low-freq ones)
+            uint32_t best_freq = ~0u;
+            int best_steal = -1;
+            for (int j = 0; j < RANS_ALPHABET_SIZE; j++) {
+                uint32_t freq = cum_freqs[j + 1] - cum_freqs[j];
+                if (freq > 1 && freq < best_freq) {
+                    best_freq = freq;
+                    best_steal = j;
+                }
+            }
+            assert(best_steal != -1);
+
+            // and steal from it!
+            if (best_steal < i) {
+                for (int j = best_steal + 1; j <= i; j++)
+                    cum_freqs[j]--;
+            } else {
+                assert(best_steal > i);
+                for (int j = i + 1; j <= best_steal; j++)
+                    cum_freqs[j]++;
+            }
+        }
+    }
+
+    // calculate updated freqs and make sure we didn't screw anything up
+    assert(cum_freqs[0] == 0 && cum_freqs[RANS_ALPHABET_SIZE] == target_total);
+    for (int i = 0; i < RANS_ALPHABET_SIZE; i++) {
+        if (freqs[i] == 0)
+            assert(cum_freqs[i + 1] == cum_freqs[i]);
+        else
+            assert(cum_freqs[i + 1] > cum_freqs[i]);
+
+        // calc updated freq
+        freqs[i] = cum_freqs[i + 1] - cum_freqs[i];
+    }
+}
+
+void RANS::recomputeFrequencyTables(const uint32_t * frequency_array) {
+    assert(frequency_array && "no frequency array given");
+    stats = SymbolStats();
+    for (int s = 0; s < RANS_ALPHABET_SIZE; s++)
+        stats.freqs[s] = frequency_array[s];
+    stats.normalize_freqs(prob_scale);
+
+    for (int s = 0; s < RANS_ALPHABET_SIZE; s++) {
+        for (uint32_t i = stats.cum_freqs[s]; i < stats.cum_freqs[s + 1]; i++)
+            cum2sym[i] = s;
+    }
+
+    // build the symbol tables
+    for (int i = 0; i < RANS_ALPHABET_SIZE; i++) {
+        RansEncSymbolInit(&esyms[i], stats.cum_freqs[i], stats.freqs[i], prob_bits);
+        RansDecSymbolInit(&dsyms[i], stats.cum_freqs[i], stats.freqs[i]);
+    }
+
+    has_frequency_tables = true;
+}
+
+void RANS::recomputeFrequencyTables(std::vector<uint8_t> &in_bytes) {
+    stats = SymbolStats();
+    stats.count_freqs(in_bytes.data(), in_bytes.size());
+    stats.normalize_freqs(prob_scale);
+
+    // cumulative->symbol table, this is super brute force
+    for (int s = 0; s < RANS_ALPHABET_SIZE; s++) {
+        for (uint32_t i = stats.cum_freqs[s]; i < stats.cum_freqs[s + 1]; i++)
+            cum2sym[i] = s;
+    }
+
+    // build the symbol tables
+    for (int i = 0; i < RANS_ALPHABET_SIZE; i++) {
+        RansEncSymbolInit(&esyms[i], stats.cum_freqs[i], stats.freqs[i], prob_bits);
+        RansDecSymbolInit(&dsyms[i], stats.cum_freqs[i], stats.freqs[i]);
+    }
+
+    has_frequency_tables = true;
+}
+
+
+uint32_t RANS::packRANS(std::vector<uint32_t> &in_packed, uint32_t start4bit, uint32_t end4bit) const {
+    assert(has_frequency_tables && "no frequency tables are given!");
+
+    size_t out_max_size = 8u + (end4bit - start4bit) * 2; // assume worst case compression rate of 100% (measured in bytes this is twice the 4bit count) 32 << 20; // 32MB
+    uint8_t *out_buf = new uint8_t[out_max_size];
+
+    int number_of_elements = static_cast<int>(end4bit - start4bit); // measured in 4 bit elements
+
+    // rANS encode --------------------------------------------------------------
+    RansState rans;
+    RansEncInit(&rans);
+    uint8_t *ptr = out_buf + out_max_size;         // *end* of output buffer
+    for (int i = end4bit - 1; i >= start4bit; i--) { // NB: working in reverse!
+        // 8 half byte elements (each 4 bit large) are packed into one of the uints
+        int shift = 28 - 4 * static_cast<int>(i % 8);
+        uint32_t s = (in_packed[i / 8] >> shift) & 0xFu;
+        assert(ptr >= out_buf && "out_buf not big enough to store full rANS encoding!");
+        RansEncPutSymbol(&rans, &ptr, &esyms[s]);
+    }
+    RansEncFlush(&rans, &ptr);
+    assert(ptr >= out_buf && "out_buf not big enough to store full rANS encoding!");
+    uint8_t *rans_begin = ptr;
+
+    int new_size_in_bytes = static_cast<int>(out_buf + out_max_size - rans_begin);
+
+    // copy our bytes to the 32bit = 4byte element input array
+    assert(start4bit % 8u == 0u && "memory region that we pack in rANS must start at a clean 32bit location");
+
+    uint32_t start32bit = start4bit / 8u;
+    uint32_t end32bit = start32bit + (new_size_in_bytes + sizeof(uint32_t) - 1) / sizeof(uint32_t); // round our byte_count up so we use exactly a number of uint32_ts
+    uint32_t out = 0u;
+    uint32_t i = 0;
+    for (; i < new_size_in_bytes; i++) {
+        uint32_t shift = 8u * (i % 4); // 4 byte in one uint32_t
+        out |= static_cast<uint32_t>(rans_begin[i]) << shift;
+        // every 4 elements: write out
+        if(i % 4 == 3) {
+            in_packed[start32bit + i/4] = out;
+            out = 0u;
+        }
+    }
+    if(i % 4 > 0) {
+        in_packed[start32bit + i/4] = out;
+        i += 4;
+    }
+    assert(new_size_in_bytes < out_max_size && "over capacity");
+    assert(start32bit + i/4 == end32bit && "didn't fill all elements in in_packed");
+
+    delete[] out_buf;
+    // return the new end4bit (= end point in number of 4 bit elements)
+    return end32bit * 8;
+}
+
+uint32_t RANS::packRANS(uint32_t* in_packed, uint32_t start4bit, uint32_t end4bit) const {
+    assert(has_frequency_tables && "no frequency tables are given!");
+
+    size_t out_max_size = 8u + (end4bit - start4bit) * 2; // assume worst case compression rate of 100% (measured in bytes this is twice the 4bit count) 32 << 20; // 32MB
+    uint8_t *out_buf = new uint8_t[out_max_size];
+
+    int number_of_elements = static_cast<int>(end4bit - start4bit); // measured in 4 bit elements
+
+    // rANS encode --------------------------------------------------------------
+    RansState rans;
+    RansEncInit(&rans);
+    uint8_t *ptr = out_buf + out_max_size;         // *end* of output buffer
+    for (int i = end4bit - 1; i >= start4bit; i--) { // NB: working in reverse!
+        // 8 half byte elements (each 4 bit large) are packed into one of the uints
+        int shift = 28 - 4 * static_cast<int>(i % 8);
+        uint32_t s = (in_packed[i / 8] >> shift) & 0xFu;
+        assert(ptr >= out_buf && "out_buf not big enough to store full rANS encoding!");
+        RansEncPutSymbol(&rans, &ptr, &esyms[s]);
+    }
+    RansEncFlush(&rans, &ptr);
+    assert(ptr >= out_buf && "out_buf not big enough to store full rANS encoding!");
+    uint8_t *rans_begin = ptr;
+
+    int new_size_in_bytes = static_cast<int>(out_buf + out_max_size - rans_begin);
+
+    // copy our bytes to the 32bit = 4byte element input array
+    assert(start4bit % 8u == 0u && "memory region that we pack in rANS must start at a clean 32bit location");
+
+    uint32_t start32bit = start4bit / 8u;
+    uint32_t end32bit = start32bit + (new_size_in_bytes + sizeof(uint32_t) - 1) / sizeof(uint32_t); // round our byte_count up so we use exactly a number of uint32_ts
+    uint32_t out = 0u;
+    uint32_t i = 0;
+    for (; i < new_size_in_bytes; i++) {
+        uint32_t shift = 8u * (i % 4); // 4 byte in one uint32_t
+        out |= static_cast<uint32_t>(rans_begin[i]) << shift;
+        // every 4 elements: write out
+        if(i % 4 == 3) {
+            in_packed[start32bit + i/4] = out;
+            out = 0u;
+        }
+    }
+    if(i % 4 > 0) {
+        in_packed[start32bit + i/4] = out;
+        i += 4;
+    }
+    assert(new_size_in_bytes < out_max_size && "over capacity");
+    assert(start32bit + i/4 == end32bit && "didn't fill all elements in in_packed");
+
+    delete[] out_buf;
+    // return the new end4bit (= end point in number of 4 bit elements)
+    return end32bit * 8;
+}
+
+
+int RANS::unpackRANS(uint8_t *rans_begin, uint8_t *out, size_t number_of_output_elements) const {
+    // rANS decode --------------------------------------------------------------
+    const uint8_t *ptr = rans_begin;
+    RansState rans;
+    RansDecInit(&rans, &ptr);
+    for (size_t i = 0; i < number_of_output_elements; i++) {
+        uint32_t s = cum2sym[RansDecGet(&rans, prob_bits)];
+        if (i % 2 == 0)
+            out[i] = (uint8_t)s << 4;
+        else
+            out[i] |= (uint8_t)s;
+        RansDecAdvanceSymbol(&rans, &ptr, &dsyms[s], prob_bits);
+    }
+
+    return static_cast<int>(number_of_output_elements / 2);
+}
+
+void RANS::itr_initDecoding(uint32_t* rans_state, const uint8_t** rans_ptr) const {
+    RansDecInit(rans_state, rans_ptr);
+}
+
+void RANS::itr_initDecoding(uint32_t& rans_state, uint32_t& byte_index, const uint32_t* array) const {
+    RansDecInit(rans_state, byte_index, array);
+}
+
+uint32_t RANS::itr_nextSymbol(uint32_t* rans_state, const uint8_t** rans_ptr) const {
+    uint32_t s = cum2sym[RansDecGet(rans_state, prob_bits)];
+    RansDecAdvanceSymbol(rans_state, rans_ptr, &dsyms[s], prob_bits);
+    return s;
+}
+
+uint32_t RANS::itr_nextSymbol(RansState& rans_state, uint32_t& byte_index,  const uint32_t* array) const {
+    uint32_t cumulative = RansDecGet(rans_state, prob_bits);
+    // uint32_t s = cum2sym[cumulative];
+    uint32_t s;
+    for(s=0; s < 16; s++) {
+        if(stats.cum_freqs[s+1] > cumulative)
+            break;
+    }
+    RansDecAdvanceSymbol(rans_state, byte_index, array, dsyms[s].start, dsyms[s].freq, prob_bits);
+    return s;
+}
+
+} // namespace vvv
+```
+
+### src/util.cpp
+```
+#include "util.hpp"
+
+std::string str(glm::vec2 v) { return array_string(&v.x, 2); }
+std::string str(glm::vec3 v) { return array_string(&v.x, 3); }
+std::string str(glm::vec4 v) { return array_string(&v.x, 4); }
+std::string str(glm::ivec2 v) { return array_string(&v.x, 2); }
+std::string str(glm::ivec3 v) { return array_string(&v.x, 3); }
+std::string str(glm::ivec4 v) { return array_string(&v.x, 4); }
+std::string str(glm::uvec2 v) { return array_string(&v.x, 2); }
+std::string str(glm::uvec3 v) { return array_string(&v.x, 3); }
+std::string str(glm::uvec4 v) { return array_string(&v.x, 4); }
+std::string str(glm::mat3 v) { return "[" + array_string(&v[0].x, 3) + " | " + array_string(&v[1].x, 3) + " | " + array_string(&v[2].x, 3) + "]"; }
+std::string str(glm::mat4 v) { return "[" + array_string(&v[0].x, 4) + " | " + array_string(&v[1].x, 4) + " | " + array_string(&v[2].x, 4) + " | " + array_string(&v[3].x, 4) + "]"; }
+
+
+double MiniTimer::restart() {
+    auto ret = elapsed();
+    m_startTime = std::chrono::high_resolution_clock::now();
+    return ret;
+}
+```
+
+### include/rANS/platform.h
+```
+// adapted form the public domain ryg_rans rANS code by Fabian Giesen.
+// see README.txt in include/rANS for details.
+
+// Just some platform utilities.
+#ifndef PLATFORM_H_INCLUDED
+#define PLATFORM_H_INCLUDED
+
+// x86 intrinsics (__rdtsc etc.)
+
+#if defined(_MSC_VER)
+
+#define _CRT_SECURE_NO_DEPRECATE
+#include <intrin.h>
+#define ALIGNSPEC(type,name,alignment) __declspec(align(alignment)) type name
+
+#elif defined(__GNUC__)
+
+#include <x86intrin.h>
+#define ALIGNSPEC(type,name,alignment) type name __attribute__((aligned(alignment)))
+
+#else
+#error Unknown compiler!
+#endif
+
+// Timer
+
+#if defined(_WIN32)
+
+#define WIN32_LEAN_AND_MEAN
+#define NOMINMAX
+#include <Windows.h>
+
+#define PRIu64 "llu"
+
+double timer()
+{
+    LARGE_INTEGER ctr, freq;
+    QueryPerformanceCounter(&ctr);
+    QueryPerformanceFrequency(&freq);
+    return 1.0 * ctr.QuadPart / freq.QuadPart;
+}
+
+#elif defined(__linux__)
+
+#define __STDC_FORMAT_MACROS
+#include <time.h>
+#include <inttypes.h>
+#include <assert.h>
+
+static inline double timer()
+{
+    timespec ts;
+    ts.tv_sec = 0;
+    ts.tv_nsec = 0;
+    int status = clock_gettime(CLOCK_MONOTONIC, &ts);
+    assert(status == 0);
+    return double(ts.tv_sec) + 1.0e-9 * double(ts.tv_nsec);
+}
+
+#else
+
+#error Unknown platform!
+
+#endif
+
+#endif // PLATFORM_H_INCLUDED
+```
+
+### include/rANS/rans_nibble.h
+```
+// adapted form the public domain ryg_rans rANS code by Fabian Giesen.
+// see README.txt in include/rANS for details.
+
+// Simple byte-aligned rANS encoder/decoder - public domain - Fabian 'ryg' Giesen 2014
+//
+// Not intended to be "industrial strength"; just meant to illustrate the general
+// idea.
+
+#ifndef RANS_BYTE_HEADER
+#define RANS_BYTE_HEADER
+
+#include <stdint.h>
+
+#ifdef assert
+#define RansAssert assert
+#else
+#define RansAssert(x)
+#endif
+
+// READ ME FIRST:
+//
+// This is designed like a typical arithmetic coder API, but there's three
+// twists you absolutely should be aware of before you start hacking:
+//
+// 1. You need to encode data in *reverse* - last symbol first. rANS works
+//    like a stack: last in, first out.
+// 2. Likewise, the encoder outputs bytes *in reverse* - that is, you give
+//    it a pointer to the *end* of your buffer (exclusive), and it will
+//    slowly move towards the beginning as more bytes are emitted.
+// 3. Unlike basically any other entropy coder implementation you might
+//    have used, you can interleave data from multiple independent rANS
+//    encoders into the same bytestream without any extra signaling;
+//    you can also just write some bytes by yourself in the middle if
+//    you want to. This is in addition to the usual arithmetic encoder
+//    property of being able to switch models on the fly. Writing raw
+//    bytes can be useful when you have some data that you know is
+//    incompressible, and is cheaper than going through the rANS encode
+//    function. Using multiple rANS coders on the same byte stream wastes
+//    a few bytes compared to using just one, but execution of two
+//    independent encoders can happen in parallel on superscalar and
+//    Out-of-Order CPUs, so this can be *much* faster in tight decoding
+//    loops.
+//
+//    This is why all the rANS functions take the write pointer as an
+//    argument instead of just storing it in some context struct.
+
+// --------------------------------------------------------------------------
+
+// L ('l' in the paper) is the lower bound of our normalization interval.
+// Between this and our byte-aligned emission, we use 31 (not 32!) bits.
+// This is done intentionally because exact reciprocals for 31-bit uints
+// fit in 32-bit uints: this permits some optimizations during encoding.
+#define RANS_BYTE_L (1u << 23)  // lower bound of our normalization interval
+
+// State for a rANS encoder. Yep, that's all there is to it.
+typedef uint32_t RansState;
+
+// Initialize a rANS encoder.
+static inline void RansEncInit(RansState* r)
+{
+    *r = RANS_BYTE_L;
+}
+
+// Renormalize the encoder. Internal function.
+static inline RansState RansEncRenorm(RansState x, uint8_t** pptr, uint32_t freq, uint32_t scale_bits)
+{
+    uint32_t x_max = ((RANS_BYTE_L >> scale_bits) << 8) * freq; // this turns into a shift.
+    if (x >= x_max) {
+        uint8_t* ptr = *pptr;
+        do {
+            *--ptr = (uint8_t) (x & 0xff);
+            x >>= 8;
+        } while (x >= x_max);
+        *pptr = ptr;
+    }
+    return x;
+}
+
+// Encodes a single symbol with range start "start" and frequency "freq".
+// All frequencies are assumed to sum to "1 << scale_bits", and the
+// resulting bytes get written to ptr (which is updated).
+//
+// NOTE: With rANS, you need to encode symbols in *reverse order*, i.e. from
+// beginning to end! Likewise, the output bytestream is written *backwards*:
+// ptr starts pointing at the end of the output buffer and keeps decrementing.
+static inline void RansEncPut(RansState* r, uint8_t** pptr, uint32_t start, uint32_t freq, uint32_t scale_bits)
+{
+    // renormalize
+    RansState x = RansEncRenorm(*r, pptr, freq, scale_bits);
+
+    // x = C(s,x)
+    *r = ((x / freq) << scale_bits) + (x % freq) + start;
+}
+
+// Flushes the rANS encoder.
+static inline void RansEncFlush(RansState* r, uint8_t** pptr)
+{
+    uint32_t x = *r;
+    uint8_t* ptr = *pptr;
+
+    ptr -= 4;
+    ptr[0] = (uint8_t) (x >> 0);
+    ptr[1] = (uint8_t) (x >> 8);
+    ptr[2] = (uint8_t) (x >> 16);
+    ptr[3] = (uint8_t) (x >> 24);
+
+    *pptr = ptr;
+}
+
+// ----------- rANS decode GPU suitable ------------------------------------------------
+static inline void RansDecInit(uint32_t& rans_state, uint32_t& byte_index, const uint32_t* array) {
+    rans_state = array[byte_index/4];
+    byte_index += 4;
+}
+
+static inline uint32_t RansDecGet(RansState r, uint32_t scale_bits)
+{
+    return r & ((1u << scale_bits) - 1);
+}
+
+static inline void RansDecAdvance(RansState& r, uint32_t& byte_index,  const uint32_t* array, uint32_t start, uint32_t freq, uint32_t scale_bits)
+{
+    uint32_t mask = (1u << scale_bits) - 1;
+
+    // s, x = D(x)
+    uint32_t x = r;
+    x = freq * (x >> scale_bits) + (x & mask) - start;
+
+    // renormalize
+    if (x < RANS_BYTE_L) {
+        uint32_t idx = byte_index;
+        do {
+            // read the next byte from our uint32 array
+            int shift = (idx % 4) * 8;
+            uint32_t byte = (array[idx / 4] >> shift) & 0xFFu;
+            x = (x << 8) | byte;
+            idx++;
+        } while (x < RANS_BYTE_L);
+        byte_index = idx;
+    }
+
+    r = x;
+}
+
+static inline void RansDecAdvanceSymbol(RansState& r, uint32_t& byte_index, const uint32_t* array,  uint32_t sym_start, uint32_t sym_freq, uint32_t scale_bits)
+{
+    RansDecAdvance(r, byte_index, array, sym_start, sym_freq, scale_bits);
+}
+
+
+// end ----------- rANS decode GPU suitable --------------------------------------------
+
+
+// Initializes a rANS decoder.
+// Unlike the encoder, the decoder works forwards as you'd expect.
+static inline void RansDecInit(RansState* r, const uint8_t** pptr)
+{
+    uint32_t x;
+    const uint8_t* ptr = *pptr;
+
+    x  = ptr[0] << 0;
+    x |= ptr[1] << 8;
+    x |= ptr[2] << 16;
+    x |= ptr[3] << 24;
+    ptr += 4;
+
+    *pptr = ptr;
+    *r = x;
+}
+
+// Returns the current cumulative frequency (map it to a symbol yourself!)
+static inline uint32_t RansDecGet(RansState* r, uint32_t scale_bits)
+{
+    return *r & ((1u << scale_bits) - 1);
+}
+
+// Advances in the bit stream by "popping" a single symbol with range start
+// "start" and frequency "freq". All frequencies are assumed to sum to "1 << scale_bits",
+// and the resulting bytes get written to ptr (which is updated).
+static inline void RansDecAdvance(RansState* r, const uint8_t** pptr, uint32_t start, uint32_t freq, uint32_t scale_bits)
+{
+    uint32_t mask = (1u << scale_bits) - 1;
+
+    // s, x = D(x)
+    uint32_t x = *r;
+    x = freq * (x >> scale_bits) + (x & mask) - start;
+
+    // renormalize
+    if (x < RANS_BYTE_L) {
+        const uint8_t* ptr = *pptr;
+        do x = (x << 8) | *ptr++; while (x < RANS_BYTE_L);
+        *pptr = ptr;
+    }
+
+    *r = x;
+}
+
+// --------------------------------------------------------------------------
+
+// That's all you need for a full encoder; below here are some utility
+// functions with extra convenience or optimizations.
+
+// Encoder symbol description
+// This (admittedly odd) selection of parameters was chosen to make
+// RansEncPutSymbol as cheap as possible.
+typedef struct {
+    uint32_t x_max;     // (Exclusive) upper bound of pre-normalization interval
+    uint32_t rcp_freq;  // Fixed-point reciprocal frequency
+    uint32_t bias;      // Bias
+    uint16_t cmpl_freq; // Complement of frequency: (1 << scale_bits) - freq
+    uint16_t rcp_shift; // Reciprocal shift
+} RansEncSymbol;
+
+// Decoder symbols are straightforward.
+typedef struct {
+    uint16_t start;     // Start of range.
+    uint16_t freq;      // Symbol frequency.
+} RansDecSymbol;
+
+// Initializes an encoder symbol to start "start" and frequency "freq"
+static inline void RansEncSymbolInit(RansEncSymbol* s, uint32_t start, uint32_t freq, uint32_t scale_bits)
+{
+    RansAssert(scale_bits <= 16);
+    RansAssert(start <= (1u << scale_bits));
+    RansAssert(freq <= (1u << scale_bits) - start);
+
+    // Say M := 1 << scale_bits.
+    //
+    // The original encoder does:
+    //   x_new = (x/freq)*M + start + (x%freq)
+    //
+    // The fast encoder does (schematically):
+    //   q     = mul_hi(x, rcp_freq) >> rcp_shift   (division)
+    //   r     = x - q*freq                         (remainder)
+    //   x_new = q*M + bias + r                     (new x)
+    // plugging in r into x_new yields:
+    //   x_new = bias + x + q*(M - freq)
+    //        =: bias + x + q*cmpl_freq             (*)
+    //
+    // and we can just precompute cmpl_freq. Now we just need to
+    // set up our parameters such that the original encoder and
+    // the fast encoder agree.
+
+    s->x_max = ((RANS_BYTE_L >> scale_bits) << 8) * freq;
+    s->cmpl_freq = (uint16_t) ((1 << scale_bits) - freq);
+    if (freq < 2) {
+        // freq=0 symbols are never valid to encode, so it doesn't matter what
+        // we set our values to.
+        //
+        // freq=1 is tricky, since the reciprocal of 1 is 1; unfortunately,
+        // our fixed-point reciprocal approximation can only multiply by values
+        // smaller than 1.
+        //
+        // So we use the "next best thing": rcp_freq=0xffffffff, rcp_shift=0.
+        // This gives:
+        //   q = mul_hi(x, rcp_freq) >> rcp_shift
+        //     = mul_hi(x, (1<<32) - 1)) >> 0
+        //     = floor(x - x/(2^32))
+        //     = x - 1 if 1 <= x < 2^32
+        // and we know that x>0 (x=0 is never in a valid normalization interval).
+        //
+        // So we now need to choose the other parameters such that
+        //   x_new = x*M + start
+        // plug it in:
+        //     x*M + start                   (desired result)
+        //   = bias + x + q*cmpl_freq        (*)
+        //   = bias + x + (x - 1)*(M - 1)    (plug in q=x-1, cmpl_freq)
+        //   = bias + 1 + (x - 1)*M
+        //   = x*M + (bias + 1 - M)
+        //
+        // so we have start = bias + 1 - M, or equivalently
+        //   bias = start + M - 1.
+        s->rcp_freq = ~0u;
+        s->rcp_shift = 0;
+        s->bias = start + (1 << scale_bits) - 1;
+    } else {
+        // Alverson, "Integer Division using reciprocals"
+        // shift=ceil(log2(freq))
+        uint32_t shift = 0;
+        while (freq > (1u << shift))
+            shift++;
+
+        s->rcp_freq = (uint32_t) (((1ull << (shift + 31)) + freq-1) / freq);
+        s->rcp_shift = shift - 1;
+
+        // With these values, 'q' is the correct quotient, so we
+        // have bias=start.
+        s->bias = start;
+    }
+}
+
+// Initialize a decoder symbol to start "start" and frequency "freq"
+static inline void RansDecSymbolInit(RansDecSymbol* s, uint32_t start, uint32_t freq)
+{
+    RansAssert(start <= (1 << 16));
+    RansAssert(freq <= (1 << 16) - start);
+    s->start = (uint16_t) start;
+    s->freq = (uint16_t) freq;
+}
+
+// Encodes a given symbol. This is faster than straight RansEnc since we can do
+// multiplications instead of a divide.
+//
+// See RansEncSymbolInit for a description of how this works.
+static inline void RansEncPutSymbol(RansState* r, uint8_t** pptr, RansEncSymbol const* sym)
+{
+    RansAssert(sym->x_max != 0); // can't encode symbol with freq=0
+
+    // renormalize
+    uint32_t x = *r;
+    uint32_t x_max = sym->x_max;
+    if (x >= x_max) {
+        uint8_t* ptr = *pptr;
+        do {
+            *--ptr = (uint8_t) (x & 0xff);
+            x >>= 8;
+        } while (x >= x_max);
+        *pptr = ptr;
+    }
+
+    // x = C(s,x)
+    // NOTE: written this way so we get a 32-bit "multiply high" when
+    // available. If you're on a 64-bit platform with cheap multiplies
+    // (e.g. x64), just bake the +32 into rcp_shift.
+    uint32_t q = (uint32_t) (((uint64_t)x * sym->rcp_freq) >> 32) >> sym->rcp_shift;
+    *r = x + sym->bias + q * sym->cmpl_freq;
+}
+
+// Equivalent to RansDecAdvance that takes a symbol.
+static inline void RansDecAdvanceSymbol(RansState* r, const uint8_t** pptr, RansDecSymbol const* sym, uint32_t scale_bits)
+{
+    RansDecAdvance(r, pptr, sym->start, sym->freq, scale_bits);
+}
+
+// Advances in the bit stream by "popping" a single symbol with range start
+// "start" and frequency "freq". All frequencies are assumed to sum to "1 << scale_bits".
+// No renormalization or output happens.
+static inline void RansDecAdvanceStep(RansState* r, uint32_t start, uint32_t freq, uint32_t scale_bits)
+{
+    uint32_t mask = (1u << scale_bits) - 1;
+
+    // s, x = D(x)
+    uint32_t x = *r;
+    *r = freq * (x >> scale_bits) + (x & mask) - start;
+}
+
+// Equivalent to RansDecAdvanceStep that takes a symbol.
+static inline void RansDecAdvanceSymbolStep(RansState* r, RansDecSymbol const* sym, uint32_t scale_bits)
+{
+    RansDecAdvanceStep(r, sym->start, sym->freq, scale_bits);
+}
+
+// Renormalize.
+static inline void RansDecRenorm(RansState* r, uint8_t** pptr)
+{
+    // renormalize
+    uint32_t x = *r;
+    if (x < RANS_BYTE_L) {
+        uint8_t* ptr = *pptr;
+        do x = (x << 8) | *ptr++; while (x < RANS_BYTE_L);
+        *pptr = ptr;
+    }
+
+    *r = x;
+}
+
+#endif
+```
+
+### shader/cpp_glsl_include/csvol_constants.h
+```
+// This header includes some constants that are used in the CPU encoding/decoding C++ classes
+// as well as in the GLSL shaders for GPU decoding.
+
+#ifndef CSVOL_CONSTANTS_HPP
+#define CSVOL_CONSTANTS_HPP
+
+// 1 bit is the 'stop bit'
+#define STOP_BIT 8u         // the msb (1000)_2 bit is set if we stop the "octree" refinement here
+// 3 bits are the label operations
+#define PARENT 0u           // use entry from parent
+#define NEIGHBORX 1u        //
+#define NEIGHBORY 2u        // } use value of a neighboring cell (pointing outwards)
+#define NEIGHBORZ 3u        //
+#define PALETTE_DELTA 4u    // reuse the palette value from DELTA+1 entries earlier, DELTA is the next value in the stream
+#define PALETTE_ADV 5u      // use palette value and advance palette pointer
+#define PALETTE_LAST 6u     // use the previous palette value
+
+#define INVALID 0xFFFFFFFF
+
+#endif // CSVOL_CONSTANTS_HPP
+```

@@ -1,0 +1,99 @@
+# Projection Transfer Function
+Also called: Summed Projection
+
+## Overview
+The Projection Transfer Function generates a 2D image by summing scalar field values along rays traversing a 3D volume [S1, unofficial][S2]. It serves as a comparative baseline to the maximum activity method by aggregating total signal rather than peak signal [S1, unofficial]. Unlike methods that modulate opacity based on local density gradients or probabilistic models, this method applies a uniform integration weight, treating the volume as a transparent medium where all samples contribute linearly to the final pixel value [S2].
+
+## How it works
+**Inputs and Outputs:**
+*   **Input:** A 3D volume dataset containing scalar field values and a transfer function definition specifying integration bounds and field IDs [S2].
+*   **Output:** A 2D image where each pixel value represents the sum of field values along the corresponding ray [S1, unofficial].
+
+**Data Structures:**
+The method utilizes a `MultiVariateTransferFunction` container which holds a list of `TransferFunction` tables [S2]. Each table defines the integration behavior for a specific field [S2].
+*   `x_bounds`: A tuple `(min_val, max_val)` defining the truncation range for input values; values outside this range are clipped [S2]. Default: `(-1e+60, 1e+60)`.
+*   `n_fields`: An integer specifying the number of distinct fields to project [S2]. Default: `1`.
+*   `field_id`: An integer identifier linking a `TransferFunction` table to a specific data field in the volume [S2].
+*   `channels`: A list of integers (0–5) linking the table's output to image channels (Red, Green, Blue, Red Absorption, Green Absorption, Blue Absorption) [S2].
+
+**Steps:**
+1.  Initialize a `MultiVariateTransferFunction` object [S2].
+2.  Define a `TransferFunction` table with a value range (`x_bounds`) and a shape (e.g., Gaussian) [S2]. For a simple projection, the table outputs a constant weight (e.g., 1.0) within the active range to sum values [S2].
+3.  Add the transfer function table to the container using `add_field_table`, associating it with a specific `field_id` [S2].
+4.  Link the table to one or more output channels using `link_channels` [S2].
+5.  During ray casting, for each sample point $\mathbf{x}$ along a ray:
+    a. Retrieve the scalar value $v$ from the specified field.
+    b. Clamp $v$ to `x_bounds`.
+    c. Evaluate the transfer function to get a weight $w$. For a pure projection, $w$ is typically 1.0 for valid values [S2].
+    d. Accumulate the weighted value to the ray's integral: $I = \sum w \cdot v \cdot \Delta s$, where $\Delta s$ is the step size [G].
+6.  After ray casting completes, scale the accumulated integral $I$ by the total path length through which rays were cast to normalize the density [S2].
+
+**Pseudocode:**
+> **Unverified code.** The code below did not pass a test run against a reference implementation, or no test fits it, so it may contain errors.
+
+```python
+class ProjectionTransferFunction:
+    def __init__(self, x_bounds=(-1e60, 1e60), n_fields=1):
+        self.x_bounds = x_bounds
+        self.n_fields = n_fields
+        self.field_tables = []
+        self.channel_links = {}
+
+    def add_field_table(self, table, field_id, weight_field_id=-1, weight_table_id=-1):
+        self.field_tables.append({
+            'table': table,
+            'field_id': field_id,
+            'weight_field_id': weight_field_id,
+            'weight_table_id': weight_table_id
+        })
+
+    def link_channels(self, table_id, channels):
+        self.channel_links[table_id] = channels
+
+    def evaluate(self, value, table_id):
+        min_val, max_val = self.x_bounds
+        if value < min_val:
+            value = min_val
+        elif value > max_val:
+            value = max_val
+        table = self.field_tables[table_id]['table']
+        weight = table.evaluate(value)
+        return weight
+
+    def cast_ray(self, origin, direction, step_size, volume, bounds):
+        total_sum = 0.0
+        alpha = 0.0
+        color = [0.0, 0.0, 0.0]
+        t = 0.0
+        while t < bounds['max_t']:
+            x, y, z = origin[0] + direction[0] * t, origin[1] + direction[1] * t, origin[2] + direction[2] * t
+            if bounds['min_x'] <= x <= bounds['max_x'] and bounds['min_y'] <= y <= bounds['max_y'] and bounds['min_z'] <= z <= bounds['max_z']:
+                val = volume.sample(x, y, z)
+                weight = self.evaluate(val, 0)
+                total_sum += weight * val * step_size
+            t += step_size
+        return [total_sum, alpha, color[0], color[1]]
+```
+
+**Parameters:**
+*   `x_bounds`: Tuple of floats. Range for truncation. Default: `(-1e+60, 1e+60)` [S2].
+*   `n_fields`: Integer. Number of fields to project. Default: `1` [S2].
+
+**Edge Cases and Pitfalls:**
+*   **Scaling:** The raw sum depends on the number of samples, which is determined by the ray length and step size. The final image must be scaled by the total width through which rays were cast, a value inaccessible to the transfer function itself [S2].
+*   **Logging:** When using this function, explicitly disable logging of fields to avoid performance overhead or incorrect state tracking [S2].
+*   **Unlinked Tables:** Not all added tables must be linked to channels; unlinked tables contribute values but do not affect the final image unless linked [S2].
+
+## Operating characteristics
+*   **Time Complexity:** $O(N \cdot S)$, where $N$ is the number of rays (pixels) and $S$ is the number of samples per ray [G]. The evaluation is $O(1)$ per sample [G].
+*   **Memory Complexity:** $O(1)$ for the transfer function structure itself, plus $O(V)$ for the volume data [G].
+*   **Strengths:** Aggregates total signal rather than peak signal [S1, unofficial]. Useful for comparing against MIP [S1, unofficial].
+*   **Limitations:** Lacks depth cueing; foreground and background structures overlap additively, potentially obscuring details [S1, unofficial]. Requires post-processing scaling for quantitative accuracy [S2].
+*   **When to use:** Not given in the sources.
+
+## Background
+The summed projection method was introduced as a comparative technique to the maximum activity method for displaying SPECT images [S1, unofficial]. It was implemented in FORTRAN on a microVAX-II minicomputer for cine display rotation [S1, unofficial]. The method sums activity values along columns to form a 2D image, providing a different visual emphasis than MIP, which selects the maximum value [S1, unofficial]. The `ProjectionTransferFunction` class in the yt project implements this logic for volume rendering [S2].
+
+## Sources
+[S1] "Volume rendering in three-dimensional display of SPECT images", http://jnm.snmjournals.org/cgi/pmidlookup?view=long&pmid=2384811, fetched 2026-10-29 (unofficial)
+[S2] ColorTransferFunction yt.visualization.volume_rendering.transfer_functions.ColorTransferFunction, https://yt-project.org/doc/reference/api/yt.visualization.volume_rendering.transfer_functions.html, fetched 2026-10-29

@@ -1,0 +1,36 @@
+# Polyhedral Primitives
+Also called: Polyhedral SDFs, Polyhedron Signed Distance Functions
+## Overview
+Polyhedral primitives compute the exact Euclidean signed distance from a query point to the surface of convex polyhedra, enabling precise ray marching and collision detection for shapes with flat faces and sharp edges. They are distinguished from smooth primitives (like spheres) by their piecewise-linear geometry and from implicit surfaces by their reliance on symmetry folding or explicit face/edge projections to resolve the distance analytically.
+## Shared principles
+All primitives in this family adhere to a common computational framework:
+1.  **Canonical Placement:** Primitives are defined in a local coordinate system centered at the origin $(0,0,0)$ and axis-aligned where applicable.
+2.  **Transformation:** To render a primitive at a different position, rotation, or scale, the query point $p$ is transformed into the primitive's local space (inverse transformation) before evaluation, or the primitive parameters are adjusted accordingly [S1, unofficial].
+3.  **Signed Output:** The function returns a scalar $d \in \mathbb{R}$. $d < 0$ indicates the point is inside the primitive, $d > 0$ indicates it is outside, and $d = 0$ lies on the surface [S1, unofficial].
+4.  **Gradient Availability:** The functions are differentiable almost everywhere, allowing for the computation of surface normals via the gradient $\nabla d$ [S1, unofficial].
+## Subtopics
+
+### [Octahedron Signed Distance Function](2339-octahedron-signed-distance-function.md)
+Computes the exact Euclidean signed distance from a query point to the surface of a regular octahedron centered at the origin. It is distinguished from other polyhedral primitives by its symmetry across the coordinate axes and its reliance on a specific face-identification logic based on the sum of absolute coordinates. See [Octahedron Signed Distance Function](2339-octahedron-signed-distance-function.md).
+
+### [Hexagonal Prism Signed Distance Function](2348-hexagonal-prism-signed-distance-function.md)
+Computes the exact Euclidean signed distance from a query point to a hexagonal prism aligned with the Z-axis. It differs from the [Triangular Prism SDF](2865-triangular-prism-signed-distance-function.md) by utilizing six-fold rotational symmetry to define the cross-section, allowing for more efficient reflection-based distance calculation in the XY plane compared to the three-fold symmetry of the triangular prism. See [Hexagonal Prism Signed Distance Function](2348-hexagonal-prism-signed-distance-function.md).
+
+### [Triangular Prism Signed Distance Function](2865-triangular-prism-signed-distance-function.md)
+Computes the exact Euclidean signed distance from a query point to the surface of a triangular prism. It differs from other polyhedral primitives by projecting the query point onto a 2D equilateral triangle in the cross-sectional plane, leveraging the triangle's symmetry to avoid iterative projection steps. It builds on [Polyhedral Primitives](2529-polyhedral-primitives.md). See [Triangular Prism Signed Distance Function](2865-triangular-prism-signed-distance-function.md).
+
+### [Dodecahedron Modulo](3737-dodecahedron-modulo.md)
+The Dodecahedron Modulo method computes the signed distance from a query point to the surface of a regular dodecahedron by folding 3D space into a single fundamental cell using a sequence of reflections and rotations. Unlike primitives defined by explicit face normals or intersection tests, this approach relies on symmetry operations to map any point in space to its closest representative within the canonical dodecahedral cell, from which the distance is trivially derived. It is distinct from the [Octahedron Signed Distance Function](2339-octahedron-signed-distance-function.md) and [Hexagonal Prism Signed Distance Function](2348-hexagonal-prism-signed-distance-function.md) by its five-fold rotational symmetry and the specific dihedral angles required to tile space into dodecahedral cells. See [Dodecahedron Modulo](3737-dodecahedron-modulo.md).
+
+### Pyramid Signed Distance Function
+- **Definition**: Computes the signed distance function for a pyramid with height $h$ [S1, unofficial].
+- **Steps**: Calculate $m^2 = h^2 + 0.25$. Take the absolute value of the XZ components of $p$. Swap X and Z if $Z > X$ to fold the pyramid into a fundamental domain. Subtract $0.5$ from X and Z. Calculate $q$ as a transformed vector. Calculate $s$ as the positive part of $-q.x$. Calculate $t$ as the clamp of $(q.y - 0.5 \cdot p.z) / (m^2 + 0.25)$ to $[0, 1]$. Calculate $a$ and $b$ as squared distances to edges. Calculate $b$ as squared distance to the other edge. Calculate $d^2$ as the minimum of $a$ and $b$, or $0$ if inside. Return the final signed distance [S1, unofficial].
+
+### Rhombus Signed Distance Function
+- **Definition**: Computes the signed distance function for a rhombus with semi-axes $s$ and height $h$ [S1, unofficial].
+- **Steps**: Calculate $f$ using the dot product of $s$ and $s - 2 \cdot p.xz$, clamped to $[-1, 1]$. Calculate $q.x$ as the length of the vector from the rhombus edge minus the radius, multiplied by the sign. Return the signed distance using the min/max/length formula for box-like shapes [S1, unofficial].
+
+## Background
+Polyhedral SDFs are a staple of procedural geometry in computer graphics, popularized by the work of Inigo Quilez and others in the context of ray marching [G]. They allow for the creation of complex, hard-surface models using constructive solid geometry (CSG) operations without the need for mesh generation. The specific folding techniques for dodecahedrons and octahedrons leverage the high symmetry of Platonic solids to reduce computational cost [S1, unofficial].
+## Sources
+[S1] skmhrk1209/Torch-Sphere-Tracer, https://github.com/skmhrk1209/Torch-Sphere-Tracer, fetched 2026-10-26 (unofficial)

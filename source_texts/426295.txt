@@ -1,0 +1,134 @@
+JAX-native tree toolkit for fast hierarchical tree structures: radix and k-d trees today, extensible to octrees and other trees in the near future. - Fix: LBVH forest on tied Morton codes; kd-tree Dehnen default on every walk route by TobiBu · Pull Request #94 · TobiBu/yggdrax
+
+Fix: LBVH forest on tied Morton codes; kd-tree Dehnen default on every walk route by TobiBu · Pull Request #94 · TobiBu/yggdrax · GitHub
+Skip to content
+You signed in with another tab or window. Reload to refresh your session.
+You signed out in another tab or window. Reload to refresh your session.
+You switched accounts on another tab or window. Reload to refresh your session.
+Dismiss alert
+Conversation
+TobiBu
+commented
+Oct 11, 2026
+Copy link
+Copy Markdown
+Owner
+Two bugs found during the 2026-10 cleanup (Y1 and Y2).
+Merge after jaccpot #391. Fix 1 attaches a cells tree's padding subtree to the root. jaccpot's multi-GPU export walk didn't skip empty nodes, and #391 makes it do so. Without #391, 5 jaccpot unit tests overflow their list caps against this branch.
+1. The adaptive LBVH returned a forest when Morton codes tie (1f00527)
+When more than leaf_size particles share one Morton code, the adaptive build (build_tree, and the octree on top of it) returned several roots, with leaves no walk from the root reaches. Ties come from duplicate positions, or from padding rows that copy a real particle (sanitize_padding).
+Case (leaf 8)
+Before the fix
+64 copies of one point among 128
+6 roots; 5 of 16 leaves unreachable
+28 copies
+2 roots; 1 leaf unreachable
+build_static_cells_tree's padding leaves share a sentinel code, so the "one subtree at the right end" its docstring promises was mostly orphaned.
+Cause: the range search orders leaves by code and breaks ties by leaf index (Karras 2012's augmented delta). The split search compared codes only, so a range whose leaves all share one code collapsed onto its first leaf.
+Fix: the split search now uses the same augmented delta. Where a range's first and last codes differ, both forms make the same decision, so only trees with tied ranges change. static_radix was never affected.
+Tests:
+Y2's strict xfails are removed.
+New test_duplicate_positions_leave_no_leaf_unreachable (28 and 64 copies × static_radix / build_tree / build_octree): one root, every leaf reachable, and the root spans every particle.
+Both tests fail on main for the adaptive builders.
+2. Every walk route applies the kd-tree Dehnen radius default (b3e3964)
+A kd-tree's Dehnen MAC defaults to dehnen_radius_scale=1.2 when the caller leaves it at 1.0. Only the joint walk applied that. The bounded count-pass routes walked at 1.0: build_leaf_neighbor_lists, build_well_separated_interactions and build_compact_far_pairs_and_leaf_neighbor_lists, each with a traversal config. They returned 1,710 near pairs against the joint walk's 2,408 (N = 512, leaf 8). So a caller that mixed routes got a far/near partition with gaps.
+Fix: _resolve_dehnen_radius_scale holds the rule, and all four routes call it.
+Test: test_walk_builders_agree_with_the_joint_walk[octree, kdtree] checks every builder's near and far pairs against the joint walk. The kd-tree case fails on main.
+Verification
+yggdrax suite: 793 passed, 42 skipped.
+jaccpot GPU pins on an A100, jaccpot main (fff5dfa) on this branch: S1–S6 (fused strict lane, no-Pallas route, defaults, gradients, block-step, clean env) are all bitwise identical to their references.
+jaccpot CPU suite (unit, integration, characterization) on this branch:
+Without #391: the 5 export-walk overflows above, plus the known stale local nornax failure.
+With #391, against this branch: tests/unit/distributed 65 passed / 7 skipped, and tests/distributed on 4 forced devices 53 passed / 2 skipped.
+Not yet run: the two-card pins M1 and M3. No two A100s are free.
+🤖 Generated with Claude Code
+TobiBu
+and others
+added 2 commits
+October 11, 2026 14:01
+fix(tree): the adaptive LBVH split search breaks Morton-code ties by …
+…
+1f00527
+```
+…index
+
+When more than leaf_size particles share one Morton code -- duplicate
+positions, or padding rows that copy a real particle (sanitize_padding) -- the
+adaptive build (build_tree, and the octree built on it) returned a forest:
+several parent == -1 nodes, and leaves no walk from the root reaches, whose
+particles then get no force and exert none. 64 copies of one point among 128
+(leaf 8): 6 roots, 5 of 16 leaves unreachable; 28 copies: 2 roots, 1 leaf.
+
+The range search already orders leaves by code and, where codes tie, by leaf
+index (Karras 2012's augmented delta). The split search compared codes only,
+so a range whose leaves all share one code found no split above its own
+prefix, collapsed onto its first leaf and orphaned the rest. It now uses the
+same augmented delta. Where a range's first and last codes differ the two
+forms make the same decision, so only trees with such tied ranges change.
+static_radix was never affected. _lcp_codes_only had no other caller.
+
+Tests: test_tree_builders_degenerate_tied_codes_are_valid loses its strict
+xfail on build_tree and build_octree (Y2 pinned the bug there);
+test_duplicate_positions_leave_no_leaf_unreachable (new; static_radix,
+build_tree, build_octree x 28, 64 copies) checks one root, every leaf reachable
+and the root spanning every particle. On main both fail for the two adaptive
+builders and pass for static_radix.
+
+Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
+```
+fix(walk): every walk route applies the kd-tree Dehnen radius default
+…
+b3e3964
+```
+A kd-tree's Dehnen MAC defaults to dehnen_radius_scale 1.2 when the caller
+leaves it at 1.0, but only the joint walk (_run_dual_tree_walk_raw) applied it.
+The bounded count-pass routes -- build_leaf_neighbor_lists,
+build_well_separated_interactions and
+build_compact_far_pairs_and_leaf_neighbor_lists with a traversal config --
+walked a kd-tree at 1.0, so their lists disagreed with the joint walk's: 1,710
+near pairs against 2,408 at N = 512, leaf 8. A caller mixing routes (far pairs
+from one, near lists from another) got a far/near partition with gaps.
+
+_resolve_dehnen_radius_scale holds the rule and the >0 check; the joint walk
+and the three count-pass helpers call it. Radix and octree trees, other MACs and
+explicit scales are unchanged.
+
+Test: test_octree_near_lists_agree_across_builders becomes
+test_walk_builders_agree_with_the_joint_walk[octree, kdtree], and also compares
+the far pairs of build_well_separated_interactions and the compact builder with
+the joint walk's. The kd-tree case fails on main.
+
+Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
+```
+TobiBu
+mentioned this pull request
+Oct 11, 2026
+Cross lane: the export walk leaves the local tree's empty nodes alone
+TobiBu/jaccpot#391
+Merged
+Hide details
+View details
+TobiBu
+merged commit 1f0e36f
+into
+main
+Oct 11, 2026
+8 checks passed
+Uh oh!
+There was an error while loading. Please reload this page.
+TobiBu
+deleted the
+fix/tied-codes-kd-dehnen
+branch
+October 11, 2026 14:41
+Sign up for free
+to join this conversation on GitHub.
+Already have an account?
+Sign in to comment
+Uh oh!
+There was an error while loading. Please reload this page.
+Labels
+None yet
+1 participant
+Add this suggestion to a batch that can be applied as a single commit.This suggestion is invalid because no changes were made to the code.Suggestions cannot be applied while the pull request is closed.Suggestions cannot be applied while viewing a subset of changes.Only one suggestion per line can be applied in a batch.Add this suggestion to a batch that can be applied as a single commit.Applying suggestions on deleted lines is not supported.You must change the existing code in this line in order to create a valid suggestion.Outdated suggestions cannot be applied.This suggestion has been applied or marked resolved.Suggestions cannot be applied from pending reviews.Suggestions cannot be applied on multi-line comments.Suggestions cannot be applied while the pull request is queued to merge.Suggestion cannot be applied right now. Please check back later.
+You can’t perform that action at this time.

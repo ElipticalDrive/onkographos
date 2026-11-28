@@ -1,0 +1,187 @@
+# AUSE Metric (Area Under the Sparsification Error)
+Also called: Area Under the Sparsification Error, Sparsification Analysis
+
+## Overview
+The Area Under the Sparsification Error (AUSE) metric evaluates the quality of uncertainty quantification in neural fields by measuring how effectively a ranking scalar $z$ allows the average error to improve when voxels flagged as least trustworthy are systematically discarded [S1, unofficial][S2]. It distinguishes itself from standard error metrics by assessing the calibration of uncertainty—specifically, whether high uncertainty values correspond to high actual errors—rather than just the magnitude of the error itself [S2].
+
+## How it works
+**Inputs and Outputs:**
+*   **Input:** A predicted depth map $\bar{D}$, a ground truth depth map $D^{GT}$, and a ranking scalar field $z$ (e.g., ensemble standard deviation $\sigma_{ens}$, mean error proxy $\bar{E}$, or random values) defined over the same voxel grid or pixel set [S1, unofficial][S2].
+*   **Output:** A scalar value $AUSE_z$ (and optionally normalized $nAUSE_z$) representing the area under the sparsification error curve [S1, unofficial].
+
+**Data Structures:**
+*   The method operates on a set of $N$ voxels (or pixels) $V = \{v_1, ..., v_N\}$ [S1, unofficial].
+*   Each voxel $v_i$ has an associated ground truth error $\epsilon_i$ (typically absolute depth error $|D^{GT}_i - \bar{D}_i|$) and a ranking scalar $z_i$ [S1, unofficial].
+
+**Steps:**
+1.  **Sort:** Sort all $N$ voxels in descending order of the ranking scalar $z$ [S1, unofficial]. Let the sorted indices be $p_1, p_2, ..., p_N$ such that $z_{p_1} \ge z_{p_2} \ge ... \ge z_{p_N}$ [S1, unofficial].
+2.  **Define Retention Set:** For a sparsification level $t \in [0, 1]$, define the kept set $K_z(t)$ as the subset of voxels retaining the lowest-ranked $(1-t)$ fraction [S1, unofficial]. Specifically, $K_z(t)$ contains the voxels with indices $p_k$ where $k > t \cdot N$ [S1, unofficial]. Note: $t=0$ retains all voxels; $t=1$ retains none [S1, unofficial].
+3.  **Compute Risk:** Calculate the risk $Risk_z(t)$, defined as the mean error over the kept set $K_z(t)$ [S1, unofficial]:
+    $$
+    Risk_z(t) = \frac{1}{|K_z(t)|} \sum_{i \in K_z(t)} \epsilon_i
+    $$
+    For the oracle baseline, $z$ is the actual error $\epsilon_{mean}$, so the oracle removes the largest errors first [S1, unofficial]. For the random baseline, the curve is the exact expected uniform-retention curve (the global mean error), not a finite permutation average [S1, unofficial].
+4.  **Compute Sparsification Error:** Calculate the sparsification error $SE_z(t)$ at each level $t$ as the gap between the method's risk and the oracle's risk [S1, unofficial]:
+    $$
+    SE_z(t) = Risk_z(t) - Risk_{oracle}(t)
+    $$
+    By definition, $SE_z(t) \ge 0$ [S1, unofficial].
+5.  **Integrate:** Compute the AUSE by integrating $SE_z(t)$ from $t=0$ to $t_{max}$ [S1, unofficial]:
+    $$
+    AUSE_z = \int_{0}^{t_{max}} SE_z(t) \, dt
+    $$
+    In practice, this is computed using a discretized grid of $t$ values [S1, unofficial].
+6.  **Normalize (Optional):** To compare relative ranking performance across conditions, normalize by the random baseline's AUSE [S1, unofficial]:
+    $$
+    nAUSE_z = \frac{AUSE_z}{AUSE_{random}}
+    $$
+    A $nAUSE_z$ of 0 indicates perfect ranking (identical to oracle), 1 indicates no better than random, and $>1$ indicates worse than random [S1, unofficial].
+
+**Parameters:**
+*   **Integration limit $t_{max}$:** 0.95 [S1, unofficial]. This avoids a noisy terminal spike when few voxels remain [S1, unofficial].
+*   **Random Baseline:** Defined as the exact expected uniform-retention curve (the global mean error) [S1, unofficial].
+
+**Pitfalls:**
+*   Raw AUSE combines the scale of reconstruction error with ranking quality [S1, unofficial]. Therefore, raw AUSE should not be used for comparisons of relative ranking performance across different conditions or datasets; $nAUSE$ is preferred for such comparisons [S1, unofficial].
+*   The metric assumes the ranking scalar $z$ is available for all voxels in the valid set [S1, unofficial].
+
+**Pseudocode:**
+> **Unverified code.** The code below did not pass a test run against a reference implementation, or no test fits it, so it may contain errors.
+
+```python
+def compute_ause(errors: list[float], z_scores: list[float], t_max: float = 0.95) -> float:
+    """
+    Compute the Area Under the Sparsification Error (AUSE).
+    
+    Args:
+        errors: List of ground truth errors (e.g., absolute depth error) for N voxels.
+        z_scores: List of ranking scalar values for the same N voxels.
+        t_max: Integration limit (default 0.95).
+        
+    Returns:
+        AUSE value.
+    """
+    n = len(errors)
+    if n == 0:
+        return 0.0
+
+    # Step 1: Sort voxels by decreasing z_score
+    voxels = sorted(zip(z_scores, errors), key=lambda x: x[0], reverse=True)
+    sorted_errors = [v[1] for v in voxels]
+    
+    # Precompute prefix sums for efficient mean calculation
+    prefix_sum = [0.0] * (n + 1)
+    for i in range(n):
+        prefix_sum[i+1] = prefix_sum[i] + sorted_errors[i]
+        
+    # Helper to get mean error of the kept set
+    def get_risk(t: float) -> float:
+        k_removed = int(t * n)
+        k_kept = n - k_removed
+        if k_kept == 0:
+            return 0.0
+        sum_kept = prefix_sum[n] - prefix_sum[k_removed]
+        return sum_kept / k_kept
+
+    # Step 2 & 3: Compute Risk for Oracle
+    # Oracle: z = error. Sorted by decreasing error.
+    oracle_sorted_errors = sorted(errors, reverse=True)
+    oracle_prefix_sum = [0.0] * (n + 1)
+    for i in range(n):
+        oracle_prefix_sum[i+1] = oracle_prefix_sum[i] + oracle_sorted_errors[i]
+        
+    def get_oracle_risk(t: float) -> float:
+        k_removed = int(t * n)
+        k_kept = n - k_removed
+        if k_kept == 0:
+            return 0.0
+        sum_kept = oracle_prefix_sum[n] - oracle_prefix_sum[k_removed]
+        return sum_kept / k_kept
+
+    # Random: Exact expected uniform-retention curve (global mean error)
+    global_mean_error = sum(errors) / n
+    def get_random_risk(t: float) -> float:
+        return global_mean_error
+
+    # Step 4 & 5: Integrate Sparsification Error
+    num_steps = 1000  # [G] Standard discretization resolution
+    dt = t_max / num_steps
+    ause = 0.0
+    
+    for i in range(num_steps):
+        t = i * dt
+        risk_z = get_risk(t)
+        risk_oracle = get_oracle_risk(t)
+        se = risk_z - risk_oracle
+        
+        # SE should be >= 0, but numerical issues might occur. Clamp.
+        if se < 0:
+            se = 0.0
+            
+        ause += se * dt
+        
+    return ause
+
+def compute_nause(errors: list[float], z_scores: list[float], t_max: float = 0.95) -> float:
+    """
+    Compute normalized AUSE (nAUSE).
+    """
+    ause_z = compute_ause(errors, z_scores, t_max)
+    
+    # Compute AUSE_random analytically/integrally
+    # Random baseline is the exact expected uniform-retention curve (global mean error)
+    n = len(errors)
+    oracle_sorted_errors = sorted(errors, reverse=True)
+    oracle_prefix_sum = [0.0] * (n + 1)
+    for i in range(n):
+        oracle_prefix_sum[i+1] = oracle_prefix_sum[i] + oracle_sorted_errors[i]
+        
+    global_mean_error = sum(errors) / n
+    
+    def get_oracle_risk(t: float) -> float:
+        k_removed = int(t * n)
+        k_kept = n - k_removed
+        if k_kept == 0:
+            return 0.0
+        sum_kept = oracle_prefix_sum[n] - oracle_prefix_sum[k_removed]
+        return sum_kept / k_kept
+
+    num_steps = 1000  # [G] Standard discretization resolution
+    dt = t_max / num_steps
+    ause_random = 0.0
+    
+    for i in range(num_steps):
+        t = i * dt
+        risk_oracle = get_oracle_risk(t)
+        risk_random = global_mean_error
+        se = risk_random - risk_oracle
+        if se < 0:
+            se = 0.0
+        ause_random += se * dt
+        
+    if ause_random == 0:
+        return 0.0  # Avoid division by zero
+        
+    return ause_z / ause_random
+```
+
+## Subtopics
+
+### nAUSE (Normalized AUSE)
+A variant of AUSE normalized by the random baseline's AUSE [S1, unofficial]. It removes the dependency on absolute error scale, allowing direct comparison of relative ranking performance across different conditions or datasets [S1, unofficial]. Choose it when evaluating whether an uncertainty proxy improves ranking quality independent of scene reconstruction fidelity [S1, unofficial]. See [nAUSE](12301-nause.md).
+
+### Sparsification Curve
+The plot of $Risk_z(t)$ against $t$. It visualizes how the mean error decreases as voxels are removed. It sets itself apart from scalar metrics by providing a full diagnostic view of calibration quality across all retention levels. Choose it when debugging uncertainty proxies or comparing multiple ranking scalars visually. See [Sparsification Curve](12301-sparsification-curve.md).
+
+## Operating characteristics
+*   **Strengths:** Provides a single scalar metric for uncertainty calibration that is sensitive to the ranking quality of the uncertainty estimate [S1, unofficial].
+*   **Limitations:** Raw AUSE is not comparable across different scenes or error scales [S1, unofficial]. It requires a ground truth error estimate to compute the oracle baseline [S1, unofficial].
+*   **When to use:** When evaluating the calibration of uncertainty estimates in neural fields, specifically to determine if high uncertainty regions correspond to high error regions [S2].
+*   **When not to use:** When comparing ranking performance across different conditions with different error scales; use nAUSE instead [S1, unofficial].
+
+## Background
+The AUSE metric was introduced by Ilg et al. (2018) and Poggi et al. (2020) as a standard protocol for assessing neural-field uncertainty quantification [S1, unofficial]. It has been adopted in recent works such as Shen et al. (2022), Sünderhauf et al. (2023), and Goli et al. (2024) [S1, unofficial]. In the context of volume rendering, it is used to evaluate how well uncertainty heatmaps align with actual depth errors, as demonstrated in evaluations of methods like FisherRF and SA-ResGS [S2].
+
+## Sources
+[S1] Image Fidelity is Not Field Fidelity: Joint Thermodynamic Reconstruction and Error Localization in Neural Tomography, https://doi.org/10.48550/arxiv.2609.28868, fetched 2026-10-26 (unofficial)
+[S2] SA-ResGS: Self-augmented Residual 3D Gaussian Splatting for Next Best View Selection, https://doi.org/10.1007/978-3-032-37013-6_17, fetched 2026-10-29

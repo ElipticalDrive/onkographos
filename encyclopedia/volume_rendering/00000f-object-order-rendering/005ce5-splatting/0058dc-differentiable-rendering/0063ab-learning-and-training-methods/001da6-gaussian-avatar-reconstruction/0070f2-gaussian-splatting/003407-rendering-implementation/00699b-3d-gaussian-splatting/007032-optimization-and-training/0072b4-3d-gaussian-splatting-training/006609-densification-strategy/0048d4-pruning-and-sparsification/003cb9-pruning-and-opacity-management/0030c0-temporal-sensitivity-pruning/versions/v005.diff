@@ -1,0 +1,186 @@
+--- v004.md
++++ v005.md
+@@ -3,9 +3,9 @@
+ 
+ ## Overview
+-Temporal Sensitivity Pruning (TSP) is a method for removing low-impact 3D Gaussians by calculating a temporal sensitivity score that approximates the second-order sensitivity to the $L_2$ loss across all training views and timesteps [S1, unofficial]. It sets itself apart from static pruning methods by aggregating gradient information over time, allowing it to identify Gaussians that are redundant for the dynamic scene reconstruction [S1, unofficial]. This reduces neural inference load and boosts rendering speed while maintaining fidelity [S1, unofficial].
++Temporal Sensitivity Pruning (TSP) is a method for removing low-impact 3D Gaussians in dynamic scene reconstruction by calculating a sensitivity score that approximates the second-order sensitivity to the $L_2$ loss across all training views and timesteps [S1, unofficial]. It distinguishes itself from static pruning methods by aggregating gradients over time to capture the cumulative contribution of each Gaussian to the dynamic scene reconstruction, thereby reducing neural inference load and boosting rendering speed in deformable Gaussian splatting pipelines [S1, unofficial].
+ 
+ ## How it works
+ **Inputs and Outputs:**
+-*   **Input:** The set of 3D Gaussians $\{\mathcal{G}_i\}$, the set of training poses and timesteps $\mathcal{P}_{gt}$, and the rendering function $I_{\mathcal{G}_t}(\phi)$.
++*   **Input:** A set of 3D Gaussians $\{\mathcal{G}_i\}$, the set of training poses and timesteps $\mathcal{P}_{gt}$, and the rendered images $I_{\mathcal{G}_t}(\phi)$ for each pose $\phi$ and timestep $t$.
+ *   **Output:** A scalar TSP score $\tilde{U}_{\mathcal{G}_i}$ for each Gaussian, used to determine if it should be pruned.
+ 
+@@ -14,23 +14,26 @@
+ *   $g_i$: The value of $\mathcal{G}_i$ projected onto image space.
+ *   $\mathcal{P}_{gt}$: The set of pairs $(\phi, t)$ representing training poses $\phi$ and timesteps $t$.
+-*   $\tilde{U}_{\mathcal{G}_i}$: The cumulative sensitivity score for Gaussian $\mathcal{G}_i$.
++*   $\tilde{U}_{\mathcal{G}_i}$: The accumulated sensitivity score for Gaussian $\mathcal{G}_i$.
+ 
+ **Steps:**
+-1.  For each Gaussian $\mathcal{G}_i$, iterate through all training poses $\phi$ and timesteps $t$ in the set $\mathcal{P}_{gt}$.
+-2.  Compute the gradient of the rendered image $I_{\mathcal{G}_t}(\phi)$ with respect to the projected Gaussian value $g_i$. This gradient, $\nabla_{g_i} I_{\mathcal{G}_t}(\phi)$, captures the first-order sensitivity of the image to the Gaussian's contribution at that specific pose and time [S1, unofficial].
+-3.  Square this gradient: $\left( \nabla_{g_i} I_{\mathcal{G}_t}(\phi) \right)^2$.
+-4.  Sum the squared gradients over all $(\phi, t) \in \mathcal{P}_{gt}$ to compute the cumulative sensitivity score $\tilde{U}_{\mathcal{G}_i}$ [S1, unofficial].
+-5.  Periodically during training, compare $\tilde{U}_{\mathcal{G}_i}$ against a pruning threshold. Gaussians with scores below the threshold are removed to reduce the primitive count [S1, unofficial].
++1.  For each Gaussian $\mathcal{G}_i$, iterate through all training poses $\phi$ and timesteps $t$ in $\mathcal{P}_{gt}$.
++2.  Calculate the gradient of the rendered image $I_{\mathcal{G}_t}(\phi)$ with respect to the projected Gaussian value $g_i$ for the current pose and timestep.
++3.  Square this gradient.
++4.  Sum the squared gradients over all poses and timesteps in $\mathcal{P}_{gt}$ to compute the cumulative sensitivity score $\tilde{U}_{\mathcal{G}_i}$.
++5.  Periodically during training, compare $\tilde{U}_{\mathcal{G}_i}$ against a threshold. If the score is below the threshold, prune the Gaussian $\mathcal{G}_i$ to reduce the number of primitives and lower neural inference load [S1, unofficial].
+ 
+ **Formula:**
+ The TSP score $\tilde{U}_{\mathcal{G}_i}$ approximates the second-order sensitivity to the $L_2$ loss:
++
+ $$
+ \tilde{U}_{\mathcal{G}_i} \approx \nabla_{g_i}^2 L_2 \approx \sum_{\phi, t \in \mathcal{P}_{gt}} \left( \nabla_{g_i} I_{\mathcal{G}_t}(\phi) \right)^2
+ $$
++
+ Where:
+ *   $\tilde{U}_{\mathcal{G}_i}$ is the TSP score for Gaussian $\mathcal{G}_i$.
+ *   $g_i$ is the value of $\mathcal{G}_i$ projected onto image space.
+ *   $\mathcal{P}_{gt}$ is the set of training poses and timesteps.
+-*   $I_{\mathcal{G}_t}(\phi)$ is the rendered image at pose $\phi$ and timestep $t$ [S1, unofficial].
++*   $I_{\mathcal{G}_t}(\phi)$ is the rendered image at pose $\phi$ and timestep $t$.
++*   $\nabla_{g_i} I_{\mathcal{G}_t}(\phi)$ is the gradient of the rendered image with respect to the projected Gaussian value.
+ 
+ **Parameters:**
+@@ -39,78 +42,80 @@
+ **Pseudocode:**
+ ```python
+-def compute_temporal_sensitivity_score(gaussians, training_data):
++def compute_temporal_sensitivity(gaussians, training_data):
+     """
+-    Computes the TSP score for each Gaussian.
++    Computes the Temporal Sensitivity Pruning (TSP) score for each Gaussian.
++    
++    Args:
++        gaussians: List of Gaussian objects, each having a unique ID and projection function.
++        training_data: A list of tuples (pose, timestep, rendered_image_gradient_function).
++                       rendered_image_gradient_function(pose, timestep, gaussian_id) returns
++                       the gradient of the rendered image w.r.t the projected value of the
++                       specified Gaussian at the given pose and timestep.
++                       
++    Returns:
++        A dictionary mapping Gaussian ID to its TSP score.
++    """
++    tsp_scores = {}
++    
++    for gaussian in gaussians:
++        gid = gaussian.id
++        cumulative_score = 0.0
++        
++        # Iterate over all training poses and timesteps
++        for pose, timestep, grad_fn in training_data:
++            # Calculate gradient of rendered image w.r.t projected Gaussian value
++            # Note: In practice, this requires backpropagation through the rasterizer
++            # for the specific Gaussian at the specific pose/timestep.
++            gradient = grad_fn(pose, timestep, gid)
++            
++            # Square the gradient
++            squared_gradient = gradient * gradient
++            
++            # Accumulate the score
++            cumulative_score += squared_gradient
++            
++        tsp_scores[gid] = cumulative_score
++        
++    return tsp_scores
++
++def prune_gaussians(gaussians, tsp_scores, threshold):
++    """
++    Removes Gaussians with TSP scores below the threshold.
+     
+     Args:
+         gaussians: List of Gaussian objects.
+-        training_data: Object containing:
+-            - poses: List of camera poses phi.
+-            - timesteps: List of timesteps t.
+-            - render_image(phi, t, gaussian): Function to render image for a specific 
+-              pose, timestep, and single Gaussian contribution (or full scene if 
+-              isolating gradients is not feasible, though the formula implies 
+-              gradient w.r.t projected value g_i).
+-              
++        tsp_scores: Dictionary mapping Gaussian ID to TSP score.
++        threshold: The minimum sensitivity score to keep a Gaussian.
++        
+     Returns:
+-        scores: Dictionary mapping Gaussian ID to TSP score.
++        A list of Gaussians that were kept (score >= threshold).
+     """
+-    scores = {}
+-    
+-    # Pre-calculate the set of (phi, t) pairs
+-    # Note: In practice, this might be a subset or all training frames
+-    training_pairs = [(phi, t) for phi in training_data.poses for t in training_data.timesteps]
+-    
+-    for g in gaussians:
+-        cumulative_score = 0.0
+-        
+-        for phi, t in training_pairs:
+-            # Calculate gradient of rendered image w.r.t projected Gaussian value g_i
+-            # I_{G_t}(phi) is the rendered image. 
+-            # nabla_{g_i} I_{G_t}(phi) is the gradient.
+-            # This requires backpropagation through the rendering function for the specific Gaussian.
+-            gradient = compute_gradient_wrt_gi(g, phi, t, training_data)
+-            
+-            # Square the gradient
+-            squared_gradient = gradient ** 2
+-            
+-            # Sum over all poses and timesteps
+-            cumulative_score += squared_gradient
+-            
+-        scores[g.id] = cumulative_score
+-        
+-    return scores
+-
+-def prune_gaussians(gaussians, scores, threshold):
+-    """
+-    Removes Gaussians with TSP scores below the threshold.
+-    """
+-    active_gaussians = []
+-    for g in gaussians:
+-        if scores[g.id] >= threshold:
+-            active_gaussians.append(g)
+-        # Else: Gaussian is pruned
+-    return active_gaussians
++    kept_gaussians = []
++    for gaussian in gaussians:
++        score = tsp_scores.get(gaussian.id, 0.0)
++        if score >= threshold:
++            kept_gaussians.append(gaussian)
++    return kept_gaussians
+ ```
+ 
+ **Edge Cases and Pitfalls:**
+-*   **Gradient Calculation:** The gradient $\nabla_{g_i} I_{\mathcal{G}_t}(\phi)$ must be computed accurately. If the rendering pipeline clamps negative colors to zero (as in standard 3DGS), the partial derivatives for clamped values become zero, potentially leading to incorrect sensitivity scores for SH coefficients that still contribute to the image [S2]. To avoid this, sensitivity calculations should not clamp colors [S2].
+-*   **Zero Sensitivity:** Some Gaussians may exhibit zero sensitivity in color parameters, indicating no impact on training images. These should be eliminated [S2].
+-*   **Over-Pruning:** Using a high pruning threshold can remove fine details (e.g., small leaves) from the reconstruction [S2].
++*   **Zero Sensitivity:** Gaussians that have no impact on training images may exhibit zero sensitivity in their color parameters. These should be eliminated [S2].
++*   **Clamping Artifacts:** If negative direction-dependent colors (resulting from SH coefficient evaluation) are clamped to zero during the forward pass, the partial derivatives are set to zero in the backward pass. This results in zero sensitivity for SH coefficients that may still contribute to training images [S2]. To avoid this, do not clamp colors when calculating sensitivity [S2].
++*   **Over-Pruning:** Higher pruning thresholds can remove fine details (e.g., small leaves) from the reconstruction [S2].
+ 
+ ## Subtopics
+ 
+ ### Sensitivity Calculation and Pruning
+-A variant method that eliminates Gaussians with no impact on training images by calculating sensitivity using the gradient of total image energy with respect to parameters [S2]. It specifically addresses the issue where clamping negative direction-dependent colors to zero results in zero sensitivity for SH coefficients that may still contribute to training images [S2]. By not clamping colors during sensitivity calculation, it avoids this pitfall [S2]. Gaussians exhibiting zero sensitivity in color parameters are eliminated [S2]. Higher pruning thresholds can remove fine details, so care must be taken [S2].
++A method to eliminate Gaussians that have no impact on training images by calculating sensitivity using the gradient of total image energy with respect to parameters [S2]. It specifically addresses the issue where clamping negative colors in the standard 3D Gaussian Splatting implementation leads to zero sensitivity for SH coefficients that might still contribute to the image [S2]. By not clamping colors during sensitivity calculation, it correctly identifies Gaussians with zero impact (up to 15% in some cases) and removes them [S2]. However, using higher pruning thresholds risks removing fine scene details [S2].
+ 
+ ## Operating characteristics
+-*   **Time Complexity:** The sensitivity calculation requires iterating over all Gaussians and all training poses/timesteps in $\mathcal{P}_{gt}$, and computing gradients for each. This is computationally expensive, scaling with $O(N \cdot |\mathcal{P}_{gt}|)$, where $N$ is the number of Gaussians [S1, unofficial].
+-*   **Memory Complexity:** Requires storing the gradient information for each Gaussian across all training views/timesteps during the sensitivity aggregation phase [S1, unofficial].
+-*   **Performance:** Integrating TSP into DeformableGS accelerates rendering by 6.78× on average while maintaining neural-field fidelity and using 10× fewer primitives [S1, unofficial].
+-*   **Strengths:** Reduces neural inference load and boosts rendering speed [S1, unofficial]. Captures second-order effects of Gaussians and their deformations on dynamic scene reconstruction [S1, unofficial].
+-*   **Limitations:** Computationally expensive to calculate [S1, unofficial]. Risk of removing fine details if thresholds are too high [S2]. Relies on gradients from discrete training frames, which may overlook floaters that drift at unseen timestamps (addressed by Temporal Sensitivity Sampling) [S1, unofficial].
++*   **Time Complexity:** The sensitivity calculation requires iterating over all training poses and timesteps for each Gaussian. If $N$ is the number of Gaussians and $M$ is the number of training views/timesteps, the complexity is $O(N \cdot M)$ per pruning step, assuming gradient computation is $O(1)$ per view. This is significantly more expensive than simple opacity thresholding but provides a more robust measure of importance in dynamic scenes.
++*   **Memory Complexity:** Requires storing the accumulated sensitivity scores for all Gaussians. No additional large buffers are needed beyond the training data set $\mathcal{P}_{gt}$.
++*   **Performance:** In dynamic scenes, integrating TSP into DeformableGS accelerated rendering by 6.78× on average while maintaining neural-field fidelity and using 10× fewer primitives [S1, unofficial].
++*   **Strengths:** Reduces redundant primitives, stabilizes temporal pruning, and lowers deformation cost [S1, unofficial]. It captures the second-order effects of each Gaussian and its deformations on the dynamic scene reconstruction over time [S1, unofficial].
++*   **Limitations:** Computationally expensive due to the need for gradient accumulation over time. May remove fine details if the pruning threshold is set too high [S2]. Relies on gradients from discrete training frames, which may overlook floaters that drift at unseen timestamps (addressed by Temporal Sensitivity Sampling) [S1, unofficial].
+ 
+ ## Background
+-Temporal Sensitivity Pruning was introduced in the context of Speedy Deformable 3D Gaussian Splatting (SpeeDe3DGS) [S1, unofficial]. It builds on DeformableGS and is designed to bridge the efficiency-fidelity gap in dynamic scene reconstruction [S1, unofficial]. The method was presented in the unofficial preprint "SpeeDe3DGS: Speedy Deformable 3D Gaussian Splatting with Temporal Pruning and Motion Grouping" [S1, unofficial].
++Temporal Sensitivity Pruning was introduced in the context of Speedy Deformable 3D Gaussian Splatting (SpeeDe3DGS) to address the computational expense of neural inference in dynamic 3D Gaussian Splatting models [S1, unofficial]. It builds on DeformableGS and is designed to bridge the efficiency-fidelity gap by removing low-impact Gaussians via temporally aggregated sensitivity analysis [S1, unofficial]. The method was presented in an unofficial preprint/repo associated with the SpeeDe3DGS project [S1, unofficial].
+ 
+ ## Sources

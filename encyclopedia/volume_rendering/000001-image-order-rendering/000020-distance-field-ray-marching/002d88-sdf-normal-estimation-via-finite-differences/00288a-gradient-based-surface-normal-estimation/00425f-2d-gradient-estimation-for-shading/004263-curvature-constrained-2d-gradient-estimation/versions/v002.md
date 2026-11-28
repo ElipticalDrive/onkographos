@@ -1,0 +1,70 @@
+# Curvature-Constrained 2D Gradient Estimation
+
+Also called: Curvature-Constrained Normal Estimation
+
+## Overview
+Curvature-Constrained 2D Gradient Estimation refines standard 2D gradient estimation by restricting normal computation to pixels within the same continuous curvature region, preventing the blurring of sharp features across disjoint object boundaries [S1, book]. Unlike standard 2D gradient estimation, which computes normals from depth values that may represent disjoint regions in the volume, this method ensures that edges remain sharp by avoiding the blending of gradients across discontinuities [S1, book][S2, unofficial]. It builds on [2D Gradient Estimation for Shading](10739-2d-gradient-estimation-for-shading.md) by adding a context-aware filtering step before gradient calculation [G].
+
+## How it works
+**Inputs and Outputs:**
+- Input: A depth image $Z$ (distance from view plane to surface), where $Z(x, y)$ is the depth at pixel coordinates $(x, y)$ [S1, book].
+- Output: A normal vector $\vec{n} = (n_x, n_y, n_z)$ for each pixel [G].
+
+**Data Structures:**
+- Depth image $Z$: A 2D array of floating-point values representing depth [S1, book].
+- Neighborhood $N_p$: A user-defined set of pixel offsets relative to the target pixel $p$ [S2, unofficial].
+
+**Steps:**
+1. **Locate Continuous Curvature Regions:** Identify pixels that belong to the same continuous curvature region [S1, book]. Two pixels are considered to be in the same "context" if their depth values and the first derivative of the depth at these locations do not greatly differ [S2, unofficial].
+2. **Select Valid Neighbors:** For a target pixel $p$, select only those pixels within the user-defined neighborhood $N_p$ that belong to the same context as $p$ [S2, unofficial].
+3. **Estimate Gradient Components:** Compute the gradient components using only the selected valid neighbors. If standard central differences cannot be used due to context mismatch, use off-centered differences (forward or backward) [S1, book].
+   - Forward difference for x-component:
+     $$ \frac{\partial Z}{\partial x} \simeq \frac{Z(x_p + \Delta x, y_p) - Z(x_p, y_p)}{\Delta x} $$ [S1, book]
+   - Backward difference for x-component:
+     $$ \frac{\partial Z}{\partial x} \simeq \frac{Z(x_p, y_p) - Z(x_p - \Delta x, y_p)}{\Delta x} $$ [S1, book]
+   - Forward difference for y-component:
+     $$ \frac{\partial Z}{\partial y} \simeq \frac{Z(x_p, y_p + \Delta y) - Z(x_p, y_p)}{\Delta y} $$ [G]
+   - Backward difference for y-component:
+     $$ \frac{\partial Z}{\partial y} \simeq \frac{Z(x_p, y_p) - Z(x_p, y_p - \Delta y)}{\Delta y} $$ [G]
+4. **Compute Normal:** Normalize the resulting gradient vector to obtain the surface normal [G].
+
+**Parameters:**
+- $\Delta x, \Delta y$: Step sizes for finite differences. These may be reduced to improve accuracy within the curvature region [S1, book].
+- Neighborhood size: User-defined radius for context checking [S2, unofficial].
+
+**Edge Cases and Pitfalls:**
+- Disjoint boundaries: Standard central differences may blend across object edges if not constrained by curvature context [S1, book].
+- Derivative discontinuities: The first derivative of depth may vary significantly across edges, requiring careful context definition [S2, unofficial].
+
+## Subtopics
+
+### Context Sensitive Normal Estimation
+A method to provide more accurate normal estimations by detecting image discontinuities and restricting gradient estimation to pixels within the same 'context' as the target pixel [S2, unofficial]. Two pixels are in the same context if their depth values and the first derivative of the depth at these locations do not greatly differ [S2, unofficial]. This ensures that sharp object edges and slope changes are not smoothed out, unlike standard gradient shading which might blend across discontinuities [S2, unofficial].
+
+## Operating characteristics
+**Time and Memory Complexity:**
+- Time complexity: Depends on the neighborhood size and context checking overhead [S2, unofficial]. Generally faster than 3D gradient estimation [S1, book].
+- Memory complexity: Requires storage for the depth image and potentially intermediate derivative values for context checking [S2, unofficial].
+
+**Measured Performance:**
+- Not given in the sources.
+
+**Scaling:**
+- Performance scales with the size of the neighborhood and the complexity of the depth image [S2, unofficial].
+
+**Strengths and Limitations:**
+- Strengths: Prevents blurring of sharp features, maintains edge sharpness, allows quick lighting changes without recomputing depth [S1, book][S2, unofficial].
+- Limitations: Less accurate than 3D gradient estimation, requires careful tuning of context parameters [S1, book].
+
+**When to Use:**
+- Use when sharp object edges must be preserved and 3D gradient estimation is too expensive [S1, book].
+
+**When Not to Use:**
+- Do not use when high accuracy is required and 3D gradient estimation is feasible [S1, book].
+
+## Background
+Curvature-Constrained 2D Gradient Estimation was developed to address the issue of normal blurring across disjoint regions in volume rendering [S1, book]. It builds on earlier work in 2D gradient estimation and context-sensitive normal estimation [S2, unofficial]. The method is particularly useful in applications where sharp features must be preserved without the computational cost of 3D gradient estimation [S1, book].
+
+## Sources
+[S1] Chapter 7 - Advanced Computer Graphics - VTK, https://examples.vtk.org/site/VTKBook/07Chapter7/, fetched 2026-10-29 (book)
+[S2] PDF Volume Visualization: Principles and Advances, https://courses.cs.duke.edu/spring03/cps296.8/papers/KaufmanVolumeVisualization.pdf, fetched 2026-10-28 (unofficial)

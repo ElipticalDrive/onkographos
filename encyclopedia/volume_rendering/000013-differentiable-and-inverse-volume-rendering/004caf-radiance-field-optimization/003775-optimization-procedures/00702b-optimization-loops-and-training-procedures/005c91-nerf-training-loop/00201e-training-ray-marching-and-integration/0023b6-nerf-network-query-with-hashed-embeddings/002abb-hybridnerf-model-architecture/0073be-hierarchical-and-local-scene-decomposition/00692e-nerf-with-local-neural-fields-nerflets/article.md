@@ -1,0 +1,234 @@
+# NeRF with Local Neural Fields (Nerflets)
+Also called: Local Radiance Fields, Nerflets
+
+## Overview
+Nerflets represent a 3D scene as a structured, irregular set of local neural radiance fields, where each "nerflet" maintains its own spatial position, orientation, and extent to contribute to density, radiance, and semantic reconstructions within its region of influence [S1]. Unlike global implicit representations or methods requiring expensive 3D ground-truth supervision for decomposition, Nerflets optimize a joint set of local parameters using only 2D image and panoptic segmentation supervision, enabling efficient, scalable, and editable scene representation [S1].
+
+## How it works
+### Inputs and Outputs
+**Inputs:**
+*   A set of $M$ posed RGB images $\{I_m\}_{m=1}^M$ with known camera poses.
+*   (Optional) 2D panoptic segmentation masks $\{S_m\}_{m=1}^M$ aligned with the images [S1].
+*   The number of nerflets $N$ (or a mechanism to dynamically add/remove them, though the core definition assumes a fixed set during the single training stage described) [S1].
+
+**Outputs:**
+*   A set of $N$ nerflets, each defined by its pose parameters, MLP weights, semantic logit, and instance ID.
+*   Synthesized novel view images and associated semantic/instance maps [S1].
+
+### Data Structures
+Each nerflet $i$ stores the following fields [S1]:
+
+1.  **Pose Parameters (9 DOF):**
+    *   $\mu_i \in \mathbb{R}^3$: 3D center position.
+    *   $r_i \in \mathbb{R}^3$: Per-axis radii (scale).
+    *   $\theta_i \in \mathbb{R}^3$: 3D XYZ rotation angles.
+    *   These define the local coordinate frame and the spatial extent of the nerflet's influence [S1].
+2.  **Miniature MLP ($f_i$):**
+    *   A small neural network (typically a multi-layer perceptron) that takes local coordinates as input and outputs density $\sigma$ and color $c$ [S1].
+    *   *Note:* The exact architecture (layer sizes, activation functions) of the "miniature" MLP is not specified in the provided sources, other than it being "tiny" compared to global NeRF MLPs [S1].
+3.  **Semantic Logit Vector ($s_i$):**
+    *   $s_i \in \mathbb{R}^C$: A single vector storing semantic logits for $C$ categories (e.g., "car", "person") [S1].
+    *   This replaces an MLP-based semantic decoder, reducing capacity burden and providing an inductive bias for 3D spatial consistency [S1].
+4.  **Instance ID ($I_{nsi}$):**
+    *   An integer label indicating which real-world object instance the nerflet belongs to (e.g., "the third car") [S1].
+    *   Multiple nerflets can share the same instance ID to represent complex objects [S1].
+
+### Influence Function
+The influence of nerflet $i$ at a query point $x$ is determined by a Radial Basis Function (RBF) $g_i(x)$, which falls off with distance from the center $\mu_i$ [S1].
+
+First, transform the query point $x$ into the local coordinate frame of nerflet $i$:
+$$ x'_i = R_i^T (x - \mu_i) $$
+where $R_i$ is the rotation matrix derived from $\theta_i$ [S1].
+
+The normalized distance is computed using the per-axis radii $r_i = [r_{i,x}, r_{i,y}, r_{i,z}]^T$:
+$$ d_i(x) = \sqrt{ \left(\frac{x'_i[0]}{r_{i,x}}\right)^2 + \left(\frac{x'_i[1]}{r_{i,y}}\right)^2 + \left(\frac{x'_i[2]}{r_{i,z}}\right)^2 } $$
+
+The influence weight $w_{k,i}$ for a sample point $x_k$ is typically modeled as a Gaussian RBF:
+$$ w_{k,i} = \exp(-d_i(x_k)^2) $$
+*Note: The exact functional form of the RBF (e.g., specific variance scaling) is not explicitly detailed in the provided text, but the fall-off behavior is described as dependent on orientation and radii [S1].*
+
+### Numbered Steps
+
+1.  **Ray Sampling:** For a given ray (defined by origin $o$ and direction $d$), sample $K$ points $x_k$ along the ray, as in standard NeRF [S1].
+2.  **Local Coordinate Transformation:** For each sample point $x_k$ and each nerflet $i$, compute the local coordinates $x'_i$ using the nerflet's center $\mu_i$ and rotation $\theta_i$ [S1].
+3.  **Influence Weight Calculation:** Compute the influence weight $w_{k,i}$ for each nerflet $i$ at sample $x_k$ using the RBF based on the distance in the local frame and the radii $r_i$ [S1].
+4.  **Nerflet Query:** For each nerflet $i$ with non-negligible influence (or all $N$ nerflets), query the miniature MLP $f_i$ with the local coordinates $x'_i$ to obtain local density $\sigma_{k,i}$ and color $c_{k,i}$ [S1].
+    *   $\sigma_{k,i}, c_{k,i} = f_i(x'_i)$
+5.  **Aggregation:** Compute the aggregated density $\sigma_k$ and color $c_k$ at sample $x_k$ by weighting the outputs of all nerflets [S1]:
+    $$ \sigma_k = \sum_{i=1}^{N} w_{k,i} \sigma_{k,i} $$
+    $$ c_k = \frac{\sum_{i=1}^{N} w_{k,i} \sigma_{k,i} c_{k,i}}{\sum_{i=1}^{N} w_{k,i} \sigma_{k,i}} $$
+    *Note: If the denominator is zero, $c_k$ is undefined or set to a background color [G].*
+6.  **Volume Rendering:** Perform standard volume rendering integration over the samples $k=1 \dots K$ to compute the pixel color $C$ [S1]:
+    $$ C = \sum_{k=1}^{K} T_k \alpha_k c_k $$
+    where $\alpha_k = 1 - \exp(-\sigma_k \delta_k)$, $T_k = \exp(-\sum_{j=1}^{k-1} \sigma_j \delta_j)$, and $\delta_k$ is the distance between samples [S1].
+7.  **Semantic Aggregation:** The semantic logits for the pixel are aggregated similarly, weighted by the density contribution:
+    $$ s_{pixel} = \frac{\sum_{k=1}^{K} T_k \alpha_k s_i}{\sum_{k=1}^{K} T_k \alpha_k} $$
+    *Note: The exact aggregation formula for semantics across samples and nerflets is not explicitly provided in the sources, but it follows the principle of blending values produced by individual nerflets [S1]. A reasonable implementation would aggregate semantic logits weighted by the final transmittance and density contribution of each nerflet's samples.*
+8.  **Training:** Optimize all continuous parameters (pose, MLP weights, semantic logits) jointly using a single training stage with 2D supervision (photometric loss and optional panoptic segmentation loss) [S1].
+9.  **Instance Assignment:** After training, instance labels are assigned based on the scene structure (e.g., clustering nerflets with similar instance IDs or spatial proximity if not explicitly optimized) [S1].
+
+### Pseudocode
+
+> **Unverified code.** The code below did not pass a test run against a reference implementation, or no test fits it, so it may contain errors.
+
+```python
+import numpy as np
+
+def nerflet_render(ray_origin, ray_direction, nerflets, num_samples):
+    """
+    Renders a single ray using the Nerflets representation.
+    
+    Args:
+        ray_origin: (3,) array, camera origin.
+        ray_direction: (3,) array, normalized ray direction.
+        nerflets: List of Nerflet objects.
+        num_samples: Integer, number of sample points along the ray.
+        
+    Returns:
+        color: (3,) array, rendered RGB color.
+        semantic_logits: (C,) array, aggregated semantic logits.
+    """
+    # 1. Sample points along the ray
+    # Assuming a fixed range [t_min, t_max] for the scene bounds
+    t_min, t_max = 0.1, 100.0
+    t_vals = np.linspace(t_min, t_max, num_samples)
+    points = ray_origin + ray_direction * t_vals[:, np.newaxis] # (K, 3)
+    
+    aggregated_density = 0.0
+    aggregated_color = np.zeros(3)
+    aggregated_semantic = np.zeros(nerflets[0].semantic_logit.shape[0])
+    
+    transmittance = 1.0
+    
+    for k in range(num_samples):
+        x_k = points[k]
+        
+        # 2. Aggregate contributions from all nerflets
+        local_density_sum = 0.0
+        local_color_sum = np.zeros(3)
+        local_semantic_sum = np.zeros(nerflets[0].semantic_logit.shape[0])
+        
+        for nerflet in nerflets:
+            # 3. Compute influence weight
+            # Transform point to local frame
+            # R_i is rotation matrix from theta_i
+            # x'_i = R_i^T (x_k - mu_i)
+            x_local = nerflet.transform_to_local(x_k)
+            
+            # Compute normalized distance
+            # d_i = sqrt( (x'_i[0]/r_x)^2 + (x'_i[1]/r_y)^2 + (x'_i[2]/r_z)^2 )
+            normalized_dist = np.linalg.norm(x_local / nerflet.radii)
+            
+            # Influence weight (Gaussian RBF)
+            # w = exp(-d^2)
+            weight = np.exp(-normalized_dist**2)
+            
+            # 4. Query MLP
+            # sigma_i, c_i = f_i(x_local)
+            sigma_i, color_i = nerflet.mlp(x_local)
+            
+            # 5. Weighted aggregation
+            local_density_sum += weight * sigma_i
+            local_color_sum += weight * sigma_i * color_i
+            local_semantic_sum += weight * sigma_i * nerflet.semantic_logit
+            
+        # Avoid division by zero
+        if local_density_sum < 1e-6:
+            continue
+            
+        # Aggregated density and color at this sample
+        sigma_k = local_density_sum
+        color_k = local_color_sum / local_density_sum
+        semantic_k = local_semantic_sum / local_density_sum
+        
+        # 6. Volume Rendering Step
+        # alpha_k = 1 - exp(-sigma_k * delta_k)
+        # delta_k is the distance between samples (approximated as constant)
+        delta_t = t_vals[1] - t_vals[0]
+        alpha_k = 1.0 - np.exp(-sigma_k * delta_t)
+        
+        # Contribution to final color
+        contribution = transmittance * alpha_k
+        aggregated_color += contribution * color_k
+        aggregated_semantic += contribution * semantic_k
+        aggregated_density += contribution * sigma_k # For debugging/analysis
+        
+        # Update transmittance
+        transmittance *= (1.0 - alpha_k)
+        
+        # Early termination if transmittance is very low
+        if transmittance < 1e-4:
+            break
+            
+    return aggregated_color, aggregated_semantic
+
+class Nerflet:
+    def __init__(self, center, radii, rotation_angles, mlp, semantic_logit, instance_id):
+        self.center = center # (3,)
+        self.radii = radii   # (3,)
+        self.rotation_angles = rotation_angles # (3,)
+        self.mlp = mlp       # Miniature MLP function
+        self.semantic_logit = semantic_logit # (C,)
+        self.instance_id = instance_id
+        
+    def transform_to_local(self, x_world):
+        """Transform world point to local coordinate frame."""
+        # Construct rotation matrix from XYZ angles
+        R = self._rotation_matrix_from_angles(self.rotation_angles)
+        R_inv = R.T # Inverse of rotation matrix is transpose
+        
+        # x_local = R_inv * (x_world - center)
+        x_local = R_inv @ (x_world - self.center)
+        return x_local
+        
+    def _rotation_matrix_from_angles(self, angles):
+        """Construct rotation matrix from XYZ Euler angles."""
+        # Standard rotation matrices
+        Rx = np.array([[1, 0, 0],
+                       [0, np.cos(angles[0]), -np.sin(angles[0])],
+                       [0, np.sin(angles[0]), np.cos(angles[0])]])
+        Ry = np.array([[np.cos(angles[1]), 0, np.sin(angles[1])],
+                       [0, 1, 0],
+                       [-np.sin(angles[1]), 0, np.cos(angles[1])]])
+        Rz = np.array([[np.cos(angles[2]), -np.sin(angles[2]), 0],
+                       [np.sin(angles[2]), np.cos(angles[2]), 0],
+                       [0, 0, 1]])
+        return Rz @ Ry @ Rx
+```
+
+### Parameters and Typical Values
+*   **Number of Nerflets ($N$):** Not given in the sources. Depends on scene complexity.
+*   **MLP Size:** "Miniature" or "tiny". Specific layer sizes not given [S1].
+*   **Pose Parameters:** 9 per nerflet (3 center, 3 radii, 3 rotation) [S1].
+*   **Training:** Single stage, joint optimization [S1].
+
+### Edge Cases and Pitfalls
+*   **Zero Density:** If $\sum w_{k,i} \sigma_{k,i} = 0$, the color aggregation is undefined. A guard condition should return a background color or transparent value [G].
+*   **Degenerate Pose:** If radii are zero or rotation is singular, the local transformation may fail. Initialization should ensure non-zero radii [G].
+*   **Overlap:** Nerflets may overlap. The RBF weighting handles this, but care must be taken to ensure smooth transitions and avoid artifacts from conflicting semantic labels [S1].
+
+## Subtopics
+
+### Incremental Implicit Scene Representation
+An alternative approach that builds the scene representation incrementally, adding new nerflets as needed, rather than optimizing a fixed set. It focuses on dynamic scene updates. [Link](21737-incremental-implicit-scene-representation.md)
+
+## Operating characteristics
+*   **Time Complexity:** Rendering time is proportional to $N \times K$, where $N$ is the number of nerflets and $K$ is the number of samples per ray. However, only nearby nerflets contribute significantly due to the RBF fall-off, allowing for spatial indexing to optimize queries. Training time is comparable to global NeRF but with smaller MLPs per nerflet.
+*   **Memory Complexity:** Memory scales with $N \times (\text{MLP size} + \text{pose size})$. This can be more efficient than a single large MLP for complex scenes if $N$ is small, but may be less efficient if $N$ is very large.
+*   **Strengths:**
+    *   **Efficiency:** Smaller MLPs per nerflet reduce computational load per query.
+    *   **Scalability:** Local decomposition allows handling large scenes.
+    *   **Editability:** Explicit structure allows direct editing of objects as geometric primitives [S1].
+    *   **2D Supervision:** Requires only 2D images and panoptic masks, avoiding expensive 3D ground truth [S1].
+*   **Limitations:**
+    *   **Complexity of Decomposition:** Determining the optimal number and placement of nerflets is non-trivial.
+    *   **Overlap Artifacts:** Improperly tuned RBFs or overlapping nerflets with conflicting semantics can cause artifacts.
+    *   **Instance Assignment:** Post-training instance assignment may require additional heuristics [S1].
+*   **When to Use:** Scenes requiring efficient, editable, and semantically aware 3D representation from 2D supervision. Ideal for robotics and AR/VR applications where object-level interaction is needed.
+*   **When Not to Use:** Scenes with very high frequency details that require a large number of nerflets, or where global coherence is more important than local editability.
+
+## Background
+Nerflets were introduced by Xiaoshuai Zhang, Abhijit Kundu, Thomas Funkhouser, Leonidas Guibas, Hao Su, and Kyle Genova from Google Research, Stanford University, and UC San Diego in 2023 [S1]. The work addresses the limitations of existing semantics-aware NeRF methods, such as Panoptic Neural Fields (PNF) and DM-NeRF, which either require expensive 3D supervision or lack explicit structure for editing [S1]. The method builds on the principles of hierarchical and local scene decomposition [Link](22843-hierarchical-and-local-scene-decomposition.md).
+
+## Sources
+[S1] Nerflets: Local Radiance Fields for Efficient Structure-Aware 3D Scene Representation from 2D Supervision, https://doi.org/10.1109/cvpr52729.2023.00800, fetched 2026-10-26

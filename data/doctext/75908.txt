@@ -1,0 +1,940 @@
+# Terminal SDF Renderer
+A terminal based implementation of SDF rendering with raymarching.
+## Features:
+- Smooth primitive morphing operations
+- Dynamic camera that can be moved and rotated
+- Domain repetition to render primitives infinitely
+
+![infinite spheres](https://media.giphy.com/media/q4cGa94FGaBWc0Xxmh/giphy.gif)
+![morphing spheres](https://media.giphy.com/media/uaVc3UVwj0PLrIyyr4/giphy.gif)
+
+## Sources
+- [SDF operations](https://iquilezles.org/articles/distfunctions/)
+- [Makefile base](https://makefiletutorial.com/)
+
+### src/cpp/Camera.cpp
+```
+#include <cmath>
+#include "constants.h"
+#include "Camera.h"
+#include "Vector3d.h"
+
+Camera::Camera(double half_fov_deg_x, double aspect, Vector3d pos)
+{
+    this->half_fov_rad_x = (half_fov_deg_x * PI)/180.0;
+
+    near_plane_width = 2.0*std::tan(half_fov_rad_x);
+    near_plane_height = near_plane_width * (1.0/aspect);
+
+    this->pos = pos;
+
+    forward = Vector3d(0,0,1.0);
+    up = Vector3d(0,1.0,0);
+    right = Vector3d::Cross(up, forward);  
+}
+
+Vector3d Camera::ndc_to_world_pos(double ndc_x, double ndc_y)
+{
+    Vector3d view_space_pos = forward + 
+        right * (ndc_x-0.5)*near_plane_width +
+        up * (ndc_y-0.5)*near_plane_height;
+
+    Vector3d world_space_pos = view_space_pos + pos;
+    return world_space_pos;
+}
+
+void Camera::rotate(char axis, double ang)
+{
+    switch (axis)
+    {
+        case 'x':
+            forward = forward.rotate_x(ang);
+            up = up.rotate_x(ang);
+            right = right.rotate_x(ang);
+            break;
+        case 'y':
+            forward = forward.rotate_y(ang);
+            up = up.rotate_y(ang);
+            right = right.rotate_y(ang);
+            break;
+        case 'z':
+            forward = forward.rotate_z(ang);
+            up = up.rotate_z(ang);
+            right = right.rotate_z(ang);
+            break;
+        default:
+            break;
+    }
+}
+```
+
+### src/cpp/SDF.cpp
+```
+#include "Vector3d.h"
+#include <cmath>
+
+float sdf_sphere(Vector3d pos, float radius)
+{
+    return pos.Length() - radius;
+}
+
+float sdf_box(Vector3d pos, Vector3d box)
+{
+    Vector3d q = Vector3d::Abs(pos) - box; 
+    return Vector3d::Max(q, 0.0).Length() + std::fmin(std::fmax(q.x, std::fmax(q.y, q.z)),0.0);
+}
+
+double op_union(double d1, double d2) { return std::min(d1,d2); }
+double op_intersection(double d1, double d2) { return std::max(d1,d2); }
+double op_subtraction(double d1, double d2) { return std::max(-d1,d2); }
+double op_xor(double d1, double d2) { return std::max(std::min(d1,d2), -std::max(d1,d2)); }
+
+double op_smooth_union(double d1, double d2, double k)
+{
+    k *= 4.0;
+    double h = std::max(k-std::abs(d1-d2), 0.0);
+    return std::min(d1,d2) - h*h*0.25/k;
+}
+
+Vector3d repeat_coords(Vector3d pos, Vector3d spacing)
+{
+    Vector3d repeated_pos = pos - (spacing*Vector3d::Round(pos/spacing));
+    return repeated_pos;
+}
+```
+
+### src/cpp/Screen.cpp
+```
+#include <iostream>
+#include <string>
+
+// only need these for getting screen width and height
+#include <sys/ioctl.h> //ioctl() and TIOCGWINSZ
+#include <unistd.h> // for STDOUT_FILENO
+
+#include "Screen.h"
+#include "constants.h"
+
+// apsect here is as standard i.e. w/h
+Screen::Screen(int height, double aspect)
+{
+    this->height = height;
+    width = height * aspect * CHAR_ASPECT;
+    pixels = width * height;
+    pixels_vector = std::vector<char>(pixels, EMPTY_CHAR);
+    modifiers_vector = std::vector<std::string>(pixels, "");
+
+    this->aspect = aspect;
+
+    half_pixel_width = 1.0/(2.0*width); // in ndc space
+    half_pixel_height = 1.0/(2.0*height); // in ndc space
+    
+    gradient_size = gradient.size();
+}
+
+// makes fullscreen
+Screen::Screen()
+{
+    struct winsize size;
+    ioctl(STDOUT_FILENO, TIOCGWINSZ, &size);
+    height = size.ws_row;
+    width = size.ws_col;
+
+    pixels = width * height;
+    pixels_vector = std::vector<char>(pixels, EMPTY_CHAR);
+    modifiers_vector = std::vector<std::string>(pixels, "");
+
+    aspect = (width/height) / CHAR_ASPECT;
+
+    half_pixel_width = 1.0/(2.0*width); // in ndc space
+    half_pixel_height = 1.0/(2.0*height); // in ndc space
+}
+
+void Screen::print_buffer()
+{
+    for (int row=0; row<height; row++)
+    {
+        for (int col=0; col<width; col++)
+        {
+            // reset all ANSI modifiers relating to styles and colours
+            std::cout << "\x1B[0m";
+
+            int index = col + row*width;
+            std::cout << modifiers_vector[index] << pixels_vector[index];
+        }
+        std::cout << std::endl;
+    }
+}
+
+void Screen::clear_buffer()
+{
+    for (int i=0; i < pixels; i++)
+    {
+        pixels_vector[i] = EMPTY_CHAR;
+        modifiers_vector[i] = "";
+    }
+}
+
+bool Screen::set_pixel(int pixel_index, double brightness, double depth_percentage)
+{
+    if (pixel_index >= 0 && pixel_index < pixels)
+    {
+        int gradient_index = std::floor((std::max(brightness-0.0001,0.0)) * gradient_size);
+        pixels_vector[pixel_index] = gradient[gradient_index];
+
+        if (depth_percentage > 0.666)
+            modifiers_vector[pixel_index] = "\u001b[2m";
+        else if (depth_percentage > 0.333)
+            modifiers_vector[pixel_index] = "";
+        else
+            modifiers_vector[pixel_index] = "\u001b[1m";
+
+        return true;
+    }
+    return false;
+}
+
+void Screen::pi_to_ndc(int pixel_index, double& ndc_x, double& ndc_y) const
+{
+    int row = pixel_index / width;
+    int col = pixel_index % width;
+    ndc_x = (col / static_cast<double>(width)) + half_pixel_width; 
+    ndc_y = row / static_cast<double>(height) - half_pixel_height;
+}
+
+void Screen::clear_terminal()
+{
+    std::cout << "\x1B[H" << "\x1B[J";
+}
+
+void Screen::hide_cursor()
+{
+    std::cout << "\x1b[?25l";
+}
+
+void Screen::unhide_cursor()
+{
+    std::cout << "\x1b[?25h";
+}
+```
+
+### src/cpp/Vector3d.cpp
+```
+#include <iostream>
+#include <cmath>
+#include "constants.h"
+#include "Vector3d.h"
+
+float Vector3d::Length() const
+{
+    return std::sqrtf(this->x*this->x + this->y*this->y + this->z*this->z);
+}
+
+Vector3d Vector3d::Normalize() const
+{
+    double len = this->Length();
+    return Vector3d(x/len,y/len,z/len);
+}
+
+Vector3d Vector3d::rotate_x(double theta)
+{
+    theta /= DEG_TO_RAD; 
+    double c_theta = std::cos(theta);
+    double s_theta = std::sin(theta);
+    double new_x = x;
+    double new_y = c_theta*y - s_theta*z;
+    double new_z = s_theta*y + c_theta*z;  
+    
+    return Vector3d(new_x, new_y, new_z);
+}
+
+Vector3d Vector3d::rotate_y(double theta)
+{
+    theta /= DEG_TO_RAD; 
+    double c_theta = std::cos(theta);
+    double s_theta = std::sin(theta);
+    double new_x = c_theta*x + s_theta*z;;
+    double new_y = y;
+    double new_z = -s_theta*x + c_theta*z;  
+    
+    return Vector3d(new_x, new_y, new_z);
+}
+
+Vector3d Vector3d::rotate_z(double theta)
+{
+    theta /= DEG_TO_RAD; 
+    double c_theta = std::cos(theta);
+    double s_theta = std::sin(theta);
+    double new_x = c_theta*x - s_theta*y;
+    double new_y = s_theta*x + c_theta*y;
+    double new_z = z;  
+    
+    return Vector3d(new_x, new_y, new_z);
+}
+
+std::ostream& operator<<(std::ostream& os, const Vector3d& v)
+{
+    os << "(" << v.x<< ", " << v.y << ", " << v.z << ")";
+    return os;
+}
+```
+
+### src/cpp/graphics_context.cpp
+```
+#include "Camera.h"
+#include "Screen.h"
+#include "Vector3d.h"
+#include "graphics_context.h"
+
+GraphicsContext::GraphicsContext(int screen_height, double aspect,
+                                 double half_fov_x, Vector3d cam_pos,
+                                 int steps, double dist, double eps)
+    :   cam(half_fov_x, aspect, cam_pos),
+        screen(screen_height, aspect),
+        raymarcher(steps, dist, eps)
+{
+    lights.push_back(Light(Vector3d(1,1,1),1.0));
+}
+
+void GraphicsContext::draw_frame()
+{
+    // move and rotate the camera
+    //cam.rotate('z', 1);
+    //cam.pos = cam.pos + Vector3d(0,0,0.1);
+    screen.clear_buffer();
+
+    for (int i=0; i < screen.get_pixel_count(); i++)
+    {
+        Vector3d normal;
+        double hit_distance;
+        double ndc_x, ndc_y;
+        screen.pi_to_ndc(i,ndc_x,ndc_y);
+
+        Vector3d pixel_wpos = cam.ndc_to_world_pos(ndc_x, ndc_y);
+        bool hit = raymarcher.raymarch(cam.pos, pixel_wpos, normal, hit_distance); 
+
+        if (hit)
+        {
+            double light = get_normalised_light(normal);
+            double depth_percentage = hit_distance / raymarcher.get_max_dist();
+            screen.set_pixel(i,light, depth_percentage);
+        }   
+    }
+
+    Screen::clear_terminal();
+    screen.print_buffer();
+}
+
+double GraphicsContext::get_normalised_light(const Vector3d& normal)
+{
+    double light = 0;
+    for (Light l : lights)
+    {
+        light += l.calculate_diffuse(normal);
+    }
+    return light;
+}
+
+GraphicsContext::~GraphicsContext()
+{
+}
+```
+
+### src/cpp/light.cpp
+```
+#include <algorithm>
+#include "Vector3d.h"
+#include "light.h"
+
+Light::Light(Vector3d direction, double strength)
+{
+    this->direction = direction.Normalize();
+    this->strength = strength;
+}
+
+double Light::calculate_diffuse(Vector3d normal)
+{
+    double diffuse = direction.Dot(normal) * strength; 
+    return std::max(0.0,diffuse);
+}
+```
+
+### src/cpp/main.cpp
+```
+#include <chrono>
+#include <thread>
+#include <cmath>
+#include <csignal>
+#include <list>
+
+#include "Vector3d.h"
+#include "sdf.h"
+#include "Camera.h"
+#include "Screen.h"
+#include "constants.h"
+#include "raymarch.h"
+#include "light.h"
+#include "graphics_context.h"
+
+volatile bool STOP = false;
+void sigint_handler(int sig);
+
+int main()
+{
+    std::signal(SIGINT, sigint_handler);
+    std::ios_base::sync_with_stdio(false);
+    std::chrono::duration<double> frame_duration(FRAME_TIME);
+
+    const int HEIGHT = 60;
+    const double ASPECT = 1.1;
+    const double HALF_FOV_DEG_X = 45.0;
+    const Vector3d CAM_START_POS = Vector3d(0,0,0);
+    const int MAX_STEPS = 200;
+    const double MAX_DIST = 30.0;
+    const double EPS = 0.001;
+
+    GraphicsContext gc = GraphicsContext(HEIGHT, ASPECT, HALF_FOV_DEG_X, CAM_START_POS,
+                                         MAX_STEPS, MAX_DIST, EPS);
+
+    Screen::hide_cursor();
+
+    // Setup lights
+    std::list<Light> lights;
+    lights.push_back(Light(Vector3d(1,1,1), 1.0));
+
+    while(1)
+    {
+        if (STOP)
+            break;
+
+        gc.draw_frame();
+
+        std::this_thread::sleep_for(frame_duration);
+    }
+    return 0;
+}
+
+void sigint_handler(int sig)
+{
+    Screen::unhide_cursor();
+    STOP = true;
+}
+```
+
+### src/cpp/raymarch.cpp
+```
+#include <chrono>
+#include "Screen.h"
+#include "Camera.h"
+#include "constants.h"
+#include "sdf.h"
+#include "raymarch.h"
+#include "Vector3d.h"
+#include "scenes.h"
+
+Raymarcher::Raymarcher(int steps, double dist, double eps)
+    : MAX_STEPS(steps), MAX_DIST(dist), EPS(eps)
+{
+}
+
+bool Raymarcher::raymarch(Vector3d& cam_pos, Vector3d& pixel_wpos, Vector3d& normal, double& dist)
+{
+    Vector3d ro = cam_pos;
+    Vector3d rd = (pixel_wpos - ro).Normalize(); 
+    
+    double total_dist = 0.0;
+    int step = 0;
+    while (step < MAX_STEPS && total_dist < MAX_DIST)
+    {
+        Vector3d sample_pos = ro +rd*total_dist;
+        double SDF_sample = scene(sample_pos);
+        /*
+        if (SDF_sample < 0)
+            return false;
+        */
+        if (SDF_sample < EPS)
+        {
+            normal = get_normal(sample_pos);
+            dist = total_dist;
+            return true;
+        }
+
+        total_dist += SDF_sample;
+        step++;
+    }
+    return false;
+}
+
+Vector3d Raymarcher::get_normal(Vector3d pos)
+{
+    double eps = 0.0001;
+    double x = scene(pos + Vector3d(eps,0.0,0.0)) - scene(pos - Vector3d(eps,0.0,0.0));
+    double y = scene(pos + Vector3d(0.0,eps,0.0)) - scene(pos - Vector3d(0.0,eps,0.0));
+    double z = scene(pos + Vector3d(0.0,0.0,eps)) - scene(pos - Vector3d(0.0,0.0,eps));
+    return Vector3d(x,y,z).Normalize() * -1.0;
+}
+
+
+double Raymarcher::scene(Vector3d pos)
+{
+    //return radial_spheres(pos);
+    //return near_plane_test(pos);
+    return spheres_around_a_cube(pos);
+    //return infinite_spheres(pos);
+    return four_boxes_and_sphere(pos);
+}
+```
+
+### src/cpp/scenes.cpp
+```
+#include <chrono>
+#include <cmath>
+#include "sdf.h"
+#include "Vector3d.h"
+#include "constants.h"
+
+double get_current_time();
+
+double four_boxes_and_sphere(Vector3d pos)
+{
+    double cur_time = get_current_time();
+    double morph = 0.15;
+    Vector3d box_size = Vector3d(0.5,0.5,1);
+
+    double box1 = sdf_box(pos - Vector3d(-1.5,0,3), box_size);
+    double box2 = sdf_box(pos - Vector3d(1.5,0,3), box_size);
+    double box3 = sdf_box(pos - Vector3d(0,1.5,3), box_size);
+    double box4 = sdf_box(pos - Vector3d(0,-1.5,3), box_size);
+    double u = op_smooth_union(box1,box2,morph);
+    u = op_smooth_union(box3,u, morph);
+    u = op_smooth_union(box4,u,morph);
+
+    double speed = 2.0;
+    Vector3d sphere_pos = Vector3d(1.5*std::sin(speed * cur_time), 1.5*std::cos(speed * cur_time), 3);
+    double sphere = sdf_sphere(pos - sphere_pos, 1);
+    u = op_smooth_union(sphere, u, morph);
+
+    return u;
+}
+
+double spheres_around_a_cube(Vector3d pos)
+{
+    double cur_time = get_current_time();
+
+    double morph = 0.2;
+    Vector3d sphere1_centre = Vector3d(-1,0,3);
+    Vector3d sphere1_offset = Vector3d(std::sin(-cur_time * 1.5), std::cos(-cur_time * 1.5), 0);
+    Vector3d sphere2_centre = Vector3d(1,0,3);
+    Vector3d sphere2_offset = Vector3d(std::sin(cur_time * 1.5), std::cos(cur_time * 1.5), 0);
+    double sphere1 = sdf_sphere(pos - (sphere1_centre + sphere2_offset), 0.5);
+    double sphere2 = sdf_sphere(pos - (sphere2_centre - sphere2_offset), 0.5);
+    double sphere3 = sdf_sphere(pos - (sphere1_centre - sphere1_offset), 0.5);
+    double sphere4 = sdf_sphere(pos - (sphere2_centre + sphere1_offset), 0.5);
+
+    double box = sdf_box((pos- Vector3d(0,0,3)).rotate_x(cur_time * 50.0), Vector3d(0.5,0.5,0.5));
+
+    double u = op_smooth_union(sphere1, sphere2, morph);
+    u = op_smooth_union(u, sphere3, morph);
+    u = op_smooth_union(u, sphere4, morph);
+    u = op_smooth_union(u, box, morph);
+    return u;
+}
+
+double radial_spheres(Vector3d pos)
+{
+    double cur_time = get_current_time();
+    int sphere_count = 3;
+    double radius = 0.7;
+
+    Vector3d box_pos = Vector3d(0,0,3);
+    double u = sdf_box((pos-box_pos).rotate_x(cur_time*50.0), Vector3d(0.5,0.5,0.5));
+    double move_radius = 3.0;
+    double morph = 0.1;
+
+    double interpolation = (std::sin(cur_time) + 1.0)/2.0;
+    for (int i=0; i < sphere_count; i++)
+    {
+        double ang = 2*PI * i/static_cast<double>(sphere_count); 
+        Vector3d endpoint = Vector3d(std::sin(ang), std::cos(ang),0) * interpolation * move_radius + box_pos; 
+        double s = sdf_sphere(pos - endpoint, radius);
+        u = op_smooth_union(u,s,morph);
+    }
+
+    return u;
+}
+
+double near_plane_test(Vector3d pos)
+{
+    double cur_time = get_current_time();
+    Vector3d c = Vector3d(0,0,cur_time);
+    double u = sdf_sphere(pos - c, 1.0);
+    return u;
+}
+
+double infinite_spheres(Vector3d pos)
+{
+    Vector3d offset = Vector3d(3,3,3);
+    Vector3d new_pos = repeat_coords(pos - offset, Vector3d(6,6,6));// + Vector3d(1.5,0,1.5);
+    return sdf_sphere(new_pos, 1.7);
+}
+
+
+double get_current_time()
+{
+    auto now = std::chrono::high_resolution_clock::now();
+    std::chrono::duration<double> diff = now - START_TIME;
+    double cur_time = diff.count();
+    
+    return cur_time;
+}
+```
+
+### src/headers/Camera.h
+```
+#ifndef CAMERA_H
+#define CAMERA_H
+
+#include "Vector3d.h"
+
+// assuming the near plane is at z=1 in view space and that 
+// the Camera is facing in the postive z with no rotation
+class Camera
+{
+private:
+    double half_fov_rad_x;
+
+    double near_plane_width;
+    double near_plane_height;
+
+    Vector3d forward;
+    Vector3d up;
+    Vector3d right;
+
+public:
+    Vector3d pos;
+
+    inline Vector3d get_right() { return right; }
+    Camera(double x_fov_deg, double y_fov_deg, Vector3d pos);
+
+    void rotate(char axis, double ang);
+    Vector3d ndc_to_world_pos(double ndc_x, double ndc_y);
+};
+
+#endif
+```
+
+### src/headers/SDF.h
+```
+#ifndef SDF
+#define SDF
+
+#include "Vector3d.h"
+
+float sdf_sphere(Vector3d pos, float radius);
+float sdf_box(Vector3d pos, Vector3d box);
+
+double op_union(double d1, double d2);
+double op_intersection(double d1, double d2);
+double op_subtraction(double d1, double d2);
+double op_xor(double d1, double d2);
+
+double op_smooth_union(double d1, double d2, double k);
+double op_smooth_intersection(double d1, double d2, double k);
+double op_smooth_subtraction(double d1, double d2, double k);
+
+// repeats the coords 
+Vector3d repeat_coords(Vector3d pos, Vector3d spacing);
+
+#endif
+```
+
+### src/headers/Screen.h
+```
+#ifndef SCREEN_H
+#define SCREEN_H
+
+#include <vector>
+#include <string>
+
+class Screen
+{
+private:
+    const char EMPTY_CHAR = ' ';
+    const double CHAR_ASPECT = 2.0;
+    const std::string gradient = ".:-=+*%#@"; //9
+    int gradient_size;
+
+    // the width and height of the screen in pixels
+    int width;
+    int height;
+    int pixels;
+
+    // the aspect ratio of the screen accounting for the aspect ratio of a character 
+    double aspect;
+
+    // the distance from a pixel corner to its centre
+    double half_pixel_width; // in NDC space
+    double half_pixel_height; //in NDC space
+    
+    // the actual character representation of the screen
+    std::vector<char> pixels_vector;
+    std::vector<std::string> modifiers_vector;
+
+public:
+    // constructors
+    Screen(int height, double asepct);
+    Screen();
+
+    // output the screen to the terminal
+    void print_buffer();
+    // sets each entry in screen to EMPTY_CHAR
+    void clear_buffer();
+    // sets the value of a pixel at a given pixel
+    bool set_pixel(int pixel_index, double brightness, double depth_percentage);
+    void pi_to_ndc(int pi, double& ndc_x, double& ndc_y) const;
+
+    // getters
+    inline int get_pixel_count() const { return pixels; }
+    inline double get_aspect() const { return aspect; }
+    inline char get_empty_char() const { return EMPTY_CHAR; }
+
+    // static methods
+    static void clear_terminal();
+    static void hide_cursor();
+    static void unhide_cursor();
+};
+
+#endif
+```
+
+### src/headers/Vector3d.h
+```
+#ifndef VECTOR_3D
+#define VECTOR_3D
+
+#include <cmath>
+#include <iostream>
+
+struct Vector3d
+{
+    // variables
+    float x, y, z;
+
+    // inline defined functions
+    inline Vector3d(void) {}
+    inline Vector3d(const float x, const float y, const float z)
+    {
+        this->x = x;
+        this->y = y;
+        this->z = z;
+    }
+
+    inline Vector3d operator * (float A) const { return Vector3d(A*x, A*y, A*z); }
+    inline Vector3d operator * (double A) const { return Vector3d(A*x, A*y, A*z); }
+
+    inline Vector3d operator * (Vector3d v) { return Vector3d(x*v.x, y*v.y, z*v.z); }
+    inline Vector3d operator / (Vector3d& v) { return Vector3d(x/v.x, y/v.y, z/v.z); }
+
+    inline Vector3d operator + (const Vector3d& A) const { return Vector3d(x + A.x, y + A.y, z + A.z); }
+    inline Vector3d operator - (const Vector3d& A) const { return *this + (A*(-1.0)); }
+
+    inline Vector3d operator + (float A) const {return Vector3d(x + A, y + A, z + A); }
+    inline Vector3d operator - (float A) const {return *this + (-A); }
+
+    inline Vector3d operator % (float A) const { return Vector3d(
+        std::fmod(x,A), 
+        std::fmod(y,A),
+        std::fmod(z,A)); 
+    }
+
+    inline float Dot(const Vector3d& A)
+    {
+        return x*A.x + y*A.y + z*A.z;
+    }
+
+    // member functions
+    float Length() const;
+    Vector3d Normalize() const;
+    Vector3d rotate_x(double ang);
+    Vector3d rotate_y(double ang);
+    Vector3d rotate_z(double ang);
+
+    // static functions
+    static Vector3d Max(const Vector3d &v, float a)
+    {
+        return Vector3d(
+            v.x > a ? v.x : a,
+            v.y > a ? v.y : a,
+            v.z > a ? v.z : a
+        );
+    }
+
+    static Vector3d Min(const Vector3d &v, float a)
+    {
+        return Vector3d(
+            v.x < a ? v.x : a,
+            v.y < a ? v.y : a,
+            v.z < a ? v.z : a
+        );
+    }
+
+    static Vector3d Max(const Vector3d& v1, const Vector3d& v2)
+    {
+        return Vector3d(
+            v1.x > v2.x ? v1.x : v2.x,
+            v1.y > v2.y ? v1.y : v2.y,
+            v1.z > v2.z ? v1.z : v2.z
+        );
+    }
+
+    static Vector3d Abs(const Vector3d& v)
+    {
+        return Vector3d(
+            v.x >= 0 ? v.x : -v.x,
+            v.y >= 0 ? v.y : -v.y,
+            v.z >= 0 ? v.z : -v.z
+        );
+    }
+
+    static Vector3d Round(const Vector3d& v)
+    {
+        return Vector3d(std::round(v.x), std::round(v.y), std::round(v.z));
+    }
+
+    static Vector3d Cross(Vector3d v1, Vector3d v2)
+    {
+        return Vector3d(v1.y*v2.z - v1.z*v2.y,
+                        v1.z*v2.x - v1.x*v2.z,
+                        v1.x*v2.y - v1.y*v2.x);
+    }
+
+    // friends (helper functions)
+    friend std::ostream& operator <<(std::ostream& os, const Vector3d& v);
+};
+
+
+#endif
+```
+
+### src/headers/constants.h
+```
+#ifndef CONSTANTS
+#define CONSTANTS
+
+#include <chrono>
+
+const float PI = 3.14159265359;
+const int FPS = 30;
+const double FRAME_TIME = 1.0/FPS;
+
+const auto START_TIME = std::chrono::high_resolution_clock::now();
+
+const double DEG_TO_RAD = 180.0/PI;
+
+#endif
+```
+
+### src/headers/graphics_context.h
+```
+#ifndef GRAPHICS_CONTEXT_H
+#define GRAPHICS_CONTEXT_H
+
+#include <list>
+
+#include "Camera.h"
+#include "Screen.h"
+#include "Vector3d.h"
+#include "raymarch.h"
+#include "light.h"
+
+class GraphicsContext
+{
+private:
+    Camera cam;
+    Screen screen;
+    Raymarcher raymarcher;
+    std::list<Light> lights;
+public:
+    //constructor
+    GraphicsContext(int screen_height, double aspect, 
+                    double half_fov_x, Vector3d cam_pos,
+                    int steps, double dist, double eps);
+
+    void draw_frame();
+    double get_normalised_light(const Vector3d& normal);
+    //destructor
+    ~GraphicsContext();
+};
+
+#endif
+```
+
+### src/headers/light.h
+```
+#ifndef LIGHT_H 
+#define LIGHT_H
+
+#include "Vector3d.h"
+
+class Light
+{
+private:
+    Vector3d direction;
+    double strength;
+
+public:
+    // constructors 
+    Light(Vector3d direction, double strength);
+
+    double calculate_diffuse(Vector3d normal);
+};
+
+#endif
+```
+
+### src/headers/raymarch.h
+```
+#ifndef RAYMARCH_H
+#define RAYMARCH_H
+
+#include "Screen.h"
+#include "Camera.h"
+#include "Vector3d.h"
+
+class Raymarcher
+{
+private:
+    const int MAX_STEPS = 200;
+    const double MAX_DIST = 500.0; 
+    const double EPS = 0.001;
+
+public:
+    // constructors
+    Raymarcher(int steps, double dist, double eps);
+    
+    bool raymarch(Vector3d& cam_pos, Vector3d& pixel_pos, Vector3d& normal, double& dist);
+    Vector3d get_normal(Vector3d pos);
+    double scene(Vector3d pos);
+
+    // getters
+    double get_max_dist() { return MAX_DIST; }
+};
+
+#endif
+```
+
+### src/headers/scenes.h
+```
+#ifndef SCENES_H
+#define SCENES_H
+
+#include "Vector3d.h"
+
+double four_boxes_and_sphere(Vector3d pos);
+double spheres_around_a_cube(Vector3d pos);
+double radial_spheres(Vector3d pos);
+double near_plane_test(Vector3d pos);
+double infinite_spheres(Vector3d pos);
+
+#endif
+```

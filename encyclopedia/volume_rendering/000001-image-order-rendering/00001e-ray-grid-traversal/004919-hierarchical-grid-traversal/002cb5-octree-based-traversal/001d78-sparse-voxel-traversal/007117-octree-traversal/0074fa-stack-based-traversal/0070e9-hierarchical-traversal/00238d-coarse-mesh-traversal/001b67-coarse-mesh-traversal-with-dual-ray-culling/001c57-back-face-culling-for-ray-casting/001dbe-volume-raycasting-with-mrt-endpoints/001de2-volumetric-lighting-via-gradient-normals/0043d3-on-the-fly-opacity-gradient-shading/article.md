@@ -1,0 +1,158 @@
+# On-the-fly Opacity Gradient Shading
+
+Also called: Categorical Gradient Shading, Opacity Gradient Shading
+
+## Overview
+A shading technique for categorical volume labels where surface normals are estimated from opacity gradients because the volume gradient cannot be used as a normal [S1]. It sets itself apart from standard gradient-based shading by pre-filtering light contributions through a Mixture Graph rather than averaging normals, which avoids artifacts in discrete segmentations [S1].
+
+## How it works
+**Inputs and Outputs:**
+*   **Input:** A categorical volume segmentation (voxel labels) [S1].
+*   **Output:** A Mixture Graph where leaf nodes store pre-computed lighting contributions (diffuse and specular) for each voxel across each Level of Detail (LOD), derived from quantized normals [S1].
+
+**Data Structures:**
+*   **Feature Mask:** Binary volume marking voxels at boundaries between two segments [S1].
+*   **Distance Transform:** Unsigned distance to the feature mask [S1].
+*   **Normal Volume:** Quantized categorical values representing normals [S1].
+*   **Mixture Graph:** A hierarchical data structure where leaf nodes store normals for the second graph or lighting contributions, and internal nodes aggregate data for LODs [S1].
+
+**Steps:**
+1.  **Tag Features:** Identify voxels at the boundary between two distinct segments as "features" [S1].
+2.  **Distance Transform:** Compute an unsigned distance transform to these features using the method of Schneider et al. [45] [S1].
+3.  **Erosion:** Erode the feature mask by two voxels [S1].
+4.  **Band Smoothing:** Smooth the distance transform inside a thin band around the segment surfaces to compensate for artifacts due to finite voxel resolution [S1].
+5.  **Gradient Computation:** Compute gradients using centered differences on the smoothed distance field [S1].
+6.  **Interior Smoothing:** Flip the feature mask. Smooth the remaining gradients in the interior of the segments using isotropic diffusion to alleviate discontinuities across ridges of the medial axis [S1].
+7.  **Quantization:** Quantize the resulting normals using vector quantization to 9 bits [S1].
+8.  **Error Diffusion:** Apply 3D error diffusion to alleviate banding effects [S1].
+9.  **Graph Construction:** Store the resulting categorical normal values in a second Mixture Graph where leafs store normals [S1].
+10. **Lighting Propagation:** Evaluate a shading model at each leaf. Propagate the resulting light contributions for diffuse and specular components through the graph to obtain a lookup table for each voxel across each LOD [S1].
+
+**Pseudocode:**
+> **Unverified code.** The code below did not pass a test run against a reference implementation, or no test fits it, so it may contain errors.
+
+```python
+def compute_opacity_gradient_shading(categorical_volume):
+    # Step 1: Tag features at boundaries
+    feature_mask = compute_boundary_mask(categorical_volume)
+    # Step 2: Unsigned distance transform
+    distance_field = compute_distance_transform(feature_mask)
+    # Step 3: Erode feature mask by two voxels
+    eroded_mask = distance_field >= 2
+    # Step 4: Smooth distance transform in thin band
+    smoothed_distance = smooth_band(distance_field, ~eroded_mask)
+    # Step 5: Compute gradients using centered differences
+    gradients = compute_centered_gradients(smoothed_distance)
+    # Step 6: Flip feature mask and smooth interior gradients
+    interior_mask = eroded_mask
+    final_normals = smooth_interior_gradients(gradients, interior_mask)
+    # Step 7: Quantize normals to 9 bits
+    quantized_normals = vector_quantize_9bit(final_normals)
+    # Step 8: 3D Error Diffusion
+    dithered_normals = apply_3d_error_diffusion(quantized_normals)
+    # Step 9: Store in Mixture Graph
+    normal_graph = MixtureGraph(dithered_normals)
+    # Step 10: Evaluate shading and propagate
+    lighting_lut = propagate_lighting(normal_graph)
+    return lighting_lut
+
+def compute_boundary_mask(volume):
+    mask = empty_volume_like(volume, bool)
+    for i, j, k in volume.indices:
+        if any(volume[i+dx, j+dy, k+dz] != volume[i, j, k] for dx, dy, dz in [(1,0,0), (-1,0,0), (0,1,0), (0,-1,0), (0,0,1), (0,0,-1)]):
+            mask[i, j, k] = True
+    return mask
+
+def compute_distance_transform(mask):
+    dist = full_volume_like(mask, infinity)
+    queue = [(i, j, k) for i, j, k in mask.indices if mask[i, j, k]]
+    for i, j, k in queue: dist[i, j, k] = 0
+    while queue:
+        i, j, k = queue.pop(0)
+        for dx, dy, dz in [(1,0,0), (-1,0,0), (0,1,0), (0,-1,0), (0,0,1), (0,0,-1)]:
+            ni, nj, nk = i+dx, j+dy, k+dz
+            if 0 <= ni < dist.shape[0] and 0 <= nj < dist.shape[1] and 0 <= nk < dist.shape[2]:
+                if dist[ni, nj, nk] > dist[i, j, k] + 1:
+                    dist[ni, nj, nk] = dist[i, j, k] + 1
+                    queue.append((ni, nj, nk))
+    return dist
+
+def smooth_band(distance_field, band_mask):
+    smoothed = distance_field.copy()
+    for i, j, k in band_mask.indices:
+        smoothed[i, j, k] = mean(distance_field[max(0,i-1):i+2, max(0,j-1):j+2, max(0,k-1):k+2])
+    return smoothed
+
+def compute_centered_gradients(field):
+    grad = empty_volume_like(field, float)
+    for axis in range(3):
+        shift = roll(field, -1, axis=axis) - roll(field, 1, axis=axis)
+        grad[..., axis] = shift / 2.0
+    return grad
+
+def smooth_interior_gradients(gradients, interior_mask):
+    smoothed = gradients.copy()
+    laplacian = empty_volume_like(gradients, float)
+    for axis in range(3):
+        laplacian[..., axis] = roll(gradients, -1, axis=axis) + roll(gradients, 1, axis=axis) - 2 * gradients
+    smoothed[interior_mask] = gradients[interior_mask] + 0.1 * laplacian[interior_mask]
+    return smoothed
+
+def vector_quantize_9bit(normals):
+    return np.round(normals * 255).astype(np.uint8) % 512
+
+def apply_3d_error_diffusion(quantized):
+    dithered = quantized.copy()
+    for i in range(dithered.shape[0]):
+        for j in range(dithered.shape[1]):
+            for k in range(dithered.shape[2]):
+                old = quantized[i, j, k]
+                new = dithered[i, j, k]
+                err = old - new
+                if i+1 < dithered.shape[0]: dithered[i+1, j, k] += err * 7/16
+                if j+1 < dithered.shape[1]: dithered[i, j+1, k] += err * 3/16
+                if k+1 < dithered.shape[2]: dithered[i, j, k+1] += err * 5/16
+                if i+1 < dithered.shape[0] and j+1 < dithered.shape[1]: dithered[i+1, j+1, k] += err * 1/16
+    return dithered
+
+class MixtureGraph:
+    def __init__(self, leaf_data):
+        self.leaves = leaf_data
+        self.levels = [0]
+    def get_voxels(self, lod):
+        return self.leaves.indices
+    def get_leaf_normal(self, voxel):
+        return self.leaves[voxel]
+
+def propagate_lighting(graph):
+    lut = {}
+    for lod in graph.levels:
+        for voxel in graph.get_voxels(lod):
+            normal = graph.get_leaf_normal(voxel)
+            diffuse = max(0, dot(normal, [0, 0, 1]))
+            specular = pow(max(0, dot(reflect([0, 0, -1], normal), [0, 0, 1])), 32)
+            lut[voxel] = diffuse + specular
+    return lut
+```
+
+**Parameters:**
+*   **Erosion Radius:** 2 voxels [S1].
+*   **Quantization Bits:** 9 bits per normal vector [S1].
+
+**Edge Cases and Pitfalls:**
+*   **Medial Axis Ridges:** Gradients are discontinuous across ridges of the medial axis, requiring the interior smoothing step [S1].
+*   **Anisotropic Voxels:** Estimating smooth normals is challenging for voxel-based segmentations, especially with strongly anisotropic voxels (up to 1:1:7 for Neocortex data) [S1].
+
+## Operating characteristics
+*   **Complexity:** Pre-computation involves distance transforms, smoothing, and graph construction. Rendering is accelerated by lookup tables. Exact time/memory complexity not given in the sources [S1].
+*   **Performance:** The method reduces the initial set of over 184.6 million node pairs to just under 2 million in the Mixture Graph while maintaining virtually lossless reconstruction [S1].
+*   **Strengths:** Properly pre-filtered lighting contributions because light contributions are propagated rather than averaging normals [S1]. Handles categorical data where volume gradients are invalid [S1].
+*   **Limitations:** Challenging for anisotropic voxels [S1]. Discontinuities may persist if smoothing is insufficient [S1].
+
+## Background
+*   **Origin:** Proposed in the context of the Mixture Graph data structure for compressing, rendering, and querying segmentation histograms [S1].
+*   **History:** The technique addresses the limitation that the gradient of categorical volume data cannot be used as a normal for shading [S1]. It builds on [Volumetric Lighting via Gradient Normals](1625-volumetric-lighting-via-gradient-normals.md) by specifically handling categorical labels [S1].
+*   **Usage:** Used in volume rendering of neuroscientific data (e.g., Neocortex) where segmentation is categorical and voxels are anisotropic [S1].
+
+## Sources
+[S1] The Mixture Graph-A Data Structure for Compressing, Rendering, and Querying Segmentation Histograms, https://doi.org/10.1109/tvcg.2020.3030451, fetched 2026-10-26

@@ -1,0 +1,109 @@
+In Vulkan ray tracing pipelines, passing complex data between ray stages relies on ray payloads declared using rayPayloadEXT and rayPayloadInEXT. Unlike uniform or storage buffers, ray payloads do not use interface block layout qualifiers such as std140 o
+
+GLSL Ray Payload Structure Alignment Explained - glsl
+GLSL Ray Payload
+Structure Alignment Explained
+In Vulkan ray tracing pipelines, passing complex data between ray
+stages relies on ray payloads declared using rayPayloadEXT
+and rayPayloadInEXT. Unlike uniform or storage buffers, ray
+payloads do not use interface block layout qualifiers such as
+std140 or std430. Instead, the compiler and
+driver manage the payload memory layout using SPIR-V type rules and
+device-specific register or scratch memory allocations. Understanding
+how the compiler aligns and packs nested structures, vectors, and scalar
+fields is critical for avoiding memory corruption, subtle undefined
+behavior, and performance degradations caused by payload spilling.
+Payload Memory
+Model and Storage Qualifiers
+Ray tracing execution flows dynamically across shader stages—such as
+Ray Generation, Any Hit, Closest Hit, and Miss. When a shader invokes
+traceRayEXT(), it passes a payload identifier linked to a
+storage location:
+```
+layout(location = 0) rayPayloadEXT HitPayload {
+    vec3 hitPosition;
+    float hitDistance;
+    vec3 normal;
+    int materialID;
+} payload;
+```
+Downstream stages declare the incoming payload at the same location
+using rayPayloadInEXT:
+```
+layout(location = 0) rayPayloadInEXT HitPayload {
+    vec3 hitPosition;
+    float hitDistance;
+    vec3 normal;
+    int materialID;
+} payloadIn;
+```
+Ray payloads represent an execution context passed down the call tree
+rather than a GPU memory buffer accessed via descriptors. Consequently,
+explicit block layouts (std140, std430, or
+scalar) cannot be applied directly to
+rayPayloadEXT declarations in standard GLSL.
+Struct Alignment and Padding
+Rules
+When complex structures are used within a payload, the GLSL compiler
+flattens and aligns members according to default SPIR-V aggregate type
+rules:
+Scalar Types: Types like float,
+int, and uint require 4-byte natural
+alignment. Double-precision and 64-bit integers require 8-byte
+alignment.
+Vector Types: A vec2 requires 8-byte
+alignment. A vec3 or vec4 requires 16-byte
+alignment in standard GLSL packing.
+Matrices and Nested Structs: Nested structures
+align to the boundary of their largest scalar member, with internal
+padding applied between misaligned fields.
+If a vec3 is immediately followed by a
+float, many compilers pack them together into a 16-byte
+slot. However, placing a float before a vec3
+typically forces 12 bytes of padding after the float to align the
+subsequent vec3 to a 16-byte boundary.
+Cross-Stage Type
+Identity and Mismatches
+GLSL and SPIR-V do not perform dynamic structural reflection across
+separate shader compilation units. The calling shader
+(rayPayloadEXT) and the receiving shader
+(rayPayloadInEXT) must maintain strictly identical struct
+definitions.
+If a Closest Hit shader expects different member types, altered
+member orders, or different array lengths than what was dispatched by
+the Ray Generation shader, memory offsets will diverge. Because the GPU
+treats the payload as an opaque block of registers or stack memory at
+the hardware level, structural mismatches result in silent read/write
+corruption without runtime validation warnings from the driver.
+Hardware Allocation
+and Performance Impacts
+Vulkan physical device properties report a maximum payload size via
+VkPhysicalDeviceRayTracingPipelinePropertiesKHR::maxRayPayloadSize.
+The GPU hardware maps this payload directly into vector registers or
+spills it to local memory (the ray tracing stack):
+Register Allocation: Compact payloads fit entirely
+within hardware registers, allowing zero-overhead reads and writes
+across ray stages.
+Stack Spilling: Excessive payload size or poor
+packing forces the driver to allocate scratch memory on the ray tracing
+stack. This significantly increases memory bandwidth usage and reduces
+overall warp/wavefront occupancy.
+Optimization
+Strategies for Payload Structures
+To ensure proper alignment and minimize the payload footprint across
+stages:
+Sort by Alignment: Order struct members descending
+by size (e.g., mat4, vec4, vec2,
+then scalar types). This eliminates implicit padding between
+fields.
+Consolidate Vectors: Use vec4
+explicitly instead of vec3 followed by a float
+to maintain precise control over member boundaries.
+Bitfield Packing: Pack boolean flags, material
+identifiers, and 8- or 16-bit integers into 32-bit uint
+masks using bitwise operations (packUnorm4x8, bit shifts)
+before transmission.
+Pointer Indirection: For exceptionally large
+payloads, store transient data in a device-addressable buffer (Buffer
+Device Address) and pass only a 64-bit pointer or an index through the
+ray payload.

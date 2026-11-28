@@ -1,0 +1,157 @@
+# Hybrid Blocky-Smooth Voxel Meshing
+
+Also called: Binary smooth voxels with sharp features, Dual-pass Voxel Meshing
+
+## Overview
+Hybrid Blocky-Smooth Voxel Meshing generates a triangular mesh from binary voxel data by preserving sharp, 90-degree blocky features in specific regions while smoothing others, using separate meshing passes for different material types [S1, unofficial]. It distinguishes itself from single-pass surface extraction methods by decoupling geometry generation into distinct "smooth" and "blocky" passes, thereby avoiding the combinatorial explosion of case tables required to handle mixed sharp/smooth transitions in a unified algorithm [S1, unofficial].
+
+## How it works
+**Inputs and Outputs:**
+*   **Input:** A 3D grid of voxels where each voxel has a binary density value ($d \in \{0, 1\}$) and a material classification ($m \in \{\text{smooth}, \text{blocky}\}$) [S1, unofficial].
+*   **Output:** A non-manifold triangular mesh representing the surface, allowing self-intersections but requiring topological continuity (no holes) [S1, unofficial].
+
+**Data Structures:**
+The voxel grid is indexed by integer coordinates $(i, j, k)$. Each voxel $V_{i,j,k}$ stores:
+1.  `density`: Binary integer (0 or 1).
+2.  `material`: Enum or boolean flag indicating 'smooth' or 'blocky' type [S1, unofficial].
+
+**Steps:**
+The algorithm iterates through the voxel grid and executes two distinct passes to construct the mesh.
+
+1.  **Smooth Pass (Marching Cubes):**
+    *   For every voxel $V_{i,j,k}$, determine if it should contribute to the smooth mesh.
+    *   Condition: The voxel is processed if at least one of its 8 corner neighbors (including itself) is classified as `smooth` [S1, unofficial].
+    *   Action: Run the standard Marching Cubes algorithm on the local $2 \times 2 \times 2$ neighborhood of densities.
+    *   Constraint: To maintain surface continuity ("solidity"), the smooth pass must treat any voxel with `density` = 1 as occupied space, regardless of its material type [S1, unofficial].
+
+2.  **Blocky Pass (Cube Face Placement):**
+    *   For every voxel $V_{i,j,k}$, determine if it should contribute to the blocky mesh.
+    *   Condition: The voxel is processed if its own `material` is `blocky` [S1, unofficial].
+    *   Action: Generate geometry by placing up to six quads (which are split into triangles) around the voxel center, corresponding to the faces of the cube [S1, unofficial].
+    *   Constraint: The block pass ignores cases where the face is adjacent to a `blocky` or continuously `smooth` material in a way that would create redundancy, though the primary duplication guard is handled by the smooth pass's conditional execution [S1, unofficial].
+
+**Formulas and Logic:**
+Let $N_{8}(i,j,k)$ be the set of 8 voxels forming the corner neighborhood of voxel $(i,j,k)$ in a standard Marching Cubes context (indices $i, i+1$, etc.).
+The smooth pass generates geometry for voxel $(i,j,k)$ if:
+$$ \exists (x,y,z) \in N_{8}(i,j,k) \text{ such that } V_{x,y,z}.\text{material} = \text{smooth} $$
+The blocky pass generates geometry for voxel $(i,j,k)$ if:
+$$ V_{i,j,k}.\text{material} = \text{blocky} $$
+
+**Parameters:**
+*   **Density Threshold:** Binary. Values are strictly 0 or 1 [S1, unofficial].
+*   **Material Classification:** User-defined or derived from voxel identity [S1, unofficial].
+
+**Edge Cases and Pitfalls:**
+*   **Duplication:** Without the conditional check in the smooth pass (drawing only if a smooth material is present in the neighborhood), geometry would be duplicated at boundaries where smooth and blocky materials meet [S1, unofficial].
+*   **Continuity:** The smooth pass must consider all solid voxels (density=1) as occupied to prevent holes at the interface between smooth and blocky regions [S1, unofficial].
+*   **Manifoldness:** The resulting mesh is not required to be manifold; self-crossing is permitted [S1, unofficial].
+
+**Pseudocode:**
+> **Unverified code.** The code below did not pass a test run against a reference implementation, or no test fits it, so it may contain errors.
+
+```python
+def hybrid_blocky_smooth_meshing(voxel_grid):
+    """
+    voxel_grid: 3D array of objects with attributes .density (0/1) and .material ('smooth'/'blocky')
+    Returns: List of triangles
+    """
+    triangles = []
+    dimensions = voxel_grid.shape
+    
+    # Pre-calculate neighbor indices for Marching Cubes to avoid boundary checks in loop
+    # Assuming voxel_grid is padded or boundaries are handled by standard MC logic
+    
+    for i in range(dimensions[0] - 1):
+        for j in range(dimensions[1] - 1):
+            for k in range(dimensions[2] - 1):
+                
+                # --- Smooth Pass ---
+                # Check if any of the 8 corners of the current voxel cell is 'smooth'
+                # The 8 corners are at indices (i,j,k) to (i+1,j+1,k+1)
+                has_smooth_neighbor = False
+                for dx in [0, 1]:
+                    for dy in [0, 1]:
+                        for dz in [0, 1]:
+                            if voxel_grid[i+dx, j+dy, k+dz].material == 'smooth':
+                                has_smooth_neighbor = True
+                                break
+                        if has_smooth_neighbor: break
+                    if has_smooth_neighbor: break
+                
+                if has_smooth_neighbor:
+                    # Extract 2x2x2 density block for Marching Cubes
+                    # Treat density=1 as occupied, regardless of material
+                    density_block = np.zeros((2, 2, 2), dtype=int)
+                    for dx in [0, 1]:
+                        for dy in [0, 1]:
+                            for dz in [0, 1]:
+                                density_block[dx, dy, dz] = voxel_grid[i+dx, j+dy, k+dz].density
+                    
+                    # Run standard Marching Cubes on density_block
+                    # Note: Standard MC assumes binary density 0/1
+                    mc_triangles = marching_cubes(density_block)
+                    # Transform MC vertices to world/grid coordinates
+                    for tri in mc_triangles:
+                        triangles.append(transform_vertices(tri, i, j, k))
+
+                # --- Blocky Pass ---
+                # Check if the center voxel (or the voxel at i,j,k) is 'blocky'
+                # The source specifies "center point of the voxel is 'block-type'"
+                # In a grid iteration, this refers to the voxel at i,j,k
+                if voxel_grid[i, j, k].material == 'blocky':
+                    # Generate 6 faces of a cube centered at i,j,k
+                    # Or placed at the voxel extent. Standard blocky meshing places quads
+                    # on the faces of the voxel grid cell.
+                    # Assuming voxel i,j,k represents the cube at that location.
+                    block_triangles = generate_cube_faces(i, j, k)
+                    triangles.extend(block_triangles)
+
+    return triangles
+
+def generate_cube_faces(i, j, k):
+    """Generates 6 quads (12 triangles) for a voxel at i,j,k"""
+    # Vertices of the cube at grid position i,j,k
+    # Assuming unit size voxels
+    verts = [
+        (i, j, k), (i+1, j, k), (i+1, j+1, k), (i, j+1, k), # Bottom
+        (i, j, k+1), (i+1, j, k+1), (i+1, j+1, k+1), (i, j+1, k+1) # Top
+    ]
+    # Define 6 faces as pairs of triangles
+    faces = [
+        [0, 1, 2, 3], # Front
+        [5, 4, 7, 6], # Back
+        [4, 0, 3, 7], # Left
+        [1, 5, 6, 2], # Right
+        [3, 2, 6, 7], # Top
+        [4, 5, 1, 0]  # Bottom
+    ]
+    triangles = []
+    for face in faces:
+        # Split quad into 2 triangles
+        triangles.append([verts[face[0]], verts[face[1]], verts[face[2]]])
+        triangles.append([verts[face[0]], verts[face[2]], verts[face[3]]])
+    return triangles
+```
+
+## Subtopics
+
+### Marching Cubes
+The standard algorithm used in the smooth pass. It interpolates vertices along edges based on density gradients. Choose this when smooth, organic surfaces are required [Link to Marching Cubes article if available, otherwise link to Parent].
+
+### Blocky Surface Extraction
+The technique used in the blocky pass, generating explicit cube faces. Choose this when performance is critical and sharp, angular geometry is desired [Link to Blocky Surface Extraction](6418-blocky-surface-extraction.md).
+
+## Operating characteristics
+*   **Time Complexity:** $O(N)$ where $N$ is the number of voxels, as each voxel is processed a constant number of times in both passes. The complexity is significantly lower than a hypothetical single-pass hybrid algorithm which would require handling $3^8 = 6561$ cases [S1, unofficial].
+*   **Memory Complexity:** $O(N)$ to store the voxel grid and the output mesh. The output mesh size depends on the ratio of smooth to blocky regions; smooth regions generate more triangles per voxel than blocky regions.
+*   **Performance:** The method is efficient for real-time applications (e.g., games) because it avoids complex branching logic for mixed materials within a single pass. The "smooth" pass leverages optimized, pre-computed Marching Cubes lookup tables [S1, unofficial].
+*   **Strengths:** Simple implementation; avoids combinatorial explosion of case tables; allows distinct visual styles (smooth vs. blocky) in the same world [S1, unofficial].
+*   **Limitations:** The mesh is not manifold; self-intersections may occur at boundaries if not carefully managed; requires binary density [S1, unofficial].
+*   **When to use:** When generating voxel worlds (like Minecraft) that require both smooth terrain (hills) and blocky structures (buildings) [S1, unofficial].
+*   **When not to use:** When a strictly manifold mesh is required for physics or advanced rendering techniques [S1, unofficial].
+
+## Background
+The method was proposed in a 2014 Stack Overflow answer by user Canis Artorus, addressing a user's need to smooth a voxel world while retaining "blocky" cubes with 90-degree angles [S1, unofficial]. It was developed as a practical solution for game development, specifically for engines using binary voxel data, avoiding the complexity of single-pass algorithms with large case tables [S1, unofficial].
+
+## Sources
+[S1] Binary smooth voxels with sharp features, https://stackoverflow.com/questions/21368072/binary-smooth-voxels-with-sharp-features, fetched 2026-10-27 (unofficial)

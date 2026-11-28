@@ -1,0 +1,190 @@
+# Joint Optimization of Scene and Calibration Parameters
+
+Also called: MOISST, Multimodal Optimization of Implicit Scene for SpatioTemporal Calibration
+
+## Overview
+This method performs multi-sensor spatiotemporal calibration by jointly optimizing implicit neural scene parameters and sensor calibration parameters (extrinsics and time offsets) using multimodal data, specifically RGB images and LiDAR depth [S1]. It distinguishes itself from methods that optimize all frame poses independently (such as BARF) by leveraging a known reference sensor trajectory to constrain the optimization to only the relative extrinsics and time offsets between sensors, thereby reducing the number of optimized parameters [S1].
+
+## How it works
+**Inputs and Outputs**
+*   **Inputs:**
+    *   Reference sensor trajectory $\mathcal{T}_r(t)$, providing poses for a reference sensor $r$ over time [S1].
+    *   Multimodal data from $S$ sensors: RGB images $I^{n_i}$ and depth maps $D^{n_i}$ for sensor $i$ at frame $n_i$ [S1].
+    *   Rough spatial calibration priors (initial extrinsics ${}_i T^r$) and temporal priors (initial time offsets $\delta_i$) [S1].
+*   **Outputs:**
+    *   Optimized neural network parameters $\hat{\Theta}$ [S1].
+    *   Optimized extrinsic transformations ${}_i \hat{T}^r$ between each sensor $i$ and the reference sensor $r$ [S1].
+    *   Optimized time offsets $\hat{\delta}_i$ for each sensor $i$ [S1].
+
+**Data Structures**
+The method uses a neural radiance field (NeRF) model, typically instantiated with an Instant-NGP backbone featuring a multi-resolution hash grid [S1].
+*   **Scene Parameters ($\Theta$):** Weights of the neural network, including the hash grid [S1].
+*   **Calibration Parameters:**
+    *   Extrinsics ${}_i T^r$: 3x4 matrix (or equivalent representation) representing the rigid transformation from sensor $i$ to reference sensor $r$ [S1].
+    *   Time offsets $\delta_i$: Scalar values representing the temporal shift for sensor $i$ [S1].
+
+**Numbered Steps**
+1.  **Initialization:** Initialize the model with rays generated using the rough spatial and temporal calibration priors and the reference frame trajectory [S1]. Set initial time offsets $\delta_i = 0$ [S1].
+2.  **Ray Regeneration:** For each optimization step, regenerate rays based on the current pose estimates derived from the reference trajectory and current calibration parameters [S1].
+3.  **Rendering:** Render RGB images and depth maps from the NeRF model using the current pose estimates [S1].
+    *   Color rendering: $\mathcal{R}_I(\mathcal{T}_r(t^{n_i} + \delta_i)_i T^r \mid \Theta)$ [S1].
+    *   Depth rendering: $\mathcal{R}_D(\mathcal{T}_r(t^{n_i} + \delta_i)_i T^r \mid \Theta)$, computed via alpha composition of distances from the ray center to sampled points [S1].
+4.  **Loss Computation:** Compute losses by comparing rendered results with ground truth data [S1].
+5.  **Optimization:** Use gradient descent to optimize $\Theta$, ${}_i T^r$, and $\delta_i$ [S1].
+6.  **Frequency Release (Pitfall Mitigation):** Apply weight decay to the hash encoder for the first 5 epochs to mimic BARF's low-to-high frequency release strategy, avoiding local minima in pose optimization [S1].
+7.  **Depth Loss Delay:** Delay the application of depth loss for the first 2 epochs to initialize geometry solely through visual supervision, aiding convergence [S1].
+
+**Formulas**
+The total loss is defined as [S1]:
+$$ \mathcal{L}_{total} = \lambda_C \mathcal{L}_C + \lambda_D \mathcal{L}_D + \lambda_{SSIM} \mathcal{L}_{SSIM} + \lambda_{DS} \mathcal{L}_{DS} $$
+
+The color loss $\mathcal{L}_C$ is [S1]:
+$$ \mathcal{L}_C = \sum_{i=1}^S \sum_{n_i=1}^{N_i} \left\| \mathcal{R}_I(\mathcal{T}_r(t^{n_i} + \delta_i)_i T^r \mid \Theta) - I^{n_i} \right\|_2^2 $$
+
+The depth loss $\mathcal{L}_D$ is [S1]:
+$$ \mathcal{L}_D = \sum_{i=1}^S \sum_{n_i=1}^{N_i} \left\| \mathcal{R}_D(\mathcal{T}_r(t^{n_i} + \delta_i)_i T^r \mid \Theta) - D^{n_i} \right\|_2^2 $$
+
+Where:
+*   $S$: Number of sensors.
+*   $N_i$: Number of frames for sensor $i$.
+*   $\mathcal{T}_r(t)$: Pose of the reference sensor at time $t$.
+*   $\delta_i$: Time offset for sensor $i$.
+*   ${}_i T^r$: Extrinsic transformation from sensor $i$ to reference sensor $r$.
+*   $\mathcal{R}_I$: Ray composition function returning RGB image.
+*   $\mathcal{R}_D$: Ray composition function returning depth.
+*   $I^{n_i}$: Ground truth image.
+*   $D^{n_i}$: Ground truth depth.
+
+Additional losses [S1]:
+*   $\mathcal{L}_{SSIM}$: Structural dissimilarity (DSSIM) loss to minimize difference in local 2D structures.
+*   $\mathcal{L}_{DS}$: Depth smoothness loss.
+
+**Parameters**
+*   $\lambda_C$: Weight for color loss, typical value 1 [S1].
+*   $\lambda_D$: Weight for depth loss, typical value 20 [S1].
+*   $\lambda_{SSIM}$: Weight for structural dissimilarity loss, typical value 0.1 [S1].
+*   $\lambda_{DS}$: Weight for depth smoothness loss, typical value 0.0001 [S1].
+*   Learning rate for network parameters ($\Theta$): $1 \times 10^{-2}$, decaying exponentially to $1 \times 10^{-4}$ [S1].
+*   Learning rate for spatial and temporal parameters (${}_i T^r, \delta_i$): $5 \times 10^{-5}$, decaying exponentially to $5 \times 10^{-7}$ [S1].
+*   Weight decay for network parameters (including hash grid): $1 \times 10^{-6}$ [S1].
+*   Initial time offset estimate: 0 [S1].
+*   Epochs to wait before applying depth loss: 2 [S1].
+*   Epochs to apply weight decay to hash grid: 5 [S1].
+
+**Pseudocode**
+> **Unverified code.** The code below did not pass a test run against a reference implementation, or no test fits it, so it may contain errors.
+
+```python
+def joint_optimization(scene_params, calibration_params, reference_trajectory, 
+                       rgb_data, depth_data, num_sensors, num_epochs):
+    """
+    Jointly optimize NeRF parameters and sensor calibration.
+    
+    Args:
+        scene_params: Neural network weights (Theta), including hash grid.
+        calibration_params: Dictionary containing extrinsics (i_T_r) and time offsets (delta_i) for each sensor.
+        reference_trajectory: Function or array providing reference sensor poses T_r(t).
+        rgb_data: Dictionary mapping (sensor_id, frame_idx) to ground truth RGB images.
+        depth_data: Dictionary mapping (sensor_id, frame_idx) to ground truth depth maps.
+        num_sensors: Total number of sensors S.
+        num_epochs: Total training epochs.
+        
+    Returns:
+        Optimized scene_params, calibration_params.
+    """
+    optimizer_scene = Adam(scene_params, lr=1e-2, weight_decay=1e-6)
+    optimizer_calib = Adam(calibration_params, lr=5e-5)
+    
+    # Initialize time offsets to 0 if not provided
+    for i in range(num_sensors):
+        if calibration_params['delta'][i] is None:
+            calibration_params['delta'][i] = 0.0
+            
+    for epoch in range(num_epochs):
+        total_loss = 0.0
+        
+        # Frequency release: Apply weight decay to hash grid for first 5 epochs
+        if epoch < 5:
+            scene_params.apply_weight_decay(1e-6)
+        else:
+            scene_params.apply_weight_decay(0)
+            
+        for sensor_id in range(num_sensors):
+            for frame_idx in range(len(rgb_data[sensor_id])):
+                # 1. Regenerate rays using current calibration and reference trajectory
+                # Time adjusted by offset
+                t_adjusted = reference_trajectory.time(frame_idx) + calibration_params['delta'][sensor_id]
+                # Absolute pose of sensor i
+                pose_i = reference_trajectory.pose(t_adjusted) @ calibration_params['extrinsics'][sensor_id]
+                
+                # 2. Render RGB and Depth
+                rendered_rgb = render_rgb(scene_params, pose_i)
+                rendered_depth = render_depth(scene_params, pose_i)
+                
+                # 3. Compute Losses
+                # Color Loss
+                gt_rgb = rgb_data[sensor_id][frame_idx]
+                l_color = mse(rendered_rgb, gt_rgb)
+                
+                # Depth Loss (delayed for first 2 epochs)
+                l_depth = 0.0
+                if epoch >= 2:
+                    gt_depth = depth_data[sensor_id][frame_idx]
+                    l_depth = mse(rendered_depth, gt_depth)
+                    
+                # SSIM Loss (geometric consistency)
+                l_ssim = ssim_loss(rendered_rgb, gt_rgb)
+                
+                # Depth Smoothness Loss (geometric consistency)
+                l_ds = depth_smoothness(rendered_depth)
+                
+                # 4. Combine Losses
+                # Weights: lambda_C=1, lambda_D=20, lambda_SSIM=0.1, lambda_DS=0.0001
+                loss = (1.0 * l_color + 
+                        20.0 * l_depth + 
+                        0.1 * l_ssim + 
+                        0.0001 * l_ds)
+                
+                total_loss += loss
+                
+        # 5. Optimize
+        optimizer_scene.zero_grad()
+        optimizer_calib.zero_grad()
+        
+        total_loss.backward()
+        
+        optimizer_scene.step()
+        optimizer_calib.step()
+        
+    return scene_params, calibration_params
+```
+
+**Edge Cases and Pitfalls**
+*   **Local Minima:** Pose optimization can get stuck in local minima. This is mitigated by mimicking BARF's low-to-high frequency release strategy using weight decay on the hash encoder for the first 5 epochs [S1].
+*   **Convergence:** Initializing geometry solely through visual supervision helps convergence. Depth loss is delayed for 2 epochs to allow the network to learn basic geometry from color before incorporating sparse LiDAR depth [S1].
+*   **Temporal Calibration:** The solution is robust to temporal calibration, allowing initial time offsets to be set to 0 [S1].
+
+## Subtopics
+
+### [Trainable Camera Parameters](21772-trainable-camera-parameters.md)
+Optimizes camera intrinsics and extrinsics but typically focuses on single-camera or simpler setups without the multimodal LiDAR integration and specific spatiotemporal calibration formulation of MOISST.
+
+### [Camera and Pose Optimization](21918-camera-and-pose-optimization.md)
+The parent category covering general techniques for optimizing camera poses, of which this method is a specific instance for multi-sensor systems.
+
+## Operating characteristics
+*   **Time Complexity:** Training takes between 1 and 4 hours depending on the number of selected sensors and dataset size [S1].
+*   **Memory Complexity:** Depends on the NeRF representation (Instant-NGP hash grid) and the number of sensors [S1].
+*   **Measured Performance:** Evaluated on the KITTI-360 dataset with 2 forward and 2 side-facing cameras and a Velodyne HDL-64E LiDAR [S1].
+    *   Spatial Calibration Accuracy: Translation errors typically < 2 cm, Rotation errors < 0.1 degrees across sequences [S1].
+    *   Temporal Calibration Accuracy: Errors typically < 1 ms [S1].
+*   **Strengths:** Reduces the number of optimized parameters compared to optimizing all frame poses (e.g., BARF) by leveraging a reference trajectory [S1]. Robust to temporal calibration errors [S1].
+*   **Limitations:** Requires a known reference sensor trajectory [S1]. Performance depends on the quality of rough spatial calibration priors [S1].
+*   **When to use:** Multi-sensor systems (RGB + LiDAR) where a reference trajectory is available and high-precision spatiotemporal calibration is needed.
+*   **When not to use:** Single-sensor systems or systems without a reliable reference trajectory.
+
+## Background
+MOISST (Multimodal Optimization of Implicit Scene for SpatioTemporal Calibration) was introduced in 2023 [S1]. It builds on the concept of differentiable volume rendering for pose optimization, extending it to multi-sensor setups by incorporating LiDAR depth and optimizing relative extrinsics and time offsets [S1]. It addresses the challenge of calibrating heterogeneous sensors (cameras and LiDAR) in autonomous driving scenarios, such as those found in the KITTI-360 dataset [S1].
+
+## Sources
+[S1] MOISST: Multimodal Optimization of Implicit Scene for SpatioTemporal Calibration, https://doi.org/10.1109/IROS55552.2023.10342427, fetched 2026-10-26

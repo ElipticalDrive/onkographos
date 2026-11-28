@@ -1,0 +1,164 @@
+# Direct Volume Rendering with Interactive Piecewise Transfer Function
+
+Also called: DirectVolRendering1, Front-to-Back Ray Casting with Transfer Functions, InteractiveDirectVolRendering
+
+## Overview
+This method performs direct volume rendering by mapping scalar voxel values to RGBA colors using a piecewise linear transfer function defined by five control points, then compositing the resulting 3D volume along rays using front-to-back alpha blending [S1, unofficial]. It is distinguished from optimized implementations by performing transfer function application and compositing in two separate passes (first creating a 4D RGBA volume, then compositing), rather than combining these steps into a single ray-casting loop [S1, unofficial].
+
+## How it works
+**Inputs and Outputs**
+*   **Input**: A 3D scalar volume `vol` of shape $(D, H, W)$, where $D$ is depth (slices), $H$ is height, and $W$ is width [S1, unofficial].
+*   **Input**: Five threshold values $l_1, l_2, l_3, l_4$ defining interval boundaries [S1, unofficial].
+*   **Input**: Five opacity values $\alpha_1, \alpha_2, \alpha_3, \alpha_4, \alpha_5$ corresponding to the intervals defined by the thresholds [S1, unofficial].
+*   **Output**: A 2D image `res` of shape $(H, W, 4)$ with an inverted alpha channel [S1, unofficial].
+
+**Data Structures**
+*   `fres`: A 4D array of shape $(D, 4, H, W)$ storing the pre-computed RGBA values for each voxel after transfer function application [S1, unofficial].
+*   `ps`: A 3D accumulator array of shape $(4, H, W)$ representing the previous sample's accumulated RGBA during compositing [S1, unofficial].
+*   `rgbScaler`: An array of size $N = C_N/4$, where each row stores `[scalar, R, G, B]` [S2, unofficial].
+*   `opacityScaler`: An array of size $M = O_N/2$, where each row stores `[scalar, opacity]` [S2, unofficial].
+
+**Steps**
+
+1.  **Preprocessing**: Normalize the input volume to the 8-bit integer range $[0, 255]$ [S1, unofficial]. Calculate $x_{max} = \max(vol)$ and $x_{min} = \min(vol)$ [S1, unofficial]. Apply the normalization formula:
+    $$ vol = \text{round}\left( 255 \cdot \frac{vol - x_{min}}{x_{max} - x_{min} + 10^{-15}} \right) $$
+    The term $10^{-15}$ prevents division by zero if the volume has constant values [S1, unofficial].
+
+2.  **Transfer Function Application**: For each slice $i$ in range $[0, D-1]$:
+    *   Initialize temporary arrays `res1`, `res2`, `res3`, `res4` (representing R, G, B, A channels) as zero arrays of shape $(H, W)$ [S1, unofficial].
+    *   Let $v = vol[i, :, :]$ [S1, unofficial]. Apply boolean masking to assign RGBA values based on thresholds $l_1, l_2, l_3, l_4$:
+        *   If $v < l_1$: $R=0, G=0, B=0, A=\alpha_1$ [S1, unofficial].
+        *   If $l_1 \le v < l_2$: $R=0, G=0, B=255, A=\alpha_2$ [S1, unofficial].
+        *   If $l_2 \le v < l_3$: $R=0, G=255, B=0, A=\alpha_3$ [S1, unofficial].
+        *   If $l_3 \le v < l_4$: $R=255, G=0, B=0, A=\alpha_4$ [S1, unofficial].
+        *   If $v \ge l_4$: $R=127, G=0, B=127, A=\alpha_5$ [S1, unofficial].
+    *   Store results in `fres[i, 0, :, :]` (R), `fres[i, 1, :, :]` (G), `fres[i, 2, :, :]` (B), and `fres[i, 3, :, :]` (A) [S1, unofficial].
+
+3.  **Compositing**: Initialize `ps` as a zero array of shape $(4, H, W)$ representing accumulated RGBA [S1, unofficial]. Initialize `tmp_res` similarly [S1, unofficial]. Iterate $i$ from $0$ to $D-1$:
+    *   Get current slice $s = fres[i, :, :, :]$ with shape $(4, H, W)$ [S1, unofficial].
+    *   Update `tmp_res` RGB channels:
+        $$ tmp\_res[0:3, :, :] = ps[0:3, :, :] + (1 - ps[3, :, :]) \cdot s[3, :, :] \cdot s[0:3, :, :] $$
+    *   Update `tmp_res` Alpha channel:
+        $$ tmp\_res[3, :, :] = ps[3, :, :] + (1 - ps[3, :, :]) \cdot s[3, :, :] $$
+    *   Set $ps = tmp\_res$ [S1, unofficial].
+    *   This implements the front-to-back alpha blending equation: $C_{out} = C_{prev} + (1 - A_{prev}) \cdot A_{curr} \cdot C_{curr}$ [S1, S2, unofficial].
+
+4.  **Final Output**: After the loop, initialize `res` as shape $(H, W, 4)$ [S1, unofficial]. Copy the final accumulated RGBA from `ps` to `res` [S1, unofficial]. Invert the alpha channel: $res[:, :, 3] = 1 - res[:, :, 3]$ [S1, unofficial].
+
+**Pseudocode**
+
+> **Unverified code.** The code below did not pass a test run against a reference implementation, or no test fits it, so it may contain errors.
+
+```python
+import numpy as np
+
+def normalize_volume(vol):
+    """Normalize volume to 8-bit integer range [0, 255]."""
+    xmax = np.max(vol)
+    xmin = np.min(vol)
+    # Prevent division by zero
+    vol = np.round(255 * (vol - xmin) / (xmax - xmin + 1e-15))
+    return vol.astype(np.uint8)
+
+def apply_transfer_function(vol, l1, l2, l3, l4, alpha1, alpha2, alpha3, alpha4, alpha5):
+    """
+    Map scalar voxel values to RGBA using piecewise linear thresholds.
+    vol: shape (D, H, W)
+    Returns: fres of shape (D, 4, H, W)
+    """
+    D, H, W = vol.shape
+    fres = np.zeros((D, 4, H, W), dtype=np.float32)
+    
+    for i in range(D):
+        v = vol[i, :, :]
+        
+        # Initialize channels
+        R = np.zeros((H, W))
+        G = np.zeros((H, W))
+        B = np.zeros((H, W))
+        A = np.zeros((H, W))
+        
+        # Masking logic
+        mask1 = v < l1
+        R[mask1] = 0; G[mask1] = 0; B[mask1] = 0; A[mask1] = alpha1
+        
+        mask2 = (v >= l1) & (v < l2)
+        R[mask2] = 0; G[mask2] = 0; B[mask2] = 255; A[mask2] = alpha2
+        
+        mask3 = (v >= l2) & (v < l3)
+        R[mask3] = 0; G[mask3] = 255; B[mask3] = 0; A[mask3] = alpha3
+        
+        mask4 = (v >= l3) & (v < l4)
+        R[mask4] = 255; G[mask4] = 0; B[mask4] = 0; A[mask4] = alpha4
+        
+        mask5 = v >= l4
+        R[mask5] = 127; G[mask5] = 0; B[mask5] = 127; A[mask5] = alpha5
+        
+        fres[i, 0, :, :] = R
+        fres[i, 1, :, :] = G
+        fres[i, 2, :, :] = B
+        fres[i, 3, :, :] = A
+        
+    return fres
+
+def composite_front_to_back(fres):
+    """
+    Composite the RGBA volume using front-to-back alpha blending.
+    fres: shape (D, 4, H, W)
+    Returns: res of shape (H, W, 4) with inverted alpha
+    """
+    D, _, H, W = fres.shape
+    
+    # Initialize accumulator ps as (4, H, W)
+    ps = np.zeros((4, H, W))
+    tmp_res = np.zeros((4, H, W))
+    
+    for i in range(D):
+        s = fres[i, :, :, :] # Shape (4, H, W)
+        
+        # Update RGB: C_out = C_prev + (1 - A_prev) * A_curr * C_curr
+        tmp_res[0:3, :, :] = ps[0:3, :, :] + (1 - ps[3, :, :]) * s[3, :, :] * s[0:3, :, :]
+        
+        # Update Alpha: A_out = A_prev + (1 - A_prev) * A_curr
+        tmp_res[3, :, :] = ps[3, :, :] + (1 - ps[3, :, :]) * s[3, :, :]
+        
+        ps = tmp_res.copy()
+        
+    # Final output shape: (H, W, 4)
+    res = np.transpose(ps, (1, 2, 0))
+    
+    # Invert Alpha channel
+    res[:, :, 3] = 1 - res[:, :, 3]
+    
+    return res
+
+def render(vol, l1, l2, l3, l4, alpha1, alpha2, alpha3, alpha4, alpha5):
+    vol_norm = normalize_volume(vol)
+    fres = apply_transfer_function(vol_norm, l1, l2, l3, l4, alpha1, alpha2, alpha3, alpha4, alpha5)
+    res = composite_front_to_back(fres)
+    return res
+```
+
+**Parameters**
+*   $l_1, l_2, l_3, l_4$: Threshold values defining the boundaries of the 5 intervals [S1, unofficial].
+*   $\alpha_1, \alpha_2, \alpha_3, \alpha_4, \alpha_5$: Opacity values for the 5 intervals [S1, unofficial].
+*   `stepsize`: The distance between sample points along the ray [S2, unofficial].
+
+**Edge Cases and Pitfalls**
+*   **Division by Zero**: Normalization uses $x_{max} - x_{min} + 10^{-15}$ to prevent division by zero if the volume has constant values [S1, unofficial].
+*   **Threshold Ordering**: The transfer function logic assumes $l_1 < l_2 < l_3 < l_4$ [S1, unofficial].
+*   **Alpha Inversion**: The final alpha channel is inverted ($1 - A$) [S1, unofficial].
+
+## Operating characteristics
+*   **Time Complexity**: $O(D \cdot H \cdot W)$ for transfer function application and $O(D \cdot H \cdot W)$ for compositing [S1, unofficial].
+*   **Memory Complexity**: $O(D \cdot H \cdot W)$ for storing the intermediate `fres` array plus $O(H \cdot W)$ for the accumulator [S1, unofficial].
+*   **Performance**: The two-pass approach requires storing the entire 4D RGBA volume in memory before compositing [S1, unofficial].
+*   **Strengths**: Simple implementation with interactive control over transfer function parameters [S1, unofficial].
+*   **Limitations**: High memory usage for large volumes [S1, unofficial].
+
+## Background
+This method originates from a Python-based educational demo by Dakai Zhou, designed to understand the ray casting algorithm from scratch without image processing packages [S1, unofficial]. It demonstrates user-interactive volume rendering by applying a piecewise linear transfer function and front-to-back compositing [S1, unofficial]. A parallel implementation using MPI and binary-swap compositing extends the core ray casting and transfer function logic to distributed systems [S2, unofficial].
+
+## Sources
+[S1] DakaiZhou/Volume-Rendering, https://github.com/DakaiZhou/Volume-Rendering, fetched 2026-10-26 (unofficial)
+[S2] rishit-AI/parallel-volume-rendering-with-binary-swap, https://github.com/rishit-AI/parallel-volume-rendering-with-binary-swap, fetched 2026-10-27 (unofficial)

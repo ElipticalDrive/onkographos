@@ -1,0 +1,120 @@
+--- v006.md
++++ v007.md
+@@ -8,6 +8,6 @@
+ ## How it works
+ **Inputs and Outputs:**
+-*   **Input:** A 3D simulation domain (chunk) defined by grid dimensions (e.g., $N \times N \times N$). External forces (static or dynamic bodies) and initial velocity/pressure fields.
+-*   **Output:** A rendered voxel scene representing the fluid, where active voxels are determined by non-zero velocity/pressure values, colored via a ramp function.
++*   **Input:** A 3D simulation domain (chunk) defined by grid dimensions (e.g., $N \times N \times N$). External forces (static or dynamic bodies) and initial velocity/pressure fields [S1].
++*   **Output:** A rendered voxel scene representing the fluid, where active voxels are determined by non-zero velocity/pressure values, colored via a ramp function [S1].
+ 
+ **Data Structures:**
+@@ -41,58 +41,61 @@
+ 
+ ```python
++# Parameters
++dt = 0.016  # Time step
++viscosity = 0.0001  # Kinematic viscosity
++max_magnitude = 1.0  # Normalization factor for color ramp
++jacobi_iterations = 20  # Pressure solver iterations
++
+ # Compute Shader: Fluid Simulation
+ def compute_fluid_step(velocity_textures, pressure_textures, forces):
+-    # Step 2: Velocity Update
+-    # Advection
+-    advected_velocity = advect(velocity_textures, dt)
+-    # Diffusion
+-    diffused_velocity = diffuse(advected_velocity, viscosity, dt)
++    # Step 2: Velocity Update (Advection, Diffusion, Forces)
++    # Advection: Semi-Lagrangian backtrace
++    advected_velocity = lerp(velocity_textures, velocity_textures - velocity_textures * dt)
++    # Diffusion: Implicit Euler
++    diffused_velocity = advected_velocity / (1.0 + viscosity * dt * laplacian(advected_velocity))
+     # Forces
+     updated_velocity = diffused_velocity + forces * dt
+-    
++
+     # Step 3: Pressure Projection
+     # Compute Divergence
+-    divergence = compute_divergence(updated_velocity)
+-    
++    divergence = divergence_field(updated_velocity)
++
+     # Solve Pressure (Jacobi Iteration)
+-    pressure = solve_pressure_jacobi(divergence, pressure_textures, iterations=20)
+-    
++    pressure = pressure_textures[0]
++    for i in range(jacobi_iterations):
++        pressure = jacobi_update(pressure, divergence)
++
+     # Subtract Pressure Gradient
+     final_velocity = updated_velocity - gradient(pressure)
+-    
++
+     # Step 4: Output
+     # Write final velocity to speed grid texture
+-    write_texture(speed_grid_texture, final_velocity)
+-    
++    speed_grid_texture[:] = final_velocity
++
+     # Create activation texture (non-zero values only)
+-    activation_data = select_nonzero(final_velocity)
+-    write_texture(activation_texture, activation_data)
++    activation_texture[:] = where(final_velocity != 0, final_velocity, 0)
+ 
+ # Geometry Shader: Voxel Rendering
+ def geometry_shader_render(activation_texture, speed_grid_texture):
+-    # Read voxel position and value from activation texture
+-    voxel_pos = read_3d_coord(activation_texture)
+-    voxel_value = read_3d_value(activation_texture, voxel_pos)
+-    
+-    if voxel_value != 0:
++    vertex_buffer = []
++    for voxel_pos in activation_texture.nonzero_indices():
++        voxel_value = speed_grid_texture[voxel_pos]
+         # Apply Color Ramp
+-        # Input: float between 0 and 1 (normalized magnitude or concentration)
+-        normalized_val = clamp(voxel_value / max_magnitude, 0.0, 1.0)
++        normalized_val = clamp(abs(voxel_value) / max_magnitude, 0.0, 1.0)
+         color = apply_color_ramp(normalized_val)
+-        
+         # Generate Vertex Data for the voxel (e.g., cube corners)
+         vertices = generate_cube_vertices(voxel_pos)
+-        
+         # Stream-out to vertex buffer
+-        stream_out(vertices, color)
++        vertex_buffer.append(vertices, color)
++    return vertex_buffer
+ 
+ # Rasterization
+-def rasterize():
++def rasterize(vertex_buffer):
+     draw_triangles(vertex_buffer)
+ ```
+ 
+ **Parameters:**
+-*   **Simulation Grid Size:** Must match the size of the 3D voxel staging texture (if using CPU approach) or the resolution of the activation texture [S1]. Typical tested size: $64 \times 64 \times 64$ (262,144 blocks) [S1].
+-*   **Jacobi Iterations:** Not explicitly given, but standard for pressure projection [S1].
++*   **Simulation Grid Size:** Must match the size of the 3D voxel staging texture (if using CPU approach) [S1]. Typical tested size: $64 \times 64 \times 64$ (262,144 blocks) [S1].
++*   **Jacobi Iterations:** Not given in the sources.
+ *   **Color Ramp Input:** A float between 0 and 1 [S1].
+ 
+@@ -108,5 +111,5 @@
+ 
+ ## Operating characteristics
+-*   **Time Complexity:** The simulation steps (advection, diffusion, pressure) are performed on the GPU. The CPU approach adds significant overhead due to data transfer.
++*   **Time Complexity:** The simulation steps (advection, diffusion, pressure) are performed on the GPU [S1]. The CPU approach adds significant overhead due to data transfer [S1].
+ *   **Memory Complexity:** Requires storage for three velocity textures, two pressure textures, and the final speed grid texture, all of type `float4` [S1].
+ *   **Measured Performance:**
+@@ -115,9 +118,9 @@
+         *   Activate voxels and render: 976,276 ns [S1].
+     *   **GPU-Only Approach (NVIDIA GeForce GT540M, 64x64x64 chunk):** 180 FPS (5.556 ms frame time) [S1].
+-    *   **Performance Improvement:** The GPU-only method improves performance from 30 FPS (original method, likely referring to a less optimized version or different hardware baseline mentioned in the text as "going from 30 fps... up to 1100 fps") to 1100 FPS on the tested hardware [S1].
++    *   **Performance Improvement:** The GPU-only method improves performance from 30 FPS (original method) to 1100 FPS on the tested hardware [S1].
+ *   **Scaling:** Frame time scales linearly with the number of voxels [S1].
+ *   **Strengths:** High performance due to GPU-only processing; deterministic ordering of primitives via stream-out; efficient integration with voxel engines like Poxels [S1].
+ *   **Limitations:** Does not handle obstacles; limited to single chunk (without extension); requires Direct3D geometry shaders and compute shaders [S1].
+-*   **When to Use:** When real-time fluid visualization in a voxel engine is required and obstacle interaction is not needed.
++*   **When to Use:** When real-time fluid visualization in a voxel engine is required and obstacle interaction is not needed [S1].
+ *   **When Not to Use:** When obstacle collision detection is required or when running on hardware without support for geometry shader stream-out or compute shaders [S1].
+ 

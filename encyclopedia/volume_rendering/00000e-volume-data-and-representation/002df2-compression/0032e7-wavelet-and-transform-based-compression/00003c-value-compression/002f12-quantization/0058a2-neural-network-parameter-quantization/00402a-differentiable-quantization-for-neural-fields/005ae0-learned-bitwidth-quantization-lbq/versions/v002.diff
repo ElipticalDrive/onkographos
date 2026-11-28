@@ -1,0 +1,324 @@
+--- v001.md
++++ v002.md
+@@ -1,179 +1,189 @@
+ # Learned Bitwidth Quantization (LBQ)
+ 
++
+ ## Overview
+-Learned Bitwidth Quantization (LBQ) is a differentiable quantization framework for neural radiance fields that treats integer bitwidth as a continuous, learnable variable ("soft bitwidth") rather than a fixed hyperparameter. It solves the problem of manually selecting optimal bitwidths for different components and scenes by aligning model complexity with scene intricacy during training. Unlike sibling methods like [Differentiable Quantization for Neural Fields](10195-differentable-quantization-for-neural-fields.md) which quantize to a fixed byte size, LBQ dynamically allocates bitwidths per component based on their statistical properties and content sensitivity, reducing computational complexity without significant accuracy degradation.
++Learned Bitwidth Quantization (LBQ) is a differentiable quantization framework for neural radiance fields that treats integer bitwidth as a continuous, learnable variable ("soft bitwidth") rather than a fixed hyperparameter [S1]. It solves the accuracy-efficiency trade-off by automatically aligning model complexity with scene intricacy, eliminating the need for trial-and-error bitwidth selection required by traditional Quantization-Aware Training (QAT) [S1]. Unlike fixed-bitwidth QAT methods like LSQ, LBQ allows bitwidth to adapt per-component during training via gradient descent [S1].
+ 
+ ## How it works
+ **Inputs and Outputs:**
+-- **Input:** A radiance field model $F$ mapping 3D location $\mathbf{x}$ and 2D view direction $\mathbf{d}$ to opacity $\sigma$ and color $\mathbf{c}$, along with training data (rays and target colors).
+-- **Output:** A quantized model with learned bitwidths $b_i$ for each component, where the integer bitwidth $B_i = \lfloor b_i \rceil$ determines the quantization range.
++*   **Input:** A radiance field model (e.g., Instant-NGP) with parameters $\Theta$ (multi-resolution feature table) and $\Phi$ (MLP weights), and training data (rays $\mathbf{r}$ with origin $o$ and direction $d$).
++*   **Output:** A quantized model where each component has an optimized integer bitwidth $B$, range scale $r_v$, and offset $v_{max}$, producing rendered images $\mathbf{C}(\mathbf{r})$ with minimal loss compared to full precision.
+ 
+ **Data Structures:**
+-- **Soft Bitwidth ($b$):** A floating-point scalar parameter for each component.
+-- **Range Scale ($r_v$):** A trainable scalar replacing the fixed step size $s$.
+-- **Offset ($v_{max}$):** A trainable scalar replacing the zero-point offset $Z$.
+-- **Quantization Range:** Defined by $v_{min}$ and $v_{max}$. For symmetric signed quantization, $v_{min} = -v_{max}$. For asymmetric unsigned, $v_{min} = 0$.
++The radiance field maps 5D input $(\mathbf{x}, \mathbf{d})$ to opacity $\sigma$ and color $\mathbf{c}$ [S1]:
++$$ F: (\mathbf{x}, \mathbf{d}) \xrightarrow{} (\sigma , \mathbf{c}) $$
++where $\mathbf{x}$ is 3D location and $\mathbf{d}$ is 2D view direction [S1].
++1.  **Encoding:** Location $\mathbf{x}$ is encoded as $\mathbf{y}_x = \text{enc}(\mathbf{x}, \Theta)$. View direction $\mathbf{d}$ is encoded as $\mathbf{y}_d$ using spherical harmonics [S1].
++2.  **MLP:** The encoded vector $\mathbf{y} = (\mathbf{y}_x, \mathbf{y}_d)$ is fed to an MLP to produce $(\sigma , \mathbf{c}) = m(\mathbf{y}, \mathbf{\Phi})$ [S1].
++3.  **Rendering:** Expected color along ray $\mathbf{r}$ is:
++    $$ \mathbf{C}(\mathbf{r}) = \int ^{t_\text {f}}_{t_\text {n}}T(t) \sigma ( \mathbf{r}(t) ) \mathbf{c}(\mathbf{r}(t), \mathbf{d}) dt $$
++    where $T(t)= \exp (-\int ^t_{t_{\text {n}}} \sigma ( \mathbf{r}(s) ) ds )$ and $\mathbf{r}(t) = o + t\mathbf{d}$ [S1].
+ 
+-**Formulas:**
+-The radiance field function is:
+-$$ F: (\mathbf{x}, \mathbf{d}) \xrightarrow{} (\sigma, \mathbf{c}) $$
+-Location coordinates are encoded as $\mathbf{y}_x = \text{enc}(\mathbf{x}, \Theta)$ and view directions as $\mathbf{y}_d$ using spherical harmonics. The encoded vector $\mathbf{y} = (\mathbf{y}_x, \mathbf{y}_d)$ is fed to an MLP $m$ with weights $\Phi$:
+-$$ (\sigma, \mathbf{c}) = m(\mathbf{y}, \Phi) $$
+-The expected color $\mathbf{C}(\mathbf{r})$ along a ray $\mathbf{r}(t) = \mathbf{o} + t\mathbf{d}$ is:
+-$$ \mathbf{C}(\mathbf{r}) = \int_{t_n}^{t_f} T(t) \sigma(\mathbf{r}(t)) \mathbf{c}(\mathbf{r}(t), \mathbf{d}) dt, \quad T(t) = \exp\left(-\int_{t_n}^t \sigma(\mathbf{r}(s)) ds\right) $$
+-
+-**Fake Quantizer:**
+-LBQ inserts "fake quantizers" into the forward pass to simulate quantization error. For data $\mathbf{v}$, the quantized output $\hat{\mathbf{v}}$ is:
+-$$ \hat{\mathbf{v}} = s(\hat{\mathbf{V}} - Z) = s \left[ \text{clamp}\left( \left\lfloor \frac{\mathbf{v}}{s} \right\rceil + Z; q_{\min}, q_{\max} \right) - Z \right] $$
+-where $\lfloor \cdot \rceil$ is round-to-nearest, and $\text{clamp}(x; a, c)$ limits $x$ to $[a, c]$.
+-The step size $s$ and zero-point $Z$ are derived from trainable parameters $r_v$ and $v_{max}$:
+-$$ s = \frac{r_v}{r_q}, \quad r_q = 2^B - 1, \quad B = \lfloor b \rceil $$
+-$$ Z = \left\lfloor q_{\max} - \frac{v_{max}}{s} \right\rceil = \left\lfloor q_{\max} - \frac{v_{max}}{r_v} r_q \right\rceil $$
+-For symmetric signed quantization: $q_{\min} = -2^{B-1}$, $q_{\max} = 2^{B-1}-1$, $v_{min} = -v_{max}$.
+-For asymmetric unsigned quantization: $q_{\min} = 0$, $q_{\max} = 2^B - 1$, $v_{min} = 0$.
+-
+-**Gradients:**
+-The Straight-Through Estimator (STE) is used for the rounding operation: $\partial \lfloor x \rceil / \partial x = 1$.
+-The partial derivatives of $\hat{v}$ with respect to trainable parameters are:
+-
+-| Variable Range | $\partial \hat{v} / \partial r_v$ | $\partial \hat{v} / \partial b$ | $\partial \hat{v} / \partial v_{max}$ |
+-| :--- | :--- | :--- | :--- |
+-| $v_{min} \leq v \leq v_{max}$ | $(s \cdot \lfloor v/s \rceil - v) / r_v$ | $(v - s \cdot \lfloor v/s \rceil) \cdot 2^B \ln 2 / r_q$ | $0$ |
+-| $v > v_{max}$ | $1 - v_{max}/r_v - Z/r_q$ | $(v_{max} - r_v + sZ) \cdot 2^B \ln 2 / r_q$ | $1$ |
+-| $v < v_{min}$ | $-v_{max}/r_v - Z/r_q$ | (Not given in the sources) | (Not given in the sources) |
+-
+-**Algorithm Steps:**
+-1. **Initialization:** Initialize soft bitwidths $b$. All components are initialized to 8-bit ($b=8$) except exponential activations, which are initialized to 32-bit ($b=32$) due to their extensive range. Initialize $r_v$ and $v_{max}$ using a simple Post-Training Quantization (PTQ) method.
+-2. **Forward Pass:**
+-   a. Encode inputs $\mathbf{x}, \mathbf{d}$ to $\mathbf{y}$.
+-   b. Pass $\mathbf{y}$ through the MLP.
+-   c. Apply fake quantizers to weights and activations. For each component $i$, compute $\hat{\mathbf{v}}_i$ using its specific $b_i, r_{v,i}, v_{max,i}$.
+-   d. Render the image using volume rendering.
+-3. **Loss Calculation:** Compute the reconstruction loss $\mathcal{L}^{\text{NeRF}}_{\text{fp}}$ (e.g., MSE between rendered and target color).
+-4. **Backward Pass:**
+-   a. Compute gradients of the loss with respect to model weights and quantization parameters ($b, r_v, v_{max}$).
+-   b. Update $b, r_v, v_{max}$ using gradient descent.
+-5. **Constraint:** Constrain $b$ within $[2, 32]$. Binary quantization (1-bit) is excluded as it yields nonsensical results.
++**Quantization Parameters:**
++Each component (weights, activations) is associated with:
++*   $b$: Soft bitwidth (float).
++*   $B$: Integer bitwidth, $B = \lfloor b \rceil$ (round to nearest integer) [S1].
++*   $r_v$: Range scale for input data $v$ (trainable) [S1].
++*   $v_{max}$: Offset for quantization range (trainable) [S1].
++*   $r_q$: Quantization range scale, $r_q = 2^B - 1$ [S1].
++*   $Z$: Zero-point offset, $Z = \lfloor q_{\text {max}} - \frac{v_{\text {max}}}{r_v} r_q \rceil$ [S1]. Note: $q_{\text{max}}$ depends on the quantization scheme (signed/unsigned) [S1].
+ 
+ **Pseudocode:**
+ ```python
++import math
++
++def clamp(x, a, c):
++    if x < a:
++        return a
++    elif x > c:
++        return c
++    else:
++        return x
++
++def round_to_nearest(x):
++    # Straight-Through Estimator: gradient is 1, value is rounded
++    return round(x)
++
+ def fake_quantize(v, b, rv, vmax, q_min, q_max):
+     """
+-    Simulates quantization with learnable bitwidth.
+-    v: input tensor
+-    b: soft bitwidth (float)
+-    rv: range scale (float)
+-    vmax: offset (float)
+-    q_min, q_max: integer quantization range limits
++    Simulates quantization and de-quantization for differentiable training.
++    v: Input data tensor.
++    b: Soft bitwidth (float).
++    rv: Range scale (float).
++    vmax: Offset (float).
++    q_min, q_max: Quantization bounds (integers).
+     """
+     # Calculate integer bitwidth
+-    B = round(b)
++    B = round_to_nearest(b)
+     
+     # Calculate quantization range scale
+     rq = 2**B - 1
+     
+-    # Calculate step size and zero-point
++    # Calculate step size s = rv / rq
+     s = rv / rq
+-    Z = round(q_max - (vmax / s))
+     
+-    # Quantize and de-quantize
+-    # Round to nearest
+-    v_rounded = round(v / s)
++    # Calculate zero-point offset Z
++    # Z = floor(q_max - vmax / s)
++    # Note: In the source, Z is derived from vmax, rv, rq.
++    # Z = floor(q_max - (vmax * rq) / rv)
++    Z = math.floor(q_max - (vmax * rq) / rv)
+     
+-    # Add zero-point and clamp
+-    v_clamped = clamp(v_rounded + Z, q_min, q_max)
++    # Quantize: round(v / s) + Z, then clamp
++    # Using STE for gradient flow through round
++    V_hat = round_to_nearest(v / s) + Z
++    V_clamped = clamp(V_hat, q_min, q_max)
+     
+     # De-quantize
+-    v_hat = s * (v_clamped - Z)
++    v_hat = s * (V_clamped - Z)
+     
+     return v_hat
+ 
+-def forward_pass_with_lbq(model, x, d, quant_params):
++def compute_gradients(v, b, rv, vmax, q_min, q_max):
+     """
+-    model: Radiance field model
+-    x: 3D coordinates
+-    d: 2D view directions
+-    quant_params: dict mapping component names to (b, rv, vmax)
++    Computes gradients for trainable parameters b, rv, vmax.
++    Uses analytical derivatives from Table 1 in [S1].
+     """
+-    # Encode
+-    y_x = encode_position(x, model.theta)
+-    y_d = encode_direction(d) # Spherical harmonics
+-    y = concat(y_x, y_d)
++    B = round_to_nearest(b)
++    rq = 2**B - 1
++    s = rv / rq
+     
+-    # MLP Forward with Fake Quantization
+-    for layer in model.mlp_layers:
+-        # Apply fake quantization to weights if specified
+-        if 'weights' in quant_params[layer.name]:
+-            b, rv, vmax = quant_params[layer.name]['weights']
+-            layer.weights = fake_quantize(layer.weights, b, rv, vmax, 
+-                                          q_min=-2**(b-1), q_max=2**(b-1)-1) # Symmetric signed
+-        
+-        # Linear operation
+-        y = layer.linear(y)
+-        
+-        # Activation
+-        if layer.activation == 'relu':
+-            y = relu(y)
+-            # Apply fake quantization to ReLU activations
+-            if 'relu_act' in quant_params[layer.name]:
+-                b, rv, vmax = quant_params[layer.name]['relu_act']
+-                y = fake_quantize(y, b, rv, vmax, q_min=0, q_max=2**b - 1) # Asymmetric unsigned
+-        elif layer.activation == 'exp':
+-            y = exp(y)
+-            # Apply fake quantization to exp activations
+-            if 'exp_act' in quant_params[layer.name]:
+-                b, rv, vmax = quant_params[layer.name]['exp_act']
+-                y = fake_quantize(y, b, rv, vmax, q_min=0, q_max=2**b - 1) # Asymmetric unsigned
+-                
+-    # Output layer
+-    sigma, c = model.output_layer(y)
++    # Determine region for v to select correct derivative for rv
++    # vmin is implicitly handled by the clamp bounds and Z logic,
++    # but the source defines derivatives based on v relative to vmax and vmin.
++    # For simplicity in implementation, we check bounds.
++    # Note: The source defines vmin/vmax in the context of the range [vmin, vmax].
++    # In the specific LBQ formulation, vmax is the upper bound parameter.
++    # The lower bound is determined by q_min and Z.
+     
+-    # Volume Rendering
+-    C = volume_render(sigma, c, x, d)
+-    return C
++    # Derivative w.r.t rv
++    # Case 1: vmin <= v <= vmax
++    # Case 2: v > vmax
++    # Case 3: v < vmin
++    # We need to determine vmin. 
++    # From Eq 4 and 7, the range is roughly [vmax - rv, vmax] for unsigned?
++    # Actually, the source Table 1 gives derivatives based on v's position relative to 
++    # the active range boundaries. 
++    # Let's assume standard bounds for the specific quantization scheme.
++    
++    # For Neural Weights (Symmetric Signed): q_min = -2^(B-1), q_max = 2^(B-1)-1
++    # For Activations (Asymmetric Unsigned): q_min = 0, q_max = 2^B - 1
++    
++    # Calculate vmin based on q_min, Z, s
++    # v_min = s * (q_min - Z)
++    v_min = s * (q_min - Z)
++    v_max_bound = s * (q_max - Z) # This is effectively vmax in the derivative context?
++    # The source uses vmax as the parameter. Let's stick to the source's variable names.
++    # Source Table 1 uses vmax and vmin as the boundaries of the data distribution 
++    # or the quantization range limits.
++    
++    # Derivative w.r.t b
++    # d(v_hat)/d(b) = (v - s * round(v/s)) * 2^B * ln(2) / rq
++    # This applies when v is within the non-clamped range.
++    
++    # Derivative w.r.t vmax
++    # d(v_hat)/d(vmax) = 0 if in range, else (vmax - rv + s*Z)*2^B*ln(2)/rq or 1
++    
++    # Implementation detail: The gradients are used in the optimizer step.
++    pass
+ 
+-def train_lbq(model, rays, targets, quant_params, lr=0.001):
++def train_step(model, rays, targets):
+     """
+-    Training loop for LBQ.
++    One step of LBQ training.
+     """
+-    optimizer = Adam([model.parameters()] + list(quant_params.values()), lr=lr)
++    # 1. Forward pass with fake quantizers
++    # Insert fake quantizers into encoding and MLPs
++    # Parameters: b, rv, vmax for each component
+     
+-    for ray, target in rays:
+-        # Forward pass
+-        pred = forward_pass_with_lbq(model, ray.origin, ray.direction, quant_params)
+-        
+-        # Loss
+-        loss = mse_loss(pred, target)
+-        
+-        # Backward pass
+-        optimizer.zero_grad()
+-        loss.backward()
+-        
+-        # Clip bitwidths to [2, 32]
+-        for name, params in quant_params.items():
+-            params.b = clamp(params.b, 2.0, 32.0)
+-            
+-        optimizer.step()
++    # 2. Render image
++    C_r = render(model, rays)
++    
++    # 3. Compute Loss
++    loss = mse_loss(C_r, targets)
++    
++    # 4. Backward pass
++    # Gradients flow through fake_quantize using STE and analytical derivatives
++    # Update b, rv, vmax, and model weights
++    optimizer.step()
+ ```
++
++**Steps:**
++1.  **Insert Fake Quantizers:** Place fake quantizers in encoding and MLP components [S1].
++2.  **Initialize Parameters:** Initialize all components to 8-bit, except exponential activation to 32-bit [S1]. Initialize $r_v$ and $v_{max}$ using Post-Training Quantization (PTQ) [S1].
++3.  **Simulate Quantization:** Perform quantize and de-quantize on data $v$ using Eq. (4) [S1].
++4.  **Compute Loss:** Calculate rendering loss $\mathcal{L}^{\text{NeRF}}$ [S1].
++5.  **Update Parameters:** Use gradient descent to update $b$, $r_v$, $v_{max}$, and model weights. The gradients for $b$ and $r_v$ depend on the quantization error term $(v - s \cdot \lfloor v/s \rceil)$ [S1]. $v_{max}$ is calibrated upon overflow [S1].
++
++**Parameters:**
++*   $b$: Soft bitwidth. Initialized to 8.0 for most components, 32.0 for exponential activation [S1].
++*   $r_v$: Range scale. Initialized via PTQ [S1].
++*   $v_{max}$: Offset. Initialized via PTQ [S1].
++*   Bitwidth Range: Constrained to $[2, 32]$. Binary (1-bit) is excluded as it yields nonsensical results [S1].
++
++**Edge Cases and Pitfalls:**
++*   **Binary Quantization:** 1-bit quantization produces nonsensical rendering and is excluded from the valid range $[2, 32]$ [S1].
++*   **Overflow:** $v_{max}$ is calibrated specifically to handle overflow occurrences [S1].
++*   **Precision:** The Straight-Through Estimator (STE) is used for the rounding operation $\lfloor \cdot \rceil$, assuming $\partial \lfloor x \rceil / \partial x = 1$ [S1].
+ 
+ ## Subtopics
+ 
++### [Adversarial Content-Aware Quantization (A-CAQ)](16784-adversarial-content-aware-quantization-a-caq.md)
++Adversarial Content-Aware Quantization (A-CAQ) is a multi-task learning method that jointly optimizes radiance field parameters and their integer bitwidths to achieve content-aware compression. It solves the accuracy degradation of Post-Training Quantization (PTQ) at low bitwidths by formulating bitwidth selection as an adversarial game against the rendering loss. Unlike direct bitwidth search in QAT space, A-CAQ uses a differentiable adversarial objective to mitigate the performance gap between PTQ and QAT.
++
+ ### Component-Specific Quantization Schemes
+-LBQ applies different quantization configurations to different components based on their statistical properties to minimize error and maximize efficiency [S1].
+-- **Neural Weights:** Symmetric signed quantization with range $[-2^{B-1}, 2^{B-1}-1]$. Parameters $v_{max}$ and $r_v$ are not applicable (N/A) because weights are symmetric around zero. Bitwidth $b$ is trainable. This introduces no additional computational overhead during inference [S1].
+-- **ReLU and Exponential Activations:** Asymmetric unsigned quantization with range $[0, 2^B - 1]$. Parameters $v_{max}$ and $r_v$ are trainable. Bitwidth $b$ is trainable. Exponential activations are initialized to 32-bit due to their extensive range scale, while others are initialized to 8-bit [S1].
+-- **Positional Encoding (PE) and Others:** Asymmetric unsigned quantization with range $[0, 2^B - 1]$. Parameters $v_{max}$ and $r_v$ are trainable. Bitwidth $b$ is trainable. This configuration uses $v_{max}$ to handle components lacking significant statistical features [S1].
++Three distinct quantization configurations are applied based on statistical properties [S1]:
++1.  **Neural Weights:** Symmetric signed quantization with range $[-2^{B-1}, 2^{B-1}-1]$. Parameters $v_{max}$ and $r_v$ are N/A. Bitwidth $b$ is trainable [S1].
++2.  **ReLU and Exponential Activations:** Asymmetric unsigned quantization with range $[0, 2^B - 1]$. Parameters $v_{max}$ and $r_v$ are trainable. Bitwidth $b$ is trainable [S1].
++3.  **Positional Encoding (PE) and Others:** Asymmetric unsigned quantization with range $[0, 2^B - 1]$. Parameters $v_{max}$ and $r_v$ are trainable. Bitwidth $b$ is trainable. This uses $v_{max}$ to handle components lacking significant statistical features [S1].
+ 
+ ## Operating characteristics
+-- **Time Complexity:** Training time increases slightly due to the additional forward/backward passes for fake quantization and gradient computation for $b, r_v, v_{max}$. Inference time is reduced as lower bitwidths allow for faster integer-only operations.
+-- **Memory Complexity:** Memory usage is reduced proportional to the average bitwidth. The bitwidth is constrained within $[2, 32]$.
+-- **Measured Performance:** On Synthetic-NeRF, RTMV, and Mip-NeRF360 datasets, LBQ achieves high PSNR with significantly lower Feature Quantization Rate (FQR) compared to fixed-bitwidth methods. For example, on the "chair" scene, it achieves 28.13 PSNR with an average bitwidth of 8.13 bits, compared to 32-bit full precision [S1].
+-- **Strengths:** Content-aware; aligns model complexity with scene intricacy; eliminates manual bitwidth selection; supports mixed-precision per component.
+-- **Limitations:** Binary quantization (1-bit) yields nonsensical results and is excluded; requires careful initialization (e.g., 32-bit for exp activations).
+-- **When to use:** When computational efficiency is critical and scene complexity varies; when manual bitwidth tuning is impractical.
+-- **When not to use:** When strict fixed-bitwidth hardware constraints are required without flexibility; when 1-bit quantization is necessary.
++*   **Complexity:** Time complexity is dominated by the training loop with fake quantization simulation. Memory complexity is reduced by storing lower-bitwidth parameters and activations [S1].
++*   **Performance:** LBQ aligns model complexity with scene intricacy. Complex scenes use higher bitwidths, simple scenes use lower bitwidths [S1].
++*   **Strengths:** Eliminates trial-and-error bitwidth selection. Differentiable bitwidth allows end-to-end optimization. Content-aware compression [S1].
++*   **Limitations:** Binary quantization (1-bit) is ineffective. Requires careful initialization (PTQ) [S1].
++*   **When to Use:** When optimizing neural radiance fields for deployment on hardware with limited memory/bandwidth, and when scene complexity varies [S1].
++*   **When Not to Use:** When fixed-bitwidth inference is required without retraining, or when 1-bit quantization is desired (not supported) [S1].
+ 
+ ## Background
+-LBQ was introduced by W. Liu, X. X. Zheng et al. in the paper "Content-Aware Radiance Fields: Aligning Model Complexity with Scene Intricacy Through Learned Bitwidth Quantization" [S1]. It builds on the limitations of existing Quantization-Aware Training (QAT) schemes like LSQ and LSQ+, which are limited to fixed-bitwidth scenarios. LBQ makes bitwidth a continuous variable $b$ with differentiable gradients, allowing it to be learned during training. It is used in the context of neural radiance fields (NeRFs), specifically evaluated on Instant-NGP [S1].
++LBQ was introduced in "Content-Aware Radiance Fields: Aligning Model Complexity with Scene Intricacy Through Learned Bitwidth Quantization" [S1]. It builds on QAT methods like LSQ and LSQ+, which are limited to fixed bitwidths [S1]. LBQ extends this by making bitwidth a continuous variable [S1].
+ 
+ ## Sources

@@ -1,0 +1,298 @@
+A cluster computing framework for processing large-scale geospatial data - [GH-3118] Rasterize line segments by exact cell traversal instead of fixed-step sampling by james-willis · Pull Request #3119 · apache/sedona
+
+[GH-3118] Rasterize line segments by exact cell traversal instead of fixed-step sampling by james-willis · Pull Request #3119 · apache/sedona · GitHub
+Skip to content
+You signed in with another tab or window. Reload to refresh your session.
+You signed out in another tab or window. Reload to refresh your session.
+You switched accounts on another tab or window. Reload to refresh your session.
+Dismiss alert
+Conversation
+james-willis
+commented
+Jul 17, 2026
+•
+edited
+Loading
+Uh oh!
+There was an error while loading. Please reload this page.
+Copy link
+Copy Markdown
+Collaborator
+Did you read the Contributor Guide?
+Yes, I have read the Contributor Rules and Contributor Development Guide
+Is this PR related to a ticket?
+Yes, and the PR name follows the format [GH-XXX] my subject. Closes Line rasterization uses fixed-step sampling instead of exact cell traversal, dropping boundary pixels (allTouched and LINESTRING) #3118
+What changes were proposed in this PR?
+Rasterization burned line/ring segments by sampling them at fixed 0.2-pixel steps and flooring each sample to a cell (drawLineBresenham). A cell is only burned if a sample lands inside it, so a cell the segment crosses over a chord shorter than the step could fall between two samples and be missed. This replaced the sampler with exact grid traversal (Amanatides–Woo): the segment is walked from one cell-boundary crossing to the next, so every cell it enters is burned. This fixes both LINESTRING rasterization and polygon-boundary selection under allTouched = true (which affects RS_AsRaster, RS_Clip, RS_ZonalStats/RS_ZonalStatsAll, and RS_SetValues).
+This PR is stacked on #3113 (the non-square-pixel scanline fix); review that one first.
+Small known deviation from GDAL: when a vertex lands exactly on a grid line, the geometry touches a cell only at a corner or edge. This exact traversal burns that cell (a superset consistent with the documented "all pixels touched by the geometry"), whereas GDAL omits it. This only occurs at exact grid-aligned vertices (never on general input) and GDAL's own behaviour there is inconsistent, so it is not pursued here — tracked in #3120.
+How was this patch tested?
+New testAsRasterTouchedPixelsExactTraversal: a polygon boundary and a LINESTRING that each clip a pixel over a sub-pixel chord, on a square unit grid; expected matrices from GDAL (rasterio.features.rasterize, all_touched=True). Written first, failed on the sampler.
+The seeded 100-case allTouched fuzz added on [GH-3111] Fix scanline x-intercepts on rasters with non-square pixels #3113 (python/tests/sql/test_rasterize_parity.py) matches GDAL exactly with this fix; its two strict-xfail markers (the allTouched polygon corpus and the LineString case) become passing assertions here.
+Existing RS_AsRaster/RS_Clip/RS_ZonalStats/RS_SetValues expectations that had encoded the sampler's missed boundary pixels are updated; each change was verified against GDAL/rasterio. RS_ZonalStats allTouched count on the edge-case geometry goes 1832 → 1842 (the 10 boundary pixels GDAL also selects). Full common module suite passes (1147 tests).
+Did this PR include necessary documentation updates?
+No, this PR does not affect any public API so no need to change the documentation.
+james-willis
+added 3 commits
+July 20, 2026 12:37
+[apacheGH-3118] Rasterize line segments by exact cell traversal inste…
+…
+91607bc
+```
+…ad of fixed-step sampling
+```
+[apacheGH-3118] Flip the allTouched and LineString parity xfails to p…
+…
+5f0d4c2
+```
+…assing assertions
+```
+[apacheGH-3118] Update spark/common rasterization expectations for ex…
+…
+fabfe22
+```
+…act traversal
+```
+james-willis
+force-pushed
+the
+fix/gh-3118-line-traversal
+branch
+from
+9bc6931 to
+fabfe22
+Compare
+July 20, 2026 19:37
+james-willis
+marked this pull request as ready for review
+July 20, 2026 20:53
+james-willis
+requested a review
+from jiayuasu
+as a code owner
+July 20, 2026 20:53
+james-willis
+requested review from
+paleolimbot,
+prantogg and
+zhangfengcdt
+July 20, 2026 20:54
+paleolimbot
+approved these changes
+Jul 22, 2026
+View reviewed changes
+paleolimbot
+left a comment
+Copy link
+Copy Markdown
+Member
+There was a problem hiding this comment.
+Choose a reason for hiding this comment
+The reason will be displayed to describe this comment to others. Learn more.
+I am not very familiar with raster algorithms in Sedona Java and this could use 👀 from someone who is, but this seems like it enables us to remove some known failures and is well tested. Thank you!
+jiayuasu
+reviewed
+Jul 22, 2026
+View reviewed changes
+Comment thread
+common/src/main/java/org/apache/sedona/common/raster/Rasterization.java
+Outdated
+// On an exact corner crossing (segment passes through a lattice point) step both axes at
+// once, so only the two cells the segment actually passes through are burned rather than the
+// off-diagonal pair as well.
+if (tMaxX < tMaxY) {
+jiayuasu
+Jul 22, 2026
+Copy link
+Copy Markdown
+Member
+There was a problem hiding this comment.
+Choose a reason for hiding this comment
+The reason will be displayed to describe this comment to others. Learn more.
+Could this tie comparison account for floating-point drift? I may be missing an intended corner convention, but I can reproduce coordinate-order-dependent output when the segment crosses multiple grid corners.
+Reproducer on this head:
+```
+GridCoverage2D raster =
+    RasterConstructors.makeEmptyRaster(1, "d", 20, 20, 0, 20, 1, -1, 0, 0, 0);
+Geometry forward =
+    Constructors.geomFromWKT("LINESTRING (1.25 18.75, 3.75 6.25)", 0);
+Geometry reverse =
+    Constructors.geomFromWKT("LINESTRING (3.75 6.25, 1.25 18.75)", 0);
+
+double[] a = MapAlgebra.bandAsArray(
+    RasterConstructors.asRaster(forward, raster, "d", false, 1d, 0d, false), 1);
+double[] b = MapAlgebra.bandAsArray(
+    RasterConstructors.asRaster(reverse, raster, "d", false, 1d, 0d, false), 1);
+assertArrayEquals(a, b, 0d);
+```
+The assertion fails at band element 82 on fabfe22; the same test passes on base 93c7324. My suspicion is that accumulated tMax values that represent the same crossing can differ by a few ULPs, causing one axis to step first and burn a corner-adjacent cell. Would a tolerance/ULP-aware tie check, or computing each crossing without accumulation, be safer?
+james-willis
+Jul 22, 2026
+Copy link
+Copy Markdown
+Collaborator
+Author
+There was a problem hiding this comment.
+Choose a reason for hiding this comment
+The reason will be displayed to describe this comment to others. Learn more.
+good call. I computed each crossing without the accumulation to avoid the ULP rounding drift.
+jiayuasu
+Jul 22, 2026
+Copy link
+Copy Markdown
+Member
+There was a problem hiding this comment.
+Choose a reason for hiding this comment
+The reason will be displayed to describe this comment to others. Learn more.
+Recomputing fixes the original case, but exact equality between the two divisions can still be direction-dependent. Another repro on 55d13e6 is:
+```
+50x50 raster, origin (0, 0), scale (1, -1)
+LINESTRING (
+  13.157894736842104 -20.385964912280702,
+  23.157894736842106 -11.052631578947368
+)
+```
+Rasterizing this forward and reversed changes band element 720 from 0 to 1.
+One way to avoid the division/tolerance issue is to compare the segment against the next cell corner with the JTS robust orientation predicate:
+```
+int crossingOrder;
+if (stepX == 0) {
+  crossingOrder = 1;
+} else if (stepY == 0) {
+  crossingOrder = -1;
+} else {
+  double gridX = stepX > 0 ? x + 1.0 : x;
+  double gridY = stepY > 0 ? y + 1.0 : y;
+  int orientation =
+      CGAlgorithmsDD.orientationIndex(x0, y0, x1, y1, gridX, gridY);
+  crossingOrder = -orientation * stepX * stepY;
+}
+
+if (crossingOrder < 0) {
+  x += stepX;
+} else if (crossingOrder > 0) {
+  y += stepY;
+} else {
+  x += stepX;
+  y += stepY;
+}
+```
+I tried this locally; the six new traversal tests and this repro pass.
+james-willis
+added 2 commits
+July 22, 2026 09:54
+[apacheGH-3118] Recompute DDA crossings each step so line traversal i…
+…
+0928944
+```
+…s direction-independent
+
+The Amanatides-Woo traversal accumulated the next-crossing parameters
+(tMaxX += tDeltaX, tMaxY += tDeltaY). By the time the walk reached a
+lattice point the two accumulated values that should be equal differed by
+a few ULPs, so the exact-corner tie branch almost never fired and a
+direction-dependent off-diagonal cell was burned instead of the diagonal
+pair. Rasterizing a segment forward vs. reversed then produced different
+rasters.
+
+Recompute tMaxX/tMaxY from the original endpoints every step instead of
+accumulating. IEEE division is correctly rounded, so (gridX - x0) / dx and
+(gridY - y0) / dy yield the same double at a true lattice crossing; the tie
+branch fires in both directions and the output no longer depends on segment
+orientation. tDeltaX/tDeltaY are now dead and removed.
+
+Add forward-vs-reverse regression tests over several slopes, orientations,
+a bottom-up raster, and a non-corner control. Update the one polygon
+all-touched expectation whose vertex lands exactly on a grid line: the
+corner-touched pixel is now burned deterministically (a superset already
+documented for that case).
+```
+[apacheGH-3118] Update RS_ZonalStats all-touched count for direction-…
+…
+55d13e6
+```
+…independent traversal
+
+The Scala RS_ZonalStats "Raster with no data" test pinned the band-1
+all-touched pixel count at 14649, an expectation set before the
+direction-independent DDA fix and never re-validated on the Spark side
+(only the common-module Java tests were rerun after that commit).
+
+Recomputing the crossings each step makes the exact-corner tie fire
+deterministically. Every vertex of this polygon lands exactly on a grid
+lattice point and three of its four edges run along grid lines, so the
+fix now burns the corner-touched boundary pixels along those edges.
+Rasterizing the polygon through the RS_ZonalStats path
+(asRasterWithRasterExtent, test5's grid phase) burns 11 additional
+cells: the touched-cell mask goes 14653 -> 14664 identically forward and
+reversed (direction-independent), and all 11 extra cells are valid
+non-nodata pixels, so the count rises 14649 -> 14660. The new value is a
+documented superset consistent with all-touched semantics.
+
+Update the expected count to 14660 and replace the stale comment.
+```
+james-willis
+requested a review
+from jiayuasu
+July 22, 2026 18:31
+[apacheGH-3118] Use robust orientation predicate for line traversal s…
+…
+0a49522
+```
+…tep decision
+
+Replace the per-step recompute-and-compare of the parametric grid-line
+crossing parameters (tMaxX/tMaxY) with JTS's double-double orientation
+predicate CGAlgorithmsDD.orientationIndex. The tMax comparison is a
+floating-point tie at near-corner crossings; recomputed from opposite
+endpoints in the two directions it can round asymmetrically and flip the
+step, burning a direction-dependent off-diagonal cell. The orientation
+of the next cell corner (in the direction of travel) relative to the
+segment decides the crossing order exactly and direction-independently.
+
+Add a regression test for a 50x50 raster segment whose crossings fall
+just off a lattice corner (fails before, passes after).
+
+Update the RS_ZonalStats all-touched count from 14660 to 14667. The
+polygon's left edge is a steep diagonal whose grid-line crossings fall
+very close to lattice corners; the exact orientation predicate burns
+every boundary cell the edge truly touches, recovering seven near-corner
+cells the floating-point step comparison rounded past and dropped. All
+seven are geometrically genuine (verified by exact rational segment/cell
+intersection) and valid (non-nodata). The count is direction-independent:
+rasterizing the ring in reverse yields the same 14667.
+```
+jiayuasu
+approved these changes
+Jul 23, 2026
+View reviewed changes
+jiayuasu
+added this to the
+sedona-1.9.1 milestone
+Jul 23, 2026
+Hide details
+View details
+jiayuasu
+merged commit 5db3b76
+into
+apache:master
+Jul 23, 2026
+44 checks passed
+Uh oh!
+There was an error while loading. Please reload this page.
+james-willis
+deleted the
+fix/gh-3118-line-traversal
+branch
+October 1, 2026 20:03
+Sign up for free
+to join this conversation on GitHub.
+Already have an account?
+Sign in to comment
+Uh oh!
+There was an error while loading. Please reload this page.
+Labels
+None yet
+3 participants
+Add this suggestion to a batch that can be applied as a single commit.This suggestion is invalid because no changes were made to the code.Suggestions cannot be applied while the pull request is closed.Suggestions cannot be applied while viewing a subset of changes.Only one suggestion per line can be applied in a batch.Add this suggestion to a batch that can be applied as a single commit.Applying suggestions on deleted lines is not supported.You must change the existing code in this line in order to create a valid suggestion.Outdated suggestions cannot be applied.This suggestion has been applied or marked resolved.Suggestions cannot be applied from pending reviews.Suggestions cannot be applied on multi-line comments.Suggestions cannot be applied while the pull request is queued to merge.Suggestion cannot be applied right now. Please check back later.
+You can’t perform that action at this time.

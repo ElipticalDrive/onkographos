@@ -1,0 +1,142 @@
+--- v026.md
++++ v027.md
+@@ -4,17 +4,17 @@
+ 
+ ## Overview
+-This article defines the specific hyperparameters, activation functions, and input preprocessing steps used to train Mip-NeRF and JaxNeRF models. These details address implementation-specific challenges such as training stability, catastrophic failure modes in density prediction, and optimization robustness, rather than introducing new geometric or rendering primitives. The method sets itself apart from standard NeRF configurations by replacing the identity concatenation in MLP inputs with pure Integrated Positional Encoding (IPE), using shifted softplus and widened sigmoid activations for density and color respectively, and employing a specific warmup learning rate schedule. It builds on [Method-Specific Training Configurations](6267-method-specific-training-configurations.md).
++This article defines the specific hyperparameters, activation functions, and input preprocessing steps used to train Mip-NeRF and JaxNeRF models [S1]. These details address implementation-specific challenges such as training stability, catastrophic failure modes in density prediction, and optimization robustness, rather than introducing new geometric or rendering primitives [S1]. The method sets itself apart from standard NeRF configurations by replacing the identity concatenation in MLP inputs with pure Integrated Positional Encoding (IPE), using shifted softplus and widened sigmoid activations for density and color respectively, and employing a specific warmup learning rate schedule [S1]. It builds on [Method-Specific Training Configurations](6267-method-specific-training-configurations.md) [G].
+ 
+ ## How it works
+-The training procedure minimizes photometric error using the Adam optimizer. The following details define the network input, activation functions, and optimization schedule.
++The training procedure minimizes photometric error using the Adam optimizer [S1]. The following details define the network input, activation functions, and optimization schedule [S1].
+ 
+ ### Inputs and Outputs
+ *   **Input:** Integrated Positional Encoding (IPE) of the ray mean and covariance. The original position and view direction are **not** concatenated with the encoding [S1].
+ *   **View Direction:** The ray direction $d$ is normalized, positionally encoded with $L=4$, and injected into the last layer of the MLP after density $\tau$ is predicted but before color $c$ is predicted [S1].
+-*   **Output:** Density $\tau$ and color $c$ for each sample point.
++*   **Output:** Density $\tau$ and color $c$ for each sample point [S1].
+ 
+ ### Data Structures
+-*   **MLP Input:** A vector containing only the IPE features.
+-*   **MLP Architecture:** Standard MLP as defined in the parent Mip-NeRF method. The view direction encoding is added to the final layer weights/biases or concatenated before the final output layer [S1].
++*   **MLP Input:** A vector containing only the IPE features [S1].
++*   **MLP Architecture:** Standard MLP as defined in the parent Mip-NeRF method [G]. The view direction encoding is added to the final layer weights/biases or concatenated before the final output layer [S1].
+ 
+ ### Activation Functions
+@@ -37,9 +37,9 @@
+ *   **Batch Size:** 4096 [S1].
+ *   **Learning Rate Annealing:** Logarithmic interpolation from $\eta_0 = 5 \cdot 10^{-4}$ to $\eta_n = 5 \cdot 10^{-6}$ [S1].
+-*   **Warmup:** The first $n_w = 2500$ iterations use a warmup scale factor $\lambda_w$ annealed from 0.01 to 1 [S1].
++*   **Warmup:** The first $n_w = 2500$ iterations use a warmup scale factor annealed from 0.01 to 1 [S1].
+ 
+ The learning rate $\eta_i$ at iteration $i$ is calculated as:
+ $$ \eta_i = \left( \lambda_w + (1 - \lambda_w) \sin\left(\frac{\pi}{2} \operatorname{clip}\left(\frac{i}{n_w}, 0, 1\right)\right) \right) \times \exp\left( \left(1 - \frac{i}{n}\right) \log(\eta_0) + \frac{i}{n} \log(\eta_n) \right) $$
+-where $\lambda_w$ is the current warmup scale factor, which is linearly interpolated from 0.01 to 1 during the first $n_w$ iterations [S1].
++where $\lambda_w = 0.01$ is the constant starting value of the warmup multiplier [S1].
+ 
+ ### Pseudocode
+@@ -55,59 +55,11 @@
+     n = total_iterations
+     n_w = warmup_iterations
++    lambda_w = 0.01
+     
+-    # Calculate warmup scale factor lambda_w
+-    # Annealed from 0.01 to 1 during warmup
++    # Warmup multiplier: anneals from lambda_w to 1 during warmup
+     clip_val = min(max(i / n_w, 0.0), 1.0)
+-    lambda_w = 0.01 + (1.0 - 0.01) * (0.5 * (1 - math.cos(math.pi * clip_val)))
+-    # Note: The source uses sin(pi/2 * clip). 
+-    # sin(pi/2 * x) goes from 0 to 1 as x goes from 0 to 1.
+-    # lambda_w = 0.01 + (1 - 0.01) * sin(pi/2 * clip_val)
+-    # Let's stick strictly to the formula in [S1]:
+-    # lambda_w is annealed from 0.01 to 1. The term multiplying the base LR is:
+-    # (lambda_w + (1 - lambda_w) * sin(...))
+-    # Wait, the formula in [S1] is:
+-    # eta_i = (lambda_w + (1 - lambda_w) * sin(...)) * base_lr
+-    # And lambda_w is annealed from 0.01 to 1.
+-    # This implies lambda_w is a variable that changes.
+-    # Let's re-read carefully: "scale factor that is smoothly annealed between lambda_w = 0.01 and 1"
+-    # The formula uses lambda_w inside. This suggests lambda_w in the formula IS the annealed value.
+-    # Let's define lambda_w_current as the annealed value.
++    warmup_multiplier = lambda_w + (1 - lambda_w) * math.sin((math.pi / 2) * clip_val)
+     
+-    # Re-evaluating the formula structure from [S1]:
+-    # eta_i = (lambda_w + (1 - lambda_w) * sin((pi/2) * clip(i/n_w, 0, 1))) * base_lr
+-    # If lambda_w is the annealed value, it appears on both sides? No.
+-    # "we scale the basic learning rate by an additional scale factor that is smoothly annealed between lambda_w = 0.01 and 1"
+-    # This phrasing is slightly ambiguous. Usually, warmup is a multiplier.
+-    # Let's look at the formula again:
+-    # eta_i = (lambda_w + (1 - lambda_w) * sin(...)) * exp(...)
+-    # If lambda_w is constant 0.01, the term is 0.01 + 0.99*sin(...).
+-    # If lambda_w is the *current* value being annealed, it's recursive?
+-    # Standard interpretation: lambda_w is a parameter that is annealed.
+-    # However, the text says "scale factor ... annealed between lambda_w=0.01 and 1".
+-    # It is most likely that the term in the parenthesis IS the warmup multiplier.
+-    # Let's assume the formula defines the multiplier M_i.
+-    # M_i = lambda_w_current + (1 - lambda_w_current) * sin(...)
+-    # But lambda_w_current is defined as being annealed.
+-    # Actually, looking at JaxNeRF docs or standard practices:
+-    # Often lambda_w is a fixed hyperparameter for the warmup curve shape, or it's the value at the end.
+-    # Let's look at the limits.
+-    # If i=0, sin(0)=0. M_0 = lambda_w.
+-    # If i=n_w, sin(pi/2)=1. M_nw = lambda_w + (1-lambda_w) = 1.
+-    # So the multiplier goes from lambda_w to 1.
+-    # The text says "annealed between lambda_w = 0.01 and 1".
+-    # This implies lambda_w is the STARTING value of the multiplier, and it ends at 1.
+-    # So lambda_w is a constant 0.01 in the formula?
+-    # "we scale the basic learning rate by an additional scale factor that is smoothly annealed between lambda_w = 0.01 and 1"
+-    # This implies the SCALE FACTOR is the thing annealing.
+-    # The formula calculates the scale factor.
+-    # So lambda_w in the formula is the constant 0.01.
+-    
+-    lambda_w_const = 0.01
+-    
+-    # Warmup multiplier
+-    sin_term = math.sin((math.pi / 2) * clip_val)
+-    warmup_multiplier = lambda_w_const + (1 - lambda_w_const) * sin_term
+-    
+-    # Base learning rate (logarithmic annealing)
++    # Base learning rate: logarithmic annealing
+     base_lr = math.exp((1 - i / n) * math.log(lr_start) + (i / n) * math.log(lr_end))
+     
+@@ -131,19 +83,28 @@
+ 
+ ### [Mip-NeRF 360 Optimization Setup](3426-mip-nerf-360-optimization-setup.md)
+-Mip-NeRF 360 optimization setup defines the training configuration for unbounded neural radiance fields, specifically addressing the challenge of rendering large-scale urban scenes with limited video memory by warping the infinite scene domain into a finite sphere. It distinguishes itself from standard NeRF training by combining a specific scene contraction function, a multi-stage proposal network sampling strategy, and a robust learning schedule that prevents aliasing artifacts in unbounded spaces. [Mip-NeRF 360 Optimization Setup](3426-mip-nerf-360-optimization-setup.md)
++Mip-NeRF 360 optimization setup defines the training configuration for unbounded neural radiance fields, specifically addressing the challenge of rendering large-scale urban scenes with limited video memory by warping the infinite scene domain into a finite sphere. It distinguishes itself from standard NeRF training by combining a specific scene contraction function, a multi-stage proposal network sampling strategy, and a robust learning schedule that prevents aliasing artifacts in unbounded spaces.
+ 
+ ### [Scale-Dependent Downweighting for Grid Interpolation](8571-scale-dependent-downweighting-for-grid-interpolation.md)
+-Scale-Dependent Downweighting is a technique to anti-alias trilinear interpolation in neural radiance fields by downweighting features interpolated from grid cells that are small relative to the sampling Gaussian's spread, preventing aliasing artifacts from high-frequency content. Unlike naive trilinear interpolation which causes aliasing at high frequencies, this method uses the Gaussian CDF to weight samples, similar to Mip-NeRF's IPE features but applied to grid-based representations. [Scale-Dependent Downweighting for Grid Interpolation](8571-scale-dependent-downweighting-for-grid-interpolation.md)
++Scale-Dependent Downweighting is a technique to anti-alias trilinear interpolation in neural radiance fields by downweighting features interpolated from grid cells that are small relative to the sampling Gaussian's spread, preventing aliasing artifacts from high-frequency content. Unlike naive trilinear interpolation which causes aliasing at high frequencies, this method uses the Gaussian CDF to weight samples, similar to Mip-NeRF's IPE features but applied to grid-based representations.
+ 
+ ### [S-NeRF Training Configuration](15165-s-nerf-training-configuration.md)
+-S-NeRF defines the specific hyperparameters, network architectures, and training schedules required to optimize neural radiance fields for dynamic street scenes using LiDAR and RGB data. It distinguishes itself from standard NeRF variants by employing a coarse-fine training strategy with separate configurations for foreground vehicles and background street scenes, and by integrating confidence maps derived from multi-view geometric consistency to mitigate depth outliers. [S-NeRF Training Configuration](15165-s-nerf-training-configuration.md)
++S-NeRF defines the specific hyperparameters, network architectures, and training schedules required to optimize neural radiance fields for dynamic street scenes using LiDAR and RGB data. It distinguishes itself from standard NeRF variants by employing a coarse-fine training strategy with separate configurations for foreground vehicles and background street scenes, and by integrating confidence maps derived from multi-view geometric consistency to mitigate depth outliers.
++
++### [Mip-Grid](21844-mip-grid.md)
++Mip-Grid is a method for integrating anti-aliasing techniques into grid-based radiance field representations, mitigating aliasing artifacts that occur when rendering scenes at varying camera distances or resolutions. Unlike methods that store distinct grids for each scale or rely on heavy multisampling, Mip-Grid generates multi-scale grid representations from a single shared base grid using learnable depth-wise convolutions, allowing features to vary with camera distance while maintaining fast training times and minimal storage overhead. It sets itself apart from siblings like [Mip-NeRF 360 Optimization Setup](3426-mip-nerf-360-optimization-setup.md) by operating directly on the grid structure rather than just the ray integration, and from [Scale-Dependent Downweighting for Grid Interpolation](8571-scale-dependent-downweighting-for-grid-interpolation.md) by explicitly generating hierarchical feature grids rather than downweighting interpolation weights.
+ 
+ ### Alternative Gaussian Positional Encoding
+-An alternative to Integrated Positional Encoding (IPE) involves concatenating the positional encodings of the mean and the (signed) square root of the covariance matrix elements. Specifically, positional encoding with $L=12$ is applied to the mean $\mu$, and positional encoding with $L=2$ is applied to $\operatorname{vec}(\operatorname{triu}(\operatorname{sign}(\Sigma) \circ \sqrt{|\Sigma|}))$. This approach performs comparably to IPE in terms of PSNR and SSIM but is sensitive to the hyperparameters $L$ and the covariance parameterization design. IPE is preferred because it is hyperparameter-free and more compact [S1].
++An alternative to Integrated Positional Encoding (IPE) involves concatenating the positional encodings of the mean and the (signed) square root of the covariance matrix elements [S1]. Specifically, positional encoding with $L=12$ is applied to the mean $\mu$, and positional encoding with $L=2$ is applied to $\operatorname{vec}(\operatorname{triu}(\operatorname{sign}(\Sigma) \circ \sqrt{|\Sigma|}))$ [S1]. This approach performs comparably to IPE in terms of PSNR and SSIM but is sensitive to the hyperparameters $L$ and the covariance parameterization design [S1]. IPE is preferred because it is hyperparameter-free and more compact [S1].
+ 
+ ### Reflected Cone Derivation
+-A geometric derivation used in Mip-NeRF to handle reflections. To ensure consistent view-dependent appearance, the origin of the reflected ray $\mathbf{o}'$ is shifted so that its cone radius matches the incident ray's cone radius at the intersection point $\bar{\mathbf{x}}$. The condition is:
++A geometric derivation used in Mip-NeRF to handle reflections [S2]. To ensure consistent view-dependent appearance, the origin of the reflected ray $\mathbf{o}'$ is shifted so that its cone radius matches the incident ray's cone radius at the intersection point $\bar{\mathbf{x}}$ [S2]. The condition is:
+ $$ \dot{r}\|\bar{\mathbf{x}} - \mathbf{o}\| = \dot{r}'\|\bar{\mathbf{x}} - \mathbf{o}'\| $$
+-where $\dot{r}$ and $\dot{r}'$ are the incident and reflected ray radius parameters, $\mathbf{o}$ is the incident ray origin, and $\mathbf{d}'$ is the reflected direction. This equation, along with the constraint that $\mathbf{o}'$ lies on the reflected ray, determines the shifted origin [S2].
++where $\dot{r}$ and $\dot{r}'$ are the incident and reflected ray radius parameters, $\mathbf{o}$ is the incident ray origin, and $\mathbf{o}'$ is the reflected ray origin [S2]. This equation, along with the constraint that $\mathbf{o}'$ lies on the reflected ray, determines the shifted origin [S2].
++
++### Mip-NeRF Covariance Annealing
++A technique to define the covariance matrix $\Sigma$ of the ray interval Gaussian distribution using a linearly annealed scale parameter $\lambda_\Sigma$, rather than deriving it from camera geometry [S3, unofficial]. $\Sigma$ is defined as $\Sigma = \lambda_\Sigma^2 I_3$, where $\lambda_\Sigma$ is linearly annealed from $5 \times 10^{-2}$ to $2 \times 10^{-3}$ over the first 5k steps of optimization (out of 15k total) [S3, unofficial].
++
++### PL-MipNeRF
++A variant of Mip-NeRF that integrates the piecewise linear opacity formulation into the volume rendering integral as a drop-in replacement [S4]. It shows significant improvement over baseline Mip-NeRF in difficult scenarios such as fine texture details (Chair) and grazing angle views (Mic) [S4].
+ 
+ ## Operating characteristics
+@@ -159,3 +120,5 @@
+ ## Sources
+ [S1] Mip-NeRF: A Multiscale Representation for Anti-Aliasing Neural Radiance Fields, https://doi.org/10.1109/iccv48922.2021.00580, fetched 2026-10-26
+-[S2] NeRF-Casting: Improved View-Dependent Appearance with Consistent Reflections, https://arxiv.org/abs/2405.14871v1, fetched 2026-10-26+[S2] NeRF-Casting: Improved View-Dependent Appearance with Consistent Reflections, https://arxiv.org/abs/2405.14871v1, fetched 2026-10-26
++[S3] DreamFusion: Text-to-3D using 2D Diffusion, https://doi.org/10.48550/arxiv.2209.14988, fetched 2026-10-27 (unofficial)
++[S4] NeRF Revisited: Fixing Quadrature Instability in Volume Rendering, https://doi.org/10.52202/075280-1139, fetched 2026-10-26

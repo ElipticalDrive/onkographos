@@ -1,0 +1,166 @@
+# MeshInitializer
+
+Also called: Mesh-embedded Gaussian Initialization
+
+## Overview
+MeshInitializer initializes 3D Gaussian splats by placing them on the surface of a triangle mesh using barycentric coordinates to determine position, normal interpolation, and color interpolation [S1, unofficial]. It builds on [SplatFace](17294-splatface.md) [G].
+
+## How it works
+**Inputs:**
+- Triangle mesh defined by vertices $V \in \mathbb{R}^{N_v \times 3}$ and faces $F \in \mathbb{R}^{N_f \times 3}$ (indices into $V$) [S1, unofficial].
+- Optional vertex colors $C_v \in \mathbb{R}^{N_v \times 3}$ [S1, unofficial].
+- Optional vertex normals $N_v \in \mathbb{R}^{N_v \times 3}$ [S1, unofficial].
+- Parameter $n_{gpst}$ (number of Gaussians per surface triangle), integer $\in \{1, 3, 4, 6\}$ [S1, unofficial].
+
+**Outputs:**
+- Gaussian means $M \in \mathbb{R}^{N_g \times 3}$, where $N_g = N_f \times n_{gpst}$ [S1, unofficial].
+- Gaussian rotations $Q \in \mathbb{R}^{N_g \times 4}$ (quaternions) [S1, unofficial].
+- Gaussian scales $S \in \mathbb{R}^{N_g \times 3}$ (log-space) [S1, unofficial].
+- Gaussian opacities $O \in \mathbb{R}^{N_g}$ (pre-sigmoid) [S1, unofficial].
+- Gaussian colors $C \in \mathbb{R}^{N_g \times 3}$ (if vertex colors provided, else None) [S1, unofficial].
+
+**Data Structures:**
+- Barycentric patterns are precomputed static arrays based on $n_{gpst}$ [S1, unofficial].
+- Edge lengths are computed per face [S1, unofficial].
+
+**Steps:**
+
+1. **Select Barycentric Pattern:** Based on $n_{gpst}$, select the precomputed barycentric coordinates $B \in \mathbb{R}^{n_{gpst} \times 3}$ and circle radius $r_{circ}$ [S1, unofficial]:
+   - If $n_{gpst} = 1$: $B = [[1/3, 1/3, 1/3]]$, $r_{circ} = 1/(2\sqrt{3})$
+   - If $n_{gpst} = 3$: $B = [[1/2, 1/4, 1/4], [1/4, 1/2, 1/4], [1/4, 1/4, 1/2]]$, $r_{circ} = 1/(2(\sqrt{3}+1))$
+   - If $n_{gpst} = 4$: $B = [[1/3, 1/3, 1/3], [2/3, 1/6, 1/6], [1/6, 2/3, 1/6], [1/6, 1/6, 2/3]]$, $r_{circ} = 1/(4\sqrt{3})$
+   - If $n_{gpst} = 6$: $B = [[2/3, 1/6, 1/6], [1/6, 2/3, 1/6], [1/6, 1/6, 2/3], [1/6, 5/12, 5/12], [5/12, 1/6, 5/12], [5/12, 5/12, 1/6]]$, $r_{circ} = 1/(4+2\sqrt{3})$
+
+2. **Compute Gaussian Positions:** Multiply face vertex positions (shape $N_f, 3, 3$) by barycentric coordinates (shape $n_{gpst}, 3, 1$) and sum over the vertex dimension to get positions (shape $N_f \times n_{gpst}, 3)$ [S1, unofficial].
+
+3. **Compute Surface Normals:** Interpolate vertex normals using the same barycentric coordinates as positions, then normalize the resulting vector [S1, unofficial].
+
+4. **Convert Normals to Rotations:** Pass the interpolated normals to `normal2rotation`, which constructs a rotation matrix from the normal and an orthogonal basis, then converts to quaternion [S1, unofficial].
+
+5. **Compute Colors:** If vertex colors exist, interpolate them using barycentric coordinates; otherwise return None [S1, unofficial].
+
+6. **Compute Scales:** Calculate edge lengths for each triangle, find the minimum edge length, multiply by the precomputed circle radius, clamp to minimum 0, expand to 2D scale $(x,y)$, append 0 for $z$-scale, and convert to log space via $\log(\text{scales} \times 2 + 10^{-7})$ [S1, unofficial].
+
+7. **Set Opacity:** Set all Gaussians to fully opaque by computing $\text{inverse\_sigmoid}(1.0)$ [S1, unofficial].
+
+**Pseudocode:**
+
+> **Unverified code.** The code below did not pass a test run against a reference implementation, or no test fits it, so it may contain errors.
+
+```python
+import torch
+import torch.nn.functional as F
+
+def normal2rotation(n):
+    n = F.normalize(n, dim=-1)
+    w0 = torch.tensor([[1.0, 0.0, 0.0]], device=n.device, dtype=n.dtype).expand(n.shape)
+    R0 = w0 - torch.sum(w0 * n, -1, True) * n
+    R0 *= torch.sign(R0[:, :1])
+    R0 = F.normalize(R0, dim=-1)
+    R1 = torch.cross(n, R0)
+    R1 *= torch.sign(R1[:, 1:2]) * torch.sign(n[:, 2:])
+    R = torch.stack([R0, R1, n], -1)
+    q = rotmat2quaternion(R)
+    return q
+
+def rotmat2quaternion(R, normalize=False):
+    tr = R[:, 0, 0] + R[:, 1, 1] + R[:, 2, 2] + 1e-6
+    r = torch.sqrt(1 + tr) / 2
+    q = torch.stack([
+        r,
+        (R[:, 2, 1] - R[:, 1, 2]) / (4 * r),
+        (R[:, 0, 2] - R[:, 2, 0]) / (4 * r),
+        (R[:, 1, 0] - R[:, 0, 1]) / (4 * r)
+    ], -1)
+    if normalize:
+        q = F.normalize(q, dim=-1)
+    return q
+
+def inverse_sigmoid(x):
+    return torch.log(x / (1 - x + 1e-7))
+
+def mesh_initializer(mesh_vertices, mesh_faces, mesh_vertex_normals=None, mesh_vertex_colors=None, n_gaussians_per_surface_triangle=1):
+    # 1. Setup barycentric coordinates and circle radius
+    if n_gaussians_per_surface_triangle == 1:
+        barycentric_coords = torch.tensor([[1/3, 1/3, 1/3]], dtype=mesh_vertices.dtype, device=mesh_vertices.device)
+        circle_radius = 1.0 / (2.0 * torch.sqrt(torch.tensor(3.0)))
+    elif n_gaussians_per_surface_triangle == 3:
+        barycentric_coords = torch.tensor([[1/2, 1/4, 1/4], [1/4, 1/2, 1/4], [1/4, 1/4, 1/2]], dtype=mesh_vertices.dtype, device=mesh_vertices.device)
+        circle_radius = 1.0 / (2.0 * (torch.sqrt(torch.tensor(3.0)) + 1.0))
+    elif n_gaussians_per_surface_triangle == 4:
+        barycentric_coords = torch.tensor([[1/3, 1/3, 1/3], [2/3, 1/6, 1/6], [1/6, 2/3, 1/6], [1/6, 1/6, 2/3]], dtype=mesh_vertices.dtype, device=mesh_vertices.device)
+        circle_radius = 1.0 / (4.0 * torch.sqrt(torch.tensor(3.0)))
+    elif n_gaussians_per_surface_triangle == 6:
+        barycentric_coords = torch.tensor([[2/3, 1/6, 1/6], [1/6, 2/3, 1/6], [1/6, 1/6, 2/3], [1/6, 5/12, 5/12], [5/12, 1/6, 5/12], [5/12, 5/12, 1/6]], dtype=mesh_vertices.dtype, device=mesh_vertices.device)
+        circle_radius = 1.0 / (4.0 + 2.0 * torch.sqrt(torch.tensor(3.0)))
+    else:
+        raise ValueError("n_gaussians_per_surface_triangle must be 1, 3, 4, or 6")
+
+    # Gather vertex positions for all faces
+    face_vertices = mesh_vertices[mesh_faces]  # (N_f, 3, 3)
+    
+    # 2. Compute Gaussian Positions
+    # Multiply face vertex positions by barycentric coordinates and sum over vertex dimension
+    positions = torch.einsum('ijk,kl->ijl', face_vertices, barycentric_coords)
+    means = positions.reshape(-1, 3)
+    
+    # 3. Compute Surface Normals
+    if mesh_vertex_normals is not None:
+        face_normals = mesh_vertex_normals[mesh_faces]
+        interpolated_normals = torch.einsum('ijk,kl->ijl', face_normals, barycentric_coords)
+        normals = F.normalize(interpolated_normals.reshape(-1, 3), dim=-1)
+    else:
+        # Source does not specify fallback behavior [G]
+        v0 = face_vertices[:, 0, :]
+        v1 = face_vertices[:, 1, :]
+        v2 = face_vertices[:, 2, :]
+        normals = F.normalize(torch.cross(v1 - v0, v2 - v0), dim=-1).repeat_interleave(n_gaussians_per_surface_triangle, dim=0)
+        
+    # 4. Convert Normals to Rotations
+    rotations = normal2rotation(normals)
+    
+    # 5. Compute Colors
+    if mesh_vertex_colors is not None:
+        face_colors = mesh_vertex_colors[mesh_faces]
+        interpolated_colors = torch.einsum('ijk,kl->ijl', face_colors, barycentric_coords)
+        colors = interpolated_colors.reshape(-1, 3)
+    else:
+        colors = None
+        
+    # 6. Compute Scales
+    v0 = face_vertices[:, 0, :]
+    v1 = face_vertices[:, 1, :]
+    v2 = face_vertices[:, 2, :]
+    e0 = torch.norm(v1 - v0, dim=-1)
+    e1 = torch.norm(v2 - v1, dim=-1)
+    e2 = torch.norm(v0 - v2, dim=-1)
+    min_edge_len = torch.min(torch.stack([e0, e1, e2], dim=-1), dim=-1).values
+    base_scale = min_edge_len * circle_radius
+    base_scale = torch.clamp(base_scale, min=0.0)
+    scales_2d = torch.stack([base_scale, base_scale, torch.zeros_like(base_scale)], dim=-1)
+    scales_log = torch.log(scales_2d * 2.0 + 1e-7)
+    scales = scales_log.repeat_interleave(n_gaussians_per_surface_triangle, dim=0)
+    
+    # 7. Set Opacity
+    opacities = inverse_sigmoid(torch.ones_like(means[:, 0]))
+    
+    return means, rotations, scales, opacities, colors
+```
+
+## Subtopics
+
+### VoxelInitializer
+VoxelInitializer initializes 3D Gaussian splats by voxelizing a mesh and placing Gaussians at voxel centers that intersect the mesh surface [S1, unofficial]. It differs from MeshInitializer by using a grid-based approach rather than barycentric interpolation on triangles. It is chosen when a uniform grid distribution is preferred over surface-adaptive distribution. Parameter `voxel_size` defaults to $1/256$ [S1, unofficial].
+
+### 3DGS Initialization on CAD Mesh
+This variant initializes 600,000 Gaussian primitives on a canonicalized CAD mesh surface [S2, unofficial]. It sets initial log-scales so each splat covers the mean distance to its three nearest neighbors, quaternions to the shortest-arc rotation aligned with the surface normal, and opacities to the post-sigmoid activation 0.5 [S2, unofficial]. A key pitfall is that means and quaternions are frozen entirely; geometric corrections are absorbed by a deformation field $D_\theta$ [S2, unofficial].
+
+## Operating characteristics
+Not given in the sources.
+
+## Background
+MeshInitializer is part of the GauStudio framework, a modular framework for 3D Gaussian Splatting and beyond [S1, unofficial]. It was introduced in the context of supporting mesh-based initialization for 3DGS, allowing for robust reconstruction from CAD models or textured meshes. The method leverages barycentric coordinates to distribute Gaussians evenly across triangle surfaces, a technique common in computer graphics for sampling surfaces.
+
+## Sources
+[S1] GAP-LAB-CUHK-SZ/gaustudio, https://github.com/GAP-LAB-CUHK-SZ/gaustudio, fetched 2026-10-26 (unofficial)
+[S2] CADSplat: Sparse-View 3D Gaussian Splatting Aided by CAD Models for Robust, Photorealistic Digital-Twin Reconstruction, https://arxiv.org/abs/2609.18473, fetched 2026-10-30 (unofficial)

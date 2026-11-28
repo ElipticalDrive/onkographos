@@ -1,0 +1,118 @@
+# Voxel Fragmentation via Grid Clustering
+
+Also called: RegularGrid::queryCluster, Voxel-based Face Clustering
+
+## Overview
+Voxel Fragmentation via Grid Clustering assigns a discrete voxel cluster ID to each triangle face by statistically sampling intersections with a regular voxel grid [S1, unofficial]. It determines which continuous surface fragment primarily occupies a specific voxel value, enabling triangle mesh conversion into sparse voxel grids for volume rendering [S1, unofficial].
+
+## How it works
+The method executes on a GPU using compute shaders and processes faces in batches to respect hardware buffer limits [S1, unofficial].
+
+### Inputs and Outputs
+**Inputs:**
+- `faces`: List of triangle faces to process [S1, unofficial].
+- `grid`: Regular voxel grid defined by `aabbMin`, `cellSize`, and `gridDims` [S1, unofficial].
+- `numSamples`: Number of random samples taken per face for intersection testing, defaulting to 1000 [S1, unofficial].
+- `numFragments`: Number of distinct voxel values (clusters) in the grid, determined by `countValues()` [S1, unofficial].
+
+**Outputs:**
+- `clusterIdx`: Vector of cluster IDs for each face, where negative values indicate boundary faces [S1, unofficial].
+- `faceClusterOccupancy`: Map of cluster IDs to normalized occupancy counts for each face [S1, unofficial].
+
+### Data Structures
+The implementation uses the following layouts [S1, unofficial]:
+1. `count`: A flat array of `GLuint` with size `maxFaces * numFragments`, storing raw intersection counts for each face-cluster pair [S1, unofficial].
+2. `boundary`: A flat array of `unsigned` with size `maxFaces * numFragments`, used by the GPU to store boundary flags or intermediate cluster IDs [S1, unofficial].
+3. `clusterIdx`: A `std::vector<float>` of size `faces.size()`, storing the final cluster index for each face [S1, unofficial].
+4. `faceClusterOccupancy`: A `std::vector<std::unordered_map<unsigned, float>>` of size `faces.size()`, mapping cluster ID to normalized occupancy count [S1, unofficial].
+5. `noiseBuffer`: A `std::vector<float>` of size `numSamples * numSamples`, storing random values for the compute shader [S1, unofficial].
+
+### Parameters
+- `numSamples`: Default value is 1000 [S1, unofficial].
+- `maxFaces`: Calculated as `min(faces.size(), floor(getMaxSSBOSize(sizeof(GLuint)) / numFragments))` to respect GPU SSBO limits [S1, unofficial].
+
+### Algorithm Steps
+1. **Initialization**: Initialize `clusterIdx` with `-1.0f` for all faces [S1, unofficial]. Fill `noiseBuffer` with random values of size `numSamples * numSamples` [S1, unofficial]. Calculate `maxFaces` based on GPU SSBO size limits [S1, unofficial].
+2. **Buffer Binding**: Bind `countSSBO` (read/write), `vertexSSBO` (read), `gridSSBO` (read), `boundarySSBO` (read/write), `noiseSSBO` (read), and `clusterSSBO` (read/write) [S1, unofficial].
+3. **Counting Phase**: Execute `_countVoxelTriangleShader` with uniforms `aabbMin`, `cellSize`, `gridDims`, `numFragments`, `numSamples`, and `numFaces` [S1, unofficial].
+4. **Assignment Phase**: Execute `_pickVoxelTriangleShader` with uniforms `numFragments` and `numFaces` to assign cluster IDs to faces based on counts [S1, unofficial].
+5. **Post-Processing**: Read count data from the GPU and populate `faceClusterOccupancy` [S1, unofficial]. For each face and cluster, if count > 0, store the count in the map [S1, unofficial]. Normalize occupancy counts by dividing by `numSamples` [S1, unofficial]. Read final cluster IDs from `clusterSSBO` [S1, unofficial]. If `clusterIdx[idx] < 0.0f`, it is a boundary face; push the index to `boundaryFaces` and negate the value to store a positive ID [S1, unofficial].
+
+### Pseudocode
+> **Unverified code.** The code below did not pass a test run against a reference implementation, or no test fits it, so it may contain errors.
+
+```python
+def voxel_fragmentation_via_grid_clustering(faces, grid, num_samples=1000):
+    # 1. Calculate max faces based on GPU SSBO limits [S1, unofficial]
+    max_ssbo_size = 2**31  # Placeholder for getMaxSSBOSize(sizeof(GLuint)) [G]
+    num_fragments = len(set(grid.values()))  # Placeholder for countValues() [G]
+    max_faces = min(len(faces), max_ssbo_size // num_fragments)
+    
+    # 2. Initialize data structures [S1, unofficial]
+    cluster_idx = [-1.0] * len(faces)
+    noise_buffer = [0.0] * (num_samples * num_samples)  # Filled with random values [S1, unofficial]
+    count_ssbo = [0] * (max_faces * num_fragments)
+    boundary_ssbo = [0] * (max_faces * num_fragments)
+    cluster_ssbo = [0.0] * max_faces
+    
+    face_cluster_occupancy = [{} for _ in range(len(faces))]
+    boundary_faces = []
+    
+    # 3. Batch processing loop [S1, unofficial]
+    processed = 0
+    while processed < len(faces):
+        batch_size = min(len(faces) - processed, max_faces)
+        
+        # Bind buffers [S1, unofficial]
+        # GPU: bind countSSBO, vertexSSBO, gridSSBO, boundarySSBO, noiseSSBO, clusterSSBO
+        
+        # Execute Count Shader [S1, unofficial]
+        # GPU: dispatch _countVoxelTriangleShader with uniforms aabbMin, cellSize, gridDims, numFragments, numSamples, numFaces
+        
+        # Execute Pick Shader [S1, unofficial]
+        # GPU: dispatch _pickVoxelTriangleShader with uniforms numFragments, numFaces
+        
+        # 4. Read and Process Results [S1, unofficial]
+        counts = count_ssbo[:batch_size * num_fragments]
+        
+        for i in range(batch_size):
+            face_idx = processed + i
+            for c in range(num_fragments):
+                count = counts[i * num_fragments + c]
+                if count > 0:
+                    # Normalize occupancy [S1, unofficial]
+                    occupancy = count / num_samples
+                    face_cluster_occupancy[face_idx][c] = occupancy
+            
+            # Read final cluster ID [S1, unofficial]
+            final_id = cluster_ssbo[i]
+            
+            if final_id < 0.0:
+                # Boundary face handling [S1, unofficial]
+                boundary_faces.append(face_idx)
+                cluster_idx[face_idx] = -final_id  # Negate to store positive ID
+            else:
+                cluster_idx[face_idx] = final_id
+        
+        processed += batch_size
+        
+    return cluster_idx, face_cluster_occupancy, boundary_faces
+```
+
+### Edge Cases and Pitfalls
+- **SSBO Size Limits**: The number of faces may exceed the GPU's maximum SSBO size for the count array, requiring batch processing [S1, unofficial].
+- **Boundary Faces**: Identified by negative cluster indices in the output buffer, which the algorithm negates to store positive IDs while tracking them separately [S1, unofficial].
+- **Precision**: Floating point comparisons for `clusterIdx[idx] < 0.0f` should account for potential precision errors, though the source specifies exact `-1.0f` initialization [S1, unofficial].
+
+## Operating characteristics
+- **Time Complexity**: $O(N \cdot S)$, where $N$ is the number of faces and $S$ is the number of samples per face [S1, unofficial]. Batch processing adds a factor of $N / maxFaces$ [S1, unofficial].
+- **Memory Complexity**: $O(maxFaces \cdot numFragments)$ for the count buffer, plus $O(N)$ for the output arrays [S1, unofficial].
+- **Strengths**: Handles ambiguous boundary cases via statistical sampling and executes efficiently on GPU via parallel compute shaders [S1, unofficial].
+- **Limitations**: Requires batch processing for large meshes and relies on stochastic sampling which may vary without fixed random seeds [S1, unofficial].
+- **When to use**: Converting triangle meshes to sparse voxel grids for volume rendering, especially when faces span multiple voxel clusters [S1, unofficial].
+
+## Background
+Not given in the sources.
+
+## Sources
+[S1] AlfonsoLRz/VoxelFragmentML, https://github.com/AlfonsoLRz/VoxelFragmentML, fetched 2026-10-26 (unofficial)

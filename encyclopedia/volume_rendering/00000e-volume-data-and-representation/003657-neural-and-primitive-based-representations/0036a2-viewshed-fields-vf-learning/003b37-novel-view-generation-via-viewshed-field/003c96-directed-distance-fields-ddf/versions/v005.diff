@@ -1,0 +1,225 @@
+--- v004.md
++++ v005.md
+@@ -1,89 +1,69 @@
+ # Directed Distance Fields (DDF)
+-
+-
+ ## Overview
+ A Directed Distance Field (DDF) is a 5D neural field representation that maps a 3D position $p$ and a view direction $v$ to a binary visibility $\xi(p, v)$ and a non-negative distance $d(p, v)$ to the first surface intersection along the ray defined by $(p, v)$ [S1, S2]. It solves the problem of efficient, differentiable geometric rendering by enabling depth map computation with a single forward pass per pixel, unlike standard implicit shapes (SDFs/occupancy) which require multiple queries or complex calculations [S2]. It differs from Signed Directional Distance Fields (SDDF) by lacking a sign; a DDF measures the distance to the *next* object after an intersection, reducing complexity but potentially limiting representational utility for certain internal structures [S1].
++## How it works
++The DDF takes an oriented point $\tau = (p, v)$ as input, where $p \in B \subset \mathbb{R}^3$ is a position in a convex compact domain $B$, and $v \in S^2$ is a unit direction vector [S2]. It outputs a tuple $(\xi(p, v), d(p, v))$, where $\xi \in \{0, 1\}$ is the binary visibility indicator and $d \in \mathbb{R}_{\ge 0}$ is the distance to the first surface intersection along the ray [S1, S2]. The DDF is implemented as a neural network $F_\theta: \Gamma \rightarrow \{0, 1\} \times \mathbb{R}_{\ge 0}$, where $\Gamma = B \times S^2$ is the 5D product space [S2]. The visibility component $\xi$ outputs a scalar, typically activated with a sigmoid or step function to approximate the binary indicator [G]. The distance component $d$ outputs a scalar, typically activated with a softplus or ReLU to ensure non-negativity [G].
+ 
+-## How it works
+-**Inputs and Outputs:**
+-*   **Input:** An oriented point $\tau = (p, v)$, where $p \in B \subset \mathbb{R}^3$ is a position in a convex compact domain $B$, and $v \in S^2$ is a unit direction vector.
+-*   **Output:** A tuple $(\xi(p, v), d(p, v))$, where $\xi \in \{0, 1\}$ is the visibility indicator and $d \in \mathbb{R}_{\ge 0}$ is the distance to the surface.
++Rendering a depth map follows these steps [S2]:
++1. For each pixel, determine the camera position $p_0$ and the pixel ray direction $v_\rho = (\rho - p_0) / \|\rho - p_0\|_2$, where $\rho$ is the pixel's 3D position in world space [S2].
++2. If $p_0 \notin B$, compute the intersection $p_r$ of the ray $r(t) = p_0 + t v_\rho$ with the boundary $\partial B$ [S2]. If no intersection exists, set $\xi(p_r, v_\rho) = 0$ and depth to infinity [S2]. Otherwise, use $p_r$ as the query position [S2].
++3. Query the DDF network with $(p_r, v_\rho)$ to obtain $(\xi, d)$ [S2].
++4. If $\xi(p_r, v_\rho) = 1$, the depth for the pixel is $d(p_r, v_\rho) + \|p_0 - p_r\|_2$ [S2].
++5. If $\xi(p_r, v_\rho) = 0$, the pixel is background (depth is infinite or handled by background model) [S2].
+ 
+-**Data Structures:**
+-The DDF is implemented as a neural network $F_\theta: \Gamma \rightarrow \{0, 1\} \times \mathbb{R}_{\ge 0}$, where $\Gamma = B \times S^2$ is the 5D product space.
+-*   **Visibility Network ($\xi$):** Outputs a scalar. Typically activated with a sigmoid or step function to approximate the binary indicator.
+-*   **Distance Network ($d$):** Outputs a scalar. Typically activated with a softplus or ReLU to ensure non-negativity.
++The fields are regularized with geometric constraints to mitigate view inconsistencies, though these alone cannot guarantee mathematical view consistency [S2]. Formally, a DDF $F=(\xi,d)$ requires $\xi$ to be a Visibility Field (VF) and $d$ to be a $\xi$-coherent Simple DDF, plus compatibility between them [S2].
++1. **Directed Eikonal Equation (DEd):** For any visible $(p, v)$, the gradient of the distance field with respect to position projected onto the view direction equals -1: $\nabla_p d(p, v) \cdot v = -1$ [S1, S2]. This implies $\|\nabla_p d(p, v)\|_2 \ge 1$ [S1, S2].
++2. **Visibility Field (VF) Constraints:** The visibility field $\xi$ must be a Binary Open Zero (BOZ) field satisfying:
++   * **Non-Visible Boundary Condition (BC$\xi$):** $\xi(\tau) = 0$ for all rays starting in $B \setminus B_\varepsilon$ that miss $B_\varepsilon$ [S2].
++   * **Directed Eikonal Constraint (DE$\xi$):** $\xi$ is non-increasing along any ray ($f_\xi(s_1|\tau) \le f_\xi(s_2|\tau)$ for $s_1 > s_2$) [S2].
++   * **Isotropic Opaqueness Constraint (IO$\xi$):** If a "one-to-zero flip" occurs at $q$ along direction $v$, then $\xi(\tau) = 1$ for all rays $\tau$ intersecting $q$ [S2].
++3. **Compatibility:** $\xi$ and $d$ are compatible if the zero set of $d$ (positional zeroes $Q_d$) corresponds exactly to the visible rays of $\xi$ [S2]. Specifically, $q \in Q_{d,\xi} \implies \tau \in R_V[\xi]$ for all $\tau \in I_q$, and $\tau \in R_V[\xi] \implies [B]_\tau \cap Q_{d,\xi} \neq \emptyset$ [S2].
++4. **Surface Normal Extraction:** For visible $(p, v)$ where the normal $n(p, v)$ is not perpendicular to $v$, the surface normal at the intersection point $q(p, v) = p + d(p, v)v$ is: $n(p, v) = \varsigma \frac{\nabla_p d(p, v)^T}{\|\nabla_p d(p, v)\|_2}$, where $\varsigma \in \{-1, 1\}$ is chosen such that $n^T v < 0$ (normal points back to the query point) [S1, S2].
++5. **Gradient Consistency:** The directional derivative with respect to viewpoint relates to the position gradient: $\nabla_v d(p, v) \delta v = d(p, v) \nabla_p d(p, v) \delta v$, where $\delta v = \omega \times v$ for any $\omega \in \mathbb{R}^3$ [S1, S2].
+ 
+-**Numbered Steps for Rendering (Depth Map):**
+-1.  For each pixel in the target image, determine the camera position $p_0$ and the pixel ray direction $v_\rho = (\rho - p_0) / \|\rho - p_0\|_2$, where $\rho$ is the pixel's 3D position in world space.
+-2.  If $p_0 \notin B$, compute the intersection $p_r$ of the ray $r(t) = p_0 + t v_\rho$ with the boundary $\partial B$. If no intersection exists, set $\xi(p_r, v_\rho) = 0$ and depth to infinity. Otherwise, use $p_r$ as the query position.
+-3.  Query the DDF network with $(p_r, v_\rho)$ to obtain $(\xi, d)$.
+-4.  If $\xi(p_r, v_\rho) = 1$, the depth for the pixel is $d(p_r, v_\rho) + \|p_0 - p_r\|_2$.
+-5.  If $\xi(p_r, v_\rho) = 0$, the pixel is background (depth is infinite or handled by background model).
++Parameters: $\varepsilon$: Width of the boundary shell defining the $\varepsilon$-domain $B_\varepsilon$ [S2]. $\gamma$ weights: Hyperparameters for loss functions (e.g., $\gamma_d, \gamma_\xi, \gamma_n$) [S2].
+ 
+-**Formulas and Constraints:**
+-To ensure the DDF represents a valid 3D shape $S \subset B_\varepsilon$ (where $B_\varepsilon$ is the $\varepsilon$-domain excluding a thin shell near $\partial B$), the fields must satisfy specific geometric constraints [S2]:
++Edge Cases and Pitfalls:
++* **Discontinuities:** DDFs are inherently discontinuous when $p$ passes through the surface $S$ (surface discontinuity) or when $p/v$ moves across an occlusion boundary (occlusion discontinuity) [S1, S2]. This challenges differentiable neural networks [S2].
++* **View Inconsistency:** The 5D nature permits view-dependent geometry [S2]. Without regularization, the DDF may represent an aberrant 5D entity rather than a consistent 3D shape [S2].
++* **Pathologies:** In proof-of-concept path tracing with Probabilistic DDFs (PDDFs), geometry may exhibit weight field seams ("cuts"), occlusion difficulties ("black spots" at intersections), and normal inaccuracies ("waviness") [S2].
+ 
+-1.  **Directed Eikonal Equation (DEd):** For any visible $(p, v)$, the gradient of the distance field with respect to position projected onto the view direction equals -1:
+-    $$ \nabla_p d(p, v) \cdot v = -1 $$
+-    This implies $\|\nabla_p d(p, v)\|_2 \ge 1$.
+-
+-2.  **Visibility Field (VF) Constraints:** The visibility field $\xi$ must be a Binary Open Zero (BOZ) field satisfying:
+-    *   **Non-Visible Boundary Condition (BC$\xi$):** $\xi(\tau) = 0$ for all rays starting in $B \setminus B_\varepsilon$ that miss $B_\varepsilon$.
+-    *   **Directed Eikonal Constraint (DE$\xi$):** $\xi$ is non-increasing along any ray ($f_\xi(s_1|\tau) \le f_\xi(s_2|\tau)$ for $s_1 > s_2$).
+-    *   **Isotropic Opaqueness Constraint (IO$\xi$):** If a "one-to-zero flip" occurs at $q$ along direction $v$, then $\xi(\tau) = 1$ for all rays $\tau$ intersecting $q$.
+-
+-3.  **Compatibility:** $\xi$ and $d$ are compatible if the zero set of $d$ (positional zeroes $Q_d$) corresponds exactly to the visible rays of $\xi$. Specifically, $q \in Q_{d,\xi} \implies \tau \in R_V[\xi]$ for all $\tau \in I_q$, and $\tau \in R_V[\xi] \implies [B]_\tau \cap Q_{d,\xi} \neq \emptyset$.
+-
+-4.  **Surface Normal Extraction:** For visible $(p, v)$ where the normal $n(p, v)$ is not perpendicular to $v$, the surface normal at the intersection point $q(p, v) = p + d(p, v)v$ is:
+-    $$ n(p, v) = \varsigma \frac{\nabla_p d(p, v)^T}{\|\nabla_p d(p, v)\|_2} $$
+-    where $\varsigma \in \{-1, 1\}$ is chosen such that $n^T v < 0$ (normal points back to the query point) [S1, S2].
+-
+-5.  **Gradient Consistency:** The directional derivative with respect to viewpoint relates to the position gradient:
+-    $$ \nabla_v d(p, v) \delta v = d(p, v) \nabla_p d(p, v) \delta v $$
+-    where $\delta v = \omega \times v$ for any $\omega \in \mathbb{R}^3$ [S1, S2].
+-
+-**Parameters:**
+-*   $\varepsilon$: Width of the boundary shell excluded from shape containment. Not given in the sources.
+-*   $\gamma$ weights: Hyperparameters for loss functions (e.g., $\gamma_d, \gamma_\xi, \gamma_n$). Not given in the sources.
+-
+-**Edge Cases and Pitfalls:**
+-*   **Discontinuities:** DDFs are inherently discontinuous when $p$ passes through the surface $S$ (surface discontinuity) or when $p/v$ moves across an occlusion boundary (occlusion discontinuity) [S1, S2]. This challenges differentiable neural networks.
+-*   **View Inconsistency:** The 5D nature permits view-dependent geometry. Without regularization, the DDF may represent an aberrant 5D entity rather than a consistent 3D shape [S2].
+-*   **Pathologies:** In practice, DDFs may exhibit weight field seams ("cuts"), occlusion difficulties ("black spots" at intersections), and normal inaccuracies ("waviness") [S2].
+-
+-**Pseudocode:**
++Pseudocode:
+ ```python
+ import numpy as np
+ 
++def ray_aabb_intersect(origin, direction, bbox_min, bbox_max):
++    """Standard ray-AABB intersection. Returns intersection point or None."""
++    tmin = (bbox_min - origin) / direction
++    tmax = (bbox_max - origin) / direction
++    t1 = np.minimum(tmin, tmax)
++    t2 = np.maximum(tmin, tmax)
++    t_near = np.max(t1)
++    t_far = np.min(t2)
++    if t_near > t_far or t_far < 0:
++        return None
++    return origin + t_near * direction
++
++def compute_gradient_finite_diff(p, v, network, eps=1e-4):
++    """Computes gradient of d w.r.t p using central finite differences."""
++    grad = np.zeros(3)
++    for i in range(3):
++        p_plus = p.copy()
++        p_plus[i] += eps
++        p_minus = p.copy()
++        p_minus[i] -= eps
++        d_plus = network(p_plus, v)[1]
++        d_minus = network(p_minus, v)[1]
++        grad[i] = (d_plus - d_minus) / (2 * eps)
++    return grad
++
+ def query_ddf(p, v, network):
+-    """
+-    Queries the DDF network for visibility and distance.
+-    p: numpy array, shape (3,), position in world space.
+-    v: numpy array, shape (3,), unit direction vector.
+-    network: callable function taking (p, v) and returning (xi, d).
+-    Returns: (xi: float, d: float)
+-    """
+-    # Normalize v to ensure it is a unit vector
+     v = v / np.linalg.norm(v)
+-    
+-    # Query the neural network
+     xi, d = network(p, v)
+-    
+     return xi, d
+ 
+-def render_depth_map(camera_pos, pixel_positions, network, bounding_box):
+-    """
+-    Renders a depth map using a single forward pass per pixel.
+-    camera_pos: numpy array, shape (3,), camera origin.
+-    pixel_positions: numpy array, shape (N, 3), 3D positions of pixels in world space.
+-    network: DDF network function.
+-    bounding_box: object with method 'intersect(ray_origin, ray_direction)' returning intersection point or None.
+-    Returns: numpy array, shape (N,), depth values.
+-    """
++def render_depth_map(camera_pos, pixel_positions, network, bbox_min, bbox_max):
+     depths = np.zeros(len(pixel_positions))
+-    
+     for i, pixel_pos in enumerate(pixel_positions):
+-        # Ray direction
+         ray_dir = pixel_pos - camera_pos
+         ray_len = np.linalg.norm(ray_dir)
+@@ -92,13 +72,10 @@
+             continue
+         ray_dir = ray_dir / ray_len
+-        
+-        # Check if camera is inside bounding box
+-        if not is_inside_bounding_box(camera_pos, bounding_box):
+-            # Intersect ray with bounding box boundary
+-            intersection = bounding_box.intersect(camera_pos, ray_dir)
++
++        if not np.all((camera_pos >= bbox_min) & (camera_pos <= bbox_max)):
++            intersection = ray_aabb_intersect(camera_pos, ray_dir, bbox_min, bbox_max)
+             if intersection is None:
+                 depths[i] = np.inf
+                 continue
+-            # Query from the boundary intersection point
+             query_p = intersection
+             dist_to_boundary = np.linalg.norm(camera_pos - intersection)
+@@ -106,40 +83,21 @@
+             query_p = camera_pos
+             dist_to_boundary = 0.0
+-            
+-        # Query DDF
++
+         xi, d = query_ddf(query_p, ray_dir, network)
+-        
+-        if xi > 0.5: # Assuming xi is continuous probability or binary
+-            # Depth is distance from query point to surface + distance from camera to query point
++        if xi > 0.5:
+             depths[i] = d + dist_to_boundary
+         else:
+             depths[i] = np.inf
+-            
+     return depths
+ 
+ def extract_surface_normal(p, v, network):
+-    """
+-    Extracts surface normal from DDF gradient.
+-    """
+-    # Compute gradient of d with respect to p
+-    # In practice, use automatic differentiation
+-    grad_d = compute_gradient_of_d_with_respect_to_p(p, v, network)
+-    
+-    # Normalize gradient
++    grad_d = compute_gradient_finite_diff(p, v, network)
+     grad_norm = np.linalg.norm(grad_d)
+     if grad_norm == 0:
+         return None
+-        
+-    # Determine sign such that normal points back to query point (n^T v < 0)
+-    # n = s * grad_d / ||grad_d||
+-    # We want (s * grad_d / ||grad_d||)^T v < 0
+-    # s * (grad_d^T v) / ||grad_d|| < 0
+-    # If grad_d^T v < 0, s = 1. If grad_d^T v > 0, s = -1.
+     s = 1 if np.dot(grad_d, v) < 0 else -1
+-    
+     normal = s * grad_d / grad_norm
+     return normal
+ ```
+-
+ ## Subtopics
+ 
+@@ -160,15 +118,13 @@
+ 
+ ## Operating characteristics
+-*   **Time Complexity:** Rendering complexity is independent of shape complexity. Depth rendering requires a single forward pass per pixel [S2].
+-*   **Memory Complexity:** The 5D nature of the field ($3$ for position, $2$ for direction) requires significant memory for storage and computation compared to 3D fields [S1, S2].
+-*   **Measured Performance:** In proof-of-concept forward rendering, DDF geometry showed accurate first-order values (initial ray-casting) and sufficient accuracy for surface bounces, but exhibited pathologies: weight field seams ('cuts'), occlusion difficulties ('black spots' at sphere intersections), and normal inaccuracies ('waviness' in reflected horizons) [S2].
+-*   **Strengths:** Single forward pass per pixel for depth; topologically unconstrained; supports internal structure; enables differentiable rendering [S1, S2].
+-*   **Limitations:** Inherently discontinuous; view inconsistencies possible without regularization; high dimensionality makes learning difficult [S1, S2].
+-*   **When to use:** When fast, differentiable geometric rendering is required, or when internal structure and compositionality are needed [S1, S2].
+-*   **When not to use:** When strict view consistency is required without regularization, or when computational resources for 5D networks are limited [S2].
+-
++* **Time Complexity:** Rendering complexity is independent of shape complexity [S2]. Depth rendering requires a single forward pass per pixel [S2].
++* **Memory Complexity:** The 5D nature of the field ($3$ for position, $2$ for direction) requires significant memory for storage and computation compared to 3D fields [S1, S2].
++* **Measured Performance:** In proof-of-concept forward rendering, DDF geometry showed accurate first-order values (initial ray-casting) and sufficient accuracy for surface bounces, but exhibited pathologies: weight field seams ('cuts'), occlusion difficulties ('black spots' at sphere intersections), and normal inaccuracies ('waviness' in reflected horizons) [S2].
++* **Strengths:** Single forward pass per pixel for depth; topologically unconstrained; supports internal structure; enables differentiable rendering [S1, S2].
++* **Limitations:** Inherently discontinuous; view inconsistencies possible without regularization; high dimensionality makes learning difficult [S1, S2].
++* **When to use:** When fast, differentiable geometric rendering is required, or when internal structure and compositionality are needed [S1, S2].
++* **When not to use:** When strict view consistency is required without regularization, or when computational resources for 5D networks are limited [S2].
+ ## Background
+ Directed Distance Fields were introduced in 'Probabilistic Directed Distance Fields for Ray-Based Shape Representations' (CVPR 2022) by Aumentado-Armstrong et al. [S2]. The work builds on the history of distance field representations in computer vision, specifically Signed and Unsigned Distance Fields (S/UDFs) [S1]. It was developed to address the limitations of meshes (topological constraints, complexity-dependent rendering) and standard implicit shapes (inefficient rendering, multiple forward passes) [S2]. The theory of View Consistency and the geometric constraints (BC, DE, IO) were formalized to ensure the 5D field represents a valid 3D shape [S2].
+-
+ ## Sources
+ [S1] Representing 3D Shapes with Probabilistic Directed Distance Fields, https://doi.org/10.1109/cvpr52688.2022.01874, fetched 2026-10-26

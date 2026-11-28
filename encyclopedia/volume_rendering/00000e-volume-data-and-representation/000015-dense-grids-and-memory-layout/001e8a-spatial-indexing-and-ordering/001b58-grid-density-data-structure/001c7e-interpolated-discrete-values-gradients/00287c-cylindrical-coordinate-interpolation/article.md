@@ -1,0 +1,104 @@
+# Cylindrical Coordinate Interpolation
+Also called: Interpolation in cylindrical coordinates
+
+## Overview
+Cylindrical Coordinate Interpolation reconstructs volumetric data by mapping Cartesian query points into cylindrical coordinates before sampling [S1, unofficial]. It differs from its sibling, [Spherical Coordinate Interpolation](6278-spherical-coordinate-interpolation.md), by utilizing radial, angular, and vertical dimensions for cylindrical data layouts [S1, unofficial].
+
+## How it works
+**Inputs:**
+- `point`: A 3D Cartesian coordinate $(x, y, z)$ representing the query location [S1, unofficial].
+- `outVal`: The default output value to return if the query point is out of bounds [S1, unofficial].
+- `triCubic`: A boolean flag indicating whether to use cubic or linear interpolation [S1, unofficial].
+- `geomSize`: The physical dimensions of the geometry in Cartesian space, typically $(W, H, D)$ [S1, unofficial].
+- `dataDim`: The dimensions of the discrete data grid $(D_x, D_y, D_z)$ corresponding to radial, angular, and vertical axes [S1, unofficial].
+- `dataTex`: The 3D texture or data array containing the sampled values [S1, unofficial].
+
+**Data Structures:**
+- `float3`: A vector type containing three floating-point components $(x, y, z)$ [S1, unofficial].
+- `cartToCyl`: A helper function converting Cartesian $(x, y, z)$ to cylindrical $(r, \theta, z)$ [S1, unofficial].
+
+**Steps:**
+1. Calculate step sizes for each cylindrical dimension based on the geometry size and data dimensions [S1, unofficial]:
+   $$ \text{lengthStep} = \frac{\text{geomSize}.x}{\text{dataDim}.width} $$
+   $$ \text{angleStep} = \frac{\text{geomSize}.y}{\text{dataDim}.height} $$
+   $$ \text{heightStep} = \frac{\text{geomSize}.z}{\text{dataDim}.depth} $$
+2. Convert the input Cartesian `point` to cylindrical coordinates using `cartToCyl` [S1, unofficial].
+3. Normalize the cylindrical coordinates by dividing by the step sizes to obtain texture coordinates [S1, unofficial]:
+   $$ \text{texCoord} = \frac{\text{cylCoord}}{(\text{lengthStep}, \text{angleStep}, \text{heightStep})} $$
+4. Check if any component of `texCoord` is out of bounds (less than 0 or greater than `dataDim` - 1) [S1, unofficial].
+5. If out of bounds, return `outVal` [S1, unofficial].
+6. If `triCubic` is true, call `cubicInterpolate(texCoord)` [S1, unofficial].
+7. Otherwise, perform linear texture sampling using `tex3D` on `texCoord` [S1, unofficial].
+
+**Pseudocode:**
+> **Unverified code.** The code below did not pass a test run against a reference implementation, or no test fits it, so it may contain errors.
+
+```python
+def interpolate_cyl(point, out_val, tri_cubic, geom_size, data_dim, data_tex, cart_to_cyl, cubic_interpolate):
+    # Calculate step sizes
+    length_step = geom_size.x / data_dim.width
+    angle_step = geom_size.y / data_dim.height
+    height_step = geom_size.z / data_dim.depth
+
+    # Convert Cartesian to Cylindrical
+    cyl_coord = cart_to_cyl(point)
+
+    # Normalize to texture coordinates
+    tex_coord = (
+        cyl_coord.x / length_step,
+        cyl_coord.y / angle_step,
+        cyl_coord.z / height_step
+    )
+
+    # Boundary check
+    if (tex_coord.x < 0 or tex_coord.x > data_dim.width - 1 or
+        tex_coord.y < 0 or tex_coord.y > data_dim.height - 1 or
+        tex_coord.z < 0 or tex_coord.z > data_dim.depth - 1):
+        return out_val
+
+    # Interpolation
+    if tri_cubic:
+        return cubic_interpolate(tex_coord)
+    else:
+        # Standard 3D linear texture sampling [G]
+        return tex3d_linear(data_tex, tex_coord)
+
+def tex3d_linear(data, uvw):
+    # Standard 3D linear interpolation implementation [G]
+    u, v, w = uvw
+    u0, v0, w0 = int(floor(u)), int(floor(v)), int(floor(w))
+    u1, v1, w1 = u0 + 1, v0 + 1, w0 + 1
+    u0, u1 = max(0, min(u0, data.width-1)), max(0, min(u1, data.width-1))
+    v0, v1 = max(0, min(v0, data.height-1)), max(0, min(v1, data.height-1))
+    w0, w1 = max(0, min(w0, data.depth-1)), max(0, min(w1, data.depth-1))
+    c000 = data[u0, v0, w0]; c100 = data[u1, v0, w0]
+    c010 = data[u0, v1, w0]; c110 = data[u1, v1, w0]
+    c001 = data[u0, v0, w1]; c101 = data[u1, v0, w1]
+    c011 = data[u0, v1, w1]; c111 = data[u1, v1, w1]
+    lerp = lambda a, b, t: a + t * (b - a)
+    c00 = lerp(c000, c100, u - u0)
+    c01 = lerp(c010, c110, u - u0)
+    c10 = lerp(c001, c101, u - u0)
+    c11 = lerp(c011, c111, u - u0)
+    c0 = lerp(c00, c01, v - v0)
+    c1 = lerp(c10, c11, v - v0)
+    return lerp(c0, c1, w - w0)
+```
+
+**Edge Cases and Pitfalls:**
+- If texture coordinates are out of bounds ($<0$ or $>dim-1$), the method returns the output value without sampling [S1, unofficial].
+- Precision issues may arise if `geomSize` or `dataDim` are not aligned, leading to incorrect step sizes [S1, unofficial].
+
+## Subtopics
+
+## Operating characteristics
+- **Time Complexity:** Not given in the sources.
+- **Memory Complexity:** Depends on the storage of `dataTex`, which is $O(D_x \times D_y \times D_z)$ [S1, unofficial].
+- **Strengths:** Efficient for data with cylindrical symmetry; avoids the overhead of full 3D grid traversal [S1, unofficial].
+- **Limitations:** Only suitable for data that can be naturally represented in cylindrical coordinates; boundary handling is simplistic [S1, unofficial].
+
+## Background
+This method is part of a CUDA-based volume rendering implementation, specifically designed for efficient sampling of volumetric data in cylindrical coordinates [S1, unofficial].
+
+## Sources
+[S1] ojaisnielsen/dtu-2010-cuda-volume-rendering, https://github.com/ojaisnielsen/dtu-2010-cuda-volume-rendering, fetched 2026-10-27 (unofficial)

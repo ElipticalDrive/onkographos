@@ -1,0 +1,185 @@
+--- v012.md
++++ v013.md
+@@ -4,93 +4,132 @@
+ 
+ ## Overview
+-Vector Quantization (VQ) is a lossy compression technique that maps $n$-dimensional input vectors to a single fixed-length index referencing an entry in a pre-defined or learned codebook (dictionary) [S1, S3, unofficial][S5]. It solves the problem of high storage and bandwidth requirements for volumetric data by exploiting spatial redundancy, replacing individual voxel blocks with compact indices [S2, S5]. Unlike [Scalar Quantization](5726-scalar-quantization.md) which processes values independently, VQ groups data into blocks to capture correlations, and unlike [Hierarchical Vector Quantization](827-hierarchical-vector-quantization.md) which uses multiple resolution levels, standard VQ typically employs a single dictionary for the entire dataset [S3, unofficial][S5].
++Vector Quantization (VQ) is a lossy compression technique that maps input data blocks (vectors) to indices referencing a finite set of pre-defined or learned dictionary entries (codewords) [S1, unofficial][S6]. It solves the problem of high storage and bandwidth requirements for volumetric data by exploiting spatial redundancy, where similar data blocks are represented by a single shared code [S6]. Unlike [Scalar Quantization](5726-scalar-quantization.md), which quantizes individual values independently, VQ groups multiple attributes or spatial neighbors into a single vector, enabling more efficient compression by clustering similar patterns [S3]. It is distinguished from [Hierarchical Vector Quantization](827-hierarchical-vector-quantization.md) by using a single resolution level codebook, whereas HVQ employs multiple levels to capture coarse and fine details [S3].
+ 
+ ## How it works
+ **Inputs and Outputs:**
+-*   **Input:** A set of $N$ $n$-dimensional vectors (e.g., voxel color features or small volume blocks) $S = \{(x_1, y_1, \dots), \dots, (x_N, y_N, \dots)\}$ [S1, S3, unofficial].
+-*   **Output:** A codebook $C$ of size $K = 2^r$ entries, where $r$ is the bit-size of the index, and a mapping of each input vector to an index $j \in [0, K-1]$ [S1, unofficial][S2].
++*   **Input:** A set of $N$ input vectors $\mathbf{X} = \{\mathbf{x}_1, \mathbf{x}_2, \dots, \mathbf{x}_N\}$, where each $\mathbf{x}_i \in \mathbb{R}^d$ (e.g., a block of voxel intensities or a vector of Gaussian attributes) [S1, S4, unofficial].
++*   **Output:** A codebook $C$ of size $K = 2^r$ codewords, and a mapping index list $I = \{j_1, j_2, \dots, j_N\}$, where $j_i \in \{0, \dots, K-1\}$ is the index of the best matching codeword for $\mathbf{x}_i$ [S1, unofficial][S2].
+ 
+ **Data Structures:**
+-*   **Codebook ($C$):** A table of $K$ vectors, each of dimension $n$. Stored as $C = \{(c_{x1}, c_{y1}, \dots), \dots, (c_{xK}, c_{yK}, \dots)\}$ [S1, unofficial].
+-*   **Index Map:** A list of integers (indices) corresponding to the input vectors, where each index points to an entry in $C$ [S2, S5].
++1.  **Codebook ($C$):** A table of $K$ vectors, each of dimension $d$. Stored as a contiguous array or texture. Size: $K \times d$ elements [S2][S4, unofficial].
++2.  **Index Map ($I$):** A list of $N$ integers, each requiring $r = \lceil \log_2 K \rceil$ bits. For an 8-bit index, $K=256$ [S1, unofficial].
+ 
+ **Algorithm Steps:**
+-1.  **Block Division:** Divide the input volume into small data blocks of size $B \times B \times B$ (commonly $4 \times 4 \times 4$) [S5][S7, unofficial]. Each block is treated as an $n$-dimensional vector.
+-2.  **Codebook Training:** Learn the codebook $C$ from the training data.
+-    *   *Metric:* Minimize the average squared-distance distortion:
+-        $$ D_{avg} = \frac{1}{N} \sum_{m=1}^N \| \vec{x}_m - \vec{c}_m \|^2_2 $$
+-        where $\vec{x}_m$ is the original vector and $\vec{c}_m$ is the codebook entry assigned to it [S1, S3, unofficial].
+-    *   *Optimization:* Use an iterative algorithm such as the Linde-Buzo-Gray (LBG) algorithm or a Principal Component Analysis (PCA) splitting strategy to avoid empty cells and improve speed [S1, S3, unofficial].
+-3.  **Encoding:** For each input vector $\vec{x}_i$, find the codebook entry $\vec{c}_j$ that minimizes the distortion metric $\delta(\vec{x}_i, \vec{c}_j) = \|\vec{x}_i - \vec{c}_j\|^2_2$ [S3, unofficial]. Store the index $j$ in the index map [S2].
+-4.  **Decoding:** To reconstruct the volume, look up the index $j$ in the codebook $C$ to retrieve the vector $\vec{c}_j$, which replaces the original block [S1, unofficial][S5].
+ 
+-**GPU Implementation Details (Cg/OpenGL):**
+-For hardware-accelerated decoding, integer arithmetic limitations in shading languages (e.g., Cg) are handled using texture mapping [S1, unofficial]:
+-1.  **Coordinate Mapping:** Map integer block coordinates $(x, y, z)$ to float texture coordinates in $[-1.0, 1.0]$ for a viewport of size $D_x \times D_y \times D_z$:
+-    $$ x' = (x \cdot 0.5 + 0.5) \cdot \frac{D_x - 1}{\frac{D_x - 4}{D_y - 1}} - \frac{2 D_x - 8}{3} $$
+-    $$ y' = (x \cdot 0.5 + 0.5) \cdot \frac{D_y - 4}{\frac{D_y - 1}{D_z - 1}} - \frac{2 D_y - 8}{3} $$
+-    $$ z' = (z \cdot 0.5 + 0.5) \cdot \frac{D_z - 1}{D_z - 4} - \frac{2 D_z - 8}{3} $$
+-    where $D_{x,y,z} = 2^n$ for $n \ge 3$ [S1, unofficial].
+-2.  **Address Texture:** Use a $4^3$ "Address Texture" (Texture A) to store $w$ coordinates for codebook lookups. The texture is repeated using `GL_REPEAT` to handle block boundaries. Coordinates for the address texture are:
+-    $$ x_A = (x \cdot 0.5 + 0.5) \cdot (D_x/4) $$
+-    $$ y_A = (y \cdot 0.5 + 0.5) \cdot (D_y/4) $$
+-    $$ z_A = (z \cdot 0.5 + 0.5) \cdot (D_z/4) $$
+-    [S1, unofficial].
+-3.  **Filtering:** Use `GL_NEAREST` to simulate integer division (e.g., $\lfloor x/4 \rfloor$) and `GL_CLAMP` to handle boundary conditions where coordinates fall outside $[0.0, 1.0]$ [S1, unofficial].
++1.  **Block Partitioning:** Divide the input volume or attribute set into non-overlapping blocks of size $B \times B \times B$ (or group $d$ attributes per voxel) to form the input vectors $\mathbf{x}_i$ [S6][S8, unofficial].
++2.  **Codebook Initialization:** Initialize the codebook $C$ with $K$ representative vectors. Common methods include random selection from the input data or using Principal Component Analysis (PCA) to avoid empty cells and speed up convergence [S1, S4, unofficial].
++3.  **Assignment (Nearest Neighbor Search):** For each input vector $\mathbf{x}_i$, find the codeword $\mathbf{c}_j \in C$ that minimizes the distortion metric $\delta(\mathbf{x}, \mathbf{y}) = \|\mathbf{x} - \mathbf{y}\|_2^2$ [S4, unofficial].
++    $$ j_i = \arg \min_{j \in \{0, \dots, K-1\}} \|\mathbf{x}_i - \mathbf{c}_j\|_2^2 $$
++4.  **Codebook Update (Clustering):** Recalculate each codeword $\mathbf{c}_j$ as the centroid of all input vectors assigned to it:
++    $$ \mathbf{c}_j = \frac{\sum_{i: j_i=j} \mathbf{x}_i}{\sum_{i: j_i=j} 1} $$
++    If a codeword has no assigned vectors (empty cell), it must be re-initialized [S1, S4, unofficial].
++5.  **Convergence Check:** Calculate the average distortion:
++    $$ D_{avg} = \frac{1}{N} \sum_{i=1}^N \|\mathbf{x}_i - \mathbf{c}_{j_i}\|_2^2 $$
++    Repeat steps 3-4 until $D_{avg}$ stabilizes or a maximum iteration count is reached [S1, S4, unofficial].
++6.  **Encoding:** Store the final codebook $C$ and the index map $I$.
++7.  **Decoding:** For each index $j_i$ in $I$, retrieve the codeword $\mathbf{c}_{j_i}$ from $C$ to reconstruct the approximation $\hat{\mathbf{x}}_i = \mathbf{c}_{j_i}$ [S1, S7, unofficial].
++
++**Pseudocode (Training):**
++```python
++def train_vq(input_vectors, codebook_size, max_iterations, tolerance):
++    """
++    input_vectors: List of numpy arrays, shape (N, d)
++    codebook_size: Integer K
++    max_iterations: Integer
++    tolerance: Float for convergence check
++    """
++    N, d = input_vectors.shape
++    # Step 2: Initialize codebook (e.g., random selection)
++    indices = np.random.choice(N, codebook_size, replace=False)
++    codebook = input_vectors[indices].copy()
++    
++    prev_distortion = float('inf')
++    
++    for iteration in range(max_iterations):
++        # Step 3: Assignment
++        # Calculate distances from each vector to each codeword
++        # dists shape: (N, K)
++        dists = np.linalg.norm(input_vectors[:, np.newaxis, :] - codebook[np.newaxis, :, :], axis=2)
++        assignments = np.argmin(dists, axis=1)
++        
++        # Step 4: Update
++        new_codebook = np.zeros_like(codebook)
++        for k in range(codebook_size):
++            mask = assignments == k
++            if np.sum(mask) > 0:
++                new_codebook[k] = np.mean(input_vectors[mask], axis=0)
++            else:
++                # Handle empty cell: re-initialize with a random input vector
++                new_codebook[k] = input_vectors[np.random.randint(N)]
++        
++        codebook = new_codebook
++        
++        # Step 5: Convergence Check
++        current_distortion = np.mean(np.min(dists, axis=1))
++        if abs(prev_distortion - current_distortion) < tolerance:
++            break
++        prev_distortion = current_distortion
++        
++    return codebook, assignments
++```
+ 
+ **Parameters:**
+-*   **Index Bit-size ($r$):** Controls the trade-off between compression ratio and distortion. Typical value: 8 bits [S1, unofficial].
+-*   **Block Size:** Commonly $4 \times 4 \times 4$ [S7, unofficial].
++*   **Codebook Size ($K$):** Critical parameter. Larger $K$ improves quality but increases storage and search time. Typical values range from 256 to 4096 for volumetric blocks [S6].
++*   **Block Size:** Spatial dimensions of the input vectors. Commonly $4 \times 4 \times 4$ for volumetric data [S8, unofficial].
++*   **Bit-size of Index:** Determines $K$. An 8-bit index allows $K=256$ [S1, unofficial].
+ 
+ **Edge Cases and Pitfalls:**
+-*   **Empty Cell Problem:** Iterative algorithms like LBG may create unused codebook entries, increasing distortion and execution time [S1, S3, unofficial]. PCA splitting strategies mitigate this [S1, unofficial].
+-*   **Accumulated Error:** In time-varying data, reconstructing differences (P-frames) leads to error accumulation. Mitigated by periodically transferring original data (I-frames) to reset the state [S1, unofficial].
+-*   **Pre-processing Time:** Learning dictionaries for massive volumes requires significant pre-processing time [S5].
++*   **Empty Cell Problem:** Iterative algorithms like LBG may result in codewords with no assigned vectors, increasing distortion and execution time [S1, S4, unofficial]. PCA-based initialization helps avoid this [S1, unofficial].
++*   **Accumulated Error:** In time-varying data, reconstructing differences frame-by-frame accumulates error. I-frames (original data) must be periodically inserted to reset the state [S1, unofficial].
++*   **Pre-processing Time:** Learning dictionaries for massive volumes requires significant computation time [S6].
+ 
+ ## Subtopics
+ 
+ ### [Hierarchical Vector Quantization](827-hierarchical-vector-quantization.md)
+-Uses multiple resolution levels (codebooks) to capture coarse and fine details, allowing direct GPU decoding and minimizing CPU-GPU transfer.
++Uses multiple resolution levels (codebooks) to capture coarse and fine details, allowing efficient handling of large-scale data and direct GPU rendering.
+ 
+ ### [LBG Algorithm](840-lbg-algorithm.md)
+-The standard iterative method for finding optimal codebooks by minimizing distortion, though prone to empty cells and slow execution.
++The standard iterative algorithm (Linde-Buzo-Gray) for optimizing codebooks by minimizing distortion, though it suffers from speed issues and empty cells.
+ 
+ ### [Progressive Encoding of Time-Varying Sequences](959-progressive-encoding-of-time-varying-sequences.md)
+-Extends VQ to time-varying data by reusing codebooks across frames, treating frames as I-frames or P-frames.
++Compresses time-varying data by reusing codebooks across frames, treating frames as I-frames or P-frames to reduce memory and encoding time.
+ 
+ ### [Vector Quantization for Volumetric Radiance Fields](1870-vector-quantization-for-volumetric-radiance-fields.md)
+-Applies VQ to compress voxel color features in NeRF-like grids, achieving high compression ratios with minimal quality loss.
++Applies VQ to compress voxel color features in radiance fields, achieving ~1 MB model sizes by combining adaptive pruning with learnable VQ.
+ 
+ ### [Fortune's Palette Compression](4988-fortune-s-palette-compression.md)
+-A lossless variant for sparse data, mapping unique values to a compact palette.
++A lossless variant for sparse data, mapping unique values to a compact palette and storing bit-packed indices.
+ 
+ ### [Compact3D / C3DGS / EAGLES](6139-compact3d-c3dgs-eagles.md)
+-Applies VQ to 3D Gaussian Splatting attributes (SH coefficients, scale) to reduce model size.
++Applies VQ to 3D Gaussian Splatting attributes (SH coefficients, shape parameters) to achieve ~4× compression with minimal quality loss.
+ 
+ ### [Codebook Sharing](7563-codebook-sharing.md)
+-Reuses a single codebook across multiple levels or images to save memory.
++Reuses a single codebook across multiple levels or similar images to reduce memory overhead.
+ 
+ ### [Brood-based Vector Quantization](7595-brood-based-vector-quantization.md)
+-Applies VQ to residuals in adaptive trees (quadtrees/octrees) to exploit spatial coherence.
++Applies VQ to residuals of adaptive tree broods, exploiting spatial coherence for lower error at the same bit rate.
+ 
+ ### [Residual Vector Quantization (R-VQ)](12711-residual-vector-quantization-r-vq.md)
+-Decomposes quantization error across multiple stages for higher precision in geometric attributes.
++Decomposes quantization error across multiple stages (codebooks) to achieve higher precision for geometric attributes like scale and rotation.
+ 
+ ## Operating characteristics
+-*   **Time Complexity:** Encoding is $O(N \cdot K \cdot n)$ for naive search, where $N$ is the number of vectors, $K$ is codebook size, and $n$ is dimensionality. Decoding is $O(1)$ per vector (lookup) [S1, unofficial][S5].
+-*   **Memory Complexity:** Storage is $O(K \cdot n + N)$ for the codebook and indices [S2].
+-*   **Performance:** Decompression is extremely fast, suitable for real-time rendering [S5]. Achieves high compression ratios (e.g., ~20:1) with minimal artifacts for data with high spatial redundancy [S5].
+-*   **Strengths:** Fast decoding, good compression for redundant data, hardware-friendly [S1, unofficial][S5].
+-*   **Limitations:** Lossy, pre-processing time for codebook generation, dictionary size limits quality [S1, unofficial][S5].
++*   **Time Complexity:** Encoding is $O(N \cdot K \cdot d)$ for brute-force search, where $N$ is the number of vectors, $K$ is codebook size, and $d$ is dimensionality. Training is iterative and can be slow for large datasets [S1, S4, unofficial].
++*   **Memory Complexity:** Storage is $O(K \cdot d + N \cdot r)$, where $r$ is bits per index. Decompression is $O(1)$ per vector via lookup [S6].
++*   **Performance:** Decompression is extremely fast, suitable for real-time rendering [S6]. Compression ratio depends heavily on data redundancy; high spatial redundancy yields better results [S1, unofficial].
++*   **Strengths:** Fast decompression, simple implementation, effective for data with high spatial redundancy [S6].
++*   **Limitations:** Lossy, pre-processing time for codebook generation, sensitivity to codebook size [S1, unofficial][S6].
++*   **When to Use:** Real-time rendering of large volumetric datasets with high spatial redundancy [S1, unofficial].
++*   **When Not to Use:** Data with low redundancy or where lossless compression is required (unless using variants like Fortune's Palette) [S1, unofficial].
+ 
+ ## Background
+-Vector Quantization was first introduced in volume rendering by [NH92, NH93] [S5]. The foundational LBG algorithm was developed by Linde, Buzo, and Gray in 1980, improving upon scalar quantizers by Max (1960) and Lloyd (1982) [S3, unofficial]. It is widely used for large time-varying volumetric data due to high spatial and temporal redundancy [S1, unofficial].
++Vector Quantization was first introduced in volume rendering by [NH92, NH93] [S6]. The foundational LBG algorithm was developed by Linde, Buzo, and Gray in 1980, improving upon earlier scalar quantizers by Max (1960) and Lloyd (1982) [S4, unofficial]. It has been widely used for compressing time-varying volumetric data due to its ability to exploit high spatial and temporal redundancy [S1, unofficial]. Recent applications include compressing Neural Radiance Fields (NeRF) and 3D Gaussian Splatting attributes [S2, S3].
+ 
+ ## Sources
+ [S1] A system for real-time rendering of compressed time-varying volume data, https://doi.org/10.7939/r3041m, fetched 2026-10-26 (unofficial)
+ [S2] Compressing Volumetric Radiance Fields to 1 MB, https://doi.org/10.1109/cvpr52729.2023.00411, fetched 2026-10-26
+-[S3] Compression Domain Volume Rendering, https://www.cs.cit.tum.de/fileadmin/w00cfj/cg/Research/Publications/2003/Compression_Domain_Volume_Rendering/vis03-vq.pdf, fetched 2026-10-26 (unofficial)
+-[S4] A 129 FPS Full HD Real-Time Accelerator for 3D Gaussian Splatting., https://doi.org/10.1109/tvcg.2026.3683714, fetched 2026-10-27
+-[S5] PDF A Survey of Compressed GPU-Based Direct Volume Rendering, https://www.ifi.uzh.ch/dam/jcr:00000000-7f10-48e5-ffff-ffff94c9f943/CompressedDVR.pdf, fetched 2026-10-27
+-[S6] GauStudio: A Modular Framework for 3D Gaussian Splatting and Beyond, https://doi.org/10.48550/arXiv.2403.19632, fetched 2026-10-30 (unofficial)
+-[S7] 体数据压缩技术综述, https://www.jcad.cn/article/id/9d3ce9cd-c97c-4fab-9291-a72fbe7ba37e, fetched 2026-10-30 (unofficial)+[S3] Compression in 3D Gaussian Splatting: A Survey of Methods, Trends, and Future Directions, https://doi.org/10.1109/TCSVT.2026.3676048, fetched 2026-10-26
++[S4] Compression Domain Volume Rendering, https://www.cs.cit.tum.de/fileadmin/w00cfj/cg/Research/Publications/2003/Compression_Domain_Volume_Rendering/vis03-vq.pdf, fetched 2026-10-26 (unofficial)
++[S5] A 129 FPS Full HD Real-Time Accelerator for 3D Gaussian Splatting., https://doi.org/10.1109/tvcg.2026.3683714, fetched 2026-10-27
++[S6] PDF A Survey of Compressed GPU-Based Direct Volume Rendering, https://www.ifi.uzh.ch/dam/jcr:00000000-7f10-48e5-ffff-ffff94c9f943/CompressedDVR.pdf, fetched 2026-10-27
++[S7] GauStudio: A Modular Framework for 3D Gaussian Splatting and Beyond, https://doi.org/10.48550/arXiv.2403.19632, fetched 2026-10-30 (unofficial)
++[S8] 体数据压缩技术综述, https://www.jcad.cn/article/id/9d3ce9cd-c97c-4fab-9291-a72fbe7ba37e, fetched 2026-10-30 (unofficial)

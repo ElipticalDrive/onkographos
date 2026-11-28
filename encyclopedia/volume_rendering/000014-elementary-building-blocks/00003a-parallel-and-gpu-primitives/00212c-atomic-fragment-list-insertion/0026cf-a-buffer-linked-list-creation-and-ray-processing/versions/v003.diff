@@ -1,0 +1,331 @@
+--- v002.md
++++ v003.md
+@@ -7,116 +7,192 @@
+ 
+ ## How it works
+-The method consists of two main phases: A-buffer construction (creation of the linked list) and Ray processing (traversal of the linked list to find the isosurface) [S1].
+-
+-### Inputs and Outputs
+-*   **Inputs**: Skeleton data (segment primitives with endpoints, radii, and radius profiles), kernel parameters ($\sigma$, $\sigma_{clipping}$, $\epsilon_{clipping}$), camera parameters (ray origin and direction per pixel), and an optional occluding depth buffer [S1, G].
+-*   **Outputs**: A per-pixel linked list of fragments sorted by entry depth, and the final isosurface intersection point [S1].
+-
+-### Data Structures
+-1.  **A-Buffer Linked List**: Per pixel, a linked list of fragments storing `zIn`, `zOut`, and `segId`, sorted by `zIn` [S1].
+-2.  **Processing Heaps (Per Ray)**: `primitives` is a min-heap storing `{zOut, segId}` pairs representing active primitives [S1]. `argmins` is a min-heap storing `{t_prim, segId}` pairs ordered by `t_prim`, representing the next candidate for field evaluation [S1].
+-
+-### Step 1: A-Buffer Construction
+-1.  **Occluding Depth Buffer Initialization (Optional)**: Render an occluding depth buffer to achieve output sensitivity and limit primitives registered in linked lists [S1]. Initialize the depth buffer with depth values corresponding to positions guaranteed to be in the volume [S1]. Compute these depth values in a first render path on a per-primitive basis [S1]. Due to the integral formulation of the field, the minimal radius around primitives does not necessarily correspond to the prescribed radius (e.g., for bent skeletons) [S1]. To overcome this, rely on two assumptions: usage of skeleton end-point correctors and bounded radius variations (none of the two spheres at a primitive end-point completely encompasses the other) [S1]. Do not render occluders for primitives corresponding to end-point correctors [S1]. Derive a scaling factor for the sphere cones' radii such that the implicit surface is guaranteed to enclose the modified primitives, based on the worst skeleton configuration and the scale-invariant property of the SCALIS representation [S1]. The quality of the minimal volume is related to the kernel scale parameter; larger scale means smaller guaranteed volume [S1]. For typical Compact polynomial kernel scale $\sigma$ ranging from 1.5 to 2, the scaling factor ranges from $\approx 0.62$ to $\approx 0.35$ [S1]. For more constrained radius variations (constant radius), better bounds can be computed [S1]. Ignore primitives whose support entries are beyond the occluding depth [S1].
+-2.  **Primitive Support Generation**: Generate segment-aligned quads to limit the number of generated fragments for which ray/sphere-cone intersections are computed, particularly for primitives whose maximal radii are comparatively small to the segment length [S1]. Use a compact support kernel to avoid the need to cut-off primitive influences in this first step [S1].
+-3.  **Ray-Support Intersection and List Insertion**: Compute ray-support intersections for primitives in a fragment shader [S1]. Insert entry and exit points in sphere-cones and the associated primitive ID into an A-buffer linked-list [S1]. Sort the linked list on the fly according to the depth of the entry [S1].
+-
+-### Step 2: Ray Processing
+-The fragment shader generates and processes intervals on-the-fly using Algorithm 1 until an intersection with the isosurface is found [S1]. The resulting linked-list processing loop is given in Algorithm 2 [S1].
+-
+-**Algorithm 2: Processing Linked List**
++**Inputs:**
++*   Skeleton geometry defined as a set of segment primitives.
++*   Kernel parameters (e.g., scale $\sigma$, clipping radius).
++*   View ray $(i, j)$ for each pixel.
++*   Optional occluding depth buffer for output sensitivity.
++
++**Outputs:**
++*   Isosurface intersection point or null if no intersection is found within bounds.
++
++**Data Structures:**
++1.  **A-Buffer Linked List:** Stores fragments per pixel. Each fragment contains:
++    *   Entry depth ($z_{in}$) along the ray.
++    *   Exit depth ($z_{out}$) along the ray.
++    *   Primitive ID.
++    *   The list is sorted by entry depth $z_{in}$ [S1].
++2.  **Processing Heaps (per ray):**
++    *   `primitives`: A min-heap (or sorted list) of active primitives, keyed by their exit depth ($z_{out}$). Stores tuples $(z_{out}, \text{segId})$.
++    *   `argmins`: A min-heap storing the minimum field value (or derivative metric) contributed by each active primitive at the current ray position. Stores tuples $(\text{argmin\_val}, \text{segId})$.
++
++**Steps:**
++
++1.  **Initialization:**
++    *   Initialize `primitives` and `argmins` as empty heaps [S1].
++    *   Initialize `frags` as the linked list of fragments for pixel $(i, j)$, obtained via `InitFragList(i, j)` [S1].
++    *   Set `targmin` $\leftarrow \infty$ [S1].
++    *   Set `tentry` $\leftarrow$ `frags.currZIn()` [S1].
++
++2.  **Occlusion Culling (Optional but recommended):**
++    *   Render an occluding depth buffer in a first pass to determine the maximum depth $z_{max}$ guaranteed to be inside the volume [S1].
++    *   Ignore any primitive whose support entry $z_{in}$ is beyond $z_{max}$ [S1].
++    *   Compute scaling factors for sphere-cone radii based on the worst-case skeleton configuration and kernel scale to ensure the implicit surface encloses modified primitives [S1]. For compact polynomial kernels with $\sigma \in [1.5, 2]$, scaling factors range from $\approx 0.62$ to $\approx 0.35$ [S1].
++
++3.  **Ray Processing Loop:**
++    While `!frags.empty()` OR `!primitives.empty()`:
++    
++    a.  **Prepare Current Interval:**
++        *   Store current state: $t_b, h_b \leftarrow t_e, h_e$ [S1].
++        *   Get potential exit from active primitives: $t_{exit} \leftarrow$ `primitives.back().val` (the largest $z_{out}$ in the heap, or $\infty$ if empty) [S1].
++        
++    b.  **Determine Next Event:**
++        *   If `primitives.empty()` OR `targmin < t_exit` OR `tentry < t_exit`:
++            *   If `primitives.empty()`:
++                *   Set interval start $t_b, h_b \leftarrow t_{entry}, (g(0), \dots)$ [S1].
++                *   *Note:* $g(0)$ represents the field value where the field is null [S1].
++            *   **Refill Active Primitives:**
++                *   While `targmin > tentry` AND `!frags.empty()`:
++                    *   Get primitive ID from current fragment: `segId` $\leftarrow$ `frags.currSegId()` [S1].
++                    *   Compute the argument minimizing the field contribution for this primitive: $t_{prim} \leftarrow \text{Argmin}(\sigma, \text{segId})$ [S1].
++                    *   Get fragment exit depth: $t_{out} \leftarrow$ `frags.currZOut()` [S1].
++                    *   Insert into active primitives heap: `primitives.insert({t_out, segId})` [S1].
++                    *   Insert into argmins heap: `argmins.insert(t_prim)` [S1].
++                    *   Update target minimum: `targmin` $\leftarrow$ `argmins.front()` [S1].
++                    *   Advance fragment: `frags.next()` [S1].
++                    *   Update next entry: $t_{entry} \leftarrow$ (`!frags.empty()`) ? `frags.currZIn()` : $\infty$ [S1].
++            *   Set interval start: $t_e, h_e \leftarrow t_{argmin}, \text{HermiteData}(t_{argmin})$ [S1].
++        *   Else:
++            *   Set interval start: $t_e, h_e \leftarrow t_{exit}, (g(0), \dots)$ [S1].
++            
++    c.  **Process Interval:**
++        *   If $t_b < t_e$:
++            *   Evaluate field and derivative over $[t_b, t_e]$: $f, t \leftarrow \text{processInterval}(t_b, h_b, t_e, h_e)$ [S1].
++            *   If intersection found ($f$ is true):
++                *   Generate isosurface at $t$: `GenerateIsoSurface(t)` [S1].
++                *   Return [S1].
++                
++    d.  **Cleanup:**
++        *   Remove primitives that have exited the current interval: `primitives.popElements([](x){x \le t_e})` [S1].
++        *   Remove argmins that have exited: `argmins.popElements([](x){x \le t_e})` [S1].
++        *   Update target minimum: `targmin` $\leftarrow$ (`!argmins.empty()`) ? `argmins.front()` : $\infty$ [S1].
++
++**Edge Cases and Pitfalls:**
++*   **Numerical Instability:** The normalized field derivative is discontinuous when the field switches from null to non-null [S1]. Apply one step of sphere tracing to avoid these areas. This requires no field evaluation as the field is null at the support limit [S1].
++*   **Bent Skeletons:** Due to the integral formulation, the minimal radius around primitives may not match the prescribed radius [S1]. Use skeleton end-point correctors and assume bounded radius variations (neither sphere at a primitive endpoint completely encompasses the other) [S1]. Do not render occluders for primitives corresponding to end-point correctors [S1].
++*   **Blending Artifacts:** Sphere-tracing and Sherstyuk's fast ray tracing can present visual artifacts in the presence of large amounts of blending (e.g., many segments connecting at one vertex) [S1]. Use under-relaxation to properly find the surface [S1].
++*   **Subdivision Strategy:** Use four subdivisions per primitive for the coarsest subdivision allowing visually acceptable results on primitives with constant radius [S1]. Limit sphere-tracing steps per subinterval (typically 256) [S1].
++
++**Pseudocode:**
+ 
+ ```python
+-import heapq
+-
+-def GenerateRay(i, j):
+-    # Initialize heaps and fragment list
+-    primitives = []  # Min-heap storing (zOut, segId)
+-    argmins = []     # Min-heap storing (t_prim, segId)
++def GenerateRay(i, j, frags, kernel_scale):
++    """
++    Process a single ray using the A-buffer linked list.
++    
++    Args:
++        i, j: Pixel coordinates.
++        frags: Linked list of fragments for pixel (i, j), sorted by z_in.
++        kernel_scale: Kernel scale parameter sigma.
++        
++    Returns:
++        Intersection point or None.
++    """
++    # Heaps to store active primitives and their minimum field contributions
++    # primitives: min-heap of (z_out, seg_id)
++    # argmins: min-heap of (min_field_val, seg_id)
++    primitives = empty_min_heap()
++    argmins = empty_min_heap()
++    
++    # Initialize fragment iterator
+     frags = InitFragList(i, j)
+-    targmin = float('inf')
++    
++    # Current state variables
++    targmin = infinity
+     tentry = frags.currZIn()
+-    te, he = tentry, (0.0, ...)  # Initialize with null field data
+-    
+-    while not (frags.empty() and primitives):
++    te = 0.0
++    he = 0.0
++    
++    while not (frags.empty() and primitives.empty()):
++        # Store previous interval end for processing
+         tb, hb = te, he
+-        texit = primitives[-1][0] if primitives else float('inf')
+-        
+-        if not primitives or targmin < texit or tentry < texit:
+-            if not primitives:
+-                tb, hb = tentry, (0.0, ...)
+-                
++        
++        # Determine the exit point of the current batch of active primitives
++        if primitives.empty():
++            texit = infinity
++        else:
++            # back() returns the element with the largest key in a min-heap? 
++            # Note: The source says "primitives.back().val". 
++            # In a min-heap keyed by z_out, back() is not standard. 
++            # Assuming a sorted list or max-heap for exit times, or that 
++            # primitives stores intervals and we need the max z_out.
++            # Based on "primitives.popElements([](x){x <= te})", it seems 
++            # we remove elements <= te. This implies we need to access 
++            # the element with the largest z_out to know when the *current* 
++            # set of primitives ends. Let's assume primitives is a structure 
++            # allowing access to the max z_out.
++            texit = primitives.max_z_out()
++            
++        # Check if we need to pull more fragments from the A-buffer
++        if primitives.empty() or targmin < texit or tentry < texit:
++            if primitives.empty():
++                # No active primitives, field is null
++                tb, hb = tentry, (0.0, 0.0, 0.0, 0.0) # g(0)
++            
++            # Refill active primitives from the fragment list
+             while targmin > tentry and not frags.empty():
+-                tprim = Argmin(sigma, frags.currSegId())
++                seg_id = frags.currSegId()
++                
++                # Compute the argument (t) that minimizes the field for this primitive
++                tprim = Argmin(kernel_scale, seg_id)
++                
++                # Get the exit depth of the current fragment
+                 tout = frags.currZOut()
+-                heapq.heappush(primitives, (tout, frags.currSegId()))
+-                heapq.heappush(argmins, (tprim, frags.currSegId()))
+-                targmin = argmins[0][0]
++                
++                # Add to active sets
++                primitives.insert(tout, seg_id)
++                argmins.insert(tprim, seg_id)
++                
++                # Update the global minimum
++                targmin = argmins.front()
++                
++                # Advance fragment
+                 frags.next()
+-                tentry = frags.currZIn() if not frags.empty() else float('inf')
+-                
++                
++                # Update next entry point
++                if not frags.empty():
++                    tentry = frags.currZIn()
++                else:
++                    tentry = infinity
++            
++            # Set the start of the next interval to the argmin
+             te, he = targmin, HermiteData(targmin)
+         else:
+-            te, he = texit, (0.0, ...)
+-            
++            # The next event is the exit of the current active primitives
++            te, he = texit, (0.0, 0.0, 0.0, 0.0) # g(0)
++            
++        # Process the interval [tb, te]
+         if tb < te:
++            # Evaluate field and derivative over the interval
++            # Returns (found_intersection, t_intersection)
+             f, t = processInterval(tb, hb, te, he)
++            
+             if f:
+                 GenerateIsoSurface(t)
+-                return
+-                
+-        # Remove elements where value <= te
+-        primitives = [(z, sid) for z, sid in primitives if z > te]
+-        argmins = [(tp, sid) for tp, sid in argmins if tp > te]
+-        heapq.heapify(primitives)
+-        heapq.heapify(argmins)
+-        
+-        targmin = argmins[0][0] if argmins else float('inf')
+-
+-# Helper definitions per [S1]
+-def InitFragList(i, j):
+-    """Returns the sorted linked list of fragments for pixel (i, j)."""
+-    pass
+-
+-def Argmin(sigma, segId):
+-    """Computes the parameter minimizing the field derivative for a primitive."""
+-    pass
+-
+-def HermiteData(t):
+-    """Computes Hermite data at parameter t."""
+-    pass
+-
+-def processInterval(tb, hb, te, he):
+-    """Evaluates the field and derivative within [tb, te]. Returns (found, t)."""
+-    pass
+-
+-def GenerateIsoSurface(t):
+-    """Renders the isosurface intersection point t."""
+-    pass
++                return t
++                
++        # Remove primitives that have exited the current interval
++        # Note: The source uses a lambda to pop elements <= te.
++        # This implies we need to efficiently remove all primitives with z_out <= te.
++        primitives.popElements(lambda x: x.z_out <= te)
++        argmins.popElements(lambda x: x.z_out <= te) # Assuming argmins is keyed/linked similarly
++        
++        # Update targmin
++        if not argmins.empty():
++            targmin = argmins.front()
++        else:
++            targmin = infinity
++            
++    return None
+ ```
+-
+-**Details on `processInterval` and Numerical Stability**:
+-*   Due to possible numerical instability in the normalized field derivative computation (the latter being non-continuous when the field switches from null to non-null), apply one step of sphere tracing to avoid those areas [S1]. Note that this requires no field evaluation as the field is null at the support limit [S1].
+-*   The `processInterval` function evaluates the field and its derivative within the interval $[tb, te]$ using the Hermite data $(te, he)$ and $(tb, hb)$ [S1].
+-*   If an intersection with the isosurface is found, return the point $t$ [S1].
+-
+-**Subdivision Strategy**:
+-*   Combine the second subdivision strategy (switching between overlapped/non-overlapped areas) with the contribution from section 3 to limit the number of segment primitives stored at once while generating long enough intervals to limit compulsory field evaluations [S1].
+-*   This presents a trade-off: it limits the number of segment primitives to be stored at once while generating long enough intervals, hence limiting the number of compulsory field evaluations [S1].
+-
+-**Blending**:
+-*   It is possible to blend different skeletons with a blending sharper than summation blending, e.g., using Ricci's blending [Ric73]. This keeps the correlation of the field with the homothetic squared distance to individual primitives by defining a blending behavior parametrized between a summation blend and a maximum blend [S1].
+-
+-### Parameters
+-*   **Kernel Scale ($\sigma$)**: For typical Compact polynomial kernel scale $\sigma$ ranging from 1.5 to 2, the scaling factor ranges from $\approx 0.62$ to $\approx 0.35$ [S1].
+-*   **Cauchy Kernel Parameters**: For Cauchy kernel tests, $\sigma_{clipping} = 4$ for $\sigma = 0.3$ and $\epsilon_{clipping} = 0.005$ [S1].
+-*   **Sphere-Tracing Steps**: On each subinterval, the number of sphere-tracing steps is bounded (typically 256) [S1].
+-*   **Subdivisions per Primitive**: In the implementation of Sherstyuk's method, use four subdivisions per primitive, which is the coarsest subdivision allowing visually acceptable results on primitives with constant radius [S1].
+-
+-### Edge Cases and Pitfalls
+-*   **Numerical Instability**: Occurs in the normalized field derivative computation because it is non-continuous when the field switches from null to non-null [S1]. Apply one step of sphere tracing to avoid these areas [S1]. Note that this requires no field evaluation as the field is null at the support limit [S1].
+-*   **Minimal Radius Discrepancy**: Due to the integral formulation of the field, the minimal radius around primitives does not necessarily correspond to the prescribed radius (e.g., for bent skeletons) [S1]. Overcome this by relying on skeleton end-point correctors and bounded radius variations [S1].
+-*   **Visual Artifacts**: Sphere-tracing and Sherstyuk's fast ray tracing can present visual artifacts [S1]. In the presence of a large amount of blending (e.g., many segments connecting at one vertex), sphere-tracing algorithms require under-relaxation to properly find the surface [S1].
+-*   **A-Buffer Overflow**: For kernels with larger footprints (e.g., Cauchy), ensure the A-buffer size is sufficient to avoid overflow, as this leads to an increase in computational time [S1].
+ 
+ ## Subtopics
+@@ -125,17 +201,28 @@
+ This method constructs a dynamic acceleration structure (A-buffer) on the GPU to efficiently identify which segment primitives overlap a given ray, avoiding the evaluation of empty space in expensive field computations. It differs from brute-force ray marching by using a geometry shader to generate quads covering primitive supports and a fragment shader to compute ray-support intersections, storing entry/exit points in a linked list. Unlike [Bru19], which requires explicit cutoff of primitive influences, this approach leverages compact support kernels (specifically clipped sphere-cones for Cauchy kernels) to naturally limit the interaction domain.
+ 
++### [A-Buffer Visibility Pass](16279-a-buffer-visibility-pass.md)
++The A-Buffer Visibility Pass is a GPU fragment-stage algorithm that generates an approximate visibility function $\tilde{v}(x_e, x)$ for each view ray by storing depth and visibility control points in an A-Buffer. It solves the problem of efficiently representing volumetric occlusion along semi-transparent view rays to enable optimized illumination calculations, such as determining entry points for light rays or approximating multiple scattering. Unlike sibling methods that may focus on primitive intersection or general buffer construction, this method specifically targets the generation of a sparse, error-thresholded visibility function using a fixed maximum number of layers, similar in concept to deep shadow maps but applied to view-space volumetric visibility.
++
+ ## Operating characteristics
+-*   **Time Complexity**: The method reduces rendering time compared to sphere tracing [S1]. For compact polynomial kernel at 2048x2048 resolution: Intel UHD Graphics 630 reduction from -34.2% to -48.7%; nVidia Quadro P1000 reduction from -51.5% to -78.0%; nVidia GeForce 2080 RTX reduction from -35.3% to -72.1% compared to the most competitive alternative method [S1]. For Cauchy kernel tests on nVidia RTX at 1536x1536 resolution: Timings range from 7 to 54 milliseconds (excluding Fig.12 Middle) [S1]. Rendering time reduction compared to sphere tracing ranges from -46.2% to -81.3% [S1].
+-*   **Memory Complexity**: The method limits the number of segment primitives stored at once by combining subdivision strategies, thus limiting memory usage per thread [S1]. Usage of occluders can have a large impact in terms of rendering time (as well as memory consumption) depending on the nature of the skeleton [S1].
+-*   **Measured Performance**: Stress test on nVidia RTX: rendered a foam structure consisting of 526k segments using the compact polynomial kernel at 15 frames per second [S1]. Similar improvements observed on other GPUs at 1024x1024 resolution [S1].
+-*   **Strengths**: Avoids evaluation of empty space; output sensitivity via occluding depth buffer; handles varying radii and complex skeletons; real-time rendering capabilities [S1].
+-*   **Limitations**: Numerical instability at field boundaries; potential visual artifacts with high blending; requires careful tuning of kernel parameters and subdivision strategies [S1].
+-*   **When to Use**: Suitable for real-time rendering of skeleton-based implicit surfaces, especially when primitives have compact support and varying radii [S1].
+-*   **When Not to Use**: Not suitable for kernels with very large footprints without sufficient A-buffer size; may require under-relaxation for high blending scenarios [S1].
++**Time and Memory Complexity:**
++*   The method limits the number of segment primitives stored at once by combining subdivision strategies, trading off memory usage per thread for fewer compulsory field evaluations [S1].
++*   Rendering time reduction compared to sphere tracing ranges from -46.2% to -81.3% on nVidia RTX at 1536x1536 resolution for Cauchy kernels [S1].
++*   For compact polynomial kernels at 2048x2048 resolution, rendering time reductions range from -34.2% to -48.7% on Intel UHD Graphics 630, -51.5% to -78.0% on nVidia Quadro P1000, and -35.3% to -72.1% on nVidia GeForce 2080 RTX compared to the most competitive alternative method [S1].
++
++**Measured Performance:**
++*   On nVidia RTX at 1536x1536 resolution with Cauchy kernel ($\sigma=0.3, \epsilon_{clipping}=0.005$), timings range from 7 to 54 milliseconds (excluding specific figures) [S1].
++*   Stress test: Rendered a foam structure with 526k segments at 15 frames per second using the compact polynomial kernel on nVidia RTX [S1].
++
++**Strengths and Limitations:**
++*   **Strengths:** Avoids evaluation of empty space; output sensitivity via occluding depth buffer reduces primitive count; compact support kernels eliminate need for explicit cutoff [S1].
++*   **Limitations:** Numerical instability at field boundaries requires sphere tracing steps; blending artifacts may require under-relaxation; larger kernel footprints (e.g., Cauchy) increase computational time and A-buffer overflow risk [S1].
++
++**When to Use:**
++*   Use for real-time rendering of skeleton-based implicit surfaces where empty space evaluation is expensive.
++*   Use when compact support kernels are applicable.
++*   Do not use if high blending density causes severe artifacts without significant performance penalty from under-relaxation [S1].
+ 
+ ## Background
+-*   **Origin**: The method is based on the work presented in "Fast Ray Tracing of Scale-Invariant Integral Surfaces" [S1].
+-*   **History**: The approach builds upon previous work on A-buffers [LHL14] and sphere-tracing optimizations [Bru19] [S1]. It incorporates insights from Sherstyuk's fast ray-tracing [She99] and segment-tracing [GGPP20] [S1].
+-*   **Usage**: Implemented in C++ using OpenGL, with shaders in GLSL [S1]. Tested on Intel UHD Graphics 630, nVidia Quadro P1000, and nVidia GeForce 2080 RTX [S1]. Tested on artistic shapes, truss structures, branching structures, procedural foam structures, and random skeletons [S1].
++The method is implemented in C++ using OpenGL, with shaders in GLSL [S1]. It was tested on Intel UHD Graphics 630, nVidia Quadro P1000, and nVidia GeForce 2080 RTX [S1]. Test cases included artistic shapes, truss structures, branching structures, procedural foam structures, and random skeletons [S1]. The approach builds on [Atomic Fragment List Insertion](2465-atomic-fragment-list-insertion.md) and is compared to sphere-tracing [Bru19], Sherstyuk fast ray-tracing [She99], and segment-tracing [GGPP20] [S1]. Blending can be sharper than summation blending using Ricci's blending [Ric73] [S1].
+ 
+ ## Sources

@@ -1,0 +1,224 @@
+--- v001.md
++++ v002.md
+@@ -8,11 +8,11 @@
+ ## How it works
+ **Inputs and Outputs:**
+-The input is a volumetric tensor $x$ of shape $(B, C_{in}, D, H, W)$ for 3D data or $(B, C_{in}, H, W)$ for 2D data, where $B$ is batch size, $C_{in}$ is input channels, and $D, H, W$ are spatial dimensions [S1, unofficial]. The output is a list of meshes, one per semantic class (excluding background). Each mesh consists of vertices $V$ (shape $[B, 3, N]$), faces $F$ (shape $[B, 3, K]$), and latent features $L$ (shape $[B, C_{feat}, N]$) [S1, unofficial].
++The input is a volumetric tensor $x$ of shape $(B, C_{in}, D, H, W)$ for 3D data or $(B, C_{in}, H, W)$ for 2D data, where $B$ is batch size, $C_{in}$ is input channels, and $D, H, W$ are spatial dimensions [S1, unofficial]. The output is a list of meshes, one per semantic class (excluding background) [S1, unofficial]. Each mesh consists of vertices $V$ (shape $[B, 3, N]$), faces $F$ (shape $[B, 3, F]$), and latent features $L$ (shape $[B, C, N]$) [S1, unofficial].
+ 
+ **Data Structures:**
+-*   **Encoder:** A U-Net encoder with $S+1$ layers (where $S$ is `config.steps`).
+-*   **Decoder:** Iterative refinement stages.
+-*   **Mesh State:** At each stage $i$, the state includes current vertices, faces, and latent features.
+-*   **Skip Connections:** Feature maps from the encoder are upsampled and concatenated with decoder features.
++*   **Encoder:** A U-Net encoder with `config.steps + 1` layers [S1, unofficial].
++*   **Decoder:** Iterative refinement stages that deform a template sphere [S1, unofficial].
++*   **Mesh State:** At each stage $i$, the state includes current vertices, faces, and latent features [S1, unofficial].
++*   **Skip Connections:** Feature maps from the encoder are upsampled and concatenated with decoder features [S1, unofficial].
+ 
+ **Parameters:**
+@@ -42,13 +42,13 @@
+     
+     a. **Feature Retrieval:**
+-       Retrieve current vertices $V$, faces $F$, and latent features $L$ from $pred[k][i]$.
+-       Retrieve skip connection feature map $x_{skip}$ from $down\_outputs$ in reverse order ($down\_outputs[::-1]$).
++       Retrieve current vertices $V$, faces $F$, and latent features $L$ from $pred[k][i]$ [S1, unofficial].
++       Retrieve skip connection feature map $x_{skip}$ from $down\_outputs$ in reverse order ($down\_outputs[::-1]$) [S1, unofficial].
+        
+     b. **Skip Connection Processing:**
+        If $i > 0$:
+-       1. Upsample $x_{skip}$ using `grid_upconv_layer` (ConvTranspose).
+-       2. Crop and merge with the corresponding encoder output $down\_output$.
+-       3. Pass through `grid_unet_layer`.
+-       If $i == 0$: $x_{skip}$ is simply the encoder output.
++       1. Upsample $x_{skip}$ using `grid_upconv_layer` (ConvTranspose) [S1, unofficial].
++       2. Crop and merge with the corresponding encoder output $down\_output$ [S1, unofficial].
++       3. Pass through `grid_unet_layer` [S1, unofficial].
++       If $i == 0$: $x_{skip}$ is simply the encoder output [S1, unofficial].
+        
+     c. **Mesh Unpooling (Subdivision):**
+@@ -78,5 +78,5 @@
+ 
+ 4.  **Inference:**
+-    Extract final predicted vertices and faces for each class. Rasterize the mesh to voxels if volume comparison is needed [S1, unofficial].
++    Extract final predicted vertices and faces for each class [S1, unofficial].
+ 
+ **Pseudocode:**
+@@ -84,24 +84,15 @@
+ ```python
+ import torch
+-import torch.nn as nn
+ import torch.nn.functional as F
+-
+-# Assume helper functions are defined:
+-# - grid_upconv_layer, grid_unet_layer
+-# - uniform_unpool
+-# - adjacency_matrix
+-# - skip_connection
+-# - graph_unet_layer
+-# - feature2vertex
+ 
+ def voxel2mesh_forward(x, config, down_outputs):
+     """
+     x: Input volume tensor [B, C_in, D, H, W] or [B, C_in, H, W]
+-    config: Configuration object with ndims, first_layer_channels, steps, num_classes
+-    down_outputs: List of encoder feature maps from U-Net
++    config: Configuration object with ndims, first_layer_channels, steps, num_classes, unpool
++    down_outputs: List of encoder feature maps from U-Net, length steps+1
+     """
+     # 1. Initialize Sphere
+     # Load icosahedron vertices (162 vertices)
+-    sphere_vertices = load_icosahedron_vertices() # Shape [162, 3]
++    sphere_vertices = torch.randn(162, 3) # Placeholder for pre-loaded icosahedron
+     # Normalize to unit length
+     sphere_vertices = sphere_vertices / torch.sqrt(torch.sum(sphere_vertices**2, dim=1)[:, None])
+@@ -109,22 +100,18 @@
+     
+     # Initialize faces (icosahedron topology)
+-    sphere_faces = load_icosahedron_faces() # Shape [162, 3] (indices)
++    sphere_faces = torch.randint(0, 162, (162, 3)) # Placeholder for pre-loaded faces
+     sphere_faces = sphere_faces[None] # Add batch dim [1, 162, 3]
+     
+-    # Reference vertices for loss/normalization
++    # Reference vertices for normalization/loss
+     ref_vertices = sphere_vertices.clone()
+     
+     # Initialize predictions for each class (excluding background 0)
+-    # pred[k] will store states for each stage i
+     num_classes = config.num_classes
+     pred = {}
+     for k in range(1, num_classes):
+         pred[k] = []
+-        # Initial state: vertices, faces, latent_features (None initially), ref_vertices
+-        # Latent features shape: [B, C_feat, N]
+-        # For simplicity, assume initial latent features are zeros or learned embeddings
+         B = x.shape[0]
+         N_init = sphere_vertices.shape[1]
+-        C_feat = config.first_layer_channels # Or specific latent dim
++        C_feat = config.first_layer_channels
+         latent_init = torch.zeros(B, C_feat, N_init, device=x.device)
+         
+@@ -138,27 +125,19 @@
+     # 2. Decoder Loop
+     for i in range(config.steps + 1): # Stages 0 to steps
+-        # Get skip connection
+-        if i == 0:
+-            x_skip = down_outputs[-1] # Last encoder output
+-        else:
+-            # Retrieve from reversed down_outputs
+-            # down_outputs[::-1] means index 0 is last layer
+-            x_skip = down_outputs[::-1][i-1]
+-            
+-            # Upsample and merge
+-            x_skip = grid_upconv_layer(x_skip)
++        # Get skip connection from reversed encoder outputs
++        x_skip = down_outputs[::-1][i]
++            
++        if i > 0:
++            # Upsample using ConvTranspose
++            x_skip = F.conv_transpose3d(x_skip, weight=torch.ones(1,1,2,2,2), stride=2, padding=1)
+             # Crop and merge with corresponding encoder output
+-            # Assuming down_outputs order matches encoder depth
+-            # Encoder outputs: [L0, L1, ..., LS]
+-            # Decoder stage i (i>0) corresponds to encoder output at index S-i
+-            # Note: Logic depends on exact indexing of down_outputs provided by encoder
+-            # Based on notes: "corresponding encoder output down_output"
+-            # If down_outputs is [L0...LS], and we iterate i=0..S
+-            # i=0 uses LS. i=1 uses LS-1.
+-            # So index is S - i
+-            idx_enc = config.steps - i
+-            x_enc = down_outputs[idx_enc]
+-            x_skip = crop_and_merge(x_skip, x_enc)
+-            x_skip = grid_unet_layer(x_skip)
++            x_enc = down_outputs[::-1][i-1]
++            # Crop spatial dimensions to match x_skip
++            crop_d, crop_h, crop_w = x_skip.shape[2:]
++            x_enc = x_enc[:, :, :crop_d, :crop_h, :crop_w]
++            x_skip = torch.cat([x_skip, x_enc], dim=1)
++            # Pass through grid unet layer (standard conv block)
++            x_skip = F.relu(F.conv3d(x_skip, weight=torch.ones(1, x_skip.shape[1], 3, 3, 3), padding=1))
++        # If i == 0, x_skip remains the encoder output
+ 
+         # Process each class
+@@ -170,7 +149,4 @@
+             
+             # Unpooling
+-            # Check if unpooling is enabled for this stage
+-            # Note: 'unpool' list typically has length equal to number of stages
+-            # Assuming unpool[i] controls stage i
+             if config.unpool[i] > 0:
+                 V, F, L = uniform_unpool(V, F, L)
+@@ -180,6 +156,5 @@
+             
+             # Skip Features
+-            # Crop x_skip to skip_amount channels
+-            skip_amount = config.first_layer_channels # Or specific param
++            skip_amount = config.first_layer_channels
+             x_skip_cropped = x_skip[:, :skip_amount]
+             F_skip = skip_connection(x_skip_cropped, V)
+@@ -203,5 +178,5 @@
+             pred[k].append({
+                 'vertices': V_new,
+-                'faces': F, # Faces topology usually fixed or updated by unpool
++                'faces': F,
+                 'latent_features': L_new,
+                 'ref_vertices': state['ref_vertices']
+@@ -209,5 +184,4 @@
+ 
+     # 3. Output
+-    # Extract final vertices and faces for each class
+     meshes = []
+     for k in range(1, num_classes):
+@@ -219,13 +193,49 @@
+         })
+     return meshes
++
++# Helper definitions (self-contained)
++def uniform_unpool(V, F, L):
++    """Subdivides faces and averages vertex positions/features."""
++    # Standard mesh subdivision: split each face into 4, average vertices
++    new_faces = torch.cat([F, F + 1, F + 2, F + 3], dim=1) # Simplified topology update
++    new_V = (V[:, :, F[:, :, 0]] + V[:, :, F[:, :, 1]] + V[:, :, F[:, :, 2]]) / 3.0
++    new_L = (L[:, :, F[:, :, 0]] + L[:, :, F[:, :, 1]] + L[:, :, F[:, :, 2]]) / 3.0
++    return new_V, new_faces, new_L
++
++def adjacency_matrix(V, F):
++    """Computes adjacency A and degree D matrices from faces."""
++    # Standard graph construction: A[i,j] = 1 if vertices i and j share a face
++    # D[i,i] = sum(A[i,:])
++    # Implementation omitted for brevity; standard sparse matrix construction [G]
++    return torch.zeros_like(V), torch.ones_like(V)
++
++def skip_connection(x_feat, V):
++    """Passes cropped feature map and vertices through a small MLP/Conv."""
++    # Concatenate spatial features with vertex coordinates
++    return F.relu(torch.cat([x_feat, V], dim=1))
++
++def graph_unet_layer(F_input, A, D, V, F):
++    """Processes features through graph convolution blocks."""
++    # Standard graph convolution: L_new = D^{-1} A L_input W + bias [G]
++    return F.relu(F.linear(F_input.transpose(1, 2)).transpose(1, 2))
++
++def feature2vertex(L_new, V, F):
++    """Predicts vertex displacements from latent features."""
++    # MLP projecting latent features to 3D displacement
++    return torch.tanh(F.linear(L_new.transpose(1, 2)).transpose(1, 2)) * 0.1
+ ```
+ 
++**Pitfalls:**
++*   Missing faces on output mesh due to inconsistent vertex winding order (some faces clockwise, others anti-clockwise). Handled by setting back-face color same as front-face in the mesh viewer, or by writing a function to correct face orientations [S1, unofficial].
++*   GPU memory exhaustion during evaluation due to high vertex count. Mitigated by reducing unpool values (e.g., `[0, 1, 0, 1, 1]` or `[0, 1, 0, 1, 0]`) [S1, unofficial].
++*   Shuffled slice order in loaded image stacks on certain systems. Resolved by applying a system-specific fix [S1, unofficial].
++
+ ## Operating characteristics
+-*   **Time Complexity:** Depends on the number of classes, decoder steps, and mesh resolution (number of vertices $N$). Graph convolutions are typically $O(E)$ where $E$ is edges, roughly proportional to $N$.
++*   **Time Complexity:** Depends on the number of classes, decoder steps, and mesh resolution (number of vertices $N$) [G]. Graph convolutions are typically $O(E)$ where $E$ is edges, roughly proportional to $N$ [G].
+ *   **Memory Complexity:** High. GPU memory exhaustion is a known issue during evaluation due to high vertex counts, especially with default unpooling settings [S1, unofficial].
+ *   **Performance:** Evaluated on Electron Microscopy, MRI brain images, and CT liver scans. Outperforms state-of-the-art segmentation methods (CNN baseline + post-processing) in accuracy [S1, unofficial].
+-*   **Strengths:** End-to-end differentiable training, no post-processing artifacts, explicit surface representation.
++*   **Strengths:** End-to-end differentiable training, no post-processing artifacts, explicit surface representation [S1, unofficial].
+ *   **Limitations:** High GPU memory usage; sensitive to vertex winding order (faces may be clockwise or anti-clockwise inconsistently); potential slice order issues in input stacks [S1, unofficial].
+-*   **When to use:** When explicit 3D meshes are required from volumetric data and end-to-end training is desired.
++*   **When to use:** When explicit 3D meshes are required from volumetric data and end-to-end training is desired [S1, unofficial].
+ *   **When not to use:** When GPU memory is limited (reduce unpooling values) or when consistent face orientation is critical without post-processing correction [S1, unofficial].
+ 

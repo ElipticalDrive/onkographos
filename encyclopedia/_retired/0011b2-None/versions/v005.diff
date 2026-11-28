@@ -1,0 +1,211 @@
+--- v004.md
++++ v005.md
+@@ -3,60 +3,63 @@
+ 
+ ## Overview
+-OTS+SAtn Densification is a density control strategy for 3D Gaussian Splatting (3DGS) adapted for real-world scene reconstruction, specifically designed to align the primitive count and optimization behavior of the OTS+SAtn method with standard 3DGS [S1]. It solves the problem of uncontrolled primitive growth in large scenes by imposing strict caps on the total number of Gaussians and adapting the densification thresholds to match the parent 3DGS protocol [S1]. It differs from standard 3DGS by explicitly targeting the "real-world" regime where scene scale and complexity require tighter budget constraints, while maintaining visual fidelity within a 4% PSNR variance compared to standard 3DGS [S1].
++OTS+SAtn Densification is a density control strategy for 3D Gaussian Splatting adapted for real-world scene reconstruction, specifically designed to align the primitive count and optimization behavior of the OTS+SAtn method with standard 3DGS [S1]. It solves the problem of uncontrolled primitive growth in large scenes by imposing strict caps on the total number of Gaussians and adapting the densification thresholds to match the parent 3DGS protocol [S1]. It differs from standard 3DGS by explicitly targeting the "real-world" regime where scene scale and complexity require tighter budget constraints, while maintaining visual fidelity within a 4% PSNR variance compared to standard 3DGS [S1].
+ 
+ ## How it works
+-The method follows the periodic densification schedule of 3DGS, executing steps every 100 iterations starting from iteration 100, but modifies the termination and scaling criteria to fit the OTS+SAtn representation [S1, S2].
+-
+ **Inputs and Outputs:**
+-*   **Input:** Set of 3D Gaussians $\{G_i\}$, accumulated view-space positional gradients $|\nabla_{\mathbf{p}} \mathcal{L}|_i$, current iteration count, and scene bounding box.
+-*   **Output:** Updated set of Gaussians with modified positions, scales, opacities, and counts.
++*   **Input:** Set of 3D Gaussians $\{G_i\}$ with mean position $\mathbf{p}_i$, covariance/scale parameters, opacity $\alpha_i$, and spherical harmonics coefficients [G]. Accumulated view-space positional gradient magnitudes $|\nabla_{\mathbf{p}} \mathcal{L}|_i$ [G]. Scene bounding box diagonal length [G].
++*   **Output:** Updated set of Gaussians with modified positions, scales, opacities, and counts [G].
+ 
+ **Data Structures:**
+-*   **Gaussian $G_i$:** Contains mean position $\mathbf{p}_i$, covariance matrix $\Sigma_i$ (or scale/rotation parameters), opacity $\alpha_i$, and spherical harmonics coefficients.
+-*   **Accumulated Gradients:** A buffer storing the magnitude of position gradients for each Gaussian, reset after each densification step.
++*   **Gaussian $G_i$:** Contains mean position $\mathbf{p}_i$, scale/rotation parameters, opacity $\alpha_i$, and spherical harmonics coefficients [G].
++*   **Accumulated Gradients:** A buffer storing the magnitude of position gradients for each Gaussian, reset after each densification step [G].
+ 
+ **Parameters:**
+ *   $\tau_{grad} = 1.5 \times 10^{-4}$: Gradient threshold for densification consideration [S2].
+ *   $\tau_{opac} = 0.025$: Opacity threshold for pruning [S2].
+-*   $\theta_{size\_scene} = 0.01$: Size threshold for splitting vs. cloning (1% of scene diagonal) [S2].
+-*   $\theta_{size\_pixel} = 20$: Pixel size threshold for pruning [S2].
++*   $\theta_{small} = 0.01$: Size threshold for splitting vs. cloning (1% of scene diagonal) [S2].
++*   $\theta_{prune\_3d} = 0.4$: 3D size threshold for pruning (40% of scene diagonal) [S2].
++*   $\theta_{prune\_2d} = 20$: 2D projected size threshold for pruning (pixels) [S2].
+ *   $N_{max}$: Maximum primitive count, set to 100k, 500k, 1M, or 5M depending on the specific real-world experiment [S1].
+ *   $scale\_factor = 1.2^{-1}$: Reduction factor for split primitives [S2].
+ 
+ **Steps:**
+-1.  **Gradient Accumulation:** During the training loop, accumulate the magnitude of the view-space positional gradient $|\nabla_{\mathbf{p}} \mathcal{L}|_i$ for each Gaussian $G_i$ [S2]. Do not propagate gradients through the density normalization factor [S2].
+-2.  **Check Densification Condition:** If the current iteration is not a multiple of 100, or if the total number of Gaussians $N \ge N_{max}$, skip densification [S1, S2].
+-3.  **Pruning:** Remove any Gaussian $G_i$ where:
+-    *   $\alpha_i < \tau_{opac}$ [S2].
+-    *   The spatial extent of $G_i$ exceeds 40% of the scene diagonal or projects to >20 pixels in any view [S2].
++1.  **Gradient Accumulation:** During the training loop, accumulate the view-space positional gradient magnitude $|\nabla_{\mathbf{p}} \mathcal{L}|_i$ for each Gaussian $G_i$ [G]. Do not propagate gradients through the density normalization factor [S2].
++2.  **Check Densification Condition:** Skip densification if the total number of Gaussians $N \ge N_{max}$ [S1].
++3.  **Pruning:** Remove any Gaussian $G_i$ where $\alpha_i < \tau_{opac}$ [S2] or where the spatial extent exceeds 40% of the scene diagonal or projects to $>20$ pixels in any view [S2].
+ 4.  **Evaluate for Densification:** For each remaining Gaussian $G_i$:
+-    *   If $|\nabla_{\mathbf{p}} \mathcal{L}|_i < \tau_{grad}$, mark $G_i$ for no action.
++    *   If $|\nabla_{\mathbf{p}} \mathcal{L}|_i < \tau_{grad}$, mark $G_i$ for no action [S2].
+     *   If $|\nabla_{\mathbf{p}} \mathcal{L}|_i \ge \tau_{grad}$, evaluate size:
+-        *   If $G_i$ is "small" (size $< \theta_{size\_scene}$), mark for **Cloning**.
+-        *   If $G_i$ is "large" (size $\ge \theta_{size\_scene}$), mark for **Splitting**.
++        *   If $G_i$ is "small" (size $< \theta_{small} \times \text{scene\_diag}$), mark for **Cloning** [S2].
++        *   If $G_i$ is "large" (size $\ge \theta_{small} \times \text{scene\_diag}$), mark for **Splitting** [S2].
+ 5.  **Execute Cloning:** For each marked Gaussian $G_i$:
+-    *   Create a clone $G_{clone}$ at $\mathbf{p}_{clone} = \mathbf{p}_i$.
+-    *   Set $\alpha_{clone} = \alpha_i / 2$ to preserve energy [S2].
+-    *   Copy scale and rotation from $G_i$.
++    *   Create a clone $G_{clone}$ at $\mathbf{p}_{clone} = \mathbf{p}_i$ [G].
++    *   Set $\alpha_{clone} = \alpha_i / 2$ to preserve energy [G].
++    *   Copy scale and rotation from $G_i$ [G].
+ 6.  **Execute Splitting:** For each marked Gaussian $G_i$:
+-    *   Remove $G_i$.
+-    *   Generate two new Gaussians $G_{new1}, G_{new2}$.
+-    *   Sample positions $\mathbf{p}_{new}$ from the distribution defined by $G_i$'s covariance.
++    *   Remove $G_i$ [G].
++    *   Generate two new Gaussians $G_{new1}, G_{new2}$ [G].
++    *   Sample positions $\mathbf{p}_{new}$ from the distribution defined by $G_i$'s covariance [G].
+         *   For octahedral primitives: Sample normally with standard deviation equal to the distances in each dimension [S2].
+         *   For tetrahedral primitives: Sample normally with standard deviation equal to half of the largest distance [S2].
+     *   Set scale of new primitives to $scale_{new} = scale_i \times 1.2^{-1}$ [S2].
+     *   Distribute opacity: $\alpha_{new1} = \alpha_{new2} = \alpha_i / 2$ [G].
+-7.  **Anti-Aliasing Adjustment:** For octahedral primitives, adjust the ray space vector by half the kernel size (0.05) to account for mirrored adjustments [S2].
++7.  **Anti-Aliasing Adjustment:** For octahedral primitives, adjust the ray space vector by half the kernel size (0.05) to account for mirrored adjustments [S2]. The 3D filter remains consistent with Mip-Splatting [S2].
+ 
+ **Pseudocode:**
+ ```python
+-def densify_ots_satn(gaussians, gradients, iteration, scene_diag, max_primitives):
+-    # Step 2: Check conditions
+-    if iteration % 100 != 0 or len(gaussians) >= max_primitives:
++import math
++
++def sample_normal(mean, std_devs):
++    """Standard normal sampling with per-dimension standard deviations [G]."""
++    return [mean[d] + math.sqrt(2) * std_devs[d] * math.erfinv(2 * (i % 2 + 1) / 3 - 1) for d in range(3)]
++
++def densify_ots_satn(gaussians, gradients, scene_diag, max_primitives):
++    # Step 2: Skip if budget reached
++    if len(gaussians) >= max_primitives:
+         return gaussians
+ 
+-    to_prune = []
+-    to_clone = []
+-    to_split = []
++    to_prune = set()
++    to_clone = set()
++    to_split = set()
+ 
+     # Step 3 & 4: Evaluate and classify
+@@ -64,49 +67,26 @@
+         # Pruning: low opacity
+         if g.opacity < 0.025:
+-            to_prune.append(i)
++            to_prune.add(i)
+             continue
+-        
+-        # Pruning: excessive size (simplified check)
+-        if get_projected_size(g) > 20 or get_3d_size(g) > 0.4 * scene_diag:
+-            to_prune.append(i)
++        # Pruning: excessive size (simplified attribute access)
++        if g.size_3d > 0.4 * scene_diag or g.size_projected > 20:
++            to_prune.add(i)
+             continue
+-
+         # Densification criteria
+         if gradients[i] >= 1.5e-4:
+-            if get_3d_size(g) < 0.01 * scene_diag:
+-                to_clone.append(i)
++            if g.size_3d < 0.01 * scene_diag:
++                to_clone.add(i)
+             else:
+-                to_split.append(i)
++                to_split.add(i)
+ 
+-    # Step 3: Prune
+-    new_gaussians = [g for i, g in enumerate(gaussians) if i not in to_prune]
+-
+-    # Step 5: Clone
+-    for i in to_clone:
+-        g = new_gaussians[i]
+-        clone = Gaussian(
+-            position=g.position,
+-            scale=g.scale,
+-            rotation=g.rotation,
+-            opacity=g.opacity / 2.0,
+-            sh=g.sh
+-        )
+-        new_gaussians.append(clone)
+-
+-    # Step 6: Split
+-    # Note: Indices shift after cloning, so split must be handled carefully or 
+-    # processed in reverse order. Here we assume a fresh list construction.
+-    final_gaussians = []
+-    split_indices = set(to_split)
+-    
+-    # Re-iterate original list to handle splits correctly without index shifting issues
+-    # This is a logical reconstruction for clarity
++    # Build new list, handling indices carefully
++    new_gaussians = []
+     for i, g in enumerate(gaussians):
+         if i in to_prune:
+             continue
+         if i in to_clone:
+-            # Add original and clone
+-            final_gaussians.append(g)
+-            final_gaussians.append(Gaussian(
++            # Keep original, add clone
++            new_gaussians.append(g)
++            new_gaussians.append(Gaussian(
+                 position=g.position,
+                 scale=g.scale,
+@@ -117,16 +97,24 @@
+         elif i in to_split:
+             # Remove original, add two splits
+-            pos1, pos2 = sample_split_positions(g)
++            if g.primitive_type == "octahedron":
++                std_devs = g.scale # distances in each dimension [S2]
++            else: # tetrahedron
++                max_dist = max(g.scale)
++                std_devs = [max_dist / 2.0] * 3 # half of largest distance [S2]
++            
++            pos1 = sample_normal(g.position, std_devs)
++            pos2 = sample_normal(g.position, std_devs)
+             scale_factor = 1.2 ** -1
+-            final_gaussians.append(Gaussian(
++            
++            new_gaussians.append(Gaussian(
+                 position=pos1,
+-                scale=g.scale * scale_factor,
++                scale=[s * scale_factor for s in g.scale],
+                 rotation=g.rotation,
+                 opacity=g.opacity / 2.0,
+                 sh=g.sh
+             ))
+-            final_gaussians.append(Gaussian(
++            new_gaussians.append(Gaussian(
+                 position=pos2,
+-                scale=g.scale * scale_factor,
++                scale=[s * scale_factor for s in g.scale],
+                 rotation=g.rotation,
+                 opacity=g.opacity / 2.0,
+@@ -134,7 +122,6 @@
+             ))
+         else:
+-            final_gaussians.append(g)
+-
+-    return final_gaussians
++            new_gaussians.append(g)
++    return new_gaussians
+ ```
+ 
+@@ -145,9 +132,9 @@
+ 
+ ## Operating characteristics
+-*   **Time Complexity:** Densification is periodic (every 100 iterations), making the amortized cost low. The splitting and cloning operations are $O(N)$ per step.
++*   **Time Complexity:** Densification is periodic, making the amortized cost low [G]. The splitting and cloning operations are $O(N)$ per step [G].
+ *   **Memory Complexity:** Bounded by $N_{max}$ (100k–5M primitives) [S1].
+ *   **Performance:** On MipNeRF360, OTS+SAtn with this densification differs from standard 3DGS by at most 4% PSNR across all tested sizes and scenes [S1]. Average training times are slightly lower (2%) for OTS+SAtn [S1]. Rendering times are balanced [S1].
+-*   **Strengths:** Prevents explosive growth in large real-world scenes; maintains high visual quality with controlled primitive counts.
+-*   **Limitations:** The strict caps may limit detail reconstruction in extremely complex regions compared to unconstrained methods.
++*   **Strengths:** Prevents explosive growth in large real-world scenes; maintains high visual quality with controlled primitive counts [G].
++*   **Limitations:** The strict caps may limit detail reconstruction in extremely complex regions compared to unconstrained methods [G].
+ 
+ ## Background

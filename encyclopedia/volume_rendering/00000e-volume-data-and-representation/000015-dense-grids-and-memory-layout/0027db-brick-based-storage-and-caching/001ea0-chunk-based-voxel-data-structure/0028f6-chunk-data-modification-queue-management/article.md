@@ -1,0 +1,97 @@
+# Chunk Data Modification & Queue Management
+
+
+## Overview
+This method processes chunk modifications, expands voxel arrays if sparse, updates block types, tracks adjacent chunks for mesh regeneration, and queues affected chunks for mesh loading [S1, unofficial]. It solves the problem of maintaining consistency between raw voxel data and the rendered mesh when user edits or game logic modify the world state [G]. It differs from [Sparse Voxel Octree Representation](2340-sparse-voxel-octree-representation.md) by operating on fixed-size dense grids rather than hierarchical trees, and from [Compact Voxel Section Storage](4219-compact-voxel-section-storage.md) by explicitly managing a modification queue for mesh updates rather than just storage compression [G].
+
+## How it works
+**Inputs:** A mutable reference to the chunk data structure, a 3D position (`pos`) in world space, and a new block type/value [S1, unofficial].
+**Outputs:** Updated chunk data, updated adjacency sets, and queued chunks for mesh regeneration [S1, unofficial].
+
+**Data Structures:**
+*   `ChunkData`: Contains a flat array of voxel IDs. If sparse, it may start with a single block ID [S1, unofficial].
+*   `adj_chunk_set`: A set of adjacent chunk indices that require mesh updates due to boundary modifications [S1, unofficial].
+*   `mesh_queue`: A queue of chunk indices requiring mesh loading/regeneration [S1, unofficial].
+*   `CHUNK_SIZE_I32`: Integer constant, typically 32 [S1, unofficial].
+
+**Steps:**
+1.  **Retrieve Chunk Data:** Retrieve the mutable chunk data for the given world position. If the chunk data is `None`, skip processing [S1, unofficial].
+2.  **Expand Sparse Array:** If the voxel array length is 1, expand it to the full chunk size ($CHUNK\_SIZE\_I32^3$) by duplicating the single block data into all positions [S1, unofficial].
+3.  **Calculate Local Index:** Compute the local 3D coordinates $(x, y, z)$ within the chunk and the flat index $i$:
+    $$ i = \text{vec3\_to\_index}(local\_pos, CHUNK\_SIZE\_I32) $$
+    Where `vec3_to_index` maps $(x, y, z)$ to $x + y \cdot W + z \cdot W \cdot H$ with $W=H=CHUNK\_SIZE\_I32$ [S1, unofficial].
+4.  **Update Voxel:** Set the voxel block type at index $i$ to the new value [S1, unofficial].
+5.  **Check Boundaries:** If the modification occurs at a chunk edge (i.e., $x=0, x=31, y=0, y=31, z=0, z=31$), add the adjacent chunk indices to `adj_chunk_set` [S1, unofficial].
+6.  **Queue for Meshing:** Add the current chunk and all chunks in `adj_chunk_set` to the `mesh_queue` for mesh loading/regeneration [S1, unofficial].
+
+**Pseudocode:**
+> **Unverified code.** The code below did not pass a test run against a reference implementation, or no test fits it, so it may contain errors.
+
+```python
+CHUNK_SIZE_I32 = 32
+
+def vec3_to_index(pos, size):
+    return pos[0] + pos[1] * size + pos[2] * size * size
+
+def modify_chunk(chunk_data, pos, new_block_type, adj_chunk_set, mesh_queue, chunk_origin, chunk_index_3d):
+    # Step 1: Retrieve chunk data
+    if chunk_data is None:
+        return
+
+    # Step 2: Expand sparse array
+    if len(chunk_data.voxel_array) == 1:
+        single_block = chunk_data.voxel_array[0]
+        chunk_data.voxel_array = [single_block] * (CHUNK_SIZE_I32 ** 3)
+
+    # Step 3: Calculate local index
+    local_pos = (pos[0] - chunk_origin[0], pos[1] - chunk_origin[1], pos[2] - chunk_origin[2])
+    i = vec3_to_index(local_pos, CHUNK_SIZE_I32)
+
+    # Step 4: Update voxel
+    chunk_data.voxel_array[i] = new_block_type
+
+    # Step 5: Check boundaries
+    x, y, z = local_pos
+    is_edge = (x == 0 or x == CHUNK_SIZE_I32 - 1 or
+               y == 0 or y == CHUNK_SIZE_I32 - 1 or
+               z == 0 or z == CHUNK_SIZE_I32 - 1)
+
+    if is_edge:
+        cx, cy, cz = chunk_index_3d
+        if x == 0: adj_chunk_set.add((cx - 1, cy, cz))
+        if x == CHUNK_SIZE_I32 - 1: adj_chunk_set.add((cx + 1, cy, cz))
+        if y == 0: adj_chunk_set.add((cx, cy - 1, cz))
+        if y == CHUNK_SIZE_I32 - 1: adj_chunk_set.add((cx, cy + 1, cz))
+        if z == 0: adj_chunk_set.add((cx, cy, cz - 1))
+        if z == CHUNK_SIZE_I32 - 1: adj_chunk_set.add((cx, cy, cz + 1))
+
+    # Step 6: Queue for meshing
+    mesh_queue.append(chunk_index_3d)
+    mesh_queue.extend(adj_chunk_set)
+```
+
+## Subtopics
+
+### [Chunk State Machine](19180-chunk-state-machine.md)
+Manages the lifecycle of individual voxel chunks within a brick-based volume rendering system, tracking their processing status through a series of bitwise flags. It operates in conjunction with the parent [Chunk Data Modification & Queue Management](4427-chunk-data-modification-queue-management.md) to ensure that mesh generation and rendering occur only when chunks are in a valid state, preventing race conditions during asynchronous updates. It is distinct from the broader Volume State Management, which handles global volume lifecycle events such as loading and texture allocation.
+
+### Chunk-based Terrain Modification via List & Filtering
+Stores user terrain edits as uncompressed lists of larger chunks (e.g., $16^3$ voxels) rather than individual voxels [S2, unofficial]. It renders these changes with bilinear filtering to smooth the subtraction [S2, unofficial]. This approach reduces storage overhead for large edits but produces a "curved stair-step" effect across voxels due to the filtering [S2, unofficial].
+
+### Chunk Data Layout & Modification
+Routes terrain modification to `addTerrain` or `removeTerrain` based on the sign of the modification value [S3, unofficial]. Both functions calculate `byteIndex`, read `value = data[byteIndex]`, compute `newValue = Mathf.Clamp(value + modification, 0, 255)`, and update `data[byteIndex] = (byte)newValue` [S3, unofficial]. In `addTerrain`, if the scalar value crosses the Marching Cubes iso-surface threshold (`value < isoSurface && newValue >= isoSurface`), the material byte is updated: `data[byteIndex + 1] = (byte)mat` [S3, unofficial]. Each chunk stores voxel data in a contiguous byte array `data` where each vertex occupies `Constants.CHUNK_POINT_BYTE` bytes, the first byte is the scalar value (0–255), and the second byte is the material ID [S3, unofficial]. The 3D grid is flattened using the stride formula: `byteIndex = ((int)vertexPoint.x + (int)vertexPoint.z * Constants.CHUNK_VERTEX_SIZE + (int)vertexPoint.y * Constants.CHUNK_VERTEX_AREA) * Constants.CHUNK_POINT_BYTE` [S3, unofficial]. Mesh regeneration is deferred to the next frame via a `modified` flag, batching multiple vertex edits in the same frame to prevent intermediate rebuilds and ensure consistent state before `MeshBuilder.Instance.BuildChunk(data)` is called [S3, unofficial].
+
+## Operating characteristics
+*   **Time Complexity:** Not given in the sources.
+*   **Memory Complexity:** Not given in the sources.
+*   **Strengths:** Simple implementation, efficient for dense worlds, explicit control over mesh regeneration scope [G].
+*   **Limitations:** Sparse expansion can be memory-intensive if many chunks are initially empty [S1, unofficial]. Bilinear filtering variants introduce visual artifacts [S2, unofficial].
+*   **When to use:** Real-time voxel editing in games where performance is critical and visual fidelity can tolerate stair-stepping or simple smoothing [G].
+
+## Background
+Originated in voxel-based game engines such as VoxelQuest and demonstrated in the Binary Greedy Voxel Meshing Algorithm demo [S1, unofficial][S2, unofficial]. It addresses the need for efficient, real-time terrain modification in infinite voxel worlds without the overhead of octree traversal for every edit [G].
+
+## Sources
+[S1] Binary Greedy Voxel Meshing Algorithm, https://github.com/TanTanDev/binary_greedy_mesher_demo, fetched 2026-10-26 (unofficial)
+[S2] How Does It Work?, https://www.voxelquest.com/news/how-does-it-work, fetched 2026-10-29 (unofficial)
+[S3] Javier-Garzo/Marching-cubes-on-Unity-3D, https://github.com/Javier-Garzo/Marching-cubes-on-Unity-3D, fetched 2026-10-26 (unofficial)

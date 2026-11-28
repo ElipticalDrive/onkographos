@@ -1,0 +1,89 @@
+--- v001.md
++++ v002.md
+@@ -1,18 +1,18 @@
+ # Continuous Coarse-To-Fine Optimization
+ 
+-Also called: Coarse-to-Fine Optimization, Continuous LOD scheduling, Progressive Optimization, Texture MIP Pyramid Optimization
++Also called: Continuous LOD scheduling, Progressive Optimization, Texture MIP Pyramid Optimization
+ 
+ ## Overview
+-Continuous Coarse-To-Fine Optimization is a progressive training strategy that mitigates shape-radiance ambiguity and convergence to low-quality local optima by restricting the Level of Detail (LOD) of the scene representation to coarse levels initially, then gradually relaxing this regularization [S1, unofficial][S2]. Unlike discrete multi-stage approaches, it operates continuously in LOD space, allowing for dynamic resolution extension without modifying previously trained parameters or decoder weights [S1, unofficial]. It sets itself apart from sibling methods like the standard NeRF Training Loop by explicitly managing the degrees of freedom of the spatial representation alongside the optimization variables [S1, unofficial][S2].
++Continuous Coarse-To-Fine Optimization is a progressive training strategy that mitigates shape-radiance ambiguity and convergence to low-quality local optima by restricting the Level of Detail (LOD) of the scene representation to coarse levels initially, then gradually relaxing this regularization [S1, unofficial][S2]. Unlike discrete multi-stage approaches, it operates continuously in LOD space, allowing for dynamic resolution extension without modifying previously trained parameters or decoder weights [S1, unofficial]. It sets itself apart from I-NGP-based architectures by keeping all decoder latent space dimensions supervised during LOD expansion, so adding new grid levels only adds degrees of freedom to the mapping function rather than requiring global weight refinement [S1, unofficial].
+ 
+ ## How it works
+ **Inputs and Outputs:**
+-*   **Inputs:** Scene observations (images/poses), initial scene parameters (emission, roughness, specular, albedo), hyperparameters for the LOD scheduler ($L_0, n_{ctf}$), and optimization hyperparameters (learning rates).
+-*   **Outputs:** Optimized scene representation (grids/textures) and material parameters.
++*   **Inputs:** Scene observations (images and camera poses), initial scene parameters (emission, roughness, specular, albedo), and hyperparameters for the LOD scheduler ($L_0, n_{ctf}$) and optimizer (learning rates) [S1, unofficial][S2].
++*   **Outputs:** Optimized scene representation (hierarchical grids and albedo texture) and material parameters [S1, unofficial][S2].
+ 
+ **Data Structures:**
+-*   **LOD Grids:** Hierarchical grid structures where each level $l$ corresponds to a specific spatial resolution. The structure supports continuous LOD sampling, where a sample's effective resolution is determined by its distance to the camera or a scheduler value [S1, unofficial].
+-*   **Albedo Texture:** A spatially varying texture map, initially at $1024 \times 1024$ RGB, refined to $4096 \times 4096$ [S2].
+-*   **Material Parameters:** Emission coefficients, roughness, and specular coefficients [S2].
++*   **LOD Grids:** Hierarchical grid structures where each level $l$ corresponds to a specific spatial resolution. The structure supports continuous LOD sampling, where a sample's effective resolution is determined by a scheduler value based on the training epoch [S1, unofficial].
++*   **Albedo Texture:** A spatially varying RGB texture map, initially at $1024 \times 1024$ resolution, refined to $4096 \times 4096$ [S2].
++*   **Material Parameters:** Emission coefficients, roughness coefficients, specular coefficients, and diffuse albedo [S2].
+ 
+ **Numbered Steps:**
+@@ -31,22 +31,12 @@
+ 5.  **Albedo Refinement:** Optimize albedo first as a $1024 \times 1024$ RGB texture. Then, refine it in two stages to reach the final $4096 \times 4096$ resolution [S2].
+ 6.  **Sparsity Pruning:** After the first albedo refinement stage, identify emitters contributing a small fraction of the total scene radiance and round their values to zero [S2].
+-7.  **Gradient Clamping:** To handle noisy Monte Carlo estimates from path tracing, clamp gradients to $\pm 10^{-8}$ before Adam rescaling to prevent outliers from destabilizing the optimization [S2].
++7.  **Gradient Clamping:** To handle noisy Monte Carlo estimates from path tracing, clamp gradients to $\pm 10^{-8}$ before optimizer rescaling to prevent outliers from destabilizing the optimization [S2].
+ 
+ **Pseudocode:**
+ 
+ ```python
+-def continuous_coarse_to_fine_optimization(scene_params, observations, n_epochs, L0, n_ctf):
++def continuous_coarse_to_fine_optimization(scene_params, observations, n_epochs, L0, n_ctf, max_L):
+     """
+     Implements continuous coarse-to-fine optimization for radiance fields.
+-    
+-    Args:
+-        scene_params: Initial scene parameters (emission, roughness, specular, albedo).
+-        observations: List of scene observations (images, poses).
+-        n_epochs: Total number of training epochs.
+-        L0: Initial maximal LOD level.
+-        n_ctf: Hyperparameter for LOD scheduling speed.
+-        
+-    Returns:
+-        Optimized scene parameters.
+     """
+     # Initialize parameters
+@@ -54,17 +44,21 @@
+     roughness = scene_params['roughness']
+     specular = scene_params['specular']
+-    albedo = scene_params['albedo'] # Initial resolution 1024x1024
++    albedo = scene_params['albedo']  # Initial resolution 1024x1024
+     
+-    # Define optimizer (Adam) with specific learning rates
+-    # lr_emission = 1.0
+-    # lr_roughness_specular = 0.005
+-    # lr_albedo = 0.1
+-    optimizer = Adam([emission, roughness, specular, albedo], 
+-                     lr={'emission': 1.0, 'roughness': 0.005, 'specular': 0.005, 'albedo': 0.1})
++    # Learning rates per parameter group
++    lr_emission = 1.0
++    lr_roughness_specular = 0.005
++    lr_albedo = 0.1
++    
++    # Optimizer state (simplified Adam-like update)
++    m = {k: 0.0 for k in ['emission', 'roughness', 'specular', 'albedo']}
++    v = {k: 0.0 for k in ['emission', 'roughness', 'specular', 'albedo']}
++    t = 0
+     
+     for n in range(n_epochs):
++        t += 1
+         # 1. Update maximal LOD
+         L = L0 + n / n_ctf
+-        L = min(L, max_allowed_L) # Clamp to max resolution
++        L = min(L, max_L)
+         
+         # 2. Prepare scene for rendering with LOD clamping
+@@ -73,5 +67,4 @@
+         
+         # 3. Render and compute loss
+-        # Use cone casting with LOD clamping
+         rendered_images = []
+         for obs in observations:

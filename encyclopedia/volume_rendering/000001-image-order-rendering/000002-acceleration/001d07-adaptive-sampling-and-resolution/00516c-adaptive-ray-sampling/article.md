@@ -1,0 +1,70 @@
+# Adaptive Ray Sampling
+## Overview
+Adaptive Ray Sampling refers to a family of techniques in volume rendering and neural radiance fields (NeRF) that dynamically adjust the number, distribution, or density of samples along rays to optimize the trade-off between computational cost and visual fidelity [G]. Unlike uniform sampling, which casts a fixed number of samples regardless of scene complexity, these methods use metrics such as rendering error, density, or spatial coherence to concentrate samples in complex regions (e.g., high-frequency details, surfaces) and reduce them in empty or smooth areas [G]. This family is distinct from [Resolution Adaptation](3063-resolution-adaptation.md) (which adjusts pixel resolution) and [Temporal and Progressive Rendering](11267-temporal-and-progressive-rendering.md) (which leverages temporal coherence), focusing instead on spatial and structural adaptivity within the ray-marching process itself [G].
+
+## Shared principles
+The core mechanism shared by all children is the deviation from a fixed, uniform sampling strategy [G]. Instead of casting a constant number of rays or samples per pixel/ray, the method computes a metric (such as gradient magnitude, rendering error, or temporal difference) and uses it to modulate the sampling rate or resolution [G].
+
+Mathematically, this often involves a control loop:
+1. **Metric Evaluation:** Compute a scalar value $M$ representing local complexity or error [G].
+2. **Adaptation:** Adjust a parameter $P$ (step size $\Delta t$, resolution $R$, or sampling probability $w$) based on $M$ [G].
+3. **Rendering/Training:** Execute the volume integral or loss computation with the adjusted parameter [G].
+
+Common adaptation laws include:
+* **Step Size Adaptation:** $\Delta t \propto \frac{1}{M}$ or $\Delta t = \min(\Delta t_{max}, \max(\Delta t_{min}, \frac{k}{M}))$ [G].
+* **Resolution Control:** $R_{new} = R_{old} + \alpha \cdot (t_{target} - t_{actual})$ or threshold-based switching [G].
+* **Probability Weighting:** $w_i \propto M_i$ for importance sampling [G].
+
+All methods in this family aim to maintain visual fidelity while reducing the total number of volume queries [G].
+
+## Subtopics
+
+### [Mip-NeRF 360 Sampling and Training](3393-mip-nerf-360-sampling-and-training.md)
+Addresses floaters and background collapse in unbounded scenes using disparity-based parameterization and a two-stage proposal network supervised to bound the final NeRF's weight distribution. Choose when rendering unbounded scenes with significant depth variation.
+
+### [Ray-Centric Adaptive Step and Termination](5938-ray-centric-adaptive-step-and-termination.md)
+Dynamically adjusts sampling step size $\Delta t$ and ray termination conditions based on local data metrics or geometric properties. Choose when uniform sampling wastes queries in homogeneous regions or fails to capture high-frequency details.
+
+### [Context-Based Adaptive Ray Sampling with Quadtree Subdivision](8164-context-based-adaptive-ray-sampling-with-quadtree-subdivisio.md)
+A training-stage strategy that accelerates radiance field learning by dynamically adjusting ray distribution across input views using a quadtree structure driven by rendering error. Choose when training requires efficient handling of varying spatial complexity in the image plane.
+
+### [Adaptive Sparse Ray Sampling](8313-adaptive-sparse-ray-sampling.md)
+Reduces computational cost by casting a sparse grid of rays and adaptively increasing sampling density in regions of high image complexity. Choose when rendering standard volumes with strong spatial coherence and low-frequency backgrounds.
+
+### [Hard Sample Mining](8673-hard-sample-mining.md)
+Reduces iteration time and memory usage by subsampling a "hard minibatch" of point samples ranked by propagated pixel loss. Choose when training speed and memory are constrained, and the loss landscape has distinct hard/soft regions.
+
+### [Two-Stage Sampling with Occupancy Grid and Nonlinear Function](9146-two-stage-sampling-with-occupancy-grid-and-nonlinear-functio.md)
+Combines spatial skipping with an Occupancy Grid to skip empty space and a nonlinear piecewise exponential function to bias samples toward the surface. Choose for neural implicit surface reconstruction where geometry is sparse or well-defined by SDFs.
+
+### [Adaptive Volume Sampling](11162-adaptive-volume-sampling.md)
+Not given in the sources.
+
+### [Superpixel-guide Efficient Sampling (SES)](11252-superpixel-guide-efficient-sampling-ses.md)
+Uses SLIC superpixels as the smallest processing units to guide ray sampling, adapting to image content and rendering error. Choose when training high-resolution neural fields where standard partitions cause redundant computation or fragmented information.
+
+### [Adaptive Volume Renderer (AVR)](11608-adaptive-volume-renderer-avr.md)
+Combines adaptive ray sampling with standard volume rendering by using an LSTM to predict a surface intersection point, then samples points around that prediction. Choose when a learned depth prior is available and local surface refinement is sufficient.
+
+### [Coarse-to-Fine Hierarchical Sampling](14488-coarse-to-fine-hierarchical-sampling.md)
+Improves learning of high-frequency details by performing two tiers of volume sampling, using a coarse network to identify opaque regions and clustering a second set of samples near those regions. Choose as a baseline for high-quality NeRF training to cluster samples near opaque locations.
+
+### [Deformed Space Sampling](18731-deformed-space-sampling.md)
+Not given in the sources.
+
+### Error Map Importance Sampling
+* **step**: [S1, unofficial] If `opt.error_map_size` is set, compute sampling weights: `sample_weight = error_map + 2 * error_map.mean(dim=-1, keepdim=True)`. [S1, unofficial] Sample ray indices using multinomial distribution: `var.ray_idx_coarse = torch.multinomial(sample_weight, opt.nerf.n_rays//batch_size, replacement=False)`. [S1, unofficial] Decode 1D sampled indices to 2D grid coordinates: `inds_x = ray_idx // error_map_size`, `inds_y = ray_idx % error_map_size`.
+* **parameter**: [S1, unofficial] `error_map_size`: int, defines the resolution of the 2D error map grid.
+* **pitfall**: [S1, unofficial] The integer division operator `//` triggers a PyTorch 1.10+ deprecation warning; use `torch.div` or `torch.floor_divide` instead.
+* **comparison**: [S1, unofficial] Combines 1/3 importance sampling based on error map with 2/3 uniform random sampling to prevent overfitting to local error spikes.
+
+### Progressive Gaussian Pose Sampling
+* **definition**: [S2] A strategy to progressively enlarge the viewing angle during training by starting at a local neighbor of the reference view and progressively rotating the camera pose.
+* **step**: [S2] Represent the distance between an unseen view and the reference view as Euler angles $(\alpha, \beta, \phi)$ denoting signed angles between axes in reference view’s camera coordinate and unseen views’ camera coordinates. [S2] In each iteration, sample $\alpha, \beta, \phi$ each based on a Gaussian distribution $N(0, \omega^2)$, where $\omega$ increases with more iterations.
+
+## Background
+Adaptive sampling in volume rendering originated from the need to handle the high computational cost of ray marching through dense volumetric data [G]. Specific origins, historical development, and exact paper citations are Not given in the sources.
+
+## Sources
+[S1] Nemo1999/Joint-TensoRF, https://github.com/Nemo1999/Joint-TensoRF, fetched 2026-10-27 (unofficial)
+[S2] SinNeRF: Training Neural Radiance Fields on Complex Scenes from a Single Image, https://doi.org/10.1007/978-3-031-20047-2_42, fetched 2026-10-26

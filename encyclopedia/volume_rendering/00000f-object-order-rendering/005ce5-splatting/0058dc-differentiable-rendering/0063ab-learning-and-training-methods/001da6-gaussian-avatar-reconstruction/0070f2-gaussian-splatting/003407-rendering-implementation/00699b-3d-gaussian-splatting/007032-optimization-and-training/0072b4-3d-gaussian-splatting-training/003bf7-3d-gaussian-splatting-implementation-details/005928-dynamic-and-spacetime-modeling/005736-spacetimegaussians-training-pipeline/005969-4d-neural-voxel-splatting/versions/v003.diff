@@ -1,0 +1,139 @@
+--- v002.md
++++ v003.md
+@@ -8,5 +8,5 @@
+ ## How it works
+ **Inputs and Outputs:**
+-*   **Inputs:** Sparse point cloud from Structure-from-Motion (SfM) [S1]; camera poses and timestamps [S1].
++*   **Inputs:** Sparse point cloud from Structure-from-Motion (SfM), camera poses, and timestamps [S1].
+ *   **Outputs:** Rendered images for arbitrary timestamps and viewpoints [S1].
+ 
+@@ -14,5 +14,5 @@
+ 1.  **Neural Voxels:** A 4D voxel grid. Each voxel $v$ has a center position $x_v \in \mathbb{R}^3$, a spatial extent (scale factor) $l_v \in \mathbb{R}^3$, and a learnable feature vector $f_v \in \mathbb{R}^{f_v}$ [S1]. The feature dimension $f_v$ is 32 [S1].
+ 2.  **Gaussian Offsets:** For each voxel, $k$ learnable offset vectors $O_i \in \mathbb{R}^3$ for $i=0,\dots,k-1$ [S1].
+-3.  **HexPlane Grids:** A decomposition of the 4D space into 2D planes (XY, XZ, YZ, XT, YT, ZT) with specific resolutions [S1].
++3.  **HexPlane Grids:** A decomposition of the 4D space into 2D planes $p \in \{XY, XZ, YZ, XT, YT, ZT\}$ with specific resolutions [S1].
+ 4.  **Refinement Stack:** Stores metadata for problematic viewpoints, including failure type (quality vs. gradient), severity score, and temporal consistency flags [S1].
+ 
+@@ -61,50 +61,59 @@
+ 
+ ```python
++# Data structures
++class Voxel:
++    center: tuple  # 3D position
++    scale: tuple   # 3D spatial extent
++    feature: list  # 32-dimensional vector
++    offsets: list  # 10 x 3 learnable offset vectors
++
++class Gaussian:
++    mu: tuple      # 3D position
++    alpha: float   # opacity
++    color: tuple   # RGB color
++    scale: tuple   # 3D scale
++    rot: tuple     # quaternion rotation
++
+ # Initialization
+-voxels = initialize_from_sfm(sparse_point_cloud)
+-train_scaffold_gs(voxels, iterations=3000)
++voxels = []
++for p in sparse_point_cloud:
++    center = floor(p / voxel_size) * voxel_size
++    voxels.append(Voxel(center=center, scale=voxel_size, feature=[0.0]*32, offsets=[[0.0,0.0,0.0]]*10))
++train_scaffold_gs(voxels, mixed_timestamps, iterations=3000)
+ 
+-# Main Training Loop
++# Main Training Loop (14,000 iterations)
+ for iteration in range(14000):
+-    # 1. Visibility Culling
+-    visible_voxels = cull_frustum(voxels, camera_pose)
+-    
+-    # 2. Generate Gaussians
++    visible_voxels = [v for v in voxels if is_inside_frustum(v.center, camera_pose)]
+     gaussians = []
+     for v in visible_voxels:
+-        # Position
+-        for i in range(k):
+-            mu_i = v.center + v.offsets[i] * v.scale
+-            # Attributes via MLPs
+-            alpha_i, color_i, scale_i, rot_i = decode_attributes(v.feature, delta_vc, d_vc)
+-            gaussians.append(Gaussian(mu_i, alpha_i, color_i, scale_i, rot_i))
++        for i in range(10):
++            mu = v.center + v.offsets[i] * v.scale
++            alpha, color, scale, rot = decode_attributes(v.feature, delta_vc, d_vc)
++            gaussians.append(Gaussian(mu, alpha, color, scale, rot))
+     
+-    # 3. Deformation
+-    hex_features = get_hex_plane_features(voxels, timestamp)
+-    integrated_features = shallow_mlp(hex_features)
++    hex_features = [sample_plane(v.feature, plane, timestamp) for plane in ["XY","XZ","YZ","XT","YT","ZT"] for v in visible_voxels]
++    integrated = shallow_mlp(hex_features)
+     for g in gaussians:
+-        delta_mu = position_mlp(integrated_features)
+-        delta_rot = rotation_mlp(integrated_features)
+-        delta_scale = scale_mlp(integrated_features)
+-        # Selective deformation: only geometric
+-        g.mu = g.mu + delta_mu
+-        g.rot = g.rot + delta_rot
+-        g.scale = g.scale + delta_scale
+-        # Color and opacity remain unchanged
++        delta_mu = single_layer_mlp(integrated, output_dim=3)
++        delta_rot = single_layer_mlp(integrated, output_dim=4)
++        delta_scale = single_layer_mlp(integrated, output_dim=3)
++        g.mu = tuple(a+b for a,b in zip(g.mu, delta_mu))
++        g.rot = tuple(a+b for a,b in zip(g.rot, delta_rot))
++        g.scale = tuple(a+b for a,b in zip(g.scale, delta_scale))
+     
+-    # 4. Render and Loss
+-    rendered_image = rasterize(gaussians, camera_pose)
+-    loss = compute_loss(rendered_image, ground_truth)
+-    loss += lambda_vol * volume_regularization_loss(gaussians)
+-    loss += lambda_tv * total_variation_loss(hex_features)
++    rendered = rasterize(gaussians, camera_pose)
++    loss = L1(rendered, ground_truth) + lambda_ssim * SSIM(rendered, ground_truth)
++    loss += lambda_vol * volume_regularization(gaussians)
++    loss += lambda_tv * total_variation(hex_features)
+     update_parameters(loss)
+     
+-    # 5. Density Control
+     densify_gaussians(gaussians, threshold=0.0002)
+     prune_gaussians(gaussians, opacity_threshold=0.05)
+ 
+-# View Refinement Loop
++# View Refinement Loop (14,000 iterations)
++ema_psnr = 0.0
++ema_grad = 0.0
++gamma = 0.05
+ for iteration in range(14000):
+-    # Identify crude views
+     crude_views = []
+     for view in camera_list:
+@@ -113,19 +122,21 @@
+         if psnr < (1 + gamma) * ema_psnr:
+             crude_views.append(view)
+-        
+         grad_mag = compute_gradient_magnitude(view)
++        ema_grad = 0.4 * grad_mag + 0.6 * ema_grad
+         if grad_mag > (1 + gamma) * ema_grad:
+             crude_views.append(view)
+     
+-    # Focused training on crude views
+     for view in sample(crude_views, weights=severity_scores):
+-        visible_voxels = cull_frustum(voxels, view.pose)
+-        gaussians = generate_gaussians(visible_voxels)
+-        gaussians = deform_gaussians(gaussians)
+-        rendered_image = rasterize(gaussians, view.pose)
+-        loss = compute_loss(rendered_image, view.gt)
++        visible = [v for v in voxels if is_inside_frustum(v.center, view.pose)]
++        gaussians = []
++        for v in visible:
++            for i in range(10):
++                mu = v.center + v.offsets[i] * v.scale
++                alpha, color, scale, rot = decode_attributes(v.feature, delta_vc, d_vc)
++                gaussians.append(Gaussian(mu, alpha, color, scale, rot))
++        gaussians = deform_gaussians(gaussians, get_hex_features(view.timestamp))
++        rendered = rasterize(gaussians, view.pose)
++        loss = compute_loss(rendered, view.gt)
+         update_parameters(loss)
+-        
+-        # Adjusted thresholds for refinement
+         densify_gaussians(gaussians, threshold=0.0001)
+         prune_gaussians(gaussians, opacity_threshold=0.03)

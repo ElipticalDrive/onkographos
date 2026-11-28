@@ -1,0 +1,31 @@
+# Ambient Volume Illumination
+
+
+## Overview
+Ambient Volume Illumination is a family of local illumination algorithms for direct volume rendering that approximates light transport based on the local "ambient region" of each data point, aiming to reproduce phenomenological illumination effects for interactive performance [S1, unofficial]. It solves the problem of poor spatial depth perception and feature occlusion inherent in simple emission-absorption models by introducing local shadows and indirect light cues [S1, unofficial]. What sets it apart from its siblings is the explicit use of ambient scattering to simulate complex light-matter interactions, providing stronger visual cues for spatial arrangement than ambient occlusion alone [S1, unofficial].
+
+## Shared principles
+All methods in this family share the core mechanism of evaluating visibility or illumination at a specific point $\mathbf{p}$ within or on the boundary of a volume, based on a light source direction $\mathbf{l}$ or environment [G].
+
+1.  **Visibility/Transmittance Evaluation:** The fundamental operation is determining how much light reaches $\mathbf{p}$ from a source [G]. This involves integrating the extinction coefficient $\sigma_t(\mathbf{x})$ along a path from the source to $\mathbf{p}$ (or vice versa) [G]. The transmittance $T$ is calculated as:
+    $$ T = \exp\left(-\int_{\mathbf{p}_{source}}^{\mathbf{p}} \sigma_t(\mathbf{x}) \, d\mathbf{x}\right) $$
+    In discrete implementations, this integral is approximated by summing $\sigma_t \cdot \Delta s$ over samples along the ray [G].
+
+2.  **Local Shading Models:** Simple emission-absorption models are often used as a baseline, but they lack illumination cues that make it difficult to visually identify salient structures [S1, unofficial]. Ambient illumination methods augment this by computing local shadows and ambient scattering to simulate complex light-matter interactions [S1, unofficial].
+
+3.  **Shadowing Approximation:** Shadows are computed by testing occlusion along the direction to the light source [G].
+
+4.  **Ambient Occlusion:** Indirect illumination is approximated by integrating over the hemisphere or using simplified models (e.g., upward ray for sky light) [G]. The ambient contribution $L_{ambient}$ is often modulated by a shadowing factor based on local density:
+    $$ L_{ambient} = L_{sky} \cdot \exp(-D_{up}) \cdot AO_{factor} $$
+    where $D_{up}$ is the integrated density along an upward ray [G].
+
+## Subtopics
+
+### [Anisotropic Ambient Volume Shading](15228-anisotropic-ambient-volume-shading.md)
+An algorithm to visualize the anisotropy of volumetric features using anisotropic bidirectional reflectance distribution functions (BRDFs), solving the problem where isotropic specular highlights (like Blinn-Phong) do not support the perception of anisotropic features like elliptic or linear structures.
+
+## Background
+The concept was introduced in the paper "Ambient Volume Illumination" published in IEEE Computing in Science and Engineering in 2016 [S1, unofficial]. It emerged from ongoing research in volume visualization focused on developing simplified optical models that reproduce important illumination effects on a phenomenological level to achieve interactive performance and simpler parameter control compared to accurate global illumination [S1, unofficial]. It is used in direct volume rendering to help users perceive spatial depth, discover cavities, and identify salient structures in volumetric data sets [S1, unofficial].
+
+## Sources
+[S1] Volume Rendering, https://cg.ivd.kit.edu/publications/2015/marco/VolumeRendering.pdf, fetched 2026-10-28 (unofficial)

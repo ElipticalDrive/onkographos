@@ -1,0 +1,96 @@
+# Monocular Depth Regularization on Seen Views
+
+Also called: Patch-wise depth alignment, Seen-view depth distillation
+
+## Overview
+This method aligns pseudo-depth maps from a pre-trained monocular depth estimation (MDE) network with NeRF-rendered depth for seen input views to stabilize geometry optimization [S1, unofficial]. It differs from global scale-fitting approaches by computing local scale and shift parameters per image patch, preventing dominant objects from biasing the depth alignment and thereby preserving local geometric details [S1, unofficial].
+
+## How it works
+**Inputs and Outputs:**
+*   **Input:** A set of seen view images $S$, a pre-trained MDE network $G_\phi$, and a NeRF model $F_\Theta$ [S1, unofficial].
+*   **Output:** A depth consistency loss term $L_{\text{seen}}$ added to the training objective [S1, unofficial].
+
+**Data Structures:**
+*   **Patches:** The image is partitioned into patches $P$ containing sets of pixels [S1, unofficial].
+*   **Depth Maps:**
+    *   $D^*_i$: Relative depth map from MDE for image $I_i$ [S1, unofficial].
+    *   $\bar{D}_i$: Absolute depth map rendered by NeRF for view $i$ [S1, unofficial].
+
+**Parameters:**
+*   $w_i, q_i$: Local scale and shift parameters for a specific patch, computed via least squares [S1, unofficial].
+*   $\text{sg}(\cdot)$: Stop-gradient operator applied to the monocular depth to prevent gradient flow into the frozen MDE network [S1, unofficial].
+
+**Steps:**
+1. For each seen view $I_i \in S$, render the NeRF depth map $\bar{D}_i$ [S1, unofficial].
+2. Extract the relative pseudo-depth map $D^*_i = G_\phi(I_i)$ using the pre-trained MDE network [S1, unofficial].
+3. Partition the image into patches $P$ [S1, unofficial].
+4. For each patch, compute the optimal scale $w_i$ and shift $q_i$ by minimizing the least-squares error between $\text{sg}(D^*_i)$ and $\bar{D}_i$ [S1, unofficial].
+5. Calculate the patch-wise depth consistency loss and sum over all patches and all seen views [S1, unofficial].
+
+**Formula:**
+The total depth consistency loss for seen views is defined as [S1, unofficial]:
+$$ L_{\text{seen}} = \sum_{I_i \in S} \sum_{p \in P} \| (w_i \cdot \text{sg}(D^*_i(p)) + q_i) - \bar{D}_i(p) \| $$
+where $\| \cdot \|$ denotes the unspecified norm (implemented as L1 in the reference implementation) [G].
+
+**Pseudocode:**
+> **Unverified code.** The code below did not pass a test run against a reference implementation, or no test fits it, so it may contain errors.
+
+```python
+def compute_seen_depth_loss(views, nerf_model, mde_model, patch_size):
+    total_loss = 0.0
+    for view in views:
+        # 1. Render NeRF depth for current camera pose
+        nerf_depth = nerf_model.render_depth(view.camera_pose)
+        # 2. Extract relative MDE depth
+        mde_depth = mde_model(view.image)
+        # 3. Iterate over patches
+        H, W = nerf_depth.shape
+        for y in range(0, H, patch_size):
+            for x in range(0, W, patch_size):
+                y_end = min(y + patch_size, H)
+                x_end = min(x + patch_size, W)
+                # Extract patch tensors
+                patch_mde = mde_depth[y:y_end, x:x_end]
+                patch_nerf = nerf_depth[y:y_end, x:x_end]
+                # 4. Compute scale and shift via least squares
+                m_mean = patch_mde.mean()
+                n_mean = patch_nerf.mean()
+                m_c = patch_mde - m_mean
+                n_c = patch_nerf - n_mean
+                var_m = (m_c ** 2).sum()
+                cov_mn = (m_c * n_c).sum()
+                if var_m > 1e-6:
+                    w = cov_mn / var_m
+                    q = n_mean - w * m_mean
+                else:
+                    w = 1.0
+                    q = 0.0
+                # 5. Calculate loss with stop-gradient on MDE depth
+                aligned_mde = w * patch_mde.detach() + q
+                patch_loss = (aligned_mde - patch_nerf).abs().sum()
+                total_loss += patch_loss
+    return total_loss
+```
+
+**Edge Cases and Pitfalls:**
+*   **Dominant Object Bias:** Global scale/shift fitting favors large or high-contrast objects, leading to ill-fitted depths in less dominant sections; patch-wise adjustment alleviates this [S1, unofficial].
+*   **Computational Bottleneck:** The patch-based approach helps overcome the computational bottleneck of full image rendering by allowing localized computations [S1, unofficial].
+*   **Gradient Flow:** The stop-gradient operator $\text{sg}(\cdot)$ is critical to prevent gradients from flowing into the pre-trained MDE network $G_\phi$, which remains frozen during this loss computation [S1, unofficial].
+
+## Subtopics
+
+### [Transient-Aware Depth Prior](13096-transient-aware-depth-prior.md)
+Incorporates geometric constraints from MDE but filters supervision using transient confidence weights to enforce consistency only on static geometry.
+
+## Operating characteristics
+*   **Time Complexity:** Not given in the sources.
+*   **Memory Complexity:** Not given in the sources.
+*   **Strengths:** Preserves local geometric details by avoiding global bias; stabilizes training for sparse inputs [S1, unofficial].
+*   **Limitations:** Not given in the sources.
+*   **When to use:** When training NeRFs on sparse or unconstrained image collections where global depth alignment fails due to varying object scales or dominant foregrounds [S1, unofficial].
+
+## Background
+The method was introduced in the DaRF paper, which proposes boosting radiance fields from sparse inputs using monocular depth adaptation [S1, unofficial]. It addresses the issue that global scale fitting undermines local statistics [S1, unofficial].
+
+## Sources
+[S1] DaRF: Boosting Radiance Fields from Sparse Inputs with Monocular Depth Adaptation, https://doi.org/10.48550/arxiv.2305.19201, fetched 2026-10-29 (unofficial)

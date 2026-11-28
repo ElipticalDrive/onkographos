@@ -1,0 +1,201 @@
+--- v006.md
++++ v007.md
+@@ -4,11 +4,11 @@
+ 
+ ## Overview
+-Incremental Registration is a training strategy for joint pose and radiance field optimization that registers camera frames sequentially following their temporal order [S2]. It solves the problem of non-convex pose optimization and local minima by leveraging the intuition that adjacent camera poses in video sequences are spatially close [S2]. Unlike methods that optimize all poses simultaneously or rely on global initialization, this method incrementally adds frames to the training buffer, initializing new poses from previous ones and freezing older parameters to prevent disruption [S2]. Builds on [Progressive and Dynamic Scene Growth](8869-progressive-and-dynamic-scene-growth.md).
++Incremental Registration is a training strategy for joint pose and radiance field optimization that registers camera frames sequentially following their temporal order [S2]. It solves the problem of non-convex pose optimization and local minima by leveraging the intuition that adjacent camera poses in video sequences are spatially close [S2]. Unlike methods that optimize all poses simultaneously or rely on global initialization, this method incrementally adds frames to the training buffer, initializing new poses from previous ones and freezing older parameters to prevent disruption [S2]. Builds on [Progressive and Dynamic Scene Growth](8869-progressive-and-dynamic-scene-growth.md) [G].
+ 
+ ## How it works
+-The method adapts to the underlying scene representation architecture, primarily implemented for NeRF-based radiance fields [S2] and 3D Gaussian Splatting [S1, unofficial]. Both variants follow the shared principles of metric computation, expansion triggers, and re-optimization defined in [Progressive and Dynamic Scene Growth](8869-progressive-and-dynamic-scene-growth.md).
++The method adapts to the underlying scene representation architecture, primarily implemented for NeRF-based radiance fields [S2] and 3D Gaussian Splatting [S1, unofficial]. Both variants follow the shared principles of metric computation, expansion triggers, and re-optimization defined in [Progressive and Dynamic Scene Growth](8869-progressive-and-dynamic-scene-growth.md) [S1, unofficial][S2].
+ 
+ ### Inputs and Outputs
+-*   **Inputs:** A sequence of unposed images $\{I_1, I_2, \dots, I_N\}$; a scene regressor (NeRF or 3DGS); hyperparameters $k$ (iteration interval), $T_{freeze}$ (freeze duration), and $T_{init}$ (initialization iterations) [S1, unofficial][S2].
++*   **Inputs:** A sequence of unposed images $\{I_1, I_2, \dots, I_N\}$; a scene regressor (NeRF or 3DGS); hyperparameters $k$ (iteration interval), $T_{freeze}$ (freeze duration), $T_{init}$ (seed finetuning iterations), and $T_{finetune}$ (per-batch finetuning iterations) [S1, unofficial][S2].
+ *   **Outputs:** Optimized radiance field parameters $\Theta$ and camera poses $\{P_1, \dots, P_N\}$ [S1, unofficial][S2].
+ 
+@@ -27,12 +27,13 @@
+ Repeat the following until all images are registered:
+ 
+-1.  **Select Batch:** Select a batch of unregistered images $I_{buf} = \{I_k\}$ [S1, unofficial]. In ZeroGS, the reference image is selected from registered images that connects to the most unregistered images [S1, unofficial].
+-2.  **Pose Initialization:** For each new frame $I_i$, initialize its pose $P_i$ using the previous pose $P_{i-1}$ [S2].
+-3.  **Add to Buffer:** Add $I_i$ and $P_i$ to the training buffer [S1, unofficial][S2].
+-4.  **Optimization:**
++1.  **Train:** Run $k$ training iterations on the current training buffer [S2].
++2.  **Select Batch:** Select a batch of unregistered images $I_{buf} = \{I_k\}$ [S1, unofficial]. In ZeroGS, the reference image is selected from registered images that connects to the most unregistered images [S1, unofficial].
++3.  **Pose Initialization:** For each new frame $I_i$, initialize its pose $P_i$ using the previous pose $P_{i-1}$ [S2].
++4.  **Add to Buffer:** Add $I_i$ and $P_i$ to the training buffer [S1, unofficial][S2].
++5.  **Trigger Check (ZeroGS):** Add the target image $I_k$ into the training buffer only when the inlier number is larger than the inlier threshold $s_{inlier}$ [S1, unofficial].
++6.  **Optimization:**
+     *   **ICON:** Freeze the learning rate on poses $\{P_i\}$ and NeRF $\Theta$ for $T_{freeze}$ iterations [S2].
+-    *   **ZeroGS:** Fix camera poses registered in previous epochs and only optimize poses registered in the current epoch [S1, unofficial].
+-    *   **Convergence:** Train until convergence or for a fixed number of iterations (e.g., 1,000 for LLFF, 1,500 for Mip-NeRF360) [S1, unofficial].
+-5.  **Trigger Check:** If using a metric-based trigger (e.g., inlier count $> s_{inlier}$), add the image to the buffer only if the metric is satisfied [S1, unofficial].
++    *   **ZeroGS:** Fix camera poses registered in previous epochs and only optimize the camera poses registered in the current epoch [S1, unofficial]. Finetune the scene regressor for $T_{finetune}$ iterations [S1, unofficial].
++7.  **Convergence:** Train until convergence or for the fixed iteration count [S1, unofficial][S2].
+ 
+ #### 3. Finalization
+@@ -44,89 +45,78 @@
+ ### Pseudocode
+ ```python
+-def incremental_registration(images, scene_regressor, k, T_freeze, T_init, s_inlier):
++def incremental_registration(images, regressor, k, T_freeze, T_init, T_finetune, s_inlier):
+     registered = []
+     poses = {}
+-    current_iter = 0
++    i = 2 if regressor.type == "NeRF" else 1
+ 
+     # 1. Initialization
+-    if scene_regressor.architecture == "NeRF":
+-        # ICON: Jointly optimize NeRF parameters and first two poses
+-        for _ in range(1000):  # Standard joint optimization iterations [G]
+-            optimize_jointly(scene_regressor, images[0:2])
++    if regressor.type == "NeRF":
++        optimize_jointly(regressor, images[0], images[1])
+         registered = [images[0], images[1]]
+-        poses[0] = scene_regressor.get_pose(images[0])
+-        poses[1] = scene_regressor.get_pose(images[1])
++        poses[0] = regressor.get_pose(images[0])
++        poses[1] = regressor.get_pose(images[1])
+     else:
+-        # ZeroGS: Seed initialization
+         seed = images[0]
+         for _ in range(T_init):
+-            finetune_scene_regressor(scene_regressor, seed)
++            regressor.finetune(seed)
+         registered = [seed]
+-        poses[0] = [[1,0,0,0],[0,1,0,0],[0,0,1,0],[0,0,0,1]]
+-        scene_regressor.set_pose(0, poses[0])
++        poses[0] = identity_matrix()
++        regressor.set_pose(0, poses[0])
+ 
+-    i = 1
+     while i < len(images):
+-        if scene_regressor.architecture == "NeRF":
+-            batch = images[i:i+k]
++        # 2. Train for k iterations
++        for _ in range(k):
++            train_step(regressor, registered)
++
++        # 3. Pose Initialization & Buffer Add
++        frame = images[i]
++        poses[i] = poses[i-1]
++        regressor.set_pose(i, poses[i])
++
++        if regressor.type == "3DGS":
++            inliers = count_inliers(regressor, frame, poses[i])
++            if inliers < s_inlier:
++                i += 1
++                continue
++        registered.append(frame)
++
++        # 4. Optimization Phase
++        if regressor.type == "NeRF":
++            freeze_learning_rate(regressor, ["poses", "nerf"])
++            for _ in range(T_freeze):
++                train_step(regressor, registered)
++            unfreeze_learning_rate(regressor)
+         else:
+-            ref_idx = select_reference(registered, images[i:])
+-            batch = [images[i]]
++            freeze_learning_rate(regressor, ["old_poses"])
++            for _ in range(T_finetune):
++                optimize_current_poses(regressor, frame)
++            unfreeze_learning_rate(regressor)
+ 
+-        for frame in batch:
+-            # 2. Pose Initialization
+-            prev_pose = poses[registered[-1].id]
+-            poses[frame.id] = prev_pose
+-            scene_regressor.set_pose(frame.id, poses[frame.id])
+-
+-            # 3. Add to Buffer & Trigger Check
+-            if scene_regressor.architecture == "3DGS":
+-                inliers = compute_inliers(scene_regressor, frame, poses[frame.id])
+-                if inliers < s_inlier:
+-                    continue
+-            registered.append(frame)
+-
+-            # 4. Optimization
+-            if scene_regressor.architecture == "NeRF":
+-                scene_regressor.freeze_parameters("poses_and_nerf")
+-                for _ in range(T_freeze):
+-                    train_iterations(scene_regressor)
+-                scene_regressor.unfreeze_parameters()
+-            else:
+-                scene_regressor.freeze_parameters("old_poses")
+-                for _ in range(T_init):
+-                    optimize_current_poses(scene_regressor, frame)
+-                scene_regressor.unfreeze_parameters()
+-
+-        current_iter += 1
+-        if current_iter % k == 0:
+-            i += 1
++        i += 1
+ 
+     # 5. Finalization
+-    if scene_regressor.architecture == "NeRF":
+-        scene_regressor.apply_lr_decay()
++    if regressor.type == "NeRF":
++        apply_lr_decay(regressor)
+     else:
+-        global_pose_optimization(scene_regressor, registered, poses)
++        global_pose_optimization(regressor, registered, poses)
+ 
+ # Helper definitions (standard operations) [G]
+-def optimize_jointly(regressor, frames):
++def optimize_jointly(regressor, f1, f2):
+     regressor.train()
+-    for frame in frames:
+-        regressor.forward(frame)
++    for f in [f1, f2]:
++        regressor.forward(f)
+         regressor.backward()
+         regressor.step()
+ 
+-def finetune_scene_regressor(regressor, frame):
++def train_step(regressor, buffer):
+     regressor.train()
+-    regressor.forward(frame)
+-    regressor.backward()
+-    regressor.step()
++    for f in buffer:
++        regressor.forward(f)
++        regressor.backward()
++        regressor.step()
+ 
+-def select_reference(registered, unregistered):
+-    # Find registered frame connecting to most unregistered [G]
+-    return max(registered, key=lambda r: count_connections(r, unregistered))
+-
+-def compute_inliers(regressor, frame, pose):
+-    # Count inliers using reprojection error [G]
++def count_inliers(regressor, frame, pose):
++    # Count pixels with reprojection error below threshold [G]
++    threshold = 6.0
+     return sum(1 for p in frame.points if reprojection_error(p, pose) < threshold)
+ 
+@@ -146,10 +136,11 @@
+ *   **$k$ (Iteration Interval):** Number of iterations between adding new frames. Value: 1,000 iterations for CO3D/HO3D; 500 iterations for LLFF [S2].
+ *   **$T_{freeze}$ (Freeze Duration):** Iterations to freeze learning rates. Value: 100,000 iterations for HO3D/CO3D; 30,000 iterations for LLFF [S2].
+-*   **$T_{init}$ (Initialization Iterations):** Finetuning iterations for scene regressor. Value: 500 iterations for seed; 1,000 iterations for LLFF; 1,500 iterations for Mip-NeRF360 [S1, unofficial].
++*   **$T_{init}$ (Initialization Iterations):** Finetuning iterations for seed. Value: 500 iterations [S1, unofficial].
++*   **$T_{finetune}$ (Per-Batch Finetuning):** Finetuning iterations during incremental training. Value: 1,000 iterations for LLFF; 1,500 iterations for Mip-NeRF360 [S1, unofficial].
+ *   **$s_{inlier}$ (Inlier Threshold):** Minimum inlier count for registration. Value: 5,000 [S1, unofficial].
+ 
+ ### Edge Cases and Pitfalls
+ *   **Local Minima:** Optimizing poses and NeRF using photometric losses is highly non-convex [S2]. Incorrectly optimized poses can mislead the NeRF, causing re-registration on already registered viewpoints [S2].
+-*   **Pose Drift:** Errors accumulate during incremental training. Finalization stages are required to refine poses [S1, unofficial].
++*   **Pose Drift:** Errors accumulate during incremental training [S1, unofficial]. Finalization stages are required to refine poses [S1, unofficial].
+ *   **Occlusion:** Avoid sampling rays from occluded regions [S2].
+ 
+@@ -160,6 +151,6 @@
+ 
+ ## Operating characteristics
+-*   **Time Complexity:** Not given in the sources.
+-*   **Memory Complexity:** Not given in the sources.
++*   **Time Complexity:** Not given in the sources. [G]
++*   **Memory Complexity:** Not given in the sources. [G]
+ *   **Strengths:** Provides good initialization for camera poses, avoiding the breaking point of 20-degree rotation difference observed in global optimization [S2]. Efficient for video sequences with smooth camera motion [S2].
+ *   **Limitations:** Not suitable for scenes with large, abrupt camera motions or non-sequential image sets [S2]. Requires careful tuning of $k$ and $T_{freeze}$ [S2].

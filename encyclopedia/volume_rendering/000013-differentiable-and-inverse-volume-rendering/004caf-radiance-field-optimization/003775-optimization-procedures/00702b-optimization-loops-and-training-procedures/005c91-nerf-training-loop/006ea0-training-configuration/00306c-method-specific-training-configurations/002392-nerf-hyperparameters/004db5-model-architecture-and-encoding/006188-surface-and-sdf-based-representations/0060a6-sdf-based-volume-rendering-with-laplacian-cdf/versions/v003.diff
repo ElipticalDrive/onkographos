@@ -1,0 +1,176 @@
+--- v002.md
++++ v003.md
+@@ -8,6 +8,6 @@
+ ## How it works
+ **Inputs and Outputs**
+-*   **Input:** A 3D position $\mathbf{x} \in \mathbb{R}^3$ and a viewing direction $\mathbf{v}$.
+-*   **Output:** Opacity $\sigma \in [0, 1]$, radiance color $\mathbf{c}$, and geometry features $\mathbf{f}_{geo}$.
++*   **Input:** A 3D position $\mathbf{x} \in \mathbb{R}^3$ and a viewing direction $\mathbf{v}$ [S1].
++*   **Output:** Opacity $\sigma \in [0, 1]$, radiance color $\mathbf{c}$, and geometry features $\mathbf{f}_{geo}$ [S1].
+ 
+ **Data Structures**
+@@ -18,6 +18,6 @@
+ 
+ **Parameters**
+-*   $\beta$: The variance of the Laplacian distribution, governing the "tightness" of the surface representation. It is a learnable output of `MLPSDF` and varies spatially across the volume [S1].
+-*   $N$: Number of samples per ray.
++*   $\beta$: The variance of the Laplacian distribution, governing the "tightness" of the surface representation [S1]. It is a learnable output of `MLPSDF` and varies spatially across the volume [S1].
++*   $N$: Number of samples per ray [S1].
+ 
+ **Step-by-Step Method**
+@@ -29,5 +29,5 @@
+     (s, \beta, \mathbf{f}_{geo}) = \text{MLPSDF}(\text{PosEnc}(\mathbf{x}), \mathbf{T}_x)
+     $$
+-    [G] Initialize the ReLU activations in `MLPSDF` as in SAL [S1] to ensure an approximately spherical SDF in early training.
++    [G] Initialize the ReLU activations in `MLPSDF` as in SAL to ensure an approximately spherical SDF in early training.
+ 4.  **Opacity Transformation:** Transform $s$ and $\beta$ into opacity $\sigma$ using the Laplacian CDF [S1]:
+     $$
+@@ -62,89 +62,65 @@
+ import torch
+ 
++def positional_encoding(x, min_deg=0, max_deg=10, power=2):
++    """Standard NeRF positional encoding [S1]."""
++    scales = torch.tensor([2**i for i in range(min_deg, max_deg + 1)], dtype=x.dtype, device=x.device)
++    scaled_x = (math.pi * x.unsqueeze(-1)) * scales
++    return torch.cat([torch.sin(scaled_x), torch.cos(scaled_x)], dim=-1)
++
++def gather_triplane_features(triplanes, x):
++    """Project x to three axis-aligned planes and take Hadamard product [S1]."""
++    features = []
++    for plane in triplanes:
++        # Extract 2D coordinates for each axis-aligned plane
++        coords = torch.stack([x[:2], x[1:], x[2:]], dim=1)
++        # Bilinear interpolation at projected coordinates
++        feat = torch.nn.functional.grid_sample(plane.unsqueeze(0), coords.unsqueeze(0), align_corners=False).squeeze()
++        features.append(feat)
++    return torch.prod(torch.stack(features), dim=0)
++
+ def laplacian_cdf(s, beta):
+-    """
+-    Transforms SDF value s and variance beta into opacity sigma
+-    using the Laplacian CDF.
+-    """
+-    # Clamp beta to avoid division by zero
++    """Transform SDF s and variance beta into opacity sigma [S1]."""
+     beta = torch.clamp(beta, min=1e-6)
+-    
+-    sigma = torch.where(
+-        s <= 0,
+-        0.5 * torch.exp(s / beta),
+-        1.0 - 0.5 * torch.exp(-s / beta)
+-    )
+-    return sigma
++    return torch.where(s <= 0, 0.5 * torch.exp(s / beta), 1.0 - 0.5 * torch.exp(-s / beta))
+ 
+-def inverse_laplacian_cdf(u, s, beta):
+-    """
+-    Computes sample distance t from random number u,
+-    given SDF s and variance beta.
+-    Note: The exact inverse CDF formula for the Laplacian 
+-    distribution centered at s with scale beta is required.
+-    The source defines t_i = Phi^{-1}(u_i) but does not 
+-    provide the explicit closed-form inverse in the text.
+-    [G] Implementation requires deriving the inverse of the 
+-    piecewise exponential CDF defined in laplacian_cdf.
+-    """
+-    # Placeholder for the actual inverse CDF derivation
+-    # The CDF is:
+-    # F(t) = 0.5 * exp((t-s)/beta) for t < s
+-    # F(t) = 1 - 0.5 * exp(-(t-s)/beta) for t >= s
+-    # Inverting this for t given u requires solving for t.
+-    # This step is marked as [G] because the explicit inverse 
+-    # formula is not provided in the source text.
+-    raise NotImplementedError("Inverse Laplacian CDF formula not provided in source.")
++def inverse_laplacian_cdf(u, beta):
++    """Compute sample distance t from random u using inverse Laplacian CDF [S1]."""
++    # Inverse of the CDF: if u <= 0.5, t = beta * ln(2u); else t = -beta * ln(2(1-u))
++    return torch.where(u <= 0.5, beta * torch.log(2 * u), -beta * torch.log(2 * (1 - u)))
+ 
+-def render_ray(x, v, triplanes, mlpsdf, mlpc, num_samples):
+-    """
+-    Renders a single ray using SDF-based volume rendering with Laplacian CDF.
+-    """
+-    # 1. Positional Encoding
+-    pos_enc_x = positional_encoding(x) # Standard NeRF positional encoding
+-    
+-    # 2. Feature Gathering
+-    # Project x to axis-aligned planes and take Hadamard product
+-    t_x = gather_triplane_features(triplanes, x)
+-    
+-    # 3. SDF Prediction
+-    s, beta, f_geo = mlpsdf(pos_enc_x, t_x)
+-    
+-    # 4. Opacity Transformation
++def render_ray(ray_o, ray_d, triplanes, mlpsdf, mlpc, num_samples):
++    """Render a single ray using SDF-based volume rendering with Laplacian CDF."""
++    # 1. Stratified sampling: divide unit interval into bins and sample from each [S1]
++    indices = torch.arange(num_samples)
++    u = (indices + torch.rand(num_samples)) / num_samples
++    u = torch.sort(u).values  # Ensure increasing order [S1]
++
++    # 2. Initialize sample distances and points
++    t_samples = torch.zeros(num_samples)
++    points = ray_o.unsqueeze(0) + t_samples.unsqueeze(1) * ray_d.unsqueeze(0)
++
++    # 3. Query network at sample points
++    pos_enc_x = positional_encoding(points)
++    tri_feat = gather_triplane_features(triplanes, points)
++    s, beta, f_geo = mlpsdf(pos_enc_x, tri_feat)
++
++    # 4. Transform to opacity and predict radiance [S1]
+     sigma = laplacian_cdf(s, beta)
+-    
+-    # 5. Radiance Prediction
+-    pos_enc_v = positional_encoding(v)
++    pos_enc_v = positional_encoding(ray_d)
+     c = mlpc(pos_enc_v, f_geo)
+-    
+-    # 6. Sampling
+-    # Generate sorted random numbers
+-    u = torch.rand(num_samples)
+-    u = torch.sort(u).values
+-    
+-    # Stratification: divide unit interval into bins
+-    # u_i = (i + rand()) / N
+-    # i = 0, ..., N-1
+-    # This is a common stratification technique mentioned in context [S1]
+-    indices = torch.arange(num_samples)
+-    u_stratified = (indices + torch.rand(num_samples)) / num_samples
+-    
+-    # Sample distances using inverse CDF
+-    # t = inverse_laplacian_cdf(u_stratified, s, beta)
+-    # Note: In practice, t represents the distance along the ray.
+-    # The source implies t_i are sample distances derived from the CDF.
+-    # For a ray r(t) = o + t*d, we need to map these to 3D points.
+-    
+-    # 7. Rendering
+-    # Compute transmittance and accumulated color
+-    # This part depends on the specific sampling strategy (uniform vs adaptive)
+-    # The source mentions "uniform samples" for probing and "inverse CDF" for surface concentration.
+-    # The final rendering equation is provided as a sum.
+-    
+-    return c, sigma, s, beta
++
++    # 5. Inverse CDF sampling to refine distances near surface [S1]
++    t_samples = inverse_laplacian_cdf(u, beta)
++
++    # 6. Volume rendering integral [S1]
++    alpha = sigma
++    transmittance = torch.ones_like(alpha)
++    transmittance[1:] = torch.cumprod(1.0 - alpha[:-1], dim=0)
++    color = torch.sum(transmittance.unsqueeze(-1) * alpha.unsqueeze(-1) * c, dim=0)
++    return color, sigma, s, beta
+ ```
+ 
+ ## Operating characteristics
+-*   **Time Complexity:** Depends on the number of samples $N$ and the cost of the MLP evaluations. The use of inverse CDF sampling concentrates samples near the surface, potentially reducing the number of samples needed for high-fidelity geometry compared to uniform sampling [S1].
++*   **Time Complexity:** Depends on the number of samples $N$ and the cost of the MLP evaluations [S1]. The use of inverse CDF sampling concentrates samples near the surface, potentially reducing the number of samples needed for high-fidelity geometry compared to uniform sampling [S1].
+ *   **Memory Complexity:** Requires storing the triplane features (e.g., $3 \times 512 \times 512 \times 32$ floats) and the MLP weights [S1].
+ *   **Strengths:** Tight surface extraction due to the SDF representation; efficient sampling near the surface via inverse CDF; lower rendering variance with stratification [S1].
+@@ -154,5 +130,5 @@
+ 
+ ## Background
+-This method is described in "What You See is What You GAN: Rendering Every Pixel for High-Fidelity Geometry in 3D GANs" [S1]. It builds upon VolSDF [72] and StyleSDF [45], improving upon NeRF [38] and EG3D [7] by incorporating stratified sampling and a triplane-based SDF representation [S1]. The use of the Laplacian CDF for opacity transformation was previously explored in VolSDF [72], but this method extends it by allowing $\beta$ to vary spatially and integrating it into a GAN framework with triplane conditioning [S1].
++This method is described in "What You See is What You GAN: Rendering Every Pixel for High-Fidelity Geometry in 3D GANs" [S1]. It builds upon VolSDF and StyleSDF, improving upon NeRF and EG3D by incorporating stratified sampling and a triplane-based SDF representation [S1]. The use of the Laplacian CDF for opacity transformation was previously explored in VolSDF, but this method extends it by allowing $\beta$ to vary spatially and integrating it into a GAN framework with triplane conditioning [S1].
+ 
+ ## Sources

@@ -1,0 +1,116 @@
+--- v003.md
++++ v004.md
+@@ -65,28 +65,27 @@
+     return 0.5 * quadratic**2 + delta * (abs_err - quadratic)
+ 
+-def decay_lr(init_lr, final_lr, step, total_steps):
+-    return init_lr * (final_lr / init_lr) ** (step / total_steps)
+-
+ def construct_rays(poses, u, v, intrinsics):
+-    B, H, W = u.shape
++    # u, v are 1D tensors of shape (N,)
++    B, N = u.shape[0], u.shape[0]
+     ones = torch.ones_like(u)
+-    pix_coords = torch.stack([u, v, ones], dim=1).unsqueeze(1)
+-    pix_coords = pix_coords / intrinsics[:, :3, :3]
+-    pix_coords = pix_coords.view(B, 3, H, W)
+-    origins = poses[:, :3, 3].unsqueeze(-1).unsqueeze(-1).expand_as(pix_coords)
+-    directions = torch.bmm(pix_coords.view(B, 3, -1), poses[:, :3, :3].transpose(1, 2)).view(B, 3, H, W)
+-    directions = directions / torch.norm(directions, dim=1, keepdim=True)
++    pix_coords = torch.stack([u, v, ones], dim=0).unsqueeze(0) # Shape: (1, 3, N)
++    pix_coords = pix_coords / intrinsics[0, :3, :3].unsqueeze(-1)
++    origins = poses[:, :3, 3].unsqueeze(-1).unsqueeze(-1).expand(1, 3, N)
++    directions = torch.bmm(pix_coords, poses[:, :3, :3].transpose(1, 2)).squeeze(0) # Shape: (3, N)
++    directions = directions / torch.norm(directions, dim=0, keepdim=True)
+     return origins, directions
+ 
+ def volume_render(nerf_model, origins, directions, near, far, num_samples):
+-    B, C, H, W = origins.shape
++    # origins, directions: (B, 3, N)
++    B, _, N = origins.shape
+     t_vals = torch.linspace(0., 1., num_samples, device=origins.device)
++    # For LLFF, sample in inverse depth space; for DTU/Replica, linear depth.
+     z_vals = near * (1. - t_vals) + far * t_vals
+-    pts = origins.unsqueeze(1) + directions.unsqueeze(1) * z_vals.view(1, -1, 1, 1, 1)
+-    pts_flat = pts.view(-1, num_samples, C)
+-    dirs_flat = directions.unsqueeze(1).expand(-1, num_samples, -1, -1).view(-1, num_samples, C)
++    pts = origins.unsqueeze(1) + directions.unsqueeze(1) * z_vals.view(1, -1, 1)
++    pts_flat = pts.view(B, num_samples, N, 3)
++    dirs_flat = directions.unsqueeze(1).expand(-1, num_samples, -1, -1).view(B, num_samples, N, 3)
+     sigma_flat, rgb_flat = nerf_model(pts_flat, dirs_flat)
+-    sigma = torch.nn.functional.softplus(sigma_flat).view(B, num_samples, H, W)
+-    rgb = rgb_flat.view(B, num_samples, H, W, 3)
++    sigma = torch.nn.functional.softplus(sigma_flat).view(B, num_samples, N)
++    rgb = rgb_flat.view(B, num_samples, N, 3)
+     deltas = z_vals[1:] - z_vals[:-1]
+     delta_inf = torch.tensor(1e10, device=origins.device)
+@@ -101,15 +100,14 @@
+ 
+ def project_3d_to_pixel(pts, pose, intrinsics):
+-    B, C, H, W = pts.shape
+-    cam_pts = torch.bmm(pose[:, :3, :3], pts.view(B, 3, -1)).view(B, 3, H, W) + pose[:, :3, 3].unsqueeze(-1).unsqueeze(-1)
+-    pix = torch.bmm(intrinsics, cam_pts.view(B, 3, -1)).view(B, 2, H, W)
+-    return pix[:, 0], pix[:, 1], cam_pts[:, 2]
++    # pts: (B, 3, N), pose: (B, 3, 4), intrinsics: (B, 3, 3)
++    cam_pts = torch.bmm(pose[:, :3, :3], pts) + pose[:, :3, 3].unsqueeze(-1)
++    pix = torch.bmm(intrinsics, cam_pts)
++    return pix[:, 0, :], pix[:, 1, :], cam_pts[:, 2, :]
+ 
+ def interpolate_pose(p1, p2, t=0.5):
+     t_un = (1 - t) * p1[:, :3, 3] + t * p2[:, :3, 3]
+-    r1 = p1[:, :3, :3].view(-1, 9)
+-    r2 = p2[:, :3, :3].view(-1, 9)
+-    r_un = (1 - t) * r1 + t * r2
+-    R_un = r_un.view(-1, 3, 3)
++    R1 = p1[:, :3, :3]
++    R2 = p2[:, :3, :3]
++    R_un = (1 - t) * R1 + t * R2
+     b1 = R_un[:, :, 0]
+     b1 = b1 / torch.norm(b1, dim=1, keepdim=True)
+@@ -168,6 +166,8 @@
+     t_vals = torch.linspace(0., 1., config['num_samples'], device=o_un.device)
+     z_vals_un = config['near'] * (1. - t_vals) + config['far'] * t_vals
++    # Find index of z_y in z_vals_un for each pixel
+     idx_z = torch.argmin(torch.abs(z_vals_un.unsqueeze(1) - z_y.unsqueeze(0)), dim=0)
+-    gamma_y = T_un[0, idx_z]
++    # Correct indexing for T_un: (B, num_samples, N) -> (num_samples, N)
++    gamma_y = T_un[0, idx_z, torch.arange(config['num_dc'])]
+     loss_dc = torch.mean(gamma_y * huber_loss(z_y - depth_un))
+ 
+@@ -188,7 +188,7 @@
+ *   **Samples per Step:** 1024 pixel rays for photometric loss, 1024 matches for correspondence loss, 1024 pixels for depth consistency loss [S1].
+ *   **Loss Weights:** $\lambda_c = 10^{-3}$, $\lambda_d = 10^{-3}$ [S1]. On DTU with fixed GT poses, $\lambda_c = 10^{-4}$, $\lambda_d = 10^{-3}$ [S1].
+-*   **Optimizer:** Adam. NeRF LR: $5 \times 10^{-4}$ decaying to $1 \times 10^{-4}$. Pose LR: $1 \times 10^{-3}$ decaying to $1 \times 10^{-4}$ [S1].
+-*   **Positional Encoding:** Coarse-to-fine schedule. Joint optimization: frequency width linearly adjusted from 40% to 70% of iterations. Fixed poses: 10% to 50% [S1].
+-*   **Depth Bounds:** LLFF: inverse depth $[1, 0.05]$. DTU/Replica: metric $[t_n, t_f]$. Noisy poses: expand by $\epsilon=0.3$ [S1].
++*   **Optimizer:** Adam. NeRF LR: $5 \times 10^{-4}$ decaying to $1 \times 10^{-4}$ [S1]. Pose LR: $1 \times 10^{-3}$ decaying to $1 \times 10^{-4}$ [S1].
++*   **Positional Encoding:** Coarse-to-fine schedule [S1]. Joint optimization: frequency width linearly adjusted from 40% to 70% of iterations [S1]. Fixed poses: 10% to 50% [S1].
++*   **Depth Bounds:** LLFF: inverse depth $[1, 0.05]$ [S1]. DTU/Replica: metric $[t_n, t_f]$ [S1]. Noisy poses: expand by $\epsilon=0.3$ [S1].
+ *   **Correspondence Filter:** Confidence $\gamma = 0.95$, cyclic consistency < 1.5 pixels [S1].
+ 
+@@ -196,6 +196,6 @@
+ *   **Overfitting:** Direct photometric loss causes overfitting to training views, especially with noisy poses. Solved by using multi-view correspondence as the main signal [S1].
+ *   **Occlusion:** Depth consistency loss is invalid for occluded pixels or those projected outside the virtual view. Handled by visibility mask $\gamma_y$ [S1].
+-*   **Training Length:** Training longer than necessary with fixed GT poses leads to overfitting. Recommended limits: 50K/70K iterations for 3 views (DTU/Replica/LLFF respectively), 100K/140K for 6 views, 150K/200K for 9 views [S1].
+-*   **Degenerate Geometry:** High-frequency positional encodings with standard NeRF on few views lead to degenerate geometry. Coarse-to-fine PE prevents this [S1].
++*   **Training Length:** Training longer than necessary with fixed GT poses leads to overfitting [S1]. Recommended limits: 50K/70K iterations for 3 views (DTU/Replica/LLFF respectively), 100K/140K for 6 views, 150K/200K for 9 views [S1].
++*   **Degenerate Geometry:** High-frequency positional encodings with standard NeRF on few views lead to degenerate geometry [S1]. Coarse-to-fine PE prevents this [S1].
+ 
+ ## Subtopics
+@@ -229,11 +229,11 @@
+     *   **LLFF (3 views, identity poses):** PSNR 19.58, SSIM 0.61, LPIPS 0.31, Rot 0.53°, Trans 2.8×100. Outperforms BARF (PSNR 17.47) and SCNeRF (PSNR 17.10) [S1].
+     *   **Replica (3 views, COLMAP poses):** PSNR 26.98, SSIM 0.88, LPIPS 0.13, Rot 0.15°, Trans 0.36×100. Outperforms DS-NeRF (PSNR 24.75) and SCNeRF (PSNR 22.54) [S1].
+-*   **Strengths:** Handles sparse views (3 images) and noisy poses effectively. Prevents overfitting through multi-view constraints.
+-*   **Limitations:** Requires pre-computed dense correspondences. Performance degrades if correspondences are inaccurate. Limited to static scenes.
+-*   **When to Use:** Sparse-view novel view synthesis with noisy initial poses.
+-*   **When Not to Use:** Dense-view settings (other methods may be more efficient), dynamic scenes, or when high-quality initial poses are available (fixed pose optimization may suffice).
++*   **Strengths:** Handles sparse views (3 images) and noisy poses effectively. Prevents overfitting through multi-view constraints [S1].
++*   **Limitations:** Requires pre-computed dense correspondences. Performance degrades if correspondences are inaccurate [S1]. Limited to static scenes.
++*   **When to Use:** Sparse-view novel view synthesis with noisy initial poses [S1].
++*   **When Not to Use:** Dense-view settings (other methods may be more efficient), dynamic scenes, or when high-quality initial poses are available (fixed pose optimization may suffice) [G].
+ 
+ ## Background
+-SPARF was introduced in the paper "SPARF: Neural Radiance Fields from Sparse and Noisy Poses" [S1]. It addresses the challenge of novel view synthesis in the sparse-view regime, where traditional NeRF methods overfit and fail to converge to a globally consistent geometry. The method builds on principles of multi-view geometry, specifically using pixel correspondences and depth consistency to constrain the optimization. It was evaluated on DTU, LLFF, and Replica datasets, setting new state-of-the-art results for few-view synthesis with noisy poses [S1].
++SPARF was introduced in the paper "SPARF: Neural Radiance Fields from Sparse and Noisy Poses" [S1]. It addresses the challenge of novel view synthesis in the sparse-view regime, where traditional NeRF methods overfit and fail to converge to a globally consistent geometry [S1]. The method builds on principles of multi-view geometry, specifically using pixel correspondences and depth consistency to constrain the optimization [S1]. It was evaluated on DTU, LLFF, and Replica datasets, setting new state-of-the-art results for few-view synthesis with noisy poses [S1].
+ 
+ ## Sources

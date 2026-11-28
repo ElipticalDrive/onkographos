@@ -1,0 +1,114 @@
+--- v002.md
++++ v003.md
+@@ -38,10 +38,15 @@
+ **Pseudocode:**
+ ```python
+-def A_CAQ(model, initial_Q, initial_b, dataset, L_metric, beta, E, I):
++import math
++
++def compute_gradient(loss, params):
++    """Standard autograd or numerical gradient computation."""
++    return params.grad  # Assumes loss.backward() was called on loss
++
++def A_CAQ(initial_Q, initial_b, dataset, L_metric, beta, E, I, epsilon_weights):
+     """
+     Adversarial Content-Aware Quantization.
+     
+     Args:
+-        model: Fully trained full-precision radiance field model.
+         initial_Q: Initial quantization parameters {Omega, v_max, r_v}.
+         initial_b: Initial soft bitwidths.
+@@ -51,4 +56,5 @@
+         E: Total number of epochs.
+         I: Iterations per epoch.
++        epsilon_weights: List of penalty weights epsilon_i for each component.
+         
+     Returns:
+@@ -56,44 +62,45 @@
+         b_final: Convergent bitwidths.
+     """
+-    Q = copy.deepcopy(initial_Q)
+-    b = copy.deepcopy(initial_b)
+-    
++    Q = {k: v.clone() if hasattr(v, 'clone') else v for k, v in initial_Q.items()}
++    b = [x.clone() if hasattr(x, 'clone') else x for x in initial_b]
++
+     for epoch in range(E):
+         for iteration in range(1, I + 1):
+-            # Get batch using ray-marching
+-            batch = sample_batch(dataset)
+-            
+-            # Forward pass: Compute density and color
+-            # F computes (sigma, c) for rays in batch using current Q and b
+-            sigma_c = model.forward(batch, Q, b)
+-            
+-            # Volume rendering to get rendered images C_hat
+-            C_hat = volume_rendering(sigma_c, batch.rays)
+-            
+-            # Ground truth colors for the batch
+-            C_gt = batch.ground_truth_colors
+-            
+-            # Compute NeRF Loss (MSE)
+-            # L_NeRF = sum(||C_hat - C_gt||_F^2) over rays in batch
+-            L_NeRF = compute_mse_loss(C_hat, C_gt)
+-            
+-            # Compute Bitwidth Loss
+-            # L_bit = sqrt(||L_NeRF - L_metric||) + sum(epsilon_i * B_i)
+-            # Note: epsilon_i and B_i are derived from b and model structure
+-            L_bit = compute_bitwidth_loss(L_NeRF, L_metric, b)
+-            
+-            # Compute gradients
+-            # Gradient for model parameters Q
++            # 1. Get batch using ray-marching
++            batch = dataset.sample_rays()
++            rays = batch.rays
++            C_gt = batch.colors
++            step_sizes = batch.step_sizes
++
++            # 2. Forward pass: Compute density and color
++            sigmas, colors = F(rays, Q, b)
++
++            # 3. Volume rendering to get rendered images C_hat
++            alphas = [1.0 - math.exp(-s * ss) for s, ss in zip(sigmas, step_sizes)]
++            transmittance = [1.0]
++            for a in alphas:
++                transmittance.append(transmittance[-1] * (1.0 - a + 1e-10))
++            transmittance = transmittance[:-1]
++            weights = [a * t for a, t in zip(alphas, transmittance)]
++            C_hat = [sum(w * c for w, c in zip(ws, cs)) for ws, cs in zip(weights, colors)]
++
++            # 4. Compute NeRF Loss (MSE)
++            L_NeRF = sum((ch - cg) ** 2 for ch, cg in zip(C_hat, C_gt))
++
++            # 5. Compute Bitwidth Loss
++            L_bit = math.sqrt(abs(L_NeRF - L_metric)) + sum(eps * bw for eps, bw in zip(epsilon_weights, b))
++
++            # 6. Compute gradients
++            # In practice, L_NeRF.backward() and L_bit.backward() populate .grad attributes
+             grad_Q = compute_gradient(L_NeRF, Q)
+-            
+-            # Gradient for bitwidths b
+             grad_b = compute_gradient(L_bit, b)
+-            
+-            # Update parameters
+-            # Gradients are averaged on batch size |B_j|
+-            batch_size = len(batch)
+-            Q = Q - (beta / batch_size) * grad_Q
+-            b = b - (beta / batch_size) * grad_b
+-            
++
++            # 7. Update parameters (gradients averaged on batch size)
++            batch_size = len(rays)
++            for key in Q:
++                Q[key] = Q[key] - (beta / batch_size) * grad_Q[key]
++            for idx in range(len(b)):
++                b[idx] = b[idx] - (beta / batch_size) * grad_b[idx]
++
+     return Q, b
+ ```
+@@ -123,5 +130,4 @@
+ *   **Limitations:** The adversarial formulation requires careful tuning of the metric and penalty weights to balance accuracy and efficiency [S1].
+ *   **When to use:** When mixed-precision quantization is needed for radiance fields with specific accuracy or memory constraints [S1].
+-*   **When not to use:** When full precision is required or when the overhead of training the quantization parameters is prohibitive [S1].
+ 
+ ## Background

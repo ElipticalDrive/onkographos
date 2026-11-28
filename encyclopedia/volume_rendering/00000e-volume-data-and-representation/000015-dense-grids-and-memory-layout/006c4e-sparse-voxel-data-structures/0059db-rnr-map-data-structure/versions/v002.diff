@@ -1,0 +1,127 @@
+--- v001.md
++++ v002.md
+@@ -4,9 +4,9 @@
+ 
+ ## Overview
+-The RNR-Map is a dense 3D tensor used to store averaged latent feature vectors for visual navigation and rendering, mapping 2D spatial positions to high-dimensional latent codes [S1]. It differs from traditional sparse voxel structures by aggregating pixel features into a fixed-resolution grid to enable efficient decoder-based image reconstruction, whereas siblings like VDB use sparse octrees for explicit geometry and MERF uses hash grids for neural field approximation [21071-sparse-voxel-data-structures.md].
++The RNR-Map is a dense 3D tensor used to store averaged latent feature vectors for visual navigation and rendering, mapping 2D spatial positions to high-dimensional latent codes [S1]. It aggregates pixel features into a fixed-resolution grid to enable efficient decoder-based image reconstruction [S1].
+ 
+ ## How it works
+ **Inputs:**
+-- A set of registered 2D pixel features (e.g., from camera observations).
++- Registered 2D pixel features with normalized coordinates and feature vectors [S1].
+ - Map resolution parameters: grid dimensions $U \times V$ and latent dimension $D$ [S1].
+ 
+@@ -16,7 +16,5 @@
+ **Data Structures:**
+ - **RNR-Map ($m$):** A 3D tensor of size $U \times V \times D$. Each cell $(u, v)$ stores a latent feature vector $c_{u,v} \in \mathbb{R}^D$ [S1].
+-- **Map Struct (Variant):** In specific optimization contexts (e.g., boat rendering), the map is implemented as an array of structs. Each struct contains:
+-    - 4 bytes: Tile pointer.
+-    - 4 bytes: Additional data (e.g., a 32-bit 'boat bit' flag) [S2, unofficial].
++- **Map Struct (Variant):** In specific optimization contexts, the map is implemented as an array of 8-byte structs instead of 4-byte pointers [S2, unofficial]. Each struct contains a 4-byte tile pointer and 4 bytes of additional data, which includes a single 32-bit 'boat bit' flag [S2, unofficial].
+ 
+ **Steps:**
+@@ -27,5 +25,5 @@
+ 
+ **Formulas:**
+-The map position $(u, v)$ is derived from the normalized position (details of normalization function not explicitly defined in sources, assumed standard linear mapping) [S1]. The latent vector for a cell is:
++The map position $(u, v)$ is derived from the normalized position using the map resolution $s$ [S1]. The latent vector for a cell is:
+ $$ c_{u,v} = \frac{1}{N_{u,v}} \sum_{i \in \text{pixels mapping to } (u,v)} f_i $$
+ where $f_i$ is the feature vector of pixel $i$, and $N_{u,v}$ is the count of pixels mapping to $(u, v)$ [S1].
+@@ -34,64 +32,38 @@
+ - $U, V$: Grid dimensions (height and width in grid cells) [S1].
+ - $D$: Latent dimension (channel size) [S1].
+-- Map Size (Variant): Can be doubled (e.g., 64 KB to 128 KB) to accommodate auxiliary flags in struct layouts [S2, unofficial].
++- Map Size (Variant): Doubled from 64 KB to 128 KB to accommodate the 8-byte structs instead of 4-byte pointers [S2, unofficial].
+ 
+ **Edge Cases and Pitfalls:**
+-- **Cache Performance:** Doubling map size to store auxiliary data (like the 'boat bit') may reduce cache hit rates for pointer traversal. However, in arbitrary traversal patterns, cache hits are already slim, making the impact negligible [S2, unofficial].
+-- **Memory Access:** Avoiding repeated memory access for static per-frame data (e.g., boat position) by embedding flags in the map structure reduces rendering loop overhead [S2, unofficial].
++- **Cache Performance:** Doubling map size to store auxiliary data may reduce cache hit rates for pointer traversal, but arbitrary traversal directions already make cache hits slim, so the impact is negligible [S2, unofficial].
++- **Memory Access:** Embedding static per-frame data (e.g., boat position) directly in the map structure avoids repeated memory access during the rendering loop [S2, unofficial].
+ 
+ **Pseudocode:**
+ ```python
++def zeros(shape):
++    """Initialize a multi-dimensional array with zeros."""
++    if len(shape) == 1:
++        return [0.0] * shape[0]
++    return [zeros(shape[1:]) for _ in range(shape[0])]
++
+ def build_rnr_map(pixels, U, V, D):
+-    """
+-    Build an RNR-Map from registered pixel features.
+-    
+-    Args:
+-        pixels: List of tuples (u_norm, v_norm, feature_vector)
+-        U: Grid height
+-        V: Grid width
+-        D: Latent dimension
+-        
+-    Returns:
+-        m: Tensor of shape (U, V, D)
+-    """
+-    # Initialize map with zeros
+     m = zeros((U, V, D))
+-    # Initialize count map to track number of pixels per cell
+     counts = zeros((U, V))
+-    
+     for u_norm, v_norm, f in pixels:
+-        # Normalize and map to grid indices
+-        # Note: Exact normalization formula from source is implicit; 
+-        # assuming standard integer conversion from normalized coordinates
+         u = int(u_norm * U)
+         v = int(v_norm * V)
+-        
+-        # Clamp to bounds to handle edge cases
+         u = max(0, min(u, U - 1))
+         v = max(0, min(v, V - 1))
+-        
+-        # Aggregate features
+-        m[u, v] += f
+-        counts[u, v] += 1
+-        
+-    # Average aggregated features
++        for d in range(D):
++            m[u][v][d] += f[d]
++        counts[u][v] += 1
+     for u in range(U):
+         for v in range(V):
+-            if counts[u, v] > 0:
+-                m[u, v] /= counts[u, v]
+-                
++            if counts[u][v] > 0:
++                for d in range(D):
++                    m[u][v][d] /= counts[u][v]
+     return m
+ 
+ def update_boat_flags(map_structs, boat_tiles):
+-    """
+-    Update the 'boat bit' in the map structs for the current frame.
+-    
+-    Args:
+-        map_structs: Array of 8-byte structs (4-byte pointer, 4-byte data)
+-        boat_tiles: List of tile indices occupied by the boat
+-    """
+     for tile_idx in boat_tiles:
+-        # Set the boat bit in the additional data field
+-        # Assuming bit 0 is the boat bit
+         map_structs[tile_idx].data |= 1
+ ```
+@@ -100,12 +72,12 @@
+ 
+ ### Map Struct Expansion for Boat Optimization
+-A variant where the map stores 8-byte structs (4-byte tile pointer + 4-byte auxiliary data) instead of 4-byte pointers. The auxiliary data includes a 32-bit 'boat bit' marking tiles the boat occupies. This avoids repeated memory access for boat position data during rendering. The map size is doubled (e.g., 64 KB to 128 KB) to accommodate the larger structs. Cache impact is negligible due to arbitrary traversal patterns [S2, unofficial].
++A variant where the map stores 8-byte structs (4-byte tile pointer + 4-byte auxiliary data) instead of 4-byte pointers [S2, unofficial]. The auxiliary data includes a single 32-bit 'boat bit' marking the four tiles the boat currently touches [S2, unofficial]. Before rendering, the map is updated to set this flag for the occupied tiles [S2, unofficial]. During rendering, if the 'boat bit' is zero, the loop skips grabbing additional boat data, avoiding repeated memory access for static per-frame data [S2, unofficial]. The map size is doubled (e.g., 64 KB to 128 KB) to accommodate the larger structs [S2, unofficial]. Cache impact is negligible due to arbitrary traversal patterns [S2, unofficial].
+ 
+ ## Operating characteristics
+-- **Time Complexity:** Building the map is linear in the number of pixels $O(N)$, where $N$ is the number of input pixels, due to aggregation and averaging [S1].
++- **Time Complexity:** Building the map requires a single pass over the input pixels to aggregate and average features [S1].
+ - **Memory Complexity:** $O(U \times V \times D)$ for the standard RNR-Map [S1]. For the struct variant, memory usage is doubled compared to a pointer-only map [S2, unofficial].
+ - **Performance:** The struct variant reduces rendering loop overhead by embedding static per-frame data (boat position) directly in the map structure, avoiding repeated memory accesses [S2, unofficial].
+-- **Strengths:** Efficient aggregation of visual information into a fixed grid; reduced memory access penalties in specific rendering loops [S1][S2, unofficial].
+-- **Limitations:** Fixed resolution limits detail; doubling map size for auxiliary data increases memory usage [S1][S2, unofficial].
++- **Strengths:** Efficient aggregation of visual information into a fixed grid [S1]. Reduced memory access penalties in specific rendering loops [S2, unofficial].
++- **Limitations:** Fixed resolution limits detail [S1]. Doubling map size for auxiliary data increases memory usage [S2, unofficial].
+ 
+ ## Background

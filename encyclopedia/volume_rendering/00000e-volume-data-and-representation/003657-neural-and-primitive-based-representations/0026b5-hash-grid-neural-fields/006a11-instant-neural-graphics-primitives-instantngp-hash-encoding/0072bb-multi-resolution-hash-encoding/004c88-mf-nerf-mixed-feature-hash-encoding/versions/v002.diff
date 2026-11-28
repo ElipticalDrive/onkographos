@@ -1,0 +1,220 @@
+--- v001.md
++++ v002.md
+@@ -8,33 +8,92 @@
+ ## How it works
+ **Inputs and Outputs:**
+-*   **Input:** A sampled 3D point $x$, a viewing direction $d$, and a set of posed images for training.
+-*   **Output:** Density and color values for the point $x$.
++*   **Input:** A sampled 3D point $x$, a viewing direction $d$, and a set of posed images for training [S1, unofficial].
++*   **Output:** Density and color values for the point $x$ [S1, unofficial].
+ 
+ **Data Structures:**
+-*   **Hash Tables:** $N$ hash tables, where $N \in [1, L]$. Each table has a maximum size $T \in [2^{14}, 2^{24}]$. The actual size is $\min(T, N_i \cdot W / 3)$, where $i \in [1, N]$ and $W$ is the world volume size [S1, unofficial].
++*   **Hash Tables:** $N$ hash tables, where $N \in [1, L]$ [S1, unofficial]. Each table has a maximum size $T \in [2^{14}, 2^{24}]$ [S1, unofficial]. The actual size is $\min(T, N_i \cdot W / 3)$, where $i \in [1, N]$ and $W$ is the world volume size [S1, unofficial]. Each entry holds an $F$-dimensional feature vector [S1, unofficial].
+ *   **Grids:** $L$ grids $\{G_l\}_{l=1}^L$ with different resolution levels. The resolution ratio $b$ between $G_l$ and $G_{l+1}$ follows the Instant-NGP definition [S1, unofficial].
+-*   **Features:** Each entry in the hash table holds an $F$-dimensional feature vector.
+ *   **Grouping:** Grids are grouped into sets of $L/N$ consecutive grids, each mapped to one hash table. For example, if $L=8$ and $N=2$, grids $G_1..G_4$ map to one table and $G_5..G_8$ to another [S1, unofficial].
+ 
+-**Parameters:**
+-*   $L$: Total number of resolution levels.
+-*   $N$: Number of hash tables ($1 \le N \le L$). If $N=L$, it behaves like standard multi-resolution encoding; if $N=1$, all grids share one table [S1, unofficial].
+-*   $T$: Maximum hash table size.
+-*   $F$: Feature vector dimension.
+-
+-**Steps:**
+-1.  **Identify Indices:** For a sampled point $x$, identify the indices $I_{G_l}$ of the eight voxel corners surrounding $x$ at each grid level $l \in [1, L]$.
+-2.  **Index Transformation:** Transform the indices from lower-level grids to the corresponding indices in the highest-resolution grid of their group. For a grid $G_i$ in a group where $G_j$ is the finest grid, the transformation is:
+-    $$ \text{Index}_{trans}^{G_j}(I_{G_i}) = \lfloor I_{G_i} \times \frac{N_j}{N_i} \rfloor = I_{G_j} $$
+-    where $N_i$ and $N_j$ are the resolutions of grids $G_i$ and $G_j$ respectively [S1, unofficial]. This ensures that grid points at identical spatial positions map to the same hash entry despite having different raw indices in different resolutions.
++**Numbered Steps:**
++1.  **Identify Indices:** For a sampled point $x$, identify the indices $I_{G_l}$ of the eight voxel corners surrounding $x$ at each grid level $l \in [1, L]$ [S1, unofficial].
++2.  **Index Transformation:** Transform the indices from lower-level grids to the corresponding indices in the highest-resolution grid of their group prior to hashing [S1, unofficial].
+ 3.  **Hashing:** Hash the transformed indices using the spatial hash function to find entries in the defined hash table [S1, unofficial].
+-4.  **Feature Retrieval and Interpolation:** Retrieve the $F$-dimensional feature vectors from the hash table entries. Trilinearly interpolate these vectors to produce a feature vector $f_l$ for each level $l$.
+-5.  **Concatenation:** Concatenate the $L$ feature vectors into a single vector $y = [f_1; \dots; f_L]$.
++4.  **Feature Retrieval and Interpolation:** Retrieve the $F$-dimensional feature vectors from the hash table entries. Trilinearly interpolate these vectors to produce a feature vector $f_l$ for each level $l$ [S1, unofficial].
++5.  **Concatenation:** Concatenate the $L$ feature vectors into a single vector $y = [f_1; \dots; f_L]$ [S1, unofficial].
+ 6.  **Rendering:** Feed $y$ and the viewing direction $d$ into the NeRF Renderer to yield density and color [S1, unofficial].
+ 
++**Formulas:**
++*   **Index Transformation:** Maps an index $I_{G_i}$ from grid $G_i$ to the finest grid $G_j$ in the same group:
++    $$ I_{G_j} = \left\lfloor I_{G_i} \times \frac{N_j}{N_i} \right\rfloor $$
++    where $N_i$ and $N_j$ are the resolutions (voxels per axis) of grids $G_i$ and $G_j$ respectively [S1, unofficial].
++
++**Parameters:**
++*   $L$: Total number of resolution levels [S1, unofficial].
++*   $N$: Number of hash tables ($1 \le N \le L$). If $N=L$, it matches standard multi-resolution encoding; if $N=1$, a single hash table is shared by all grids [S1, unofficial].
++*   $T$: Maximum hash table size [S1, unofficial].
++*   $F$: Feature vector dimension [S1, unofficial].
++
++**Edge Cases and Pitfalls:**
++*   **Index Mismatch:** Without index transformation, grid points at identical spatial positions in different grids have distinct indices (e.g., $(2,2)$ in $G_{L-1}$ vs $(4,4)$ in $G_L$). Hashing these directly maps them to different entries despite representing the same location [S1, unofficial].
++*   **Hash Collisions:** As with all hash-based encodings, collisions may occur. The sources do not specify a collision resolution strategy beyond the standard spatial hash function [S1, unofficial].
++*   **Precision and Boundaries:** Not given in the sources.
++
+ **Pseudocode:**
++```python
++import math
+ 
+-```python
+-def mf_nerf_forward(x, d, L, N, T, F, grids, hash_tables, spatial_hash):
++def get_voxel_corners(x, bounds_min, bounds_max, resolution):
++    """Returns 8 corner indices for point x in a grid with given resolution."""
++    voxel_size = (bounds_max - bounds_min) / resolution
++    base_idx = math.floor((x - bounds_min) / voxel_size)
++    corners = []
++    for dx in (0, 1):
++        for dy in (0, 1):
++            for dz in (0, 1):
++                corners.append([base_idx[0] + dx, base_idx[1] + dy, base_idx[2] + dz])
++    return corners
++
++def trilinear_interpolate(features, x, bounds_min, bounds_max, resolution):
++    """Trilinearly interpolates 8 feature vectors based on fractional position."""
++    voxel_size = (bounds_max - bounds_min) / resolution
++    base_idx = math.floor((x - bounds_min) / voxel_size)
++    frac = (x - bounds_min) / voxel_size - base_idx
++    interp = [0.0] * len(features[0])
++    for dx in (0, 1):
++        for dy in (0, 1):
++            for dz in (0, 1):
++                w = (1.0 - frac[0] if dx == 0 else frac[0]) * \
++                    (1.0 - frac[1] if dy == 0 else frac[1]) * \
++                    (1.0 - frac[2] if dz == 0 else frac[2])
++                idx = dx * 4 + dy * 2 + dz
++                for k in range(len(features[0])):
++                    interp[k] += w * features[idx][k]
++    return interp
++
++def concatenate(features_list):
++    """Concatenates a list of feature vectors along the last axis."""
++    result = []
++    for feat in features_list:
++        result.extend(feat)
++    return result
++
++def zeros(dim):
++    """Returns a list of zeros of given dimension."""
++    return [0.0] * dim
++
++def spatial_hash(index, table_size):
++    """Standard spatial hash mapping multi-dimensional index to 1D table index [G]."""
++    h = 0
++    for i in index:
++        h = (h * 31 + i) % table_size
++    return h
++
++def nerf_renderer(features, direction):
++    """Standard NeRF MLP decoder. Returns density and color [G]."""
++    # In practice, this is a learned MLP mapping features and direction to density/color
++    return 0.0, [0.0, 0.0, 0.0]
++
++def mf_nerf_forward(x, d, L, N, T, F, grids, hash_tables, bounds_min, bounds_max):
+     """
+     x: 3D point (float32)
+@@ -44,75 +103,51 @@
+     T: Max hash table size
+     F: Feature dimension
+-    grids: List of L grid objects, each with resolution N_l and bounds
+-    hash_tables: List of N hash tables (dict or array)
+-    spatial_hash: Function mapping integer index to hash table index
++    grids: List of L grid objects, each with resolution N_l
++    hash_tables: List of N hash tables (dicts mapping int -> list of floats)
++    bounds_min, bounds_max: World volume bounds
+     """
+     features_per_level = []
+-    
+-    # Determine group size
+     group_size = L // N
+-    
++
+     for l in range(L):
+-        grid_idx = l
+-        grid = grids[grid_idx]
++        grid = grids[l]
+         N_l = grid.resolution
+-        
+-        # 1. Identify voxel corner indices for point x in grid l
+-        # Assuming grid covers world volume W, and voxel size is W / N_l
+-        # Corner indices are integers in [0, N_l]^3
+-        corner_indices = get_voxel_corners(x, grid.bounds, N_l)
+-        
+-        # 2. Determine which hash table this grid belongs to
+-        # Grids 0..group_size-1 -> hash_table 0
+-        # Grids group_size..2*group_size-1 -> hash_table 1, etc.
++
++        # 1. Identify voxel corner indices
++        corner_indices = get_voxel_corners(x, bounds_min, bounds_max, N_l)
++
++        # 2. Determine hash table and finest grid in group
+         table_idx = l // group_size
+         hash_table = hash_tables[table_idx]
+-        
+-        # Find the finest grid in this group to determine target resolution
+-        # The group contains grids from l_start to l_end
+         l_start = table_idx * group_size
+         l_end = min((table_idx + 1) * group_size, L) - 1
+-        finest_grid_idx = l_end
+-        finest_grid = grids[finest_grid_idx]
++        finest_grid = grids[l_end]
+         N_finest = finest_grid.resolution
+-        
++
+         transformed_corners = []
+         for corner_idx in corner_indices:
+             # 3. Index Transformation
+-            # Map corner_idx from grid l to finest_grid
+-            # Formula: floor(corner_idx * N_finest / N_l)
+-            transformed_idx = floor(corner_idx * N_finest / N_l)
++            transformed_idx = [math.floor(c * N_finest / N_l) for c in corner_idx]
+             transformed_corners.append(transformed_idx)
+-        
++
+         # 4. Hashing and Retrieval
+-        # Hash the transformed indices to get positions in the hash table
+-        # Note: spatial_hash typically maps a multi-dimensional index to a 1D hash
+-        hashed_positions = [spatial_hash(idx, T) for idx in transformed_corners]
+-        
+-        # Retrieve features. If collision or empty, handle appropriately (e.g., zero)
+-        # Assuming hash_table stores F-dimensional vectors
+         retrieved_features = []
+-        for pos in hashed_positions:
+-            feat = hash_table.get(pos, zeros(F))
++        for t_idx in transformed_corners:
++            pos = spatial_hash(t_idx, T)
++            feat = hash_tables[table_idx].get(pos, zeros(F))
+             retrieved_features.append(feat)
+-        
++
+         # 5. Trilinear Interpolation
+-        # Interpolate the 8 retrieved features based on x's position within the voxel
+-        f_l = trilinear_interpolate(retrieved_features, x, grid.bounds, N_l)
++        f_l = trilinear_interpolate(retrieved_features, x, bounds_min, bounds_max, N_l)
+         features_per_level.append(f_l)
+-    
++
+     # 6. Concatenation
+-    y = concatenate(features_per_level, axis=-1)
+-    
++    y = concatenate(features_per_level)
++
+     # 7. Rendering
+-    # NeRF_Renderer takes concatenated features and viewing direction
+     density, color = nerf_renderer(y, d)
+-    
++
+     return density, color
+ ```
+-
+-**Edge Cases and Pitfalls:**
+-*   **Index Mismatch:** Without index transformation, grid points at identical spatial positions in different grids have distinct indices (e.g., $(2,2)$ in $G_{L-1}$ vs $(4,4)$ in $G_L$). Hashing these directly maps them to different entries despite representing the same location [S1, unofficial].
+-*   **Hash Collisions:** As with all hash-based encodings, collisions may occur. The sources do not specify a collision resolution strategy beyond the standard spatial hash function [S1, unofficial].
+ 
+ ## Subtopics
+@@ -126,5 +161,5 @@
+ *   **Memory Efficiency:** MF-NeRF achieves comparable or better reconstruction quality with significantly fewer features than Instant-NGP. For example, MF-NeRF-1 with 16.78M features achieves a PSNR of 33.13 on the Synthetic NeRF dataset, compared to Instant-NGP with 126.97M features achieving 33.00 PSNR [S1, unofficial].
+ *   **Training Time:** MF-NeRF generally exhibits faster training times due to reduced memory footprint and feature size. MF-NeRF-1 with 16.78M features trains in 12.49 minutes, while Instant-NGP with 126.97M features takes 17.43 minutes [S1, unofficial].
+-*   **Scalability:** The method scales by adjusting $N$ and $T$. A smaller $N$ (more sharing) reduces memory but may limit the ability to learn distinct features per resolution level. A larger $T$ reduces collisions but increases memory usage [S1, unofficial].
++*   **Scalability:** The method scales by adjusting $N$ and $T$. A smaller $N$ (more sharing) reduces memory but may limit the ability to learn distinct features per resolution level [S1, unofficial]. Increasing $T$ increases memory usage [S1, unofficial].
+ *   **Strengths:** Significant reduction in memory usage and training time while preserving reconstruction quality. Effective for scenes where overlapping grids exhibit analogous feature distributions [S1, unofficial].
+ *   **Limitations:** The assumption that overlapping grids have analogous feature distributions may not hold for all scenes, potentially leading to artifacts if the shared features are insufficiently expressive [S1, unofficial].

@@ -1,0 +1,173 @@
+# TensoIR
+
+Also called: TensoRF-based inverse rendering, Tensorial Inverse Rendering
+
+## Overview
+TensoIR is a differentiable inverse rendering method that reconstructs geometry, material properties (albedo, roughness), and lighting from multi-view images by combining radiance field rendering with physically-based shading. It solves the problem of jointly optimizing scene appearance and illumination without explicit geometry inputs, leveraging the efficiency of tensor factorization. It differs from its parent [TensoRF Training Loop](8644-tensorf-training-loop.md) by introducing a physically-based rendering path that estimates surface points from volume density and computes indirect lighting via secondary ray sampling, while maintaining the low-rank tensor structure for memory efficiency.
+
+## How it works
+**Inputs and Outputs:**
+*   **Inputs:** Multi-view images of a static scene, camera poses, and optionally environmental maps for relighting.
+*   **Outputs:** Density field, appearance field, normal field, BRDF parameters (albedo, roughness), and estimated lighting.
+
+**Data Structures:**
+The method uses tensor factorization for the radiance field.
+*   **Density Tensor:** Uses 48 tensor components, distributed as 16 components per dimension ($16 \times 16 \times 16$).
+*   **Appearance Tensor:** Uses 144 tensor components, distributed as 48 components per dimension ($48 \times 48 \times 48$).
+*   **Spatial Resolution:** Typically $300^3$. For complex thin structures (e.g., Ficus), $400^3$ is used.
+*   **MLP Decoder:** A two-layer MLP with 128 channels in each hidden layer and ReLU activation.
+    *   **Radiance Net:** Inputs are appearance feature and viewing direction.
+    *   **Normal Net & BRDF Net:** Inputs are intrinsic feature and 3D location.
+    *   **Encoding:** Frequency encoding is applied to directions and locations.
+
+**Algorithm Steps:**
+
+1.  **AlphaMask Generation (Pre-training):**
+    *   Run radiance field rendering only (no physically-based rendering) for the first 10,000 iterations.
+    *   Generate an alpha mask to identify empty space. This reduces GPU memory usage, allowing larger batch sizes later. This step takes approximately 5 minutes.
+
+2.  **Ray Sampling:**
+    *   Sample camera rays. Batch size is 4096 rays (enabled by the alpha mask).
+    *   For a grid resolution of $300^3$, sample approximately 1000 points per ray.
+
+3.  **Radiance Field Rendering:**
+    *   Compute volume density $\sigma_j$ and view-dependent radiance $c_j$ for each sample point $j$ along the ray $\mathbf{r}(t) = \mathbf{o} + t\mathbf{d}$.
+    *   Calculate transmittance $T_j$ and rendering weights $w_j$:
+        $$ T_j = \exp\left(-\sum_{q=1}^{j-1} \sigma_q \delta_q\right) $$
+        $$ w_j = T_j (1 - \exp(-\sigma_j \delta_j)) $$
+    *   Compute radiance field color $C_{\text{RF}}$:
+        $$ C_{\text{RF}}(\mathbf{o}, \mathbf{d}) = \sum_{j=1}^N w_j c_j $$
+
+4.  **Surface Point Estimation:**
+    *   Estimate the expected surface intersection point $\hat{\mathbf{x}}$ using the weighted sum of sample positions:
+        $$ \hat{\mathbf{x}} = \sum_{j=1}^N w_j \mathbf{r}(t_j) $$
+
+5.  **Physically-Based Rendering (PBR):**
+    *   At surface point $\hat{\mathbf{x}}$, compute shading color $C_{\text{PB}}$ using the rendering equation:
+        $$ C_{\text{PB}}(\hat{\mathbf{x}}, \mathbf{d}) = \int_{\Omega} L_i(\hat{\mathbf{x}}, \boldsymbol{\omega}_i) f_r(\hat{\mathbf{x}}, \boldsymbol{\omega}_i, \mathbf{d}, \boldsymbol{\beta}) (\boldsymbol{\omega}_i \cdot \mathbf{n}) d\boldsymbol{\omega}_i $$
+    *   Where $L_i$ is incident illumination, $f_r$ is the BRDF, $\boldsymbol{\beta}$ are material parameters, and $\mathbf{n}$ is the normal.
+    *   **Visibility and Indirect Lighting Calculation:**
+        *   Sample 512 secondary rays from $\hat{\mathbf{x}}$.
+        *   Filter rays: Only keep those in the upper hemisphere relative to the surface normal $\mathbf{n}$ (256 rays).
+        *   Points per secondary ray: 96.
+        *   Direction generation: Stratified sampling by dividing the environmental map into equal 2D area grids and picking a random direction per grid.
+        *   Gradients for visibility and indirect lighting are detached to save memory.
+
+6.  **Relighting Sampling (Optional):**
+    *   If ground-truth environmental maps are available for relighting, use lighting-intensity importance sampling instead of stratified sampling to prioritize directions with stronger lighting.
+
+7.  **Loss Computation:**
+    *   **Radiance Field Loss:** Compare $C_{\text{RF}}$ with ground truth. Weight $\alpha_{RF} = 1.0$.
+    *   **Physically-Based Loss:** Compare $C_{\text{PB}}$ with ground truth. Weight $\alpha_{PB} = 0.2$.
+    *   **BRDF Smoothness Loss ($\ell_\beta$):** Encourage spatial coherence of material properties.
+        $$ \ell_\beta = \sum_{j, \mathbf{x}=\mathbf{r}(t_j)} w_j \left\| \frac{\beta_{\mathbf{x}} - \beta_{\mathbf{x}+\xi}}{\max(\beta_{\mathbf{x}}, \beta_{\mathbf{x}+\xi})} \right\|_2^2 $$
+        Where $\xi$ is a random translation vector from a normal distribution (mean 0, variance 0.01).
+    *   **Normal Back-Facing Loss ($\ell_d$):** Penalize normals facing away from the camera.
+        $$ \ell_d = \sum_j w_j \max(0, \mathbf{n}_j \cdot \mathbf{d}) $$
+        Weight $\alpha_n \in [4 \times 10^{-4}, 6 \times 10^{-3}]$.
+    *   **BRDF Smoothness Weight:** 0.001.
+
+8.  **Optimization:**
+    *   Use Adam optimizer.
+    *   Initial learning rate: 0.02 for tensor factors, 0.001 for MLPs.
+    *   Total iterations: 80,000.
+
+**Pseudocode:**
+
+> **Unverified code.** The code below did not pass a test run against a reference implementation, or no test fits it, so it may contain errors.
+
+```python
+def tensoir_training(scene_data, num_iterations=80000):
+    # Initialization
+    density_tensor = initialize_tensor(shape=(16, 16, 16), resolution=128)
+    appearance_tensor = initialize_tensor(shape=(48, 48, 48), resolution=128)
+    mlp_decoder = TwoLayerMLP(hidden_channels=128)
+    alpha_mask = None
+    
+    # Phase 1: AlphaMask Generation (First 10k iterations)
+    for step in range(10000):
+        rays = sample_camera_rays(batch_size=4096)
+        # Only radiance field rendering, no PBR
+        colors_rf = render_radiance_field(rays, density_tensor, appearance_tensor, mlp_decoder)
+        loss = compute_mse_loss(colors_rf, scene_data.gt_images)
+        optimize_step(loss, density_tensor, appearance_tensor, mlp_decoder)
+        
+        # Update alpha mask based on density/transmittance
+        if step % 1000 == 0:
+            alpha_mask = generate_alpha_mask(density_tensor, resolution=128)
+
+    # Phase 2: Coarse-to-Fine Upsampling and PBR Training
+    upsampling_steps = [10000, 20000, 30000, 40000]
+    final_resolution = 300  # or 400 for complex scenes
+    
+    for step in range(10000, num_iterations):
+        # Coarse-to-fine upsampling
+        if step in upsampling_steps:
+            current_res = interpolate_resolution(density_tensor, appearance_tensor, step, final_resolution)
+            # Linear upsample vectors, bilinear upsample matrices
+            # Voxels interpolated linearly in logarithmic space
+        
+        # Ray Sampling
+        rays = sample_camera_rays(batch_size=4096, alpha_mask=alpha_mask)
+        points_per_ray = estimate_points_per_ray(final_resolution)
+        
+        # Radiance Field Rendering
+        samples = sample_points_along_rays(rays, points_per_ray)
+        sigma, c = query_radiance_field(samples, density_tensor, appearance_tensor, mlp_decoder)
+        T, w = compute_transmittance_and_weights(sigma, samples.delta)
+        colors_rf = sum(w * c)
+        
+        # Surface Point Estimation
+        surface_points = sum(w * samples.positions)
+        
+        # Physically-Based Rendering
+        normals, brdf_params = query_material_properties(surface_points, appearance_tensor, mlp_decoder)
+        
+        # Secondary Ray Sampling for Indirect Lighting
+        secondary_rays = sample_secondary_rays(surface_points, normals, num_rays=512)
+        # Filter to upper hemisphere
+        valid_secondary_rays = filter_upper_hemisphere(secondary_rays, normals)
+        
+        # Detach gradients for memory efficiency
+        with torch.no_grad():
+            visibility = compute_visibility(valid_secondary_rays, density_tensor)
+            indirect_lighting = compute_indirect_lighting(valid_secondary_rays, density_tensor, appearance_tensor)
+        
+        # Re-attach gradients for PBR color calculation if needed, or compute directly
+        # Note: The paper detaches gradients for visibility/indirect lighting computation steps
+        # but uses the results in the PBR integral.
+        
+        colors_pb = compute_pbr_color(surface_points, normals, brdf_params, visibility, indirect_lighting)
+        
+        # Loss Computation
+        loss_rf = compute_mse_loss(colors_rf, scene_data.gt_images) * 1.0
+        loss_pb = compute_mse_loss(colors_pb, scene_data.gt_images) * 0.2
+        
+        # Regularization
+        loss_beta = compute_brdf_smoothness_loss(brdf_params, w) * 0.001
+        loss_d = compute_normal_backfacing_loss(normals, rays.direction, w) * alpha_n
+        
+        total_loss = loss_rf + loss_pb + loss_beta + loss_d
+        optimize_step(total_loss, density_tensor, appearance_tensor, mlp_decoder)
+```
+
+## Subtopics
+
+### [TensoIR Incident Illumination Calculation](22914-tensoir-incident-illumination-calculation.md)
+This method computes the incident illumination $L_i$ at a surface point $\hat{\mathbf{x}}$ for a specific direction $\boldsymbol{\omega}_i$ by combining direct lighting with physically-based indirect effects. It solves the problem of accurately modeling secondary shading (bounces) in inverse rendering without the prohibitive computational cost of traditional neural radiance field (NeRF) methods. It differs from its parent [TensoIR](22896-tensoir.md) by explicitly separating the visibility and indirect components using the radiance field's own transmittance and color outputs, enabling efficient online Monte Carlo integration via tensor factorization.
+
+### TensoIR Surface Point Estimation
+This method estimates the 3D surface point $\hat{\mathbf{x}}$ for physically-based rendering by calculating the rendering weight $w_j$ for each sample point $j$ using the transmittance and density, and then computing the expected surface intersection point as the weighted sum of sample positions. It differs from its siblings by providing a differentiable approximation of surface geometry directly from the volume density, which is then used as the anchor for physically-based shading calculations.
+
+## Operating characteristics
+*   **Time Complexity:** Training takes approximately 5 hours on an RTX 2080 Ti (11 GB) for 80k iterations. The first 10k iterations are fast (~5 minutes) as they only involve radiance field rendering.
+*   **Memory Complexity:** The use of tensor factorization (48 components for density, 144 for appearance) significantly reduces memory compared to dense voxel grids. The alpha mask generation allows increasing the batch size from 1024 to 4096 rays, improving throughput.
+*   **Performance:** On synthetic datasets, TensoIR achieves higher PSNR and SSIM for novel view synthesis and relighting compared to baselines like NeRFactor and InvRender. For example, on the Ficus scene, it achieves a PSNR of 27.130 for novel view synthesis and 24.296 for relighting, outperforming NeRFactor (21.664 and 20.684 respectively).
+*   **Strengths:** Efficient memory usage due to tensor factorization; accurate material and lighting estimation; ability to handle complex thin structures with higher resolution ($400^3$).
+*   **Limitations:** Requires careful tuning of loss weights (e.g., $\alpha_n$) to balance normal accuracy and high-frequency detail; large $\alpha_n$ can damage high-frequency detail prediction.
+
+## Background
+TensoIR was introduced in the paper "TensoIR: Tensorial Inverse Rendering" [S1]. It builds upon the TensoRF framework, which uses tensor decomposition for efficient radiance field representation. The method was developed to address the limitations of previous inverse rendering methods that either lacked efficiency or struggled with accurate material and lighting estimation. It is used in computer vision and graphics for tasks such as novel view synthesis, relighting, and 3D reconstruction from multi-view images.
+
+## Sources
+[S1] TensoIR: Tensorial Inverse Rendering, https://doi.org/10.1109/cvpr52729.2023.00024, fetched 2026-10-26

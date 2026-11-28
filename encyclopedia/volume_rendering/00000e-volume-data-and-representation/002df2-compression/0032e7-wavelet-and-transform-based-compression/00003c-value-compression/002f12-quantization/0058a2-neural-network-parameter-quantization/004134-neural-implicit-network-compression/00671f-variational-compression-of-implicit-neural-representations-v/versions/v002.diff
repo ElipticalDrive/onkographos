@@ -1,0 +1,151 @@
+--- v001.md
++++ v002.md
+@@ -13,5 +13,5 @@
+ **Data Structures:**
+ *   **Shared INR Weights ($\theta$):** A large matrix of weights shared across all data items, typically implemented as a SIREN MLP with 15 layers of 512 units [S1, unofficial].
+-*   **Latent Representation ($\phi$):** A compact, data-item-specific parameter vector. For VC-INR, $\phi$ is represented as a sequence of low-rank matrices $[U^{(1)}, V^{(1)}, \dots, U^{(L)}, V^{(L)}]$ for each layer $l$, predicted from a compact representation by reshaping a long vector [S1, unofficial].
++*   **Latent Representation ($\phi$):** A compact, data-item-specific parameter vector in $\mathbb{R}^D$ [S1, unofficial]. For VC-INR, $\phi$ is represented as a sequence of low-rank matrices $[U^{(1)}, V^{(1)}, \dots, U^{(N)}, V^{(N)}]$ for each layer $l$, predicted from a compact representation by reshaping a long vector [S1, unofficial].
+ *   **Gating Mask ($G_{low}^{(l)}$):** A soft gating matrix for layer $l$, defined as $G_{low}^{(l)} = \sigma(U^{(l)} (V^{(l)})^\top)$, where $\sigma$ is the sigmoid function, and $U^{(l)}, V^{(l)} \in \mathbb{R}^{m \times d}$ with $d \ll m$ [S1, unofficial].
+ 
+@@ -26,5 +26,4 @@
+ 
+ **Algorithm Steps:**
+-
+ 1.  **Meta-Learning Adaptation:** For a given data point $x$, obtain a compact latent representation $\phi^*$ by adapting the shared INR using Meta-Learning (e.g., MetaSGD) in a handful of optimization steps [S1, unofficial]. This avoids the high-dimensional parameter vectors of naive optimization [S1, unofficial].
+ 2.  **Stabilization:** Apply LayerNorm to the modulation $\phi$ to stabilize gradients: $\phi \leftarrow \text{LayerNorm}(\phi)$ [S1, unofficial]. Use residual connections and increased layer widths in the predictor network [S1, unofficial].
+@@ -43,6 +42,9 @@
+     where $G_{low}^{(l)} = \sigma(U^{(l)} (V^{(l)})^\top)$ is derived from $\hat{\phi}$, $\odot$ is element-wise multiplication, and $W^{(l)}, b^{(l)}$ are the shared weights [S1, unofficial].
+ 
++**Compression Loss:**
++$$ \mathcal{L}_{compress} = -\log_2[p_{\hat{z}}(Q(g_a(\phi; \pi_a)))] + \lambda \mathcal{L}_{MSE}(g_s(\hat{z}; \pi_s), \phi) $$
++where $p_{\hat{z}}$ is the entropy model, $\mathcal{L}_{MSE}$ is mean squared error, and $\pi_a, \pi_s$ are parameters [S1, unofficial].
++
+ **Pseudocode:**
+-
+ ```python
+ import numpy as np
+@@ -60,60 +62,53 @@
+     return np.sin(omega0 * x)
+ 
+-def vc_inr_compress(data_point_x, shared_inr_weights, analysis_net, synthesis_net, lambda_dist):
+-    """
+-    Compress a single data point using VC-INR.
+-    Note: This pseudocode represents the inference/encoding pipeline.
+-    Training involves optimizing pi_a and pi_s with the loss function below.
+-    """
++def meta_learning_adaptation(data_point_x, shared_inr_weights, num_inner_steps=3, lr=0.01):
++    """Obtains phi* in a handful of optimization steps using MetaSGD [S1, unofficial]."""
++    phi = np.zeros_like(shared_inr_weights)
++    for _ in range(num_inner_steps):
++        # Placeholder for actual gradient computation on INR reconstruction loss
++        grad = np.zeros_like(phi) 
++        phi = phi - lr * grad
++    return phi
++
++def entropy_encode(z_hat):
++    """Losslessly compresses discrete code z_hat using arithmetic or Huffman coding [S1, unofficial]."""
++    return bytes(z_hat.flatten())
++
++def entropy_decode(bit_stream, shape):
++    """Decodes bit stream back to discrete code z_hat [S1, unofficial]."""
++    return np.frombuffer(bit_stream, dtype=np.float32).reshape(shape)
++
++def entropy_model_density(z_tilde):
++    """Non-parametric piecewise linear density model for uniform noise approximation [S1, unofficial]."""
++    return np.ones_like(z_tilde) / 2.0
++
++def vc_inr_compress(data_point_x, shared_inr_weights, analysis_net, num_layers, m, d):
+     # Step 1: Meta-Learning Adaptation
+-    # In practice, this is done during training. 
+-    # For inference, phi* is assumed to be pre-computed or obtained via fast adaptation.
+     phi_star = meta_learning_adaptation(data_point_x, shared_inr_weights)
+-    
+     # Step 2: Stabilization
+     phi_normalized = layer_norm(phi_star)
+-    
+     # Step 3: Analysis Transform
+     z = analysis_net(phi_normalized)
+-    
+     # Step 4: Quantization
+     z_hat = np.round(z)
+-    
+-    # Step 5: Entropy Coding (Abstracted)
++    # Step 5: Entropy Coding
+     bit_stream = entropy_encode(z_hat)
+-    
+     return bit_stream
+ 
+-def vc_inr_decompress(bit_stream, shared_inr_weights, synthesis_net, omega0):
+-    """
+-    Decompress a bit stream using VC-INR.
+-    """
++def vc_inr_decompress(bit_stream, shared_inr_weights, synthesis_net, omega0, num_layers, m, d):
+     # Step 5 (Decode): Entropy Decoding
+-    z_hat = entropy_decode(bit_stream)
+-    
++    z_hat = entropy_decode(bit_stream, shape=(1, -1))
+     # Step 6: Synthesis Transform
+     phi_hat = synthesis_net(z_hat)
+-    
+     # Step 7: INR Reconstruction
+-    # Reconstruct the gating masks from phi_hat
+-    # phi_hat contains flattened U and V matrices for each layer
+     layers = []
+     current_idx = 0
+     for l in range(num_layers):
+-        # Reshape phi_hat to get U(l) and V(l)
+-        # Assuming phi_hat is structured as [U(1), V(1), ..., U(L), V(L)]
+         U_l = phi_hat[:, current_idx : current_idx + m*d].reshape(-1, m, d)
+         current_idx += m*d
+         V_l = phi_hat[:, current_idx : current_idx + m*d].reshape(-1, m, d)
+         current_idx += m*d
+-        
+-        # Compute Gating Mask
+-        G_low = sigmoid(U_l @ V_l.T) # Element-wise multiplication with W later
+-        
++        G_low = sigmoid(U_l @ V_l.T)
+         layers.append((G_low, shared_inr_weights[l]))
+-        
+-    # Forward pass through INR with gating
+-    # This is a simplified representation; actual implementation requires 
+-    # handling of coordinate inputs and layer-by-layer computation.
+     def reconstruct_signal(coordinates):
+         c = coordinates
+@@ -121,36 +116,16 @@
+             G_low, W_l = layers[l]
+             b_l = shared_inr_weights[l].bias
+-            # Apply gating and activation
+-            # Note: In the paper, G_low is applied element-wise to W_l * c
+-            # Assuming W_l is (m, m) and G_low is (m, m)
+             pre_act = W_l @ c + b_l
+-            gated_act = G_low * pre_act # Element-wise multiplication
++            gated_act = G_low * pre_act
+             c = sinusoidal_activation(gated_act, omega0)
+         return c
+-
+     return reconstruct_signal
+ 
+ def compression_loss(phi, analysis_net, synthesis_net, shared_inr_weights, data_point_x, lambda_dist):
+-    """
+-    Compute the compression loss for training.
+-    """
+-    # Analysis
+     z = analysis_net(phi)
+-    
+-    # Quantization approximation (uniform noise)
+     z_tilde = z + np.random.uniform(-0.5, 0.5, size=z.shape)
+-    
+-    # Entropy rate (using the density model p_z_tilde)
+-    # In practice, this is computed using the piecewise linear density model
+     rate = -np.log2(entropy_model_density(z_tilde))
+-    
+-    # Synthesis
+     phi_hat = synthesis_net(np.round(z))
+-    
+-    # Distortion: MSE between reconstructed phi and original phi
+-    # Or directly on the data signal if L_distortion is modified
+     distortion = np.mean((phi_hat - phi) ** 2)
+-    
+-    # Total Loss
+     loss = rate + lambda_dist * distortion
+     return loss

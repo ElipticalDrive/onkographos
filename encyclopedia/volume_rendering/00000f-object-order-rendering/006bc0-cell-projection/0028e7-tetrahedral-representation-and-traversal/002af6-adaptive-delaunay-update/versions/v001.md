@@ -1,0 +1,65 @@
+# Adaptive Delaunay Update
+
+Also called: Delaunay Update Frequency
+
+## Overview
+Adaptive Delaunay Update is a periodic recomputation strategy for the topological structure of a tetrahedral mesh during the training of volumetric representations. It addresses the computational bottleneck of recalculating Delaunay triangulations after every optimization step, which is necessary when primitive locations (such as circumcenters) change. It sets itself apart from continuous topological updates by trading immediate topological accuracy for significant GPU acceleration speed, balancing rendering fidelity with training throughput [S1, unofficial].
+
+## How it works
+**Inputs and Outputs:**
+*   **Input:** Current vertex positions (e.g., circumcenters of tetrahedra), current Delaunay topology, optimization iteration counter.
+*   **Output:** Updated Delaunay triangulation (connectivity) and vertex attributes.
+
+**Data Structures:**
+*   **Vertices:** Array of 3D coordinates ($\mathbb{R}^3$).
+*   **Topology:** List of tetrahedra, each defined by 4 vertex indices.
+*   **Iteration Counter:** Integer tracking the number of optimization steps.
+
+**Parameters:**
+*   **Update Frequency ($F$):** The number of iterations between full Delaunay recomputations. Typical value: $F = 10$ [S1, unofficial].
+
+**Steps:**
+1.  **Check Update Condition:** If the current iteration count $I$ is divisible by $F$ ($I \mod F == 0$), proceed to Step 2. Otherwise, skip to Step 4.
+2.  **Compute New Vertex Positions:** Update vertex locations based on the current gradient descent step. In the context of Radiance Meshes, these vertices often correspond to circumcenters of the tetrahedral cells [S1, unofficial].
+3.  **Recompute Delaunay Triangulation:**
+    *   Input the new vertex positions into a Delaunay triangulation algorithm.
+    *   Generate the new set of tetrahedra such that no vertex lies inside the circumsphere of any tetrahedron.
+    *   This step is computationally expensive. On a scene with 1.2 million tetrahedra, this takes approximately 92 ms [S1, unofficial].
+4.  **Render/Query:** Perform volume rendering or attribute queries using the *current* topology and vertex positions. Note that during the $F-1$ iterations between updates, the topology remains static while vertex positions may drift, potentially causing slight topological inaccuracies [S1, unofficial].
+5.  **Increment Counter:** Increase iteration count $I$ by 1.
+
+**Edge Cases and Pitfalls:**
+*   **Topological Drift:** Between updates, the geometric positions of vertices may violate the Delaunay condition for the existing topology. This can lead to incorrect ray-tetrahedron intersection tests or incorrect attribute interpolation if the renderer assumes strict Delaunay validity [S1, unofficial].
+*   **Precision:** The circumcenter calculation and subsequent Delaunay check are sensitive to floating-point precision. Degenerate tetrahedra (zero volume) may arise if vertices become coplanar or coincident during optimization [G].
+*   **Performance Spike:** The update step introduces a periodic latency spike. The total time per iteration is not constant; it is the sum of rendering/query/backprop times plus the Delaunay cost only on update steps [S1, unofficial].
+
+## Subtopics
+
+### [Radiance Meshes](4929-radiance-meshes.md)
+Radiance Meshes represent radiance fields using constant density tetrahedral cells produced via Delaunay tetrahedralization. Unlike Voronoi-based methods (e.g., RadFoam) that require complex polyhedral tessellation, or splatting methods (e.g., 3DGS) that rely on approximate sorting, Radiance Meshes use simple triangles native to hardware rasterizers to enable exact, fast volume rendering. It solves the trade-off between optimization dynamics and rendering speed by decoupling topology (Delaunay mesh) from attribute parameterization (Instant-NGP).
+
+## Operating characteristics
+**Time and Memory Complexity:**
+*   **Memory:** Linear in the number of tetrahedra $N$ for storing vertices and connectivity.
+*   **Time:** Rendering and querying are fast (19 ms and 13 ms respectively for 1.2M tetrahedra) [S1, unofficial]. Backpropagation is 143 ms [S1, unofficial]. Delaunay recomputation is the dominant cost at 92 ms per update [S1, unofficial].
+
+**Measured Performance:**
+*   On a scene with 1.2 million tetrahedra:
+    *   Rendering: 19 ms
+    *   Instant-NGP Query: 13 ms
+    *   Backwards Pass: 143 ms
+    *   Delaunay Triangulation: 92 ms [S1, unofficial]
+
+**Strengths and Limitations:**
+*   **Strengths:** Significantly reduces training time by avoiding expensive Delaunay computations at every step. Maintains high rendering quality by ensuring topological correctness periodically.
+*   **Limitations:** Introduces topological inconsistency between updates. The periodic 92 ms spike can affect real-time training feedback loops.
+
+**When to Use:**
+*   Use when training volumetric representations with dynamic tetrahedral meshes where full Delaunay updates are too slow for per-step optimization.
+*   Do not use if strict topological validity is required at every single iteration for correctness guarantees.
+
+## Background
+The method originates from the Radiance Meshes framework for volumetric reconstruction [S1, unofficial]. It was developed to address the computational cost of GPU-accelerated Delaunay triangulation during the optimization of 3D primitives. The approach leverages the observation that frequent topological updates are not strictly necessary for high-quality reconstruction, allowing for a fixed update frequency.
+
+## Sources
+[S1] Radiance Meshes for Volumetric Reconstruction, https://arxiv.org/abs/2512.04076v1, fetched 2026-10-26 (unofficial)

@@ -1,0 +1,140 @@
+# HashDAG Color Lookup
+
+
+## Overview
+HashDAG Color Lookup is a GPU kernel that retrieves the color for a pixel by traversing the DAG path and looking up the color in a separate color DAG [S1, unofficial]. It builds on [BasicDAGUncompressedColors](6741-basicdaguncompressedcolors.md) by storing uncompressed color data for DAG leaves in a flat array indexed by leaf count [S1, unofficial].
+
+## How it works
+**Inputs and Outputs:**
+- `pathsSurface`: Input texture containing the traversal paths for each pixel.
+- `colorsSurface`: Output texture where the final color is written.
+- `traceParams`: Configuration object containing `pathsSurface`, `colorsSurface`, `toolInfo`, `debugColors` (boolean flag), and `debugColorsIndexLevel` (integer).
+- Implicit inputs: The color DAG structure and the flat color array defined by the parent [BasicDAGUncompressedColors](6741-basicdaguncompressedcolors.md).
+
+**Data Structures:**
+- `ColorLeaf`: Struct containing a `StaticArray<uint32> colors`, where each element stores a color value [S1, unofficial].
+- `pathsSurface`: Stores the path from root to leaf for each ray/pixel.
+
+**Parameters:**
+- `leaf_level`: The depth at which leaves are considered final.
+- `color_tree_levels`: The depth up to which the color tree is explicitly traversed before indexing into the flat array.
+- Default colors: Background color `(187, 242, 250)` (RGB) or equivalent; Error color `0xFF00FF` (Magenta).
+
+**Steps:**
+1. Calculate pixel coordinates $(x, y)$. If outside image bounds, return.
+2. Load the path from `pathsSurface` at $(x, y)$. If the path is null, set the output color to the default background color $(187, 242, 250)$ and return.
+3. Initialize traversal variables:
+   - `level = 0`
+   - `nodeIndex = root`
+   - `colorNodeIndex = 0`
+   - `colorLeaf = default`
+4. Loop while `level < leaf_level`:
+   a. Increment `level`.
+   b. Get the current node and its `childMask`.
+   c. Determine the `childIndex` from the path for the current level.
+   d. If the child bit is not set in `childMask` (child does not exist):
+      - Set the output color to Magenta (`0xFF00FF`) and return.
+   e. If `level - 1 < color_tree_levels`:
+      - Update `colorNodeIndex` to point to the child node in the color tree.
+      - If `level - 1 == color_tree_levels - 1` (final color tree level), retrieve the `colorLeaf` from the color tree structure.
+   f. Handle debug colors if `debugColors` is true:
+      - Depending on `debugColorsIndexLevel`, return specific debug values such as Index, Position, ColorTree, ColorBits, MinColor, MaxColor, or Weight.
+   g. If `level == leaf_level`:
+      - Count the number of preceding leaves (`nof_leaves`) to determine the index in the flat color array.
+   h. Update `nodeIndex` to the child node for the next iteration.
+5. After the loop (at leaf level):
+   a. If `colorLeaf` is invalid or the calculated index is out of range:
+      - Set the output color to an invalid color indicator and return.
+   b. Get the compressed color from `colorLeaf` using `nof_leaves` as the index into the flat array.
+   c. Extract the final color based on debug mode or use the default color.
+   d. Write the final color to `colorsSurface` at $(x, y)$.
+
+**Pseudocode:**
+> **Unverified code.** The code below did not pass a test run against a reference implementation, or no test fits it, so it may contain errors.
+
+```python
+def hash_dag_color_lookup(x, y, paths_surface, colors_surface, trace_params):
+    # 1. Calculate pixel coordinates and return if outside bounds
+    if x < 0 or x >= width or y < 0 or y >= height:
+        return
+
+    # 2. Load path from pathsSurface
+    path = paths_surface.get(x, y)
+    if path is None:
+        colors_surface.set(x, y, Color(187, 242, 250))
+        return
+
+    # 3. Initialize traversal
+    level = 0
+    node_index = root_node_index
+    color_node_index = 0
+    color_leaf = None # Represents default or invalid state
+
+    # 4. Loop while level < leaf_level
+    while level < trace_params.leaf_level:
+        level += 1
+        
+        # Get node and childMask
+        current_node = get_node(node_index, level - 1)
+        child_mask = current_node.child_mask
+        
+        # Determine child index from path
+        child_index = path.get_child_index(level)
+        
+        # Check if child exists
+        if not (child_mask & (1 << child_index)):
+            colors_surface.set(x, y, Color(0xFF, 0x00, 0xFF)) # Magenta
+            return
+        
+        # Update color tree traversal if within color_tree_levels
+        if level - 1 < trace_params.color_tree_levels:
+            color_node_index = get_color_child_index(color_node_index, child_index)
+            if level - 1 == trace_params.color_tree_levels - 1:
+                color_leaf = get_color_leaf(color_node_index)
+        
+        # Handle debug colors
+        if trace_params.debug_colors:
+            debug_color = get_debug_color(level, child_index, node_index, color_leaf)
+            colors_surface.set(x, y, debug_color)
+            return
+        
+        # Count preceding leaves if at leaf level
+        if level == trace_params.leaf_level:
+            nof_leaves = count_preceding_leaves(path)
+        
+        # Update node index for next iteration
+        node_index = get_child_node_index(node_index, child_index)
+
+    # 5. Post-loop processing
+    if color_leaf is None or not is_valid(color_leaf):
+        colors_surface.set(x, y, Color(0, 0, 0)) # Invalid color
+        return
+    
+    if nof_leaves < 0 or nof_leaves >= color_leaf.colors.size:
+        colors_surface.set(x, y, Color(0, 0, 0)) # Out of range
+        return
+    
+    # Get compressed color
+    compressed_color = color_leaf.colors[nof_leaves]
+    
+    # Extract final color
+    final_color = decompress_color(compressed_color)
+    
+    # Write to output
+    colors_surface.set(x, y, final_color)
+```
+
+## Subtopics
+
+### Color Lookup Table Assembly
+A process to assemble a color lookup table on CPU and GPU by assigning colors to source leaf nodes in the DAG and traversing all remaining nodes in parallel [S2]. For each node in the DAG, it fetches data from its children and performs one interpolation [S2]. The evaluation measures the execution time of 1,000 repetitions and reports the average time of one repetition [S2].
+
+## Operating characteristics
+Not given in the sources.
+
+## Background
+Not given in the sources.
+
+## Sources
+[S1] Phyronnaz/HashDAG, https://github.com/Phyronnaz/HashDAG, fetched 2026-10-26 (unofficial)
+[S2] The Mixture Graph-A Data Structure for Compressing, Rendering, and Querying Segmentation Histograms, https://doi.org/10.1109/tvcg.2020.3030451, fetched 2026-10-26

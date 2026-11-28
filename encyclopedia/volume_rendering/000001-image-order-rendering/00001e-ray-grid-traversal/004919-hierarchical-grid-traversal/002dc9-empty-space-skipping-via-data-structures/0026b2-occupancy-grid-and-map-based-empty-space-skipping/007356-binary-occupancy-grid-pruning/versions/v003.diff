@@ -1,0 +1,127 @@
+--- v002.md
++++ v003.md
+@@ -7,5 +7,5 @@
+ 
+ ## How it works
+-The method builds on the shared principles of [Occupancy Grid and Map-Based Empty Space Skipping](3852-occupancy-grid-and-map-based-empty-space-skipping.md). It constructs a secondary binary occupancy grid to represent the volume, defines active regions based on density thresholds, and skips free space during ray traversal [S1].
++The method builds on the shared principles of [Occupancy Grid and Map-Based Empty Space Skipping](3852-occupancy-grid-and-map-based-empty-space-skipping.md) [G]. It constructs a secondary binary occupancy grid to represent the volume, defines active regions based on density thresholds, and skips free space during ray traversal [S1].
+ 
+ ### Inputs and Outputs
+@@ -20,13 +20,13 @@
+ 
+ ### Data Structures
+-*   **Binary Occupancy Grid:** A 3D array of boolean values.
++*   **Binary Occupancy Grid:** A 3D array of boolean values [S1].
+     *   Layout: $G \in \{0, 1\}^{R \times R \times R}$, where $R$ is the current grid resolution [S1].
+     *   Value `1` indicates the voxel is occupied (may contain geometry) [G].
+     *   Value `0` indicates the voxel is free (can be skipped) [G].
+-*   **History Buffer:** A 3D array storing the maximum density observed for each voxel during training.
+-    *   Layout: $H \in \mathbb{R}^{R \times R \times R}$ [S1].
++*   **History Buffer:** A 3D array storing the maximum density observed for each voxel during training [S1].
++    *   Layout: $H \in \mathbb{R}^{R \times R \times R}$ [G].
+     *   Initialized to $0.0$ [G].
+-*   **Grid-Based Density Buffer:** A 3D array storing the maximum density estimated via dense sampling inside each voxel.
+-    *   Layout: $D \in \mathbb{R}^{R \times R \times R}$ [S1].
++*   **Grid-Based Density Buffer:** A 3D array storing the maximum density estimated via dense sampling inside each voxel [S1].
++    *   Layout: $D \in \mathbb{R}^{R \times R \times R}$ [G].
+     *   Initialized to $0.0$ [G].
+ 
+@@ -52,5 +52,5 @@
+             *   Calculate the current pruning threshold $\tau$ [S1].
+             *   $\tau$ is annealed linearly from $0$ to $\alpha = 0.2$ over the course of the pruning phase [S1].
+-            *   Let $I_{current}$ be the current iteration. Let $I_{end}$ be the final iteration (or a predefined milestone).
++            *   Let $I_{current}$ be the current iteration [G]. Let $I_{end}$ be the final iteration (or a predefined milestone) [G].
+             *   $\tau = \alpha \times \frac{I_{current} - I_{start}}{I_{end} - I_{start}}$ (clamped to $[0, \alpha]$) [G].
+         *   **Voxel Pruning:**
+@@ -82,9 +82,4 @@
+     ox, oy, oz = ray_origin
+     dx, dy, dz = ray_direction
+-    
+-    # Guard against zero direction components
+-    if dx == 0: dx = 1e-9
+-    if dy == 0: dy = 1e-9
+-    if dz == 0: dz = 1e-9
+ 
+     # Initial grid cell indices
+@@ -93,18 +88,25 @@
+     cz = int(math.floor(oz / voxel_size))
+ 
+-    # Step direction per axis
+-    sx = 1 if dx > 0 else -1
+-    sy = 1 if dy > 0 else -1
+-    sz = 1 if dz > 0 else -1
+-
+-    # Distance to next grid boundary along each axis
+-    t_max_x = ((cx + (1 if sx > 0 else 0)) * voxel_size - ox) / dx
+-    t_max_y = ((cy + (1 if sy > 0 else 0)) * voxel_size - oy) / dy
+-    t_max_z = ((cz + (1 if sz > 0 else 0)) * voxel_size - oz) / dz
+-
+-    # Distance between consecutive boundaries
+-    t_delta_x = voxel_size / abs(dx)
+-    t_delta_y = voxel_size / abs(dy)
+-    t_delta_z = voxel_size / abs(dz)
++    # Step direction and distance to next boundary per axis
++    if dx == 0:
++        sx, t_max_x, t_delta_x = 0, float('inf'), float('inf')
++    else:
++        sx = 1 if dx > 0 else -1
++        t_max_x = ((cx + (1 if sx > 0 else 0)) * voxel_size - ox) / dx
++        t_delta_x = voxel_size / abs(dx)
++
++    if dy == 0:
++        sy, t_max_y, t_delta_y = 0, float('inf'), float('inf')
++    else:
++        sy = 1 if dy > 0 else -1
++        t_max_y = ((cy + (1 if sy > 0 else 0)) * voxel_size - oy) / dy
++        t_delta_y = voxel_size / abs(dy)
++
++    if dz == 0:
++        sz, t_max_z, t_delta_z = 0, float('inf'), float('inf')
++    else:
++        sz = 1 if dz > 0 else -1
++        t_max_z = ((cz + (1 if sz > 0 else 0)) * voxel_size - oz) / dz
++        t_delta_z = voxel_size / abs(dz)
+ 
+     intervals = []
+@@ -132,13 +134,16 @@
+                 cz += sz
+ 
++        # Clamp to max_t to avoid overshooting
++        t_end = min(t_next, max_t)
++
+         # Record interval if the current cell is occupied
+         if grid[cx, cy, cz]:
+-            intervals.append((t, t_next))
+-
+-        t = t_next
++            intervals.append((t, t_end))
++
++        t = t_end
+         # Advance the t_max for the axis that was crossed
+         if t_next == t_max_x: t_max_x += t_delta_x
+         elif t_next == t_max_y: t_max_y += t_delta_y
+-        else: t_max_z += t_delta_z
++        elif t_next == t_max_z: t_max_z += t_delta_z
+ 
+     return intervals
+@@ -186,10 +191,9 @@
+ *   **Precision:** The density estimation in grid-based pruning depends on the step size. Using a step size that is too large may underestimate density, leading to over-pruning [S1].
+ *   **Boundaries:** Cylinder pruning must ensure that voxels are *completely* inside the cylinder to be marked as free, to avoid cutting into valid geometry [S1].
+-*   **Degenerate Input:** If the scene has no geometry (e.g., pure black background), all voxels may be pruned, leading to empty renders. The threshold annealing helps mitigate this by being conservative early on [S1].
+ 
+ ## Subtopics
+ 
+ ### Joint History- and Grid-based Pruning
+-A conservative pruning strategy combining history-based pruning (tracking max density per voxel during training) with grid-based pruning (evaluating a dense cubic grid inside each voxel to estimate max density) to prune occupancy grid voxels [S1]. It is chosen when higher accuracy in pruning is needed compared to using only one method. It prunes grid voxels where both maximum densities (history and grid-based) fall below the current pruning threshold [S1]. The pruning threshold is annealed linearly from $0$ to $0.2$ [S1].
++A conservative pruning strategy combining history-based pruning (tracking max density per voxel during training) with grid-based pruning (evaluating a dense cubic grid inside each voxel to estimate max density) to prune occupancy grid voxels [S1]. It prunes grid voxels where both maximum densities (history and grid-based) fall below the current pruning threshold [S1]. The pruning threshold is annealed linearly from $0$ to $0.2$ [S1].
+ 
+ ### Cylinder Pruning
+@@ -197,6 +201,6 @@
+ 
+ ## Operating characteristics
+-*   **Time Complexity:** Pruning is performed periodically (every 1,000 iterations) and involves dense sampling inside each voxel, which is expensive. However, it is done offline or during training, not at render time. Rendering time is reduced by skipping free space [S1].
+-*   **Memory Complexity:** Requires storing the binary occupancy grid, history buffer, and density buffer. For a $128^3$ grid, this is $128^3 \times 3$ voxels. Upsampling increases memory usage [S1].
++*   **Time Complexity:** Pruning is performed periodically (every 1,000 iterations) and involves dense sampling inside each voxel, which is expensive [S1]. However, it is done offline or during training, not at render time [G]. Rendering time is reduced by skipping free space [S1].
++*   **Memory Complexity:** Requires storing the binary occupancy grid, history buffer, and density buffer [S1]. For a $128^3$ grid, this is $128^3 \times 3$ voxels [G]. Upsampling increases memory usage [S1].
+ *   **Measured Performance:** The method enables native rendering on a Meta Quest Pro VR headset at dual 2K×2K eyebuffers at 72 FPS [S1].
+ *   **Strengths:** Maximizes rendering speed without model baking; prevents cheating with floaters; improves convergence speed in early training [S1].

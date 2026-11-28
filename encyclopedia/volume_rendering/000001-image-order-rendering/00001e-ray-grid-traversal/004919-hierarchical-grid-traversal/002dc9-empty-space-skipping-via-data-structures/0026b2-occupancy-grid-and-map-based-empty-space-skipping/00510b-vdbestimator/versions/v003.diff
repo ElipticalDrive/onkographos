@@ -1,0 +1,73 @@
+--- v002.md
++++ v003.md
+@@ -29,7 +29,7 @@
+ 1.  **Plane Clamping:** If `t_min` is provided, clamp `near_planes` to be at least `t_min`. If `t_max` is provided, clamp `far_planes` to be at most `t_max` [S1, unofficial].
+ 2.  **Stratified Sampling (Optional):** If `stratified` is True, add jitter to `near_planes`:
+-    $$ t_{near}^{jittered} = t_{near} + \text{rand}() \times \text{render\_step\_size} $$
++    $$ t_{near}^{\text{jittered}} = t_{near} + \text{rand}() \times \text{render\_step\_size} $$
+     where $\text{rand}()$ is a uniform random value [S1, unofficial].
+-3.  **VDB Traversal:** Call `traverse_vdbs` with rays, grid, near/far planes, step size, and cone angle to get initial `t_starts`, `t_ends`, and `ray_indices` [S1, unofficial]. This function computes ray-AABB intersections. For each ray-grid pair, it calculates $t_{min} = \max(\min(t_1, t_2), \text{near\_plane})$ and $t_{max} = \min(\max(t_1, t_2), \text{far\_plane})$, where $t_1, t_2$ are the intersection distances with the AABB faces [S1, unofficial]. If no intersection exists ($t_{max} \le t_{min}$ or $t_{max} \le 0$), the interval is marked as invalid [S1, unofficial].
++3.  **VDB Traversal:** Call `traverse_vdbs` with rays, grid, near/far planes, step size, and cone angle to get initial `t_starts`, `t_ends`, and `ray_indices` [S1, unofficial]. This function computes ray-AABB intersections [S1, unofficial]. For each ray-grid pair, it calculates $t_{min} = \max(\min(t_1, t_2), \text{near\_plane})$ and $t_{max} = \min(\max(t_1, t_2), \text{far\_plane})$, where $t_1, t_2$ are the intersection distances with the AABB faces [S1, unofficial]. If no intersection exists ($t_{max} \le t_{min}$ or $t_{max} \le 0$), the interval is marked as invalid [S1, unofficial].
+ 4.  **Alpha Threshold Capping:** If skipping invisible space is enabled (`alpha_thre > 0.0` or `early_stop_eps > 0.0`) and a density/alpha function is provided, cap the alpha threshold:
+     $$ \alpha_{thre} = \min(\alpha_{thre}, \text{mean}(self.occs)) $$
+@@ -38,5 +38,5 @@
+ 6.  **Grid Update (Training):**
+     *   If current training `step < warmup_steps`: Sample all cells using `_get_all_cells()` [S1, unofficial].
+-    *   If `step >= warmup_steps`: Call `_sample_uniform_and_occupied_cells()`. Sample $n = \text{total\_voxels} // 4$ uniform cells and $n$ occupied cells (or all occupied if fewer than $n$), concatenating them for gradient updates [S1, unofficial].
++    *   If `step >= warmup_steps`: Call `_sample_uniform_and_occupied_cells()` [S1, unofficial]. This samples $n = \text{total\_voxels} // 4$ uniform cells and $n$ occupied cells (or all occupied if fewer than $n$), concatenating them for gradient updates [S1, unofficial].
+     *   Update `self.occs` using EMA with `ema_decay` [S1, unofficial].
+ 
+@@ -98,6 +98,5 @@
+ 
+     # 6. Grid Update (if in training mode)
+-    # This part is typically handled in a separate _update method called periodically
+-    # For the sake of completeness, we outline the logic here:
++    # Sources do not provide the exact implementation for cell sampling and EMA updates [S1, unofficial].
+     # if step % n == 0:
+     #     if step < warmup_steps:
+@@ -129,35 +128,7 @@
+     Returns ray_indices, t_starts, t_ends.
+     """
+-    # Implementation detail: This function uses grids.uniform_ray_samples internally
+-    # It computes intersections with AABBs of active voxels.
+-    # It returns intervals clipped to near_planes and far_planes.
+-    # Note: TODO in source indicates endpoints should be restrained to grid boundaries.
+-    
+-    # Extract grid metadata (assumed attributes based on fVDB/nerfacc conventions)
+-    aabbs = grid.aabbs  # [m, 6]
+-    
+-    # Compute ray-AABB intersections
+-    # t1, t2 are intersection distances with AABB faces
+-    t1 = (aabbs[:, :3] - rays_o[:, None, :]) / rays_d[:, None, :]
+-    t2 = (aabbs[:, 3:] - rays_o[:, None, :]) / rays_d[:, None, :]
+-    t_min_inter = torch.max(torch.min(t1, t2), dim=-1)[0]  # [n_rays, m]
+-    t_max_inter = torch.min(torch.max(t1, t2), dim=-1)[0]  # [n_rays, m]
+-    
+-    # Clip to near/far planes
+-    t_min_inter = torch.clamp(t_min_inter, min=near_planes[:, None], max=far_planes[:, None])
+-    t_max_inter = torch.clamp(t_max_inter, min=near_planes[:, None], max=far_planes[:, None])
+-    
+-    # Check hits
+-    hits = (t_max_inter > t_min_inter) & (t_max_inter > 0)
+-    
+-    # Flatten indices for filtering
+-    ray_indices = torch.arange(rays_o.shape[0], device=rays_o.device)[:, None].expand(-1, aabbs.shape[0]).flatten()
+-    
+-    # Filter out misses
+-    valid = hits.flatten()
+-    ray_indices = ray_indices[valid]
+-    t_starts = t_min_inter.flatten()[valid]
+-    t_ends = t_max_inter.flatten()[valid]
+-    
++    # The core traversal logic calls grids.uniform_ray_samples to get indices and intervals, then unbinds the intervals [S1, unofficial].
++    intervals = grid.uniform_ray_samples(rays_o, rays_d, near_planes, far_planes, step_size, cone_angle)
++    ray_indices, t_starts, t_ends = intervals.unbind()
+     return ray_indices, t_starts, t_ends
+ ```
+@@ -188,5 +159,5 @@
+ *   **Time Complexity:** Depends on the sparsity of the VDB grid [S1, unofficial]. Traversal is proportional to the number of active voxels intersected by rays [S1, unofficial].
+ *   **Memory Complexity:** Proportional to the number of active voxels in the VDB grid plus the occupancy buffer [S1, unofficial].
+-*   **Measured Performance:** Not given in the sources.
++*   **Measured Performance:** Not given in the sources [S1, unofficial].
+ *   **Scaling:** Scales well with sparsity [S1, unofficial]. The hierarchical nature of fVDB allows efficient traversal of large volumes with sparse active regions [S1, unofficial].
+ *   **Strengths:** Efficient empty space skipping, mutable grid allows for dynamic updates during training [S1, unofficial].

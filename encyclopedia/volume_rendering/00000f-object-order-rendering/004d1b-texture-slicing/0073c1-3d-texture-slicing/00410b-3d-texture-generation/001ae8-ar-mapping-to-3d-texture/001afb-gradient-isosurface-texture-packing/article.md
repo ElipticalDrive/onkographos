@@ -1,0 +1,115 @@
+# Gradient-Isosurface Texture Packing
+
+Also called: Gradient Packing in Alpha Channel
+
+## Overview
+Gradient-Isosurface Texture Packing is a data layout strategy for 3D volume textures that stores surface gradients in the RGB components and the original scalar isovalue in the Alpha component [S1, unofficial]. This allows a single texture to serve as both the data source for shading (via interpolated normals) and the classification source (via the isovalue), eliminating the need for a second texture copy or runtime gradient calculation [S1, unofficial]. It sets itself apart from [AR mapping to 3D texture](884-ar-mapping-to-3d-texture.md) by embedding geometric shading information directly into the texture coordinates, and from [Uniform Grid](920-uniform-grid.md) by enabling hardware-accelerated normal interpolation during ray casting [S2].
+
+## How it works
+**Inputs:** A 3D volume dataset with scalar values $V(x,y,z)$ and computed gradient vectors $\nabla V(x,y,z) = (G_x, G_y, G_z)$.
+**Outputs:** A 3D volume texture $T$ with internal format supporting 4 components (e.g., `RGBA16F` or `RGBA8`).
+
+**Data Structures:**
+The texture stores four components per voxel:
+- $R = G_x$ (Gradient X component)
+- $G = G_y$ (Gradient Y component)
+- $B = G_z$ (Gradient Z component)
+- $A = V$ (Original scalar/isovalue)
+
+**Steps:**
+1. **Gradient Computation:** Compute the gradient $\nabla V$ for each voxel. The sources cite two approaches:
+   - Central differences for accuracy [S2].
+   - Sobel filters for high-quality offline computation [S2].
+   - Optional filtering: A simple averaging of neighbors [S1, unofficial] or a separable 3D Gaussian kernel to smooth gradients [S1, unofficial].
+2. **Normalization:** Normalize the gradient vector to unit length to store as a normal [S1, unofficial].
+   $$ \hat{G} = \frac{\nabla V}{\|\nabla V\|} $$
+   If $\|\nabla V\| = 0$, the gradient is undefined [G].
+3. **Pack Data:** Construct a `HalfVector4` (or equivalent 16-bit float vector) for each voxel:
+   $$ P(x,y,z) = (\hat{G}_x, \hat{G}_y, \hat{G}_z, V(x,y,z)) $$
+4. **Upload:** Upload the packed array to the GPU as a 3D texture [S1, unofficial].
+
+**Pseudocode:**
+> **Unverified code.** The code below did not pass a test run against a reference implementation, or no test fits it, so it may contain errors.
+
+```python
+def pack_gradients(volume_data: Array3D[float], resolution: int):
+    """
+    Pack gradients and isovalue into a 3D texture format.
+    volume_data: 3D array of scalar values.
+    resolution: N x N x N grid size.
+    Returns: 3D array of HalfVector4 (or equivalent packed structure).
+    """
+    packed_volume = empty_array(resolution, resolution, resolution, dtype=HalfVector4)
+    
+    # 1. Compute Gradients (Central Difference)
+    gradients = empty_array(resolution, resolution, resolution, dtype=Vector3)
+    
+    for z in range(resolution):
+        for y in range(resolution):
+            for x in range(resolution):
+                # Central difference approximation
+                # Handle boundaries by clamping or assuming zero gradient [G]
+                gx = sample(volume_data, x+1, y, z) - sample(volume_data, x-1, y, z)
+                gy = sample(volume_data, x, y+1, z) - sample(volume_data, x, y-1, z)
+                gz = sample(volume_data, x, y, z+1) - sample(volume_data, x, y, z-1)
+                
+                grad = Vector3(gx, gy, gz)
+                norm = length(grad)
+                
+                if norm > 0.0:
+                    grad = normalize(grad)
+                
+                gradients[x, y, z] = grad
+
+    # 2. Pack into Texture Format
+    for z in range(resolution):
+        for y in range(resolution):
+            for x in range(resolution):
+                g = gradients[x, y, z]
+                val = volume_data[x, y, z]
+                
+                # Store gradient in RGB, value in Alpha
+                packed_volume[x, y, z] = HalfVector4(g.x, g.y, g.z, val)
+                
+    return packed_volume
+
+def sample_packed_texture(tex: Texture3D, pos: Vector3):
+    """
+    Sample the packed texture to retrieve normal and isovalue.
+    """
+    # Hardware interpolation handles the linear interpolation of RGB (normal) and A (value)
+    vec4 = tex3Dlod(tex, pos)
+    
+    normal = normalize(vec4.rgb) # Ensure normalization after interpolation
+    isovalue = vec4.a
+    
+    return normal, isovalue
+```
+
+**Parameters:**
+- **Gradient Filter:** Sobel or Central Difference. Sobel is preferred for offline quality [S2].
+- **Texture Format:** Must support 4 components. 16-bit floats (`HalfVector4`) are recommended for gradient precision [S1, unofficial].
+
+**Edge Cases:**
+- **Zero Gradient:** If the gradient magnitude is zero (flat region), normalization fails. [G] Set gradient to $(0,0,0)$ or a default normal.
+- **Boundary Conditions:** Central differences require neighbors outside the volume. [G] Clamp coordinates to the nearest boundary voxel.
+- **Precision:** Storing normalized gradients in 8-bit integers (as mentioned in [S2] for older hardware) loses precision. 16-bit floats are standard for modern implementations [S1, unofficial].
+
+## Subtopics
+
+### Pre-computed Gradient Resampling
+A technique where volume gradients are pre-computed and stored in texture memory alongside density data, allowing the texture mapping hardware to interpolate both density and gradients during resampling [S2]. It sets itself apart from Sommer et al.'s method, which computes gradients from a second copy of the volume in main memory (slower for translucent projections), by using hardware interpolation for throughput [S2]. Choose this when dynamic lighting and high-quality shading are required without reloading textures [S2].
+
+## Operating characteristics
+- **Time Complexity:** Gradient computation is $O(N^3)$ offline [S2]. Rendering is $O(1)$ per sample for shading (no extra texture fetches for normals) [S1, unofficial].
+- **Memory Complexity:** Requires 4 components per voxel. If gradients were computed on-the-fly, an additional texture or memory would be needed [S1, unofficial].
+- **Performance:** On a 200MHz CPU, computing gradients for a $256^3$ volume takes 12 seconds [S2]. Rendering speed depends on the base ray-casting implementation but benefits from reduced memory bandwidth for shading data [S2].
+- **Strengths:** Enables dynamic lighting changes without reloading texture memory [S1, unofficial]. Hardware-accelerated interpolation of normals [S2].
+- **Limitations:** Gradients are static; cannot handle dynamic volume changes without recomputation [S2]. Offline computation cost [S2].
+
+## Background
+Originated from early 3D texture mapping hardware acceleration research. Cullip and Neumann described a method utilizing the PixelFlow machine that pre-computed gradient components [S2]. Sommer et al. proposed resampling texture volumes in planes parallel to image pixels [S2]. The specific packing of gradients into RGB and isovalue into Alpha is detailed in unofficial tutorials [S1, unofficial].
+
+## Sources
+[S1] Volume Rendering 102: Transfer Functions, http://graphicsrunner.blogspot.com/2009/01/volume-rendering-102-transfer-functions.html, fetched 2026-10-28 (unofficial)
+[S2] High-Quality Volume Rendering Using Texture Mapping ..., https://cfcs.pku.edu.cn/baoquan/docs/20180622110034067331.pdf, fetched 2026-10-27

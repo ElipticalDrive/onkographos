@@ -1,0 +1,1268 @@
+# DIF-Gaussian
+
+Yiqun Lin, Hualiang Wang, Jixiang Chen, and Xiaomeng Li. "Learning 3D Gaussians for Extremely Sparse-View Cone-Beam CT Reconstruction." MICCAI 2024. [arXiv](https://arxiv.org/abs/2407.01090)
+
+```
+@misc{lin2024learning3d,
+      title={Learning 3D Gaussians for Extremely Sparse-View Cone-Beam CT Reconstruction}, 
+      author={Yiqun Lin and Hualiang Wang and Jixiang Chen and Xiaomeng Li},
+      year={2024},
+      eprint={2407.01090},
+      archivePrefix={arXiv},
+      primaryClass={eess.IV},
+      url={https://arxiv.org/abs/2407.01090}, 
+}
+```
+
+## 1. Installation
+
+torch 1.13, pytorch3d, SimpleITK, easydict
+
+## 2. Data Preprocessing
+
+Please refer to https://github.com/xmed-lab/C2RV-CBCT/tree/main/data for more details.
+
+## 3. Experiments
+
+### code/evaluate.py
+```
+import os
+import csv
+import json
+import argparse
+import numpy as np
+from tqdm import tqdm
+from copy import deepcopy
+
+import torch
+from torch.utils.data import DataLoader
+from skimage.metrics import peak_signal_noise_ratio, structural_similarity
+
+from datasets.dst_gs import CBCT_dataset_gs
+from models.model import DIF_Gaussian
+from utils import convert_cuda, load_config, sitk_save
+
+
+
+def eval_one_epoch(model, loader, npoint=50000, save_dir=None, ignore_msg=True, use_tqdm=False):
+    model.eval()
+    results = {}
+    metrics = {}
+    metrics_tmp = {key:[] for key in ['psnr', 'ssim']}
+    if use_tqdm:
+        loader = tqdm(loader, ncols=50)
+    
+    with torch.no_grad():
+        for item in loader:
+            item = convert_cuda(item)
+
+            dst_name = item['dst_name'][0]
+            name = item['name'][0]
+            image = item['points_gt'].cpu().numpy()
+            image = image[0] # W, H, D
+
+            pred = model(item, is_eval=True, eval_npoint=npoint) # B, 1, N
+            output = pred['points_pred']
+            output = output[0, 0].data.cpu().numpy()
+            
+            output = output.reshape(image.shape)
+            output = np.clip(output, 0, 1)
+
+            psnr = peak_signal_noise_ratio(image, output, data_range=1.)
+            ssim = structural_similarity(image, output, data_range=1.)
+
+            if not ignore_msg:
+                print('{}, PSNR: {:.4}, SSIM: {:.4}'.format(
+                    name, psnr, ssim
+                ))
+
+            dst_res = results.get(dst_name, [])
+            dst_met = metrics.get(dst_name, deepcopy(metrics_tmp))
+
+            dst_res.append({
+                'name': name, 
+                'psnr': psnr,
+                'ssim': ssim,
+            })
+            for key in dst_met.keys():
+                dst_met[key].append(dst_res[-1][key])
+            
+            results[dst_name] = dst_res
+            metrics[dst_name] = dst_met
+
+            if save_dir is not None:
+                spacing = item['spacing'][0].cpu().numpy()
+                origin = item['origin'][0].cpu().numpy()
+                save_path = os.path.join(save_dir, f'{name}.nii.gz')
+                sitk_save(save_path, output, spacing=spacing, origin=origin, uint8=True)
+
+    for dst_name in metrics.keys():
+        dst_met = metrics[dst_name]
+        m = {key:np.mean(val) for key, val in dst_met.items()}
+        metrics[dst_name] = m
+
+    return metrics, results
+
+
+if __name__ == '__main__':
+    parser = argparse.ArgumentParser(description='eval')
+
+    parser.add_argument('--name', type=str, default='baseline')
+    parser.add_argument('--dst_name', type=str, default='LUNA16')
+    parser.add_argument('--epoch', type=int, default=400)
+    parser.add_argument('--num_views', type=int, default=10)
+    parser.add_argument('--cfg_path', type=str, default=None)
+    parser.add_argument('--split', type=str, default='test')
+    parser.add_argument('--view_offset', type=int, default=0)
+    parser.add_argument('--out_res_scale', type=float, default=1.0)
+    parser.add_argument('--eval_npoint', type=int, default=100000)
+    parser.add_argument('--save_results', action='store_true', default=False)
+
+    args = parser.parse_args()
+    if args.cfg_path is None:
+        args.cfg_path = f'./logs/{args.name}/config.yaml'
+    
+    print(args)
+
+    cfg = load_config(args.cfg_path)
+
+    # -- dataloader
+    eval_loader = DataLoader(
+        CBCT_dataset_gs(
+            dst_name=args.dst_name,
+            cfg=cfg.dataset,
+            split=args.split, 
+            num_views=args.num_views,
+            out_res_scale=args.out_res_scale,
+            view_offset=args.view_offset,
+        ), 
+        batch_size=1, 
+        shuffle=False,
+        pin_memory=True
+    )
+
+    # -- model, load ckpt
+    ckpt_path = f'./logs/{args.name}/ep_{args.epoch}.pth'
+    ckpt = torch.load(ckpt_path, map_location=torch.device('cpu'))
+    print('load ckpt from', ckpt_path)
+    
+    model = DIF_Gaussian(cfg.model)
+    model.load_state_dict(ckpt)
+    model = model.cuda()
+
+    # -- output dir
+    tag = '{:.1f}x'.format(args.out_res_scale)
+    save_dir = None
+    if args.save_results:
+        save_dir = f'./logs/{args.name}/results/ep_{args.epoch}/predictions_{tag}'
+        os.makedirs(save_dir, exist_ok=True)
+
+    # -- evaluate
+    metrics, results = eval_one_epoch(
+        model, 
+        eval_loader, 
+        args.eval_npoint,
+        save_dir=save_dir,
+        use_tqdm=True,
+        ignore_msg=False
+    )
+    print(metrics)
+
+    # -- save results [csv]
+    pred_dir = f'./logs/{args.name}/results/ep_{args.epoch}'
+    os.makedirs(pred_dir, exist_ok=True)
+
+    csv_file = open(os.path.join(pred_dir, f'results_{tag}.csv'), 'w', newline='')
+    csv_writer = csv.writer(csv_file)
+    csv_writer.writerow(['dataset', 'obj_id', 'psnr', 'ssim'])
+
+    for dst_name in results.keys():
+        dst_res = results[dst_name]
+        for res in dst_res:
+            csv_writer.writerow([dst_name, res['name'], res['psnr'], res['ssim']])
+
+        dst_avg = metrics[dst_name]
+        csv_writer.writerow([dst_name, 'average', dst_avg['psnr'], dst_avg['ssim']])
+    
+    csv_file.close()
+    
+    # -- save config [args]
+    with open(os.path.join(pred_dir, 'args.json'), 'w') as f:
+        args = vars(args)
+        json.dump(args, f, indent=4)
+```
+
+### code/train.py
+```
+import os
+import shutil
+import argparse
+import numpy as np
+from datetime import datetime
+
+import torch
+from torch import nn
+from torch.utils.data import DataLoader
+
+from datasets.dst_gs import CBCT_dataset_gs
+from models.model import DIF_Gaussian
+from utils import convert_cuda, load_config
+from evaluate import eval_one_epoch
+
+
+
+def worker_init_fn(worker_id):
+    np.random.seed((worker_id + torch.initial_seed()) % np.iinfo(np.int32).max)
+
+
+if __name__ == '__main__':
+    parser = argparse.ArgumentParser(description='train')
+    
+    parser.add_argument('--name', type=str, default='baseline')
+    parser.add_argument('--dst_name', type=str, default='LUNA16')
+    parser.add_argument('--epoch', type=int, default=400)
+    parser.add_argument('--num_views', type=int, default=10)
+    parser.add_argument('--cfg_path', type=str, default=None)
+    parser.add_argument('--out_res_scale', type=float, default=1.0)
+    parser.add_argument('--eval_npoint', type=int, default=100000)
+
+    parser.add_argument('--local-rank', dest='local_rank', type=int, default=0)
+    parser.add_argument('--local_rank', type=int, default=0)
+    parser.add_argument('--dist', action='store_true', default=False)
+    
+    parser.add_argument('--batch_size', type=int, default=4)
+    parser.add_argument('--lr', type=float, default=1e-2)
+    parser.add_argument('--weight_decay', type=float, default=1e-3)
+    parser.add_argument('--lr_decay', type=float, default=1e-3)
+    parser.add_argument('--num_workers', type=int, default=2)
+    parser.add_argument('--num_points', type=int, default=10000)
+    parser.add_argument('--random_views', action='store_true', default=False)
+    parser.add_argument('--resume', type=int, default=None)
+
+    args = parser.parse_args()
+
+    if args.dist:
+        args.local_rank = int(os.environ["LOCAL_RANK"]) # Make it compatible with different versions of DDP
+        torch.distributed.init_process_group(backend="nccl")
+        torch.cuda.set_device(args.local_rank)
+
+    cfg = load_config(args.cfg_path)
+    if args.local_rank == 0:
+        print(args)
+        print(cfg)
+
+        # save config
+        save_dir = f'./logs/{args.name}'
+        os.makedirs(save_dir, exist_ok=True)
+        if os.path.exists(os.path.join(save_dir, 'config.yaml')):
+            time_str = datetime.now().strftime('%d-%m-%Y_%H-%M-%S')
+            shutil.copyfile(
+                os.path.join(save_dir, 'config.yaml'), 
+                os.path.join(save_dir, f'config_{time_str}.yaml')
+            )
+        shutil.copyfile(args.cfg_path, os.path.join(save_dir, 'config.yaml'))
+
+    # -- initialize training dataset/loader
+    train_dst = CBCT_dataset_gs(
+        dst_name=args.dst_name,
+        cfg=cfg.dataset,
+        split='train', 
+        num_views=args.num_views, 
+        npoint=args.num_points,
+        out_res_scale=args.out_res_scale,
+        random_views=args.random_views
+    )
+    train_sampler = None
+    if args.dist:
+        train_sampler = torch.utils.data.distributed.DistributedSampler(train_dst)
+    train_loader = DataLoader(
+        train_dst, 
+        batch_size=args.batch_size, 
+        sampler=train_sampler, 
+        shuffle=(train_sampler is None),
+        num_workers=0, # args.num_workers,
+        pin_memory=True,
+        worker_init_fn=worker_init_fn
+    )
+
+    # -- initialize evaluation dataset/loader
+    eval_loader = DataLoader(
+        CBCT_dataset_gs(
+            dst_name=args.dst_name,
+            cfg=cfg.dataset,
+            split='eval',
+            num_views=args.num_views,
+            out_res_scale=0.5, # low-res for faster evaluation,
+        ), 
+        batch_size=1, 
+        shuffle=False,
+        pin_memory=True
+    )
+
+    # -- initialize model
+    model = DIF_Gaussian(cfg.model)
+    if args.resume:
+        print(f'resume model from epoch {args.resume}')
+        ckpt = torch.load(
+            os.path.join(f'./logs/{args.name}/ep_{args.resume}.pth'),
+            map_location=torch.device('cpu')
+        )
+        model.load_state_dict(ckpt)
+    
+    model = model.cuda()
+    if args.dist:
+        model = nn.parallel.DistributedDataParallel(
+            model, 
+            find_unused_parameters=False,
+            device_ids=[args.local_rank]
+        )
+    
+    # -- initialize optimizer, lr scheduler, and loss function
+    optimizer = torch.optim.SGD(
+        model.parameters(), 
+        lr=args.lr, 
+        momentum=0.98, 
+        weight_decay=args.weight_decay
+    )
+    lr_scheduler = torch.optim.lr_scheduler.StepLR(
+        optimizer, 
+        step_size=1, 
+        gamma=np.power(args.lr_decay, 1 / args.epoch)
+    )
+    loss_func = nn.MSELoss()
+
+    start_epoch = 0
+    if args.resume:
+        start_epoch = args.resume + 1
+        if lr_scheduler is not None:
+            lr_scheduler.step(epoch=args.resume)
+
+    # -- training starts
+    for epoch in range(start_epoch, args.epoch + 1):
+        if args.dist:
+            train_loader.sampler.set_epoch(epoch)
+
+        loss_list = []
+        model.train()
+        optimizer.zero_grad()
+
+        for k, item in enumerate(train_loader):
+            item = convert_cuda(item)
+
+            pred = model(item)
+            loss = loss_func(pred['points_pred'], item['points_gt'])
+            loss_list.append(loss.item())
+
+            loss.backward()
+            torch.nn.utils.clip_grad_norm_(model.parameters(), 1.0)
+            optimizer.step()
+            optimizer.zero_grad()
+        
+        if args.local_rank == 0:
+            if epoch % 10 == 0:
+                loss = np.mean(loss_list)
+                print('epoch: {}, loss: {:.4}'.format(epoch, loss))
+            
+            if epoch % 100 == 0 or (epoch >= (args.epoch - 100) and epoch % 10 == 0):
+                if isinstance(model, torch.nn.DataParallel) or isinstance(model, torch.nn.parallel.DistributedDataParallel):
+                    model_state = model.module.state_dict()
+                else:
+                    model_state = model.state_dict()
+                torch.save(
+                    model_state,
+                    os.path.join(save_dir, f'ep_{epoch}.pth')
+                )
+
+            if epoch % 50 == 0 or (epoch >= (args.epoch - 100) and epoch % 20 == 0):
+                metrics, _ = eval_one_epoch(
+                    model, 
+                    eval_loader, 
+                    args.eval_npoint,
+                    ignore_msg=True,
+                )
+                msg = f' --- epoch {epoch}'
+                for dst_name in metrics.keys():
+                    msg += f', {dst_name}'
+                    met = metrics[dst_name]
+                    for key, val in met.items():
+                        msg += ', {}: {:.4}'.format(key, val)
+                print(msg)
+        
+        if lr_scheduler is not None:
+            lr_scheduler.step()
+```
+
+### code/utils.py
+```
+import yaml
+import numpy as np
+import SimpleITK as sitk
+from easydict import EasyDict
+
+
+
+def load_config(path):
+    with open(path, 'r') as f:
+        cfg = yaml.safe_load(f)
+    return EasyDict(cfg)
+
+
+def convert_cuda(item):
+    for key in item.keys():
+        if key not in ['name', 'dst_name']:
+            item[key] = item[key].float().cuda()
+    return item
+
+
+def count_parameters(model):
+    return sum(p.numel() for p in model.parameters())
+
+
+def sitk_load(path, uint8=False, spacing_unit='mm'):
+    # load as float32
+    itk_img = sitk.ReadImage(path)
+    spacing = np.array(itk_img.GetSpacing(), dtype=np.float32)
+    origin = np.array(itk_img.GetOrigin(), dtype=np.float32)
+    if spacing_unit == 'm':
+        spacing *= 1000.
+        origin *= 1000
+    elif spacing_unit != 'mm':
+        raise ValueError
+    image = sitk.GetArrayFromImage(itk_img)
+    image = image.transpose(2, 1, 0) # to [x, y, z]
+    image = image.astype(np.float32)
+    if uint8:
+        # if data is saved as uint8, [0, 255] => [0, 1]
+        image /= 255.
+    return image, spacing, origin
+
+
+def sitk_save(path, image, spacing=None, origin=None, uint8=False):
+    # default: float32 (input)
+    image = image.astype(np.float32)
+    image = image.transpose(2, 1, 0)
+    if uint8:
+        # value range should be [0, 1]
+        image = (image * 255).astype(np.uint8)
+    out = sitk.GetImageFromArray(image)
+    if spacing is not None:
+        out.SetSpacing(spacing.astype(np.float64)) # unit: mm
+    if origin is not None:
+        out.SetOrigin(origin.astype(np.float64)) # unit: mm
+    sitk.WriteImage(out, path)
+```
+
+### code/datasets/base.py
+```
+import os
+import json
+import yaml
+import scipy
+import pickle
+import numpy as np
+from torch.utils.data import Dataset
+
+from utils import sitk_load
+from datasets.geometry import Geometry
+
+
+
+class CBCT_dataset(Dataset):
+    def __init__(
+            self,
+            dst_name,
+            cfg,
+            split='train',
+            num_views=10,
+            npoint=5000,
+            out_res_scale=1.0,
+            random_views=False,
+            view_offset=0,
+        ):
+        super().__init__()
+        if not (0. < out_res_scale and out_res_scale <= 1.):
+            raise ValueError
+        
+        self.cfg = cfg
+        self.dst_name = dst_name
+        self.data_root = os.path.join(self.cfg.root_dir, dst_name)
+        
+        # load dataset info
+        with open(os.path.join(self.data_root, 'meta_info.json'), 'r') as f:
+            self.info = json.load(f)
+            splits = split.split('+')
+            name_list = []
+            for s in splits:
+                name_list += self.info[s]
+            name_list = sorted(name_list)
+            print('CBCT_dataset, name: {}, split: {}, len: {}.'.format(dst_name, split, len(name_list)))
+
+        # load dataset config
+        with open(os.path.join(self.data_root, self.info['dataset_config']), 'r') as f:
+            dst_cfg = yaml.safe_load(f)
+            out_res = np.array(dst_cfg['dataset']['resolution'])
+            out_res = np.round(out_res * out_res_scale).astype(int) # to align the output shape with 'scipy.ndimage.zoom'
+            self.geo = Geometry(dst_cfg['projector'])
+
+        # prepare points
+        if split == 'train':
+            # load blocks' coordinates [train only]
+            self.blocks = np.load(os.path.join(self.data_root, self.info['blocks_coords']))
+        else:
+            # prepare sampling points
+            points = np.mgrid[:out_res[0], :out_res[1], :out_res[2]]
+            points = points.astype(np.float32)
+            points = points.reshape(3, -1)
+            points = points.transpose(1, 0) # N, 3
+            self.points = points / (out_res - 1)
+        
+        # other parameters
+        self.out_res_scale = out_res_scale
+        self.name_list = name_list
+        self.npoint = npoint
+        self.is_train = (split == 'train')
+        self.num_views = num_views
+        self.random_views = random_views
+        self.view_offset = view_offset
+
+        # for acceleration when testing
+        self.points_proj = None
+
+    def __len__(self):
+        return len(self.name_list)
+    
+    def sample_projections(self, name, n_view=None):
+        # -- load projections
+        with open(os.path.join(self.data_root, self.info['projs'].format(name)), 'rb') as f:
+            data = pickle.load(f)
+            projs = data['projs']         # uint8: [K, W, H]
+            projs_max = data['projs_max'] # float
+            angles = data['angles']       # float: [K,]
+
+        if n_view is None:
+            n_view = self.num_views
+
+        # -- sample projections
+        views = np.linspace(0, len(projs), n_view, endpoint=False).astype(int) # endpoint=False as the random_views is True during training, i.e., enabling view offsets.
+        offset = np.random.randint(len(projs) - views[-1]) if self.random_views else self.view_offset
+        views += offset
+
+        projs = projs[views].astype(np.float32) / 255.
+        projs = projs[:, None, ...]
+        angles = angles[views]
+
+        # -- de-normalization
+        projs = projs * projs_max / 0.2
+
+        return projs, angles
+    
+    def load_ct(self, name):
+        image, spacing, origin = sitk_load(
+            os.path.join(self.data_root, self.info['image'].format(name)),
+            uint8=True
+        ) # float32
+        if self.out_res_scale < 1.:
+            image = scipy.ndimage.zoom(image, self.out_res_scale, order=3, prefilter=False)
+            spacing /= self.out_res_scale
+        return image, spacing, origin
+    
+    def load_block(self, name, b_idx):
+        path = os.path.join(self.data_root, self.info['blocks_vals'].format(name, b_idx))
+        block = np.load(path) # uint8
+        return block
+
+    def sample_points(self, points, values):
+        choice = np.random.choice(len(points), size=self.npoint, replace=False)
+        points = points[choice]
+        values = values[choice]
+        return points, values
+
+    def project_points(self, points, angles):
+        points_proj = []
+        for a in angles:
+            p = self.geo.project(points, a)
+            points_proj.append(p)
+        points_proj = np.stack(points_proj, axis=0) # [M, N, 2]
+        return points_proj
+
+    def __getitem__(self, index):
+        name = self.name_list[index]
+
+        # -- load projections
+        projs, angles = self.sample_projections(name)
+
+        # -- load sampling points
+        if not self.is_train:
+            points = self.points
+            points_gt, spacing, origin = self.load_ct(name)
+        else:
+            b_idx = np.random.randint(len(self.blocks))
+            block_values = self.load_block(name, b_idx)
+            block_coords = self.blocks[b_idx] # [N, 3]
+            points, points_gt = self.sample_points(block_coords, block_values)
+            points_gt = points_gt.astype(np.float32) / 255.
+            points_gt = points_gt[None, :]
+
+        # -- project points
+        if self.is_train or self.points_proj is None:
+            points_proj = self.project_points(points, angles) # given the same geo cfg
+            self.points_proj = points_proj
+        else:
+            points_proj = self.points_proj
+
+        # -- collect data
+        ret_dict = {
+            # M: the number of views
+            # N: the number of sampled points
+            'dst_name': self.dst_name,
+            'name': name,
+            'angles': angles,           # [M,]
+            'projs': projs,             # [M, 1, W, H], projections
+            'points': points,           # [N, 3], center xyz of volumes ~[0, 1]
+            'points_gt': points_gt,     # [1, N] (or [W', H', D'] only when is_train is False)
+            'points_proj': points_proj, # [M, N, 2]
+        }
+        if not self.is_train:
+            ret_dict['spacing'] = spacing # [3,]
+            ret_dict['origin'] = origin   # [3,]
+        return ret_dict
+```
+
+### code/datasets/dst_gs.py
+```
+import numpy as np
+from copy import deepcopy
+
+from datasets.base import CBCT_dataset
+
+
+
+class CBCT_dataset_gs(CBCT_dataset):
+    def __init__(self, **kwargs):
+        super().__init__(**kwargs)
+        gs_res = self.cfg.gs_res
+        points_gs = np.mgrid[:gs_res, :gs_res, :gs_res] / gs_res
+        self.points_gs = points_gs.reshape(3, -1).transpose(1, 0) # ~[0, 1]
+
+    def __getitem__(self, index):
+        data_dict = super().__getitem__(index)
+
+        # projections of GS points (initial center xyz)
+        points_gs = deepcopy(self.points_gs)
+        points_gs_proj = self.project_points(points_gs, data_dict['angles'])
+
+        data_dict.update({
+            'points_gs': points_gs,          # [K, 3]
+            'points_gs_proj': points_gs_proj # [M, K, 2]
+        })
+        return data_dict
+```
+
+### code/datasets/geometry.py
+```
+import numpy as np
+from copy import deepcopy
+
+
+
+class Geometry(object):
+    def __init__(self, config):
+        self.v_res = config['nVoxel']    # ct scan
+        self.p_res = config['nDetector'] # projections
+        self.v_spacing = np.array(config['dVoxel'])    # mm
+        self.p_spacing = np.array(config['dDetector']) # mm
+        # NOTE: only (res * spacing) is used
+
+        self.DSO = config['DSO'] # mm, source to origin
+        self.DSD = config['DSD'] # mm, source to detector
+
+    def project(self, points, angle):
+        # points: [N, 3] ranging from [0, 1]
+        # d_points: [N, 2] ranging from [-1, 1]
+
+        d1 = self.DSO
+        d2 = self.DSD
+
+        points = deepcopy(points).astype(float)
+        points[:, :2] -= 0.5 # [-0.5, 0.5]
+        points[:, 2] = 0.5 - points[:, 2] # [-0.5, 0.5]
+        points *= self.v_res * self.v_spacing # mm
+
+        angle = -1 * angle # inverse direction
+        rot_M = np.array([
+            [np.cos(angle), -np.sin(angle), 0],
+            [np.sin(angle),  np.cos(angle), 0],
+            [            0,              0, 1]
+        ])
+        points = points @ rot_M.T
+        
+        coeff = (d2) / (d1 - points[:, 0]) # N,
+        d_points = points[:, [2, 1]] * coeff[:, None] # [N, 2] float
+        d_points /= (self.p_res * self.p_spacing)
+        d_points *= 2 # NOTE: some points may fall outside [-1, 1]
+        return d_points
+```
+
+### code/models/base.py
+```
+import torch
+import torch.nn as nn
+import numpy as np
+
+from models.utils import query_view_feats
+from models.unet import UNet
+from models.point_decoder import PointDecoder
+
+
+
+class Recon_base(nn.Module):
+    def __init__(self, cfg):
+        super().__init__()
+        self.cfg = cfg
+        self.init()
+
+    def init(self):
+        self.init_encoder()
+        self.init_decoder(self.image_encoder.out_ch)
+        self.registered_point_keys = ['points_proj']
+
+    def init_encoder(self):
+        cfg = self.cfg.image_encoder
+        self.image_encoder = UNet(
+            in_ch=1,
+            out_ch=cfg.out_ch
+        )
+        
+    def init_decoder(self, mid_ch):
+        cfg = self.cfg.point_decoder
+        self.point_decoder = PointDecoder(
+            channels=[mid_ch] + cfg.mlp_chs,
+            residual=True, 
+            use_bn=True
+        )
+
+    def encode_projs(self, data):
+        encoder_output = self.image_encoder(data['projs'])
+        return {
+            'feats_proj': encoder_output['feats']
+        }
+    
+    def forward_points(self, feats_dict, data):
+        # 1. multi-view pixel-aligned features + max-pooling
+        p_feats = query_view_feats(
+            view_feats=feats_dict['feats_proj'], 
+            points_proj=data['points_proj'],
+            fusion='max'
+        )
+
+        # 2. point-wise prediction
+        p_pred = self.point_decoder(p_feats)
+        return p_pred
+
+    def forward(self, data, is_eval=False, eval_npoint=100000):
+        feats_dict = self.encode_projs(data) # these features are shared for any sampled 3D points
+
+        # point-wise forward
+        if not is_eval:
+            return {
+                'points_pred': self.forward_points(feats_dict, data)
+            }
+        else:
+            total_npoint = data['points_proj'].shape[2]
+            n_batch = int(np.ceil(total_npoint / eval_npoint))
+
+            pred_list = []
+            for i in range(n_batch):
+                left = i * eval_npoint
+                right = min((i + 1) * eval_npoint, total_npoint)
+                
+                tmp_data = {}
+                for key in data.keys():
+                    if key in self.registered_point_keys:
+                        tmp_data[key] = data[key][..., left:right, :]
+                    else: 
+                        tmp_data[key] = data[key]
+                
+                points_pred = self.forward_points(feats_dict, tmp_data) # B, C, N
+                pred_list.append(points_pred)
+
+            return {
+                'points_pred': torch.cat(pred_list, dim=2)
+            }
+```
+
+### code/models/gs_utils.py
+```
+import torch
+import numpy as np
+from pytorch3d.ops.knn import knn_points, knn_gather
+
+
+def build_rotation(r):
+    # https://github.com/graphdeco-inria/gaussian-splatting/blob/main/utils/general_utils.py#L78
+    # https://en.wikipedia.org/wiki/Quaternions_and_spatial_rotation
+    # r: [B, 4]
+    # R: [B, 3, 3]
+    
+    norm = torch.sqrt(
+        r[:, 0] * r[:, 0] + 
+        r[:, 1] * r[:, 1] + 
+        r[:, 2] * r[:, 2] + 
+        r[:, 3] * r[:, 3]
+    )
+
+    q = r / norm[:, None]
+
+    R = torch.zeros((q.size(0), 3, 3), device='cuda')
+
+    r = q[:, 0]
+    x = q[:, 1]
+    y = q[:, 2]
+    z = q[:, 3]
+
+    # https://www.zhihu.com/tardis/zm/art/78987582?source_id=1003 (see Eqn. 21)
+    R[:, 0, 0] = 1 - 2 * (y*y + z*z)
+    R[:, 0, 1] = 2 * (x*y - r*z)
+    R[:, 0, 2] = 2 * (x*z + r*y)
+    R[:, 1, 0] = 2 * (x*y + r*z)
+    R[:, 1, 1] = 1 - 2 * (x*x + z*z)
+    R[:, 1, 2] = 2 * (y*z - r*x)
+    R[:, 2, 0] = 2 * (x*z - r*y)
+    R[:, 2, 1] = 2 * (y*z + r*x)
+    R[:, 2, 2] = 1 - 2 * (x*x + y*y)
+    return R
+
+
+def build_scaling_rotation(s, r):
+    # https://github.com/graphdeco-inria/gaussian-splatting/blob/main/utils/general_utils.py#L101
+    # s: [B, 3]
+    # r: [B, 4]
+    # L: [B, 3, 3]
+
+    L = torch.zeros((s.size(0), 3, 3), dtype=torch.float, device="cuda")
+    R = build_rotation(r)
+
+    L[:, 0, 0] = s[:, 0]
+    L[:, 1, 1] = s[:, 1]
+    L[:, 2, 2] = s[:, 2]
+
+    L = R @ L
+    return L
+
+
+def build_covariance(s, r):
+    # https://github.com/graphdeco-inria/gaussian-splatting/blob/main/scene/gaussian_model.py#L28
+    # s: [B, N, 3]
+    # r: [B, N, 4]
+    # Cov: [B, N, 3, 3]
+
+    b, n = s.shape[:2]
+    s = s.reshape(b * n, 3)
+    r = r.reshape(b * n, 4)
+    
+    L = build_scaling_rotation(s, r)
+    Cov = L @ L.transpose(1, 2)
+
+    Cov = Cov.reshape(b, n, 3, 3)
+    return Cov
+
+
+def query_gs(points, gs_points, gs_params):
+    # points: [B, N, 3]
+    # gs_points: [B, K, 3]
+    # gs_params:
+    #     - det: [B, K]
+    #     - inv: [B, K, 3, 3]
+    #     - offsets: [B, K, 3]
+    #     - feats: [B, K, C]
+
+    B, K = gs_points.shape[:2]
+    N = points.shape[1]
+    k = 3
+
+    # 1. det and inv of Cov
+    det = gs_params['det']
+    inv = gs_params['inv']
+    
+    # 2. query neighbors
+    # neb_idx: [B, N, k]
+    # points_ext: [B, N, k, 3]
+    # gs': [B, N, k, ...], (1) xyz; (2) det, inv; (3) feats.
+    _, neb_idx, _ = knn_points(points, gs_points, K=k) # [B, N, k]
+    points_ext = points.unsqueeze(2).repeat(1, 1, k, 1) # [B, N, k, 3]
+    neb_gs_xyz = knn_gather(
+        gs_points + gs_params['offsets'],
+        neb_idx
+    ) # [B, N, k, 3]
+    neb_gs_feats = knn_gather(
+        gs_params['feats'].transpose(1, 2), # [B, N, C]
+        neb_idx
+    ).permute(0, 3, 1, 2) # [B, N, k, C] => [B, C, N, k]
+    neb_det = knn_gather(
+        det.unsqueeze(-1),
+        neb_idx
+    ).squeeze(-1) # [B, N, k]
+    neb_inv = knn_gather(
+        inv.reshape(B, K, 9),
+        neb_idx
+    ).reshape(B, N, k, 3, 3) # [B, N, k, 3, 3]
+
+    # 3. calculate weights
+    # let * be [B, N, k]
+    # weights: [*]
+    # w = (2*pi)^(-k/2) * det^(-1/2) * exp(-1/2 * (p-mu)' * inv * (p-mu))
+    neb_gs_xyz = (points_ext - neb_gs_xyz).unsqueeze(-1) # [*, 3, 1]
+    weights = np.power(2 * np.pi, -3/2) * \
+        torch.pow(neb_det, -1/2) * \
+        torch.exp(
+            -1/2 * neb_gs_xyz.transpose(3, 4) @ neb_inv @ neb_gs_xyz # [*, 1, 3] @ [*, 3, 3] @ [*, 3, 1] => [*, 1, 1]
+        ).squeeze(4).squeeze(3) # [*]
+
+    # 4. sum weighted features
+    # weights * gs_feats' =(sum)> [B, C, N]
+    weights = weights.unsqueeze(1) # [B, 1, N, k]
+    sum_feats = (weights * neb_gs_feats).sum(dim=-1) # [B, C, N]
+
+    return sum_feats
+```
+
+### code/models/model.py
+```
+import torch
+import torch.nn as nn
+import numpy as np
+
+from models.base import Recon_base
+from models.utils import query_view_feats, MLP_1d
+from models.gs_utils import query_gs, build_covariance
+
+
+
+class DIF_Gaussian(Recon_base):
+    def __init__(self, cfg):
+        super().__init__(cfg)
+
+    def init(self):
+        self.init_encoder()
+        
+        # gaussians-related modules
+        mid_ch = self.image_encoder.out_ch
+        ds_ch = self.image_encoder.ds_ch
+        self.gs_feats_mlp = MLP_1d([ds_ch, ds_ch // 4, mid_ch], use_bn=True, last_bn=True, last_act=False)
+        self.gs_params_mlp = MLP_1d([ds_ch, ds_ch // 4, 3 + 4 + 3], use_bn=True, last_bn=False, last_act=False) # 3d: offsets, 4d: rotation, 3d: scaling
+        self.gs_act = nn.LeakyReLU(inplace=True)
+
+        self.init_decoder(mid_ch * 2)
+        self.registered_point_keys = ['points', 'points_proj']
+
+    def encode_projs(self, data):
+        encoder_output = self.image_encoder(data['projs'])
+
+        p_feats = query_view_feats(
+            view_feats=encoder_output['feats_ds'],
+            points_proj=data['points_gs_proj'],
+            fusion='max'
+        )
+
+        # features
+        gs_feats = self.gs_feats_mlp(p_feats)
+        
+        # hyper-parameters
+        gs_cfg = self.cfg.gs
+
+        t = 1. / gs_cfg.t
+        gs_res = gs_cfg.res
+        p_dist_scaling = gs_cfg.p_dist_scaling
+        o_scaling = gs_cfg.o_scaling
+        s_scaling = gs_cfg.s_scaling
+
+        p_dist = 1 / gs_res * p_dist_scaling
+        
+        # other gs parameters
+        gs_params = self.gs_params_mlp(p_feats)
+        # gs_params[:, :6, :] = gs_params[:, :6, :] / t
+        gs_params = gs_params / t
+
+        # offsets
+        max_dist = p_dist * 0.5 * o_scaling # 0.5: half (two neighboring points share the distance)
+        offsets = gs_params[:, :3, :].transpose(1, 2) # [B, K, 3]
+        offsets = (torch.sigmoid(offsets) - 0.5) * 2 * max_dist
+
+        # s
+        s_mean = np.sqrt(p_dist)
+        s = gs_params[:, 3:6, :].transpose(1, 2) # [B, K, 3]
+        s = torch.sigmoid(s) * 2 * s_scaling * s_mean + (1 - s_scaling) * s_mean # (0, 1) => ((1-k)d, (1+k)d)
+
+        # r
+        r = gs_params[:, 6:, :].transpose(1, 2) # [B, K, 4]
+
+        # convariance matrix, det/inv
+        Cov = build_covariance(s, r) # [B, K, 3, 3]
+        det = torch.linalg.det(Cov)  # [B, K]
+        inv = torch.linalg.inv(Cov)  # [B, K, 3, 3]
+
+        return {
+            'feats_proj': encoder_output['feats'],
+            'gs_params': {
+                'feats': gs_feats,  # [B, C, K]
+                'offsets': offsets, # [B, K, 3]
+                'det': det,         # [B, K]
+                'inv': inv,         # [B, K, 3, 3]
+            }
+        }
+
+    def forward_points(self, feats_dict, data):
+        # 1. multi-view pixel-aligned features + max-pooling
+        p_feats = query_view_feats(
+            view_feats=feats_dict['feats_proj'], 
+            points_proj=data['points_proj'],
+            fusion='max'
+        )
+
+        # 2. gaussian-based interp
+        interp_feats = query_gs(
+            data['points'], 
+            data['points_gs'], 
+            feats_dict['gs_params']
+        )
+        interp_feats = self.gs_act(interp_feats)
+        p_feats = torch.cat([p_feats, interp_feats], dim=1)
+
+        # 3. point-wise prediction
+        p_pred = self.point_decoder(p_feats)
+        return p_pred
+```
+
+### code/models/point_decoder.py
+```
+import torch
+import torch.nn as nn
+
+
+
+class PointDecoder(nn.Module):
+    def __init__(self, channels, residual=True, use_bn=True):
+        super().__init__()
+
+        self.residual = residual
+        self.mlps = nn.ModuleList()
+
+        for i in range(len(channels) - 1):
+            modules = []
+            if i == 0 or not self.residual:
+                modules.append(nn.Conv1d(channels[i], channels[i + 1], kernel_size=1))
+            else:
+                modules.append(nn.Conv1d(channels[i] + channels[0], channels[i + 1], kernel_size=1))
+
+            if i != len(channels) - 1:
+                if use_bn:
+                    modules.append(nn.BatchNorm1d(channels[i + 1]))
+                modules.append(nn.LeakyReLU(inplace=True))
+
+            self.mlps.append(nn.Sequential(*modules))
+
+    def forward(self, x):
+        x_ = x
+        for i, m in enumerate(self.mlps):
+            if i != 0 and self.residual:
+                x_ = torch.cat([x_, x], dim=1)
+            x_ = m(x_)
+        return x_
+```
+
+### code/models/unet.py
+```
+import torch
+import torch.nn as nn
+import torch.nn.functional as F
+
+
+
+class UNet(nn.Module):
+    def __init__(self, in_ch, out_ch):
+        super().__init__()
+
+        self._out_ch = out_ch
+        self._ds_ch = 1024
+
+        self.inc = DoubleConv(in_ch, 64)
+
+        self.down = nn.ModuleList()
+        for m in [           # in: 256x
+            DownConv(64, 128),   # 128x
+            DownConv(128, 256),  # 64x
+            DownConv(256, 512),  # 32x
+            DownConv(512, 1024)  # 16x
+        ]:
+            self.down.append(m)
+
+        self.up = nn.ModuleList()
+        for m in [
+            UpConv(1024, 512), # 32x
+            UpConv(512, 256),  # 64x
+            UpConv(256, 128),  # 128x
+            UpConv(128, 64)    # 256x
+        ]:
+            self.up.append(m)
+
+        self.outc = nn.Sequential(
+            nn.Conv2d(64, out_ch, kernel_size=1),
+            nn.BatchNorm2d(out_ch),
+            nn.LeakyReLU(inplace=True)
+        )
+    
+    @property
+    def out_ch(self):
+        return self._out_ch
+
+    @property
+    def ds_ch(self):
+        return self._ds_ch
+
+    def forward(self, x):
+        # x: [B, M, C, W, H], M: the number of views
+        # outputs: [B, M, C', W', H']
+        b, m = x.shape[:2]
+        x = x.reshape(b * m, *x.shape[2:])
+
+        x1 = self.inc(x)
+
+        xs = [x1]
+        for conv in self.down:
+            xs.append(conv(xs[-1]))
+
+        x = xs[-1]
+        ds_x = x
+
+        for i, conv in enumerate(self.up):
+            x = conv(x, xs[-(2 + i)])
+
+        y = self.outc(x)
+        return {
+            'feats': y.reshape(b, m, *y.shape[1:]), 
+            'feats_ds': ds_x.reshape(b, m, *ds_x.shape[1:])
+        }
+
+
+class DoubleConv(nn.Module):
+    def __init__(self, in_ch, out_ch, mid_ch=None):
+        super().__init__()
+        if mid_ch is None:
+            mid_ch = out_ch
+        self.double_conv = nn.Sequential(
+            nn.Conv2d(in_ch, mid_ch, kernel_size=3, padding=1, bias=False),
+            nn.BatchNorm2d(mid_ch),
+            nn.ReLU(inplace=True),
+            nn.Conv2d(mid_ch, mid_ch, kernel_size=3, padding=1, bias=False),
+            nn.BatchNorm2d(out_ch),
+            nn.ReLU(inplace=True)
+        )
+
+    def forward(self, x):
+        return self.double_conv(x)
+
+
+class DownConv(nn.Module):
+    def __init__(self, in_ch, out_ch):
+        super().__init__()
+        self.maxpool_conv = nn.Sequential(
+            nn.MaxPool2d(kernel_size=2),
+            DoubleConv(in_ch, out_ch)
+        )
+
+    def forward(self, x):
+        return self.maxpool_conv(x)
+
+
+class UpConv(nn.Module):
+    def __init__(self, in_ch, out_ch):
+        super().__init__()
+        self.up = nn.ConvTranspose2d(in_ch, in_ch // 2, kernel_size=2, stride=2)
+        self.conv = DoubleConv(in_ch, out_ch)
+
+    def forward(self, x1, x2):
+        x1 = self.up(x1)
+        
+        diffY = x2.size()[2] - x1.size()[2]
+        diffX = x2.size()[3] - x1.size()[3]
+
+        x1 = F.pad(x1, [diffX // 2, diffX - diffX // 2,
+                        diffY // 2, diffY - diffY // 2])
+        '''
+           if you have padding issues, see
+           https://github.com/HaiyongJiang/U-Net-Pytorch-Unstructured-Buggy/commit/0e854509c2cea854e247a9c615f175f76fbb2e3a
+           https://github.com/xiaopeng-liao/Pytorch-UNet/commit/8ebac70e633bac59fc22bb5195e513d5832fb3bd
+        '''
+        x = torch.cat([x2, x1], dim=1)
+        return self.conv(x)
+```
+
+### code/models/utils.py
+```
+import torch
+from torch import nn
+import torch.nn.functional as F
+
+
+
+def index_3d(feat, uv):
+    '''
+    :param feat: [B, C, H, W, D] image features
+    :param uv: [B, N, 3] uv coordinates in the image plane, range [-1, 1]
+    :return: [B, C, N] image features at the uv coordinates
+    '''
+    uv = uv.unsqueeze(2).unsqueeze(2)  # [B, N, 1, 1, 3]; 5-d case
+    feat = feat.transpose(2, 4)
+    # NOTE: for newer PyTorch, it seems that training results are degraded due to implementation diff in F.grid_sample
+    # for old versions, simply remove the aligned_corners argument.
+    samples = torch.nn.functional.grid_sample(feat, uv, align_corners=True)  # [B, C, N, 1, 1]
+    return samples[:, :, :, 0, 0]  # [B, C, N]
+
+
+def index_2d(feat, uv):
+    # https://zhuanlan.zhihu.com/p/137271718
+    # feat: [B, C, H, W]
+    # uv: [B, N, 2]
+    uv = uv.unsqueeze(2) # [B, N, 1, 2]
+    feat = feat.transpose(2, 3) # [W, H]
+    samples = torch.nn.functional.grid_sample(feat, uv, align_corners=True) # [B, C, N, 1]
+    return samples[:, :, :, 0] # [B, C, N]
+
+
+def query_view_feats(view_feats, points_proj, fusion='max'):
+    # view_feats: [B, M, C, H, W]
+    # points_proj: [B, M, N, 2]
+    # output: [B, C, N, M]
+    n_view = view_feats.shape[1]
+    p_feats_list = []
+    for i in range(n_view):
+        feat = view_feats[:, i, ...] # B, C, W, H
+        p = points_proj[:, i, ...] # B, N, 2
+        p_feats = index_2d(feat, p) # B, C, N
+        p_feats_list.append(p_feats)
+    p_feats = torch.stack(p_feats_list, dim=-1) # B, C, N, M
+    if fusion == 'max':
+        p_feats = F.max_pool2d(p_feats, (1, p_feats.shape[-1]))
+        p_feats = p_feats.squeeze(-1) # [B, C, K]
+    elif fusion is not None:
+        raise NotImplementedError
+    return p_feats
+
+
+class MLP_1d(nn.Module):
+    def __init__(self, mlp_list, use_bn=False, last_bn=True, last_act=True):
+        super().__init__()
+
+        layers = []
+        for i in range(len(mlp_list) - 1):
+            layers += [nn.Conv1d(mlp_list[i], mlp_list[i + 1], kernel_size=1)]
+            if use_bn and (last_bn or i < len(mlp_list) - 2):
+                layers += [nn.BatchNorm1d(mlp_list[i + 1])]
+            if last_act or i < len(mlp_list) - 2:
+                layers += [nn.LeakyReLU(inplace=True)]
+        
+        self.layer = nn.Sequential(*layers)
+
+    def forward(self, x):
+        return self.layer(x)
+```

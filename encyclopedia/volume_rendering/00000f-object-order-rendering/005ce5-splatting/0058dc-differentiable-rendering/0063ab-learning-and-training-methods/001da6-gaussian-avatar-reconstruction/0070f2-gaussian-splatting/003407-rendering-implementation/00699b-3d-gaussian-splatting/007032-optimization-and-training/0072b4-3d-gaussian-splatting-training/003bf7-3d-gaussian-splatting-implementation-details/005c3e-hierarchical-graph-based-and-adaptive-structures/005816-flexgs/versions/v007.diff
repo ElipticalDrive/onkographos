@@ -1,0 +1,297 @@
+--- v006.md
++++ v007.md
+@@ -1,55 +1,45 @@
+ # FlexGS
+ 
+-Also called: Flexible 3D Gaussian Splatting, Elastic 3DGS
++Also called: Flexible 3D Gaussian Splatting, Elastic Inference for 3DGS
+ 
+ ## Overview
+-FlexGS is an elastic inference method for 3D Gaussian Splatting (3DGS) that enables a single trained model to adapt to varying computational constraints at inference time by selecting and transforming a subset of Gaussians based on a desired model size ratio, without requiring additional fine-tuning [S1]. It solves the problem that standard 3DGS models are too memory-intensive for devices with restricted resources (e.g., smartphones, VR headsets) and that previous compression methods require costly separate fine-tuning runs for each target compression ratio [S1]. Unlike post-hoc pruning methods that use fixed heuristics to retain Top-K Gaussians, FlexGS jointly trains a learnable selector and a transformation field to dynamically adjust the primitive set [S1].
++FlexGS is an elastic inference method for 3D Gaussian Splatting (3DGS) that enables a single trained model to adapt to varying computational constraints at inference time by selecting and transforming a subset of Gaussians based on a desired model size ratio, without requiring additional fine-tuning [S1]. It solves the problem of standard 3DGS requiring significant GPU memory, which limits deployment on devices with restricted resources (e.g., smartphones, VR headsets) by decoupling model size from fixed pruning ratios [S1]. Unlike post-hoc compression methods that require separate fine-tuning runs for each target ratio, FlexGS jointly trains a learnable selector and transformation field to dynamically balance quality and cost [S1].
+ 
+ ## How it works
+ **Inputs and Outputs:**
+-*   **Input:** A pre-trained 3DGS model consisting of $N$ Gaussians, each characterized by position $\mathbf{X}$, scaling vector $\mathbf{s}$, rotation vector $\mathbf{q}$, opacity $\alpha$, and spherical harmonics coefficients $\mathbf{SH}$ [S1]. A target ratio $e \in (0, 1]$ specifying the fraction of Gaussians to retain [S1].
+-*   **Output:** A subset of $K = eN$ Gaussians, with modified parameters, ready for rendering [S1].
++*   **Input:** A pre-trained 3DGS model consisting of $N$ Gaussians, each characterized by position $X \in \mathbb{R}^3$, scaling vector $s \in \mathbb{R}^3$, rotation quaternion $q \in \mathbb{R}^3$, opacity $\alpha \in \mathbb{R}$, and color $c$ defined by spherical harmonics coefficients $SH \in \mathbb{R}^{(d+1)}$ [S1]. A target ratio $e \in (0, 1]$ representing the desired percentage of remaining Gaussians [S1].
++*   **Output:** A rendered image using a subset of the original Gaussians, where the selected Gaussians are transformed to compensate for missing details [S1].
+ 
+ **Data Structures:**
+-*   **Gaussian Attributes:** Each Gaussian $i$ is defined by:
+-    *   Position $\mathbf{X}_i \in \mathbb{R}^3$ [S1].
+-    *   Scaling vector $\mathbf{s}_i \in \mathbb{R}^3$ [S1].
+-    *   Rotation vector $\mathbf{q}_i \in \mathbb{R}^3$ [S1].
+-    *   Opacity $\alpha_i \in \mathbb{R}$ [S1].
+-    *   Color $\mathbf{c}_i$ defined by spherical harmonics coefficients $\mathbf{SH}_i \in \mathbb{R}^{(d+1)}$ where $d$ is the SH degree [S1].
+-*   **Selector Output:** A binary scaler $\lambda_i \in \{0, 1\}$ for each Gaussian, where $\lambda_i = 1$ indicates selection [S1].
++*   **Gaussian Set:** A collection of $N$ primitives. Each primitive $i$ stores:
++    *   Mean position: $X_i$
++    *   Scaling vector: $s_i$
++    *   Rotation quaternion: $q_i$
++    *   Opacity: $\alpha_i$
++    *   Spherical Harmonics coefficients: $SH_i$
++*   **Selector Output:** A binary mask vector $\lambda \in \{0, 1\}^N$, where $\lambda_i = 1$ if Gaussian $i$ is selected, and $0$ otherwise.
++*   **Transformation Field:** A module that outputs displacement and scaling adjustments for selected Gaussians [S1].
+ 
+ **Core Formulas:**
+-1.  **Gaussian Definition:** The spatial distribution is defined by mean $\mathbf{X}$ and covariance $\mathbf{\Sigma}$:
+-    $$ G(\mathbf{X}) = e^{-\frac{1}{2} \mathbf{X}^\top \mathbf{\Sigma}^{-1} \mathbf{X}} $$
+-    The covariance is decomposed into scaling matrix $\mathbf{S}$ and rotation matrix $\mathbf{R}$:
+-    $$ \mathbf{\Sigma} = \mathbf{R} \mathbf{S} \mathbf{S}^\top \mathbf{R}^\top $$
+-    where $\mathbf{S}$ is derived from $\mathbf{s}$ and $\mathbf{R}$ from $\mathbf{q}$ [S1].
+-2.  **Rendering Equation:** Color $C$ for a pixel is computed via alpha-blending of overlapping Gaussians sorted by depth:
+-    $$ C = \sum_{i \in N_{active}} \mathbf{c}_i \alpha_i \prod_{j=1}^{i-1} (1 - \alpha_j) $$
+-    where $N_{active}$ are the selected Gaussians overlapping the pixel [S1].
+-3.  **Selection Constraint:** The sum of selected Gaussians must equal the target count:
++Each Gaussian is defined by a mean value $X$ and a covariance matrix $\Sigma$:
++$$ G(X) = e^{-\frac{1}{2} X \Sigma^{-1} X} $$
++The covariance matrix $\Sigma$ is decomposed into a scaling matrix $S$ and a rotation matrix $R$ for differentiable optimization:
++$$ \Sigma = R S S^\top R^\top $$
++where $S$ is derived from the scaling vector $s$ and $R$ from the quaternion $q$ [S1].
++
++Rendering blends $N$ ordered points overlapping a pixel using color $c_i$ and opacity $\alpha_i$:
++$$ C = \sum_{i \in N} c_i \alpha_i \prod_{j=1}^{i-1} (1 - \alpha_j) $$
++[ S1 ]
++
++**Numbered Steps:**
++1.  **Initialization:** Train the base 3DGS model using standard differentiable rendering optimization [S1].
++2.  **Selector Training:** During training, for each batch, sample a target ratio $e$ from a distribution of desired ratios [S1].
++3.  **Adaptive Selection:** Predict a binary scaler $\lambda_i$ for each Gaussian $i$ based on its attributes and the target ratio $e$. The selection must satisfy the constraint:
+     $$ \sum_{i=1}^{N} \lambda_i = eN $$
+-    [S1].
+-
+-**Steps:**
+-1.  **Training Phase (Joint Optimization):**
+-    *   Initialize a standard 3DGS model with $N$ Gaussians [S1].
+-    *   Introduce a **Learnable Gaussian Selector**: A module that takes Gaussian attributes ($\mathbf{X}, \mathbf{s}, \mathbf{q}, \alpha, \mathbf{SH}$) and the target ratio $e$ as input, and outputs a probability distribution over $\lambda_i$ [S1]. To handle the discrete nature of $\lambda_i$, the method uses Gumbel-Softmax relaxation during training to allow gradient backpropagation [S1].
+-    *   Introduce a **Ratio-Dependent Gaussian Transformation Field**: A module that takes the selected Gaussians and the ratio $e$ as input, and outputs displacement/adjustment parameters to modify the attributes of the selected Gaussians [S1]. This compensates for missing details caused by pruning [S1].
+-    *   Jointly optimize 3DGS, selector, and transform network using standard rendering loss (e.g., L1 + SSIM) [S1]. The selector learns to identify important Gaussians dynamically as attributes evolve, avoiding the need for frequent re-computation of static importance scores [S1].
+-
+-2.  **Inference Phase (Elastic Deployment):**
+-    *   Given a target ratio $e$ (e.g., 0.1 for 10% of Gaussians):
+-    *   **Select:** Pass the pre-trained Gaussians and $e$ through the learned selector to obtain binary mask $\lambda_i$. Filter the Gaussian set to keep only those with $\lambda_i = 1$ [S1]. The number of kept Gaussians is $K = eN$ [S1].
+-    *   **Transform:** Pass the selected Gaussians and $e$ through the learned transformation field. Apply the predicted adjustments to the position, scale, or other attributes of the selected Gaussians to restore visual fidelity lost by pruning [S1].
+-    *   **Render:** Deploy the model with a specific compression ratio and render the transformed subset using the standard 3DGS rasterization pipeline [S1].
+-
+-**Parameters:**
+-*   **Target Ratio ($e$):** A float between 0 and 1. Typical values depend on hardware constraints (e.g., 0.1 for mobile, 0.5 for VR) [S1]. Not given in the sources for specific training hyperparameters (e.g., learning rates, number of iterations) [S1].
+-
+-**Edge Cases and Pitfalls:**
+-*   **Extreme Compression:** Fixed heuristic selection may fail when selecting very small percentages (e.g., 1%) because importance scores must be frequently re-computed as Gaussian attributes evolve during training [S1].
+-*   **Discrete Optimization:** Direct optimization over discrete binary choices $\lambda_i$ is ineffective for gradient descent [S1].
++    [ S1 ]
++    To handle the discrete nature of $\lambda_i$, the method uses a learnable module (e.g., Gumbel-Softmax relaxation during training) to allow gradient descent [S1].
++4.  **Transformation:** For the selected Gaussians ($\lambda_i = 1$), apply a ratio-dependent transformation field. This field displaces the Gaussians and adjusts their attributes to compensate for the missing details caused by the reduction in Gaussian count [S1].
++5.  **Rendering:** Render the scene using the transformed subset of Gaussians [S1].
++6.  **Inference:** At inference time, input any ratio $e$. The trained selector determines the subset, the transformation field adjusts them, and rendering proceeds without further training [S1].
+ 
+ **Pseudocode:**
+@@ -64,97 +54,136 @@
+         """
+         gaussians: List of Gaussian objects with attributes X, s, q, alpha, SH
+-        selector_net: nn.Module that outputs selection logits given attributes and ratio
+-        transform_net: nn.Module that outputs transformation deltas given attributes and ratio
++        selector_net: Neural network predicting selection logits based on Gaussian attributes and ratio e
++        transform_net: Neural network predicting transformations for selected Gaussians
+         """
+         self.gaussians = gaussians
+-        self.selector = selector_net
+-        self.transform = transform_net
++        self.N = len(gaussians)
++        self.selector_net = selector_net
++        self.transform_net = transform_net
+ 
+-    def train_step(self, images, cameras, target_ratio, optimizer):
+-        optimizer.zero_grad()
++    def select_gaussians(self, ratio_e, training=False):
++        """
++        Selects a subset of Gaussians based on ratio e.
++        Returns: binary_mask (N,), selected_gaussians_indices
++        """
++        # Extract features from all Gaussians
++        # Features might include X, s, q, alpha, SH norms, etc.
++        features = self._extract_features(self.gaussians)
+         
+-        # 1. Get selection probabilities using Gumbel-Softmax relaxation
+-        selection_logits = self.selector(self.gaussians, target_ratio)
+-        # Relax binary selection to continuous for backprop
+-        lambda_relaxed = self.gumbel_softmax(selection_logits, hard=False)
++        # Concatenate ratio e as a feature for the selector
++        # Repeat ratio for all N Gaussians
++        ratio_tensor = torch.full((self.N, 1), ratio_e, device=features.device)
++        input_to_selector = torch.cat([features, ratio_tensor], dim=-1)
+         
+-        # 2. Apply selection mask to Gaussians (soft selection)
+-        # [G] Standard practice multiplies attributes by the relaxed mask or uses it as a weight
+-        selected_gaussians = self.apply_selection(self.gaussians, lambda_relaxed)
++        # Predict logits for selection
++        logits = self.selector_net(input_to_selector)
+         
+-        # 3. Apply transformation to compensate for pruning
+-        transform_deltas = self.transform(selected_gaussians, target_ratio)
+-        transformed_gaussians = self.apply_transform(selected_gaussians, transform_deltas)
+-        
+-        # 4. Render images using transformed Gaussians
+-        rendered_images = render_3dgs(transformed_gaussians, cameras)
+-        
+-        # 5. Compute loss (e.g., L1 + SSIM)
+-        loss = compute_loss(rendered_images, images)
+-        
+-        # 6. Backpropagate
+-        loss.backward()
+-        optimizer.step()
+-        
+-        return loss
++        if training:
++            # Use Gumbel-Softmax for differentiable selection during training
++            # Note: Exact temperature and implementation details depend on the specific Gumbel-Softmax variant used
++            # [G] Standard Gumbel-Softmax relaxation is used here to allow backpropagation
++            selection_probs = F.gumbel_softmax(logits, tau=1.0, hard=False)
++            # Hard mask for loss calculation or visualization if needed
++            binary_mask = (selection_probs > 0.5).float()
++        else:
++            # During inference, use hard selection
++            # Ensure exactly e*N Gaussians are selected
++            # [G] Argtopk is used to ensure the exact count constraint is met
++            k = int(ratio_e * self.N)
++            _, indices = torch.topk(logits.squeeze(), k)
++            binary_mask = torch.zeros(self.N, device=logits.device)
++            binary_mask[indices] = 1.0
++            
++        return binary_mask
+ 
+-    def infer(self, target_ratio):
+-        # 1. Hard selection based on learned probabilities
+-        selection_logits = self.selector(self.gaussians, target_ratio)
+-        lambda_hard = (selection_logits > 0.5).float()
+-        
+-        # 2. Filter Gaussians
+-        selected_indices = torch.where(lambda_hard == 1)[0]
++    def transform_gaussians(self, selected_indices, ratio_e):
++        """
++        Transforms the selected Gaussians to compensate for missing details.
++        Returns: Transformed Gaussians
++        """
+         selected_gaussians = [self.gaussians[i] for i in selected_indices]
+         
+-        # 3. Transform selected Gaussians
+-        transform_deltas = self.transform(selected_gaussians, target_ratio)
+-        transformed_gaussians = self.apply_transform(selected_gaussians, transform_deltas)
++        # Extract features for transformation
++        features = self._extract_features(selected_gaussians)
++        ratio_tensor = torch.full((len(selected_gaussians), 1), ratio_e, device=features.device)
++        input_to_transform = torch.cat([features, ratio_tensor], dim=-1)
+         
++        # Predict transformations (e.g., displacement, scale adjustment)
++        transformations = self.transform_net(input_to_transform)
++        
++        # Apply transformations to the selected Gaussians
++        # [G] Specific transformation logic (e.g., adding displacement to X)
++        transformed_gaussians = []
++        for i, g in enumerate(selected_gaussians):
++            new_g = g.copy()
++            # Apply predicted transformation
++            # new_g.X += transformations[i].displacement
++            # new_g.s *= transformations[i].scale_factor
++            # [G] Placeholder for specific transformation application logic
++            transformed_gaussians.append(new_g)
++            
+         return transformed_gaussians
+ 
+-    def gumbel_softmax(self, logits, tau=1.0, hard=False):
+-        gumbels = -torch.empty_like(logits).exponential_().log()
+-        gumbels = (logits + gumbels) / tau
+-        y_soft = F.softmax(gumbels, dim=-1)
+-        if hard:
+-            index = y_soft.max(1, keepdim=True)[1]
+-            y_hard = torch.zeros_like(logits).scatter_(1, index, 1.0)
+-            return y_hard - y_soft.detach() + y_soft
+-        return y_soft
+-
+-    def apply_selection(self, gaussians, mask):
+-        # [G] Multiplies each Gaussian's attributes by the selection mask
+-        return [g * mask[i] for i, g in enumerate(gaussians)]
+-
+-    def apply_transform(self, gaussians, deltas):
+-        # [G] Adds transformation deltas to Gaussian attributes
+-        return [g + deltas[i] for i, g in enumerate(gaussians)]
+-
+-    def render_3dgs(gaussians, cameras):
+-        # [G] Standard 3DGS rasterization pipeline not specified in source
++    def render(self, transformed_gaussians, camera_params):
++        """
++        Renders the scene using the transformed Gaussians.
++        """
++        # Standard 3DGS rendering pipeline
++        # 1. Project Gaussians to 2D
++        # 2. Sort by depth
++        # 3. Alpha blend
++        # [G] Standard 3DGS rasterization code
+         pass
+ 
+-    def compute_loss(rendered, target):
+-        # [G] Standard L1 and SSIM loss computation not specified in source
++    def _extract_features(self, gaussians):
++        # Extract relevant features from Gaussian attributes
++        # [G] Implementation depends on specific feature engineering
+         pass
+ ```
+ 
++**Parameters:**
++*   **Target Ratio ($e$):** The desired percentage of Gaussians to retain. Typical values range from 0.01 (1%) to 1.0 (100%) [S1].
++*   **Number of Gaussians ($N$):** The total number of Gaussians in the initial 3DGS model [S1].
++
++**Edge Cases and Pitfalls:**
++*   **Extreme Ratios:** Fixed heuristic selection rules may fail to generalize in extreme cases, such as when selecting only 1% of Gaussians, because importance scores must be frequently re-computed as Gaussian attributes evolve during training [S1]. FlexGS addresses this by jointly training the selector [S1].
++*   **Discrete Optimization:** The binary nature of selection requires special handling (e.g., Gumbel-Softmax) to enable gradient-based training [S1].
++
++## Subtopics
++
++### TraGraph-GS
++Defines edges between Gaussians based on feature matching or geometric intersection. [Link](14454-tragraph-gs.md)
++
++### Gaussian Mixture Tree Construction
++Merges primitives into parent nodes using statistical or spatial criteria. [Link](16717-gaussian-mixture-tree-construction.md)
++
++### Mipmap-GS
++Modifies Gaussian parameters dynamically based on view-dependent factors like zoom level. [Link](16893-mipmap-gs.md)
++
++### Hierarchical Anchor Coupling
++Uses hierarchical structures to couple Gaussians. [Link](17260-hierarchical-anchor-coupling.md)
++
++### Self-Organizing Gaussian Grids
++Organizes Gaussians into a grid structure. [Link](19022-self-organizing-gaussian-grids.md)
++
++### Surface-Aware Splat Graph Construction
++Defines edges based on geometric intersection. [Link](22007-surface-aware-splat-graph-construction.md)
++
+ ## Operating characteristics
+-*   **Time Complexity:** Training time is comparable to standard 3DGS but requires joint optimization of the selector and transformation networks, potentially increasing per-step cost [S1]. Inference time is reduced as fewer Gaussians are rendered [S1].
+-*   **Memory Complexity:** Inference memory scales with the target ratio $e$, allowing deployment on devices with limited VRAM [S1].
+-*   **Measured Performance:** Experiments on ZipNeRF, MipNeRF, and Tanks&Temples scenes demonstrate effectiveness in balancing rendering speed and visual quality [S1]. Specific PSNR/SSIM metrics or FPS numbers are not provided in the sources [S1].
++*   **Time Complexity:** Inference time is proportional to the number of selected Gaussians, which is $eN$. The selection and transformation steps add negligible overhead compared to rendering [S1].
++*   **Memory Complexity:** Memory usage is proportional to the number of selected Gaussians, $eN$. The selector and transformation networks are lightweight [S1].
++*   **Measured Performance:** Experiments on ZipNeRF, MipNeRF, and Tanks&Temples scenes demonstrate effectiveness in maintaining rendering performance while reducing model size [S1].
+ *   **Strengths:**
+-    *   Single model supports arbitrary compression ratios without retraining [S1].
+-    *   Adapts to diverse hardware constraints (smartphones, VR) [S1].
+-    *   Avoids the need for separate fine-tuning runs for each ratio [S1].
++    *   Single model can be deployed on diverse hardware constraints (smartphones, VR headsets) [S1].
++    *   No additional fine-tuning required for different ratios [S1].
++    *   Adapts to arbitrary ratios during inference [S1].
+ *   **Limitations:**
+-    *   Requires joint training of additional modules, increasing training complexity [S1].
+-    *   Performance at extreme compression ratios (e.g., 1%) may be challenging due to the difficulty of learning robust selection and transformation policies [S1].
+-*   **When to use:** When deploying 3DGS on multiple devices with varying computational capabilities and avoiding the cost of maintaining multiple pruned models [S1].
+-*   **When not to use:** When maximum possible quality is required for a single fixed hardware configuration (standard 3DGS or post-hoc pruning with fine-tuning might yield better results for that specific ratio) [S1].
++    *   Requires joint training of selector and transformation modules, which may increase training complexity compared to standard 3DGS [S1].
++    *   Performance at extreme ratios (e.g., 1%) may still be challenging, though improved over heuristics [S1].
++*   **When to Use:** When deploying 3DGS models on devices with varying computational resources and avoiding the need for multiple model versions or retraining is critical [S1].
++*   **When Not to Use:** When the highest possible quality at very low ratios is required and the overhead of joint training is prohibitive [S1].
+ 
+ ## Background
+-FlexGS was introduced by Hengyu Liu, Yuehao Wang, Chenxin Li, Ruisi Cai, Kevin Wang, Wuyang Li, Pavlo Molchanov, Peihao Wang, and Zhangyang Wang from The Chinese University of Hong Kong, University of Texas at Austin, and Nvidia [S1]. The paper "FlexGS: Train Once, Deploy Everywhere with Many-in-One Flexible 3D Gaussian Splatting" was published in CVPR 2025 (arXiv:2506.04174v1, June 4, 2025) [S1]. It addresses the limitations of standard 3DGS in terms of memory overhead and the rigidity of previous compression methods that require separate fine-tuning for each target compression ratio [S1].
++FlexGS was introduced by Hengyu Liu, Yuehao Wang, Chenxin Li, Ruisi Cai, Kevin Wang, Wuyang Li, Pavlo Molchanov, Peihao Wang, and Zhangyang Wang from The Chinese University of Hong Kong, University of Texas at Austin, and Nvidia [S1]. The paper "FlexGS: Train Once, Deploy Everywhere with Many-in-One Flexible 3D Gaussian Splatting" was published in CVPR 2025 (arXiv:2506.04174v1, June 4, 2025) [S1]. It addresses the limitations of standard 3DGS in terms of memory overhead and the lack of adaptability for different devices in previous compression methods [S1].
+ 
+ ## Sources

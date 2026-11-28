@@ -1,0 +1,655 @@
+#  3D Brain MRI Volume Renderer
+
+An interactive 3D volume rendering tool for brain MRI data, built entirely in Python using VTK, NiBabel, and NumPy. Explore internal anatomical brain structures in real time — cortical folding, deep white matter, subcortical regions — directly from a raw MRI volume, with no segmentation mask needed.
+
+## Features
+
+- GPU-accelerated ray-cast volume rendering via VTK
+- Real-time interactive cropping along X, Y, and Z axes
+- Intensity clipping to isolate tissue layers
+- Transfer function manually calibrated to actual voxel spacing (0.781 mm x 2.0 mm x 0.781 mm)
+- Gradient opacity for sharp anatomical edge definition
+- FXAA anti-aliasing and 8x multisampling for clean output
+- Fully local — no cloud dependency, no segmentation mask required
+- Runs on any standard Windows/Linux machine with a GPU
+
+---
+
+## Controls
+
+### Camera (always active)
+
+| Action | Control |
+|---|---|
+| Rotate volume | Left Mouse Button + Drag |
+| Zoom in / out | Middle Mouse Button or Scroll |
+| Pan / Move | Right Mouse Button + Drag |
+
+### Cropping Tool
+
+| Action | Control |
+|---|---|
+| Toggle cropping on/off | C |
+| Crop along X-axis | Arrow Keys left / right |
+| Crop along Y-axis | Arrow Keys up / down |
+| Crop along Z-axis | PageUp / PageDown |
+| Expand crop region | Shift + Arrow Keys |
+| Reset crop to full volume | R |
+
+### Intensity Clipping Tool
+
+| Action | Control |
+|---|---|
+| Toggle clipping on/off | V |
+| Increase lower threshold (remove dark areas) | + |
+| Decrease lower threshold | - |
+| Increase upper threshold | ] |
+| Decrease upper threshold | [ |
+| Reset clipping to full range | R |
+
+---
+
+## Dataset
+
+This project uses the **Hippocampus Segmentation in MRI Images** dataset from Kaggle:
+
+[https://www.kaggle.com/datasets/andrewmvd/hippocampus-segmentation-in-mri-images](https://www.kaggle.com/datasets/andrewmvd/hippocampus-segmentation-in-mri-images)
+
+The raw files are provided in Analyze format (.hdr + .img). The first step of the pipeline converts them to NIfTI (.nii) using NiBabel before feeding them into the renderer.
+
+### Conversion script
+
+```python
+import nibabel as nib
+import numpy as np
+
+img = nib.load('HFH_026.hdr')
+data = np.squeeze(img.get_fdata())
+nii = nib.Nifti1Image(data, img.affine, img.header)
+nib.save(nii, 'HFH_026.nii')
+```
+
+---
+
+## Installation
+
+### Requirements
+
+- Python 3.9 or higher
+- A GPU with OpenGL support (for VTK GPU rendering)
+
+### Install dependencies
+
+```bash
+pip install -r requirements.txt
+```
+
+**requirements.txt**
+
+```
+nibabel
+numpy
+vtk
+```
+
+### Run
+
+```bash
+python crop_clip.py
+```
+
+By default the script looks for a NIfTI file at the path defined inside `crop_clip.py`. Edit the `file_path` variable at the bottom of the script to point to your own `.nii` file:
+
+```python
+file_path = "path/to/your/volume.nii"
+```
+
+---
+
+## Technical Details
+
+### Pipeline
+
+```
+Analyze (.hdr + .img)
+        |
+        v
+   NiBabel load
+        |
+        v
+  np.squeeze()          # remove singleton dimension
+        |
+        v
+  Normalize [0, 1]      # map intensity range to float
+        |
+        v
+  Set voxel spacing     # from header.get_zooms() — critical for correct geometry
+        |
+        v
+  VTK vtkImageData      # feed into GPU ray-cast mapper
+        |
+        v
+  Transfer function     # scalar opacity + gradient opacity calibrated to data
+        |
+        v
+  Interactive render    # crop box + intensity clipping in real time
+```
+
+### Key rendering settings
+
+```python
+# Fine ray sampling — removes wood-grain banding artifact
+mapper.SetSampleDistance(0.3)
+mapper.SetAutoAdjustSampleDistances(False)
+
+# Jittering — breaks up residual banding into imperceptible noise
+mapper.UseJitteringOn()
+
+# Gradient opacity — gives anatomical boundaries sharp definition
+# Scaled to normalized [0,1] data range, not raw intensity
+gradient_opacity.AddPoint(0.0,  0.0)
+gradient_opacity.AddPoint(0.05, 0.5)
+gradient_opacity.AddPoint(0.2,  1.0)
+
+# Anti-aliasing
+render_window.SetMultiSamples(8)
+renderer.UseFXAAOn()
+```
+
+> The transfer function gradient opacity range must match the actual gradient magnitudes of the normalized data. With data in [0, 1], gradients are small floats — using a range of 0–90 (a common default) multiplies every voxel opacity by zero and produces a completely black screen.
+
+---
+
+## Stack
+
+| Library | Role |
+|---|---|
+| Python | Core language |
+| VTK | GPU ray-cast volume rendering, interaction, cropping |
+| NiBabel | NIfTI / Analyze file I/O, voxel spacing |
+| NumPy | Data normalization, array manipulation |
+
+---
+
+## Author
+
+**Firas Ftoutou**
+Computer Vision Engineer
+
+- GitHub: [github.com/Ftoutou](https://github.com/Ftoutou)
+- LinkedIn: [linkedin.com/in/firas-ftoutou](https://www.linkedin.com/in/firas-ftoutou)
+
+---
+
+## License
+
+MIT License — free to use, modify, and distribute with attribution.
+
+### crop_clip.py
+```
+import numpy as np
+import nibabel as nib
+import vtk
+from vtk.util import numpy_support
+
+
+class VolumeRenderer:
+    """3D Volume Renderer for NIfTI MRI data with interactive cropping and clipping tools"""
+    
+    def __init__(self, file_path):
+        """
+        Initialize the volume renderer
+        
+        Args:
+            file_path: Path to the NIfTI file
+        """
+        self.file_path = file_path
+        self.original_data = None
+        self.processed_data = None
+        self.vtk_image = None
+        
+        # Rendering components
+        self.renderer = None
+        self.render_window = None
+        self.interactor = None
+        self.volume = None
+        self.volume_mapper = None
+        self.volume_property = None
+        
+        # Cropping and clipping state
+        self.cropping_enabled = False
+        self.clipping_enabled = False
+        self.crop_planes = None
+        
+        # Current crop ranges (full range initially)
+        self.current_x_range = [0, 1]
+        self.current_y_range = [0, 1]
+        self.current_z_range = [0, 1]
+        
+        # Current clip thresholds
+        self.lower_threshold = 0.0
+        self.upper_threshold = 1.0
+        
+    def load_nifti(self):
+        """Load NIfTI file and handle 4D data by removing singleton dimensions"""
+        print(f"Loading NIfTI file: {self.file_path}")
+        
+        # Load the NIfTI file
+        nii_img = nib.load(self.file_path)
+        data = nii_img.get_fdata()
+        
+        # Grab real-world voxel spacing (mm) from the header so the volume
+        # isn't rendered as if every voxel were a 1x1x1mm cube
+        self.voxel_spacing = nii_img.header.get_zooms()[:3]
+        
+        print(f"Original shape: {data.shape}")
+        print(f"Voxel spacing (mm): {self.voxel_spacing}")
+        
+        # Handle 4D data - remove singleton dimensions
+        if len(data.shape) == 4:
+            data = np.squeeze(data)
+            print(f"After squeezing: {data.shape}")
+            
+            if len(data.shape) == 4:
+                data = data[..., 0]
+                print(f"Extracted first volume: {data.shape}")
+        
+        if len(data.shape) != 3:
+            raise ValueError(f"Expected 3D data, got shape: {data.shape}")
+        
+        self.original_data = data.copy()
+        self.processed_data = data.copy()
+        
+        print(f"Final volume shape: {self.processed_data.shape}")
+        print(f"Intensity range: [{np.min(data):.2f}, {np.max(data):.2f}]")
+        
+        return self
+    
+    def normalize(self):
+        """Normalize data to [0, 1] range"""
+        print("Normalizing data...")
+        
+        min_val = np.min(self.processed_data)
+        max_val = np.max(self.processed_data)
+        
+        if max_val > min_val:
+            self.processed_data = (self.processed_data - min_val) / (max_val - min_val)
+        
+        print(f"Normalized range: [{np.min(self.processed_data):.2f}, {np.max(self.processed_data):.2f}]")
+        
+        return self
+    
+    def _prepare_vtk_image(self):
+        """Convert numpy array to VTK image"""
+        data = self.processed_data.astype(np.float32)
+        
+        vtk_data = numpy_support.numpy_to_vtk(
+            data.ravel(order='F'),
+            deep=True,
+            array_type=vtk.VTK_FLOAT
+        )
+        
+        self.vtk_image = vtk.vtkImageData()
+        self.vtk_image.SetDimensions(data.shape)
+        # Use real voxel spacing so the volume has correct proportions
+        # instead of being treated as isotropic 1x1x1mm
+        spacing = getattr(self, 'voxel_spacing', (1.0, 1.0, 1.0))
+        self.vtk_image.SetSpacing(spacing[0], spacing[1], spacing[2])
+        self.vtk_image.GetPointData().SetScalars(vtk_data)
+        
+        return self.vtk_image
+    
+    def _setup_cropping_planes(self):
+        """Setup interactive cropping planes"""
+        if not self.crop_planes:
+            self.crop_planes = vtk.vtkPlanes()
+            bounds = self.vtk_image.GetBounds()
+            
+            # Initialize planes at full bounds
+            points = vtk.vtkPoints()
+            points.SetNumberOfPoints(8)
+            for i in range(8):
+                points.SetPoint(i, 
+                    bounds[0] if i & 1 else bounds[1],
+                    bounds[2] if i & 2 else bounds[3],
+                    bounds[4] if i & 4 else bounds[5])
+            
+            self.crop_planes.SetPoints(points)
+        
+        # Apply cropping to mapper
+        self.volume_mapper.SetCroppingRegionPlanes(self.crop_planes)
+        self.volume_mapper.SetCropping(self.cropping_enabled)
+    
+    def _create_color_function(self, colormap):
+        """Create color transfer function based on colormap"""
+        color_func = vtk.vtkColorTransferFunction()
+        
+        if colormap == 'brown':
+            color_func.AddRGBPoint(0.0, 0.0, 0.0, 0.0)
+            color_func.AddRGBPoint(0.3, 0.545, 0.271, 0.075)
+            color_func.AddRGBPoint(0.6, 0.627, 0.322, 0.176)
+            color_func.AddRGBPoint(1.0, 0.824, 0.412, 0.118)
+        elif colormap == 'gray':
+            color_func.AddRGBPoint(0.0, 0.0, 0.0, 0.0)
+            color_func.AddRGBPoint(1.0, 1.0, 1.0, 1.0)
+        elif colormap == 'hot':
+            color_func.AddRGBPoint(0.0, 0.0, 0.0, 0.0)
+            color_func.AddRGBPoint(0.4, 1.0, 0.0, 0.0)
+            color_func.AddRGBPoint(0.7, 1.0, 1.0, 0.0)
+            color_func.AddRGBPoint(1.0, 1.0, 1.0, 1.0)
+        elif colormap == 'bone':
+            color_func.AddRGBPoint(0.0, 0.0, 0.0, 0.0)
+            color_func.AddRGBPoint(0.4, 0.32, 0.4, 0.55)
+            color_func.AddRGBPoint(0.7, 0.64, 0.74, 0.86)
+            color_func.AddRGBPoint(1.0, 1.0, 1.0, 1.0)
+        
+        return color_func
+    
+    def _setup_interactive_controls(self):
+        """Setup keyboard controls for cropping and clipping"""
+        
+        def key_press_callback(obj, event):
+            key = self.interactor.GetKeySym()
+            
+            if key == 'c' or key == 'C':
+                # Toggle cropping
+                self.cropping_enabled = not self.cropping_enabled
+                self.volume_mapper.SetCropping(self.cropping_enabled)
+                status = "ENABLED" if self.cropping_enabled else "DISABLED"
+                print(f"\n{'='*60}")
+                print(f"CROPPING {status}")
+                if self.cropping_enabled:
+                    print("Use arrow keys to crop:")
+                    print("  ← → : Crop X-axis")
+                    print("  ↑ ↓ : Crop Y-axis")
+                    print("  PageUp/PageDown : Crop Z-axis")
+                    print("  Shift + arrows : Expand crop region")
+                print(f"{'='*60}\n")
+                self.render_window.Render()
+            
+            elif key == 'v' or key == 'V':
+                # Toggle clipping
+                self.clipping_enabled = not self.clipping_enabled
+                status = "ENABLED" if self.clipping_enabled else "DISABLED"
+                print(f"\n{'='*60}")
+                print(f"INTENSITY CLIPPING {status}")
+                if self.clipping_enabled:
+                    print("Use +/- keys to adjust thresholds:")
+                    print("  + : Increase lower threshold (remove dark voxels)")
+                    print("  - : Decrease lower threshold")
+                    print("  ] : Increase upper threshold")
+                    print("  [ : Decrease upper threshold")
+                print(f"Current range: [{self.lower_threshold:.2f}, {self.upper_threshold:.2f}]")
+                print(f"{'='*60}\n")
+                self._apply_clipping()
+            
+            elif self.cropping_enabled:
+                # Handle cropping adjustments
+                bounds = list(self.vtk_image.GetBounds())
+                step = 0.05
+                shift = self.interactor.GetShiftKey()
+                
+                if key == 'Left':
+                    if shift:
+                        self.current_x_range[1] = max(self.current_x_range[0] + 0.1, self.current_x_range[1] - step)
+                    else:
+                        self.current_x_range[0] = min(self.current_x_range[1] - 0.1, self.current_x_range[0] + step)
+                elif key == 'Right':
+                    if shift:
+                        self.current_x_range[0] = max(0, self.current_x_range[0] - step)
+                    else:
+                        self.current_x_range[1] = min(1, self.current_x_range[1] + step)
+                elif key == 'Up':
+                    if shift:
+                        self.current_y_range[1] = min(1, self.current_y_range[1] + step)
+                    else:
+                        self.current_y_range[0] = min(self.current_y_range[1] - 0.1, self.current_y_range[0] + step)
+                elif key == 'Down':
+                    if shift:
+                        self.current_y_range[0] = max(0, self.current_y_range[0] - step)
+                    else:
+                        self.current_y_range[1] = max(self.current_y_range[0] + 0.1, self.current_y_range[1] - step)
+                elif key == 'Prior':  # PageUp
+                    self.current_z_range[0] = min(self.current_z_range[1] - 0.1, self.current_z_range[0] + step)
+                elif key == 'Next':  # PageDown
+                    self.current_z_range[1] = max(self.current_z_range[0] + 0.1, self.current_z_range[1] - step)
+                elif key == 'r' or key == 'R':
+                    # Reset crop
+                    self.current_x_range = [0, 1]
+                    self.current_y_range = [0, 1]
+                    self.current_z_range = [0, 1]
+                    print("Crop reset to full volume")
+                
+                # Update cropping planes
+                x_min = bounds[0] + self.current_x_range[0] * (bounds[1] - bounds[0])
+                x_max = bounds[0] + self.current_x_range[1] * (bounds[1] - bounds[0])
+                y_min = bounds[2] + self.current_y_range[0] * (bounds[3] - bounds[2])
+                y_max = bounds[2] + self.current_y_range[1] * (bounds[3] - bounds[2])
+                z_min = bounds[4] + self.current_z_range[0] * (bounds[5] - bounds[4])
+                z_max = bounds[4] + self.current_z_range[1] * (bounds[5] - bounds[4])
+                
+                self.volume_mapper.SetCroppingRegionPlanes(x_min, x_max, y_min, y_max, z_min, z_max)
+                self.render_window.Render()
+            
+            elif self.clipping_enabled:
+                # Handle clipping adjustments
+                changed = False
+                if key == 'plus' or key == 'equal':
+                    self.lower_threshold = min(self.upper_threshold - 0.05, self.lower_threshold + 0.05)
+                    changed = True
+                elif key == 'minus':
+                    self.lower_threshold = max(0.0, self.lower_threshold - 0.05)
+                    changed = True
+                elif key == 'bracketright':
+                    self.upper_threshold = min(1.0, self.upper_threshold + 0.05)
+                    changed = True
+                elif key == 'bracketleft':
+                    self.upper_threshold = max(self.lower_threshold + 0.05, self.upper_threshold - 0.05)
+                    changed = True
+                elif key == 'r' or key == 'R':
+                    self.lower_threshold = 0.0
+                    self.upper_threshold = 1.0
+                    changed = True
+                    print("Clipping reset to full range")
+                
+                if changed:
+                    print(f"Clipping range: [{self.lower_threshold:.2f}, {self.upper_threshold:.2f}]")
+                    self._apply_clipping()
+        
+        self.interactor.AddObserver('KeyPressEvent', key_press_callback)
+    
+    def _apply_clipping(self):
+        """Apply intensity clipping to opacity transfer function"""
+        opacity_func = vtk.vtkPiecewiseFunction()
+        
+        # Set opacity based on clipping thresholds
+        opacity_func.AddPoint(0.0, 0.0)
+        opacity_func.AddPoint(self.lower_threshold, 0.0)
+        opacity_func.AddPoint(self.lower_threshold + 0.1, 0.2)
+        opacity_func.AddPoint(self.upper_threshold - 0.1, 0.6)
+        opacity_func.AddPoint(self.upper_threshold, 0.6)
+        opacity_func.AddPoint(1.0, 0.0)
+        
+        self.volume_property.SetScalarOpacity(opacity_func)
+        self.volume_property.SetInterpolationTypeToLinear()
+        self.render_window.Render()
+    
+    def _setup_easy_camera_controls(self):
+        """Setup easier camera controls for intuitive interaction"""
+        camera_style = vtk.vtkInteractorStyleTrackballCamera()
+        
+        # Adjust sensitivity for smoother interaction
+        camera_style.SetMotionFactor(5.0)  # Faster rotation
+        camera_style.SetAutoAdjustCameraClippingRange(True)
+        
+        self.interactor.SetInteractorStyle(camera_style)
+    
+    def render(self, colormap='brown', opacity_range=(0.0, 0.8), window_size=(1024, 768)):
+        """
+        Render the 3D volume with interactive controls
+        
+        Args:
+            colormap: 'brown', 'gray', 'hot', or 'bone'
+            opacity_range: tuple (min_opacity, max_opacity)
+            window_size: tuple (width, height)
+        """
+        print("Setting up volume rendering...")
+        
+        # Prepare VTK image
+        self._prepare_vtk_image()
+        
+        # Create renderer
+        self.renderer = vtk.vtkRenderer()
+        self.render_window = vtk.vtkRenderWindow()
+        self.render_window.AddRenderer(self.renderer)
+        self.interactor = vtk.vtkRenderWindowInteractor()
+        self.interactor.SetRenderWindow(self.render_window)
+        
+        # Setup easy camera controls
+        self._setup_easy_camera_controls()
+        
+        # Volume mapper
+        self.volume_mapper = vtk.vtkGPUVolumeRayCastMapper()
+        self.volume_mapper.SetInputData(self.vtk_image)
+        self.volume_mapper.SetBlendModeToComposite()
+
+        # --- Quality settings ---
+        # Finer ray sampling step removes the "wood-grain" banding that shows
+        # up with the default (coarse) sample distance
+        self.volume_mapper.SetSampleDistance(0.3)
+        self.volume_mapper.SetAutoAdjustSampleDistances(False)
+        # Jittering scrambles the sampling pattern slightly so any residual
+        # banding turns into fine, much less visible noise
+        self.volume_mapper.UseJitteringOn()
+        
+        # Volume property
+        self.volume_property = vtk.vtkVolumeProperty()
+        self.volume_property.ShadeOn()
+        self.volume_property.SetInterpolationTypeToLinear()
+        self.volume_property.SetAmbient(0.25)
+        self.volume_property.SetDiffuse(0.7)
+        self.volume_property.SetSpecular(0.3)
+        self.volume_property.SetSpecularPower(20.0)
+
+        # Gradient opacity gives edges/surfaces definition instead of a flat,
+        # "mushy" look. With normalized [0,1] data, gradient magnitudes are
+        # small floats — scale the range accordingly (not 0-90!)
+        gradient_opacity = vtk.vtkPiecewiseFunction()
+        gradient_opacity.AddPoint(0.0,  0.0)
+        gradient_opacity.AddPoint(0.05, 0.5)
+        gradient_opacity.AddPoint(0.2,  1.0)
+        self.volume_property.SetGradientOpacity(gradient_opacity)
+        
+        # Create color transfer function
+        color_func = self._create_color_function(colormap)
+        
+        # Scalar opacity: air/background stays transparent, tissue visible
+        opacity_func = vtk.vtkPiecewiseFunction()
+        opacity_func.AddPoint(0.0,  0.0)   # background: fully transparent
+        opacity_func.AddPoint(0.1,  0.0)   # near-zero noise: still transparent
+        opacity_func.AddPoint(0.2,  0.15)  # start of tissue signal
+        opacity_func.AddPoint(0.4,  opacity_range[1] * 0.6)
+        opacity_func.AddPoint(0.6,  opacity_range[1])
+        opacity_func.AddPoint(0.8,  min(1.0, opacity_range[1] * 1.1))
+        opacity_func.AddPoint(1.0,  min(1.0, opacity_range[1] * 1.2))
+        
+        self.volume_property.SetColor(color_func)
+        self.volume_property.SetScalarOpacity(opacity_func)
+        
+        # Create volume
+        self.volume = vtk.vtkVolume()
+        self.volume.SetMapper(self.volume_mapper)
+        self.volume.SetProperty(self.volume_property)
+        
+        # Add to renderer
+        self.renderer.AddVolume(self.volume)
+        self.renderer.SetBackground(0.1, 0.1, 0.15)
+        
+        # Setup camera for better initial view
+        camera = self.renderer.GetActiveCamera()
+        camera.SetViewUp(0, 0, 1)
+        camera.Azimuth(30)
+        camera.Elevation(20)
+        self.renderer.ResetCamera()
+        
+        # Set window size
+        self.render_window.SetSize(window_size[0], window_size[1])
+        self.render_window.SetWindowName("3D Brain MRI Volume Rendering - Interactive Tools")
+        # Anti-aliasing so edges/silhouettes don't look jagged
+        self.render_window.SetMultiSamples(8)
+        self.renderer.UseFXAAOn()
+        
+        # Add orientation widget
+        self._add_orientation_widget()
+        
+        # Setup interactive controls
+        self._setup_interactive_controls()
+        
+        # Print instructions
+        self._print_instructions()
+        
+        print("\nRendering volume... (Close window to exit)")
+        
+        # Start rendering
+        self.render_window.Render()
+        self.interactor.Start()
+    
+    def _add_orientation_widget(self):
+        """Add orientation axes widget"""
+        axes = vtk.vtkAxesActor()
+        widget = vtk.vtkOrientationMarkerWidget()
+        widget.SetOrientationMarker(axes)
+        widget.SetInteractor(self.interactor)
+        widget.SetViewport(0.0, 0.0, 0.2, 0.2)
+        widget.EnabledOn()
+        widget.InteractiveOff()
+    
+    def _print_instructions(self):
+        """Print control instructions"""
+        print("\n" + "="*70)
+        print("                    INTERACTIVE CONTROLS")
+        print("="*70)
+        print("\n  CAMERA CONTROLS (Always Active):")
+        print("  • Left Mouse Button + Drag  : Rotate volume")
+        print("  • Middle Mouse Button/Scroll: Zoom in/out")
+        print("  • Right Mouse Button + Drag : Pan/Move")
+        print("\n  CROPPING TOOL:")
+        print("  • Press 'C' to toggle cropping on/off")
+        print("  • When enabled:")
+        print("    - Arrow Keys ← → : Crop X-axis")
+        print("    - Arrow Keys ↑ ↓ : Crop Y-axis")
+        print("    - PageUp/PageDown: Crop Z-axis")
+        print("    - Shift + Arrows : Expand crop region")
+        print("    - Press 'R'      : Reset crop to full volume")
+        print("\n  INTENSITY CLIPPING TOOL:")
+        print("  • Press 'V' to toggle clipping on/off")
+        print("  • When enabled:")
+        print("    - Press '+' : Increase lower threshold (remove dark areas)")
+        print("    - Press '-' : Decrease lower threshold")
+        print("    - Press ']' : Increase upper threshold")
+        print("    - Press '[' : Decrease upper threshold")
+        print("    - Press 'R' : Reset clipping to full range")
+        print("\n TIP: Use cropping to focus on specific brain regions,")
+        print("        and clipping to remove noise or enhance contrast.")
+        print("="*70 + "\n")
+
+
+# Example usage
+if __name__ == "__main__":
+    # File path
+    file_path = r'C:\Users\user\Downloads\HFH_026.nii'
+    
+    # Create and setup renderer
+    renderer = VolumeRenderer(file_path)
+    
+    # Load, normalize and render
+    renderer.load_nifti().normalize()
+    
+    # Render with interactive tools
+    # Tools are OFF by default - press 'C' for cropping, 'V' for clipping
+    renderer.render(
+        colormap='brown',
+        opacity_range=(0.0, 0.8),
+        window_size=(1024, 768)
+    )
+```

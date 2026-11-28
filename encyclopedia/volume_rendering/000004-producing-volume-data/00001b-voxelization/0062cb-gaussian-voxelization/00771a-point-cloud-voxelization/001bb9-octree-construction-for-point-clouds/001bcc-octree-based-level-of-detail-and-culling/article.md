@@ -1,0 +1,167 @@
+# Octree-based Level of Detail and Culling
+
+Also called: CPU Culling, LoD, CPU Frustum Culling, CPU-based Octree LOD & Frustum Culling, Distance-based LOD, Octree LOD, Point Cloud LOD, Point Cloud Level of Detail with Octrees
+
+## Overview
+This method reduces the rendering load of large point clouds by traversing an octree on the CPU to cull nodes outside the camera frustum and select point subsets based on distance and screen-space thresholds before uploading data to the GPU [S1, S2, unofficial]. It solves the problem of rendering billion-point clouds in real time by serving coarse-to-fine samples, ensuring the renderer draws only the points the current view can use without exceeding memory or GPU draw limits [S2, unofficial]. Unlike simple spatial indexes used only for search, this octree stores usable coarse samples at every node, turning it into a rendering tree where the union of stopping points forms a faithful picture at a fraction of the cost [S2, unofficial].
+
+## How it works
+**Inputs and Outputs**
+*   **Input:** An octree built from a point cloud (see [Octree Construction for Point Clouds](1070-octree-construction-for-point-clouds.md)), a view-projection matrix (MVP), camera eye position, near plane distance, and focal length in pixels.
+*   **Output:** A list of points (positions and colors) to be uploaded to a Vertex Buffer Object (VBO) for drawing [S1, unofficial].
+
+**Data Structures**
+*   **Octree Node:** Contains an axis-aligned bounding box (AABB) defined by `min` and `max` vectors. It stores a cached subsample of points (coarse portrait) representing the region. It may contain a bitmask `activeOctants` indicating which children exist [S1, S2, unofficial].
+*   **Point Model:** A structure containing position and color data, passed to the VBO. Size is `sizeof(PointModel)` [S1, unofficial].
+
+**Parameters**
+*   `maxDepth`: Maximum recursion depth for LOD, typically 15 [S1, unofficial].
+*   `pixel_threshold`: Screen-space size threshold (in pixels) below which a node's coarse sample is sufficient. Typical value: 100 pixels [S2, unofficial].
+*   `point_budget`: Maximum number of points allowed to be drawn per frame. Typical value: 2,000,000 points [S2, unofficial].
+*   `node_capacity`: Number of points kept per node during the octree build. Typical value: 2500 [S2, unofficial].
+*   `_world_size`: Bounding box diagonal length of the point cloud, used for distance thresholds [S1, unofficial].
+*   `_cpuCulling`: Boolean flag enabling CPU-side aggregation and frustum culling. Default: false [S1, unofficial].
+*   `_cpuCullingEveryFrame`: Recompute culling every frame. Default: false [S1, unofficial].
+
+**Steps**
+1.  **Pre-compute World Size:** Calculate the diagonal of the point cloud's AABB:
+    $$ \text{world\_size} = \|\text{pc.aabb.max} - \text{pc.aabb.min}\| $$
+    [S1, unofficial]
+2.  **Traverse Octree:** Start recursion from the root node.
+3.  **Frustum Culling:** For each node, test its AABB against the six view frustum planes. If the most-positive corner of the box is outside any plane, cull the entire subtree [S1, S2, unofficial].
+4.  **LOD Decision:** Calculate the projected screen size of the current node's bounding box. If the size is below `pixel_threshold`, draw the node's coarse sample and stop descent. If above, descend to children [S2, unofficial].
+    *   Formula for projected size:
+        $$ \text{projected\_px} = \frac{\text{diag}}{\text{dist}} \times \text{focal\_px} $$
+        Where `diag` is the bounding-box diagonal in meters, `dist` is the distance from camera eye to node center (clamped to near plane), and `focal_px` is the focal length in pixels [S2, unofficial].
+5.  **Distance-based Depth Selection (Alternative/Complementary):** Some implementations use distance thresholds to determine traversal depth directly. If distance > `_world_size / 2`, recurse with depth 9; if `_world_size / 4 < dist < _world_size / 2`, recurse with depth 10; else recurse with depth 15 [S1, unofficial].
+6.  **Point Budget Enforcement:** Cap the total number of points drawn per frame. Spend the budget on nodes closest to the camera and largest on screen. Stop descent when the budget is exhausted [S2, unofficial].
+7.  **Emit Points:** If the traversal depth is reached or the node is culled/accepted as a leaf, emit the node's cached average point (or subsample) instead of its contents [S1, unofficial].
+8.  **Upload:** Re-upload aggregated points to the VBO for drawing [S1, unofficial].
+
+**Pseudocode**
+> **Unverified code.** The code below did not pass a test run against a reference implementation, or no test fits it, so it may contain errors.
+
+```python
+def render_point_cloud_octree(root_node, camera, params):
+    """
+    Render a point cloud using octree-based LOD and culling.
+    
+    Args:
+        root_node: The root of the octree.
+        camera: Dict containing 'eye', 'near', 'focal_px', and 'mvp' (or planes).
+        params: Dict containing 'pixel_threshold', 'point_budget', 'maxDepth', 'world_size'.
+        
+    Returns:
+        list of points to draw.
+    """
+    drawn_points = []
+    points_drawn_so_far = 0
+    
+    # Pre-calculate frustum planes from MVP if not provided directly
+    # Assuming a helper function exists to extract planes from MVP matrix
+    frustum_planes = extract_frustum_planes(camera['mvp']) 
+    
+    def traverse(node, current_depth):
+        nonlocal points_drawn_so_far
+        
+        # 1. Frustum Culling
+        if not aabb_in_frustum(node, frustum_planes):
+            return
+
+        # 2. Calculate Projected Size
+        proj_px = projected_px(node, camera)
+        
+        # 3. LOD Decision: If projected size is small enough, draw coarse sample
+        if proj_px <= params['pixel_threshold']:
+            # Add the node's cached subsample to the output
+            # Note: In some implementations, this might be a single average point
+            # or the full subsample stored at the node.
+            points_to_add = node.subsample
+            if points_drawn_so_far + len(points_to_add) <= params['point_budget']:
+                drawn_points.extend(points_to_add)
+                points_drawn_so_far += len(points_to_add)
+            return
+        
+        # 4. Point Budget Check before descending
+        if points_drawn_so_far >= params['point_budget']:
+            return
+
+        # 5. Recurse to children
+        # Assuming node has a list of children or an active bitmask
+        for i in range(8):
+            # Check if child exists (bitmask or null check)
+            if not node.has_child(i):
+                continue
+                
+            child = node.get_child(i)
+            
+            # Optional: Distance-based depth adjustment (if not using projected size primarily)
+            # dist = glm.length(child.center - camera.eye)
+            # if dist > params['world_size'] / 2:
+            #     effective_depth = 9
+            # elif params['world_size'] / 4 < dist < params['world_size'] / 2:
+            #     effective_depth = 10
+            # else:
+            #     effective_depth = 15
+            # if effective_depth <= current_depth:
+            #     # Draw coarse sample
+            #     ...
+            #     continue
+            
+            # Recurse
+            traverse(child, current_depth + 1)
+
+    # Start traversal
+    traverse(root_node, 0)
+    
+    return drawn_points
+
+def projected_px(node, camera):
+    """Screen-space size (pixels) of a node's bounding box."""
+    center = 0.5 * (node['min'] + node['max'])
+    diag = np.linalg.norm(node['max'] - node['min'])
+    dist = max(np.linalg.norm(center - camera['eye']), camera['near'])
+    return diag / dist * camera['focal_px']
+
+def aabb_in_frustum(node, planes):
+    """True if the node's box is at least partly inside the frustum."""
+    bmin, bmax = node['min'], node['max']
+    for a, b, c, d in planes:
+        # Pick the corner farthest along the plane normal
+        px = bmax[0] if a >= 0 else bmin[0]
+        py = bmax[1] if b >= 0 else bmin[1]
+        pz = bmax[2] if c >= 0 else bmin[2]
+        if a * px + b * py + c * pz + d < 0:
+            return False
+    return True
+
+def extract_frustum_planes(mvp_matrix):
+    """Extract the 6 frustum planes from the MVP matrix.
+    This is a standard graphics math operation.
+    Returns list of [a, b, c, d] for plane equation ax + by + cz + d = 0.
+    """
+    # Implementation details omitted as this is a standard linear algebra operation
+    # not specific to the LOD method itself.
+    pass
+```
+
+**Edge Cases and Pitfalls**
+*   **Empty Aggregated List:** If culling removes all points, the draw call must handle an empty buffer to prevent invalid state [S1, unofficial].
+*   **Node Capacity Tuning:** If `node_capacity` is too small, coarse levels look threadbare when zoomed out. If too large, tiles are expensive to draw and LOD steps feel chunky [S2, unofficial].
+*   **Pixel Threshold Tightness:** If the pixel threshold is too tight, the point budget is exhausted quickly on busy views, causing frame rate drops [S2, unofficial].
+
+## Operating characteristics
+*   **Time Complexity:** Depends on the number of nodes visited. Frustum culling prunes large subtrees, reducing the number of nodes processed. LOD decision limits recursion depth based on screen coverage.
+*   **Memory Complexity:** The octree structure itself consumes memory proportional to the number of nodes. Each node stores a subsample, so total memory is higher than storing just the raw points if subsamples are large, but typically optimized by keeping subsamples small [S2, unofficial].
+*   **Measured Performance:** Capable of rendering billion-point clouds in real time [S2, unofficial].
+*   **Strengths:** Hierarchical culling discards millions of points with few comparisons. View-dependent sampling ensures fidelity where it matters.
+*   **Limitations:** Requires CPU traversal per frame. Performance depends on scene complexity and camera movement.
+*   **When to Use:** Real-time rendering of very large point clouds where GPU memory or draw call limits are constraints.
+*   **When Not to Use:** Small point clouds where overhead outweighs benefits, or when GPU-based compute shaders are preferred for culling.
+
+## Background
+This technique is used in point cloud rendering applications to handle large datasets. It builds on the concept of octrees for spatial organization [S1, S2, unofficial]. The specific implementation details (distance thresholds, pixel projection) are derived from practical implementations in real-time rendering engines [S1, S2, unofficial].
+
+## Sources
+[S1] arminkz/PointCloudRendering, https://github.com/arminkz/PointCloudRendering, fetched 2026-10-28 (unofficial)
+[S2] Point Cloud Level of Detail: Octrees and Out-Core ..., https://learngeodata.eu/point-cloud-level-of-detail-octree/, fetched 2026-10-28 (unofficial)

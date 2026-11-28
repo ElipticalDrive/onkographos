@@ -1,0 +1,169 @@
+# Near-Far Linear/Disparity Ray Generation with Stratification
+
+Also called: Coarse Stratified Sampling, Near-Far Linear Ray Generation with Stratification, Stratified Sampling Along Rays, linear/disparity sampling
+
+## Overview
+Generates sample points along camera rays for volume rendering by sampling z-values (depths) either linearly or in disparity space, with optional stratification to reduce variance [S1, S2, unofficial]. It extends [Near-Far Linear Ray Generation](6841-near-far-linear-ray-generation.md) by supporting disparity-based spacing and depth-guided supersampling, distinguishing it from [Inverse CDF Ray Sampling](11412-inverse-cdf-ray-sampling.md) which uses probabilistic distributions rather than fixed geometric spacing [S2, unofficial].
+
+## How it works
+**Inputs:**
+- `origins`: Ray origins, shape `[batch_size, 3]`.
+- `directions`: Ray directions, shape `[batch_size, 3]`.
+- `near`: Float, near clip plane distance [S1, unofficial].
+- `far`: Float, far clip plane distance [S1, unofficial].
+- `num_coarse_samples`: Integer, number of base samples to generate along each ray [S1, unofficial].
+- `use_linear_disparity`: Boolean, if True, samples linearly in disparity ($1/z$) rather than depth ($z$) [S1, S2, unofficial].
+- `use_stratified_sampling`: Boolean, if True, adds uniform random noise to sample positions within intervals to reduce variance [S1, unofficial].
+- `randomized`: Boolean flag to use randomized stratified sampling [S3, unofficial].
+- `sigma_depth`: Optional float, if not None, triggers depth-guided supersampling [S2, unofficial].
+- `rays`: Object containing `origins`, `directions`, `radii`, and `ray_shape` for supersampling context [S2, unofficial].
+
+**Outputs:**
+- `t_samples`: Sorted sample positions along the ray parameter $t \in [0, 1]$, shape `[batch_size, num_t_samples]` [S2, S4, unofficial].
+- `means`, `covs`: Radiance and covariance outputs from ray casting [S4, unofficial].
+
+**Data Structures:**
+- `t_vals`: 1D tensor of base sample positions in $[0, 1]$.
+- `z_vals`: 1D tensor of depth values corresponding to `t_vals`.
+- `ss_tsamples`: Tensor of additional samples from depth-guided supersampling.
+
+**Steps:**
+
+1. **Compute Base Linear Samples:** Generate `num_coarse_samples + 1` evenly spaced values in $[0, 1]$: $t_{base} = \text{linspace}(0.0, 1.0, \text{num\_coarse\_samples} + 1)$ [S1, unofficial].
+2. **Convert to Depth ($z_{val}$):** For each $t \in t_{base}$, compute depth using linear or disparity spacing [S1, unofficial]:
+   - If `use_linear_disparity` is False: $z_{val} = near \cdot (1 - t) + far \cdot t$ [S1, unofficial].
+   - If `use_linear_disparity` is True: $z_{val} = \frac{1}{\frac{1}{near}(1 - t) + \frac{1}{far}t}$ [S1, unofficial].
+3. **Apply Stratification (if `use_stratified_sampling` is True):** Compute midpoints $mids = 0.5 \cdot (z_{vals}[1:] + z_{vals}[:-1])$, upper bounds $upper = [mids, z_{vals}[-1]]$, and lower bounds $lower = [z_{vals}[0], mids]$ [S1, unofficial]. Generate random uniform noise $t_{rand} \sim U[0, 1]$ with shape matching `z_vals`, then update $z_{vals} = lower + (upper - lower) \cdot t_{rand}$ [S1, unofficial].
+4. **Compute 3D Points:** Calculate points using the stratified depth values: $points = origins + z_{vals} \cdot directions$ [S1, unofficial].
+5. **Determine Sample Counts:** If `sigma_depth` is not None, set `num_t_samples` = `num_coarse_samples` // 4 * 3 + 1 and `num_ss_samples` = `num_coarse_samples` // 4; otherwise set `num_t_samples` = `num_coarse_samples` + 1 and `num_ss_samples` = 0 [S2, unofficial].
+6. **Generate Base $t$ Samples:** Create $t_{samples} = \text{linspace}(0., 1., \text{num\_t\_samples})$ on the same device as `origins` [S2, unofficial].
+7. **Convert $t$ Samples to Depth:** If `use_linear_disparity` is True, transform to disparity: $t_{samples} = \frac{1}{\frac{1}{near}(1 - t_{samples}) + \frac{1}{far}t_{samples}}$; otherwise transform to depth: $t_{samples} = near + (far - near) \cdot t_{samples}$ [S2, unofficial].
+8. **Apply Randomized Stratification (if `randomized` is True):** Compute midpoints $mids = 0.5 \cdot (t_{samples}[:, 1:] + t_{samples}[:, :-1])$, upper bounds $upper = \text{concat}([mids, t_{samples}[:, -1:]])$, and lower bounds $lower = \text{concat}([t_{samples}[:, :1], mids])$ [S2, unofficial]. Generate random uniform noise $t_{rand} \sim U[0, 1]$ with shape matching `t_samples`, then update $t_{samples} = lower + (upper - lower) \cdot t_{rand}$ [S2, unofficial].
+9. **Depth-Guided Supersampling (if `sigma_depth` is not None):** Call `depth_guided_supersampling(rays=rays, n_samples=num_ss_samples, start_sigma=sigma_depth)` to get `ss_tsamples`, then concatenate and sort: $t_{samples} = \text{sort}(\text{concat}([t_{samples}, ss_{tsamples}]), \text{axis}=-1)$ [S2, unofficial].
+10. **Cast Rays:** Call `cast_rays(t_samples, origins, directions, radii, ray_shape, a, f, l)` to get means and covariances [S4, unofficial].
+11. **Return Results:** Output `t_samples`, `(means, covs)` [S4, unofficial].
+
+**Pseudocode:**
+
+> **Unverified code.** The code below did not pass a test run against a reference implementation, or no test fits it, so it may contain errors.
+
+```python
+import torch
+
+def near_far_linear_disparity_ray_generation_with_stratification(
+    origins, directions, near, far, num_coarse_samples,
+    use_linear_disparity=False, use_stratified_sampling=False,
+    randomized=False, sigma_depth=None, rays=None
+):
+    """
+    Generates stratified ray samples with linear or disparity spacing.
+    
+    Args:
+        origins: Tensor [B, 3]
+        directions: Tensor [B, 3]
+        near: float
+        far: float
+        num_coarse_samples: int
+        use_linear_disparity: bool
+        use_stratified_sampling: bool
+        randomized: bool
+        sigma_depth: float or None
+        rays: Object with origins, directions, radii, ray_shape
+        
+    Returns:
+        t_samples: Tensor [B, N]
+        means: Tensor from cast_rays
+        covs: Tensor from cast_rays
+    """
+    device = origins.device
+    
+    # Step 1: Base linear samples in t-space [0, 1]
+    t_base = torch.linspace(0.0, 1.0, num_coarse_samples + 1, device=device)
+    
+    # Step 2: Convert to depth z_vals
+    if use_linear_disparity:
+        inv_near = 1.0 / near
+        inv_far = 1.0 / far
+        denom = inv_near * (1.0 - t_base) + inv_far * t_base
+        z_vals = 1.0 / denom
+    else:
+        z_vals = near * (1.0 - t_base) + far * t_base
+        
+    # Step 3: Stratification on z_vals
+    if use_stratified_sampling:
+        mids = 0.5 * (z_vals[1:] + z_vals[:-1])
+        upper = torch.cat([mids, z_vals[-1:]], dim=0)
+        lower = torch.cat([z_vals[:1], mids], dim=0)
+        t_rand = torch.rand_like(z_vals)
+        z_vals = lower + (upper - lower) * t_rand
+        
+    # Step 4: Compute 3D points
+    # z_vals shape [N], origins [B, 3], directions [B, 3]
+    # Broadcasting yields [B, N, 3]
+    points = origins[:, None, :] + z_vals[None, :, None] * directions[:, None, :]
+    
+    # Step 5: Determine sample counts
+    if sigma_depth is not None:
+        num_t_samples = num_coarse_samples // 4 * 3 + 1
+        num_ss_samples = num_coarse_samples // 4
+    else:
+        num_t_samples = num_coarse_samples + 1
+        num_ss_samples = 0
+        
+    # Step 6: Generate base t_samples
+    t_samples = torch.linspace(0., 1., num_t_samples, device=device)
+    
+    # Step 7: Convert t_samples to depth/disparity
+    if use_linear_disparity:
+        inv_near = 1.0 / near
+        inv_far = 1.0 / far
+        denom = inv_near * (1.0 - t_samples) + inv_far * t_samples
+        t_samples = 1.0 / denom
+    else:
+        t_samples = near + (far - near) * t_samples
+        
+    # Step 8: Randomized stratification on t_samples
+    if randomized:
+        mids = 0.5 * (t_samples[..., 1:] + t_samples[..., :-1])
+        upper = torch.cat([mids, t_samples[..., -1:]], dim=-1)
+        lower = torch.cat([t_samples[..., :1], mids], dim=-1)
+        t_rand = torch.rand_like(t_samples)
+        t_samples = lower + (upper - lower) * t_rand
+        
+    # Step 9: Depth-guided supersampling
+    if sigma_depth is not None and rays is not None:
+        # [G] Sources do not provide implementation for depth_guided_supersampling.
+        # Standard implementation uses sigma field to allocate additional samples.
+        ss_tsamples = depth_guided_supersampling(rays, num_ss_samples, sigma_depth)
+        t_samples = torch.sort(torch.cat([t_samples, ss_tsamples], dim=-1), dim=-1).values
+        
+    # Step 10: Cast rays
+    # [G] Sources do not provide implementation for cast_rays.
+    # Standard implementation evaluates volume rendering integral at sample positions.
+    means, covs = cast_rays(t_samples, origins, directions, rays.radii, rays.ray_shape, 0.02, 0.1, 0.6)
+    
+    # Step 11: Return results
+    return t_samples, means, covs
+```
+
+**Edge Cases and Pitfalls:**
+- **Division by Zero:** If `near` or `far` is 0, disparity calculation ($1/z$) will fail. Ensure `near > 0` [G].
+- **Precision:** Floating-point precision issues may arise when `near` and `far` differ significantly, especially in disparity space. Use double precision if necessary [G].
+- **Degenerate Input:** If `num_coarse_samples` is 0, no samples are generated. Handle this case explicitly [G].
+- **Unimplemented Functions:** `depth_guided_supersampling` and `cast_rays` are called but not defined in the sources. Implementers must provide these functions [G].
+
+## Operating characteristics
+- **Time Complexity:** $O(N)$ where $N$ is the number of samples per ray. Supersampling adds $O(N_{ss})$ where $N_{ss}$ is the number of additional samples [G].
+- **Memory Complexity:** $O(N)$ for storing sample positions and points [G].
+- **Performance:** Stratification reduces variance compared to uniform sampling, potentially requiring fewer samples for similar quality [S1, S2, unofficial].
+- **Strengths:** Simple to implement, supports both depth and disparity sampling, reduces variance with stratification [S1, S2, unofficial].
+- **Limitations:** Requires external implementations for `depth_guided_supersampling` and `cast_rays` to complete the pipeline [S2, S4, unofficial]. Disparity sampling may be less intuitive for scenes with large depth ranges [G].
+
+## Background
+Not given in the sources.
+
+## Sources
+[S1] google/nerfies, https://github.com/google/nerfies, fetched 2026-10-26 (unofficial)
+[S2] sxyu/pixel-nerf, https://github.com/sxyu/pixel-nerf, fetched 2026-10-26 (unofficial)
+[S3] AlexSheldrick/density_bounded_ray_weights, https://github.com/AlexSheldrick/density_bounded_ray_weights, fetched 2026-10-27 (unofficial)
+[S4] https://github.com/CPREgroup/CaSE-NeRF, https://github.com/CPREgroup/CaSE-NeRF, fetched 2026-10-30 (unofficial)

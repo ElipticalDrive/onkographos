@@ -1,0 +1,241 @@
+--- v002.md
++++ v003.md
+@@ -3,186 +3,89 @@
+ 
+ ## Overview
+-H-2DGS converts a volumetric 3D Gaussian Splatting reconstruction into a thin, geometrically sharp, and deformable cortical surface using curved height-field Gaussian primitives initialized on a shared Truncated Signed Distance Field (TSDF) zero level set [S1, unofficial]. It solves the problem of depth ambiguity and volumetric thickness in standard 3DGS, particularly in medical imaging where limited view coverage creates thick, geometrically ambiguous bands of opacity [S1, unofficial]. Unlike its sibling [3D Gaussian Splatting with Gaussian Unpooling](6133-3d-gaussian-splatting-with-gaussian-unpooling.md) which refines density, or [3D Gaussian Splatting with Mesh UV Parameterization](8046-3d-gaussian-splatting-with-mesh-uv-parameterization.md) which relies on explicit mesh topology, H-2DGS uses a three-stage pipeline to bootstrap appearance, concentrate density via a differentiable thickness loss, and finally map the result to a surface-oriented height-field representation [S1, unofficial].
++H-2DGS converts a volumetric 3D Gaussian Splatting reconstruction into a thin, geometrically sharp, and deformable cortical surface using curved height-field Gaussian primitives initialized on a shared Truncated Signed Distance Field (TSDF) zero level set [S1, unofficial]. It solves the problem of depth ambiguity and thick, geometrically inconsistent opacity bands in standard 3DGS, particularly in medical imaging where explicit surface geometry is required for navigation and analysis [S1, unofficial]. Unlike its siblings, which either expand from sparse seeds or parameterize onto a UV atlas, H-2DGS explicitly constructs a continuous surface representation by concentrating volumetric density into a TSDF and then mapping curved 2D Gaussians to that surface [S1, unofficial].
+ 
+ ## How it works
+-H-2DGS operates in three distinct stages: appearance bootstrapping, ray-wise density concentration, and TSDF-guided surface conversion [S1, unofficial].
++H-2DGS operates as a three-stage pipeline: photometric bootstrap, ray-wise density concentration, and TSDF-guided surface conversion [S1, unofficial].
+ 
+ ### Inputs and Outputs
+ **Inputs:**
+-*   Multi-view images of the scene (e.g., neurosurgical video frames).
+-*   Camera poses and intrinsics for the training views.
+-*   (Optional) Postoperative MRI depth data for deformation [S1, unofficial].
++*   Multi-view images $I_v$ from training cameras.
++*   Camera poses and intrinsics.
++*   (Optional) Postoperative MRI-derived depth geometry for deformation [S1, unofficial].
+ 
+ **Outputs:**
+-*   A set of curved height-field Gaussian primitives, each defined by a position on the TSDF zero level set, a height offset, color, opacity, and orientation [S1, unofficial].
+-*   A compact representation (e.g., 7.97 MB for neurosurgical cases) supporting interactive rendering [S1, unofficial].
++*   A set of curved height-field Gaussian primitives $\{G_j\}$ representing the surface.
++*   Each primitive contains height, color, and opacity bases [S1, unofficial].
+ 
+ ### Data Structures
+-The method transitions from volumetric Gaussians to height-field primitives.
+-
+-**Stage I/II: Volumetric 3DGS Primitives**
+-Standard 3DGS parameters [3D Gaussian Splatting MVP](3410-3d-gaussian-splatting-mvp.md):
+-*   $\mathbf{\mu}_i$: 3D mean position.
+-*   $\mathbf{q}_i$: Quaternion rotation.
+-*   $\mathbf{s}_i$: Scaling vector.
+-*   $\alpha_i$: Opacity.
+-*   $\mathbf{c}_i$: Spherical harmonics coefficients for color.
+-
+-**Stage III: Height-Field Gaussian Primitives**
+-Each primitive $j$ is defined by:
+-*   $\mathbf{x}_j$: Base position on the TSDF zero level set.
+-*   $h_j$: Height offset along the local surface normal.
+-*   $\mathbf{c}_j$: Color basis.
+-*   $\alpha_j$: Opacity basis.
+-*   Orientation derived from the TSDF normal at $\mathbf{x}_j$.
++**Height-Field Primitive:**
++Unlike standard 3D Gaussians defined by mean $\mu$, covariance $\Sigma$, opacity $\alpha$, and spherical harmonics $c$, H-2DGS primitives are defined on a 2D manifold (the TSDF zero level set).
++*   **Position:** 3D coordinates on the TSDF surface.
++*   **Orientation:** Normal vector derived from the TSDF gradient.
++*   **Bases:** Separate parameters for height (geometry deviation from the TSDF), color (appearance), and opacity [S1, unofficial].
+ 
+ ### Numbered Steps
+ 
+ **Stage I: Photometric Bootstrap**
+-1.  Train conventional 3DGS with adaptive densification using the standard photometric objective [S1, unofficial].
+-2.  Optimize for $N_{warm}$ iterations (default 5,000) to establish appearance and scene support without surface constraints [S1, unofficial].
++1.  Train a conventional 3DGS model using adaptive densification [S1, unofficial].
++2.  Optimize using the standard photometric loss $\mathcal{L}_{\text{photo}}$ to establish appearance and scene support without surface constraints [S1, unofficial].
++    $$ \mathcal{L}_{\text{photo}} = (1 - \lambda) \|\hat{I}_v - I_v\|_1 + \lambda(1 - \text{SSIM}(\hat{I}_v, I_v)) $$
++    where $\lambda = 0.2$, $\hat{I}_v$ is the rendered image, and $I_v$ is the input image [S1, unofficial].
+ 
+ **Stage II: Ray-wise Density Concentration**
+-1.  Initialize Stage II with the Stage I model [S1, unofficial].
+-2.  For each training camera ray $\mathbf{r}(t) = \mathbf{o} + t\mathbf{d}$, compute 1D Gaussian contributions from all 3D Gaussians:
++1.  Initialize with the Stage I model after a 5,000 iteration warm start [S1, unofficial].
++2.  Optimize for 1,000 iterations using a combined loss $\mathcal{L}_{\text{stage2}}$ to concentrate density along rays [S1, unofficial].
++3.  For each camera ray $r(t) = o + td$, compute 1D Gaussian contributions:
+     $$ \sigma_i(t) = \beta_i \exp\left[-\frac{1}{2}a_i(t - m_i)^2\right] $$
+-    where $\beta_i$ is the amplitude, $a_i$ is the inverse variance, and $m_i$ is the mean position along the ray [S1, unofficial].
+-3.  Compute total density $\sigma(t) = \sum_i \sigma_i(t)$ [S1, unofficial].
+-4.  Sample along the ray at positions $\{t_m\}_{m=1}^M$. Compute normalized density $p_m$ and cumulative distribution $F_m$:
+-    $$ p_m = \frac{\sigma(t_m)}{\sum_n \sigma(t_n) + \epsilon} $$
+-    $$ F_m = \sum_{n=1}^m p_n $$
+-    where $\epsilon$ is a small constant for numerical stability [S1, unofficial].
+-5.  Approximate quantiles $t_q$ using differentiable quantile approximation with temperature $\tau_q$:
+-    $$ w_m(q) = \frac{\exp(-\tau_q|F_m - q|)}{\sum_n \exp(-\tau_q|F_n - q|)} $$
+-    $$ t_q = \sum_m w_m(q)t_m $$
+-    Use $q_{low} = 0.01$ and $q_{high} = 0.99$ [S1, unofficial].
+-6.  Compute effective thickness $\Delta t = t_{q_{high}} - t_{q_{low}}$ [S1, unofficial].
+-7.  Compute thickness loss for ray $\mathbf{r}$:
++    where $\beta_i$ is amplitude, $a_i$ is inverse variance, and $m_i$ is mean position along the ray [S1, unofficial].
++4.  Compute normalized density $p_m$ and cumulative distribution $F_m$ at sample $t_m$:
++    $$ p_m = \frac{\sigma(t_m)}{\sum_n \sigma(t_n) + \epsilon}, \quad F_m = \sum_{n=1}^m p_n $$
++5.  Approximate quantile $q$ using differentiable quantile approximation:
++    $$ w_m(q) = \frac{\exp(-\tau_q|F_m - q|)}{\sum_n \exp(-\tau_q|F_n - q|)}, \quad t_q = \sum_m w_m(q)t_m $$
++    where $\tau_q$ is the temperature parameter [S1, unofficial].
++6.  Calculate effective thickness $\Delta t = t_{q_{\text{high}}} - t_{q_{\text{low}}}$ with $q_{\text{low}} = 0.01$ and $q_{\text{high}} = 0.99$ [S1, unofficial].
++7.  Compute thickness loss:
+     $$ \mathcal{L}_{\text{thick}}(\mathbf{r}) = \frac{\max(0, \Delta t - \Delta t^*)}{E} $$
+-    where $\Delta t^*$ is the target thickness (set to 0 for normalized thickness) and $E$ is the scene extent [S1, unofficial].
+-8.  Compute total loss for Stage II:
++    where $\Delta t^*$ is the target thickness (set to zero normalized thickness) and $E$ is the scene extent [S1, unofficial].
++8.  Total loss:
+     $$ \mathcal{L}_{\text{stage2}} = \mathcal{L}_{\text{photo}} + \lambda_{\text{thick}} \mathbb{E}_{\mathbf{r}}[\mathcal{L}_{\text{thick}}] $$
+-    where $\mathcal{L}_{\text{photo}} = (1 - \lambda) \|\hat{I}_v - I_v\|_1 + \lambda(1 - \text{SSIM}(\hat{I}_v, I_v))$ with $\lambda = 0.2$, and $\lambda_{\text{thick}} = 5.0$ [S1, unofficial].
+-9.  Optimize Stage II parameters for 1,000 iterations [S1, unofficial].
++    where $\lambda_{\text{thick}} = 5.0$ [S1, unofficial].
+ 
+ **Stage III: TSDF-Guided Surface Conversion**
+-1.  Render depth maps $\hat{D}_v$ from all training cameras using the Stage II model [S1, unofficial].
+-2.  Fuse these multi-view depth observations into a Truncated Signed Distance Field (TSDF) $\Phi(\mathbf{x})$. For a voxel center $\mathbf{x}$ and view $v$, compute the signed distance observation:
++1.  Render depth maps from all training cameras using the Stage II model [S1, unofficial].
++2.  Fuse these depth observations into a Truncated Signed Distance Field (TSDF) [S1, unofficial].
++3.  For a voxel center $\mathbf{x}$ and view $v$, compute the signed distance observation:
+     $$ \phi_v(\mathbf{x}) = \text{clip}\left(\frac{\hat{D}_v(\pi_v(\mathbf{x})) - d_v(\mathbf{x})}{\mu}, -1, 1\right) $$
+-    where $d_v(\mathbf{x})$ is the known depth (if available) or derived from the fused field, $\pi_v(\mathbf{x})$ is the projection, and $\mu$ is the truncation threshold [S1, unofficial].
+-3.  Aggregate observations into the TSDF $\Phi(\mathbf{x})$ using view weights $w_v(\mathbf{x})$ [S1, unofficial].
+-4.  Extract the zero level set of $\Phi(\mathbf{x})$ to initialize the base positions $\mathbf{x}_j$ of the height-field primitives [S1, unofficial].
+-5.  Initialize height-field primitives with height $h_j=0$, color $\mathbf{c}_j$, and opacity $\alpha_j$ derived from the Stage II density/color at $\mathbf{x}_j$ [S1, unofficial].
++    where $\hat{D}_v$ is the rendered depth, $d_v(\mathbf{x})$ is the projected depth, and $\mu$ is the truncation margin [S1, unofficial].
++4.  Fuse observations into the global TSDF $\Phi(\mathbf{x})$ using view weights $w_v(\mathbf{x})$ [S1, unofficial].
++5.  Initialize curved height-field primitives on the TSDF zero level set $\Phi(\mathbf{x}) = 0$ [S1, unofficial].
+ 6.  Apply neighbor-transition optimization to coordinate overlapping patches and ensure locally continuous geometry [S1, unofficial].
+ 
+ **Postoperative Deformation (Optional)**
+-1.  Render depth from postoperative MRI-derived geometry [S1, unofficial].
+-2.  Deform the explicit height-field surface toward the MRI depth using tracked-color supervision [S1, unofficial].
+-3.  Use alternating geometry-appearance updates to preserve photorealistic texture during deformation [S1, unofficial].
+-
+-### Pseudocode
+-
+-```python
+-def h2dgs_pipeline(images, poses, intrinsics, num_iterations_stage2=1000, num_iterations_warmup=5000):
+-    # Stage I: Photometric Bootstrap
+-    gaussians = initialize_3d_gaussians()
+-    for i in range(num_iterations_warmup):
+-        rendered_images = render_3dgs(gaussians, images, poses, intrinsics)
+-        loss = photometric_loss(rendered_images, images, lambda_param=0.2)
+-        optimize(gaussians, loss)
+-    
+-    # Stage II: Ray-wise Density Concentration
+-    for i in range(num_iterations_stage2):
+-        total_loss = 0.0
+-        for ray in rays_from_images(images, poses, intrinsics):
+-            # Compute 1D contributions along ray
+-            densities = []
+-            for g in gaussians:
+-                sigma_i = g.amplitude * exp(-0.5 * g.inverse_variance * (ray.t - g.mean_along_ray)**2)
+-                densities.append(sigma_i)
+-            
+-            total_density = sum(densities)
+-            
+-            # Compute quantiles
+-            samples = sample_along_ray(ray, num_samples=100)
+-            p_m = [d / (sum(total_density) + epsilon) for d in total_density]
+-            F_m = cumulative_sum(p_m)
+-            
+-            # Differentiable quantile approximation
+-            q_low = 0.01
+-            q_high = 0.99
+-            tau_q = 10.0 # Temperature parameter
+-            
+-            w_m_low = [exp(-tau_q * abs(F - q_low)) for F in F_m]
+-            w_m_low = [w / sum(w_m_low) for w in w_m_low]
+-            t_q_low = sum(w * t for w, t in zip(w_m_low, samples))
+-            
+-            w_m_high = [exp(-tau_q * abs(F - q_high)) for F in F_m]
+-            w_m_high = [w / sum(w_m_high) for w in w_m_high]
+-            t_q_high = sum(w * t for w, t in zip(w_m_high, samples))
+-            
+-            delta_t = t_q_high - t_q_low
+-            target_thickness = 0.0 # Normalized
+-            scene_extent = get_scene_extent()
+-            
+-            thick_loss = max(0, delta_t - target_thickness) / scene_extent
+-            photo_loss = photometric_loss_for_ray(ray, rendered_images)
+-            
+-            total_loss += photo_loss + 5.0 * thick_loss
+-        
+-        optimize(gaussians, total_loss)
+-        
+-    # Stage III: TSDF Conversion
+-    depth_maps = render_depth(gaussians, images, poses, intrinsics)
+-    tsdf = fuse_tsdf(depth_maps, poses, intrinsics)
+-    surface_points = extract_zero_level_set(tsdf)
+-    
+-    height_field_primitives = []
+-    for point in surface_points:
+-        primitive = HeightFieldPrimitive(
+-            position=point,
+-            height=0.0,
+-            color=sample_color_at(point, gaussians),
+-            opacity=sample_opacity_at(point, gaussians)
+-        )
+-        height_field_primitives.append(primitive)
+-        
+-    # Neighbor transition optimization
+-    optimize_neighbor_transitions(height_field_primitives)
+-    
+-    return height_field_primitives
+-```
++1.  Deform the explicit height-field surface toward postoperative MRI-derived depth geometry [S1, unofficial].
++2.  Use tracked-color supervision and alternating geometry-appearance updates to preserve photorealistic texture [S1, unofficial].
+ 
+ ### Parameters
+-*   $\lambda$: Photometric SSIM weight, default 0.2 [S1, unofficial].
+-*   $\lambda_{\text{thick}}$: Thickness loss weight, default 5.0 [S1, unofficial].
+-*   $q_{low}, q_{high}$: Quantiles for thickness measurement, default 0.01 and 0.99 [S1, unofficial].
+-*   $\Delta t^*$: Target thickness, default 0 (normalized) [S1, unofficial].
+-*   Warm-up iterations: 5,000 [S1, unofficial].
++*   $\lambda$ (SSIM weight): 0.2 [S1, unofficial].
++*   $\lambda_{\text{thick}}$ (Thickness loss weight): 5.0 [S1, unofficial].
++*   $q_{\text{low}}$: 0.01 [S1, unofficial].
++*   $q_{\text{high}}$: 0.99 [S1, unofficial].
++*   $\Delta t^*$ (Target thickness): Zero normalized thickness [S1, unofficial].
+ *   Stage II iterations: 1,000 [S1, unofficial].
++*   Warm start iterations: 5,000 [S1, unofficial].
+ 
+ ### Edge Cases and Pitfalls
+-*   **Precision:** The differentiable quantile approximation requires careful tuning of the temperature parameter $\tau_q$ to balance smoothness and accuracy [S1, unofficial].
+-*   **Boundaries:** The TSDF fusion requires accurate depth rendering; errors in Stage II can propagate to the surface initialization [S1, unofficial].
+-*   **Degenerate Input:** Limited view coverage can lead to ambiguous depth; the thickness loss helps mitigate this but may require sufficient initialization [S1, unofficial].
+-
+-## Subtopics
+-
+-### 3D Gaussian Splatting with Gaussian Unpooling
+-Refines density by unpooling from lower resolutions, focusing on multi-scale representation rather than explicit surface conversion [6133-3d-gaussian-splatting-with-gaussian-unpooling.md].
+-
+-### 3D Gaussian Splatting with Mesh UV Parameterization
+-Maps Gaussians to a mesh UV space, relying on explicit topology rather than a height-field on a TSDF [8046-3d-gaussian-splatting-with-mesh-uv-parameterization.md].
++*   **Depth Ambiguity:** Standard 3DGS may distribute opacity through a thick band under limited view coverage; Stage II is required to resolve this [S1, unofficial].
++*   **Floating Density:** Stage II may leave residual floating density; TSDF fusion in Stage III aggregates evidence to create a clean surface [S1, unofficial].
++*   **Postoperative Changes:** Brain motion and tissue removal alter anatomy; the deformation stage must preserve texture while aligning to new geometry [S1, unofficial].
+ 
+ ## Operating characteristics
+-*   **Time Complexity:** Rendering is interactive, taking 29–42 ms per frame for neurosurgical cases [S1, unofficial]. Training involves three stages, with Stage II adding overhead due to ray-wise quantile computation [S1, unofficial].
+-*   **Memory Complexity:** Produces a compact representation, e.g., 7.97 MB for five neurosurgical cases [S1, unofficial].
+-*   **Strengths:** Sharp geometric boundaries, deformable surface, compact representation, integration with MRI/tractography [S1, unofficial].
+-*   **Limitations:** Requires multi-stage optimization, sensitive to initialization, and relies on TSDF fusion which may be noisy in sparse views [S1, unofficial].
+-*   **When to use:** When a sharp, deformable surface is required from volumetric data, especially in medical imaging with limited views [S1, unofficial].
+-*   **When not to use:** When a purely volumetric representation is sufficient or when real-time training is required without multi-stage refinement [S1, unofficial].
++*   **Representation Size:** Compact, achieving 7.97 MB across five real neurosurgical cases [S1, unofficial].
++*   **Performance:** Interactive rendering at 29–42 ms per frame [S1, unofficial].
++*   **Strengths:** Produces sharp, geometrically consistent surfaces; supports postoperative deformation; integrates with tractography and MRI anatomy [S1, unofficial].
++*   **Limitations:** Requires multi-stage training; dependent on TSDF fusion quality; specific to surface reconstruction tasks [S1, unofficial].
+ 
+ ## Background
+-H-2DGS was introduced in "H-2DGS: Height-Field Gaussian Splatting for Sharp and Deformable Neurosurgical Surface Reconstruction" [S1, unofficial]. It addresses the limitations of standard 3DGS in medical visualization, where depth ambiguity and volumetric thickness obscure internal structures [S1, unofficial]. The method builds on [3D Gaussian Splatting MVP](3410-3d-gaussian-splatting-mvp.md) by adding geometric constraints and a surface-oriented representation [S1, unofficial].
++H-2DGS was introduced to address the limitations of conventional 3D Gaussian Splatting in neurosurgical visualization, where explicit surface geometry is critical for navigation and analysis [S1, unofficial]. It builds on [3D Gaussian Splatting](3410-3d-gaussian-splatting-mvp.md) by incorporating geometric supervision and representation modification [21351-geometry-and-representation-adaptation.md]. The method was developed for real neurosurgical cases to provide low multi-view depth inconsistency and a compact representation [S1, unofficial].
+ 
+ ## Sources

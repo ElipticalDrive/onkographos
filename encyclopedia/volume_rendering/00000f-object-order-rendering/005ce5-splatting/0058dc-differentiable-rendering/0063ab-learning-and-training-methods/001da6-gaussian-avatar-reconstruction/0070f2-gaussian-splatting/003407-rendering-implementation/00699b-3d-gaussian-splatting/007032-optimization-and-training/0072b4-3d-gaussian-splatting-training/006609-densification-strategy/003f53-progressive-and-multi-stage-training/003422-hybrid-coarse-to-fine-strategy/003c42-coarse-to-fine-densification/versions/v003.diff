@@ -1,0 +1,124 @@
+--- v002.md
++++ v003.md
+@@ -7,6 +7,6 @@
+ 
+ ## How it works
+-**Inputs:** Target image (or batch), initial sparse mesh (vertices and triangles), rendering parameters [G].
+-**Outputs:** Refined mesh (vertices, features, topology) after densification steps [G].
++**Inputs:** Target image, rendering parameters [G]. The initial sparse mesh is generated during the initialization step [S1].
++**Outputs:** Refined mesh (vertices, features, topology) after densification steps [S1].
+ 
+ **Data Structures:**
+@@ -34,5 +34,5 @@
+         $$ \text{score}_t = \overline{\text{DSSIM}}_t \cdot |\text{pixels}_t|^\alpha $$
+         where $\alpha = 0.75$ [S1].
+-    b. **Select Triangles:** Sort triangles by $\text{score}_t$ descending. Select the top-scoring triangles such that the total number of new vertices does not exceed $0.35 \times V$, where $V$ is the current number of vertices [S1].
++    b. **Select Triangles:** Sort triangles by $\text{score}_t$ descending [S1]. Select the top-scoring triangles such that the total number of new vertices does not exceed $0.35 \times V$, where $V$ is the current number of vertices [S1].
+     c. **Insert Vertices:** For each selected triangle $t$:
+         i. Compute the centroid position $\mathbf{p}_{new} = \frac{1}{3} \sum_{v \in t} \mathbf{p}_v$ [S1].
+@@ -45,24 +45,27 @@
+ 
+ ```python
+-def coarse_to_fine_densification(mesh, target_image, start_iter=1500, end_iter=15000, step=500):
+-    # Initialization
++def coarse_to_fine_densification(target_image, start_iter=1500, end_iter=15000, step=500):
++    # Initialization [S1]
+     downsampled_img = target_image[::4, ::4]  # Standard downsampling [G]
+-    gradients = standard_sobel_magnitude(downsampled_img)  # Standard Sobel filter [G]
+-    vertices = sample_proportional_to_gradient(gradients, floor=0.01)  # Sample + uniform floor [S1]
+-    mesh.vertices = vertices
+-    mesh.triangles = standard_delaunay_triangulation(vertices)  # Standard Delaunay [G]
+-    mesh.add_boundary_vertices()  # Ensure full coverage [S1]
+-    for v in mesh.vertices: v.features = sample_image_at_coords(target_image, v.position)  # Feature init [G]
++    gradients = compute_sobel_magnitude(downsampled_img)  # Standard Sobel filter [G]
++    # Sample proportionally to gradient with uniform floor [S1]
++    vertices = sample_points_from_map(gradients, min_prob=0.01)
++    # Add boundary vertices for full coverage [S1]
++    vertices.extend(get_image_boundary_points())
++    # Initialize features from target image [G]
++    for v in vertices: v.features = bilinear_sample(target_image, v.position)
++    triangles = compute_delaunay(vertices)  # Standard Delaunay [G]
+ 
+     for i in range(start_iter, end_iter + 1, step):
+         scores = {}
+-        for t in mesh.triangles:
+-            pixels = get_covered_pixel_coords(t)  # Rasterize triangle [G]
++        for t in triangles:
++            pixels = rasterize_triangle_to_pixel_coords(t)  # Standard rasterization [G]
+             if len(pixels) < 3: continue
+-            dssim = mean([compute_dssim(p) for p in pixels])  # Mean DSSIM [S1]
+-            scores[t] = dssim * (len(pixels) ** 0.75)
++            dssim_vals = [compute_dssim(p) for p in pixels]  # Structural dissimilarity [G]
++            mean_dssim = sum(dssim_vals) / len(dssim_vals)
++            scores[t] = mean_dssim * (len(pixels) ** 0.75)
+ 
+         sorted_triangles = sorted(scores.items(), key=lambda x: x[1], reverse=True)
+-        max_new = 0.35 * len(mesh.vertices)
++        max_new = 0.35 * len(vertices)
+         split_triangles = []
+         count = 0
+@@ -74,22 +77,24 @@
+         new_verts = []
+         for t in split_triangles:
+-            pos = mean([v.position for v in t.vertices])  # Centroid [S1]
+-            feat = mean([v.features for v in t.vertices])  # Feature average [S1]
++            pos = sum(v.position for v in t.vertices) / 3.0  # Centroid [S1]
++            feat = sum(v.features for v in t.vertices) / 3.0  # Feature average [S1]
+             new_verts.append(Vertex(position=pos, features=feat))
+-        mesh.vertices.extend(new_verts)
+-        mesh.triangles = standard_delaunay_triangulation(mesh.vertices)  # Re-triangulate [S1]
++        vertices.extend(new_verts)
++        triangles = compute_delaunay(vertices)  # Re-triangulate [S1]
+ 
+-        if any(is_colinear(v) for v in mesh.vertices):  # Degeneracy check [S1]
+-            mesh = coarse_to_fine_densification(mesh=None, target_image=target_image, start_iter=0, end_iter=0, step=0)  # Re-mesh [S1]
++        # Degeneracy check: detect colinear vertices and re-mesh [S1]
++        if check_mesh_degeneracy(vertices, triangles):
++            vertices, triangles = reinitialize_mesh(vertices, triangles)  # Exact procedure not given [G]
+ 
+ # Standard helper definitions
+-def standard_sobel_magnitude(img): return convolve(img, sobel_kernel)
+-def sample_proportional_to_gradient(grads, floor): return sample_points_from_map(grads, min_prob=floor)
+-def standard_delaunay_triangulation(points): return compute_delaunay_mesh(points)
+-def sample_image_at_coords(img, coords): return bilinear_sample(img, coords)
+-def get_covered_pixel_coords(tri): return rasterize_triangle_to_pixel_list(tri)
++def compute_sobel_magnitude(img): return convolve(img, sobel_kernel)
++def sample_points_from_map(grads, min_prob): return sample_points_from_density_map(grads, min_prob=min_prob)
++def get_image_boundary_points(): return get_image_border_coordinates()
++def bilinear_sample(img, coords): return interpolate_image_at_coords(img, coords)
++def compute_delaunay(points): return compute_voronoi_dual_mesh(points)
++def rasterize_triangle_to_pixel_coords(tri): return rasterize_triangle_to_pixel_list(tri)
+ def compute_dssim(p): return structural_dissimilarity_metric(p)
+-def mean(vecs): return sum(vecs) / len(vecs)
+-def is_colinear(v): return check_vertex_colinearity(v)
++def check_mesh_degeneracy(vertices, triangles): return any_are_vertices_colinear(vertices)
++def reinitialize_mesh(vertices, triangles): return recompute_delaunay_and_features(vertices, triangles)
+ ```
+ 
+@@ -105,5 +110,5 @@
+ *   **Degeneracy:** Vertices may become colinear, causing mesh degeneracy. Re-meshing is required, though rare [S1].
+ *   **Small Triangles:** Triangles with fewer than 3 pixels are excluded to prevent over-densification of tiny areas [S1].
+-*   **Precision:** Not given in the sources.
++*   **Precision:** Not given in the sources. [S1]
+ 
+ ## Subtopics
+@@ -113,14 +118,14 @@
+ 
+ ## Operating characteristics
+-*   **Time Complexity:** Not given in the sources.
+-*   **Memory Complexity:** Not given in the sources.
+-*   **Performance:** Training takes 1-3 minutes on an RTX A6000 [S1].
++*   **Time Complexity:** Not given in the sources. [S1]
++*   **Memory Complexity:** Not given in the sources. [S1]
++*   **Performance:** Training generally takes between 1-3 minutes on an RTX A6000 [S1].
+ *   **Strengths:** Automatic initialization, uniform vertex distribution, prevents over-densification of small areas [S1].
+ *   **Limitations:** Requires Delaunay triangulation, which can be computationally expensive for very large meshes. Degeneracy handling is necessary but rare [S1].
+ *   **When to Use:** When initializing a mesh-based neural reconstruction without manual seed placement [S1].
+-*   **When Not to Use:** When real-time densification is required during training (it is periodic) [S1].
++*   **When Not to Use:** When real-time per-step densification is required, as the method runs periodically every 500 iterations [S1].
+ 
+ ## Background
+-Coarse-to-Fine Densification was introduced in "Neural Harmonic Textures for High-Quality Primitive Based Neural Reconstruction" [S1]. It addresses the need for robust mesh initialization and refinement in primitive-based neural reconstruction methods. The method uses structural dissimilarity (DSSIM) and area weighting to guide densification, ensuring that vertices are placed where they contribute most to image fidelity [S1].
++Coarse-to-Fine Densification was introduced in "Neural Harmonic Textures for High-Quality Primitive Based Neural Reconstruction" [S1]. It addresses the need for robust mesh initialization and refinement in primitive-based neural reconstruction methods [S1]. The method uses structural dissimilarity (DSSIM) and area weighting to guide densification, ensuring that vertices are placed where they contribute most to image fidelity [S1].
+ 
+ ## Sources

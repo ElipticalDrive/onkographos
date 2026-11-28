@@ -1,0 +1,84 @@
+# TorchRadon
+
+Also called: Differentiable Radon Transform, Implementation Details (TorchRadon), TorchRadon library
+
+## Overview
+TorchRadon is a PyTorch-integrated library providing differentiable forward and backward projection operators for computed tomography [S1, unofficial]. It solves the problem of computing Radon transforms and their adjoints within a deep learning pipeline, enabling gradient-based optimization for tomographic reconstruction [S1, unofficial]. It distinguishes itself from non-differentiable alternatives by supporting automatic differentiation for all inputs, allowing gradients to flow through the projection and backprojection operations [S1, unofficial].
+
+## How it works
+TorchRadon implements linear projection operators that approximate the continuous Radon transform [G]. The core operations are the forward projection (mapping an image to a sinogram) and the backward projection (mapping a sinogram to an image), corresponding to matrix-vector multiplications with $A$ and $A^T$ respectively [S1, unofficial].
+
+**Inputs and Outputs:**
+*   **Forward Projection:** Input is a 2D image tensor $x$ of shape $(N, C, H, W)$ [G]. Output is a sinogram tensor $y$ of shape $(N, C, D, \Theta)$ [G].
+*   **Backward Projection:** Input is a sinogram tensor $y$ [S1, unofficial]. Output is an image tensor $x_{bp}$ [S1, unofficial].
+
+**Data Structures:**
+The library uses PyTorch tensors. The geometry is defined by parameters such as image size, number of angles, and detector configuration [G].
+
+**Parameters:**
+Parameters include `angles`, `det_count`, and interpolation method. Specific default values are not given in the sources [G].
+
+**Algorithm Steps:**
+1. Initialize the Radon operator with specified geometry parameters [G].
+2. **Forward Projection:** For each angle $\theta$, compute the line integrals of the image $x$ along parallel or fan-beam rays to produce $y = Ax$ [S1, unofficial].
+3. **Backward Projection:** For each angle $\theta$, distribute the sinogram values back to the image grid to produce $x_{bp} = A^T y$ [S1, unofficial].
+
+**Pseudocode:**
+> **Unverified code.** The code below did not pass a test run against a reference implementation, or no test fits it, so it may contain errors.
+
+```python
+import torch
+import torch.nn.functional as F
+import numpy as np
+
+def radon_forward(image: torch.Tensor, angles: np.ndarray, det_count: int) -> torch.Tensor:
+    N, C, H, W = image.shape
+    num_angles = len(angles)
+    sinogram = torch.zeros(N, C, det_count, num_angles, device=image.device)
+    for i, theta in enumerate(angles):
+        cos_t, sin_t = torch.cos(torch.tensor(theta)), torch.sin(torch.tensor(theta))
+        y_grid, x_grid = torch.meshgrid(torch.linspace(-1, 1, det_count), torch.linspace(-1, 1, H), indexing='ij')
+        x_rot = x_grid * cos_t - y_grid * sin_t
+        y_rot = x_grid * sin_t + y_grid * cos_t
+        sinogram[:, :, :, i] = F.grid_sample(image, torch.stack([x_rot, y_rot], dim=-1).unsqueeze(0).unsqueeze(0))
+    return sinogram
+
+def radon_backward(sinogram: torch.Tensor, angles: np.ndarray, size: int) -> torch.Tensor:
+    N, C, det_count, num_angles = sinogram.shape
+    image_bp = torch.zeros(N, C, size, size, device=sinogram.device)
+    for i, theta in enumerate(angles):
+        cos_t, sin_t = torch.cos(torch.tensor(theta)), torch.sin(torch.tensor(theta))
+        y_grid, x_grid = torch.meshgrid(torch.linspace(-1, 1, size), torch.linspace(-1, 1, size), indexing='ij')
+        x_sin = x_grid * cos_t + y_grid * sin_t
+        y_sin = -x_grid * sin_t + y_grid * cos_t
+        image_bp[:, :, :, :] = F.grid_sample(sinogram[:, :, :, i].unsqueeze(0).unsqueeze(0), 
+                                             torch.stack([x_sin, y_sin], dim=-1).unsqueeze(0).unsqueeze(0), 
+                                             align_corners=True)
+    return image_bp
+```
+
+**Edge Cases and Pitfalls:**
+*   **Boundary Effects:** Rays passing near the edge of the image may have incomplete support for interpolation kernels, potentially causing artifacts [G].
+*   **Precision:** The library uses floating-point arithmetic, and relative errors compared to reference implementations are small but non-zero [G].
+*   **Memory:** High-resolution images and large numbers of angles increase memory consumption linearly with the sinogram size [G].
+
+## Subtopics
+
+### [Radon Transform](11306-radon-transform.md)
+The Radon transform maps a 2D image to its projections (sinogram) by integrating pixel intensities along parallel lines at various angles. It solves the forward acquisition model in computed tomography, converting spatial domain data into projection domain data. Unlike its inverse counterpart (e.g., Filtered Back-Projection), which reconstructs images from projections, the forward Radon transform generates the measurements required for reconstruction. It is distinguished from other projection methods by its strict parallel-beam geometry and linear integration nature.
+
+### [Fan-Beam Radon Transform](11269-fan-beam-radon-transform.md)
+The Fan-Beam Radon Transform computes projections for a geometry where X-rays originate from a single fixed point source and are captured by a linear detector array. Unlike the [Radon Transform](11306-radon-transform.md) which assumes parallel rays, this method models the divergent ray paths inherent to fan-beam acquisition, allowing for direct reconstruction or rebinning to parallel geometry. It is distinguished from parallel-beam by the diverging ray paths.
+
+## Operating characteristics
+*   **Time Complexity:** Linear with respect to the number of pixels and angles [G].
+*   **Memory Complexity:** Proportional to the size of the sinogram [G].
+*   **Performance:** High performance on NVIDIA GPUs via PyTorch [G].
+*   **Strengths:** Seamless integration with PyTorch, differentiability, support for both parallel and fan-beam geometries [G].
+*   **Limitations:** Interpolation artifacts at boundaries [G].
+
+## Background
+TorchRadon was developed to provide a fast, differentiable implementation of Radon transforms for use in deep learning-based tomographic reconstruction [G]. It is integrated with PyTorch, allowing for end-to-end training of reconstruction networks [S1, unofficial].
+
+## Sources
+[S1] Generative Tomography Reconstruction, https://core.ac.uk/works/91148923, fetched 2026-10-31 (unofficial)

@@ -1,0 +1,396 @@
+# Voxmat Path Tracer
+
+Also called: Voxmat real-time path tracer, per-voxel PBR path tracer
+
+## Overview
+A real-time path tracer for per-voxel physically based rendering (PBR) and global illumination, implemented in GLSL fragment shaders [S1, unofficial]. It renders voxel models defined by 3D textures, supporting emission, metallic/roughness, transmission, and refraction [S1, unofficial]. It distinguishes itself from sibling methods by performing full path tracing (including specular reflections and refractions) on a per-voxel basis using a pre-computed irradiance cache for indirect diffuse lighting, rather than relying solely on static shading or simple ray marching [S1, unofficial].
+
+## How it works
+### Inputs and Outputs
+**Inputs:**
+*   `u_vol_color`: `sampler3D`, per-voxel RGBA. Alpha > 0.001 indicates a filled voxel [S1, unofficial].
+*   `u_vol_mat`: `usampler3D`, per-voxel material row index [S1, unofficial].
+*   `u_materials`: `sampler2D`, material table (see Layout) [S1, unofficial].
+*   `u_env`: `sampler2D`, equirectangular environment map [S1, unofficial].
+*   `u_gi`: `sampler2D`, irradiance atlas for indirect diffuse lighting [S1, unofficial].
+*   `u_dims`: `ivec3`, grid dimensions [S1, unofficial].
+*   `u_max_steps`: `int`, maximum ray march steps [S1, unofficial].
+*   `u_max_trans_depth`: `int`, maximum transmission depth [S1, unofficial].
+*   `u_gi_scale`: `float`, scale factor for GI contribution [S1, unofficial].
+*   `u_glass_density`: `float`, absorption coefficient for glass [S1, unofficial].
+*   `u_env_mode`: `int`, environment mode (0=ambient, 1=texture, 2=procedural sky) [S1, unofficial].
+*   `u_env_intensity`: `float`, environment intensity multiplier [S1, unofficial].
+*   `u_env_flip_h/v`: `bool`, flip environment map horizontally/vertically [S1, unofficial].
+*   `u_ambient`: `vec3`, ambient color if `u_env_mode` is 0 [S1, unofficial].
+*   `state`: `uint`, random number generator state [S1, unofficial].
+
+**Outputs:**
+*   Fragment color (RGB) with alpha [S1, unofficial].
+
+### Data Structures
+**Material Table (`u_materials`)**
+Each material row `r` consists of 4 texels (columns 0-3) [S1, unofficial]:
+*   **Texel 0 (Col 0):** `albedo.rgb`, `useVoxelColor` flag in `.a` (if > 0.5, multiply albedo by voxel color) [S1, unofficial].
+*   **Texel 1 (Col 1):** `metallic`, `roughness`, `transmission`, `ior` (Index of Refraction) [S1, unofficial].
+*   **Texel 2 (Col 2):** `emission.rgb`, `emissionStrength` in `.a` [S1, unofficial].
+*   **Texel 3 (Col 3):** `emissionUsesVoxelColor` flag in `.x` (if > 0.5, multiply emission by voxel color; else use `emission.rgb`), `material flags` in `.y` [S1, unofficial].
+
+**Irradiance Cache Atlas (`u_gi`)**
+A 2D texture storing one texel per (voxel, face) [S1, unofficial].
+*   **Layout:** Six face slabs stacked vertically.
+*   **Face Indices:** 0:+X, 1:-X, 2:+Y, 3:-Y, 4:+Z, 5:-Z [S1, unofficial].
+*   **Coordinate Mapping:** `atlas_coord(v, face)` returns `ivec2(v.x, v.y + v.z * u_dims.y + face * (u_dims.y * u_dims.z))` [S1, unofficial].
+
+### Parameters
+*   `EPS`: `2e-3` [S1, unofficial].
+*   `PI`: `3.14159265359` [S1, unofficial].
+
+### Steps
+
+1.  **Fetch Material Properties**
+    *   Get material row index `r` from `u_vol_mat` at voxel coordinate `v` [S1, unofficial].
+    *   Fetch 4 texels from `u_materials` at row `r`, columns 0-3 [S1, unofficial].
+    *   Convert albedo from sRGB to linear using `to_linear` [S1, unofficial].
+    *   If `useVoxelColor` flag (`texel0.a > 0.5`) is set, multiply linear albedo by voxel color (also linearized) [S1, unofficial].
+    *   Clamp `roughness` to `[0.02, 1.0]` [S1, unofficial].
+    *   Set IOR to `max(texel1.w, 1.0)` [S1, unofficial].
+    *   If `emissionUsesVoxelColor` flag (`texel3.x > 0.5`) is set, multiply emission by voxel color; otherwise use `texel2.rgb` [S1, unofficial].
+    *   Multiply emission by `emissionStrength` (`texel2.a`) [S1, unofficial].
+
+2.  **Sample Environment**
+    *   If `u_env_mode` is 0, return `u_ambient` [S1, unofficial].
+    *   If `u_env_mode` is 2, return `procedural_sky(d) * u_env_intensity` [S1, unofficial].
+    *   If `u_env_mode` is 1:
+        *   Convert direction `d` to spherical coordinates: `u = atan(d.y, d.x) / (2.0 * PI) + 0.5`, `v = acos(clamp(d.z, -1.0, 1.0)) / PI` [S1, unofficial].
+        *   Apply horizontal/vertical flips if `u_env_flip_h/v` is true [S1, unofficial].
+        *   Sample `u_env` at `(texU, texV)` and multiply by `u_env_intensity` [S1, unofficial].
+
+3.  **Procedural Sky Sampling** (Used if `u_env_mode` is 2)
+    *   Horizon color: `vec3(0.90, 0.94, 1.00)` [S1, unofficial].
+    *   Zenith color: `vec3(0.22, 0.42, 0.85)` [S1, unofficial].
+    *   Ground color: `vec3(0.34, 0.32, 0.30)` [S1, unofficial].
+    *   If `d.z >= 0.0`, mix horizon and zenith using `pow(clamp(d.z, 0.0, 1.0), 0.55)` [S1, unofficial].
+    *   If `d.z < 0.0`, mix horizon and ground using `clamp(-d.z * 2.5, 0.0, 1.0)` [S1, unofficial].
+    *   Add sun disk: `sun = normalize(vec3(0.55, 0.35, 0.75))` [S1, unofficial].
+    *   Add specular highlights:
+        *   `vec3(1.0, 0.96, 0.85) * pow(max(dot(d, sun), 0.0), 1500.0) * 8.0` [S1, unofficial].
+        *   `vec3(1.0, 0.90, 0.72) * pow(max(dot(d, sun), 0.0), 12.0) * 0.25` [S1, unofficial].
+
+4.  **Cosine Hemisphere Sampling**
+    *   Generate two random numbers `u1, u2` in `[0, 1)` [S1, unofficial].
+    *   Compute `radius = sqrt(u1)`, `phi = 2.0 * PI * u2` [S1, unofficial].
+    *   Build local basis `(tangent, bitangent)` from normal `n` using `build_basis` [S1, unofficial].
+    *   Return `normalize(tangent * (radius * cos(phi)) + bitangent * (radius * sin(phi)) + n * sqrt(max(0.0, 1.0 - u1)))` [S1, unofficial].
+
+5.  **GGX Microfacet Sampling**
+    *   Compute `a = max(roughness * roughness, 1e-3)` [S1, unofficial].
+    *   Generate `u1, u2` [S1, unofficial].
+    *   Compute `phi = 2.0 * PI * u1` [S1, unofficial].
+    *   Compute `cosTheta = sqrt((1.0 - u2) / (1.0 + (a * a - 1.0) * u2))` [S1, unofficial].
+    *   Compute `sinTheta = sqrt(max(0.0, 1.0 - cosTheta * cosTheta))` [S1, unofficial].
+    *   Build basis from normal `n` [S1, unofficial].
+    *   Return `normalize(tangent * (sinTheta * cos(phi)) + bitangent * (sinTheta * sin(phi)) + n * cosTheta)` [S1, unofficial].
+
+6.  **Smith Geometry Function**
+    *   Compute `k = (roughness * roughness) * 0.5` [S1, unofficial].
+    *   Return `g_schlick(ndv, k) * g_schlick(ndl, k)` where `g_schlick(ndx, k) = ndx / (ndx * (1.0 - k) + k)` [S1, unofficial].
+
+7.  **Fresnel Schlick (Metallic)**
+    *   Return `f0 + (1.0 - f0) * pow(1.0 - cosTheta, 5.0)` [S1, unofficial].
+
+8.  **Fresnel Dielectric**
+    *   Compute `r0 = ((1.0 - ior) / (1.0 + ior))^2` [S1, unofficial].
+    *   Return `r0 + (1.0 - r0) * pow(1.0 - clamp(cosTheta, 0.0, 1.0), 5.0)` [S1, unofficial].
+
+9.  **Voxel Volume Access**
+    *   Check bounds with `in_bounds(c)` which verifies `0 <= c < u_dims` [S1, unofficial].
+    *   Check if filled with `filled(c)` which checks `texelFetch(u_vol_color, c, 0).a > 0.001` [S1, unofficial].
+    *   Get material row with `material_row(c)` which reads `u_vol_mat` [S1, unofficial].
+    *   Get transmission with `transmission_at(c)` which reads `u_materials` at column 1, row `material_row(c)` [S1, unofficial].
+
+10. **Face Normal Determination**
+    *   Given surface normal `n`, determine face index `f` (0-5) [S1, unofficial].
+    *   Compare absolute components `a = abs(n)` [S1, unofficial].
+    *   If `a.x` is max, return 0 if `n.x > 0` else 1 [S1, unofficial].
+    *   If `a.y` is max, return 2 if `n.y > 0` else 3 [S1, unofficial].
+    *   Else return 4 if `n.z > 0` else 5 [S1, unofficial].
+    *   Map face index to normal vector: 0:(1,0,0), 1:(-1,0,0), 2:(0,1,0), 3:(0,-1,0), 4:(0,0,1), 5:(0,0,-1) [S1, unofficial].
+
+11. **Irradiance Cache Read**
+    *   To get outgoing radiance for voxel `v` seen from face `n`, fetch material `m` [S1, unofficial].
+    *   Determine face index `f = face_of(n)` [S1, unofficial].
+    *   Compute atlas coordinate `atlas_coord(v, f)` [S1, unofficial].
+    *   Read irradiance from `u_gi` at that coordinate [S1, unofficial].
+    *   Return irradiance (emission is handled separately as omnidirectional) [S1, unofficial].
+
+### Pseudocode
+
+> **Unverified code.** The code below did not pass a test run against a reference implementation, or no test fits it, so it may contain errors.
+
+```python
+import math
+
+# Constants
+PI = 3.14159265359
+EPS = 2e-3
+
+# Random Number Generator (PCG)
+def pcg(state):
+    state = (state * 747796405 + 2891336453) & 0xFFFFFFFF
+    word = ((state >> ((state >> 28) + 4)) ^ state) * 277803737
+    return ((word >> 22) ^ word) & 0xFFFFFFFF
+
+def random01(state):
+    return float(pcg(state)) / 4294967296.0
+
+# Helper: Linearize sRGB
+def to_linear(c):
+    # Simplified sRGB to linear conversion
+    return vec3(
+        pow(c.x, 2.2) if c.x <= 0.04045 else pow((c.x + 0.055) / 1.055, 2.4),
+        pow(c.y, 2.2) if c.y <= 0.04045 else pow((c.y + 0.055) / 1.055, 2.4),
+        pow(c.z, 2.2) if c.z <= 0.04045 else pow((c.z + 0.055) / 1.055, 2.4)
+    )
+
+# Helper: Build Basis
+def build_basis(n):
+    # Avoid singularity
+    if abs(n.z) < 0.999:
+        ref = vec3(0.0, 0.0, 1.0)
+    else:
+        ref = vec3(1.0, 0.0, 0.0)
+    tangent = normalize(cross(n, ref))
+    bitangent = cross(n, tangent)
+    return tangent, bitangent
+
+# Helper: Schlick Geometry
+def g_schlick(ndx, k):
+    return ndx / (ndx * (1.0 - k) + k)
+
+# Helper: Smith Geometry
+def smith_geometry(roughness, ndv, ndl):
+    k = (roughness * roughness) * 0.5
+    return g_schlick(ndv, k) * g_schlick(ndl, k)
+
+# Helper: Fresnel Metallic
+def fresnel_schlick_metallic(f0, cos_theta):
+    return f0 + (1.0 - f0) * pow(1.0 - cos_theta, 5.0)
+
+# Helper: Fresnel Dielectric
+def fresnel_schlick_dielectric(ior, cos_theta):
+    r0 = pow((1.0 - ior) / (1.0 + ior), 2.0)
+    return r0 + (1.0 - r0) * pow(1.0 - clamp(cos_theta, 0.0, 1.0), 5.0)
+
+# Helper: Procedural Sky
+def procedural_sky(d):
+    horizon = vec3(0.90, 0.94, 1.00)
+    zenith = vec3(0.22, 0.42, 0.85)
+    ground = vec3(0.34, 0.32, 0.30)
+    
+    if d.z >= 0.0:
+        mix_factor = pow(clamp(d.z, 0.0, 1.0), 0.55)
+        color = mix(horizon, zenith, mix_factor)
+    else:
+        mix_factor = clamp(-d.z * 2.5, 0.0, 1.0)
+        color = mix(horizon, ground, mix_factor)
+        
+    sun = normalize(vec3(0.55, 0.35, 0.75))
+    spec1 = vec3(1.0, 0.96, 0.85) * pow(max(dot(d, sun), 0.0), 1500.0) * 8.0
+    spec2 = vec3(1.0, 0.90, 0.72) * pow(max(dot(d, sun), 0.0), 12.0) * 0.25
+    return color + spec1 + spec2
+
+# Helper: Cosine Hemisphere Sampling
+def sample_cosine_hemisphere(n, u1, u2):
+    radius = sqrt(u1)
+    phi = 2.0 * PI * u2
+    tangent, bitangent = build_basis(n)
+    return normalize(
+        tangent * (radius * cos(phi)) + 
+        bitangent * (radius * sin(phi)) + 
+        n * sqrt(max(0.0, 1.0 - u1))
+    )
+
+# Helper: GGX Microfacet Sampling
+def sample_ggx(roughness, n, u1, u2):
+    a = max(roughness * roughness, 1e-3)
+    phi = 2.0 * PI * u1
+    cos_theta = sqrt((1.0 - u2) / (1.0 + (a * a - 1.0) * u2))
+    sin_theta = sqrt(max(0.0, 1.0 - cos_theta * cos_theta))
+    tangent, bitangent = build_basis(n)
+    return normalize(
+        tangent * (sin_theta * cos(phi)) + 
+        bitangent * (sin_theta * sin(phi)) + 
+        n * cos_theta
+    )
+
+# Helper: Face Index from Normal
+def face_of(n):
+    a = abs(n)
+    if a.x >= a.y and a.x >= a.z:
+        return 0 if n.x > 0 else 1
+    elif a.y >= a.x and a.y >= a.z:
+        return 2 if n.y > 0 else 3
+    else:
+        return 4 if n.z > 0 else 5
+
+# Helper: Atlas Coordinate
+def atlas_coord(v, face, u_dims):
+    return ivec2(v.x, v.y + v.z * u_dims.y + face * (u_dims.y * u_dims.z))
+
+# Main Path Tracing Function
+def voxmat_path_tracer(v, state, u_vol_color, u_vol_mat, u_materials, u_env, u_gi, u_dims, u_max_steps, u_max_trans_depth, u_gi_scale, u_glass_density, u_env_mode, u_env_intensity, u_env_flip_h, u_env_flip_v, u_ambient):
+    # 1. Fetch Material Properties
+    r = texelFetch(u_vol_mat, v, 0).r
+    t0 = texelFetch(u_materials, ivec2(0, r), 0)
+    t1 = texelFetch(u_materials, ivec2(1, r), 0)
+    t2 = texelFetch(u_materials, ivec2(2, r), 0)
+    t3 = texelFetch(u_materials, ivec2(3, r), 0)
+    
+    albedo = to_linear(t0.rgb)
+    if t0.a > 0.5:
+        albedo *= to_linear(texelFetch(u_vol_color, v, 0).rgb)
+        
+    roughness = clamp(t1.g, 0.02, 1.0)
+    ior = max(t1.w, 1.0)
+    metallic = t1.r
+    transmission = t1.b
+    
+    emission = t2.rgb
+    if t3.r > 0.5:
+        emission *= to_linear(texelFetch(u_vol_color, v, 0).rgb)
+    emission *= t2.a
+    
+    # 2. Sample Environment
+    # Note: In a full path tracer, this is called for outgoing directions hitting the environment
+    def sample_env(d):
+        if u_env_mode == 0:
+            return u_ambient
+        elif u_env_mode == 2:
+            return procedural_sky(d) * u_env_intensity
+        else:
+            u = atan(d.y, d.x) / (2.0 * PI) + 0.5
+            v = acos(clamp(d.z, -1.0, 1.0)) / PI
+            if u_env_flip_h: u = 1.0 - u
+            if u_env_flip_v: v = 1.0 - v
+            return texelFetch(u_env, ivec2(u, v), 0).rgb * u_env_intensity
+
+    # 3. Irradiance Cache Read
+    def read_gi(v, n):
+        f = face_of(n)
+        coord = atlas_coord(v, f, u_dims)
+        return texelFetch(u_gi, coord, 0).rgb
+
+    # 4. Voxel Volume Access
+    def in_bounds(c):
+        return all(0 <= c[i] < u_dims[i] for i in range(3))
+        
+    def filled(c):
+        return texelFetch(u_vol_color, c, 0).a > 0.001
+        
+    def transmission_at(c):
+        r_c = texelFetch(u_vol_mat, c, 0).r
+        return texelFetch(u_materials, ivec2(1, r_c), 0).b
+
+    # 5. Ray Marching / Path Tracing Loop
+    # Note: The specific ray marching loop for voxel traversal is not fully detailed in the source,
+    # but the shading model components are. We assume a standard path tracing loop structure.
+    
+    color = vec3(0.0)
+    throughput = vec3(1.0)
+    current_voxel = v
+    state_local = state
+    
+    for depth in range(u_max_trans_depth + 1):
+        # Check if voxel is filled
+        if not filled(current_voxel):
+            # Hit empty space, sample environment
+            # Direction d would be determined by ray marching
+            # For this summary, we assume d is passed or computed
+            # color += throughput * sample_env(d)
+            break
+            
+        # Get material properties for current voxel
+        r = texelFetch(u_vol_mat, current_voxel, 0).r
+        t0 = texelFetch(u_materials, ivec2(0, r), 0)
+        t1 = texelFetch(u_materials, ivec2(1, r), 0)
+        t2 = texelFetch(u_materials, ivec2(2, r), 0)
+        t3 = texelFetch(u_materials, ivec2(3, r), 0)
+        
+        albedo = to_linear(t0.rgb)
+        if t0.a > 0.5:
+            albedo *= to_linear(texelFetch(u_vol_color, current_voxel, 0).rgb)
+        roughness = clamp(t1.g, 0.02, 1.0)
+        ior = max(t1.w, 1.0)
+        metallic = t1.r
+        transmission = t1.b
+        
+        emission = t2.rgb
+        if t3.r > 0.5:
+            emission *= to_linear(texelFetch(u_vol_color, current_voxel, 0).rgb)
+        emission *= t2.a
+        
+        # Add emission
+        color += throughput * emission
+        
+        # Determine normal (simplified: assume surface normal n is known from ray march)
+        # n = ...
+        
+        # Sample indirect lighting (Diffuse GI)
+        # For diffuse surfaces, use irradiance cache
+        if metallic < 0.5:
+            gi_irradiance = read_gi(current_voxel, n)
+            color += throughput * albedo * gi_irradiance * u_gi_scale
+            
+        # Sample specular/reflection/refraction
+        u1 = random01(state_local)
+        u2 = random01(state_local)
+        
+        # GGX Sampling for specular
+        h = sample_ggx(roughness, n, u1, u2)
+        l = reflect(-n, h) # Simplified reflection direction
+        
+        # Fresnel
+        cos_theta = max(dot(n, l), 0.0)
+        if metallic > 0.5:
+            f0 = albedo # Simplified f0 for metals
+            f = fresnel_schlick_metallic(f0, cos_theta)
+        else:
+            f = fresnel_schlick_dielectric(ior, cos_theta)
+            
+        # Russian Roulette / Throughput update
+        # Note: Full path tracing requires careful throughput management
+        # For simplicity, we assume a single bounce or simplified loop
+        
+        # If transmission, march through voxel
+        if transmission > 0.0:
+            # Calculate step size based on glass density
+            step = 1.0 / (u_glass_density + 1e-5)
+            # March ray through voxel
+            # new_voxel = current_voxel + direction * step
+            # throughput *= (1.0 - transmission) # Absorption
+            pass
+            
+        # Break after one bounce for simplicity in this summary
+        break
+        
+    return color
+```
+
+### Edge Cases and Pitfalls
+*   **Basis Construction Singularity:** When constructing tangent/bitangent from normal `n`, if `abs(n.z) < 0.999`, use reference vector `(0,0,1)`. Otherwise, use `(1,0,0)` to avoid cross product near zero [S1, unofficial].
+*   **Roughness Clamping:** Roughness values are clamped to `[0.02, 1.0]` to prevent numerical instability or invalid shading [S1, unofficial].
+*   **IOR Minimum:** IOR is clamped to a minimum of `1.0` to ensure valid dielectric calculations [S1, unofficial].
+
+## Operating characteristics
+*   **Time Complexity:** Real-time, implemented in fragment shaders. Performance depends on grid resolution, `u_max_steps`, and `u_max_trans_depth` [S1, unofficial].
+*   **Memory Complexity:** Requires storage for `u_vol_color`, `u_vol_mat`, `u_materials`, `u_env`, and `u_gi` [S1, unofficial]. The irradiance cache `u_gi` scales with grid size and number of faces (6) [S1, unofficial].
+*   **Strengths:** Supports PBR materials (metallic/roughness, transmission, refraction), emission, and global illumination via irradiance cache [S1, unofficial].
+*   **Limitations:** Relies on pre-computed irradiance cache for indirect lighting, which may not capture dynamic indirect effects [S1, unofficial]. Real-time performance may be limited by complex materials and deep transmission paths [S1, unofficial].
+*   **When to use:** Real-time voxel rendering with PBR materials and global illumination [S1, unofficial].
+*   **When not to use:** Offline rendering requiring high-fidelity global illumination without pre-computation, or scenes with highly dynamic indirect lighting [S1, unofficial].
+
+## Background
+The Voxmat Path Tracer is part of the Voxmat project, a lightweight, per-voxel material editor for sliced voxel images [S1, unofficial]. It was developed by HollaFoil and is available on GitHub [S1, unofficial]. The method is designed for real-time rendering of voxel models with global illumination, supporting materials like emission, metallic/roughness, transmission, and refraction [S1, unofficial].
+
+## Sources
+[S1] HollaFoil/Voxmat, https://github.com/HollaFoil/Voxmat, fetched 2026-10-28 (unofficial)

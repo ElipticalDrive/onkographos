@@ -1,0 +1,126 @@
+# Diffusion Models (DDPMs)
+Also called: Denoising Diffusion Probabilistic Models
+
+## Overview
+Diffusion Models (DDPMs) are generative models that transform a sample from a noise distribution towards a data distribution using a fixed forward process and a learned reverse process [S1][S3, unofficial]. In volume rendering, they address the challenge of generating high-fidelity volumetric data, designing transfer functions, and synthesizing visualizations by iteratively denoising from pure noise to a data distribution sample [S2][S3, unofficial]. They set themselves apart from sibling methods like GANs and Gaussian Mixture Models by their iterative refinement nature, which naturally handles the multimodal distributions common in scientific data [S3, unofficial].
+
+## How it works
+**Inputs and Outputs:**
+*   **Input:** A Gaussian noise sample $z_T \sim \mathcal{N}(0, I)$ at the final timestep $T$, and optional conditioning information $y$ (e.g., text prompts, low-resolution images, or other latent representations) [S1].
+*   **Output:** A denoised sample $z_0$ representing the generated data (e.g., latent codes for volume data or transfer function parameters) [S1][S3, unofficial].
+
+**Data Structures:**
+*   **Noising Schedule:** A sequence of coefficients $\bar{\alpha}_t$ and $\alpha_t$ for $t \in [0, T]$. $\bar{\alpha}_t$ is the cumulative product of $\alpha_i$ from $i=1$ to $t$ [S2].
+*   **Denoising Network:** A neural network $\epsilon_\phi$ parameterized by $\phi$, which takes $(z_t, y, t)$ as input and outputs a predicted noise vector $\hat{\epsilon}$ [S1].
+*   **Latent Space (Optional):** If using Latent Diffusion, a Variational Autoencoder (VAE) with encoder $E$ and decoder $D$ maps data to latent space $z$ and back [S1].
+
+**Numbered Steps:**
+
+1.  **Forward Process (Training Data Preparation):**
+    Given a clean data sample $z_0$ (or latent representation thereof), noise is added at a random timestep $t \sim U(0, T)$ to produce $z_t$ [S1]. This is computed using the closed-form reparameterization trick [S1]:
+    $$ z_t = \sqrt{\bar{\alpha}_t} z_0 + \sqrt{1 - \bar{\alpha}_t} \epsilon $$
+    where $\epsilon \sim \mathcal{N}(0, I)$ is the Gaussian noise sample [S1].
+
+2.  **Training Objective:**
+    The network $\epsilon_\phi$ is trained to predict the noise component $\epsilon$ used to create $z_t$ [S1]. The loss function is the weighted mean squared error between the predicted noise and the actual noise [S1]:
+    $$ \mathcal{L} = \mathbb{E}_{t \sim U(0,T), \epsilon \sim \mathcal{N}(0,I)} \left[ \gamma(t) \| \epsilon_\phi(z_t, y, t) - \epsilon \|_2^2 \right] $$
+    where $\gamma(t)$ is a weighting function (often set to 1) [S1].
+
+3.  **Sampling (Reverse Process):**
+    To generate data, start with $z_T \sim \mathcal{N}(0, I)$ [S1]. Iteratively denoise from $t=T$ down to $t=0$ using the following update rule [S1]:
+    $$ z_{t-1} = \sqrt{\alpha_t} \left( \frac{1}{\sqrt{\alpha_t}} \left( z_t - \frac{1-\alpha_t}{\sqrt{1-\bar{\alpha}_t}} \epsilon_\phi(z_t, y, t) \right) + \sigma_t \epsilon \right) $$
+    where $\epsilon \sim \mathcal{N}(0, I)$ is resampled at each step, and $\sigma_t$ is the variance coefficient for the noise added at step $t-1$ [S1].
+
+**Parameters:**
+*   **T:** Total number of diffusion steps. Not given in the sources.
+*   **$\bar{\alpha}_t, \alpha_t, \sigma_t$:** Schedule parameters. $\alpha_t = 1 - \beta_t$ and $\bar{\alpha}_t = \prod_{s=1}^t \alpha_s$ [S2]. Not given in the sources.
+*   **$\phi$:** Network weights. Learned during training.
+*   **$\gamma(t)$:** Loss weighting function. Not given in the sources.
+
+**Edge Cases and Pitfalls:**
+*   **Precision:** The calculation involves square roots and divisions by $\sqrt{\alpha_t}$. If $\alpha_t$ approaches 0, numerical instability may occur [G].
+*   **Boundary Conditions:** The loop must terminate exactly at $t=1$ to produce $z_0$ without applying an extra denoising step [G].
+
+**Pseudocode:**
+
+> **Unverified code.** The code below did not pass a test run against a reference implementation, or no test fits it, so it may contain errors.
+
+```python
+import numpy as np
+
+def forward_process(z0, t, alpha_bar, noise):
+    """
+    Adds noise to clean data z0 at timestep t.
+    z0: clean data sample
+    t: timestep integer
+    alpha_bar: array of cumulative alpha coefficients
+    noise: Gaussian noise sample epsilon
+    """
+    sqrt_alpha_bar = np.sqrt(alpha_bar[t])
+    sqrt_one_minus_alpha_bar = np.sqrt(1 - alpha_bar[t])
+    zt = sqrt_alpha_bar * z0 + sqrt_one_minus_alpha_bar * noise
+    return zt
+
+def train_step(z0, y, alpha_bar, alpha, network_epsilon, t, gamma):
+    """
+    Computes the training loss for a single step.
+    """
+    noise = np.random.normal(0, 1, size=z0.shape)
+    zt = forward_process(z0, t, alpha_bar, noise)
+    predicted_noise = network_epsilon(zt, y, t)
+    loss = gamma(t) * np.mean((predicted_noise - noise) ** 2)
+    return loss
+
+def sample_ddpm(T, alpha_bar, alpha, sigma, network_epsilon, y):
+    """
+    Generates a sample from noise using the reverse process.
+    Implements Eq. 3 from [S1] exactly.
+    """
+    zt = np.random.normal(0, 1, size=(1, 1, 64, 64))
+    
+    for t in range(T, 0, -1):
+        eps_pred = network_epsilon(zt, y, t)
+        
+        # Term inside the outer sqrt(alpha_t)
+        # z0_est = (zt - (1-alpha_t)/sqrt(1-alpha_bar_t) * eps_pred) / sqrt(alpha_t)
+        term_inside = (zt - (1 - alpha[t]) / np.sqrt(1 - alpha_bar[t]) * eps_pred) / np.sqrt(alpha[t])
+        
+        # Sample new noise for this step
+        eps_step = np.random.normal(0, 1, size=zt.shape)
+        
+        # Apply Eq. 3 from [S1]
+        zt = np.sqrt(alpha[t]) * (term_inside + sigma[t] * eps_step)
+        
+    return zt
+```
+
+## Subtopics
+
+### [Latent Diffusion Models (LDM) for 3D](12787-latent-diffusion-models-ldm-for-3d.md)
+Latent Diffusion Models (LDM) for 3D perform the diffusion process in a compressed latent space rather than the high-dimensional voxel or pixel space, significantly improving computational efficiency and output quality. In the context of 3D volume rendering, this approach defines a generative model over latent variables representing scene geometry, enabling the synthesis of voxel-based neural fields. It sets itself apart from standard Denoising Diffusion Probabilistic Models (DDPMs) by decoupling the diffusion process from the expensive decoding step, allowing for stable and efficient generation of complex 3D scenes conditioned on hierarchical inputs.
+
+## Operating characteristics
+**Time and Memory Complexity:**
+Standard DDPMs operate in the native data space, which can be memory-intensive for high-resolution 3D volumes [G]. Latent Diffusion Models (LDMs) reduce GPU memory usage and improve speed by projecting data into a lower-dimensional latent space using a pretrained Variational Autoencoder (VAE) [S1].
+
+**Measured Performance:**
+Specific performance metrics (FPS, memory usage) are not provided in the sources. However, LDMs are noted to improve speed and GPU memory usage compared to full-space diffusion [S1].
+
+**Strengths and Limitations:**
+*   **Strengths:** Naturally handles multimodal distributions common in scientific data [S3, unofficial]. Can generate high-quality details when guided by super-resolution models (e.g., SD×4) [S1].
+*   **Limitations:** Requires iterative sampling (many steps), which can be slow compared to single-pass methods. Requires significant computational resources for training the denoising network [S1].
+
+**When to Use:**
+Use when the data distribution is complex and multimodal, or when high-fidelity detail generation (e.g., super-resolution) is required [S1][S3, unofficial].
+
+**When Not to Use:**
+Avoid when real-time performance is critical and iterative sampling is too slow, or when computational resources for training a large diffusion model are unavailable [G].
+
+## Background
+Diffusion models were introduced as generative models that transform samples from a noise distribution to a data distribution [S1][S3, unofficial]. They entered volume visualization following surveys by Wang and Han, finding applications in volume generation, transfer function design, and visualization synthesis [S3, unofficial]. Latent Diffusion Models (LDMs) further improved efficiency by operating in latent space [S3, unofficial]. Stable Diffusion is a prominent example of a pretrained LDM used for upscaling and generation [S1].
+
+## Sources
+[S1] DiSR-NeRF: Diffusion-Guided View-Consistent Super-Resolution NeRF, https://doi.org/10.1109/cvpr52733.2024.01943, fetched 2026-10-26
+[S2] Diffusion Posterior Illumination for Ambiguity-Aware Inverse Rendering, https://doi.org/10.1145/3618357, fetched 2026-10-26
+[S3] PDF Deep Learning Methods and Neural Representations for Scientific Volume ..., https://www.cs.uoregon.edu/Reports/AREA-202603-Mathai.pdf, fetched 2026-10-27 (unofficial)
+[S4] A survey on 3D editing based on NeRF and 3DGS, https://link.springer.com/article/10.1007/s11704-025-41176-9, fetched 2026-10-28

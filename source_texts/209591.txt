@@ -1,0 +1,171 @@
+Context Graphics-pipeline review on main at 8fb19924c1ba281b800f75bc8d1fdf237f82f808. TextureManager currently creates the block texture-array image with: imageInfo.mipLevels = 1; ... samplerInfo.magFilter = VK_FILTER_NEAREST; samplerInf...
+
+render(textures): add mipmapped block atlas, anisotropic filtering and alpha-coverage-safe cutouts · Issue #136 · gkehren/ft_vox · GitHub
+Skip to content
+You signed in with another tab or window. Reload to refresh your session.
+You signed out in another tab or window. Reload to refresh your session.
+You switched accounts on another tab or window. Reload to refresh your session.
+Dismiss alert
+render(textures): add mipmapped block atlas, anisotropic filtering and alpha-coverage-safe cutouts #136
+New issue
+Copy link
+New issue
+Copy link
+Closed
+#149
+Closed
+render(textures): add mipmapped block atlas, anisotropic filtering and alpha-coverage-safe cutouts#136
+#149
+Copy link
+Description
+gkehren
+opened on Sep 7, 2026
+Issue body actions
+Context
+Graphics-pipeline review on main at 8fb19924c1ba281b800f75bc8d1fdf237f82f808.
+TextureManager currently creates the block texture-array image with:
+```
+imageInfo.mipLevels = 1;
+...
+samplerInfo.magFilter = VK_FILTER_NEAREST;
+samplerInfo.minFilter = VK_FILTER_NEAREST;
+```
+The world is rendered to several hundred blocks (maxRenderDistance = 512 by default), with repeated voxel textures, large greedy quads, foliage/cross details and oblique surfaces. A single nearest-filtered mip level therefore undersamples distant textures heavily.
+Typical symptoms are:
+shimmering / crawling texels while moving;
+moiré on large repeated surfaces at grazing angles;
+unstable foliage silhouettes in the distance;
+noisy distant terrain that competes with fog/SSAO/post-processing;
+unnecessary texture bandwidth because minification always samples the full-resolution level.
+The current alpha-cut paths (terrain.frag, shadow.frag) also use very low fixed discard thresholds. Naively generating box-filtered mipmaps for alpha-cut textures can make leaves/grass progressively disappear because coverage is not preserved.
+Goal
+Introduce a texture-minification path appropriate for a voxel world while preserving the intended pixel-art look at close range and stable alpha-cut coverage in color + shadow passes.
+Proposed implementation
+1. Generate a complete mip chain for block texture-array layers
+For atlas layer size N, allocate:
+```
+mipLevels = floor(log2(N)) + 1
+```
+Generate mip levels during resource-pack upload.
+Implementation options:
+Vulkan blit path when the selected format supports linear blit;
+compute/downsample path;
+CPU mip generation while decoding the resource pack.
+The chosen path must work for the sRGB albedo format introduced by #135: filtering needs to represent linear-light averaging rather than averaging gamma-encoded RGB values.
+2. Preserve pixel-art appearance near the camera
+Do not simply switch magnification to bilinear filtering.
+Recommended policy:
+magnification: VK_FILTER_NEAREST;
+minification: evaluate VK_FILTER_LINEAR between texels/mips versus nearest-with-mip interpolation;
+mipmap mode: VK_SAMPLER_MIPMAP_MODE_LINEAR if visually preferable;
+expose a graphics-quality option only if needed, not a per-texture special case.
+This keeps texels crisp when enlarged while providing stable minification in the distance.
+3. Add anisotropic filtering when supported
+Query and use samplerAnisotropy / maxSamplerAnisotropy for grazing-angle terrain.
+Cap the application value to a sensible quality tier (for example 4x/8x/16x) and gracefully fall back when unsupported.
+Do not make anisotropy a hard device requirement.
+4. Preserve alpha-test coverage through mip levels
+Leaves, grass, flowers, kelp/seagrass and other cutout textures need stable silhouette coverage.
+Evaluate one of:
+alpha-coverage-preserving mip generation (preferred);
+per-mip alpha rescaling against a canonical cut threshold;
+alpha-to-coverage only if MSAA is introduced later (not sufficient for the current path).
+Use one documented cutout threshold policy shared by terrain color and shadow rendering. The current 0.01 discard is effectively "discard only almost fully transparent" and is not robust for filtered alpha.
+Shadow-map cutout coverage must track the visible color silhouette closely; leaves should not cast dense square-ish shadows or vanish at distance.
+5. Resource-pack compatibility
+The mip path must work for:
+bundled textures;
+folder packs;
+ZIP packs;
+different source resolutions that are rescaled into the texture-array layer size;
+animated strip inputs (currently first frame only).
+Mip generation happens after the canonical layer image has been produced so all sources use identical semantics.
+Tests
+Add CPU/helper tests for:
+mip-count calculation;
+1x1 / non-power-of-two input handling where applicable;
+alpha coverage preservation on synthetic checker/cutout images;
+opaque textures staying fully opaque through the mip chain;
+transparent pixels not creating RGB fringe/halo pollution;
+format capability fallback when linear blit or anisotropy is unavailable.
+Visual validation
+Capture fixed camera comparisons for:
+long grass/sand/stone plane viewed almost horizontally;
+forest canopy from 50 / 150 / 300+ blocks;
+flowers/seagrass/kelp at increasing distance;
+shadow silhouettes from leaves at each cascade;
+slow forward camera movement to detect temporal shimmer.
+A video comparison is more valuable than screenshots for shimmer.
+Performance validation
+Using the existing GPU profiler, report before/after:
+Opaque GPU ms;
+Shadow GPU ms;
+frame GPU ms;
+texture memory used by the mip chain;
+resource-pack load/upload time.
+Mipmaps increase texture storage (~33% for a full 2D chain) but should improve cache/minification behavior and visual stability.
+Acceptance criteria
+Block texture arrays have a complete usable mip chain.
+Close-range block textures remain crisp/pixel-art appropriate.
+Distant terrain no longer exhibits strong nearest-only shimmer/moiré during movement.
+Anisotropic filtering is enabled when supported and has a documented fallback.
+Cutout alpha coverage remains visually stable across mip levels.
+Terrain and shadow passes use compatible alpha-cut semantics.
+Leaves/grass/kelp do not disappear or turn into opaque rectangles in distant mips/shadows.
+Resource-pack loading remains deterministic and failure-atomic.
+Vulkan validation remains clean.
+GPU cost does not regress materially; include profiler numbers.
+Dependencies
+Implement after or together with #135 so mip generation/filtering follows the corrected sRGB/linear-light contract.
+Priority
+P0/P1 visual stability — high-value improvement for any moving camera in a large repeated-texture voxel scene.
+Activity
+gkehren
+added 6 commits that reference this issue on Sep 7, 2026
+fix(renderer): true alpha-coverage preservation, POT layers, edge dil…
+...
+0430599
+fix(renderer): quantized coverage ties + mip-0 edge dilation (#136 re…
+...
+e7d499f
+feat(renderer): mipmapped block atlas, anisotropic filtering and alph…
+...
+db829a9
+fix(renderer): true alpha-coverage preservation, POT layers, edge dil…
+...
+c159726
+fix(renderer): quantized coverage ties + mip-0 edge dilation (#136 re…
+...
+00fc831
+feat(renderer): mipmapped block atlas, anisotropic filtering and alph…
+...
+e58dac4
+gkehren
+closed this as completedin #149on Sep 7, 2026
+gkehren
+added 2 commits that reference this issue on Sep 9, 2026
+fix(renderer): mipmapped alpha-safe minification for mob textures (is…
+...
+830488b
+fix(renderer): mipmapped alpha-safe minification for mob textures (is…
+...
+3524d72
+Sign up for free to join this conversation on GitHub. Already have an account? Sign in to comment
+Metadata
+Metadata
+Assignees
+No one assigned
+Labels
+No labels
+No labels
+Projects
+No projects
+Milestone
+No milestone
+Relationships
+None yet
+Development
+No branches or pull requests
+Issue actions
+Open in GitHub Copilot app
+You can’t perform that action at this time.

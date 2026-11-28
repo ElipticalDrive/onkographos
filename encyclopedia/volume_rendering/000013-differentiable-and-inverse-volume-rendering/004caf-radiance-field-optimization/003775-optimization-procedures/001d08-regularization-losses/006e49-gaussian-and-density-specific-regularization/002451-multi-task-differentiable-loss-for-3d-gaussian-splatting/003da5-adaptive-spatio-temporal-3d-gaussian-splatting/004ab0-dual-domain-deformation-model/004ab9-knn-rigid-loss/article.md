@@ -1,0 +1,109 @@
+# KNN Rigid Loss
+
+Also called: Spatial Regularization
+
+## Overview
+The KNN Rigid Loss is a regularization term used in dynamic 3D Gaussian Splatting to enforce spatial local consistency by penalizing differences in attribute residuals between a Gaussian point and its K nearest neighbors [S1]. It addresses the instability caused by dynamic density control (adding/removing points) by restricting the application of spatial constraints to optimization stages where the point set is static [S1].
+
+## How it works
+**Inputs and Outputs:**
+*   **Input:** A set of 3D Gaussian particles. Each particle $i$ has a position $\mu_i$, and a deformation function $D^{(t)}$ that outputs attributes (e.g., position, rotation) at normalized time $t \in [0, 1]$ [S1].
+*   **Output:** A scalar loss value $L_s$ representing the spatial rigidity error [S1].
+
+**Data Structures:**
+*   **K-Nearest Neighbors (KNN):** For each Gaussian $i$, a list of $K$ indices $j$ corresponding to the spatially nearest neighbors in the current frame [S1].
+*   **Scaled Time Input:** $t_s = \lambda_s \cdot t + \lambda_b$, where $\lambda_s$ is the dilation factor and $\lambda_b$ is the base factor [S1].
+
+**Parameters:**
+*   $\lambda_s$: Dilation factor for time scaling. Initialized to 1 [S1].
+*   $\lambda_b$: Base factor for time scaling. Initialized to 0 [S1].
+*   $K$: Number of nearest neighbors. Not given in the sources.
+
+**Algorithm:**
+The optimization is divided into two alternating stages to handle dynamic point density [S1]:
+1.  **Stage 1 (Density Control):** Optimize all variables (including adding/removing points) without the KNN Rigid Loss [S1].
+2.  **Stage 2 (Attribute Optimization):** Optimize attributes (position, rotation, etc.) without adding or removing points. The KNN Rigid Loss is applied in this stage [S1].
+
+**Formula:**
+The loss is defined as the sum of squared differences between the deformation outputs of a Gaussian and its neighbors at time $t_s$ [S1]:
+
+$$
+L_s = \sum_{i} \sum_{j \in \text{KNN}(i)} \| D^{(t_s)}_i - D^{(t_s)}_j \|_2^2
+$$
+
+Where:
+*   $i$ iterates over all Gaussian particles [S1].
+*   $\text{KNN}(i)$ is the set of $K$ nearest neighbors to particle $i$ [S1].
+*   $D^{(t_s)}_i$ is the attribute vector (e.g., position) of particle $i$ predicted by its deformation function at scaled time $t_s$ [S1].
+
+**Pseudocode:**
+> **Unverified code.** The code below did not pass a test run against a reference implementation, or no test fits it, so it may contain errors.
+
+```python
+def knn_rigid_loss(gaussians, k_neighbors, time_t, lambda_s, lambda_b):
+    """
+    Computes the KNN Rigid Loss for dynamic 3D Gaussian Splatting.
+    
+    Args:
+        gaussians: List of Gaussian objects, each having a deformation function D(t).
+        k_neighbors: Dictionary mapping Gaussian index i to a list of neighbor indices j.
+        time_t: Normalized frame index t in [0, 1].
+        lambda_s: Dilation factor (default 1).
+        lambda_b: Base factor (default 0).
+        
+    Returns:
+        Scalar loss value.
+    """
+    # Calculate scaled time input
+    t_s = lambda_s * time_t + lambda_b
+    
+    loss = 0.0
+    
+    # Iterate over each Gaussian and its neighbors
+    for i, neighbor_indices in k_neighbors.items():
+        # Get the deformation output for the current Gaussian at t_s
+        attr_i = gaussians[i].deformation(t_s)
+        
+        for j in neighbor_indices:
+            # Get the deformation output for the neighbor at t_s
+            attr_j = gaussians[j].deformation(t_s)
+            
+            # Compute squared L2 distance
+            diff = attr_i - attr_j
+            loss += sum(d * d for d in diff)
+            
+    return loss
+```
+
+**Edge Cases and Pitfalls:**
+*   **Dynamic Density Control:** Directly enforcing spatial consistency during density control (adding/removing points) is difficult because neighbors change constantly [S1]. The two-stage optimization sidesteps this by only applying the loss when the point set is static [S1].
+*   **Neighbor Stability:** The KNN graph must be recomputed or maintained carefully between Stage 1 and Stage 2 to ensure consistent neighbor relationships [S1].
+
+## Subtopics
+
+### [Locality Regularizers](16622-locality-regularizers.md)
+Locality Regularizers are a pair of constraints used in resource-linear Gaussian decoding to ensure that the spatial neighborhood of a Gaussian token remains consistent with its parent anchor's local context. They solve the problem of "neighbor drift," where optimized Gaussians move far enough from their initial positions that their true spatial neighbors no longer reside within the parent anchor's computed neighborhood $N_{anc}(n_b)$, thereby breaking the validity of the hierarchical neighbor search. Unlike the parent [KNN Rigid Loss](12815-knn-rigid-loss.md), which enforces smoothness between a point and its K nearest neighbors, Locality Regularizers enforce topological consistency between a Gaussian and its anchor's local cluster structure.
+
+### SH Neighbor Smoothness Regularizer
+A regularizer penalizing squared differences between a splat's SH coefficient vector and its K nearest neighbors in canonical CAD space, acting as a graph Laplacian on appearance [S2, unofficial]. At initialization, indices of $K=20$ nearest neighbors $N(i)$ are precomputed for every splat $i$ in the canonical CAD frame [S2, unofficial]. During Stage II, the loss is computed as the average squared L2 norm of the difference between SH coefficients of splat $i$ and its neighbors $j$ [S2, unofficial]:
+$$L_{SH} = \frac{1}{N} \sum_{i} \sum_{j \in N(i)} \|c_i - c_j\|_2^2$$
+where $c_i$ is the SH coefficient vector, $N(i)$ is the neighbor set, and $N$ is the total number of splats [S2, unofficial]. The neighbor set is fixed in canonical space, making the loss invariant to small deformations $\Delta \mu$ [S2, unofficial].
+
+### Decoder Diversification Regularizer
+A regularization term applied when $K > 1$ decoder heads output multiple Gaussians per superpixel to prevent them from collapsing into identical copies and to encourage spatial coverage of the original superpixel region [S3]. The weight scales each pair contribution: $w_{ij} = \sqrt{v_i v_j}$ where $v_i = \exp(\sum_k s_{k,i})$ is the volume proxy of Gaussian $i$ [S3]. The normalized gap is $\gamma_{ij} = \max(0, d_{ij} - d_{contact}) / d_{contact}$ where $d_{ij}$ is the Euclidean distance between means and $d_{contact}$ is the sum of the two AABB half-extent norms [S3]. The profile function is:
+$$f(u_{ij}, \gamma_{ij}) = \begin{cases} \left(\frac{u_{ij} - 0.5}{0.5}\right)^3 & u_{ij} \ge 0.5 \\ \frac{0.5 - u_{ij}}{0.5} - 3\gamma_{ij} + 0.5(1 - e^{-3\gamma_{ij}}) & u_{ij} < 0.5 \end{cases}$$
+where $u_{ij}$ is the AABB IoU [S3]. The repulsion branch penalizes excessive overlap, and the attraction branch prevents Gaussians from drifting apart when non-overlapping [S3]. The geometric term averages these weighted profile values over all pairs $P$: $L_{geom} = \frac{1}{|P|} \sum_{(i,j) \in P} w_{ij} f(u_{ij}, \gamma_{ij})$ [S3]. To prevent single-Gaussian dominance, pairwise opacity differences are penalized: $L_{opa} = \frac{1}{|P|} \sum_{(i,j) \in P} w_{ij} |\alpha_i - \alpha_j|^2$ [S3]. The combined loss blends both terms: $L_{div} = 0.75 L_{geom} + 0.25 L_{opa}$ [S3]. Without this regularizer, multiple Gaussians from the same superpixel may collapse into identical copies [S3].
+
+## Operating characteristics
+*   **Time Complexity:** The loss computation is $O(N \cdot K)$, where $N$ is the number of Gaussians and $K$ is the number of neighbors [S1].
+*   **Strengths:** Enforces local rigidity, preventing unrealistic deformations in dynamic scenes [S1].
+*   **Limitations:** Computationally expensive if $K$ is large or if KNN queries are not optimized [S1]. Sensitive to the choice of $K$ and the stability of the neighbor graph during dynamic density control [S1].
+*   **When to use:** In dynamic 3D Gaussian Splatting scenarios where spatial consistency is crucial and the optimization can be split into static attribute optimization stages [S1].
+
+## Background
+The KNN Rigid Loss was introduced in "Gaussian-Flow: 4D Reconstruction with Dynamic 3D Gaussian Particle" [S1]. It addresses the challenge of maintaining spatial coherence in dynamic scenes where Gaussian particles are added or removed during optimization [S1]. The method builds on the Dual-Domain Deformation Model [12804-dual-domain-deformation-model.md], which models Gaussian dynamics using time-domain polynomials and frequency-domain Fourier series [12804-dual-domain-deformation-model.md].
+
+## Sources
+[S1] Gaussian-Flow: 4D Reconstruction with Dynamic 3D Gaussian Particle, https://doi.org/10.1109/cvpr52733.2024.01997, fetched 2026-10-26
+[S2] CADSplat: Sparse-View 3D Gaussian Splatting Aided by CAD Models for Robust, Photorealistic Digital-Twin Reconstruction, https://arxiv.org/abs/2609.18473, fetched 2026-10-30 (unofficial)
+[S3] Compact Feed-Forward 3D Gaussians via Saliency-Guided Primitive Merging, https://arxiv.org/abs/2608.10712, fetched 2026-10-29

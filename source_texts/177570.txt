@@ -1,0 +1,238 @@
+ニューラル放射輝度場 NeRF 入門
+株式会社アビスト イノベーションセンターPublicationへの投稿
+AR
+ディープラーニング
+Computer Vision
+NeRF
+3d再構成
+tech
+1. 概要
+NeRF（Neural Radiance Fields） は、ニューラルネットワークを用いて 3次元空間の輝度場（Radiance Field） を学習・再構成する技術です。
+2020 年に Google Research によって提案され、「ニューラルネットで 3D シーンを 連続的な関数として表現できる」ことを初めて大きく示しました。
+複数枚の 2D 画像とそのカメラ姿勢が与えられるとき、任意の新しい視点 から画像（Novel View）を生成することを目標とします。
+🧠 一言でいうと：
+「AI が 3D 世界を ‘連続関数’ として覚えておいて、どこから見てもそれっぽい画像を描いてくれる仕組み」 です。
+2. 3次元空間をどう表現するか
+NeRF の話に入る前に、「そもそも 3D をどう表すか」を軽く整理します。
+2.1 離散的な表現（明示的表現）
+メッシュ（Mesh）
+三角形ポリゴンの集合で物体表面を近似する（ゲーム・CG の王道）
+点群（Point Cloud）
+3D 上の点の集合。LiDAR や RGB-D センサーでよく出てくる形式
+ボクセル（Voxel）
+空間を 3D グリッドに区切り，各セルに「占有」「カラー」などの属性を持たせる
+➡️ コンピュータで扱いやすく、レンダリングや衝突判定などには便利ですが、
+グリッドの解像度やメッシュの細かさに依存する ため、連続的な微細構造の表現には限界があります。
+このようなものをここでは 明示的（Explicit）な 3D 表現 と呼びます。
+2.2 連続的な表現（暗黙的表現）
+一方で、「関数として 3D を表す」という発想もあります。
+代表的な例が：
+SDF（Signed Distance Function）
+ある点が「表面からどれくらい離れているか」を返す関数
+NeRF
+ある点が「どんな色で、どれくらい“物体っぽい”か」を返す関数
+直感的には：
+SDF：「表面どこ？」 → geometry first
+NeRF：「そこからどう見える？」 → appearance + geometry
+どちらも 3D 空間を 連続関数 として扱うため、
+解像度に縛られず、なめらかな形状やテクスチャを表現しやすいというメリットがあります。
+このようなものをここでは 暗黙的（Implicit）な 3D 表現 と呼びます。
+3. 放射輝度場（Radiance Field）と NeRF の定式化
+3.1 輝度場とは？
+NeRF では、シーン全体を 放射輝度場（Radiance Field） という関数で表現します。
+空間中の任意の点 \mathbf{x} = (x, y, z)
+その点をどの方向から見るか（視線方向） \mathbf{d}
+を入力として、
+その点からカメラに届く 色 \mathbf{c} = (r,g,b)
+その点がどれくらい「物体っぽい」かを表す 密度 \sigma
+を返す関数を考えます：
+F_\theta(\mathbf{x}, \mathbf{d}) \rightarrow (\mathbf{c}, \sigma)
+ここで：
+\theta：ニューラルネットワーク（MLP）のパラメータ
+シーン全体は、このパラメータ \theta によって暗黙的に表現されます。
+3.2 レイと体積レンダリング
+画像の各ピクセルに対して、カメラ中心 \mathbf{o} と画素に対応する方向 \mathbf{d} から レイ を定義します：
+\mathbf{r}(t) = \mathbf{o} + t\mathbf{d},\quad t \in [t_n, t_f]
+t_n：near plane
+t_f：far plane
+このレイ上の各点 \mathbf{r}(t) について、NeRF が返す密度 \sigma(\mathbf{r}(t)) と色 \mathbf{c}(\mathbf{r}(t), \mathbf{d}) を用いて、
+体積レンダリング（ボリュームレンダリング） によってピクセルの色 \hat{C}(\mathbf{r}) を計算します。
+連続な形だと：
+\hat{C}(\mathbf{r}) = \int_{t_n}^{t_f} T(t)\,\sigma(\mathbf{r}(t))\,\mathbf{c}(\mathbf{r}(t), \mathbf{d}) \, dt
+ここで透過率 T(t) は
+T(t) = \exp\left(-\int_{t_n}^{t} \sigma(\mathbf{r}(s))\, ds \right)
+を表します（カメラから距離 t まで「何も当たらずに抜けてくる」確率のイメージ）。
+実際の実装では、この積分は 有限個のサンプル点の和 に置き換えます。
+3.3 離散化されたレンダリング式
+レイ区間 [t_n, t_f] を N 個のサンプル点 \{t_i\} に分割すると、
+NeRF 論文では、各サンプルに対する重み w_i を使って次のように表します：
+\hat{C}(\mathbf{r}) = \sum_{i=1}^{N} w_i\,\mathbf{c}_i
+w_i = T_i \left(1 - \exp(-\sigma_i \Delta t_i)\right)
+\sigma_i：サンプル点の密度
+\mathbf{c}_i：サンプル点の色
+T_i：それまでの透過率
+\Delta t_i：区間幅
+この レイマーチング＋体積レンダリング が、NeRF でのレンダリングのコアです。
+4. NeRF ネットワーク構造と位置エンコーディング
+4.1 ネットワーク構成（MLP）
+NeRF の放射輝度場 F_\theta は、基本的には 全結合層からなる MLP で近似されます。
+入力は：
+3D 位置 \mathbf{x}
+視線方向 \mathbf{d}
+（後述の位置エンコーディングを通したもの）です。
+構成のイメージ：
+前半ネットワーク
+入力：位置 \mathbf{x}（エンコード後）
+出力：
+中間特徴ベクトル \mathbf{h}
+スカラー密度 \sigma
+後半ネットワーク
+入力：\mathbf{h} と 視線方向 \mathbf{d}（エンコード後）
+出力：RGB 色 \mathbf{c}
+論文実装では、パラメータ数は数百万オーダーで、モデルサイズは数 MB 程度と言われています。
+4.2 位置エンコーディング（Positional Encoding）
+MLP は本来 低周波な関数を表現しやすく、高周波成分（シャープなエッジなど）が苦手 です。
+NeRF ではこの問題を避けるため、Fourier 系の位置エンコーディング を導入します。
+位置 \mathbf{x} に対して、複数周波数の \sin / \cos を用いて：
+\gamma(\mathbf{x}) = \left[\sin(2^0\pi \mathbf{x}), \cos(2^0\pi \mathbf{x}), \ldots, \sin(2^{L-1}\pi \mathbf{x}), \cos(2^{L-1}\pi \mathbf{x})\right]
+のような高次元ベクトルに変換してから MLP に入力します。
+視線方向 \mathbf{d} についても同様です。
+これにより、MLP でも高周波なテクスチャや細かいディテールまで表現できるようになります。
+5. 学習アルゴリズム
+5.1 データ前提
+NeRF の学習では、次の情報が既知であることを前提とします：
+各視点画像の RGB 値
+各画像のカメラ内部パラメータ（焦点距離、主点など）
+各画像のカメラ外部パラメータ（回転・並進）
+現実世界のデータでは、これらのカメラパラメータは COLMAP のような SfM ツールで推定されることが多いです。
+5.2 レイサンプリングと損失関数
+学習の 1 ステップでは、以下のような流れになります：
+トレーニング画像からランダムに画像・ピクセルをサンプリング
+そのピクセルに対応するレイ（\mathbf{o}, \mathbf{d}）を計算
+レイ上に N 個のサンプル点 \{t_i\} を取る
+各点について NeRF（MLP）を通して (\sigma_i, \mathbf{c}_i) を計算
+体積レンダリング式から再構成画素色 \hat{C}(\mathbf{r}) を計算
+GT の画素色 C(\mathbf{r}) と比較し、MSE（L2 損失）で誤差を計算
+損失はシンプルに：
+\mathcal{L} = \frac{1}{|\mathcal{R}|} \sum_{\mathbf{r} \in \mathcal{R}} \left\|\hat{C}(\mathbf{r}) - C(\mathbf{r})\right\|^2
+という形です。
+5.3 階層サンプリング（Hierarchical Sampling）
+NeRF では、計算効率と画質を両立させるために coarse / fine の二段階サンプリング を行います。
+coarse ネットワーク
+レイ上を一様サンプリングして、おおまかな密度分布を推定
+fine ネットワーク
+coarse の結果から「密度が高そうな区間」を重点的に再サンプリング
+そのサンプルに対してより高品質なレンダリング
+👉 これにより、ほとんど何もない空間にサンプルを無駄打ちせず、重要な領域に計算資源を集中できる ようになります。
+6. Tiny-NeRF の 7 ステップと計算量感覚
+入門用の実装である Tiny-NeRF では、処理の流れを 7 ステップに分解して説明しています。
+レイとサンプル空間の生成
+サンプル点のフラット化
+位置エンコーディング
+NeRF（MLP）への入力と出力
+出力の再整形と \sigma・RGB の取得
+レイマーチングとレンダリング
+損失計算とパラメータ更新
+ざっくり計算量
+Tiny-NeRF の図の設定を例にすると：
+画像サイズ：100×100 px
+サンプル数：奥行き方向に 64 点
+→ サンプル点の総数は 64 \times 100 \times 100 = 640{,}000 点
+位置エンコーディング後の次元数が 39 だとすると：
+入力行列のサイズは 640000 \times 39
+最初の全結合層が 39→128 ユニットなら、ここだけで
+640000 \times 39 \times 128 \approx 3.2 \times 10^9 回の乗算
+これが数層続き、さらに backward も必要
+さらに、これを 何千〜何万ステップ も繰り返して学習します。
+👉 結論：
+解像度 100×100 の “Tiny” 版ですら、1 回の学習で数十億〜百億オーダーの演算が必要 で、
+フルサイズの NeRF ではテラ FLOPs クラスの計算を何時間も回すことになります。
+そのため、素の NeRF は「とてもきれいだけど、素直に動かすとかなり遅い」手法です。
+7. NeRF → 高速化・実用化への流れ
+オリジナル NeRF は画質は良いものの、学習に数時間〜十数時間、推論も重い という問題がありました。
+このため、多数の高速化手法・派生手法が提案されています。
+7.1 Instant-NGP（Instant Neural Graphics Primitives）
+NVIDIA の Instant-NGP は、NeRF を含む複数のタスクを「数秒〜数分で学習」できることを目指したフレームワークです。
+特徴：
+マルチレゾリューション・ハッシュエンコーディング で座標を高効率に符号化
+非常に小さな MLP と CUDA 実装により高速学習を実現
+NeRF だけでなく、SDF、画像、ボリュームなども統一的に扱える
+7.2 Plenoxels: Radiance Fields without Neural Networks
+NeRF の「連続的な Radiance Field」という発想を維持しつつ、
+ニューラルネットを使わず、ボクセル＋最適化 で近似する手法。
+ある意味で「NeRF 的なことを Explicit な構造でやる」アプローチ。
+8. 3D Gaussian Splatting との比較
+3D Gaussian Splatting（Kerbl et al., SIGGRAPH 2023） は、NeRF と並んで最近よく名前を見る手法です。
+シーンを 3D ガウス分布の集合（スプラット） として表現
+各ガウスに位置・共分散（形・向き）・色・不透明度などを持たせる
+レンダリングは、可視範囲のガウスを画面上に「スプラット」して合成
+NeRF との違いをざっくりまとめると：
+NeRF：
+連続場＋MLP で表現
+レイトレーシング的な体積レンダリング
+Gaussian Splatting：
+離散的な点群＋ガウスで表現
+ラスタライズ寄りの描画
+トレードオフはこんな感じです：
+項目
+NeRF
+3D Gaussian Splatting
+表現
+ニューラルネットによる関数
+3D ガウス分布の集合
+学習コスト
+高い（積分＋MLP 推論）
+比較的低い（GPU ラスタライズに近い処理）
+レンダリング
+秒単位〜
+リアルタイム（30fps 以上も可能）
+精度・表現力
+高精細・連続的
+高速・やや近似的
+共通点
+どちらも Radiance Field を扱う
+9. Luma 3D の紹介（NeRF を「使ってみる」側のツール）
+Luma AI は、スマホだけで高品質な 3D キャプチャを実現する NeRF ベースのサービス／アプリです。
+iOS / Android / Web から利用でき、内部では NeRF や Gaussian Splatting を使ってフォトリアリスティックな 3D シーンを生成していると言われています。
+特徴
+スマホだけで 3D スキャン
+iPhone などで物体や室内をぐるっと撮影するだけで 3D モデル化。LiDAR がなくても動くモードもあり。
+クラウドで NeRF / Gaussian Splat 生成
+撮影データはクラウドに送られ、サーバ側で Radiance Field を最適化。
+手元の PC の GPU 性能に依存しない。
+インタラクティブな Web ビューア
+生成結果はブラウザでインタラクティブに閲覧可能（だいたい 30fps 前後）。
+軽量なデータ形式で配信されるため、Web 埋め込みにも向いている。
+3D エクスポート
+GLTF / OBJ / PLY などに加え、NeRF / Gaussian Splatting 形式でゲームエンジンに持っていく機能も提供。
+勉強用としての位置づけ
+「NeRF を自前実装する前に、『こういうワークフローになるのか』を体験するツール」として有用：
+スマホでぐるっと撮る
+数分後にクラウドから 3D フライスルーが返ってくる
+Radiance Field ベースの 3D 生成が「サービス」としてどう見えるかイメージが湧く
+10. まとめ
+NeRF 自体は 2020 年の技術で、今のトレンドとしては 3D Gaussian Splatting や Instant-NGP など、より高速な手法が主役になりつつあります。
+それでも、
+「放射輝度場をニューラルネットで連続関数として表現し、微分可能な体積レンダリングで学習する」
+という枠組みは、現在の 3D / XR / ニューラルレンダリング技術の基盤になっています。
+NeRF は画質と表現力のバランスが良く、オフライン処理やポストプロダクション的なパイプラインでは、依然として強力な選択肢です。
+— おわり —
+参考資料
+NeRF: Representing Scenes as Neural Radiance Fields for View Synthesis
+https://arxiv.org/pdf/2003.08934
+A Brief Introduction to Neural Radiance Fields | CESCG Academy 2023
+https://www.youtube.com/watch?v=s3PHOPv88P4
+Understanding NeRF on a Small Scale（Tiny-NeRF 解説）
+https://radiancefields.com/understanding-nerf-on-a-small-scale
+tiny-nerf（公式 Colab / 実装例）
+https://colab.research.google.com/github/nerfies/nerfies.github.io/blob/main/nerfies_tutorial.ipynb
+Instant Neural Graphics Primitives with a Multiresolution Hash Encoding（Instant-NGP）
+https://nvlabs.github.io/instant-ngp/
+Plenoxels: Radiance Fields without Neural Networks
+https://alexyu.net/plenoxels/
+3D Gaussian Splatting for Real-Time Radiance Field Rendering
+https://repo-sam.inria.fr/fungraph/3d-gaussian-splatting/
+Luma Labs – Interactive Scenes
+https://lumalabs.ai/interactive-scenes
+株式会社アビスト イノベーションセンターPublication
+Discussion

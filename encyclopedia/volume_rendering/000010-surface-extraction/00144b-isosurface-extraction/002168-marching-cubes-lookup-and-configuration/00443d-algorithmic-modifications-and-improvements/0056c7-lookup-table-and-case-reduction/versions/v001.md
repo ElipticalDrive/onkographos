@@ -1,0 +1,29 @@
+# Lookup Table and Case Reduction
+
+Also called: Symmetry-based Lookup Reduction, Major/Sub-case Decomposition
+
+## Overview
+This family reduces the memory footprint and computational complexity of isosurface extraction by exploiting geometric symmetries to minimize the size of lookup tables or by decomposing ambiguous configurations into simpler primitives. It sets itself apart from sibling methods like [Snap Marching Cubes](2181-snap-marching-cubes.md) by focusing on combinatorial reduction and topological disambiguation rather than geometric snapping or local hull construction.
+
+## Shared principles
+All methods in this family operate on a structured grid and determine the isosurface intersection via a case index derived from vertex signs relative to an isovalue. The core mechanism involves mapping this index to a triangulation or simplex set using a lookup structure that is smaller than the full $2^n$ configuration space. This is achieved either by grouping symmetric cases into a single entry (reducing the number of unique patterns stored) or by decomposing complex cases into edge-connected sub-cases that are resolved via simpler geometric primitives (simplices). The mapping from the full configuration to the reduced entry requires calculating an orientation or transformation matrix to correctly align the stored geometric data with the current cell's orientation.
+
+## Subtopics
+
+### [Sub-case decomposition for n-dimensional marching cubes](11668-sub-case-decomposition-for-n-dimensional-marching-cubes.md)
+This method reduces configuration space explosion in $n$-dimensions by decomposing major cases into edge-connected sub-cases. Unlike [Lookup Table and Case Reduction](15794-lookup-table-and-case-reduction.md) which groups cases by symmetry, this method fragments major cases into simpler geometric primitives (simplices) to manage higher-dimensional complexity, addressing the limitations of sibling methods like [Improved Marching Cubes with New Table and Displacement](14182-improved-marching-cubes-with-new-table-and-displacement.md) which do not explicitly handle the combinatorial growth in dimensions $n > 3$. It uses an orientation matrix (32-bit integer, 2 bits per position) to map primary table entries to secondary table simplices. In 3D, it identifies 14 major cases and 74 sub-cases; in 4D, 222 major cases. Tetrahedronization uses a "fewest edges" heuristic, with backtracking required for only 3 of 74 sub-cases in 3D. Ambiguities are handled via separate complementary case configurations and vertex ordering.
+
+### [Improved Marching Cubes with New Table and Displacement](14182-improved-marching-cubes-with-new-table-and-displacement.md)
+This method improves the worst-case triangle quality of the Marching Cubes (MC) algorithm by combining a modified lookup table that avoids specific edge groups responsible for poor triangles with a non-linear displacement of cut points on edges. It sets itself apart from standard MC by explicitly optimizing for triangle aspect ratio bounds rather than just topological correctness, and from state-of-the-art methods like Schreiner et al. or Dey and Levine by retaining the simplicity and performance advantages of MC while achieving minimum triangle quality above 0.19. It uses a gain function parameter $k=0.3$ to modulate the normalized position of cut points, applying greater displacement closer to endpoints.
+
+### Generic Rule Marching Cubes
+**Definition:** A variant of MC that uses a single generic rule to triangulate all 15 standard cube configurations and additional cases, eliminating the need for a lookup table [S1].
+**Pitfall:** Resolves the Type A ‘hole problem’ which occurs when at least one cube face has an intersection point in each of its four edges [S1].
+**Number:** Tested on full resolution CT and MRI of human heads on SGI Indigo 2 with 128 MB RAM [S1].
+**Comparison:** Differs from standard MC by not requiring definition of different cube configurations, rotations, or comparisons with predefined configurations, reducing execution time [S1].
+
+## Background
+The concept of reducing lookup table size via symmetry was foundational in early Marching Cubes implementations to manage memory. The specific decomposition into sub-cases for n-dimensional generalization was developed to address the combinatorial explosion in higher dimensions [S1]. The generic rule approach was proposed as an alternative to table-based methods to simplify implementation and reduce overhead [S1].
+
+## Sources
+[S1] A novel and efficient implementation of the marching cubes algorithm, https://doi.org/10.1016/s0895-6111(00)00082-3, fetched 2026-10-27

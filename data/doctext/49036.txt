@@ -1,0 +1,1414 @@
+# Raymarcher
+
+A simple raymarcher for rendering signed distance field (SDF) scenes
+
+<!-- 2.786 -->
+<!-- 2.801 -->
+## Learning goals
+
+ - 3D graphics
+ - performance optimization in rust
+ - Refresher on vector math
+ - Rust polymorphism
+
+## Project goals
+
+ - [ ] SDF primitives
+   - [x] Sphere
+   - [x] Plane
+   - [ ] Torus
+   - [ ] Box
+   - [ ] Rounded Box
+   - [ ] Cone
+   - [ ] Cylinder
+ - [x] SDF Booleans
+   - [x] Union
+   - [x] Subtract
+   - [x] Intersect
+ - [ ] Smooth Stepping Booleans
+ - [ ] Per-Entity Shading
+ - [ ] Generic shading model
+ - [ ] Phong shading
+ - [ ] PBR shading
+
+## Long term aspirations
+ - Realtime 3D editing of scenes
+ - Format for SDF scene definition
+ - Serialization/deserialization of scenes for export/import
+
+### src/app.rs
+```
+use std::time::Instant;
+
+use crate::{
+    camera::Camera, frame_timer::FrameTimer, input::Input, make_scene, wgpu_context::WgpuContext,
+};
+use glam::{quat, vec3, Quat};
+use winit::{
+    application::ApplicationHandler,
+    event::WindowEvent,
+    keyboard::{self, NamedKey},
+    window::Window,
+};
+
+pub struct App<'a> {
+    window: &'a Window,
+    ctx: WgpuContext<'a>,
+    yaw: f32,
+    pitch: f32,
+    camera: Camera,
+    input: Input,
+    frame_timer: FrameTimer,
+}
+
+impl<'a> App<'a> {
+    pub async fn create(window: &'a Window) -> Self {
+        let ctx = WgpuContext::new(window).await;
+        let input = Input::new();
+
+        Self {
+            window,
+            ctx,
+            yaw: 0.1,
+            pitch: 0.0,
+            camera: Camera::new(
+                0.5,
+                vec3(0.0, 0.0, -10.0),
+                quat(0.0, 0.0, 0.0, 1.0),
+                0.001,
+                1000.0,
+            ),
+            input,
+            frame_timer: FrameTimer::new(30),
+        }
+    }
+
+    fn render_frame(&mut self) {
+        let start = Instant::now();
+        let rotation_input = self.input.camera_rotation();
+
+        // Accumulate yaw and pitch values
+        self.yaw -= rotation_input.x;
+        self.pitch -= rotation_input.y;
+
+        // Clamp pitch to avoid gimbal lock
+        self.pitch = self.pitch.clamp(-90.0, 90.0);
+        self.yaw %= 360.0;
+
+        let yaw_quat = Quat::from_rotation_y(self.yaw.to_radians());
+        let pitch_quat = Quat::from_rotation_x(self.pitch.to_radians());
+
+        // Apply yaw first, then pitch
+        self.camera.orientation = pitch_quat * yaw_quat;
+
+        // Move the camera
+        let translation = self.input.camera_translation();
+        // Orient the translation vector by the camera's orientation
+
+        let translation = self.camera.orientation.inverse() * translation;
+        self.camera.position += translation;
+
+        self.ctx.render(make_scene(), &self.camera).unwrap();
+        println!("{:}", self.frame_timer.mark_frame());
+        let end = Instant::now();
+        let elapsed = end - start;
+        println!("Frame time: {:?}", elapsed);
+    }
+    fn resize(&mut self, new_size: winit::dpi::PhysicalSize<u32>) {
+        self.ctx.resize(self.window, new_size);
+    }
+
+    pub async fn run(&mut self, event_loop: winit::event_loop::EventLoop<()>) {
+        event_loop.run_app(self).expect("Failure in event loop");
+    }
+}
+
+impl ApplicationHandler for App<'_> {
+    fn resumed(&mut self, event_loop: &winit::event_loop::ActiveEventLoop) {
+        event_loop.set_control_flow(winit::event_loop::ControlFlow::Poll)
+    }
+
+    fn window_event(
+        &mut self,
+        event_loop: &winit::event_loop::ActiveEventLoop,
+        _window_id: winit::window::WindowId,
+        event: winit::event::WindowEvent,
+    ) {
+        match event {
+            WindowEvent::Resized(new_size) => self.resize(new_size),
+            WindowEvent::CloseRequested => event_loop.exit(),
+            WindowEvent::RedrawRequested => {
+                self.render_frame();
+                self.window.request_redraw();
+            }
+            WindowEvent::KeyboardInput {
+                device_id: _,
+                event,
+                is_synthetic: _,
+            } => {
+                if matches!(event.logical_key, keyboard::Key::Named(NamedKey::Escape)) {
+                    event_loop.exit()
+                }
+                self.input
+                    .keyboard
+                    .on_keyboard_button(event.logical_key, event.state);
+            }
+            _ => {}
+        }
+    }
+}
+```
+
+### src/camera.rs
+```
+use bytemuck::{Pod, Zeroable};
+use glam::{Quat, Vec3};
+
+#[repr(C, align(16))]
+#[derive(Clone, Copy, Debug)]
+pub struct Camera {
+    pub position: Vec3,
+    pub fov: f32,
+    pub orientation: Quat,
+    pub clip_near: f32,
+    pub clip_far: f32,
+}
+
+unsafe impl Pod for Camera {}
+unsafe impl Zeroable for Camera {}
+
+impl Camera {
+    pub fn new(fov: f32, position: Vec3, orientation: Quat, clip_near: f32, clip_far: f32) -> Self {
+        Camera {
+            fov,
+            position,
+            orientation,
+            clip_near,
+            clip_far,
+        }
+    }
+}
+```
+
+### src/frame_timer.rs
+```
+use std::{
+    collections::VecDeque,
+    fmt::Display,
+    time::{Duration, Instant},
+};
+
+pub struct FrameTimer {
+    buffer_size: usize,
+    frames: VecDeque<Duration>,
+    last_frame: Instant,
+}
+
+pub struct FrameStats {
+    samples: usize,
+    total_frame_time: Duration,
+    min_frame_time: Duration,
+    max_frame_time: Duration,
+}
+
+impl From<&Duration> for FrameStats {
+    fn from(value: &Duration) -> Self {
+        Self {
+            samples: 1,
+            total_frame_time: *value,
+            min_frame_time: *value,
+            max_frame_time: *value,
+        }
+    }
+}
+
+impl FrameTimer {
+    pub fn new(buffer_size: usize) -> Self {
+        let buffer_size = buffer_size.max(1);
+        Self {
+            buffer_size,
+            frames: VecDeque::with_capacity(buffer_size),
+            last_frame: Instant::now(),
+        }
+    }
+
+    pub fn mark_frame(&mut self) -> FrameStats {
+        let now = Instant::now();
+        while self.frames.len() >= self.buffer_size {
+            self.frames.pop_back();
+        }
+        self.frames.push_front(now - self.last_frame);
+        self.last_frame = now;
+
+        self.stats()
+    }
+
+    fn stats(&self) -> FrameStats {
+        self.frames
+            .iter()
+            .map(|it| it.into())
+            .reduce(|a: FrameStats, b: FrameStats| FrameStats {
+                samples: a.samples + b.samples,
+                total_frame_time: a.total_frame_time + b.total_frame_time,
+                min_frame_time: a.min_frame_time.min(b.min_frame_time),
+                max_frame_time: a.max_frame_time.max(b.max_frame_time),
+            })
+            .unwrap()
+    }
+}
+
+impl Display for FrameStats {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(
+            f,
+            "Frame time: {}ms (min: {}ms, max: {}ms)",
+            self.total_frame_time.as_millis() / self.samples as u128,
+            self.min_frame_time.as_millis(),
+            self.max_frame_time.as_millis()
+        )
+    }
+}
+```
+
+### src/input.rs
+```
+pub mod keyboard_state;
+
+use glam::{vec2, vec3, Vec2, Vec3};
+use keyboard_state::KeyboardState;
+use winit::keyboard::{Key, NamedKey};
+
+pub struct Input {
+    pub keyboard: KeyboardState,
+    movement_speed: f32,
+    sensitivity: f32,
+}
+
+impl Input {
+    pub fn new() -> Self {
+        Self {
+            keyboard: KeyboardState::default(),
+            movement_speed: 0.05,
+            sensitivity: 2.0,
+        }
+    }
+
+    pub fn camera_translation(&self) -> Vec3 {
+        let positive = vec3(
+            self.keyboard.is_down(Key::Character("d".into())) as u32 as f32,
+            self.keyboard.is_down(Key::Character("e".into())) as u32 as f32,
+            self.keyboard.is_down(Key::Character("w".into())) as u32 as f32,
+        );
+
+        let negative = vec3(
+            self.keyboard.is_down(Key::Character("a".into())) as u32 as f32,
+            self.keyboard.is_down(Key::Character("q".into())) as u32 as f32,
+            self.keyboard.is_down(Key::Character("s".into())) as u32 as f32,
+        );
+
+        (positive - negative) * self.movement_speed
+    }
+
+    pub fn camera_rotation(&self) -> Vec2 {
+        let positive = vec2(
+            self.keyboard.is_down(Key::Named(NamedKey::ArrowRight)) as u32 as f32,
+            self.keyboard.is_down(Key::Named(NamedKey::ArrowDown)) as u32 as f32,
+        );
+
+        let negative = vec2(
+            self.keyboard.is_down(Key::Named(NamedKey::ArrowLeft)) as u32 as f32,
+            self.keyboard.is_down(Key::Named(NamedKey::ArrowUp)) as u32 as f32,
+        );
+
+        (positive - negative) * self.sensitivity
+    }
+}
+```
+
+### src/lib.rs
+```
+#![feature(async_closure)]
+
+pub mod app;
+mod camera;
+mod frame_timer;
+mod input;
+mod light_buffers;
+mod scene_buffer;
+mod scene_descriptor;
+mod wgpu_context;
+
+use glam::vec3;
+use light_buffers::{Light, LightBufferBuilder, LightBuffers};
+use scene_descriptor::{
+    objects::{Cuboid, Sphere},
+    SceneDescriptorBuilder,
+};
+
+pub fn make_scene() -> (SceneDescriptorBuilder, LightBuffers) {
+    let mut scene_buffer = SceneDescriptorBuilder::default();
+
+    scene_buffer
+        .cuboids
+        .push(Cuboid::new(vec3(1.0, 1.0, 1.0)).translate(vec3(2.0, 0.0, 0.0)));
+
+    scene_buffer
+        .cuboids
+        .push(Cuboid::new(vec3(10.0, 1.0, 10.0)).translate(vec3(0.0, 2.0, 0.0)));
+
+    scene_buffer
+        .spheres
+        .push(Sphere::new(1.0).translate(vec3(0.0, 0.0, 0.0)));
+
+    let mut light_buffer = LightBufferBuilder::new();
+
+    light_buffer.add(Light {
+        position: vec3(2.0, 3.0, 2.0),
+        radius: 0.2,
+        color: vec3(0.2, 0.2, 1.0),
+        enabled: 1,
+    });
+
+    light_buffer.add(Light {
+        position: vec3(-2.0, 3.0, 2.0),
+        radius: 0.2,
+        color: vec3(1.0, 0.2, 0.2),
+        enabled: 1,
+    });
+
+    (scene_buffer, light_buffer.build())
+}
+```
+
+### src/light_buffers.rs
+```
+use bytemuck::{Pod, Zeroable};
+
+const MAX_LIGHTS: usize = 8;
+const LIGHT_SIZE: usize = std::mem::size_of::<Light>();
+
+#[repr(C, align(16))]
+#[derive(Clone, Copy, Debug, Default)]
+pub struct Light {
+    pub position: glam::Vec3,
+    pub radius: f32,
+    pub color: glam::Vec3,
+    pub enabled: u32,
+}
+
+unsafe impl Pod for Light {}
+unsafe impl Zeroable for Light {}
+
+unsafe impl Pod for LightBuffers {}
+unsafe impl Zeroable for LightBuffers {}
+
+#[derive(Clone, Copy, Debug)]
+#[repr(C, align(16))]
+pub struct LightBuffers {
+    lights: [u8; MAX_LIGHTS * LIGHT_SIZE],
+    lights_length: u32,
+}
+pub struct LightBufferBuilder {
+    lights: [Light; MAX_LIGHTS],
+    index: usize,
+}
+impl LightBufferBuilder {
+    pub fn new() -> Self {
+        Self {
+            lights: [Default::default(); MAX_LIGHTS],
+            index: 0,
+        }
+    }
+
+    pub fn add(&mut self, light: Light) {
+        self.lights[self.index] = light;
+        self.index += 1;
+    }
+
+    pub fn build(self) -> LightBuffers {
+        LightBuffers {
+            lights: bytemuck::cast(self.lights),
+            lights_length: self.lights.len() as u32,
+        }
+    }
+}
+
+impl Default for LightBufferBuilder {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+```
+
+### src/main.rs
+```
+use pollster::FutureExt;
+use ray_marcher::app::App;
+use winit::{event_loop::EventLoop, window::Window};
+
+pub fn main() {
+    let event_loop: EventLoop<()> = EventLoop::new().unwrap();
+
+    #[allow(unused_mut)]
+    let mut window_attributes = Window::default_attributes();
+
+    #[allow(deprecated)]
+    let window = event_loop.create_window(window_attributes).unwrap();
+
+    env_logger::init();
+
+    let mut app = App::create(&window).block_on();
+
+    app.run(event_loop).block_on();
+}
+```
+
+### src/scene_buffer.rs
+```
+use std::mem::size_of;
+
+use bytemuck::{Pod, Zeroable};
+const MAX_ENTITIES: usize = 8;
+const ENTITY_SIZE: usize = size_of::<SceneEntity>();
+
+use glam::Vec3;
+
+type Ptr = u32;
+
+#[repr(C, align(16))]
+#[derive(Clone, Copy)]
+pub enum SceneEntity {
+    Empty,
+    Sphere { render: u32, radius: f32 },
+    Translate { render: u32, pointer: Ptr, v: Vec3 },
+    Box { render: u32, dimensions: Vec3 },
+}
+
+unsafe impl Pod for SceneEntity {}
+unsafe impl Zeroable for SceneEntity {}
+
+unsafe impl Pod for SceneBuffers {}
+unsafe impl Zeroable for SceneBuffers {}
+
+pub struct SceneBufferBuilder {
+    entities: [SceneEntity; MAX_ENTITIES],
+    entities_length: usize,
+}
+
+#[repr(C, align(16))]
+#[derive(Clone, Copy, Debug)]
+pub struct SceneBuffers {
+    entities: [u8; MAX_ENTITIES * ENTITY_SIZE],
+    entities_length: u32,
+}
+
+impl SceneBufferBuilder {
+    pub fn new() -> Self {
+        Self {
+            entities: [SceneEntity::Empty; MAX_ENTITIES],
+            entities_length: 0,
+        }
+    }
+
+    pub fn push(&mut self, entity: SceneEntity) -> u32 {
+        let index = self.entities_length;
+        self.entities[index] = entity;
+        self.entities_length += 1;
+        index as u32
+    }
+
+    pub fn build(self) -> SceneBuffers {
+        SceneBuffers {
+            entities: bytemuck::cast(self.entities),
+            entities_length: self.entities_length as u32,
+        }
+    }
+}
+```
+
+### src/scene_descriptor.rs
+```
+pub mod objects;
+
+use bytemuck::{Pod, Zeroable};
+use objects::{Cuboid, Sphere};
+
+#[derive(Clone, Default)]
+pub struct SceneDescriptorBuilder {
+    pub spheres: Vec<Sphere>,
+    pub cuboids: Vec<Cuboid>,
+}
+
+impl SceneDescriptorBuilder {
+    pub fn length_descriptor(&self) -> SceneLengthDescriptor {
+        SceneLengthDescriptor {
+            spheres: self.spheres.len() as u32,
+            cuboids: self.cuboids.len() as u32,
+            padding: [0; 2],
+        }
+    }
+}
+
+#[repr(C, align(16))]
+#[derive(Clone, Copy, Pod, Zeroable)]
+pub struct SceneLengthDescriptor {
+    spheres: u32,
+    cuboids: u32,
+    padding: [u32; 2],
+}
+```
+
+### src/wgpu_context.rs
+```
+pub mod buffers;
+
+use buffers::GPUBuffers;
+use glam::{quat, vec3};
+use wgpu::{
+    BindGroupLayout, BindGroupLayoutDescriptor, BindGroupLayoutEntry, Features, Limits,
+    PipelineCompilationOptions, RenderPipeline, ShaderModule,
+};
+use winit::{dpi::PhysicalSize, window::Window};
+
+use crate::{
+    camera::Camera, light_buffers::LightBuffers, make_scene,
+    scene_descriptor::SceneDescriptorBuilder,
+};
+
+pub struct WgpuContext<'a> {
+    pub surface: wgpu::Surface<'a>,
+    pub device: wgpu::Device,
+    pub queue: wgpu::Queue,
+    pub config: wgpu::SurfaceConfiguration,
+    pub render_pipeline: RenderPipeline,
+    pub size: (u32, u32),
+
+    pub buffers: GPUBuffers,
+
+    pub bind_group_layout: BindGroupLayout,
+}
+
+fn load_shaders(device: &wgpu::Device) -> (ShaderModule, ShaderModule) {
+    let vertex_module = device.create_shader_module(wgpu::include_wgsl!("shaders/vert.wgsl"));
+    let fragment_module = device.create_shader_module(wgpu::include_wgsl!("shaders/frag.wgsl"));
+
+    (vertex_module, fragment_module)
+}
+
+impl<'a> WgpuContext<'a> {
+    pub async fn new(window: &'a Window) -> Self {
+        let mut size = window.inner_size();
+        size.width = size.width.max(1);
+        size.height = size.height.max(1);
+
+        log::info!("Creating Wgpu Context");
+
+        let (width, height) = (size.width, size.height);
+
+        log::info!("Canvas size: {width}x{height}");
+
+        let instance = wgpu::Instance::default();
+        let surface = instance.create_surface(window).unwrap();
+
+        // Request adapter with high perf power preference
+        let adapter = instance
+            .request_adapter(&wgpu::RequestAdapterOptions {
+                power_preference: wgpu::PowerPreference::HighPerformance,
+                force_fallback_adapter: false,
+                compatible_surface: Some(&surface),
+            })
+            .await
+            .expect("Failed to get requested adapter");
+
+        log::info!("{:?}", adapter.get_downlevel_capabilities());
+
+        log::info!("Backend: {:?}", adapter.get_info().backend);
+
+        let (device, queue) = adapter
+            .request_device(
+                &wgpu::DeviceDescriptor {
+                    label: None,
+                    required_features: Features::empty(),
+                    required_limits: Limits::default(),
+                    memory_hints: wgpu::MemoryHints::Performance,
+                },
+                None,
+            )
+            .await
+            .expect("Failed to request device");
+
+        let mut surface_config = surface.get_default_config(&adapter, width, height).unwrap();
+        surface_config.present_mode = wgpu::PresentMode::AutoVsync;
+
+        surface.configure(&device, &surface_config);
+
+        let bind_group_layout = device.create_bind_group_layout(&BindGroupLayoutDescriptor {
+            label: None,
+            entries: &[
+                BindGroupLayoutEntry {
+                    binding: 0,
+                    visibility: wgpu::ShaderStages::FRAGMENT,
+                    ty: wgpu::BindingType::Buffer {
+                        ty: wgpu::BufferBindingType::Uniform,
+                        has_dynamic_offset: false,
+                        min_binding_size: None,
+                    },
+                    count: None,
+                },
+                BindGroupLayoutEntry {
+                    binding: 1,
+                    visibility: wgpu::ShaderStages::FRAGMENT,
+                    ty: wgpu::BindingType::Buffer {
+                        ty: wgpu::BufferBindingType::Uniform,
+                        has_dynamic_offset: false,
+                        min_binding_size: None,
+                    },
+                    count: None,
+                },
+                BindGroupLayoutEntry {
+                    binding: 2,
+                    visibility: wgpu::ShaderStages::FRAGMENT,
+                    ty: wgpu::BindingType::Buffer {
+                        ty: wgpu::BufferBindingType::Uniform,
+                        has_dynamic_offset: false,
+                        min_binding_size: None,
+                    },
+                    count: None,
+                },
+                BindGroupLayoutEntry {
+                    binding: 3,
+                    visibility: wgpu::ShaderStages::FRAGMENT,
+                    ty: wgpu::BindingType::Buffer {
+                        ty: wgpu::BufferBindingType::Uniform,
+                        has_dynamic_offset: false,
+                        min_binding_size: None,
+                    },
+                    count: None,
+                },
+                BindGroupLayoutEntry {
+                    binding: 4,
+                    visibility: wgpu::ShaderStages::FRAGMENT,
+                    ty: wgpu::BindingType::Buffer {
+                        ty: wgpu::BufferBindingType::Uniform,
+                        has_dynamic_offset: false,
+                        min_binding_size: None,
+                    },
+                    count: None,
+                },
+                BindGroupLayoutEntry {
+                    binding: 5,
+                    visibility: wgpu::ShaderStages::FRAGMENT,
+                    ty: wgpu::BindingType::Buffer {
+                        ty: wgpu::BufferBindingType::Uniform,
+                        has_dynamic_offset: false,
+                        min_binding_size: None,
+                    },
+                    count: None,
+                },
+            ],
+        });
+
+        let (vertex_module, fragment_module) = load_shaders(&device);
+
+        let render_pipeline = {
+            let frag_targets = [Some(wgpu::ColorTargetState {
+                format: surface_config.format,
+                blend: Some(wgpu::BlendState::REPLACE),
+                write_mask: wgpu::ColorWrites::ALL,
+            })];
+
+            let fragment = Some(wgpu::FragmentState {
+                module: &fragment_module,
+                entry_point: "main",
+                targets: &frag_targets,
+                compilation_options: PipelineCompilationOptions::default(),
+            });
+
+            let layout = device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
+                label: Some("Pipeline Layout"),
+                bind_group_layouts: &[&bind_group_layout],
+                push_constant_ranges: &[],
+            });
+
+            let desc = &wgpu::RenderPipelineDescriptor {
+                label: Some("Render Pipeline"),
+                layout: Some(&layout),
+                vertex: wgpu::VertexState {
+                    module: &vertex_module,
+                    entry_point: "main",
+                    buffers: &[],
+                    compilation_options: PipelineCompilationOptions::default(),
+                },
+                fragment,
+                primitive: wgpu::PrimitiveState {
+                    topology: wgpu::PrimitiveTopology::TriangleList,
+                    ..Default::default()
+                },
+                depth_stencil: None,
+                multisample: Default::default(),
+                multiview: None,
+                cache: None,
+            };
+
+            device.create_render_pipeline(desc)
+        };
+
+        let buffers = {
+            let (scene, lights) = make_scene();
+            GPUBuffers::create(
+                &device,
+                (width, height),
+                scene,
+                lights,
+                Camera::new(
+                    0.5,
+                    vec3(0.0, 0.0, -10.0),
+                    quat(0.0, 0.0, 0.0, 1.0),
+                    0.001,
+                    1000.0,
+                ),
+            )
+        };
+
+        Self {
+            render_pipeline,
+            surface,
+            device,
+            queue,
+            config: surface_config,
+            size: (width, height),
+            bind_group_layout,
+            buffers,
+        }
+    }
+
+    pub fn render(
+        &self,
+        scene: (SceneDescriptorBuilder, LightBuffers),
+        camera: &Camera,
+    ) -> Result<(), wgpu::SurfaceError> {
+        let (scene, lights) = scene;
+
+        self.buffers
+            .update_buffers(&self.queue, self.size, scene, lights, *camera);
+
+        let output_texture = self.surface.get_current_texture()?;
+
+        let view = output_texture
+            .texture
+            .create_view(&wgpu::TextureViewDescriptor::default());
+
+        let mut encoder = self
+            .device
+            .create_command_encoder(&wgpu::CommandEncoderDescriptor {
+                label: Some("Render Encoder"),
+            });
+
+        {
+            let bind_group = self.device.create_bind_group(&wgpu::BindGroupDescriptor {
+                label: Some("Main Bind group"),
+                layout: &self.bind_group_layout,
+                entries: &[
+                    wgpu::BindGroupEntry {
+                        binding: 0,
+                        resource: self.buffers.dimension_uniform.as_entire_binding(),
+                    },
+                    wgpu::BindGroupEntry {
+                        binding: 1,
+                        resource: self.buffers.scene_data.as_entire_binding(),
+                    },
+                    wgpu::BindGroupEntry {
+                        binding: 2,
+                        resource: self.buffers.light_data.as_entire_binding(),
+                    },
+                    wgpu::BindGroupEntry {
+                        binding: 3,
+                        resource: self.buffers.camera_uniform.as_entire_binding(),
+                    },
+                    wgpu::BindGroupEntry {
+                        binding: 4,
+                        resource: self.buffers.cuboids.as_entire_binding(),
+                    },
+                    wgpu::BindGroupEntry {
+                        binding: 5,
+                        resource: self.buffers.spheres.as_entire_binding(),
+                    },
+                ],
+            });
+
+            let mut render_pass = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
+                label: Some("Render Pass"),
+                color_attachments: &[Some(wgpu::RenderPassColorAttachment {
+                    view: &view,
+                    resolve_target: None,
+                    ops: wgpu::Operations {
+                        load: wgpu::LoadOp::Load,
+                        store: wgpu::StoreOp::Store,
+                    },
+                })],
+                ..Default::default()
+            });
+
+            render_pass.set_pipeline(&self.render_pipeline);
+            render_pass.set_bind_group(0, &bind_group, &[]);
+
+            render_pass.draw(0..3, 0..1);
+        }
+
+        self.queue.submit(Some(encoder.finish()));
+        output_texture.present();
+        Ok(())
+    }
+
+    pub fn resize(&mut self, _window: &Window, new_size: PhysicalSize<u32>) {
+        // Reconfigure the surface with the new size
+        self.config.width = new_size.width.max(1);
+        self.config.height = new_size.height.max(1);
+
+        self.surface.configure(&self.device, &self.config);
+    }
+}
+```
+
+### src/input/keyboard_state.rs
+```
+use std::collections::HashSet;
+
+use winit::{event::ElementState, keyboard::Key};
+
+#[derive(Default)]
+pub struct KeyboardState {
+    down: HashSet<Key>,
+}
+
+impl KeyboardState {
+    pub fn on_keyboard_button(&mut self, key: Key, state: ElementState) {
+        match state {
+            ElementState::Pressed => self.down.insert(key),
+            ElementState::Released => self.down.remove(&key),
+        };
+    }
+
+    pub fn is_down(&self, key: Key) -> bool {
+        self.down.contains(&key)
+    }
+}
+```
+
+### src/scene_descriptor/objects.rs
+```
+use bytemuck::{Pod, Zeroable};
+use glam::{Mat4, Vec3};
+
+#[repr(C, align(16))]
+#[derive(Clone, Copy, Pod, Zeroable)]
+pub struct Sphere {
+    pub transform: Mat4,
+    pub radius: f32,
+    _padding: [u32; 3],
+}
+
+#[repr(C, align(16))]
+#[derive(Clone, Copy, Pod, Zeroable)]
+pub struct Cuboid {
+    pub transform: Mat4,
+    pub dimensions: Vec3,
+    _padding: u32,
+}
+
+impl Sphere {
+    pub fn new(radius: f32) -> Self {
+        Self {
+            transform: Mat4::IDENTITY,
+            radius,
+            _padding: [0; 3],
+        }
+    }
+
+    pub fn translate(&self, v: Vec3) -> Self {
+        Self {
+            transform: Mat4::from_translation(v) * self.transform,
+            ..*self
+        }
+    }
+}
+
+impl Cuboid {
+    pub fn new(dimensions: Vec3) -> Self {
+        Self {
+            transform: Mat4::IDENTITY,
+            dimensions,
+            _padding: 0,
+        }
+    }
+
+    pub fn translate(&self, v: Vec3) -> Self {
+        Self {
+            transform: Mat4::from_translation(v) * self.transform,
+            ..*self
+        }
+    }
+
+    pub fn rotate(&self, v: Vec3) -> Self {
+        Self {
+            transform: Mat4::from_rotation_x(v.x)
+                * Mat4::from_rotation_y(v.y)
+                * Mat4::from_rotation_z(v.z)
+                * self.transform,
+            ..*self
+        }
+    }
+}
+```
+
+### src/shaders/frag.wgsl
+```
+const MAX_LIGHTS = 8u;
+
+const MAX_SIGNED_DISTANCE = 10000.0;
+const MAX_MARCH_STEPS = 255u;
+
+const CLIP_NEAR:f32 = 0.001;
+const CLIP_FAR:f32 = 100.0;
+
+const AO_STEPS:i32 = 4;
+const AO_DISTANCE: f32 = 0.25;
+
+const THRESHOLD:f32 = 0.00001;
+
+const MAX_RECUR_DEPTH = 8;
+
+@group(0) @binding(0) 
+var<uniform> dimensions: vec4<f32>;
+
+@group(0) @binding(1) 
+var<uniform> scene: Scene;
+
+@group(0) @binding(2)
+var<uniform> lights: Lights;
+
+@group(0) @binding(3) 
+var<uniform> camera: Camera;
+
+@group(0) @binding(4)
+var<uniform> cuboids: array<Cuboid, 2>;
+
+@group(0) @binding(5)
+var<uniform> spheres: array<Sphere, 1>;
+
+
+struct Camera {
+    position: vec3<f32>,
+    fov: f32,
+    orientation: vec4<f32>,
+    clip_near: f32,
+    clip_far: f32,
+}
+
+struct Scene {
+    sphere_count: u32,
+    cuboid_count: u32,
+}
+
+struct Light {
+    position: vec3<f32>,
+    radius: f32,
+    color: vec3<f32>,
+    enabled: u32,
+}
+
+struct Lights {
+    lights: array<Light, MAX_LIGHTS>
+}
+
+struct Sphere {
+    transform: mat4x4<f32>,
+    radius: f32,
+}
+
+struct Cuboid {
+    transform: mat4x4<f32>,
+    dimensions: vec3<f32>,
+}
+
+struct ViewRay {
+    position: vec3<f32>,
+    distance: f32, // Distance along ray, 
+}
+
+fn applyRotation(v:vec3<f32>, rv:vec4<f32>) -> vec3<f32>{
+    let r = rv * vec4<f32>(-1.0, -1.0, -1.0, 1.0);
+    let s = r.w;
+    let u = r.xyz;
+    let a = u * (dot(u, v) * 2.0);
+    let b = v * ((s * s) - dot(u, u));
+    let c = cross(u, v) * (2.0 * s);
+    return a + b + c;
+}
+
+fn ambient_occlusion(point:vec3<f32>, normal:vec3<f32>) -> f32 {
+    var occlusion = 0.0;
+    var i = 1;
+    while i <= AO_STEPS {
+        i++;
+        let distance = f32(AO_DISTANCE) / f32(AO_STEPS) * f32(i);
+        let d = map(point + (normal * distance));
+        occlusion += max(-(d - distance), 0.0);
+    }
+    return occlusion/f32(AO_DISTANCE * f32(AO_STEPS) * 4.0);
+}
+
+fn direct_lighting(point:vec3<f32>, normal:vec3<f32>) -> vec3<f32> {
+    var light = vec3<f32>(0.0);
+
+    for (var i = 0u; i < MAX_LIGHTS; i++) {
+        let l = lights.lights[i];
+
+        if l.enabled == 0u { return light; }
+
+        let delta = l.position - point;
+        let dir = normalize(delta);
+
+        let distance = length(delta);
+        let angle = dot(dir, normal);
+
+        var power = (angle / distance);
+
+        // Edge case optimization
+        if power > 0.0 {
+            power *= trace_shadow(point, l);
+        }
+
+        light += l.color * max(0.0, power);
+    }
+    
+    return light;
+}
+
+fn trace_shadow(point:vec3<f32>, light: Light) -> f32 {
+    var res: f32 = 1.0;
+
+    let max_t = length(light.position - point);
+    let normal = normalize(light.position - point);
+    var t = 0.01;
+
+    for(var i = 0u; i < MAX_MARCH_STEPS; i++){
+
+        let h = map(point + (normal * t));
+
+        res = min(res, h / (light.radius * t));
+        t += max(h, 0.01);
+
+        if res < -1.0 || t > max_t {
+            break;
+        }
+    }
+
+    res = max(res, -1.0);
+
+    return 0.25 * (1.0 + res) * (1.0 + res) * (2.0 - res);
+}
+
+fn evaluate_sdf_sphere(sphere: Sphere, point: vec3<f32>) -> f32 {
+    let transformed_point = sphere.transform * vec4f(point, 1.0);
+    return length(transformed_point.xyz) - sphere.radius;
+}
+
+fn evaluate_sdf_cuboid(cuboid: Cuboid, point: vec3<f32>) -> f32 {
+    let transformed_point =  cuboid.transform * vec4f(point, 1.0);
+    let q = abs(transformed_point.xyz) - cuboid.dimensions;
+    return length(max(q, vec3<f32>(0.0))) + min(max(q.x, max(q.y, q.z)), 0.0);
+}
+
+fn evaluate_sdf(point: vec3<f32>) -> f32 {
+    var min_dist = MAX_SIGNED_DISTANCE;
+
+    for (var i = 0u; i < scene.sphere_count; i++) {
+        min_dist = min(min_dist, evaluate_sdf_sphere(spheres[i], point));
+    }
+
+    for (var i = 0u; i < scene.cuboid_count; i++) {
+        min_dist = min(min_dist, evaluate_sdf_cuboid(cuboids[i], point));
+    }
+
+    return min_dist;
+}
+
+fn map(point:vec3<f32>) -> f32 {
+    return evaluate_sdf(point);
+}
+
+fn surface_normal(point:vec3<f32>) -> vec3<f32> {
+    let step_x = vec3<f32>(0.0001, 0.0, 0.0);
+    let step_y = vec3<f32>(0.0, 0.0001, 0.0);
+    let step_z = vec3<f32>(0.0, 0.0, 0.0001);
+
+    return normalize(vec3<f32>(
+        map(point + step_x) - map(point - step_x),
+        map(point + step_y) - map(point - step_y),
+        map(point + step_z) - map(point - step_z),
+    ));
+}
+
+
+struct Input {
+    @builtin(position) screen_cords: vec4<f32>,
+};
+
+fn surface_point(ray_origin: vec3f, ray_direction: vec3f) -> vec3f {
+    var ray_length:f32 = CLIP_NEAR;
+    var steps:u32 = 0u;
+
+    loop {
+        let point = ray_origin + (ray_direction * ray_length);
+        let min_signed_distance = map(point);
+        if ray_length > CLIP_FAR { break;}
+        if min_signed_distance < THRESHOLD { break;  }
+        ray_length += min_signed_distance;
+        steps++;
+        if steps > MAX_MARCH_STEPS {break;}
+    }
+
+    return ray_origin + ray_direction * ray_length;
+}
+
+
+@fragment
+fn main(in: Input) -> @location(0) vec4<f32> {
+    // Get the aspect ratio of the render target
+    let aspect_ratio = dimensions.x / dimensions.y;
+    // Normalize the pixel coordonates to -0.5 - 0.5;
+    let normalized = in.screen_cords / vec4<f32>(dimensions.x, dimensions.y, 1.0, 1.0) - vec4<f32>(0.5);
+
+    let aspected = normalized * vec4<f32>(aspect_ratio, 1.0, 1.0, 1.0);
+
+    let ray_dir = normalize(vec3(aspected.x, -aspected.y, 1.0));
+    let ray_direction = applyRotation(ray_dir, camera.orientation);
+    let ray_origin = camera.position;
+
+    let surface_point = surface_point(ray_origin, ray_direction);
+
+    let surface_normal = surface_normal(surface_point);
+
+    let reflected_ray = reflect(ray_direction, surface_normal);
+
+    let reflected_point = surface_point(surface_point, reflected_ray);
+
+    let occlusion = ambient_occlusion(surface_point, surface_normal);
+
+    let reflected_surface_normal = surface_normal(reflected_point);
+
+    let reflected_occlusion = ambient_occlusion(reflected_point, reflected_surface_normal);
+
+    var color = vec3<f32>(0.0);
+    var reflected_color = vec3<f32>(0.0);
+
+    if length(surface_point) < 100.0 {
+        color = direct_lighting(surface_point, surface_normal) * max(0.0, 1.0 - occlusion);
+    }
+
+    if length(reflected_point - surface_point) < 100.0 {
+        reflected_color = direct_lighting(reflected_point, reflected_surface_normal) * max(0.0, 1.0 - reflected_occlusion);
+    }
+
+    // Apply fresnel effect
+    let ratio = pow(abs(dot(ray_direction, surface_normal)), 0.5);
+    
+    color = mix(reflected_color, color, ratio);
+
+    color = sqrt(color);
+
+    return vec4<f32>(color, 1.0);
+}
+```
+
+### src/shaders/vert.wgsl
+```
+@vertex
+fn main(@builtin(vertex_index) VertexIndex : u32) -> @builtin(position) vec4<f32> {
+    var pos = array<vec2<f32>, 3>(
+        vec2(-1.0, 3.0),
+        vec2(-1.0, -1.0),
+        vec2(3.0, -1.0)
+    );
+    return vec4<f32>(pos[VertexIndex], 0.0, 1.0);
+}
+```
+
+### src/signed_distance_field/repeat.rs
+```
+use crate::vector3::Vec3;
+
+use super::SignedDistance;
+
+pub struct Repeated<T: SignedDistance + Sized>(pub Box<T>, pub f32);
+
+impl<T: SignedDistance + Sized> SignedDistance for Repeated<T> {
+    fn distance_from(&self, point: Vec3) -> f32 {
+        let (x, y, z) = point;
+        let point = (
+            x.abs() % self.1 - self.1 / 2.0,
+            y.abs() % self.1 - self.1 / 2.0,
+            z.abs() % self.1 - self.1 / 2.0,
+        );
+        self.0.distance_from(point)
+    }
+}
+```
+
+### src/signed_distance_field/rouding.rs
+```
+use crate::vector3::Vec3;
+
+use super::SignedDistance;
+
+pub struct Rounded<T: SignedDistance + Sized>(pub Box<T>, pub f32);
+
+impl<T: SignedDistance + Sized> SignedDistance for Rounded<T> {
+    fn distance_from(&self, point: Vec3) -> f32 {
+        self.0.distance_from(point) + self.1
+    }
+}
+```
+
+### src/signed_distance_field/scale.rs
+```
+use crate::vector3::{Vec3, Vector3};
+
+use super::SignedDistance;
+
+pub struct Scaled<T: SignedDistance + Sized>(pub Box<T>, pub f32);
+
+impl<T: SignedDistance + Sized> SignedDistance for Scaled<T> {
+    fn distance_from(&self, point: Vec3) -> f32 {
+        self.0.distance_from(point.multiply_scalar(self.1))
+    }
+}
+```
+
+### src/signed_distance_field/transform.rs
+```
+use crate::{
+    quaternion::{Quat, Quaternion},
+    vector3::{Vec3, Vector3},
+};
+
+use super::SignedDistance;
+#[derive(Clone)]
+pub struct Rotation<T: SignedDistance + Sized>(pub Box<T>, pub Quaternion);
+
+#[derive(Clone)]
+pub struct Translation<T: SignedDistance>(pub Box<T>, pub Vec3);
+
+impl<T: SignedDistance> SignedDistance for Rotation<T> {
+    #[inline]
+    fn distance_from(&self, point: Vec3) -> f32 {
+        self.0.distance_from(point.apply_rotation(self.1.inverse()))
+    }
+}
+
+impl<T: SignedDistance> SignedDistance for Translation<T> {
+    #[inline]
+    fn distance_from(&self, point: Vec3) -> f32 {
+        self.0.distance_from(point.sub(self.1))
+    }
+}
+```
+
+### src/wgpu_context/buffers.rs
+```
+use wgpu::{util::DeviceExt, Device};
+
+use crate::{
+    camera::Camera, light_buffers::LightBuffers, scene_descriptor::SceneDescriptorBuilder,
+};
+
+pub struct GPUBuffers {
+    pub dimension_uniform: wgpu::Buffer,
+    pub scene_data: wgpu::Buffer,
+    pub cuboids: wgpu::Buffer,
+    pub spheres: wgpu::Buffer,
+    pub light_data: wgpu::Buffer,
+    pub camera_uniform: wgpu::Buffer,
+}
+
+impl GPUBuffers {
+    pub fn update_buffers(
+        &self,
+        queue: &wgpu::Queue,
+        dimensions: (u32, u32),
+        scene: SceneDescriptorBuilder,
+        lights: LightBuffers,
+        camera: Camera,
+    ) {
+        queue.write_buffer(
+            &self.dimension_uniform,
+            0,
+            bytemuck::bytes_of(&[dimensions.0 as f32, dimensions.1 as f32, 1.0, 1.0]),
+        );
+        queue.write_buffer(
+            &self.scene_data,
+            0,
+            bytemuck::bytes_of(&scene.length_descriptor()),
+        );
+        queue.write_buffer(&self.cuboids, 0, bytemuck::cast_slice(&scene.cuboids));
+        queue.write_buffer(&self.spheres, 0, bytemuck::cast_slice(&scene.spheres));
+        queue.write_buffer(&self.light_data, 0, bytemuck::bytes_of(&lights));
+        queue.write_buffer(&self.camera_uniform, 0, bytemuck::bytes_of(&camera));
+    }
+
+    pub fn create(
+        device: &Device,
+        dimensions: (u32, u32),
+        scene: SceneDescriptorBuilder,
+        lights: LightBuffers,
+        camera: Camera,
+    ) -> Self {
+        let dimension_uniform = device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
+            label: Some("Dimension Buffer"),
+            // Padded to 16 bytes, uniforms must be.
+            contents: bytemuck::bytes_of(&[dimensions.0 as f32, dimensions.1 as f32, 1.0, 1.0]),
+            usage: wgpu::BufferUsages::UNIFORM | wgpu::BufferUsages::COPY_DST,
+        });
+
+        let scene_data = device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
+            label: Some("Scene Buffer"),
+            contents: bytemuck::bytes_of(&scene.length_descriptor()),
+            usage: wgpu::BufferUsages::UNIFORM | wgpu::BufferUsages::COPY_DST,
+        });
+
+        let light_data = device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
+            label: Some("Light Buffer"),
+            contents: bytemuck::bytes_of(&lights),
+            usage: wgpu::BufferUsages::UNIFORM | wgpu::BufferUsages::COPY_DST,
+        });
+
+        let camera_uniform = device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
+            label: Some("Camera Buffer"),
+            contents: bytemuck::bytes_of(&camera),
+            usage: wgpu::BufferUsages::UNIFORM | wgpu::BufferUsages::COPY_DST,
+        });
+
+        let cuboids = device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
+            label: Some("Cuboid Buffer"),
+            contents: bytemuck::cast_slice(&scene.cuboids),
+            usage: wgpu::BufferUsages::UNIFORM | wgpu::BufferUsages::COPY_DST,
+        });
+
+        let spheres = device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
+            label: Some("Sphere Buffer"),
+            contents: bytemuck::cast_slice(&scene.spheres),
+            usage: wgpu::BufferUsages::UNIFORM | wgpu::BufferUsages::COPY_DST,
+        });
+
+        Self {
+            dimension_uniform,
+            scene_data,
+            light_data,
+            camera_uniform,
+            cuboids,
+            spheres,
+        }
+    }
+}
+```

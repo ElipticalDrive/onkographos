@@ -1,0 +1,196 @@
+A production-grade 3D game engine in C17 and Vulkan 1.3: data-oriented, GPU-driven, built for native 4K at 240 FPS on mid-range hardware. - feat(render): voxels splatted to the pixels their footprints cover (ADR-0061) by SugalAbubaker · Pull Request #115 · SugalAbubaker/nepheline
+
+feat(render): voxels splatted to the pixels their footprints cover (ADR-0061) by SugalAbubaker · Pull Request #115 · SugalAbubaker/nepheline · GitHub
+Skip to content
+You signed in with another tab or window. Reload to refresh your session.
+You signed out in another tab or window. Reload to refresh your session.
+You switched accounts on another tab or window. Reload to refresh your session.
+Dismiss alert
+Conversation
+SugalAbubaker
+commented
+Oct 27, 2026
+Copy link
+Copy Markdown
+Owner
+ADR-0061 stage 3's raster, rebuilt: voxels are splatted to the pixels their footprints cover, instead of every pixel of a brick's rectangle walking the brick's cells. Stacked on #114 (stage 3).
+Why
+On foliage_4k_production stage 3's raster sent 14.9 M rays a frame through bricks, taking 59.7 M traversal steps and 15.2 M footprint tests for 1.78 M hits. At the first voxel levels a cell is about a pixel and a foliage footprint a fraction of its cell, so four in five voxels cover no pixel centre, and a brick's rectangle is mostly pixels no footprint covers.
+The splat (vis_voxel_raster.comp)
+An invocation per voxel of the cluster. Its brick comes from a binary search over the bricks' first voxels, and its cell from the n-th set bit of the brick's mask.
+Each voxel projects its footprint's box (a capsule's widened by its radius, within its cell) to the pixel centres it may cover:
+the box's corners lie on the brick's grid of 32nds of a cell, so its centre and half-extents reach clip space as steps along that grid, the same for the whole cluster;
+the projection lies within (r_x + |x_c / w_c| r_w) / (w_c − r_w) of the centre's in x, and likewise in y, widened by a 64th of a pixel;
+a voxel wholly behind the near plane covers nothing; one reaching behind the camera's plane takes the whole target.
+A subgroup pools its voxels' (voxel, pixel) pairs: an exclusive add, then a binary search per pair. The rays' tests fill the lanes whichever voxels cover pixels.
+Each pair's ray is tested against that voxel alone (vis_voxel_hit). It takes the ray's span through the voxel's cell from the cell's own planes, then the footprint over that span. A hit takes the atomic max of (1 / t, cluster, brick), so the nearest voxel wins.
+The search (vis_voxel_find)
+The voxel resolve and gi update find the pixel's voxel again in the brick the visibility buffer names:
+first the cell holding the ray's point at the stored depth;
+then the two cells along each axis whose centres lie nearest that point (which hold it whatever its rounding);
+stopping at the first whose hit gives the stored depth again, bit for bit.
+A voxel's test depends only on the ray and the voxel, so every pass meets it at the same t. The DDA (vis_voxel_trace) is gone. The C twin's nph_render_voxel_trace is now the nearest of a brick's voxel hits, the lowest cell on a tie.
+New rules, checked
+A voxel cluster's bricks share one cell size, and their voxels follow one another in the bricks' order. The builder already makes them so. nph_render_mesh_create (validate_voxel_cluster) and the mesh loader (views.c mesh_voxels) refuse clusters that break either rule.
+The radiance cache's update, gated
+gi_update.comp's voxel path was compiled into every frame's update. With the search in it, the driver spilled 2,816 B of shared memory a workgroup, and Bistro's update measured 0.011 ms slower than stage 3's. It is now specialised out (k_voxels) of the pipeline that frames without voxel meshes bind, as the meshlet cull's and the resolve's are. Specialised, the update is stage 2's binary exactly (42,240 B, 2,304 B shared) and takes Bistro's street 0.189 ms, its cost at Phase 13's start.
+Stage 3's update ran 0.010 ms faster on Bistro (0.179) only because the driver split that build's spills differently: 1,280 B shared plus 80 B local. That allocation is the driver's choice, not something our code controls, so the gate does not try to reproduce it. ADR-0061 records it.
+No test reached the update's voxel path before; only render_perf's foliage did. A new test covers it (below).
+Tests
+VoxelGpu.the_voxel_tests_match_their_cpu_twin (renamed): 16,384 rays through 256 random bricks, 2,609 hits.
+0 disagree on the hit, the voxel or the face; t is within 4.8e-6 of the brick (5.3e-6 on lavapipe).
+The resolve's search from each hit's depth meets that hit again exactly: 0 misses.
+Voxel.the_first_voxel_is_the_nearest_footprint_of_random_bricks (renamed): 25,600 rays, 3,965 hits, against a double-precision search of every footprint. 0 mismatches; worst t 1.9e-5 of the brick.
+VoxelGpu.the_radiance_cache_holds_the_voxels_cells (new): at 30 m, 307 voxel pixels give 284 cells.
+The cache holds every one of them and nothing else.
+Planted bug, the triangle-only update bound in a voxel frame: 4 of 301 slots were expected cells.
+VoxelGpu.malformed_voxel_clusters_are_refused (new), and the views fixture: mixed cell sizes and out-of-order voxels are refused.
+Unchanged from stage 3:
+the raster against the CPU's rays, pixel for pixel: 7 of 1,298, 0 of 476 and 0 of 105 pixels differ;
+coverage against level 0: +7.1 / +3.7 / −4.8 / −4.9 %;
+light against level 0: +10.0 / +9.7 / +7.2 % a pixel (lavapipe +9.6 at 40 m);
+the voxel resolve against its C twin: ±0.04 %.
+Whole suites:
+RTX 3060 Ti: Development 97 of 97 (render 200 of 200), and Debug ASan 97 of 97 (render 200 of 200).
+Lavapipe: 198 of 200 render tests, plus the two mesh-shader-only skips. Its subgroups of 8 run the splat's pooling as eight subgroups a workgroup.
+glslang 14 sweep: 108 of 108 shaders. GCC 14, clang's CI warnings and clang-tidy 19 are clean on the changed C files.
+Cost
+RTX 3060 Ti, 240 frames, three interleaved rounds against stage 3 (#114), VS Code minimized. Final build (both commits):
+scene
+frame
+passes
+foliage_4k_production
+9.606 → 7.580 ms
+voxel raster 4.640 + 0.808 → 2.795 + 0.577 ms; voxel resolve 0.094 → 0.069 ms
+field_4k_production
+3.993 → 3.981 ms
+—
+bistro_street_production
+6.794 → 6.777 ms
+gi update 0.179 → 0.189 ms
+Before the gate (first commit alone), also three rounds:
+scene
+frame
+passes
+lod_4k_production
+3.703 → 3.698 ms
+—
+shadows_4k_production
+4.200 → 4.202 ms
+—
+bistro_street_production
+6.771 → 6.778 ms
+gi update 0.178 → 0.190 ms
+Every other pipeline is stage 3's, byte for byte. With debug info stripped (spirv-opt --strip-debug --strip-nonsemantic --compact-ids), only gi_update, vis_voxel_raster, vis_voxel_resolve(_rt) and vis_voxel_test differ from stage 3's SPIR-V, and render_perf's pipeline log agrees (binary sizes, registers, spills).
+On the foliage scene, the other passes measure 0.5 to 2 % slower with unchanged pipelines. The frame is 2 ms shorter there; I have not isolated why they move.
+Against the stalled triangles: foliage_4k_triangles still takes 5.6 ms. A voxel costs the raster about what a triangle does (~138 ps against ~146), but the first voxel levels hold about twice the triangles they replace. So the cooker's voxels stay opt-in (--voxels).
+The first voxel level's budget stays at 4× the triangles. At 1× the frame is 5.84 ms. But the simplified triangle levels then drawn from 24 to 40 m cover 11.6–12.5 % fewer pixels than level 0, with 9 % less light a pixel, where the voxels cover 3.7–7.1 % more (ADR-0061 "Cost").
+DRAM bytes:
+The declared footprint is unchanged: 39 MB read and 66 MB written for each voxel raster phase (the visibility buffer); 166 MB read and 33 MB written for the voxel resolve.
+Undeclared reads through device addresses:
+every drawn voxel's record, once by its lane: about 24 M × 16 B ≈ 390 MB a frame (stage 3's rays read one per footprint test, 15.2 M);
+the bricks, 3.2 M × 32 B ≈ 100 MB, as before;
+each pair's voxel again (a fifth of the voxels have pairs).
+I did not measure DRAM traffic; that needs the elevated trace runner. ADR-0061's next work starts with testing each cell's rectangle before reading its voxel's record, which would skip the records of voxels whose cells cover no pixel centre.
+Docs
+docs/render.md "Voxels" (the test, the splat, the search, the numbers) and "Global illumination". ADR-0061: the raster section, "Cost", the budget finding, frames without voxels, the next work, and three rejected alternatives:
+the DDA;
+the search over all eight cells without the early stop: 0.104 ms against 0.068;
+the register and queueing variants of the splat, none faster per cluster drawn.
+🤖 Generated with Claude Code
+SugalAbubaker
+and others
+added 2 commits
+October 27, 2026 13:32
+feat(render): voxels splatted to the pixels their footprints cover (A…
+…
+b308577
+```
+…DR-0061)
+
+The voxel raster no longer walks every pixel of a brick's rectangle
+through the brick's cells: on the foliage benchmark that sent 14.9
+million rays through 59.7 million steps for 1.78 million hits, since a
+cell at the first voxel levels is about a pixel and four in five
+footprints cover no pixel centre. Each voxel now projects its
+footprint's box (a capsule's widened by its radius, within its cell) to
+the pixel centres it may cover, from clip-space steps along its brick's
+grid, and a subgroup pools its voxels' pixels so that the rays' tests
+fill its lanes. Each pixel's ray is tested against that voxel alone
+(vis_voxel_hit): the cell's span along the ray from the cell's own
+planes, then the footprint, so every pass meets a voxel at the same t
+bit for bit. The voxel resolve and the radiance cache's update find the
+pixel's voxel again among the cells next to the depth's point
+(vis_voxel_find), the point's own cell first, stopping at the first
+whose hit gives the stored depth again. The DDA is gone; the C twin's
+nph_render_voxel_trace is now the nearest of a brick's voxel hits.
+
+A voxel cluster's bricks must share a cell size and their voxels must
+follow one another in the bricks' order (as the builder makes them);
+the renderer and the mesh loader check both, and refuse clusters that
+break them.
+
+On render_perf's foliage_4k_production (RTX 3060 Ti, three interleaved
+rounds against stage 3) the frame falls from 9.61 to 7.57 ms, the voxel
+raster from 5.45 to 3.37 ms and the voxel resolve from 0.094 to 0.069
+ms. The tests' numbers are stage 3's: the raster matches the CPU's rays
+pixel for pixel, the coverage and light against level 0 are unchanged,
+and the shaders' search meets every one of 2,609 hits again exactly.
+Frames without voxel meshes bind stage 3's pipelines byte for byte, but
+for the radiance cache's update, which compiles the voxels' search in
+(the next commit specialises it out).
+
+The first voxel level keeps its budget of four times the triangles: at
+one, the test foliage's simplified triangle levels draw from 24 to 40 m
+and cover 11.6 to 12.5 % fewer pixels than level 0 (needles thinned
+below a pixel) where its voxels cover 3.7 to 7.1 % more.
+
+Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
+```
+perf(render): the radiance cache's update looks for voxels only with …
+…
+0c9843b
+```
+…voxel meshes
+
+gi_update.comp's voxel path is specialised out (k_voxels, constant 0)
+of the pipeline that frames without voxel meshes bind, as the meshlet
+cull's and the resolve's are; a second pipeline with it serves the
+frames that may draw voxel clusters (RenderVis.frame_voxels). With the
+voxels' search compiled in, the driver spilled 2,816 bytes of shared
+memory a workgroup and Bistro's update ran 0.011 ms longer than stage
+3's; specialised, the update is stage 2's binary exactly (2,304 bytes)
+and takes Bistro's street 0.189 ms, its cost at Phase 13's start. Stage
+3's update, with the traversal compiled in, had run 0.010 ms faster
+there only by the driver's split of its spills (1,280 bytes of shared
+and 80 of local memory), which no source change controls; the gate
+keeps frames without voxels clear of the voxel path from now on.
+
+No test reached the update's voxel path before (only render_perf's
+foliage did). VoxelGpu.the_radiance_cache_holds_the_voxels_cells
+renders a foliage mesh's voxels with global illumination and checks the
+cache's slots against the cells the CPU's rays through the clusters
+drawn give for the voxel pixels' points and faces: at 30 m, 284 cells
+from 307 voxel pixels, every one of them held and nothing else. With
+the triangle-only update bound in a voxel frame, 4 of 301 slots were
+expected cells.
+
+Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
+```
+SugalAbubaker
+mentioned this pull request
+Oct 27, 2026
+feat(render): the sun's shadow map casts voxel clusters (ADR-0061, stage 4)
+#116
+Open
+Sign up for free
+to join this conversation on GitHub.
+Already have an account?
+Sign in to comment
+Uh oh!
+There was an error while loading. Please reload this page.
+Labels
+None yet
+1 participant
+Add this suggestion to a batch that can be applied as a single commit.This suggestion is invalid because no changes were made to the code.Suggestions cannot be applied while the pull request is closed.Suggestions cannot be applied while viewing a subset of changes.Only one suggestion per line can be applied in a batch.Add this suggestion to a batch that can be applied as a single commit.Applying suggestions on deleted lines is not supported.You must change the existing code in this line in order to create a valid suggestion.Outdated suggestions cannot be applied.This suggestion has been applied or marked resolved.Suggestions cannot be applied from pending reviews.Suggestions cannot be applied on multi-line comments.Suggestions cannot be applied while the pull request is queued to merge.Suggestion cannot be applied right now. Please check back later.
+You can’t perform that action at this time.

@@ -1,0 +1,152 @@
+--- v001.md
++++ v002.md
+@@ -4,94 +4,80 @@
+ 
+ ## Overview
+-Adjacency-based mesh rebuilding is an incremental optimization for chunk-based voxel rendering that regenerates mesh geometry only for chunks adjacent to a modified voxel [S1, unofficial]. It solves the performance bottleneck of full-scene mesh regeneration by limiting updates to the immediate neighborhood of a block change, ensuring real-time responsiveness during voxel editing [S1, unofficial]. Unlike full rebuilds, it relies on boundary detection to determine which neighboring chunks require recalculation [S1, unofficial].
++Adjacency-Based Mesh Rebuilding is a method for maintaining chunked voxel meshes by regenerating geometry only for the chunk containing a modified voxel and any immediately adjacent chunks that share a face with it [S1, unofficial]. It solves the problem of visual artifacts at chunk boundaries when internal topology changes, distinguishing itself from static meshing by its incremental nature and from full-scene rebuilds by its localized scope [S1, unofficial].
+ 
+ ## How it works
+-The method triggers upon a voxel addition or removal. It identifies the local coordinates of the modified voxel within its chunk and determines if the voxel lies on any chunk boundary. If a boundary is crossed, the adjacent chunk sharing that face is marked for rebuild. Finally, the mesh for the chunk containing the modified voxel is regenerated [S1, unofficial].
+-
+-**Inputs:**
+-- `chunk_size`: Integer dimension of the chunk (e.g., 16).
+-- `modified_voxel_pos`: World coordinates $(wx, wy, wz)$ of the changed voxel.
+-- `chunk_grid`: Map or array of active chunk renderers.
+-
+-**Outputs:**
+-- Updated vertex/index buffers for affected chunks.
++**Inputs and Outputs:**
++*   **Input:** The local coordinates $(lx, ly, lz)$ of the modified voxel within its chunk, the world coordinates $(wx, wy, wz)$ of that voxel, and the chunk dimensions $(CHUNK\_SIZE)$.
++*   **Output:** Updated mesh data structures for the affected chunks.
+ 
+ **Data Structures:**
+-- `ChunkRenderer`: Object managing a single chunk's mesh data. Contains flags `needsUpdate` and neighbor flags `neighborNeedUpdate` for WEST, EAST, SOUTH, NORTH [S2, unofficial].
++*   **Chunk:** A cubic block of voxels with dimensions $CHUNK\_SIZE \times CHUNK\_SIZE \times CHUNK\_SIZE$.
++*   **Voxel Position:** Represented as local $(lx, ly, lz)$ relative to the chunk origin and world $(wx, wy, wz)$ relative to the global grid.
+ 
+ **Steps:**
+-1. Calculate local voxel coordinates $(lx, ly, lz)$ from world coordinates:
+-   $$lx = wx \pmod{\text{chunk\_size}}$$
+-   $$ly = wy \pmod{\text{chunk\_size}}$$
+-   $$lz = wz \pmod{\text{chunk\_size}}$$
+-   [S1, unofficial]
+-
+-2. Determine if the voxel is on a boundary. If $lx == 0$, the chunk at $(wx - \text{chunk\_size}, wy, wz)$ must be rebuilt [S1, unofficial]. If $lx == \text{chunk\_size} - 1$, the chunk at $(wx + \text{chunk\_size}, wy, wz)$ must be rebuilt [S1, unofficial]. Apply similar logic for $ly$ and $lz$ axes [S1, unofficial].
+-
+-3. Rebuild the mesh for the chunk containing the modified voxel [S1, unofficial].
+-
+-4. For each flagged neighbor chunk, perform the **Chunk Mesh Building Pipeline** [S2, unofficial]:
+-   a. Lock the weak pointer to the neighbor `ChunkRenderer` [S2, unofficial].
+-   b. Verify the neighbor has all adjacent chunks loaded via `hasAllAdjacentChunkLoaded()` [S2, unofficial].
+-   c. Call `buildMesh()` on the neighbor [S2, unofficial].
++1.  Determine the local position $(lx, ly, lz)$ of the voxel that was added or removed.
++2.  Determine the world position $(wx, wy, wz)$ of the modified voxel.
++3.  Check if the modification occurred on the X-axis boundary:
++    *   If $lx == 0$, the voxel is on the negative X face. Rebuild the mesh of the adjacent chunk at world coordinates $(wx - 1, wy, wz)$.
++    *   If $lx == CHUNK\_SIZE - 1$, the voxel is on the positive X face. Rebuild the mesh of the adjacent chunk at world coordinates $(wx + 1, wy, wz)$.
++4.  Check if the modification occurred on the Y-axis boundary:
++    *   If $ly == 0$, the voxel is on the negative Y face. Rebuild the mesh of the adjacent chunk at world coordinates $(wx, wy - 1, wz)$.
++    *   If $ly == CHUNK\_SIZE - 1$, the voxel is on the positive Y face. Rebuild the mesh of the adjacent chunk at world coordinates $(wx, wy + 1, wz)$.
++5.  Check if the modification occurred on the Z-axis boundary:
++    *   If $lz == 0$, the voxel is on the negative Z face. Rebuild the mesh of the adjacent chunk at world coordinates $(wx, wy, wz - 1)$.
++    *   If $lz == CHUNK\_SIZE - 1$, the voxel is on the positive Z face. Rebuild the mesh of the adjacent chunk at world coordinates $(wx, wy, wz + 1)$.
++6.  Always rebuild the mesh of the chunk containing the modified voxel, regardless of boundary position.
+ 
+ **Pseudocode:**
+ ```python
+-def rebuild_adjacent_chunks(modified_world_pos, chunk_size, chunk_grid):
+-    wx, wy, wz = modified_world_pos
+-    lx = wx % chunk_size
+-    ly = wy % chunk_size
+-    lz = wz % chunk_size
+-
+-    # Identify neighbors to rebuild based on boundary conditions
+-    neighbors_to_rebuild = []
+-
+-    if lx == 0:
+-        neighbors_to_rebuild.append((wx - chunk_size, wy, wz))
+-    if lx == chunk_size - 1:
+-        neighbors_to_rebuild.append((wx + chunk_size, wy, wz))
+-    
+-    if ly == 0:
+-        neighbors_to_rebuild.append((wx, wy - chunk_size, wz))
+-    if ly == chunk_size - 1:
+-        neighbors_to_rebuild.append((wx, wy + chunk_size, wz))
+-        
+-    if lz == 0:
+-        neighbors_to_rebuild.append((wx, wy, wz - chunk_size))
+-    if lz == chunk_size - 1:
+-        neighbors_to_rebuild.append((wx, wy, wz + chunk_size))
++def rebuild_adjacent_chunks(modified_voxel_local_pos, modified_voxel_world_pos, chunk_size):
++    lx, ly, lz = modified_voxel_local_pos
++    wx, wy, wz = modified_voxel_world_pos
+ 
+     # Rebuild the chunk containing the modified voxel
+-    current_chunk = chunk_grid.get_chunk_at(wx, wy, wz)
+-    if current_chunk:
+-        current_chunk.build_mesh()
++    rebuild_chunk_mesh(modified_voxel_world_pos)
+ 
+-    # Rebuild adjacent chunks if they exist and are valid
+-    for nx, ny, nz in neighbors_to_rebuild:
+-        neighbor_chunk = chunk_grid.get_chunk_at(nx, ny, nz)
+-        if neighbor_chunk:
+-            # Check if neighbor needs update and is fully loaded
+-            if neighbor_chunk.needs_update and neighbor_chunk.has_all_adjacent_chunk_loaded():
+-                neighbor_chunk.build_mesh()
++    # Check X boundaries
++    if lx == 0:
++        rebuild_chunk_mesh((wx - 1, wy, wz))
++    if lx == chunk_size - 1:
++        rebuild_chunk_mesh((wx + 1, wy, wz))
++
++    # Check Y boundaries
++    if ly == 0:
++        rebuild_chunk_mesh((wx, wy - 1, wz))
++    if ly == chunk_size - 1:
++        rebuild_chunk_mesh((wx, wy + 1, wz))
++
++    # Check Z boundaries
++    if lz == 0:
++        rebuild_chunk_mesh((wx, wy, wz - 1))
++    if lz == chunk_size - 1:
++        rebuild_chunk_mesh((wx, wy, wz + 1))
+ ```
++
++**Parameters:**
++*   $CHUNK\_SIZE$: The dimension of a single chunk in voxels. Typical values are 16 or 32. Not given in the sources.
++
++**Edge Cases:**
++*   **Boundary Checks:** The logic relies on exact equality with $0$ and $CHUNK\_SIZE - 1$. If a voxel is not on the boundary, no adjacent chunks are rebuilt.
++*   **Degenerate Input:** If the chunk size is less than 2, the boundary conditions may overlap or behave unexpectedly. Not given in the sources.
+ 
+ ## Subtopics
+ 
+-### Chunk Mesh Building Pipeline
+-This subtopic details the internal steps of `buildMesh()` for a single chunk [S2, unofficial]. It orchestrates lighting recomputation, palette decoding, mesh generation, GPU upload, vegetation building, and neighbor synchronization [S2, unofficial].
+-- **Lighting:** Skips full sky/block-light BFS only if `blockLightOnlyRebuild` is true AND the chunk already has sky and block light; otherwise, calls `computeSkyLight()` and `computeBlockLight()` [S2, unofficial].
+-- **GPU Upload:** Calls `uploadMesh()` to transfer vertex data to GPU buffers (VAO/VBO) [S2, unofficial].
+-- **Vegetation:** Calls `buildVegetationMesh()` to generate vegetation geometry [S2, unofficial].
++### [Chunk Mesh Building Pipeline](10914-chunk-mesh-building-pipeline.md)
++Orchestrates the full incremental reconstruction including lighting and vegetation updates, managing state transitions and neighbor synchronization. Choose this when the rebuild cycle requires more than just geometry regeneration.
+ 
+ ## Operating characteristics
+-- **Time Complexity:** $O(1)$ relative to the total scene size, proportional only to the surface area of the modified chunk and its immediate neighbors.
+-- **Memory Complexity:** $O(1)$ additional memory for temporary rebuild state per chunk.
+-- **Performance:** Enables real-time voxel editing by avoiding full-scene regeneration [S1, unofficial].
+-- **Limitations:** Requires robust neighbor tracking and boundary detection logic [S1, unofficial]. Does not handle non-adjacent changes (e.g., teleportation or large-scale terrain generation) without additional logic.
++*   **Time Complexity:** $O(1)$ relative to the total world size, as it only processes a constant number of chunks (1 to 7) per modification.
++*   **Memory Complexity:** $O(1)$ additional memory per modification, as it reuses existing chunk structures.
++*   **Strengths:** Minimal computational overhead for frequent small edits; ensures visual consistency at chunk boundaries.
++*   **Limitations:** Does not handle non-adjacent topology changes; requires careful synchronization if multiple edits occur simultaneously.
++*   **When to use:** Real-time voxel editing where performance is critical and edits are localized.
++*   **When not to use:** When large-scale topology changes occur that affect distant chunks or when lighting/vegetation updates are not required.
+ 
+ ## Background
+-This method originates from implementations of real-time voxel editing in Minecraft-like engines, specifically focusing on efficient chunk management [S1, S2, unofficial]. It is used in engines requiring immediate feedback during block placement and removal, such as the `ft_minecraft` and `StanislavPetrovV/Minecraft` projects [S1, S2, unofficial].
++This method is derived from implementations in voxel-based games, specifically those mimicking Minecraft's chunk-based rendering system [S1, unofficial]. It addresses the need for efficient mesh updates in dynamic environments where voxels are frequently added or removed.
+ 
+ ## Sources
+-[S1] StanislavPetrovV/Minecraft, https://github.com/StanislavPetrovV/Minecraft, fetched 2026-10-26 (unofficial)
+-[S2] ldominiq/ft_minecraft, https://github.com/ldominiq/ft_minecraft, fetched 2026-10-27 (unofficial)+[S1] StanislavPetrovV/Minecraft, https://github.com/StanislavPetrovV/Minecraft, fetched 2026-10-26 (unofficial)

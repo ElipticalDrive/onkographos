@@ -1,0 +1,110 @@
+# Voxel Face and Geometry Generation
+
+
+## Overview
+Voxel Face and Geometry Generation is a family of surface extraction algorithms that convert a 3D voxel grid into a triangular mesh by emitting geometry for voxel faces. Variants within the family differ in topology handling: some cull internal faces between adjacent solid voxels to reduce draw calls and vertex counts, while others emit all faces per voxel for simplicity or specific rendering pipelines [G]. It preserves the discrete, axis-aligned aesthetic of voxel art, contrasting with smooth extraction methods like Marching Cubes [G]. It differs from [Boolean Voxel Meshing](971-boolean-voxel-meshing.md) by relying on neighbor visibility checks rather than constructive solid geometry operations to determine mesh topology [G].
+
+## Shared principles
+The family operates on a 3D occupancy grid or density field [G]. The core mechanism involves iterating through voxels and determining which faces are "exposed" to empty space or a chunk boundary [G].
+
+1.  **Neighbor Check:** For each solid voxel, the algorithm checks its 6 immediate neighbors (±X, ±Y, ±Z) [G].
+    *   If a neighbor is empty (Air, density below threshold, or `visible=false`), the face is exposed [G].
+    *   If a neighbor is out of chunk bounds, it is treated as empty/visible [G].
+    *   *Translucency Rule:* For translucent voxels, a face is generated if the neighbor is empty; if the neighbor is opaque, the face is hidden [G].
+2.  **Face Culling:** Internal faces between two adjacent solid voxels are discarded. This is the primary optimization that reduces geometry count [G].
+3.  **Vertex/Quad Emission:** For each exposed face, a quad (two triangles) is generated. The vertices are calculated by adding the voxel's world position (scaled by `BlockSize`) to base quad vertices defined for the face direction [G].
+4.  **Winding Order:** Triangle winding must be consistent (e.g., counter-clockwise) to ensure correct back-face culling [G]. A common pattern is `(0,1,2)` and `(3,2,1)` relative to the current vertex count [G].
+5.  **Padding:** To simplify boundary checks, the voxel grid is often conceptually or physically padded with a constant empty boundary on all sides [G].
+
+> **Unverified code.** The code below did not pass a test run against a reference implementation, or no test fits it, so it may contain errors.
+
+```python
+def generate_voxel_face_mesh(chunk_data, chunk_width, chunk_height, chunk_depth, block_size):
+    """
+    Generates a mesh from a voxel chunk by emitting quads for exposed faces.
+    
+    Args:
+        chunk_data: 1D array of block IDs or densities.
+        chunk_width, chunk_height, chunk_depth: Dimensions of the chunk.
+        block_size: World unit size of a single voxel.
+        
+    Returns:
+        vertices: List of (x, y, z) positions.
+        indices: List of triangle indices.
+    """
+    vertices = []
+    indices = []
+    vertex_count = 0
+
+    # Face definitions: (normal, vertex_offsets, winding_indices)
+    # Offsets are relative to voxel corner (0,0,0). Winding ensures CCW.
+    FACES = [
+        {"normal": (0, 1, 0), "verts": [(0, 1, 0), (1, 1, 0), (1, 1, 1), (0, 1, 1)], "indices": [0, 1, 2, 0, 2, 3]}, # Up
+        {"normal": (0, -1, 0), "verts": [(0, 0, 0), (1, 0, 0), (1, 0, 1), (0, 0, 1)], "indices": [0, 2, 1, 0, 3, 2]}, # Down
+        {"normal": (0, 0, 1), "verts": [(0, 0, 1), (1, 0, 1), (1, 1, 1), (0, 1, 1)], "indices": [0, 1, 2, 0, 2, 3]}, # North
+        {"normal": (0, 0, -1), "verts": [(0, 0, 0), (1, 0, 0), (1, 1, 0), (0, 1, 0)], "indices": [0, 2, 1, 0, 3, 2]}, # South
+        {"normal": (1, 0, 0), "verts": [(1, 0, 0), (1, 1, 0), (1, 1, 1), (1, 0, 1)], "indices": [0, 1, 2, 0, 2, 3]}, # East
+        {"normal": (-1, 0, 0), "verts": [(0, 0, 0), (0, 1, 0), (0, 1, 1), (0, 0, 1)], "indices": [0, 2, 1, 0, 3, 2]}  # West
+    ]
+
+    def get_block(x, y, z):
+        if not (0 <= x < chunk_width and 0 <= y < chunk_height and 0 <= z < chunk_depth):
+            return 0
+        return chunk_data[x + chunk_width * (y + chunk_height * z)]
+
+    AIR_BLOCK = 0
+
+    for z in range(chunk_depth):
+        for y in range(chunk_height):
+            for x in range(chunk_width):
+                block_id = get_block(x, y, z)
+                if block_id == AIR_BLOCK:
+                    continue
+
+                for face in FACES:
+                    nx, ny, nz = face["normal"]
+                    neighbor_x, neighbor_y, neighbor_z = x + nx, y + ny, z + nz
+                    neighbor_block = get_block(neighbor_x, neighbor_y, neighbor_z)
+
+                    if neighbor_block == AIR_BLOCK:
+                        base_x, base_y, base_z = x * block_size, y * block_size, z * block_size
+                        for vx, vy, vz in face["verts"]:
+                            vertices.append((base_x + vx * block_size, base_y + vy * block_size, base_z + vz * block_size))
+                        for idx in face["indices"]:
+                            indices.append(vertex_count + idx)
+                        vertex_count += 4
+
+    return vertices, indices
+```
+
+## Subtopics
+
+### [Boolean Voxel Meshing](971-boolean-voxel-meshing.md)
+Boolean Voxel Meshing converts a 3D boolean occupancy grid into an explicit triangular mesh by generating geometry for every occupied voxel. Unlike [Voxel Face Mesh Generation](4212-voxel-face-mesh-generation.md), which culls internal faces to produce a watertight manifold, this method outputs all 12 triangles for every active voxel, resulting in redundant geometry for internal faces. It is distinguished by its simplicity and lack of adjacency checks, making it suitable for rapid prototyping or when the voxel grid is sparse and internal redundancy is negligible.
+
+### [Voxel Face Mesh Generation](4212-voxel-face-mesh-generation.md)
+Voxel Face Mesh Generation is a surface extraction algorithm that produces a blocky, axis-aligned mesh by iterating through a 3D voxel grid and emitting a quad for every face of a solid voxel that is exposed to empty space or a chunk boundary. It solves the problem of rendering large voxel worlds efficiently by culling internal faces between adjacent solid voxels, thereby drastically reducing vertex and triangle counts compared to rendering full cubes for every block. Unlike smooth surface extraction methods like Marching Cubes, this method preserves the discrete, voxel-art aesthetic by generating only axis-aligned quads. It differs from its sibling [Boolean Voxel Meshing](971-boolean-voxel-meshing.md) by relying on simple neighbor visibility checks rather than constructive solid geometry operations to determine mesh topology.
+
+### [Voxel Outline Generation](13639-voxel-outline-generation.md)
+Voxel Outline Generation renders the edges of a voxel grid as line primitives to emphasize the blocky structure of the model. It solves the visual need for clear geometric definition in voxel art by drawing lines around the perimeter and holes of rectangular faces. It differs from [Voxel Face Mesh Generation](4212-voxel-face-mesh-generation.md) by emitting line segments instead of quads, and from [Boolean Voxel Meshing](971-boolean-voxel-meshing.md) by focusing on aesthetic edge highlighting rather than precise surface topology.
+
+### Classic Meshing
+A mesh generation technique where each voxel face is generated individually, resulting in higher vertex and index counts than greedy meshing [S1, unofficial]. Functions `addBackFace`, `addFrontFace`, `addLeftFace`, `addRightFace`, `addTopFace`, `addBottomFace` take a single voxel coordinate `x, y, z` and append vertices to `std::vector<PackedVertex>& vertices` and indices to `std::vector<GLuint>& indices` [S1, unofficial].
+
+### Self-bootstrap Geometry Generation
+Generates initial geometry purely from the model itself using 8 coarse tri-vectors, without using existing modules from previous work [S2]. Maintains high PSNR even with a much worse early-stopped RGBA reconstruction [S2]. Achieves robust high PSNR across various initial geometry choices, proving quality stems from the Strivec representation rather than the initial geometry [S2].
+
+### Geometry Shader Brick Generation
+A geometry shader step that converts voxel data (stored in a VBO) into LEGOr brick geometries (cubes and cylinders) by generating triangles for each voxel [S3]. Converts the alpha channel value (spatial coordinate) to the center of the cube, computes each face of the cube including normal and texture coordinates given the cube edge length `r`, and discards vertices with illegal values in the alpha channel [S3]. Lets the graphics pipeline handle duplicate cubes via culling, clipping, and z-tests, though it does not guarantee a single cube per voxel [S3].
+
+### GPU-side Voxel Mesh Generation via Vertex Shader Decoding
+Generates voxel mesh geometry entirely in the vertex shader by decoding packed vertex attributes, eliminating CPU-side mesh generation and draw call overhead [S4, unofficial]. Receives packed vertex attributes `aData` and `aData2` as `uint`, decodes position components X, Y, Z, constructs `modelPosition`, and transforms to clip space via `gl_Position = projectionMatrix * modelViewMatrix * vec4(modelPosition, 1.0)` [S4, unofficial]. Uses `data1AttributeName` ('aData') for packed position/face/edge roundness/AO, and `data2AttributeName` ('aData2') for packed normal/UV/right vector/checkerboard/voxel material [S4, unofficial].
+
+## Background
+The concept of extracting meshes from voxel grids by culling internal faces is foundational to voxel-based games like Minecraft, where efficiency is critical for rendering large worlds [G]. The specific implementation details, such as padding grids to handle boundaries and using lookup tables for texture atlas UVs, are standard practices in engine development [G]. The "Self-bootstrap" variant originates from the Strivec paper, which uses coarse geometry for pruning rather than final rendering [S2]. The "Voxel Outline" technique is described in Fogleman's voxel rendering blog, focusing on aesthetic line art generation [S3]. The "Geometry Shader Brick Generation" variant was introduced in the Legolizer system for real-time LEGO representation [S3]. The GPU-side decoding approach eliminates CPU overhead by packing attributes into `uint` buffers and decoding them in GLSL [S4, unofficial].
+
+## Sources
+[S1] Justinj68/OM3D_PROJECT, https://github.com/Justinj68/OM3D_PROJECT, fetched 2026-10-27 (unofficial)
+[S2] Strivec: Sparse Tri-Vector Radiance Fields, https://doi.org/10.1109/iccv51070.2023.01611, fetched 2026-10-26
+[S3] Legolizer: A Real-Time System for Modeling and Rendering LEGO Representations of Boundary Models, https://doi.org/10.1109/sibgrapi.2009.18, fetched 2026-11-02
+[S4] aresrpg/aresrpg-engine, https://github.com/aresrpg/aresrpg-engine, fetched 2026-10-27 (unofficial)

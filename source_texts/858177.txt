@@ -1,0 +1,164 @@
+# urban-auto-vox-rs
+
+[![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](LICENSE)
+[![Rust](https://img.shields.io/badge/rust-1.85-orange.svg)](rust-toolchain.toml)
+[![Docker Compose](https://img.shields.io/badge/docker--compose-ready-blue.svg)](docker-compose.yml)
+
+An automated pipeline for converting 3D city models (CityGML) into voxel
+representations, with output to CSV and PostGIS. The entire workflow runs as
+a single `docker compose up` invocation on any Linux host with an NVIDIA GPU.
+
+```
+CityGML  ──→  OBJ + JSON  ──→  CUDA voxelization  ──→  CSV / PostGIS
+```
+
+---
+
+## Table of contents
+
+1. [Prerequisites](#prerequisites)
+2. [Quick start](#quick-start)
+3. [Pipeline overview](#pipeline-overview)
+4. [Repository layout](#repository-layout)
+5. [Configuration](#configuration)
+6. [GUI](#gui)
+7. [Batch processing](#batch-processing)
+8. [CLI reference](#cli-reference)
+9. [Data flow and outputs](#data-flow-and-outputs)
+10. [Database schema](#database-schema)
+11. [Performance](#performance)
+12. [Testing](#testing)
+13. [Troubleshooting](#troubleshooting)
+14. [License](#license)
+
+---
+
+## Prerequisites
+
+| Requirement | Notes |
+|---|---|
+| **Linux host** | Tested on Ubuntu 22.04 / 24.04 |
+| **NVIDIA GPU** | Any CUDA-capable card (tested with RTX 4090) |
+| **NVIDIA driver** | `nvidia-smi` must succeed on the host |
+| **NVIDIA Container Toolkit** | [Install guide](https://docs.nvidia.com/datacenter/cloud-native/container-toolkit/install-guide.html) |
+| **Docker Engine** | 20.10+ with Compose V2 |
+
+Run `./setup-gpu.sh` to verify all prerequisites in one go.
+
+---
+
+## Quick start
+
+```bash
+# 1. Clone the repository
+git clone https://github.com/Atsaad/urban-auto-vox-rs.git
+cd urban-auto-vox-rs
+
+# 2. Verify GPU + Docker setup (one-time)
+./setup-gpu.sh
+
+# 3. Drop your CityGML files into the input directory
+cp /path/to/city_tile.gml data/citygml2/
+
+# 4. Configure (optional — defaults are sensible)
+cp .env.example .env
+$EDITOR .env
+
+# 5. Run the full pipeline
+./start.sh
+
+# 6. Inspect results
+ls data/objs/voxels_output.csv
+docker compose exec postgis psql -U postgres -d voxel_db \
+  -c "SELECT count(*) FROM voxel;"
+```
+
+For CityGML 3.0 input, drop files into `data/citygml3/` instead and set
+`CITYGML_INPUT_VERSION=3.0` in `.env`.
+
+For processing many tiles, see [Batch processing](#batch-processing).
+
+---
+
+## Pipeline overview
+
+```
+   ┌──────────────────────────┐
+   │  data/citygml2/*.gml     │   user input (CityGML 2.0)
+   └────────────┬─────────────┘
+                │   (skipped if CITYGML_INPUT_VERSION=3.0)
+                ▼
+   ┌──────────────────────────┐
+   │  citygml-tools (Java)    │   CityGML 2.0 → 3.0 upgrade
+   └────────────┬─────────────┘
+                ▼
+   ┌──────────────────────────┐
+   │  rustgml2obj             │   CityGML 3.0 → one OBJ per building
+   │                          │   + one JSON sidecar per surface
+   └────────────┬─────────────┘
+                ▼
+   ┌──────────────────────────────────────────────────────────┐
+   │  voxel-pipeline (Rust)                                   │
+   │                                                          │
+   │  1. Generate translate.json, index.json, grid_mapping    │
+   │  2. Y↔Z axis swap per OBJ                               │
+   │  3. cuda_voxelizer → *.binvox (GPU-accelerated)          │
+   │  4. Decode binvox → CSV rows + PostGIS COPY BINARY       │
+   │                                                          │
+   │  rayon thread-pool for CPU work; tokio async for DB I/O  │
+   └────────────┬─────────────────────────────────────────────┘
+                ▼
+   ┌──────────────────────────┐    ┌──────────────────────────┐
+   │  voxels_output.csv       │    │  PostGIS                 │
+   │                          │    │  voxel / object /        │
+   │                          │    │  object_class tables     │
+   └──────────────────────────┘    └──────────────────────────┘
+```
+
+Each block maps to a service in [`docker-compose.yml`](docker-compose.yml).
+Everything runs as a Docker container — the host only needs Docker and the
+NVIDIA Container Toolkit. The first `./start.sh` invocation builds the
+voxelizer image once (~3 min) and caches it.
+
+---
+
+## Repository layout
+
+```
+urban-auto-vox-rs/
+│
+├── docker-compose.yml             # Full pipeline stack (4 services)
+├── .env.example                   # All configuration knobs, documented
+├── start.sh                       # End-to-end orchestration (single tile)
+├── batch-process.sh               # End-to-end orchestration (batch of tiles)
+├── setup-gpu.sh                   # NVIDIA + Docker prerequisites check
+├── clean-all.sh                   # Full cleanup of generated data
+├── gui_modern.py                  # Desktop GUI (CustomTkinter)
+├── gui-modern.sh                  # GUI launcher (creates venv on first run)
+│
+├── data/                          # Mounted into containers
+│   ├── citygml2/                  # Input: CityGML 2.0 files
+│   ├── citygml3/                  # Intermediate: upgraded CityGML 3.0
+│   └── objs/                      # Output: OBJ, sidecars, CSV, binvox
+│
+├── docker/
+│   ├── Dockerfile.voxel-pipeline-rs
+│   └── docker-compose.voxel-pipeline-rs.yml
+│
+├── crates/                        # Rust workspace
+│   ├── voxel-schema/              # Typed data contracts (translate,
+│   │                              #   index, grid_mapping, surface, EWKB)
+│   ├── voxel-binvox/              # mmap-backed streaming binvox parser
+│   ├── voxel-postgis/             # COPY BINARY writer + DDL
+│   └── voxel-pipeline/            # CLI binary (5 subcommands)
+│
+├── Cargo.toml                     # Workspace manifest
+└── rust-toolchain.toml            # Pinned to Rust 1.85
+```
+
+---
+
+## Configuration
+
+A single `.env` file drives the entire stack. Copy `.env.example` to `.env`
+and edit as needed — all values have sensible defaults.

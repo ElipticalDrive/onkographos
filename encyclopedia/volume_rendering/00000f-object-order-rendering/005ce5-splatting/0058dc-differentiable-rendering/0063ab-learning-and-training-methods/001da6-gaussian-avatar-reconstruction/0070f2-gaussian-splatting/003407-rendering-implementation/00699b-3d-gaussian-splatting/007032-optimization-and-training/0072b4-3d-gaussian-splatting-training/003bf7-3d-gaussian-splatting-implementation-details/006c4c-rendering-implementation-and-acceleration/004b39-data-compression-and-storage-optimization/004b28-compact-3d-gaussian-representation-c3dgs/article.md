@@ -1,0 +1,149 @@
+# Compact 3D Gaussian Representation (C3DGS)
+
+Also called: Compact3DGS, Compact 3D Gaussian Representation for Radiance Field
+
+## Overview
+Compact 3D Gaussian Representation (C3DGS) is a method for compressing 3D Gaussian Splatting (3DGS) scenes by reducing the number of Gaussian primitives and compacting their attributes, addressing the high memory and storage costs of unbounded scenes [S1, S2]. It sets itself apart from standard 3DGS by exploiting spatial redundancy: instead of storing per-Gaussian attributes, it uses a grid-based neural field for view-dependent color and a codebook for geometric attributes, combined with a learnable volume-based mask to prune redundant Gaussians [S1, S2]. Unlike sibling methods that may rely on global significance scoring or vector clustering, C3DGS explicitly regularizes Gaussian volume via binary masks during training to iteratively eliminate non-essential primitives [S2].
+
+## How it works
+**Inputs and Outputs:**
+*   **Input:** A set of $N$ 3D Gaussians $\{G_i\}_{i=1}^N$ initialized from Structure-from-Motion (SfM) points, along with camera poses and training images.
+*   **Output:** A compact representation consisting of:
+    1.  A reduced set of active Gaussians defined by position, a binary mask, and codebook indices.
+    2.  A hash-based grid neural field for color.
+    3.  A geometric codebook.
+    4.  (Optional) Quantized and entropy-coded bitstream for final storage.
+
+**Data Structures:**
+1.  **Gaussian Attributes:**
+    *   `position`: 3D vector $(x, y, z)$.
+    *   `mask`: Binary scalar $m_i \in \{0, 1\}$. If $m_i=0$, the Gaussian is pruned.
+    *   `color_code_idx`: Integer index into the color grid (implicit via position query).
+    *   `geo_code_idx`: Integer index into the geometric codebook.
+2.  **Color Representation:**
+    *   `grid`: Hash-based multi-resolution grid (Instant-NGP style) mapping 3D coordinates to feature vectors. The grid stores features that are decoded into spherical harmonics coefficients or directly into RGB values [S1].
+3.  **Geometric Codebook:**
+    *   `codebook`: A small lookup table of size $K$ containing learned scale and rotation parameters. Each Gaussian stores only an index $c_i \in \{1, \dots, K\}$ [S1].
+
+**Numbered Steps:**
+
+1.  **Initialization:** Initialize Gaussians from SfM points with standard 3DGS attributes (position, opacity, scale, rotation, spherical harmonics coefficients). Initialize the hash grid and geometric codebook [S1].
+
+2.  **Volume-Based Masking (Pruning):**
+    *   Introduce a learnable binary mask $m_i$ for each Gaussian $i$.
+    *   Define a volume metric $V_i$ based on the Gaussian's opacity $\alpha_i$ and scale (covariance determinant). Gaussians with low contribution to the scene reconstruction are identified [S2].
+    *   During training, optimize the masks such that $m_i \to 0$ for redundant Gaussians. The rendering loss includes a regularization term on the mask to encourage sparsity [S2].
+    *   *Pitfall:* Aggressive pruning can remove high-frequency details. The mask optimization must be balanced with the reconstruction loss [S1].
+
+3.  **Color Attribute Compression:**
+    *   Replace per-Gaussian spherical harmonics coefficients with a query to the hash grid.
+    *   For a Gaussian at position $\mathbf{p}$, query the grid to obtain a feature vector.
+    *   Decode this feature vector into view-dependent color (RGB) or lower-degree spherical harmonics coefficients. This exploits spatial redundancy where neighboring Gaussians share similar colors [S1].
+    *   *Parameter:* Use a hash-based grid representation (Instant-NGP) for compactness and fast processing [S1].
+
+4.  **Geometric Attribute Compression:**
+    *   Replace per-Gaussian scale and rotation parameters with codebook indices.
+    *   Cluster similar geometric patterns (scale/rotation combinations) across the scene.
+    *   Store only the index $c_i$ for each Gaussian. Retrieve scale and rotation from the codebook at index $c_i$ during rendering [S1].
+    *   *Note:* The codebook size $K$ is kept small to minimize overhead [S1].
+
+5.  **Training:**
+    *   Optimize positions, masks, grid parameters, and codebook entries jointly using differentiable rendering.
+    *   The loss function typically includes photometric loss (L1 or SSIM) and mask regularization [S2].
+
+6.  **Post-Processing (Optional):**
+    *   Apply quantization to the remaining parameters (positions, codebook indices, grid features).
+    *   Apply entropy coding to the quantized data for final storage compression [S2].
+
+**Pseudocode:**
+
+> **Unverified code.** The code below did not pass a test run against a reference implementation, or no test fits it, so it may contain errors.
+
+```python
+# C3DGS Rendering and Training Step
+
+def query_color_grid(grid, position):
+    """
+    Query the hash-based grid for color features at a given 3D position.
+    Returns: RGB color or SH coefficients.
+    """
+    # Implementation details of Instant-NGP hash grid query
+    # 1. Hash position to grid indices
+    # 2. Trilinear interpolation of features
+    # 3. Decode to color
+    pass
+
+def get_geometry_from_codebook(codebook, index):
+    """
+    Retrieve scale and rotation from the geometric codebook.
+    """
+    return codebook[index]
+
+def render_gaussian(gaussian, camera, grid, codebook):
+    """
+    Render a single Gaussian primitive.
+    """
+    # 1. Check if Gaussian is active
+    if gaussian.mask == 0:
+        return None
+
+    # 2. Retrieve attributes
+    position = gaussian.position
+    # Color is not stored per Gaussian, but queried
+    color = query_color_grid(grid, position)
+    
+    # Geometry is retrieved from codebook
+    geo_index = gaussian.geo_code_idx
+    scale, rotation = get_geometry_from_codebook(codebook, geo_index)
+    
+    # 3. Project to 2D and splat (standard 3DGS splatting logic)
+    # ... (standard projection and alpha blending) ...
+    return splat
+
+def train_step(gaussians, images, grid, codebook, optimizer):
+    """
+    One step of training.
+    """
+    optimizer.zero_grad()
+    
+    rendered_image = render_scene(gaussians, camera, grid, codebook)
+    
+    # Compute photometric loss
+    loss = photometric_loss(rendered_image, images)
+    
+    # Add mask regularization to encourage pruning
+    mask_loss = lambda * gaussians: sum(g.mask for g in gaussians)
+    loss += regularization_weight * mask_loss(gaussians)
+    
+    loss.backward()
+    optimizer.step()
+    
+    # Update codebook and grid parameters
+    # ... (standard gradient descent updates) ...
+```
+
+**Edge Cases and Pitfalls:**
+*   **Precision:** Hash grid collisions may affect color accuracy. Use sufficient grid resolution [S1].
+*   **Boundaries:** Pruning near object boundaries may cause artifacts. The mask regularization should be tuned to preserve boundary Gaussians [S2].
+*   **Degenerate Input:** If the scene has very low redundancy, the codebook may not compress well. The method assumes spatial redundancy in color and geometric similarity in scale/rotation [S1].
+
+## Subtopics
+
+### [Optimized Minimal 3D Gaussian Splatting (OMG)](13978-optimized-minimal-3d-gaussian-splatting-omg.md)
+OMG extends C3DGS by retaining per-Gaussian parameterization for geometry to handle sparsity better, while using a small neural field and Sub-Vector Quantization (SVQ) for appearance. It achieves higher compression (>300×) by addressing C3DGS's weakness in sparse settings where neural fields struggle due to larger distances between Gaussians.
+
+## Operating characteristics
+*   **Time Complexity:** Rendering speed is linearly proportional to the number of *active* Gaussians. Since C3DGS prunes redundant Gaussians, rendering is faster than standard 3DGS [S1].
+*   **Memory Complexity:** Storage is significantly reduced. C3DGS achieves ~15× reduced storage on average and up to 28× on the Deep Blending dataset compared to 3DGS [S1]. With post-processing (quantization and entropy coding), compression exceeds 25× [S1].
+*   **Measured Performance:** On the Deep Blending dataset, C3DGS outperforms 3DGS in PSNR, with nearly 40% increase in rendering speed and over 28× storage efficiency enhancement [S1].
+*   **Strengths:** High storage compression, faster rendering, maintains high visual fidelity.
+*   **Limitations:** Requires additional training complexity for mask optimization and grid/codebook learning. Performance may degrade in highly sparse scenes without the enhancements found in OMG [S1].
+*   **When to use:** When storage and rendering speed are critical, and the scene has sufficient spatial redundancy in color and geometric similarity.
+*   **When not to use:** In highly sparse scenes where geometric diversity is high and spatial redundancy is low, unless using variants like OMG [S1].
+
+## Background
+C3DGS was proposed to address the critical memory and storage issues in 3DGS, which often require >1GB for large real-world scenes [S1]. It was introduced in the paper "Compact 3D Gaussian Representation for Radiance Field" (CVPR 2024) [S1]. The method builds on the observation that standard 3DGS densification produces many redundant Gaussians and does not exploit spatial redundancy in attributes [S1]. It incorporates techniques from neural radiance fields (Instant-NGP) for color representation and vector quantization for geometry [S1].
+
+## Sources
+[S1] Compact 3D Gaussian Representation for Radiance Field, https://doi.org/10.1109/cvpr52733.2024.02052, fetched 2026-10-26
+[S2] 3DGS.zip: A survey on 3D Gaussian Splatting Compression Methods, https://arxiv.org/abs/2407.09510v5, fetched 2026-10-26

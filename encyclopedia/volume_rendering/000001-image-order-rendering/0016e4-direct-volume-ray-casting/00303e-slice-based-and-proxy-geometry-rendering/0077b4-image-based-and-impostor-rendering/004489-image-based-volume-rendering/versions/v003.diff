@@ -1,0 +1,187 @@
+--- v002.md
++++ v003.md
+@@ -7,15 +7,14 @@
+ 
+ ## How it works
+-The method operates in three distinct phases: Volume Rendering (preprocessing), Key View Generation, and Interactive Viewing. It is independent of the underlying volume rendering system and dataset representation (e.g., rectilinear or irregular grids) [S1, unofficial].
++The method operates in three distinct phases: Volume Rendering (preprocessing), Key View Generation, and Interactive Viewing [S1, unofficial]. It is independent of the underlying volume rendering system and dataset representation (e.g., rectilinear or irregular grids) [S1, unofficial].
+ 
+ ### Inputs and Outputs
+ *   **Inputs:**
+-    *   Volumetric dataset (scalar field).
+-    *   Transfer function (mapping scalar values to RGBA).
++    *   Volumetric dataset (scalar field) [S1, unofficial].
+     *   Geometric proxy surface bounding the volume (initially a bounding sphere or isosurface) [S1, unofficial].
+-    *   Set of original viewpoints for preprocessing.
++    *   Set of original viewpoints for preprocessing [S1, unofficial].
+     *   User-defined parameters: number of ray slices per viewpoint, slice spacing [S1, unofficial].
+ *   **Outputs:**
+-    *   Interactive 3D visualization allowing camera movement and dynamic clipping surface modification.
++    *   Interactive 3D visualization allowing camera movement and dynamic clipping surface modification [G].
+ 
+ ### Data Structures
+@@ -38,18 +37,18 @@
+ 
+ **Step 1: Volume Rendering (Preprocessing)**
+-1.  Select a set of original viewpoints from which to pre-render the volume.
++1.  Select a set of original viewpoints from which to pre-render the volume [S1, unofficial].
+ 2.  For each viewpoint, define a series of image-aligned clipping planes moving back-to-front through the volume [S1, unofficial].
+ 3.  For each clipping plane position (slice):
+-    a. Clip the volume between the clipping plane and the viewpoint.
+-    b. Render the remaining volume (from the clipping plane to the far end of the data) using a standard volume rendering algorithm (e.g., ray casting, splatting) with back-to-front compositing [S1, unofficial].
+-    c. Store the resulting RGBA image as a **Ray Slice**.
++    a. Clip the volume between the clipping plane and the viewpoint [S1, unofficial].
++    b. Render the remaining volume (from the clipping plane to the far end of the data) using a standard volume rendering algorithm with back-to-front compositing [S1, unofficial].
++    c. Store the resulting RGBA image as a **Ray Slice** [S1, unofficial].
+     *   *Note:* The number of slices per viewpoint is adjustable and dataset-dependent. Anisotropic data may require more slices along one axis. Spacing can be adapted to skip empty space or capture detail [S1, unofficial].
+ 4.  Define a **Geometric Proxy Surface** bounding the volume [S1, unofficial].
+ 
+ **Step 2: Key View Generation**
+-1.  Input: The set of Ray Slices, their associated viewpoint parameters, and the Geometric Proxy Surface.
++1.  Input: The set of Ray Slices, their associated viewpoint parameters, and the Geometric Proxy Surface [S1, unofficial].
+ 2.  For each desired interactive viewing location (Key View):
+-    a. Determine the intersection of the viewing rays with the Geometric Proxy Surface.
+-    b. Identify which Ray Slices are "behind" the proxy surface relative to the new viewpoint.
++    a. Determine the intersection of the viewing rays with the Geometric Proxy Surface [G].
++    b. Identify which Ray Slices are "behind" the proxy surface relative to the new viewpoint [G].
+     c. Composite the relevant Ray Slices and the proxy surface to generate a **Key View** image. This image represents the volume intersected by the proxy surface from that specific location [S1, unofficial].
+ 
+@@ -57,7 +56,7 @@
+ 1.  Load the Key Views and the Geometric Proxy Surface into the graphics hardware [S1, unofficial].
+ 2.  Render the scene interactively:
+-    a. Render the Geometric Proxy Surface.
+-    b. Render the Key Views as **Opacity Light Fields** behind the proxy surface.
+-    c. Allow the user to modify the Geometric Proxy Surface (e.g., via clipping planes) to reveal interior structure.
++    a. Render the Geometric Proxy Surface [G].
++    b. Render the Key Views as **Opacity Light Fields** behind the proxy surface [S1, unofficial].
++    c. Allow the user to modify the Geometric Proxy Surface (e.g., via clipping planes) to reveal interior structure [S1, unofficial].
+     d. Because the interior structure is pre-computed in the Ray Slices/Key Views, changes to the proxy do not require volumetric re-rendering [S1, unofficial].
+ 
+@@ -69,5 +68,4 @@
+     Main pipeline for Image-Based Volume Rendering.
+     """
+-    # Step 1: Volume Rendering (Preprocessing)
+     ray_slices = {}
+     
+@@ -75,62 +73,48 @@
+         ray_slices[viewpoint] = []
+         
+-        # Determine slice positions based on slice_params
+-        # slice_params includes: number_of_slices, spacing, direction
+-        slice_positions = generate_slice_positions(viewpoint, volume_data.bounds, slice_params)
++        # Determine slice positions along the view direction
++        view_dir = normalize(viewpoint.position - volume_data.center)
++        num_slices = slice_params.get('num_slices', 10)
++        spacing = slice_params.get('spacing', 1.0)
++        slice_positions = [
++            viewpoint.position + view_dir * (i * spacing)
++            for i in range(num_slices)
++        ]
+         
+-        for slice_pos in slice_positions:
+-            # Create a clipping plane at slice_pos facing the viewpoint
+-            clip_plane = ClipPlane(position=slice_pos, normal=viewpoint.direction)
++        for pos in slice_positions:
++            # Render volume from pos to far end using chosen renderer
++            # Source states this delegates to any arbitrary volume rendering system [S1, unofficial]
++            rgba_image = render_volume_back_to_front(volume_data, transfer_function, pos, viewpoint)
+             
+-            # Render the volume from the clip_plane to the far end of the data
+-            # using back-to-front compositing
+-            rgba_image = render_volume_back_to_front(
+-                volume_data, 
+-                transfer_function, 
+-                clip_plane, 
+-                viewpoint.camera
+-            )
++            # Compress using standard lossless format (e.g., PNG) [G]
++            compressed_slice = compress_to_png(rgba_image)
++            ray_slices[viewpoint].append({'position': pos, 'image': compressed_slice})
+             
+-            # Compress and store the Ray Slice
+-            compressed_slice = compress_image(rgba_image, format='PNG')
+-            ray_slices[viewpoint].append(compressed_slice)
+-            
+-    # Step 2: Key View Generation
++    return ray_slices
++
++def generate_key_views(ray_slices, proxy_surface, key_viewpoints):
+     key_views = {}
+     
+-    for key_viewpoint in interactive_viewpoints:
+-        # Determine which ray slices are behind the proxy relative to key_viewpoint
++    for kv in key_viewpoints:
+         relevant_slices = []
+-        for viewpoint, slices in ray_slices.items():
+-            for slice_obj in slices:
+-                if is_behind_proxy(slice_obj.position, key_viewpoint, proxy_surface):
+-                    relevant_slices.append((viewpoint, slice_obj))
++        for vp, slices in ray_slices.items():
++            for s in slices:
++                # Check if slice is behind proxy relative to key viewpoint [G]
++                if is_behind_proxy(s['position'], kv.position, proxy_surface):
++                    relevant_slices.append(s)
+         
+-        # Composite the relevant slices and proxy to form the Key View
+-        # This step effectively pre-composites the light field data
+-        key_view_image = composite_key_view(
+-            relevant_slices, 
+-            proxy_surface, 
+-            key_viewpoint.camera
+-        )
+-        key_views[key_viewpoint] = key_view_image
++        # Composite slices back-to-front relative to key viewpoint [G]
++        key_views[kv] = composite_slices(relevant_slices, kv)
+         
+-    return key_views, proxy_surface
++    return key_views
+ 
+-def render_interactive(key_views, proxy_surface, current_camera, current_proxy):
+-    """
+-    Interactive viewing phase.
+-    """
+-    # Render the proxy surface first (depth buffer setup)
+-    render_geometry(current_proxy)
++def render_interactive(key_views, proxy_surface, current_camera):
++    # Standard GPU rasterization of proxy surface [G]
++    rasterize(proxy_surface, current_camera)
+     
+-    # Render the pre-computed key views as textures behind the proxy
+-    # The key views act as opacity light fields
+-    for key_viewpoint, image in key_views.items():
+-        if is_visible(key_viewpoint, current_camera):
+-            render_image_as_quad(image, current_camera, key_viewpoint)
+-            
+-    # Allow user to modify current_proxy to reveal interior
+-    # No volumetric re-rendering occurs here
++    # Render pre-computed key views as textured quads behind proxy [G]
++    for kv, image in key_views.items():
++        if is_in_frustum(kv.position, current_camera):
++            render_quad(image, kv.position, kv.orientation, current_camera)
+ ```
+ 
+@@ -138,17 +122,17 @@
+ *   **Number of Ray Slices:** User-adjustable. Dataset-dependent. Anisotropic data may need more slices along one axis. Can range from 1 to memory limits [S1, unofficial].
+ *   **Compression:** PNG (lossless) or JPEG 2000 (lossy) [S1, unofficial].
+-*   **Proxy Surface:** Initial proxy can be a bounding sphere or isosurface. Must be closed to define "interior" vs "exterior" [S1, unofficial].
+-*   **Edge Case:** If the proxy surface is not closed or is self-intersecting, the definition of "interior" becomes ambiguous, potentially leading to incorrect compositing.
+-*   **Pitfall:** The quality of the interactive view depends on the density of the pre-computed ray slices. Sparse slices may cause artifacts when the camera moves significantly between key viewpoints.
++*   **Proxy Surface:** Initial proxy can be a bounding sphere or isosurface [S1, unofficial].
++*   **Edge Case:** Sparse pre-computed ray slices may cause interpolation artifacts when the camera moves significantly between key viewpoints [G].
++*   **Pitfall:** The quality of the interactive view depends on the density of the pre-computed ray slices.
+ 
+ ## Operating characteristics
+ *   **Time Complexity:**
+-    *   Preprocessing: $O(V \cdot N_{views} \cdot N_{slices})$, where $V$ is volume size, $N_{views}$ is number of viewpoints, $N_{slices}$ is number of slices per view. This is the expensive phase.
+-    *   Interactive Viewing: $O(1)$ per frame (constant time relative to volume size), dependent only on the number of key views and proxy geometry.
+-*   **Memory Complexity:** $O(N_{views} \cdot N_{slices} \cdot W \cdot H)$, where $W, H$ are image dimensions. Scales with the number of pre-computed views and slices.
++    *   Preprocessing: $O(V \cdot N_{views} \cdot N_{slices})$, where $V$ is volume size, $N_{views}$ is number of viewpoints, $N_{slices}$ is number of slices per view. This is the expensive phase [G].
++    *   Interactive Viewing: $O(1)$ per frame (constant time relative to volume size), dependent only on the number of key views and proxy geometry [G].
++*   **Memory Complexity:** $O(N_{views} \cdot N_{slices} \cdot W \cdot H)$, where $W, H$ are image dimensions. Scales with the number of pre-computed views and slices [G].
+ *   **Measured Performance:** Tested on arbitrarily large datasets (e.g., terabyte-scale seismic data) on low-cost PC graphics hardware, achieving interactivity where direct ray casting fails [S1, unofficial].
+ *   **Strengths:**
+     *   Handles arbitrarily large datasets.
+-    *   Unrestricted viewpoints (unlike [22]).
++    *   Unrestricted viewpoints (unlike prior methods [22]).
+     *   Allows arbitrary clipping surfaces to reveal interior structure without re-rendering [S1, unofficial].
+     *   Independent of volume rendering system and dataset representation (works with irregular grids) [S1, unofficial].

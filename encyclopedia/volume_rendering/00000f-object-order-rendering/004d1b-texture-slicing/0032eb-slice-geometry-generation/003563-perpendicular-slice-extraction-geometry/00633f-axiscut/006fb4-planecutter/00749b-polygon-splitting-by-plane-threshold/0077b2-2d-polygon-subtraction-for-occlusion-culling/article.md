@@ -1,0 +1,173 @@
+# 2D Polygon Subtraction for Occlusion Culling
+
+Also called: 2D Polygon Subtraction, Polygon Subtraction System
+
+## Overview
+A method to compute the visible portion of a subject polygon by subtracting convex occluder polygons, used for 2D occlusion culling or silhouette generation [S1, unofficial]. It treats earlier faces as solid and subtracts them from later faces using a grid spatial index and AABB broad-phase culling [S1, unofficial]. Unlike [Polygon Splitting by Plane Threshold](23041-polygon-splitting-by-plane-threshold.md), which splits a polygon by a single plane, this method iteratively clips a polygon against the edges of a convex occluder to remove fully occluded regions.
+
+## How it works
+### Inputs and Outputs
+- **Inputs**: 
+  - `subject`: A 2D polygon (array of `[x, y]` pairs).
+  - `occluders`: An array of convex occluder polygons, each represented as an object containing `poly` (the polygon) and `bounds` (AABB: `minX`, `minY`, `maxX`, `maxY`).
+  - `grid`: A spatial index mapping cell keys to arrays of occluder indices.
+- **Outputs**: An array of 2D polygons representing the visible fragments of the subject polygon after occlusion.
+
+### Data Structures
+- **Polygon**: Array of `[x, y]` coordinate pairs, where `x` and `y` are numbers [S1, unofficial].
+- **Occluder Object**: Contains `poly` (oriented polygon) and `bounds` (object with `minX`, `minY`, `maxX`, `maxY`) [S1, unofficial].
+- **Grid**: A `Map` where keys are cell keys (integers) and values are arrays of indices into the `nodes` array [S1, unofficial].
+- **Cell Key**: Computed as `(gx << 16) ^ gy`, where `gx` and `gy` are grid cell coordinates [S1, unofficial].
+- **OccluderIndex**: Maintains `nodes` (array of convex polygons), `cellSize` (default 50), and `grid` (Map) [S1, unofficial].
+
+### Parameters
+- **EPSILON**: A small constant for floating-point precision issues. Minimum area threshold to filter degenerate polygons is `1e-4` [S1, unofficial].
+- **cellSize**: Grid cell size for spatial partitioning. Default: 50 [S1, unofficial].
+
+### Algorithm Steps
+1. **Spatial Indexing**:
+   - For each occluder, compute its AABB bounds.
+   - Compute grid cell bounds for the AABB. Iterate `gx` from `x0` to `x1`, `gy` from `y0` to `y1`.
+   - Push `(gx << 16) ^ gy` to a list of keys for each occluder.
+   - Store occluder indices in the grid under these keys [S1, unofficial].
+
+2. **Overlap Query**:
+   - Given a subject polygon's AABB, compute its grid cell bounds.
+   - Retrieve cell keys. Iterate through buckets in the grid.
+   - Skip seen indices. Compute exact AABB overlap test against `occ.bounds`.
+   - If overlap exists, push `occ.poly` to an `overlapping` list [S1, unofficial].
+
+3. **Polygon Subtraction**:
+   - Initialize `result` array with the `subject` polygon.
+   - For each `occluderObj` in `overlapping`:
+     - If `result` is empty, return `[]`.
+     - Initialize `nextResult` array.
+     - For each polygon `p` in `result`:
+       - Compute `p`'s AABB.
+       - If no AABB overlap with `occluderObj.bounds`, push `p` to `nextResult`.
+       - Else, call `subtractConvex(p, occluderObj.poly)` and push results to `nextResult`.
+     - Set `result = nextResult`.
+   - Filter `result` by `calcArea(p) > EPSILON` [S1, unofficial].
+
+4. **Subtract Convex Polygon (`subtractConvex`)**:
+   - Initialize `insideFrag` to the full subject polygon.
+   - Iterate through each edge of the convex CW occluder polygon using index `i` from 0 to `occluder.length - 1`.
+   - If `insideFrag` is null or has fewer than 3 vertices, break the loop.
+   - Define edge endpoints `p1` as `occluder[i]` and `p2` as `occluder[(i + 1) % occluder.length]`.
+   - Split `insideFrag` by the infinite line passing through `p1` and `p2` using `splitPolygonByLine`, resulting in `front` (left/outside) and `back` (right/inside) fragments.
+   - If `split.front` exists, has more than 2 vertices, and has area greater than `EPSILON`, add it to the `fragments` array.
+   - Update `insideFrag` to `split.back` if it has more than 2 vertices, otherwise set to null.
+   - After the loop, discard any remaining `insideFrag` (it is fully inside the occluder) and return `fragments` [S1, unofficial].
+
+5. **Split Polygon by Line (`splitPolygonByLine`)**:
+   - For each edge of the input polygon, classify vertices relative to the line `p1→p2` using the cross product.
+   - If a vertex is left (outside), add it to `front`. If right (inside), add it to `back`.
+   - For each edge crossing the line, compute the intersection point and add it to both `front` and `back`.
+   - Return `front` and `back` polygons [S1, unofficial].
+
+### Formulas
+- **Cross Product**: Classify point `pt` relative to edge `p1→p2`:
+  $$cross = (p2_x - p1_x)(pt_y - p1_y) - (p2_y - p1_y)(pt_x - p1_x)$$
+  If $cross > EPSILON$, point is left (outside); if $cross < -EPSILON$, point is right (inside); otherwise on the line [S1, unofficial].
+
+- **Intersection Parameter**: For line segment $p3→p4$ against line $p1→p2$:
+  $$t = \frac{(p3_x - p1_x)(p4_y - p3_y) - (p3_y - p1_y)(p4_x - p3_x)}{(p2_x - p1_x)(p4_y - p3_y) - (p2_y - p1_y)(p4_x - p3_x)}$$
+  Intersection point is $[p1_x + t(p2_x - p1_x), p1_y + t(p2_y - p1_y)]$ [S1, unofficial].
+
+- **Signed Area**:
+  $$Area = \frac{1}{2} \sum_{i=0}^{n-1} (x_i y_{i+1} - x_{i+1} y_i)$$
+  where indices are modulo $n$. Positive indicates Counter-Clockwise (CCW), negative indicates Clockwise (CW) [S1, unofficial].
+
+### Pseudocode
+> **Unverified code.** The code below did not pass a test run against a reference implementation, or no test fits it, so it may contain errors.
+
+```python
+def subtract_convex(subject_poly, occluder_poly):
+    inside_frag = [vertex for vertex in subject_poly]
+    fragments = []
+    
+    for i in range(len(occluder_poly)):
+        if inside_frag is None or len(inside_frag) < 3:
+            break
+            
+        p1 = occluder_poly[i]
+        p2 = occluder_poly[(i + 1) % len(occluder_poly)]
+        
+        split = split_polygon_by_line(inside_frag, p1, p2)
+        
+        if split.front is not None and len(split.front) > 2 and calc_area(split.front) > EPSILON:
+            fragments.append(split.front)
+            
+        if len(split.back) > 2:
+            inside_frag = split.back
+        else:
+            inside_frag = None
+            
+    return fragments
+
+def split_polygon_by_line(polygon, p1, p2):
+    front = []
+    back = []
+    
+    for i in range(len(polygon)):
+        pt = polygon[i]
+        next_pt = polygon[(i + 1) % len(polygon)]
+        
+        cross_pt = cross_product(p1, p2, pt)
+        cross_next = cross_product(p1, p2, next_pt)
+        
+        if cross_pt > EPSILON:
+            front.append(pt)
+        elif cross_pt < -EPSILON:
+            back.append(pt)
+        else:
+            # Point on line, add to both or handle as needed
+            front.append(pt)
+            back.append(pt)
+            
+        if (cross_pt > EPSILON and cross_next < -EPSILON) or (cross_pt < -EPSILON and cross_next > EPSILON):
+            intersection = line_intersection(p1, p2, pt, next_pt)
+            if intersection is not None:
+                front.append(intersection)
+                back.append(intersection)
+                
+    return {"front": front, "back": back}
+
+def cross_product(p1, p2, pt):
+    return (p2[0] - p1[0]) * (pt[1] - p1[1]) - (p2[1] - p1[1]) * (pt[0] - p1[0])
+
+def line_intersection(p1, p2, p3, p4):
+    denom = (p2[0] - p1[0]) * (p4[1] - p3[1]) - (p2[1] - p1[1]) * (p4[0] - p3[0])
+    if abs(denom) < EPSILON:
+        return None  # Parallel lines
+        
+    t = ((p3[0] - p1[0]) * (p4[1] - p3[1]) - (p3[1] - p1[1]) * (p4[0] - p3[0])) / denom
+    return [p1[0] + t * (p2[0] - p1[0]), p1[1] + t * (p2[1] - p1[1])]
+
+def calc_area(polygon):
+    area = 0
+    n = len(polygon)
+    for i in range(n):
+        j = (i + 1) % n
+        area += polygon[i][0] * polygon[j][1] - polygon[j][0] * polygon[i][1]
+    return abs(area) / 2.0
+```
+
+### Edge Cases and Pitfalls
+- **Degenerate Polygons**: Polygons with area less than `EPSILON` (lines, points, slivers) are filtered out to prevent invalid geometry and rendering artifacts [S1, unofficial].
+- **Parallel Lines**: `line_intersection` returns `null` if the denominator is less than `EPSILON` to avoid division by zero [S1, unofficial].
+- **Precision Issues**: `EPSILON` is used to handle floating-point precision issues for degenerate polygons and parallel lines [S1, unofficial].
+
+## Operating characteristics
+- **Time Complexity**: Depends on the number of occluders and the complexity of the polygons. Spatial indexing reduces the number of occluders checked per subject polygon.
+- **Memory Complexity**: Proportional to the number of occluders and the grid size.
+- **Strengths**: Efficient for scenes with many convex occluders. Spatial indexing helps in broad-phase culling.
+- **Limitations**: Only handles convex occluders. Performance may degrade with highly complex polygons or many overlapping occluders.
+- **When to Use**: Suitable for 2D occlusion culling in rendering pipelines where convex shapes are common.
+- **When Not to Use**: Not suitable for non-convex occluders or when high precision is required for very small polygons.
+
+## Background
+This method is part of the Heerich library, which provides geometry processing and rendering utilities [S1, unofficial]. It is used in the context of SVG rendering and 2D graphics, where occlusion culling can improve performance by reducing the number of drawn elements.
+
+## Sources
+[S1] meodai/heerich, https://github.com/meodai/heerich, fetched 2026-10-26 (unofficial)

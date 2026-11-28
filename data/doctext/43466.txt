@@ -1,0 +1,674 @@
+# Remote Rendering
+
+A high-performance **remote 3D DICOM Volume Renderer** that allows real-time interactive visualization of medical CT/MR scans directly in the browser.
+
+## Key Features
+- GPU-powered 3D volume ray casting using VTK
+- Real-time interaction via WebSocket (rotate, zoom, pan)
+- Multiple clinical presets (Bone, Lung, Soft Tissue, Vascular, Tumor, etc.)
+- DICOM file upload support
+- Low-latency remote rendering architecture
+
+## Use Cases
+- Remote medical image viewing
+- Teleradiology applications
+- Educational medical imaging tools
+- Research & prototyping for 3D medical visualization
+
+### server.py
+```
+import base64
+import asyncio
+import io
+import os
+import time
+import traceback
+import shutil
+import uuid
+from fastapi import FastAPI, WebSocket, WebSocketDisconnect, HTTPException, UploadFile, File
+from fastapi.staticfiles import StaticFiles
+from fastapi.middleware.cors import CORSMiddleware
+from vtkmodules.vtkRenderingCore import vtkRenderer, vtkRenderWindowInteractor, vtkRenderWindow
+from vtkmodules.vtkRenderingVolume import vtkGPUVolumeRayCastMapper
+from vtkmodules.vtkIOImage import vtkDICOMImageReader
+from vtkmodules.util import numpy_support
+import vtkmodules.all as vtk
+from PIL import Image
+import uvicorn
+import pydicom
+import pynvml
+from typing import List
+import numpy as np
+
+try:
+    from vtkmodules.vtkRenderingOpenGL2 import vtkOpenGLRenderWindow
+    USE_OPENGL_RENDER_WINDOW = True
+except ImportError:
+    print("Warning: vtkOpenGLRenderWindow not available. Falling back to vtkRenderWindow.")
+    USE_OPENGL_RENDER_WINDOW = False
+
+os.environ["VTK_RENDERING_BACKEND"] = "OpenGL2"
+if os.name == "nt":
+    os.environ.pop("VTK_USE_EGL", None)
+else:
+    os.environ["VTK_USE_EGL"] = "1"
+    os.environ["VTK_DEFAULT_EGL_DEVICE_INDEX"] = "0"
+
+vtk.vtkLogger.SetStderrVerbosity(vtk.vtkLogger.VERBOSITY_INFO)
+
+app = FastAPI()
+
+app.add_middleware(
+    CORSMiddleware,
+    allow_origins=["*"],
+    allow_credentials=True,
+    allow_methods=["*"],
+    allow_headers=["*"],
+)
+
+BASE_DIR = "C:/Users/nikhil.h/tk-server/dicom_viewer/"
+app.mount("/client", StaticFiles(directory=BASE_DIR, html=True), name="client")
+
+UPLOAD_DIR = "C:/Users/nikhil.h/tk-server/dicom_viewer/uploads/"
+
+PRESETS = {
+    "CT-Bone": {
+        "color": [(-1000, 0.0, 0.0, 0.0), (200, 0.8, 0.8, 0.8), (1000, 1.0, 1.0, 1.0)],
+        "opacity": [(-1000, 0.0), (200, 0.0), (400, 0.8), (1000, 1.0)]
+    },
+    "CT-SoftTissue": {
+        "color": [(-1000, 0.0, 0.0, 0.0), (0, 0.2, 0.2, 0.5), (500, 0.9, 0.7, 0.7), (1000, 1.0, 0.8, 0.8)],
+        "opacity": [(-1000, 0.0), (0, 0.0), (100, 0.2), (500, 0.6), (1000, 0.8)]
+    },
+    "CT-Lung": {
+        "color": [(-1000, 0.0, 0.0, 0.0), (-600, 0.5, 0.5, 0.5), (-400, 0.7, 0.7, 0.7), (1000, 0.9, 0.9, 0.9)],
+        "opacity": [(-1000, 0.0), (-600, 0.0), (-500, 0.2), (-400, 0.5), (1000, 0.2)]
+    },
+    "CT-Vascular": {
+        "color": [(-1000, 0.0, 0.0, 0.0), (0, 0.2, 0.2, 0.2), (150, 0.8, 0.2, 0.2), (400, 0.9, 0.3, 0.3), (1000, 0.7, 0.7, 0.7)],
+        "opacity": [(-1000, 0.0), (0, 0.1), (150, 0.6), (400, 0.9), (1000, 0.2)]
+    },
+    "CT-Tumor": {
+        "color": [(-1000, 0.0, 0.0, 0.0), (0, 0.2, 0.2, 0.2), (30, 1.0, 0.0, 0.0), (200, 1.0, 1.0, 0.0), (1000, 0.5, 0.5, 0.5)],
+        "opacity": [(-1000, 0.0), (0, 0.1), (30, 0.5), (200, 0.8), (1000, 0.2)]
+    },
+    "CT-Fat": {
+        "color": [(-1000, 0.0, 0.0, 0.0), (-100, 1.0, 0.8, 0.0), (-50, 1.0, 0.8, 0.0), (0, 0.2, 0.2, 0.2), (1000, 0.5, 0.5, 0.5)],
+        "opacity": [(-1000, 0.0), (-100, 0.6), (-50, 0.8), (0, 0.1), (1000, 0.1)]
+    },
+    "CT-HighContrast": {
+        "color": [(-1000, 0.0, 0.0, 1.0), (-500, 0.0, 1.0, 0.0), (0, 1.0, 0.0, 0.0), (500, 1.0, 1.0, 1.0), (1000, 1.0, 1.0, 0.0)],
+        "opacity": [(-1000, 0.0), (-500, 0.3), (0, 0.5), (500, 0.8), (1000, 1.0)]
+    },
+    "MR-Brain": {
+        "color": [(0, 0.0, 0.0, 0.0), (200, 0.2, 0.2, 0.8), (500, 0.8, 0.8, 0.8), (800, 1.0, 1.0, 1.0), (1000, 0.5, 0.5, 0.5)],
+        "opacity": [(0, 0.0), (200, 0.3), (500, 0.6), (800, 0.8), (1000, 0.2)]
+    },
+    "CT-Calcification": {
+        "color": [(-1000, 0.0, 0.0, 0.0), (0, 0.2, 0.2, 0.2), (700, 1.0, 1.0, 0.0), (1000, 1.0, 1.0, 0.0), (2000, 0.7, 0.7, 0.7)],
+        "opacity": [(-1000, 0.0), (0, 0.1), (700, 0.8), (1000, 1.0), (2000, 0.2)]
+    }
+}
+
+def initialize_nvml():
+    try:
+        pynvml.nvmlInit()
+        return True
+    except Exception as e:
+        print(f"Failed to initialize NVML: {e}")
+        return False
+
+def get_gpu_usage():
+    try:
+        device_count = pynvml.nvmlDeviceGetCount()
+        if device_count == 0:
+            return None
+        handle = pynvml.nvmlDeviceGetHandleByIndex(0)
+        utilization = pynvml.nvmlDeviceGetUtilizationRates(handle)
+        memory_info = pynvml.nvmlDeviceGetMemoryInfo(handle)
+        return {
+            "gpu_utilization": utilization.gpu,
+            "memory_used_mb": memory_info.used / 1024**2,
+            "memory_total_mb": memory_info.total / 1024**2
+        }
+    except Exception as e:
+        print(f"Error getting GPU usage: {e}")
+        return None
+
+def validate_dicom_dir(dicom_dir):
+    if not os.path.exists(dicom_dir):
+        raise HTTPException(status_code=400, detail=f"DICOM directory not found: {dicom_dir}")
+    dicom_files = [f for f in os.listdir(dicom_dir) if f.lower().endswith('.dcm')]
+    if not dicom_files:
+        raise HTTPException(status_code=400, detail=f"No DICOM files found in: {dicom_dir}")
+    valid_files = 0
+    sample_size = min(10, len(dicom_files))
+    sampled_files = np.random.choice(dicom_files, sample_size, replace=False) if sample_size < len(dicom_files) else dicom_files
+    for f in sampled_files:
+        file_path = os.path.join(dicom_dir, f)
+        try:
+            ds = pydicom.dcmread(file_path)
+            if not hasattr(ds, 'PixelData'):
+                print(f"Warning: {file_path} lacks PixelData")
+            else:
+                valid_files += 1
+        except Exception as e:
+            print(f"Invalid DICOM file {file_path}: {e}")
+    if valid_files == 0:
+        raise HTTPException(status_code=400, detail=f"No valid DICOM files with PixelData in: {dicom_dir}")
+    print(f"Validated {valid_files}/{sample_size} sampled DICOM files in {dicom_dir}")
+    return True
+
+def apply_preset(volume_property, preset_name):
+    if preset_name not in PRESETS:
+        print(f"Invalid preset: {preset_name}, falling back to CT-Bone")
+        preset_name = "CT-Bone"
+    preset = PRESETS[preset_name]
+    color_func = vtk.vtkColorTransferFunction()
+    for value, r, g, b in preset["color"]:
+        color_func.AddRGBPoint(value, r, g, b)
+    opacity_func = vtk.vtkPiecewiseFunction()
+    for value, opacity in preset["opacity"]:
+        opacity_func.AddPoint(value, opacity)
+    volume_property.SetColor(color_func)
+    volume_property.SetScalarOpacity(opacity_func)
+    volume_property.ShadeOn()
+    volume_property.SetInterpolationTypeToLinear()
+    volume_property.SetAmbient(0.3)
+    volume_property.SetDiffuse(0.7)
+    print(f"Applied preset: {preset_name}")
+
+def create_fallback_image(message):
+    img = Image.new('RGB', (400, 400), color='red')
+    buf = io.BytesIO()
+    img.save(buf, format="JPEG", quality=20)
+    encoded = base64.b64encode(buf.getvalue()).decode("utf-8")
+    return encoded
+
+def get_renderer_and_window(dicom_folder, preset_name="CT-Bone"):
+    try:
+        validate_dicom_dir(dicom_folder)
+        reader = vtkDICOMImageReader()
+        reader.SetDirectoryName(dicom_folder)
+        reader.Update()
+        image_data = reader.GetOutput()
+        if not image_data or image_data.GetNumberOfPoints() == 0:
+            print("No valid image data loaded, creating fallback volume")
+            image_data = vtk.vtkImageData()
+            image_data.SetDimensions(100, 100, 100)
+            image_data.SetSpacing(1.0, 1.0, 1.0)
+            scalars = vtk.vtkFloatArray()
+            scalars.SetNumberOfTuples(100*100*100)
+            scalars.Fill(100.0)
+            image_data.GetPointData().SetScalars(scalars)
+
+        dims = image_data.GetDimensions()
+        spacing = image_data.GetSpacing()
+        print(f"Dataset dimensions: {dims[0]}x{dims[1]}x{dims[2]}, Spacing: {spacing}")
+
+        volume_mapper = vtkGPUVolumeRayCastMapper()
+        volume_mapper.SetInputData(image_data)
+        volume_mapper.SetSampleDistance(0.2)
+        volume_mapper.SetAutoAdjustSampleDistances(1)
+
+        volume_property = vtk.vtkVolumeProperty()
+        apply_preset(volume_property, preset_name)
+
+        volume = vtk.vtkVolume()
+        volume.SetMapper(volume_mapper)
+        volume.SetProperty(volume_property)
+
+        renderer = vtkRenderer()
+        renderer.SetBackground(0, 0, 0)
+        renderer.AddVolume(volume)
+
+        if USE_OPENGL_RENDER_WINDOW:
+            render_window = vtkOpenGLRenderWindow()
+        else:
+            render_window = vtkRenderWindow()
+        render_window.SetOffScreenRendering(1)
+        render_window.SetSize(600, 600)
+        render_window.SetMultiSamples(4)
+        render_window.AddRenderer(renderer)
+
+        interactor = vtkRenderWindowInteractor()
+        interactor.SetRenderWindow(render_window)
+        interactor.Initialize()
+
+        render_window.Render()
+
+        vtk_version = vtk.vtkVersion.GetVTKVersion()
+        print(f"VTK Version: {vtk_version}")
+
+        capabilities = render_window.ReportCapabilities() or ""
+        renderer_name = "Unknown"
+        opengl_version = "Unknown"
+        max_texture_size = "Unknown"
+        is_gpu_supported = False
+        for line in capabilities.splitlines():
+            if "OpenGL renderer string" in line:
+                renderer_name = line.split(":")[-1].strip()
+            if "OpenGL version string" in line:
+                opengl_version = line.split(":")[-1].strip()
+            if "Max texture size" in line:
+                max_texture_size = line.split(":")[-1].strip()
+            if any(x in line for x in ["NVIDIA", "AMD", "Intel"]):
+                is_gpu_supported = True
+        backend = os.environ.get("VTK_RENDERING_BACKEND", "Unknown")
+        print(f"GPU rendering enabled: {is_gpu_supported}, Renderer: {renderer_name}, "
+              f"OpenGL Version: {opengl_version}, Max Texture Size: {max_texture_size}, Backend: {backend}")
+        if not is_gpu_supported:
+            print("Warning: Falling back to CPU rendering. Ensure GPU drivers are installed and configured.")
+        if not USE_OPENGL_RENDER_WINDOW:
+            print("Warning: Using vtkRenderWindow instead of vtkOpenGLRenderWindow. Consider upgrading VTK to 9.3.0 or later.")
+
+        renderer.ResetCamera()
+        camera = renderer.GetActiveCamera()
+        camera.SetViewUp(0, 1, 0)
+        bounds = volume.GetBounds()
+        center = [(bounds[i*2] + bounds[i*2+1]) / 2 for i in range(3)]
+        camera.SetFocalPoint(*center)
+        max_bound = max([bounds[i*2+1] - bounds[i*2] for i in range(3)])
+        camera.SetClippingRange(0.1, max_bound * 2)
+        initial_distance = camera.GetDistance()
+        print(f"Volume bounds: {bounds}, Initial distance: {initial_distance}, Max bound: {max_bound}")
+        return renderer, render_window, camera, volume, max_bound, volume_mapper
+    except Exception as e:
+        print(f"Error initializing renderer: {e}\n{traceback.format_exc()}")
+        raise HTTPException(status_code=500, detail=f"Failed to initialize renderer: {str(e)}")
+
+def render_to_image(render_window, rotation_mode=False, frame_counter=[0], peak_utilization=[0]):
+    try:
+        start_time = time.time()
+        t0 = start_time
+
+        capabilities = render_window.ReportCapabilities() or ""
+        renderer_name = "Unknown"
+        is_gpu_supported = False
+        for line in capabilities.splitlines():
+            if "OpenGL renderer string" in line:
+                renderer_name = line.split(":")[-1].strip()
+            if any(x in line for x in ["NVIDIA", "AMD", "Intel"]):
+                is_gpu_supported = True
+
+        render_window.Render()
+        t1 = time.time()
+
+        w2if = vtk.vtkWindowToImageFilter()
+        w2if.SetInput(render_window)
+        w2if.Update()
+        vtk_image = w2if.GetOutput()
+        t2 = time.time()
+
+        if not vtk_image:
+            print("Error: No VTK image data generated")
+            return create_fallback_image("No VTK image data")
+
+        width, height, _ = vtk_image.GetDimensions()
+        vtk_array = vtk_image.GetPointData().GetScalars()
+        if not vtk_array:
+            print("Error: No scalar data in VTK image")
+            return create_fallback_image("No scalar data")
+
+        arr = numpy_support.vtk_to_numpy(vtk_array)
+        if arr.size == 0:
+            print("Error: Empty numpy array from VTK")
+            return create_fallback_image("Empty numpy array")
+        arr = arr.reshape(height, width, 3)
+        t3 = time.time()
+
+        image = Image.fromarray(arr[::-1])
+        buf = io.BytesIO()
+        quality = 20 if rotation_mode else 30
+        image.save(buf, format="JPEG", quality=quality)
+        t4 = time.time()
+
+        encoded = base64.b64encode(buf.getvalue()).decode("utf-8")
+        t5 = time.time()
+
+        render_time = (t1 - t0) * 1000
+        extract_time = (t2 - t1) * 1000
+        numpy_time = (t3 - t2) * 1000
+        jpeg_time = (t4 - t3) * 1000
+        base64_time = (t5 - t4) * 1000
+        total_render_time = (t5 - t0) * 1000
+
+        frame_counter[0] += 1
+        gpu_stats = get_gpu_usage() if is_gpu_supported and initialize_nvml() else "N/A"
+        if gpu_stats and isinstance(gpu_stats, dict):
+            peak_utilization[0] = max(peak_utilization[0], gpu_stats["gpu_utilization"])
+        fps = frame_counter[0] / (time.time() - app.state.start_time) if hasattr(app.state, 'start_time') else 0
+        print(f"Frame {frame_counter[0]}: Rendering on GPU: {is_gpu_supported}, Renderer: {renderer_name}, "
+              f"Total Render Time: {total_render_time:.1f}ms (Render: {render_time:.1f}ms, "
+              f"Extract: {extract_time:.1f}ms, Numpy: {numpy_time:.1f}ms, JPEG: {jpeg_time:.1f}ms, "
+              f"Base64: {base64_time:.1f}ms), FPS: {fps:.2f}, GPU Stats: {gpu_stats}, "
+              f"Peak GPU Utilization: {peak_utilization[0]}%")
+
+        return encoded
+    except Exception as e:
+        print(f"Error rendering image: {e}\n{traceback.format_exc()}")
+        return create_fallback_image(str(e))
+
+@app.get("/health")
+async def health_check():
+    try:
+        return {"status": "healthy", "message": "Server is running"}
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"Health check failed: {str(e)}")
+
+@app.post("/upload")
+async def upload_files(files: List[UploadFile] = File(...)):
+    try:
+        print(f"Received upload request with {len(files)} files")
+        session_id = str(uuid.uuid4())
+        session_dir = os.path.join(UPLOAD_DIR, session_id)
+        os.makedirs(session_dir, exist_ok=True)
+
+        valid_files = 0
+        for file in files:
+            print(f"Processing file: {file.filename}")
+            if not file.filename.lower().endswith('.dcm'):
+                print(f"Skipping non-DICOM file: {file.filename}")
+                continue
+            file_path = os.path.join(session_dir, file.filename)
+            with open(file_path, "wb") as f:
+                content = await file.read()
+                f.write(content)
+            try:
+                ds = pydicom.dcmread(file_path)
+                if hasattr(ds, 'PixelData'):
+                    valid_files += 1
+                else:
+                    print(f"Warning: {file_path} lacks PixelData")
+                    os.remove(file_path)
+            except Exception as e:
+                print(f"Invalid DICOM file {file_path}: {e}")
+                os.remove(file_path)
+
+        if valid_files == 0:
+            shutil.rmtree(session_dir)
+            raise HTTPException(status_code=400, detail="No valid DICOM files uploaded")
+
+        print(f"Uploaded {valid_files} valid DICOM files to {session_dir}")
+        return {"session_id": session_id, "message": f"Uploaded {valid_files} DICOM files"}
+    except Exception as e:
+        print(f"Upload error: {e}\n{traceback.format_exc()}")
+        if os.path.exists(session_dir):
+            shutil.rmtree(session_dir, ignore_errors=True)
+        raise HTTPException(status_code=500, detail=f"Upload failed: {str(e)}")
+
+@app.websocket("/ws")
+async def websocket_endpoint(websocket: WebSocket):
+    await websocket.accept()
+    print("WebSocket connection attempt received")
+    session_id = None
+    dicom_dir = None
+    rotation_mode = False
+    try:
+        data = await asyncio.wait_for(websocket.receive_text(), timeout=5.0)
+        if data.startswith("session:"):
+            session_id = data.split(":")[1]
+            dicom_dir = os.path.join(UPLOAD_DIR, session_id)
+            if not os.path.exists(dicom_dir):
+                await websocket.send_text(f"error: Session {session_id} not found")
+                await websocket.close(code=1008, reason="Invalid session")
+                return
+        else:
+            await websocket.send_text("error: Session ID required")
+            await websocket.close(code=1008, reason="Session ID required")
+            return
+
+        renderer, render_window, camera, volume, max_bound, volume_mapper = get_renderer_and_window(dicom_dir)
+        app.state.start_time = time.time()
+        print(f"WebSocket connection established for session {session_id}")
+        await websocket.send_text("connected")
+    except Exception as e:
+        print(f"WebSocket initialization error: {e}\n{traceback.format_exc()}")
+        await websocket.send_text(f"error: Server initialization failed: {str(e)}")
+        await websocket.close(code=1011, reason="Server initialization failed")
+        return
+
+    try:
+        while True:
+            try:
+                start_time = time.time()
+                data = await asyncio.wait_for(websocket.receive_text(), timeout=30.0)
+                command_time = time.time()
+                command = data
+                print(f"Received command: {command}")
+
+                parts = data.split()
+
+                if data == "status":
+                    await websocket.send_text("server_running")
+                    end_time = time.time()
+                    total_latency = (end_time - start_time) * 1000
+                    print(f"Command: status, Total Latency: {total_latency:.1f}ms")
+                    continue
+
+                if data == "debug":
+                    debug_info = {
+                        "vtk_version": vtk.vtkVersion.GetVTKVersion(),
+                        "dicom_dir": dicom_dir,
+                        "dicom_valid": validate_dicom_dir(dicom_dir),
+                        "gpu_stats": get_gpu_usage() if initialize_nvml() else "N/A",
+                        "volume_bounds": volume.GetBounds(),
+                        "camera_position": camera.GetPosition(),
+                        "camera_focal_point": camera.GetFocalPoint(),
+                        "rotation_mode": rotation_mode
+                    }
+                    await websocket.send_text(f"debug: {debug_info}")
+                    end_time = time.time()
+                    total_latency = (end_time - start_time) * 1000
+                    print(f"Command: debug, Total Latency: {total_latency:.1f}ms")
+                    continue
+
+                if data == "ping" or data == "render":
+                    image = render_to_image(render_window, rotation_mode)
+                    await websocket.send_text(image)
+                    end_time = time.time()
+                    total_latency = (end_time - start_time) * 1000
+                    print(f"Command: {command}, Total Latency: {total_latency:.1f}ms")
+                    continue
+
+                if data == "latency_test":
+                    await websocket.send_text(f"latency_test_response {start_time}")
+                    end_time = time.time()
+                    total_latency = (end_time - start_time) * 1000
+                    print(f"Command: latency_test, Total Latency: {total_latency:.1f}ms (server-side)")
+                    continue
+
+                if data == "set_rotation_mode":
+                    rotation_mode = True
+                    render_window.SetSize(400, 400)
+                    volume_mapper.SetSampleDistance(0.5)
+                    print("Switched to rotation mode: 400x400, SampleDistance=0.5")
+                    continue
+
+                if data == "set_normal_mode":
+                    rotation_mode = False
+                    render_window.SetSize(600, 600)
+                    volume_mapper.SetSampleDistance(0.2)
+                    print("Switched to normal mode: 600x600, SampleDistance=0.2")
+                    image = render_to_image(render_window, rotation_mode)
+                    await websocket.send_text(image)
+                    end_time = time.time()
+                    total_latency = (end_time - start_time) * 1000
+                    print(f"Command: set_normal_mode, Total Latency: {total_latency:.1f}ms")
+                    continue
+
+                if parts[0] == "batch_render" and len(parts) == 2:
+                    try:
+                        num_renders = int(parts[1])
+                        if 1 <= num_renders <= 500:
+                            for i in range(num_renders):
+                                image = render_to_image(render_window, rotation_mode)
+                                await websocket.send_text(image)
+                                await asyncio.sleep(0.01)
+                            print(f"Completed batch render of {num_renders} frames")
+                        else:
+                            print(f"Batch render rejected: Invalid number {num_renders} (must be 1-500)")
+                            await websocket.send_text("batch_render_rejected")
+                    except ValueError:
+                        print(f"Batch render rejected: Invalid number format {parts[1]}")
+                        await websocket.send_text("batch_render_rejected")
+                    end_time = time.time()
+                    total_latency = (end_time - start_time) * 1000
+                    print(f"Command: {command}, Total Latency: {total_latency:.1f}ms")
+                    continue
+
+                if parts[0] == "mouse_rotate" and len(parts) == 3:
+                    try:
+                        dx, dy = float(parts[1]), float(parts[2])
+                        camera.Azimuth(-dx * 0.5)
+                        camera.Elevation(-dy * 0.5)
+                        renderer.ResetCameraClippingRange()
+                        print(f"Mouse Rotate: dx={dx}, dy={dy}")
+                    except ValueError:
+                        print(f"Invalid mouse_rotate parameters: {data}")
+                elif parts[0] == "mouse_zoom" and len(parts) == 2:
+                    try:
+                        factor = float(parts[1])
+                        if 0.5 < factor < 2:
+                            current_distance = camera.GetDistance()
+                            new_distance = current_distance / factor
+                            if 0.1 < new_distance < max_bound * 5:
+                                camera.Dolly(factor)
+                                camera.SetClippingRange(0.1, max_bound * 2.5)
+                                renderer.ResetCameraClippingRange()
+                                print(f"Mouse Zoom: factor={factor}, New Distance: {new_distance}")
+                            else:
+                                print(f"Mouse Zoom rejected: Distance {new_distance} out of bounds [0.1, {max_bound * 5}]")
+                                await websocket.send_text("mouse_zoom_rejected")
+                        else:
+                            print(f"Mouse Zoom rejected: Factor {factor} out of bounds [0.5, 2]")
+                            await websocket.send_text("mouse_zoom_rejected")
+                    except ValueError:
+                        print(f"Invalid mouse_zoom parameter: {data}")
+                elif parts[0] == "mouse_pan" and len(parts) == 3:
+                    try:
+                        dx, dy = float(parts[1]), float(parts[2])
+                        focal_point = camera.GetFocalPoint()
+                        position = camera.GetPosition()
+                        view_up = camera.GetViewUp()
+                        view_normal = [position[i] - focal_point[i] for i in range(3)]
+                        right = [
+                            view_up[1] * view_normal[2] - view_up[2] * view_normal[1],
+                            view_up[2] * view_normal[0] - view_up[0] * view_normal[2],
+                            view_up[0] * view_normal[1] - view_up[1] * view_normal[0]
+                        ]
+                        mag = sum(r * r for r in right) ** 0.5
+                        if mag > 0:
+                            right = [r / mag for r in right]
+                        new_focal = [
+                            focal_point[0] + dx * right[0] - dy * view_up[0],
+                            focal_point[1] + dx * right[1] - dy * view_up[1],
+                            focal_point[2] + dx * right[2] - dy * view_up[2]
+                        ]
+                        new_position = [
+                            position[0] + dx * right[0] - dy * view_up[0],
+                            position[1] + dx * right[1] - dy * view_up[1],
+                            position[2] + dx * right[2] - dy * view_up[2]
+                        ]
+                        camera.SetFocalPoint(*new_focal)
+                        camera.SetPosition(*new_position)
+                        renderer.ResetCameraClippingRange()
+                        print(f"Mouse Pan: dx={dx}, dy={dy}")
+                    except ValueError:
+                        print(f"Invalid mouse_pan parameters: {data}")
+                elif parts[0] == "preset" and len(parts) == 2:
+                    apply_preset(volume.GetProperty(), parts[1])
+                    print(f"Preset: {parts[1]}")
+                elif parts[0] in ["rotate", "zoom", "pan"]:
+                    if parts[0] == "rotate" and len(parts) == 3:
+                        axis, amount = parts[1].upper(), float(parts[2])
+                        if axis == "X":
+                            camera.Elevation(amount)
+                        elif axis == "Y":
+                            camera.Azimuth(amount)
+                        renderer.ResetCameraClippingRange()
+                        print(f"Rotate {axis}: {amount}")
+                    elif parts[0] == "zoom" and len(parts) == 2:
+                        factor = float(parts[1])
+                        if 0.5 < factor < 2:
+                            current_distance = camera.GetDistance()
+                            new_distance = current_distance / factor
+                            if 0.1 < new_distance < max_bound * 5:
+                                camera.Dolly(factor)
+                                camera.SetClippingRange(0.1, max_bound * 2.5)
+                                renderer.ResetCameraClippingRange()
+                                print(f"Zoom: {factor}, New Distance: {new_distance}")
+                            else:
+                                print(f"Zoom rejected: Distance {new_distance} out of bounds [0.1, {max_bound * 5}]")
+                                await websocket.send_text("zoom_rejected")
+                        else:
+                            print(f"Zoom rejected: Factor {factor} out of bounds [0.5, 2]")
+                            await websocket.send_text("zoom_rejected")
+                    elif parts[0] == "pan" and len(parts) == 3:
+                        dx, dy = float(parts[1]), float(parts[2])
+                        focal_point = camera.GetFocalPoint()
+                        position = camera.GetPosition()
+                        view_up = camera.GetViewUp()
+                        view_normal = [position[i] - focal_point[i] for i in range(3)]
+                        right = [
+                            view_up[1] * view_normal[2] - view_up[2] * view_normal[1],
+                            view_up[2] * view_normal[0] - view_up[0] * view_normal[2],
+                            view_up[0] * view_normal[1] - view_up[1] * view_normal[0]
+                        ]
+                        mag = sum(r * r for r in right) ** 0.5
+                        if mag > 0:
+                            right = [r / mag for r in right]
+                        new_focal = [
+                            focal_point[0] + dx * right[0] - dy * view_up[0],
+                            focal_point[1] + dx * right[1] - dy * view_up[1],
+                            focal_point[2] + dx * right[2] - dy * view_up[2]
+                        ]
+                        new_position = [
+                            position[0] + dx * right[0] - dy * view_up[0],
+                            position[1] + dx * right[1] - dy * view_up[1],
+                            position[2] + dx * right[2] - dy * view_up[2]
+                        ]
+                        camera.SetFocalPoint(*new_focal)
+                        camera.SetPosition(*new_position)
+                        renderer.ResetCameraClippingRange()
+                        print(f"Pan dx: {dx}, dy: {dy}")
+
+                image = render_to_image(render_window, rotation_mode)
+                await websocket.send_text(image)
+                end_time = time.time()
+                total_latency = (end_time - start_time) * 1000
+                print(f"Command: {command}, Total Latency: {total_latency:.1f}ms")
+            except asyncio.TimeoutError:
+                start_time = time.time()
+                print("Ping timeout, sending image")
+                image = render_to_image(render_window, rotation_mode)
+                await websocket.send_text(image)
+                end_time = time.time()
+                total_latency = (end_time - start_time) * 1000
+                print(f"Command: timeout, Total Latency: {total_latency:.1f}ms")
+            except ValueError as e:
+                print(f"Error parsing message {data}: {e}")
+                await websocket.send_text(f"error: Invalid command: {str(e)}")
+    except WebSocketDisconnect:
+        print(f"Client disconnected for session {session_id}")
+    except Exception as e:
+        print(f"WebSocket error: {e}\n{traceback.format_exc()}")
+        await websocket.send_text(f"error: Server error: {str(e)}")
+        await websocket.close(code=1011, reason="Server error")
+    finally:
+        print(f"WebSocket connection closed for session {session_id}")
+        if session_id and dicom_dir and os.path.exists(dicom_dir):
+            try:
+                shutil.rmtree(dicom_dir)
+                print(f"Cleaned up session directory: {dicom_dir}")
+            except Exception as e:
+                print(f"Error cleaning up session {session_id}: {e}")
+
+if __name__ == "__main__":
+    try:
+        if not os.path.exists(UPLOAD_DIR):
+            os.makedirs(UPLOAD_DIR)
+        uvicorn.run("server:app", host="0.0.0.0", port=8000, log_level="info")
+    except Exception as e:
+        print(f"Startup error: {e}\n{traceback.format_exc()}")
+```

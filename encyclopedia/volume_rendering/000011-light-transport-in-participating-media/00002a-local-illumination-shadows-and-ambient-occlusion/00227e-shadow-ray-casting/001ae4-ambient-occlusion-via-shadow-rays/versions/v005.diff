@@ -1,0 +1,276 @@
+--- v004.md
++++ v005.md
+@@ -4,149 +4,148 @@
+ 
+ ## Overview
+-Ambient Occlusion via Shadow Rays approximates the geometric obscurance of a surface point by casting shadow rays into the hemisphere above the surface normal to determine visibility [S2, unofficial][S3, unofficial]. It solves the problem of missing secondary (reflected) light in local illumination models by providing a view-independent occlusion factor that can be combined with arbitrary direct illumination [S1, unofficial]. It differs from its siblings [Incremental Local Ambient Occlusion](1089-incremental-local-ambient-occlusion.md) and [Zhukov Ambient Occlusion](2245-zhukov-ambient-occlusion.md) by relying on explicit ray casting against geometry or volumes rather than precomputed angular distributions or local spherical neighborhood integration [S2, unofficial][S3, unofficial].
++Ambient Occlusion via Shadow Rays approximates the lack of secondary (reflected) light rays by evaluating the geometric obscurance of a point $\mathbf{p}$ within or on the boundary of a volume [S1, unofficial]. It solves the problem of flat, unshaded volume appearances by darkening crevices and areas shielded from the environment, providing a view-independent shading term that can be combined with arbitrary direct illumination [S1, unofficial]. Unlike [Variance Shadow Mapping for NeRFs](3561-variance-shadow-mapping-for-nerfs.md) which uses probabilistic depth buffers, or [Lookup Table Shadow Rendering](3588-lookup-table-shadow-rendering.md) which relies on precomputed spatial indices, this method directly samples the hemisphere around $\mathbf{p}$ using shadow rays to determine visibility, offering a balance between the physical accuracy of [Recursive Ray Tracing](5600-recursive-ray-tracing.md) and the speed of screen-space approximations [S3, unofficial].
+ 
+ ## How it works
+-**Inputs and Outputs**
+-*   **Inputs:** Surface position $\mathbf{p}$, surface normal $\mathbf{n}$, scene geometry or volume data structure, number of shadow rays $N_R$, number of samples per ray $N_S$, and optional falloff parameters.
+-*   **Outputs:** Ambient occlusion factor $A \in [0, 1]$, where 1 indicates no occlusion (completely open) and 0 indicates full occlusion [S1, unofficial].
++**Inputs and Outputs:**
++*   **Inputs:** Surface point position $\mathbf{p}$, surface normal $\mathbf{n}$, volume density field $V(\mathbf{x})$ (or extinction coefficient $\sigma_t$), number of shadow rays $N_R$, number of samples per ray $N_S$, and optional parameters for falloff or density thresholds.
++*   **Outputs:** Ambient occlusion factor $A \in [0, 1]$ or radiance contribution $L_{AO}$.
+ 
+-**Data Structures**
+-*   **Scene Representation:** The method relies on a scene representation capable of ray intersection tests. This can be a triangle mesh, a Signed Distance Field (SDF), or a sparse voxel structure (e.g., SVO, DAG) [S5].
+-*   **Sampling Buffers:** No persistent buffers are required for the core algorithm, though implementations may use spatial caches for optimization [S1, unofficial].
++**Data Structures:**
++*   **Volume Texture/Field:** A 3D texture or sparse voxel structure storing density values. Access is performed via trilinear interpolation or ray marching [S4, unofficial].
++*   **Sample Directions:** Precomputed or generated on-the-fly directions $\omega_i$ distributed over the hemisphere oriented by $\mathbf{n}$ [S2, unofficial].
+ 
+-**Formulas**
+-The fundamental definition of ambient occlusion $A(p)$ substitutes the distance-based function $\rho$ of obscurance with a binary visibility function $V(p, \omega)$ [S1, unofficial]:
++**Formulas:**
++The fundamental definition of ambient occlusion $A(p)$ substitutes the distance-based obscurance function with a binary visibility function $V(p, \omega)$ [S1, unofficial]:
+ 
+ $$ A(p) = \frac{1}{\pi} \int_{\Omega} V(p, \omega) \cos \theta \, d\omega $$
+ 
+-where:
+-*   $\Omega$ is the hemisphere oriented according to the surface normal at $p$.
+-*   $V(p, \omega)$ is 1 if the direction $\omega$ is visible (no geometry intersection) and 0 otherwise.
+-*   $\theta$ is the angle between the normal $\mathbf{n}$ and direction $\omega$.
++where $\Omega$ is the hemisphere oriented according to the surface normal, $\theta$ is the angle between the normal $\mathbf{n}$ and direction $\omega$, and $V(p, \omega)$ is 1 if the path is clear and 0 if occluded [S1, unofficial].
+ 
+-Alternatively, the more general obscurance formulation uses a distance falloff function $\rho(d(p, \omega))$ [S1, unofficial]:
++In implementations using density-weighted attenuation (obscurance), the formula becomes [S4, unofficial]:
+ 
+-$$ O(p) = \frac{1}{\pi} \int_{\Omega} \rho(d(p, \omega)) \cos \theta \, d\omega $$
++$$ AO = \text{clamp}\left(2 \cdot \exp\left(\frac{-7.0}{N_R N_S} \sum_{i=0}^{N_R-1} \sum_{j=0}^{N_S-1} I_{ij} \cdot \mathbb{I}(I_{ij} \in [T_{min}, T_{max}])\right), 0, 1\right) $$
+ 
+-where $d(p, \omega)$ is the distance to the first intersection of a ray from $p$ in direction $\omega$ [S1, unofficial].
++where $I_{ij}$ is the density sampled at the $j$-th point along the $i$-th ray, and $\mathbb{I}$ is the indicator function for density thresholds [S4, unofficial].
+ 
+-**Parameters**
+-*   **Number of shadow rays ($N_R$):** Typically 64 rays per pixel are used for high-quality results [S5]. In practice, 1 to 2 samples per pixel/surface are often used due to performance constraints, requiring denoising [S3, unofficial].
+-*   **Samples per ray ($N_S$):** Often 5 samples per ray are used to estimate density or occlusion along the ray path [S4, unofficial].
+-*   **Falloff Exponent:** An exponent applied to the normalized hit distance to control the falloff of occlusion (e.g., 1.3) [S6, unofficial].
+-*   **Ambient Color:** The color of the ambient light (e.g., `vec3(1.0)`) [S6, unofficial].
+-*   **Constant Color:** A minimum ambient color to prevent total darkness (e.g., `vec3(0.003)`) [S6, unofficial].
++**Steps:**
++1.  **Normal Estimation:** If not provided, compute the normal $\mathbf{n}$ from the volume gradient $\mathbf{g} = \nabla V$ at $\mathbf{p}$ using central differences [S4, unofficial].
++2.  **Tangent Basis Construction:** Construct a local tangent space basis $(\mathbf{t}_0, \mathbf{t}_1)$ from $\mathbf{n}$ to transform hemisphere samples to world space [S6, unofficial].
++    *   If $|n_z| > 0.5$, set $\mathbf{t}_0 = (-n_y, n_x, 0)$, else $\mathbf{t}_0 = (1, 0, 0)$.
++    *   Normalize $\mathbf{t}_0$.
++    *   Compute $\mathbf{t}_1 = \mathbf{n} \times \mathbf{t}_0$.
++3.  **Ray Casting Loop:** For each of $N_R$ rays:
++    *   Sample a direction $\omega$ from the hemisphere using cosine-weighted or uniform solid angle sampling [S2, unofficial].
++    *   Transform $\omega$ to world space: $\mathbf{d} = \omega_x \mathbf{t}_0 + \omega_y \mathbf{t}_1 + \omega_z \mathbf{n}$.
++    *   Cast a shadow ray from $\mathbf{p} + \epsilon \mathbf{d}$ in direction $\mathbf{d}$ [S2, unofficial].
++    *   Evaluate visibility $V$ by checking for intersections with volume boundaries or density thresholds [S6, unofficial].
++4.  **Accumulation:**
++    *   **Binary Visibility:** Accumulate $(1 - V) \cdot \cos \theta$ [S2, unofficial].
++    *   **Density Weighted:** Accumulate density-weighted attenuation terms as per the obscurance formula [S4, unofficial].
++5.  **Normalization:** Average the accumulated value over $N_R$ samples [S2, unofficial].
++6.  **Final Color:** Combine the AO factor with ambient lighting: $L_{ambient} = L_{sky} \cdot A \cdot \text{color}$ [S2, unofficial].
+ 
+-**Steps**
+-1.  **Initialize Accumulator:** Set `occlusion` to 0.0.
+-2.  **Sample Directions:** For each ray $i$ from 0 to $N_R - 1$:
+-    a.  Sample a direction $\mathbf{d}_i$ from the hemisphere above the normal $\mathbf{n}$. Common strategies include uniform solid angle sampling or cosine-weighted sampling [S2, unofficial].
+-    b.  For cosine-weighted sampling, the contribution is weighted by $\cos \theta_i$ [S2, unofficial].
+-3.  **Cast Shadow Ray:** Trace a ray from $\mathbf{p}$ in direction $\mathbf{d}_i$.
+-    a.  Check for intersection with scene geometry or volume density [S2, unofficial].
+-    b.  If an intersection is found at distance $t$, the direction is occluded.
+-4.  **Accumulate Occlusion:**
+-    *   **Binary Visibility:** If using binary visibility, add $(1 - \text{inShadow}) \cdot \cos \theta_i \cdot \frac{2}{\pi}$ to the accumulator for uniform sampling, or $\frac{1 - \text{inShadow}}{\pi}$ for cosine-weighted sampling [S2, unofficial].
+-    *   **Density-Weighted (Volume):** For volume rendering, sample points along the ray. If the density at a sample point is within a threshold range $[T_{min}, T_{max}]$, add a weighted contribution. A common implementation adds $-7.0 \cdot \text{neighborIntensity} / (N_R \cdot N_S)$ to the occlusion accumulator [S4, unofficial].
+-5.  **Finalize:**
+-    *   For binary visibility, average the result over $N_R$ samples: $L_r = L_r / N_R$ [S2, unofficial].
+-    *   For density-weighted, apply the exponential falloff: $A = \text{clamp}(2 \cdot \exp(\text{occlusion}), 0.0, 1.0)$ [S4, unofficial].
+-    *   Alternatively, compute a falloff term $t = (\text{hitDist} / \text{maxDist})^{\text{ambientExponent}}$ and combine with ambient color [S6, unofficial].
+-6.  **Apply:** Multiply the object's base color by the accumulated occlusion factor to get the final pixel color [S2, unofficial].
+-
+-**Pseudocode**
+-The following pseudocode implements the density-weighted approach for volume rendering as described in [S4, unofficial], and the general ray-traced approach as described in [S6, unofficial].
+-
++**Pseudocode:**
+ ```python
+-def compute_ambient_occlusion(pos, normal, volume_texture, num_rays=10, samples_per_ray=5):
++def compute_ambient_occlusion(pos, normal, volume_texture, num_rays=10, num_samples_per_ray=5):
+     """
+-    Computes ambient occlusion for a point in a volume.
+-    Based on [S4, unofficial].
++    Computes ambient occlusion using shadow rays and density sampling.
++    Based on [S4, unofficial] and [S6, unofficial].
+     """
+-    occlusion = 0.0
+-    min_density_threshold = 0.0
+-    max_density_threshold = 1.0
++    # 1. Tangent Basis Construction [S6, unofficial]
++    # Choose t0 based on normal to avoid degeneracy
++    if abs(normal.z) > 0.5:
++        t0 = vec3(-normal.y, normal.x, 0.0)
++    else:
++        t0 = vec3(1.0, 0.0, 0.0)
+     
++    t0 = normalize(t0)
++    t1 = cross(normal, t0)
++    
++    occlusion_sum = 0.0
++    
++    # 2. Ray Casting Loop [S4, unofficial][S6, unofficial]
+     for i in range(num_rays):
+-        # Sample a direction uniformly on the sphere/hemisphere
+-        # Note: For hemisphere, restrict to upper half relative to normal
+-        direction = sample_uniform_sphere(i)
++        # Sample direction from hemisphere [S6, unofficial]
++        # Using a simple uniform sphere sample for demonstration, 
++        # cosine-weighted is preferred for physical accuracy [S2, unofficial]
++        dir_local = sample_uniform_sphere(i) 
+         
+-        # Offset to avoid self-intersection
+-        offset = direction * 0.01
++        # Transform to world space [S6, unofficial]
++        dir_world = t0 * dir_local.x + t1 * dir_local.y + normal * dir_local.z
+         
++        # Offset to avoid self-intersection [S2, unofficial]
++        offset = dir_world * 0.01
+         sample_pos = pos + offset
+         
+-        for j in range(samples_per_ray):
+-            # Move along the ray
++        # 3. Sample along ray [S4, unofficial]
++        for j in range(num_samples_per_ray):
+             sample_pos += offset
+             
+-            # Check bounds
+-            if is_out_of_bounds(sample_pos):
++            # Boundary check [S4, unofficial]
++            if any(less_than(sample_pos, min_slices)) or any(greater_than(sample_pos, max_slices)):
+                 break
+-                
+-            # Sample density from volume
++            
++            # Sample density [S4, unofficial]
+             neighbor_intensity = texture(volume_texture, sample_pos).r
+             
+-            # Check if density is in threshold range
++            # Check density threshold [S4, unofficial]
+             if min_density_threshold < neighbor_intensity < max_density_threshold:
+-                # Accumulate occlusion
+-                # Formula from [S4, unofficial]: occlusion += -7.0 * neighborIntensity / (NUM_RAYS * NUM_SAMPLES_PER_RAY)
+-                occlusion += -7.0 * neighbor_intensity / (num_rays * samples_per_ray)
++                # Accumulate attenuation [S4, unofficial]
++                occlusion_sum += -7.0 * neighbor_intensity / (num_rays * num_samples_per_ray)
+                 
+-    # Finalize occlusion value
+-    # Formula from [S4, unofficial]: clamp(2 * exp(occlusion), 0.0, 1.0)
+-    ao = clamp(2.0 * exp(occlusion), 0.0, 1.0)
+-    
+-    return ao
++    # 4. Final Calculation [S4, unofficial]
++    ao_factor = clamp(2.0 * exp(occlusion_sum), 0.0, 1.0)
++    return ao_factor
+ 
+-def compute_ray_traced_ao(pos, normal, scene, num_samples=2, ambient_exponent=1.3):
++def compute_ao_radiance(pos, normal, ambient_color, constant_color, ambient_exponent=1.3):
+     """
+-    Computes ray-traced ambient occlusion for a surface point.
++    Computes final AO radiance contribution.
+     Based on [S6, unofficial].
+     """
+     output_color = vec3(0.0)
+-    ambient_color = vec3(1.0)
+-    constant_color = vec3(0.003)
+     
+-    # Compute tangent and bitangent for hemisphere sampling
+-    # Choose t0 based on normal.z to avoid degeneracy
++    # Tangent Basis [S6, unofficial]
+     if abs(normal.z) > 0.5:
+-        t0 = normalize(vec3(0.0, 1.0, 0.0) - normal * dot(vec3(0.0, 1.0, 0.0), normal))
++        t0 = vec3(-normal.y, normal.x, 0.0)
+     else:
+-        t0 = normalize(vec3(1.0, 0.0, 0.0) - normal * dot(vec3(1.0, 0.0, 0.0), normal))
+-        
++        t0 = vec3(1.0, 0.0, 0.0)
++    t0 = normalize(t0)
+     t1 = cross(normal, t0)
+     
+-    for _ in range(num_samples):
+-        # Sample direction from hemisphere using cosine-weighted sampling
+-        # blue_noise() provides jittered random numbers
+-        local_dir = cosine_sample_hemisphere(blue_noise_2d())
++    # Sample Hemisphere [S6, unofficial]
++    # Loop 2 times for low sample count [S3, unofficial]
++    for _ in range(2):
++        dir_local = cosine_sample_hemisphere(blue_noise_2d())
++        dir_world = t0 * dir_local.x + t1 * dir_local.y + normal * dir_local.z
+         
+-        # Transform to world space
+-        dir_world = t0 * local_dir.x + t1 * local_dir.y + normal * local_dir.z
+-        
+-        # Compute incoming light factor (simplified)
++        # Incoming light approximation [S6, unofficial]
+         incoming = dir_world.y * 0.2 + 0.8
+         
+-        # Cast shadow ray
++        # Raycast for distance [S6, unofficial]
+         hit_dist = raycast_ambient(pos, normal, dir_world, max_distance=24.0)
+         
+-        # Compute falloff
++        # Falloff [S6, unofficial]
+         t = hit_dist / 24.0
+         t = pow(t, ambient_exponent)
+         
+-        # Accumulate color
+-        output_color += ambient_color * (incoming * t)
+-        output_color += constant_color * (incoming * max(1.0, hit_dist * 0.25))
++        # Accumulate [S6, unofficial]
++        output_color.rgb += ambient_color * (incoming * t)
++        output_color.rgb += constant_color * (incoming * max(1.0, hit_dist * 0.25))
+         
+-    # Average and return
+-    return output_color / num_samples
++    return output_color / 2.0
+ ```
+ 
+-**Edge Cases and Pitfalls**
+-*   **Low Sample Counts:** Using 1-2 samples per pixel leads to very noisy images [S3, unofficial]. Denoising algorithms (spatial/temporal convolutional or deep learning) are commonly required [S3, unofficial].
+-*   **Precision:** When computing normals from volume gradients, small gradients can lead to artifacts; a magnitude check is required [S4, unofficial].
+-*   **Boundaries:** Ray samples must be checked against volume bounds to avoid out-of-bounds memory access [S4, unofficial].
++**Parameters:**
++*   $N_R$ (Number of rays): Typically 10–64 per pixel/surface [S4, unofficial][S5].
++*   $N_S$ (Samples per ray): Typically 5 [S4, unofficial].
++*   $T_{min}, T_{max}$ (Density thresholds): Define the range of density considered for occlusion [S4, unofficial].
++*   `ambientExponent`: Exponent for the falloff term, typically 1.3 [S6, unofficial].
++*   `ambientColor`: Color of the ambient light, typically `vec3(1.0)` [S6, unofficial].
++*   `constantColor`: Constant ambient color to prevent total darkness, typically `vec3(0.003)` [S6, unofficial].
++
++**Edge Cases and Pitfalls:**
++*   **Noise:** Low sample counts (1–2 samples per pixel) lead to very noisy images [S3, unofficial]. Denoising algorithms (spatial/temporal convolutional) are often required [S3, unofficial].
++*   **Precision:** Normalizing very small volume gradients can lead to artifacts; a magnitude threshold (e.g., 0.0001) should be applied [S4, unofficial].
++*   **Boundaries:** Ray samples falling outside the volume bounds must be handled to avoid out-of-bounds memory access [S4, unofficial].
+ 
+ ## Subtopics
+@@ -168,17 +167,19 @@
+ 
+ ### Ambient Occlusion Field
+-Ambient Occlusion Field is a storage and reconstruction method where the reciprocal of a quadratic polynomial encodes how ambient occlusion changes with distance [S3, unofficial]. The coefficients are stored in a cube map [S3, unofficial]. This allows modeling of directional variation of occlusion and the ambient occlusion effect an object has on its surroundings [S3, unofficial]. A key pitfall is that it requires reconstructing the ambient occlusion factor at runtime, which incurs a performance penalty [S3, unofficial].
++A storage and reconstruction method where the reciprocal of a quadratic polynomial encodes how ambient occlusion changes with distance. Coefficients are stored in a cube map [S3, unofficial].
++*   **Layout:** Data structure is a cube map storing coefficients of the reciprocal of a quadratic polynomial [S3, unofficial].
++*   **Pitfall:** Requires reconstructing the ambient occlusion factor at runtime, which incurs a performance penalty [S3, unofficial].
+ 
+ ## Operating characteristics
+-*   **Time Complexity:** Linear with respect to the number of shadow rays $N_R$ and the number of samples per ray $N_S$ [S5]. For volume rendering, it also depends on the cost of volume traversal and density sampling [S4, unofficial].
+-*   **Memory Complexity:** Low, as it does not require storing large precomputed tables for the basic method, though caching variants require additional memory [S1, unofficial].
+-*   **Measured Performance:** Shooting 64 shadow rays per pixel provides high quality but is expensive [S5]. In practice, 1-2 samples are used, requiring denoising [S3, unofficial].
+-*   **Strengths:** View-independent, works with arbitrary direct illumination, physically plausible for indirect lighting [S1, unofficial]. Hardware-accelerated ray tracing allows for exact visibility checks [S3, unofficial].
+-*   **Limitations:** Noisy with low sample counts [S3, unofficial]. Computational complexity scales with scene complexity for dynamic scenes [S3, unofficial].
+-*   **When to Use:** When high-quality indirect lighting is needed and performance allows for denoising, or when precomputing occlusion for static scenes.
+-*   **When Not to Use:** When real-time performance is critical and denoising is not an option, or when the scene is highly dynamic and caching is not feasible.
++*   **Time Complexity:** $O(N_R \cdot N_S \cdot T_{ray})$, where $N_R$ is the number of rays, $N_S$ is samples per ray, and $T_{ray}$ is the cost of ray traversal/sampling in the volume. With $N_R=64$ and $N_S=5$, this is computationally expensive for real-time without acceleration [S4, unofficial][S5].
++*   **Memory Complexity:** $O(1)$ auxiliary memory per pixel, plus the storage for the volume texture [S3, unofficial].
++*   **Measured Performance:** On high-resolution sparse voxel DAGs, shooting 64 shadow rays per pixel provides high quality but requires denoising for low sample counts [S5]. Hardware-accelerated ray tracing (DXR, Vulkan RT) allows implementation of the original formulation, but 1–2 samples per pixel are often used in practice due to cost, leading to noise [S3, unofficial].
++*   **Strengths:** View-independent; combines well with arbitrary direct illumination; physically plausible when using cosine-weighted sampling [S1, unofficial].
++*   **Limitations:** Noisy with low samples; scales with scene complexity (not constant like screen-space methods); requires efficient volume traversal [S3, unofficial].
++*   **When to Use:** When view-independent shading is required and hardware ray tracing is available, or for offline/precomputed shading.
++*   **When Not to Use:** When real-time performance is critical and denoising is not an option, or for dynamic scenes where cache invalidation is frequent.
+ 
+ ## Background
+-Ambient Occlusion was introduced by Zhukov et al. [Zhukov 1998] and Iones [2003] as an efficient technique for perceptually similar results to global illumination with lower cost [S1, unofficial]. The computation was originally done as a preprocess [S1, unofficial]. Landis [2002] detailed how ambient occlusion could be used to add realism to models, and Méndez et al. [2003b] extended the use of obscurances to ray tracing [S1, unofficial]. The method has been further developed with hardware-accelerated ray tracing APIs like DirectX Ray Tracing and Vulkan Ray Tracing, enabling real-time implementations [S3, unofficial].
++Ambient occlusion was introduced by Zhukov et al. [Zhukov 1998] and Iones [2003] as an efficient technique for perceptually similar results to global illumination with lower cost [S1, unofficial]. The term "obscurance" was used to describe the measure of the hemisphere obscured by neighboring surfaces [S1, unofficial]. Landis [2002] detailed its use for adding realism to models, and Méndez et al. [2003b] extended it to ray tracing [S1, unofficial]. Kontkanen and Laine [29] proposed storing occlusion data in an "ambient occlusion field" using a cube map of quadratic polynomial coefficients [S3, unofficial]. With the advent of hardware-accelerated ray tracing (DXR, Vulkan RT), the original formulation could be implemented directly as Ray-traced Ambient Occlusion (RTAO) [S3, unofficial].
+ 
+ ## Sources

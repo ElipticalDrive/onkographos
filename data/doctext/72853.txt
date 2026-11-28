@@ -1,0 +1,453 @@
+# VolumeRendering
+
+
+This Project is to render medical images or Volume with VTK Using Python
+
+### render_common.py
+```
+import logging
+
+logging.basicConfig(level=logging.INFO,
+                    format='%(asctime)s %(filename)s[line:%(lineno)d] %(levelname)s %(message)s',
+                    datefmt='%a, %d %b %Y %H:%M:%S')
+
+
+"""
+This file is mainly to VolumeRendering to Get Image2D using vtkGPURaycastingMapper and vtkRender
+This interface  follows such rules:
+a. Logger
+"""
+```
+
+### render_dicom2mha.py
+```
+import cv2
+import os
+import pydicom
+import numpy
+import SimpleITK
+
+# 路径和列表声明
+PathDicom = "./DicomResource/"  # 与python文件同一个目录下的文件夹,存储dicom文件
+SaveRawDicom = "./SaveRaw/"  # 与python文件同一个目录下的文件夹,用来存储mhd文件和raw文件
+lstFilesDCM = []
+
+# 将PathDicom文件夹下的dicom文件地址读取到lstFilesDCM中
+for dirName, subdirList, fileList in os.walk(PathDicom):
+    for filename in fileList:
+        if ".dcm" in filename.lower():  # 判断文件是否为dicom文件
+            print(filename)
+            lstFilesDCM.append(os.path.join(dirName, filename))  # 加入到列表中
+
+# 第一步：将第一张图片作为参考图片，并认为所有图片具有相同维度
+RefDs = pydicom.read_file(lstFilesDCM[0])  # 读取第一张dicom图片
+
+# 第二步：得到dicom图片所组成3D图片的维度
+ConstPixelDims = (int(RefDs.Rows), int(RefDs.Columns), len(lstFilesDCM))  # ConstPixelDims是一个元组
+
+# 第三步：得到x方向和y方向的Spacing并得到z方向的层厚
+ConstPixelSpacing = (float(RefDs.PixelSpacing[0]), float(RefDs.PixelSpacing[1]), float(RefDs.SliceThickness))
+
+# 第四步：得到图像的原点
+Origin = RefDs.ImagePositionPatient
+
+# 根据维度创建一个numpy的三维数组，并将元素类型设为：pixel_array.dtype
+ArrayDicom = numpy.zeros(ConstPixelDims, dtype=RefDs.pixel_array.dtype)  # array is a numpy array
+
+# 第五步:遍历所有的dicom文件，读取图像数据，存放在numpy数组中
+i = 0
+for filenameDCM in lstFilesDCM:
+    ds = pydicom.read_file(filenameDCM)
+    ArrayDicom[:, :, lstFilesDCM.index(filenameDCM)] = ds.pixel_array
+    cv2.imwrite("out_" + str(i) + ".png", ArrayDicom[:, :, lstFilesDCM.index(filenameDCM)])
+    i += 1
+
+# 第六步：对numpy数组进行转置，即把坐标轴（x,y,z）变换为（z,y,x）,这样是dicom存储文件的格式，即第一个维度为z轴便于图片堆叠
+ArrayDicom = numpy.transpose(ArrayDicom, (2, 0, 1))
+
+# 第七步：将现在的numpy数组通过SimpleITK转化为mhd和raw文件
+sitk_img = SimpleITK.GetImageFromArray(ArrayDicom, isVector=False)
+sitk_img.SetSpacing(ConstPixelSpacing)
+sitk_img.SetOrigin(Origin)
+SimpleITK.WriteImage(sitk_img, os.path.join(SaveRawDicom, "sample" + ".mhd"))
+```
+
+### render_mpr.py
+```
+# coding=utf-8
+import numpy as np
+from vtk import *
+import render_common
+
+class RendererMPR():
+    def __init__(self):
+        """
+        This Class is mainly to render volume and mask with parameters such as camera, lut, light and so
+        Condition: This class can only used in GPU
+        """
+        self._imageReslice = vtk.vtkImageReslice()
+        self._lookupTable = vtk.vtkLookupTable()
+        self._imageMapToColors = vtk.vtkImageMapToColors()
+        self._imageMapToColors.SetLookupTable(self._lookupTable)
+
+        self._imageActor = vtk.vtkImageActor()
+        self._renderer = vtk.vtkRenderer()
+        self._renderWindow = vtk.vtkRenderWindow()
+        self._camera = vtk.vtkCamera()
+        self._sliceAxis = vtk.vtkMatrix4x4()
+        self._bg_color = [0, 0, 0]
+
+        self._renderWindow.AddRenderer(self._renderer)
+        self._windowToImageFilter = vtk.vtkWindowToImageFilter()
+        self._windowToImageFilter.SetInput(self._renderWindow)  # 保存成图片格式
+        self._pngWriter = vtk.vtkPNGWriter()
+
+        self._pngWriter.SetInputConnection(self._windowToImageFilter.GetOutputPort())
+
+        # self._interactorStyle = vtk.vtkInteractorStyleImage()
+        # self._interactor = vtk.vtkRenderWindowInteractor()
+        # self._interactor.SetInteractorStyle(self._interactorStyle)
+        # self._renderWindow.SetInteractor(self._interactor)
+
+    def set_volume(self, volume):
+        """
+        :param volume: Type: vtkImageData
+        :return:
+        """
+        # Set Volume and Volume Property
+        self._imageReslice.SetInputConnection(volume.GetOutputPort())
+        self._imageReslice.SetOutputDimensionality(2)
+        self._imageReslice.SetInterpolationModeToLinear()
+        self._imageMapToColors.SetInputConnection(self._imageReslice.GetOutputPort())
+
+        # Calculate Slice Axis  Which can calculate camera parameters
+        (xMin, xMax, yMin, yMax, zMin, zMax) = volume.GetOutput().GetExtent()
+        (xSpacing, ySpacing, zSpacing) = volume.GetOutput().GetSpacing()
+        (x0, y0, z0) = volume.GetOutput().GetOrigin()
+        center = [x0 + xSpacing * 0.5 * (xMin + xMax),
+                  y0 + ySpacing * 0.5 * (yMin + yMax),
+                  z0 + zSpacing * 0.5 * (zMin + zMax)]
+        self._sliceAxis.DeepCopy((0, 0, -1, center[0],
+                           1, 0, 0, center[1],
+                           0, -1, 0, center[2],
+                           0, 0, 0, 1))
+        self._imageReslice.SetResliceAxes(self._sliceAxis)
+
+    def set_mask(self, mask):
+        """
+        Set the Volume Mask which is often one of the segment results.
+        Voxel Value CAN ONLY be 0, 1, 2. The Dim should be the same of Volume
+        :param mask: Type Of vtk.vtkImageData
+        :return:
+        """
+        pass
+
+    def set_output_image_size(self, width=512, height=512):
+        """
+        Set the render result width and height. Default value is 512, 512
+        :param width:
+        :param height:
+        :return:
+        """
+        self._renderWindow.SetSize(width, height)
+
+    def get_output_image_size(self):
+        """
+        Set the render result width and height. Default value is 512, 512
+        :return width, height:
+        """
+        size = {}
+        self._renderWindow.GetSize(size)
+        return size
+
+    def set_output_type(self, itype):
+        """
+
+        :param itype: 0 RGBA,  1, RGB,  2 Raw
+        :return:
+        """
+
+    def set_sample_rate(self, rate = 0.5):
+        """
+        :param rate: Sample Rate， usually use 0.5 if for GPU Render
+        :return:
+        """
+        pass
+
+    def set_camera(self, camera):
+        """
+
+        :param camera: type of vtk.vtkCamera
+        :return:
+        """
+        render_common.logging.info("Set Camera:" + str(camera))
+
+        # Calculate SliceAxis According Camera Parameters
+        self._renderer.SetActiveCamera(camera)
+        camera_pos = camera.GetPosition()
+        camera_focal = camera.GetFocalPoint()
+        z_dir = [camera_pos[0] - camera_focal[0], camera_pos[1] - camera_focal[1], camera_pos[2] - camera_focal[2]]
+        z_dir_norm = np.linalg.norm(z_dir, ord=2)
+        z_dir_normalized = z_dir / z_dir_norm
+        # print("z_dir_normalized" + str(z_dir_normalized[0]) + str(z_dir_normalized[1]) + str(z_dir_normalized[2]))
+        # render_common.logging("Z-dir: " + z_dir_normalized)
+        camera_view_up = camera.GetViewUp()
+        camera_view_up = camera_view_up / np.linalg.norm(camera_view_up)
+        x_dir_normal = np.cross(camera_view_up, z_dir_normalized)
+
+        render_common.logging.info("Self._sliceAxis Begin:" + str(self._sliceAxis))
+        self._sliceAxis.DeepCopy((x_dir_normal[0], camera_view_up[0], z_dir_normalized[0], camera_focal[0],
+                                  x_dir_normal[1], camera_view_up[1], z_dir_normalized[1], camera_focal[1],
+                                  x_dir_normal[2], camera_view_up[2], z_dir_normalized[2], camera_focal[2],
+                                  0, 0, 0, 1))
+        self._imageReslice.SetResliceAxes(self._sliceAxis)
+        render_common.logging.info("Self._sliceAxis After:" + str(self._sliceAxis))
+
+
+    def get_camera(self):
+        """
+        Get Camera To Implement Logic
+        :return: vtk.camera
+        """
+        return self._renderer.GetActiveCamera()
+
+    def set_blend_mode(self, mode):
+        """
+        COMPOSITE_BLEND 0,  MAXIMUM_INTENSITY_BLEND  1,  MINIMUM_INTENSITY_BLEND  2,  AVERAGE_INTENSITY_BLEND  3,  ADDITIVE_BLEND  4,  ISOSURFACE_BLEND  5
+        :param mode: int
+        :return:
+        """
+        pass
+
+    def set_window_width_level(self, ww, wl, label = 0):
+        """
+        :param ww: float windowwidth
+        :param wl: float windowlevel
+        :param label: Default value is 0 means set WWWL to volume. Change WWWL according label (Mask Voxel Value)
+        :return:
+        """
+        pass
+
+    def set_lut_property(self, property, label=0):
+        """
+        property["color"]
+        property["opacity"]
+        property["opacityGrad"]
+        property["phong"]  Parameters: diffuse_color, specular_color, ambient_color, ( Optional: position, direction )
+        :param property:
+        :return:
+        """
+        # Set Default LookupTable
+        # self._lookupTable.SetRange(0, 2000)
+        # self._lookupTable.SetRange(0, 2000)  # image intensity range
+        # self._lookupTable.SetValueRange(0.0, 1.0)  # from black to white
+        # self._lookupTable.SetSaturationRange(0.0, 0.0)  # no color saturation
+        # self._lookupTable.SetRampToLinear()
+        self._lookupTable.SetNumberOfColors(2) # 256
+        self._lookupTable.SetTableValue(0, 0, 0, 1)
+        self._lookupTable.SetTableValue(1, 1, 1, 1)
+        self._lookupTable.Build()
+
+        # Set ImageMapToColors
+        self._imageMapToColors.SetLookupTable(self._lookupTable)
+        self._imageMapToColors.SetInputConnection(self._imageReslice.GetOutputPort())
+
+        # Set Image Actor
+        self._imageActor.GetMapper().SetInputConnection(self._imageMapToColors.GetOutputPort())
+
+        # Add Actor
+        self._renderer.AddActor(self._imageActor)
+
+        render_common.logging.info("SetLutProperty: " + str(self._lookupTable) )
+
+    def get_lut_property(self, label=0):
+        """
+        get lut property by label
+        :return:
+        """
+
+    def set_background_color(self, r, g, b):
+        """
+        set background color
+        :param r:
+        :param g:
+        :param b:
+        :return:
+        """
+        self._bg_color = [r, g, b]
+        #self._renderer.
+
+    def pre_render(self):
+        """
+        Before render, should to judge wther need to render
+        :return bool :
+        """
+
+        return True
+
+    def render(self):
+        """
+        :return:bool
+        """
+        render_common.logging.info("Render MPR Begin!")
+
+        try:
+            #self._renderer.render()
+            self._renderWindow.Render()
+            #self._interactor.start()
+        except BaseException as e:
+            render_common.logging.error("Exception:" + str(e))
+
+        render_common.logging.info("Render MPR End!")
+
+
+    def post_render(self):
+        """
+        After render, should do something
+        :return:
+        """
+
+        return True
+
+    def get_output_image_result(self):
+        """
+        Render Result： Type  vtkImageData
+        :return:vtkImageData
+        """
+        self._windowToImageFilter.update()
+        return self
+
+    def get_output_png_image(self, filename):
+        """
+        Output Result is png image
+        :param filename:
+        :return:
+        """
+        render_common.logging.info("Get Output PNG Result Begin!")
+        try:
+            self._pngWriter.SetFileName(filename)
+            self._pngWriter.Write()
+            self._pngWriter.Update()
+            render_common.logging.info("pngWriter" + str(self._pngWriter))
+        except BaseException as e:
+            render_common.logging.error("Exception:" + str(e))
+        render_common.logging.info("Get Output PNG Result End!")
+
+    def update(self):
+        """
+        Use this methods to set flag whether it need render again.
+        :return:
+        """
+        pass
+```
+
+### render_reader.py
+```
+# coding=utf-8
+from vtk import *
+
+dicom_image_reader = vtk.vtkDICOMImageReader()
+dicom_image_reader.SetDirectoryName("D:\\CodeProject\\Hover\\Data\\Dicom\\02ef8f31ea86a45cfce6eb297c274598\\series-000001\\")
+dicom_image_reader.SetDataByteOrderToLittleEndian()
+dicom_image_reader.SetDataSpacing(3.2, 3.2, 1.5)
+dicom_image_reader.Update()
+
+print(dicom_image_reader.GetDataSpacing())
+print(dicom_image_reader.GetImagePositionPatient())
+print( dicom_image_reader.GetImageOrientationPatient())
+
+print("H:" + str(dicom_image_reader.GetHeight()) + "W:" + str(dicom_image_reader.GetWidth()))
+
+reader_image_cast = vtk.vtkImageCast()
+reader_image_cast.SetInputConnection(dicom_image_reader.GetOutputPort())
+reader_image_cast.SetOutputScalarTypeToUnsignedShort()
+reader_image_cast.Update()
+```
+
+### render_vr.py
+```
+# coding=utf-8
+from vtk import *
+
+import render_reader
+
+opactiyTransferFunction = vtk.vtkPiecewiseFunction()
+opactiyTransferFunction.AddPoint(120, 0.0)
+opactiyTransferFunction.AddPoint(250, 1.0)
+opactiyTransferFunction.AddPoint(520, 1.0)
+opactiyTransferFunction.AddPoint(650, 0.0)
+
+colorTransferFunction = vtk.vtkColorTransferFunction()
+colorTransferFunction.AddRGBPoint(120, 255 / 255.0, 98 / 255.0, 98 / 255.0)
+colorTransferFunction.AddRGBPoint(250, 255 / 255.0, 255 / 255.0, 180 / 255.0)
+colorTransferFunction.AddRGBPoint(520, 1.0, 1.0, 1.0)
+colorTransferFunction.AddRGBPoint(650, 1.0, 1.0, 1.0)
+
+gradientTransferFunction = vtk.vtkPiecewiseFunction()
+gradientTransferFunction.AddPoint(120, 2.0)
+gradientTransferFunction.AddPoint(250, 2.0)
+gradientTransferFunction.AddPoint(520, 0.1)
+gradientTransferFunction.AddPoint(650, 0.1)
+
+volumeProperty = vtk.vtkVolumeProperty()
+volumeProperty.SetColor(colorTransferFunction)
+volumeProperty.SetScalarOpacity(opactiyTransferFunction)
+volumeProperty.SetGradientOpacity(gradientTransferFunction)
+volumeProperty.ShadeOn()   # 阴影
+volumeProperty.SetInterpolationTypeToLinear()   # 直线与样条插值之间逐发函数
+volumeProperty.SetAmbient(0.2)   # 环境光系数
+volumeProperty.SetDiffuse(0.9)   # 漫反射
+volumeProperty.SetSpecular(0.2)   # 高光系数
+volumeProperty.SetSpecularPower(10)   # 高光强度
+
+#compositeRaycastFunction = vtk.vtkVolumeRayCastCompositeFunction()
+
+volumeMapper = vtk.vtkFixedPointVolumeRayCastMapper() # vtkFixedPointVolumeRayCastMapper  vtkVolumeRayCastMapper
+# volumeMapper.SetVolumeRayCastFunction(compositeRaycastFunction)   # 载入体绘制方法
+volumeMapper.SetInputConnection(render_reader.reader_image_cast.GetOutputPort())
+# fixedPointVolumeMapper = vtkFixedPointVolumeRayCastMapper::New()
+# fixedPointVolumeMapper.SetInput(dicomImagereader.GetOutput())
+
+volume =  vtk.vtkVolume()
+volume.SetMapper(volumeMapper)
+volume.SetProperty(volumeProperty)   # 设置体属性
+
+ren1 = vtk.vtkRenderer()
+ren1.AddVolume(volume)
+ren1.SetBackground(1, 1, 1)
+
+renWin = vtk.vtkRenderWindow()
+renWin.AddRenderer(ren1)
+renWin.SetSize(800, 800)
+
+iren = vtk.vtkRenderWindowInteractor()
+iren.SetRenderWindow(renWin)
+
+renWin.Render()
+iren.Start()
+```
+
+### test_mpr.py
+```
+import vtk
+from vtk.util.misc import vtkGetDataRoot
+
+import render_mpr
+
+reader = vtk.vtkMetaImageReader()
+reader.SetFileName("C:\\Users\\fei.wang\\PycharmProjects\\Rendering\\data\\org.mha")
+reader.Update()
+
+render_mpr = render_mpr.RendererMPR()
+render_mpr.set_volume(reader)
+render_mpr.set_output_image_size(1024, 1024)
+render_mpr.set_lut_property("")
+render_mpr.render()
+render_mpr.get_output_png_image("1.png")
+
+# test Camera
+cur_camera = render_mpr.get_camera()
+print("cur_camera:" + str(cur_camera))
+render_mpr.set_camera(cur_camera)
+render_mpr.render()
+```

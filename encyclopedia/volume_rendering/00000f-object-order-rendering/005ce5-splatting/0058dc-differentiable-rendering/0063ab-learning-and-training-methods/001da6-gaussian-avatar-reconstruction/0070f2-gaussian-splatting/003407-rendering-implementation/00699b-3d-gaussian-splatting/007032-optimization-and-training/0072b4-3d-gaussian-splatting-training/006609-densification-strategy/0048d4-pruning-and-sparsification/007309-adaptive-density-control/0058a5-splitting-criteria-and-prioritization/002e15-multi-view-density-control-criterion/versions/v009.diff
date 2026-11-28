@@ -1,0 +1,155 @@
+--- v008.md
++++ v009.md
+@@ -4,98 +4,89 @@
+ 
+ ## Overview
+-The Multi-View Density Control Criterion is a densification strategy for 3D Gaussian Splatting designed to resolve invalid vector arithmetic that occurs when applying standard Adaptive Density Control (ADC) to multi-view training. Standard ADC sums 2D positional gradients from pixels covering a Gaussian; however, in multi-view training, a single Gaussian is projected onto multiple image planes, and adding 2D gradient vectors from different view spaces is mathematically invalid, potentially resulting in zero vectors even if the underlying 3D gradients are significant [S1, unofficial]. This method replaces vector addition with the summation of squared norms, ensuring that error metrics remain valid across viewpoints [S1, unofficial]. It yields higher reconstruction quality with fewer primitives compared to standard positional-gradient rules [S2, unofficial].
++The Multi-View Density Control Criterion is a densification strategy for 3D Gaussian Splatting designed to resolve invalid vector arithmetic that occurs when applying standard Adaptive Density Control (ADC) during multi-view training. Standard ADC sums 2D positional gradients from pixels covering a Gaussian; however, in multi-view training, a single Gaussian is projected onto multiple image planes, and adding 2D gradient vectors from different view spaces is mathematically invalid and can result in nullified vectors despite significant 3D error. This method replaces vector addition with the summation of squared norms of gradients, ensuring that error metrics correctly reflect the total reconstruction error across all viewpoints. It yields higher rendering quality with fewer primitives compared to standard positional-gradient rules [S2, unofficial].
+ 
+ ## How it works
+-The method computes a scalar error score $E_1(G)$ for each Gaussian $G$ by aggregating the squared magnitudes of gradients from all pixels that project onto $G$ across all viewpoints.
++The method operates within the Adaptive Density Control loop defined in [Splitting Criteria and Prioritization](16226-splitting-criteria-and-prioritization.md). It modifies the aggregation step to compute a scalar error score $E_1(G)$ for each Gaussian $G$ by summing the squared magnitudes of gradients from all pixels covering $G$ across all active viewpoints.
+ 
+-**Inputs:**
+-- $N$: Total number of viewpoints (images) used in the training batch.
+-- $G$: A specific 3D Gaussian primitive.
+-- $\mathcal{P}_k$: The set of pixels in viewpoint $k$ that are covered by the projection of $G$.
+-- $\nabla_{\pi} L$: The 2D positional gradient of the loss $L$ with respect to the pixel coordinates $(u, v)$ for pixel $\pi$.
++**Inputs and Outputs:**
++*   **Input:** A set of $N$ active viewpoints $\{V_1, \dots, V_N\}$. For each viewpoint, a set of pixels $\Pi_k$ covering the projection of Gaussian $G$. The gradient of the loss $\mathcal{L}$ with respect to the 2D position of each pixel, $\nabla_{\pi} \mathcal{L}$.
++*   **Output:** A scalar error score $E_1(G)$ used for thresholding against $\tau$.
+ 
+ **Data Structures:**
+-- No specific complex data structures are required beyond standard gradient buffers. The criterion operates on the scalar values derived from the gradient tensors.
++*   **Gradient Norms:** For each pixel $\pi$ covering $G$ in viewpoint $V_k$, store the squared Euclidean norm of the 2D positional gradient: $g_{\pi}^2 = \|\nabla_{\pi} \mathcal{L}\|^2$.
+ 
+-**Algorithm:**
+-1. Initialize the error score for Gaussian $G$ to zero: $E_1(G) \leftarrow 0$.
+-2. Iterate over each viewpoint $k$ from $1$ to $N$.
+-3. For each pixel $\pi$ in the set $\mathcal{P}_k$ (pixels covered by $G$ in viewpoint $k$):
+-   a. Retrieve the 2D positional gradient $\nabla_{\pi} L$.
+-   b. Compute the squared Euclidean norm of this gradient: $\|\nabla_{\pi} L\|^2$.
+-   c. Add this squared norm to the error score: $E_1(G) \leftarrow E_1(G) + \|\nabla_{\pi} L\|^2$.
+-4. Compare $E_1(G)$ against a threshold $\tau$ (typically derived from the parent splitting criteria logic). If $E_1(G) > \tau$, mark $G$ for densification (splitting or cloning).
+-
+-**Formula:**
+-$$
+-E_1(G) = \sum_{k=1}^{N} \sum_{\pi \in \mathcal{P}_k} \|\nabla_{\pi} L\|^2
+-$$
+-Where:
+-- $N$ is the number of viewpoints.
+-- $\mathcal{P}_k$ is the set of pixels in viewpoint $k$ covered by $G$.
+-- $\nabla_{\pi} L$ is the 2D positional gradient at pixel $\pi$.
+-- $\|\cdot\|$ denotes the Euclidean norm.
++**Numbered Steps:**
++1.  **Initialization:** Initialize the error accumulator $E_1(G) = 0$.
++2.  **Iterate Viewpoints:** For each active viewpoint $k$ from $1$ to $N$:
++    a. Identify all pixels $\pi$ in viewpoint $V_k$ that are covered by the projection of Gaussian $G$.
++    b. For each such pixel $\pi$, compute the squared norm of the 2D positional gradient: $g_{\pi}^2 = \|\nabla_{\pi} \mathcal{L}\|^2$.
++    c. Add $g_{\pi}^2$ to $E_1(G)$.
++3.  **Aggregation:** The final score is the sum of all squared gradient norms:
++    $$ E_1(G) = \sum_{k=1}^{N} \sum_{\pi \in \Pi_k} \|\nabla_{\pi} \mathcal{L}\|^2 $$
++    where $\Pi_k$ is the set of pixels in viewpoint $V_k$ covering $G$, and $\nabla_{\pi} \mathcal{L}$ is the gradient of the loss with respect to the 2D position of pixel $\pi$ [S1, unofficial].
++4.  **Thresholding:** Compare $E_1(G)$ against the threshold $\tau$. If $E_1(G) > \tau$, mark $G$ for densification.
++5.  **Prioritization:** If multiple Gaussians exceed $\tau$, prioritize those with higher $E_1(G)$ values for splitting [S1, unofficial].
+ 
+ **Parameters:**
+-- The threshold $\tau$ is not defined by this specific criterion in isolation but is passed from the parent [Splitting Criteria and Prioritization](16226-splitting-criteria-and-prioritization.md). The specific hyperparameter controlling the constraint strength in related implementations is the DS Threshold (DSTH), with a default value of 30 [S3, unofficial].
+-
+-**Edge Cases and Pitfalls:**
+-- **Invalid Vector Addition:** The primary pitfall avoided by this method is the direct summation of 2D gradient vectors $\sum \nabla_{\pi} L$ from different viewpoints. As shown in [S1, unofficial], adding 2D gradients from different image planes (different coordinate spaces) can result in cancellation (e.g., two identical 3D gradients producing 2D gradients that sum to zero), leading to incorrect densification decisions.
+-- **Precision:** Squared norms are always non-negative, preventing cancellation errors. However, large gradients may cause overflow if not handled with appropriate data types (e.g., float32 vs float64).
+-- **Boundary Conditions:** Pixels on the boundary of the Gaussian's support must be correctly identified to ensure $\mathcal{P}_k$ is accurate.
++*   **Threshold $\tau$:** The threshold for densification. The specific value is often inherited from the parent Adaptive Density Control configuration. In related density control methods, a default DSTH (Density Split Threshold) of 30 is used, with adjustments (e.g., 60) for specific scenes [S3, unofficial]. For the Multi-View criterion itself, the exact $\tau$ value is not specified in the sources, but it functions as the scalar cutoff for $E_1(G)$.
+ 
+ **Pseudocode:**
+ ```python
+-def compute_multiview_error(G, viewpoints, gradients):
++def compute_multiview_error(Gaussian G, Viewpoints views, LossGradients grads):
+     """
+     Computes the Multi-View Density Control error score for a Gaussian.
+     
+     Args:
+-        G: The Gaussian primitive object.
+-        viewpoints: List of viewpoint indices [0, ..., N-1].
+-        gradients: A dictionary or array where gradients[k][pi] is the 
+-                   2D positional gradient vector for pixel pi in viewpoint k.
+-                   
++        G: The 3D Gaussian primitive.
++        views: List of active viewpoints (indices or objects).
++        grads: A mapping or structure providing 2D positional gradients 
++               for pixels covering Gaussians. grads[pixel_idx] returns 
++               the 2D gradient vector (dx, dy).
++               
+     Returns:
+-        E1: Scalar error score.
++        float: The scalar error score E1(G).
+     """
+-    E1 = 0.0
++    error_score = 0.0
+     
+-    for k in viewpoints:
+-        # Get pixels covered by G in viewpoint k
+-        # Implementation detail: This requires the projection logic from the 
+-        # rendering pipeline to determine which pixels are covered by G.
+-        covered_pixels = get_covered_pixels(G, k)
++    for view_idx in views:
++        # Identify pixels in this view covered by G
++        # Note: In implementation, this is typically done via the rasterization 
++        # buffer or a spatial index during the forward pass.
++        covered_pixels = get_pixels_covering_gaussian(G, view_idx)
+         
+-        for pi in covered_pixels:
+-            # Retrieve 2D gradient vector for pixel pi in viewpoint k
+-            grad_vec = gradients[k][pi]
++        for pixel in covered_pixels:
++            # Get 2D positional gradient for this pixel
++            grad_vec = grads[pixel]
+             
+-            # Compute squared Euclidean norm
+-            # grad_vec is typically a 2D vector [du, dv]
+-            squared_norm = grad_vec[0]**2 + grad_vec[1]**2
++            # Compute squared Euclidean norm of the 2D gradient
++            # ||grad_vec||^2 = dx^2 + dy^2
++            grad_norm_sq = grad_vec.x**2 + grad_vec.y**2
+             
+-            # Accumulate
+-            E1 += squared_norm
++            # Accumulate squared norms (not vector addition)
++            error_score += grad_norm_sq
+             
+-    return E1
++    return error_score
+ ```
++
++**Edge Cases and Pitfalls:**
++*   **Invalid Vector Addition:** The primary pitfall avoided by this method is adding 2D gradient vectors from different image planes. Standard ADC sums $\sum \nabla_{\pi} \mathcal{L}$, which is invalid when $\nabla_{\pi} \mathcal{L}$ vectors belong to different coordinate systems (view spaces). This can result in a zero vector sum even if the individual gradients are large, leading to missed densification opportunities [S1, unofficial].
++*   **Precision:** Summing squared norms can lead to large values for Gaussians covered by many pixels. Ensure the accumulator uses sufficient precision (e.g., float32 is typically sufficient, but float64 may be needed for very high-resolution scenes or many views) to avoid overflow or loss of significance [G].
++*   **Gradient Availability:** The method requires access to 2D positional gradients for all pixels covering the Gaussian in all active views. This necessitates storing or recomputing these gradients during the backward pass for multi-view training [S1, unofficial].
+ 
+ ## Subtopics
+ 
+ ### DS Threshold (DSTH)
+-A hyperparameter threshold that controls the densification constraints of Gaussians in the context of the Multi-View Density Control Criterion. Increasing DSTH imposes stricter constraints, reducing the number of Gaussians (NGS), rendering quality, and training time [S3, unofficial]. The default value is 30. For the playroom scene in the DeepBlending dataset, it is set to 60, while other scenes use 30 [S3, unofficial].
++A hyperparameter threshold used in density control strategies to constrain densification. Increasing DSTH imposes stricter constraints, reducing the number of Gaussians (NGS), rendering quality, and training time. The default value is 30, but it can be increased to 60 for specific scenes like the playroom in the DeepBlending dataset to further reduce primitive count [S3, unofficial].
+ 
+ ## Operating characteristics
+-- **Time Complexity:** The computation involves iterating over all pixels covering each Gaussian across all viewpoints. The cost is proportional to the number of covered pixels and viewpoints. It is generally faster than methods requiring complex vector operations or covariance updates during the scoring phase.
+-- **Memory Complexity:** Minimal additional memory is required as it operates on existing gradient buffers.
+-- **Performance:** The multi-view criterion yields an average improvement of 0.67 dB in PSNR and 0.028 in LPIPS compared to standard methods, while using 28% fewer primitives at the same rendering time [S2, unofficial].
+-- **Comparison:** In the "garden" scene, the standard positional-gradient rule produces 240,075 primitives with a PSNR of 26.83 and LPIPS of 0.1303. The multi-view criterion produces 148,658 primitives with a PSNR of 27.06 and LPIPS of 0.1247 [S2, unofficial].
+-- **Strengths:** Resolves the invalid arithmetic issue in multi-view training; reduces primitive count without sacrificing quality.
+-- **Limitations:** Requires access to per-pixel gradients for all viewpoints in the batch.
+-- **Usage:** Applied during the teacher training phase to control primitive count and distribution [S2, unofficial].
++*   **Time Complexity:** The computation involves iterating over all pixels covering each Gaussian across all views and summing squared norms. This is $O(\sum_{G} \sum_{k} |\Pi_k(G)|)$, which is comparable to standard ADC but avoids the overhead of vector addition and potential nullification checks.
++*   **Memory Complexity:** Requires storing squared gradient norms or recomputing them from gradients. No additional large data structures are needed beyond those required for gradient storage in multi-view training.
++*   **Measured Performance:** On the "garden" scene, the Multi-View criterion yields 0.67 dB higher PSNR (27.06 vs 26.83) and 0.028 lower LPIPS (0.1247 vs 0.1303) compared to standard positional-gradient rules, while using 28% fewer primitives (148,658 vs 240,075) [S2, unofficial].
++*   **Strengths:** Resolves the invalid arithmetic issue in multi-view training, leading to more accurate error estimation and better densification decisions. Reduces the total number of primitives needed for high-quality rendering.
++*   **Limitations:** Requires access to 2D positional gradients from multiple views, which may increase memory bandwidth usage during the backward pass if not optimized.
++*   **When to Use:** Specifically recommended for multi-view training scenarios where standard ADC fails due to gradient nullification. It is applied during the teacher training phase to control primitive count and distribution [S2, unofficial].
+ 
+ ## Background
+-The method was proposed to address a fundamental incompatibility between standard 3D Gaussian Splatting's densification strategy and multi-view training pipelines. Standard Adaptive Density Control (ADC) relies on summing 2D positional gradients, which is valid for single-view or independent-view updates but fails when gradients from different view spaces are summed directly [S1, unofficial]. The Multi-View Density Control Criterion was introduced in "Efficient multi-view training for 3D Gaussian Splatting" [S1, unofficial] as a space-independent error metric. It is also referenced in the context of ultrafast spatial texture-atlas splatting [S2, unofficial] and loss-guided density control [S3, unofficial].
++The Multi-View Density Control Criterion was proposed to address a fundamental incompatibility between standard 3D Gaussian Splatting's densification strategy and multi-view training. Standard ADC, which sums 2D positional gradients, assumes all gradients are in the same 2D space. In multi-view training, a Gaussian is projected onto multiple image planes, and summing gradients from different planes is mathematically invalid. The method was introduced in "Efficient multi-view training for 3D Gaussian Splatting" [S1, unofficial] as a solution to this problem, enabling efficient multi-view training without the pitfalls of invalid vector arithmetic. It has been shown to improve rendering quality and reduce primitive count in subsequent applications [S2, unofficial].
+ 
+ ## Sources

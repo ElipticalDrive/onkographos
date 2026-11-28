@@ -1,0 +1,112 @@
+# Displaced Parallel Projection for Stereoscopic Volume Rendering
+
+Also called: Displaced Parallel Projection Geometry, Parallel Shears for Stereo
+
+## Overview
+Displaced Parallel Projection is a viewing geometry for parallel stereoscopic imaging that generates left and right eye views by exploiting geometric coherence, reducing rendering time by 70-80% compared to independent renders [S1]. It differs from standard parallel projection by displacing the centers of projection (LCoP and RCoP) asymmetrically to maintain a fixed center of rotation, allowing the right-eye image to be derived from the left-eye view-transformed data with minimal additional computation [S1].
+
+## How it works
+**Inputs and Outputs:**
+- Input: Volume data, viewing angle $\theta$, separation distance $e$, distance to screen $D$, parallax limits $K_1, K_2$.
+- Output: Left-eye image $(X_{sl}, Y_{sl})$ and Right-eye image $(X_{sr}, Y_{sr})$.
+
+**Data Structures:**
+- View-transformed point $(X_p, Y_p, Z_p)$ in the $(u, v, w)$ coordinate system.
+- Constants: $e$ (inter-ocular distance), $\theta$ (viewing angle), $D$ (screen distance), $K_1, K_2$ (parallax constants).
+
+**Steps:**
+1. **Viewing Transformation Setup:**
+   Define the viewing coordinate system such that the center of the viewing axes is at $(e/2 \cos(\theta/2), 0, e/2 \sin(\theta/2))$ and the $w$-axis is $(-\sin(\theta/2), 0, \cos(\theta/2))$ [S1]. This establishes a center of rotation $P = (0, 0, R)$ where $R = e / [2 \sin(\theta/2)]$ [S1].
+   
+2. **Left-Eye Projection:**
+   Perform a parallel projection on the view-transformed data $(X_p, Y_p, Z_p)$ [S1].
+   $$X_{sl} = X_p$$
+   $$Y_{sl} = Y_p$$
+   [S1]
+
+3. **Right-Eye Projection:**
+   Apply a rotation of $-\theta/2$ about the $y$-axis, a translation of $(-e, 0, 0)$, and a second rotation of $-\theta/2$ about the $y$-axis to the view-transformed data [S1]. The resulting coordinates are:
+   $$X_{sr} = X_p \cos(\theta) + Z_p \sin(\theta) - e \cos(\theta/2)$$
+   $$Y_{sr} = Y_p$$
+   [S1]
+
+4. **Parallel Shears Approximation (Optional):**
+   For small $\theta$, use $\sin(\theta) \approx \theta$ and $\cos(\theta) \approx 1$, $\cos(\theta/2) \approx 1$ [S1].
+   $$X_{sl} = X_p$$
+   $$X_{sr} = X_p + Z_p \theta - e$$
+   [S1]
+
+**Formulas:**
+- **Separation Distance:** $e = 2D \tan(\theta/2)$ [S1].
+- **Z-Range Constraint:** To limit horizontal parallax within acceptable bounds:
+  $$D \left(1 - \frac{K_1}{2 \sin(\theta/2)}\right) < z \le D \left(1 + \frac{K_2}{2 \sin(\theta/2)}\right)$$
+  [S1]
+
+**Parameters:**
+- $e$: Separation distance between LCoP and RCoP [S1].
+- $\theta$: Viewing angle. Small angles are recommended for the parallel shears approximation [S1].
+- $K_1, K_2$: Positive constants for near and far parallax limits, generally $\le 0.028$ [S1].
+- $D$: Physical distance from viewer to screen [S1].
+
+**Pitfalls:**
+- **Unbounded Parallax:** Horizontal parallax $(X_{sr} - X_{sl})$ is unbounded in parallel projections. It must be limited to the interocular distance to prevent viewers from becoming "walleyed" [S1]. Casual viewers tolerate much less than experienced viewers [S1].
+- **Precision:** The parallel shears approximation introduces error. At 6.5 degrees, the error is less than 0.65% even with larger $e$ recommendations [S1].
+
+**Pseudocode:**
+> **Unverified code.** The code below did not pass a test run against a reference implementation, or no test fits it, so it may contain errors.
+
+```python
+def displaced_parallel_projection(Xp, Yp, Zp, theta, e, D, K1, K2, use_shears=False):
+    """
+    Compute stereoscopic coordinates for a view-transformed point.
+    
+    Args:
+        Xp, Yp, Zp: View-transformed coordinates.
+        theta: Viewing angle in radians.
+        e: Inter-ocular separation distance.
+        D: Distance to screen.
+        K1, K2: Parallax limits constants.
+        use_shears: If True, use parallel shears approximation.
+        
+    Returns:
+        (Xsl, Ysl, Xsr, Ysr): Left and right eye coordinates.
+    """
+    # Validate Z-range constraint
+    # D * (1 - K1 / (2 * sin(theta/2))) < Zp <= D * (1 + K2 / (2 * sin(theta/2)))
+    # [G] Implementation note: Clamp or reject points outside this range to prevent excessive parallax.
+    
+    if use_shears:
+        # Parallel Shears Approximation
+        # Xsl = Xp
+        # Xsr = Xp + Zp * theta - e
+        Xsl = Xp
+        Xsr = Xp + Zp * theta - e
+    else:
+        # Exact Displaced Parallel Projection
+        # Xsl = Xp
+        # Xsr = Xp * cos(theta) + Zp * sin(theta) - e * cos(theta/2)
+        Xsl = Xp
+        cos_theta = math.cos(theta)
+        sin_theta = math.sin(theta)
+        cos_half_theta = math.cos(theta / 2)
+        Xsr = Xp * cos_theta + Zp * sin_theta - e * cos_half_theta
+        
+    Ysl = Yp
+    Ysr = Yp
+    
+    return (Xsl, Ysl, Xsr, Ysr)
+```
+
+## Operating characteristics
+- **Time Complexity:** The method reduces rendering time by 70-80% compared to rendering two independent views because the right-eye view is derived from the left-eye view-transformed data with minimal additional calculations (two additions and one multiplication for the shears approximation) [S1].
+- **Memory Complexity:** Not given in the sources.
+- **Strengths:** High efficiency for parallel stereoscopic rendering; simple arithmetic for the right-eye projection when using shears approximation [S1].
+- **Limitations:** Horizontal parallax is unbounded and must be manually constrained by limiting the $z$-range or viewing angle to avoid viewer discomfort ("walleyed" effect) [S1]. Casual viewers tolerate less parallax than experienced viewers [S1].
+- **When to use:** When rendering parallel stereoscopic images and computational efficiency is critical, and the viewing angle $\theta$ is small [S1].
+- **When not to use:** When large viewing angles are required (shears approximation loses accuracy) or when strict control over parallax without $z$-clamping is needed [S1].
+
+## Background
+The method was introduced in the context of fast stereoscopic images with ray-traced volume rendering [S1]. It builds on the shear-warp algorithm family, specifically optimizing the parallel projection stage for stereoscopy [S1]. The geometry was derived to allow efficient generation of stereo pairs by exploiting coherence between the left and right views [S1].
+
+## Sources
+[S1] Fast stereoscopic images with ray-traced volume rendering, https://digital.library.unt.edu/ark:/67531/metadc1315616/?q=ct volume rendering, fetched 2026-10-28

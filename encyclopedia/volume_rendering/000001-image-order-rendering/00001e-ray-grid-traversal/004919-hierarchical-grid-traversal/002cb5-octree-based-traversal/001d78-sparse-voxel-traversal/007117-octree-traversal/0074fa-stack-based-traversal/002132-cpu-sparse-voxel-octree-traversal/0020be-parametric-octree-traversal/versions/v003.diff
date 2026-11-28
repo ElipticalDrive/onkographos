@@ -1,0 +1,437 @@
+--- v002.md
++++ v003.md
+@@ -1,257 +1,157 @@
+ # Parametric Octree Traversal
+ 
+-Also called: An efficient parametric algorithm for octree traversal, Revelles 2000, Revelles Octree Traversal, Revelles' algorithm
++Also called: Parametric Ray-Octree Traversal, Parametric Algorithm for Octree Traversal, Revelles 2000, Revelles' algorithm, Revelles Octree Traversal, An efficient parametric algorithm for octree traversal
+ 
+ ## Overview
+-Parametric Octree Traversal is a top-down ray-octree traversal algorithm that uses parametric interval arithmetic to determine which child nodes of an octree node are intersected by a ray, handling non-uniform octree depths [S1, S2, unofficial]. It sets itself apart from bottom-up approaches (like DDA traversal) by performing a depth-first search that computes entry and exit parametric times ($t$) for the bounding box, allowing it to skip empty subtrees without requiring a fixed tree depth or explicit stack management for the traversal order itself [S1, S2, unofficial].
++Parametric Octree Traversal is a top-down recursive algorithm for finding all voxels in a sparse voxel octree intersected by a ray [S1, S5, unofficial]. It solves the problem of efficiently traversing non-uniform octrees without maintaining neighbor pointers or sorting potentially visited sub-voxels [S1, S5, unofficial]. It sets itself apart from bottom-up methods like Samet [S1, S5, unofficial] by avoiding neighbor finding, and from HERO [S1, S5, unofficial] by computing the sequence of visited sub-voxels sequentially using simple parametric comparisons rather than sorting [S1, S5, unofficial].
+ 
+ ## How it works
+-### Inputs and Outputs
+-**Inputs:**
+-*   `octree`: A Sparse Voxel Octree structure containing:
+-    *   `min[3]`: The minimum coordinates of the octree's bounding box [S1, S2, unofficial].
+-    *   `max[3]`: The maximum coordinates of the octree's bounding box [S1, S2, unofficial].
+-    *   `center[3]`: The center coordinates of the octree's bounding box, used for mirroring ray origins [S1, S2, unofficial].
+-    *   `root`: A pointer to the root `Node` [S1, S2, unofficial].
+-*   `ray`: A ray defined by:
+-    *   `origin[3]`: The starting point of the ray [S1, S2, unofficial].
+-    *   `direction[3]`: The direction vector of the ray [S1, S2, unofficial].
++**Inputs and Outputs:**
++*   **Input:** A ray $r$ defined by origin $p=(p_x, p_y, p_z)$ and direction $d=(d_x, d_y, d_z)$, and an octree structure containing a root node and bounding box dimensions ($xmin, xmax, ymin, ymax, zmin, zmax$) [S1, S5, unofficial].
++*   **Output:** A list of terminal (leaf) nodes intersected by the ray [S1, S5, unofficial].
+ 
+-**Outputs:**
+-*   Traversal of all nodes intersected by the ray, processing leaf nodes as defined by the application (e.g., volume sampling) [S1, S2, unofficial].
++**Data Structures:**
++*   **Octree:** Contains a pointer to the root node, dimensions ($xmin, xmax, ymin, ymax, zmin, zmax$), and sizes ($sizeX, sizeY, sizeZ$) [S1, S5, unofficial].
++*   **Node:**
++    *   `terminal`: Boolean indicating if the node is a leaf [S2, S3, S4, unofficial].
++    *   `children`: Array of 8 pointers to child nodes, indexed 0–7 [S2, S3, S4, S5, unofficial].
++    *   (Optional) `debug_ID`: Integer identifier for debugging [S2, S3, S4, unofficial].
+ 
+-### Data Structures
+-**Node Structure:**
+-*   `terminal` (bool): Indicates if the node is a leaf [S1, S2, unofficial].
+-*   `debug_ID` (int): Identifier for debugging (optional, not required for traversal logic) [S1, S2, unofficial].
+-*   `children` (array of 8 `Node*` pointers): Pointers to the 8 child nodes, indexed 0–7 [S1, S2, unofficial]. If a child does not exist, the pointer is `nullptr` (or handled as empty) [S1, unofficial].
++**Preprocessing (Handling Negative Directions):**
++The algorithm assumes non-negative ray direction components for the base logic. If any component is negative, the ray is reflected across the center plane of the octree, and a bitmask `a` is set to track the inversion [S1, S2, S3, S4, S5, unofficial].
+ 
+-### Parameters
+-*   `a` (unsigned char, 8 bits): A bitmask used to track coordinate system transformations for rays with negative direction components [S1, S2, unofficial]. Bit 0 corresponds to Z-axis inversion, bit 1 to Y-axis inversion, and bit 2 to X-axis inversion [S1, S2, unofficial].
++1.  Initialize `a = 0` [S1, S2, S3, S4, unofficial].
++2.  If $d_x < 0$:
++    *   $p_x \leftsizeX - p_x$ [S1, S2, unofficial] or $p_x \leftsizeX - p_x$ [S3, S4, S5, unofficial] (Note: S1/S2 use size, S3/S4/S5 use center*2 which is equivalent to size for axis-aligned bounds starting at 0).
++    *   $d_x \left -d_x$ [S1, S2, S3, S4, S5, unofficial].
++    *   `a |= 4` [S1, S2, S3, S4, S5, unofficial].
++3.  If $d_y < 0$:
++    *   $p_y \leftsizeY - p_y$ [S1, S2, unofficial] or $p_y \leftsizeY - p_y$ [S3, S4, S5, unofficial].
++    *   $d_y \left -d_y$ [S1, S2, S3, S4, S5, unofficial].
++    *   `a |= 2` [S1, S2, S3, S4, S5, unofficial].
++4.  If $d_z < 0$:
++    *   $p_z \leftsizeZ - p_z$ [S1, S2, unofficial] or $p_z \leftsizeZ - p_z$ [S3, S4, S5, unofficial].
++    *   $d_z \left -d_z$ [S1, S2, S3, S4, S5, unofficial].
++    *   `a |= 1` [S1, S2, S3, S4, S5, unofficial].
+ 
+-### Steps
++**Parametric Interval Calculation:**
++Compute inverse direction components for stability [S2, S3, S4, unofficial]:
++$$div_x = 1/d_x, \quad div_y = 1/d_y, \quad div_z = 1/d_z$$
++Handle $d_i=0$ by allowing infinite values: $x/0 = +\infty$ if $x>0$, $-\infty$ if $x<0$ [S1, S5, unofficial].
+ 
+-1.  **Initialize and Normalize Ray Direction:**
+-    Initialize `a = 0`. For each axis $i \in \{0, 1, 2\}$ (X, Y, Z):
+-    *   If `ray.direction[i] < 0`:
+-        *   Mirror the origin: `ray.origin[i] = octree.center[i] * 2 - ray.origin[i]` [S1, S2, unofficial].
+-        *   Negate the direction: `ray.direction[i] = -ray.direction[i]` [S1, S2, unofficial].
+-        *   Set the corresponding bit in `a`:
+-            *   Axis 0 (X): `a |= 4` [S1, S2, unofficial].
+-            *   Axis 1 (Y): `a |= 2` [S1, S2, unofficial].
+-            *   Axis 2 (Z): `a |= 1` [S1, S2, unofficial].
++Compute initial entry/exit t-values for the octree bounding box [S1, S2, S3, S4, S5, unofficial]:
++$$tx_0 = (xmin - p_x) \cdot div_x, \quad tx_1 = (xmax - p_x) \cdot div_x$$
++$$ty_0 = (ymin - p_y) \cdot div_y, \quad ty_1 = (ymax - p_y) \cdot div_y$$
++$$tz_0 = (zmin - p_z) \cdot div_z, \quad tz_1 = (zmax - p_z) \cdot div_z$$
+ 
+-2.  **Compute Inverse Directions:**
+-    Calculate inverse direction components for stability:
+-    $$
+-    \begin{aligned}
+-    divx &= 1 / ray.direction[0] \\
+-    divy &= 1 / ray.direction[1] \\
+-    divz &= 1 / ray.direction[2]
+-    \end{aligned}
+-    $$
+-    Division by zero or near-zero direction components relies on IEEE floating-point behavior (producing infinity/NaN) [S1, unofficial]. Robust implementations may require explicit checks or clamping [S1, S2, unofficial].
++**Intersection Test:**
++Check if the ray intersects the octree:
++$$t_{min} = \max(tx_0, ty_0, tz_0)$$
++$$t_{max} = \min(tx_1, ty_1, tz_1)$$
++If $t_{min} \ge t_{max}$, the ray misses the octree [S1, S2, S3, S4, S5, unofficial]. Otherwise, call `proc_subtree` with the root node and these t-values [S1, S2, S3, S4, S5, unofficial].
+ 
+-3.  **Compute Parametric Bounds for Octree:**
+-    Calculate the parametric entry ($t_0$) and exit ($t_1$) times for the octree's bounding box along each axis:
+-    $$
+-    \begin{aligned}
+-    tx0 &= (octree.min[0] - ray.origin[0]) \times divx \\
+-    tx1 &= (octree.max[0] - ray.origin[0]) \times divx \\
+-    ty0 &= (octree.min[1] - ray.origin[1]) \times divy \\
+-    ty1 &= (octree.max[1] - ray.origin[1]) \times divy \\
+-    tz0 &= (octree.min[2] - ray.origin[2]) \times divz \\
+-    tz1 &= (octree.max[2] - ray.origin[2]) \times divz
+-    \end{aligned}
+-    $$
+-    [S1, S2, unofficial]
++**Traversal Logic (`proc_subtree`):**
++For a node with parametric bounds $(tx_0, ty_0, tz_0)$ to $(tx_1, ty_1, tz_1)$:
+ 
+-4.  **Check Intersection with Octree:**
+-    Determine if the ray intersects the octree bounding box:
+-    $$
+-    \max(\max(tx0, ty0), tz0) < \min(\min(tx1, ty1), tz1)
+-    $$
+-    [S2, unofficial] If false, the ray misses the octree entirely; terminate [S2, unofficial]. If true, call `proc_subtree(tx0, ty0, tz0, tx1, ty1, tz1, octree.root)` [S1, unofficial].
++1.  **Early Exit:** If $tx_1 < 0$ or $ty_1 < 0$ or $tz_1 < 0$, return (ray is behind the viewer) [S1, S2, S3, S4, S5, unofficial].
++2.  **Leaf Check:** If the node is terminal, process it (e.g., add to list) and return [S1, S2, S3, S4, S5, unofficial].
++3.  **Midpoints:** Compute mid-plane parameters [S1, S2, S3, S4, S5, unofficial]:
++    $$tx_m = 0.5(tx_0 + tx_1)$$
++    $$ty_m = 0.5(ty_0 + ty_1)$$
++    $$tz_m = 0.5(tz_0 + tz_1)$$
++4.  **First Node:** Determine the first child to visit using `first_node(tx_0, ty_0, tz_0, tx_m, ty_m, tz_m)` [S1, S2, S3, S4, S5, unofficial].
++5.  **Loop:** Iterate through children using a `do-while` loop while `currNode < 8` [S1, S2, S3, S4, S5, unofficial].
+ 
+-5.  **Recursive Traversal (`proc_subtree`):**
+-    The function `proc_subtree(tx0, ty0, tz0, tx1, ty1, tz1, node)` traverses the subtree rooted at `node` within the parametric bounds $[tx0, tx1] \times [ty0, ty1] \times [tz0, tz1]$ [S1, S2, unofficial].
++**`first_node` Function:**
++Determines the entry plane by finding $\max(tx_0, ty_0, tz_0)$ [S1, S5, unofficial].
++*   If $tx_0$ is max (Entry YZ plane):
++    *   Bit 1 set if $ty_m < tx_0$.
++    *   Bit 0 set if $tz_m < tx_0$.
++    *   Return index formed by bits [S1, S2, S3, S5, unofficial].
++*   Else if $ty_0$ is max (Entry XZ plane):
++    *   Bit 2 set if $tx_m < ty_0$.
++    *   Bit 0 set if $tz_m < ty_0$.
++    *   Return index formed by bits [S1, S2, S3, S5, unofficial].
++*   Else (Entry XY plane, $tz_0$ is max):
++    *   Bit 2 set if $tx_m < tz_0$.
++    *   Bit 1 set if $ty_m < tz_0$.
++    *   Return index formed by bits [S1, S2, S3, S5, unofficial].
+ 
+-    **Step 5.1: Termination Conditions**
+-    *   If `tx1 < 0` or `ty1 < 0` or `tz1 < 0`, return (the ray has exited the volume behind the origin) [S1, S2, unofficial].
+-    *   If `node` is `terminal` (leaf), process the leaf (e.g., sample volume) and return [S1, S2, unofficial].
++**`new_node` Function:**
++Determines the next child to visit based on the exit plane (minimum of $tx_m, ty_m, tz_m$) [S1, S2, S3, S4, S5, unofficial].
++*   If $tx_m < ty_m$ and $tx_m < tz_m$: Return X-index (4, 5, 6, or 7 depending on context) [S2, S3, S4, S5, unofficial].
++*   Else if $ty_m < tz_m$: Return Y-index (2, 3, 6, or 7) [S2, S3, S4, S5, unofficial].
++*   Else: Return Z-index (1, 3, 5, or 7) [S2, S3, S4, S5, unofficial].
++*   *Note:* The specific integer return values depend on the current state and are hardcoded in the switch cases below [S1, S2, S3, S4, S5, unofficial].
+ 
+-    **Step 5.2: Compute Midpoints**
+-    Calculate the parametric midpoints for the current node's bounds:
+-    $$
+-    \begin{aligned}
+-    txm &= 0.5 \times (tx0 + tx1) \\
+-    tym &= 0.5 \times (ty0 + ty1) \\
+-    tzm &= 0.5 \times (tz0 + tz1)
+-    \end{aligned}
+-    $$
+-    [S1, S2, unofficial]
+-
+-    **Step 5.3: Determine First Child**
+-    Call `first_node(tx0, ty0, tz0, txm, tym, tzm)` to determine the index of the first child to visit [S2, unofficial]. This function selects the entry plane (YZ, XZ, or XY) based on which entry time ($tx0, ty0, tz0$) is largest and sets bits based on whether the midpoints are less than the entry times [S1, S2, unofficial].
+-
+-    **Step 5.4: Iterate Through Children**
+-    Use a `do-while` loop to visit all intersected children [S1, unofficial]. Let `currNode` be the index returned by `first_node` [S1, unofficial].
+-    $$
+-    \text{do } \{ \dots \} \text{ while } (currNode < 8)
+-    $$
+-    Inside the loop, switch on `currNode` to recurse into the appropriate child and update `currNode` for the next iteration using `new_node` [S1, S2, unofficial]. The child index is accessed as `node->children[child_idx ^ a]` to account for axis inversions [S1, S2, unofficial]. The bounds passed to the recursive call are determined by the child's position relative to the midpoints ($txm, tym, tzm$) [S1, unofficial].
+-
+-    *   **Case 0 (YZ plane entry):**
+-        *   Recurse: `proc_subtree(tx0, ty0, tz0, txm, tym, tzm, node->children[a])`
+-        *   Next: `currNode = new_node(txm, 4, tym, 2, tzm, 1)`
+-    *   **Case 1 (YZ plane entry):**
+-        *   Recurse: `proc_subtree(tx0, ty0, tzm, txm, tym, tz1, node->children[1^a])`
+-        *   Next: `currNode = new_node(txm, 5, tym, 3, tz1, 8)`
+-    *   **Case 2 (XZ plane entry):**
+-        *   Recurse: `proc_subtree(tx0, tym, tz0, txm, ty1, tzm, node->children[2^a])`
+-        *   Next: `currNode = new_node(txm, 6, ty1, 8, tzm, 3)`
+-    *   **Case 3 (XZ plane entry):**
+-        *   Recurse: `proc_subtree(tx0, tym, tzm, txm, ty1, tz1, node->children[3^a])`
+-        *   Next: `currNode = new_node(txm, 7, ty1, 8, tz1, 8)`
+-    *   **Case 4 (XY plane entry):**
+-        *   Recurse: `proc_subtree(txm, ty0, tz0, tx1, tym, tzm, node->children[4^a])`
+-        *   Next: `currNode = new_node(tx1, 8, tym, 6, tzm, 5)`
+-    *   **Case 5 (XY plane entry):**
+-        *   Recurse: `proc_subtree(txm, ty0, tzm, tx1, tym, tz1, node->children[5^a])`
+-        *   Next: `currNode = new_node(tx1, 8, tym, 7, tz1, 8)`
+-    *   **Case 6 (XY plane entry):**
+-        *   Recurse: `proc_subtree(txm, tym, tz0, tx1, ty1, tzm, node->children[6^a])`
+-        *   Next: `currNode = new_node(tx1, 8, ty1, 8, tzm, 7)`
+-    *   **Case 7 (XY plane entry):**
+-        *   Recurse: `proc_subtree(txm, tym, tzm, tx1, ty1, tz1, node->children[7^a])`
+-        *   Next: `currNode = 8` (terminates loop)
+-
+-    **Helper Functions:**
+-    *   `first_node(tx0, ty0, tz0, txm, tym, tzm)`:
+-        *   Initialize `answer = 0`.
+-        *   If `tx0 > ty0`:
+-            *   If `tx0 > tz0` (YZ plane):
+-                *   If `tym < tx0`, `answer |= 2`.
+-                *   If `tzm < tx0`, `answer |= 1`.
+-                *   Return `answer`.
+-            *   Else (XZ plane, since `ty0 > tz0` is checked in the else branch):
+-                *   If `txm < ty0`, `answer |= 4`.
+-                *   If `tzm < ty0`, `answer |= 1`.
+-                *   Return `answer`.
+-        *   Else (XY plane, since `tz0` is the maximum entry time):
+-            *   If `txm < tz0`, `answer |= 4`.
+-            *   If `tym < tz0`, `answer |= 2`.
+-            *   Return `answer`.
+-    *   `new_node(txm, x, tym, y, tzm, z)`:
+-        *   If `txm < tym`:
+-            *   If `txm < tzm`, return `x`.
+-            *   Else, return `z`.
+-        *   Else:
+-            *   If `tym < tzm`, return `y`.
+-            *   Else, return `z`.
+-        *   This selects the child adjacent to the plane with the smallest midpoint parametric time [S1, unofficial].
+-
+-### Pseudocode
++**Switch Case Logic (Iterating Children):**
++The traversal uses a switch statement on `currNode`. For each case, it recursively calls `proc_subtree` with the appropriate sub-volume bounds and updates `currNode` using `new_node` [S1, S2, S3, S4, S5, unofficial]. The child index is accessed as `node->children[currNode ^ a]` to account for axis inversions [S1, S2, S3, S4, S5, unofficial].
+ 
+ ```python
+-def parametric_octree_traversal(octree, ray):
+-    # 1. Normalize Ray Direction
+-    a = 0
+-    if ray.direction[0] < 0:
+-        ray.origin[0] = octree.center[0] * 2 - ray.origin[0]
+-        ray.direction[0] = -ray.direction[0]
+-        a |= 4
+-    if ray.direction[1] < 0:
+-        ray.origin[1] = octree.center[1] * 2 - ray.origin[1]
+-        ray.direction[1] = -ray.direction[1]
+-        a |= 2
+-    if ray.direction[2] < 0:
+-        ray.origin[2] = octree.center[2] * 2 - ray.origin[2]
+-        ray.direction[2] = -ray.direction[2]
+-        a |= 1
++def proc_subtree(tx0, ty0, tz0, tx1, ty1, tz1, node):
++    # Early exit if ray is behind
++    if tx1 < 0.0 or ty1 < 0.0 or tz1 < 0.0:
++        return
+ 
+-    # 2. Compute Inverse Directions
+-    divx = 1.0 / ray.direction[0]
+-    divy = 1.0 / ray.direction[1]
+-    divz = 1.0 / ray.direction[2]
+-
+-    # 3. Compute Parametric Bounds
+-    tx0 = (octree.min[0] - ray.origin[0]) * divx
+-    tx1 = (octree.max[0] - ray.origin[0]) * divx
+-    ty0 = (octree.min[1] - ray.origin[1]) * divy
+-    ty1 = (octree.max[1] - ray.origin[1]) * divy
+-    tz0 = (octree.min[2] - ray.origin[2]) * divz
+-    tz1 = (octree.max[2] - ray.origin[2]) * divz
+-
+-    # 4. Check Intersection
+-    if max(tx0, max(ty0, tz0)) < min(tx1, min(ty1, tz1)):
+-        proc_subtree(tx0, ty0, tz0, tx1, ty1, tz1, octree.root, a)
+-
+-def proc_subtree(tx0, ty0, tz0, tx1, ty1, tz1, node, a):
+-    # 5.1 Termination
+-    if tx1 < 0 or ty1 < 0 or tz1 < 0:
+-        return
++    # Leaf node processing
+     if node.terminal:
+         process_leaf(node)
+         return
+ 
+-    # 5.2 Midpoints
++    # Compute midpoints
+     txm = 0.5 * (tx0 + tx1)
+     tym = 0.5 * (ty0 + ty1)
+     tzm = 0.5 * (tz0 + tz1)
+ 
+-    # 5.3 First Child
+-    currNode = first_node(tx0, ty0, tz0, txm, tym, tzm)
++    # Determine first child
++    curr_node = first_node(tx0, ty0, tz0, txm, tym, tzm)
+ 
+-    # 5.4 Iterate
+-    while currNode < 8:
+-        if currNode == 0:
+-            proc_subtree(tx0, ty0, tz0, txm, tym, tzm, node.children[0 ^ a], a)
+-            currNode = new_node(txm, 4, tym, 2, tzm, 1)
+-        elif currNode == 1:
+-            proc_subtree(tx0, ty0, tzm, txm, tym, tz1, node.children[1 ^ a], a)
+-            currNode = new_node(txm, 5, tym, 3, tz1, 8)
+-        elif currNode == 2:
+-            proc_subtree(tx0, tym, tz0, txm, ty1, tzm, node.children[2 ^ a], a)
+-            currNode = new_node(txm, 6, ty1, 8, tzm, 3)
+-        elif currNode == 3:
+-            proc_subtree(tx0, tym, tzm, txm, ty1, tz1, node.children[3 ^ a], a)
+-            currNode = new_node(txm, 7, ty1, 8, tz1, 8)
+-        elif currNode == 4:
+-            proc_subtree(txm, ty0, tz0, tx1, tym, tzm, node.children[4 ^ a], a)
+-            currNode = new_node(tx1, 8, tym, 6, tzm, 5)
+-        elif currNode == 5:
+-            proc_subtree(txm, ty0, tzm, tx1, tym, tz1, node.children[5 ^ a], a)
+-            currNode = new_node(tx1, 8, tym, 7, tz1, 8)
+-        elif currNode == 6:
+-            proc_subtree(txm, tym, tz0, tx1, ty1, tzm, node.children[6 ^ a], a)
+-            currNode = new_node(tx1, 8, ty1, 8, tzm, 7)
+-        elif currNode == 7:
+-            proc_subtree(txm, tym, tzm, tx1, ty1, tz1, node.children[7 ^ a], a)
+-            currNode = 8
++    # Traverse children
++    while curr_node < 8:
++        if curr_node == 0:
++            proc_subtree(tx0, ty0, tz0, txm, tym, tzm, node.children[curr_node ^ a])
++            curr_node = new_node(txm, 4, tym, 2, tzm, 1)
++        elif curr_node == 1:
++            proc_subtree(tx0, ty0, tzm, txm, tym, tz1, node.children[curr_node ^ a])
++            curr_node = new_node(txm, 5, tym, 3, tz1, 8)
++        elif curr_node == 2:
++            proc_subtree(tx0, tym, tz0, txm, ty1, tzm, node.children[curr_node ^ a])
++            curr_node = new_node(txm, 6, ty1, 8, tzm, 3)
++        elif curr_node == 3:
++            proc_subtree(tx0, tym, tzm, txm, ty1, tz1, node.children[curr_node ^ a])
++            curr_node = new_node(txm, 7, ty1, 8, tz1, 8)
++        elif curr_node == 4:
++            proc_subtree(txm, ty0, tz0, tx1, tym, tzm, node.children[curr_node ^ a])
++            curr_node = new_node(tx1, 8, tym, 6, tzm, 5)
++        elif curr_node == 5:
++            proc_subtree(txm, ty0, tzm, tx1, tym, tz1, node.children[curr_node ^ a])
++            curr_node = new_node(tx1, 8, tym, 7, tz1, 8)
++        elif curr_node == 6:
++            proc_subtree(txm, tym, tz0, tx1, ty1, tzm, node.children[curr_node ^ a])
++            curr_node = new_node(tx1, 8, ty1, 8, tzm, 7)
++        elif curr_node == 7:
++            proc_subtree(txm, tym, tzm, tx1, ty1, tz1, node.children[curr_node ^ a])
++            curr_node = 8 # Terminate loop
+ 
+ def first_node(tx0, ty0, tz0, txm, tym, tzm):
+-    answer = 0
+-    if tx0 > ty0:
+-        if tx0 > tz0: # YZ Plane
+-            if tym < tx0:
+-                answer |= 2
+-            if tzm < tx0:
+-                answer |= 1
+-            return answer
++    # Determine entry plane
++    if tx0 > ty0 and tx0 > tz0:
++        # Entry YZ plane
++        ans = 0
++        if tym < tx0: ans |= 2 # Bit 1
++        if tzm < tx0: ans |= 1 # Bit 0
++        return ans
++    elif ty0 > tz0:
++        # Entry XZ plane
++        ans = 0
++        if txm < ty0: ans |= 4 # Bit 2
++        if tzm < ty0: ans |= 1 # Bit 0
++        return ans
+     else:
+-        if ty0 > tz0: # XZ Plane
+-            if txm < ty0:
+-                answer |= 4
+-            if tzm < ty0:
+-                answer |= 1
+-            return answer
+-    
+-    # XY Plane
+-    if txm < tz0:
+-        answer |= 4
+-    if tym < tz0:
+-        answer |= 2
+-    return answer
++        # Entry XY plane
++        ans = 0
++        if txm < tz0: ans |= 4 # Bit 2
++        if tym < tz0: ans |= 2 # Bit 1
++        return ans
+ 
+ def new_node(txm, x, tym, y, tzm, z):
+@@ -259,30 +159,37 @@
+         if txm < tzm:
+             return x
+-        else:
+-            return z
+     else:
+         if tym < tzm:
+             return y
+-        else:
+-            return z
++    return z
+ ```
+ 
+-### Edge Cases and Pitfalls
+-*   **Zero Direction Components:** Division by zero in `divx`, `divy`, or `divz` occurs if the ray direction component is zero [S1, S2, unofficial]. The source code relies on IEEE floating-point behavior (resulting in infinity/NaN) which may propagate incorrectly through comparisons [S1, unofficial]. Robust implementations should explicitly check for zero direction components and handle them (e.g., by clamping or special-case logic) [S1, S2, unofficial].
+-*   **Negative Directions:** Rays with negative direction components must be mirrored [S1, S2, unofficial]. Failure to do so results in incorrect parametric intervals and traversal order [S1, S2, unofficial].
+-*   **Non-Uniform Depth:** The algorithm handles non-uniform octree depths by using pointers to children, unlike DDA algorithms that often assume fixed depth [S1, unofficial].
++**Edge Cases and Pitfalls:**
++*   **Zero Direction Components:** Rays parallel to axes cause division by zero. Handled by IEEE floating point infinities ($+\infty, -\infty$) [S1, S4, S5, unofficial].
++*   **Negative Directions:** Must be handled by reflection and bitmask `a` before traversal begins [S1, S2, S3, S4, S5, unofficial].
++*   **No Intersection:** The initial bounding box check prevents unnecessary traversal [S2, S3, S4, S5, unofficial].
++
++## Subtopics
++
++### [GPU Parametric Octree Traversal](3504-gpu-parametric-octree-traversal.md)
++Adapts the CPU-based parametric traversal for GPU execution using a mipmap hierarchy to privilege arithmetic over memory accesses, suitable for soft shadow computation.
++
++### [Parametric Quadtree Traversal](5018-parametric-quadtree-traversal.md)
++Applies the same parametric coordinate logic to 2D quadtrees, normalizing coordinates via flipping to avoid branching on direction signs.
+ 
+ ## Operating characteristics
+-*   **Time Complexity:** Not given in the sources.
+-*   **Memory Complexity:** Not given in the sources.
+-*   **Strengths:** Handles non-uniform octree depths efficiently; top-down approach is intuitive; bitwise operations for child selection are fast [S1, S2, unofficial].
+-*   **Limitations:** Recursion depth can be large for deep octrees; division by zero requires handling; relies on IEEE floating-point behavior for stability [S1, S2, unofficial].
+-*   **When to Use:** When traversing sparse voxel octrees with non-uniform depth on CPU, as it handles null pointers for empty subtrees without requiring fixed-depth assumptions [S1, unofficial].
+-*   **When Not to Use:** When ray directions are guaranteed to be positive (simplification possible); when robustness to zero-direction rays is critical without IEEE guarantees [S1, S2, unofficial].
++*   **Complexity:** The worst case for determining the first node requires 4 comparisons. Each subsequent transition requires 2 comparisons. The longest path involves 4 nodes (3 transitions), totaling 10 comparisons per node transition [S1, S5, unofficial].
++*   **Memory:** Requires less memory than bottom-up methods like Samet-Net because it does not store neighbor voxel pointers [S1, S5, unofficial].
++*   **Performance:** On a Silicon Graphics Indigo 2 (MIPS R4000), it was 10.4%, 12.7%, and 6.8% faster than binary tree traversal for scenes with 512, 4096, and 32768 spheres respectively [S1, S5, unofficial]. It outperforms bottom-up methods (Samet, SametCorner, SametNet) and is comparable to or faster than Gargantini [S1, S5, unofficial].
++*   **Strengths:** Simple implementation, no neighbor finding, efficient for full or nearly full octrees [S1, S5, unofficial].
++*   **Limitations:** Recursive implementation may cause stack overflow for very deep trees (though iterative stack-based versions exist) [S1, unofficial].
+ 
+ ## Background
+-Parametric Octree Traversal was introduced by Revelles in 2000 in the paper "An efficient parametric algorithm for octree traversal" [S1, S2, unofficial]. It is a top-down algorithm designed to overcome limitations of bottom-up DDA algorithms (like Sung's 1991 algorithm) which often require fixed-depth octrees [S1, S2, unofficial]. It is particularly relevant for Sparse Voxel Octrees (SVOs) where empty subtrees are represented by null pointers [S1, S2, unofficial].
++The algorithm was introduced by J. Revelles, C. Ureña, and M. Lastra in 2000 [S1, S2, S5, unofficial]. It is based on the principles of parametric methods for BSP trees and octrees, differing in the selection of the first sub-voxel using simple comparisons on parameter values [S1, unofficial]. It avoids the neighbor finding process of Samet [S1, S5, unofficial] and the sorting of potentially visited sub-voxels of HERO [S1, S5, unofficial].
+ 
+ ## Sources
+-[S1] Ray - Octree intersection algorithms, https://stackoverflow.com/questions/10228690/ray-octree-intersection-algorithms, fetched 2026-10-24 (unofficial)
+-[S2] Ray - Octree intersection algorithms, https://www.stackoverflow.com/questions/10228690, fetched 2026-10-25 (unofficial)+[S1] An Efficient Parametric Algorithm for Octree Traversal, http://wscg.zcu.cz/wscg2000/Papers_2000/X31.pdf, fetched 2026-10-24 (unofficial)
++[S2] Ray / Octree traversal: Parametric algorithm implementation - Jeroen Baert's Blog, https://forceflow.be/2012/05/10/ray-octree-traversal-parametric-algorithm-implementation/, fetched 2026-10-24 (unofficial)
++[S3] Ray - Octree intersection algorithms, https://stackoverflow.com/questions/10228690/ray-octree-intersection-algorithms, fetched 2026-10-24 (unofficial)
++[S4] Ray - Octree intersection algorithms, https://www.stackoverflow.com/questions/10228690, fetched 2026-10-25 (unofficial)
++[S5] An Efficient Parametric Algorithm For Octree Traversal, https://www.scribd.com/document/74957433/An-Efficient-Parametric-Algorithm-for-Octree-Traversal, fetched 2026-10-25 (unofficial)

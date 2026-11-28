@@ -1,0 +1,241 @@
+Describe the project you are working on Godot 4.0 :) Describe the problem or limitation you are having in your project Right now volumetric fog uses a uniform density value for the entire view frustum. This constant density continues reg...
+
+Add fog volumes and fog shaders · Issue #2261 · godotengine/godot-proposals · GitHub
+Skip to content
+You signed in with another tab or window. Reload to refresh your session.
+You signed out in another tab or window. Reload to refresh your session.
+You switched accounts on another tab or window. Reload to refresh your session.
+Dismiss alert
+Add fog volumes and fog shaders #2261
+New issue
+Copy link
+New issue
+Copy link
+Closed
+Closed
+Add fog volumes and fog shaders#2261
+Copy link
+Labels
+topic:3dtopic:renderingtopic:shaders
+Milestone
+4.0
+Description
+clayjohn
+opened on Feb 8, 2021
+Issue body actions
+Describe the project you are working on
+Godot 4.0 :)
+Describe the problem or limitation you are having in your project
+Right now volumetric fog uses a uniform density value for the entire view frustum. This constant density continues regardless of where the player is or what direction they are looking. This makes it impossible to have localized volumetric fog, volumetric fog that varies with height, fog that moves, swirls etc.
+Describe the feature / enhancement and how it helps to overcome the problem or limitation
+I propose we add a new node called FogVolume along with a new material FogVolumeMaterial and a new shader type shader_type fog.
+The FogVolume is an Node that can be placed in the scene to add density to the volumetric fog. By default, it will be an AABB that takes a material. The material is responsible for setting the density over the volume of the AABB.
+The default FogVolumeMaterial, will have the following parameters:
+density (how much density to add to the area)
+edge fade (how much the density decreases at the edges, use this to get softer transitions)
+volume texture (3D texture that modulates the density)
+Users can define custom shaders to do whatever they want. The fog shader will output two values: COLOR and DENSITY as input, it will have world space position, the extents of the AABB and the current UVW within the AABB (for texture lookups)
+Importantly, we would need to add 2 new utilities:
+An editor tool to convert a mesh into a 3D texture (this can work similar to how SDF particle colliders are generated, in fact SDF textures may be better than a straight voxelized texture)
+A NoiseTexture3D resource
+Optional
+We may want to consider having a fog shader that runs on the entire view frustum each frame during the main density/lighting pass. This could be done as simply as injecting a fog shader into the main shader, the way we inject code into the default spatial/canvas_item shaders.
+Describe how your proposal will work, with code, pseudo-code, mock-ups, and/or diagrams
+These are basic notes on implementation, I intend to add more detail and organization as I gain feedback on the core idea
+The way the Volumetric Fog works now, there is a full pass over the frustum to set the density value and light values. Then there is a couple passes to filter the density map. Finally, the density map is integrated to calculated the amount of fog at each position that can be used by the scene shader.
+This proposal requires us to inject density into the density map prior to filtering happening, likely even before the main density pass.
+Using the AABBs of the FogVolume node, we can easily compute an area of the frustum volume (density map) that may be touched and launch a compute shader for just that area. The compute shader could easily add density using atomic add functions. This would hopefully allow all fog volumes to write to the density map together.
+This approach is quite limited in that it doesnt allow for easy rotating of Volumes, rotations and transformations would have to be done in the shader (limited of course by the AABB)
+If this enhancement will not be used often, can it be worked around with a few lines of script?
+No, this requires a new node type and changes to the volumetric fog shader
+Is there a reason why this should be core and not an add-on in the asset library?
+It cannot be an addon.
+👍React with 👍33Reacted by Darkinggq, Zireael07, Hugo Locurcio, mrjustaguy, Juan Manuel, Aaron Record, Archer Allstars, Roujel Williams, NHodgesVFX, iBoonie and 23 more
+Activity
+clayjohn
+added
+topic:rendering
+topic:shaders
+on Feb 8, 2021
+clayjohn
+added this to the 4.0 milestone on Feb 8, 2021
+2plus2makes5 commented on Feb 8, 2021
+2plus2makes5
+on Feb 8, 2021
+More actions
+I don't know if it can help but here's a video on how fog works in Unreal Engine i saw some time ago:
+https://www.youtube.com/watch?v=Xd7-rTzfmCo
+clayjohn commented on Feb 8, 2021
+clayjohn
+on Feb 8, 2021
+MemberAuthor
+More actions
+@2plus2makes5 Thanks. I did look into Unreal's fog in researching this. In Unreal you write to fog using a special type of particle shader and an ExponentialHeightFog. I think overall the structure would be similar to my proposal, except in my proposal you have a single particle shader for a given area.
+But I guess since you mention it, maybe it does make sense to have a parent FogVolume and then any number of child FogParticles. The children could render to a 3D texture and then the Fog Volume could "stamp" that texture into the fog density buffer.
+This would allow a nice optimization where you could specify the resolution of the FogVolume (so low detail sections could be really cheap), and we could update the FogVolume only when changed or visible which would scale really well.
+👍React with 👍1Reacted by Aaron Record
+AaronRecord commented on Feb 8, 2021
+AaronRecord
+on Feb 8, 2021
+More actions
+A NoiseTexture3D resource
+I'm probably misunderstanding what you mean, but doesn't OpenSimplexNoise support 3d noise?
+clayjohn commented on Feb 8, 2021
+clayjohn
+on Feb 8, 2021
+MemberAuthor
+More actions
+I'm probably misunderstanding what you mean, but doesn't OpenSimplexNoise support 3d noise?
+Yes. It does. But we don't have a NoiseTexture3D resource like we have a NoiseTexture2D. E.g. a resource that lets you generate an configure a noise texture in the editor
+👍React with 👍6Reacted by Aaron Record, Darkinggq, Akira1San, soleust, Julian and Talii
+clayjohn commented on Feb 11, 2021
+clayjohn
+on Feb 11, 2021
+MemberAuthor
+More actions
+Doing some further research I have some ideas I want to jot down before incorporating them into the proposal:
+We should add an anisotropy control to the volumetric fog controlled in the world environment (not on a fog volume basis)
+We will need to run a full frustum density/color pass before the fog shaders run, this pass will reset the density to the value set in the world environment
+a. We should consider adding a "global fog shader" that is attached in the world environment and is run for every froxel, this will allow us to provide an easy to use material that does height based fog (based on world position) or noise based fog
+We should consider exposing particle collision information to the fog shader
+We should consider having the following structure:
+a. FogVolume: OOBB + material
+b. Fog Particle: child of FogVolume, sphere, has radius, position, density, color
+c. Internally, Godot will use the Fog Volume to carve out what area of the froxel buffer is impacted, and then launch a single compute dispatch to draw all child Particles. The particles can be stored in an array. The shader will loop through all the particles and run the same shader, adding the results together, and then finally stamping that into the froxel buffer.
+d. The benefit of this approach is that we only do one compute dispatch per fog volume, but we still have the flexibility to move particles around based on CPU computations (or maybe even based on a particle system in the future?).
+👍React with 👍3Reacted by Akira1San, alexfreyre and Aaron Record
+alexfreyre commented on Feb 14, 2021
+alexfreyre
+on Feb 14, 2021
+More actions
+I think this idea is great and it will get used by almost everyone!
+Would be amazing if we can use any mesh as a volume or as @clayjohn suggested bake a mesh into a Texture3D
+I agree with the possibility of adding a shader to the Volumetrig Fog so that everyone gets custom environments that can simulate dust or moisture in the air in some places and air movement if Texture3D is animated.
+👍React with 👍1Reacted by Akira1San
+Calinou
+changed the title [-]Fog Volumes and Fog Shaders[/-] [+]Add fog volumes and fog shaders[/+] on Mar 12, 2021
+Ansraer commented on Mar 24, 2021
+Ansraer
+on Mar 24, 2021
+More actions
+I haven't had time to read more about this, but from what I remember both Houdini and Blender support exporting fog/particles as openvdb files. Would be cool if we could import these files and use them as resources for fog volume density.
+fire commented on Mar 31, 2021
+fire
+on Mar 31, 2021
+Last edited by fire
+Member
+More actions
+If you have an openvdb sample I can try getting it into gltf for testing.
+Please post the file.
+Calinou
+added
+topic:3d
+on Jul 8, 2021
+Ophiolith commented on Jul 25, 2021
+Ophiolith
+on Jul 25, 2021
+More actions
+Was just thinking about this while playing around with the current build of 4.0's volumetric fog and was considering submitting a proposal, but glad to see this is already being proposed. The fact that the current volumetric fog implementation is mostly limited to enabling 'godrays' and a single uniform volume of fog seems a little lacking. My ideas have more or less already been proposed by @clayjohn in a more eloquent manner than I could manage, but I can think of a few prominent existing examples of how what's proposed could be beneficial:
+Warframe uses what I believe are froxel-based fog folumes with density modulated by a noise shader to give the impression of undulating fog in many areas of the game. Star Citizen uses what I think is a combination of procedural shaders for planetary cloud rendering, as well as predefined 3D textures for gas and nebula rendering. Many other games now use some kind of froxel-based volumetrics for rendering clouds, height-clamped fog etc.
+This could of course also be beneficial in terms of bolstering Godot's existing PhysicalSky and ProceduralSky materials and could potentially eliminate the need to write separate shaders for cloud rendering as is current.
+atirutw commented on Sep 11, 2021
+atirutw
+on Sep 11, 2021
+More actions
+I think it would be cool to also have an option for fog volumes to cast shadows. You know, volumetric clouds that cast shadows and have effects on godrays.
+Calinou commented on Sep 11, 2021
+Calinou
+on Sep 11, 2021
+Last edited by Calinou
+Member
+More actions
+I think it would be cool to also have an option for fog volumes to cast shadows. You know, volumetric clouds that cast shadows and have effects on godrays.
+Cloud shadows can be emulated well enough using the Decal node in 4.0 already 🙂
+It's not physically accurate, but it's likely cheaper than making fog volumes able to cast shadows.
+PS: It's possible to create fake fog volumes using the Decal node with emissive textures too. The effect works with both static and dynamic objects, and is convincing enough if there's no sky or void behind the fog. See https://github.com/Calinou/godotcon-2021-decals for an example of this.
+👍React with 👍1Reacted by Zireael07
+atirutw commented on Sep 11, 2021
+atirutw
+on Sep 11, 2021
+More actions
+using the Decal node
+How would you make them block godrays, though?
+Calinou commented on Sep 11, 2021
+Calinou
+on Sep 11, 2021
+Last edited by Calinou
+Member
+More actions
+How would you make them block godrays, though?
+You might be able to use lots of transparent surfaces arranged in planes and project a decal onto it, but it'll be slow. I would suggest just using fake volumetric lights using sprites at this point 🙂
+atirutw commented on Sep 11, 2021
+atirutw
+on Sep 11, 2021
+More actions
+I would suggest just using fake volumetric lights using sprites at this point
+So no realistic volumetric clouds that you can fly through and have them block godrays. 😭
+clayjohn commented on Sep 14, 2021
+clayjohn
+on Sep 14, 2021
+MemberAuthor
+More actions
+I started working on this. I figured it was pretty clear we needed some form of fog shader plus we would need to be able to do a full-frustum pass to do world-space effects. However, I am still uncertain how the API for fog volumes should work.
+Accordingly, I will PR Fog shaders that includes a global, world-space pass, and then once we have feedback we can look into doing something like fog volumes or fog particles.
+I am certain that just having fog shaders will enable users to do some pretty nice things :)
+👍React with 👍6Reacted by soleust, Zireael07, Akira1San, Atirut Wattanamongkol, Brian Semrau and mrjustaguy
+clayjohn commented on Nov 3, 2021
+clayjohn
+on Nov 3, 2021
+MemberAuthor
+More actions
+Implemented in godotengine/godot#53353 :)
+🎉React with 🎉2Reacted by Hugo Locurcio and Roujel Williams
+clayjohn
+closed this as completedon Nov 3, 2021
+macryc commented on Apr 29, 2022
+macryc
+on Apr 29, 2022
+More actions
+I am certain that just having fog shaders will enable users to do some pretty nice things :)
+You wouldn't mind sharing your fog () code for testing, would you?
+clayjohn commented on Apr 29, 2022
+clayjohn
+on Apr 29, 2022
+MemberAuthor
+More actions
+I am certain that just having fog shaders will enable users to do some pretty nice things :)
+You wouldn't mind sharing your fog () code for testing, would you?
+Are you referring to the code in that screenshot? If so, unfortunately that code is long gone you can see most of it in the screenshot though! The noise function is generic 3D gradient noise (you can find many implementations on Shadertoy)
+lemilonkh commented on Mar 19, 2023
+lemilonkh
+on Mar 19, 2023
+More actions
+You wouldn't mind sharing your fog () code for testing, would you?
+@macryc if you're still looking for this, I played around with it a bit and have a working example here: https://godotshaders.com/shader/moving-gradient-noise-fog-mist-for-godot-4
+🎉React with 🎉2Reacted by Zireael07 and Axel
+fire commented on Mar 19, 2023
+fire
+on Mar 19, 2023
+Member
+More actions
+Someone mentioned this seamless noise implmenetation. https://github.com/stegu/psrdnoise/tree/main
+Sign up for free to join this conversation on GitHub. Already have an account? Sign in to comment
+Metadata
+Metadata
+Assignees
+No one assigned
+Labels
+topic:3dtopic:renderingtopic:shaders
+Type
+No type
+Projects
+No projects
+Milestone
+4.0
+Relationships
+None yet
+Development
+No branches or pull requests
+Issue actions
+Open in GitHub Copilot app
+You can’t perform that action at this time.

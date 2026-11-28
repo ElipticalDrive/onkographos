@@ -1,0 +1,141 @@
+Contribute to aircan80/vimi development by creating an account on GitHub.
+
+Light World terrain with the recorded direct and ambient light by aircan80 · Pull Request #591 · aircan80/vimi · GitHub
+Skip to content
+You signed in with another tab or window. Reload to refresh your session.
+You signed out in another tab or window. Reload to refresh your session.
+You switched accounts on another tab or window. Reload to refresh your session.
+Dismiss alert
+Conversation
+aircan80
+commented
+Nov 8, 2026
+Copy link
+Copy Markdown
+Owner
+Problem
+#177 step 2c, part 2. #541 read LightData's DirectColor and AmbientColor into the recorded sky sample, but the renderer still lit terrain with the fixed World light. Plan in issuecomment-6715593643; this is step 1.
+Approach
+WorldSkyLook (gui) carries the sample's direct and ambient colours, 0..255, with a light weight of coverage × light share, the same way it weighs the fog. A sample without recorded light has weight 0.
+WorldStreamTransport.Sky gains direct, ambient and lightWeight, quantized like the rest: whole colour steps, weight in thousandths. The existing constructor still means no recorded light.
+The camera line gets an optional LIGHT <12 hex> <weight> tail after SKY, written only when the weight is above 0. A LIGHT tail with weight 0 is refused. The longest camera line is now 273 bytes, so WorldStreamControl.MAX_LINE_BYTES goes from 256 to 320. Both ends are the same build, and the existing longest-line test pins it.
+The renderer sets u_worldLight from light.withRecorded(recordedSky): diffuse moves toward direct/255 and ambient toward ambient/255 by the weight. The direction stays fixed, because LightData records colours, not a direction (step 3 of the plan). A camera without a sky, or without recorded light, keeps the renderer's own light. No shader change.
+Without -Dvimi.world.sky=recorded, no sky is sent, so nothing changes by default.
+Validation
+Tests:
+WorldLightTest.aSkysRecordedLightIsMixedInByItsWeight: no sky or weight 0 returns the same light; weight 1 gives exactly direct/255 and ambient/255; weight 0.5 gives half-way; the direction is unchanged.
+WorldStreamControlTest.aSkysRecordedLightRoundTripsAndAZeroWeightLightIsRefused: the LIGHT ffe0c0404060 750 tail round-trips exactly; no tail without light; a zero-weight tail is refused. The longest-line test now includes a full light tail and still fits.
+WorldSkyLookTest.carriesTheRecordedLight: colours come from DirectColor/AmbientColor, the weight is coverage × share, an unlit sample gives weight 0, and the light is carried even with no fog.
+spotlessApply :concepts-world:check :rendering-bgfx:check :gui:check on Linux: BUILD SUCCESSFUL in 1m 8s; concepts-world 451 tests, rendering-bgfx 593 tests (4 skipped), 0 failures; gui World sky look: … recorded light … passed.
+GPU proofs on Vulkan (Linux). The owner proof gains a recorded-light oracle: a camera sky with no direct light and a mid-grey ambient (128) at full weight draws the terrain at albedo × 128/255, (180, 20, 30) → (90, 10, 15):
+```
+WORLD_NATIVE_OWNER_PASS backend=vulkan replacements=104 content=92 ... terrainLit=ff9d111a terrainUnlit=ffb4141e terrainRecorded=ff5a0a0f
+World horizon native proof PASS 169 tiles, 194688 triangles, 9.2 MiB GPU, rebuild 68.3 ms off the render thread, 228492/400000 pixels changed
+WORLD_HORIZON_SESSION_PASS outcome=DRAWN tiles=169 triangles=194688 changed=56788/100000
+WORLD_SESSION_PASS content=3 cameras=16 canceled=2 resize=800x500 recordedSky
+WORLD_PUBLIC_LIFECYCLE_PASS submittedCameras=100 stagedTiles=2 refusedProducers=1 canceledTiles=1 commits=2 acceptedFrames=3
+Production terrain inline proof PASS ("backend":"Vulkan")
+Terrain texture native proof PASS 12 authored frames plus5children/9mappedframes
+```
+After the recorded-light camera, a camera without a sky goes back to the fixed light ((180, 20, 30) again).
+Owner checks (Windows, D3D11), with -Dvimi.world.sky=recorded
+Terrain brightness and tint follow the zone's recorded light: warmer in sunny zones, darker and bluer at night with -Dvimi.world.sky.time=00:00. Objects keep their fixed light until step 2.
+Without the property, terrain looks exactly as before.
+Not done
+Objects on the same light, the sun direction and water shading: steps 2–4 of the plan.
+Refs #177, #373
+Light World terrain with the recorded direct and ambient light of the…
+…
+26106e4
+```
+… camera's sky
+
+The camera line's sky gains an optional LIGHT tail: LightData's DirectColor and AmbientColor with their weight. The renderer mixes them into the World light's diffuse and ambient by that weight; the direction stays fixed. The control line bound grows to 320 bytes (longest line 273).
+```
+aircan80
+commented
+Nov 8, 2026
+Copy link
+Copy Markdown
+Owner
+Author
+APPROVE (head 26106e4)
+The recorded direct and ambient light travel and get mixed in correctly. Without -Dvimi.world.sky=recorded it changes nothing. The camera line bound is consistent, and the new oracle and the unit tests catch the obvious mutations. Nothing blocking. Notes below.
+Findings
+Low: rendering-bgfx/.../WorldStreamTransport.java:213. When lightWeight quantizes to 0 (e.g. 0.0004), direct/ambient keep their colours. The writer (WorldStreamControl.java:159) then leaves out the tail, so the decoded Sky has zero colours and isn't equals to the sent one. I checked: encode, then decode, then equals gives false. Rendering is identical because weight 0 keeps the fixed light. Still, the fog fields are canonical in the constructor, so I'd zero the light colours when the rounded weight is 0, like the fog fields. WorldSkyLook already does this for an unlit sample, but not for 0 < lit < 0.0005.
+Low (follow-up, not this PR): the horizon doesn't pick up the recorded light. WorldStreamHorizon.java:273-274 writes the unlit normal marker, and fs_model.sc:31 skips lighting for it, so the horizon keeps its baked slope light (about 0.955 on flat ground). Under the fixed light, near terrain and the horizon roughly match (about 0.88 on flat ground). With a dark recorded light at night, near terrain darkens and the horizon ring doesn't. The recorded fog hides most of it, but the nearest horizon tiles will show a brightness step at the full-detail edge. Please add it to the step 3/5 list in the plan comment. Water is also unlit (no normal), as the PR says for step 4. Objects use the separate world-wmo program and don't read u_worldLight, so they keep the fixed light as stated.
+Info: WorldStreamControl.java:198-208. The explicit LIGHT keyword check and the zero-weight check are redundant with the canonical re-encode at :452. Disabling either one alone leaves all tests green, because the re-encode still refuses the line. That's fine as defence in depth. I probed the parse separately and every malformed tail was refused (18/18): wrong keyword, uppercase hex, 11/13-digit hex, + in hex, weight 0750/1001/-1/NaN/Infinity/7.5e2/750.0/0, a duplicate tail, a missing weight, an extra token, a double space, and a LIGHT tail without SKY. Old lines (no tail, SKY only) still parse, with weight 0 and null sky respectively.
+Info: WorldLight.withRecorded (WorldLight.java:78) mixes 0..255 gamma colours divided by 255 into a gamma-space light. This matches how WorldLight documents the fixed light (albedo × (ambient + diffuse·N·L), gamma space). Full direct plus full ambient can reach 2.0 and saturates in the target. That's consistent with the shader and the 0..4 validator.
+Info: thread confinement and stale state are fine. sky() calls requireOwner() and maps null to EXPLORER (weight 0). The owner calls it on every camera (WorldStreamNativeOwner.java:603,641), and the light is derived per frame at BgfxWorldStreamRenderer.java:2024, with nothing cached.
+Info: the bound change covers both sides. encode and decode/read all use MAX_LINE_BYTES, and there's no other camera-line limit (the 256 in WorldStreamStdout is the status record). The branch is 3 commits behind main but merges cleanly.
+Default path
+withRecorded returns this for a null/EXPLORER sky (assertSame in the test). WorldSkyFeed is only built when vimi.world.sky is set. The owner proof's default-path pixels match main exactly: terrainLit=ff9d111a terrainUnlit=ffb4141e, same as the values recorded on #581.
+Checks run on 26106e4 (Linux, Vulkan)
+:concepts-world:check :rendering-bgfx:check :gui:check: BUILD SUCCESSFUL in 45s. concepts-world 451 tests, 0 failures. rendering-bgfx 593 tests, 0 failures, 4 skipped. gui: World sky look: ... recorded light, ... passed.
+```
+WORLD_NATIVE_OWNER_PASS backend=vulkan ... replacements=104 content=92 ... terrainLit=ff9d111a terrainUnlit=ffb4141e terrainRecorded=ff5a0a0f
+WORLD_NATIVE_BUFFERS_RELEASED_PASS open=10/10 closed=0/0
+World horizon native proof PASS 169 tiles, 194688 triangles, 9.2 MiB GPU, rebuild 44.1 ms off the render thread, 228492/400000 pixels changed
+WORLD_HORIZON_SESSION_PASS outcome=DRAWN tiles=169 triangles=194688 changed=56788/100000
+WORLD_SESSION_PASS content=3 cameras=16 canceled=2 resize=800x500 recordedSky
+WORLD_PUBLIC_LIFECYCLE_PASS submittedCameras=100 elapsedMs=695 stagedTiles=2 refusedProducers=1 canceledTiles=1 commits=2 acceptedFrames=3 closeMillis=17
+Production terrain inline proof PASS: {"backend":"Vulkan",...,"cases":[...,"oversized-control",...]}
+Terrain texture native proof PASS 12 authored frames plus5children/9mappedframes
+```
+I didn't run nativeGpuWorldAppearanceProof (#527).
+Mutations (each reverted)
+Mutation
+Result
+withRecorded ignores the weight (w = 1)
+WorldLightTest > aSkysRecordedLightIsMixedInByItsWeight() FAILED
+diffuse mixed toward the ambient colour
+WorldLightTest > aSkysRecordedLightIsMixedInByItsWeight() FAILED
+20-part camera line refused
+aSkysRecordedLightRoundTripsAndAZeroWeightLightIsRefused() FAILED, theLongestCameraWithASkyFitsTheLine() FAILED
+MAX_LINE_BYTES back to 256
+theLongestCameraWithASkyFitsTheLine() FAILED
+zero-weight check removed
+passes (caught by the canonical re-encode, see above)
+LIGHT keyword check removed
+passes (same)
+renderer uses light without the recorded sky
+owner proof: Recorded-light terrain ffb3131d expected [90, 10, 15]
+sky(null) keeps the previous sky (stale state)
+owner proof: Committed pixels ff5a0a0f (the sky-less camera stays on the recorded light)
+aircan80
+mentioned this pull request
+Nov 8, 2026
+World objects take the shared World light
+#592
+Merged
+Hide details
+View details
+aircan80
+merged commit e5fe45d
+into
+main
+Nov 8, 2026
+28 checks passed
+Uh oh!
+There was an error while loading. Please reload this page.
+This was referenced Nov 8, 2026
+Shade water from the recorded water light; draw magma, fel and tar opaque
+#594
+Merged
+The WDL horizon takes the World light; diffuse-only object light test
+#597
+Merged
+Add v0.1.0-alpha.29 release notes
+#605
+Merged
+Sign up for free
+to join this conversation on GitHub.
+Already have an account?
+Sign in to comment
+Uh oh!
+There was an error while loading. Please reload this page.
+Labels
+None yet
+1 participant
+Add this suggestion to a batch that can be applied as a single commit.This suggestion is invalid because no changes were made to the code.Suggestions cannot be applied while the pull request is closed.Suggestions cannot be applied while viewing a subset of changes.Only one suggestion per line can be applied in a batch.Add this suggestion to a batch that can be applied as a single commit.Applying suggestions on deleted lines is not supported.You must change the existing code in this line in order to create a valid suggestion.Outdated suggestions cannot be applied.This suggestion has been applied or marked resolved.Suggestions cannot be applied from pending reviews.Suggestions cannot be applied on multi-line comments.Suggestions cannot be applied while the pull request is queued to merge.Suggestion cannot be applied right now. Please check back later.
+You can’t perform that action at this time.

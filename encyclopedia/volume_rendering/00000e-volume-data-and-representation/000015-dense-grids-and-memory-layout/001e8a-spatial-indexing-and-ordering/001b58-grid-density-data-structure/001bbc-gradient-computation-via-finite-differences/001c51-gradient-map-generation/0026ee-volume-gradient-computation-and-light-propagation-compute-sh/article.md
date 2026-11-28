@@ -1,0 +1,133 @@
+# Volume Gradient Computation and Light Propagation Compute Shader
+
+Also called: Central Differences Gradient, Gradient Computation & Light Propagation Compute Shader, Gradient Computation via Central Differences, Real-Time Gradient Computation for Volume Shading
+
+## Overview
+This method is a compute shader pass that samples a 3D volume texture, computes spatial gradients using central differences, transforms gradients between world and view spaces, and initiates a per-pixel light propagation pass across volume layers [S2, unofficial]. It builds on [Gradient Map Generation](1204-gradient-map-generation.md) by calculating gradients for all voxels in the volume and storing them in a gradient map image, including magnitude and direction [S2, unofficial].
+
+## How it works
+**Inputs and Outputs:** The shader takes a 3D volume texture, a uniform buffer object (UBO), and a push constant as inputs, and produces six output storage images (lighting, depth, color, material, volume position, and volume depth) [S2, unofficial]. It operates on a per-pixel basis for a specific volume layer, dispatched via a compute shader [S2, unofficial].
+
+**Data Structures:** 
+* **Uniform Buffer Object (UBO)** (binding 0, `std140` layout): `mat4 view_matrix`, `mat4 inverse_view_matrix`, `vec3 middle_of_front_plane_vs`, `vec3 light_color`, `ivec2 plane_pixel_size`, `vec2 plane_extent_vs`, `vec3 lightVSPos`, `float voxelDepth`, `float distance_between_planes`, `int plane_count` [S2, unofficial].
+* **Push Constants** (binding 0): `int layer_index` [S2, unofficial].
+* **Input Samplers** (binding 1-6): `lb_in`, `ldb_in`, `cb_in`, `mb_in`, `vpb_in`, `vdb_in` (all `sampler2D`) [S2, unofficial].
+* **Output Images** (binding 7-12): `lb_out`, `ldb_out`, `cb_out`, `mb_out`, `vpb_out`, `vdb_out` (all `rgba32f image2D`) [S2, unofficial].
+* **Volume Texture** (binding 13): `sampler3D volume` [S2, unofficial].
+* **Transfer Functions** (binding 14-16): `sampler2D volume_transfer`, `sampler2D medium_transfer`, `sampler1D refraction_transfer_tex` [S2, unofficial].
+
+**Numbered Steps:**
+1. **Thread Dispatch Setup:** The shader uses a local group size of 2x2 with derivative group quads enabled for efficient gradient computation [S2, unofficial].
+2. **UV Coordinate Computation:** Compute the UV coordinates for the current pixel based on the global invocation ID and plane pixel size [S2, unofficial].
+3. **Layer Z Position Computation:** Determine the current layer's Z position in view space [S2, unofficial].
+4. **World Space Position Computation:** Convert the plane UV and Z position to world space [S2, unofficial].
+5. **Volume Texture Sampling:** Sample the volume texture at the computed world position, applying the necessary coordinate transformation [S2, unofficial].
+6. **Central Difference Gradient Computation:** Compute spatial gradients using central differences along the X, Y, and Z axes [S2, unofficial].
+7. **Gradient Transformation:** Transform the world-space gradient to view space [S2, unofficial].
+8. **Refraction Gradient Computation:** Compute the refraction gradient by transforming the difference vector to view space and normalizing it [S2, unofficial].
+9. **Light Propagation:** Initiate the per-pixel light propagation pass across volume layers [S2, unofficial].
+
+**Formulas:**
+* UV coordinates: $uv = (global\_id.xy + 0.5) / plane\_pixel\_size$ [S2, unofficial]
+* Layer Z position: $current\_z = middle\_of\_front\_plane\_vs.z - layer\_index \times distance\_between\_planes$ [S2, unofficial]
+* View-space position: $pos\_vs = (2.0 \times plane\_extent\_vs \times (middle\_of\_front\_plane\_vs.xy + uv - 0.5), current\_z)$ [S2, unofficial]
+* World-space position: $pos\_ws = (inverse\_view\_matrix \times (pos\_vs, 1.0)).xyz + 0.5$ [S2, unofficial]
+* Volume texture coordinates: $coord = (pos\_ws - 0.5) \times (voxelDepth, voxelDepth, 1.0) + 0.5$ [S2, unofficial]
+* Central differences: $s1 = sample(volume, coord - dist)$, $s2 = sample(volume, coord + dist)$ for each axis, where $dist = distance\_between\_planes$ [S2, unofficial]
+* World-space gradient: $grad\_ws = (s2 - s1) / (2.0 \times dist)$ [S2, unofficial]
+* View-space gradient: $grad\_vs = view\_matrix \times grad\_ws$ [S2, unofficial]
+* Volume gradient difference: $diff = s2 - s1$ [S2, unofficial]
+* Transformed volume gradient: $diff = inverse(transpose(view\_matrix)) \times diff$ [S2, unofficial]
+* Normalized volume gradient: $diff = safe\_normalize(diff)$ [S2, unofficial]
+
+**Parameters:**
+* `ubo.voxelDepth`: Scaling factor applied to X and Y dimensions when transforming world positions to volume texture coordinates [S2, unofficial].
+* `ubo.distance_between_planes`: Spacing between volume layers in world space, used as the step size for central difference gradient computation [S2, unofficial].
+* `ubo.plane_pixel_size`: Resolution of the output plane in pixels, used to normalize `global_id.xy` to UV coordinates [S2, unofficial].
+* `ubo.middle_of_front_plane_vs.z`: View-space Z coordinate of the front plane, used as the base Z for layer indexing [S2, unofficial].
+
+**Edge Cases and Pitfalls:**
+* **Division by Zero in Intersect Plane:** When the direction vector's Z component is near zero, division by zero can occur [S2, unofficial]. This is handled by clamping the denominator to `1e-5` with sign preservation [S2, unofficial].
+* **Zero-Length Vector Normalization:** When normalizing vectors, if the length is less than `1e-6`, the function returns `vec3(0.0)` to avoid division by zero [S2, unofficial].
+
+**Pseudocode:**
+> **Unverified code.** The code below did not pass a test run against a reference implementation, or no test fits it, so it may contain errors.
+
+```python
+def compute_gradient_and_light_propagation(global_id, layer_index, ubo, volume, lb_out, ldb_out, cb_out, mb_out, vpb_out, vdb_out):
+    # 1. Thread dispatch uses 2x2 local groups with derivative group quads
+    # layout(local_size_x = 2, local_size_y = 2) in; layout(derivative_group_quadsNV) in;
+
+    # 2. Compute UV coordinates
+    uv = (global_id.xy + 0.5) / ubo.plane_pixel_size
+
+    # 3. Compute current layer Z position
+    current_z = ubo.middle_of_front_plane_vs.z - layer_index * ubo.distance_between_planes
+
+    # 4. Convert plane UV and Z to world space
+    pos_vs = vec3(2.0 * ubo.plane_extent_vs * (ubo.middle_of_front_plane_vs.xy + uv - 0.5), current_z)
+    pos_ws = (ubo.inverse_view_matrix * vec4(pos_vs, 1.0)).xyz + 0.5
+
+    # 5. Sample volume texture with coordinate transform
+    coord = (pos_ws - vec3(0.5)) * vec3(ubo.voxelDepth, ubo.voxelDepth, 1.0) + vec3(0.5)
+    density = sample_volume(volume, coord).r
+
+    # 6. Compute central differences for x, y, z axes
+    dist = ubo.distance_between_planes
+    s1_x = sample_volume(volume, coord + vec3(-dist, 0, 0)).r
+    s2_x = sample_volume(volume, coord + vec3(dist, 0, 0)).r
+    s1_y = sample_volume(volume, coord + vec3(0, -dist, 0)).r
+    s2_y = sample_volume(volume, coord + vec3(0, dist, 0)).r
+    s1_z = sample_volume(volume, coord + vec3(0, 0, -dist)).r
+    s2_z = sample_volume(volume, coord + vec3(0, 0, dist)).r
+
+    # 7. Compute refraction gradient
+    grad_ws = vec3(s2_x - s1_x, s2_y - s1_y, s2_z - s1_z) / (2.0 * dist)
+    grad_vs = mat3(ubo.view_matrix) * grad_ws
+
+    # 8. Compute volume gradient
+    diff = vec3(s2_x - s1_x, s2_y - s1_y, s2_z - s1_z)
+    diff = inverse(transpose(mat3(ubo.view_matrix))) * diff
+    diff = safe_normalize(diff)
+
+    # 9. Light propagation pass across volume layers
+    # The sources do not specify the exact light propagation logic. [G]
+    write_storage_image(lb_out, global_id.xy, vec4(density, 0.0, 0.0, 1.0))
+    write_storage_image(ldb_out, global_id.xy, vec4(grad_vs, 1.0))
+    write_storage_image(cb_out, global_id.xy, vec4(diff, 1.0))
+    # Other outputs (mb_out, vpb_out, vdb_out) would be populated similarly.
+
+def sample_volume(tex, coord):
+    # Standard 3D texture sampling with linear filtering and clamp-to-edge
+    return tex.sample(coord)
+
+def write_storage_image(img, coord, value):
+    # Standard storage image write
+    img[coord] = value
+
+def safe_normalize(v):
+    length = vector_length(v)
+    if length < 1e-6:
+        return vec3(0.0, 0.0, 0.0)
+    return v / length
+
+def vector_length(v):
+    return sqrt(v[0]**2 + v[1]**2 + v[2]**2)
+```
+
+## Operating characteristics
+* **Time Complexity:** Not given in the sources.
+* **Memory Complexity:** Not given in the sources.
+* **Measured Performance:** Not given in the sources.
+* **Scaling:** Not given in the sources.
+* **Strengths:** Efficient gradient computation using central differences and derivative group quads, flexible transformation between world and view spaces, and real-time integration with advection and blending iterations [S1][S2, unofficial].
+* **Limitations:** Requires ping-pong buffer management for descriptor sets, careful handling of near-zero denominators and vector lengths, and explicit coordinate mapping for each volume layer [S2, unofficial].
+* **When to Use:** Suitable for real-time volume rendering where gradient-based illumination and refraction effects are desired [S1].
+* **When Not to Use:** Not given in the sources.
+
+## Background
+The method originates from real-time advection and volumetric illumination techniques for the visualization of 3D unsteady flow, which introduced central differences to compute gradients that serve as normal vectors for local illumination [S1]. The specific compute shader implementation integrates with a Vulkan-based rendering pipeline, utilizing descriptor sets, push constants, and compute shaders for efficient per-layer processing [S2, unofficial].
+
+## Sources
+[S1] Real-Time Advection and Volumetric Illumination for the Visualization of 3D Unsteady Flow, https://doi.org/10.2312/vissym/eurovis05/013-020, fetched 2026-10-30
+[S2] GitThirteen/vis-magnus-2018, https://github.com/GitThirteen/vis-magnus-2018, fetched 2026-10-26 (unofficial)

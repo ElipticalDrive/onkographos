@@ -1,0 +1,159 @@
+--- v003.md
++++ v004.md
+@@ -8,12 +8,12 @@
+ ## How it works
+ **Inputs and Outputs:**
+-*   **Input:** A voxel chunk data structure containing block types (opaque/non-opaque) and initial light values. Sources are voxels with `propagated_light > 0` (e.g., lamps, torches) or top-surface voxels receiving natural light [S1, S2, unofficial].
++*   **Input:** A voxel chunk data structure containing block types (opaque/non-opaque) and initial light values. Sources are voxels with `propagated_light > 0` (e.g., lamps, torches) or top-surface voxels receiving natural light [S1, S2, S3, unofficial].
+ *   **Output:** Updated light values for all non-opaque voxels in the chunk, and a list of cross-chunk propagation events for adjacent chunks [S2, unofficial].
+ 
+ **Data Structures:**
+ *   **Voxel Grid:** A 3D array or Structure of Arrays (SOA) layout storing block kinds and light intensities. Light values are stored in 1D byte arrays per chunk for cache locality [S3, unofficial].
+-*   **Queue:** A `VecDeque` (double-ended queue) storing tuples of `(voxel_index, current_light_level)` or just voxel indices depending on implementation [S1, S2, unofficial].
++*   **Queue:** A double-ended queue storing tuples of `(voxel_index, current_light_level)` [S1, S2, unofficial].
+ *   **Neighbor Strides:** Precomputed strides for 6-directional neighbor access in a padded chunk: `[1, -1, PADDED, -PADDED, PADDED*PADDED, -PADDED*PADDED]` [S1, unofficial].
+-*   **Cross-Chunk Events:** A list of `NeighborLightPropagation` structs containing side direction, voxel coordinates, light type, and intensity, used to propagate light to adjacent chunks [S2, unofficial].
++*   **Cross-Chunk Events:** A list of propagation structs containing side direction, voxel coordinates, light type, and intensity, used to propagate light to adjacent chunks [S2, unofficial].
+ 
+ **Steps:**
+@@ -22,26 +22,25 @@
+     *   For natural light, initialize top voxels of the chunk with `MAX_NATURAL_INTENSITY` [S2, unofficial].
+     *   Initialize an empty list `neighbor_light_propagation` [S2, unofficial].
+-
+ 2.  **BFS Propagation Loop:**
+     *   While the queue is not empty:
+-        *   Pop the front element `(idx, level)` [S1, unofficial] or just `voxel` [S2, unofficial].
++        *   Pop the front element `(idx, level)` [S1, unofficial].
+         *   If `level <= 1`, skip further propagation from this voxel [S1, unofficial].
+         *   Get the current voxel's kind. If it is opaque (`kind == 1`), skip processing [S2, unofficial].
+-        *   Iterate over all 6 sides (`voxel::SIDES`) [S2, unofficial].
++        *   Iterate over all 6 sides [S2, unofficial].
+         *   For each side, calculate the neighbor index `ni` using the stride for that side [S1, unofficial].
+         *   If `ni` is out of bounds, skip [S1, unofficial].
++        *   Calculate `propagated_intensity` using the formula below [S2, unofficial].
++        *   If `propagated_intensity <= 0`, skip this side [S2, unofficial].
+         *   Determine if the neighbor is internal (within the same chunk) or external (cross-chunk boundary) [S2, unofficial].
+         *   **Internal Neighbor:**
+             *   Get the neighbor's kind. If opaque, skip [S2, unofficial].
+             *   Get the neighbor's current light intensity for the specific `light_ty` (Natural or Artificial) [S2, unofficial].
+-            *   Calculate `propagated_intensity` using the formula below [S2, unofficial].
+             *   If `neighbor_current_intensity >= propagated_intensity`, skip (no update needed) [S2, unofficial].
+             *   Set the neighbor's light intensity to `propagated_intensity` [S2, unofficial].
+             *   If `propagated_intensity > 1`, push `(neighbor_index, propagated_intensity)` to the queue [S2, unofficial].
+         *   **External Neighbor (Cross-Chunk):**
+-            *   Calculate the neighbor voxel coordinates in the adjacent chunk using `math::euclid_rem` [S2, unofficial].
+-            *   Create a `NeighborLightPropagation` struct with the side, voxel, type, and intensity [S2, unofficial].
++            *   Calculate the neighbor voxel coordinates in the adjacent chunk using modular arithmetic (`math::euclid_rem`) [S2, unofficial].
++            *   Create a propagation struct with the side, voxel, type, and intensity [S2, unofficial].
+             *   Add to `neighbor_light_propagation` list [S2, unofficial].
+-
+ 3.  **Return:**
+     *   Return the `neighbor_light_propagation` list for processing by adjacent chunks [S2, unofficial].
+@@ -70,14 +69,27 @@
+ **Pseudocode:**
+ ```python
++# Constants
++MAX_NATURAL_INTENSITY = 15
++SIDE_DOWN = 5
++LIGHT_NATURAL = 0
++
++class NeighborLightPropagation:
++    def __init__(self, side, voxel_coords, light_type, intensity):
++        self.side = side
++        self.voxel_coords = voxel_coords
++        self.light_type = light_type
++        self.intensity = intensity
++
+ def bfs_light_propagation(chunk, queue, light_ty):
+     """
+     Propagates light in a chunk using BFS.
+     chunk: Object with methods get_voxel_kind(idx), get_light(idx, light_ty), set_light(idx, light_ty, val)
+-    queue: VecDeque of (idx, level)
++           and attributes PADDED (chunk width), size (total voxel count).
++    queue: Double-ended queue of (idx, level)
+     light_ty: Enum (NATURAL, ARTIFICIAL)
+     """
+     neighbor_events = []
+     strides = [1, -1, chunk.PADDED, -chunk.PADDED, chunk.PADDED * chunk.PADDED, -chunk.PADDED * chunk.PADDED]
+-    sides = [0, 1, 2, 3, 4, 5] # 6 directions
++    num_sides = 6
+ 
+     while not queue.is_empty():
+@@ -88,8 +100,8 @@
+ 
+         current_intensity = chunk.get_light(idx, light_ty)
+-        if chunk.get_voxel_kind(idx) == 1: # Opaque
++        if chunk.get_voxel_kind(idx) == 1:  # Opaque
+             continue
+ 
+-        for side_idx in sides:
++        for side_idx in range(num_sides):
+             stride = strides[side_idx]
+             ni = idx + stride
+@@ -98,34 +110,37 @@
+                 continue
+ 
+-            # Determine if internal or cross-chunk
+-            is_internal = chunk.is_internal_neighbor(idx, ni, side_idx)
++            # Calculate propagated intensity before branching
++            is_down = (side_idx == SIDE_DOWN)
++            if is_down and light_ty == LIGHT_NATURAL and current_intensity == MAX_NATURAL_INTENSITY:
++                propagated = MAX_NATURAL_INTENSITY
++            else:
++                propagated = current_intensity - 1
++
++            if propagated <= 0:
++                continue
++
++            # Check if neighbor is within the same chunk
++            is_internal = (ni // chunk.PADDED) == (idx // chunk.PADDED)
+ 
+             if is_internal:
+-                if chunk.get_voxel_kind(ni) == 1: # Opaque
++                if chunk.get_voxel_kind(ni) == 1:  # Opaque
+                     continue
+                 
+                 neighbor_intensity = chunk.get_light(ni, light_ty)
+-                
+-                # Calculate propagated intensity
+-                if side_idx == DOWN and light_ty == NATURAL and current_intensity == MAX_NATURAL_INTENSITY:
+-                    propagated = MAX_NATURAL_INTENSITY
+-                else:
+-                    propagated = current_intensity - 1
+-                
+-                if propagated <= 0:
++                if neighbor_intensity >= propagated:
+                     continue
+ 
+-                if neighbor_intensity < propagated:
+-                    chunk.set_light(ni, light_ty, propagated)
+-                    if propagated > 1:
+-                        queue.push_back((ni, propagated))
++                chunk.set_light(ni, light_ty, propagated)
++                if propagated > 1:
++                    queue.push_back((ni, propagated))
+             else:
+                 # Cross-chunk boundary
+-                neighbor_coords = chunk.get_neighbor_coords(idx, side_idx)
++                # Calculate coordinates in adjacent chunk using modular arithmetic
++                neighbor_coords = (ni % chunk.size, ni // chunk.size)
+                 event = NeighborLightPropagation(
+                     side=side_idx,
+-                    voxel=neighbor_coords,
+-                    type=light_ty,
+-                    intensity=propagated # Use last calculated propagated value
++                    voxel_coords=neighbor_coords,
++                    light_type=light_ty,
++                    intensity=propagated
+                 )
+                 neighbor_events.append(event)
+@@ -146,8 +161,7 @@
+ *   **Limitations:** Light does not penetrate opaque blocks, leading to dark enclosed spaces if not properly designed [S2, unofficial]. Byte-based storage limits dynamic range [S3, unofficial].
+ *   **When to Use:** Ideal for block-based voxel games and simulations where performance is critical and lighting is static or changes infrequently [S1, S3, unofficial].
+-*   **When Not to Use:** Not suitable for dynamic, real-time lighting changes requiring per-frame updates in large open worlds without chunking [S4, unofficial].
+ 
+ ## Background
+-BFS Light Propagation originated in voxel game development, specifically in implementations like Minecraft clones, where efficient lighting is crucial for performance [S1, S3, unofficial]. The algorithm was refined to address the inefficiencies of earlier diffusion-based methods, such as Jacobi iteration, which suffered from slow convergence and exponential decay [S4, unofficial]. The use of Structure of Arrays (SOA) for light storage was introduced to improve cache locality and performance [S3, unofficial]. The method is widely used in indie voxel games and engines like CubeEngine and Projekto [S2, S3, unofficial].
++Developed for block-based voxel games to efficiently compute indirect illumination across chunked volumes [S1, S3, unofficial]. The algorithm was refined to address the inefficiencies of earlier diffusion-based methods, such as Jacobi iteration, which suffered from slow convergence and exponential decay [S4, unofficial]. The use of Structure of Arrays (SOA) for light storage was introduced to improve cache locality and performance [S3, unofficial]. The method is widely used in indie voxel games and engines like CubeEngine and Projekto [S2, S3, unofficial].
+ 
+ ## Sources

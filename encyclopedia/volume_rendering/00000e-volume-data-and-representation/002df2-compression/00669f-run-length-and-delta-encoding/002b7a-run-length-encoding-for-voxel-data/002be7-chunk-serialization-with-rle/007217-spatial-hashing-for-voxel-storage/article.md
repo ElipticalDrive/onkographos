@@ -1,0 +1,86 @@
+# Spatial Hashing for Voxel Storage
+
+Also called: Perfect Spatial Hashing for Voxels
+
+## Overview
+Spatial hashing for voxel storage replaces run-length encoding (RLE) to enable $O(1)$ voxel lookup and support dynamic scenes and streaming by storing voxels as bitmasks and a hash table for attributes [S1, unofficial]. It sets itself apart from its parent [Chunk Serialization with RLE](5162-chunk-serialization-with-rle.md) and sibling [Bit-serial Chunk Serialization](14785-bit-serial-chunk-serialization.md) by trading linear scan time for constant-time direct access, at the cost of higher memory overhead [S1, unofficial].
+
+## How it works
+**Inputs and Outputs:**
+*   **Input:** A set of voxel positions $(x, y, z)$ and their associated attributes (normal, color, reflectivity).
+*   **Output:** A hash table $T$ and a hash function $h$ that maps any valid voxel position to its attribute data in $T$.
+
+**Data Structures:**
+1.  **Bitmask:** A binary structure indicating voxel presence (0 for empty, 1 for full) [S1, unofficial].
+2.  **Hash Table ($T$):** A contiguous array storing the actual voxel attributes. The size of $T$ is approximately 2 times the total number of voxels in the scene [S1, unofficial].
+3.  **Hash Function ($h$):** A 3D function $h(x,y,z)$ that maps a voxel position to a unique location within $T$ [S1, unofficial].
+
+**Algorithm:**
+1.  **Initialization:** Determine the total number of voxels $N$ in the scene. Allocate memory for the hash table $T$ with size $2N$ [S1, unofficial].
+2.  **Hash Function Definition:** Define $h(x,y,z)$ such that it maps the 3D integer coordinates to a unique index in $T$. The source describes this as a "perfect" spatial hash, implying no collisions for the given dataset [S1, unofficial].
+3.  **Storage:** For each voxel at position $(x,y,z)$ with attributes $A$, compute the index $idx = h(x,y,z)$. Store $A$ at $T[idx]$ [S1, unofficial].
+4.  **Lookup:** To retrieve attributes for a voxel at $(x,y,z)$, compute $idx = h(x,y,z)$ and return $T[idx]$. This operation is $O(1)$ [S1, unofficial].
+
+**Parameters:**
+*   **Memory Overhead:** The hash table size is fixed at approximately $2 \times N$ voxels [S1, unofficial].
+
+**Pitfalls:**
+*   **Dynamic Scenes:** Standard spatial hashing is generally unsuitable for dynamic scenes due to fragmentation and the need for re-hashing [S1, unofficial].
+*   **Rounding Errors:** Transforming voxels already in GPU memory using floating-point transformation matrices leads to rounding errors, causing holes in the voxel grid [S1, unofficial].
+
+**Pseudocode:**
+> **Unverified code.** The code below did not pass a test run against a reference implementation, or no test fits it, so it may contain errors.
+
+```python
+# Assuming a perfect hash function h exists that maps (x,y,z) to a unique index
+# and a table T of size 2 * total_voxels is pre-allocated.
+
+def store_voxel(x, y, z, attributes):
+    """Store voxel attributes at the computed hash location."""
+    idx = hash_function_3d(x, y, z)
+    T[idx] = attributes
+
+def lookup_voxel(x, y, z):
+    """Retrieve voxel attributes in O(1) time."""
+    idx = hash_function_3d(x, y, z)
+    return T[idx]
+
+def transform_object_voxels(object_voxels, transformation_matrix):
+    """
+    Transform voxels of an object and recalculate the hash table.
+    object_voxels: List of (x, y, z, attributes) for the object.
+    """
+    # 1. Transform positions on GPU to avoid rounding errors from existing grid positions
+    # This reads "original" voxels stored independently in GPU memory
+    new_voxels = []
+    for (x, y, z, attrs) in object_voxels:
+        # Apply transformation matrix to (x,y,z)
+        # Note: Source implies this is done on GPU for parallelism
+        new_pos = apply_matrix(transformation_matrix, (x, y, z))
+        new_voxels.append((new_pos, attrs))
+    
+    # 2. Recalculate spatial hash table in real-time
+    # This involves rebuilding T or updating entries for the transformed voxels
+    # The source notes this takes a few milliseconds
+    rebuild_hash_table(new_voxels)
+```
+
+## Subtopics
+
+### GPU-based Dynamic Voxel Transformation & Hash Recalculation
+This variant handles dynamic scenes by transforming all voxels of an object on the GPU using a transformation matrix and recalculating the spatial hash table in real-time immediately after transformation to maintain $O(1}$ lookup validity [S1, unofficial]. It is chosen when dynamic scene updates are required, despite the general unsuitability of spatial hashing for dynamic data [S1, unofficial]. The transformation and recalculation for an object take a few milliseconds [S1, unofficial]. It avoids rounding errors by recalculating the scene entirely on the GPU by linearly reading out original voxels, rather than transforming existing grid positions [S1, unofficial].
+
+## Operating characteristics
+*   **Time Complexity:** Lookup time is $O(1)$ constant time, compared to linear lookup time in RLE approaches [S1, unofficial].
+*   **Memory Complexity:** Memory overhead is approximately 2 times the total number of voxels in the scene [S1, unofficial].
+*   **Performance:** Real-time recalculation of the spatial hash table for scene blocks takes a few milliseconds using a hybrid GPU/CUDA + SSE2 approach [S1, unofficial].
+*   **Strengths:** Extremely cheap constant-time lookup; supports streaming new blocks of voxel data; suitable for dynamic scenes when combined with GPU recalculation [S1, unofficial].
+*   **Limitations:** High memory overhead (2x voxel count); standard spatial hashing is unsuitable for dynamic scenes due to fragmentation; requires complex hybrid GPU/CPU implementation for dynamic updates [S1, unofficial].
+*   **When to use:** When fast, constant-time voxel lookup is critical and memory is available, particularly for dynamic scenes where RLE linear scans are too slow [S1, unofficial].
+*   **When not to use:** When memory is extremely constrained or when the scene is static and RLE offers better compression [S1, unofficial].
+
+## Background
+This method was implemented by Ken Silverman for real-time voxel raytracing, as described in a forum archive [S1, unofficial]. It was developed to address the limitations of his original RLE approach, specifically to enable very fast real-time recalculation of voxels for dynamic scenes and streaming [S1, unofficial].
+
+## Sources
+[S1] Forum archive / Ken Silverman / Real-time voxel raytracing, in development.., https://www.jonof.id.au/forum/topic-1433.html, fetched 2026-10-26 (unofficial)

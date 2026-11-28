@@ -1,0 +1,114 @@
+# Voxel Volume Generation
+Also called: Compute Kernel Voxel Generation, Procedural Voxel Volume Generation
+
+## Overview
+Voxel Volume Generation is a procedural method that computes voxel values on-the-fly or via compute shaders by evaluating a generation graph or function at specific world-space coordinates, rather than rasterizing geometry or carving from images. It differs from [VoxelGrid from Mesh (Fill Method)](1013-voxelgrid-from-mesh-fill-method.md) and [Voxel Carving](1213-voxel-carving.md) by decoupling the volume representation from explicit geometric primitives, allowing for infinite or dynamic domains defined by mathematical functions or shader scripts [S1, unofficial][S2].
+
+## How it works
+**Inputs and Outputs:**
+*   **Inputs:**
+    *   `numberOfVoxels`: `uint3` defining the grid dimensions $(N_x, N_y, N_z)$ [S1, unofficial].
+    *   `voxelSpacing`: `float` defining the physical size of a single voxel [S1, unofficial].
+    *   `voxelVolumeToWorldSpaceOffset`: `float3` defining the translation from the voxel volume's local center to world space [S1, unofficial].
+    *   `generationGraph`: A function or shader script that takes a world position and returns a `Voxel` structure (containing density, color, material, etc.) [S1, unofficial][S2].
+*   **Outputs:**
+    *   `voxelVolume`: A `RWStructuredBuffer<PackedVoxel>` storing the resulting voxel data. The buffer size is $N_x \times N_y \times N_z$ [S1, unofficial].
+
+**Data Structures:**
+*   **PackedVoxel:** The specific layout of `PackedVoxel` is not detailed in the sources, but it is stored in a 1D structured buffer [S1, unofficial].
+*   **Indexing:** The 3D coordinate $(x, y, z)$ is mapped to a 1D array index using row-major storage where X is the fastest varying dimension [S1, unofficial]:
+    $$ \text{index} = x + y \cdot N_x + z \cdot (N_x \cdot N_y) $$
+    In vector notation:
+    $$ \text{index} = \text{dot}(\text{coordinate}, \text{uint3}(1, N_x, N_x \cdot N_y)) $$
+
+**Coordinate Transformation:**
+The method converts the discrete voxel ID to a continuous world position before evaluation [S1, unofficial]:
+1.  **Voxel to Local Space:** The voxel ID (integer coordinate) is converted to a local space position centered at the origin. The formula accounts for the voxel spacing and centers the volume:
+    $$ \text{localPosition} = \text{voxelSpacing} \cdot (\text{voxelID} - 0.5 \cdot (\text{numberOfVoxels} - 1.0)) $$
+    *Note: The source code implies an implicit or explicit `position = 0.0f` offset in the call `VoxelToVoxelVolumeSpace(voxelID)` before applying the world offset [S1, unofficial].*
+2.  **Local to World Space:**
+    $$ \text{worldPosition} = \text{localPosition} + \text{voxelVolumeToWorldSpaceOffset} $$
+
+**Algorithm Steps:**
+1.  Dispatch a compute kernel (e.g., `GenerateVoxelVolume`) with thread groups of size $[4, 4, 4]$ [S1, unofficial].
+2.  Each thread identifies its voxel using `SV_DispatchThreadID` (denoted as `voxelID`) [S1, unofficial].
+3.  Check if `voxelID` is within bounds ($0 \le x < N_x$, etc.). If out of bounds, return immediately [S1, unofficial].
+4.  Calculate `worldPosition` using the transformation formulas above [S1, unofficial].
+5.  Evaluate the procedural generation graph at `worldPosition` to obtain a `Voxel` object: `voxel = EvaluateGenerationGraph(worldPosition)` [S1, unofficial].
+6.  Store the `voxel` in the `voxelVolume` buffer at the index calculated from `voxelID` [S1, unofficial].
+
+**Pseudocode:**
+> **Unverified code.** The code below did not pass a test run against a reference implementation, or no test fits it, so it may contain errors.
+
+```python
+# Constants passed from host
+NUM_THREADS_X = 4
+NUM_THREADS_Y = 4
+NUM_THREADS_Z = 4
+
+# Shader/Kernel Entry Point
+def GenerateVoxelVolume(voxelID: uint3, 
+                        numberOfVoxels: uint3, 
+                        voxelSpacing: float, 
+                        voxelVolumeToWorldSpaceOffset: float3,
+                        voxelVolume: RWStructuredBuffer[PackedVoxel]):
+    
+    # 1. Bounds Check
+    if voxelID.x >= numberOfVoxels.x or \
+       voxelID.y >= numberOfVoxels.y or \
+       voxelID.z >= numberOfVoxels.z:
+        return
+
+    # 2. Convert Voxel ID to Local Space (Centered)
+    # Formula: voxelSpacing * (voxelID - 0.5 * (numberOfVoxels - 1.0))
+    localPosition = voxelSpacing * (voxelID - 0.5 * (numberOfVoxels - 1.0))
+
+    # 3. Convert to World Space
+    worldPosition = localPosition + voxelVolumeToWorldSpaceOffset
+
+    # 4. Evaluate Procedural Graph
+    # The graph function is external to this kernel but defined by the user/application
+    voxel = EvaluateGenerationGraph(worldPosition)
+
+    # 5. Calculate 1D Index (Row-major, X fastest)
+    index = voxelID.x + voxelID.y * numberOfVoxels.x + voxelID.z * (numberOfVoxels.x * numberOfVoxels.y)
+
+    # 6. Store Result
+    voxelVolume[index] = PackedVoxel(voxel)
+```
+
+**Parameters and Edge Cases:**
+*   **Thread Group Size:** Fixed at $[4, 4, 4]$ in the reference implementation [S1, unofficial].
+*   **Precision:** Floating-point precision in `worldPosition` calculation may affect high-resolution volumes or large world offsets.
+*   **Boundary Conditions:** The bounds check prevents out-of-bounds memory access [S1, unofficial].
+*   **Generation Graph:** The specific implementation of `EvaluateGenerationGraph` is user-defined. In the MagicaVoxel variant, this is a GLSL script [S2].
+
+## Subtopics
+
+### Voxel Shader
+A GLSL-based scripting system within MagicaVoxel that generates custom voxel volumes through iterative shader execution [S2]. It allows for dynamic, procedural generation using a console command interface (`xs [shader name] [args...]`) [S2]. Unlike the general compute kernel approach which evaluates a static graph per voxel, Voxel Shader supports iterative refinement and frame-based animation [S2].
+*   **Parameters:**
+    *   `iFrame`: Current frame index [S2].
+    *   `iNumFrames`: Total number of frames [S2].
+    *   `iIter`: Current iteration index [S2].
+    *   `iRand`: A `vec4` random number updated every iteration and frame [S2].
+*   **Execution:**
+    *   Iteration count is specified via the `-n` flag (e.g., `xs -n 8 [shaderName]`) [S2].
+    *   Frame targeting uses `-prev` (previous frame) or `-cur` (current frame) flags, defaulting to `-prev` [S2].
+*   **When to choose:** Use when dynamic, animated, or interactive procedural generation is required within a voxel editor context, rather than static pre-computed volumes [S2].
+
+## Operating characteristics
+*   **Time Complexity:** $O(N_x \cdot N_y \cdot N_z)$, as every voxel in the defined domain is evaluated exactly once [S1, unofficial].
+*   **Memory Complexity:** $O(N_x \cdot N_y \cdot N_z)$ for the output buffer [S1, unofficial].
+*   **Performance:** Highly parallelizable on GPU via compute shaders [S1, unofficial]. Performance is limited by the complexity of the `EvaluateGenerationGraph` function rather than geometric intersection tests [S1, unofficial].
+*   **Strengths:** Supports infinite or very large domains without explicit mesh storage; easily animatable via shader inputs [S2]; no need for rasterization or marching cubes preprocessing [S1, unofficial].
+*   **Limitations:** Requires a procedural definition (function/shader) for the volume; cannot directly represent arbitrary static mesh geometry without a complex implicit function [S1, unofficial].
+*   **When to use:** Procedural content generation, animated volumes, or when the volume definition is mathematical rather than geometric [S1, unofficial][S2].
+*   **When not to use:** When converting existing static mesh assets to voxels (use [VoxelGrid from Mesh (Fill Method)](1013-voxelgrid-from-mesh-fill-method.md)) or when reconstructing from images (use [Voxel Carving](1213-voxel-carving.md)) [S1, unofficial].
+
+## Background
+The method originates from GPU-based procedural voxel generation techniques, specifically implemented in the open-source project "Voxels" by Tantenfisch [S1, unofficial]. It leverages DirectX Compute Shaders (`[numthreads(4, 4, 4)]`) to map world-space positions to voxel values via a generation graph [S1, unofficial]. A related implementation exists in MagicaVoxel as "Voxel Shader," introduced in version 0.97.1 (Feb 15, 2016), which uses GLSL for iterative volume generation [S2].
+
+## Sources
+[S1] Tantenfisch/Voxels, https://github.com/Tantenfisch/Voxels, fetched 2026-10-26 (unofficial)
+[S2] MagicaVoxel .vox, https://ephtracy.github.io/, fetched 2026-10-26

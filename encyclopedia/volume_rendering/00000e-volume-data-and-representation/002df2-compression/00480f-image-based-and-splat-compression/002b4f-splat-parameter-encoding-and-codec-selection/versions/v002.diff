@@ -1,0 +1,261 @@
+--- v001.md
++++ v002.md
+@@ -4,163 +4,118 @@
+ 
+ ## Overview
+-This method defines the binary layout and compression pipeline for 3D Gaussian Splat parameters (centres, scales, rotations, amplitudes, and spherical harmonics) to minimize storage size while maintaining high-fidelity rendering. It solves the problem of excessive memory bandwidth and storage requirements for large-scale Gaussian splat scenes by applying specific quantization schemes per parameter type and a width-aware codec policy. It is distinguished from general volume compression by its focus on the specific statistical properties of Gaussian splat attributes (e.g., Cholesky factors for rotation) and its optimization for both native and WebAssembly browser decoding [S1, S2, unofficial].
++This method defines the storage format and compression pipeline for 3D Gaussian Splat parameters, reducing file size from 30–37 bytes/splat to 8.8–12.7 bytes/splat while maintaining high rendering fidelity [S1, unofficial]. It differs from generic volume compression by applying width-aware, per-data-type codec policies and specific byte-shuffling rules to spatially bucketed splat attributes, rather than treating the volume as a uniform grid [S1, unofficial].
+ 
+ ## How it works
+-**Inputs:** Raw 3D Gaussian splat parameters (position, scale, rotation, color/amplitude, spherical harmonics coefficients) typically stored in float32.
+-**Outputs:** A compressed binary stream (`.ksplat` format) with a target size of 8.8–12.7 bytes/splat [S1, unofficial].
++**Inputs:** Float32 Gaussian Splat parameters (centres, scales, rotations, opacities, spherical harmonics coefficients).
++**Outputs:** Compressed `.ksplat` byte stream.
+ 
+-### Data Structures and Layout
+-The store organizes parameters into four primary arrays, each with specific quantization and encoding rules [S1, unofficial]:
++**Data Structures and Layout:**
++The store organizes splat parameters into four distinct arrays, each with specific quantization and encoding rules [S1, unofficial]:
++1.  **Centres:** 3D position vectors. Quantized to `uint16`.
++2.  **Cholesky Factors:** Derived from scale/rotation matrices. Certified to `uint8`.
++3.  **Amplitudes:** Opacity and SH coefficients. Quantized to either bounded-linear `uint8`/`uint16` or geometric-log `uint16`, selected based on the array's dynamic range.
++4.  **Spherical Harmonics:** Coefficients encoded similarly to amplitudes.
+ 
+-1.  **Centres (Positions):**
+-    *   **Type:** `uint16` (16-bit unsigned integer).
+-    *   **Encoding:** Quantized coordinates.
+-2.  **Cholesky Factors (Rotation/Scale):**
+-    *   **Type:** `uint8` (8-bit unsigned integer).
+-    *   **Constraint:** "Certified" values, implying bounds checking or specific range constraints to ensure valid rotation matrices upon reconstruction.
+-3.  **Amplitudes (Color/Intensity):**
+-    *   **Type:** `uint8` or `uint16`.
+-    *   **Selection Logic:** Selected based on the array's dynamic range. Options include:
+-        *   Bounded-linear `uint8`/`uint16`.
+-        *   Geometric-log `uint16` grid.
+-4.  **Spherical Harmonics (SH):**
+-    *   **Type:** Implicitly handled within the codec sweep, though specific bit-depths are not detailed in the provided notes beyond the general codec policy.
++**Compression Pipeline:**
++1.  **Quantization:** Float32 values are mapped to the integer grids defined above. The quantization fidelity loss is at most −0.679 dB (median −0.012 dB) against original float32 fits [S1, unofficial].
++2.  **Prefiltering (Centres):** A columnar delta prefilter is applied to the centre coordinates to enhance compressibility [S1, unofficial].
++3.  **Chunking:** Data is divided into chunks. The shipped configuration uses atom-aligned chunks to mitigate specific codec anomalies [S1, unofficial].
++4.  **Codec Selection:** The Blosc library with the zstd compressor at level 9 is used [S1, unofficial]. A width-aware per-dtype compressor policy is applied natively and via WebAssembly [S1, unofficial].
++5.  **Byte Shuffling:**
++    *   Multi-byte integer codes: Byte shuffle is applied.
++    *   Single-byte codes and floating-point arrays: Byte shuffle is skipped.
++    *   Log-companded amplitude codes: In the optimized configuration, these are left unshuffled to reduce size by 1.44% [S1, unofficial].
+ 
+-### Compression Pipeline
+-The compression process follows these steps:
++**Parameters:**
++*   **Codec:** Blosc-zstd level 9 [S1, unofficial].
++*   **Chunk Size:** Atom-aligned (specific size not given, but anomalies noted at 64 KiB) [S1, unofficial].
++*   **Shuffle Policy:** Conditional on data type width [S1, unofficial].
+ 
+-1.  **Quantization:**
+-    *   Centres are quantized to `uint16`.
+-    *   Cholesky factors are quantized to `uint8`.
+-    *   Amplitudes are quantized to either bounded-linear or geometric-log grids (`uint8`/`uint16`) based on dynamic range analysis [S1, unofficial].
+-    *   *Note:* The quantization fidelity loss is at most $-0.679$ dB (median $-0.012$ dB) relative to original float32 fits. The PSNR of the quantised render relative to the float32 render is 59–88 dB [S1, unofficial].
++**Pitfalls:**
++*   **Blosc Shuffle Anomaly:** A level-dependent anomaly occurs on 64 KiB chunks. This is mitigated by using atom-aligned chunks and the columnar delta prefilter on centres [S1, unofficial].
++*   **Re-chunking Penalty:** Re-chunking the shipped rule to 64 KiB without the prefilter increases size to 10.09 bytes/splat [S1, unofficial].
+ 
+-2.  **Prefiltering (Centres Only):**
+-    *   Apply **columnar delta prefiltering** to the centres array. This reduces redundancy between adjacent splats in the sorted order, improving compression ratio [S1, unofficial].
++**Pseudocode:**
++```python
++def encode_splats(splats: List[Splat], config: Config) -> bytes:
++    # 1. Extract and Quantize Arrays
++    centres = quantize_uint16(splats.centres)
++    cholesky = quantize_uint8(splats.cholesky_factors)
++    amplitudes = select_quantization_grid(splats.amplitudes) # Bounded-linear or Geometric-log
++    
++    # 2. Prefilter Centres
++    centres_delta = columnar_delta_prefilter(centres)
++    
++    # 3. Prepare Arrays for Compression
++    # Note: Amplitudes may be log-companded depending on dynamic range
++    arrays = [centres_delta, cholesky, amplitudes]
++    
++    # 4. Apply Codec Policy (Blosc-zstd level 9)
++    compressed_arrays = []
++    for arr in arrays:
++        dtype = arr.dtype
++        # Byte shuffle logic
++        if dtype == 'uint16' or dtype == 'int32': # Multi-byte integer
++            arr_shuffled = byte_shuffle(arr)
++        else: # Single-byte or float
++            arr_shuffled = arr
++            
++        # Compress
++        # chunk_size is atom-aligned to avoid 64 KiB anomaly
++        compressed = blosc_compress(arr_shuffled, 
++                                    clevel=9, 
++                                    cname='zstd', 
++                                    shuffle=True if dtype in ['uint16', 'int32'] else False)
++        compressed_arrays.append(compressed)
++        
++    # 5. Serialize
++    # Header: metadata about quantization grids, chunk sizes, etc.
++    header = serialize_header(config, arrays)
++    return header + join_chunks(compressed_arrays)
+ 
+-3.  **Codec Selection and Chunking:**
+-    *   **Codec:** Blosc with Zstd compressor at level 9.
+-    *   **Chunking:** Data is split into chunks. The default shipped configuration uses atom-aligned chunks. A specific anomaly occurs with Blosc shuffle on 64 KiB chunks, which is mitigated by atom alignment [S1, unofficial].
+-    *   **Byte Shuffle Policy:**
+-        *   **Multi-byte integer codes:** Apply byte shuffle.
+-        *   **Single-byte codes:** Skip byte shuffle.
+-        *   **Floating-point arrays:** Skip byte shuffle.
+-        *   **Optimized Configuration:** Leave log-companded amplitude codes unshuffled to reduce size by an additional 1.44% [S1, unofficial].
+-
+-4.  **Entropy Coding:**
+-    *   Handled internally by the Blosc/Zstd pipeline. The policy is width-aware and per-dtype [S1, unofficial].
+-
+-### Pseudocode
+-```python
+-def encode_splats(splats_float32):
+-    """
+-    Encodes splat parameters into the Luxar store format.
+-    splats_float32: List of dicts with keys 'pos', 'cholesky', 'amp', 'sh'
+-    Returns: bytes (compressed stream)
+-    """
+-    # 1. Separate arrays
+-    centres = [s['pos'] for s in splats_float32]
+-    choleskys = [s['cholesky'] for s in splats_float32]
+-    amplitudes = [s['amp'] for s in splats_float32]
+-    sh_coeffs = [s['sh'] for s in splats_float32]
+-
+-    # 2. Quantization
+-    # Centres: uint16
+-    centres_quant = quantize_uint16(centres)
++def decode_splats(data: bytes) -> List[Splat]:
++    header, chunks = parse_header_and_chunks(data)
+     
+-    # Cholesky: uint8 (certified)
+-    choleskys_quant = quantize_uint8_certified(choleskys)
++    # 1. Decompress
++    decompressed_chunks = []
++    for chunk in chunks:
++        # Reverse shuffle if applied
++        raw = blosc_decompress(chunk)
++        if needs_shuffle(chunk.dtype):
++            raw = byte_unshuffle(raw)
++        decompressed_chunks.append(raw)
++        
++    # 2. Inverse Prefilter
++    centres_delta = decompressed_chunks[0]
++    centres = columnar_delta_unfilter(centres_delta)
+     
+-    # Amplitudes: Select grid based on dynamic range
+-    amp_dynamic_range = calculate_dynamic_range(amplitudes)
+-    if amp_dynamic_range < THRESHOLD_LINEAR:
+-        amplitudes_quant = quantize_bounded_linear_uint8(amplitudes)
+-        amp_is_float = False
+-        amp_is_log = False
+-    elif amp_dynamic_range < THRESHOLD_LOG:
+-        amplitudes_quant = quantize_bounded_linear_uint16(amplitudes)
+-        amp_is_float = False
+-        amp_is_log = False
+-    else:
+-        amplitudes_quant = quantize_geometric_log_uint16(amplitudes)
+-        amp_is_float = False
+-        amp_is_log = True
+-
+-    # 3. Prefiltering (Centres)
+-    # Columnar delta prefiltering on centres
+-    centres_prefiltered = columnar_delta_prefilter(centres_quant)
+-
+-    # 4. Codec Configuration (Blosc-zstd level 9)
+-    # Determine shuffle policy per array
+-    def get_shuffle_policy(dtype, is_log_amp=False):
+-        if dtype == 'uint8':
+-            return False # Single-byte: skip shuffle
+-        elif dtype == 'uint16':
+-            if is_log_amp:
+-                return False # Optimized: leave log-companded unshuffled
+-            else:
+-                return True  # Multi-byte integer: apply shuffle
+-        elif dtype == 'float32':
+-            return False # Floating-point: skip shuffle
+-        return True # Default for others
+-
+-    # Encode each array
+-    centres_bytes = blosc_compress(centres_prefiltered, 
+-                                   compressor='zstd', 
+-                                   level=9, 
+-                                   shuffle=get_shuffle_policy('uint16'))
+-    
+-    choleskys_bytes = blosc_compress(choleskys_quant, 
+-                                     compressor='zstd', 
+-                                     level=9, 
+-                                     shuffle=get_shuffle_policy('uint8'))
+-    
+-    amplitudes_bytes = blosc_compress(amplitudes_quant, 
+-                                      compressor='zstd', 
+-                                      level=9, 
+-                                      shuffle=get_shuffle_policy('uint16', is_log_amp=amp_is_log))
+-    
+-    # SH encoding details not fully specified in notes; assume standard float32 or quantized uint16/8
+-    # Placeholder for SH encoding logic
+-    sh_bytes = blosc_compress(sh_coeffs, 
+-                              compressor='zstd', 
+-                              level=9, 
+-                              shuffle=get_shuffle_policy('float32'))
+-
+-    # 5. Assemble Stream
+-    # Header: metadata about chunk sizes, dtypes, shuffle flags
+-    header = create_header(centres_bytes, choleskys_bytes, amplitudes_bytes, sh_bytes)
+-    
+-    return header + centres_bytes + choleskys_bytes + amplitudes_bytes + sh_bytes
++    # 3. Dequantize
++    splats = []
++    for i in range(num_splats):
++        splat = Splat()
++        splat.centres = dequantize_uint16(centres[i])
++        splat.cholesky = dequantize_uint8(decompressed_chunks[1][i])
++        splat.amplitudes = dequantize_amplitudes(decompressed_chunks[2][i], config.grid_type)
++        splats.append(splat)
++        
++    return splats
+ ```
+-
+-### Parameters and Typical Values
+-*   **Codec:** Blosc-zstd level 9 [S1, unofficial].
+-*   **Chunk Size:** Atom-aligned chunks recommended to avoid 64 KiB shuffle anomaly. Re-chunking to 64 KiB without prefilter increases size to 10.09 bytes/splat [S1, unofficial].
+-*   **Target Size:** 9.63 bytes/splat (shipped rule), 9.50 bytes/splat (optimized unshuffled log-amplitude config) [S1, unofficial].
+-*   **Baseline Comparison:** 14.3% below uniform Blosc-zstd level-3 bit-shuffle baseline; 15.6% below baseline at 64 KiB [S1, unofficial].
+-
+-### Edge Cases and Pitfalls
+-*   **64 KiB Shuffle Anomaly:** Level-dependent Blosc shuffle anomaly occurs on 64 KiB chunks. Mitigation: Use atom-aligned chunks and columnar delta prefiltering on centres [S1, unofficial].
+-*   **Dynamic Range Selection:** Incorrect selection of amplitude quantization grid (linear vs. log) can lead to suboptimal compression or precision loss. Selection must be based on the array's dynamic range [S1, unofficial].
+-*   **Browser vs. Native Performance:** Decoding throughput varies significantly between environments. In-browser (WebAssembly): 138–215 MB/s. Native: 326–592 MB/s [S1, unofficial].
+ 
+ ## Subtopics
+ 
+ ### [Ksplat Decompression](6899-ksplat-decompression.md)
+-Decompresses a `.ksplat` file (compressed 3D Gaussian Splat) into a structured DataTable format for rendering. It handles position quantization, scale/rotation decompression, and spherical harmonics decoding. This is the inverse operation of the encoding method described above.
++Ksplat Decompression reads and decompresses `.ksplat` files, which contain spatially bucketed and quantized 3D Gaussian Splat data, into a structured `DataTable` format suitable for rendering. It handles position quantization, scale/rotation compression, and spherical harmonics decoding. Unlike raw PLY formats, it supports three distinct compression modes (Float32, Float16, Uint8) to balance file size and precision, and uses spatial bucketing to optimize position storage.
+ 
+ ## Operating characteristics
+-*   **Compression Ratio:** Reduces store size from 30–37 bytes/splat (float32) to 8.8–12.7 bytes/splat [S1, unofficial].
+-*   **Quality:** Quantisation PSNR loss vs original is at most $-0.679$ dB (median $-0.012$ dB). Quantised render PSNR vs float32 render is 59–88 dB [S1, unofficial].
+-*   **Throughput:**
+-    *   In-browser (WebAssembly): 138–215 MB/s [S1, unofficial].
+-    *   Native: 326–592 MB/s [S1, unofficial].
+-*   **Strengths:** High compression ratio with minimal perceptual loss; optimized for both native and web environments; specific handling of Gaussian splat statistics (Cholesky, log-amplitude).
+-*   **Limitations:** Complexity in codec configuration (shuffle policies, chunk alignment); potential performance degradation in browsers due to WebAssembly overhead; specific anomaly on 64 KiB chunks requires careful chunking [S1, unofficial].
+-*   **When to Use:** When storage size and loading speed are critical, especially for web-based viewers or large-scale scenes. Not suitable if maximum floating-point precision is required for scientific analysis beyond the quantization error bounds [S1, S2, unofficial].
++*   **Compression Ratio:** Reduces store size from 30–37 bytes/splat to 8.8–12.7 bytes/splat [S1, unofficial].
++*   **Shipped Rule Storage:** 9.63 bytes/splat (10.09 bytes/splat if re-chunked to 64 KiB without prefilter, 14.3% below uniform Blosc-zstd level-3 bit-shuffle baseline) [S1, unofficial].
++*   **Optimized Configuration:** 9.50 bytes/splat (15.6% below baseline at 64 KiB) when log-companded amplitude codes are left unshuffled [S1, unofficial].
++*   **Decoding Throughput:** 138–215 MB/s in-browser (WebAssembly), 326–592 MB/s natively on identical chunk sets on a benchmark workstation [S1, unofficial].
++*   **Quality:** Quantisation PSNR loss vs original is at most −0.679 dB (median −0.012 dB). Quantised render PSNR vs float32 render is 59–88 dB [S1, unofficial].
++*   **Strengths:** High compression ratio with minimal perceptual loss; optimized for web and native decoding; cache-friendly ordering.
++*   **Limitations:** Requires specific codec configuration (Blosc-zstd level 9) and chunk alignment to avoid anomalies; not compatible with progressive loading optimizations of standard PLY/SPLAT formats [S2, unofficial].
+ 
+ ## Background
+-The method originates from the Luxar project, which focuses on Gaussian splatting for microscopy and scalable interactive web visualization of multidimensional scientific data. The specific encoding and codec selection strategies were detailed in supplementary documents accompanying the main publication, addressing quantization fidelity and codec sweep results [S1, unofficial]. The `.ksplat` format was also popularized by the GaussianSplats3D project (mkkellogg) as a trimmed-down, compressed version of `.ply` files for faster loading in web viewers [S2, unofficial].
++This method originates from the Luxar project, which focuses on Gaussian splatting for microscopy and scalable interactive web visualization of multidimensional scientific data [S1, unofficial]. The `.ksplat` format was introduced by the GaussianSplats3D project (mkkellogg) as a trimmed-down and compressed version of original `.ply` files, designed for fastest loading times by matching the internal format for splat data [S2, unofficial].
+ 
+ ## Sources

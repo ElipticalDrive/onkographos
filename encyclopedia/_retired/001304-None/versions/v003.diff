@@ -1,0 +1,286 @@
+--- v002.md
++++ v003.md
+@@ -1,147 +1,179 @@
+-# Visible Block Faces
++# Face Culling Voxel Meshing
+ 
+-Also called: Mesh Culled, optimizeVoxels, simple meshing
++Also called: Naive Voxel Meshing with Culling, Voxel Mesh Generation with Face Culling, Voxel Chunk Mesh Generation with Face Culling, Visible Block Faces, Naive Chunk Meshing, simple meshing, Naive Meshing
+ 
+ ## Overview
+-Visible Block Faces is a voxel surface extraction method that generates a single quad for every visible face of a voxel block, culling faces where the neighbor is solid [S1, S3, unofficial][S4]. It solves the problem of redundant geometry generation by removing hidden faces between adjacent opaque full cubes [S2, unofficial]. Unlike [Greedy Meshing](3674-gpu-marching-cubes-face-based.md), which merges adjacent coplanar faces into larger rectangles, Visible Block Faces produces suboptimal but quickly generated meshes with minimal computational overhead [S3, unofficial][S4]. It builds on [Voxel Chunk Meshing with Culling](2523-voxel-chunk-meshing-with-culling.md) by implementing the culling logic directly during mesh generation rather than as a post-processing step [G].
++Face Culling Voxel Meshing generates a static triangle mesh for a 3D voxel chunk by iterating through every voxel and emitting geometry only for faces adjacent to empty space (air) or the chunk boundary [S1, S3, S5, S9, S11, unofficial]. It solves the problem of excessive geometry and draw calls inherent in naive per-voxel meshing by culling internal faces shared between adjacent solid voxels [S1, S7, S10, unofficial]. Unlike [Greedy Meshing](3670-gpu-voxel-mesh-generation.md), which merges adjacent coplanar faces into larger rectangles to reduce triangle count, Face Culling generates exactly one quad (two triangles) per exposed face, resulting in a simpler, faster algorithm that produces a larger number of triangles [S2, S7, S10, unofficial]. It serves as the "oracle" or ground-truth reference for verifying the correctness of more complex merging algorithms [S10, unofficial].
+ 
+ ## How it works
+-**Inputs:** A 3D voxel grid (array or hash map) storing voxel states (e.g., material ID or color), grid dimensions ($W \times H \times D$), and a boundary policy ("air" or "solid") [S1, S2, unofficial].
+-**Outputs:** A list of quads, where each quad represents a single visible unit face [S3, unofficial].
++**Inputs and Outputs:**
++*   **Input:** A 3D voxel grid (chunk) where each voxel has a state (e.g., material ID or solid/empty flag). The grid dimensions are typically $W \times H \times D$ (e.g., $32 \times 32 \times 32$ or $16 \times 64 \times 16$) [S5, S6, S11, unofficial].
++*   **Output:** A list of quads (or a vertex/index buffer) representing the visible surface. Each quad corresponds to one exposed face of a solid voxel [S1, S7, S12, unofficial].
+ 
+ **Data Structures:**
+-*   **Voxel State:** An integer or enum representing the material. $0$ typically denotes empty/air [S1, S2, unofficial].
+-*   **Quad:** A structure containing:
+-    *   `axis`: The normal axis ($0, 1, 2$ for X, Y, Z) [S1, unofficial].
+-    *   `dir`: The direction of the normal ($1$ for positive, $-1$ for negative) [S1, unofficial].
+-    *   `slice`: The integer coordinate of the plane the face sits on along the axis [S1, unofficial].
+-    *   `u, v`: The starting coordinates of the quad on the two perpendicular axes [S1, unofficial].
+-    *   `w, h`: The width and height of the quad (always $1$ for this method) [S1, unofficial].
+-    *   `material`: The material ID of the face [S1, unofficial].
+-*   **Axis Constants:**
+-    *   `AXES = [0, 1, 2]`
+-    *   `AXIS_U = [1, 2, 0]` ($u = (axis + 1) \pmod 3$) [S1, unofficial].
+-    *   `AXIS_V = [2, 0, 1]` [S1, unofficial].
++*   **Voxel Grid:** A 3D array or hash map storing voxel states. In array-based implementations, the index for $(x, y, z)$ is often linearized as $x + y \cdot W + z \cdot W \cdot H$ or similar, depending on memory layout [S2, S6, unofficial].
++*   **Quad Representation:** Each generated face is represented by its axis, direction, slice coordinate, position, dimensions, and material ID [S1, S12, unofficial]. A minimal quad struct includes:
++    *   `axis`: The normal axis (0=X, 1=Y, 2=Z).
++    *   `dir`: The direction sign (+1 or -1).
++    *   `slice`: The integer coordinate along the axis where the face lies.
++    *   `u, v`: The starting coordinates on the plane's local axes.
++    *   `w, h`: The width and height of the face (always 1 for naive culling).
++    *   `material`: The ID of the voxel material.
++    [S1, S12, unofficial]
++
++**Boundary Policy:**
++The behavior at chunk edges is defined by a policy parameter [S1, S2, unofficial]:
++*   **Air:** Treats out-of-bounds neighbors as empty (material 0). This exposes the chunk's outer surface, creating a visible boundary. If adjacent chunks both use "Air", double walls may appear at the seam [S1, unofficial].
++*   **Solid:** Treats out-of-bounds neighbors as solid. This hides the chunk's outer surface, requiring the renderer to handle multiple chunks seamlessly without gaps or double geometry [S1, unofficial].
+ 
+ **Algorithm Steps:**
+-1.  Initialize an empty list `quads`.
+-2.  Determine `outsideIsSolid` based on the boundary policy: `true` if "solid", `false` if "air" [S1, unofficial].
+-3.  Iterate through every voxel position $(x, y, z)$ in the grid bounds ($0 \le x < W, 0 \le y < H, 0 \le z < D$) [S1, unofficial].
+-4.  Get the material of the current voxel: `mat = chunk.get(x, y, z)` [S1, unofficial].
+-5.  If `mat == 0` (empty), continue to the next voxel [S1, unofficial].
+-6.  For each `axis` in `AXES` (0, 1, 2) [S1, unofficial]:
+-    a.  Calculate `u = AXIS_U[axis]` and `v = AXIS_V[axis]` [S1, unofficial].
+-    b.  For each `dir` in $[1, -1]$ [S1, unofficial]:
+-        i.  Calculate neighbor position: $n_x = x, n_y = y, n_z = z$; then $n_{axis} += dir$ [S1, unofficial].
+-        ii. Check if neighbor is outside chunk bounds: `outside = (n_axis < 0 || n_axis >= size[axis])` [S1, unofficial].
+-        iii. Determine neighbor material:
+-            *   If `outside`: `neighbor_mat = (outsideIsSolid ? 1 : 0)` [S1, unofficial].
+-            *   Else: `neighbor_mat = chunk.get(n_x, n_y, n_z)` [S1, unofficial].
+-        iv. If `neighbor_mat != 0` (neighbor is solid/opaque), the face is hidden; `continue` to the next direction [S1, unofficial].
+-        v.  Calculate `slice`:
+-            *   If `dir == 1`: `slice = p[axis] + 1`
+-            *   If `dir == -1`: `slice = p[axis]` [S1, unofficial].
+-        vi. Create a quad: `makeQuad(axis, dir, slice, p[u], p[v], 1, 1, mat)` [S1, unofficial].
+-        vii. Add the quad to `quads` [S1, unofficial].
++1.  Initialize an empty list for quads.
++2.  Iterate through every voxel $(x, y, z)$ in the chunk grid.
++3.  If the current voxel is empty (state 0), skip to the next voxel [S1, S9, S11, unofficial].
++4.  For each of the 6 face directions (e.g., $\pm X, \pm Y, \pm Z$):
++    a. Calculate the neighbor's coordinates $(nx, ny, nz)$.
++    b. Determine the neighbor's state:
++        i. If $(nx, ny, nz)$ is outside the chunk bounds, apply the Boundary Policy (return 0 for Air, non-0 for Solid).
++        ii. If inside bounds, lookup the voxel state at $(nx, ny, nz)$.
++    c. If the neighbor is empty (state 0), the face is exposed. Generate a quad for this face.
++    d. If the neighbor is solid, the face is internal and is culled (not generated) [S1, S6, S11, unofficial].
++5.  Return the list of generated quads.
+ 
+ **Pseudocode:**
+ ```python
+-def visible_block_faces(chunk, width, height, depth, boundary_policy="air"):
++def face_culling_meshing(chunk_width, chunk_height, chunk_depth, get_voxel, boundary_policy="air"):
++    """
++    Generates a mesh for a voxel chunk using face culling.
++    
++    Args:
++        chunk_width, chunk_height, chunk_depth: Dimensions of the chunk.
++        get_voxel(x, y, z): Function returning the material ID of a voxel.
++                           Returns 0 for empty/air.
++        boundary_policy: "air" or "solid".
++        
++    Returns:
++        A list of Quad objects.
++    """
+     quads = []
+-    outside_is_solid = (boundary_policy == "solid")
+     
+-    # Helper to get voxel material, handling bounds
+-    def get_voxel(x, y, z):
+-        if x < 0 or x >= width or y < 0 or y >= height or z < 0 or z >= depth:
+-            return 1 if outside_is_solid else 0
+-        return chunk.get(x, y, z)
+-
+-    for z in range(depth):
+-        for y in range(height):
+-            for x in range(width):
+-                material = get_voxel(x, y, z)
+-                if material == 0:
++    # Define the 6 face directions: (axis_index, direction_sign, neighbor_offset_axis, neighbor_offset_sign)
++    # axis_index: 0=X, 1=Y, 2=Z
++    # direction_sign: +1 for positive axis face, -1 for negative axis face
++    # neighbor_offset: how to get to the neighbor (e.g., +1 in X for +X face)
++    faces = [
++        (0, 1, 1, 0, 0),  # +X face: normal +X, neighbor at x+1
++        (0, -1, -1, 0, 0), # -X face: normal -X, neighbor at x-1
++        (1, 1, 0, 1, 0),  # +Y face: normal +Y, neighbor at y+1
++        (1, -1, 0, -1, 0), # -Y face: normal -Y, neighbor at y-1
++        (2, 1, 0, 0, 1),  # +Z face: normal +Z, neighbor at z+1
++        (2, -1, 0, 0, -1)  # -Z face: normal -Z, neighbor at z-1
++    ]
++    
++    for z in range(chunk_depth):
++        for y in range(chunk_height):
++            for x in range(chunk_width):
++                # Step 3: Skip empty voxels
++                current_material = get_voxel(x, y, z)
++                if current_material == 0:
+                     continue
+                 
+-                # Axis 0 (X), 1 (Y), 2 (Z)
+-                for axis in [0, 1, 2]:
+-                    u = (axis + 1) % 3
+-                    v = (axis + 2) % 3
++                # Step 4: Check each of the 6 faces
++                for axis, dir_sign, nx_off, ny_off, nz_off in faces:
++                    # Calculate neighbor coordinates
++                    nx = x + nx_off
++                    ny = y + ny_off
++                    nz = z + nz_off
+                     
+-                    for dir in [1, -1]:
+-                        # Neighbor coordinates
+-                        nx, ny, nz = x, y, z
+-                        if axis == 0: nx += dir
+-                        elif axis == 1: ny += dir
+-                        else: nz += dir
+-                        
+-                        # Check bounds and get neighbor material
+-                        if nx < 0 or nx >= width or ny < 0 or ny >= height or nz < 0 or nz >= depth:
+-                            neighbor_mat = 1 if outside_is_solid else 0
+-                        else:
+-                            neighbor_mat = chunk.get(nx, ny, nz)
+-                        
+-                        # Cull if neighbor is solid
+-                        if neighbor_mat != 0:
+-                            continue
+-                        
+-                        # Determine slice plane
+-                        if dir == 1:
+-                            slice_val = (x if axis == 0 else y if axis == 1 else z) + 1
+-                        else:
+-                            slice_val = (x if axis == 0 else y if axis == 1 else z)
+-                        
+-                        # Create quad
+-                        # u_start is x if u==0 else y if u==1 else z
+-                        # v_start is x if v==0 else y if v==1 else z
+-                        u_start = x if u == 0 else y if u == 1 else z
+-                        v_start = x if v == 0 else y if v == 1 else z
+-                        
++                    # Determine neighbor state
++                    # Check bounds
++                    if nx < 0 or nx >= chunk_width or \
++                       ny < 0 or ny >= chunk_height or \
++                       nz < 0 or nz >= chunk_depth:
++                        # Apply boundary policy
++                        if boundary_policy == "air":
++                            neighbor_material = 0
++                        else: # solid
++                            neighbor_material = 1 # Non-zero implies solid
++                    else:
++                        neighbor_material = get_voxel(nx, ny, nz)
++                    
++                    # Step 4c: If neighbor is empty, generate face
++                    if neighbor_material == 0:
++                        # Determine slice coordinate and local u,v
++                        # For axis 0 (X), slice is x (for -X) or x+1 (for +X)
++                        # Local axes u, v are the other two dimensions
++                        if axis == 0:
++                            slice_coord = x if dir_sign == -1 else x + 1
++                            u, v = y, z
++                        elif axis == 1:
++                            slice_coord = y if dir_sign == -1 else y + 1
++                            u, v = z, x
++                        else: # axis == 2
++                            slice_coord = z if dir_sign == -1 else z + 1
++                            u, v = x, y
++                            
+                         quads.append({
+                             "axis": axis,
+-                            "dir": dir,
+-                            "slice": slice_val,
+-                            "u": u_start,
+-                            "v": v_start,
++                            "dir": dir_sign,
++                            "slice": slice_coord,
++                            "u": u,
++                            "v": v,
+                             "w": 1,
+                             "h": 1,
+-                            "material": material
++                            "material": current_material
+                         })
++                        
+     return quads
+ ```
+ 
+ **Edge Cases and Pitfalls:**
+-*   **Boundary Conditions:** The behavior of faces on the chunk boundary depends on the `boundary_policy`. "Air" treats the outside as empty, emitting an outer surface (which can cause double walls if chunks are adjacent). "Solid" treats the outside as solid, hiding the outer surface [S1, unofficial].
+-*   **Precision:** Integer coordinates are used for slices and positions, avoiding floating-point errors in face placement [S1, unofficial].
+-*   **Degenerate Input:** Empty chunks produce no quads [S1, unofficial]. Fully solid chunks produce no quads under "solid" policy, or $6 \times W \times H \times D$ quads under "air" policy (if all voxels are solid) [S1, unofficial].
++*   **Precision:** Integer coordinates are used for slice and position, avoiding floating-point errors in face placement [S1, unofficial].
++*   **Boundaries:** Incorrect handling of out-of-bounds checks leads to crashes or incorrect culling. The boundary policy must be consistent across adjacent chunks to avoid gaps or double geometry [S1, S6, unofficial].
++*   **Translucency:** The basic algorithm assumes opaque voxels. If translucent blocks (e.g., water, glass) are present, the culling logic must be extended to check if the neighbor is opaque vs. translucent, as translucent faces may need to be rendered even if adjacent to another translucent block [S7, S10, unofficial].
+ 
+ ## Subtopics
+ 
++### [Culled Voxel Meshing](2392-culled-voxel-meshing.md)
++Culled Voxel Meshing is a surface extraction method that generates a single mesh for a voxel chunk by omitting faces shared between adjacent solid voxels. It solves the problem of excessive geometry and draw calls inherent in naive per-voxel meshing by merging adjacent voxels into one large mesh. It is distinguished from its parent [Face Culling Voxel Meshing](2268-face-culling-voxel-meshing.md) by its explicit handling of chunk boundaries via a `BoundaryPolicy` parameter, and from [Greedy Meshing](3670-gpu-voxel-mesh-generation.md) by its lack of face merging (it produces more polygons but is simpler and faster).
++
++### [GPU Voxel Mesh Generation](3670-gpu-voxel-mesh-generation.md)
++GPU Voxel Mesh Generation is a technique to generate a static triangle mesh from a 3D voxel grid entirely on the GPU, avoiding CPU readback. It identifies exposed faces of active voxels and generates geometry for each face using a multi-pass compute shader pipeline. Unlike CPU-based meshing, which is significantly slower (e.g., 5 FPS vs >1000 FPS for generation alone), this method leverages parallel processing to achieve high performance. It builds on [Voxel Mesh Generation with Face Culling](2411-voxel-mesh-generation-with-face-culling.md) by implementing the face culling logic within a GPU compute shader environment using indirect drawing.
++
+ ### [Face Visibility Check](3701-face-visibility-check.md)
+-Face Visibility Check determines whether a specific voxel face needs to be meshed based on its own visibility state, the neighbor's visibility state, and whether the face has already been processed. It solves the problem of redundant geometry generation by culling hidden faces between two opaque full cubes. Unlike complex partial-shape culling which checks area coverage, this method relies on boolean opacity states to decide if a face is visible.
++Face Visibility Check determines whether a specific voxel face needs to be meshed based on its own visibility state, the neighbor's visibility state, and whether the voxel has already been processed. It solves the problem of redundant geometry generation by culling hidden faces between two opaque full cubes. Unlike complex partial-shape culling which checks area coverage, this method relies on boolean opacity states to decide if a face is visible.
++
++### [Voxel Visibility Map Computation](4046-voxel-visibility-map-computation.md)
++Voxel Visibility Map Computation is a preprocessing step in voxel meshing that determines which faces of solid voxels are exposed to empty space or the chunk boundary, producing a 3D map of visible face flags. It differs from sibling methods by explicitly computing a per-voxel bitmask of visible faces rather than generating mesh primitives directly; [Culled Voxel Meshing](2392-culled-voxel-meshing.md) and [GPU Voxel Mesh Generation](3670-gpu-voxel-mesh-generation.md) may integrate this map or perform visibility checks inline, while [Face Visibility Check](3701-face-visibility-check.md) describes the atomic predicate used within this algorithm.
+ 
+ ### Quad Data Structure
+-Represents a merged rectangular face with axis, direction, slice, position, dimensions, and material [S1, unofficial]. It is the output format for naive, culled, and greedy meshing, allowing comparison of the generated geometry sets [S1, unofficial]. The `makeQuad` function returns an object with fields: `axis` (0|1|2), `dir` (1|-1), `slice` (number), `u` (number), `w` (number), `v` (number), `h` (number), `material` (number) [S1, unofficial]. The triangle indices for a quad depend on `dir`: if `dir=1`, indices are `[0,1,2,0,2,3]`; if `dir=-1`, indices are `[0,3,2,0,2,1]` [S1, unofficial]. The axes `u` and `v` are derived from `axis` using `AXIS_U = [1, 2, 0]` and `AXIS_V = [2, 0, 1]`, ensuring the cross product $\hat{u} \times \hat{v}$ points in the `axis` direction [S1, unofficial].
+-
+-### Culled Voxel Meshing
+-This variant omits faces that are adjacent to another solid voxel [S1, unofficial]. It generates geometry for voxels but culls faces based on a boundary policy (`"air"` or `"solid"`) [S1, unofficial]. On a solid $32^3$ cube, it produces 6,144 quads [S1, unofficial]. On a $32^3$ terrain chunk with 17,191 solid voxels, it produces 6,654 quads, 26,616 vertices, and 13,308 triangles [S1, unofficial]. It reduces geometry compared to naive meshing (6,654 vs 103,146 quads) but produces more than greedy meshing (6,654 vs 2,416 quads) on the same terrain chunk [S1, unofficial]. Performance on an Apple M2 Pro is approximately 2.06 ms median time for the terrain chunk [S1, unofficial].
++Represents a merged rectangular face with axis, direction, slice, position, dimensions, and material [S1, unofficial]. The interface includes fields: `axis` (0|1|2), `dir` (1|-1), `slice` (number), `u` (number), `w` (number), `v` (number), `h` (number), and `material` (number) [S1, unofficial]. The local axes $u$ and $v$ are derived from the normal axis: $u = (axis + 1) \pmod 3$, $v = (axis + 2) \pmod 3$ [S1, unofficial]. This ordering ensures the cross product $\hat{u} \times \hat{v}$ aligns with the normal direction [S1, unofficial].
+ 
+ ### Validator Expected Faces Generation
+-Used to verify meshing correctness by generating a sorted list of expected face tokens. It iterates through every voxel, checks all 6 directions for empty neighbors, and constructs a 64-bit token encoding axis, direction, depth, u, v, and material [S5, unofficial]. The tokens are sorted and returned to allow exact set-equality comparisons against the mesher's output [S5, unofficial].
++A method to generate expected faces for validation purposes. It iterates through all voxels, checks neighbors, and computes face tokens (axis, positive/negative, depth, u, v, material) for each exposed face [S13, unofficial]. The resulting list is sorted to allow comparison with the actual mesh output [S13, unofficial].
+ 
+ ## Operating characteristics
+-**Time Complexity:** $O(N)$, where $N$ is the number of voxels in the chunk. Each voxel is visited once, and for each solid voxel, 6 neighbor checks are performed [S1, S3, unofficial].
+-**Memory Complexity:** $O(F)$, where $F$ is the number of visible faces. The output buffer stores one quad per visible face [S3, unofficial].
+-**Performance:** Visible Block Faces is very fast, generating about 40 million quads per second on a single core of a 2.5 GHz Intel Core i7 [S3, unofficial][S4]. It is significantly faster than Greedy Meshing, which takes about 3 times longer to produce a more optimal mesh with 1/3 of the quads [S3, unofficial][S4].
+-**Strengths:** Simplicity, speed, and deterministic output [S3, unofficial][S4]. It is suitable for real-time applications where mesh generation speed is critical and mesh size is less of a concern [S3, unofficial][S4].
+-**Limitations:** Produces suboptimal meshes with many more triangles than Greedy Meshing. It does not merge adjacent coplanar faces, leading to higher vertex and index counts [S3, unofficial][S4].
++*   **Time Complexity:** $O(N)$, where $N$ is the number of voxels in the chunk. Each voxel is visited once, and 6 neighbor checks are performed [S7, S11, unofficial].
++*   **Memory Complexity:** $O(F)$, where $F$ is the number of exposed faces. In the worst case (all voxels isolated), $F \approx 6N$. In typical terrain, $F \ll 6N$ but still proportional to the surface area [S7, unofficial].
++*   **Performance:** On a single core of a 2.5 GHz Intel Core i7, the algorithm can generate approximately 40 million quads per second [S7, unofficial][S8]. It is significantly faster than greedy meshing, which takes about 3 times longer to produce a mesh with 1/3 of the quads [S7, unofficial][S8].
++*   **Strengths:** Simplicity of implementation, high speed, deterministic output, serves as a correct reference for testing [S7, S10, unofficial].
++*   **Limitations:** Generates more triangles than greedy meshing, leading to higher GPU draw call overhead and vertex buffer size [S7, S10, unofficial]. Does not merge coplanar faces [S10, unofficial].
++*   **When to use:** When mesh generation speed is critical, or as a baseline for testing more complex meshing algorithms [S7, S10, unofficial].
++*   **When not to use:** When minimizing triangle count and draw calls is more important than generation speed, such as in large-scale open worlds with limited GPU bandwidth [S7, S10, unofficial].
+ 
+ ## Background
+-Visible Block Faces is a fast algorithm for generating voxel block meshes, introduced as part of the `block_mesh` Rust crate [S3, unofficial][S4]. It is designed to be a simple, high-performance alternative to Greedy Meshing [S3, unofficial]. The method is also referenced in TypeScript implementations of voxel greedy meshing, where it is compared against Naive and Greedy meshers [S1, unofficial]. A C++ implementation using bitmasks and BFS was also documented [S2, unofficial].
++Face Culling Voxel Meshing is a fundamental technique in voxel-based game development, popularized by games like Minecraft. It was originally described in early Minecraft source code analysis and tutorials, where it was used to generate chunk meshes by iterating over blocks and checking for adjacent air blocks [S3, S6, S11, unofficial]. The method is often referred to as "naive" meshing because it does not perform any face merging, distinguishing it from later optimizations like greedy meshing [S7, S10, unofficial]. It is widely used in educational contexts and as a reference implementation for more advanced voxel rendering techniques [S10, unofficial].
+ 
+ ## Sources
+ [S1] m2-md/voxel-greedy-meshing-typescript, https://github.com/m2-md/voxel-greedy-meshing-typescript, fetched 2026-10-26 (unofficial)
+ [S2] nustxujun/AfterHumanDeclined, https://github.com/nustxujun/AfterHumanDeclined, fetched 2026-10-26 (unofficial)
+-[S3] GitHub - bonsairobo/block-mesh-rs: Generate voxel block meshes in Rust ..., https://github.com/bonsairobo/block-mesh-rs, fetched 2026-10-27 (unofficial)
+-[S4] block_mesh - Rust - Docs.rs, https://docs.rs/block-mesh/latest/block_mesh/, fetched 2026-10-27
+-[S5] dmadevice/streaming-binary-greedy-meshing, https://github.com/dmadevice/streaming-binary-greedy-meshing, fetched 2026-10-27 (unofficial)+[S3] Manolo94/UE5MinecraftClone, https://github.com/Manolo94/UE5MinecraftClone, fetched 2026-10-26 (unofficial)
++[S4] voxel-rs/voxel-rs, https://github.com/voxel-rs/voxel-rs, fetched 2026-10-27 (unofficial)
++[S5] kvxy/exolands, https://github.com/kvxy/exolands, fetched 2026-10-27 (unofficial)
++[S6] scarlyle0/voxel-compare, https://github.com/scarlyle0/voxel-compare, fetched 2026-10-27 (unofficial)
++[S7] GitHub - bonsairobo/block-mesh-rs: Generate voxel block meshes in Rust ..., https://github.com/bonsairobo/block-mesh-rs, fetched 2026-10-27 (unofficial)
++[S8] block_mesh - Rust - Docs.rs, https://docs.rs/block-mesh/latest/block_mesh/, fetched 2026-10-27
++[S9] andrewbloese-00/web_voxel_terrain, https://github.com/andrewbloese-00/web_voxel_terrain, fetched 2026-10-27 (unofficial)
++[S10] nerima-games/mc-meshing, https://github.com/nerima-games/mc-meshing, fetched 2026-10-28 (unofficial)
++[S11] GitHub - ernerdgn/voxel-engine: A voxel engine written from scratch in ..., https://github.com/ernerdgn/voxel-engine, fetched 2026-10-29 (unofficial)
++[S12] GitHub - nicolas-goyon/Voxel-Mesh-Optimization-Library, https://github.com/nicolas-goyon/Voxel-Mesh-Optimization-Library, fetched 2026-10-29 (unofficial)
++[S13] dmadevice/streaming-binary-greedy-meshing, https://github.com/dmadevice/streaming-binary-greedy-meshing, fetched 2026-10-27 (unofficial)

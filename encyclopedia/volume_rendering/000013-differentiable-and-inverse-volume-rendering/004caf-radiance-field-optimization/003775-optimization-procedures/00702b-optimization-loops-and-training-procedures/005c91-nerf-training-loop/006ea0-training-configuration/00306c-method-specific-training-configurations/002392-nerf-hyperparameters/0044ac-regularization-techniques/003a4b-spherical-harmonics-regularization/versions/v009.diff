@@ -1,0 +1,178 @@
+--- v008.md
++++ v009.md
+@@ -4,99 +4,108 @@
+ 
+ ## Overview
+-Spherical Harmonics Regularization is a training strategy that restricts the maximum degree of Spherical Harmonics (SH) during the early stages of optimization to prevent high-frequency overfitting and stabilize geometry reconstruction [S1, S2]. It differs from general density-based floaters removal by directly controlling the frequency bandwidth of the view-dependent radiance representation, ensuring that low-frequency diffuse properties are learned before high-frequency specular details [S1, S2].
++Spherical Harmonics Regularization is a training strategy that restricts the maximum degree of Spherical Harmonics (SH) during the early stages of radiance field optimization to prevent high-frequency overfitting and stabilize geometry reconstruction [S1, S2]. It differs from sibling methods by applying this frequency constraint directly to the SH coefficients within a voxel grid representation, rather than to positional encodings or Fourier features [S2].
+ 
+ ## How it works
+-**Inputs:**
+-*   Training epochs counter $t$.
+-*   Total early-stage epochs $T_{early}$ (typically 5) [S1].
+-*   Maximum SH degree $D_{max}$ (typically 3 or 4 for Plenoxels) [S1, S2].
+-*   Current SH degree limit $D_{curr}$ [S2].
+-
+-**Outputs:**
+-*   Active SH degree mask or limit $D_{curr}$ for the current optimization step [S1, S2].
++**Inputs and Outputs:**
++*   **Input:** Radiance field parameters including voxel opacity, SH coefficients (for degrees 0–3), and potentially white balance/CRF parameters; multi-view LDR images.
++*   **Output:** Updated SH coefficients and other radiance field parameters optimized under the regularization constraint.
+ 
+ **Data Structures:**
+-*   SH Coefficients: Stored per voxel. For degree $l$, there are $2l+1$ coefficients. Total coefficients for degree $L$ is $(L+1)^2$ [S1].
++*   **SH Coefficients:** Stored per voxel. For degree $L$, there are $(L+1)^2$ coefficients. Degrees 0–3 are typically used, totaling $1+4+9+16=30$ coefficients per voxel [S1].
++*   **Mask/State:** A boolean or integer state tracking the maximum allowable SH degree for the current training epoch.
+ 
+ **Steps:**
+-1.  **Initialize:** Set initial maximum SH degree $D_{curr} = 0$ or a low value (e.g., degree 0 or 1) at the start of training [S2].
+-2.  **Curriculum Schedule:** During the early training phase ($t < T_{early}$), gradually increase the allowable SH degree [S1, S2].
+-    *   *Method A (HDR-Plenoxels):* Apply SH masking to coefficients of degrees 2 and 3. Decrease the masking rate by 1/5 per epoch for the first 5 epochs [S1]. After 5 epochs, update all SH degrees with full rate (no masking) [S1].
+-    *   *Method B (F2Plenoxels):* Gradually increase the allowable SH degree as training progresses, following a curriculum schedule [S2].
+-3.  **Apply Mask:** During rendering or gradient computation, zero out or ignore gradients for SH coefficients with degree $l > D_{curr}$ [S1, S2].
+-4.  **Update Limit:** Increment $D_{curr}$ according to the schedule [S1, S2].
+-5.  **Full Resolution:** After $T_{early}$ epochs, enable all SH degrees up to $D_{max}$ [S1].
++1.  **Initialization:** Initialize SH coefficients for all degrees (0–3) [S1].
++2.  **Early Stage Constraint (Epochs 0–4):**
++    *   Restrict the maximum SH degree used for color/feature representation to a low value (e.g., degree 0 or 1, representing diffuse reflectance) [S1, S2].
++    *   Apply "SH masking" to coefficients of higher degrees (specifically degrees 2 and 3) [S1]. This prevents gradients from updating high-frequency components that can cause instability [S1].
++    *   The masking rate decreases by $1/5$ per epoch during these first five epochs [S1]. This implies a gradual release of constraints:
++        *   Epoch 0: Mask all high-frequency (Degree $\ge 2$) coefficients completely.
++        *   Epoch 1: Allow $1/5$ of the high-frequency coefficients to update (or reduce mask strength by 20%).
++        *   Epoch 2: Allow $2/5$ update.
++        *   Epoch 3: Allow $3/5$ update.
++        *   Epoch 4: Allow $4/5$ update.
++    *   *Note:* The exact implementation of "decreasing rate by 1/5" is interpreted as a linear schedule of mask relaxation over the first 5 epochs [S1].
++3.  **Full Optimization (Epoch $\ge 5$):**
++    *   After the early five epochs, update SH coefficients of all degrees with full rate (no masking) [S1].
++4.  **Loss Calculation:**
++    *   Compute the total loss $\mathcal{L} = \mathcal{L}_{recon} + \lambda_{reg} \mathcal{L}_{reg}$, where $\mathcal{L}_{reg}$ incorporates the effect of the masking (effectively zeroing gradients for masked coefficients) [S1].
+ 
+ **Pseudocode:**
+ ```python
+-def get_sh_degree_limit(epoch, total_epochs=5, max_degree=3):
++def spherical_harmonics_regularization_step(epoch, max_epochs_early=5, degrees_to_mask=[2, 3]):
+     """
+-    Returns the maximum SH degree allowed for optimization at the given epoch.
+-    Implements the curriculum schedule from HDR-Plenoxels and F2Plenoxels.
++    Determines the update mask for SH coefficients based on the current epoch.
++    Implements the curriculum schedule from HDR-Plenoxels [S1].
+     """
+-    if epoch < total_epochs:
+-        # Gradually increase degree or reduce masking
+-        # HDR-Plenoxels: Masking decreases by 1/5 per epoch.
+-        # This implies full access is granted progressively.
+-        # A simple interpretation: allow degree 0 initially, then 1, then 2, etc.
+-        # Or: allow all coefficients but scale their learning rate/gradient.
+-        # Based on "decrease the rate of SH masking by 1/5", 
+-        # we can interpret this as allowing higher degrees stepwise.
++    # Initialize mask for all coefficients to 1.0 (fully active)
++    sh_mask = 1.0
++    
++    if epoch < max_epochs_early:
++        # Calculate relaxation rate: 1/5 per epoch
++        # Epoch 0: 0/5 relaxed (fully masked)
++        # Epoch 1: 1/5 relaxed
++        # ...
++        # Epoch 4: 4/5 relaxed
++        relaxation_rate = epoch / max_epochs_early
+         
+-        # Let's assume a step-wise unlock for clarity, consistent with "curriculum"
+-        # Epoch 0: Degree 0
+-        # Epoch 1: Degree 1
+-        # Epoch 2: Degree 2
+-        # Epoch 3: Degree 3 (if max_degree >= 3)
+-        # Epoch 4: Degree 3 (full)
++        # Apply mask to specific high degrees
++        # Note: The source specifies masking degrees 2 and 3 [S1]
++        # We assume a binary mask or a scaling factor. 
++        # "Decrease the rate of SH masking by 1/5" implies the mask strength 
++        # (which prevents update) decreases.
+         
+-        # More precise mapping from "decrease masking rate by 1/5":
+-        # If masking rate is 1.0 at start, it becomes 0.8, 0.6, 0.4, 0.2, 0.0
+-        # This likely refers to the *proportion* of high-frequency coefficients 
+-        # that are masked or penalized.
++        # If mask=1 means "blocked", then:
++        # Epoch 0: mask=1 (blocked)
++        # Epoch 1: mask=0.8 (20% allowed)
++        # ...
++        # Epoch 4: mask=0.2 (80% allowed)
+         
+-        # F2Plenoxels explicitly states "gradually increase the allowable SH degree".
+-        # We implement a linear increase in allowed degree.
++        mask_strength = 1.0 - relaxation_rate
+         
+-        progress = epoch / total_epochs
+-        allowed_degree = int(progress * max_degree)
+-        return allowed_degree
++        # Apply to degrees 2 and 3
++        # In a flattened array or structured tensor, this targets indices 
++        # corresponding to l=2 and l=3
++        sh_mask[degrees_to_mask] = mask_strength
++        
+     else:
+-        return max_degree
++        # After early epochs, no masking
++        sh_mask = 1.0
++        
++    return sh_mask
+ 
+-def apply_sh_masking(sh_coefficients, current_max_degree):
++def update_sh_coefficients(sh_coeffs, gradients, sh_mask):
+     """
+-    Zeros out SH coefficients with degree > current_max_degree.
++    Applies the mask to gradients before updating SH coefficients.
+     """
+-    masked_coefficients = sh_coefficients.copy()
+-    for l in range(current_max_degree + 1, len(sh_coefficients)):
+-        # Zero out coefficients for degree l
+-        # Assuming coefficients are stored in order of increasing l
+-        # Number of coefficients for degree l is 2*l + 1
+-        start_idx = sum(2*k + 1 for k in range(l))
+-        end_idx = start_idx + (2*l + 1)
+-        masked_coefficients[start_idx:end_idx] = 0
+-    return masked_coefficients
++    # Zero out gradients for masked coefficients
++    masked_gradients = gradients * sh_mask
++    # Standard gradient descent update
++    sh_coeffs = sh_coeffs - learning_rate * masked_gradients
++    return sh_coeffs
+ ```
+ 
+ **Parameters:**
+-*   $T_{early}$: Number of early epochs for curriculum. Typical value: 5 [S1].
+-*   $D_{max}$: Maximum SH degree. Typical value: 3 or 4 for Plenoxels [S1, S2].
++*   `max_epochs_early`: 5 [S1].
++*   `degrees_to_mask`: [2, 3] [S1].
++*   `relaxation_step`: 1/5 per epoch [S1].
+ 
+ **Edge Cases:**
+-*   **Harsh Input Conditions:** The method is specifically designed to stabilize optimization when input data is noisy or sparse [S1].
+-*   **High-Frequency Reflectance:** Glossy materials, which exhibit drastic reflectance changes with subtle view direction changes, are prone to overfitting if high-frequency SH are enabled too early [S1].
++*   **Harsh Input Conditions:** The method is specifically designed to stabilize optimization when input data is sparse or noisy ("harsh condition input case") [S1].
++*   **White Balance Mismatch:** Without this regularization, if the optimization speed of white balance does not match SH coefficients, ambiguity may arise in later steps [S1].
+ 
+ ## Operating characteristics
+-*   **Time Complexity:** Negligible overhead. The masking operation is a simple index check or zeroing of coefficients, which is faster than computing high-frequency SH basis functions [S2].
+-*   **Memory Complexity:** No additional memory required. The SH coefficients are stored regardless; the regularization only affects which coefficients are updated [S1, S2].
+-*   **Performance:** Improves coarse geometry accuracy and reduces floaters with negligible computational cost [S2]. Stabilizes optimization in harsh input conditions [S1].
+-*   **Strengths:** Prevents high-frequency overfitting early in training, leading to better geometry [S2]. Simple to implement [S1, S2].
+-*   **Limitations:** Requires tuning of the curriculum schedule ($T_{early}$) [S1]. May slow down convergence if the schedule is too conservative [G].
++*   **Time Complexity:** Negligible additional computational cost during training, as masking is a simple multiplication or zeroing operation [S2].
++*   **Memory Complexity:** No additional memory overhead; uses existing SH coefficient storage [S2].
++*   **Strengths:** Stabilizes early optimization; prevents high-frequency overfitting; improves coarse geometry reconstruction; reduces floaters near cameras when combined with other techniques [S1, S2].
++*   **Limitations:** Requires careful tuning of the early epoch schedule; may slow down convergence if the relaxation is too slow [S1].
++*   **When to Use:** Few-shot view synthesis, sparse input scenarios, or when training voxel-based radiance fields (like Plenoxels) [S1, S2].
++*   **When Not to Use:** Dense input scenarios with abundant views may not require this stabilization [S1].
+ 
+ ## Background
+-*   **Origin:** Introduced in HDR-Plenoxels [S1] and F2Plenoxels [S2].
+-*   **History:** Inspired by frequency regularization techniques in FreeNeRF (positional encoding) and FourieRF (Fourier coefficients) [S2]. Applied directly to SH coefficients in voxel grid representations [S2].
+-*   **Usage:** Used in few-shot view synthesis and high-dynamic-range radiance field optimization [S1, S2].
++*   **Origin:** Introduced in HDR-Plenoxels (2022) as "SH coefficient masking" to stabilize optimization for high dynamic range radiance fields [S1].
++*   **Development:** Later adopted and adapted in F2Plenoxels (2026) as a "curriculum training strategy" to mitigate high-frequency overfitting in few-shot view synthesis [S2].
++*   **Inspiration:** Inspired by frequency regularization techniques in FreeNeRF (positional encoding) and FourieRF (Fourier coefficients), but applied to SH coefficients in voxel grids [S2].
++*   **Usage:** Used in voxel-based radiance field methods like Plenoxels and its variants [S1, S2].
+ 
+ ## Sources

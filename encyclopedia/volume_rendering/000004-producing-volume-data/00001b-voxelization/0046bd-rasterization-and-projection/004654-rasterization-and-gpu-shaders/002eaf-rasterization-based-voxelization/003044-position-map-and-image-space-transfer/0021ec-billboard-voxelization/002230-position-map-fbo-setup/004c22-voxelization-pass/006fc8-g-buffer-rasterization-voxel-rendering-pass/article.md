@@ -1,0 +1,177 @@
+# G-Buffer Rasterization (Voxel Rendering Pass)
+
+Also called: Front Framebuffer Pass, Voxel Grid Rasterizer
+
+## Overview
+This method performs the initial rasterization pass for voxelization, rendering scene geometry into a multi-target framebuffer (G-Buffer) to capture position, normal, and albedo data. It differs from standard deferred shading by configuring the output targets specifically for subsequent voxelization algorithms (such as billboard or ray-casting voxelization) rather than screen-space lighting. It builds on [Voxelization Pass](13160-voxelization-pass.md) by providing the raw geometric data required for that stage.
+
+## How it works
+**Inputs and Outputs:**
+*   **Inputs:** Active camera list, mesh list, voxel grid parameters (offset), previous frame G-Buffer state.
+*   **Outputs:** Updated G-Buffer textures (Position, Normal, Albedo, Picker), Depth-Stencil buffer.
+
+**Data Structures:**
+*   **G-Buffer:** A Framebuffer Object (FBO) with 3 or 4 color attachments.
+    *   Target 0: Position (32-bit float RGB or RGBA).
+    *   Target 1: Normal (8-bit or 16-bit fixed-point or float RGB/RGBA).
+    *   Target 2: Albedo (8-bit or 16-bit fixed-point or float RGBA).
+    *   Target 3 (Optional): Picker (16-bit integer RGBA, used for object ID).
+    *   Depth-Stencil: Standard depth buffer.
+*   **Uniform Buffers:**
+    *   `PerScene`: Contains `viewProj` matrix (camera view $\times$ projection).
+    *   `PerMesh`: Contains model matrix components.
+    *   `Palette`: (If applicable) Material/texture data.
+
+**Numbered Steps:**
+
+1.  **State Change Detection:** Compare current G-Buffer/picker texture configurations with stored rasterizer state. If any differ (resolution, format, or attachment count), mark state as dirty.
+2.  **Framebuffer Recreation:** If state is dirty, destroy the old FBO and create a new one with 3 or 4 color targets plus a depth-stencil target. Store the new state.
+3.  **Binding and Configuration:** Bind the FBO. Set viewport to full G-Buffer resolution. Configure rasterization state: enable rasterization, disable blending, enable depth-stencil testing.
+4.  **Buffer Clearing:**
+    *   Depth buffer: Clear to $1.0$ if not already cleared.
+    *   Color Targets 0-2 (Position, Normal, Albedo): Clear to $(0, 0, 0, 0)$.
+    *   Color Target 3 (Picker): If present and not cleared, clear to $(65535, 65535, 0, 0)$.
+5.  **Camera Loop:** For each active camera:
+    a.  Compute View Matrix: $V = M_{camera}^{-1}$, where $M_{camera}$ is the camera's local-to-world matrix.
+    b.  Compute View-Projection Matrix: $VP = P \times V$, where $P$ is the projection matrix.
+    c.  Upload $VP$ to the `PerScene` uniform buffer.
+    d.  Set Viewport and Scissor Rectangles:
+        $$
+        \begin{aligned}
+        x &= \text{viewportOffset}_x \times \text{GBufferWidth} \\
+        y &= \text{viewportOffset}_y \times \text{GBufferHeight} \\
+        w &= \text{viewportSize}_x \times \text{GBufferWidth} \\
+        h &= \text{viewportSize}_y \times \text{GBufferHeight}
+        \end{aligned}
+        $$
+    e.  Bind shader pipeline (with or without picker support), vertex array, and uniform buffers (`PerScene`, `PerMesh`, `Palette`).
+6.  **Mesh Loop:** For each mesh:
+    a.  Compute Final Model Matrix:
+        $$
+        M_{final} = M_{mesh} \times T(\text{grid.offset}) \times T(\text{mesh.baseOffset})
+        $$
+        Where $M_{mesh}$ is the mesh's local-to-world transform, $T$ is a translation matrix, `grid.offset` is the voxel grid's world-space offset, and `mesh.baseOffset` is the mesh's specific offset within the grid.
+    b.  Upload $M_{final}$ to `PerMesh` uniform buffer.
+    c.  Draw mesh.
+7.  **Swap References:** After processing all cameras, swap the front and back framebuffer references and picker textures to prepare for the next frame and avoid unnecessary recreation.
+
+**Pseudocode:**
+
+> **Unverified code.** The code below did not pass a test run against a reference implementation, or no test fits it, so it may contain errors.
+
+```python
+def g_buffer_rasterization_pass(cameras, meshes, voxel_grid, previous_state):
+    # Step 1: Check for state changes
+    needs_recreation = False
+    current_targets = get_current_gbuffer_config()
+    if current_targets != previous_state.config:
+        needs_recreation = True
+        previous_state.config = current_targets
+
+    # Step 2: Recreate FBO if needed
+    if needs_recreation:
+        destroy_fbo(previous_state.fbo)
+        previous_state.fbo = create_fbo(
+            color_targets=[POSITION, NORMAL, ALBEDO],
+            depth_stencil=DEPTH_STENCIL,
+            picker_target=PRESENCE_OF_PICKER
+        )
+        if PRESENCE_OF_PICKER:
+            previous_state.fbo.add_color_target(PICKER)
+
+    # Step 3: Bind and Configure
+    bind_fbo(previous_state.fbo)
+    set_viewport(0, 0, previous_state.fbo.width, previous_state.fbo.height)
+    set_scissor(0, 0, previous_state.fbo.width, previous_state.fbo.height)
+    set_rasterization_state(enabled=True, blending=False, depth_stencil=True)
+
+    # Step 4: Clear Buffers
+    if not previous_state.depth_cleared:
+        clear_depth(1.0)
+        previous_state.depth_cleared = True
+    
+    if not previous_state.color_cleared:
+        clear_color(0, 0, 0, 0, targets=[0, 1, 2])
+        if PRESENCE_OF_PICKER and not previous_state.picker_cleared:
+            clear_color(65535, 65535, 0, 0, target=3)
+            previous_state.picker_cleared = True
+        previous_state.color_cleared = True
+
+    # Step 5: Camera Loop
+    for camera in cameras:
+        # Compute View Matrix
+        view_matrix = inverse(camera.local_to_world_matrix)
+        
+        # Compute View-Projection Matrix
+        vp_matrix = camera.projection_matrix * view_matrix
+        
+        # Upload Uniforms
+        upload_uniform("PerScene", {"viewProj": vp_matrix})
+        
+        # Set Viewport/Scissor based on camera offset/size
+        vp_x = camera.viewport_offset.x * previous_state.fbo.width
+        vp_y = camera.viewport_offset.y * previous_state.fbo.height
+        vp_w = camera.viewport_size.x * previous_state.fbo.width
+        vp_h = camera.viewport_size.y * previous_state.fbo.height
+        
+        set_viewport(vp_x, vp_y, vp_w, vp_h)
+        set_scissor(vp_x, vp_y, vp_w, vp_h)
+        
+        # Bind Pipeline and VAO
+        bind_pipeline(get_shader_pipeline(has_picker=PRESENCE_OF_PICKER))
+        bind_vertex_array(camera.vao)
+        bind_uniform_buffer("PerMesh", previous_state.per_mesh_buffer)
+        bind_uniform_buffer("Palette", previous_state.palette_buffer)
+
+        # Step 6: Mesh Loop
+        for mesh in meshes:
+            # Compute Final Model Matrix
+            # M_final = M_mesh * T(grid.offset) * T(mesh.baseOffset)
+            translation_grid = translate(voxel_grid.offset)
+            translation_mesh = translate(mesh.base_offset)
+            final_model = mesh.local_to_world_matrix * translation_grid * translation_mesh
+            
+            upload_uniform("PerMesh", {"model": final_model})
+            draw_mesh(mesh)
+
+    # Step 7: Swap References
+    swap_framebuffer_references(previous_state)
+    swap_picker_textures(previous_state)
+```
+
+**Parameters:**
+*   `viewportOffset`, `viewportSize`: Camera-specific scissoring parameters. Typical values depend on multi-monitor or split-screen setups; default to $(0,0)$ and $(1,1)$ for full screen.
+*   `grid.offset`: Voxel grid world-space origin.
+*   `mesh.baseOffset`: Mesh-specific offset within the voxel grid.
+
+**Edge Cases and Pitfalls:**
+*   **Precision:** Position buffer precision must be sufficient to avoid z-fighting or voxelization artifacts. [G] Use 32-bit floats for position if the scene scale is large.
+*   **Boundaries:** Ensure `viewportOffset` and `viewportSize` do not exceed G-Buffer dimensions.
+*   **Degenerate Input:** Empty mesh lists or cameras with invalid matrices should be handled gracefully (e.g., skip draw calls).
+
+## Subtopics
+
+### Position Map FBO Setup
+Configures the specific texture formats and internal storage for the position, normal, and albedo targets. [Position Map FBO Setup](13161-position-map-fbo-setup.md)
+
+### Voxelization Pass
+The subsequent pass that consumes the G-Buffer to generate voxel data. [Voxelization Pass](13160-voxelization-pass.md)
+
+### Billboard Voxelization
+A voxelization technique that may use the G-Buffer data for billboard-based voxel generation. [Billboard Voxelization](13159-billboard-voxelization.md)
+
+## Operating characteristics
+*   **Time Complexity:** $O(C \times M)$, where $C$ is the number of active cameras and $M$ is the number of meshes. Each mesh is drawn once per camera.
+*   **Memory Complexity:** $O(W \times H \times D)$ for the G-Buffer textures, where $W, H$ are G-Buffer dimensions and $D$ is the number of channels (3 or 4).
+*   **Measured Performance:** Not given in the sources.
+*   **Scaling:** Performance scales linearly with the number of cameras and meshes. G-Buffer resolution affects memory bandwidth and clear time.
+*   **Strengths:** Efficiently captures all necessary geometric data in a single pass per camera. Reuses framebuffer state to minimize allocation overhead.
+*   **Limitations:** Requires careful management of framebuffer state changes. Picker target is optional and adds overhead if used.
+*   **When to use:** When voxelizing scene geometry from multiple viewpoints or when the voxelization algorithm requires per-pixel position/normal/albedo data.
+*   **When not:** If the voxelization algorithm can work directly with depth-only buffers or if the scene is static and can be pre-voxelized.
+
+## Background
+This method is part of the voxelization pipeline in the Cubos engine. It was introduced as part of the engine's rendering subsystem to support efficient voxel-based rendering techniques. The specific implementation details are derived from the Cubos engine source code.
+
+## Sources
+[S1] GameDevTecnico/cubos, https://github.com/GameDevTecnico/cubos, fetched 2026-10-27 (unofficial)

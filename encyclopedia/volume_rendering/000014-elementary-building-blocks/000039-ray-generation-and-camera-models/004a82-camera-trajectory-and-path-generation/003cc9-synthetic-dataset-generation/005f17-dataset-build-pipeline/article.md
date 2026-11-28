@@ -1,0 +1,93 @@
+# Dataset Build Pipeline
+
+Also called: build_dataset workflow
+
+## Overview
+The Dataset Build Pipeline orchestrates the creation of a 3D Gaussian Splatting (3DGS) dataset by managing the lifecycle of a build session, from initialization through point sampling and sequential rendering to final output writing [S1, unofficial]. It differs from novel view synthesis rendering by explicitly handling the generation of the underlying 3DGS representation from mesh data before rendering frames, and from dataset preparation methods by providing the procedural workflow for constructing the dataset files rather than just filtering existing ones [S1, unofficial][S2, unofficial].
+
+## How it works
+**Inputs and Outputs:**
+*   **Inputs:** A scene object, a target collection object, dataset settings (snapshot), an output directory path, and sampling parameters.
+*   **Outputs:** A directory structure containing rendered images, camera information, and diagnostic logs.
+
+**Data Structures:**
+The core state is held in a `BuildSession` object with the following fields [S1, unofficial]:
+*   `scene`: Object representing the 3D scene.
+*   `target_collection`: Object representing the collection of assets.
+*   `snapshot`: `DatasetSettingsSnapshot` object containing configuration.
+*   `output_dir`: `Path` to the final output directory.
+*   `images_dir`: `Path` to the subdirectory for rendered images.
+*   `render_state`: `RenderState` object tracking rendering progress.
+*   `temp_camera_obj`: Temporary camera object for sampling.
+*   `focus_point`: `Vector` defining the center of interest.
+*   `camera_info`: `dict` storing camera parameters.
+*   `diagnostics`: `DiagnosticsSession` for logging.
+*   `samples`: `list[CameraSample]` of generated camera poses.
+*   `frames`: `list[dict]` of frame metadata.
+*   `warnings`: `list[WarningRecord]` of issues encountered.
+*   `warning_keys`: `set[str]` of unique warning identifiers.
+*   `point_state`: `PointSamplingState | None` holding mesh data and sampling parameters.
+
+**Steps:**
+1.  **Initialize:** Call `begin_dataset_build` to create the `BuildSession` with the target collection, settings, output directory, temporary camera, and initial camera samples [S1, unofficial].
+2.  **Prepare Sampling:** Call `prepare_point_sampling` to populate `session.point_state` with mesh data and sampling parameters [S1, unofficial].
+3.  **Generate Points:** Call `run_point_sampling_sync` to generate the 3DGS points from the prepared state [S1, unofficial].
+4.  **Render Loop:** While `has_remaining_frames(session)` is true, call `render_next_frame(session)` to render and save each frame sequentially [S1, unofficial].
+5.  **Finalize:** Call `write_outputs(session)` to write all accumulated data (images, camera info, diagnostics) to the output directory [S1, unofficial].
+6.  **Cleanup:** In a `finally` block, call `cleanup_dataset_build(session)` to release resources [S1, unofficial].
+
+**Pseudocode:**
+> **Unverified code.** The code below did not pass a test run against a reference implementation, or no test fits it, so it may contain errors.
+
+```python
+def run_dataset_build_pipeline(scene, target_collection, settings, output_dir):
+    session = begin_dataset_build(
+        target_collection=target_collection,
+        settings=settings,
+        output_dir=output_dir
+    )
+    try:
+        # Prepare point sampling state
+        prepare_point_sampling(session)
+        
+        # Generate 3DGS points
+        run_point_sampling_sync(session)
+        
+        # Render frames sequentially
+        while has_remaining_frames(session):
+            render_next_frame(session)
+            
+        # Write final outputs
+        write_outputs(session)
+        
+    finally:
+        # Release resources
+        cleanup_dataset_build(session)
+```
+
+**Parameters and Edge Cases:**
+*   **Point Sampling:** The sampling process may spawn a worker process. Progress is polled via a JSON file at `worker_state.progress_path`. If the worker fails, resources in `temp_dir` are cleaned up [S1, unofficial].
+*   **Precision:** Not given in the sources.
+*   **Boundaries:** The loop condition `has_remaining_frames` ensures all planned views are rendered. If `point_state` is accessed before preparation, a `DatasetBuildError` is raised [S1, unofficial].
+
+## Subtopics
+
+### DL3DV-GS Dataset Preparation
+A dataset preparation process for training Fast Feedforward 3D Gaussian Splatting (FCGS), involving generating 3DGS from multi-view scenes and filtering for quality [S2, unofficial]. It uses the DL3DV dataset containing approximately 7,000 multi-view scenes [S2, unofficial]. Scenes are trained to generate 3DGS at 960P resolution, taking about 60 GPU days on NVIDIA L40s [S2, unofficial]. Low-quality scenes are filtered out to obtain 6,770 valid 3DGS scenes, which are then randomly split with 100 for testing and the remainder for training [S2, unofficial].
+
+## Operating characteristics
+*   **Time Complexity:** Not given in the sources.
+*   **Memory Complexity:** Not given in the sources.
+*   **Measured Performance:** Generating 3DGS for the DL3DV dataset at 960P resolution requires approximately 60 GPU days on NVIDIA L40s [S2, unofficial].
+*   **Scaling:** The pipeline is designed to handle large-scale datasets (e.g., ~7K scenes) but requires significant computational resources for the point sampling and rendering phases [S2, unofficial].
+*   **Strengths:** Provides a structured, automated workflow for creating high-quality 3DGS datasets with diagnostic tracking [S1, unofficial].
+*   **Limitations:** Computationally expensive for large scene counts; dependent on the quality of the input mesh and camera poses [S1, unofficial][S2, unofficial].
+*   **When to use:** When constructing a custom 3DGS dataset from mesh data and camera trajectories.
+*   **When not to use:** When using pre-existing datasets or when computational resources are insufficient for the scale of the scene collection.
+
+## Background
+The pipeline is part of the 3DGS dataset builder ecosystem, designed to automate the creation of training data for 3D Gaussian Splatting models [S1, unofficial]. The DL3DV-GS variant was developed to support the training of FCGS, leveraging the large-scale DL3DV dataset to provide abundant 3DGS representations for compression research [S2, unofficial].
+
+## Sources
+[S1] yumehiko/3dgs-dataset-builder, https://github.com/yumehiko/3dgs-dataset-builder, fetched 2026-10-27 (unofficial)
+[S2] Fast Feedforward 3D Gaussian Splatting Compression, https://doi.org/10.48550/arxiv.2410.08017, fetched 2026-10-26 (unofficial)

@@ -1,0 +1,144 @@
+--- v002.md
++++ v003.md
+@@ -17,5 +17,5 @@
+ 
+ **Data Structures:**
+-*   **Cloud Plane Grid:** A 2D uniform grid representing the cloud bottom plane. Each cell stores a distance value obtained from a distance transform [S1].
++*   **Cloud Plane Grid:** A 2D uniform grid representing the cloud bottom plane. [S1]
+ *   **Initial Query Volume ($D_0$):** A 3D uniform grid (bounding box of the query shape) where each cell contains a binary value: 1 if inside the query shape, 0 otherwise [S1].
+ *   **Query Vector ($x_0$):** A 1D vector containing the voxel values of $D_0$ [S1].
+@@ -34,5 +34,5 @@
+ 5.  **Distance Transform:** Apply a distance transform to the binary image to compute the Euclidean distance from each grid point to the boundary of the projected shape [S1].
+ 6.  **Query Shape Height Generation:** Create the 3D query shape by assuming the cloud height at each grid point $(x, y)$ equals the distance value obtained from the distance transform at that point [S1].
+-7.  **Bounding Box and Volume Creation:** Create a bounding box for the query shape. Subdivide this bounding box into a uniform 3D grid to form the initial query volume $D_0$. Assign 1 to grid points inside the shape and 0 to points outside [S1].
++7.  **Bounding Box and Volume Creation:** Create a bounding box for the query shape. [S1] Subdivide this bounding box into a uniform 3D grid to form the initial query volume $D_0$. [S1] Assign 1 to grid points inside the shape and 0 to points outside [S1].
+ 8.  **Vectorization:** Represent the initial query volume $D_0$ as a vector $x_0$ of voxel values [S1].
+ 9.  **SVD Approximation of Query:** Approximate $x_0$ as a linear combination of the $K$ pre-computed SVD basis vectors $u_k$:
+@@ -53,60 +53,55 @@
+ **Pseudocode:**
+ ```python
+-def retrieve_cloud_volume(user_sketch_points, cloud_bottom_height, database_volumes, basis_vectors):
+-    # Step 1-2: Define Cloud Plane Grid
+-    grid_resolution = 64
+-    cloud_plane_grid = [[0.0] * grid_resolution for _ in range(grid_resolution)]
++def retrieve_cloud_volume(user_sketch_points, cloud_bottom_height, database_volumes, basis_vectors, grid_size=64):
++    # Step 1-2: Cloud plane grid
++    cloud_plane = [[0.0] * grid_size for _ in range(grid_size)]
+ 
+-    # Step 3-4: Project Sketch and Create Binary Mask
+-    binary_mask = [[0] * grid_resolution for _ in range(grid_resolution)]
+-    # Standard polygon rasterization to fill interior [G]
+-    for y in range(grid_resolution):
+-        for x in range(grid_resolution):
++    # Step 3-4: Project sketch & binary mask
++    binary_mask = [[0] * grid_size for _ in range(grid_size)]
++    for y in range(grid_size):
++        for x in range(grid_size):
+             if point_in_polygon(x, y, user_sketch_points):
+                 binary_mask[y][x] = 1
+ 
+-    # Step 5: Distance Transform
+-    distance_map = [[0.0] * grid_resolution for _ in range(grid_resolution)]
+-    # Standard Euclidean distance transform [G]
+-    for y in range(grid_resolution):
+-        for x in range(grid_resolution):
+-            if binary_mask[y][x] == 0:
+-                min_dist = float('inf')
+-                for dy in range(-grid_resolution, grid_resolution):
+-                    for dx in range(-grid_resolution, grid_resolution):
+-                        nx, ny = x + dx, y + dy
+-                        if 0 <= nx < grid_resolution and 0 <= ny < grid_resolution and binary_mask[ny][nx] == 1:
+-                            dist = (dx**2 + dy**2)**0.5
+-                            if dist < min_dist:
+-                                min_dist = dist
+-                distance_map[y][x] = min_dist
++    # Step 5: Distance transform [G]
++    distance_map = compute_distance_transform(binary_mask, grid_size)
+ 
+-    # Step 6-7: Create Query Shape and Initial Query Volume D0
+-    # Determine bounding box from distance map extent
+-    min_x, max_x, min_y, max_y = 0, grid_resolution, 0, grid_resolution
+-    query_volume = [[[0] for _ in range(max_x - min_x)] for _ in range(max_y - min_y)]
+-    for y in range(min_y, max_y):
+-        for x in range(min_x, max_x):
+-            height = int(distance_map[y][x])
+-            for z in range(height):
+-                query_volume[y - min_y][x - min_x][z] = 1
++    # Step 6-7: Query shape & D0
++    # Find bounding box of non-zero distances
++    min_x = min_y = grid_size
++    max_x = max_y = -1
++    for y in range(grid_size):
++        for x in range(grid_size):
++            if distance_map[y][x] > 0:
++                min_x, max_x = min(min_x, x), max(max_x, x)
++                min_y, max_y = min(min_y, y), max(max_y, y)
++    if max_x == -1:
++        min_x, max_x, min_y, max_y = 0, grid_size - 1, 0, grid_size - 1
++
++    width = max_x - min_x + 1
++    height_dim = max_y - min_y + 1
++    max_h = int(max(distance_map[y][x] for y in range(grid_size) for x in range(grid_size)))
++    D0 = [[[0] * max_h for _ in range(width)] for _ in range(height_dim)]
++
++    for y in range(min_y, max_y + 1):
++        for x in range(min_x, max_x + 1):
++            h = int(distance_map[y][x])
++            for z in range(h):
++                D0[y - min_y][x - min_x][z] = 1
+ 
+     # Step 8: Vectorize D0
+-    x0 = [voxel for layer in query_volume for row in layer for voxel in row]
++    x0 = [D0[y][x][z] for y in range(height_dim) for x in range(width) for z in range(max_h)]
+ 
+-    # Step 9-10: Calculate Query Coefficients w_k0
++    # Step 9-10: Query coefficients
+     K = len(basis_vectors)
+     w_k0 = [dot_product(x0, u_k) for u_k in basis_vectors]
+ 
+-    # Step 11: Calculate Similarity Scores for Database Volumes
++    # Step 11: Retrieve
+     best_score = float('inf')
+     best_volume = None
+-
+     for volume in database_volumes:
+         xn = [voxel for layer in volume for row in layer for voxel in row]
+         w_nk = [dot_product(xn, u_k) for u_k in basis_vectors]
+         score = sum((w_k0[k] - w_nk[k])**2 for k in range(K))
+-
+-        # Step 12: Select Best Match
+         if score < best_score:
+             best_score = score
+@@ -116,5 +111,4 @@
+ 
+ def point_in_polygon(x, y, polygon):
+-    # Standard ray-casting algorithm [G]
+     n = len(polygon)
+     inside = False
+@@ -134,4 +128,26 @@
+ def dot_product(v1, v2):
+     return sum(a * b for a, b in zip(v1, v2))
++
++def compute_distance_transform(binary_mask, size):
++    # Standard Euclidean distance transform [G]
++    dist = [[float('inf')] * size for _ in range(size)]
++    for y in range(size):
++        for x in range(size):
++            if binary_mask[y][x] == 1:
++                dist[y][x] = 0.0
++    for y in range(size):
++        for x in range(size):
++            if dist[y][x] == 0.0:
++                continue
++            min_d = float('inf')
++            for dy in range(-size, size + 1):
++                for dx in range(-size, size + 1):
++                    ny, nx = y + dy, x + dx
++                    if 0 <= ny < size and 0 <= nx < size:
++                        d = (dx**2 + dy**2)**0.5
++                        if d < min_d:
++                            min_d = d
++            dist[y][x] = min_d
++    return dist
+ ```
+ 

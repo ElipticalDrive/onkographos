@@ -1,0 +1,231 @@
+--- v003.md
++++ v004.md
+@@ -50,7 +50,7 @@
+ $$ I_l(x_v) = \sum_{k=1}^{n_f} I_l(x_v, k) $$
+ 
+-The ambient occlusion factor $AO(v)$ is computed by averaging the light contributions over $L$ rays:
+-$$ AO(v) = \frac{1}{L} \sum_{l=1}^{L} I_l(x_v) $$
+-However, in the final recombination step, the method uses the maximum of the precomputed per-feature occlusion textures $T_k(v)$, which represent the occlusion factor derived from the above integrals [S1].
++The ambient occlusion factor $AO(v)$ is computed by averaging the light contributions over $L$ rays for each feature texture $T_k$, then recombining with the maximum operator:
++$$ AO(v) = \max \{ T_k(v) \mid \forall k \in [1, n_f] \} $$
++where $T_k(v)$ stores the averaged light contribution $\frac{1}{L} \sum_{l=1}^{L} I_l(x_v, k)$ [S1].
+ 
+ **Parameters:**
+@@ -75,7 +75,7 @@
+     
+     Args:
+-        volume: 3D array of scalar values.
++        volume: 3D list of scalar values.
+         features: List of 3D boolean masks, one for each feature k.
+-        transfer_function: Function mapping scalar value to (color, opacity).
++        transfer_function: Function mapping scalar value to opacity.
+         L: Number of rays per voxel.
+         M: Number of samples per ray.
+@@ -83,96 +83,110 @@
+         
+     Returns:
+-        ao_volume: 3D array of ambient occlusion factors.
++        ao_volume: 3D list of ambient occlusion factors.
+     """
++    import math
+     n_f = len(features)
+     shape = volume.shape
++    
+     # Initialize per-feature occlusion textures
+-    # T_k[v] stores the occlusion factor for voxel v if v belongs to feature k
+-    # If v does not belong to feature k, T_k[v] is undefined/ignored
+-    T = [np.zeros(shape) for _ in range(n_f)]
++    T = [[[0.0 for _ in range(shape[2])] for _ in range(shape[1])] for _ in range(shape[0])]
+     
+-    # Precompute brick structure for optimization
+-    # bricks: list of (start_coords, end_coords, is_empty)
+-    # Note: Implementation details of bricking are omitted as they are 
+-    # standard volume rendering optimizations. We assume raycasting 
+-    # skips empty bricks.
+-    brick_structure = preprocess_bricks(volume)
+-    
++    # Brick preprocessing: scan for empty bricks (simplified for self-containment)
++    # In practice, bricks are equal-sized, overlap at borders, and store a boolean flag.
++    # We skip empty bricks during raycasting.
++    brick_size = 16
++    brick_flags = {}
++    for x in range(0, shape[0], brick_size):
++        for y in range(0, shape[1], brick_size):
++            for z in range(0, shape[2], brick_size):
++                is_empty = True
++                for dx in range(brick_size):
++                    for dy in range(brick_size):
++                        for dz in range(brick_size):
++                            nx, ny, nz = x+dx, y+dy, z+dz
++                            if nx < shape[0] and ny < shape[1] and nz < shape[2]:
++                                if volume[nx][ny][nz] != 0:
++                                    is_empty = False
++                                    break
++                        if not is_empty: break
++                    if not is_empty: break
++                if not is_empty:
++                    brick_flags[(x//brick_size, y//brick_size, z//brick_size)] = True
++
++    def get_ray_direction():
++        # Pseudo-random rays uniformly scattered using polar coordinates [S1]
++        theta = math.uniform(0, 2 * math.pi)
++        phi = math.uniform(0, math.pi / 2)
++        return (math.sin(phi) * math.cos(theta), math.sin(phi) * math.sin(theta), math.cos(phi))
++
++    def interpolate_volume(pos):
++        # Standard trilinear interpolation [G]
++        x, y, z = pos
++        ix, fx = math.floor(x), x - math.floor(x)
++        iy, fy = math.floor(y), y - math.floor(y)
++        iz, fz = math.floor(z), z - math.floor(z)
++        def v(nx, ny, nz):
++            if 0 <= nx < shape[0] and 0 <= ny < shape[1] and 0 <= nz < shape[2]:
++                return volume[nx][ny][nz]
++            return 0.0
++        c00 = v(ix, iy, iz) * (1-fx) + v(ix+1, iy, iz) * fx
++        c01 = v(ix, iy+1, iz) * (1-fx) + v(ix+1, iy+1, iz) * fx
++        c10 = v(ix, iy, iz+1) * (1-fx) + v(ix+1, iy, iz+1) * fx
++        c11 = v(ix, iy+1, iz+1) * (1-fx) + v(ix+1, iy+1, iz+1) * fx
++        return c00 * (1-fy) + c01 * fy, c10 * (1-fy) + c11 * fy
++
+     for k in range(n_f):
+         feature_mask = features[k]
+-        # Iterate over all voxels in the volume
+-        # Optimization: Only iterate over non-empty bricks and voxels belonging to feature k
+-        for v in get_voxel_indices(volume, brick_structure):
+-            if not feature_mask[v]:
+-                continue
++        for x in range(shape[0]):
++            for y in range(shape[1]):
++                for z in range(shape[2]):
++                    if not feature_mask[x][y][z]:
++                        continue
++                    
++                    # Skip empty bricks for optimization [S1]
++                    bx, by, bz = x // brick_size, y // brick_size, z // brick_size
++                    if (bx, by, bz) not in brick_flags:
++                        continue
++
++                    occlusion_sum = 0.0
++                    for _ in range(L):
++                        ray_dir = get_ray_direction()
++                        light_contribution = 0.0
++                        transmittance = 1.0
++                        
++                        for m in range(M):
++                            # Sample position along ray
++                            step = (m + 0.5) * (R_Omega / M)
++                            sample_pos = (x + ray_dir[0] * step, y + ray_dir[1] * step, z + ray_dir[2] * step)
++                            
++                            # Get opacity
++                            _, alpha = interpolate_volume(sample_pos)
++                            alpha = transfer_function(alpha)
++                            
++                            # Key step: If sample does not belong to feature k, set opacity to 0 [S1]
++                            sx, sy, sz = int(sample_pos[0]), int(sample_pos[1]), int(sample_pos[2])
++                            if not (0 <= sx < shape[0] and 0 <= sy < shape[1] and 0 <= sz < shape[2] and feature_mask[sx][sy][sz]):
++                                alpha = 0.0
++                            
++                            # Accumulate light contribution per formula [S1]
++                            light_contribution += transmittance
++                            transmittance *= (1.0 - alpha)
++                            
++                        light_contribution /= M
++                        occlusion_sum += light_contribution
++                        
++                    T[x][y][z] = occlusion_sum / L
++
++    # Recombine using maximum operator [S1]
++    ao_volume = [[[0.0 for _ in range(shape[2])] for _ in range(shape[1])] for _ in range(shape[0])]
++    for x in range(shape[0]):
++        for y in range(shape[1]):
++            for z in range(shape[2]):
++                max_val = 0.0
++                for k in range(n_f):
++                    if features[k][x][y][z]:
++                        max_val = max(max_val, T[x][y][z])
++                ao_volume[x][y][z] = max_val
+                 
+-            # Compute occlusion for voxel v for feature k
+-            occlusion_sum = 0.0
+-            
+-            # Cast L rays
+-            for l in range(L):
+-                ray_direction = get_random_hemisphere_direction(v)
+-                light_contribution = 0.0
+-                
+-                # Sample along the ray
+-                for m in range(M):
+-                    # Calculate sample position along the ray
+-                    # Assuming uniform sampling within R_Omega or similar
+-                    sample_pos = v + ray_direction * (m + 0.5) * (R_Omega / M)
+-                    
+-                    # Get opacity at sample position
+-                    # If sample_pos is outside volume, opacity is 0
+-                    if is_outside_volume(sample_pos):
+-                        alpha = 0.0
+-                    else:
+-                        scalar_val = interpolate_volume(volume, sample_pos)
+-                        _, alpha = transfer_function(scalar_val)
+-                        
+-                        # Key step: If sample does not belong to feature k, set opacity to 0
+-                        # This ignores inter-occlusions from other features
+-                        if not feature_mask[round(sample_pos)]:
+-                            alpha = 0.0
+-                            
+-                    # Front-to-back compositing for light contribution
+-                    # Product of (1 - alpha) for previous samples
+-                    transmittance = 1.0
+-                    for i in range(m):
+-                        prev_sample_pos = v + ray_direction * (i + 0.5) * (R_Omega / M)
+-                        if is_outside_volume(prev_sample_pos):
+-                            prev_alpha = 0.0
+-                        else:
+-                            prev_scalar_val = interpolate_volume(volume, prev_sample_pos)
+-                            _, prev_alpha = transfer_function(prev_scalar_val)
+-                            if not feature_mask[round(prev_sample_pos)]:
+-                                prev_alpha = 0.0
+-                        transmittance *= (1.0 - prev_alpha)
+-                        
+-                    light_contribution += transmittance * alpha
+-                    
+-                light_contribution /= M
+-                occlusion_sum += light_contribution
+-                
+-            # Average over L rays
+-            T[k][v] = occlusion_sum / L
+-            
+-    # Recombine using maximum operator
+-    ao_volume = np.zeros(shape)
+-    for v in get_voxel_indices(volume, brick_structure):
+-        max_val = 0.0
+-        for k in range(n_f):
+-            # Only consider T_k[v] if v belongs to feature k
+-            # However, the paper suggests taking max over all k for any voxel v
+-            # to extend influence of opaque features.
+-            # The formula is AO(v) = max{T_k(v) | forall k}
+-            # Note: T_k(v) is only valid/computed if v belongs to feature k.
+-            # If v does not belong to feature k, T_k(v) is 0 or undefined.
+-            # The paper states: "AO(v) = max{T_k(v) | forall k in [1, nf]}"
+-            # This implies we take the max of the computed values.
+-            # If v is not in feature k, T_k(v) was not computed or is 0.
+-            # We assume T_k[v] is 0 if v is not in feature k.
+-            if features[k][v]:
+-                max_val = max(max_val, T[k][v])
+-        ao_volume[v] = max_val
+-        
+     return ao_volume
+ ```
+@@ -193,8 +207,8 @@
+         *   Orange dataset (256x256x64): No shading ~200 fps, Phong shading ~125 fps, Classical AO ~130 fps, Feature-driven AO ~130 fps [S1].
+         *   CT Knee dataset (379x229x305): No shading ~60 fps, Phong shading ~50 fps, Classical AO ~45 fps, Feature-driven AO ~45 fps [S1].
+-*   **Strengths:** Improves visual quality of multi-layer volumes by preventing overdarkening of internal layers. Less parameter-sensitive than classical AO, improving usability for non-experts. Preserves auto-occlusions for shape perception.
+-*   **Limitations:** Computationally more expensive than classical AO by a factor of $n_f$. Requires prior feature segmentation (though the method itself does not perform segmentation). Artifacts can occur at feature borders if not handled correctly (mitigated by the max recombination operator).
+-*   **When to Use:** Direct volume rendering of multi-layer datasets (e.g., CT scans) where features are interleaved and distinct, and visual clarity of internal structures is critical.
+-*   **When Not to Use:** Single-layer volumes, or when computational resources are severely constrained and $n_f$ is large.
++*   **Strengths:** Improves visual quality of multi-layer volumes by preventing overdarkening of internal layers. Less parameter-sensitive than classical AO, improving usability for non-experts. Preserves auto-occlusions for shape perception [S1].
++*   **Limitations:** Computationally more expensive than classical AO by a factor of $n_f$. Requires prior feature segmentation (though the method itself does not perform segmentation). Artifacts can occur at feature borders if not handled correctly (mitigated by the max recombination operator) [S1].
++*   **When to Use:** Direct volume rendering of multi-layer datasets (e.g., CT scans) where features are interleaved and distinct, and visual clarity of internal structures is critical [S1].
++*   **When Not to Use:** Single-layer volumes, or when computational resources are severely constrained and $n_f$ is large [S1].
+ 
+ ## Background

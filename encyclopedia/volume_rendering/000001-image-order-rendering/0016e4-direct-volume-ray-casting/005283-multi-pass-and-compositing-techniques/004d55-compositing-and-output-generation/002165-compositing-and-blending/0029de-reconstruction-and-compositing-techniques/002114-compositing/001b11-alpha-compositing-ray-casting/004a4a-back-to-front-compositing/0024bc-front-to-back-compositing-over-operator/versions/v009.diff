@@ -1,0 +1,114 @@
+--- v008.md
++++ v009.md
+@@ -4,24 +4,22 @@
+ 
+ ## Overview
+-Front-to-Back Compositing is a ray-casting accumulation technique that computes the final pixel color by iteratively blending semi-transparent samples along a viewing ray, starting from the camera and moving toward the background [S1, S4, S5, unofficial][S7][S10, S15, S18, S20, unofficial][S23]. It solves the problem of rendering volumetric data by approximating the volume rendering integral through discrete emission-absorption modeling [S6, S14, S18, S21, unofficial]. Unlike its sibling [Back-to-Front Compositing](2078-back-to-front-compositing.md), which requires storing only the accumulated color but prohibits early termination, this method maintains accumulated opacity to enable **early ray termination** [S4, S10, S15, unofficial][S22, book]. This allows the ray to stop processing once the accumulated opacity exceeds a threshold, significantly reducing computation for opaque regions [S4, S10, S15, unofficial][S22, book].
++Front-to-Back Compositing is a ray-casting accumulation technique that computes the final pixel color by iteratively blending semi-transparent samples along a viewing ray, starting from the camera and moving toward the background [S1, S4, S5, unofficial][S7][S10, S15, S18, S20, unofficial][S23]. It solves the problem of rendering volumetric data by approximating the volume rendering integral through discrete emission-absorption modeling [S6, S14, S18, S21, unofficial]. Unlike its sibling [Back-to-Front Compositing](2078-back-to-front-compositing.md), which requires storing only the accumulated color but prohibits early termination, this method maintains accumulated opacity to enable early ray termination [S4, S10, S15, unofficial][S22, book]. This allows the ray to stop processing once the accumulated opacity exceeds a threshold, significantly reducing computation for opaque regions [S4, S10, S15, unofficial][S22, book].
+ 
+ ## How it works
+ ### Inputs and Outputs
+-*   **Input:** A 3D volume dataset (scalar field), a transfer function mapping scalar values to color $C$ and opacity $\alpha$, a viewing ray defined by origin and direction, and a background color $C_{bg}$ (typically fully opaque, $\alpha=1$) [S5, S10, S18, unofficial][S23].
++*   **Input:** A 3D volume dataset (scalar field), a transfer function mapping scalar values to color $C$ and opacity $\alpha$, a viewing ray defined by origin, direction, and length, a background color $C_{bg}$ (typically fully opaque, $\alpha=1$), and a sampling step size $\Delta s$ [S5, S10, S18, unofficial][S23].
+ *   **Output:** A final pixel color $C_{out}$ and accumulated opacity $\alpha_{out}$ [S3, S10, S15, S20, unofficial].
+ 
+ ### Data Structures
+-The method maintains two scalar accumulators for each ray:
+-1.  $C_{acc}$: Accumulated color (RGB), initialized to $(0, 0, 0)$ [S7][S16, unofficial][S23].
+-2.  $\alpha_{acc}$: Accumulated opacity (scalar), initialized to $0$ [S7][S16, unofficial][S23].
+-    *   Note: Some formulations track transmission $T_{acc} = 1 - \alpha_{acc}$ [S5, unofficial][S7, S23].
++The method maintains two accumulators for each ray:
++1.  $C_{acc}$: Accumulated color (RGB), initialized to $\mathbf{0}$ [S16, unofficial][S23].
++2.  $\alpha_{acc}$: Accumulated opacity (scalar), initialized to $0$ [S16, unofficial][S23].
++    *   Some formulations track transmission $T_{acc} = 1 - \alpha_{acc}$ instead, where $T_{acc}$ is initialized to $1$ [S5, unofficial][S7]. Source [S7] computes transmission per segment as $T \leftarrow (1 - \alpha_{src})^{\Delta s_i / \xi}$, where $\xi$ is a standard length parameter.
+ 
+ ### Steps
+-1.  **Initialization:** Set $C_{acc} = 0$, $\alpha_{acc} = 0$ (or $T_{acc} = 1$) [S7][S16, unofficial][S23].
++1.  **Initialization:** Set $C_{acc} = \mathbf{0}$ and $\alpha_{acc} = 0$ (or $T_{acc} = 1$) [S16, unofficial][S23].
+ 2.  **Ray Traversal:** Iterate through sample points $i = 1 \dots n$ along the ray from front to back [S5, unofficial][S7][S10, unofficial][S23].
+ 3.  **Sampling:** For each sample position, retrieve the scalar value from the volume and apply the transfer function to obtain the sample color $C_i$ and sample opacity $\alpha_i$ [S1, unofficial][S7][S11, S20, S21, unofficial].
+-    *   **Opacity Correction:** If the sampling step size $\Delta s$ differs from the transfer function's assumed resolution, correct the opacity to maintain physical consistency [S12, S20, unofficial].
+-        $$ \alpha_{corrected} = 1 - (1 - \alpha_{original})^{\Delta s} $$
+-        [S20, unofficial] uses a simplified approximation or hardcoded exponent in implementations [S12, unofficial].
++    *   **Opacity Correction:** If the sampling step size $\Delta s$ differs from the transfer function's assumed resolution, correct the opacity to maintain physical consistency [S12, S20, unofficial]. The corrected opacity is $\alpha_{corrected} = 1 - (1 - \alpha_{original})^{\Delta s}$ [S20, unofficial]. Some implementations use a hardcoded exponent multiplier for the step size, e.g., `1.0 - pow(1.0 - a_in, stepsize * 200.0)` [S12, unofficial].
+ 4.  **Compositing (The Over Operator):** Update the accumulators using the current sample's contribution, weighted by the remaining transmission $(1 - \alpha_{acc})$ [S3, S5, S10, S15, S20, unofficial][S23]:
+     $$ \Delta \alpha_i = \alpha_i (1 - \alpha_{acc}) $$
+@@ -40,44 +38,38 @@
+ ### Pseudocode
+ ```python
+-def front_to_back_compositing(ray_origin, ray_direction, volume, transfer_function, background_color, threshold=0.99):
++def front_to_back_compositing(ray_origin, ray_direction, ray_length, volume_min, volume_max, transfer_function, background_color, step_size=0.01, threshold=0.99):
+     # Initialize accumulators
+     acc_color = vec3(0.0, 0.0, 0.0)
+     acc_alpha = 0.0
+     
+-    # Ray traversal parameters
+-    step_size = 0.01 # Example fixed step
+-    t = 0.0
+-    max_t = length(ray_direction) * volume_depth # Or intersection bounds
++    # Precompute number of samples
++    num_samples = int(ceil(ray_length / step_size))
+     
+-    while t < max_t and acc_alpha < threshold:
+-        # 1. Sample position
++    for i in range(num_samples):
++        t = i * step_size
+         sample_pos = ray_origin + ray_direction * t
+         
+-        # 2. Check bounds (simplified)
+-        if not is_inside_volume(sample_pos):
+-            t += step_size
++        # Check if sample is within volume bounds
++        if not (all(volume_min <= sample_pos) and all(sample_pos <= volume_max)):
+             continue
+             
+-        # 3. Retrieve scalar value and apply transfer function
+-        scalar_val = volume.sample(sample_pos)
++        # Sample scalar value and apply transfer function
++        scalar_val = volume.sample(sample_pos)  # Standard trilinear/bilinear interpolation [G]
+         sample_color, sample_alpha = transfer_function(scalar_val)
+         
+-        # 4. Opacity correction for step size (if necessary)
+-        # Assuming transfer function alpha is for unit distance
+-        # Corrected alpha = 1 - (1 - alpha)^step_size
++        # Opacity correction for step size
+         if step_size != 1.0:
+             sample_alpha = 1.0 - pow(1.0 - sample_alpha, step_size)
+             
+-        # 5. Compositing (Over Operator)
+-        # Weight of current sample = sample_alpha * (1 - acc_alpha)
++        # Compositing (Over Operator)
+         weight = sample_alpha * (1.0 - acc_alpha)
+-        
+         acc_color += weight * sample_color
+         acc_alpha += weight
+         
+-        # 6. Advance ray
+-        t += step_size
+-        
+-    # 7. Blend with background
++        # Early ray termination
++        if acc_alpha >= threshold:
++            break
++            
++    # Blend with background
+     final_color = acc_color + (1.0 - acc_alpha) * background_color
+     
+@@ -87,5 +79,5 @@
+ ### Parameters and Edge Cases
+ *   **Threshold:** The early termination threshold determines the trade-off between speed and accuracy. A value of $0.95$–$0.99$ is common [S4, S15, unofficial].
+-*   **Step Size:** Fixed step sizes require opacity correction to prevent transparency artifacts when zooming or changing resolution [S12, S20, unofficial]. Adaptive step sizes (e.g., voxel traversal) reduce the need for correction but require complex traversal logic [S7][S11, unofficial].
++*   **Step Size:** Fixed step sizes require opacity correction to prevent transparency artifacts when zooming or changing resolution [S12, S20, unofficial].
+ *   **Non-Premultiplied Alpha:** If using non-premultiplied color values, the formula must explicitly multiply color by alpha before accumulation to prevent overflow or incorrect blending [S16, unofficial]. The pseudocode above assumes $C_i$ is the emitted color, and the weight handles the alpha blending.
+ *   **Associativity:** The over operator is associative, allowing chunks to be composited independently before final assembly, provided they are processed in front-to-back order [S9, S19, unofficial].
+@@ -107,8 +99,8 @@
+ ## Operating characteristics
+ *   **Time Complexity:** $O(N)$ per ray, where $N$ is the number of samples. With early ray termination, the average case is significantly faster, especially for opaque volumes [S4, S10, S15, unofficial].
+-*   **Memory Complexity:** $O(1)$ per ray for accumulators. Requires storage for the volume data and transfer function [S10, unofficial].
++*   **Memory Complexity:** $O(1)$ per ray for accumulators. Requires storage for composited color and composited opacity at each sampling location [S10, unofficial].
+ *   **Performance:** Highly efficient on GPUs due to the iterative, branch-heavy nature of early termination, which can be managed via warp-level primitives [S7][S8, book].
+ *   **Strengths:** Supports early ray termination, allowing for significant speedups in opaque regions [S4, S10, S15, unofficial][S22, book]. Physically plausible under the emission-absorption model [S5, S13, S14, unofficial].
+-*   **Limitations:** Requires tracking accumulated opacity, increasing register pressure compared to back-to-front [S10, unofficial]. Sensitive to sampling density; incorrect step sizes lead to transparency artifacts without correction [S12, S20, unofficial]. Not suitable for order-independent transparency (OIT) without sorting chunks [S9, unofficial].
++*   **Limitations:** Requires tracking accumulated opacity, increasing register pressure compared to back-to-front [S10, unofficial]. Sensitive to sampling density; incorrect step sizes lead to transparency artifacts without correction [S12, S20, unofficial]. Requires sorted chunks or falls back to order-independent transparency (OIT) when preconditions fail [S9, unofficial].
+ 
+ ## Background

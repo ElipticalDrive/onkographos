@@ -1,0 +1,121 @@
+--- v006.md
++++ v007.md
+@@ -1,7 +1,6 @@
+ # Voxel Grid Generation & Expansion
+-Also called: Occupancy Grid Expansion, Smoke Voxelization
+ 
+ ## Overview
+-This method generates a 3D occupancy grid representing a volumetric smoke cloud by expanding a spherical radius from a central origin point over time [S1, unofficial]. It solves the problem of creating a discrete, GPU-friendly voxel representation for ray-marched volumetric rendering without using particle systems or billboard geometry [S1, unofficial]. It is distinguished from standard point-splatting by evaluating a continuous sphere falloff against a discrete grid, and from [DCX Pipeline](3770-dcx-pipeline.md) by its procedural, time-driven expansion rather than static file parsing.
++This method generates a 3D occupancy grid representing a volumetric smoke cloud by expanding a spherical radius from a central origin point over time [S1, unofficial]. It solves the problem of creating a discrete, GPU-friendly voxel representation for ray-marched volumetric rendering without using particle systems or billboard geometry [S1, unofficial]. It is distinguished from standard point-splatting by evaluating a continuous sphere falloff against a discrete grid, and from the [DCX Pipeline](3770-dcx-pipeline.md) by its procedural, time-driven expansion rather than static file parsing.
+ 
+ ## How it works
+@@ -19,5 +18,5 @@
+ 
+ **Data Structures:**
+-- The buffer is linear memory, indexed by $x + y \cdot \text{voxelsX} + z \cdot \text{voxelsX} \cdot \text{voxelsY}$ [S1, unofficial].
++- The buffer uses linear memory, indexed by $x + y \cdot \text{voxelsX} + z \cdot \text{voxelsX} \cdot \text{voxelsY}$ [S1, unofficial].
+ - Each element is a 4-byte integer [S1, unofficial].
+ 
+@@ -36,5 +35,5 @@
+ 
+ 5. Compute the world position of the voxel center:
+-   $$ \text{voxelPos} = (x \cdot \text{voxelSize}, y \cdot \text{voxelSize}, z \cdot \text{voxelSize}) - \text{boundsExtent} $$
++   $$ \text{voxelPos} = (x \cdot \text{voxelSize}, y \cdot \text{voxelSize}, z \cdot \text{voxelSize}) - (\text{boundsExtent}.x, 0, \text{boundsExtent}.z) $$
+    [S1, unofficial]
+ 
+@@ -44,5 +43,5 @@
+ 
+ 7. Compute the current expansion radius:
+-   $$ \text{normalValue} = \text{lerp}(0, \text{smokeExpansionTime}, \text{smokeTimer}) $$
++   $$ \text{normalValue} = \text{smokeTimer} / \text{smokeExpansionTime} $$
+    $$ \text{currentSmokeRadius} = \text{easingCurve}(\text{normalValue}) \cdot \text{smokeRadius} $$
+    [S1, unofficial]
+@@ -59,37 +58,27 @@
+     voxels_y = math.ceil(bounds_extent.y / voxel_size)
+     voxels_z = math.ceil(bounds_extent.z / voxel_size)
+-    
+     total_voxels = voxels_x * voxels_y * voxels_z
+     
+-    # 2. Initialize buffer with 0
++    # 2 & 3. Initialize and clear buffer
+     smoke_data = [0] * total_voxels
+     
+-    # 3. Compute current radius
+-    # Note: lerp(0, smoke_expansion_time, smoke_timer) implies smoke_timer is normalized [0,1] relative to expansion time
+-    # or smoke_timer is absolute time and lerp scales it. Based on source: normalValue = inlerp(0, smokeExpansionTime, smokeTimer)
+-    # Assuming smoke_timer is current time, and we normalize against expansion time for the curve input?
+-    # Source says: normalValue = inlerp(0, smokeExpansionTime, smokeTimer). 
+-    # If smokeTimer > smokeExpansionTime, normalValue > 1. Easing curve should handle clamping or extrapolation.
+-    normal_value = smoke_timer / smoke_expansion_time if smoke_expansion_time != 0 else 0
++    # 7. Compute current radius
++    # Handle division by zero if expansion time is zero
++    if smoke_expansion_time == 0:
++        normal_value = 0.0
++    else:
++        normal_value = smoke_timer / smoke_expansion_time
++        
+     current_smoke_radius = easing_curve(normal_value) * smoke_radius
+     
+-    # 4. Iterate and fill
++    # 4, 5, 6, 8. Iterate, compute position/distance, and fill
+     for x in range(voxels_x):
+         for y in range(voxels_y):
+             for z in range(voxels_z):
+-                # 5. Voxel world position
++                # Evidence specifies asymmetric offset: (boundsExtent.x, 0, boundsExtent.z)
+                 voxel_pos_x = x * voxel_size - bounds_extent.x
+-                voxel_pos_y = y * voxel_size - bounds_extent.y # Source uses boundsExtent.z for Z offset? 
+-                # Source: voxelPos = float3(x * voxelSize, y * voxelSize, z * voxelSize) - float3(boundsExtent.x, 0, boundsExtent.z)
+-                # This implies Y offset is 0, X offset is boundsExtent.x, Z offset is boundsExtent.z.
+-                # This centers the grid differently than standard -boundsExtent.
+-                
+-                voxel_pos_x = x * voxel_size - bounds_extent.x
+-                voxel_pos_y = y * voxel_size # Offset 0
++                voxel_pos_y = y * voxel_size
+                 voxel_pos_z = z * voxel_size - bounds_extent.z
+                 
+-                voxel_pos = (voxel_pos_x, voxel_pos_y, voxel_pos_z)
+-                
+-                # 6. Distance
+                 dx = voxel_pos_x - smoke_origin.x
+                 dy = voxel_pos_y - smoke_origin.y
+@@ -97,15 +86,15 @@
+                 distance = math.sqrt(dx*dx + dy*dy + dz*dz)
+                 
+-                # 8. Check radius
+                 if distance <= current_smoke_radius:
+                     index = x + y * voxels_x + z * voxels_x * voxels_y
+                     smoke_data[index] = 1
+                     
++    # 9. Upload to GPU (simulated)
++    # smokeBuffer.SetData(smoke_data)
+     return smoke_data
+ ```
+-[G] The source code snippet for `voxelPos` subtracts `boundsExtent.x` from X and `boundsExtent.z` from Z, but subtracts `0` from Y. This is implemented in the pseudocode above.
+ 
+ **Edge Cases:**
+-- If `smokeExpansionTime` is 0, division by zero occurs in normalization; handle by clamping `normal_value` to 0 or 1 [G].
++- If `smokeExpansionTime` is $0$, division by zero occurs in normalization; handle by clamping `normal_value` to $0$ or $1$ [G].
+ - Buffer updates occur every 30 frames, causing potential stutter or delay in volume expansion [S1, unofficial].
+ - Smoke is rendered to a reduced-resolution target and composited back up without an upsampling filter, resulting in blocky edges under motion [S1, unofficial].
+@@ -114,11 +103,17 @@
+ 
+ ### [Point Wisp Voxelization](10591-point-wisp-voxelization.md)
+-Point Wisp Voxelization is a procedural method for generating volumetric smoke data by distributing points around a "guide particle" using fractal noise and baking them into a voxel grid. It solves the problem of creating detailed, organic-looking smoke volumes from sparse particle data, distinguishing itself from standard point-splatting by using correlated random walks and radial displacement to form cohesive "wisps" rather than isolated blobs.
++Point Wisp Voxelization is a procedural method for generating volumetric smoke data by distributing points around a guide particle using fractal noise and baking them into a voxel grid. It solves the problem of creating detailed, organic-looking smoke volumes from sparse particle data, distinguishing itself from standard point-splatting by using correlated random walks and radial displacement to form cohesive wisps rather than isolated blobs. Choose it when organic, noise-driven smoke structures are required over simple geometric expansions.
+ 
+ ### [Virtual Smoke](17061-virtual-smoke.md)
+-Virtual Smoke is an interactive 3D flow visualization technique that simulates the injection of colored smoke from a user-selected seed point into a fixed vector field, where the smoke color is mapped to a local scalar value. It solves the problem of simultaneously visualizing flow direction (via vector fields) and scalar properties (e.g., temperature, concentration) in large 3D datasets. Unlike [Volume Seedlings](2979-voxel-grid-generation-expansion.md), which uses a priority queue based on a "degree of interest," Virtual Smoke uses an event queue ordered by propagation time derived from velocity vectors to grow a control volume.
++Virtual Smoke is an interactive 3D flow visualization technique that simulates the injection of colored smoke from a user-selected seed point into a fixed vector field, where the smoke color is mapped to a local scalar value. It solves the problem of simultaneously visualizing flow direction (via vector fields) and scalar properties (e.g., temperature, concentration) in large 3D datasets. Unlike this method's time-driven sphere expansion, Virtual Smoke uses an event queue ordered by propagation time derived from velocity vectors to grow a control volume. Choose it for interactive flow and scalar field visualization.
++
++### [Voxel CFDG Expansion](19345-voxel-cfdg-expansion.md)
++Voxel CFDG Expansion generates a 3D voxel structure representing a smoke volume using a Context-Free Grammar (CFDG) style recursive branching algorithm with probability-based face selection. It differs from sibling methods by explicitly modeling hierarchical growth from a root voxel, whereas Point Wisp Voxelization relies on particle trajectories and Virtual Smoke simulates fluid dynamics. Choose it when procedural, grammar-based hierarchical smoke structures are needed.
++
++### [3D-to-4D Voxel Expansion Algorithm](19990-3d-to-4d-voxel-expansion-algorithm.md)
++The 3D-to-4D Voxel Expansion Algorithm converts a static 3D occupancy grid into a 4D object-centric representation by clustering voxels based on geometry, color, and dynamics. It solves the problem of separating mixed volumetric data into distinct object slots, assuming voxels belonging to the same object share similar motion and appearance features. Unlike Point Wisp Voxelization which relies on point cloud structures, or Virtual Smoke which models fluid dynamics explicitly, this method uses a graph-based connected components approach on pre-filtered voxel features to achieve unsupervised object-centric decomposition. Choose it for dynamic object tracking and decomposition in volumetric data.
+ 
+ ### Block-Palette Map Generation
+-A tool to generate a static physical walk-through grid of all registered voxels, exporting a block-palette matrix [S2, unofficial]. It is used for inspecting textures, normals, and colors side-by-side [S2, unofficial]. Steps: Run `python map_maker.py` to export the block-palette matrix to `map/maps/default_map.npz` [S2, unofficial].
++Block-Palette Map Generation is a tool to generate a static physical walk-through grid of all registered voxels, exporting a block-palette matrix [S2, unofficial]. It is used for inspecting textures, normals, and colors side-by-side [S2, unofficial]. Steps: Run `python map_maker.py` to export the block-palette matrix to `map/maps/default_map.npz` [S2, unofficial]. Choose it for debugging and visual inspection of voxelized maps.
+ 
+ ## Operating characteristics

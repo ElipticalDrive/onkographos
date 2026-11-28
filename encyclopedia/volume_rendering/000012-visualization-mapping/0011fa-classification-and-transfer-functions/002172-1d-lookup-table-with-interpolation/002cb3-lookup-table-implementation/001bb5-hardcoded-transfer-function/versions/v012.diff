@@ -1,0 +1,151 @@
+--- v011.md
++++ v012.md
+@@ -4,5 +4,5 @@
+ 
+ ## Overview
+-The Hardcoded Transfer Function (HTF) is a classification method that maps scalar volume data values directly to color and opacity using a static, pre-defined 1D lookup table (LUT) [S1, unofficial][S2][S3, unofficial]. It solves the problem of visualizing scalar fields by assigning RGBA values based solely on intensity, without considering spatial context or gradients [S2, S4]. Unlike gradient-based or texture-based transfer functions, the HTF relies exclusively on the scalar value $x$, making it the simplest and most computationally efficient classification method [S2]. Its primary limitation is the inability to distinguish between different features that share the same scalar value but differ in their local structure or context [S2, S4].
++The Hardcoded Transfer Function (HTF) is a classification method that maps scalar volume data values directly to color and opacity using a static, pre-defined 1D lookup table (LUT) [S1, unofficial][S2]. It solves the problem of visualizing scalar fields by assigning RGBA values based solely on intensity, without considering spatial context or gradients [S2, S4]. Unlike gradient-based or texture-based transfer functions, the HTF relies exclusively on the scalar value $x$, making it the simplest and most computationally efficient classification method [S2]. Its primary limitation is the inability to distinguish between different features that share the same scalar value but differ in their local structure or context [S2, S4]. It serves as a reference point for other TFs [S2].
+ 
+ ## How it works
+@@ -13,20 +13,20 @@
+ **Data Structures**
+ The transfer function is stored as a static 1D array of 4-component vectors [S1, unofficial][S2].
+-*   **Format:** Entries are interleaved 4-component vectors. Common formats include `float4` (32-bit floats per component) or 8-bit integers (`uint8_t[4]`) [S1, unofficial][S2][S3, unofficial]. Hardware-specific implementations may use non-standard widths, such as 36-bit entries (8-bit RGB, 12-bit alpha) [S3, unofficial].
++*   **Format:** Entries are stored as interleaved 4-component vectors [S1, unofficial]. Hardware-specific implementations may use non-standard widths, such as 36-bit entries (8-bit RGB, 12-bit alpha) [S3, unofficial].
+ *   **Size:** The number of entries $N$ is typically a power of two (e.g., 256, 1024, 4096) to support hardware texture sampling [S1, unofficial][S2][S3, unofficial]. Specific implementations may use fixed sizes like 4096 entries [S3, unofficial].
+-*   **Layout:** A contiguous 1D array where index $i$ maps to the normalized coordinate $x = i / (N-1)$ or $x = (i + 0.5) / N$ depending on the binning scheme [S2][S3, unofficial].
++*   **Layout:** A contiguous 1D array where index $i$ maps to the normalized coordinate $x = i / (N-1)$ or $x = (i + 0.5) / N$ depending on the binning scheme [G].
+ 
+ **Algorithm**
+ 1.  **Normalization:** The input scalar value $v$ is normalized to the domain $[0, 1]$ using window/level parameters ($x_{min}, x_{max}$):
+     $$ x = \frac{v - x_{min}}{x_{max} - x_{min}} $$
+-    Values outside $[x_{min}, x_{max}]$ are clamped to $[0, 1]$ [S2][S3, unofficial].
++    Values outside $[x_{min}, x_{max}]$ are clamped to $[0, 1]$ [S5, unofficial][G].
+ 
+-2.  **Lookup:** The RGBA value is retrieved from the LUT. Two primary sampling methods are used:
+-    *   **Hardware Interpolation:** The LUT is uploaded as a 1D texture with `LINEAR` filter mode and `CLAMP_TO_EDGE` wrap mode. The hardware interpolates between adjacent entries based on $x$ [S1, unofficial][S2][S3, unofficial].
++2.  **Lookup:** The RGBA value is retrieved from the LUT [S3, unofficial]. Two primary sampling methods are used:
++    *   **Hardware Interpolation:** The LUT is uploaded as a 1D texture with `LINEAR` filter mode and `CLAMP_TO_EDGE` wrap mode. The hardware interpolates between adjacent entries based on $x$ [S5, unofficial].
+     *   **Direct Lookup:** The integer index is computed for nearest-neighbor sampling:
+         $$ idx = \text{clamp}(\lfloor x \cdot (N-1) \rfloor, 0, N-1) $$
+-        The value at `table[idx]` is returned [S3, unofficial].
++        The value at `table[idx]` is returned [S5, unofficial].
+ 
+-3.  **Opacity Correction (Optional):** In some hardware pipelines, opacities may require correction to account for non-unit sample spacing $\Delta$ [S1, S3, unofficial]. If gradient modulation is enabled (e.g., `Gmom=1`), the alpha is modulated by a gradient LUT:
++3.  **Opacity Correction (Optional):** In some hardware pipelines, opacities may require correction to account for non-unit sample spacing $\Delta$ [S3, unofficial]. If gradient modulation is enabled (e.g., `Gmom=1`), the alpha is modulated by a gradient LUT:
+     $$ \alpha = \text{GmLUT}[\text{Gradient}] \cdot \text{opacityLUT}[\text{sampleValue}] $$
+     If `Gmom=0`, $\alpha = \text{opacityLUT}[\text{sampleValue}]$ [S3, unofficial].
+@@ -34,52 +34,20 @@
+ **Pseudocode**
+ ```python
+-# Data Structure
+-# table: array of float4, size N (power of 2)
+-# x_min, x_max: float, domain bounds
+-# N: int, number of entries
+-
+-def hardcoded_transfer_function(v, x_min, x_max, table, N):
+-    # 1. Normalize
++def hardcoded_transfer_function(v, x_min, x_max, table, N, step_size=1.0):
++    # 1. Normalize input to [0, 1]
+     if x_max == x_min:
+         x = 0.0
+     else:
+         x = (v - x_min) / (x_max - x_min)
+-    
+-    # Clamp to [0, 1]
+     x = max(0.0, min(1.0, x))
+     
+     # 2. Direct Lookup (Nearest Neighbor)
+-    # Index calculation based on binning scheme x = i / (N-1)
+     idx = int(x * (N - 1))
+     idx = max(0, min(N - 1, idx))
++    r, g, b, a_raw = table[idx]
+     
+-    # 3. Return RGBA
+-    return table[idx]
+-
+-def hardcoded_transfer_function_linear(v, x_min, x_max, table, N):
+-    # 1. Normalize
+-    if x_max == x_min:
+-        x = 0.0
+-    else:
+-        x = (v - x_min) / (x_max - x_min)
+-    
+-    # Clamp to [0, 1]
+-    x = max(0.0, min(1.0, x))
+-    
+-    # 2. Linear Interpolation
+-    # Compute float index
+-    float_idx = x * (N - 1)
+-    i0 = int(floor(float_idx))
+-    i1 = min(i0 + 1, N - 1)
+-    t = float_idx - i0
+-    
+-    # Interpolate
+-    c0 = table[i0]
+-    c1 = table[i1]
+-    
+-    r = lerp(c0.r, c1.r, t)
+-    g = lerp(c0.g, c1.g, t)
+-    b = lerp(c0.b, c1.b, t)
+-    a = lerp(c0.a, c1.a, t)
++    # 3. Opacity Correction for non-unit sample spacing [G]
++    import math
++    a = 1.0 - math.exp(-a_raw * step_size)
+     
+     return (r, g, b, a)
+@@ -87,10 +55,10 @@
+ 
+ **Parameters**
+-*   $x_{min}, x_{max}$: Window/level bounds defining the scalar range mapped to $[0, 1]$. Typical values depend on the dataset (e.g., Hounsfield units for CT).
+-*   $N$: LUT size. Typical values: 256, 1024, 4096 [S1, S3, unofficial].
++*   $x_{min}, x_{max}$: Window/level bounds defining the scalar range mapped to $[0, 1]$.
++*   $N$: LUT size. Typical values: 256, 1024, 4096 [S1, unofficial][S3, unofficial].
+ *   `Gmom`: Boolean flag for gradient modulation. If true, alpha is modulated by gradient magnitude [S3, unofficial].
+ 
+ **Edge Cases and Pitfalls**
+-*   **Precision:** Opacity values in hardcoded tables are often sparse (e.g., mostly 0.0 or 0.1) [S1, unofficial]. This can lead to aliasing or loss of detail if the LUT resolution is too low.
++*   **Precision:** Opacity values in hardcoded tables are often sparse (e.g., mostly 0.0 or 0.1) [S1, unofficial].
+ *   **Ambiguity:** Features with identical scalar values but different visual importance (e.g., different tissues with similar density) cannot be distinguished [S2, S4].
+ *   **Boundary Conditions:** Values outside $[x_{min}, x_{max}]$ must be clamped to avoid out-of-bounds access [S2][S3, unofficial].
+@@ -108,19 +76,19 @@
+ *   **Clamp:** Input $d$ to $[0.0, 1.0]$.
+ *   **Interpolation:**
+-    *   If $x < 0.25$: lerp(`gray`, `darkgray`, $x \cdot 4.0$)
+-    *   If $0.25 \le x < 0.5$: lerp(`darkgray`, `red`, $x \cdot 4.0 - 1.0$)
+-    *   If $0.5 \le x < 0.75$: lerp(`red`, `orange`, $x \cdot 4.0 - 2.0$)
+-    *   If $x \ge 0.75$: lerp(`orange`, `yellow`, $x \cdot 4.0 - 3.0$)
++    *   If $x < 0.25$: lerp(`gray`, `darkgray`, $x \cdot 4.0$) [S7, unofficial].
++    *   If $0.25 \le x < 0.5$: lerp(`darkgray`, `red`, $x \cdot 4.0 - 1.0$) [S7, unofficial].
++    *   If $0.5 \le x < 0.75$: lerp(`red`, `orange`, $x \cdot 4.0 - 2.0$) [S7, unofficial].
++    *   If $x \ge 0.75$: lerp(`orange`, `yellow`, $x \cdot 4.0 - 3.0$) [S7, unofficial].
+ *   **Colors:** `gray`=(0.4, 0.4, 0.4), `darkgray`=(0.2, 0.2, 0.2), `red`=(1.0, 0.0, 0.0), `orange`=(1.0, 0.6, 0.0), `yellow`=(1.7, 1.3, 1.0) [S7, unofficial]. Note: components can exceed 1.0.
+ 
+-### Exponential Color Transfer Function
+-Maps volume intensity to color and alpha using an exponential function for alpha and linear interpolation for color [S8, unofficial].
++### [Exponential Color Transfer Function](2666-exponential-color-transfer-function.md)
++Maps volume intensity to color and alpha using an exponential function for alpha and linear interpolation for color.
+ *   **Colors:** `high`=(1.0, 1.0, 1.0), `low`=(0.0, 0.0, 0.0).
+-*   **Alpha:** $\alpha = \frac{e^{intensity} - 1}{e^1 - 1}$ [S8, unofficial].
+-*   **Color:** $C = intensity \cdot high + (1.0 - intensity) \cdot low$ [S8, unofficial].
++*   **Alpha:** $\alpha = \frac{e^{k_i \cdot intensity} - 1}{e^{k_i} - 1}$.
++*   **Color:** $C = intensity \cdot high + (1.0 - intensity) \cdot low$.
+ 
+ ## Operating characteristics
+ *   **Time Complexity:** $O(1)$ per sample. The lookup is a direct array access or texture fetch [S2].
+-*   **Memory Complexity:** $O(N)$, where $N$ is the LUT size. Typically 256–4096 entries [S1, S3, unofficial].
++*   **Memory Complexity:** $O(N)$, where $N$ is the LUT size. Typically 256–4096 entries [S1, unofficial][S3, unofficial].
+ *   **Performance:** Lowest computation power and memory usage among transfer function types [S2].
+ *   **Strengths:** High safety against misinterpretation due to simplicity; low user interaction required; fast rendering [S2].
+@@ -130,5 +98,5 @@
+ 
+ ## Background
+-The Hardcoded Transfer Function is the foundational method for volume rendering classification, originating from early ray-casting systems [S1, S3, unofficial]. It was prominently used in hardware-accelerated systems like VolumePro, which employed a 4096-entry, 36-bit classification LUT [S3, unofficial]. The method is described in foundational surveys as the "1D data-based TF" (1dTF) [S2]. It remains a baseline for more complex transfer functions due to its simplicity and efficiency [S2].
++The Hardcoded Transfer Function is the foundational method for volume rendering classification, originating from early ray-casting systems [S1, unofficial][S3, unofficial]. It was prominently used in hardware-accelerated systems like VolumePro, which employed a 4096-entry, 36-bit classification LUT [S3, unofficial]. The method is described in foundational surveys as the "1D data-based TF" (1dTF) [S2]. It serves as a reference point for other TFs [S2].
+ 
+ ## Sources
+@@ -139,4 +107,3 @@
+ [S5] Loveof1ife7/cuVRender-A-CUDA-Accelerated-Volume-Rendering-Engine, https://github.com/Loveof1ife7/cuVRender-A-CUDA-Accelerated-Volume-Rendering-Engine, fetched 2026-10-27 (unofficial)
+ [S6] GPU-accelerated single-pass volumetric raycasting in Qt ..., https://martinopilia.com/posts/2018/09/17/volume-raycasting.html, fetched 2026-10-27 (unofficial)
+-[S7] OmerNYU/Kaboom_Diffusion, https://github.com/OmerNYU/Kaboom_Diffusion, fetched 2026-10-26 (unofficial)
+-[S8] GitHub - m-pilia/volume-raycasting: Simple visualiser based on GPU ..., https://github.com/m-pilia/volume-raycasting, fetched 2026-10-27 (unofficial)+[S7] OmerNYU/Kaboom_Diffusion, https://github.com/OmerNYU/Kaboom_Diffusion, fetched 2026-10-26 (unofficial)

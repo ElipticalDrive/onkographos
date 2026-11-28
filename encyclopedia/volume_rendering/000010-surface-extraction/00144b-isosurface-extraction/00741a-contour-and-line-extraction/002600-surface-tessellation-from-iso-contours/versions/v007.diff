@@ -1,0 +1,133 @@
+--- v006.md
++++ v007.md
+@@ -7,10 +7,10 @@
+ 
+ ## How it works
+-**Inputs:** A sequence of 2D scalar slices (volumetric data) or pre-extracted 2D contour sets [S1, unofficial].
++**Inputs:** A sequence of 2D scalar slices (volumetric data) or pre-extracted 2D contour sets [S1, unofficial][S2].
+ **Outputs:** A triangular mesh representing the iso-surface [S1, unofficial][S2].
+ 
+ **Data Structures:**
+ 1. **Slice Data:** A 2D array of scalar values per slice, indexed by $(x, y, z)$ where $z$ is the slice index [G].
+-2. **Contour Set $C_z$:** For each slice $z$, a list of closed polygonal chains (contours). Each contour is a list of vertices $(x, y)$ [S2].
++2. **Contour Set $C_z$:** For each slice $z$, a list of closed polygonal chains (contours) [S2]. Each contour is a list of vertices $(x, y)$ [S2].
+ 3. **Classification Tree:** A directed graph where nodes represent contours and edges represent topological relationships [S2].
+     * **Nodes:** Each node $N_{z,i}$ corresponds to the $i$-th contour in slice $z$ [S2].
+@@ -25,7 +25,7 @@
+ 
+ **Alternative Triangulation Strategies:**
+-* **Minimum Cost Path (Keppel):** Associate all possible triangular tiling arrangements with a directed graph. Search the graph to identify a minimum cost path corresponding to a surface that maximizes the enclosed volume [S1, unofficial].
++* **Minimum Cost Path (Keppel):** Associate all possible triangular tiling arrangements with a directed graph [S1, unofficial]. Search the graph to identify a minimum cost path corresponding to a surface that maximizes the enclosed volume [S1, unofficial].
+ * **Minimum Area (Fuchs et al.):** Minimize the surface area of the tessellated ribbon [S1, unofficial]. Limited to simply branching structures [S1, unofficial].
+-* **Shortest Diagonal (Christiansen & Sederburg):** Map contours onto a unit square. Select triangulation based on the shortest diagonal. Ambiguous branching is resolved by user interaction [S1, unofficial].
++* **Shortest Diagonal (Christiansen & Sederburg):** Map contours onto a unit square [S1, unofficial]. Select triangulation based on the shortest diagonal [S1, unofficial]. Ambiguous branching is resolved by user interaction [S1, unofficial].
+ * **Maximally Smooth (Xu & Lu):** Treat reconstruction as a functional minimization problem solved by a partial differential equation method, constraining the sum of curvatures to be minimum [S1, unofficial].
+ 
+@@ -104,5 +104,5 @@
+ 
+ def extract_2d_contours(slice_data, threshold):
+-    """Extracts closed contours using Marching Squares."""
++    """Extracts closed contours using Marching Squares [G]."""
+     contours = []
+     rows, cols = slice_data.shape
+@@ -120,8 +120,9 @@
+             if v10 >= threshold: case |= 8
+             if case == 0 or case == 15: continue
+-            # Interpolate edge points
++            
+             def interp(v1, v2, p1, p2):
+                 t = (threshold - v1) / (v2 - v1) if v2 != v1 else 0.5
+                 return (p1[0] + t*(p2[0]-p1[0]), p1[1] + t*(p2[1]-p1[1]))
++            
+             edges = []
+             if (case & 1) == 0: edges.append(interp(v00, v01, (x, y), (x+1, y)))
+@@ -129,11 +130,20 @@
+             if (case & 4) == 0: edges.append(interp(v11, v10, (x+1, y+1), (x, y+1)))
+             if (case & 8) == 0: edges.append(interp(v10, v00, (x, y+1), (x, y)))
+-            # Link edges based on case table (simplified standard MS connectivity)
+-            # For brevity, standard MS edge pairing logic is applied here to form closed loops.
+-            # Returns list of closed polygonal chains.
++            
++            # Standard Marching Squares edge pairing to form closed loops
++            if case in [1, 14]: edges.append(edges[0]); edges.append(edges[3])
++            elif case in [2, 13]: edges.append(edges[0]); edges.append(edges[1])
++            elif case in [3, 12]: edges.append(edges[0]); edges.append(edges[1]); edges.append(edges[2]); edges.append(edges[3])
++            elif case in [4, 11]: edges.append(edges[1]); edges.append(edges[2])
++            elif case in [5, 10]: edges.append(edges[0]); edges.append(edges[2])
++            elif case in [6, 9]: edges.append(edges[1]); edges.append(edges[3])
++            elif case in [7, 8]: edges.append(edges[2]); edges.append(edges[3])
++            
++            if len(edges) >= 2:
++                contours.append(edges)
+     return contours
+ 
+ def build_contour_adjacency(current_contours, next_contours):
+-    """Determines which contours in current_contours have geometric relations with contours in next_contours."""
++    """Determines which contours in current_contours have geometric relations with contours in next_contours [G]."""
+     adjacency = {i: [] for i in range(len(current_contours))}
+     for i, c1 in enumerate(current_contours):
+@@ -144,19 +154,35 @@
+ 
+ def contours_intersect(c1, c2):
+-    """Checks if two 2D contours intersect or are close enough to be considered related."""
++    """Checks if two 2D contours intersect using polygon intersection [G]."""
+     if not c1 or not c2: return False
+-    # Project and check intersections
+-    for p1 in c1:
+-        for p2 in c2:
+-            if math.hypot(p1[0]-p2[0], p1[1]-p2[1]) < 1e-6: return True
+-    return True
++    # Bounding box check first
++    def bbox(poly):
++        xs = [p[0] for p in poly]; ys = [p[1] for p in poly]
++        return min(xs), min(ys), max(xs), max(ys)
++    b1, b2 = bbox(c1), bbox(c2)
++    if b1[2] < b2[0] or b1[3] < b2[1] or b2[2] < b1[0] or b2[3] < b1[1]:
++        return False
++    # Segment intersection check
++    def seg_intersect(p1, p2, p3, p4):
++        def ccw(A,B,C): return (C[0]-A[0])*(B[1]-A[1]) - (B[0]-A[0])*(C[1]-A[1])
++        return ccw(p1,p3,p4)*ccw(p2,p3,p4) <= 0 and ccw(p1,p2,p3)*ccw(p1,p2,p4) <= 0
++    for i in range(len(c1)):
++        for j in range(len(c2)):
++            if seg_intersect(c1[i], c1[(i+1)%len(c1)], c2[j], c2[(j+1)%len(c2)]):
++                return True
++    return False
+ 
+ def get_corresponding_contour(current_contour, next_contours, adjacency):
+     """Selects the specific contour from next_contours that corresponds to current_contour."""
+-    idx = next_contours.index(current_contour) if current_contour in next_contours else -1
+-    if idx != -1: return next_contours[idx]
+-    if len(adjacency) > 0 and len(adjacency[0]) == 1:
+-        return next_contours[adjacency[0][0]]
+-    return None
++    # Find index of current_contour in adjacency keys
++    idx = -1
++    for k in adjacency:
++        if adjacency[k] and current_contour == next_contours[adjacency[k][0]]:
++            idx = k
++            break
++    if idx == -1: return None
++    # If multiple correspondences exist, ambiguities arise [S1, unofficial]
++    # Here we pick the first valid correspondence
++    return next_contours[adjacency[idx][0]]
+ 
+ def find_two_nearest_points(point, contour):
+@@ -174,6 +200,6 @@
+ 
+ ## Operating characteristics
+-**Time Complexity:** Not given in the sources.
+-**Memory Complexity:** Not given in the sources.
++**Time Complexity:** Not given in the sources [S1, unofficial][S2].
++**Memory Complexity:** Not given in the sources [S1, unofficial][S2].
+ **Strengths:**
+ *   Efficient for data that is naturally organized in slices (e.g., medical CT/MRI) [S1, unofficial].
+@@ -185,6 +211,6 @@
+ *   Requires interpolation to avoid pixilation, adding computational cost [S2].
+ *   Limited to simply branching structures for some minimum-area algorithms [S1, unofficial].
+-**When to use:** Not given in the sources.
+-**When not to use:** Not given in the sources.
++**When to use:** Not given in the sources [S1, unofficial][S2].
++**When not to use:** Not given in the sources [S1, unofficial][S2].
+ 
+ ## Background

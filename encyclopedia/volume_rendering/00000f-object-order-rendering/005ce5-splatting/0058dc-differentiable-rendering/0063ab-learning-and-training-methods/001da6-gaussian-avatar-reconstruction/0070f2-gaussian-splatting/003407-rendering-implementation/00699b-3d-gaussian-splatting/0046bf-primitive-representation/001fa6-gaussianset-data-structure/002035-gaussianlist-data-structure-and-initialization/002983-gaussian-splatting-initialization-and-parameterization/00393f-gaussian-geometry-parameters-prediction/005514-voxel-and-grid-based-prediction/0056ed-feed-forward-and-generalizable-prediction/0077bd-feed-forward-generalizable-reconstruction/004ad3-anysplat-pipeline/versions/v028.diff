@@ -1,0 +1,178 @@
+--- v027.md
++++ v028.md
+@@ -4,115 +4,84 @@
+ 
+ ## Overview
+-The AnySplat Pipeline is a feed-forward, transformer-based method for reconstructing 3D scenes from uncalibrated, unconstrained multi-view images, directly predicting 3D Gaussian primitives and camera parameters without iterative optimization [S1, unofficial]. It differs from iterative 3D Gaussian Splatting by eliminating the per-scene training loop, and from other feed-forward methods like Splatt3R by employing a differentiable voxelization module to resolve density artifacts inherent in pixel-aligned predictions [S1, unofficial].
++The AnySplat Pipeline is a feed-forward, transformer-based method for reconstructing 3D scenes from uncalibrated, unconstrained multi-view images without requiring camera poses or depth as input [S1, unofficial]. It differs from iterative optimization-based Gaussian Splatting by predicting Gaussian parameters, depth, and poses directly from images in a single forward pass, and from other generalizable methods by employing a differentiable voxelization module to convert pixel-wise Gaussians into a renderable set [S1, unofficial].
+ 
+ ## How it works
+-The pipeline processes a set of input images through a unified encoder-decoder architecture to predict scene geometry, appearance, and camera poses simultaneously.
++**Inputs and Outputs:**
++*   **Input:** A tensor of $K$ uncalibrated RGB images. The standard input shape is $[1, K, 3, 448, 448]$ (batch, views, channels, height, width) [S1, unofficial]. Images are typically normalized to $[-1, 1]$ before encoding [S1, unofficial].
++*   **Outputs:** A set of 3D Gaussians (defined by mean $\mu$, covariance parameters $\sigma, r, s$, and color $c$), predicted camera poses $p$ (extrinsic and intrinsic matrices), and a predicted depth map $D$ [S1, unofficial].
+ 
+-**Inputs and Outputs**
+-*   **Input:** A tensor of $K$ uncalibrated images with shape $[1, K, 3, 448, 448]$ (batch size 1, number of views, RGB channels, height 448, width 448) [S1, unofficial].
+-*   **Outputs:**
+-    *   A set of 3D Gaussians defined by mean $\mu$, covariance parameters (scale $s$, rotation $r$, and potentially anisotropy $\sigma$), and opacity/color $c$.
+-    *   A predicted depth map $D$.
+-    *   Predicted camera poses $p$ (extrinsic and intrinsic matrices).
++**Data Structures:**
++The method constructs a set of pixel-wise 3D Gaussians. Each Gaussian is defined by:
++*   $\mu \in \mathbb{R}^3$: 3D mean position.
++*   $\sigma, r, s$: Parameters defining the 3D covariance matrix (scale, rotation, etc.).
++*   $c \in \mathbb{R}^3$: Color (RGB).
++These are voxelized into "pre-voxel 3D Gaussians" using a Differentiable Voxelization module [S1, unofficial].
+ 
+-**Data Structures**
+-The Gaussian parameters are predicted per-pixel in the feature space and subsequently mapped to 3D space. The core data structure is a list of Gaussian primitives, each containing:
+-*   $\mu \in \mathbb{R}^3$: 3D position.
+-*   $s \in \mathbb{R}^3$: Scale factors.
+-*   $r \in \mathbb{R}^4$: Rotation quaternion.
+-*   $c \in \mathbb{R}^3$: Color (SH coefficients or RGB).
+-*   $\sigma$: Additional covariance parameter if applicable [S1, unofficial].
++**Steps:**
++1.  **Encoding:** Input images are processed by a transformer-based geometry encoder [S1, unofficial].
++2.  **Decoding:** Three decoder heads ($F_G, F_D, F_C$) predict:
++    *   $F_G$: Gaussian parameters $(\mu, \sigma, r, s, c)$ [S1, unofficial].
++    *   $F_D$: Depth map $D$ [S1, unofficial].
++    *   $F_C$: Camera poses $p$ [S1, unofficial].
++3.  **Gaussian Construction:** The predicted parameters are used to construct a set of pixel-wise 3D Gaussians [S1, unofficial].
++4.  **Voxelization:** The pixel-wise Gaussians are voxelized into pre-voxel 3D Gaussians using the Differentiable Voxelization module [S1, unofficial].
++5.  **Rendering:** Multi-view images and depth maps are rendered from the voxelized Gaussians using standard differentiable splatting [S1, unofficial].
++6.  **Loss Computation:**
++    *   **RGB Loss:** Rendered images are compared against ground truth images [S1, unofficial].
++    *   **Geometry Loss:** Rendered depth maps, decoded depth $D$, and poses $p$ are used to compute geometry losses [S1, unofficial].
++7.  **Supervision:** Geometries are supervised by pseudo-geometry priors obtained from a pretrained VGGT model [S1, unofficial].
+ 
+-**Algorithm Steps**
+-1.  **Encoding:** Input images are normalized to $[-1, 1]$ range via $(images+1)*0.5$ and passed through a transformer-based geometry encoder [S1, unofficial].
+-2.  **Decoding:** Three decoder heads ($F_G, F_D, F_C$) process the encoded features:
+-    *   $F_G$ predicts Gaussian parameters ($\mu, \sigma, r, s, c$).
+-    *   $F_D$ predicts a dense depth map $D$.
+-    *   $F_C$ predicts camera poses $p$ (extrinsics and intrinsics) [S1, unofficial].
+-3.  **Gaussian Construction:** Pixel-wise 2D Gaussian centers are back-projected into 3D space using the predicted depth $D$ and camera intrinsics to form initial 3D Gaussians [S1, unofficial].
+-4.  **Differentiable Voxelization:** The initial 3D Gaussians are voxelized into a structured grid using a Differentiable Voxelization module. This step aggregates overlapping Gaussians and resolves density issues, producing "pre-voxel" Gaussians [S1, unofficial].
+-5.  **Rendering:** The voxelized Gaussians are rendered into multi-view images and depth maps using standard differentiable splatting techniques [S1, unofficial].
+-6.  **Loss Computation:**
+-    *   **RGB Loss:** The rendered images are compared against ground truth images using an RGB loss (e.g., L1 or LPIPS) [S1, unofficial].
+-    *   **Geometry Loss:** The rendered depth maps, the decoded depth $D$, and the predicted poses $p$ are used to compute geometry losses. These are supervised by pseudo-geometry priors obtained from a pretrained VGGT (Video Grounding Transformer) model [S1, unofficial].
+-7.  **Optimization:** The model parameters are updated via backpropagation to minimize the combined loss [S1, unofficial].
++**Pseudocode:**
++```python
++# Assume model is the trained AnySplat pipeline
++# images: torch.Tensor of shape [1, K, 3, 448, 448], normalized to [-1, 1]
+ 
+-**Pseudocode**
+-```python
+-import torch
++# 1. Run Inference
++# The model performs encoding, decoding, and voxelization internally
++gaussians, pred_context_pose = model.inference((images + 1) * 0.5)
+ 
+-def anysplat_pipeline(images: torch.Tensor, model) -> tuple:
+-    """
+-    Runs the AnySplat inference pipeline.
+-    
+-    Args:
+-        images: Input tensor of shape [1, K, 3, 448, 448] with values in [-1, 1].
+-        model: The trained AnySplat model containing encoder and decoder heads.
+-        
+-    Returns:
+-        gaussians: Predicted 3D Gaussian parameters.
+-        pred_context_pose: Dictionary containing predicted extrinsic and intrinsic camera poses.
+-    """
+-    # Normalize images from [0, 1] to [-1, 1] if necessary, 
+-    # though the source code shows (images+1)*0.5 implying input might be [0,1] or [-1,1] depending on preprocessing.
+-    # Based on source: (images+1)*0.5 suggests input is [-1, 1] -> output [0, 1] for model, 
+-    # but standard practice often normalizes to [-1, 1]. 
+-    # The source snippet: `model.inference((images+1)*0.5)` implies the model expects inputs scaled such that 
+-    # adding 1 and dividing by 2 is the correct normalization step.
+-    
+-    normalized_images = (images + 1.0) * 0.5
+-    
+-    # Run inference
+-    gaussians, pred_context_pose = model.inference(normalized_images)
+-    
+-    return gaussians, pred_context_pose
++# 2. Extract Outputs
++# gaussians: Contains parameters for the 3D Gaussian set
++# pred_context_pose: Dictionary containing 'extrinsic' and 'intrinsic' matrices
++pred_all_extrinsic = pred_context_pose['extrinsic']
++pred_all_intrinsic = pred_context_pose['intrinsic']
+ 
+-def compute_losses(rendered_images, rendered_depths, gt_images, gt_depths, 
+-                   pred_depth, pred_poses, model, vggt_priors):
+-    """
+-    Computes the total loss for training.
+-    """
+-    # RGB Loss
+-    rgb_loss = torch.nn.functional.l1_loss(rendered_images, gt_images)
+-    
+-    # Geometry Losses
+-    # Supervised by pseudo-geometry priors from pretrained VGGT
+-    geometry_loss = compute_geometry_loss(
+-        rendered_depths, 
+-        pred_depth, 
+-        pred_poses, 
+-        vggt_priors
+-    )
+-    
+-    total_loss = rgb_loss + geometry_loss
+-    return total_loss
++# 3. (Optional) Save/Render Video
++# Uses the predicted poses and Gaussians to render novel views
++save_interpolated_video(
++    pred_all_extrinsic, 
++    pred_all_intrinsic, 
++    batch_size=1, 
++    height=448, 
++    width=448, 
++    gaussians=gaussians, 
++    image_folder="output", 
++    decoder=model.decoder
++)
+ ```
+ 
+-**Parameters**
+-*   Input resolution: 448x448 pixels [S1, unofficial].
+-*   Number of views $K$: Variable, depending on input [S1, unofficial].
+-
+-**Edge Cases and Pitfalls**
+-*   **Uncalibrated Input:** The method assumes no prior camera calibration is available, relying on the network to predict poses. Poor pose prediction can lead to geometric inconsistencies [S1, unofficial].
+-*   **Voxelization Artifacts:** Without the differentiable voxelization module, pixel-aligned Gaussians may suffer from insufficient density and artifacts, particularly in low-resolution feature spaces [S1, unofficial].
++**Parameters and Edge Cases:**
++*   **Input Resolution:** Fixed at $448 \times 448$ per view [S1, unofficial].
++*   **Number of Views ($K$):** Variable, but the model expects a batch of views. The exact maximum $K$ is not specified in the sources [S1, unofficial].
++*   **Uncalibrated Input:** The method handles uncalibrated images, meaning no prior knowledge of camera intrinsics or extrinsics is required [S1, unofficial].
++*   **Pseudo-Geometry Priors:** The reliance on VGGT for supervision implies that the quality of geometry is bounded by the accuracy of the VGGT model [S1, unofficial].
+ 
+ ## Subtopics
+ 
+ ### [SubSplat](13524-subsplat.md)
+-SubSplat is a method for high-resolution novel-view synthesis that resolves the trade-off between network computational cost and rendering fidelity in pixel-aligned 3D Gaussian Splatting. It solves the problem of insufficient Gaussian density and artifacts when using low-resolution backbone inputs by introducing a Sub-pixel Gaussian Reparameterizer (SPGR). Unlike prior methods limited by fixed grids or image-space upsamplers, SubSplat subdivides each grid-anchored primary Gaussian into multiple fine-grained sub-pixel primitives, restoring structural density directly from low-resolution features while maintaining stable network latency.
++A high-resolution variant using a Sub-pixel Gaussian Reparameterizer to increase density from low-resolution features.
+ 
+ ### [Deformable Radial Kernel (DRK)](13699-deformable-radial-kernel-drk.md)
+-Deformable Radial Kernel (DRK) Splatting is a 3D scene representation method that replaces the fixed radial symmetry of Gaussian primitives with a flexible planar kernel defined by multiple radial basis functions. It solves the overparameterization and geometric fidelity limitations of Gaussian Splatting by allowing adaptive stretching, rotation, and sharp boundary control, enabling high-fidelity rendering with significantly fewer primitives. Unlike standard 2D Gaussian Splatting, which relies on smooth, elliptical distributions, DRK supports straight edges and sharp corners through L1/L2 norm blending and piecewise edge sharpening.
++A variant replacing fixed radial Gaussians with flexible planar kernels for better geometric fidelity.
+ 
+ ## Operating characteristics
+-*   **Time Complexity:** Inference time is constant with respect to scene complexity, depending primarily on the number of input views and the transformer's computational cost. Training time is significantly reduced compared to iterative 3D Gaussian Splatting as it does not require per-scene optimization [S1, unofficial].
+-*   **Memory Complexity:** Memory usage is dominated by the transformer encoder-decoder and the storage of predicted Gaussian parameters. The voxelization step adds overhead but helps manage density [S1, unofficial].
+-*   **Strengths:** Handles uncalibrated, unconstrained views; fast inference; no per-scene optimization required [S1, unofficial].
+-*   **Limitations:** Relies on the quality of the pretrained VGGT priors for geometry supervision; performance may degrade in scenes with extreme lighting or textureless regions where VGGT priors are weak [S1, unofficial].
+-*   **When to use:** When fast reconstruction from a small set of uncalibrated images is required, and iterative optimization is prohibitive [S1, unofficial].
+-*   **When not to use:** When high-precision calibrated camera poses are available and iterative optimization can be afforded for higher fidelity [S1, unofficial].
++*   **Time Complexity:** Feed-forward inference is significantly faster than iterative optimization-based Gaussian Splatting, as it avoids per-scene optimization loops [S1, unofficial]. Exact inference time depends on the transformer size and number of views $K$.
++*   **Memory Complexity:** Memory usage is dominated by the transformer encoder/decoder and the storage of the predicted Gaussian set. The voxelization step adds overhead compared to direct splatting [S1, unofficial].
++*   **Strengths:** Handles unconstrained, uncalibrated image sets; no iterative optimization required; generalizable across scenes [S1, unofficial].
++*   **Limitations:** Relies on the quality of the pretrained VGGT model for geometry supervision; fixed input resolution; performance may degrade with very few or highly overlapping views if the transformer fails to generalize [S1, unofficial].
++*   **Hardware:** Requires a GPU with CUDA support (tested on CUDA 12.1) [S1, unofficial].
+ 
+ ## Background
+-AnySplat was introduced by InternRobotics as a feed-forward approach to 3D Gaussian Splatting, leveraging transformer architectures for generalizable reconstruction [S1, unofficial]. It builds on the principles of differentiable rendering and voxelization to address the limitations of pixel-aligned Gaussian predictions. The method utilizes pseudo-geometry priors from VGGT to guide the learning process, enabling robust reconstruction from unconstrained image collections [S1, unofficial].
++AnySplat was introduced by InternRobotics as a feed-forward approach to 3D Gaussian Splatting from unconstrained views [S1, unofficial]. It builds on the principles of differentiable rendering and transformer-based scene reconstruction, aiming to bridge the gap between iterative optimization and real-time generalizable reconstruction [S1, unofficial].
+ 
+ ## Sources

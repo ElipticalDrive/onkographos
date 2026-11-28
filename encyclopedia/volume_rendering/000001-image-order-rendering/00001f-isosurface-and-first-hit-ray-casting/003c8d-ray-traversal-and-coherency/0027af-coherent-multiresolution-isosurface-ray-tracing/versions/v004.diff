@@ -1,0 +1,278 @@
+--- v003.md
++++ v004.md
+@@ -4,135 +4,162 @@
+ 
+ ## Overview
+-Coherent Multiresolution Isosurface Ray Tracing optimizes interactive isosurface extraction from large volumetric datasets stored in octrees [S1, unofficial]. It solves the problem of low spatial coherence in large volumes by grouping neighboring rays into 2x2 packets and adapting coherent traversal algorithms to hierarchical grid structures [S1, unofficial]. Unlike single-ray tracers or coherent kd-tree tracers for meshes, this method leverages the inherent multiresolution level-of-detail (LOD) of the octree to maintain coherence on complex data, allowing interactive performance on commodity CPUs [S1, unofficial]. Smoothing of isosurfaces between resolutions is acceptable and can be desirable in visualization [S1, unofficial]. It builds on the coherent kd-tree isosurface ray tracer of Wald et al. and extends it to octree volumes, differing from siblings like [Cell-Based First-Hit Ray Casting](1039-cell-based-first-hit-ray-casting.md), [Hybrid Strategy for Interactive High Resolution Isosurface Ray Tracing](3697-hybrid-strategy-for-interactive-high-resolution-isosurface-r.md), and [Interactive High Resolution Isosurface Ray Tracing](4093-interactive-high-resolution-isosurface-ray-tracing.md) by explicitly combining packet-based coherence with octree LOD traversal [S1, unofficial].
++Coherent Multiresolution Isosurface Ray Tracing is a method for interactive isosurface extraction from large volumetric datasets stored in octrees [S1, unofficial]. It solves the performance bottleneck of single-ray isosurface tracing on commodity CPUs by grouping neighboring rays into 2x2 packets to exploit spatial coherence during traversal and intersection [S1, unofficial]. Unlike single-ray approaches, it performs traversal and intersection computations per packet rather than per ray, leveraging the multiresolution nature of the octree to maintain coherence even in complex or distant scenes by dynamically switching to coarser levels of detail (LOD) [S1, unofficial].
+ 
+ ## How it works
+-**Inputs:**
+-*   A multiresolution octree representing the scalar field [S1, unofficial].
+-*   Camera parameters (origin $\mathbf{o}$, direction $\mathbf{d}$) [S1, unofficial].
+-*   Isovalue $\tau$ [S1, unofficial].
+-*   Ray packet size (conservative 2x2, i.e., 4 rays) [S1, unofficial].
+-*   LOD cut depth (optional, to specify resolution) [S1, unofficial].
++The method adapts coherent grid traversal techniques to hierarchical octree structures, combining ray packet processing with multiresolution LOD selection [S1, unofficial].
+ 
+-**Outputs:**
+-*   Pixel colors for the isosurface, including shading [S1, unofficial].
++### Inputs and Outputs
++- **Input**: A large volumetric dataset $V$, an isovalue threshold $\tau$, a camera configuration (origin $\mathbf{o}$, direction $\mathbf{d}$ per pixel), and an optional LOD cut depth $D_{cut}$.
++- **Output**: A rendered image where each pixel contains the color of the first isosurface intersection or background.
+ 
+-**Data Structures:**
+-*   **Octree Node:** Contains min/max values of the scalar field within the voxel/cell to guide traversal [S1, unofficial]. Interior nodes may store coarser-resolution voxel data for LOD [S1, unofficial].
+-*   **Ray Packet:** A group of 4 rays (2x2 grid) sharing similar origins and directions [S1, unofficial].
++### Data Structures
++The core data structure is a multiresolution octree stored in CPU main memory [S1, unofficial].
++- **Octree Node**: Each node represents a voxel or a block of voxels.
++    - **Min/Max Bounds**: Each node stores the minimum and maximum scalar values ($v_{min}, v_{max}$) of the data contained within its subtree [S1, unofficial]. This forms the min/max acceleration structure.
++    - **Children**: Pointers to up to 8 child nodes (if not a leaf).
++    - **Data**: If a leaf, stores the scalar value(s) for the voxel(s). For multiresolution support, interior nodes may store aggregated or representative values if the octree is constructed to allow LOD traversal [S1, unofficial].
++- **Ray Packet**: A group of 4 rays (2x2 pixel block) [S1, unofficial].
++    - **Ray Data**: Each ray has origin $\mathbf{o}_i$ and direction $\mathbf{d}_i$ for $i \in \{0,1,2,3\}$.
++    - **SSE Representation**: Rays are packed into SIMD registers for parallel processing [S1, unofficial].
+ 
+-**Algorithm Steps:**
+-1.  **Offline Construction:** Losslessly compress the original large dataset into a multiresolution octree structure stored in CPU main memory [S1, unofficial]. The octree stores min/max acceleration values and potentially coarser voxel data in interior nodes [S1, unofficial].
+-2.  **Packet Generation:** Group neighboring rays (2x2) into packets [S1, unofficial]. Distribute these packets to worker threads for parallel processing [S1, unofficial].
+-3.  **Coherent Traversal:** For each packet, perform a coherent traversal of the octree [S1, unofficial]. This involves testing the packet against the min/max acceleration structure of the octree nodes [S1, unofficial]. If the packet's bounding volume intersects the node's min/max range, traverse children [S1, unofficial]. If the node is a leaf or the cut depth is reached, proceed to intersection [S1, unofficial].
+-4.  **SSE Intersection:** Perform SSE-optimized isosurface intersection tests for the rays in the packet against the leaf cells or LOD cells [S1, unofficial]. For fine resolution, intersect against the smallest voxels [S1, unofficial]. For LOD resolution, at the termination depth (cut depth), intersect the coarser, larger cells instead of fine voxels [S1, unofficial].
+-5.  **Shading:** Perform shading for the intersected surfaces [S1, unofficial].
++### Algorithm Steps
++1.  **Offline Construction**:
++    - Losslessly compress the original large dataset into a multiresolution octree structure [S1, unofficial].
++    - Compute min/max bounds for each node bottom-up.
++    - Store the octree in CPU main memory [S1, unofficial].
+ 
+-**Pseudocode:**
++2.  **Rendering Setup**:
++    - Generate rays for each pixel in the frame buffer.
++    - Group rays into 2x2 packets [S1, unofficial].
++    - Distribute ray packets to worker threads for parallel processing [S1, unofficial].
++
++3.  **Per-Packet Traversal**:
++    - For each packet, perform coherent traversal of the octree [S1, unofficial].
++    - Start at the root node.
++    - For each node in the packet's traversal path:
++        - Check if the isovalue $\tau$ lies within the node's min/max bounds: $\tau \in [v_{min}, v_{max}]$ [S1, unofficial].
++        - If $\tau \notin [v_{min}, v_{max}]$, cull the node (no intersection possible) [S1, unofficial].
++        - If $\tau \in [v_{min}, v_{max}]$, determine which children to visit.
++        - **LOD Handling**: If the current node depth is $\ge D_{cut}$ (or if the system decides to switch to LOD due to low coherence/complexity), treat the current node as a leaf for intersection purposes [S1, unofficial].
++            - **LOD Intersection**: Intersect the rays with the coarser cell represented by the current node instead of traversing deeper [S1, unofficial].
++            - If an intersection is found, refine the intersection point (e.g., linear interpolation within the cell) and shade [S1, unofficial].
++            - If no intersection is found at this LOD level, continue traversal or mark as background depending on implementation details [G].
++        - If not at LOD cut depth, push children to the traversal stack/list [S1, unofficial].
++        - Use coherence: Rays in a packet likely traverse similar nodes. Process children for all rays in the packet together [S1, unofficial].
++
++4.  **SSE Intersection**:
++    - Perform isosurface intersection tests for the rays in the packet using SIMD (SSE) instructions [S1, unofficial].
++    - For a leaf node (fine voxel or LOD cell), compute the intersection of each ray with the isosurface defined within that cell [S1, unofficial].
++    - The intersection test typically involves checking for sign changes of $f(\mathbf{p}) - \tau$ at the cell corners and interpolating [S3, unofficial][S1, unofficial].
++
++5.  **Shading**:
++    - For the closest intersection found across all rays in the packet, compute the surface normal $\nabla f$ and shade the pixel [S3, unofficial][S1, unofficial].
++
++### Pseudocode
+ ```python
+-def render_packet(packet, octree_node, isovalue, cut_depth, current_depth):
+-    # packet: list of 4 rays, each ray is (origin, direction)
+-    # octree_node: node with bbox (min, max), is_leaf flag, children list, scalar_data (if leaf)
+-    # Returns list of 4 colors or None
++def render_packet(packet, octree_root, tau, d_cut):
++    """
++    Render a 2x2 ray packet through an octree.
++    packet: list of 4 rays, each with origin o and direction d
++    octree_root: root of the min/max octree
++    tau: isovalue threshold
++    d_cut: depth at which to switch to LOD (coarser intersection)
++    """
++    # Stack for traversal: stores (node, ray_indices_in_packet)
++    # ray_indices_in_packet: subset of {0,1,2,3} that are still active in this node
++    stack = [(octree_root, [0, 1, 2, 3])]
+     
+-    # 1. Coherent Traversal: Test packet against node's min/max bounds
+-    if not ray_aabb_intersect_packet(packet, octree_node.bbox):
+-        return None
++    closest_hit = None # Stores (distance, ray_index, intersection_point, normal)
++    
++    while stack:
++        node, active_rays = stack.pop()
++        
++        # Check culling condition
++        if not (node.v_min <= tau <= node.v_max):
++            continue
++            
++        # Determine if we should use LOD
++        use_lod = (node.depth >= d_cut)
++        
++        if use_lod:
++            # Intersect rays with the coarser cell represented by this node
++            # This is a single intersection test per ray against the cell
++            for i in active_rays:
++                hit = intersect_ray_with_cell(packet[i], node)
++                if hit is not None:
++                    if closest_hit is None or hit.distance < closest_hit.distance:
++                        closest_hit = hit
++        else:
++            # Traverse children
++            if node.is_leaf():
++                # Fine voxel intersection
++                for i in active_rays:
++                    hit = intersect_ray_with_voxel(packet[i], node)
++                    if hit is not None:
++                        if closest_hit is None or hit.distance < closest_hit.distance:
++                            closest_hit = hit
++            else:
++                # Push children to stack
++                # Optimization: group rays by which child they enter to reduce stack size
++                children = node.children
++                for child in children:
++                    # Determine which rays in active_rays enter this child
++                    # This requires checking ray direction and node bounds
++                    child_rays = get_rays_entering_child(packet, active_rays, child)
++                    if child_rays:
++                        stack.append((child, child_rays))
++                        
++    return closest_hit
+ 
+-    # If leaf node or reached cut depth, perform intersection
+-    if octree_node.is_leaf or current_depth >= cut_depth:
+-        colors = []
+-        for ray in packet:
+-            # 2. Intersection: Check ray against cell bbox
+-            t_min, t_max = ray_aabb_intersect(ray, octree_node.bbox)
+-            if t_min is None:
+-                colors.append(None) # Miss
+-                continue
+-            
+-            # 3. Scalar field evaluation and isosurface intersection [G]
+-            # Standard step: sample f(p) along the ray segment [t_min, t_max] and find sign change or f(p) == isovalue.
+-            hit_t = find_scalar_isovalue(ray, octree_node.scalar_data, t_min, t_max, isovalue)
+-            
+-            if hit_t is not None and hit_t >= 0:
+-                hit_pos = ray.origin + hit_t * ray.direction
+-                # 4. Shading: Compute color using local lighting model [G]
+-                color = compute_shading(hit_pos, ray.direction, octree_node)
+-                colors.append(color)
+-            else:
+-                colors.append(None)
+-        return colors
++def intersect_ray_with_cell(ray, node):
++    """
++    Intersect a ray with the isosurface within a coarse cell.
++    Returns hit object or None.
++    """
++    # Sample corners of the cell
++    # Compute f(p) - tau for each corner
++    # If sign change exists, interpolate to find intersection
++    # Return distance, point, normal
++    pass
+ 
+-    # 5. Recurse to children
+-    results = [None] * 4
+-    for child in octree_node.children:
+-        # Distribute rays to children based on coherence
+-        sub_packet = filter_rays_for_child(packet, child.bbox)
+-        if sub_packet:
+-            child_colors = render_packet(sub_packet, child, isovalue, cut_depth, current_depth + 1)
+-            if child_colors:
+-                for i, c in enumerate(child_colors):
+-                    if c is not None:
+-                        results[i] = c
+-    return results
++def intersect_ray_with_voxel(ray, node):
++    """
++    Intersect a ray with the isosurface within a fine voxel.
++    Returns hit object or None.
++    """
++    # Similar to cell intersection but at voxel resolution
++    pass
+ 
+-def ray_aabb_intersect(ray, bbox):
+-    # Slab method for ray-AABB intersection
+-    # Returns (t_min, t_max) or (None, None) if miss
+-    t_min, t_max = 0.0, float('inf')
+-    for i in range(3):
+-        if ray.direction[i] == 0:
+-            if ray.origin[i] < bbox.min[i] or ray.origin[i] > bbox.max[i]:
+-                return None, None
+-        else:
+-            t1 = (bbox.min[i] - ray.origin[i]) / ray.direction[i]
+-            t2 = (bbox.max[i] - ray.origin[i]) / ray.direction[i]
+-            if t1 > t2: t1, t2 = t2, t1
+-            t_min = max(t_min, t1)
+-            t_max = min(t_max, t2)
+-            if t_min > t_max:
+-                return None, None
+-    if t_max < 0:
+-        return None, None # Box is behind the ray
+-    return t_min, t_max
+-
+-def ray_aabb_intersect_packet(packet, bbox):
+-    # Returns True if at least one ray in packet intersects bbox
+-    for ray in packet:
+-        if ray_aabb_intersect(ray, bbox)[0] is not None:
+-            return True
+-    return False
+-
+-def filter_rays_for_child(packet, child_bbox):
+-    # Returns rays that intersect child_bbox
+-    return [ray for ray in packet if ray_aabb_intersect(ray, child_bbox)[0] is not None]
+-
+-def find_scalar_isovalue(ray, scalar_data, t_min, t_max, isovalue):
+-    # Standard step: linear interpolation or binary search to find t where f(p) == isovalue [G].
+-    return None
+-
+-def compute_shading(hit_pos, ray_dir, node):
+-    # Standard step: Phong-like shading using gradient normal and local lighting model [G].
+-    return None
++def get_rays_entering_child(packet, active_rays, child):
++    """
++    Determine which rays in active_rays intersect the bounding box of child.
++    """
++    # Use ray-AABB intersection test
++    # Return list of indices
++    pass
+ ```
+ 
+-**Parameters:**
+-*   **Packet Size:** 2x2 (4 rays) [S1, unofficial].
+-*   **LOD Cut Depth:** Specified by user to control resolution. Omitting traversal below this depth improves coherence [S1, unofficial].
++### Parameters
++- **Packet Size**: 2x2 rays [S1, unofficial].
++- **LOD Cut Depth ($D_{cut}$)**: A specified depth in the octree. Rays do not traverse below this depth; instead, they intersect the coarser cell at this depth [S1, unofficial].
++- **Isovalue ($\tau$)**: The threshold for isosurface extraction.
+ 
+-**Edge Cases and Pitfalls:**
+-*   **Low Coherence:** Large volume data from far-away camera positions exhibits low spatial coherence, hampering packet performance [S1, unofficial].
+-*   **Overhead:** Coherent traversal may induce more intersection tests than single-ray traversal and can perform worse without optimizations like LOD [S1, unofficial].
+-*   **Scalability:** Coherent grid traversal on hierarchical structures may have scalability issues [S1, unofficial].
++### Edge Cases and Pitfalls
++- **Scalability**: Coherent grid traversal on hierarchical structures may have scalability issues [S1, unofficial].
++- **Performance Degradation**: Coherent traversal may induce more intersection tests than single-ray traversal and can perform worse without optimizations like LOD [S1, unofficial].
++- **Low Coherence**: Large volume data exhibits low spatial coherence, particularly from far-away camera positions, which hampers packet performance [S1, unofficial].
++- **Precision**: Standard floating-point precision issues may arise in intersection tests, though not explicitly detailed in sources [G].
+ 
+ ## Operating characteristics
+-*   **Time Complexity:** Depends on the number of nodes visited and the cost of intersection tests. Coherent traversal reduces the number of node visits per packet compared to single-ray traversal, but packet overhead exists. LOD reduces the depth of traversal. [S1, unofficial]
+-*   **Memory Complexity:** The octree structure is stored in CPU main memory. Lossless compression reduces the footprint compared to the original dataset. [S1, unofficial]
+-*   **Performance:** Outperforms single-ray ray tracing of the same large data on distributed clusters. Achieves interactive performance on laptops and commodity desktops. [S1, unofficial]
+-*   **Strengths:** Interactive performance on commodity hardware; smooth gradient normals; shadows; lower memory footprint. [S1, unofficial]
+-*   **Limitations:** Scalability issues with coherent traversal on hierarchical structures; low coherence in large volumes from far distances; potential for more intersection tests than single-ray if not optimized. [S1, unofficial]
+-*   **When to Use:** Interactive visualization of large volumetric datasets on commodity CPUs where memory and performance are constraints. [S1, unofficial]
+-*   **When Not to Use:** When high spatial coherence is not present (e.g., very distant camera views) or when exact high-resolution detail is required without LOD smoothing. [S1, unofficial]
++- **Time Complexity**: Depends on the number of nodes visited per packet. With LOD, the depth of traversal is limited, reducing complexity. Without LOD, it can be higher than single-ray due to packet overhead [S1, unofficial].
++- **Memory Complexity**: The octree structure is stored in CPU main memory. The multiresolution representation allows for a smaller footprint than uncompressed data [S1, unofficial].
++- **Measured Performance**: The system outperforms ray tracing the same large data on a distributed cluster on a multicore workstation [S1, unofficial]. It achieves interactive performance on laptops and commodity desktops [S1, unofficial].
++- **Strengths**: Interactive performance on commodity hardware, smooth gradients due to LOD smoothing, lower memory footprint [S1, unofficial].
++- **Limitations**: Scalability issues with coherent traversal, potential performance loss without LOD, low coherence in distant views [S1, unofficial].
++- **When to Use**: Interactive visualization of large volumes on commodity CPUs where smoothness is acceptable and hardware is limited [S1, unofficial].
++- **When Not to Use**: When maximum precision is required at all scales, or when the scene has very high coherence without LOD (single-ray might be simpler) [S1, unofficial].
+ 
+ ## Background
+-The method was developed by Knoll et al. and presented in the thesis "Ray Tracing Implicit Surfaces for Interactive Visualization" (2006) and the paper "Coherent Multiresolution Isosurface Ray Tracing" [S1, unofficial]. It builds on the coherent kd-tree isosurface ray tracer of Wald et al. and extends it to octree volumes with multiresolution LODs. The work appeared in Chapter 4 of the thesis and in the cited paper [60]. [S1, unofficial]
++The method was presented in the paper "Coherent Multiresolution Isosurface Ray Tracing" [60], part of a thesis by Knoll [S1, unofficial]. It builds on the coherent kd-tree isosurface ray tracer of Wald et al. [129, 130], adapting it to octree volumes with multiresolution LODs [S1, unofficial]. The work appeared in Chapter 4 of the thesis [S1, unofficial].
+ 
+ ## Sources

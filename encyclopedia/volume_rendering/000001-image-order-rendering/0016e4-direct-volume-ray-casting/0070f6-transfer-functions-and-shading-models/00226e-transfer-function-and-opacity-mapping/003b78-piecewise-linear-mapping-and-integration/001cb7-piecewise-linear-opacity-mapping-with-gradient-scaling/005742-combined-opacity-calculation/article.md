@@ -1,0 +1,69 @@
+# Combined Opacity Calculation
+Also called: Grey-value and Gradient Opacity Combination
+
+## Overview
+Combined Opacity Calculation is a volume rendering technique that combines opacity values derived from grey-value mapping and volume gradient mapping to enhance surface boundaries while suppressing tissue interiors [S1, unofficial]. It builds on [Piecewise Linear Opacity Mapping with Gradient Scaling](1335-piecewise-linear-opacity-mapping-with-gradient-scaling.md) [G].
+
+## How it works
+**Inputs and Outputs:**
+*   Input: Opacity value derived from grey-value mapping ($\alpha_{gv}$) and opacity value derived from volume gradient mapping ($\alpha_{grad}$) [S1, unofficial].
+*   Output: Combined opacity value ($\alpha_{combined}$) [S1, unofficial].
+
+**Data Structures:**
+*   Two scalar values for $\alpha_{gv}$ and $\alpha_{grad}$, typically in the range $[0, 1]$ [G].
+
+**Steps:**
+1.  Calculate the opacity value resulting from the grey-value based method, denoted as $\alpha_{gv}$ [S1, unofficial].
+2.  Calculate the opacity value resulting from the volume gradient based method, denoted as $\alpha_{grad}$ [S1, unofficial].
+3.  Multiply the two opacity values to obtain the final combined opacity:
+    $$ \alpha_{combined} = \alpha_{gv} \times \alpha_{grad} $$
+
+**Parameters:**
+*   Not given in the sources.
+
+**Edge Cases and Pitfalls:**
+*   If either $\alpha_{gv}$ or $\alpha_{grad}$ is zero, the result is zero, which may hide valid structures if one mapping is overly aggressive [S1, unofficial].
+*   Precision issues may arise if the values are very small, leading to underflow in fixed-point arithmetic [G].
+
+**Pseudocode:**
+> **Unverified code.** The code below did not pass a test run against a reference implementation, or no test fits it, so it may contain errors.
+
+```python
+def combined_opacity(alpha_gv: float, alpha_grad: float) -> float:
+    """
+    Calculate combined opacity by multiplying grey-value and gradient-based opacities.
+    
+    Args:
+        alpha_gv: Opacity from grey-value mapping.
+        alpha_grad: Opacity from gradient mapping.
+        
+    Returns:
+        Combined opacity value.
+    """
+    return alpha_gv * alpha_grad
+```
+
+## Subtopics
+
+### [Gradient-Magnitude Opacity Modulation](15927-gradient-magnitude-opacity-modulation.md)
+A technique that modulates opacity based on local data variation to preserve edge details. It is chosen when encrypted volume rendering requires edge preservation without complex compositing operations.
+
+### Gradient Opacity Modulation
+Modulates the base scalar opacity using the magnitude of the volume gradient to enhance edges and suppress noise [S2, unofficial]. Typical parameters for the gradient opacity mapping step include `scalarOpacityUnitDistance` set to 3.0, `gradientOpacityMinimumValue` set to 2, `gradientOpacityMinimumOpacity` set to 0.0, `gradientOpacityMaximumValue` set to 20, and `gradientOpacityMaximumOpacity` set to 1.0 [S2, unofficial].
+
+## Operating characteristics
+*   **Time Complexity:** $O(1)$ per sample, as it involves a single multiplication [G].
+*   **Memory Complexity:** $O(1)$ additional memory [G].
+*   **Measured Performance:** Not given in the sources.
+*   **Scaling:** Linear with the number of samples [G].
+*   **Strengths:** Simple to implement; effectively combines tissue classification (grey-value) with edge detection (gradient) [G].
+*   **Limitations:** May suppress valid internal structures if gradient-based opacity is too low [G].
+*   **When to use:** When both tissue type and surface boundaries are important for visualization [G].
+*   **When not to use:** When performance is critical and the overhead of calculating gradients is prohibitive, or when one mapping is sufficient [G].
+
+## Background
+Not given in the sources.
+
+## Sources
+[S1] Iso-Surface Volume Rendering : speed and accuracy for medical applications, https://doi.org/10.3990/1.9789036513982, fetched 2026-10-26 (unofficial)
+[S2] GhadaDx/Volume-Rendering-VTKjs, https://github.com/GhadaDx/Volume-Rendering-VTKjs, fetched 2026-10-27 (unofficial)

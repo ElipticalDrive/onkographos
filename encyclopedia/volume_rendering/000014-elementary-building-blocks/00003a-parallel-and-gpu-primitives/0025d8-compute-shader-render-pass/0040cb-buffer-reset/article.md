@@ -1,0 +1,108 @@
+# Buffer Reset
+
+Also called: resetBuffer
+
+## Overview
+Buffer Reset is a compute shader primitive used to initialize or clear a buffer to a specific value [S1, unofficial]. It serves as a foundational step in parallel rendering pipelines, ensuring data structures are in a known state before accumulation or processing begins. Unlike atomic operations which modify existing data, this method performs a bulk overwrite [S1, unofficial].
+
+## How it works
+**Inputs and Outputs:**
+- Input: A buffer (typically a Storage Buffer Object or SSBO) of size $N$ elements.
+- Input: A scalar `value` to fill the buffer with.
+- Output: The buffer contents are overwritten with `value`.
+
+**Data Structures:**
+- The buffer is treated as a linear array of $N$ elements. The element type depends on the shader interface (e.g., `uint`, `float`, `vec4`). No specific bit-packing is mandated by the primitive itself, but the layout must match the shader's uniform declaration [S1, unofficial].
+
+**Steps:**
+1. Bind the target buffer to the compute shader as a storage buffer.
+2. Set the uniform `arraySize` to $N$, the total number of elements.
+3. Set the uniform `value` to the desired reset value.
+4. Calculate the number of work groups: $G = \lceil N / W \rceil$, where $W$ is the maximum group size supported by the hardware [S1, unofficial].
+5. Dispatch the compute shader with $G$ groups.
+
+**Pseudocode:**
+> **Unverified code.** The code below did not pass a test run against a reference implementation, or no test fits it, so it may contain errors.
+
+```python
+# Compute Shader Dispatch Logic
+def reset_buffer(buffer, array_size, value):
+    # Determine group size based on hardware limits
+    max_group_size = get_max_compute_group_size()
+    
+    # Calculate number of groups needed to cover all elements
+    # Each group processes max_group_size elements
+    num_groups = (array_size + max_group_size - 1) // max_group_size
+    
+    # Dispatch the compute shader
+    # The shader itself iterates over its local range within the global buffer
+    dispatch_compute_shader(
+        num_groups=num_groups,
+        group_size=max_group_size,
+        uniforms={
+            "arraySize": array_size,
+            "value": value,
+            "buffer": buffer
+        }
+    )
+
+# Example Compute Shader Logic (GLSL-like pseudocode)
+# uniform uint arraySize;
+# uniform float value;
+// uniform write only buffer float buffer[];
+
+void main() {
+    uint global_id = gl_GlobalInvocationID.x;
+    if (global_id < arraySize) {
+        buffer[global_id] = value;
+    }
+}
+```
+
+**Parameters:**
+- `arraySize`: Total number of elements in the buffer.
+- `value`: The scalar or vector value to write.
+- `group_size`: Typically the maximum supported by the GPU driver (e.g., 256 or 1024) [S1, unofficial].
+
+**Edge Cases and Pitfalls:**
+- If $N=0$, no dispatch is required.
+- Precision issues may arise if `value` is a floating-point number and the buffer expects integers, or vice versa, depending on shader type casting rules [G].
+- Boundary checks (`global_id < arraySize`) are essential to prevent out-of-bounds writes if $N$ is not a multiple of the group size [G].
+
+## Subtopics
+
+### Pixel Buffer Clear
+Clears a tile's pixels in the framebuffer to 0 [S2, unofficial]. It is chosen when resetting a specific rectangular region of the screen buffer rather than a generic compute buffer. The method calculates a linear offset for a 2D tile and iterates through its dimensions [S2, unofficial].
+
+**Steps:**
+1. Calculate width $w = \text{screensize}.x$.
+2. Initialize $yoffset = \text{tileorg}.y \times w$.
+3. Loop $y$ from $\text{tileorg}.y$ to $\text{tileorg}.y + \text{TILESIZE} - 1$, incrementing $yoffset$ by $w$ each iteration.
+4. Loop $x$ from $\text{tileorg}.x$ to $\text{tileorg}.x + \text{TILESIZE} - 1$.
+5. Set $\text{pixels}[x + yoffset] = 0$.
+
+**Pseudocode:**
+> **Unverified code.** The code below did not pass a test run against a reference implementation, or no test fits it, so it may contain errors.
+
+```python
+def clear_pixel_tile(pixels, screensize, tileorg, tilesz):
+    w = screensize.x
+    for y in range(tileorg.y, tileorg.y + tilesz):
+        yoffset = y * w
+        for x in range(tileorg.x, tileorg.x + tilesz):
+            pixels[x + yoffset] = 0
+```
+
+## Operating characteristics
+- **Time Complexity:** $O(N)$, where $N$ is the number of elements or pixels to reset.
+- **Memory Complexity:** $O(1)$ auxiliary memory; the operation is in-place.
+- **Performance:** Highly efficient on GPUs due to parallel dispatch. The cost is dominated by memory bandwidth and shader overhead.
+- **Strengths:** Simple implementation, minimal synchronization overhead compared to atomic operations.
+- **Limitations:** Requires a full buffer traversal; not suitable for sparse resets without additional logic.
+
+## Background
+Buffer Reset is a standard technique in GPU programming, often implemented as a helper utility in graphics libraries. The specific implementation cited here originates from the VoxelFragmentML project, which uses it for voxel data management [S1, unofficial]. Pixel Buffer Clear variants are common in tile-based renderers, such as those found in mini.q [S2, unofficial].
+
+## Sources
+[S1] AlfonsoLRz/VoxelFragmentML, https://github.com/AlfonsoLRz/VoxelFragmentML, fetched 2026-10-26 (unofficial)
+[S2] bsegovia/mini.q, https://github.com/bsegovia/mini.q, fetched 2026-10-26 (unofficial)

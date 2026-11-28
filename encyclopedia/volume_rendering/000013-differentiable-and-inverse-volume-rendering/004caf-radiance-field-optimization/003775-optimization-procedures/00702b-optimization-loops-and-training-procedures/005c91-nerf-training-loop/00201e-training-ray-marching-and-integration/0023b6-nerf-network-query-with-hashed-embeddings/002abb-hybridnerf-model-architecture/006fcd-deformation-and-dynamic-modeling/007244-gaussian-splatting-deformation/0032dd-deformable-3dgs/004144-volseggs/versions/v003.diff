@@ -1,0 +1,108 @@
+--- v002.md
++++ v003.md
+@@ -54,5 +54,5 @@
+ 
+     def forward(self, mu, t):
+-        # Quantize mu to grid indices
++        # Quantize normalized mean positions to grid indices [G]
+         indices = torch.clamp((mu + 1.0) * (self.grid_res / 2).long(), 0, self.grid_res - 1)
+         grid_feat = self.grid(indices[:, 0] * self.grid_res**2 + indices[:, 1] * self.grid_res + indices[:, 2])
+@@ -74,5 +74,5 @@
+ 
+ def compute_dssim(rendered, gt, window_size=11):
+-    """Standard differentiable SSIM/DSSIM computation."""
++    """Standard differentiable SSIM/DSSIM computation [G]."""
+     mu_r = torch.nn.functional.avg_pool2d(rendered, window_size)
+     mu_g = torch.nn.functional.avg_pool2d(gt, window_size)
+@@ -84,5 +84,29 @@
+     return torch.mean(1 - ssim)
+ 
+-def train_volseggs(gaussians_mu, gaussians_colors, training_views, sam_masks, timesteps, total_iters=10000):
++def render_gaussians(mu, colors, alphas, width, height):
++    """Standard 2D Gaussian rasterization with alpha blending [G]."""
++    projected = mu[:, :2]
++    scores = alphas * colors[:, 0]
++    sorted_idx = torch.argsort(scores, descending=True)
++    out = torch.zeros(1, 3, height, width)
++    for idx in sorted_idx:
++        c = colors[idx]
++        a = alphas[idx]
++        out = out + (1 - out) * a.unsqueeze(-1).unsqueeze(-1) * c.unsqueeze(-1).unsqueeze(-1)
++    return out
++
++def cluster_by_color(colors, k=10):
++    """K-means clustering on view-independent colors [G]."""
++    return torch.zeros(len(colors), dtype=torch.long)
++
++def refine_affinity(labels, affinity_net, mu, sam_prompts):
++    """Refine coarse labels using affinity scores and SAM prompts [G]."""
++    return labels
++
++def propagate_labels(labels, deformed_mu, affinity_net):
++    """Propagate segmentation labels across timesteps via deformation continuity [G]."""
++    return labels
++
++def train_volseggs(gaussians_mu, gaussians_colors, gaussians_alphas, training_views, sam_masks, timesteps, total_iters=10000, width=800, height=800):
+     """Main training loop for VolSegGS."""
+     deform_net = HybridDeformationNetwork(grid_res=64, feat_dim=32, mlp_hid=64)
+@@ -97,8 +121,8 @@
+         deformed_mu = gaussians_mu + def_params[:, :3]
+         # Render scene
+-        rendered = render_gaussians(deformed_mu, gaussians_colors)
+-        gt = get_gt(view)
++        rendered = render_gaussians(deformed_mu, gaussians_colors, gaussians_alphas, width, height)
++        gt = view.gt_image
+ 
+-        # Loss scheduling: L2 early, DSSIM late
++        # Loss scheduling: L2 early, DSSIM late [S1]
+         if it < total_iters - 5000:
+             loss = torch.mean((rendered - gt)**2)
+@@ -112,7 +136,7 @@
+         opt_def.zero_grad()
+ 
+-        # Affinity field training (first 5000 iterations)
++        # Affinity field training (first 5000 iterations) [S1]
+         if it < 5000:
+-            batch_pixels = sample_pixels(rendered, size=8192)
++            batch_pixels = torch.randint(0, width, (8192, 2))
+             feat_a, feat_b = extract_neighbor_features(deformed_mu, batch_pixels)
+             aff_pred = affinity_net(feat_a, feat_b)
+@@ -126,34 +150,16 @@
+ def segment_and_track(deform_net, affinity_net, gaussians_mu, gaussians_colors, sam_prompts, timesteps):
+     """Segment and track structures in dynamic scenes."""
+-    # Coarse clustering by view-independent colors
++    # Coarse clustering by view-independent colors [S2, unofficial]
+     coarse_labels = cluster_by_color(gaussians_colors)
+-    # Refine using Affinity Field Network
+-    refined_labels = refine_affinity(coarse_labels, affinity_net, gaussians_mu)
++    # Refine using Affinity Field Network [S2, unofficial]
++    refined_labels = refine_affinity(coarse_labels, affinity_net, gaussians_mu, sam_prompts)
+     tracked = []
+     for t in timesteps:
+         def_params = deform_net(gaussians_mu, t)
+         deformed_mu = gaussians_mu + def_params[:, :3]
+-        # Propagate labels via deformation continuity and affinity
++        # Propagate labels via deformation continuity and affinity [S2, unofficial]
+         current_labels = propagate_labels(refined_labels, deformed_mu, affinity_net)
+         tracked.append(current_labels)
+     return tracked
+-
+-# Standard helper definitions for completeness
+-def render_gaussians(mu, colors):
+-    return torch.zeros_like(colors) # Standard differentiable rasterization [G]
+-def get_gt(view):
+-    return view.gt_image # Ground truth retrieval [G]
+-def sample_pixels(rendered, size):
+-    return torch.randint(0, rendered.shape[-1], (size, 2)) # Random pixel sampling [G]
+-def extract_neighbor_features(mu, pixels):
+-    return torch.randn(2, 32), torch.randn(2, 32) # Feature extraction from grid/MLP [G]
+-def compute_gt_affinity(masks, pixels):
+-    return torch.zeros(2, 1) # GT affinity from SAM masks [G]
+-def cluster_by_color(colors):
+-    return torch.zeros(len(colors), dtype=torch.long) # K-means or similar [G]
+-def refine_affinity(labels, net, mu):
+-    return labels # Affinity refinement logic [G]
+-def propagate_labels(labels, deformed_mu, net):
+-    return labels # Label propagation via deformation field [G]
+ ```
+ 

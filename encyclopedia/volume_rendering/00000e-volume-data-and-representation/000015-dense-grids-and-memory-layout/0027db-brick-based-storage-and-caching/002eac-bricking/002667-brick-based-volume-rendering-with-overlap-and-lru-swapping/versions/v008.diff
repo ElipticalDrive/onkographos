@@ -1,0 +1,274 @@
+--- v007.md
++++ v008.md
+@@ -4,14 +4,14 @@
+ 
+ ## Overview
+-Brick-based volume rendering with overlap and LRU swapping manages volumetric data larger than GPU memory by dividing the volume into smaller 3D texture bricks, rendering them individually, and composing the final image [S1, unofficial][S2]. It sets itself apart from traditional bricking by using considerably smaller bricks to exploit void detection and Least Recently Used (LRU) swapping, thereby reducing bus transfer overhead and alleviating the bottleneck of reloading the entire volume per frame [S1, unofficial]. Unlike [Dynamic Rebricking](2823-dynamic-rebricking.md) which adapts brick structure to view or data changes, this method uses fixed uniform bricks and relies on memory management policies to optimize performance [S1, unofficial].
++Brick-based volume rendering with overlap and LRU swapping manages volumetric data larger than GPU memory by dividing the volume into smaller 3D texture bricks, rendering them individually, and composing the final image [S1, unofficial][S2]. It sets itself apart from traditional bricking by using considerably smaller bricks to exploit void detection and Least Recently Used (LRU) swapping, thereby reducing bus transfer overhead and alleviating the bottleneck of reloading the entire volume per frame [S1, unofficial]. Unlike [Dynamic Rebricking](2823-dynamic-rebricking.md) which adapts brick structure to view or data changes, this method uses fixed uniform bricks when dimensions align, but handles boundaries with partially empty or smaller rest-bricks to maintain memory management optimization [S1, unofficial].
+ 
+ ## How it works
+-**Inputs:** A volumetric dataset stored in main memory, GPU texture memory with limited capacity, and a rendering view (camera position and projection).
+-**Outputs:** A 2D composited image.
++**Inputs:** A volumetric dataset stored in main memory, GPU texture memory with limited capacity, and a rendering view (camera position and projection) [G].
++**Outputs:** A 2D composited image [G].
+ 
+ **Data Structures:**
+-1.  **Volume Data:** Stored in main memory as a contiguous array or structured grid.
+-2.  **Bricks:** Uniform 3D sub-volumes of size $b \times b \times b$ voxels.
+-3.  **Texture Memory:** Holds resident bricks as 3D textures. Graphics cards often require 3D texture dimensions to be powers of 2 [S1, unofficial].
++1.  **Volume Data:** Stored in main memory as a contiguous array or structured grid [G].
++2.  **Bricks:** Uniform 3D sub-volumes of size $b \times b \times b$ voxels, with remainder bricks used when dimensions do not divide evenly [S1, unofficial].
++3.  **Texture Memory:** Holds resident bricks as 3D textures [S1, unofficial].
+ 4.  **LRU State:** A tracking mechanism (implicit in OpenGL implementations) to identify the least recently used resident texture for eviction [S1, unofficial].
+ 
+@@ -22,5 +22,5 @@
+     *   For trilinear interpolation: $n = 1$ voxel in every direction [S1, unofficial].
+     *   For pre-integrated rendering or on-the-fly gradient calculation: $n = 2$ voxels (trilinear overlap + 1 additional voxel) [S1, unofficial].
+-*   $V_{dim}$: Dimensions of the original volume.
++*   $V_{dim}$: Dimensions of the original volume [G].
+ 
+ **Steps:**
+@@ -48,127 +48,118 @@
+ 
+ ```python
+-def render_volume_with_bricks(volume_data, camera, transfer_function, brick_size_b, overlap_n):
++def render_volume_with_bricks(volume_data, camera_pos, transfer_function, brick_size_b, overlap_n):
+     """
+     Renders a volume using brick-based rendering with LRU swapping and overlap.
++    """
++    vol_dims = (len(volume_data), len(volume_data[0]), len(volume_data[0][0]))
++    num_bricks_x = (vol_dims[0] + brick_size_b - 1) // brick_size_b
++    num_bricks_y = (vol_dims[1] + brick_size_b - 1) // brick_size_b
++    num_bricks_z = (vol_dims[2] + brick_size_b - 1) // brick_size_b
+     
+-    Args:
+-        volume_data: Array of voxel values in main memory.
+-        camera: Camera parameters (position, direction, projection).
+-        transfer_function: Function mapping voxel values to color/opacity.
+-        brick_size_b: Integer, dimension of cubic bricks in voxels.
+-        overlap_n: Integer, number of voxels of overlap per direction.
+-    """
+-    
+-    # 1. Partitioning and Overlap Setup
+-    # Calculate grid dimensions for bricks
+-    vol_dims = volume_data.shape
+-    brick_dims = (brick_size_b, brick_size_b, brick_size_b)
+-    
+-    # Determine number of bricks needed, handling non-divisible dimensions
+-    # Add extra bricks if volume dimensions are not multiples of brick_size_b
+-    num_bricks_x = ceil(vol_dims[0] / brick_size_b)
+-    num_bricks_y = ceil(vol_dims[1] / brick_size_b)
+-    num_bricks_z = ceil(vol_dims[2] / brick_size_b)
+-    
+-    # Create brick structures with overlap padding
+-    # Each brick stores its local data plus overlap voxels from neighbors
+     bricks = []
+     for z in range(num_bricks_z):
+         for y in range(num_bricks_y):
+             for x in range(num_bricks_x):
+-                # Extract base brick data
+-                x_start = x * brick_size_b
+-                y_start = y * brick_size_b
+-                z_start = z * brick_size_b
++                x_start, y_start, z_start = x * brick_size_b, y * brick_size_b, z * brick_size_b
++                x_end, y_end, z_end = min(x_start + brick_size_b, vol_dims[0]), min(y_start + brick_size_b, vol_dims[1]), min(z_start + brick_size_b, vol_dims[2])
++                base_data = volume_data[x_start:x_end, y_start:y_end, z_start:z_end]
++                padded_data = pad_edge(base_data, overlap_n)
++                bricks.append({'id': (x, y, z), 'data': padded_data, 'dims': (x_end-x_start, y_end-y_start, z_end-z_start)})
+                 
+-                x_end = min(x_start + brick_size_b, vol_dims[0])
+-                y_end = min(y_start + brick_size_b, vol_dims[1])
+-                z_end = min(z_start + brick_size_b, vol_dims[2])
+-                
+-                base_data = volume_data[x_start:x_end, y_start:y_end, z_start:z_end]
+-                
+-                # Apply overlap: duplicate boundary voxels
+-                # For trilinear interpolation, we need 1 voxel overlap.
+-                # For pre-integration/gradients, we need 2.
+-                # This step ensures continuous interpolation across boundaries [S1, unofficial][S2]
+-                padded_data = apply_overlap(base_data, brick_size_b, overlap_n, 
+-                                            vol_dims, x_start, y_start, z_start)
+-                
+-                bricks.append({
+-                    'id': (x, y, z),
+-                    'data': padded_data,
+-                    'original_dims': (x_end - x_start, y_end - y_start, z_end - z_start),
+-                    'padded_dims': padded_data.shape
+-                })
++    max_gpu_memory = 1024  # Capacity in bricks [G]
++    lru_cache = LRUCache(max_gpu_memory)
+     
+-    # 2. Memory Management and Rendering Loop
+-    # Initialize LRU cache for texture memory
+-    texture_cache = LRUCache(max_capacity=available_gpu_texture_memory)
++    sorted_bricks = sorted(bricks, key=lambda b: distance_to_camera(b['id'], camera_pos, brick_size_b))
+     
+-    # Sort bricks for depth-first rendering? 
+-    # The method specifies drawing proxy geometry in depth sorted order [S2].
+-    # This implies sorting bricks by their distance to the camera.
+-    sorted_bricks = sort_bricks_by_depth(bricks, camera)
+-    
+-    final_image = initialize_image()
+-    
++    final_image = []
+     for brick in sorted_bricks:
+-        # Check if brick is in texture cache
+-        if not texture_cache.contains(brick['id']):
+-            # Evict LRU texture if cache is full
+-            if texture_cache.is_full():
+-                evicted_id = texture_cache.get_lru_key()
+-                texture_cache.evict(evicted_id)
++        if brick['id'] not in lru_cache:
++            if len(lru_cache) >= max_gpu_memory:
++                evicted = lru_cache.get_lru_key()
++                lru_cache.evict(evicted)
++            lru_cache.put(brick['id'], brick['data'])
+             
+-            # Load brick into GPU texture memory
+-            # Note: Graphics cards may require power-of-2 dimensions [S1, unofficial]
+-            # If padded_dims are not power-of-2, handle via padding or rest-bricks
+-            gpu_texture = load_to_gpu_texture(brick['data'])
+-            texture_cache.put(brick['id'], gpu_texture)
+-        
+-        # Get resident texture
+-        gpu_texture = texture_cache.get(brick['id'])
+-        
+-        # Check for void brick optimization
+-        # If the brick is completely void after applying transfer function, skip drawing [S1, unofficial]
+         if is_void(brick['data'], transfer_function):
++            lru_cache.access(brick['id'])
+             continue
+             
+-        # Render the brick
+-        # Draw proxy geometry (front faces) of the brick in depth sorted order [S2]
+-        # Perform raycasting within the brick's bounds
+-        brick_image = raycast_brick(gpu_texture, camera, transfer_function, 
+-                                    brick['original_dims'], overlap_n)
+-        
+-        # Alpha blend the brick's result into the final image
+-        # Clamp rays at boundaries to ensure correct transitions [S2]
+-        final_image = alpha_blend(final_image, brick_image, brick['id'])
+-        
+-        # Update LRU access time
+-        texture_cache.access(brick['id'])
++        brick_image = raycast_brick(lru_cache.get(brick['id']), camera_pos, transfer_function, brick['dims'], overlap_n)
++        final_image = alpha_blend(final_image, brick_image)
++        lru_cache.access(brick['id'])
+         
+     return final_image
+ 
+-def apply_overlap(data, brick_size, overlap_n, vol_dims, x_start, y_start, z_start):
+-    """
+-    Duplicates boundary voxels to create overlap for interpolation.
+-    """
+-    # Pad the data with overlap voxels on all sides
+-    # The size of the padded data will be (brick_size + 2*overlap_n) in each dimension
+-    # except for boundary bricks where it might be smaller or handled by rest-bricks.
+-    # For simplicity, assume uniform padding logic for internal bricks.
+-    # Boundary handling requires checking against vol_dims.
+-    
+-    padded = np.pad(data, ((overlap_n, overlap_n), (overlap_n, overlap_n), (overlap_n, overlap_n)), 
+-                    mode='edge')
++class LRUCache:
++    def __init__(self, capacity):
++        self.capacity = capacity
++        self.cache = {}
++        self.order = []
++    def __len__(self): return len(self.cache)
++    def __contains__(self, key): return key in self.cache
++    def get(self, key): return self.cache[key]
++    def put(self, key, value):
++        if key in self.cache: self.order.remove(key)
++        self.cache[key] = value
++        self.order.append(key)
++    def get_lru_key(self): return self.order[0]
++    def evict(self, key):
++        del self.cache[key]
++        self.order.remove(key)
++    def access(self, key):
++        if key in self.order: self.order.remove(key)
++        self.order.append(key)
++
++def pad_edge(data, n):
++    # Replicate boundary voxels in all 3 dimensions for interpolation continuity [S2]
++    padded = data
++    for _ in range(n):
++        padded = [padded[0]] + padded + [padded[-1]]
+     return padded
+ 
+ def is_void(data, transfer_function):
+-    """
+-    Checks if all voxels in the brick map to zero opacity.
+-    """
+-    # Apply transfer function and check if any opacity > 0
+-    opacities = transfer_function(data)
+-    return np.all(opacities == 0)
++    # Checks if all voxels in the brick map to zero opacity [S1, unofficial]
++    for row in data:
++        for voxel in row:
++            if transfer_function(voxel) > 0:
++                return False
++    return True
++
++def distance_to_camera(brick_id, camera_pos, brick_size_b):
++    # Approximate depth for sorting proxy geometry [S2]
++    x, y, z = brick_id
++    center = (x * brick_size_b + brick_size_b / 2, y * brick_size_b + brick_size_b / 2, z * brick_size_b + brick_size_b / 2)
++    return (center[0] - camera_pos[0])**2 + (center[1] - camera_pos[1])**2 + (center[2] - camera_pos[2])**2
++
++def raycast_brick(texture, camera_pos, transfer_function, dims, overlap_n):
++    # Iterative front-to-back raycasting within brick bounds [S2]
++    image = []
++    for y in range(dims[1]):
++        row = []
++        for x in range(dims[0]):
++            color, opacity = 0.0, 0.0
++            for z in range(dims[2]):
++                sample = texture[z][y][x]
++                c, o = transfer_function(sample)
++                alpha = o * (1.0 - opacity)
++                color += c * alpha
++                opacity += alpha
++                if opacity >= 1.0:
++                    break
++            row.append((color, opacity))
++        image.append(row)
++    return image
++
++def alpha_blend(image1, image2):
++    # Compose brick fragments into final image [S2]
++    result = []
++    for r1, r2 in zip(image1, image2):
++        row = []
++        for (c1, o1), (c2, o2) in zip(r1, r2):
++            alpha = o2 * (1.0 - o1)
++            c = c1 * o1 + c2 * alpha
++            o = o1 + alpha
++            row.append((c, o))
++        result.append(row)
++    return result
+ ```
+ 
+@@ -188,15 +179,15 @@
+ 
+ ### View-dependent brick upload
+-View-dependent brick upload is a variant where the unit of texture copy is a brick (e.g., 64 × 64 × 64 voxels), allowing the render to copy only the bricks that the view needs, avoiding copying whole slices for oblique views [S3, unofficial]. The render copies only the out-of-date bricks that its view crosses: MPR views copy bricks crossed by the plane or slab, and 3D views copy bricks in the view volume [S3, unofficial]. The copy respects the limit for each render (rendering.reducedTextureFill) and copies bricks nearest to the centre of the view first [S3, unofficial]. The copy respects the limit for each render (rendering.reducedTextureFill) and copies bricks nearest to the centre of the view first [S3, unofficial].
++View-dependent brick upload is a variant where the unit of texture copy is a brick (e.g., 64 × 64 × 64 voxels), allowing the render to copy only the bricks that the view needs, avoiding copying whole slices for oblique views [S3, unofficial]. The render copies only the out-of-date bricks that its view crosses: MPR views copy bricks crossed by the plane or slab, and 3D views copy bricks in the view volume [S3, unofficial]. The copy respects the limit for each render (rendering.reducedTextureFill) and copies bricks nearest to the centre of the view first [S3, unofficial].
+ 
+ ## Operating characteristics
+-*   **Time Complexity:** Rendering time depends on the number of non-void bricks and the cost of raycasting per brick. Void detection significantly reduces the number of bricks processed [S1, unofficial].
+-*   **Memory Complexity:** Memory usage is bounded by the GPU texture memory capacity plus the storage for the volume data in main memory. The overhead due to overlap is approximately $(3 \cdot n / b) \cdot 100\%$ [S1, unofficial].
++*   **Time Complexity:** Rendering time depends on the number of non-void bricks and the cost of raycasting per brick [S1, unofficial][S2]. Void detection significantly reduces the number of bricks processed [S1, unofficial].
++*   **Memory Complexity:** Memory usage is bounded by the GPU texture memory capacity plus the storage for the volume data in main memory [G]. The overhead due to overlap is approximately $(3 \cdot n / b) \cdot 100\%$ [S1, unofficial].
+ *   **Measured Performance:** Using smaller bricks alleviates the bus bottleneck by avoiding the transfer of the entire volume per frame, as void bricks are swapped out and not reloaded [S1, unofficial]. It also improves data locality, resulting in less cache trashing on the graphics card [S1, unofficial].
+-*   **Scaling:** Performance scales with the number of bricks and the efficiency of the LRU policy. Smaller bricks increase the chance of void detection but increase overhead due to overlap [S1, unofficial].
++*   **Scaling:** Performance scales with the number of bricks and the efficiency of the LRU policy [G]. Smaller bricks increase the chance of void detection but increase overhead due to overlap [S1, unofficial].
+ *   **Strengths:** Reduces bus traffic, improves data locality, handles volumes larger than GPU memory, and supports empty-space skipping [S1, unofficial][S2].
+-*   **Limitations:** Requires careful selection of brick size to balance overlap overhead and void detection probability. Graphics cards may require power-of-2 texture dimensions, necessitating padding or rest-bricks [S1, unofficial].
+-*   **When to use:** When rendering large volumetric datasets that exceed GPU memory, especially when significant portions of the volume are void or low-opacity.
+-*   **When not to use:** When the volume is small enough to fit entirely in GPU memory without bricking, or when the overhead of overlap and LRU swapping outweighs the benefits of void detection.
++*   **Limitations:** Requires careful selection of brick size to balance overlap overhead and void detection probability [S1, unofficial]. Graphics cards may require power-of-2 texture dimensions, necessitating padding or rest-bricks [S1, unofficial].
++*   **When to use:** When rendering large volumetric datasets that exceed GPU memory, especially when significant portions of the volume are void or low-opacity [S1, unofficial][S2].
++*   **When not to use:** When the volume is small enough to fit entirely in GPU memory without bricking, or when the overhead of overlap and LRU swapping outweighs the benefits of void detection [G].
+ 
+ ## Background

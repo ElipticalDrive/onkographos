@@ -1,0 +1,134 @@
+--- v005.md
++++ v006.md
+@@ -47,7 +47,7 @@
+ 2. Validate covariance matrices to ensure they are positive semidefinite, removing invalid Gaussians [S1, unofficial].
+ 3. Filter Gaussians by `min_opacity`, `visibility_threshold`, bounding box constraints, and `cull_gaussian_sizes` percentage before sampling [S1, unofficial].
+-4. If rendering colours is enabled, initialize a Gaussian renderer with the loaded Gaussians and camera parameters [S1, unofficial]. Iterate through all provided camera transforms (skipping based on `camera_skip_rate`). For each camera, render the scene to obtain per-pixel contributions and depth maps [S1, unofficial]. Retrieve the total contribution of each Gaussian across all rendered images to prioritize visible Gaussians [S1, unofficial]. Update Gaussian colours with the rendered colours if rendering was performed [S1, unofficial].
+-5. Calculate the number of points to sample from each remaining Gaussian. Compute the surface area of each Gaussian ellipsoid from the eigenvalues of its covariance matrix. Calculate magnitude $m_i = \sqrt{4\pi \left(\frac{a^p b^p + a^p c^p + b^p c^p}{3}\right)^{1/p}} \times v_i$, where $a,b,c$ are the square roots of the eigenvalues, $p=1.6075$, and $v_i$ is the visibility contribution if `prioritise_visible_gaussians` is True, otherwise opacity $\alpha_i$ [S1, unofficial]. Distribute the total `num_points` among Gaussians proportional to $m_i$ [S1, unofficial]. Set `num_sample_attempts` to 5 if `exact_num_points` is False, else 100 [S1, unofficial].
+-6. Generate points for the entire scene by iterating over remaining Gaussians. For each Gaussian, add its mean as a point, then sample additional points from the Gaussian distribution $\mathcal{N}(\boldsymbol{\mu}_i, \boldsymbol{\Sigma}_i)$, rejecting samples where the Mahalanobis distance from the Gaussian center exceeds `mahalanobis_distance_std` [S1, unofficial].
++4. If rendering colours is enabled, initialize a Gaussian renderer with the loaded Gaussians and camera parameters [S1, unofficial]. Iterate through all provided camera transforms (skipping based on `camera_skip_rate`) [S1, unofficial]. For each camera, render the scene to obtain per-pixel contributions and depth maps [S1, unofficial]. Retrieve the total contribution of each Gaussian across all rendered images to prioritize visible Gaussians [S1, unofficial]. Update Gaussian colours with the rendered colours if rendering was performed [S1, unofficial].
++5. Calculate the number of points to sample from each remaining Gaussian [S1, unofficial]. Compute the surface area of each Gaussian ellipsoid from the eigenvalues of its covariance matrix [S1, unofficial]. Calculate magnitude $m_i = \sqrt{4\pi \left(\frac{a^p b^p + a^p c^p + b^p c^p}{3}\right)^{1/p}} \times v_i$, where $a,b,c$ are the square roots of the eigenvalues, $p=1.6075$, and $v_i$ is the visibility contribution if `prioritise_visible_gaussians` is True, otherwise opacity $\alpha_i$ [S1, unofficial]. Distribute the total `num_points` among Gaussians proportional to $m_i$ [S1, unofficial]. Set `num_sample_attempts` to 5 if `exact_num_points` is False, else 100 [S1, unofficial].
++6. Generate points for the entire scene by iterating over remaining Gaussians [S1, unofficial]. For each Gaussian, add its mean as a point, then sample additional points from the Gaussian distribution $\mathcal{N}(\boldsymbol{\mu}_i, \boldsymbol{\Sigma}_i)$, rejecting samples where the Mahalanobis distance from the Gaussian center exceeds `mahalanobis_distance_std` [S1, unofficial].
+ 7. If generating a mesh, identify surface Gaussians using a predicted surface standard deviation threshold (`surface_distance_std`) [S1, unofficial]. Cull non-surface Gaussians and generate a separate point cloud with a fixed average of 25 points per surface Gaussian, capped at half the total requested points [S1, unofficial].
+ 8. If `clean_pointcloud` is enabled, remove outliers on the point cloud after generation using Open3D [S1, unofficial].
+@@ -64,14 +64,30 @@
+ 
+ def load_gaussians(file_path):
+-    # Standard 3DGS PLY loader returning tensors: xyz, scales, rots, opacities, sh_coeffs
+-    pass # Implementation depends on file format; assume standard loader [G]
+-
+-def validate_covariances(xyz, scales, rots, epsilon=1e-6):
++    # Sources do not provide a standard PLY/splat loader implementation [G]
++    pass
++
++def validate_covariances(xyz, scales, rots, epsilon=1e-6, num_clamp_iters=3):
+     # Construct covariance matrices from scale and rotation
+-    # R = quat_to_rot_matrix(rots)
+-    # S = diag(scales)
+-    # Sigma = R @ S @ S.T @ R.T
+-    # Check eigenvalues. Clamp or remove invalid Gaussians.
+-    pass # Standard covariance validation [G]
++    R = quat_to_rot_matrix(rots)
++    S = torch.diag_embed(scales)
++    covariances = R @ S @ S.transpose(-2, -1) @ R.transpose(-2, -1)
++    
++    # Regularise low-factor covariances to ensure positive-definiteness
++    covariances = regularise_covariances(covariances)
++    
++    for _ in range(num_clamp_iters):
++        non_posdef = check_positive_definite(covariances, epsilon)
++        if not non_posdef.any():
++            break
++        covariances = clamp_covariances(covariances, non_posdef, epsilon)
++        
++    # Remove Gaussians that remain non-positive-definite
++    invalid_mask = check_positive_definite(covariances, epsilon=1e-8)
++    if invalid_mask.any():
++        xyz = xyz[~invalid_mask]
++        scales = scales[~invalid_mask]
++        rots = rots[~invalid_mask]
++        covariances = covariances[~invalid_mask]
++    return xyz, scales, rots, covariances
+ 
+ def get_gaussian_magnitudes(gaussians, contributions=None):
+@@ -108,29 +124,68 @@
+ 
+ def render_colors(points, gaussians, cameras, renderer_type, colour_resolution):
+-    # Initialize renderer based on renderer_type
+-    # For each camera: render scene, project points, assign colors
+-    pass # Standard Gaussian rasterization [G]
++    # Sources do not provide the full rasterization loop; standard Gaussian splatting rasterizer is used [G]
++    pass
+ 
+ def calculate_normals(points, gaussians):
+-    # Compute normals from Gaussian covariance principal axes or local neighborhood
+-    pass # Standard normal estimation [G]
++    # Sources state normals are calculated from covariance matrices [S1, unofficial]
++    pass
+ 
+ def save_ply(output_path, points, colours, normals):
+-    # Write points, colours, normals to PLY file
+-    pass # Standard PLY writer [G]
++    # Sources do not provide a standard PLY writer implementation [G]
++    pass
+ 
+ def convert_3dgs_to_pointcloud(input_path, output_path, settings):
+     gaussians = load_gaussians(input_path)
+-    gaussians.validate_covariances()
++    gaussians.xyz, gaussians.scales, gaussians.rots, gaussians.covariances = validate_covariances(
++        gaussians.xyz, gaussians.scales, gaussians.rots
++    )
+     if settings.min_opacity > 0:
+-        gaussians.apply_min_opacity(settings.min_opacity)
++        valid = gaussians.opacities > settings.min_opacity
++        gaussians.xyz = gaussians.xyz[valid]
++        gaussians.scales = gaussians.scales[valid]
++        gaussians.rots = gaussians.rots[valid]
++        gaussians.colours = gaussians.colours[valid]
++        gaussians.opacities = gaussians.opacities[valid]
++        gaussians.covariances = gaussians.covariances[valid]
+     if settings.bounding_box_min is not None:
+-        gaussians.apply_bounding_box(settings.bounding_box_min, settings.bounding_box_max)
++        valid = (gaussians.xyz[:,0] > settings.bounding_box_min[0]) & \
++                (gaussians.xyz[:,1] > settings.bounding_box_min[1]) & \
++                (gaussians.xyz[:,2] > settings.bounding_box_min[2]) & \
++                (gaussians.xyz[:,0] < settings.bounding_box_max[0]) & \
++                (gaussians.xyz[:,1] < settings.bounding_box_max[1]) & \
++                (gaussians.xyz[:,2] < settings.bounding_box_max[2])
++        gaussians.xyz = gaussians.xyz[valid]
++        gaussians.scales = gaussians.scales[valid]
++        gaussians.rots = gaussians.rots[valid]
++        gaussians.colours = gaussians.colours[valid]
++        gaussians.opacities = gaussians.opacities[valid]
++        gaussians.covariances = gaussians.covariances[valid]
+     if settings.cull_gaussian_sizes > 0:
+-        gaussians.cull_large_gaussians(settings.cull_gaussian_sizes)
++        sizes = torch.linalg.norm(gaussians.scales, dim=1)
++        indices_to_cull = torch.zeros(len(gaussians), dtype=torch.bool)
++        num_cull = int(len(gaussians) * settings.cull_gaussian_sizes)
++        if num_cull > 0:
++            largest_indices = torch.argsort(sizes, descending=True)[:num_cull]
++            indices_to_cull[largest_indices] = True
++        gaussians.xyz = gaussians.xyz[~indices_to_cull]
++        gaussians.scales = gaussians.scales[~indices_to_cull]
++        gaussians.rots = gaussians.rots[~indices_to_cull]
++        gaussians.colours = gaussians.colours[~indices_to_cull]
++        gaussians.opacities = gaussians.opacities[~indices_to_cull]
++        gaussians.covariances = gaussians.covariances[~indices_to_cull]
++        
+     contributions = None
+     if settings.prioritise_visible_gaussians:
++        # Render to get contributions
+         contributions = get_visibility_contributions(gaussians, settings)
+-        gaussians.apply_visibility_threshold(settings.visibility_threshold, contributions)
++        valid = contributions > settings.visibility_threshold
++        gaussians.xyz = gaussians.xyz[valid]
++        gaussians.scales = gaussians.scales[valid]
++        gaussians.rots = gaussians.rots[valid]
++        gaussians.colours = gaussians.colours[valid]
++        gaussians.opacities = gaussians.opacities[valid]
++        gaussians.covariances = gaussians.covariances[valid]
++        contributions = contributions[valid]
++        
+     magnitudes = get_gaussian_magnitudes(gaussians, contributions)
+     total_mag = magnitudes.sum()

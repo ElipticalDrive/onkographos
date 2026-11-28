@@ -1,0 +1,145 @@
+--- v007.md
++++ v008.md
+@@ -28,15 +28,15 @@
+ 3.  If the ray is inside a medium, initialize a local RNG from the sampler, sample majorant transmittance $T_{maj}$, and handle medium emission if applicable [S3].
+ 4.  Compute interaction probabilities for absorption, scattering, and null scattering based on the majorant cross-section [S3].
+-5.  Sample the interaction type using a discrete distribution. Handle absorption by terminating the path, scattering by updating throughput and sampling the phase function, or null scattering by updating throughput with the null coefficient [S3].
+-6.  If the path terminated or throughput became invalid, return $L$. If a real scattering event occurred, continue to the next loop iteration. If the ray passed through the medium unscattered, scale throughput by the transmittance ratio [S3].
++5.  Sample the interaction type using a discrete distribution [S3]. Handle absorption by terminating the path, scattering by updating throughput and sampling the phase function, or null scattering by updating throughput with the null coefficient [S3].
++6.  If the path terminated or throughput became invalid, return $L$ [S3]. If a real scattering event occurred, continue to the next loop iteration [S3]. If the ray passed through the medium unscattered, scale throughput by the transmittance ratio [S3].
+ 7.  Handle surface intersections: retrieve the BSDF, initialize visible surface albedo at depth 0, check depth limits, regularize the BSDF if needed, sample direct lighting for non-specular BSDFs, and sample the BSDF for the next direction [S3].
+ 8.  Update throughput $\beta$ and rescaled probability $r_l$ using the BSDF sample and the absolute dot product of the normal and outgoing direction [S3].
+-9.  Update path state flags, refractive index scale for transmission, and spawn the new ray. Handle BSSRDF subsurface scattering if present and transmission occurs [S3].
+-10. Apply Russian roulette termination based on the scaled throughput and depth. If terminated, break; otherwise, scale $\beta$ and continue [S3].
++9.  Update path state flags, refractive index scale for transmission, and spawn the new ray [S3]. Handle BSSRDF subsurface scattering if present and transmission occurs [S3].
++10. Apply Russian roulette termination based on the scaled throughput and depth [S3]. If terminated, break; otherwise, scale $\beta$ and continue [S3].
+ 11. Return the accumulated radiance $L$ [S3].
+ 
+ **Pseudocode:**
+ ```python
+-def Li(ray, lambda, sampler, scratchBuffer, visibleSurf, maxDepth, regularize):
++def Li(ray, lambda, sampler, scratchBuffer, visibleSurf, maxDepth, regularize, camera, lights, lightSampler):
+     L = SampledSpectrum(0.0)
+     beta = SampledSpectrum(1.0)
+@@ -57,10 +57,62 @@
+             hash1 = Hash(sampler.Get1D())
+             rng = RNG(hash0, hash1)
+-            
+-            T_maj = SampleT_maj(ray, t_max, sampler.Get1D(), rng, lambda,
+-                lambda p, mp, sigma_maj, T_maj:
+-                handle_medium_event(p, mp, sigma_maj, T_maj, beta, r_u, r_l, 
+-                                    depth, maxDepth, L, ray, sampler, prevIntrContext))
+-            
++            scattered = False
++            terminated = False
++
++            def medium_callback(p, mp, sigma_maj, T_maj):
++                nonlocal scattered, terminated, beta, r_u, r_l, L, prevIntrContext, depth
++                if depth < maxDepth and mp.Le:
++                    pdf = sigma_maj[0] * T_maj[0]
++                    betap = beta * T_maj / pdf
++                    r_e = r_u * sigma_maj * T_maj / pdf
++                    if r_e:
++                        L += betap * mp.sigma_a * mp.Le / r_e.Average()
++
++                pAbsorb = mp.sigma_a[0] / sigma_maj[0]
++                pScatter = mp.sigma_s[0] / sigma_maj[0]
++                pNull = max(0.0, 1.0 - pAbsorb - pScatter)
++
++                um = rng.Uniform()
++                mode = SampleDiscrete([pAbsorb, pScatter, pNull], um)
++
++                if mode == 0:
++                    terminated = True
++                    return False
++                elif mode == 1:
++                    if depth >= maxDepth:
++                        terminated = True
++                        return False
++                    depth += 1
++                    pdf = T_maj[0] * mp.sigma_s[0]
++                    beta *= T_maj * mp.sigma_s / pdf
++                    r_u *= T_maj * mp.sigma_s / pdf
++                    if beta and r_u:
++                        intr = MediumInteraction(p, -ray.d, ray.time, ray.medium, mp.phase)
++                        L += SampleLd(intr, None, lambda, sampler, beta, r_u)
++                        u = sampler.Get2D()
++                        ps = intr.phase.Sample_p(-ray.d, u)
++                        if not ps or ps.pdf == 0:
++                            terminated = True
++                        else:
++                            beta *= ps.p / ps.pdf
++                            r_l = r_u / ps.pdf
++                            prevIntrContext = LightSampleContext(intr)
++                            scattered = True
++                            ray.o = p
++                            ray.d = ps.wi
++                            specularBounce = False
++                            anyNonSpecularBounces = True
++                    return False
++                else:
++                    sigma_n = ClampZero(sigma_maj - mp.sigma_a - mp.sigma_s)
++                    pdf = T_maj[0] * sigma_n[0]
++                    beta *= T_maj * sigma_n / pdf
++                    if pdf == 0: beta = SampledSpectrum(0.0)
++                    r_u *= T_maj * sigma_n / pdf
++                    r_l *= T_maj * sigma_maj / pdf
++                    return bool(beta and r_u)
++
++            T_maj = SampleT_maj(ray, t_max, sampler.Get1D(), rng, lambda, medium_callback)
++
+             if terminated or not beta or not r_u:
+                 return L
+@@ -83,4 +135,5 @@
+             continue
+ 
++        isect = si
+         bsdf = isect.GetBSDF(ray, lambda, camera, scratchBuffer, sampler)
+         if not bsdf:
+@@ -90,5 +143,5 @@
+         if depth == 0 and visibleSurf:
+             albedo = bsdf.rho(isect.wo, ucRho, uRho)
+-            *visibleSurf = VisibleSurface(isect, albedo, lambda)
++            visibleSurf = VisibleSurface(isect, albedo, lambda)
+ 
+         if depth >= maxDepth:
+@@ -99,5 +152,5 @@
+ 
+         if IsNonSpecular(bsdf.Flags()):
+-            L += SampleLd(isect, &bsdf, lambda, sampler, beta, r_u)
++            L += SampleLd(isect, bsdf, lambda, sampler, beta, r_u)
+             prevIntrContext = LightSampleContext(isect)
+ 
+@@ -120,4 +173,5 @@
+         ray = isect.SpawnRay(ray, bsdf, bs.wi, bs.flags, bs.eta)
+ 
++        bssrdf = isect.GetBSSRDF(ray, lambda, camera, scratchBuffer)
+         if bssrdf and bs.IsTransmission():
+             uc = sampler.Get1D()
+@@ -131,10 +185,10 @@
+             while True:
+                 r = base.SpawnRayTo(probeSeg.p1)
+-                si = Intersect(r, 1)
+-                if not si:
++                si_sub = Intersect(r, 1)
++                if not si_sub:
+                     break
+-                base = si.intr
+-                if si.intr.material == isect.material:
+-                    interactionSampler.Add(SubsurfaceInteraction(si.intr), 1.0)
++                base = si_sub.intr
++                if si_sub.intr.material == isect.material:
++                    interactionSampler.Add(SubsurfaceInteraction(si_sub.intr), 1.0)
+             if not interactionSampler.HasSample():
+                 break
+@@ -147,7 +201,9 @@
+             r_u *= bssrdfSample.Sp / pdf
+             anyNonSpecularBounces = True
++            Sw = bssrdfSample.Sw
+             if regularize:
+                 Sw.Regularize()
+-            L += SampleLd(pi, &Sw, lambda, sampler, beta, r_u)
++            pi = bssrdfSample.pi
++            L += SampleLd(pi, Sw, lambda, sampler, beta, r_u)
+             u = sampler.Get1D()
+             bs = Sw.Sample_f(pi.wo, u, sampler.Get2D())

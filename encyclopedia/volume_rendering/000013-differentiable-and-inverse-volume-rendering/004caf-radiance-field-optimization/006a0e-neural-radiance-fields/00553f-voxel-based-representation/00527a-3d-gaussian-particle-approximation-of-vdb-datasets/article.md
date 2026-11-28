@@ -1,0 +1,226 @@
+# 3D Gaussian Particle Approximation of VDB Datasets
+
+Also called: Gaussian Particle Approximation, Gaussian Particle Rendering, VDB to Gaussian Conversion
+
+## Overview
+This method converts OpenVDB volumetric datasets into a set of non-overlapping 3D Gaussian particles to enable memory-efficient, lossy representation with Level of Detail (LOD) support [S1, unofficial]. It renders volumetric and level-set data using forward ray marching through Gaussian primitives via NVIDIA OptiX [S1, unofficial]. Unlike standard Gaussian Splatting which often uses overlapping primitives for photorealism, this approach strictly maintains non-overlapping Gaussians derived from OpenVDB's non-overlapping leaf nodes, limiting the model to specific refinement levels but ensuring compatibility with traditional volume rendering pipelines via transfer functions [S1, unofficial].
+
+## How it works
+
+### Inputs and Outputs
+**Inputs:**
+*   An OpenVDB grid containing volumetric or level-set data [S1, unofficial].
+*   Camera parameters (origin, direction) [S1, unofficial].
+*   Rendering parameters: LOD level (Low, Medium, High), maximum recursion depth, step size [S1, unofficial].
+
+**Outputs:**
+*   A rendered image with accumulated color and transmittance [S1, unofficial].
+*   Device-side buffers containing Gaussian properties (position, covariance, opacity) [S1, unofficial].
+
+### Data Structures
+
+**GaussianModel**
+A parent class containing device-side pointers to contiguous arrays for each Gaussian property [S1, unofficial]:
+*   `opacity`: Scalar array. For volumes, this reflects the average scalar value of the voxel region [S1, unofficial]. For level sets, opacity is uniform and may not require per-particle storage [S1, unofficial].
+*   `world_position`: 3D vector array. The center in world space, derived from the centroid of the voxel region or its bounding box [S1, unofficial].
+*   `covariance`: 3D vector array (for ellipsoids) or scalar array (for spheres). Represents the diagonal of the 3x3 covariance matrix, defining spatial extent along axes [S1, unofficial].
+
+**Acceleration Structures**
+*   **Geometry Acceleration Structure (GAS):** Built on the GPU using a CUDA device-side array of Axis-Aligned Bounding Boxes (AABBs). Each AABB encloses a single Gaussian particle, defined by its minimum and maximum coordinates in OpenVDB Index Space [S1, unofficial].
+    *   Build Flags: `OPTIX_BUILD_FLAG_ALLOW_COMPACTION`, `OPTIX_BUILD_INPUT_TYPE_CUSTOM_PRIMITIVES` [S1, unofficial].
+*   **Instance Acceleration Structure (IAS):** Stores the GAS instance with the OpenVDB Grid transform. Sets visibility masks for all Gaussians to visible for primary and continuation rays [S1, unofficial].
+
+**HitGroupRecord**
+A structure initialized for Gaussian particles rendering that specifies the shaders associated with the Gaussian primitive. It contains a pointer to the `GaussianModel` object [S1, unofficial].
+
+### Steps
+
+1.  **Data Generation (CPU):**
+    *   Retrieve all leaf nodes from the OpenVDB Grid Tree using the OpenVDB API [S1, unofficial].
+    *   Apply LOD logic to determine Gaussian properties for each leaf node or cluster:
+        *   **Low LOD:** Each leaf node is represented by a single Gaussian reflecting the distribution of active voxels [S1, unofficial].
+        *   **Medium LOD:** Dense leaf nodes are merged into 4x4x4 groups; sparse nodes into 2x2x2 groups. Remaining active voxels are added as individual voxel-sized Gaussians [S1, unofficial].
+        *   **High LOD:** Sparse leaf nodes contribute one Gaussian per active voxel; dense leaf nodes are merged into 2x2x2 blocks [S1, unofficial].
+    *   For each Gaussian, compute:
+        *   Position $\mu$: Centroid of the voxel region/bounding box [S1, unofficial].
+        *   Opacity $\alpha$: Average scalar value of the region [S1, unofficial].
+        *   Covariance $\Sigma$: Diagonal vector of the 3x3 matrix (axis-aligned) [S1, unofficial].
+    *   Note: Tiled leaf nodes (homogeneous regions) are excluded from Gaussian creation as their value is stored in the parent node's value mask [S1, unofficial].
+
+2.  **Data Transfer (CPU to GPU):**
+    *   Allocate contiguous device-side buffers using `cudaMalloc` for opacity, world position, and covariance [S1, unofficial].
+    *   Copy data using `cudaMemcpy` [S1, unofficial].
+    *   Store device pointers in a `GaussianModel` object added to the OptiX Shader Binding Table (SBT) [S1, unofficial].
+
+3.  **Acceleration Structure Build (GPU):**
+    *   Build the GAS using the CUDA device-side array of AABBs derived from Gaussian extents in OpenVDB Index Space [S1, unofficial].
+    *   Build the IAS with the OpenVDB Grid transform [S1, unofficial].
+
+4.  **Ray Generation:**
+    *   Shoot primary rays from the camera using the `__raygen__` program [S1, unofficial].
+
+5.  **Intersection Test (`__intersection__`):**
+    *   Use the primitive index to retrieve the Gaussian AABB [S1, unofficial].
+    *   Perform ray-box intersection with the world AABB [S1, unofficial].
+    *   If intersected:
+        *   Retrieve Gaussian center $\mu$ and inverse covariance $\Sigma^{-1}$ [S1, unofficial].
+        *   Transform the ray into the Gaussian's local space using $\Sigma^{-1}$ [S1, unofficial].
+        *   Solve the quadratic equation for the ellipsoid/sphere intersection to find entry ($t_0$) and exit ($t_1$) distances [S1, unofficial].
+        *   Store $t_0$ and $t_1$ in the payload and exit the intersection shader early [S1, unofficial].
+
+6.  **Ray Marching and Density Evaluation:**
+    *   Step along the ray using a predefined step size based on the distance between entry and exit points [S1, unofficial].
+    *   For each sample point $x_k$:
+        *   Compute difference $\delta = x_k - \mu$ [S1, unofficial].
+        *   Compute squared Mahalanobis distance $D^2 = \delta^\top \Sigma^{-1} \delta$ [S1, unofficial].
+        *   Evaluate density $\rho_k = \exp(-D^2/2)$ [S1, unofficial].
+
+7.  **Absorption and Transmittance Update:**
+    *   Compute volume factor: $V_f = 1/\det(\Sigma)$ [S1, unofficial].
+    *   Calculate absorption: $A_k = \rho_k \cdot \Delta t \cdot V_f$ [S1, unofficial].
+    *   Update color: $C \leftarrow C + T_k \cdot c(\sigma_k) \cdot A_k$, where $c(\sigma_k)$ is the scattering color derived from opacity via a transfer function [S1, unofficial].
+    *   Update transmittance: $T_{k+1} = T_k \cdot \exp(-A_k)$ [S1, unofficial].
+
+8.  **Ray Continuation:**
+    *   Advance the ray origin: $o_{new} = o + d \cdot (t_1 - t_0)$, where $o$ is the current origin, $d$ is the direction, and $t_0/t_1$ are entry/exit points [S1, unofficial].
+    *   Recursively trace the next Gaussian using `optixTrace` with `RAY_TYPE_RADIANCE` [S1, unofficial].
+
+### Pseudocode
+
+> **Unverified code.** The code below did not pass a test run against a reference implementation, or no test fits it, so it may contain errors.
+
+```python
+def ray_aabb_intersect(origin, direction, min_pt, max_pt):
+    """Returns (t0, t1) for ray-box intersection, or (None, None) if no hit."""
+    t0 = (min_pt[0] - origin[0]) / direction[0]
+    t1 = (max_pt[0] - origin[0]) / direction[0]
+    if t0 > t1: t0, t1 = t1, t0
+    for i in range(1, 3):
+        t_near = (min_pt[i] - origin[i]) / direction[i]
+        t_far = (max_pt[i] - origin[i]) / direction[i]
+        if t_near > t_far: t_near, t_far = t_far, t_near
+        if t_near > t0: t0 = t_near
+        if t_far < t1: t1 = t_far
+    return (t0, t1) if t0 <= t1 else (None, None)
+
+def gaussian_aabb(center, cov_diag):
+    """Computes AABB from center and diagonal covariance (3 floats or 1 float)."""
+    if isinstance(cov_diag, (int, float)):
+        cov_diag = [cov_diag, cov_diag, cov_diag]
+    half_extents = [sqrt(c) for c in cov_diag]
+    min_pt = [center[i] - half_extents[i] for i in range(3)]
+    max_pt = [center[i] + half_extents[i] for i in range(3)]
+    return min_pt, max_pt
+
+def solve_ellipsoid_intersection(origin, direction, center, inv_cov_diag):
+    """Solves quadratic for ray-ellipsoid intersection. Returns (t0, t1) or (None, None)."""
+    p = [origin[i] - center[i] for i in range(3)]
+    v = direction
+    a = sum(v[i]**2 * inv_cov_diag[i] for i in range(3))
+    b = 2.0 * sum(p[i] * v[i] * inv_cov_diag[i] for i in range(3))
+    c = sum(p[i]**2 * inv_cov_diag[i] for i in range(3)) - 1.0
+    disc = b*b - 4*a*c
+    if disc < 0: return None, None
+    sqrt_disc = sqrt(disc)
+    t0 = (-b - sqrt_disc) / (2.0 * a)
+    t1 = (-b + sqrt_disc) / (2.0 * a)
+    return t0, t1
+
+def compute_density(sample, center, inv_cov_diag):
+    delta = [sample[i] - center[i] for i in range(3)]
+    d2 = sum(delta[i]**2 * inv_cov_diag[i] for i in range(3))
+    return exp(-0.5 * d2)
+
+def render_gaussian_particles(ray_origin, ray_direction, gaussians, max_depth, current_depth=0, step_size=0.5, epsilon=1e-4):
+    if current_depth >= max_depth:
+        return [0.0, 0.0, 0.0], 1.0
+    
+    accumulated_color = [0.0, 0.0, 0.0]
+    transmittance = 1.0
+    
+    # Find closest Gaussian intersection
+    closest_t0, closest_t1, closest_idx = None, None, None
+    for i, g in enumerate(gaussians):
+        min_pt, max_pt = gaussian_aabb(g['pos'], g['cov'])
+        t0, t1 = ray_aabb_intersect(ray_origin, ray_direction, min_pt, max_pt)
+        if t0 is not None and (closest_t0 is None or t0 < closest_t0):
+            closest_t0, closest_t1, closest_idx = t0, t1, i
+            
+    if closest_t0 is None:
+        return [0.0, 0.0, 0.0], transmittance
+        
+    g = gaussians[closest_idx]
+    inv_cov = [1.0/c for c in g['cov']] if isinstance(g['cov'], (int, float)) else [1.0/c for c in g['cov']]
+    det_sigma = prod(g['cov']) if isinstance(g['cov'], (int, float)) else prod(g['cov'])
+    volume_factor = 1.0 / det_sigma
+    
+    t = closest_t0
+    while t < closest_t1:
+        sample_pt = [ray_origin[i] + ray_direction[i] * t for i in range(3)]
+        density = compute_density(sample_pt, g['pos'], inv_cov)
+        absorption = density * step_size * volume_factor
+        
+        scattering_color = [g['opacity'], g['opacity'], g['opacity']] # Placeholder for transfer function lookup
+        accumulated_color = [accumulated_color[i] + transmittance * scattering_color[i] * absorption for i in range(3)]
+        transmittance *= exp(-absorption)
+        
+        if transmittance < epsilon:
+            break
+        t += step_size
+        
+    new_origin = [ray_origin[i] + ray_direction[i] * closest_t1 for i in range(3)]
+    next_color, next_trans = render_gaussian_particles(new_origin, ray_direction, gaussians, max_depth, current_depth + 1, step_size, epsilon)
+    
+    final_color = [accumulated_color[i] + transmittance * next_color[i] for i in range(3)]
+    return final_color, transmittance
+```
+
+### Parameters
+*   **Grid Layout Variant:** The '5-4-3' variant is used for all explanations and rendering samples [S1, unofficial].
+    *   Top-level ('5-level') nodes: $2^5 \times 2^5 \times 2^5$ resolution (32,768 children) [S1, unofficial].
+    *   Intermediate-level ('4-level') nodes: $2^4 \times 2^4 \times 2^4$ resolution (4,096 children) [S1, unofficial].
+    *   Leaf-level ('3-level') nodes: $2^3 \times 2^3 \times 2^3$ resolution (512 voxels) [S1, unofficial].
+*   **Build Flags:** `OPTIX_BUILD_FLAG_ALLOW_COMPACTION`, `OPTIX_BUILD_INPUT_TYPE_CUSTOM_PRIMITIVES` [S1, unofficial].
+*   **Ray Type:** `RAY_TYPE_RADIANCE` for all `optixTrace` calls, indicating a purely forward-ray-marching approach [S1, unofficial].
+
+### Edge Cases and Pitfalls
+*   **Non-overlapping Constraint:** The implementation uses non-overlapping Gaussians because OpenVDB leaf nodes are strictly non-overlapping cubic regions. This limits the model to three overarching refinement levels and introduces lossiness [S1, unofficial].
+*   **NanoVDB Limitation:** NanoVDB does not support device-side traversal of the Grid Tree or device-side iterators/accessors. This creates a bottleneck for random access required in ray-BVH or ray-particle intersections. Therefore, NanoVDB cannot be used for 3D Gaussian generation or rendering in this pipeline; OpenVDB must be used for generation [S1, unofficial].
+*   **NanoVDB HDDA Incompatibility:** NanoVDB's built-in HDDA transmittance algorithm only works with regular float grid volumes. It is invalid for overlapping and variable-size particle data with custom ray tracing pipelines [S1, unofficial].
+*   **OptiX Register Constraint:** Propagating state via recursive `optixTrace` calls is limited by OptiX’s 8-payload register constraint, causing sub-optimal accumulation and inconsistent resetting of payload values [S1, unofficial].
+
+## Operating characteristics
+
+**Time and Memory Complexity:**
+*   Memory footprint depends on LOD and dataset sparsity. For the 'dragon' dataset:
+    *   High LOD: 546MB, 23.3M Gaussians [S1, unofficial].
+    *   Low LOD: 174.4MB, 7.4M Gaussians [S1, unofficial].
+*   Time complexity is driven by the number of Gaussians and the ray tracing overhead [S1, unofficial].
+
+**Measured Performance:**
+*   The renderer consistently provides above 150 FPS for all tested datasets (bunny_cloud, explosion, fire, utahteapot, venusstatue, dragon) across all LODs, even with millions of Gaussians [S1, unofficial].
+
+**Strengths and Limitations:**
+*   **Strengths:** Real-time performance via hardware-accelerated ray tracing (OptiX); memory efficiency through sparse VDB representation and LOD; support for transfer functions (unlike baked-color Gaussian Splatting) [S1, unofficial].
+*   **Limitations:** Lossy representation due to non-overlapping constraint; limited to specific refinement levels; dependency on OpenVDB for generation (NanoVDB unsupported); register constraints in recursive tracing [S1, unofficial].
+
+**When to Use:**
+*   Scientific visualization (SciVis) applications requiring real-time rendering of large sparse volumetric datasets with transfer function support [S1, unofficial].
+
+**When Not to Use:**
+*   Photorealistic rendering requiring overlapping Gaussian mixtures for soft shadows and complex light transport [S1, unofficial].
+
+## Background
+
+**Origin:**
+The method was introduced in the paper "3D Gaussian Particle Approximation of VDB Datasets: A Study for Scientific Visualization" [S1, unofficial]. It explores the integration of OpenVDB and NVIDIA OptiX to leverage memory compaction and hardware acceleration [S1, unofficial].
+
+**History and Development:**
+Gaussian approximation and mixture models have a history in Scientific Visualization, with prior work by Jang et al. [S1, unofficial]. This work builds on the popularity of Gaussian Splatting (Kerbl et al. [12]) but adapts it for VDB datasets and SciVis pipelines rather than stereoscopic image-to-3D conversion [S1, unofficial].
+
+**Usage:**
+Used in NVIDIA OptiX-based rendering engines for forward ray marching through Gaussian particles [S1, unofficial].
+
+## Sources
+
+[S1] 3D Gaussian Particle Approximation of VDB Datasets: A Study for Scientific Visualization, https://www.emergentmind.com/papers/2504.04857, fetched 2026-10-29 (unofficial)

@@ -1,0 +1,101 @@
+# Chunk Draw Call Preparation
+
+Also called: Block Rendering, Chunk Draw
+
+## Overview
+Chunk Draw Call Preparation is the method that iterates through a chunk's 3D block array to generate the specific draw commands required to render visible geometry. It solves the problem of translating logical voxel data into GPU-drawable primitives by filtering out invisible blocks and aggregating their rendering requirements. It differs from [Chunk-Based Voxel Rendering](21851-chunk-based-voxel-rendering.md) by focusing on the immediate preparation of draw state rather than the long-term management of vertex buffers and chunk updates.
+
+## How it works
+**Inputs and Outputs:**
+*   **Input:** A `Chunk` object containing a 3D array of `Block` instances and a `ChunkDrawCall` structure.
+*   **Output:** A populated `ChunkDrawCall` structure containing the chunk pointer, total index count, and shader position offset, followed by the execution of draw calls for each visible block.
+
+**Data Structures:**
+*   `ChunkDrawCall`: A structure holding:
+    *   `chunk`: Pointer to the parent chunk.
+    *   `numIndices`: Total number of indices to be drawn for all blocks in this chunk.
+    *   `shaderPositionOffset`: Shader uniform offset for the chunk's position.
+*   `Block`: Represents a single voxel unit.
+*   `BlockMask`: Associated with each block, containing:
+    *   `doRender`: Boolean array of size 6, corresponding to the 6 faces (TOP, BOTTOM, etc.).
+    *   `faces`: Array of 6 `VertexContainer` objects, lazily initialized.
+    *   `render`: Boolean flag indicating if the block should be drawn.
+    *   `outline`: Boolean flag for debug rendering.
+
+**Steps:**
+1.  Initialize the `ChunkDrawCall` structure with the current chunk pointer, set `numIndices` to 0, and set `shaderPositionOffset` to the chunk's position.
+2.  Iterate through the chunk's 3D block array using nested loops (e.g., $x, y, z$).
+3.  For each `Block`, invoke its `draw()` method.
+4.  Inside `Block.draw()`:
+    a.  Check if `render` is true.
+    b.  Iterate through the 6 faces ($i = 0$ to $5$).
+    c.  If `doRender[i]` is true, call `getFace(i).render()`.
+    d.  If `outline` is true, render the block's wireframe using `glLineWidth` and `rectPrism2f`.
+
+**Pseudocode:**
+> **Unverified code.** The code below did not pass a test run against a reference implementation, or no test fits it, so it may contain errors.
+
+```python
+def prepare_chunk_draw_calls(chunk: Chunk) -> ChunkDrawCall:
+    # Step 1: Initialize structure
+    draw_call = ChunkDrawCall()
+    draw_call.chunk = chunk
+    draw_call.numIndices = 0
+    draw_call.shaderPositionOffset = chunk.position
+    
+    # Step 2: Iterate through 3D block array
+    for x in range(chunk.width):
+        for y in range(chunk.height):
+            for z in range(chunk.depth):
+                block = chunk.blocks[x][y][z]
+                
+                # Step 3: Invoke block draw
+                if block is not None:
+                    draw_block(block, draw_call)
+                    
+    return draw_call
+
+def draw_block(block: Block, draw_call: ChunkDrawCall):
+    # Step 4a: Check render flag
+    if not block.render:
+        return
+        
+    mask = block.mask
+    
+    # Step 4b: Iterate faces
+    for i in range(6):
+        # Step 4c: Check mask and render
+        if mask.doRender[i]:
+            face = mask.get_face(i)
+            face.render()
+            draw_call.numIndices += face.index_count
+            
+    # Step 4d: Outline rendering
+    if mask.outline:
+        gl_color3f(OUTLINE_R, OUTLINE_G, OUTLINE_B)
+        gl_line_width(OUTLINE_WIDTH)
+        outlines.rect_prism_2f(block.a, block.b)
+```
+
+**Parameters:**
+*   `OUTLINE_R`, `OUTLINE_G`, `OUTLINE_B`: Outline color components.
+*   `OUTLINE_WIDTH`: Line width for debug outlines.
+
+**Edge Cases:**
+*   **Null Blocks:** The loop must handle null entries in the block array if the chunk is sparse.
+*   **Lazy Initialization:** `get_face(i)` must handle null `VertexContainer` instances by calling `make_face(i)` to generate geometry on demand.
+
+## Subtopics
+
+## Operating characteristics
+*   **Time Complexity:** $O(N)$ where $N$ is the number of blocks in the chunk, as every block is visited.
+*   **Memory Complexity:** $O(1)$ additional memory per visible block for the draw call structure, plus lazy geometry storage.
+*   **Strengths:** Simple implementation; separates visibility culling from geometry generation.
+*   **Limitations:** Iterating every block every frame can be costly for dense chunks; does not support batching across chunks.
+
+## Background
+This method is derived from the `voxel-party` and `Cube` repositories, which implement basic voxel rendering engines. It reflects a straightforward object-order approach where each block is treated as an independent drawable entity within a chunk.
+
+## Sources
+[S1] aaasen/voxel-party, https://github.com/aaasen/voxel-party, fetched 2026-10-27 (unofficial)
+[S2] gabkhanfig/Cube, https://github.com/gabkhanfig/Cube, fetched 2026-10-27 (unofficial)

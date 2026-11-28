@@ -1,0 +1,1364 @@
+Received: Added at production
+Revised: Added at production
+Accepted: Added at production
+DOI: xxx/xxxx
+ARTICLE TYPE
+Quality tetrahedral mesh generation with HXT
+Célestin Marot* | Jean-François Remacle
+arXiv:2008.08508v1 [cs.CG] 19 Aug 2020
+1 Institute of Mechanics, Materials and Civil
+Engineering, Université catholique de
+Louvain, Louvain-la-Neuve, Belgium
+Summary
+Correspondence
+Célestin Marot, Institute of Mechanics,
+Materials and Civil Engineering,
+Université catholique de Louvain,
+Avenue Georges Lemaitre 4, bte L4.05.02,
+1348 Louvain-la-Neuve, Belgium.
+Email: celestin.marot@uclouvain.be
+mesh generation. This kernel was however incomplete in the sense that it lacked
+We proposed, in a recent paper 1 , a fast 3D parallel Delaunay kernel for tetrahedral
+the necessary mesh improvement tools. The present paper builds on that previous
+work and proposes a fast parallel mesh improvement stage that delivers high-quality
+tetrahedral meshes compared to alternative open-source mesh generators. Our mesh
+improvement toolkit includes edge removal and improved Laplacian smoothing as
+well as a brand new operator called the Growing SPR Cavity, which can be regarded
+Funding Information
+This research was supported by the
+European Union’s Horizon 2020 research
+and innovation programme,
+ERC-2015AdG-694020.
+as the mother of all flips. The paper describes the workflow of the new mesh improvement schedule, as well as the details of the implementation. The result of this research
+is a series of open-source scalable software components, called HXT, whose overall
+efficiency is demonstrated on practical examples by means of a detailed comparative
+benchmark with two open-source mesh generators: Gmsh and TetGen.
+KEYWORDS:
+HXT, Growing SPR Cavity, quality, tetrahedral, mesh, improvement
+1
+INTRODUCTION
+Tetrahedral meshes are the geometrical support for most finite element discretizations. The size and the shape of the generated
+tetrahedral elements must however be controlled cautiously to ensure reliable numerical simulations in industrial applications.
+The majority of popular tetrahedral mesh generators are based on a Delaunay kernel, because Delaunay-based algorithms are
+fast, especially in 3D. They are also robust and consume relatively little memory. Yet, pure Delaunay meshes are known to
+contain near-zero volume elements, called slivers, and a mesh improvement stage is mandatory if one wishes to end up with a
+high-quality computational mesh.
+We proposed, in a recent paper 1 , techniques to compute a Delaunay triangulation of three billion tetrahedra in less than one
+minute using multiple threads. We also explained how to extend that algorithm to obtain an efficient parallel tetrahedral mesh
+generator. This mesh generator was however incomplete in the sense that it did not provide any mesh improvement process. The
+present paper builds on the 2019 paper and proposes a mesh improvement strategy that is both highly parallel and efficient, and
+generates high quality meshes.
+Starting with an existing surface mesh, tetrahedral mesh generation is usually broken down into four steps.
+1. Empty Mesh: A triangulation (tetrahedralization) of the volume, based on all points of the surface mesh and with no
+additional interior nodes (hence the name empty mesh), except for some isolated user-specified points in the interior of
+the volume, is first generated.
+2. Boundary Recovery: The recovery step locally modifies the empty mesh to match the triangular facets of the surface
+mesh as well as some possible embedded user-specified constrained triangles and lines.
+2
+3. Refinement: The empty mesh is iteratively refined by adding points in the interior of the volumes while always preserving
+a valid mesh at each iteration. The refinement step ends up when all tetrahedra are smaller in size than a user-prescribed
+sizemap.
+4. Improvement: Whereas the refinement step controls the size of the generated tetrahedra, the improvement step finalizes
+the mesh by locally eliminating badly shaped tetrahedra, and optimizes the quality of the mesh by means of specific
+topological operations and vertex relocations.
+Steps 1 and 3 were described in detail in our 2019 paper 1 . Step 2 is currently done using TetGen’s implementation 2 . Finally,
+Step 4, which is the central topic in this paper, relies on a novel mesh improvement strategy based on an innovative local mesh
+modification operator called Growing SPR Cavity. The overall efficiency of the resulting full-fledged open-source tetrahedral
+mesh generation library is then discussed in detail. Some implementation details are included in this paper, be the authors are
+aware that the devil is very much into the details. Being commited to provide reproducible research, the code and meshes used
+in this paper’s test cases are thus all made available at https://git.immc.ucl.ac.be/marotc/tetmesher_benchmark.
+The computer code supporting this paper is available in Gmsh 4.6.0 1 and above versions through the -algo hxt parameter
+or the Mesh.Algorithm3D=10 option. HXT successfully passes all Gmsh 3D benchmarks and, as discussed below, is faster
+and generates meshes of higher quality than other open-source implementations, including Gmsh’s native 3D mesher.
+The paper is structured as follows. Section 2 contains a concise review of existing mesh improvement operations. Whenever
+our implementation differs from others, the differences are briefly explained. Section 3 is devoted to the presentation of our
+new Growing SPR Cavity operation, which is the main contribution of this paper. In section 4, we detail our mesh improvement
+schedule, its parallelization and the quality improvement that can be obtained. Finally, in Section 5, we present our complete tetrahedral mesh generator algorithm (HXT) and compare it against Gmsh and TetGen, two other reference open-source tetrahedral
+mesh generation softwares.
+MESH IMPROVEMENT OPERATIONS
+2
+Mesh improvement operations are modifications of the mesh aiming at increasing its overall quality, the latter being essentially
+determined by the quality of its worst quality element 3 . Therefore, when we shall speak of the quality of a mesh or of a cavity,
+we shall in practice refer to the quality of its worst tetrahedron. The value of a quality measure is expected to be inversely
+proportional to the interpolation error associated with the tetrahedron in some discretization scheme. If the tetrahedron is not
+valid, i.e., if it is inverted or flat, the quality measure should then be non-positive. Two examples of quality measure, the Gamma
+and SICN measure, are described in Appendix A.3 and A.4.
+A cavity is a volume corresponding to a set of face-connected tetrahedra. A mesh modification operates on a cavity, which is by
+definition the part of the mesh that is modified. Among all possible mesh modifications, mesh improvement operations are those
+that strictly increase the quality of a cavity, from an original tetrahedralization of quality 𝑞𝑎 to an improved tetrahedralization
+of quality 𝑞𝑏 > 𝑞𝑎 . Any mesh modification can be decomposed into a succession of elementary moves, called bistellar flips or
+Pachner moves 4 . The 1-4 move adds a point inside a cavity formed by the removal of a single tetrahedron, and fills it with 4 new
+tetrahedra. The 4-1 move is the opposite, it removes a point. Both operations are illustrated on Figure 1a. The two remaining
+Pachner moves are the 2-3 and 3-2 flips, which do neither add nor remove any points in the tetrahedralization (see Figure 1b).
+2.1
+Flipping
+The purpose of the mesh refinement step is to obtain a distribution of points all over the volume whose distance to the closest
+neighbour is prescribed by a given mesh size field. Adding or removing vertices during the subsequent mesh improvement
+phase is therefore likely to disrupt the refined point distribution and see it deviate from the prescribed size map. The simplest
+mesh improvement schedule one may think of is thus composed of 2-3 and 3-2 flips only, the simplest operations that do not
+add or remove points, and are executed whenever they improve the quality of the tetrahedralization in their respective cavity.
+This strategy is able to eliminate efficiently most ill-shaped tetrahedra. However, this hill-climbing method often reaches local
+maxima where 2-3 or 3-2 flip no longer improve the mesh quality although the overall quality is not yet optimal. To overcome
+1 https://gitlab.onelab.info/gmsh/gmsh/-/tree/master/contrib/hxt
+3
+2-3 flip
+1-4 flip
+3-2 flip
+4-1 flip
+(a) The 1-4 move (point insertion) and 4-1 move (point removal)
+(b) The 2-3 and 3-2 flips
+FIGURE 1 Pachner moves
+ov
+al
+re
+m
+re
+m
+-fa
+ce
+ul
+ti
+ed
+ge
+al
+ov
+al
+ov
+m
+re
+m
+re
+m
+ce
+-fa
+ge
+ed
+4-4 flip
+ti
+ul
+4-4 flip
+m
+ov
+al
+this limitation, combinations of multiple flips can be applied at once whenever one can check they result in a tetrahedralization
+of better quality. This is equivalent with creating more complex topological operations. For example, the 4-4 flip, which is an
+operation on a cavity of 6 points and 4 tetrahedra with only one interior edge (see Figure 2a), can be obtained by doing a 2-3
+flip that creates a new interior edge, followed by a 3-2 flip that removes the initial edge.
+4-4 flip
+multi-face retriangulation
+(a) The 4-4 flip
+(b) Edge removal, multi-face removal and multi-face retriangulation
+FIGURE 2 Examples of composite topological operations
+2.2
+Edge removal
+The most useful topological operation is the edge removal operation. It is a generalization of the 3-2 and 4-4 flips, starting from
+a cavity with 𝑁 ≥ 3 tetrahedra surrounding a unique edge 𝑎𝑏 (see Figure 2b). The operation removes first all tetrahedra adjacent
+to that edge, and creates instead 𝑁 − 2 upper tetrahedra connected to 𝑎 and 𝑁 − 2 lower tetrahedra connected to 𝑏. The facets
+between lower and upper tetrahedra form a 2D sandwiched triangulation, and Shewchuk has proposed an algorithm, based
+4
+on dynamic programming concepts, that finds the 2D triangulation resulting in an optimal tetrahedralization 5 . In contrast, Si
+presents a more versatile implementation of the edge removal operation that recursively removes other edges that prevents the
+current edge removal from producing a valid tetrahedralization 2 . This forms a tree of edge removal operations, where the leafs
+are removed with a sequence of 2-3 flips terminated by a final 3-2 flip. Our implementation of edge removal does neither use
+dynamic programming nor sequences of flips. It is rather a brute-force approach inspired by the first description of edge removal
+by Freitag and Ollivier-Gooch 6 . In a nutshell, the principle is as follows. Each triangle of the sandwiched 2D triangulation is
+assigned a quality, which is the minimum of the corresponding upper and lower tetrahedron quality. If the quality of a triangle is
+less than the quality of the original tetrahedralization, the triangle is marked bad. Using precomputed tables giving all possible
+triangulations up to 𝑁 = 7 in which this triangle is found, it is then possible to eliminate triangulations involving bad triangles.
+Whenever all triangulations are eliminated, the edge removal is not performed. If, on the other hand, several tetrahedralizations
+are possible, their respective overall quality are computed, and the best candidate is selected. As Freitag and Ollivier-Gooch
+noted, having more than 7 tetrahedra around an edge is exceptional, and edge removal is also less likely to succeed in those cases.
+Our approach favors thus simplicity over asymptotic complexity, although all approaches have of course their pros and cons
+in practice. In average, our edge removal terminates within about 1 microsecond for cavities of about 5 tetrahedra, on modern
+hardware.
+The inverse of the edge removal was coined multi-face removal by Shewchuk 5 . The operations that derive from edge removal
+are shown in Figure 2b. This group of operations includes a third operation, named Mutli-face retriangulation by Misztal et
+al. 7 . Mutli-face retriangulation can be regarded either as a combination of an edge removal and a multi-face removal, or as a
+sequence of 4-4 flips modifying the 2D sandwiched triangulation. Although multi-face removal and multi-face retriangulation
+have proved their effectiveness, their implementation is more involved than edge removal, and they are far less used. We decided
+not to implement them, because they are covered by the Growing SPR Cavity operation anyway. This mother of all flips is
+detailed in section 3.
+2.3
+Smoothing
+A vertex relocation, or smoothing operation, in the context of tetrahedral mesh optimization, is an operation that changes the
+position of a point in order to improve the quality of the adjacent tetrahedra. Smoothing methods have been extensively studied
+in the past 25 years 8–11 , and their objective is twofold: improve the overall quality of the mesh and space out points appropriately
+so that subsequent topological transformations can further improve the mesh. Smoothing and topological transformations are
+indeed more effective when combined 6 . The most used smoothing technique, called Laplacian smoothing, simply relocates a
+point at the centroid of the set of points to which is it connected by a mesh edge. As for flipping, Laplacian smoothing is applied
+only if it effectively improves the quality of the mesh. In our mesh generation library HXT, Laplacian smoothing is combined with
+a golden-section search of the optimal relocation on the segment between the original position and the centroid. This approach
+is effective in practice, although the objective function may have local maxima over the segment, and the golden-section search
+is not guaranteed to identify the largest one. In their work 9 , Freitag et al. studied this optimized Laplacian smoothing technique,
+among other techniques.
+2.4
+Other operations
+A good review of classical mesh improvement operations is found in Klingner’s Ph.D. Dissertation 12 . Klingner reports therein
+that large quality improvements are obtained by using point insertion and edge contraction. We have not implement those
+operations so far, but we will consider them for later updates. They are indeed more complex than one might think at first sight.
+It is not enough to insert or remove points and check on whether the quality is improved. The position of adjacent points must
+also often be modified to obtain tetrahedra of better quality and, more importantly, to respect the meshsize map.
+Valid mesh of higher quality may be obtained in some situations if a slight modification of the surface mesh is allowed. This
+however implies relying on a CAD software during the meshing process to evaluate the distance to the parametric definition of
+the initial surface. A more lightweight approach considering a modification of the surface mesh itself, up to an approximated
+Hausdorff distance threshold, would still mean bookkeeping in memory an unmodified version of the surface mesh. As we are
+aiming at a simple and parallelizable mesh generator, we chose to not consider at all operations that modifies the surface mesh.
+In some cases, this is even an asset, as there are situations where one wants the surface mesh to remain strictly unchanged, for
+instance, if the surface is an interface between independent parts of an assembly. Boundary modification is however an option
+5
+2-2 flip
+FIGURE 3 The 2-2 flip. Triangles of the surface mesh are shaded in orange.
+worth being considered for future implementations, as it has shown its effectiveness 13 . The most elementary surface mesh
+modification operation simply flips a pair of adjacent tetrahedra, which are themselves adjacent to two boundary triangles on
+the surface mesh. This operation is called a 2-2 flip and is illustrated in Figure 3.
+3
+GROWING SPR CAVITY
+FIGURE 4 2D illustration of the SPR search tree
+Small Polyhedron Reconnection (SPR) is a branch and bound type algorithm for finding the best of all possible tetrahedralization of a cavity. It was named and first implemented by Liu et al. in 2006 14 . Finding whether a polyhedron can be triangulated
+or not is already a NP-complete problem 15 . Finding the best triangulation is an even more difficult NP-hard problem. The SPR
+algorithm has indeed factorial complexity with regard to the number of points 𝑛 in the cavity. It starts from a selected face, and
+recursively fills up the cavity with well-shaped tetrahedra, trying out each of the 𝑛 − 3 remaining points, until the best triangulation is found. The basic algorithm thus covers the whole tree of possible triangulations, but simple optimizations allow pruning
+most branches 14, 16 . Figure 4 shows the search tree for a simple 2D cavity.
+The choice of the cavity on which to apply the SPR operation is a matter that received very little attention, although the
+performances strongly depend on the geometry and topology of the cavity. In this paper, we propose a new algorithm called
+Growing SPR Cavity (GSC), whose basic idea is to increment the number of points gradually, and to apply the SPR at each step
+until a better triangulation is found. As the SPR algorithm has factorial complexity, the cost of repeating SPR operations from 4
+to 𝑛 points is not much higher than computing directly the best triangulation with 𝑛 points. In addition, most of the SPR structure
+can be reused from one iteration to the next, and a better triangulation of the cavity is usually found within few iterations. The
+limit to the maximum number of points has been set to 𝑛 = 32, and GSC abandons if no better triangulation has been found
+when the cavity has reached 32 points.
+6
+We explained in 16 how the SPR algorithm can be optimized by storing, in a 𝑛4 table, the quality (and thus also the validity)
+of all tetrahedra the algorithm already encountered. By limiting the number of points to 32, we can allocate an acceptably large
+324 table at the beginning of the GSC algorithm and keep it from one iteration of the GSC algorithm to another.
+C3
+A3
+C4
+(a)
+A4
+(b)
+C5
+C5new
+A5
+(c)
+A5
+(d)
+FIGURE 5 Growing SPR Cavity in 2D. Triangles in the cavity  are colored in orange, and triangles adjacent to the cavity 
+are colored in cyan. (a): at first, the cavity only contains a bad triangle. (b) and (c): every point outside the cavity is a vertex
+of at most one triangle in , so we add the triangle in  with the worst quality to . (d): the SPR algorithm found a better
+triangulation for 5 , the triangulation of the cavity is replaced and the GSC algorithm ends.
+Algorithm 1 The Growing SPR Cavity (GSC) operation, applied on a bad tetrahedron 𝑡 of a mesh 
+1: function GSC(𝑡, )
+2:
+3:
+4:
+5:
+6:
+←𝑡
+𝑛←4
+while 𝑛 < 32 do
+ ← E XTENDCAVITY(, 𝐶, 𝑛)
+𝑛←𝑛+1
+⊳ the cavity is the tetrahedron at first
+⊳ the number of points in 
+⊳ add 𝑝𝑘+1 and all tetrahedra with 4 vertices in 𝑘+1
+7:
+8:
+9:
+10:
+11:
+𝑏 ← SPR()
+if 𝑏 ≠  then
+return ( ⧵ ) ∪ 𝑏
+⊳ find the optimal triangulation of 
+⊳ Mesh is improved
+end while
+12:
+return 
+14: end function
+13:
+⊳ Failed to improve the mesh
+The GSC pseudocode given in algorithm 1 can be explained as follows. As its initial cavity, GSC starts with a tetrahedron
+of bad quality which needs to be optimized. Let the four point of this initial tetrahedron be denoted as {𝑝1 , 𝑝2 , 𝑝3 , 𝑝4 }. Now, let
+𝑘 be a cavity containing a set of 𝑘 points 𝑘 = {𝑝1 , 𝑝2 , … , 𝑝𝑘 }. To iteratively obtain 𝑘+1 , a point 𝑝𝑘+1 is added and every
+tetrahedra whose four points are in 𝑘+1 = 𝑘 ∪𝑝𝑘+1 are also added. The selection of the next point of 𝑝𝑘+1 is a heuristic based on
+a simple intuition comforted by experience in testing the SPR algorithm. We observed that it is in general easier to find a better
+tetrahedralization for a cavity with few points and many tetrahedra than for a cavity with few tetrahedra per point. Therefore,
+the point 𝑝𝑘+1 is chosen so as to add as many tetrahedra as possible. Let 𝑘 denote the set of tetrahedra sharing at least one
+facet with a tetrahedron in 𝑘 . In practice, GSC adds the most connected point, i.e., the point adjacent to the largest number of
+tetrahedra in 𝑘 . If several points are adjacent to 𝑚 tetrahedra in 𝑘 , the sum of the qualities of those 𝑚 tetrahedra is evaluated
+for each point, and the point with the lowest sum is selected as a tiebreaker rule. Figure 5 illustrates the GSC algorithm in 2D,
+where the tiebreaker rule has been used twice. This rule is however empirical and different alternative rule were also tested:
+selecting the point with the highest sum of qualities, with the maximum or minimum quality, with the quality function replaced
+7
+by the volume or by the height associated to the boundary facet. The proposed tiebreaker rule consistently gave better results in
+our full mesh improvement schedule, as detailed in section 4.
+In 2D, the triangles to be added to the cavity, i.e. with all 3 points in 𝑘+1 = 𝑘 ∪ 𝑝𝑘+1 , are always in 𝑘 . However, in 3D
+there might be tetrahedra that are neither in 𝑘 nor in 𝑘 , but still have all their vertices in 𝑘+1 . Therefore, in reality, the GSC
+algorithm does not always add the optimal point that result in the addition of as many tetrahedra as possible. Choosing the most
+connected point and not the optimal point is however simpler and faster in practice.
+4
+MESH IMPROVEMENT SCHEDULE
+(a) Tetrahedra with 𝛾 < 0.35 before (above) and
+after (below) the mesh improvement step on the
+Rotor mesh
+(b) Tetrahedra with 𝛾 < 0.35 before (above) and
+after (below) the mesh improvement step on the
+Piston mesh
+(c) Tetrahedra with 𝛾 < 0.35 before (above) and
+after (below) the mesh improvement step on the
+Rim mesh
+FIGURE 6 Effect of HXT’s mesh improvement step on bad tetrahedra. The threshold for being considered a bad tetrahedron
+was set to 𝛾𝑡ℎ𝑟𝑒𝑠ℎ𝑜𝑙𝑑 = 0.35. Almost all bad tetrahedra of the Rotor, Piston and Rim meshes (specified in Table A1) were improved
+above this threshold.
+Our mesh improvement strategy includes a Laplacian smoothing phase, an edge removal phase and the GSC. As Laplacian
+smoothing and edge removal are approximately 100× faster than GSC, they are used in priority, whereas GSC is used as a
+last resort technique to unlock processes trapped in local maxima of the mesh quality objective function. The pseudocode for a
+simplified serial mesh improvement schedule is presented in Algorithm 2. The for loop on line 7 will be called the SER loop in
+the following (Smoothing Edge Removal) and the loop where the GSC operation is applied, on line 17, will be called GSC loop.
+Both loops iterate over bad tetrahedra, which are tetrahedra with a quality under a user-defined threshold. Using the Gamma
+quality function detailed in Appendix A.3, our mesh improvement strategy is able to eliminate most tetrahedra with 𝛾 < 0.35,
+as shown in Figure 6, where one can see that only a few bad tetrahedra subsist.
+8
+Algorithm 2 The proposed serial mesh improvement schedule tries to improve each tetrahedron 𝜏 from a list of bad tetrahedra
+ in a mesh . Bad tetrahedra are tetrahedra with a quality smaller than a user-defined threshold 𝑞𝑚𝑖𝑛
+1: function M ESH IMPROVEMENT (, 𝑞𝑚𝑖𝑛 )
+2:
+3:
+4:
+5:
+6:
+7:
+8:
+9:
+10:
+11:
+12:
+do
+modifGSC ← 0
+⊳ count modifications of the mesh by Growing SPR Cavity
+do
+modifSER ← 0
+⊳ count modifications of the mesh by Smoothing or Edge Removal
+ ← G ETBADT ETRAHEDRA(, 𝑞𝑚𝑖𝑛 )
+for 𝜏 ∈  do
+⊳ the SER loop
+improved ← False
+for point ∈ 𝜏 and ¬improved do
+improved ← L APLACIANSMOOTHING(, point)
+for edge ∈ 𝜏 and ¬improved do
+improved ← EDGER EMOVAL(, edge)
+if improved then
+modifSER ← modifSER + 1
+15:
+while modifSER > 0
+16:
+ ← G ETBADT ETS(, 𝑞𝑚𝑖𝑛 )
+17:
+for 𝜏 ∈  do
+18:
+if GSC(, 𝑡𝑎𝑢) then
+19:
+modifGSC ← modifGSC + 1
+20:
+while modifGSC > 0
+21: end function
+13:
+14:
+4.1
+⊳ the GSC loop
+Parallelization
+The mesh improvement strategy described above can be parallelized pretty much in the same way as the Delaunay refinement.
+The parallel shared-memory Delaunay kernel introduced in our previous article 1 partitions the domain on basis of a 3D Moore
+curve defined in such a way that all partitions contain the same amount of points to be inserted. A point is in a partition if its
+Moore index is in the range that defines the partition. A tetrahedron, then, is considered to belong to a partition if at least 3 of its
+4 vertices lay in that partition. When the cavity created for the insertion of a new point overlaps the boundary between different
+partitions, the operation is suspended, until all other insertions have been tried. At that moment, a new Moore curve and hence
+new partitions are created, and the insertion loop resumes with the points whose insertion was suspended. The number of parallel
+threads, and hence the number of partitions, is determined at the beginning of each sweep by the percentage 𝜌 of suspended point
+insertions during the previous sweep. If 𝜌 = 1, a single thread is used so that the termination of the algorithm is guaranteed.
+Similarly, for mesh improvement, the space filling curve is partitioned so as to equally distribute bad tetrahedra over the
+threads. Figure 7 shows partitioning examples for 8 threads on 3 different meshes. The number of threads is again decided in
+function of the percentage of suspended operations—due to a conflict with another partition— in the previous sweep. The SER
+loop is thus executed repeatedly with decreasing numbers of threads, until all partition conflicts have been resolved. The same
+procedure is used for the GSC loop as well. This parallel algorithm scales well in case of very big meshes only, for essentially
+two reasons. Firstly, elements crossing partition boundaries represent a larger portion of space in small meshes than in large
+meshes, yielding thus mechanically more conflicts. This is less of an issue with mesh refinement because cavities are usually
+smaller for point insertion than for the Growing SPR Cavity. The second reason is that the time spent in one execution of the
+SER or of the GSC loop is very small, typically in the millisecond range. Therefore, the overhead of launching new threads and
+computing Moore indices for the whole mesh is significant. Figure 8a compares the scaling in the case of two highly-refined
+models. The mesh generation was done on the 64 physical cores of an Intel Xeon Phi 7210 machine, running at 1.3 GHz. The
+overall effectiveness and performance of our mesh improvement algorithm is analyzed in section 5.4.
+9
+(a) Rotor mesh partitions
+(b) Piston mesh partitions
+(c) Rim mesh partitions
+FIGURE 7 Partitions based on the 3D Moore curve ordering. These partitions were created almost instantaneously at the start
+of the mesh improvement step, running on 8 threads.
+Time [s]
+103
+Aircraft
+500 thin fibers
+perfect scaling
+102
+101
+1
+2
+4
+8
+16
+Number of threads
+32
+64
+(a) Scaling of tetrahedral mesh improvement on 2 very large meshes.
+(b) The 2 different meshes used within the scaling graph. Above, an Aircraft
+with 637 million tetrahedra, the interior being also meshed. Below, a cube
+with 500 thin fibers that has 351 million tetrahedra.
+FIGURE 8 Scaling of our parallel mesh improvement schedule on 2 huge meshes
+5
+MESH GENERATOR’S PERFORMANCE
+Before comparing the performance of our tetrahedral mesh generator with TetGen and Gmsh, the similarities and key differences
+between the different implementations are briefly recalled. Besides being all open-source and free, the three considered software
+tools are also structured very similarly. As explained in the introduction, the mesh generation process can be splitted into four
+distinct steps: creation of an empty mesh, boundary recovery, mesh refinement and mesh improvement.
+Although it could be sensible to work on improving the quality of tetrahedra right at the moment of their creation, none of the
+open source mesh generators that are considered here use such a strategy. Separating mesh refinement and mesh improvement
+has several advantages. The mesh refinement process essentially creates around 4 times the number of tetrahedra that are present
+in the final mesh. Avoiding the computation of element quality during refinement therefore allows a substantial gain in efficiency.
+Moreover, having separated pieces of code for refinement and improvement allows to programmers to focus on smaller tasks and
+goals. It also allows using meshing capabilities of our code in a modular fashion: it is indeed possible to create a mesh with Gmsh,
+refine it with TetGen, and optimize it with our HXT algorithm, without duplicating any part of the process. Another advantage is
+that the implementations of the different steps can be analyzed separately, and their respective execution times be compared on
+10
+different models. The results of our benchmark for all 4 steps of the tetrahedral mesh generation, including the specification of
+relevant hardware characteristics and compilation flags, are given in Appendix A. More specifically, element numbers, timings
+and CPU/memory usages are reported in Table A1. Comparative performances per step, except for the boundary recovery step,
+and per mesh generator are shown as bar plots in Figure A1.
+5.1
+Empty mesh
+The first step, i.e., the creation of the empty mesh, consists in computing a Delaunay tetrahedralization through all points of
+the surface mesh plus some possible user-defined interiors points. Since a Delaunay tetrahedralization is unique, provided a
+simulation of simplicity 17 is used in conjunction with robust adaptive predicates 18 , all three programs generate identical empty
+meshes. The ordering of the tetrahedra however, can largely vary from one packege to another. The ordering is even nondeterministic with HXT, because threads can reserve chunks of memory corresponding to a set of 8192 tetrahedra at different
+moments from one run to another. To get rid of this non-deterministic behaviour, HXT offers a reproducible mode, which
+reorders deterministically tetrahedra in the lexicographic order of their nodes. The performance of TetGen, Gmsh and HXT
+(with and without the reproducible mode), for the different meshes shown in Table A1, are reported in Figure A1b. HXT is the
+fastest for the empty mesh step, but not because of parallelization. Most tetrahedra of the empty mesh indeed cross the domain
+from side to side. With our partitioning method based on a space-filling curve, points that are at different extremities of the
+domain have very little chances of being in the same partition. Because a tetrahedron is only considered in a partition when at
+least three of its vertices are in that partition, parallelization is not very effective at this step. The speed difference between HXT
+and TetGen, or between HXT and Gmsh, is rather explained here by the good serial performances of our Delaunay kernel 1 .
+5.2
+Boundary Recovery
+All 3 software tools rely internally on TetGen’s boundary recovery code. Table A1 shows however that HXT is a bit slower
+than TetGen for boundary recovery, because of the back and forth conversion of the mesh between its own data structure and
+TetGen’s format. Gmsh applies the same, albeit much slower, kind of conversion. Moreover, the order under which tetrahedra are
+stored in memory can either slow down or speedup the boundary recovery process, which explains timing differences observed
+between HXT in normal or reproducible mode. As the other parts of HXT are parallelized and optimized for heavy workload,
+boundary recovery is the bottleneck of our code for large meshes. In contrast, HXT usually performs very well on small meshes.
+We suspect that TetGen’s algorithm for locating missing facets or edges has a superlinear complexity with respect to the size of
+the mesh.
+5.3
+Mesh Refinement
+Mesh refinement is the step where our parallel HXT algorithm really stands out. The ways TetGen, HXT or Gmsh proceed to
+refine the mesh are rather different, but Figure A1a nonetheless shows that the different software tools generate meshes with
+only slightly different numbers of tetrahedra. TetGen was given the options q1.1/14 , causing it to refine only tetrahedra with
+a radius-edge ratio larger than 1.1 or a minimum dihedral angle smaller than 14◦ 19 . No meshsize constraint was given, although
+TetGen allows it. TetGen therefore adds point only to optimize the quality of elements. In contrast, HXT and Gmsh add a new
+point 𝑝𝑘+1 inside a tetrahedron 𝜏 if the insertion does not create an edge shorter than the prescribed meshsize, which is the value
+linearly interpolated from meshsizes at the vertices of 𝜏. At the beginning of the refinement step, nodal meshsizes are evaluated
+from the surface mesh. and Gmsh thus do not refine with the goal of improving the quality of the elements. All three softwares
+do however end up with meshes with very similar numbers of tetrahedra. Still, timings for mesh refinement and improvement
+indicated in Table A1, Figure A1c and A1d, are expressed in second per million tetrahedra to alleviate the effect of the different
+refinement strategies. HXT is at least 5 times faster than Gmsh and TetGen for mesh refinement, consistently generating more
+than one million tetrahedra per second when the other mesh generators peak at 300 000 tetrahedra per second. On the 300
+fibers model, HXT reaches nearly 3 million tetrahedra per second, which is 132 times faster than Gmsh. HXT is also efficient
+in terms of memory usage. For the 100 fibers mesh, the peak resident set size does not exceed 77 bytes per tetrahedron. If
+memory allocations not depending on the size of the mesh are put aside, HXT consumes only about 60 bytes per tetrahedron.
+11
+5.4
+Mesh Improvement
+For the mesh improvement step, TetGen was given the -o/130 option, setting to 130◦ the target maximum dihedral angle. In
+contrast, HXT and Gmsh target a minimum inradius to longest edge ratio 𝛾𝑡ℎ𝑟𝑒𝑠ℎ𝑜𝑙𝑑 = 0.35. As Gmsh and HXT avoid modifying
+the surface mesh, TetGen was also prevented from modifying the surface mesh by enabling the -Y option. In addition to the
+timings of Table A1, mesh quality has also been compared after the mesh improvement step for 3 geometries (Rotor, Piston and
+Rim) and 3 quality measures:
+• the dihedral angles, plotted in Figure A2
+• the inradius to longest edge ratio (𝛾), shown on the bar plot of Figure A3. The tetrahedra with 𝛾 < 0.35 before and after
+HXT’s mesh improvement step are also shown in Figure 6
+• the signed inverse condition number (SICN), plotted in Figure A4
+HXT gives comparatively the best results regarding each of those three quality measures, even for the maximum dihedral
+angles which is the quality measure used by TetGen during the mesh improvements step. Figure A2 indeed shows noticeably
+smaller maximum dihedral angles for HXT compared to Gmsh and TetGen for each of the 3 considered meshes. This difference
+is explained by the effectiveness of the new Growing SPR Cavity operation described in section 3. The performance of HXT is
+even more striking when looking at the minimum inradius to longest edge ratio and the minimum SICN:
+𝛾
+Gmsh
+TetGen
+HXT (ours)
+0.014
+0.037
+0.13
+Rotor
+SICN ∡𝑚𝑖𝑛
+∡𝑚𝑎𝑥
+0.077
+0.16
+0.16
+174.76
+168.28
+149.2
+4.06
+5.10
+5.10
+𝛾
+Piston
+SICN ∡𝑚𝑖𝑛
+∡𝑚𝑎𝑥
+𝛾
+0.23
+0.15
+0.29
+0.23
+0.30
+0.39
+161.40
+156.12
+146.64
+0.0094
+0.073
+0.16
+11.24
+14.40
+13.76
+Rim
+SICN ∡𝑚𝑖𝑛
+∡𝑚𝑎𝑥
+0.034
+0.15
+0.17
+177.22
+168.26
+149.09
+1.59
+6.70
+5.92
+TABLE 1 Minimum 𝛾 and SICN measure among all tetrahedra, minimum and maximum dihedral angle among all dihedral
+angles of the mesh, for the Rotor, Piston and Rim meshes with the 3 different open-source software tools tested.
+HXT’s mesh improvement is parallelized and has very fast smoothing and edge removal operations. Table A1 and Figure
+A1d indeed indicate that HXT is also the fastest when it comes to mesh improvement, but not by much. The reason for this is
+simple: TetGen and Gmsh stop optimizing whenever the smoothing and edge removal operations become ineffective, whereas
+HXT, then, starts its first GSC sweep.
+6
+CONCLUSION AND DISCUSSION
+This paper has presented the parallel tetrahedral mesh generator HXT, and demonstrated its efficiency by means of a detailed
+comparative benchmark with two concurrent open-source software tools: Gmsh and TetGen. Although the obtained performance
+are very satisfactory, there is room for improvement. The first and easiest improvement will be the implementation of edge
+contraction, point insertion and 2-2 flips. Another particularly challenging task is the parallelization of the boundary recovery
+step, which is the last non-parallelized step in the whole meshing process. Thanks to the acquired experience, improvement on
+the boundary recovery procedures of TetGen is now definitely within reach, probably but adding our parallelization strategy
+based on Moore curves. The novel GSC operation could also help gaining performance, and could be adapted as a last resort
+operation to recover constrained facets or edges. Other parallelizations strategies should also be tested for the mesh improvement
+stage.
+ACKNOWLEDGMENTS
+This project has received funding from the European Research Council (ERC) under the European Union’s Horizon 2020
+research and innovation programme (grant agreement ERC-2015-AdG-694020). We are grateful to the authors of the ABC
+12
+Dataset 20 , for providing the Rim and Piston geometries (respectively model 40 and 9733). Surface meshes were generated thanks
+to Gmsh.
+References
+1. Marot C, Pellerin J, Remacle JF. One machine, one minute, three billion tetrahedra. International Journal for Numerical
+Methods in Engineering. 2019 Feb;117(9):967–990. Available from: https://onlinelibrary.wiley.com/doi/abs/10.1002/nme.
+5987.
+2. Si H. TetGen, a Delaunay-Based Quality Tetrahedral Mesh Generator. ACM Trans Math Softw. 2015;41(2):11:1–11:36.
+Available from: http://doi.acm.org/10.1145/2629697.
+3. Shewchuk JR. What Is a Good Linear Finite Element? - Interpolation, Conditioning, Anisotropy, and Quality Measures. In
+Proc. of the 11th International Meshing Roundtable; 2002.
+4. Pachner U. P.L. Homeomorphic Manifolds are Equivalent by Elementary Shellings. European Journal of Combinatorics.
+1991 Mar;12(2):129–145. Available from: http://www.sciencedirect.com/science/article/pii/S0195669813800807.
+5. Shewchuk JR. Two Discrete Optimization Algorithms for the Topological Improvement of Tetrahedral Meshes. In: In
+Unpublished manuscript; 2002. p. 11.
+6. Freitag LA, Ollivier-Gooch C. Tetrahedral mesh improvement using swapping and smoothing. International Journal for Numerical Methods in Engineering. 1997 Nov;40(21):3979–4002. Available from: http://doi.wiley.com/10.1002/
+%28SICI%291097-0207%2819971115%2940%3A21%3C3979%3A%3AAID-NME251%3E3.0.CO%3B2-9.
+7. Misztal MK, Bærentzen JA, Anton F, Erleben K. Tetrahedral Mesh Improvement Using Multi-face Retriangulation.
+In: Clark BW, editor. Proceedings of the 18th International Meshing Roundtable. Berlin, Heidelberg: Springer Berlin
+Heidelberg; 2009. p. 539–555. Available from: http://link.springer.com/10.1007/978-3-642-04319-2_31.
+8. Amenta N, Bern M, Eppstein D. Optimal Point Placement for Mesh Smoothing. Journal of Algorithms. 1999
+Feb;30(2):302–322. Available from: http://linkinghub.elsevier.com/retrieve/pii/S0196677498909841.
+9. Freitag L, Jones M, Plassmann P. A Parallel Algorithm for Mesh Smoothing. SIAM Journal on Scientific Computing. 1999
+Jan;20(6):2023–2040. Available from: http://epubs.siam.org/doi/10.1137/S1064827597323208.
+10. Freitag LA, Knupp PM.
+Tetrahedral mesh improvement via optimization of the element condition number.
+International Journal for Numerical Methods in Engineering. 2002;53(6):1377–1391.
+_eprint:
+https://onlinelibrary.wiley.com/doi/pdf/10.1002/nme.341.
+Available from: https://onlinelibrary.wiley.com/doi/abs/10.
+1002/nme.341.
+11. Dassi F, Kamenski L, Farrell P, Si H. Tetrahedral mesh improvement using moving mesh smoothing, lazy searching flips,
+and RBF surface reconstruction. Computer-Aided Design. 2018 Oct;103:2–13. Available from: http://www.sciencedirect.
+com/science/article/pii/S0010448517302336.
+12. Klingner BM. Improving Tetrahedral Meshes. EECS Department, University of California, Berkeley. 2008 Nov;Available
+from: http://www2.eecs.berkeley.edu/Pubs/TechRpts/2008/EECS-2008-145.html.
+13. Klingner BM, Shewchuk JR. Aggressive Tetrahedral Mesh Improvement. In: Brewer ML, Marcum D, editors. Proceedings
+of the 16th International Meshing Roundtable. Berlin, Heidelberg: Springer Berlin Heidelberg; 2008. p. 3–23. Available
+from: http://link.springer.com/10.1007/978-3-540-75103-8_1.
+14. Liu J, Chen YQ, Sun SL. Small polyhedron reconnection for mesh improvement and its implementation based on advancing
+front technique. International Journal for Numerical Methods in Engineering. 2009;79(8):1004–1018. Available from:
+https://onlinelibrary.wiley.com/doi/abs/10.1002/nme.2605.
+13
+15. Ruppert J, Seidel R. On the difficulty of triangulating three-dimensional Nonconvex Polyhedra. Discrete & Computational
+Geometry. 1992 Mar;7(3):227–253. Available from: http://link.springer.com/10.1007/BF02187840.
+16. Marot C, Verhetsel K, Remacle JF. Reviving the Search for Optimal Tetrahedralizations. In: Proceedings of the 28th International Meshing Roundtable. Buffalo, New York, USA: Zenodo; 2020. Available from: https://doi.org/10.5281/zenodo.
+3653420.
+17. Edelsbrunner H, Mücke EP. Simulation of simplicity: a technique to cope with degenerate cases in geometric algorithms.
+ACM Trans Graph. 1990;9(1):66–104. Available from: http://doi.acm.org/10.1145/77635.77639.
+18. Shewchuk JR. Adaptive precision floating-point arithmetic and fast robust geometric predicates. Discrete & Computational
+Geometry. 1997;18(3):305–363.
+19. TetGen, Version 1.5, User’s Manual;. Available from: http://wias-berlin.de/software/tetgen/1.5/doc/manual/index.html.
+20. Koch S, Matveev A, Jiang Z, Williams F, Artemov A, Burnaev E, et al. ABC: A Big CAD Model Dataset For Geometric
+Deep Learning. In: The IEEE Conference on Computer Vision and Pattern Recognition (CVPR); 2019. .
+14
+APPENDIX
+A BENCHMARKS
+Benchmarks use the average of 5 runs on an IntelⓇ CoreTM i7-6700HQ with 4 cores running at 3.5GHz and 16Gb of RAM.
+We use Gmsh 4.6.0 with the -optimize_threshold=0.35 option and HXT’s tetMesh_CLI executable provided in gmsh/contrib/hxt/tetMesh/ with default options. We use TetGen 1.5.1 with "-BNEFIVVYp -q1.1/14 -O7 -o/130" options. TetGen
+was compiled with gcc -O3, Gmsh and HXT with gcc -O3 -march=native. See section 5 for an in-depth discussion on the
+results. The code for the benchmarks is available at https://git.immc.ucl.ac.be/marotc/tetmesher_benchmark
+A.1 Speed
+Figure A1 shows bar plots of different performance measures, further detailed in Table A1.
+⋅107
+# tet.
+2
+1
+Gmsh
+TetGen
+Ours
+Ours (reprod. mode)
+10
+Time [s]
+Gmsh
+TetGen
+Ours
+Ours (reprod. mode)
+(a) Final number of tetrahedra
+sto
+n
+10
+Pi
+Ro
+to
+r
+er
+s
+0
+fib
+m
+(b) Tetrahedrizing the empty mesh
+⋅10−5
+⋅10−6
+4
+2
+Gmsh
+TetGen
+Ours
+Ours (reprod. mode)
+8
+Time / # tet.[s/tet]
+Gmsh
+TetGen
+Ours
+Ours (reprod. mode)
+6
+4
+2
+(c) Mesh refinement
+(d) Mesh improvement
+FIGURE A1 Performance benchmark bar plots
+Pi
+sto
+n
+Ro
+to
+r
+rs
+10
+0
+fib
+e
+m
+Ri
+e
+ck
+l
+nu
+K
+fib
+e
+30
+0
+sto
+n
+Pi
+Ro
+to
+r
+rs
+10
+0
+fib
+e
+m
+ck
+l
+nu
+K
+Ri
+e
+s
+er
+fib
+0
+rs
+0
+0
+30
+Time / # tet. [s/tet]
+Ri
+ck
+l
+nu
+K
+0
+30
+10
+e
+er
+s
+fib
+sto
+n
+Pi
+Ro
+to
+r
+0
+fib
+er
+m
+Ri
+e
+ck
+l
+K
+nu
+fib
+0
+30
+s
+0
+er
+s
+0
+5
+15
+models
+Rotor
+Knuckle
+Rim
+100 fibers
+300 fibers
+Piston
+Surface mesh
+number of points
+number of triangles
+115 052
+230 232
+435 423
+870 914
+397 985
+796 030
+47 759
+94 994
+328 661
+656 162
+27 187
+54 374
+Gmsh
+final number of points
+final number of tetrahedra
+Empty Mesh [𝑠]
+Boundary Recovery [𝑠]
+Mesh Refinement [𝜇𝑠∕tet]
+Mesh Improvement [𝜇𝑠∕tet]
+Max. mem. usage [𝐵∕tet]
+CPU %
+138 652
+493 632
+2.31
+2.43
+14.61
+4.14
+1226.70
+99.9
+1 435 736
+7 536 855
+13.78
+33.039
+36.73
+7.16
+558.86
+99.9
+964 213
+4 729 987
+9.68
+32.93
+28.50
+5.96
+569.25
+99.9
+583 860
+3 580 914
+0.95
+6.30
+28.72
+5.73
+524.24
+99.9
+2 583 840
+15 680 789
+9.78
+0.07
+45.12
+8.24
+493.53
+99.9
+52 823
+241 982
+0.52
+23.92
+20.69
+4.23
+865.92
+99.9
+TetGen
+final number of points
+final number of tetrahedra
+Empty Mesh [𝑠]
+Boundary Recovery [𝑠]
+Mesh Refinement [𝜇𝑠∕tet]
+Mesh Improvement [𝜇𝑠∕tet]
+Max. mem. usage [𝐵∕tet]
+CPU %
+169 755
+670 594
+1.78
+1.23
+3.19
+0.82
+903.46
+99.9
+2 140 715
+11 442 634
+8.13
+6.21
+5.23
+1.00
+314.12
+99.9
+1 101 619
+5 382 975
+6.32
+4.70
+4.76
+0.94
+474.32
+99.9
+614 938
+3 606 324
+0.63
+0.54
+3.49
+0.88
+204.72
+99.9
+3 183 439
+18 589 149
+4.81
+4.60
+4.14
+0.94
+227.18
+99.9
+59 876
+275 491
+0.42
+0.32
+3.98
+0.73
+614.19
+99.9
+HXT (ours)
+final number of points
+final number of tetrahedra
+Empty Mesh [𝑠]
+Boundary Recovery [𝑠]
+Mesh Refinement [𝜇𝑠∕tet]
+Mesh Improvement [𝜇𝑠∕tet]
+Max. mem. usage [𝐵∕tet]
+CPU %
+146 957
+541 929.6
+0.36
+1.91
+0.64
+0.78
+1032.73
+292.2
+2 121 555.4
+11 714 033.8
+1.57
+8.54
+0.50
+0.65
+221.15
+383.0
+1 184 497.6
+6 063 127.6
+0.87
+6.64
+0.47
+0.11
+328.88
+326.4
+1 162 217
+7 139 662
+0.16
+0.72
+0.35
+0.36
+80.86
+523.8
+4 350 880.2
+26 526 744.2
+1.13
+6.53
+0.34
+0.31
+77.13
+479.4
+57 452
+268 116.4
+0.12
+0.47
+0.62
+0.25
+646.72
+351.2
+HXT (ours)
+reproducible mode
+final number of points
+final number of tetrahedra
+Empty Mesh [𝑠]
+Boundary Recovery [𝑠]
+Mesh Refinement [𝜇𝑠∕tet]
+Mesh Improvement [𝜇𝑠∕tet]
+Max. mem. usage [𝐵∕tet]
+CPU %
+146 967
+542 012
+0.35
+1.60
+0.65
+0.61
+1031.42
+301.4
+2 121 944
+11 716 723
+1.67
+7.60
+0.83
+0.64
+221.40
+444.6
+1 184 569
+6 064 318
+1.35
+6.10
+0.78
+0.90
+328.60
+391.4
+1 162 848
+7 141 786
+0.19
+0.64
+0.51
+0.36
+123.45
+577.4
+4 348 050
+26 506 921
+1.35
+5.74
+0.75
+0.24
+113.98
+514.8
+57 505
+268 493
+0.12
+0.42
+0.75
+0.15
+654.47
+379.2
+TABLE A1 Performance benchmark table
+16
+A.2 Dihedral Angles
+The dihedral angles formed by each pair of facets of a tetrahedron are customary measures to look at because of their conceptual
+simplicity. However, this measure does not directly correspond to any type of error that the discretization induces during a finite
+element simulation 3 .
+⋅104
+⋅104
+⋅105
+3
+Gmsh - Rotor
+Gmsh - Piston
+Gmsh - Rim
+# angles
+6
+4
+2
+4
+2
+1
+2
+0
+0
+0
+0
+45
+90
+135
+180
+0
+45
+90
+135
+180
+8
+45
+90
+135
+180
+⋅105
+Tetgen - Piston
+Tetgen - Rotor
+Tetgen - Rim
+6
+3
+# angles
+0
+⋅104
+⋅104
+6
+4
+2
+4
+2
+1
+2
+0
+0
+0
+45
+90
+135
+180
+0
+0
+⋅104
+45
+90
+135
+180
+0
+45
+90
+135
+180
+⋅105
+⋅104
+8
+Ours - Rotor
+6
+4
+2
+4
+2
+1
+2
+6
+# angles
+Ours - Rim
+Ours - Piston
+3
+0
+0
+0
+45
+90
+135
+dihedral angle [◦ ]
+180
+0
+0
+90
+135
+45
+dihedral angle [◦ ]
+180
+0
+45
+90
+135
+dihedral angle [◦ ]
+180
+FIGURE A2 Histograms of the dihedral angles. Lower and upper bound are marked with red vertical lines. The average is
+marked with a blue line.
+17
+A.3 Gamma
+√
+24 𝑟𝑖𝑛
+24 3𝑉
+𝛾=
+=
+,
+|𝑒𝑚𝑎𝑥 |(𝐴1 + 𝐴2 + 𝐴3 + 𝐴4 )
+|𝑒𝑚𝑎𝑥 |
+√
+where 𝑉 is the volume of the tetrahedron,
+√ |𝑒𝑚𝑎𝑥 | is the length of the longest edge, 𝐴𝑖 is the area of the 𝑖th face and 𝑟𝑖𝑛 is the
+inradius of the tetrahedron. The factor 24 is added such that the optimal tetrahedron, which is a regular tetrahedron, has a
+quality 𝛾 = 1. This quality measure penalize all tetrahedra according to their associated interpolation error 3 .
+⋅104
+⋅104
+⋅105
+1
+Gmsh - Piston
+# tet.
+Gmsh - Rotor
+1
+Gmsh - Rim
+1
+0.5
+0
+0
+0
+0.2
+0.4
+0.6
+0.8
+1
+0
+0
+⋅104
+0.2
+0.4
+0.6
+0.8
+1
+0
+Tetgen - Rotor
+2
+Tetgen - Piston
+1
+0.2
+0.4
+0.6
+0.8
+1
+0.6
+0.8
+1
+0.6
+0.8
+1
+⋅105
+⋅104
+Tetgen - Rim
+# tet.
+2
+1
+0.5
+1
+0
+0
+0
+0.2
+0.4
+0.6
+0.8
+1
+0
+0
+# tet.
+0.4
+0.6
+0.8
+1
+Ours - Rotor
+2
+1
+0
+0
+0.2
+0.4
+0.6
+𝛾
+0.8
+1
+0.4
+Ours - Rim
+0.5
+0
+0.2
+⋅105
+Ours - Piston
+1
+1
+0
+0
+⋅104
+⋅104
+2
+0.2
+0
+0.2
+0.4
+0.6
+𝛾
+0.8
+1
+0
+0.2
+0.4
+𝛾
+FIGURE A3 Histograms of the quality measure 𝛾. Lower bound is marked with a red vertical line. The average is marked with
+a blue line.
+18
+A.4 Signed inverse condition number (SICN)
+3
+The inverse condition number in Frobenius norm SICN = 𝜅(𝑆)
+for each tetrahedron. 𝜅(𝑆) is the condition number of the linear
+transformation matrix 𝑆 between a tetrahedron of the mesh and a regular tetrahedron. the SICN is directly proportional to the
+greatest lower bound for the distance of 𝑆 to the set of singular matrices 10 .
+⋅104
+⋅104
+Gmsh - Rotor
+# tet.
+2
+Gmsh - Piston
+1
+1
+⋅105
+1
+0.5
+0
+0
+0
+0.2
+0.4
+0.6
+0.8
+1
+0
+0
+⋅104
+0.2
+0.4
+0.6
+0.8
+1
+⋅104
+1.5
+Tetgen - Rotor
+Gmsh - Rim
+2
+0
+0.2
+0.4
+0.6
+0.8
+1
+0.6
+0.8
+1
+0.4 0.6
+SICN
+0.8
+1
+⋅105
+3
+Tetgen - Rim
+Tetgen - Piston
+# tet.
+3
+1
+2
+0.5
+1
+2
+1
+0
+0
+0
+0.2
+0.4
+0.6
+0.8
+1
+⋅104
+0
+0
+0.2
+0.4
+0.6
+0.8
+1
+1.5
+Ours - Rotor
+3
+1
+2
+0.5
+1
+# tet.
+1
+0
+0
+0
+0.2
+0.4 0.6
+SICN
+0.8
+1
+0.2
+0.4
+⋅105
+Ours - Piston
+2
+0
+⋅104
+Ours - Rim
+0
+0
+0.2
+0.4 0.6
+SICN
+0.8
+1
+0
+0.2
+FIGURE A4 Histograms of the SICN quality measure. Lower bound is marked with a red vertical lines. The average is marked
+with a blue line.

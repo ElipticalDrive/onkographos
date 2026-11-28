@@ -1,0 +1,506 @@
+Decompilation of sead: the standard C++ library for first-party Nintendo games - gfx, geom, and math: Projection, Camera, and Viewport functions (with bonus Matrix math and Segment/Ray) by Esras · Pull Request #213 · open-ead/sead
+
+gfx, geom, and math: Projection, Camera, and Viewport functions (with bonus Matrix math and Segment/Ray) by Esras · Pull Request #213 · open-ead/sead · GitHub
+Skip to content
+You signed in with another tab or window. Reload to refresh your session.
+You signed out in another tab or window. Reload to refresh your session.
+You switched accounts on another tab or window. Reload to refresh your session.
+Dismiss alert
+Conversation
+Esras
+commented
+Jul 28, 2025
+•
+edited
+Loading
+Uh oh!
+There was an error while loading. Please reload this page.
+Copy link
+Copy Markdown
+Try 2 3 some number...
+This PR attempts to implement many of the Projection libraries and tries to update their dependencies where needed and from @aboood40091's repo.
+Goals
+Implement all of these, as seen from BotW:
+Projection libraries, including what appear to be the Perspective, Ortho, Frustum, and Direct projections
+Camera functions, including the LookAt, Direct, and Ortho cameras
+Viewport's functions, including a guard on the mDepthRange since SMO doesn't seem to have that member variable.
+Include the Graphics and DrawContext library updates that @aboood40091 had worked on.
+Note, this also brings in a vectorized Matrix44f::copy function.
+Addresses
+0xB1D898 - 0xB1F2B0 are the Projection functions in BotW.
+0xB1FFF0 - 0xB20718 are the sead::Viewport functions
+0xB1B9F0 - 0xB1C680 are the Camera functions
+Non-Matching / Other Functions
+In the prior PR, the static_assert in seadGraphicsNvn.h had been commented out because it was failing while editing. I'm not entirely sure if that's related to the work here.
+Next Steps
+I'm looking for feedback. Been iterating on the SMO side with german77.
+Thank you to aboood40091, MonsterDruide1, and german77 for all the commentary, help, and original code that I pulled into this branch!
+This change is
+Esras
+mentioned this pull request
+Jul 28, 2025
+RFC: Projection Libraries
+#129
+Closed
+Esras
+commented
+Aug 7, 2025
+Copy link
+Copy Markdown
+Author
+I just pushed an update that added some things to the Camera, Projection, and Viewport libs. In a few cases, the matrix math can likely be simplified by some of the internal CalcCommon functions, in other cases I'm looking for, "What am I missing?"
+For instance, I think once sead::Projection::doScreenPosToCameraPosTo is fixed, some of the other non-matching functions in the Projection lib will match.
+MonsterDruide1
+reviewed
+Aug 22, 2025
+View reviewed changes
+MonsterDruide1
+left a comment
+Copy link
+Copy Markdown
+Member
+There was a problem hiding this comment.
+Choose a reason for hiding this comment
+The reason will be displayed to describe this comment to others. Learn more.
+@MonsterDruide1 reviewed 1 of 10 files at r2, 3 of 8 files at r4, all commit messages.
+Reviewable status: 4 of 14 files reviewed, 7 unresolved discussions
+a discussion (no related file):
+I will slowly review this file-by-file.
+modules/src/gfx/seadProjection.cpp line 284 at r4 (raw file):
+```
+{
+    offset->x = ((float)0.5 * (this->mLeft + this->mRight)) / (this->mRight - this->mLeft);
+    offset->y = ((float)0.5 * (this->mTop + this->mBottom)) / (this->mTop - this->mBottom);
+```
+Suggestion:
+```
+    offset->x = (0.5f * (mLeft + mRight)) / (mRight - mLeft);
+    offset->y = (0.5f * (mTop + mBottom)) / (mTop - mBottom);
+```
+include/gfx/seadDrawContext.h line 15 at r4 (raw file):
+```
+public:
+    DrawContext();
+    virtual ~DrawContext() = default;
+```
+Not header-defined
+Suggestion:
+```
+virtual ~DrawContext();
+```
+include/gfx/seadProjection.h line 145 at r4 (raw file):
+```
+    f32 mFovyCos;
+    f32 mFovyTan;
+    f32 mAspect = 1.333333f;
+```
+Suggestion:
+```
+f32 mAspect = 4.0f/3.0f;
+```
+include/gfx/seadCamera.h line 15 at r4 (raw file):
+```
+class Ray : public T
+{
+};
+```
+This seems wrong. Looking at sead::Camera::unprojectRayByMatrix, Ray<sead::Vector3f> contains at least two sead::Vector3f. Also, : public T is very unusual. I would rather suggest the below, based on these two facts.
+Also, mStart and mEnd come from 7100B67F34 in SMO, which does something like this:
+```
+sead::Vector2f a = _0;
+sead::Vector2f b = _8 - _0;
+```
+I would definitely leave in a note that those names are not really known and just a wild guess here.
+Suggestion:
+```
+class Ray
+{
+    // TODO: names are very guessed
+    T mStart;
+    T mEnd;
+};
+```
+include/gfx/seadCamera.h line 84 at r4 (raw file):
+```
+    SEAD_RTTI_OVERRIDE(DirectCamera, Camera)
+public:
+    DirectCamera();
+```
+inlined in its usages
+Suggestion:
+```
+DirectCamera() = default;
+```
+include/gfx/seadCamera.h line 91 at r4 (raw file):
+```
+private:
+    Matrix34f mDirectMatrix = Matrix34f::ident;  // I don't think this is right, the Matrix has 0, 2
+                                                 // and 1, 3 populated as 1.0f
+```
+Seems right to me, I literally see a memcpy(someOffsetWithinDirectCamera, &sead::Matrix34f::ident, 0x30);
+Suggestion:
+```
+    Matrix34f mDirectMatrix = Matrix34f::ident;
+```
+include/gfx/seadCamera.h line 98 at r4 (raw file):
+```
+    SEAD_RTTI_OVERRIDE(OrthoCamera, LookAtCamera)
+public:
+    OrthoCamera() = default;
+```
+This one is not inlined.
+Suggestion:
+```
+OrthoCamera();
+```
+Esras
+commented
+Aug 23, 2025
+Copy link
+Copy Markdown
+Author
+I have an implementation of Ray that I currently have in seadGeometry.h (though not in the sead::Geometry namespace) as part of some WIP. Should it just be its own seadRay.h? As I dug around, I definitely think it's "position" and "direction" for the vector type, done right now without any other complexity as:
+```
+template <typename T>
+struct Ray
+{
+    Ray();
+
+    T position;
+    T direction;
+};
+```
+I've changed the constructors, is there something I'm missing in terms of when they're = default; in the header vs. the trivial implementation in the cpp, or is it more that they aren't the trivial constructor (and I just created them for purposes of making names for uking_functions.csv?
+aboood40091
+commented
+Aug 24, 2025
+Copy link
+Copy Markdown
+Contributor
+Should be in geom/seadLine.h. It's a class with two members: mP and mD. I recommend adding two typedefs: Ray2f and Ray3f.
+Esras
+force-pushed
+the
+projection_try_2
+branch
+from
+a1536c0 to
+91186da
+Compare
+August 25, 2025 15:44
+MonsterDruide1
+reviewed
+Oct 12, 2025
+View reviewed changes
+MonsterDruide1
+left a comment
+Copy link
+Copy Markdown
+Member
+There was a problem hiding this comment.
+Choose a reason for hiding this comment
+The reason will be displayed to describe this comment to others. Learn more.
+If it shows up as a function in the game, it's implemented in the cpp. If it's inlined in all usages, it's header-defined.
+If the constructor has no content, it can often be defined as = default; (preferred). Sometimes, this doesn't match for some reason, so try {} too if you're having problems.
+@MonsterDruide1 reviewed 1 of 1 files at r1, 1 of 9 files at r6, 1 of 5 files at r7, 1 of 5 files at r8, 1 of 1 files at r10, 1 of 1 files at r12, all commit messages.
+Reviewable status: 7 of 17 files reviewed, 9 unresolved discussions (waiting on @Esras)
+modules/src/math/seadGeometry.cpp line 6 at r12 (raw file):
+```
+{
+
+float Geometry::calcSquaredDistancePointToRay(Vector2<float>* point, Ray<Vector2<float>>* ray,
+```
+Suggestion:
+```
+{
+
+// BUG: returns the distance from point to ray origin, ignoring its direction
+// (closestRayPos is fine)
+float Geometry::calcSquaredDistancePointToRay(Vector2<float>* point, Ray<Vector2<float>>* ray,
+```
+modules/src/math/seadGeometry.cpp line 7 at r12 (raw file):
+```
+float Geometry::calcSquaredDistancePointToRay(Vector2<float>* point, Ray<Vector2<float>>* ray,
+                                              float* scalar)
+```
+Suggestion:
+```
+f32 Geometry::calcSquaredDistancePointToRay(Vector2f* point, Ray2f* ray, f32* closestRayPos)
+```
+modules/src/math/seadGeometry.cpp line 11 at r12 (raw file):
+```
+    auto diff = *point - ray->position;
+
+    auto numerator = diff.dot(ray->direction);
+```
+Suggestion:
+```
+auto dot = diff.dot(ray->direction);
+```
+modules/src/math/seadGeometry.cpp line 12 at r12 (raw file):
+```
+    auto numerator = diff.dot(ray->direction);
+    auto squaredLength = diff.squaredLength();
+```
+avoid auto in general
+Suggestion:
+```
+    sead::Vector2f diff = *point - ray->position;
+
+    f32 numerator = diff.dot(ray->direction);
+    f32 squaredLength = diff.squaredLength();
+```
+include/geom/seadLine.h line 12 at r12 (raw file):
+```
+{
+public:
+    using T = typename VectorType::ValueType;
+```
+... or is that used anywhere?
+Suggestion:
+```
+template <typename T>
+class Segment
+{
+```
+include/geom/seadLine.h line 15 at r12 (raw file):
+```
+public:
+    Segment() : mP0(VectorType::zero), mP1(VectorType::ex) {}
+```
+Use VectorType mP0 = VectorType::zero; (similar for mP1) instead
+Suggestion:
+```
+Segment() = default;
+```
+include/geom/seadLine.h line 42 at r12 (raw file):
+```
+public:
+    T position;
+    T direction;
+```
+Suggestion:
+```
+public:
+    const VectorType& getPos() const { return mP; }
+    void setPos(const VectorType& p) { mP = p; }
+    
+    const VectorType& getDir() const { return mD; }
+    void setDir(const VectorType& d) { mD = d; }
+
+private:
+    T mP;
+    T mD;
+```
+CMakeLists.txt line 116 at r4 (raw file):
+```
+  modules/src/gfx/seadCamera.cpp
+  modules/src/gfx/seadColor.cpp
+  modules/src/gfx/seadDrawContext.cpp
+```
+Why is this one removed?
+german77
+commented
+Nov 20, 2025
+Copy link
+Copy Markdown
+Contributor
+I just noticed you implemented projection here. I just did just the base projection implementation in #228
+Since it wasn't my intention to "steal" any of your work I can either add you as a co-autor or close my PR and help this PR so is up to standard and get it merged.
+Esras
+and others
+added 6 commits
+August 9, 2026 19:16
+Fix the header declaration of the Matrix44<T>::setRow function.
+cc15b22
+Try 2 at the Projection libraries. Copying over from the prior PR (op…
+…
+41ce93d
+```
+…en-ead#129) and organizing.
+```
+engine/geom: Add Segment
+e473dc2
+Add a vectorized copy function for 4x4 f32 Matrices, guarded by NNSDK…
+…
+20a9e8e
+```
+…. Matched matrix copies in Projection functions in BotW.
+```
+With copious help from GRAnimated (read: linked me the matched functi…
+…
+8dfce9d
+```
+…on), Projection::doUpdateDeviceMatrix matches.
+```
+Minor fixing up to names / templates for Geometry and Segment.
+b3dbe2a
+Esras
+force-pushed
+the
+projection_try_2
+branch
+from
+290d74a to
+b3dbe2a
+Compare
+August 10, 2026 03:02
+Match PerspectiveProjection::getOffset, does assignment based on indi…
+…
+6a91967
+```
+…vidual elements instead of vector assignment.
+```
+Esras
+commented
+Aug 10, 2026
+Copy link
+Copy Markdown
+Author
+I rebased the PR on the current master and cleaned up the history some and believe I have taken into account all the feedback from the reviews, thank you for those!
+As of this message, there are a few functions still missing:
+sead::Projection::~Projection()
+sead::PerspectiveProjection::PerspectiveProjection()
+sead::PerspectiveProjection::getOffset(sead::Vector2<float>*) const
+sead::OrthoProjection::OrthoProjection()
+sead::OrthoProjection::OrthoProjection(float, float, sead::Viewport const&)
+sead::OrthoProjection::setByViewport(sead::Viewport const&)
+sead::OrthoProjection::doUpdateMatrix(sead::Matrix44<float>*) const
+sead::FrustumProjection::doScreenPosToCameraPosTo(sead::Vector3<float>*, sead::Vector3<float> const&) const
+sead::DirectProjection::DirectProjection()
+sead::DirectProjection::DirectProjection(sead::Matrix44<float> const&, sead::Graphics::DevicePosture)
+sead::DirectProjection::setProjectionMatrix(sead::Matrix44<float> const&, sead::Graphics::DevicePosture)
+sead::DirectProjection::updateAttributesForDirectProjection()
+sead::DirectProjection::doScreenPosToCameraPosTo(sead::Vector3<float>*, sead::Vector3<float> const&) const
+A couple that I haven't pushed that are matched:
+sead::OrthoProjection::getAspect() const
+sead::OrthoProjection::doScreenPosToCameraPosTo(sead::Vector3<float>*, sead::Vector3<float> const&) const
+Finally, I know this PR touched Camera functions and the Viewport (among other things), but for the sake of not leaving this open for another year or two, I will leave those, finish up the Projection functions, hopefully get it merged, and then move that to a separate PR and not take forever on it.
+Thank you again to aboood40091, MonsterDruide1, and german77 for all the commentary, help, and original code that I pulled into this branch!
+Esras
+added 2 commits
+August 11, 2026 10:29
+Match the remaining Projection functions in sead against BotW.
+1169fbc
+Minor corrections based on earlier feedback on the PR.
+467ccf6
+Esras
+marked this pull request as ready for review
+August 11, 2026 23:11
+Esras
+added 9 commits
+August 11, 2026 19:12
+Move PerspectiveProjection::get* functions from the header to the cpp…
+…
+3950cb4
+```
+… to avoid inlining.
+```
+Move more header functions into the CPP for Projection functions. Add…
+…
+9c7ec64
+```
+… the getOffsetX and getOffsetY functions for the FrustumProjection class.
+```
+Update the getOffsetX and getOffsetY functions according to the SMO d…
+…
+f720a83
+```
+…ecomp.
+```
+Match the remaining camera functions, at least as they show up in Bot…
+…
+d00a838
+```
+…W from 0xb1b9f0 to 0xb1c680
+```
+Rename the mDepthBound -> mDepthRange, based on the nvn commands bein…
+…
+594dbbd
+```
+…g called. Update the apply functions in the CPP to match all of the Viewport functions in BotW.
+```
+Add a guard for the mDepthRange on the Viewport function so that it w…
+…
+0f1c9a6
+```
+…ill match on SMO and others, leave comments indicating unknown status on some of the other branches. Additionally, remove the RTTI functions on the Viewport class, since they don't exist anywhere. Also revert a change to the initial mPos on the LookAtCamera, the change was leftover from a constructor match exercise.
+```
+Remove the base Projection::doScreenPos... function - it's supposed t…
+…
+8c1a68c
+```
+…o be overridden and its existence here is an artifact.
+
+Change the mPos vector back to 1.0f - all of the constructors seem to use it like that and the 10.0f override seems to be coming from other game functions' ctors.
+
+Move the PerspectiveProjection dtor to be defined in the CPP - this may be wrong, based on what pointer nonsense is going on.
+```
+Move functions out of the CPP and into the header - they're all inlined.
+ba7cf04
+Remove the normalizeUp function in favor of folding its usage directl…
+…
+63d9f32
+```
+…y into setUp. This will break the SMO build.
+```
+german77
+mentioned this pull request
+Aug 12, 2026
+Library/Camera: Remove normalizeUp from LookAtCamera
+MonsterDruide1/OdysseyDecomp#1337
+Open
+Esras
+added 3 commits
+August 14, 2026 08:32
+Remove unused GraphicsContext port and dead FrustumProjection(BoundBo…
+…
+8d1bc9e
+```
+…x2f) constructor.
+
+GraphicsContext was ported from aboood's WiiU branch but nothing in my code calls it. Its existence is causing the BotW and SMO builds to fail their CI checks. Finally, the FrustumProjection constructor that takes the BoundBox2f doesn't seem to appear in BotW or SMO.
+```
+Restore LookAtCamera::normalizeUp() for SMO compat
+…
+136aa69
+```
+63d9f32 folded the normalize into setUp() and dropped the standalone
+method, but SMO's CameraPoser::makeLookAtCameraPrev calls setUp()
+immediately followed by normalizeUp() as two separate steps - it's
+decomp output tracking the actual SMO binary, so it can't be edited
+to match. Re-adding the wrapper keeps both builds green; no BotW
+caller depends on normalizeUp() being absent.
+```
+Revert "Restore LookAtCamera::normalizeUp() for SMO compat"
+…
+2d9f2e5
+```
+This reverts commit 136aa69.
+```
+Esras
+commented
+Aug 14, 2026
+Copy link
+Copy Markdown
+Author
+BotW builds, SMO doesn't, Narr had commented on the change for setUp:
+It will break compilation on SMO but I can PR the fix
+Esras
+changed the title
+RFC Projection try 2
+gfx, geom, and math: Projection, Camera, and Viewport functions (with bonus Matrix math and Segment/Ray)
+Aug 14, 2026
+Add back an empty LookAtCamera::normalizeUp() so SMO compiles.
+e0013cb
+Sign up for free
+to join this conversation on GitHub.
+Already have an account?
+Sign in to comment
+Uh oh!
+There was an error while loading. Please reload this page.
+Labels
+None yet
+4 participants
+Add this suggestion to a batch that can be applied as a single commit.This suggestion is invalid because no changes were made to the code.Suggestions cannot be applied while the pull request is closed.Suggestions cannot be applied while viewing a subset of changes.Only one suggestion per line can be applied in a batch.Add this suggestion to a batch that can be applied as a single commit.Applying suggestions on deleted lines is not supported.You must change the existing code in this line in order to create a valid suggestion.Outdated suggestions cannot be applied.This suggestion has been applied or marked resolved.Suggestions cannot be applied from pending reviews.Suggestions cannot be applied on multi-line comments.Suggestions cannot be applied while the pull request is queued to merge.Suggestion cannot be applied right now. Please check back later.
+You can’t perform that action at this time.

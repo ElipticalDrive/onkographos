@@ -1,0 +1,258 @@
+--- v001.md
++++ v002.md
+@@ -8,5 +8,5 @@
+ ## How it works
+ **Inputs and Outputs:**
+-*   **Inputs:** A set of posed LDR images (typically from a dataset), camera poses (recalibrated from NDC to world coordinates), and an optional user-defined exposure time $\Delta t$ for LDR reconstruction [S1].
++*   **Inputs:** A set of posed LDR images, camera poses (recalibrated from Normalized Device Coordinates to world coordinates), and an optional user-defined exposure time $\Delta t$ for LDR reconstruction [S1].
+ *   **Outputs:** A rendered HDR image and a rendered LDR image corresponding to the input camera pose [S1].
+ 
+@@ -25,5 +25,5 @@
+ where $R_i$ and $S_i$ are learnable parameters [S1].
+ 
+-The HDR color $c_{h,i}$ is view-dependent and modeled using Spherical Harmonics (SH). Let $k = \{k_{lm} \mid 0 \le l \le L, -l \le m \le l\} \in \mathbb{R}^{(L+1)^2 \times 3}$ be the SH coefficients, where each $k_{lm} \in \mathbb{R}^3$ corresponds to RGB components. For a view direction $d = (\theta, \phi)$, the HDR color is:
++The HDR color $c_{h,i}$ is view-dependent and modeled using Spherical Harmonics (SH) [S1]. Let $k = \{k_{lm} \mid 0 \le l \le L, -l \le m \le l\} \in \mathbb{R}^{(L+1)^2 \times 3}$ be the SH coefficients, where each $k_{lm} \in \mathbb{R}^3$ corresponds to RGB components [S1]. For a view direction $d = (\theta, \phi)$, the HDR color is:
+ $$ c_{h,i}(d, k) = \exp\left( \sum_{l=0}^{L} \sum_{m=-l}^{l} k_{lm} Y_{lm}(\theta, \phi) \right) $$
+ where $Y_{lm}: S^2 \to \mathbb{R}$ are the SH basis functions [S1].
+@@ -38,5 +38,5 @@
+     $$ c_l = (\log f_{TM}^{-1})^{-1}(\log c_h + \log \Delta t) $$
+     [S1].
+-3.  **MLP Tone-Mapper:** Three independent MLPs with global parameters $\theta$ model the function $(\log f_{TM}^{-1})^{-1}$ independently for each RGB channel [S1]. Define the mapping function $g_\theta(x) \triangleq (\log f_{TM}^{-1})^{-1}(x)$. The LDR color is computed as:
++3.  **MLP Tone-Mapper:** Three independent MLPs with global parameters $\theta$ model the function $(\log f_{TM}^{-1})^{-1}$ independently for each RGB channel [S1]. Define the mapping function $g_\theta(x) \triangleq (\log f_{TM}^{-1})^{-1}(x)$ [S1]. The LDR color is computed as:
+     $$ c_{l,i} = g_\theta(\log c_{h,i} + \log \Delta t) $$
+     [S1].
+@@ -44,132 +44,94 @@
+ 
+ **Pseudocode:**
+-
+ ```python
+ import numpy as np
+ 
+-def spherical_harmonics_eval(direction_theta, direction_phi, coefficients, degree):
+-    """
+-    Evaluates Spherical Harmonics for HDR color.
+-    direction_theta: float, polar angle
+-    direction_phi: float, azimuthal angle
+-    coefficients: list of (l, m, k_lm) tuples where k_lm is np.array([R, G, B])
+-    degree: int, L
+-    Returns: np.array([R, G, B])
+-    """
+-    color = np.zeros(3)
+-    for l in range(degree + 1):
+-        for m in range(-l, l + 1):
+-            # Get k_lm for this l, m
+-            k_lm = None
+-            for (ll, mm, k_val) in coefficients:
+-                if ll == l and mm == m:
+-                    k_lm = k_val
+-                    break
+-            if k_lm is None:
+-                continue
+-            
+-            # Evaluate Y_lm(theta, phi)
+-            # Note: Standard SH basis functions Y_lm are used here.
+-            # Implementation details of Y_lm depend on the specific SH library or formula.
+-            y_lm = evaluate_sh_basis(l, m, direction_theta, direction_phi)
+-            
+-            color += k_lm * y_lm
+-            
+-    # Apply exponential as per Eq. 7
+-    return np.exp(color)
++def project_3d_to_2d(mu_3d, camera_pose):
++    # Standard perspective projection [G]
++    mu_cam = camera_pose[:3, :3] @ mu_3d + camera_pose[:3, 3]
++    z = mu_cam[2]
++    if z <= 0:
++        return None, None
++    fx, fy = 1.0, 1.0  # Normalized focal lengths
++    x_2d = fx * mu_cam[0] / z
++    y_2d = fy * mu_cam[1] / z
++    return np.array([x_2d, y_2d]), z
+ 
+-def tone_mapper_log_inverse(log_hdr_color, exposure_time, mlp_r, mlp_g, mlp_b):
+-    """
+-    Computes LDR color from HDR color and exposure time using learned MLPs.
+-    log_hdr_color: np.array([log_R, log_G, log_B])
+-    exposure_time: float
+-    mlp_r, mlp_g, mlp_b: MLP functions for R, G, B channels
+-    Returns: np.array([R, G, B]) in LDR range
+-    """
+-    log_exposure = np.log(exposure_time)
+-    
+-    # Input to MLPs is log(c_h) + log(delta_t)
+-    input_r = log_hdr_color[0] + log_exposure
+-    input_g = log_hdr_color[1] + log_exposure
+-    input_b = log_hdr_color[2] + log_exposure
+-    
+-    # Apply MLPs
+-    out_r = mlp_r(input_r)
+-    out_g = mlp_g(input_g)
+-    out_b = mlp_b(input_b)
+-    
+-    return np.array([out_r, out_g, out_b])
++def project_covariance_2d(Sigma_3d, camera_pose, mu_3d):
++    # Standard 3D Gaussian splatting 2D covariance projection [G]
++    W = camera_pose[:3, :3]
++    mu_cam = W @ mu_3d + camera_pose[:3, 3]
++    Z = mu_cam[2]
++    if Z <= 0:
++        return None
++    J = np.zeros((3, 3))
++    J[0, 0] = 1.0 / Z
++    J[0, 2] = -mu_cam[0] / (Z * Z)
++    J[1, 1] = 1.0 / Z
++    J[1, 2] = -mu_cam[1] / (Z * Z)
++    T = J @ W
++    return T @ Sigma_3d @ T.T
+ 
+-def render_hdr_gaussians(gaussians, camera_pose, sh_coefficients, degree):
+-    """
+-    Renders HDR image using Parallel Differentiable Rasterization.
+-    gaussians: list of Gaussian objects with attributes mu, Sigma, alpha, sh_coefficients
+-    camera_pose: Camera transformation matrix
+-    sh_coefficients: Global SH coefficients for each Gaussian
+-    degree: SH degree L
+-    Returns: HDR Image tensor
+-    """
+-    # 1. Project Gaussians to 2D
+-    projected_gaussians = []
++def direction_to_spherical(d):
++    # Convert 3D direction vector to spherical coordinates [G]
++    norm_d = np.linalg.norm(d)
++    if norm_d == 0:
++        return 0.0, 0.0
++    theta = np.arccos(np.clip(d[2] / norm_d, -1.0, 1.0))
++    phi = np.arctan2(d[1], d[0])
++    return theta, phi
++
++def evaluate_sh_basis(l, m, theta, phi):
++    # Standard spherical harmonic basis evaluation [G]
++    # Returns Y_lm(theta, phi)
++    return 0.0  # Placeholder for standard SH library/math
++
++def render_hdr_ldr(gaussians, camera_pose, exposure_time, mlp_r, mlp_g, mlp_b, sh_coeffs, degree):
++    img_h, img_w = 400, 400
++    hdr_img = np.zeros((img_h, img_w, 3))
++    ldr_img = np.zeros((img_h, img_w, 3))
++    alpha_img = np.zeros((img_h, img_w))
++
+     for g in gaussians:
+-        # Project center mu to camera space
+-        mu_cam = transform_point(g.mu, camera_pose)
+-        
+-        # Project covariance Sigma
+-        # J is Jacobian of projection, W is view transform
+-        # Sigma_2D = J W Sigma W^T J^T
+-        # (Implementation of 2D projection of 3D Gaussian)
+-        sigma_2d = project_covariance(g.Sigma, camera_pose)
+-        
+-        projected_gaussians.append({
+-            'mu_2d': project_2d(g.mu, camera_pose),
+-            'sigma_2d': sigma_2d,
+-            'alpha': g.alpha,
+-            'sh_coeffs': g.sh_coefficients
+-        })
+-        
+-    # 2. Rasterize
+-    # Sort by depth, iterate over pixels, accumulate splats
+-    # For each pixel, compute view direction d
+-    # Compute HDR color c_h using SH
+-    # Accumulate color weighted by alpha and Gaussian PDF
+-    pass
++        mu_2d, z = project_3d_to_2d(g['mu'], camera_pose)
++        if mu_2d is None: continue
++        sigma_2d = project_covariance_2d(g['Sigma'], camera_pose, g['mu'])
++        if sigma_2d is None: continue
+ 
+-def render_ldr_gaussians(gaussians, camera_pose, exposure_time, mlp_r, mlp_g, mlp_b):
+-    """
+-    Renders LDR image using Parallel Differentiable Rasterization.
+-    gaussians: list of Gaussian objects
+-    camera_pose: Camera transformation matrix
+-    exposure_time: float
+-    mlp_r, mlp_g, mlp_b: Tone-mapping MLPs
+-    Returns: LDR Image tensor
+-    """
+-    # 1. Project Gaussians to 2D (Same as HDR)
+-    projected_gaussians = []
+-    for g in gaussians:
+-        mu_cam = transform_point(g.mu, camera_pose)
+-        sigma_2d = project_covariance(g.Sigma, camera_pose)
+-        
+-        # Compute HDR color c_h first (needed for tone mapping)
+-        # View direction d from camera to mu_cam
+-        d = normalize(mu_cam - camera_origin)
+-        theta, phi = spherical_coords(d)
+-        
+-        c_h = spherical_harmonics_eval(theta, phi, g.sh_coefficients, g.degree)
+-        
+-        # Compute LDR color c_l using tone mapper
+-        log_c_h = np.log(c_h + 1e-8) # Avoid log(0)
+-        c_l = tone_mapper_log_inverse(log_c_h, exposure_time, mlp_r, mlp_g, mlp_b)
+-        
+-        projected_gaussians.append({
+-            'mu_2d': project_2d(g.mu, camera_pose),
+-            'sigma_2d': sigma_2d,
+-            'alpha': g.alpha,
+-            'color': c_l
+-        })
+-        
+-    # 2. Rasterize LDR colors
+-    # Accumulate LDR color weighted by alpha and Gaussian PDF
+-    pass
++        # Compute view direction for SH evaluation
++        cam_origin = np.array([0.0, 0.0, 0.0])
++        d = g['mu'] - cam_origin
++        theta, phi = direction_to_spherical(d)
++
++        # Evaluate HDR color using SH
++        sh_sum = np.zeros(3)
++        for l in range(degree + 1):
++            for m in range(-l, l + 1):
++                k_lm = sh_coeffs.get((l, m), np.zeros(3))
++                y_lm = evaluate_sh_basis(l, m, theta, phi)
++                sh_sum += k_lm * y_lm
++        c_h = np.exp(sh_sum)
++
++        # Compute LDR color using tone mapper: c_l = g_theta(log(c_h) + log(dt))
++        log_c_h = np.log(c_h + 1e-8)
++        log_dt = np.log(exposure_time)
++        c_l = np.array([
++            mlp_r(log_c_h[0] + log_dt),
++            mlp_g(log_c_h[1] + log_dt),
++            mlp_b(log_c_h[2] + log_dt)
++        ])
++
++        # Rasterize accumulation (simplified bounding box)
++        px, py = int(mu_2d[0]), int(mu_2d[1])
++        if 0 <= px < img_w and 0 <= py < img_h:
++            alpha = g['alpha']
++            hdr_img[py, px] += alpha * c_h
++            ldr_img[py, px] += alpha * c_l
++            alpha_img[py, px] += alpha
++
++    alpha_img = np.maximum(alpha_img, 1e-8)
++    hdr_img /= alpha_img[:, :, np.newaxis]
++    ldr_img /= alpha_img[:, :, np.newaxis]
++    return hdr_img, ldr_img
+ ```
+ 
+@@ -182,17 +144,6 @@
+ **Edge Cases and Pitfalls:**
+ *   **Vanishing Gradients/Overflow:** Directly modeling the tone-mapping function $f_{TM}(\cdot)$ in the linear domain can cause vanishing gradients and numerical overflow/underflow due to multiplication operations [S1]. The logarithmic transformation is required to mitigate this [S1].
+-*   **NDC Coordinates:** Existing datasets often provide camera poses in Normalized Device Coordinates (NDC), which are not suitable for 3DGS-based methods. Recalibration to world coordinates is necessary [S1].
++*   **NDC Coordinates:** Existing datasets often provide camera poses in Normalized Device Coordinates (NDC), which are not suitable for 3DGS-based methods [S1]. Recalibration to world coordinates is necessary [S1].
+ *   **RGB Channel Independence:** The tone-mapping function is modeled by three independent MLPs for RGB channels because RGB colors are tone-mapped by different Camera Response Functions (CRFs) [S1].
+-
+-## Subtopics
+-
+-### Dual Dynamic Range (DDR) Model
+-A Gaussian point cloud model that stores both HDR and LDR color attributes, enabling simultaneous rendering of both dynamic ranges [S1].
+-
+-### Parallel Differentiable Rasterization (PDR)
+-A rendering technique that processes HDR and LDR colors through separate rasterization pipelines in parallel [S1].
+-
+-### Logarithmic Tone-Mapping
+-A method to stabilize MLP training for tone-mapping by operating in the logarithmic domain to avoid numerical issues [S1].
+ 
+ ## Operating characteristics

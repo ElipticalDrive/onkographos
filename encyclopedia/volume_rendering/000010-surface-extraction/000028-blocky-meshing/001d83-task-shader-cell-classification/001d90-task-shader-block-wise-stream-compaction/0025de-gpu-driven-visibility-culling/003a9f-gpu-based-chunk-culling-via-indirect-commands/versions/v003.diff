@@ -1,0 +1,263 @@
+--- v002.md
++++ v003.md
+@@ -1,137 +1,151 @@
+ # GPU-Based Chunk Culling via Indirect Commands
+ 
+-Also called: Compute Shader Culling, Indirect Draw Culling
++Also called: Compute Shader Culling, Compute Shader Frustum Culling with Indirect Draw, Frustum culling in compute shader, GPU frustum culling, GPU-side Frustum Culling, Indirect Draw Culling, Indirect Rendering Culling
+ 
+ ## Overview
+-A rendering optimization that uses a compute shader to filter visible chunks and generates indirect draw arguments on the GPU, reducing CPU-GPU synchronization overhead [S1, unofficial].
++A rendering optimization that uses a compute shader to filter visible chunks and generates indirect draw arguments on the GPU, reducing CPU-GPU synchronization overhead [S1, S2, unofficial]. It differs from CPU-side culling by moving the visibility test and command buffer population entirely to the GPU, and from general GPU-driven visibility culling by specifically targeting chunk-based mesh data and using atomic counters to compact the output command list [S1, S2, unofficial].
+ 
+ ## How it works
+ **Inputs and Outputs:**
+-*   **Input:** A list of loaded chunks and their associated render resources [S1, unofficial].
+-*   **Output:** An indirect command buffer containing `D3D12_DRAW_INDEXED_ARGUMENTS` for only the visible chunks, ready for `ExecuteIndirect` [S1, unofficial].
++*   **Input:** A list of chunk mesh data (bounding boxes, geometry references) and camera frustum parameters (position, plane normals/distances).
++*   **Output:** An indirect draw command buffer containing draw calls only for visible chunks.
+ 
+ **Data Structures:**
+-1.  **`IndirectCommand`**: The structure written by the compute shader to the output buffer [S1, unofficial]. It contains:
+-    *   `render_resources`: A struct of type `VoxelRenderResources` containing `scene_constant_buffer_index` and `chunk_constant_buffer_index` [S1, unofficial].
+-    *   `index_buffer_view`: A `D3D12_INDEX_BUFFER_VIEW` describing the index buffer for the chunk mesh [S1, unofficial].
+-    *   `draw_arguments`: A `D3D12_DRAW_INDEXED_ARGUMENTS` struct containing `IndexCountPerInstance`, `InstanceCount`, `StartIndexLocation`, `BaseVertexLocation`, and `StartInstanceLocation` [S1, unofficial].
+-2.  **`GPUCullRenderResources`**: Struct passed to the compute shader via root constants (64 bits / 16 32-bit values) [S1, unofficial]. It contains:
+-    *   `number_of_chunks`: `u32`, the total number of chunks to process [S1, unofficial].
+-    *   `indirect_command_srv_index`: `u32`, descriptor heap index for the input command buffer (SRV) [S1, unofficial].
+-    *   `output_command_uav_index`: `u32`, descriptor heap index for the output command buffer (UAV) [S1, unofficial].
+-    *   `scene_constant_buffer_index`: `u32`, descriptor heap index for the scene constant buffer (CBV) [S1, unofficial].
++
++1.  **IndirectCommand** (CPU-side preparation, D3D12 style) [S1, unofficial]:
++    *   `render_resources`: Struct containing `scene_constant_buffer_index` and `chunk_constant_buffer_index`.
++    *   `index_buffer_view`: `D3D12_INDEX_BUFFER_VIEW`.
++    *   `draw_arguments`: `D3D12_DRAW_INDEXED_ARGUMENTS` struct with fields:
++        *   `IndexCountPerInstance` (uint)
++        *   `InstanceCount` (uint)
++        *   `StartIndexLocation` (uint)
++        *   `BaseVertexLocation` (int)
++        *   `StartInstanceLocation` (uint)
++
++2.  **MeshData** (GPU-side input, GLSL std430) [S2, unofficial]:
++    *   `center`: `vec3` (mesh center position).
++    *   `data1`: `uint` (packed: bits 0-2 are `normalID`, bits 3-31 are `squaresCount`).
++    *   `size`: `vec3` (bounding box half-extents or size).
++    *   `data2`: `uint` (packed: `startSquare` offset).
++
++3.  **GPUCullRenderResources** (CPU-side constants, D3D12 style) [S1, unofficial]:
++    *   `number_of_chunks`: `u32`.
++    *   `indirect_command_srv_index`: `u32`.
++    *   `output_command_uav_index`: `u32`.
++    *   `scene_constant_buffer_index`: `u32`.
++
++4.  **IndirectDrawArgs** (GPU-side output, GLSL std430) [S2, unofficial]:
++    *   `count`: `uint`.
++    *   `instanceCount`: `uint`.
++    *   `first`: `uint`.
++    *   `baseInstance`: `uint`.
++
++5.  **Uniforms** (Camera data) [S2, unofficial]:
++    *   `position`: `vec3`.
++    *   `farPlane`, `leftPlane`, `rightPlane`, `upPlane`, `downPlane`: `vec4` (xyz = plane normal, w = distance).
+ 
+ **Numbered Steps:**
+-1.  Build indirect command vector on CPU by iterating loaded chunks and populating `IndirectCommand` structs [S1, unofficial].
+-2.  Transition indirect command buffer to `COPY_DEST` state and copy CPU data via `memcpy` to the mapped upload resource pointer [S1, unofficial].
+-3.  Set compute root constants (64 bits) with the `GPUCullRenderResources` struct [S1, unofficial].
+-4.  Reset UAV counter by copying a zeroed 4-byte value from a dedicated counter buffer to the output buffer's counter offset [S1, unofficial].
+-5.  Transition buffer to `UNORDERED_ACCESS` state and dispatch compute shader [S1, unofficial].
+-6.  Transition buffer to `INDIRECT_ARGUMENT` state and execute indirect draw [S1, unofficial].
+ 
+-**Pseudocode:**
++1.  **CPU Preparation:**
++    *   Iterate through loaded chunks and populate a vector of `IndirectCommand` structs [S1, unofficial].
++    *   Set root constants (D3D12) or uniforms (OpenGL) with `GPUCullRenderResources` and camera frustum planes [S1, S2, unofficial].
++    *   Copy CPU data to the indirect command buffer's upload resource [S1, unofficial].
++
++2.  **GPU Culling Dispatch:**
++    *   Reset the UAV counter buffer to zero [S1, unofficial].
++    *   Transition the indirect command buffer state: `COPY_DEST` -> `UNORDERED_ACCESS` [S1, unofficial].
++    *   Dispatch the compute shader. Workgroup count is `ceil(meshData.size() / threadGroupSize)` [S2, unofficial]. One workgroup per mesh is typical [S2, unofficial].
++
++3.  **Compute Shader Execution:**
++    *   Read `MeshData` from the readonly buffer [S2, unofficial].
++    *   Reconstruct the normal vector from `data1`:
++        *   `normalID = data1 & 7u` (mask 3 bits) [S2, unofficial].
++        *   Axis index: `normalID >> 1`.
++        *   Sign: `normalID & 1u`.
++        *   Normal vector: `axis * (-2 * float(normalID & 1u) + 1)` [S2, unofficial].
++    *   Test visibility against the camera frustum [S2, unofficial]:
++        *   Check if the mesh is behind the camera relative to its normal: `dot(center - normal * size - position, normal) > 0`. If true, discard [S2, unofficial].
++        *   Check if the bounding box is outside any frustum plane (far, left, right, up, down) using `outsidePlane` [S2, unofficial].
++    *   If visible:
++        *   Atomically increment the command counter [S2, unofficial].
++        *   Write the `IndirectDrawArgs` (or equivalent draw arguments) to the output buffer at the returned index [S2, unofficial].
++
++4.  **Execution:**
++    *   Transition the indirect command buffer state: `UNORDERED_ACCESS` -> `INDIRECT_ARGUMENT` [S1, unofficial].
++    *   Issue a memory barrier for indirect commands [S2, unofficial].
++    *   Execute indirect draw using the counter offset to determine the number of commands [S1, unofficial].
++
++**Pseudocode (Compute Shader Logic):**
++
+ ```python
+-# Self-contained definitions to replace engine-specific handles
+-D3D_PRIMITIVE_TOPOLOGY_TRIANGLELIST = 0
+-MAX_CHUNKS_TO_BE_DRAWN = 1024  # Parameterized maximum per frame
++# Pseudocode for the compute shader kernel
++# Inputs: meshDataBuffer (readonly), commandsBuffer (writeonly), commandsCount (atomic), 
++#         frustumPosition, farPlane, leftPlane, rightPlane, upPlane, downPlane
+ 
+-class CommandList:
+-    def set_descriptor_heaps(self, heaps): pass
+-    def set_compute_root_signature(self, sig): pass
+-    def set_pipeline_state(self, pso): pass
+-    def set_compute_root_constants(self, root_index, num_words, data): pass
+-    def copy_buffer_region(self, dst, dst_offset, src, src_offset, size): pass
+-    def dispatch(self, x, y, z): pass
+-    def set_graphics_root_signature(self, sig): pass
+-    def ia_set_primitive_topology(self, topo): pass
+-    def execute_indirect(self, signature, max_commands, cmd_buf, cmd_offset, arg_buf, arg_offset): pass
++kernel void cull_meshes(uint3 mesh_id) {
++    uint index = mesh_id.x;
++    MeshData mesh = meshDataBuffer[index];
++    
++    // Reconstruct normal
++    uint normalID = mesh.data1 & 7u;
++    uint axisIdx = normalID >> 1;
++    int sign = -2 * int(normalID & 1u) + 1;
++    vec3 normal = vec3(0.0);
++    if (axisIdx == 0) normal.x = float(sign);
++    else if (axisIdx == 1) normal.y = float(sign);
++    else normal.z = float(sign);
++    
++    // Check if facing away from camera
++    vec3 centerToPos = mesh.center - frustumPosition;
++    if (dot(centerToPos, normal) > dot(mesh.size, normal)) { // Simplified backface check based on source [S2, unofficial]
++        return;
++    }
++    
++    // Frustum culling
++    if (outsidePlane(mesh.center, mesh.size, farPlane)) return;
++    if (outsidePlane(mesh.center, mesh.size, leftPlane)) return;
++    if (outsidePlane(mesh.center, mesh.size, rightPlane)) return;
++    if (outsidePlane(mesh.center, mesh.size, upPlane)) return;
++    if (outsidePlane(mesh.center, mesh.size, downPlane)) return;
++    
++    // Write command
++    uint cmdIndex = atomicAdd(commandsCount, 1u);
++    commandsBuffer[cmdIndex] = IndirectDrawArgs(
++        mesh.data1 & 0x1FFFFFFFu, // squaresCount as count
++        1u,
++        mesh.data2,               // startSquare as first
++        0u
++    );
++}
+ 
+-class IndirectCommandBuffer:
+-    def __init__(self):
+-        self.upload_resource_mapped_ptr = bytearray()
+-        self.upload_resource_srv_index = 0
+-        self.default_resource_uav_index = 1
+-        self.default_resource = "default_resource_handle"
+-        self.zeroed_counter_buffer_resource = "zeroed_counter_handle"
+-        self.counter_offset = 0
+-
+-class SceneBuffer:
+-    def __init__(self):
+-        self.cbv_index = 2
+-
+-class Renderer:
+-    def __init__(self):
+-        self.m_bindless_root_signature = "bindless_sig_handle"
+-
+-def gpu_based_chunk_culling(indirect_command_vector, renderer, command_list, indirect_command_buffer, scene_buffer):
+-    # 1. Upload Data (CPU)
+-    # Transition upload resource to COPY_DEST state
+-    # Copy CPU data to mapped upload resource
+-    indirect_command_buffer.upload_resource_mapped_ptr = bytes(indirect_command_vector)
+-
+-    # 2. Setup Compute Shader (CPU)
+-    command_list.set_descriptor_heaps(["shader_visible_descriptor_heaps"])
+-    command_list.set_compute_root_signature(renderer.m_bindless_root_signature)
+-    command_list.set_pipeline_state("gpu_culling_pso")
+-
+-    gpu_cull_render_resources = {
+-        'number_of_chunks': len(indirect_command_vector),
+-        'indirect_command_srv_index': indirect_command_buffer.upload_resource_srv_index,
+-        'output_command_uav_index': indirect_command_buffer.default_resource_uav_index,
+-        'scene_constant_buffer_index': scene_buffer.cbv_index
+-    }
+-    command_list.set_compute_root_constants(0, 64, gpu_cull_render_resources)
+-
+-    # 3. Reset Counter (CPU)
+-    command_list.copy_buffer_region(
+-        dst=indirect_command_buffer.default_resource,
+-        dst_offset=indirect_command_buffer.counter_offset,
+-        src=indirect_command_buffer.zeroed_counter_buffer_resource,
+-        src_offset=0,
+-        size=4
+-    )
+-
+-    # 4. Dispatch Compute Shader (CPU/GPU)
+-    # Transition default_resource from COPY_DEST to UNORDERED_ACCESS
+-    command_list.dispatch(
+-        num_threads_x=(len(indirect_command_vector) + 31) // 32,
+-        num_threads_y=1,
+-        num_threads_z=1
+-    )
+-
+-    # 5. Execute Indirect Draw (CPU/GPU)
+-    # Transition default_resource from UNORDERED_ACCESS to INDIRECT_ARGUMENT
+-    command_list.set_descriptor_heaps(["shader_visible_descriptor_heaps"])
+-    command_list.set_graphics_root_signature(renderer.m_bindless_root_signature)
+-    command_list.set_pipeline_state("render_pso")
+-    command_list.ia_set_primitive_topology(D3D_PRIMITIVE_TOPOLOGY_TRIANGLELIST)
+-
+-    command_list.execute_indirect(
+-        command_signature="command_signature_handle",
+-        max_command_count=MAX_CHUNKS_TO_BE_DRAWN,
+-        p_indirect_command_buffer=indirect_command_buffer.default_resource,
+-        indirect_command_buffer_offset=0,
+-        p_indirect_argument_buffer=indirect_command_buffer.default_resource,
+-        indirect_argument_buffer_offset=indirect_command_buffer.counter_offset
+-    )
++bool outsidePlane(vec3 center, vec3 size, vec4 plane) {
++    vec3 normalSign = sign(plane.xyz);
++    vec3 closestPoint = center + size * normalSign;
++    return dot(closestPoint, plane.xyz) + plane.w < 0.0;
++}
+ ```
+-
+-**Compute Shader Logic:**
+-The compute shader processes each chunk index and performs visibility testing against scene data [G]. Visible chunks append their `IndirectCommand` to the UAV output buffer using an atomic counter increment [G].
+ 
+ **Parameters:**
+ *   `MAX_CHUNKS_TO_BE_DRAWN`: Maximum number of indirect draw calls per frame. Used as the second argument to `ExecuteIndirect` [S1, unofficial].
++*   `threadGroupSize`: Typically 32 or 64, depending on hardware and implementation [S2, unofficial].
+ 
+ **Edge Cases and Pitfalls:**
+-*   **Resource State Transitions:** Must strictly follow D3D12 rules: `INDIRECT_ARGUMENT` -> `COPY_DEST` -> `UNORDERED_ACCESS` -> `INDIRECT_ARGUMENT`. Missing transitions cause validation errors or undefined behavior [S1, unofficial].
+-*   **Counter Reset:** The UAV counter must be reset before each dispatch to ensure correct indexing in the output buffer [S1, unofficial].
+-*   **Thread Group Size:** The dispatch size is calculated based on 32 threads per group. The thread count uses ceiling division `(N + 31) // 32` to handle non-multiples of 32 correctly [S1, unofficial].
++*   **Resource State Transitions:** Must strictly follow API rules (e.g., D3D12: `INDIRECT_ARGUMENT` -> `COPY_DEST` -> `UNORDERED_ACCESS` -> `INDIRECT_ARGUMENT`). Missing transitions cause validation errors or undefined behavior [S1, unofficial].
++*   **Normal Reconstruction:** Assumes `normalID >> 1` maps to axis index (0=x, 1=y, 2=z) and `normalID & 1` maps to sign [S2, unofficial].
++*   **Backface Culling:** The logic `dot(center - normal * size - position, normal) > 0` ignores meshes whose normal points away from the camera position relative to the mesh center [S2, unofficial].
+ 
+ ## Operating characteristics
+-Not given in the sources.
++*   **Time Complexity:** O(N) for culling, where N is the number of chunks. The compute shader dispatch is parallelized.
++*   **Memory Complexity:** O(N) for storing the indirect command buffer and mesh data.
++*   **Performance:** Reduces CPU-GPU synchronization overhead by eliminating CPU-side frustum culling and command buffer population [S1, S2, unofficial].
++*   **Strengths:** Efficient for large scenes with many chunks; minimal CPU intervention [S1, S2, unofficial].
++*   **Limitations:** Requires GPU support for indirect drawing and compute shaders; overhead of buffer management and state transitions [S1, unofficial].
++*   **When to use:** Large voxel terrains or chunk-based scenes where culling is a bottleneck [S1, S2, unofficial].
++*   **When not to use:** Small scenes where CPU culling is sufficient; hardware without indirect draw support.
+ 
+ ## Background
+-Not given in the sources.
++Originating from implementations in voxel engines and terrain renderers, this technique leverages modern GPU capabilities (compute shaders, indirect drawing) to optimize rendering [S1, S2, unofficial]. It is commonly used in real-time voxel rendering applications [S1, S2, unofficial].
+ 
+ ## Sources
+-[S1] rtarun9/voxel-engine, https://github.com/rtarun9/voxel-engine, fetched 2026-10-27 (unofficial)+[S1] rtarun9/voxel-engine, https://github.com/rtarun9/voxel-engine, fetched 2026-10-27 (unofficial)
++[S2] Gamengineer314/GLVoxelTerrain, https://github.com/Gamengineer314/GLVoxelTerrain, fetched 2026-10-27 (unofficial)

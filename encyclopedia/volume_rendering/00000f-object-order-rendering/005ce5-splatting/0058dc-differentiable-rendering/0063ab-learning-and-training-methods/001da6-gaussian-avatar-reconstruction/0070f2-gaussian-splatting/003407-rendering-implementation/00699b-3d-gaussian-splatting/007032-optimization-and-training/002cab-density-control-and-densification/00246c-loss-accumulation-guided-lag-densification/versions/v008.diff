@@ -1,0 +1,179 @@
+--- v007.md
++++ v008.md
+@@ -7,20 +7,20 @@
+ 
+ ## How it works
+-LAG operates as a constraint on the densification steps defined in [Density Control and Densification](5337-density-control-and-densification.md). It does not replace the gradient-based classification but adds a loss-based gate.
++LAG operates as a constraint on the densification steps defined in [Density Control and Densification](5337-density-control-and-densification.md) [S1, unofficial]. It does not replace the gradient-based classification but adds a loss-based gate [S1, unofficial].
+ 
+ **Inputs and Outputs:**
+-*   **Input:** The joint reconstruction loss map from the current backward pass (averaged across RGB channels), the set of Gaussians $\{G_i\}$, and the accumulated loss mask history.
+-*   **Output:** A binary decision (allow/deny) for each candidate Gaussian for splitting or cloning.
++*   **Input:** The joint reconstruction loss map from the current backward pass (averaged across RGB channels), the set of Gaussians $\{G_i\}$, and the accumulated loss mask history [S1, unofficial].
++*   **Output:** A binary decision (allow/deny) for each candidate Gaussian for splitting or cloning [S1, unofficial].
+ 
+ **Data Structures:**
+-*   **Loss Map ($L_m$):** A single-channel float32 image of resolution $W \times H$, where $L_m(P)$ is the mean reconstruction loss at pixel $P$.
+-*   **Binary Mask ($M$):** A single-channel uint8 image of resolution $W \times H$, where $M(P) \in \{0, 1\}$.
+-*   **Densification Score Buffer ($DS$):** A float32 array of size $N$ (number of Gaussians), initialized to 0.0.
++*   **Loss Map ($L_m$):** A single-channel float32 image of resolution $W \times H$, where $L_m(P)$ is the mean reconstruction loss at pixel $P$ [S1, unofficial].
++*   **Binary Mask ($M$):** A single-channel uint8 image of resolution $W \times H$, where $M(P) \in \{0, 1\}$ [S1, unofficial].
++*   **Densification Score Buffer ($DS$):** A float32 array of size $N$ (number of Gaussians), initialized to 0.0 [S1, unofficial].
+ 
+ **Parameters:**
+-*   $\tau$: Loss threshold to distinguish well-reconstructed from under-reconstructed pixels. Not given in the sources.
+-*   $K$: Number of iterations over which the mask is accumulated and the score is averaged. Not given in the sources.
+-*   $\theta$: Size threshold for distinguishing small/large Gaussians (from parent).
+-*   $\tau_{grad}$: Gradient threshold for densification consideration (from parent).
++*   $\tau$: Loss threshold to distinguish well-reconstructed from under-reconstructed pixels. Not given in the sources. [S1, unofficial]
++*   $K$: Number of iterations over which the mask is accumulated and the score is averaged. Not given in the sources. [S1, unofficial]
++*   $\theta$: Size threshold for distinguishing small/large Gaussians (from parent). [3034-adaptive-densification.md, 1488-ots-satn-densification.md]
++*   $\tau_{grad}$: Gradient threshold for densification consideration (from parent). [3034-adaptive-densification.md, 1488-ots-satn-densification.md]
+ 
+ **Numbered Steps:**
+@@ -49,17 +49,17 @@
+ 
+ ```python
+-def lag_densification_check(gaussian, current_iteration, loss_map, mask_history, ds_buffer, tau, k, tau_grad, size_threshold):
++def lag_densification_check(gaussian_id, covered_pixel_indices, current_mask, mask_history, ds_buffer, k, tau_grad, accumulated_gradient, size_threshold):
+     """
+     Determines if a Gaussian should be densified based on LAG criteria.
+     
+     Args:
+-        gaussian: Object with attributes: position, scale, rotation, opacity, accumulated_gradient.
+-        current_iteration: Integer, current training iteration index.
+-        loss_map: 2D array (H, W), float32, mean reconstruction loss per pixel.
+-        mask_history: List of 2D arrays (H, W), uint8, stored masks from previous K-1 iterations.
++        gaussian_id: Integer index of the Gaussian.
++        covered_pixel_indices: List of integer indices (flattened or 2D) of pixels covered by the Gaussian in the current iteration.
++        current_mask: 2D array (H, W), uint8, binary mask for the current iteration.
++        mask_history: List of 2D arrays (H, W), uint8, stored masks from previous iterations.
+         ds_buffer: 1D array, float32, accumulated DS values for all Gaussians.
+-        tau: Float, loss threshold for binary mask.
+         k: Integer, number of iterations for averaging.
+         tau_grad: Float, gradient threshold.
++        accumulated_gradient: Float, accumulated view-space positional gradient magnitude for this Gaussian.
+         size_threshold: Float, size threshold for splitting/cloning decision.
+         
+@@ -67,11 +67,5 @@
+         bool: True if densification (split/clone) is allowed, False otherwise.
+     """
+-    
+-    # Step 1 & 2: Compute Binary Mask for current iteration
+-    # M(P) = 1 if Lm(P) > tau else 0
+-    current_mask = (loss_map > tau).astype(np.uint8)
+-    
+     # Step 3: Accumulate Mask
+-    # Maintain a rolling window of K masks
+     mask_history.append(current_mask)
+     if len(mask_history) > k:
+@@ -80,72 +74,42 @@
+     # Step 4: Compute Densification Score (DS)
+     # DS = (1/K) * sum_{t=1 to K} sum_{P in Omega_t} M_t(P)
+-    
+-    # Get pixels covered by this Gaussian in the current iteration
+-    # Note: In implementation, Omega_t is typically computed during rasterization.
+-    # Here we assume a function get_covered_pixels exists which returns indices of pixels covered by the Gaussian.
+-    covered_pixels = get_covered_pixels(gaussian)
+-    
+-    # Calculate sum of mask values for covered pixels over the history
+-    total_high_loss_coverage = 0
++    total_high_loss = 0
+     for t_mask in mask_history:
+-        # Sum mask values for the covered pixels
+-        # t_mask is 2D, covered_pixels are indices. 
+-        # Assuming covered_pixels are flattened indices or (y, x) tuples.
+-        # For simplicity, assuming we can index directly.
+-        for p in covered_pixels:
+-            total_high_loss_coverage += t_mask[p]
++        for idx in covered_pixel_indices:
++            total_high_loss += t_mask[idx]
+             
+-    # Average over K iterations
+-    # If history is not yet full (warm-up), average over len(mask_history)
+     iterations_count = len(mask_history)
+-    ds = total_high_loss_coverage / iterations_count
+-    
+-    # Store DS if needed for logging or further processing
+-    # ds_buffer[gaussian.id] = ds 
++    ds = total_high_loss / iterations_count
++    ds_buffer[gaussian_id] = ds
+     
+     # Step 5: Evaluate Criteria
++    # Gradient Condition
++    gradient_ok = accumulated_gradient > tau_grad
+     
+-    # Gradient Condition
+-    gradient_ok = gaussian.accumulated_gradient > tau_grad
+-    
+-    # Size Condition (from parent)
+-    # Determine if Gaussian is "Small" (clone candidate) or "Large" (split candidate)
+-    # This logic is from the parent article. LAG applies to both.
++    # Size Condition (from parent article)
+     is_small = gaussian.size < size_threshold
+     is_large = gaussian.size >= size_threshold
+-    
+     size_ok = is_small or is_large
+     
+     # Loss Condition
+-    # DS is "high" if it indicates under-reconstruction.
+-    # The source states: "A Gaussian with a low DS mainly covers well-reconstructed pixels... 
+-    # Conversely, Gaussians with a high DS are allowed to densify."
+-    # It does not specify a numeric threshold for DS. 
+-    # However, it implies DS must be sufficiently non-zero.
+-    # We mark this as a placeholder for the specific threshold if not given.
+-    # Since the source says "If DS is low, skip... if DS is high, allow", 
+-    # and no threshold is provided, we assume a threshold exists or DS > 0 is the minimal check.
+-    # Given the formula averages counts, DS=0 means no high-loss pixels ever covered.
+-    # We will use a placeholder comment for the threshold.
+-    ds_threshold = 0.0 # Placeholder: Specific threshold not given in sources [S1, unofficial]
+-    loss_ok = ds > ds_threshold
++    # DS must be high to indicate under-reconstruction.
++    # The source does not specify a numeric threshold for DS.
++    # ds_threshold = ...  # Placeholder: Specific threshold not given in sources [S1, unofficial]
++    loss_ok = ds > 0.0  # Minimal check: any high-loss coverage allows densification [G]
+     
+     # Dual-Constraint Mechanism
+-    if gradient_ok and size_ok and loss_ok:
+-        return True
+-    else:
+-        return False
++    return gradient_ok and size_ok and loss_ok
+ ```
+ 
+ **Edge Cases and Pitfalls:**
+-*   **Precision:** The loss map and mask accumulation must be precise enough to distinguish between well-reconstructed and under-reconstructed regions. Floating-point errors in loss computation could affect mask generation [S1, unofficial].
+-*   **Boundaries:** The mask $M(P)$ is defined per pixel. Gaussians covering few pixels may have noisy DS estimates. Accumulating over $K$ iterations mitigates this [S1, unofficial].
+-*   **Degenerate Input:** If $K$ is too small, the DS may not be stable. If $K$ is too large, the method may react slowly to changes in reconstruction quality [S1, unofficial].
+-*   **Threshold Selection:** The value of $\tau$ and the DS threshold are critical. Incorrect values may either suppress necessary densification or fail to prevent redundancy [S1, unofficial].
++*   **Precision:** The loss map and mask accumulation must be precise enough to distinguish between well-reconstructed and under-reconstructed regions [S1, unofficial].
++*   **Boundaries:** The mask $M(P)$ is defined per pixel [S1, unofficial]. Gaussians covering few pixels may have noisy DS estimates [S1, unofficial]. Accumulating over $K$ iterations mitigates this [S1, unofficial].
++*   **Degenerate Input:** If $K$ is too small, the DS may not be stable [S1, unofficial].
++*   **Threshold Selection:** The value of $\tau$ and the DS threshold are critical [S1, unofficial]. Incorrect values may either suppress necessary densification or fail to prevent redundancy [S1, unofficial].
+ 
+ ## Subtopics
+ 
+ ### Opacity-Gradient Pruning
+-A complementary strategy that removes Gaussians with low opacity or high opacity gradients after densification. It targets redundant primitives and works synergistically with LAG to further reduce Gaussian count [S1, unofficial]. See [Soft Pruning](5590-soft-pruning.md) for related pruning techniques.
++A complementary strategy that removes Gaussians with low opacity or high opacity gradients after densification [S1, unofficial]. It targets redundant primitives and works synergistically with LAG to further reduce Gaussian count [S1, unofficial]. See [Soft Pruning](5590-soft-pruning.md) for related pruning techniques [S1, unofficial].
+ 
+ ### CUDA Backward Optimization
+@@ -153,12 +117,12 @@
+ 
+ ## Operating characteristics
+-*   **Time Complexity:** The additional cost of LAG is the computation of the loss map and mask, which is done during the standard backward pass. The DS update requires summing mask values for covered pixels, which is proportional to the number of pixels covered by each Gaussian. This is generally low overhead compared to the rasterization and rendering steps [S1, unofficial].
+-*   **Memory Complexity:** Requires storing the loss map, mask history (K iterations), and DS buffer. Memory usage is $O(W \cdot H \cdot K + N)$, where $W, H$ are image dimensions, $K$ is the accumulation window, and $N$ is the number of Gaussians [S1, unofficial].
++*   **Time Complexity:** The additional cost of LAG is the computation of the loss map and mask, which is done during the standard backward pass [S1, unofficial]. The DS update requires summing mask values for covered pixels, which is proportional to the number of pixels covered by each Gaussian [S1, unofficial].
++*   **Memory Complexity:** Requires storing the loss map, mask history ($K$ iterations), and DS buffer [S1, unofficial]. Memory usage is $O(W \cdot H \cdot K + N)$, where $W, H$ are image dimensions, $K$ is the accumulation window, and $N$ is the number of Gaussians [S1, unofficial].
+ *   **Measured Performance:** On the Mip-NeRF 360 bicycle scene, LAG reduced the peak number of Gaussians from 947,136 to 547,083 and training time from unspecified to 190.0 seconds, with SSIM dropping from 0.751 to 0.734 and PSNR from 25.153 to 24.939 [S1, unofficial]. Across Mip-NeRF 360, LAG reduces NGS from 0.77M to 0.47M and training time from 245.7s to 215.4s compared to the Base configuration [S1, unofficial].
+-*   **Scaling:** LAG scales with the number of Gaussians and image resolution. The mask accumulation is independent of $N$, but the DS update depends on coverage.
++*   **Scaling:** LAG scales with the number of Gaussians and image resolution [S1, unofficial]. The mask accumulation is independent of $N$, but the DS update depends on coverage [S1, unofficial].
+ *   **Strengths:** Reduces redundant Gaussian growth, shortens training time, and produces more compact scene representations [S1, unofficial].
+-*   **Limitations:** Slight decrease in rendering metrics (SSIM/PSNR) due to suppressed densification in well-reconstructed areas [S1, unofficial]. Requires careful tuning of $\tau$ and $K$.
+-*   **When to Use:** When training time and memory are constrained, and a slight reduction in peak rendering quality is acceptable for a more compact model. Particularly effective when combined with pruning [S1, unofficial].
+-*   **When Not to Use:** When maximum possible rendering quality is required, or when the scene has dynamic regions where reconstruction quality changes rapidly and $K$ cannot adapt quickly enough.
++*   **Limitations:** Slight decrease in rendering metrics (SSIM/PSNR) due to suppressed densification in well-reconstructed areas [S1, unofficial]. Requires careful tuning of $\tau$ and $K$ [S1, unofficial].
++*   **When to Use:** When training time and memory are constrained, and a slight reduction in peak rendering quality is acceptable for a more compact model [S1, unofficial]. Particularly effective when combined with pruning [S1, unofficial].
++*   **When Not to Use:** When maximum possible rendering quality is required, or when the scene has dynamic regions where reconstruction quality changes rapidly and $K$ cannot adapt quickly enough [S1, unofficial].
+ 
+ ## Background

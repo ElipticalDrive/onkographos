@@ -1,0 +1,390 @@
+--- v008.md
++++ v009.md
+@@ -4,60 +4,64 @@
+ 
+ ## Overview
+-SDF Training with Eikonal Loss optimizes a neural network to predict a Signed Distance Function (SDF) from point cloud data by enforcing the Eikonal equation, which requires the gradient magnitude of the SDF to be unity everywhere [S3, S5, unofficial]. This method distinguishes itself from density-based volume rendering (like NeRF) by directly modeling the geometric distance field, ensuring topological consistency and smooth surface reconstruction [S1][S5, unofficial]. It serves as the foundational training procedure for implicit surface representations, upon which variants like [SDF-Instant-NGP Training](10640-sdf-instant-ngp-training.md) and [TetraSDF Training Procedure](13235-tetrasdf-training-procedure.md) build.
++SDF Training with Eikonal Loss is a method for reconstructing a 3D surface $S$ from a point cloud $\{p_i\}$ with normals $\{n_i\}$ by optimizing a neural implicit function $\Phi(x)$ to represent a Signed Distance Field (SDF) [S3]. It solves the problem of learning high-fidelity implicit neural representations directly from raw data without requiring 3D supervision (such as pre-computed occupancy grids) or explicit regularization on the zero level set [S6, unofficial]. Unlike sibling methods like [Batched SDF Inference](2329-batched-sdf-inference.md) which focuses on efficient evaluation, or [SDF Optimization via Finite Differences](3086-sdf-optimization-via-finite-differences.md) which approximates gradients numerically, this method enforces the Eikonal equation $|\nabla \Phi(x)| = 1$ via a differentiable regularization term, implicitly guiding the network to learn a valid distance field [S6, unofficial].
+ 
+ ## How it works
+-**Inputs:**
+-*   Point cloud data: Vertices $P = \{p_i\}$ and optionally normals $N = \{n_i\}$ [S2][S5, unofficial].
+-*   Training bounding box $\Omega$ defined by `cfg.training.bounds` [S3, S5, unofficial].
+-*   Hyperparameters: `batch_size`, `eikonal_weight`, `inter_weight`, `lr`, `lr_scheduler_gamma`, `lr_scheduler_step_size`, `pretrain_iters` [S3, S4, S5, unofficial].
+-
+-**Outputs:**
+-*   Optimized neural network parameters $\theta$ representing the SDF $\Phi_\theta(x)$ [S2][S3, unofficial].
++**Inputs and Outputs:**
++*   **Input:** A point cloud dataset $\{p_i\} \subset \mathbb{R}^3$ with associated normals $\{n_i\} \subset \mathbb{R}^3$ [S3]. Optionally, a bounding box $\Omega$ for sampling [S7, unofficial].
++*   **Output:** A trained Multi-Layer Perceptron (MLP) $\Phi(x; \theta)$ that outputs the signed distance to the surface for any input coordinate $x$ [S4, unofficial].
+ 
+ **Data Structures:**
+-*   `NeuralSurface`: A PyTorch module containing an MLP to predict distance for any input point [S3, unofficial].
+-*   `optimizer`: Adam optimizer initialized with learning rate `lr` [S3, S5, unofficial].
+-*   `lr_scheduler`: LambdaLR scheduler [S4, S5, unofficial].
+-
+-**Steps:**
+-
+-1.  **Preprocessing:** Load the point cloud vertices and center them by subtracting the mean:
+-    $$ P_{centered} = P - \text{mean}(P) $$
+-    [S3, S5, unofficial]
+-
+-2.  **Pretraining (Optional but Recommended):** Pretrain the network using a Sphere Loss on random points to initialize the implicit surface as a sphere [S4, S5, unofficial]. This provides a stable geometric prior [S1].
+-    *   Sample random points within the bounding box.
+-    *   Compute loss against the analytical SDF of a sphere with radius $R=1.0$ (or specified config).
+-    *   Run for `pretrain_iters` iterations [S5, unofficial].
+-
+-3.  **Main Training Loop:** For each epoch:
+-    a.  **Sample Point Cloud Points:** Select a batch of points $X_{pc}$ from the centered point cloud $P_{centered}$ [S3, S5, unofficial].
+-    b.  **Compute Point Cloud Loss:**
+-        *   Query the SDF network for distances: $D_{pc} = \Phi_\theta(X_{pc})$ [S3, S5, unofficial].
+-        *   Compute the L2 norm of distances (assuming signed distance should be zero at surface):
+-            $$ \mathcal{L}_{data} = \frac{1}{N_{pc}} \sum_{i=1}^{N_{pc}} \| D_{pc,i} \|_2 $$
+-            [S3, S5, unofficial]
+-        *   *Note:* If normals are available, the data loss can include a normal consistency term: $\lambda_3 |1 - \langle \nabla_x \Phi(x), n(x) \rangle|$ [S2].
+-
+-    c.  **Sample Eikonal Points:** Sample a batch of points $X_{eik}$ uniformly within the bounding box $\Omega$ [S3, S5, unofficial].
+-
+-    d.  **Compute Eikonal Loss Components:**
+-        *   Query distances and gradients: $(D_{eik}, G_{eik}) = (\Phi_\theta(X_{eik}), \nabla \Phi_\theta(X_{eik}))$ [S3, S5, unofficial].
+-        *   **Gradient Eikonal Loss:** Enforce unit gradient magnitude:
+-            $$ \mathcal{L}_{eik} = \frac{1}{N_{eik}} \sum_{i=1}^{N_{eik}} \left( \| G_{eik,i} \|_2 - 1 \right)^2 $$
+-            [S3, S5, unofficial]
+-        *   **Interior/Off-surface Regularization (Optional):** Penalize points inside the object or far from the surface to suppress spurious outliers [S1][S3, S5, unofficial].
+-            $$ \mathcal{L}_{inter} = \frac{1}{N_{eik}} \sum_{i=1}^{N_{eik}} \exp(-100 \cdot |D_{eik,i}|) $$
+-            [S3, S5, unofficial]
+-
+-    e.  **Total Loss:**
+-        $$ \mathcal{L}_{total} = \mathcal{L}_{data} + \lambda_{eik} \mathcal{L}_{eik} + \lambda_{inter} \mathcal{L}_{inter} $$
+-        Where $\lambda_{eik}$ is `cfg.training.eikonal_weight` and $\lambda_{inter}$ is `cfg.training.inter_weight` [S3, S5, unofficial].
+-
+-    f.  **Optimization Step:**
+-        *   Zero gradients: `optimizer.zero_grad()`
+-        *   Backpropagate: `loss.backward()`
+-        *   Step optimizer: `optimizer.step()`
+-        *   Update learning rate: `lr_scheduler.step()` [S3, S4, S5, unofficial].
++*   **MLP Architecture:** A feedforward neural network mapping $\mathbb{R}^3 \rightarrow \mathbb{R}$. Common configurations include depths $D \in \{4, 6, 8, 10, 15, 20\}$ and widths $W \in \{45, 60, 90\}$, maintaining constant total neurons (e.g., D6-W60 has 360 neurons) [S1, unofficial].
++*   **Point Cloud Buffer:** A tensor of shape $(N, 3)$ containing vertex coordinates, optionally normalized to $[-1, 1]^3$ [S1, S7, unofficial].
++*   **Optimizer State:** Parameters $\theta$ for the MLP, optimized using Adam [S7, unofficial].
++
++**Numbered Steps:**
++
++1.  **Data Preprocessing:** Load the point cloud vertices. Center the point cloud by subtracting the mean:
++    $$ p_{centered} = p - \text{mean}(p, \text{dim}=0) $$
++    [S7, unofficial]. Normalize the 3D space to a bounding box, typically $[-1, 1]^3$ [S1, unofficial].
++
++2.  **Pretraining (Optional but Recommended):** Initialize the network using a "Sphere Loss" to provide a stable geometric prior [S1, unofficial][S2].
++    *   Sample random points $x$ uniformly within the bounding box.
++    *   Compute the analytical SDF of a sphere with radius $R$: $d_{sphere}(x) = \|x\| - R$.
++    *   Minimize the Mean Squared Error (MSE): $\mathcal{L}_{sphere} = \frac{1}{N} \sum (\Phi(x) - d_{sphere}(x))^2$ [S1, unofficial][S2].
++    *   This phase runs for `pretrain_iters` iterations [S7, unofficial].
++
++3.  **Sampling:** For each optimization step, sample two sets of points:
++    *   **Surface Points:** Randomly select $N_s$ points from the input point cloud $\{p_i\}$ [S7, unofficial].
++    *   **Eikonal Points:** Randomly select $N_e$ points uniformly from the bounding box $\Omega$ [S7, unofficial].
++
++4.  **Forward Pass:**
++    *   Query the MLP for distances and gradients at surface points:
++        $$ d_i = \Phi(p_i), \quad g_i = \nabla_x \Phi(p_i) \big|_{x=p_i} $$
++        [S7, unofficial].
++    *   Query the MLP for distances and gradients at eikonal points:
++        $$ d_j = \Phi(x_j), \quad g_j = \nabla_x \Phi(x_j) \big|_{x=x_j} $$
++        [S7, unofficial].
++
++5.  **Loss Computation:** The total loss $\mathcal{L}$ is a weighted sum of terms [S3]:
++    $$ \mathcal{L} = \mathcal{L}_{data} + \lambda_1 \mathcal{L}_{eikonal} + \lambda_2 \mathcal{L}_{off} $$
++    [S3].
++
++    *   **Data Loss ($\mathcal{L}_{data}$):** Constrains the implicit function to match the point cloud and normals [S3].
++        $$ \mathcal{L}_{data} = \frac{1}{N_s} \sum_{i=1}^{N_s} \left( |\Phi(p_i)| + \lambda_3 |1 - \langle \nabla_x \Phi(p_i), n_i \rangle| \right) $$
++        [S3]. The first term forces the surface to pass through the points; the second aligns the gradient with the provided normal. If normals are unavailable, the second term is omitted [S6, unofficial].
++
++    *   **Eikonal Loss ($\mathcal{L}_{eikonal}$):** Enforces the unit gradient magnitude constraint $|\nabla \Phi(x)| = 1$ [S4, unofficial].
++        $$ \mathcal{L}_{eikonal} = \frac{1}{N_e} \sum_{j=1}^{N_e} \left( \|\nabla_x \Phi(x_j)\|_2 - 1 \right)^2 $$
++        [S7, unofficial]. Note: Some implementations use the L1 norm $|\|\nabla \Phi\|_2 - 1|$ [S4, unofficial].
++
++    *   **Interior/Off-Surface Loss ($\mathcal{L}_{off}$):** Encourages points off the surface to have non-zero values, specifically penalizing points inside the object to suppress spurious outliers [S3][S7, unofficial].
++        $$ \mathcal{L}_{off} = \frac{1}{N_e} \sum_{j=1}^{N_e} \exp(-\beta_0 |d_j|) $$
++        [S3]. Here $\beta_0 = 1$ [S3]. In some implementations, this is combined with the Eikonal term using an "inter-weight" [S7, unofficial]:
++        $$ \mathcal{L}_{interior} = \exp(-100 \cdot |d_j|) $$
++        [S7, unofficial].
++
++6.  **Optimization:**
++    *   Compute the total loss:
++        $$ \mathcal{L}_{total} = \mathcal{L}_{data} + \lambda_{eik} \mathcal{L}_{eikonal} + \lambda_{inter} \mathcal{L}_{interior} $$
++        [S7, unofficial].
++    *   Perform backpropagation: `optimizer.zero_grad()`, `loss.backward()`, `optimizer.step()` [S7, unofficial].
++    *   Use the Adam optimizer with a learning rate schedule (e.g., starting at $10^{-3}$, decaying by a factor of 10 every 20 epochs) [S1, S7, unofficial].
+ 
+ **Pseudocode:**
+@@ -69,53 +73,74 @@
+ def eikonal_loss(gradients: torch.Tensor) -> torch.Tensor:
+     """
+-    Computes the Eikonal loss enforcing unit gradient magnitude.
++    Computes the Eikonal loss: mean squared error of gradient norm from 1.
+     Args:
+-        gradients: Tensor of shape (N, 3) containing spatial gradients of the SDF.
++        gradients: Tensor of shape (N, 3) containing spatial gradients.
+     Returns:
+         Scalar loss value.
+     """
+     # Compute L2 norm of gradients along the last dimension
+-    grad_norms = torch.linalg.norm(gradients, dim=-1)
+-    # Mean absolute difference from 1.0 (or squared difference as per S5)
+-    # S3 uses abs, S5 uses squared. S5 is more common in modern implementations.
+-    loss = ((grad_norms - 1.0) ** 2).mean()
+-    return loss
+-
+-def train_sdf(model, optimizer, lr_scheduler, point_cloud, cfg):
+-    """
+-    Trains a neural SDF using Eikonal loss.
+-    """
+-    # 1. Preprocessing
+-    all_points = torch.Tensor(point_cloud["verts"]).cuda().view(-1, 3)
+-    all_points = all_points - torch.mean(all_points, dim=0).unsqueeze(0)
++    grad_norms = torch.norm(gradients, p=2, dim=1)
++    # Return mean squared difference from 1.0
++    return torch.mean((grad_norms - 1.0) ** 2)
++
++def train_sdf(model, optimizer, point_cloud, normals, cfg):
++    """
++    Training loop for SDF with Eikonal Loss.
++    """
++    # 1. Preprocessing: Center point cloud
++    all_points = point_cloud.clone()
++    all_points = all_points - torch.mean(all_points, dim=0, keepdim=True)
+     
+     # 2. Pretraining (Sphere Loss) - Optional
+-    if cfg.training.pretrain_iters > 0:
+-        pretrain_sdf(model, optimizer, cfg)
++    if cfg.pretrain_iters > 0:
++        for _ in range(cfg.pretrain_iters):
++            # Sample random points in bounds
++            pretrain_points = get_random_points(cfg.batch_size, cfg.bounds, device='cuda')
++            distances = model(pretrain_points)
++            # Analytical sphere SDF (radius 1.0)
++            sphere_sdf = torch.norm(pretrain_points, dim=1, keepdim=True) - 1.0
++            loss = torch.mean((distances - sphere_sdf) ** 2)
++            
++            optimizer.zero_grad()
++            loss.backward()
++            optimizer.step()
+ 
+     # 3. Main Training Loop
+-    for epoch in range(cfg.training.num_epochs):
+-        # Sample points from point cloud
+-        points = select_random_points(all_points, cfg.training.batch_size)
+-        
+-        # Compute Point Cloud Loss
+-        distances = model.implicit_fn.get_distance(points)
+-        loss_data = torch.linalg.norm(distances, dim=-1).mean()
+-        
+-        # Sample random points in bounds for Eikonal regularization
+-        eikonal_points = get_random_points(cfg.training.batch_size, cfg.training.bounds, "cuda")
++    for epoch in range(cfg.num_epochs):
++        # Sample surface points
++        surface_indices = torch.randint(0, len(all_points), (cfg.batch_size,))
++        surface_points = all_points[surface_indices]
++        
++        # Query surface points
++        # Note: model must return (distance, gradient)
++        surf_dists, surf_grads = model.get_distance_and_gradient(surface_points)
++        
++        # Compute Data Loss
++        # Term 1: Distance to zero
++        loss_dist = torch.mean(torch.abs(surf_dists))
++        # Term 2: Normal alignment (if normals provided)
++        if normals is not None:
++            surf_normals = normals[surface_indices]
++            # Normalize gradients to unit length for dot product comparison
++            surf_grads_norm = surf_grads / (torch.norm(surf_grads, dim=1, keepdim=True) + 1e-9)
++            loss_normal = torch.mean(torch.abs(1.0 - torch.sum(surf_grads_norm * surf_normals, dim=1)))
++            loss_data = loss_dist + cfg.lambda_normal * loss_normal
++        else:
++            loss_data = loss_dist
++
++        # Sample Eikonal points (uniform in bounding box)
++        eikonal_points = get_random_points(cfg.batch_size, cfg.bounds, device='cuda')
++        eikonal_dists, eikonal_grads = model.get_distance_and_gradient(eikonal_points)
+         
+         # Compute Eikonal Loss
+-        eikonal_distances, eikonal_gradients = model.implicit_fn.get_distance_and_gradient(eikonal_points)
+-        
+-        # Gradient Eikonal Loss
+-        loss_eik = eikonal_loss(eikonal_gradients) * cfg.training.eikonal_weight
+-        
+-        # Interior Regularization (suppress spurious outliers)
+-        # exp(-beta * |distance|) where beta = 1e2
+-        loss_inter = torch.exp(-1e2 * torch.abs(eikonal_distances)).mean() * cfg.training.inter_weight
++        loss_eikonal = eikonal_loss(eikonal_grads)
++        
++        # Compute Interior/Off-Surface Loss
++        # Penalize points close to zero that are not on the surface (optional but common)
++        # Using exponential decay for points inside/near surface
++        loss_interior = torch.mean(torch.exp(-1e2 * torch.abs(eikonal_dists)))
+         
+         # Total Loss
+-        loss = loss_data + loss_eik + loss_inter
++        loss = loss_data + cfg.eikonal_weight * loss_eikonal + cfg.inter_weight * loss_interior
+         
+         # Optimization Step
+@@ -124,52 +149,34 @@
+         optimizer.step()
+         
+-        # Learning Rate Schedule
++        # Learning Rate Scheduler Step (if using LambdaLR)
+         lr_scheduler.step()
+ 
+-def pretrain_sdf(model, optimizer, cfg):
+-    """
+-    Pretrains SDF with sphere loss.
+-    """
+-    for _ in range(cfg.training.pretrain_iters):
+-        points = get_random_points(cfg.training.batch_size, cfg.training.bounds, "cuda")
+-        distances = model.implicit_fn.get_distance(points)
+-        # Sphere loss: minimize distance to sphere of radius 1.0
+-        loss = sphere_loss(distances, points, 1.0)
+-        
+-        optimizer.zero_grad()
+-        loss.backward()
+-        optimizer.step()
+-
+-def sphere_loss(distances, points, radius):
+-    """
+-    Computes loss between predicted SDF and analytical sphere SDF.
+-    """
+-    # Analytical SDF for sphere centered at origin with given radius
+-    # d(x) = ||x|| - radius
+-    analytical_sdf = torch.linalg.norm(points, dim=-1) - radius
+-    # L2 loss
+-    return torch.mean((distances - analytical_sdf) ** 2)
++def get_random_points(n, bounds, device):
++    """
++    Samples n points uniformly within the bounding box.
++    bounds: tuple (min_val, max_val), e.g., (-1.0, 1.0)
++    """
++    min_val, max_val = bounds
++    return torch.rand(n, 3, device=device) * (max_val - min_val) + min_val
+ ```
+ 
+ **Parameters:**
+-*   `cfg.training.eikonal_weight`: Weight for the gradient Eikonal loss term [S3, S5, unofficial].
+-*   `cfg.training.inter_weight`: Weight for the interior regularization term [S3, S5, unofficial].
+-*   `cfg.training.batch_size`: Number of points sampled per optimization step [S3, S5, unofficial].
+-*   `cfg.training.bounds`: Spatial limits for sampling random eikonal points [S3, S5, unofficial].
+-*   `lr`: Learning rate for the Adam optimizer [S5, unofficial].
+-*   `lr_scheduler_gamma`: Gamma factor for the LambdaLR learning rate scheduler [S5, unofficial].
+-*   `lr_scheduler_step_size`: Step size for the LambdaLR learning rate scheduler [S4, S5, unofficial].
+-*   `pretrain_iters`: Number of iterations for the pretraining phase using sphere loss [S5, unofficial].
++*   $\lambda_{eik}$ (or `eikonal_weight`): Weight for the Eikonal regularization. Typical value: $0.02$ [S2].
++*   $\lambda_{inter}$ (or `inter_weight`): Weight for the interior/off-surface loss.
++*   $\beta_0$: Exponential decay factor for interior loss. Set to $1$ [S3].
++*   Learning Rate: Starts at $10^{-3}$ [S1, unofficial].
++*   Weight Decay: $10^{-4}$ [S1, unofficial].
++*   Batch Size: Depends on memory; typical values range from 1024 to 4096 points [S7, unofficial].
+ 
+ **Edge Cases and Pitfalls:**
+-*   **Gradient Computation:** Ensure `samples.requires_grad = True` is set before computing gradients to enable backpropagation through the network [S7, unofficial].
+-*   **Precision:** The Eikonal loss can be sensitive to the scaling of the input coordinates. Centering the point cloud is critical [S3, S5, unofficial].
+-*   **Spurious Outliers:** Without interior regularization, the SDF may develop spurious zero-level sets. The term $\exp(-100 |d|)$ helps suppress these [S1][S3, S5, unofficial].
+-*   **Topological Noise:** Mild Eikonal regularization ($\lambda_{Eik} \approx 0.02$) can suppress topological noise at the cost of minor surface precision [S1].
++*   **Non-Uniqueness:** The solution to the Eikonal equation vanishing on a point set is not unique. The method relies on implicit regularization (SGD dynamics) to find a plausible SDF rather than an arbitrary one [S6, unofficial].
++*   **Vanishing Gradients:** For thin objects, the learned scale parameter $\beta$ in related density transformations can become large, causing gradients to vanish rapidly as distance increases, preventing recovery of thin structures [S13].
++*   **Approximation Quality:** The zero-level isosurface only approximates the ground truth; quality depends on MLP capacity (depth/width) [S1, unofficial].
++*   **Gradient Computation:** Ensure `requires_grad=True` is set on sampled points before computing gradients to enable backpropagation [S9, unofficial].
+ 
+ ## Subtopics
+ 
+ ### [Sphere Loss](2750-sphere-loss.md)
+-A regularization term used during the pretraining phase to initialize the implicit surface as a sphere. It minimizes the MSE between the network's predicted SDF and the analytical SDF of a sphere, providing a stable geometric prior.
++A pretraining regularization term that initializes the SDF network to match an analytical sphere, providing a stable geometric prior before refining with point cloud data.
+ 
+ ### [MLP Distillation](4829-mlp-distillation.md)
+@@ -177,5 +184,5 @@
+ 
+ ### [SDDF with Ellipsoidal Priors and Neural Residuals](10638-sddf-with-ellipsoidal-priors-and-neural-residuals.md)
+-Learns a Signed Directional Distance Function by combining an explicit ellipsoidal prior with an implicit neural residual, handling occlusions and discontinuities.
++Combines explicit ellipsoidal priors with neural residuals to learn a Signed Directional Distance Function, handling occlusions and discontinuities better than standard SDFs.
+ 
+ ### [SDF-Instant-NGP Training](10640-sdf-instant-ngp-training.md)
+@@ -183,45 +190,54 @@
+ 
+ ### [TetraSDF Training Procedure](13235-tetrasdf-training-procedure.md)
+-Optimizes a neural network using a multi-resolution tetrahedral grid, combining L1 regression, Eikonal regularization, and weight normalization.
++Optimizes an SDF using a multi-resolution tetrahedral grid, combining L1 regression, Eikonal regularization, and weight normalization for efficient mesh extraction.
++
++### [Surface SDF Loss](14235-surface-sdf-loss.md)
++A regularizer for Directional Distance Fields (DDF) that enforces consistency with a co-trained SDF by constraining DDF-reconstructed points to lie on the SDF's zero-level set.
++
++### [Geometry Loss](17091-geometry-loss.md)
++A composite regularization term incorporating multi-view geometric priors (depth, normals) and topological penalties (bubble loss) alongside SDF regression and Eikonal terms.
+ 
+ ### Bias Network for High-Fidelity Points
+-A network that captures geometric bias between volume rendering and point modeling, trained on high-fidelity points to enhance detail representation [S6, unofficial]. It filters points with predicted variance below a threshold $\epsilon$ to create a set $P_s$, then optimizes a bias MLP $f_b$ such that the final SDF $f_{final} = f + f_b$ minimizes the L1 loss against ideal SDF values (0) on $P_s$ [S6, unofficial].
++A network that captures geometric bias between volume rendering and point modeling, trained on high-fidelity points to enhance detail representation [S8, unofficial]. It filters the point set $P$ to create $P_s$ containing only points with predicted variance below threshold $\epsilon$ ($P_s = \{x_P \mid \bar{\sigma}^2(x_P) < \epsilon\}$) [S8, unofficial]. The bias SDF $f_b(x_P)$ is computed via a dedicated MLP, and the final SDF is $f_{final}(x_P) = f(x_P) + f_b(x_P)$ [S8, unofficial]. The network is optimized using L1 loss $\mathcal{L}_{bias} = \frac{1}{D_{P_s}} \sum_{x_P \in P_s} |f_\epsilon(x_P) - f_{final}(x_P)|$, assuming ideal SDF values $f_\epsilon(x_P)$ are 0 [S8, unofficial].
+ 
+ ### SDF Training with Chamfer Distance
+-Trains a neural network to predict Unsigned Distance Function (UDF) values and gradients, projecting query points onto the implicit surface via gradient descent and minimizing Chamfer distance to ground truth points [S7, unofficial]. It uses the update rule $x_{moved} = x_{sample} - \frac{\nabla \text{UDF}(x_{sample})}{\|\nabla \text{UDF}(x_{sample})\|} \cdot \text{UDF}(x_{sample})$ [S7, unofficial].
++Trains a neural network to predict Unsigned Distance Function (UDF) values and gradients, projecting query points onto the implicit surface via gradient descent and minimizing Chamfer distance to ground truth points [S9, unofficial]. The projection is computed as $x_{moved} = x_{sample} - \frac{\nabla \text{UDF}(x_{sample})}{\|\nabla \text{UDF}(x_{sample})\|} \cdot \text{UDF}(x_{sample})$ [S9, unofficial]. A critical pitfall is ensuring `samples.requires_grad = True` before computing gradients [S9, unofficial].
+ 
+ ### Implicit Surface to Volume Transformation
+-Represents scene geometry as a surface $S = \{x \mid F(x) = 0\}$ and transforms it into a volumetric model by computing pseudo-density $\sigma_i = \Psi(F(x_i))$ using a Laplace cumulative distribution function $\Psi(d)$ [S8]. This allows standard volume rendering techniques to be applied to SDFs [S8].
++Represents scene geometry as a surface $S = \{x \in \mathbb{R}^3 \mid F(x) = 0\}$ [S10]. It enforces the Eikonal property on $F$ and transforms the implicit surface into a volumetric model by computing pseudo-density $\sigma_i = \Psi(F(x_i))$ using a Laplace cumulative distribution function: $\Psi(d) = \frac{1}{2} \exp(-d/\beta)$ for $d \geq 0$ and $1 - \frac{1}{2} \exp(d/\beta)$ for $d < 0$ [S10]. The scale parameter $\beta$ is optimizable [S10].
+ 
+ ### Sparse Points SDF Loss
+-Computes loss on sparse points extracted from batch data, filtering points inside a unit sphere and weighting them, though the specific loss value is multiplied by 0.0 in the reference implementation [S9, unofficial].
+-
+-### Surface SDF Loss
+-Computes the mean absolute SDF value on surface points, also multiplied by 0.0 in the reference implementation [S9, unofficial].
++Extracts sparse points and weights from a batch, filters points inside the unit sphere, and computes SDF values using an occupancy field. The loss is computed as the mean of `abs(sparse_pts_sdf) * pts_weights` multiplied by 0.0, effectively acting as a placeholder or weak constraint in some pipelines [S11, unofficial].
+ 
+ ### SDF Smoothness Loss
+-Regularizes the reconstructed surface by penalizing gradients of the SDF between adjacent sampled points along a ray, encouraging geometric smoothness [S10].
++Regularizes the reconstructed surface by penalizing gradients of the SDF between adjacent sampled points along a ray, encouraging geometric smoothness [S12].
++
++### Bubble Loss for Thin Object Recovery
++Applies a loss term to 'bubbles' (3D points derived from depth images) to enforce zero SDF values, recovering gradients for thin/small objects where standard SDF training fails due to vanishing gradients [S13]. The loss is $L_{bubble} = \sum_{p \in P} |d(x(p, D))|$ [S13].
+ 
+ ## Operating characteristics
+-*   **Time Complexity:** Depends on the number of training iterations, batch size, and network depth. Each iteration requires forward and backward passes through the MLP for both point cloud and random points [S3, S5, unofficial].
+-*   **Memory Complexity:** Proportional to the batch size and the number of network parameters. Gradients for all points must be stored during backpropagation [S3, S5, unofficial].
+-*   **Performance:** Enforcing the Eikonal constraint improves topological consistency and reduces spurious artifacts compared to unconstrained SDF training [S1]. However, it may slightly decrease surface precision (Chamfer Distance/F1) if the regularization weight is too high [S1].
+-*   **Strengths:** Produces smooth, well-defined surfaces; compatible with standard volume rendering pipelines via density transformation; robust to noise when combined with regularization [S1][S3, S5, unofficial].
+-*   **Limitations:** Requires careful tuning of regularization weights; pretraining can help convergence but adds overhead; may struggle with highly complex geometries without additional priors or acceleration structures [S1][S3, S5, unofficial].
+-*   **When to Use:** When reconstructing surfaces from point clouds or when a smooth, differentiable distance field is required for downstream tasks like rendering or physics simulation [S2][S3, S5, unofficial].
+-*   **When Not to Use:** When high-frequency details are critical and not captured by the point cloud; when computational resources are extremely limited and acceleration structures (like [SDF-Instant-NGP Training](10640-sdf-instant-ngp-training.md)) are not feasible [S1][S5, unofficial].
++*   **Time Complexity:** Training time depends on the number of epochs and the cost of computing gradients via backpropagation through the MLP. Inference time for a D6-W60 MLP is approximately 20.8 seconds for mesh extraction (Marching Cubes) on a single object [S1, unofficial].
++*   **Memory Complexity:** Memory usage is dominated by the MLP parameters (e.g., D6-W60 has 360 neurons, negligible compared to grid-based methods) and the point cloud data [S1, unofficial].
++*   **Performance:** Produces state-of-the-art implicit neural representations with higher fidelity and detail compared to methods requiring 3D supervision [S6, unofficial].
++*   **Strengths:** Works directly from raw point clouds without 3D supervision; implicit regularization avoids bad zero-loss solutions; differentiable.
++*   **Limitations:** Approximation quality depends on MLP capacity; not unique solution without regularization; may struggle with thin structures without specific losses (e.g., Bubble Loss) [S1, unofficial][S13].
++*   **When to Use:** When reconstructing shapes from point clouds with normals is required, and a continuous, differentiable implicit representation is needed for downstream tasks like rendering or editing.
++*   **When Not to Use:** When real-time inference is critical without acceleration structures (like Instant-NGP), or when the input data lacks normals and the Eikonal constraint alone is insufficient to resolve ambiguity [S6, unofficial].
+ 
+ ## Background
+-The method originates from the use of neural implicit representations for 3D reconstruction, specifically leveraging the properties of Signed Distance Functions [S2][S3, S5, unofficial]. The Eikonal equation $|\nabla \phi(x)| = 1$ is a fundamental property of SDFs, and enforcing it during neural network training ensures the output behaves like a true distance field [S3, S5, unofficial]. Key developments include the VolSDF paper [S3, unofficial][S8] which integrated SDFs with volume rendering, and various implementations in academic assignments and repositories [S3, S4, S5, unofficial]. The technique is widely used in neural surface rendering, 3D reconstruction, and novel view synthesis [S2][S3, S5, unofficial][S8].
++The method originates from the work on Implicit Geometric Regularization for Learning Shapes [S6, unofficial], which demonstrated that encouraging a neural network to vanish on input point clouds and have unit norm gradients leads to high-fidelity implicit neural representations. It builds on earlier works using implicit neural representations [S6, unofficial] and is distinct from NeRF by using SDF values and Eikonal regularization instead of density and color prediction [S7, unofficial]. The approach has been widely adopted in neural surface rendering and implicit geometry representation [S3][S7, unofficial].
+ 
+ ## Sources
+-[S1] DCCVT: Differentiable Clipped Centroidal Voronoi Tessellation, https://arxiv.org/abs/2601.13603v1, fetched 2026-10-26
+-[S2] Multi-scale hash encoding based neural geometry representation, https://doi.org/10.1007/s41095-023-0340-x, fetched 2026-10-26
+-[S3] omkarchittar/Neural_Surfaces, https://github.com/omkarchittar/Neural_Surfaces, fetched 2026-10-26 (unofficial)
+-[S4] Shreyas120/l3d_assignment3, https://github.com/Shreyas120/l3d_assignment3, fetched 2026-10-26 (unofficial)
+-[S5] Fhz2346/Neural-Volume-Rendering-and-Surface-Rendering, https://github.com/Fhz2346/Neural-Volume-Rendering-and-Surface-Rendering, fetched 2026-10-27 (unofficial)
+-[S6] Point-NeuS: Point-Guided Neural Implicit Surface Reconstruction by Volume Rendering, https://doi.org/10.48550/arXiv.2310.07997, fetched 2026-10-30 (unofficial)
+-[S7] jjjkkyz/DCx, https://github.com/jjjkkyz/DCx, fetched 2026-10-26 (unofficial)
+-[S8] Radar Fields: An Extension of Radiance Fields to SAR, https://doi.org/10.1109/cvprw63382.2024.00061, fetched 2026-10-26
+-[S9] autonomousvision/sdfstudio, https://github.com/autonomousvision/sdfstudio, fetched 2026-10-26 (unofficial)
+-[S10] Ray-Distance Volume Rendering for Neural Scene Reconstruction, https://doi.org/10.1007/978-3-031-72630-9_22, fetched 2026-10-26+[S1] Analytic Marching: An Analytic Meshing Solution from Deep Implicit Surface Networks, https://arxiv.org/abs/2002.06597v1, fetched 2026-10-26 (unofficial)
++[S2] DCCVT: Differentiable Clipped Centroidal Voronoi Tessellation, https://arxiv.org/abs/2601.13603v1, fetched 2026-10-26
++[S3] Multi-scale hash encoding based neural geometry representation, https://doi.org/10.1007/s41095-023-0340-x, fetched 2026-10-26
++[S4] omkarchittar/Neural_Surfaces, https://github.com/omkarchittar/Neural_Surfaces, fetched 2026-10-26 (unofficial)
++[S5] Shreyas120/l3d_assignment3, https://github.com/Shreyas120/l3d_assignment3, fetched 2026-10-26 (unofficial)
++[S6] Implicit Geometric Regularization for Learning Shapes, https://doi.org/10.48550/arxiv.2002.10099, fetched 2026-10-26 (unofficial)
++[S7] Fhz2346/Neural-Volume-Rendering-and-Surface-Rendering, https://github.com/Fhz2346/Neural-Volume-Rendering-and-Surface-Rendering, fetched 2026-10-27 (unofficial)
++[S8] Point-NeuS: Point-Guided Neural Implicit Surface Reconstruction by Volume Rendering, https://doi.org/10.48550/arXiv.2310.07997, fetched 2026-10-30 (unofficial)
++[S9] jjjkkyz/DCx, https://github.com/jjjkkyz/DCx, fetched 2026-10-26 (unofficial)
++[S10] Radar Fields: An Extension of Radiance Fields to SAR, https://doi.org/10.1109/cvprw63382.2024.00061, fetched 2026-10-26
++[S11] autonomousvision/sdfstudio, https://github.com/autonomousvision/sdfstudio, fetched 2026-10-26 (unofficial)
++[S12] Ray-Distance Volume Rendering for Neural Scene Reconstruction, https://doi.org/10.1007/978-3-031-72630-9_22, fetched 2026-10-26
++[S13] I 2 -SDF: Intrinsic Indoor Scene Reconstruction and Editing via Raytracing in Neural SDFs, https://doi.org/10.1109/cvpr52729.2023.01202, fetched 2026-11-01

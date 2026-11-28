@@ -1,0 +1,100 @@
+--- v002.md
++++ v003.md
+@@ -4,5 +4,5 @@
+ 
+ ## Overview
+-A CUDA kernel that maps 3D LiDAR points to a voxel grid by aggregating attributes into a block-level shared memory cache, falling back to atomic operations on global memory for cache collisions [S1, unofficial]. It reduces global memory contention compared to standard global-memory-only voxelization by using a fixed-size per-block cache, while gracefully handling hash collisions that pure shared-memory approaches cannot [S1, unofficial].
++A CUDA kernel that maps 3D LiDAR points to a voxel grid by aggregating attributes into a block-level shared memory cache, falling back to atomic operations on global memory for cache collisions [S1, unofficial]. It builds on [CUDA Voxelization](3491-cuda-voxelization.md) by reducing global memory contention for spatially clustered points through a fixed-size per-block cache, while gracefully handling hash collisions that pure shared-memory approaches cannot [S1, unofficial].
+ 
+ ## How it works
+@@ -22,5 +22,5 @@
+ 
+ **Algorithm Steps:**
+-1. **Initialize Shared Memory:** If `threadIdx.x < CACHE_SIZE`, set `smem_voxel_idx[threadIdx.x] = -1` and zero all fields in `smem_voxel_data[threadIdx.x]` [S1, unofficial].
++1. **Initialize Shared Memory:** If `threadIdx.x < CACHE_SIZE`, set `smem_voxel_idx[threadIdx.x] = -1ULL` and zero all fields in `smem_voxel_data[threadIdx.x]` [S1, unofficial].
+ 2. **Synchronize:** `__syncthreads()` [S1, unofficial].
+ 3. **Calculate Voxel Indices:** For each point $(p.x, p.y, p.z)$:
+@@ -44,9 +44,9 @@
+    $$
+    [S1, unofficial]
+-7. **Attempt to Claim Slot:** Use `atomicCAS` on `smem_voxel_idx[cache_idx]` with value `-1`. If the returned old value is `-1` or equals `voxel_idx`, the claim is successful [S1, unofficial].
++7. **Attempt to Claim Slot:** Use `atomicCAS` on `smem_voxel_idx[cache_idx]` with value `-1ULL` [S1, unofficial]. If the returned old value is `-1ULL` or equals `voxel_idx`, the claim is successful [S1, unofficial].
+ 8. **Shared Memory Reduction (Claimed):** If claimed, perform `atomicAdd` on `smem_voxel_data[cache_idx]` for `sum_x`, `sum_y`, `sum_z`, `sum_intensity`, `sum_ring`, and `count` [S1, unofficial].
+ 9. **Global Memory Reduction (Collision):** If not claimed (collision), perform `atomicAdd` on `d_grid[voxel_idx]` for all fields [S1, unofficial].
+ 10. **Synchronize:** `__syncthreads()` [S1, unofficial].
+-11. **Write Back Results:** If `threadIdx.x < CACHE_SIZE` and `smem_voxel_idx[threadIdx.x] != -1` and `count > 0`, perform `atomicAdd` on `d_grid[smem_voxel_idx[threadIdx.x]]` for all fields [S1, unofficial].
++11. **Write Back Results:** If `threadIdx.x < CACHE_SIZE` and `smem_voxel_idx[threadIdx.x] != -1ULL` and `count > 0`, perform `atomicAdd` on `d_grid[smem_voxel_idx[threadIdx.x]]` for all fields [S1, unofficial].
+ 
+ **Parameters:**
+@@ -60,16 +60,28 @@
+ **Pseudocode:**
+ ```python
++import math
++
+ def mapPointsToVoxelsKernel(points_x, points_y, points_z, points_intensity, points_ring,
+-                            num_points, d_grid_sum_x, d_grid_sum_y, d_grid_sum_z,
+-                            d_grid_intensity, d_grid_ring, d_grid_count,
+-                            min_x, min_y, min_z, leaf_size, dim_x, dim_y, dim_z, CACHE_SIZE):
+-    # Shared memory simulation
++                            num_points, min_x, min_y, min_z, leaf_size, 
++                            dim_x, dim_y, dim_z, CACHE_SIZE):
++    # Initialize global grid arrays (simulating pre-allocated device memory)
++    grid_size = dim_x * dim_y * dim_z
++    d_grid_sum_x = [0.0] * grid_size
++    d_grid_sum_y = [0.0] * grid_size
++    d_grid_sum_z = [0.0] * grid_size
++    d_grid_intensity = [0.0] * grid_size
++    d_grid_ring = [0.0] * grid_size
++    d_grid_count = [0] * grid_size
++
++    # Simulate shared memory arrays per block
+     smem_voxel_idx = [-1] * CACHE_SIZE
+-    smem_voxel_data = [{'sum_x': 0.0, 'sum_y': 0.0, 'sum_z': 0.0, 'sum_intensity': 0.0, 'sum_ring': 0.0, 'count': 0} for _ in range(CACHE_SIZE)]
++    smem_voxel_data = [{'sum_x': 0.0, 'sum_y': 0.0, 'sum_z': 0.0, 
++                        'sum_intensity': 0.0, 'sum_ring': 0.0, 'count': 0} for _ in range(CACHE_SIZE)]
+ 
+     # Step 1: Initialize shared memory
+     for i in range(CACHE_SIZE):
+         smem_voxel_idx[i] = -1
+-        smem_voxel_data[i] = {'sum_x': 0.0, 'sum_y': 0.0, 'sum_z': 0.0, 'sum_intensity': 0.0, 'sum_ring': 0.0, 'count': 0}
++        smem_voxel_data[i] = {'sum_x': 0.0, 'sum_y': 0.0, 'sum_z': 0.0, 
++                              'sum_intensity': 0.0, 'sum_ring': 0.0, 'count': 0}
+ 
+     # Step 2: Synchronize (simulated)
+@@ -85,7 +97,7 @@
+ 
+         # Step 3: Calculate voxel indices
+-        idx_x = int((px - min_x) / leaf_size)
+-        idx_y = int((py - min_y) / leaf_size)
+-        idx_z = int((pz - min_z) / leaf_size)
++        idx_x = math.floor((px - min_x) / leaf_size)
++        idx_y = math.floor((py - min_y) / leaf_size)
++        idx_z = math.floor((pz - min_z) / leaf_size)
+ 
+         # Step 4: Clamp indices
+@@ -100,5 +112,5 @@
+         cache_idx = voxel_idx % CACHE_SIZE
+ 
+-        # Step 7: Attempt to claim slot
++        # Step 7: Attempt to claim slot (simulated atomicCAS)
+         old_val = smem_voxel_idx[cache_idx]
+         if old_val == -1 or old_val == voxel_idx:
+@@ -138,13 +150,15 @@
+             d_grid_ring[v_idx] += smem_voxel_data[i]['sum_ring']
+             d_grid_count[v_idx] += smem_voxel_data[i]['count']
++
++    return d_grid_sum_x, d_grid_sum_y, d_grid_sum_z, d_grid_intensity, d_grid_ring, d_grid_count
+ ```
+ 
+ ## Operating characteristics
+-- **Time Complexity:** Not given in the sources.
+-- **Memory Complexity:** Not given in the sources.
++- **Time Complexity:** Not given in the sources [S1, unofficial].
++- **Memory Complexity:** Not given in the sources [S1, unofficial].
+ - **Strengths:** Reduces global memory atomic contention for spatially clustered points by aggregating them in shared memory first [S1, unofficial].
+ - **Limitations:** Cache collisions force fallback to global memory atomic operations, which may degrade performance if collision rates are high [S1, unofficial].
+ - **When to use:** When points are spatially clustered, leading to repeated access to the same voxels within a block [S1, unofficial].
+-- **When not to use:** Not given in the sources.
++- **When not to use:** Not given in the sources [S1, unofficial].
+ 
+ ## Background

@@ -1,0 +1,209 @@
+--- v001.md
++++ v002.md
+@@ -1,5 +1,4 @@
+ # InfoNeRF
+ 
+-Also called: Ray Entropy Minimization for Few-Shot Neural Volume Rendering
+ 
+ ## Overview
+@@ -8,17 +7,17 @@
+ ## How it works
+ **Inputs and Outputs**
+-*   **Inputs:** A neural implicit scene representation (e.g., an MLP mapping 3D coordinates and viewing directions to density $\sigma$ and color $\mathbf{c}$), a set of training rays $\mathcal{R}_s$ from known viewpoints, and a set of unseen rays $\mathcal{R}_u$ sampled from random camera poses.
+-*   **Outputs:** Optimized neural network parameters that minimize the total loss, producing rendered RGB images and depth maps for novel views.
++*   **Inputs:** A neural implicit scene representation (e.g., an MLP mapping 3D coordinates and viewing directions to density $\sigma$ and color $\mathbf{c}$), a set of training rays $\mathcal{R}_s$ from known viewpoints, and a set of unseen rays $\mathcal{R}_u$ sampled from random camera poses [S1].
++*   **Outputs:** Optimized neural network parameters that minimize the total loss, producing rendered RGB images and depth maps for novel views [S1].
+ 
+ **Data Structures**
+-*   **Ray Samples:** For each ray $\mathbf{r}$, a set of $N$ 3D points $\{\mathbf{r}_1, \dots, \mathbf{r}_N\}$ is sampled.
++*   **Ray Samples:** For each ray $\mathbf{r}$, a set of $N$ 3D points $\{\mathbf{r}_1, \dots, \mathbf{r}_N\}$ is sampled [S1].
+ *   **Sample Attributes:** Each sample $i$ stores:
+-    *   $\sigma_i$: Volume density (scalar).
+-    *   $\delta_i$: Distance to the adjacent sample along the ray (scalar).
+-    *   $\alpha_i$: Opacity, computed as $1 - \exp(-\sigma_i \delta_i)$ (scalar).
+-    *   $\mathbf{c}_i$: Emitted RGB color (vector of size 3).
++    *   $\sigma_i$: Volume density (scalar) [S1].
++    *   $\delta_i$: Distance to the adjacent sample along the ray (scalar) [S1].
++    *   $\alpha_i$: Opacity, computed as $1 - \exp(-\sigma_i \delta_i)$ (scalar) [S1].
++    *   $\mathbf{c}_i$: Emitted RGB color (vector of size 3) [S1].
+ *   **Ray Sets:**
+-    *   $\mathcal{R}_s$: Set of rays from training images (size $|\mathcal{R}_s|$).
+-    *   $\mathcal{R}_u$: Set of rays from randomly sampled unseen images (size $|\mathcal{R}_u|$).
++    *   $\mathcal{R}_s$: Set of rays from training images (size $|\mathcal{R}_s|$) [S1].
++    *   $\mathcal{R}_u$: Set of rays from randomly sampled unseen images (size $|\mathcal{R}_u|$) [S1].
+ 
+ **Numbered Steps**
+@@ -50,5 +49,5 @@
+     $$ \mathcal{L}_{\text{total}} = \mathcal{L}_{\text{RGB}} + \lambda_1 \mathcal{L}_{\text{entropy}} + \lambda_2 \mathcal{L}_{\text{KL}} $$
+     [S1].
+-11. **Optimization:** Update the neural network parameters using gradient descent.
++11. **Optimization:** Update the neural network parameters using gradient descent (specifically Adam optimizer) [S1].
+ 
+ **Pseudocode**
+@@ -56,6 +55,4 @@
+ ```python
+ import torch
+-import torch.nn as nn
+-import math
+ 
+ def compute_ray_density_probabilities(sigma, delta):
+@@ -118,11 +115,11 @@
+ 
+ def info_nerf_step(
+-    network, 
+-    rays_s,       # List of Ray objects for seen views
+-    rays_u,       # List of Ray objects for unseen views
+-    N_samples,    # Number of samples per ray
+-    lambda_1,     # Weight for entropy loss
+-    lambda_2,     # Weight for KL loss
+-    epsilon=1e-5  # Threshold for ray mask
++    network_fn, 
++    rays_s_origins, rays_s_directions, rays_s_gt_colors,
++    rays_u_origins, rays_u_directions,
++    N_samples, 
++    lambda_1, 
++    lambda_2, 
++    epsilon=1e-5
+ ):
+     """
+@@ -130,7 +127,10 @@
+     
+     Args:
+-        network: Neural implicit model returning (sigma, color).
+-        rays_s: List of Ray objects from training images.
+-        rays_u: List of Ray objects from random unseen poses.
++        network_fn: Neural implicit model returning (sigma, color).
++        rays_s_origins: List of origins for seen rays.
++        rays_s_directions: List of directions for seen rays.
++        rays_s_gt_colors: List of ground truth colors for seen rays.
++        rays_u_origins: List of origins for unseen rays.
++        rays_u_directions: List of directions for unseen rays.
+         N_samples: Number of samples along each ray.
+         lambda_1: Balancing term for L_entropy.
+@@ -141,73 +141,67 @@
+         total_loss: Scalar loss value.
+     """
+-    total_loss = 0.0
+     l_rgb = 0.0
+     l_entropy = 0.0
+     l_kl = 0.0
+-    
+-    # 1. Process Seen Rays (for RGB loss and KL loss)
+-    for ray in rays_s:
+-        # Sample points along ray (two-stage: uniform then opacity-based)
+-        # Implementation detail: Standard NeRF sampling strategy
+-        points, delta = ray.sample(N_samples)
+-        
+-        # Query network
+-        sigma, color = network(points, ray.direction)
+-        
+-        # Compute rendered color for RGB loss
++    count_s = len(rays_s_origins)
++    count_u = len(rays_u_directions)
++    
++    # Process seen rays
++    for i in range(count_s):
++        # 1. Sample points along ray (two-stage: uniform then opacity-based) [S1]
++        # Implementation detail: standard NeRF sampling strategy [S1]
++        # Source does not specify exact sampling implementation [S1]
++        points, delta = sample_ray(rays_s_origins[i], rays_s_directions[i], N_samples)
++        
++        # 2. Query network for density and color [S1]
++        sigma, color = network_fn(points, rays_s_directions[i])
++        
++        # 3. Compute rendered color for RGB loss [S1]
+         alpha = 1.0 - torch.exp(-sigma * delta)
+-        transmittance = torch.cumprod(1.0 - alpha + 1e-10, dim=0) # T_i
+-        # Standard volume rendering equation: sum T_i * alpha_i * c_i
++        transmittance = torch.cumprod(1.0 - alpha + 1e-10, dim=0)
+         rendered_color = torch.sum(transmittance * alpha * color, dim=0)
+         
+         # RGB Loss
+-        gt_color = ray.get_ground_truth_color()
+-        l_rgb += torch.mean((rendered_color - gt_color) ** 2)
+-        
+-        # Compute Probabilities for Entropy and KL
++        l_rgb += torch.mean((rendered_color - rays_s_gt_colors[i]) ** 2)
++        
++        # 4. Compute Probabilities for Entropy and KL [S1]
+         p, _ = compute_ray_density_probabilities(sigma, delta)
+         
+-        # Ray Mask
++        # 5. Ray Mask [S1]
+         cumulative_density = torch.sum(1.0 - torch.exp(-sigma * delta))
+         mask = 1.0 if cumulative_density > epsilon else 0.0
+         
+-        # Entropy Loss component
++        # 6. Entropy Loss component [S1]
+         H = compute_ray_entropy(p)
+         l_entropy += mask * H
+         
+-        # KL Loss component (Information Gain Reduction)
+-        # Generate neighbor ray by perturbing camera pose (-5 to 5 degrees)
+-        neighbor_ray = ray.perturb_pose(angle_range_deg=5.0)
+-        
+-        # Sample neighbor ray
+-        points_tilde, delta_tilde = neighbor_ray.sample(N_samples)
+-        sigma_tilde, _ = network(points_tilde, neighbor_ray.direction)
++        # 7. KL Loss component (Information Gain Reduction) [S1]
++        # Generate neighbor ray by perturbing camera pose (-5 to 5 degrees) [S1]
++        # Implementation detail: pose perturbation is application-specific [G]
++        neighbor_origin, neighbor_direction = perturb_pose(rays_s_origins[i], rays_s_directions[i], angle_deg=5.0)
++        
++        points_tilde, delta_tilde = sample_ray(neighbor_origin, neighbor_direction, N_samples)
++        sigma_tilde, _ = network_fn(points_tilde, neighbor_direction)
+         
+         p_tilde, _ = compute_ray_density_probabilities(sigma_tilde, delta_tilde)
+         
+-        # KL Divergence
++        # KL Divergence [S1]
+         kl = compute_kl_divergence(p, p_tilde)
+         l_kl += kl
+ 
+-    # 2. Process Unseen Rays (for Entropy Loss only)
+-    for ray in rays_u:
+-        points, delta = ray.sample(N_samples)
+-        sigma, _ = network(points, ray.direction)
++    # 8. Process unseen rays (for Entropy Loss only) [S1]
++    for i in range(count_u):
++        points, delta = sample_ray(rays_u_origins[i], rays_u_directions[i], N_samples)
++        sigma, _ = network_fn(points, rays_u_directions[i])
+         
+         p, _ = compute_ray_density_probabilities(sigma, delta)
+         
+-        # Ray Mask
+         cumulative_density = torch.sum(1.0 - torch.exp(-sigma * delta))
+         mask = 1.0 if cumulative_density > epsilon else 0.0
+         
+-        # Entropy Loss component
+         H = compute_ray_entropy(p)
+         l_entropy += mask * H
+ 
+-    # Normalize losses
+-    # Note: |R_s| and |R_u| are the counts of rays in the batches
+-    count_s = len(rays_s)
+-    count_u = len(rays_u)
+-    
++    # Normalize losses [S1]
+     if count_s > 0:
+         l_rgb = l_rgb / count_s
+@@ -217,5 +211,5 @@
+         l_entropy = l_entropy / (count_s + count_u)
+         
+-    # Total Loss
++    # Total Loss [S1]
+     total_loss = l_rgb + lambda_1 * l_entropy + lambda_2 * l_kl
+     
+@@ -242,9 +236,9 @@
+ *   **Memory Complexity:** Does not require external data structures (voxels, meshes) or additional learnable parameters, avoiding memory bounds associated with explicit representations [S1].
+ *   **Performance:** Evaluated on Realistic Synthetic 360° (Lego, Materials, Ficus) in 4-view settings, DTU in 3-view settings, and ZJU-MoCap. Achieves improved PSNR, SSIM, LPIPS, FID, and KID metrics compared to baselines like PixelNeRF [S1].
+-*   **Strengths:** Generic applicability to various NeRF-based algorithms; no need for scene priors or pretrained encoders; effective for few-shot scenarios.
+-*   **Limitations:** Relies on the quality of the underlying neural implicit representation; performance depends on the effectiveness of the regularization weights ($\lambda_1, \lambda_2$).
++*   **Strengths:** Generic applicability to various NeRF-based algorithms; no need for scene priors or pretrained encoders; effective for few-shot scenarios [S1].
++*   **Limitations:** Relies on the quality of the underlying neural implicit representation; performance depends on the effectiveness of the regularization weights ($\lambda_1, \lambda_2$) [S1].
+ 
+ ## Background
+-InfoNeRF was introduced by Mijeong Kim, Seonguk Seo, and Bohyung Han from Seoul National University in 2022 [S1]. It addresses the limitations of existing few-shot novel view synthesis methods, such as PixelNeRF [38] and class-specific methods [14, 24], which rely on features from seen images or semantic priors. InfoNeRF is distinct from explicit representation methods like octree sparsity [37] or voxel grid total variation [17] by being fully implicit and generic. It builds on the NeRF framework [21] and classical volume rendering theory [19].
++InfoNeRF was introduced by Mijeong Kim, Seonguk Seo, and Bohyung Han from Seoul National University in 2022 [S1]. It addresses the limitations of existing few-shot novel view synthesis methods, such as PixelNeRF [38] and class-specific methods [14, 24], which rely on features from seen images or semantic priors [S1]. InfoNeRF is distinct from explicit representation methods like octree sparsity [37] or voxel grid total variation [17] by being fully implicit and generic [S1]. It builds on the NeRF framework [21] and classical volume rendering theory [19] [S1].
+ 
+ ## Sources

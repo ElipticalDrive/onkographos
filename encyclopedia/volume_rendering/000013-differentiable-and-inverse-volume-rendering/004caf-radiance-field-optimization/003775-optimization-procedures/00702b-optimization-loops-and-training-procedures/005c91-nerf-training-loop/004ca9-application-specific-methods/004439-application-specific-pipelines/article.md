@@ -1,0 +1,143 @@
+# Application-Specific Pipelines
+
+## Overview
+Application-Specific Pipelines adapt the standard NeRF training loop to solve domain-specific inverse problems by modifying neural field architectures, loss functions, and optimization strategies [G]. Unlike standard NeRF training, which optimizes a single MLP for photometric reconstruction, these pipelines decompose fields, enforce domain priors, or employ iterative multi-stage optimization to handle complex constraints [G]. Source [S1] specifically demonstrates a dynamically-informed iNeRF estimator for robotics navigation that relies solely on photometric loss [S1].
+## Shared principles
+See parent [Application-Specific Methods](13294-application-specific-methods.md).
+## Subtopics
+
+### [DPPE (Dense Pose Estimation in a Plenoxels Environment)](9640-dppe-dense-pose-estimation-in-a-plenoxels-environment.md)
+DPPE is a 6-DoF monocular RGB-only pose estimation method that recovers a camera's ground truth pose from a perturbed initial estimate by minimizing photometric error within a pre-trained Plenoxels environment. It distinguishes itself from analytical derivative-based methods and slow NeRF-based optimizers by leveraging the rapid rendering speed of Plenoxels to numerically approximate image gradients via central differencing, allowing full-image re-rendering at each optimization step. Choose it when working with Plenoxels representations and needing robust pose recovery without analytical gradients.
+
+### [GO-NeRF](11181-go-nerf.md)
+GO-NeRF is a pipeline for generating text-prompt-controlled 3D virtual objects at user-specified locations within an existing 3D environment represented as a NeRF, preserving unchanged scene content and maintaining compatibility with various NeRF representations. It distinguishes itself from standard NeRF training by separating the optimization of a local object field from the global scene, using compositional rendering to handle occlusions and context-aware losses to mitigate artifacts like floaters and oversaturation common in diffusion-guided optimization. Choose it for localized 3D object insertion and editing in pre-trained scenes.
+
+### Dynamically-informed iNeRF Estimator
+A state estimation method that uses an iNeRF initialized with a dynamics prior, optimized only via photometric loss, acting as a recursive Bayesian filter with infinite state covariance [S1]. The process loss is set to 0 [S1]. An iNeRF estimator initialized without a dynamics prior will very quickly diverge [S1]. Choose it for robotics navigation in NeRF environments where dynamics priors are available and photometric supervision suffices.
+
+## Background
+Developed for vision-only robot navigation in a neural radiance world [S1]. Not given in the sources.
+
+> **Unverified code.** The code below did not pass a test run against a reference implementation, or no test fits it, so it may contain errors.
+
+```python
+import numpy as np
+import copy
+
+def dppe_pose_estimation(plenoxels_grid, I_gt, pi_init, f, W, H, epsilon, max_epochs):
+    pi_c = copy.deepcopy(pi_init)
+    epoch = 0
+    alpha_trans = 4.0
+    alpha_rot = 5.0
+    trans_step = 1.0
+    rot_step = 0.001
+
+    while epoch < max_epochs:
+        I_curr = render_plenoxels(plenoxels_grid, pi_c, f, W, H)
+        error_sq = np.sum((I_curr - I_gt) ** 2)
+        if error_sq <= epsilon:
+            break
+
+        Delta_I = I_curr - I_gt
+        J_params = {}
+
+        # Compute gradients for all 6 DoFs via central differencing
+        for dof, step in [('x', trans_step), ('y', trans_step), ('z', trans_step),
+                          ('omega1', rot_step), ('omega2', rot_step), ('omega3', rot_step)]:
+            pi_plus = perturb_pose(pi_c, dof, step)
+            pi_minus = perturb_pose(pi_c, dof, -step)
+            I_plus = render_plenoxels(plenoxels_grid, pi_plus, f, W, H)
+            I_minus = render_plenoxels(plenoxels_grid, pi_minus, f, W, H)
+            J_params[dof] = (I_plus - I_minus) / 2.0
+
+        # Update pose parameters
+        if epoch % 2 == 0:
+            if epoch > 0 and epoch % 100 == 0:
+                alpha_trans *= 0.75
+            for dof in ['x', 'y', 'z']:
+                grad = np.sum(J_params[dof] * Delta_I)
+                pi_c.t[dof] += alpha_trans * grad
+        else:
+            if epoch > 0 and epoch % 100 == 0:
+                alpha_rot *= 0.75
+            for dof in ['omega1', 'omega2', 'omega3']:
+                grad = np.sum(J_params[dof] * Delta_I)
+                pi_c.omega[dof] += alpha_rot * grad
+
+        epoch += 1
+    return pi_c
+
+def perturb_pose(pose, dof, step):
+    new_pose = copy.deepcopy(pose)
+    if dof in ['x', 'y', 'z']:
+        new_pose.t[dof] += step
+    elif dof in ['omega1', 'omega2', 'omega3']:
+        new_pose.omega[dof] += step
+    return new_pose
+
+def render_plenoxels(grid, pose, f, W, H):
+    # Cast rays from pose: o_r = pose.t, d_r = pose.R * [(u - W/2)/f, -(v + H/2)/f, -1]^T
+    # Render ray r using volume rendering equation: sum T_i (1 - exp(-sigma_i delta_i)) c_i
+    # Sources do not provide implementation details for this step.
+    pass
+
+def go_nerf_pipeline(scene_nerf, text_prompt, user_points_2d, reference_image=None):
+    # Step 1: Region Definition
+    # Convert 2D points to 3D bounding box using depth and perspective projection
+    # Sources do not provide implementation details for this step.
+    bounding_box = project_2d_to_3d(user_points_2d, depth_map)
+
+    # Step 2: Scene Rendering
+    # Render RGB-D images of the scene
+    # Sources do not provide implementation details for this step.
+    scene_rgb, scene_depth = render_scene(scene_nerf, cameras)
+
+    # Initialize Object NeRF within the bounding box
+    # Sources do not provide implementation details for this step.
+    object_nerf = initialize_nerf(bounding_box)
+
+    # Step 3: Object Generation (Optimization Loop)
+    for step in range(num_training_steps):
+        # Sample rays within the bounding box
+        # Sources do not provide implementation details for this step.
+        rays = sample_rays_in_box(bounding_box, cameras)
+
+        # Render object RGB and opacity
+        # Sources do not provide implementation details for this step.
+        object_rgb, object_opacity = render_object(object_nerf, rays)
+
+        # Compute SDS loss from diffusion model using text prompt
+        # This distills 2D inpainting priors
+        # Sources do not provide implementation details for this step.
+        sds_loss = compute_sds_loss(object_rgb, text_prompt, diffusion_model)
+
+        # Apply saturation regularizer
+        # Sources do not provide implementation details for this step.
+        saturation_loss = compute_saturation_alignment_loss(object_rgb, scene_rgb)
+
+        # Apply random background replacement to mitigate artifacts
+        # Sources do not provide implementation details for this step.
+        context_loss = compute_context_loss(object_rgb, scene_rgb)
+
+        # Apply reference-image-guided feature space loss if reference provided
+        # Sources do not provide implementation details for this step.
+        feature_loss = compute_feature_similarity_loss(reference_image, object_rgb) if reference_image else 0.0
+
+        # Total loss
+        total_loss = sds_loss + saturation_loss + context_loss + feature_loss
+
+        # Update Object NeRF parameters
+        # Sources do not provide implementation details for this step.
+        update_parameters(object_nerf, total_loss)
+
+    # Step 4: Compositional Rendering
+    # Final render of object
+    # Sources do not provide implementation details for this step.
+    final_object_rgb, final_object_opacity = render_object(object_nerf, cameras)
+
+    # Composite scene and object
+    final_image = final_object_rgb * final_object_opacity + scene_rgb * (1 - final_object_opacity)
+    return final_image
+```
+## Sources
+[S1] Vision-Only Robot Navigation in a Neural Radiance World, https://doi.org/10.1109/lra.2022.3150497, fetched 2026-10-26

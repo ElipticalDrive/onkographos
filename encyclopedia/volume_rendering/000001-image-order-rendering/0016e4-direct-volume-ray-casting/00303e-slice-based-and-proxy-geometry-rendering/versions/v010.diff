@@ -1,0 +1,105 @@
+--- v009.md
++++ v010.md
+@@ -1,30 +1,28 @@
+ # Slice-based and Proxy Geometry Rendering
+ 
+-Also called: Texture-Based Volume Rendering, Object-Aligned Slicing, View-Aligned Slicing
++Also called: Texture-Based Volume Rendering, View-Aligned Slicing, Object-Aligned Slicing, Hybrid Ray Tracing, Surface Rendering Pipeline, Mixed Geometry Rendering, Image-based Rendering Integration, Vector Icon Volume Rendering
+ 
+ ## Overview
+-Slice-based and Proxy Geometry Rendering is a family of direct volume rendering techniques that convert 3D volumetric data into 2D geometric primitives (polygons) which are then rasterized by the graphics pipeline [S1][S2, unofficial]. It solves the problem of efficiently sampling and compositing 3D scalar fields on GPUs by leveraging hardware-accelerated texture lookups and alpha blending, rather than computing samples per pixel via ray marching [S2, unofficial][S8]. Unlike [Direct volume ray casting](19-direct-volume-ray-casting.md), which computes samples along rays in image order, this family operates in object order, rendering explicit geometry that represents slices through the volume [S2, unofficial]. It is distinguished from [Surface Rendering Pipeline](2614-surface-rendering-pipeline.md) by its ability to render translucent internal structures rather than just opaque surfaces [S1, S5, unofficial].
++Slice-based and Proxy Geometry Rendering accelerates direct volume ray casting by rasterizing 2D proxy polygons (slices) through the volume instead of marching rays per pixel [S1, S2, S8, unofficial]. It solves the performance bottleneck of CPU-based ray marching by leveraging the GPU's dedicated texture sampling units and hardware alpha blending to compute samples per fragment [S1, S2, S8, unofficial]. Unlike pure ray casting which computes samples per pixel, this method generates explicit geometry that is rasterized, requiring dynamic regeneration of the proxy mesh when the camera transform changes [S2, unofficial]. It is distinguished from [2D Visualization from 3D Grid (Slow)](1507-2d-visualization-from-3d-grid-slow.md) by its use of GPU-accelerated rasterization and from [Hybrid Ray Tracing](2308-hybrid-ray-tracing.md) by its reliance on fixed-function or programmable rasterization pipelines rather than ray intersection tests [S2, S6, unofficial].
+ 
+ ## Shared principles
+-The method relies on the following mechanism common to all children:
++The method operates on the fundamental loop structure of [Image-order rendering](16-image-order-rendering.md): for each pixel, a ray $r(t) = \mathbf{o} + t\mathbf{d}$ is defined, intersected with the volume domain, and sampled/composited along its path [G]. The traversal order is determined by the pixel's position in the image plane [G].
+ 
+-1.  **Proxy Geometry Generation**: The 3D volume is conceptually divided into a series of parallel slicing planes. These planes are intersected with the volume's bounding box to form 2D polygonal proxies (typically quads or triangle fans) [S1, S5, unofficial][S8].
+-2.  **Texture Coordinate Assignment**: Each vertex of the proxy geometry is assigned 3D texture coordinates $(u, v, w)$ that map the polygon to the volume space [S1][S8]. For a volume of dimensions $W \times H \times D$, the coordinates are typically normalized:
+-    $$ u = \frac{x}{W} + 0.5, \quad v = \frac{y}{H} + 0.5, \quad w = \frac{z}{D} + 0.5 $$
+-    [S4]
+-3.  **Rasterization and Sampling**: The proxy polygons are rasterized. In the fragment shader, the 3D texture is sampled at the interpolated texture coordinates to retrieve the scalar value $V(\mathbf{p})$ [S1, S5, S6, unofficial].
+-4.  **Transfer Function Lookup**: The scalar value is mapped to color $C$ and opacity $\alpha$ using a 1D transfer function texture [S2, unofficial][S8].
+-5.  **Alpha Blending**: The fragments are composited into the framebuffer using hardware alpha blending. For the Over operator, the blend function is:
+-    $$ Source = GL\_ONE, \quad Destination = GL\_ONE\_MINUS\_SRC\_ALPHA $$
+-    [S1][S2, unofficial][S8]
+-    The fragments must be drawn in **back-to-front** order relative to the viewer to ensure correct compositing [S1][S2, unofficial][S8].
++The core computational engine consists of four sequential stages applied to each ray [S5, S10, S37, unofficial]:
++
++1.  **Ray Generation and Discretization**: The ray segment $[t_{start}, t_{end}]$ intersecting the volume is determined, typically by intersecting the ray with the volume's bounding box [S1][S8, S16, unofficial]. The segment is discretized into $N$ samples at equidistant intervals $\Delta t = (t_{end} - t_{start}) / N$ [S5, S10, S17, unofficial].
++2.  **Sampling and Interpolation**: At each sample point $\mathbf{p}_i = r(t_i)$, the scalar value $V(\mathbf{p}_i)$ is retrieved from the volume data. This is typically performed by trilinear interpolation of the eight surrounding voxels [S9, S11, S47, unofficial].
++3.  **Classification (Transfer Function)**: The scalar value $V(\mathbf{p}_i)$ is mapped to optical properties: color $C_i$ and opacity $\alpha_i$ [S2, S2789]. The opacity is often corrected for the step size $\Delta t$ to ensure physical consistency, using the Beer-Lambert law approximation:
++    $$ \alpha_i = 1 - e^{-\sigma_i \Delta t} $$
++    where $\sigma_i$ is the extinction coefficient derived from the scalar value [S24, S30, unofficial].
++4.  **Compositing**: The samples are accumulated from front to back (closest to the eye to furthest) using the front-to-back alpha compositing equation [S1][S2, S13, unofficial][S61]:
++    $$ C_{out} = C_{in} + (1 - \alpha_{in}) \cdot C_{sample} \cdot \alpha_{sample} $$
++    $$ \alpha_{out} = \alpha_{in} + (1 - \alpha_{in}) \cdot \alpha_{sample} $$
++    where $C_{in}$ and $\alpha_{in}$ are the accumulated color and opacity from previous samples, and $C_{sample}$ and $\alpha_{sample}$ are the color and opacity of the current sample [S52, S60, unofficial]. The process initializes with $C_{in} = 0$ and $\alpha_{in} = 0$ [S15, S46, unofficial].
+ 
+ ## Subtopics
+ 
+-### [2D Visualization from 3D Grid (Slow)](1507-2d-visualization-from-3d-grid-slow.md)
+-This method generates a 2D projection of a 3D scalar volume by treating the volume as a series of 2D slices, applying a transfer function to each slice, and compositing them into a final 2D image using the over operator. It is distinguished from its siblings by its explicit reliance on a CPU-side or software-based iterative slice processing loop, often involving specific data transformations (like logarithmic scaling) and direct array manipulation, rather than optimized GPU rasterization pipelines or hybrid ray-tracing techniques. Unlike [View-Aligned Slicing](6530-view-aligned-slicing.md), which optimizes slice orientation for cache coherence, this method may process slices in a fixed or arbitrary order defined by the camera grid structure.
+-
+ ### [Hybrid Ray Tracing](2308-hybrid-ray-tracing.md)
+-Hybrid Ray Tracing is a method for mixing geometric and volumetric data by casting rays through the ensemble of both, drawing samples of each, and compositing them in depth-sorted order. It solves the problem of rendering scenes containing both scalar fields (volumes) and polygonal surfaces simultaneously, ensuring correct visibility where polygons obscure volume and vice versa. Unlike [Texture-Based Volume Rendering](4707-texture-based-volume-rendering.md) which rasterizes proxy geometry, or [Mixed Geometry Rendering](3442-mixed-geometry-rendering.md) which may use hardware acceleration for static views, Hybrid Ray Tracing performs a unified ray-casting pass that explicitly handles the interaction between discrete polygonal intersections and continuous volumetric attenuation.
++Hybrid Ray Tracing is a method for mixing geometric and volumetric data by casting rays through the ensemble of both, drawing samples of each, and compositing them in depth-sorted order. It solves the problem of rendering scenes containing both scalar fields (volumes) and polygonal models simultaneously, ensuring correct visibility and occlusion between the two data types. Unlike pure volume rendering which ignores geometry, or pure polygon rendering which ignores volume density, this method treats polygons as embedded surfaces within the volumetric gel, handling the "hidden-volume" problem locally to avoid the expense of exact intersection tests.
+ 
+ ### [Surface Rendering Pipeline](2614-surface-rendering-pipeline.md)
+@@ -35,44 +33,38 @@
+ 
+ ### [Texture-Based Volume Rendering](4707-texture-based-volume-rendering.md)
+-Texture-Based Volume Rendering (TBVR) is a technique that renders volumetric data by mapping it to 2D proxy geometry (polygons) and rasterizing them using the graphics pipeline's texture hardware. It solves the problem of efficiently sampling and compositing 3D scalar fields on GPUs by leveraging hardware-accelerated texture lookups and alpha blending. Unlike direct ray casting which computes samples per pixel, TBVR computes samples per fragment of a slice polygon. It is distinguished from [Image-order rendering](52-name.md) by its object-order nature (rendering geometry rather than pixels) and from [Surface Rendering Pipeline](2614-surface-rendering-pipeline.md) by its ability to render translucent internal structures rather than just opaque surfaces.
++Texture-Based Volume Rendering (TBVR) is an image-order rendering technique that accelerates direct volume ray casting by exploiting modern graphics hardware (GPUs) to rasterize proxy geometry. It solves the performance bottleneck of CPU-based ray marching by loading volumetric data into texture memory and intersecting it with parallel slicing planes (proxy geometry) that are rasterized and composited using hardware alpha blending. Unlike pure ray casting which computes samples per pixel, TBVR computes samples per fragment of the proxy polygons, leveraging the GPU's dedicated texture sampling units for trilinear or bilinear interpolation. It is distinguished from [2D Visualization from 3D Grid (Slow)](1507-2d-visualization-from-3d-grid-slow.md) by its use of GPU-accelerated rasterization and from [Hybrid Ray Tracing](2308-hybrid-ray-tracing.md) by its reliance on fixed-function or programmable rasterization pipelines rather than ray intersection tests.
+ 
+ ### [View-Aligned Slicing](6530-view-aligned-slicing.md)
+-View-Aligned Slicing is a direct volume rendering technique that decomposes a 3D volume into a series of 2D triangular proxy polygons aligned with the view direction. It solves the problem of inconsistent sampling density and artifacts inherent in fixed-grid slicing by dynamically regenerating geometry to maintain consistent slice thickness relative to the camera. Unlike standard ray casting which samples volume textures directly, this method rasterizes explicit geometry, requiring geometry regeneration on every view change.
++View-Aligned Slicing is a direct volume rendering technique that decomposes a 3D volume into a series of 2D proxy polygons (typically quads or triangle fans) aligned with the view direction. Unlike standard ray casting which samples the volume texture directly per pixel, this method generates explicit geometry that is rasterized, requiring dynamic regeneration of the proxy mesh when the camera transform changes. It sets itself apart from siblings like [Texture-Based Volume Rendering](4707-texture-based-volume-rendering.md) by explicitly managing slice geometry to maintain consistent sampling distance relative to the camera, thereby reducing view-dependent aliasing artifacts.
+ 
+ ### [Image-based rendering integration](6969-image-based-rendering-integration.md)
+-This method integrates volumetric data into a polygonal virtual environment by treating rendered volume images as 2D image-based primitives (impostors). It decouples the computationally expensive volume rendering from the client-side scene graph, distributing the rendering workload to a separate server and transmitting the resulting images over a network. Unlike direct ray casting or proxy geometry methods that render volume data as 3D geometry on the client, this approach renders the volume as a 2D texture mapped onto a quad, allowing the volume to be seamlessly mixed with polygonal geometry in the virtual environment.
++This method integrates volume rendering into a polygonal virtual environment by treating rendered volume images as image-based primitives (impostors) within the scene. It solves the problem of coupling high-latency volume rendering with real-time interactive navigation by decoupling the rendering workload from the client's display loop. Unlike sibling methods that render volume geometry directly on the client, this approach distributes the heavy computation to a separate server and streams the resulting images to the client, where they are mapped onto simple geometric proxies.
+ 
+ ### [Vector Icon Volume Rendering](7693-vector-icon-volume-rendering.md)
+-Vector Icon Volume Rendering is a 3D raster resampling technique that integrates vector field visualization into scalar volume rendering by embedding tiny cylinder-like icons within splat footprints. It solves the problem of visualizing flow direction and magnitude within volumetric data by creating an illusion of coherent motion through stochastic placement and orientation of billboard textures. It differs from standard scalar volume rendering by modifying the volume integral to include directional primitives, and from pure flow visualization by merging these icons with density clouds in a single back-to-front compositing pass.
++Vector Icon Volume Rendering is a technique for visualizing vector fields (such as wind or fluid flow) within a 3D volume by embedding small billboard textures containing vector icons into the splat footprints of a sheet-based volume renderer. It solves the problem of conveying direction and magnitude in scalar volume renderings by stochastically placing oriented icons that create an illusion of coherent motion. It differs from pure scalar volume rendering by adding directional glyphs and from line-based methods (like Line Bundles) by using discrete, billboarded icons rather than continuous streamlines.
+ 
+-#### 2D Slice Replication Approach
++### 2D Slice Replication Approach
+ - **Definition**: When data is stored as a set of 2D texture slices, proxy polygons are simply rectangles aligned with the slices [S1].
+ - **Steps**: Reconstruct slices on the fly to avoid data replication, with some performance overhead [S1]. Add intermediate slices and perform trilinear interpolation with a fragment shader to solve sampling rate dependency [S1].
+ - **Pitfalls**: Requires three times more memory because data slices need to be replicated along each principal direction [S1]. Sampling rate depends on the resolution of the volume [S1]. Sampling distance changes with the viewpoint, resulting in intensity variations as the camera moves and image-popping artifacts when switching from one set of slices to another [S1].
+ 
+-#### Two-Pass Volume Rendering with Shadows
++### Two-Pass Volume Rendering with Shadows
+ - **Definition**: A two-pass algorithm to render volumetric shadows on the GPU by modifying proxy geometry slicing to render from both the eye and the light's point of view [S2, unofficial].
+ - **Steps**: Set the slice axis half-way between the view direction and the light direction [S2, unofficial]. First Pass: Render from the eye. In the fragment shader, look up light color from a light buffer bound as a texture and multiply material color by light color [S2, unofficial]. Second Pass: Render from the light. In the fragment shader, only blend alpha values to compute light transmissivity [S2, unofficial].
+ - **Parameters**: Render order for light: front-to-back [S2, unofficial]. Render order for eye: front-to-back or back-to-front [S2, unofficial].
+ 
+-#### Object-Aligned Slicing
++### Object-Aligned Slicing
+ - **Steps**: Create three stacks of 2D textures corresponding to the x, y, and z principal directions [S2, unofficial]. Swap the texture stack based on the viewpoint's closest principal direction [S2, unofficial].
+ 
+-#### Texture-Based AMR Volume Rendering
+-- **Definition**: A texture/slicing-based volume rendering technique for AMR data that resamples to node-centered data, subdivides into homogeneous resolution regions using a kD-tree, and optimizes texture packing [S3, unofficial].
+-- **Steps**: Resample AMR data to node-centered format [S3, unofficial]. Subdivide data into homogeneous resolution regions using a kD-tree, minimizing the number of blocks using AMR grid placement algorithm information [S3, unofficial]. Perform texture/slicing-based volume rendering with optimized texture packing [S3, unofficial]. Adapt slice spacing and correct opacity to handle varying resolution levels [S3, unofficial].
+-- **Usage**: Used in Virtual Director and CAVE for rendering 'The First Star of the Universe' astrophysical data set [S3, unofficial].
+-
+-#### Ray-to-Gravity-Center (R-GC) Volume Slicing
+-- **Definition**: A volume slicing strategy where parallel cutting planes are oriented perpendicular to the straight line connecting the point of reflection to the gravity center of the volume domain, used to generate Layered Polygonal Area Lights (LPALs) [S4].
+-- **Number**: Visual result: R-RR fails to accurately render the upper part of the reflected appearance when apart from the volume, whereas R-GC handles this correctly [S4].
+-- **Comparison**: Compared to Ray-of-Regular-Reflection (R-RR) slicing: R-RR fails to capture the upper part of reflected appearance when the R-RR is apart from the volume because LPALs face away from the reflection point. R-GC ensures LPALs face properly to the point of reflection regardless of the regular reflection direction [S4].
++### Ray-to-Gravity-Center (R-GC) Volume Slicing
++- **Definition**: A volume slicing strategy where parallel cutting planes are oriented perpendicular to the straight line connecting the point of reflection to the gravity center of the volume domain, used to generate Layered Polygonal Area Lights (LPALs) [S3].
++- **Number**: Visual result: R-RR fails to accurately render the upper part of the reflected appearance when apart from the volume, whereas R-GC handles this correctly [S3].
++- **Comparison**: Compared to Ray-of-Regular-Reflection (R-RR) slicing: R-RR fails to capture the upper part of reflected appearance when the R-RR is apart from the volume because LPALs face away from the reflection point. R-GC ensures LPALs face properly to the point of reflection regardless of the regular reflection direction [S3].
+ 
+ ## Background
+-The technique originated with the advent of 3D texture hardware in the late 1990s and early 2000s. Early implementations, such as those by Krüger and Westermann (2003), utilized proxy geometry to leverage the graphics pipeline's texture sampling capabilities [S2, unofficial]. The "Object-Aligned Slicing" variant was popularized by Lefohn et al. (2004) and Kniss et al. (2002b), who addressed memory and sampling issues by replicating data along principal axes [S1]. View-aligned slicing was introduced to mitigate the sampling distance variations inherent in object-aligned approaches [S2, unofficial]. The method has been extended to Adaptive Mesh Refinement (AMR) data by Kähler and Hege (2001/2002) and Kähler et al. (2002), who applied it to astrophysical datasets like 'The First Star of the Universe' [S3, unofficial]. More recently, it has been adapted for indirect illumination via Layered Polygonal Area Lights (LPALs) using Ray-to-Gravity-Center slicing [S4].
++The technique was popularized in the early 2000s as graphics hardware evolved to support 3D textures and hardware alpha blending. Key early works include Lefohn et al. (2004) for on-the-fly slice reconstruction, Rezk-Salama et al. (2000) for trilinear interpolation in fragment shaders, and Kniss et al. (2002b) for addressing intensity variations and popping artifacts. The method is widely used in medical imaging and scientific visualization where interactive frame rates are required for large datasets.
+ 
+ ## Sources
+ [S1] GPU Gems ch39, Volume rendering techniques, https://developer.nvidia.com/sites/all/modules/custom/gpugems/books/GPUGems/gpugems_ch39.html, fetched 2026-10-29
+ [S2] GPU volume rendering, http://www.slideserve.com/hilliard/volume-rendering-using-graphics-hardware, fetched 2026-10-26 (unofficial)
+-[S3] Visualization Tools for Adaptive Mesh Refinement Data, https://www.vacet.org/publications/AMRVisJune2007.pdf, fetched 2026-10-27 (unofficial)
+-[S4] Real‐time Indirect Illumination of Emissive Inhomogeneous Volumes using Layered Polygonal Area Lights, https://doi.org/10.1111/cgf.13851, fetched 2026-10-26+[S3] Real‐time Indirect Illumination of Emissive Inhomogeneous Volumes using Layered Polygonal Area Lights, https://doi.org/10.1111/cgf.13851, fetched 2026-10-26

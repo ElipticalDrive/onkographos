@@ -1,0 +1,172 @@
+# Camera Rotation Methods
+Also called: Yaw, Roll, Pitch, Azimuth, Elevation
+
+## Overview
+Camera rotation methods manipulate the orientation of a camera in a right-handed coordinate system centered on the camera [S1, S3]. They solve the problem of updating the camera's view matrix or basis by applying specific angular transformations (pitch, yaw, roll, azimuth, elevation) or arbitrary axis rotations, while optionally pivoting around a specified center [S1, S2, S3]. What sets them apart from sibling methods like [Arcball Camera View & Projection Matrix Computation](2210-arcball-camera-view-projection-matrix-computation.md) is their direct exposure of elementary rotation primitives (pitch/yaw/roll) rather than high-level quaternion or matrix composition APIs [S1, S3].
+
+## How it works
+**Inputs and Outputs:**
+*   **Inputs:**
+    *   `angle`: The rotation angle in radians or degrees (implementation dependent) [S1, S2, S3].
+    *   `axis`: For `rotate()` and `iter_rotate()`, the arbitrary axis vector [S1, S3]. For `pitch()`, `yaw()`, and `roll()`, the axis is implicit [S1, S3].
+    *   `rot_center`: The pivot point for the rotation [S1, S3].
+*   **Outputs:**
+    *   Updated camera orientation (view matrix or basis vectors) [S1, S3].
+
+**Data Structures:**
+The camera maintains an internal state including:
+*   `position`: 3D vector [S1, S3].
+*   `orientation`: Represented as a basis (right, up, forward) or a rotation matrix/quaternion [S1, S3].
+*   `rot_center`: 3D vector, defaulting to `position` [S1, S3].
+
+**Numbered Steps:**
+1.  **Determine Pivot:** Identify the pivot point `P` [S1, S3]. If `rot_center` is not explicitly provided, `P` is set to the current camera `position` [S1, S3].
+2.  **Select Axis:**
+    *   For `pitch()`: The axis is the **lateral axis** (typically the camera's right vector) [S1, S3].
+    *   For `yaw()`: The axis is the **vertical axis** (referred to as `north_vector` in the source) [S1, S3].
+    *   For `roll()`: The axis is the **longitudinal axis** (referred to as `normal_vector` in the source) [S1, S3].
+    *   For `rotate()` and `iter_rotate()`: The axis is the user-provided arbitrary vector `axis` [S1, S3].
+3.  **Apply Rotation:**
+    *   Compute the rotation matrix $R$ for the given `angle` and `axis` [G].
+    *   Update the camera's basis vectors by applying $R$ to each vector [S1, S3].
+    *   If `rot_center` equals `position`, only the orientation is updated [S1, S3].
+4.  **Iterative Update (for `iter_rotate`):** If `iter_rotate()` is used, the rotation is applied incrementally over multiple calls rather than as a single jump [S1, S3].
+5.  **Trigger Update:** Any change triggers an update of all other camera properties (e.g., view matrix, frustum planes) [S1, S3].
+
+**Formulas:**
+Let $B_{old}$ be the current camera basis matrix (columns are right, up, forward vectors). The rotated basis $B_{new}$ is:
+$$ B_{new} = R \cdot B_{old} $$
+Where $R$ is the rotation matrix derived from the axis-angle representation using Rodrigues' rotation formula [G]:
+$$ R = I + (\sin\theta)K + (1-\cos\theta)K^2 $$
+Here, $\theta$ is the rotation angle, $I$ is the identity matrix, and $K$ is the skew-symmetric cross-product matrix of the normalized rotation axis vector $k = [k_x, k_y, k_z]^T$:
+$$ K = \begin{bmatrix} 0 & -k_z & k_y \\ k_z & 0 & -k_x \\ -k_y & k_x & 0 \end{bmatrix} $$
+
+**Parameters:**
+*   `rot_center`: Default is the camera position [S1, S3].
+
+**Edge Cases and Pitfalls:**
+*   **Default Pivot Behavior:** By default, `rot_center` is the camera position, meaning the camera does not change its position at all, it only changes its orientation [S1, S3].
+*   **Coordinate System:** The camera exists in a right-handed coordinate system centered on the camera [S1, S3].
+
+**Pseudocode:**
+> **Unverified code.** The code below did not pass a test run against a reference implementation, or no test fits it, so it may contain errors.
+
+```python
+def pitch(camera, angle, rot_center=None):
+    """Rotate camera about its lateral (right) axis."""
+    if rot_center is None:
+        rot_center = camera.position
+    axis = camera.right_vector
+    apply_rotation(camera, angle, axis, rot_center)
+
+def yaw(camera, angle, rot_center=None):
+    """Rotate camera about its vertical (north/up) axis."""
+    if rot_center is None:
+        rot_center = camera.position
+    axis = camera.up_vector
+    apply_rotation(camera, angle, axis, rot_center)
+
+def roll(camera, angle, rot_center=None):
+    """Rotate camera about its longitudinal (forward) axis."""
+    if rot_center is None:
+        rot_center = camera.position
+    axis = camera.forward_vector
+    apply_rotation(camera, angle, axis, rot_center)
+
+def rotate(camera, angle, axis, rot_center=None):
+    """Rotate camera about an arbitrary axis."""
+    if rot_center is None:
+        rot_center = camera.position
+    apply_rotation(camera, angle, axis, rot_center)
+
+def iter_rotate(camera, total_angle, axis, steps, rot_center=None):
+    """Iteratively rotate camera about an arbitrary axis."""
+    if rot_center is None:
+        rot_center = camera.position
+    step_angle = total_angle / steps
+    for _ in range(steps):
+        apply_rotation(camera, step_angle, axis, rot_center)
+
+def apply_rotation(camera, angle, axis, rot_center):
+    """Apply rotation to camera orientation around rot_center."""
+    # Compute rotation matrix R from angle and axis using Rodrigues' formula [G]
+    R = axis_angle_to_rotation_matrix(axis, angle)
+    
+    # Update orientation (basis vectors)
+    camera.right_vector = R @ camera.right_vector
+    camera.up_vector = R @ camera.up_vector
+    camera.forward_vector = R @ camera.forward_vector
+    
+    # Re-orthonormalize basis to prevent numerical drift [G]
+    camera.forward_vector = normalize(camera.forward_vector)
+    camera.right_vector = normalize(cross(camera.up_vector, camera.forward_vector))
+    camera.up_vector = cross(camera.forward_vector, camera.right_vector)
+    
+    # Trigger update of view matrix and other properties [S1, S3]
+    camera.update_view_matrix()
+
+def axis_angle_to_rotation_matrix(axis, angle):
+    """Compute 3x3 rotation matrix from axis and angle using Rodrigues' formula [G]."""
+    k = normalize(axis)
+    kx, ky, kz = k[0], k[1], k[2]
+    cos_a = cos(angle)
+    sin_a = sin(angle)
+    one_minus_cos = 1.0 - cos_a
+    R = [[
+        one_minus_cos * kx * kx + cos_a,
+        one_minus_cos * kx * ky - sin_a * kz,
+        one_minus_cos * kx * kz + sin_a * ky
+    ], [
+        one_minus_cos * kx * ky + sin_a * kz,
+        one_minus_cos * ky * ky + cos_a,
+        one_minus_cos * ky * kz - sin_a * kx
+    ], [
+        one_minus_cos * kx * kz - sin_a * ky,
+        one_minus_cos * ky * kz + sin_a * kx,
+        one_minus_cos * kz * kz + cos_a
+    ]]
+    return R
+
+def normalize(v):
+    """Return normalized vector."""
+    mag = sqrt(v[0]**2 + v[1]**2 + v[2]**2)
+    if mag == 0:
+        return [0.0, 0.0, 0.0]
+    return [v[0]/mag, v[1]/mag, v[2]/mag]
+
+def cross(a, b):
+    """Compute cross product of two 3D vectors."""
+    return [
+        a[1]*b[2] - a[2]*b[1],
+        a[2]*b[0] - a[0]*b[2],
+        a[0]*b[1] - a[1]*b[0]
+    ]
+```
+
+## Subtopics
+
+### [Arcball Camera View & Projection Matrix Computation](2210-arcball-camera-view-projection-matrix-computation.md)
+Uses a sphere-based interaction model to compute view/projection matrices. Choose when intuitive 3D rotation via mouse drag is needed.
+
+### [Camera Look-at Computation via Rotation](2696-camera-look-at-computation-via-rotation.md)
+Computes view matrix by rotating to face a target. Choose when explicit target orientation is required.
+
+### [Orbit Camera Controls](3262-orbit-camera-controls.md)
+Manages orbit camera input handling. Choose when implementing user controls for orbit cameras.
+
+### [Spherical Camera Path Generation](3934-spherical-camera-path-generation.md)
+Generates camera paths on a sphere. Choose for automated camera animations.
+
+### [Volume Visualization Camera](4116-volume-visualization-camera.md)
+High-level camera abstraction for volume rendering. Choose for general volume rendering setups.
+
+## Operating characteristics
+Not given in the sources.
+
+## Background
+These methods are part of the `yt` project's volume rendering visualization tools, specifically the `Camera` helper class [S1, S3]. They provide a high-level interface for manipulating camera orientation in 3D visualizations [S1, S3]. ParaView also implements equivalent rotation primitives (Azimuth, Yaw, Elevation, Pitch, Roll) with similar semantics for interactive data exploration [S2].
+
+## Sources
+[S1] 3D Visualization and Volume Rendering, https://yt-project.org/doc/visualizing/volume_rendering.html, fetched 2026-10-28
+[S2] 5. Displaying data — ParaView Documentation 6.2.0 documentation, https://docs.paraview.org/en/latest/UsersGuide/displayingData.html, fetched 2026-10-29
+[S3] https://yt-project.org/docs/dev/visualizing/volume_rendering.html#volume-rendering-components, https://yt-project.org/docs/dev/visualizing/volume_rendering.html, fetched 2026-10-29

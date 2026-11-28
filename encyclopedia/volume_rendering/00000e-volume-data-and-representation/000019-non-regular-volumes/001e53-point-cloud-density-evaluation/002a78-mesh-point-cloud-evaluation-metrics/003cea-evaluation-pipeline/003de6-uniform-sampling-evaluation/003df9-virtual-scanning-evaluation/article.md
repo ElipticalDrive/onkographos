@@ -1,0 +1,57 @@
+# Virtual Scanning Evaluation
+
+Also called: Virtual Scanning, Depth Map Back-projection Evaluation
+
+## Overview
+Virtual Scanning Evaluation is an evaluation protocol for surface reconstruction that simulates the original laser scan data acquisition process to account for incomplete meshes and acquisition bias, complementing Uniform Sampling Evaluation [S1]. It addresses the limitation where Uniform Sampling alone fails to account for incomplete meshes that mimic ground truth (GT) bias, revealing true reconstruction quality by simulating acquisition bias [S1].
+
+## How it works
+**Inputs:**
+1. A reconstructed mesh $M$.
+2. The original input camera poses (intrinsics and extrinsics) used during the capture of the GT data.
+3. The GT crop volume (bounding box defining the region of interest).
+
+**Outputs:**
+1. A set of 3D points derived from the reconstructed mesh, projected into the GT coordinate frame.
+2. Geometric metrics (e.g., Chamfer Distance, F1 Score) computed by comparing these points against the GT point cloud.
+
+**Data Structures:**
+*   **Camera Pose:** A $4 \times 4$ transformation matrix $P$ mapping world coordinates to camera coordinates, or equivalently, a projection matrix $K$ combined with extrinsics.
+*   **GT Point Cloud:** A set of points $\mathcal{P}_{GT}$ within the GT crop volume.
+*   **Rendered Depth Map:** A 2D array $D$ where each pixel $(u, v)$ stores the distance from the camera center to the nearest surface intersection along the viewing ray.
+
+**Steps:**
+1.  **Render Depth Maps:** For each original input camera pose, render a depth map of the reconstructed mesh $M$. This involves ray-tracing or rasterization to determine the depth $d_{uv}$ for each pixel $(u, v)$ in the image plane.
+2.  **Back-project Points:** For each pixel $(u, v)$ in the rendered depth map with valid depth $d_{uv}$, back-project the 2D pixel coordinate into 3D world space.
+    *   Convert pixel $(u, v)$ to a normalized device coordinate or ray direction $\mathbf{r}_{uv}$ using the camera intrinsics.
+    *   Compute the 3D point $\mathbf{X}_{uv} = \mathbf{C} + d_{uv} \cdot \mathbf{R} \mathbf{r}_{uv}$, where $\mathbf{C}$ is the camera center and $\mathbf{R}$ is the rotation component of the camera pose.
+    *   Collect all such points into a set $\mathcal{P}_{pred}$.
+3.  **Filter to GT Crop:** Discard any points in $\mathcal{P}_{pred}$ that lie outside the GT crop volume.
+4.  **Compute Metrics:** Compare the filtered predicted point set $\mathcal{P}_{pred}$ with the GT point cloud $\mathcal{P}_{GT}$ using standard geometric metrics (e.g., Chamfer Distance or F1 Score based on nearest-neighbor distances).
+
+**Pitfalls:**
+*   **Tessellation Density Sensitivity:** Legacy vertex-based metrics are highly sensitive to tessellation density. For example, extracting meshes with 9 pivots instead of 2 can artificially inflate scores without improving actual geometry [S1]. Virtual Scanning mitigates this by relying on depth rendering rather than vertex counts, though rendering artifacts (e.g., z-fighting, depth discontinuities) must be handled.
+*   **Incomplete Meshes:** If the mesh is incomplete, the rendered depth map will have holes. These holes result in missing points in $\mathcal{P}_{pred}$, which correctly penalizes the reconstruction for missing geometry, unlike uniform sampling which might sample empty space if not careful [S1].
+
+## Subtopics
+
+### Terrestrial Laser Scanning (TLS) for Reference
+Terrestrial Laser Scanning (TLS) is a method using laser scanning systems to generate millions of 3D points for high-resolution comparison, capturing the depth of complex scenes [S2]. It serves as a high-accuracy reference for evaluating reconstruction quality [S2].
+*   **Process:** 1. Record multiple scans from different positions and heights to achieve full coverage. 2. Align all scans to complete the whole object. 3. Remove noise and outliers caused by spatial sensor noise. 4. Generate final point cloud [S2].
+*   **Outlier Removal:** Compute the mean distance to neighbors for each point. Remove points whose mean distances are outside an interval defined by the mean and standard deviation [S2].
+*   **Hardware:** Leica HDS6000, scan rate up to 500,000 points/sec, 0.7mm RMS accuracy [S2].
+*   **Pitfalls:** TLS point clouds contain noise on shoulders and top of head, and gaps below knees due to occlusion and sensor noise [S2]. Details of facial features (nose and mouth) are not reliably represented, and the neck may fail to be reconstructed [S2].
+
+## Operating characteristics
+*   **Time Complexity:** Dominated by the rendering step. For $N$ cameras and image resolution $W \times H$, the complexity is $O(N \cdot W \cdot H)$ for depth rendering, plus $O(|\mathcal{P}_{pred}| \cdot |\mathcal{P}_{GT}|)$ or $O((|\mathcal{P}_{pred}| + |\mathcal{P}_{GT}|) \log |\mathcal{P}_{GT}|)$ for metric computation depending on the nearest-neighbor search implementation.
+*   **Memory Complexity:** $O(N \cdot W \cdot H)$ to store depth maps, plus $O(|\mathcal{P}_{pred}| + |\mathcal{P}_{GT}|)$ for point clouds.
+*   **Strengths:** Accounts for acquisition bias and incomplete meshes, providing a fairer evaluation than vertex-based metrics or uniform sampling alone [S1]. It simulates the actual data acquisition process [S1].
+*   **Limitations:** Computationally more expensive than simple vertex-based metrics. Requires access to original camera poses and intrinsics [S1].
+*   **Usage:** Used alongside Uniform Sampling for robust evaluation on Tanks & Temples (T&T) and Mip-NeRF 360 datasets to validate state-of-the-art performance [S1].
+
+## Background
+Virtual Scanning Evaluation was proposed to address the flaws of legacy vertex-based metrics and the limitations of Uniform Sampling Evaluation in the context of high-fidelity surface reconstruction [S1]. It is particularly relevant for datasets like Tanks & Temples (T&T) and DTU, where ground truth is often acquired via structured light or laser scanning [S1, S2]. The method complements uniform sampling by ensuring that evaluations reflect the completeness and accuracy of the reconstructed surface as it would be observed by the original sensors [S1].
+
+## Sources
+[S1] From Blobs to Spokes: High-Fidelity Surface Reconstruction via Oriented Gaussians, https://doi.org/10.1007/978-3-032-37095-2_4, fetched 2026-10-29
+[S2] GEOMETRIC ACCURACY ANALYSIS BETWEEN NEURAL RADIANCE FIELDS (NERFS) AND TERRESTRIAL LASER SCANNING (TLS), https://doi.org/10.5194/isprs-archives-xlviii-1-w3-2023-153-2023, fetched 2026-10-29
